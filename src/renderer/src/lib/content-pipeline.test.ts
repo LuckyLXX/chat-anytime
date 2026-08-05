@@ -10,6 +10,19 @@ describe("rich content pipeline", () => {
     expect(segments[2]).toMatchObject({ type: "artifact", artifact: { language: "html", content: "<h1>预览</h1>" } });
   });
 
+  it("marks HTML artifacts with scripts or canvas as dynamic previews", () => {
+    const segments = parseRichContent("```html\n<div><canvas id=\"chart\"></canvas><script>requestAnimationFrame(() => {});</script></div>\n```");
+    expect(segments).toEqual([{
+      type: "artifact",
+      artifact: {
+        title: "HTML 预览",
+        language: "html",
+        content: "<div><canvas id=\"chart\"></canvas><script>requestAnimationFrame(() => {});</script></div>",
+        dynamic: true
+      }
+    }]);
+  });
+
   it("renders assistant_html as a separate visual segment", () => {
     const segments = parseRichContent("前言\n\n<assistant_html><div class=\"ai-card\"><strong>卡片</strong></div></assistant_html>\n\n结尾");
     expect(segments).toEqual([

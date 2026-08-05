@@ -1,4 +1,4 @@
-import type { Artifact } from "./content";
+import { withDynamicArtifactFlag, type Artifact } from "./content";
 
 export type RichContentSegment =
   | { type: "markdown"; content: string }
@@ -178,7 +178,7 @@ function parseTextPart(text: string, options: RichContentParseOptions = {}): Ric
     }
     return [{
       type: "artifact",
-      artifact: { title: "HTML 预览", language: "html", content: trimmed }
+      artifact: withDynamicArtifactFlag({ title: "HTML 预览", language: "html", content: trimmed })
     }];
   }
 
@@ -216,7 +216,7 @@ function parseAssistantHtmlPart(content: string, options: RichContentParseOption
     if (options.isStreaming) {
       return [{ type: "markdown", content: `\`\`\`html\n${normalized}\n\`\`\`` }];
     }
-    return [{ type: "artifact", artifact: { title: "HTML 预览", language: "html", content: normalized } }];
+    return [{ type: "artifact", artifact: withDynamicArtifactFlag({ title: "HTML 预览", language: "html", content: normalized }) }];
   }
   return [{ type: "html", content: normalized, source: "assistant-html" }];
 }
@@ -267,7 +267,7 @@ function splitFencedContent(text: string, options: RichContentParseOptions = {})
     } else if (closed && (language === "html" || language === "svg") && !options.isStreaming) {
       segments.push({
         type: "artifact",
-        artifact: { title: language === "svg" ? "SVG 预览" : "HTML 预览", language, content: code }
+        artifact: withDynamicArtifactFlag({ title: language === "svg" ? "SVG 预览" : "HTML 预览", language, content: code })
       });
     } else {
       const opening = `${fence.marker}${fence.info}`;

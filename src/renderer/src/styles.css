@@ -266,6 +266,8 @@ button { color: inherit; }
 .artifact-card-header > span { display: inline-flex; align-items: center; gap: 7px; min-width: 0; }
 .artifact-card-header strong { font-size: 11px; }
 .artifact-card-header small { color: var(--text-muted); font-size: 9px; }
+.artifact-dynamic-badge { padding: 2px 5px; border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--border)); border-radius: 999px; color: var(--accent) !important; background: var(--accent-soft); font-weight: 700; }
+.artifact-card.is-dynamic { border-color: color-mix(in srgb, var(--accent) 30%, var(--border)); }
 .artifact-card-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 .artifact-open-button { min-height: 29px; padding: 0 9px; font-size: 10px; }
 .artifact-inline-preview { border-top: 1px solid var(--border); background: var(--surface); }
@@ -376,6 +378,7 @@ button { color: inherit; }
 .artifact-header { display: flex; align-items: center; justify-content: space-between; padding: 0 10px 0 14px; border-bottom: 1px solid var(--border); }.artifact-header > div { display: flex; align-items: center; gap: 8px; }.artifact-header strong { font-size: 12px; }.artifact-header span { color: var(--text-muted); font-size: 9px; }
 .artifact-content { min-height: 0; background: var(--surface-muted); }.artifact-content iframe { width: 100%; height: 100%; border: 0; background: var(--preview-surface); }
 .artifact-footer { display: flex; align-items: center; gap: 5px; padding: 0 12px; color: var(--text-muted); border-top: 1px solid var(--border); font-size: 9px; }
+.artifact-preview-control { min-height: 24px; margin-left: auto; padding: 0 8px; font-size: 10px; }
 .error-toast { position: fixed; z-index: 70; right: 18px; bottom: 18px; display: grid; grid-template-columns: 20px minmax(0, 1fr) 28px; gap: 8px; align-items: center; width: min(430px, calc(100vw - 36px)); padding: 10px 9px 10px 12px; color: var(--danger-text); border: 1px solid var(--danger-border); border-radius: 7px; background: var(--danger-soft); box-shadow: var(--shadow-md); font-size: 11px; }
 .app-loading { display: grid; place-items: center; align-content: center; gap: 15px; width: 100%; height: 100%; }
 .spinning { animation: spin .9s linear infinite; }

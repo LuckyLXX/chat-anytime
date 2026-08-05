@@ -1,4 +1,4 @@
-import { Check, Code2, Copy, Expand, Eye, EyeOff, FileCode2, ExternalLink, X } from "lucide-react";
+import { Check, Code2, Copy, Expand, Eye, EyeOff, FileCode2, ExternalLink, Pause, Play, X } from "lucide-react";
 import mermaid from "mermaid";
 import { isValidElement, useEffect, useId, useRef, useState, type ReactNode, type SyntheticEvent } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
@@ -9,7 +9,7 @@ import type { Schema } from "hast-util-sanitize";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import hljs from "highlight.js";
-import { artifactSandbox, buildArtifactPreviewSource, isFullArtifactDocument, type Artifact } from "../lib/content";
+import { artifactSandbox, buildArtifactPreviewSource, DYNAMIC_PREVIEW_ACTIONS, isDynamicArtifact, isFullArtifactDocument, type Artifact, type DynamicPreviewAction } from "../lib/content";
 import { normalizeMermaidSource, parseRichContent, type RichContentSegment } from "../lib/content-pipeline";
 import { sanitizeRichHtmlTree } from "../lib/html-sanitize";
 
@@ -249,9 +249,17 @@ function CodeBlock({ language, code }: { language: string; code: string }): Reac
 
 function ArtifactCard({ artifact, onOpenArtifact }: { artifact: Artifact; onOpenArtifact(artifact: Artifact): void }): ReactNode {
   const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewPaused, setPreviewPaused] = useState(false);
+  const cardRef = useRef<HTMLElement | null>(null);
+  const previewFrameRef = useRef<HTMLIFrameElement | null>(null);
   const previewObserverRef = useRef<ResizeObserver | undefined>(undefined);
+  const dynamic = isDynamicArtifact(artifact);
   const previewSource = buildArtifactPreviewSource(artifact);
   const fullPage = isFullArtifactDocument(artifact);
+
+  function postPreviewAction(action: DynamicPreviewAction): void {
+    previewFrameRef.current?.contentWindow?.postMessage({ action }, "*");
+  }
 
   useEffect(() => {
     if (!previewOpen) {
@@ -260,6 +268,26 @@ function ArtifactCard({ artifact, onOpenArtifact }: { artifact: Artifact; onOpen
     }
     return () => previewObserverRef.current?.disconnect();
   }, [previewOpen]);
+
+  useEffect(() => {
+    if (!dynamic || !previewOpen || typeof IntersectionObserver === "undefined" || !cardRef.current) return;
+    const observer = new IntersectionObserver(([entry]) => {
+      if (!entry) return;
+      if (entry.isIntersecting) {
+        postPreviewAction(DYNAMIC_PREVIEW_ACTIONS.resume);
+        setPreviewPaused(false);
+      } else {
+        postPreviewAction(DYNAMIC_PREVIEW_ACTIONS.pause);
+        setPreviewPaused(true);
+      }
+    }, { threshold: 0.01 });
+    observer.observe(cardRef.current);
+    return () => observer.disconnect();
+  }, [dynamic, previewOpen]);
+
+  useEffect(() => () => {
+    if (dynamic) postPreviewAction(DYNAMIC_PREVIEW_ACTIONS.destroy);
+  }, [dynamic]);
 
   function resizePreviewFrame(iframe: HTMLIFrameElement): void {
     if (fullPage) {
@@ -278,7 +306,9 @@ function ArtifactCard({ artifact, onOpenArtifact }: { artifact: Artifact; onOpen
 
   function handlePreviewLoad(event: SyntheticEvent<HTMLIFrameElement>): void {
     const iframe = event.currentTarget;
+    previewFrameRef.current = iframe;
     resizePreviewFrame(iframe);
+    if (previewPaused) postPreviewAction(DYNAMIC_PREVIEW_ACTIONS.pause);
     previewObserverRef.current?.disconnect();
     if (fullPage || typeof ResizeObserver === "undefined") return;
     try {
@@ -293,16 +323,28 @@ function ArtifactCard({ artifact, onOpenArtifact }: { artifact: Artifact; onOpen
     }
   }
 
+  function togglePreview(): void {
+    if (previewOpen) {
+      if (dynamic) postPreviewAction(DYNAMIC_PREVIEW_ACTIONS.destroy);
+      setPreviewOpen(false);
+      setPreviewPaused(false);
+      return;
+    }
+    setPreviewPaused(false);
+    setPreviewOpen(true);
+  }
+
   return (
-    <article className="artifact-card">
+    <article className={`artifact-card${dynamic ? " is-dynamic" : ""}`} ref={cardRef}>
       <header className="artifact-card-header">
-        <span><FileCode2 size={15} /><strong>{artifact.title}</strong><small>{artifact.language.toUpperCase()}</small></span>
+        <span><FileCode2 size={15} /><strong>{artifact.title}</strong><small>{artifact.language.toUpperCase()}</small>{dynamic && <small className="artifact-dynamic-badge">动态</small>}</span>
         <div className="artifact-card-actions">
-          <button className="secondary-button artifact-open-button" type="button" onClick={() => setPreviewOpen((current) => !current)}>{previewOpen ? <EyeOff size={14} /> : <Eye size={14} />}{previewOpen ? "隐藏预览" : "显示预览"}</button>
+          <button className="secondary-button artifact-open-button" type="button" onClick={togglePreview}>{previewOpen ? <EyeOff size={14} /> : <Eye size={14} />}{previewOpen ? "隐藏预览" : "显示预览"}</button>
+          {dynamic && previewOpen && <button className="secondary-button artifact-open-button" type="button" aria-pressed={previewPaused} onClick={() => { postPreviewAction(previewPaused ? DYNAMIC_PREVIEW_ACTIONS.resume : DYNAMIC_PREVIEW_ACTIONS.pause); setPreviewPaused((current) => !current); }}>{previewPaused ? <Play size={14} /> : <Pause size={14} />}{previewPaused ? "继续" : "暂停"}</button>}
           <button className="secondary-button artifact-open-button" type="button" onClick={() => onOpenArtifact(artifact)}><ExternalLink size={14} />打开预览</button>
         </div>
       </header>
-      {previewOpen && <div className="artifact-inline-preview"><iframe title={`${artifact.title}内嵌预览`} sandbox={artifactSandbox(artifact)} referrerPolicy="no-referrer" srcDoc={previewSource} onLoad={handlePreviewLoad} /></div>}
+      {previewOpen && <div className="artifact-inline-preview"><iframe ref={previewFrameRef} title={`${artifact.title}内嵌预览`} sandbox={artifactSandbox(artifact)} referrerPolicy="no-referrer" srcDoc={previewSource} onLoad={handlePreviewLoad} /></div>}
       <details className="artifact-source">
         <summary><Code2 size={14} />查看源代码</summary>
         <pre><code>{artifact.content}</code></pre>
