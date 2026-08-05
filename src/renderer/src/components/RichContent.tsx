@@ -122,20 +122,20 @@ function RichImage({ src, alt, title }: { src?: string; alt?: string; title?: st
 }
 
 function RichVideo({ src, poster, title, children }: { src?: string; poster?: string; title?: string; children?: ReactNode }): ReactNode {
-  if (!src) return null;
+  if (!src && !children) return null;
   return (
     <video className="rich-media-video" controls preload="metadata" poster={poster} title={title}>
-      <source src={src} />
+      {src && <source src={src} />}
       {children}
     </video>
   );
 }
 
 function RichAudio({ src, title, children }: { src?: string; title?: string; children?: ReactNode }): ReactNode {
-  if (!src) return null;
+  if (!src && !children) return null;
   return (
     <audio className="rich-media-audio" controls preload="metadata" title={title}>
-      <source src={src} />
+      {src && <source src={src} />}
       {children}
     </audio>
   );
@@ -235,17 +235,47 @@ function CodeBlock({ language, code }: { language: string; code: string }): Reac
 
 function ArtifactCard({ artifact, onOpenArtifact }: { artifact: Artifact; onOpenArtifact(artifact: Artifact): void }): ReactNode {
   const [previewOpen, setPreviewOpen] = useState(false);
+  const previewObserverRef = useRef<ResizeObserver | undefined>(undefined);
   const previewSource = buildArtifactPreviewSource(artifact);
   const fullPage = isFullArtifactDocument(artifact);
 
-  function resizePreview(event: SyntheticEvent<HTMLIFrameElement>): void {
-    if (fullPage) return;
+  useEffect(() => {
+    if (!previewOpen) {
+      previewObserverRef.current?.disconnect();
+      previewObserverRef.current = undefined;
+    }
+    return () => previewObserverRef.current?.disconnect();
+  }, [previewOpen]);
+
+  function resizePreviewFrame(iframe: HTMLIFrameElement): void {
+    if (fullPage) {
+      const viewportHeight = typeof window === "undefined" ? 720 : window.innerHeight || 720;
+      iframe.style.height = `${Math.min(720, Math.max(420, Math.round(viewportHeight * 0.62)))}px`;
+      return;
+    }
     try {
-      const document = event.currentTarget.contentDocument;
-      const height = Math.max(document?.body?.scrollHeight ?? 0, document?.documentElement?.scrollHeight ?? 0, 220);
-      event.currentTarget.style.height = `${Math.min(height, 720)}px`;
+      const frameDocument = iframe.contentDocument;
+      const height = Math.max(frameDocument?.body?.scrollHeight ?? 0, frameDocument?.documentElement?.scrollHeight ?? 0, 220);
+      iframe.style.height = `${Math.min(height, 720)}px`;
     } catch {
-      event.currentTarget.style.height = "280px";
+      iframe.style.height = "520px";
+    }
+  }
+
+  function handlePreviewLoad(event: SyntheticEvent<HTMLIFrameElement>): void {
+    const iframe = event.currentTarget;
+    resizePreviewFrame(iframe);
+    previewObserverRef.current?.disconnect();
+    if (fullPage || typeof ResizeObserver === "undefined") return;
+    try {
+      const frameDocument = iframe.contentDocument;
+      if (!frameDocument?.body) return;
+      const observer = new ResizeObserver(() => resizePreviewFrame(iframe));
+      observer.observe(frameDocument.body);
+      if (frameDocument.documentElement) observer.observe(frameDocument.documentElement);
+      previewObserverRef.current = observer;
+    } catch {
+      // Sandboxed frames may deny document observation; the load-time height remains valid.
     }
   }
 
@@ -258,7 +288,7 @@ function ArtifactCard({ artifact, onOpenArtifact }: { artifact: Artifact; onOpen
           <button className="secondary-button artifact-open-button" type="button" onClick={() => onOpenArtifact(artifact)}><ExternalLink size={14} />打开预览</button>
         </div>
       </header>
-      {previewOpen && <div className="artifact-inline-preview"><iframe title={`${artifact.title}内嵌预览`} sandbox={artifactSandbox(artifact)} referrerPolicy="no-referrer" srcDoc={previewSource} onLoad={resizePreview} /></div>}
+      {previewOpen && <div className="artifact-inline-preview"><iframe title={`${artifact.title}内嵌预览`} sandbox={artifactSandbox(artifact)} referrerPolicy="no-referrer" srcDoc={previewSource} onLoad={handlePreviewLoad} /></div>}
       <details className="artifact-source">
         <summary><Code2 size={14} />查看源代码</summary>
         <pre><code>{artifact.content}</code></pre>
