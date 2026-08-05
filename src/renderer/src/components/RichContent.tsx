@@ -121,6 +121,26 @@ function RichImage({ src, alt, title }: { src?: string; alt?: string; title?: st
   );
 }
 
+function RichVideo({ src, poster, title, children }: { src?: string; poster?: string; title?: string; children?: ReactNode }): ReactNode {
+  if (!src) return null;
+  return (
+    <video className="rich-media-video" controls preload="metadata" poster={poster} title={title}>
+      <source src={src} />
+      {children}
+    </video>
+  );
+}
+
+function RichAudio({ src, title, children }: { src?: string; title?: string; children?: ReactNode }): ReactNode {
+  if (!src) return null;
+  return (
+    <audio className="rich-media-audio" controls preload="metadata" title={title}>
+      <source src={src} />
+      {children}
+    </audio>
+  );
+}
+
 function MermaidBlock({ code, language }: { code: string; language: string }): ReactNode {
   const id = useId().replaceAll(":", "");
   const tokens = useThemeTokens();
@@ -284,6 +304,12 @@ function markdownComponents(artifactIndex: { current: number }, artifactPrefix: 
     },
     img({ src, alt, title }) {
       return <RichImage src={src} alt={alt} title={title} />;
+    },
+    video({ src, poster, title, children }) {
+      return <RichVideo src={src} poster={poster} title={title}>{children}</RichVideo>;
+    },
+    audio({ src, title, children }) {
+      return <RichAudio src={src} title={title}>{children}</RichAudio>;
     },
     input({ type, checked, disabled }) {
       return <input type={type} checked={checked} disabled={disabled} readOnly />;

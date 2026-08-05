@@ -19,6 +19,16 @@ describe("rich content pipeline", () => {
     ]);
   });
 
+  it("keeps assistant HTML inert until streaming has finished", () => {
+    const segments = parseRichContent("<assistant_html><div>正在生成</div></assistant_html>", { isStreaming: true });
+    expect(segments).toEqual([{ type: "markdown", content: "```html\n<div>正在生成</div>\n```" }]);
+  });
+
+  it("shows an unfinished assistant HTML block as code while streaming", () => {
+    const segments = parseRichContent("<assistant_html><div>尚未闭合", { isStreaming: true });
+    expect(segments).toEqual([{ type: "markdown", content: "```html\n<div>尚未闭合\n```" }]);
+  });
+
   it("treats an unfinished html fence as code while streaming", () => {
     const segments = parseRichContent("```html\n<div>正在生成");
     expect(segments).toHaveLength(1);
@@ -41,6 +51,22 @@ describe("rich content pipeline", () => {
 
   it("normalizes indented block markup without changing fenced code", () => {
     expect(normalizeRichContent("  <div>卡片</div>\n```text\n  <div>代码</div>\n```")).toBe("<div>卡片</div>\n```text\n  <div>代码</div>\n```");
+  });
+
+  it("keeps shell transcripts in a stable text code block", () => {
+    const segments = parseRichContent("[shell] pnpm test\n[cwd] D:/workspace\n[stdout] ok\n[退出码] 0");
+    expect(segments).toEqual([{ type: "markdown", content: "```text\n[shell] pnpm test\n[cwd] D:/workspace\n[stdout] ok\n[退出码] 0\n```" }]);
+  });
+
+  it("keeps unified diffs in a diff code block", () => {
+    const segments = parseRichContent("diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1 +1 @@\n-old\n+new");
+    expect(segments).toEqual([{ type: "markdown", content: "```diff\ndiff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1 +1 @@\n-old\n+new\n```" }]);
+  });
+
+  it("does not swallow prose that merely mentions a shell transcript", () => {
+    const segments = parseRichContent("执行结果如下：\n[shell] pnpm test\n[cwd] D:/workspace\n[stdout] ok\n[退出码] 0");
+    expect(segments[0]).toMatchObject({ type: "markdown", content: expect.stringContaining("执行结果如下") });
+    expect(segments[0]).not.toMatchObject({ content: expect.stringMatching(/^```text/u) });
   });
 
   it("supports flowchart and graph aliases for Mermaid", () => {

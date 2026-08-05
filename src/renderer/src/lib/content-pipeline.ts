@@ -17,6 +17,25 @@ function isFullHtmlDocument(text: string): boolean {
   return /^<!doctype\s/i.test(text) || /^<html\b/i.test(text) || /^<body\b/i.test(text);
 }
 
+function looksLikeShellTranscript(text: string): boolean {
+  const raw = text.trim();
+  if (!raw) return false;
+  const lineCount = raw.split(/\r?\n/u).filter(Boolean).length;
+  if (lineCount < 4) return false;
+  return /^\[(?:shell|cwd|stdout|stderr|退出码)\]/i.test(raw)
+    || /^diff --git\s/i.test(raw)
+    || /^index [0-9a-f]+\.{2}[0-9a-f]+/i.test(raw)
+    || /^@@\s.+\s@@/.test(raw);
+}
+
+function looksLikeUnifiedDiff(text: string): boolean {
+  const raw = text.trim();
+  if (!raw) return false;
+  return /^diff --git\s.+/i.test(raw)
+    || (/^---\s(?:a\/|\/dev\/null)/.test(raw) && /^\+\+\+\s(?:b\/|\/dev\/null)/m.test(raw))
+    || /^@@\s.+\s@@/.test(raw);
+}
+
 export function normalizeMermaidSource(code: string, language = "mermaid"): string {
   const normalized = String(code || "").replace(/[—–－]/gu, "--").trim();
   if (!normalized) return "";
@@ -71,6 +90,16 @@ function parseTextPart(text: string, options: RichContentParseOptions = {}): Ric
     }];
   }
 
+  // Shell transcripts and unified diffs are common assistant/tool output. Keep
+  // them in a code surface so indentation, prefixes and +/- markers survive
+  // Markdown parsing just as they do in ChatAnyTime.
+  if (looksLikeUnifiedDiff(trimmed)) {
+    return [{ type: "markdown", content: `\`\`\`diff\n${trimmed}\n\`\`\`` }];
+  }
+  if (looksLikeShellTranscript(trimmed)) {
+    return [{ type: "markdown", content: `\`\`\`text\n${trimmed}\n\`\`\`` }];
+  }
+
   if (htmlBlockPattern.test(trimmed)) {
     return [{ type: "html", content: trimmed, source: "fragment" }];
   }
@@ -108,7 +137,16 @@ function splitAssistantHtml(text: string, options: RichContentParseOptions): Ric
     const start = match.index ?? 0;
     if (start > cursor) segments.push(...parseTextPart(text.slice(cursor, start), options));
     const content = match[1]?.trim();
-    if (content) segments.push(...parseAssistantHtmlPart(content, options));
+    const isClosed = Boolean(match[2]);
+    if (content) {
+      // Keep assistant-authored HTML inert until the assistant turn is done.
+      // This avoids repeatedly mounting half-written cards during streaming.
+      if (isClosed && !options.isStreaming) {
+        segments.push(...parseAssistantHtmlPart(content, options));
+      } else {
+        segments.push({ type: "markdown", content: `\`\`\`html\n${content}\n\`\`\`` });
+      }
+    }
     cursor = start + match[0].length;
   }
   if (cursor < text.length) segments.push(...parseTextPart(text.slice(cursor), options));

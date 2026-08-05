@@ -26,7 +26,7 @@ import {
   Wrench,
   X
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import type {
   ChatMessage,
   AgentProfile,
@@ -47,7 +47,7 @@ import { DiffView } from "./components/DiffView";
 import { RichContent } from "./components/RichContent";
 import { compactPath, formatDuration, type Artifact } from "./lib/content";
 import { groupAssistantMessages, splitAssistantToolLayout } from "./lib/chat-layout";
-import { THEME_PRESETS, themePresetCss } from "./lib/theme-presets";
+import { THEME_PRESETS, scopeCustomThemeCss, themePresetCss } from "./lib/theme-presets";
 import { useDesktopStore } from "./store";
 
 const thinkingLevels: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
@@ -466,6 +466,7 @@ export function App(): ReactNode {
   const [attachmentError, setAttachmentError] = useState<string>();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
+  const stickToBottomRef = useRef(true);
   const selectedModel = snapshot.model ? `${snapshot.model.provider}/${snapshot.model.id}` : "";
   const availableModels = useMemo(() => models.filter((model) => model.configured), [models]);
   const visibleAgents = useMemo(() => settings.agents.filter((agent) => !agent.archived && `${agent.name} ${agent.description}`.toLowerCase().includes(sidebarQuery.trim().toLowerCase())), [settings.agents, sidebarQuery]);
@@ -480,7 +481,21 @@ export function App(): ReactNode {
   }, [initialize]);
 
   useEffect(() => {
-    timelineRef.current?.scrollTo({ top: timelineRef.current.scrollHeight, behavior: snapshot.busy ? "smooth" : "auto" });
+    const timeline = timelineRef.current;
+    if (!timeline) return;
+    const updateScrollIntent = (): void => {
+      const gap = timeline.scrollHeight - timeline.clientHeight - timeline.scrollTop;
+      stickToBottomRef.current = gap <= 64;
+    };
+    updateScrollIntent();
+    timeline.addEventListener("scroll", updateScrollIntent, { passive: true });
+    return () => timeline.removeEventListener("scroll", updateScrollIntent);
+  }, []);
+
+  useLayoutEffect(() => {
+    const timeline = timelineRef.current;
+    if (!timeline || !stickToBottomRef.current) return;
+    timeline.scrollTo({ top: timeline.scrollHeight, behavior: snapshot.busy ? "smooth" : "auto" });
   }, [snapshot.messages, snapshot.busy]);
 
   useEffect(() => {
@@ -501,6 +516,7 @@ export function App(): ReactNode {
   useEffect(() => {
     const root = document.documentElement;
     root.dataset.themePreset = settings.appearance.themePreset;
+    root.dataset.themeCustom = "true";
     const styleId = "pi-desktop-custom-theme";
     let style = document.getElementById(styleId) as HTMLStyleElement | null;
     if (!style) {
@@ -508,10 +524,11 @@ export function App(): ReactNode {
       style.id = styleId;
       document.head.appendChild(style);
     }
-    style.textContent = `${themePresetCss(settings.appearance.themePreset)}\n${settings.appearance.customCss}`;
+    style.textContent = `${themePresetCss(settings.appearance.themePreset)}\n${scopeCustomThemeCss(settings.appearance.customCss)}`;
     return () => {
       style?.remove();
       delete root.dataset.themePreset;
+      delete root.dataset.themeCustom;
     };
   }, [settings.appearance.themePreset, settings.appearance.customCss]);
 

@@ -160,3 +160,12 @@ export const THEME_PRESETS: readonly ThemePresetDefinition[] = presetDefinitions
 export function themePresetCss(id: ThemePresetId): string {
   return THEME_PRESETS.find((preset) => preset.id === id)?.css ?? "";
 }
+
+/**
+ * Give user-authored root rules one extra attribute of specificity so they can
+ * override preset variables while keeping ordinary component selectors in the
+ * same cascade as the app stylesheet.
+ */
+export function scopeCustomThemeCss(css: string): string {
+  return String(css || "").replace(/:root(?!\[data-theme-custom\])/gu, ":root[data-theme-custom]");
+}
