@@ -58,6 +58,10 @@ describe("rich content pipeline", () => {
     expect(normalizeRichContent("  <div>卡片</div>\n```text\n  <div>代码</div>\n```")).toBe("<div>卡片</div>\n```text\n  <div>代码</div>\n```");
   });
 
+  it("normalizes bare tildes outside fenced code", () => {
+    expect(normalizeRichContent("~draft\n~~strike~~\n~~~text\n~code\n~~~")).toBe("~ draft\n~~strike~~\n~~~text\n~code\n~~~");
+  });
+
   it("keeps shell transcripts in a stable text code block", () => {
     const segments = parseRichContent("[shell] pnpm test\n[cwd] D:/workspace\n[stdout] ok\n[退出码] 0");
     expect(segments).toEqual([{ type: "markdown", content: "```text\n[shell] pnpm test\n[cwd] D:/workspace\n[stdout] ok\n[退出码] 0\n```" }]);

@@ -59,6 +59,10 @@ function isClosingFence(line: string, marker: string): boolean {
     && [...trimmed].every((character) => character === first);
 }
 
+function normalizeTildeSpacing(line: string): string {
+  return line.replace(/(^|[^\w/\\=~])~(?![\s~])/gu, "$1~ ");
+}
+
 function mergeMarkdownSegments(segments: RichContentSegment[]): RichContentSegment[] {
   const merged: RichContentSegment[] = [];
   for (const segment of segments) {
@@ -223,7 +227,9 @@ export function normalizeRichContent(text: string): string {
       inFence = !inFence;
       return line.trimStart();
     }
-    return inFence ? line : line.replace(/^(\s*)(<\/?(?:div|section|article|table|ul|ol|blockquote|details|img)\b)/iu, "$2");
+    if (inFence) return line;
+    const normalizedLine = line.replace(/^(\s*)(<\/?(?:div|section|article|table|ul|ol|blockquote|details|img)\b)/iu, "$2");
+    return normalizeTildeSpacing(normalizedLine);
   }).join("\n");
 }
 
