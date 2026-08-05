@@ -1,4 +1,4 @@
-import type { ThemePresetId } from "../../../shared/protocol";
+import type { ThemeColorKey, ThemeOverrideMode, ThemeOverrides, ThemePresetId } from "../../../shared/protocol";
 
 export interface ThemePresetDefinition {
   id: ThemePresetId;
@@ -193,6 +193,61 @@ export const THEME_PRESETS: readonly ThemePresetDefinition[] = presetDefinitions
 
 export function themePresetCss(id: ThemePresetId): string {
   return THEME_PRESETS.find((preset) => preset.id === id)?.css ?? "";
+}
+
+const themeColorVariables: Record<ThemeColorKey, string> = {
+  accent: "--accent",
+  accentHover: "--accent-hover",
+  userBubble: "--user-bubble",
+  aiBubble: "--ai-bubble"
+};
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
+
+function resolveThemeVariable(value: string, vars: ThemeVars, seen = new Set<string>()): string {
+  const match = /^var\((--[\w-]+)\)$/u.exec(value.trim());
+  const variable = match?.[1];
+  if (!variable || seen.has(variable)) return value.trim();
+  const next = vars[variable];
+  if (!next) return value.trim();
+  const nextSeen = new Set(seen);
+  nextSeen.add(variable);
+  return resolveThemeVariable(next, vars, nextSeen);
+}
+
+function presetModeVars(id: ThemePresetId, mode: ThemeOverrideMode): ThemeVars {
+  const vars = { ...(mode === "dark" ? darkBase : lightBase) };
+  const css = themePresetCss(id);
+  if (!css) return vars;
+  const selector = mode === "dark"
+    ? `:root[data-theme-preset="${id}"][data-theme="dark"]`
+    : `:root[data-theme-preset="${id}"]`;
+  const block = new RegExp(`${escapeRegExp(selector)}\\s*\\{([\\s\\S]*?)\\}`, "u").exec(css)?.[1] ?? "";
+  for (const declaration of block.matchAll(/(--[\w-]+)\s*:\s*([^;]+);/gu)) {
+    const variable = declaration[1];
+    const value = declaration[2];
+    if (variable && value) vars[variable] = value.trim();
+  }
+  return vars;
+}
+
+/** Return the resolved default value for one of the four ChatAnyTime color controls. */
+export function themePresetColor(id: ThemePresetId, mode: ThemeOverrideMode, key: ThemeColorKey): string {
+  const vars = presetModeVars(id, mode);
+  return resolveThemeVariable(vars[themeColorVariables[key]] ?? "#000000", vars);
+}
+
+/** Build independent light/dark override rules for the main document or a preview scope. */
+export function themeOverrideCss(overrides: ThemeOverrides, scopeSelector = ":root"): string {
+  return (["light", "dark"] as const).flatMap((mode) => {
+    const declarationsForMode = Object.entries(overrides[mode] ?? {})
+      .map(([key, value]) => [themeColorVariables[key as ThemeColorKey], value] as const)
+      .filter(([variable, value]) => Boolean(variable) && /^#[\da-f]{6}$/iu.test(value ?? ""));
+    if (declarationsForMode.length === 0) return [];
+    return `${scopeSelector}[data-theme-effective="${mode}"] {\n${declarationsForMode.map(([variable, value]) => `  ${variable}: ${value};`).join("\n")}\n}`;
+  }).join("\n");
 }
 
 function baseThemeCssForScope(scopeSelector: string): string {

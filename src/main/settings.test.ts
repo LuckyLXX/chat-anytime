@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CUSTOM_PROVIDER_ID, createDefaultAgent, mergeProviderModels, migrateSettings, normalizeCustomThemes } from "./settings.js";
+import { CUSTOM_PROVIDER_ID, createDefaultAgent, mergeProviderModels, migrateSettings, normalizeCustomThemes, normalizeThemeOverrides } from "./settings.js";
 
 describe("desktop settings migration", () => {
   it("migrates the legacy custom provider without changing its stable id", () => {
@@ -54,17 +54,25 @@ describe("desktop settings migration", () => {
       themePreset: "rose",
       customCss: ".message { outline: 1px solid red; }",
       customThemes: [],
+      themeOverrides: { light: {}, dark: {} },
       showThinking: false
     });
   });
 
   it("falls back to safe appearance defaults for unknown theme values", () => {
     const result = migrateSettings({ appearance: { theme: "neon", themePreset: "unknown", customCss: 42 } });
-    expect(result.settings.appearance).toEqual({ theme: "system", themePreset: "default", customCss: "", customThemes: [], showThinking: true });
+    expect(result.settings.appearance).toEqual({ theme: "system", themePreset: "default", customCss: "", customThemes: [], themeOverrides: { light: {}, dark: {} }, showThinking: true });
   });
 
   it("accepts the expanded reference theme presets", () => {
     expect(migrateSettings({ appearance: { themePreset: "ocean" } }).settings.appearance.themePreset).toBe("ocean");
+  });
+
+  it("normalizes independent theme color overrides and drops invalid values", () => {
+    expect(normalizeThemeOverrides({
+      light: { accent: " #ABCDEF ", aiBubble: "rgb(0 0 0)" },
+      dark: { accentHover: "#123456", unknown: "#ffffff" }
+    })).toEqual({ light: { accent: "#abcdef" }, dark: { accentHover: "#123456" } });
   });
 
   it("normalizes saved custom CSS themes and ignores empty entries", () => {

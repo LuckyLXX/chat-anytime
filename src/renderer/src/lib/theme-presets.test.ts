@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { THEME_PRESETS, scopeCustomThemeCss, scopeCustomThemeCssForPreview, themePresetCss, themePreviewCss } from "./theme-presets";
+import { THEME_PRESETS, scopeCustomThemeCss, scopeCustomThemeCssForPreview, themeOverrideCss, themePresetColor, themePresetCss, themePreviewCss } from "./theme-presets";
 
 describe("theme presets", () => {
   it("contains the reference palette families", () => {
@@ -30,6 +30,22 @@ describe("theme presets", () => {
     expect(css).toContain("--accent: #0ea5e9");
     expect(css).toContain("--accent: #0284c7");
     expect(css).not.toContain(':root[data-theme-preset="ocean"]');
+  });
+
+  it("resolves the four editable colors from each preset mode", () => {
+    expect(themePresetColor("ocean", "light", "accent")).toBe("#0284c7");
+    expect(themePresetColor("ocean", "dark", "accent")).toBe("#0ea5e9");
+    expect(themePresetColor("ocean", "light", "userBubble")).toBe("#0369a1");
+    expect(themePresetColor("default", "dark", "aiBubble")).toBe("#172033");
+  });
+
+  it("emits only valid independent mode overrides", () => {
+    const css = themeOverrideCss({ light: { accent: "#abcdef", aiBubble: "rgb(0 0 0)" }, dark: { userBubble: "#123456" } }, ".preview");
+    expect(css).toContain('.preview[data-theme-effective="light"]');
+    expect(css).toContain("--accent: #abcdef;");
+    expect(css).toContain('.preview[data-theme-effective="dark"]');
+    expect(css).toContain("--user-bubble: #123456;");
+    expect(css).not.toContain("rgb(0 0 0)");
   });
 
   it("redirects ChatAnyTime mode selectors into a preview scope", () => {

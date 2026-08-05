@@ -20,6 +20,7 @@ import {
   PanelRightOpen,
   Play,
   RefreshCw,
+  RotateCcw,
   Paperclip,
   Pencil,
   Save,
@@ -42,6 +43,8 @@ import type {
   ProviderOption,
   CustomThemeDefinition,
   ThinkingLevel,
+  ThemeColorKey,
+  ThemeOverrideMode,
   ThemePresetId,
   ToolExecution,
   MessageBlock
@@ -52,11 +55,18 @@ import { DiffView } from "./components/DiffView";
 import { RichContent } from "./components/RichContent";
 import { compactPath, formatDuration, type Artifact } from "./lib/content";
 import { groupAssistantMessages, splitAssistantToolLayout } from "./lib/chat-layout";
-import { THEME_PRESETS, scopeCustomThemeCss, scopeCustomThemeCssForPreview, themePresetCss, themePreviewCss } from "./lib/theme-presets";
+import { THEME_PRESETS, scopeCustomThemeCss, scopeCustomThemeCssForPreview, themeOverrideCss, themePresetColor, themePresetCss, themePreviewCss } from "./lib/theme-presets";
 import { useDesktopStore } from "./store";
 
 const thinkingLevels: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 const agentTools: BuiltinToolName[] = ["read", "bash", "edit", "write", "grep", "find", "ls"];
+const themeColorFields: readonly { key: ThemeColorKey; label: string }[] = [
+  { key: "accent", label: "主题色" },
+  { key: "accentHover", label: "辅助色" },
+  { key: "userBubble", label: "用户气泡" },
+  { key: "aiBubble", label: "AI 气泡" }
+];
+const HEX_COLOR_PATTERN = /^#[\da-f]{6}$/iu;
 
 function createCustomThemeId(): string {
   if (typeof globalThis.crypto?.randomUUID === "function") return `custom-${globalThis.crypto.randomUUID()}`;
@@ -65,6 +75,10 @@ function createCustomThemeId(): string {
 
 function cssThemeNameFromFile(fileName: string): string {
   return fileName.replace(/\.[^./\\]+$/u, "").trim();
+}
+
+function themeColorValue(appearance: AppearanceSettings, mode: ThemeOverrideMode, key: ThemeColorKey): string {
+  return appearance.themeOverrides[mode][key] ?? themePresetColor(appearance.themePreset, mode, key);
 }
 
 function messageText(message: ChatMessage): string {
@@ -258,7 +272,7 @@ flowchart LR
 \`\`\`
 
 <assistant_html><div><strong>HTML 片段</strong><p>安全清洗后仍保留布局和交互样式。</p></div></assistant_html>`;
-  const previewCss = `${themePreviewCss(appearance.themePreset)}\n${scopeCustomThemeCssForPreview(appearance.customCss)}`;
+  const previewCss = `${themePreviewCss(appearance.themePreset)}\n${themeOverrideCss(appearance.themeOverrides, ".theme-preview-scope")}\n${scopeCustomThemeCssForPreview(appearance.customCss)}`;
   const panes = [
     { id: "dark", label: "深色", effective: "dark" },
     { id: "light", label: "浅色", effective: "light" }
@@ -271,7 +285,7 @@ flowchart LR
         {panes.map((pane) => (
           <section className="theme-preview-pane theme-preview-scope" data-theme={pane.effective} data-theme-effective={pane.effective} data-theme-preset={appearance.themePreset} data-theme-custom="true" key={pane.id}>
             <header className="theme-preview-pane-header"><strong>{pane.label}模式</strong><small>富内容输出</small></header>
-            <div className="theme-preview-body"><RichContent streaming={false} artifactPrefix={`theme-preview-${pane.id}`} onOpenArtifact={() => undefined}>{previewContent}</RichContent></div>
+            <div className="theme-preview-body"><div className="theme-preview-user-bubble">用户消息：主题色也会实时更新</div><RichContent streaming={false} artifactPrefix={`theme-preview-${pane.id}`} onOpenArtifact={() => undefined}>{previewContent}</RichContent></div>
           </section>
         ))}
       </div>
@@ -330,6 +344,7 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string>();
   const [tab, setTab] = useState<"general" | "models" | "agents" | "appearance">("general");
+  const [themeColorMode, setThemeColorMode] = useState<ThemeOverrideMode>("light");
   const initialSettingsRef = useRef<import("../../shared/protocol").DesktopSettings>(structuredClone(settings));
   const [agentList, setAgentList] = useState<AgentProfile[]>(settings.agents);
   const [selectedAgentId, setSelectedAgentId] = useState(settings.currentAgentId);
@@ -352,6 +367,18 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
 
   function updateAppearance(patch: Partial<AppearanceSettings>): void {
     useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, ...patch } } });
+  }
+
+  function updateThemeColor(key: ThemeColorKey, value: string): void {
+    const themeOverrides = structuredClone(settings.appearance.themeOverrides);
+    themeOverrides[themeColorMode][key] = value.toLowerCase();
+    updateAppearance({ themeOverrides });
+  }
+
+  function resetThemeColor(key: ThemeColorKey): void {
+    const themeOverrides = structuredClone(settings.appearance.themeOverrides);
+    delete themeOverrides[themeColorMode][key];
+    updateAppearance({ themeOverrides });
   }
 
   async function importCustomCss(event: React.ChangeEvent<HTMLInputElement>): Promise<void> {
@@ -537,7 +564,12 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
             <div>
               <label>主题模式<select value={settings.appearance.theme} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, theme: event.target.value as "system" | "light" | "dark" } } })}><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></label>
               <label className="checkbox-setting"><input type="checkbox" checked={settings.appearance.showThinking} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, showThinking: event.target.checked } } })} />展示思考过程</label>
-              <div className="theme-preset-field"><span className="settings-field-label">主题预设</span><div className="theme-preset-grid">{THEME_PRESETS.map((preset) => <button type="button" key={preset.id} className={`theme-preset-card${settings.appearance.themePreset === preset.id ? " active" : ""}`} onClick={() => useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, themePreset: preset.id as ThemePresetId } } })}><span className="theme-swatches">{preset.swatches.map((color) => <i key={color} style={{ backgroundColor: color }} />)}</span><strong>{preset.name}</strong><small>{preset.description}</small></button>)}</div></div>
+              <div className="theme-preset-field"><span className="settings-field-label">主题预设</span><div className="theme-preset-grid">{THEME_PRESETS.map((preset) => <button type="button" key={preset.id} className={`theme-preset-card${settings.appearance.themePreset === preset.id ? " active" : ""}`} onClick={() => useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, themePreset: preset.id as ThemePresetId, themeOverrides: { light: {}, dark: {} } } } })}><span className="theme-swatches">{preset.swatches.map((color) => <i key={color} style={{ backgroundColor: color }} />)}</span><strong>{preset.name}</strong><small>{preset.description}</small></button>)}</div></div>
+              <section className="theme-color-settings" aria-label="自定义配色">
+                <div className="theme-color-heading"><span className="settings-field-label">自定义配色</span><div className="theme-color-mode-switch" role="tablist" aria-label="配色模式"><button type="button" className={themeColorMode === "light" ? "active" : ""} role="tab" aria-selected={themeColorMode === "light"} onClick={() => setThemeColorMode("light")}>浅色</button><button type="button" className={themeColorMode === "dark" ? "active" : ""} role="tab" aria-selected={themeColorMode === "dark"} onClick={() => setThemeColorMode("dark")}>深色</button></div></div>
+                <p className="theme-color-hint">为当前模式覆盖预设颜色；切换预设会重置这些覆盖。</p>
+                <div className="theme-color-grid">{themeColorFields.map((field) => { const value = themeColorValue(settings.appearance, themeColorMode, field.key); return <div className="theme-color-row" key={field.key}><label htmlFor={`theme-color-${field.key}`}>{field.label}</label><input id={`theme-color-${field.key}`} type="color" value={value} onChange={(event) => updateThemeColor(field.key, event.target.value)} /><input className="theme-color-hex" type="text" inputMode="text" maxLength={7} spellCheck={false} aria-label={`${field.label}十六进制值`} value={value} onChange={(event) => { const next = event.target.value.trim(); if (HEX_COLOR_PATTERN.test(next)) updateThemeColor(field.key, next); }} /><button className="icon-button theme-color-reset" type="button" title={`重置${field.label}`} aria-label={`重置${field.label}`} onClick={() => resetThemeColor(field.key)}><RotateCcw size={14} /></button></div>; })}</div>
+              </section>
             </div>
             <ThemePreview appearance={settings.appearance} />
           </div>
@@ -646,13 +678,13 @@ export function App(): ReactNode {
       style.id = styleId;
       document.head.appendChild(style);
     }
-    style.textContent = `${themePresetCss(settings.appearance.themePreset)}\n${scopeCustomThemeCss(settings.appearance.customCss)}`;
+    style.textContent = `${themePresetCss(settings.appearance.themePreset)}\n${themeOverrideCss(settings.appearance.themeOverrides)}\n${scopeCustomThemeCss(settings.appearance.customCss)}`;
     return () => {
       style?.remove();
       delete root.dataset.themePreset;
       delete root.dataset.themeCustom;
     };
-  }, [settings.appearance.themePreset, settings.appearance.customCss]);
+  }, [settings.appearance.themePreset, settings.appearance.themeOverrides, settings.appearance.customCss]);
 
   async function openWorkspace(): Promise<void> {
     const path = await window.piDesktop.chooseWorkspace();

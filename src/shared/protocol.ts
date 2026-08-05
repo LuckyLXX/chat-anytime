@@ -66,11 +66,27 @@ export interface CustomThemeDefinition {
   css: string;
 }
 
+export type ThemeColorKey = "accent" | "accentHover" | "userBubble" | "aiBubble";
+export type ThemeOverrideMode = "light" | "dark";
+
+export interface ThemeColorOverrides {
+  accent?: string;
+  accentHover?: string;
+  userBubble?: string;
+  aiBubble?: string;
+}
+
+export interface ThemeOverrides {
+  light: ThemeColorOverrides;
+  dark: ThemeColorOverrides;
+}
+
 export interface AppearanceSettings {
   theme: "system" | "light" | "dark";
   themePreset: ThemePresetId;
   customCss: string;
   customThemes: CustomThemeDefinition[];
+  themeOverrides: ThemeOverrides;
   showThinking: boolean;
 }
 

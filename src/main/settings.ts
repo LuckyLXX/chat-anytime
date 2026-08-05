@@ -7,6 +7,9 @@ import type {
   DesktopSettings,
   ProviderModelSettings,
   ProviderSettings,
+  ThemeColorKey,
+  ThemeColorOverrides,
+  ThemeOverrides,
   ThemePresetId,
   ThinkingLevel
 } from "../shared/protocol.js";
@@ -31,7 +34,34 @@ export function createDefaultAgent(): AgentProfile {
 }
 
 export function defaultAppearance(): AppearanceSettings {
-  return { theme: "system", themePreset: "default", customCss: "", customThemes: [], showThinking: true };
+  return {
+    theme: "system",
+    themePreset: "default",
+    customCss: "",
+    customThemes: [],
+    themeOverrides: { light: {}, dark: {} },
+    showThinking: true
+  };
+}
+
+const THEME_COLOR_KEYS: readonly ThemeColorKey[] = ["accent", "accentHover", "userBubble", "aiBubble"];
+const HEX_COLOR_PATTERN = /^#[\da-f]{6}$/iu;
+
+function normalizeThemeColorOverrides(value: unknown): ThemeColorOverrides {
+  if (!value || typeof value !== "object") return {};
+  const source = value as Record<string, unknown>;
+  return Object.fromEntries(THEME_COLOR_KEYS.flatMap((key) => {
+    const color = typeof source[key] === "string" ? source[key].trim().toLowerCase() : "";
+    return HEX_COLOR_PATTERN.test(color) ? [[key, color]] : [];
+  })) as ThemeColorOverrides;
+}
+
+export function normalizeThemeOverrides(value: unknown): ThemeOverrides {
+  const source = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  return {
+    light: normalizeThemeColorOverrides(source.light),
+    dark: normalizeThemeColorOverrides(source.dark)
+  };
 }
 
 export function normalizeCustomThemes(value: unknown): CustomThemeDefinition[] {
@@ -149,6 +179,7 @@ export function migrateSettings(raw: unknown): { settings: DesktopSettings; lega
     : defaults.appearance.themePreset;
   const customCss = typeof appearanceSource.customCss === "string" ? appearanceSource.customCss : defaults.appearance.customCss;
   const customThemes = normalizeCustomThemes(appearanceSource.customThemes);
+  const themeOverrides = normalizeThemeOverrides(appearanceSource.themeOverrides);
   const thinkingLevel = ["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(String(source.thinkingLevel))
     ? source.thinkingLevel as ThinkingLevel
     : "medium";
@@ -160,7 +191,7 @@ export function migrateSettings(raw: unknown): { settings: DesktopSettings; lega
     providers,
     agents: normalizedAgents,
     currentAgentId,
-    appearance: { theme, themePreset, customCss, customThemes, showThinking: appearanceSource.showThinking !== false }
+    appearance: { theme, themePreset, customCss, customThemes, themeOverrides, showThinking: appearanceSource.showThinking !== false }
   };
   const legacyApiKey = typeof source.customProviderApiKey === "string" ? source.customProviderApiKey : undefined;
   return { settings, legacyApiKey };
