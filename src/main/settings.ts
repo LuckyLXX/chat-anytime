@@ -1,3 +1,4 @@
+import { THEME_PRESET_IDS } from "../shared/protocol.js";
 import type {
   AgentProfile,
   AppearanceSettings,
@@ -124,7 +125,7 @@ export function migrateSettings(raw: unknown): { settings: DesktopSettings; lega
     : normalizedAgents[0]!.id;
   const appearanceSource = source.appearance && typeof source.appearance === "object" ? source.appearance as Record<string, unknown> : {};
   const theme = appearanceSource.theme === "light" || appearanceSource.theme === "dark" ? appearanceSource.theme : "system";
-  const themePreset = ["default", "indigo", "forest", "rose"].includes(String(appearanceSource.themePreset))
+  const themePreset = THEME_PRESET_IDS.includes(String(appearanceSource.themePreset) as ThemePresetId)
     ? appearanceSource.themePreset as ThemePresetId
     : defaults.appearance.themePreset;
   const customCss = typeof appearanceSource.customCss === "string" ? appearanceSource.customCss : defaults.appearance.customCss;

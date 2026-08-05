@@ -1,11 +1,9 @@
 import { Code2, ExternalLink, X } from "lucide-react";
 import { useEffect, type ReactNode } from "react";
-import type { Artifact } from "../lib/content";
+import { artifactSandbox, buildArtifactPreviewSource, type Artifact } from "../lib/content";
 
 export function ArtifactPreview({ artifact, onClose }: { artifact: Artifact; onClose(): void }): ReactNode {
-  const source = artifact.language === "svg"
-    ? `<!doctype html><html><body style="margin:0;display:grid;place-items:center;min-height:100vh;font-family:sans-serif">${artifact.content}</body></html>`
-    : artifact.content;
+  const source = buildArtifactPreviewSource(artifact);
   useEffect(() => {
     function close(event: KeyboardEvent): void {
       if (event.key === "Escape") onClose();
@@ -26,7 +24,7 @@ export function ArtifactPreview({ artifact, onClose }: { artifact: Artifact; onC
       <div className="artifact-content" onMouseDown={(event) => event.stopPropagation()}>
         <iframe
           title={artifact.title}
-          sandbox="allow-scripts"
+          sandbox={artifactSandbox(artifact)}
           referrerPolicy="no-referrer"
           srcDoc={source}
         />

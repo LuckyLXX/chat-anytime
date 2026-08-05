@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeRichContent, parseRichContent } from "./content-pipeline";
+import { normalizeMermaidSource, normalizeRichContent, parseRichContent } from "./content-pipeline";
 
 describe("rich content pipeline", () => {
   it("keeps ordinary code fences as markdown and promotes special fences", () => {
@@ -26,6 +26,19 @@ describe("rich content pipeline", () => {
     expect(segments[0]).not.toMatchObject({ type: "artifact" });
   });
 
+  it("defers a closed HTML fence until streaming has finished", () => {
+    const segments = parseRichContent("```html\n<div>完整但仍在生成</div>\n```", { isStreaming: true });
+    expect(segments).toHaveLength(1);
+    expect(segments[0]).toMatchObject({ type: "markdown", content: expect.stringContaining("完整但仍在生成") });
+    expect(segments[0]).not.toMatchObject({ type: "artifact" });
+    expect(parseRichContent("```html\n<div>完成</div>\n```", { isStreaming: false })[0]).toMatchObject({ type: "artifact" });
+  });
+
+  it("promotes complete documents inside assistant_html to sandbox artifacts", () => {
+    const segments = parseRichContent("<assistant_html><!doctype html><html><body><h1>页面</h1></body></html></assistant_html>");
+    expect(segments).toEqual([{ type: "artifact", artifact: { title: "HTML 预览", language: "html", content: "<!doctype html><html><body><h1>页面</h1></body></html>" } }]);
+  });
+
   it("normalizes indented block markup without changing fenced code", () => {
     expect(normalizeRichContent("  <div>卡片</div>\n```text\n  <div>代码</div>\n```")).toBe("<div>卡片</div>\n```text\n  <div>代码</div>\n```");
   });
@@ -36,5 +49,10 @@ describe("rich content pipeline", () => {
       { type: "mermaid", language: "flowchart" },
       { type: "mermaid", language: "graph" }
     ]);
+  });
+
+  it("normalizes Mermaid aliases and full-width dash arrows", () => {
+    expect(normalizeMermaidSource("A —> B", "flowchart")).toBe("flowchart A --> B");
+    expect(normalizeMermaidSource("graph LR\nA --> B", "graph")).toBe("graph LR\nA --> B");
   });
 });

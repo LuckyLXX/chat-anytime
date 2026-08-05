@@ -57,7 +57,8 @@ export interface AgentProfile {
   archived?: boolean;
 }
 
-export type ThemePresetId = "default" | "indigo" | "forest" | "rose";
+export const THEME_PRESET_IDS = ["default", "ocean", "emerald", "indigo", "forest", "rose", "amber", "violet", "carbon"] as const;
+export type ThemePresetId = typeof THEME_PRESET_IDS[number];
 
 export interface AppearanceSettings {
   theme: "system" | "light" | "dark";

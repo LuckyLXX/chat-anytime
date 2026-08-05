@@ -403,7 +403,7 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
             <ThemePreview />
           </div>
               <div className="custom-css-heading"><span>自定义 CSS</span><div><input ref={cssFileInputRef} hidden type="file" accept=".css,text/css" onChange={(event) => void importCustomCss(event)} /><button className="secondary-button" type="button" onClick={() => cssFileInputRef.current?.click()}>导入 CSS</button><button className="secondary-button" type="button" onClick={() => useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, customCss: "" } } })}>清空</button></div></div>
-              <label className="custom-css-field"><textarea value={settings.appearance.customCss} spellCheck={false} rows={11} placeholder={":root[data-theme=\"dark\"] {\n  --accent: #8b5cf6;\n}"} aria-label="自定义 CSS" onChange={(event) => useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, customCss: event.target.value } } })} /></label>
+              <label className="custom-css-field"><textarea value={settings.appearance.customCss} spellCheck={false} rows={11} placeholder={":root[data-theme-effective=\"dark\"] {\n  --accent: #8b5cf6;\n}"} aria-label="自定义 CSS" onChange={(event) => useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, customCss: event.target.value } } })} /></label>
           <footer><button type="button" className="secondary-button" onClick={closeSettings}>取消</button><button className="primary-button" type="submit">保存外观设置</button></footer>
         </form>}</div></div>
       </section>
@@ -466,7 +466,18 @@ export function App(): ReactNode {
   }, [snapshot.messages, snapshot.busy]);
 
   useEffect(() => {
-    document.documentElement.dataset.theme = settings.appearance.theme;
+    const root = document.documentElement;
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const update = (): void => {
+      root.dataset.theme = settings.appearance.theme;
+      root.dataset.themeEffective = settings.appearance.theme === "dark" || (settings.appearance.theme === "system" && media.matches) ? "dark" : "light";
+    };
+    update();
+    media.addEventListener("change", update);
+    return () => {
+      media.removeEventListener("change", update);
+      delete root.dataset.themeEffective;
+    };
   }, [settings.appearance.theme]);
 
   useEffect(() => {

@@ -6,8 +6,26 @@ export type RichContentSegment =
   | { type: "mermaid"; content: string; language: string }
   | { type: "artifact"; artifact: Omit<Artifact, "id"> };
 
-const htmlBlockPattern = /^\s*<(?:div|section|article|aside|header|footer|nav|main|table|ul|ol|dl|blockquote|figure|details|form|fieldset|img|video|audio|canvas|svg)\b/i;
+export interface RichContentParseOptions {
+  isStreaming?: boolean;
+}
+
+const htmlBlockPattern = /^\s*<(?:div|section|article|aside|header|footer|nav|main|table|thead|tbody|tfoot|tr|td|th|ul|ol|li|dl|blockquote|figure|figcaption|details|summary|form|fieldset|label|button|img|video|audio|canvas|svg|p)\b/i;
 const mermaidLanguages = new Set(["mermaid", "flowchart", "graph"]);
+
+function isFullHtmlDocument(text: string): boolean {
+  return /^<!doctype\s/i.test(text) || /^<html\b/i.test(text) || /^<body\b/i.test(text);
+}
+
+export function normalizeMermaidSource(code: string, language = "mermaid"): string {
+  const normalized = String(code || "").replace(/[—–－]/gu, "--").trim();
+  if (!normalized) return "";
+  const normalizedLanguage = language.trim().toLowerCase();
+  if ((normalizedLanguage === "flowchart" || normalizedLanguage === "graph") && !new RegExp(`^${normalizedLanguage}\\b`, "iu").test(normalized)) {
+    return `${normalizedLanguage} ${normalized}`;
+  }
+  return normalized;
+}
 
 function isFenceLine(line: string): { marker: string; info: string } | undefined {
   const match = /^ {0,3}(`{3,}|~{3,})([^\r\n]*)$/.exec(line);
@@ -37,13 +55,16 @@ function mergeMarkdownSegments(segments: RichContentSegment[]): RichContentSegme
   return merged;
 }
 
-function parseTextPart(text: string): RichContentSegment[] {
+function parseTextPart(text: string, options: RichContentParseOptions = {}): RichContentSegment[] {
   if (!text) return [];
   const normalized = text.replace(/\r\n?/gu, "\n");
   const trimmed = normalized.trim();
   if (!trimmed) return [{ type: "markdown", content: normalized }];
 
-  if (/^<!doctype\s/i.test(trimmed) || /^<html\b/i.test(trimmed)) {
+  if (isFullHtmlDocument(trimmed)) {
+    if (options.isStreaming) {
+      return [{ type: "markdown", content: `\`\`\`html\n${trimmed}\n\`\`\`` }];
+    }
     return [{
       type: "artifact",
       artifact: { title: "HTML 预览", language: "html", content: trimmed }
@@ -54,7 +75,7 @@ function parseTextPart(text: string): RichContentSegment[] {
     return [{ type: "html", content: trimmed, source: "fragment" }];
   }
 
-  const embeddedHtml = /\n\s*<(?:div|section|article|table|ul|ol|blockquote|details|img)\b/i.exec(normalized);
+  const embeddedHtml = /\n\s*<(?:div|section|article|table|thead|tbody|tr|td|ul|ol|blockquote|details|img|svg)\b/i.exec(normalized);
   if (embeddedHtml && embeddedHtml.index !== undefined) {
     const before = normalized.slice(0, embeddedHtml.index);
     const after = normalized.slice(embeddedHtml.index).trim();
@@ -67,22 +88,34 @@ function parseTextPart(text: string): RichContentSegment[] {
   return [{ type: "markdown", content: normalized }];
 }
 
-function splitAssistantHtml(text: string): RichContentSegment[] {
+function parseAssistantHtmlPart(content: string, options: RichContentParseOptions): RichContentSegment[] {
+  const normalized = content.replace(/\r\n?/gu, "\n").trim();
+  if (!normalized) return [];
+  if (isFullHtmlDocument(normalized)) {
+    if (options.isStreaming) {
+      return [{ type: "markdown", content: `\`\`\`html\n${normalized}\n\`\`\`` }];
+    }
+    return [{ type: "artifact", artifact: { title: "HTML 预览", language: "html", content: normalized } }];
+  }
+  return [{ type: "html", content: normalized, source: "assistant-html" }];
+}
+
+function splitAssistantHtml(text: string, options: RichContentParseOptions): RichContentSegment[] {
   const segments: RichContentSegment[] = [];
   const pattern = /<assistant_html>([\s\S]*?)(<\/assistant_html>|$)/giu;
   let cursor = 0;
   for (const match of text.matchAll(pattern)) {
     const start = match.index ?? 0;
-    if (start > cursor) segments.push(...parseTextPart(text.slice(cursor, start)));
+    if (start > cursor) segments.push(...parseTextPart(text.slice(cursor, start), options));
     const content = match[1]?.trim();
-    if (content) segments.push({ type: "html", content, source: "assistant-html" });
+    if (content) segments.push(...parseAssistantHtmlPart(content, options));
     cursor = start + match[0].length;
   }
-  if (cursor < text.length) segments.push(...parseTextPart(text.slice(cursor)));
-  return segments.length ? segments : parseTextPart(text);
+  if (cursor < text.length) segments.push(...parseTextPart(text.slice(cursor), options));
+  return segments.length ? segments : parseTextPart(text, options);
 }
 
-function splitFencedContent(text: string): RichContentSegment[] {
+function splitFencedContent(text: string, options: RichContentParseOptions = {}): RichContentSegment[] {
   const lines = text.replace(/\r\n?/gu, "\n").split("\n");
   const segments: RichContentSegment[] = [];
   let markdownLines: string[] = [];
@@ -90,7 +123,7 @@ function splitFencedContent(text: string): RichContentSegment[] {
 
   function flushMarkdown(): void {
     if (markdownLines.length) {
-      segments.push(...splitAssistantHtml(markdownLines.join("\n")));
+      segments.push(...splitAssistantHtml(markdownLines.join("\n"), options));
       markdownLines = [];
     }
   }
@@ -100,15 +133,16 @@ function splitFencedContent(text: string): RichContentSegment[] {
     const language = fence.info.split(/\s+/u)[0]?.toLowerCase() ?? "";
     const code = fence.lines.join("\n");
     if (closed && mermaidLanguages.has(language)) {
-      segments.push({ type: "mermaid", content: code, language });
-    } else if (closed && (language === "html" || language === "svg")) {
+      segments.push({ type: "mermaid", content: normalizeMermaidSource(code, language), language });
+    } else if (closed && (language === "html" || language === "svg") && !options.isStreaming) {
       segments.push({
         type: "artifact",
         artifact: { title: language === "svg" ? "SVG 预览" : "HTML 预览", language, content: code }
       });
     } else {
-      const opening = `\`\`\`${fence.info}`;
-      segments.push({ type: "markdown", content: `${opening}\n${code}\n\`\`\`` });
+      const opening = `${fence.marker}${fence.info}`;
+      const closing = fence.marker[0]?.repeat(fence.marker.length) ?? "```";
+      segments.push({ type: "markdown", content: `${opening}\n${code}\n${closing}` });
     }
     fence = undefined;
   }
@@ -155,6 +189,6 @@ export function normalizeRichContent(text: string): string {
   }).join("\n");
 }
 
-export function parseRichContent(text: string): RichContentSegment[] {
-  return splitFencedContent(normalizeRichContent(text));
+export function parseRichContent(text: string, options: RichContentParseOptions = {}): RichContentSegment[] {
+  return splitFencedContent(normalizeRichContent(text), options);
 }

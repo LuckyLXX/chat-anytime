@@ -16,6 +16,24 @@ export function extractArtifacts(text: string, messageId: string): Artifact[] {
   }));
 }
 
+export function isFullArtifactDocument(artifact: Pick<Artifact, "language" | "content">): boolean {
+  if (artifact.language === "svg") return false;
+  const content = artifact.content.trim();
+  return /^<!doctype\s/i.test(content) || /^<html\b/i.test(content) || /^<body\b/i.test(content);
+}
+
+export function buildArtifactPreviewSource(artifact: Pick<Artifact, "language" | "content">): string {
+  if (artifact.language === "svg") {
+    return `<!doctype html><html><head><meta charset="utf-8"></head><body style="margin:0;display:grid;place-items:center;min-height:100vh;font-family:sans-serif;background:#fff">${artifact.content}</body></html>`;
+  }
+  if (isFullArtifactDocument(artifact)) return artifact.content;
+  return `<!doctype html><html><head><meta charset="utf-8"></head><body style="margin:0;padding:20px;font-family:Inter,Segoe UI,Microsoft YaHei,sans-serif">${artifact.content}</body></html>`;
+}
+
+export function artifactSandbox(artifact: Pick<Artifact, "language" | "content">): string {
+  return isFullArtifactDocument(artifact) ? "allow-scripts" : "allow-same-origin";
+}
+
 export function formatDuration(startedAt: number, completedAt?: number): string {
   const duration = (completedAt ?? Date.now()) - startedAt;
   if (duration < 1000) return `${duration}ms`;

@@ -61,4 +61,8 @@ describe("desktop settings migration", () => {
     const result = migrateSettings({ appearance: { theme: "neon", themePreset: "unknown", customCss: 42 } });
     expect(result.settings.appearance).toEqual({ theme: "system", themePreset: "default", customCss: "", showThinking: true });
   });
+
+  it("accepts the expanded reference theme presets", () => {
+    expect(migrateSettings({ appearance: { themePreset: "ocean" } }).settings.appearance.themePreset).toBe("ocean");
+  });
 });
