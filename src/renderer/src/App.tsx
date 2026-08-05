@@ -118,7 +118,7 @@ function ToolGroup({ calls, executions, streaming }: { calls: Array<Extract<Mess
   );
 }
 
-function MessageView({ message, executions, onOpenArtifact, onCopy, onEdit, onRegenerate, showThinking = true, busy = false }: { message: ChatMessage; executions: ToolExecution[]; onOpenArtifact(artifact: Artifact): void; onCopy(message: ChatMessage): void; onEdit(message: ChatMessage): void; onRegenerate(message: ChatMessage): void; showThinking?: boolean; busy?: boolean }): ReactNode {
+function MessageView({ message, executions, onOpenArtifact, onHtmlAction, onCopy, onEdit, onRegenerate, showThinking = true, busy = false }: { message: ChatMessage; executions: ToolExecution[]; onOpenArtifact(artifact: Artifact): void; onHtmlAction(text: string): void; onCopy(message: ChatMessage): void; onEdit(message: ChatMessage): void; onRegenerate(message: ChatMessage): void; showThinking?: boolean; busy?: boolean }): ReactNode {
   const text = messageText(message);
   const thinking = thinkingText(message);
   const toolLayout = splitAssistantToolLayout(message);
@@ -145,11 +145,11 @@ function MessageView({ message, executions, onOpenArtifact, onCopy, onEdit, onRe
         )}
         {toolLayout ? (
           <>
-            {blockText(toolLayout.leading) && <RichContent streaming={false} artifactPrefix={`${message.id}-leading`} onOpenArtifact={onOpenArtifact}>{blockText(toolLayout.leading)}</RichContent>}
+            {blockText(toolLayout.leading) && <RichContent streaming={false} artifactPrefix={`${message.id}-leading`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction}>{blockText(toolLayout.leading)}</RichContent>}
             <ToolGroup calls={toolLayout.process} executions={executions} streaming={message.streaming} />
-            {blockText(toolLayout.trailing) && <RichContent streaming={message.streaming} artifactPrefix={`${message.id}-trailing`} onOpenArtifact={onOpenArtifact}>{blockText(toolLayout.trailing)}</RichContent>}
+            {blockText(toolLayout.trailing) && <RichContent streaming={message.streaming} artifactPrefix={`${message.id}-trailing`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction}>{blockText(toolLayout.trailing)}</RichContent>}
           </>
-        ) : text && <RichContent streaming={message.streaming} artifactPrefix={message.id} onOpenArtifact={onOpenArtifact}>{text}</RichContent>}
+        ) : text && <RichContent streaming={message.streaming} artifactPrefix={message.id} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction}>{text}</RichContent>}
         {message.error && <p className="inline-error"><AlertCircle size={15} />{message.error}</p>}
         {!message.streaming && !busy && <div className="message-actions"><button type="button" title="重新生成" aria-label="重新生成回复" onClick={() => onRegenerate(message)}><RefreshCw size={13} /></button><button type="button" title="复制" aria-label="复制 AI 回复" onClick={() => onCopy(message)}><Copy size={13} /></button></div>}
       </div>
@@ -222,14 +222,32 @@ function ChangesPanel({ executions }: { executions: ToolExecution[] }): ReactNod
 }
 
 function ThemePreview(): ReactNode {
+  const previewContent = `**实时主题预览**
+
+Markdown、表格、代码、公式和图表会共用当前主题变量。
+
+| 输出 | 状态 |
+| --- | --- |
+| 代码高亮 | 跟随主题 |
+| HTML 片段 | 已清洗 |
+
+\`\`\`ts
+const theme = "live";
+\`\`\`
+
+$$E = mc^2$$
+
+\`\`\`mermaid
+flowchart LR
+  Theme[主题] --> Preview[实时预览]
+  Preview --> Output[消息输出]
+\`\`\`
+
+<assistant_html><div><strong>HTML 片段</strong><p>安全清洗后仍保留布局和交互样式。</p></div></assistant_html>`;
   return (
     <div className="theme-preview" aria-label="主题预览">
       <div className="theme-preview-header"><span className="theme-preview-dot" /><strong>Pi Desktop</strong><small>主题预览</small></div>
-      <div className="theme-preview-body">
-        <div className="theme-preview-bubble"><strong>助手</strong><span>输出、代码和工具状态会跟随当前主题。</span></div>
-        <div className="theme-preview-tool"><span className="theme-preview-tool-icon">+</span><span>读取项目文件</span><small>完成</small></div>
-        <pre className="theme-preview-code"><span>const</span> theme = <em>"live"</em>;</pre>
-      </div>
+      <div className="theme-preview-body"><RichContent streaming={false} artifactPrefix="theme-preview" onOpenArtifact={() => undefined}>{previewContent}</RichContent></div>
     </div>
   );
 }
@@ -531,6 +549,11 @@ export function App(): ReactNode {
     setMessageActionError(undefined);
   }
 
+  function handleHtmlAction(text: string): void {
+    setInput((current) => current.trim() ? `${current.trim()}\n${text}` : text);
+    setMessageActionError(undefined);
+  }
+
   async function regenerateMessage(message: ChatMessage): Promise<void> {
     if (snapshot.busy) return;
     const index = snapshot.messages.findIndex((item) => item.id === message.id);
@@ -656,7 +679,7 @@ export function App(): ReactNode {
                 <div className="empty-workspace"><div className="empty-icon"><FolderOpen size={27} /></div><h1>打开一个项目</h1><button className="primary-button" type="button" onClick={() => void openWorkspace()}><FolderOpen size={16} />选择文件夹</button></div>
               ) : snapshot.messages.length === 0 ? (
                 <div className="empty-conversation"><div className="empty-icon"><CodeXml size={27} /></div><h1>今天想开发什么？</h1></div>
-              ) : groupAssistantMessages(snapshot.messages).map((message) => <MessageView key={message.id} message={message} executions={snapshot.executions} onOpenArtifact={setArtifact} onCopy={(item) => void copyMessage(item)} onEdit={editMessage} onRegenerate={(item) => void regenerateMessage(item)} showThinking={settings.appearance.showThinking} busy={snapshot.busy} />)}
+              ) : groupAssistantMessages(snapshot.messages).map((message) => <MessageView key={message.id} message={message} executions={snapshot.executions} onOpenArtifact={setArtifact} onHtmlAction={handleHtmlAction} onCopy={(item) => void copyMessage(item)} onEdit={editMessage} onRegenerate={(item) => void regenerateMessage(item)} showThinking={settings.appearance.showThinking} busy={snapshot.busy} />)}
             </div>
             <div className="composer-tools"><label title="模型快捷切换"><Bot size={14} /><select value={selectedModel} disabled={snapshot.busy} onChange={(event) => void selectModel(event.target.value)}><option value="">选择模型</option>{Array.from(new Set(availableModels.map((model) => model.provider))).map((providerId) => <optgroup key={providerId} label={providers.find((provider) => provider.id === providerId)?.name ?? providerId}>{availableModels.filter((model) => model.provider === providerId).map((model) => <option key={`${model.provider}/${model.id}`} value={`${model.provider}/${model.id}`}>{model.name}</option>)}</optgroup>)}</select></label><label title="思考级别"><span>思考</span><select value={snapshot.thinkingLevel} disabled={snapshot.busy} onChange={(event) => void window.piDesktop.send({ type: "thinking.select", level: event.target.value as ThinkingLevel })}>{thinkingLevels.map((level) => <option key={level} value={level}>{thinkingLevelLabels[level]}</option>)}</select></label></div>
             <form className="composer" onSubmit={submit} onDragOver={(event) => event.preventDefault()} onDrop={handleDrop}>
