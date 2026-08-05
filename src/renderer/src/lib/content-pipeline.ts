@@ -18,6 +18,10 @@ function isFullHtmlDocument(text: string): boolean {
   return /^<!doctype\s/i.test(text) || /^<html\b/i.test(text) || /^<body\b/i.test(text);
 }
 
+function createHtmlArtifact(content: string, title = "HTML 预览"): Omit<Artifact, "id"> {
+  return withDynamicArtifactFlag({ title, language: "html", content });
+}
+
 function looksLikeShellTranscript(text: string): boolean {
   const raw = text.trim();
   if (!raw) return false;
@@ -176,10 +180,7 @@ function parseTextPart(text: string, options: RichContentParseOptions = {}): Ric
     if (options.isStreaming) {
       return [{ type: "markdown", content: `\`\`\`html\n${trimmed}\n\`\`\`` }];
     }
-    return [{
-      type: "artifact",
-      artifact: withDynamicArtifactFlag({ title: "HTML 预览", language: "html", content: trimmed })
-    }];
+    return [{ type: "artifact", artifact: createHtmlArtifact(trimmed) }];
   }
 
   // Shell transcripts and unified diffs are common assistant/tool output. Keep
@@ -193,6 +194,8 @@ function parseTextPart(text: string, options: RichContentParseOptions = {}): Ric
   }
 
   if (htmlBlockPattern.test(trimmed)) {
+    const artifact = createHtmlArtifact(trimmed);
+    if (artifact.dynamic) return [{ type: "artifact", artifact }];
     return [{ type: "html", content: trimmed, source: "fragment" }];
   }
 
@@ -200,9 +203,12 @@ function parseTextPart(text: string, options: RichContentParseOptions = {}): Ric
   if (embeddedHtml && embeddedHtml.index !== undefined) {
     const before = normalized.slice(0, embeddedHtml.index);
     const after = normalized.slice(embeddedHtml.index).trim();
+    const artifact = createHtmlArtifact(after);
     return [
       ...(before.trim() ? [{ type: "markdown", content: before } satisfies RichContentSegment] : []),
-      { type: "html", content: after, source: "fragment" }
+      artifact.dynamic
+        ? { type: "artifact", artifact }
+        : { type: "html", content: after, source: "fragment" }
     ];
   }
 
@@ -216,9 +222,12 @@ function parseAssistantHtmlPart(content: string, options: RichContentParseOption
     if (options.isStreaming) {
       return [{ type: "markdown", content: `\`\`\`html\n${normalized}\n\`\`\`` }];
     }
-    return [{ type: "artifact", artifact: withDynamicArtifactFlag({ title: "HTML 预览", language: "html", content: normalized }) }];
+    return [{ type: "artifact", artifact: createHtmlArtifact(normalized) }];
   }
-  return [{ type: "html", content: normalized, source: "assistant-html" }];
+  const artifact = createHtmlArtifact(normalized);
+  return artifact.dynamic
+    ? [{ type: "artifact", artifact }]
+    : [{ type: "html", content: normalized, source: "assistant-html" }];
 }
 
 function splitAssistantHtml(text: string, options: RichContentParseOptions): RichContentSegment[] {

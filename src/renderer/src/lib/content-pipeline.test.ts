@@ -32,6 +32,24 @@ describe("rich content pipeline", () => {
     ]);
   });
 
+  it("moves dynamic assistant_html into a sandbox artifact", () => {
+    const segments = parseRichContent("<assistant_html><div><canvas id=\"stage\"></canvas><script>requestAnimationFrame(() => {});</script></div></assistant_html>");
+    expect(segments).toEqual([{
+      type: "artifact",
+      artifact: {
+        title: "HTML 预览",
+        language: "html",
+        content: "<div><canvas id=\"stage\"></canvas><script>requestAnimationFrame(() => {});</script></div>",
+        dynamic: true
+      }
+    }]);
+  });
+
+  it("moves dynamic raw HTML fragments out of the renderer HTML path", () => {
+    const segments = parseRichContent("<div><canvas></canvas><script>setInterval(() => {}, 1000);</script></div>");
+    expect(segments).toMatchObject([{ type: "artifact", artifact: { language: "html", dynamic: true } }]);
+  });
+
   it("folds a short trailing epilogue into the completed HTML bubble", () => {
     const segments = parseRichContent("<assistant_html><div>卡片</div></assistant_html>\n\n希望对你有帮助。\n如有问题欢迎继续提问。");
     expect(segments).toEqual([{
