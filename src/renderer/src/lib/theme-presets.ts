@@ -10,6 +10,25 @@ export interface ThemePresetDefinition {
 
 type ThemeVars = Record<string, string>;
 
+const chatAnytimeVariableAliases: readonly [RegExp, string][] = [
+  [/--bg-primary(?![-\w])/gu, "--surface"],
+  [/--bg-secondary(?![-\w])/gu, "--surface-muted"],
+  [/--bg-tertiary(?![-\w])/gu, "--surface-raised"],
+  [/--bg-card(?![-\w])/gu, "--surface-raised"],
+  [/--bg-hover(?![-\w])/gu, "--surface-button-hover"],
+  [/--text-primary(?![-\w])/gu, "--text"],
+  [/--text-secondary(?![-\w])/gu, "--text-muted"],
+  [/--border-color(?![-\w])/gu, "--border"],
+  [/--border-light(?![-\w])/gu, "--border-strong"],
+  [/--accent-primary(?![-\w])/gu, "--accent"],
+  [/--accent-secondary(?![-\w])/gu, "--accent-hover"],
+  [/--accent-danger(?![-\w])/gu, "--danger"],
+  [/--user-bubble(?![-\w])/gu, "--avatar-user"],
+  [/--ai-bubble(?![-\w])/gu, "--surface"],
+  [/--tool-bubble-bg(?![-\w])/gu, "--accent-soft"],
+  [/--tool-bubble-border(?![-\w])/gu, "--border"]
+];
+
 const lightBase: ThemeVars = {
   "--surface": "#ffffff",
   "--surface-muted": "#f8fafc",
@@ -161,11 +180,57 @@ export function themePresetCss(id: ThemePresetId): string {
   return THEME_PRESETS.find((preset) => preset.id === id)?.css ?? "";
 }
 
+function baseThemeCssForScope(scopeSelector: string): string {
+  return `
+${scopeSelector}[data-theme-effective="light"] {
+${declarations(lightBase)}
+}
+
+${scopeSelector}[data-theme-effective="dark"] {
+${declarations(darkBase)}
+}
+`;
+}
+
+/**
+ * Build the same light/dark preset variables for a nested preview scope. The
+ * main window uses :root selectors, while a preview must not mutate them.
+ */
+export function themePreviewCss(id: ThemePresetId, scopeSelector = ".theme-preview-scope"): string {
+  return `${baseThemeCssForScope(scopeSelector)}\n${themePresetCss(id).replaceAll(":root", scopeSelector)}`;
+}
+
+function normalizeChatAnyTimeVariables(css: string): string {
+  return chatAnytimeVariableAliases.reduce((result, [pattern, replacement]) => result.replace(pattern, replacement), css);
+}
+
+function scopeModeSelectors(css: string, rootSelector: string): string {
+  const hasChatAnytimeLightMode = /html\.theme-light/iu.test(css);
+  const modeAwareRootSelector = hasChatAnytimeLightMode
+    ? `${rootSelector}[data-theme-effective="dark"]`
+    : rootSelector;
+  return css
+    .replace(/html\.theme-light/gu, `${rootSelector}[data-theme-effective="light"]`)
+    .replace(/html\.theme-dark/gu, `${rootSelector}[data-theme-effective="dark"]`)
+    .replace(/html:not\(\.theme-light\)/gu, `${rootSelector}[data-theme-effective="dark"]`)
+    .replace(/:root(?=\[(?!data-theme-custom\b))/gu, rootSelector)
+    .replace(/:root(?!\[data-theme-custom\])/gu, modeAwareRootSelector);
+}
+
 /**
  * Give user-authored root rules one extra attribute of specificity so they can
  * override preset variables while keeping ordinary component selectors in the
  * same cascade as the app stylesheet.
  */
-export function scopeCustomThemeCss(css: string): string {
-  return String(css || "").replace(/:root(?!\[data-theme-custom\])/gu, ":root[data-theme-custom]");
+export function scopeCustomThemeCss(css: string, rootSelector = ":root[data-theme-custom]"): string {
+  return scopeModeSelectors(normalizeChatAnyTimeVariables(String(css || "")), rootSelector);
+}
+
+/**
+ * Adapt the selector names used by ChatAnyTime theme templates to a nested
+ * preview pane. Variable declarations remain user-authored CSS; only the
+ * document-level mode selectors need to be redirected.
+ */
+export function scopeCustomThemeCssForPreview(css: string, scopeSelector = ".theme-preview-scope"): string {
+  return scopeModeSelectors(normalizeChatAnyTimeVariables(String(css || "")), scopeSelector);
 }

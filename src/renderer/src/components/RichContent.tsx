@@ -33,12 +33,19 @@ interface ThemeTokens {
   border: string;
 }
 
-function readThemeTokens(): ThemeTokens {
-  const root = document.documentElement;
-  const computed = getComputedStyle(root);
+type ThemeAnchorRef = { current: HTMLElement | null };
+
+function resolveThemeSource(anchor: HTMLElement | null): HTMLElement {
+  return anchor?.closest<HTMLElement>("[data-theme-effective]") ?? document.documentElement;
+}
+
+function readThemeTokens(anchor?: HTMLElement | null): ThemeTokens {
+  const source = resolveThemeSource(anchor ?? null);
+  const computed = getComputedStyle(source);
   const value = (name: string, fallback: string): string => computed.getPropertyValue(name).trim() || fallback;
-  const selected = root.dataset.theme;
-  const dark = selected === "dark" || (selected !== "light" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+  const selected = source.dataset.theme;
+  const effective = source.dataset.themeEffective;
+  const dark = effective ? effective === "dark" : selected === "dark" || (selected !== "light" && window.matchMedia("(prefers-color-scheme: dark)").matches);
   const tokens = {
     dark,
     surface: value("--surface", dark ? "#172033" : "#ffffff"),
@@ -52,24 +59,30 @@ function readThemeTokens(): ThemeTokens {
   return { ...tokens, key: JSON.stringify(tokens) };
 }
 
-function useThemeTokens(): ThemeTokens {
-  const [tokens, setTokens] = useState<ThemeTokens>(() => readThemeTokens());
+function useThemeTokens(anchorRef?: ThemeAnchorRef): ThemeTokens {
+  const [tokens, setTokens] = useState<ThemeTokens>(() => readThemeTokens(anchorRef?.current));
   useEffect(() => {
     const media = window.matchMedia("(prefers-color-scheme: dark)");
     const update = (): void => {
-      const next = readThemeTokens();
+      const next = readThemeTokens(anchorRef?.current);
       setTokens((current) => current.key === next.key ? current : next);
     };
     update();
     const observer = new MutationObserver(update);
-    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
-    observer.observe(document.head, { childList: true, characterData: true, subtree: true });
+    const source = resolveThemeSource(anchorRef?.current ?? null);
+    const previewRoot = source.closest<HTMLElement>(".theme-preview");
+    if (source === document.documentElement) {
+      observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme", "data-theme-effective", "data-theme-preset", "data-theme-custom"] });
+      observer.observe(document.head, { childList: true, characterData: true, subtree: true });
+    } else {
+      observer.observe(previewRoot ?? source, { attributes: true, childList: true, characterData: true, subtree: true });
+    }
     media.addEventListener("change", update);
     return () => {
       observer.disconnect();
       media.removeEventListener("change", update);
     };
-  }, []);
+  }, [anchorRef]);
   return tokens;
 }
 
@@ -143,7 +156,8 @@ function RichAudio({ src, title, children }: { src?: string; title?: string; chi
 
 function MermaidBlock({ code, language }: { code: string; language: string }): ReactNode {
   const id = useId().replaceAll(":", "");
-  const tokens = useThemeTokens();
+  const blockRef = useRef<HTMLDivElement>(null);
+  const tokens = useThemeTokens(blockRef);
   const source = normalizeMermaidSource(code, language);
   const [svg, setSvg] = useState("");
   const [error, setError] = useState("");
@@ -204,7 +218,7 @@ function MermaidBlock({ code, language }: { code: string; language: string }): R
   }
   return (
     <>
-      <div className="mermaid-block" data-mermaid-language={language}>
+      <div className="mermaid-block" data-mermaid-language={language} ref={blockRef}>
          <div className="mermaid-toolbar"><span>{language === "mermaid" ? "Mermaid" : language}</span><div className="mermaid-actions"><CopyButton text={source} /><button className="icon-button" type="button" title="放大图表" aria-label="放大图表" onClick={() => setExpanded(true)}><Expand size={15} /></button></div></div>
          <button type="button" className="mermaid-canvas" aria-label="放大 Mermaid 图表" aria-busy={!svg} onClick={() => setExpanded(true)} dangerouslySetInnerHTML={{ __html: svg }} />
          <details className="mermaid-source"><summary>查看源码</summary><pre><code>{source}</code></pre></details>

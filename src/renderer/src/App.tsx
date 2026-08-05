@@ -51,7 +51,7 @@ import { DiffView } from "./components/DiffView";
 import { RichContent } from "./components/RichContent";
 import { compactPath, formatDuration, type Artifact } from "./lib/content";
 import { groupAssistantMessages, splitAssistantToolLayout } from "./lib/chat-layout";
-import { THEME_PRESETS, scopeCustomThemeCss, themePresetCss } from "./lib/theme-presets";
+import { THEME_PRESETS, scopeCustomThemeCss, scopeCustomThemeCssForPreview, themePresetCss, themePreviewCss } from "./lib/theme-presets";
 import { useDesktopStore } from "./store";
 
 const thinkingLevels: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
@@ -234,7 +234,7 @@ function ChangesPanel({ executions }: { executions: ToolExecution[] }): ReactNod
   );
 }
 
-function ThemePreview(): ReactNode {
+function ThemePreview({ appearance }: { appearance: AppearanceSettings }): ReactNode {
   const previewContent = `**实时主题预览**
 
 Markdown、表格、代码、公式和图表会共用当前主题变量。
@@ -257,10 +257,23 @@ flowchart LR
 \`\`\`
 
 <assistant_html><div><strong>HTML 片段</strong><p>安全清洗后仍保留布局和交互样式。</p></div></assistant_html>`;
+  const previewCss = `${themePreviewCss(appearance.themePreset)}\n${scopeCustomThemeCssForPreview(appearance.customCss)}`;
+  const panes = [
+    { id: "dark", label: "深色", effective: "dark" },
+    { id: "light", label: "浅色", effective: "light" }
+  ] as const;
   return (
     <div className="theme-preview" aria-label="主题预览">
-      <div className="theme-preview-header"><span className="theme-preview-dot" /><strong>Pi Desktop</strong><small>主题预览</small></div>
-      <div className="theme-preview-body"><RichContent streaming={false} artifactPrefix="theme-preview" onOpenArtifact={() => undefined}>{previewContent}</RichContent></div>
+      <style>{previewCss}</style>
+      <div className="theme-preview-header"><span className="theme-preview-dot" /><strong>Pi Desktop</strong><small>深浅模式实时预览</small></div>
+      <div className="theme-preview-modes">
+        {panes.map((pane) => (
+          <section className="theme-preview-pane theme-preview-scope" data-theme={pane.effective} data-theme-effective={pane.effective} data-theme-preset={appearance.themePreset} data-theme-custom="true" key={pane.id}>
+            <header className="theme-preview-pane-header"><strong>{pane.label}模式</strong><small>富内容输出</small></header>
+            <div className="theme-preview-body"><RichContent streaming={false} artifactPrefix={`theme-preview-${pane.id}`} onOpenArtifact={() => undefined}>{previewContent}</RichContent></div>
+          </section>
+        ))}
+      </div>
     </div>
   );
 }
@@ -512,7 +525,7 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
               <label className="checkbox-setting"><input type="checkbox" checked={settings.appearance.showThinking} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, showThinking: event.target.checked } } })} />展示思考过程</label>
               <div className="theme-preset-field"><span className="settings-field-label">主题预设</span><div className="theme-preset-grid">{THEME_PRESETS.map((preset) => <button type="button" key={preset.id} className={`theme-preset-card${settings.appearance.themePreset === preset.id ? " active" : ""}`} onClick={() => useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, themePreset: preset.id as ThemePresetId } } })}><span className="theme-swatches">{preset.swatches.map((color) => <i key={color} style={{ backgroundColor: color }} />)}</span><strong>{preset.name}</strong><small>{preset.description}</small></button>)}</div></div>
             </div>
-            <ThemePreview />
+            <ThemePreview appearance={settings.appearance} />
           </div>
               <div className="custom-css-heading"><span>自定义 CSS</span><div><input ref={cssFileInputRef} hidden type="file" accept=".css,text/css" onChange={(event) => void importCustomCss(event)} /><button className="secondary-button" type="button" onClick={() => cssFileInputRef.current?.click()}>导入 CSS</button><button className="secondary-button" type="button" onClick={() => { setEditingCustomThemeId(undefined); setCustomThemeName(""); updateAppearance({ customCss: "" }); }}>清空</button></div></div>
               <label className="custom-css-field"><textarea value={settings.appearance.customCss} spellCheck={false} rows={11} placeholder={":root[data-theme-effective=\"dark\"] {\n  --accent: #8b5cf6;\n}"} aria-label="自定义 CSS" onChange={(event) => useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, customCss: event.target.value } } })} /></label>
