@@ -19,6 +19,29 @@ describe("rich content pipeline", () => {
     ]);
   });
 
+  it("folds a short trailing epilogue into the completed HTML bubble", () => {
+    const segments = parseRichContent("<assistant_html><div>卡片</div></assistant_html>\n\n希望对你有帮助。\n如有问题欢迎继续提问。");
+    expect(segments).toEqual([{
+      type: "html",
+      content: '<div>卡片</div>\n<div class="ai-epilogue">希望对你有帮助。<br />如有问题欢迎继续提问。</div>',
+      source: "assistant-html"
+    }]);
+  });
+
+  it("keeps substantive Markdown after an HTML bubble separate", () => {
+    const segments = parseRichContent("<assistant_html><div>卡片</div></assistant_html>\n\n## 后续说明");
+    expect(segments.map((segment) => segment.type)).toEqual(["html", "markdown"]);
+  });
+
+  it("preserves a CSS-led HTML fragment as a styled HTML segment", () => {
+    const segments = parseRichContent("<style>.card { color: red; }</style>\n<div class=\"card\">内容</div>");
+    expect(segments).toEqual([{
+      type: "html",
+      content: '<style>.card { color: red; }</style>\n<div class="card">内容</div>',
+      source: "fragment"
+    }]);
+  });
+
   it("keeps assistant HTML inert until streaming has finished", () => {
     const segments = parseRichContent("<assistant_html><div>正在生成</div></assistant_html>", { isStreaming: true });
     expect(segments).toEqual([{ type: "markdown", content: "```html\n<div>正在生成</div>\n```" }]);
@@ -60,6 +83,46 @@ describe("rich content pipeline", () => {
 
   it("normalizes bare tildes outside fenced code", () => {
     expect(normalizeRichContent("~draft\n~~strike~~\n~~~text\n~code\n~~~")).toBe("~ draft\n~~strike~~\n~~~text\n~code\n~~~");
+  });
+
+  it("keeps cross-type fence-looking lines inside code fences", () => {
+    const content = [
+      "  ```text",
+      "  ~~~",
+      "~draft",
+      "~~~",
+      "~outside-code",
+      "  ```",
+      "~after"
+    ].join("\n");
+
+    expect(normalizeRichContent(content)).toBe([
+      "```text",
+      "  ~~~",
+      "~draft",
+      "~~~",
+      "~outside-code",
+      "```",
+      "~ after"
+    ].join("\n"));
+  });
+
+  it("does not close a longer fence with a shorter marker", () => {
+    const content = [
+      "````text",
+      "```",
+      "~draft",
+      "````",
+      "~after"
+    ].join("\n");
+
+    expect(normalizeRichContent(content)).toBe([
+      "````text",
+      "```",
+      "~draft",
+      "````",
+      "~ after"
+    ].join("\n"));
   });
 
   it("keeps shell transcripts in a stable text code block", () => {

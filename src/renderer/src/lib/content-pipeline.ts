@@ -10,8 +10,9 @@ export interface RichContentParseOptions {
   isStreaming?: boolean;
 }
 
-const htmlBlockPattern = /^\s*<(?:div|section|article|aside|header|footer|nav|main|table|thead|tbody|tfoot|tr|td|th|ul|ol|li|dl|blockquote|figure|figcaption|details|summary|form|fieldset|label|button|img|video|audio|canvas|svg|p)\b/i;
+const htmlBlockPattern = /^\s*<(?:style|div|section|article|aside|header|footer|nav|main|table|thead|tbody|tfoot|tr|td|th|ul|ol|li|dl|blockquote|figure|figcaption|details|summary|form|fieldset|label|button|img|video|audio|canvas|svg|p)\b/i;
 const mermaidLanguages = new Set(["mermaid", "flowchart", "graph"]);
+const epiloguePattern = /(总结|综上|以上就是|希望|祝你|如有|欢迎|随时|供你参考|希望对你|希望能|如果有|需要的话|如果还|麻烦|谢谢|感谢|辛苦|愉快|顺利|提问|哈|哦|呢|吧|哟)\s*[!?。！？~…]?\s*$/u;
 
 function isFullHtmlDocument(text: string): boolean {
   return /^<!doctype\s/i.test(text) || /^<html\b/i.test(text) || /^<body\b/i.test(text);
@@ -63,6 +64,26 @@ function normalizeTildeSpacing(line: string): string {
   return line.replace(/(^|[^\w/\\=~])~(?![\s~])/gu, "$1~ ");
 }
 
+function escapeHtmlText(text: string): string {
+  return text.replace(/[&<>"']/gu, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character] ?? character);
+}
+
+function mergeTrailingEpilogue(segments: RichContentSegment[]): RichContentSegment[] {
+  if (segments.length < 2) return segments;
+  const lastIndex = segments.length - 1;
+  const previous = segments[lastIndex - 1];
+  const last = segments[lastIndex];
+  if (previous?.type !== "html" || previous.source !== "assistant-html" || last?.type !== "markdown") return segments;
+
+  const trimmed = last.content.trim();
+  if (!trimmed || last.content.length > 160 || /^#{1,6}\s|^\|.*\||^>\s|^```|^<|^\*{1,2}\[|^-\s|^\d+\.\s/mu.test(trimmed) || !epiloguePattern.test(trimmed)) return segments;
+  const epilogue = `<div class="ai-epilogue">${escapeHtmlText(trimmed).replace(/\n/gu, "<br />")}</div>`;
+  return [
+    ...segments.slice(0, lastIndex - 1),
+    { ...previous, content: `${previous.content.trimEnd()}\n${epilogue}` }
+  ];
+}
+
 function mergeMarkdownSegments(segments: RichContentSegment[]): RichContentSegment[] {
   const merged: RichContentSegment[] = [];
   for (const segment of segments) {
@@ -108,7 +129,7 @@ function parseTextPart(text: string, options: RichContentParseOptions = {}): Ric
     return [{ type: "html", content: trimmed, source: "fragment" }];
   }
 
-  const embeddedHtml = /\n\s*<(?:div|section|article|table|thead|tbody|tr|td|ul|ol|blockquote|details|img|svg)\b/i.exec(normalized);
+  const embeddedHtml = /\n\s*<(?:style|div|section|article|table|thead|tbody|tr|td|ul|ol|blockquote|details|img|svg)\b/i.exec(normalized);
   if (embeddedHtml && embeddedHtml.index !== undefined) {
     const before = normalized.slice(0, embeddedHtml.index);
     const after = normalized.slice(embeddedHtml.index).trim();
@@ -154,7 +175,7 @@ function splitAssistantHtml(text: string, options: RichContentParseOptions): Ric
     cursor = start + match[0].length;
   }
   if (cursor < text.length) segments.push(...parseTextPart(text.slice(cursor), options));
-  return segments.length ? segments : parseTextPart(text, options);
+  return segments.length ? mergeTrailingEpilogue(segments) : parseTextPart(text, options);
 }
 
 function splitFencedContent(text: string, options: RichContentParseOptions = {}): RichContentSegment[] {
@@ -220,16 +241,24 @@ function splitFencedContent(text: string, options: RichContentParseOptions = {})
 export function normalizeRichContent(text: string): string {
   const normalized = text.replace(/\r\n?/gu, "\n");
   const lines = normalized.split("\n");
-  let inFence = false;
+  let activeFence: { marker: string } | undefined;
   return lines.map((line) => {
     const fence = isFenceLine(line);
-    if (fence) {
-      inFence = !inFence;
+    if (!activeFence) {
+      if (!fence) {
+        const normalizedLine = line.replace(/^(\s*)(<\/?(?:div|section|article|table|ul|ol|blockquote|details|img)\b)/iu, "$2");
+        return normalizeTildeSpacing(normalizedLine);
+      }
+      activeFence = { marker: fence.marker };
       return line.trimStart();
     }
-    if (inFence) return line;
-    const normalizedLine = line.replace(/^(\s*)(<\/?(?:div|section|article|table|ul|ol|blockquote|details|img)\b)/iu, "$2");
-    return normalizeTildeSpacing(normalizedLine);
+
+    if (isClosingFence(line, activeFence.marker)) {
+      activeFence = undefined;
+      return line.trimStart();
+    }
+
+    return line;
   }).join("\n");
 }
 

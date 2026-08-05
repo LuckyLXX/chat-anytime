@@ -34,7 +34,7 @@ describe("theme presets", () => {
 
   it("redirects ChatAnyTime mode selectors into a preview scope", () => {
     expect(scopeCustomThemeCssForPreview("html.theme-light { --accent: red; } :root { --surface: blue; }"))
-      .toBe('.theme-preview-scope[data-theme-effective="light"] { --accent: red; } .theme-preview-scope[data-theme-effective="dark"] { --surface: blue; }');
+      .toBe('.theme-preview-scope[data-theme-custom][data-theme-effective="light"] { --accent: red; } .theme-preview-scope[data-theme-custom][data-theme-effective="dark"] { --surface: blue; }');
   });
 
   it("maps common ChatAnyTime variables into the desktop token names", () => {

@@ -231,6 +231,6 @@ export function scopeCustomThemeCss(css: string, rootSelector = ":root[data-them
  * preview pane. Variable declarations remain user-authored CSS; only the
  * document-level mode selectors need to be redirected.
  */
-export function scopeCustomThemeCssForPreview(css: string, scopeSelector = ".theme-preview-scope"): string {
+export function scopeCustomThemeCssForPreview(css: string, scopeSelector = ".theme-preview-scope[data-theme-custom]"): string {
   return scopeModeSelectors(normalizeChatAnyTimeVariables(String(css || "")), scopeSelector);
 }

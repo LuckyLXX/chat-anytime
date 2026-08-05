@@ -313,6 +313,7 @@ function ArtifactCard({ artifact, onOpenArtifact }: { artifact: Artifact; onOpen
 
 const richSanitizeSchema: Schema = {
   ...defaultSchema,
+  tagNames: [...(defaultSchema.tagNames ?? []), "style"],
   attributes: {
     ...defaultSchema.attributes,
     "*": [
@@ -372,13 +373,24 @@ function markdownComponents(artifactIndex: { current: number }, artifactPrefix: 
   };
 }
 
+function htmlBubbleScopeClass(prefix: string): string {
+  let hash = 2166136261;
+  for (const character of prefix) {
+    hash ^= character.codePointAt(0) ?? 0;
+    hash = Math.imul(hash, 16777619);
+  }
+  return `html-bubble-scope-${(hash >>> 0).toString(36)}`;
+}
+
 function MarkdownSurface({ content, htmlBubble, artifactPrefix, onOpenArtifact, onHtmlAction }: { content: string; htmlBubble?: boolean; artifactPrefix: string; onOpenArtifact(artifact: Artifact): void; onHtmlAction?: (text: string) => void }): ReactNode {
   const dark = useThemeTokens().dark;
   const artifactIndex = useRef(0);
   const components = markdownComponents(artifactIndex, artifactPrefix, onOpenArtifact, dark, onHtmlAction);
+  const scopeClass = htmlBubble ? htmlBubbleScopeClass(artifactPrefix) : "";
+  const scopeSelector = scopeClass ? `.${scopeClass}` : "";
   return (
-    <div className={htmlBubble ? "html-bubble" : undefined}>
-      <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeRaw, sanitizeRichHtmlTree, [rehypeSanitize, richSanitizeSchema], rehypeKatex]} components={components}>
+    <div className={htmlBubble ? `html-bubble ${scopeClass}` : undefined}>
+      <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeRaw, [sanitizeRichHtmlTree, { allowStyleTags: Boolean(htmlBubble), scopeSelector }], [rehypeSanitize, richSanitizeSchema], rehypeKatex]} components={components}>
         {content}
       </ReactMarkdown>
     </div>

@@ -1,4 +1,4 @@
-const blockedTags = new Set(["base", "embed", "iframe", "link", "meta", "object", "script", "style"]);
+const blockedTags = new Set(["base", "embed", "iframe", "link", "meta", "object", "script"]);
 const urlProperties = new Set(["action", "formAction", "href", "poster", "src", "xLinkHref"]);
 
 export function sanitizeStyleDeclarations(styleText: string): string {
@@ -36,8 +36,14 @@ function sanitizeClassValue(value: unknown): string[] {
 interface HastNode {
   type?: string;
   tagName?: string;
+  value?: unknown;
   properties?: Record<string, unknown>;
-  children?: HastNode[];
+  children?: Array<HastNode | null | undefined>;
+}
+
+export interface RichHtmlSanitizeOptions {
+  allowStyleTags?: boolean;
+  scopeSelector?: string;
 }
 
 function sanitizeNode(node: HastNode): void {
@@ -68,18 +74,117 @@ function sanitizeNode(node: HastNode): void {
   node.properties = properties;
 }
 
+function textContent(nodes: Array<HastNode | null | undefined> | undefined): string {
+  return (nodes ?? []).map((node) => !node ? "" : node.type === "text" ? String(node.value ?? "") : textContent(node.children)).join("");
+}
+
+function splitCssSelectors(selectorText: string): string[] {
+  const selectors: string[] = [];
+  let current = "";
+  let bracketDepth = 0;
+  let parenthesisDepth = 0;
+
+  for (const character of selectorText) {
+    if (character === "[") bracketDepth += 1;
+    if (character === "]") bracketDepth = Math.max(0, bracketDepth - 1);
+    if (character === "(") parenthesisDepth += 1;
+    if (character === ")") parenthesisDepth = Math.max(0, parenthesisDepth - 1);
+    if (character === "," && bracketDepth === 0 && parenthesisDepth === 0) {
+      if (current.trim()) selectors.push(current.trim());
+      current = "";
+      continue;
+    }
+    current += character;
+  }
+
+  if (current.trim()) selectors.push(current.trim());
+  return selectors;
+}
+
+function scopeCssSelector(selector: string, scopeSelector: string): string {
+  const raw = selector.trim();
+  if (!raw || !scopeSelector) return "";
+  const replacedRoots = raw
+    .replace(/:root\b/giu, scopeSelector)
+    .replace(/(^|[\s>+~])(?:html|body)(?=[\s.#:[>+~]|$)/giu, `$1${scopeSelector}`);
+  return replacedRoots.includes(scopeSelector) ? replacedRoots : `${scopeSelector} ${replacedRoots}`;
+}
+
+function serializeScopedCssRule(rule: CSSRule, scopeSelector: string): string {
+  const styleRuleType = typeof CSSRule === "undefined" ? 1 : CSSRule.STYLE_RULE;
+  const mediaRuleType = typeof CSSRule === "undefined" ? 4 : CSSRule.MEDIA_RULE;
+  const supportsRuleType = typeof CSSRule === "undefined" ? 12 : CSSRule.SUPPORTS_RULE;
+  if (rule.type === styleRuleType) {
+    const styleRule = rule as CSSStyleRule;
+    const selector = splitCssSelectors(styleRule.selectorText)
+      .map((item) => scopeCssSelector(item, scopeSelector))
+      .filter(Boolean)
+      .join(", ");
+    const declarations = sanitizeStyleDeclarations(styleRule.style.cssText);
+    return selector && declarations ? `${selector} { ${declarations} }` : "";
+  }
+  if (rule.type === mediaRuleType || rule.type === supportsRuleType) {
+    const groupRule = rule as CSSGroupingRule;
+    const conditionText = (rule as CSSMediaRule | CSSSupportsRule).conditionText;
+    const nested = Array.from(groupRule.cssRules)
+      .map((child) => serializeScopedCssRule(child, scopeSelector))
+      .filter(Boolean)
+      .join("\n");
+    if (!nested) return "";
+    const name = rule.type === mediaRuleType ? "media" : "supports";
+    return `@${name} ${conditionText} {\n${nested}\n}`;
+  }
+  return "";
+}
+
+/** Sanitize and scope assistant-authored CSS without allowing it to reach the app shell. */
+export function sanitizeStyleTagCss(styleText: string, scopeSelector: string): string {
+  const raw = String(styleText || "").trim();
+  const scope = scopeSelector.trim();
+  if (!raw || !scope || typeof document === "undefined") return "";
+  const sourceWithoutImports = raw.replace(/@import\s+[^;{}]+;?/giu, "");
+  if (/expression\s*\(|javascript\s*:|behavior\s*:|-moz-binding|url\s*\(/iu.test(sourceWithoutImports)) return "";
+
+  const openCount = (sourceWithoutImports.match(/\{/gu) ?? []).length;
+  const closeCount = (sourceWithoutImports.match(/\}/gu) ?? []).length;
+  const source = openCount > closeCount ? `${sourceWithoutImports}${"\n}".repeat(openCount - closeCount)}` : sourceWithoutImports;
+  try {
+    const cssDocument = document.implementation.createHTMLDocument("");
+    const style = cssDocument.createElement("style");
+    style.textContent = source;
+    cssDocument.head.append(style);
+    return Array.from(style.sheet?.cssRules ?? [])
+      .map((rule) => serializeScopedCssRule(rule, scope))
+      .filter(Boolean)
+      .join("\n");
+  } catch {
+    return "";
+  }
+}
+
 /** Rehype plugin: sanitize raw assistant HTML before the schema sanitizer runs. */
-export function sanitizeRichHtmlTree(): (tree: unknown) => void {
+export function sanitizeRichHtmlTree(options: RichHtmlSanitizeOptions = {}): (tree: unknown) => void {
+  const allowStyleTags = options.allowStyleTags === true;
+  const scopeSelector = options.scopeSelector?.trim() ?? "";
   return (tree: unknown) => {
     const root = tree as HastNode;
-    const visit = (node: HastNode): void => {
-      sanitizeNode(node);
-      if (!node.children) return;
-      node.children = node.children.filter((child) => {
-        if (child.type === "element" && blockedTags.has(String(child.tagName || "").toLowerCase())) return false;
-        visit(child);
+    const visit = (node: HastNode | null | undefined): boolean => {
+      if (!node || typeof node !== "object") return false;
+      const tagName = String(node.tagName || "").toLowerCase();
+      if (node.type === "element" && tagName === "style") {
+        const safeCss = allowStyleTags ? sanitizeStyleTagCss(textContent(node.children), scopeSelector) : "";
+        if (!safeCss) return false;
+        node.children = [{ type: "text", value: safeCss }];
         return true;
+      }
+      sanitizeNode(node);
+      if (!node.children) return true;
+      node.children = node.children.filter((child) => {
+        if (!child) return false;
+        if (child.type === "element" && blockedTags.has(String(child.tagName || "").toLowerCase())) return false;
+        return visit(child);
       });
+      return true;
     };
     visit(root);
   };

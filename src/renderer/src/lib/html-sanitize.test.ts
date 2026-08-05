@@ -5,6 +5,7 @@ describe("assistant HTML sanitizer", () => {
   it("keeps layout styles but removes executable CSS values", () => {
     expect(sanitizeStyleDeclarations("color: red; padding: 8px; background: url(javascript:bad); onload: alert(1);"))
       .toBe("color: red; padding: 8px");
+    expect(sanitizeStyleDeclarations("color: red !important;")).toBe("color: red !important");
   });
 
   it("removes scripts, event handlers, unsafe URLs, and unsafe classes", () => {
@@ -24,5 +25,20 @@ describe("assistant HTML sanitizer", () => {
     expect(tree.children[0]?.properties).toEqual({ className: ["ai-card", "bad", "class"], style: "color: red" });
     expect(tree.children[0]?.children).toHaveLength(1);
     expect(tree.children[0]?.children?.[0]).toMatchObject({ tagName: "span" });
+  });
+
+  it("removes style tags unless the caller explicitly enables scoped styles", () => {
+    const tree = {
+      type: "root",
+      children: [{
+        type: "element",
+        tagName: "style",
+        properties: {},
+        children: [{ type: "text", value: ".card { color: red; }" }]
+      }]
+    };
+
+    sanitizeRichHtmlTree()(tree);
+    expect(tree.children).toEqual([]);
   });
 });
