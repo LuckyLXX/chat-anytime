@@ -28,7 +28,7 @@ const demoSettings: DesktopSettings = {
   providers: [],
   agents: [demoDefaultAgent],
   currentAgentId: "default",
-  appearance: { theme: "system", themePreset: "default", customCss: "", showThinking: true }
+  appearance: { theme: "system", themePreset: "default", customCss: "", customThemes: [], showThinking: true }
 };
 
 const demoSnapshot: RuntimeSnapshot = {

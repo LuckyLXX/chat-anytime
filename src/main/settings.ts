@@ -3,6 +3,7 @@ import type {
   AgentProfile,
   AppearanceSettings,
   BuiltinToolName,
+  CustomThemeDefinition,
   DesktopSettings,
   ProviderModelSettings,
   ProviderSettings,
@@ -30,7 +31,25 @@ export function createDefaultAgent(): AgentProfile {
 }
 
 export function defaultAppearance(): AppearanceSettings {
-  return { theme: "system", themePreset: "default", customCss: "", showThinking: true };
+  return { theme: "system", themePreset: "default", customCss: "", customThemes: [], showThinking: true };
+}
+
+export function normalizeCustomThemes(value: unknown): CustomThemeDefinition[] {
+  if (!Array.isArray(value)) return [];
+  const usedIds = new Set<string>();
+  return value.flatMap((item, index) => {
+    if (!item || typeof item !== "object") return [];
+    const source = item as Record<string, unknown>;
+    const css = typeof source.css === "string" ? source.css : "";
+    if (!css.trim()) return [];
+    const name = typeof source.name === "string" && source.name.trim() ? source.name.trim() : `自定义主题 ${index + 1}`;
+    const baseId = typeof source.id === "string" && source.id.trim() ? source.id.trim() : `custom-${index + 1}`;
+    let id = baseId;
+    let suffix = 2;
+    while (usedIds.has(id)) id = `${baseId}-${suffix++}`;
+    usedIds.add(id);
+    return [{ id, name, css }];
+  });
 }
 
 export function normalizeAgent(agent: Partial<AgentProfile> | undefined): AgentProfile {
@@ -129,6 +148,7 @@ export function migrateSettings(raw: unknown): { settings: DesktopSettings; lega
     ? appearanceSource.themePreset as ThemePresetId
     : defaults.appearance.themePreset;
   const customCss = typeof appearanceSource.customCss === "string" ? appearanceSource.customCss : defaults.appearance.customCss;
+  const customThemes = normalizeCustomThemes(appearanceSource.customThemes);
   const thinkingLevel = ["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(String(source.thinkingLevel))
     ? source.thinkingLevel as ThinkingLevel
     : "medium";
@@ -140,7 +160,7 @@ export function migrateSettings(raw: unknown): { settings: DesktopSettings; lega
     providers,
     agents: normalizedAgents,
     currentAgentId,
-    appearance: { theme, themePreset, customCss, showThinking: appearanceSource.showThinking !== false }
+    appearance: { theme, themePreset, customCss, customThemes, showThinking: appearanceSource.showThinking !== false }
   };
   const legacyApiKey = typeof source.customProviderApiKey === "string" ? source.customProviderApiKey : undefined;
   return { settings, legacyApiKey };

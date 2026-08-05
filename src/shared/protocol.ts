@@ -60,10 +60,17 @@ export interface AgentProfile {
 export const THEME_PRESET_IDS = ["default", "ocean", "emerald", "indigo", "forest", "rose", "amber", "violet", "carbon"] as const;
 export type ThemePresetId = typeof THEME_PRESET_IDS[number];
 
+export interface CustomThemeDefinition {
+  id: string;
+  name: string;
+  css: string;
+}
+
 export interface AppearanceSettings {
   theme: "system" | "light" | "dark";
   themePreset: ThemePresetId;
   customCss: string;
+  customThemes: CustomThemeDefinition[];
   showThinking: boolean;
 }
 

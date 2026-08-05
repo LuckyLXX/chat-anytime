@@ -21,13 +21,16 @@ import {
   RefreshCw,
   Paperclip,
   Pencil,
+  Save,
   Settings,
   TerminalSquare,
+  Trash2,
   Wrench,
   X
 } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import type {
+  AppearanceSettings,
   ChatMessage,
   AgentProfile,
   BuiltinToolName,
@@ -36,6 +39,7 @@ import type {
   ModelOption,
   PermissionDecision,
   ProviderOption,
+  CustomThemeDefinition,
   ThinkingLevel,
   ThemePresetId,
   ToolExecution,
@@ -52,6 +56,15 @@ import { useDesktopStore } from "./store";
 
 const thinkingLevels: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 const agentTools: BuiltinToolName[] = ["read", "bash", "edit", "write", "grep", "find", "ls"];
+
+function createCustomThemeId(): string {
+  if (typeof globalThis.crypto?.randomUUID === "function") return `custom-${globalThis.crypto.randomUUID()}`;
+  return `custom-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function cssThemeNameFromFile(fileName: string): string {
+  return fileName.replace(/\.[^./\\]+$/u, "").trim();
+}
 
 function messageText(message: ChatMessage): string {
   return message.blocks
@@ -252,6 +265,41 @@ flowchart LR
   );
 }
 
+interface CustomThemeLibraryProps {
+  customCss: string;
+  customThemes: CustomThemeDefinition[];
+  customThemeName: string;
+  editingCustomThemeId?: string;
+  onNameChange(name: string): void;
+  onSave(): void;
+  onApply(theme: CustomThemeDefinition): void;
+  onDelete(theme: CustomThemeDefinition): void;
+}
+
+function CustomThemeLibrary({ customCss, customThemes, customThemeName, editingCustomThemeId, onNameChange, onSave, onApply, onDelete }: CustomThemeLibraryProps): ReactNode {
+  return (
+    <div className="custom-theme-library">
+      <div className="custom-theme-library-heading">
+        <label className="custom-theme-name-field">当前 CSS 主题名称<input value={customThemeName} placeholder="例如：午夜玻璃" onChange={(event) => onNameChange(event.target.value)} /></label>
+        <button className="secondary-button" type="button" disabled={!customCss.trim()} onClick={onSave}><Save size={13} />保存当前主题</button>
+      </div>
+      {customThemes.length > 0 ? (
+        <div className="custom-theme-list">
+          {customThemes.map((theme) => (
+            <div className={`custom-theme-item${editingCustomThemeId === theme.id ? " active" : ""}`} key={theme.id}>
+              <button className="custom-theme-select" type="button" onClick={() => onApply(theme)}>
+                <span className="custom-theme-swatch" aria-hidden="true" />
+                <span><strong>{theme.name}</strong><small>{theme.css.trim().split("\n")[0]?.slice(0, 56) || "空 CSS"}</small></span>
+              </button>
+              <button className="icon-button custom-theme-delete" type="button" title={`删除主题 ${theme.name}`} aria-label={`删除主题 ${theme.name}`} onClick={() => onDelete(theme)}><Trash2 size={14} /></button>
+            </div>
+          ))}
+        </div>
+      ) : <p className="custom-theme-empty">保存后的 CSS 主题会出现在这里，可随时点击切换并实时预览。</p>}
+    </div>
+  );
+}
+
 function SettingsDialog({ settings, models, providers, customProvider, customProviderKeyConfigured, customModels, customModelFetchStatus, customModelFetchError, onClose }: { settings: import("../../shared/protocol").DesktopSettings; models: ModelOption[]; providers: ProviderOption[]; customProvider?: ProviderSettings; customProviderKeyConfigured: boolean; customModels: CustomProviderModel[]; customModelFetchStatus: "idle" | "loading" | "success" | "error"; customModelFetchError?: string; onClose(): void }): ReactNode {
   const customProviderId = "chatanytime-openai-compatible";
   const configuredProviders = settings.providers;
@@ -271,6 +319,9 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
   const [agentList, setAgentList] = useState<AgentProfile[]>(settings.agents);
   const [selectedAgentId, setSelectedAgentId] = useState(settings.currentAgentId);
   const cssFileInputRef = useRef<HTMLInputElement>(null);
+  const initialCustomTheme = settings.appearance.customThemes.find((theme) => theme.css === settings.appearance.customCss);
+  const [customThemeName, setCustomThemeName] = useState(initialCustomTheme?.name ?? "");
+  const [editingCustomThemeId, setEditingCustomThemeId] = useState<string | undefined>(initialCustomTheme?.id);
   const selectedAgent = agentList.find((agent) => agent.id === selectedAgentId) ?? agentList[0];
   const configuredModels = models.filter((model) => model.configured);
   const hasSavedCustomKey = Boolean(selectedProvider?.keyConfigured) || (provider === customProviderId && customProviderKeyConfigured);
@@ -284,12 +335,55 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
     useDesktopStore.setState({ settings: saved });
   }
 
+  function updateAppearance(patch: Partial<AppearanceSettings>): void {
+    useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, ...patch } } });
+  }
+
   async function importCustomCss(event: React.ChangeEvent<HTMLInputElement>): Promise<void> {
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file) return;
     const css = await file.text();
-    useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, customCss: css } } });
+    setCustomThemeName(cssThemeNameFromFile(file.name));
+    setEditingCustomThemeId(undefined);
+    updateAppearance({ customCss: css });
+  }
+
+  function saveCustomTheme(): void {
+    const css = settings.appearance.customCss;
+    if (!css.trim()) return;
+    const currentThemes = settings.appearance.customThemes;
+    const existingIndex = editingCustomThemeId ? currentThemes.findIndex((theme) => theme.id === editingCustomThemeId) : -1;
+    const existing = existingIndex >= 0 ? currentThemes[existingIndex] : undefined;
+    const nextTheme: CustomThemeDefinition = {
+      id: existing?.id ?? createCustomThemeId(),
+      name: customThemeName.trim() || existing?.name || `自定义主题 ${currentThemes.length + 1}`,
+      css
+    };
+    const nextThemes = existingIndex >= 0
+      ? currentThemes.map((theme, index) => index === existingIndex ? nextTheme : theme)
+      : [...currentThemes, nextTheme];
+    setEditingCustomThemeId(nextTheme.id);
+    setCustomThemeName(nextTheme.name);
+    updateAppearance({ customThemes: nextThemes });
+  }
+
+  function applyCustomTheme(theme: CustomThemeDefinition): void {
+    setEditingCustomThemeId(theme.id);
+    setCustomThemeName(theme.name);
+    updateAppearance({ customCss: theme.css });
+  }
+
+  function deleteCustomTheme(theme: CustomThemeDefinition): void {
+    const nextThemes = settings.appearance.customThemes.filter((item) => item.id !== theme.id);
+    const isActive = editingCustomThemeId === theme.id || (!editingCustomThemeId && settings.appearance.customCss === theme.css);
+    setEditingCustomThemeId(undefined);
+    if (isActive) {
+      setCustomThemeName("");
+      updateAppearance({ customCss: "", customThemes: nextThemes });
+      return;
+    }
+    updateAppearance({ customThemes: nextThemes });
   }
 
   useEffect(() => {
@@ -420,8 +514,9 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
             </div>
             <ThemePreview />
           </div>
-              <div className="custom-css-heading"><span>自定义 CSS</span><div><input ref={cssFileInputRef} hidden type="file" accept=".css,text/css" onChange={(event) => void importCustomCss(event)} /><button className="secondary-button" type="button" onClick={() => cssFileInputRef.current?.click()}>导入 CSS</button><button className="secondary-button" type="button" onClick={() => useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, customCss: "" } } })}>清空</button></div></div>
+              <div className="custom-css-heading"><span>自定义 CSS</span><div><input ref={cssFileInputRef} hidden type="file" accept=".css,text/css" onChange={(event) => void importCustomCss(event)} /><button className="secondary-button" type="button" onClick={() => cssFileInputRef.current?.click()}>导入 CSS</button><button className="secondary-button" type="button" onClick={() => { setEditingCustomThemeId(undefined); setCustomThemeName(""); updateAppearance({ customCss: "" }); }}>清空</button></div></div>
               <label className="custom-css-field"><textarea value={settings.appearance.customCss} spellCheck={false} rows={11} placeholder={":root[data-theme-effective=\"dark\"] {\n  --accent: #8b5cf6;\n}"} aria-label="自定义 CSS" onChange={(event) => useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, customCss: event.target.value } } })} /></label>
+              <CustomThemeLibrary customCss={settings.appearance.customCss} customThemes={settings.appearance.customThemes} customThemeName={customThemeName} editingCustomThemeId={editingCustomThemeId} onNameChange={setCustomThemeName} onSave={saveCustomTheme} onApply={applyCustomTheme} onDelete={deleteCustomTheme} />
           <footer><button type="button" className="secondary-button" onClick={closeSettings}>取消</button><button className="primary-button" type="submit">保存外观设置</button></footer>
         </form>}</div></div>
       </section>

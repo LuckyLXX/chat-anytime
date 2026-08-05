@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CUSTOM_PROVIDER_ID, createDefaultAgent, mergeProviderModels, migrateSettings } from "./settings.js";
+import { CUSTOM_PROVIDER_ID, createDefaultAgent, mergeProviderModels, migrateSettings, normalizeCustomThemes } from "./settings.js";
 
 describe("desktop settings migration", () => {
   it("migrates the legacy custom provider without changing its stable id", () => {
@@ -53,16 +53,31 @@ describe("desktop settings migration", () => {
       theme: "dark",
       themePreset: "rose",
       customCss: ".message { outline: 1px solid red; }",
+      customThemes: [],
       showThinking: false
     });
   });
 
   it("falls back to safe appearance defaults for unknown theme values", () => {
     const result = migrateSettings({ appearance: { theme: "neon", themePreset: "unknown", customCss: 42 } });
-    expect(result.settings.appearance).toEqual({ theme: "system", themePreset: "default", customCss: "", showThinking: true });
+    expect(result.settings.appearance).toEqual({ theme: "system", themePreset: "default", customCss: "", customThemes: [], showThinking: true });
   });
 
   it("accepts the expanded reference theme presets", () => {
     expect(migrateSettings({ appearance: { themePreset: "ocean" } }).settings.appearance.themePreset).toBe("ocean");
+  });
+
+  it("normalizes saved custom CSS themes and ignores empty entries", () => {
+    expect(normalizeCustomThemes([
+      { id: "midnight", name: "  午夜  ", css: " :root { --accent: red; } " },
+      { id: "midnight", name: "重复", css: ".message { color: blue; }" },
+      { id: "empty", name: "空", css: "   " },
+      { name: "无 ID", css: ".message { color: green; }" },
+      { id: "bad", css: 42 }
+    ])).toEqual([
+      { id: "midnight", name: "午夜", css: " :root { --accent: red; } " },
+      { id: "midnight-2", name: "重复", css: ".message { color: blue; }" },
+      { id: "custom-4", name: "无 ID", css: ".message { color: green; }" }
+    ]);
   });
 });
