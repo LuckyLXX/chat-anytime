@@ -29,6 +29,11 @@ describe("rich content pipeline", () => {
     expect(segments).toEqual([{ type: "markdown", content: "```html\n<div>尚未闭合\n```" }]);
   });
 
+  it("renders an unfinished assistant HTML block after streaming completes", () => {
+    const segments = parseRichContent("<assistant_html><div>最终片段", { isStreaming: false });
+    expect(segments).toEqual([{ type: "html", content: "<div>最终片段", source: "assistant-html" }]);
+  });
+
   it("treats an unfinished html fence as code while streaming", () => {
     const segments = parseRichContent("```html\n<div>正在生成");
     expect(segments).toHaveLength(1);

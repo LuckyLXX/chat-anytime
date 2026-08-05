@@ -141,7 +141,7 @@ function splitAssistantHtml(text: string, options: RichContentParseOptions): Ric
     if (content) {
       // Keep assistant-authored HTML inert until the assistant turn is done.
       // This avoids repeatedly mounting half-written cards during streaming.
-      if (isClosed && !options.isStreaming) {
+      if (!options.isStreaming) {
         segments.push(...parseAssistantHtmlPart(content, options));
       } else {
         segments.push({ type: "markdown", content: `\`\`\`html\n${content}\n\`\`\`` });
