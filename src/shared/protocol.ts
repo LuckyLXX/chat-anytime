@@ -57,8 +57,12 @@ export interface AgentProfile {
   archived?: boolean;
 }
 
+export type ThemePresetId = "default" | "indigo" | "forest" | "rose";
+
 export interface AppearanceSettings {
   theme: "system" | "light" | "dark";
+  themePreset: ThemePresetId;
+  customCss: string;
   showThinking: boolean;
 }
 

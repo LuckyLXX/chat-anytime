@@ -46,4 +46,19 @@ describe("desktop settings migration", () => {
       { id: "new", name: "New", imageInput: undefined, enabled: false }
     ]);
   });
+
+  it("migrates the live theme controls and custom CSS", () => {
+    const result = migrateSettings({ appearance: { theme: "dark", themePreset: "rose", customCss: ".message { outline: 1px solid red; }", showThinking: false } });
+    expect(result.settings.appearance).toEqual({
+      theme: "dark",
+      themePreset: "rose",
+      customCss: ".message { outline: 1px solid red; }",
+      showThinking: false
+    });
+  });
+
+  it("falls back to safe appearance defaults for unknown theme values", () => {
+    const result = migrateSettings({ appearance: { theme: "neon", themePreset: "unknown", customCss: 42 } });
+    expect(result.settings.appearance).toEqual({ theme: "system", themePreset: "default", customCss: "", showThinking: true });
+  });
 });

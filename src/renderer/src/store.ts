@@ -38,7 +38,7 @@ const emptySnapshot: RuntimeSnapshot = {
   executions: [],
   sessions: []
 };
-const emptySettings: DesktopSettings = { version: 2, thinkingLevel: "medium", providers: [], agents: [], currentAgentId: "default", appearance: { theme: "system", showThinking: true } };
+const emptySettings: DesktopSettings = { version: 2, thinkingLevel: "medium", providers: [], agents: [], currentAgentId: "default", appearance: { theme: "system", themePreset: "default", customCss: "", showThinking: true } };
 
 export const useDesktopStore = create<DesktopState>((set, get) => ({
   ready: false,

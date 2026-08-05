@@ -5,6 +5,7 @@ import type {
   DesktopSettings,
   ProviderModelSettings,
   ProviderSettings,
+  ThemePresetId,
   ThinkingLevel
 } from "../shared/protocol.js";
 
@@ -28,7 +29,7 @@ export function createDefaultAgent(): AgentProfile {
 }
 
 export function defaultAppearance(): AppearanceSettings {
-  return { theme: "system", showThinking: true };
+  return { theme: "system", themePreset: "default", customCss: "", showThinking: true };
 }
 
 export function normalizeAgent(agent: Partial<AgentProfile> | undefined): AgentProfile {
@@ -123,6 +124,10 @@ export function migrateSettings(raw: unknown): { settings: DesktopSettings; lega
     : normalizedAgents[0]!.id;
   const appearanceSource = source.appearance && typeof source.appearance === "object" ? source.appearance as Record<string, unknown> : {};
   const theme = appearanceSource.theme === "light" || appearanceSource.theme === "dark" ? appearanceSource.theme : "system";
+  const themePreset = ["default", "indigo", "forest", "rose"].includes(String(appearanceSource.themePreset))
+    ? appearanceSource.themePreset as ThemePresetId
+    : defaults.appearance.themePreset;
+  const customCss = typeof appearanceSource.customCss === "string" ? appearanceSource.customCss : defaults.appearance.customCss;
   const thinkingLevel = ["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(String(source.thinkingLevel))
     ? source.thinkingLevel as ThinkingLevel
     : "medium";
@@ -134,7 +139,7 @@ export function migrateSettings(raw: unknown): { settings: DesktopSettings; lega
     providers,
     agents: normalizedAgents,
     currentAgentId,
-    appearance: { theme, showThinking: appearanceSource.showThinking !== false }
+    appearance: { theme, themePreset, customCss, showThinking: appearanceSource.showThinking !== false }
   };
   const legacyApiKey = typeof source.customProviderApiKey === "string" ? source.customProviderApiKey : undefined;
   return { settings, legacyApiKey };

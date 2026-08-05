@@ -37,6 +37,7 @@ import type {
   PermissionDecision,
   ProviderOption,
   ThinkingLevel,
+  ThemePresetId,
   ToolExecution,
   MessageBlock
 } from "../../shared/protocol";
@@ -46,6 +47,7 @@ import { DiffView } from "./components/DiffView";
 import { RichContent } from "./components/RichContent";
 import { compactPath, formatDuration, type Artifact } from "./lib/content";
 import { groupAssistantMessages, splitAssistantToolLayout } from "./lib/chat-layout";
+import { THEME_PRESETS, themePresetCss } from "./lib/theme-presets";
 import { useDesktopStore } from "./store";
 
 const thinkingLevels: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
@@ -67,6 +69,25 @@ function thinkingText(message: ChatMessage): string {
 
 function blockText(blocks: MessageBlock[]): string {
   return blocks.filter((block) => block.type === "text").map((block) => block.text).join("");
+}
+
+function ImageMessageBlock({ block }: { block: Extract<MessageBlock, { type: "image" }> }): ReactNode {
+  const [expanded, setExpanded] = useState(false);
+  const src = `data:${block.mimeType};base64,${block.data}`;
+  useEffect(() => {
+    if (!expanded) return;
+    function close(event: KeyboardEvent): void {
+      if (event.key === "Escape") setExpanded(false);
+    }
+    window.addEventListener("keydown", close);
+    return () => window.removeEventListener("keydown", close);
+  }, [expanded]);
+  return (
+    <>
+      <button className="image-message" type="button" aria-label="放大图片" onClick={() => setExpanded(true)}><img src={src} alt="用户上传的图片" /></button>
+      {expanded && <div className="modal-backdrop image-lightbox" role="presentation" onMouseDown={() => setExpanded(false)}><div className="image-lightbox-content" role="dialog" aria-modal="true" aria-label="图片预览" onMouseDown={(event) => event.stopPropagation()}><button className="icon-button modal-close" type="button" title="关闭图片" aria-label="关闭图片" onClick={() => setExpanded(false)}><X size={17} /></button><img src={src} alt="用户上传的图片" /></div></div>}
+    </>
+  );
 }
 
 function ToolGroup({ calls, executions, streaming }: { calls: Array<Extract<MessageBlock, { type: "tool-call" }>>; executions: ToolExecution[]; streaming?: boolean }): ReactNode {
@@ -103,10 +124,11 @@ function MessageView({ message, executions, onOpenArtifact, onCopy, onEdit, onRe
   const toolLayout = splitAssistantToolLayout(message);
 
   if (message.role === "user") {
+    const images = message.blocks.filter((block): block is Extract<MessageBlock, { type: "image" }> => block.type === "image");
     return (
       <article className="message message-user">
         <div className="message-avatar user-avatar">我</div>
-        <div className="message-body"><p className="user-text">{text}</p><div className="message-actions"><button type="button" title="复制" aria-label="复制用户消息" onClick={() => onCopy(message)}><Copy size={13} /></button><button type="button" title="重新编辑" aria-label="重新编辑用户消息" onClick={() => onEdit(message)}><Pencil size={13} /></button></div></div>
+        <div className="message-body">{images.length > 0 && <div className="image-message-list">{images.map((block, index) => <ImageMessageBlock key={`${message.id}-image-${index}`} block={block} />)}</div>}{text && <p className="user-text">{text}</p>}<div className="message-actions"><button type="button" title="复制" aria-label="复制用户消息" onClick={() => onCopy(message)}><Copy size={13} /></button><button type="button" title="重新编辑" aria-label="重新编辑用户消息" onClick={() => onEdit(message)}><Pencil size={13} /></button></div></div>
       </article>
     );
   }
@@ -199,6 +221,19 @@ function ChangesPanel({ executions }: { executions: ToolExecution[] }): ReactNod
   );
 }
 
+function ThemePreview(): ReactNode {
+  return (
+    <div className="theme-preview" aria-label="主题预览">
+      <div className="theme-preview-header"><span className="theme-preview-dot" /><strong>Pi Desktop</strong><small>主题预览</small></div>
+      <div className="theme-preview-body">
+        <div className="theme-preview-bubble"><strong>助手</strong><span>输出、代码和工具状态会跟随当前主题。</span></div>
+        <div className="theme-preview-tool"><span className="theme-preview-tool-icon">+</span><span>读取项目文件</span><small>完成</small></div>
+        <pre className="theme-preview-code"><span>const</span> theme = <em>"live"</em>;</pre>
+      </div>
+    </div>
+  );
+}
+
 function SettingsDialog({ settings, models, providers, customProvider, customProviderKeyConfigured, customModels, customModelFetchStatus, customModelFetchError, onClose }: { settings: import("../../shared/protocol").DesktopSettings; models: ModelOption[]; providers: ProviderOption[]; customProvider?: ProviderSettings; customProviderKeyConfigured: boolean; customModels: CustomProviderModel[]; customModelFetchStatus: "idle" | "loading" | "success" | "error"; customModelFetchError?: string; onClose(): void }): ReactNode {
   const customProviderId = "chatanytime-openai-compatible";
   const configuredProviders = settings.providers;
@@ -217,6 +252,7 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
   const initialSettingsRef = useRef<import("../../shared/protocol").DesktopSettings>(structuredClone(settings));
   const [agentList, setAgentList] = useState<AgentProfile[]>(settings.agents);
   const [selectedAgentId, setSelectedAgentId] = useState(settings.currentAgentId);
+  const cssFileInputRef = useRef<HTMLInputElement>(null);
   const selectedAgent = agentList.find((agent) => agent.id === selectedAgentId) ?? agentList[0];
   const configuredModels = models.filter((model) => model.configured);
   const hasSavedCustomKey = Boolean(selectedProvider?.keyConfigured) || (provider === customProviderId && customProviderKeyConfigured);
@@ -228,6 +264,14 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
     const saved = structuredClone(nextSettings);
     initialSettingsRef.current = saved;
     useDesktopStore.setState({ settings: saved });
+  }
+
+  async function importCustomCss(event: React.ChangeEvent<HTMLInputElement>): Promise<void> {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    const css = await file.text();
+    useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, customCss: css } } });
   }
 
   useEffect(() => {
@@ -349,9 +393,17 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
         </form> : tab === "agents" ? <div className="agent-settings">
           <div className="agent-list">{agentList.filter((agent) => !agent.archived).map((agent) => <button type="button" key={agent.id} className={agent.id === selectedAgent?.id ? "active" : ""} onClick={() => setSelectedAgentId(agent.id)}><strong>{agent.name}</strong><small>{agent.description || "未填写说明"}</small></button>)}<button type="button" className="secondary-button" onClick={newAgent}>+ 新建 Agent</button></div>
           {selectedAgent && <div className="agent-editor"><label>名称<input value={selectedAgent.name} onChange={(event) => updateAgent({ name: event.target.value })} /></label><label>说明<input value={selectedAgent.description} onChange={(event) => updateAgent({ description: event.target.value })} /></label><label>系统提示词<textarea value={selectedAgent.systemPrompt} rows={6} onChange={(event) => updateAgent({ systemPrompt: event.target.value })} /></label><label>默认模型<select value={selectedAgent.defaultModel ? `${selectedAgent.defaultModel.provider}/${selectedAgent.defaultModel.id}` : ""} onChange={(event) => { const value = event.target.value; updateAgent({ defaultModel: value ? { provider: value.slice(0, value.indexOf("/")), id: value.slice(value.indexOf("/") + 1) } : undefined }); }}><option value="">跟随全局默认模型</option>{configuredModels.map((model) => <option key={`${model.provider}/${model.id}`} value={`${model.provider}/${model.id}`}>{model.name}</option>)}</select></label><label>默认思考等级<select value={selectedAgent.defaultThinkingLevel} onChange={(event) => updateAgent({ defaultThinkingLevel: event.target.value as ThinkingLevel })}>{thinkingLevels.map((level) => <option key={level} value={level}>{thinkingLevelLabels[level]}</option>)}</select></label><fieldset><legend>工具权限</legend>{agentTools.map((tool) => <label className="tool-toggle" key={tool}><input type="checkbox" checked={selectedAgent.tools[tool]} onChange={(event) => updateAgent({ tools: { ...selectedAgent.tools, [tool]: event.target.checked } })} />{tool}</label>)}</fieldset><footer><button type="button" className="danger-button" disabled={selectedAgent.id === "default"} onClick={() => void archiveAgent()}>归档</button><button type="button" className="secondary-button" onClick={duplicateAgent}>复制</button><button type="button" className="primary-button" onClick={() => void saveAgent()}>保存 Agent</button></footer></div>}
-        </div> : <form onSubmit={(event) => { event.preventDefault(); const nextSettings = structuredClone(settings); void window.piDesktop.send({ type: "appearance.save", appearance: nextSettings.appearance }); markSettingsSaved(nextSettings); onClose(); }}>
-          <label>主题<select value={settings.appearance.theme} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, theme: event.target.value as "system" | "light" | "dark" } } })}><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></label>
-          <label className="checkbox-setting"><input type="checkbox" checked={settings.appearance.showThinking} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, showThinking: event.target.checked } } })} />展示思考过程</label>
+        </div> : <form className="appearance-settings" onSubmit={(event) => { event.preventDefault(); const nextSettings = structuredClone(settings); void window.piDesktop.send({ type: "appearance.save", appearance: nextSettings.appearance }); markSettingsSaved(nextSettings); onClose(); }}>
+          <div className="appearance-grid">
+            <div>
+              <label>主题模式<select value={settings.appearance.theme} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, theme: event.target.value as "system" | "light" | "dark" } } })}><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></label>
+              <label className="checkbox-setting"><input type="checkbox" checked={settings.appearance.showThinking} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, showThinking: event.target.checked } } })} />展示思考过程</label>
+              <div className="theme-preset-field"><span className="settings-field-label">主题预设</span><div className="theme-preset-grid">{THEME_PRESETS.map((preset) => <button type="button" key={preset.id} className={`theme-preset-card${settings.appearance.themePreset === preset.id ? " active" : ""}`} onClick={() => useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, themePreset: preset.id as ThemePresetId } } })}><span className="theme-swatches">{preset.swatches.map((color) => <i key={color} style={{ backgroundColor: color }} />)}</span><strong>{preset.name}</strong><small>{preset.description}</small></button>)}</div></div>
+            </div>
+            <ThemePreview />
+          </div>
+              <div className="custom-css-heading"><span>自定义 CSS</span><div><input ref={cssFileInputRef} hidden type="file" accept=".css,text/css" onChange={(event) => void importCustomCss(event)} /><button className="secondary-button" type="button" onClick={() => cssFileInputRef.current?.click()}>导入 CSS</button><button className="secondary-button" type="button" onClick={() => useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, customCss: "" } } })}>清空</button></div></div>
+              <label className="custom-css-field"><textarea value={settings.appearance.customCss} spellCheck={false} rows={11} placeholder={":root[data-theme=\"dark\"] {\n  --accent: #8b5cf6;\n}"} aria-label="自定义 CSS" onChange={(event) => useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, customCss: event.target.value } } })} /></label>
           <footer><button type="button" className="secondary-button" onClick={closeSettings}>取消</button><button className="primary-button" type="submit">保存外观设置</button></footer>
         </form>}</div></div>
       </section>
@@ -416,6 +468,23 @@ export function App(): ReactNode {
   useEffect(() => {
     document.documentElement.dataset.theme = settings.appearance.theme;
   }, [settings.appearance.theme]);
+
+  useEffect(() => {
+    const root = document.documentElement;
+    root.dataset.themePreset = settings.appearance.themePreset;
+    const styleId = "pi-desktop-custom-theme";
+    let style = document.getElementById(styleId) as HTMLStyleElement | null;
+    if (!style) {
+      style = document.createElement("style");
+      style.id = styleId;
+      document.head.appendChild(style);
+    }
+    style.textContent = `${themePresetCss(settings.appearance.themePreset)}\n${settings.appearance.customCss}`;
+    return () => {
+      style?.remove();
+      delete root.dataset.themePreset;
+    };
+  }, [settings.appearance.themePreset, settings.appearance.customCss]);
 
   async function openWorkspace(): Promise<void> {
     const path = await window.piDesktop.chooseWorkspace();

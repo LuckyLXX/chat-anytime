@@ -28,7 +28,7 @@ const demoSettings: DesktopSettings = {
   providers: [],
   agents: [demoDefaultAgent],
   currentAgentId: "default",
-  appearance: { theme: "system", showThinking: true }
+  appearance: { theme: "system", themePreset: "default", customCss: "", showThinking: true }
 };
 
 const demoSnapshot: RuntimeSnapshot = {
@@ -87,7 +87,19 @@ flowchart LR
     <progress value="82" max="100" style="width:100%"></progress>
   </body>
 </html>
-\`\`\``
+\`\`\`
+
+<assistant_html>
+<div class="ai-card">
+  <h3>渲染摘要</h3>
+  <p>Markdown、数学公式、图表和受限 HTML 片段可以在同一条回复里共存。</p>
+  <table>
+    <thead><tr><th>内容</th><th>状态</th></tr></thead>
+    <tbody><tr><td>主题变量</td><td>实时</td></tr><tr><td>HTML 产物</td><td>沙箱</td></tr></tbody>
+  </table>
+  <details><summary>查看渲染边界</summary><p>完整 HTML 文档只进入沙箱预览，卡片片段经过清洗后展示。</p></details>
+</div>
+</assistant_html>`
         }
       ]
     }
