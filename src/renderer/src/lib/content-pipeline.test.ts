@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeMermaidSource, normalizeRichContent, parseRichContent } from "./content-pipeline";
+import { findStableCutoff, normalizeMermaidSource, normalizeRichContent, parseRichContent } from "./content-pipeline";
 
 describe("rich content pipeline", () => {
   it("keeps ordinary code fences as markdown and promotes special fences", () => {
@@ -45,6 +45,26 @@ describe("rich content pipeline", () => {
   it("keeps assistant HTML inert until streaming has finished", () => {
     const segments = parseRichContent("<assistant_html><div>正在生成</div></assistant_html>", { isStreaming: true });
     expect(segments).toEqual([{ type: "markdown", content: "```html\n<div>正在生成</div>\n```" }]);
+  });
+
+  it("takes completed assistant HTML over the stable prefix while streaming the tail", () => {
+    const segments = parseRichContent("前言\n<assistant_html><div>已完成</div></assistant_html>\n\n正在生成", { isStreaming: true });
+    expect(segments.map((segment) => segment.type)).toEqual(["markdown", "html", "markdown"]);
+    expect(segments[1]).toMatchObject({ type: "html", content: "<div>已完成</div>", source: "assistant-html" });
+    expect(segments[2]).toMatchObject({ type: "markdown", content: expect.stringContaining("正在生成") });
+  });
+
+  it("keeps an unfinished structural block in the streaming tail", () => {
+    const text = "说明\n```ts\nconst value = 1\n";
+    expect(findStableCutoff(text)).toBe(0);
+    expect(parseRichContent(text, { isStreaming: true })[0]).toMatchObject({ type: "markdown" });
+  });
+
+  it("advances stable cutoff across multiple fence styles without crossing types", () => {
+    const text = "```ts\nconst a = 1\n```\n~~~mermaid\nflowchart LR\n A --> B\n~~~\n尾部";
+    const cutoff = findStableCutoff(text);
+    expect(text.slice(0, cutoff)).toContain("~~~mermaid");
+    expect(text.slice(cutoff)).toBe("尾部");
   });
 
   it("shows an unfinished assistant HTML block as code while streaming", () => {

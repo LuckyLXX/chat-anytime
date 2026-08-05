@@ -22,11 +22,8 @@ const chatAnytimeVariableAliases: readonly [RegExp, string][] = [
   [/--border-light(?![-\w])/gu, "--border-strong"],
   [/--accent-primary(?![-\w])/gu, "--accent"],
   [/--accent-secondary(?![-\w])/gu, "--accent-hover"],
-  [/--accent-danger(?![-\w])/gu, "--danger"],
-  [/--user-bubble(?![-\w])/gu, "--avatar-user"],
-  [/--ai-bubble(?![-\w])/gu, "--surface"],
-  [/--tool-bubble-bg(?![-\w])/gu, "--accent-soft"],
-  [/--tool-bubble-border(?![-\w])/gu, "--border"]
+  [/--accent-success(?![-\w])/gu, "--success"],
+  [/--accent-danger(?![-\w])/gu, "--danger"]
 ];
 
 const lightBase: ThemeVars = {
@@ -40,9 +37,14 @@ const lightBase: ThemeVars = {
   "--accent": "#6366f1",
   "--accent-hover": "#4f46e5",
   "--accent-soft": "#eef2ff",
+  "--success": "#059669",
   "--danger": "#dc2626",
   "--warning": "#d97706",
   "--blue": "#2563eb",
+  "--user-bubble": "var(--blue)",
+  "--ai-bubble": "var(--surface)",
+  "--tool-bubble-bg": "var(--accent-soft)",
+  "--tool-bubble-border": "var(--border)",
   "--code-surface": "#0b1220",
   "--code-text": "#e5e7eb",
   "--syntax-keyword": "#c026d3",
@@ -53,7 +55,11 @@ const lightBase: ThemeVars = {
   "--syntax-meta": "#b42318",
   "--panel-bg": "rgb(255 255 255 / 92%)",
   "--shadow-sm": "0 1px 2px rgb(15 23 42 / 6%)",
-  "--shadow-md": "0 5px 18px rgb(15 23 42 / 8%)"
+  "--shadow-md": "0 5px 18px rgb(15 23 42 / 8%)",
+  "--shadow-lg": "0 22px 70px rgb(15 23 42 / 18%)",
+  "--scrollbar-track": "var(--surface-muted)",
+  "--scrollbar-thumb": "rgb(99 102 241 / 38%)",
+  "--scrollbar-thumb-hover": "rgb(99 102 241 / 60%)"
 };
 
 const darkBase: ThemeVars = {
@@ -67,9 +73,14 @@ const darkBase: ThemeVars = {
   "--accent": "#818cf8",
   "--accent-hover": "#a5b4fc",
   "--accent-soft": "#25254b",
+  "--success": "#34d399",
   "--danger": "#fb7185",
   "--warning": "#fbbf24",
   "--blue": "#93c5fd",
+  "--user-bubble": "var(--blue)",
+  "--ai-bubble": "var(--surface)",
+  "--tool-bubble-bg": "var(--accent-soft)",
+  "--tool-bubble-border": "var(--border)",
   "--code-surface": "#0b1220",
   "--code-text": "#e5e7eb",
   "--syntax-keyword": "#c4b5fd",
@@ -80,7 +91,11 @@ const darkBase: ThemeVars = {
   "--syntax-meta": "#fb7185",
   "--panel-bg": "rgb(23 32 51 / 94%)",
   "--shadow-sm": "0 1px 2px rgb(0 0 0 / 20%)",
-  "--shadow-md": "0 8px 24px rgb(0 0 0 / 24%)"
+  "--shadow-md": "0 8px 24px rgb(0 0 0 / 24%)",
+  "--shadow-lg": "0 22px 70px rgb(0 0 0 / 45%)",
+  "--scrollbar-track": "var(--surface-muted)",
+  "--scrollbar-thumb": "rgb(129 140 248 / 42%)",
+  "--scrollbar-thumb-hover": "rgb(129 140 248 / 68%)"
 };
 
 function declarations(vars: ThemeVars): string {

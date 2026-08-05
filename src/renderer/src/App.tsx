@@ -6,6 +6,7 @@ import {
   ChevronDown,
   CircleStop,
   CodeXml,
+  Download,
   FileDiff,
   Folder,
   FolderOpen,
@@ -285,16 +286,17 @@ interface CustomThemeLibraryProps {
   editingCustomThemeId?: string;
   onNameChange(name: string): void;
   onSave(): void;
+  onExport(): void;
   onApply(theme: CustomThemeDefinition): void;
   onDelete(theme: CustomThemeDefinition): void;
 }
 
-function CustomThemeLibrary({ customCss, customThemes, customThemeName, editingCustomThemeId, onNameChange, onSave, onApply, onDelete }: CustomThemeLibraryProps): ReactNode {
+function CustomThemeLibrary({ customCss, customThemes, customThemeName, editingCustomThemeId, onNameChange, onSave, onExport, onApply, onDelete }: CustomThemeLibraryProps): ReactNode {
   return (
     <div className="custom-theme-library">
       <div className="custom-theme-library-heading">
         <label className="custom-theme-name-field">当前 CSS 主题名称<input value={customThemeName} placeholder="例如：午夜玻璃" onChange={(event) => onNameChange(event.target.value)} /></label>
-        <button className="secondary-button" type="button" disabled={!customCss.trim()} onClick={onSave}><Save size={13} />保存当前主题</button>
+        <div className="custom-theme-library-actions"><button className="secondary-button" type="button" disabled={!customCss.trim()} onClick={onSave}><Save size={13} />保存当前主题</button><button className="secondary-button" type="button" disabled={!customCss.trim()} onClick={onExport}><Download size={13} />导出 CSS</button></div>
       </div>
       {customThemes.length > 0 ? (
         <div className="custom-theme-list">
@@ -397,6 +399,18 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
       return;
     }
     updateAppearance({ customThemes: nextThemes });
+  }
+
+  function exportCustomCss(): void {
+    const css = settings.appearance.customCss;
+    if (!css.trim()) return;
+    const fileName = `${(customThemeName.trim() || "chatanytime-theme").replace(/[<>:"/\\|?*\x00-\x1F]/gu, "-").slice(0, 80)}.css`;
+    const url = URL.createObjectURL(new Blob([css], { type: "text/css;charset=utf-8" }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = fileName;
+    anchor.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
   }
 
   useEffect(() => {
@@ -529,7 +543,7 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
           </div>
               <div className="custom-css-heading"><span>自定义 CSS</span><div><input ref={cssFileInputRef} hidden type="file" accept=".css,text/css" onChange={(event) => void importCustomCss(event)} /><button className="secondary-button" type="button" onClick={() => cssFileInputRef.current?.click()}>导入 CSS</button><button className="secondary-button" type="button" onClick={() => { setEditingCustomThemeId(undefined); setCustomThemeName(""); updateAppearance({ customCss: "" }); }}>清空</button></div></div>
               <label className="custom-css-field"><textarea value={settings.appearance.customCss} spellCheck={false} rows={11} placeholder={":root[data-theme-effective=\"dark\"] {\n  --accent: #8b5cf6;\n}"} aria-label="自定义 CSS" onChange={(event) => useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, customCss: event.target.value } } })} /></label>
-              <CustomThemeLibrary customCss={settings.appearance.customCss} customThemes={settings.appearance.customThemes} customThemeName={customThemeName} editingCustomThemeId={editingCustomThemeId} onNameChange={setCustomThemeName} onSave={saveCustomTheme} onApply={applyCustomTheme} onDelete={deleteCustomTheme} />
+              <CustomThemeLibrary customCss={settings.appearance.customCss} customThemes={settings.appearance.customThemes} customThemeName={customThemeName} editingCustomThemeId={editingCustomThemeId} onNameChange={setCustomThemeName} onSave={saveCustomTheme} onExport={exportCustomCss} onApply={applyCustomTheme} onDelete={deleteCustomTheme} />
           <footer><button type="button" className="secondary-button" onClick={closeSettings}>取消</button><button className="primary-button" type="submit">保存外观设置</button></footer>
         </form>}</div></div>
       </section>

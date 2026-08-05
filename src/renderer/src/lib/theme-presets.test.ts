@@ -41,4 +41,11 @@ describe("theme presets", () => {
     expect(scopeCustomThemeCss(':root { --bg-primary: #111; --accent-primary: #f0a; color: var(--text-primary); }'))
       .toBe(':root[data-theme-custom] { --surface: #111; --accent: #f0a; color: var(--text); }');
   });
+
+  it("keeps ChatAnyTime semantic bubble variables and maps success colors", () => {
+    const css = scopeCustomThemeCss(":root { --accent-success: #12b981; --ai-bubble: #101827; --tool-bubble-bg: #18243a; }");
+    expect(css).toContain("--success: #12b981");
+    expect(css).toContain("--ai-bubble: #101827");
+    expect(css).toContain("--tool-bubble-bg: #18243a");
+  });
 });

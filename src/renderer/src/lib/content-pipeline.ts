@@ -60,6 +60,72 @@ function isClosingFence(line: string, marker: string): boolean {
     && [...trimmed].every((character) => character === first);
 }
 
+function findMatchingFenceEnd(raw: string, startIndex: number, marker: string): number {
+  const openingLineEnd = raw.indexOf("\n", startIndex);
+  if (openingLineEnd < 0) return -1;
+  let lineStart = openingLineEnd + 1;
+  while (lineStart < raw.length) {
+    const lineEnd = raw.indexOf("\n", lineStart);
+    const line = raw.slice(lineStart, lineEnd < 0 ? raw.length : lineEnd);
+    if (isClosingFence(line, marker)) return lineEnd < 0 ? raw.length : lineEnd + 1;
+    if (lineEnd < 0) break;
+    lineStart = lineEnd + 1;
+  }
+  return -1;
+}
+
+function findInlineBlockEnd(raw: string, startIndex: number): number {
+  const head = raw.slice(startIndex, startIndex + 32);
+  if (!/^<assistant_html>/iu.test(head)) return -2;
+  const closingTag = /<\/assistant_html>/giu;
+  closingTag.lastIndex = startIndex + "<assistant_html>".length;
+  const match = closingTag.exec(raw);
+  return match ? match.index + match[0].length : -1;
+}
+
+/**
+ * Return the end of the last complete structural block in a streamed reply.
+ * Plain text is intentionally left in the tail so the caller can keep it
+ * cheap to update while completed fences and HTML bubbles keep their DOM.
+ */
+export function findStableCutoff(text: string, previousCutoff = 0): number {
+  const raw = String(text || "");
+  const safePreviousCutoff = Math.min(Math.max(0, previousCutoff), raw.length);
+  let index = safePreviousCutoff;
+  let stableCutoff = safePreviousCutoff;
+
+  while (index < raw.length) {
+    const atLineStart = index === 0 || raw[index - 1] === "\n";
+    if (atLineStart) {
+      const lineEnd = raw.indexOf("\n", index);
+      const line = raw.slice(index, lineEnd < 0 ? raw.length : lineEnd);
+      const opening = isFenceLine(line);
+      if (opening) {
+        const fenceEnd = findMatchingFenceEnd(raw, index, opening.marker);
+        if (fenceEnd < 0) return stableCutoff;
+        stableCutoff = fenceEnd;
+        index = fenceEnd;
+        continue;
+      }
+    }
+
+    if (raw[index] === "<") {
+      const blockEnd = findInlineBlockEnd(raw, index);
+      if (blockEnd === -1) return stableCutoff;
+      if (blockEnd >= 0) {
+        stableCutoff = blockEnd;
+        index = blockEnd;
+        continue;
+      }
+    }
+
+    const nextLine = raw.indexOf("\n", index);
+    index = nextLine < 0 ? raw.length : nextLine + 1;
+  }
+
+  return stableCutoff;
+}
+
 function normalizeTildeSpacing(line: string): string {
   return line.replace(/(^|[^\w/\\=~])~(?![\s~])/gu, "$1~ ");
 }
@@ -68,7 +134,8 @@ function escapeHtmlText(text: string): string {
   return text.replace(/[&<>"']/gu, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character] ?? character);
 }
 
-function mergeTrailingEpilogue(segments: RichContentSegment[]): RichContentSegment[] {
+function mergeTrailingEpilogue(segments: RichContentSegment[], isStreaming = false): RichContentSegment[] {
+  if (isStreaming) return segments;
   if (segments.length < 2) return segments;
   const lastIndex = segments.length - 1;
   const previous = segments[lastIndex - 1];
@@ -175,7 +242,7 @@ function splitAssistantHtml(text: string, options: RichContentParseOptions): Ric
     cursor = start + match[0].length;
   }
   if (cursor < text.length) segments.push(...parseTextPart(text.slice(cursor), options));
-  return segments.length ? mergeTrailingEpilogue(segments) : parseTextPart(text, options);
+  return segments.length ? mergeTrailingEpilogue(segments, options.isStreaming) : parseTextPart(text, options);
 }
 
 function splitFencedContent(text: string, options: RichContentParseOptions = {}): RichContentSegment[] {
@@ -263,5 +330,13 @@ export function normalizeRichContent(text: string): string {
 }
 
 export function parseRichContent(text: string, options: RichContentParseOptions = {}): RichContentSegment[] {
-  return splitFencedContent(normalizeRichContent(text), options);
+  const normalized = normalizeRichContent(text);
+  if (!options.isStreaming) return splitFencedContent(normalized, options);
+
+  const stableCutoff = findStableCutoff(normalized);
+  if (stableCutoff <= 0 || stableCutoff >= normalized.length) return splitFencedContent(normalized, options);
+
+  const stable = splitFencedContent(normalized.slice(0, stableCutoff), { ...options, isStreaming: false });
+  const tail = splitFencedContent(normalized.slice(stableCutoff), options);
+  return mergeTrailingEpilogue(mergeMarkdownSegments([...stable, ...tail]), false);
 }

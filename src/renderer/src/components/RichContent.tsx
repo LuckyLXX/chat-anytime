@@ -1,6 +1,6 @@
 import { Check, Code2, Copy, Expand, Eye, EyeOff, FileCode2, ExternalLink, X } from "lucide-react";
 import mermaid from "mermaid";
-import { useEffect, useId, useRef, useState, type ReactNode, type SyntheticEvent } from "react";
+import { isValidElement, useEffect, useId, useRef, useState, type ReactNode, type SyntheticEvent } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
@@ -327,11 +327,24 @@ const richSanitizeSchema: Schema = {
   }
 };
 
-function markdownComponents(artifactIndex: { current: number }, artifactPrefix: string, onOpenArtifact: (artifact: Artifact) => void, dark: boolean, onHtmlAction?: (text: string) => void): Components {
-  function explicitHtmlAction(props: Record<string, unknown>): string {
+function markdownComponents(artifactIndex: { current: number }, artifactPrefix: string, onOpenArtifact: (artifact: Artifact) => void, dark: boolean, htmlBubble = false, onHtmlAction?: (text: string) => void): Components {
+  function childrenText(value: ReactNode): string {
+    if (typeof value === "string" || typeof value === "number") return String(value);
+    if (Array.isArray(value)) return value.map((item) => childrenText(item)).join("");
+    if (isValidElement(value)) return childrenText((value.props as { children?: ReactNode }).children);
+    return "";
+  }
+
+  function explicitHtmlAction(props: Record<string, unknown>, children: ReactNode, allowImplicit: boolean): string {
     for (const key of ["data-send", "data-prompt", "data-message"]) {
       const value = props[key];
       if (typeof value === "string" && value.trim()) return value.trim().slice(0, 500);
+    }
+    if (allowImplicit) {
+      const labelled = [props["aria-label"], props.title].find((value) => typeof value === "string" && value.trim());
+      if (typeof labelled === "string") return labelled.trim().slice(0, 500);
+      const text = childrenText(children).replace(/\s+/gu, " ").trim();
+      if (text) return text.slice(0, 500);
     }
     return "";
   }
@@ -361,7 +374,7 @@ function markdownComponents(artifactIndex: { current: number }, artifactPrefix: 
     },
     button(props) {
       const { children, className, ...buttonProps } = props;
-      const action = explicitHtmlAction(buttonProps as Record<string, unknown>);
+      const action = explicitHtmlAction(buttonProps as Record<string, unknown>, children, Boolean(htmlBubble));
       const classes = [typeof className === "string" ? className : "", action ? "html-action-button" : ""].filter(Boolean).join(" ");
       return <button {...buttonProps} className={classes || undefined} type="button" onClick={action && onHtmlAction ? () => onHtmlAction(action) : undefined}>{children}</button>;
     },
@@ -385,7 +398,7 @@ function htmlBubbleScopeClass(prefix: string): string {
 function MarkdownSurface({ content, htmlBubble, artifactPrefix, onOpenArtifact, onHtmlAction }: { content: string; htmlBubble?: boolean; artifactPrefix: string; onOpenArtifact(artifact: Artifact): void; onHtmlAction?: (text: string) => void }): ReactNode {
   const dark = useThemeTokens().dark;
   const artifactIndex = useRef(0);
-  const components = markdownComponents(artifactIndex, artifactPrefix, onOpenArtifact, dark, onHtmlAction);
+  const components = markdownComponents(artifactIndex, artifactPrefix, onOpenArtifact, dark, htmlBubble, onHtmlAction);
   const scopeClass = htmlBubble ? htmlBubbleScopeClass(artifactPrefix) : "";
   const scopeSelector = scopeClass ? `.${scopeClass}` : "";
   return (
