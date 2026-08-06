@@ -50,7 +50,7 @@ function readThemeTokens(anchor?: HTMLElement | null): ThemeTokens {
     dark,
     surface: value("--surface", dark ? "#172033" : "#ffffff"),
     surfaceRaised: value("--surface-raised", dark ? "#1e293b" : "#f1f5f9"),
-    accent: value("--accent", dark ? "#818cf8" : "#6366f1"),
+    accent: value("--accent", "#4f46e5"),
     accentSoft: value("--accent-soft", dark ? "#25254b" : "#eef2ff"),
     text: value("--text", dark ? "#eef2ff" : "#1e293b"),
     muted: value("--text-muted", dark ? "#a6b1c5" : "#64748b"),

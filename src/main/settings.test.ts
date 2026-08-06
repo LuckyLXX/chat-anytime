@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CUSTOM_PROVIDER_ID, createDefaultAgent, mergeProviderModels, migrateSettings, normalizeCustomThemes, normalizeThemeOverrides } from "./settings.js";
+import { CUSTOM_PROVIDER_ID, createDefaultAgent, mergeProviderModels, migrateSettings, normalizeCustomThemes, normalizeThemeAssets, normalizeThemeOverrides } from "./settings.js";
 
 describe("desktop settings migration", () => {
   it("migrates the legacy custom provider without changing its stable id", () => {
@@ -77,15 +77,23 @@ describe("desktop settings migration", () => {
 
   it("normalizes saved custom CSS themes and ignores empty entries", () => {
     expect(normalizeCustomThemes([
-      { id: "midnight", name: "  午夜  ", css: " :root { --accent: red; } " },
+      { id: "midnight", name: "  午夜  ", css: " :root { --accent: red; } ", assets: { "./wallpaper.png": "data:image/png;base64,abc" } },
       { id: "midnight", name: "重复", css: ".message { color: blue; }" },
       { id: "empty", name: "空", css: "   " },
       { name: "无 ID", css: ".message { color: green; }" },
       { id: "bad", css: 42 }
     ])).toEqual([
-      { id: "midnight", name: "午夜", css: " :root { --accent: red; } " },
+      { id: "midnight", name: "午夜", css: " :root { --accent: red; } ", assets: { "wallpaper.png": "data:image/png;base64,abc" } },
       { id: "midnight-2", name: "重复", css: ".message { color: blue; }" },
       { id: "custom-4", name: "无 ID", css: ".message { color: green; }" }
     ]);
+  });
+
+  it("keeps imported image data separate from the editable CSS", () => {
+    const result = migrateSettings({ appearance: { customCss: ":root { --chat-bg-image: url(wallpaper.png); }", customCssAssets: { "wallpaper.png": "data:image/png;base64,abc" } } });
+    expect(result.settings.appearance.customCss).toContain("url(wallpaper.png)");
+    expect(result.settings.appearance.customCss).not.toContain("base64");
+    expect(result.settings.appearance.customCssAssets).toEqual({ "wallpaper.png": "data:image/png;base64,abc" });
+    expect(normalizeThemeAssets({ "../wallpaper.png": "data:image/png;base64,abc", bad: "https://example.com/image.png" })).toEqual({ "../wallpaper.png": "data:image/png;base64,abc" });
   });
 });

@@ -44,6 +44,7 @@ import type {
   CustomThemeDefinition,
   ThinkingLevel,
   ThemeColorKey,
+  ThemeAssetMap,
   ThemeOverrideMode,
   ThemePresetId,
   ToolExecution,
@@ -75,6 +76,75 @@ function createCustomThemeId(): string {
 
 function cssThemeNameFromFile(fileName: string): string {
   return fileName.replace(/\.[^./\\]+$/u, "").trim();
+}
+
+type ThemeDirectoryFile = File & { webkitRelativePath?: string };
+
+function themeRelativePath(file: File): string {
+  const relative = (file as ThemeDirectoryFile).webkitRelativePath || file.name;
+  return relative.replaceAll("\\", "/").replace(/^\.\/+?/u, "");
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => typeof reader.result === "string" ? resolve(reader.result) : reject(new Error("无法读取主题图片"));
+    reader.onerror = () => reject(reader.error ?? new Error("无法读取主题图片"));
+    reader.readAsDataURL(file);
+  });
+}
+
+function themeNameFromCss(css: string, fallback: string): string {
+  const match = /(?:Theme Name|主题)\s*[:：]\s*([^\r\n*]+)/iu.exec(css);
+  return match?.[1]?.trim() || fallback;
+}
+
+function customCssHasWallpaper(css: string): boolean {
+  return /--chat-bg-image\s*:\s*(?!none\b)/iu.test(css);
+}
+
+const CSS_URL_PATTERN = /url\(\s*(['"]?)([^'")]+)\1\s*\)/giu;
+
+function normalizeThemeAssetReference(value: string): string {
+  return value.trim().replaceAll("\\", "/").replace(/^\.\/+?/u, "").toLowerCase();
+}
+
+function isExternalThemeReference(reference: string): boolean {
+  return !reference || /^(?:data:|https?:|file:|blob:|var\(|#)/iu.test(reference);
+}
+
+async function collectThemeAssets(css: string, cssFile: File, files: File[]): Promise<ThemeAssetMap> {
+  const imageFiles = files.filter((file) => /\.(?:png|jpe?g|webp|gif)$/iu.test(file.name));
+  const assets = await Promise.all(imageFiles.map(async (file) => [themeRelativePath(file).toLowerCase(), await readFileAsDataUrl(file)] as const));
+  const cssPath = themeRelativePath(cssFile);
+  const cssDirectory = cssPath.includes("/") ? cssPath.slice(0, cssPath.lastIndexOf("/")) : "";
+  const result: ThemeAssetMap = {};
+  css.replace(CSS_URL_PATTERN, (match, _quote: string, rawReference: string) => {
+    const reference = normalizeThemeAssetReference(rawReference);
+    if (isExternalThemeReference(reference)) return match;
+    const candidates = [
+      cssDirectory ? `${cssDirectory}/${reference}` : reference,
+      reference
+    ];
+    const asset = assets.find(([path]) => candidates.includes(path) || path.endsWith(`/${reference}`) || path.split("/").at(-1) === reference);
+    if (asset) result[reference] = asset[1];
+    return match;
+  });
+  return result;
+}
+
+function resolveThemeAssets(css: string, assets: ThemeAssetMap | undefined): string {
+  if (!assets || Object.keys(assets).length === 0) return css;
+  return css.replace(CSS_URL_PATTERN, (match, _quote: string, rawReference: string) => {
+    const reference = normalizeThemeAssetReference(rawReference);
+    const dataUrl = assets[reference];
+    return dataUrl && !isExternalThemeReference(reference) ? `url("${dataUrl}")` : match;
+  });
+}
+
+function themeAssetsForAppearance(appearance: AppearanceSettings): ThemeAssetMap | undefined {
+  if (appearance.customCssAssets) return appearance.customCssAssets;
+  return appearance.customThemes.find((theme) => theme.css === appearance.customCss)?.assets;
 }
 
 function themeColorValue(appearance: AppearanceSettings, mode: ThemeOverrideMode, key: ThemeColorKey): string {
@@ -156,7 +226,7 @@ function MessageView({ message, executions, onOpenArtifact, onHtmlAction, onCopy
     return (
       <article className="message message-user">
         <div className="message-avatar user-avatar">我</div>
-        <div className="message-body">{images.length > 0 && <div className="image-message-list">{images.map((block, index) => <ImageMessageBlock key={`${message.id}-image-${index}`} block={block} />)}</div>}{text && <p className="user-text">{text}</p>}<div className="message-actions"><button type="button" title="复制" aria-label="复制用户消息" onClick={() => onCopy(message)}><Copy size={13} /></button><button type="button" title="重新编辑" aria-label="重新编辑用户消息" onClick={() => onEdit(message)}><Pencil size={13} /></button></div></div>
+        <div className="message-body message-bubble">{images.length > 0 && <div className="image-message-list">{images.map((block, index) => <ImageMessageBlock key={`${message.id}-image-${index}`} block={block} />)}</div>}{text && <p className="user-text">{text}</p>}<div className="message-actions"><button type="button" title="复制" aria-label="复制用户消息" onClick={() => onCopy(message)}><Copy size={13} /></button><button type="button" title="重新编辑" aria-label="重新编辑用户消息" onClick={() => onEdit(message)}><Pencil size={13} /></button></div></div>
       </article>
     );
   }
@@ -164,7 +234,7 @@ function MessageView({ message, executions, onOpenArtifact, onHtmlAction, onCopy
   return (
     <article className="message message-assistant">
       <div className="message-avatar pi-avatar"><Bot size={17} /></div>
-      <div className="message-body">
+      <div className="message-body message-bubble">
         {thinking && showThinking && (
           <details className="thinking-block" open={message.streaming}>
             <summary><LoaderCircle size={14} className={message.streaming ? "spinning" : ""} /> 思考过程</summary>
@@ -272,7 +342,8 @@ flowchart LR
 \`\`\`
 
 <assistant_html><div><strong>HTML 片段</strong><p>安全清洗后仍保留布局和交互样式。</p></div></assistant_html>`;
-  const previewCss = `${themePreviewCss(appearance.themePreset)}\n${themeOverrideCss(appearance.themeOverrides, ".theme-preview-scope")}\n${scopeCustomThemeCssForPreview(appearance.customCss)}`;
+  const previewCss = `${themePreviewCss(appearance.themePreset)}\n${themeOverrideCss(appearance.themeOverrides, ".theme-preview-scope")}\n${scopeCustomThemeCssForPreview(resolveThemeAssets(appearance.customCss, themeAssetsForAppearance(appearance)))}`;
+  const hasWallpaper = customCssHasWallpaper(appearance.customCss);
   const panes = [
     { id: "dark", label: "深色", effective: "dark" },
     { id: "light", label: "浅色", effective: "light" }
@@ -283,7 +354,7 @@ flowchart LR
       <div className="theme-preview-header"><span className="theme-preview-dot" /><strong>Pi Desktop</strong><small>深浅模式实时预览</small></div>
       <div className="theme-preview-modes">
         {panes.map((pane) => (
-          <section className="theme-preview-pane theme-preview-scope" data-theme={pane.effective} data-theme-effective={pane.effective} data-theme-preset={appearance.themePreset} data-theme-custom="true" key={pane.id}>
+          <section className="theme-preview-pane theme-preview-scope" data-theme={pane.effective} data-theme-effective={pane.effective} data-theme-preset={appearance.themePreset} data-theme-custom="true" data-theme-wallpaper={hasWallpaper ? "true" : undefined} key={pane.id}>
             <header className="theme-preview-pane-header"><strong>{pane.label}模式</strong><small>富内容输出</small></header>
             <div className="theme-preview-body"><div className="theme-preview-user-bubble">用户消息：主题色也会实时更新</div><RichContent streaming={false} artifactPrefix={`theme-preview-${pane.id}`} onOpenArtifact={() => undefined}>{previewContent}</RichContent></div>
           </section>
@@ -349,6 +420,8 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
   const [agentList, setAgentList] = useState<AgentProfile[]>(settings.agents);
   const [selectedAgentId, setSelectedAgentId] = useState(settings.currentAgentId);
   const cssFileInputRef = useRef<HTMLInputElement>(null);
+  const themeDirectoryInputRef = useRef<HTMLInputElement>(null);
+  const [themeImportError, setThemeImportError] = useState<string>();
   const initialCustomTheme = settings.appearance.customThemes.find((theme) => theme.css === settings.appearance.customCss);
   const [customThemeName, setCustomThemeName] = useState(initialCustomTheme?.name ?? "");
   const [editingCustomThemeId, setEditingCustomThemeId] = useState<string | undefined>(initialCustomTheme?.id);
@@ -385,10 +458,36 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file) return;
+    setThemeImportError(undefined);
     const css = await file.text();
     setCustomThemeName(cssThemeNameFromFile(file.name));
     setEditingCustomThemeId(undefined);
-    updateAppearance({ customCss: css });
+    updateAppearance({ customCss: css, customCssAssets: {} });
+  }
+
+  async function importThemeDirectory(event: React.ChangeEvent<HTMLInputElement>): Promise<void> {
+    const files = Array.from(event.target.files ?? []) as ThemeDirectoryFile[];
+    event.target.value = "";
+    setThemeImportError(undefined);
+    if (files.length === 0) return;
+    const cssFiles = files.filter((file) => file.name.toLowerCase().endsWith(".css"));
+    if (cssFiles.length === 0) {
+      setThemeImportError("主题目录中没有找到 CSS 文件");
+      return;
+    }
+    try {
+      const rootName = themeRelativePath(cssFiles[0]!).split("/")[0] || cssThemeNameFromFile(cssFiles[0]!.name);
+      const cssFile = cssFiles.find((file) => file.name.toLowerCase() === "theme.css")
+        ?? cssFiles.find((file) => file.name.toLowerCase() === `${rootName.toLowerCase()}.css`)
+        ?? cssFiles[0]!;
+      const css = await cssFile.text();
+      const assets = await collectThemeAssets(css, cssFile, files);
+      setCustomThemeName(themeNameFromCss(css, rootName));
+      setEditingCustomThemeId(undefined);
+      updateAppearance({ customCss: css, customCssAssets: assets });
+    } catch (error) {
+      setThemeImportError(error instanceof Error ? error.message : "主题目录导入失败");
+    }
   }
 
   function saveCustomTheme(): void {
@@ -397,10 +496,12 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
     const currentThemes = settings.appearance.customThemes;
     const existingIndex = editingCustomThemeId ? currentThemes.findIndex((theme) => theme.id === editingCustomThemeId) : -1;
     const existing = existingIndex >= 0 ? currentThemes[existingIndex] : undefined;
+    const assets = settings.appearance.customCssAssets;
     const nextTheme: CustomThemeDefinition = {
       id: existing?.id ?? createCustomThemeId(),
       name: customThemeName.trim() || existing?.name || `自定义主题 ${currentThemes.length + 1}`,
-      css
+      css,
+      ...(assets && Object.keys(assets).length > 0 ? { assets: structuredClone(assets) } : {})
     };
     const nextThemes = existingIndex >= 0
       ? currentThemes.map((theme, index) => index === existingIndex ? nextTheme : theme)
@@ -413,7 +514,7 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
   function applyCustomTheme(theme: CustomThemeDefinition): void {
     setEditingCustomThemeId(theme.id);
     setCustomThemeName(theme.name);
-    updateAppearance({ customCss: theme.css });
+    updateAppearance({ customCss: theme.css, customCssAssets: theme.assets ?? {} });
   }
 
   function deleteCustomTheme(theme: CustomThemeDefinition): void {
@@ -422,7 +523,7 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
     setEditingCustomThemeId(undefined);
     if (isActive) {
       setCustomThemeName("");
-      updateAppearance({ customCss: "", customThemes: nextThemes });
+      updateAppearance({ customCss: "", customCssAssets: {}, customThemes: nextThemes });
       return;
     }
     updateAppearance({ customThemes: nextThemes });
@@ -573,8 +674,9 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
             </div>
             <ThemePreview appearance={settings.appearance} />
           </div>
-              <div className="custom-css-heading"><span>自定义 CSS</span><div><input ref={cssFileInputRef} hidden type="file" accept=".css,text/css" onChange={(event) => void importCustomCss(event)} /><button className="secondary-button" type="button" onClick={() => cssFileInputRef.current?.click()}>导入 CSS</button><button className="secondary-button" type="button" onClick={() => { setEditingCustomThemeId(undefined); setCustomThemeName(""); updateAppearance({ customCss: "" }); }}>清空</button></div></div>
+              <div className="custom-css-heading"><span>自定义 CSS</span><div><input ref={cssFileInputRef} hidden type="file" accept=".css,text/css" onChange={(event) => void importCustomCss(event)} /><input ref={(element) => { themeDirectoryInputRef.current = element; element?.setAttribute("webkitdirectory", ""); }} hidden type="file" multiple accept=".css,image/png,image/jpeg,image/webp,image/gif" onChange={(event) => void importThemeDirectory(event)} /><button className="secondary-button" type="button" onClick={() => cssFileInputRef.current?.click()}>导入 CSS</button><button className="secondary-button" type="button" onClick={() => themeDirectoryInputRef.current?.click()}>导入主题目录</button><button className="secondary-button" type="button" onClick={() => { setEditingCustomThemeId(undefined); setCustomThemeName(""); setThemeImportError(undefined); updateAppearance({ customCss: "", customCssAssets: {} }); }}>清空</button></div></div>
               <label className="custom-css-field"><textarea value={settings.appearance.customCss} spellCheck={false} rows={11} placeholder={":root[data-theme-effective=\"dark\"] {\n  --accent: #8b5cf6;\n}"} aria-label="自定义 CSS" onChange={(event) => useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, customCss: event.target.value } } })} /></label>
+              {themeImportError && <p className="form-error theme-import-error">{themeImportError}</p>}
               <CustomThemeLibrary customCss={settings.appearance.customCss} customThemes={settings.appearance.customThemes} customThemeName={customThemeName} editingCustomThemeId={editingCustomThemeId} onNameChange={setCustomThemeName} onSave={saveCustomTheme} onExport={exportCustomCss} onApply={applyCustomTheme} onDelete={deleteCustomTheme} />
           <footer><button type="button" className="secondary-button" onClick={closeSettings}>取消</button><button className="primary-button" type="submit">保存外观设置</button></footer>
         </form>}</div></div>
@@ -671,6 +773,8 @@ export function App(): ReactNode {
     const root = document.documentElement;
     root.dataset.themePreset = settings.appearance.themePreset;
     root.dataset.themeCustom = "true";
+    if (customCssHasWallpaper(settings.appearance.customCss)) root.dataset.themeWallpaper = "true";
+    else delete root.dataset.themeWallpaper;
     const styleId = "pi-desktop-custom-theme";
     let style = document.getElementById(styleId) as HTMLStyleElement | null;
     if (!style) {
@@ -678,13 +782,15 @@ export function App(): ReactNode {
       style.id = styleId;
       document.head.appendChild(style);
     }
-    style.textContent = `${themePresetCss(settings.appearance.themePreset)}\n${themeOverrideCss(settings.appearance.themeOverrides)}\n${scopeCustomThemeCss(settings.appearance.customCss)}`;
+    const customCss = resolveThemeAssets(settings.appearance.customCss, themeAssetsForAppearance(settings.appearance));
+    style.textContent = `${themePresetCss(settings.appearance.themePreset)}\n${themeOverrideCss(settings.appearance.themeOverrides)}\n${scopeCustomThemeCss(customCss)}`;
     return () => {
       style?.remove();
       delete root.dataset.themePreset;
       delete root.dataset.themeCustom;
+      delete root.dataset.themeWallpaper;
     };
-  }, [settings.appearance.themePreset, settings.appearance.themeOverrides, settings.appearance.customCss]);
+  }, [settings.appearance.themePreset, settings.appearance.themeOverrides, settings.appearance.customCss, settings.appearance.customCssAssets, settings.appearance.customThemes]);
 
   async function openWorkspace(): Promise<void> {
     const path = await window.piDesktop.chooseWorkspace();

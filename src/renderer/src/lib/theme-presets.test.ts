@@ -32,6 +32,19 @@ describe("theme presets", () => {
     expect(css).not.toContain(':root[data-theme-preset="ocean"]');
   });
 
+  it("includes explicit foreground and status tokens for dark surfaces", () => {
+    const css = themePreviewCss("default");
+    expect(css).toContain("--text-on-user-bubble: #ffffff;");
+    expect(css).toContain("--inline-code-text: var(--accent-hover);");
+    expect(css).toContain("--danger-soft: #4a1d2b;");
+    expect(css).toContain("--diff-remove-text: #fda4af;");
+  });
+
+  it("chooses readable button foregrounds for bright preset accents", () => {
+    expect(themePresetCss("emerald")).toContain("--text-on-accent: #052e16;");
+    expect(themePresetCss("amber")).toContain("--text-on-accent: #422006;");
+  });
+
   it("resolves the four editable colors from each preset mode", () => {
     expect(themePresetColor("ocean", "light", "accent")).toBe("#0284c7");
     expect(themePresetColor("ocean", "dark", "accent")).toBe("#0ea5e9");
@@ -50,12 +63,12 @@ describe("theme presets", () => {
 
   it("redirects ChatAnyTime mode selectors into a preview scope", () => {
     expect(scopeCustomThemeCssForPreview("html.theme-light { --accent: red; } :root { --surface: blue; }"))
-      .toBe('.theme-preview-scope[data-theme-custom][data-theme-effective="light"] { --accent: red; } .theme-preview-scope[data-theme-custom][data-theme-effective="dark"] { --surface: blue; }');
+      .toBe('.theme-preview-scope[data-theme-custom][data-theme-effective="light"] { --accent: red; } .theme-preview-scope[data-theme-custom][data-theme-effective] { --surface: blue; }');
   });
 
   it("maps common ChatAnyTime variables into the desktop token names", () => {
     expect(scopeCustomThemeCss(':root { --bg-primary: #111; --accent-primary: #f0a; color: var(--text-primary); }'))
-      .toBe(':root[data-theme-custom] { --surface: #111; --accent: #f0a; color: var(--text); }');
+      .toBe(':root[data-theme-custom][data-theme-effective] { --surface: #111; --accent: #f0a; color: var(--text); }');
   });
 
   it("keeps ChatAnyTime semantic bubble variables and maps success colors", () => {
@@ -63,5 +76,12 @@ describe("theme presets", () => {
     expect(css).toContain("--success: #12b981");
     expect(css).toContain("--ai-bubble: #101827");
     expect(css).toContain("--tool-bubble-bg: #18243a");
+  });
+
+  it("keeps ChatAnyTime wallpaper variables and scopes bubble styles", () => {
+    const css = scopeCustomThemeCss("html.has-wallpaper .message-bubble { --chat-bg-image: url(wallpaper-dark.png); }");
+    expect(css).toContain(':root[data-theme-custom][data-theme-wallpaper="true"]');
+    expect(css).toContain(':root[data-theme-custom] .message-bubble');
+    expect(css).toContain("--chat-bg-image: url(wallpaper-dark.png)");
   });
 });

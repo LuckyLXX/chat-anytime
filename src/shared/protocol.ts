@@ -60,10 +60,14 @@ export interface AgentProfile {
 export const THEME_PRESET_IDS = ["default", "ocean", "emerald", "indigo", "forest", "rose", "amber", "violet", "carbon"] as const;
 export type ThemePresetId = typeof THEME_PRESET_IDS[number];
 
+export type ThemeAssetMap = Record<string, string>;
+
 export interface CustomThemeDefinition {
   id: string;
   name: string;
   css: string;
+  /** Image data is kept separately so the editable CSS stays readable. */
+  assets?: ThemeAssetMap;
 }
 
 export type ThemeColorKey = "accent" | "accentHover" | "userBubble" | "aiBubble";
@@ -85,6 +89,8 @@ export interface AppearanceSettings {
   theme: "system" | "light" | "dark";
   themePreset: ThemePresetId;
   customCss: string;
+  /** Imported image data keyed by the relative url used in customCss. */
+  customCssAssets?: ThemeAssetMap;
   customThemes: CustomThemeDefinition[];
   themeOverrides: ThemeOverrides;
   showThinking: boolean;

@@ -7,6 +7,7 @@ import type {
   DesktopSettings,
   ProviderModelSettings,
   ProviderSettings,
+  ThemeAssetMap,
   ThemeColorKey,
   ThemeColorOverrides,
   ThemeOverrides,
@@ -74,12 +75,21 @@ export function normalizeCustomThemes(value: unknown): CustomThemeDefinition[] {
     if (!css.trim()) return [];
     const name = typeof source.name === "string" && source.name.trim() ? source.name.trim() : `自定义主题 ${index + 1}`;
     const baseId = typeof source.id === "string" && source.id.trim() ? source.id.trim() : `custom-${index + 1}`;
+    const assets = normalizeThemeAssets(source.assets);
     let id = baseId;
     let suffix = 2;
     while (usedIds.has(id)) id = `${baseId}-${suffix++}`;
     usedIds.add(id);
-    return [{ id, name, css }];
+    return [{ id, name, css, ...(Object.keys(assets).length > 0 ? { assets } : {}) }];
   });
+}
+
+export function normalizeThemeAssets(value: unknown): ThemeAssetMap {
+  if (!value || typeof value !== "object") return {};
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).flatMap(([path, data]) => {
+    const normalizedPath = path.trim().replaceAll("\\", "/").replace(/^\.\/+?/u, "").toLowerCase();
+    return normalizedPath && typeof data === "string" && data.startsWith("data:image/") ? [[normalizedPath, data]] : [];
+  }));
 }
 
 export function normalizeAgent(agent: Partial<AgentProfile> | undefined): AgentProfile {
@@ -178,6 +188,7 @@ export function migrateSettings(raw: unknown): { settings: DesktopSettings; lega
     ? appearanceSource.themePreset as ThemePresetId
     : defaults.appearance.themePreset;
   const customCss = typeof appearanceSource.customCss === "string" ? appearanceSource.customCss : defaults.appearance.customCss;
+  const customCssAssets = normalizeThemeAssets(appearanceSource.customCssAssets);
   const customThemes = normalizeCustomThemes(appearanceSource.customThemes);
   const themeOverrides = normalizeThemeOverrides(appearanceSource.themeOverrides);
   const thinkingLevel = ["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(String(source.thinkingLevel))
@@ -191,7 +202,7 @@ export function migrateSettings(raw: unknown): { settings: DesktopSettings; lega
     providers,
     agents: normalizedAgents,
     currentAgentId,
-    appearance: { theme, themePreset, customCss, customThemes, themeOverrides, showThinking: appearanceSource.showThinking !== false }
+    appearance: { theme, themePreset, customCss, ...(Object.keys(customCssAssets).length > 0 ? { customCssAssets } : {}), customThemes, themeOverrides, showThinking: appearanceSource.showThinking !== false }
   };
   const legacyApiKey = typeof source.customProviderApiKey === "string" ? source.customProviderApiKey : undefined;
   return { settings, legacyApiKey };
