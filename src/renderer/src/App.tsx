@@ -14,17 +14,23 @@ import {
   LoaderCircle,
   MessageSquarePlus,
   MessageCircle,
+  PackageOpen,
+  PlugZap,
+  Puzzle,
   Search,
+  Server,
   Users,
   PanelRightClose,
   PanelRightOpen,
   Play,
+  Plus,
   RefreshCw,
   RotateCcw,
-  Paperclip,
   Pencil,
   Save,
+  ShieldAlert,
   Settings,
+  ShieldCheck,
   TerminalSquare,
   Trash2,
   Wrench,
@@ -32,6 +38,7 @@ import {
 } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import type {
+  AccessMode,
   AppearanceSettings,
   ChatMessage,
   AgentProfile,
@@ -39,6 +46,7 @@ import type {
   ProviderSettings,
   CustomProviderModel,
   ModelOption,
+  McpServerStatus,
   PermissionDecision,
   ProviderOption,
   CustomThemeDefinition,
@@ -48,7 +56,12 @@ import type {
   ThemeOverrideMode,
   ThemePresetId,
   ToolExecution,
-  MessageBlock
+  MessageBlock,
+  TurnTiming,
+  ResourceCatalog,
+  ResourceScope,
+  McpServerConfigDraft,
+  RuntimeCommand
 } from "../../shared/protocol";
 import { thinkingLevelLabels, toolLabel } from "../../shared/locale";
 import { ArtifactPreview } from "./components/ArtifactPreview";
@@ -56,10 +69,23 @@ import { DiffView } from "./components/DiffView";
 import { RichContent } from "./components/RichContent";
 import { compactPath, formatDuration, type Artifact } from "./lib/content";
 import { groupAssistantMessages, splitAssistantToolLayout } from "./lib/chat-layout";
-import { THEME_PRESETS, scopeCustomThemeCss, scopeCustomThemeCssForPreview, themeOverrideCss, themePresetColor, themePresetCss, themePreviewCss } from "./lib/theme-presets";
+import { CSS_URL_PATTERN, createThemeAssetUrls, isExternalThemeReference, normalizeThemeAssetReference, resolveThemeAssets } from "./lib/theme-assets";
+import { THEME_PRESETS, scopeCustomThemeCss, scopeCustomThemeCssForPreview, themeOverrideCss, themePresetColor, themePresetCss, themePreviewCss, themeWallpaperOpacity } from "./lib/theme-presets";
 import { useDesktopStore } from "./store";
 
 const thinkingLevels: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+const accessModeOptions: readonly { value: AccessMode; label: string }[] = [
+  { value: "read-only", label: "只读" },
+  { value: "ask", label: "每次询问" },
+  { value: "workspace", label: "工作区访问" },
+  { value: "full", label: "完全访问" }
+];
+const accessModeDescriptions: Record<AccessMode, string> = {
+  "read-only": "只允许读取，不执行修改和命令",
+  ask: "危险操作执行前逐次询问",
+  workspace: "工作区内文件写入自动允许",
+  full: "自动允许全部工具操作"
+};
 const agentTools: BuiltinToolName[] = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 const themeColorFields: readonly { key: ThemeColorKey; label: string }[] = [
   { key: "accent", label: "主题色" },
@@ -103,16 +129,6 @@ function customCssHasWallpaper(css: string): boolean {
   return /--chat-bg-image\s*:\s*(?!none\b)/iu.test(css);
 }
 
-const CSS_URL_PATTERN = /url\(\s*(['"]?)([^'")]+)\1\s*\)/giu;
-
-function normalizeThemeAssetReference(value: string): string {
-  return value.trim().replaceAll("\\", "/").replace(/^\.\/+?/u, "").toLowerCase();
-}
-
-function isExternalThemeReference(reference: string): boolean {
-  return !reference || /^(?:data:|https?:|file:|blob:|var\(|#)/iu.test(reference);
-}
-
 async function collectThemeAssets(css: string, cssFile: File, files: File[]): Promise<ThemeAssetMap> {
   const imageFiles = files.filter((file) => /\.(?:png|jpe?g|webp|gif)$/iu.test(file.name));
   const assets = await Promise.all(imageFiles.map(async (file) => [themeRelativePath(file).toLowerCase(), await readFileAsDataUrl(file)] as const));
@@ -133,18 +149,19 @@ async function collectThemeAssets(css: string, cssFile: File, files: File[]): Pr
   return result;
 }
 
-function resolveThemeAssets(css: string, assets: ThemeAssetMap | undefined): string {
-  if (!assets || Object.keys(assets).length === 0) return css;
-  return css.replace(CSS_URL_PATTERN, (match, _quote: string, rawReference: string) => {
-    const reference = normalizeThemeAssetReference(rawReference);
-    const dataUrl = assets[reference];
-    return dataUrl && !isExternalThemeReference(reference) ? `url("${dataUrl}")` : match;
-  });
-}
-
 function themeAssetsForAppearance(appearance: AppearanceSettings): ThemeAssetMap | undefined {
   if (appearance.customCssAssets) return appearance.customCssAssets;
   return appearance.customThemes.find((theme) => theme.css === appearance.customCss)?.assets;
+}
+
+function useThemeAssetUrls(assets: ThemeAssetMap | undefined): ThemeAssetMap {
+  const [urls, setUrls] = useState<ThemeAssetMap>({});
+  useEffect(() => {
+    const assetUrlSet = createThemeAssetUrls(assets);
+    setUrls(assetUrlSet.urls);
+    return assetUrlSet.revoke;
+  }, [assets]);
+  return urls;
 }
 
 function themeColorValue(appearance: AppearanceSettings, mode: ThemeOverrideMode, key: ThemeColorKey): string {
@@ -167,6 +184,43 @@ function thinkingText(message: ChatMessage): string {
 
 function blockText(blocks: MessageBlock[]): string {
   return blocks.filter((block) => block.type === "text").map((block) => block.text).join("");
+}
+
+function useElapsedNow(active: boolean): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) {
+      setNow(Date.now());
+      return;
+    }
+    const update = (): void => setNow(Date.now());
+    update();
+    const timer = window.setInterval(update, 100);
+    return () => window.clearInterval(timer);
+  }, [active]);
+  return now;
+}
+
+function TimingMeta({ timing, now }: { timing: TurnTiming; now: number }): ReactNode {
+  const completedAt = timing.completedAt ?? now;
+  return (
+    <div className="message-timing" aria-label="回答耗时与总耗时">
+      <span>回答耗时 {timing.answerStartedAt === undefined ? "等待输出" : formatDuration(timing.answerStartedAt, completedAt)}</span>
+      <span>总耗时 {formatDuration(timing.startedAt, completedAt)}</span>
+    </div>
+  );
+}
+
+function PendingResponse({ agentName, timing, now }: { agentName: string; timing?: TurnTiming; now: number }): ReactNode {
+  return (
+    <article className="message message-assistant pending-response">
+      <div className="message-avatar pi-avatar"><LoaderCircle size={17} className="spinning" /></div>
+      <div className="message-body message-bubble pending-response-body">
+        <div className="response-progress"><LoaderCircle size={14} className="spinning" /><span>{agentName}正在努力输出中……</span></div>
+        {timing && <TimingMeta timing={timing} now={now} />}
+      </div>
+    </article>
+  );
 }
 
 function ImageMessageBlock({ block }: { block: Extract<MessageBlock, { type: "image" }> }): ReactNode {
@@ -216,7 +270,7 @@ function ToolGroup({ calls, executions, streaming }: { calls: Array<Extract<Mess
   );
 }
 
-function MessageView({ message, executions, onOpenArtifact, onHtmlAction, onCopy, onEdit, onRegenerate, showThinking = true, busy = false }: { message: ChatMessage; executions: ToolExecution[]; onOpenArtifact(artifact: Artifact): void; onHtmlAction(text: string): void; onCopy(message: ChatMessage): void; onEdit(message: ChatMessage): void; onRegenerate(message: ChatMessage): void; showThinking?: boolean; busy?: boolean }): ReactNode {
+function MessageView({ message, executions, onOpenArtifact, onHtmlAction, onCopy, onEdit, onRegenerate, showThinking = true, busy = false, timing, now = Date.now() }: { message: ChatMessage; executions: ToolExecution[]; onOpenArtifact(artifact: Artifact): void; onHtmlAction(text: string): void; onCopy(message: ChatMessage): void; onEdit(message: ChatMessage): void; onRegenerate(message: ChatMessage): void; showThinking?: boolean; busy?: boolean; timing?: TurnTiming; now?: number }): ReactNode {
   const text = messageText(message);
   const thinking = thinkingText(message);
   const toolLayout = splitAssistantToolLayout(message);
@@ -249,6 +303,7 @@ function MessageView({ message, executions, onOpenArtifact, onHtmlAction, onCopy
           </>
         ) : text && <RichContent streaming={message.streaming} artifactPrefix={message.id} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction}>{text}</RichContent>}
         {message.error && <p className="inline-error"><AlertCircle size={15} />{message.error}</p>}
+        {timing && <TimingMeta timing={timing} now={now} />}
         {!message.streaming && !busy && <div className="message-actions"><button type="button" title="重新生成" aria-label="重新生成回复" onClick={() => onRegenerate(message)}><RefreshCw size={13} /></button><button type="button" title="复制" aria-label="复制 AI 回复" onClick={() => onCopy(message)}><Copy size={13} /></button></div>}
       </div>
     </article>
@@ -320,6 +375,7 @@ function ChangesPanel({ executions }: { executions: ToolExecution[] }): ReactNod
 }
 
 function ThemePreview({ appearance }: { appearance: AppearanceSettings }): ReactNode {
+  const themeAssetUrls = useThemeAssetUrls(themeAssetsForAppearance(appearance));
   const previewContent = `**实时主题预览**
 
 Markdown、表格、代码、公式和图表会共用当前主题变量。
@@ -342,7 +398,7 @@ flowchart LR
 \`\`\`
 
 <assistant_html><div><strong>HTML 片段</strong><p>安全清洗后仍保留布局和交互样式。</p></div></assistant_html>`;
-  const previewCss = `${themePreviewCss(appearance.themePreset)}\n${themeOverrideCss(appearance.themeOverrides, ".theme-preview-scope")}\n${scopeCustomThemeCssForPreview(resolveThemeAssets(appearance.customCss, themeAssetsForAppearance(appearance)))}`;
+  const previewCss = `${themePreviewCss(appearance.themePreset)}\n${scopeCustomThemeCssForPreview(resolveThemeAssets(appearance.customCss, themeAssetUrls))}\n${themeOverrideCss(appearance.themeOverrides, ".theme-preview-scope[data-theme-custom]")}`;
   const hasWallpaper = customCssHasWallpaper(appearance.customCss);
   const panes = [
     { id: "dark", label: "深色", effective: "dark" },
@@ -400,7 +456,152 @@ function CustomThemeLibrary({ customCss, customThemes, customThemeName, editingC
   );
 }
 
-function SettingsDialog({ settings, models, providers, customProvider, customProviderKeyConfigured, customModels, customModelFetchStatus, customModelFetchError, onClose }: { settings: import("../../shared/protocol").DesktopSettings; models: ModelOption[]; providers: ProviderOption[]; customProvider?: ProviderSettings; customProviderKeyConfigured: boolean; customModels: CustomProviderModel[]; customModelFetchStatus: "idle" | "loading" | "success" | "error"; customModelFetchError?: string; onClose(): void }): ReactNode {
+const resourceScopeLabels: Record<ResourceScope, string> = {
+  global: "全局",
+  project: "当前项目",
+  package: "Pi Package",
+  bundled: "内置",
+  temporary: "临时",
+  unknown: "未知"
+};
+
+const mcpStatusLabels: Record<McpServerStatus, string> = {
+  connected: "已连接",
+  cached: "有缓存",
+  failed: "连接失败",
+  "needs-auth": "需要认证",
+  "not-connected": "未连接",
+  disabled: "已停用"
+};
+
+function parseKeyValueLines(value: string): Record<string, string> | undefined {
+  const entries = value.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean).map((line) => {
+    const separator = line.indexOf("=");
+    if (separator <= 0) throw new Error(`环境变量格式无效：${line}，应为 KEY=VALUE`);
+    const key = line.slice(0, separator).trim();
+    const entryValue = line.slice(separator + 1).trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(key)) throw new Error(`环境变量名无效：${key}`);
+    return [key, entryValue] as const;
+  });
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+}
+
+interface ResourceSettingsProps {
+  resources: ResourceCatalog;
+}
+
+function ResourceSettings({ resources }: ResourceSettingsProps): ReactNode {
+  const [packageSource, setPackageSource] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [localError, setLocalError] = useState<string>();
+  const [mcpFormOpen, setMcpFormOpen] = useState(false);
+  const [mcpName, setMcpName] = useState("");
+  const [mcpScope, setMcpScope] = useState<McpServerConfigDraft["scope"]>("project");
+  const [mcpTransport, setMcpTransport] = useState<McpServerConfigDraft["transport"]>("stdio");
+  const [mcpCommand, setMcpCommand] = useState("npx");
+  const [mcpArgs, setMcpArgs] = useState("");
+  const [mcpUrl, setMcpUrl] = useState("");
+  const [mcpAuth, setMcpAuth] = useState<NonNullable<McpServerConfigDraft["auth"]>>("none");
+  const [mcpBearerTokenEnv, setMcpBearerTokenEnv] = useState("");
+  const [mcpEnv, setMcpEnv] = useState("");
+
+  async function run(command: RuntimeCommand): Promise<boolean> {
+    setBusy(true);
+    setLocalError(undefined);
+    try {
+      await window.piDesktop.send(command);
+      return true;
+    } catch (error) {
+      setLocalError(error instanceof Error ? error.message : "资源操作失败");
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function installPackage(event: FormEvent): Promise<void> {
+    event.preventDefault();
+    const source = packageSource.trim();
+    if (!source) return;
+    if (await run({ type: "resources.package.install", source })) setPackageSource("");
+  }
+
+  async function addMcpServer(event: FormEvent): Promise<void> {
+    event.preventDefault();
+    try {
+      const server: McpServerConfigDraft = {
+        name: mcpName.trim(),
+        scope: mcpScope,
+        transport: mcpTransport,
+        ...(mcpTransport === "stdio"
+          ? {
+              command: mcpCommand.trim(),
+              args: mcpArgs.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean),
+              env: parseKeyValueLines(mcpEnv)
+            }
+          : {
+              url: mcpUrl.trim(),
+              auth: mcpAuth,
+              ...(mcpAuth === "bearer-env" ? { bearerTokenEnv: mcpBearerTokenEnv.trim() } : {})
+            })
+      };
+      const success = await run({ type: "mcp.server.save", server });
+      if (!success) return;
+      setMcpName("");
+      setMcpUrl("");
+      setMcpArgs("");
+      setMcpEnv("");
+      setMcpBearerTokenEnv("");
+      setMcpFormOpen(false);
+    } catch (error) {
+      setLocalError(error instanceof Error ? error.message : "MCP Server 配置无效");
+    }
+  }
+
+  return (
+    <div className="resource-settings">
+      <div className="resource-settings-header"><div><h3><Puzzle size={16} />技能与 MCP</h3><p>Skill 会跟随 Pi 资源加载，MCP Server 使用标准配置文件。</p></div><button className="secondary-button" type="button" disabled={busy} onClick={() => void run({ type: "resources.reload" })}><RefreshCw size={13} className={busy ? "spinning" : undefined} />重载资源</button></div>
+      {!resources.mcpAdapterLoaded && <div className="resource-notice"><PlugZap size={15} /><span>MCP 适配器尚未加载。请先重载资源，或安装 `pi-mcp-adapter` Package。</span></div>}
+      {localError && <p className="form-error resource-error">{localError}</p>}
+      <section className="resource-section">
+        <div className="resource-section-heading"><span><Puzzle size={14} />Skill</span><small>{resources.skills.length} 个已发现</small></div>
+        {resources.skills.length === 0 ? <p className="resource-empty">当前没有发现 Skill。安装一个 Pi Package 后重载资源，Package 中的 `SKILL.md` 会出现在这里。</p> : <div className="resource-list">{resources.skills.map((skill) => <div className="resource-item" key={`${skill.source}:${skill.name}`}><div className="resource-item-icon"><Puzzle size={14} /></div><div className="resource-item-copy"><strong>/skill:{skill.name}</strong><small>{skill.description}</small><em>{resourceScopeLabels[skill.scope]} · {skill.source}{skill.disableModelInvocation ? " · 仅手动调用" : ""}</em></div></div>)}</div>}
+      </section>
+      <section className="resource-section">
+        <div className="resource-section-heading"><span><Server size={14} />MCP Server</span><div className="resource-section-actions"><small>{resources.mcpServers.length} 个已发现</small><button className="secondary-button compact-button" type="button" disabled={busy} onClick={() => setMcpFormOpen((open) => !open)}><Plus size={13} />{mcpFormOpen ? "收起" : "添加"}</button></div></div>
+        {mcpFormOpen && <form className="mcp-config-form" onSubmit={(event) => void addMcpServer(event)}>
+          <div className="mcp-form-grid">
+            <label>名称<input value={mcpName} placeholder="例如 context7" onChange={(event) => setMcpName(event.target.value)} /></label>
+            <label>写入范围<select value={mcpScope} onChange={(event) => setMcpScope(event.target.value as McpServerConfigDraft["scope"])}><option value="project">当前项目 .mcp.json</option><option value="global">用户全局 Pi 配置</option></select></label>
+            <label>连接方式<select value={mcpTransport} onChange={(event) => setMcpTransport(event.target.value as McpServerConfigDraft["transport"])}><option value="stdio">本地命令（stdio）</option><option value="http">远程地址（HTTP）</option></select></label>
+            {mcpTransport === "stdio" ? <>
+              <label>启动命令<input value={mcpCommand} placeholder="npx" onChange={(event) => setMcpCommand(event.target.value)} /></label>
+              <label className="mcp-form-wide">参数（每行一个）<textarea value={mcpArgs} rows={3} placeholder={"-y\ncontext7-mcp"} onChange={(event) => setMcpArgs(event.target.value)} /></label>
+              <label className="mcp-form-wide">环境变量（可选，每行 `KEY=VALUE`）<textarea value={mcpEnv} rows={2} placeholder="API_KEY=$env:CONTEXT7_API_KEY" onChange={(event) => setMcpEnv(event.target.value)} /></label>
+            </> : <>
+              <label className="mcp-form-wide">服务器地址<input value={mcpUrl} placeholder="https://mcp.example.com/mcp" onChange={(event) => setMcpUrl(event.target.value)} /></label>
+              <label>认证<select value={mcpAuth} onChange={(event) => setMcpAuth(event.target.value as NonNullable<McpServerConfigDraft["auth"]>)}><option value="none">无</option><option value="oauth">OAuth</option><option value="bearer-env">Bearer 环境变量</option></select></label>
+              {mcpAuth === "bearer-env" && <label>Token 环境变量<input value={mcpBearerTokenEnv} placeholder="MCP_TOKEN" onChange={(event) => setMcpBearerTokenEnv(event.target.value)} /></label>}
+            </>}
+          </div>
+          <p className="resource-form-help">添加后会写入 Pi 标准 MCP 配置并自动重载。stdio 服务通常由 `npx` 在首次使用时启动；敏感值建议使用 `$env:变量名`，不要直接写入配置。</p>
+          <footer className="mcp-form-actions"><button className="secondary-button" type="button" disabled={busy} onClick={() => setMcpFormOpen(false)}><X size={13} />取消</button><button className="primary-button" type="submit" disabled={busy}><Plus size={13} />添加 MCP</button></footer>
+        </form>}
+        {resources.mcpServers.length === 0 ? <p className="resource-empty">未发现 MCP Server。点击“添加”，或将已有配置放入 `.mcp.json`。</p> : <div className="resource-list">{resources.mcpServers.map((server) => <div className="resource-item mcp-resource-item" key={server.name}><div className={`resource-item-icon mcp-status-icon ${server.status}`}><Server size={14} /></div><div className="resource-item-copy"><strong>{server.name}</strong><small>{mcpStatusLabels[server.status]} · {server.toolCount} 个工具{server.resourceCount === undefined ? "" : ` · ${server.resourceCount} 个资源`}</small>{server.failedAgoSeconds !== undefined && <em>{server.failedAgoSeconds} 秒前失败</em>}</div><label className="resource-toggle"><input type="checkbox" checked={!server.disabled} disabled={busy} onChange={(event) => void run({ type: "mcp.server.toggle", name: server.name, enabled: event.target.checked })} /><span>启用</span></label></div>)}</div>}
+      </section>
+      <section className="resource-section">
+        <div className="resource-section-heading"><span><PackageOpen size={14} />安装 Skill / Pi Package</span><small>Skill 随 Package 加载</small></div>
+        <p className="resource-form-help resource-package-help">输入 npm 或 Git 来源。Pi 会安装 Package，重载后自动发现其中的 Skill；第三方 Extension 不会被本应用自动执行。</p>
+        <form className="resource-package-form" onSubmit={(event) => void installPackage(event)}><input value={packageSource} placeholder="npm:package-name 或 git:..." onChange={(event) => setPackageSource(event.target.value)} /><button className="primary-button" type="submit" disabled={busy || !packageSource.trim()}><PackageOpen size={13} />安装</button></form>
+        <div className="resource-list resource-package-list">{resources.packages.map((item) => <div className="resource-item" key={`${item.scope}:${item.source}`}><div className="resource-item-icon"><PackageOpen size={14} /></div><div className="resource-item-copy"><strong>{item.source}</strong><small>{resourceScopeLabels[item.scope]} · {item.installed ? "已安装" : "未安装"}</small></div>{item.removable && <button className="icon-button resource-remove" type="button" title={`删除 ${item.source}`} aria-label={`删除 ${item.source}`} disabled={busy} onClick={() => void run({ type: "resources.package.remove", source: item.source, scope: item.scope === "project" ? "project" : "global" })}><Trash2 size={14} /></button>}</div>)}</div>
+      </section>
+      {resources.extensions.length > 0 && <section className="resource-section"><div className="resource-section-heading"><span><PlugZap size={14} />Extension</span><small>{resources.extensions.length} 个已加载</small></div><div className="resource-list">{resources.extensions.map((extension) => <div className="resource-item" key={`${extension.source}:${extension.name}`}><div className={`resource-item-icon ${extension.loaded ? "" : "resource-item-error"}`}><PlugZap size={14} /></div><div className="resource-item-copy"><strong>{extension.name}</strong><small>{extension.loaded ? `${resourceScopeLabels[extension.scope]} · ${extension.source}` : extension.error ?? "加载失败"}</small></div></div>)}</div></section>}
+      {resources.diagnostics.length > 0 && <div className="resource-diagnostics"><strong>资源诊断</strong>{resources.diagnostics.map((diagnostic) => <p key={diagnostic}>{diagnostic}</p>)}</div>}
+    </div>
+  );
+}
+
+function SettingsDialog({ settings, models, providers, customProvider, customProviderKeyConfigured, customModels, customModelFetchStatus, customModelFetchError, resources, onClose }: { settings: import("../../shared/protocol").DesktopSettings; models: ModelOption[]; providers: ProviderOption[]; customProvider?: ProviderSettings; customProviderKeyConfigured: boolean; customModels: CustomProviderModel[]; customModelFetchStatus: "idle" | "loading" | "success" | "error"; customModelFetchError?: string; resources: ResourceCatalog; onClose(): void }): ReactNode {
   const customProviderId = "chatanytime-openai-compatible";
   const configuredProviders = settings.providers;
   const firstCustomProvider = configuredProviders[0];
@@ -414,8 +615,13 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
   const [apiKey, setApiKey] = useState("");
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string>();
-  const [tab, setTab] = useState<"general" | "models" | "agents" | "appearance">("general");
-  const [themeColorMode, setThemeColorMode] = useState<ThemeOverrideMode>("light");
+  const [tab, setTab] = useState<"general" | "models" | "agents" | "appearance" | "resources">("general");
+  const [themeColorMode, setThemeColorMode] = useState<ThemeOverrideMode>(() => {
+    const { theme } = settings.appearance;
+    if (theme === "light") return "light";
+    if (theme === "dark") return "dark";
+    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  });
   const initialSettingsRef = useRef<import("../../shared/protocol").DesktopSettings>(structuredClone(settings));
   const [agentList, setAgentList] = useState<AgentProfile[]>(settings.agents);
   const [selectedAgentId, setSelectedAgentId] = useState(settings.currentAgentId);
@@ -431,11 +637,25 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
   const providerModels = isCustomProvider ? (selectedProvider?.models ?? customModels) : [];
   const enabledProviderModels = providerModels.filter((model) => model.enabled !== false);
   const selectedCustomModel = providerModels.find((model) => model.id === customModelId);
+  const wallpaperOpacityOverride = settings.appearance.themeOverrides[themeColorMode].wallpaperOpacity;
+  const wallpaperOpacity = wallpaperOpacityOverride ?? themeWallpaperOpacity(settings.appearance.customCss, themeColorMode) ?? 0;
+  const wallpaperOpacityPercent = Math.round(wallpaperOpacity * 100);
   function closeSettings(): void { useDesktopStore.setState({ settings: structuredClone(initialSettingsRef.current) }); onClose(); }
   function markSettingsSaved(nextSettings: import("../../shared/protocol").DesktopSettings): void {
     const saved = structuredClone(nextSettings);
     initialSettingsRef.current = saved;
     useDesktopStore.setState({ settings: saved });
+  }
+
+  function updateProviderModel(modelId: string, patch: Partial<import("../../shared/protocol").ProviderModelSettings>): void {
+    const updated = providerModels.map((model) => model.id === modelId ? { ...model, ...patch } : model);
+    const hasConfiguredProvider = settings.providers.some((item) => item.id === provider);
+    useDesktopStore.setState((state) => ({
+      customModels: (!selectedProvider || provider === customProviderId) ? updated : state.customModels,
+      settings: hasConfiguredProvider
+        ? { ...state.settings, providers: state.settings.providers.map((item) => item.id === provider ? { ...item, models: updated } : item) }
+        : state.settings
+    }));
   }
 
   function updateAppearance(patch: Partial<AppearanceSettings>): void {
@@ -451,6 +671,18 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
   function resetThemeColor(key: ThemeColorKey): void {
     const themeOverrides = structuredClone(settings.appearance.themeOverrides);
     delete themeOverrides[themeColorMode][key];
+    updateAppearance({ themeOverrides });
+  }
+
+  function updateWallpaperOpacity(value: number): void {
+    const themeOverrides = structuredClone(settings.appearance.themeOverrides);
+    themeOverrides[themeColorMode].wallpaperOpacity = Math.min(1, Math.max(0, value));
+    updateAppearance({ themeOverrides });
+  }
+
+  function resetWallpaperOpacity(): void {
+    const themeOverrides = structuredClone(settings.appearance.themeOverrides);
+    delete themeOverrides[themeColorMode].wallpaperOpacity;
     updateAppearance({ themeOverrides });
   }
 
@@ -564,7 +796,7 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
     try {
       if (isCustomProvider) {
         const modelsForProvider = providerModels;
-        const providerConfig = { id: provider, name: customName.trim(), baseUrl: customBaseUrl.trim(), models: modelsForProvider.length ? modelsForProvider.map((model) => model.id === customModelId && imageInputOverride !== undefined ? { ...model, imageInput: imageInputOverride } : { ...model, enabled: model.enabled !== false }) : [{ id: customModelId.trim(), name: customModelId.trim(), imageInput: imageInputOverride ?? selectedCustomModel?.imageInput, enabled: true }] };
+        const providerConfig = { id: provider, name: customName.trim(), baseUrl: customBaseUrl.trim(), models: modelsForProvider.length ? modelsForProvider.map((model) => ({ ...model, enabled: model.enabled !== false })) : [{ id: customModelId.trim(), name: customModelId.trim(), imageInput: imageInputOverride ?? selectedCustomModel?.imageInput, enabled: true }] };
         await window.piDesktop.send({ type: "provider.save", provider: providerConfig, apiKey: apiKey.trim() || undefined });
         const nextProviders = settings.providers.some((item) => item.id === provider) ? settings.providers.map((item) => item.id === provider ? providerConfig : item) : [...settings.providers, providerConfig];
         markSettingsSaved({ ...settings, providers: nextProviders.map((item) => item.id === provider ? { ...item, keyConfigured: Boolean(apiKey.trim()) || selectedProvider?.keyConfigured } : item) });
@@ -639,9 +871,12 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
     <div className="modal-backdrop" role="presentation" onMouseDown={closeSettings}>
       <section className="settings-dialog settings-center" onMouseDown={(event) => event.stopPropagation()}>
         <header><div><Settings size={19} /><div><h2>ChatAnyTime 设置</h2><p>模型服务和 Agent 角色配置保存在本机。</p></div></div><button className="icon-button" type="button" title="关闭设置" aria-label="关闭设置" onClick={closeSettings}><X size={18} /></button></header>
-        <div className="settings-body"><nav className="settings-tabs"><button type="button" className={tab === "general" ? "active" : ""} onClick={() => setTab("general")}>通用</button><button type="button" className={tab === "models" ? "active" : ""} onClick={() => setTab("models")}>模型服务</button><button type="button" className={tab === "agents" ? "active" : ""} onClick={() => setTab("agents")}>Agent 角色</button><button type="button" className={tab === "appearance" ? "active" : ""} onClick={() => setTab("appearance")}>外观</button></nav><div className="settings-content">{tab === "general" ? <form onSubmit={(event) => { event.preventDefault(); const nextSettings = structuredClone(settings); void window.piDesktop.send({ type: "settings.save", settings: { model: nextSettings.model, thinkingLevel: nextSettings.thinkingLevel, appearance: nextSettings.appearance } }); markSettingsSaved(nextSettings); onClose(); }}>
+        <div className="settings-body"><nav className="settings-tabs"><button type="button" className={tab === "general" ? "active" : ""} onClick={() => setTab("general")}>通用</button><button type="button" className={tab === "models" ? "active" : ""} onClick={() => setTab("models")}>模型服务</button><button type="button" className={tab === "agents" ? "active" : ""} onClick={() => setTab("agents")}>Agent 角色</button><button type="button" className={tab === "resources" ? "active" : ""} onClick={() => setTab("resources")}>技能与 MCP</button><button type="button" className={tab === "appearance" ? "active" : ""} onClick={() => setTab("appearance")}>外观</button></nav><div className="settings-content">{tab === "general" ? <form onSubmit={(event) => { event.preventDefault(); const nextSettings = structuredClone(settings); void window.piDesktop.send({ type: "settings.save", settings: { model: nextSettings.model, thinkingLevel: nextSettings.thinkingLevel, accessMode: nextSettings.accessMode, appearance: nextSettings.appearance } }); markSettingsSaved(nextSettings); onClose(); }}>
           <label>全局默认模型<select value={settings.model ? `${settings.model.provider}/${settings.model.id}` : ""} onChange={(event) => { const value = event.target.value; const slash = value.indexOf("/"); useDesktopStore.setState({ settings: { ...settings, model: slash > 0 ? { provider: value.slice(0, slash), id: value.slice(slash + 1) } : undefined } }); }}>{<option value="">请选择默认模型</option>}{models.filter((model) => model.configured).map((model) => <option key={`${model.provider}/${model.id}`} value={`${model.provider}/${model.id}`}>{model.name}</option>)}</select></label>
           <label>默认思考等级<select value={settings.thinkingLevel} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, thinkingLevel: event.target.value as ThinkingLevel } })}>{thinkingLevels.map((level) => <option key={level} value={level}>{thinkingLevelLabels[level]}</option>)}</select></label>
+          <label>访问模式<select value={settings.accessMode} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, accessMode: event.target.value as AccessMode } })}>{accessModeOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+          {settings.accessMode === "full" && <p className="access-mode-warning">完全访问会允许 Pi 直接执行命令并访问工作区外路径，请只在可信项目中使用。</p>}
+          {settings.accessMode === "workspace" && <p className="access-mode-hint">工作区内的文件写入会自动允许；bash 命令和工作区外路径仍会询问。</p>}
           <label className="checkbox-setting"><input type="checkbox" checked={settings.appearance.showThinking} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, showThinking: event.target.checked } } })} />展示思考过程</label>
           <footer><button type="button" className="secondary-button" onClick={closeSettings}>取消</button><button className="primary-button" type="submit">保存通用设置</button></footer>
         </form> : tab === "models" ? <form onSubmit={save}>
@@ -649,8 +884,8 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
         {isCustomProvider && <>
           <label>服务名称<input value={customName} placeholder="例如：公司中转站" onChange={(event) => setCustomName(event.target.value)} /></label>
           <div className="settings-action-row"><label>OpenAI 兼容接口地址<input value={customBaseUrl} placeholder="https://api.example.com/v1" onChange={(event) => setCustomBaseUrl(event.target.value)} /></label><button className="secondary-button" type="button" disabled={customModelFetchStatus === "loading" || !customBaseUrl.trim() || (!apiKey.trim() && !customProviderKeyConfigured)} onClick={() => void fetchModels()}><RefreshCw size={14} className={customModelFetchStatus === "loading" ? "spinning" : undefined} />{customModelFetchStatus === "loading" ? "拉取中" : "拉取模型"}</button></div>
-          <div className="model-selection"><div className="model-selection-heading"><span>可用模型</span><small>勾选后才会出现在输入区的模型切换列表</small></div>{providerModels.length === 0 ? <p className="panel-empty">请先拉取模型，或手动填写模型 ID</p> : providerModels.map((model) => <label className="checkbox-setting model-option" key={model.id}><input type="checkbox" checked={model.enabled !== false} onChange={(event) => { const next = event.target.checked; const updated = providerModels.map((item) => item.id === model.id ? { ...item, enabled: next } : item); useDesktopStore.setState({ customModels: provider === customProviderId ? updated : useDesktopStore.getState().customModels, settings: { ...settings, providers: settings.providers.some((item) => item.id === provider) ? settings.providers.map((item) => item.id === provider ? { ...item, models: updated } : item) : settings.providers } }); if (model.id === customModelId && !next) setCustomModelId(updated.find((item) => item.enabled !== false)?.id ?? model.id); }} /><span><strong>{model.name}</strong><small>{model.id}</small></span></label>)}</div>
-          {customModelId && <label className="checkbox-setting"><input type="checkbox" checked={imageInputOverride ?? false} onChange={(event) => setImageInputOverride(event.target.checked)} />支持图片输入（手动覆盖推断）</label>}
+          <div className="model-selection"><div className="model-selection-heading"><span>可用模型</span><small>左侧控制显示，右侧标记图片输入</small></div>{providerModels.length === 0 ? <p className="panel-empty">请先拉取模型，或手动填写模型 ID</p> : providerModels.map((model) => <div className="model-option" key={model.id}><label className="checkbox-setting model-enabled-option"><input type="checkbox" checked={model.enabled !== false} onChange={(event) => { const next = event.target.checked; updateProviderModel(model.id, { enabled: next }); if (model.id === customModelId && !next) setCustomModelId(providerModels.find((item) => item.id !== model.id && item.enabled !== false)?.id ?? model.id); }} /><span><strong>{model.name}</strong><small>{model.id}</small></span></label><label className="checkbox-setting model-image-option" title="允许向此模型发送图片"><input type="checkbox" checked={model.imageInput === true} onChange={(event) => updateProviderModel(model.id, { imageInput: event.target.checked })} />图片输入</label></div>)}</div>
+          {providerModels.length === 0 && customModelId && <label className="checkbox-setting"><input type="checkbox" checked={imageInputOverride ?? false} onChange={(event) => setImageInputOverride(event.target.checked)} />支持图片输入（手动覆盖推断）</label>}
           {providerModels.length > 0 && enabledProviderModels.length === 0 && <p className="form-error">请至少勾选一个模型</p>}
           {customModelFetchError && <p className="form-error">{customModelFetchError}</p>}
         </>}
@@ -660,17 +895,18 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
         </form> : tab === "agents" ? <div className="agent-settings">
           <div className="agent-list">{agentList.filter((agent) => !agent.archived).map((agent) => <button type="button" key={agent.id} className={agent.id === selectedAgent?.id ? "active" : ""} onClick={() => setSelectedAgentId(agent.id)}><strong>{agent.name}</strong><small>{agent.description || "未填写说明"}</small></button>)}<button type="button" className="secondary-button agent-new-button" onClick={newAgent}>+ 新建 Agent</button></div>
           {selectedAgent && <div className="agent-editor"><label>名称<input value={selectedAgent.name} onChange={(event) => updateAgent({ name: event.target.value })} /></label><label>说明<input value={selectedAgent.description} onChange={(event) => updateAgent({ description: event.target.value })} /></label><label>系统提示词<textarea value={selectedAgent.systemPrompt} rows={6} onChange={(event) => updateAgent({ systemPrompt: event.target.value })} /></label><label>默认模型<select value={selectedAgent.defaultModel ? `${selectedAgent.defaultModel.provider}/${selectedAgent.defaultModel.id}` : ""} onChange={(event) => { const value = event.target.value; updateAgent({ defaultModel: value ? { provider: value.slice(0, value.indexOf("/")), id: value.slice(value.indexOf("/") + 1) } : undefined }); }}><option value="">跟随全局默认模型</option>{configuredModels.map((model) => <option key={`${model.provider}/${model.id}`} value={`${model.provider}/${model.id}`}>{model.name}</option>)}</select></label><label>默认思考等级<select value={selectedAgent.defaultThinkingLevel} onChange={(event) => updateAgent({ defaultThinkingLevel: event.target.value as ThinkingLevel })}>{thinkingLevels.map((level) => <option key={level} value={level}>{thinkingLevelLabels[level]}</option>)}</select></label><fieldset><legend>工具权限</legend>{agentTools.map((tool) => <label className="tool-toggle" key={tool}><input type="checkbox" checked={selectedAgent.tools[tool]} onChange={(event) => updateAgent({ tools: { ...selectedAgent.tools, [tool]: event.target.checked } })} />{tool}</label>)}</fieldset><footer><button type="button" className="danger-button" disabled={selectedAgent.id === "default"} onClick={() => void archiveAgent()}>归档</button><button type="button" className="secondary-button" onClick={duplicateAgent}>复制</button><button type="button" className="primary-button" onClick={() => void saveAgent()}>保存 Agent</button></footer></div>}
-        </div> : <form className="appearance-settings" onSubmit={(event) => { event.preventDefault(); const nextSettings = structuredClone(settings); void window.piDesktop.send({ type: "appearance.save", appearance: nextSettings.appearance }); markSettingsSaved(nextSettings); onClose(); }}>
+        </div> : tab === "resources" ? <ResourceSettings resources={resources} /> : <form className="appearance-settings" onSubmit={(event) => { event.preventDefault(); const nextSettings = structuredClone(settings); void window.piDesktop.send({ type: "appearance.save", appearance: nextSettings.appearance }); markSettingsSaved(nextSettings); onClose(); }}>
           <div className="appearance-grid">
             <div>
-              <label>主题模式<select value={settings.appearance.theme} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, theme: event.target.value as "system" | "light" | "dark" } } })}><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></label>
+              <label>主题模式<select value={settings.appearance.theme} onChange={(event) => { const next = event.target.value as "system" | "light" | "dark"; useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, theme: next } } }); setThemeColorMode(next === "light" ? "light" : next === "dark" ? "dark" : (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")); }}><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></label>
               <label className="checkbox-setting"><input type="checkbox" checked={settings.appearance.showThinking} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, showThinking: event.target.checked } } })} />展示思考过程</label>
               <div className="theme-preset-field"><span className="settings-field-label">主题预设</span><div className="theme-preset-grid">{THEME_PRESETS.map((preset) => <button type="button" key={preset.id} className={`theme-preset-card${settings.appearance.themePreset === preset.id ? " active" : ""}`} onClick={() => useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, themePreset: preset.id as ThemePresetId, themeOverrides: { light: {}, dark: {} } } } })}><span className="theme-swatches">{preset.swatches.map((color) => <i key={color} style={{ backgroundColor: color }} />)}</span><strong>{preset.name}</strong><small>{preset.description}</small></button>)}</div></div>
               <section className="theme-color-settings" aria-label="自定义配色">
                 <div className="theme-color-heading"><span className="settings-field-label">自定义配色</span><div className="theme-color-mode-switch" role="tablist" aria-label="配色模式"><button type="button" className={themeColorMode === "light" ? "active" : ""} role="tab" aria-selected={themeColorMode === "light"} onClick={() => setThemeColorMode("light")}>浅色</button><button type="button" className={themeColorMode === "dark" ? "active" : ""} role="tab" aria-selected={themeColorMode === "dark"} onClick={() => setThemeColorMode("dark")}>深色</button></div></div>
                 <p className="theme-color-hint">为当前模式覆盖预设颜色；切换预设会重置这些覆盖。</p>
-                <div className="theme-color-grid">{themeColorFields.map((field) => { const value = themeColorValue(settings.appearance, themeColorMode, field.key); return <div className="theme-color-row" key={field.key}><label htmlFor={`theme-color-${field.key}`}>{field.label}</label><input id={`theme-color-${field.key}`} type="color" value={value} onChange={(event) => updateThemeColor(field.key, event.target.value)} /><input className="theme-color-hex" type="text" inputMode="text" maxLength={7} spellCheck={false} aria-label={`${field.label}十六进制值`} value={value} onChange={(event) => { const next = event.target.value.trim(); if (HEX_COLOR_PATTERN.test(next)) updateThemeColor(field.key, next); }} /><button className="icon-button theme-color-reset" type="button" title={`重置${field.label}`} aria-label={`重置${field.label}`} onClick={() => resetThemeColor(field.key)}><RotateCcw size={14} /></button></div>; })}</div>
-              </section>
+                 <div className="theme-color-grid">{themeColorFields.map((field) => { const value = themeColorValue(settings.appearance, themeColorMode, field.key); return <div className="theme-color-row" key={field.key}><label htmlFor={`theme-color-${field.key}`}>{field.label}</label><input id={`theme-color-${field.key}`} type="color" value={value} onChange={(event) => updateThemeColor(field.key, event.target.value)} /><input className="theme-color-hex" type="text" inputMode="text" maxLength={7} spellCheck={false} aria-label={`${field.label}十六进制值`} value={value} onChange={(event) => { const next = event.target.value.trim(); if (HEX_COLOR_PATTERN.test(next)) updateThemeColor(field.key, next); }} /><button className="icon-button theme-color-reset" type="button" title={`重置${field.label}`} aria-label={`重置${field.label}`} onClick={() => resetThemeColor(field.key)}><RotateCcw size={14} /></button></div>; })}</div>
+                 <div className="theme-opacity-row"><label htmlFor="theme-wallpaper-opacity">背景图片透明度</label><input id="theme-wallpaper-opacity" type="range" min="0" max="100" step="1" value={wallpaperOpacityPercent} aria-valuetext={`${wallpaperOpacityPercent}%`} onChange={(event) => updateWallpaperOpacity(Number(event.target.value) / 100)} /><output>{wallpaperOpacityPercent}%</output><button className="icon-button theme-color-reset" type="button" disabled={wallpaperOpacityOverride === undefined} title="恢复主题默认透明度" aria-label="恢复主题默认透明度" onClick={resetWallpaperOpacity}><RotateCcw size={14} /></button></div>
+               </section>
             </div>
             <ThemePreview appearance={settings.appearance} />
           </div>
@@ -706,9 +942,11 @@ function PermissionDialog({ request }: { request: NonNullable<ReturnType<typeof 
 }
 
 export function App(): ReactNode {
-  const { ready, snapshot, models, providers, customProvider, customProviderKeyConfigured, customModels, customModelFetchStatus, customModelFetchError, permission, error, initialize, clearError } = useDesktopStore();
+  const { ready, snapshot, models, providers, resources, customProvider, customProviderKeyConfigured, customModels, customModelFetchStatus, customModelFetchError, permission, error, initialize, clearError } = useDesktopStore();
   const settings = useDesktopStore((state) => state.settings);
+  const themeAssetUrls = useThemeAssetUrls(themeAssetsForAppearance(settings.appearance));
   const [input, setInput] = useState("");
+  const [localTurnStartedAt, setLocalTurnStartedAt] = useState<number>();
   const [messageActionError, setMessageActionError] = useState<string>();
   // Tool details are already available inline in the conversation. Keep the
   // live activity panel opt-in so the first screen stays focused on the chat.
@@ -717,16 +955,31 @@ export function App(): ReactNode {
   const [sidebarQuery, setSidebarQuery] = useState("");
   const [panelTab, setPanelTab] = useState<"activity" | "changes">("activity");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [accessModeMenuOpen, setAccessModeMenuOpen] = useState(false);
+  const [composerMenu, setComposerMenu] = useState<"model" | "thinking">();
   const [artifact, setArtifact] = useState<Artifact>();
   const [attachments, setAttachments] = useState<import("../../shared/protocol").PromptAttachment[]>([]);
   const [attachmentError, setAttachmentError] = useState<string>();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const accessModeMenuRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLFormElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const selectedModel = snapshot.model ? `${snapshot.model.provider}/${snapshot.model.id}` : "";
   const availableModels = useMemo(() => models.filter((model) => model.configured), [models]);
+  const selectedModelOption = availableModels.find((model) => `${model.provider}/${model.id}` === selectedModel);
   const visibleAgents = useMemo(() => settings.agents.filter((agent) => !agent.archived && `${agent.name} ${agent.description}`.toLowerCase().includes(sidebarQuery.trim().toLowerCase())), [settings.agents, sidebarQuery]);
   const visibleSessions = useMemo(() => snapshot.sessions.filter((item) => item.title.toLowerCase().includes(sidebarQuery.trim().toLowerCase())), [snapshot.sessions, sidebarQuery]);
+  const displayMessages = useMemo(() => groupAssistantMessages(snapshot.messages), [snapshot.messages]);
+  const latestAssistantIndex = useMemo(() => [...displayMessages].reverse().findIndex((message) => message.role === "assistant"), [displayMessages]);
+  const latestAssistantMessageIndex = latestAssistantIndex < 0 ? -1 : displayMessages.length - 1 - latestAssistantIndex;
+  const localTiming = localTurnStartedAt === undefined ? undefined : { startedAt: localTurnStartedAt } satisfies TurnTiming;
+  const localTurnPending = localTiming !== undefined && (snapshot.turnTiming === undefined || snapshot.turnTiming.startedAt < localTiming.startedAt);
+  const activeTurnTiming = localTurnPending ? localTiming : snapshot.turnTiming;
+  const isGenerating = localTurnPending || Boolean(snapshot.busy && snapshot.turnTiming && snapshot.turnTiming.completedAt === undefined);
+  const now = useElapsedNow(isGenerating);
+  const hasAssistantMessage = displayMessages.some((message) => message.role === "assistant");
+  const showTurnTimingOnLatest = Boolean(snapshot.turnTiming && (!snapshot.busy || displayMessages[latestAssistantMessageIndex]?.streaming));
 
   useEffect(() => {
     let dispose: (() => void) | undefined;
@@ -753,6 +1006,30 @@ export function App(): ReactNode {
     if (!timeline || !stickToBottomRef.current) return;
     timeline.scrollTo({ top: timeline.scrollHeight, behavior: snapshot.busy ? "smooth" : "auto" });
   }, [snapshot.messages, snapshot.busy]);
+
+  useEffect(() => {
+    if (!snapshot.busy) setLocalTurnStartedAt(undefined);
+  }, [snapshot.busy]);
+
+  useEffect(() => {
+    if (!accessModeMenuOpen && !composerMenu) return;
+    const closeOnPointerDown = (event: PointerEvent): void => {
+      if (!accessModeMenuRef.current?.contains(event.target as Node)) setAccessModeMenuOpen(false);
+      if (!composerRef.current?.contains(event.target as Node)) setComposerMenu(undefined);
+    };
+    const closeOnEscape = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") {
+        setAccessModeMenuOpen(false);
+        setComposerMenu(undefined);
+      }
+    };
+    document.addEventListener("pointerdown", closeOnPointerDown);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnPointerDown);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [accessModeMenuOpen, composerMenu]);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -782,15 +1059,15 @@ export function App(): ReactNode {
       style.id = styleId;
       document.head.appendChild(style);
     }
-    const customCss = resolveThemeAssets(settings.appearance.customCss, themeAssetsForAppearance(settings.appearance));
-    style.textContent = `${themePresetCss(settings.appearance.themePreset)}\n${themeOverrideCss(settings.appearance.themeOverrides)}\n${scopeCustomThemeCss(customCss)}`;
+    const customCss = resolveThemeAssets(settings.appearance.customCss, themeAssetUrls);
+    style.textContent = `${themePresetCss(settings.appearance.themePreset)}\n${scopeCustomThemeCss(customCss)}\n${themeOverrideCss(settings.appearance.themeOverrides, ":root[data-theme-custom]")}`;
     return () => {
       style?.remove();
       delete root.dataset.themePreset;
       delete root.dataset.themeCustom;
       delete root.dataset.themeWallpaper;
     };
-  }, [settings.appearance.themePreset, settings.appearance.themeOverrides, settings.appearance.customCss, settings.appearance.customCssAssets, settings.appearance.customThemes]);
+  }, [settings.appearance.themePreset, settings.appearance.themeOverrides, settings.appearance.customCss, settings.appearance.customCssAssets, settings.appearance.customThemes, themeAssetUrls]);
 
   async function openWorkspace(): Promise<void> {
     const path = await window.piDesktop.chooseWorkspace();
@@ -802,11 +1079,13 @@ export function App(): ReactNode {
     const text = input.trim();
     if ((!text && attachments.length === 0) || snapshot.busy) return;
     if (attachments.some((item) => item.kind === "image") && !models.find((item) => `${item.provider}/${item.id}` === selectedModel)?.imageInput) { setAttachmentError("当前模型不支持图片输入，请先切换多模态模型"); return; }
+    setLocalTurnStartedAt(Date.now());
     try {
       await window.piDesktop.send({ type: "session.prompt", text, attachments });
       setInput("");
       setAttachments([]);
     } catch (error) {
+      setLocalTurnStartedAt(undefined);
       setAttachmentError(error instanceof Error ? error.message : "附件发送失败");
     }
   }
@@ -837,9 +1116,11 @@ export function App(): ReactNode {
     const previousUser = index > 0 ? [...snapshot.messages.slice(0, index)].reverse().find((item) => item.role === "user") : undefined;
     const text = previousUser ? messageText(previousUser) : "";
     if (!text) return;
+    setLocalTurnStartedAt(Date.now());
     try {
       await window.piDesktop.send({ type: "session.regenerate", text, timestamp: previousUser?.timestamp });
     } catch (error) {
+      setLocalTurnStartedAt(undefined);
       setMessageActionError(error instanceof Error ? error.message : "重新生成失败");
     }
   }
@@ -911,9 +1192,30 @@ export function App(): ReactNode {
   }
 
   async function selectModel(value: string): Promise<void> {
+    setComposerMenu(undefined);
     const slash = value.indexOf("/");
     if (slash < 1) return;
     await window.piDesktop.send({ type: "model.select", provider: value.slice(0, slash), id: value.slice(slash + 1) });
+  }
+
+  async function selectAccessMode(value: AccessMode): Promise<void> {
+    setAccessModeMenuOpen(false);
+    setComposerMenu(undefined);
+    if (value === settings.accessMode) return;
+    const previousSettings = settings;
+    const nextSettings = { ...settings, accessMode: value };
+    useDesktopStore.setState({ settings: nextSettings });
+    try {
+      await window.piDesktop.send({ type: "settings.save", settings: { model: nextSettings.model, thinkingLevel: nextSettings.thinkingLevel, accessMode: value, appearance: nextSettings.appearance } });
+    } catch (error) {
+      useDesktopStore.setState({ settings: previousSettings });
+      setMessageActionError(error instanceof Error ? error.message : "访问模式切换失败");
+    }
+  }
+
+  async function selectThinkingLevel(level: ThinkingLevel): Promise<void> {
+    setComposerMenu(undefined);
+    await window.piDesktop.send({ type: "thinking.select", level });
   }
 
   if (!ready) return <div className="app-loading"><div className="brand-mark">CA</div><LoaderCircle className="spinning" size={22} /></div>;
@@ -954,16 +1256,17 @@ export function App(): ReactNode {
             <div className="timeline" ref={timelineRef}>
               {!snapshot.workspace ? (
                 <div className="empty-workspace"><div className="empty-icon"><FolderOpen size={27} /></div><h1>打开一个项目</h1><button className="primary-button" type="button" onClick={() => void openWorkspace()}><FolderOpen size={16} />选择文件夹</button></div>
-              ) : snapshot.messages.length === 0 ? (
+              ) : displayMessages.length === 0 && !isGenerating ? (
                 <div className="empty-conversation"><div className="empty-icon"><CodeXml size={27} /></div><h1>今天想开发什么？</h1></div>
-              ) : groupAssistantMessages(snapshot.messages).map((message) => <MessageView key={message.id} message={message} executions={snapshot.executions} onOpenArtifact={setArtifact} onHtmlAction={handleHtmlAction} onCopy={(item) => void copyMessage(item)} onEdit={editMessage} onRegenerate={(item) => void regenerateMessage(item)} showThinking={settings.appearance.showThinking} busy={snapshot.busy} />)}
+              ) : <>
+                {displayMessages.map((message, index) => <MessageView key={message.id} message={message} executions={snapshot.executions} onOpenArtifact={setArtifact} onHtmlAction={handleHtmlAction} onCopy={(item) => void copyMessage(item)} onEdit={editMessage} onRegenerate={(item) => void regenerateMessage(item)} showThinking={settings.appearance.showThinking} busy={snapshot.busy} timing={showTurnTimingOnLatest && index === latestAssistantMessageIndex && message.role === "assistant" ? snapshot.turnTiming : undefined} now={now} />)}
+                {isGenerating && (hasAssistantMessage ? <div className="response-progress response-progress-inline"><LoaderCircle size={14} className="spinning" /><span>{snapshot.agentName}正在努力输出中……</span>{activeTurnTiming && <TimingMeta timing={activeTurnTiming} now={now} />}</div> : <PendingResponse agentName={snapshot.agentName} timing={activeTurnTiming} now={now} />)}
+              </>}
             </div>
-            <div className="composer-tools"><label title="模型快捷切换"><Bot size={14} /><select value={selectedModel} disabled={snapshot.busy} onChange={(event) => void selectModel(event.target.value)}><option value="">选择模型</option>{Array.from(new Set(availableModels.map((model) => model.provider))).map((providerId) => <optgroup key={providerId} label={providers.find((provider) => provider.id === providerId)?.name ?? providerId}>{availableModels.filter((model) => model.provider === providerId).map((model) => <option key={`${model.provider}/${model.id}`} value={`${model.provider}/${model.id}`}>{model.name}</option>)}</optgroup>)}</select></label><label title="思考级别"><span>思考</span><select value={snapshot.thinkingLevel} disabled={snapshot.busy} onChange={(event) => void window.piDesktop.send({ type: "thinking.select", level: event.target.value as ThinkingLevel })}>{thinkingLevels.map((level) => <option key={level} value={level}>{thinkingLevelLabels[level]}</option>)}</select></label></div>
-            <form className="composer" onSubmit={submit} onDragOver={(event) => event.preventDefault()} onDrop={handleDrop}>
+            <form ref={composerRef} className="composer" onSubmit={submit} onDragOver={(event) => event.preventDefault()} onDrop={handleDrop}>
               {attachments.length > 0 && <div className="attachment-list">{attachments.map((attachment, index) => <span className="attachment-chip" key={`${attachment.name}-${index}`}>{attachment.kind === "image" ? <img src={`data:${attachment.mimeType};base64,${attachment.data}`} alt="" /> : <FileDiff size={12} />}<span>{attachment.name}</span><button type="button" title="移除附件" aria-label={`移除 ${attachment.name}`} onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={12} /></button></span>)}</div>}
               {attachmentError && <div className="attachment-error" role="alert">{attachmentError}<button type="button" title="关闭提示" aria-label="关闭附件提示" onClick={() => setAttachmentError(undefined)}><X size={12} /></button></div>}
               <input ref={fileInputRef} type="file" hidden multiple accept="image/png,image/jpeg,image/webp,image/gif,.txt,.md,.json,.js,.ts,.tsx,.jsx,.py,.go,.rs,.java,.css,.html" onChange={(event) => { void addLocalFiles(event.target.files ?? []); event.currentTarget.value = ""; }} />
-              <button className="icon-button attach-button" type="button" title="添加附件" aria-label="添加附件" disabled={snapshot.busy || attachments.length >= 5} onClick={() => void addAttachments()}><Paperclip size={17} /></button>
               <textarea
                 value={input}
                 rows={1}
@@ -973,11 +1276,34 @@ export function App(): ReactNode {
                 onPaste={handlePaste}
                 onChange={(event) => setInput(event.target.value)}
               />
-              {snapshot.busy ? (
-                <button className="stop-button" type="button" title="停止" aria-label="停止" onClick={() => void window.piDesktop.send({ type: "session.abort" })}><CircleStop size={18} /></button>
-              ) : (
-                <button className="send-button" type="submit" title="发送" aria-label="发送" disabled={!input.trim() || !snapshot.workspace || !snapshot.model}><Play size={17} fill="currentColor" /></button>
-              )}
+              <div className="composer-footer">
+                <div className="composer-footer-left">
+                  <button className="icon-button attach-button" type="button" title="添加附件" aria-label="添加附件" disabled={snapshot.busy || attachments.length >= 5} onClick={() => void addAttachments()}><Plus size={18} /></button>
+                  <div className="access-mode-menu-shell" ref={accessModeMenuRef}>
+                    <button className={`access-mode-button${settings.accessMode === "full" ? " full" : ""}`} type="button" aria-haspopup="menu" aria-expanded={accessModeMenuOpen} onClick={() => { setComposerMenu(undefined); setAccessModeMenuOpen((open) => !open); }}>{settings.accessMode === "full" ? <ShieldAlert size={15} /> : <ShieldCheck size={15} />}<span>{accessModeOptions.find((option) => option.value === settings.accessMode)?.label ?? "访问模式"}</span><ChevronDown size={13} /></button>
+                    {accessModeMenuOpen && <div className="access-mode-menu" role="menu" aria-label="访问模式">
+                      {accessModeOptions.map((option) => <button className={`access-mode-menu-item${option.value === settings.accessMode ? " active" : ""}${option.value === "full" ? " full" : ""}`} type="button" role="menuitemradio" aria-checked={option.value === settings.accessMode} key={option.value} onClick={() => void selectAccessMode(option.value)}>{option.value === "full" ? <ShieldAlert size={15} /> : <ShieldCheck size={15} />}<span><strong>{option.label}</strong><small>{accessModeDescriptions[option.value]}</small></span>{option.value === settings.accessMode && <Check size={14} />}</button>)}
+                    </div>}
+                  </div>
+                </div>
+                <div className="composer-footer-right">
+                  <div className="composer-control-menu">
+                    <button className="composer-menu-trigger" type="button" title="模型快捷切换" aria-label="模型快捷切换" aria-haspopup="menu" aria-expanded={composerMenu === "model"} disabled={snapshot.busy} onClick={() => { setAccessModeMenuOpen(false); setComposerMenu((current) => current === "model" ? undefined : "model"); }}><Bot size={14} /><span>{selectedModelOption?.name ?? snapshot.model?.id ?? "选择模型"}</span><ChevronDown size={13} /></button>
+                    {composerMenu === "model" && <div className="composer-select-menu model-select-menu" role="menu" aria-label="模型快捷切换">
+                      {Array.from(new Set(availableModels.map((model) => model.provider))).map((providerId) => <div className="composer-menu-group" key={providerId}><small>{providers.find((provider) => provider.id === providerId)?.name ?? providerId}</small>{availableModels.filter((model) => model.provider === providerId).map((model) => { const value = `${model.provider}/${model.id}`; return <button className={value === selectedModel ? "active" : ""} type="button" role="menuitemradio" aria-checked={value === selectedModel} key={value} onClick={() => void selectModel(value)}><span>{model.name}</span>{value === selectedModel && <Check size={13} />}</button>; })}</div>)}
+                    </div>}
+                  </div>
+                  <div className="composer-control-menu thinking-control">
+                    <button className="composer-menu-trigger" type="button" title="思考级别" aria-label="思考级别" aria-haspopup="menu" aria-expanded={composerMenu === "thinking"} disabled={snapshot.busy} onClick={() => { setAccessModeMenuOpen(false); setComposerMenu((current) => current === "thinking" ? undefined : "thinking"); }}><span>思考</span><strong>{thinkingLevelLabels[snapshot.thinkingLevel]}</strong><ChevronDown size={13} /></button>
+                    {composerMenu === "thinking" && <div className="composer-select-menu thinking-select-menu" role="menu" aria-label="思考级别">{thinkingLevels.map((level) => <button className={level === snapshot.thinkingLevel ? "active" : ""} type="button" role="menuitemradio" aria-checked={level === snapshot.thinkingLevel} key={level} onClick={() => void selectThinkingLevel(level)}><span>{thinkingLevelLabels[level]}</span>{level === snapshot.thinkingLevel && <Check size={13} />}</button>)}</div>}
+                  </div>
+                  {snapshot.busy ? (
+                    <button className="stop-button" type="button" title="停止" aria-label="停止" onClick={() => void window.piDesktop.send({ type: "session.abort" })}><CircleStop size={18} /></button>
+                  ) : (
+                    <button className="send-button" type="submit" title="发送" aria-label="发送" disabled={!input.trim() || !snapshot.workspace || !snapshot.model}><Play size={17} fill="currentColor" /></button>
+                  )}
+                </div>
+              </div>
             </form>
           </section>
 
@@ -993,7 +1319,7 @@ export function App(): ReactNode {
         </div>
       </main>
 
-      {settingsOpen && <SettingsDialog settings={settings} models={models} providers={providers} customProvider={customProvider} customProviderKeyConfigured={customProviderKeyConfigured} customModels={customModels} customModelFetchStatus={customModelFetchStatus} customModelFetchError={customModelFetchError} onClose={() => setSettingsOpen(false)} />}
+      {settingsOpen && <SettingsDialog settings={settings} models={models} providers={providers} customProvider={customProvider} customProviderKeyConfigured={customProviderKeyConfigured} customModels={customModels} customModelFetchStatus={customModelFetchStatus} customModelFetchError={customModelFetchError} resources={resources} onClose={() => setSettingsOpen(false)} />}
       {permission && <PermissionDialog request={permission} />}
       {artifact && <ArtifactPreview artifact={artifact} onClose={() => setArtifact(undefined)} />}
       {error && <div className="error-toast"><AlertCircle size={18} /><span>{error}</span><button className="icon-button" type="button" title="关闭提示" aria-label="关闭提示" onClick={clearError}><X size={16} /></button></div>}

@@ -7,7 +7,8 @@ import type {
   PermissionRequest,
   ProviderOption,
   RuntimeMessage,
-  RuntimeSnapshot
+  RuntimeSnapshot,
+  ResourceCatalog
 } from "../../shared/protocol";
 
 interface DesktopState {
@@ -15,6 +16,7 @@ interface DesktopState {
   snapshot: RuntimeSnapshot;
   models: ModelOption[];
   providers: ProviderOption[];
+  resources: ResourceCatalog;
   settings: DesktopSettings;
   customProvider?: ProviderSettings;
   customProviderKeyConfigured: boolean;
@@ -38,13 +40,15 @@ const emptySnapshot: RuntimeSnapshot = {
   executions: [],
   sessions: []
 };
-const emptySettings: DesktopSettings = { version: 2, thinkingLevel: "medium", providers: [], agents: [], currentAgentId: "default", appearance: { theme: "system", themePreset: "default", customCss: "", customThemes: [], themeOverrides: { light: {}, dark: {} }, showThinking: true } };
+const emptySettings: DesktopSettings = { version: 2, thinkingLevel: "medium", accessMode: "ask", providers: [], agents: [], currentAgentId: "default", appearance: { theme: "system", themePreset: "default", customCss: "", customThemes: [], themeOverrides: { light: {}, dark: {} }, showThinking: true } };
+const emptyResources: ResourceCatalog = { skills: [], extensions: [], packages: [], mcpServers: [], mcpAdapterLoaded: false, diagnostics: [] };
 
 export const useDesktopStore = create<DesktopState>((set, get) => ({
   ready: false,
   snapshot: emptySnapshot,
   models: [],
   providers: [],
+  resources: emptyResources,
   settings: emptySettings,
   customProviderKeyConfigured: false,
   customModels: [],
@@ -59,6 +63,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
       snapshot: bootstrap.runtime ?? get().snapshot,
       models: bootstrap.catalog?.models ?? [],
       providers: bootstrap.catalog?.providers ?? [],
+      resources: bootstrap.resources ?? get().resources,
       customProvider: bootstrap.settings.providers.find((provider) => provider.id === "chatanytime-openai-compatible"),
       customProviderKeyConfigured: Boolean(bootstrap.settings.providers.find((provider) => provider.id === "chatanytime-openai-compatible")?.keyConfigured),
       customModels: bootstrap.settings.providers.find((provider) => provider.id === "chatanytime-openai-compatible")?.models ?? []
@@ -69,6 +74,9 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
     switch (message.type) {
       case "state":
         set({ snapshot: message.snapshot });
+        break;
+      case "resources":
+        set({ resources: message.resources });
         break;
       case "catalog":
         set({ models: message.models, providers: message.providers });

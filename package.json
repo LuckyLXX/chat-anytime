@@ -20,6 +20,7 @@
     "katex": "0.16.22",
     "lucide-react": "0.468.0",
     "mermaid": "11.16.1",
+    "pi-mcp-adapter": "2.21.0",
     "react": "19.1.1",
     "react-dom": "19.1.1",
     "react-markdown": "10.1.0",
@@ -28,6 +29,7 @@
     "rehype-sanitize": "6.0.0",
     "remark-gfm": "4.0.1",
     "remark-math": "6.0.0",
+    "strip-json-comments": "5.0.3",
     "zustand": "5.0.8"
   },
   "devDependencies": {

@@ -1,4 +1,5 @@
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export type AccessMode = "read-only" | "ask" | "workspace" | "full";
 
 export type BuiltinToolName = "read" | "bash" | "edit" | "write" | "grep" | "find" | "ls";
 
@@ -78,6 +79,7 @@ export interface ThemeColorOverrides {
   accentHover?: string;
   userBubble?: string;
   aiBubble?: string;
+  wallpaperOpacity?: number;
 }
 
 export interface ThemeOverrides {
@@ -101,6 +103,7 @@ export interface DesktopSettings {
   workspace?: string;
   model?: { provider: string; id: string };
   thinkingLevel: ThinkingLevel;
+  accessMode: AccessMode;
   providers: ProviderSettings[];
   agents: AgentProfile[];
   currentAgentId: string;
@@ -144,6 +147,12 @@ export interface ChatMessage {
   error?: string;
 }
 
+export interface TurnTiming {
+  startedAt: number;
+  answerStartedAt?: number;
+  completedAt?: number;
+}
+
 export interface ToolExecution {
   id: string;
   name: string;
@@ -163,6 +172,63 @@ export interface SessionSummary {
   messageCount: number;
 }
 
+export type ResourceScope = "global" | "project" | "package" | "bundled" | "temporary" | "unknown";
+
+export interface SkillSummary {
+  name: string;
+  description: string;
+  source: string;
+  scope: ResourceScope;
+  disableModelInvocation: boolean;
+}
+
+export interface ExtensionSummary {
+  name: string;
+  source: string;
+  scope: ResourceScope;
+  loaded: boolean;
+  error?: string;
+}
+
+export interface PackageSummary {
+  source: string;
+  scope: "global" | "project" | "bundled";
+  installed: boolean;
+  removable: boolean;
+}
+
+export type McpServerStatus = "connected" | "cached" | "failed" | "needs-auth" | "not-connected" | "disabled";
+
+export interface McpServerSummary {
+  name: string;
+  status: McpServerStatus;
+  toolCount: number;
+  resourceCount?: number;
+  failedAgoSeconds?: number;
+  disabled: boolean;
+}
+
+export interface McpServerConfigDraft {
+  name: string;
+  scope: "project" | "global";
+  transport: "stdio" | "http";
+  command?: string;
+  args?: string[];
+  url?: string;
+  auth?: "none" | "oauth" | "bearer-env";
+  bearerTokenEnv?: string;
+  env?: Record<string, string>;
+}
+
+export interface ResourceCatalog {
+  skills: SkillSummary[];
+  extensions: ExtensionSummary[];
+  packages: PackageSummary[];
+  mcpServers: McpServerSummary[];
+  mcpAdapterLoaded: boolean;
+  diagnostics: string[];
+}
+
 export interface RuntimeSnapshot {
   workspace?: string;
   agentId: string;
@@ -173,6 +239,7 @@ export interface RuntimeSnapshot {
   thinkingLevel: ThinkingLevel;
   busy: boolean;
   status: string;
+  turnTiming?: TurnTiming;
   messages: ChatMessage[];
   executions: ToolExecution[];
   sessions: SessionSummary[];
@@ -199,7 +266,7 @@ export type RuntimeCommand =
   | { type: "agent.select"; agentId: string }
   | { type: "agent.save"; agent: AgentProfile }
   | { type: "agent.archive"; agentId: string; archived: boolean }
-  | { type: "settings.save"; settings: Pick<DesktopSettings, "model" | "thinkingLevel" | "appearance"> }
+  | { type: "settings.save"; settings: Pick<DesktopSettings, "model" | "thinkingLevel" | "accessMode" | "appearance"> }
   | { type: "model.select"; provider: string; id: string }
   | { type: "thinking.select"; level: ThinkingLevel }
   | { type: "auth.set"; provider: string; apiKey: string }
@@ -207,6 +274,11 @@ export type RuntimeCommand =
   | { type: "provider.delete"; providerId: string }
   | { type: "provider.models.fetch"; providerId: string; baseUrl: string; apiKey?: string }
   | { type: "appearance.save"; appearance: AppearanceSettings }
+  | { type: "resources.package.install"; source: string }
+  | { type: "resources.package.remove"; source: string; scope?: "global" | "project" }
+  | { type: "resources.reload" }
+  | { type: "mcp.server.save"; server: McpServerConfigDraft }
+  | { type: "mcp.server.toggle"; name: string; enabled: boolean }
   | { type: "permission.resolve"; id: string; decision: PermissionDecision };
 
 export type RuntimeMessage =
@@ -214,6 +286,7 @@ export type RuntimeMessage =
   | { type: "custom-models"; providerId: string; models: ProviderModelSettings[] }
   | { type: "custom-model-error"; providerId: string; message: string }
   | { type: "state"; snapshot: RuntimeSnapshot }
+  | { type: "resources"; resources: ResourceCatalog }
   | { type: "permission"; request: PermissionRequest }
   | { type: "error"; message: string }
   | { type: "log"; level: "info" | "warn"; message: string };
@@ -225,6 +298,7 @@ export interface DesktopBootstrap {
   settings: DesktopSettings;
   runtime?: RuntimeSnapshot;
   catalog?: { models: ModelOption[]; providers: ProviderOption[] };
+  resources?: ResourceCatalog;
 }
 
 export interface DesktopApi {

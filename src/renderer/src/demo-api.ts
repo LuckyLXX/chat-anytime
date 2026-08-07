@@ -6,7 +6,8 @@ import type {
   PermissionDecision,
   RuntimeCommand,
   RuntimeMessage,
-  RuntimeSnapshot
+  RuntimeSnapshot,
+  ResourceCatalog
 } from "../../shared/protocol";
 
 const listeners = new Set<(message: RuntimeMessage) => void>();
@@ -25,6 +26,7 @@ const demoSettings: DesktopSettings = {
   workspace: "D:\\Projects\\chat-anytime-demo",
   model: { provider: "anthropic", id: "claude-sonnet-4-6" },
   thinkingLevel: "medium",
+  accessMode: "ask",
   providers: [],
   agents: [demoDefaultAgent],
   currentAgentId: "default",
@@ -136,6 +138,21 @@ flowchart LR
   ]
 };
 
+const demoResources: ResourceCatalog = {
+  skills: [
+    { name: "code-review", description: "审查代码变更并整理风险与建议。", source: "用户资源", scope: "global", disableModelInvocation: false },
+    { name: "project-notes", description: "整理项目文档和工作记录。", source: "当前项目", scope: "project", disableModelInvocation: false }
+  ],
+  extensions: [{ name: "pi-mcp-adapter", source: "PiDesktop 内置", scope: "bundled", loaded: true }],
+  packages: [{ source: "pi-mcp-adapter", scope: "bundled", installed: true, removable: false }],
+  mcpServers: [
+    { name: "docs", status: "connected", toolCount: 8, resourceCount: 2, disabled: false },
+    { name: "browser", status: "disabled", toolCount: 0, disabled: true }
+  ],
+  mcpAdapterLoaded: true,
+  diagnostics: []
+};
+
 function emit(message: RuntimeMessage): void {
   for (const listener of listeners) listener(message);
 }
@@ -159,6 +176,7 @@ export function createDemoApi(): DesktopApi {
         version: "0.1.0",
         settings: structuredClone(demoSettings),
         runtime: structuredClone(demoSnapshot),
+        resources: structuredClone(demoResources),
         catalog: {
           providers: [
             { id: "anthropic", name: "Anthropic", configured: true, authSource: "demo" },
@@ -207,6 +225,7 @@ export function createDemoApi(): DesktopApi {
         case "settings.save":
           demoSettings.model = command.settings.model;
           demoSettings.thinkingLevel = command.settings.thinkingLevel;
+          demoSettings.accessMode = command.settings.accessMode;
           demoSettings.appearance = structuredClone(command.settings.appearance);
           updateSnapshot({ model: command.settings.model, thinkingLevel: command.settings.thinkingLevel });
           break;
@@ -256,6 +275,34 @@ export function createDemoApi(): DesktopApi {
             ]
           });
           break;
+        case "resources.reload":
+          emit({ type: "resources", resources: structuredClone(demoResources) });
+          break;
+        case "resources.package.install":
+          if (!demoResources.packages.some((item) => item.source === command.source)) demoResources.packages.push({ source: command.source, scope: "global", installed: true, removable: true });
+          emit({ type: "resources", resources: structuredClone(demoResources) });
+          break;
+        case "resources.package.remove":
+          demoResources.packages = demoResources.packages.filter((item) => item.source !== command.source || !item.removable);
+          emit({ type: "resources", resources: structuredClone(demoResources) });
+          break;
+        case "mcp.server.save": {
+          const existing = demoResources.mcpServers.find((item) => item.name === command.server.name);
+          if (existing) {
+            existing.disabled = false;
+            existing.status = "not-connected";
+          } else {
+            demoResources.mcpServers.push({ name: command.server.name, status: "not-connected", toolCount: 0, disabled: false });
+          }
+          emit({ type: "resources", resources: structuredClone(demoResources) });
+          break;
+        }
+        case "mcp.server.toggle": {
+          const server = demoResources.mcpServers.find((item) => item.name === command.name);
+          if (server) { server.disabled = !command.enabled; server.status = command.enabled ? "not-connected" : "disabled"; }
+          emit({ type: "resources", resources: structuredClone(demoResources) });
+          break;
+        }
       }
     },
     onRuntimeMessage(listener) {

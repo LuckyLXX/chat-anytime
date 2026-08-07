@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CUSTOM_PROVIDER_ID, createDefaultAgent, mergeProviderModels, migrateSettings, normalizeCustomThemes, normalizeThemeAssets, normalizeThemeOverrides } from "./settings.js";
+import { CUSTOM_PROVIDER_ID, createDefaultAgent, mergeProviderModels, migrateSettings, normalizeAccessMode, normalizeCustomThemes, normalizeThemeAssets, normalizeThemeOverrides } from "./settings.js";
 
 describe("desktop settings migration", () => {
   it("migrates the legacy custom provider without changing its stable id", () => {
@@ -73,6 +73,22 @@ describe("desktop settings migration", () => {
       light: { accent: " #ABCDEF ", aiBubble: "rgb(0 0 0)" },
       dark: { accentHover: "#123456", unknown: "#ffffff" }
     })).toEqual({ light: { accent: "#abcdef" }, dark: { accentHover: "#123456" } });
+  });
+
+  it("defaults unknown access modes to asking and preserves supported modes", () => {
+    expect(migrateSettings({}).settings.accessMode).toBe("ask");
+    expect(normalizeAccessMode("read-only")).toBe("read-only");
+    expect(normalizeAccessMode("workspace")).toBe("workspace");
+    expect(normalizeAccessMode("full")).toBe("full");
+    expect(normalizeAccessMode("unsafe")).toBe("ask");
+  });
+
+  it("clamps independent wallpaper opacity overrides", () => {
+    expect(normalizeThemeOverrides({
+      light: { wallpaperOpacity: 1.4 },
+      dark: { wallpaperOpacity: "-0.2" }
+    })).toEqual({ light: { wallpaperOpacity: 1 }, dark: { wallpaperOpacity: 0 } });
+    expect(normalizeThemeOverrides({ light: { wallpaperOpacity: "not-a-number" } })).toEqual({ light: {}, dark: {} });
   });
 
   it("normalizes saved custom CSS themes and ignores empty entries", () => {

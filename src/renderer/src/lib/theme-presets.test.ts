@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { THEME_PRESETS, scopeCustomThemeCss, scopeCustomThemeCssForPreview, themeOverrideCss, themePresetColor, themePresetCss, themePreviewCss } from "./theme-presets";
+import { THEME_PRESETS, scopeCustomThemeCss, scopeCustomThemeCssForPreview, themeOverrideCss, themePresetColor, themePresetCss, themePreviewCss, themeWallpaperOpacity } from "./theme-presets";
 
 describe("theme presets", () => {
   it("contains the reference palette families", () => {
@@ -59,6 +59,38 @@ describe("theme presets", () => {
     expect(css).toContain('.preview[data-theme-effective="dark"]');
     expect(css).toContain("--user-bubble: #123456;");
     expect(css).not.toContain("rgb(0 0 0)");
+  });
+
+  it("reads generic and mode-specific wallpaper opacity values", () => {
+    const css = `:root { --chat-bg-opacity: 24%; }
+:root[data-theme-effective="light"] { --chat-bg-opacity: 0.18; }
+:root[data-theme-effective="dark"] { --chat-bg-opacity: 0.16 !important; }`;
+
+    expect(themeWallpaperOpacity(css, "light")).toBe(0.18);
+    expect(themeWallpaperOpacity(css, "dark")).toBe(0.16);
+    expect(themeWallpaperOpacity(":root { --chat-bg-opacity: 24%; }", "light")).toBe(0.24);
+  });
+
+  it("clamps wallpaper opacity overrides before emitting CSS", () => {
+    const css = themeOverrideCss({ light: { wallpaperOpacity: 1.5 }, dark: { wallpaperOpacity: -0.2 } }, ".preview");
+
+    expect(css).toContain('.preview[data-theme-wallpaper="true"][data-theme-effective="light"] {\n  --chat-bg-opacity: 1 !important;\n}');
+    expect(css).toContain('.preview[data-theme-wallpaper="true"][data-theme-effective="dark"] {\n  --chat-bg-opacity: 0 !important;\n}');
+  });
+
+  it("lets explicit opacity overrides win over important theme declarations", () => {
+    expect(themeOverrideCss({ light: {}, dark: { wallpaperOpacity: 0.42 } }, ".preview"))
+      .toContain('.preview[data-theme-wallpaper="true"][data-theme-effective="dark"] {\n  --chat-bg-opacity: 0.42 !important;\n}');
+  });
+
+  it("emits color and wallpaper overrides as independent rules", () => {
+    const css = themeOverrideCss({ light: {}, dark: { accent: "#1ab394", wallpaperOpacity: 0.42 } }, ".preview");
+
+    expect(css).toContain('.preview[data-theme-effective="dark"] {\n  --accent: #1ab394;\n}');
+    expect(css).toContain('.preview[data-theme-wallpaper="true"][data-theme-effective="dark"] {\n  --chat-bg-opacity: 0.42 !important;\n}');
+    // Color rule must not carry the wallpaper attribute — otherwise non-wallpaper
+    // themes would lose their accent override when no wallpaper is present.
+    expect(css).not.toMatch(/\.preview\[data-theme-effective="dark"\][^{]*--accent[^}]*data-theme-wallpaper/su);
   });
 
   it("redirects ChatAnyTime mode selectors into a preview scope", () => {
