@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>离歌 · Div气泡</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;overflow:hidden}
+body{display:flex;align-items:center;justify-content:center;background:#0d0d1a;font-family:'Segoe UI',system-ui,'PingFang SC',sans-serif}
+</style>
+</head>
+<body>
+<assistant_html>
+<div id="root" style="width:480px;background:#16213e;border:1px solid #0f3460;border-radius:18px;padding:26px;color:#e0e0e0;box-shadow:0 12px 40px rgba(0,0,0,.5),0 0 24px rgba(83,52,131,.25);position:relative;overflow:hidden">
+
+<canvas id="bgCanvas" style="position:absolute;top:0;left:0;width:100%;height:100%;z-index:0;pointer-events:none"></canvas>
+
+<div style="position:relative;z-index:1">
+
+<!-- 头像行 -->
+<div style="display:flex;align-items:center;gap:14px;margin-bottom:18px">
+  <div id="avatar" style="width:52px;height:52px;border-radius:50%;background:linear-gradient(135deg,#533483,#e94560);display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:700;color:#fff;box-shadow:0 0 12px rgba(233,69,96,.4)"></div>
+  <div>
+    <div style="font-size:18px;font-weight:700;color:#fff">离歌</div>
+    <div style="font-size:12px;color:#e94560;margin-top:2px"><span id="dot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#4ecdc4;margin-right:6px"></span>在线 · 沈阳→广东 · 32</div>
+  </div>
+</div>
+
+<!-- 消息 -->
+<div style="font-size:14px;line-height:1.7;color:#c8c8d4;padding:14px 16px;background:rgba(15,52,96,.6);border-radius:12px;border-left:3px solid #533483;margin-bottom:16px">
+  搞运维的转行做插件，天天跟服务器较劲。性格直，<span style="color:#e94560;font-weight:600">不绕弯子</span>——有好说好，有坏说坏。
+</div>
+
+<!-- 数据卡 -->
+<div style="display:flex;gap:10px;margin-bottom:16px">
+  <div style="flex:1;background:rgba(15,52,96,.5);border-radius:10px;padding:12px 8px;text-align:center;border:1px solid rgba(83,52,131,.3)">
+    <div class="num" data-target="9" style="font-size:22px;font-weight:700;color:#4ecdc4;font-variant-numeric:tabular-nums">0</div>
+    <div style="font-size:11px;color:#888;margin-top:4px;letter-spacing:.5px">广东打拼/年</div>
+  </div>
+  <div style="flex:1;background:rgba(15,52,96,.5);border-radius:10px;padding:12px 8px;text-align:center;border:1px solid rgba(83,52,131,.3)">
+    <div class="num" data-target="32" style="font-size:22px;font-weight:700;color:#4ecdc4;font-variant-numeric:tabular-nums">0</div>
+    <div style="font-size:11px;color:#888;margin-top:4px;letter-spacing:.5px">年纪</div>
+  </div>
+  <div style="flex:1;background:rgba(15,52,96,.5);border-radius:10px;padding:12px 8px;text-align:center;border:1px solid rgba(83,52,131,.3)">
+    <div class="num" data-target="2" style="font-size:22px;font-weight:700;color:#4ecdc4;font-variant-numeric:tabular-nums">0</div>
+    <div style="font-size:11px;color:#888;margin-top:4px;letter-spacing:.5px">单身/年</div>
+  </div>
+</div>
+
+<!-- 进度条 -->
+<div style="margin-bottom:16px">
+  <div style="display:flex;justify-content:space-between;font-size:11px;color:#888;margin-bottom:6px"><span>技术栈熟练度</span><span id="skillPct">0%</span></div>
+  <div style="height:6px;background:rgba(15,52,96,.5);border-radius:3px;overflow:hidden">
+    <div id="skillBar" style="height:100%;width:0%;background:linear-gradient(90deg,#533483,#e94560);border-radius:3px;transition:width .8s ease"></div>
+  </div>
+</div>
+
+<!-- 标签 -->
+<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:16px">
+  <span style="padding:4px 10px;background:rgba(83,52,131,.2);border:1px solid rgba(83,52,131,.4);border-radius:12px;font-size:11px;color:#b8a0d8">运维</span>
+  <span style="padding:4px 10px;background:rgba(233,69,96,.15);border:1px solid rgba(233,69,96,.3);border-radius:12px;font-size:11px;color:#e94560">插件开发</span>
+  <span style="padding:4px 10px;background:rgba(78,205,196,.15);border:1px solid rgba(78,205,196,.3);border-radius:12px;font-size:11px;color:#4ecdc4">看球</span>
+  <span style="padding:4px 10px;background:rgba(15,52,96,.5);border:1px solid rgba(83,52,131,.3);border-radius:12px;font-size:11px;color:#888">喝两口</span>
+</div>
+
+<!-- 按钮 -->
+<div style="display:flex;gap:10px;margin-bottom:16px">
+  <button data-send="兄弟，聊聊技术？" style="flex:1;padding:10px 14px;border:none;border-radius:10px;font-size:13px;font-weight:600;cursor:pointer;background:linear-gradient(135deg,#533483,#e94560);color:#fff;transition:all .2s ease">🛠️ 聊聊技术</button>
+  <button data-send="球赛看了吗？" style="flex:1;padding:10px 14px;border:1px solid rgba(83,52,131,.4);border-radius:10px;font-size:13px;font-weight:600;cursor:pointer;background:rgba(15,52,96,.6);color:#c8c8d4;transition:all .2s ease">⚽ 聊聊球</button>
+</div>
+
+<!-- 底部 -->
+<div style="font-size:11px;color:#555;text-align:center;border-top:1px solid rgba(83,52,131,.2);padding-top:12px">不装 · 不演 · 不端 — 有啥说啥</div>
+
+</div>
+</div>
+</assistant_html>
+
+<script>
+(function(){
+  // 头像文字
+  var av = document.getElementById('avatar');
+  if(av) av.textContent = '离';
+
+  // 状态点闪烁
+  var dot = document.getElementById('dot');
+  if(dot){
+    var op = 1;
+    setInterval(function(){
+      op = op === 1 ? 0.3 : 1;
+      dot.style.opacity = op;
+    }, 750);
+  }
+
+  // 头像脉冲
+  var avEl = document.getElementById('avatar');
+  if(avEl){
+    var phase = 0;
+    setInterval(function(){
+      phase += 0.08;
+      var s = 12 + Math.sin(phase)*6;
+      var r = Math.round(233), g = Math.round(69), b = Math.round(96);
+      avEl.style.boxShadow = '0 0 '+s+'px rgba('+r+','+g+','+b+',0.5)';
+    }, 60);
+  }
+
+  // 数字滚动
+  document.querySelectorAll('.num').forEach(function(el){
+    var target = parseInt(el.dataset.target);
+    var current = 0;
+    var step = Math.max(1, Math.ceil(target / 28));
+    var t = setInterval(function(){
+      current += step;
+      if(current >= target){ current = target; clearInterval(t); }
+      el.textContent = current;
+    }, 40);
+  });
+
+  // 进度条
+  var bar = document.getElementById('skillBar');
+  var pct = document.getElementById('skillPct');
+  if(bar){
+    var val = 0;
+    var t = setInterval(function(){
+      val += 2;
+      if(val >= 78){ val = 78; clearInterval(t); }
+      bar.style.width = val + '%';
+      pct.textContent = val + '%';
+    }, 30);
+  }
+
+  // 按钮点击
+  document.querySelectorAll('button[data-send]').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      var text = this.getAttribute('data-send');
+      var orig = this.innerHTML;
+      this.innerHTML = '✓ ' + text;
+      this.style.opacity = '0.65';
+      setTimeout(function(){
+        btn.innerHTML = orig;
+        btn.style.opacity = '1';
+      }, 1400);
+    });
+    btn.addEventListener('mouseenter', function(){
+      this.style.transform = 'translateY(-2px)';
+    });
+    btn.addEventListener('mouseleave', function(){
+      this.style.transform = 'translateY(0)';
+    });
+  });
+
+  // 粒子背景
+  (function(){
+    var canvas = document.getElementById('bgCanvas');
+    if(!canvas) return;
+    var ctx = canvas.getContext('2d');
+    var dpr = window.devicePixelRatio || 1;
+    var particles = [];
+    function resize(){
+      var rect = canvas.parentElement.getBoundingClientRect();
+      canvas.width = rect.width * dpr;
+      canvas.height = rect.height * dpr;
+      canvas.style.width = rect.width + 'px';
+      canvas.style.height = rect.height + 'px';
+      ctx.setTransform(dpr,0,0,dpr,0,0);
+    }
+    resize();
+    var W = canvas.width/dpr, H = canvas.height/dpr;
+    for(var i=0;i<28;i++){
+      particles.push({
+        x:Math.random()*W, y:Math.random()*H,
+        r:Math.random()*2+0.5,
+        dx:(Math.random()-0.5)*0.4,
+        dy:(Math.random()-0.5)*0.4,
+        a:Math.random()*0.4+0.1
+      });
+    }
+    function draw(){
+      ctx.clearRect(0,0,W,H);
+      for(var i=0;i<particles.length;i++){
+        var p = particles[i];
+        p.x += p.dx; p.y += p.dy;
+        if(p.x<0)p.x=W; if(p.x>W)p.x=0;
+        if(p.y<0)p.y=H; if(p.y>H)p.y=0;
+        ctx.beginPath();
+        ctx.arc(p.x,p.y,p.r,0,Math.PI*2);
+        ctx.fillStyle='rgba(233,69,96,'+p.a+')';
+        ctx.fill();
+        for(var j=i+1;j<particles.length;j++){
+          var q=particles[j];
+          var dx=p.x-q.x, dy=p.y-q.y;
+          var d=Math.sqrt(dx*dx+dy*dy);
+          if(d<75){
+            ctx.beginPath();
+            ctx.moveTo(p.x,p.y);
+            ctx.lineTo(q.x,q.y);
+            ctx.strokeStyle='rgba(83,52,131,'+(0.12*(1-d/75))+')';
+            ctx.lineWidth=0.5;
+            ctx.stroke();
+          }
+        }
+      }
+      requestAnimationFrame(draw);
+    }
+    draw();
+    window.addEventListener('resize', resize);
+  })();
+})();
+</script>
+</body>
+</html>

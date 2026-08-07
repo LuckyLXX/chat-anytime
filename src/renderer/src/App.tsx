@@ -11,6 +11,7 @@ import {
   Folder,
   FolderOpen,
   KeyRound,
+  Layers,
   LoaderCircle,
   MessageSquarePlus,
   MessageCircle,
@@ -36,7 +37,7 @@ import {
   Wrench,
   X
 } from "lucide-react";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import type {
   AccessMode,
   AppearanceSettings,
@@ -94,6 +95,17 @@ const themeColorFields: readonly { key: ThemeColorKey; label: string }[] = [
   { key: "aiBubble", label: "AI 气泡" }
 ];
 const HEX_COLOR_PATTERN = /^#[\da-f]{6}$/iu;
+
+type SlashCommandBase = {
+  trigger: string;
+  label: string;
+  description: string;
+};
+
+type SlashCommand = SlashCommandBase & (
+  | { kind: "skill"; skillName: string }
+  | { kind: "command"; command: RuntimeCommand }
+);
 
 function createCustomThemeId(): string {
   if (typeof globalThis.crypto?.randomUUID === "function") return `custom-${globalThis.crypto.randomUUID()}`;
@@ -242,35 +254,59 @@ function ImageMessageBlock({ block }: { block: Extract<MessageBlock, { type: "im
   );
 }
 
+function toolCallStatusIcon(execution: ToolExecution | undefined, streaming?: boolean): ReactNode {
+  if (execution?.status === "running" || (!execution && streaming)) return <LoaderCircle size={14} className="spinning" />;
+  if (execution?.status === "error") return <AlertCircle size={14} />;
+  return <Check size={14} />;
+}
+
+function toolCallStatusLabel(execution: ToolExecution | undefined, streaming?: boolean): string {
+  if (execution?.status === "error") return "失败";
+  if (execution?.status === "completed") return "已运行";
+  return streaming ? "运行中" : "已运行";
+}
+
 function ToolGroup({ calls, executions, streaming }: { calls: Array<Extract<MessageBlock, { type: "tool-call" }>>; executions: ToolExecution[]; streaming?: boolean }): ReactNode {
   const byId = new Map(executions.map((execution) => [execution.id, execution]));
   const items = calls.map((call) => ({ call, execution: byId.get(call.id) }));
   const active = streaming || items.some((item) => item.execution?.status === "running");
   const names = [...new Set(items.map((item) => toolLabel(item.call.name)))];
-  const allDone = items.every((item) => item.execution?.status === "completed" || item.execution?.status === "error");
+  const failedCount = items.filter((item) => item.execution?.status === "error").length;
+  const currentTool = [...items].reverse().find((item) => item.execution?.status === "running")?.call;
+  let statusLabel = "已完成";
+  if (active) statusLabel = currentTool ? `正在${toolLabel(currentTool.name)}` : "正在处理";
+  else if (failedCount > 0) statusLabel = `${failedCount} 个失败`;
   return (
-    <details className="tool-call-group" open={active}>
+    <details className={`tool-call-group${active ? " active" : ""}`}>
       <summary className="tool-call-group-summary">
-        <span className="tool-call-group-title"><Wrench size={14} /><strong>{allDone ? "已处理" : "连续工具调用"} · {calls.length} 次</strong></span>
+        <span className="tool-call-group-title"><Wrench size={14} /><strong>连续工具调用 · {calls.length} 次</strong><span className={`tool-call-group-status${failedCount > 0 ? " error" : active ? " running" : ""}`}>{statusLabel}</span></span>
         <span className="tool-call-group-preview">{names.slice(0, 3).map((name) => <span className="tool-call-group-chip" key={name}>{name}</span>)}{names.length > 3 && <span className="tool-call-group-extra">+{names.length - 3}</span>}</span>
         <span className="tool-call-group-toggle" aria-hidden="true" />
       </summary>
       <div className="tool-call-group-body">
-        {items.map(({ call, execution }) => (
-          <div className="tool-call-group-item" key={call.id}>
-            <div className={`tool-call-bubble${execution?.status === "completed" ? " completed" : ""}`}>
-              <Wrench size={14} /><strong>{toolLabel(call.name)}</strong>
-              {execution?.completedAt && <span className="tool-call-duration">{formatDuration(execution.startedAt, execution.completedAt)}</span>}
-              <span className={`tool-call-status ${execution?.status === "completed" ? "done" : ""}`}>{execution?.status === "error" ? "失败" : execution?.status === "completed" ? "完成" : "执行中"}</span>
+        {items.map(({ call, execution }) => {
+          let bubbleClass = "tool-call-bubble";
+          if (execution?.status === "completed") bubbleClass += " completed";
+          if (execution?.status === "error") bubbleClass += " error";
+          return (
+            <div className="tool-call-group-item" key={call.id}>
+              <div className={bubbleClass}>
+                {toolCallStatusIcon(execution, streaming)}
+                <span className="tool-call-line-state">{toolCallStatusLabel(execution, streaming)}</span><strong>{toolLabel(call.name)}</strong>
+                {execution?.completedAt && <span className="tool-call-duration">{formatDuration(execution.startedAt, execution.completedAt)}</span>}
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </details>
   );
 }
 
-function MessageView({ message, executions, onOpenArtifact, onHtmlAction, onCopy, onEdit, onRegenerate, showThinking = true, busy = false, timing, now = Date.now() }: { message: ChatMessage; executions: ToolExecution[]; onOpenArtifact(artifact: Artifact): void; onHtmlAction(text: string): void; onCopy(message: ChatMessage): void; onEdit(message: ChatMessage): void; onRegenerate(message: ChatMessage): void; showThinking?: boolean; busy?: boolean; timing?: TurnTiming; now?: number }): ReactNode {
+// Memoized so an unchanged message bubble (stable ChatMessage reference from
+// the store's uuid-based reuse) is skipped during high-frequency streaming
+// updates that only mutate other bubbles.
+const MessageView = memo(function MessageView({ message, executions, onOpenArtifact, onHtmlAction, onCopy, onEdit, onRegenerate, showThinking = true, busy = false, timing, now = Date.now() }: { message: ChatMessage; executions: ToolExecution[]; onOpenArtifact(artifact: Artifact): void; onHtmlAction(text: string): void; onCopy(message: ChatMessage): void; onEdit(message: ChatMessage): void; onRegenerate(message: ChatMessage): void; showThinking?: boolean; busy?: boolean; timing?: TurnTiming; now?: number }): ReactNode {
   const text = messageText(message);
   const thinking = thinkingText(message);
   const toolLayout = splitAssistantToolLayout(message);
@@ -280,7 +316,7 @@ function MessageView({ message, executions, onOpenArtifact, onHtmlAction, onCopy
     return (
       <article className="message message-user">
         <div className="message-avatar user-avatar">我</div>
-        <div className="message-body message-bubble">{images.length > 0 && <div className="image-message-list">{images.map((block, index) => <ImageMessageBlock key={`${message.id}-image-${index}`} block={block} />)}</div>}{text && <p className="user-text">{text}</p>}<div className="message-actions"><button type="button" title="复制" aria-label="复制用户消息" onClick={() => onCopy(message)}><Copy size={13} /></button><button type="button" title="重新编辑" aria-label="重新编辑用户消息" onClick={() => onEdit(message)}><Pencil size={13} /></button></div></div>
+        <div className="message-body message-bubble">{message.skill && <div className="message-skill-badge"><Puzzle size={13} /><strong>{message.skill.name}</strong></div>}{images.length > 0 && <div className="image-message-list">{images.map((block, index) => <ImageMessageBlock key={`${message.id}-image-${index}`} block={block} />)}</div>}{text && <p className="user-text">{text}</p>}<div className="message-actions"><button type="button" title="复制" aria-label="复制用户消息" onClick={() => onCopy(message)}><Copy size={13} /></button><button type="button" title="重新编辑" aria-label="重新编辑用户消息" onClick={() => onEdit(message)}><Pencil size={13} /></button></div></div>
       </article>
     );
   }
@@ -308,7 +344,7 @@ function MessageView({ message, executions, onOpenArtifact, onHtmlAction, onCopy
       </div>
     </article>
   );
-}
+});
 
 function ExecutionItem({ execution, selected, onSelect }: { execution: ToolExecution; selected: boolean; onSelect(): void }): ReactNode {
   const statusIcon = execution.status === "running"
@@ -832,7 +868,7 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
 
   function newAgent(): void {
     const id = `agent-${Date.now()}`;
-    const agent: AgentProfile = { id, name: "新 Agent", description: "", systemPrompt: "", defaultThinkingLevel: "medium", tools: Object.fromEntries(agentTools.map((tool) => [tool, true])) as Record<BuiltinToolName, boolean> };
+    const agent: AgentProfile = { id, name: "新 Agent", description: "", systemPrompt: "", divMode: false, defaultThinkingLevel: "medium", tools: Object.fromEntries(agentTools.map((tool) => [tool, true])) as Record<BuiltinToolName, boolean> };
     setAgentList((current) => [...current, agent]);
     setSelectedAgentId(id);
   }
@@ -894,7 +930,7 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
         <footer><button type="button" className="secondary-button" onClick={closeSettings}>取消</button><button className="primary-button" disabled={saving || (!apiKey.trim() && !hasSavedCustomKey) || (isCustomProvider && (!customName.trim() || !customBaseUrl.trim() || !customModelId.trim() || (providerModels.length > 0 && enabledProviderModels.length === 0)))} type="submit">{saving ? "正在应用" : "保存设置"}</button></footer>
         </form> : tab === "agents" ? <div className="agent-settings">
           <div className="agent-list">{agentList.filter((agent) => !agent.archived).map((agent) => <button type="button" key={agent.id} className={agent.id === selectedAgent?.id ? "active" : ""} onClick={() => setSelectedAgentId(agent.id)}><strong>{agent.name}</strong><small>{agent.description || "未填写说明"}</small></button>)}<button type="button" className="secondary-button agent-new-button" onClick={newAgent}>+ 新建 Agent</button></div>
-          {selectedAgent && <div className="agent-editor"><label>名称<input value={selectedAgent.name} onChange={(event) => updateAgent({ name: event.target.value })} /></label><label>说明<input value={selectedAgent.description} onChange={(event) => updateAgent({ description: event.target.value })} /></label><label>系统提示词<textarea value={selectedAgent.systemPrompt} rows={6} onChange={(event) => updateAgent({ systemPrompt: event.target.value })} /></label><label>默认模型<select value={selectedAgent.defaultModel ? `${selectedAgent.defaultModel.provider}/${selectedAgent.defaultModel.id}` : ""} onChange={(event) => { const value = event.target.value; updateAgent({ defaultModel: value ? { provider: value.slice(0, value.indexOf("/")), id: value.slice(value.indexOf("/") + 1) } : undefined }); }}><option value="">跟随全局默认模型</option>{configuredModels.map((model) => <option key={`${model.provider}/${model.id}`} value={`${model.provider}/${model.id}`}>{model.name}</option>)}</select></label><label>默认思考等级<select value={selectedAgent.defaultThinkingLevel} onChange={(event) => updateAgent({ defaultThinkingLevel: event.target.value as ThinkingLevel })}>{thinkingLevels.map((level) => <option key={level} value={level}>{thinkingLevelLabels[level]}</option>)}</select></label><fieldset><legend>工具权限</legend>{agentTools.map((tool) => <label className="tool-toggle" key={tool}><input type="checkbox" checked={selectedAgent.tools[tool]} onChange={(event) => updateAgent({ tools: { ...selectedAgent.tools, [tool]: event.target.checked } })} />{tool}</label>)}</fieldset><footer><button type="button" className="danger-button" disabled={selectedAgent.id === "default"} onClick={() => void archiveAgent()}>归档</button><button type="button" className="secondary-button" onClick={duplicateAgent}>复制</button><button type="button" className="primary-button" onClick={() => void saveAgent()}>保存 Agent</button></footer></div>}
+          {selectedAgent && <div className="agent-editor"><label>名称<input value={selectedAgent.name} onChange={(event) => updateAgent({ name: event.target.value })} /></label><label>说明<input value={selectedAgent.description} onChange={(event) => updateAgent({ description: event.target.value })} /></label><label>系统提示词<textarea value={selectedAgent.systemPrompt} rows={6} onChange={(event) => updateAgent({ systemPrompt: event.target.value })} /></label><label className="checkbox-setting"><input type="checkbox" checked={selectedAgent.divMode} onChange={(event) => updateAgent({ divMode: event.target.checked })} />启用 Div 气泡模式</label><label>默认模型<select value={selectedAgent.defaultModel ? `${selectedAgent.defaultModel.provider}/${selectedAgent.defaultModel.id}` : ""} onChange={(event) => { const value = event.target.value; updateAgent({ defaultModel: value ? { provider: value.slice(0, value.indexOf("/")), id: value.slice(value.indexOf("/") + 1) } : undefined }); }}><option value="">跟随全局默认模型</option>{configuredModels.map((model) => <option key={`${model.provider}/${model.id}`} value={`${model.provider}/${model.id}`}>{model.name}</option>)}</select></label><label>默认思考等级<select value={selectedAgent.defaultThinkingLevel} onChange={(event) => updateAgent({ defaultThinkingLevel: event.target.value as ThinkingLevel })}>{thinkingLevels.map((level) => <option key={level} value={level}>{thinkingLevelLabels[level]}</option>)}</select></label><fieldset><legend>工具权限</legend>{agentTools.map((tool) => <label className="tool-toggle" key={tool}><input type="checkbox" checked={selectedAgent.tools[tool]} onChange={(event) => updateAgent({ tools: { ...selectedAgent.tools, [tool]: event.target.checked } })} />{tool}</label>)}</fieldset><footer><button type="button" className="danger-button" disabled={selectedAgent.id === "default"} onClick={() => void archiveAgent()}>归档</button><button type="button" className="secondary-button" onClick={duplicateAgent}>复制</button><button type="button" className="primary-button" onClick={() => void saveAgent()}>保存 Agent</button></footer></div>}
         </div> : tab === "resources" ? <ResourceSettings resources={resources} /> : <form className="appearance-settings" onSubmit={(event) => { event.preventDefault(); const nextSettings = structuredClone(settings); void window.piDesktop.send({ type: "appearance.save", appearance: nextSettings.appearance }); markSettingsSaved(nextSettings); onClose(); }}>
           <div className="appearance-grid">
             <div>
@@ -946,6 +982,8 @@ export function App(): ReactNode {
   const settings = useDesktopStore((state) => state.settings);
   const themeAssetUrls = useThemeAssetUrls(themeAssetsForAppearance(settings.appearance));
   const [input, setInput] = useState("");
+  const [selectedSkill, setSelectedSkill] = useState<string>();
+  const [editingMessageTimestamp, setEditingMessageTimestamp] = useState<number>();
   const [localTurnStartedAt, setLocalTurnStartedAt] = useState<number>();
   const [messageActionError, setMessageActionError] = useState<string>();
   // Tool details are already available inline in the conversation. Keep the
@@ -963,8 +1001,10 @@ export function App(): ReactNode {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const accessModeMenuRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLFormElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
+  const [slashIndex, setSlashIndex] = useState(0);
   const selectedModel = snapshot.model ? `${snapshot.model.provider}/${snapshot.model.id}` : "";
   const availableModels = useMemo(() => models.filter((model) => model.configured), [models]);
   const selectedModelOption = availableModels.find((model) => `${model.provider}/${model.id}` === selectedModel);
@@ -980,6 +1020,47 @@ export function App(): ReactNode {
   const now = useElapsedNow(isGenerating);
   const hasAssistantMessage = displayMessages.some((message) => message.role === "assistant");
   const showTurnTimingOnLatest = Boolean(snapshot.turnTiming && (!snapshot.busy || displayMessages[latestAssistantMessageIndex]?.streaming));
+  const canSubmit = Boolean(snapshot.workspace && snapshot.model && (input.trim() || attachments.length > 0 || selectedSkill));
+  let composerPlaceholder = "请先打开一个项目";
+  if (snapshot.workspace) composerPlaceholder = selectedSkill ? "输入任务要求" : "让 Pi 检查、修改或运行这个项目";
+
+  // 斜杠指令清单：固定会话命令 + 已发现的 Skill
+  const slashCommands = useMemo<SlashCommand[]>(() => {
+    const fixed: SlashCommand[] = [
+      { trigger: "/compact", label: "/compact", description: "压缩当前会话上下文", kind: "command", command: { type: "session.compact" } },
+      { trigger: "/new", label: "/new", description: "开启新话题", kind: "command", command: { type: "session.new" } }
+    ];
+    const skills: SlashCommand[] = resources.skills.map((skill) => ({
+      trigger: `/skill:${skill.name}`,
+      label: `/skill:${skill.name}`,
+      description: skill.description || "调用 Skill",
+      kind: "skill",
+      skillName: skill.name
+    }));
+    return [...fixed, ...skills];
+  }, [resources.skills]);
+
+  // 仅当输入以 / 开头且光标仍处于首个 token（无空格）时才过滤指令
+  const slashToken = useMemo(() => {
+    if (selectedSkill) return null;
+    const trimmed = input.trimStart();
+    if (!trimmed.startsWith("/")) return null;
+    const tail = trimmed.slice(1);
+    if (tail.includes(" ")) return null; // 首个 token 已结束，补全关闭
+    return trimmed.toLowerCase();
+  }, [input, selectedSkill]);
+
+  const slashMatches = useMemo(() => {
+    if (!slashToken) return [];
+    return slashCommands.filter((cmd) => cmd.trigger.toLowerCase().startsWith(slashToken) && cmd.trigger.toLowerCase() !== slashToken);
+  }, [slashToken, slashCommands]);
+
+  const slashOpen = slashMatches.length > 0;
+  const activeSlashIndex = Math.min(slashIndex, slashMatches.length - 1);
+
+  useEffect(() => {
+    if (slashIndex > slashMatches.length - 1) setSlashIndex(Math.max(0, slashMatches.length - 1));
+  }, [slashMatches.length, slashIndex]);
 
   useEffect(() => {
     let dispose: (() => void) | undefined;
@@ -1010,6 +1091,11 @@ export function App(): ReactNode {
   useEffect(() => {
     if (!snapshot.busy) setLocalTurnStartedAt(undefined);
   }, [snapshot.busy]);
+
+  useEffect(() => {
+    setEditingMessageTimestamp(undefined);
+    setSelectedSkill(undefined);
+  }, [snapshot.sessionId]);
 
   useEffect(() => {
     if (!accessModeMenuOpen && !composerMenu) return;
@@ -1077,13 +1163,48 @@ export function App(): ReactNode {
   async function submit(event: FormEvent): Promise<void> {
     event.preventDefault();
     const text = input.trim();
-    if ((!text && attachments.length === 0) || snapshot.busy) return;
+    if ((!text && attachments.length === 0 && !selectedSkill) || snapshot.busy) return;
+    // 客户端执行的固定指令：不透传给 Pi（会话层会当噪声），直接发协议命令
+    if (!selectedSkill && text === "/new") {
+      try {
+        await window.piDesktop.send({ type: "session.new" });
+        setInput("");
+        setAttachments([]);
+        setEditingMessageTimestamp(undefined);
+      } catch (error) {
+        setMessageActionError(error instanceof Error ? error.message : "新建话题失败");
+      }
+      return;
+    }
+    if (!selectedSkill && (text === "/compact" || text.startsWith("/compact "))) {
+      const instructions = text.startsWith("/compact ") ? text.slice("/compact ".length).trim() || undefined : undefined;
+      try {
+        await window.piDesktop.send({ type: "session.compact", instructions });
+        setInput("");
+        setAttachments([]);
+        setEditingMessageTimestamp(undefined);
+      } catch (error) {
+        setMessageActionError(error instanceof Error ? error.message : "压缩上下文失败");
+      }
+      return;
+    }
+    const skillMatch = selectedSkill ? undefined : text.match(/^\/skill:([^\s]+)(?:\s+([\s\S]*))?$/u);
+    const skillName = selectedSkill ?? skillMatch?.[1];
+    const skillInstructions = selectedSkill ? text || undefined : skillMatch?.[2]?.trim() || undefined;
     if (attachments.some((item) => item.kind === "image") && !models.find((item) => `${item.provider}/${item.id}` === selectedModel)?.imageInput) { setAttachmentError("当前模型不支持图片输入，请先切换多模态模型"); return; }
     setLocalTurnStartedAt(Date.now());
     try {
-      await window.piDesktop.send({ type: "session.prompt", text, attachments });
+      if (editingMessageTimestamp !== undefined) {
+        await window.piDesktop.send({ type: "session.regenerate", text, timestamp: editingMessageTimestamp, skillName, attachments });
+      } else if (skillName) {
+        await window.piDesktop.send({ type: "session.skill", name: skillName, instructions: skillInstructions, attachments });
+      } else {
+        await window.piDesktop.send({ type: "session.prompt", text, attachments });
+      }
       setInput("");
+      setSelectedSkill(undefined);
       setAttachments([]);
+      setEditingMessageTimestamp(undefined);
     } catch (error) {
       setLocalTurnStartedAt(undefined);
       setAttachmentError(error instanceof Error ? error.message : "附件发送失败");
@@ -1102,11 +1223,17 @@ export function App(): ReactNode {
 
   function editMessage(message: ChatMessage): void {
     setInput(messageText(message));
+    setSelectedSkill(message.skill?.name);
+    setAttachments([]);
+    setEditingMessageTimestamp(message.timestamp);
     setMessageActionError(undefined);
+    setTimeout(() => textareaRef.current?.focus(), 0);
   }
 
   function handleHtmlAction(text: string): void {
     setInput((current) => current.trim() ? `${current.trim()}\n${text}` : text);
+    setSelectedSkill(undefined);
+    setEditingMessageTimestamp(undefined);
     setMessageActionError(undefined);
   }
 
@@ -1115,10 +1242,10 @@ export function App(): ReactNode {
     const index = snapshot.messages.findIndex((item) => item.id === message.id);
     const previousUser = index > 0 ? [...snapshot.messages.slice(0, index)].reverse().find((item) => item.role === "user") : undefined;
     const text = previousUser ? messageText(previousUser) : "";
-    if (!text) return;
+    if (!text && !previousUser?.skill) return;
     setLocalTurnStartedAt(Date.now());
     try {
-      await window.piDesktop.send({ type: "session.regenerate", text, timestamp: previousUser?.timestamp });
+      await window.piDesktop.send({ type: "session.regenerate", text, timestamp: previousUser?.timestamp, skillName: previousUser?.skill?.name });
     } catch (error) {
       setLocalTurnStartedAt(undefined);
       setMessageActionError(error instanceof Error ? error.message : "重新生成失败");
@@ -1184,7 +1311,50 @@ export function App(): ReactNode {
     void addLocalFiles(event.dataTransfer.files);
   }
 
+  function applySlashCommand(command: SlashCommand): void {
+    setEditingMessageTimestamp(undefined);
+    if (command.kind === "skill") {
+      setSelectedSkill(command.skillName);
+      setInput("");
+      setSlashIndex(0);
+      setTimeout(() => textareaRef.current?.focus(), 0);
+      return;
+    }
+    if (snapshot.busy) return;
+    setSelectedSkill(undefined);
+    setInput("");
+    setAttachments([]);
+    setSlashIndex(0);
+    void window.piDesktop.send(command.command).catch((error) => {
+      setMessageActionError(error instanceof Error ? error.message : "指令执行失败");
+    });
+  }
+
   function handleComposerKey(event: React.KeyboardEvent<HTMLTextAreaElement>): void {
+    if (slashOpen) {
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        setSlashIndex((current) => (current + 1) % slashMatches.length);
+        return;
+      }
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        setSlashIndex((current) => (current - 1 + slashMatches.length) % slashMatches.length);
+        return;
+      }
+      if (event.key === "Tab" || (event.key === "Enter" && !event.shiftKey)) {
+        event.preventDefault();
+        const selected = slashMatches[activeSlashIndex];
+        if (selected) applySlashCommand(selected);
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setSlashIndex(0);
+        setInput("");
+        return;
+      }
+    }
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       event.currentTarget.form?.requestSubmit();
@@ -1259,7 +1429,7 @@ export function App(): ReactNode {
               ) : displayMessages.length === 0 && !isGenerating ? (
                 <div className="empty-conversation"><div className="empty-icon"><CodeXml size={27} /></div><h1>今天想开发什么？</h1></div>
               ) : <>
-                {displayMessages.map((message, index) => <MessageView key={message.id} message={message} executions={snapshot.executions} onOpenArtifact={setArtifact} onHtmlAction={handleHtmlAction} onCopy={(item) => void copyMessage(item)} onEdit={editMessage} onRegenerate={(item) => void regenerateMessage(item)} showThinking={settings.appearance.showThinking} busy={snapshot.busy} timing={showTurnTimingOnLatest && index === latestAssistantMessageIndex && message.role === "assistant" ? snapshot.turnTiming : undefined} now={now} />)}
+                {displayMessages.map((message, index) => <MessageView key={message.uuid ?? message.id} message={message} executions={snapshot.executions} onOpenArtifact={setArtifact} onHtmlAction={handleHtmlAction} onCopy={(item) => void copyMessage(item)} onEdit={editMessage} onRegenerate={(item) => void regenerateMessage(item)} showThinking={settings.appearance.showThinking} busy={snapshot.busy} timing={showTurnTimingOnLatest && index === latestAssistantMessageIndex && message.role === "assistant" ? snapshot.turnTiming : undefined} now={now} />)}
                 {isGenerating && (hasAssistantMessage ? <div className="response-progress response-progress-inline"><LoaderCircle size={14} className="spinning" /><span>{snapshot.agentName}正在努力输出中……</span>{activeTurnTiming && <TimingMeta timing={activeTurnTiming} now={now} />}</div> : <PendingResponse agentName={snapshot.agentName} timing={activeTurnTiming} now={now} />)}
               </>}
             </div>
@@ -1267,15 +1437,38 @@ export function App(): ReactNode {
               {attachments.length > 0 && <div className="attachment-list">{attachments.map((attachment, index) => <span className="attachment-chip" key={`${attachment.name}-${index}`}>{attachment.kind === "image" ? <img src={`data:${attachment.mimeType};base64,${attachment.data}`} alt="" /> : <FileDiff size={12} />}<span>{attachment.name}</span><button type="button" title="移除附件" aria-label={`移除 ${attachment.name}`} onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={12} /></button></span>)}</div>}
               {attachmentError && <div className="attachment-error" role="alert">{attachmentError}<button type="button" title="关闭提示" aria-label="关闭附件提示" onClick={() => setAttachmentError(undefined)}><X size={12} /></button></div>}
               <input ref={fileInputRef} type="file" hidden multiple accept="image/png,image/jpeg,image/webp,image/gif,.txt,.md,.json,.js,.ts,.tsx,.jsx,.py,.go,.rs,.java,.css,.html" onChange={(event) => { void addLocalFiles(event.target.files ?? []); event.currentTarget.value = ""; }} />
-              <textarea
-                value={input}
-                rows={1}
-                disabled={!snapshot.workspace}
-                placeholder={snapshot.workspace ? "让 Pi 检查、修改或运行这个项目" : "请先打开一个项目"}
-                onKeyDown={handleComposerKey}
-                onPaste={handlePaste}
-                onChange={(event) => setInput(event.target.value)}
-              />
+              {slashOpen && (
+                <div className="slash-menu" role="listbox" aria-label="斜杠指令">
+                  {slashMatches.map((cmd, index) => (
+                    <button
+                      type="button"
+                      role="option"
+                      aria-selected={index === activeSlashIndex}
+                      key={`${cmd.kind}:${cmd.trigger}`}
+                      className={`slash-menu-item${index === activeSlashIndex ? " active" : ""}`}
+                      disabled={cmd.kind === "command" && snapshot.busy}
+                      onMouseEnter={() => setSlashIndex(index)}
+                      onClick={() => applySlashCommand(cmd)}
+                    >
+                      <span className="slash-menu-icon">{cmd.trigger.startsWith("/skill:") ? <Puzzle size={14} /> : cmd.trigger === "/compact" ? <Layers size={14} /> : <MessageSquarePlus size={14} />}</span>
+                      <span className="slash-menu-copy"><strong>{cmd.label}</strong><small>{cmd.description}</small></span>
+                    </button>
+                  ))}
+                </div>
+              )}
+              <div className="composer-input-row">
+                {selectedSkill && <span className="composer-skill-chip"><Puzzle size={13} /><strong>{selectedSkill}</strong><button type="button" title="取消 Skill" aria-label={`取消 Skill ${selectedSkill}`} onClick={() => setSelectedSkill(undefined)}><X size={12} /></button></span>}
+                <textarea
+                  ref={textareaRef}
+                  value={input}
+                  rows={1}
+                  disabled={!snapshot.workspace}
+                  placeholder={composerPlaceholder}
+                  onKeyDown={handleComposerKey}
+                  onPaste={handlePaste}
+                  onChange={(event) => setInput(event.target.value)}
+                />
+              </div>
               <div className="composer-footer">
                 <div className="composer-footer-left">
                   <button className="icon-button attach-button" type="button" title="添加附件" aria-label="添加附件" disabled={snapshot.busy || attachments.length >= 5} onClick={() => void addAttachments()}><Plus size={18} /></button>
@@ -1300,7 +1493,7 @@ export function App(): ReactNode {
                   {snapshot.busy ? (
                     <button className="stop-button" type="button" title="停止" aria-label="停止" onClick={() => void window.piDesktop.send({ type: "session.abort" })}><CircleStop size={18} /></button>
                   ) : (
-                    <button className="send-button" type="submit" title="发送" aria-label="发送" disabled={!input.trim() || !snapshot.workspace || !snapshot.model}><Play size={17} fill="currentColor" /></button>
+                    <button className="send-button" type="submit" title="发送" aria-label="发送" disabled={!canSubmit}><Play size={17} fill="currentColor" /></button>
                   )}
                 </div>
               </div>

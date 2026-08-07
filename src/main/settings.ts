@@ -34,6 +34,7 @@ export function createDefaultAgent(): AgentProfile {
     name: "默认助手",
     description: "使用 Pi 工具协助完成项目开发任务",
     systemPrompt: "你是 ChatAnyTime 的默认开发助手。请先理解项目结构，再谨慎地检查、修改和验证代码。",
+    divMode: false,
     defaultThinkingLevel: "medium",
     tools: defaultTools()
   };
@@ -112,6 +113,7 @@ export function normalizeAgent(agent: Partial<AgentProfile> | undefined): AgentP
     name: String(agent?.name || fallback.name),
     description: String(agent?.description ?? ""),
     systemPrompt: String(agent?.systemPrompt ?? (agent?.id === DEFAULT_AGENT_ID ? fallback.systemPrompt : "")),
+    divMode: agent?.divMode === true,
     defaultModel: agent?.defaultModel,
     defaultThinkingLevel: agent?.defaultThinkingLevel ?? fallback.defaultThinkingLevel,
     tools: Object.fromEntries(BUILTIN_TOOLS.map((tool) => [tool, sourceTools[tool] !== false])) as Record<BuiltinToolName, boolean>,

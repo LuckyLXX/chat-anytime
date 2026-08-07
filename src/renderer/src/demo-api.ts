@@ -17,6 +17,7 @@ const demoDefaultAgent: AgentProfile = {
   name: "默认助手",
   description: "",
   systemPrompt: "",
+  divMode: false,
   defaultThinkingLevel: "medium",
   tools: { read: true, bash: true, edit: true, write: true, grep: true, find: true, ls: true }
 };
@@ -235,15 +236,36 @@ export function createDemoApi(): DesktopApi {
         case "session.new":
           updateSnapshot({ messages: [], executions: [], sessionId: "new-demo-session" });
           break;
+        case "session.compact":
+          updateSnapshot({ busy: true, status: "Pi 正在压缩上下文" });
+          setTimeout(() => updateSnapshot({
+            busy: false,
+            status: "就绪",
+            messages: [...demoSnapshot.messages, { id: `demo-compacted-${Date.now()}`, role: "assistant", timestamp: Date.now(), blocks: [{ type: "text", text: command.instructions ? `已压缩上下文（${command.instructions}）。` : "已压缩上下文。" }] }]
+          }), 80);
+          break;
         case "session.prompt":
           updateSnapshot({
             messages: [...demoSnapshot.messages, { id: `user-${Date.now()}`, role: "user", timestamp: Date.now(), blocks: [{ type: "text", text: command.text }] }]
           });
           break;
-        case "session.regenerate":
+        case "session.skill": {
+          updateSnapshot({
+            messages: [...demoSnapshot.messages, { id: `user-${Date.now()}`, role: "user", timestamp: Date.now(), skill: { name: command.name }, blocks: command.instructions ? [{ type: "text", text: command.instructions }] : [] }]
+          });
+          break;
+        }
+        case "session.regenerate": {
+          const targetIndex = demoSnapshot.messages.findIndex((message) => message.role === "user" && (command.timestamp === undefined || message.timestamp === command.timestamp));
+          const editedTimestamp = Date.now();
+          const editedMessages = [
+            ...(targetIndex >= 0 ? demoSnapshot.messages.slice(0, targetIndex) : demoSnapshot.messages),
+            { id: `demo-edited-${editedTimestamp}`, role: "user" as const, timestamp: editedTimestamp, skill: command.skillName ? { name: command.skillName } : undefined, blocks: command.text ? [{ type: "text" as const, text: command.text }] : [] }
+          ];
           updateSnapshot({
             busy: true,
-            status: "Pi 正在重新生成"
+            status: "Pi 正在重新生成",
+            messages: editedMessages
           });
           setTimeout(() => updateSnapshot({
             busy: false,
@@ -251,6 +273,7 @@ export function createDemoApi(): DesktopApi {
             messages: [...demoSnapshot.messages, { id: `demo-regenerated-${Date.now()}`, role: "assistant", timestamp: Date.now(), blocks: [{ type: "text", text: `已重新生成：${command.text}` }] }]
           }), 80);
           break;
+        }
         case "permission.resolve": {
           const decision: PermissionDecision = command.decision;
           if (decision === "deny") emit({ type: "log", level: "warn", message: "已拒绝演示工具请求" });

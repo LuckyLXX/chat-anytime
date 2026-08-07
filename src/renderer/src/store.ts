@@ -73,7 +73,33 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   handleRuntimeMessage(message) {
     switch (message.type) {
       case "state":
-        set({ snapshot: message.snapshot });
+        set((state) => {
+          const incoming = message.snapshot;
+          const previous = state.snapshot;
+          // Preserve object identity for unchanged messages: match by uuid
+          // (stable across streaming/final frames) and reuse the previous
+          // ChatMessage reference when no lifecycle field changed. This lets
+          // memoized list items skip re-rendering during high-frequency
+          // streaming updates that only touch other bubbles.
+          const prevByUuid = new Map(previous.messages.map((msg) => [msg.uuid, msg]));
+          let changed = previous.messages.length !== incoming.messages.length;
+          const mergedMessages = incoming.messages.map((msg) => {
+            const prev = msg.uuid !== undefined ? prevByUuid.get(msg.uuid) : undefined;
+            if (prev && prev.streaming === msg.streaming && prev.error === msg.error) return prev;
+            changed = true;
+            return msg;
+          });
+          if (!changed && previous.busy === incoming.busy && previous.status === incoming.status &&
+              previous.turnTiming === incoming.turnTiming && previous.executions === incoming.executions &&
+              previous.sessions === incoming.sessions && previous.model === incoming.model &&
+              previous.sessionId === incoming.sessionId && previous.sessionFile === incoming.sessionFile &&
+              previous.thinkingLevel === incoming.thinkingLevel) {
+            // Nothing changed at all — keep the exact same snapshot reference
+            // so downstream useMemo/useEffect dependency checks stay no-ops.
+            return state;
+          }
+          return { snapshot: { ...incoming, messages: mergedMessages } };
+        });
         break;
       case "resources":
         set({ resources: message.resources });

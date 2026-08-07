@@ -1,4 +1,5 @@
 import type { ThemeColorKey, ThemeOverrideMode, ThemeOverrides, ThemePresetId } from "../../../shared/protocol";
+import blueDreamWallpaper from "../assets/blue-dream-wallpaper.png";
 
 export interface ThemePresetDefinition {
   id: ThemePresetId;
@@ -287,6 +288,14 @@ const presetDefinitions: ThemePresetDefinition[] = [
       "--surface": "#18181b", "--surface-muted": "#101012", "--surface-raised": "#27272a", "--border": "#3f3f46", "--border-strong": "#52525b", "--accent": "#60a5fa", "--accent-hover": "#93c5fd", "--accent-soft": "#1e3a5f", "--blue": "#93c5fd", "--user-bubble": "#2563eb", "--text-on-accent": "#172033", "--on-accent": "#172033", "--panel-bg": "rgb(39 39 42 / 94%)"
     }, {
       "--surface": "#fafafa", "--surface-muted": "#f4f4f5", "--surface-raised": "#e4e4e7", "--border": "#d4d4d8", "--border-strong": "#a1a1aa", "--accent": "#2563eb", "--accent-hover": "#1d4ed8", "--accent-soft": "#dbeafe", "--blue": "#1d4ed8", "--user-bubble": "#2563eb", "--text-on-accent": "#ffffff", "--on-accent": "#ffffff", "--panel-bg": "rgb(250 250 250 / 92%)"
+    })
+  },
+  {
+    id: "blue-dream", name: "蓝色梦境", description: "手绘动画感的蓝色海岸", swatches: ["#102a43", "#2f6690", "#78c6e8"],
+    css: presetCss("blue-dream", {
+      "--chat-bg-image": `url("${blueDreamWallpaper}")`, "--chat-bg-opacity": "0.32", "--surface": "#102a43", "--surface-muted": "#0b1f33", "--surface-raised": "#193b59", "--surface-conversation": "rgb(16 42 67 / 78%)", "--surface-sidebar": "#0d263f", "--surface-sidebar-tabs": "#193b59", "--surface-sidebar-hover": "#214b6c", "--surface-sidebar-active": "#255b7d", "--border": "#2c5b7d", "--border-strong": "#467fa3", "--accent": "#78c6e8", "--accent-hover": "#a6def4", "--accent-soft": "#1b4965", "--accent-text": "#bfeafa", "--blue": "#90d7f1", "--user-bubble": "#176b91", "--user-bubble-border": "#5eb4d5", "--text-on-accent": "#082f49", "--on-accent": "#082f49", "--panel-bg": "rgb(13 38 63 / 94%)"
+    }, {
+      "--chat-bg-image": `url("${blueDreamWallpaper}")`, "--chat-bg-opacity": "0.24", "--surface": "#f4fbff", "--surface-muted": "#e5f4fb", "--surface-raised": "#d4edf7", "--surface-conversation": "rgb(244 251 255 / 76%)", "--surface-sidebar": "#e5f4fb", "--surface-sidebar-tabs": "#d4edf7", "--surface-sidebar-hover": "#c5e5f2", "--surface-sidebar-active": "#b7deed", "--border": "#b2d8e8", "--border-strong": "#83bdd4", "--accent": "#147da6", "--accent-hover": "#0d6285", "--accent-soft": "#d8eff8", "--accent-text": "#075579", "--blue": "#126a91", "--user-bubble": "#147da6", "--user-bubble-border": "#0d6285", "--text-on-accent": "#ffffff", "--on-accent": "#ffffff", "--panel-bg": "rgb(244 251 255 / 92%)"
     })
   }
 ];

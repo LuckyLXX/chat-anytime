@@ -52,13 +52,14 @@ export interface AgentProfile {
   name: string;
   description: string;
   systemPrompt: string;
+  divMode: boolean;
   defaultModel?: { provider: string; id: string };
   defaultThinkingLevel: ThinkingLevel;
   tools: Record<BuiltinToolName, boolean>;
   archived?: boolean;
 }
 
-export const THEME_PRESET_IDS = ["default", "ocean", "emerald", "indigo", "forest", "rose", "amber", "violet", "carbon"] as const;
+export const THEME_PRESET_IDS = ["default", "ocean", "emerald", "indigo", "forest", "rose", "amber", "violet", "carbon", "blue-dream"] as const;
 export type ThemePresetId = typeof THEME_PRESET_IDS[number];
 
 export type ThemeAssetMap = Record<string, string>;
@@ -139,9 +140,17 @@ export type MessageBlock =
 
 export interface ChatMessage {
   id: string;
+  /**
+   * Stable identifier for the underlying Pi message object. The same Pi
+   * message keeps one uuid across its partial (streaming) and final frames,
+   * letting the renderer update a bubble in place instead of re-appending.
+   * Omitted on snapshots produced before this field existed.
+   */
+  uuid?: string;
   role: "user" | "assistant";
   timestamp: number;
   blocks: MessageBlock[];
+  skill?: { name: string };
   attachments?: Array<{ kind: PromptAttachment["kind"]; name: string; relativePath?: string }>;
   streaming?: boolean;
   error?: string;
@@ -261,7 +270,9 @@ export type RuntimeCommand =
   | { type: "session.new" }
   | { type: "session.open"; path: string }
   | { type: "session.prompt"; text: string; attachments?: PromptAttachment[] }
-  | { type: "session.regenerate"; text: string; timestamp?: number }
+  | { type: "session.skill"; name: string; instructions?: string; attachments?: PromptAttachment[] }
+  | { type: "session.regenerate"; text: string; timestamp?: number; skillName?: string; attachments?: PromptAttachment[] }
+  | { type: "session.compact"; instructions?: string }
   | { type: "session.abort" }
   | { type: "agent.select"; agentId: string }
   | { type: "agent.save"; agent: AgentProfile }

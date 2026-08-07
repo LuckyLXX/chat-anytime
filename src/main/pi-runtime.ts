@@ -46,6 +46,8 @@ import { agentWorkspaceSessionDir } from "./session-scope.js";
 import { workspaceRelativeAttachment } from "./attachments.js";
 import { mergeProviderModels } from "./settings.js";
 import { upsertMcpServerConfig, type McpServerConfigEntry } from "./mcp-config.js";
+import { buildSkillPrompt, parseSkillPrompt, type SkillPromptDisplay } from "./skill-prompt.js";
+import { buildDivModePrompt } from "./div-prompt.js";
 
 const parentPort = process.parentPort;
 if (!parentPort) throw new Error("Pi 运行时必须作为 Electron 工具进程启动");
@@ -78,6 +80,43 @@ let mcpStatusUnsubscribe: (() => void) | undefined;
 let mcpServers: McpServerSummary[] = [];
 let mcpAdapterLoaded = false;
 let resourceOperationBusy = false;
+
+// Streaming coalescer: high-frequency partial frames (message_update token
+// batches, tool partial output) are throttled to 50ms (20fps) to avoid IPC
+// storms. State transitions that change busy/status/executions flush
+// immediately so the UI never lags on real lifecycle changes.
+const STREAM_FLUSH_INTERVAL_MS = 50;
+let pendingFlushTimer: ReturnType<typeof setTimeout> | undefined;
+let hasPendingFlush = false;
+
+function flushState(): void {
+  pendingFlushTimer = undefined;
+  hasPendingFlush = false;
+  post({ type: "state", snapshot: snapshot() });
+}
+
+/**
+ * Emit the runtime snapshot. Pass `true` for state-changing events that must
+ * reach the renderer immediately (busy/status/tool lifecycle); pass `false`
+ * for pure streaming accumulation that can safely batch to 20fps.
+ */
+function scheduleEmit(immediate: boolean): void {
+  if (immediate) {
+    if (pendingFlushTimer) {
+      clearTimeout(pendingFlushTimer);
+      pendingFlushTimer = undefined;
+    }
+    hasPendingFlush = false;
+    post({ type: "state", snapshot: snapshot() });
+    return;
+  }
+  if (pendingFlushTimer) {
+    hasPendingFlush = true;
+    return;
+  }
+  hasPendingFlush = true;
+  pendingFlushTimer = setTimeout(flushState, STREAM_FLUSH_INTERVAL_MS);
+}
 
 const emptyResourceCatalog: ResourceCatalog = {
   skills: [],
@@ -243,9 +282,16 @@ function userMessageText(message: AgentMessage): string {
   return message.content.filter((block) => block.type === "text").map((block) => block.text).join("");
 }
 
-function blocksFromMessage(message: AgentMessage): MessageBlock[] {
+function blocksFromMessage(message: AgentMessage, skillPrompt?: SkillPromptDisplay): MessageBlock[] {
   if (message.role === "user") {
     const user = message as UserMessage;
+    if (skillPrompt) {
+      const blocks: MessageBlock[] = skillPrompt.instructions ? [{ type: "text", text: skillPrompt.instructions }] : [];
+      if (typeof user.content !== "string") {
+        blocks.push(...user.content.filter((content) => content.type === "image").map((content) => ({ type: "image" as const, data: content.data, mimeType: content.mimeType })));
+      }
+      return blocks;
+    }
     if (typeof user.content === "string") return [{ type: "text", text: user.content }];
     return user.content.map((content) =>
       content.type === "text"
@@ -267,20 +313,55 @@ function blocksFromMessage(message: AgentMessage): MessageBlock[] {
   });
 }
 
+// Maps each Pi AgentMessage object to a stable uuid so a message keeps its
+// identity across the partial (streamingMessage) and final (committed into
+// session.state.messages) frames. Fall-back key handles the rare case of two
+// messages sharing a timestamp (counter appended within timestamp bucket).
+const messageUuids = new WeakMap<AgentMessage, string>();
+let uuidSequence = 0;
+
+function messageUuid(message: AgentMessage, index: number): string {
+  const cached = messageUuids.get(message);
+  if (cached) return cached;
+  const uuid = `${message.timestamp ?? 0}-${message.role}-${index}-${++uuidSequence}`;
+  messageUuids.set(message, uuid);
+  return uuid;
+}
+
 function normalizeMessages(messages: AgentMessage[], streamingMessage?: AgentMessage): ChatMessage[] {
   const visible = messages.filter((message) => message.role === "user" || message.role === "assistant");
   if (streamingMessage && streamingMessage.role === "assistant") {
     const last = visible.at(-1);
     if (last !== streamingMessage) visible.push(streamingMessage);
   }
-  return visible.map((message, index) => ({
-    id: `${message.timestamp ?? 0}-${index}-${message.role}`,
-    role: message.role as "user" | "assistant",
-    timestamp: message.timestamp ?? Date.now(),
-    blocks: blocksFromMessage(message),
-    streaming: message === streamingMessage,
-    error: message.role === "assistant" ? (message as AssistantMessage).errorMessage : undefined
-  }));
+  return visible.map((message, index) => {
+    const skillPrompt = message.role === "user" ? parseSkillPrompt(userMessageText(message)) : undefined;
+    return {
+      id: `${message.timestamp ?? 0}-${index}-${message.role}`,
+      uuid: messageUuid(message, index),
+      role: message.role as "user" | "assistant",
+      timestamp: message.timestamp ?? Date.now(),
+      blocks: blocksFromMessage(message, skillPrompt),
+      skill: skillPrompt ? { name: skillPrompt.name } : undefined,
+      streaming: message === streamingMessage,
+      error: message.role === "assistant" ? (message as AssistantMessage).errorMessage : undefined
+    };
+  });
+}
+
+function runtimeSkillPrompt(name: string, instructions?: string): string {
+  if (!resourceLoader) throw new Error("Skill 资源尚未加载");
+  const skill = resourceLoader.getSkills().skills.find((item) => item.name === name);
+  if (!skill) throw new Error(`未找到 Skill：${name}`);
+  if (!session?.getActiveToolNames().includes("read")) throw new Error("当前 Agent 未启用 read 工具，无法读取 Skill");
+  const userInstructions = instructions?.trim() ?? "";
+  const executionPrompt = [
+    `使用 Skill「${skill.name}」完成任务。`,
+    `首先调用 read 工具读取 Skill 文件：${skill.filePath}`,
+    "完整阅读后遵循其中的说明；其中的相对路径均以该 Skill 文件所在目录为基准。",
+    userInstructions ? `用户要求：\n${userInstructions}` : undefined
+  ].filter(Boolean).join("\n\n");
+  return buildSkillPrompt(skill.name, userInstructions, executionPrompt);
 }
 
 function snapshot(): RuntimeSnapshot {
@@ -311,7 +392,7 @@ function workspaceSessionDir(): string | undefined {
 
 function activeAgent(): AgentProfile {
   const list = settings?.agents ?? [];
-  return list.find((agent) => agent.id === settings?.currentAgentId && !agent.archived) ?? list.find((agent) => agent.id === "default") ?? list[0] ?? { id: "default", name: "默认助手", description: "", systemPrompt: "", defaultThinkingLevel: "medium", tools: { read: true, bash: true, edit: true, write: true, grep: true, find: true, ls: true } };
+  return list.find((agent) => agent.id === settings?.currentAgentId && !agent.archived) ?? list.find((agent) => agent.id === "default") ?? list[0] ?? { id: "default", name: "默认助手", description: "", systemPrompt: "", divMode: false, defaultThinkingLevel: "medium", tools: { read: true, bash: true, edit: true, write: true, grep: true, find: true, ls: true } };
 }
 
 function defaultModel(): { provider: string; id: string } | undefined {
@@ -321,7 +402,8 @@ function defaultModel(): { provider: string; id: string } | undefined {
 function hasImageInput(model: { input?: readonly string[] } | undefined): boolean { return Boolean(model?.input?.includes("image")); }
 
 function emitState(): void {
-  post({ type: "state", snapshot: snapshot() });
+  // Default callers (commands, lifecycle hooks) flush immediately.
+  scheduleEmit(true);
 }
 
 function beginTurn(): void {
@@ -401,6 +483,10 @@ function patchFromToolResult(result: unknown): string | undefined {
 }
 
 function handleSessionEvent(event: AgentSessionEvent): void {
+  // Pure streaming accumulation can safely batch at 20fps; everything that
+  // changes busy/status/executions must flush immediately so the UI never
+  // lags on lifecycle transitions.
+  let immediate = true;
   switch (event.type) {
     case "agent_start":
       busy = true;
@@ -423,6 +509,14 @@ function handleSessionEvent(event: AgentSessionEvent): void {
     case "message_start":
       if (event.message.role === "assistant") markAnswerStarted();
       break;
+    case "message_update":
+      // Token-batch partial; high frequency — throttle.
+      immediate = false;
+      break;
+    case "message_end":
+      // Final frame carries the completed message; flush immediately so the
+      // streaming flag clears without a 50ms gap.
+      break;
     case "tool_execution_start":
       executions.set(event.toolCallId, {
         id: event.toolCallId,
@@ -434,8 +528,10 @@ function handleSessionEvent(event: AgentSessionEvent): void {
       status = `正在${toolLabel(event.toolName)}`;
       break;
     case "tool_execution_update": {
+      // Partial tool output; high frequency — throttle.
       const current = executions.get(event.toolCallId);
       if (current) current.output = textFromToolResult(event.partialResult);
+      immediate = false;
       break;
     }
     case "tool_execution_end": {
@@ -458,8 +554,11 @@ function handleSessionEvent(event: AgentSessionEvent): void {
     case "auto_retry_start":
       status = `正在重试（${event.attempt}/${event.maxAttempts}）`;
       break;
+    default:
+      // Unknown event types also flush immediately to be safe.
+      break;
   }
-  emitState();
+  scheduleEmit(immediate);
 }
 
 async function refreshCatalog(): Promise<void> {
@@ -568,6 +667,13 @@ function sessionReadyStatus(hasModel: boolean, usedFallback: boolean): string {
 
 async function createSession(sessionManager?: SessionManager): Promise<void> {
   if (!workspace || !modelRuntime) return;
+  // Drop any pending throttled emit so a stale streaming flush from the
+  // previous session cannot fire against the freshly reset state below.
+  if (pendingFlushTimer) {
+    clearTimeout(pendingFlushTimer);
+    pendingFlushTimer = undefined;
+    hasPendingFlush = false;
+  }
   unsubscribeSession?.();
   mcpStatusUnsubscribe?.();
   mcpStatusUnsubscribe = undefined;
@@ -588,7 +694,7 @@ async function createSession(sessionManager?: SessionManager): Promise<void> {
     noThemes: true,
     additionalExtensionPaths: [bundledMcpAdapterPath()],
     extensionFactories: [createPermissionExtension(), createMcpStatusExtension()],
-    systemPromptOverride: (base) => [base, currentAgent?.systemPrompt].filter(Boolean).join("\n\n")
+    systemPromptOverride: (base) => [base, currentAgent?.systemPrompt, currentAgent?.divMode ? buildDivModePrompt() : undefined].filter(Boolean).join("\n\n")
   });
   await resourceLoader.reload();
   emitResourceCatalog();
@@ -675,6 +781,36 @@ async function reloadRuntimeResources(): Promise<void> {
   await createSession(session.sessionManager);
 }
 
+async function preparePromptPayload(text: string, attachments: PromptAttachment[] = []): Promise<{ text: string; images: ImageContent[] }> {
+  if (attachments.length > 5) throw new Error("最多同时发送 5 个附件");
+  if (!workspace) throw new Error("请先打开工作区，再发送消息");
+  const images: ImageContent[] = [];
+  const fileRefs: string[] = [];
+  let rootReal: string | undefined;
+  for (const attachment of attachments) {
+    if (attachment.kind === "image") {
+      if (!imageMimeTypes.has(attachment.mimeType) || !attachment.data || !/^[A-Za-z0-9+/]+=*$/u.test(attachment.data)) throw new Error(`图片附件无效：${attachment.name}`);
+      if (Math.ceil((attachment.data.length * 3) / 4) > 20 * 1024 * 1024) throw new Error(`附件超过 20 MB 限制：${attachment.name}`);
+      images.push({ type: "image", data: attachment.data, mimeType: attachment.mimeType });
+      continue;
+    }
+    const rel = attachment.relativePath || attachment.path;
+    if (!rel || isAbsolute(rel) || rel.split(/[\\/]/u).includes("..")) throw new Error(`附件路径无效：${attachment.name}`);
+    const candidateReal = await realpath(resolve(workspace, rel));
+    rootReal ??= await realpath(workspace);
+    const relativeReal = workspaceRelativeAttachment(rootReal, candidateReal);
+    if (!relativeReal || relativeReal === ".." || relativeReal.startsWith(`..${sep}`)) throw new Error(`附件必须位于当前工作区内：${attachment.name}`);
+    const info = await stat(candidateReal);
+    if (!info.isFile()) throw new Error(`附件不是普通文件：${attachment.name}`);
+    if (info.size > 20 * 1024 * 1024) throw new Error(`附件超过 20 MB 限制：${attachment.name}`);
+    fileRefs.push(relativeReal);
+  }
+  return {
+    text: fileRefs.length ? `${text}\n\n项目文件附件（请使用 read 工具按需读取）：\n${fileRefs.map((path) => `- ${path}`).join("\n")}` : text,
+    images
+  };
+}
+
 async function handleCommand(command: RuntimeCommand): Promise<void> {
   switch (command.type) {
     case "initialize":
@@ -694,39 +830,21 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         await createSession(SessionManager.open(command.path, sessionRoot, workspace));
       }
       break;
+    case "session.skill": {
+      const prompt = runtimeSkillPrompt(command.name, command.instructions);
+      await handleCommand({ type: "session.prompt", text: prompt, attachments: command.attachments });
+      break;
+    }
     case "session.prompt":
       if (!session) throw new Error("请先打开工作区，再发送消息");
       if (!session.model) throw new Error("请先配置并选择模型，再发送消息");
-      if ((command.attachments?.length ?? 0) > 5) throw new Error("最多同时发送 5 个附件");
-      const images: ImageContent[] = [];
-      const fileRefs: string[] = [];
-      for (const attachment of command.attachments ?? []) {
-        if (attachment.kind === "image") {
-          if (!imageMimeTypes.has(attachment.mimeType) || !attachment.data || !/^[A-Za-z0-9+/]+=*$/u.test(attachment.data)) throw new Error(`图片附件无效：${attachment.name}`);
-          if (Math.ceil((attachment.data.length * 3) / 4) > 20 * 1024 * 1024) throw new Error(`附件超过 20 MB 限制：${attachment.name}`);
-          images.push({ type: "image", data: attachment.data, mimeType: attachment.mimeType });
-        }
-        else {
-          const rel = attachment.relativePath || attachment.path;
-          if (!rel || isAbsolute(rel) || rel.split(/[\\/]/u).includes("..")) throw new Error(`附件路径无效：${attachment.name}`);
-          const candidate = resolve(workspace!, rel);
-          const rootReal = await realpath(workspace!);
-          const candidateReal = await realpath(candidate);
-          const relativeReal = workspaceRelativeAttachment(rootReal, candidateReal);
-          if (!relativeReal || relativeReal === ".." || relativeReal.startsWith(`..${sep}`)) throw new Error(`附件必须位于当前工作区内：${attachment.name}`);
-          const info = await stat(candidateReal);
-          if (!info.isFile()) throw new Error(`附件不是普通文件：${attachment.name}`);
-          if (info.size > 20 * 1024 * 1024) throw new Error(`附件超过 20 MB 限制：${attachment.name}`);
-          fileRefs.push(relativeReal);
-        }
-      }
-      const promptText = fileRefs.length ? `${command.text}\n\n项目文件附件（请使用 read 工具按需读取）：\n${fileRefs.map((path) => `- ${path}`).join("\n")}` : command.text;
-      if (images.length && !hasImageInput(session.model)) throw new Error("当前模型不支持图片输入，请先切换多模态模型");
+      const prompt = await preparePromptPayload(command.text, command.attachments);
+      if (prompt.images.length && !hasImageInput(session.model)) throw new Error("当前模型不支持图片输入，请先切换多模态模型");
       busy = true;
       status = "Pi 正在工作";
       beginTurn();
       emitState();
-      void session.prompt(promptText, images.length ? { images } : undefined).catch((error) => {
+      void session.prompt(prompt.text, prompt.images.length ? { images: prompt.images } : undefined).catch((error) => {
         completeTurn();
         busy = false;
         status = "请求失败";
@@ -737,17 +855,27 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     case "session.regenerate":
       if (!session) throw new Error("请先打开工作区，再重新生成");
       if (!session.model) throw new Error("请先配置并选择模型，再重新生成");
-      if (!command.text.trim()) throw new Error("没有可重新生成的用户消息");
+      if (!command.text.trim() && !command.skillName) throw new Error("没有可重新生成的用户消息");
+      const regeneratedText = command.skillName ? runtimeSkillPrompt(command.skillName, command.text) : command.text.trim();
+      const regeneratedPrompt = await preparePromptPayload(regeneratedText, command.attachments);
+      if (regeneratedPrompt.images.length && !hasImageInput(session.model)) throw new Error("当前模型不支持图片输入，请先切换多模态模型");
       busy = true;
       status = "Pi 正在重新生成";
       beginTurn();
       emitState();
       void (async () => {
         const branch = session!.sessionManager.getBranch();
-        const target = branch.filter((entry) => entry.type === "message" && entry.message.role === "user" && (command.timestamp !== undefined ? entry.message.timestamp === command.timestamp : userMessageText(entry.message) === command.text.trim())).at(-1);
+        const target = branch.filter((entry) => {
+          if (entry.type !== "message" || entry.message.role !== "user") return false;
+          if (command.timestamp !== undefined) return entry.message.timestamp === command.timestamp;
+          const text = userMessageText(entry.message);
+          if (!command.skillName) return text === command.text.trim();
+          const skillPrompt = parseSkillPrompt(text);
+          return skillPrompt?.name === command.skillName && skillPrompt.instructions === command.text.trim();
+        }).at(-1);
         if (!target || target.type !== "message") throw new Error("找不到要重新生成的用户消息");
         await session!.navigateTree(target.id);
-        await session!.prompt(command.text.trim());
+        await session!.prompt(regeneratedPrompt.text, regeneratedPrompt.images.length ? { images: regeneratedPrompt.images } : undefined);
       })().catch((error) => {
         completeTurn();
         busy = false;
@@ -758,6 +886,21 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       break;
     case "session.abort":
       session?.abort();
+      break;
+    case "session.compact":
+      if (!session) throw new Error("请先打开工作区，再压缩上下文");
+      if (!session.model) throw new Error("请先配置并选择模型，再压缩上下文");
+      busy = true;
+      status = "Pi 正在压缩上下文";
+      beginTurn();
+      emitState();
+      void session.compact(command.instructions).catch((error) => {
+        completeTurn();
+        busy = false;
+        status = "压缩失败";
+        post({ type: "error", message: errorText(error) });
+        emitState();
+      });
       break;
     case "model.select": {
       if (!modelRuntime) break;

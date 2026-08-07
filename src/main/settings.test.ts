@@ -13,8 +13,15 @@ describe("desktop settings migration", () => {
   it("keeps custom agent prompts empty and always provides the default assistant", () => {
     const result = migrateSettings({ agents: [{ id: "coder", name: "代码助手", systemPrompt: "" }] });
     expect(result.settings.agents.find((agent) => agent.id === "coder")?.systemPrompt).toBe("");
+    expect(result.settings.agents.find((agent) => agent.id === "coder")?.divMode).toBe(false);
     expect(result.settings.agents.some((agent) => agent.id === "default")).toBe(true);
     expect(createDefaultAgent().id).toBe("default");
+  });
+
+  it("persists the Agent-level Div mode switch", () => {
+    const result = migrateSettings({ agents: [{ id: "designer", name: "设计助手", divMode: true }] });
+    expect(result.settings.agents.find((agent) => agent.id === "designer")).toMatchObject({ divMode: true });
+    expect(createDefaultAgent().divMode).toBe(false);
   });
 
   it("preserves provider and agent defaults while normalizing invalid current ids", () => {

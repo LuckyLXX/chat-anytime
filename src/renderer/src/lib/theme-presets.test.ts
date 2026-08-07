@@ -4,7 +4,7 @@ import { THEME_PRESETS, scopeCustomThemeCss, scopeCustomThemeCssForPreview, them
 describe("theme presets", () => {
   it("contains the reference palette families", () => {
     expect(THEME_PRESETS.map((preset) => preset.id)).toEqual([
-      "default", "ocean", "emerald", "indigo", "forest", "rose", "amber", "violet", "carbon"
+      "default", "ocean", "emerald", "indigo", "forest", "rose", "amber", "violet", "carbon", "blue-dream"
     ]);
   });
 
