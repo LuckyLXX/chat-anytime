@@ -4,12 +4,13 @@ import { extname, join, resolve } from "node:path";
 import { app, BrowserWindow, dialog, ipcMain, Menu, safeStorage, utilityProcess, type UtilityProcess } from "electron";
 import { migrateSettings } from "./settings.js";
 import { workspaceRelativeAttachment } from "./attachments.js";
-import type { DesktopBootstrap, DesktopSettings, PromptAttachment, RuntimeCommand, RuntimeMessage, RuntimeSnapshot } from "../shared/protocol.js";
+import type { DesktopBootstrap, DesktopSettings, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot } from "../shared/protocol.js";
 
 let mainWindow: BrowserWindow | undefined;
 let runtimeProcess: UtilityProcess | undefined;
 let latestSnapshot: RuntimeSnapshot | undefined;
 let latestCatalog: Extract<RuntimeMessage, { type: "catalog" }> | undefined;
+let latestResources: ResourceCatalog | undefined;
 let settingsCache: DesktopSettings | undefined;
 let credentialsCache: Record<string, string> = {};
 let securityWarning: string | undefined;
@@ -109,7 +110,7 @@ function updateSettings(command: RuntimeCommand): void {
       settings.agents = settings.agents.map((item) => item.id === command.agentId && item.id !== "default" ? { ...item, archived: command.archived } : item);
       if (settings.currentAgentId === command.agentId && command.archived) settings.currentAgentId = "default";
       break;
-    case "settings.save": settings.model = command.settings.model; settings.thinkingLevel = command.settings.thinkingLevel; settings.appearance = command.settings.appearance; break;
+    case "settings.save": settings.model = command.settings.model; settings.thinkingLevel = command.settings.thinkingLevel; settings.accessMode = command.settings.accessMode; settings.appearance = command.settings.appearance; break;
     case "appearance.save": settings.appearance = command.appearance; break;
     case "provider.save": {
       settings.providers = settings.providers.some((item) => item.id === command.provider.id) ? settings.providers.map((item) => item.id === command.provider.id ? command.provider : item) : [...settings.providers, command.provider];
@@ -139,6 +140,7 @@ function startRuntime(): void {
   runtimeProcess.on("message", (message: RuntimeMessage) => {
     if (message.type === "state") latestSnapshot = message.snapshot;
     if (message.type === "catalog") latestCatalog = message;
+    if (message.type === "resources") latestResources = message.resources;
     if (message.type === "custom-models") {
       const source = loadSettings();
       source.providers = source.providers.map((provider) => provider.id === message.providerId ? { ...provider, models: message.models } : provider);
@@ -161,7 +163,7 @@ function registerIpc(): void {
   ipcMain.handle("desktop:bootstrap", (): DesktopBootstrap => {
     const source = loadSettings();
     const settings: DesktopSettings = { ...source, providers: source.providers.map((provider) => ({ ...provider, keyConfigured: Boolean(credentialsCache[provider.id]) })) };
-    return { platform: process.platform, version: app.getVersion(), securityWarning, settings, runtime: latestSnapshot, catalog: latestCatalog ? { models: latestCatalog.models, providers: latestCatalog.providers } : undefined };
+    return { platform: process.platform, version: app.getVersion(), securityWarning, settings, runtime: latestSnapshot, catalog: latestCatalog ? { models: latestCatalog.models, providers: latestCatalog.providers } : undefined, resources: latestResources };
   });
   ipcMain.handle("desktop:choose-workspace", async (): Promise<string | undefined> => { const result = mainWindow ? await dialog.showOpenDialog(mainWindow, { title: "选择项目工作区", properties: ["openDirectory", "createDirectory"] }) : await dialog.showOpenDialog({ title: "选择项目工作区", properties: ["openDirectory", "createDirectory"] }); return result.canceled ? undefined : result.filePaths[0]; });
   ipcMain.handle("desktop:choose-attachments", async (_event, workspace?: string): Promise<PromptAttachment[]> => { const result = mainWindow ? await dialog.showOpenDialog(mainWindow, { title: "添加附件", properties: ["openFile", "multiSelections"], filters: [{ name: "图片和项目文件", extensions: ["png", "jpg", "jpeg", "webp", "gif", "*" ] }] }) : await dialog.showOpenDialog({ properties: ["openFile", "multiSelections"] }); return result.canceled ? [] : readAttachmentSelection(result.filePaths, workspace); });

@@ -1,5 +1,5 @@
 import { isAbsolute, relative, resolve } from "node:path";
-import type { PermissionRequest } from "../shared/protocol.js";
+import type { AccessMode, PermissionRequest } from "../shared/protocol.js";
 
 export function toolPath(args: Record<string, unknown>): unknown {
   return args.path ?? args.file_path ?? args.filePath;
@@ -18,11 +18,24 @@ export function toolRisk(
   args: Record<string, unknown>
 ): PermissionRequest["risk"] | undefined {
   if (pathLeavesWorkspace(workspace, toolPath(args))) return "outside-workspace";
-  if (toolName === "bash") return "command";
+  if (toolName === "bash" || toolName === "mcp" || toolName.startsWith("mcp_") || toolName.startsWith("server_")) return "command";
   if (toolName === "edit" || toolName === "write") return "write";
   return undefined;
 }
 
 export function permissionScope(toolName: string, risk: PermissionRequest["risk"]): string {
   return `${toolName}:${risk}`;
+}
+
+export type PermissionAction = "allow" | "ask" | "deny";
+
+export function permissionAction(mode: AccessMode, toolName: string, risk: PermissionRequest["risk"] | undefined): PermissionAction {
+  if (mode === "full" || !risk) return "allow";
+  if (mode === "read-only" && (risk === "command" || risk === "write")) return "deny";
+  if (mode === "workspace" && risk === "write") return "allow";
+  return "ask";
+}
+
+export function permissionNeedsApproval(mode: AccessMode, toolName: string, risk: PermissionRequest["risk"] | undefined): boolean {
+  return permissionAction(mode, toolName, risk) === "ask";
 }

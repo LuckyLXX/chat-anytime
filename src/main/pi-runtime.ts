@@ -1,9 +1,11 @@
 import { realpath, stat } from "node:fs/promises";
-import { isAbsolute, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
+import { basename, isAbsolute, join, resolve, sep } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, UserMessage, ImageContent } from "@earendil-works/pi-ai";
 import {
   createAgentSession,
+  DefaultPackageManager,
   DefaultResourceLoader,
   getAgentDir,
   ModelRuntime,
@@ -14,6 +16,7 @@ import {
   type InlineExtension
 } from "@earendil-works/pi-coding-agent";
 import type {
+  AccessMode,
   ChatMessage,
   DesktopSettings, AgentProfile, ProviderSettings, ProviderModelSettings, PromptAttachment,
   MessageBlock,
@@ -24,16 +27,25 @@ import type {
   RuntimeCommand,
   RuntimeMessage,
   RuntimeSnapshot,
+  ResourceCatalog,
+  ResourceScope,
+  SkillSummary,
+  ExtensionSummary,
+  PackageSummary,
+  McpServerSummary,
+  McpServerConfigDraft,
   SessionSummary,
   ThinkingLevel,
-  ToolExecution
+  ToolExecution,
+  TurnTiming
 } from "../shared/protocol.js";
 import { toolLabel } from "../shared/locale.js";
 import { customProviderModelDefinition, inferCustomModelImageInput } from "./custom-provider.js";
-import { permissionScope, toolRisk } from "./permissions.js";
+import { permissionAction, permissionScope, toolRisk } from "./permissions.js";
 import { agentWorkspaceSessionDir } from "./session-scope.js";
 import { workspaceRelativeAttachment } from "./attachments.js";
 import { mergeProviderModels } from "./settings.js";
+import { upsertMcpServerConfig, type McpServerConfigEntry } from "./mcp-config.js";
 
 const parentPort = process.parentPort;
 if (!parentPort) throw new Error("Pi 运行时必须作为 Electron 工具进程启动");
@@ -43,8 +55,10 @@ let session: AgentSession | undefined;
 let unsubscribeSession: (() => void) | undefined;
 let workspace: string | undefined;
 let thinkingLevel: ThinkingLevel = "medium";
+let accessMode: AccessMode = "ask";
 let status = "请选择一个项目开始使用";
 let busy = false;
+let turnTiming: TurnTiming | undefined;
 let executions = new Map<string, ToolExecution>();
 let currentSessions: SessionSummary[] = [];
 let selectedModel: { provider: string; id: string } | undefined;
@@ -56,9 +70,167 @@ const imageMimeTypes = new Set(["image/png", "image/jpeg", "image/webp", "image/
 let permissionSequence = 0;
 const pendingPermissions = new Map<string, (decision: PermissionDecision) => void>();
 const allowedForSession = new Set<string>();
+const builtinToolNames = new Set(["read", "bash", "edit", "write", "grep", "find", "ls"]);
+const mcpStatusEvent = "pi-mcp-adapter/status/v1";
+let resourceLoader: DefaultResourceLoader | undefined;
+let packageManager: DefaultPackageManager | undefined;
+let mcpStatusUnsubscribe: (() => void) | undefined;
+let mcpServers: McpServerSummary[] = [];
+let mcpAdapterLoaded = false;
+let resourceOperationBusy = false;
+
+const emptyResourceCatalog: ResourceCatalog = {
+  skills: [],
+  extensions: [],
+  packages: [],
+  mcpServers: [],
+  mcpAdapterLoaded: false,
+  diagnostics: []
+};
 
 function post(message: RuntimeMessage): void {
   parentPort.postMessage(message);
+}
+
+function resourceScope(scope: string | undefined, origin: string | undefined): ResourceScope {
+  if (origin === "package") return "package";
+  if (scope === "user") return "global";
+  if (scope === "project") return "project";
+  if (scope === "temporary") return "temporary";
+  return "unknown";
+}
+
+function resourceSource(source: string | undefined, scope: ResourceScope, origin?: string): string {
+  if (origin === "package" && source && /^(?:npm:|git:|https?:|ssh:)/u.test(source)) return source;
+  if (source === "cli") return "临时资源";
+  if (source?.startsWith("<inline:")) return "PiDesktop 内置";
+  if (scope === "project") return "当前项目";
+  if (scope === "global") return "用户资源";
+  if (scope === "package") return "Pi Package";
+  return "PiDesktop";
+}
+
+function isSafePackageSource(source: string): boolean {
+  return /^(?:npm:|git:|https?:|ssh:)[^\r\n]+$/u.test(source);
+}
+
+function mcpConfigPath(scope: McpServerConfigDraft["scope"]): string {
+  if (!workspace) throw new Error("请先打开工作区，再添加 MCP Server");
+  return scope === "project" ? resolve(workspace, ".mcp.json") : join(getAgentDir(), "mcp.json");
+}
+
+function mcpConfigEntry(server: McpServerConfigDraft): McpServerConfigEntry {
+  if (server.transport === "stdio") {
+    const command = server.command?.trim();
+    if (!command) throw new Error("stdio MCP Server 需要填写启动命令");
+    return {
+      command,
+      ...(server.args && server.args.length > 0 ? { args: server.args } : {}),
+      ...(server.env && Object.keys(server.env).length > 0 ? { env: server.env } : {})
+    };
+  }
+  const url = server.url?.trim();
+  if (!url || !/^https?:\/\//iu.test(url)) throw new Error("HTTP MCP Server 需要填写 http:// 或 https:// 地址");
+  if (server.auth === "bearer-env" && !server.bearerTokenEnv?.trim()) throw new Error("Bearer 认证需要填写环境变量名");
+  return {
+    url,
+    ...(server.auth === "oauth" ? { auth: "oauth" as const } : {}),
+    ...(server.auth === "bearer-env" ? { bearerTokenEnv: server.bearerTokenEnv!.trim() } : {})
+  };
+}
+
+function sanitizeResourceError(message: string): string {
+  return message.replace(/[A-Za-z]:[\\/][^\r\n\s]*/gu, "[本地路径]").replace(/\\\\[^\r\n\s]+/gu, "[本地路径]");
+}
+
+function bundledMcpAdapterPath(): string {
+  return fileURLToPath(import.meta.resolve("pi-mcp-adapter"));
+}
+
+function isMcpStatusSnapshot(value: unknown): value is {
+  servers: Array<{ name: string; status: McpServerSummary["status"]; toolCount: number; resourceCount?: number; failedAgoSeconds?: number; disabled: boolean }>;
+} {
+  if (!value || typeof value !== "object") return false;
+  const servers = (value as { servers?: unknown }).servers;
+  return Array.isArray(servers) && servers.every((server) => {
+    if (!server || typeof server !== "object") return false;
+    const item = server as Record<string, unknown>;
+    return typeof item.name === "string" && typeof item.status === "string" && typeof item.toolCount === "number" && typeof item.disabled === "boolean";
+  });
+}
+
+function createMcpStatusExtension(): InlineExtension {
+  return {
+    name: "chat-anytime-mcp-status",
+    hidden: true,
+    factory(pi) {
+      mcpStatusUnsubscribe?.();
+      mcpStatusUnsubscribe = pi.events.on(mcpStatusEvent, (value) => {
+        if (!isMcpStatusSnapshot(value)) return;
+        mcpAdapterLoaded = true;
+        mcpServers = value.servers.map((server) => ({
+          name: server.name,
+          status: server.status,
+          toolCount: server.toolCount,
+          ...(server.resourceCount === undefined ? {} : { resourceCount: server.resourceCount }),
+          ...(server.failedAgoSeconds === undefined ? {} : { failedAgoSeconds: server.failedAgoSeconds }),
+          disabled: server.disabled
+        }));
+        emitResourceCatalog();
+      });
+    }
+  };
+}
+
+function emitResourceCatalog(): void {
+  if (!resourceLoader) {
+    post({ type: "resources", resources: structuredClone(emptyResourceCatalog) });
+    return;
+  }
+  const skillResult = resourceLoader.getSkills();
+  const extensionResult = resourceLoader.getExtensions();
+  const skills: SkillSummary[] = skillResult.skills.map((skill) => {
+    const scope = resourceScope(skill.sourceInfo.scope, skill.sourceInfo.origin);
+    return {
+      name: skill.name,
+      description: skill.description,
+      source: resourceSource(skill.sourceInfo.source, scope, skill.sourceInfo.origin),
+      scope,
+      disableModelInvocation: skill.disableModelInvocation
+    };
+  });
+  const extensions: ExtensionSummary[] = extensionResult.extensions.map((extension) => {
+    const scope = resourceScope(extension.sourceInfo.scope, extension.sourceInfo.origin);
+    const name = extension.path.startsWith("<inline:") ? extension.path.slice(8, -1) : basename(extension.path);
+    if (extension.resolvedPath.toLowerCase().includes("pi-mcp-adapter")) mcpAdapterLoaded = true;
+    return {
+      name,
+      source: resourceSource(extension.sourceInfo.source, scope, extension.sourceInfo.origin),
+      scope,
+      loaded: true
+    };
+  });
+  for (const error of extensionResult.errors) {
+    const name = error.path.startsWith("<inline:") ? error.path.slice(8, -1) : basename(error.path);
+    extensions.push({ name, source: "加载失败", scope: "unknown", loaded: false, error: sanitizeResourceError(error.error) });
+  }
+  const packages: PackageSummary[] = packageManager?.listConfiguredPackages().map((item) => ({
+    source: isSafePackageSource(item.source) ? item.source : `本地 Pi Package（${basename(item.source)}）`,
+    scope: item.scope === "project" ? "project" : "global",
+    installed: Boolean(item.installedPath),
+    removable: isSafePackageSource(item.source)
+  })) ?? [];
+  if (mcpAdapterLoaded && !packages.some((item) => item.source === "pi-mcp-adapter")) {
+    packages.unshift({ source: "pi-mcp-adapter", scope: "bundled", installed: true, removable: false });
+  }
+  const diagnostics = [
+    ...skillResult.diagnostics.map((item) => sanitizeResourceError(item.message)),
+    ...extensionResult.errors.map((item) => sanitizeResourceError(item.error))
+  ].filter((message, index, list) => Boolean(message) && list.indexOf(message) === index);
+  post({
+    type: "resources",
+    resources: { skills, extensions, packages, mcpServers: structuredClone(mcpServers), mcpAdapterLoaded, diagnostics }
+  });
 }
 
 function errorText(error: unknown): string {
@@ -125,6 +297,7 @@ function snapshot(): RuntimeSnapshot {
     thinkingLevel: session?.thinkingLevel ?? thinkingLevel,
     busy,
     status,
+    turnTiming,
     messages,
     executions: [...executions.values()],
     sessions: currentSessions
@@ -151,6 +324,20 @@ function emitState(): void {
   post({ type: "state", snapshot: snapshot() });
 }
 
+function beginTurn(): void {
+  turnTiming = { startedAt: Date.now() };
+}
+
+function markAnswerStarted(): void {
+  if (!turnTiming || turnTiming.answerStartedAt !== undefined) return;
+  turnTiming = { ...turnTiming, answerStartedAt: Date.now() };
+}
+
+function completeTurn(): void {
+  if (!turnTiming || turnTiming.completedAt !== undefined) return;
+  turnTiming = { ...turnTiming, completedAt: Date.now() };
+}
+
 function summarizeArgs(toolName: string, args: Record<string, unknown>): string {
   if (toolName === "bash") return String(args.command ?? "执行命令");
   const path = args.path ?? args.file_path ?? args.filePath;
@@ -162,6 +349,9 @@ function requestPermission(toolName: string, args: Record<string, unknown>): Pro
   const id = `permission-${++permissionSequence}`;
   const risk = toolRisk(workspace, toolName, args);
   if (!risk) return Promise.resolve("allow-once");
+  const action = permissionAction(accessMode, toolName, risk);
+  if (action === "allow") return Promise.resolve("allow-once");
+  if (action === "deny") return Promise.resolve("deny");
   if (allowedForSession.has(permissionScope(toolName, risk))) return Promise.resolve("allow-session");
   const request: PermissionRequest = {
     id,
@@ -217,9 +407,21 @@ function handleSessionEvent(event: AgentSessionEvent): void {
       status = "Pi 正在工作";
       break;
     case "agent_end":
+      if (event.willRetry) {
+        busy = true;
+        status = "正在重试";
+      } else {
+        completeTurn();
+        busy = false;
+        status = "就绪";
+      }
+      break;
     case "agent_settled":
       busy = false;
-      status = event.type === "agent_end" && event.willRetry ? "正在重试" : "就绪";
+      status = "就绪";
+      break;
+    case "message_start":
+      if (event.message.role === "assistant") markAnswerStarted();
       break;
     case "tool_execution_start":
       executions.set(event.toolCallId, {
@@ -367,21 +569,29 @@ function sessionReadyStatus(hasModel: boolean, usedFallback: boolean): string {
 async function createSession(sessionManager?: SessionManager): Promise<void> {
   if (!workspace || !modelRuntime) return;
   unsubscribeSession?.();
+  mcpStatusUnsubscribe?.();
+  mcpStatusUnsubscribe = undefined;
   session?.dispose();
+  mcpServers = [];
+  mcpAdapterLoaded = false;
   executions = new Map();
+  turnTiming = undefined;
   allowedForSession.clear();
 
   const settingsManager = SettingsManager.create(workspace, getAgentDir());
-  const resourceLoader = new DefaultResourceLoader({
+  packageManager = new DefaultPackageManager({ cwd: workspace, agentDir: getAgentDir(), settingsManager });
+  resourceLoader = new DefaultResourceLoader({
     cwd: workspace,
     agentDir: getAgentDir(),
     settingsManager,
     noExtensions: true,
     noThemes: true,
-    extensionFactories: [createPermissionExtension()]
-    ,systemPromptOverride: (base) => [base, currentAgent?.systemPrompt].filter(Boolean).join("\n\n")
+    additionalExtensionPaths: [bundledMcpAdapterPath()],
+    extensionFactories: [createPermissionExtension(), createMcpStatusExtension()],
+    systemPromptOverride: (base) => [base, currentAgent?.systemPrompt].filter(Boolean).join("\n\n")
   });
   await resourceLoader.reload();
+  emitResourceCatalog();
 
   const activeSessionManager = sessionManager ?? SessionManager.continueRecent(workspace, workspaceSessionDir());
   const hasExistingMessages = activeSessionManager.buildSessionContext().messages.length > 0;
@@ -389,23 +599,30 @@ async function createSession(sessionManager?: SessionManager): Promise<void> {
   const requestedModel = requested
     ? modelRuntime.getModel(requested.provider, requested.id)
     : undefined;
+  const enabledBuiltinTools = Object.entries(currentAgent?.tools ?? {}).filter(([, enabled]) => enabled).map(([name]) => name);
   const result = await createAgentSession({
     cwd: workspace,
     modelRuntime,
     model: requestedModel,
     thinkingLevel: hasExistingMessages ? undefined : (currentAgent?.defaultThinkingLevel ?? settings?.thinkingLevel ?? "medium"),
-    tools: Object.entries(currentAgent?.tools ?? {}).filter(([, enabled]) => enabled).map(([name]) => name),
     sessionManager: activeSessionManager,
     settingsManager,
     resourceLoader
   });
   session = result.session;
+  await session.bindExtensions({
+    mode: "rpc",
+    onError: (error) => post({ type: "log", level: "warn", message: `Pi 扩展错误：${error.error}` })
+  });
+  const extensionTools = session.getAllTools().map((tool) => tool.name).filter((name) => !builtinToolNames.has(name));
+  session.setActiveToolsByName([...enabledBuiltinTools, ...extensionTools]);
   selectedModel = session.model ? { provider: session.model.provider, id: session.model.id } : requested;
   thinkingLevel = session.thinkingLevel;
   unsubscribeSession = session.subscribe(handleSessionEvent);
   status = sessionReadyStatus(Boolean(session.model), Boolean(result.modelFallbackMessage));
   busy = false;
   await refreshSessions();
+  emitResourceCatalog();
   emitState();
 }
 
@@ -415,6 +632,7 @@ async function initialize(command: Extract<RuntimeCommand, { type: "initialize" 
   workspace = settings.workspace;
   currentAgent = activeAgent();
   thinkingLevel = settings.thinkingLevel ?? "medium";
+  accessMode = settings.accessMode ?? "ask";
   selectedModel = settings.model;
   modelRuntime = await ModelRuntime.create();
   for (const provider of settings.providers) {
@@ -424,7 +642,37 @@ async function initialize(command: Extract<RuntimeCommand, { type: "initialize" 
   }
   await refreshCatalog();
   if (workspace) await createSession();
-  else emitState();
+  else {
+    emitResourceCatalog();
+    emitState();
+  }
+}
+
+async function runResourceOperation(label: string, operation: () => Promise<void>): Promise<void> {
+  if (!session || !packageManager) throw new Error("请先打开工作区，再管理 Skill 或 MCP");
+  if (busy || resourceOperationBusy) throw new Error("当前会话正在运行，请等待完成后再管理 Skill 或 MCP");
+  resourceOperationBusy = true;
+  busy = true;
+  status = label;
+  emitState();
+  try {
+    await operation();
+    emitResourceCatalog();
+  } finally {
+    resourceOperationBusy = false;
+    busy = false;
+    status = "就绪";
+    emitResourceCatalog();
+    emitState();
+  }
+}
+
+async function reloadRuntimeResources(): Promise<void> {
+  if (!session) throw new Error("请先打开工作区，再重载资源");
+  // Pi's in-place reload publishes the MCP adapter shutdown snapshot but does
+  // not reliably rebuild the adapter state. Recreate the runtime while keeping
+  // the current session manager so the updated global/project config is read.
+  await createSession(session.sessionManager);
 }
 
 async function handleCommand(command: RuntimeCommand): Promise<void> {
@@ -476,8 +724,10 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       if (images.length && !hasImageInput(session.model)) throw new Error("当前模型不支持图片输入，请先切换多模态模型");
       busy = true;
       status = "Pi 正在工作";
+      beginTurn();
       emitState();
       void session.prompt(promptText, images.length ? { images } : undefined).catch((error) => {
+        completeTurn();
         busy = false;
         status = "请求失败";
         post({ type: "error", message: errorText(error) });
@@ -490,6 +740,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       if (!command.text.trim()) throw new Error("没有可重新生成的用户消息");
       busy = true;
       status = "Pi 正在重新生成";
+      beginTurn();
       emitState();
       void (async () => {
         const branch = session!.sessionManager.getBranch();
@@ -498,6 +749,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         await session!.navigateTree(target.id);
         await session!.prompt(command.text.trim());
       })().catch((error) => {
+        completeTurn();
         busy = false;
         status = "请求失败";
         post({ type: "error", message: errorText(error) });
@@ -627,13 +879,52 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       }
       break;
     case "settings.save":
-      if (settings) { settings.model = command.settings.model; settings.thinkingLevel = command.settings.thinkingLevel; settings.appearance = command.settings.appearance; thinkingLevel = command.settings.thinkingLevel; selectedModel = command.settings.model; if (session) { session.setThinkingLevel(thinkingLevel); if (selectedModel) { const model = modelRuntime?.getModel(selectedModel.provider, selectedModel.id); if (model) await session.setModel(model); } } emitState(); }
+      if (settings) { settings.model = command.settings.model; settings.thinkingLevel = command.settings.thinkingLevel; settings.accessMode = command.settings.accessMode; settings.appearance = command.settings.appearance; thinkingLevel = command.settings.thinkingLevel; accessMode = command.settings.accessMode; selectedModel = command.settings.model; if (session) { session.setThinkingLevel(thinkingLevel); if (selectedModel) { const model = modelRuntime?.getModel(selectedModel.provider, selectedModel.id); if (model) await session.setModel(model); } } emitState(); }
       break;
     case "agent.archive":
       if (settings && command.agentId !== "default") { settings.agents = settings.agents.map((item) => item.id === command.agentId ? { ...item, archived: command.archived } : item); if (settings.currentAgentId === command.agentId) { settings.currentAgentId = "default"; currentAgent = activeAgent(); } if (workspace) await createSession(); }
       break;
     case "appearance.save":
       break;
+    case "resources.package.install": {
+      const source = command.source.trim();
+      if (!source) throw new Error("请输入 Pi Package 来源");
+      await runResourceOperation("正在安装 Pi Package", async () => {
+        await packageManager!.installAndPersist(source);
+        await reloadRuntimeResources();
+      });
+      break;
+    }
+    case "resources.package.remove": {
+      const source = command.source.trim();
+      if (!source) throw new Error("缺少要删除的 Pi Package");
+      await runResourceOperation("正在删除 Pi Package", async () => {
+        await packageManager!.removeAndPersist(source, { local: command.scope === "project" });
+        await reloadRuntimeResources();
+      });
+      break;
+    }
+    case "resources.reload":
+      await runResourceOperation("正在重载 Skill 和 MCP", reloadRuntimeResources);
+      break;
+    case "mcp.server.save": {
+      const server = command.server;
+      const name = server.name.trim();
+      if (!/^[A-Za-z0-9._-]+$/u.test(name)) throw new Error("MCP Server 名称只能包含字母、数字、点、下划线和短横线");
+      await runResourceOperation("正在添加 MCP Server", async () => {
+        upsertMcpServerConfig(mcpConfigPath(server.scope), name, mcpConfigEntry({ ...server, name }));
+        await reloadRuntimeResources();
+      });
+      break;
+    }
+    case "mcp.server.toggle": {
+      if (!/^[A-Za-z0-9._-]+$/u.test(command.name)) throw new Error("MCP Server 名称无效");
+      await runResourceOperation(command.enabled ? "正在启用 MCP Server" : "正在停用 MCP Server", async () => {
+        await session!.prompt(`/mcp ${command.enabled ? "enable" : "disable"} ${command.name}`);
+        await reloadRuntimeResources();
+      });
+      break;
+    }
     case "permission.resolve": {
       const resolveDecision = pendingPermissions.get(command.id);
       if (resolveDecision) {

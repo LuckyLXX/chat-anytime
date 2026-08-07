@@ -1,5 +1,6 @@
 import { THEME_PRESET_IDS } from "../shared/protocol.js";
 import type {
+  AccessMode,
   AgentProfile,
   AppearanceSettings,
   BuiltinToolName,
@@ -18,6 +19,10 @@ import type {
 export const BUILTIN_TOOLS: BuiltinToolName[] = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 export const DEFAULT_AGENT_ID = "default";
 export const CUSTOM_PROVIDER_ID = "chatanytime-openai-compatible";
+
+export function normalizeAccessMode(value: unknown): AccessMode {
+  return value === "read-only" || value === "workspace" || value === "full" ? value : "ask";
+}
 
 export function defaultTools(): Record<BuiltinToolName, boolean> {
   return Object.fromEntries(BUILTIN_TOOLS.map((tool) => [tool, true])) as Record<BuiltinToolName, boolean>;
@@ -51,10 +56,17 @@ const HEX_COLOR_PATTERN = /^#[\da-f]{6}$/iu;
 function normalizeThemeColorOverrides(value: unknown): ThemeColorOverrides {
   if (!value || typeof value !== "object") return {};
   const source = value as Record<string, unknown>;
-  return Object.fromEntries(THEME_COLOR_KEYS.flatMap((key) => {
+  const colors = Object.fromEntries(THEME_COLOR_KEYS.flatMap((key) => {
     const color = typeof source[key] === "string" ? source[key].trim().toLowerCase() : "";
     return HEX_COLOR_PATTERN.test(color) ? [[key, color]] : [];
   })) as ThemeColorOverrides;
+  const rawOpacity = typeof source.wallpaperOpacity === "number"
+    ? source.wallpaperOpacity
+    : typeof source.wallpaperOpacity === "string" && source.wallpaperOpacity.trim()
+      ? Number(source.wallpaperOpacity)
+      : Number.NaN;
+  if (!Number.isFinite(rawOpacity)) return colors;
+  return { ...colors, wallpaperOpacity: Math.min(1, Math.max(0, rawOpacity)) };
 }
 
 export function normalizeThemeOverrides(value: unknown): ThemeOverrides {
@@ -145,6 +157,7 @@ export function defaultSettings(): DesktopSettings {
   return {
     version: 2,
     thinkingLevel: "medium",
+    accessMode: "ask",
     providers: [],
     agents: [createDefaultAgent()],
     currentAgentId: DEFAULT_AGENT_ID,
@@ -194,11 +207,13 @@ export function migrateSettings(raw: unknown): { settings: DesktopSettings; lega
   const thinkingLevel = ["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(String(source.thinkingLevel))
     ? source.thinkingLevel as ThinkingLevel
     : "medium";
+  const accessMode = normalizeAccessMode(source.accessMode);
   const settings: DesktopSettings = {
     version: 2,
     workspace: typeof source.workspace === "string" ? source.workspace : undefined,
     model: normalizeDefaultModel(source.model),
     thinkingLevel,
+    accessMode,
     providers,
     agents: normalizedAgents,
     currentAgentId,
