@@ -355,9 +355,10 @@ function ArtifactCard({ artifact, onOpenArtifact }: { artifact: Artifact; onOpen
 
 const richSanitizeSchema: Schema = {
   ...defaultSchema,
-  tagNames: [...(defaultSchema.tagNames ?? []), "style"],
+  tagNames: [...(defaultSchema.tagNames ?? []), "style", "script"],
   attributes: {
     ...defaultSchema.attributes,
+    script: ["type"],
     "*": [
       ...(defaultSchema.attributes?.["*"] ?? []),
       ["className", /^[a-zA-Z0-9_:/.[\]%-]{1,96}$/u],
@@ -437,6 +438,155 @@ function htmlBubbleScopeClass(prefix: string): string {
   return `html-bubble-scope-${(hash >>> 0).toString(36)}`;
 }
 
+interface ScopedBubbleDocument {
+  body: HTMLElement;
+  documentElement: HTMLElement;
+  head: HTMLElement;
+  createElement(tagName: string): HTMLElement;
+  createTextNode(value: string): Text;
+  querySelector(selector: string): Element | null;
+  querySelectorAll(selector: string): NodeListOf<Element>;
+  getElementById(id: string): Element | null;
+  addEventListener(type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions): void;
+  removeEventListener(type: string, listener: EventListenerOrEventListenerObject, options?: boolean | EventListenerOptions): void;
+}
+
+interface ScopedBubbleWindow {
+  document: ScopedBubbleDocument;
+  container: HTMLElement;
+  requestAnimationFrame(callback: FrameRequestCallback): number;
+  cancelAnimationFrame(id: number): void;
+  setTimeout(callback: (...args: unknown[]) => void, delay?: number, ...args: unknown[]): ReturnType<typeof window.setTimeout>;
+  clearTimeout(id: ReturnType<typeof window.setTimeout>): void;
+  setInterval(callback: (...args: unknown[]) => void, delay?: number, ...args: unknown[]): ReturnType<typeof window.setInterval>;
+  clearInterval(id: ReturnType<typeof window.setInterval>): void;
+  addEventListener(type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions): void;
+  removeEventListener(type: string, listener: EventListenerOrEventListenerObject, options?: boolean | EventListenerOptions): void;
+}
+
+interface BubbleRuntime {
+  destroyed: boolean;
+  timers: Set<ReturnType<typeof window.setTimeout>>;
+  intervals: Set<ReturnType<typeof window.setInterval>>;
+  rafs: Set<number>;
+  listeners: Array<{ target: EventTarget; type: string; listener: EventListenerOrEventListenerObject; options?: boolean | AddEventListenerOptions }>;
+  scopedDocument: ScopedBubbleDocument;
+  scopedWindow: ScopedBubbleWindow;
+  requestAnimationFrame(callback: FrameRequestCallback): number;
+  cancelAnimationFrame(id: number): void;
+  setTimeout(callback: (...args: unknown[]) => void, delay?: number, ...args: unknown[]): ReturnType<typeof window.setTimeout>;
+  clearTimeout(id: ReturnType<typeof window.setTimeout>): void;
+  setInterval(callback: (...args: unknown[]) => void, delay?: number, ...args: unknown[]): ReturnType<typeof window.setInterval>;
+  clearInterval(id: ReturnType<typeof window.setInterval>): void;
+}
+
+function createBubbleRuntime(scope: HTMLElement): BubbleRuntime {
+  const runtimeState = { destroyed: false, timers: new Set<ReturnType<typeof window.setTimeout>>(), intervals: new Set<ReturnType<typeof window.setInterval>>(), rafs: new Set<number>(), listeners: [] };
+  const runtime = runtimeState as unknown as BubbleRuntime;
+  const trackListener = (target: EventTarget, type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions): void => {
+    target.addEventListener(type, listener, options);
+    runtime.listeners.push({ target, type, listener, options });
+  };
+  const scopedDocument: ScopedBubbleDocument = {
+    body: scope,
+    documentElement: scope,
+    head: scope,
+    createElement: (tagName: string) => document.createElement(tagName),
+    createTextNode: (value: string) => document.createTextNode(value),
+    querySelector: (selector: string) => scope.querySelector(selector),
+    querySelectorAll: (selector: string) => scope.querySelectorAll(selector),
+    getElementById: (id: string) => {
+      const escaped = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(id) : id.replace(/[^a-zA-Z0-9_-]/gu, "\\$&");
+      return scope.querySelector(`#${escaped}`);
+    },
+    addEventListener: (type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) => trackListener(scope, type, listener, options),
+    removeEventListener: (type: string, listener: EventListenerOrEventListenerObject, options?: boolean | EventListenerOptions) => scope.removeEventListener(type, listener, options)
+  };
+  const scopedWindow = { document: scopedDocument, container: scope } as ScopedBubbleWindow;
+  const requestAnimationFrame = (callback: FrameRequestCallback): number => {
+    if (runtime.destroyed) return 0;
+    const id = window.requestAnimationFrame((timestamp) => {
+      runtime.rafs.delete(id);
+      if (!runtime.destroyed) callback(timestamp);
+    });
+    runtime.rafs.add(id);
+    return id;
+  };
+  const cancelAnimationFrame = (id: number): void => { runtime.rafs.delete(id); window.cancelAnimationFrame(id); };
+  const setTimeoutScoped = (callback: (...args: unknown[]) => void, delay?: number, ...args: unknown[]): ReturnType<typeof window.setTimeout> => {
+    if (runtime.destroyed) return 0;
+    const id = window.setTimeout(() => { runtime.timers.delete(id); if (!runtime.destroyed) callback(...args); }, delay);
+    runtime.timers.add(id);
+    return id;
+  };
+  const clearTimeoutScoped = (id: ReturnType<typeof window.setTimeout>): void => { runtime.timers.delete(id); window.clearTimeout(id); };
+  const setIntervalScoped = (callback: (...args: unknown[]) => void, delay?: number, ...args: unknown[]): ReturnType<typeof window.setInterval> => {
+    if (runtime.destroyed) return 0;
+    const id = window.setInterval(() => { if (!runtime.destroyed) callback(...args); }, delay);
+    runtime.intervals.add(id);
+    return id;
+  };
+  const clearIntervalScoped = (id: ReturnType<typeof window.setInterval>): void => { runtime.intervals.delete(id); window.clearInterval(id); };
+  Object.assign(scopedWindow, { requestAnimationFrame, cancelAnimationFrame, setTimeout: setTimeoutScoped, clearTimeout: clearTimeoutScoped, setInterval: setIntervalScoped, clearInterval: clearIntervalScoped, addEventListener: scopedDocument.addEventListener, removeEventListener: scopedDocument.removeEventListener });
+  return Object.assign(runtime, { scopedDocument, scopedWindow, requestAnimationFrame, cancelAnimationFrame, setTimeout: setTimeoutScoped, clearTimeout: clearTimeoutScoped, setInterval: setIntervalScoped, clearInterval: clearIntervalScoped });
+}
+
+function destroyBubbleRuntime(runtime: BubbleRuntime | undefined): void {
+  if (!runtime || runtime.destroyed) return;
+  runtime.destroyed = true;
+  runtime.timers.forEach((id) => window.clearTimeout(id));
+  runtime.intervals.forEach((id) => window.clearInterval(id));
+  runtime.rafs.forEach((id) => window.cancelAnimationFrame(id));
+  runtime.listeners.forEach(({ target, type, listener, options }) => target.removeEventListener(type, listener, options));
+  runtime.timers.clear();
+  runtime.intervals.clear();
+  runtime.rafs.clear();
+  runtime.listeners = [];
+}
+
+function DynamicHtmlBubble({ content, closed, streaming, artifactPrefix, onOpenArtifact, onHtmlAction }: { content: string; closed: boolean; streaming: boolean; artifactPrefix: string; onOpenArtifact(artifact: Artifact): void; onHtmlAction?: (text: string) => void }): ReactNode {
+  const scopeRef = useRef<HTMLDivElement | null>(null);
+  const runtimeRef = useRef<BubbleRuntime | undefined>(undefined);
+  const sourceKeyRef = useRef("");
+  const scopeClass = htmlBubbleScopeClass(artifactPrefix);
+  const artifactIndex = useRef(0);
+  const components = markdownComponents(artifactIndex, artifactPrefix, onOpenArtifact, false, true, onHtmlAction);
+  const scopeSelector = `.${scopeClass}`;
+
+  useEffect(() => {
+    const scope = scopeRef.current;
+    if (!scope || !closed || streaming) return;
+    const scripts = Array.from(scope.querySelectorAll<HTMLScriptElement>('script[type="application/x-pidesktop-bubble-script"]'));
+    const sourceKey = scripts.map((script) => script.textContent ?? "").join("\n---\n");
+    if (!sourceKey || sourceKey === sourceKeyRef.current) return;
+    destroyBubbleRuntime(runtimeRef.current);
+    sourceKeyRef.current = sourceKey;
+    const runtime = createBubbleRuntime(scope);
+    runtimeRef.current = runtime;
+    const scriptDocument = runtime.scopedDocument;
+    const scriptWindow = runtime.scopedWindow;
+    for (const script of scripts) {
+      const source = script.textContent ?? "";
+      try {
+        const execute = new Function("container", "document", "window", "requestAnimationFrame", "cancelAnimationFrame", "setTimeout", "clearTimeout", "setInterval", "clearInterval", `"use strict";\n${source}`);
+        execute(scope, scriptDocument, scriptWindow, runtime.requestAnimationFrame, runtime.cancelAnimationFrame, runtime.setTimeout, runtime.clearTimeout, runtime.setInterval, runtime.clearInterval);
+      } catch (error) {
+        console.warn("[pidesktop] Div 气泡脚本执行失败", error);
+      }
+    }
+  }, [closed, content, streaming]);
+
+  useEffect(() => () => destroyBubbleRuntime(runtimeRef.current), []);
+
+  return (
+    <div ref={scopeRef} className={`html-bubble ${scopeClass}`} data-html-bubble-runtime-key={sourceKeyRef.current || artifactPrefix}>
+      <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeRaw, [sanitizeRichHtmlTree, { allowStyleTags: true, allowBubbleScripts: true, scopeSelector }], [rehypeSanitize, richSanitizeSchema], rehypeKatex]} components={components}>
+        {content}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
 function MarkdownSurface({ content, htmlBubble, artifactPrefix, onOpenArtifact, onHtmlAction }: { content: string; htmlBubble?: boolean; artifactPrefix: string; onOpenArtifact(artifact: Artifact): void; onHtmlAction?: (text: string) => void }): ReactNode {
   const dark = useThemeTokens().dark;
   const artifactIndex = useRef(0);
@@ -452,11 +602,14 @@ function MarkdownSurface({ content, htmlBubble, artifactPrefix, onOpenArtifact, 
   );
 }
 
-function renderSegment(segment: RichContentSegment, index: number, artifactPrefix: string, onOpenArtifact: (artifact: Artifact) => void, onHtmlAction?: (text: string) => void): ReactNode {
+function renderSegment(segment: RichContentSegment, index: number, artifactPrefix: string, streaming: boolean, onOpenArtifact: (artifact: Artifact) => void, onHtmlAction?: (text: string) => void): ReactNode {
   if (segment.type === "mermaid") return <MermaidBlock key={`mermaid-${index}`} code={segment.content} language={segment.language} />;
   if (segment.type === "artifact") {
     const artifact: Artifact = { ...segment.artifact, id: `${artifactPrefix}-artifact-${index}` };
     return <ArtifactCard key={`artifact-${index}`} artifact={artifact} onOpenArtifact={onOpenArtifact} />;
+  }
+  if (segment.type === "html" && segment.source === "assistant-html") {
+    return <DynamicHtmlBubble key={`assistant-html-${index}`} content={segment.content} closed={segment.closed !== false} streaming={streaming} artifactPrefix={`${artifactPrefix}-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} />;
   }
   return <MarkdownSurface key={`${segment.type}-${index}`} content={segment.content} htmlBubble={segment.type === "html"} artifactPrefix={`${artifactPrefix}-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} />;
 }
@@ -465,7 +618,7 @@ export function RichContent({ children, streaming, onOpenArtifact, onHtmlAction,
   const segments = parseRichContent(children, { isStreaming: Boolean(streaming) });
   return (
     <div className={`rich-content${streaming ? " is-streaming" : ""}`}>
-      {segments.map((segment, index) => renderSegment(segment, index, artifactPrefix, onOpenArtifact, onHtmlAction))}
+      {segments.map((segment, index) => renderSegment(segment, index, artifactPrefix, Boolean(streaming), onOpenArtifact, onHtmlAction))}
     </div>
   );
 }

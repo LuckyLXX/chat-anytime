@@ -1,5 +1,6 @@
 const blockedTags = new Set(["base", "embed", "iframe", "link", "meta", "object", "script"]);
 const urlProperties = new Set(["action", "formAction", "href", "poster", "src", "xLinkHref"]);
+const blockedBubbleScriptPattern = /(?:\beval\s*\(|\bnew\s+function\b|\bfetch\s*\(|\bxmlhttprequest\b|\bwebsocket\b|\beventsource\b|\bnavigator\b|\blocation\b|\bhistory\b|\blocalstorage\b|\bsessionstorage\b|\bindexeddb\b|\bcaches\b|document\s*\.\s*write|window\s*\.\s*open|\bglobalthis\b|\bself\b|\btop\b|\bparent\b|\bownerDocument\b|\bdefaultView\b|\bconstructor\b|\bprototype\b|__proto__|\bimport\s*\(|\brequire\s*\(|\bprocess\b)/iu;
 
 export function sanitizeStyleDeclarations(styleText: string): string {
   const safeRules: string[] = [];
@@ -43,7 +44,14 @@ interface HastNode {
 
 export interface RichHtmlSanitizeOptions {
   allowStyleTags?: boolean;
+  allowBubbleScripts?: boolean;
   scopeSelector?: string;
+}
+
+function sanitizeBubbleScript(scriptText: string): string {
+  const source = String(scriptText || "").trim();
+  if (!source || source.length > 16_000 || blockedBubbleScriptPattern.test(source)) return "";
+  return source;
 }
 
 function sanitizeNode(node: HastNode): void {
@@ -165,6 +173,7 @@ export function sanitizeStyleTagCss(styleText: string, scopeSelector: string): s
 /** Rehype plugin: sanitize raw assistant HTML before the schema sanitizer runs. */
 export function sanitizeRichHtmlTree(options: RichHtmlSanitizeOptions = {}): (tree: unknown) => void {
   const allowStyleTags = options.allowStyleTags === true;
+  const allowBubbleScripts = options.allowBubbleScripts === true;
   const scopeSelector = options.scopeSelector?.trim() ?? "";
   return (tree: unknown) => {
     const root = tree as HastNode;
@@ -177,11 +186,19 @@ export function sanitizeRichHtmlTree(options: RichHtmlSanitizeOptions = {}): (tr
         node.children = [{ type: "text", value: safeCss }];
         return true;
       }
+      if (node.type === "element" && tagName === "script") {
+        const safeScript = allowBubbleScripts ? sanitizeBubbleScript(textContent(node.children)) : "";
+        if (!safeScript) return false;
+        node.properties = { type: "application/x-pidesktop-bubble-script" };
+        node.children = [{ type: "text", value: safeScript }];
+        return true;
+      }
       sanitizeNode(node);
       if (!node.children) return true;
       node.children = node.children.filter((child) => {
         if (!child) return false;
-        if (child.type === "element" && blockedTags.has(String(child.tagName || "").toLowerCase())) return false;
+        const childTagName = String(child.tagName || "").toLowerCase();
+        if (child.type === "element" && blockedTags.has(childTagName) && childTagName !== "script") return false;
         return visit(child);
       });
       return true;

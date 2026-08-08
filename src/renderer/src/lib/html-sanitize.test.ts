@@ -41,4 +41,42 @@ describe("assistant HTML sanitizer", () => {
     sanitizeRichHtmlTree()(tree);
     expect(tree.children).toEqual([]);
   });
+
+  it("retains a safe inline script only for an explicit Div bubble", () => {
+    const tree = {
+      type: "root",
+      children: [{
+        type: "element",
+        tagName: "script",
+        properties: { src: "https://example.com/app.js" },
+        children: [{ type: "text", value: "const render = () => container.querySelector('canvas'); render();" }]
+      }]
+    };
+
+    sanitizeRichHtmlTree({ allowBubbleScripts: true })(tree);
+    expect(tree.children[0]).toMatchObject({
+      tagName: "script",
+      properties: { type: "application/x-pidesktop-bubble-script" }
+    });
+  });
+
+  it("rejects bubble scripts that reach outside the scoped runtime", () => {
+    const tree = {
+      type: "root",
+      children: [{ type: "element", tagName: "script", properties: {}, children: [{ type: "text", value: "fetch('https://example.com');" }] }]
+    };
+
+    sanitizeRichHtmlTree({ allowBubbleScripts: true })(tree);
+    expect(tree.children).toEqual([]);
+  });
+
+  it("rejects DOM prototype escape attempts in bubble scripts", () => {
+    const tree = {
+      type: "root",
+      children: [{ type: "element", tagName: "script", properties: {}, children: [{ type: "text", value: "container.ownerDocument.defaultView" }] }]
+    };
+
+    sanitizeRichHtmlTree({ allowBubbleScripts: true })(tree);
+    expect(tree.children).toEqual([]);
+  });
 });

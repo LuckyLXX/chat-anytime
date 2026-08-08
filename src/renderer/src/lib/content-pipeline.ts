@@ -2,7 +2,7 @@ import { withDynamicArtifactFlag, type Artifact } from "./content";
 
 export type RichContentSegment =
   | { type: "markdown"; content: string }
-  | { type: "html"; content: string; source: "assistant-html" | "fragment" }
+  | { type: "html"; content: string; source: "assistant-html" | "fragment"; closed?: boolean }
   | { type: "mermaid"; content: string; language: string }
   | { type: "artifact"; artifact: Omit<Artifact, "id"> };
 
@@ -215,19 +215,13 @@ function parseTextPart(text: string, options: RichContentParseOptions = {}): Ric
   return [{ type: "markdown", content: normalized }];
 }
 
-function parseAssistantHtmlPart(content: string, options: RichContentParseOptions): RichContentSegment[] {
+function parseAssistantHtmlPart(content: string, closed: boolean): RichContentSegment[] {
   const normalized = content.replace(/\r\n?/gu, "\n").trim();
   if (!normalized) return [];
   if (isFullHtmlDocument(normalized)) {
-    if (options.isStreaming) {
-      return [{ type: "markdown", content: `\`\`\`html\n${normalized}\n\`\`\`` }];
-    }
     return [{ type: "artifact", artifact: createHtmlArtifact(normalized) }];
   }
-  const artifact = createHtmlArtifact(normalized);
-  return artifact.dynamic
-    ? [{ type: "artifact", artifact }]
-    : [{ type: "html", content: normalized, source: "assistant-html" }];
+  return [{ type: "html", content: normalized, source: "assistant-html", ...(closed ? {} : { closed: false }) }];
 }
 
 function splitAssistantHtml(text: string, options: RichContentParseOptions): RichContentSegment[] {
@@ -240,13 +234,9 @@ function splitAssistantHtml(text: string, options: RichContentParseOptions): Ric
     const content = match[1]?.trim();
     const isClosed = Boolean(match[2]);
     if (content) {
-      // Keep assistant-authored HTML inert until the assistant turn is done.
-      // This avoids repeatedly mounting half-written cards during streaming.
-      if (!options.isStreaming) {
-        segments.push(...parseAssistantHtmlPart(content, options));
-      } else {
-        segments.push({ type: "markdown", content: `\`\`\`html\n${content}\n\`\`\`` });
-      }
+      // Assistant bubbles are rendered as soon as useful markup arrives. Scripts
+      // remain inert until the matching closing tag is present and the turn ends.
+      segments.push(...parseAssistantHtmlPart(content, isClosed));
     }
     cursor = start + match[0].length;
   }

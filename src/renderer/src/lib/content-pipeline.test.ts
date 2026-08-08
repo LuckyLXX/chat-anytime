@@ -32,16 +32,12 @@ describe("rich content pipeline", () => {
     ]);
   });
 
-  it("moves dynamic assistant_html into a sandbox artifact", () => {
+  it("keeps dynamic assistant_html in the direct chat-bubble path", () => {
     const segments = parseRichContent("<assistant_html><div><canvas id=\"stage\"></canvas><script>requestAnimationFrame(() => {});</script></div></assistant_html>");
     expect(segments).toEqual([{
-      type: "artifact",
-      artifact: {
-        title: "HTML 预览",
-        language: "html",
-        content: "<div><canvas id=\"stage\"></canvas><script>requestAnimationFrame(() => {});</script></div>",
-        dynamic: true
-      }
+      type: "html",
+      content: "<div><canvas id=\"stage\"></canvas><script>requestAnimationFrame(() => {});</script></div>",
+      source: "assistant-html"
     }]);
   });
 
@@ -73,9 +69,9 @@ describe("rich content pipeline", () => {
     }]);
   });
 
-  it("keeps assistant HTML inert until streaming has finished", () => {
+  it("renders closed assistant HTML while streaming but defers script activation to the renderer", () => {
     const segments = parseRichContent("<assistant_html><div>正在生成</div></assistant_html>", { isStreaming: true });
-    expect(segments).toEqual([{ type: "markdown", content: "```html\n<div>正在生成</div>\n```" }]);
+    expect(segments).toEqual([{ type: "html", content: "<div>正在生成</div>", source: "assistant-html" }]);
   });
 
   it("takes completed assistant HTML over the stable prefix while streaming the tail", () => {
@@ -98,14 +94,14 @@ describe("rich content pipeline", () => {
     expect(text.slice(cutoff)).toBe("尾部");
   });
 
-  it("shows an unfinished assistant HTML block as code while streaming", () => {
+  it("renders an unfinished assistant HTML block in the streaming bubble", () => {
     const segments = parseRichContent("<assistant_html><div>尚未闭合", { isStreaming: true });
-    expect(segments).toEqual([{ type: "markdown", content: "```html\n<div>尚未闭合\n```" }]);
+    expect(segments).toEqual([{ type: "html", content: "<div>尚未闭合", source: "assistant-html", closed: false }]);
   });
 
   it("renders an unfinished assistant HTML block after streaming completes", () => {
     const segments = parseRichContent("<assistant_html><div>最终片段", { isStreaming: false });
-    expect(segments).toEqual([{ type: "html", content: "<div>最终片段", source: "assistant-html" }]);
+    expect(segments).toEqual([{ type: "html", content: "<div>最终片段", source: "assistant-html", closed: false }]);
   });
 
   it("treats an unfinished html fence as code while streaming", () => {

@@ -15,7 +15,7 @@ export const DIV_MODE_PROMPT = `
 
 export const DIV_DYNAMIC_MODE_PROMPT = `
 【Div 动态内容】
-- 需要按钮交互、折叠展开、实时计时、进度变化、Canvas 动画或数据可视化时，可以在同一个 <assistant_html> 气泡中加入 <script>；PiDesktop 会把含脚本或动态图形的内容转入隔离的 HTML Artifact 预览，而不是在主聊天页面执行。
+- 需要按钮交互、折叠展开、实时计时、进度变化、Canvas 动画或数据可视化时，可以在同一个 <assistant_html> 气泡中加入 <script>；PiDesktop 会在聊天窗口内实时渲染气泡，并在气泡完整结束后于受控作用域中激活脚本。完整 HTML 页面仍使用隔离的 HTML Artifact 预览。
 - 只输出一个最外层 <div>，脚本放在该 <div> 内；使用 addEventListener，不使用 onclick、onchange 等内联事件属性。
 - 脚本只操作当前内容，不修改主聊天页面，不访问文件、Cookie、localStorage 或用户隐私数据；不使用 eval、new Function、document.write、window.open、iframe、外部远程脚本或模块导入。
 - 可以使用 setTimeout、setInterval、requestAnimationFrame 和 Canvas；动画需要在合理时机停止或复用，避免无休止创建计时器和渲染器。

@@ -9,8 +9,9 @@ describe("Div mode prompt", () => {
     expect(DIV_MODE_PROMPT).toContain("data-send");
   });
 
-  it("documents PiDesktop's sandbox boundary for dynamic content", () => {
-    expect(DIV_DYNAMIC_MODE_PROMPT).toContain("隔离的 HTML Artifact 预览");
+  it("documents PiDesktop's controlled chat-bubble boundary for dynamic content", () => {
+    expect(DIV_DYNAMIC_MODE_PROMPT).toContain("聊天窗口内实时渲染气泡");
+    expect(DIV_DYNAMIC_MODE_PROMPT).toContain("完整 HTML 页面仍使用隔离的 HTML Artifact 预览");
     expect(DIV_DYNAMIC_MODE_PROMPT).toContain("addEventListener");
     expect(buildDivModePrompt()).toContain(DIV_MODE_PROMPT);
     expect(buildDivModePrompt()).toContain(DIV_DYNAMIC_MODE_PROMPT);
