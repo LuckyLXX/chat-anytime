@@ -156,6 +156,18 @@ select option:checked { color: var(--on-accent); background-color: var(--accent)
 .session-list span, .agent-list button > span:last-child { display: grid; gap: 3px; min-width: 0; }
 .session-list strong, .agent-list strong { overflow: hidden; font-size: 12px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
 .session-list small, .agent-list small { overflow: hidden; color: var(--text-muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.session-list-empty { display: grid; place-items: center; min-height: 80px; padding: 10px; color: var(--text-muted); font-size: 11px; }
+.session-workspace-group { display: grid; gap: 2px; }
+.session-workspace-heading { grid-template-columns: 20px minmax(0, 1fr) auto 16px !important; min-height: 43px !important; padding: 6px 8px !important; color: var(--text) !important; background: transparent !important; }
+.session-workspace-heading > span { gap: 2px; }
+.session-workspace-heading > span strong { font-size: 11px; }
+.session-workspace-heading > span small { font-size: 9px; }
+.session-workspace-heading > svg:first-child { color: var(--accent-text); }
+.session-workspace-heading > svg:last-child { color: var(--text-muted); transition: transform .15s ease; }
+.session-workspace-heading > svg:last-child.collapsed { transform: rotate(-90deg); }
+.session-workspace-heading em { min-width: 18px; padding: 2px 5px; border-radius: 8px; color: var(--text-muted); background: var(--surface-sidebar-badge); font-size: 9px; font-style: normal; text-align: center; }
+.session-workspace-items { display: grid; gap: 2px; margin-left: 10px; padding-left: 6px; border-left: 1px solid var(--border); }
+.session-workspace-items button { min-height: 44px; padding: 6px 7px; }
 .agent-list button { display: grid; grid-template-columns: 27px minmax(0, 1fr); gap: 8px; align-items: center; min-height: 50px; padding: 7px 8px; text-align: left; border: 0; border-radius: 6px; background: transparent; cursor: pointer; }
 .agent-list button:hover { background: var(--surface-sidebar-hover); }
 .agent-list button.active { color: var(--text-sidebar-active); background: var(--surface-sidebar-active); }

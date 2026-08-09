@@ -176,6 +176,7 @@ export interface ToolExecution {
 export interface SessionSummary {
   id: string;
   path: string;
+  workspace: string;
   title: string;
   modifiedAt: number;
   messageCount: number;
@@ -305,7 +306,7 @@ export type RuntimeCommand =
   | { type: "initialize"; settings: DesktopSettings; apiKeys: Record<string, string> }
   | { type: "workspace.open"; path: string }
   | { type: "session.new" }
-  | { type: "session.open"; path: string }
+  | { type: "session.open"; path: string; workspace?: string }
   | { type: "session.prompt"; text: string; attachments?: PromptAttachment[] }
   | { type: "session.skill"; name: string; instructions?: string; attachments?: PromptAttachment[] }
   | { type: "session.regenerate"; text: string; timestamp?: number; skillName?: string; attachments?: PromptAttachment[] }

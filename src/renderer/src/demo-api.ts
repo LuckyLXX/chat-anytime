@@ -44,8 +44,9 @@ const demoSnapshot: RuntimeSnapshot = {
   busy: false,
   status: "就绪",
   sessions: [
-    { id: "demo-session", path: "demo-session.jsonl", title: "梳理项目架构", modifiedAt: Date.now(), messageCount: 4 },
-    { id: "older-session", path: "older-session.jsonl", title: "检查渲染流程", modifiedAt: Date.now() - 86_400_000, messageCount: 7 }
+    { id: "demo-session", path: "demo-session.jsonl", workspace: "D:\\Projects\\chat-anytime-demo", title: "梳理项目架构", modifiedAt: Date.now(), messageCount: 4 },
+    { id: "older-session", path: "older-session.jsonl", workspace: "D:\\Projects\\chat-anytime-demo", title: "检查渲染流程", modifiedAt: Date.now() - 86_400_000, messageCount: 7 },
+    { id: "other-session", path: "other-session.jsonl", workspace: "D:\\Projects\\PiDesktop", title: "检查桌面端", modifiedAt: Date.now() - 43_200_000, messageCount: 3 }
   ],
   messages: [
     {
@@ -217,6 +218,9 @@ export function createDemoApi(): DesktopApi {
         case "model.select":
           updateSnapshot({ model: { provider: command.provider, id: command.id } });
           break;
+        case "workspace.open":
+          updateSnapshot({ workspace: command.path, sessionId: undefined, messages: [], executions: [] });
+          break;
         case "agent.select":
           demoSettings.currentAgentId = command.agentId;
           updateSnapshot({ agentId: command.agentId, agentName: activeDemoAgent().name, sessionId: `${command.agentId}-demo-session`, messages: [] });
@@ -249,6 +253,9 @@ export function createDemoApi(): DesktopApi {
           break;
         case "session.new":
           updateSnapshot({ messages: [], executions: [], sessionId: "new-demo-session" });
+          break;
+        case "session.open":
+          updateSnapshot({ workspace: command.workspace ?? demoSnapshot.workspace, sessionId: command.path.replace(/.*[\\/]/u, "").replace(/\.jsonl$/u, ""), messages: [], executions: [] });
           break;
         case "session.compact":
           updateSnapshot({ busy: true, status: "Pi 正在压缩上下文" });

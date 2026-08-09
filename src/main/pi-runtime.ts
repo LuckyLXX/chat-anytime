@@ -1,6 +1,6 @@
-import { realpath, stat } from "node:fs/promises";
-import { isAbsolute, join, resolve, sep } from "node:path";
+import { readdir, realpath, stat } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import { basename, dirname, isAbsolute, join, relative as relativePath, resolve, sep } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, UserMessage, ImageContent } from "@earendil-works/pi-ai";
 import {
@@ -53,6 +53,7 @@ import { discoverExtensionCandidates, ExtensionPolicy } from "./extension-policy
 import { agentWorkspaceSessionDir } from "./session-scope.js";
 import { mergeProviderModels } from "./settings.js";
 import { buildSkillPrompt, parseSkillPrompt, type SkillPromptDisplay } from "./skill-prompt.js";
+import { restoreToolExecutions, type PersistedSessionMessage } from "./session-history.js";
 
 const parentPort = process.parentPort;
 if (!parentPort) throw new Error("Pi 运行时必须作为 Electron 工具进程启动");
@@ -84,6 +85,7 @@ let mcpServers: McpServerSummary[] = [];
 let mcpAdapterLoaded = false;
 let resourceOperationBusy = false;
 const runtimeScriptPath = process.argv[1];
+let sessionGeneration = 0;
 
 // Streaming coalescer: high-frequency partial frames (message_update token
 // batches, tool partial output) are throttled to 50ms (20fps) to avoid IPC
@@ -350,6 +352,27 @@ function workspaceSessionDir(): string | undefined {
   return agentWorkspaceSessionDir(getAgentDir(), currentAgent.id, workspace);
 }
 
+function agentSessionRoot(): string | undefined {
+  if (!currentAgent) return undefined;
+  return join(getAgentDir(), "chatanytime-sessions", currentAgent.id);
+}
+
+function pathIsWithin(root: string, target: string): boolean {
+  const relation = relativePath(resolve(root), resolve(target));
+  return Boolean(relation) && relation !== ".." && !relation.startsWith(`..${sep}`) && !isAbsolute(relation);
+}
+
+async function sessionDirectories(): Promise<string[]> {
+  const root = agentSessionRoot();
+  if (!root) return [];
+  try {
+    const entries = await readdir(root, { withFileTypes: true });
+    return [root, ...entries.filter((entry) => entry.isDirectory()).map((entry) => join(root, entry.name))];
+  } catch {
+    return [root];
+  }
+}
+
 function activeAgent(): AgentProfile {
   const list = settings?.agents ?? [];
   return list.find((agent) => agent.id === settings?.currentAgentId && !agent.archived) ?? list.find((agent) => agent.id === "default") ?? list[0] ?? { id: "default", name: "默认助手", description: "", systemPrompt: "", divMode: false, defaultThinkingLevel: "medium", tools: { read: true, bash: true, edit: true, write: true, grep: true, find: true, ls: true } };
@@ -603,14 +626,18 @@ async function fetchCustomProviderModels(baseUrlInput: string, apiKey: string): 
 }
 
 async function refreshSessions(): Promise<void> {
-  if (!workspace) {
+  const directories = await sessionDirectories();
+  if (directories.length === 0) {
     currentSessions = [];
     return;
   }
-  const items = await SessionManager.list(workspace, workspaceSessionDir());
-  currentSessions = items.map((item) => ({
+
+  const lists = await Promise.all(directories.map((directory) => SessionManager.listAll(directory)));
+  const items = [...new Map(lists.flat().map((item) => [resolve(item.path).toLowerCase(), item])).values()];
+  currentSessions = items.sort((left, right) => right.modified.getTime() - left.modified.getTime()).map((item) => ({
     id: item.id,
     path: item.path,
+    workspace: item.cwd || "未知工作区",
     title: item.name || item.firstMessage || "新会话",
     modifiedAt: item.modified.getTime(),
     messageCount: item.messageCount
@@ -625,6 +652,7 @@ function sessionReadyStatus(hasModel: boolean, usedFallback: boolean): string {
 
 async function createSession(sessionManager?: SessionManager): Promise<void> {
   if (!workspace || !modelRuntime) return;
+  const generation = ++sessionGeneration;
   // Drop any pending throttled emit so a stale streaming flush from the
   // previous session cannot fire against the freshly reset state below.
   if (pendingFlushTimer) {
@@ -638,6 +666,7 @@ async function createSession(sessionManager?: SessionManager): Promise<void> {
   permissionBroker.reset();
   extensionUiBridge.reset();
   session?.dispose();
+  session = undefined;
   mcpServers = [];
   mcpAdapterLoaded = false;
   executions = new Map();
@@ -681,6 +710,10 @@ async function createSession(sessionManager?: SessionManager): Promise<void> {
     settingsManager,
     resourceLoader
   });
+  if (generation !== sessionGeneration) {
+    result.session.dispose();
+    return;
+  }
   session = result.session;
   await session.bindExtensions({
     mode: "rpc",
@@ -689,6 +722,7 @@ async function createSession(sessionManager?: SessionManager): Promise<void> {
   });
   const extensionTools = session.getAllTools().map((tool) => tool.name).filter((name) => !builtinToolNames.has(name));
   session.setActiveToolsByName([...enabledBuiltinTools, ...extensionTools]);
+  executions = new Map(restoreToolExecutions(session.state.messages as unknown as PersistedSessionMessage[]).map((execution) => [execution.id, execution]));
   selectedModel = session.model ? { provider: session.model.provider, id: session.model.id } : requested;
   thinkingLevel = session.thinkingLevel;
   unsubscribeSession = session.subscribe(handleSessionEvent);
@@ -792,13 +826,21 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     case "session.new":
       if (workspace) await createSession(SessionManager.create(workspace, workspaceSessionDir()));
       break;
-    case "session.open":
-      if (workspace) {
-        const sessionRoot = workspaceSessionDir();
-        if (!sessionRoot || !resolve(command.path).toLowerCase().startsWith(`${resolve(sessionRoot).toLowerCase()}${sep}`)) throw new Error("只能打开当前 Agent 和工作区下的会话");
-        await createSession(SessionManager.open(command.path, sessionRoot, workspace));
+    case "session.open": {
+      const root = agentSessionRoot();
+      const target = resolve(command.path);
+      if (!root || !pathIsWithin(root, target) || !target.toLowerCase().endsWith(".jsonl")) throw new Error("只能打开当前 Agent 的会话");
+      const discovered = SessionManager.open(target);
+      const sessionWorkspace = discovered.getCwd();
+      if (!sessionWorkspace) throw new Error("会话缺少工作区信息");
+      workspace = resolve(sessionWorkspace);
+      const sessionRoot = workspaceSessionDir();
+      if (!sessionRoot || (resolve(dirname(target)).toLowerCase() !== resolve(sessionRoot).toLowerCase() && resolve(dirname(target)).toLowerCase() !== resolve(root).toLowerCase())) {
+        throw new Error("会话路径与工作区不匹配");
       }
+      await createSession(SessionManager.open(target, sessionRoot, workspace));
       break;
+    }
     case "session.skill": {
       const prompt = runtimeSkillPrompt(command.name, command.instructions);
       await handleCommand({ type: "session.prompt", text: prompt, attachments: command.attachments });
@@ -809,11 +851,14 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       if (!session.model) throw new Error("请先配置并选择模型，再发送消息");
       const prompt = await preparePromptPayload(command.text, command.attachments);
       if (prompt.images.length && !hasImageInput(session.model)) throw new Error("当前模型不支持图片输入，请先切换多模态模型");
+      const promptSession = session;
+      const promptGeneration = sessionGeneration;
       busy = true;
       status = "Pi 正在工作";
       beginTurn();
       emitState();
-      void session.prompt(prompt.text, prompt.images.length ? { images: prompt.images } : undefined).catch((error) => {
+      void promptSession.prompt(prompt.text, prompt.images.length ? { images: prompt.images } : undefined).catch((error) => {
+        if (promptGeneration !== sessionGeneration || session !== promptSession) return;
         completeTurn();
         busy = false;
         status = "请求失败";
@@ -828,12 +873,14 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       const regeneratedText = command.skillName ? runtimeSkillPrompt(command.skillName, command.text) : command.text.trim();
       const regeneratedPrompt = await preparePromptPayload(regeneratedText, command.attachments);
       if (regeneratedPrompt.images.length && !hasImageInput(session.model)) throw new Error("当前模型不支持图片输入，请先切换多模态模型");
+      const regenerateSession = session;
+      const regenerateGeneration = sessionGeneration;
       busy = true;
       status = "Pi 正在重新生成";
       beginTurn();
       emitState();
       void (async () => {
-        const branch = session!.sessionManager.getBranch();
+        const branch = regenerateSession.sessionManager.getBranch();
         const target = branch.filter((entry) => {
           if (entry.type !== "message" || entry.message.role !== "user") return false;
           if (command.timestamp !== undefined) return entry.message.timestamp === command.timestamp;
@@ -843,9 +890,10 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
           return skillPrompt?.name === command.skillName && skillPrompt.instructions === command.text.trim();
         }).at(-1);
         if (!target || target.type !== "message") throw new Error("找不到要重新生成的用户消息");
-        await session!.navigateTree(target.id);
-        await session!.prompt(regeneratedPrompt.text, regeneratedPrompt.images.length ? { images: regeneratedPrompt.images } : undefined);
+        await regenerateSession.navigateTree(target.id);
+        await regenerateSession.prompt(regeneratedPrompt.text, regeneratedPrompt.images.length ? { images: regeneratedPrompt.images } : undefined);
       })().catch((error) => {
+        if (regenerateGeneration !== sessionGeneration || session !== regenerateSession) return;
         completeTurn();
         busy = false;
         status = "请求失败";
@@ -859,11 +907,14 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     case "session.compact":
       if (!session) throw new Error("请先打开工作区，再压缩上下文");
       if (!session.model) throw new Error("请先配置并选择模型，再压缩上下文");
+      const compactSession = session;
+      const compactGeneration = sessionGeneration;
       busy = true;
       status = "Pi 正在压缩上下文";
       beginTurn();
       emitState();
-      void session.compact(command.instructions).catch((error) => {
+      void compactSession.compact(command.instructions).catch((error) => {
+        if (compactGeneration !== sessionGeneration || session !== compactSession) return;
         completeTurn();
         busy = false;
         status = "压缩失败";
@@ -1053,8 +1104,11 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
   }
 }
 
+let commandQueue = Promise.resolve();
 parentPort.on("message", (event: { data: RuntimeCommand }) => {
-  void handleCommand(event.data).catch((error) => {
-    post({ type: "error", message: errorText(error) });
-  });
+  commandQueue = commandQueue
+    .then(() => handleCommand(event.data))
+    .catch((error) => {
+      post({ type: "error", message: errorText(error) });
+    });
 });

@@ -71,6 +71,7 @@ import { RichContent } from "./components/RichContent";
 import { ExtensionUiDialog, PermissionDialog } from "./components/RuntimeDialogs";
 import { compactPath, formatDuration, type Artifact } from "./lib/content";
 import { groupAssistantMessages, splitAssistantToolLayout } from "./lib/chat-layout";
+import { groupSessionsByWorkspace } from "./lib/session-groups";
 import { CSS_URL_PATTERN, createThemeAssetUrls, isExternalThemeReference, normalizeThemeAssetReference, resolveThemeAssets } from "./lib/theme-assets";
 import { THEME_PRESETS, scopeCustomThemeCss, scopeCustomThemeCssForPreview, themeOverrideCss, themePresetColor, themePresetCss, themePreviewCss, themeWallpaperOpacity } from "./lib/theme-presets";
 import { shareElementAsImage } from "./lib/share-image";
@@ -213,6 +214,23 @@ function useElapsedNow(active: boolean): number {
     return () => window.clearInterval(timer);
   }, [active]);
   return now;
+}
+
+function readStoredBoolean(key: string, fallback: boolean): boolean {
+  try {
+    const value = window.localStorage.getItem(key);
+    return value === null ? fallback : value === "true";
+  } catch {
+    return fallback;
+  }
+}
+
+function readStoredPanelTab(): "activity" | "changes" {
+  try {
+    return window.localStorage.getItem("pidesktop.right-panel-tab") === "changes" ? "changes" : "activity";
+  } catch {
+    return "activity";
+  }
 }
 
 function TimingMeta({ timing, now }: { timing: TurnTiming; now: number }): ReactNode {
@@ -992,10 +1010,11 @@ export function App(): ReactNode {
   const [messageActionError, setMessageActionError] = useState<string>();
   // Tool details are already available inline in the conversation. Keep the
   // live activity panel opt-in so the first screen stays focused on the chat.
-  const [rightPanel, setRightPanel] = useState(false);
+  const [rightPanel, setRightPanel] = useState(() => readStoredBoolean("pidesktop.right-panel-open", false));
   const [sidebarTab, setSidebarTab] = useState<"agents" | "topics">("topics");
   const [sidebarQuery, setSidebarQuery] = useState("");
-  const [panelTab, setPanelTab] = useState<"activity" | "changes">("activity");
+  const [panelTab, setPanelTab] = useState<"activity" | "changes">(readStoredPanelTab);
+  const [collapsedWorkspaceGroups, setCollapsedWorkspaceGroups] = useState<Record<string, boolean>>({});
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [accessModeMenuOpen, setAccessModeMenuOpen] = useState(false);
   const [composerMenu, setComposerMenu] = useState<"model" | "thinking">();
@@ -1013,7 +1032,7 @@ export function App(): ReactNode {
   const availableModels = useMemo(() => models.filter((model) => model.configured), [models]);
   const selectedModelOption = availableModels.find((model) => `${model.provider}/${model.id}` === selectedModel);
   const visibleAgents = useMemo(() => settings.agents.filter((agent) => !agent.archived && `${agent.name} ${agent.description}`.toLowerCase().includes(sidebarQuery.trim().toLowerCase())), [settings.agents, sidebarQuery]);
-  const visibleSessions = useMemo(() => snapshot.sessions.filter((item) => item.title.toLowerCase().includes(sidebarQuery.trim().toLowerCase())), [snapshot.sessions, sidebarQuery]);
+  const sessionGroups = useMemo(() => groupSessionsByWorkspace(snapshot.sessions, sidebarQuery), [snapshot.sessions, sidebarQuery]);
   const displayMessages = useMemo(() => groupAssistantMessages(snapshot.messages), [snapshot.messages]);
   const latestAssistantIndex = useMemo(() => [...displayMessages].reverse().findIndex((message) => message.role === "assistant"), [displayMessages]);
   const latestAssistantMessageIndex = latestAssistantIndex < 0 ? -1 : displayMessages.length - 1 - latestAssistantIndex;
@@ -1097,6 +1116,14 @@ export function App(): ReactNode {
   }, [snapshot.busy]);
 
   useEffect(() => {
+    try { window.localStorage.setItem("pidesktop.right-panel-open", String(rightPanel)); } catch { /* storage may be unavailable in browser demo */ }
+  }, [rightPanel]);
+
+  useEffect(() => {
+    try { window.localStorage.setItem("pidesktop.right-panel-tab", panelTab); } catch { /* storage may be unavailable in browser demo */ }
+  }, [panelTab]);
+
+  useEffect(() => {
     setEditingMessageTimestamp(undefined);
     setSelectedSkill(undefined);
   }, [snapshot.sessionId]);
@@ -1164,17 +1191,35 @@ export function App(): ReactNode {
     if (path) await window.piDesktop.send({ type: "workspace.open", path });
   }
 
+  async function createNewSession(): Promise<void> {
+    try {
+      await window.piDesktop.send({ type: "session.new" });
+      setInput("");
+      setAttachments([]);
+      setSelectedSkill(undefined);
+      setEditingMessageTimestamp(undefined);
+    } catch (error) {
+      setMessageActionError(error instanceof Error ? error.message : "新建话题失败");
+    }
+  }
+
+  async function openSession(path: string, sessionWorkspace: string): Promise<void> {
+    try {
+      await window.piDesktop.send({ type: "session.open", path, workspace: sessionWorkspace });
+    } catch (error) {
+      setMessageActionError(error instanceof Error ? error.message : "打开话题失败");
+    }
+  }
+
   async function submit(event: FormEvent): Promise<void> {
     event.preventDefault();
     const text = input.trim();
-    if ((!text && attachments.length === 0 && !selectedSkill) || snapshot.busy) return;
+    const isNewSessionCommand = !selectedSkill && text === "/new";
+    if ((!text && attachments.length === 0 && !selectedSkill) || (snapshot.busy && !isNewSessionCommand)) return;
     // 客户端执行的固定指令：不透传给 Pi（会话层会当噪声），直接发协议命令
     if (!selectedSkill && text === "/new") {
       try {
-        await window.piDesktop.send({ type: "session.new" });
-        setInput("");
-        setAttachments([]);
-        setEditingMessageTimestamp(undefined);
+        await createNewSession();
       } catch (error) {
         setMessageActionError(error instanceof Error ? error.message : "新建话题失败");
       }
@@ -1334,7 +1379,7 @@ export function App(): ReactNode {
       setTimeout(() => textareaRef.current?.focus(), 0);
       return;
     }
-    if (snapshot.busy) return;
+    if (snapshot.busy && command.command.type !== "session.new") return;
     setSelectedSkill(undefined);
     setInput("");
     setAttachments([]);
@@ -1417,9 +1462,29 @@ export function App(): ReactNode {
         {sidebarTab === "agents" ? <nav className="agent-list" aria-label="助手列表">
           {visibleAgents.map((agent) => <button className={agent.id === snapshot.agentId ? "active" : ""} type="button" key={agent.id} disabled={snapshot.busy} onClick={() => { useDesktopStore.setState({ settings: { ...settings, currentAgentId: agent.id } }); void window.piDesktop.send({ type: "agent.select", agentId: agent.id }); }}><span className="agent-list-icon"><Bot size={15} /></span><span><strong>{agent.name}</strong><small>{agent.description || "未填写说明"}</small></span></button>)}
         </nav> : <nav className="session-list" aria-label="话题列表">
-          {visibleSessions.map((item) => <button className={item.id === snapshot.sessionId ? "active" : ""} type="button" key={item.id} onClick={() => void window.piDesktop.send({ type: "session.open", path: item.path })}><MessageCircle size={14} /><span><strong>{item.title}</strong><small>{new Date(item.modifiedAt).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}</small></span></button>)}
+          {sessionGroups.length === 0 ? <div className="session-list-empty">暂无匹配话题</div> : sessionGroups.map((group) => {
+            const collapsed = collapsedWorkspaceGroups[group.key] === true;
+            return (
+              <section className="session-workspace-group" key={group.key}>
+                <button
+                  className="session-workspace-heading"
+                  type="button"
+                  aria-expanded={!collapsed}
+                  onClick={() => setCollapsedWorkspaceGroups((current) => ({ ...current, [group.key]: !collapsed }))}
+                >
+                  <Folder size={15} />
+                  <span><strong>{group.workspace.split(/[\\/]/u).at(-1) || group.workspace}</strong><small>{compactPath(group.workspace)}</small></span>
+                  <em>{group.sessions.length}</em>
+                  <ChevronDown size={14} className={collapsed ? "collapsed" : ""} />
+                </button>
+                {!collapsed && <div className="session-workspace-items">
+                  {group.sessions.map((item) => <button className={item.id === snapshot.sessionId ? "active" : ""} type="button" key={item.path} onClick={() => void openSession(item.path, item.workspace)}><MessageCircle size={14} /><span><strong>{item.title}</strong><small>{new Date(item.modifiedAt).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}</small></span></button>)}
+                </div>}
+              </section>
+            );
+          })}
         </nav>}
-        <button className="new-session-button" type="button" disabled={!snapshot.workspace || snapshot.busy} onClick={() => void window.piDesktop.send({ type: "session.new" })}><MessageSquarePlus size={16} />新建话题</button>
+        <button className="new-session-button" type="button" disabled={!snapshot.workspace} onClick={() => void createNewSession()}><MessageSquarePlus size={16} />新建话题</button>
         <div className="sidebar-footer">
           <button type="button" onClick={() => setSettingsOpen(true)}><Settings size={16} />设置</button>
           <span className={`runtime-indicator${snapshot.busy ? " busy" : ""}`}><i />{snapshot.status}</span>
@@ -1460,7 +1525,7 @@ export function App(): ReactNode {
                       aria-selected={index === activeSlashIndex}
                       key={`${cmd.kind}:${cmd.trigger}`}
                       className={`slash-menu-item${index === activeSlashIndex ? " active" : ""}`}
-                      disabled={cmd.kind === "command" && snapshot.busy}
+                      disabled={cmd.kind === "command" && snapshot.busy && cmd.command.type !== "session.new"}
                       onMouseEnter={() => setSlashIndex(index)}
                       onClick={() => applySlashCommand(cmd)}
                     >
