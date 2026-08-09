@@ -33,7 +33,6 @@ import {
   ShieldAlert,
   Settings,
   ShieldCheck,
-  TerminalSquare,
   Trash2,
   Wrench,
   X
@@ -49,7 +48,6 @@ import type {
   CustomProviderModel,
   ModelOption,
   McpServerStatus,
-  PermissionDecision,
   ProviderOption,
   CustomThemeDefinition,
   ThinkingLevel,
@@ -68,7 +66,9 @@ import type {
 import { thinkingLevelLabels, toolLabel } from "../../shared/locale";
 import { ArtifactPreview } from "./components/ArtifactPreview";
 import { DiffView } from "./components/DiffView";
+import { ExtensionResourceList } from "./components/ExtensionResourceList";
 import { RichContent } from "./components/RichContent";
+import { ExtensionUiDialog, PermissionDialog } from "./components/RuntimeDialogs";
 import { compactPath, formatDuration, type Artifact } from "./lib/content";
 import { groupAssistantMessages, splitAssistantToolLayout } from "./lib/chat-layout";
 import { CSS_URL_PATTERN, createThemeAssetUrls, isExternalThemeReference, normalizeThemeAssetReference, resolveThemeAssets } from "./lib/theme-assets";
@@ -618,7 +618,7 @@ function ResourceSettings({ resources }: ResourceSettingsProps): ReactNode {
 
   return (
     <div className="resource-settings">
-      <div className="resource-settings-header"><div><h3><Puzzle size={16} />技能与 MCP</h3><p>Skill 会跟随 Pi 资源加载，MCP Server 使用标准配置文件。</p></div><button className="secondary-button" type="button" disabled={busy} onClick={() => void run({ type: "resources.reload" })}><RefreshCw size={13} className={busy ? "spinning" : undefined} />重载资源</button></div>
+      <div className="resource-settings-header"><div><h3><Puzzle size={16} />技能与工具</h3><p>管理 Skill、MCP Server 和第三方扩展。</p></div><button className="secondary-button" type="button" disabled={busy} onClick={() => void run({ type: "resources.reload" })}><RefreshCw size={13} className={busy ? "spinning" : undefined} />重载资源</button></div>
       {!resources.mcpAdapterLoaded && <div className="resource-notice"><PlugZap size={15} /><span>MCP 适配器尚未加载。请先重载资源，或安装 `pi-mcp-adapter` Package。</span></div>}
       {localError && <p className="form-error resource-error">{localError}</p>}
       <section className="resource-section">
@@ -648,12 +648,12 @@ function ResourceSettings({ resources }: ResourceSettingsProps): ReactNode {
         {resources.mcpServers.length === 0 ? <p className="resource-empty">未发现 MCP Server。点击“添加”，或将已有配置放入 `.mcp.json`。</p> : <div className="resource-list">{resources.mcpServers.map((server) => <div className="resource-item mcp-resource-item" key={server.name}><div className={`resource-item-icon mcp-status-icon ${server.status}`}><Server size={14} /></div><div className="resource-item-copy"><strong>{server.name}</strong><small>{mcpStatusLabels[server.status]} · {server.toolCount} 个工具{server.resourceCount === undefined ? "" : ` · ${server.resourceCount} 个资源`}</small>{server.failedAgoSeconds !== undefined && <em>{server.failedAgoSeconds} 秒前失败</em>}</div><label className="resource-toggle"><input type="checkbox" checked={!server.disabled} disabled={busy} onChange={(event) => void run({ type: "mcp.server.toggle", name: server.name, enabled: event.target.checked })} /><span>启用</span></label></div>)}</div>}
       </section>
       <section className="resource-section">
-        <div className="resource-section-heading"><span><PackageOpen size={14} />安装 Skill / Pi Package</span><small>Skill 随 Package 加载</small></div>
-        <p className="resource-form-help resource-package-help">输入 npm 或 Git 来源。Pi 会安装 Package，重载后自动发现其中的 Skill；第三方 Extension 不会被本应用自动执行。</p>
+        <div className="resource-section-heading"><span><PackageOpen size={14} />安装 Skill / 扩展包</span><small>支持 npm 和 Git</small></div>
+        <p className="resource-form-help resource-package-help">安装后，Skill 会自动出现；扩展工具需要在下方单独启用。</p>
         <form className="resource-package-form" onSubmit={(event) => void installPackage(event)}><input value={packageSource} placeholder="npm:package-name 或 git:..." onChange={(event) => setPackageSource(event.target.value)} /><button className="primary-button" type="submit" disabled={busy || !packageSource.trim()}><PackageOpen size={13} />安装</button></form>
         <div className="resource-list resource-package-list">{resources.packages.map((item) => <div className="resource-item" key={`${item.scope}:${item.source}`}><div className="resource-item-icon"><PackageOpen size={14} /></div><div className="resource-item-copy"><strong>{item.source}</strong><small>{resourceScopeLabels[item.scope]} · {item.installed ? "已安装" : "未安装"}</small></div>{item.removable && <button className="icon-button resource-remove" type="button" title={`删除 ${item.source}`} aria-label={`删除 ${item.source}`} disabled={busy} onClick={() => void run({ type: "resources.package.remove", source: item.source, scope: item.scope === "project" ? "project" : "global" })}><Trash2 size={14} /></button>}</div>)}</div>
       </section>
-      {resources.extensions.length > 0 && <section className="resource-section"><div className="resource-section-heading"><span><PlugZap size={14} />Extension</span><small>{resources.extensions.length} 个已加载</small></div><div className="resource-list">{resources.extensions.map((extension) => <div className="resource-item" key={`${extension.source}:${extension.name}`}><div className={`resource-item-icon ${extension.loaded ? "" : "resource-item-error"}`}><PlugZap size={14} /></div><div className="resource-item-copy"><strong>{extension.name}</strong><small>{extension.loaded ? `${resourceScopeLabels[extension.scope]} · ${extension.source}` : extension.error ?? "加载失败"}</small></div></div>)}</div></section>}
+      <ExtensionResourceList extensions={resources.extensions} scopeLabels={resourceScopeLabels} onApprove={(id) => void run({ type: "resources.extension.approve", id })} />
       {resources.diagnostics.length > 0 && <div className="resource-diagnostics"><strong>资源诊断</strong>{resources.diagnostics.map((diagnostic) => <p key={diagnostic}>{diagnostic}</p>)}</div>}
     </div>
   );
@@ -929,7 +929,7 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
     <div className="modal-backdrop" role="presentation" onMouseDown={closeSettings}>
       <section className="settings-dialog settings-center" onMouseDown={(event) => event.stopPropagation()}>
         <header><div><Settings size={19} /><div><h2>ChatAnyTime 设置</h2><p>模型服务和 Agent 角色配置保存在本机。</p></div></div><button className="icon-button" type="button" title="关闭设置" aria-label="关闭设置" onClick={closeSettings}><X size={18} /></button></header>
-        <div className="settings-body"><nav className="settings-tabs"><button type="button" className={tab === "general" ? "active" : ""} onClick={() => setTab("general")}>通用</button><button type="button" className={tab === "models" ? "active" : ""} onClick={() => setTab("models")}>模型服务</button><button type="button" className={tab === "agents" ? "active" : ""} onClick={() => setTab("agents")}>Agent 角色</button><button type="button" className={tab === "resources" ? "active" : ""} onClick={() => setTab("resources")}>技能与 MCP</button><button type="button" className={tab === "appearance" ? "active" : ""} onClick={() => setTab("appearance")}>外观</button></nav><div className="settings-content">{tab === "general" ? <form onSubmit={(event) => { event.preventDefault(); const nextSettings = structuredClone(settings); void window.piDesktop.send({ type: "settings.save", settings: { model: nextSettings.model, thinkingLevel: nextSettings.thinkingLevel, accessMode: nextSettings.accessMode, appearance: nextSettings.appearance } }); markSettingsSaved(nextSettings); onClose(); }}>
+        <div className="settings-body"><nav className="settings-tabs"><button type="button" className={tab === "general" ? "active" : ""} onClick={() => setTab("general")}>通用</button><button type="button" className={tab === "models" ? "active" : ""} onClick={() => setTab("models")}>模型服务</button><button type="button" className={tab === "agents" ? "active" : ""} onClick={() => setTab("agents")}>Agent 角色</button><button type="button" className={tab === "resources" ? "active" : ""} onClick={() => setTab("resources")}>技能与工具</button><button type="button" className={tab === "appearance" ? "active" : ""} onClick={() => setTab("appearance")}>外观</button></nav><div className="settings-content">{tab === "general" ? <form onSubmit={(event) => { event.preventDefault(); const nextSettings = structuredClone(settings); void window.piDesktop.send({ type: "settings.save", settings: { model: nextSettings.model, thinkingLevel: nextSettings.thinkingLevel, accessMode: nextSettings.accessMode, appearance: nextSettings.appearance } }); markSettingsSaved(nextSettings); onClose(); }}>
           <label>全局默认模型<select value={settings.model ? `${settings.model.provider}/${settings.model.id}` : ""} onChange={(event) => { const value = event.target.value; const slash = value.indexOf("/"); useDesktopStore.setState({ settings: { ...settings, model: slash > 0 ? { provider: value.slice(0, slash), id: value.slice(slash + 1) } : undefined } }); }}>{<option value="">请选择默认模型</option>}{models.filter((model) => model.configured).map((model) => <option key={`${model.provider}/${model.id}`} value={`${model.provider}/${model.id}`}>{model.name}</option>)}</select></label>
           <label>默认思考等级<select value={settings.thinkingLevel} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, thinkingLevel: event.target.value as ThinkingLevel } })}>{thinkingLevels.map((level) => <option key={level} value={level}>{thinkingLevelLabels[level]}</option>)}</select></label>
           <label>访问模式<select value={settings.accessMode} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, accessMode: event.target.value as AccessMode } })}>{accessModeOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
@@ -979,28 +979,10 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
   );
 }
 
-function PermissionDialog({ request }: { request: NonNullable<ReturnType<typeof useDesktopStore.getState>["permission"]> }): ReactNode {
-  async function resolve(decision: PermissionDecision): Promise<void> {
-    await window.piDesktop.send({ type: "permission.resolve", id: request.id, decision });
-    useDesktopStore.setState({ permission: undefined });
-  }
-  return (
-    <div className="modal-backdrop permission-backdrop">
-      <div className="permission-dialog" role="alertdialog" aria-modal="true" aria-label="工具权限确认">
-        <header><div className={`risk-icon ${request.risk}`}><TerminalSquare size={20} /></div><div><h2>允许{toolLabel(request.toolName)}？</h2><p>{request.summary}</p></div></header>
-        <pre>{JSON.stringify(request.args, null, 2)}</pre>
-        <footer>
-          <button className="danger-button" type="button" onClick={() => void resolve("deny")}>拒绝</button>
-          <button className="secondary-button" type="button" onClick={() => void resolve("allow-once")}>仅允许一次</button>
-          <button className="primary-button" type="button" onClick={() => void resolve("allow-session")}>本次会话允许</button>
-        </footer>
-      </div>
-    </div>
-  );
-}
-
 export function App(): ReactNode {
-  const { ready, snapshot, models, providers, resources, customProvider, customProviderKeyConfigured, customModels, customModelFetchStatus, customModelFetchError, permission, error, initialize, clearError } = useDesktopStore();
+  const { ready, snapshot, models, providers, resources, customProvider, customProviderKeyConfigured, customModels, customModelFetchStatus, customModelFetchError, permissions, extensionUiDialogs, extensionNotice, error, initialize, clearError, clearExtensionNotice } = useDesktopStore();
+  const permission = permissions[0];
+  const extensionUiDialog = extensionUiDialogs[0];
   const settings = useDesktopStore((state) => state.settings);
   const themeAssetUrls = useThemeAssetUrls(themeAssetsForAppearance(settings.appearance));
   const [input, setInput] = useState("");
@@ -1546,8 +1528,10 @@ export function App(): ReactNode {
 
       {settingsOpen && <SettingsDialog settings={settings} models={models} providers={providers} customProvider={customProvider} customProviderKeyConfigured={customProviderKeyConfigured} customModels={customModels} customModelFetchStatus={customModelFetchStatus} customModelFetchError={customModelFetchError} resources={resources} onClose={() => setSettingsOpen(false)} />}
       {permission && <PermissionDialog request={permission} />}
+      {!permission && extensionUiDialog && <ExtensionUiDialog key={extensionUiDialog.id} request={extensionUiDialog} />}
       {artifact && <ArtifactPreview artifact={artifact} onClose={() => setArtifact(undefined)} />}
       {error && <div className="error-toast"><AlertCircle size={18} /><span>{error}</span><button className="icon-button" type="button" title="关闭提示" aria-label="关闭提示" onClick={clearError}><X size={16} /></button></div>}
+      {extensionNotice && <div className={`error-toast extension-notice ${extensionNotice.level}`}><PlugZap size={18} /><span>{extensionNotice.message}</span><button className="icon-button" type="button" title="关闭扩展提示" aria-label="关闭扩展提示" onClick={clearExtensionNotice}><X size={16} /></button></div>}
       {messageActionError && <div className="error-toast"><AlertCircle size={18} /><span>{messageActionError}</span><button className="icon-button" type="button" title="关闭提示" aria-label="关闭提示" onClick={() => setMessageActionError(undefined)}><X size={16} /></button></div>}
     </div>
   );

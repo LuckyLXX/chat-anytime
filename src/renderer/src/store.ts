@@ -1,14 +1,15 @@
 import { create } from "zustand";
 import type {
-  DesktopSettings,
-  ProviderSettings,
   CustomProviderModel,
+  DesktopSettings,
+  ExtensionUiDialogRequest,
   ModelOption,
   PermissionRequest,
   ProviderOption,
+  ProviderSettings,
+  ResourceCatalog,
   RuntimeMessage,
-  RuntimeSnapshot,
-  ResourceCatalog
+  RuntimeSnapshot
 } from "../../shared/protocol";
 
 interface DesktopState {
@@ -23,11 +24,14 @@ interface DesktopState {
   customModels: CustomProviderModel[];
   customModelFetchStatus: "idle" | "loading" | "success" | "error";
   customModelFetchError?: string;
-  permission?: PermissionRequest;
+  permissions: PermissionRequest[];
+  extensionUiDialogs: ExtensionUiDialogRequest[];
+  extensionNotice?: { message: string; level: "info" | "warning" | "error" };
   error?: string;
   initialize(): Promise<() => void>;
   handleRuntimeMessage(message: RuntimeMessage): void;
   clearError(): void;
+  clearExtensionNotice(): void;
 }
 
 const emptySnapshot: RuntimeSnapshot = {
@@ -49,6 +53,8 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   models: [],
   providers: [],
   resources: emptyResources,
+  permissions: [],
+  extensionUiDialogs: [],
   settings: emptySettings,
   customProviderKeyConfigured: false,
   customModels: [],
@@ -123,7 +129,23 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
         set({ customModelFetchStatus: "error", customModelFetchError: message.message });
         break;
       case "permission":
-        set({ permission: message.request });
+        set((state) => state.permissions.some((request) => request.id === message.request.id)
+          ? state
+          : { permissions: [...state.permissions, message.request] });
+        break;
+      case "permission.dismiss":
+        set((state) => ({ permissions: state.permissions.filter((request) => request.id !== message.id) }));
+        break;
+      case "extension-ui.request":
+        set((state) => state.extensionUiDialogs.some((request) => request.id === message.request.id)
+          ? state
+          : { extensionUiDialogs: [...state.extensionUiDialogs, message.request] });
+        break;
+      case "extension-ui.dismiss":
+        set((state) => ({ extensionUiDialogs: state.extensionUiDialogs.filter((request) => request.id !== message.id) }));
+        break;
+      case "extension-ui.notify":
+        set({ extensionNotice: { message: message.message, level: message.level } });
         break;
       case "error":
         set({ error: message.message });
@@ -135,5 +157,8 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   },
   clearError() {
     set({ error: undefined });
+  },
+  clearExtensionNotice() {
+    set({ extensionNotice: undefined });
   }
 }));

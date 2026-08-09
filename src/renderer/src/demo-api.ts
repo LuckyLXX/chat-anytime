@@ -144,7 +144,21 @@ const demoResources: ResourceCatalog = {
     { name: "code-review", description: "审查代码变更并整理风险与建议。", source: "用户资源", scope: "global", disableModelInvocation: false },
     { name: "project-notes", description: "整理项目文档和工作记录。", source: "当前项目", scope: "project", disableModelInvocation: false }
   ],
-  extensions: [{ name: "pi-mcp-adapter", source: "PiDesktop 内置", scope: "bundled", loaded: true }],
+  extensions: [{
+    id: "bundled:bundled:PiDesktop 内置:pi-mcp-adapter",
+    name: "pi-mcp-adapter",
+    source: "PiDesktop 内置",
+    scope: "bundled",
+    origin: "bundled",
+    trust: "trusted",
+    executionMode: "native",
+    enabled: true,
+    modelVisible: true,
+    compatibility: "full",
+    tools: ["mcp"],
+    commands: [],
+    loaded: true
+  }],
   packages: [{ source: "pi-mcp-adapter", scope: "bundled", installed: true, removable: false }],
   mcpServers: [
     { name: "docs", status: "connected", toolCount: 8, resourceCount: 2, disabled: false },

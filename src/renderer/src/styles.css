@@ -465,7 +465,7 @@ select option:checked { color: var(--on-accent); background-color: var(--accent)
 .mcp-form-grid input, .mcp-form-grid select, .mcp-form-grid textarea { width: 100%; min-width: 0; margin: 0; }
 .mcp-form-grid textarea { min-height: 54px; resize: vertical; }
 .resource-form-help { margin: 0; color: var(--text-muted); font-size: 9px; line-height: 1.45; }
-.resource-package-help { margin: -2px 0 8px; }
+.resource-package-help, .resource-extension-help { margin: -2px 0 8px; }
 .mcp-form-actions { display: flex; justify-content: flex-end; gap: 7px; }
 .mcp-form-actions button { min-height: 30px; }
 .resource-package-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; margin-bottom: 7px; }
@@ -519,6 +519,7 @@ select option:checked { color: var(--on-accent); background-color: var(--accent)
 .settings-dialog .access-mode-hint { margin: -5px 18px 13px; color: var(--text-muted); font-size: 11px; line-height: 1.45; }
 .settings-dialog footer, .permission-dialog footer { display: flex; justify-content: flex-end; gap: 8px; padding: 13px 18px; border-top: 1px solid var(--border); background: var(--surface-footer); }
 .permission-dialog header { display: flex; justify-content: flex-start; }.permission-dialog > pre { max-height: 260px; margin: 15px 18px; overflow: auto; padding: 10px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface-detail); font-size: 10px; white-space: pre-wrap; }
+.extension-ui-dialog form .field { display: grid; gap: 6px; margin: 15px 18px; color: var(--text-muted); font-size: 11px; font-weight: 600; }.extension-ui-dialog input, .extension-ui-dialog textarea { width: 100%; padding: 9px 10px; border: 1px solid var(--border-strong); border-radius: 5px; outline: 0; color: var(--text); background: var(--surface-input); font: inherit; }.extension-ui-dialog textarea { resize: vertical; }.extension-ui-options { display: grid; gap: 8px; max-height: 280px; margin: 15px 18px; overflow: auto; }.extension-ui-options button { justify-content: flex-start; }
 .risk-icon { display: grid; place-items: center; width: 38px; height: 38px; flex: 0 0 auto; border-radius: 7px; color: var(--warning); background: var(--warning-soft); }.risk-icon.outside-workspace { color: var(--danger); background: var(--danger-soft); }
 .primary-button, .secondary-button, .danger-button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 34px; padding: 0 13px; border: 1px solid transparent; border-radius: 5px; font-size: 11px; font-weight: 650; cursor: pointer; }
 .primary-button { color: var(--on-accent); background: var(--accent); }.primary-button:hover { background: var(--accent-hover); }.primary-button:disabled { opacity: .5; }
@@ -530,6 +531,7 @@ select option:checked { color: var(--on-accent); background-color: var(--accent)
 .artifact-footer { display: flex; align-items: center; gap: 5px; padding: 0 12px; color: var(--text-muted); border-top: 1px solid var(--border); font-size: 9px; }
 .artifact-preview-control { min-height: 24px; margin-left: auto; padding: 0 8px; font-size: 10px; }
 .error-toast { position: fixed; z-index: 70; right: 18px; bottom: 18px; display: grid; grid-template-columns: 20px minmax(0, 1fr) 28px; gap: 8px; align-items: center; width: min(430px, calc(100vw - 36px)); padding: 10px 9px 10px 12px; color: var(--danger-text); border: 1px solid var(--danger-border); border-radius: 7px; background: var(--danger-soft); box-shadow: var(--shadow-md); font-size: 11px; }
+.error-toast.extension-notice.info { color: var(--text); border-color: var(--border-strong); background: var(--surface); }.error-toast.extension-notice.warning { color: var(--warning); border-color: var(--warning); background: var(--warning-soft); }
 .app-loading { display: grid; place-items: center; align-content: center; gap: 15px; width: 100%; height: 100%; }
 .spinning { animation: spin .9s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } } @keyframes blink { 50% { opacity: 0; } }

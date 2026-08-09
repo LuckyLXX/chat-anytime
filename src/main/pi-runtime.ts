@@ -1,6 +1,6 @@
 import { realpath, stat } from "node:fs/promises";
+import { isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { basename, isAbsolute, join, resolve, sep } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, UserMessage, ImageContent } from "@earendil-works/pi-ai";
 import {
@@ -17,37 +17,42 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type {
   AccessMode,
+  AgentProfile,
   ChatMessage,
-  DesktopSettings, AgentProfile, ProviderSettings, ProviderModelSettings, PromptAttachment,
+  DesktopSettings,
+  McpServerConfigDraft,
+  McpServerSummary,
   MessageBlock,
   ModelOption,
   PermissionDecision,
   PermissionRequest,
+  PromptAttachment,
+  ProviderModelSettings,
   ProviderOption,
+  ProviderSettings,
   RuntimeCommand,
   RuntimeMessage,
   RuntimeSnapshot,
-  ResourceCatalog,
-  ResourceScope,
-  SkillSummary,
-  ExtensionSummary,
-  PackageSummary,
-  McpServerSummary,
-  McpServerConfigDraft,
   SessionSummary,
   ThinkingLevel,
   ToolExecution,
   TurnTiming
 } from "../shared/protocol.js";
 import { toolLabel } from "../shared/locale.js";
-import { customProviderModelDefinition, inferCustomModelImageInput } from "./custom-provider.js";
-import { permissionAction, permissionScope, toolRisk } from "./permissions.js";
-import { agentWorkspaceSessionDir } from "./session-scope.js";
 import { workspaceRelativeAttachment } from "./attachments.js";
-import { mergeProviderModels } from "./settings.js";
-import { upsertMcpServerConfig, type McpServerConfigEntry } from "./mcp-config.js";
-import { buildSkillPrompt, parseSkillPrompt, type SkillPromptDisplay } from "./skill-prompt.js";
+import { customProviderModelDefinition, inferCustomModelImageInput } from "./custom-provider.js";
 import { buildDivModePrompt } from "./div-prompt.js";
+import { DesktopExtensionUiBridge } from "./extension-ui-bridge.js";
+import { upsertMcpServerConfig, type McpServerConfigEntry } from "./mcp-config.js";
+import { PermissionBroker } from "./permission-broker.js";
+import { configurePiCliShim, PiCliHostBroker, resolvePiCliShimPath } from "./pi-cli-compat.js";
+import { runPiCliSession } from "./pi-cli-session.js";
+import { toolRisk } from "./permissions.js";
+import { buildResourceCatalog } from "./resource-catalog.js";
+import { discoverExtensionCandidates, ExtensionPolicy } from "./extension-policy.js";
+import { agentWorkspaceSessionDir } from "./session-scope.js";
+import { mergeProviderModels } from "./settings.js";
+import { buildSkillPrompt, parseSkillPrompt, type SkillPromptDisplay } from "./skill-prompt.js";
 
 const parentPort = process.parentPort;
 if (!parentPort) throw new Error("Pi 运行时必须作为 Electron 工具进程启动");
@@ -69,17 +74,16 @@ let apiKeys: Record<string, string> = {};
 let currentAgent: AgentProfile | undefined;
 const customProviderId = "chatanytime-openai-compatible";
 const imageMimeTypes = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
-let permissionSequence = 0;
-const pendingPermissions = new Map<string, (decision: PermissionDecision) => void>();
-const allowedForSession = new Set<string>();
 const builtinToolNames = new Set(["read", "bash", "edit", "write", "grep", "find", "ls"]);
 const mcpStatusEvent = "pi-mcp-adapter/status/v1";
 let resourceLoader: DefaultResourceLoader | undefined;
 let packageManager: DefaultPackageManager | undefined;
+let extensionPolicy: ExtensionPolicy | undefined;
 let mcpStatusUnsubscribe: (() => void) | undefined;
 let mcpServers: McpServerSummary[] = [];
 let mcpAdapterLoaded = false;
 let resourceOperationBusy = false;
+const runtimeScriptPath = process.argv[1];
 
 // Streaming coalescer: high-frequency partial frames (message_update token
 // batches, tool partial output) are throttled to 50ms (20fps) to avoid IPC
@@ -118,40 +122,45 @@ function scheduleEmit(immediate: boolean): void {
   pendingFlushTimer = setTimeout(flushState, STREAM_FLUSH_INTERVAL_MS);
 }
 
-const emptyResourceCatalog: ResourceCatalog = {
-  skills: [],
-  extensions: [],
-  packages: [],
-  mcpServers: [],
-  mcpAdapterLoaded: false,
-  diagnostics: []
-};
-
 function post(message: RuntimeMessage): void {
   parentPort.postMessage(message);
 }
 
-function resourceScope(scope: string | undefined, origin: string | undefined): ResourceScope {
-  if (origin === "package") return "package";
-  if (scope === "user") return "global";
-  if (scope === "project") return "project";
-  if (scope === "temporary") return "temporary";
-  return "unknown";
-}
-
-function resourceSource(source: string | undefined, scope: ResourceScope, origin?: string): string {
-  if (origin === "package" && source && /^(?:npm:|git:|https?:|ssh:)/u.test(source)) return source;
-  if (source === "cli") return "临时资源";
-  if (source?.startsWith("<inline:")) return "PiDesktop 内置";
-  if (scope === "project") return "当前项目";
-  if (scope === "global") return "用户资源";
-  if (scope === "package") return "Pi Package";
-  return "PiDesktop";
-}
-
-function isSafePackageSource(source: string): boolean {
-  return /^(?:npm:|git:|https?:|ssh:)[^\r\n]+$/u.test(source);
-}
+const permissionBroker = new PermissionBroker(
+  (request) => post({ type: "permission", request }),
+  (id) => post({ type: "permission.dismiss", id })
+);
+const piCliHostBroker = new PiCliHostBroker(
+  () => ({
+    agentDir: getAgentDir(),
+    model: selectedModel,
+    thinkingLevel,
+    accessMode,
+    parentSessionId: session?.sessionId,
+    providers: settings?.providers ?? [],
+    apiKeys: { ...apiKeys }
+  }),
+  (request) => permissionBroker.request(request),
+  (request, emit, signal, reportError) => {
+    if (!modelRuntime || !workspace) throw new Error("Pi CLI 兼容宿主尚未完成会话初始化");
+    return runPiCliSession({
+      modelRuntime,
+      agentDir: getAgentDir(),
+      workspace,
+      model: selectedModel,
+      thinkingLevel,
+      accessMode,
+      parentSessionId: session?.sessionId,
+      requestPermission: (permission) => permissionBroker.request(permission),
+      resetPermissions: (sessionId) => permissionBroker.reset(sessionId)
+    }, request, emit, signal, reportError);
+  }
+);
+const extensionUiBridge = new DesktopExtensionUiBridge({
+  request: (request) => post({ type: "extension-ui.request", request }),
+  dismiss: (id) => post({ type: "extension-ui.dismiss", id }),
+  notify: (message, level) => post({ type: "extension-ui.notify", message, level })
+});
 
 function mcpConfigPath(scope: McpServerConfigDraft["scope"]): string {
   if (!workspace) throw new Error("请先打开工作区，再添加 MCP Server");
@@ -176,10 +185,6 @@ function mcpConfigEntry(server: McpServerConfigDraft): McpServerConfigEntry {
     ...(server.auth === "oauth" ? { auth: "oauth" as const } : {}),
     ...(server.auth === "bearer-env" ? { bearerTokenEnv: server.bearerTokenEnv!.trim() } : {})
   };
-}
-
-function sanitizeResourceError(message: string): string {
-  return message.replace(/[A-Za-z]:[\\/][^\r\n\s]*/gu, "[本地路径]").replace(/\\\\[^\r\n\s]+/gu, "[本地路径]");
 }
 
 function bundledMcpAdapterPath(): string {
@@ -222,54 +227,9 @@ function createMcpStatusExtension(): InlineExtension {
 }
 
 function emitResourceCatalog(): void {
-  if (!resourceLoader) {
-    post({ type: "resources", resources: structuredClone(emptyResourceCatalog) });
-    return;
-  }
-  const skillResult = resourceLoader.getSkills();
-  const extensionResult = resourceLoader.getExtensions();
-  const skills: SkillSummary[] = skillResult.skills.map((skill) => {
-    const scope = resourceScope(skill.sourceInfo.scope, skill.sourceInfo.origin);
-    return {
-      name: skill.name,
-      description: skill.description,
-      source: resourceSource(skill.sourceInfo.source, scope, skill.sourceInfo.origin),
-      scope,
-      disableModelInvocation: skill.disableModelInvocation
-    };
-  });
-  const extensions: ExtensionSummary[] = extensionResult.extensions.map((extension) => {
-    const scope = resourceScope(extension.sourceInfo.scope, extension.sourceInfo.origin);
-    const name = extension.path.startsWith("<inline:") ? extension.path.slice(8, -1) : basename(extension.path);
-    if (extension.resolvedPath.toLowerCase().includes("pi-mcp-adapter")) mcpAdapterLoaded = true;
-    return {
-      name,
-      source: resourceSource(extension.sourceInfo.source, scope, extension.sourceInfo.origin),
-      scope,
-      loaded: true
-    };
-  });
-  for (const error of extensionResult.errors) {
-    const name = error.path.startsWith("<inline:") ? error.path.slice(8, -1) : basename(error.path);
-    extensions.push({ name, source: "加载失败", scope: "unknown", loaded: false, error: sanitizeResourceError(error.error) });
-  }
-  const packages: PackageSummary[] = packageManager?.listConfiguredPackages().map((item) => ({
-    source: isSafePackageSource(item.source) ? item.source : `本地 Pi Package（${basename(item.source)}）`,
-    scope: item.scope === "project" ? "project" : "global",
-    installed: Boolean(item.installedPath),
-    removable: isSafePackageSource(item.source)
-  })) ?? [];
-  if (mcpAdapterLoaded && !packages.some((item) => item.source === "pi-mcp-adapter")) {
-    packages.unshift({ source: "pi-mcp-adapter", scope: "bundled", installed: true, removable: false });
-  }
-  const diagnostics = [
-    ...skillResult.diagnostics.map((item) => sanitizeResourceError(item.message)),
-    ...extensionResult.errors.map((item) => sanitizeResourceError(item.error))
-  ].filter((message, index, list) => Boolean(message) && list.indexOf(message) === index);
-  post({
-    type: "resources",
-    resources: { skills, extensions, packages, mcpServers: structuredClone(mcpServers), mcpAdapterLoaded, diagnostics }
-  });
+  const result = buildResourceCatalog({ resourceLoader, packageManager, mcpServers, mcpAdapterLoaded, extensionCandidates: extensionPolicy?.candidateSummaries(), trustedExtensionIds: extensionPolicy?.approvedIds() });
+  mcpAdapterLoaded = result.mcpAdapterLoaded;
+  post({ type: "resources", resources: result.resources });
 }
 
 function errorText(error: unknown): string {
@@ -427,23 +387,22 @@ function summarizeArgs(toolName: string, args: Record<string, unknown>): string 
   return toolLabel(toolName);
 }
 
-function requestPermission(toolName: string, args: Record<string, unknown>): Promise<PermissionDecision> {
-  const id = `permission-${++permissionSequence}`;
+function requestPermission(toolName: string, args: Record<string, unknown>, toolCallId: string): Promise<PermissionDecision> {
   const risk = toolRisk(workspace, toolName, args);
   if (!risk) return Promise.resolve("allow-once");
-  const action = permissionAction(accessMode, toolName, risk);
-  if (action === "allow") return Promise.resolve("allow-once");
-  if (action === "deny") return Promise.resolve("deny");
-  if (allowedForSession.has(permissionScope(toolName, risk))) return Promise.resolve("allow-session");
-  const request: PermissionRequest = {
-    id,
+  return permissionBroker.request({
+    accessMode,
     toolName,
     summary: summarizeArgs(toolName, args),
     args,
-    risk
-  };
-  post({ type: "permission", request });
-  return new Promise((resolveDecision) => pendingPermissions.set(id, resolveDecision));
+    risk,
+    principal: {
+      kind: "root-agent",
+      sessionId: session?.sessionId ?? "session-pending",
+      agentId: currentAgent?.id,
+      toolCallId
+    }
+  });
 }
 
 function createPermissionExtension(): InlineExtension {
@@ -455,9 +414,8 @@ function createPermissionExtension(): InlineExtension {
         const args = event.input as Record<string, unknown>;
         const risk = toolRisk(workspace, event.toolName, args);
         if (!risk) return undefined;
-        const decision = await requestPermission(event.toolName, args);
-        if (decision === "allow-session") allowedForSession.add(permissionScope(event.toolName, risk));
-        if (decision === "deny") return { block: true, reason: "用户已在 ChatAnyTime 中拒绝此操作" };
+        const decision = await requestPermission(event.toolName, args, event.toolCallId);
+        if (decision === "deny") return { block: true, reason: "用户已在 PiDesktop 中拒绝此操作" };
         return undefined;
       });
     }
@@ -677,22 +635,30 @@ async function createSession(sessionManager?: SessionManager): Promise<void> {
   unsubscribeSession?.();
   mcpStatusUnsubscribe?.();
   mcpStatusUnsubscribe = undefined;
+  permissionBroker.reset();
+  extensionUiBridge.reset();
   session?.dispose();
   mcpServers = [];
   mcpAdapterLoaded = false;
   executions = new Map();
   turnTiming = undefined;
-  allowedForSession.clear();
 
   const settingsManager = SettingsManager.create(workspace, getAgentDir());
+  await piCliHostBroker.start();
+  configurePiCliShim(resolvePiCliShimPath(runtimeScriptPath, import.meta.url), piCliHostBroker);
   packageManager = new DefaultPackageManager({ cwd: workspace, agentDir: getAgentDir(), settingsManager });
+  const bundledAdapterPath = bundledMcpAdapterPath();
+  const resolvedResources = await packageManager.resolve();
+  extensionPolicy ??= new ExtensionPolicy(getAgentDir());
+  extensionPolicy.setCandidates(discoverExtensionCandidates(resolvedResources.extensions, bundledAdapterPath));
+  const approvedExtensionPaths = extensionPolicy.approvedPaths();
   resourceLoader = new DefaultResourceLoader({
     cwd: workspace,
     agentDir: getAgentDir(),
     settingsManager,
     noExtensions: true,
     noThemes: true,
-    additionalExtensionPaths: [bundledMcpAdapterPath()],
+    additionalExtensionPaths: [bundledAdapterPath, ...approvedExtensionPaths],
     extensionFactories: [createPermissionExtension(), createMcpStatusExtension()],
     systemPromptOverride: (base) => [base, currentAgent?.systemPrompt, currentAgent?.divMode ? buildDivModePrompt() : undefined].filter(Boolean).join("\n\n")
   });
@@ -718,6 +684,7 @@ async function createSession(sessionManager?: SessionManager): Promise<void> {
   session = result.session;
   await session.bindExtensions({
     mode: "rpc",
+    uiContext: extensionUiBridge.context,
     onError: (error) => post({ type: "log", level: "warn", message: `Pi 扩展错误：${error.error}` })
   });
   const extensionTools = session.getAllTools().map((tool) => tool.name).filter((name) => !builtinToolNames.has(name));
@@ -740,6 +707,8 @@ async function initialize(command: Extract<RuntimeCommand, { type: "initialize" 
   thinkingLevel = settings.thinkingLevel ?? "medium";
   accessMode = settings.accessMode ?? "ask";
   selectedModel = settings.model;
+  extensionPolicy = new ExtensionPolicy(getAgentDir());
+  await extensionPolicy.load();
   modelRuntime = await ModelRuntime.create();
   for (const provider of settings.providers) {
     registerCustomProvider(provider);
@@ -1069,11 +1038,16 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       break;
     }
     case "permission.resolve": {
-      const resolveDecision = pendingPermissions.get(command.id);
-      if (resolveDecision) {
-        pendingPermissions.delete(command.id);
-        resolveDecision(command.decision);
-      }
+      permissionBroker.resolve(command.id, command.decision);
+      break;
+    }
+    case "resources.extension.approve": {
+      if (!extensionPolicy || !(await extensionPolicy.approve(command.id))) throw new Error("找不到待批准的扩展");
+      await runResourceOperation("正在加载扩展", reloadRuntimeResources);
+      break;
+    }
+    case "extension-ui.resolve": {
+      extensionUiBridge.resolve(command.response);
       break;
     }
   }

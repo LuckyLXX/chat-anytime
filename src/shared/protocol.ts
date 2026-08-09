@@ -183,6 +183,11 @@ export interface SessionSummary {
 
 export type ResourceScope = "global" | "project" | "package" | "bundled" | "temporary" | "unknown";
 
+export type ExtensionOrigin = "bundled" | "local" | "package" | "unknown";
+export type ExtensionTrust = "trusted" | "restricted" | "blocked" | "undecided";
+export type ExtensionExecutionMode = "native" | "restricted-host";
+export type ExtensionCompatibility = "full" | "partial" | "unsupported" | "unknown";
+
 export interface SkillSummary {
   name: string;
   description: string;
@@ -192,9 +197,18 @@ export interface SkillSummary {
 }
 
 export interface ExtensionSummary {
+  id: string;
   name: string;
   source: string;
   scope: ResourceScope;
+  origin: ExtensionOrigin;
+  trust: ExtensionTrust;
+  executionMode: ExtensionExecutionMode;
+  enabled: boolean;
+  modelVisible: boolean;
+  compatibility: ExtensionCompatibility;
+  tools: string[];
+  commands: string[];
   loaded: boolean;
   error?: string;
 }
@@ -254,15 +268,38 @@ export interface RuntimeSnapshot {
   sessions: SessionSummary[];
 }
 
+export interface ExecutionPrincipal {
+  kind: "root-agent" | "subagent" | "native-extension" | "restricted-extension";
+  sessionId: string;
+  parentSessionId?: string;
+  agentId?: string;
+  extensionId?: string;
+  toolCallId?: string;
+}
+
 export interface PermissionRequest {
   id: string;
   toolName: string;
   summary: string;
   args: unknown;
   risk: "write" | "command" | "outside-workspace";
+  principal: ExecutionPrincipal;
 }
 
 export type PermissionDecision = "allow-once" | "allow-session" | "deny";
+
+export type ExtensionUiDialogRequest =
+  | { id: string; method: "select"; title: string; options: string[]; timeout?: number }
+  | { id: string; method: "confirm"; title: string; message: string; timeout?: number }
+  | { id: string; method: "input"; title: string; placeholder?: string; timeout?: number }
+  | { id: string; method: "editor"; title: string; prefill?: string };
+
+export interface ExtensionUiResponse {
+  id: string;
+  cancelled?: boolean;
+  value?: string;
+  confirmed?: boolean;
+}
 
 export type RuntimeCommand =
   | { type: "initialize"; settings: DesktopSettings; apiKeys: Record<string, string> }
@@ -287,9 +324,11 @@ export type RuntimeCommand =
   | { type: "appearance.save"; appearance: AppearanceSettings }
   | { type: "resources.package.install"; source: string }
   | { type: "resources.package.remove"; source: string; scope?: "global" | "project" }
+  | { type: "resources.extension.approve"; id: string }
   | { type: "resources.reload" }
   | { type: "mcp.server.save"; server: McpServerConfigDraft }
   | { type: "mcp.server.toggle"; name: string; enabled: boolean }
+  | { type: "extension-ui.resolve"; response: ExtensionUiResponse }
   | { type: "permission.resolve"; id: string; decision: PermissionDecision };
 
 export type RuntimeMessage =
@@ -299,6 +338,10 @@ export type RuntimeMessage =
   | { type: "state"; snapshot: RuntimeSnapshot }
   | { type: "resources"; resources: ResourceCatalog }
   | { type: "permission"; request: PermissionRequest }
+  | { type: "permission.dismiss"; id: string }
+  | { type: "extension-ui.request"; request: ExtensionUiDialogRequest }
+  | { type: "extension-ui.dismiss"; id: string }
+  | { type: "extension-ui.notify"; message: string; level: "info" | "warning" | "error" }
   | { type: "error"; message: string }
   | { type: "log"; level: "info" | "warn"; message: string };
 

@@ -9,7 +9,8 @@ export default defineConfig({
       rollupOptions: {
         input: {
           index: resolve("src/main/index.ts"),
-          "pi-runtime": resolve("src/main/pi-runtime.ts")
+          "pi-runtime": resolve("src/main/pi-runtime.ts"),
+          "pi-cli-host": resolve("src/main/pi-cli-entry.ts")
         }
       }
     }
