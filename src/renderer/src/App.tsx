@@ -20,6 +20,7 @@ import {
   Puzzle,
   Search,
   Server,
+  Share2,
   Users,
   PanelRightClose,
   PanelRightOpen,
@@ -72,6 +73,7 @@ import { compactPath, formatDuration, type Artifact } from "./lib/content";
 import { groupAssistantMessages, splitAssistantToolLayout } from "./lib/chat-layout";
 import { CSS_URL_PATTERN, createThemeAssetUrls, isExternalThemeReference, normalizeThemeAssetReference, resolveThemeAssets } from "./lib/theme-assets";
 import { THEME_PRESETS, scopeCustomThemeCss, scopeCustomThemeCssForPreview, themeOverrideCss, themePresetColor, themePresetCss, themePreviewCss, themeWallpaperOpacity } from "./lib/theme-presets";
+import { shareElementAsImage } from "./lib/share-image";
 import { useDesktopStore } from "./store";
 
 const thinkingLevels: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
@@ -306,10 +308,28 @@ function ToolGroup({ calls, executions, streaming }: { calls: Array<Extract<Mess
 // Memoized so an unchanged message bubble (stable ChatMessage reference from
 // the store's uuid-based reuse) is skipped during high-frequency streaming
 // updates that only mutate other bubbles.
-const MessageView = memo(function MessageView({ message, executions, onOpenArtifact, onHtmlAction, onCopy, onEdit, onRegenerate, showThinking = true, busy = false, timing, now = Date.now() }: { message: ChatMessage; executions: ToolExecution[]; onOpenArtifact(artifact: Artifact): void; onHtmlAction(text: string): void; onCopy(message: ChatMessage): void; onEdit(message: ChatMessage): void; onRegenerate(message: ChatMessage): void; showThinking?: boolean; busy?: boolean; timing?: TurnTiming; now?: number }): ReactNode {
+const MessageView = memo(function MessageView({ message, executions, onOpenArtifact, onHtmlAction, onCopy, onEdit, onRegenerate, onShare, showThinking = true, busy = false, timing, now = Date.now() }: { message: ChatMessage; executions: ToolExecution[]; onOpenArtifact(artifact: Artifact): void; onHtmlAction(text: string): void; onCopy(message: ChatMessage): void; onEdit(message: ChatMessage): void; onRegenerate(message: ChatMessage): void; onShare(message: ChatMessage, target: HTMLElement): Promise<void>; showThinking?: boolean; busy?: boolean; timing?: TurnTiming; now?: number }): ReactNode {
   const text = messageText(message);
   const thinking = thinkingText(message);
   const toolLayout = splitAssistantToolLayout(message);
+  const shareTargetRef = useRef<HTMLDivElement | null>(null);
+  const [sharing, setSharing] = useState(false);
+  const [shared, setShared] = useState(false);
+  const hasShareableContent = Boolean(text || (toolLayout && (blockText(toolLayout.leading) || blockText(toolLayout.trailing))));
+
+  async function share(): Promise<void> {
+    const target = shareTargetRef.current;
+    if (!target || sharing) return;
+    setSharing(true);
+    setShared(false);
+    try {
+      await onShare(message, target);
+      setShared(true);
+      window.setTimeout(() => setShared(false), 1500);
+    } finally {
+      setSharing(false);
+    }
+  }
 
   if (message.role === "user") {
     const images = message.blocks.filter((block): block is Extract<MessageBlock, { type: "image" }> => block.type === "image");
@@ -325,22 +345,24 @@ const MessageView = memo(function MessageView({ message, executions, onOpenArtif
     <article className="message message-assistant">
       <div className="message-avatar pi-avatar"><Bot size={17} /></div>
       <div className="message-body message-bubble">
-        {thinking && showThinking && (
-          <details className="thinking-block" open={message.streaming}>
-            <summary><LoaderCircle size={14} className={message.streaming ? "spinning" : ""} /> 思考过程</summary>
-            <p>{thinking}</p>
-          </details>
-        )}
-        {toolLayout ? (
-          <>
-            {blockText(toolLayout.leading) && <RichContent streaming={false} artifactPrefix={`${message.id}-leading`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction}>{blockText(toolLayout.leading)}</RichContent>}
-            <ToolGroup calls={toolLayout.process} executions={executions} streaming={message.streaming} />
-            {blockText(toolLayout.trailing) && <RichContent streaming={message.streaming} artifactPrefix={`${message.id}-trailing`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction}>{blockText(toolLayout.trailing)}</RichContent>}
-          </>
-        ) : text && <RichContent streaming={message.streaming} artifactPrefix={message.id} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction}>{text}</RichContent>}
-        {message.error && <p className="inline-error"><AlertCircle size={15} />{message.error}</p>}
-        {timing && <TimingMeta timing={timing} now={now} />}
-        {!message.streaming && !busy && <div className="message-actions"><button type="button" title="重新生成" aria-label="重新生成回复" onClick={() => onRegenerate(message)}><RefreshCw size={13} /></button><button type="button" title="复制" aria-label="复制 AI 回复" onClick={() => onCopy(message)}><Copy size={13} /></button></div>}
+        <div className="assistant-share-content" ref={shareTargetRef}>
+          {thinking && showThinking && (
+            <details className="thinking-block" open={message.streaming}>
+              <summary><LoaderCircle size={14} className={message.streaming ? "spinning" : ""} /> 思考过程</summary>
+              <p>{thinking}</p>
+            </details>
+          )}
+          {toolLayout ? (
+            <>
+              {blockText(toolLayout.leading) && <RichContent streaming={false} artifactPrefix={`${message.id}-leading`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction}>{blockText(toolLayout.leading)}</RichContent>}
+              <ToolGroup calls={toolLayout.process} executions={executions} streaming={message.streaming} />
+              {blockText(toolLayout.trailing) && <RichContent streaming={message.streaming} artifactPrefix={`${message.id}-trailing`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction}>{blockText(toolLayout.trailing)}</RichContent>}
+            </>
+          ) : text && <RichContent streaming={message.streaming} artifactPrefix={message.id} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction}>{text}</RichContent>}
+          {message.error && <p className="inline-error"><AlertCircle size={15} />{message.error}</p>}
+          {timing && <TimingMeta timing={timing} now={now} />}
+        </div>
+        {!message.streaming && !busy && <div className="message-actions"><button type="button" title="重新生成" aria-label="重新生成回复" onClick={() => onRegenerate(message)}><RefreshCw size={13} /></button><button type="button" title="复制" aria-label="复制 AI 回复" onClick={() => onCopy(message)}><Copy size={13} /></button>{hasShareableContent && <button type="button" title={sharing ? "正在生成图片" : shared ? "已复制图片" : "分享图片"} aria-label={sharing ? "正在生成回复图片" : shared ? "回复图片已复制" : "分享 AI 回复图片"} disabled={sharing} onClick={() => void share()}>{sharing ? <LoaderCircle size={13} className="spinning" /> : shared ? <Check size={13} /> : <Share2 size={13} />}</button>}</div>}
       </div>
     </article>
   );
@@ -1221,6 +1243,16 @@ export function App(): ReactNode {
     }
   }
 
+  async function shareMessage(_message: ChatMessage, target: HTMLElement): Promise<void> {
+    setMessageActionError(undefined);
+    try {
+      await shareElementAsImage(target);
+    } catch (error) {
+      setMessageActionError(error instanceof Error ? `分享失败：${error.message}` : "分享失败，请重试");
+      throw error;
+    }
+  }
+
   function editMessage(message: ChatMessage): void {
     setInput(messageText(message));
     setSelectedSkill(message.skill?.name);
@@ -1429,7 +1461,7 @@ export function App(): ReactNode {
               ) : displayMessages.length === 0 && !isGenerating ? (
                 <div className="empty-conversation"><div className="empty-icon"><CodeXml size={27} /></div><h1>今天想开发什么？</h1></div>
               ) : <>
-                {displayMessages.map((message, index) => <MessageView key={message.uuid ?? message.id} message={message} executions={snapshot.executions} onOpenArtifact={setArtifact} onHtmlAction={handleHtmlAction} onCopy={(item) => void copyMessage(item)} onEdit={editMessage} onRegenerate={(item) => void regenerateMessage(item)} showThinking={settings.appearance.showThinking} busy={snapshot.busy} timing={showTurnTimingOnLatest && index === latestAssistantMessageIndex && message.role === "assistant" ? snapshot.turnTiming : undefined} now={now} />)}
+                {displayMessages.map((message, index) => <MessageView key={message.uuid ?? message.id} message={message} executions={snapshot.executions} onOpenArtifact={setArtifact} onHtmlAction={handleHtmlAction} onCopy={(item) => void copyMessage(item)} onEdit={editMessage} onRegenerate={(item) => void regenerateMessage(item)} onShare={shareMessage} showThinking={settings.appearance.showThinking} busy={snapshot.busy} timing={showTurnTimingOnLatest && index === latestAssistantMessageIndex && message.role === "assistant" ? snapshot.turnTiming : undefined} now={now} />)}
                 {isGenerating && (hasAssistantMessage ? <div className="response-progress response-progress-inline"><LoaderCircle size={14} className="spinning" /><span>{snapshot.agentName}正在努力输出中……</span>{activeTurnTiming && <TimingMeta timing={activeTurnTiming} now={now} />}</div> : <PendingResponse agentName={snapshot.agentName} timing={activeTurnTiming} now={now} />)}
               </>}
             </div>
