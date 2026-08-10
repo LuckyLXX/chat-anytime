@@ -824,6 +824,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       await createSession();
       break;
     case "session.new":
+      if (command.workspace) workspace = resolve(command.workspace);
       if (workspace) await createSession(SessionManager.create(workspace, workspaceSessionDir()));
       break;
     case "session.open": {

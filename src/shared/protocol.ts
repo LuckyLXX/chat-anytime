@@ -305,7 +305,7 @@ export interface ExtensionUiResponse {
 export type RuntimeCommand =
   | { type: "initialize"; settings: DesktopSettings; apiKeys: Record<string, string> }
   | { type: "workspace.open"; path: string }
-  | { type: "session.new" }
+  | { type: "session.new"; workspace?: string }
   | { type: "session.open"; path: string; workspace?: string }
   | { type: "session.prompt"; text: string; attachments?: PromptAttachment[] }
   | { type: "session.skill"; name: string; instructions?: string; attachments?: PromptAttachment[] }

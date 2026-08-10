@@ -104,6 +104,7 @@ function updateSettings(command: RuntimeCommand): void {
   const settings = loadSettings();
   switch (command.type) {
     case "workspace.open": settings.workspace = command.path; break;
+    case "session.new": if (command.workspace) settings.workspace = command.workspace; break;
     case "session.open": if (command.workspace) settings.workspace = command.workspace; break;
     case "agent.select": settings.currentAgentId = command.agentId; break;
     case "agent.save": settings.agents = settings.agents.some((item) => item.id === command.agent.id) ? settings.agents.map((item) => item.id === command.agent.id ? command.agent : item) : [...settings.agents, command.agent]; break;

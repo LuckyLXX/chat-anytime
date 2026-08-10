@@ -21,6 +21,7 @@ import {
   Search,
   Server,
   Share2,
+  SquarePen,
   Users,
   PanelRightClose,
   PanelRightOpen,
@@ -1191,9 +1192,9 @@ export function App(): ReactNode {
     if (path) await window.piDesktop.send({ type: "workspace.open", path });
   }
 
-  async function createNewSession(): Promise<void> {
+  async function createNewSession(workspace?: string): Promise<void> {
     try {
-      await window.piDesktop.send({ type: "session.new" });
+      await window.piDesktop.send({ type: "session.new", workspace });
       setInput("");
       setAttachments([]);
       setSelectedSkill(undefined);
@@ -1464,19 +1465,31 @@ export function App(): ReactNode {
         </nav> : <nav className="session-list" aria-label="话题列表">
           {sessionGroups.length === 0 ? <div className="session-list-empty">暂无匹配话题</div> : sessionGroups.map((group) => {
             const collapsed = collapsedWorkspaceGroups[group.key] === true;
+            const workspaceName = group.workspace.split(/[\\/]/u).at(-1) || group.workspace;
             return (
               <section className="session-workspace-group" key={group.key}>
-                <button
-                  className="session-workspace-heading"
-                  type="button"
-                  aria-expanded={!collapsed}
-                  onClick={() => setCollapsedWorkspaceGroups((current) => ({ ...current, [group.key]: !collapsed }))}
-                >
-                  <Folder size={15} />
-                  <span><strong>{group.workspace.split(/[\\/]/u).at(-1) || group.workspace}</strong><small>{compactPath(group.workspace)}</small></span>
-                  <em>{group.sessions.length}</em>
-                  <ChevronDown size={14} className={collapsed ? "collapsed" : ""} />
-                </button>
+                <div className="session-workspace-heading">
+                  <button
+                    className="session-workspace-toggle"
+                    type="button"
+                    aria-expanded={!collapsed}
+                    onClick={() => setCollapsedWorkspaceGroups((current) => ({ ...current, [group.key]: !collapsed }))}
+                  >
+                    <Folder size={15} />
+                    <span><strong>{workspaceName}</strong><small>{compactPath(group.workspace)}</small></span>
+                    <em>{group.sessions.length}</em>
+                    <ChevronDown size={14} className={collapsed ? "collapsed" : ""} />
+                  </button>
+                  <button
+                    className="session-workspace-new-button"
+                    type="button"
+                    title={`在 ${workspaceName} 中新建话题`}
+                    aria-label={`在 ${workspaceName} 中新建话题`}
+                    onClick={() => void createNewSession(group.workspace)}
+                  >
+                    <SquarePen size={14} />
+                  </button>
+                </div>
                 {!collapsed && <div className="session-workspace-items">
                   {group.sessions.map((item) => <button className={item.id === snapshot.sessionId ? "active" : ""} type="button" key={item.path} onClick={() => void openSession(item.path, item.workspace)}><MessageCircle size={14} /><span><strong>{item.title}</strong><small>{new Date(item.modifiedAt).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}</small></span></button>)}
                 </div>}

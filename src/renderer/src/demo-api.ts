@@ -252,7 +252,7 @@ export function createDemoApi(): DesktopApi {
           demoSettings.appearance = structuredClone(command.appearance);
           break;
         case "session.new":
-          updateSnapshot({ messages: [], executions: [], sessionId: "new-demo-session" });
+          updateSnapshot({ workspace: command.workspace ?? demoSnapshot.workspace, messages: [], executions: [], sessionId: "new-demo-session" });
           break;
         case "session.open":
           updateSnapshot({ workspace: command.workspace ?? demoSnapshot.workspace, sessionId: command.path.replace(/.*[\\/]/u, "").replace(/\.jsonl$/u, ""), messages: [], executions: [] });
