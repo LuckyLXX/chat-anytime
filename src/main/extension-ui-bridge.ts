@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import type { ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent";
-import type { ExtensionUiDialogRequest, ExtensionUiResponse } from "../shared/protocol.js";
+import type { ExtensionUIContext, ExtensionWidgetOptions, Theme, WorkingIndicatorOptions } from "@earendil-works/pi-coding-agent";
+import type { ExtensionComposerRequest, ExtensionUiDialogRequest, ExtensionUiResponse, ExtensionUiState } from "../shared/protocol.js";
 
 interface PendingDialog<T> {
   defaultValue: T;
@@ -14,6 +14,12 @@ export interface DesktopExtensionUiBridgeOptions {
   request(request: ExtensionUiDialogRequest): void;
   dismiss(id: string): void;
   notify(message: string, level: "info" | "warning" | "error"): void;
+  stateChanged?(state: ExtensionUiState): void;
+  composer?(request: ExtensionComposerRequest): void;
+}
+
+function emptyState(): ExtensionUiState {
+  return { statuses: {}, widgets: [], workingVisible: true, unsupported: [] };
 }
 
 function createNeutralTheme(): Theme {
@@ -37,6 +43,8 @@ function createNeutralTheme(): Theme {
 export class DesktopExtensionUiBridge {
   private readonly pending = new Map<string, PendingDialog<unknown>>();
   private readonly neutralTheme = createNeutralTheme();
+  private state = emptyState();
+  private editorText = "";
 
   readonly context: ExtensionUIContext = {
     select: (title, options, dialogOptions) => this.createDialog(
@@ -63,32 +71,78 @@ export class DesktopExtensionUiBridge {
       (response) => response.cancelled ? undefined : response.value
     ),
     notify: (message, level = "info") => this.options.notify(message, level),
-    onTerminalInput: () => () => undefined,
-    setStatus: () => undefined,
-    setWorkingMessage: () => undefined,
-    setWorkingVisible: () => undefined,
-    setWorkingIndicator: () => undefined,
-    setHiddenThinkingLabel: () => undefined,
-    setWidget: () => undefined,
-    setFooter: () => undefined,
-    setHeader: () => undefined,
-    setTitle: () => undefined,
-    custom: async <T>() => undefined as T,
-    pasteToEditor: () => undefined,
-    setEditorText: () => undefined,
-    getEditorText: () => "",
-    addAutocompleteProvider: () => undefined,
-    setEditorComponent: () => undefined,
+    onTerminalInput: () => {
+      this.markUnsupported("raw-terminal-input");
+      return () => undefined;
+    },
+    setStatus: (key, text) => {
+      const statuses = { ...this.state.statuses };
+      if (text === undefined) delete statuses[key];
+      else statuses[key] = text;
+      this.updateState({ statuses });
+    },
+    setWorkingMessage: (workingMessage) => this.updateState({ workingMessage }),
+    setWorkingVisible: (workingVisible) => this.updateState({ workingVisible }),
+    setWorkingIndicator: (options?: WorkingIndicatorOptions) => {
+      if (options) this.markUnsupported("working-indicator");
+    },
+    setHiddenThinkingLabel: (hiddenThinkingLabel) => this.updateState({ hiddenThinkingLabel }),
+    setWidget: (key: string, content: string[] | ((...args: never[]) => unknown) | undefined, widgetOptions?: ExtensionWidgetOptions) => {
+      if (typeof content === "function") {
+        this.markUnsupported("component-widget");
+        return;
+      }
+      const widgets = this.state.widgets.filter((widget) => widget.key !== key);
+      if (content) widgets.push({ key, lines: [...content], placement: widgetOptions?.placement ?? "aboveEditor" });
+      this.updateState({ widgets });
+    },
+    setFooter: (factory) => {
+      if (factory) this.markUnsupported("custom-footer");
+    },
+    setHeader: (factory) => {
+      if (factory) this.markUnsupported("custom-header");
+    },
+    setTitle: (title) => this.updateState({ title }),
+    custom: async <T>() => {
+      this.markUnsupported("custom-component");
+      return undefined as T;
+    },
+    pasteToEditor: (text) => {
+      this.editorText += text;
+      this.options.composer?.({ id: randomUUID(), method: "pasteToEditor", text });
+    },
+    setEditorText: (text) => {
+      this.editorText = text;
+      this.options.composer?.({ id: randomUUID(), method: "setEditorText", text });
+    },
+    getEditorText: () => this.editorText,
+    addAutocompleteProvider: () => this.markUnsupported("autocomplete-provider"),
+    setEditorComponent: (factory) => {
+      if (factory) this.markUnsupported("custom-editor");
+    },
     getEditorComponent: () => undefined,
     theme: this.neutralTheme,
     getAllThemes: () => [],
     getTheme: () => undefined,
-    setTheme: () => ({ success: false, error: "PiDesktop 不支持扩展切换终端主题" }),
+    setTheme: () => {
+      this.markUnsupported("tui-theme-switching");
+      return { success: false, error: "PiDesktop 不支持扩展切换终端主题" };
+    },
     getToolsExpanded: () => false,
-    setToolsExpanded: () => undefined
+    setToolsExpanded: (expanded) => {
+      if (expanded) this.markUnsupported("tool-output-expansion");
+    }
   };
 
   constructor(private readonly options: DesktopExtensionUiBridgeOptions) {}
+
+  snapshot(): ExtensionUiState {
+    return structuredClone(this.state);
+  }
+
+  syncEditorText(text: string): void {
+    this.editorText = text;
+  }
 
   resolve(response: ExtensionUiResponse): boolean {
     const pending = this.pending.get(response.id);
@@ -99,12 +153,19 @@ export class DesktopExtensionUiBridge {
     return true;
   }
 
-  reset(): void {
+  cancelPendingDialogs(): void {
     for (const [id, pending] of this.pending) {
       this.pending.delete(id);
       this.cleanup(id, pending);
       pending.resolve(pending.defaultValue);
     }
+  }
+
+  reset(): void {
+    this.cancelPendingDialogs();
+    this.editorText = "";
+    this.state = emptyState();
+    this.options.stateChanged?.(this.snapshot());
   }
 
   private createDialog<T>(
@@ -142,5 +203,16 @@ export class DesktopExtensionUiBridge {
     if (pending.timeout) clearTimeout(pending.timeout);
     pending.removeAbortListener?.();
     this.options.dismiss(id);
+  }
+
+  private updateState(patch: Partial<ExtensionUiState>): void {
+    this.state = { ...this.state, ...patch };
+    this.options.stateChanged?.(this.snapshot());
+  }
+
+  private markUnsupported(capability: string): void {
+    if (this.state.unsupported.includes(capability)) return;
+    this.updateState({ unsupported: [...this.state.unsupported, capability] });
+    this.options.notify(`扩展请求了 PiDesktop 暂不支持的 TUI 能力：${capability}`, "warning");
   }
 }

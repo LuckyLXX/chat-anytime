@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CUSTOM_PROVIDER_ID, createDefaultAgent, mergeProviderModels, migrateSettings, normalizeAccessMode, normalizeCustomThemes, normalizeThemeAssets, normalizeThemeOverrides } from "./settings.js";
+import { CUSTOM_PROVIDER_ID, createDefaultAgent, mergeProviderModels, migrateSettings, normalizeAccessMode, normalizeAgent, normalizeCustomThemes, normalizeThemeAssets, normalizeThemeOverrides } from "./settings.js";
 
 describe("desktop settings migration", () => {
   it("migrates the legacy custom provider without changing its stable id", () => {
@@ -22,6 +22,16 @@ describe("desktop settings migration", () => {
     const result = migrateSettings({ agents: [{ id: "designer", name: "设计助手", divMode: true }] });
     expect(result.settings.agents.find((agent) => agent.id === "designer")).toMatchObject({ divMode: true });
     expect(createDefaultAgent().divMode).toBe(false);
+  });
+
+  it("preserves only valid Agent-level Skill overrides", () => {
+    const agent = normalizeAgent({
+      id: "coder",
+      skillOverrides: { " skill:review ": false, "skill:notes": true, invalid: true, "skill:bad": "yes" as unknown as boolean }
+    });
+
+    expect(agent.skillOverrides).toEqual({ "skill:review": false, "skill:notes": true });
+    expect(normalizeAgent({ id: "plain" }).skillOverrides).toBeUndefined();
   });
 
   it("preserves provider and agent defaults while normalizing invalid current ids", () => {

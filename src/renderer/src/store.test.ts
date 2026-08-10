@@ -15,7 +15,7 @@ function permission(id: string, sessionId: string): PermissionRequest {
 
 describe("desktop permission queue", () => {
   beforeEach(() => {
-    useDesktopStore.setState({ permissions: [], extensionUiDialogs: [], extensionNotice: undefined });
+    useDesktopStore.setState({ permissions: [], extensionUiDialogs: [], extensionComposerRequests: [], extensionNotice: undefined, packageProgress: undefined });
   });
 
   it("keeps concurrent permission requests in arrival order", () => {
@@ -54,5 +54,16 @@ describe("desktop permission queue", () => {
 
     state.handleRuntimeMessage({ type: "extension-ui.dismiss", id: request.id });
     expect(useDesktopStore.getState().extensionUiDialogs).toEqual([]);
+  });
+
+  it("queues composer mutations and exposes package progress", () => {
+    const state = useDesktopStore.getState();
+    const request = { id: "composer-1", method: "setEditorText" as const, text: "prefill" };
+    state.handleRuntimeMessage({ type: "extension-ui.composer", request });
+    state.handleRuntimeMessage({ type: "extension-ui.composer", request });
+    state.handleRuntimeMessage({ type: "package-progress", progress: { type: "progress", action: "update", source: "npm:test", message: "updating" } });
+
+    expect(useDesktopStore.getState().extensionComposerRequests).toEqual([request]);
+    expect(useDesktopStore.getState().packageProgress).toMatchObject({ action: "update", message: "updating" });
   });
 });

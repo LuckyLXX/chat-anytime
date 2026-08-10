@@ -105,9 +105,18 @@ export function normalizeThemeAssets(value: unknown): ThemeAssetMap {
   }));
 }
 
+export function normalizeSkillOverrides(value: unknown): Record<string, boolean> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).flatMap(([rawId, enabled]) => {
+    const id = rawId.trim();
+    return id.startsWith("skill:") && id.length <= 256 && typeof enabled === "boolean" ? [[id, enabled]] : [];
+  }));
+}
+
 export function normalizeAgent(agent: Partial<AgentProfile> | undefined): AgentProfile {
   const fallback = createDefaultAgent();
   const sourceTools = (agent?.tools ?? {}) as Partial<Record<BuiltinToolName, boolean>>;
+  const skillOverrides = normalizeSkillOverrides(agent?.skillOverrides);
   return {
     id: String(agent?.id || fallback.id),
     name: String(agent?.name || fallback.name),
@@ -117,6 +126,7 @@ export function normalizeAgent(agent: Partial<AgentProfile> | undefined): AgentP
     defaultModel: agent?.defaultModel,
     defaultThinkingLevel: agent?.defaultThinkingLevel ?? fallback.defaultThinkingLevel,
     tools: Object.fromEntries(BUILTIN_TOOLS.map((tool) => [tool, sourceTools[tool] !== false])) as Record<BuiltinToolName, boolean>,
+    ...(Object.keys(skillOverrides).length > 0 ? { skillOverrides } : {}),
     archived: Boolean(agent?.archived)
   };
 }

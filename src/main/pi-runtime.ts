@@ -13,13 +13,14 @@ import {
   SettingsManager,
   type AgentSession,
   type AgentSessionEvent,
-  type InlineExtension
+  type InlineExtension,
 } from "@earendil-works/pi-coding-agent";
 import type {
   AccessMode,
   AgentProfile,
   ChatMessage,
   DesktopSettings,
+  ExtensionCommandSummary,
   McpServerConfigDraft,
   McpServerSummary,
   MessageBlock,
@@ -40,6 +41,7 @@ import type {
 } from "../shared/protocol.js";
 import { toolLabel } from "../shared/locale.js";
 import { workspaceRelativeAttachment } from "./attachments.js";
+import { runManualCompaction } from "./compaction-lifecycle.js";
 import { customProviderModelDefinition, inferCustomModelImageInput } from "./custom-provider.js";
 import { buildDivModePrompt } from "./div-prompt.js";
 import { DesktopExtensionUiBridge } from "./extension-ui-bridge.js";
@@ -53,7 +55,15 @@ import { discoverExtensionCandidates, ExtensionPolicy } from "./extension-policy
 import { agentWorkspaceSessionDir } from "./session-scope.js";
 import { mergeProviderModels } from "./settings.js";
 import { buildSkillPrompt, parseSkillPrompt, type SkillPromptDisplay } from "./skill-prompt.js";
-import { restoreToolExecutions, type PersistedSessionMessage } from "./session-history.js";
+import { applyAgentSkillOverrides, enabledSkillResourcePaths, type AgentSkillResource } from "./skill-resources.js";
+import {
+  PI_DESKTOP_CONTROL_ENTRY_TYPE,
+  restoreControlMessages,
+  restoreToolExecutions,
+  type PersistedSessionEntry,
+  type PersistedSessionMessage
+} from "./session-history.js";
+import { changedWorkspaceFile } from "./workspace-preview.js";
 
 const parentPort = process.parentPort;
 if (!parentPort) throw new Error("Pi 运行时必须作为 Electron 工具进程启动");
@@ -68,6 +78,7 @@ let status = "请选择一个项目开始使用";
 let busy = false;
 let turnTiming: TurnTiming | undefined;
 let executions = new Map<string, ToolExecution>();
+let controlMessages: ChatMessage[] = [];
 let currentSessions: SessionSummary[] = [];
 let selectedModel: { provider: string; id: string } | undefined;
 let settings: DesktopSettings | undefined;
@@ -79,11 +90,14 @@ const builtinToolNames = new Set(["read", "bash", "edit", "write", "grep", "find
 const mcpStatusEvent = "pi-mcp-adapter/status/v1";
 let resourceLoader: DefaultResourceLoader | undefined;
 let packageManager: DefaultPackageManager | undefined;
+let resolvedSkillResources: AgentSkillResource[] = [];
 let extensionPolicy: ExtensionPolicy | undefined;
 let mcpStatusUnsubscribe: (() => void) | undefined;
 let mcpServers: McpServerSummary[] = [];
 let mcpAdapterLoaded = false;
 let resourceOperationBusy = false;
+let extensionCommands: ExtensionCommandSummary[] = [];
+let availablePackageUpdates: Array<{ source: string }> = [];
 const runtimeScriptPath = process.argv[1];
 let sessionGeneration = 0;
 
@@ -94,6 +108,27 @@ let sessionGeneration = 0;
 const STREAM_FLUSH_INTERVAL_MS = 50;
 let pendingFlushTimer: ReturnType<typeof setTimeout> | undefined;
 let hasPendingFlush = false;
+
+interface RuntimeCustomMessage {
+  role: "custom";
+  customType: string;
+  content: string | Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }>;
+  display: boolean;
+  details?: unknown;
+  timestamp: number;
+}
+
+function cloneProtocolValue(value: unknown): unknown {
+  try {
+    return structuredClone(value);
+  } catch {
+    return undefined;
+  }
+}
+
+function packageProgressSource(source: string): string {
+  return /^(?:npm:|git:|https?:|ssh:)/u.test(source) ? source : `本地 Pi Package（${basename(source)}）`;
+}
 
 function flushState(): void {
   pendingFlushTimer = undefined;
@@ -161,7 +196,9 @@ const piCliHostBroker = new PiCliHostBroker(
 const extensionUiBridge = new DesktopExtensionUiBridge({
   request: (request) => post({ type: "extension-ui.request", request }),
   dismiss: (id) => post({ type: "extension-ui.dismiss", id }),
-  notify: (message, level) => post({ type: "extension-ui.notify", message, level })
+  notify: (message, level) => post({ type: "extension-ui.notify", message, level }),
+  stateChanged: () => emitState(),
+  composer: (request) => post({ type: "extension-ui.composer", request })
 });
 
 function mcpConfigPath(scope: McpServerConfigDraft["scope"]): string {
@@ -229,7 +266,7 @@ function createMcpStatusExtension(): InlineExtension {
 }
 
 function emitResourceCatalog(): void {
-  const result = buildResourceCatalog({ resourceLoader, packageManager, mcpServers, mcpAdapterLoaded, extensionCandidates: extensionPolicy?.candidateSummaries(), trustedExtensionIds: extensionPolicy?.approvedIds() });
+  const result = buildResourceCatalog({ resourceLoader, packageManager, mcpServers, mcpAdapterLoaded, extensionCandidates: extensionPolicy?.candidateSummaries(), trustedExtensionIds: extensionPolicy?.approvedIds(), skillResources: resolvedSkillResources, workspace, agentDir: getAgentDir(), availablePackageUpdates: availablePackageUpdates.map((update) => update.source) });
   mcpAdapterLoaded = result.mcpAdapterLoaded;
   post({ type: "resources", resources: result.resources });
 }
@@ -262,6 +299,14 @@ function blocksFromMessage(message: AgentMessage, skillPrompt?: SkillPromptDispl
     );
   }
 
+  if (message.role === "custom") {
+    const custom = message as unknown as RuntimeCustomMessage;
+    if (typeof custom.content === "string") return [{ type: "text", text: custom.content }];
+    return custom.content.map((content) => content.type === "text"
+      ? { type: "text" as const, text: content.text }
+      : { type: "image" as const, data: content.data, mimeType: content.mimeType });
+  }
+
   if (message.role !== "assistant") return [];
   return (message as AssistantMessage).content.map((content) => {
     if (content.type === "text") return { type: "text" as const, text: content.text };
@@ -291,7 +336,7 @@ function messageUuid(message: AgentMessage, index: number): string {
 }
 
 function normalizeMessages(messages: AgentMessage[], streamingMessage?: AgentMessage): ChatMessage[] {
-  const visible = messages.filter((message) => message.role === "user" || message.role === "assistant");
+  const visible = messages.filter((message) => message.role === "user" || message.role === "assistant" || (message.role === "custom" && (message as unknown as RuntimeCustomMessage).display));
   if (streamingMessage && streamingMessage.role === "assistant") {
     const last = visible.at(-1);
     if (last !== streamingMessage) visible.push(streamingMessage);
@@ -301,9 +346,10 @@ function normalizeMessages(messages: AgentMessage[], streamingMessage?: AgentMes
     return {
       id: `${message.timestamp ?? 0}-${index}-${message.role}`,
       uuid: messageUuid(message, index),
-      role: message.role as "user" | "assistant",
+      role: message.role === "custom" ? "extension" : message.role as "user" | "assistant",
       timestamp: message.timestamp ?? Date.now(),
       blocks: blocksFromMessage(message, skillPrompt),
+      extension: message.role === "custom" ? { customType: (message as unknown as RuntimeCustomMessage).customType, details: cloneProtocolValue((message as unknown as RuntimeCustomMessage).details) } : undefined,
       skill: skillPrompt ? { name: skillPrompt.name } : undefined,
       streaming: message === streamingMessage,
       error: message.role === "assistant" ? (message as AssistantMessage).errorMessage : undefined
@@ -327,9 +373,10 @@ function runtimeSkillPrompt(name: string, instructions?: string): string {
 }
 
 function snapshot(): RuntimeSnapshot {
-  const messages = session
+  const sessionMessages = session
     ? normalizeMessages(session.state.messages, session.state.streamingMessage)
     : [];
+  const messages = [...sessionMessages, ...controlMessages].sort((left, right) => left.timestamp - right.timestamp);
   return {
     workspace,
     agentId: currentAgent?.id ?? "default",
@@ -343,7 +390,9 @@ function snapshot(): RuntimeSnapshot {
     turnTiming,
     messages,
     executions: [...executions.values()],
-    sessions: currentSessions
+    sessions: currentSessions,
+    extensionCommands,
+    extensionUi: extensionUiBridge.snapshot()
   };
 }
 
@@ -504,7 +553,8 @@ function handleSessionEvent(event: AgentSessionEvent): void {
         name: event.toolName,
         args: event.args,
         status: "running",
-        startedAt: Date.now()
+        startedAt: Date.now(),
+        changedFile: changedWorkspaceFile(workspace, event.toolName, event.args)
       });
       status = `正在${toolLabel(event.toolName)}`;
       break;
@@ -525,7 +575,8 @@ function handleSessionEvent(event: AgentSessionEvent): void {
         completedAt: Date.now(),
         status: event.isError ? "error" : "completed",
         output: textFromToolResult(event.result),
-        patch: patchFromToolResult(event.result)
+        patch: patchFromToolResult(event.result),
+        changedFile: current?.changedFile ?? changedWorkspaceFile(workspace, event.toolName, current?.args)
       });
       break;
     }
@@ -540,6 +591,13 @@ function handleSessionEvent(event: AgentSessionEvent): void {
       break;
   }
   scheduleEmit(immediate);
+}
+
+function appendCompactControlMessage(compactSession: AgentSession, kind: "compact-command" | "compact-result", text: string): void {
+  const entryId = compactSession.sessionManager.appendCustomEntry(PI_DESKTOP_CONTROL_ENTRY_TYPE, { kind, text });
+  const entry = compactSession.sessionManager.getEntry(entryId);
+  if (!entry || entry.type !== "custom") return;
+  controlMessages = [...controlMessages, ...restoreControlMessages([entry as unknown as PersistedSessionEntry])];
 }
 
 async function refreshCatalog(): Promise<void> {
@@ -664,30 +722,38 @@ async function createSession(sessionManager?: SessionManager): Promise<void> {
   mcpStatusUnsubscribe?.();
   mcpStatusUnsubscribe = undefined;
   permissionBroker.reset();
+  extensionCommands = [];
   extensionUiBridge.reset();
   session?.dispose();
   session = undefined;
   mcpServers = [];
   mcpAdapterLoaded = false;
   executions = new Map();
+  controlMessages = [];
   turnTiming = undefined;
 
   const settingsManager = SettingsManager.create(workspace, getAgentDir());
   await piCliHostBroker.start();
   configurePiCliShim(resolvePiCliShimPath(runtimeScriptPath, import.meta.url), piCliHostBroker);
   packageManager = new DefaultPackageManager({ cwd: workspace, agentDir: getAgentDir(), settingsManager });
+  packageManager.setProgressCallback((progress) => post({ type: "package-progress", progress: { ...progress, source: packageProgressSource(progress.source) } }));
+  availablePackageUpdates = [];
   const bundledAdapterPath = bundledMcpAdapterPath();
   const resolvedResources = await packageManager.resolve();
+  resolvedSkillResources = applyAgentSkillOverrides(resolvedResources.skills, currentAgent?.skillOverrides);
   extensionPolicy ??= new ExtensionPolicy(getAgentDir());
   extensionPolicy.setCandidates(discoverExtensionCandidates(resolvedResources.extensions, bundledAdapterPath));
+  await extensionPolicy.refreshFingerprints();
   const approvedExtensionPaths = extensionPolicy.approvedPaths();
   resourceLoader = new DefaultResourceLoader({
     cwd: workspace,
     agentDir: getAgentDir(),
     settingsManager,
     noExtensions: true,
+    noSkills: true,
     noThemes: true,
     additionalExtensionPaths: [bundledAdapterPath, ...approvedExtensionPaths],
+    additionalSkillPaths: enabledSkillResourcePaths(resolvedSkillResources),
     extensionFactories: [createPermissionExtension(), createMcpStatusExtension()],
     systemPromptOverride: (base) => [base, currentAgent?.systemPrompt, currentAgent?.divMode ? buildDivModePrompt() : undefined].filter(Boolean).join("\n\n")
   });
@@ -715,14 +781,25 @@ async function createSession(sessionManager?: SessionManager): Promise<void> {
     return;
   }
   session = result.session;
+  controlMessages = restoreControlMessages(activeSessionManager.getBranch() as unknown as PersistedSessionEntry[]);
   await session.bindExtensions({
     mode: "rpc",
     uiContext: extensionUiBridge.context,
-    onError: (error) => post({ type: "log", level: "warn", message: `Pi 扩展错误：${error.error}` })
+    onError: (error) => {
+      post({ type: "log", level: "warn", message: `Pi 扩展错误：${error.error}` });
+      post({ type: "extension-ui.notify", message: `扩展运行失败：${error.error}`, level: "error" });
+    }
   });
+  extensionCommands = session.extensionRunner.getRegisteredCommands().map((command) => ({
+    name: command.invocationName,
+    description: command.description,
+    source: /^(?:npm:|git:|https?:|ssh:)/u.test(command.sourceInfo.source)
+      ? command.sourceInfo.source
+      : command.sourceInfo.scope === "project" ? "当前项目" : command.sourceInfo.scope === "user" ? "用户资源" : "临时资源"
+  }));
   const extensionTools = session.getAllTools().map((tool) => tool.name).filter((name) => !builtinToolNames.has(name));
   session.setActiveToolsByName([...enabledBuiltinTools, ...extensionTools]);
-  executions = new Map(restoreToolExecutions(session.state.messages as unknown as PersistedSessionMessage[]).map((execution) => [execution.id, execution]));
+  executions = new Map(restoreToolExecutions(session.state.messages as unknown as PersistedSessionMessage[], workspace).map((execution) => [execution.id, execution]));
   selectedModel = session.model ? { provider: session.model.provider, id: session.model.id } : requested;
   thinkingLevel = session.thinkingLevel;
   unsubscribeSession = session.subscribe(handleSessionEvent);
@@ -903,7 +980,20 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       });
       break;
     case "session.abort":
-      session?.abort();
+      extensionUiBridge.cancelPendingDialogs();
+      session?.abortCompaction();
+      void session?.abort();
+      break;
+    case "session.extension-command": {
+      if (!session) throw new Error("请先打开工作区，再运行扩展命令");
+      const name = command.name.replace(/^\/+/u, "");
+      if (!extensionCommands.some((item) => item.name === name)) throw new Error(`扩展命令不存在：/${name}`);
+      await session.prompt(`/${name}${command.args?.trim() ? ` ${command.args.trim()}` : ""}`);
+      emitState();
+      break;
+    }
+    case "composer.sync":
+      extensionUiBridge.syncEditorText(command.text);
       break;
     case "session.compact":
       if (!session) throw new Error("请先打开工作区，再压缩上下文");
@@ -913,13 +1003,15 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       busy = true;
       status = "Pi 正在压缩上下文";
       beginTurn();
+      appendCompactControlMessage(compactSession, "compact-command", command.instructions ? `/compact ${command.instructions}` : "/compact");
       emitState();
-      void compactSession.compact(command.instructions).catch((error) => {
+      void runManualCompaction(() => compactSession.compact(command.instructions)).then((outcome) => {
         if (compactGeneration !== sessionGeneration || session !== compactSession) return;
+        appendCompactControlMessage(compactSession, "compact-result", outcome.message);
         completeTurn();
         busy = false;
-        status = "压缩失败";
-        post({ type: "error", message: errorText(error) });
+        status = outcome.status;
+        if (outcome.type === "failed") post({ type: "error", message: errorText(outcome.error) });
         emitState();
       });
       break;
@@ -1068,6 +1160,23 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       });
       break;
     }
+    case "resources.package.check-updates": {
+      if (!packageManager) throw new Error("请先打开工作区，再检查 Pi Package 更新");
+      await runResourceOperation("正在检查 Pi Package 更新", async () => {
+        post({ type: "package-progress", progress: { type: "start", action: "update", source: "全部 Pi Package", message: "正在检查可用更新" } });
+        availablePackageUpdates = await packageManager!.checkForAvailableUpdates();
+        post({ type: "package-progress", progress: { type: "complete", action: "update", source: "全部 Pi Package", message: availablePackageUpdates.length ? `发现 ${availablePackageUpdates.length} 个可用更新` : "当前已是最新版本" } });
+      });
+      break;
+    }
+    case "resources.package.update": {
+      await runResourceOperation("正在更新 Pi Package", async () => {
+        await packageManager!.update(command.source?.trim() || undefined);
+        availablePackageUpdates = availablePackageUpdates.filter((update) => command.source ? update.source !== command.source : false);
+        await reloadRuntimeResources();
+      });
+      break;
+    }
     case "resources.reload":
       await runResourceOperation("正在重载 Skill 和 MCP", reloadRuntimeResources);
       break;
@@ -1096,6 +1205,16 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     case "resources.extension.approve": {
       if (!extensionPolicy || !(await extensionPolicy.approve(command.id))) throw new Error("找不到待批准的扩展");
       await runResourceOperation("正在加载扩展", reloadRuntimeResources);
+      break;
+    }
+    case "resources.extension.set-enabled": {
+      if (!extensionPolicy || !(await extensionPolicy.setEnabled(command.id, command.enabled))) throw new Error("扩展授权已失效，请重新批准");
+      await runResourceOperation(command.enabled ? "正在启用扩展" : "正在停用扩展", reloadRuntimeResources);
+      break;
+    }
+    case "resources.extension.revoke": {
+      if (!extensionPolicy || !(await extensionPolicy.revoke(command.id))) throw new Error("找不到要撤销授权的扩展");
+      await runResourceOperation("正在撤销扩展授权", reloadRuntimeResources);
       break;
     }
     case "extension-ui.resolve": {

@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -27,7 +27,7 @@ describe("ExtensionPolicy", () => {
     const root = await mkdtemp(join(tmpdir(), "pidesktop-extension-policy-"));
     tempDirs.push(root);
     const extensionPath = join(root, "extension.ts");
-    await (await import("node:fs/promises")).writeFile(extensionPath, "export default () => undefined;", "utf8");
+    await writeFile(extensionPath, "export default () => undefined;", "utf8");
 
     const [candidate] = discoverExtensionCandidates([{ path: extensionPath, enabled: true, metadata: { source: "auto", scope: "user", origin: "top-level" } }], join(root, "other.js"));
     const policy = new ExtensionPolicy(root);
@@ -42,5 +42,43 @@ describe("ExtensionPolicy", () => {
     restored.setCandidates([candidate!]);
     expect(restored.candidateSummaries()[0]).toMatchObject({ trust: "trusted", enabled: true });
     expect(restored.approvedIds()).toEqual([candidate!.summary.id]);
+  });
+
+  it("invalidates approval when extension contents change", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pidesktop-extension-fingerprint-"));
+    tempDirs.push(root);
+    const extensionPath = join(root, "extension.ts");
+    await writeFile(extensionPath, "export default () => 'v1';", "utf8");
+    const [candidate] = discoverExtensionCandidates([{ path: extensionPath, enabled: true, metadata: { source: "auto", scope: "user", origin: "top-level" } }], join(root, "other.js"));
+    const policy = new ExtensionPolicy(root);
+    policy.setCandidates([candidate!]);
+    await policy.refreshFingerprints();
+    await policy.approve(candidate!.summary.id);
+
+    await writeFile(extensionPath, "export default () => 'v2';", "utf8");
+    await policy.refreshFingerprints();
+
+    expect(policy.approvedPaths()).toEqual([]);
+    expect(policy.candidateSummaries()[0]).toMatchObject({ trust: "undecided", enabled: false, approvalChanged: true });
+  });
+
+  it("supports disabling, re-enabling and revoking a valid approval", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pidesktop-extension-toggle-"));
+    tempDirs.push(root);
+    const extensionPath = join(root, "extension.ts");
+    await writeFile(extensionPath, "export default () => undefined;", "utf8");
+    const [candidate] = discoverExtensionCandidates([{ path: extensionPath, enabled: true, metadata: { source: "auto", scope: "user", origin: "top-level" } }], join(root, "other.js"));
+    const policy = new ExtensionPolicy(root);
+    policy.setCandidates([candidate!]);
+    await policy.refreshFingerprints();
+    await policy.approve(candidate!.summary.id);
+
+    await expect(policy.setEnabled(candidate!.summary.id, false)).resolves.toBe(true);
+    expect(policy.approvedPaths()).toEqual([]);
+    expect(policy.candidateSummaries()[0]).toMatchObject({ trust: "trusted", enabled: false });
+    await expect(policy.setEnabled(candidate!.summary.id, true)).resolves.toBe(true);
+    expect(policy.approvedPaths()).toEqual([extensionPath]);
+    await expect(policy.revoke(candidate!.summary.id)).resolves.toBe(true);
+    expect(policy.candidateSummaries()[0]).toMatchObject({ trust: "undecided", enabled: false });
   });
 });

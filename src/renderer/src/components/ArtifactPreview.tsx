@@ -1,16 +1,67 @@
-import { Code2, ExternalLink, Pause, Play, X } from "lucide-react";
+import { AlertCircle, Code2, FileCode2, FileText, LoaderCircle, Pause, Play, ShieldCheck, X } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode, type SyntheticEvent } from "react";
+import type { WorkspaceFilePreview } from "../../../shared/protocol";
 import { artifactSandbox, buildArtifactPreviewSource, DYNAMIC_PREVIEW_ACTIONS, isDynamicArtifact, type Artifact, type DynamicPreviewAction } from "../lib/content";
+import { DiffView } from "./DiffView";
+import { CodeBlock, RichContent } from "./RichContent";
 
-export function ArtifactPreview({ artifact, onClose }: { artifact: Artifact; onClose(): void }): ReactNode {
-  const source = buildArtifactPreviewSource(artifact);
-  const dynamic = isDynamicArtifact(artifact);
+export type PreviewTarget =
+  | { type: "artifact"; artifact: Artifact }
+  | { type: "file"; file: WorkspaceFilePreview }
+  | { type: "diff"; title: string; path?: string; patch: string }
+  | { type: "loading"; title: string; path: string }
+  | { type: "error"; title: string; path: string; message: string };
+
+function fileArtifact(file: WorkspaceFilePreview): Artifact | undefined {
+  if ((file.kind !== "html" && file.kind !== "svg") || !file.content || file.truncated) return undefined;
+  return { id: `workspace-file-${file.relativePath}`, title: file.name, language: file.kind, content: file.content };
+}
+
+function targetArtifact(target: PreviewTarget): Artifact | undefined {
+  if (target.type === "artifact") return target.artifact;
+  return target.type === "file" ? fileArtifact(target.file) : undefined;
+}
+
+function targetMetadata(target: PreviewTarget): { title: string; path?: string; label: string } {
+  if (target.type === "artifact") return { title: target.artifact.title, label: target.artifact.language.toUpperCase() };
+  if (target.type === "file") return { title: target.file.name, path: target.file.relativePath, label: target.file.kind === "code" ? (target.file.language ?? "CODE").toUpperCase() : target.file.kind.toUpperCase() };
+  if (target.type === "diff") return { title: target.title, path: target.path, label: "DIFF" };
+  return { title: target.title, path: target.path, label: target.type === "loading" ? "LOADING" : "ERROR" };
+}
+
+function FilePreviewContent({ file, onOpenArtifact }: { file: WorkspaceFilePreview; onOpenArtifact(artifact: Artifact): void }): ReactNode {
+  if (file.kind === "image" && file.data && file.mimeType) {
+    return <div className="preview-image"><img src={`data:${file.mimeType};base64,${file.data}`} alt={file.name} /></div>;
+  }
+  if (file.kind === "markdown" && file.content !== undefined) {
+    return <div className="preview-scroll preview-markdown"><RichContent streaming={false} artifactPrefix={`preview-${file.relativePath}`} onOpenArtifact={onOpenArtifact}>{file.content}</RichContent></div>;
+  }
+  if (file.kind === "code" && file.content !== undefined) {
+    return <div className="preview-scroll preview-code"><CodeBlock language={file.language ?? "text"} code={file.content} /></div>;
+  }
+  if ((file.kind === "html" || file.kind === "svg") && file.content !== undefined && file.truncated) {
+    return <div className="preview-scroll preview-code"><CodeBlock language={file.kind} code={file.content} /></div>;
+  }
+  if (file.kind === "text" && file.content !== undefined) {
+    return <div className="preview-scroll"><pre className="preview-plain-text">{file.content}</pre></div>;
+  }
+  return <div className="preview-empty"><FileText size={28} /><strong>此文件无法预览</strong><span>{file.size.toLocaleString("zh-CN")} bytes</span></div>;
+}
+
+export function ArtifactPreview({ target, onClose, onOpenArtifact }: { target: PreviewTarget; onClose(): void; onOpenArtifact(artifact: Artifact): void }): ReactNode {
+  const artifact = targetArtifact(target);
+  const dynamic = Boolean(artifact && isDynamicArtifact(artifact));
+  const metadata = targetMetadata(target);
   const [paused, setPaused] = useState(false);
   const frameRef = useRef<HTMLIFrameElement | null>(null);
 
   function postPreviewAction(action: DynamicPreviewAction): void {
     frameRef.current?.contentWindow?.postMessage({ action }, "*");
   }
+
+  useEffect(() => {
+    setPaused(false);
+  }, [target]);
 
   useEffect(() => {
     function close(event: KeyboardEvent): void {
@@ -30,27 +81,30 @@ export function ArtifactPreview({ artifact, onClose }: { artifact: Artifact; onC
   }
 
   return (
-    <div className="artifact-overlay" role="dialog" aria-modal="true" aria-label={artifact.title} onMouseDown={onClose}>
-      <header className="artifact-header" onMouseDown={(event) => event.stopPropagation()}>
-        <div>
-          <Code2 size={17} />
-          <strong>{artifact.title}</strong>
-          <span>{artifact.language.toUpperCase()}</span>
-          {dynamic && <span className="artifact-dynamic-badge">动态</span>}
+    <aside className="content-preview-panel" aria-label={`${metadata.title}预览`}>
+      <header className="content-preview-header">
+        <div className="content-preview-title">
+          {target.type === "diff" ? <Code2 size={17} /> : <FileCode2 size={17} />}
+          <span><strong>{metadata.title}</strong>{metadata.path && <small title={metadata.path}>{metadata.path}</small>}</span>
+          <em>{metadata.label}</em>
         </div>
-        <button className="icon-button" type="button" title="关闭预览" aria-label="关闭预览" onClick={onClose}><X size={18} /></button>
+        <div className="content-preview-actions">
+          {dynamic && <button className="icon-button" type="button" aria-label={paused ? "继续动态预览" : "暂停动态预览"} title={paused ? "继续" : "暂停"} onClick={() => { postPreviewAction(paused ? DYNAMIC_PREVIEW_ACTIONS.resume : DYNAMIC_PREVIEW_ACTIONS.pause); setPaused((current) => !current); }}>{paused ? <Play size={16} /> : <Pause size={16} />}</button>}
+          <button className="icon-button" type="button" title="关闭预览" aria-label="关闭预览" onClick={onClose}><X size={18} /></button>
+        </div>
       </header>
-      <div className="artifact-content" onMouseDown={(event) => event.stopPropagation()}>
-        <iframe
-          ref={frameRef}
-          title={artifact.title}
-          sandbox={artifactSandbox(artifact)}
-          referrerPolicy="no-referrer"
-          srcDoc={source}
-          onLoad={handleLoad}
-        />
+      <div className="content-preview-body">
+        {artifact && <iframe ref={frameRef} title={artifact.title} sandbox={artifactSandbox(artifact)} referrerPolicy="no-referrer" srcDoc={buildArtifactPreviewSource(artifact)} onLoad={handleLoad} />}
+        {!artifact && target.type === "file" && <FilePreviewContent file={target.file} onOpenArtifact={onOpenArtifact} />}
+        {target.type === "diff" && <div className="preview-scroll preview-diff"><DiffView patch={target.patch} /></div>}
+        {target.type === "loading" && <div className="preview-empty"><LoaderCircle className="spinning" size={26} /><strong>正在读取文件</strong><span>{target.path}</span></div>}
+        {target.type === "error" && <div className="preview-empty preview-error"><AlertCircle size={26} /><strong>无法打开预览</strong><span>{target.message}</span></div>}
       </div>
-      <footer className="artifact-footer"><ExternalLink size={14} />沙箱预览{dynamic && <button className="secondary-button artifact-preview-control" type="button" aria-pressed={paused} onClick={() => { postPreviewAction(paused ? DYNAMIC_PREVIEW_ACTIONS.resume : DYNAMIC_PREVIEW_ACTIONS.pause); setPaused((current) => !current); }}>{paused ? <Play size={13} /> : <Pause size={13} />}{paused ? "继续动态" : "暂停动态"}</button>}</footer>
-    </div>
+      <footer className="content-preview-footer">
+        <ShieldCheck size={13} />
+        <span>{artifact ? "沙箱预览" : target.type === "diff" ? "会话变更" : "只读预览"}</span>
+        {target.type === "file" && target.file.truncated && <em>已显示前 1 MB</em>}
+      </footer>
+    </aside>
   );
 }

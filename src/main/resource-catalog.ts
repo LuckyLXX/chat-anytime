@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { basename } from "node:path";
-import type { DefaultPackageManager, DefaultResourceLoader } from "@earendil-works/pi-coding-agent";
+import { basename, dirname } from "node:path";
+import { loadSkills, type DefaultPackageManager, type DefaultResourceLoader, type ResolvedResource, type Skill } from "@earendil-works/pi-coding-agent";
 import type {
   ExtensionOrigin,
   ExtensionSummary,
@@ -10,6 +10,8 @@ import type {
   ResourceScope,
   SkillSummary
 } from "../shared/protocol.js";
+import { canToggleSkillResource, skillResourceId } from "./skill-resources.js";
+import type { AgentSkillResource } from "./skill-resources.js";
 
 type ResourceLoaderCatalog = Pick<DefaultResourceLoader, "getExtensions" | "getSkills">;
 type PackageManagerCatalog = Pick<DefaultPackageManager, "listConfiguredPackages">;
@@ -21,6 +23,10 @@ export interface ResourceCatalogInput {
   mcpAdapterLoaded: boolean;
   extensionCandidates?: ExtensionSummary[];
   trustedExtensionIds?: string[];
+  skillResources?: Array<ResolvedResource | AgentSkillResource>;
+  workspace?: string;
+  agentDir?: string;
+  availablePackageUpdates?: string[];
 }
 
 export interface ResourceCatalogResult {
@@ -82,6 +88,20 @@ function resourceExtensionDigest(identity: string): string {
   return createHash("sha256").update(identity.replaceAll("\\", "/").toLowerCase()).digest("hex").slice(0, 20);
 }
 
+function resourcePathKey(path: string): string {
+  return path.replaceAll("\\", "/").toLowerCase();
+}
+
+function resolveSkillMetadata(resource: ResolvedResource, loadedSkills: Map<string, Skill>, workspace: string, agentDir: string): { skill?: Skill; diagnostics: string[] } {
+  const loaded = loadedSkills.get(resourcePathKey(resource.path));
+  if (loaded) return { skill: loaded, diagnostics: [] };
+  const result = loadSkills({ cwd: workspace, agentDir, skillPaths: [resource.path], includeDefaults: false });
+  return {
+    skill: result.skills[0],
+    diagnostics: result.diagnostics.map((item) => sanitizeResourceError(item.message))
+  };
+}
+
 export function resourceExtensionId(origin: ExtensionOrigin, scope: ResourceScope, identity: string): string {
   return `${origin}:${scope}:${resourceExtensionDigest(identity)}`;
 }
@@ -100,16 +120,41 @@ export function buildResourceCatalog(input: ResourceCatalogInput): ResourceCatal
   const trustedExtensionIds = new Set(input.trustedExtensionIds ?? []);
   const extensionCandidatesByDigest = new Map((input.extensionCandidates ?? []).map((candidate) => [candidate.id.split(":").at(-1), candidate]));
 
-  const skills: SkillSummary[] = skillResult.skills.map((skill) => {
+  const loadedSkills = new Map(skillResult.skills.map((skill) => [resourcePathKey(skill.filePath), skill]));
+  const includedSkillPaths = new Set<string>();
+  const resolvedSkillDiagnostics: string[] = [];
+  const skills: SkillSummary[] = (input.skillResources ?? []).map((resource) => {
+    const parsed = resolveSkillMetadata(resource, loadedSkills, input.workspace ?? process.cwd(), input.agentDir ?? process.cwd());
+    resolvedSkillDiagnostics.push(...parsed.diagnostics);
+    const skill = parsed.skill;
+    if (skill) includedSkillPaths.add(resourcePathKey(skill.filePath));
+    const scope = resourceScope(resource.metadata.scope, resource.metadata.origin);
+    return {
+      id: skillResourceId(resource.path),
+      name: skill?.name ?? (basename(resource.path).toLowerCase() === "skill.md" ? basename(dirname(resource.path)) : basename(resource.path)),
+      description: skill?.description ?? "已停用的 Skill",
+      source: resourceSource(resource.metadata.source, scope, resource.metadata.origin),
+      scope,
+      defaultEnabled: "defaultEnabled" in resource ? resource.defaultEnabled : resource.enabled,
+      enabled: resource.enabled,
+      toggleable: canToggleSkillResource(resource),
+      disableModelInvocation: skill?.disableModelInvocation ?? false
+    };
+  });
+  skills.push(...skillResult.skills.filter((skill) => !includedSkillPaths.has(resourcePathKey(skill.filePath))).map((skill) => {
     const scope = resourceScope(skill.sourceInfo.scope, skill.sourceInfo.origin);
     return {
+      id: skillResourceId(skill.filePath),
       name: skill.name,
       description: skill.description,
       source: resourceSource(skill.sourceInfo.source, scope, skill.sourceInfo.origin),
       scope,
+      defaultEnabled: true,
+      enabled: true,
+      toggleable: false,
       disableModelInvocation: skill.disableModelInvocation
     };
-  });
+  }));
 
   const extensions: ExtensionSummary[] = extensionResult.extensions.map((extension) => {
     const candidate = extensionCandidatesByDigest.get(resourceExtensionDigest(extension.resolvedPath || extension.path));
@@ -159,11 +204,13 @@ export function buildResourceCatalog(input: ResourceCatalogInput): ResourceCatal
     });
   });
 
+  const packageUpdates = new Set(input.availablePackageUpdates ?? []);
   const packages: PackageSummary[] = input.packageManager?.listConfiguredPackages().map((item) => ({
     source: isSafePackageSource(item.source) ? item.source : `本地 Pi Package（${basename(item.source)}）`,
     scope: item.scope === "project" ? "project" : "global",
     installed: Boolean(item.installedPath),
-    removable: isSafePackageSource(item.source)
+    removable: isSafePackageSource(item.source),
+    ...(packageUpdates.has(item.source) ? { updateAvailable: true } : {})
   })) ?? [];
 
   if (mcpAdapterLoaded && !packages.some((item) => item.source === "pi-mcp-adapter")) {
@@ -172,6 +219,7 @@ export function buildResourceCatalog(input: ResourceCatalogInput): ResourceCatal
 
   const diagnostics = [
     ...skillResult.diagnostics.map((item) => sanitizeResourceError(item.message)),
+    ...resolvedSkillDiagnostics,
     ...extensionResult.errors.map((item) => sanitizeResourceError(item.error))
   ].filter((message, index, list) => Boolean(message) && list.indexOf(message) === index);
 

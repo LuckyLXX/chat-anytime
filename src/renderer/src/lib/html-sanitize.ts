@@ -22,7 +22,7 @@ function isSafeUrl(value: string, property: string): boolean {
   if (property === "href" || property === "formAction" || property === "action") {
     return /^(?:https?:|mailto:|tel:|#|\/|\.\.?\/)/iu.test(normalized);
   }
-  return /^(?:https?:|data:image\/(?:png|gif|jpe?g|webp);|\/|\.\.?\/)/iu.test(normalized);
+  return /^(?:https?:|file:\/\/|data:image\/(?:png|gif|jpe?g|webp);|\/|\.\.?\/)/iu.test(normalized);
 }
 
 function sanitizeClassValue(value: unknown): string[] {

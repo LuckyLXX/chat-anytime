@@ -1,4 +1,4 @@
-import { PlugZap } from "lucide-react";
+import { PlugZap, Trash2 } from "lucide-react";
 import type { ReactNode } from "react";
 import type { ExtensionSummary, ResourceScope } from "../../../shared/protocol.js";
 
@@ -6,6 +6,9 @@ interface ExtensionResourceListProps {
   extensions: ExtensionSummary[];
   scopeLabels: Record<ResourceScope, string>;
   onApprove?(id: string): void;
+  onSetEnabled?(id: string, enabled: boolean): void;
+  onRevoke?(id: string): void;
+  busy?: boolean;
 }
 
 function isSubagentExtension(extension: ExtensionSummary): boolean {
@@ -27,6 +30,8 @@ function sourceLabel(extension: ExtensionSummary, scopeLabels: Record<ResourceSc
 function capabilityLabel(extension: ExtensionSummary): string {
   if (extension.error) return `加载失败：${extension.error}`;
   if (!extension.loaded) {
+    if (extension.approvalChanged) return "扩展代码已变更，需要重新批准后才能运行";
+    if (extension.trust === "trusted" && !extension.enabled) return "扩展已停用，保留授权但不会加载代码";
     return isSubagentExtension(extension)
       ? "启用后可以把独立任务交给子代理处理"
       : "启用后会在本机运行该扩展";
@@ -37,7 +42,7 @@ function capabilityLabel(extension: ExtensionSummary): string {
   return "扩展已加载";
 }
 
-export function ExtensionResourceList({ extensions, scopeLabels, onApprove }: ExtensionResourceListProps): ReactNode {
+export function ExtensionResourceList({ extensions, scopeLabels, onApprove, onSetEnabled, onRevoke, busy = false }: ExtensionResourceListProps): ReactNode {
   const manageableExtensions = extensions.filter((extension) => extension.origin !== "bundled");
   if (manageableExtensions.length === 0) return null;
 
@@ -56,14 +61,18 @@ export function ExtensionResourceList({ extensions, scopeLabels, onApprove }: Ex
             </div>
             <div className="resource-item-copy">
               <strong>{displayName(extension)}</strong>
-              <small>{sourceLabel(extension, scopeLabels)} · {extension.loaded ? "已启用" : extension.error ? "不可用" : "尚未启用"}</small>
+              <small>{sourceLabel(extension, scopeLabels)} · {extension.loaded ? "已启用" : extension.error ? "不可用" : extension.trust === "trusted" ? "已停用" : "尚未启用"}</small>
               <em>{capabilityLabel(extension)}</em>
             </div>
-            {!extension.loaded && !extension.error && extension.trust === "undecided" && onApprove && (
-              <button className="secondary-button compact-button" type="button" onClick={() => onApprove(extension.id)}>
-                {isSubagentExtension(extension) ? "启用子代理" : "启用扩展"}
-              </button>
-            )}
+            <div className="resource-extension-actions">
+              {!extension.loaded && !extension.error && extension.trust === "undecided" && onApprove && (
+                <button className="secondary-button compact-button" type="button" disabled={busy} onClick={() => onApprove(extension.id)}>
+                  {extension.approvalChanged ? "重新批准" : isSubagentExtension(extension) ? "启用子代理" : "启用扩展"}
+                </button>
+              )}
+              {extension.trust === "trusted" && onSetEnabled && <label className="resource-toggle"><input type="checkbox" checked={extension.enabled} disabled={busy} onChange={(event) => onSetEnabled(extension.id, event.target.checked)} /><span>启用</span></label>}
+              {extension.trust === "trusted" && onRevoke && <button className="icon-button resource-remove" type="button" title={`撤销 ${displayName(extension)} 的授权`} aria-label={`撤销 ${displayName(extension)} 的授权`} disabled={busy} onClick={() => onRevoke(extension.id)}><Trash2 size={14} /></button>}
+            </div>
           </div>
         ))}
       </div>

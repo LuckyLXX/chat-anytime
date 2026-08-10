@@ -1,7 +1,7 @@
 import { Check, Code2, Copy, Expand, Eye, EyeOff, FileCode2, ExternalLink, Pause, Play, X } from "lucide-react";
 import mermaid from "mermaid";
 import { isValidElement, useEffect, useId, useRef, useState, type ReactNode, type SyntheticEvent } from "react";
-import ReactMarkdown, { type Components } from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform, type Components, type UrlTransform } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
@@ -235,7 +235,7 @@ function MermaidBlock({ code, language }: { code: string; language: string }): R
   );
 }
 
-function CodeBlock({ language, code }: { language: string; code: string }): ReactNode {
+export function CodeBlock({ language, code }: { language: string; code: string }): ReactNode {
   const highlighted = language && hljs.getLanguage(language)
     ? hljs.highlight(code, { language }).value
     : hljs.highlightAuto(code).value;
@@ -356,6 +356,10 @@ function ArtifactCard({ artifact, onOpenArtifact }: { artifact: Artifact; onOpen
 const richSanitizeSchema: Schema = {
   ...defaultSchema,
   tagNames: [...(defaultSchema.tagNames ?? []), "style", "script"],
+  protocols: {
+    ...defaultSchema.protocols,
+    src: [...(defaultSchema.protocols?.src ?? []), "data", "file"]
+  },
   attributes: {
     ...defaultSchema.attributes,
     script: ["type"],
@@ -368,6 +372,12 @@ const richSanitizeSchema: Schema = {
       ["data-message", /^[^<>]{0,500}$/u]
     ]
   }
+};
+
+const richUrlTransform: UrlTransform = (url, key) => {
+  if ((key === "src" || key === "poster" || key === "xLinkHref") && /^file:\/\//iu.test(url)) return url;
+  if (key === "src" && /^data:image\/(?:png|gif|jpe?g|webp);/iu.test(url)) return url;
+  return defaultUrlTransform(url);
 };
 
 function markdownComponents(artifactIndex: { current: number }, artifactPrefix: string, onOpenArtifact: (artifact: Artifact) => void, dark: boolean, htmlBubble = false, onHtmlAction?: (text: string) => void): Components {
@@ -580,7 +590,7 @@ function DynamicHtmlBubble({ content, closed, streaming, artifactPrefix, onOpenA
 
   return (
     <div ref={scopeRef} className={`html-bubble ${scopeClass}`} data-html-bubble-runtime-key={sourceKeyRef.current || artifactPrefix}>
-      <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeRaw, [sanitizeRichHtmlTree, { allowStyleTags: true, allowBubbleScripts: true, scopeSelector }], [rehypeSanitize, richSanitizeSchema], rehypeKatex]} components={components}>
+      <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeRaw, [sanitizeRichHtmlTree, { allowStyleTags: true, allowBubbleScripts: true, scopeSelector }], [rehypeSanitize, richSanitizeSchema], rehypeKatex]} components={components} urlTransform={richUrlTransform}>
         {content}
       </ReactMarkdown>
     </div>
@@ -595,7 +605,7 @@ function MarkdownSurface({ content, htmlBubble, artifactPrefix, onOpenArtifact, 
   const scopeSelector = scopeClass ? `.${scopeClass}` : "";
   return (
     <div className={htmlBubble ? `html-bubble ${scopeClass}` : undefined}>
-      <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeRaw, [sanitizeRichHtmlTree, { allowStyleTags: Boolean(htmlBubble), scopeSelector }], [rehypeSanitize, richSanitizeSchema], rehypeKatex]} components={components}>
+      <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeRaw, [sanitizeRichHtmlTree, { allowStyleTags: Boolean(htmlBubble), scopeSelector }], [rehypeSanitize, richSanitizeSchema], rehypeKatex]} components={components} urlTransform={richUrlTransform}>
         {content}
       </ReactMarkdown>
     </div>

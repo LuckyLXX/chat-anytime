@@ -2,9 +2,11 @@ import { create } from "zustand";
 import type {
   CustomProviderModel,
   DesktopSettings,
+  ExtensionComposerRequest,
   ExtensionUiDialogRequest,
   ModelOption,
   PermissionRequest,
+  PackageProgress,
   ProviderOption,
   ProviderSettings,
   ResourceCatalog,
@@ -26,7 +28,9 @@ interface DesktopState {
   customModelFetchError?: string;
   permissions: PermissionRequest[];
   extensionUiDialogs: ExtensionUiDialogRequest[];
+  extensionComposerRequests: ExtensionComposerRequest[];
   extensionNotice?: { message: string; level: "info" | "warning" | "error" };
+  packageProgress?: PackageProgress;
   error?: string;
   initialize(): Promise<() => void>;
   handleRuntimeMessage(message: RuntimeMessage): void;
@@ -42,7 +46,9 @@ const emptySnapshot: RuntimeSnapshot = {
   status: "正在启动 Pi 运行时",
   messages: [],
   executions: [],
-  sessions: []
+  sessions: [],
+  extensionCommands: [],
+  extensionUi: { statuses: {}, widgets: [], workingVisible: true, unsupported: [] }
 };
 const emptySettings: DesktopSettings = { version: 2, thinkingLevel: "medium", accessMode: "ask", providers: [], agents: [], currentAgentId: "default", appearance: { theme: "system", themePreset: "default", customCss: "", customThemes: [], themeOverrides: { light: {}, dark: {} }, showThinking: true } };
 const emptyResources: ResourceCatalog = { skills: [], extensions: [], packages: [], mcpServers: [], mcpAdapterLoaded: false, diagnostics: [] };
@@ -55,6 +61,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   resources: emptyResources,
   permissions: [],
   extensionUiDialogs: [],
+  extensionComposerRequests: [],
   settings: emptySettings,
   customProviderKeyConfigured: false,
   customModels: [],
@@ -99,7 +106,8 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
               previous.turnTiming === incoming.turnTiming && previous.executions === incoming.executions &&
               previous.sessions === incoming.sessions && previous.model === incoming.model &&
               previous.sessionId === incoming.sessionId && previous.sessionFile === incoming.sessionFile &&
-              previous.thinkingLevel === incoming.thinkingLevel) {
+              previous.thinkingLevel === incoming.thinkingLevel && previous.extensionCommands === incoming.extensionCommands &&
+              previous.extensionUi === incoming.extensionUi) {
             // Nothing changed at all — keep the exact same snapshot reference
             // so downstream useMemo/useEffect dependency checks stay no-ops.
             return state;
@@ -146,6 +154,14 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
         break;
       case "extension-ui.notify":
         set({ extensionNotice: { message: message.message, level: message.level } });
+        break;
+      case "extension-ui.composer":
+        set((state) => state.extensionComposerRequests.some((request) => request.id === message.request.id)
+          ? state
+          : { extensionComposerRequests: [...state.extensionComposerRequests, message.request] });
+        break;
+      case "package-progress":
+        set({ packageProgress: message.progress });
         break;
       case "error":
         set({ error: message.message });

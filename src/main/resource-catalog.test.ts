@@ -1,3 +1,6 @@
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { DefaultPackageManager, DefaultResourceLoader } from "@earendil-works/pi-coding-agent";
 import { buildResourceCatalog, resourceExtensionId } from "./resource-catalog.js";
@@ -47,6 +50,31 @@ function packageManagerFixture(): Pick<DefaultPackageManager, "listConfiguredPac
 }
 
 describe("buildResourceCatalog", () => {
+  it("keeps disabled Skills visible and toggleable", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pidesktop-disabled-skill-"));
+    const skillDirectory = join(root, "skills", "review");
+    const skillPath = join(skillDirectory, "SKILL.md");
+    await mkdir(skillDirectory, { recursive: true });
+    await writeFile(skillPath, "---\nname: review\ndescription: Review code\n---\n\nReview the current changes.\n", "utf8");
+
+    const result = buildResourceCatalog({
+      resourceLoader: { getSkills: () => ({ skills: [], diagnostics: [] }) as never, getExtensions: () => ({ extensions: [], errors: [] }) as never },
+      skillResources: [{ path: skillPath, enabled: false, metadata: { source: "auto", scope: "user", origin: "top-level", baseDir: root } }],
+      workspace: root,
+      agentDir: root,
+      mcpServers: [],
+      mcpAdapterLoaded: false
+    });
+
+    expect(result.resources.skills).toEqual([expect.objectContaining({
+      name: "review",
+      description: "Review code",
+      defaultEnabled: false,
+      enabled: false,
+      toggleable: true
+    })]);
+  });
+
   it("keeps discovered extensions as candidates until approval", () => {
     const candidate = {
       id: "local:global:candidate",
@@ -126,6 +154,18 @@ describe("buildResourceCatalog", () => {
       installed: true,
       removable: true
     }]);
+  });
+
+  it("marks configured packages with available updates", () => {
+    const result = buildResourceCatalog({
+      resourceLoader: resourceLoaderFixture(),
+      packageManager: packageManagerFixture(),
+      mcpServers: [],
+      mcpAdapterLoaded: false,
+      availablePackageUpdates: ["npm:sample-extension"]
+    });
+
+    expect(result.resources.packages[0]).toMatchObject({ source: "npm:sample-extension", updateAvailable: true });
   });
 
   it("keeps approved Pi Package extensions in the package scope", () => {

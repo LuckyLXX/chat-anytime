@@ -32,6 +32,17 @@ describe("chat message layout", () => {
     expect(result.map((item) => item.id)).toEqual(["u1", "a1", "u2", "a2"]);
   });
 
+  it("keeps extension callouts as boundaries between assistant segments", () => {
+    const extension = { ...message("ext", "extension", "notice"), extension: { customType: "sample" } };
+    const result = groupAssistantMessages([
+      message("a1", "assistant", "before"),
+      extension,
+      message("a2", "assistant", "after")
+    ]);
+
+    expect(result.map((item) => item.role)).toEqual(["assistant", "extension", "assistant"]);
+  });
+
   it("keeps prose before and after the folded tool process", () => {
     const layout = splitAssistantToolLayout(message("a1", "assistant", "开始", [
       { type: "tool-call", id: "t1", name: "read", arguments: {} },

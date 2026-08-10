@@ -27,6 +27,21 @@ describe("assistant HTML sanitizer", () => {
     expect(tree.children[0]?.children?.[0]).toMatchObject({ tagName: "span" });
   });
 
+  it("allows local file URLs for media sources", () => {
+    const tree = {
+      type: "root",
+      children: [{
+        type: "element",
+        tagName: "img",
+        properties: { src: "file:///D:/Utools%E6%8F%92%E4%BB%B6/PiDesktop/poster.png" },
+        children: []
+      }]
+    };
+
+    sanitizeRichHtmlTree()(tree);
+    expect(tree.children[0]?.properties.src).toBe("file:///D:/Utools%E6%8F%92%E4%BB%B6/PiDesktop/poster.png");
+  });
+
   it("removes style tags unless the caller explicitly enables scoped styles", () => {
     const tree = {
       type: "root",

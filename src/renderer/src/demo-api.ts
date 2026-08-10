@@ -61,7 +61,8 @@ const demoSnapshot: RuntimeSnapshot = {
       timestamp: Date.now() - 12_000,
       blocks: [
         { type: "thinking", text: "我会先检查项目结构、运行时入口和桌面端边界，再整理结论。" },
-        { type: "tool-call", id: "demo-tool-read", name: "read", arguments: { path: "package.json" } },
+        { type: "tool-call", id: "tool-read", name: "read", arguments: { path: "package.json" } },
+        { type: "tool-call", id: "tool-edit", name: "edit", arguments: { path: "src/runtime.ts" } },
         {
           type: "text",
           text: `第一版包含三个清晰的进程边界：
@@ -126,7 +127,8 @@ flowchart LR
       startedAt: Date.now() - 14_000,
       completedAt: Date.now() - 13_400,
       output: "已更新 src/runtime.ts",
-      patch: "--- a/src/runtime.ts\n+++ b/src/runtime.ts\n@@ -12,3 +12,3 @@\n-status = idle\n+status = ready\n"
+      patch: "--- a/src/runtime.ts\n+++ b/src/runtime.ts\n@@ -12,3 +12,3 @@\n-status = idle\n+status = ready\n",
+      changedFile: { relativePath: "src/runtime.ts" }
     },
     {
       id: "tool-bash",
@@ -137,13 +139,15 @@ flowchart LR
       completedAt: Date.now() - 10_800,
       output: "TypeScript 检查通过\nElectron 渲染进程构建成功"
     }
-  ]
+  ],
+  extensionCommands: [],
+  extensionUi: { statuses: {}, widgets: [], workingVisible: true, unsupported: [] }
 };
 
 const demoResources: ResourceCatalog = {
   skills: [
-    { name: "code-review", description: "审查代码变更并整理风险与建议。", source: "用户资源", scope: "global", disableModelInvocation: false },
-    { name: "project-notes", description: "整理项目文档和工作记录。", source: "当前项目", scope: "project", disableModelInvocation: false }
+    { id: "skill:code-review", name: "code-review", description: "审查代码变更并整理风险与建议。", source: "用户资源", scope: "global", defaultEnabled: true, enabled: true, toggleable: true, disableModelInvocation: false },
+    { id: "skill:project-notes", name: "project-notes", description: "整理项目文档和工作记录。", source: "当前项目", scope: "project", defaultEnabled: true, enabled: true, toggleable: true, disableModelInvocation: false }
   ],
   extensions: [{
     id: "bundled:bundled:PiDesktop 内置:pi-mcp-adapter",
@@ -184,6 +188,14 @@ function activeDemoAgent(): AgentProfile {
     ?? demoDefaultAgent;
 }
 
+function applyDemoAgentSkillOverrides(): void {
+  const overrides = activeDemoAgent().skillOverrides;
+  demoResources.skills = demoResources.skills.map((skill) => ({
+    ...skill,
+    enabled: overrides?.[skill.id] ?? skill.defaultEnabled
+  }));
+}
+
 export function createDemoApi(): DesktopApi {
   return {
     async bootstrap(): Promise<DesktopBootstrap> {
@@ -210,6 +222,15 @@ export function createDemoApi(): DesktopApi {
       return demoSnapshot.workspace ?? "D:\\Projects\\chat-anytime-demo";
     },
     async chooseAttachments(): Promise<import("../../shared/protocol").PromptAttachment[]> { return []; },
+    async readWorkspaceFile(relativePath: string): Promise<import("../../shared/protocol").WorkspaceFilePreview> {
+      if (relativePath === "src/runtime.ts") {
+        return { relativePath, name: "runtime.ts", kind: "code", language: "typescript", size: 96, content: "export const runtime = {\n  status: \"ready\",\n  process: \"utility\"\n};\n" };
+      }
+      if (relativePath === "README.md") {
+        return { relativePath, name: "README.md", kind: "markdown", language: "markdown", size: 70, content: "# Pi Desktop\n\n- Electron 主进程\n- Pi 工具进程\n- React 渲染进程\n" };
+      }
+      throw new Error(`找不到演示文件：${relativePath}`);
+    },
     async send(command: RuntimeCommand): Promise<void> {
       switch (command.type) {
         case "thinking.select":
@@ -224,12 +245,18 @@ export function createDemoApi(): DesktopApi {
         case "agent.select":
           demoSettings.currentAgentId = command.agentId;
           updateSnapshot({ agentId: command.agentId, agentName: activeDemoAgent().name, sessionId: `${command.agentId}-demo-session`, messages: [] });
+          applyDemoAgentSkillOverrides();
+          emit({ type: "resources", resources: structuredClone(demoResources) });
           break;
         case "agent.save": {
           const index = demoSettings.agents.findIndex((agent) => agent.id === command.agent.id);
           if (index >= 0) demoSettings.agents[index] = structuredClone(command.agent);
           else demoSettings.agents.push(structuredClone(command.agent));
-          if (demoSettings.currentAgentId === command.agent.id) updateSnapshot({ agentName: command.agent.name });
+          if (demoSettings.currentAgentId === command.agent.id) {
+            updateSnapshot({ agentName: command.agent.name });
+            applyDemoAgentSkillOverrides();
+            emit({ type: "resources", resources: structuredClone(demoResources) });
+          }
           break;
         }
         case "agent.archive": {
@@ -238,6 +265,8 @@ export function createDemoApi(): DesktopApi {
           if (demoSettings.currentAgentId === command.agentId) {
             demoSettings.currentAgentId = "default";
             updateSnapshot({ agentId: "default", agentName: demoDefaultAgent.name, sessionId: "default-demo-session", messages: [] });
+            applyDemoAgentSkillOverrides();
+            emit({ type: "resources", resources: structuredClone(demoResources) });
           }
           break;
         }
@@ -257,14 +286,20 @@ export function createDemoApi(): DesktopApi {
         case "session.open":
           updateSnapshot({ workspace: command.workspace ?? demoSnapshot.workspace, sessionId: command.path.replace(/.*[\\/]/u, "").replace(/\.jsonl$/u, ""), messages: [], executions: [] });
           break;
-        case "session.compact":
-          updateSnapshot({ busy: true, status: "Pi 正在压缩上下文" });
+        case "session.compact": {
+          const timestamp = Date.now();
+          updateSnapshot({
+            busy: true,
+            status: "Pi 正在压缩上下文",
+            messages: [...demoSnapshot.messages, { id: `demo-compact-command-${timestamp}`, role: "user", control: "compact", timestamp, blocks: [{ type: "text", text: command.instructions ? `/compact ${command.instructions}` : "/compact" }] }]
+          });
           setTimeout(() => updateSnapshot({
             busy: false,
             status: "就绪",
-            messages: [...demoSnapshot.messages, { id: `demo-compacted-${Date.now()}`, role: "assistant", timestamp: Date.now(), blocks: [{ type: "text", text: command.instructions ? `已压缩上下文（${command.instructions}）。` : "已压缩上下文。" }] }]
+            messages: [...demoSnapshot.messages, { id: `demo-compacted-${Date.now()}`, role: "assistant", control: "compact", timestamp: Date.now(), blocks: [{ type: "text", text: "已压缩上下文。" }] }]
           }), 80);
           break;
+        }
         case "session.prompt":
           updateSnapshot({
             messages: [...demoSnapshot.messages, { id: `user-${Date.now()}`, role: "user", timestamp: Date.now(), blocks: [{ type: "text", text: command.text }] }]
@@ -329,6 +364,25 @@ export function createDemoApi(): DesktopApi {
         case "resources.package.remove":
           demoResources.packages = demoResources.packages.filter((item) => item.source !== command.source || !item.removable);
           emit({ type: "resources", resources: structuredClone(demoResources) });
+          break;
+        case "resources.package.check-updates":
+          emit({ type: "package-progress", progress: { type: "complete", action: "update", source: "全部 Package", message: "当前已是最新版本" } });
+          break;
+        case "resources.package.update":
+          emit({ type: "package-progress", progress: { type: "complete", action: "update", source: command.source ?? "全部 Package" } });
+          break;
+        case "resources.extension.set-enabled": {
+          const extension = demoResources.extensions.find((item) => item.id === command.id);
+          if (extension) { extension.enabled = command.enabled; extension.loaded = command.enabled; }
+          emit({ type: "resources", resources: structuredClone(demoResources) });
+          break;
+        }
+        case "resources.extension.revoke":
+          demoResources.extensions = demoResources.extensions.map((item) => item.id === command.id ? { ...item, trust: "undecided", enabled: false, loaded: false } : item);
+          emit({ type: "resources", resources: structuredClone(demoResources) });
+          break;
+        case "composer.sync":
+        case "session.extension-command":
           break;
         case "mcp.server.save": {
           const existing = demoResources.mcpServers.find((item) => item.name === command.server.name);

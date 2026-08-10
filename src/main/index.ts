@@ -3,8 +3,9 @@ import { readFile, realpath, stat } from "node:fs/promises";
 import { extname, join, resolve } from "node:path";
 import { app, BrowserWindow, dialog, ipcMain, Menu, safeStorage, utilityProcess, type UtilityProcess } from "electron";
 import { migrateSettings } from "./settings.js";
-import { workspaceRelativeAttachment } from "./attachments.js";
-import type { DesktopBootstrap, DesktopSettings, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot } from "../shared/protocol.js";
+import { importExternalAttachment, workspaceRelativeAttachment } from "./attachments.js";
+import type { DesktopBootstrap, DesktopSettings, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot, WorkspaceFilePreview } from "../shared/protocol.js";
+import { readWorkspaceFilePreview } from "./workspace-preview.js";
 
 let mainWindow: BrowserWindow | undefined;
 let runtimeProcess: UtilityProcess | undefined;
@@ -28,6 +29,7 @@ const imageMimeByExtension: Record<string, string> = { ".png": "image/png", ".jp
 
 async function readAttachmentSelection(paths: string[], workspace?: string): Promise<PromptAttachment[]> {
   const root = workspace ? resolve(workspace) : undefined;
+  const rootReal = root ? await realpath(root) : undefined;
   const result: PromptAttachment[] = [];
   for (const path of paths) {
     const info = await stat(path);
@@ -40,11 +42,15 @@ async function readAttachmentSelection(paths: string[], workspace?: string): Pro
       result.push({ kind: "image", name, mimeType, size: info.size, data });
       continue;
     }
-    if (!root) throw new Error(`项目文件必须位于当前工作区内：${name}`);
+    if (!root || !rootReal) throw new Error(`请先打开工作区，再添加项目文件：${name}`);
     const candidate = resolve(path);
-    const rootReal = await realpath(root);
     const candidateReal = await realpath(candidate);
-    const relativePath = workspaceRelativeAttachment(rootReal, candidateReal);
+    let relativePath: string;
+    try {
+      relativePath = workspaceRelativeAttachment(rootReal, candidateReal);
+    } catch {
+      relativePath = await importExternalAttachment(rootReal, candidateReal);
+    }
     result.push({ kind: "file", name, path: relativePath, relativePath, size: info.size });
   }
   return result;
@@ -157,9 +163,10 @@ function startRuntime(): void {
   sendToRuntime({ type: "initialize", settings, apiKeys: credentialsCache });
 }
 function createWindow(): void {
-  mainWindow = new BrowserWindow({ width: 1440, height: 920, minWidth: 1040, minHeight: 680, backgroundColor: "#f5f5f2", titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default", webPreferences: { preload: join(__dirname, "../preload/index.cjs"), contextIsolation: true, nodeIntegration: false, sandbox: true } });
+  const rendererUrl = process.env.ELECTRON_RENDERER_URL;
+  mainWindow = new BrowserWindow({ width: 1440, height: 920, minWidth: 1040, minHeight: 680, backgroundColor: "#f5f5f2", titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default", webPreferences: { preload: join(__dirname, "../preload/index.cjs"), contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: !rendererUrl } });
   mainWindow.webContents.setWindowOpenHandler(({ url }) => { void import("electron").then(({ shell }) => shell.openExternal(url)); return { action: "deny" }; });
-  if (process.env.ELECTRON_RENDERER_URL) void mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL); else void mainWindow.loadFile(join(__dirname, "../renderer/index.html"));
+  if (rendererUrl) void mainWindow.loadURL(rendererUrl); else void mainWindow.loadFile(join(__dirname, "../renderer/index.html"));
 }
 function registerIpc(): void {
   ipcMain.handle("desktop:bootstrap", (): DesktopBootstrap => {
@@ -169,6 +176,12 @@ function registerIpc(): void {
   });
   ipcMain.handle("desktop:choose-workspace", async (): Promise<string | undefined> => { const result = mainWindow ? await dialog.showOpenDialog(mainWindow, { title: "选择项目工作区", properties: ["openDirectory", "createDirectory"] }) : await dialog.showOpenDialog({ title: "选择项目工作区", properties: ["openDirectory", "createDirectory"] }); return result.canceled ? undefined : result.filePaths[0]; });
   ipcMain.handle("desktop:choose-attachments", async (_event, workspace?: string): Promise<PromptAttachment[]> => { const result = mainWindow ? await dialog.showOpenDialog(mainWindow, { title: "添加附件", properties: ["openFile", "multiSelections"], filters: [{ name: "图片和项目文件", extensions: ["png", "jpg", "jpeg", "webp", "gif", "*" ] }] }) : await dialog.showOpenDialog({ properties: ["openFile", "multiSelections"] }); return result.canceled ? [] : readAttachmentSelection(result.filePaths, workspace); });
+  ipcMain.handle("desktop:read-workspace-file", async (_event, relativePath: string): Promise<WorkspaceFilePreview> => {
+    const workspace = loadSettings().workspace;
+    if (!workspace) throw new Error("请先打开工作区，再预览文件");
+    if (typeof relativePath !== "string") throw new Error("预览文件路径无效");
+    return readWorkspaceFilePreview(workspace, relativePath);
+  });
   ipcMain.handle("runtime:send", (_event, command: RuntimeCommand): void => { updateSettings(command); sendToRuntime(command); });
 }
 app.whenReady().then(() => { Menu.setApplicationMenu(null); registerIpc(); startRuntime(); createWindow(); app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); }); });

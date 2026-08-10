@@ -56,6 +56,8 @@ export interface AgentProfile {
   defaultModel?: { provider: string; id: string };
   defaultThinkingLevel: ThinkingLevel;
   tools: Record<BuiltinToolName, boolean>;
+  /** Agent-owned Skill enablement layered over Pi's discovered defaults. */
+  skillOverrides?: Record<string, boolean>;
   archived?: boolean;
 }
 
@@ -147,9 +149,12 @@ export interface ChatMessage {
    * Omitted on snapshots produced before this field existed.
    */
   uuid?: string;
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "extension";
   timestamp: number;
   blocks: MessageBlock[];
+  extension?: { customType: string; details?: unknown };
+  /** Desktop-generated control messages are visible but not editable or regenerable. */
+  control?: "compact";
   skill?: { name: string };
   attachments?: Array<{ kind: PromptAttachment["kind"]; name: string; relativePath?: string }>;
   streaming?: boolean;
@@ -171,6 +176,22 @@ export interface ToolExecution {
   completedAt?: number;
   output?: string;
   patch?: string;
+  /** Workspace-relative file changed by a write/edit tool. */
+  changedFile?: { relativePath: string };
+}
+
+export type WorkspaceFilePreviewKind = "markdown" | "code" | "html" | "svg" | "image" | "text" | "binary";
+
+export interface WorkspaceFilePreview {
+  relativePath: string;
+  name: string;
+  kind: WorkspaceFilePreviewKind;
+  size: number;
+  language?: string;
+  mimeType?: string;
+  content?: string;
+  data?: string;
+  truncated?: boolean;
 }
 
 export interface SessionSummary {
@@ -190,10 +211,14 @@ export type ExtensionExecutionMode = "native" | "restricted-host";
 export type ExtensionCompatibility = "full" | "partial" | "unsupported" | "unknown";
 
 export interface SkillSummary {
+  id: string;
   name: string;
   description: string;
   source: string;
   scope: ResourceScope;
+  defaultEnabled: boolean;
+  enabled: boolean;
+  toggleable: boolean;
   disableModelInvocation: boolean;
 }
 
@@ -211,6 +236,7 @@ export interface ExtensionSummary {
   tools: string[];
   commands: string[];
   loaded: boolean;
+  approvalChanged?: boolean;
   error?: string;
 }
 
@@ -219,6 +245,42 @@ export interface PackageSummary {
   scope: "global" | "project" | "bundled";
   installed: boolean;
   removable: boolean;
+  updateAvailable?: boolean;
+}
+
+export interface PackageProgress {
+  type: "start" | "progress" | "complete" | "error";
+  action: "install" | "remove" | "update" | "clone" | "pull";
+  source: string;
+  message?: string;
+}
+
+export interface ExtensionCommandSummary {
+  name: string;
+  description?: string;
+  source: string;
+}
+
+export interface ExtensionWidgetState {
+  key: string;
+  lines: string[];
+  placement: "aboveEditor" | "belowEditor";
+}
+
+export interface ExtensionUiState {
+  statuses: Record<string, string>;
+  widgets: ExtensionWidgetState[];
+  title?: string;
+  workingMessage?: string;
+  workingVisible: boolean;
+  hiddenThinkingLabel?: string;
+  unsupported: string[];
+}
+
+export interface ExtensionComposerRequest {
+  id: string;
+  method: "setEditorText" | "pasteToEditor";
+  text: string;
 }
 
 export type McpServerStatus = "connected" | "cached" | "failed" | "needs-auth" | "not-connected" | "disabled";
@@ -267,6 +329,8 @@ export interface RuntimeSnapshot {
   messages: ChatMessage[];
   executions: ToolExecution[];
   sessions: SessionSummary[];
+  extensionCommands: ExtensionCommandSummary[];
+  extensionUi: ExtensionUiState;
 }
 
 export interface ExecutionPrincipal {
@@ -312,6 +376,8 @@ export type RuntimeCommand =
   | { type: "session.regenerate"; text: string; timestamp?: number; skillName?: string; attachments?: PromptAttachment[] }
   | { type: "session.compact"; instructions?: string }
   | { type: "session.abort" }
+  | { type: "session.extension-command"; name: string; args?: string }
+  | { type: "composer.sync"; text: string }
   | { type: "agent.select"; agentId: string }
   | { type: "agent.save"; agent: AgentProfile }
   | { type: "agent.archive"; agentId: string; archived: boolean }
@@ -325,7 +391,11 @@ export type RuntimeCommand =
   | { type: "appearance.save"; appearance: AppearanceSettings }
   | { type: "resources.package.install"; source: string }
   | { type: "resources.package.remove"; source: string; scope?: "global" | "project" }
+  | { type: "resources.package.check-updates" }
+  | { type: "resources.package.update"; source?: string }
   | { type: "resources.extension.approve"; id: string }
+  | { type: "resources.extension.set-enabled"; id: string; enabled: boolean }
+  | { type: "resources.extension.revoke"; id: string }
   | { type: "resources.reload" }
   | { type: "mcp.server.save"; server: McpServerConfigDraft }
   | { type: "mcp.server.toggle"; name: string; enabled: boolean }
@@ -343,6 +413,8 @@ export type RuntimeMessage =
   | { type: "extension-ui.request"; request: ExtensionUiDialogRequest }
   | { type: "extension-ui.dismiss"; id: string }
   | { type: "extension-ui.notify"; message: string; level: "info" | "warning" | "error" }
+  | { type: "extension-ui.composer"; request: ExtensionComposerRequest }
+  | { type: "package-progress"; progress: PackageProgress }
   | { type: "error"; message: string }
   | { type: "log"; level: "info" | "warn"; message: string };
 
@@ -360,6 +432,7 @@ export interface DesktopApi {
   bootstrap(): Promise<DesktopBootstrap>;
   chooseWorkspace(): Promise<string | undefined>;
   chooseAttachments(workspace?: string): Promise<PromptAttachment[]>;
+  readWorkspaceFile(relativePath: string): Promise<WorkspaceFilePreview>;
   send(command: RuntimeCommand): Promise<void>;
   onRuntimeMessage(listener: (message: RuntimeMessage) => void): () => void;
 }
