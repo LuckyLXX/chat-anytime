@@ -12,6 +12,7 @@ import {
   FileDiff,
   Folder,
   FolderOpen,
+  Globe2,
   KeyRound,
   Layers,
   LoaderCircle,
@@ -94,6 +95,15 @@ const accessModeDescriptions: Record<AccessMode, string> = {
   workspace: "工作区内文件写入自动允许",
   full: "自动允许全部工具操作"
 };
+
+function previewTargetKey(target: PreviewTarget): string {
+  switch (target.type) {
+    case "artifact": return target.artifact.id;
+    case "browser": return "browser";
+    case "file": return target.file.relativePath;
+    default: return `${target.type}-${target.path ?? target.title}`;
+  }
+}
 const agentTools: BuiltinToolName[] = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 const themeColorFields: readonly { key: ThemeColorKey; label: string }[] = [
   { key: "accent", label: "主题色" },
@@ -1139,6 +1149,7 @@ export function App(): ReactNode {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [accessModeMenuOpen, setAccessModeMenuOpen] = useState(false);
   const [composerMenu, setComposerMenu] = useState<"model" | "thinking">();
+  const [previewMenuOpen, setPreviewMenuOpen] = useState(false);
   const [preview, setPreview] = useState<PreviewTarget>();
   const [previewSplit, setPreviewSplit] = useState(readStoredPreviewSplit);
   const [previewDragging, setPreviewDragging] = useState(false);
@@ -1146,6 +1157,7 @@ export function App(): ReactNode {
   const [attachmentError, setAttachmentError] = useState<string>();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const accessModeMenuRef = useRef<HTMLDivElement>(null);
+  const previewMenuRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLFormElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const processedComposerRequestsRef = useRef(new Set<string>());
@@ -1312,14 +1324,16 @@ export function App(): ReactNode {
   }, [snapshot.sessionId]);
 
   useEffect(() => {
-    if (!accessModeMenuOpen && !composerMenu) return;
+    if (!accessModeMenuOpen && !composerMenu && !previewMenuOpen) return;
     const closeOnPointerDown = (event: PointerEvent): void => {
       if (!accessModeMenuRef.current?.contains(event.target as Node)) setAccessModeMenuOpen(false);
+      if (!previewMenuRef.current?.contains(event.target as Node)) setPreviewMenuOpen(false);
       if (!composerRef.current?.contains(event.target as Node)) setComposerMenu(undefined);
     };
     const closeOnEscape = (event: KeyboardEvent): void => {
       if (event.key === "Escape") {
         setAccessModeMenuOpen(false);
+        setPreviewMenuOpen(false);
         setComposerMenu(undefined);
       }
     };
@@ -1329,7 +1343,7 @@ export function App(): ReactNode {
       document.removeEventListener("pointerdown", closeOnPointerDown);
       document.removeEventListener("keydown", closeOnEscape);
     };
-  }, [accessModeMenuOpen, composerMenu]);
+  }, [accessModeMenuOpen, composerMenu, previewMenuOpen]);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -1540,6 +1554,26 @@ export function App(): ReactNode {
     previewRequestRef.current += 1;
     setRightPanel(false);
     setPreview({ type: "artifact", artifact });
+  }
+
+  function openBrowserPreview(): void {
+    previewRequestRef.current += 1;
+    setPreviewMenuOpen(false);
+    setRightPanel(false);
+    setPreview({ type: "browser" });
+  }
+
+  async function openManualFilePreview(): Promise<void> {
+    setPreviewMenuOpen(false);
+    try {
+      const file = await window.piDesktop.choosePreviewFile();
+      if (!file) return;
+      previewRequestRef.current += 1;
+      setRightPanel(false);
+      setPreview({ type: "file", file });
+    } catch (error) {
+      setMessageActionError(error instanceof Error ? error.message : "无法打开预览文件");
+    }
   }
 
   async function openFilePreview(relativePath: string): Promise<void> {
@@ -1789,6 +1823,13 @@ export function App(): ReactNode {
           <div className="project-title"><Folder size={17} /><span><strong>{snapshot.workspace?.split(/[\\/]/u).at(-1) ?? "ChatAnyTime"}</strong><small>{snapshot.agentName} · {snapshot.sessionId ? "当前话题" : "未开始话题"}</small></span></div>
           <div className="runtime-controls">
             <button className="workspace-top-button" type="button" onClick={() => void openWorkspace()}><FolderOpen size={15} /><span>工作区</span><strong>{compactPath(snapshot.workspace)}</strong><ChevronDown size={13} /></button>
+            <div className="preview-open-menu-shell" ref={previewMenuRef}>
+              <button className="preview-open-trigger" type="button" aria-haspopup="menu" aria-expanded={previewMenuOpen} onClick={() => setPreviewMenuOpen((open) => !open)}><Eye size={15} /><span>打开预览</span><ChevronDown size={13} /></button>
+              {previewMenuOpen && <div className="preview-open-menu" role="menu" aria-label="打开预览">
+                <button type="button" role="menuitem" onClick={openBrowserPreview}><Globe2 size={16} /><span>浏览器</span></button>
+                <button type="button" role="menuitem" disabled={!snapshot.workspace} onClick={() => void openManualFilePreview()}><File size={16} /><span>文件</span></button>
+              </div>}
+            </div>
             {!preview && <button className="icon-button panel-toggle" type="button" aria-label={rightPanel ? "关闭活动面板" : "打开活动面板"} title={rightPanel ? "关闭活动面板" : "打开活动面板"} onClick={() => setRightPanel((open) => !open)}>{rightPanel ? <PanelRightClose size={18} /> : <PanelRightOpen size={18} />}</button>}
           </div>
         </header>
@@ -1889,7 +1930,7 @@ export function App(): ReactNode {
               <ActivityPanel executions={snapshot.executions} onOpenDiff={openDiffPreview} />
             </aside>
           )}
-          {preview && <ArtifactPreview key={preview.type === "artifact" ? preview.artifact.id : preview.type === "file" ? preview.file.relativePath : `${preview.type}-${preview.path ?? preview.title}`} target={preview} onClose={closePreview} onOpenArtifact={openArtifactPreview} />}
+          {preview && <ArtifactPreview key={previewTargetKey(preview)} target={preview} browserSuspended={previewDragging || previewMenuOpen || settingsOpen || Boolean(permission) || Boolean(extensionUiDialog) || Boolean(messageActionError)} onClose={closePreview} onOpenArtifact={openArtifactPreview} />}
         </div>
       </main>
 

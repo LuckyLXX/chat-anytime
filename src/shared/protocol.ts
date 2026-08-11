@@ -194,6 +194,34 @@ export interface WorkspaceFilePreview {
   truncated?: boolean;
 }
 
+export interface BrowserPreviewBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface BrowserPreviewState {
+  attached: boolean;
+  url: string;
+  title: string;
+  loading: boolean;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  error?: string;
+}
+
+export type BrowserPreviewCommand =
+  | { type: "bounds"; bounds: BrowserPreviewBounds }
+  | { type: "visible"; visible: boolean }
+  | { type: "navigate"; url: string }
+  | { type: "back" }
+  | { type: "forward" }
+  | { type: "reload" }
+  | { type: "stop" }
+  | { type: "open-external" }
+  | { type: "close" };
+
 export interface SessionSummary {
   id: string;
   path: string;
@@ -432,7 +460,10 @@ export interface DesktopApi {
   bootstrap(): Promise<DesktopBootstrap>;
   chooseWorkspace(): Promise<string | undefined>;
   chooseAttachments(workspace?: string): Promise<PromptAttachment[]>;
+  choosePreviewFile(): Promise<WorkspaceFilePreview | undefined>;
   readWorkspaceFile(relativePath: string): Promise<WorkspaceFilePreview>;
+  browserPreview(command: BrowserPreviewCommand): Promise<BrowserPreviewState>;
   send(command: RuntimeCommand): Promise<void>;
   onRuntimeMessage(listener: (message: RuntimeMessage) => void): () => void;
+  onBrowserPreviewState(listener: (state: BrowserPreviewState) => void): () => void;
 }

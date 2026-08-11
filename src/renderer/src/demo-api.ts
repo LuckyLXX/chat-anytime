@@ -1,5 +1,7 @@
 import type {
   AgentProfile,
+  BrowserPreviewCommand,
+  BrowserPreviewState,
   DesktopApi,
   DesktopBootstrap,
   DesktopSettings,
@@ -11,6 +13,8 @@ import type {
 } from "../../shared/protocol";
 
 const listeners = new Set<(message: RuntimeMessage) => void>();
+const browserPreviewListeners = new Set<(state: BrowserPreviewState) => void>();
+let browserPreviewState: BrowserPreviewState = { attached: false, url: "", title: "", loading: false, canGoBack: false, canGoForward: false };
 
 const demoDefaultAgent: AgentProfile = {
   id: "default",
@@ -177,6 +181,18 @@ function emit(message: RuntimeMessage): void {
   for (const listener of listeners) listener(message);
 }
 
+function emitBrowserPreview(update: Partial<BrowserPreviewState>): BrowserPreviewState {
+  browserPreviewState = { ...browserPreviewState, ...update };
+  for (const listener of browserPreviewListeners) listener(structuredClone(browserPreviewState));
+  return structuredClone(browserPreviewState);
+}
+
+function normalizeDemoBrowserUrl(input: string): string {
+  const value = input.trim();
+  const local = /^(?:localhost|127(?:\.\d{1,3}){3}|0\.0\.0\.0|\[::1\])(?::\d+)?(?:[/?#]|$)/iu.test(value);
+  return /^[a-z][a-z\d+.-]*:\/\//iu.test(value) ? value : `${local ? "http" : "https"}://${value}`;
+}
+
 function updateSnapshot(update: Partial<RuntimeSnapshot>): void {
   Object.assign(demoSnapshot, update);
   emit({ type: "state", snapshot: structuredClone(demoSnapshot) });
@@ -222,6 +238,9 @@ export function createDemoApi(): DesktopApi {
       return demoSnapshot.workspace ?? "D:\\Projects\\chat-anytime-demo";
     },
     async chooseAttachments(): Promise<import("../../shared/protocol").PromptAttachment[]> { return []; },
+    async choosePreviewFile(): Promise<import("../../shared/protocol").WorkspaceFilePreview> {
+      return { relativePath: "README.md", name: "README.md", kind: "markdown", language: "markdown", size: 70, content: "# Pi Desktop\n\n- Electron 主进程\n- Pi 工具进程\n- React 渲染进程\n" };
+    },
     async readWorkspaceFile(relativePath: string): Promise<import("../../shared/protocol").WorkspaceFilePreview> {
       if (relativePath === "src/runtime.ts") {
         return { relativePath, name: "runtime.ts", kind: "code", language: "typescript", size: 96, content: "export const runtime = {\n  status: \"ready\",\n  process: \"utility\"\n};\n" };
@@ -230,6 +249,16 @@ export function createDemoApi(): DesktopApi {
         return { relativePath, name: "README.md", kind: "markdown", language: "markdown", size: 70, content: "# Pi Desktop\n\n- Electron 主进程\n- Pi 工具进程\n- React 渲染进程\n" };
       }
       throw new Error(`找不到演示文件：${relativePath}`);
+    },
+    async browserPreview(command: BrowserPreviewCommand): Promise<BrowserPreviewState> {
+      if (command.type === "close") {
+        return emitBrowserPreview({ attached: false, url: "", title: "", loading: false, canGoBack: false, canGoForward: false, error: undefined });
+      }
+      if (command.type === "navigate") {
+        const url = normalizeDemoBrowserUrl(command.url);
+        return emitBrowserPreview({ attached: false, url, title: "浏览器演示", loading: false, error: "网页内容仅在 Electron 桌面窗口中显示" });
+      }
+      return structuredClone(browserPreviewState);
     },
     async send(command: RuntimeCommand): Promise<void> {
       switch (command.type) {
@@ -406,6 +435,10 @@ export function createDemoApi(): DesktopApi {
     onRuntimeMessage(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);
+    },
+    onBrowserPreviewState(listener) {
+      browserPreviewListeners.add(listener);
+      return () => browserPreviewListeners.delete(listener);
     }
   };
 }

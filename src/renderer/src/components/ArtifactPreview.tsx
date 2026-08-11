@@ -1,12 +1,14 @@
-import { AlertCircle, Code2, FileCode2, FileText, LoaderCircle, Pause, Play, ShieldCheck, X } from "lucide-react";
+import { AlertCircle, Code2, FileCode2, FileText, Globe2, LoaderCircle, Pause, Play, ShieldCheck, X } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode, type SyntheticEvent } from "react";
 import type { WorkspaceFilePreview } from "../../../shared/protocol";
 import { artifactSandbox, buildArtifactPreviewSource, DYNAMIC_PREVIEW_ACTIONS, isDynamicArtifact, type Artifact, type DynamicPreviewAction } from "../lib/content";
 import { DiffView } from "./DiffView";
 import { CodeBlock, RichContent } from "./RichContent";
+import { BrowserPreview } from "./BrowserPreview";
 
 export type PreviewTarget =
   | { type: "artifact"; artifact: Artifact }
+  | { type: "browser" }
   | { type: "file"; file: WorkspaceFilePreview }
   | { type: "diff"; title: string; path?: string; patch: string }
   | { type: "loading"; title: string; path: string }
@@ -24,9 +26,23 @@ function targetArtifact(target: PreviewTarget): Artifact | undefined {
 
 function targetMetadata(target: PreviewTarget): { title: string; path?: string; label: string } {
   if (target.type === "artifact") return { title: target.artifact.title, label: target.artifact.language.toUpperCase() };
+  if (target.type === "browser") return { title: "内置浏览器", label: "WEB" };
   if (target.type === "file") return { title: target.file.name, path: target.file.relativePath, label: target.file.kind === "code" ? (target.file.language ?? "CODE").toUpperCase() : target.file.kind.toUpperCase() };
   if (target.type === "diff") return { title: target.title, path: target.path, label: "DIFF" };
   return { title: target.title, path: target.path, label: target.type === "loading" ? "LOADING" : "ERROR" };
+}
+
+function targetIcon(target: PreviewTarget): ReactNode {
+  if (target.type === "diff") return <Code2 size={17} />;
+  if (target.type === "browser") return <Globe2 size={17} />;
+  return <FileCode2 size={17} />;
+}
+
+function footerLabel(target: PreviewTarget, artifact?: Artifact): string {
+  if (artifact) return "沙箱预览";
+  if (target.type === "browser") return "隔离浏览器";
+  if (target.type === "diff") return "会话变更";
+  return "只读预览";
 }
 
 function FilePreviewContent({ file, onOpenArtifact }: { file: WorkspaceFilePreview; onOpenArtifact(artifact: Artifact): void }): ReactNode {
@@ -48,7 +64,7 @@ function FilePreviewContent({ file, onOpenArtifact }: { file: WorkspaceFilePrevi
   return <div className="preview-empty"><FileText size={28} /><strong>此文件无法预览</strong><span>{file.size.toLocaleString("zh-CN")} bytes</span></div>;
 }
 
-export function ArtifactPreview({ target, onClose, onOpenArtifact }: { target: PreviewTarget; onClose(): void; onOpenArtifact(artifact: Artifact): void }): ReactNode {
+export function ArtifactPreview({ target, browserSuspended, onClose, onOpenArtifact }: { target: PreviewTarget; browserSuspended?: boolean; onClose(): void; onOpenArtifact(artifact: Artifact): void }): ReactNode {
   const artifact = targetArtifact(target);
   const dynamic = Boolean(artifact && isDynamicArtifact(artifact));
   const metadata = targetMetadata(target);
@@ -84,7 +100,7 @@ export function ArtifactPreview({ target, onClose, onOpenArtifact }: { target: P
     <aside className="content-preview-panel" aria-label={`${metadata.title}预览`}>
       <header className="content-preview-header">
         <div className="content-preview-title">
-          {target.type === "diff" ? <Code2 size={17} /> : <FileCode2 size={17} />}
+          {targetIcon(target)}
           <span><strong>{metadata.title}</strong>{metadata.path && <small title={metadata.path}>{metadata.path}</small>}</span>
           <em>{metadata.label}</em>
         </div>
@@ -95,6 +111,7 @@ export function ArtifactPreview({ target, onClose, onOpenArtifact }: { target: P
       </header>
       <div className="content-preview-body">
         {artifact && <iframe ref={frameRef} title={artifact.title} sandbox={artifactSandbox(artifact)} referrerPolicy="no-referrer" srcDoc={buildArtifactPreviewSource(artifact)} onLoad={handleLoad} />}
+        {target.type === "browser" && <BrowserPreview suspended={browserSuspended} />}
         {!artifact && target.type === "file" && <FilePreviewContent file={target.file} onOpenArtifact={onOpenArtifact} />}
         {target.type === "diff" && <div className="preview-scroll preview-diff"><DiffView patch={target.patch} /></div>}
         {target.type === "loading" && <div className="preview-empty"><LoaderCircle className="spinning" size={26} /><strong>正在读取文件</strong><span>{target.path}</span></div>}
@@ -102,7 +119,7 @@ export function ArtifactPreview({ target, onClose, onOpenArtifact }: { target: P
       </div>
       <footer className="content-preview-footer">
         <ShieldCheck size={13} />
-        <span>{artifact ? "沙箱预览" : target.type === "diff" ? "会话变更" : "只读预览"}</span>
+        <span>{footerLabel(target, artifact)}</span>
         {target.type === "file" && target.file.truncated && <em>已显示前 1 MB</em>}
       </footer>
     </aside>

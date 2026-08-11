@@ -59,4 +59,20 @@ describe("demo session commands", () => {
 
     expect(preview).toMatchObject({ kind: "code", language: "typescript", relativePath: "src/runtime.ts" });
   });
+
+  it("supports manual files and browser preview state events", async () => {
+    const api = createDemoApi();
+    const states: string[] = [];
+    const unsubscribe = api.onBrowserPreviewState((state) => states.push(state.url));
+
+    const file = await api.choosePreviewFile();
+    const navigated = await api.browserPreview({ type: "navigate", url: "localhost:4173" });
+    const closed = await api.browserPreview({ type: "close" });
+    unsubscribe();
+
+    expect(file).toMatchObject({ kind: "markdown", relativePath: "README.md" });
+    expect(navigated.url).toBe("http://localhost:4173");
+    expect(states).toContain("http://localhost:4173");
+    expect(closed).toMatchObject({ attached: false, url: "", loading: false });
+  });
 });

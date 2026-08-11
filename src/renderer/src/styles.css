@@ -187,7 +187,7 @@ select option:checked { color: var(--on-accent); background-color: var(--accent)
 .runtime-indicator.busy i { background: var(--warning); box-shadow: 0 0 0 3px var(--warning-soft); }
 
 .workspace-main { display: grid; grid-template-rows: 58px minmax(0, 1fr); min-width: 0; min-height: 0; overflow: hidden; background: transparent; }
-.topbar { display: flex; align-items: center; justify-content: space-between; min-width: 0; padding: 0 18px 0 22px; border-bottom: 1px solid var(--border); background: var(--surface); }
+.topbar { position: relative; z-index: 20; display: flex; align-items: center; justify-content: space-between; min-width: 0; padding: 0 18px 0 22px; border-bottom: 1px solid var(--border); background: var(--surface); }
 .project-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .project-title > span { display: grid; gap: 3px; min-width: 0; }.project-title strong { overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }.project-title small { overflow: hidden; color: var(--text-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .runtime-controls { display: flex; align-items: center; gap: 7px; }
@@ -196,6 +196,14 @@ select option:checked { color: var(--on-accent); background-color: var(--accent)
 .runtime-controls .agent-selector span { color: var(--text-muted); font-size: 10px; font-weight: 600; }
 .runtime-controls select { max-width: 230px; border: 0; outline: 0; color: var(--text); background: transparent; font-size: 11px; }
 .workspace-top-button { display: grid; grid-template-columns: 16px auto minmax(70px, 180px) 13px; gap: 7px; align-items: center; min-height: 33px; padding: 0 10px; border: 1px solid var(--border); border-radius: 6px; color: var(--text); background: var(--surface-raised); font-size: 11px; cursor: pointer; }.workspace-top-button:hover { border-color: var(--accent); }.workspace-top-button strong { overflow: hidden; color: var(--text-muted); font-size: 10px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.preview-open-menu-shell { position: relative; }
+.preview-open-trigger { display: inline-flex; align-items: center; gap: 6px; min-height: 33px; padding: 0 9px; border: 1px solid var(--border); border-radius: 6px; color: var(--text); background: var(--surface-raised); font-size: 11px; cursor: pointer; }
+.preview-open-trigger:hover, .preview-open-trigger[aria-expanded="true"] { border-color: var(--accent); background: var(--surface-button-hover); }
+.preview-open-menu { position: absolute; z-index: 30; top: calc(100% + 6px); right: 0; display: grid; width: 180px; gap: 2px; padding: 6px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); box-shadow: var(--shadow-lg); }
+.preview-open-menu button { display: grid; grid-template-columns: 20px minmax(0, 1fr); gap: 9px; align-items: center; min-width: 0; min-height: 34px; padding: 6px 8px; text-align: left; border: 0; border-radius: 5px; color: var(--text-muted); background: transparent; cursor: pointer; }
+.preview-open-menu button:hover { color: var(--text); background: var(--surface-raised); }
+.preview-open-menu button:disabled { opacity: .45; cursor: default; }
+.preview-open-menu button > span { min-width: 0; color: var(--text); font-size: 11px; font-weight: 650; }
 .icon-button { display: grid; place-items: center; width: 31px; height: 31px; padding: 0; border: 0; border-radius: 5px; background: transparent; cursor: pointer; }
 .icon-button:hover { background: var(--surface-button-hover); }
 .panel-toggle { border: 1px solid var(--border); }
@@ -633,6 +641,19 @@ select option:checked { color: var(--on-accent); background-color: var(--accent)
 .preview-empty.preview-error { color: var(--danger-text); }
 .content-preview-footer { display: flex; align-items: center; gap: 5px; min-width: 0; padding: 0 12px; color: var(--text-muted); border-top: 1px solid var(--border); font-size: 9px; }
 .content-preview-footer em { margin-left: auto; color: var(--warning); font-style: normal; }
+.browser-preview { display: grid; grid-template-rows: 43px minmax(0, 1fr); width: 100%; height: 100%; min-width: 0; min-height: 0; background: var(--surface-muted); }
+.browser-preview-toolbar { display: grid; grid-template-columns: 29px 29px 29px minmax(0, 1fr) 29px; gap: 4px; align-items: center; min-width: 0; padding: 0 8px; border-bottom: 1px solid var(--border); background: var(--surface); }
+.browser-preview-toolbar > button { display: grid; place-items: center; width: 29px; height: 29px; padding: 0; border: 0; border-radius: 5px; color: var(--text-muted); background: transparent; cursor: pointer; }
+.browser-preview-toolbar > button:hover { color: var(--text); background: var(--surface-button-hover); }
+.browser-preview-toolbar > button:disabled { opacity: .4; cursor: default; }
+.browser-address { display: flex; align-items: center; gap: 7px; min-width: 0; height: 29px; padding: 0 9px; border: 1px solid var(--border); border-radius: 6px; color: var(--text-muted); background: var(--surface-input); }
+.browser-address:focus-within { border-color: var(--accent); box-shadow: 0 0 0 2px var(--focus-ring); }
+.browser-address input { width: 100%; min-width: 0; border: 0; outline: 0; color: var(--text); background: transparent; font: 11px/1.2 "Cascadia Code", Consolas, monospace; }
+.browser-preview-viewport { position: relative; min-width: 0; min-height: 0; overflow: hidden; background: #fff; }
+.browser-preview-empty { display: grid; place-items: center; align-content: center; gap: 9px; width: 100%; height: 100%; color: var(--text-muted); }
+.browser-preview-empty strong { color: var(--text); font-size: 12px; font-weight: 600; }
+.browser-preview-empty.error { color: var(--danger-text); }
+.browser-preview-empty.error strong { color: var(--danger-text); max-width: min(420px, calc(100% - 36px)); text-align: center; }
 .error-toast { position: fixed; z-index: 70; right: 18px; bottom: 18px; display: grid; grid-template-columns: 20px minmax(0, 1fr) 28px; gap: 8px; align-items: center; width: min(430px, calc(100vw - 36px)); padding: 10px 9px 10px 12px; color: var(--danger-text); border: 1px solid var(--danger-border); border-radius: 7px; background: var(--danger-soft); box-shadow: var(--shadow-md); font-size: 11px; }
 .error-toast.extension-notice.info { color: var(--text); border-color: var(--border-strong); background: var(--surface); }.error-toast.extension-notice.warning { color: var(--warning); border-color: var(--warning); background: var(--warning-soft); }
 .app-loading { display: grid; place-items: center; align-content: center; gap: 15px; width: 100%; height: 100%; }

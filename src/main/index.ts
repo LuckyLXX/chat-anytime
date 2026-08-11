@@ -4,8 +4,9 @@ import { extname, join, resolve } from "node:path";
 import { app, BrowserWindow, dialog, ipcMain, Menu, safeStorage, utilityProcess, type UtilityProcess } from "electron";
 import { migrateSettings } from "./settings.js";
 import { importExternalAttachment, workspaceRelativeAttachment } from "./attachments.js";
-import type { DesktopBootstrap, DesktopSettings, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot, WorkspaceFilePreview } from "../shared/protocol.js";
+import type { BrowserPreviewCommand, BrowserPreviewState, DesktopBootstrap, DesktopSettings, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot, WorkspaceFilePreview } from "../shared/protocol.js";
 import { readWorkspaceFilePreview } from "./workspace-preview.js";
+import { BrowserPreviewController } from "./browser-preview.js";
 
 let mainWindow: BrowserWindow | undefined;
 let runtimeProcess: UtilityProcess | undefined;
@@ -15,6 +16,7 @@ let latestResources: ResourceCatalog | undefined;
 let settingsCache: DesktopSettings | undefined;
 let credentialsCache: Record<string, string> = {};
 let securityWarning: string | undefined;
+let browserPreviewController: BrowserPreviewController | undefined;
 
 function settingsPath(): string { return join(app.getPath("userData"), "settings.json"); }
 function credentialsPath(): string { return join(app.getPath("userData"), "credentials.json"); }
@@ -164,9 +166,19 @@ function startRuntime(): void {
 }
 function createWindow(): void {
   const rendererUrl = process.env.ELECTRON_RENDERER_URL;
-  mainWindow = new BrowserWindow({ width: 1440, height: 920, minWidth: 1040, minHeight: 680, backgroundColor: "#f5f5f2", titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default", webPreferences: { preload: join(__dirname, "../preload/index.cjs"), contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: !rendererUrl } });
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => { void import("electron").then(({ shell }) => shell.openExternal(url)); return { action: "deny" }; });
-  if (rendererUrl) void mainWindow.loadURL(rendererUrl); else void mainWindow.loadFile(join(__dirname, "../renderer/index.html"));
+  const nextWindow = new BrowserWindow({ width: 1440, height: 920, minWidth: 1040, minHeight: 680, backgroundColor: "#f5f5f2", titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default", webPreferences: { preload: join(__dirname, "../preload/index.cjs"), contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: !rendererUrl } });
+  const previewController = new BrowserPreviewController(nextWindow, (state) => {
+    if (!nextWindow.isDestroyed()) nextWindow.webContents.send("browser-preview:state", state);
+  });
+  mainWindow = nextWindow;
+  browserPreviewController = previewController;
+  nextWindow.on("closed", () => {
+    previewController.dispose();
+    if (browserPreviewController === previewController) browserPreviewController = undefined;
+    if (mainWindow === nextWindow) mainWindow = undefined;
+  });
+  nextWindow.webContents.setWindowOpenHandler(({ url }) => { void import("electron").then(({ shell }) => shell.openExternal(url)); return { action: "deny" }; });
+  if (rendererUrl) void nextWindow.loadURL(rendererUrl); else void nextWindow.loadFile(join(__dirname, "../renderer/index.html"));
 }
 function registerIpc(): void {
   ipcMain.handle("desktop:bootstrap", (): DesktopBootstrap => {
@@ -175,6 +187,24 @@ function registerIpc(): void {
     return { platform: process.platform, version: app.getVersion(), securityWarning, settings, runtime: latestSnapshot, catalog: latestCatalog ? { models: latestCatalog.models, providers: latestCatalog.providers } : undefined, resources: latestResources };
   });
   ipcMain.handle("desktop:choose-workspace", async (): Promise<string | undefined> => { const result = mainWindow ? await dialog.showOpenDialog(mainWindow, { title: "选择项目工作区", properties: ["openDirectory", "createDirectory"] }) : await dialog.showOpenDialog({ title: "选择项目工作区", properties: ["openDirectory", "createDirectory"] }); return result.canceled ? undefined : result.filePaths[0]; });
+  ipcMain.handle("desktop:choose-preview-file", async (): Promise<WorkspaceFilePreview | undefined> => {
+    const workspace = loadSettings().workspace;
+    if (!workspace) throw new Error("请先打开工作区，再选择预览文件");
+    const result = mainWindow
+      ? await dialog.showOpenDialog(mainWindow, { title: "选择预览文件", defaultPath: workspace, properties: ["openFile"], filters: [{ name: "常见代码、Markdown 和资源", extensions: ["md", "markdown", "mdx", "js", "ts", "tsx", "jsx", "json", "css", "html", "htm", "svg", "png", "jpg", "jpeg", "gif", "webp", "*" ] }] })
+      : await dialog.showOpenDialog({ title: "选择预览文件", defaultPath: workspace, properties: ["openFile"] });
+    if (result.canceled || !result.filePaths[0]) return undefined;
+    const rootReal = await realpath(resolve(workspace));
+    const candidateReal = await realpath(result.filePaths[0]);
+    let relativePath: string;
+    try {
+      relativePath = workspaceRelativeAttachment(rootReal, candidateReal);
+    } catch (error) {
+      if (error instanceof Error && error.message === "附件必须位于当前工作区内") throw new Error("预览文件必须位于当前工作区内");
+      throw error;
+    }
+    return readWorkspaceFilePreview(rootReal, relativePath);
+  });
   ipcMain.handle("desktop:choose-attachments", async (_event, workspace?: string): Promise<PromptAttachment[]> => { const result = mainWindow ? await dialog.showOpenDialog(mainWindow, { title: "添加附件", properties: ["openFile", "multiSelections"], filters: [{ name: "图片和项目文件", extensions: ["png", "jpg", "jpeg", "webp", "gif", "*" ] }] }) : await dialog.showOpenDialog({ properties: ["openFile", "multiSelections"] }); return result.canceled ? [] : readAttachmentSelection(result.filePaths, workspace); });
   ipcMain.handle("desktop:read-workspace-file", async (_event, relativePath: string): Promise<WorkspaceFilePreview> => {
     const workspace = loadSettings().workspace;
@@ -182,8 +212,12 @@ function registerIpc(): void {
     if (typeof relativePath !== "string") throw new Error("预览文件路径无效");
     return readWorkspaceFilePreview(workspace, relativePath);
   });
+  ipcMain.handle("browser-preview:command", async (_event, command: BrowserPreviewCommand): Promise<BrowserPreviewState> => {
+    if (!browserPreviewController) throw new Error("浏览器预览当前不可用");
+    return browserPreviewController.handle(command);
+  });
   ipcMain.handle("runtime:send", (_event, command: RuntimeCommand): void => { updateSettings(command); sendToRuntime(command); });
 }
 app.whenReady().then(() => { Menu.setApplicationMenu(null); registerIpc(); startRuntime(); createWindow(); app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); }); });
 app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
-app.on("before-quit", () => { runtimeProcess?.kill(); });
+app.on("before-quit", () => { browserPreviewController?.dispose(); runtimeProcess?.kill(); });
