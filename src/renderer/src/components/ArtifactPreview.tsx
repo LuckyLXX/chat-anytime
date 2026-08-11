@@ -14,6 +14,11 @@ export type PreviewTarget =
   | { type: "loading"; title: string; path: string }
   | { type: "error"; title: string; path: string; message: string };
 
+export interface PreviewTab {
+  id: string;
+  target: PreviewTarget;
+}
+
 function fileArtifact(file: WorkspaceFilePreview): Artifact | undefined {
   if ((file.kind !== "html" && file.kind !== "svg") || !file.content || file.truncated) return undefined;
   return { id: `workspace-file-${file.relativePath}`, title: file.name, language: file.kind, content: file.content };
@@ -33,9 +38,9 @@ function targetMetadata(target: PreviewTarget): { title: string; path?: string; 
 }
 
 function targetIcon(target: PreviewTarget): ReactNode {
-  if (target.type === "diff") return <Code2 size={17} />;
-  if (target.type === "browser") return <Globe2 size={17} />;
-  return <FileCode2 size={17} />;
+  if (target.type === "diff") return <Code2 size={15} />;
+  if (target.type === "browser") return <Globe2 size={15} />;
+  return <FileCode2 size={15} />;
 }
 
 function footerLabel(target: PreviewTarget, artifact?: Artifact): string {
@@ -64,7 +69,10 @@ function FilePreviewContent({ file, onOpenArtifact }: { file: WorkspaceFilePrevi
   return <div className="preview-empty"><FileText size={28} /><strong>此文件无法预览</strong><span>{file.size.toLocaleString("zh-CN")} bytes</span></div>;
 }
 
-export function ArtifactPreview({ target, browserSuspended, onClose, onOpenArtifact }: { target: PreviewTarget; browserSuspended?: boolean; onClose(): void; onOpenArtifact(artifact: Artifact): void }): ReactNode {
+export function ArtifactPreview({ tabs, activeTabId, browserSuspended, onSelectTab, onCloseTab, onOpenArtifact }: { tabs: PreviewTab[]; activeTabId: string; browserSuspended?: boolean; onSelectTab(id: string): void; onCloseTab(id: string): void; onOpenArtifact(artifact: Artifact): void }): ReactNode {
+  const active = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0];
+  if (!active) return null;
+  const target = active.target;
   const artifact = targetArtifact(target);
   const dynamic = Boolean(artifact && isDynamicArtifact(artifact));
   const metadata = targetMetadata(target);
@@ -77,15 +85,15 @@ export function ArtifactPreview({ target, browserSuspended, onClose, onOpenArtif
 
   useEffect(() => {
     setPaused(false);
-  }, [target]);
+  }, [activeTabId]);
 
   useEffect(() => {
     function close(event: KeyboardEvent): void {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape") onCloseTab(activeTabId);
     }
     window.addEventListener("keydown", close);
     return () => window.removeEventListener("keydown", close);
-  }, [onClose]);
+  }, [onCloseTab, activeTabId]);
 
   useEffect(() => () => {
     if (dynamic) postPreviewAction(DYNAMIC_PREVIEW_ACTIONS.destroy);
@@ -98,6 +106,22 @@ export function ArtifactPreview({ target, browserSuspended, onClose, onOpenArtif
 
   return (
     <aside className="content-preview-panel" aria-label={`${metadata.title}预览`}>
+      {tabs.length > 1 && (
+        <div className="preview-tabs" role="tablist" aria-label="预览标签">
+          {tabs.map((tab) => {
+            const tabMeta = targetMetadata(tab.target);
+            return (
+              <div className={`preview-tab${tab.id === activeTabId ? " active" : ""}`} key={tab.id} role="presentation">
+                <button type="button" className="preview-tab-main" title={tabMeta.path ?? tabMeta.title} onClick={() => onSelectTab(tab.id)}>
+                  {targetIcon(tab.target)}
+                  <span>{tabMeta.title}</span>
+                </button>
+                <button type="button" className="preview-tab-close" aria-label={`关闭 ${tabMeta.title}`} onClick={() => onCloseTab(tab.id)}><X size={12} /></button>
+              </div>
+            );
+          })}
+        </div>
+      )}
       <header className="content-preview-header">
         <div className="content-preview-title">
           {targetIcon(target)}
@@ -106,7 +130,7 @@ export function ArtifactPreview({ target, browserSuspended, onClose, onOpenArtif
         </div>
         <div className="content-preview-actions">
           {dynamic && <button className="icon-button" type="button" aria-label={paused ? "继续动态预览" : "暂停动态预览"} title={paused ? "继续" : "暂停"} onClick={() => { postPreviewAction(paused ? DYNAMIC_PREVIEW_ACTIONS.resume : DYNAMIC_PREVIEW_ACTIONS.pause); setPaused((current) => !current); }}>{paused ? <Play size={16} /> : <Pause size={16} />}</button>}
-          <button className="icon-button" type="button" title="关闭预览" aria-label="关闭预览" onClick={onClose}><X size={18} /></button>
+          <button className="icon-button" type="button" title="关闭预览" aria-label="关闭预览" onClick={() => onCloseTab(activeTabId)}><X size={18} /></button>
         </div>
       </header>
       <div className="content-preview-body">

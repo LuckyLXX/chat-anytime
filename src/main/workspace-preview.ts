@@ -1,6 +1,6 @@
-import { open, realpath, stat } from "node:fs/promises";
+import { open, readdir, realpath, stat } from "node:fs/promises";
 import { basename, extname, isAbsolute, relative, resolve, sep } from "node:path";
-import type { WorkspaceFilePreview } from "../shared/protocol.js";
+import type { WorkspaceDirectoryEntry, WorkspaceDirectoryListing, WorkspaceFilePreview } from "../shared/protocol.js";
 
 const textPreviewLimit = 1024 * 1024;
 const imagePreviewLimit = 5 * 1024 * 1024;
@@ -134,4 +134,39 @@ export async function readWorkspaceFilePreview(workspace: string, requestedPath:
   const language = filenameLanguages[name.toLowerCase()] ?? codeLanguages[extension];
   if (language) return { ...base, kind: "code", language, content, truncated };
   return { ...base, kind: "text", language: "text", content, truncated };
+}
+
+const ignoredWorkspaceEntries = new Set([
+  "node_modules", ".git", ".svn", ".hg", ".next", ".nuxt", ".cache", ".turbo",
+  "dist", "out", "build", "coverage", ".DS_Store", "Thumbs.db"
+]);
+
+export async function listWorkspaceDirectory(workspace: string, requestedPath?: string): Promise<WorkspaceDirectoryListing> {
+  const requested = requestedPath?.trim() ?? "";
+  if (requested) {
+    const probed = safeRelativePath(workspace, requested);
+    if (!probed || isAbsolute(requested)) throw new Error("预览目录路径必须位于当前工作区内");
+  }
+
+  const rootReal = await realpath(resolve(workspace));
+  const candidateReal = requested ? await realpath(resolve(rootReal, ...requested.split("/"))) : rootReal;
+  let realRelative = "";
+  if (requested) {
+    const resolved = safeRelativePath(rootReal, candidateReal);
+    if (!resolved) throw new Error("预览目录路径必须位于当前工作区内");
+    realRelative = resolved;
+  }
+
+  const info = await stat(candidateReal);
+  if (!info.isDirectory()) throw new Error("只能列出目录");
+
+  const dirents = await readdir(candidateReal, { withFileTypes: true });
+  const entries: WorkspaceDirectoryEntry[] = [];
+  for (const dirent of dirents) {
+    if (!dirent.name || ignoredWorkspaceEntries.has(dirent.name)) continue;
+    const childRelative = realRelative ? `${realRelative}/${dirent.name}` : dirent.name;
+    entries.push({ name: dirent.name, relativePath: childRelative, kind: dirent.isDirectory() ? "directory" : "file" });
+  }
+  entries.sort((a, b) => (a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind === "directory" ? -1 : 1));
+  return { relativePath: realRelative, entries };
 }

@@ -241,7 +241,7 @@ export function createDemoApi(): DesktopApi {
     async choosePreviewFile(): Promise<import("../../shared/protocol").WorkspaceFilePreview> {
       return { relativePath: "README.md", name: "README.md", kind: "markdown", language: "markdown", size: 70, content: "# Pi Desktop\n\n- Electron 主进程\n- Pi 工具进程\n- React 渲染进程\n" };
     },
-    async readWorkspaceFile(relativePath: string): Promise<import("../../shared/protocol").WorkspaceFilePreview> {
+    async readWorkspaceFile(relativePath: string, _workspace?: string): Promise<import("../../shared/protocol").WorkspaceFilePreview> {
       if (relativePath === "src/runtime.ts") {
         return { relativePath, name: "runtime.ts", kind: "code", language: "typescript", size: 96, content: "export const runtime = {\n  status: \"ready\",\n  process: \"utility\"\n};\n" };
       }
@@ -249,6 +249,9 @@ export function createDemoApi(): DesktopApi {
         return { relativePath, name: "README.md", kind: "markdown", language: "markdown", size: 70, content: "# Pi Desktop\n\n- Electron 主进程\n- Pi 工具进程\n- React 渲染进程\n" };
       }
       throw new Error(`找不到演示文件：${relativePath}`);
+    },
+    async listWorkspaceDirectory(_workspace?: string, _relativePath?: string): Promise<import("../../shared/protocol").WorkspaceDirectoryListing> {
+      return { relativePath: "", entries: [{ name: "src", relativePath: "src", kind: "directory" }, { name: "README.md", relativePath: "README.md", kind: "file" }] };
     },
     async browserPreview(command: BrowserPreviewCommand): Promise<BrowserPreviewState> {
       if (command.type === "close") {

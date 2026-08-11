@@ -52,6 +52,26 @@ describe("DesktopExtensionUiBridge", () => {
     expect(notify).toHaveBeenCalledWith("扩展已加载", "info");
   });
 
+  it("records terminal input as unsupported without warning on registration", () => {
+    const notify = vi.fn();
+    const bridge = new DesktopExtensionUiBridge({ request: () => undefined, dismiss: () => undefined, notify });
+
+    const unsubscribe = bridge.context.onTerminalInput(() => undefined);
+    unsubscribe();
+
+    expect(bridge.snapshot().unsupported).toContain("raw-terminal-input");
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it("still warns for active unsupported UI requests", () => {
+    const notify = vi.fn();
+    const bridge = new DesktopExtensionUiBridge({ request: () => undefined, dismiss: () => undefined, notify });
+
+    bridge.context.setTheme("missing-theme");
+
+    expect(notify).toHaveBeenCalledWith("扩展请求了 PiDesktop 暂不支持的 TUI 能力：tui-theme-switching", "warning");
+  });
+
   it("publishes RPC-compatible status and string widget state", () => {
     const { bridge, states } = createFixture();
 

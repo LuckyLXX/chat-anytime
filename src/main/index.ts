@@ -4,8 +4,8 @@ import { extname, join, resolve } from "node:path";
 import { app, BrowserWindow, dialog, ipcMain, Menu, safeStorage, utilityProcess, type UtilityProcess } from "electron";
 import { migrateSettings } from "./settings.js";
 import { importExternalAttachment, workspaceRelativeAttachment } from "./attachments.js";
-import type { BrowserPreviewCommand, BrowserPreviewState, DesktopBootstrap, DesktopSettings, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot, WorkspaceFilePreview } from "../shared/protocol.js";
-import { readWorkspaceFilePreview } from "./workspace-preview.js";
+import type { BrowserPreviewCommand, BrowserPreviewState, DesktopBootstrap, DesktopSettings, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot, WorkspaceDirectoryListing, WorkspaceFilePreview } from "../shared/protocol.js";
+import { listWorkspaceDirectory, readWorkspaceFilePreview } from "./workspace-preview.js";
 import { BrowserPreviewController } from "./browser-preview.js";
 
 let mainWindow: BrowserWindow | undefined;
@@ -206,11 +206,15 @@ function registerIpc(): void {
     return readWorkspaceFilePreview(rootReal, relativePath);
   });
   ipcMain.handle("desktop:choose-attachments", async (_event, workspace?: string): Promise<PromptAttachment[]> => { const result = mainWindow ? await dialog.showOpenDialog(mainWindow, { title: "添加附件", properties: ["openFile", "multiSelections"], filters: [{ name: "图片和项目文件", extensions: ["png", "jpg", "jpeg", "webp", "gif", "*" ] }] }) : await dialog.showOpenDialog({ properties: ["openFile", "multiSelections"] }); return result.canceled ? [] : readAttachmentSelection(result.filePaths, workspace); });
-  ipcMain.handle("desktop:read-workspace-file", async (_event, relativePath: string): Promise<WorkspaceFilePreview> => {
-    const workspace = loadSettings().workspace;
-    if (!workspace) throw new Error("请先打开工作区，再预览文件");
+  ipcMain.handle("desktop:read-workspace-file", async (_event, relativePath: string, workspace?: string): Promise<WorkspaceFilePreview> => {
+    const resolvedWorkspace = workspace ?? loadSettings().workspace;
+    if (!resolvedWorkspace) throw new Error("请先打开工作区，再预览文件");
     if (typeof relativePath !== "string") throw new Error("预览文件路径无效");
-    return readWorkspaceFilePreview(workspace, relativePath);
+    return readWorkspaceFilePreview(resolvedWorkspace, relativePath);
+  });
+  ipcMain.handle("desktop:list-workspace-directory", async (_event, workspace: string, relativePath?: string): Promise<WorkspaceDirectoryListing> => {
+    if (typeof workspace !== "string" || !workspace.trim()) throw new Error("请指定要浏览的工作区");
+    return listWorkspaceDirectory(workspace, relativePath);
   });
   ipcMain.handle("browser-preview:command", async (_event, command: BrowserPreviewCommand): Promise<BrowserPreviewState> => {
     if (!browserPreviewController) throw new Error("浏览器预览当前不可用");

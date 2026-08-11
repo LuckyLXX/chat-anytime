@@ -53,6 +53,7 @@ import { toolRisk } from "./permissions.js";
 import { buildResourceCatalog } from "./resource-catalog.js";
 import { discoverExtensionCandidates, ExtensionPolicy } from "./extension-policy.js";
 import { agentWorkspaceSessionDir } from "./session-scope.js";
+import { isDesktopConfiguredProvider } from "./model-catalog.js";
 import { mergeProviderModels } from "./settings.js";
 import { buildSkillPrompt, parseSkillPrompt, type SkillPromptDisplay } from "./skill-prompt.js";
 import { applyAgentSkillOverrides, enabledSkillResourcePaths, type AgentSkillResource } from "./skill-resources.js";
@@ -601,20 +602,27 @@ function appendCompactControlMessage(compactSession: AgentSession, kind: "compac
 }
 
 async function refreshCatalog(): Promise<void> {
-  if (!modelRuntime) return;
-  let available = modelRuntime.getAvailableSnapshot();
+  const runtime = modelRuntime;
+  if (!runtime) return;
+  let available = runtime.getAvailableSnapshot();
   try {
-    available = await modelRuntime.getAvailable();
+    available = await runtime.getAvailable();
   } catch (error) {
     post({ type: "log", level: "warn", message: `检查模型可用性失败：${errorText(error)}` });
   }
-  const configured = new Set(available.map((model) => model.provider));
-  const providers: ProviderOption[] = modelRuntime.getProviders().map((provider) => {
-    const auth = modelRuntime?.getProviderAuthStatus(provider.id);
+  const providerAuth = new Map(runtime.getProviders().map((provider) => [
+    provider.id,
+    runtime.getProviderAuthStatus(provider.id)
+  ] as const));
+  const configured = new Set(available
+    .filter((model) => isDesktopConfiguredProvider(providerAuth.get(model.provider)))
+    .map((model) => model.provider));
+  const providers: ProviderOption[] = runtime.getProviders().map((provider) => {
+    const auth = providerAuth.get(provider.id);
     return {
       id: provider.id,
       name: provider.name,
-      configured: auth?.configured ?? false,
+      configured: isDesktopConfiguredProvider(auth),
       authSource: auth?.source
     };
   });
@@ -622,7 +630,7 @@ async function refreshCatalog(): Promise<void> {
     providers.push({ id: customProviderId, name: settings?.providers.find((item) => item.id === customProviderId)?.name ?? "自定义 OpenAI 兼容服务", configured: false });
   }
   const enabledModels = new Set(settings?.providers.flatMap((provider) => provider.models.filter((item) => item.enabled !== false).map((item) => `${provider.id}/${item.id}`)) ?? []);
-  const models: ModelOption[] = modelRuntime.getModels().filter((model) => !settings?.providers.some((provider) => provider.id === model.provider) || enabledModels.has(`${model.provider}/${model.id}`)).map((model) => ({
+  const models: ModelOption[] = runtime.getModels().filter((model) => !settings?.providers.some((provider) => provider.id === model.provider) || enabledModels.has(`${model.provider}/${model.id}`)).map((model) => ({
     provider: model.provider,
     id: model.id,
     name: model.name,
@@ -821,10 +829,19 @@ async function initialize(command: Extract<RuntimeCommand, { type: "initialize" 
   extensionPolicy = new ExtensionPolicy(getAgentDir());
   await extensionPolicy.load();
   modelRuntime = await ModelRuntime.create();
+  const initializedProviderIds = new Set<string>();
   for (const provider of settings.providers) {
     registerCustomProvider(provider);
+    initializedProviderIds.add(provider.id);
     const key = apiKeys[provider.id];
     if (key) await modelRuntime.setRuntimeApiKey(provider.id, key, { allowNetwork: false });
+  }
+  // `auth.set` stores built-in provider keys separately from provider settings.
+  // Rehydrate those keys after restart so explicit app configuration remains
+  // distinguishable from inherited environment credentials.
+  for (const [providerId, key] of Object.entries(apiKeys)) {
+    if (initializedProviderIds.has(providerId) || !key || !modelRuntime.getProvider(providerId)) continue;
+    await modelRuntime.setRuntimeApiKey(providerId, key, { allowNetwork: false });
   }
   await refreshCatalog();
   if (workspace) await createSession();

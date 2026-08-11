@@ -1,6 +1,6 @@
 import { Check, Code2, Copy, Expand, Eye, EyeOff, FileCode2, ExternalLink, Pause, Play, X } from "lucide-react";
 import mermaid from "mermaid";
-import { isValidElement, useEffect, useId, useRef, useState, type ReactNode, type SyntheticEvent } from "react";
+import { isValidElement, memo, useEffect, useId, useMemo, useRef, useState, type ReactNode, type SyntheticEvent } from "react";
 import ReactMarkdown, { defaultUrlTransform, type Components, type UrlTransform } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
@@ -154,7 +154,7 @@ function RichAudio({ src, title, children }: { src?: string; title?: string; chi
   );
 }
 
-function MermaidBlock({ code, language }: { code: string; language: string }): ReactNode {
+const MermaidBlock = memo(function MermaidBlock({ code, language }: { code: string; language: string }): ReactNode {
   const id = useId().replaceAll(":", "");
   const blockRef = useRef<HTMLDivElement>(null);
   const tokens = useThemeTokens(blockRef);
@@ -233,9 +233,9 @@ function MermaidBlock({ code, language }: { code: string; language: string }): R
       )}
     </>
   );
-}
+});
 
-export function CodeBlock({ language, code }: { language: string; code: string }): ReactNode {
+export const CodeBlock = memo(function CodeBlock({ language, code }: { language: string; code: string }): ReactNode {
   const highlighted = language && hljs.getLanguage(language)
     ? hljs.highlight(code, { language }).value
     : hljs.highlightAuto(code).value;
@@ -245,7 +245,7 @@ export function CodeBlock({ language, code }: { language: string; code: string }
       <pre><code dangerouslySetInnerHTML={{ __html: highlighted }} /></pre>
     </div>
   );
-}
+});
 
 function ArtifactCard({ artifact, onOpenArtifact }: { artifact: Artifact; onOpenArtifact(artifact: Artifact): void }): ReactNode {
   const [previewOpen, setPreviewOpen] = useState(false);
@@ -554,7 +554,7 @@ function destroyBubbleRuntime(runtime: BubbleRuntime | undefined): void {
   runtime.listeners = [];
 }
 
-function DynamicHtmlBubble({ content, closed, streaming, artifactPrefix, onOpenArtifact, onHtmlAction }: { content: string; closed: boolean; streaming: boolean; artifactPrefix: string; onOpenArtifact(artifact: Artifact): void; onHtmlAction?: (text: string) => void }): ReactNode {
+const DynamicHtmlBubble = memo(function DynamicHtmlBubble({ content, closed, streaming, artifactPrefix, onOpenArtifact, onHtmlAction }: { content: string; closed: boolean; streaming: boolean; artifactPrefix: string; onOpenArtifact(artifact: Artifact): void; onHtmlAction?: (text: string) => void }): ReactNode {
   const scopeRef = useRef<HTMLDivElement | null>(null);
   const runtimeRef = useRef<BubbleRuntime | undefined>(undefined);
   const sourceKeyRef = useRef("");
@@ -595,9 +595,9 @@ function DynamicHtmlBubble({ content, closed, streaming, artifactPrefix, onOpenA
       </ReactMarkdown>
     </div>
   );
-}
+});
 
-function MarkdownSurface({ content, htmlBubble, artifactPrefix, onOpenArtifact, onHtmlAction }: { content: string; htmlBubble?: boolean; artifactPrefix: string; onOpenArtifact(artifact: Artifact): void; onHtmlAction?: (text: string) => void }): ReactNode {
+const MarkdownSurface = memo(function MarkdownSurface({ content, htmlBubble, artifactPrefix, onOpenArtifact, onHtmlAction }: { content: string; htmlBubble?: boolean; artifactPrefix: string; onOpenArtifact(artifact: Artifact): void; onHtmlAction?: (text: string) => void }): ReactNode {
   const dark = useThemeTokens().dark;
   const artifactIndex = useRef(0);
   const components = markdownComponents(artifactIndex, artifactPrefix, onOpenArtifact, dark, htmlBubble, onHtmlAction);
@@ -610,7 +610,7 @@ function MarkdownSurface({ content, htmlBubble, artifactPrefix, onOpenArtifact, 
       </ReactMarkdown>
     </div>
   );
-}
+});
 
 function renderSegment(segment: RichContentSegment, index: number, artifactPrefix: string, streaming: boolean, onOpenArtifact: (artifact: Artifact) => void, onHtmlAction?: (text: string) => void): ReactNode {
   if (segment.type === "mermaid") return <MermaidBlock key={`mermaid-${index}`} code={segment.content} language={segment.language} />;
@@ -624,11 +624,11 @@ function renderSegment(segment: RichContentSegment, index: number, artifactPrefi
   return <MarkdownSurface key={`${segment.type}-${index}`} content={segment.content} htmlBubble={segment.type === "html"} artifactPrefix={`${artifactPrefix}-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} />;
 }
 
-export function RichContent({ children, streaming, onOpenArtifact, onHtmlAction, artifactPrefix }: RichContentProps): ReactNode {
-  const segments = parseRichContent(children, { isStreaming: Boolean(streaming) });
+export const RichContent = memo(function RichContent({ children, streaming, onOpenArtifact, onHtmlAction, artifactPrefix }: RichContentProps): ReactNode {
+  const segments = useMemo(() => parseRichContent(children, { isStreaming: Boolean(streaming) }), [children, streaming]);
   return (
     <div className={`rich-content${streaming ? " is-streaming" : ""}`}>
       {segments.map((segment, index) => renderSegment(segment, index, artifactPrefix, Boolean(streaming), onOpenArtifact, onHtmlAction))}
     </div>
   );
-}
+});

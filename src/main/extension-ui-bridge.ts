@@ -72,7 +72,10 @@ export class DesktopExtensionUiBridge {
     ),
     notify: (message, level = "info") => this.options.notify(message, level),
     onTerminalInput: () => {
-      this.markUnsupported("raw-terminal-input");
+      // RPC sessions have no raw terminal stream. Extensions commonly register
+      // this listener defensively, so record the limitation without interrupting
+      // normal session switches with a warning toast.
+      this.markUnsupported("raw-terminal-input", false);
       return () => undefined;
     },
     setStatus: (key, text) => {
@@ -210,9 +213,9 @@ export class DesktopExtensionUiBridge {
     this.options.stateChanged?.(this.snapshot());
   }
 
-  private markUnsupported(capability: string): void {
+  private markUnsupported(capability: string, notify = true): void {
     if (this.state.unsupported.includes(capability)) return;
     this.updateState({ unsupported: [...this.state.unsupported, capability] });
-    this.options.notify(`扩展请求了 PiDesktop 暂不支持的 TUI 能力：${capability}`, "warning");
+    if (notify) this.options.notify(`扩展请求了 PiDesktop 暂不支持的 TUI 能力：${capability}`, "warning");
   }
 }

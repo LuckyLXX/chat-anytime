@@ -39,9 +39,11 @@ import {
   ShieldCheck,
   Trash2,
   Wrench,
+  FolderTree,
+  ChevronLeft,
   X
 } from "lucide-react";
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import type {
   AccessMode,
   AppearanceSettings,
@@ -68,7 +70,8 @@ import type {
   RuntimeCommand
 } from "../../shared/protocol";
 import { thinkingLevelLabels, toolLabel } from "../../shared/locale";
-import { ArtifactPreview, type PreviewTarget } from "./components/ArtifactPreview";
+import { ArtifactPreview, type PreviewTab, type PreviewTarget } from "./components/ArtifactPreview";
+import { WorkspaceTree } from "./components/WorkspaceTree";
 import { ExtensionResourceList } from "./components/ExtensionResourceList";
 import { RichContent } from "./components/RichContent";
 import { ExtensionUiDialog, PermissionDialog } from "./components/RuntimeDialogs";
@@ -103,6 +106,11 @@ function previewTargetKey(target: PreviewTarget): string {
     case "file": return target.file.relativePath;
     default: return `${target.type}-${target.path ?? target.title}`;
   }
+}
+
+interface PreviewState {
+  tabs: PreviewTab[];
+  activeTabId: string;
 }
 const agentTools: BuiltinToolName[] = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 const themeColorFields: readonly { key: ThemeColorKey; label: string }[] = [
@@ -388,7 +396,7 @@ function CompactTimingMeta({ timing, now }: { timing: TurnTiming; now: number })
   );
 }
 
-function ChangedFilesPanel({ files, onOpenFile }: { files: ReplyChangedFile[]; onOpenFile(relativePath: string): void }): ReactNode {
+function ChangedFilesPanel({ files, onOpenFile, onOpenDiff }: { files: ReplyChangedFile[]; onOpenFile(relativePath: string): void; onOpenDiff(execution: ToolExecution): void }): ReactNode {
   return (
     <details className="reply-files-panel">
       <summary>
@@ -396,10 +404,11 @@ function ChangedFilesPanel({ files, onOpenFile }: { files: ReplyChangedFile[]; o
         <span className="reply-files-toggle" aria-hidden="true" />
       </summary>
       <div className="reply-files-list">
-        {files.map(({ relativePath }) => {
+        {files.map(({ relativePath, execution }) => {
           const name = relativePath.split("/").at(-1) ?? relativePath;
+          const hasDiff = Boolean(execution.patch);
           return (
-            <button type="button" key={relativePath} title={`预览 ${relativePath}`} onClick={() => onOpenFile(relativePath)}>
+            <button type="button" key={relativePath} title={hasDiff ? `查看 ${relativePath} 变更` : `预览 ${relativePath}`} onClick={() => (hasDiff ? onOpenDiff(execution) : onOpenFile(relativePath))}>
               <File size={14} />
               <span><strong>{name}</strong><small>{relativePath}</small></span>
               <Eye size={14} />
@@ -414,7 +423,7 @@ function ChangedFilesPanel({ files, onOpenFile }: { files: ReplyChangedFile[]; o
 // Memoized so an unchanged message bubble (stable ChatMessage reference from
 // the store's uuid-based reuse) is skipped during high-frequency streaming
 // updates that only mutate other bubbles.
-const MessageView = memo(function MessageView({ message, executions, onOpenArtifact, onOpenFile, onHtmlAction, onCopy, onEdit, onRegenerate, onShare, showThinking = true, hiddenThinkingLabel, busy = false, timing, now = Date.now() }: { message: ChatMessage; executions: ToolExecution[]; onOpenArtifact(artifact: Artifact): void; onOpenFile(relativePath: string): void; onHtmlAction(text: string): void; onCopy(message: ChatMessage): void; onEdit(message: ChatMessage): void; onRegenerate(message: ChatMessage): void; onShare(message: ChatMessage, target: HTMLElement): Promise<void>; showThinking?: boolean; hiddenThinkingLabel?: string; busy?: boolean; timing?: TurnTiming; now?: number }): ReactNode {
+const MessageView = memo(function MessageView({ message, executions, onOpenArtifact, onOpenFile, onOpenDiff, onHtmlAction, onCopy, onEdit, onRegenerate, onShare, showThinking = true, hiddenThinkingLabel, busy = false, timing, now = Date.now() }: { message: ChatMessage; executions: ToolExecution[]; onOpenArtifact(artifact: Artifact): void; onOpenFile(relativePath: string): void; onOpenDiff(execution: ToolExecution): void; onHtmlAction(text: string): void; onCopy(message: ChatMessage): void; onEdit(message: ChatMessage): void; onRegenerate(message: ChatMessage): void; onShare(message: ChatMessage, target: HTMLElement): Promise<void>; showThinking?: boolean; hiddenThinkingLabel?: string; busy?: boolean; timing?: TurnTiming; now?: number }): ReactNode {
   const text = messageText(message);
   const thinking = thinkingText(message);
   const toolLayout = splitAssistantToolLayout(message);
@@ -484,7 +493,7 @@ const MessageView = memo(function MessageView({ message, executions, onOpenArtif
           {message.error && <p className="inline-error"><AlertCircle size={15} />{message.error}</p>}
           {timing && (isControlMessage ? <CompactTimingMeta timing={timing} now={now} /> : <TimingMeta timing={timing} now={now} />)}
         </div>
-        {changedFiles.length > 0 && <ChangedFilesPanel files={changedFiles} onOpenFile={onOpenFile} />}
+        {changedFiles.length > 0 && <ChangedFilesPanel files={changedFiles} onOpenFile={onOpenFile} onOpenDiff={onOpenDiff} />}
         {!isControlMessage && !message.streaming && !busy && <div className="message-actions"><button type="button" title="重新生成" aria-label="重新生成回复" onClick={() => onRegenerate(message)}><RefreshCw size={13} /></button><button type="button" title="复制" aria-label="复制 AI 回复" onClick={() => onCopy(message)}><Copy size={13} /></button>{hasShareableContent && <button type="button" title={sharing ? "正在生成图片" : shared ? "已复制图片" : "分享图片"} aria-label={sharing ? "正在生成回复图片" : shared ? "回复图片已复制" : "分享 AI 回复图片"} disabled={sharing} onClick={() => void share()}>{sharing ? <LoaderCircle size={13} className="spinning" /> : shared ? <Check size={13} /> : <Share2 size={13} />}</button>}</div>}
       </div>
     </article>
@@ -1150,7 +1159,11 @@ export function App(): ReactNode {
   const [accessModeMenuOpen, setAccessModeMenuOpen] = useState(false);
   const [composerMenu, setComposerMenu] = useState<"model" | "thinking">();
   const [previewMenuOpen, setPreviewMenuOpen] = useState(false);
-  const [preview, setPreview] = useState<PreviewTarget>();
+  const [preview, setPreview] = useState<PreviewState>();
+  const previewRef = useRef<PreviewState | undefined>(preview);
+  previewRef.current = preview;
+  const [sidebarView, setSidebarView] = useState<"topics" | "files">("topics");
+  const [browsingWorkspace, setBrowsingWorkspace] = useState("");
   const [previewSplit, setPreviewSplit] = useState(readStoredPreviewSplit);
   const [previewDragging, setPreviewDragging] = useState(false);
   const [attachments, setAttachments] = useState<import("../../shared/protocol").PromptAttachment[]>([]);
@@ -1161,7 +1174,6 @@ export function App(): ReactNode {
   const composerRef = useRef<HTMLFormElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const processedComposerRequestsRef = useRef(new Set<string>());
-  const previewRequestRef = useRef(0);
   const previewDragPointerRef = useRef<number | undefined>(undefined);
   const workAreaRef = useRef<HTMLDivElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
@@ -1319,7 +1331,6 @@ export function App(): ReactNode {
   useEffect(() => {
     setEditingMessageTimestamp(undefined);
     setSelectedSkill(undefined);
-    previewRequestRef.current += 1;
     setPreview(undefined);
   }, [snapshot.sessionId]);
 
@@ -1468,7 +1479,7 @@ export function App(): ReactNode {
     }
   }
 
-  async function copyMessage(message: ChatMessage): Promise<void> {
+  const copyMessage = useCallback(async (message: ChatMessage): Promise<void> => {
     const text = messageText(message);
     if (!text) return;
     try {
@@ -1476,9 +1487,9 @@ export function App(): ReactNode {
     } catch {
       setMessageActionError("复制失败，请检查剪贴板权限");
     }
-  }
+  }, []);
 
-  async function shareMessage(_message: ChatMessage, target: HTMLElement): Promise<void> {
+  const shareMessage = useCallback(async (_message: ChatMessage, target: HTMLElement): Promise<void> => {
     setMessageActionError(undefined);
     try {
       await shareElementAsImage(target);
@@ -1486,23 +1497,23 @@ export function App(): ReactNode {
       setMessageActionError(error instanceof Error ? `分享失败：${error.message}` : "分享失败，请重试");
       throw error;
     }
-  }
+  }, []);
 
-  function editMessage(message: ChatMessage): void {
+  const editMessage = useCallback((message: ChatMessage): void => {
     setInput(messageText(message));
     setSelectedSkill(message.skill?.name);
     setAttachments([]);
     setEditingMessageTimestamp(message.timestamp);
     setMessageActionError(undefined);
     setTimeout(() => textareaRef.current?.focus(), 0);
-  }
+  }, []);
 
-  function handleHtmlAction(text: string): void {
+  const handleHtmlAction = useCallback((text: string): void => {
     setInput((current) => current.trim() ? `${current.trim()}\n${text}` : text);
     setSelectedSkill(undefined);
     setEditingMessageTimestamp(undefined);
     setMessageActionError(undefined);
-  }
+  }, []);
 
   function updatePreviewSplitFromPointer(clientX: number, clientY: number): void {
     const bounds = workAreaRef.current?.getBoundingClientRect();
@@ -1550,17 +1561,42 @@ export function App(): ReactNode {
     setPreviewSplit(next);
   }
 
-  function openArtifactPreview(artifact: Artifact): void {
-    previewRequestRef.current += 1;
+  function openPreviewTarget(target: PreviewTarget, id: string = previewTargetKey(target)): void {
     setRightPanel(false);
-    setPreview({ type: "artifact", artifact });
+    setPreview((current) => {
+      if (current?.tabs.some((tab) => tab.id === id)) return { ...current, activeTabId: id };
+      const tab: PreviewTab = { id, target };
+      return current ? { tabs: [...current.tabs, tab], activeTabId: id } : { tabs: [tab], activeTabId: id };
+    });
   }
 
+  function updatePreviewTarget(id: string, target: PreviewTarget): void {
+    setPreview((current) => (current ? { ...current, tabs: current.tabs.map((tab) => (tab.id === id ? { ...tab, target } : tab)) } : current));
+  }
+
+  function selectPreviewTab(id: string): void {
+    setPreview((current) => (current ? { ...current, activeTabId: id } : current));
+  }
+
+  function closePreviewTab(id: string): void {
+    setPreview((current) => {
+      if (!current) return undefined;
+      const index = current.tabs.findIndex((tab) => tab.id === id);
+      if (index < 0) return current;
+      const tabs = current.tabs.filter((tab) => tab.id !== id);
+      if (tabs.length === 0) return undefined;
+      const activeTabId = current.activeTabId === id ? tabs[Math.min(index, tabs.length - 1)]!.id : current.activeTabId;
+      return { tabs, activeTabId };
+    });
+  }
+
+  const openArtifactPreview = useCallback((artifact: Artifact): void => {
+    openPreviewTarget({ type: "artifact", artifact });
+  }, []);
+
   function openBrowserPreview(): void {
-    previewRequestRef.current += 1;
     setPreviewMenuOpen(false);
-    setRightPanel(false);
-    setPreview({ type: "browser" });
+    openPreviewTarget({ type: "browser" });
   }
 
   async function openManualFilePreview(): Promise<void> {
@@ -1568,42 +1604,36 @@ export function App(): ReactNode {
     try {
       const file = await window.piDesktop.choosePreviewFile();
       if (!file) return;
-      previewRequestRef.current += 1;
-      setRightPanel(false);
-      setPreview({ type: "file", file });
+      openPreviewTarget({ type: "file", file });
     } catch (error) {
       setMessageActionError(error instanceof Error ? error.message : "无法打开预览文件");
     }
   }
 
-  async function openFilePreview(relativePath: string): Promise<void> {
-    const requestId = previewRequestRef.current + 1;
-    previewRequestRef.current = requestId;
-    const title = relativePath.split("/").at(-1) ?? relativePath;
+  const openFilePreview = useCallback(async (relativePath: string, workspace?: string): Promise<void> => {
+    const id = workspace ? `${workspace}::${relativePath}` : relativePath;
     setRightPanel(false);
-    setPreview({ type: "loading", title, path: relativePath });
-    try {
-      const file = await window.piDesktop.readWorkspaceFile(relativePath);
-      if (previewRequestRef.current === requestId) setPreview({ type: "file", file });
-    } catch (error) {
-      if (previewRequestRef.current === requestId) setPreview({ type: "error", title, path: relativePath, message: error instanceof Error ? error.message : "读取文件失败" });
+    if (previewRef.current?.tabs.some((tab) => tab.id === id)) {
+      setPreview((current) => (current ? { ...current, activeTabId: id } : current));
+      return;
     }
-  }
+    const title = relativePath.split("/").at(-1) ?? relativePath;
+    openPreviewTarget({ type: "loading", title, path: relativePath }, id);
+    try {
+      const file = await window.piDesktop.readWorkspaceFile(relativePath, workspace);
+      updatePreviewTarget(id, { type: "file", file });
+    } catch (error) {
+      updatePreviewTarget(id, { type: "error", title, path: relativePath, message: error instanceof Error ? error.message : "读取文件失败" });
+    }
+  }, []);
 
-  function openDiffPreview(execution: ToolExecution): void {
+  const openDiffPreview = useCallback((execution: ToolExecution): void => {
     if (!execution.patch) return;
-    previewRequestRef.current += 1;
-    setRightPanel(false);
     const path = execution.changedFile?.relativePath;
-    setPreview({ type: "diff", title: path?.split("/").at(-1) ?? `${toolLabel(execution.name)}变更`, path, patch: execution.patch });
-  }
+    openPreviewTarget({ type: "diff", title: path?.split("/").at(-1) ?? `${toolLabel(execution.name)}变更`, path, patch: execution.patch });
+  }, []);
 
-  function closePreview(): void {
-    previewRequestRef.current += 1;
-    setPreview(undefined);
-  }
-
-  async function regenerateMessage(message: ChatMessage): Promise<void> {
+  const regenerateMessage = useCallback(async (message: ChatMessage): Promise<void> => {
     if (snapshot.busy) return;
     const index = snapshot.messages.findIndex((item) => item.id === message.id);
     const previousUser = index > 0 ? [...snapshot.messages.slice(0, index)].reverse().find((item) => item.role === "user") : undefined;
@@ -1616,7 +1646,7 @@ export function App(): ReactNode {
       setLocalTurnStartedAt(undefined);
       setMessageActionError(error instanceof Error ? error.message : "重新生成失败");
     }
-  }
+  }, [snapshot.busy, snapshot.messages]);
 
   async function addAttachments(): Promise<void> {
     let selected: import("../../shared/protocol").PromptAttachment[];
@@ -1765,9 +1795,21 @@ export function App(): ReactNode {
   if (!ready) return <div className="app-loading"><div className="brand-mark">CA</div><LoaderCircle className="spinning" size={22} /></div>;
 
   return (
-    <div className={`desktop-shell${preview ? " preview-open" : ""}`}>
-      {!preview && <aside className="sidebar">
+    <div className="desktop-shell">
+      <aside className="sidebar">
         <div className="brand-row"><div className="brand-mark">CA</div><div><strong>ChatAnyTime</strong><span>桌面端</span></div></div>
+        {sidebarView === "files" ? (
+          <>
+            <div className="workspace-tree-header">
+              <button type="button" className="workspace-tree-back" onClick={() => setSidebarView("topics")}><ChevronLeft size={14} />返回</button>
+              <span title={browsingWorkspace}>{browsingWorkspace ? (browsingWorkspace.split(/[\\/]/u).at(-1) ?? browsingWorkspace) : "工作区文件"}</span>
+            </div>
+            {browsingWorkspace
+              ? <WorkspaceTree key={browsingWorkspace} workspace={browsingWorkspace} onOpenFile={(relativePath) => openFilePreview(relativePath, browsingWorkspace)} />
+              : <div className="session-list-empty">请从话题列表选择工作区</div>}
+          </>
+        ) : (
+          <>
         <div className="sidebar-tabs" role="tablist" aria-label="侧栏视图">
           <button type="button" role="tab" aria-selected={sidebarTab === "agents"} className={sidebarTab === "agents" ? "active" : ""} onClick={() => { setSidebarTab("agents"); setSidebarQuery(""); }}><Users size={14} />助手<span>{settings.agents.filter((agent) => !agent.archived).length}</span></button>
           <button type="button" role="tab" aria-selected={sidebarTab === "topics"} className={sidebarTab === "topics" ? "active" : ""} onClick={() => { setSidebarTab("topics"); setSidebarQuery(""); }}><MessageCircle size={14} />话题<span>{snapshot.sessions.length}</span></button>
@@ -1795,6 +1837,15 @@ export function App(): ReactNode {
                     <ChevronDown size={14} className={collapsed ? "collapsed" : ""} />
                   </button>
                   <button
+                    className="session-workspace-files-button"
+                    type="button"
+                    title={`查看 ${workspaceName} 文件`}
+                    aria-label={`查看 ${workspaceName} 文件`}
+                    onClick={() => { setBrowsingWorkspace(group.workspace); setSidebarView("files"); }}
+                  >
+                    <FolderTree size={14} />
+                  </button>
+                  <button
                     className="session-workspace-new-button"
                     type="button"
                     title={`在 ${workspaceName} 中新建话题`}
@@ -1811,12 +1862,14 @@ export function App(): ReactNode {
             );
           })}
         </nav>}
+          </>
+        )}
         <button className="new-session-button" type="button" disabled={!snapshot.workspace} onClick={() => void createNewSession()}><MessageSquarePlus size={16} />新建话题</button>
         <div className="sidebar-footer">
           <button type="button" onClick={() => setSettingsOpen(true)}><Settings size={16} />设置</button>
           <span className={`runtime-indicator${snapshot.busy ? " busy" : ""}`}><i />{snapshot.status}</span>
         </div>
-      </aside>}
+      </aside>
 
       <main className="workspace-main">
         <header className="topbar">
@@ -1846,7 +1899,10 @@ export function App(): ReactNode {
               ) : displayMessages.length === 0 && !isGenerating ? (
                 <div className="empty-conversation"><div className="empty-icon"><CodeXml size={27} /></div><h1>今天想开发什么？</h1></div>
               ) : <>
-                {displayMessages.map((message, index) => <MessageView key={message.uuid ?? message.id} message={message} executions={snapshot.executions} onOpenArtifact={openArtifactPreview} onOpenFile={(relativePath) => void openFilePreview(relativePath)} onHtmlAction={handleHtmlAction} onCopy={(item) => void copyMessage(item)} onEdit={editMessage} onRegenerate={(item) => void regenerateMessage(item)} onShare={shareMessage} showThinking={settings.appearance.showThinking} hiddenThinkingLabel={snapshot.extensionUi.hiddenThinkingLabel} busy={snapshot.busy} timing={showTurnTimingOnLatest && index === latestAssistantMessageIndex && message.role === "assistant" ? snapshot.turnTiming : undefined} now={now} />)}
+                {displayMessages.map((message, index) => {
+                  const timing = showTurnTimingOnLatest && index === latestAssistantMessageIndex && message.role === "assistant" ? snapshot.turnTiming : undefined;
+                  return <MessageView key={message.uuid ?? message.id} message={message} executions={snapshot.executions} onOpenArtifact={openArtifactPreview} onOpenFile={openFilePreview} onOpenDiff={openDiffPreview} onHtmlAction={handleHtmlAction} onCopy={copyMessage} onEdit={editMessage} onRegenerate={regenerateMessage} onShare={shareMessage} showThinking={settings.appearance.showThinking} hiddenThinkingLabel={snapshot.extensionUi.hiddenThinkingLabel} busy={snapshot.busy} timing={timing} now={timing ? now : undefined} />;
+                })}
                 {isGenerating && snapshot.extensionUi.workingVisible && (hasAssistantMessage ? <div className="response-progress response-progress-inline"><LoaderCircle size={14} className="spinning" /><span>{workingLabel}</span>{activeTurnTiming && <TimingMeta timing={activeTurnTiming} now={now} />}</div> : <PendingResponse label={workingLabel} timing={activeTurnTiming} now={now} />)}
               </>}
             </div>
@@ -1930,7 +1986,7 @@ export function App(): ReactNode {
               <ActivityPanel executions={snapshot.executions} onOpenDiff={openDiffPreview} />
             </aside>
           )}
-          {preview && <ArtifactPreview key={previewTargetKey(preview)} target={preview} browserSuspended={previewDragging || previewMenuOpen || settingsOpen || Boolean(permission) || Boolean(extensionUiDialog) || Boolean(messageActionError)} onClose={closePreview} onOpenArtifact={openArtifactPreview} />}
+          {preview && <ArtifactPreview key={preview.activeTabId} tabs={preview.tabs} activeTabId={preview.activeTabId} browserSuspended={previewDragging || previewMenuOpen || settingsOpen || Boolean(permission) || Boolean(extensionUiDialog) || Boolean(messageActionError)} onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} />}
         </div>
       </main>
 
