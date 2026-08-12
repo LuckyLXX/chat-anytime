@@ -98,7 +98,10 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
           let changed = previous.messages.length !== incoming.messages.length;
           const mergedMessages = incoming.messages.map((msg) => {
             const prev = msg.uuid !== undefined ? prevByUuid.get(msg.uuid) : undefined;
-            if (prev && prev.streaming === msg.streaming && prev.error === msg.error) return prev;
+            // Skip streaming messages when reusing the identity: a streaming
+            // bubble keeps the same uuid while its content grows token by
+            // token, so we must take the fresh reference to render new tokens.
+            if (prev && !msg.streaming && prev.streaming === msg.streaming && prev.error === msg.error) return prev;
             changed = true;
             return msg;
           });

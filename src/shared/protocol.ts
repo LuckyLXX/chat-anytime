@@ -224,15 +224,15 @@ export interface BrowserPreviewState {
 }
 
 export type BrowserPreviewCommand =
-  | { type: "bounds"; bounds: BrowserPreviewBounds }
-  | { type: "visible"; visible: boolean }
-  | { type: "navigate"; url: string }
-  | { type: "back" }
-  | { type: "forward" }
-  | { type: "reload" }
-  | { type: "stop" }
-  | { type: "open-external" }
-  | { type: "close" };
+  | { type: "bounds"; tabId?: string; bounds: BrowserPreviewBounds }
+  | { type: "visible"; tabId?: string; visible: boolean }
+  | { type: "navigate"; tabId?: string; url: string }
+  | { type: "back"; tabId?: string }
+  | { type: "forward"; tabId?: string }
+  | { type: "reload"; tabId?: string }
+  | { type: "stop"; tabId?: string }
+  | { type: "open-external"; tabId?: string }
+  | { type: "close"; tabId?: string };
 
 export interface SessionSummary {
   id: string;
@@ -482,5 +482,5 @@ export interface DesktopApi {
   browserPreview(command: BrowserPreviewCommand): Promise<BrowserPreviewState>;
   send(command: RuntimeCommand): Promise<void>;
   onRuntimeMessage(listener: (message: RuntimeMessage) => void): () => void;
-  onBrowserPreviewState(listener: (state: BrowserPreviewState) => void): () => void;
+  onBrowserPreviewState(tabId?: string, listener?: (state: BrowserPreviewState) => void): () => void;
 }

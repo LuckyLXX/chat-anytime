@@ -743,13 +743,17 @@ async function createSession(sessionManager?: SessionManager): Promise<void> {
   turnTiming = undefined;
 
   const settingsManager = SettingsManager.create(workspace, getAgentDir());
-  await piCliHostBroker.start();
-  configurePiCliShim(resolvePiCliShimPath(runtimeScriptPath, import.meta.url), piCliHostBroker);
+  const brokerReady = piCliHostBroker.start();
   packageManager = new DefaultPackageManager({ cwd: workspace, agentDir: getAgentDir(), settingsManager });
   packageManager.setProgressCallback((progress) => post({ type: "package-progress", progress: { ...progress, source: packageProgressSource(progress.source) } }));
   availablePackageUpdates = [];
   const bundledAdapterPath = bundledMcpAdapterPath();
-  const resolvedResources = await packageManager.resolve();
+  // Resolve packages in parallel with the CLI broker handshake: resolve hits
+  // npm/git/disk while the broker only opens a local socket.
+  const resolvedResourcesPromise = packageManager.resolve();
+  await brokerReady;
+  configurePiCliShim(resolvePiCliShimPath(runtimeScriptPath, import.meta.url), piCliHostBroker);
+  const resolvedResources = await resolvedResourcesPromise;
   resolvedSkillResources = applyAgentSkillOverrides(resolvedResources.skills, currentAgent?.skillOverrides);
   extensionPolicy ??= new ExtensionPolicy(getAgentDir());
   extensionPolicy.setCandidates(discoverExtensionCandidates(resolvedResources.extensions, bundledAdapterPath));
@@ -777,6 +781,10 @@ async function createSession(sessionManager?: SessionManager): Promise<void> {
     ? modelRuntime.getModel(requested.provider, requested.id)
     : undefined;
   const enabledBuiltinTools = Object.entries(currentAgent?.tools ?? {}).filter(([, enabled]) => enabled).map(([name]) => name);
+  // refreshSessions only reads session files from disk — it doesn't touch the
+  // in-memory session — so run it concurrently with createAgentSession and
+  // await the result before emitState publishes the session list.
+  const sessionsPromise = refreshSessions();
   const result = await createAgentSession({
     cwd: workspace,
     modelRuntime,
@@ -788,6 +796,7 @@ async function createSession(sessionManager?: SessionManager): Promise<void> {
   });
   if (generation !== sessionGeneration) {
     result.session.dispose();
+    await sessionsPromise;
     return;
   }
   session = result.session;
@@ -815,8 +824,12 @@ async function createSession(sessionManager?: SessionManager): Promise<void> {
   unsubscribeSession = session.subscribe(handleSessionEvent);
   status = sessionReadyStatus(Boolean(session.model), Boolean(result.modelFallbackMessage));
   busy = false;
-  await refreshSessions();
-  emitResourceCatalog();
+  await sessionsPromise;
+  // Note: emitResourceCatalog() is intentionally NOT re-called here. Since
+  // reload() at the top of createSession, none of buildResourceCatalog's inputs
+  // (resourceLoader, packageManager, extensionPolicy, skillResources) have
+  // changed, so this would only resend identical data. MCP adapter status is
+  // refreshed separately by the mcpStatusEvent subscriber as adapters load.
   emitState();
 }
 

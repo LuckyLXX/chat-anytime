@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { BrowserPreviewCommand, DesktopApi, RuntimeCommand, RuntimeMessage } from "../shared/protocol.js";
+import type { BrowserPreviewCommand, BrowserPreviewState, DesktopApi, RuntimeCommand, RuntimeMessage } from "../shared/protocol.js";
 
 const api: DesktopApi = {
   bootstrap: () => ipcRenderer.invoke("desktop:bootstrap"),
@@ -15,10 +15,12 @@ const api: DesktopApi = {
     ipcRenderer.on("runtime:message", handler);
     return () => ipcRenderer.removeListener("runtime:message", handler);
   },
-  onBrowserPreviewState: (listener) => {
-    const handler = (_event: Electron.IpcRendererEvent, state: Parameters<typeof listener>[0]): void => listener(state);
-    ipcRenderer.on("browser-preview:state", handler);
-    return () => ipcRenderer.removeListener("browser-preview:state", handler);
+  onBrowserPreviewState: (tabId?: string, listener?: (state: BrowserPreviewState) => void) => {
+    const eventChannel = tabId === undefined ? "browser-preview:state" : `browser-preview:state:${tabId}`;
+    const stateListener = listener ?? (() => {});
+    const handler = (_event: Electron.IpcRendererEvent, state: BrowserPreviewState): void => stateListener(state);
+    ipcRenderer.on(eventChannel, handler);
+    return () => ipcRenderer.removeListener(eventChannel, handler);
   }
 };
 

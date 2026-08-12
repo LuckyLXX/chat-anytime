@@ -63,7 +63,7 @@ describe("demo session commands", () => {
   it("supports manual files and browser preview state events", async () => {
     const api = createDemoApi();
     const states: string[] = [];
-    const unsubscribe = api.onBrowserPreviewState((state) => states.push(state.url));
+    const unsubscribe = api.onBrowserPreviewState(undefined, (state) => states.push(state.url));
 
     const file = await api.choosePreviewFile();
     const navigated = await api.browserPreview({ type: "navigate", url: "localhost:4173" });

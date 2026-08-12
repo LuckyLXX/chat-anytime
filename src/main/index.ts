@@ -160,16 +160,21 @@ function startRuntime(): void {
     mainWindow?.webContents.send("runtime:message", message);
   });
   runtimeProcess.on("exit", (code) => { runtimeProcess = undefined; mainWindow?.webContents.send("runtime:message", { type: "error", message: `Pi 运行时意外停止（退出代码 ${code}），请重启应用。` } satisfies RuntimeMessage); });
-  runtimeProcess.stdout?.on("data", (chunk) => console.log(`[pi-runtime] ${String(chunk).trimEnd()}`));
-  runtimeProcess.stderr?.on("data", (chunk) => console.error(`[pi-runtime] ${String(chunk).trimEnd()}`));
+  // Forward Pi runtime stdio only in development: in packaged builds the Pi
+  // runtime is chatty (per-token/tool logs) and piping it through synchronous
+  // console I/O on the main thread slows runtime→renderer message forwarding.
+  if (!app.isPackaged) {
+    runtimeProcess.stdout?.on("data", (chunk) => console.log(`[pi-runtime] ${String(chunk).trimEnd()}`));
+    runtimeProcess.stderr?.on("data", (chunk) => console.error(`[pi-runtime] ${String(chunk).trimEnd()}`));
+  }
   const settings = loadSettings();
   sendToRuntime({ type: "initialize", settings, apiKeys: credentialsCache });
 }
 function createWindow(): void {
   const rendererUrl = process.env.ELECTRON_RENDERER_URL;
   const nextWindow = new BrowserWindow({ width: 1440, height: 920, minWidth: 1040, minHeight: 680, backgroundColor: "#f5f5f2", titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default", webPreferences: { preload: join(__dirname, "../preload/index.cjs"), contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: !rendererUrl } });
-  const previewController = new BrowserPreviewController(nextWindow, (state) => {
-    if (!nextWindow.isDestroyed()) nextWindow.webContents.send("browser-preview:state", state);
+  const previewController = new BrowserPreviewController(nextWindow, (state, tabId) => {
+    if (!nextWindow.isDestroyed()) nextWindow.webContents.send(`browser-preview:state:${tabId}`, state);
   });
   mainWindow = nextWindow;
   browserPreviewController = previewController;

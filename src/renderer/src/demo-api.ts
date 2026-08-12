@@ -448,9 +448,10 @@ export function createDemoApi(): DesktopApi {
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
-    onBrowserPreviewState(listener) {
-      browserPreviewListeners.add(listener);
-      return () => browserPreviewListeners.delete(listener);
+    onBrowserPreviewState(_tabId: string, listener?: (state: BrowserPreviewState) => void) {
+      const l = listener ?? (() => {});
+      browserPreviewListeners.add(l);
+      return () => browserPreviewListeners.delete(l);
     }
   };
 }

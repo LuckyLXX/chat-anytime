@@ -13,7 +13,6 @@ import {
   FileDiff,
   Folder,
   FolderOpen,
-  Globe2,
   KeyRound,
   Layers,
   LoaderCircle,
@@ -40,7 +39,6 @@ import {
   ShieldCheck,
   Trash2,
   Workflow,
-  Wrench,
   FolderTree,
   ChevronLeft,
   Pin,
@@ -107,7 +105,7 @@ const accessModeDescriptions: Record<AccessMode, string> = {
 function previewTargetKey(target: PreviewTarget): string {
   switch (target.type) {
     case "artifact": return target.artifact.id;
-    case "browser": return "browser";
+    case "browser": return target.id ?? "browser";
     case "file": return target.file.relativePath;
     default: return `${target.type}-${target.path ?? target.title}`;
   }
@@ -508,55 +506,6 @@ const MessageView = memo(function MessageView({ message, executions, onOpenArtif
     </article>
   );
 });
-
-function ExecutionItem({ execution, selected, onSelect }: { execution: ToolExecution; selected: boolean; onSelect(): void }): ReactNode {
-  const statusIcon = execution.status === "running"
-    ? <LoaderCircle size={14} className="spinning" />
-    : execution.status === "error"
-      ? <AlertCircle size={14} />
-      : <Check size={14} />;
-  return (
-    <button type="button" className={`execution-item${selected ? " selected" : ""}`} onClick={onSelect}>
-      <span className={`execution-status ${execution.status}`}>{statusIcon}</span>
-      <span className="execution-copy">
-        <strong>{toolLabel(execution.name)}</strong>
-        <small>{formatDuration(execution.startedAt, execution.completedAt)}</small>
-      </span>
-      <ChevronDown size={14} className="execution-chevron" />
-    </button>
-  );
-}
-
-function ActivityPanel({ executions, onOpenDiff }: { executions: ToolExecution[]; onOpenDiff(execution: ToolExecution): void }): ReactNode {
-  const [selectedId, setSelectedId] = useState<string>();
-  const selected = executions.find((item) => item.id === selectedId) ?? executions.at(-1);
-  return (
-    <div className="activity-panel">
-      <div className="activity-list">
-        {executions.length === 0 ? (
-          <div className="panel-empty"><Wrench size={20} /><span>暂无工具活动</span></div>
-        ) : executions.map((execution) => (
-          <ExecutionItem
-            key={execution.id}
-            execution={execution}
-            selected={selected?.id === execution.id}
-            onSelect={() => setSelectedId(execution.id)}
-          />
-        ))}
-      </div>
-      {selected && (
-        <div className="execution-detail">
-          <div className="detail-section">
-            <h3>输入</h3>
-            <pre>{JSON.stringify(selected.args, null, 2)}</pre>
-          </div>
-          {selected.patch && <div className="detail-section"><h3>变更</h3><button className="secondary-button activity-preview-button" type="button" onClick={() => onOpenDiff(selected)}><FileDiff size={14} />在预览中打开</button></div>}
-          {selected.output && <div className="detail-section"><h3>输出</h3><pre>{selected.output}</pre></div>}
-        </div>
-      )}
-    </div>
-  );
-}
 
 function ThemePreview({ appearance }: { appearance: AppearanceSettings }): ReactNode {
   const themeAssetUrls = useThemeAssetUrls(themeAssetsForAppearance(appearance));
@@ -1158,16 +1107,14 @@ export function App(): ReactNode {
   const [editingMessageTimestamp, setEditingMessageTimestamp] = useState<number>();
   const [localTurnStartedAt, setLocalTurnStartedAt] = useState<number>();
   const [messageActionError, setMessageActionError] = useState<string>();
-  // Tool details are already available inline in the conversation. Keep the
-  // live activity panel opt-in so the first screen stays focused on the chat.
-  const [rightPanel, setRightPanel] = useState(() => readStoredBoolean("pidesktop.right-panel-open", false));
   const [sidebarTab, setSidebarTab] = useState<"agents" | "topics">("topics");
   const [sidebarQuery, setSidebarQuery] = useState("");
   const [collapsedWorkspaceGroups, setCollapsedWorkspaceGroups] = useState<Record<string, boolean>>({});
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [accessModeMenuOpen, setAccessModeMenuOpen] = useState(false);
   const [composerMenu, setComposerMenu] = useState<"model" | "thinking">();
-  const [previewMenuOpen, setPreviewMenuOpen] = useState(false);
+  const [previewOpened, setPreviewOpened] = useState(false);
+  const [previewCollapsed, setPreviewCollapsed] = useState(false);
   const [preview, setPreview] = useState<PreviewState>();
   const previewRef = useRef<PreviewState | undefined>(preview);
   previewRef.current = preview;
@@ -1183,7 +1130,6 @@ export function App(): ReactNode {
   const [attachmentError, setAttachmentError] = useState<string>();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const accessModeMenuRef = useRef<HTMLDivElement>(null);
-  const previewMenuRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLFormElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const processedComposerRequestsRef = useRef(new Set<string>());
@@ -1265,16 +1211,31 @@ export function App(): ReactNode {
     if (slashIndex > slashMatches.length - 1) setSlashIndex(Math.max(0, slashMatches.length - 1));
   }, [slashMatches.length, slashIndex]);
 
+  // Race-safe subscription: if the component unmounts before initialize()
+  // resolves (e.g. React.StrictMode's mount-unmount-mount in dev), the cleanup
+  // runs with unsubscribe still pending. The cancelled flag makes the late
+  // resolution tear down the listener immediately instead of leaking it.
   useEffect(() => {
-    let dispose: (() => void) | undefined;
-    void initialize().then((unsubscribe) => {
-      dispose = unsubscribe;
+    let cancelled = false;
+    let unsubscribe: (() => void) | undefined;
+    void initialize().then((fn) => {
+      if (cancelled) fn?.();
+      else unsubscribe = fn;
     });
-    return () => dispose?.();
+    return () => {
+      cancelled = true;
+      unsubscribe?.();
+    };
   }, [initialize]);
 
   useEffect(() => {
-    void window.piDesktop.send({ type: "composer.sync", text: input });
+    // Debounce composer.sync: typing fires one IPC round-trip per keystroke
+    // otherwise, contending with streaming on the main thread. 150ms keeps it
+    // responsive for live slash-command matching in the runtime.
+    const timer = window.setTimeout(() => {
+      void window.piDesktop.send({ type: "composer.sync", text: input });
+    }, 150);
+    return () => window.clearTimeout(timer);
   }, [input]);
 
   useEffect(() => {
@@ -1320,16 +1281,15 @@ export function App(): ReactNode {
   useLayoutEffect(() => {
     const timeline = timelineRef.current;
     if (!timeline || !stickToBottomRef.current) return;
-    timeline.scrollTo({ top: timeline.scrollHeight, behavior: snapshot.busy ? "smooth" : "auto" });
+    // Instant scroll while busy: streaming fires frequent updates, and smooth
+    // scrolling on every frame stacks competing animations and janks. Reserve
+    // smooth scrolling for the occasional new message when idle.
+    timeline.scrollTo({ top: timeline.scrollHeight, behavior: snapshot.busy ? "auto" : "smooth" });
   }, [snapshot.messages, snapshot.busy]);
 
   useEffect(() => {
     if (!snapshot.busy) setLocalTurnStartedAt(undefined);
   }, [snapshot.busy]);
-
-  useEffect(() => {
-    try { window.localStorage.setItem("pidesktop.right-panel-open", String(rightPanel)); } catch { /* storage may be unavailable in browser demo */ }
-  }, [rightPanel]);
 
   useEffect(() => {
     try { window.localStorage.setItem("pidesktop.preview-split", String(previewSplit)); } catch { /* storage may be unavailable in browser demo */ }
@@ -1345,19 +1305,19 @@ export function App(): ReactNode {
     setEditingMessageTimestamp(undefined);
     setSelectedSkill(undefined);
     setPreview(undefined);
+    setPreviewOpened(false);
+    setPreviewCollapsed(false);
   }, [snapshot.sessionId]);
 
   useEffect(() => {
-    if (!accessModeMenuOpen && !composerMenu && !previewMenuOpen) return;
+    if (!accessModeMenuOpen && !composerMenu) return;
     const closeOnPointerDown = (event: PointerEvent): void => {
       if (!accessModeMenuRef.current?.contains(event.target as Node)) setAccessModeMenuOpen(false);
-      if (!previewMenuRef.current?.contains(event.target as Node)) setPreviewMenuOpen(false);
       if (!composerRef.current?.contains(event.target as Node)) setComposerMenu(undefined);
     };
     const closeOnEscape = (event: KeyboardEvent): void => {
       if (event.key === "Escape") {
         setAccessModeMenuOpen(false);
-        setPreviewMenuOpen(false);
         setComposerMenu(undefined);
       }
     };
@@ -1367,7 +1327,7 @@ export function App(): ReactNode {
       document.removeEventListener("pointerdown", closeOnPointerDown);
       document.removeEventListener("keydown", closeOnEscape);
     };
-  }, [accessModeMenuOpen, composerMenu, previewMenuOpen]);
+  }, [accessModeMenuOpen, composerMenu]);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -1575,7 +1535,8 @@ export function App(): ReactNode {
   }
 
   function openPreviewTarget(target: PreviewTarget, id: string = previewTargetKey(target)): void {
-    setRightPanel(false);
+    setPreviewCollapsed(false);
+    setPreviewOpened(true);
     setPreview((current) => {
       if (current?.tabs.some((tab) => tab.id === id)) return { ...current, activeTabId: id };
       const tab: PreviewTab = { id, target };
@@ -1597,7 +1558,10 @@ export function App(): ReactNode {
       const index = current.tabs.findIndex((tab) => tab.id === id);
       if (index < 0) return current;
       const tabs = current.tabs.filter((tab) => tab.id !== id);
-      if (tabs.length === 0) return undefined;
+      if (tabs.length === 0) {
+        setPreviewCollapsed(false);
+        return undefined;
+      }
       const activeTabId = current.activeTabId === id ? tabs[Math.min(index, tabs.length - 1)]!.id : current.activeTabId;
       return { tabs, activeTabId };
     });
@@ -1608,12 +1572,10 @@ export function App(): ReactNode {
   }, []);
 
   function openBrowserPreview(): void {
-    setPreviewMenuOpen(false);
-    openPreviewTarget({ type: "browser" });
+    openPreviewTarget({ type: "browser", id: `browser-${crypto.randomUUID()}` });
   }
 
   async function openManualFilePreview(): Promise<void> {
-    setPreviewMenuOpen(false);
     try {
       const file = await window.piDesktop.choosePreviewFile();
       if (!file) return;
@@ -1625,7 +1587,7 @@ export function App(): ReactNode {
 
   const openFilePreview = useCallback(async (relativePath: string, workspace?: string): Promise<void> => {
     const id = workspace ? `${workspace}::${relativePath}` : relativePath;
-    setRightPanel(false);
+    setPreviewOpened(true);
     if (previewRef.current?.tabs.some((tab) => tab.id === id)) {
       setPreview((current) => (current ? { ...current, activeTabId: id } : current));
       return;
@@ -1646,10 +1608,21 @@ export function App(): ReactNode {
     openPreviewTarget({ type: "diff", title: path?.split("/").at(-1) ?? `${toolLabel(execution.name)}变更`, path, patch: execution.patch });
   }, []);
 
+  const latestReviewExecution = [...snapshot.executions].reverse().find((execution) => Boolean(execution.patch));
+  const openLatestReview = useCallback((): void => {
+    if (latestReviewExecution) openDiffPreview(latestReviewExecution);
+  }, [latestReviewExecution, openDiffPreview]);
+
+  // Latest snapshot ref so regenerateMessage keeps a stable identity instead of
+  // rebuilding on every streaming frame — rebuilding it would hand a new
+  // onRegenerate to every MessageView and bust their memo during streaming.
+  const latestSnapshotRef = useRef(snapshot);
+  latestSnapshotRef.current = snapshot;
   const regenerateMessage = useCallback(async (message: ChatMessage): Promise<void> => {
-    if (snapshot.busy) return;
-    const index = snapshot.messages.findIndex((item) => item.id === message.id);
-    const previousUser = index > 0 ? [...snapshot.messages.slice(0, index)].reverse().find((item) => item.role === "user") : undefined;
+    const { busy, messages } = latestSnapshotRef.current;
+    if (busy) return;
+    const index = messages.findIndex((item) => item.id === message.id);
+    const previousUser = index > 0 ? [...messages.slice(0, index)].reverse().find((item) => item.role === "user") : undefined;
     const text = previousUser ? messageText(previousUser) : "";
     if (!text && !previousUser?.skill) return;
     setLocalTurnStartedAt(Date.now());
@@ -1659,7 +1632,7 @@ export function App(): ReactNode {
       setLocalTurnStartedAt(undefined);
       setMessageActionError(error instanceof Error ? error.message : "重新生成失败");
     }
-  }, [snapshot.busy, snapshot.messages]);
+  }, []);
 
   async function addAttachments(): Promise<void> {
     let selected: import("../../shared/protocol").PromptAttachment[];
@@ -1889,22 +1862,20 @@ export function App(): ReactNode {
           <div className="project-title"><Folder size={17} /><span><strong>{snapshot.workspace?.split(/[\\/]/u).at(-1) ?? "ChatAnyTime"}</strong><small>{snapshot.agentName} · {snapshot.sessionId ? "当前话题" : "未开始话题"}</small></span></div>
           <div className="runtime-controls">
             <button className="workspace-top-button" type="button" onClick={() => void openWorkspace()}><FolderOpen size={15} /><span>工作区</span><strong>{compactPath(snapshot.workspace)}</strong><ChevronDown size={13} /></button>
-            <div className="preview-open-menu-shell" ref={previewMenuRef}>
-              <button className="preview-open-trigger" type="button" aria-haspopup="menu" aria-expanded={previewMenuOpen} onClick={() => setPreviewMenuOpen((open) => !open)}><Eye size={15} /><span>打开预览</span><ChevronDown size={13} /></button>
-              {previewMenuOpen && <div className="preview-open-menu" role="menu" aria-label="打开预览">
-                <button type="button" role="menuitem" onClick={openBrowserPreview}><Globe2 size={16} /><span>浏览器</span></button>
-                <button type="button" role="menuitem" disabled={!snapshot.workspace} onClick={() => void openManualFilePreview()}><File size={16} /><span>文件</span></button>
-              </div>}
-            </div>
-            {!preview && <button className="icon-button panel-toggle" type="button" aria-label={rightPanel ? "关闭活动面板" : "打开活动面板"} title={rightPanel ? "关闭活动面板" : "打开活动面板"} onClick={() => setRightPanel((open) => !open)}>{rightPanel ? <PanelRightClose size={18} /> : <PanelRightOpen size={18} />}</button>}
+            <button className="icon-button preview-panel-toggle" type="button" aria-label={previewOpened ? "关闭预览" : "打开预览"} title={previewOpened ? "关闭预览" : "打开预览"} onClick={() => {
+              if (previewCollapsed) setPreviewCollapsed(false);
+              else if (preview) setPreviewCollapsed(true);
+              else if (previewOpened) setPreviewOpened(false);
+              else setPreviewOpened(true);
+            }}>{previewOpened ? <PanelRightClose size={18} /> : <Eye size={18} />}</button>
           </div>
         </header>
 
-        <div
-          ref={workAreaRef}
-          className={`work-area${preview ? " with-preview" : rightPanel ? " with-panel" : ""}${previewDragging ? " is-preview-dragging" : ""}`}
-          style={preview ? { "--preview-split": `${previewSplit}%` } as CSSProperties : undefined}
-        >
+          <div
+            ref={workAreaRef}
+            className={`work-area${preview && !previewCollapsed ? " with-preview" : previewCollapsed ? " with-preview-collapsed" : previewOpened ? " with-preview-empty" : ""}${previewDragging ? " is-preview-dragging" : ""}`}
+            style={(preview && !previewCollapsed) || previewOpened ? { "--preview-split": `${previewSplit}%` } as CSSProperties : undefined}
+          >
           <section className="conversation-pane">
             <div className="timeline" ref={timelineRef}>
               {!snapshot.workspace ? (
@@ -1990,17 +1961,18 @@ export function App(): ReactNode {
             </form>
           </section>
 
-          {preview && <PreviewDivider split={previewSplit} dragging={previewDragging} onStart={startPreviewResize} onMove={movePreviewResize} onEnd={endPreviewResize} onCancel={cancelPreviewResize} onKeyDown={resizePreviewWithKeyboard} onReset={() => setPreviewSplit(50)} />}
+          {preview && !previewCollapsed && <PreviewDivider split={previewSplit} dragging={previewDragging} onStart={startPreviewResize} onMove={movePreviewResize} onEnd={endPreviewResize} onCancel={cancelPreviewResize} onKeyDown={resizePreviewWithKeyboard} onReset={() => setPreviewSplit(50)} />}
 
-          {rightPanel && !preview && (
-            <aside className="right-panel">
-              <div className="panel-tabs">
-                <button className="active" type="button"><Wrench size={15} />活动</button>
-              </div>
-              <ActivityPanel executions={snapshot.executions} onOpenDiff={openDiffPreview} />
+          {previewCollapsed && (
+            <aside className="preview-panel-collapsed" aria-label="预览已折叠">
+              <button className="icon-button preview-panel-collapsed-toggle" type="button" aria-label="展开预览" title="展开预览" onClick={() => setPreviewCollapsed(false)}><PanelRightOpen size={16} /></button>
             </aside>
           )}
-          {preview && <ArtifactPreview key={preview.activeTabId} tabs={preview.tabs} activeTabId={preview.activeTabId} browserSuspended={previewDragging || previewMenuOpen || settingsOpen || Boolean(permission) || Boolean(extensionUiDialog) || Boolean(messageActionError)} onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} />}
+          {(!preview && previewOpened) || (preview && !previewCollapsed && preview.tabs.length === 0) ? (
+            <ArtifactPreview key="empty-state" tabs={[]} activeTabId="" onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddFile={() => void openManualFilePreview()} />
+          ) : (
+            preview && !previewCollapsed && <ArtifactPreview key={preview.activeTabId} tabs={preview.tabs} activeTabId={preview.activeTabId} browserSuspended={previewDragging || settingsOpen || Boolean(permission) || Boolean(extensionUiDialog) || Boolean(messageActionError)} onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddFile={() => void openManualFilePreview()} onAddReview={openLatestReview} reviewAvailable={Boolean(latestReviewExecution)} />
+          )}
         </div>
       </main>
 

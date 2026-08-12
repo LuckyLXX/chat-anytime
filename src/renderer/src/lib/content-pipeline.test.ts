@@ -177,6 +177,30 @@ describe("rich content pipeline", () => {
     expect(segments).toEqual([{ type: "markdown", content: "```text\n[shell] pnpm test\n[cwd] D:/workspace\n[stdout] ok\n[退出码] 0\n```" }]);
   });
 
+  it("keeps adjacent reconstructed fences on separate lines after merge", () => {
+    // Simulates the common "outer ```TEXT fence containing inner ``` fences"
+    // shape. The outer fence gets closed by the first inner ```, then the
+    // inner fence becomes its own markdown fence. When mergeMarkdownSegments
+    // joins them, the closing and opening fences must not fuse into a single
+    // line like ``````js — that fuses them into one malformed code block.
+    const content = [
+      "```text",
+      "```bash",
+      "cargo add anydoc",
+      "```",
+      "```js",
+      "const x = 1",
+      "```"
+    ].join("\n");
+    const segments = parseRichContent(content);
+    const merged = segments
+      .map((segment) => (segment as { content?: string }).content ?? "")
+      .join("\n");
+    expect(merged).not.toContain("``````js");
+    expect(merged).toContain("```text\n```bash");
+    expect(merged).toContain("```\n```js");
+  });
+
   it("keeps unified diffs in a diff code block", () => {
     const segments = parseRichContent("diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1 +1 @@\n-old\n+new");
     expect(segments).toEqual([{ type: "markdown", content: "```diff\ndiff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1 +1 @@\n-old\n+new\n```" }]);

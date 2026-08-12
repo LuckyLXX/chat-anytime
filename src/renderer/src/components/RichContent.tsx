@@ -1,5 +1,4 @@
 import { Check, Code2, Copy, Expand, Eye, EyeOff, FileCode2, ExternalLink, Pause, Play, X } from "lucide-react";
-import mermaid from "mermaid";
 import { isValidElement, memo, useEffect, useId, useMemo, useRef, useState, type ReactNode, type SyntheticEvent } from "react";
 import ReactMarkdown, { defaultUrlTransform, type Components, type UrlTransform } from "react-markdown";
 import rehypeKatex from "rehype-katex";
@@ -35,6 +34,15 @@ interface ThemeTokens {
 
 type ThemeAnchorRef = { current: HTMLElement | null };
 
+// Mermaid is ~2.5MB unpacked; load it on first use instead of pulling the whole
+// diagram engine into the initial renderer bundle. Cached so concurrent
+// first-time renders share one dynamic import.
+type MermaidApi = typeof import("mermaid").default;
+let mermaidLoader: Promise<MermaidApi> | null = null;
+function loadMermaid(): Promise<MermaidApi> {
+  return mermaidLoader ??= import("mermaid").then((module) => module.default);
+}
+
 function resolveThemeSource(anchor: HTMLElement | null): HTMLElement {
   return anchor?.closest<HTMLElement>("[data-theme-effective]") ?? document.documentElement;
 }
@@ -59,9 +67,62 @@ function readThemeTokens(anchor?: HTMLElement | null): ThemeTokens {
   return { ...tokens, key: JSON.stringify(tokens) };
 }
 
+// Shared observer for the document-level theme. Most RichContent surfaces
+// (chat-area Markdown/Mermaid) resolve against documentElement, so without
+// sharing each bubble would install its own MutationObserver over <html>/<head>
+// and re-read computed styles on every theme tweak — N bubbles → N observers.
+// This singleton collapses all document-scoped subscribers onto one observer.
+interface DocumentThemeState {
+  observer: MutationObserver;
+  media: MediaQueryList;
+  update: () => void;
+  subscribers: Set<(tokens: ThemeTokens) => void>;
+}
+let documentThemeState: DocumentThemeState | null = null;
+let documentThemeTokens: ThemeTokens | null = null;
+
+function subscribeDocumentTheme(onChange: (tokens: ThemeTokens) => void): () => void {
+  if (!documentThemeState) {
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const subscribers = new Set<(tokens: ThemeTokens) => void>();
+    const update = (): void => {
+      const next = readThemeTokens();
+      if (documentThemeTokens && next.key === documentThemeTokens.key) return;
+      documentThemeTokens = next;
+      subscribers.forEach((callback) => callback(next));
+    };
+    const observer = new MutationObserver(update);
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme", "data-theme-effective", "data-theme-preset", "data-theme-custom"] });
+    observer.observe(document.head, { childList: true, characterData: true, subtree: true });
+    media.addEventListener("change", update);
+    documentThemeTokens = readThemeTokens();
+    documentThemeState = { observer, media, update, subscribers };
+  }
+  const state = documentThemeState;
+  state.subscribers.add(onChange);
+  return () => {
+    state.subscribers.delete(onChange);
+    if (state.subscribers.size === 0) {
+      state.observer.disconnect();
+      state.media.removeEventListener("change", state.update);
+      documentThemeState = null;
+      documentThemeTokens = null;
+    }
+  };
+}
+
 function useThemeTokens(anchorRef?: ThemeAnchorRef): ThemeTokens {
   const [tokens, setTokens] = useState<ThemeTokens>(() => readThemeTokens(anchorRef?.current));
   useEffect(() => {
+    const source = resolveThemeSource(anchorRef?.current ?? null);
+    // Document-scoped (the common chat-area case): reuse the shared singleton
+    // so hundreds of bubbles share one observer instead of one each.
+    if (source === document.documentElement) {
+      if (documentThemeTokens) setTokens((current) => current.key === documentThemeTokens!.key ? current : documentThemeTokens!);
+      return subscribeDocumentTheme((next) => setTokens((current) => current.key === next.key ? current : next));
+    }
+    // Preview-scoped (theme picker card): few of these exist, keep a private
+    // observer scoped to the preview root.
     const media = window.matchMedia("(prefers-color-scheme: dark)");
     const update = (): void => {
       const next = readThemeTokens(anchorRef?.current);
@@ -69,14 +130,8 @@ function useThemeTokens(anchorRef?: ThemeAnchorRef): ThemeTokens {
     };
     update();
     const observer = new MutationObserver(update);
-    const source = resolveThemeSource(anchorRef?.current ?? null);
     const previewRoot = source.closest<HTMLElement>(".theme-preview");
-    if (source === document.documentElement) {
-      observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme", "data-theme-effective", "data-theme-preset", "data-theme-custom"] });
-      observer.observe(document.head, { childList: true, characterData: true, subtree: true });
-    } else {
-      observer.observe(previewRoot ?? source, { attributes: true, childList: true, characterData: true, subtree: true });
-    }
+    observer.observe(previewRoot ?? source, { attributes: true, childList: true, characterData: true, subtree: true });
     media.addEventListener("change", update);
     return () => {
       observer.disconnect();
@@ -167,29 +222,32 @@ const MermaidBlock = memo(function MermaidBlock({ code, language }: { code: stri
     let active = true;
     setError("");
     setSvg("");
-    mermaid.initialize({
-      startOnLoad: false,
-      securityLevel: "strict",
-      theme: tokens.dark ? "dark" : "neutral",
-      themeVariables: {
-        background: tokens.surface,
-        primaryColor: tokens.accentSoft,
-        primaryTextColor: tokens.text,
-        primaryBorderColor: tokens.accent,
-        lineColor: tokens.muted,
-        secondaryColor: tokens.surfaceRaised,
-        secondaryTextColor: tokens.text,
-        tertiaryColor: tokens.surface,
-        tertiaryTextColor: tokens.text,
-        clusterBkg: tokens.surfaceRaised,
-        clusterBorder: tokens.border
-      },
-      fontFamily: "Inter, Segoe UI, Microsoft YaHei, sans-serif"
-    });
-    void mermaid
-      .render(`mermaid-${id}`, source)
+    void loadMermaid()
+      .then((mermaid) => {
+        if (!active) return;
+        mermaid.initialize({
+          startOnLoad: false,
+          securityLevel: "strict",
+          theme: tokens.dark ? "dark" : "neutral",
+          themeVariables: {
+            background: tokens.surface,
+            primaryColor: tokens.accentSoft,
+            primaryTextColor: tokens.text,
+            primaryBorderColor: tokens.accent,
+            lineColor: tokens.muted,
+            secondaryColor: tokens.surfaceRaised,
+            secondaryTextColor: tokens.text,
+            tertiaryColor: tokens.surface,
+            tertiaryTextColor: tokens.text,
+            clusterBkg: tokens.surfaceRaised,
+            clusterBorder: tokens.border
+          },
+          fontFamily: "Inter, Segoe UI, Microsoft YaHei, sans-serif"
+        });
+        return mermaid.render(`mermaid-${id}`, source);
+      })
       .then((result) => {
-        if (active) setSvg(result.svg);
+        if (active && result) setSvg(result.svg);
       })
       .catch((reason: unknown) => {
         if (active) setError(reason instanceof Error ? reason.message : String(reason));
@@ -236,9 +294,11 @@ const MermaidBlock = memo(function MermaidBlock({ code, language }: { code: stri
 });
 
 export const CodeBlock = memo(function CodeBlock({ language, code }: { language: string; code: string }): ReactNode {
-  const highlighted = language && hljs.getLanguage(language)
+  // Memoize so streaming code blocks only re-highlight when the code string
+  // actually changes, not on every parent re-render.
+  const highlighted = useMemo(() => language && hljs.getLanguage(language)
     ? hljs.highlight(code, { language }).value
-    : hljs.highlightAuto(code).value;
+    : hljs.highlightAuto(code).value, [code, language]);
   return (
     <div className="code-block">
       <div className="code-toolbar"><span>{language || "text"}</span><div className="code-actions"><CopyButton text={code} /></div></div>

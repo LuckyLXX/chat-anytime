@@ -11,24 +11,33 @@ const emptyState: BrowserPreviewState = {
   canGoForward: false
 };
 
-function storedBrowserAddress(): string {
+function addressStorageKey(tabId: string): string {
+  return `pidesktop.browser-preview-url-${tabId}`;
+}
+
+function storedBrowserAddress(tabId: string): string {
   try {
-    return window.localStorage.getItem("pidesktop.browser-preview-url") ?? "http://localhost:3000";
+    return window.localStorage.getItem(addressStorageKey(tabId)) ?? "http://localhost:3000";
   } catch {
     return "http://localhost:3000";
   }
 }
 
-export function BrowserPreview({ suspended = false }: { suspended?: boolean }): ReactNode {
+function saveBrowserAddress(tabId: string, address: string): void {
+  try { window.localStorage.setItem(addressStorageKey(tabId), address); } catch { /* storage may be unavailable in browser demo */ }
+}
+
+export function BrowserPreview({ suspended = false, tabId = "default" }: { suspended?: boolean; tabId?: string }): ReactNode {
   const viewportRef = useRef<HTMLDivElement>(null);
   const addressFocusedRef = useRef(false);
-  const [address, setAddress] = useState(storedBrowserAddress);
+  const [address, setAddress] = useState(() => storedBrowserAddress(tabId));
   const [state, setState] = useState<BrowserPreviewState>(emptyState);
   const [localError, setLocalError] = useState<string>();
 
   async function send(command: BrowserPreviewCommand): Promise<BrowserPreviewState | undefined> {
+    const payload: BrowserPreviewCommand = { ...command, tabId };
     try {
-      const next = await window.piDesktop.browserPreview(command);
+      const next = await window.piDesktop.browserPreview(payload);
       setState(next);
       setLocalError(undefined);
       return next;
@@ -43,21 +52,21 @@ export function BrowserPreview({ suspended = false }: { suspended?: boolean }): 
     const next = await send({ type: "navigate", url: address });
     if (!next?.url) return;
     setAddress(next.url);
-    try { window.localStorage.setItem("pidesktop.browser-preview-url", next.url); } catch { /* storage may be unavailable in browser demo */ }
+    saveBrowserAddress(tabId, next.url);
   }
 
-  useEffect(() => window.piDesktop.onBrowserPreviewState((next) => {
+  useEffect(() => window.piDesktop.onBrowserPreviewState(tabId, (next) => {
     setState(next);
     if (next.url && !addressFocusedRef.current) setAddress(next.url);
-  }), []);
+  }), [tabId]);
 
   useEffect(() => {
     void send({ type: "visible", visible: !suspended });
   }, [suspended]);
 
   useEffect(() => () => {
-    void window.piDesktop.browserPreview({ type: "close" });
-  }, []);
+    void window.piDesktop.browserPreview({ type: "close", tabId });
+  }, [tabId]);
 
   useLayoutEffect(() => {
     const viewport = viewportRef.current;

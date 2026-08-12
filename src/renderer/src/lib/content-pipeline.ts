@@ -160,7 +160,13 @@ function mergeMarkdownSegments(segments: RichContentSegment[]): RichContentSegme
   for (const segment of segments) {
     const previous = merged.at(-1);
     if (segment.type === "markdown" && previous?.type === "markdown") {
-      previous.content += segment.content;
+      // Adjacent reconstructed fences (e.g. an outer ```TEXT fence that gets
+      // closed by an inner ``` fence) must keep their delimiter lines on
+      // separate lines; concatenating them raw would fuse the trailing
+      // closing fence with the next opening fence into one line like
+      // ``````js, which breaks Markdown parsing downstream.
+      const separator = previous.content.endsWith("\n") || segment.content.startsWith("\n") ? "" : "\n";
+      previous.content += separator + segment.content;
     } else if (segment.type === "markdown" && !segment.content.trim()) {
       if (previous?.type === "markdown") previous.content += segment.content;
     } else {
