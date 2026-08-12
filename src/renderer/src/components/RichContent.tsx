@@ -48,6 +48,13 @@ function resolveThemeSource(anchor: HTMLElement | null): HTMLElement {
 }
 
 function readThemeTokens(anchor?: HTMLElement | null): ThemeTokens {
+  // SSR/non-DOM guard: react-dom/server renders RichContent without a window,
+  // so getComputedStyle/matchMedia are unavailable. Return neutral defaults;
+  // the client re-reads real tokens once it mounts.
+  if (typeof window === "undefined" || typeof document === "undefined") {
+    const fallback = { dark: false, surface: "#ffffff", surfaceRaised: "#f1f5f9", accent: "#4f46e5", accentSoft: "#eef2ff", text: "#1e293b", muted: "#64748b", border: "#e2e8f0" };
+    return { ...fallback, key: JSON.stringify(fallback) };
+  }
   const source = resolveThemeSource(anchor ?? null);
   const computed = getComputedStyle(source);
   const value = (name: string, fallback: string): string => computed.getPropertyValue(name).trim() || fallback;
@@ -679,7 +686,16 @@ function renderSegment(segment: RichContentSegment, index: number, artifactPrefi
     return <ArtifactCard key={`artifact-${index}`} artifact={artifact} onOpenArtifact={onOpenArtifact} />;
   }
   if (segment.type === "html" && segment.source === "assistant-html") {
-    return <DynamicHtmlBubble key={`assistant-html-${index}`} content={segment.content} closed={segment.closed !== false} streaming={streaming} artifactPrefix={`${artifactPrefix}-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} />;
+    // While the assistant_html block is still streaming (no closing tag yet),
+    // render it as lightweight markdown instead of the full DynamicHtmlBubble
+    // pipeline (rehypeRaw + double sanitize). That pipeline is too heavy to
+    // rerun on every token now that streaming updates flow through (the store
+    // streaming-identity fix), and would render half-parsed intermediate HTML.
+    // The interactive bubble mounts once the closing tag arrives.
+    if (segment.closed === false) {
+      return <MarkdownSurface key={`assistant-html-${index}`} content={segment.content} artifactPrefix={`${artifactPrefix}-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} />;
+    }
+    return <DynamicHtmlBubble key={`assistant-html-${index}`} content={segment.content} closed streaming={streaming} artifactPrefix={`${artifactPrefix}-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} />;
   }
   return <MarkdownSurface key={`${segment.type}-${index}`} content={segment.content} htmlBubble={segment.type === "html"} artifactPrefix={`${artifactPrefix}-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} />;
 }
