@@ -1,6 +1,6 @@
 import html2canvas from "html2canvas-pro";
 
-const shareExcludedSelectors = [".thinking-block", ".tool-call-group", ".message-timing", ".inline-error"].join(",");
+const shareExcludedSelectors = [".action-timeline", ".message-timing", ".inline-error"].join(",");
 
 function copyCanvasPixels(source: HTMLElement, clone: HTMLElement): void {
   const sourceCanvases = Array.from(source.querySelectorAll("canvas"));

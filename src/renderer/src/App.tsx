@@ -1,5 +1,6 @@
 import {
   AlertCircle,
+  Brain,
   Bot,
   Check,
   Copy,
@@ -38,6 +39,7 @@ import {
   Settings,
   ShieldCheck,
   Trash2,
+  Workflow,
   Wrench,
   FolderTree,
   ChevronLeft,
@@ -78,8 +80,9 @@ import { ExtensionResourceList } from "./components/ExtensionResourceList";
 import { RichContent } from "./components/RichContent";
 import { ExtensionUiDialog, PermissionDialog } from "./components/RuntimeDialogs";
 import { compactPath, formatDuration, type Artifact } from "./lib/content";
+import { actionTimelineSegments, actionTimelineStats, formatProcessDuration, type ActionTimelineSegment } from "./lib/action-timeline";
 import { changedFilesForMessage, type ReplyChangedFile } from "./lib/changed-files";
-import { groupAssistantMessages, splitAssistantToolLayout } from "./lib/chat-layout";
+import { groupAssistantMessages } from "./lib/chat-layout";
 import { clampPreviewSplit, PREVIEW_SPLIT_MAX, PREVIEW_SPLIT_MIN, previewSplitFromKey } from "./lib/preview-split";
 import { groupSessionsByWorkspace } from "./lib/session-groups";
 import { CSS_URL_PATTERN, createThemeAssetUrls, isExternalThemeReference, normalizeThemeAssetReference, resolveThemeAssets } from "./lib/theme-assets";
@@ -215,20 +218,6 @@ function messageText(message: ChatMessage): string {
     .join("");
 }
 
-/** Each thinking block is one round of reasoning from the model. Keep them
- *  separate so multi-turn thinking (think → act → think → …) stays readable
- *  instead of being mashed into a single wall of text. */
-function thinkingTurns(message: ChatMessage): string[] {
-  return message.blocks
-    .filter((block): block is Extract<MessageBlock, { type: "thinking" }> => block.type === "thinking")
-    .map((block) => block.text)
-    .filter((text) => text.length > 0);
-}
-
-function blockText(blocks: MessageBlock[]): string {
-  return blocks.filter((block) => block.type === "text").map((block) => block.text).join("");
-}
-
 function useElapsedNow(active: boolean): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -315,40 +304,69 @@ function toolCallStatusLabel(execution: ToolExecution | undefined, streaming?: b
   return streaming ? "运行中" : "已运行";
 }
 
-function ToolGroup({ calls, executions, streaming }: { calls: Array<Extract<MessageBlock, { type: "tool-call" }>>; executions: ToolExecution[]; streaming?: boolean }): ReactNode {
-  const byId = new Map(executions.map((execution) => [execution.id, execution]));
-  const items = calls.map((call) => ({ call, execution: byId.get(call.id) }));
-  const active = streaming || items.some((item) => item.execution?.status === "running");
-  const names = [...new Set(items.map((item) => toolLabel(item.call.name)))];
-  const failedCount = items.filter((item) => item.execution?.status === "error").length;
-  const currentTool = [...items].reverse().find((item) => item.execution?.status === "running")?.call;
-  let statusLabel = "已完成";
-  if (active) statusLabel = currentTool ? `正在${toolLabel(currentTool.name)}` : "正在处理";
-  else if (failedCount > 0) statusLabel = `${failedCount} 个失败`;
+function actionTimelineIcon(segment: ActionTimelineSegment, execution: ToolExecution | undefined, streaming: boolean): ReactNode {
+  if (segment.type === "thinking") return <Brain size={14} />;
+  if (segment.type === "text") return <MessageCircle size={14} />;
+  return toolCallStatusIcon(execution, streaming);
+}
+
+function actionTimelineNodeState(segment: ActionTimelineSegment, execution: ToolExecution | undefined, streaming: boolean): string {
+  if (segment.type === "thinking") return "thinking";
+  if (segment.type === "text") return "text";
+  return execution?.status ?? (streaming ? "running" : "completed");
+}
+
+interface ActionTimelineProps {
+  message: ChatMessage;
+  executions: ToolExecution[];
+  turnActive: boolean;
+  showThinking: boolean;
+  thinkingLabel?: string;
+  onOpenArtifact(artifact: Artifact): void;
+  onHtmlAction(text: string): void;
+  timing?: TurnTiming;
+  now: number;
+}
+
+function ActionTimeline({ message, executions, turnActive, showThinking, thinkingLabel, onOpenArtifact, onHtmlAction, timing, now }: ActionTimelineProps): ReactNode {
+  const segments = actionTimelineSegments(message, showThinking);
+  const lastActionIndex = segments.reduce((index, segment, currentIndex) => segment.type === "thinking" || segment.type === "tool-call" ? currentIndex : index, -1);
+  if (lastActionIndex < 0) return segments[0]?.type === "text" ? <RichContent streaming={message.streaming} artifactPrefix={message.id} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction}>{segments[0].text}</RichContent> : null;
+  const process = segments.slice(0, lastActionIndex + 1);
+  const trailing = segments.slice(lastActionIndex + 1).filter((segment): segment is Extract<ActionTimelineSegment, { type: "text" }> => segment.type === "text");
+  const processActive = turnActive || Boolean(message.streaming);
+  const stats = actionTimelineStats(process, executions, processActive);
+  const executionById = new Map(executions.map((execution) => [execution.id, execution]));
+  const historicalStartedAt = stats.startedAt === undefined ? message.timestamp : Math.min(message.timestamp, stats.startedAt);
+  const startedAt = timing?.startedAt ?? historicalStartedAt;
+  const completedAt = stats.active ? now : timing?.completedAt ?? stats.completedAt;
+  const elapsed = startedAt === undefined ? undefined : formatProcessDuration(startedAt, completedAt ?? now);
+  const summary = stats.active ? "正在处理" : elapsed ? `已处理 ${elapsed}` : "已处理";
   return (
-    <details className={`tool-call-group${active ? " active" : ""}`}>
-      <summary className="tool-call-group-summary">
-        <span className="tool-call-group-title"><Wrench size={14} /><strong>连续工具调用 · {calls.length} 次</strong><span className={`tool-call-group-status${failedCount > 0 ? " error" : active ? " running" : ""}`}>{statusLabel}</span></span>
-        <span className="tool-call-group-preview">{names.slice(0, 3).map((name) => <span className="tool-call-group-chip" key={name}>{name}</span>)}{names.length > 3 && <span className="tool-call-group-extra">+{names.length - 3}</span>}</span>
-        <span className="tool-call-group-toggle" aria-hidden="true" />
-      </summary>
-      <div className="tool-call-group-body">
-        {items.map(({ call, execution }) => {
-          let bubbleClass = "tool-call-bubble";
-          if (execution?.status === "completed") bubbleClass += " completed";
-          if (execution?.status === "error") bubbleClass += " error";
-          return (
-            <div className="tool-call-group-item" key={call.id}>
-              <div className={bubbleClass}>
-                {toolCallStatusIcon(execution, streaming)}
-                <span className="tool-call-line-state">{toolCallStatusLabel(execution, streaming)}</span><strong>{toolLabel(call.name)}</strong>
-                {execution?.completedAt && <span className="tool-call-duration">{formatDuration(execution.startedAt, execution.completedAt)}</span>}
+    <>
+      <details className={`action-timeline${stats.active ? " active" : ""}`} open={stats.active}>
+        <summary className="action-timeline-summary">
+          <span className="action-timeline-summary-title"><Workflow size={15} /><strong>{summary}</strong></span>
+          <span className="action-timeline-summary-meta">{stats.thinkingCount > 0 && `${stats.thinkingCount} 段思考`}{stats.thinkingCount > 0 && stats.toolCount > 0 ? " · " : ""}{stats.toolCount > 0 && `${stats.toolCount} 次工具调用`}{stats.failedCount > 0 && ` · ${stats.failedCount} 个失败`}</span>
+          <ChevronDown size={14} className="action-timeline-chevron" />
+        </summary>
+        <div className="action-timeline-body">
+          {process.map((segment, index) => {
+            const execution = segment.type === "tool-call" ? executionById.get(segment.call.id) : undefined;
+            const stateClass = actionTimelineNodeState(segment, execution, processActive);
+            return (
+              <div className={`action-timeline-node ${segment.type} ${stateClass}`} key={segment.type === "tool-call" ? segment.call.id : `${segment.type}-${index}`}>
+                <span className="action-timeline-node-icon">{actionTimelineIcon(segment, execution, processActive)}</span>
+                <div className="action-timeline-node-content">
+                  {segment.type === "thinking" ? <><strong>{thinkingLabel || "思考过程"}</strong><p>{segment.text}</p></> : segment.type === "tool-call" ? <><strong>{toolLabel(segment.call.name)}</strong><span>{toolCallStatusLabel(execution, message.streaming)}{execution?.completedAt ? ` · ${formatDuration(execution.startedAt, execution.completedAt)}` : ""}</span></> : <RichContent streaming={false} artifactPrefix={`${message.id}-process-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction}>{segment.text}</RichContent>}
+                </div>
               </div>
-            </div>
-          );
-        })}
-      </div>
-    </details>
+            );
+          })}
+        </div>
+      </details>
+      {trailing.map((segment, index) => <RichContent key={`trailing-${index}`} streaming={message.streaming} artifactPrefix={`${message.id}-trailing-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction}>{segment.text}</RichContent>)}
+    </>
   );
 }
 
@@ -428,15 +446,13 @@ function ChangedFilesPanel({ files, onOpenFile, onOpenDiff }: { files: ReplyChan
 // Memoized so an unchanged message bubble (stable ChatMessage reference from
 // the store's uuid-based reuse) is skipped during high-frequency streaming
 // updates that only mutate other bubbles.
-const MessageView = memo(function MessageView({ message, executions, onOpenArtifact, onOpenFile, onOpenDiff, onHtmlAction, onCopy, onEdit, onRegenerate, onShare, showThinking = true, hiddenThinkingLabel, busy = false, timing, now = Date.now() }: { message: ChatMessage; executions: ToolExecution[]; onOpenArtifact(artifact: Artifact): void; onOpenFile(relativePath: string): void; onOpenDiff(execution: ToolExecution): void; onHtmlAction(text: string): void; onCopy(message: ChatMessage): void; onEdit(message: ChatMessage): void; onRegenerate(message: ChatMessage): void; onShare(message: ChatMessage, target: HTMLElement): Promise<void>; showThinking?: boolean; hiddenThinkingLabel?: string; busy?: boolean; timing?: TurnTiming; now?: number }): ReactNode {
+const MessageView = memo(function MessageView({ message, executions, onOpenArtifact, onOpenFile, onOpenDiff, onHtmlAction, onCopy, onEdit, onRegenerate, onShare, showThinking = true, hiddenThinkingLabel, busy = false, turnActive = false, timing, now = Date.now() }: { message: ChatMessage; executions: ToolExecution[]; onOpenArtifact(artifact: Artifact): void; onOpenFile(relativePath: string): void; onOpenDiff(execution: ToolExecution): void; onHtmlAction(text: string): void; onCopy(message: ChatMessage): void; onEdit(message: ChatMessage): void; onRegenerate(message: ChatMessage): void; onShare(message: ChatMessage, target: HTMLElement): Promise<void>; showThinking?: boolean; hiddenThinkingLabel?: string; busy?: boolean; turnActive?: boolean; timing?: TurnTiming; now?: number }): ReactNode {
   const text = messageText(message);
-  const turns = thinkingTurns(message);
-  const toolLayout = splitAssistantToolLayout(message);
   const shareTargetRef = useRef<HTMLDivElement | null>(null);
   const [sharing, setSharing] = useState(false);
   const [shared, setShared] = useState(false);
   const isControlMessage = message.control !== undefined;
-  const hasShareableContent = Boolean(text || (toolLayout && (blockText(toolLayout.leading) || blockText(toolLayout.trailing))));
+  const hasShareableContent = Boolean(text);
   const changedFiles = changedFilesForMessage(message, executions);
 
   async function share(): Promise<void> {
@@ -482,24 +498,7 @@ const MessageView = memo(function MessageView({ message, executions, onOpenArtif
       <div className="message-avatar pi-avatar"><Bot size={17} /></div>
       <div className="message-body message-bubble">
         <div className="assistant-share-content" ref={shareTargetRef}>
-          {turns.length > 0 && showThinking && (
-            <details className="thinking-block" open={message.streaming}>
-              <summary><LoaderCircle size={14} className={message.streaming ? "spinning" : ""} /> {hiddenThinkingLabel || "思考过程"}</summary>
-              {turns.map((turn, index) => (
-                <div key={index} className="thinking-turn">
-                  {turns.length > 1 && <div className="thinking-turn-label">第 {index + 1} 轮</div>}
-                  <p>{turn}</p>
-                </div>
-              ))}
-            </details>
-          )}
-          {toolLayout ? (
-            <>
-              {blockText(toolLayout.leading) && <RichContent streaming={false} artifactPrefix={`${message.id}-leading`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction}>{blockText(toolLayout.leading)}</RichContent>}
-              <ToolGroup calls={toolLayout.process} executions={executions} streaming={message.streaming} />
-              {blockText(toolLayout.trailing) && <RichContent streaming={message.streaming} artifactPrefix={`${message.id}-trailing`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction}>{blockText(toolLayout.trailing)}</RichContent>}
-            </>
-          ) : text && <RichContent streaming={message.streaming} artifactPrefix={message.id} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction}>{text}</RichContent>}
+          <ActionTimeline message={message} executions={executions} turnActive={turnActive} showThinking={showThinking} thinkingLabel={hiddenThinkingLabel} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} timing={timing} now={now} />
           {message.error && <p className="inline-error"><AlertCircle size={15} />{message.error}</p>}
           {timing && (isControlMessage ? <CompactTimingMeta timing={timing} now={now} /> : <TimingMeta timing={timing} now={now} />)}
         </div>
@@ -1915,7 +1914,8 @@ export function App(): ReactNode {
               ) : <>
                 {displayMessages.map((message, index) => {
                   const timing = showTurnTimingOnLatest && index === latestAssistantMessageIndex && message.role === "assistant" ? snapshot.turnTiming : undefined;
-                  return <MessageView key={message.uuid ?? message.id} message={message} executions={snapshot.executions} onOpenArtifact={openArtifactPreview} onOpenFile={openFilePreview} onOpenDiff={openDiffPreview} onHtmlAction={handleHtmlAction} onCopy={copyMessage} onEdit={editMessage} onRegenerate={regenerateMessage} onShare={shareMessage} showThinking={settings.appearance.showThinking} hiddenThinkingLabel={snapshot.extensionUi.hiddenThinkingLabel} busy={snapshot.busy} timing={timing} now={timing ? now : undefined} />;
+                  const turnActive = snapshot.busy && index === latestAssistantMessageIndex && message.role === "assistant";
+                  return <MessageView key={message.uuid ?? message.id} message={message} executions={snapshot.executions} onOpenArtifact={openArtifactPreview} onOpenFile={openFilePreview} onOpenDiff={openDiffPreview} onHtmlAction={handleHtmlAction} onCopy={copyMessage} onEdit={editMessage} onRegenerate={regenerateMessage} onShare={shareMessage} showThinking={settings.appearance.showThinking} hiddenThinkingLabel={snapshot.extensionUi.hiddenThinkingLabel} busy={snapshot.busy} turnActive={turnActive} timing={timing} now={timing ? now : undefined} />;
                 })}
                 {isGenerating && snapshot.extensionUi.workingVisible && (hasAssistantMessage ? <div className="response-progress response-progress-inline"><LoaderCircle size={14} className="spinning" /><span>{workingLabel}</span>{activeTurnTiming && <TimingMeta timing={activeTurnTiming} now={now} />}</div> : <PendingResponse label={workingLabel} timing={activeTurnTiming} now={now} />)}
               </>}
