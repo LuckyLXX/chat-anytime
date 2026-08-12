@@ -41,6 +41,7 @@ import {
   Wrench,
   FolderTree,
   ChevronLeft,
+  Pin,
   X
 } from "lucide-react";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
@@ -72,6 +73,7 @@ import type {
 import { thinkingLevelLabels, toolLabel } from "../../shared/locale";
 import { ArtifactPreview, type PreviewTab, type PreviewTarget } from "./components/ArtifactPreview";
 import { WorkspaceTree } from "./components/WorkspaceTree";
+import { ContextMenu, type ContextMenuItem } from "./components/ContextMenu";
 import { ExtensionResourceList } from "./components/ExtensionResourceList";
 import { RichContent } from "./components/RichContent";
 import { ExtensionUiDialog, PermissionDialog } from "./components/RuntimeDialogs";
@@ -213,11 +215,14 @@ function messageText(message: ChatMessage): string {
     .join("");
 }
 
-function thinkingText(message: ChatMessage): string {
+/** Each thinking block is one round of reasoning from the model. Keep them
+ *  separate so multi-turn thinking (think → act → think → …) stays readable
+ *  instead of being mashed into a single wall of text. */
+function thinkingTurns(message: ChatMessage): string[] {
   return message.blocks
-    .filter((block) => block.type === "thinking")
+    .filter((block): block is Extract<MessageBlock, { type: "thinking" }> => block.type === "thinking")
     .map((block) => block.text)
-    .join("");
+    .filter((text) => text.length > 0);
 }
 
 function blockText(blocks: MessageBlock[]): string {
@@ -425,7 +430,7 @@ function ChangedFilesPanel({ files, onOpenFile, onOpenDiff }: { files: ReplyChan
 // updates that only mutate other bubbles.
 const MessageView = memo(function MessageView({ message, executions, onOpenArtifact, onOpenFile, onOpenDiff, onHtmlAction, onCopy, onEdit, onRegenerate, onShare, showThinking = true, hiddenThinkingLabel, busy = false, timing, now = Date.now() }: { message: ChatMessage; executions: ToolExecution[]; onOpenArtifact(artifact: Artifact): void; onOpenFile(relativePath: string): void; onOpenDiff(execution: ToolExecution): void; onHtmlAction(text: string): void; onCopy(message: ChatMessage): void; onEdit(message: ChatMessage): void; onRegenerate(message: ChatMessage): void; onShare(message: ChatMessage, target: HTMLElement): Promise<void>; showThinking?: boolean; hiddenThinkingLabel?: string; busy?: boolean; timing?: TurnTiming; now?: number }): ReactNode {
   const text = messageText(message);
-  const thinking = thinkingText(message);
+  const turns = thinkingTurns(message);
   const toolLayout = splitAssistantToolLayout(message);
   const shareTargetRef = useRef<HTMLDivElement | null>(null);
   const [sharing, setSharing] = useState(false);
@@ -477,10 +482,15 @@ const MessageView = memo(function MessageView({ message, executions, onOpenArtif
       <div className="message-avatar pi-avatar"><Bot size={17} /></div>
       <div className="message-body message-bubble">
         <div className="assistant-share-content" ref={shareTargetRef}>
-          {thinking && showThinking && (
+          {turns.length > 0 && showThinking && (
             <details className="thinking-block" open={message.streaming}>
               <summary><LoaderCircle size={14} className={message.streaming ? "spinning" : ""} /> {hiddenThinkingLabel || "思考过程"}</summary>
-              <p>{thinking}</p>
+              {turns.map((turn, index) => (
+                <div key={index} className="thinking-turn">
+                  {turns.length > 1 && <div className="thinking-turn-label">第 {index + 1} 轮</div>}
+                  <p>{turn}</p>
+                </div>
+              ))}
             </details>
           )}
           {toolLayout ? (
@@ -1164,6 +1174,10 @@ export function App(): ReactNode {
   previewRef.current = preview;
   const [sidebarView, setSidebarView] = useState<"topics" | "files">("topics");
   const [browsingWorkspace, setBrowsingWorkspace] = useState("");
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: ContextMenuItem[] } | null>(null);
+  const [renameSession, setRenameSession] = useState<{ path: string; title: string } | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const [removeWorkspace, setRemoveWorkspace] = useState<{ workspace: string; name: string; count: number } | null>(null);
   const [previewSplit, setPreviewSplit] = useState(readStoredPreviewSplit);
   const [previewDragging, setPreviewDragging] = useState(false);
   const [attachments, setAttachments] = useState<import("../../shared/protocol").PromptAttachment[]>([]);
@@ -1824,7 +1838,7 @@ export function App(): ReactNode {
             const workspaceName = group.workspace.split(/[\\/]/u).at(-1) || group.workspace;
             return (
               <section className="session-workspace-group" key={group.key}>
-                <div className="session-workspace-heading">
+                <div className="session-workspace-heading" onContextMenu={(event) => { event.preventDefault(); setContextMenu({ x: event.clientX, y: event.clientY, items: [{ label: "移除工作区", danger: true, onClick: () => setRemoveWorkspace({ workspace: group.workspace, name: workspaceName, count: group.sessions.length }) }] }); }}>
                   <button
                     className="session-workspace-toggle"
                     type="button"
@@ -1856,7 +1870,7 @@ export function App(): ReactNode {
                   </button>
                 </div>
                 {!collapsed && <div className="session-workspace-items">
-                  {group.sessions.map((item) => <button className={item.id === snapshot.sessionId ? "active" : ""} type="button" key={item.path} onClick={() => void openSession(item.path, item.workspace)}><MessageCircle size={14} /><span><strong>{item.title}</strong><small>{new Date(item.modifiedAt).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}</small></span></button>)}
+                  {group.sessions.map((item) => <button className={item.id === snapshot.sessionId ? "active" : ""} type="button" key={item.path} title={item.title} onClick={() => void openSession(item.path, item.workspace)} onContextMenu={(event) => { event.preventDefault(); setContextMenu({ x: event.clientX, y: event.clientY, items: [{ label: "重命名", onClick: () => { setRenameSession({ path: item.path, title: item.title }); setRenameValue(item.title); } }, { label: item.pinned ? "取消置顶" : "置顶", onClick: () => { void window.piDesktop.send({ type: "session.pin", path: item.path, pinned: !item.pinned }); } }] }); }}><MessageCircle size={14} /><span><strong>{item.title}</strong><small>{new Date(item.modifiedAt).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}</small></span>{item.pinned && <Pin size={11} className="session-pin-indicator" />}</button>)}
                 </div>}
               </section>
             );
@@ -1993,6 +2007,26 @@ export function App(): ReactNode {
       {settingsOpen && <SettingsDialog settings={settings} models={models} providers={providers} customProvider={customProvider} customProviderKeyConfigured={customProviderKeyConfigured} customModels={customModels} customModelFetchStatus={customModelFetchStatus} customModelFetchError={customModelFetchError} resources={resources} onClose={() => setSettingsOpen(false)} />}
       {permission && <PermissionDialog request={permission} />}
       {!permission && extensionUiDialog && <ExtensionUiDialog key={extensionUiDialog.id} request={extensionUiDialog} />}
+      {contextMenu && <ContextMenu x={contextMenu.x} y={contextMenu.y} items={contextMenu.items} onClose={() => setContextMenu(null)} />}
+      {renameSession && (
+        <div className="modal-backdrop permission-backdrop" onClick={() => setRenameSession(null)}>
+          <div className="permission-dialog extension-ui-dialog" role="dialog" aria-modal="true" aria-label="重命名会话" onClick={(event) => event.stopPropagation()}>
+            <header><div className="risk-icon command"><Pencil size={20} /></div><div><h2>重命名会话</h2></div></header>
+            <form onSubmit={(event) => { event.preventDefault(); const title = renameValue.trim(); if (title) { void window.piDesktop.send({ type: "session.rename", path: renameSession.path, title }); setRenameSession(null); } }}>
+              <div className="field"><label>会话名称</label><input value={renameValue} placeholder="输入会话名称" autoFocus onChange={(event) => setRenameValue(event.target.value)} /></div>
+              <footer><button className="secondary-button" type="button" onClick={() => setRenameSession(null)}>取消</button><button className="primary-button" type="submit" disabled={!renameValue.trim()}>确定</button></footer>
+            </form>
+          </div>
+        </div>
+      )}
+      {removeWorkspace && (
+        <div className="modal-backdrop permission-backdrop" onClick={() => setRemoveWorkspace(null)}>
+          <div className="permission-dialog" role="alertdialog" aria-modal="true" aria-label="移除工作区" onClick={(event) => event.stopPropagation()}>
+            <header><div className="risk-icon outside-workspace"><Trash2 size={20} /></div><div><h2>移除工作区「{removeWorkspace.name}」？</h2><p>将永久删除该工作区下 {removeWorkspace.count} 个会话，此操作不可恢复。</p></div></header>
+            <footer><button className="secondary-button" type="button" onClick={() => setRemoveWorkspace(null)}>取消</button><button className="danger-button" type="button" onClick={() => { void window.piDesktop.send({ type: "workspace.remove", workspace: removeWorkspace.workspace }); setRemoveWorkspace(null); }}>移除</button></footer>
+          </div>
+        </div>
+      )}
       {error && <div className="error-toast"><AlertCircle size={18} /><span>{error}</span><button className="icon-button" type="button" title="关闭提示" aria-label="关闭提示" onClick={clearError}><X size={16} /></button></div>}
       {extensionNotice && <div className={`error-toast extension-notice ${extensionNotice.level}`}><PlugZap size={18} /><span>{extensionNotice.message}</span><button className="icon-button" type="button" title="关闭扩展提示" aria-label="关闭扩展提示" onClick={clearExtensionNotice}><X size={16} /></button></div>}
       {messageActionError && <div className="error-toast"><AlertCircle size={18} /><span>{messageActionError}</span><button className="icon-button" type="button" title="关闭提示" aria-label="关闭提示" onClick={() => setMessageActionError(undefined)}><X size={16} /></button></div>}

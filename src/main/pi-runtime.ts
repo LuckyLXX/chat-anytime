@@ -1,4 +1,4 @@
-import { readdir, realpath, stat } from "node:fs/promises";
+import { readdir, realpath, stat, unlink } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { basename, dirname, isAbsolute, join, relative as relativePath, resolve, sep } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
@@ -700,13 +700,15 @@ async function refreshSessions(): Promise<void> {
 
   const lists = await Promise.all(directories.map((directory) => SessionManager.listAll(directory)));
   const items = [...new Map(lists.flat().map((item) => [resolve(item.path).toLowerCase(), item])).values()];
+  const pinnedPaths = settings?.pinnedSessionPaths ?? [];
   currentSessions = items.sort((left, right) => right.modified.getTime() - left.modified.getTime()).map((item) => ({
     id: item.id,
     path: item.path,
     workspace: item.cwd || "未知工作区",
     title: item.name || item.firstMessage || "新会话",
     modifiedAt: item.modified.getTime(),
-    messageCount: item.messageCount
+    messageCount: item.messageCount,
+    pinned: pinnedPaths.includes(item.path) || undefined
   }));
 }
 
@@ -934,6 +936,45 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         throw new Error("会话路径与工作区不匹配");
       }
       await createSession(SessionManager.open(target, sessionRoot, workspace));
+      break;
+    }
+    case "session.rename": {
+      const renameRoot = agentSessionRoot();
+      const renameTarget = resolve(command.path);
+      if (!renameRoot || !pathIsWithin(renameRoot, renameTarget) || !renameTarget.toLowerCase().endsWith(".jsonl")) throw new Error("只能重命名当前 Agent 的会话");
+      const activeFile = session?.sessionManager.getSessionFile();
+      if (activeFile && resolve(activeFile).toLowerCase() === renameTarget.toLowerCase()) session?.sessionManager.appendSessionInfo(command.title);
+      else SessionManager.open(renameTarget).appendSessionInfo(command.title);
+      await refreshSessions();
+      emitState();
+      break;
+    }
+    case "session.pin": {
+      if (settings) {
+        const pinnedSet = new Set(settings.pinnedSessionPaths ?? []);
+        if (command.pinned) pinnedSet.add(command.path);
+        else pinnedSet.delete(command.path);
+        settings = { ...settings, pinnedSessionPaths: [...pinnedSet] };
+      }
+      await refreshSessions();
+      emitState();
+      break;
+    }
+    case "workspace.remove": {
+      const removeRoot = agentSessionRoot();
+      if (removeRoot) {
+        const targetWorkspace = resolve(command.workspace).toLowerCase();
+        const removed = currentSessions.filter((item) => resolve(item.workspace).toLowerCase() === targetWorkspace);
+        const activeFile = session?.sessionManager.getSessionFile();
+        const activeRemoved = Boolean(activeFile && removed.some((item) => resolve(item.path).toLowerCase() === resolve(activeFile).toLowerCase()));
+        if (activeRemoved) { session?.dispose(); session = undefined; }
+        for (const item of removed) {
+          if (!pathIsWithin(removeRoot, item.path) || !item.path.toLowerCase().endsWith(".jsonl")) continue;
+          try { await unlink(item.path); } catch { /* 会话文件可能已释放或不存在 */ }
+        }
+      }
+      await refreshSessions();
+      emitState();
       break;
     }
     case "session.skill": {

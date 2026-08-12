@@ -318,6 +318,15 @@ export function createDemoApi(): DesktopApi {
         case "session.open":
           updateSnapshot({ workspace: command.workspace ?? demoSnapshot.workspace, sessionId: command.path.replace(/.*[\\/]/u, "").replace(/\.jsonl$/u, ""), messages: [], executions: [] });
           break;
+        case "session.rename":
+          updateSnapshot({ sessions: demoSnapshot.sessions.map((item) => item.path === command.path ? { ...item, title: command.title } : item) });
+          break;
+        case "session.pin":
+          updateSnapshot({ sessions: demoSnapshot.sessions.map((item) => item.path === command.path ? { ...item, pinned: command.pinned || undefined } : item) });
+          break;
+        case "workspace.remove":
+          updateSnapshot({ sessions: demoSnapshot.sessions.filter((item) => item.workspace !== command.workspace) });
+          break;
         case "session.compact": {
           const timestamp = Date.now();
           updateSnapshot({

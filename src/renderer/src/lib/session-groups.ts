@@ -25,7 +25,7 @@ export function groupSessionsByWorkspace(sessions: readonly SessionSummary[], qu
   }
 
   for (const group of groups.values()) {
-    group.sessions.sort((left, right) => right.modifiedAt - left.modifiedAt);
+    group.sessions.sort((left, right) => (Number(right.pinned ?? false) - Number(left.pinned ?? false)) || right.modifiedAt - left.modifiedAt);
   }
 
   return [...groups.values()].sort((left, right) => (right.sessions[0]?.modifiedAt ?? 0) - (left.sessions[0]?.modifiedAt ?? 0));

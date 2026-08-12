@@ -20,4 +20,14 @@ describe("session workspace groups", () => {
       { id: "two", path: "two.jsonl", workspace: "C:/Projects/Other", title: "其他", modifiedAt: 2, messageCount: 1 }
     ], "pidesktop").flatMap((group) => group.sessions.map((session) => session.id))).toEqual(["one"]);
   });
+
+  it("pins sessions to the top of their group regardless of modified time", () => {
+    const groups = groupSessionsByWorkspace([
+      { id: "fresh", path: "fresh.jsonl", workspace: "C:/Projects/PiDesktop", title: "最新", modifiedAt: 30, messageCount: 1 },
+      { id: "starred", path: "starred.jsonl", workspace: "C:/Projects/PiDesktop", title: "置顶", modifiedAt: 5, messageCount: 1, pinned: true },
+      { id: "mid", path: "mid.jsonl", workspace: "C:/Projects/PiDesktop", title: "中间", modifiedAt: 20, messageCount: 1 }
+    ]);
+
+    expect(groups[0]?.sessions.map((session) => session.id)).toEqual(["starred", "fresh", "mid"]);
+  });
 });

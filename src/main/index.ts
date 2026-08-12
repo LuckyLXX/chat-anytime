@@ -112,6 +112,7 @@ function updateSettings(command: RuntimeCommand): void {
   const settings = loadSettings();
   switch (command.type) {
     case "workspace.open": settings.workspace = command.path; break;
+    case "session.pin": settings.pinnedSessionPaths = command.pinned ? [...(settings.pinnedSessionPaths ?? []), command.path] : (settings.pinnedSessionPaths ?? []).filter((item) => item !== command.path); break;
     case "session.new": if (command.workspace) settings.workspace = command.workspace; break;
     case "session.open": if (command.workspace) settings.workspace = command.workspace; break;
     case "agent.select": settings.currentAgentId = command.agentId; break;

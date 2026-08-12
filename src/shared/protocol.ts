@@ -113,6 +113,7 @@ export interface DesktopSettings {
   appearance: AppearanceSettings;
   customProvider?: CustomProviderSettings;
   customProviderKeyConfigured?: boolean;
+  pinnedSessionPaths?: string[];
 }
 
 export interface ImageAttachment {
@@ -240,6 +241,7 @@ export interface SessionSummary {
   title: string;
   modifiedAt: number;
   messageCount: number;
+  pinned?: boolean;
 }
 
 export type ResourceScope = "global" | "project" | "package" | "bundled" | "temporary" | "unknown";
@@ -408,8 +410,11 @@ export interface ExtensionUiResponse {
 export type RuntimeCommand =
   | { type: "initialize"; settings: DesktopSettings; apiKeys: Record<string, string> }
   | { type: "workspace.open"; path: string }
+  | { type: "workspace.remove"; workspace: string }
   | { type: "session.new"; workspace?: string }
   | { type: "session.open"; path: string; workspace?: string }
+  | { type: "session.rename"; path: string; title: string }
+  | { type: "session.pin"; path: string; pinned: boolean }
   | { type: "session.prompt"; text: string; attachments?: PromptAttachment[] }
   | { type: "session.skill"; name: string; instructions?: string; attachments?: PromptAttachment[] }
   | { type: "session.regenerate"; text: string; timestamp?: number; skillName?: string; attachments?: PromptAttachment[] }

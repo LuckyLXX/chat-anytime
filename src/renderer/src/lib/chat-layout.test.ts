@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ChatMessage } from "../../../shared/protocol";
+import type { ChatMessage, MessageBlock } from "../../../shared/protocol";
 import { groupAssistantMessages, splitAssistantToolLayout } from "./chat-layout";
 
 function message(id: string, role: ChatMessage["role"], text: string, extra: ChatMessage["blocks"] = []): ChatMessage {
@@ -53,5 +53,18 @@ describe("chat message layout", () => {
     expect(layout?.leading).toEqual([{ type: "text", text: "开始" }]);
     expect(layout?.process.map((item) => item.id)).toEqual(["t1", "t2"]);
     expect(layout?.trailing).toEqual([{ type: "text", text: "继续处理" }, { type: "text", text: "处理完成" }]);
+  });
+
+  it("keeps each thinking segment as a separate turn after grouping assistant messages", () => {
+    const result = groupAssistantMessages([
+      message("u1", "user", "改一下"),
+      message("a1", "assistant", "", [{ type: "thinking", text: "先读文件" }, { type: "tool-call", id: "t1", name: "read", arguments: {} }]),
+      message("a2", "assistant", "", [{ type: "thinking", text: "再修改" }, { type: "tool-call", id: "t2", name: "edit", arguments: {} }]),
+      message("a3", "assistant", "完成")
+    ]);
+
+    expect(result).toHaveLength(2);
+    const turns = result[1]!.blocks.filter((block): block is Extract<MessageBlock, { type: "thinking" }> => block.type === "thinking");
+    expect(turns.map((block) => block.text)).toEqual(["先读文件", "再修改"]);
   });
 });

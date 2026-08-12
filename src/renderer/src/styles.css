@@ -155,7 +155,7 @@ select option:checked { color: var(--on-accent); background-color: var(--accent)
 .sidebar-view-toggle:disabled { opacity: .45; cursor: default; }
 .sidebar-heading { display: none; }
 .session-list, .agent-list { display: flex; flex: 1; flex-direction: column; gap: 3px; min-height: 0; overflow-y: auto; }
-.session-list button { display: grid; grid-template-columns: 20px minmax(0, 1fr); gap: 8px; align-items: center; min-height: 48px; padding: 7px 8px; text-align: left; border: 0; border-radius: 6px; color: var(--text-muted); background: transparent; cursor: pointer; }
+.session-list button { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; gap: 8px; align-items: center; min-height: 48px; padding: 7px 8px; text-align: left; border: 0; border-radius: 6px; color: var(--text-muted); background: transparent; cursor: pointer; }
 .session-list button:hover { background: var(--surface-sidebar-hover); }
 .session-list button.active { color: var(--text-sidebar-active); background: var(--surface-sidebar-active); }
 .session-list span, .agent-list button > span:last-child { display: grid; gap: 3px; min-width: 0; }
@@ -175,6 +175,13 @@ select option:checked { color: var(--on-accent); background-color: var(--accent)
 .workspace-tree-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .workspace-tree-status { display: flex; align-items: center; gap: 7px; padding: 8px 10px; color: var(--text-muted); font-size: 11px; }
 .workspace-tree-status.error { color: var(--danger-text); }
+.session-pin-indicator { display: grid; place-items: center; color: var(--accent-text); }
+.context-menu-overlay { position: fixed; inset: 0; z-index: 80; }
+.context-menu { position: fixed; min-width: 168px; padding: 4px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); box-shadow: var(--shadow-md); }
+.context-menu-item { display: flex; align-items: center; min-width: 0; width: 100%; min-height: 30px; padding: 0 12px; border: 0; border-radius: 5px; color: var(--text); background: transparent; font-size: 12px; text-align: left; cursor: pointer; }
+.context-menu-item:hover { background: var(--surface-button-hover); }
+.context-menu-item.danger { color: var(--danger); }
+.context-menu-item.danger:hover { background: var(--danger-soft); }
 .session-workspace-group { display: grid; gap: 2px; }
 .session-workspace-heading { position: relative; min-height: 43px; }
 .session-list .session-workspace-toggle { grid-template-columns: 20px minmax(0, 1fr) auto 16px; width: 100%; min-height: 43px; padding: 6px 8px; color: var(--text); background: transparent; }
@@ -271,6 +278,9 @@ select option:checked { color: var(--on-accent); background-color: var(--accent)
 .thinking-block { margin-bottom: 10px; color: var(--text-muted); font-size: 12px; }
 .thinking-block summary, .tool-call-details summary { display: flex; align-items: center; gap: 6px; width: fit-content; max-width: 100%; cursor: pointer; user-select: none; }
 .thinking-block p { margin: 8px 0 0; padding-left: 20px; white-space: pre-wrap; }
+.thinking-turn-label { margin: 8px 0 0 20px; font-size: 10px; opacity: .6; letter-spacing: .03em; }
+.thinking-turn + .thinking-turn { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border); }
+.thinking-turn + .thinking-turn .thinking-turn-label { margin-top: 0; }
 .tool-call-row { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 9px; }
 .tool-call-row span { display: inline-flex; align-items: center; gap: 5px; padding: 3px 7px; border: 1px solid var(--border); border-radius: 5px; color: var(--text-muted); background: var(--surface-raised); font-size: 10px; }
 .tool-call-details { margin-top: 10px; color: var(--text-muted); font-size: 11px; }
