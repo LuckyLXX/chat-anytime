@@ -47,6 +47,7 @@ import { buildDivModePrompt } from "./div-prompt.js";
 import { McpClientManager } from "./mcp-client.js";
 import { readConfiguredMcpServers, removeMcpServerConfig, setMcpServerDisabled, upsertMcpServerConfig, type McpServerConfigEntry } from "./mcp-config.js";
 import { PermissionBroker } from "./permission-broker.js";
+import { buildSkillsSystemPromptBlock, discoverSkills, isSkillDisabled, setSkillEnabled, skillIdFromPath, toSkillSummaries, type DiscoveredSkill } from "./skill-catalog.js";
 import { toolRisk } from "./permissions.js";
 import { buildResourceCatalog } from "./resource-catalog.js";
 import { agentWorkspaceSessionDir } from "./session-scope.js";
@@ -89,6 +90,7 @@ let resourceLoader: DefaultResourceLoader | undefined;
 // discovery / Todo store in later phases). Kept here so emitResourceCatalog
 // always has a stable aggregate to publish.
 let nativeSkills: SkillSummary[] = [];
+let discoveredSkills: DiscoveredSkill[] = [];
 let mcpServers: McpServerSummary[] = [];
 let todos: Todo[] = [];
 let resourceDiagnostics: string[] = [];
@@ -165,6 +167,35 @@ function mcpConfigPaths(): { project: string; global: string } {
     project: workspace ? resolve(workspace, ".mcp.json") : join(getAgentDir(), ".mcp.json"),
     global: join(getAgentDir(), "mcp.json")
   };
+}
+
+function skillPaths(): { globalDir: string; projectDir: string; statePath: string } {
+  return {
+    globalDir: join(getAgentDir(), "pidesktop-skills"),
+    projectDir: workspace ? resolve(workspace, ".pidesktop-skills") : join(getAgentDir(), "pidesktop-skills"),
+    statePath: join(getAgentDir(), "pidesktop-skill-state.json")
+  };
+}
+
+/** Scan skill dirs and refresh the published SkillSummary catalog. */
+function syncSkills(): void {
+  const { globalDir, projectDir, statePath } = skillPaths();
+  discoveredSkills = discoverSkills(globalDir, projectDir);
+  const disabled = new Set<string>();
+  for (const skill of discoveredSkills) {
+    const id = skillIdFromPath(skill.filePath);
+    if (isSkillDisabled(statePath, id)) disabled.add(id);
+  }
+  nativeSkills = toSkillSummaries(discoveredSkills, disabled);
+}
+
+/** Skills active for the current agent (global state + per-agent overrides). */
+function activeSkillsForAgent(): SkillSummary[] {
+  return nativeSkills.filter((skill) => {
+    if (!skill.enabled) return false;
+    const override = currentAgent?.skillOverrides?.[skill.id];
+    return override !== false;
+  });
 }
 
 function mcpConfigEntry(server: McpServerConfigDraft): McpServerConfigEntry {
@@ -291,8 +322,7 @@ function normalizeMessages(messages: AgentMessage[], streamingMessage?: AgentMes
 }
 
 function runtimeSkillPrompt(name: string, instructions?: string): string {
-  if (!resourceLoader) throw new Error("Skill 资源尚未加载");
-  const skill = resourceLoader.getSkills().skills.find((item) => item.name === name);
+  const skill = discoveredSkills.find((item) => item.name === name || item.slug === name);
   if (!skill) throw new Error(`未找到 Skill：${name}`);
   if (!session?.getActiveToolNames().includes("read")) throw new Error("当前 Agent 未启用 read 工具，无法读取 Skill");
   const userInstructions = instructions?.trim() ?? "";
@@ -680,9 +710,10 @@ async function createSession(sessionManager?: SessionManager): Promise<void> {
     noThemes: true,
     noContextFiles: true,
     extensionFactories: [createPermissionExtension()],
-    systemPromptOverride: (base) => [base, currentAgent?.systemPrompt, currentAgent?.divMode ? buildDivModePrompt() : undefined].filter(Boolean).join("\n\n")
+    systemPromptOverride: (base) => [base, currentAgent?.systemPrompt, currentAgent?.divMode ? buildDivModePrompt() : undefined, buildSkillsSystemPromptBlock(activeSkillsForAgent())].filter(Boolean).join("\n\n")
   });
   await resourceLoader.reload();
+  syncSkills();
   // Connect to configured MCP servers and rebuild the customTool set. Runs
   // concurrently with session manager setup since neither depends on the other.
   const mcpPromise = syncMcpServers().catch((error) => {
@@ -1145,6 +1176,13 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         const { project, global } = mcpConfigPaths();
         const target = command.scope === "project" ? project : global;
         if (!removeMcpServerConfig(target, command.name)) throw new Error("找不到要删除的 MCP Server");
+        await reloadRuntimeResources();
+      });
+      break;
+    }
+    case "skill.toggle": {
+      await runResourceOperation(command.enabled ? "正在启用 Skill" : "正在停用 Skill", async () => {
+        setSkillEnabled(skillPaths().statePath, command.id, command.enabled);
         await reloadRuntimeResources();
       });
       break;
