@@ -584,6 +584,11 @@ select option:checked { color: var(--on-accent); background-color: var(--accent)
 .resource-remove:hover { color: var(--danger); background: var(--danger-soft); }
 .resource-diagnostics { margin-top: 16px; padding: 9px 10px; border: 1px solid var(--danger-border); border-radius: 6px; color: var(--danger-text); background: var(--danger-soft); font-size: 10px; }
 .resource-diagnostics strong { font-size: 10px; }
+.todo-list .resource-empty { margin-bottom: 0; }
+.todo-item { min-height: 43px; }
+.todo-item .todo-check { flex: 0 0 auto; }
+.todo-item.completed .resource-item-copy strong { text-decoration: line-through; color: var(--text-muted); }
+.todo-item.completed .resource-item-copy { opacity: .7; }
 .resource-diagnostics p { margin: 4px 0 0; overflow-wrap: anywhere; line-height: 1.4; }
 .agent-settings { display: grid; grid-template-columns: 245px minmax(0, 1fr); min-height: 0; }
 .agent-list { display: flex; flex-direction: column; gap: 5px; min-height: 0; padding: 14px; overflow-y: auto; border-right: 1px solid var(--border); background: var(--surface-muted); }

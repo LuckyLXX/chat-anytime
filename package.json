@@ -59,10 +59,14 @@
     "directories": {
       "output": "dist"
     },
-    "files": [
-      "out/**/*",
-      "package.json"
-    ],
+  "files": [
+    "out/**/*",
+    "package.json"
+  ],
+  "asarUnpack": [
+    "**/node_modules/@modelcontextprotocol/**",
+    "**/node_modules/typebox/**"
+  ],
     "win": {
       "target": "dir",
       "signAndEditExecutable": false

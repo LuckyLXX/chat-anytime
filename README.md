@@ -80,13 +80,26 @@ npm run package:win
 
 ## 与 Pi 及原插件的关系
 
-- Pi `0.82.1` 提供模型、AgentSession、会话持久化、上下文管理和开发工具能力
+- Pi `0.82.1` 仅作为 Agent 运行时核心使用：模型、AgentSession、会话持久化、上下文管理、内置工具（read/bash/edit/write/grep/find/ls）
+- 已移除 Pi 的「扩展接入」能力（第三方扩展加载/批准/绑定、`pi-mcp-adapter`、子代理 CLI shim、扩展 UI 桥），只保留应用自有的工具调用权限拦截 hook
+- MCP、Skill、子代理、Todo 均为自研实现：MCP 由内置 `@modelcontextprotocol/sdk` 客户端直连并把每个工具包装成 Pi `customTool`；Skill 通过扫描 `SKILL.md` 目录并注入系统提示；子代理用 `delegate_agent` 创建同进程子会话；Todo 用本地 JSON 存储
 - 本项目沿用 ChatAnyTime 品牌与核心渲染、交互理念，没有复制原插件运行时或旧代码
-- Pi 原仓库 `D:\开源仓库\pi` 和 ChatAnyTime 原插件仓库均不属于本项目，也不会被本项目构建修改
+- Pi 原仓库和 ChatAnyTime 原插件仓库均不属于本项目，也不会被本项目构建修改
+
+## 能力管理
+
+打开「设置 → 技能与工具」即可管理自研能力：
+
+- **MCP Server**：支持 stdio/HTTP，配置写入项目 `.mcp.json` 或全局 `mcp.json`，启用/停用/删除，状态与工具数实时显示
+- **Skill**：把 `<slug>/SKILL.md` 放到全局 `pidesktop-skills/` 或项目 `.pidesktop-skills/` 即可被发现，勾选启用后注入系统提示，用 `/skill:<name>` 调用
+- **Todo**：本地待办清单，可在面板手动管理，也可让助手通过 `todo_create`/`todo_list`/`todo_update`/`todo_delete` 工具维护
+- **子代理**：助手可通过 `delegate_agent` 把独立子任务委派给子代理（单层，权限走同一审批闸口）
 
 ## 当前限制
 
-- 暂不支持 Git 工作树管理、终端面板、MCP/扩展管理界面
+- 暂不支持 Git 工作树管理、终端面板
+- MCP 配置变更后需重建会话才能让新工具生效（会话历史保留）；stdio 类型 MCP 子进程在应用退出时未做优雅关闭，极少数情况下可能残留
+- 子代理目前以工具调用结果内联展示，尚未在侧栏以嵌套会话形式呈现
 - HTML/SVG Artifact 只提供隔离预览，不提供桌面能力桥接
 - Windows 目前输出解压目录，尚未生成安装程序、自动更新、代码签名和可执行文件资源定制
 - `@earendil-works/pi-coding-agent@0.82.1` 发布包的 shrinkwrap 固定了 `undici@8.5.0` 与 `brace-expansion@5.0.7`；截至本版，`npm audit --omit=dev` 会报告 3 项关联风险。根项目 override 无法可靠替换它们，需等待 Pi 上游发布更新依赖的版本，或以后改为可审计的 Pi 源码构建流程
