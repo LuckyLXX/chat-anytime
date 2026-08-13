@@ -5,6 +5,7 @@ import type { AssistantMessage, UserMessage, ImageContent } from "@earendil-work
 import {
   createAgentSession,
   DefaultResourceLoader,
+  defineTool,
   getAgentDir,
   ModelRuntime,
   SessionManager,
@@ -49,6 +50,8 @@ import { readConfiguredMcpServers, removeMcpServerConfig, setMcpServerDisabled, 
 import { PermissionBroker } from "./permission-broker.js";
 import { createSubagentTools, type SubagentContext } from "./subagent.js";
 import { buildSkillsSystemPromptBlock, discoverSkills, isSkillDisabled, setSkillEnabled, skillIdFromPath, toSkillSummaries, type DiscoveredSkill } from "./skill-catalog.js";
+import { createTodoStore, type TodoStore } from "./todo-store.js";
+import { Type } from "typebox";
 import { toolRisk } from "./permissions.js";
 import { buildResourceCatalog } from "./resource-catalog.js";
 import { agentWorkspaceSessionDir } from "./session-scope.js";
@@ -94,6 +97,7 @@ let nativeSkills: SkillSummary[] = [];
 let discoveredSkills: DiscoveredSkill[] = [];
 let mcpServers: McpServerSummary[] = [];
 let todos: Todo[] = [];
+let todoStore: TodoStore | undefined;
 let resourceDiagnostics: string[] = [];
 let resourceOperationBusy = false;
 let sessionGeneration = 0;
@@ -256,6 +260,80 @@ function emitResourceCatalog(): void {
 function emitTodos(): void {
   post({ type: "todos", todos });
 }
+
+/** Reload todos from the store and broadcast to the renderer. */
+function refreshTodos(): void {
+  if (todoStore) todos = todoStore.list();
+  emitTodos();
+  emitResourceCatalog();
+}
+
+function summarizeTodos(items: Todo[]): string {
+  if (items.length === 0) return "（暂无 Todo）";
+  return items.map((todo) => {
+    const mark = todo.status === "completed" ? "x" : todo.status === "in_progress" ? "~" : " ";
+    return `- [${mark}] ${todo.title}${todo.notes ? `（${todo.notes}）` : ""}`;
+  }).join("\n");
+}
+
+/** Build the Todo customTools (todo_create/list/update/complete/delete). */
+function buildTodoTools(): ToolDefinition[] {
+  if (!todoStore) return [];
+  const summarize = (): AgentToolResultLike => ({ content: [{ type: "text", text: summarizeTodos(todoStore!.list()) }], details: { count: todoStore!.list().length } });
+  const mutate = (action: () => void): AgentToolResultLike => {
+    action();
+    refreshTodos();
+    return summarize();
+  };
+  return [
+    defineTool({
+      name: "todo_create",
+      label: "新建 Todo",
+      description: "创建一个新的待办事项。",
+      promptSnippet: "todo_create: 新建待办事项",
+      parameters: Type.Object({
+        title: Type.String({ description: "待办标题" }),
+        notes: Type.Optional(Type.String({ description: "可选备注" }))
+      }),
+      execute: async (_id, params) => mutate(() => todoStore!.create(String(params?.title ?? ""), params?.notes as string | undefined))
+    }),
+    defineTool({
+      name: "todo_list",
+      label: "列出 Todo",
+      description: "列出所有待办事项及其状态。",
+      promptSnippet: "todo_list: 列出待办事项",
+      parameters: Type.Object({}),
+      execute: async () => summarize()
+    }),
+    defineTool({
+      name: "todo_update",
+      label: "更新 Todo",
+      description: "更新待办事项的标题、备注或状态。status 可为 pending/in_progress/completed。",
+      promptSnippet: "todo_update: 更新待办事项",
+      parameters: Type.Object({
+        id: Type.String({ description: "待办 id" }),
+        title: Type.Optional(Type.String()),
+        notes: Type.Optional(Type.String()),
+        status: Type.Optional(Type.Union([Type.Literal("pending"), Type.Literal("in_progress"), Type.Literal("completed")]))
+      }),
+      execute: async (_id, params) => mutate(() => todoStore!.update(String(params?.id ?? ""), {
+        ...(typeof params?.title === "string" ? { title: params.title } : {}),
+        ...(params?.notes !== undefined ? { notes: params.notes as string } : {}),
+        ...(typeof params?.status === "string" ? { status: params.status as Todo["status"] } : {})
+      }))
+    }),
+    defineTool({
+      name: "todo_delete",
+      label: "删除 Todo",
+      description: "按 id 删除一个待办事项。",
+      promptSnippet: "todo_delete: 删除待办事项",
+      parameters: Type.Object({ id: Type.String() }),
+      execute: async (_id, params) => mutate(() => todoStore!.remove(String(params?.id ?? "")))
+    })
+  ];
+}
+
+type AgentToolResultLike = { content: Array<{ type: "text"; text: string }>; details: unknown };
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -758,6 +836,7 @@ async function createSession(sessionManager?: SessionManager): Promise<void> {
   await mcpPromise;
   emitResourceCatalog();
   const subagentTools = buildSubagentTools(false);
+  const todoTools = buildTodoTools();
   const result = await createAgentSession({
     cwd: workspace,
     modelRuntime,
@@ -766,7 +845,7 @@ async function createSession(sessionManager?: SessionManager): Promise<void> {
     sessionManager: activeSessionManager,
     settingsManager,
     resourceLoader,
-    customTools: [...mcpTools, ...subagentTools]
+    customTools: [...mcpTools, ...subagentTools, ...todoTools]
   });
   if (generation !== sessionGeneration) {
     result.session.dispose();
@@ -784,9 +863,9 @@ async function createSession(sessionManager?: SessionManager): Promise<void> {
     }
   });
   // Activate the agent's enabled built-in tools plus every customTool (MCP,
-  // subagent delegation, and later todo tools). customTools are registered but
-  // not active unless explicitly enabled here.
-  session.setActiveToolsByName([...enabledBuiltinTools, ...mcpTools.map((tool) => tool.name), ...subagentTools.map((tool) => tool.name)]);
+  // subagent delegation, todo). customTools are registered but not active
+  // unless explicitly enabled here.
+  session.setActiveToolsByName([...enabledBuiltinTools, ...mcpTools.map((tool) => tool.name), ...subagentTools.map((tool) => tool.name), ...todoTools.map((tool) => tool.name)]);
   executions = new Map(restoreToolExecutions(session.state.messages as unknown as PersistedSessionMessage[], workspace).map((execution) => [execution.id, execution]));
   selectedModel = session.model ? { provider: session.model.provider, id: session.model.id } : requested;
   thinkingLevel = session.thinkingLevel;
@@ -810,6 +889,7 @@ async function initialize(command: Extract<RuntimeCommand, { type: "initialize" 
   accessMode = settings.accessMode ?? "ask";
   selectedModel = settings.model;
   modelRuntime = await ModelRuntime.create();
+  todoStore = createTodoStore(join(getAgentDir(), "pidesktop-todos.json"), refreshTodos);
   const initializedProviderIds = new Set<string>();
   for (const provider of settings.providers) {
     registerCustomProvider(provider);
@@ -827,8 +907,8 @@ async function initialize(command: Extract<RuntimeCommand, { type: "initialize" 
   await refreshCatalog();
   if (workspace) await createSession();
   else {
+    refreshTodos();
     emitResourceCatalog();
-    emitTodos();
     emitState();
   }
 }
@@ -1209,6 +1289,24 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         setSkillEnabled(skillPaths().statePath, command.id, command.enabled);
         await reloadRuntimeResources();
       });
+      break;
+    }
+    case "todo.create": {
+      if (!todoStore) throw new Error("Todo 存储尚未初始化");
+      todoStore.create(command.title, command.notes);
+      refreshTodos();
+      break;
+    }
+    case "todo.update": {
+      if (!todoStore) throw new Error("Todo 存储尚未初始化");
+      if (!todoStore.update(command.id, { ...(command.title !== undefined ? { title: command.title } : {}), ...(command.notes !== undefined ? { notes: command.notes } : {}), ...(command.status !== undefined ? { status: command.status } : {}) })) throw new Error("找不到要更新的 Todo");
+      refreshTodos();
+      break;
+    }
+    case "todo.delete": {
+      if (!todoStore) throw new Error("Todo 存储尚未初始化");
+      if (!todoStore.remove(command.id)) throw new Error("找不到要删除的 Todo");
+      refreshTodos();
       break;
     }
     case "permission.resolve": {

@@ -626,6 +626,8 @@ interface ResourceSettingsProps {
 function ResourceSettings({ resources }: ResourceSettingsProps): ReactNode {
   const [busy, setBusy] = useState(false);
   const [localError, setLocalError] = useState<string>();
+  const [newTodo, setNewTodo] = useState("");
+  const todos = useDesktopStore((state) => state.todos);
   const [mcpFormOpen, setMcpFormOpen] = useState(false);
   const [mcpName, setMcpName] = useState("");
   const [mcpScope, setMcpScope] = useState<McpServerConfigDraft["scope"]>("project");
@@ -717,6 +719,19 @@ function ResourceSettings({ resources }: ResourceSettingsProps): ReactNode {
         {resources.skills.length === 0 ? <p className="resource-empty">当前没有发现 Skill。</p> : <div className="resource-list">{resources.skills.map((skill) => <div className="resource-item" key={skill.id}><div className="resource-item-icon"><Puzzle size={14} /></div><div className="resource-item-copy"><strong>/skill:{skill.name}</strong><small>{skill.description}</small><em>{resourceScopeLabels[skill.scope]} · {skill.source}{skill.disableModelInvocation ? " · 仅手动调用" : ""}</em></div><label className="resource-toggle"><input type="checkbox" checked={skill.enabled} disabled={controlsBusy || !skill.toggleable} onChange={(event) => void run({ type: "skill.toggle", id: skill.id, enabled: event.target.checked })} /><span>启用</span></label></div>)}</div>}
       </section>
       {resources.diagnostics.length > 0 && <div className="resource-diagnostics"><strong>资源诊断</strong>{resources.diagnostics.map((diagnostic) => <p key={diagnostic}>{diagnostic}</p>)}</div>}
+      <section className="resource-section">
+        <div className="resource-section-heading"><span><Check size={14} />Todo</span><small>{todos.length} 项</small></div>
+        <form className="resource-package-form" onSubmit={(event) => { event.preventDefault(); const title = newTodo.trim(); if (!title) return; void run({ type: "todo.create", title }).then((ok) => { if (ok) setNewTodo(""); }); }}><input value={newTodo} placeholder="新增待办，回车添加" onChange={(event) => setNewTodo(event.target.value)} /><button className="primary-button" type="submit" disabled={controlsBusy || !newTodo.trim()}><Plus size={13} />添加</button></form>
+        <div className="resource-list todo-list">
+          {todos.length === 0 ? <p className="resource-empty">暂无待办。也可以让助手用 todo_create 等工具管理。</p> : todos.map((todo) => (
+            <div className={`resource-item todo-item${todo.status === "completed" ? " completed" : ""}`} key={todo.id}>
+              <label className="resource-toggle todo-check"><input type="checkbox" checked={todo.status === "completed"} disabled={controlsBusy} onChange={(event) => void run({ type: "todo.update", id: todo.id, status: event.target.checked ? "completed" : "pending" })} /><span>{todo.status === "completed" ? "已完成" : "完成"}</span></label>
+              <div className="resource-item-copy"><strong>{todo.title}</strong>{todo.notes && <small>{todo.notes}</small>}</div>
+              <button className="icon-button resource-remove" type="button" title="删除" aria-label={`删除待办 ${todo.title}`} disabled={controlsBusy} onClick={() => void run({ type: "todo.delete", id: todo.id })}><Trash2 size={14} /></button>
+            </div>
+          ))}
+        </div>
+      </section>
     </div>
   );
 }
