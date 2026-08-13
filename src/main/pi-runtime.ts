@@ -47,6 +47,7 @@ import { buildDivModePrompt } from "./div-prompt.js";
 import { McpClientManager } from "./mcp-client.js";
 import { readConfiguredMcpServers, removeMcpServerConfig, setMcpServerDisabled, upsertMcpServerConfig, type McpServerConfigEntry } from "./mcp-config.js";
 import { PermissionBroker } from "./permission-broker.js";
+import { createSubagentTools, type SubagentContext } from "./subagent.js";
 import { buildSkillsSystemPromptBlock, discoverSkills, isSkillDisabled, setSkillEnabled, skillIdFromPath, toSkillSummaries, type DiscoveredSkill } from "./skill-catalog.js";
 import { toolRisk } from "./permissions.js";
 import { buildResourceCatalog } from "./resource-catalog.js";
@@ -196,6 +197,27 @@ function activeSkillsForAgent(): SkillSummary[] {
     const override = currentAgent?.skillOverrides?.[skill.id];
     return override !== false;
   });
+}
+
+/**
+ * Build the subagent delegation customTools for the current session. The child
+ * flag disables nesting (delegations cannot spawn further delegations).
+ */
+function buildSubagentTools(isDelegationChild: boolean): ToolDefinition[] {
+  if (!modelRuntime || !workspace || !currentAgent) return [];
+  const ctx: SubagentContext = {
+    modelRuntime,
+    workspace,
+    agentDir: getAgentDir(),
+    agent: currentAgent,
+    thinkingLevel,
+    accessMode,
+    model: selectedModel ?? { provider: "", id: "" },
+    parentSessionId: session?.sessionId,
+    requestPermission: (toolName, args, toolCallId) => requestPermission(toolName, args, toolCallId, "subagent"),
+    isDelegationChild
+  };
+  return createSubagentTools(ctx);
 }
 
 function mcpConfigEntry(server: McpServerConfigDraft): McpServerConfigEntry {
@@ -420,7 +442,7 @@ function summarizeArgs(toolName: string, args: Record<string, unknown>): string 
   return toolLabel(toolName);
 }
 
-function requestPermission(toolName: string, args: Record<string, unknown>, toolCallId: string): Promise<PermissionDecision> {
+function requestPermission(toolName: string, args: Record<string, unknown>, toolCallId: string, principalKind: "root-agent" | "subagent" = "root-agent"): Promise<PermissionDecision> {
   const risk = toolRisk(workspace, toolName, args);
   if (!risk) return Promise.resolve("allow-once");
   return permissionBroker.request({
@@ -430,8 +452,9 @@ function requestPermission(toolName: string, args: Record<string, unknown>, tool
     args,
     risk,
     principal: {
-      kind: "root-agent",
+      kind: principalKind,
       sessionId: session?.sessionId ?? "session-pending",
+      ...(principalKind === "subagent" ? { parentSessionId: session?.sessionId } : {}),
       agentId: currentAgent?.id,
       toolCallId
     }
@@ -734,6 +757,7 @@ async function createSession(sessionManager?: SessionManager): Promise<void> {
   const sessionsPromise = refreshSessions();
   await mcpPromise;
   emitResourceCatalog();
+  const subagentTools = buildSubagentTools(false);
   const result = await createAgentSession({
     cwd: workspace,
     modelRuntime,
@@ -742,7 +766,7 @@ async function createSession(sessionManager?: SessionManager): Promise<void> {
     sessionManager: activeSessionManager,
     settingsManager,
     resourceLoader,
-    customTools: mcpTools
+    customTools: [...mcpTools, ...subagentTools]
   });
   if (generation !== sessionGeneration) {
     result.session.dispose();
@@ -760,9 +784,9 @@ async function createSession(sessionManager?: SessionManager): Promise<void> {
     }
   });
   // Activate the agent's enabled built-in tools plus every customTool (MCP,
-  // and later subagent/todo tools). customTools are registered but not active
-  // unless explicitly enabled here.
-  session.setActiveToolsByName([...enabledBuiltinTools, ...mcpTools.map((tool) => tool.name)]);
+  // subagent delegation, and later todo tools). customTools are registered but
+  // not active unless explicitly enabled here.
+  session.setActiveToolsByName([...enabledBuiltinTools, ...mcpTools.map((tool) => tool.name), ...subagentTools.map((tool) => tool.name)]);
   executions = new Map(restoreToolExecutions(session.state.messages as unknown as PersistedSessionMessage[], workspace).map((execution) => [execution.id, execution]));
   selectedModel = session.model ? { provider: session.model.provider, id: session.model.id } : requested;
   thinkingLevel = session.thinkingLevel;
