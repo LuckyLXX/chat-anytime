@@ -128,8 +128,12 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, onSelectT
   const editing = activeEditorState?.editing !== false;
   const [paused, setPaused] = useState(false);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
+  const [sourceModes, setSourceModes] = useState<Record<string, boolean>>({});
   const addMenuRef = useRef<HTMLDivElement>(null);
   const frameRef = useRef<HTMLIFrameElement | null>(null);
+
+  const showSource = sourceModes[activeTabId] === true;
+  const sourceable = Boolean(artifact) || (target.type === "file" && target.file.kind === "markdown" && target.file.content !== undefined);
 
   function postPreviewAction(action: DynamicPreviewAction): void {
     frameRef.current?.contentWindow?.postMessage({ action }, "*");
@@ -202,14 +206,17 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, onSelectT
         </div>
         <div className="preview-tab-actions">
           {markdownEditable && <button className="icon-button" type="button" title={editing ? "切换到预览" : "切换到编辑"} aria-label={editing ? "预览" : "编辑"} onClick={() => onToggleEditing?.()}>{editing ? <Eye size={15} /> : <Pencil size={15} />}</button>}
+          {sourceable && <button className="icon-button" type="button" title={showSource ? "切换到预览" : "查看源代码"} aria-label={showSource ? "预览" : "源代码"} onClick={() => setSourceModes((prev) => ({ ...prev, [activeTabId]: !showSource }))}>{showSource ? <Eye size={15} /> : <Code2 size={15} />}</button>}
           {dynamic && <button className="icon-button" type="button" aria-label={paused ? "继续动态预览" : "暂停动态预览"} title={paused ? "继续" : "暂停"} onClick={() => { postPreviewAction(paused ? DYNAMIC_PREVIEW_ACTIONS.resume : DYNAMIC_PREVIEW_ACTIONS.pause); setPaused((current) => !current); }}>{paused ? <Play size={15} /> : <Pause size={15} />}</button>}
           <button className="icon-button" type="button" title="关闭预览" aria-label="关闭预览" onClick={() => onCloseTab(activeTabId)}><X size={16} /></button>
         </div>
       </div>
       <div className="content-preview-body">
-        {artifact && <iframe ref={frameRef} title={artifact.title} sandbox={artifactSandbox(artifact)} referrerPolicy="no-referrer" srcDoc={buildArtifactPreviewSource(artifact)} onLoad={handleLoad} />}
-        {target.type === "browser" && <BrowserPreview suspended={browserSuspended} tabId={activeTabId} />}
-        {!artifact && target.type === "file" && <FilePreviewContent file={target.file} onOpenArtifact={onOpenArtifact} workspace={workspace} editorState={activeEditorState} onEditorChange={onActiveEditorChange} onResolveConflict={onActiveEditorResolveConflict} />}
+        {showSource && artifact && <div className="preview-scroll preview-code"><CodeBlock language={artifact.language} code={artifact.content} /></div>}
+        {showSource && !artifact && target.type === "file" && target.file.content !== undefined && <div className="preview-scroll preview-code"><CodeBlock language={target.file.kind === "markdown" ? "markdown" : target.file.language ?? "text"} code={target.file.content} /></div>}
+        {!showSource && artifact && <iframe ref={frameRef} title={artifact.title} sandbox={artifactSandbox(artifact)} referrerPolicy="no-referrer" srcDoc={buildArtifactPreviewSource(artifact)} onLoad={handleLoad} />}
+        {!showSource && target.type === "browser" && <BrowserPreview suspended={browserSuspended} tabId={activeTabId} />}
+        {!showSource && !artifact && target.type === "file" && <FilePreviewContent file={target.file} onOpenArtifact={onOpenArtifact} workspace={workspace} editorState={activeEditorState} onEditorChange={onActiveEditorChange} onResolveConflict={onActiveEditorResolveConflict} />}
         {target.type === "diff" && <div className="preview-scroll preview-diff"><DiffView patch={target.patch} /></div>}
         {target.type === "loading" && <div className="preview-empty"><LoaderCircle className="spinning" size={26} /><strong>正在读取文件</strong><span>{target.path}</span></div>}
         {target.type === "error" && <div className="preview-empty preview-error"><AlertCircle size={26} /><strong>无法打开预览</strong><span>{target.message}</span></div>}
