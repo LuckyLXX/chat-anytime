@@ -12,12 +12,14 @@ import {
   type AgentSession,
   type AgentSessionEvent,
   type InlineExtension,
+  type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type {
   AccessMode,
   AgentProfile,
   ChatMessage,
   DesktopSettings,
+  McpServerConfigDraft,
   McpServerSummary,
   MessageBlock,
   ModelOption,
@@ -42,6 +44,8 @@ import { workspaceRelativeAttachment } from "./attachments.js";
 import { runManualCompaction } from "./compaction-lifecycle.js";
 import { customProviderModelDefinition, inferCustomModelImageInput } from "./custom-provider.js";
 import { buildDivModePrompt } from "./div-prompt.js";
+import { McpClientManager } from "./mcp-client.js";
+import { readConfiguredMcpServers, removeMcpServerConfig, setMcpServerDisabled, upsertMcpServerConfig, type McpServerConfigEntry } from "./mcp-config.js";
 import { PermissionBroker } from "./permission-broker.js";
 import { toolRisk } from "./permissions.js";
 import { buildResourceCatalog } from "./resource-catalog.js";
@@ -153,6 +157,44 @@ const permissionBroker = new PermissionBroker(
   (request) => post({ type: "permission", request }),
   (id) => post({ type: "permission.dismiss", id })
 );
+const mcpClient = new McpClientManager();
+let mcpTools: ToolDefinition[] = [];
+
+function mcpConfigPaths(): { project: string; global: string } {
+  return {
+    project: workspace ? resolve(workspace, ".mcp.json") : join(getAgentDir(), ".mcp.json"),
+    global: join(getAgentDir(), "mcp.json")
+  };
+}
+
+function mcpConfigEntry(server: McpServerConfigDraft): McpServerConfigEntry {
+  if (server.transport === "stdio") {
+    const command = server.command?.trim();
+    if (!command) throw new Error("stdio MCP Server 需要填写启动命令");
+    return {
+      command,
+      ...(server.args && server.args.length > 0 ? { args: server.args } : {}),
+      ...(server.env && Object.keys(server.env).length > 0 ? { env: server.env } : {})
+    };
+  }
+  const url = server.url?.trim();
+  if (!url || !/^https?:\/\//iu.test(url)) throw new Error("HTTP MCP Server 需要填写 http:// 或 https:// 地址");
+  if (server.auth === "bearer-env" && !server.bearerTokenEnv?.trim()) throw new Error("Bearer 认证需要填写环境变量名");
+  return {
+    url,
+    ...(server.auth === "oauth" ? { auth: "oauth" as const } : {}),
+    ...(server.auth === "bearer-env" ? { bearerTokenEnv: server.bearerTokenEnv!.trim() } : {})
+  };
+}
+
+/** Connect to all configured MCP servers and refresh tool definitions + catalog status. */
+async function syncMcpServers(): Promise<void> {
+  const { project, global } = mcpConfigPaths();
+  const servers = readConfiguredMcpServers(project, global);
+  const { summaries, bindings } = await mcpClient.sync(servers);
+  mcpServers = summaries;
+  mcpTools = mcpClient.buildToolDefinitions(bindings);
+}
 
 function emitResourceCatalog(): void {
   post({ type: "resources", resources: buildResourceCatalog({ skills: nativeSkills, mcpServers, todos, diagnostics: resourceDiagnostics }) });
@@ -641,7 +683,11 @@ async function createSession(sessionManager?: SessionManager): Promise<void> {
     systemPromptOverride: (base) => [base, currentAgent?.systemPrompt, currentAgent?.divMode ? buildDivModePrompt() : undefined].filter(Boolean).join("\n\n")
   });
   await resourceLoader.reload();
-  emitResourceCatalog();
+  // Connect to configured MCP servers and rebuild the customTool set. Runs
+  // concurrently with session manager setup since neither depends on the other.
+  const mcpPromise = syncMcpServers().catch((error) => {
+    post({ type: "log", level: "warn", message: `同步 MCP 服务器失败：${errorText(error)}` });
+  });
   emitTodos();
 
   const activeSessionManager = sessionManager ?? SessionManager.continueRecent(workspace, workspaceSessionDir());
@@ -655,6 +701,8 @@ async function createSession(sessionManager?: SessionManager): Promise<void> {
   // in-memory session — so run it concurrently with createAgentSession and
   // await the result before emitState publishes the session list.
   const sessionsPromise = refreshSessions();
+  await mcpPromise;
+  emitResourceCatalog();
   const result = await createAgentSession({
     cwd: workspace,
     modelRuntime,
@@ -662,7 +710,8 @@ async function createSession(sessionManager?: SessionManager): Promise<void> {
     thinkingLevel: hasExistingMessages ? undefined : (currentAgent?.defaultThinkingLevel ?? settings?.thinkingLevel ?? "medium"),
     sessionManager: activeSessionManager,
     settingsManager,
-    resourceLoader
+    resourceLoader,
+    customTools: mcpTools
   });
   if (generation !== sessionGeneration) {
     result.session.dispose();
@@ -679,7 +728,10 @@ async function createSession(sessionManager?: SessionManager): Promise<void> {
       post({ type: "log", level: "warn", message: `权限拦截扩展错误：${error.error}` });
     }
   });
-  session.setActiveToolsByName(enabledBuiltinTools);
+  // Activate the agent's enabled built-in tools plus every customTool (MCP,
+  // and later subagent/todo tools). customTools are registered but not active
+  // unless explicitly enabled here.
+  session.setActiveToolsByName([...enabledBuiltinTools, ...mcpTools.map((tool) => tool.name)]);
   executions = new Map(restoreToolExecutions(session.state.messages as unknown as PersistedSessionMessage[], workspace).map((execution) => [execution.id, execution]));
   selectedModel = session.model ? { provider: session.model.provider, id: session.model.id } : requested;
   thinkingLevel = session.thinkingLevel;
@@ -1064,6 +1116,39 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     case "resources.reload":
       await runResourceOperation("正在重载能力资源", reloadRuntimeResources);
       break;
+    case "mcp.server.save": {
+      const server = command.server;
+      const name = server.name.trim();
+      if (!/^[A-Za-z0-9._-]+$/u.test(name)) throw new Error("MCP Server 名称只能包含字母、数字、点、下划线和短横线");
+      const { project, global } = mcpConfigPaths();
+      const target = server.scope === "project" ? project : global;
+      await runResourceOperation("正在保存 MCP Server", async () => {
+        upsertMcpServerConfig(target, name, mcpConfigEntry({ ...server, name }));
+        await reloadRuntimeResources();
+      });
+      break;
+    }
+    case "mcp.server.toggle": {
+      if (!/^[A-Za-z0-9._-]+$/u.test(command.name)) throw new Error("MCP Server 名称无效");
+      await runResourceOperation(command.enabled ? "正在启用 MCP Server" : "正在停用 MCP Server", async () => {
+        const { project, global } = mcpConfigPaths();
+        if (!setMcpServerDisabled(project, command.name, !command.enabled) && !setMcpServerDisabled(global, command.name, !command.enabled)) {
+          throw new Error("找不到要切换的 MCP Server");
+        }
+        await reloadRuntimeResources();
+      });
+      break;
+    }
+    case "mcp.server.delete": {
+      if (!/^[A-Za-z0-9._-]+$/u.test(command.name)) throw new Error("MCP Server 名称无效");
+      await runResourceOperation("正在删除 MCP Server", async () => {
+        const { project, global } = mcpConfigPaths();
+        const target = command.scope === "project" ? project : global;
+        if (!removeMcpServerConfig(target, command.name)) throw new Error("找不到要删除的 MCP Server");
+        await reloadRuntimeResources();
+      });
+      break;
+    }
     case "permission.resolve": {
       permissionBroker.resolve(command.id, command.decision);
       break;
