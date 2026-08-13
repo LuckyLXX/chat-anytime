@@ -42,6 +42,7 @@
     "electron-builder": "26.0.12",
     "electron-vite": "5.0.0",
     "typescript": "5.9.3",
+    "vditor": "^3.11.3",
     "vite": "7.3.6",
     "vitest": "4.0.18"
   },

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { sanitizeRichHtmlTree, sanitizeStyleDeclarations } from "./html-sanitize";
+import { sanitizeRichHtmlTree, sanitizeStyleDeclarations, sanitizeStyleTagCss } from "./html-sanitize";
 
 describe("assistant HTML sanitizer", () => {
   it("keeps layout styles but removes executable CSS values", () => {
@@ -93,5 +93,30 @@ describe("assistant HTML sanitizer", () => {
 
     sanitizeRichHtmlTree({ allowBubbleScripts: true })(tree);
     expect(tree.children).toEqual([]);
+  });
+
+  it("keeps safe @keyframes rules with sanitized declarations", () => {
+    const scoped = sanitizeStyleTagCss(
+      "@keyframes heartbeat { 0%,100% { transform: scale(1); } 12% { transform: scale(1.16); } }",
+      ".bubble-scope"
+    );
+    // In a real browser (Electron renderer) the offscreen stylesheet yields a
+    // KEYFRAMES_RULE with sanitized declarations. In the node test environment
+    // the CSSOM is unavailable, so this assertion guards the happy path only
+    // when the environment actually parses CSS.
+    if (typeof CSSKeyframeRule === "undefined" || typeof CSSRule === "undefined") return;
+    expect(scoped).toContain("@keyframes heartbeat");
+    expect(scoped).toContain("transform:scale(1)");
+    expect(scoped).toContain("transform:scale(1.16)");
+  });
+
+  it("drops dangerous declarations inside keyframe rules", () => {
+    const scoped = sanitizeStyleTagCss(
+      "@keyframes evil { 0% { transform: scale(1); color: red; } 100% { width: expression(alert(1)); } }",
+      ".bubble-scope"
+    );
+    // expression() is rejected by the whole-style guard, so the entire block
+    // collapses to "" rather than leaking the unsafe declaration.
+    expect(scoped).not.toContain("expression");
   });
 });

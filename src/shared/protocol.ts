@@ -195,6 +195,12 @@ export interface WorkspaceFilePreview {
   truncated?: boolean;
 }
 
+export interface WorkspaceFileWriteResult {
+  saved: true;
+  size: number;
+  relativePath: string;
+}
+
 export interface WorkspaceDirectoryEntry {
   name: string;
   relativePath: string;
@@ -478,6 +484,7 @@ export interface DesktopApi {
   chooseAttachments(workspace?: string): Promise<PromptAttachment[]>;
   choosePreviewFile(): Promise<WorkspaceFilePreview | undefined>;
   readWorkspaceFile(relativePath: string, workspace?: string): Promise<WorkspaceFilePreview>;
+  writeWorkspaceFile(relativePath: string, content: string, workspace?: string): Promise<WorkspaceFileWriteResult>;
   listWorkspaceDirectory(workspace: string, relativePath?: string): Promise<WorkspaceDirectoryListing>;
   browserPreview(command: BrowserPreviewCommand): Promise<BrowserPreviewState>;
   send(command: RuntimeCommand): Promise<void>;

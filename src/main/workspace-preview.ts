@@ -1,6 +1,6 @@
-import { open, readdir, realpath, stat } from "node:fs/promises";
+import { mkdir, open, readdir, realpath, stat, writeFile } from "node:fs/promises";
 import { basename, extname, isAbsolute, relative, resolve, sep } from "node:path";
-import type { WorkspaceDirectoryEntry, WorkspaceDirectoryListing, WorkspaceFilePreview } from "../shared/protocol.js";
+import type { WorkspaceDirectoryEntry, WorkspaceDirectoryListing, WorkspaceFilePreview, WorkspaceFileWriteResult } from "../shared/protocol.js";
 
 const textPreviewLimit = 1024 * 1024;
 const imagePreviewLimit = 5 * 1024 * 1024;
@@ -134,6 +134,42 @@ export async function readWorkspaceFilePreview(workspace: string, requestedPath:
   const language = filenameLanguages[name.toLowerCase()] ?? codeLanguages[extension];
   if (language) return { ...base, kind: "code", language, content, truncated };
   return { ...base, kind: "text", language: "text", content, truncated };
+}
+
+export async function writeWorkspaceFile(workspace: string, requestedPath: string, content: string): Promise<WorkspaceFileWriteResult> {
+  const relativePath = safeRelativePath(workspace, requestedPath);
+  if (!relativePath || isAbsolute(requestedPath)) throw new Error("写入文件路径必须位于当前工作区内");
+  const rootReal = await realpath(resolve(workspace));
+  const withinRoot = (real: string): boolean => real === rootReal || Boolean(safeRelativePath(rootReal, real));
+  const candidate = resolve(rootReal, ...relativePath.split("/"));
+  // 逐级向上找到已存在的最近祖先：已存在的路径段必须落在工作区内，防止符号链接把写入
+  // 目标劫持到工作区之外；尚不存在的段是全新创建的，无 symlink 风险。
+  let existingAncestor = candidate;
+  for (;;) {
+    const real = await realpath(existingAncestor).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return undefined;
+      throw error;
+    });
+    if (real !== undefined) {
+      if (!withinRoot(real)) throw new Error("写入文件路径必须位于当前工作区内");
+      break;
+    }
+    const parent = resolve(existingAncestor, "..");
+    if (existingAncestor === parent) break;
+    existingAncestor = parent;
+  }
+  await mkdir(resolve(candidate, ".."), { recursive: true });
+  // 目标若已存在，其自身 realpath 必须落在工作区内。
+  const existingTarget = await realpath(candidate).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return undefined;
+    throw error;
+  });
+  if (existingTarget && !withinRoot(existingTarget)) throw new Error("写入文件路径必须位于当前工作区内");
+  await writeFile(candidate, content, "utf8");
+  const info = await stat(candidate);
+  const realRelativePath = safeRelativePath(rootReal, await realpath(candidate));
+  if (!realRelativePath) throw new Error("写入文件路径必须位于当前工作区内");
+  return { saved: true, size: info.size, relativePath: realRelativePath };
 }
 
 const ignoredWorkspaceEntries = new Set([

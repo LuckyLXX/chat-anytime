@@ -250,6 +250,9 @@ export function createDemoApi(): DesktopApi {
       }
       throw new Error(`找不到演示文件：${relativePath}`);
     },
+    async writeWorkspaceFile(relativePath: string, content: string, _workspace?: string): Promise<import("../../shared/protocol").WorkspaceFileWriteResult> {
+      return { saved: true, size: new Blob([content]).size, relativePath };
+    },
     async listWorkspaceDirectory(_workspace?: string, _relativePath?: string): Promise<import("../../shared/protocol").WorkspaceDirectoryListing> {
       return { relativePath: "", entries: [{ name: "src", relativePath: "src", kind: "directory" }, { name: "README.md", relativePath: "README.md", kind: "file" }] };
     },

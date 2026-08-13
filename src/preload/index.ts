@@ -7,6 +7,7 @@ const api: DesktopApi = {
   chooseAttachments: (workspace?: string) => ipcRenderer.invoke("desktop:choose-attachments", workspace),
   choosePreviewFile: () => ipcRenderer.invoke("desktop:choose-preview-file"),
   readWorkspaceFile: (relativePath: string, workspace?: string) => ipcRenderer.invoke("desktop:read-workspace-file", relativePath, workspace),
+  writeWorkspaceFile: (relativePath: string, content: string, workspace?: string) => ipcRenderer.invoke("desktop:write-workspace-file", relativePath, content, workspace),
   listWorkspaceDirectory: (workspace: string, relativePath?: string) => ipcRenderer.invoke("desktop:list-workspace-directory", workspace, relativePath),
   browserPreview: (command: BrowserPreviewCommand) => ipcRenderer.invoke("browser-preview:command", command),
   send: (command: RuntimeCommand) => ipcRenderer.invoke("runtime:send", command),

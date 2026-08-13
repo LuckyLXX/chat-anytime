@@ -121,6 +121,8 @@ function scopeCssSelector(selector: string, scopeSelector: string): string {
 function serializeScopedCssRule(rule: CSSRule, scopeSelector: string): string {
   const styleRuleType = typeof CSSRule === "undefined" ? 1 : CSSRule.STYLE_RULE;
   const mediaRuleType = typeof CSSRule === "undefined" ? 4 : CSSRule.MEDIA_RULE;
+  const keyframesRuleType = typeof CSSRule === "undefined" ? 7 : CSSRule.KEYFRAMES_RULE;
+  const keyframeRuleType = typeof CSSRule === "undefined" ? 9 : CSSRule.KEYFRAME_RULE;
   const supportsRuleType = typeof CSSRule === "undefined" ? 12 : CSSRule.SUPPORTS_RULE;
   if (rule.type === styleRuleType) {
     const styleRule = rule as CSSStyleRule;
@@ -141,6 +143,24 @@ function serializeScopedCssRule(rule: CSSRule, scopeSelector: string): string {
     if (!nested) return "";
     const name = rule.type === mediaRuleType ? "media" : "supports";
     return `@${name} ${conditionText} {\n${nested}\n}`;
+  }
+  if (rule.type === keyframesRuleType) {
+    const keyframesRule = rule as CSSKeyframesRule;
+    const keyframesName = keyframesRule.name;
+    if (!keyframesName) return "";
+    const nested = Array.from(keyframesRule.cssRules)
+      .map((child) => {
+        if (child.type !== keyframeRuleType) return "";
+        const keyframeRule = child as CSSKeyframeRule;
+        const key = String(keyframeRule.keyText || "").trim();
+        if (!key) return "";
+        const declarations = sanitizeStyleDeclarations(keyframeRule.style.cssText);
+        return declarations ? `${key} { ${declarations} }` : "";
+      })
+      .filter(Boolean)
+      .join("\n");
+    if (!nested) return "";
+    return `@keyframes ${keyframesName} {\n${nested}\n}`;
   }
   return "";
 }

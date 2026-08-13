@@ -336,13 +336,17 @@ select option:checked { color: var(--on-accent); background-color: var(--accent)
 .reply-files-toggle { width: 7px; height: 7px; flex: 0 0 auto; border-right: 1px solid var(--text-muted); border-bottom: 1px solid var(--text-muted); transform: rotate(45deg) translate(-1px, 1px); transition: transform .15s ease; }
 .reply-files-panel[open] .reply-files-toggle { transform: rotate(225deg) translate(-1px, 1px); }
 .reply-files-list { display: grid; border-top: 1px solid var(--border); }
-.reply-files-list button { display: grid; grid-template-columns: 20px minmax(0, 1fr) 20px; align-items: center; gap: 7px; min-width: 0; min-height: 42px; padding: 5px 8px; text-align: left; border: 0; border-bottom: 1px solid var(--border); color: var(--text-muted); background: transparent; cursor: pointer; }
-.reply-files-list button:last-child { border-bottom: 0; }
-.reply-files-list button:hover { color: var(--accent-text); background: var(--surface-button-hover); }
-.reply-files-list button > span { display: grid; gap: 2px; min-width: 0; }
-.reply-files-list strong, .reply-files-list small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.reply-files-list strong { color: var(--text); font-size: 10px; }
-.reply-files-list small { color: var(--text-muted); font-size: 9px; }
+.reply-file-row { display: flex; align-items: center; gap: 6px; min-width: 0; min-height: 42px; padding: 5px 8px; border-bottom: 1px solid var(--border); }
+.reply-file-row:last-child { border-bottom: 0; }
+.reply-file-info { display: flex; align-items: center; gap: 7px; min-width: 0; flex: 1 1 0; color: var(--text-muted); }
+.reply-file-text { display: grid; gap: 2px; min-width: 0; }
+.reply-file-text strong { color: var(--text); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.reply-file-text small { color: var(--text-muted); font-size: 9px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.reply-file-actions { display: inline-flex; align-items: center; gap: 2px; flex: 0 0 auto; }
+.reply-file-action { display: inline-grid; place-items: center; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 5px; color: var(--text-muted); background: transparent; cursor: pointer; }
+.reply-file-action:hover { color: var(--accent-text); background: var(--surface-button-hover); }
+.reply-file-action:disabled { opacity: .35; cursor: default; }
+.reply-file-action:disabled:hover { color: var(--text-muted); background: transparent; }
 .inline-error { display: flex; gap: 7px; align-items: flex-start; margin: 10px 0 0; color: var(--danger); font-size: 12px; }
 
 .rich-content { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
@@ -665,6 +669,40 @@ select option:checked { color: var(--on-accent); background-color: var(--accent)
 .content-preview-body > iframe { display: block; width: 100%; height: 100%; border: 0; background: var(--preview-surface); }
 .preview-scroll { width: 100%; height: 100%; overflow: auto; }
 .preview-markdown { padding: 22px 24px 36px; background: var(--surface); }
+.preview-markdown-editor { width: 100%; height: 100%; background: var(--surface); }
+.markdown-editor { display: flex; flex-direction: column; width: 100%; height: 100%; min-height: 0; }
+.markdown-editor-host { flex: 1 1 0; min-height: 0; }
+.markdown-editor-conflict { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; padding: 6px 10px; background: var(--accent-soft); color: var(--accent-text); font-size: 11px; border-bottom: 1px solid var(--border); }
+.markdown-editor-conflict span { flex: 1 1 0; min-width: 0; }
+.markdown-editor-conflict-btn { padding: 3px 9px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface); color: var(--text); font-size: 11px; cursor: pointer; }
+.markdown-editor-conflict-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.markdown-editor-conflict-btn:hover { filter: brightness(1.05); }
+/* Vditor 即时渲染编辑器：覆盖 vditor 根的 CSS 变量，让内容区/工具栏跟随项目主题（亮/暗一致）。
+   注意：Vditor 会把 vditor 类加到挂载元素自身（initUI: element.classList.add("vditor")），
+   与 markdown-editor-host 是同一个 div，因此这里必须是同元素选择器；
+   写成后代选择器（.markdown-editor-host .vditor）会永远匹配不到，变量覆盖静默失效 → 白底浅字。 */
+.markdown-editor-host.vditor {
+  height: 100%;
+  border: 0;
+  background-color: var(--surface);
+  color: var(--text);
+  --panel-background-color: var(--surface);
+  --textarea-background-color: var(--surface);
+  --textarea-text-color: var(--text);
+  --toolbar-background-color: var(--surface-muted);
+  --toolbar-icon-color: var(--text-muted);
+  --toolbar-icon-hover-color: var(--accent);
+  --border-color: var(--border);
+  --second-color: var(--text-muted);
+  --heading-border-color: var(--border);
+  --blockquote-color: var(--text-muted);
+  --count-background-color: var(--surface-raised);
+}
+.markdown-editor-host .vditor-toolbar { background-color: var(--surface-muted); border-bottom: 1px solid var(--border); }
+.markdown-editor-host .vditor-content,
+.markdown-editor-host .vditor-ir,
+.markdown-editor-host .vditor-reset { background-color: var(--surface); color: var(--text); }
+.markdown-editor-host .vditor-toolbar__item .vditor-tooltipped { color: var(--text-muted); }
 .preview-code { background: var(--code-surface); }
 .preview-code .code-block { min-height: 100%; margin: 0; border: 0; border-radius: 0; box-shadow: none; }
 .preview-code .code-block pre { max-height: none; }

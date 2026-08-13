@@ -1,6 +1,10 @@
 import { Check, Code2, Copy, Expand, Eye, EyeOff, FileCode2, ExternalLink, Pause, Play, X } from "lucide-react";
 import { isValidElement, memo, useEffect, useId, useMemo, useRef, useState, type ReactNode, type SyntheticEvent } from "react";
+import { Fragment, jsx, jsxs } from "react/jsx-runtime";
 import ReactMarkdown, { defaultUrlTransform, type Components, type UrlTransform } from "react-markdown";
+import { fromHtml } from "hast-util-from-html";
+import { sanitize } from "hast-util-sanitize";
+import { toJsxRuntime } from "hast-util-to-jsx-runtime";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
@@ -422,14 +426,43 @@ function ArtifactCard({ artifact, onOpenArtifact }: { artifact: Artifact; onOpen
 
 const richSanitizeSchema: Schema = {
   ...defaultSchema,
-  tagNames: [...(defaultSchema.tagNames ?? []), "style", "script"],
+  tagNames: [
+    ...(defaultSchema.tagNames ?? []),
+    "style",
+    "script",
+    "svg",
+    "g",
+    "path",
+    "circle",
+    "ellipse",
+    "rect",
+    "line",
+    "polyline",
+    "polygon",
+    "defs",
+    "linearGradient",
+    "radialGradient",
+    "stop"
+  ],
   protocols: {
     ...defaultSchema.protocols,
     src: [...(defaultSchema.protocols?.src ?? []), "data", "file"]
   },
   attributes: {
     ...defaultSchema.attributes,
-    script: ["type"],
+    script: ["type", "data-script-source"],
+    svg: ["viewBox", "width", "height", "xmlns", "fill", "stroke", "strokeWidth", "transform", "preserveAspectRatio", "role", "ariaLabel"],
+    g: ["fill", "stroke", "strokeWidth", "transform", "opacity"],
+    path: ["d", "fill", "stroke", "strokeWidth", "strokeLinecap", "strokeLinejoin", "transform", "opacity"],
+    circle: ["cx", "cy", "r", "fill", "stroke", "strokeWidth", "transform", "opacity"],
+    ellipse: ["cx", "cy", "rx", "ry", "fill", "stroke", "strokeWidth", "transform", "opacity"],
+    rect: ["x", "y", "width", "height", "rx", "ry", "fill", "stroke", "strokeWidth", "transform", "opacity"],
+    line: ["x1", "y1", "x2", "y2", "fill", "stroke", "strokeWidth", "transform", "opacity"],
+    polyline: ["points", "fill", "stroke", "strokeWidth", "strokeLinecap", "strokeLinejoin", "transform", "opacity"],
+    polygon: ["points", "fill", "stroke", "strokeWidth", "strokeLinecap", "strokeLinejoin", "transform", "opacity"],
+    linearGradient: ["id", "x1", "y1", "x2", "y2", "gradientUnits", "gradientTransform", "spreadMethod"],
+    radialGradient: ["id", "cx", "cy", "r", "fx", "fy", "fr", "gradientUnits", "gradientTransform", "spreadMethod"],
+    stop: ["offset", "stopColor", "stopOpacity"],
     "*": [
       ...(defaultSchema.attributes?.["*"] ?? []),
       ["className", /^[a-zA-Z0-9_:/.[\]%-]{1,96}$/u],
@@ -621,20 +654,35 @@ function destroyBubbleRuntime(runtime: BubbleRuntime | undefined): void {
   runtime.listeners = [];
 }
 
+function renderAssistantHtml(content: string, components: Components, scopeSelector: string): ReactNode {
+  const tree = fromHtml(content, { fragment: true });
+  sanitizeRichHtmlTree({ allowStyleTags: true, allowBubbleScripts: true, scopeSelector })(tree);
+  const sanitizedTree = sanitize(tree, richSanitizeSchema);
+  return toJsxRuntime(sanitizedTree, {
+    Fragment,
+    jsx,
+    jsxs,
+    components,
+    ignoreInvalidStyle: true,
+    passKeys: true
+  }) as ReactNode;
+}
+
 const DynamicHtmlBubble = memo(function DynamicHtmlBubble({ content, closed, streaming, artifactPrefix, onOpenArtifact, onHtmlAction }: { content: string; closed: boolean; streaming: boolean; artifactPrefix: string; onOpenArtifact(artifact: Artifact): void; onHtmlAction?: (text: string) => void }): ReactNode {
   const scopeRef = useRef<HTMLDivElement | null>(null);
   const runtimeRef = useRef<BubbleRuntime | undefined>(undefined);
   const sourceKeyRef = useRef("");
   const scopeClass = htmlBubbleScopeClass(artifactPrefix);
   const artifactIndex = useRef(0);
-  const components = markdownComponents(artifactIndex, artifactPrefix, onOpenArtifact, false, true, onHtmlAction);
+  const components = useMemo(() => markdownComponents(artifactIndex, artifactPrefix, onOpenArtifact, false, true, onHtmlAction), [artifactPrefix, onHtmlAction, onOpenArtifact]);
   const scopeSelector = `.${scopeClass}`;
+  const renderedContent = useMemo(() => renderAssistantHtml(content, components, scopeSelector), [components, content, scopeSelector]);
 
   useEffect(() => {
     const scope = scopeRef.current;
     if (!scope || !closed || streaming) return;
     const scripts = Array.from(scope.querySelectorAll<HTMLScriptElement>('script[type="application/x-pidesktop-bubble-script"]'));
-    const sourceKey = scripts.map((script) => script.textContent ?? "").join("\n---\n");
+    const sourceKey = scripts.map((script) => script.dataset.scriptSource ?? "").join("\n---\n");
     if (!sourceKey || sourceKey === sourceKeyRef.current) return;
     destroyBubbleRuntime(runtimeRef.current);
     sourceKeyRef.current = sourceKey;
@@ -643,7 +691,7 @@ const DynamicHtmlBubble = memo(function DynamicHtmlBubble({ content, closed, str
     const scriptDocument = runtime.scopedDocument;
     const scriptWindow = runtime.scopedWindow;
     for (const script of scripts) {
-      const source = script.textContent ?? "";
+      const source = script.dataset.scriptSource ?? "";
       try {
         const execute = new Function("container", "document", "window", "requestAnimationFrame", "cancelAnimationFrame", "setTimeout", "clearTimeout", "setInterval", "clearInterval", `"use strict";\n${source}`);
         execute(scope, scriptDocument, scriptWindow, runtime.requestAnimationFrame, runtime.cancelAnimationFrame, runtime.setTimeout, runtime.clearTimeout, runtime.setInterval, runtime.clearInterval);
@@ -657,9 +705,7 @@ const DynamicHtmlBubble = memo(function DynamicHtmlBubble({ content, closed, str
 
   return (
     <div ref={scopeRef} className={`html-bubble ${scopeClass}`} data-html-bubble-runtime-key={sourceKeyRef.current || artifactPrefix}>
-      <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeRaw, [sanitizeRichHtmlTree, { allowStyleTags: true, allowBubbleScripts: true, scopeSelector }], [rehypeSanitize, richSanitizeSchema], rehypeKatex]} components={components} urlTransform={richUrlTransform}>
-        {content}
-      </ReactMarkdown>
+      {renderedContent}
     </div>
   );
 });

@@ -71,7 +71,7 @@ import type {
   RuntimeCommand
 } from "../../shared/protocol";
 import { thinkingLevelLabels, toolLabel } from "../../shared/locale";
-import { ArtifactPreview, type PreviewTab, type PreviewTarget } from "./components/ArtifactPreview";
+import { ArtifactPreview, type PreviewEditorState, type PreviewTab, type PreviewTarget } from "./components/ArtifactPreview";
 import { WorkspaceTree } from "./components/WorkspaceTree";
 import { ContextMenu, type ContextMenuItem } from "./components/ContextMenu";
 import { ExtensionResourceList } from "./components/ExtensionResourceList";
@@ -429,11 +429,13 @@ function ChangedFilesPanel({ files, onOpenFile, onOpenDiff }: { files: ReplyChan
           const name = relativePath.split("/").at(-1) ?? relativePath;
           const hasDiff = Boolean(execution.patch);
           return (
-            <button type="button" key={relativePath} title={hasDiff ? `查看 ${relativePath} 变更` : `预览 ${relativePath}`} onClick={() => (hasDiff ? onOpenDiff(execution) : onOpenFile(relativePath))}>
-              <File size={14} />
-              <span><strong>{name}</strong><small>{relativePath}</small></span>
-              <Eye size={14} />
-            </button>
+            <div className="reply-file-row" key={relativePath}>
+              <span className="reply-file-info"><File size={14} /><span className="reply-file-text"><strong>{name}</strong><small>{relativePath}</small></span></span>
+              <span className="reply-file-actions">
+                <button type="button" className="reply-file-action" title={`预览 ${relativePath}`} aria-label={`预览 ${name}`} onClick={() => onOpenFile(relativePath)}><Eye size={14} /></button>
+                <button type="button" className="reply-file-action" title={hasDiff ? `查看 ${relativePath} 变更` : "暂无变更记录"} aria-label={`查看 ${name} 变更`} disabled={!hasDiff} onClick={() => onOpenDiff(execution)}><FileDiff size={14} /></button>
+              </span>
+            </div>
           );
         })}
       </div>
@@ -1118,6 +1120,7 @@ export function App(): ReactNode {
   const [preview, setPreview] = useState<PreviewState>();
   const previewRef = useRef<PreviewState | undefined>(preview);
   previewRef.current = preview;
+  const [previewEditorStates, setPreviewEditorStates] = useState<Record<string, PreviewEditorState>>({});
   const [sidebarView, setSidebarView] = useState<"topics" | "files">("topics");
   const [browsingWorkspace, setBrowsingWorkspace] = useState("");
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: ContextMenuItem[] } | null>(null);
@@ -1150,6 +1153,7 @@ export function App(): ReactNode {
   const localTurnPending = localTiming !== undefined && (snapshot.turnTiming === undefined || snapshot.turnTiming.startedAt < localTiming.startedAt);
   const activeTurnTiming = localTurnPending ? localTiming : snapshot.turnTiming;
   const isGenerating = localTurnPending || Boolean(snapshot.busy && snapshot.turnTiming && snapshot.turnTiming.completedAt === undefined);
+  const activePreviewTab = preview?.tabs.find((tab) => tab.id === preview.activeTabId);
   const now = useElapsedNow(isGenerating);
   const hasAssistantMessage = displayMessages.some((message) => message.role === "assistant" && !message.control);
   const showTurnTimingOnLatest = Boolean(snapshot.turnTiming && (!snapshot.busy || displayMessages[latestAssistantMessageIndex]?.streaming));
@@ -1613,6 +1617,60 @@ export function App(): ReactNode {
     if (latestReviewExecution) openDiffPreview(latestReviewExecution);
   }, [latestReviewExecution, openDiffPreview]);
 
+  // —— Markdown 编辑器状态与 AI 变更智能合并 ——
+  const previewEditorStatesRef = useRef(previewEditorStates);
+  previewEditorStatesRef.current = previewEditorStates;
+  const editorSyncedExecutionsRef = useRef<Record<string, string>>({});
+  const defaultEditorState = (): PreviewEditorState => ({ editing: true, dirty: false, externalConflict: false });
+  function getEditorState(tabId: string): PreviewEditorState {
+    return previewEditorStates[tabId] ?? defaultEditorState();
+  }
+  function patchEditorState(tabId: string, patch: Partial<PreviewEditorState>): void {
+    setPreviewEditorStates((prev) => ({ ...prev, [tabId]: { ...(prev[tabId] ?? defaultEditorState()), ...patch } }));
+  }
+  async function reloadEditorFromDisk(tabId: string, relativePath: string): Promise<void> {
+    try {
+      const file = await window.piDesktop.readWorkspaceFile(relativePath, snapshot.workspace);
+      setPreviewEditorStates((prev) => {
+        const prior = prev[tabId] ?? defaultEditorState();
+        return { ...prev, [tabId]: { ...prior, remoteReload: { content: file.content ?? "", nonce: (prior.remoteReload?.nonce ?? 0) + 1 }, externalConflict: false, dirty: false } };
+      });
+    } catch {
+      /* 读取失败则保留当前编辑器内容 */
+    }
+  }
+  function handleEditorResolveConflict(tabId: string, choice: "keep-local" | "load-remote"): void {
+    const tab = previewRef.current?.tabs.find((t) => t.id === tabId);
+    const relativePath = tab?.target.type === "file" ? tab.target.file.relativePath : undefined;
+    const exec = relativePath
+      ? [...snapshot.executions].reverse().find((e) => e.status === "completed" && e.changedFile && e.changedFile.relativePath.toLowerCase() === relativePath.toLowerCase())
+      : undefined;
+    if (tab && exec) editorSyncedExecutionsRef.current[tab.id] = exec.id;
+    if (choice === "load-remote" && relativePath) {
+      void reloadEditorFromDisk(tabId, relativePath);
+    } else {
+      setPreviewEditorStates((prev) => ({ ...prev, [tabId]: { ...(prev[tabId] ?? defaultEditorState()), externalConflict: false } }));
+    }
+  }
+  // 当 edit/write 工具改动了正在编辑的 markdown 文件：本地无未保存改动→自动刷新；
+  // 有未保存改动→置冲突提示，等用户在编辑器内选择保留本地或加载 AI 版本。
+  useEffect(() => {
+    if (!preview) return;
+    for (const tab of preview.tabs) {
+      if (tab.target.type !== "file" || tab.target.file.kind !== "markdown") continue;
+      const relativePath = tab.target.file.relativePath.toLowerCase();
+      const exec = [...snapshot.executions].reverse().find((e) => e.status === "completed" && e.changedFile && e.changedFile.relativePath.toLowerCase() === relativePath);
+      if (!exec || editorSyncedExecutionsRef.current[tab.id] === exec.id) continue;
+      const state = previewEditorStatesRef.current[tab.id] ?? defaultEditorState();
+      if (state.dirty) {
+        if (!state.externalConflict) patchEditorState(tab.id, { externalConflict: true });
+      } else {
+        editorSyncedExecutionsRef.current[tab.id] = exec.id;
+        void reloadEditorFromDisk(tab.id, tab.target.file.relativePath);
+      }
+    }
+  }, [snapshot.executions, preview]);
+
   // Latest snapshot ref so regenerateMessage keeps a stable identity instead of
   // rebuilding on every streaming frame — rebuilding it would hand a new
   // onRegenerate to every MessageView and bust their memo during streaming.
@@ -1971,7 +2029,7 @@ export function App(): ReactNode {
           {(!preview && previewOpened) || (preview && !previewCollapsed && preview.tabs.length === 0) ? (
             <ArtifactPreview key="empty-state" tabs={[]} activeTabId="" onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddFile={() => void openManualFilePreview()} />
           ) : (
-            preview && !previewCollapsed && <ArtifactPreview key={preview.activeTabId} tabs={preview.tabs} activeTabId={preview.activeTabId} browserSuspended={previewDragging || settingsOpen || Boolean(permission) || Boolean(extensionUiDialog) || Boolean(messageActionError)} onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddFile={() => void openManualFilePreview()} onAddReview={openLatestReview} reviewAvailable={Boolean(latestReviewExecution)} />
+            preview && !previewCollapsed && <ArtifactPreview key={preview.activeTabId} tabs={preview.tabs} activeTabId={preview.activeTabId} browserSuspended={previewDragging || settingsOpen || Boolean(permission) || Boolean(extensionUiDialog) || Boolean(messageActionError)} onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddFile={() => void openManualFilePreview()} onAddReview={openLatestReview} reviewAvailable={Boolean(latestReviewExecution)} workspace={snapshot.workspace} activeEditorState={activePreviewTab?.target.type === "file" && activePreviewTab.target.file.kind === "markdown" ? getEditorState(activePreviewTab.id) : undefined} onActiveEditorChange={(patch) => { if (activePreviewTab) patchEditorState(activePreviewTab.id, patch); }} onActiveEditorResolveConflict={(choice) => { if (activePreviewTab) handleEditorResolveConflict(activePreviewTab.id, choice); }} onToggleEditing={() => { if (activePreviewTab) patchEditorState(activePreviewTab.id, { editing: !getEditorState(activePreviewTab.id).editing }); }} />
           )}
         </div>
       </main>

@@ -1,8 +1,9 @@
-import { AlertCircle, Code2, File, FileCode2, FileText, FileDiff, Globe2, LoaderCircle, MessageSquare, Pause, Play, Plus, Terminal, X } from "lucide-react";
+import { AlertCircle, Code2, Eye, File, FileCode2, FileDiff, FileText, Globe2, LoaderCircle, MessageSquare, Pause, Pencil, Play, Plus, Terminal, X } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode, type SyntheticEvent } from "react";
 import type { WorkspaceFilePreview } from "../../../shared/protocol";
 import { artifactSandbox, buildArtifactPreviewSource, DYNAMIC_PREVIEW_ACTIONS, isDynamicArtifact, type Artifact, type DynamicPreviewAction } from "../lib/content";
 import { DiffView } from "./DiffView";
+import { MarkdownEditor } from "./MarkdownEditor";
 import { CodeBlock, RichContent } from "./RichContent";
 import { BrowserPreview } from "./BrowserPreview";
 
@@ -17,6 +18,14 @@ export type PreviewTarget =
 export interface PreviewTab {
   id: string;
   target: PreviewTarget;
+}
+
+/** 预览面板中某个 markdown 文件 tab 的编辑器状态（由顶层持有，驱动编辑/预览与 AI 同步）。 */
+export interface PreviewEditorState {
+  editing: boolean;
+  dirty: boolean;
+  externalConflict: boolean;
+  remoteReload?: { content: string; nonce: number };
 }
 
 function fileArtifact(file: WorkspaceFilePreview): Artifact | undefined {
@@ -43,11 +52,27 @@ function targetIcon(target: PreviewTarget): ReactNode {
   return <FileCode2 size={15} />;
 }
 
-function FilePreviewContent({ file, onOpenArtifact }: { file: WorkspaceFilePreview; onOpenArtifact(artifact: Artifact): void }): ReactNode {
+function FilePreviewContent({ file, onOpenArtifact, workspace, editorState, onEditorChange, onResolveConflict }: { file: WorkspaceFilePreview; onOpenArtifact(artifact: Artifact): void; workspace?: string; editorState?: PreviewEditorState; onEditorChange?(patch: Partial<PreviewEditorState>): void; onResolveConflict?(choice: "keep-local" | "load-remote"): void }): ReactNode {
   if (file.kind === "image" && file.data && file.mimeType) {
     return <div className="preview-image"><img src={`data:${file.mimeType};base64,${file.data}`} alt={file.name} /></div>;
   }
   if (file.kind === "markdown" && file.content !== undefined) {
+    if (editorState?.editing && !file.truncated) {
+      return (
+        <div className="preview-markdown-editor">
+          <MarkdownEditor
+            key={file.relativePath}
+            relativePath={file.relativePath}
+            initialContent={file.content}
+            workspace={workspace}
+            externalConflict={editorState.externalConflict}
+            remoteReload={editorState.remoteReload}
+            onDirtyChange={(dirty) => onEditorChange?.({ dirty })}
+            onResolveConflict={onResolveConflict}
+          />
+        </div>
+      );
+    }
     return <div className="preview-scroll preview-markdown"><RichContent streaming={false} artifactPrefix={`preview-${file.relativePath}`} onOpenArtifact={onOpenArtifact}>{file.content}</RichContent></div>;
   }
   if (file.kind === "code" && file.content !== undefined) {
@@ -62,7 +87,7 @@ function FilePreviewContent({ file, onOpenArtifact }: { file: WorkspaceFilePrevi
   return <div className="preview-empty"><FileText size={28} /><strong>此文件无法预览</strong><span>{file.size.toLocaleString("zh-CN")} bytes</span></div>;
 }
 
-export function ArtifactPreview({ tabs, activeTabId, browserSuspended, onSelectTab, onCloseTab, onOpenArtifact, onAddBrowser, onAddFile, onAddReview, reviewAvailable }: { tabs: PreviewTab[]; activeTabId: string; browserSuspended?: boolean; onSelectTab(id: string): void; onCloseTab(id: string): void; onOpenArtifact(artifact: Artifact): void; onAddBrowser?(): void; onAddFile?(): void; onAddReview?(): void; reviewAvailable?: boolean }): ReactNode {
+export function ArtifactPreview({ tabs, activeTabId, browserSuspended, onSelectTab, onCloseTab, onOpenArtifact, onAddBrowser, onAddFile, onAddReview, reviewAvailable, workspace, activeEditorState, onActiveEditorChange, onActiveEditorResolveConflict, onToggleEditing }: { tabs: PreviewTab[]; activeTabId: string; browserSuspended?: boolean; onSelectTab(id: string): void; onCloseTab(id: string): void; onOpenArtifact(artifact: Artifact): void; onAddBrowser?(): void; onAddFile?(): void; onAddReview?(): void; reviewAvailable?: boolean; workspace?: string; activeEditorState?: PreviewEditorState; onActiveEditorChange?(patch: Partial<PreviewEditorState>): void; onActiveEditorResolveConflict?(choice: "keep-local" | "load-remote"): void; onToggleEditing?(): void }): ReactNode {
   const active = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0];
   if (!active) {
     return (
@@ -99,6 +124,8 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, onSelectT
   const target = active.target;
   const artifact = targetArtifact(target);
   const dynamic = Boolean(artifact && isDynamicArtifact(artifact));
+  const markdownEditable = !artifact && target.type === "file" && target.file.kind === "markdown" && target.file.content !== undefined && !target.file.truncated;
+  const editing = activeEditorState?.editing !== false;
   const [paused, setPaused] = useState(false);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const addMenuRef = useRef<HTMLDivElement>(null);
@@ -174,6 +201,7 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, onSelectT
           </div>}
         </div>
         <div className="preview-tab-actions">
+          {markdownEditable && <button className="icon-button" type="button" title={editing ? "切换到预览" : "切换到编辑"} aria-label={editing ? "预览" : "编辑"} onClick={() => onToggleEditing?.()}>{editing ? <Eye size={15} /> : <Pencil size={15} />}</button>}
           {dynamic && <button className="icon-button" type="button" aria-label={paused ? "继续动态预览" : "暂停动态预览"} title={paused ? "继续" : "暂停"} onClick={() => { postPreviewAction(paused ? DYNAMIC_PREVIEW_ACTIONS.resume : DYNAMIC_PREVIEW_ACTIONS.pause); setPaused((current) => !current); }}>{paused ? <Play size={15} /> : <Pause size={15} />}</button>}
           <button className="icon-button" type="button" title="关闭预览" aria-label="关闭预览" onClick={() => onCloseTab(activeTabId)}><X size={16} /></button>
         </div>
@@ -181,7 +209,7 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, onSelectT
       <div className="content-preview-body">
         {artifact && <iframe ref={frameRef} title={artifact.title} sandbox={artifactSandbox(artifact)} referrerPolicy="no-referrer" srcDoc={buildArtifactPreviewSource(artifact)} onLoad={handleLoad} />}
         {target.type === "browser" && <BrowserPreview suspended={browserSuspended} tabId={activeTabId} />}
-        {!artifact && target.type === "file" && <FilePreviewContent file={target.file} onOpenArtifact={onOpenArtifact} />}
+        {!artifact && target.type === "file" && <FilePreviewContent file={target.file} onOpenArtifact={onOpenArtifact} workspace={workspace} editorState={activeEditorState} onEditorChange={onActiveEditorChange} onResolveConflict={onActiveEditorResolveConflict} />}
         {target.type === "diff" && <div className="preview-scroll preview-diff"><DiffView patch={target.patch} /></div>}
         {target.type === "loading" && <div className="preview-empty"><LoaderCircle className="spinning" size={26} /><strong>正在读取文件</strong><span>{target.path}</span></div>}
         {target.type === "error" && <div className="preview-empty preview-error"><AlertCircle size={26} /><strong>无法打开预览</strong><span>{target.message}</span></div>}

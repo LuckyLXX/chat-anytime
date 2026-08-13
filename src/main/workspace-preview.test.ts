@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { changedWorkspaceFile, listWorkspaceDirectory, readWorkspaceFilePreview } from "./workspace-preview.js";
+import { changedWorkspaceFile, listWorkspaceDirectory, readWorkspaceFilePreview, writeWorkspaceFile } from "./workspace-preview.js";
 
 describe("workspace file preview", () => {
   it("classifies Markdown and common code without exposing absolute paths", async () => {
@@ -34,6 +34,30 @@ describe("workspace file preview", () => {
     expect(changedWorkspaceFile("C:/work/demo", "write", { file_path: "C:/work/demo/README.md" })).toEqual({ relativePath: "README.md" });
     expect(changedWorkspaceFile("C:/work/demo", "read", { path: "src/app.ts" })).toBeUndefined();
     expect(changedWorkspaceFile("C:/work/demo", "write", { path: "../outside.txt" })).toBeUndefined();
+  });
+
+  it("writes a new markdown file (creating parent dirs) and overwrites existing files inside the workspace", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "pidesktop-write-"));
+    await writeFile(join(workspace, "doc.md"), "old", "utf8");
+    const created = await writeWorkspaceFile(workspace, "notes/hello.md", "# Hello\n");
+    expect(created).toMatchObject({ saved: true, relativePath: "notes/hello.md" });
+    expect(created.size).toBe(Buffer.byteLength("# Hello\n", "utf8"));
+    await expect(readWorkspaceFilePreview(workspace, "notes/hello.md")).resolves.toMatchObject({ kind: "markdown", content: "# Hello\n" });
+    await writeWorkspaceFile(workspace, "doc.md", "new content");
+    await expect(readWorkspaceFilePreview(workspace, "doc.md")).resolves.toMatchObject({ content: "new content" });
+  });
+
+  it("rejects writes that traverse, use absolute paths, or target symlinks outside the workspace", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pidesktop-write-boundary-"));
+    const workspace = join(root, "workspace");
+    const outside = join(root, "outside.txt");
+    await mkdir(workspace);
+    await writeFile(outside, "private", "utf8");
+    await symlink(outside, join(workspace, "linked.md"), "file");
+
+    await expect(writeWorkspaceFile(workspace, "../outside.txt", "x")).rejects.toThrow("当前工作区");
+    await expect(writeWorkspaceFile(workspace, outside, "x")).rejects.toThrow("当前工作区");
+    await expect(writeWorkspaceFile(workspace, "linked.md", "x")).rejects.toThrow("当前工作区");
   });
 
   it("lists a workspace directory without leaking ignored folders, sorting dirs first", async () => {
