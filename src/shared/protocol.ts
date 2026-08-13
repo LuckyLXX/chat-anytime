@@ -252,82 +252,18 @@ export interface SessionSummary {
 
 export type ResourceScope = "global" | "project" | "package" | "bundled" | "temporary" | "unknown";
 
-export type ExtensionOrigin = "bundled" | "local" | "package" | "unknown";
-export type ExtensionTrust = "trusted" | "restricted" | "blocked" | "undecided";
-export type ExtensionExecutionMode = "native" | "restricted-host";
-export type ExtensionCompatibility = "full" | "partial" | "unsupported" | "unknown";
-
 export interface SkillSummary {
   id: string;
   name: string;
   description: string;
   source: string;
   scope: ResourceScope;
+  /** Absolute path to the SKILL.md file, so the agent can `read` it on invocation. */
+  filePath?: string;
   defaultEnabled: boolean;
   enabled: boolean;
   toggleable: boolean;
   disableModelInvocation: boolean;
-}
-
-export interface ExtensionSummary {
-  id: string;
-  name: string;
-  source: string;
-  scope: ResourceScope;
-  origin: ExtensionOrigin;
-  trust: ExtensionTrust;
-  executionMode: ExtensionExecutionMode;
-  enabled: boolean;
-  modelVisible: boolean;
-  compatibility: ExtensionCompatibility;
-  tools: string[];
-  commands: string[];
-  loaded: boolean;
-  approvalChanged?: boolean;
-  error?: string;
-}
-
-export interface PackageSummary {
-  source: string;
-  scope: "global" | "project" | "bundled";
-  installed: boolean;
-  removable: boolean;
-  updateAvailable?: boolean;
-}
-
-export interface PackageProgress {
-  type: "start" | "progress" | "complete" | "error";
-  action: "install" | "remove" | "update" | "clone" | "pull";
-  source: string;
-  message?: string;
-}
-
-export interface ExtensionCommandSummary {
-  name: string;
-  description?: string;
-  source: string;
-}
-
-export interface ExtensionWidgetState {
-  key: string;
-  lines: string[];
-  placement: "aboveEditor" | "belowEditor";
-}
-
-export interface ExtensionUiState {
-  statuses: Record<string, string>;
-  widgets: ExtensionWidgetState[];
-  title?: string;
-  workingMessage?: string;
-  workingVisible: boolean;
-  hiddenThinkingLabel?: string;
-  unsupported: string[];
-}
-
-export interface ExtensionComposerRequest {
-  id: string;
-  method: "setEditorText" | "pasteToEditor";
-  text: string;
 }
 
 export type McpServerStatus = "connected" | "cached" | "failed" | "needs-auth" | "not-connected" | "disabled";
@@ -339,6 +275,7 @@ export interface McpServerSummary {
   resourceCount?: number;
   failedAgoSeconds?: number;
   disabled: boolean;
+  error?: string;
 }
 
 export interface McpServerConfigDraft {
@@ -355,11 +292,45 @@ export interface McpServerConfigDraft {
 
 export interface ResourceCatalog {
   skills: SkillSummary[];
-  extensions: ExtensionSummary[];
-  packages: PackageSummary[];
   mcpServers: McpServerSummary[];
-  mcpAdapterLoaded: boolean;
+  todos: Todo[];
   diagnostics: string[];
+}
+
+/**
+ * Native (non-Pi-extension) capability types below. These back the self-built
+ * MCP / Skill / Subagent / Todo features and are layered in over the refactor
+ * phases. They intentionally avoid any Pi-extension trust/approval model.
+ */
+
+export type TodoStatus = "pending" | "in_progress" | "completed";
+
+export interface Todo {
+  id: string;
+  title: string;
+  status: TodoStatus;
+  notes?: string;
+  createdAt: number;
+  updatedAt: number;
+  completedAt?: number;
+}
+
+export type DelegationRole = "explore" | "research" | "implement" | "review" | "custom";
+export type DelegationStatus = "running" | "completed" | "failed" | "cancelled";
+
+export interface DelegationSummary {
+  id: string;
+  parentSessionId: string;
+  childSessionId: string;
+  role: DelegationRole;
+  status: DelegationStatus;
+  goal: string;
+  modelId?: string;
+  startedAt: number;
+  completedAt?: number;
+  /** Last assistant text emitted by the child session, if any. */
+  preview?: string;
+  error?: string;
 }
 
 export interface RuntimeSnapshot {
@@ -376,16 +347,13 @@ export interface RuntimeSnapshot {
   messages: ChatMessage[];
   executions: ToolExecution[];
   sessions: SessionSummary[];
-  extensionCommands: ExtensionCommandSummary[];
-  extensionUi: ExtensionUiState;
 }
 
 export interface ExecutionPrincipal {
-  kind: "root-agent" | "subagent" | "native-extension" | "restricted-extension";
+  kind: "root-agent" | "subagent";
   sessionId: string;
   parentSessionId?: string;
   agentId?: string;
-  extensionId?: string;
   toolCallId?: string;
 }
 
@@ -400,19 +368,6 @@ export interface PermissionRequest {
 
 export type PermissionDecision = "allow-once" | "allow-session" | "deny";
 
-export type ExtensionUiDialogRequest =
-  | { id: string; method: "select"; title: string; options: string[]; timeout?: number }
-  | { id: string; method: "confirm"; title: string; message: string; timeout?: number }
-  | { id: string; method: "input"; title: string; placeholder?: string; timeout?: number }
-  | { id: string; method: "editor"; title: string; prefill?: string };
-
-export interface ExtensionUiResponse {
-  id: string;
-  cancelled?: boolean;
-  value?: string;
-  confirmed?: boolean;
-}
-
 export type RuntimeCommand =
   | { type: "initialize"; settings: DesktopSettings; apiKeys: Record<string, string> }
   | { type: "workspace.open"; path: string }
@@ -426,8 +381,6 @@ export type RuntimeCommand =
   | { type: "session.regenerate"; text: string; timestamp?: number; skillName?: string; attachments?: PromptAttachment[] }
   | { type: "session.compact"; instructions?: string }
   | { type: "session.abort" }
-  | { type: "session.extension-command"; name: string; args?: string }
-  | { type: "composer.sync"; text: string }
   | { type: "agent.select"; agentId: string }
   | { type: "agent.save"; agent: AgentProfile }
   | { type: "agent.archive"; agentId: string; archived: boolean }
@@ -439,17 +392,14 @@ export type RuntimeCommand =
   | { type: "provider.delete"; providerId: string }
   | { type: "provider.models.fetch"; providerId: string; baseUrl: string; apiKey?: string }
   | { type: "appearance.save"; appearance: AppearanceSettings }
-  | { type: "resources.package.install"; source: string }
-  | { type: "resources.package.remove"; source: string; scope?: "global" | "project" }
-  | { type: "resources.package.check-updates" }
-  | { type: "resources.package.update"; source?: string }
-  | { type: "resources.extension.approve"; id: string }
-  | { type: "resources.extension.set-enabled"; id: string; enabled: boolean }
-  | { type: "resources.extension.revoke"; id: string }
-  | { type: "resources.reload" }
   | { type: "mcp.server.save"; server: McpServerConfigDraft }
   | { type: "mcp.server.toggle"; name: string; enabled: boolean }
-  | { type: "extension-ui.resolve"; response: ExtensionUiResponse }
+  | { type: "mcp.server.delete"; name: string; scope: "project" | "global" }
+  | { type: "skill.toggle"; id: string; enabled: boolean }
+  | { type: "todo.create"; title: string; notes?: string }
+  | { type: "todo.update"; id: string; title?: string; notes?: string; status?: TodoStatus }
+  | { type: "todo.delete"; id: string }
+  | { type: "resources.reload" }
   | { type: "permission.resolve"; id: string; decision: PermissionDecision };
 
 export type RuntimeMessage =
@@ -458,13 +408,9 @@ export type RuntimeMessage =
   | { type: "custom-model-error"; providerId: string; message: string }
   | { type: "state"; snapshot: RuntimeSnapshot }
   | { type: "resources"; resources: ResourceCatalog }
+  | { type: "todos"; todos: Todo[] }
   | { type: "permission"; request: PermissionRequest }
   | { type: "permission.dismiss"; id: string }
-  | { type: "extension-ui.request"; request: ExtensionUiDialogRequest }
-  | { type: "extension-ui.dismiss"; id: string }
-  | { type: "extension-ui.notify"; message: string; level: "info" | "warning" | "error" }
-  | { type: "extension-ui.composer"; request: ExtensionComposerRequest }
-  | { type: "package-progress"; progress: PackageProgress }
   | { type: "error"; message: string }
   | { type: "log"; level: "info" | "warn"; message: string };
 

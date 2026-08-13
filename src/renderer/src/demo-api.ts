@@ -143,9 +143,7 @@ flowchart LR
       completedAt: Date.now() - 10_800,
       output: "TypeScript 检查通过\nElectron 渲染进程构建成功"
     }
-  ],
-  extensionCommands: [],
-  extensionUi: { statuses: {}, widgets: [], workingVisible: true, unsupported: [] }
+  ]
 };
 
 const demoResources: ResourceCatalog = {
@@ -153,27 +151,11 @@ const demoResources: ResourceCatalog = {
     { id: "skill:code-review", name: "code-review", description: "审查代码变更并整理风险与建议。", source: "用户资源", scope: "global", defaultEnabled: true, enabled: true, toggleable: true, disableModelInvocation: false },
     { id: "skill:project-notes", name: "project-notes", description: "整理项目文档和工作记录。", source: "当前项目", scope: "project", defaultEnabled: true, enabled: true, toggleable: true, disableModelInvocation: false }
   ],
-  extensions: [{
-    id: "bundled:bundled:PiDesktop 内置:pi-mcp-adapter",
-    name: "pi-mcp-adapter",
-    source: "PiDesktop 内置",
-    scope: "bundled",
-    origin: "bundled",
-    trust: "trusted",
-    executionMode: "native",
-    enabled: true,
-    modelVisible: true,
-    compatibility: "full",
-    tools: ["mcp"],
-    commands: [],
-    loaded: true
-  }],
-  packages: [{ source: "pi-mcp-adapter", scope: "bundled", installed: true, removable: false }],
   mcpServers: [
     { name: "docs", status: "connected", toolCount: 8, resourceCount: 2, disabled: false },
     { name: "browser", status: "disabled", toolCount: 0, disabled: true }
   ],
-  mcpAdapterLoaded: true,
+  todos: [],
   diagnostics: []
 };
 
@@ -400,33 +382,6 @@ export function createDemoApi(): DesktopApi {
           break;
         case "resources.reload":
           emit({ type: "resources", resources: structuredClone(demoResources) });
-          break;
-        case "resources.package.install":
-          if (!demoResources.packages.some((item) => item.source === command.source)) demoResources.packages.push({ source: command.source, scope: "global", installed: true, removable: true });
-          emit({ type: "resources", resources: structuredClone(demoResources) });
-          break;
-        case "resources.package.remove":
-          demoResources.packages = demoResources.packages.filter((item) => item.source !== command.source || !item.removable);
-          emit({ type: "resources", resources: structuredClone(demoResources) });
-          break;
-        case "resources.package.check-updates":
-          emit({ type: "package-progress", progress: { type: "complete", action: "update", source: "全部 Package", message: "当前已是最新版本" } });
-          break;
-        case "resources.package.update":
-          emit({ type: "package-progress", progress: { type: "complete", action: "update", source: command.source ?? "全部 Package" } });
-          break;
-        case "resources.extension.set-enabled": {
-          const extension = demoResources.extensions.find((item) => item.id === command.id);
-          if (extension) { extension.enabled = command.enabled; extension.loaded = command.enabled; }
-          emit({ type: "resources", resources: structuredClone(demoResources) });
-          break;
-        }
-        case "resources.extension.revoke":
-          demoResources.extensions = demoResources.extensions.map((item) => item.id === command.id ? { ...item, trust: "undecided", enabled: false, loaded: false } : item);
-          emit({ type: "resources", resources: structuredClone(demoResources) });
-          break;
-        case "composer.sync":
-        case "session.extension-command":
           break;
         case "mcp.server.save": {
           const existing = demoResources.mcpServers.find((item) => item.name === command.server.name);

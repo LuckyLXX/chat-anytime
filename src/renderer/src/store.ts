@@ -2,16 +2,14 @@ import { create } from "zustand";
 import type {
   CustomProviderModel,
   DesktopSettings,
-  ExtensionComposerRequest,
-  ExtensionUiDialogRequest,
   ModelOption,
   PermissionRequest,
-  PackageProgress,
   ProviderOption,
   ProviderSettings,
   ResourceCatalog,
   RuntimeMessage,
-  RuntimeSnapshot
+  RuntimeSnapshot,
+  Todo
 } from "../../shared/protocol";
 
 interface DesktopState {
@@ -20,6 +18,7 @@ interface DesktopState {
   models: ModelOption[];
   providers: ProviderOption[];
   resources: ResourceCatalog;
+  todos: Todo[];
   settings: DesktopSettings;
   customProvider?: ProviderSettings;
   customProviderKeyConfigured: boolean;
@@ -27,15 +26,10 @@ interface DesktopState {
   customModelFetchStatus: "idle" | "loading" | "success" | "error";
   customModelFetchError?: string;
   permissions: PermissionRequest[];
-  extensionUiDialogs: ExtensionUiDialogRequest[];
-  extensionComposerRequests: ExtensionComposerRequest[];
-  extensionNotice?: { message: string; level: "info" | "warning" | "error" };
-  packageProgress?: PackageProgress;
   error?: string;
   initialize(): Promise<() => void>;
   handleRuntimeMessage(message: RuntimeMessage): void;
   clearError(): void;
-  clearExtensionNotice(): void;
 }
 
 const emptySnapshot: RuntimeSnapshot = {
@@ -46,12 +40,10 @@ const emptySnapshot: RuntimeSnapshot = {
   status: "正在启动 Pi 运行时",
   messages: [],
   executions: [],
-  sessions: [],
-  extensionCommands: [],
-  extensionUi: { statuses: {}, widgets: [], workingVisible: true, unsupported: [] }
+  sessions: []
 };
 const emptySettings: DesktopSettings = { version: 2, thinkingLevel: "medium", accessMode: "ask", providers: [], agents: [], currentAgentId: "default", appearance: { theme: "system", themePreset: "default", customCss: "", customThemes: [], themeOverrides: { light: {}, dark: {} }, showThinking: true } };
-const emptyResources: ResourceCatalog = { skills: [], extensions: [], packages: [], mcpServers: [], mcpAdapterLoaded: false, diagnostics: [] };
+const emptyResources: ResourceCatalog = { skills: [], mcpServers: [], todos: [], diagnostics: [] };
 
 export const useDesktopStore = create<DesktopState>((set, get) => ({
   ready: false,
@@ -59,9 +51,8 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   models: [],
   providers: [],
   resources: emptyResources,
+  todos: [],
   permissions: [],
-  extensionUiDialogs: [],
-  extensionComposerRequests: [],
   settings: emptySettings,
   customProviderKeyConfigured: false,
   customModels: [],
@@ -109,8 +100,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
               previous.turnTiming === incoming.turnTiming && previous.executions === incoming.executions &&
               previous.sessions === incoming.sessions && previous.model === incoming.model &&
               previous.sessionId === incoming.sessionId && previous.sessionFile === incoming.sessionFile &&
-              previous.thinkingLevel === incoming.thinkingLevel && previous.extensionCommands === incoming.extensionCommands &&
-              previous.extensionUi === incoming.extensionUi) {
+              previous.thinkingLevel === incoming.thinkingLevel) {
             // Nothing changed at all — keep the exact same snapshot reference
             // so downstream useMemo/useEffect dependency checks stay no-ops.
             return state;
@@ -120,6 +110,9 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
         break;
       case "resources":
         set({ resources: message.resources });
+        break;
+      case "todos":
+        set({ todos: message.todos });
         break;
       case "catalog":
         set({ models: message.models, providers: message.providers });
@@ -147,25 +140,6 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
       case "permission.dismiss":
         set((state) => ({ permissions: state.permissions.filter((request) => request.id !== message.id) }));
         break;
-      case "extension-ui.request":
-        set((state) => state.extensionUiDialogs.some((request) => request.id === message.request.id)
-          ? state
-          : { extensionUiDialogs: [...state.extensionUiDialogs, message.request] });
-        break;
-      case "extension-ui.dismiss":
-        set((state) => ({ extensionUiDialogs: state.extensionUiDialogs.filter((request) => request.id !== message.id) }));
-        break;
-      case "extension-ui.notify":
-        set({ extensionNotice: { message: message.message, level: message.level } });
-        break;
-      case "extension-ui.composer":
-        set((state) => state.extensionComposerRequests.some((request) => request.id === message.request.id)
-          ? state
-          : { extensionComposerRequests: [...state.extensionComposerRequests, message.request] });
-        break;
-      case "package-progress":
-        set({ packageProgress: message.progress });
-        break;
       case "error":
         set({ error: message.message });
         break;
@@ -176,8 +150,5 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   },
   clearError() {
     set({ error: undefined });
-  },
-  clearExtensionNotice() {
-    set({ extensionNotice: undefined });
   }
 }));

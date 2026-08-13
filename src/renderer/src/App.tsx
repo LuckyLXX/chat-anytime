@@ -74,9 +74,8 @@ import { thinkingLevelLabels, toolLabel } from "../../shared/locale";
 import { ArtifactPreview, type PreviewEditorState, type PreviewTab, type PreviewTarget } from "./components/ArtifactPreview";
 import { WorkspaceTree } from "./components/WorkspaceTree";
 import { ContextMenu, type ContextMenuItem } from "./components/ContextMenu";
-import { ExtensionResourceList } from "./components/ExtensionResourceList";
 import { RichContent } from "./components/RichContent";
-import { ExtensionUiDialog, PermissionDialog } from "./components/RuntimeDialogs";
+import { PermissionDialog } from "./components/RuntimeDialogs";
 import { compactPath, formatDuration, type Artifact } from "./lib/content";
 import { actionTimelineSegments, actionTimelineStats, formatProcessDuration, type ActionTimelineSegment } from "./lib/action-timeline";
 import { changedFilesForMessage, type ReplyChangedFile } from "./lib/changed-files";
@@ -132,7 +131,6 @@ type SlashCommandBase = {
 
 type SlashCommand = SlashCommandBase & (
   | { kind: "skill"; skillName: string }
-  | { kind: "extension"; commandName: string }
   | { kind: "command"; command: RuntimeCommand }
 );
 
@@ -626,20 +624,8 @@ interface ResourceSettingsProps {
 }
 
 function ResourceSettings({ resources }: ResourceSettingsProps): ReactNode {
-  const [packageSource, setPackageSource] = useState("");
   const [busy, setBusy] = useState(false);
   const [localError, setLocalError] = useState<string>();
-  const [mcpFormOpen, setMcpFormOpen] = useState(false);
-  const [mcpName, setMcpName] = useState("");
-  const [mcpScope, setMcpScope] = useState<McpServerConfigDraft["scope"]>("project");
-  const [mcpTransport, setMcpTransport] = useState<McpServerConfigDraft["transport"]>("stdio");
-  const [mcpCommand, setMcpCommand] = useState("npx");
-  const [mcpArgs, setMcpArgs] = useState("");
-  const [mcpUrl, setMcpUrl] = useState("");
-  const [mcpAuth, setMcpAuth] = useState<NonNullable<McpServerConfigDraft["auth"]>>("none");
-  const [mcpBearerTokenEnv, setMcpBearerTokenEnv] = useState("");
-  const [mcpEnv, setMcpEnv] = useState("");
-  const packageProgress = useDesktopStore((state) => state.packageProgress);
   const runtimeBusy = useDesktopStore((state) => state.snapshot.busy);
   const controlsBusy = busy || runtimeBusy;
 
@@ -657,84 +643,18 @@ function ResourceSettings({ resources }: ResourceSettingsProps): ReactNode {
     }
   }
 
-  async function installPackage(event: FormEvent): Promise<void> {
-    event.preventDefault();
-    const source = packageSource.trim();
-    if (!source) return;
-    if (await run({ type: "resources.package.install", source })) setPackageSource("");
-  }
-
-  async function addMcpServer(event: FormEvent): Promise<void> {
-    event.preventDefault();
-    try {
-      const server: McpServerConfigDraft = {
-        name: mcpName.trim(),
-        scope: mcpScope,
-        transport: mcpTransport,
-        ...(mcpTransport === "stdio"
-          ? {
-              command: mcpCommand.trim(),
-              args: mcpArgs.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean),
-              env: parseKeyValueLines(mcpEnv)
-            }
-          : {
-              url: mcpUrl.trim(),
-              auth: mcpAuth,
-              ...(mcpAuth === "bearer-env" ? { bearerTokenEnv: mcpBearerTokenEnv.trim() } : {})
-            })
-      };
-      const success = await run({ type: "mcp.server.save", server });
-      if (!success) return;
-      setMcpName("");
-      setMcpUrl("");
-      setMcpArgs("");
-      setMcpEnv("");
-      setMcpBearerTokenEnv("");
-      setMcpFormOpen(false);
-    } catch (error) {
-      setLocalError(error instanceof Error ? error.message : "MCP Server 配置无效");
-    }
-  }
-
   return (
     <div className="resource-settings">
-      <div className="resource-settings-header"><div><h3><Puzzle size={16} />技能与工具</h3><p>查看已发现的 Skill、MCP Server 和第三方扩展。</p></div><div className="resource-section-actions"><button className="secondary-button" type="button" disabled={controlsBusy} onClick={() => void run({ type: "resources.package.check-updates" })}><RefreshCw size={13} />检查更新</button><button className="secondary-button" type="button" disabled={controlsBusy} onClick={() => void run({ type: "resources.reload" })}><RefreshCw size={13} className={controlsBusy ? "spinning" : undefined} />重载资源</button></div></div>
-      {!resources.mcpAdapterLoaded && <div className="resource-notice"><PlugZap size={15} /><span>MCP 适配器尚未加载。请先重载资源，或安装 `pi-mcp-adapter` Package。</span></div>}
+      <div className="resource-settings-header"><div><h3><Puzzle size={16} />技能与工具</h3><p>MCP、Skill、Todo 与子代理能力正在重构中，将逐步上线。Pi 的第三方扩展接入已移除。</p></div><div className="resource-section-actions"><button className="secondary-button" type="button" disabled={controlsBusy} onClick={() => void run({ type: "resources.reload" })}><RefreshCw size={13} className={controlsBusy ? "spinning" : undefined} />重载资源</button></div></div>
       {localError && <p className="form-error resource-error">{localError}</p>}
-      {packageProgress && <div className={`resource-notice package-progress ${packageProgress.type}`}><PackageOpen size={15} /><span>{packageProgress.message || `${packageProgress.source}：${packageProgress.type === "complete" ? "操作完成" : packageProgress.type === "error" ? "操作失败" : "正在处理"}`}</span></div>}
       <section className="resource-section">
         <div className="resource-section-heading"><span><Puzzle size={14} />Skill</span><small>{resources.skills.length} 个已发现</small></div>
-        {resources.skills.length === 0 ? <p className="resource-empty">当前没有发现 Skill。安装一个 Pi Package 后重载资源，Package 中的 `SKILL.md` 会出现在这里。</p> : <div className="resource-list">{resources.skills.map((skill) => <div className="resource-item" key={skill.id}><div className="resource-item-icon"><Puzzle size={14} /></div><div className="resource-item-copy"><strong>/skill:{skill.name}</strong><small>{skill.description}</small><em>{resourceScopeLabels[skill.scope]} · {skill.source}{skill.disableModelInvocation ? " · 仅手动调用" : ""}</em></div></div>)}</div>}
+        {resources.skills.length === 0 ? <p className="resource-empty">当前没有发现 Skill。自研 Skill 管理即将上线。</p> : <div className="resource-list">{resources.skills.map((skill) => <div className="resource-item" key={skill.id}><div className="resource-item-icon"><Puzzle size={14} /></div><div className="resource-item-copy"><strong>/skill:{skill.name}</strong><small>{skill.description}</small><em>{resourceScopeLabels[skill.scope]} · {skill.source}{skill.disableModelInvocation ? " · 仅手动调用" : ""}</em></div></div>)}</div>}
       </section>
       <section className="resource-section">
-        <div className="resource-section-heading"><span><Server size={14} />MCP Server</span><div className="resource-section-actions"><small>{resources.mcpServers.length} 个已发现</small><button className="secondary-button compact-button" type="button" disabled={controlsBusy} onClick={() => setMcpFormOpen((open) => !open)}><Plus size={13} />{mcpFormOpen ? "收起" : "添加"}</button></div></div>
-        {mcpFormOpen && <form className="mcp-config-form" onSubmit={(event) => void addMcpServer(event)}>
-          <div className="mcp-form-grid">
-            <label>名称<input value={mcpName} placeholder="例如 context7" onChange={(event) => setMcpName(event.target.value)} /></label>
-            <label>写入范围<select value={mcpScope} onChange={(event) => setMcpScope(event.target.value as McpServerConfigDraft["scope"])}><option value="project">当前项目 .mcp.json</option><option value="global">用户全局 Pi 配置</option></select></label>
-            <label>连接方式<select value={mcpTransport} onChange={(event) => setMcpTransport(event.target.value as McpServerConfigDraft["transport"])}><option value="stdio">本地命令（stdio）</option><option value="http">远程地址（HTTP）</option></select></label>
-            {mcpTransport === "stdio" ? <>
-              <label>启动命令<input value={mcpCommand} placeholder="npx" onChange={(event) => setMcpCommand(event.target.value)} /></label>
-              <label className="mcp-form-wide">参数（每行一个）<textarea value={mcpArgs} rows={3} placeholder={"-y\ncontext7-mcp"} onChange={(event) => setMcpArgs(event.target.value)} /></label>
-              <label className="mcp-form-wide">环境变量（可选，每行 `KEY=VALUE`）<textarea value={mcpEnv} rows={2} placeholder="API_KEY=$env:CONTEXT7_API_KEY" onChange={(event) => setMcpEnv(event.target.value)} /></label>
-            </> : <>
-              <label className="mcp-form-wide">服务器地址<input value={mcpUrl} placeholder="https://mcp.example.com/mcp" onChange={(event) => setMcpUrl(event.target.value)} /></label>
-              <label>认证<select value={mcpAuth} onChange={(event) => setMcpAuth(event.target.value as NonNullable<McpServerConfigDraft["auth"]>)}><option value="none">无</option><option value="oauth">OAuth</option><option value="bearer-env">Bearer 环境变量</option></select></label>
-              {mcpAuth === "bearer-env" && <label>Token 环境变量<input value={mcpBearerTokenEnv} placeholder="MCP_TOKEN" onChange={(event) => setMcpBearerTokenEnv(event.target.value)} /></label>}
-            </>}
-          </div>
-          <p className="resource-form-help">添加后会写入 Pi 标准 MCP 配置并自动重载。stdio 服务通常由 `npx` 在首次使用时启动；敏感值建议使用 `$env:变量名`，不要直接写入配置。</p>
-          <footer className="mcp-form-actions"><button className="secondary-button" type="button" disabled={controlsBusy} onClick={() => setMcpFormOpen(false)}><X size={13} />取消</button><button className="primary-button" type="submit" disabled={controlsBusy}><Plus size={13} />添加 MCP</button></footer>
-        </form>}
-        {resources.mcpServers.length === 0 ? <p className="resource-empty">未发现 MCP Server。点击“添加”，或将已有配置放入 `.mcp.json`。</p> : <div className="resource-list">{resources.mcpServers.map((server) => <div className="resource-item mcp-resource-item" key={server.name}><div className={`resource-item-icon mcp-status-icon ${server.status}`}><Server size={14} /></div><div className="resource-item-copy"><strong>{server.name}</strong><small>{mcpStatusLabels[server.status]} · {server.toolCount} 个工具{server.resourceCount === undefined ? "" : ` · ${server.resourceCount} 个资源`}</small>{server.failedAgoSeconds !== undefined && <em>{server.failedAgoSeconds} 秒前失败</em>}</div><label className="resource-toggle"><input type="checkbox" checked={!server.disabled} disabled={controlsBusy} onChange={(event) => void run({ type: "mcp.server.toggle", name: server.name, enabled: event.target.checked })} /><span>启用</span></label></div>)}</div>}
+        <div className="resource-section-heading"><span><Server size={14} />MCP Server</span><small>{resources.mcpServers.length} 个已连接</small></div>
+        {resources.mcpServers.length === 0 ? <p className="resource-empty">未发现 MCP Server。自研 MCP 管理即将上线。</p> : <div className="resource-list">{resources.mcpServers.map((server) => <div className="resource-item mcp-resource-item" key={server.name}><div className={`resource-item-icon mcp-status-icon ${server.status}`}><Server size={14} /></div><div className="resource-item-copy"><strong>{server.name}</strong><small>{mcpStatusLabels[server.status]} · {server.toolCount} 个工具{server.resourceCount === undefined ? "" : ` · ${server.resourceCount} 个资源`}</small>{server.failedAgoSeconds !== undefined && <em>{server.failedAgoSeconds} 秒前失败</em>}</div></div>)}</div>}
       </section>
-      <section className="resource-section">
-        <div className="resource-section-heading"><span><PackageOpen size={14} />安装 Skill / 扩展包</span><small>支持 npm 和 Git</small></div>
-        <p className="resource-form-help resource-package-help">安装后，Skill 会自动出现；扩展工具需要在下方单独启用。</p>
-        <form className="resource-package-form" onSubmit={(event) => void installPackage(event)}><input value={packageSource} placeholder="npm:package-name 或 git:..." onChange={(event) => setPackageSource(event.target.value)} /><button className="primary-button" type="submit" disabled={controlsBusy || !packageSource.trim()}><PackageOpen size={13} />安装</button></form>
-        <div className="resource-list resource-package-list">{resources.packages.map((item) => <div className="resource-item" key={`${item.scope}:${item.source}`}><div className="resource-item-icon"><PackageOpen size={14} /></div><div className="resource-item-copy"><strong>{item.source}</strong><small>{resourceScopeLabels[item.scope]} · {item.installed ? "已安装" : "未安装"}{item.updateAvailable ? " · 有可用更新" : ""}</small></div>{item.updateAvailable && <button className="secondary-button compact-button" type="button" disabled={controlsBusy} onClick={() => void run({ type: "resources.package.update", source: item.source })}><RefreshCw size={13} />更新</button>}{item.removable && <button className="icon-button resource-remove" type="button" title={`删除 ${item.source}`} aria-label={`删除 ${item.source}`} disabled={controlsBusy} onClick={() => void run({ type: "resources.package.remove", source: item.source, scope: item.scope === "project" ? "project" : "global" })}><Trash2 size={14} /></button>}</div>)}</div>
-      </section>
-      <ExtensionResourceList extensions={resources.extensions} scopeLabels={resourceScopeLabels} busy={controlsBusy} onApprove={(id) => void run({ type: "resources.extension.approve", id })} onSetEnabled={(id, enabled) => void run({ type: "resources.extension.set-enabled", id, enabled })} onRevoke={(id) => void run({ type: "resources.extension.revoke", id })} />
       {resources.diagnostics.length > 0 && <div className="resource-diagnostics"><strong>资源诊断</strong>{resources.diagnostics.map((diagnostic) => <p key={diagnostic}>{diagnostic}</p>)}</div>}
     </div>
   );
@@ -1099,9 +1019,8 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
 }
 
 export function App(): ReactNode {
-  const { ready, snapshot, models, providers, resources, customProvider, customProviderKeyConfigured, customModels, customModelFetchStatus, customModelFetchError, permissions, extensionUiDialogs, extensionComposerRequests, extensionNotice, error, initialize, clearError, clearExtensionNotice } = useDesktopStore();
+  const { ready, snapshot, models, providers, resources, customProvider, customProviderKeyConfigured, customModels, customModelFetchStatus, customModelFetchError, permissions, error, initialize, clearError } = useDesktopStore();
   const permission = permissions[0];
-  const extensionUiDialog = extensionUiDialogs[0];
   const settings = useDesktopStore((state) => state.settings);
   const themeAssetUrls = useThemeAssetUrls(themeAssetsForAppearance(settings.appearance));
   const [input, setInput] = useState("");
@@ -1157,16 +1076,8 @@ export function App(): ReactNode {
   const now = useElapsedNow(isGenerating);
   const hasAssistantMessage = displayMessages.some((message) => message.role === "assistant" && !message.control);
   const showTurnTimingOnLatest = Boolean(snapshot.turnTiming && (!snapshot.busy || displayMessages[latestAssistantMessageIndex]?.streaming));
-  const typedExtensionCommand = useMemo(() => {
-    const match = input.trim().match(/^\/([^\s]+)(?:\s+([\s\S]*))?$/u);
-    return match && snapshot.extensionCommands.some((command) => command.name === match[1]) ? { name: match[1]!, args: match[2]?.trim() } : undefined;
-  }, [input, snapshot.extensionCommands]);
-  const canSubmit = Boolean(snapshot.workspace && (input.trim() || attachments.length > 0 || selectedSkill) && (snapshot.model || typedExtensionCommand));
-  const extensionStatusEntries = Object.entries(snapshot.extensionUi.statuses);
-  const extensionWidgetsAbove = snapshot.extensionUi.widgets.filter((widget) => widget.placement === "aboveEditor");
-  const extensionWidgetsBelow = snapshot.extensionUi.widgets.filter((widget) => widget.placement === "belowEditor");
-  const hasExtensionWidgets = snapshot.extensionUi.widgets.length > 0;
-  const workingLabel = snapshot.extensionUi.workingMessage?.trim() || `${snapshot.agentName}正在努力输出中……`;
+  const canSubmit = Boolean(snapshot.workspace && (input.trim() || attachments.length > 0 || selectedSkill) && snapshot.model);
+  const workingLabel = `${snapshot.agentName}正在努力输出中……`;
   let composerPlaceholder = "请先打开一个项目";
   if (snapshot.workspace) composerPlaceholder = selectedSkill ? "输入任务要求" : "让 Pi 检查、修改或运行这个项目";
 
@@ -1183,15 +1094,8 @@ export function App(): ReactNode {
       kind: "skill",
       skillName: skill.name
     }));
-    const extensions: SlashCommand[] = snapshot.extensionCommands.map((command) => ({
-      trigger: `/${command.name}`,
-      label: `/${command.name}`,
-      description: command.description || `来自 ${command.source}`,
-      kind: "extension",
-      commandName: command.name
-    }));
-    return [...fixed, ...extensions, ...skills];
-  }, [resources.skills, snapshot.extensionCommands]);
+    return [...fixed, ...skills];
+  }, [resources.skills]);
 
   // 仅当输入以 / 开头且光标仍处于首个 token（无空格）时才过滤指令
   const slashToken = useMemo(() => {
@@ -1233,27 +1137,8 @@ export function App(): ReactNode {
   }, [initialize]);
 
   useEffect(() => {
-    // Debounce composer.sync: typing fires one IPC round-trip per keystroke
-    // otherwise, contending with streaming on the main thread. 150ms keeps it
-    // responsive for live slash-command matching in the runtime.
-    const timer = window.setTimeout(() => {
-      void window.piDesktop.send({ type: "composer.sync", text: input });
-    }, 150);
-    return () => window.clearTimeout(timer);
-  }, [input]);
-
-  useEffect(() => {
-    if (extensionComposerRequests.length === 0) return;
-    const pending = extensionComposerRequests.filter((request) => !processedComposerRequestsRef.current.has(request.id));
-    pending.forEach((request) => processedComposerRequestsRef.current.add(request.id));
-    if (pending.length > 0) setInput((current) => pending.reduce((value, request) => request.method === "setEditorText" ? request.text : value + request.text, current));
-    useDesktopStore.setState({ extensionComposerRequests: [] });
-    if (pending.length > 0) window.setTimeout(() => textareaRef.current?.focus(), 0);
-  }, [extensionComposerRequests]);
-
-  useEffect(() => {
-    document.title = snapshot.extensionUi.title?.trim() || "ChatAnyTime";
-  }, [snapshot.extensionUi.title]);
+    document.title = "ChatAnyTime";
+  }, []);
 
   useEffect(() => {
     if (!ready) return;
@@ -1400,24 +1285,13 @@ export function App(): ReactNode {
     event.preventDefault();
     const text = input.trim();
     const isNewSessionCommand = !selectedSkill && text === "/new";
-    if ((!text && attachments.length === 0 && !selectedSkill) || (snapshot.busy && !isNewSessionCommand && !typedExtensionCommand)) return;
+    if ((!text && attachments.length === 0 && !selectedSkill) || (snapshot.busy && !isNewSessionCommand)) return;
     // 客户端执行的固定指令：不透传给 Pi（会话层会当噪声），直接发协议命令
     if (!selectedSkill && text === "/new") {
       try {
         await createNewSession();
       } catch (error) {
         setMessageActionError(error instanceof Error ? error.message : "新建话题失败");
-      }
-      return;
-    }
-    if (!selectedSkill && typedExtensionCommand) {
-      try {
-        await window.piDesktop.send({ type: "session.extension-command", name: typedExtensionCommand.name, args: typedExtensionCommand.args });
-        setInput("");
-        setAttachments([]);
-        setEditingMessageTimestamp(undefined);
-      } catch (error) {
-        setMessageActionError(error instanceof Error ? error.message : "扩展命令执行失败");
       }
       return;
     }
@@ -1760,14 +1634,6 @@ export function App(): ReactNode {
       setTimeout(() => textareaRef.current?.focus(), 0);
       return;
     }
-    if (command.kind === "extension") {
-      setSelectedSkill(undefined);
-      setInput(`/${command.commandName} `);
-      setAttachments([]);
-      setSlashIndex(0);
-      setTimeout(() => textareaRef.current?.focus(), 0);
-      return;
-    }
     if (snapshot.busy && command.command.type !== "session.new") return;
     setSelectedSkill(undefined);
     setInput("");
@@ -1944,12 +1810,12 @@ export function App(): ReactNode {
                 {displayMessages.map((message, index) => {
                   const timing = showTurnTimingOnLatest && index === latestAssistantMessageIndex && message.role === "assistant" ? snapshot.turnTiming : undefined;
                   const turnActive = snapshot.busy && index === latestAssistantMessageIndex && message.role === "assistant";
-                  return <MessageView key={message.uuid ?? message.id} message={message} executions={snapshot.executions} onOpenArtifact={openArtifactPreview} onOpenFile={openFilePreview} onOpenDiff={openDiffPreview} onHtmlAction={handleHtmlAction} onCopy={copyMessage} onEdit={editMessage} onRegenerate={regenerateMessage} onShare={shareMessage} showThinking={settings.appearance.showThinking} hiddenThinkingLabel={snapshot.extensionUi.hiddenThinkingLabel} busy={snapshot.busy} turnActive={turnActive} timing={timing} now={timing ? now : undefined} />;
+                  return <MessageView key={message.uuid ?? message.id} message={message} executions={snapshot.executions} onOpenArtifact={openArtifactPreview} onOpenFile={openFilePreview} onOpenDiff={openDiffPreview} onHtmlAction={handleHtmlAction} onCopy={copyMessage} onEdit={editMessage} onRegenerate={regenerateMessage} onShare={shareMessage} showThinking={settings.appearance.showThinking} busy={snapshot.busy} turnActive={turnActive} timing={timing} now={timing ? now : undefined} />;
                 })}
-                {isGenerating && snapshot.extensionUi.workingVisible && (hasAssistantMessage ? <div className="response-progress response-progress-inline"><LoaderCircle size={14} className="spinning" /><span>{workingLabel}</span>{activeTurnTiming && <TimingMeta timing={activeTurnTiming} now={now} />}</div> : <PendingResponse label={workingLabel} timing={activeTurnTiming} now={now} />)}
+                {isGenerating && (hasAssistantMessage ? <div className="response-progress response-progress-inline"><LoaderCircle size={14} className="spinning" /><span>{workingLabel}</span>{activeTurnTiming && <TimingMeta timing={activeTurnTiming} now={now} />}</div> : <PendingResponse label={workingLabel} timing={activeTurnTiming} now={now} />)}
               </>}
             </div>
-            <form ref={composerRef} className={`composer${hasExtensionWidgets ? " has-extension-widgets" : ""}`} onSubmit={submit} onDragOver={(event) => event.preventDefault()} onDrop={handleDrop}>
+            <form ref={composerRef} className="composer" onSubmit={submit} onDragOver={(event) => event.preventDefault()} onDrop={handleDrop}>
               {attachments.length > 0 && <div className="attachment-list">{attachments.map((attachment, index) => <span className="attachment-chip" key={`${attachment.name}-${index}`}>{attachment.kind === "image" ? <img src={`data:${attachment.mimeType};base64,${attachment.data}`} alt="" /> : <FileDiff size={12} />}<span>{attachment.name}</span><button type="button" title="移除附件" aria-label={`移除 ${attachment.name}`} onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={12} /></button></span>)}</div>}
               {attachmentError && <div className="attachment-error" role="alert">{attachmentError}<button type="button" title="关闭提示" aria-label="关闭附件提示" onClick={() => setAttachmentError(undefined)}><X size={12} /></button></div>}
               <input ref={fileInputRef} type="file" hidden multiple accept="image/png,image/jpeg,image/webp,image/gif,.txt,.md,.json,.js,.ts,.tsx,.jsx,.py,.go,.rs,.java,.css,.html" onChange={(event) => { void addLocalFiles(event.target.files ?? []); event.currentTarget.value = ""; }} />
@@ -1966,13 +1832,13 @@ export function App(): ReactNode {
                       onMouseEnter={() => setSlashIndex(index)}
                       onClick={() => applySlashCommand(cmd)}
                     >
-                      <span className="slash-menu-icon">{cmd.kind === "extension" ? <PlugZap size={14} /> : cmd.trigger.startsWith("/skill:") ? <Puzzle size={14} /> : cmd.trigger === "/compact" ? <Layers size={14} /> : <MessageSquarePlus size={14} />}</span>
+                      <span className="slash-menu-icon">{cmd.trigger.startsWith("/skill:") ? <Puzzle size={14} /> : cmd.trigger === "/compact" ? <Layers size={14} /> : <MessageSquarePlus size={14} />}</span>
                       <span className="slash-menu-copy"><strong>{cmd.label}</strong><small>{cmd.description}</small></span>
                     </button>
                   ))}
                 </div>
               )}
-              {extensionWidgetsAbove.length > 0 && <div className="extension-widget-list extension-widget-above">{extensionWidgetsAbove.map((widget) => <div className="extension-widget" key={widget.key}>{widget.lines.map((line, index) => <span key={`${widget.key}-${index}`}>{line}</span>)}</div>)}</div>}
+
               <div className="composer-input-row">
                 {selectedSkill && <span className="composer-skill-chip"><Puzzle size={13} /><strong>{selectedSkill}</strong><button type="button" title="取消 Skill" aria-label={`取消 Skill ${selectedSkill}`} onClick={() => setSelectedSkill(undefined)}><X size={12} /></button></span>}
                 <textarea
@@ -1995,7 +1861,6 @@ export function App(): ReactNode {
                       {accessModeOptions.map((option) => <button className={`access-mode-menu-item${option.value === settings.accessMode ? " active" : ""}${option.value === "full" ? " full" : ""}`} type="button" role="menuitemradio" aria-checked={option.value === settings.accessMode} key={option.value} onClick={() => void selectAccessMode(option.value)}>{option.value === "full" ? <ShieldAlert size={15} /> : <ShieldCheck size={15} />}<span><strong>{option.label}</strong><small>{accessModeDescriptions[option.value]}</small></span>{option.value === settings.accessMode && <Check size={14} />}</button>)}
                     </div>}
                   </div>
-                  {extensionStatusEntries.length > 0 && <div className="extension-status-list">{extensionStatusEntries.map(([key, text]) => <span title={key} key={key}><PlugZap size={11} />{text}</span>)}</div>}
                 </div>
                 <div className="composer-footer-right">
                   <div className="composer-control-menu">
@@ -2015,7 +1880,6 @@ export function App(): ReactNode {
                   )}
                 </div>
               </div>
-              {extensionWidgetsBelow.length > 0 && <div className="extension-widget-list extension-widget-below">{extensionWidgetsBelow.map((widget) => <div className="extension-widget" key={widget.key}>{widget.lines.map((line, index) => <span key={`${widget.key}-${index}`}>{line}</span>)}</div>)}</div>}
             </form>
           </section>
 
@@ -2029,14 +1893,13 @@ export function App(): ReactNode {
           {(!preview && previewOpened) || (preview && !previewCollapsed && preview.tabs.length === 0) ? (
             <ArtifactPreview key="empty-state" tabs={[]} activeTabId="" onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddFile={() => void openManualFilePreview()} />
           ) : (
-            preview && !previewCollapsed && <ArtifactPreview key={preview.activeTabId} tabs={preview.tabs} activeTabId={preview.activeTabId} browserSuspended={previewDragging || settingsOpen || Boolean(permission) || Boolean(extensionUiDialog) || Boolean(messageActionError)} onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddFile={() => void openManualFilePreview()} onAddReview={openLatestReview} reviewAvailable={Boolean(latestReviewExecution)} workspace={snapshot.workspace} activeEditorState={activePreviewTab?.target.type === "file" && activePreviewTab.target.file.kind === "markdown" ? getEditorState(activePreviewTab.id) : undefined} onActiveEditorChange={(patch) => { if (activePreviewTab) patchEditorState(activePreviewTab.id, patch); }} onActiveEditorResolveConflict={(choice) => { if (activePreviewTab) handleEditorResolveConflict(activePreviewTab.id, choice); }} onToggleEditing={() => { if (activePreviewTab) patchEditorState(activePreviewTab.id, { editing: !getEditorState(activePreviewTab.id).editing }); }} />
+            preview && !previewCollapsed && <ArtifactPreview key={preview.activeTabId} tabs={preview.tabs} activeTabId={preview.activeTabId} browserSuspended={previewDragging || settingsOpen || Boolean(permission) || Boolean(messageActionError)} onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddFile={() => void openManualFilePreview()} onAddReview={openLatestReview} reviewAvailable={Boolean(latestReviewExecution)} workspace={snapshot.workspace} activeEditorState={activePreviewTab?.target.type === "file" && activePreviewTab.target.file.kind === "markdown" ? getEditorState(activePreviewTab.id) : undefined} onActiveEditorChange={(patch) => { if (activePreviewTab) patchEditorState(activePreviewTab.id, patch); }} onActiveEditorResolveConflict={(choice) => { if (activePreviewTab) handleEditorResolveConflict(activePreviewTab.id, choice); }} onToggleEditing={() => { if (activePreviewTab) patchEditorState(activePreviewTab.id, { editing: !getEditorState(activePreviewTab.id).editing }); }} />
           )}
         </div>
       </main>
 
       {settingsOpen && <SettingsDialog settings={settings} models={models} providers={providers} customProvider={customProvider} customProviderKeyConfigured={customProviderKeyConfigured} customModels={customModels} customModelFetchStatus={customModelFetchStatus} customModelFetchError={customModelFetchError} resources={resources} onClose={() => setSettingsOpen(false)} />}
       {permission && <PermissionDialog request={permission} />}
-      {!permission && extensionUiDialog && <ExtensionUiDialog key={extensionUiDialog.id} request={extensionUiDialog} />}
       {contextMenu && <ContextMenu x={contextMenu.x} y={contextMenu.y} items={contextMenu.items} onClose={() => setContextMenu(null)} />}
       {renameSession && (
         <div className="modal-backdrop permission-backdrop" onClick={() => setRenameSession(null)}>
@@ -2058,7 +1921,6 @@ export function App(): ReactNode {
         </div>
       )}
       {error && <div className="error-toast"><AlertCircle size={18} /><span>{error}</span><button className="icon-button" type="button" title="关闭提示" aria-label="关闭提示" onClick={clearError}><X size={16} /></button></div>}
-      {extensionNotice && <div className={`error-toast extension-notice ${extensionNotice.level}`}><PlugZap size={18} /><span>{extensionNotice.message}</span><button className="icon-button" type="button" title="关闭扩展提示" aria-label="关闭扩展提示" onClick={clearExtensionNotice}><X size={16} /></button></div>}
       {messageActionError && <div className="error-toast"><AlertCircle size={18} /><span>{messageActionError}</span><button className="icon-button" type="button" title="关闭提示" aria-label="关闭提示" onClick={() => setMessageActionError(undefined)}><X size={16} /></button></div>}
     </div>
   );

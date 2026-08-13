@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import type { PermissionRequest } from "../../shared/protocol.js";
+import type { PermissionRequest, Todo } from "../../shared/protocol.js";
 import { useDesktopStore } from "./store.js";
 
 function permission(id: string, sessionId: string): PermissionRequest {
@@ -15,7 +15,7 @@ function permission(id: string, sessionId: string): PermissionRequest {
 
 describe("desktop permission queue", () => {
   beforeEach(() => {
-    useDesktopStore.setState({ permissions: [], extensionUiDialogs: [], extensionComposerRequests: [], extensionNotice: undefined, packageProgress: undefined });
+    useDesktopStore.setState({ permissions: [], todos: [] });
   });
 
   it("keeps concurrent permission requests in arrival order", () => {
@@ -46,24 +46,18 @@ describe("desktop permission queue", () => {
     expect(useDesktopStore.getState().permissions).toEqual([]);
   });
 
-  it("queues and dismisses extension UI dialogs", () => {
+  it("publishes the native todo list over the todos channel", () => {
     const state = useDesktopStore.getState();
-    const request = { id: "dialog-1", method: "confirm" as const, title: "确认", message: "继续吗？" };
-    state.handleRuntimeMessage({ type: "extension-ui.request", request });
-    expect(useDesktopStore.getState().extensionUiDialogs).toEqual([request]);
+    const todos: Todo[] = [
+      { id: "todo-1", title: "审阅变更", status: "in_progress", createdAt: 1, updatedAt: 2 },
+      { id: "todo-2", title: "提交", status: "pending", createdAt: 3, updatedAt: 3 }
+    ];
+    state.handleRuntimeMessage({ type: "todos", todos });
 
-    state.handleRuntimeMessage({ type: "extension-ui.dismiss", id: request.id });
-    expect(useDesktopStore.getState().extensionUiDialogs).toEqual([]);
-  });
+    expect(useDesktopStore.getState().todos).toEqual(todos);
 
-  it("queues composer mutations and exposes package progress", () => {
-    const state = useDesktopStore.getState();
-    const request = { id: "composer-1", method: "setEditorText" as const, text: "prefill" };
-    state.handleRuntimeMessage({ type: "extension-ui.composer", request });
-    state.handleRuntimeMessage({ type: "extension-ui.composer", request });
-    state.handleRuntimeMessage({ type: "package-progress", progress: { type: "progress", action: "update", source: "npm:test", message: "updating" } });
-
-    expect(useDesktopStore.getState().extensionComposerRequests).toEqual([request]);
-    expect(useDesktopStore.getState().packageProgress).toMatchObject({ action: "update", message: "updating" });
+    state.handleRuntimeMessage({ type: "todos", todos: [{ ...todos[0]!, status: "completed", completedAt: 5 }] });
+    expect(useDesktopStore.getState().todos).toHaveLength(1);
+    expect(useDesktopStore.getState().todos[0]?.status).toBe("completed");
   });
 });

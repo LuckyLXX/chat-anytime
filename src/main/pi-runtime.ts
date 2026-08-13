@@ -1,11 +1,9 @@
 import { readdir, realpath, stat, unlink } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
-import { basename, dirname, isAbsolute, join, relative as relativePath, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative as relativePath, resolve, sep } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, UserMessage, ImageContent } from "@earendil-works/pi-ai";
 import {
   createAgentSession,
-  DefaultPackageManager,
   DefaultResourceLoader,
   getAgentDir,
   ModelRuntime,
@@ -20,8 +18,6 @@ import type {
   AgentProfile,
   ChatMessage,
   DesktopSettings,
-  ExtensionCommandSummary,
-  McpServerConfigDraft,
   McpServerSummary,
   MessageBlock,
   ModelOption,
@@ -35,7 +31,9 @@ import type {
   RuntimeMessage,
   RuntimeSnapshot,
   SessionSummary,
+  SkillSummary,
   ThinkingLevel,
+  Todo,
   ToolExecution,
   TurnTiming
 } from "../shared/protocol.js";
@@ -44,19 +42,13 @@ import { workspaceRelativeAttachment } from "./attachments.js";
 import { runManualCompaction } from "./compaction-lifecycle.js";
 import { customProviderModelDefinition, inferCustomModelImageInput } from "./custom-provider.js";
 import { buildDivModePrompt } from "./div-prompt.js";
-import { DesktopExtensionUiBridge } from "./extension-ui-bridge.js";
-import { upsertMcpServerConfig, type McpServerConfigEntry } from "./mcp-config.js";
 import { PermissionBroker } from "./permission-broker.js";
-import { configurePiCliShim, PiCliHostBroker, resolvePiCliShimPath } from "./pi-cli-compat.js";
-import { runPiCliSession } from "./pi-cli-session.js";
 import { toolRisk } from "./permissions.js";
 import { buildResourceCatalog } from "./resource-catalog.js";
-import { discoverExtensionCandidates, ExtensionPolicy } from "./extension-policy.js";
 import { agentWorkspaceSessionDir } from "./session-scope.js";
 import { isDesktopConfiguredProvider } from "./model-catalog.js";
 import { mergeProviderModels } from "./settings.js";
 import { buildSkillPrompt, parseSkillPrompt, type SkillPromptDisplay } from "./skill-prompt.js";
-import { applyAgentSkillOverrides, enabledSkillResourcePaths, type AgentSkillResource } from "./skill-resources.js";
 import {
   PI_DESKTOP_CONTROL_ENTRY_TYPE,
   restoreControlMessages,
@@ -88,18 +80,15 @@ let currentAgent: AgentProfile | undefined;
 const customProviderId = "chatanytime-openai-compatible";
 const imageMimeTypes = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 const builtinToolNames = new Set(["read", "bash", "edit", "write", "grep", "find", "ls"]);
-const mcpStatusEvent = "pi-mcp-adapter/status/v1";
 let resourceLoader: DefaultResourceLoader | undefined;
-let packageManager: DefaultPackageManager | undefined;
-let resolvedSkillResources: AgentSkillResource[] = [];
-let extensionPolicy: ExtensionPolicy | undefined;
-let mcpStatusUnsubscribe: (() => void) | undefined;
+// Native capability sources (populated by the self-built MCP client / Skill
+// discovery / Todo store in later phases). Kept here so emitResourceCatalog
+// always has a stable aggregate to publish.
+let nativeSkills: SkillSummary[] = [];
 let mcpServers: McpServerSummary[] = [];
-let mcpAdapterLoaded = false;
+let todos: Todo[] = [];
+let resourceDiagnostics: string[] = [];
 let resourceOperationBusy = false;
-let extensionCommands: ExtensionCommandSummary[] = [];
-let availablePackageUpdates: Array<{ source: string }> = [];
-const runtimeScriptPath = process.argv[1];
 let sessionGeneration = 0;
 
 // Streaming coalescer: high-frequency partial frames (message_update token
@@ -125,10 +114,6 @@ function cloneProtocolValue(value: unknown): unknown {
   } catch {
     return undefined;
   }
-}
-
-function packageProgressSource(source: string): string {
-  return /^(?:npm:|git:|https?:|ssh:)/u.test(source) ? source : `本地 Pi Package（${basename(source)}）`;
 }
 
 function flushState(): void {
@@ -168,108 +153,13 @@ const permissionBroker = new PermissionBroker(
   (request) => post({ type: "permission", request }),
   (id) => post({ type: "permission.dismiss", id })
 );
-const piCliHostBroker = new PiCliHostBroker(
-  () => ({
-    agentDir: getAgentDir(),
-    model: selectedModel,
-    thinkingLevel,
-    accessMode,
-    parentSessionId: session?.sessionId,
-    providers: settings?.providers ?? [],
-    apiKeys: { ...apiKeys }
-  }),
-  (request) => permissionBroker.request(request),
-  (request, emit, signal, reportError) => {
-    if (!modelRuntime || !workspace) throw new Error("Pi CLI 兼容宿主尚未完成会话初始化");
-    return runPiCliSession({
-      modelRuntime,
-      agentDir: getAgentDir(),
-      workspace,
-      model: selectedModel,
-      thinkingLevel,
-      accessMode,
-      parentSessionId: session?.sessionId,
-      requestPermission: (permission) => permissionBroker.request(permission),
-      resetPermissions: (sessionId) => permissionBroker.reset(sessionId)
-    }, request, emit, signal, reportError);
-  }
-);
-const extensionUiBridge = new DesktopExtensionUiBridge({
-  request: (request) => post({ type: "extension-ui.request", request }),
-  dismiss: (id) => post({ type: "extension-ui.dismiss", id }),
-  notify: (message, level) => post({ type: "extension-ui.notify", message, level }),
-  stateChanged: () => emitState(),
-  composer: (request) => post({ type: "extension-ui.composer", request })
-});
-
-function mcpConfigPath(scope: McpServerConfigDraft["scope"]): string {
-  if (!workspace) throw new Error("请先打开工作区，再添加 MCP Server");
-  return scope === "project" ? resolve(workspace, ".mcp.json") : join(getAgentDir(), "mcp.json");
-}
-
-function mcpConfigEntry(server: McpServerConfigDraft): McpServerConfigEntry {
-  if (server.transport === "stdio") {
-    const command = server.command?.trim();
-    if (!command) throw new Error("stdio MCP Server 需要填写启动命令");
-    return {
-      command,
-      ...(server.args && server.args.length > 0 ? { args: server.args } : {}),
-      ...(server.env && Object.keys(server.env).length > 0 ? { env: server.env } : {})
-    };
-  }
-  const url = server.url?.trim();
-  if (!url || !/^https?:\/\//iu.test(url)) throw new Error("HTTP MCP Server 需要填写 http:// 或 https:// 地址");
-  if (server.auth === "bearer-env" && !server.bearerTokenEnv?.trim()) throw new Error("Bearer 认证需要填写环境变量名");
-  return {
-    url,
-    ...(server.auth === "oauth" ? { auth: "oauth" as const } : {}),
-    ...(server.auth === "bearer-env" ? { bearerTokenEnv: server.bearerTokenEnv!.trim() } : {})
-  };
-}
-
-function bundledMcpAdapterPath(): string {
-  return fileURLToPath(import.meta.resolve("pi-mcp-adapter"));
-}
-
-function isMcpStatusSnapshot(value: unknown): value is {
-  servers: Array<{ name: string; status: McpServerSummary["status"]; toolCount: number; resourceCount?: number; failedAgoSeconds?: number; disabled: boolean }>;
-} {
-  if (!value || typeof value !== "object") return false;
-  const servers = (value as { servers?: unknown }).servers;
-  return Array.isArray(servers) && servers.every((server) => {
-    if (!server || typeof server !== "object") return false;
-    const item = server as Record<string, unknown>;
-    return typeof item.name === "string" && typeof item.status === "string" && typeof item.toolCount === "number" && typeof item.disabled === "boolean";
-  });
-}
-
-function createMcpStatusExtension(): InlineExtension {
-  return {
-    name: "chat-anytime-mcp-status",
-    hidden: true,
-    factory(pi) {
-      mcpStatusUnsubscribe?.();
-      mcpStatusUnsubscribe = pi.events.on(mcpStatusEvent, (value) => {
-        if (!isMcpStatusSnapshot(value)) return;
-        mcpAdapterLoaded = true;
-        mcpServers = value.servers.map((server) => ({
-          name: server.name,
-          status: server.status,
-          toolCount: server.toolCount,
-          ...(server.resourceCount === undefined ? {} : { resourceCount: server.resourceCount }),
-          ...(server.failedAgoSeconds === undefined ? {} : { failedAgoSeconds: server.failedAgoSeconds }),
-          disabled: server.disabled
-        }));
-        emitResourceCatalog();
-      });
-    }
-  };
-}
 
 function emitResourceCatalog(): void {
-  const result = buildResourceCatalog({ resourceLoader, packageManager, mcpServers, mcpAdapterLoaded, extensionCandidates: extensionPolicy?.candidateSummaries(), trustedExtensionIds: extensionPolicy?.approvedIds(), skillResources: resolvedSkillResources, workspace, agentDir: getAgentDir(), availablePackageUpdates: availablePackageUpdates.map((update) => update.source) });
-  mcpAdapterLoaded = result.mcpAdapterLoaded;
-  post({ type: "resources", resources: result.resources });
+  post({ type: "resources", resources: buildResourceCatalog({ skills: nativeSkills, mcpServers, todos, diagnostics: resourceDiagnostics }) });
+}
+
+function emitTodos(): void {
+  post({ type: "todos", todos });
 }
 
 function errorText(error: unknown): string {
@@ -391,9 +281,7 @@ function snapshot(): RuntimeSnapshot {
     turnTiming,
     messages,
     executions: [...executions.values()],
-    sessions: currentSessions,
-    extensionCommands,
-    extensionUi: extensionUiBridge.snapshot()
+    sessions: currentSessions
   };
 }
 
@@ -729,36 +617,18 @@ async function createSession(sessionManager?: SessionManager): Promise<void> {
     hasPendingFlush = false;
   }
   unsubscribeSession?.();
-  mcpStatusUnsubscribe?.();
-  mcpStatusUnsubscribe = undefined;
   permissionBroker.reset();
-  extensionCommands = [];
-  extensionUiBridge.reset();
   session?.dispose();
   session = undefined;
-  mcpServers = [];
-  mcpAdapterLoaded = false;
   executions = new Map();
   controlMessages = [];
   turnTiming = undefined;
 
   const settingsManager = SettingsManager.create(workspace, getAgentDir());
-  const brokerReady = piCliHostBroker.start();
-  packageManager = new DefaultPackageManager({ cwd: workspace, agentDir: getAgentDir(), settingsManager });
-  packageManager.setProgressCallback((progress) => post({ type: "package-progress", progress: { ...progress, source: packageProgressSource(progress.source) } }));
-  availablePackageUpdates = [];
-  const bundledAdapterPath = bundledMcpAdapterPath();
-  // Resolve packages in parallel with the CLI broker handshake: resolve hits
-  // npm/git/disk while the broker only opens a local socket.
-  const resolvedResourcesPromise = packageManager.resolve();
-  await brokerReady;
-  configurePiCliShim(resolvePiCliShimPath(runtimeScriptPath, import.meta.url), piCliHostBroker);
-  const resolvedResources = await resolvedResourcesPromise;
-  resolvedSkillResources = applyAgentSkillOverrides(resolvedResources.skills, currentAgent?.skillOverrides);
-  extensionPolicy ??= new ExtensionPolicy(getAgentDir());
-  extensionPolicy.setCandidates(discoverExtensionCandidates(resolvedResources.extensions, bundledAdapterPath));
-  await extensionPolicy.refreshFingerprints();
-  const approvedExtensionPaths = extensionPolicy.approvedPaths();
+  // Pi's own discovery is fully disabled: no extensions, no skills, no themes,
+  // no ambient context files. The app injects its own system prompt, skills,
+  // AGENTS.md instructions, MCP/subagent/todo tools explicitly (built in later
+  // phases). Only the app-owned permission hook remains as an inline extension.
   resourceLoader = new DefaultResourceLoader({
     cwd: workspace,
     agentDir: getAgentDir(),
@@ -766,13 +636,13 @@ async function createSession(sessionManager?: SessionManager): Promise<void> {
     noExtensions: true,
     noSkills: true,
     noThemes: true,
-    additionalExtensionPaths: [bundledAdapterPath, ...approvedExtensionPaths],
-    additionalSkillPaths: enabledSkillResourcePaths(resolvedSkillResources),
-    extensionFactories: [createPermissionExtension(), createMcpStatusExtension()],
+    noContextFiles: true,
+    extensionFactories: [createPermissionExtension()],
     systemPromptOverride: (base) => [base, currentAgent?.systemPrompt, currentAgent?.divMode ? buildDivModePrompt() : undefined].filter(Boolean).join("\n\n")
   });
   await resourceLoader.reload();
   emitResourceCatalog();
+  emitTodos();
 
   const activeSessionManager = sessionManager ?? SessionManager.continueRecent(workspace, workspaceSessionDir());
   const hasExistingMessages = activeSessionManager.buildSessionContext().messages.length > 0;
@@ -801,23 +671,15 @@ async function createSession(sessionManager?: SessionManager): Promise<void> {
   }
   session = result.session;
   controlMessages = restoreControlMessages(activeSessionManager.getBranch() as unknown as PersistedSessionEntry[]);
+  // Activate the app-owned inline extension(s) only. The permission hook lives
+  // in createPermissionExtension() and gates risky tool calls; no third-party
+  // extension code is ever loaded.
   await session.bindExtensions({
-    mode: "rpc",
-    uiContext: extensionUiBridge.context,
     onError: (error) => {
-      post({ type: "log", level: "warn", message: `Pi 扩展错误：${error.error}` });
-      post({ type: "extension-ui.notify", message: `扩展运行失败：${error.error}`, level: "error" });
+      post({ type: "log", level: "warn", message: `权限拦截扩展错误：${error.error}` });
     }
   });
-  extensionCommands = session.extensionRunner.getRegisteredCommands().map((command) => ({
-    name: command.invocationName,
-    description: command.description,
-    source: /^(?:npm:|git:|https?:|ssh:)/u.test(command.sourceInfo.source)
-      ? command.sourceInfo.source
-      : command.sourceInfo.scope === "project" ? "当前项目" : command.sourceInfo.scope === "user" ? "用户资源" : "临时资源"
-  }));
-  const extensionTools = session.getAllTools().map((tool) => tool.name).filter((name) => !builtinToolNames.has(name));
-  session.setActiveToolsByName([...enabledBuiltinTools, ...extensionTools]);
+  session.setActiveToolsByName(enabledBuiltinTools);
   executions = new Map(restoreToolExecutions(session.state.messages as unknown as PersistedSessionMessage[], workspace).map((execution) => [execution.id, execution]));
   selectedModel = session.model ? { provider: session.model.provider, id: session.model.id } : requested;
   thinkingLevel = session.thinkingLevel;
@@ -825,11 +687,10 @@ async function createSession(sessionManager?: SessionManager): Promise<void> {
   status = sessionReadyStatus(Boolean(session.model), Boolean(result.modelFallbackMessage));
   busy = false;
   await sessionsPromise;
-  // Note: emitResourceCatalog() is intentionally NOT re-called here. Since
-  // reload() at the top of createSession, none of buildResourceCatalog's inputs
-  // (resourceLoader, packageManager, extensionPolicy, skillResources) have
-  // changed, so this would only resend identical data. MCP adapter status is
-  // refreshed separately by the mcpStatusEvent subscriber as adapters load.
+  // Note: emitResourceCatalog()/emitTodos() are intentionally NOT re-called
+  // here. They were already published right after resourceLoader.reload() at
+  // the top of createSession, and none of the native capability sources change
+  // between then and now.
   emitState();
 }
 
@@ -841,8 +702,6 @@ async function initialize(command: Extract<RuntimeCommand, { type: "initialize" 
   thinkingLevel = settings.thinkingLevel ?? "medium";
   accessMode = settings.accessMode ?? "ask";
   selectedModel = settings.model;
-  extensionPolicy = new ExtensionPolicy(getAgentDir());
-  await extensionPolicy.load();
   modelRuntime = await ModelRuntime.create();
   const initializedProviderIds = new Set<string>();
   for (const provider of settings.providers) {
@@ -862,13 +721,14 @@ async function initialize(command: Extract<RuntimeCommand, { type: "initialize" 
   if (workspace) await createSession();
   else {
     emitResourceCatalog();
+    emitTodos();
     emitState();
   }
 }
 
 async function runResourceOperation(label: string, operation: () => Promise<void>): Promise<void> {
-  if (!session || !packageManager) throw new Error("请先打开工作区，再管理 Skill 或 MCP");
-  if (busy || resourceOperationBusy) throw new Error("当前会话正在运行，请等待完成后再管理 Skill 或 MCP");
+  if (!session) throw new Error("请先打开工作区，再管理能力");
+  if (busy || resourceOperationBusy) throw new Error("当前会话正在运行，请等待完成后再管理能力");
   resourceOperationBusy = true;
   busy = true;
   status = label;
@@ -887,9 +747,9 @@ async function runResourceOperation(label: string, operation: () => Promise<void
 
 async function reloadRuntimeResources(): Promise<void> {
   if (!session) throw new Error("请先打开工作区，再重载资源");
-  // Pi's in-place reload publishes the MCP adapter shutdown snapshot but does
-  // not reliably rebuild the adapter state. Recreate the runtime while keeping
-  // the current session manager so the updated global/project config is read.
+  // customTools are fixed at AgentSession creation, so the only reliable way to
+  // pick up changed MCP/Skill/Todo tooling is to recreate the session while
+  // keeping the same SessionManager (the JSONL history is preserved).
   await createSession(session.sessionManager);
 }
 
@@ -1051,20 +911,8 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       });
       break;
     case "session.abort":
-      extensionUiBridge.cancelPendingDialogs();
       session?.abortCompaction();
       void session?.abort();
-      break;
-    case "session.extension-command": {
-      if (!session) throw new Error("请先打开工作区，再运行扩展命令");
-      const name = command.name.replace(/^\/+/u, "");
-      if (!extensionCommands.some((item) => item.name === name)) throw new Error(`扩展命令不存在：/${name}`);
-      await session.prompt(`/${name}${command.args?.trim() ? ` ${command.args.trim()}` : ""}`);
-      emitState();
-      break;
-    }
-    case "composer.sync":
-      extensionUiBridge.syncEditorText(command.text);
       break;
     case "session.compact":
       if (!session) throw new Error("请先打开工作区，再压缩上下文");
@@ -1213,83 +1061,11 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       break;
     case "appearance.save":
       break;
-    case "resources.package.install": {
-      const source = command.source.trim();
-      if (!source) throw new Error("请输入 Pi Package 来源");
-      await runResourceOperation("正在安装 Pi Package", async () => {
-        await packageManager!.installAndPersist(source);
-        await reloadRuntimeResources();
-      });
-      break;
-    }
-    case "resources.package.remove": {
-      const source = command.source.trim();
-      if (!source) throw new Error("缺少要删除的 Pi Package");
-      await runResourceOperation("正在删除 Pi Package", async () => {
-        await packageManager!.removeAndPersist(source, { local: command.scope === "project" });
-        await reloadRuntimeResources();
-      });
-      break;
-    }
-    case "resources.package.check-updates": {
-      if (!packageManager) throw new Error("请先打开工作区，再检查 Pi Package 更新");
-      await runResourceOperation("正在检查 Pi Package 更新", async () => {
-        post({ type: "package-progress", progress: { type: "start", action: "update", source: "全部 Pi Package", message: "正在检查可用更新" } });
-        availablePackageUpdates = await packageManager!.checkForAvailableUpdates();
-        post({ type: "package-progress", progress: { type: "complete", action: "update", source: "全部 Pi Package", message: availablePackageUpdates.length ? `发现 ${availablePackageUpdates.length} 个可用更新` : "当前已是最新版本" } });
-      });
-      break;
-    }
-    case "resources.package.update": {
-      await runResourceOperation("正在更新 Pi Package", async () => {
-        await packageManager!.update(command.source?.trim() || undefined);
-        availablePackageUpdates = availablePackageUpdates.filter((update) => command.source ? update.source !== command.source : false);
-        await reloadRuntimeResources();
-      });
-      break;
-    }
     case "resources.reload":
-      await runResourceOperation("正在重载 Skill 和 MCP", reloadRuntimeResources);
+      await runResourceOperation("正在重载能力资源", reloadRuntimeResources);
       break;
-    case "mcp.server.save": {
-      const server = command.server;
-      const name = server.name.trim();
-      if (!/^[A-Za-z0-9._-]+$/u.test(name)) throw new Error("MCP Server 名称只能包含字母、数字、点、下划线和短横线");
-      await runResourceOperation("正在添加 MCP Server", async () => {
-        upsertMcpServerConfig(mcpConfigPath(server.scope), name, mcpConfigEntry({ ...server, name }));
-        await reloadRuntimeResources();
-      });
-      break;
-    }
-    case "mcp.server.toggle": {
-      if (!/^[A-Za-z0-9._-]+$/u.test(command.name)) throw new Error("MCP Server 名称无效");
-      await runResourceOperation(command.enabled ? "正在启用 MCP Server" : "正在停用 MCP Server", async () => {
-        await session!.prompt(`/mcp ${command.enabled ? "enable" : "disable"} ${command.name}`);
-        await reloadRuntimeResources();
-      });
-      break;
-    }
     case "permission.resolve": {
       permissionBroker.resolve(command.id, command.decision);
-      break;
-    }
-    case "resources.extension.approve": {
-      if (!extensionPolicy || !(await extensionPolicy.approve(command.id))) throw new Error("找不到待批准的扩展");
-      await runResourceOperation("正在加载扩展", reloadRuntimeResources);
-      break;
-    }
-    case "resources.extension.set-enabled": {
-      if (!extensionPolicy || !(await extensionPolicy.setEnabled(command.id, command.enabled))) throw new Error("扩展授权已失效，请重新批准");
-      await runResourceOperation(command.enabled ? "正在启用扩展" : "正在停用扩展", reloadRuntimeResources);
-      break;
-    }
-    case "resources.extension.revoke": {
-      if (!extensionPolicy || !(await extensionPolicy.revoke(command.id))) throw new Error("找不到要撤销授权的扩展");
-      await runResourceOperation("正在撤销扩展授权", reloadRuntimeResources);
-      break;
-    }
-    case "extension-ui.resolve": {
-      extensionUiBridge.resolve(command.response);
       break;
     }
   }
