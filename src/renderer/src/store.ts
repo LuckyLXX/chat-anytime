@@ -40,7 +40,9 @@ const emptySnapshot: RuntimeSnapshot = {
   status: "正在启动 Pi 运行时",
   messages: [],
   executions: [],
-  sessions: []
+  backgroundProcesses: [],
+  sessions: [],
+  recentWorkspaces: []
 };
 const emptySettings: DesktopSettings = { version: 2, thinkingLevel: "medium", accessMode: "ask", providers: [], agents: [], currentAgentId: "default", appearance: { theme: "system", themePreset: "default", customCss: "", customThemes: [], themeOverrides: { light: {}, dark: {} }, showThinking: true } };
 const emptyResources: ResourceCatalog = { skills: [], mcpServers: [], todos: [], diagnostics: [] };
@@ -68,6 +70,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
       models: bootstrap.catalog?.models ?? [],
       providers: bootstrap.catalog?.providers ?? [],
       resources: bootstrap.resources ?? get().resources,
+      todos: bootstrap.resources?.todos ?? get().todos,
       customProvider: bootstrap.settings.providers.find((provider) => provider.id === "chatanytime-openai-compatible"),
       customProviderKeyConfigured: Boolean(bootstrap.settings.providers.find((provider) => provider.id === "chatanytime-openai-compatible")?.keyConfigured),
       customModels: bootstrap.settings.providers.find((provider) => provider.id === "chatanytime-openai-compatible")?.models ?? []
@@ -98,7 +101,8 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
           });
           if (!changed && previous.busy === incoming.busy && previous.status === incoming.status &&
               previous.turnTiming === incoming.turnTiming && previous.executions === incoming.executions &&
-              previous.sessions === incoming.sessions && previous.model === incoming.model &&
+              previous.sessions === incoming.sessions && previous.recentWorkspaces === incoming.recentWorkspaces &&
+              previous.model === incoming.model &&
               previous.sessionId === incoming.sessionId && previous.sessionFile === incoming.sessionFile &&
               previous.thinkingLevel === incoming.thinkingLevel) {
             // Nothing changed at all — keep the exact same snapshot reference

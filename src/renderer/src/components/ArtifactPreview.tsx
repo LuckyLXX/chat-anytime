@@ -1,16 +1,16 @@
-import { AlertCircle, Code2, Eye, File, FileCode2, FileDiff, FileText, Globe2, LoaderCircle, MessageSquare, Pause, Pencil, Play, Plus, Terminal, X } from "lucide-react";
+import { AlertCircle, Check, Code2, Eye, File, FileCode2, FileDiff, FileText, Globe2, LoaderCircle, MessageSquare, Pause, Pencil, Play, Plus, Terminal, X } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode, type SyntheticEvent } from "react";
 import type { WorkspaceFilePreview } from "../../../shared/protocol";
 import { artifactSandbox, buildArtifactPreviewSource, DYNAMIC_PREVIEW_ACTIONS, isDynamicArtifact, type Artifact, type DynamicPreviewAction } from "../lib/content";
 import { DiffView } from "./DiffView";
-import { MarkdownEditor } from "./MarkdownEditor";
+import { MarkdownEditor, type EditorSaveStatus } from "./MarkdownEditor";
 import { CodeBlock, RichContent } from "./RichContent";
 import { BrowserPreview } from "./BrowserPreview";
 
 export type PreviewTarget =
   | { type: "artifact"; artifact: Artifact }
   | { type: "browser"; id?: string }
-  | { type: "file"; file: WorkspaceFilePreview }
+  | { type: "file"; file: WorkspaceFilePreview; workspace?: string }
   | { type: "diff"; title: string; path?: string; patch: string }
   | { type: "loading"; title: string; path: string }
   | { type: "error"; title: string; path: string; message: string };
@@ -26,6 +26,8 @@ export interface PreviewEditorState {
   dirty: boolean;
   externalConflict: boolean;
   remoteReload?: { content: string; nonce: number };
+  /** 最近一次保存状态，用于右上角指示器（idle 不展示）。 */
+  saveStatus?: EditorSaveStatus;
 }
 
 function fileArtifact(file: WorkspaceFilePreview): Artifact | undefined {
@@ -52,7 +54,7 @@ function targetIcon(target: PreviewTarget): ReactNode {
   return <FileCode2 size={15} />;
 }
 
-function FilePreviewContent({ file, onOpenArtifact, workspace, editorState, onEditorChange, onResolveConflict }: { file: WorkspaceFilePreview; onOpenArtifact(artifact: Artifact): void; workspace?: string; editorState?: PreviewEditorState; onEditorChange?(patch: Partial<PreviewEditorState>): void; onResolveConflict?(choice: "keep-local" | "load-remote"): void }): ReactNode {
+function FilePreviewContent({ file, tabId, onOpenArtifact, workspace, editorState, onEditorChange, onEditorContentChange, onEditorSaved, onEditorStatusChange, onEditorSaveError, onResolveConflict }: { file: WorkspaceFilePreview; tabId: string; onOpenArtifact(artifact: Artifact): void; workspace?: string; editorState?: PreviewEditorState; onEditorChange?(patch: Partial<PreviewEditorState>): void; onEditorContentChange?(tabId: string, content: string): void; onEditorSaved?(tabId: string, content: string): void; onEditorStatusChange?(tabId: string, status: EditorSaveStatus): void; onEditorSaveError?(message: string): void; onResolveConflict?(choice: "keep-local" | "load-remote"): void }): ReactNode {
   if (file.kind === "image" && file.data && file.mimeType) {
     return <div className="preview-image"><img src={`data:${file.mimeType};base64,${file.data}`} alt={file.name} /></div>;
   }
@@ -62,12 +64,18 @@ function FilePreviewContent({ file, onOpenArtifact, workspace, editorState, onEd
         <div className="preview-markdown-editor">
           <MarkdownEditor
             key={file.relativePath}
+            tabId={tabId}
             relativePath={file.relativePath}
             initialContent={file.content}
             workspace={workspace}
+            contentPersisted={editorState?.dirty !== true}
             externalConflict={editorState.externalConflict}
             remoteReload={editorState.remoteReload}
             onDirtyChange={(dirty) => onEditorChange?.({ dirty })}
+            onContentChange={onEditorContentChange}
+            onSaved={onEditorSaved}
+            onStatusChange={onEditorStatusChange}
+            onSaveError={onEditorSaveError}
             onResolveConflict={onResolveConflict}
           />
         </div>
@@ -87,7 +95,7 @@ function FilePreviewContent({ file, onOpenArtifact, workspace, editorState, onEd
   return <div className="preview-empty"><FileText size={28} /><strong>此文件无法预览</strong><span>{file.size.toLocaleString("zh-CN")} bytes</span></div>;
 }
 
-export function ArtifactPreview({ tabs, activeTabId, browserSuspended, onSelectTab, onCloseTab, onOpenArtifact, onAddBrowser, onAddFile, onAddReview, reviewAvailable, workspace, activeEditorState, onActiveEditorChange, onActiveEditorResolveConflict, onToggleEditing }: { tabs: PreviewTab[]; activeTabId: string; browserSuspended?: boolean; onSelectTab(id: string): void; onCloseTab(id: string): void; onOpenArtifact(artifact: Artifact): void; onAddBrowser?(): void; onAddFile?(): void; onAddReview?(): void; reviewAvailable?: boolean; workspace?: string; activeEditorState?: PreviewEditorState; onActiveEditorChange?(patch: Partial<PreviewEditorState>): void; onActiveEditorResolveConflict?(choice: "keep-local" | "load-remote"): void; onToggleEditing?(): void }): ReactNode {
+export function ArtifactPreview({ tabs, activeTabId, browserSuspended, onSelectTab, onCloseTab, onOpenArtifact, onAddBrowser, onAddFile, onAddReview, reviewAvailable, workspace, activeEditorState, onActiveEditorChange, onActiveEditorContentChange, onActiveEditorSaved, onActiveEditorStatusChange, onActiveEditorSaveError, onActiveEditorResolveConflict, onToggleEditing }: { tabs: PreviewTab[]; activeTabId: string; browserSuspended?: boolean; onSelectTab(id: string): void; onCloseTab(id: string): void; onOpenArtifact(artifact: Artifact): void; onAddBrowser?(): void; onAddFile?(): void; onAddReview?(): void; reviewAvailable?: boolean; workspace?: string; activeEditorState?: PreviewEditorState; onActiveEditorChange?(patch: Partial<PreviewEditorState>): void; onActiveEditorContentChange?(tabId: string, content: string): void; onActiveEditorSaved?(tabId: string, content: string): void; onActiveEditorStatusChange?(tabId: string, status: EditorSaveStatus): void; onActiveEditorSaveError?(message: string): void; onActiveEditorResolveConflict?(choice: "keep-local" | "load-remote"): void; onToggleEditing?(): void }): ReactNode {
   const active = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0];
   if (!active) {
     return (
@@ -205,6 +213,16 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, onSelectT
           </div>}
         </div>
         <div className="preview-tab-actions">
+          {markdownEditable && activeEditorState?.saveStatus && activeEditorState.saveStatus !== "idle" && (
+            <span
+              className={`editor-save-status ${activeEditorState.saveStatus}`}
+              role="status"
+              title={activeEditorState.saveStatus === "error" ? "保存失败，详见编辑器内的错误提示" : activeEditorState.saveStatus === "saved" ? "已保存到磁盘" : activeEditorState.saveStatus === "saving" ? "正在写入磁盘" : "有未保存的修改"}
+            >
+              {activeEditorState.saveStatus === "saving" ? <LoaderCircle size={12} className="spinning" /> : activeEditorState.saveStatus === "saved" ? <Check size={13} /> : activeEditorState.saveStatus === "error" ? <AlertCircle size={13} /> : <Pencil size={12} />}
+              <span>{activeEditorState.saveStatus === "saving" ? "保存中…" : activeEditorState.saveStatus === "saved" ? "已保存" : activeEditorState.saveStatus === "error" ? "保存失败" : "未保存"}</span>
+            </span>
+          )}
           {markdownEditable && <button className="icon-button" type="button" title={editing ? "切换到预览" : "切换到编辑"} aria-label={editing ? "预览" : "编辑"} onClick={() => onToggleEditing?.()}>{editing ? <Eye size={15} /> : <Pencil size={15} />}</button>}
           {sourceable && <button className="icon-button" type="button" title={showSource ? "切换到预览" : "查看源代码"} aria-label={showSource ? "预览" : "源代码"} onClick={() => setSourceModes((prev) => ({ ...prev, [activeTabId]: !showSource }))}>{showSource ? <Eye size={15} /> : <Code2 size={15} />}</button>}
           {dynamic && <button className="icon-button" type="button" aria-label={paused ? "继续动态预览" : "暂停动态预览"} title={paused ? "继续" : "暂停"} onClick={() => { postPreviewAction(paused ? DYNAMIC_PREVIEW_ACTIONS.resume : DYNAMIC_PREVIEW_ACTIONS.pause); setPaused((current) => !current); }}>{paused ? <Play size={15} /> : <Pause size={15} />}</button>}
@@ -216,7 +234,7 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, onSelectT
         {showSource && !artifact && target.type === "file" && target.file.content !== undefined && <div className="preview-scroll preview-code"><CodeBlock language={target.file.kind === "markdown" ? "markdown" : target.file.language ?? "text"} code={target.file.content} /></div>}
         {!showSource && artifact && <iframe ref={frameRef} title={artifact.title} sandbox={artifactSandbox(artifact)} referrerPolicy="no-referrer" srcDoc={buildArtifactPreviewSource(artifact)} onLoad={handleLoad} />}
         {!showSource && target.type === "browser" && <BrowserPreview suspended={browserSuspended} tabId={activeTabId} />}
-        {!showSource && !artifact && target.type === "file" && <FilePreviewContent file={target.file} onOpenArtifact={onOpenArtifact} workspace={workspace} editorState={activeEditorState} onEditorChange={onActiveEditorChange} onResolveConflict={onActiveEditorResolveConflict} />}
+        {!showSource && !artifact && target.type === "file" && <FilePreviewContent file={target.file} tabId={activeTabId} onOpenArtifact={onOpenArtifact} workspace={target.workspace ?? workspace} editorState={activeEditorState} onEditorChange={onActiveEditorChange} onEditorContentChange={onActiveEditorContentChange} onEditorSaved={onActiveEditorSaved} onEditorStatusChange={onActiveEditorStatusChange} onEditorSaveError={onActiveEditorSaveError} onResolveConflict={onActiveEditorResolveConflict} />}
         {target.type === "diff" && <div className="preview-scroll preview-diff"><DiffView patch={target.patch} /></div>}
         {target.type === "loading" && <div className="preview-empty"><LoaderCircle className="spinning" size={26} /><strong>正在读取文件</strong><span>{target.path}</span></div>}
         {target.type === "error" && <div className="preview-empty preview-error"><AlertCircle size={26} /><strong>无法打开预览</strong><span>{target.message}</span></div>}

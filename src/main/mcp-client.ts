@@ -20,10 +20,31 @@ import type { ConfiguredMcpServer, McpServerConfigEntry } from "./mcp-config.js"
 
 const TOOL_NAME_PREFIX = "mcp__";
 
+/** Upper bound for a single MCP connect / tools-list operation. */
+const MCP_OP_TIMEOUT_MS = 15_000;
+
+/** Bounded wait so a slow or unreachable server can never block session switching forever. */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`MCP 操作超时（${ms}ms）`)), ms);
+    promise.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (error) => { clearTimeout(timer); reject(error); }
+    );
+  });
+}
+
 interface McpConnection {
   client: Client;
   configHash: string;
   close: () => Promise<void>;
+}
+
+/** Cached tool bindings per server, so steady-state syncs need no network roundtrip. */
+interface McpToolCacheEntry {
+  hash: string;
+  bindings: McpToolBinding[];
+  toolCount: number;
 }
 
 export interface McpToolBinding {
@@ -131,9 +152,17 @@ export function convertMcpResult(result: unknown): AgentToolResult<unknown> {
 export class McpClientManager {
   private readonly connections = new Map<string, McpConnection>();
   private readonly toolIndex = new Map<string, { serverName: string; toolName: string }>();
+  private readonly toolCache = new Map<string, McpToolCacheEntry>();
 
-  /** Reconcile live connections with the given servers; returns status + tool bindings. */
-  async sync(servers: ConfiguredMcpServer[]): Promise<McpSyncResult> {
+  /**
+   * Reconcile live connections with the given servers; returns status + tool
+   * bindings. Steady state (connection alive, hash unchanged, tools cached)
+   * is served from cache with zero network, so session switches never block
+   * on remote MCP servers. Pass `{ refresh: true }` to force a fresh
+   * connect/listTools roundtrip (config changes, explicit reloads).
+   */
+  async sync(servers: ConfiguredMcpServer[], options?: { refresh?: boolean }): Promise<McpSyncResult> {
+    const refresh = options?.refresh === true;
     const enabled = servers.filter((server) => !server.entry.disabled);
     const wanted = new Set(enabled.map((server) => server.name));
 
@@ -149,22 +178,24 @@ export class McpClientManager {
         summaries.push({ name: server.name, status: "disabled", toolCount: 0, disabled: true });
         return;
       }
+      const hash = configHash(server.entry);
+      const cache = this.toolCache.get(server.name);
+      const connectionMatches = this.connections.get(server.name)?.configHash === hash;
+      // Fast path: nothing changed and tools are cached — no network at all.
+      if (!refresh && connectionMatches && cache && cache.hash === hash) {
+        bindings.push(...cache.bindings);
+        summaries.push({ name: server.name, status: "connected", toolCount: cache.toolCount, disabled: false });
+        return;
+      }
       try {
-        const hash = configHash(server.entry);
-        const existing = this.connections.get(server.name);
-        if (!existing || existing.configHash !== hash) {
-          if (existing) await this.disconnect(server.name);
-          await this.connect(server, hash);
-        }
-        const connection = this.connections.get(server.name);
-        if (!connection) throw new Error("MCP 连接未建立");
-        const { tools } = await connection.client.listTools();
-        for (const tool of tools) {
-          bindings.push({ serverName: server.name, toolName: tool.name, description: tool.description ?? "", inputSchema: tool.inputSchema });
-        }
-        summaries.push({ name: server.name, status: "connected", toolCount: tools.length, disabled: false });
+        const fresh = await this.ensureTools(server, hash);
+        bindings.push(...fresh);
+        summaries.push({ name: server.name, status: "connected", toolCount: fresh.length, disabled: false });
       } catch (error) {
-        summaries.push({ name: server.name, status: "failed", toolCount: 0, disabled: false, error: errorText(error) });
+        // Keep serving cached bindings so a slow/unreachable server does not
+        // strip previously working tools; the status still reports the failure.
+        if (cache && cache.hash === hash) bindings.push(...cache.bindings);
+        summaries.push({ name: server.name, status: "failed", toolCount: cache?.toolCount ?? 0, disabled: false, error: errorText(error) });
       }
     }));
 
@@ -175,18 +206,50 @@ export class McpClientManager {
     return { summaries, bindings };
   }
 
-  private async connect(server: ConfiguredMcpServer, hash: string): Promise<void> {
+  /** Connect if needed, list tools, and refresh the per-server tool cache. */
+  private async ensureTools(server: ConfiguredMcpServer, hash: string): Promise<McpToolBinding[]> {
+    const list = async (): Promise<McpToolBinding[]> => {
+      const connection = this.connections.get(server.name);
+      if (!connection) throw new Error("MCP 连接未建立");
+      const { tools } = await withTimeout(connection.client.listTools(), MCP_OP_TIMEOUT_MS);
+      const bindings = tools.map((tool) => ({ serverName: server.name, toolName: tool.name, description: tool.description ?? "", inputSchema: tool.inputSchema }));
+      this.toolCache.set(server.name, { hash, bindings, toolCount: tools.length });
+      return bindings;
+    };
+    const existing = this.connections.get(server.name);
+    if (!existing || existing.configHash !== hash) {
+      if (existing) await this.disconnect(server.name);
+      await withTimeout(this.connect(server, hash), MCP_OP_TIMEOUT_MS);
+    }
+    try {
+      return await list();
+    } catch (error) {
+      // The connection may have gone stale (server-side idle timeout).
+      // Reconnect once and retry before giving up.
+      await this.disconnect(server.name);
+      await withTimeout(this.connect(server, hash), MCP_OP_TIMEOUT_MS);
+      try {
+        return await list();
+      } catch {
+        throw error;
+      }
+    }
+  }
+
+  private async connect(server: ConfiguredMcpServer, hash: string): Promise<McpConnection> {
     const transport = createTransport(server.entry);
     const client = new Client({ name: "chatanytime-desktop", version: "0.1.0" }, { capabilities: {} });
     await client.connect(transport);
-    this.connections.set(server.name, {
+    const connection: McpConnection = {
       client,
       configHash: hash,
       close: async () => {
         try { await transport.close(); } catch { /* closing twice is harmless */ }
         try { await client.close(); } catch { /* ignore */ }
       }
-    });
+    };
+    this.connections.set(server.name, connection);
+    return connection;
   }
 
   private async disconnect(name: string): Promise<void> {
@@ -231,6 +294,7 @@ export class McpClientManager {
     const closing = [...this.connections.values()].map((connection) => connection.close());
     this.connections.clear();
     this.toolIndex.clear();
+    this.toolCache.clear();
     await Promise.allSettled(closing);
   }
 }

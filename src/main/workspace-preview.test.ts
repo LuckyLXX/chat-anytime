@@ -11,8 +11,8 @@ describe("workspace file preview", () => {
     await writeFile(join(workspace, "README.md"), "# Preview\n", "utf8");
     await writeFile(join(workspace, "src", "app.ts"), "export const ready = true;\n", "utf8");
 
-    await expect(readWorkspaceFilePreview(workspace, "README.md")).resolves.toMatchObject({ kind: "markdown", relativePath: "README.md", content: "# Preview\n" });
-    await expect(readWorkspaceFilePreview(workspace, "src/app.ts")).resolves.toMatchObject({ kind: "code", language: "typescript", relativePath: "src/app.ts" });
+    await expect(readWorkspaceFilePreview(workspace, "README.md")).resolves.toMatchObject({ kind: "markdown", relativePath: "README.md", content: "# Preview\n", workspace });
+    await expect(readWorkspaceFilePreview(workspace, "src/app.ts")).resolves.toMatchObject({ kind: "code", language: "typescript", relativePath: "src/app.ts", workspace });
   });
 
   it("rejects traversal, absolute paths, directories and symlinks outside the workspace", async () => {

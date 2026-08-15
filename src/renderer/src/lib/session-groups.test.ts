@@ -30,4 +30,48 @@ describe("session workspace groups", () => {
 
     expect(groups[0]?.sessions.map((session) => session.id)).toEqual(["starred", "fresh", "mid"]);
   });
+
+  it("shows recently opened workspaces even without any session", () => {
+    const groups = groupSessionsByWorkspace([], "", [
+      { path: "C:/Projects/Older", openedAt: 30 },
+      { path: "C:/Projects/Fresh", openedAt: 40 }
+    ]);
+
+    expect(groups.map((group) => group.workspace)).toEqual(["C:/Projects/Fresh", "C:/Projects/Older"]);
+    expect(groups[0]?.sessions).toEqual([]);
+  });
+
+  it("merges empty workspaces with session groups by recency", () => {
+    const groups = groupSessionsByWorkspace(
+      [{ id: "one", path: "one.jsonl", workspace: "C:/Projects/Used", title: "标题", modifiedAt: 20, messageCount: 1 }],
+      "",
+      [
+        { path: "C:/Projects/Used", openedAt: 10 },
+        { path: "C:/Projects/Fresh", openedAt: 50 }
+      ]
+    );
+
+    // The freshly opened empty workspace ranks above the used one.
+    expect(groups.map((group) => group.workspace)).toEqual(["C:/Projects/Fresh", "C:/Projects/Used"]);
+  });
+
+  it("dedupes workspaces already covered by session groups", () => {
+    const groups = groupSessionsByWorkspace(
+      [{ id: "one", path: "one.jsonl", workspace: "C:/Projects/PiDesktop", title: "标题", modifiedAt: 20, messageCount: 1 }],
+      "",
+      [{ path: "C:/Projects/PiDesktop", openedAt: 50 }]
+    );
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.sessions).toHaveLength(1);
+  });
+
+  it("filters empty workspaces by search query", () => {
+    const groups = groupSessionsByWorkspace([], "fresh", [
+      { path: "C:/Projects/Other", openedAt: 20 },
+      { path: "C:/Projects/Fresh", openedAt: 10 }
+    ]);
+
+    expect(groups.map((group) => group.workspace)).toEqual(["C:/Projects/Fresh"]);
+  });
 });

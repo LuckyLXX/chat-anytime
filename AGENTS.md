@@ -8,7 +8,7 @@
   - MCP: `src/main/mcp-client.ts` (`McpClientManager`) connects via `@modelcontextprotocol/sdk`; each tool becomes `mcp__<server>__<tool>`. Config in `.mcp.json` (project) / `mcp.json` (global).
   - Skill: `src/main/skill-catalog.ts` scans `pidesktop-skills/` (global) and `.pidesktop-skills/` (project) for `SKILL.md`; enable state in `pidesktop-skill-state.json`.
   - Subagent: `src/main/subagent.ts` `delegate_agent` creates a single-level child `AgentSession` under `chatanytime-sessions/<agentId>/delegations/`.
-  - Todo: `src/main/todo-store.ts` atomic JSON at `pidesktop-todos.json`.
+  - Todo: `src/main/todo-store.ts` atomic JSON, session-scoped at `chatanytime-sessions/<agentId>/todos/<sessionId>.json`; the store is rebuilt in `createSession` so the task panel follows the active session.
 - Preserve the permission boundary for bash, writes, and paths outside the selected workspace.
 - Keep provider secrets process-local unless a dedicated secure-storage design is added.
 - Render complete HTML/SVG documents only inside the sandboxed Artifact preview.

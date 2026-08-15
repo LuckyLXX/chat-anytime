@@ -6,5 +6,6 @@ dist/
 .DS_Store
 Thumbs.db
 .zcode/
+.workbuddy/
 .pi-subagents/
 

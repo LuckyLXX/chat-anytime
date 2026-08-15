@@ -64,8 +64,11 @@ export function BrowserPreview({ suspended = false, tabId = "default" }: { suspe
     void send({ type: "visible", visible: !suspended });
   }, [suspended]);
 
-  useEffect(() => () => {
-    void window.piDesktop.browserPreview({ type: "close", tabId });
+  useLayoutEffect(() => () => {
+    // Deactivation (tab switch, panel collapse) must NOT destroy the loaded
+    // page: hide the native view instead, so switching back restores it
+    // instantly. Real tab removal is closed explicitly by the preview owner.
+    void window.piDesktop.browserPreview({ type: "visible", visible: false, tabId });
   }, [tabId]);
 
   useLayoutEffect(() => {

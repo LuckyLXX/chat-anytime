@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Todo, TodoStatus } from "../shared/protocol.js";
 
@@ -36,6 +36,26 @@ function normalizeTodo(value: unknown): Todo | undefined {
     updatedAt: typeof todo.updatedAt === "number" ? todo.updatedAt : now,
     ...(typeof todo.completedAt === "number" ? { completedAt: todo.completedAt } : {})
   };
+}
+
+/**
+ * One-time upgrade from the pre-session-scoped global file: seed a fresh
+ * session-scoped store from it, then rename the legacy file so its todos are
+ * never inherited by a second session. No-op when the legacy file is missing
+ * or corrupt, or the session already has its own todo file.
+ */
+export function migrateLegacyTodoFile(targetPath: string, legacyPath: string): void {
+  try {
+    if (existsSync(targetPath)) return;
+    const raw = readFileSync(legacyPath, "utf8");
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || !Array.isArray((parsed as { todos?: unknown }).todos)) return;
+    mkdirSync(dirname(targetPath), { recursive: true });
+    writeFileSync(targetPath, raw, "utf8");
+    renameSync(legacyPath, `${legacyPath}.migrated`);
+  } catch {
+    // missing/corrupt legacy file → nothing to migrate
+  }
 }
 
 export function createTodoStore(filePath: string, onChanged: () => void): TodoStore {

@@ -1,4 +1,5 @@
 import { readdir, realpath, stat, unlink } from "node:fs/promises";
+import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative as relativePath, resolve, sep } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, UserMessage, ImageContent } from "@earendil-works/pi-ai";
@@ -15,6 +16,7 @@ import {
   type InlineExtension,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import { BackgroundProcessRegistry, bashCommandsFromMessages, isBackgroundCommand } from "./background-processes.js";
 import type {
   AccessMode,
   AgentProfile,
@@ -30,6 +32,7 @@ import type {
   ProviderModelSettings,
   ProviderOption,
   ProviderSettings,
+  RecentWorkspace,
   RuntimeCommand,
   RuntimeMessage,
   RuntimeSnapshot,
@@ -48,9 +51,10 @@ import { buildDivModePrompt } from "./div-prompt.js";
 import { McpClientManager } from "./mcp-client.js";
 import { readConfiguredMcpServers, removeMcpServerConfig, setMcpServerDisabled, upsertMcpServerConfig, type McpServerConfigEntry } from "./mcp-config.js";
 import { PermissionBroker } from "./permission-broker.js";
+import { loadRecentWorkspaces, recordRecentWorkspace, removeRecentWorkspace, writeRecentWorkspaces } from "./recent-workspaces.js";
 import { createSubagentTools, type SubagentContext } from "./subagent.js";
 import { buildSkillsSystemPromptBlock, discoverSkills, isSkillDisabled, setSkillEnabled, skillIdFromPath, toSkillSummaries, type DiscoveredSkill } from "./skill-catalog.js";
-import { createTodoStore, type TodoStore } from "./todo-store.js";
+import { createTodoStore, migrateLegacyTodoFile, type TodoStore } from "./todo-store.js";
 import { Type } from "typebox";
 import { toolRisk } from "./permissions.js";
 import { buildResourceCatalog } from "./resource-catalog.js";
@@ -82,6 +86,7 @@ let turnTiming: TurnTiming | undefined;
 let executions = new Map<string, ToolExecution>();
 let controlMessages: ChatMessage[] = [];
 let currentSessions: SessionSummary[] = [];
+let recentWorkspaces: RecentWorkspace[] = [];
 let selectedModel: { provider: string; id: string } | undefined;
 let settings: DesktopSettings | undefined;
 let apiKeys: Record<string, string> = {};
@@ -101,6 +106,13 @@ let todoStore: TodoStore | undefined;
 let resourceDiagnostics: string[] = [];
 let resourceOperationBusy = false;
 let sessionGeneration = 0;
+// Set when the user explicitly reloads resources or changes MCP config, so the
+// next createSession forces a network sync instead of serving the tool cache.
+let forceMcpRefresh = false;
+// Detached background processes left by bash executions (dev servers etc.),
+// surfaced in the task panel. App-wide: processes outlive session switches.
+const backgroundProcesses = new BackgroundProcessRegistry(() => emitState());
+let lastBackgroundDiscoveryAt = 0;
 
 // Streaming coalescer: high-frequency partial frames (message_update token
 // batches, tool partial output) are throttled to 50ms (20fps) to avoid IPC
@@ -174,9 +186,10 @@ function mcpConfigPaths(): { project: string; global: string } {
   };
 }
 
-function skillPaths(): { globalDir: string; projectDir: string; statePath: string } {
+function skillPaths(): { globalDir: string; agentsDir: string; projectDir: string; statePath: string } {
   return {
     globalDir: join(getAgentDir(), "pidesktop-skills"),
+    agentsDir: join(homedir(), ".agents", "skills"),
     projectDir: workspace ? resolve(workspace, ".pidesktop-skills") : join(getAgentDir(), "pidesktop-skills"),
     statePath: join(getAgentDir(), "pidesktop-skill-state.json")
   };
@@ -184,8 +197,8 @@ function skillPaths(): { globalDir: string; projectDir: string; statePath: strin
 
 /** Scan skill dirs and refresh the published SkillSummary catalog. */
 function syncSkills(): void {
-  const { globalDir, projectDir, statePath } = skillPaths();
-  discoveredSkills = discoverSkills(globalDir, projectDir);
+  const { globalDir, agentsDir, projectDir, statePath } = skillPaths();
+  discoveredSkills = discoverSkills(globalDir, projectDir, agentsDir);
   const disabled = new Set<string>();
   for (const skill of discoveredSkills) {
     const id = skillIdFromPath(skill.filePath);
@@ -245,10 +258,10 @@ function mcpConfigEntry(server: McpServerConfigDraft): McpServerConfigEntry {
 }
 
 /** Connect to all configured MCP servers and refresh tool definitions + catalog status. */
-async function syncMcpServers(): Promise<void> {
+async function syncMcpServers(refresh = false): Promise<void> {
   const { project, global } = mcpConfigPaths();
   const servers = readConfiguredMcpServers(project, global);
-  const { summaries, bindings } = await mcpClient.sync(servers);
+  const { summaries, bindings } = await mcpClient.sync(servers, { refresh });
   mcpServers = summaries;
   mcpTools = mcpClient.buildToolDefinitions(bindings);
 }
@@ -268,39 +281,65 @@ function refreshTodos(): void {
   emitResourceCatalog();
 }
 
+/** Session-scoped todo file: `<agentDir>/chatanytime-sessions/<agentId>/todos/<sessionId>.json`. */
+function sessionTodosPath(sessionId: string): string {
+  const root = agentSessionRoot();
+  if (!root) throw new Error("当前没有可用的 Agent，无法定位任务存储");
+  return join(root, "todos", `${sessionId}.json`);
+}
+
 function summarizeTodos(items: Todo[]): string {
   if (items.length === 0) return "（暂无 Todo）";
   return items.map((todo) => {
     const mark = todo.status === "completed" ? "x" : todo.status === "in_progress" ? "~" : " ";
-    return `- [${mark}] ${todo.title}${todo.notes ? `（${todo.notes}）` : ""}`;
+    return `- [${mark}] ${todo.title}${todo.notes ? `（${todo.notes}）` : ""}（id: ${todo.id}）`;
   }).join("\n");
 }
 
-/** Build the Todo customTools (todo_create/list/update/complete/delete). */
+/** 引导模型主动使用 Todo 工具维护任务清单的系统提示词块。 */
+function buildTodoSystemPromptBlock(): string {
+  return [
+    "【任务清单（Todo）】",
+    "多步骤任务请先用 todo_create 把步骤拆成待办项，进度变化时用 todo_update 更新状态（in_progress/completed），需要时用 todo_list 查看最新清单、todo_delete 清理已完成项。",
+    "用户也可能直接在任务面板中增删或勾选待办：每轮开始时如有疑问，先用 todo_list 同步最新清单再继续。"
+  ].join("\n");
+}
+
+/** 当前待办清单的紧凑文本（随每次用户消息注入，保证模型与任务面板同步）。 */
+function currentTodoBlock(): string | undefined {
+  if (todos.length === 0) return undefined;
+  return `当前任务清单（Todo 面板）：\n${summarizeTodos(todos)}`;
+}
+
+/** Build the Todo customTools (todo_create/list/update/delete). */
 function buildTodoTools(): ToolDefinition[] {
   if (!todoStore) return [];
   const summarize = (): AgentToolResultLike => ({ content: [{ type: "text", text: summarizeTodos(todoStore!.list()) }], details: { count: todoStore!.list().length } });
-  const mutate = (action: () => void): AgentToolResultLike => {
-    action();
-    refreshTodos();
-    return summarize();
-  };
+  const listText = (): string => summarizeTodos(todoStore!.list());
+  const count = (): number => todoStore!.list().length;
   return [
     defineTool({
       name: "todo_create",
       label: "新建 Todo",
-      description: "创建一个新的待办事项。",
+      description: "创建一个新的待办事项。多步骤任务请用它把步骤拆成待办并跟踪进度，不要只把步骤写在回复里。",
       promptSnippet: "todo_create: 新建待办事项",
       parameters: Type.Object({
         title: Type.String({ description: "待办标题" }),
         notes: Type.Optional(Type.String({ description: "可选备注" }))
       }),
-      execute: async (_id, params) => mutate(() => todoStore!.create(String(params?.title ?? ""), params?.notes as string | undefined))
+      execute: async (_id, params) => {
+        const created = todoStore!.create(String(params?.title ?? ""), params?.notes as string | undefined);
+        refreshTodos();
+        return {
+          content: [{ type: "text", text: `已创建 Todo「${created.title}」，id: ${created.id}。\n\n当前待办：\n${listText()}` }],
+          details: { count: count(), createdId: created.id }
+        };
+      }
     }),
     defineTool({
       name: "todo_list",
       label: "列出 Todo",
-      description: "列出所有待办事项及其状态。",
+      description: "列出所有待办事项及其状态（即任务面板当前的最新清单），每行末尾的（id: …）可用于后续更新或删除。",
       promptSnippet: "todo_list: 列出待办事项",
       parameters: Type.Object({}),
       execute: async () => summarize()
@@ -308,27 +347,43 @@ function buildTodoTools(): ToolDefinition[] {
     defineTool({
       name: "todo_update",
       label: "更新 Todo",
-      description: "更新待办事项的标题、备注或状态。status 可为 pending/in_progress/completed。",
+      description: "更新待办事项的标题、备注或状态。status 可为 pending/in_progress/completed。进度变化时请及时更新状态，避免清单与实际情况脱节。id 取 todo_list 返回的（id: …）。",
       promptSnippet: "todo_update: 更新待办事项",
       parameters: Type.Object({
-        id: Type.String({ description: "待办 id" }),
+        id: Type.String({ description: "待办 id（来自 todo_list 输出中的（id: …））" }),
         title: Type.Optional(Type.String()),
         notes: Type.Optional(Type.String()),
         status: Type.Optional(Type.Union([Type.Literal("pending"), Type.Literal("in_progress"), Type.Literal("completed")]))
       }),
-      execute: async (_id, params) => mutate(() => todoStore!.update(String(params?.id ?? ""), {
-        ...(typeof params?.title === "string" ? { title: params.title } : {}),
-        ...(params?.notes !== undefined ? { notes: params.notes as string } : {}),
-        ...(typeof params?.status === "string" ? { status: params.status as Todo["status"] } : {})
-      }))
+      execute: async (_id, params) => {
+        const id = String(params?.id ?? "");
+        const updated = todoStore!.update(id, {
+          ...(typeof params?.title === "string" ? { title: params.title } : {}),
+          ...(params?.notes !== undefined ? { notes: params.notes as string } : {}),
+          ...(typeof params?.status === "string" ? { status: params.status as Todo["status"] } : {})
+        });
+        refreshTodos();
+        const heading = updated
+          ? `已更新 Todo「${updated.title}」（id: ${id}）。`
+          : `未找到 id 为「${id}」的 Todo，未做任何修改。请先用 todo_list 确认正确的 id。`;
+        return { content: [{ type: "text", text: `${heading}\n\n当前待办：\n${listText()}` }], details: { count: count(), updated: Boolean(updated) } };
+      }
     }),
     defineTool({
       name: "todo_delete",
       label: "删除 Todo",
-      description: "按 id 删除一个待办事项。",
+      description: "按 id 删除一个待办事项。id 取 todo_list 返回的（id: …）。",
       promptSnippet: "todo_delete: 删除待办事项",
-      parameters: Type.Object({ id: Type.String() }),
-      execute: async (_id, params) => mutate(() => todoStore!.remove(String(params?.id ?? "")))
+      parameters: Type.Object({ id: Type.String({ description: "待办 id（来自 todo_list 输出中的（id: …））" }) }),
+      execute: async (_id, params) => {
+        const id = String(params?.id ?? "");
+        const removed = todoStore!.remove(id);
+        refreshTodos();
+        const heading = removed
+          ? `已删除 id 为「${id}」的 Todo。`
+          : `未找到 id 为「${id}」的 Todo，未删除任何内容。请先用 todo_list 确认正确的 id。`;
+        return { content: [{ type: "text", text: `${heading}\n\n当前待办：\n${listText()}` }], details: { count: count(), removed } };
+      }
     })
   ];
 }
@@ -453,13 +508,25 @@ function snapshot(): RuntimeSnapshot {
     turnTiming,
     messages,
     executions: [...executions.values()],
-    sessions: currentSessions
+    backgroundProcesses: backgroundProcesses.list(),
+    sessions: currentSessions,
+    recentWorkspaces
   };
 }
 
 function workspaceSessionDir(): string | undefined {
   if (!workspace || !currentAgent) return undefined;
   return agentWorkspaceSessionDir(getAgentDir(), currentAgent.id, workspace);
+}
+
+function recentWorkspacesPath(): string {
+  return join(getAgentDir(), "pidesktop-recent-workspaces.json");
+}
+
+/** Record a workspace as recently opened and persist the list. */
+function touchRecentWorkspace(path: string): void {
+  recentWorkspaces = recordRecentWorkspace(recentWorkspaces, path);
+  writeRecentWorkspaces(recentWorkspacesPath(), recentWorkspaces);
 }
 
 function agentSessionRoot(): string | undefined {
@@ -640,6 +707,15 @@ function handleSessionEvent(event: AgentSessionEvent): void {
         patch: patchFromToolResult(event.result),
         changedFile: current?.changedFile ?? changedWorkspaceFile(workspace, event.toolName, current?.args)
       });
+      // Bash commands with background patterns (`nohup ... &`, `( ... & )`)
+      // leave detached descendants running after the shell exits. Scan for
+      // survivors so the task panel can show and kill them.
+      if (current?.name === "bash") {
+        const command = (current.args as { command?: unknown } | undefined)?.command;
+        if (typeof command === "string" && isBackgroundCommand(command)) {
+          void backgroundProcesses.scanForCommand(command, current.startedAt);
+        }
+      }
       break;
     }
     case "compaction_start":
@@ -811,28 +887,39 @@ async function createSession(sessionManager?: SessionManager): Promise<void> {
     noThemes: true,
     noContextFiles: true,
     extensionFactories: [createPermissionExtension()],
-    systemPromptOverride: (base) => [base, currentAgent?.systemPrompt, currentAgent?.divMode ? buildDivModePrompt() : undefined, buildSkillsSystemPromptBlock(activeSkillsForAgent())].filter(Boolean).join("\n\n")
+    systemPromptOverride: (base) => [base, currentAgent?.systemPrompt, currentAgent?.divMode ? buildDivModePrompt() : undefined, buildSkillsSystemPromptBlock(activeSkillsForAgent()), buildTodoSystemPromptBlock()].filter(Boolean).join("\n\n")
   });
   await resourceLoader.reload();
   syncSkills();
   // Connect to configured MCP servers and rebuild the customTool set. Runs
   // concurrently with session manager setup since neither depends on the other.
-  const mcpPromise = syncMcpServers().catch((error) => {
+  // Steady-state switches are served from the MCP tool cache (no network);
+  // only explicit resource reloads / MCP config changes force a roundtrip.
+  const mcpPromise = syncMcpServers(forceMcpRefresh).catch((error) => {
     post({ type: "log", level: "warn", message: `同步 MCP 服务器失败：${errorText(error)}` });
   });
-  emitTodos();
-
+  forceMcpRefresh = false;
   const activeSessionManager = sessionManager ?? SessionManager.continueRecent(workspace, workspaceSessionDir());
+  // Todos are session-scoped: each session id gets its own store so the task
+  // panel follows the opened session. The first session opened after the
+  // upgrade inherits the legacy global todo file exactly once.
+  const todosPath = sessionTodosPath(activeSessionManager.getSessionId());
+  migrateLegacyTodoFile(todosPath, join(getAgentDir(), "pidesktop-todos.json"));
+  todoStore = createTodoStore(todosPath, refreshTodos);
+  todos = todoStore.list();
+  emitTodos();
   const hasExistingMessages = activeSessionManager.buildSessionContext().messages.length > 0;
   const requested = hasExistingMessages ? undefined : defaultModel();
   const requestedModel = requested
     ? modelRuntime.getModel(requested.provider, requested.id)
     : undefined;
   const enabledBuiltinTools = Object.entries(currentAgent?.tools ?? {}).filter(([, enabled]) => enabled).map(([name]) => name);
-  // refreshSessions only reads session files from disk — it doesn't touch the
-  // in-memory session — so run it concurrently with createAgentSession and
-  // await the result before emitState publishes the session list.
-  const sessionsPromise = refreshSessions();
+  // refreshSessions re-reads every session file from disk (line-by-line), which
+  // is slow with many/large sessions. It only needs to be fresh for the sidebar,
+  // so on switches with a known list it runs in the background instead of
+  // delaying the state emit; the follow-up emit is generation-guarded.
+  const hasSessionList = currentSessions.length > 0;
+  const sessionsPromise = hasSessionList ? undefined : refreshSessions();
   await mcpPromise;
   emitResourceCatalog();
   const subagentTools = buildSubagentTools(false);
@@ -849,7 +936,7 @@ async function createSession(sessionManager?: SessionManager): Promise<void> {
   });
   if (generation !== sessionGeneration) {
     result.session.dispose();
-    await sessionsPromise;
+    if (sessionsPromise) await sessionsPromise;
     return;
   }
   session = result.session;
@@ -869,14 +956,32 @@ async function createSession(sessionManager?: SessionManager): Promise<void> {
   executions = new Map(restoreToolExecutions(session.state.messages as unknown as PersistedSessionMessage[], workspace).map((execution) => [execution.id, execution]));
   selectedModel = session.model ? { provider: session.model.provider, id: session.model.id } : requested;
   thinkingLevel = session.thinkingLevel;
+  // Background processes launched by earlier sessions keep running across
+  // restarts; rediscover them from the session's bash history (throttled).
+  const discoveryNow = Date.now();
+  if (discoveryNow - lastBackgroundDiscoveryAt > 30_000) {
+    lastBackgroundDiscoveryAt = discoveryNow;
+    void backgroundProcesses.discoverFromHistory(bashCommandsFromMessages(session.state.messages as unknown as readonly unknown[])).catch(() => { /* discovery is best-effort */ });
+  }
   unsubscribeSession = session.subscribe(handleSessionEvent);
   status = sessionReadyStatus(Boolean(session.model), Boolean(result.modelFallbackMessage));
   busy = false;
-  await sessionsPromise;
+  if (sessionsPromise) {
+    // First list (app start): wait so the sidebar is populated on the first emit.
+    await sessionsPromise;
+  } else {
+    // Subsequent switches: refresh the session list in the background and only
+    // re-emit if this generation is still current.
+    void refreshSessions().then(() => {
+      if (generation === sessionGeneration) emitState();
+    }).catch((error) => {
+      post({ type: "log", level: "warn", message: `刷新会话列表失败：${errorText(error)}` });
+    });
+  }
   // Note: emitResourceCatalog()/emitTodos() are intentionally NOT re-called
-  // here. They were already published right after resourceLoader.reload() at
-  // the top of createSession, and none of the native capability sources change
-  // between then and now.
+  // here. Todos were published right after the session-scoped store was built,
+  // the resource catalog right after the MCP sync completed, and none of the
+  // native capability sources change between then and now.
   emitState();
 }
 
@@ -884,12 +989,13 @@ async function initialize(command: Extract<RuntimeCommand, { type: "initialize" 
   settings = command.settings;
   apiKeys = command.apiKeys;
   workspace = settings.workspace;
+  recentWorkspaces = loadRecentWorkspaces(recentWorkspacesPath());
+  if (workspace) touchRecentWorkspace(workspace);
   currentAgent = activeAgent();
   thinkingLevel = settings.thinkingLevel ?? "medium";
   accessMode = settings.accessMode ?? "ask";
   selectedModel = settings.model;
   modelRuntime = await ModelRuntime.create();
-  todoStore = createTodoStore(join(getAgentDir(), "pidesktop-todos.json"), refreshTodos);
   const initializedProviderIds = new Set<string>();
   for (const provider of settings.providers) {
     registerCustomProvider(provider);
@@ -964,8 +1070,13 @@ async function preparePromptPayload(text: string, attachments: PromptAttachment[
     if (info.size > 20 * 1024 * 1024) throw new Error(`附件超过 20 MB 限制：${attachment.name}`);
     fileRefs.push(relativeReal);
   }
+  const attachmentsBlock = fileRefs.length
+    ? `项目文件附件（请使用 read 工具按需读取）：\n${fileRefs.map((path) => `- ${path}`).join("\n")}`
+    : undefined;
+  const todoBlock = currentTodoBlock();
+  const extras = [attachmentsBlock, todoBlock].filter(Boolean) as string[];
   return {
-    text: fileRefs.length ? `${text}\n\n项目文件附件（请使用 read 工具按需读取）：\n${fileRefs.map((path) => `- ${path}`).join("\n")}` : text,
+    text: extras.length ? `${text}\n\n${extras.join("\n\n")}` : text,
     images
   };
 }
@@ -977,10 +1088,14 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       break;
     case "workspace.open":
       workspace = resolve(command.path);
+      touchRecentWorkspace(workspace);
       await createSession();
       break;
     case "session.new":
-      if (command.workspace) workspace = resolve(command.workspace);
+      if (command.workspace) {
+        workspace = resolve(command.workspace);
+        touchRecentWorkspace(workspace);
+      }
       if (workspace) await createSession(SessionManager.create(workspace, workspaceSessionDir()));
       break;
     case "session.open": {
@@ -991,6 +1106,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       const sessionWorkspace = discovered.getCwd();
       if (!sessionWorkspace) throw new Error("会话缺少工作区信息");
       workspace = resolve(sessionWorkspace);
+      touchRecentWorkspace(workspace);
       const sessionRoot = workspaceSessionDir();
       if (!sessionRoot || (resolve(dirname(target)).toLowerCase() !== resolve(sessionRoot).toLowerCase() && resolve(dirname(target)).toLowerCase() !== resolve(root).toLowerCase())) {
         throw new Error("会话路径与工作区不匹配");
@@ -1021,6 +1137,8 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       break;
     }
     case "workspace.remove": {
+      recentWorkspaces = removeRecentWorkspace(recentWorkspaces, command.workspace);
+      writeRecentWorkspaces(recentWorkspacesPath(), recentWorkspaces);
       const removeRoot = agentSessionRoot();
       if (removeRoot) {
         const targetWorkspace = resolve(command.workspace).toLowerCase();
@@ -1031,6 +1149,8 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         for (const item of removed) {
           if (!pathIsWithin(removeRoot, item.path) || !item.path.toLowerCase().endsWith(".jsonl")) continue;
           try { await unlink(item.path); } catch { /* 会话文件可能已释放或不存在 */ }
+          // Session-scoped todo file lives next to the session list under todos/.
+          try { await unlink(join(removeRoot, "todos", `${item.id}.json`)); } catch { /* 任务文件可能不存在 */ }
         }
       }
       await refreshSessions();
@@ -1100,6 +1220,22 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     case "session.abort":
       session?.abortCompaction();
       void session?.abort();
+      // Make the task panel reflect the abort immediately: mark every running
+      // tool execution as aborted so its card disappears without waiting for
+      // the SDK's tool_execution_end (which may be delayed or never arrive
+      // if the killed process tree hangs the tool promise).
+      {
+        let changed = false;
+        for (const execution of executions.values()) {
+          if (execution.status === "running") {
+            execution.status = "error";
+            execution.completedAt = Date.now();
+            execution.output = `${execution.output ?? ""}${execution.output ? "\n\n" : ""}（已中止）`;
+            changed = true;
+          }
+        }
+        if (changed) emitState();
+      }
       break;
     case "session.compact":
       if (!session) throw new Error("请先打开工作区，再压缩上下文");
@@ -1249,6 +1385,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     case "appearance.save":
       break;
     case "resources.reload":
+      forceMcpRefresh = true;
       await runResourceOperation("正在重载能力资源", reloadRuntimeResources);
       break;
     case "mcp.server.save": {
@@ -1259,6 +1396,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       const target = server.scope === "project" ? project : global;
       await runResourceOperation("正在保存 MCP Server", async () => {
         upsertMcpServerConfig(target, name, mcpConfigEntry({ ...server, name }));
+        forceMcpRefresh = true;
         await reloadRuntimeResources();
       });
       break;
@@ -1270,6 +1408,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         if (!setMcpServerDisabled(project, command.name, !command.enabled) && !setMcpServerDisabled(global, command.name, !command.enabled)) {
           throw new Error("找不到要切换的 MCP Server");
         }
+        forceMcpRefresh = true;
         await reloadRuntimeResources();
       });
       break;
@@ -1280,6 +1419,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         const { project, global } = mcpConfigPaths();
         const target = command.scope === "project" ? project : global;
         if (!removeMcpServerConfig(target, command.name)) throw new Error("找不到要删除的 MCP Server");
+        forceMcpRefresh = true;
         await reloadRuntimeResources();
       });
       break;
@@ -1292,23 +1432,26 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       break;
     }
     case "todo.create": {
-      if (!todoStore) throw new Error("Todo 存储尚未初始化");
+      if (!todoStore) throw new Error("请先打开一个会话，再管理任务");
       todoStore.create(command.title, command.notes);
       refreshTodos();
       break;
     }
     case "todo.update": {
-      if (!todoStore) throw new Error("Todo 存储尚未初始化");
+      if (!todoStore) throw new Error("请先打开一个会话，再管理任务");
       if (!todoStore.update(command.id, { ...(command.title !== undefined ? { title: command.title } : {}), ...(command.notes !== undefined ? { notes: command.notes } : {}), ...(command.status !== undefined ? { status: command.status } : {}) })) throw new Error("找不到要更新的 Todo");
       refreshTodos();
       break;
     }
     case "todo.delete": {
-      if (!todoStore) throw new Error("Todo 存储尚未初始化");
+      if (!todoStore) throw new Error("请先打开一个会话，再管理任务");
       if (!todoStore.remove(command.id)) throw new Error("找不到要删除的 Todo");
       refreshTodos();
       break;
     }
+    case "background.kill":
+      if (!backgroundProcesses.kill(command.id)) throw new Error("找不到该后台进程");
+      break;
     case "permission.resolve": {
       permissionBroker.resolve(command.id, command.decision);
       break;

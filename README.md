@@ -82,7 +82,7 @@ npm run package:win
 
 - Pi `0.82.1` 仅作为 Agent 运行时核心使用：模型、AgentSession、会话持久化、上下文管理、内置工具（read/bash/edit/write/grep/find/ls）
 - 已移除 Pi 的「扩展接入」能力（第三方扩展加载/批准/绑定、`pi-mcp-adapter`、子代理 CLI shim、扩展 UI 桥），只保留应用自有的工具调用权限拦截 hook
-- MCP、Skill、子代理、Todo 均为自研实现：MCP 由内置 `@modelcontextprotocol/sdk` 客户端直连并把每个工具包装成 Pi `customTool`；Skill 通过扫描 `SKILL.md` 目录并注入系统提示；子代理用 `delegate_agent` 创建同进程子会话；Todo 用本地 JSON 存储
+- MCP、Skill、子代理、Todo 均为自研实现：MCP 由内置 `@modelcontextprotocol/sdk` 客户端直连并把每个工具包装成 Pi `customTool`；Skill 通过扫描 `SKILL.md` 目录并注入系统提示；子代理用 `delegate_agent` 创建同进程子会话；Todo 用会话维度的本地 JSON 存储
 - 本项目沿用 ChatAnyTime 品牌与核心渲染、交互理念，没有复制原插件运行时或旧代码
 - Pi 原仓库和 ChatAnyTime 原插件仓库均不属于本项目，也不会被本项目构建修改
 
@@ -92,7 +92,7 @@ npm run package:win
 
 - **MCP Server**：支持 stdio/HTTP，配置写入项目 `.mcp.json` 或全局 `mcp.json`，启用/停用/删除，状态与工具数实时显示
 - **Skill**：把 `<slug>/SKILL.md` 放到全局 `pidesktop-skills/` 或项目 `.pidesktop-skills/` 即可被发现，勾选启用后注入系统提示，用 `/skill:<name>` 调用
-- **Todo**：本地待办清单，可在面板手动管理，也可让助手通过 `todo_create`/`todo_list`/`todo_update`/`todo_delete` 工具维护
+- **Todo**：本地待办清单（AI 任务），按会话维度存储（每个会话一份，切换会话自动跟随）。聊天窗口右上角有悬浮「任务」面板（可折叠/关闭），实时展示并支持手动新增/勾选完成/删除；助手可通过 `todo_create`/`todo_list`/`todo_update`/`todo_delete` 工具维护
 - **子代理**：助手可通过 `delegate_agent` 把独立子任务委派给子代理（单层，权限走同一审批闸口）
 
 ## 当前限制

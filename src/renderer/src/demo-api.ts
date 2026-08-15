@@ -6,6 +6,7 @@ import type {
   DesktopBootstrap,
   DesktopSettings,
   PermissionDecision,
+  RecentWorkspace,
   RuntimeCommand,
   RuntimeMessage,
   RuntimeSnapshot,
@@ -47,6 +48,11 @@ const demoSnapshot: RuntimeSnapshot = {
   thinkingLevel: "medium",
   busy: false,
   status: "就绪",
+  backgroundProcesses: [],
+  recentWorkspaces: [
+    { path: "D:\\Projects\\chat-anytime-demo", openedAt: Date.now() },
+    { path: "D:\\Projects\\PiDesktop", openedAt: Date.now() - 43_200_000 }
+  ],
   sessions: [
     { id: "demo-session", path: "demo-session.jsonl", workspace: "D:\\Projects\\chat-anytime-demo", title: "梳理项目架构", modifiedAt: Date.now(), messageCount: 4 },
     { id: "older-session", path: "older-session.jsonl", workspace: "D:\\Projects\\chat-anytime-demo", title: "检查渲染流程", modifiedAt: Date.now() - 86_400_000, messageCount: 7 },
@@ -194,6 +200,11 @@ function applyDemoAgentSkillOverrides(): void {
   }));
 }
 
+function recordDemoWorkspace(workspaces: RecentWorkspace[], path: string): RecentWorkspace[] {
+  const key = path.replaceAll("\\", "/").toLowerCase();
+  return [{ path, openedAt: Date.now() }, ...workspaces.filter((item) => item.path.replaceAll("\\", "/").toLowerCase() !== key)].slice(0, 15);
+}
+
 export function createDemoApi(): DesktopApi {
   return {
     async bootstrap(): Promise<DesktopBootstrap> {
@@ -257,7 +268,7 @@ export function createDemoApi(): DesktopApi {
           updateSnapshot({ model: { provider: command.provider, id: command.id } });
           break;
         case "workspace.open":
-          updateSnapshot({ workspace: command.path, sessionId: undefined, messages: [], executions: [] });
+          updateSnapshot({ workspace: command.path, sessionId: undefined, messages: [], executions: [], recentWorkspaces: recordDemoWorkspace(demoSnapshot.recentWorkspaces, command.path) });
           break;
         case "agent.select":
           demoSettings.currentAgentId = command.agentId;
@@ -297,12 +308,16 @@ export function createDemoApi(): DesktopApi {
         case "appearance.save":
           demoSettings.appearance = structuredClone(command.appearance);
           break;
-        case "session.new":
-          updateSnapshot({ workspace: command.workspace ?? demoSnapshot.workspace, messages: [], executions: [], sessionId: "new-demo-session" });
+        case "session.new": {
+          const workspace = command.workspace ?? demoSnapshot.workspace ?? "D:\\Projects\\chat-anytime-demo";
+          updateSnapshot({ workspace, messages: [], executions: [], sessionId: "new-demo-session", recentWorkspaces: recordDemoWorkspace(demoSnapshot.recentWorkspaces, workspace) });
           break;
-        case "session.open":
-          updateSnapshot({ workspace: command.workspace ?? demoSnapshot.workspace, sessionId: command.path.replace(/.*[\\/]/u, "").replace(/\.jsonl$/u, ""), messages: [], executions: [] });
+        }
+        case "session.open": {
+          const workspace = command.workspace ?? demoSnapshot.workspace ?? "D:\\Projects\\chat-anytime-demo";
+          updateSnapshot({ workspace, sessionId: command.path.replace(/.*[\\/]/u, "").replace(/\.jsonl$/u, ""), messages: [], executions: [], recentWorkspaces: recordDemoWorkspace(demoSnapshot.recentWorkspaces, workspace) });
           break;
+        }
         case "session.rename":
           updateSnapshot({ sessions: demoSnapshot.sessions.map((item) => item.path === command.path ? { ...item, title: command.title } : item) });
           break;
@@ -310,7 +325,10 @@ export function createDemoApi(): DesktopApi {
           updateSnapshot({ sessions: demoSnapshot.sessions.map((item) => item.path === command.path ? { ...item, pinned: command.pinned || undefined } : item) });
           break;
         case "workspace.remove":
-          updateSnapshot({ sessions: demoSnapshot.sessions.filter((item) => item.workspace !== command.workspace) });
+          updateSnapshot({
+            sessions: demoSnapshot.sessions.filter((item) => item.workspace !== command.workspace),
+            recentWorkspaces: demoSnapshot.recentWorkspaces.filter((item) => item.path !== command.workspace)
+          });
           break;
         case "session.compact": {
           const timestamp = Date.now();

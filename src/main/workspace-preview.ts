@@ -116,7 +116,7 @@ export async function readWorkspaceFilePreview(workspace: string, requestedPath:
 
   const name = basename(candidateReal);
   const extension = extname(name).toLowerCase();
-  const base = { relativePath: realRelativePath, name, size: info.size };
+  const base = { relativePath: realRelativePath, name, size: info.size, workspace: rootReal };
   const imageMimeType = imageMimeTypes[extension];
   if (imageMimeType) {
     if (info.size > imagePreviewLimit) return { ...base, kind: "binary", mimeType: imageMimeType };

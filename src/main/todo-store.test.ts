@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { createTodoStore } from "./todo-store.js";
+import { createTodoStore, migrateLegacyTodoFile } from "./todo-store.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -65,6 +65,47 @@ describe("todo store", () => {
     expect(store.list()).toEqual([]);
     store.create("恢复后的任务");
     expect(store.list()).toHaveLength(1);
+  });
+});
+
+describe("legacy todo migration", () => {
+  it("seeds a fresh session file from the global file exactly once", async () => {
+    const { promises: fs } = await import("node:fs");
+    const dir = await mkdtemp(join(tmpdir(), "pi-desktop-todos-"));
+    temporaryDirectories.push(dir);
+    const legacy = join(dir, "pidesktop-todos.json");
+    const first = join(dir, "todos", "session-a.json");
+    await fs.writeFile(legacy, JSON.stringify({ todos: [{ id: "t1", title: "旧任务", status: "pending", createdAt: 1, updatedAt: 1 }] }), "utf8");
+
+    migrateLegacyTodoFile(first, legacy);
+    expect(createTodoStore(first, () => {}).list().map((todo) => todo.title)).toEqual(["旧任务"]);
+    // Legacy file is renamed so a second session never inherits the same todos.
+    const renamed = await fs.readFile(`${legacy}.migrated`, "utf8");
+    expect(renamed).toContain("旧任务");
+
+    const second = join(dir, "todos", "session-b.json");
+    migrateLegacyTodoFile(second, legacy);
+    expect(createTodoStore(second, () => {}).list()).toEqual([]);
+  });
+
+  it("never overwrites an existing session file and ignores corrupt legacy data", async () => {
+    const { promises: fs } = await import("node:fs");
+    const dir = await mkdtemp(join(tmpdir(), "pi-desktop-todos-"));
+    temporaryDirectories.push(dir);
+    const legacy = join(dir, "pidesktop-todos.json");
+    const target = join(dir, "todos", "session-a.json");
+
+    const store = createTodoStore(target, () => {});
+    store.create("会话自己的任务");
+    await fs.writeFile(legacy, JSON.stringify({ todos: [{ id: "t1", title: "全局任务", status: "pending", createdAt: 1, updatedAt: 1 }] }), "utf8");
+    migrateLegacyTodoFile(target, legacy);
+    expect(store.list().map((todo) => todo.title)).toEqual(["会话自己的任务"]);
+    expect(await fs.readFile(legacy, "utf8")).toContain("全局任务");
+
+    const corruptTarget = join(dir, "todos", "session-b.json");
+    await fs.writeFile(legacy, "{ not valid json", "utf8");
+    migrateLegacyTodoFile(corruptTarget, legacy);
+    expect(createTodoStore(corruptTarget, () => {}).list()).toEqual([]);
   });
 });
 

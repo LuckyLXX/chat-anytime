@@ -193,6 +193,8 @@ export interface WorkspaceFilePreview {
   content?: string;
   data?: string;
   truncated?: boolean;
+  /** 文件所在工作区的真实（realpath）根目录，编辑后必须写回该工作区。 */
+  workspace?: string;
 }
 
 export interface WorkspaceFileWriteResult {
@@ -248,6 +250,16 @@ export interface SessionSummary {
   modifiedAt: number;
   messageCount: number;
   pinned?: boolean;
+}
+
+/**
+ * A workspace the user opened recently, tracked independently of sessions so
+ * freshly created (still empty) workspaces show up in the sidebar immediately.
+ */
+export interface RecentWorkspace {
+  path: string;
+  /** Epoch ms of the last time the workspace was opened. */
+  openedAt: number;
 }
 
 export type ResourceScope = "global" | "project" | "package" | "bundled" | "temporary" | "unknown";
@@ -315,6 +327,19 @@ export interface Todo {
   completedAt?: number;
 }
 
+/**
+ * A background process left running by a bash tool execution (e.g. a dev
+ * server started with `nohup ... &` / `( ... & )`). Tracked by the utility
+ * process so the task panel can show and kill it.
+ */
+export interface BackgroundProcess {
+  id: string;
+  /** The bash command that launched it (as invoked by the agent). */
+  command: string;
+  pid: number;
+  startedAt: number;
+}
+
 export type DelegationRole = "explore" | "research" | "implement" | "review" | "custom";
 export type DelegationStatus = "running" | "completed" | "failed" | "cancelled";
 
@@ -346,7 +371,9 @@ export interface RuntimeSnapshot {
   turnTiming?: TurnTiming;
   messages: ChatMessage[];
   executions: ToolExecution[];
+  backgroundProcesses: BackgroundProcess[];
   sessions: SessionSummary[];
+  recentWorkspaces: RecentWorkspace[];
 }
 
 export interface ExecutionPrincipal {
@@ -399,6 +426,7 @@ export type RuntimeCommand =
   | { type: "todo.create"; title: string; notes?: string }
   | { type: "todo.update"; id: string; title?: string; notes?: string; status?: TodoStatus }
   | { type: "todo.delete"; id: string }
+  | { type: "background.kill"; id: string }
   | { type: "resources.reload" }
   | { type: "permission.resolve"; id: string; decision: PermissionDecision };
 

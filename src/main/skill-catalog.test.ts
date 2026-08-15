@@ -50,6 +50,44 @@ describe("skill discovery", () => {
     expect(beta?.description).toBe("项目 beta 覆盖");
   });
 
+  it("discovers skills from the shared ~/.agents/skills dir with lowest precedence", async () => {
+    const globalDir = await makeSkillDir();
+    const agentsDir = await makeSkillDir();
+    const projectDir = await makeSkillDir();
+    // 仅存在于共享目录
+    await mkdir(join(agentsDir, "gamma"), { recursive: true });
+    await writeFile(join(agentsDir, "gamma", "SKILL.md"), "---\nname: gamma\ndescription: 共享 gamma\n---\n", "utf8");
+    // 共享目录 vs 全局目录 → 全局目录胜出
+    await mkdir(join(agentsDir, "delta"), { recursive: true });
+    await writeFile(join(agentsDir, "delta", "SKILL.md"), "---\nname: delta\ndescription: 共享 delta\n---\n", "utf8");
+    await mkdir(join(globalDir, "delta"), { recursive: true });
+    await writeFile(join(globalDir, "delta", "SKILL.md"), "---\nname: delta\ndescription: 全局 delta\n---\n", "utf8");
+    // 共享目录 vs 项目目录 → 项目目录胜出
+    await mkdir(join(agentsDir, "epsilon"), { recursive: true });
+    await writeFile(join(agentsDir, "epsilon", "SKILL.md"), "---\nname: epsilon\ndescription: 共享 epsilon\n---\n", "utf8");
+    await mkdir(join(projectDir, "epsilon"), { recursive: true });
+    await writeFile(join(projectDir, "epsilon", "SKILL.md"), "---\nname: epsilon\ndescription: 项目 epsilon\n---\n", "utf8");
+
+    const skills = discoverSkills(globalDir, projectDir, agentsDir);
+    const bySlug = new Map(skills.map((skill) => [skill.slug, skill]));
+    expect(bySlug.get("gamma")?.description).toBe("共享 gamma");
+    expect(bySlug.get("gamma")?.scope).toBe("global");
+    expect(bySlug.get("delta")?.description).toBe("全局 delta");
+    expect(bySlug.get("delta")?.scope).toBe("global");
+    expect(bySlug.get("epsilon")?.description).toBe("项目 epsilon");
+    expect(bySlug.get("epsilon")?.scope).toBe("project");
+  });
+
+  it("ignores a missing or unreadable shared dir", async () => {
+    const globalDir = await makeSkillDir();
+    const projectDir = await makeSkillDir();
+    await mkdir(join(globalDir, "alpha"), { recursive: true });
+    await writeFile(join(globalDir, "alpha", "SKILL.md"), "---\nname: alpha\ndescription: a\n---\n", "utf8");
+
+    const skills = discoverSkills(globalDir, projectDir, join(globalDir, "does-not-exist"));
+    expect(skills.map((skill) => skill.slug)).toEqual(["alpha"]);
+  });
+
   it("derives a stable id and maps to summaries with disabled state", async () => {
     const globalDir = await makeSkillDir();
     const projectDir = await makeSkillDir();

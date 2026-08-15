@@ -72,6 +72,7 @@ import type {
 } from "../../shared/protocol";
 import { thinkingLevelLabels, toolLabel } from "../../shared/locale";
 import { ArtifactPreview, type PreviewEditorState, type PreviewTab, type PreviewTarget } from "./components/ArtifactPreview";
+import type { EditorSaveStatus } from "./components/MarkdownEditor";
 import { WorkspaceTree } from "./components/WorkspaceTree";
 import { ContextMenu, type ContextMenuItem } from "./components/ContextMenu";
 import { RichContent } from "./components/RichContent";
@@ -86,6 +87,7 @@ import { CSS_URL_PATTERN, createThemeAssetUrls, isExternalThemeReference, normal
 import { THEME_PRESETS, scopeCustomThemeCss, scopeCustomThemeCssForPreview, themeOverrideCss, themePresetColor, themePresetCss, themePreviewCss, themeWallpaperOpacity } from "./lib/theme-presets";
 import { shareElementAsImage } from "./lib/share-image";
 import { useDesktopStore } from "./store";
+import { TaskPanel } from "./TaskPanel";
 
 const thinkingLevels: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 const accessModeOptions: readonly { value: AccessMode; label: string }[] = [
@@ -300,6 +302,22 @@ function toolCallStatusLabel(execution: ToolExecution | undefined, streaming?: b
   return streaming ? "运行中" : "已运行";
 }
 
+function formatToolArgs(args: unknown): string {
+  if (args === undefined || args === null) return "（无参数）";
+  try {
+    const text = JSON.stringify(args, null, 2);
+    return text === undefined ? String(args) : text;
+  } catch {
+    return String(args);
+  }
+}
+
+const MAX_TOOL_OUTPUT_CHARS = 20_000;
+
+function truncateToolOutput(output: string): string {
+  return output.length > MAX_TOOL_OUTPUT_CHARS ? `${output.slice(0, MAX_TOOL_OUTPUT_CHARS)}\n…（输出过长，已截断显示）` : output;
+}
+
 function actionTimelineIcon(segment: ActionTimelineSegment, execution: ToolExecution | undefined, streaming: boolean): ReactNode {
   if (segment.type === "thinking") return <Brain size={14} />;
   if (segment.type === "text") return <MessageCircle size={14} />;
@@ -310,6 +328,34 @@ function actionTimelineNodeState(segment: ActionTimelineSegment, execution: Tool
   if (segment.type === "thinking") return "thinking";
   if (segment.type === "text") return "text";
   return execution?.status ?? (streaming ? "running" : "completed");
+}
+
+/** Expandable tool-call node: shows the call arguments and the tool output. */
+function ToolCallDetails({ call, execution, streaming }: { call: Extract<MessageBlock, { type: "tool-call" }>; execution: ToolExecution | undefined; streaming: boolean }): ReactNode {
+  const running = execution?.status === "running" || (!execution && streaming);
+  const [open, setOpen] = useState(() => running);
+  useEffect(() => {
+    if (running) setOpen(true);
+  }, [running]);
+  return (
+    <details className="action-timeline-call" open={open} onToggle={(event) => setOpen((event.currentTarget as HTMLDetailsElement).open)}>
+      <summary className="action-timeline-call-summary">
+        <strong>{toolLabel(call.name)}</strong>
+        <span>{toolCallStatusLabel(execution, streaming)}{execution?.completedAt ? ` · ${formatDuration(execution.startedAt, execution.completedAt)}` : ""}</span>
+        <ChevronDown size={12} className="action-timeline-call-chevron" />
+      </summary>
+      <div className="action-timeline-call-detail">
+        <div className="action-timeline-call-section">
+          <span className="action-timeline-call-section-title">调用指令</span>
+          <pre className="action-timeline-call-code">{formatToolArgs(execution?.args ?? call.arguments)}</pre>
+        </div>
+        <div className="action-timeline-call-section">
+          <span className="action-timeline-call-section-title">输出</span>
+          {execution?.output ? <pre className="action-timeline-call-code">{truncateToolOutput(execution.output)}</pre> : <span className="action-timeline-call-empty">{running ? "运行中…" : "（无输出）"}</span>}
+        </div>
+      </div>
+    </details>
+  );
 }
 
 interface ActionTimelineProps {
@@ -354,7 +400,7 @@ function ActionTimeline({ message, executions, turnActive, showThinking, thinkin
               <div className={`action-timeline-node ${segment.type} ${stateClass}`} key={segment.type === "tool-call" ? segment.call.id : `${segment.type}-${index}`}>
                 <span className="action-timeline-node-icon">{actionTimelineIcon(segment, execution, processActive)}</span>
                 <div className="action-timeline-node-content">
-                  {segment.type === "thinking" ? <><strong>{thinkingLabel || "思考过程"}</strong><p>{segment.text}</p></> : segment.type === "tool-call" ? <><strong>{toolLabel(segment.call.name)}</strong><span>{toolCallStatusLabel(execution, message.streaming)}{execution?.completedAt ? ` · ${formatDuration(execution.startedAt, execution.completedAt)}` : ""}</span></> : <RichContent streaming={false} artifactPrefix={`${message.id}-process-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction}>{segment.text}</RichContent>}
+                  {segment.type === "thinking" ? <><strong>{thinkingLabel || "思考过程"}</strong><p>{segment.text}</p></> : segment.type === "tool-call" ? <ToolCallDetails call={segment.call} execution={execution} streaming={Boolean(message.streaming)} /> : <RichContent streaming={false} artifactPrefix={`${message.id}-process-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction}>{segment.text}</RichContent>}
                 </div>
               </div>
             );
@@ -626,8 +672,6 @@ interface ResourceSettingsProps {
 function ResourceSettings({ resources }: ResourceSettingsProps): ReactNode {
   const [busy, setBusy] = useState(false);
   const [localError, setLocalError] = useState<string>();
-  const [newTodo, setNewTodo] = useState("");
-  const todos = useDesktopStore((state) => state.todos);
   const [mcpFormOpen, setMcpFormOpen] = useState(false);
   const [mcpName, setMcpName] = useState("");
   const [mcpScope, setMcpScope] = useState<McpServerConfigDraft["scope"]>("project");
@@ -715,23 +759,11 @@ function ResourceSettings({ resources }: ResourceSettingsProps): ReactNode {
       </section>
       <section className="resource-section">
         <div className="resource-section-heading"><span><Puzzle size={14} />Skill</span><small>{resources.skills.length} 个已发现</small></div>
-        <p className="resource-form-help">把 <code>{`<slug>/SKILL.md`}</code> 放到全局目录 <code>pidesktop-skills/</code> 或项目目录 <code>.pidesktop-skills/</code> 即可被发现，启用后会注入系统提示供模型调用。</p>
+        <p className="resource-form-help">把 <code>{`<slug>/SKILL.md`}</code> 放到全局目录 <code>pidesktop-skills/</code>、共享目录 <code>~/.agents/skills/</code> 或项目目录 <code>.pidesktop-skills/</code> 即可被发现，启用后会注入系统提示供模型调用。</p>
         {resources.skills.length === 0 ? <p className="resource-empty">当前没有发现 Skill。</p> : <div className="resource-list">{resources.skills.map((skill) => <div className="resource-item" key={skill.id}><div className="resource-item-icon"><Puzzle size={14} /></div><div className="resource-item-copy"><strong>/skill:{skill.name}</strong><small>{skill.description}</small><em>{resourceScopeLabels[skill.scope]} · {skill.source}{skill.disableModelInvocation ? " · 仅手动调用" : ""}</em></div><label className="resource-toggle"><input type="checkbox" checked={skill.enabled} disabled={controlsBusy || !skill.toggleable} onChange={(event) => void run({ type: "skill.toggle", id: skill.id, enabled: event.target.checked })} /><span>启用</span></label></div>)}</div>}
       </section>
       {resources.diagnostics.length > 0 && <div className="resource-diagnostics"><strong>资源诊断</strong>{resources.diagnostics.map((diagnostic) => <p key={diagnostic}>{diagnostic}</p>)}</div>}
-      <section className="resource-section">
-        <div className="resource-section-heading"><span><Check size={14} />Todo</span><small>{todos.length} 项</small></div>
-        <form className="resource-package-form" onSubmit={(event) => { event.preventDefault(); const title = newTodo.trim(); if (!title) return; void run({ type: "todo.create", title }).then((ok) => { if (ok) setNewTodo(""); }); }}><input value={newTodo} placeholder="新增待办，回车添加" onChange={(event) => setNewTodo(event.target.value)} /><button className="primary-button" type="submit" disabled={controlsBusy || !newTodo.trim()}><Plus size={13} />添加</button></form>
-        <div className="resource-list todo-list">
-          {todos.length === 0 ? <p className="resource-empty">暂无待办。也可以让助手用 todo_create 等工具管理。</p> : todos.map((todo) => (
-            <div className={`resource-item todo-item${todo.status === "completed" ? " completed" : ""}`} key={todo.id}>
-              <label className="resource-toggle todo-check"><input type="checkbox" checked={todo.status === "completed"} disabled={controlsBusy} onChange={(event) => void run({ type: "todo.update", id: todo.id, status: event.target.checked ? "completed" : "pending" })} /><span>{todo.status === "completed" ? "已完成" : "完成"}</span></label>
-              <div className="resource-item-copy"><strong>{todo.title}</strong>{todo.notes && <small>{todo.notes}</small>}</div>
-              <button className="icon-button resource-remove" type="button" title="删除" aria-label={`删除待办 ${todo.title}`} disabled={controlsBusy} onClick={() => void run({ type: "todo.delete", id: todo.id })}><Trash2 size={14} /></button>
-            </div>
-          ))}
-        </div>
-      </section>
+
     </div>
   );
 }
@@ -1135,12 +1167,13 @@ export function App(): ReactNode {
   const workAreaRef = useRef<HTMLDivElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
+  const previousSessionIdRef = useRef<string | undefined>(undefined);
   const [slashIndex, setSlashIndex] = useState(0);
   const selectedModel = snapshot.model ? `${snapshot.model.provider}/${snapshot.model.id}` : "";
   const availableModels = useMemo(() => models.filter((model) => model.configured), [models]);
   const selectedModelOption = availableModels.find((model) => `${model.provider}/${model.id}` === selectedModel);
   const visibleAgents = useMemo(() => settings.agents.filter((agent) => !agent.archived && `${agent.name} ${agent.description}`.toLowerCase().includes(sidebarQuery.trim().toLowerCase())), [settings.agents, sidebarQuery]);
-  const sessionGroups = useMemo(() => groupSessionsByWorkspace(snapshot.sessions, sidebarQuery), [snapshot.sessions, sidebarQuery]);
+  const sessionGroups = useMemo(() => groupSessionsByWorkspace(snapshot.sessions, sidebarQuery, snapshot.recentWorkspaces), [snapshot.sessions, snapshot.recentWorkspaces, sidebarQuery]);
   const displayMessages = useMemo(() => groupAssistantMessages(snapshot.messages), [snapshot.messages]);
   const latestAssistantIndex = useMemo(() => [...displayMessages].reverse().findIndex((message) => message.role === "assistant"), [displayMessages]);
   const latestAssistantMessageIndex = latestAssistantIndex < 0 ? -1 : displayMessages.length - 1 - latestAssistantIndex;
@@ -1245,12 +1278,31 @@ export function App(): ReactNode {
 
   useLayoutEffect(() => {
     const timeline = timelineRef.current;
-    if (!timeline || !stickToBottomRef.current) return;
+    if (!timeline) return;
+    const sessionChanged = previousSessionIdRef.current !== snapshot.sessionId;
+    previousSessionIdRef.current = snapshot.sessionId;
+    if (sessionChanged) {
+      // Session switch: jump straight to the newest content instead of smooth-
+      // scrolling through the swapped-in history. Images/code may still be
+      // measuring, so re-jump on the next frames while still stuck to bottom.
+      stickToBottomRef.current = true;
+      timeline.scrollTo({ top: timeline.scrollHeight, behavior: "auto" });
+      requestAnimationFrame(() => {
+        const element = timelineRef.current;
+        if (element && stickToBottomRef.current) element.scrollTo({ top: element.scrollHeight, behavior: "auto" });
+      });
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        const element = timelineRef.current;
+        if (element && stickToBottomRef.current) element.scrollTo({ top: element.scrollHeight, behavior: "auto" });
+      }));
+      return;
+    }
+    if (!stickToBottomRef.current) return;
     // Instant scroll while busy: streaming fires frequent updates, and smooth
     // scrolling on every frame stacks competing animations and janks. Reserve
     // smooth scrolling for the occasional new message when idle.
     timeline.scrollTo({ top: timeline.scrollHeight, behavior: snapshot.busy ? "auto" : "smooth" });
-  }, [snapshot.messages, snapshot.busy]);
+  }, [snapshot.messages, snapshot.busy, snapshot.sessionId]);
 
   useEffect(() => {
     if (!snapshot.busy) setLocalTurnStartedAt(undefined);
@@ -1269,6 +1321,13 @@ export function App(): ReactNode {
   useEffect(() => {
     setEditingMessageTimestamp(undefined);
     setSelectedSkill(undefined);
+    if (preview) {
+      // Closing the preview wholesale must also destroy any live browser
+      // views; otherwise their hidden WebContentsViews would leak.
+      for (const tab of preview.tabs) {
+        if (tab.target.type === "browser") void window.piDesktop.browserPreview({ type: "close", tabId: tab.id });
+      }
+    }
     setPreview(undefined);
     setPreviewOpened(false);
     setPreviewCollapsed(false);
@@ -1507,6 +1566,12 @@ export function App(): ReactNode {
   }
 
   function closePreviewTab(id: string): void {
+    // Real removal of a browser tab must destroy its native view; mere tab
+    // switching only hides it (see BrowserPreview unmount behavior).
+    const closing = preview?.tabs.find((tab) => tab.id === id);
+    if (closing?.target.type === "browser") {
+      void window.piDesktop.browserPreview({ type: "close", tabId: id });
+    }
     setPreview((current) => {
       if (!current) return undefined;
       const index = current.tabs.findIndex((tab) => tab.id === id);
@@ -1533,7 +1598,7 @@ export function App(): ReactNode {
     try {
       const file = await window.piDesktop.choosePreviewFile();
       if (!file) return;
-      openPreviewTarget({ type: "file", file });
+      openPreviewTarget({ type: "file", file, workspace: file.workspace });
     } catch (error) {
       setMessageActionError(error instanceof Error ? error.message : "无法打开预览文件");
     }
@@ -1550,7 +1615,8 @@ export function App(): ReactNode {
     openPreviewTarget({ type: "loading", title, path: relativePath }, id);
     try {
       const file = await window.piDesktop.readWorkspaceFile(relativePath, workspace);
-      updatePreviewTarget(id, { type: "file", file });
+      // 记下文件所属工作区：编辑后必须写回该工作区，而不是当前会话工作区。
+      updatePreviewTarget(id, { type: "file", file, workspace: file.workspace ?? workspace });
     } catch (error) {
       updatePreviewTarget(id, { type: "error", title, path: relativePath, message: error instanceof Error ? error.message : "读取文件失败" });
     }
@@ -1578,9 +1644,37 @@ export function App(): ReactNode {
   function patchEditorState(tabId: string, patch: Partial<PreviewEditorState>): void {
     setPreviewEditorStates((prev) => ({ ...prev, [tabId]: { ...(prev[tabId] ?? defaultEditorState()), ...patch } }));
   }
+  // —— Markdown 编辑器保存管线（乐观快照 + 右上角状态指示器） ——
+  // 每次输入即时同步 tab 快照：切 tab/切预览立即显示最新内容，不会短暂回退成旧内容。
+  function handleActiveEditorContentChange(tabId: string, content: string): void {
+    const tab = previewRef.current?.tabs.find((t) => t.id === tabId);
+    if (tab?.target.type !== "file" || tab.target.file.content === content) return;
+    updatePreviewTarget(tabId, { type: "file", file: { ...tab.target.file, content }, workspace: tab.target.workspace });
+  }
+  // 落盘成功后同步快照（内容已乐观同步过，这里补上精确字节数）。
+  function handleActiveEditorSaved(tabId: string, content: string): void {
+    const tab = previewRef.current?.tabs.find((t) => t.id === tabId);
+    if (tab?.target.type !== "file") return;
+    updatePreviewTarget(tabId, { type: "file", file: { ...tab.target.file, content, size: new Blob([content]).size }, workspace: tab.target.workspace });
+  }
+  // 保存状态 → 右上角指示器；“已保存”2.5s 后自动收起，期间重新输入则不收起。
+  function handleActiveEditorStatusChange(tabId: string, status: EditorSaveStatus): void {
+    patchEditorState(tabId, { saveStatus: status });
+    if (status !== "saved") return;
+    window.setTimeout(() => {
+      setPreviewEditorStates((prev) => {
+        const current = prev[tabId];
+        if (!current || current.saveStatus !== "saved") return prev;
+        return { ...prev, [tabId]: { ...current, saveStatus: "idle" } };
+      });
+    }, 2500);
+  }
   async function reloadEditorFromDisk(tabId: string, relativePath: string): Promise<void> {
     try {
-      const file = await window.piDesktop.readWorkspaceFile(relativePath, snapshot.workspace);
+      const tab = previewRef.current?.tabs.find((t) => t.id === tabId);
+      const fileWorkspace = tab?.target.type === "file" ? tab.target.workspace : undefined;
+      const file = await window.piDesktop.readWorkspaceFile(relativePath, fileWorkspace ?? snapshot.workspace);
+      updatePreviewTarget(tabId, { type: "file", file, workspace: fileWorkspace ?? file.workspace });
       setPreviewEditorStates((prev) => {
         const prior = prev[tabId] ?? defaultEditorState();
         return { ...prev, [tabId]: { ...prior, remoteReload: { content: file.content ?? "", nonce: (prior.remoteReload?.nonce ?? 0) + 1 }, externalConflict: false, dirty: false } };
@@ -1842,7 +1936,9 @@ export function App(): ReactNode {
                   </button>
                 </div>
                 {!collapsed && <div className="session-workspace-items">
-                  {group.sessions.map((item) => <button className={item.id === snapshot.sessionId ? "active" : ""} type="button" key={item.path} title={item.title} onClick={() => void openSession(item.path, item.workspace)} onContextMenu={(event) => { event.preventDefault(); setContextMenu({ x: event.clientX, y: event.clientY, items: [{ label: "重命名", onClick: () => { setRenameSession({ path: item.path, title: item.title }); setRenameValue(item.title); } }, { label: item.pinned ? "取消置顶" : "置顶", onClick: () => { void window.piDesktop.send({ type: "session.pin", path: item.path, pinned: !item.pinned }); } }] }); }}><MessageCircle size={14} /><span><strong>{item.title}</strong><small>{new Date(item.modifiedAt).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}</small></span>{item.pinned && <Pin size={11} className="session-pin-indicator" />}</button>)}
+                  {group.sessions.length === 0
+                    ? <div className="session-workspace-empty">暂无话题，点击右上角新建</div>
+                    : group.sessions.map((item) => <button className={item.id === snapshot.sessionId ? "active" : ""} type="button" key={item.path} title={item.title} onClick={() => void openSession(item.path, item.workspace)} onContextMenu={(event) => { event.preventDefault(); setContextMenu({ x: event.clientX, y: event.clientY, items: [{ label: "重命名", onClick: () => { setRenameSession({ path: item.path, title: item.title }); setRenameValue(item.title); } }, { label: item.pinned ? "取消置顶" : "置顶", onClick: () => { void window.piDesktop.send({ type: "session.pin", path: item.path, pinned: !item.pinned }); } }] }); }}><MessageCircle size={14} /><span><strong>{item.title}</strong><small>{new Date(item.modifiedAt).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}</small></span>{item.pinned && <Pin size={11} className="session-pin-indicator" />}</button>)}
                 </div>}
               </section>
             );
@@ -1877,6 +1973,7 @@ export function App(): ReactNode {
             style={(preview && !previewCollapsed) || previewOpened ? { "--preview-split": `${previewSplit}%` } as CSSProperties : undefined}
           >
           <section className="conversation-pane">
+            <TaskPanel />
             <div className="timeline" ref={timelineRef}>
               {!snapshot.workspace ? (
                 <div className="empty-workspace"><div className="empty-icon"><FolderOpen size={27} /></div><h1>打开一个项目</h1><button className="primary-button" type="button" onClick={() => void openWorkspace()}><FolderOpen size={16} />选择文件夹</button></div>
@@ -1969,7 +2066,7 @@ export function App(): ReactNode {
           {(!preview && previewOpened) || (preview && !previewCollapsed && preview.tabs.length === 0) ? (
             <ArtifactPreview key="empty-state" tabs={[]} activeTabId="" onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddFile={() => void openManualFilePreview()} />
           ) : (
-            preview && !previewCollapsed && <ArtifactPreview key={preview.activeTabId} tabs={preview.tabs} activeTabId={preview.activeTabId} browserSuspended={previewDragging || settingsOpen || Boolean(permission) || Boolean(messageActionError)} onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddFile={() => void openManualFilePreview()} onAddReview={openLatestReview} reviewAvailable={Boolean(latestReviewExecution)} workspace={snapshot.workspace} activeEditorState={activePreviewTab?.target.type === "file" && activePreviewTab.target.file.kind === "markdown" ? getEditorState(activePreviewTab.id) : undefined} onActiveEditorChange={(patch) => { if (activePreviewTab) patchEditorState(activePreviewTab.id, patch); }} onActiveEditorResolveConflict={(choice) => { if (activePreviewTab) handleEditorResolveConflict(activePreviewTab.id, choice); }} onToggleEditing={() => { if (activePreviewTab) patchEditorState(activePreviewTab.id, { editing: !getEditorState(activePreviewTab.id).editing }); }} />
+            preview && !previewCollapsed && <ArtifactPreview tabs={preview.tabs} activeTabId={preview.activeTabId} browserSuspended={previewDragging || settingsOpen || Boolean(permission) || Boolean(messageActionError)} onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddFile={() => void openManualFilePreview()} onAddReview={openLatestReview} reviewAvailable={Boolean(latestReviewExecution)} workspace={snapshot.workspace} activeEditorState={activePreviewTab?.target.type === "file" && activePreviewTab.target.file.kind === "markdown" ? getEditorState(activePreviewTab.id) : undefined} onActiveEditorChange={(patch) => { if (activePreviewTab) patchEditorState(activePreviewTab.id, patch); }} onActiveEditorContentChange={handleActiveEditorContentChange} onActiveEditorSaved={handleActiveEditorSaved} onActiveEditorStatusChange={handleActiveEditorStatusChange} onActiveEditorSaveError={(message) => setMessageActionError(`保存 ${activePreviewTab?.target.type === "file" ? activePreviewTab.target.file.name : "Markdown"} 失败：${message}`)} onActiveEditorResolveConflict={(choice) => { if (activePreviewTab) handleEditorResolveConflict(activePreviewTab.id, choice); }} onToggleEditing={() => { if (activePreviewTab) patchEditorState(activePreviewTab.id, { editing: !getEditorState(activePreviewTab.id).editing }); }} />
           )}
         </div>
       </main>
@@ -1991,7 +2088,7 @@ export function App(): ReactNode {
       {removeWorkspace && (
         <div className="modal-backdrop permission-backdrop" onClick={() => setRemoveWorkspace(null)}>
           <div className="permission-dialog" role="alertdialog" aria-modal="true" aria-label="移除工作区" onClick={(event) => event.stopPropagation()}>
-            <header><div className="risk-icon outside-workspace"><Trash2 size={20} /></div><div><h2>移除工作区「{removeWorkspace.name}」？</h2><p>将永久删除该工作区下 {removeWorkspace.count} 个会话，此操作不可恢复。</p></div></header>
+            <header><div className="risk-icon outside-workspace"><Trash2 size={20} /></div><div><h2>移除工作区「{removeWorkspace.name}」？</h2><p>{removeWorkspace.count > 0 ? `将永久删除该工作区下 ${removeWorkspace.count} 个会话，此操作不可恢复。` : "该工作区暂无会话，将从侧边栏移除。"}</p></div></header>
             <footer><button className="secondary-button" type="button" onClick={() => setRemoveWorkspace(null)}>取消</button><button className="danger-button" type="button" onClick={() => { void window.piDesktop.send({ type: "workspace.remove", workspace: removeWorkspace.workspace }); setRemoveWorkspace(null); }}>移除</button></footer>
           </div>
         </div>

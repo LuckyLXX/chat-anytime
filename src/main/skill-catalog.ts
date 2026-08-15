@@ -5,8 +5,9 @@ import type { SkillSummary, SkillSummary as _SS } from "../shared/protocol.js";
 
 /**
  * Self-built Skill discovery. Skills live as `SKILL.md` files (one per
- * directory) under a global dir (`<agentDir>/pidesktop-skills/`) and a project
- * dir (`<workspace>/.pidesktop-skills/`). Each SKILL.md has a YAML-ish
+ * directory) under a global dir (`<agentDir>/pidesktop-skills/`), the shared
+ * cross-agent dir (`~/.agents/skills/`), and a project dir
+ * (`<workspace>/.pidesktop-skills/`). Each SKILL.md has a YAML-ish
  * frontmatter (`name`, `description`). The agent never imports these through
  * Pi's skill loader — instead the runtime injects an "available skills" list
  * into the system prompt and the user invokes a skill by asking the agent to
@@ -79,9 +80,16 @@ function scanSkillDir(rootDir: string, scope: "global" | "project"): DiscoveredS
   return skills;
 }
 
-/** Discover skills from global + project dirs. Project entries win on slug clash. */
-export function discoverSkills(globalDir: string, projectDir: string): DiscoveredSkill[] {
+/**
+ * Discover skills from the app global dir, the shared `~/.agents/skills` dir,
+ * and the project dir. On slug clash, project entries win, then the app
+ * global dir, then the shared agents dir.
+ */
+export function discoverSkills(globalDir: string, projectDir: string, agentsDir?: string): DiscoveredSkill[] {
   const merged = new Map<string, DiscoveredSkill>();
+  if (agentsDir) {
+    for (const skill of scanSkillDir(agentsDir, "global")) merged.set(skill.slug, skill);
+  }
   for (const skill of scanSkillDir(globalDir, "global")) merged.set(skill.slug, skill);
   for (const skill of scanSkillDir(projectDir, "project")) merged.set(skill.slug, skill);
   return [...merged.values()].sort((left, right) => left.name.localeCompare(right.name));
