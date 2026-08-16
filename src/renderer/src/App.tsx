@@ -1228,7 +1228,12 @@ export function App(): ReactNode {
   const isGenerating = localTurnPending || Boolean(snapshot.busy && snapshot.turnTiming && snapshot.turnTiming.completedAt === undefined);
   const activePreviewTab = preview?.tabs.find((tab) => tab.id === preview.activeTabId);
   const now = useElapsedNow(isGenerating);
-  const hasAssistantMessage = displayMessages.some((message) => message.role === "assistant" && !message.control);
+  // The avatar'd pending bubble shows from the moment a turn starts (including
+  // the local-pending window before the snapshot round-trips) until this
+  // turn's assistant reply actually renders; afterwards the plain inline
+  // progress row continues under the existing assistant bubble.
+  const lastDisplayMessage = displayMessages[displayMessages.length - 1];
+  const assistantBubbleVisible = !localTurnPending && lastDisplayMessage?.role === "assistant" && !lastDisplayMessage.control;
   const showTurnTimingOnLatest = Boolean(snapshot.turnTiming && (!snapshot.busy || displayMessages[latestAssistantMessageIndex]?.streaming));
   const canSubmit = Boolean(snapshot.workspace && (input.trim() || attachments.length > 0 || selectedSkill) && snapshot.model);
   const workingLabel = `${snapshot.agentName}正在努力输出中……`;
@@ -2030,7 +2035,7 @@ export function App(): ReactNode {
                   const turnActive = snapshot.busy && index === latestAssistantMessageIndex && message.role === "assistant";
                   return <MessageView key={message.uuid ?? message.id} message={message} executions={snapshot.executions} onOpenArtifact={openArtifactPreview} onOpenFile={openFilePreview} onOpenDiff={openDiffPreview} onHtmlAction={handleHtmlAction} onCopy={copyMessage} onEdit={editMessage} onRegenerate={regenerateMessage} onShare={shareMessage} showThinking={settings.appearance.showThinking} busy={snapshot.busy} turnActive={turnActive} timing={timing} now={timing ? now : undefined} />;
                 })}
-                {isGenerating && (hasAssistantMessage ? <div className="response-progress response-progress-inline"><LoaderCircle size={14} className="spinning" /><span>{workingLabel}</span>{activeTurnTiming && <TimingMeta timing={activeTurnTiming} now={now} />}</div> : <PendingResponse label={workingLabel} timing={activeTurnTiming} now={now} />)}
+                {isGenerating && (assistantBubbleVisible ? <div className="response-progress response-progress-inline"><LoaderCircle size={14} className="spinning" /><span>{workingLabel}</span>{activeTurnTiming && <TimingMeta timing={activeTurnTiming} now={now} />}</div> : <PendingResponse label={workingLabel} timing={activeTurnTiming} now={now} />)}
               </>}
             </div>
             <form ref={composerRef} className="composer" onSubmit={submit} onDragOver={(event) => event.preventDefault()} onDrop={handleDrop}>
