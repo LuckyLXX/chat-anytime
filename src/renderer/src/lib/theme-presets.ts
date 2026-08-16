@@ -1,4 +1,4 @@
-import type { ThemeColorKey, ThemeOverrideMode, ThemeOverrides, ThemePresetId } from "../../../shared/protocol";
+import type { ThemeMode, ThemePresetId, WallpaperOpacityOverrides } from "../../../shared/protocol";
 import blueDreamWallpaper from "../assets/blue-dream-wallpaper.png";
 
 export interface ThemePresetDefinition {
@@ -306,50 +306,6 @@ export function themePresetCss(id: ThemePresetId): string {
   return THEME_PRESETS.find((preset) => preset.id === id)?.css ?? "";
 }
 
-const themeColorVariables: Record<ThemeColorKey, string> = {
-  accent: "--accent",
-  accentHover: "--accent-hover",
-  userBubble: "--user-bubble",
-  aiBubble: "--ai-bubble"
-};
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-}
-
-function resolveThemeVariable(value: string, vars: ThemeVars, seen = new Set<string>()): string {
-  const match = /^var\((--[\w-]+)\)$/u.exec(value.trim());
-  const variable = match?.[1];
-  if (!variable || seen.has(variable)) return value.trim();
-  const next = vars[variable];
-  if (!next) return value.trim();
-  const nextSeen = new Set(seen);
-  nextSeen.add(variable);
-  return resolveThemeVariable(next, vars, nextSeen);
-}
-
-function presetModeVars(id: ThemePresetId, mode: ThemeOverrideMode): ThemeVars {
-  const vars = { ...(mode === "dark" ? darkBase : lightBase) };
-  const css = themePresetCss(id);
-  if (!css) return vars;
-  const selector = mode === "dark"
-    ? `:root[data-theme-preset="${id}"][data-theme="dark"]`
-    : `:root[data-theme-preset="${id}"]`;
-  const block = new RegExp(`${escapeRegExp(selector)}\\s*\\{([\\s\\S]*?)\\}`, "u").exec(css)?.[1] ?? "";
-  for (const declaration of block.matchAll(/(--[\w-]+)\s*:\s*([^;]+);/gu)) {
-    const variable = declaration[1];
-    const value = declaration[2];
-    if (variable && value) vars[variable] = value.trim();
-  }
-  return vars;
-}
-
-/** Return the resolved default value for one of the four ChatAnyTime color controls. */
-export function themePresetColor(id: ThemePresetId, mode: ThemeOverrideMode, key: ThemeColorKey): string {
-  const vars = presetModeVars(id, mode);
-  return resolveThemeVariable(vars[themeColorVariables[key]] ?? "#000000", vars);
-}
-
 function clampWallpaperOpacity(value: number): number {
   return Math.min(1, Math.max(0, value));
 }
@@ -361,7 +317,7 @@ function parseWallpaperOpacity(value: string): number | undefined {
 }
 
 /** Read the effective wallpaper opacity from a user-authored CSS theme. */
-export function themeWallpaperOpacity(css: string, mode: ThemeOverrideMode): number | undefined {
+export function themeWallpaperOpacity(css: string, mode: ThemeMode): number | undefined {
   let genericOpacity: number | undefined;
   for (const match of css.matchAll(/([^{}]+)\{([^{}]*)\}/gu)) {
     const selector = match[1] ?? "";
@@ -377,30 +333,18 @@ export function themeWallpaperOpacity(css: string, mode: ThemeOverrideMode): num
   return genericOpacity;
 }
 
-/** Build independent light/dark override rules for the main document or a preview scope. */
-export function themeOverrideCss(overrides: ThemeOverrides, scopeSelector = ":root"): string {
+/**
+ * Emit the wallpaper-opacity slider preference for the main document or a
+ * preview scope. Themes own every color token; this is the only renderer-side
+ * override, injected after the custom CSS on a more specific selector so it can
+ * beat the [data-theme-wallpaper="true"] rules produced by scoped themes.
+ */
+export function wallpaperOpacityCss(overrides: WallpaperOpacityOverrides | undefined, scopeSelector = ":root"): string {
+  if (!overrides) return "";
   return (["light", "dark"] as const).flatMap((mode) => {
-    const declarationsForMode: Array<readonly [string, string]> = [];
-    let wallpaperOpacity: number | undefined;
-    for (const [key, value] of Object.entries(overrides[mode] ?? {})) {
-      if (key === "wallpaperOpacity") {
-        if (typeof value === "number" && Number.isFinite(value)) wallpaperOpacity = clampWallpaperOpacity(value);
-        continue;
-      }
-      const variable = themeColorVariables[key as ThemeColorKey];
-      if (variable && typeof value === "string" && /^#[\da-f]{6}$/iu.test(value)) declarationsForMode.push([variable, value]);
-    }
-    // Wallpaper opacity rides on a more specific selector so it can beat the
-    // [data-theme-wallpaper="true"] rules produced by scoped custom themes.
-    // The override is injected after the custom CSS, so equal specificity wins.
-    const rules: string[] = [];
-    if (declarationsForMode.length > 0) {
-      rules.push(`${scopeSelector}[data-theme-effective="${mode}"] {\n${declarationsForMode.map(([variable, value]) => `  ${variable}: ${value};`).join("\n")}\n}`);
-    }
-    if (wallpaperOpacity !== undefined) {
-      rules.push(`${scopeSelector}[data-theme-wallpaper="true"][data-theme-effective="${mode}"] {\n  --chat-bg-opacity: ${String(Number(wallpaperOpacity.toFixed(4)))} !important;\n}`);
-    }
-    return rules;
+    const value = overrides[mode];
+    if (typeof value !== "number" || !Number.isFinite(value)) return [];
+    return [`${scopeSelector}[data-theme-wallpaper="true"][data-theme-effective="${mode}"] {\n  --chat-bg-opacity: ${String(Number(clampWallpaperOpacity(value).toFixed(4)))} !important;\n}`];
   }).join("\n");
 }
 

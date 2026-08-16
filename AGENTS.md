@@ -16,5 +16,6 @@
 - Preserve the permission boundary for bash, writes, and paths outside the selected workspace.
 - Keep provider secrets process-local unless a dedicated secure-storage design is added.
 - Render complete HTML/SVG documents only inside the sandboxed Artifact preview.
+- Theme system: custom theme CSS is applied verbatim (only ChatAnyTime alias mapping and mode-selector rescoping, `src/renderer/src/lib/theme-presets.ts`). The stable theme-hook contract for structural themes is: `data-pane` on major regions (sidebar / topbar / work-area / conversation / timeline / composer / task-panel / preview / settings-dialog / permission-dialog), `data-role` on message articles (user / assistant / extension), and boolean `data-ui-*` state attributes on `<html>` (settings-open / workspace-open / chat-empty / generating / preview-open / permission-pending). These attributes are public theme API — do not rename or remove them without a migration note. Themes own every color token; the only renderer-side override is the wallpaper-opacity slider (`appearance.wallpaperOpacity`, light/dark). Theme assets may be image or font data URLs.
 - Prefer focused changes. Do not copy ChatAnyTime plugin runtime code into this project.
 - Before handoff, run `npm test`, `npm run build`, and a packaged Windows smoke test when packaging behavior changes.

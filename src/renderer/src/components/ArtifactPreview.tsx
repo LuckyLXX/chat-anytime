@@ -99,7 +99,7 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, onSelectT
   const active = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0];
   if (!active) {
     return (
-      <aside className="content-preview-panel" aria-label="预览面板">
+      <aside className="content-preview-panel" data-pane="preview" aria-label="预览面板">
         <div className="preview-empty-state">
           <strong>预览面板</strong>
           <em>点击以下项可打开对应的预览标签</em>
@@ -188,7 +188,7 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, onSelectT
   }
 
   return (
-    <aside className="content-preview-panel" aria-label={`${targetMetadata(target).title}预览`}>
+    <aside className="content-preview-panel" data-pane="preview" aria-label={`${targetMetadata(target).title}预览`}>
       <div className="preview-tabs" role="tablist" aria-label="预览标签">
         {tabs.map((tab) => {
           const tabMeta = targetMetadata(tab.target);

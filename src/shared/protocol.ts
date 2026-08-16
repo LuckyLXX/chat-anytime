@@ -70,34 +70,29 @@ export interface CustomThemeDefinition {
   id: string;
   name: string;
   css: string;
-  /** Image data is kept separately so the editable CSS stays readable. */
+  /** Image/font data is kept separately so the editable CSS stays readable. */
   assets?: ThemeAssetMap;
 }
 
-export type ThemeColorKey = "accent" | "accentHover" | "userBubble" | "aiBubble";
-export type ThemeOverrideMode = "light" | "dark";
+export type ThemeMode = "light" | "dark";
 
-export interface ThemeColorOverrides {
-  accent?: string;
-  accentHover?: string;
-  userBubble?: string;
-  aiBubble?: string;
-  wallpaperOpacity?: number;
-}
-
-export interface ThemeOverrides {
-  light: ThemeColorOverrides;
-  dark: ThemeColorOverrides;
+/**
+ * Per-mode user preference for the wallpaper opacity slider. Themes own every
+ * color token; the only renderer-side override left is this slider value.
+ */
+export interface WallpaperOpacityOverrides {
+  light?: number;
+  dark?: number;
 }
 
 export interface AppearanceSettings {
   theme: "system" | "light" | "dark";
   themePreset: ThemePresetId;
   customCss: string;
-  /** Imported image data keyed by the relative url used in customCss. */
+  /** Imported image/font data keyed by the relative url used in customCss. */
   customCssAssets?: ThemeAssetMap;
   customThemes: CustomThemeDefinition[];
-  themeOverrides: ThemeOverrides;
+  wallpaperOpacity?: WallpaperOpacityOverrides;
   showThinking: boolean;
 }
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CUSTOM_PROVIDER_ID, createDefaultAgent, mergeProviderModels, migrateSettings, normalizeAccessMode, normalizeAgent, normalizeCustomThemes, normalizeThemeAssets, normalizeThemeOverrides, normalizeVision } from "./settings.js";
+import { CUSTOM_PROVIDER_ID, createDefaultAgent, mergeProviderModels, migrateSettings, normalizeAccessMode, normalizeAgent, normalizeCustomThemes, normalizeThemeAssets, normalizeVision, normalizeWallpaperOpacity } from "./settings.js";
 
 describe("desktop settings migration", () => {
   it("migrates the legacy custom provider without changing its stable id", () => {
@@ -71,25 +71,24 @@ describe("desktop settings migration", () => {
       themePreset: "rose",
       customCss: ".message { outline: 1px solid red; }",
       customThemes: [],
-      themeOverrides: { light: {}, dark: {} },
       showThinking: false
     });
   });
 
   it("falls back to safe appearance defaults for unknown theme values", () => {
     const result = migrateSettings({ appearance: { theme: "neon", themePreset: "unknown", customCss: 42 } });
-    expect(result.settings.appearance).toEqual({ theme: "system", themePreset: "default", customCss: "", customThemes: [], themeOverrides: { light: {}, dark: {} }, showThinking: true });
+    expect(result.settings.appearance).toEqual({ theme: "system", themePreset: "default", customCss: "", customThemes: [], showThinking: true });
   });
 
   it("accepts the expanded reference theme presets", () => {
     expect(migrateSettings({ appearance: { themePreset: "ocean" } }).settings.appearance.themePreset).toBe("ocean");
   });
 
-  it("normalizes independent theme color overrides and drops invalid values", () => {
-    expect(normalizeThemeOverrides({
-      light: { accent: " #ABCDEF ", aiBubble: "rgb(0 0 0)" },
-      dark: { accentHover: "#123456", unknown: "#ffffff" }
-    })).toEqual({ light: { accent: "#abcdef" }, dark: { accentHover: "#123456" } });
+  it("migrates legacy themeOverrides wallpaper opacity and clamps values", () => {
+    expect(normalizeWallpaperOpacity({ light: { accent: "#abcdef", wallpaperOpacity: 1.4 }, dark: { wallpaperOpacity: "-0.2" } })).toEqual({ light: 1, dark: 0 });
+    expect(normalizeWallpaperOpacity({ light: { wallpaperOpacity: "not-a-number" } })).toBeUndefined();
+    expect(migrateSettings({ appearance: { themeOverrides: { dark: { wallpaperOpacity: 0.42 } } } }).settings.appearance.wallpaperOpacity).toEqual({ dark: 0.42 });
+    expect(migrateSettings({ appearance: { wallpaperOpacity: { light: 0.24, dark: 0.32 } } }).settings.appearance.wallpaperOpacity).toEqual({ light: 0.24, dark: 0.32 });
   });
 
   it("defaults unknown access modes to asking and preserves supported modes", () => {
@@ -98,14 +97,6 @@ describe("desktop settings migration", () => {
     expect(normalizeAccessMode("workspace")).toBe("workspace");
     expect(normalizeAccessMode("full")).toBe("full");
     expect(normalizeAccessMode("unsafe")).toBe("ask");
-  });
-
-  it("clamps independent wallpaper opacity overrides", () => {
-    expect(normalizeThemeOverrides({
-      light: { wallpaperOpacity: 1.4 },
-      dark: { wallpaperOpacity: "-0.2" }
-    })).toEqual({ light: { wallpaperOpacity: 1 }, dark: { wallpaperOpacity: 0 } });
-    expect(normalizeThemeOverrides({ light: { wallpaperOpacity: "not-a-number" } })).toEqual({ light: {}, dark: {} });
   });
 
   it("normalizes saved custom CSS themes and ignores empty entries", () => {
@@ -122,11 +113,11 @@ describe("desktop settings migration", () => {
     ]);
   });
 
-  it("keeps imported image data separate from the editable CSS", () => {
-    const result = migrateSettings({ appearance: { customCss: ":root { --chat-bg-image: url(wallpaper.png); }", customCssAssets: { "wallpaper.png": "data:image/png;base64,abc" } } });
+  it("keeps imported image and font data separate from the editable CSS", () => {
+    const result = migrateSettings({ appearance: { customCss: ":root { --chat-bg-image: url(wallpaper.png); }", customCssAssets: { "wallpaper.png": "data:image/png;base64,abc", "brand.woff2": "data:font/woff2;base64,def" } } });
     expect(result.settings.appearance.customCss).toContain("url(wallpaper.png)");
     expect(result.settings.appearance.customCss).not.toContain("base64");
-    expect(result.settings.appearance.customCssAssets).toEqual({ "wallpaper.png": "data:image/png;base64,abc" });
+    expect(result.settings.appearance.customCssAssets).toEqual({ "wallpaper.png": "data:image/png;base64,abc", "brand.woff2": "data:font/woff2;base64,def" });
     expect(normalizeThemeAssets({ "../wallpaper.png": "data:image/png;base64,abc", bad: "https://example.com/image.png" })).toEqual({ "../wallpaper.png": "data:image/png;base64,abc" });
   });
 

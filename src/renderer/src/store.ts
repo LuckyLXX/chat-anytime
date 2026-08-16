@@ -44,7 +44,7 @@ const emptySnapshot: RuntimeSnapshot = {
   sessions: [],
   recentWorkspaces: []
 };
-const emptySettings: DesktopSettings = { version: 2, thinkingLevel: "medium", accessMode: "ask", providers: [], agents: [], currentAgentId: "default", appearance: { theme: "system", themePreset: "default", customCss: "", customThemes: [], themeOverrides: { light: {}, dark: {} }, showThinking: true } };
+const emptySettings: DesktopSettings = { version: 2, thinkingLevel: "medium", accessMode: "ask", providers: [], agents: [], currentAgentId: "default", appearance: { theme: "system", themePreset: "default", customCss: "", customThemes: [], showThinking: true } };
 const emptyResources: ResourceCatalog = { skills: [], mcpServers: [], todos: [], diagnostics: [] };
 
 export const useDesktopStore = create<DesktopState>((set, get) => ({

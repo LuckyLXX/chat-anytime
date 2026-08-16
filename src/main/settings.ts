@@ -9,12 +9,10 @@ import type {
   ProviderModelSettings,
   ProviderSettings,
   ThemeAssetMap,
-  ThemeColorKey,
-  ThemeColorOverrides,
-  ThemeOverrides,
   ThemePresetId,
   ThinkingLevel,
-  VisionSettings
+  VisionSettings,
+  WallpaperOpacityOverrides
 } from "../shared/protocol.js";
 
 export const BUILTIN_TOOLS: BuiltinToolName[] = ["read", "bash", "edit", "write", "grep", "find", "ls"];
@@ -47,36 +45,37 @@ export function defaultAppearance(): AppearanceSettings {
     themePreset: "default",
     customCss: "",
     customThemes: [],
-    themeOverrides: { light: {}, dark: {} },
     showThinking: true
   };
 }
 
-const THEME_COLOR_KEYS: readonly ThemeColorKey[] = ["accent", "accentHover", "userBubble", "aiBubble"];
-const HEX_COLOR_PATTERN = /^#[\da-f]{6}$/iu;
-
-function normalizeThemeColorOverrides(value: unknown): ThemeColorOverrides {
-  if (!value || typeof value !== "object") return {};
-  const source = value as Record<string, unknown>;
-  const colors = Object.fromEntries(THEME_COLOR_KEYS.flatMap((key) => {
-    const color = typeof source[key] === "string" ? source[key].trim().toLowerCase() : "";
-    return HEX_COLOR_PATTERN.test(color) ? [[key, color]] : [];
-  })) as ThemeColorOverrides;
-  const rawOpacity = typeof source.wallpaperOpacity === "number"
-    ? source.wallpaperOpacity
-    : typeof source.wallpaperOpacity === "string" && source.wallpaperOpacity.trim()
-      ? Number(source.wallpaperOpacity)
+function clampOpacity(value: unknown): number | undefined {
+  const raw = typeof value === "number"
+    ? value
+    : typeof value === "string" && value.trim()
+      ? Number(value)
       : Number.NaN;
-  if (!Number.isFinite(rawOpacity)) return colors;
-  return { ...colors, wallpaperOpacity: Math.min(1, Math.max(0, rawOpacity)) };
+  return Number.isFinite(raw) ? Math.min(1, Math.max(0, raw)) : undefined;
 }
 
-export function normalizeThemeOverrides(value: unknown): ThemeOverrides {
-  const source = value && typeof value === "object" ? value as Record<string, unknown> : {};
-  return {
-    light: normalizeThemeColorOverrides(source.light),
-    dark: normalizeThemeColorOverrides(source.dark)
-  };
+/**
+ * Accepts the current { light: 0.4 } shape and, for migration, the legacy
+ * themeOverrides shape { light: { wallpaperOpacity: 0.4, ...colors } }.
+ */
+export function normalizeWallpaperOpacity(value: unknown): WallpaperOpacityOverrides | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const source = value as Record<string, unknown>;
+  const result: WallpaperOpacityOverrides = {};
+  for (const mode of ["light", "dark"] as const) {
+    const modeSource = source[mode];
+    const direct = clampOpacity(modeSource);
+    const nested = modeSource && typeof modeSource === "object"
+      ? clampOpacity((modeSource as Record<string, unknown>).wallpaperOpacity)
+      : undefined;
+    const opacity = direct ?? nested;
+    if (opacity !== undefined) result[mode] = opacity;
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
 }
 
 export function normalizeCustomThemes(value: unknown): CustomThemeDefinition[] {
@@ -98,11 +97,13 @@ export function normalizeCustomThemes(value: unknown): CustomThemeDefinition[] {
   });
 }
 
+const THEME_ASSET_DATA_PATTERN = /^data:(?:image|font)\/|application\/(?:font-woff|x-font-woff|vnd\.ms-fontobject)\//iu;
+
 export function normalizeThemeAssets(value: unknown): ThemeAssetMap {
   if (!value || typeof value !== "object") return {};
   return Object.fromEntries(Object.entries(value as Record<string, unknown>).flatMap(([path, data]) => {
     const normalizedPath = path.trim().replaceAll("\\", "/").replace(/^\.\/+?/u, "").toLowerCase();
-    return normalizedPath && typeof data === "string" && data.startsWith("data:image/") ? [[normalizedPath, data]] : [];
+    return normalizedPath && typeof data === "string" && THEME_ASSET_DATA_PATTERN.test(data) ? [[normalizedPath, data]] : [];
   }));
 }
 
@@ -226,7 +227,8 @@ export function migrateSettings(raw: unknown): { settings: DesktopSettings; lega
   const customCss = typeof appearanceSource.customCss === "string" ? appearanceSource.customCss : defaults.appearance.customCss;
   const customCssAssets = normalizeThemeAssets(appearanceSource.customCssAssets);
   const customThemes = normalizeCustomThemes(appearanceSource.customThemes);
-  const themeOverrides = normalizeThemeOverrides(appearanceSource.themeOverrides);
+  const wallpaperOpacity = normalizeWallpaperOpacity(appearanceSource.wallpaperOpacity)
+    ?? normalizeWallpaperOpacity(appearanceSource.themeOverrides);
   const thinkingLevel = ["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(String(source.thinkingLevel))
     ? source.thinkingLevel as ThinkingLevel
     : "medium";
@@ -240,7 +242,7 @@ export function migrateSettings(raw: unknown): { settings: DesktopSettings; lega
     providers,
     agents: normalizedAgents,
     currentAgentId,
-    appearance: { theme, themePreset, customCss, ...(Object.keys(customCssAssets).length > 0 ? { customCssAssets } : {}), customThemes, themeOverrides, showThinking: appearanceSource.showThinking !== false },
+    appearance: { theme, themePreset, customCss, ...(Object.keys(customCssAssets).length > 0 ? { customCssAssets } : {}), customThemes, ...(wallpaperOpacity ? { wallpaperOpacity } : {}), showThinking: appearanceSource.showThinking !== false },
     vision: normalizeVision(source.vision)
   };
   const legacyApiKey = typeof source.customProviderApiKey === "string" ? source.customProviderApiKey : undefined;

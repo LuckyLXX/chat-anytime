@@ -27,7 +27,7 @@ export function PermissionDialog({ request }: PermissionDialogProps): ReactNode 
 
   return (
     <div className="modal-backdrop permission-backdrop">
-      <div className="permission-dialog" role="alertdialog" aria-modal="true" aria-label="工具权限确认">
+      <div className="permission-dialog" data-pane="permission-dialog" role="alertdialog" aria-modal="true" aria-label="工具权限确认">
         <header>
           <div className={`risk-icon ${request.risk}`}><TerminalSquare size={20} /></div>
           <div><h2>允许{toolLabel(request.toolName)}？</h2><p>{principalLabel} · {request.summary}</p></div>

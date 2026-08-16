@@ -103,7 +103,7 @@ export function TaskPanel(): ReactNode {
   }
 
   return (
-    <div className={`task-panel${collapsed ? " collapsed" : ""}`}>
+    <div className={`task-panel${collapsed ? " collapsed" : ""}`} data-pane="task-panel">
       <header className="task-panel-header">
         <button className="task-panel-header-toggle" type="button" aria-expanded={!collapsed} title={collapsed ? "展开任务面板" : "折叠任务面板"} onClick={() => setPanel(collapsed ? "open" : "collapsed")}>
           <Check size={14} />

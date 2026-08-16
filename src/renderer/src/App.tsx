@@ -58,9 +58,8 @@ import type {
   ProviderOption,
   CustomThemeDefinition,
   ThinkingLevel,
-  ThemeColorKey,
   ThemeAssetMap,
-  ThemeOverrideMode,
+  ThemeMode,
   ThemePresetId,
   ToolExecution,
   MessageBlock,
@@ -84,7 +83,7 @@ import { groupAssistantMessages } from "./lib/chat-layout";
 import { clampPreviewSplit, PREVIEW_SPLIT_MAX, PREVIEW_SPLIT_MIN, previewSplitFromKey } from "./lib/preview-split";
 import { groupSessionsByWorkspace } from "./lib/session-groups";
 import { CSS_URL_PATTERN, createThemeAssetUrls, isExternalThemeReference, normalizeThemeAssetReference, resolveThemeAssets } from "./lib/theme-assets";
-import { THEME_PRESETS, scopeCustomThemeCss, scopeCustomThemeCssForPreview, themeOverrideCss, themePresetColor, themePresetCss, themePreviewCss, themeWallpaperOpacity } from "./lib/theme-presets";
+import { THEME_PRESETS, scopeCustomThemeCss, scopeCustomThemeCssForPreview, themePresetCss, themePreviewCss, themeWallpaperOpacity, wallpaperOpacityCss } from "./lib/theme-presets";
 import { shareElementAsImage } from "./lib/share-image";
 import { useDesktopStore } from "./store";
 import { TaskPanel } from "./TaskPanel";
@@ -117,13 +116,6 @@ interface PreviewState {
   activeTabId: string;
 }
 const agentTools: BuiltinToolName[] = ["read", "bash", "edit", "write", "grep", "find", "ls"];
-const themeColorFields: readonly { key: ThemeColorKey; label: string }[] = [
-  { key: "accent", label: "主题色" },
-  { key: "accentHover", label: "辅助色" },
-  { key: "userBubble", label: "用户气泡" },
-  { key: "aiBubble", label: "AI 气泡" }
-];
-const HEX_COLOR_PATTERN = /^#[\da-f]{6}$/iu;
 
 type SlashCommandBase = {
   trigger: string;
@@ -155,8 +147,8 @@ function themeRelativePath(file: File): string {
 function readFileAsDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = () => typeof reader.result === "string" ? resolve(reader.result) : reject(new Error("无法读取主题图片"));
-    reader.onerror = () => reject(reader.error ?? new Error("无法读取主题图片"));
+    reader.onload = () => typeof reader.result === "string" ? resolve(reader.result) : reject(new Error("无法读取主题资源文件"));
+    reader.onerror = () => reject(reader.error ?? new Error("无法读取主题资源文件"));
     reader.readAsDataURL(file);
   });
 }
@@ -171,8 +163,8 @@ function customCssHasWallpaper(css: string): boolean {
 }
 
 async function collectThemeAssets(css: string, cssFile: File, files: File[]): Promise<ThemeAssetMap> {
-  const imageFiles = files.filter((file) => /\.(?:png|jpe?g|webp|gif)$/iu.test(file.name));
-  const assets = await Promise.all(imageFiles.map(async (file) => [themeRelativePath(file).toLowerCase(), await readFileAsDataUrl(file)] as const));
+  const assetFiles = files.filter((file) => /\.(?:png|jpe?g|webp|gif|woff2?|ttf|otf)$/iu.test(file.name));
+  const assets = await Promise.all(assetFiles.map(async (file) => [themeRelativePath(file).toLowerCase(), await readFileAsDataUrl(file)] as const));
   const cssPath = themeRelativePath(cssFile);
   const cssDirectory = cssPath.includes("/") ? cssPath.slice(0, cssPath.lastIndexOf("/")) : "";
   const result: ThemeAssetMap = {};
@@ -203,10 +195,6 @@ function useThemeAssetUrls(assets: ThemeAssetMap | undefined): ThemeAssetMap {
     return assetUrlSet.revoke;
   }, [assets]);
   return urls;
-}
-
-function themeColorValue(appearance: AppearanceSettings, mode: ThemeOverrideMode, key: ThemeColorKey): string {
-  return appearance.themeOverrides[mode][key] ?? themePresetColor(appearance.themePreset, mode, key);
 }
 
 function messageText(message: ChatMessage): string {
@@ -261,7 +249,7 @@ function TimingMeta({ timing, now }: { timing: TurnTiming; now: number }): React
 
 function PendingResponse({ label, timing, now }: { label: string; timing?: TurnTiming; now: number }): ReactNode {
   return (
-    <article className="message message-assistant pending-response">
+    <article className="message message-assistant pending-response" data-role="assistant">
       <div className="message-avatar pi-avatar"><Bot size={17} /></div>
       <div className="message-body message-bubble pending-response-body">
         <div className="response-progress"><LoaderCircle size={14} className="spinning" /><span>{label}</span></div>
@@ -516,7 +504,7 @@ const MessageView = memo(function MessageView({ message, executions, onOpenArtif
   if (message.role === "extension") {
     const images = message.blocks.filter((block): block is Extract<MessageBlock, { type: "image" }> => block.type === "image");
     return (
-      <article className="message message-extension">
+      <article className="message message-extension" data-role="extension">
         <div className="message-avatar extension-avatar"><PlugZap size={16} /></div>
         <div className="message-body extension-message-callout">
           <strong>{message.extension?.customType || "扩展消息"}</strong>
@@ -530,7 +518,7 @@ const MessageView = memo(function MessageView({ message, executions, onOpenArtif
   if (message.role === "user") {
     const images = message.blocks.filter((block): block is Extract<MessageBlock, { type: "image" }> => block.type === "image");
     return (
-      <article className="message message-user">
+      <article className="message message-user" data-role="user">
         <div className="message-avatar user-avatar">我</div>
         <div className="message-body message-bubble">{message.skill && <div className="message-skill-badge"><Puzzle size={13} /><strong>{message.skill.name}</strong></div>}{images.length > 0 && <div className="image-message-list">{images.map((block, index) => <ImageMessageBlock key={`${message.id}-image-${index}`} block={block} />)}</div>}{text && <p className="user-text">{text}</p>}{!isControlMessage && <div className="message-actions"><button type="button" title="复制" aria-label="复制用户消息" onClick={() => onCopy(message)}><Copy size={13} /></button><button type="button" title="重新编辑" aria-label="重新编辑用户消息" onClick={() => onEdit(message)}><Pencil size={13} /></button></div>}</div>
       </article>
@@ -538,7 +526,7 @@ const MessageView = memo(function MessageView({ message, executions, onOpenArtif
   }
 
   return (
-    <article className="message message-assistant">
+    <article className="message message-assistant" data-role="assistant">
       <div className="message-avatar pi-avatar"><Bot size={17} /></div>
       <div className="message-body message-bubble">
         <div className="assistant-share-content" ref={shareTargetRef}>
@@ -577,7 +565,7 @@ flowchart LR
 \`\`\`
 
 <assistant_html><div><strong>HTML 片段</strong><p>安全清洗后仍保留布局和交互样式。</p></div></assistant_html>`;
-  const previewCss = `${themePreviewCss(appearance.themePreset)}\n${scopeCustomThemeCssForPreview(resolveThemeAssets(appearance.customCss, themeAssetUrls))}\n${themeOverrideCss(appearance.themeOverrides, ".theme-preview-scope[data-theme-custom]")}`;
+  const previewCss = `${themePreviewCss(appearance.themePreset)}\n${scopeCustomThemeCssForPreview(resolveThemeAssets(appearance.customCss, themeAssetUrls))}\n${wallpaperOpacityCss(appearance.wallpaperOpacity, ".theme-preview-scope[data-theme-custom]")}`;
   const hasWallpaper = customCssHasWallpaper(appearance.customCss);
   const panes = [
     { id: "dark", label: "深色", effective: "dark" },
@@ -822,7 +810,7 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
   const [visionError, setVisionError] = useState<string>();
   const visionModelOptions = models.filter((model) => model.configured && model.imageInput);
   const [tab, setTab] = useState<"general" | "models" | "agents" | "appearance" | "resources">("general");
-  const [themeColorMode, setThemeColorMode] = useState<ThemeOverrideMode>(() => {
+  const [opacityMode, setOpacityMode] = useState<ThemeMode>(() => {
     const { theme } = settings.appearance;
     if (theme === "light") return "light";
     if (theme === "dark") return "dark";
@@ -843,8 +831,8 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
   const providerModels = isCustomProvider ? (selectedProvider?.models ?? customModels) : [];
   const enabledProviderModels = providerModels.filter((model) => model.enabled !== false);
   const selectedCustomModel = providerModels.find((model) => model.id === customModelId);
-  const wallpaperOpacityOverride = settings.appearance.themeOverrides[themeColorMode].wallpaperOpacity;
-  const wallpaperOpacity = wallpaperOpacityOverride ?? themeWallpaperOpacity(settings.appearance.customCss, themeColorMode) ?? 0;
+  const wallpaperOpacityOverride = settings.appearance.wallpaperOpacity?.[opacityMode];
+  const wallpaperOpacity = wallpaperOpacityOverride ?? themeWallpaperOpacity(settings.appearance.customCss, opacityMode) ?? 0;
   const wallpaperOpacityPercent = Math.round(wallpaperOpacity * 100);
   function closeSettings(): void { useDesktopStore.setState({ settings: structuredClone(initialSettingsRef.current) }); onClose(); }
   function markSettingsSaved(nextSettings: import("../../shared/protocol").DesktopSettings): void {
@@ -868,28 +856,17 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
     useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, ...patch } } });
   }
 
-  function updateThemeColor(key: ThemeColorKey, value: string): void {
-    const themeOverrides = structuredClone(settings.appearance.themeOverrides);
-    themeOverrides[themeColorMode][key] = value.toLowerCase();
-    updateAppearance({ themeOverrides });
-  }
-
-  function resetThemeColor(key: ThemeColorKey): void {
-    const themeOverrides = structuredClone(settings.appearance.themeOverrides);
-    delete themeOverrides[themeColorMode][key];
-    updateAppearance({ themeOverrides });
-  }
-
   function updateWallpaperOpacity(value: number): void {
-    const themeOverrides = structuredClone(settings.appearance.themeOverrides);
-    themeOverrides[themeColorMode].wallpaperOpacity = Math.min(1, Math.max(0, value));
-    updateAppearance({ themeOverrides });
+    const wallpaperOpacity = { ...settings.appearance.wallpaperOpacity, [opacityMode]: Math.min(1, Math.max(0, value)) };
+    updateAppearance({ wallpaperOpacity });
   }
 
   function resetWallpaperOpacity(): void {
-    const themeOverrides = structuredClone(settings.appearance.themeOverrides);
-    delete themeOverrides[themeColorMode].wallpaperOpacity;
-    updateAppearance({ themeOverrides });
+    const current = settings.appearance.wallpaperOpacity;
+    if (!current?.[opacityMode]) return;
+    const wallpaperOpacity = structuredClone(current);
+    delete wallpaperOpacity[opacityMode];
+    updateAppearance(Object.keys(wallpaperOpacity).length > 0 ? { wallpaperOpacity } : { wallpaperOpacity: undefined });
   }
 
   async function importCustomCss(event: React.ChangeEvent<HTMLInputElement>): Promise<void> {
@@ -1101,7 +1078,7 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={closeSettings}>
-      <section className="settings-dialog settings-center" onMouseDown={(event) => event.stopPropagation()}>
+      <section className="settings-dialog settings-center" data-pane="settings-dialog" onMouseDown={(event) => event.stopPropagation()}>
         <header><div><Settings size={19} /><div><h2>ChatAnyTime 设置</h2><p>模型服务和 Agent 角色配置保存在本机。</p></div></div><button className="icon-button" type="button" title="关闭设置" aria-label="关闭设置" onClick={closeSettings}><X size={18} /></button></header>
         <div className="settings-body"><nav className="settings-tabs"><button type="button" className={tab === "general" ? "active" : ""} onClick={() => setTab("general")}>通用</button><button type="button" className={tab === "models" ? "active" : ""} onClick={() => setTab("models")}>模型服务</button><button type="button" className={tab === "agents" ? "active" : ""} onClick={() => setTab("agents")}>Agent 角色</button><button type="button" className={tab === "resources" ? "active" : ""} onClick={() => setTab("resources")}>技能与工具</button><button type="button" className={tab === "appearance" ? "active" : ""} onClick={() => setTab("appearance")}>外观</button></nav><div className="settings-content">{tab === "general" ? <form onSubmit={(event) => { event.preventDefault(); const nextSettings = structuredClone(settings); void window.piDesktop.send({ type: "settings.save", settings: { model: nextSettings.model, thinkingLevel: nextSettings.thinkingLevel, accessMode: nextSettings.accessMode, appearance: nextSettings.appearance } }); markSettingsSaved(nextSettings); onClose(); }}>
           <label>全局默认模型<select value={settings.model ? `${settings.model.provider}/${settings.model.id}` : ""} onChange={(event) => { const value = event.target.value; const slash = value.indexOf("/"); useDesktopStore.setState({ settings: { ...settings, model: slash > 0 ? { provider: value.slice(0, slash), id: value.slice(slash + 1) } : undefined } }); }}>{<option value="">请选择默认模型</option>}{models.filter((model) => model.configured).map((model) => <option key={`${model.provider}/${model.id}`} value={`${model.provider}/${model.id}`}>{model.name}</option>)}</select></label>
@@ -1145,19 +1122,18 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
         </div> : tab === "resources" ? <ResourceSettings resources={resources} /> : <form className="appearance-settings" onSubmit={(event) => { event.preventDefault(); const nextSettings = structuredClone(settings); void window.piDesktop.send({ type: "appearance.save", appearance: nextSettings.appearance }); markSettingsSaved(nextSettings); onClose(); }}>
           <div className="appearance-grid">
             <div>
-              <label>主题模式<select value={settings.appearance.theme} onChange={(event) => { const next = event.target.value as "system" | "light" | "dark"; useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, theme: next } } }); setThemeColorMode(next === "light" ? "light" : next === "dark" ? "dark" : (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")); }}><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></label>
+              <label>主题模式<select value={settings.appearance.theme} onChange={(event) => { const next = event.target.value as "system" | "light" | "dark"; useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, theme: next } } }); setOpacityMode(next === "light" ? "light" : next === "dark" ? "dark" : (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")); }}><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></label>
               <label className="checkbox-setting"><input type="checkbox" checked={settings.appearance.showThinking} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, showThinking: event.target.checked } } })} />展示思考过程</label>
-              <div className="theme-preset-field"><span className="settings-field-label">主题预设</span><div className="theme-preset-grid">{THEME_PRESETS.map((preset) => <button type="button" key={preset.id} className={`theme-preset-card${settings.appearance.themePreset === preset.id ? " active" : ""}`} onClick={() => useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, themePreset: preset.id as ThemePresetId, themeOverrides: { light: {}, dark: {} } } } })}><span className="theme-swatches">{preset.swatches.map((color) => <i key={color} style={{ backgroundColor: color }} />)}</span><strong>{preset.name}</strong><small>{preset.description}</small></button>)}</div></div>
-              <section className="theme-color-settings" aria-label="自定义配色">
-                <div className="theme-color-heading"><span className="settings-field-label">自定义配色</span><div className="theme-color-mode-switch" role="tablist" aria-label="配色模式"><button type="button" className={themeColorMode === "light" ? "active" : ""} role="tab" aria-selected={themeColorMode === "light"} onClick={() => setThemeColorMode("light")}>浅色</button><button type="button" className={themeColorMode === "dark" ? "active" : ""} role="tab" aria-selected={themeColorMode === "dark"} onClick={() => setThemeColorMode("dark")}>深色</button></div></div>
-                <p className="theme-color-hint">为当前模式覆盖预设颜色；切换预设会重置这些覆盖。</p>
-                 <div className="theme-color-grid">{themeColorFields.map((field) => { const value = themeColorValue(settings.appearance, themeColorMode, field.key); return <div className="theme-color-row" key={field.key}><label htmlFor={`theme-color-${field.key}`}>{field.label}</label><input id={`theme-color-${field.key}`} type="color" value={value} onChange={(event) => updateThemeColor(field.key, event.target.value)} /><input className="theme-color-hex" type="text" inputMode="text" maxLength={7} spellCheck={false} aria-label={`${field.label}十六进制值`} value={value} onChange={(event) => { const next = event.target.value.trim(); if (HEX_COLOR_PATTERN.test(next)) updateThemeColor(field.key, next); }} /><button className="icon-button theme-color-reset" type="button" title={`重置${field.label}`} aria-label={`重置${field.label}`} onClick={() => resetThemeColor(field.key)}><RotateCcw size={14} /></button></div>; })}</div>
-                 <div className="theme-opacity-row"><label htmlFor="theme-wallpaper-opacity">背景图片透明度</label><input id="theme-wallpaper-opacity" type="range" min="0" max="100" step="1" value={wallpaperOpacityPercent} aria-valuetext={`${wallpaperOpacityPercent}%`} onChange={(event) => updateWallpaperOpacity(Number(event.target.value) / 100)} /><output>{wallpaperOpacityPercent}%</output><button className="icon-button theme-color-reset" type="button" disabled={wallpaperOpacityOverride === undefined} title="恢复主题默认透明度" aria-label="恢复主题默认透明度" onClick={resetWallpaperOpacity}><RotateCcw size={14} /></button></div>
+              <div className="theme-preset-field"><span className="settings-field-label">主题预设</span><div className="theme-preset-grid">{THEME_PRESETS.map((preset) => <button type="button" key={preset.id} className={`theme-preset-card${settings.appearance.themePreset === preset.id ? " active" : ""}`} onClick={() => useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, themePreset: preset.id as ThemePresetId } } })}><span className="theme-swatches">{preset.swatches.map((color) => <i key={color} style={{ backgroundColor: color }} />)}</span><strong>{preset.name}</strong><small>{preset.description}</small></button>)}</div></div>
+              <section className="theme-color-settings" aria-label="壁纸透明度">
+                <div className="theme-color-heading"><span className="settings-field-label">背景图片透明度</span><div className="theme-color-mode-switch" role="tablist" aria-label="透明度模式"><button type="button" className={opacityMode === "light" ? "active" : ""} role="tab" aria-selected={opacityMode === "light"} onClick={() => setOpacityMode("light")}>浅色</button><button type="button" className={opacityMode === "dark" ? "active" : ""} role="tab" aria-selected={opacityMode === "dark"} onClick={() => setOpacityMode("dark")}>深色</button></div></div>
+                <p className="theme-color-hint">覆盖当前主题声明的壁纸透明度；颜色完全由主题 CSS 决定。主题未设置壁纸时不生效。</p>
+                 <div className="theme-opacity-row"><label htmlFor="theme-wallpaper-opacity">透明度</label><input id="theme-wallpaper-opacity" type="range" min="0" max="100" step="1" value={wallpaperOpacityPercent} aria-valuetext={`${wallpaperOpacityPercent}%`} onChange={(event) => updateWallpaperOpacity(Number(event.target.value) / 100)} /><output>{wallpaperOpacityPercent}%</output><button className="icon-button theme-color-reset" type="button" disabled={wallpaperOpacityOverride === undefined} title="恢复主题默认透明度" aria-label="恢复主题默认透明度" onClick={resetWallpaperOpacity}><RotateCcw size={14} /></button></div>
                </section>
             </div>
             <ThemePreview appearance={settings.appearance} />
           </div>
-              <div className="custom-css-heading"><span>自定义 CSS</span><div><input ref={cssFileInputRef} hidden type="file" accept=".css,text/css" onChange={(event) => void importCustomCss(event)} /><input ref={(element) => { themeDirectoryInputRef.current = element; element?.setAttribute("webkitdirectory", ""); }} hidden type="file" multiple accept=".css,image/png,image/jpeg,image/webp,image/gif" onChange={(event) => void importThemeDirectory(event)} /><button className="secondary-button" type="button" onClick={() => cssFileInputRef.current?.click()}>导入 CSS</button><button className="secondary-button" type="button" onClick={() => themeDirectoryInputRef.current?.click()}>导入主题目录</button><button className="secondary-button" type="button" onClick={() => { setEditingCustomThemeId(undefined); setCustomThemeName(""); setThemeImportError(undefined); updateAppearance({ customCss: "", customCssAssets: {} }); }}>清空</button></div></div>
+              <div className="custom-css-heading"><span>自定义 CSS</span><div><input ref={cssFileInputRef} hidden type="file" accept=".css,text/css" onChange={(event) => void importCustomCss(event)} /><input ref={(element) => { themeDirectoryInputRef.current = element; element?.setAttribute("webkitdirectory", ""); }} hidden type="file" multiple accept=".css,image/png,image/jpeg,image/webp,image/gif,.woff,.woff2,.ttf,.otf" onChange={(event) => void importThemeDirectory(event)} /><button className="secondary-button" type="button" onClick={() => cssFileInputRef.current?.click()}>导入 CSS</button><button className="secondary-button" type="button" onClick={() => themeDirectoryInputRef.current?.click()}>导入主题目录</button><button className="secondary-button" type="button" onClick={() => { setEditingCustomThemeId(undefined); setCustomThemeName(""); setThemeImportError(undefined); updateAppearance({ customCss: "", customCssAssets: {} }); }}>清空</button></div></div>
               <label className="custom-css-field"><textarea value={settings.appearance.customCss} spellCheck={false} rows={11} placeholder={":root[data-theme-effective=\"dark\"] {\n  --accent: #8b5cf6;\n}"} aria-label="自定义 CSS" onChange={(event) => useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, customCss: event.target.value } } })} /></label>
               {themeImportError && <p className="form-error theme-import-error">{themeImportError}</p>}
               <CustomThemeLibrary customCss={settings.appearance.customCss} customThemes={settings.appearance.customThemes} customThemeName={customThemeName} editingCustomThemeId={editingCustomThemeId} onNameChange={setCustomThemeName} onSave={saveCustomTheme} onExport={exportCustomCss} onApply={applyCustomTheme} onDelete={deleteCustomTheme} />
@@ -1432,14 +1408,36 @@ export function App(): ReactNode {
       document.head.appendChild(style);
     }
     const customCss = resolveThemeAssets(settings.appearance.customCss, themeAssetUrls);
-    style.textContent = `${themePresetCss(settings.appearance.themePreset)}\n${scopeCustomThemeCss(customCss)}\n${themeOverrideCss(settings.appearance.themeOverrides, ":root[data-theme-custom]")}`;
+    style.textContent = `${themePresetCss(settings.appearance.themePreset)}\n${scopeCustomThemeCss(customCss)}\n${wallpaperOpacityCss(settings.appearance.wallpaperOpacity, ":root[data-theme-custom]")}`;
     return () => {
       style?.remove();
       delete root.dataset.themePreset;
       delete root.dataset.themeCustom;
       delete root.dataset.themeWallpaper;
     };
-  }, [settings.appearance.themePreset, settings.appearance.themeOverrides, settings.appearance.customCss, settings.appearance.customCssAssets, settings.appearance.customThemes, themeAssetUrls]);
+  }, [settings.appearance.themePreset, settings.appearance.wallpaperOpacity, settings.appearance.customCss, settings.appearance.customCssAssets, settings.appearance.customThemes, themeAssetUrls]);
+
+  // Project UI state onto the document root so custom themes can react to
+  // settings/preview/chat state without observing the DOM. Attribute presence
+  // means true; these names are part of the stable theme-hook contract.
+  useEffect(() => {
+    const root = document.documentElement;
+    const states: readonly [string, boolean][] = [
+      ["data-ui-settings-open", settingsOpen],
+      ["data-ui-workspace-open", Boolean(snapshot.workspace)],
+      ["data-ui-chat-empty", !snapshot.workspace || (displayMessages.length === 0 && !isGenerating)],
+      ["data-ui-generating", isGenerating],
+      ["data-ui-preview-open", previewOpened],
+      ["data-ui-permission-pending", Boolean(permission)]
+    ];
+    for (const [name, active] of states) {
+      if (active) root.setAttribute(name, "");
+      else root.removeAttribute(name);
+    }
+    return () => {
+      for (const [name] of states) root.removeAttribute(name);
+    };
+  }, [settingsOpen, snapshot.workspace, displayMessages.length, isGenerating, previewOpened, permission]);
 
   async function openWorkspace(): Promise<void> {
     const path = await window.piDesktop.chooseWorkspace();
@@ -1926,7 +1924,7 @@ export function App(): ReactNode {
 
   return (
     <div className="desktop-shell">
-      <aside className="sidebar">
+      <aside className="sidebar" data-pane="sidebar">
         <div className="brand-row"><div className="brand-mark">CA</div><div><strong>ChatAnyTime</strong><span>桌面端</span></div></div>
         {sidebarView === "files" ? (
           <>
@@ -2003,8 +2001,8 @@ export function App(): ReactNode {
         </div>
       </aside>
 
-      <main className="workspace-main">
-        <header className="topbar">
+      <main className="workspace-main" data-pane="workspace">
+        <header className="topbar" data-pane="topbar">
           <div className="project-title"><Folder size={17} /><span><strong>{snapshot.workspace?.split(/[\\/]/u).at(-1) ?? "ChatAnyTime"}</strong><small>{snapshot.agentName} · {snapshot.sessionId ? "当前话题" : "未开始话题"}</small></span></div>
           <div className="runtime-controls">
             <button className="workspace-top-button" type="button" onClick={() => void openWorkspace()}><FolderOpen size={15} /><span>工作区</span><strong>{compactPath(snapshot.workspace)}</strong><ChevronDown size={13} /></button>
@@ -2019,12 +2017,13 @@ export function App(): ReactNode {
 
           <div
             ref={workAreaRef}
+            data-pane="work-area"
             className={`work-area${preview && !previewCollapsed ? " with-preview" : previewCollapsed ? " with-preview-collapsed" : previewOpened ? " with-preview-empty" : ""}${previewDragging ? " is-preview-dragging" : ""}`}
             style={(preview && !previewCollapsed) || previewOpened ? { "--preview-split": `${previewSplit}%` } as CSSProperties : undefined}
           >
-          <section className="conversation-pane">
+          <section className="conversation-pane" data-pane="conversation">
             <TaskPanel />
-            <div className="timeline" ref={timelineRef}>
+            <div className="timeline" data-pane="timeline" ref={timelineRef}>
               {!snapshot.workspace ? (
                 <div className="empty-workspace"><div className="empty-icon"><FolderOpen size={27} /></div><h1>打开一个项目</h1><button className="primary-button" type="button" onClick={() => void openWorkspace()}><FolderOpen size={16} />选择文件夹</button></div>
               ) : displayMessages.length === 0 && !isGenerating ? (
@@ -2038,7 +2037,7 @@ export function App(): ReactNode {
                 {isGenerating && (assistantBubbleVisible ? <div className="response-progress response-progress-inline"><LoaderCircle size={14} className="spinning" /><span>{workingLabel}</span>{activeTurnTiming && <TimingMeta timing={activeTurnTiming} now={now} />}</div> : <PendingResponse label={workingLabel} timing={activeTurnTiming} now={now} />)}
               </>}
             </div>
-            <form ref={composerRef} className="composer" onSubmit={submit} onDragOver={(event) => event.preventDefault()} onDrop={handleDrop}>
+            <form ref={composerRef} className="composer" data-pane="composer" onSubmit={submit} onDragOver={(event) => event.preventDefault()} onDrop={handleDrop}>
               {attachments.length > 0 && <div className="attachment-list">{attachments.map((attachment, index) => <span className="attachment-chip" key={`${attachment.name}-${index}`}>{attachment.kind === "image" ? <img src={`data:${attachment.mimeType};base64,${attachment.data}`} alt="" /> : <FileDiff size={12} />}<span>{attachment.name}</span>{attachment.kind === "image" && !modelAcceptsImages && visionFallbackAvailable && <small className="attachment-chip-note" title="当前模型不支持图片，将自动调用视觉模型识别">视觉识别</small>}<button type="button" title="移除附件" aria-label={`移除 ${attachment.name}`} onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={12} /></button></span>)}</div>}
               {attachmentError && <div className="attachment-error" role="alert">{attachmentError}<button type="button" title="关闭提示" aria-label="关闭附件提示" onClick={() => setAttachmentError(undefined)}><X size={12} /></button></div>}
               <input ref={fileInputRef} type="file" hidden multiple accept="image/png,image/jpeg,image/webp,image/gif,.txt,.md,.json,.js,.ts,.tsx,.jsx,.py,.go,.rs,.java,.css,.html" onChange={(event) => { void addLocalFiles(event.target.files ?? []); event.currentTarget.value = ""; }} />
