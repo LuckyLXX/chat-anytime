@@ -1,12 +1,10 @@
 import { readdir, realpath, stat, unlink } from "node:fs/promises";
-import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative as relativePath, resolve, sep } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Api, AssistantMessage, UserMessage, ImageContent, Model } from "@earendil-works/pi-ai";
 import {
   createAgentSession,
   DefaultResourceLoader,
-  defineTool,
   getAgentDir,
   ModelRuntime,
   SessionManager,
@@ -23,7 +21,6 @@ import type {
   AgentProfile,
   ChatMessage,
   DesktopSettings,
-  McpServerConfigDraft,
   McpServerSummary,
   MessageBlock,
   ModelOption,
@@ -50,15 +47,13 @@ import { runManualCompaction } from "./compaction-lifecycle.js";
 import { customProviderModelDefinition, inferCustomModelImageInput } from "./custom-provider.js";
 import { buildDivModePrompt } from "./div-prompt.js";
 import { McpClientManager } from "./mcp-client.js";
-import { readConfiguredMcpServers, removeMcpServerConfig, setMcpServerDisabled, upsertMcpServerConfig, type McpServerConfigEntry } from "./mcp-config.js";
+import { removeMcpServerConfig, setMcpServerDisabled, upsertMcpServerConfig } from "./mcp-config.js";
 import { PermissionBroker } from "./permission-broker.js";
 import { loadRecentWorkspaces, recordRecentWorkspace, removeRecentWorkspace, writeRecentWorkspaces } from "./recent-workspaces.js";
 import { createSubagentTools, type SubagentContext } from "./subagent.js";
-import { buildSkillsSystemPromptBlock, discoverSkills, isSkillDisabled, setSkillEnabled, skillIdFromPath, toSkillSummaries, type DiscoveredSkill } from "./skill-catalog.js";
+import { buildSkillsSystemPromptBlock, setSkillEnabled, type DiscoveredSkill } from "./skill-catalog.js";
 import { createTodoStore, migrateLegacyTodoFile, type TodoStore } from "./todo-store.js";
-import { formatVisionBlock, recognizeImages, resolveVisionModel } from "./vision.js";
-import { Type } from "typebox";
-import { toolRisk } from "./permissions.js";
+import { resolveVisionModel } from "./vision.js";
 import { buildResourceCatalog } from "./resource-catalog.js";
 import { agentWorkspaceSessionDir } from "./session-scope.js";
 import { isDesktopConfiguredProvider } from "./model-catalog.js";
@@ -74,6 +69,11 @@ import {
 import { changedWorkspaceFile } from "./workspace-preview.js";
 import { createToolAudit } from "./tool-audit.js";
 import { diffToolNames } from "./tool-delta.js";
+import * as runtimeTodoTools from "./runtime-todo-tools.js";
+import * as runtimeSkills from "./runtime-skills.js";
+import * as runtimeVision from "./runtime-vision.js";
+import * as runtimePermissions from "./runtime-permissions.js";
+import * as runtimeMcp from "./runtime-mcp.js";
 
 const parentPort = process.parentPort;
 if (!parentPort) throw new Error("Pi 运行时必须作为 Electron 工具进程启动");
@@ -109,7 +109,6 @@ function clearPendingVisionMessage(): void {
 let currentAgent: AgentProfile | undefined;
 const customProviderId = "chatanytime-openai-compatible";
 const imageMimeTypes = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
-const builtinToolNames = new Set(["read", "bash", "edit", "write", "grep", "find", "ls"]);
 let resourceLoader: DefaultResourceLoader | undefined;
 // Native capability sources (populated by the self-built MCP client / Skill
 // discovery / Todo store in later phases). Kept here so emitResourceCatalog
@@ -119,7 +118,6 @@ let discoveredSkills: DiscoveredSkill[] = [];
 let mcpServers: McpServerSummary[] = [];
 let todos: Todo[] = [];
 let todoStore: TodoStore | undefined;
-let resourceDiagnostics: string[] = [];
 let resourceOperationBusy = false;
 let sessionGeneration = 0;
 // Set when the user explicitly reloads resources or changes MCP config, so the
@@ -203,41 +201,20 @@ const sessionCustomTools: ToolDefinition[] = [];
 // throws when used after its session is replaced.
 let extensionApi: ExtensionAPI | undefined;
 
-function mcpConfigPaths(): { project: string; global: string } {
-  return {
-    project: workspace ? resolve(workspace, ".mcp.json") : join(getAgentDir(), ".mcp.json"),
-    global: join(getAgentDir(), "mcp.json")
-  };
-}
-
-function skillPaths(): { globalDir: string; agentsDir: string; projectDir: string; statePath: string } {
-  return {
-    globalDir: join(getAgentDir(), "pidesktop-skills"),
-    agentsDir: join(homedir(), ".agents", "skills"),
-    projectDir: workspace ? resolve(workspace, ".pidesktop-skills") : join(getAgentDir(), "pidesktop-skills"),
-    statePath: join(getAgentDir(), "pidesktop-skill-state.json")
-  };
+function skillPaths(): ReturnType<typeof runtimeSkills.skillPathsFor> {
+  return runtimeSkills.skillPathsFor(workspace, getAgentDir());
 }
 
 /** Scan skill dirs and refresh the published SkillSummary catalog. */
 function syncSkills(): void {
-  const { globalDir, agentsDir, projectDir, statePath } = skillPaths();
-  discoveredSkills = discoverSkills(globalDir, projectDir, agentsDir);
-  const disabled = new Set<string>();
-  for (const skill of discoveredSkills) {
-    const id = skillIdFromPath(skill.filePath);
-    if (isSkillDisabled(statePath, id)) disabled.add(id);
-  }
-  nativeSkills = toSkillSummaries(discoveredSkills, disabled);
+  const scanned = runtimeSkills.scanSkills(skillPaths());
+  discoveredSkills = scanned.discovered;
+  nativeSkills = scanned.summaries;
 }
 
 /** Skills active for the current agent (global state + per-agent overrides). */
 function activeSkillsForAgent(): SkillSummary[] {
-  return nativeSkills.filter((skill) => {
-    if (!skill.enabled) return false;
-    const override = currentAgent?.skillOverrides?.[skill.id];
-    return override !== false;
-  });
+  return runtimeSkills.activeSkillsFor(nativeSkills, currentAgent);
 }
 
 /**
@@ -261,37 +238,19 @@ function buildSubagentTools(isDelegationChild: boolean): ToolDefinition[] {
   return createSubagentTools(ctx);
 }
 
-function mcpConfigEntry(server: McpServerConfigDraft): McpServerConfigEntry {
-  if (server.transport === "stdio") {
-    const command = server.command?.trim();
-    if (!command) throw new Error("stdio MCP Server 需要填写启动命令");
-    return {
-      command,
-      ...(server.args && server.args.length > 0 ? { args: server.args } : {}),
-      ...(server.env && Object.keys(server.env).length > 0 ? { env: server.env } : {})
-    };
-  }
-  const url = server.url?.trim();
-  if (!url || !/^https?:\/\//iu.test(url)) throw new Error("HTTP MCP Server 需要填写 http:// 或 https:// 地址");
-  if (server.auth === "bearer-env" && !server.bearerTokenEnv?.trim()) throw new Error("Bearer 认证需要填写环境变量名");
-  return {
-    url,
-    ...(server.auth === "oauth" ? { auth: "oauth" as const } : {}),
-    ...(server.auth === "bearer-env" ? { bearerTokenEnv: server.bearerTokenEnv!.trim() } : {})
-  };
+function mcpConfigPaths(): { project: string; global: string } {
+  return runtimeMcp.mcpConfigPathsFor(workspace, getAgentDir());
 }
 
 /** Connect to all configured MCP servers and refresh tool definitions + catalog status. */
 async function syncMcpServers(refresh = false): Promise<void> {
-  const { project, global } = mcpConfigPaths();
-  const servers = readConfiguredMcpServers(project, global);
-  const { summaries, bindings } = await mcpClient.sync(servers, { refresh });
-  mcpServers = summaries;
-  mcpTools = mcpClient.buildToolDefinitions(bindings);
+  const synced = await runtimeMcp.syncMcpServers(mcpClient, mcpConfigPaths(), refresh);
+  mcpServers = synced.summaries;
+  mcpTools = synced.tools;
 }
 
 function emitResourceCatalog(): void {
-  post({ type: "resources", resources: buildResourceCatalog({ skills: nativeSkills, mcpServers, todos, diagnostics: resourceDiagnostics }) });
+  post({ type: "resources", resources: buildResourceCatalog({ skills: nativeSkills, mcpServers, todos }) });
 }
 
 function emitTodos(): void {
@@ -312,107 +271,11 @@ function sessionTodosPath(sessionId: string): string {
   return join(root, "todos", `${sessionId}.json`);
 }
 
-function summarizeTodos(items: Todo[]): string {
-  if (items.length === 0) return "（暂无 Todo）";
-  return items.map((todo) => {
-    const mark = todo.status === "completed" ? "x" : todo.status === "in_progress" ? "~" : " ";
-    return `- [${mark}] ${todo.title}${todo.notes ? `（${todo.notes}）` : ""}（id: ${todo.id}）`;
-  }).join("\n");
-}
-
-/** 引导模型主动使用 Todo 工具维护任务清单的系统提示词块。 */
-function buildTodoSystemPromptBlock(): string {
-  return [
-    "【任务清单（Todo）】",
-    "多步骤任务请先用 todo_create 把步骤拆成待办项，进度变化时用 todo_update 更新状态（in_progress/completed），需要时用 todo_list 查看最新清单、todo_delete 清理已完成项。",
-    "用户也可能直接在任务面板中增删或勾选待办：每轮开始时如有疑问，先用 todo_list 同步最新清单再继续。"
-  ].join("\n");
-}
-
-/** 当前待办清单的紧凑文本（随每次用户消息注入，保证模型与任务面板同步）。 */
-function currentTodoBlock(): string | undefined {
-  if (todos.length === 0) return undefined;
-  return `当前任务清单（Todo 面板）：\n${summarizeTodos(todos)}`;
-}
-
-/** Build the Todo customTools (todo_create/list/update/delete). */
+/** Build the Todo customTools for the active session-scoped store. */
 function buildTodoTools(): ToolDefinition[] {
   if (!todoStore) return [];
-  const summarize = (): AgentToolResultLike => ({ content: [{ type: "text", text: summarizeTodos(todoStore!.list()) }], details: { count: todoStore!.list().length } });
-  const listText = (): string => summarizeTodos(todoStore!.list());
-  const count = (): number => todoStore!.list().length;
-  return [
-    defineTool({
-      name: "todo_create",
-      label: "新建 Todo",
-      description: "创建一个新的待办事项。多步骤任务请用它把步骤拆成待办并跟踪进度，不要只把步骤写在回复里。",
-      promptSnippet: "todo_create: 新建待办事项",
-      parameters: Type.Object({
-        title: Type.String({ description: "待办标题" }),
-        notes: Type.Optional(Type.String({ description: "可选备注" }))
-      }),
-      execute: async (_id, params) => {
-        const created = todoStore!.create(String(params?.title ?? ""), params?.notes as string | undefined);
-        refreshTodos();
-        return {
-          content: [{ type: "text", text: `已创建 Todo「${created.title}」，id: ${created.id}。\n\n当前待办：\n${listText()}` }],
-          details: { count: count(), createdId: created.id }
-        };
-      }
-    }),
-    defineTool({
-      name: "todo_list",
-      label: "列出 Todo",
-      description: "列出所有待办事项及其状态（即任务面板当前的最新清单），每行末尾的（id: …）可用于后续更新或删除。",
-      promptSnippet: "todo_list: 列出待办事项",
-      parameters: Type.Object({}),
-      execute: async () => summarize()
-    }),
-    defineTool({
-      name: "todo_update",
-      label: "更新 Todo",
-      description: "更新待办事项的标题、备注或状态。status 可为 pending/in_progress/completed。进度变化时请及时更新状态，避免清单与实际情况脱节。id 取 todo_list 返回的（id: …）。",
-      promptSnippet: "todo_update: 更新待办事项",
-      parameters: Type.Object({
-        id: Type.String({ description: "待办 id（来自 todo_list 输出中的（id: …））" }),
-        title: Type.Optional(Type.String()),
-        notes: Type.Optional(Type.String()),
-        status: Type.Optional(Type.Union([Type.Literal("pending"), Type.Literal("in_progress"), Type.Literal("completed")]))
-      }),
-      execute: async (_id, params) => {
-        const id = String(params?.id ?? "");
-        const updated = todoStore!.update(id, {
-          ...(typeof params?.title === "string" ? { title: params.title } : {}),
-          ...(params?.notes !== undefined ? { notes: params.notes as string } : {}),
-          ...(typeof params?.status === "string" ? { status: params.status as Todo["status"] } : {})
-        });
-        refreshTodos();
-        const heading = updated
-          ? `已更新 Todo「${updated.title}」（id: ${id}）。`
-          : `未找到 id 为「${id}」的 Todo，未做任何修改。请先用 todo_list 确认正确的 id。`;
-        return { content: [{ type: "text", text: `${heading}\n\n当前待办：\n${listText()}` }], details: { count: count(), updated: Boolean(updated) } };
-      }
-    }),
-    defineTool({
-      name: "todo_delete",
-      label: "删除 Todo",
-      description: "按 id 删除一个待办事项。id 取 todo_list 返回的（id: …）。",
-      promptSnippet: "todo_delete: 删除待办事项",
-      parameters: Type.Object({ id: Type.String({ description: "待办 id（来自 todo_list 输出中的（id: …））" }) }),
-      execute: async (_id, params) => {
-        const id = String(params?.id ?? "");
-        const removed = todoStore!.remove(id);
-        refreshTodos();
-        const heading = removed
-          ? `已删除 id 为「${id}」的 Todo。`
-          : `未找到 id 为「${id}」的 Todo，未删除任何内容。请先用 todo_list 确认正确的 id。`;
-        return { content: [{ type: "text", text: `${heading}\n\n当前待办：\n${listText()}` }], details: { count: count(), removed } };
-      }
-    })
-  ];
+  return runtimeTodoTools.buildTodoTools({ store: todoStore, onChanged: refreshTodos });
 }
-
-type AgentToolResultLike = { content: Array<{ type: "text"; text: string }>; details: unknown };
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -501,17 +364,7 @@ function normalizeMessages(messages: AgentMessage[], streamingMessage?: AgentMes
 }
 
 function runtimeSkillPrompt(name: string, instructions?: string): string {
-  const skill = discoveredSkills.find((item) => item.name === name || item.slug === name);
-  if (!skill) throw new Error(`未找到 Skill：${name}`);
-  if (!session?.getActiveToolNames().includes("read")) throw new Error("当前 Agent 未启用 read 工具，无法读取 Skill");
-  const userInstructions = instructions?.trim() ?? "";
-  const executionPrompt = [
-    `使用 Skill「${skill.name}」完成任务。`,
-    `首先调用 read 工具读取 Skill 文件：${skill.filePath}`,
-    "完整阅读后遵循其中的说明；其中的相对路径均以该 Skill 文件所在目录为基准。",
-    userInstructions ? `用户要求：\n${userInstructions}` : undefined
-  ].filter(Boolean).join("\n\n");
-  return buildSkillPrompt(skill.name, userInstructions, executionPrompt);
+  return runtimeSkills.buildRuntimeSkillPrompt(discoveredSkills, name, instructions, session?.getActiveToolNames().includes("read") ?? false);
 }
 
 function snapshot(): RuntimeSnapshot {
@@ -608,50 +461,26 @@ function completeTurn(): void {
   turnTiming = { ...turnTiming, completedAt: Date.now() };
 }
 
-function summarizeArgs(toolName: string, args: Record<string, unknown>): string {
-  if (toolName === "bash") return String(args.command ?? "执行命令");
-  const path = args.path ?? args.file_path ?? args.filePath;
-  if (path) return `${toolLabel(toolName)}：${String(path)}`;
-  return toolLabel(toolName);
-}
+// Permission gate wiring: state is read through getters so live values are
+// always current across session/workspace/agent switches.
+const permissionGateDeps: runtimePermissions.PermissionGateDeps = {
+  broker: permissionBroker,
+  workspace: () => workspace,
+  accessMode: () => accessMode,
+  session: () => session,
+  agent: () => currentAgent
+};
 
 function requestPermission(toolName: string, args: Record<string, unknown>, toolCallId: string, principalKind: "root-agent" | "subagent" = "root-agent"): Promise<PermissionDecision> {
-  const risk = toolRisk(workspace, toolName, args);
-  if (!risk) return Promise.resolve("allow-once");
-  return permissionBroker.request({
-    accessMode,
-    toolName,
-    summary: summarizeArgs(toolName, args),
-    args,
-    risk,
-    principal: {
-      kind: principalKind,
-      sessionId: session?.sessionId ?? "session-pending",
-      ...(principalKind === "subagent" ? { parentSessionId: session?.sessionId } : {}),
-      agentId: currentAgent?.id,
-      toolCallId
-    }
-  });
+  return runtimePermissions.requestPermission(permissionGateDeps, toolName, args, toolCallId, principalKind);
 }
 
 function createPermissionExtension(): InlineExtension {
-  return {
-    name: "chat-anytime-permissions",
-    hidden: true,
-    factory(pi) {
-      // Rebound on every session creation; the captured API drives the MCP
-      // hot-reload path (registerTool rebuilds Pi's registry on a live session).
-      extensionApi = pi;
-      pi.on("tool_call", async (event) => {
-        const args = event.input as Record<string, unknown>;
-        const risk = toolRisk(workspace, event.toolName, args);
-        if (!risk) return undefined;
-        const decision = await requestPermission(event.toolName, args, event.toolCallId);
-        if (decision === "deny") return { block: true, reason: "用户已在 PiDesktop 中拒绝此操作" };
-        return undefined;
-      });
-    }
-  };
+  return runtimePermissions.createPermissionExtension(permissionGateDeps, (api) => {
+    // Rebound on every session creation; the captured API drives the MCP
+    // hot-reload path (registerTool rebuilds Pi's registry on a live session).
+    extensionApi = api;
+  });
 }
 
 function textFromToolResult(result: unknown): string {
@@ -930,7 +759,7 @@ async function createSession(sessionManager?: SessionManager): Promise<void> {
         warn: (message) => void post({ type: "log", level: "warn", message })
       }).extension
     ],
-    systemPromptOverride: (base) => [base, currentAgent?.systemPrompt, currentAgent?.divMode ? buildDivModePrompt() : undefined, buildSkillsSystemPromptBlock(activeSkillsForAgent()), buildTodoSystemPromptBlock()].filter(Boolean).join("\n\n")
+    systemPromptOverride: (base) => [base, currentAgent?.systemPrompt, currentAgent?.divMode ? buildDivModePrompt() : undefined, buildSkillsSystemPromptBlock(activeSkillsForAgent()), runtimeTodoTools.buildTodoSystemPromptBlock()].filter(Boolean).join("\n\n")
   });
   await resourceLoader.reload();
   syncSkills();
@@ -1158,7 +987,7 @@ async function preparePromptPayload(text: string, attachments: PromptAttachment[
   const attachmentsBlock = fileRefs.length
     ? `项目文件附件（请使用 read 工具按需读取）：\n${fileRefs.map((path) => `- ${path}`).join("\n")}`
     : undefined;
-  const todoBlock = currentTodoBlock();
+  const todoBlock = runtimeTodoTools.buildTodoPromptBlock(todos);
   const extras = [attachmentsBlock, todoBlock].filter(Boolean) as string[];
   return {
     text: extras.length ? `${text}\n\n${extras.join("\n\n")}` : text,
@@ -1171,32 +1000,23 @@ async function preparePromptPayload(text: string, attachments: PromptAttachment[
 // inject the descriptions into the prompt text, so raw image parts never
 // reach a model that cannot read them.
 async function applyVisionFallback(payload: { text: string; images: ImageContent[] }): Promise<void> {
-  if (!visionModel || !modelRuntime) throw new Error("当前模型不支持图片输入，请先切换多模态模型，或在设置的模型服务中启用视觉识别");
-  busy = true;
-  status = "正在识别图片";
-  pendingVisionSince = Date.now();
-  pendingVisionMessage = {
-    id: `vision-pending-${pendingVisionSince}`,
-    uuid: `vision-pending-${pendingVisionSince}`,
-    role: "user",
-    timestamp: pendingVisionSince,
-    blocks: [
-      ...(payload.text.trim() ? [{ type: "text" as const, text: payload.text }] : []),
-      ...payload.images.map((image) => ({ type: "image" as const, data: image.data, mimeType: image.mimeType }))
-    ]
-  };
-  emitState();
-  try {
-    const results = await recognizeImages(modelRuntime, visionModel, { prompt: settings?.vision?.prompt, question: payload.text, images: payload.images });
-    payload.text += formatVisionBlock(results, visionModel.name || visionModel.id);
-    payload.images = [];
-  } catch (error) {
-    clearPendingVisionMessage();
-    busy = false;
-    status = "请求失败";
-    emitState();
-    throw new Error(`图片识别失败：${errorText(error)}`);
-  }
+  await runtimeVision.runVisionFallback(
+    {
+      resolve: () => {
+        if (!visionModel || !modelRuntime) throw new Error("当前模型不支持图片输入，请先切换多模态模型，或在设置的模型服务中启用视觉识别");
+        return { runtime: modelRuntime, model: visionModel, prompt: settings?.vision?.prompt };
+      },
+      apply: (state) => {
+        busy = state.busy;
+        status = state.status;
+        pendingVisionMessage = state.pendingMessage;
+        pendingVisionSince = state.pendingMessage?.timestamp;
+        emitState();
+      },
+      errorText
+    },
+    payload
+  );
 }
 
 async function handleCommand(command: RuntimeCommand): Promise<void> {
@@ -1520,7 +1340,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       const { project, global } = mcpConfigPaths();
       const target = server.scope === "project" ? project : global;
       await runResourceOperation("正在保存 MCP Server", async () => {
-        upsertMcpServerConfig(target, name, mcpConfigEntry({ ...server, name }));
+        upsertMcpServerConfig(target, name, runtimeMcp.mcpConfigEntry({ ...server, name }));
         forceMcpRefresh = true;
         await applyMcpToolChanges();
       });
