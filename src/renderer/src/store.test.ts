@@ -60,4 +60,18 @@ describe("desktop permission queue", () => {
     expect(useDesktopStore.getState().todos).toHaveLength(1);
     expect(useDesktopStore.getState().todos[0]?.status).toBe("completed");
   });
+
+  it("tracks built-in provider model refresh results", () => {
+    const state = useDesktopStore.getState();
+    state.handleRuntimeMessage({ type: "models-refresh-error", providerId: "deepseek", message: "拉取失败" });
+
+    expect(useDesktopStore.getState().modelRefreshStatus).toBe("error");
+    expect(useDesktopStore.getState().modelRefreshError).toBe("拉取失败");
+    expect(useDesktopStore.getState().modelRefreshProvider).toBe("deepseek");
+
+    state.handleRuntimeMessage({ type: "models-refreshed", providerId: "deepseek" });
+    expect(useDesktopStore.getState().modelRefreshStatus).toBe("success");
+    expect(useDesktopStore.getState().modelRefreshError).toBeUndefined();
+    expect(useDesktopStore.getState().modelRefreshProvider).toBe("deepseek");
+  });
 });

@@ -711,6 +711,10 @@ select option:checked { color: var(--on-accent); background-color: var(--accent)
 .model-selection { margin: 15px 18px; border: 1px solid var(--border); background: var(--surface-muted); }
 .model-selection-heading { display: flex; justify-content: space-between; gap: 12px; padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 13px; font-weight: 650; }
 .model-selection-heading small { color: var(--text-muted); font-weight: 400; }
+.model-selection-heading .model-refresh-button { min-height: 28px; margin-left: auto; padding: 0 10px; font-size: 11px; white-space: nowrap; }
+.model-refresh-error, .model-refresh-hint { margin: 10px 12px 0; font-size: 11px; }
+.model-refresh-error { color: var(--danger); }
+.model-refresh-hint { color: var(--text-muted); }
 .model-option { display: flex; align-items: center; gap: 12px; margin: 0; padding: 10px 12px; border-bottom: 1px solid var(--border); }
 .model-option:last-child { border-bottom: 0; }
 .model-option .model-enabled-option { flex: 1; min-width: 0; margin: 0; }

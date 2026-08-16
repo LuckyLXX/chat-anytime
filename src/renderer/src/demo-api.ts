@@ -421,6 +421,9 @@ export function createDemoApi(): DesktopApi {
             ]
           });
           break;
+        case "provider.models.refresh":
+          emit({ type: "models-refreshed", providerId: command.providerId });
+          break;
         case "vision.save":
           demoSettings.vision = { ...command.vision };
           break;

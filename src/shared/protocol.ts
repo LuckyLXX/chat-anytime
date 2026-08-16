@@ -446,6 +446,7 @@ export type RuntimeCommand =
   | { type: "provider.models.save"; provider: ProviderSettings }
   | { type: "provider.delete"; providerId: string }
   | { type: "provider.models.fetch"; providerId: string; baseUrl: string; apiKey?: string }
+  | { type: "provider.models.refresh"; providerId: string }
   | { type: "vision.save"; vision: VisionSettings }
   | { type: "appearance.save"; appearance: AppearanceSettings }
   | { type: "mcp.server.save"; server: McpServerConfigDraft }
@@ -463,6 +464,8 @@ export type RuntimeMessage =
   | { type: "catalog"; models: ModelOption[]; providers: ProviderOption[] }
   | { type: "custom-models"; providerId: string; models: ProviderModelSettings[] }
   | { type: "custom-model-error"; providerId: string; message: string }
+  | { type: "models-refreshed"; providerId: string }
+  | { type: "models-refresh-error"; providerId: string; message: string }
   | { type: "state"; snapshot: RuntimeSnapshot }
   | { type: "resources"; resources: ResourceCatalog }
   | { type: "todos"; todos: Todo[] }

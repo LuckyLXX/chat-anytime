@@ -25,6 +25,9 @@ interface DesktopState {
   customModels: CustomProviderModel[];
   customModelFetchStatus: "idle" | "loading" | "success" | "error";
   customModelFetchError?: string;
+  modelRefreshStatus: "idle" | "loading" | "success" | "error";
+  modelRefreshError?: string;
+  modelRefreshProvider?: string;
   permissions: PermissionRequest[];
   error?: string;
   initialize(): Promise<() => void>;
@@ -59,6 +62,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   customProviderKeyConfigured: false,
   customModels: [],
   customModelFetchStatus: "idle",
+  modelRefreshStatus: "idle",
   async initialize() {
     const unsubscribe = window.piDesktop.onRuntimeMessage((message) => get().handleRuntimeMessage(message));
     const bootstrap = await window.piDesktop.bootstrap();
@@ -135,6 +139,12 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
         break;
       case "custom-model-error":
         set({ customModelFetchStatus: "error", customModelFetchError: message.message });
+        break;
+      case "models-refreshed":
+        set({ modelRefreshStatus: "success", modelRefreshError: undefined, modelRefreshProvider: message.providerId });
+        break;
+      case "models-refresh-error":
+        set({ modelRefreshStatus: "error", modelRefreshError: message.message, modelRefreshProvider: message.providerId });
         break;
       case "permission":
         set((state) => state.permissions.some((request) => request.id === message.request.id)

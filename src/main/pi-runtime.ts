@@ -1,4 +1,4 @@
-import { readdir, realpath, stat, unlink } from "node:fs/promises";
+import { readFile, readdir, realpath, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative as relativePath, resolve, sep } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Api, AssistantMessage, UserMessage, ImageContent, Model } from "@earendil-works/pi-ai";
@@ -837,6 +837,155 @@ async function fetchCustomProviderModels(baseUrlInput: string, apiKey: string): 
   return [...new Map(models.map((model) => [model.id, model])).values()].sort((left, right) => left!.id.localeCompare(right!.id));
 }
 
+/** 内置服务商模型列表直连接口（pi.dev 远程目录不可达时的兜底）。 */
+interface BuiltinModelsEndpoint {
+  url: string;
+  /** 认证方式：Bearer 头 / x-api-key 头 / URL query 参数 / 无需认证。 */
+  auth: "bearer" | "x-api-key" | "query" | "none";
+  keyParam?: string;
+  headers?: Record<string, string>;
+}
+
+const BUILTIN_MODELS_ENDPOINTS: Readonly<Record<string, BuiltinModelsEndpoint>> = {
+  openai: { url: "https://api.openai.com/v1/models", auth: "bearer" },
+  anthropic: { url: "https://api.anthropic.com/v1/models", auth: "x-api-key", headers: { "anthropic-version": "2023-06-01" } },
+  deepseek: { url: "https://api.deepseek.com/models", auth: "bearer" },
+  moonshotai: { url: "https://api.moonshot.ai/v1/models", auth: "bearer" },
+  "moonshotai-cn": { url: "https://api.moonshot.cn/v1/models", auth: "bearer" },
+  groq: { url: "https://api.groq.com/openai/v1/models", auth: "bearer" },
+  mistral: { url: "https://api.mistral.ai/v1/models", auth: "bearer" },
+  xai: { url: "https://api.x.ai/v1/models", auth: "bearer" },
+  nvidia: { url: "https://integrate.api.nvidia.com/v1/models", auth: "bearer" },
+  together: { url: "https://api.together.ai/v1/models", auth: "bearer" },
+  cerebras: { url: "https://api.cerebras.ai/v1/models", auth: "bearer" },
+  fireworks: { url: "https://api.fireworks.ai/inference/v1/models", auth: "bearer" },
+  huggingface: { url: "https://router.huggingface.co/v1/models", auth: "bearer" },
+  "qwen-token-plan": { url: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/models", auth: "bearer" },
+  "qwen-token-plan-cn": { url: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/models", auth: "bearer" },
+  xiaomi: { url: "https://api.xiaomimimo.com/v1/models", auth: "bearer" },
+  "xiaomi-token-plan-cn": { url: "https://token-plan-cn.xiaomimimo.com/v1/models", auth: "bearer" },
+  "xiaomi-token-plan-ams": { url: "https://token-plan-ams.xiaomimimo.com/v1/models", auth: "bearer" },
+  "xiaomi-token-plan-sgp": { url: "https://token-plan-sgp.xiaomimimo.com/v1/models", auth: "bearer" },
+  google: { url: "https://generativelanguage.googleapis.com/v1beta/models", auth: "query", keyParam: "key" },
+  openrouter: { url: "https://openrouter.ai/api/v1/models", auth: "none" }
+};
+
+/** 解析服务商已保存/环境提供的 API Key（供直连拉取使用）。 */
+async function resolveProviderApiKey(runtime: ModelRuntime, providerId: string): Promise<string> {
+  try {
+    const auth = await runtime.getAuth(providerId);
+    const key = (auth?.auth as { apiKey?: unknown } | undefined)?.apiKey;
+    return typeof key === "string" && key.trim() ? key.trim() : "";
+  } catch {
+    return "";
+  }
+}
+
+/** 直连内置服务商的模型列表接口（15 秒超时），返回 id/name。 */
+async function fetchBuiltinProviderModels(providerId: string, apiKey: string): Promise<{ id: string; name: string }[]> {
+  const endpoint = BUILTIN_MODELS_ENDPOINTS[providerId];
+  if (!endpoint) throw new Error(`暂不支持直连拉取 ${providerId} 的模型列表`);
+  const url = new URL(endpoint.url);
+  const headers: Record<string, string> = { Accept: "application/json", ...endpoint.headers };
+  switch (endpoint.auth) {
+    case "bearer":
+      if (!apiKey) throw new Error("需要 API 密钥才能拉取模型列表");
+      headers.Authorization = `Bearer ${apiKey}`;
+      break;
+    case "x-api-key":
+      if (!apiKey) throw new Error("需要 API 密钥才能拉取模型列表");
+      headers["x-api-key"] = apiKey;
+      break;
+    case "query":
+      if (!apiKey) throw new Error("需要 API 密钥才能拉取模型列表");
+      url.searchParams.set(endpoint.keyParam ?? "key", apiKey);
+      break;
+    case "none":
+      break;
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15_000);
+  try {
+    const response = await fetch(url, { headers, signal: controller.signal });
+    if (!response.ok) throw new Error(`服务商模型接口返回 HTTP ${response.status}`);
+    const payload = await response.json() as { data?: unknown; models?: unknown } | unknown[];
+    const items = Array.isArray(payload)
+      ? payload
+      : Array.isArray((payload as { data?: unknown }).data)
+        ? (payload as { data: unknown[] }).data
+        : Array.isArray((payload as { models?: unknown }).models)
+          ? (payload as { models: unknown[] }).models
+          : undefined;
+    if (!items) throw new Error("服务商返回内容不是模型列表");
+    const models = items
+      .map((item) => {
+        if (!item || typeof item !== "object") return undefined;
+        const record = item as { id?: unknown; name?: unknown; display_name?: unknown; displayName?: unknown };
+        let id = typeof record.id === "string" && record.id.trim() ? record.id.trim() : "";
+        if (!id) {
+          // Google 的列表项 name 形如 "models/gemini-2.5-pro"。
+          const name = typeof record.name === "string" ? record.name : "";
+          if (name.startsWith("models/")) id = name.slice("models/".length);
+        }
+        if (!id) return undefined;
+        const display = record.display_name ?? record.displayName ?? record.name;
+        return { id, name: typeof display === "string" && display.trim() ? display.trim() : id };
+      })
+      .filter((model): model is { id: string; name: string } => Boolean(model));
+    if (!models.length) throw new Error("服务商没有返回可用模型");
+    return [...new Map(models.map((model) => [model.id, model])).values()].sort((left, right) => left!.id.localeCompare(right!.id));
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** 把直连拉取的模型写入 SDK 的 models-store 覆盖层（与远程目录同格式）。 */
+async function writeRemoteCatalogOverlay(providerId: string, models: unknown[]): Promise<void> {
+  const storePath = join(getAgentDir(), "models-store.json");
+  let current: Record<string, unknown> = {};
+  try {
+    current = JSON.parse(await readFile(storePath, "utf8")) as Record<string, unknown>;
+  } catch {
+    // 文件不存在或损坏：从空对象开始。
+  }
+  current[providerId] = {
+    models,
+    checkedAt: Date.now(),
+    // 时间戳取当前时间，保证 SDK 的 lastModified 门控（> 本地目录生成时间）放行。
+    lastModified: Date.now(),
+    etag: undefined
+  };
+  await writeFile(storePath, JSON.stringify(current, null, 2), "utf8");
+}
+
+/** 兜底：pi.dev 远程目录不可用时，直连服务商接口并注入 SDK 目录覆盖层。 */
+async function refreshBuiltinModelsFallback(providerId: string): Promise<void> {
+  const runtime = modelRuntime;
+  if (!runtime) return;
+  try {
+    const apiKey = await resolveProviderApiKey(runtime, providerId);
+    const fetched = await fetchBuiltinProviderModels(providerId, apiKey);
+    const baseline = runtime.getModels(providerId);
+    const baselineById = new Map(baseline.map((model) => [model.id, model]));
+    const template = baseline[0];
+    // 已知模型保留本地完整元数据（api/baseUrl/价格/输入类型等），新模型克隆
+    // 模板元数据，只覆盖 id/name，避免覆盖层丢失流式所需字段。
+    const overlay = fetched.map((model) => {
+      const base = baselineById.get(model.id);
+      if (base) return { ...base, name: model.name };
+      if (template) return { ...template, id: model.id, name: model.name };
+      return { id: model.id, name: model.name, provider: providerId };
+    });
+    await writeRemoteCatalogOverlay(providerId, overlay);
+    // 重新加载覆盖层（allowNetwork:false 只应用已持久化的目录，不再访问网络）。
+    await runtime.refresh({ allowNetwork: false, force: true });
+    await refreshCatalog();
+    post({ type: "models-refreshed", providerId });
+  } catch (error) {
+    post({ type: "models-refresh-error", providerId, message: `拉取模型列表失败：${errorText(error)}` });
+  }
+}
+
 async function refreshSessions(): Promise<void> {
   const directories = await sessionDirectories();
   if (directories.length === 0) {
@@ -1524,6 +1673,43 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         post({ type: "custom-model-error", providerId: command.providerId, message: errorText(error) });
       }
       break;
+    case "provider.models.refresh": {
+      // 内置服务商拉取最新模型：主路径走 SDK 远程目录覆盖（pi.dev catalog），
+      // 该服务偶发超时/不可达，因此带 30 秒超时并在失败后直连服务商接口兜底，
+      // 避免"拉取中"无限转圈。
+      if (!modelRuntime) break;
+      const refreshProviderId = command.providerId;
+      const refreshController = new AbortController();
+      const refreshTimeout = setTimeout(() => refreshController.abort(), 30_000);
+      try {
+        const auth = modelRuntime.getProviderAuthStatus(refreshProviderId);
+        if (!auth?.configured) {
+          post({ type: "models-refresh-error", providerId: refreshProviderId, message: "请先填写并保存该服务商的 API 密钥，再拉取最新模型列表" });
+          break;
+        }
+        post({ type: "log", level: "info", message: `开始拉取 ${refreshProviderId} 模型列表` });
+        const result = await modelRuntime.refresh({ allowNetwork: true, force: true, signal: refreshController.signal });
+        // 无论结果如何都重新发布目录，反映已应用的部分刷新。
+        await refreshCatalog();
+        const relevantErrors = [...result.errors].filter(([providerId]) => providerId === refreshProviderId);
+        for (const [providerId, error] of [...result.errors]) {
+          if (providerId !== refreshProviderId) {
+            post({ type: "log", level: "warn", message: `刷新服务商 ${providerId} 模型列表失败：${errorText(error)}` });
+          }
+        }
+        if (!refreshController.signal.aborted && relevantErrors.length === 0) {
+          post({ type: "models-refreshed", providerId: refreshProviderId });
+          break;
+        }
+        post({ type: "log", level: "warn", message: `远程目录拉取未成功（${refreshController.signal.aborted ? "超时" : relevantErrors.map(([, error]) => errorText(error)).join("；") || "无错误"}），尝试直连服务商接口` });
+        await refreshBuiltinModelsFallback(refreshProviderId);
+      } catch (error) {
+        post({ type: "models-refresh-error", providerId: refreshProviderId, message: errorText(error) });
+      } finally {
+        clearTimeout(refreshTimeout);
+      }
+      break;
+    }
     case "vision.save": {
       if (settings) settings.vision = command.vision;
       visionModel = modelRuntime ? resolveVisionModel(command.vision, modelRuntime) : undefined;
