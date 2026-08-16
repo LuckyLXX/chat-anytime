@@ -262,7 +262,7 @@ function TimingMeta({ timing, now }: { timing: TurnTiming; now: number }): React
 function PendingResponse({ label, timing, now }: { label: string; timing?: TurnTiming; now: number }): ReactNode {
   return (
     <article className="message message-assistant pending-response">
-      <div className="message-avatar pi-avatar"><LoaderCircle size={17} className="spinning" /></div>
+      <div className="message-avatar pi-avatar"><Bot size={17} /></div>
       <div className="message-body message-bubble pending-response-body">
         <div className="response-progress"><LoaderCircle size={14} className="spinning" /><span>{label}</span></div>
         {timing && <TimingMeta timing={timing} now={now} />}
