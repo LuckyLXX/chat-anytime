@@ -13,6 +13,7 @@ import {
   SettingsManager,
   type AgentSession,
   type AgentSessionEvent,
+  type ExtensionAPI,
   type InlineExtension,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
@@ -72,6 +73,7 @@ import {
 } from "./session-history.js";
 import { changedWorkspaceFile } from "./workspace-preview.js";
 import { createToolAudit } from "./tool-audit.js";
+import { diffToolNames } from "./tool-delta.js";
 
 const parentPort = process.parentPort;
 if (!parentPort) throw new Error("Pi 运行时必须作为 Electron 工具进程启动");
@@ -192,6 +194,14 @@ const permissionBroker = new PermissionBroker(
 );
 const mcpClient = new McpClientManager();
 let mcpTools: ToolDefinition[] = [];
+// The customTools array handed to createAgentSession is stored by reference and
+// re-read by Pi on every tool-registry refresh, so mutating it in place plus a
+// registerTool() trigger updates a live session without recreating it.
+const sessionCustomTools: ToolDefinition[] = [];
+// Captured from the permission extension factory at bind time; used by the
+// MCP hot-reload path. Cleared on session teardown — a stale ExtensionAPI
+// throws when used after its session is replaced.
+let extensionApi: ExtensionAPI | undefined;
 
 function mcpConfigPaths(): { project: string; global: string } {
   return {
@@ -629,6 +639,9 @@ function createPermissionExtension(): InlineExtension {
     name: "chat-anytime-permissions",
     hidden: true,
     factory(pi) {
+      // Rebound on every session creation; the captured API drives the MCP
+      // hot-reload path (registerTool rebuilds Pi's registry on a live session).
+      extensionApi = pi;
       pi.on("tool_call", async (event) => {
         const args = event.input as Record<string, unknown>;
         const risk = toolRisk(workspace, event.toolName, args);
@@ -887,6 +900,7 @@ async function createSession(sessionManager?: SessionManager): Promise<void> {
   permissionBroker.reset();
   session?.dispose();
   session = undefined;
+  extensionApi = undefined;
   executions = new Map();
   controlMessages = [];
   turnTiming = undefined;
@@ -953,6 +967,10 @@ async function createSession(sessionManager?: SessionManager): Promise<void> {
   emitResourceCatalog();
   const subagentTools = buildSubagentTools(false);
   const todoTools = buildTodoTools();
+  // Keep the same array instance across sessions: Pi stores it by reference,
+  // and applyMcpToolChanges() mutates it to hot-swap MCP tools later.
+  sessionCustomTools.length = 0;
+  sessionCustomTools.push(...mcpTools, ...subagentTools, ...todoTools);
   const result = await createAgentSession({
     cwd: workspace,
     modelRuntime,
@@ -961,7 +979,7 @@ async function createSession(sessionManager?: SessionManager): Promise<void> {
     sessionManager: activeSessionManager,
     settingsManager,
     resourceLoader,
-    customTools: [...mcpTools, ...subagentTools, ...todoTools]
+    customTools: sessionCustomTools
   });
   if (generation !== sessionGeneration) {
     result.session.dispose();
@@ -1070,10 +1088,47 @@ async function runResourceOperation(label: string, operation: () => Promise<void
 
 async function reloadRuntimeResources(): Promise<void> {
   if (!session) throw new Error("请先打开工作区，再重载资源");
-  // customTools are fixed at AgentSession creation, so the only reliable way to
-  // pick up changed MCP/Skill/Todo tooling is to recreate the session while
-  // keeping the same SessionManager (the JSONL history is preserved).
+  // customTools are fixed at AgentSession creation and Pi has no tool-removal
+  // API, so removals (server deleted/disabled) still require recreating the
+  // session while keeping the same SessionManager (JSONL history preserved).
   await createSession(session.sessionManager);
+}
+
+/**
+ * Apply MCP config changes to the live session. Tool additions and same-name
+ * replacements take the hot path: the stable customTools array is swapped in
+ * place and registerTool() makes Pi rebuild the registry and prompt snippets —
+ * the message flow and session state stay intact. Any removal (or a missing
+ * session/extension handle) falls back to a full session rebuild.
+ */
+async function applyMcpToolChanges(): Promise<void> {
+  if (!session) throw new Error("请先打开工作区，再管理 MCP Server");
+  const previousNames = mcpTools.map((tool) => tool.name);
+  await syncMcpServers(forceMcpRefresh);
+  forceMcpRefresh = false;
+  const { added, removed } = diffToolNames(previousNames, mcpTools.map((tool) => tool.name));
+  if (added.length === 0 && removed.length === 0) return;
+  if (removed.length > 0 || !extensionApi) {
+    await reloadRuntimeResources();
+    return;
+  }
+  try {
+    const subagentTools = buildSubagentTools(false);
+    const todoTools = buildTodoTools();
+    sessionCustomTools.length = 0;
+    sessionCustomTools.push(...mcpTools, ...subagentTools, ...todoTools);
+    // Re-registering every MCP tool covers additions and same-name schema
+    // changes alike, and triggers the registry refresh that re-reads
+    // sessionCustomTools.
+    for (const tool of mcpTools) extensionApi.registerTool(tool);
+    const enabledBuiltinTools = Object.entries(currentAgent?.tools ?? {}).filter(([, enabled]) => enabled).map(([name]) => name);
+    session.setActiveToolsByName([...enabledBuiltinTools, ...mcpTools.map((tool) => tool.name), ...subagentTools.map((tool) => tool.name), ...todoTools.map((tool) => tool.name)]);
+  } catch (error) {
+    // A stale extension handle (session swapped mid-operation) or any registry
+    // hiccup: recover via the rebuild path.
+    post({ type: "log", level: "warn", message: `MCP 工具热更新失败，回退到会话重建：${errorText(error)}` });
+    await reloadRuntimeResources();
+  }
 }
 
 async function preparePromptPayload(text: string, attachments: PromptAttachment[] = []): Promise<{ text: string; images: ImageContent[] }> {
@@ -1467,7 +1522,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       await runResourceOperation("正在保存 MCP Server", async () => {
         upsertMcpServerConfig(target, name, mcpConfigEntry({ ...server, name }));
         forceMcpRefresh = true;
-        await reloadRuntimeResources();
+        await applyMcpToolChanges();
       });
       break;
     }
@@ -1479,7 +1534,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
           throw new Error("找不到要切换的 MCP Server");
         }
         forceMcpRefresh = true;
-        await reloadRuntimeResources();
+        await applyMcpToolChanges();
       });
       break;
     }
@@ -1490,7 +1545,9 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         const target = command.scope === "project" ? project : global;
         if (!removeMcpServerConfig(target, command.name)) throw new Error("找不到要删除的 MCP Server");
         forceMcpRefresh = true;
-        await reloadRuntimeResources();
+        // Deletion always removes tools → applyMcpToolChanges falls back to a
+        // session rebuild (Pi has no tool-removal API).
+        await applyMcpToolChanges();
       });
       break;
     }
