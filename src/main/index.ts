@@ -2,7 +2,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { extname, join, resolve } from "node:path";
 import { app, BrowserWindow, dialog, ipcMain, Menu, safeStorage, utilityProcess, type UtilityProcess } from "electron";
-import { migrateSettings } from "./settings.js";
+import { migrateSettings, normalizeVision } from "./settings.js";
 import { importExternalAttachment, workspaceRelativeAttachment } from "./attachments.js";
 import type { BrowserPreviewCommand, BrowserPreviewState, DesktopBootstrap, DesktopSettings, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot, WorkspaceDirectoryListing, WorkspaceFilePreview, WorkspaceFileWriteResult } from "../shared/protocol.js";
 import { listWorkspaceDirectory, readWorkspaceFilePreview, writeWorkspaceFile } from "./workspace-preview.js";
@@ -140,6 +140,9 @@ function updateSettings(command: RuntimeCommand): void {
       if (settings.model?.provider === command.providerId) settings.model = undefined;
       settings.agents = settings.agents.map((agent) => agent.defaultModel?.provider === command.providerId ? { ...agent, defaultModel: undefined } : agent);
       deleteCredential(command.providerId);
+      break;
+    case "vision.save":
+      settings.vision = normalizeVision(command.vision) ?? { enabled: false, provider: "", model: "" };
       break;
   }
   persistSettings();

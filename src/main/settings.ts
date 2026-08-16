@@ -13,7 +13,8 @@ import type {
   ThemeColorOverrides,
   ThemeOverrides,
   ThemePresetId,
-  ThinkingLevel
+  ThinkingLevel,
+  VisionSettings
 } from "../shared/protocol.js";
 
 export const BUILTIN_TOOLS: BuiltinToolName[] = ["read", "bash", "edit", "write", "grep", "find", "ls"];
@@ -165,6 +166,16 @@ export function normalizeDefaultModel(value: unknown): DesktopSettings["model"] 
   return { provider: model.provider.trim(), id: model.id.trim() };
 }
 
+export function normalizeVision(value: unknown): VisionSettings | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const source = value as Record<string, unknown>;
+  const provider = typeof source.provider === "string" ? source.provider.trim() : "";
+  const model = typeof source.model === "string" ? source.model.trim() : "";
+  const prompt = typeof source.prompt === "string" && source.prompt.trim() ? source.prompt.trim() : undefined;
+  const normalized = { enabled: source.enabled === true, provider, model, ...(prompt ? { prompt } : {}) };
+  return normalized.enabled || provider || model ? normalized : undefined;
+}
+
 export function defaultSettings(): DesktopSettings {
   return {
     version: 2,
@@ -229,7 +240,8 @@ export function migrateSettings(raw: unknown): { settings: DesktopSettings; lega
     providers,
     agents: normalizedAgents,
     currentAgentId,
-    appearance: { theme, themePreset, customCss, ...(Object.keys(customCssAssets).length > 0 ? { customCssAssets } : {}), customThemes, themeOverrides, showThinking: appearanceSource.showThinking !== false }
+    appearance: { theme, themePreset, customCss, ...(Object.keys(customCssAssets).length > 0 ? { customCssAssets } : {}), customThemes, themeOverrides, showThinking: appearanceSource.showThinking !== false },
+    vision: normalizeVision(source.vision)
   };
   const legacyApiKey = typeof source.customProviderApiKey === "string" ? source.customProviderApiKey : undefined;
   return { settings, legacyApiKey };

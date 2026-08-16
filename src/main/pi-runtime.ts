@@ -2,7 +2,7 @@ import { readdir, realpath, stat, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative as relativePath, resolve, sep } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, UserMessage, ImageContent } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, UserMessage, ImageContent, Model } from "@earendil-works/pi-ai";
 import {
   createAgentSession,
   DefaultResourceLoader,
@@ -55,6 +55,7 @@ import { loadRecentWorkspaces, recordRecentWorkspace, removeRecentWorkspace, wri
 import { createSubagentTools, type SubagentContext } from "./subagent.js";
 import { buildSkillsSystemPromptBlock, discoverSkills, isSkillDisabled, setSkillEnabled, skillIdFromPath, toSkillSummaries, type DiscoveredSkill } from "./skill-catalog.js";
 import { createTodoStore, migrateLegacyTodoFile, type TodoStore } from "./todo-store.js";
+import { formatVisionBlock, recognizeImages, resolveVisionModel } from "./vision.js";
 import { Type } from "typebox";
 import { toolRisk } from "./permissions.js";
 import { buildResourceCatalog } from "./resource-catalog.js";
@@ -90,6 +91,18 @@ let recentWorkspaces: RecentWorkspace[] = [];
 let selectedModel: { provider: string; id: string } | undefined;
 let settings: DesktopSettings | undefined;
 let apiKeys: Record<string, string> = {};
+let visionModel: Model<Api> | undefined;
+// Transient user bubble shown while vision recognition runs: the real
+// UserMessage only enters the session when prompt() fires, i.e. after the
+// multi-second recognition completes. snapshot() swaps the transient bubble
+// for the committed message as soon as the latter lands.
+let pendingVisionMessage: ChatMessage | undefined;
+let pendingVisionSince: number | undefined;
+
+function clearPendingVisionMessage(): void {
+  pendingVisionMessage = undefined;
+  pendingVisionSince = undefined;
+}
 let currentAgent: AgentProfile | undefined;
 const customProviderId = "chatanytime-openai-compatible";
 const imageMimeTypes = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
@@ -494,7 +507,11 @@ function snapshot(): RuntimeSnapshot {
   const sessionMessages = session
     ? normalizeMessages(session.state.messages, session.state.streamingMessage)
     : [];
-  const messages = [...sessionMessages, ...controlMessages].sort((left, right) => left.timestamp - right.timestamp);
+  // Swap the transient recognition bubble for the committed user message in
+  // the same frame the latter appears, so neither a gap nor a duplicate shows.
+  const pendingSince = pendingVisionSince;
+  if (pendingSince !== undefined && sessionMessages.some((message) => message.role === "user" && message.timestamp >= pendingSince)) clearPendingVisionMessage();
+  const messages = [...(pendingVisionMessage ? [pendingVisionMessage] : []), ...sessionMessages, ...controlMessages].sort((left, right) => left.timestamp - right.timestamp);
   return {
     workspace,
     agentId: currentAgent?.id ?? "default",
@@ -872,6 +889,7 @@ async function createSession(sessionManager?: SessionManager): Promise<void> {
   executions = new Map();
   controlMessages = [];
   turnTiming = undefined;
+  clearPendingVisionMessage();
 
   const settingsManager = SettingsManager.create(workspace, getAgentDir());
   // Pi's own discovery is fully disabled: no extensions, no skills, no themes,
@@ -1010,6 +1028,7 @@ async function initialize(command: Extract<RuntimeCommand, { type: "initialize" 
     if (initializedProviderIds.has(providerId) || !key || !modelRuntime.getProvider(providerId)) continue;
     await modelRuntime.setRuntimeApiKey(providerId, key, { allowNetwork: false });
   }
+  visionModel = resolveVisionModel(settings.vision, modelRuntime);
   await refreshCatalog();
   if (workspace) await createSession();
   else {
@@ -1079,6 +1098,39 @@ async function preparePromptPayload(text: string, attachments: PromptAttachment[
     text: extras.length ? `${text}\n\n${extras.join("\n\n")}` : text,
     images
   };
+}
+
+// Fallback for text-only conversation models: recognize attached images with
+// the configured vision model (one of the registered provider models) and
+// inject the descriptions into the prompt text, so raw image parts never
+// reach a model that cannot read them.
+async function applyVisionFallback(payload: { text: string; images: ImageContent[] }): Promise<void> {
+  if (!visionModel || !modelRuntime) throw new Error("当前模型不支持图片输入，请先切换多模态模型，或在设置的模型服务中启用视觉识别");
+  busy = true;
+  status = "正在识别图片";
+  pendingVisionSince = Date.now();
+  pendingVisionMessage = {
+    id: `vision-pending-${pendingVisionSince}`,
+    uuid: `vision-pending-${pendingVisionSince}`,
+    role: "user",
+    timestamp: pendingVisionSince,
+    blocks: [
+      ...(payload.text.trim() ? [{ type: "text" as const, text: payload.text }] : []),
+      ...payload.images.map((image) => ({ type: "image" as const, data: image.data, mimeType: image.mimeType }))
+    ]
+  };
+  emitState();
+  try {
+    const results = await recognizeImages(modelRuntime, visionModel, { prompt: settings?.vision?.prompt, question: payload.text, images: payload.images });
+    payload.text += formatVisionBlock(results, visionModel.name || visionModel.id);
+    payload.images = [];
+  } catch (error) {
+    clearPendingVisionMessage();
+    busy = false;
+    status = "请求失败";
+    emitState();
+    throw new Error(`图片识别失败：${errorText(error)}`);
+  }
 }
 
 async function handleCommand(command: RuntimeCommand): Promise<void> {
@@ -1166,7 +1218,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       if (!session) throw new Error("请先打开工作区，再发送消息");
       if (!session.model) throw new Error("请先配置并选择模型，再发送消息");
       const prompt = await preparePromptPayload(command.text, command.attachments);
-      if (prompt.images.length && !hasImageInput(session.model)) throw new Error("当前模型不支持图片输入，请先切换多模态模型");
+      if (prompt.images.length && !hasImageInput(session.model)) await applyVisionFallback(prompt);
       const promptSession = session;
       const promptGeneration = sessionGeneration;
       busy = true;
@@ -1175,6 +1227,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       emitState();
       void promptSession.prompt(prompt.text, prompt.images.length ? { images: prompt.images } : undefined).catch((error) => {
         if (promptGeneration !== sessionGeneration || session !== promptSession) return;
+        clearPendingVisionMessage();
         completeTurn();
         busy = false;
         status = "请求失败";
@@ -1188,7 +1241,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       if (!command.text.trim() && !command.skillName) throw new Error("没有可重新生成的用户消息");
       const regeneratedText = command.skillName ? runtimeSkillPrompt(command.skillName, command.text) : command.text.trim();
       const regeneratedPrompt = await preparePromptPayload(regeneratedText, command.attachments);
-      if (regeneratedPrompt.images.length && !hasImageInput(session.model)) throw new Error("当前模型不支持图片输入，请先切换多模态模型");
+      if (regeneratedPrompt.images.length && !hasImageInput(session.model)) await applyVisionFallback(regeneratedPrompt);
       const regenerateSession = session;
       const regenerateGeneration = sessionGeneration;
       busy = true;
@@ -1210,6 +1263,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         await regenerateSession.prompt(regeneratedPrompt.text, regeneratedPrompt.images.length ? { images: regeneratedPrompt.images } : undefined);
       })().catch((error) => {
         if (regenerateGeneration !== sessionGeneration || session !== regenerateSession) return;
+        clearPendingVisionMessage();
         completeTurn();
         busy = false;
         status = "请求失败";
@@ -1332,6 +1386,11 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         post({ type: "custom-model-error", providerId: command.providerId, message: errorText(error) });
       }
       break;
+    case "vision.save": {
+      if (settings) settings.vision = command.vision;
+      visionModel = modelRuntime ? resolveVisionModel(command.vision, modelRuntime) : undefined;
+      break;
+    }
     case "agent.select":
       if (busy) throw new Error("当前会话正在运行，暂时不能切换 Agent");
       if (!settings?.agents.some((agent) => agent.id === command.agentId && !agent.archived)) throw new Error("Agent 不存在或已归档");

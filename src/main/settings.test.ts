@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CUSTOM_PROVIDER_ID, createDefaultAgent, mergeProviderModels, migrateSettings, normalizeAccessMode, normalizeAgent, normalizeCustomThemes, normalizeThemeAssets, normalizeThemeOverrides } from "./settings.js";
+import { CUSTOM_PROVIDER_ID, createDefaultAgent, mergeProviderModels, migrateSettings, normalizeAccessMode, normalizeAgent, normalizeCustomThemes, normalizeThemeAssets, normalizeThemeOverrides, normalizeVision } from "./settings.js";
 
 describe("desktop settings migration", () => {
   it("migrates the legacy custom provider without changing its stable id", () => {
@@ -128,5 +128,13 @@ describe("desktop settings migration", () => {
     expect(result.settings.appearance.customCss).not.toContain("base64");
     expect(result.settings.appearance.customCssAssets).toEqual({ "wallpaper.png": "data:image/png;base64,abc" });
     expect(normalizeThemeAssets({ "../wallpaper.png": "data:image/png;base64,abc", bad: "https://example.com/image.png" })).toEqual({ "../wallpaper.png": "data:image/png;base64,abc" });
+  });
+
+  it("normalizes the vision fallback config and drops empty ones", () => {
+    expect(migrateSettings({ vision: { enabled: true, provider: " proxy ", model: " glm-4v-flash ", prompt: "  " } }).settings.vision).toEqual({ enabled: true, provider: "proxy", model: "glm-4v-flash" });
+    expect(migrateSettings({}).settings.vision).toBeUndefined();
+    expect(normalizeVision({ enabled: false, provider: "", model: "" })).toBeUndefined();
+    expect(normalizeVision({ enabled: false, provider: "proxy", model: "glm-4v-flash", prompt: "详细描述" })).toEqual({ enabled: false, provider: "proxy", model: "glm-4v-flash", prompt: "详细描述" });
+    expect(normalizeVision("invalid")).toBeUndefined();
   });
 });

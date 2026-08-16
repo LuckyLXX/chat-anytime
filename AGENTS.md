@@ -9,6 +9,7 @@
   - Skill: `src/main/skill-catalog.ts` scans `pidesktop-skills/` (global) and `.pidesktop-skills/` (project) for `SKILL.md`; enable state in `pidesktop-skill-state.json`.
   - Subagent: `src/main/subagent.ts` `delegate_agent` creates a single-level child `AgentSession` under `chatanytime-sessions/<agentId>/delegations/`.
   - Todo: `src/main/todo-store.ts` atomic JSON, session-scoped at `chatanytime-sessions/<agentId>/todos/<sessionId>.json`; the store is rebuilt in `createSession` so the task panel follows the active session.
+- Vision fallback (`src/main/vision.ts`) is NOT a `customTools` injection: when a text-only model receives image attachments, the utility process pre-processes the prompt by calling a user-selected multimodal model from the already-configured provider catalog (`settings.vision` `{ enabled, provider, model }`, resolved via the shared `ModelRuntime`) and injects the recognized text; raw image parts never reach the text-only model.
 - Preserve the permission boundary for bash, writes, and paths outside the selected workspace.
 - Keep provider secrets process-local unless a dedicated secure-storage design is added.
 - Render complete HTML/SVG documents only inside the sandboxed Artifact preview.

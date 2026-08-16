@@ -815,6 +815,12 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
   const [apiKey, setApiKey] = useState("");
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string>();
+  const [visionEnabled, setVisionEnabled] = useState(settings.vision?.enabled ?? false);
+  const [visionModel, setVisionModel] = useState(settings.vision?.provider && settings.vision.model ? `${settings.vision.provider}/${settings.vision.model}` : "");
+  const [visionPrompt, setVisionPrompt] = useState(settings.vision?.prompt ?? "");
+  const [visionSaving, setVisionSaving] = useState(false);
+  const [visionError, setVisionError] = useState<string>();
+  const visionModelOptions = models.filter((model) => model.configured && model.imageInput);
   const [tab, setTab] = useState<"general" | "models" | "agents" | "appearance" | "resources">("general");
   const [themeColorMode, setThemeColorMode] = useState<ThemeOverrideMode>(() => {
     const { theme } = settings.appearance;
@@ -986,6 +992,27 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
     await window.piDesktop.send({ type: "provider.models.fetch", providerId: provider, baseUrl: customBaseUrl.trim(), apiKey: fetchApiKey });
   }
 
+  async function saveVision(): Promise<void> {
+    const slash = visionModel.indexOf("/");
+    const provider = slash > 0 ? visionModel.slice(0, slash) : "";
+    const modelId = slash > 0 ? visionModel.slice(slash + 1) : "";
+    if (visionEnabled && (!provider || !modelId)) {
+      setVisionError("请先在上方的服务商中配置一个支持图片输入的模型");
+      return;
+    }
+    setVisionSaving(true);
+    setVisionError(undefined);
+    try {
+      const vision = { enabled: visionEnabled, provider, model: modelId, ...(visionPrompt.trim() ? { prompt: visionPrompt.trim() } : {}) };
+      await window.piDesktop.send({ type: "vision.save", vision });
+      markSettingsSaved({ ...settings, vision });
+    } catch (error) {
+      setVisionError(error instanceof Error ? error.message : "保存视觉识别设置失败");
+    } finally {
+      setVisionSaving(false);
+    }
+  }
+
   async function save(event: FormEvent): Promise<void> {
     event.preventDefault();
     if (!provider || (!apiKey.trim() && !hasSavedCustomKey)) return;
@@ -1095,6 +1122,21 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
           {customModelFetchError && <p className="form-error">{customModelFetchError}</p>}
         </>}
         <label>API 密钥<input type="password" value={apiKey} autoFocus placeholder={isCustomProvider && hasSavedCustomKey ? "已保存，留空则继续使用" : "请输入 API 密钥"} onChange={(event) => setApiKey(event.target.value)} /></label>
+        <section className="vision-settings" aria-label="视觉识别设置">
+          <div className="vision-settings-heading">
+            <div><h3>视觉识别（图片兜底）</h3><p>当前对话模型不支持图片输入时，发送的图片会自动交给这里选择的多模态模型识别，识别结果以文本形式交给对话模型。模型来自上方已配置的模型服务。</p></div>
+            <label className="checkbox-setting"><input type="checkbox" checked={visionEnabled} onChange={(event) => setVisionEnabled(event.target.checked)} />启用</label>
+          </div>
+          <label>视觉模型<select value={visionModel} disabled={visionModelOptions.length === 0} onChange={(event) => setVisionModel(event.target.value)}>
+            <option value="">{visionModelOptions.length === 0 ? "暂无已配置的多模态模型" : "请选择视觉模型"}</option>
+            {visionModelOptions.some((model) => `${model.provider}/${model.id}` === visionModel)
+              ? visionModelOptions.map((model) => <option key={`${model.provider}/${model.id}`} value={`${model.provider}/${model.id}`}>{model.name}（{providers.find((provider) => provider.id === model.provider)?.name ?? model.provider}）</option>)
+              : [<option key={visionModel} value={visionModel}>{visionModel}</option>, ...visionModelOptions.map((model) => <option key={`${model.provider}/${model.id}`} value={`${model.provider}/${model.id}`}>{model.name}（{providers.find((provider) => provider.id === model.provider)?.name ?? model.provider}）</option>)]}
+          </select></label>
+          <label>识别提示词（可选）<textarea rows={3} value={visionPrompt} placeholder="留空使用默认提示词：转写图中文字、描述物体、布局与配色等" onChange={(event) => setVisionPrompt(event.target.value)} /></label>
+          {visionError && <p className="form-error">{visionError}</p>}
+          <div className="vision-settings-footer"><button className="primary-button" type="button" disabled={visionSaving} onClick={() => void saveVision()}>{visionSaving ? "正在保存" : "保存视觉识别设置"}</button></div>
+        </section>
         {formError && <p className="form-error">{formError}</p>}
         <footer><button type="button" className="secondary-button" onClick={closeSettings}>取消</button><button className="primary-button" disabled={saving || (!apiKey.trim() && !hasSavedCustomKey) || (isCustomProvider && (!customName.trim() || !customBaseUrl.trim() || !customModelId.trim() || (providerModels.length > 0 && enabledProviderModels.length === 0)))} type="submit">{saving ? "正在应用" : "保存设置"}</button></footer>
         </form> : tab === "agents" ? <div className="agent-settings">
@@ -1172,6 +1214,9 @@ export function App(): ReactNode {
   const selectedModel = snapshot.model ? `${snapshot.model.provider}/${snapshot.model.id}` : "";
   const availableModels = useMemo(() => models.filter((model) => model.configured), [models]);
   const selectedModelOption = availableModels.find((model) => `${model.provider}/${model.id}` === selectedModel);
+  const visionFallbackAvailable = Boolean(settings.vision?.enabled && settings.vision.provider && settings.vision.model
+    && models.some((item) => item.provider === settings.vision?.provider && item.id === settings.vision?.model && item.configured && item.imageInput));
+  const modelAcceptsImages = Boolean(models.find((item) => `${item.provider}/${item.id}` === selectedModel)?.imageInput);
   const visibleAgents = useMemo(() => settings.agents.filter((agent) => !agent.archived && `${agent.name} ${agent.description}`.toLowerCase().includes(sidebarQuery.trim().toLowerCase())), [settings.agents, sidebarQuery]);
   const sessionGroups = useMemo(() => groupSessionsByWorkspace(snapshot.sessions, sidebarQuery, snapshot.recentWorkspaces), [snapshot.sessions, snapshot.recentWorkspaces, sidebarQuery]);
   const displayMessages = useMemo(() => groupAssistantMessages(snapshot.messages), [snapshot.messages]);
@@ -1445,7 +1490,7 @@ export function App(): ReactNode {
     const skillMatch = selectedSkill ? undefined : text.match(/^\/skill:([^\s]+)(?:\s+([\s\S]*))?$/u);
     const skillName = selectedSkill ?? skillMatch?.[1];
     const skillInstructions = selectedSkill ? text || undefined : skillMatch?.[2]?.trim() || undefined;
-    if (attachments.some((item) => item.kind === "image") && !models.find((item) => `${item.provider}/${item.id}` === selectedModel)?.imageInput) { setAttachmentError("当前模型不支持图片输入，请先切换多模态模型"); return; }
+    if (attachments.some((item) => item.kind === "image") && !modelAcceptsImages && !visionFallbackAvailable) { setAttachmentError("当前模型不支持图片输入，请先切换多模态模型，或在设置的模型服务中启用视觉识别"); return; }
     setLocalTurnStartedAt(Date.now());
     try {
       if (editingMessageTimestamp !== undefined) {
@@ -1989,7 +2034,7 @@ export function App(): ReactNode {
               </>}
             </div>
             <form ref={composerRef} className="composer" onSubmit={submit} onDragOver={(event) => event.preventDefault()} onDrop={handleDrop}>
-              {attachments.length > 0 && <div className="attachment-list">{attachments.map((attachment, index) => <span className="attachment-chip" key={`${attachment.name}-${index}`}>{attachment.kind === "image" ? <img src={`data:${attachment.mimeType};base64,${attachment.data}`} alt="" /> : <FileDiff size={12} />}<span>{attachment.name}</span><button type="button" title="移除附件" aria-label={`移除 ${attachment.name}`} onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={12} /></button></span>)}</div>}
+              {attachments.length > 0 && <div className="attachment-list">{attachments.map((attachment, index) => <span className="attachment-chip" key={`${attachment.name}-${index}`}>{attachment.kind === "image" ? <img src={`data:${attachment.mimeType};base64,${attachment.data}`} alt="" /> : <FileDiff size={12} />}<span>{attachment.name}</span>{attachment.kind === "image" && !modelAcceptsImages && visionFallbackAvailable && <small className="attachment-chip-note" title="当前模型不支持图片，将自动调用视觉模型识别">视觉识别</small>}<button type="button" title="移除附件" aria-label={`移除 ${attachment.name}`} onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={12} /></button></span>)}</div>}
               {attachmentError && <div className="attachment-error" role="alert">{attachmentError}<button type="button" title="关闭提示" aria-label="关闭附件提示" onClick={() => setAttachmentError(undefined)}><X size={12} /></button></div>}
               <input ref={fileInputRef} type="file" hidden multiple accept="image/png,image/jpeg,image/webp,image/gif,.txt,.md,.json,.js,.ts,.tsx,.jsx,.py,.go,.rs,.java,.css,.html" onChange={(event) => { void addLocalFiles(event.target.files ?? []); event.currentTarget.value = ""; }} />
               {slashOpen && (

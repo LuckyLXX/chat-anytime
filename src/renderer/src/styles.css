@@ -719,6 +719,15 @@ select option:checked { color: var(--on-accent); background-color: var(--accent)
 .settings-provider-heading label { flex: 1; margin: 15px 0; }
 .settings-provider-heading button { min-height: 38px; margin-bottom: 15px; white-space: nowrap; }
 .settings-dialog .form-error { margin: 0 18px 13px; color: var(--danger); font-size: 11px; }
+.vision-settings { display: grid; gap: 4px; margin: 0 18px 15px; padding: 13px 0 15px; border-top: 1px dashed var(--border-strong); }
+.vision-settings-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.vision-settings-heading h3 { margin: 0; font-size: 12px; }
+.vision-settings-heading p { margin: 3px 0 0; line-height: 1.45; }
+.vision-settings-heading .checkbox-setting { flex: 0 0 auto; margin: 0; white-space: nowrap; }
+.vision-settings > label { margin: 8px 0 0; }
+.vision-settings textarea { width: 100%; padding: 8px 10px; border: 1px solid var(--border-strong); border-radius: 5px; outline: 0; resize: vertical; color: var(--text); background: var(--surface-input); font: inherit; }
+.vision-settings-footer { display: flex; justify-content: flex-end; margin-top: 10px; }
+.attachment-chip-note { flex: 0 0 auto; padding: 1px 5px; border-radius: 999px; color: var(--accent); background: var(--accent-soft); font-size: 9px; font-weight: 600; }
 .settings-dialog .access-mode-warning { margin: -5px 18px 13px; color: var(--danger-text); font-size: 11px; line-height: 1.45; }
 .settings-dialog .access-mode-hint { margin: -5px 18px 13px; color: var(--text-muted); font-size: 11px; line-height: 1.45; }
 .settings-dialog footer, .permission-dialog footer { display: flex; justify-content: flex-end; gap: 8px; padding: 13px 18px; border-top: 1px solid var(--border); background: var(--surface-footer); }

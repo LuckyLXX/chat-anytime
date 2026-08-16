@@ -221,7 +221,7 @@ export function createDemoApi(): DesktopApi {
             { id: "chatanytime-openai-compatible", name: "自定义 OpenAI 兼容服务", configured: false }
           ],
           models: [
-            { provider: "anthropic", id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", configured: true, input: ["text"], imageInput: false },
+            { provider: "anthropic", id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", configured: true, input: ["text", "image"], imageInput: true },
             { provider: "anthropic", id: "claude-opus-4-6", name: "Claude Opus 4.6", configured: true, input: ["text"], imageInput: false }
           ]
         }
@@ -397,6 +397,9 @@ export function createDemoApi(): DesktopApi {
               { id: "gpt-4.1", name: "GPT-4.1", imageInput: true, enabled: false }
             ]
           });
+          break;
+        case "vision.save":
+          demoSettings.vision = { ...command.vision };
           break;
         case "resources.reload":
           emit({ type: "resources", resources: structuredClone(demoResources) });

@@ -101,6 +101,19 @@ export interface AppearanceSettings {
   showThinking: boolean;
 }
 
+/**
+ * Vision fallback configuration: images attached for a text-only conversation
+ * model are recognized by one of the already-configured provider models
+ * (picked from the fetched model catalog, must support image input).
+ */
+export interface VisionSettings {
+  enabled: boolean;
+  provider: string;
+  model: string;
+  /** Optional custom recognition prompt; falls back to the built-in default. */
+  prompt?: string;
+}
+
 export interface DesktopSettings {
   version: 2;
   workspace?: string;
@@ -111,6 +124,7 @@ export interface DesktopSettings {
   agents: AgentProfile[];
   currentAgentId: string;
   appearance: AppearanceSettings;
+  vision?: VisionSettings;
   customProvider?: CustomProviderSettings;
   customProviderKeyConfigured?: boolean;
   pinnedSessionPaths?: string[];
@@ -418,6 +432,7 @@ export type RuntimeCommand =
   | { type: "provider.save"; provider: ProviderSettings; apiKey?: string }
   | { type: "provider.delete"; providerId: string }
   | { type: "provider.models.fetch"; providerId: string; baseUrl: string; apiKey?: string }
+  | { type: "vision.save"; vision: VisionSettings }
   | { type: "appearance.save"; appearance: AppearanceSettings }
   | { type: "mcp.server.save"; server: McpServerConfigDraft }
   | { type: "mcp.server.toggle"; name: string; enabled: boolean }
