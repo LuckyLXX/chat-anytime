@@ -3,7 +3,7 @@
 // store lifecycle (createTodoStore / session-scoped file) stays in pi-runtime;
 // these builders are pure over their inputs.
 
-import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { defineTool, type InlineExtension, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { Todo } from "../shared/protocol.js";
 import type { TodoStore } from "./todo-store.js";
 import { Type } from "typebox";
@@ -25,10 +25,30 @@ export function buildTodoSystemPromptBlock(): string {
   ].join("\n");
 }
 
-/** 当前待办清单的紧凑文本（随每次用户消息注入，保证模型与任务面板同步）。 */
+/** 当前待办清单的紧凑文本，注入到每轮系统提示词里，保证模型与任务面板同步。 */
 export function buildTodoPromptBlock(todos: readonly Todo[]): string | undefined {
   if (todos.length === 0) return undefined;
   return `当前任务清单（Todo 面板）：\n${summarizeTodos(todos)}`;
+}
+
+/**
+ * 每轮注入当前任务清单的 inline extension。清单内容通过
+ * `before_agent_start` 追加到当轮系统提示词，而不是拼进用户消息文本，
+ * 这样模型始终能看到最新清单，同时用户消息气泡和会话历史不会被
+ * Todo 内容污染。
+ */
+export function createTodoContextExtension(deps: { todos: () => readonly Todo[] }): InlineExtension {
+  return {
+    name: "chat-anytime-todo-context",
+    hidden: true,
+    factory(pi) {
+      pi.on("before_agent_start", (event) => {
+        const block = buildTodoPromptBlock(deps.todos());
+        if (!block) return undefined;
+        return { systemPrompt: `${event.systemPrompt}\n\n${block}` };
+      });
+    }
+  };
 }
 
 export interface TodoToolContext {

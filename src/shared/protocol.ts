@@ -26,6 +26,12 @@ export interface ProviderSettings {
   baseUrl: string;
   models: ProviderModelSettings[];
   keyConfigured?: boolean;
+  /**
+   * `false` marks a built-in provider entry that only records per-model
+   * visibility (no custom baseUrl). Absent/true means an OpenAI-compatible
+   * custom provider entry.
+   */
+  custom?: boolean;
 }
 
 export interface ProviderOption {
@@ -191,6 +197,9 @@ export interface ToolExecution {
 }
 
 export type WorkspaceFilePreviewKind = "markdown" | "code" | "html" | "svg" | "image" | "text" | "binary";
+
+/** 图片预览内联为 base64 数据 URL 的体积上限（与聊天附件 20MB 限制一致）。 */
+export const IMAGE_PREVIEW_LIMIT_BYTES = 20 * 1024 * 1024;
 
 export interface WorkspaceFilePreview {
   relativePath: string;
@@ -434,6 +443,7 @@ export type RuntimeCommand =
   | { type: "thinking.select"; level: ThinkingLevel }
   | { type: "auth.set"; provider: string; apiKey: string }
   | { type: "provider.save"; provider: ProviderSettings; apiKey?: string }
+  | { type: "provider.models.save"; provider: ProviderSettings }
   | { type: "provider.delete"; providerId: string }
   | { type: "provider.models.fetch"; providerId: string; baseUrl: string; apiKey?: string }
   | { type: "vision.save"; vision: VisionSettings }

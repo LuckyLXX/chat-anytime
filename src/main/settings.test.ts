@@ -53,6 +53,17 @@ describe("desktop settings migration", () => {
     ]);
   });
 
+  it("preserves built-in provider visibility entries through migration", () => {
+    const result = migrateSettings({ providers: [
+      { id: "openai", name: "OpenAI", baseUrl: "", models: [{ id: "gpt-4o", name: "GPT-4o", enabled: true }, { id: "gpt-4o-mini", name: "GPT-4o mini", enabled: false }], custom: false },
+      { id: "proxy", name: "代理", baseUrl: "https://proxy.test/v1", models: [{ id: "model-a", enabled: false }] }
+    ] });
+    expect(result.settings.providers).toEqual([
+      { id: "openai", name: "OpenAI", baseUrl: "", models: [{ id: "gpt-4o", name: "GPT-4o", imageInput: undefined, enabled: true }, { id: "gpt-4o-mini", name: "GPT-4o mini", imageInput: undefined, enabled: false }], custom: false },
+      { id: "proxy", name: "代理", baseUrl: "https://proxy.test/v1", models: [{ id: "model-a", name: "model-a", imageInput: undefined, enabled: false }] }
+    ]);
+  });
+
   it("preserves local model choices when merging an upstream refresh", () => {
     const merged = mergeProviderModels(
       [{ id: "vision", name: "Vision", imageInput: false, enabled: false }],

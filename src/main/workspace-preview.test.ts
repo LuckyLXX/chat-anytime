@@ -3,6 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { changedWorkspaceFile, listWorkspaceDirectory, readWorkspaceFilePreview, writeWorkspaceFile } from "./workspace-preview.js";
+import { IMAGE_PREVIEW_LIMIT_BYTES } from "../shared/protocol.js";
+
+const TINY_PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
 
 describe("workspace file preview", () => {
   it("classifies Markdown and common code without exposing absolute paths", async () => {
@@ -13,6 +16,24 @@ describe("workspace file preview", () => {
 
     await expect(readWorkspaceFilePreview(workspace, "README.md")).resolves.toMatchObject({ kind: "markdown", relativePath: "README.md", content: "# Preview\n", workspace });
     await expect(readWorkspaceFilePreview(workspace, "src/app.ts")).resolves.toMatchObject({ kind: "code", language: "typescript", relativePath: "src/app.ts", workspace });
+  });
+
+  it("previews raster images as inline base64 data and marks oversized ones as binary", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "pidesktop-image-"));
+    await writeFile(join(workspace, "tiny.png"), TINY_PNG);
+    await writeFile(join(workspace, "icon.ico"), Buffer.from([0, 0, 1, 0]));
+    const oversized = Buffer.alloc(IMAGE_PREVIEW_LIMIT_BYTES + 1, 0);
+    await writeFile(join(workspace, "huge.png"), oversized);
+
+    const tiny = await readWorkspaceFilePreview(workspace, "tiny.png");
+    expect(tiny).toMatchObject({ kind: "image", mimeType: "image/png", relativePath: "tiny.png", size: TINY_PNG.length });
+    expect(tiny.data).toBe(TINY_PNG.toString("base64"));
+
+    await expect(readWorkspaceFilePreview(workspace, "icon.ico")).resolves.toMatchObject({ kind: "image", mimeType: "image/x-icon" });
+
+    const huge = await readWorkspaceFilePreview(workspace, "huge.png");
+    expect(huge).toMatchObject({ kind: "binary", mimeType: "image/png", size: oversized.length });
+    expect(huge.data).toBeUndefined();
   });
 
   it("rejects traversal, absolute paths, directories and symlinks outside the workspace", async () => {

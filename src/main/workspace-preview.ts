@@ -1,15 +1,20 @@
 import { mkdir, open, readdir, realpath, stat, writeFile } from "node:fs/promises";
 import { basename, extname, isAbsolute, relative, resolve, sep } from "node:path";
 import type { WorkspaceDirectoryEntry, WorkspaceDirectoryListing, WorkspaceFilePreview, WorkspaceFileWriteResult } from "../shared/protocol.js";
+import { IMAGE_PREVIEW_LIMIT_BYTES } from "../shared/protocol.js";
 
 const textPreviewLimit = 1024 * 1024;
-const imagePreviewLimit = 5 * 1024 * 1024;
+// 与聊天附件（readAttachmentSelection）保持一致：大于该体积的图片无法内联为
+// base64 数据 URL 预览，渲染端会提示图片过大。
+const imagePreviewLimit = IMAGE_PREVIEW_LIMIT_BYTES;
 
 const markdownExtensions = new Set([".md", ".markdown", ".mdx"]);
+// 仅收录 Chromium 可解码的栅格格式（SVG 走下方文本/artifact 分支）。
 const imageMimeTypes: Record<string, string> = {
   ".avif": "image/avif",
   ".bmp": "image/bmp",
   ".gif": "image/gif",
+  ".ico": "image/x-icon",
   ".jpeg": "image/jpeg",
   ".jpg": "image/jpeg",
   ".png": "image/png",

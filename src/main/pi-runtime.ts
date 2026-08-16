@@ -137,8 +137,8 @@ let activeRuntime: SessionRuntimeRecord | undefined;
 // disk and is rebuilt on reopen); running sessions are never evicted.
 const MAX_PARKED_SESSIONS = 4;
 
-// Mirrors of the active record's todo state: the task panel and prompt todo
-// block always follow the session being viewed.
+// Mirrors of the active record's todo state: the task panel and the per-turn
+// todo context (injected into the system prompt) follow the session being viewed.
 let todoStore: TodoStore | undefined;
 let todos: Todo[] = [];
 let resourceOperationBusy = false;
@@ -771,8 +771,12 @@ async function refreshCatalog(): Promise<void> {
   if (!providers.some((provider) => provider.id === customProviderId)) {
     providers.push({ id: customProviderId, name: settings?.providers.find((item) => item.id === customProviderId)?.name ?? "自定义 OpenAI 兼容服务", configured: false });
   }
-  const enabledModels = new Set(settings?.providers.flatMap((provider) => provider.models.filter((item) => item.enabled !== false).map((item) => `${provider.id}/${item.id}`)) ?? []);
-  const models: ModelOption[] = runtime.getModels().filter((model) => !settings?.providers.some((provider) => provider.id === model.provider) || enabledModels.has(`${model.provider}/${model.id}`)).map((model) => ({
+  const models: ModelOption[] = runtime.getModels().filter((model) => {
+    const providerSettings = settings?.providers.find((provider) => provider.id === model.provider);
+    if (!providerSettings) return true;
+    const stored = providerSettings.models.find((item) => item.id === model.id);
+    return stored ? stored.enabled !== false : true;
+  }).map((model) => ({
     provider: model.provider,
     id: model.id,
     name: model.name,
@@ -930,7 +934,10 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
         auditDir: () => agentSessionRoot(),
         sessionId: () => sessionHolder.session?.sessionId ?? activeSessionManager.getSessionId(),
         warn: (message) => void post({ type: "log", level: "warn", message })
-      }).extension
+      }).extension,
+      // Current task list goes into the per-turn system prompt (before_agent_start)
+      // instead of the user message, so the bubble never shows todo content.
+      runtimeTodoTools.createTodoContextExtension({ todos: () => recordBox?.todoStore.list() ?? [] })
     ],
     systemPromptOverride: (base) => [base, recordAgent.systemPrompt, recordAgent.divMode ? buildDivModePrompt() : undefined, buildSkillsSystemPromptBlock(runtimeSkills.activeSkillsFor(nativeSkills, recordAgent)), runtimeTodoTools.buildTodoSystemPromptBlock()].filter(Boolean).join("\n\n")
   });
@@ -1188,10 +1195,10 @@ async function preparePromptPayload(text: string, attachments: PromptAttachment[
   const attachmentsBlock = fileRefs.length
     ? `项目文件附件（请使用 read 工具按需读取）：\n${fileRefs.map((path) => `- ${path}`).join("\n")}`
     : undefined;
-  const todoBlock = runtimeTodoTools.buildTodoPromptBlock(todos);
-  const extras = [attachmentsBlock, todoBlock].filter(Boolean) as string[];
+  // 注意：当前任务清单不再拼进用户消息文本（否则会随气泡一起发给 AI），
+  // 改由 createTodoContextExtension 通过 before_agent_start 注入当轮系统提示词。
   return {
-    text: extras.length ? `${text}\n\n${extras.join("\n\n")}` : text,
+    text: attachmentsBlock ? `${text}\n\n${attachmentsBlock}` : text,
     images
   };
 }
@@ -1453,7 +1460,9 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       await modelRuntime.setRuntimeApiKey(command.provider, command.apiKey, { allowNetwork: false });
       await refreshCatalog();
       if (!activeRuntime?.session.model || activeRuntime.session.model.provider === command.provider) {
-        const first = modelRuntime.getModels(command.provider)[0];
+        const enabledModels = new Set(settings?.providers.flatMap((provider) => provider.models.filter((item) => item.enabled !== false).map((item) => `${provider.id}/${item.id}`)) ?? []);
+        const first = modelRuntime.getModels(command.provider).find((model) => !settings?.providers.some((provider) => provider.id === command.provider) || enabledModels.has(`${command.provider}/${model.id}`))
+          ?? modelRuntime.getModels(command.provider)[0];
         if (first) {
           selectedModel = { provider: first.provider, id: first.id };
           if (activeRuntime) await activeRuntime.session.setModel(first);
@@ -1482,6 +1491,12 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
           applyStatusToActive(fallback ? `当前服务没有启用模型，已切换到 ${fallback.name}` : "当前服务没有启用模型，请在设置中勾选模型");
         }
       }
+      emitState();
+      break;
+    case "provider.models.save":
+      if (!modelRuntime) break;
+      if (settings) settings.providers = settings.providers.some((provider) => provider.id === command.provider.id) ? settings.providers.map((provider) => provider.id === command.provider.id ? command.provider : provider) : [...settings.providers, command.provider];
+      await refreshCatalog();
       emitState();
       break;
     case "provider.delete":

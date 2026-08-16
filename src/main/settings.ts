@@ -143,7 +143,8 @@ export function normalizeProvider(provider: Partial<ProviderSettings>): Provider
     id: String(provider.id || CUSTOM_PROVIDER_ID),
     name: String(provider.name || "自定义 OpenAI 服务"),
     baseUrl: String(provider.baseUrl || "").trim().replace(/\/+$/u, ""),
-    models
+    models,
+    ...(provider.custom === false ? { custom: false as const } : {})
   };
 }
 

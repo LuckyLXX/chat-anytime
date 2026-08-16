@@ -1,6 +1,7 @@
 import { AlertCircle, Check, Code2, Eye, File, FileCode2, FileDiff, FileText, Globe2, LoaderCircle, MessageSquare, Pause, Pencil, Play, Plus, Terminal, X } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode, type SyntheticEvent } from "react";
 import type { WorkspaceFilePreview } from "../../../shared/protocol";
+import { IMAGE_PREVIEW_LIMIT_BYTES } from "../../../shared/protocol";
 import { artifactSandbox, buildArtifactPreviewSource, DYNAMIC_PREVIEW_ACTIONS, isDynamicArtifact, type Artifact, type DynamicPreviewAction } from "../lib/content";
 import { DiffView } from "./DiffView";
 import { MarkdownEditor, type EditorSaveStatus } from "./MarkdownEditor";
@@ -57,6 +58,13 @@ function targetIcon(target: PreviewTarget): ReactNode {
 function FilePreviewContent({ file, tabId, onOpenArtifact, workspace, editorState, onEditorChange, onEditorContentChange, onEditorSaved, onEditorStatusChange, onEditorSaveError, onResolveConflict }: { file: WorkspaceFilePreview; tabId: string; onOpenArtifact(artifact: Artifact): void; workspace?: string; editorState?: PreviewEditorState; onEditorChange?(patch: Partial<PreviewEditorState>): void; onEditorContentChange?(tabId: string, content: string): void; onEditorSaved?(tabId: string, content: string): void; onEditorStatusChange?(tabId: string, status: EditorSaveStatus): void; onEditorSaveError?(message: string): void; onResolveConflict?(choice: "keep-local" | "load-remote"): void }): ReactNode {
   if (file.kind === "image" && file.data && file.mimeType) {
     return <div className="preview-image"><img src={`data:${file.mimeType};base64,${file.data}`} alt={file.name} /></div>;
+  }
+  if (file.kind === "image" && !file.data) {
+    return <div className="preview-empty preview-error"><FileText size={28} /><strong>图片数据缺失，无法预览</strong><span>{file.name}</span></div>;
+  }
+  // 超出内联上限的图片在读取端归类为 binary（仍带 mimeType），单独给出明确提示。
+  if (file.kind === "binary" && file.mimeType?.startsWith("image/")) {
+    return <div className="preview-empty preview-error"><FileText size={28} /><strong>图片超过 {(IMAGE_PREVIEW_LIMIT_BYTES / 1024 / 1024).toFixed(0)} MB，无法预览</strong><span>{file.name}（{file.size.toLocaleString("zh-CN")} bytes）</span></div>;
   }
   if (file.kind === "markdown" && file.content !== undefined) {
     if (editorState?.editing && !file.truncated) {

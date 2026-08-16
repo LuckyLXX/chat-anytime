@@ -2,7 +2,7 @@ import { AlertCircle, ChevronRight, FileCode2, File as FileIcon, FileText, Folde
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import type { WorkspaceDirectoryEntry } from "../../../shared/protocol";
 
-const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif"];
+const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif", "ico"];
 const CODE_EXTENSIONS = ["ts", "tsx", "js", "jsx", "cjs", "mjs", "json", "jsonc", "css", "scss", "less", "html", "htm", "py", "go", "rs", "java", "c", "cpp", "cc", "h", "hpp", "cs", "rb", "php", "sh", "bash", "zsh", "yml", "yaml", "toml", "sql", "xml"];
 
 function entryIcon(name: string): ReactNode {

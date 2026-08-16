@@ -17,6 +17,9 @@ const listeners = new Set<(message: RuntimeMessage) => void>();
 const browserPreviewListeners = new Set<(state: BrowserPreviewState) => void>();
 let browserPreviewState: BrowserPreviewState = { attached: false, url: "", title: "", loading: false, canGoBack: false, canGoForward: false };
 
+// 64x64 渐变 PNG（浏览器演示模式下的图片预览样例）。
+const demoPngData = "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";
+
 const demoDefaultAgent: AgentProfile = {
   id: "default",
   name: "默认助手",
@@ -235,6 +238,9 @@ export function createDemoApi(): DesktopApi {
       return { relativePath: "README.md", name: "README.md", kind: "markdown", language: "markdown", size: 70, content: "# Pi Desktop\n\n- Electron 主进程\n- Pi 工具进程\n- React 渲染进程\n" };
     },
     async readWorkspaceFile(relativePath: string, _workspace?: string): Promise<import("../../shared/protocol").WorkspaceFilePreview> {
+      if (relativePath === "demo.png") {
+        return { relativePath, name: "demo.png", kind: "image", mimeType: "image/png", size: 3775, data: demoPngData, workspace: demoSettings.workspace };
+      }
       if (relativePath === "src/runtime.ts") {
         return { relativePath, name: "runtime.ts", kind: "code", language: "typescript", size: 96, content: "export const runtime = {\n  status: \"ready\",\n  process: \"utility\"\n};\n" };
       }
@@ -247,7 +253,7 @@ export function createDemoApi(): DesktopApi {
       return { saved: true, size: new Blob([content]).size, relativePath };
     },
     async listWorkspaceDirectory(_workspace?: string, _relativePath?: string): Promise<import("../../shared/protocol").WorkspaceDirectoryListing> {
-      return { relativePath: "", entries: [{ name: "src", relativePath: "src", kind: "directory" }, { name: "README.md", relativePath: "README.md", kind: "file" }] };
+      return { relativePath: "", entries: [{ name: "src", relativePath: "src", kind: "directory" }, { name: "demo.png", relativePath: "demo.png", kind: "file" }, { name: "README.md", relativePath: "README.md", kind: "file" }] };
     },
     async browserPreview(command: BrowserPreviewCommand): Promise<BrowserPreviewState> {
       if (command.type === "close") {
@@ -399,6 +405,11 @@ export function createDemoApi(): DesktopApi {
           break;
         case "provider.delete":
           demoSettings.providers = demoSettings.providers.filter((provider) => provider.id !== command.providerId);
+          break;
+        case "provider.models.save":
+          demoSettings.providers = demoSettings.providers.some((provider) => provider.id === command.provider.id)
+            ? demoSettings.providers.map((provider) => provider.id === command.provider.id ? command.provider : provider)
+            : [...demoSettings.providers, command.provider];
           break;
         case "provider.models.fetch":
           emit({

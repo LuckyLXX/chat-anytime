@@ -27,7 +27,6 @@ import {
   SquarePen,
   Users,
   PanelRightClose,
-  PanelRightOpen,
   Play,
   Plus,
   RefreshCw,
@@ -52,6 +51,7 @@ import type {
   AgentProfile,
   BuiltinToolName,
   ProviderSettings,
+  ProviderModelSettings,
   CustomProviderModel,
   ModelOption,
   McpServerStatus,
@@ -795,7 +795,7 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
   const firstCustomProvider = configuredProviders[0];
   const [provider, setProvider] = useState(firstCustomProvider?.id ?? customProviderId);
   const selectedProvider = configuredProviders.find((item) => item.id === provider);
-  const isCustomProvider = provider === customProviderId || provider.startsWith("provider-") || Boolean(selectedProvider);
+  const isCustomProvider = provider === customProviderId || provider.startsWith("provider-") || (selectedProvider !== undefined && selectedProvider.custom !== false);
   const [customName, setCustomName] = useState(selectedProvider?.name ?? customProvider?.name ?? "我的中转站");
   const [customBaseUrl, setCustomBaseUrl] = useState(selectedProvider?.baseUrl ?? customProvider?.baseUrl ?? "");
   const [customModelId, setCustomModelId] = useState(selectedProvider?.models[0]?.id ?? customProvider?.models[0]?.id ?? customModels[0]?.id ?? "");
@@ -828,7 +828,12 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
   const selectedAgent = agentList.find((agent) => agent.id === selectedAgentId) ?? agentList[0];
   const configuredModels = models.filter((model) => model.configured);
   const hasSavedCustomKey = Boolean(selectedProvider?.keyConfigured) || (provider === customProviderId && customProviderKeyConfigured);
-  const providerModels = isCustomProvider ? (selectedProvider?.models ?? customModels) : [];
+  const providerModels: ProviderModelSettings[] = isCustomProvider
+    ? (selectedProvider?.models ?? customModels)
+    : models.filter((model) => model.provider === provider).map((model) => {
+      const stored = selectedProvider?.models.find((item) => item.id === model.id);
+      return { id: model.id, name: model.name, imageInput: stored?.imageInput ?? model.imageInput, enabled: stored ? stored.enabled !== false : true };
+    });
   const enabledProviderModels = providerModels.filter((model) => model.enabled !== false);
   const selectedCustomModel = providerModels.find((model) => model.id === customModelId);
   const wallpaperOpacityOverride = settings.appearance.wallpaperOpacity?.[opacityMode];
@@ -841,15 +846,28 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
     useDesktopStore.setState({ settings: saved });
   }
 
-  function updateProviderModel(modelId: string, patch: Partial<import("../../shared/protocol").ProviderModelSettings>): void {
+  function updateProviderModel(modelId: string, patch: Partial<ProviderModelSettings>): void {
     const updated = providerModels.map((model) => model.id === modelId ? { ...model, ...patch } : model);
-    const hasConfiguredProvider = settings.providers.some((item) => item.id === provider);
-    useDesktopStore.setState((state) => ({
-      customModels: (!selectedProvider || provider === customProviderId) ? updated : state.customModels,
-      settings: hasConfiguredProvider
-        ? { ...state.settings, providers: state.settings.providers.map((item) => item.id === provider ? { ...item, models: updated } : item) }
-        : state.settings
-    }));
+    useDesktopStore.setState((state) => {
+      if (!isCustomProvider) {
+        const existing = state.settings.providers.find((item) => item.id === provider);
+        const entry: ProviderSettings = {
+          id: provider,
+          name: existing?.name ?? providers.find((item) => item.id === provider)?.name ?? provider,
+          baseUrl: "",
+          models: updated,
+          custom: false
+        };
+        return { settings: { ...state.settings, providers: existing ? state.settings.providers.map((item) => item.id === provider ? entry : item) : [...state.settings.providers, entry] } };
+      }
+      const hasConfiguredProvider = state.settings.providers.some((item) => item.id === provider);
+      return {
+        customModels: (!selectedProvider || provider === customProviderId) ? updated : state.customModels,
+        settings: hasConfiguredProvider
+          ? { ...state.settings, providers: state.settings.providers.map((item) => item.id === provider ? { ...item, models: updated } : item) }
+          : state.settings
+      };
+    });
   }
 
   function updateAppearance(patch: Partial<AppearanceSettings>): void {
@@ -995,6 +1013,7 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
     if (!provider || (!apiKey.trim() && !hasSavedCustomKey)) return;
     if (!apiKey.trim() && !hasSavedCustomKey) return;
     if (isCustomProvider && (!customName.trim() || !customBaseUrl.trim() || !customModelId.trim() || (providerModels.length > 0 && enabledProviderModels.length === 0))) return;
+    if (!isCustomProvider && providerModels.length > 0 && enabledProviderModels.length === 0) return;
     setSaving(true);
     setFormError(undefined);
     try {
@@ -1005,6 +1024,17 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
         const nextProviders = settings.providers.some((item) => item.id === provider) ? settings.providers.map((item) => item.id === provider ? providerConfig : item) : [...settings.providers, providerConfig];
         markSettingsSaved({ ...settings, providers: nextProviders.map((item) => item.id === provider ? { ...item, keyConfigured: Boolean(apiKey.trim()) || selectedProvider?.keyConfigured } : item) });
       } else {
+        const builtinEntry = settings.providers.find((item) => item.id === provider && item.custom === false);
+        if (builtinEntry) {
+          await window.piDesktop.send({ type: "provider.models.save", provider: builtinEntry });
+          const enabledIds = new Set(builtinEntry.models.filter((model) => model.enabled !== false).map((model) => model.id));
+          markSettingsSaved({
+            ...settings,
+            model: settings.model?.provider === provider && !enabledIds.has(settings.model.id) ? undefined : settings.model,
+            agents: settings.agents.map((agent) => agent.defaultModel?.provider === provider && !enabledIds.has(agent.defaultModel.id) ? { ...agent, defaultModel: undefined } : agent),
+            ...(settings.vision?.provider === provider && !enabledIds.has(settings.vision.model) ? { vision: { ...settings.vision, enabled: false } } : {})
+          });
+        }
         await window.piDesktop.send({ type: "auth.set", provider, apiKey: apiKey.trim() });
       }
       setApiKey("");
@@ -1089,15 +1119,15 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
           <label className="checkbox-setting"><input type="checkbox" checked={settings.appearance.showThinking} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, showThinking: event.target.checked } } })} />展示思考过程</label>
           <footer><button type="button" className="secondary-button" onClick={closeSettings}>取消</button><button className="primary-button" type="submit">保存通用设置</button></footer>
         </form> : tab === "models" ? <form onSubmit={save}>
-        <div className="settings-provider-heading"><label>服务商<select value={provider} onChange={(event) => { const next = event.target.value; setProvider(next); const config = configuredProviders.find((item) => item.id === next); if (config) { setCustomName(config.name); setCustomBaseUrl(config.baseUrl); setCustomModelId(config.models[0]?.id ?? ""); } }}><optgroup label="内置服务">{providers.filter((item) => !item.custom && !configuredProviders.some((config) => config.id === item.id)).map((item) => <option key={item.id} value={item.id}>{item.name}{item.configured ? " - 已配置" : ""}</option>)}</optgroup><optgroup label="OpenAI 兼容服务"><option value={customProviderId}>{customProvider?.name ?? "新的模型服务"}{customProviderKeyConfigured ? " - 已配置" : ""}</option>{configuredProviders.filter((item) => item.id !== customProviderId).map((item) => <option key={item.id} value={item.id}>{item.name}{item.keyConfigured ? " - 已配置" : ""}</option>)}</optgroup></select></label><button className="secondary-button" type="button" onClick={newProvider}>+ 新增服务</button>{selectedProvider && <button className="danger-button" type="button" onClick={() => void deleteProvider()}>删除服务</button>}</div>
+        <div className="settings-provider-heading"><label>服务商<select value={provider} onChange={(event) => { const next = event.target.value; setProvider(next); const config = configuredProviders.find((item) => item.id === next); if (config) { setCustomName(config.name); setCustomBaseUrl(config.baseUrl); setCustomModelId(config.models[0]?.id ?? ""); } }}><optgroup label="内置服务">{providers.filter((item) => !item.custom && !configuredProviders.some((config) => config.id === item.id)).map((item) => <option key={item.id} value={item.id}>{item.name}{item.configured ? " - 已配置" : ""}</option>)}{configuredProviders.filter((item) => item.custom === false).map((item) => <option key={item.id} value={item.id}>{item.name}{item.keyConfigured ? " - 已配置" : ""}</option>)}</optgroup><optgroup label="OpenAI 兼容服务"><option value={customProviderId}>{customProvider?.name ?? "新的模型服务"}{customProviderKeyConfigured ? " - 已配置" : ""}</option>{configuredProviders.filter((item) => item.id !== customProviderId && item.custom !== false).map((item) => <option key={item.id} value={item.id}>{item.name}{item.keyConfigured ? " - 已配置" : ""}</option>)}</optgroup></select></label><button className="secondary-button" type="button" onClick={newProvider}>+ 新增服务</button>{selectedProvider && selectedProvider.custom !== false && <button className="danger-button" type="button" onClick={() => void deleteProvider()}>删除服务</button>}</div>
         {isCustomProvider && <>
           <label>服务名称<input value={customName} placeholder="例如：公司中转站" onChange={(event) => setCustomName(event.target.value)} /></label>
           <div className="settings-action-row"><label>OpenAI 兼容接口地址<input value={customBaseUrl} placeholder="https://api.example.com/v1" onChange={(event) => setCustomBaseUrl(event.target.value)} /></label><button className="secondary-button" type="button" disabled={customModelFetchStatus === "loading" || !customBaseUrl.trim() || (!apiKey.trim() && !customProviderKeyConfigured)} onClick={() => void fetchModels()}><RefreshCw size={14} className={customModelFetchStatus === "loading" ? "spinning" : undefined} />{customModelFetchStatus === "loading" ? "拉取中" : "拉取模型"}</button></div>
-          <div className="model-selection"><div className="model-selection-heading"><span>可用模型</span><small>左侧控制显示，右侧标记图片输入</small></div>{providerModels.length === 0 ? <p className="panel-empty">请先拉取模型，或手动填写模型 ID</p> : providerModels.map((model) => <div className="model-option" key={model.id}><label className="checkbox-setting model-enabled-option"><input type="checkbox" checked={model.enabled !== false} onChange={(event) => { const next = event.target.checked; updateProviderModel(model.id, { enabled: next }); if (model.id === customModelId && !next) setCustomModelId(providerModels.find((item) => item.id !== model.id && item.enabled !== false)?.id ?? model.id); }} /><span><strong>{model.name}</strong><small>{model.id}</small></span></label><label className="checkbox-setting model-image-option" title="允许向此模型发送图片"><input type="checkbox" checked={model.imageInput === true} onChange={(event) => updateProviderModel(model.id, { imageInput: event.target.checked })} />图片输入</label></div>)}</div>
-          {providerModels.length === 0 && customModelId && <label className="checkbox-setting"><input type="checkbox" checked={imageInputOverride ?? false} onChange={(event) => setImageInputOverride(event.target.checked)} />支持图片输入（手动覆盖推断）</label>}
-          {providerModels.length > 0 && enabledProviderModels.length === 0 && <p className="form-error">请至少勾选一个模型</p>}
-          {customModelFetchError && <p className="form-error">{customModelFetchError}</p>}
         </>}
+        <div className="model-selection"><div className="model-selection-heading"><span>可用模型</span><small>左侧控制显示，右侧标记图片输入</small></div>{providerModels.length === 0 ? <p className="panel-empty">{isCustomProvider ? "请先拉取模型，或手动填写模型 ID" : "该服务商暂无可用模型，请先配置 API 密钥"}</p> : providerModels.map((model) => <div className="model-option" key={model.id}><label className="checkbox-setting model-enabled-option"><input type="checkbox" checked={model.enabled !== false} onChange={(event) => { const next = event.target.checked; updateProviderModel(model.id, { enabled: next }); if (isCustomProvider && model.id === customModelId && !next) setCustomModelId(providerModels.find((item) => item.id !== model.id && item.enabled !== false)?.id ?? model.id); }} /><span><strong>{model.name}</strong><small>{model.id}</small></span></label>{isCustomProvider ? <label className="checkbox-setting model-image-option" title="允许向此模型发送图片"><input type="checkbox" checked={model.imageInput === true} onChange={(event) => updateProviderModel(model.id, { imageInput: event.target.checked })} />图片输入</label> : <label className="checkbox-setting model-image-option" title={model.imageInput ? "该服务商声明支持图片输入" : "该服务商不支持图片输入"}><input type="checkbox" checked={model.imageInput === true} disabled />图片输入</label>}</div>)}</div>
+        {isCustomProvider && providerModels.length === 0 && customModelId && <label className="checkbox-setting"><input type="checkbox" checked={imageInputOverride ?? false} onChange={(event) => setImageInputOverride(event.target.checked)} />支持图片输入（手动覆盖推断）</label>}
+        {providerModels.length > 0 && enabledProviderModels.length === 0 && <p className="form-error">请至少勾选一个模型</p>}
+        {isCustomProvider && customModelFetchError && <p className="form-error">{customModelFetchError}</p>}
         <label>API 密钥<input type="password" value={apiKey} autoFocus placeholder={isCustomProvider && hasSavedCustomKey ? "已保存，留空则继续使用" : "请输入 API 密钥"} onChange={(event) => setApiKey(event.target.value)} /></label>
         <section className="vision-settings" aria-label="视觉识别设置">
           <div className="vision-settings-heading">
@@ -1115,7 +1145,7 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
           <div className="vision-settings-footer"><button className="primary-button" type="button" disabled={visionSaving} onClick={() => void saveVision()}>{visionSaving ? "正在保存" : "保存视觉识别设置"}</button></div>
         </section>
         {formError && <p className="form-error">{formError}</p>}
-        <footer><button type="button" className="secondary-button" onClick={closeSettings}>取消</button><button className="primary-button" disabled={saving || (!apiKey.trim() && !hasSavedCustomKey) || (isCustomProvider && (!customName.trim() || !customBaseUrl.trim() || !customModelId.trim() || (providerModels.length > 0 && enabledProviderModels.length === 0)))} type="submit">{saving ? "正在应用" : "保存设置"}</button></footer>
+        <footer><button type="button" className="secondary-button" onClick={closeSettings}>取消</button><button className="primary-button" disabled={saving || (!apiKey.trim() && !hasSavedCustomKey) || (isCustomProvider && (!customName.trim() || !customBaseUrl.trim() || !customModelId.trim() || (providerModels.length > 0 && enabledProviderModels.length === 0))) || (!isCustomProvider && providerModels.length > 0 && enabledProviderModels.length === 0)} type="submit">{saving ? "正在应用" : "保存设置"}</button></footer>
         </form> : tab === "agents" ? <div className="agent-settings">
           <div className="agent-list">{agentList.filter((agent) => !agent.archived).map((agent) => <button type="button" key={agent.id} className={agent.id === selectedAgent?.id ? "active" : ""} onClick={() => setSelectedAgentId(agent.id)}><strong>{agent.name}</strong><small>{agent.description || "未填写说明"}</small></button>)}<button type="button" className="secondary-button agent-new-button" onClick={newAgent}>+ 新建 Agent</button></div>
           {selectedAgent && <div className="agent-editor"><label>名称<input value={selectedAgent.name} onChange={(event) => updateAgent({ name: event.target.value })} /></label><label>说明<input value={selectedAgent.description} onChange={(event) => updateAgent({ description: event.target.value })} /></label><label>系统提示词<textarea value={selectedAgent.systemPrompt} rows={6} onChange={(event) => updateAgent({ systemPrompt: event.target.value })} /></label><label className="checkbox-setting"><input type="checkbox" checked={selectedAgent.divMode} onChange={(event) => updateAgent({ divMode: event.target.checked })} />启用 Div 气泡模式</label><label>默认模型<select value={selectedAgent.defaultModel ? `${selectedAgent.defaultModel.provider}/${selectedAgent.defaultModel.id}` : ""} onChange={(event) => { const value = event.target.value; updateAgent({ defaultModel: value ? { provider: value.slice(0, value.indexOf("/")), id: value.slice(value.indexOf("/") + 1) } : undefined }); }}><option value="">跟随全局默认模型</option>{configuredModels.map((model) => <option key={`${model.provider}/${model.id}`} value={`${model.provider}/${model.id}`}>{model.name}</option>)}</select></label><label>默认思考等级<select value={selectedAgent.defaultThinkingLevel} onChange={(event) => updateAgent({ defaultThinkingLevel: event.target.value as ThinkingLevel })}>{thinkingLevels.map((level) => <option key={level} value={level}>{thinkingLevelLabels[level]}</option>)}</select></label><AgentSkillSelector agent={selectedAgent} skills={resources.skills} onChange={updateAgentSkillOverride} /><fieldset><legend>工具权限</legend>{agentTools.map((tool) => <label className="tool-toggle" key={tool}><input type="checkbox" checked={selectedAgent.tools[tool]} onChange={(event) => updateAgent({ tools: { ...selectedAgent.tools, [tool]: event.target.checked } })} />{tool}</label>)}</fieldset><footer><button type="button" className="danger-button" disabled={selectedAgent.id === "default"} onClick={() => void archiveAgent()}>归档</button><button type="button" className="secondary-button" onClick={duplicateAgent}>复制</button><button type="button" className="primary-button" onClick={() => void saveAgent()}>保存 Agent</button></footer></div>}
@@ -1161,7 +1191,6 @@ export function App(): ReactNode {
   const [accessModeMenuOpen, setAccessModeMenuOpen] = useState(false);
   const [composerMenu, setComposerMenu] = useState<"model" | "thinking">();
   const [previewOpened, setPreviewOpened] = useState(false);
-  const [previewCollapsed, setPreviewCollapsed] = useState(false);
   const [preview, setPreview] = useState<PreviewState>();
   const previewRef = useRef<PreviewState | undefined>(preview);
   previewRef.current = preview;
@@ -1178,6 +1207,7 @@ export function App(): ReactNode {
   const [attachmentError, setAttachmentError] = useState<string>();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const accessModeMenuRef = useRef<HTMLDivElement>(null);
+  const modelMenuRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLFormElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const processedComposerRequestsRef = useRef(new Set<string>());
@@ -1357,7 +1387,6 @@ export function App(): ReactNode {
     }
     setPreview(undefined);
     setPreviewOpened(false);
-    setPreviewCollapsed(false);
   }, [snapshot.sessionId]);
 
   useEffect(() => {
@@ -1379,6 +1408,12 @@ export function App(): ReactNode {
       document.removeEventListener("keydown", closeOnEscape);
     };
   }, [accessModeMenuOpen, composerMenu]);
+
+  useEffect(() => {
+    if (composerMenu !== "model") return;
+    const active = modelMenuRef.current?.querySelector<HTMLButtonElement>("button.active");
+    active?.scrollIntoView({ block: "nearest" });
+  }, [composerMenu]);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -1597,7 +1632,6 @@ export function App(): ReactNode {
   }
 
   function openPreviewTarget(target: PreviewTarget, id: string = previewTargetKey(target)): void {
-    setPreviewCollapsed(false);
     setPreviewOpened(true);
     setPreview((current) => {
       if (current?.tabs.some((tab) => tab.id === id)) return { ...current, activeTabId: id };
@@ -1626,10 +1660,7 @@ export function App(): ReactNode {
       const index = current.tabs.findIndex((tab) => tab.id === id);
       if (index < 0) return current;
       const tabs = current.tabs.filter((tab) => tab.id !== id);
-      if (tabs.length === 0) {
-        setPreviewCollapsed(false);
-        return undefined;
-      }
+      if (tabs.length === 0) return undefined;
       const activeTabId = current.activeTabId === id ? tabs[Math.min(index, tabs.length - 1)]!.id : current.activeTabId;
       return { tabs, activeTabId };
     });
@@ -2011,10 +2042,13 @@ export function App(): ReactNode {
           <div className="runtime-controls">
             <button className="workspace-top-button" data-control="workspace-open" type="button" onClick={() => void openWorkspace()}><FolderOpen size={15} /><span>工作区</span><strong>{compactPath(snapshot.workspace)}</strong><ChevronDown size={13} /></button>
             <button className="icon-button preview-panel-toggle" data-control="preview-toggle" type="button" aria-label={previewOpened ? "关闭预览" : "打开预览"} title={previewOpened ? "关闭预览" : "打开预览"} onClick={() => {
-              if (previewCollapsed) setPreviewCollapsed(false);
-              else if (preview) setPreviewCollapsed(true);
-              else if (previewOpened) setPreviewOpened(false);
-              else setPreviewOpened(true);
+              // 顶部按钮始终完全关闭/打开预览面板：即使已有标签页也不会
+              // 折叠成残留一列栏+展开按钮的中间态。
+              if (previewOpened) {
+                setPreviewOpened(false);
+              } else {
+                setPreviewOpened(true);
+              }
             }}>{previewOpened ? <PanelRightClose size={18} /> : <Eye size={18} />}</button>
           </div>
         </header>
@@ -2022,8 +2056,8 @@ export function App(): ReactNode {
           <div
             ref={workAreaRef}
             data-pane="work-area"
-            className={`work-area${preview && !previewCollapsed ? " with-preview" : previewCollapsed ? " with-preview-collapsed" : previewOpened ? " with-preview-empty" : ""}${previewDragging ? " is-preview-dragging" : ""}`}
-            style={(preview && !previewCollapsed) || previewOpened ? { "--preview-split": `${previewSplit}%` } as CSSProperties : undefined}
+            className={`work-area${preview ? " with-preview" : previewOpened ? " with-preview-empty" : ""}${previewDragging ? " is-preview-dragging" : ""}`}
+            style={preview || previewOpened ? { "--preview-split": `${previewSplit}%` } as CSSProperties : undefined}
           >
           <section className="conversation-pane" data-pane="conversation">
             <TaskPanel />
@@ -2091,7 +2125,7 @@ export function App(): ReactNode {
                 <div className="composer-footer-right">
                   <div className="composer-control-menu">
                     <button className="composer-menu-trigger" data-control="model-select" type="button" title="模型快捷切换" aria-label="模型快捷切换" aria-haspopup="menu" aria-expanded={composerMenu === "model"} disabled={snapshot.busy} onClick={() => { setAccessModeMenuOpen(false); setComposerMenu((current) => current === "model" ? undefined : "model"); }}><Bot size={14} /><span>{selectedModelOption?.name ?? snapshot.model?.id ?? "选择模型"}</span><ChevronDown size={13} /></button>
-                    {composerMenu === "model" && <div className="composer-select-menu model-select-menu" role="menu" aria-label="模型快捷切换">
+                    {composerMenu === "model" && <div className="composer-select-menu model-select-menu" ref={modelMenuRef} role="menu" aria-label="模型快捷切换">
                       {Array.from(new Set(availableModels.map((model) => model.provider))).map((providerId) => <div className="composer-menu-group" key={providerId}><small>{providers.find((provider) => provider.id === providerId)?.name ?? providerId}</small>{availableModels.filter((model) => model.provider === providerId).map((model) => { const value = `${model.provider}/${model.id}`; return <button className={value === selectedModel ? "active" : ""} type="button" role="menuitemradio" aria-checked={value === selectedModel} key={value} onClick={() => void selectModel(value)}><span>{model.name}</span>{value === selectedModel && <Check size={13} />}</button>; })}</div>)}
                     </div>}
                   </div>
@@ -2109,17 +2143,12 @@ export function App(): ReactNode {
             </form>
           </section>
 
-          {preview && !previewCollapsed && <PreviewDivider split={previewSplit} dragging={previewDragging} onStart={startPreviewResize} onMove={movePreviewResize} onEnd={endPreviewResize} onCancel={cancelPreviewResize} onKeyDown={resizePreviewWithKeyboard} onReset={() => setPreviewSplit(50)} />}
+          {preview && <PreviewDivider split={previewSplit} dragging={previewDragging} onStart={startPreviewResize} onMove={movePreviewResize} onEnd={endPreviewResize} onCancel={cancelPreviewResize} onKeyDown={resizePreviewWithKeyboard} onReset={() => setPreviewSplit(50)} />}
 
-          {previewCollapsed && (
-            <aside className="preview-panel-collapsed" aria-label="预览已折叠">
-              <button className="icon-button preview-panel-collapsed-toggle" type="button" aria-label="展开预览" title="展开预览" onClick={() => setPreviewCollapsed(false)}><PanelRightOpen size={16} /></button>
-            </aside>
-          )}
-          {(!preview && previewOpened) || (preview && !previewCollapsed && preview.tabs.length === 0) ? (
+          {(!preview && previewOpened) || (preview && preview.tabs.length === 0) ? (
             <ArtifactPreview key="empty-state" tabs={[]} activeTabId="" onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddFile={() => void openManualFilePreview()} />
           ) : (
-            preview && !previewCollapsed && <ArtifactPreview tabs={preview.tabs} activeTabId={preview.activeTabId} browserSuspended={previewDragging || settingsOpen || Boolean(permission) || Boolean(messageActionError)} onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddFile={() => void openManualFilePreview()} onAddReview={openLatestReview} reviewAvailable={Boolean(latestReviewExecution)} workspace={snapshot.workspace} activeEditorState={activePreviewTab?.target.type === "file" && activePreviewTab.target.file.kind === "markdown" ? getEditorState(activePreviewTab.id) : undefined} onActiveEditorChange={(patch) => { if (activePreviewTab) patchEditorState(activePreviewTab.id, patch); }} onActiveEditorContentChange={handleActiveEditorContentChange} onActiveEditorSaved={handleActiveEditorSaved} onActiveEditorStatusChange={handleActiveEditorStatusChange} onActiveEditorSaveError={(message) => setMessageActionError(`保存 ${activePreviewTab?.target.type === "file" ? activePreviewTab.target.file.name : "Markdown"} 失败：${message}`)} onActiveEditorResolveConflict={(choice) => { if (activePreviewTab) handleEditorResolveConflict(activePreviewTab.id, choice); }} onToggleEditing={() => { if (activePreviewTab) patchEditorState(activePreviewTab.id, { editing: !getEditorState(activePreviewTab.id).editing }); }} />
+            preview && <ArtifactPreview tabs={preview.tabs} activeTabId={preview.activeTabId} browserSuspended={previewDragging || settingsOpen || Boolean(permission) || Boolean(messageActionError)} onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddFile={() => void openManualFilePreview()} onAddReview={openLatestReview} reviewAvailable={Boolean(latestReviewExecution)} workspace={snapshot.workspace} activeEditorState={activePreviewTab?.target.type === "file" && activePreviewTab.target.file.kind === "markdown" ? getEditorState(activePreviewTab.id) : undefined} onActiveEditorChange={(patch) => { if (activePreviewTab) patchEditorState(activePreviewTab.id, patch); }} onActiveEditorContentChange={handleActiveEditorContentChange} onActiveEditorSaved={handleActiveEditorSaved} onActiveEditorStatusChange={handleActiveEditorStatusChange} onActiveEditorSaveError={(message) => setMessageActionError(`保存 ${activePreviewTab?.target.type === "file" ? activePreviewTab.target.file.name : "Markdown"} 失败：${message}`)} onActiveEditorResolveConflict={(choice) => { if (activePreviewTab) handleEditorResolveConflict(activePreviewTab.id, choice); }} onToggleEditing={() => { if (activePreviewTab) patchEditorState(activePreviewTab.id, { editing: !getEditorState(activePreviewTab.id).editing }); }} />
           )}
         </div>
       </main>

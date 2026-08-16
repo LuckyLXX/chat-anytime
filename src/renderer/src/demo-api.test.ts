@@ -60,6 +60,14 @@ describe("demo session commands", () => {
     expect(preview).toMatchObject({ kind: "code", language: "typescript", relativePath: "src/runtime.ts" });
   });
 
+  it("previews demo images as inline base64 data", async () => {
+    const preview = await createDemoApi().readWorkspaceFile("demo.png");
+
+    expect(preview).toMatchObject({ kind: "image", mimeType: "image/png", relativePath: "demo.png", size: 3775 });
+    expect(preview.data).toMatch(/^[A-Za-z0-9+/]+=*$/u);
+    expect(preview.data?.length).toBeGreaterThan(1000);
+  });
+
   it("supports manual files and browser preview state events", async () => {
     const api = createDemoApi();
     const states: string[] = [];

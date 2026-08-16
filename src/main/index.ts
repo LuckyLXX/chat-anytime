@@ -130,6 +130,9 @@ function updateSettings(command: RuntimeCommand): void {
       }
       break;
     }
+    case "provider.models.save":
+      settings.providers = settings.providers.some((item) => item.id === command.provider.id) ? settings.providers.map((item) => item.id === command.provider.id ? command.provider : item) : [...settings.providers, command.provider];
+      break;
     case "auth.set":
       if (command.apiKey.trim() && !saveCredential(command.provider, command.apiKey.trim())) {
         mainWindow?.webContents.send("runtime:message", { type: "log", level: "warn", message: "系统加密存储不可用，API Key 未保存。" } satisfies RuntimeMessage);
@@ -200,7 +203,7 @@ function registerIpc(): void {
     const workspace = loadSettings().workspace;
     if (!workspace) throw new Error("请先打开工作区，再选择预览文件");
     const result = mainWindow
-      ? await dialog.showOpenDialog(mainWindow, { title: "选择预览文件", defaultPath: workspace, properties: ["openFile"], filters: [{ name: "常见代码、Markdown 和资源", extensions: ["md", "markdown", "mdx", "js", "ts", "tsx", "jsx", "json", "css", "html", "htm", "svg", "png", "jpg", "jpeg", "gif", "webp", "*" ] }] })
+      ? await dialog.showOpenDialog(mainWindow, { title: "选择预览文件", defaultPath: workspace, properties: ["openFile"], filters: [{ name: "常见代码、Markdown 和资源", extensions: ["md", "markdown", "mdx", "js", "ts", "tsx", "jsx", "json", "css", "html", "htm", "svg", "png", "jpg", "jpeg", "gif", "webp", "bmp", "avif", "ico", "*" ] }] })
       : await dialog.showOpenDialog({ title: "选择预览文件", defaultPath: workspace, properties: ["openFile"] });
     if (result.canceled || !result.filePaths[0]) return undefined;
     const rootReal = await realpath(resolve(workspace));
