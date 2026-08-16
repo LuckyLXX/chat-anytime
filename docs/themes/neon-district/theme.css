@@ -1,0 +1,340 @@
+/* Theme Name: 霓虹街区 NEON DISTRICT
+   赛博朋克演示主题：全 token 覆盖 + 装饰层 + 结构钩子 + 控件重设计。
+   无外部资产，纯 CSS 生成霓虹网格 / 扫描线 / 极光。 */
+
+:root {
+  --neon-pink: #ff2d95;
+  --neon-cyan: #00f0ff;
+  --neon-amber: #ffc857;
+  font-family: "Cascadia Code", "JetBrains Mono", Consolas, "Microsoft YaHei", monospace;
+}
+
+/* ============ 深色：雨夜霓虹 ============ */
+:root[data-theme-effective="dark"] {
+  --chat-bg-image: none;
+  --chat-bg-opacity: 0;
+  --chat-bg-size: cover;
+  --chat-bg-repeat: no-repeat;
+  --chat-bg-position: center;
+
+  --surface: #0b0f1e;
+  --surface-muted: #070a14;
+  --surface-raised: #11162b;
+  --surface-conversation: rgb(8 12 24 / 64%);
+  --surface-sidebar: rgb(7 10 20 / 86%);
+  --surface-sidebar-tabs: #0e1426;
+  --surface-sidebar-hover: #131b33;
+  --surface-sidebar-active: #0a2733;
+  --surface-sidebar-badge: #131b33;
+  --surface-input: #0d1326;
+  --surface-footer: #070a14;
+  --surface-detail: #0e1426;
+  --surface-button-hover: #131b33;
+  --preview-surface: #0a0e1c;
+  --panel-bg: rgb(10 14 28 / 94%);
+
+  --text: #e6edff;
+  --text-muted: #8b9bc4;
+  --text-sidebar-active: #6ff3ff;
+  --text-on-accent: #01131a;
+  --on-accent: #01131a;
+  --text-on-user-bubble: #16030d;
+  --avatar-user-text: #16030d;
+  --avatar-assistant-text: #031318;
+  --link: #6ff3ff;
+
+  --border: #1c2540;
+  --border-strong: #2b3a63;
+  --border-message: #1c2540;
+  --border-assistant: rgb(0 240 255 / 28%);
+  --blockquote-border: #2b6d80;
+  --user-bubble-border: #ff5cab;
+  --accent-border: #00b8d4;
+
+  --accent: #00d9ff;
+  --accent-hover: #4de8ff;
+  --accent-soft: #07222c;
+  --accent-text: #6ff3ff;
+  --focus-ring: rgb(0 240 255 / 45%);
+  --selection-bg: #3d1468;
+  --selection-text: #ffe6ff;
+
+  --success: #00ff9d;
+  --success-soft: #032318;
+  --success-border: #00ff9d;
+  --completed-border: #00ff9d;
+  --warning: #ffc857;
+  --warning-soft: #2b1d05;
+  --danger: #ff3b6b;
+  --danger-soft: #2b0a14;
+  --danger-border: #ff3b6b;
+  --danger-text: #ff9db4;
+
+  --blue: #58c8ff;
+  --user-bubble: #ff2d95;
+  --ai-bubble: #0d1326;
+  --avatar-user: var(--user-bubble);
+  --avatar-assistant: #00d9ff;
+  --tool-bubble-bg: #0a1c2e;
+  --tool-bubble-border: rgb(0 240 255 / 25%);
+
+  --code-surface: #05070d;
+  --code-text: #d6e4ff;
+  --inline-code-surface: #07222c;
+  --inline-code-text: #6ff3ff;
+  --syntax-keyword: #ff6ad5;
+  --syntax-string: #7dffc4;
+  --syntax-number: #ffd76a;
+  --syntax-comment: #5f6c8f;
+  --syntax-title: #6ff3ff;
+  --syntax-meta: #ffa3c4;
+  --diff-add-text: #7dffc4;
+  --diff-remove-text: #ff9db4;
+  --diff-hunk-text: #6ff3ff;
+  --diff-meta-text: #b7a6ff;
+
+  --user-action-border: rgb(255 255 255 / 38%);
+  --user-action-surface: rgb(255 255 255 / 14%);
+  --overlay: rgb(2 6 18 / 62%);
+  --shadow-sm: 0 1px 3px rgb(0 0 0 / 45%);
+  --shadow-md: 0 8px 26px rgb(0 0 0 / 45%), 0 0 18px rgb(0 240 255 / 8%);
+  --shadow-lg: 0 22px 70px rgb(0 0 0 / 60%), 0 0 42px rgb(0 240 255 / 10%);
+  --scrollbar-track: rgb(7 10 20 / 60%);
+  --scrollbar-thumb: rgb(0 217 255 / 38%);
+  --scrollbar-thumb-hover: rgb(0 217 255 / 62%);
+
+  /* 装饰层：漂移霓虹网格（壁纸之上、界面之下） */
+  --pi-layer-neon-grid:
+    radial-gradient(ellipse 120% 55% at 50% 108%, rgb(255 45 149 / 16%), transparent 62%),
+    radial-gradient(ellipse 140% 45% at 50% -12%, rgb(0 240 255 / 13%), transparent 60%),
+    repeating-linear-gradient(to right, rgb(0 240 255 / 7%) 0 1px, transparent 1px 56px),
+    repeating-linear-gradient(to bottom, rgb(0 240 255 / 5%) 0 1px, transparent 1px 56px);
+  /* 覆盖层：CRT 扫描线 + 暗角（界面之上、对话框之下） */
+  --pi-overlay-crt:
+    repeating-linear-gradient(to bottom, rgb(2 6 16 / 11%) 0 1px, transparent 1px 3px),
+    radial-gradient(ellipse at center, transparent 58%, rgb(4 8 20 / 38%) 100%);
+}
+
+/* ============ 浅色：白日霓虹 ============ */
+:root[data-theme-effective="light"] {
+  --chat-bg-image: none;
+  --chat-bg-opacity: 0;
+  --chat-bg-size: cover;
+  --chat-bg-repeat: no-repeat;
+  --chat-bg-position: center;
+
+  --surface: #f2f6fc;
+  --surface-muted: #e8eef8;
+  --surface-raised: #dfe8f6;
+  --surface-conversation: rgb(244 249 255 / 78%);
+  --surface-sidebar: rgb(234 242 252 / 92%);
+  --surface-sidebar-tabs: #d9e7f6;
+  --surface-sidebar-hover: #cfe2f4;
+  --surface-sidebar-active: #c9ecf5;
+  --surface-sidebar-badge: #d9e7f6;
+  --surface-input: #ffffff;
+  --surface-footer: #e8eef8;
+  --surface-detail: #e4ecf8;
+  --surface-button-hover: #d6e4f6;
+  --preview-surface: #eef4fb;
+  --panel-bg: rgb(248 251 255 / 95%);
+
+  --text: #101828;
+  --text-muted: #47546b;
+  --text-sidebar-active: #065673;
+  --text-on-accent: #ffffff;
+  --on-accent: #ffffff;
+  --text-on-user-bubble: #ffffff;
+  --avatar-user-text: #ffffff;
+  --avatar-assistant-text: #ffffff;
+  --link: #08698c;
+
+  --border: #c8d6ea;
+  --border-strong: #9db4d4;
+  --border-message: #c8d6ea;
+  --border-assistant: #9fdcec;
+  --blockquote-border: #6fb3c9;
+  --user-bubble-border: #a80f5e;
+  --accent-border: #00799e;
+
+  --accent: #00799e;
+  --accent-hover: #00607e;
+  --accent-soft: #d3f2fb;
+  --accent-text: #0a5f78;
+  --focus-ring: rgb(0 121 158 / 38%);
+  --selection-bg: #b7e9f7;
+  --selection-text: #06303f;
+
+  --success: #077d58;
+  --success-soft: #d7f5e9;
+  --success-border: #2fae83;
+  --completed-border: #2fae83;
+  --warning: #a8680a;
+  --warning-soft: #fdf0d4;
+  --danger: #b3123f;
+  --danger-soft: #ffe1ea;
+  --danger-border: #d9537b;
+  --danger-text: #a80f3d;
+
+  --blue: #0b6fa0;
+  --user-bubble: #c9167a;
+  --ai-bubble: #ffffff;
+  --avatar-user: var(--user-bubble);
+  --avatar-assistant: #0d7d9c;
+  --tool-bubble-bg: #dff4fb;
+  --tool-bubble-border: #a9d9ea;
+
+  --code-surface: #0a0e1a;
+  --code-text: #d6e4ff;
+  --inline-code-surface: #cfeaf4;
+  --inline-code-text: #065a75;
+  --syntax-keyword: #ff6ad5;
+  --syntax-string: #7dffc4;
+  --syntax-number: #ffd76a;
+  --syntax-comment: #7787ad;
+  --syntax-title: #6ff3ff;
+  --syntax-meta: #ffa3c4;
+  --diff-add-text: #076a47;
+  --diff-remove-text: #a80f3d;
+  --diff-hunk-text: #08698c;
+  --diff-meta-text: #5b3bb8;
+
+  --user-action-border: rgb(255 255 255 / 60%);
+  --user-action-surface: rgb(255 255 255 / 34%);
+  --overlay: rgb(16 24 40 / 46%);
+  --shadow-sm: 0 1px 3px rgb(16 24 40 / 10%);
+  --shadow-md: 0 8px 26px rgb(16 24 40 / 12%), 0 0 16px rgb(0 150 190 / 8%);
+  --shadow-lg: 0 22px 70px rgb(16 24 40 / 18%), 0 0 32px rgb(0 150 190 / 10%);
+  --scrollbar-track: rgb(232 238 248 / 70%);
+  --scrollbar-thumb: rgb(0 121 158 / 34%);
+  --scrollbar-thumb-hover: rgb(0 121 158 / 55%);
+
+  /* 白日模式：淡青网格 + 蜜桃极光，扫描线几乎隐没 */
+  --pi-layer-neon-grid:
+    radial-gradient(ellipse 120% 55% at 50% 108%, rgb(201 22 122 / 10%), transparent 62%),
+    radial-gradient(ellipse 140% 45% at 50% -12%, rgb(0 150 190 / 12%), transparent 60%),
+    repeating-linear-gradient(to right, rgb(0 121 158 / 8%) 0 1px, transparent 1px 56px),
+    repeating-linear-gradient(to bottom, rgb(0 121 158 / 6%) 0 1px, transparent 1px 56px);
+  --pi-overlay-crt:
+    repeating-linear-gradient(to bottom, rgb(16 24 40 / 4%) 0 1px, transparent 1px 3px),
+    radial-gradient(ellipse at center, transparent 62%, rgb(16 24 40 / 12%) 100%);
+}
+
+/* ============ 结构：面板与边框 ============ */
+[data-theme-effective="dark"] [data-pane="sidebar"] { backdrop-filter: blur(14px) saturate(120%); }
+[data-theme-effective="dark"] [data-pane="conversation"] { backdrop-filter: blur(10px); }
+[data-theme-effective="dark"] [data-pane="topbar"] { background: rgb(9 13 26 / 82%); backdrop-filter: blur(12px); }
+
+/* 霓虹渐变描边：侧栏右缘 / 顶栏下缘 */
+[data-pane="sidebar"] { border-right: 1px solid; border-image: linear-gradient(to bottom, var(--neon-cyan), var(--neon-pink) 55%, var(--neon-cyan)) 1; }
+[data-pane="topbar"] { border-bottom: 1px solid; border-image: linear-gradient(to right, var(--neon-cyan), var(--neon-pink) 60%, transparent) 1; letter-spacing: .05em; }
+
+/* 输入卡片：HUD 切角框 + 双色角标 */
+[data-pane="composer"] {
+  border: 1px solid rgb(0 240 255 / 30%);
+  border-radius: 2px;
+  background: linear-gradient(150deg, rgb(0 240 255 / 6%), transparent 42%), var(--surface-input);
+  box-shadow: 0 0 24px rgb(0 240 255 / 10%), var(--shadow-md);
+}
+[data-pane="composer"]::before,
+[data-pane="composer"]::after {
+  content: ""; position: absolute; width: 15px; height: 15px; pointer-events: none;
+}
+[data-pane="composer"]::before {
+  top: -2px; left: -2px; border-top: 2px solid var(--neon-cyan); border-left: 2px solid var(--neon-cyan);
+  filter: drop-shadow(0 0 5px var(--neon-cyan));
+}
+[data-pane="composer"]::after {
+  bottom: -2px; right: -2px; border-bottom: 2px solid var(--neon-pink); border-right: 2px solid var(--neon-pink);
+  filter: drop-shadow(0 0 5px var(--neon-pink));
+}
+[data-theme-effective="light"] [data-pane="composer"] {
+  border-color: rgb(0 121 158 / 35%);
+  background: linear-gradient(150deg, rgb(0 150 190 / 5%), transparent 42%), var(--surface-input);
+  box-shadow: var(--shadow-md);
+}
+[data-theme-effective="light"] [data-pane="composer"]::before { border-color: var(--accent); filter: none; }
+[data-theme-effective="light"] [data-pane="composer"]::after { border-color: #c9167a; filter: none; }
+
+/* ============ 结构：消息气泡 ============ */
+[data-role="user"] .message-bubble {
+  border: 1px solid rgb(255 45 149 / 55%);
+  box-shadow: 0 0 18px rgb(255 45 149 / 16%), inset 0 0 26px rgb(255 45 149 / 7%);
+  background: linear-gradient(135deg, rgb(0 240 255 / 12%), transparent 55%), var(--user-bubble);
+}
+[data-role="assistant"] .message-bubble {
+  border-left: 2px solid var(--accent);
+  box-shadow: 0 0 22px rgb(0 240 255 / 7%);
+  background: linear-gradient(160deg, rgb(0 240 255 / 5%), transparent 40%), var(--ai-bubble);
+}
+[data-theme-effective="light"] [data-role="user"] .message-bubble {
+  border-color: rgb(168 15 94 / 45%);
+  box-shadow: 0 0 14px rgb(201 22 122 / 14%);
+  background: linear-gradient(135deg, rgb(0 150 190 / 10%), transparent 55%), var(--user-bubble);
+}
+[data-theme-effective="light"] [data-role="assistant"] .message-bubble {
+  border-left-color: var(--accent);
+  box-shadow: var(--shadow-sm);
+}
+
+/* ============ 结构：控件重设计 ============ */
+[data-pane="composer"] [data-control="send"],
+[data-pane="composer"] [data-control="stop"] {
+  width: 34px; height: 34px; min-height: 34px;
+  border-radius: 50%;
+}
+[data-pane="composer"] [data-control="send"] {
+  color: #01131a;
+  background: radial-gradient(circle at 32% 30%, #a9fbff, var(--accent) 68%);
+  box-shadow: 0 0 16px rgb(0 217 255 / 55%), inset 0 0 6px rgb(255 255 255 / 35%);
+}
+[data-pane="composer"] [data-control="stop"] {
+  color: #16030d;
+  background: radial-gradient(circle at 32% 30%, #ffc3dd, #ff2d95 72%);
+  box-shadow: 0 0 16px rgb(255 45 149 / 55%), inset 0 0 6px rgb(255 255 255 / 30%);
+}
+[data-theme-effective="light"] [data-pane="composer"] [data-control="send"] {
+  color: #ffffff;
+  background: radial-gradient(circle at 32% 30%, #37b3d4, var(--accent) 70%);
+  box-shadow: 0 0 12px rgb(0 121 158 / 40%);
+}
+[data-theme-effective="light"] [data-pane="composer"] [data-control="stop"] {
+  color: #ffffff;
+  background: radial-gradient(circle at 32% 30%, #ef7fb3, #c9167a 72%);
+  box-shadow: 0 0 12px rgb(201 22 122 / 40%);
+}
+[data-pane="composer"] [data-control="access-mode"],
+[data-pane="composer"] [data-control="model-select"],
+[data-pane="composer"] [data-control="thinking-select"] {
+  border: 1px solid rgb(0 240 255 / 25%);
+  border-radius: 2px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+[data-pane="composer"] [data-control="attach"]:hover {
+  color: var(--neon-cyan);
+  filter: drop-shadow(0 0 6px var(--neon-cyan));
+}
+
+/* ============ 结构：状态反应 ============ */
+/* 空会话：霓虹渐变大标题 */
+[data-ui-chat-empty] [data-pane="timeline"] h1 {
+  background: linear-gradient(90deg, var(--neon-cyan), var(--neon-pink), var(--neon-cyan));
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+  filter: drop-shadow(0 0 12px rgb(0 240 255 / 35%));
+}
+[data-ui-chat-empty] [data-pane="timeline"] h1 + button { text-transform: uppercase; letter-spacing: .08em; }
+
+/* 动效（尊重系统减少动态偏好） */
+@media (prefers-reduced-motion: no-preference) {
+  [data-theme-layer="neon-grid"] { animation: neon-grid-drift 14s linear infinite; }
+  [data-ui-generating] [data-pane="composer"] { animation: neon-hum 2.6s ease-in-out infinite; }
+  [data-ui-generating] [data-pane="composer"] [data-control="stop"] { animation: neon-pulse 1.2s ease-in-out infinite; }
+}
+@keyframes neon-grid-drift { to { background-position: 0 0, 0 0, 0 0, 0 56px; } }
+@keyframes neon-hum {
+  50% { box-shadow: 0 0 34px rgb(0 240 255 / 26%), var(--shadow-md); }
+}
+@keyframes neon-pulse {
+  50% { box-shadow: 0 0 30px rgb(255 45 149 / 90%), inset 0 0 6px rgb(255 255 255 / 30%); }
+}
