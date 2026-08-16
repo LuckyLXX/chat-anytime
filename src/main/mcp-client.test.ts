@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { configHash, convertMcpResult, mcpToolName, toTypeBoxSchema } from "./mcp-client.js";
+import { combinedCallSignal, configHash, convertMcpResult, mcpToolName, toTypeBoxSchema } from "./mcp-client.js";
 
 describe("mcp-client helpers", () => {
   it("names tools as mcp__<server>__<tool> with sanitized segments", () => {
@@ -48,5 +48,23 @@ describe("mcp-client helpers", () => {
     const result = convertMcpResult({});
     expect(result.content).toHaveLength(1);
     expect(result.content[0]?.type).toBe("text");
+  });
+});
+
+describe("mcp call signal", () => {
+  it("aborts on timeout when no caller signal is provided", async () => {
+    const signal = combinedCallSignal(undefined, 10);
+    expect(signal.aborted).toBe(false);
+    await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
+    expect(signal.aborted).toBe(true);
+    expect((signal.reason as { name?: string })?.name).toBe("TimeoutError");
+  });
+
+  it("propagates caller cancellation before the timeout elapses", async () => {
+    const controller = new AbortController();
+    const signal = combinedCallSignal(controller.signal, 60_000);
+    controller.abort();
+    expect(signal.aborted).toBe(true);
+    expect(signal.aborted && !controller.signal.aborted ? "unexpected" : "propagated").toBe("propagated");
   });
 });

@@ -71,6 +71,7 @@ import {
   type PersistedSessionMessage
 } from "./session-history.js";
 import { changedWorkspaceFile } from "./workspace-preview.js";
+import { createToolAudit } from "./tool-audit.js";
 
 const parentPort = process.parentPort;
 if (!parentPort) throw new Error("Pi 运行时必须作为 Electron 工具进程启动");
@@ -895,7 +896,8 @@ async function createSession(sessionManager?: SessionManager): Promise<void> {
   // Pi's own discovery is fully disabled: no extensions, no skills, no themes,
   // no ambient context files. The app injects its own system prompt, skills,
   // AGENTS.md instructions, MCP/subagent/todo tools explicitly (built in later
-  // phases). Only the app-owned permission hook remains as an inline extension.
+  // phases). Only app-owned inline extensions remain: the permission hook and
+  // the tool audit logger.
   resourceLoader = new DefaultResourceLoader({
     cwd: workspace,
     agentDir: getAgentDir(),
@@ -904,7 +906,16 @@ async function createSession(sessionManager?: SessionManager): Promise<void> {
     noSkills: true,
     noThemes: true,
     noContextFiles: true,
-    extensionFactories: [createPermissionExtension()],
+    extensionFactories: [
+      createPermissionExtension(),
+      // Tool executions land in chatanytime-sessions/<agentId>/tool-audit.jsonl
+      // for post-hoc debugging; write failures never affect the turn.
+      createToolAudit({
+        auditDir: () => agentSessionRoot(),
+        sessionId: () => session?.sessionId ?? "session-pending",
+        warn: (message) => void post({ type: "log", level: "warn", message })
+      }).extension
+    ],
     systemPromptOverride: (base) => [base, currentAgent?.systemPrompt, currentAgent?.divMode ? buildDivModePrompt() : undefined, buildSkillsSystemPromptBlock(activeSkillsForAgent()), buildTodoSystemPromptBlock()].filter(Boolean).join("\n\n")
   });
   await resourceLoader.reload();

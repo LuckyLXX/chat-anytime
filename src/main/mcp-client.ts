@@ -23,6 +23,18 @@ const TOOL_NAME_PREFIX = "mcp__";
 /** Upper bound for a single MCP connect / tools-list operation. */
 const MCP_OP_TIMEOUT_MS = 15_000;
 
+/** Upper bound for a single MCP tool call; most servers answer well within this. */
+export const MCP_CALL_TIMEOUT_MS = 120_000;
+
+/**
+ * Merge the caller's cancellation signal with a timeout signal. Node 22
+ * (Electron 43) provides both AbortSignal.any and AbortSignal.timeout.
+ */
+export function combinedCallSignal(signal: AbortSignal | undefined, timeoutMs: number): AbortSignal {
+  const timeout = AbortSignal.timeout(timeoutMs);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
+
 /** Bounded wait so a slow or unreachable server can never block session switching forever. */
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -265,8 +277,17 @@ export class McpClientManager {
     if (!binding) throw new Error(`未找到 MCP 工具：${piToolName}`);
     const connection = this.connections.get(binding.serverName);
     if (!connection) throw new Error(`MCP 服务器未连接：${binding.serverName}`);
-    const result = await connection.client.callTool({ name: binding.toolName, arguments: args }, undefined, { signal });
-    return convertMcpResult(result);
+    const callSignal = combinedCallSignal(signal, MCP_CALL_TIMEOUT_MS);
+    try {
+      const result = await connection.client.callTool({ name: binding.toolName, arguments: args }, undefined, { signal: callSignal });
+      return convertMcpResult(result);
+    } catch (error) {
+      // Our timeout fired while the caller did not abort → report a hang, not a cancel.
+      if (!signal?.aborted && callSignal.aborted) {
+        throw new Error(`MCP 工具调用超时（${MCP_CALL_TIMEOUT_MS}ms）：${piToolName}`);
+      }
+      throw error;
+    }
   }
 
   /** Wrap discovered MCP tools as Pi customTools. */
