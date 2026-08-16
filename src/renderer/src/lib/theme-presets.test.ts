@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { THEME_PRESETS, scopeCustomThemeCss, scopeCustomThemeCssForPreview, themePresetCss, themePreviewCss, themeWallpaperOpacity, wallpaperOpacityCss } from "./theme-presets";
+import { THEME_PRESETS, collectThemeLayers, scopeCustomThemeCss, scopeCustomThemeCssForPreview, themePresetCss, themePreviewCss, themeWallpaperOpacity, wallpaperOpacityCss } from "./theme-presets";
 
 describe("theme presets", () => {
   it("contains the reference palette families", () => {
@@ -94,5 +94,28 @@ describe("theme presets", () => {
     expect(css).toContain(':root[data-theme-custom][data-theme-wallpaper="true"]');
     expect(css).toContain(':root[data-theme-custom] .message-bubble');
     expect(css).toContain("--chat-bg-image: url(wallpaper-dark.png)");
+  });
+
+  it("collects decoration layer declarations with natural name ordering", () => {
+    const css = `:root {
+  --pi-layer-backdrop: url(palace.webp) center / cover no-repeat;
+  --pi-layer-mascot-10: url(m10.webp) bottom right / 220px no-repeat;
+  --pi-layer-mascot-2: url(m2.webp) bottom right / 200px no-repeat;
+  --pi-overlay-frame: url(frame.webp) top / 600px repeat-x;
+}
+:root[data-theme-effective="dark"] { --pi-layer-backdrop: url(palace-dark.webp) center / cover no-repeat; }
+.x { background: var(--pi-layer-backdrop); }`;
+
+    expect(collectThemeLayers(css)).toEqual([
+      { kind: "layer", name: "backdrop" },
+      { kind: "layer", name: "mascot-2" },
+      { kind: "layer", name: "mascot-10" },
+      { kind: "overlay", name: "frame" }
+    ]);
+  });
+
+  it("collects no layers from ordinary theme CSS", () => {
+    expect(collectThemeLayers(":root { --accent: red; } .x { background: var(--pi-layer-none-here); }")).toEqual([]);
+    expect(collectThemeLayers("")).toEqual([]);
   });
 });

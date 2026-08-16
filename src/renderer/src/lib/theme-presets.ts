@@ -403,3 +403,31 @@ export function scopeCustomThemeCss(css: string, rootSelector = ":root[data-them
 export function scopeCustomThemeCssForPreview(css: string, scopeSelector = ".theme-preview-scope[data-theme-custom]"): string {
   return scopeModeSelectors(normalizeChatAnyTimeVariables(String(css || "")), scopeSelector);
 }
+
+export interface ThemeLayerDeclaration {
+  kind: "layer" | "overlay";
+  name: string;
+}
+
+const themeLayerDeclarationPattern = /--pi-(layer|overlay)-([a-z0-9][a-z0-9-]*)(?![\w-])\s*:/gu;
+
+/**
+ * Find decoration-layer declarations (`--pi-layer-<name>` paints above the
+ * wallpaper but below the UI, `--pi-overlay-<name>` above the UI but below
+ * dialogs) in custom theme CSS. Only names are collected: values resolve via
+ * `var()` on the rendered layer element, so the CSS cascade (including
+ * light/dark mode scoping) decides what each layer shows — no JavaScript
+ * re-parsing on mode switches.
+ */
+export function collectThemeLayers(css: string): ThemeLayerDeclaration[] {
+  const found = new Map<string, ThemeLayerDeclaration>();
+  for (const match of String(css || "").matchAll(themeLayerDeclarationPattern)) {
+    const kind: ThemeLayerDeclaration["kind"] = match[1] === "overlay" ? "overlay" : "layer";
+    const name = match[2] ?? "";
+    if (!name) continue;
+    found.set(`${kind}:${name}`, { kind, name });
+  }
+  return [...found.values()].sort((a, b) => a.kind === b.kind
+    ? a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" })
+    : a.kind === "layer" ? -1 : 1);
+}

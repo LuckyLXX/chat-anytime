@@ -83,7 +83,7 @@ import { groupAssistantMessages } from "./lib/chat-layout";
 import { clampPreviewSplit, PREVIEW_SPLIT_MAX, PREVIEW_SPLIT_MIN, previewSplitFromKey } from "./lib/preview-split";
 import { groupSessionsByWorkspace } from "./lib/session-groups";
 import { CSS_URL_PATTERN, createThemeAssetUrls, isExternalThemeReference, normalizeThemeAssetReference, resolveThemeAssets } from "./lib/theme-assets";
-import { THEME_PRESETS, scopeCustomThemeCss, scopeCustomThemeCssForPreview, themePresetCss, themePreviewCss, themeWallpaperOpacity, wallpaperOpacityCss } from "./lib/theme-presets";
+import { THEME_PRESETS, collectThemeLayers, scopeCustomThemeCss, scopeCustomThemeCssForPreview, themePresetCss, themePreviewCss, themeWallpaperOpacity, wallpaperOpacityCss } from "./lib/theme-presets";
 import { shareElementAsImage } from "./lib/share-image";
 import { useDesktopStore } from "./store";
 import { TaskPanel } from "./TaskPanel";
@@ -1195,6 +1195,7 @@ export function App(): ReactNode {
   const modelAcceptsImages = Boolean(models.find((item) => `${item.provider}/${item.id}` === selectedModel)?.imageInput);
   const visibleAgents = useMemo(() => settings.agents.filter((agent) => !agent.archived && `${agent.name} ${agent.description}`.toLowerCase().includes(sidebarQuery.trim().toLowerCase())), [settings.agents, sidebarQuery]);
   const sessionGroups = useMemo(() => groupSessionsByWorkspace(snapshot.sessions, sidebarQuery, snapshot.recentWorkspaces), [snapshot.sessions, snapshot.recentWorkspaces, sidebarQuery]);
+  const themeLayers = useMemo(() => collectThemeLayers(settings.appearance.customCss), [settings.appearance.customCss]);
   const displayMessages = useMemo(() => groupAssistantMessages(snapshot.messages), [snapshot.messages]);
   const latestAssistantIndex = useMemo(() => [...displayMessages].reverse().findIndex((message) => message.role === "assistant"), [displayMessages]);
   const latestAssistantMessageIndex = latestAssistantIndex < 0 ? -1 : displayMessages.length - 1 - latestAssistantIndex;
@@ -1924,6 +1925,9 @@ export function App(): ReactNode {
 
   return (
     <div className="desktop-shell">
+      {themeLayers.map(({ kind, name }) => (
+        <div key={`${kind}-${name}`} className="theme-layer" data-theme-layer={name} data-layer-kind={kind} style={{ background: `var(--pi-${kind}-${name}, none)` }} />
+      ))}
       <aside className="sidebar" data-pane="sidebar">
         <div className="brand-row"><div className="brand-mark">CA</div><div><strong>ChatAnyTime</strong><span>桌面端</span></div></div>
         {sidebarView === "files" ? (

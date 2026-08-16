@@ -1138,6 +1138,12 @@ html[data-theme-wallpaper="true"] .settings-dialog,
 html[data-theme-wallpaper="true"] .permission-dialog,
 html[data-theme-wallpaper="true"] .content-preview-panel { background: var(--panel-bg); backdrop-filter: blur(20px) saturate(120%); -webkit-backdrop-filter: blur(20px) saturate(120%); }
 
+/* 主题装饰层（公开主题 API）：--pi-layer-* 画在壁纸之上、界面之下；
+   --pi-overlay-* 画在界面之上、对话框/菜单之下。值是完整 background 简写，
+   由 var() 经 CSS 级联解析，主题可按明暗模式分别声明。 */
+.desktop-shell > .theme-layer { position: fixed; inset: 0; z-index: 0; pointer-events: none; }
+.desktop-shell > .theme-layer[data-layer-kind="overlay"] { z-index: 45; }
+
 @media (max-width: 760px) {
   .work-area.with-preview { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, var(--preview-split, 50%)) 7px minmax(0, 1fr); }
   .work-area.is-preview-dragging { cursor: row-resize; }
