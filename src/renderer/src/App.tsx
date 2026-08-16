@@ -520,7 +520,7 @@ const MessageView = memo(function MessageView({ message, executions, onOpenArtif
     return (
       <article className="message message-user" data-role="user">
         <div className="message-avatar user-avatar">我</div>
-        <div className="message-body message-bubble">{message.skill && <div className="message-skill-badge"><Puzzle size={13} /><strong>{message.skill.name}</strong></div>}{images.length > 0 && <div className="image-message-list">{images.map((block, index) => <ImageMessageBlock key={`${message.id}-image-${index}`} block={block} />)}</div>}{text && <p className="user-text">{text}</p>}{!isControlMessage && <div className="message-actions"><button type="button" title="复制" aria-label="复制用户消息" onClick={() => onCopy(message)}><Copy size={13} /></button><button type="button" title="重新编辑" aria-label="重新编辑用户消息" onClick={() => onEdit(message)}><Pencil size={13} /></button></div>}</div>
+        <div className="message-body message-bubble">{message.skill && <div className="message-skill-badge"><Puzzle size={13} /><strong>{message.skill.name}</strong></div>}{images.length > 0 && <div className="image-message-list">{images.map((block, index) => <ImageMessageBlock key={`${message.id}-image-${index}`} block={block} />)}</div>}{text && <p className="user-text">{text}</p>}{!isControlMessage && <div className="message-actions"><button type="button" data-control="copy" title="复制" aria-label="复制用户消息" onClick={() => onCopy(message)}><Copy size={13} /></button><button type="button" data-control="edit" title="重新编辑" aria-label="重新编辑用户消息" onClick={() => onEdit(message)}><Pencil size={13} /></button></div>}</div>
       </article>
     );
   }
@@ -535,7 +535,7 @@ const MessageView = memo(function MessageView({ message, executions, onOpenArtif
           {timing && (isControlMessage ? <CompactTimingMeta timing={timing} now={now} /> : <TimingMeta timing={timing} now={now} />)}
         </div>
         {changedFiles.length > 0 && <ChangedFilesPanel files={changedFiles} onOpenFile={onOpenFile} onOpenDiff={onOpenDiff} />}
-        {!isControlMessage && !message.streaming && !busy && <div className="message-actions"><button type="button" title="重新生成" aria-label="重新生成回复" onClick={() => onRegenerate(message)}><RefreshCw size={13} /></button><button type="button" title="复制" aria-label="复制 AI 回复" onClick={() => onCopy(message)}><Copy size={13} /></button>{hasShareableContent && <button type="button" title={sharing ? "正在生成图片" : shared ? "已复制图片" : "分享图片"} aria-label={sharing ? "正在生成回复图片" : shared ? "回复图片已复制" : "分享 AI 回复图片"} disabled={sharing} onClick={() => void share()}>{sharing ? <LoaderCircle size={13} className="spinning" /> : shared ? <Check size={13} /> : <Share2 size={13} />}</button>}</div>}
+        {!isControlMessage && !message.streaming && !busy && <div className="message-actions"><button type="button" data-control="regenerate" title="重新生成" aria-label="重新生成回复" onClick={() => onRegenerate(message)}><RefreshCw size={13} /></button><button type="button" data-control="copy" title="复制" aria-label="复制 AI 回复" onClick={() => onCopy(message)}><Copy size={13} /></button>{hasShareableContent && <button type="button" data-control="share" title={sharing ? "正在生成图片" : shared ? "已复制图片" : "分享图片"} aria-label={sharing ? "正在生成回复图片" : shared ? "回复图片已复制" : "分享 AI 回复图片"} disabled={sharing} onClick={() => void share()}>{sharing ? <LoaderCircle size={13} className="spinning" /> : shared ? <Check size={13} /> : <Share2 size={13} />}</button>}</div>}
       </div>
     </article>
   );
@@ -1998,9 +1998,9 @@ export function App(): ReactNode {
         </nav>}
           </>
         )}
-        <button className="new-session-button" type="button" disabled={!snapshot.workspace} onClick={() => void createNewSession()}><MessageSquarePlus size={16} />新建话题</button>
+        <button className="new-session-button" data-control="new-session" type="button" disabled={!snapshot.workspace} onClick={() => void createNewSession()}><MessageSquarePlus size={16} />新建话题</button>
         <div className="sidebar-footer">
-          <button type="button" onClick={() => setSettingsOpen(true)}><Settings size={16} />设置</button>
+          <button type="button" data-control="settings" onClick={() => setSettingsOpen(true)}><Settings size={16} />设置</button>
           <span className={`runtime-indicator${snapshot.busy ? " busy" : ""}`}><i />{snapshot.status}</span>
         </div>
       </aside>
@@ -2009,8 +2009,8 @@ export function App(): ReactNode {
         <header className="topbar" data-pane="topbar">
           <div className="project-title"><Folder size={17} /><span><strong>{snapshot.workspace?.split(/[\\/]/u).at(-1) ?? "ChatAnyTime"}</strong><small>{snapshot.agentName} · {snapshot.sessionId ? "当前话题" : "未开始话题"}</small></span></div>
           <div className="runtime-controls">
-            <button className="workspace-top-button" type="button" onClick={() => void openWorkspace()}><FolderOpen size={15} /><span>工作区</span><strong>{compactPath(snapshot.workspace)}</strong><ChevronDown size={13} /></button>
-            <button className="icon-button preview-panel-toggle" type="button" aria-label={previewOpened ? "关闭预览" : "打开预览"} title={previewOpened ? "关闭预览" : "打开预览"} onClick={() => {
+            <button className="workspace-top-button" data-control="workspace-open" type="button" onClick={() => void openWorkspace()}><FolderOpen size={15} /><span>工作区</span><strong>{compactPath(snapshot.workspace)}</strong><ChevronDown size={13} /></button>
+            <button className="icon-button preview-panel-toggle" data-control="preview-toggle" type="button" aria-label={previewOpened ? "关闭预览" : "打开预览"} title={previewOpened ? "关闭预览" : "打开预览"} onClick={() => {
               if (previewCollapsed) setPreviewCollapsed(false);
               else if (preview) setPreviewCollapsed(true);
               else if (previewOpened) setPreviewOpened(false);
@@ -2029,7 +2029,7 @@ export function App(): ReactNode {
             <TaskPanel />
             <div className="timeline" data-pane="timeline" ref={timelineRef}>
               {!snapshot.workspace ? (
-                <div className="empty-workspace"><div className="empty-icon"><FolderOpen size={27} /></div><h1>打开一个项目</h1><button className="primary-button" type="button" onClick={() => void openWorkspace()}><FolderOpen size={16} />选择文件夹</button></div>
+                <div className="empty-workspace"><div className="empty-icon"><FolderOpen size={27} /></div><h1>打开一个项目</h1><button className="primary-button" data-control="workspace-open" type="button" onClick={() => void openWorkspace()}><FolderOpen size={16} />选择文件夹</button></div>
               ) : displayMessages.length === 0 && !isGenerating ? (
                 <div className="empty-conversation"><div className="empty-icon"><CodeXml size={27} /></div><h1>今天想开发什么？</h1></div>
               ) : <>
@@ -2080,9 +2080,9 @@ export function App(): ReactNode {
               </div>
               <div className="composer-footer">
                 <div className="composer-footer-left">
-                  <button className="icon-button attach-button" type="button" title="添加附件" aria-label="添加附件" disabled={snapshot.busy || attachments.length >= 5} onClick={() => void addAttachments()}><Plus size={18} /></button>
+                  <button className="icon-button attach-button" data-control="attach" type="button" title="添加附件" aria-label="添加附件" disabled={snapshot.busy || attachments.length >= 5} onClick={() => void addAttachments()}><Plus size={18} /></button>
                   <div className="access-mode-menu-shell" ref={accessModeMenuRef}>
-                    <button className={`access-mode-button${settings.accessMode === "full" ? " full" : ""}`} type="button" aria-haspopup="menu" aria-expanded={accessModeMenuOpen} onClick={() => { setComposerMenu(undefined); setAccessModeMenuOpen((open) => !open); }}>{settings.accessMode === "full" ? <ShieldAlert size={15} /> : <ShieldCheck size={15} />}<span>{accessModeOptions.find((option) => option.value === settings.accessMode)?.label ?? "访问模式"}</span><ChevronDown size={13} /></button>
+                    <button className={`access-mode-button${settings.accessMode === "full" ? " full" : ""}`} data-control="access-mode" type="button" aria-haspopup="menu" aria-expanded={accessModeMenuOpen} onClick={() => { setComposerMenu(undefined); setAccessModeMenuOpen((open) => !open); }}>{settings.accessMode === "full" ? <ShieldAlert size={15} /> : <ShieldCheck size={15} />}<span>{accessModeOptions.find((option) => option.value === settings.accessMode)?.label ?? "访问模式"}</span><ChevronDown size={13} /></button>
                     {accessModeMenuOpen && <div className="access-mode-menu" role="menu" aria-label="访问模式">
                       {accessModeOptions.map((option) => <button className={`access-mode-menu-item${option.value === settings.accessMode ? " active" : ""}${option.value === "full" ? " full" : ""}`} type="button" role="menuitemradio" aria-checked={option.value === settings.accessMode} key={option.value} onClick={() => void selectAccessMode(option.value)}>{option.value === "full" ? <ShieldAlert size={15} /> : <ShieldCheck size={15} />}<span><strong>{option.label}</strong><small>{accessModeDescriptions[option.value]}</small></span>{option.value === settings.accessMode && <Check size={14} />}</button>)}
                     </div>}
@@ -2090,19 +2090,19 @@ export function App(): ReactNode {
                 </div>
                 <div className="composer-footer-right">
                   <div className="composer-control-menu">
-                    <button className="composer-menu-trigger" type="button" title="模型快捷切换" aria-label="模型快捷切换" aria-haspopup="menu" aria-expanded={composerMenu === "model"} disabled={snapshot.busy} onClick={() => { setAccessModeMenuOpen(false); setComposerMenu((current) => current === "model" ? undefined : "model"); }}><Bot size={14} /><span>{selectedModelOption?.name ?? snapshot.model?.id ?? "选择模型"}</span><ChevronDown size={13} /></button>
+                    <button className="composer-menu-trigger" data-control="model-select" type="button" title="模型快捷切换" aria-label="模型快捷切换" aria-haspopup="menu" aria-expanded={composerMenu === "model"} disabled={snapshot.busy} onClick={() => { setAccessModeMenuOpen(false); setComposerMenu((current) => current === "model" ? undefined : "model"); }}><Bot size={14} /><span>{selectedModelOption?.name ?? snapshot.model?.id ?? "选择模型"}</span><ChevronDown size={13} /></button>
                     {composerMenu === "model" && <div className="composer-select-menu model-select-menu" role="menu" aria-label="模型快捷切换">
                       {Array.from(new Set(availableModels.map((model) => model.provider))).map((providerId) => <div className="composer-menu-group" key={providerId}><small>{providers.find((provider) => provider.id === providerId)?.name ?? providerId}</small>{availableModels.filter((model) => model.provider === providerId).map((model) => { const value = `${model.provider}/${model.id}`; return <button className={value === selectedModel ? "active" : ""} type="button" role="menuitemradio" aria-checked={value === selectedModel} key={value} onClick={() => void selectModel(value)}><span>{model.name}</span>{value === selectedModel && <Check size={13} />}</button>; })}</div>)}
                     </div>}
                   </div>
                   <div className="composer-control-menu thinking-control">
-                    <button className="composer-menu-trigger" type="button" title="思考级别" aria-label="思考级别" aria-haspopup="menu" aria-expanded={composerMenu === "thinking"} disabled={snapshot.busy} onClick={() => { setAccessModeMenuOpen(false); setComposerMenu((current) => current === "thinking" ? undefined : "thinking"); }}><span>思考</span><strong>{thinkingLevelLabels[snapshot.thinkingLevel]}</strong><ChevronDown size={13} /></button>
+                    <button className="composer-menu-trigger" data-control="thinking-select" type="button" title="思考级别" aria-label="思考级别" aria-haspopup="menu" aria-expanded={composerMenu === "thinking"} disabled={snapshot.busy} onClick={() => { setAccessModeMenuOpen(false); setComposerMenu((current) => current === "thinking" ? undefined : "thinking"); }}><span>思考</span><strong>{thinkingLevelLabels[snapshot.thinkingLevel]}</strong><ChevronDown size={13} /></button>
                     {composerMenu === "thinking" && <div className="composer-select-menu thinking-select-menu" role="menu" aria-label="思考级别">{thinkingLevels.map((level) => <button className={level === snapshot.thinkingLevel ? "active" : ""} type="button" role="menuitemradio" aria-checked={level === snapshot.thinkingLevel} key={level} onClick={() => void selectThinkingLevel(level)}><span>{thinkingLevelLabels[level]}</span>{level === snapshot.thinkingLevel && <Check size={13} />}</button>)}</div>}
                   </div>
                   {snapshot.busy ? (
-                    <button className="stop-button" type="button" title="停止" aria-label="停止" onClick={() => void window.piDesktop.send({ type: "session.abort" })}><CircleStop size={18} /></button>
+                    <button className="stop-button" data-control="stop" type="button" title="停止" aria-label="停止" onClick={() => void window.piDesktop.send({ type: "session.abort" })}><CircleStop size={18} /></button>
                   ) : (
-                    <button className="send-button" type="submit" title="发送" aria-label="发送" disabled={!canSubmit}><Play size={17} fill="currentColor" /></button>
+                    <button className="send-button" data-control="send" type="submit" title="发送" aria-label="发送" disabled={!canSubmit}><Play size={17} fill="currentColor" /></button>
                   )}
                 </div>
               </div>

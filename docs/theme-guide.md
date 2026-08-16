@@ -39,6 +39,34 @@ ChatAnyTime 的 `html.theme-light` / `html.theme-dark` / `--bg-primary` 等旧�
 
 **消息角色 `data-role`**：`user` / `assistant` / `extension`（加在每条消息的 article 上）。
 
+**控件钩子 `data-control`**（关键按钮与输入控件，同样有契约保障）：
+
+| 控件 | 值 |
+| --- | --- |
+| 新建话题（侧栏） | `new-session` |
+| 设置（侧栏底部） | `settings` |
+| 打开工作区（顶栏 + 空态主按钮） | `workspace-open` |
+| 预览面板开关（顶栏） | `preview-toggle` |
+| 任务面板开关（右下浮球） | `task-panel-toggle` |
+| 发送 | `send` |
+| 停止（生成中与发送互换显示） | `stop` |
+| 添加附件 | `attach` |
+| 访问模式 | `access-mode` |
+| 模型快捷切换 | `model-select` |
+| 思考级别 | `thinking-select` |
+| 消息操作 | `copy` / `edit` / `regenerate` / `share` |
+
+```css
+/* 圆形发送按钮，生成中换成呼吸的停止按钮 */
+[data-pane="composer"] [data-control="send"],
+[data-pane="composer"] [data-control="stop"] { border-radius: 50%; }
+[data-ui-generating] [data-control="stop"] { animation: pulse 1.6s infinite; }
+/* 重设计输入框本体 */
+[data-pane="composer"] textarea { font-family: "Brand", monospace; caret-color: var(--accent); }
+```
+
+`send` / `stop` 占据同一位置、按生成状态互换；重设计时建议两个一起写，避免状态切换时跳变。模型/思考菜单、斜杠指令面板都是 `composer` 区域的子元素，用 `[data-pane="composer"]` 后代选择器即可命中。
+
 **UI 状态（`<html>` 布尔属性，出现即真）**：`data-ui-settings-open` `data-ui-workspace-open` `data-ui-chat-empty` `data-ui-generating` `data-ui-preview-open` `data-ui-permission-pending`
 
 ```css

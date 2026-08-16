@@ -94,7 +94,7 @@ export function TaskPanel(): ReactNode {
 
   if (panel === "closed") {
     return (
-      <button className="task-panel-fab" type="button" title={`任务面板，${activeCount} 项未完成${backgroundCount > 0 ? `，${backgroundCount} 个终端运行中` : ""}`} aria-label={`打开任务面板，${activeCount} 项未完成`} onClick={() => setPanel("open")}>
+      <button className="task-panel-fab" data-control="task-panel-toggle" type="button" title={`任务面板，${activeCount} 项未完成${backgroundCount > 0 ? `，${backgroundCount} 个终端运行中` : ""}`} aria-label={`打开任务面板，${activeCount} 项未完成`} onClick={() => setPanel("open")}>
         <ListTodo size={16} />
         {activeCount > 0 && <span className="task-panel-badge">{activeCount}</span>}
         {backgroundCount > 0 && <Terminal size={13} className="task-panel-fab-running" />}
