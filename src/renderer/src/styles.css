@@ -162,6 +162,12 @@ select option:checked { color: var(--on-accent); background-color: var(--accent)
 .session-list strong, .agent-list strong { overflow: hidden; font-size: 12px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
 .session-list small, .agent-list small { overflow: hidden; color: var(--text-muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .session-list-empty { display: grid; place-items: center; min-height: 80px; padding: 10px; color: var(--text-muted); font-size: 11px; }
+.session-item-meta { display: flex; align-items: center; gap: 5px; justify-self: end; }
+.session-status-dot { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; }
+.session-status-dot.running { background: var(--warning); box-shadow: 0 0 0 3px var(--warning-soft); animation: session-dot-pulse 1.4s ease-in-out infinite; }
+.session-status-dot.completed { background: var(--success); }
+.session-status-dot.failed { background: var(--danger); box-shadow: 0 0 0 3px var(--danger-soft); }
+@keyframes session-dot-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 .workspace-tree-header { display: flex; align-items: center; gap: 8px; height: 34px; margin: 12px 2px 9px; padding: 0 4px; }
 .workspace-tree-back { display: flex; align-items: center; gap: 3px; height: 28px; padding: 0 9px; border: 1px solid var(--border-strong); border-radius: 5px; color: var(--text-muted); background: var(--surface); font-size: 11px; cursor: pointer; }
 .workspace-tree-back:hover { color: var(--text); background: var(--surface-button-hover); }

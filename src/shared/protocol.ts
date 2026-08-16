@@ -256,6 +256,13 @@ export type BrowserPreviewCommand =
   | { type: "open-external"; tabId?: string }
   | { type: "close"; tabId?: string };
 
+/**
+ * Execution state of a session, shown as a sidebar dot. "running" is live
+ * state; "completed"/"failed" are unseen-outcome notifications that clear as
+ * soon as the session is opened (the result is then visible in the chat).
+ */
+export type SessionRunStatus = "running" | "completed" | "failed";
+
 export interface SessionSummary {
   id: string;
   path: string;
@@ -264,6 +271,8 @@ export interface SessionSummary {
   modifiedAt: number;
   messageCount: number;
   pinned?: boolean;
+  /** Present only for live sessions; terminal dots clear once viewed. */
+  runStatus?: SessionRunStatus;
 }
 
 /**

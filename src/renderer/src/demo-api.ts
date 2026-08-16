@@ -54,8 +54,8 @@ const demoSnapshot: RuntimeSnapshot = {
     { path: "D:\\Projects\\PiDesktop", openedAt: Date.now() - 43_200_000 }
   ],
   sessions: [
-    { id: "demo-session", path: "demo-session.jsonl", workspace: "D:\\Projects\\chat-anytime-demo", title: "梳理项目架构", modifiedAt: Date.now(), messageCount: 4 },
-    { id: "older-session", path: "older-session.jsonl", workspace: "D:\\Projects\\chat-anytime-demo", title: "检查渲染流程", modifiedAt: Date.now() - 86_400_000, messageCount: 7 },
+    { id: "demo-session", path: "demo-session.jsonl", workspace: "D:\\Projects\\chat-anytime-demo", title: "梳理项目架构", modifiedAt: Date.now(), messageCount: 4, runStatus: "completed" },
+    { id: "older-session", path: "older-session.jsonl", workspace: "D:\\Projects\\chat-anytime-demo", title: "检查渲染流程", modifiedAt: Date.now() - 86_400_000, messageCount: 7, runStatus: "failed" },
     { id: "other-session", path: "other-session.jsonl", workspace: "D:\\Projects\\PiDesktop", title: "检查桌面端", modifiedAt: Date.now() - 43_200_000, messageCount: 3 }
   ],
   messages: [
@@ -344,11 +344,23 @@ export function createDemoApi(): DesktopApi {
           }), 80);
           break;
         }
-        case "session.prompt":
+        case "session.prompt": {
+          const activeId = demoSnapshot.sessionId;
+          const promptTimestamp = Date.now();
           updateSnapshot({
-            messages: [...demoSnapshot.messages, { id: `user-${Date.now()}`, role: "user", timestamp: Date.now(), blocks: [{ type: "text", text: command.text }] }]
+            busy: true,
+            status: "Pi 正在工作",
+            messages: [...demoSnapshot.messages, { id: `user-${promptTimestamp}`, role: "user", timestamp: promptTimestamp, blocks: [{ type: "text", text: command.text }] }],
+            sessions: demoSnapshot.sessions.map((item) => item.id === activeId ? { ...item, runStatus: "running" as const } : item)
           });
+          setTimeout(() => updateSnapshot({
+            busy: false,
+            status: "就绪",
+            messages: [...demoSnapshot.messages, { id: `demo-reply-${Date.now()}`, role: "assistant", timestamp: Date.now(), blocks: [{ type: "text", text: `已收到：${command.text}` }] }],
+            sessions: demoSnapshot.sessions.map((item) => item.id === activeId ? { ...item, runStatus: "completed" as const } : item)
+          }), 80);
           break;
+        }
         case "session.skill": {
           updateSnapshot({
             messages: [...demoSnapshot.messages, { id: `user-${Date.now()}`, role: "user", timestamp: Date.now(), skill: { name: command.name }, blocks: command.instructions ? [{ type: "text", text: command.instructions }] : [] }]

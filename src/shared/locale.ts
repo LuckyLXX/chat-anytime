@@ -1,4 +1,4 @@
-import type { ThinkingLevel } from "./protocol.js";
+import type { SessionRunStatus, ThinkingLevel } from "./protocol.js";
 
 export const thinkingLevelLabels: Record<ThinkingLevel, string> = {
   off: "关闭",
@@ -8,6 +8,12 @@ export const thinkingLevelLabels: Record<ThinkingLevel, string> = {
   high: "高",
   xhigh: "很高",
   max: "最高"
+};
+
+export const sessionRunStatusLabels: Record<SessionRunStatus, string> = {
+  running: "执行中",
+  completed: "执行完成",
+  failed: "执行失败"
 };
 
 const toolLabels: Record<string, string> = {
