@@ -11,7 +11,7 @@
 :root[data-theme-effective="dark"]  { --surface: #0f172a; }
 ```
 
-ChatAnyTime 的 `html.theme-light` / `html.theme-dark` / `--bg-primary` 等旧写法会自动转换，旧模板可直接导入。
+旧版模板（`html.theme-light` / `--bg-primary` 等历史写法）导入时会自动转换，无需手工迁移。
 
 ## 颜色 Token
 
