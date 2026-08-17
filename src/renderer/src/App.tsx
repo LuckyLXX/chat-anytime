@@ -1212,6 +1212,7 @@ export function App(): ReactNode {
   const [previewEditorStates, setPreviewEditorStates] = useState<Record<string, PreviewEditorState>>({});
   const [sidebarView, setSidebarView] = useState<"topics" | "files">("topics");
   const [browsingWorkspace, setBrowsingWorkspace] = useState("");
+  const [treeRefreshSignal, setTreeRefreshSignal] = useState(0);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: ContextMenuItem[] } | null>(null);
   const [renameSession, setRenameSession] = useState<{ path: string; title: string } | null>(null);
   const [renameValue, setRenameValue] = useState("");
@@ -1981,9 +1982,10 @@ export function App(): ReactNode {
             <div className="workspace-tree-header">
               <button type="button" className="workspace-tree-back" onClick={() => setSidebarView("topics")}><ChevronLeft size={14} />返回</button>
               <span title={browsingWorkspace}>{browsingWorkspace ? (browsingWorkspace.split(/[\\/]/u).at(-1) ?? browsingWorkspace) : "工作区文件"}</span>
+              <button type="button" className="workspace-tree-refresh" title="刷新文件列表" aria-label="刷新文件列表" onClick={() => setTreeRefreshSignal((signal) => signal + 1)}><RefreshCw size={13} /></button>
             </div>
             {browsingWorkspace
-              ? <WorkspaceTree key={browsingWorkspace} workspace={browsingWorkspace} onOpenFile={(relativePath) => openFilePreview(relativePath, browsingWorkspace)} />
+              ? <WorkspaceTree key={browsingWorkspace} workspace={browsingWorkspace} onOpenFile={(relativePath) => openFilePreview(relativePath, browsingWorkspace)} refreshSignal={treeRefreshSignal} />
               : <div className="session-list-empty">请从话题列表选择工作区</div>}
           </>
         ) : (
@@ -2002,7 +2004,7 @@ export function App(): ReactNode {
             const workspaceName = group.workspace.split(/[\\/]/u).at(-1) || group.workspace;
             return (
               <section className="session-workspace-group" key={group.key}>
-                <div className="session-workspace-heading" onContextMenu={(event) => { event.preventDefault(); setContextMenu({ x: event.clientX, y: event.clientY, items: [{ label: "移除工作区", danger: true, onClick: () => setRemoveWorkspace({ workspace: group.workspace, name: workspaceName, count: group.sessions.length }) }] }); }}>
+                <div className="session-workspace-heading" onContextMenu={(event) => { event.preventDefault(); setContextMenu({ x: event.clientX, y: event.clientY, items: [{ label: "打开文件目录", onClick: () => { setBrowsingWorkspace(group.workspace); setTreeRefreshSignal(0); setSidebarView("files"); } }, { label: "移除工作区", danger: true, onClick: () => setRemoveWorkspace({ workspace: group.workspace, name: workspaceName, count: group.sessions.length }) }] }); }}>
                   <button
                     className="session-workspace-toggle"
                     type="button"
@@ -2019,7 +2021,7 @@ export function App(): ReactNode {
                     type="button"
                     title={`查看 ${workspaceName} 文件`}
                     aria-label={`查看 ${workspaceName} 文件`}
-                    onClick={() => { setBrowsingWorkspace(group.workspace); setSidebarView("files"); }}
+                    onClick={() => { setBrowsingWorkspace(group.workspace); setTreeRefreshSignal(0); setSidebarView("files"); }}
                   >
                     <FolderTree size={14} />
                   </button>

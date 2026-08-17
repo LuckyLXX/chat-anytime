@@ -4,8 +4,8 @@ import { extname, join, resolve } from "node:path";
 import { app, BrowserWindow, dialog, ipcMain, Menu, safeStorage, utilityProcess, type UtilityProcess } from "electron";
 import { migrateSettings, normalizeVision } from "./settings.js";
 import { importExternalAttachment, workspaceRelativeAttachment } from "./attachments.js";
-import type { BrowserPreviewCommand, BrowserPreviewState, DesktopBootstrap, DesktopSettings, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot, WorkspaceDirectoryListing, WorkspaceFilePreview, WorkspaceFileWriteResult } from "../shared/protocol.js";
-import { listWorkspaceDirectory, readWorkspaceFilePreview, writeWorkspaceFile } from "./workspace-preview.js";
+import type { BrowserPreviewCommand, BrowserPreviewState, DesktopBootstrap, DesktopSettings, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot, WorkspaceDirectoryListing, WorkspaceEntryResult, WorkspaceFilePreview, WorkspaceFileWriteResult } from "../shared/protocol.js";
+import { createWorkspaceDirectory, createWorkspaceFile, deleteWorkspaceEntry, listWorkspaceDirectory, readWorkspaceFilePreview, renameWorkspaceEntry, writeWorkspaceFile } from "./workspace-preview.js";
 import { BrowserPreviewController } from "./browser-preview.js";
 
 let mainWindow: BrowserWindow | undefined;
@@ -234,6 +234,27 @@ function registerIpc(): void {
   ipcMain.handle("desktop:list-workspace-directory", async (_event, workspace: string, relativePath?: string): Promise<WorkspaceDirectoryListing> => {
     if (typeof workspace !== "string" || !workspace.trim()) throw new Error("请指定要浏览的工作区");
     return listWorkspaceDirectory(workspace, relativePath);
+  });
+  ipcMain.handle("desktop:create-workspace-file", async (_event, workspace: string, relativePath: string): Promise<WorkspaceEntryResult> => {
+    if (typeof workspace !== "string" || !workspace.trim()) throw new Error("请指定要操作的工作区");
+    if (typeof relativePath !== "string" || !relativePath.trim()) throw new Error("文件路径无效");
+    return createWorkspaceFile(workspace, relativePath);
+  });
+  ipcMain.handle("desktop:create-workspace-directory", async (_event, workspace: string, relativePath: string): Promise<WorkspaceEntryResult> => {
+    if (typeof workspace !== "string" || !workspace.trim()) throw new Error("请指定要操作的工作区");
+    if (typeof relativePath !== "string" || !relativePath.trim()) throw new Error("文件夹路径无效");
+    return createWorkspaceDirectory(workspace, relativePath);
+  });
+  ipcMain.handle("desktop:delete-workspace-entry", async (_event, workspace: string, relativePath: string): Promise<WorkspaceEntryResult> => {
+    if (typeof workspace !== "string" || !workspace.trim()) throw new Error("请指定要操作的工作区");
+    if (typeof relativePath !== "string" || !relativePath.trim()) throw new Error("删除路径无效");
+    return deleteWorkspaceEntry(workspace, relativePath);
+  });
+  ipcMain.handle("desktop:rename-workspace-entry", async (_event, workspace: string, relativePath: string, newName: string): Promise<WorkspaceEntryResult> => {
+    if (typeof workspace !== "string" || !workspace.trim()) throw new Error("请指定要操作的工作区");
+    if (typeof relativePath !== "string" || !relativePath.trim()) throw new Error("重命名路径无效");
+    if (typeof newName !== "string") throw new Error("新名称无效");
+    return renameWorkspaceEntry(workspace, relativePath, newName);
   });
   ipcMain.handle("browser-preview:command", async (_event, command: BrowserPreviewCommand): Promise<BrowserPreviewState> => {
     if (!browserPreviewController) throw new Error("浏览器预览当前不可用");

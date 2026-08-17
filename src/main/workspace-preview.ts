@@ -1,6 +1,6 @@
-import { mkdir, open, readdir, realpath, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, extname, isAbsolute, relative, resolve, sep } from "node:path";
-import type { WorkspaceDirectoryEntry, WorkspaceDirectoryListing, WorkspaceFilePreview, WorkspaceFileWriteResult } from "../shared/protocol.js";
+import type { WorkspaceDirectoryEntry, WorkspaceDirectoryListing, WorkspaceEntryResult, WorkspaceFilePreview, WorkspaceFileWriteResult } from "../shared/protocol.js";
 import { IMAGE_PREVIEW_LIMIT_BYTES } from "../shared/protocol.js";
 
 const textPreviewLimit = 1024 * 1024;
@@ -210,4 +210,100 @@ export async function listWorkspaceDirectory(workspace: string, requestedPath?: 
   }
   entries.sort((a, b) => (a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind === "directory" ? -1 : 1));
   return { relativePath: realRelative, entries };
+}
+
+async function statOptional(path: string): Promise<import("node:fs").Stats | undefined> {
+  return lstat(path).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT" || error.code === "ENOTDIR") return undefined;
+    throw error;
+  });
+}
+
+/**
+ * 新建类操作（目标尚不存在）的路径校验：返回工作区内目标的绝对路径。
+ * 逐级向上找到已存在的最近祖先并校验其真实路径落在工作区内，防止符号链接
+ * 把新建目标劫持到工作区之外；尚不存在的段是全新创建的，无 symlink 风险。
+ */
+async function resolveNewTarget(rootReal: string, relativePath: string): Promise<string> {
+  const candidate = resolve(rootReal, ...relativePath.split("/"));
+  let existingAncestor = candidate;
+  for (;;) {
+    const real = await realpath(existingAncestor).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT" || error.code === "ENOTDIR") return undefined;
+      throw error;
+    });
+    if (real !== undefined) {
+      if (real !== rootReal && !safeRelativePath(rootReal, real)) throw new Error("路径必须位于当前工作区内");
+      return candidate;
+    }
+    const parent = resolve(existingAncestor, "..");
+    if (existingAncestor === parent) break;
+    existingAncestor = parent;
+  }
+  throw new Error("路径必须位于当前工作区内");
+}
+
+/** 校验已存在条目（或指向它的符号链接）的真实路径位于工作区内，返回其绝对路径。 */
+async function resolveExistingTarget(rootReal: string, relativePath: string, action: string): Promise<string> {
+  const candidate = resolve(rootReal, ...relativePath.split("/"));
+  const candidateReal = await realpath(candidate).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT" || error.code === "ENOTDIR") return undefined;
+    throw error;
+  });
+  if (candidateReal === undefined) throw new Error("条目不存在或已被删除");
+  if (candidateReal !== rootReal && !safeRelativePath(rootReal, candidateReal)) throw new Error(`${action}路径必须位于当前工作区内`);
+  return candidate;
+}
+
+export async function createWorkspaceFile(workspace: string, requestedPath: string): Promise<WorkspaceEntryResult> {
+  const relativePath = safeRelativePath(workspace, requestedPath);
+  if (!relativePath || isAbsolute(requestedPath)) throw new Error("新建文件路径必须位于当前工作区内");
+  const rootReal = await realpath(resolve(workspace));
+  const candidate = await resolveNewTarget(rootReal, relativePath);
+  const existing = await statOptional(candidate);
+  if (existing) throw new Error(`已存在同名条目：${basename(candidate)}`);
+  await mkdir(resolve(candidate, ".."), { recursive: true });
+  await writeFile(candidate, "", "utf8");
+  const resolved = safeRelativePath(rootReal, await realpath(candidate));
+  if (!resolved) throw new Error("新建文件路径必须位于当前工作区内");
+  return { relativePath: resolved };
+}
+
+export async function createWorkspaceDirectory(workspace: string, requestedPath: string): Promise<WorkspaceEntryResult> {
+  const relativePath = safeRelativePath(workspace, requestedPath);
+  if (!relativePath || isAbsolute(requestedPath)) throw new Error("新建文件夹路径必须位于当前工作区内");
+  const rootReal = await realpath(resolve(workspace));
+  const candidate = await resolveNewTarget(rootReal, relativePath);
+  const existing = await statOptional(candidate);
+  if (existing) throw new Error(`已存在同名条目：${basename(candidate)}`);
+  await mkdir(candidate, { recursive: true });
+  return { relativePath };
+}
+
+export async function deleteWorkspaceEntry(workspace: string, requestedPath: string): Promise<WorkspaceEntryResult> {
+  const relativePath = safeRelativePath(workspace, requestedPath);
+  if (!relativePath || isAbsolute(requestedPath)) throw new Error("删除路径必须位于当前工作区内");
+  const rootReal = await realpath(resolve(workspace));
+  const candidate = await resolveExistingTarget(rootReal, relativePath, "删除");
+  const info = await lstat(candidate);
+  // 对符号链接本身删除（不跟随目标）；对真实目录递归删除其全部内容。
+  await rm(candidate, { recursive: info.isDirectory(), force: false });
+  return { relativePath };
+}
+
+export async function renameWorkspaceEntry(workspace: string, requestedPath: string, newName: string): Promise<WorkspaceEntryResult> {
+  const relativePath = safeRelativePath(workspace, requestedPath);
+  if (!relativePath || isAbsolute(requestedPath)) throw new Error("重命名路径必须位于当前工作区内");
+  const name = newName.trim();
+  if (!name || name === "." || name === ".." || name.includes("/") || name.includes("\\") || name.includes("\0")) throw new Error("名称无效");
+  const rootReal = await realpath(resolve(workspace));
+  const from = await resolveExistingTarget(rootReal, relativePath, "重命名");
+  const to = resolve(from, "..", name);
+  // Windows 大小写不敏感：仅大小写不同的重命名（README.md → readme.md）视为同一条目，放行。
+  const sameEntry = process.platform === "win32" ? to.toLowerCase() === from.toLowerCase() : to === from;
+  const existing = await statOptional(to);
+  if (existing && !sameEntry) throw new Error(`已存在同名条目：${name}`);
+  await rename(from, to);
+  const parent = relativePath.split("/").slice(0, -1).join("/");
+  return { relativePath: parent ? `${parent}/${name}` : name };
 }

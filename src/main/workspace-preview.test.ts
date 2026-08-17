@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { changedWorkspaceFile, listWorkspaceDirectory, readWorkspaceFilePreview, writeWorkspaceFile } from "./workspace-preview.js";
+import { changedWorkspaceFile, createWorkspaceDirectory, createWorkspaceFile, deleteWorkspaceEntry, listWorkspaceDirectory, readWorkspaceFilePreview, renameWorkspaceEntry, writeWorkspaceFile } from "./workspace-preview.js";
 import { IMAGE_PREVIEW_LIMIT_BYTES } from "../shared/protocol.js";
 
 const TINY_PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
@@ -110,5 +110,79 @@ describe("workspace file preview", () => {
 
     await expect(listWorkspaceDirectory(workspace, "../outside")).rejects.toThrow("当前工作区");
     await expect(listWorkspaceDirectory(workspace, join(root, "outside"))).rejects.toThrow("当前工作区");
+  });
+
+  it("creates files and directories (with parent dirs) and refuses name collisions", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "pidesktop-create-"));
+    await expect(createWorkspaceFile(workspace, "notes.md")).resolves.toEqual({ relativePath: "notes.md" });
+    await expect(createWorkspaceFile(workspace, "src/app.ts")).resolves.toEqual({ relativePath: "src/app.ts" });
+    await expect(createWorkspaceDirectory(workspace, "assets")).resolves.toEqual({ relativePath: "assets" });
+    await expect(createWorkspaceDirectory(workspace, "docs/guides")).resolves.toEqual({ relativePath: "docs/guides" });
+
+    await expect(createWorkspaceFile(workspace, "notes.md")).rejects.toThrow("已存在");
+    await expect(createWorkspaceDirectory(workspace, "assets")).rejects.toThrow("已存在");
+
+    const listing = await listWorkspaceDirectory(workspace);
+    expect(listing.entries.map((entry) => entry.name)).toEqual(expect.arrayContaining(["notes.md", "src", "assets", "docs"]));
+    await expect(readWorkspaceFilePreview(workspace, "src/app.ts")).resolves.toMatchObject({ kind: "code", content: "" });
+  });
+
+  it("rejects creating entries outside the workspace", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pidesktop-create-boundary-"));
+    const workspace = join(root, "workspace");
+    const outside = join(root, "outside.txt");
+    await mkdir(workspace);
+    await writeFile(outside, "private", "utf8");
+    await symlink(outside, join(workspace, "linked.md"), "file");
+
+    await expect(createWorkspaceFile(workspace, "../evil.txt")).rejects.toThrow("当前工作区");
+    await expect(createWorkspaceFile(workspace, join(root, "evil.txt"))).rejects.toThrow("当前工作区");
+    await expect(createWorkspaceDirectory(workspace, "../evil-dir")).rejects.toThrow("当前工作区");
+    await expect(createWorkspaceFile(workspace, "linked.md")).rejects.toThrow("当前工作区");
+    await expect(createWorkspaceFile(workspace, "linked.md/new.md")).rejects.toThrow("当前工作区");
+  });
+
+  it("renames entries inside the workspace with collision and name guards", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "pidesktop-rename-"));
+    await writeFile(join(workspace, "a.txt"), "old", "utf8");
+    await mkdir(join(workspace, "docs"));
+    await writeFile(join(workspace, "docs", "readme.md"), "# doc", "utf8");
+    await writeFile(join(workspace, "b.txt"), "keep", "utf8");
+
+    await expect(renameWorkspaceEntry(workspace, "a.txt", "b.txt")).rejects.toThrow("已存在");
+    await expect(renameWorkspaceEntry(workspace, "a.txt", "../evil.txt")).rejects.toThrow("名称无效");
+    await expect(renameWorkspaceEntry(workspace, "a.txt", "nested/name.txt")).rejects.toThrow("名称无效");
+    await expect(renameWorkspaceEntry(workspace, "a.txt", "  ")).rejects.toThrow("名称无效");
+    await expect(renameWorkspaceEntry(workspace, "missing.txt", "x.txt")).rejects.toThrow("不存在");
+    await expect(renameWorkspaceEntry(workspace, "a.txt", "renamed.txt")).resolves.toEqual({ relativePath: "renamed.txt" });
+    await expect(renameWorkspaceEntry(workspace, "docs/readme.md", "guide.md")).resolves.toEqual({ relativePath: "docs/guide.md" });
+    await expect(readWorkspaceFilePreview(workspace, "renamed.txt")).resolves.toMatchObject({ content: "old" });
+    await expect(listWorkspaceDirectory(workspace, "docs")).resolves.toMatchObject({ entries: [{ name: "guide.md", relativePath: "docs/guide.md", kind: "file" }] });
+  });
+
+  it("deletes files and whole directories and refuses outside-workspace targets", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "pidesktop-delete-"));
+    await writeFile(join(workspace, "a.txt"), "x", "utf8");
+    await mkdir(join(workspace, "docs"));
+    await writeFile(join(workspace, "docs", "readme.md"), "# doc", "utf8");
+
+    await expect(deleteWorkspaceEntry(workspace, "a.txt")).resolves.toEqual({ relativePath: "a.txt" });
+    await expect(readWorkspaceFilePreview(workspace, "a.txt")).rejects.toThrow();
+    await expect(deleteWorkspaceEntry(workspace, "docs")).resolves.toEqual({ relativePath: "docs" });
+    await expect(deleteWorkspaceEntry(workspace, "docs")).rejects.toThrow("不存在");
+    await expect(deleteWorkspaceEntry(workspace, ".")).rejects.toThrow("当前工作区");
+    await expect(deleteWorkspaceEntry(workspace, "../x")).rejects.toThrow("当前工作区");
+  });
+
+  it("refuses renaming or deleting symlinks that escape the workspace", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pidesktop-mutate-boundary-"));
+    const workspace = join(root, "workspace");
+    const outside = join(root, "outside.txt");
+    await mkdir(workspace);
+    await writeFile(outside, "private", "utf8");
+    await symlink(outside, join(workspace, "linked.md"), "file");
+
+    await expect(deleteWorkspaceEntry(workspace, "linked.md")).rejects.toThrow("当前工作区");
+    await expect(renameWorkspaceEntry(workspace, "linked.md", "renamed.md")).rejects.toThrow("当前工作区");
   });
 });

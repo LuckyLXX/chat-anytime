@@ -232,6 +232,12 @@ export interface WorkspaceDirectoryListing {
   entries: WorkspaceDirectoryEntry[];
 }
 
+/** 工作区目录树的新建/删除/重命名操作结果。 */
+export interface WorkspaceEntryResult {
+  /** 操作生效后的工作区相对路径（重命名为新路径，其余为原路径）。 */
+  relativePath: string;
+}
+
 export interface BrowserPreviewBounds {
   x: number;
   y: number;
@@ -492,6 +498,10 @@ export interface DesktopApi {
   readWorkspaceFile(relativePath: string, workspace?: string): Promise<WorkspaceFilePreview>;
   writeWorkspaceFile(relativePath: string, content: string, workspace?: string): Promise<WorkspaceFileWriteResult>;
   listWorkspaceDirectory(workspace: string, relativePath?: string): Promise<WorkspaceDirectoryListing>;
+  createWorkspaceFile(workspace: string, relativePath: string): Promise<WorkspaceEntryResult>;
+  createWorkspaceDirectory(workspace: string, relativePath: string): Promise<WorkspaceEntryResult>;
+  deleteWorkspaceEntry(workspace: string, relativePath: string): Promise<WorkspaceEntryResult>;
+  renameWorkspaceEntry(workspace: string, relativePath: string, newName: string): Promise<WorkspaceEntryResult>;
   browserPreview(command: BrowserPreviewCommand): Promise<BrowserPreviewState>;
   send(command: RuntimeCommand): Promise<void>;
   onRuntimeMessage(listener: (message: RuntimeMessage) => void): () => void;

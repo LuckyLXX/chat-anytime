@@ -255,6 +255,19 @@ export function createDemoApi(): DesktopApi {
     async listWorkspaceDirectory(_workspace?: string, _relativePath?: string): Promise<import("../../shared/protocol").WorkspaceDirectoryListing> {
       return { relativePath: "", entries: [{ name: "src", relativePath: "src", kind: "directory" }, { name: "demo.png", relativePath: "demo.png", kind: "file" }, { name: "README.md", relativePath: "README.md", kind: "file" }] };
     },
+    async createWorkspaceFile(_workspace: string, relativePath: string): Promise<import("../../shared/protocol").WorkspaceEntryResult> {
+      return { relativePath };
+    },
+    async createWorkspaceDirectory(_workspace: string, relativePath: string): Promise<import("../../shared/protocol").WorkspaceEntryResult> {
+      return { relativePath };
+    },
+    async deleteWorkspaceEntry(_workspace: string, relativePath: string): Promise<import("../../shared/protocol").WorkspaceEntryResult> {
+      return { relativePath };
+    },
+    async renameWorkspaceEntry(_workspace: string, relativePath: string, newName: string): Promise<import("../../shared/protocol").WorkspaceEntryResult> {
+      const parent = relativePath.includes("/") ? relativePath.slice(0, relativePath.lastIndexOf("/") + 1) : "";
+      return { relativePath: `${parent}${newName}` };
+    },
     async browserPreview(command: BrowserPreviewCommand): Promise<BrowserPreviewState> {
       if (command.type === "close") {
         return emitBrowserPreview({ attached: false, url: "", title: "", loading: false, canGoBack: false, canGoForward: false, error: undefined });

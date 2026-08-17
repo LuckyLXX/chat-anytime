@@ -9,6 +9,10 @@ const api: DesktopApi = {
   readWorkspaceFile: (relativePath: string, workspace?: string) => ipcRenderer.invoke("desktop:read-workspace-file", relativePath, workspace),
   writeWorkspaceFile: (relativePath: string, content: string, workspace?: string) => ipcRenderer.invoke("desktop:write-workspace-file", relativePath, content, workspace),
   listWorkspaceDirectory: (workspace: string, relativePath?: string) => ipcRenderer.invoke("desktop:list-workspace-directory", workspace, relativePath),
+  createWorkspaceFile: (workspace: string, relativePath: string) => ipcRenderer.invoke("desktop:create-workspace-file", workspace, relativePath),
+  createWorkspaceDirectory: (workspace: string, relativePath: string) => ipcRenderer.invoke("desktop:create-workspace-directory", workspace, relativePath),
+  deleteWorkspaceEntry: (workspace: string, relativePath: string) => ipcRenderer.invoke("desktop:delete-workspace-entry", workspace, relativePath),
+  renameWorkspaceEntry: (workspace: string, relativePath: string, newName: string) => ipcRenderer.invoke("desktop:rename-workspace-entry", workspace, relativePath, newName),
   browserPreview: (command: BrowserPreviewCommand) => ipcRenderer.invoke("browser-preview:command", command),
   send: (command: RuntimeCommand) => ipcRenderer.invoke("runtime:send", command),
   onRuntimeMessage: (listener: (message: RuntimeMessage) => void) => {
