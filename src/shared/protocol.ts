@@ -183,6 +183,27 @@ export interface TurnTiming {
   completedAt?: number;
 }
 
+/**
+ * 当前会话上下文窗口占用估算（Pi 的 AgentSession.getContextUsage()，
+ * 跟随激活会话）。窗口大小来自模型定义，token 数优先取最后一次
+ * LLM 响应的真实 usage，其后新消息按 chars/4 估算。
+ */
+export interface ContextUsage {
+  /** 估算上下文 token 数；压缩后、下一次 LLM 响应前不可知，为 null。 */
+  tokens: number | null;
+  /** 模型上下文窗口（token 数）。 */
+  contextWindow: number;
+  /** 相对上下文窗口的百分比；tokens 未知时为 null。 */
+  percent: number | null;
+  /**
+   * 会话累计缓存命中率：ΣcacheRead / Σ(input + cacheRead + cacheWrite)，
+   * 与 claude-stat / pi CLI 的 CH 指标同源。累计口径平滑（瞬时值会随工具
+   * 结果回填剧烈波动）。没有可用 usage（未发过请求、中转站不报 usage）
+   * 时为 null。独立于 tokens——压缩后估算未知时累计命中率仍有意义。
+   */
+  cacheHitRate: number | null;
+}
+
 export interface ToolExecution {
   id: string;
   name: string;
@@ -429,6 +450,8 @@ export interface RuntimeSnapshot {
   busy: boolean;
   status: string;
   turnTiming?: TurnTiming;
+  /** 激活会话的上下文占用估算；无会话或模型窗口未知时缺省。 */
+  contextUsage?: ContextUsage;
   messages: ChatMessage[];
   executions: ToolExecution[];
   backgroundProcesses: BackgroundProcess[];

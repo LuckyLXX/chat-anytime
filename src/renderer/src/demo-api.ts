@@ -2,6 +2,7 @@ import type {
   AgentProfile,
   BrowserPreviewCommand,
   BrowserPreviewState,
+  ContextUsage,
   DesktopApi,
   DesktopBootstrap,
   DesktopSettings,
@@ -22,6 +23,36 @@ let browserPreviewState: BrowserPreviewState = { attached: false, url: "", title
 
 // 64x64 渐变 PNG（浏览器演示模式下的图片预览样例）。
 const demoPngData = "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";
+
+// 演示用上下文占用：压缩后置 null（待下一次回复重新估算），与真实运行时语义一致。
+// 缓存命中率同样模拟：新会话未发过请求时为 null，第一轮回复后出现。
+const DEMO_CONTEXT_WINDOW = 200_000;
+let demoContextTokens: number | null = 41_300;
+let demoCacheHitRate: number | null = 88.4;
+
+function demoContextUsage(): ContextUsage {
+  return {
+    tokens: demoContextTokens,
+    contextWindow: DEMO_CONTEXT_WINDOW,
+    percent: demoContextTokens == null ? null : (demoContextTokens / DEMO_CONTEXT_WINDOW) * 100,
+    cacheHitRate: demoCacheHitRate
+  };
+}
+
+/** 模拟一次回合后的上下文增长：估算 prompt + 回复的 chars/4 token。 */
+function growDemoContext(...texts: string[]): void {
+  const estimated = texts.reduce((sum, text) => sum + Math.round(text.length / 4), 0);
+  demoContextTokens = Math.max(120, (demoContextTokens ?? 0) + estimated + 480);
+  // 首轮请求没有可命中缓存（60），多轮后命中前文缓存，命中率小幅爬升。
+  if (demoCacheHitRate == null) demoCacheHitRate = 60;
+  else if (demoContextTokens > 20_000) demoCacheHitRate = Math.min(97.6, demoCacheHitRate + 3.2);
+}
+
+/** 切到新会话：tokens 归零/置 null 时，命中率同步清空（还没发过请求）。 */
+function resetDemoContext(tokens: number | null): void {
+  demoContextTokens = tokens;
+  demoCacheHitRate = tokens == null || tokens === 0 ? null : 85;
+}
 
 const demoDefaultAgent: AgentProfile = {
   id: "default",
@@ -54,6 +85,7 @@ const demoSnapshot: RuntimeSnapshot = {
   thinkingLevel: "medium",
   busy: false,
   status: "就绪",
+  contextUsage: demoContextUsage(),
   backgroundProcesses: [],
   recentWorkspaces: [
     { path: "D:\\Projects\\chat-anytime-demo", openedAt: Date.now() },
@@ -313,11 +345,13 @@ export function createDemoApi(): DesktopApi {
           updateSnapshot({ model: { provider: command.provider, id: command.id } });
           break;
         case "workspace.open":
-          updateSnapshot({ workspace: command.path, sessionId: undefined, messages: [], executions: [], recentWorkspaces: recordDemoWorkspace(demoSnapshot.recentWorkspaces, command.path) });
+          resetDemoContext(0);
+          updateSnapshot({ workspace: command.path, sessionId: undefined, messages: [], executions: [], contextUsage: demoContextUsage(), recentWorkspaces: recordDemoWorkspace(demoSnapshot.recentWorkspaces, command.path) });
           break;
         case "agent.select":
           demoSettings.currentAgentId = command.agentId;
-          updateSnapshot({ agentId: command.agentId, agentName: activeDemoAgent().name, sessionId: `${command.agentId}-demo-session`, messages: [] });
+          resetDemoContext(0);
+          updateSnapshot({ agentId: command.agentId, agentName: activeDemoAgent().name, sessionId: `${command.agentId}-demo-session`, messages: [], contextUsage: demoContextUsage() });
           applyDemoAgentSkillOverrides();
           emit({ type: "resources", resources: structuredClone(demoResources) });
           break;
@@ -355,12 +389,14 @@ export function createDemoApi(): DesktopApi {
           break;
         case "session.new": {
           const workspace = command.workspace ?? demoSnapshot.workspace ?? "D:\\Projects\\chat-anytime-demo";
-          updateSnapshot({ workspace, messages: [], executions: [], sessionId: "new-demo-session", recentWorkspaces: recordDemoWorkspace(demoSnapshot.recentWorkspaces, workspace) });
+          resetDemoContext(0);
+          updateSnapshot({ workspace, messages: [], executions: [], sessionId: "new-demo-session", contextUsage: demoContextUsage(), recentWorkspaces: recordDemoWorkspace(demoSnapshot.recentWorkspaces, workspace) });
           break;
         }
         case "session.open": {
           const workspace = command.workspace ?? demoSnapshot.workspace ?? "D:\\Projects\\chat-anytime-demo";
-          updateSnapshot({ workspace, sessionId: command.path.replace(/.*[\\/]/u, "").replace(/\.jsonl$/u, ""), messages: [], executions: [], recentWorkspaces: recordDemoWorkspace(demoSnapshot.recentWorkspaces, workspace) });
+          resetDemoContext(2_600);
+          updateSnapshot({ workspace, sessionId: command.path.replace(/.*[\\/]/u, "").replace(/\.jsonl$/u, ""), messages: [], executions: [], contextUsage: demoContextUsage(), recentWorkspaces: recordDemoWorkspace(demoSnapshot.recentWorkspaces, workspace) });
           break;
         }
         case "session.rename":
@@ -382,11 +418,15 @@ export function createDemoApi(): DesktopApi {
             status: "Pi 正在压缩上下文",
             messages: [...demoSnapshot.messages, { id: `demo-compact-command-${timestamp}`, role: "user", control: "compact", timestamp, blocks: [{ type: "text", text: command.instructions ? `/compact ${command.instructions}` : "/compact" }] }]
           });
-          setTimeout(() => updateSnapshot({
-            busy: false,
-            status: "就绪",
-            messages: [...demoSnapshot.messages, { id: `demo-compacted-${Date.now()}`, role: "assistant", control: "compact", timestamp: Date.now(), blocks: [{ type: "text", text: "已压缩上下文。" }] }]
-          }), 80);
+          setTimeout(() => {
+            demoContextTokens = null;
+            updateSnapshot({
+              busy: false,
+              status: "就绪",
+              contextUsage: demoContextUsage(),
+              messages: [...demoSnapshot.messages, { id: `demo-compacted-${Date.now()}`, role: "assistant", control: "compact", timestamp: Date.now(), blocks: [{ type: "text", text: "已压缩上下文。" }] }]
+            });
+          }, 80);
           break;
         }
         case "session.prompt": {
@@ -398,12 +438,17 @@ export function createDemoApi(): DesktopApi {
             messages: [...demoSnapshot.messages, { id: `user-${promptTimestamp}`, role: "user", timestamp: promptTimestamp, blocks: [{ type: "text", text: command.text }] }],
             sessions: demoSnapshot.sessions.map((item) => item.id === activeId ? { ...item, runStatus: "running" as const } : item)
           });
-          setTimeout(() => updateSnapshot({
-            busy: false,
-            status: "就绪",
-            messages: [...demoSnapshot.messages, { id: `demo-reply-${Date.now()}`, role: "assistant", timestamp: Date.now(), blocks: [{ type: "text", text: `已收到：${command.text}` }] }],
-            sessions: demoSnapshot.sessions.map((item) => item.id === activeId ? { ...item, runStatus: "completed" as const } : item)
-          }), 80);
+          setTimeout(() => {
+            const replyText = `已收到：${command.text}`;
+            growDemoContext(command.text, replyText);
+            updateSnapshot({
+              busy: false,
+              status: "就绪",
+              contextUsage: demoContextUsage(),
+              messages: [...demoSnapshot.messages, { id: `demo-reply-${Date.now()}`, role: "assistant", timestamp: Date.now(), blocks: [{ type: "text", text: replyText }] }],
+              sessions: demoSnapshot.sessions.map((item) => item.id === activeId ? { ...item, runStatus: "completed" as const } : item)
+            });
+          }, 80);
           break;
         }
         case "session.skill": {
@@ -424,11 +469,15 @@ export function createDemoApi(): DesktopApi {
             status: "Pi 正在重新生成",
             messages: editedMessages
           });
-          setTimeout(() => updateSnapshot({
-            busy: false,
-            status: "就绪",
-            messages: [...demoSnapshot.messages, { id: `demo-regenerated-${Date.now()}`, role: "assistant", timestamp: Date.now(), blocks: [{ type: "text", text: `已重新生成：${command.text}` }] }]
-          }), 80);
+          setTimeout(() => {
+            growDemoContext(command.text ?? "");
+            updateSnapshot({
+              busy: false,
+              status: "就绪",
+              contextUsage: demoContextUsage(),
+              messages: [...demoSnapshot.messages, { id: `demo-regenerated-${Date.now()}`, role: "assistant", timestamp: Date.now(), blocks: [{ type: "text", text: `已重新生成：${command.text}` }] }]
+            });
+          }, 80);
           break;
         }
         case "permission.resolve": {

@@ -79,6 +79,7 @@ import { RichContent } from "./components/RichContent";
 import { PermissionDialog } from "./components/RuntimeDialogs";
 import { QuestionPanel } from "./components/QuestionPanel";
 import { compactPath, extractMentionTokens, formatDuration, type Artifact } from "./lib/content";
+import { contextUsageCacheLabel, contextUsagePercentLabel, contextUsageTone, contextUsageTooltip } from "./lib/context-usage";
 import { actionTimelineSegments, actionTimelineStats, formatProcessDuration, type ActionTimelineSegment } from "./lib/action-timeline";
 import { changedFilesForMessage, type ReplyChangedFile } from "./lib/changed-files";
 import { groupAssistantMessages } from "./lib/chat-layout";
@@ -2389,6 +2390,12 @@ export function App(): ReactNode {
                       {accessModeOptions.map((option) => <button className={`access-mode-menu-item${option.value === settings.accessMode ? " active" : ""}${option.value === "full" ? " full" : ""}`} type="button" role="menuitemradio" aria-checked={option.value === settings.accessMode} key={option.value} onClick={() => void selectAccessMode(option.value)}>{option.value === "full" ? <ShieldAlert size={15} /> : <ShieldCheck size={15} />}<span><strong>{option.label}</strong><small>{accessModeDescriptions[option.value]}</small></span>{option.value === settings.accessMode && <Check size={14} />}</button>)}
                     </div>}
                   </div>
+                  {snapshot.contextUsage && (
+                    <div className={`context-usage-chip tone-${contextUsageTone(snapshot.contextUsage)}`} data-control="context-usage" role="status" title={contextUsageTooltip(snapshot.contextUsage)} aria-label={`上下文占用 ${contextUsagePercentLabel(snapshot.contextUsage)}`}>
+                      <span>上下文</span><strong>{contextUsagePercentLabel(snapshot.contextUsage)}</strong>
+                      {snapshot.contextUsage.cacheHitRate != null && <span className="context-usage-cache">缓存 {contextUsageCacheLabel(snapshot.contextUsage)}</span>}
+                    </div>
+                  )}
                 </div>
                 <div className="composer-footer-right">
                   <div className="composer-control-menu">

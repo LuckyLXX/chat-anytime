@@ -54,6 +54,42 @@ describe("demo session commands", () => {
     }
   });
 
+  it("tracks context usage across prompt and compaction", async () => {
+    vi.useFakeTimers();
+    try {
+      const api = createDemoApi();
+      // 前面的用例共享模块级状态，先归零到新会话。
+      await api.send({ type: "session.new" });
+      const fresh = (await api.bootstrap()).runtime!.contextUsage!;
+      expect(fresh).toMatchObject({ tokens: 0, percent: 0, cacheHitRate: null });
+      expect(fresh.contextWindow).toBeGreaterThan(0);
+
+      await api.send({ type: "session.prompt", text: "检查这个项目的运行时架构" });
+      await vi.runAllTimersAsync();
+      const grown = (await api.bootstrap()).runtime!.contextUsage!;
+      expect(grown.tokens!).toBeGreaterThan(0);
+      expect(grown.percent!).toBeGreaterThan(0);
+      expect(grown.tokens!).toBeLessThan(grown.contextWindow);
+      expect(grown.cacheHitRate).not.toBeNull();
+
+      await api.send({ type: "session.compact" });
+      await vi.runAllTimersAsync();
+      const compacted = (await api.bootstrap()).runtime!.contextUsage!;
+      expect(compacted.tokens).toBeNull();
+      expect(compacted.percent).toBeNull();
+      expect(compacted.contextWindow).toBe(fresh.contextWindow);
+
+      // 压缩后下一条回复恢复估算。
+      await api.send({ type: "session.prompt", text: "继续" });
+      await vi.runAllTimersAsync();
+      const recovered = (await api.bootstrap()).runtime!.contextUsage!;
+      expect(recovered.tokens).not.toBeNull();
+      expect(recovered.percent).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("returns a typed workspace file preview", async () => {
     const preview = await createDemoApi().readWorkspaceFile("src/runtime.ts");
 

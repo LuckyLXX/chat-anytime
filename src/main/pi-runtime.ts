@@ -19,6 +19,7 @@ import type {
   AccessMode,
   AgentProfile,
   ChatMessage,
+  ContextUsage,
   DesktopSettings,
   McpServerSummary,
   MessageBlock,
@@ -73,6 +74,7 @@ import * as runtimeSkills from "./runtime-skills.js";
 import * as runtimeVision from "./runtime-vision.js";
 import * as runtimePermissions from "./runtime-permissions.js";
 import * as runtimeMcp from "./runtime-mcp.js";
+import * as runtimeContextUsage from "./runtime-context-usage.js";
 
 const parentPort = process.parentPort;
 if (!parentPort) throw new Error("Pi 运行时必须作为 Electron 工具进程启动");
@@ -130,6 +132,13 @@ interface SessionRuntimeRecord {
   runStatus: SessionRunStatus | undefined;
   /** True from session.abort() until the run settles — resolves the dot to red. */
   abortRequested: boolean;
+  /**
+   * Session-wide cumulative cache-token counters (durable projection, aligned
+   * with deepseek-harness): accumulated at each assistant message_end and
+   * re-scanned at agent_end as an idempotent backstop (regenerate truncates
+   * the transcript). Compaction deliberately does not clear it.
+   */
+  cacheUsage: runtimeContextUsage.CacheUsageTotals;
   activatedAt: number;
 }
 
@@ -385,6 +394,14 @@ function normalizeMessages(messages: AgentMessage[], streamingMessage?: AgentMes
   });
 }
 
+/** 快照的上下文占用：Pi 官方估算 + record 上的会话累计缓存命中率。 */
+function snapshotContextUsage(record: SessionRuntimeRecord | undefined): ContextUsage | undefined {
+  if (!record) return undefined;
+  const base = record.session.getContextUsage();
+  if (!base) return undefined;
+  return { ...base, cacheHitRate: runtimeContextUsage.cacheHitRateFrom(record.cacheUsage) };
+}
+
 function runtimeSkillPrompt(name: string, instructions?: string): string {
   return runtimeSkills.buildRuntimeSkillPrompt(discoveredSkills, name, instructions, activeRuntime?.session.getActiveToolNames().includes("read") ?? false);
 }
@@ -411,6 +428,7 @@ function snapshot(): RuntimeSnapshot {
     busy: (record?.busy ?? false) || transitionStatus !== undefined,
     status: transitionStatus ?? record?.status ?? status,
     turnTiming: record?.turnTiming,
+    contextUsage: snapshotContextUsage(record),
     messages,
     executions: record ? [...record.executions.values()] : [],
     backgroundProcesses: backgroundProcesses.list(),
@@ -653,6 +671,9 @@ function handleSessionEvent(record: SessionRuntimeRecord, event: AgentSessionEve
         record.busy = false;
         record.status = "就绪";
         resolveRunOutcome(record, event.messages);
+        // Idempotent backstop: regenerate/navigateTree truncates the transcript,
+        // so re-derive the counters from what actually remains.
+        record.cacheUsage = runtimeContextUsage.scanCacheUsage(record.session.state.messages);
         lifecycle = true;
       }
       break;
@@ -663,6 +684,7 @@ function handleSessionEvent(record: SessionRuntimeRecord, event: AgentSessionEve
       // needs the dot resolved; late settlements after agent_end are no-ops.
       if (record.runStatus === "running") {
         resolveRunOutcome(record, record.session.state.messages);
+        record.cacheUsage = runtimeContextUsage.scanCacheUsage(record.session.state.messages);
         lifecycle = true;
       }
       break;
@@ -675,7 +697,9 @@ function handleSessionEvent(record: SessionRuntimeRecord, event: AgentSessionEve
       break;
     case "message_end":
       // Final frame carries the completed message; flush immediately so the
-      // streaming flag clears without a 50ms gap.
+      // streaming flag clears without a 50ms gap. Accumulate its usage into
+      // the session-wide cache counters.
+      record.cacheUsage = runtimeContextUsage.addMessageToCacheUsage(record.cacheUsage, event.message);
       break;
     case "tool_execution_start":
       record.executions.set(event.toolCallId, {
@@ -1177,6 +1201,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     pendingVisionSince: undefined,
     runStatus: undefined,
     abortRequested: false,
+    cacheUsage: runtimeContextUsage.scanCacheUsage(result.session.state.messages),
     activatedAt: Date.now()
   };
   recordBox = record;
