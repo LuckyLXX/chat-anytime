@@ -493,9 +493,9 @@ select option:checked { color: var(--on-accent); background-color: var(--accent)
    避免文件名被 42% 的 skill 宽度限制截断；超出列宽的才省略号（悬停有完整路径）。 */
 .composer-mention-chips { display: flex; flex: 0 1 auto; flex-direction: column; align-items: flex-start; gap: 4px; max-width: min(340px, 52%); min-width: 0; }
 .composer-mention-chips .composer-skill-chip { max-width: 100%; min-width: 0; }
-.composer-footer { display: flex; grid-column: 1; grid-row: 2; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; }
-.composer-footer-left, .composer-footer-right { display: flex; min-width: 0; align-items: center; gap: 7px; }
-.composer-footer-right { justify-content: flex-end; }
+.composer-footer { display: flex; grid-column: 1; grid-row: 2; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; min-width: 0; }
+.composer-footer-left, .composer-footer-right { display: flex; min-width: 0; align-items: center; flex-wrap: wrap; gap: 7px; }
+.composer-footer-right { flex: 1 1 auto; justify-content: flex-end; }
 .extension-status-list { display: flex; min-width: 0; max-width: 290px; gap: 4px; overflow: hidden; }
 .extension-status-list > span { display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 150px; padding: 3px 6px; overflow: hidden; border: 1px solid var(--border); border-radius: 5px; color: var(--text-muted); background: var(--surface-raised); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .attach-button { width: 29px; height: 29px; color: var(--text-muted); }

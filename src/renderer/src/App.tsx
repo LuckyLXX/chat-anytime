@@ -1205,7 +1205,11 @@ export function App(): ReactNode {
   const [input, setInput] = useState("");
   const [selectedSkill, setSelectedSkill] = useState<string>();
   const [editingMessageTimestamp, setEditingMessageTimestamp] = useState<number>();
-  const [localTurnStartedAt, setLocalTurnStartedAt] = useState<number>();
+  // 本地待回复计时必须绑定发起回合时的会话：两个会话同时执行时 busy 恒为
+  // true，按 busy 清理的 effect 不会触发；若不绑定，切到另一会话后会用本会话
+  // 的本地计时去比较对方 turnTiming.startedAt，把空壳待回复气泡误渲染到对方
+  // 会话底部（耗时还从本会话发送时刻起算）。绑定 sessionId 后跨会话自动失效。
+  const [localTurn, setLocalTurn] = useState<{ startedAt: number; sessionId: string | undefined }>();
   const [messageActionError, setMessageActionError] = useState<string>();
   const [sidebarTab, setSidebarTab] = useState<"agents" | "topics">("topics");
   const [sidebarQuery, setSidebarQuery] = useState("");
@@ -1263,7 +1267,7 @@ export function App(): ReactNode {
   const displayMessages = useMemo(() => groupAssistantMessages(snapshot.messages), [snapshot.messages]);
   const latestAssistantIndex = useMemo(() => [...displayMessages].reverse().findIndex((message) => message.role === "assistant"), [displayMessages]);
   const latestAssistantMessageIndex = latestAssistantIndex < 0 ? -1 : displayMessages.length - 1 - latestAssistantIndex;
-  const localTiming = localTurnStartedAt === undefined ? undefined : { startedAt: localTurnStartedAt } satisfies TurnTiming;
+  const localTiming = localTurn !== undefined && localTurn.sessionId === snapshot.sessionId ? { startedAt: localTurn.startedAt } satisfies TurnTiming : undefined;
   const localTurnPending = localTiming !== undefined && (snapshot.turnTiming === undefined || snapshot.turnTiming.startedAt < localTiming.startedAt);
   const activeTurnTiming = localTurnPending ? localTiming : snapshot.turnTiming;
   const isGenerating = localTurnPending || Boolean(snapshot.busy && snapshot.turnTiming && snapshot.turnTiming.completedAt === undefined);
@@ -1439,7 +1443,7 @@ export function App(): ReactNode {
   }, [snapshot.messages, snapshot.busy, snapshot.sessionId]);
 
   useEffect(() => {
-    if (!snapshot.busy) setLocalTurnStartedAt(undefined);
+    if (!snapshot.busy) setLocalTurn(undefined);
   }, [snapshot.busy]);
 
   useEffect(() => {
@@ -1455,23 +1459,18 @@ export function App(): ReactNode {
   useEffect(() => {
     setEditingMessageTimestamp(undefined);
     setSelectedSkill(undefined);
-    if (preview) {
-      // Closing the preview wholesale must also destroy any live browser
-      // views; otherwise their hidden WebContentsViews would leak. Terminal
-      // tabs are workspace-scoped, not session-scoped: they survive chat
-      // session switches so a running dev server keeps its output.
-      for (const tab of preview.tabs) {
-        if (tab.target.type === "browser") void window.piDesktop.browserPreview({ type: "close", tabId: tab.id });
-      }
-      const terminalTabs = preview.tabs.filter((tab) => tab.target.type === "terminal");
-      if (terminalTabs.length > 0) {
-        const activeStillThere = terminalTabs.some((tab) => tab.id === preview.activeTabId);
-        setPreview({ tabs: terminalTabs, activeTabId: activeStillThere ? preview.activeTabId : terminalTabs[0]!.id });
-        return;
-      }
+    if (!preview) return;
+    // 会话切换不收回右侧边栏：只清理会话级标签（artifact/diff），面板保持
+    // 展开；跨会话标签（browser/terminal/file）全部保留。浏览器视图由
+    // BrowserPreview 组件在失活时隐藏、激活时恢复，无需销毁——销毁只发生在
+    // 用户显式关标签或关闭预览面板时（closePreviewTab/closePreview）。
+    const keepTabs = preview.tabs.filter((tab) => tab.target.type !== "artifact" && tab.target.type !== "diff");
+    if (keepTabs.length > 0) {
+      const activeStillThere = keepTabs.some((tab) => tab.id === preview.activeTabId);
+      setPreview({ tabs: keepTabs, activeTabId: activeStillThere ? preview.activeTabId : keepTabs[0]!.id });
+    } else {
+      setPreview(undefined);
     }
-    setPreview(undefined);
-    setPreviewOpened(false);
   }, [snapshot.sessionId]);
 
   const previousWorkspaceRef = useRef(snapshot.workspace);
@@ -1662,7 +1661,7 @@ export function App(): ReactNode {
     const skillName = selectedSkill ?? skillMatch?.[1];
     const skillInstructions = selectedSkill ? composedText || undefined : skillMatch?.[2]?.trim() || undefined;
     if (attachments.some((item) => item.kind === "image") && !modelAcceptsImages && !visionFallbackAvailable) { setAttachmentError("当前模型不支持图片输入，请先切换多模态模型，或在设置的模型服务中启用视觉识别"); return; }
-    setLocalTurnStartedAt(Date.now());
+    setLocalTurn({ startedAt: Date.now(), sessionId: snapshot.sessionId });
     try {
       if (editingMessageTimestamp !== undefined) {
         await window.piDesktop.send({ type: "session.regenerate", text: composedText, timestamp: editingMessageTimestamp, skillName, attachments });
@@ -1677,7 +1676,7 @@ export function App(): ReactNode {
       setMentionedFiles([]);
       setEditingMessageTimestamp(undefined);
     } catch (error) {
-      setLocalTurnStartedAt(undefined);
+      setLocalTurn(undefined);
       setAttachmentError(error instanceof Error ? error.message : "附件发送失败");
     }
   }
@@ -1949,11 +1948,11 @@ export function App(): ReactNode {
     const previousUser = index > 0 ? [...messages.slice(0, index)].reverse().find((item) => item.role === "user") : undefined;
     const text = previousUser ? messageText(previousUser) : "";
     if (!text && !previousUser?.skill) return;
-    setLocalTurnStartedAt(Date.now());
+    setLocalTurn({ startedAt: Date.now(), sessionId: latestSnapshotRef.current.sessionId });
     try {
       await window.piDesktop.send({ type: "session.regenerate", text, timestamp: previousUser?.timestamp, skillName: previousUser?.skill?.name });
     } catch (error) {
-      setLocalTurnStartedAt(undefined);
+      setLocalTurn(undefined);
       setMessageActionError(error instanceof Error ? error.message : "重新生成失败");
     }
   }, []);
