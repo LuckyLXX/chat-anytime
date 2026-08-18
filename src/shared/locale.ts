@@ -23,7 +23,8 @@ const toolLabels: Record<string, string> = {
   write: "写入文件",
   grep: "搜索内容",
   find: "查找文件",
-  ls: "列出目录"
+  ls: "列出目录",
+  ask_question: "向用户提问"
 };
 
 export function toolLabel(name: string): string {

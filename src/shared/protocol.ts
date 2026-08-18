@@ -238,6 +238,17 @@ export interface WorkspaceEntryResult {
   relativePath: string;
 }
 
+/** 输入框 @ 提及的工作区文件/目录搜索结果条目。 */
+export interface WorkspaceFileSearchEntry {
+  name: string;
+  relativePath: string;
+  kind: "file" | "directory";
+}
+
+export interface WorkspaceFileSearchResult {
+  entries: WorkspaceFileSearchEntry[];
+}
+
 export interface BrowserPreviewBounds {
   x: number;
   y: number;
@@ -265,6 +276,22 @@ export type BrowserPreviewCommand =
   | { type: "stop"; tabId?: string }
   | { type: "open-external"; tabId?: string }
   | { type: "close"; tabId?: string };
+
+/**
+ * User terminal (PTY) hosted in the main process, rendered with xterm.js in a
+ * preview tab. Input/output are UTF-8 strings; `create` reconnects to an
+ * existing terminal and replays its scrollback instead of spawning a new one.
+ */
+export type TerminalCommand =
+  | { type: "create"; terminalId: string; cwd?: string; cols: number; rows: number; shell?: string }
+  | { type: "input"; terminalId: string; data: string }
+  | { type: "resize"; terminalId: string; cols: number; rows: number }
+  | { type: "kill"; terminalId: string };
+
+export type TerminalEventData =
+  | { type: "data"; terminalId: string; data: string }
+  | { type: "exit"; terminalId: string; exitCode?: number }
+  | { type: "error"; terminalId: string; message: string };
 
 /**
  * Execution state of a session, shown as a sidebar dot. "running" is live
@@ -428,6 +455,21 @@ export interface PermissionRequest {
 
 export type PermissionDecision = "allow-once" | "allow-session" | "deny";
 
+/** ask_question 的单个问题；type=single/multiple 时附带选项，渲染端另提供自定义输入。 */
+export interface QuestionItem {
+  text: string;
+  type: "text" | "single" | "multiple";
+  options: string[];
+}
+
+/** ask_question 工具发给渲染端的提问请求；answers 缺省即视为用户取消。 */
+export interface QuestionRequest {
+  id: string;
+  sessionId: string;
+  toolCallId: string;
+  questions: QuestionItem[];
+}
+
 export type RuntimeCommand =
   | { type: "initialize"; settings: DesktopSettings; apiKeys: Record<string, string> }
   | { type: "workspace.open"; path: string }
@@ -464,7 +506,8 @@ export type RuntimeCommand =
   | { type: "todo.delete"; id: string }
   | { type: "background.kill"; id: string }
   | { type: "resources.reload" }
-  | { type: "permission.resolve"; id: string; decision: PermissionDecision };
+  | { type: "permission.resolve"; id: string; decision: PermissionDecision }
+  | { type: "question.resolve"; id: string; answers?: string[] };
 
 export type RuntimeMessage =
   | { type: "catalog"; models: ModelOption[]; providers: ProviderOption[] }
@@ -477,6 +520,8 @@ export type RuntimeMessage =
   | { type: "todos"; todos: Todo[] }
   | { type: "permission"; request: PermissionRequest }
   | { type: "permission.dismiss"; id: string }
+  | { type: "question"; request: QuestionRequest }
+  | { type: "question.dismiss"; id: string }
   | { type: "error"; message: string }
   | { type: "log"; level: "info" | "warn"; message: string };
 
@@ -494,16 +539,21 @@ export interface DesktopApi {
   bootstrap(): Promise<DesktopBootstrap>;
   chooseWorkspace(): Promise<string | undefined>;
   chooseAttachments(workspace?: string): Promise<PromptAttachment[]>;
+  /** 位图-only 剪贴板的兜底：无图片时返回 undefined（浏览器演示环境同样返回 undefined）。 */
+  readClipboardImage(): Promise<{ data: string } | undefined>;
   choosePreviewFile(): Promise<WorkspaceFilePreview | undefined>;
   readWorkspaceFile(relativePath: string, workspace?: string): Promise<WorkspaceFilePreview>;
   writeWorkspaceFile(relativePath: string, content: string, workspace?: string): Promise<WorkspaceFileWriteResult>;
   listWorkspaceDirectory(workspace: string, relativePath?: string): Promise<WorkspaceDirectoryListing>;
+  searchWorkspaceFiles(workspace: string, query: string): Promise<WorkspaceFileSearchResult>;
   createWorkspaceFile(workspace: string, relativePath: string): Promise<WorkspaceEntryResult>;
   createWorkspaceDirectory(workspace: string, relativePath: string): Promise<WorkspaceEntryResult>;
   deleteWorkspaceEntry(workspace: string, relativePath: string): Promise<WorkspaceEntryResult>;
   renameWorkspaceEntry(workspace: string, relativePath: string, newName: string): Promise<WorkspaceEntryResult>;
   browserPreview(command: BrowserPreviewCommand): Promise<BrowserPreviewState>;
+  terminal(command: TerminalCommand): Promise<void>;
   send(command: RuntimeCommand): Promise<void>;
   onRuntimeMessage(listener: (message: RuntimeMessage) => void): () => void;
   onBrowserPreviewState(tabId?: string, listener?: (state: BrowserPreviewState) => void): () => void;
+  onTerminalData(terminalId: string, listener: (event: TerminalEventData) => void): () => void;
 }

@@ -6,6 +6,7 @@ import type {
   PermissionRequest,
   ProviderOption,
   ProviderSettings,
+  QuestionRequest,
   ResourceCatalog,
   RuntimeMessage,
   RuntimeSnapshot,
@@ -29,6 +30,7 @@ interface DesktopState {
   modelRefreshError?: string;
   modelRefreshProvider?: string;
   permissions: PermissionRequest[];
+  questions: QuestionRequest[];
   error?: string;
   initialize(): Promise<() => void>;
   handleRuntimeMessage(message: RuntimeMessage): void;
@@ -58,6 +60,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   resources: emptyResources,
   todos: [],
   permissions: [],
+  questions: [],
   settings: emptySettings,
   customProviderKeyConfigured: false,
   customModels: [],
@@ -153,6 +156,14 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
         break;
       case "permission.dismiss":
         set((state) => ({ permissions: state.permissions.filter((request) => request.id !== message.id) }));
+        break;
+      case "question":
+        set((state) => state.questions.some((request) => request.id === message.request.id)
+          ? state
+          : { questions: [...state.questions, message.request] });
+        break;
+      case "question.dismiss":
+        set((state) => ({ questions: state.questions.filter((request) => request.id !== message.id) }));
         break;
       case "error":
         set({ error: message.message });

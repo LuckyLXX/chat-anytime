@@ -30,7 +30,10 @@
 
 类名属于实现细节，可能随版本变化；以下属性是稳定契约，结构化主题请只依赖它们：
 
-**区域钩子 `data-pane`**：`sidebar` `topbar` `work-area` `conversation` `timeline` `composer` `task-panel` `preview` `settings-dialog` `permission-dialog`
+**区域钩子 `data-pane`**：`sidebar` `topbar` `work-area` `conversation` `timeline` `composer` `task-panel` `preview` `terminal` `question-panel` `settings-dialog` `permission-dialog`
+
+> `terminal` 是预览面板内的嵌入式终端区域（xterm.js 宿主）。终端配色由 `--code-surface` / `--code-text` / `--selection-bg` token 驱动，主题改这三个 token 即可换终端配色；`[data-pane="terminal"]` 钩子可用于边框、内边距等容器装饰。
+> `question-panel` 是 AI 提问（ask_question 工具）时从输入栏上方向上展开的应答面板，位于 `conversation` 区域内、`composer` 正上方。
 
 ```css
 [data-pane="composer"] { border-image: url(frame.webp) 0 220 fill; border-radius: 0; }
@@ -69,7 +72,7 @@
 
 **覆盖层级**：① 契约控件（上表，跨版本安全）；② 钩子区域内用元素选择器统改（`[data-pane="sidebar"] button`、`[data-pane="settings-dialog"] select`，同样安全）；③ 区域内类名命中（事实稳定、无契约）。右键菜单、错误提示 toast、重命名小对话框和内嵌编辑器（Markdown 工具栏、Mermaid）在契约之外，只受颜色 token 影响。立体按钮、clip-path 异形容器、霓虹描边、扫描线等创意技法的可复制配方见 `pidesktop-theme-creator` skill 的 `references/recipes.md`。
 
-**UI 状态（`<html>` 布尔属性，出现即真）**：`data-ui-settings-open` `data-ui-workspace-open` `data-ui-chat-empty` `data-ui-generating` `data-ui-preview-open` `data-ui-permission-pending`
+**UI 状态（`<html>` 布尔属性，出现即真）**：`data-ui-settings-open` `data-ui-workspace-open` `data-ui-chat-empty` `data-ui-generating` `data-ui-preview-open` `data-ui-permission-pending` `data-ui-question-pending`
 
 ```css
 /* 生成中给输入框加呼吸光晕 */

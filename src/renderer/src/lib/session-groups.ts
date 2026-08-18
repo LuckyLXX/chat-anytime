@@ -8,7 +8,7 @@ export interface SessionWorkspaceGroup {
   openedAt?: number;
 }
 
-function workspaceKey(workspace: string): string {
+export function workspaceKey(workspace: string): string {
   return workspace.trim().replaceAll("\\", "/").toLowerCase();
 }
 

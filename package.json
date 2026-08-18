@@ -17,11 +17,14 @@
     "@earendil-works/pi-ai": "0.82.1",
     "@earendil-works/pi-coding-agent": "0.82.1",
     "@modelcontextprotocol/sdk": "^1.30.0",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "highlight.js": "11.11.1",
     "html2canvas-pro": "^2.3.3",
     "katex": "0.16.22",
     "lucide-react": "0.468.0",
     "mermaid": "11.16.1",
+    "node-pty": "^1.1.0",
     "react": "19.1.1",
     "react-dom": "19.1.1",
     "react-markdown": "10.1.0",
@@ -59,14 +62,16 @@
     "directories": {
       "output": "dist"
     },
-  "files": [
-    "out/**/*",
-    "package.json"
-  ],
-  "asarUnpack": [
-    "**/node_modules/@modelcontextprotocol/**",
-    "**/node_modules/typebox/**"
-  ],
+    "npmRebuild": false,
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "**/node_modules/@modelcontextprotocol/**",
+      "**/node_modules/typebox/**",
+      "**/node_modules/node-pty/**"
+    ],
     "win": {
       "target": "dir",
       "signAndEditExecutable": false

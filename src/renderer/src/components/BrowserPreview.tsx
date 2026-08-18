@@ -60,9 +60,18 @@ export function BrowserPreview({ suspended = false, tabId = "default" }: { suspe
     if (next.url && !addressFocusedRef.current) setAddress(next.url);
   }), [tabId]);
 
+  // Browser→browser tab switches reuse this component instance (only tabId
+  // changes): reset the stale address/state of the previous tab until the
+  // controller pushes the new tab's snapshot.
+  useEffect(() => {
+    setState(emptyState);
+    setLocalError(undefined);
+    setAddress(storedBrowserAddress(tabId));
+  }, [tabId]);
+
   useEffect(() => {
     void send({ type: "visible", visible: !suspended });
-  }, [suspended]);
+  }, [suspended, tabId]);
 
   useLayoutEffect(() => () => {
     // Deactivation (tab switch, panel collapse) must NOT destroy the loaded
@@ -95,7 +104,9 @@ export function BrowserPreview({ suspended = false, tabId = "default" }: { suspe
       observer.disconnect();
       window.removeEventListener("resize", updateBounds);
     };
-  }, []);
+    // Re-run on tabId: a second browser tab reuses this instance, and the
+    // native view stays invisible until it receives bounds for its own id.
+  }, [tabId]);
 
   const error = localError ?? state.error;
   return (

@@ -68,6 +68,7 @@ import { changedWorkspaceFile } from "./workspace-preview.js";
 import { createToolAudit } from "./tool-audit.js";
 import { diffToolNames } from "./tool-delta.js";
 import * as runtimeTodoTools from "./runtime-todo-tools.js";
+import * as runtimeQuestionTool from "./runtime-question-tool.js";
 import * as runtimeSkills from "./runtime-skills.js";
 import * as runtimeVision from "./runtime-vision.js";
 import * as runtimePermissions from "./runtime-permissions.js";
@@ -120,6 +121,7 @@ interface SessionRuntimeRecord {
   customTools: ToolDefinition[];
   subagentTools: ToolDefinition[];
   todoTools: ToolDefinition[];
+  questionTools: ToolDefinition[];
   /** Captured at bindExtensions(); drives MCP hot-reload for this session only. */
   extensionApi: ExtensionAPI | undefined;
   permissionDeps: runtimePermissions.PermissionGateDeps;
@@ -217,6 +219,10 @@ function post(message: RuntimeMessage): void {
 const permissionBroker = new PermissionBroker(
   (request) => post({ type: "permission", request }),
   (id) => post({ type: "permission.dismiss", id })
+);
+const questionBroker = new runtimeQuestionTool.QuestionBroker(
+  (request) => post({ type: "question", request }),
+  (id) => post({ type: "question.dismiss", id })
 );
 const mcpClient = new McpClientManager();
 let mcpTools: ToolDefinition[] = [];
@@ -455,6 +461,7 @@ function disposeRecord(record: SessionRuntimeRecord): void {
     // dispose is best-effort; the record is dropped regardless
   }
   permissionBroker.reset(record.session.sessionId);
+  questionBroker.reset(record.session.sessionId);
   liveSessions.delete(record.session.sessionId);
   record.extensionApi = undefined;
   if (activeRuntime === record) {
@@ -1123,10 +1130,17 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   const sessionRecordSeed: Pick<SessionRuntimeRecord, "workspace" | "agent" | "permissionDeps"> = { workspace: recordWorkspace, agent: recordAgent, permissionDeps };
   const subagentTools = buildSubagentTools(sessionRecordSeed, activeSessionManager.getSessionId(), requested ?? selectedModel, false);
   const todoTools = buildTodoTools(recordTodoStore);
+  // ask_question 的挂起按会话清理（disposeRecord → broker.reset），而新会话的
+  // sessionId 在 createAgentSession 之后才确定，因此以 getter 延迟读取。
+  let recordSessionId = activeSessionManager.getSessionId();
+  const questionTools = runtimeQuestionTool.buildQuestionTools({
+    getSessionId: () => recordSessionId,
+    broker: questionBroker
+  });
   // Each record owns its customTools array: Pi stores it by reference and
   // re-reads it on every tool-registry refresh, so per-record arrays let parked
   // sessions keep their tool set while the active one hot-swaps MCP tools.
-  const recordCustomTools: ToolDefinition[] = [...mcpTools, ...subagentTools, ...todoTools];
+  const recordCustomTools: ToolDefinition[] = [...mcpTools, ...subagentTools, ...todoTools, ...questionTools];
   const result = await createAgentSession({
     cwd: recordWorkspace,
     modelRuntime,
@@ -1156,6 +1170,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     customTools: recordCustomTools,
     subagentTools,
     todoTools,
+    questionTools,
     extensionApi: undefined,
     permissionDeps,
     pendingVisionMessage: undefined,
@@ -1166,6 +1181,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   };
   recordBox = record;
   sessionHolder.session = result.session;
+  recordSessionId = result.session.sessionId;
   // Activate the app-owned inline extension(s) only. The permission hook lives
   // in the permission extension factory and gates risky tool calls; no
   // third-party extension code is ever loaded.
@@ -1186,7 +1202,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   // subagent delegation, todo). customTools are registered but not active
   // unless explicitly enabled here.
   const enabledBuiltinTools = Object.entries(recordAgent.tools ?? {}).filter(([, enabled]) => enabled).map(([name]) => name);
-  result.session.setActiveToolsByName([...enabledBuiltinTools, ...mcpTools.map((tool) => tool.name), ...subagentTools.map((tool) => tool.name), ...todoTools.map((tool) => tool.name)]);
+  result.session.setActiveToolsByName([...enabledBuiltinTools, ...mcpTools.map((tool) => tool.name), ...subagentTools.map((tool) => tool.name), ...todoTools.map((tool) => tool.name), ...questionTools.map((tool) => tool.name)]);
   record.executions = new Map(restoreToolExecutions(result.session.state.messages as unknown as PersistedSessionMessage[], recordWorkspace).map((execution) => [execution.id, execution]));
   // Background processes launched by earlier sessions keep running across
   // restarts; rediscover them from the session's bash history (throttled).
@@ -1302,13 +1318,13 @@ async function applyMcpToolChanges(): Promise<void> {
     const subagentTools = buildSubagentTools(record, record.session.sessionId, selectedModel, false);
     record.subagentTools = subagentTools;
     record.customTools.length = 0;
-    record.customTools.push(...mcpTools, ...subagentTools, ...record.todoTools);
+    record.customTools.push(...mcpTools, ...subagentTools, ...record.todoTools, ...record.questionTools);
     // Re-registering every MCP tool covers additions and same-name schema
     // changes alike, and triggers the registry refresh that re-reads the
     // record's customTools.
     for (const tool of mcpTools) record.extensionApi.registerTool(tool);
     const enabledBuiltinTools = Object.entries(record.agent.tools ?? {}).filter(([, enabled]) => enabled).map(([name]) => name);
-    record.session.setActiveToolsByName([...enabledBuiltinTools, ...mcpTools.map((tool) => tool.name), ...subagentTools.map((tool) => tool.name), ...record.todoTools.map((tool) => tool.name)]);
+    record.session.setActiveToolsByName([...enabledBuiltinTools, ...mcpTools.map((tool) => tool.name), ...subagentTools.map((tool) => tool.name), ...record.todoTools.map((tool) => tool.name), ...record.questionTools.map((tool) => tool.name)]);
   } catch (error) {
     // A stale extension handle (session swapped mid-operation) or any registry
     // hiccup: recover via the rebuild path.
@@ -1846,6 +1862,10 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       break;
     case "permission.resolve": {
       permissionBroker.resolve(command.id, command.decision);
+      break;
+    }
+    case "question.resolve": {
+      questionBroker.resolve(command.id, command.answers);
       break;
     }
   }

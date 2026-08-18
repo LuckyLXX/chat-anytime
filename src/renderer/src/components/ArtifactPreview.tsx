@@ -7,10 +7,12 @@ import { DiffView } from "./DiffView";
 import { MarkdownEditor, type EditorSaveStatus } from "./MarkdownEditor";
 import { CodeBlock, RichContent } from "./RichContent";
 import { BrowserPreview } from "./BrowserPreview";
+import { TerminalPanel } from "./TerminalPanel";
 
 export type PreviewTarget =
   | { type: "artifact"; artifact: Artifact }
   | { type: "browser"; id?: string }
+  | { type: "terminal" }
   | { type: "file"; file: WorkspaceFilePreview; workspace?: string }
   | { type: "diff"; title: string; path?: string; patch: string }
   | { type: "loading"; title: string; path: string }
@@ -44,6 +46,7 @@ function targetArtifact(target: PreviewTarget): Artifact | undefined {
 function targetMetadata(target: PreviewTarget): { title: string; path?: string; label: string } {
   if (target.type === "artifact") return { title: target.artifact.title, label: target.artifact.language.toUpperCase() };
   if (target.type === "browser") return { title: "内置浏览器", label: "WEB" };
+  if (target.type === "terminal") return { title: "终端", label: "TERM" };
   if (target.type === "file") return { title: target.file.name, path: target.file.relativePath, label: target.file.kind === "code" ? (target.file.language ?? "CODE").toUpperCase() : target.file.kind.toUpperCase() };
   if (target.type === "diff") return { title: target.title, path: target.path, label: "DIFF" };
   return { title: target.title, path: target.path, label: target.type === "loading" ? "LOADING" : "ERROR" };
@@ -52,6 +55,7 @@ function targetMetadata(target: PreviewTarget): { title: string; path?: string; 
 function targetIcon(target: PreviewTarget): ReactNode {
   if (target.type === "diff") return <Code2 size={15} />;
   if (target.type === "browser") return <Globe2 size={15} />;
+  if (target.type === "terminal") return <Terminal size={15} />;
   return <FileCode2 size={15} />;
 }
 
@@ -103,7 +107,7 @@ function FilePreviewContent({ file, tabId, onOpenArtifact, workspace, editorStat
   return <div className="preview-empty"><FileText size={28} /><strong>此文件无法预览</strong><span>{file.size.toLocaleString("zh-CN")} bytes</span></div>;
 }
 
-export function ArtifactPreview({ tabs, activeTabId, browserSuspended, onSelectTab, onCloseTab, onOpenArtifact, onAddBrowser, onAddFile, onAddReview, reviewAvailable, workspace, activeEditorState, onActiveEditorChange, onActiveEditorContentChange, onActiveEditorSaved, onActiveEditorStatusChange, onActiveEditorSaveError, onActiveEditorResolveConflict, onToggleEditing }: { tabs: PreviewTab[]; activeTabId: string; browserSuspended?: boolean; onSelectTab(id: string): void; onCloseTab(id: string): void; onOpenArtifact(artifact: Artifact): void; onAddBrowser?(): void; onAddFile?(): void; onAddReview?(): void; reviewAvailable?: boolean; workspace?: string; activeEditorState?: PreviewEditorState; onActiveEditorChange?(patch: Partial<PreviewEditorState>): void; onActiveEditorContentChange?(tabId: string, content: string): void; onActiveEditorSaved?(tabId: string, content: string): void; onActiveEditorStatusChange?(tabId: string, status: EditorSaveStatus): void; onActiveEditorSaveError?(message: string): void; onActiveEditorResolveConflict?(choice: "keep-local" | "load-remote"): void; onToggleEditing?(): void }): ReactNode {
+export function ArtifactPreview({ tabs, activeTabId, browserSuspended, onSelectTab, onCloseTab, onOpenArtifact, onAddBrowser, onAddTerminal, onAddFile, onAddReview, onAddMenuOpenChange, reviewAvailable, workspace, activeEditorState, onActiveEditorChange, onActiveEditorContentChange, onActiveEditorSaved, onActiveEditorStatusChange, onActiveEditorSaveError, onActiveEditorResolveConflict, onToggleEditing }: { tabs: PreviewTab[]; activeTabId: string; browserSuspended?: boolean; onSelectTab(id: string): void; onCloseTab(id: string): void; onOpenArtifact(artifact: Artifact): void; onAddBrowser?(): void; onAddTerminal?(): void; onAddFile?(): void; onAddReview?(): void; onAddMenuOpenChange?(open: boolean): void; reviewAvailable?: boolean; workspace?: string; activeEditorState?: PreviewEditorState; onActiveEditorChange?(patch: Partial<PreviewEditorState>): void; onActiveEditorContentChange?(tabId: string, content: string): void; onActiveEditorSaved?(tabId: string, content: string): void; onActiveEditorStatusChange?(tabId: string, status: EditorSaveStatus): void; onActiveEditorSaveError?(message: string): void; onActiveEditorResolveConflict?(choice: "keep-local" | "load-remote"): void; onToggleEditing?(): void }): ReactNode {
   const active = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0];
   if (!active) {
     return (
@@ -122,10 +126,10 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, onSelectT
               <span className="preview-empty-state-item-name">文件</span>
               <span className="preview-empty-state-key">Ctrl+P</span>
             </button>
-            <button type="button" className="preview-empty-state-item disabled" disabled aria-label="终端预览暂不支持">
+            <button type="button" className="preview-empty-state-item" title="新建终端" aria-label="新建终端" onClick={() => onAddTerminal?.()}>
               <span className="preview-empty-state-item-icon"><Terminal size={17} /></span>
               <span className="preview-empty-state-item-name">终端</span>
-              <span className="preview-empty-state-key">Ctrl+Shift+G</span>
+              <span className="preview-empty-state-key">Ctrl+`</span>
             </button>
             <button type="button" className="preview-empty-state-item disabled" disabled aria-label="侧边聊天预览暂不支持">
               <span className="preview-empty-state-item-icon"><MessageSquare size={17} /></span>
@@ -186,6 +190,13 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, onSelectT
     };
   }, [addMenuOpen]);
 
+  // The "+" dropdown extends over the preview body, where the browser tab's
+  // native WebContentsView floats above all DOM: report open state so the
+  // owner can suspend the view, otherwise the menu is unclickable.
+  useEffect(() => {
+    onAddMenuOpenChange?.(addMenuOpen);
+  }, [addMenuOpen, onAddMenuOpenChange]);
+
   useEffect(() => () => {
     if (dynamic) postPreviewAction(DYNAMIC_PREVIEW_ACTIONS.destroy);
   }, [dynamic]);
@@ -214,7 +225,7 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, onSelectT
           <button type="button" className="preview-tab-add" aria-label="新建预览标签" aria-haspopup="menu" aria-expanded={addMenuOpen} title="新建预览标签" onClick={() => setAddMenuOpen((open) => !open)}><Plus size={14} /></button>
           {addMenuOpen && <div className="preview-open-menu" role="menu" aria-label="新建预览标签">
             <button type="button" role="menuitem" onClick={() => { setAddMenuOpen(false); onAddReview?.(); }} disabled={!reviewAvailable}><FileDiff size={16} /><span>审阅</span><kbd>Ctrl+Shift+G</kbd></button>
-            <button type="button" role="menuitem" disabled><Terminal size={16} /><span>终端</span><kbd>Ctrl+Shift+G</kbd></button>
+            <button type="button" role="menuitem" onClick={() => { setAddMenuOpen(false); onAddTerminal?.(); }}><Terminal size={16} /><span>终端</span><kbd>Ctrl+`</kbd></button>
             <button type="button" role="menuitem" onClick={() => { setAddMenuOpen(false); onAddBrowser?.(); }}><Globe2 size={16} /><span>浏览器</span><kbd>Ctrl+T</kbd></button>
             <button type="button" role="menuitem" onClick={() => { setAddMenuOpen(false); onAddFile?.(); }}><File size={16} /><span>文件</span><kbd>Ctrl+P</kbd></button>
             <button type="button" role="menuitem" disabled><MessageSquare size={16} /><span>侧边聊天</span><kbd>Ctrl+Alt+S</kbd></button>
@@ -242,6 +253,7 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, onSelectT
         {showSource && !artifact && target.type === "file" && target.file.content !== undefined && <div className="preview-scroll preview-code"><CodeBlock language={target.file.kind === "markdown" ? "markdown" : target.file.language ?? "text"} code={target.file.content} /></div>}
         {!showSource && artifact && <iframe ref={frameRef} title={artifact.title} sandbox={artifactSandbox(artifact)} referrerPolicy="no-referrer" srcDoc={buildArtifactPreviewSource(artifact)} onLoad={handleLoad} />}
         {!showSource && target.type === "browser" && <BrowserPreview suspended={browserSuspended} tabId={activeTabId} />}
+        {target.type === "terminal" && <TerminalPanel terminalId={active.id} workspace={workspace} />}
         {!showSource && !artifact && target.type === "file" && <FilePreviewContent file={target.file} tabId={activeTabId} onOpenArtifact={onOpenArtifact} workspace={target.workspace ?? workspace} editorState={activeEditorState} onEditorChange={onActiveEditorChange} onEditorContentChange={onActiveEditorContentChange} onEditorSaved={onActiveEditorSaved} onEditorStatusChange={onActiveEditorStatusChange} onEditorSaveError={onActiveEditorSaveError} onResolveConflict={onActiveEditorResolveConflict} />}
         {target.type === "diff" && <div className="preview-scroll preview-diff"><DiffView patch={target.patch} /></div>}
         {target.type === "loading" && <div className="preview-empty"><LoaderCircle className="spinning" size={26} /><strong>正在读取文件</strong><span>{target.path}</span></div>}
