@@ -1,5 +1,5 @@
 import { lstat, mkdir, open, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
-import { basename, extname, isAbsolute, relative, resolve, sep } from "node:path";
+import { basename, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { WorkspaceDirectoryEntry, WorkspaceDirectoryListing, WorkspaceEntryResult, WorkspaceFilePreview, WorkspaceFileWriteResult } from "../shared/protocol.js";
 import { IMAGE_PREVIEW_LIMIT_BYTES } from "../shared/protocol.js";
 
@@ -111,25 +111,34 @@ export async function readWorkspaceFilePreview(workspace: string, requestedPath:
   const relativePath = safeRelativePath(workspace, requestedPath);
   if (!relativePath || isAbsolute(requestedPath)) throw new Error("预览文件路径必须位于当前工作区内");
 
-  const rootReal = await realpath(resolve(workspace));
-  const candidateReal = await realpath(resolve(rootReal, ...relativePath.split("/")));
-  const realRelativePath = safeRelativePath(rootReal, candidateReal);
-  if (!realRelativePath) throw new Error("预览文件路径必须位于当前工作区内");
-
-  const info = await stat(candidateReal);
+  // 工作区内的目录链接（Windows junction / 指向目录的符号链接）允许点击浏览与预览，
+  // 与资源管理器一致——Windows 上 git 检出默认不产生链接，链接几乎必然是用户自建的。
+  // 但目标文件自身若是逃逸到工作区外的符号链接仍然拒绝，防止仓库内预置链接读取任意文件。
+  const root = resolve(workspace);
+  const candidate = resolve(root, ...relativePath.split("/"));
+  const entryInfo = await lstat(candidate).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT" || error.code === "ENOTDIR") return undefined;
+    throw error;
+  });
+  if (entryInfo === undefined) throw new Error("文件不存在或已被删除");
+  if (entryInfo.isSymbolicLink()) {
+    const rootReal = await realpath(root);
+    if (!safeRelativePath(rootReal, await realpath(candidate))) throw new Error("预览文件路径必须位于当前工作区内");
+  }
+  const info = await stat(candidate);
   if (!info.isFile()) throw new Error("只能预览普通文件");
 
-  const name = basename(candidateReal);
+  const name = basename(candidate);
   const extension = extname(name).toLowerCase();
-  const base = { relativePath: realRelativePath, name, size: info.size, workspace: rootReal };
+  const base = { relativePath, name, size: info.size, workspace: root };
   const imageMimeType = imageMimeTypes[extension];
   if (imageMimeType) {
     if (info.size > imagePreviewLimit) return { ...base, kind: "binary", mimeType: imageMimeType };
-    const data = await readPrefix(candidateReal, imagePreviewLimit);
+    const data = await readPrefix(candidate, imagePreviewLimit);
     return { ...base, kind: "image", mimeType: imageMimeType, data: data.toString("base64") };
   }
 
-  const data = await readPrefix(candidateReal, textPreviewLimit);
+  const data = await readPrefix(candidate, textPreviewLimit);
   if (looksBinary(data)) return { ...base, kind: "binary" };
   const content = data.toString("utf8");
   const truncated = info.size > data.length || undefined;
@@ -184,29 +193,33 @@ const ignoredWorkspaceEntries = new Set([
 
 export async function listWorkspaceDirectory(workspace: string, requestedPath?: string): Promise<WorkspaceDirectoryListing> {
   const requested = requestedPath?.trim() ?? "";
+  // 词法包含校验后以工作区路径为界浏览：realpath 会把目录链接解析到工作区之外，
+  // 但链接是用户放进工作区的入口，展开浏览不应被拒（写入类操作仍走 realpath 严格校验）。
+  let realRelative = "";
   if (requested) {
     const probed = safeRelativePath(workspace, requested);
     if (!probed || isAbsolute(requested)) throw new Error("预览目录路径必须位于当前工作区内");
+    realRelative = probed;
   }
 
-  const rootReal = await realpath(resolve(workspace));
-  const candidateReal = requested ? await realpath(resolve(rootReal, ...requested.split("/"))) : rootReal;
-  let realRelative = "";
-  if (requested) {
-    const resolved = safeRelativePath(rootReal, candidateReal);
-    if (!resolved) throw new Error("预览目录路径必须位于当前工作区内");
-    realRelative = resolved;
-  }
-
-  const info = await stat(candidateReal);
+  const root = resolve(workspace);
+  const candidate = realRelative ? resolve(root, ...realRelative.split("/")) : root;
+  const info = await stat(candidate);
   if (!info.isDirectory()) throw new Error("只能列出目录");
 
-  const dirents = await readdir(candidateReal, { withFileTypes: true });
+  const dirents = await readdir(candidate, { withFileTypes: true });
   const entries: WorkspaceDirectoryEntry[] = [];
   for (const dirent of dirents) {
     if (!dirent.name || ignoredWorkspaceEntries.has(dirent.name)) continue;
+    // junction / 符号链接在 readdir 中报为 link 而非 directory：跟随一次 stat 判定
+    // 是否目录链接（可展开），断链仍按文件展示。
+    let kind: WorkspaceDirectoryEntry["kind"] = dirent.isDirectory() ? "directory" : "file";
+    if (kind === "file" && dirent.isSymbolicLink()) {
+      const followed = await stat(join(candidate, dirent.name)).catch(() => undefined);
+      if (followed?.isDirectory()) kind = "directory";
+    }
     const childRelative = realRelative ? `${realRelative}/${dirent.name}` : dirent.name;
-    entries.push({ name: dirent.name, relativePath: childRelative, kind: dirent.isDirectory() ? "directory" : "file" });
+    entries.push({ name: dirent.name, relativePath: childRelative, kind });
   }
   entries.sort((a, b) => (a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind === "directory" ? -1 : 1));
   return { relativePath: realRelative, entries };
@@ -251,7 +264,14 @@ async function resolveExistingTarget(rootReal: string, relativePath: string, act
     throw error;
   });
   if (candidateReal === undefined) throw new Error("条目不存在或已被删除");
-  if (candidateReal !== rootReal && !safeRelativePath(rootReal, candidateReal)) throw new Error(`${action}路径必须位于当前工作区内`);
+  if (candidateReal !== rootReal && !safeRelativePath(rootReal, candidateReal)) {
+    // 目录链接（junction / 指向目录的符号链接）指向工作区外时放行：删除/重命名
+    // 只作用于工作区内的链接节点，不触碰其目标。文件符号链接仍拒绝。
+    const linkInfo = await lstat(candidate);
+    const targetInfo = await stat(candidate).catch(() => undefined);
+    const isDirectoryLink = linkInfo.isSymbolicLink() && targetInfo?.isDirectory() === true;
+    if (!isDirectoryLink) throw new Error(`${action}路径必须位于当前工作区内`);
+  }
   return candidate;
 }
 

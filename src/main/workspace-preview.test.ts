@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -184,5 +184,37 @@ describe("workspace file preview", () => {
 
     await expect(deleteWorkspaceEntry(workspace, "linked.md")).rejects.toThrow("当前工作区");
     await expect(renameWorkspaceEntry(workspace, "linked.md", "renamed.md")).rejects.toThrow("当前工作区");
+  });
+
+  it("browses and previews through directory links while keeping the write boundary", async (context) => {
+    const root = await mkdtemp(join(tmpdir(), "pidesktop-dirlink-"));
+    const workspace = join(root, "workspace");
+    const externalRepo = join(root, "external-repo");
+    await mkdir(workspace);
+    await mkdir(join(externalRepo, "skill"), { recursive: true });
+    await writeFile(join(externalRepo, "skill", "SKILL.md"), "# Linked\n", "utf8");
+    const linkType = process.platform === "win32" ? "junction" : "dir";
+    try {
+      await symlink(externalRepo, join(workspace, "repo-link"), linkType);
+    } catch {
+      context.skip(); // 环境不允许创建目录链接
+      return;
+    }
+
+    // 目录链接在树里按目录展示，可展开，其中文件可预览
+    const rootListing = await listWorkspaceDirectory(workspace);
+    expect(rootListing.entries.find((entry) => entry.name === "repo-link")).toMatchObject({ kind: "directory" });
+    const inside = await listWorkspaceDirectory(workspace, "repo-link/skill");
+    expect(inside.entries).toEqual([{ name: "SKILL.md", relativePath: "repo-link/skill/SKILL.md", kind: "file" }]);
+    await expect(readWorkspaceFilePreview(workspace, "repo-link/skill/SKILL.md")).resolves.toMatchObject({ kind: "markdown", relativePath: "repo-link/skill/SKILL.md", content: "# Linked\n" });
+
+    // 写入边界保持：不允许通过链接在工作区外创建/保存
+    await expect(writeWorkspaceFile(workspace, "repo-link/skill/new.md", "x")).rejects.toThrow("当前工作区");
+    await expect(createWorkspaceFile(workspace, "repo-link/skill/other.md")).rejects.toThrow("当前工作区");
+
+    // 链接节点本身可重命名/删除，且不影响外部目标
+    await expect(renameWorkspaceEntry(workspace, "repo-link", "repo-link-2")).resolves.toEqual({ relativePath: "repo-link-2" });
+    await expect(deleteWorkspaceEntry(workspace, "repo-link-2")).resolves.toEqual({ relativePath: "repo-link-2" });
+    await expect(access(join(externalRepo, "skill", "SKILL.md"))).resolves.toBeUndefined();
   });
 });
