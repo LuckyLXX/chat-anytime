@@ -7,7 +7,10 @@ import type { SkillSummary, SkillSummary as _SS } from "../shared/protocol.js";
  * Self-built Skill discovery. Skills live as `SKILL.md` files (one per
  * directory) under a global dir (`<agentDir>/pidesktop-skills/`), the shared
  * cross-agent dir (`~/.agents/skills/`), and a project dir
- * (`<workspace>/.pidesktop-skills/`). Each SKILL.md has a YAML-ish
+ * (`<workspace>/.pidesktop-skills/`). Skill directories may be links
+ * (e.g. a Windows junction to an external git checkout) — they are followed
+ * transparently so the linked repo can be updated in place with git.
+ * Each SKILL.md has a YAML-ish
  * frontmatter (`name`, `description`). The agent never imports these through
  * Pi's skill loader — instead the runtime injects an "available skills" list
  * into the system prompt and the user invokes a skill by asking the agent to
@@ -70,7 +73,10 @@ function scanSkillDir(rootDir: string, scope: "global" | "project"): DiscoveredS
   }
   const skills: DiscoveredSkill[] = [];
   for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
+    // Directory links (Windows junctions report as symlinks in readdir) let a
+    // skill live in an external git checkout; the SKILL.md existence check
+    // below filters out file links and dead targets.
+    if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
     const skillFile = join(rootDir, entry.name, "SKILL.md");
     if (!existsSync(skillFile)) continue;
     const parsed = readSkillFile(skillFile);

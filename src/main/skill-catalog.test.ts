@@ -1,4 +1,5 @@
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -86,6 +87,37 @@ describe("skill discovery", () => {
 
     const skills = discoverSkills(globalDir, projectDir, join(globalDir, "does-not-exist"));
     expect(skills.map((skill) => skill.slug)).toEqual(["alpha"]);
+  });
+
+  it("follows linked skill dirs (junction/symlink) and skips dead or file links", async (context) => {
+    const globalDir = await makeSkillDir();
+    const sourceRepo = await mkdtemp(join(tmpdir(), "pi-desktop-skill-repo-"));
+    temporaryDirectories.push(sourceRepo);
+    const linkedSkill = join(sourceRepo, "ppt-master");
+    await mkdir(linkedSkill, { recursive: true });
+    await writeFile(join(linkedSkill, "SKILL.md"), "---\nname: ppt-master\ndescription: 外部仓库链接\n---\n", "utf8");
+    const linkType = process.platform === "win32" ? "junction" : "dir";
+    try {
+      symlinkSync(linkedSkill, join(globalDir, "ppt-master"), linkType);
+    } catch {
+      context.skip(); // 环境不允许创建目录链接
+      return;
+    }
+    await writeFile(join(sourceRepo, "plain.md"), "not a skill dir", "utf8");
+    // 辅助链接（文件链接 / 断链）用于验证过滤，个别平台创建失败不影响断言
+    try {
+      symlinkSync(join(sourceRepo, "plain.md"), join(globalDir, "file-link"), linkType);
+    } catch { /* junction 无法指向文件等场景 */
+    }
+    try {
+      symlinkSync(join(sourceRepo, "missing"), join(globalDir, "dead-link"), linkType);
+    } catch { /* 平台不允许悬挂链接 */
+    }
+
+    const skills = discoverSkills(globalDir, globalDir);
+    expect(skills.map((skill) => skill.slug)).toEqual(["ppt-master"]);
+    expect(skills[0]!.filePath).toBe(join(globalDir, "ppt-master", "SKILL.md"));
+    expect(skills[0]!.description).toBe("外部仓库链接");
   });
 
   it("derives a stable id and maps to summaries with disabled state", async () => {
