@@ -2,10 +2,76 @@ import { access, mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { changedWorkspaceFile, createWorkspaceDirectory, createWorkspaceFile, deleteWorkspaceEntry, listWorkspaceDirectory, readWorkspaceFilePreview, renameWorkspaceEntry, writeWorkspaceFile } from "./workspace-preview.js";
+import { changedWorkspaceFile, createWorkspaceDirectory, createWorkspaceFile, deleteWorkspaceEntry, listWorkspaceDirectory, readWorkspaceFilePreview, renameWorkspaceEntry, searchWorkspaceFiles, writeWorkspaceFile } from "./workspace-preview.js";
 import { IMAGE_PREVIEW_LIMIT_BYTES } from "../shared/protocol.js";
 
 const TINY_PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
+
+describe("workspace file search (@ 提及)", () => {
+  it("indexes files and directories while skipping ignored entries", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "pidesktop-search-"));
+    await mkdir(join(workspace, "src", "lib"), { recursive: true });
+    await mkdir(join(workspace, "node_modules", "some-pkg"), { recursive: true });
+    await writeFile(join(workspace, "src", "app.ts"), "", "utf8");
+    await writeFile(join(workspace, "src", "lib", "util.ts"), "", "utf8");
+    await writeFile(join(workspace, "node_modules", "some-pkg", "index.js"), "", "utf8");
+
+    const empty = await searchWorkspaceFiles(workspace, "");
+    const paths = empty.entries.map((entry) => entry.relativePath);
+    expect(paths).toContain("src");
+    expect(paths).toContain("src/app.ts");
+    expect(paths.some((path) => path.startsWith("node_modules"))).toBe(false);
+  });
+
+  it("ranks basename matches before path matches with shorter paths first", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "pidesktop-rank-"));
+    await mkdir(join(workspace, "src", "components"), { recursive: true });
+    await mkdir(join(workspace, "docs"), { recursive: true });
+    await writeFile(join(workspace, "src", "app.ts"), "", "utf8");
+    await writeFile(join(workspace, "src", "components", "app.tsx"), "", "utf8");
+    await writeFile(join(workspace, "docs", "app-notes.md"), "", "utf8");
+    await writeFile(join(workspace, "app.ts.bak"), "", "utf8");
+
+    // basename 前缀命中同分时路径短者优先（同长则字典序）；docs/src 目录本身不匹配 “app” 不入榜。
+    const result = await searchWorkspaceFiles(workspace, "app");
+    expect(result.entries.map((entry) => entry.relativePath)).toEqual([
+      "app.ts.bak",
+      "src/app.ts",
+      "docs/app-notes.md",
+      "src/components/app.tsx"
+    ]);
+    // 目录命中返回目录条目，可直接拼 @src/ 继续钻取子级
+    const directory = await searchWorkspaceFiles(workspace, "sr");
+    expect(directory.entries[0]).toMatchObject({ relativePath: "src", kind: "directory" });
+    const scoped = await searchWorkspaceFiles(workspace, "src/");
+    expect(scoped.entries.map((entry) => entry.relativePath)).toEqual(["src/app.ts", "src/components", "src/components/app.tsx"]);
+  });
+
+  it("refreshes cached results after workspace mutations", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "pidesktop-cache-"));
+    await writeFile(join(workspace, "README.md"), "", "utf8");
+    await expect(searchWorkspaceFiles(workspace, "todo")).resolves.toEqual({ entries: [] });
+
+    await writeWorkspaceFile(workspace, "todo.txt", "x");
+    await expect(searchWorkspaceFiles(workspace, "todo")).resolves.toEqual({ entries: [{ name: "todo.txt", relativePath: "todo.txt", kind: "file" }] });
+
+    await deleteWorkspaceEntry(workspace, "todo.txt");
+    await expect(searchWorkspaceFiles(workspace, "todo")).resolves.toEqual({ entries: [] });
+  });
+
+  it("normalizes query separators and caps the result size", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "pidesktop-limit-"));
+    for (let index = 0; index < 6; index += 1) await writeFile(join(workspace, `item-${index}.txt`), "", "utf8");
+    const windowsPath = await searchWorkspaceFiles(workspace, "\\item-");
+    expect(windowsPath.entries).toHaveLength(6);
+    const limited = await searchWorkspaceFiles(workspace, "item-", 2);
+    expect(limited.entries).toHaveLength(2);
+  });
+
+  it("rejects blank workspaces", async () => {
+    await expect(searchWorkspaceFiles("", "x")).rejects.toThrow("工作区");
+  });
+});
 
 describe("workspace file preview", () => {
   it("classifies Markdown and common code without exposing absolute paths", async () => {

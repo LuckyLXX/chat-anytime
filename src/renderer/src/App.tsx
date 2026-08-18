@@ -67,7 +67,8 @@ import type {
   ResourceCatalog,
   ResourceScope,
   McpServerConfigDraft,
-  RuntimeCommand
+  RuntimeCommand,
+  WorkspaceFileSearchEntry
 } from "../../shared/protocol";
 import { sessionRunStatusLabels, thinkingLevelLabels, toolLabel } from "../../shared/locale";
 import { ArtifactPreview, type PreviewEditorState, type PreviewTab, type PreviewTarget } from "./components/ArtifactPreview";
@@ -76,12 +77,13 @@ import { WorkspaceTree } from "./components/WorkspaceTree";
 import { ContextMenu, type ContextMenuItem } from "./components/ContextMenu";
 import { RichContent } from "./components/RichContent";
 import { PermissionDialog } from "./components/RuntimeDialogs";
-import { compactPath, formatDuration, type Artifact } from "./lib/content";
+import { QuestionPanel } from "./components/QuestionPanel";
+import { compactPath, extractMentionTokens, formatDuration, type Artifact } from "./lib/content";
 import { actionTimelineSegments, actionTimelineStats, formatProcessDuration, type ActionTimelineSegment } from "./lib/action-timeline";
 import { changedFilesForMessage, type ReplyChangedFile } from "./lib/changed-files";
 import { groupAssistantMessages } from "./lib/chat-layout";
 import { clampPreviewSplit, PREVIEW_SPLIT_MAX, PREVIEW_SPLIT_MIN, previewSplitFromKey } from "./lib/preview-split";
-import { groupSessionsByWorkspace } from "./lib/session-groups";
+import { groupSessionsByWorkspace, workspaceKey } from "./lib/session-groups";
 import { CSS_URL_PATTERN, createThemeAssetUrls, isExternalThemeReference, normalizeThemeAssetReference, resolveThemeAssets } from "./lib/theme-assets";
 import { THEME_PRESETS, collectThemeLayers, scopeCustomThemeCss, scopeCustomThemeCssForPreview, themePresetCss, themePreviewCss, themeWallpaperOpacity, wallpaperOpacityCss } from "./lib/theme-presets";
 import { shareElementAsImage } from "./lib/share-image";
@@ -106,6 +108,7 @@ function previewTargetKey(target: PreviewTarget): string {
   switch (target.type) {
     case "artifact": return target.artifact.id;
     case "browser": return target.id ?? "browser";
+    case "terminal": return "terminal";
     case "file": return target.file.relativePath;
     default: return `${target.type}-${target.path ?? target.title}`;
   }
@@ -517,10 +520,13 @@ const MessageView = memo(function MessageView({ message, executions, onOpenArtif
 
   if (message.role === "user") {
     const images = message.blocks.filter((block): block is Extract<MessageBlock, { type: "image" }> => block.type === "image");
+    // @文件引用在气泡里渲染为 chip 行（同 skill badge），正文去掉路径尾巴；
+    // 复制/编辑仍用原始全文，重新发送后同样回环成 chip。
+    const { mentions, body } = extractMentionTokens(text);
     return (
       <article className="message message-user" data-role="user">
         <div className="message-avatar user-avatar">我</div>
-        <div className="message-body message-bubble">{message.skill && <div className="message-skill-badge"><Puzzle size={13} /><strong>{message.skill.name}</strong></div>}{images.length > 0 && <div className="image-message-list">{images.map((block, index) => <ImageMessageBlock key={`${message.id}-image-${index}`} block={block} />)}</div>}{text && <p className="user-text">{text}</p>}{!isControlMessage && <div className="message-actions"><button type="button" data-control="copy" title="复制" aria-label="复制用户消息" onClick={() => onCopy(message)}><Copy size={13} /></button><button type="button" data-control="edit" title="重新编辑" aria-label="重新编辑用户消息" onClick={() => onEdit(message)}><Pencil size={13} /></button></div>}</div>
+        <div className="message-body message-bubble">{message.skill && <div className="message-skill-badge"><Puzzle size={13} /><strong>{message.skill.name}</strong></div>}{mentions.length > 0 && <div className="message-mention-badges">{mentions.map((token) => <span className="message-skill-badge" key={token} title={token}><File size={13} /><strong>{token}</strong></span>)}</div>}{images.length > 0 && <div className="image-message-list">{images.map((block, index) => <ImageMessageBlock key={`${message.id}-image-${index}`} block={block} />)}</div>}{body && <p className="user-text">{body}</p>}{!isControlMessage && <div className="message-actions"><button type="button" data-control="copy" title="复制" aria-label="复制用户消息" onClick={() => onCopy(message)}><Copy size={13} /></button><button type="button" data-control="edit" title="重新编辑" aria-label="重新编辑用户消息" onClick={() => onEdit(message)}><Pencil size={13} /></button></div>}</div>
       </article>
     );
   }
@@ -1190,8 +1196,9 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
 }
 
 export function App(): ReactNode {
-  const { ready, snapshot, models, providers, resources, customProvider, customProviderKeyConfigured, customModels, customModelFetchStatus, customModelFetchError, modelRefreshStatus, modelRefreshError, modelRefreshProvider, permissions, error, initialize, clearError } = useDesktopStore();
+  const { ready, snapshot, models, providers, resources, customProvider, customProviderKeyConfigured, customModels, customModelFetchStatus, customModelFetchError, modelRefreshStatus, modelRefreshError, modelRefreshProvider, permissions, questions, error, initialize, clearError } = useDesktopStore();
   const permission = permissions[0];
+  const question = questions[0];
   const settings = useDesktopStore((state) => state.settings);
   const themeAssetUrls = useThemeAssetUrls(themeAssetsForAppearance(settings.appearance));
   const [input, setInput] = useState("");
@@ -1201,12 +1208,14 @@ export function App(): ReactNode {
   const [messageActionError, setMessageActionError] = useState<string>();
   const [sidebarTab, setSidebarTab] = useState<"agents" | "topics">("topics");
   const [sidebarQuery, setSidebarQuery] = useState("");
-  const [collapsedWorkspaceGroups, setCollapsedWorkspaceGroups] = useState<Record<string, boolean>>({});
+  // 启动时所有工作区分组默认折叠（空表 = 无展开项）；用户展开后保持到退出。
+  const [expandedWorkspaceGroups, setExpandedWorkspaceGroups] = useState<Record<string, boolean>>({});
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [accessModeMenuOpen, setAccessModeMenuOpen] = useState(false);
   const [composerMenu, setComposerMenu] = useState<"model" | "thinking">();
   const [previewOpened, setPreviewOpened] = useState(false);
   const [preview, setPreview] = useState<PreviewState>();
+  const [previewAddMenuOpen, setPreviewAddMenuOpen] = useState(false);
   const previewRef = useRef<PreviewState | undefined>(preview);
   previewRef.current = preview;
   const [previewEditorStates, setPreviewEditorStates] = useState<Record<string, PreviewEditorState>>({});
@@ -1233,6 +1242,14 @@ export function App(): ReactNode {
   const stickToBottomRef = useRef(true);
   const previousSessionIdRef = useRef<string | undefined>(undefined);
   const [slashIndex, setSlashIndex] = useState(0);
+  // @ 提及：tokenStart 为输入串中 @ 的下标；Esc 后按 token 记忆“已关闭”，
+  // 继续输入（token 变化）才重新弹出。
+  const [mention, setMention] = useState<{ query: string; tokenStart: number }>();
+  const [mentionResults, setMentionResults] = useState<WorkspaceFileSearchEntry[]>([]);
+  const [mentionIndex, setMentionIndex] = useState(0);
+  const [mentionDismissedToken, setMentionDismissedToken] = useState<string>();
+  // @ 选中的文件引用：与 skill chip 同样的气泡交互，发送时拼回 @路径。
+  const [mentionedFiles, setMentionedFiles] = useState<WorkspaceFileSearchEntry[]>([]);
   const selectedModel = snapshot.model ? `${snapshot.model.provider}/${snapshot.model.id}` : "";
   const availableModels = useMemo(() => models.filter((model) => model.configured), [models]);
   const selectedModelOption = availableModels.find((model) => `${model.provider}/${model.id}` === selectedModel);
@@ -1258,10 +1275,10 @@ export function App(): ReactNode {
   const lastDisplayMessage = displayMessages[displayMessages.length - 1];
   const assistantBubbleVisible = !localTurnPending && lastDisplayMessage?.role === "assistant" && !lastDisplayMessage.control;
   const showTurnTimingOnLatest = Boolean(snapshot.turnTiming && (!snapshot.busy || displayMessages[latestAssistantMessageIndex]?.streaming));
-  const canSubmit = Boolean(snapshot.workspace && (input.trim() || attachments.length > 0 || selectedSkill) && snapshot.model);
+  const canSubmit = Boolean(snapshot.workspace && (input.trim() || attachments.length > 0 || selectedSkill || mentionedFiles.length > 0) && snapshot.model);
   const workingLabel = `${snapshot.agentName}正在努力输出中……`;
   let composerPlaceholder = "请先打开一个项目";
-  if (snapshot.workspace) composerPlaceholder = selectedSkill ? "输入任务要求" : "让 Pi 检查、修改或运行这个项目";
+  if (snapshot.workspace) composerPlaceholder = selectedSkill ? "输入任务要求" : "让 Pi 检查、修改或运行这个项目，@ 可引用文件";
 
   // 斜杠指令清单：固定会话命令 + 已发现的 Skill
   const slashCommands = useMemo<SlashCommand[]>(() => {
@@ -1301,6 +1318,43 @@ export function App(): ReactNode {
     if (slashIndex > slashMatches.length - 1) setSlashIndex(Math.max(0, slashMatches.length - 1));
   }, [slashMatches.length, slashIndex]);
 
+  // —— @ 提及工作区文件 ——
+  const mentionToken = mention ? `${mention.tokenStart}:${mention.query}` : "";
+  const mentionOpen = Boolean(mention && snapshot.workspace && mentionToken !== mentionDismissedToken && mentionResults.length > 0);
+  const activeMentionIndex = Math.min(mentionIndex, mentionResults.length - 1);
+
+  useEffect(() => {
+    if (mentionIndex > mentionResults.length - 1) setMentionIndex(Math.max(0, mentionResults.length - 1));
+  }, [mentionResults.length, mentionIndex]);
+
+  // 输入被外部清空/替换（发送、编辑消息回填等）后，失效的 tokenStart 需要清理，
+  // 否则菜单会挂在错误的插入位置上。
+  useEffect(() => {
+    if (mention && (mention.tokenStart >= input.length || input[mention.tokenStart] !== "@")) setMention(undefined);
+  }, [input, mention]);
+
+  useEffect(() => {
+    const workspace = snapshot.workspace;
+    if (!mention || !workspace || mentionToken === mentionDismissedToken) return;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      void window.piDesktop.searchWorkspaceFiles(workspace, mention.query)
+        .then((result) => { if (!cancelled) setMentionResults(result.entries); })
+        .catch(() => { if (!cancelled) setMentionResults([]); });
+    }, 120);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [mention, mentionToken, mentionDismissedToken, snapshot.workspace]);
+
+  useEffect(() => {
+    setMentionIndex(0);
+  }, [mentionToken]);
+
+  // 菜单关闭时清空旧结果，避免下次弹开瞬间闪现上一次的列表；
+  // 打开状态下连续输入时保留旧列表直到新结果到达（标准自动补全体验）。
+  useEffect(() => {
+    if (!mention) setMentionResults([]);
+  }, [mention]);
+
   // Race-safe subscription: if the component unmounts before initialize()
   // resolves (e.g. React.StrictMode's mount-unmount-mount in dev), the cleanup
   // runs with unsubscribe still pending. The cancelled flag makes the late
@@ -1327,13 +1381,19 @@ export function App(): ReactNode {
     const composer = composerRef.current;
     const pane = composer?.parentElement;
     if (!composer || !pane) return;
-    const update = (): void => pane.style.setProperty("--composer-space", `${composer.getBoundingClientRect().height + 40}px`);
+    const update = (): void => {
+      const height = composer.getBoundingClientRect().height;
+      pane.style.setProperty("--composer-space", `${height + 40}px`);
+      // 提问面板锚定在输入栏正上方，需要输入栏的精确高度。
+      pane.style.setProperty("--composer-height", `${height}px`);
+    };
     update();
     const observer = new ResizeObserver(update);
     observer.observe(composer);
     return () => {
       observer.disconnect();
       pane.style.removeProperty("--composer-space");
+      pane.style.removeProperty("--composer-height");
     };
   }, [ready]);
 
@@ -1396,14 +1456,62 @@ export function App(): ReactNode {
     setSelectedSkill(undefined);
     if (preview) {
       // Closing the preview wholesale must also destroy any live browser
-      // views; otherwise their hidden WebContentsViews would leak.
+      // views; otherwise their hidden WebContentsViews would leak. Terminal
+      // tabs are workspace-scoped, not session-scoped: they survive chat
+      // session switches so a running dev server keeps its output.
       for (const tab of preview.tabs) {
         if (tab.target.type === "browser") void window.piDesktop.browserPreview({ type: "close", tabId: tab.id });
+      }
+      const terminalTabs = preview.tabs.filter((tab) => tab.target.type === "terminal");
+      if (terminalTabs.length > 0) {
+        const activeStillThere = terminalTabs.some((tab) => tab.id === preview.activeTabId);
+        setPreview({ tabs: terminalTabs, activeTabId: activeStillThere ? preview.activeTabId : terminalTabs[0]!.id });
+        return;
       }
     }
     setPreview(undefined);
     setPreviewOpened(false);
   }, [snapshot.sessionId]);
+
+  const previousWorkspaceRef = useRef(snapshot.workspace);
+  useEffect(() => {
+    if (previousWorkspaceRef.current === snapshot.workspace) return;
+    previousWorkspaceRef.current = snapshot.workspace;
+    // Terminals spawn with the old workspace as cwd; retire them all when it
+    // changes instead of leaving shells pointing at a stale directory.
+    const terminalTabs = (preview?.tabs ?? []).filter((tab) => tab.target.type === "terminal");
+    for (const tab of terminalTabs) void window.piDesktop.terminal({ type: "kill", terminalId: tab.id });
+    if (terminalTabs.length === 0) return;
+    setPreview((current) => {
+      if (!current) return current;
+      const tabs = current.tabs.filter((tab) => tab.target.type !== "terminal");
+      if (tabs.length === 0) return undefined;
+      const activeTabId = tabs.some((tab) => tab.id === current.activeTabId) ? current.activeTabId : tabs[0]!.id;
+      return { tabs, activeTabId };
+    });
+  }, [snapshot.workspace, preview]);
+
+  useEffect(() => {
+    const toggleTerminal = (event: KeyboardEvent): void => {
+      if (event.code !== "Backquote" || !(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return;
+      event.preventDefault();
+      const activeTabId = preview?.activeTabId;
+      const activeTab = preview?.tabs.find((tab) => tab.id === activeTabId);
+      if (previewOpened && activeTab?.target.type === "terminal") {
+        closePreviewTab(activeTab.id);
+        return;
+      }
+      const existing = preview?.tabs.find((tab) => tab.target.type === "terminal");
+      if (existing) {
+        setPreviewOpened(true);
+        selectPreviewTab(existing.id);
+      } else {
+        openTerminalPreview();
+      }
+    };
+    document.addEventListener("keydown", toggleTerminal);
+    return () => document.removeEventListener("keydown", toggleTerminal);
+  }, [preview, previewOpened]);
 
   useEffect(() => {
     if (!accessModeMenuOpen && !composerMenu) return;
@@ -1480,7 +1588,8 @@ export function App(): ReactNode {
       ["data-ui-chat-empty", !snapshot.workspace || (displayMessages.length === 0 && !isGenerating)],
       ["data-ui-generating", isGenerating],
       ["data-ui-preview-open", previewOpened],
-      ["data-ui-permission-pending", Boolean(permission)]
+      ["data-ui-permission-pending", Boolean(permission)],
+      ["data-ui-question-pending", Boolean(question)]
     ];
     for (const [name, active] of states) {
       if (active) root.setAttribute(name, "");
@@ -1489,7 +1598,7 @@ export function App(): ReactNode {
     return () => {
       for (const [name] of states) root.removeAttribute(name);
     };
-  }, [settingsOpen, snapshot.workspace, displayMessages.length, isGenerating, previewOpened, permission]);
+  }, [settingsOpen, snapshot.workspace, displayMessages.length, isGenerating, previewOpened, permission, question]);
 
   async function openWorkspace(): Promise<void> {
     const path = await window.piDesktop.chooseWorkspace();
@@ -1499,8 +1608,12 @@ export function App(): ReactNode {
   async function createNewSession(workspace?: string): Promise<void> {
     try {
       await window.piDesktop.send({ type: "session.new", workspace });
+      // 分组默认折叠，新建后展开目标工作区，让新话题立即可见。
+      const key = workspaceKey(workspace ?? snapshot.workspace ?? "");
+      if (key) setExpandedWorkspaceGroups((current) => ({ ...current, [key]: true }));
       setInput("");
       setAttachments([]);
+      setMentionedFiles([]);
       setSelectedSkill(undefined);
       setEditingMessageTimestamp(undefined);
     } catch (error) {
@@ -1520,7 +1633,7 @@ export function App(): ReactNode {
     event.preventDefault();
     const text = input.trim();
     const isNewSessionCommand = !selectedSkill && text === "/new";
-    if ((!text && attachments.length === 0 && !selectedSkill) || (snapshot.busy && !isNewSessionCommand)) return;
+    if ((!text && attachments.length === 0 && !selectedSkill && mentionedFiles.length === 0) || (snapshot.busy && !isNewSessionCommand)) return;
     // 客户端执行的固定指令：不透传给 Pi（会话层会当噪声），直接发协议命令
     if (!selectedSkill && text === "/new") {
       try {
@@ -1543,21 +1656,24 @@ export function App(): ReactNode {
       return;
     }
     const skillMatch = selectedSkill ? undefined : text.match(/^\/skill:([^\s]+)(?:\s+([\s\S]*))?$/u);
+    // @ 引用 chip 在发送时拼回文本：正文在前、@相对路径在后，模型拿到的是可读的完整路径。
+    const composedText = [text, ...mentionedFiles.map((entry) => `@${entry.relativePath}`)].filter(Boolean).join(" ");
     const skillName = selectedSkill ?? skillMatch?.[1];
-    const skillInstructions = selectedSkill ? text || undefined : skillMatch?.[2]?.trim() || undefined;
+    const skillInstructions = selectedSkill ? composedText || undefined : skillMatch?.[2]?.trim() || undefined;
     if (attachments.some((item) => item.kind === "image") && !modelAcceptsImages && !visionFallbackAvailable) { setAttachmentError("当前模型不支持图片输入，请先切换多模态模型，或在设置的模型服务中启用视觉识别"); return; }
     setLocalTurnStartedAt(Date.now());
     try {
       if (editingMessageTimestamp !== undefined) {
-        await window.piDesktop.send({ type: "session.regenerate", text, timestamp: editingMessageTimestamp, skillName, attachments });
+        await window.piDesktop.send({ type: "session.regenerate", text: composedText, timestamp: editingMessageTimestamp, skillName, attachments });
       } else if (skillName) {
         await window.piDesktop.send({ type: "session.skill", name: skillName, instructions: skillInstructions, attachments });
       } else {
-        await window.piDesktop.send({ type: "session.prompt", text, attachments });
+        await window.piDesktop.send({ type: "session.prompt", text: composedText, attachments });
       }
       setInput("");
       setSelectedSkill(undefined);
       setAttachments([]);
+      setMentionedFiles([]);
       setEditingMessageTimestamp(undefined);
     } catch (error) {
       setLocalTurnStartedAt(undefined);
@@ -1589,6 +1705,7 @@ export function App(): ReactNode {
     setInput(messageText(message));
     setSelectedSkill(message.skill?.name);
     setAttachments([]);
+    setMentionedFiles([]);
     setEditingMessageTimestamp(message.timestamp);
     setMessageActionError(undefined);
     setTimeout(() => textareaRef.current?.focus(), 0);
@@ -1666,10 +1783,14 @@ export function App(): ReactNode {
 
   function closePreviewTab(id: string): void {
     // Real removal of a browser tab must destroy its native view; mere tab
-    // switching only hides it (see BrowserPreview unmount behavior).
+    // switching only hides it (see BrowserPreview unmount behavior). Terminal
+    // tabs are the same: closing kills the PTY, switching keeps it alive.
     const closing = preview?.tabs.find((tab) => tab.id === id);
     if (closing?.target.type === "browser") {
       void window.piDesktop.browserPreview({ type: "close", tabId: id });
+    }
+    if (closing?.target.type === "terminal") {
+      void window.piDesktop.terminal({ type: "kill", terminalId: id });
     }
     setPreview((current) => {
       if (!current) return undefined;
@@ -1688,6 +1809,10 @@ export function App(): ReactNode {
 
   function openBrowserPreview(): void {
     openPreviewTarget({ type: "browser", id: `browser-${crypto.randomUUID()}` });
+  }
+
+  function openTerminalPreview(): void {
+    openPreviewTarget({ type: "terminal" }, `terminal-${crypto.randomUUID()}`);
   }
 
   async function openManualFilePreview(): Promise<void> {
@@ -1883,7 +2008,33 @@ export function App(): ReactNode {
 
   function handlePaste(event: React.ClipboardEvent<HTMLTextAreaElement>): void {
     const files = Array.from(event.clipboardData.files);
-    if (files.length) { event.preventDefault(); void addLocalFiles(files); }
+    // 部分来源的图片只出现在 items 里（files 为空），用 getAsFile 补齐。
+    const pastedFiles = files.length ? files : Array.from(event.clipboardData.items)
+      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+      .map((item) => item.getAsFile())
+      .filter((item): item is File => item !== null);
+    if (pastedFiles.length) { event.preventDefault(); void addLocalFiles(pastedFiles); return; }
+    // 无文件也无文本（微信/QQ 截图、浏览器“复制图片”只写位图格式）：交给主进程
+    // 读系统剪贴板兜底，同时拦截原生粘贴，避免系统弹“不支持图片插入”提示。
+    if (!event.clipboardData.getData("text/plain").trim()) {
+      event.preventDefault();
+      void pasteClipboardImage();
+    }
+  }
+
+  async function pasteClipboardImage(): Promise<void> {
+    try {
+      const image = await window.piDesktop.readClipboardImage();
+      if (!image?.data) return;
+      const bytes = Uint8Array.from(atob(image.data), (char) => char.charCodeAt(0));
+      if (bytes.byteLength === 0) return;
+      const stamp = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+      // lucide-react 的 File 图标遮蔽了 DOM 构造器，这里走 window.File。
+      const file = new window.File([bytes], `剪贴板图片 ${stamp}.png`, { type: "image/png" });
+      await addLocalFiles([file]);
+    } catch {
+      /* 剪贴板不可读时保持静默，等价于无图可贴 */
+    }
   }
 
   function handleDrop(event: React.DragEvent<HTMLFormElement>): void {
@@ -1896,6 +2047,7 @@ export function App(): ReactNode {
     if (command.kind === "skill") {
       setSelectedSkill(command.skillName);
       setInput("");
+      setMentionedFiles([]);
       setSlashIndex(0);
       setTimeout(() => textareaRef.current?.focus(), 0);
       return;
@@ -1904,13 +2056,80 @@ export function App(): ReactNode {
     setSelectedSkill(undefined);
     setInput("");
     setAttachments([]);
+    setMentionedFiles([]);
     setSlashIndex(0);
     void window.piDesktop.send(command.command).catch((error) => {
       setMessageActionError(error instanceof Error ? error.message : "指令执行失败");
     });
   }
 
+  /** 从光标位置反推 @token：@ 必须位于行首或空白之后，避免误伤邮箱类文本。 */
+  function updateMentionFromCaret(target: HTMLTextAreaElement): void {
+    const caret = target.selectionStart ?? 0;
+    const match = /(?:^|\s)@([^\s@]*)$/u.exec(target.value.slice(0, caret));
+    if (!match) {
+      setMention(undefined);
+      return;
+    }
+    const query = match[1]!;
+    setMention({ query, tokenStart: caret - query.length - 1 });
+  }
+
+  function applyMention(entry: WorkspaceFileSearchEntry): void {
+    const textarea = textareaRef.current;
+    if (!textarea || !mention) return;
+    const caret = textarea.selectionStart ?? input.length;
+    if (caret < mention.tokenStart || input[mention.tokenStart] !== "@") return;
+    // 目录以 / 结尾且不补空格：token 未断开，菜单继续列出该目录的子级，可逐层钻取。
+    if (entry.kind === "directory") {
+      const insert = `${entry.relativePath}/`;
+      const nextValue = `${input.slice(0, mention.tokenStart)}${insert}${input.slice(caret)}`;
+      const nextCaret = mention.tokenStart + insert.length;
+      setInput(nextValue);
+      requestAnimationFrame(() => {
+        textarea.focus();
+        textarea.setSelectionRange(nextCaret, nextCaret);
+      });
+      setMention({ query: insert, tokenStart: mention.tokenStart });
+      return;
+    }
+    // 文件：从文本中摘除整个 @token，转为输入框内的引用 chip；
+    // 发送时再把 @相对路径拼回 prompt，文本里不留痕迹。
+    const nextValue = `${input.slice(0, mention.tokenStart)}${input.slice(caret)}`;
+    setInput(nextValue);
+    setMentionedFiles((current) => current.some((item) => item.relativePath === entry.relativePath) ? current : [...current, entry]);
+    setMention(undefined);
+    requestAnimationFrame(() => {
+      textarea.focus();
+      textarea.setSelectionRange(mention.tokenStart, mention.tokenStart);
+    });
+  }
+
   function handleComposerKey(event: React.KeyboardEvent<HTMLTextAreaElement>): void {
+    // IME 组合期（拼音候选、回车上屏）不劫持按键，避免选词被菜单吞掉。
+    if (mentionOpen && !event.nativeEvent.isComposing) {
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        setMentionIndex((current) => (current + 1) % mentionResults.length);
+        return;
+      }
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        setMentionIndex((current) => (current - 1 + mentionResults.length) % mentionResults.length);
+        return;
+      }
+      if (event.key === "Tab" || (event.key === "Enter" && !event.shiftKey)) {
+        event.preventDefault();
+        const selected = mentionResults[activeMentionIndex];
+        if (selected) applyMention(selected);
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setMentionDismissedToken(mentionToken);
+        return;
+      }
+    }
     if (slashOpen) {
       if (event.key === "ArrowDown") {
         event.preventDefault();
@@ -2000,7 +2219,7 @@ export function App(): ReactNode {
           {visibleAgents.map((agent) => <button className={agent.id === snapshot.agentId ? "active" : ""} type="button" key={agent.id} onClick={() => { useDesktopStore.setState({ settings: { ...settings, currentAgentId: agent.id } }); void window.piDesktop.send({ type: "agent.select", agentId: agent.id }); }}><span className="agent-list-icon"><Bot size={15} /></span><span><strong>{agent.name}</strong><small>{agent.description || "未填写说明"}</small></span></button>)}
         </nav> : <nav className="session-list" aria-label="话题列表">
           {sessionGroups.length === 0 ? <div className="session-list-empty">暂无匹配话题</div> : sessionGroups.map((group) => {
-            const collapsed = collapsedWorkspaceGroups[group.key] === true;
+            const collapsed = expandedWorkspaceGroups[group.key] !== true;
             const workspaceName = group.workspace.split(/[\\/]/u).at(-1) || group.workspace;
             return (
               <section className="session-workspace-group" key={group.key}>
@@ -2009,7 +2228,7 @@ export function App(): ReactNode {
                     className="session-workspace-toggle"
                     type="button"
                     aria-expanded={!collapsed}
-                    onClick={() => setCollapsedWorkspaceGroups((current) => ({ ...current, [group.key]: !collapsed }))}
+                    onClick={() => setExpandedWorkspaceGroups((current) => ({ ...current, [group.key]: collapsed }))}
                   >
                     <Folder size={15} />
                     <span><strong>{workspaceName}</strong><small>{compactPath(group.workspace)}</small></span>
@@ -2092,6 +2311,7 @@ export function App(): ReactNode {
                 {isGenerating && (assistantBubbleVisible ? <div className="response-progress response-progress-inline"><LoaderCircle size={14} className="spinning" /><span>{workingLabel}</span>{activeTurnTiming && <TimingMeta timing={activeTurnTiming} now={now} />}</div> : <PendingResponse label={workingLabel} timing={activeTurnTiming} now={now} />)}
               </>}
             </div>
+            {question && <QuestionPanel request={question} />}
             <form ref={composerRef} className="composer" data-pane="composer" onSubmit={submit} onDragOver={(event) => event.preventDefault()} onDrop={handleDrop}>
               {attachments.length > 0 && <div className="attachment-list">{attachments.map((attachment, index) => <span className="attachment-chip" key={`${attachment.name}-${index}`}>{attachment.kind === "image" ? <img src={`data:${attachment.mimeType};base64,${attachment.data}`} alt="" /> : <FileDiff size={12} />}<span>{attachment.name}</span>{attachment.kind === "image" && !modelAcceptsImages && visionFallbackAvailable && <small className="attachment-chip-note" title="当前模型不支持图片，将自动调用视觉模型识别">视觉识别</small>}<button type="button" title="移除附件" aria-label={`移除 ${attachment.name}`} onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={12} /></button></span>)}</div>}
               {attachmentError && <div className="attachment-error" role="alert">{attachmentError}<button type="button" title="关闭提示" aria-label="关闭附件提示" onClick={() => setAttachmentError(undefined)}><X size={12} /></button></div>}
@@ -2116,8 +2336,38 @@ export function App(): ReactNode {
                 </div>
               )}
 
+              {mentionOpen && (
+                <div className="slash-menu mention-menu" role="listbox" aria-label="引用工作区文件">
+                  {mentionResults.map((entry, index) => (
+                    <button
+                      type="button"
+                      role="option"
+                      aria-selected={index === activeMentionIndex}
+                      key={entry.relativePath}
+                      className={`slash-menu-item${index === activeMentionIndex ? " active" : ""}`}
+                      onMouseEnter={() => setMentionIndex(index)}
+                      onClick={() => applyMention(entry)}
+                    >
+                      <span className="slash-menu-icon">{entry.kind === "directory" ? <Folder size={14} /> : <File size={14} />}</span>
+                      <span className="slash-menu-copy"><strong>{entry.name}</strong><small>{entry.relativePath.includes("/") ? entry.relativePath.slice(0, entry.relativePath.lastIndexOf("/")) : "工作区根目录"}</small></span>
+                    </button>
+                  ))}
+                </div>
+              )}
+
               <div className="composer-input-row">
                 {selectedSkill && <span className="composer-skill-chip"><Puzzle size={13} /><strong>{selectedSkill}</strong><button type="button" title="取消 Skill" aria-label={`取消 Skill ${selectedSkill}`} onClick={() => setSelectedSkill(undefined)}><X size={12} /></button></span>}
+                {mentionedFiles.length > 0 && (
+                  <span className="composer-mention-chips">
+                    {mentionedFiles.map((entry) => (
+                      <span className="composer-skill-chip" key={entry.relativePath} title={entry.relativePath}>
+                        <File size={13} />
+                        <strong>{entry.name}</strong>
+                        <button type="button" title="移除引用" aria-label={`移除引用 ${entry.relativePath}`} onClick={() => setMentionedFiles((current) => current.filter((item) => item.relativePath !== entry.relativePath))}><X size={12} /></button>
+                      </span>
+                    ))}
+                  </span>
+                )}
                 <textarea
                   ref={textareaRef}
                   value={input}
@@ -2126,7 +2376,8 @@ export function App(): ReactNode {
                   placeholder={composerPlaceholder}
                   onKeyDown={handleComposerKey}
                   onPaste={handlePaste}
-                  onChange={(event) => setInput(event.target.value)}
+                  onChange={(event) => { setInput(event.target.value); updateMentionFromCaret(event.target); }}
+                  onSelect={(event) => updateMentionFromCaret(event.currentTarget)}
                 />
               </div>
               <div className="composer-footer">
@@ -2163,9 +2414,9 @@ export function App(): ReactNode {
           {previewOpened && preview && <PreviewDivider split={previewSplit} dragging={previewDragging} onStart={startPreviewResize} onMove={movePreviewResize} onEnd={endPreviewResize} onCancel={cancelPreviewResize} onKeyDown={resizePreviewWithKeyboard} onReset={() => setPreviewSplit(50)} />}
 
           {previewOpened && (preview && preview.tabs.length > 0 ? (
-            <ArtifactPreview tabs={preview.tabs} activeTabId={preview.activeTabId} browserSuspended={previewDragging || settingsOpen || Boolean(permission) || Boolean(messageActionError)} onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddFile={() => void openManualFilePreview()} onAddReview={openLatestReview} reviewAvailable={Boolean(latestReviewExecution)} workspace={snapshot.workspace} activeEditorState={activePreviewTab?.target.type === "file" && activePreviewTab.target.file.kind === "markdown" ? getEditorState(activePreviewTab.id) : undefined} onActiveEditorChange={(patch) => { if (activePreviewTab) patchEditorState(activePreviewTab.id, patch); }} onActiveEditorContentChange={handleActiveEditorContentChange} onActiveEditorSaved={handleActiveEditorSaved} onActiveEditorStatusChange={handleActiveEditorStatusChange} onActiveEditorSaveError={(message) => setMessageActionError(`保存 ${activePreviewTab?.target.type === "file" ? activePreviewTab.target.file.name : "Markdown"} 失败：${message}`)} onActiveEditorResolveConflict={(choice) => { if (activePreviewTab) handleEditorResolveConflict(activePreviewTab.id, choice); }} onToggleEditing={() => { if (activePreviewTab) patchEditorState(activePreviewTab.id, { editing: !getEditorState(activePreviewTab.id).editing }); }} />
+            <ArtifactPreview tabs={preview.tabs} activeTabId={preview.activeTabId} browserSuspended={previewDragging || settingsOpen || Boolean(permission) || Boolean(messageActionError) || previewAddMenuOpen} onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddTerminal={openTerminalPreview} onAddFile={() => void openManualFilePreview()} onAddReview={openLatestReview} onAddMenuOpenChange={setPreviewAddMenuOpen} reviewAvailable={Boolean(latestReviewExecution)} workspace={snapshot.workspace} activeEditorState={activePreviewTab?.target.type === "file" && activePreviewTab.target.file.kind === "markdown" ? getEditorState(activePreviewTab.id) : undefined} onActiveEditorChange={(patch) => { if (activePreviewTab) patchEditorState(activePreviewTab.id, patch); }} onActiveEditorContentChange={handleActiveEditorContentChange} onActiveEditorSaved={handleActiveEditorSaved} onActiveEditorStatusChange={handleActiveEditorStatusChange} onActiveEditorSaveError={(message) => setMessageActionError(`保存 ${activePreviewTab?.target.type === "file" ? activePreviewTab.target.file.name : "Markdown"} 失败：${message}`)} onActiveEditorResolveConflict={(choice) => { if (activePreviewTab) handleEditorResolveConflict(activePreviewTab.id, choice); }} onToggleEditing={() => { if (activePreviewTab) patchEditorState(activePreviewTab.id, { editing: !getEditorState(activePreviewTab.id).editing }); }} />
           ) : (
-            <ArtifactPreview key="empty-state" tabs={[]} activeTabId="" onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddFile={() => void openManualFilePreview()} />
+            <ArtifactPreview key="empty-state" tabs={[]} activeTabId="" onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddTerminal={openTerminalPreview} onAddFile={() => void openManualFilePreview()} />
           ))}
         </div>
       </main>

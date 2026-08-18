@@ -10,11 +10,14 @@ import type {
   RuntimeCommand,
   RuntimeMessage,
   RuntimeSnapshot,
-  ResourceCatalog
+  ResourceCatalog,
+  TerminalCommand,
+  TerminalEventData
 } from "../../shared/protocol";
 
 const listeners = new Set<(message: RuntimeMessage) => void>();
 const browserPreviewListeners = new Set<(state: BrowserPreviewState) => void>();
+const terminalListeners = new Map<string, Set<(event: TerminalEventData) => void>>();
 let browserPreviewState: BrowserPreviewState = { attached: false, url: "", title: "", loading: false, canGoBack: false, canGoForward: false };
 
 // 64x64 渐变 PNG（浏览器演示模式下的图片预览样例）。
@@ -178,6 +181,10 @@ function emitBrowserPreview(update: Partial<BrowserPreviewState>): BrowserPrevie
   return structuredClone(browserPreviewState);
 }
 
+function emitTerminalData(terminalId: string, event: TerminalEventData): void {
+  for (const listener of terminalListeners.get(terminalId) ?? []) listener(event);
+}
+
 function normalizeDemoBrowserUrl(input: string): string {
   const value = input.trim();
   const local = /^(?:localhost|127(?:\.\d{1,3}){3}|0\.0\.0\.0|\[::1\])(?::\d+)?(?:[/?#]|$)/iu.test(value);
@@ -234,6 +241,7 @@ export function createDemoApi(): DesktopApi {
       return demoSnapshot.workspace ?? "D:\\Projects\\chat-anytime-demo";
     },
     async chooseAttachments(): Promise<import("../../shared/protocol").PromptAttachment[]> { return []; },
+    async readClipboardImage(): Promise<{ data: string } | undefined> { return undefined; },
     async choosePreviewFile(): Promise<import("../../shared/protocol").WorkspaceFilePreview> {
       return { relativePath: "README.md", name: "README.md", kind: "markdown", language: "markdown", size: 70, content: "# Pi Desktop\n\n- Electron 主进程\n- Pi 工具进程\n- React 渲染进程\n" };
     },
@@ -254,6 +262,19 @@ export function createDemoApi(): DesktopApi {
     },
     async listWorkspaceDirectory(_workspace?: string, _relativePath?: string): Promise<import("../../shared/protocol").WorkspaceDirectoryListing> {
       return { relativePath: "", entries: [{ name: "src", relativePath: "src", kind: "directory" }, { name: "demo.png", relativePath: "demo.png", kind: "file" }, { name: "README.md", relativePath: "README.md", kind: "file" }] };
+    },
+    async searchWorkspaceFiles(_workspace?: string, query?: string): Promise<import("../../shared/protocol").WorkspaceFileSearchResult> {
+      const entries = [
+        { name: "src", relativePath: "src", kind: "directory" as const },
+        { name: "runtime.ts", relativePath: "src/runtime.ts", kind: "file" as const },
+        { name: "demo.png", relativePath: "demo.png", kind: "file" as const },
+        { name: "README.md", relativePath: "README.md", kind: "file" as const }
+      ];
+      const needle = (query ?? "").trim().toLowerCase().replaceAll("\\", "/");
+      const matched = needle
+        ? entries.filter((entry) => entry.relativePath.toLowerCase().includes(needle))
+        : entries;
+      return { entries: matched.slice(0, 30) };
     },
     async createWorkspaceFile(_workspace: string, relativePath: string): Promise<import("../../shared/protocol").WorkspaceEntryResult> {
       return { relativePath };
@@ -277,6 +298,11 @@ export function createDemoApi(): DesktopApi {
         return emitBrowserPreview({ attached: false, url, title: "浏览器演示", loading: false, error: "网页内容仅在 Electron 桌面窗口中显示" });
       }
       return structuredClone(browserPreviewState);
+    },
+    async terminal(command: TerminalCommand): Promise<void> {
+      if (command.type === "create") {
+        emitTerminalData(command.terminalId, { type: "error", terminalId: command.terminalId, message: "终端仅在 Electron 桌面窗口中可用" });
+      }
     },
     async send(command: RuntimeCommand): Promise<void> {
       switch (command.type) {
@@ -470,6 +496,15 @@ export function createDemoApi(): DesktopApi {
       const l = listener ?? (() => {});
       browserPreviewListeners.add(l);
       return () => browserPreviewListeners.delete(l);
+    },
+    onTerminalData(terminalId: string, listener: (event: TerminalEventData) => void) {
+      const listeners = terminalListeners.get(terminalId) ?? new Set();
+      terminalListeners.set(terminalId, listeners);
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+        if (listeners.size === 0) terminalListeners.delete(terminalId);
+      };
     }
   };
 }

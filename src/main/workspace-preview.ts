@@ -1,6 +1,6 @@
 import { lstat, mkdir, open, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import type { WorkspaceDirectoryEntry, WorkspaceDirectoryListing, WorkspaceEntryResult, WorkspaceFilePreview, WorkspaceFileWriteResult } from "../shared/protocol.js";
+import type { WorkspaceDirectoryEntry, WorkspaceDirectoryListing, WorkspaceEntryResult, WorkspaceFilePreview, WorkspaceFileSearchEntry, WorkspaceFileSearchResult, WorkspaceFileWriteResult } from "../shared/protocol.js";
 import { IMAGE_PREVIEW_LIMIT_BYTES } from "../shared/protocol.js";
 
 const textPreviewLimit = 1024 * 1024;
@@ -180,6 +180,7 @@ export async function writeWorkspaceFile(workspace: string, requestedPath: strin
   });
   if (existingTarget && !withinRoot(existingTarget)) throw new Error("写入文件路径必须位于当前工作区内");
   await writeFile(candidate, content, "utf8");
+  invalidateWorkspaceFileIndex();
   const info = await stat(candidate);
   const realRelativePath = safeRelativePath(rootReal, await realpath(candidate));
   if (!realRelativePath) throw new Error("写入文件路径必须位于当前工作区内");
@@ -223,6 +224,81 @@ export async function listWorkspaceDirectory(workspace: string, requestedPath?: 
   }
   entries.sort((a, b) => (a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind === "directory" ? -1 : 1));
   return { relativePath: realRelative, entries };
+}
+
+// @ 提及文件索引缓存：写入/新建/删除/重命名时置空，避免菜单里出现已删除的文件。
+// 同一 workspace 只保留一份，且仅在工作区内文件变动时失效（Pi 会频繁编辑文件，
+// 每次按键都全盘扫描大仓库太昂贵）。
+let workspaceFileIndexCache: { workspace: string; root: string; version: number; entries: WorkspaceFileSearchEntry[] } | undefined;
+let workspaceFileIndexVersion = 0;
+
+function invalidateWorkspaceFileIndex(): void {
+  workspaceFileIndexVersion++;
+  workspaceFileIndexCache = undefined;
+}
+
+const fileIndexScanLimit = 20000;
+
+/**
+ * 递归扫描工作区（跳过忽略目录与符号链接目录），返回文件+目录扁平索引。
+ * 超过条目上限时停止扫描，避免在巨型仓库里卡死 @ 菜单。
+ */
+async function collectWorkspaceFileIndex(workspace: string): Promise<WorkspaceFileSearchEntry[]> {
+  if (workspaceFileIndexCache?.workspace === workspace && workspaceFileIndexCache.version === workspaceFileIndexVersion) {
+    return workspaceFileIndexCache.entries;
+  }
+  const root = resolve(workspace);
+  const entries: WorkspaceFileSearchEntry[] = [];
+  const queue: string[] = [""];
+  while (queue.length > 0 && entries.length < fileIndexScanLimit) {
+    const current = queue.shift()!;
+    const dirents = await readdir(current ? join(root, current) : root, { withFileTypes: true }).catch(() => []);
+    dirents.sort((a, b) => a.name.localeCompare(b.name));
+    for (const dirent of dirents) {
+      if (!dirent.name || ignoredWorkspaceEntries.has(dirent.name)) continue;
+      if (entries.length >= fileIndexScanLimit) break;
+      const relativePath = current ? `${current}/${dirent.name}` : dirent.name;
+      if (dirent.isDirectory()) {
+        entries.push({ name: dirent.name, relativePath, kind: "directory" });
+        queue.push(relativePath);
+      } else {
+        entries.push({ name: dirent.name, relativePath, kind: "file" });
+      }
+    }
+  }
+  workspaceFileIndexCache = { workspace, root, version: workspaceFileIndexVersion, entries };
+  return entries;
+}
+
+/** @ 提及评分：basename 精确 < basename 前缀 < basename 包含 < 路径包含；同分路径短者优先。 */
+function scoreWorkspaceFileMatch(entry: WorkspaceFileSearchEntry, queryLower: string): number | undefined {
+  const nameLower = entry.name.toLowerCase();
+  if (nameLower === queryLower) return 0;
+  if (nameLower.startsWith(queryLower)) return 1;
+  if (nameLower.includes(queryLower)) return 2;
+  if (entry.relativePath.toLowerCase().includes(queryLower)) return 3;
+  return undefined;
+}
+
+export async function searchWorkspaceFiles(workspace: string, query: string, limit = 30): Promise<WorkspaceFileSearchResult> {
+  if (typeof workspace !== "string" || !workspace.trim()) throw new Error("请指定要搜索的工作区");
+  const normalized = query.trim().replaceAll("\\", "/").replace(/^\/+/u, "");
+  const entries = await collectWorkspaceFileIndex(workspace);
+  if (!normalized) {
+    // 空查询：浅层优先，目录在前，与文件树初印象一致。
+    return { entries: entries.slice(0, limit) };
+  }
+  const queryLower = normalized.toLowerCase();
+  const scored = entries
+    .map((entry) => {
+      const score = scoreWorkspaceFileMatch(entry, queryLower);
+      return score === undefined ? undefined : { entry, score };
+    })
+    .filter((item): item is { entry: WorkspaceFileSearchEntry; score: number } => item !== undefined)
+    .sort((a, b) => a.score - b.score
+      || a.entry.relativePath.length - b.entry.relativePath.length
+      || a.entry.relativePath.localeCompare(b.entry.relativePath));
+  return { entries: scored.slice(0, limit).map((item) => item.entry) };
 }
 
 async function statOptional(path: string): Promise<import("node:fs").Stats | undefined> {
@@ -284,6 +360,7 @@ export async function createWorkspaceFile(workspace: string, requestedPath: stri
   if (existing) throw new Error(`已存在同名条目：${basename(candidate)}`);
   await mkdir(resolve(candidate, ".."), { recursive: true });
   await writeFile(candidate, "", "utf8");
+  invalidateWorkspaceFileIndex();
   const resolved = safeRelativePath(rootReal, await realpath(candidate));
   if (!resolved) throw new Error("新建文件路径必须位于当前工作区内");
   return { relativePath: resolved };
@@ -297,6 +374,7 @@ export async function createWorkspaceDirectory(workspace: string, requestedPath:
   const existing = await statOptional(candidate);
   if (existing) throw new Error(`已存在同名条目：${basename(candidate)}`);
   await mkdir(candidate, { recursive: true });
+  invalidateWorkspaceFileIndex();
   return { relativePath };
 }
 
@@ -308,6 +386,7 @@ export async function deleteWorkspaceEntry(workspace: string, requestedPath: str
   const info = await lstat(candidate);
   // 对符号链接本身删除（不跟随目标）；对真实目录递归删除其全部内容。
   await rm(candidate, { recursive: info.isDirectory(), force: false });
+  invalidateWorkspaceFileIndex();
   return { relativePath };
 }
 
@@ -324,6 +403,7 @@ export async function renameWorkspaceEntry(workspace: string, requestedPath: str
   const existing = await statOptional(to);
   if (existing && !sameEntry) throw new Error(`已存在同名条目：${name}`);
   await rename(from, to);
+  invalidateWorkspaceFileIndex();
   const parent = relativePath.split("/").slice(0, -1).join("/");
   return { relativePath: parent ? `${parent}/${name}` : name };
 }

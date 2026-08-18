@@ -271,3 +271,23 @@ export function compactPath(path?: string): string {
   const parts = path.replaceAll("\\", "/").split("/").filter(Boolean);
   return parts.length > 2 ? `.../${parts.slice(-2).join("/")}` : path;
 }
+
+// @ 文件引用与 Skill 不同，没有结构化字段——只在文本里以 @相对路径 存在。
+// 渲染时把符合“路径形态”的 @token 摘出来单独渲染成 chip 行，正文保持干净；
+// 复制/编辑仍用原始全文，重新发送后同样回环成 chip。
+// token 限行首/空白后的 @ 开头，字符限字母数字点横杠斜杠，且必须含 . 或 /
+// （拦截 @Component 这类纯单词注解与邮箱中缀 @）。
+const mentionTokenPattern = /(?:^|\s)@([\p{L}\p{N}._\-/\\]+)/gu;
+
+export function extractMentionTokens(text: string): { mentions: string[]; body: string } {
+  const mentions: string[] = [];
+  let body = text.replace(mentionTokenPattern, (match, token: string) => {
+    if (token.includes(".") || token.includes("/") || token.includes("\\")) {
+      mentions.push(token);
+      return " ";
+    }
+    return match;
+  });
+  if (mentions.length > 0) body = body.replace(/[ \t]+/gu, " ").replace(/^[ \t]+|[ \t]+$/gmu, "");
+  return { mentions, body };
+}

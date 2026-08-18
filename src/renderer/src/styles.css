@@ -299,6 +299,9 @@ select option:checked { color: var(--on-accent); background-color: var(--accent)
 .message-user .message-body { width: fit-content; max-width: min(100%, 760px); margin-left: auto; padding: 10px 13px; border: 1px solid var(--user-bubble-border); border-radius: 10px; color: var(--text-on-user-bubble); background: var(--user-bubble); box-shadow: var(--shadow-sm); }
 .message-skill-badge { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; margin-bottom: 7px; padding: 3px 6px; overflow: hidden; border: 1px solid var(--user-action-border); border-radius: 5px; color: var(--text-on-user-bubble); background: var(--user-action-surface); font-size: 10px; }
 .message-skill-badge strong { overflow: hidden; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+/* @ 文件引用 chip 行：复用单个 skill-badge 外观，多个时换行堆叠。 */
+.message-mention-badges { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 7px; }
+.message-mention-badges .message-skill-badge { margin-bottom: 0; max-width: 100%; }
 .user-text { margin: 2px 0 0; white-space: pre-wrap; }
 .image-message-list { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
 .image-message { display: block; max-width: min(280px, 100%); padding: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-raised); cursor: zoom-in; }
@@ -448,6 +451,23 @@ select option:checked { color: var(--on-accent); background-color: var(--accent)
 .artifact-source pre { max-height: 270px; margin: 0; overflow: auto; padding: 11px; border-top: 1px solid var(--border); color: var(--code-text); background: var(--code-surface); font: 11px/1.55 "Cascadia Code", Consolas, monospace; white-space: pre-wrap; }
 
 .composer { position: absolute; z-index: 10; right: auto; bottom: 0; left: 50%; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(32px, 1fr) auto; gap: 5px; width: min(840px, calc(100% - 48px)); min-height: 82px; margin: 0 auto 15px; padding: 10px; transform: translateX(-50%); border: 1px solid var(--border-strong); border-radius: 8px; background: var(--surface); box-shadow: var(--shadow-md); }
+.question-panel { position: absolute; z-index: 9; bottom: calc(var(--composer-height, 82px) + 21px); left: 50%; display: grid; gap: 10px; width: min(840px, calc(100% - 48px)); max-height: min(52vh, 420px); margin: 0; padding: 12px 14px; overflow-y: auto; transform: translateX(-50%); border: 1px solid var(--accent-border); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow-lg); animation: question-panel-in .18s ease; }
+.question-panel header { display: flex; align-items: center; gap: 8px; color: var(--text); }
+.question-panel header svg { flex: 0 0 auto; color: var(--accent); }
+.question-panel header strong { font-size: 13px; }
+.question-panel header span { margin-left: auto; font-size: 11px; color: var(--text-muted); }
+.question-panel-items { display: grid; gap: 8px; }
+.question-panel-item { display: grid; gap: 4px; }
+.question-panel-item label { font-size: 12px; line-height: 1.45; color: var(--text); }
+.question-options { display: flex; flex-wrap: wrap; gap: 6px; }
+.question-option { padding: 5px 12px; border: 1px solid var(--border-strong); border-radius: 999px; color: var(--text-muted); background: var(--surface-input); font-size: 12px; line-height: 1.4; cursor: pointer; transition: color .12s ease, border-color .12s ease, background .12s ease; }
+.question-option:hover { color: var(--text); border-color: var(--accent); }
+.question-option.active { border-color: var(--accent-border); color: var(--accent-text); background: var(--accent-soft); font-weight: 600; }
+.question-option:disabled { opacity: 0.6; cursor: default; }
+.question-panel-item input { padding: 7px 10px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface-input); color: var(--text); font-size: 13px; font-family: inherit; }
+.question-panel-item input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus-ring); }
+.question-panel footer { display: flex; justify-content: flex-end; gap: 8px; }
+@keyframes question-panel-in { from { opacity: 0; transform: translateX(-50%) translateY(8px); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
 .composer.has-extension-widgets { grid-template-rows: auto minmax(32px, 1fr) auto auto; }
 .composer.has-extension-widgets .composer-input-row { grid-row: 2; }
 .composer.has-extension-widgets .composer-footer { grid-row: 3; }
@@ -469,6 +489,10 @@ select option:checked { color: var(--on-accent); background-color: var(--accent)
 .composer-skill-chip button { display: grid; flex: 0 0 auto; place-items: center; width: 19px; height: 19px; padding: 0; border: 0; border-radius: 4px; color: inherit; background: transparent; cursor: pointer; }
 .composer-skill-chip button:hover { background: var(--surface-button-hover); }
 .composer-input-row textarea { flex: 1; align-self: stretch; min-width: 0; padding: 2px 3px; }
+/* @ 文件引用 chip 组：复用 skill-chip 外观。纵向堆叠，每个 chip 可占满整列宽度，
+   避免文件名被 42% 的 skill 宽度限制截断；超出列宽的才省略号（悬停有完整路径）。 */
+.composer-mention-chips { display: flex; flex: 0 1 auto; flex-direction: column; align-items: flex-start; gap: 4px; max-width: min(340px, 52%); min-width: 0; }
+.composer-mention-chips .composer-skill-chip { max-width: 100%; min-width: 0; }
 .composer-footer { display: flex; grid-column: 1; grid-row: 2; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; }
 .composer-footer-left, .composer-footer-right { display: flex; min-width: 0; align-items: center; gap: 7px; }
 .composer-footer-right { justify-content: flex-end; }
@@ -513,6 +537,9 @@ select option:checked { color: var(--on-accent); background-color: var(--accent)
 .slash-menu-copy { display: grid; gap: 1px; min-width: 0; }
 .slash-menu-copy strong { overflow: hidden; font-size: 11px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .slash-menu-copy small { overflow: hidden; color: var(--text-muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+/* @ 提及菜单：复用 slash-menu 骨架，行更紧凑、路径更长。 */
+.mention-menu { gap: 1px; max-height: 232px; }
+.mention-menu .slash-menu-item { min-height: 32px; }
 .composer:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus-ring); }
 .composer textarea { width: 100%; max-height: 140px; resize: none; border: 0; outline: 0; color: var(--text); background: transparent; font-size: 13px; line-height: 1.5; }
 .send-button, .stop-button { display: grid; place-items: center; align-self: end; width: 33px; height: 33px; padding: 0; border: 0; border-radius: 6px; color: var(--on-accent); background: var(--accent); cursor: pointer; }
@@ -760,6 +787,10 @@ select option:checked { color: var(--on-accent); background-color: var(--accent)
 .preview-tab-close:hover { color: var(--text); background: var(--surface-button-hover); }
 .content-preview-body { flex: 1 1 0; min-width: 0; min-height: 0; overflow: hidden; background: var(--surface-muted); }
 .content-preview-body > iframe { display: block; width: 100%; height: 100%; border: 0; background: var(--preview-surface); }
+.terminal-pane { position: relative; height: 100%; background: var(--code-surface); }
+.terminal-xterm { height: 100%; padding: 8px 6px 8px 10px; }
+.terminal-ended { position: absolute; inset: 0; z-index: 5; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 20px; text-align: center; color: var(--code-text); background: color-mix(in srgb, var(--code-surface) 82%, transparent); }
+.terminal-ended span { max-width: 46ch; font-size: 13px; line-height: 1.5; opacity: 0.78; }
 .preview-scroll { width: 100%; height: 100%; overflow: auto; }
 .preview-markdown { padding: 22px 24px 36px; background: var(--surface); }
 .preview-markdown-editor { width: 100%; height: 100%; background: var(--surface); }

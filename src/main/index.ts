@@ -1,12 +1,14 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { extname, join, resolve } from "node:path";
-import { app, BrowserWindow, dialog, ipcMain, Menu, safeStorage, utilityProcess, type UtilityProcess } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, safeStorage, utilityProcess, type UtilityProcess } from "electron";
+import { spawn } from "node-pty";
 import { migrateSettings, normalizeVision } from "./settings.js";
 import { importExternalAttachment, workspaceRelativeAttachment } from "./attachments.js";
-import type { BrowserPreviewCommand, BrowserPreviewState, DesktopBootstrap, DesktopSettings, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot, WorkspaceDirectoryListing, WorkspaceEntryResult, WorkspaceFilePreview, WorkspaceFileWriteResult } from "../shared/protocol.js";
-import { createWorkspaceDirectory, createWorkspaceFile, deleteWorkspaceEntry, listWorkspaceDirectory, readWorkspaceFilePreview, renameWorkspaceEntry, writeWorkspaceFile } from "./workspace-preview.js";
+import type { BrowserPreviewCommand, BrowserPreviewState, DesktopBootstrap, DesktopSettings, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot, TerminalCommand, TerminalEventData, WorkspaceDirectoryListing, WorkspaceEntryResult, WorkspaceFilePreview, WorkspaceFileSearchResult, WorkspaceFileWriteResult } from "../shared/protocol.js";
+import { createWorkspaceDirectory, createWorkspaceFile, deleteWorkspaceEntry, listWorkspaceDirectory, readWorkspaceFilePreview, renameWorkspaceEntry, searchWorkspaceFiles, writeWorkspaceFile } from "./workspace-preview.js";
 import { BrowserPreviewController } from "./browser-preview.js";
+import { TerminalManager, type PtyProcess, type PtySpawnOptions } from "./terminal-pty.js";
 
 let mainWindow: BrowserWindow | undefined;
 let runtimeProcess: UtilityProcess | undefined;
@@ -17,6 +19,15 @@ let settingsCache: DesktopSettings | undefined;
 let credentialsCache: Record<string, string> = {};
 let securityWarning: string | undefined;
 let browserPreviewController: BrowserPreviewController | undefined;
+
+const spawnNodePty = (file: string, args: string[], options: PtySpawnOptions): PtyProcess => spawn(file, args, options);
+const terminalManager = new TerminalManager({
+  spawnPty: spawnNodePty,
+  publish: (terminalId, event: TerminalEventData) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(`terminal:data:${terminalId}`, event);
+  },
+  defaultCwd: () => loadSettings().workspace
+});
 
 function settingsPath(): string { return join(app.getPath("userData"), "settings.json"); }
 function credentialsPath(): string { return join(app.getPath("userData"), "credentials.json"); }
@@ -192,6 +203,24 @@ function createWindow(): void {
   nextWindow.webContents.setWindowOpenHandler(({ url }) => { void import("electron").then(({ shell }) => shell.openExternal(url)); return { action: "deny" }; });
   if (rendererUrl) void nextWindow.loadURL(rendererUrl); else void nextWindow.loadFile(join(__dirname, "../renderer/index.html"));
 }
+function isTerminalCommand(value: unknown): value is TerminalCommand {
+  if (!value || typeof value !== "object") return false;
+  const command = value as Record<string, unknown>;
+  if (typeof command.terminalId !== "string" || !command.terminalId.trim()) return false;
+  switch (command.type) {
+    case "create":
+      return typeof command.cols === "number" && typeof command.rows === "number" && (command.cwd === undefined || typeof command.cwd === "string") && (command.shell === undefined || typeof command.shell === "string");
+    case "input":
+      return typeof command.data === "string";
+    case "resize":
+      return typeof command.cols === "number" && typeof command.rows === "number";
+    case "kill":
+      return true;
+    default:
+      return false;
+  }
+}
+
 function registerIpc(): void {
   ipcMain.handle("desktop:bootstrap", (): DesktopBootstrap => {
     const source = loadSettings();
@@ -218,6 +247,14 @@ function registerIpc(): void {
     return readWorkspaceFilePreview(rootReal, relativePath);
   });
   ipcMain.handle("desktop:choose-attachments", async (_event, workspace?: string): Promise<PromptAttachment[]> => { const result = mainWindow ? await dialog.showOpenDialog(mainWindow, { title: "添加附件", properties: ["openFile", "multiSelections"], filters: [{ name: "图片和项目文件", extensions: ["png", "jpg", "jpeg", "webp", "gif", "*" ] }] }) : await dialog.showOpenDialog({ properties: ["openFile", "multiSelections"] }); return result.canceled ? [] : readAttachmentSelection(result.filePaths, workspace); });
+  // 部分剪贴板来源（微信/QQ 截图、浏览器“复制图片”）只写位图格式，渲染进程的
+  // paste 事件里拿不到文件；由主进程读系统剪贴板兜底，PNG base64 返回。
+  ipcMain.handle("desktop:read-clipboard-image", (): { data: string } | undefined => {
+    const image = clipboard.readImage();
+    if (image.isEmpty()) return undefined;
+    const png = image.toPNG();
+    return png.length > 0 ? { data: png.toString("base64") } : undefined;
+  });
   ipcMain.handle("desktop:read-workspace-file", async (_event, relativePath: string, workspace?: string): Promise<WorkspaceFilePreview> => {
     const resolvedWorkspace = workspace ?? loadSettings().workspace;
     if (!resolvedWorkspace) throw new Error("请先打开工作区，再预览文件");
@@ -234,6 +271,11 @@ function registerIpc(): void {
   ipcMain.handle("desktop:list-workspace-directory", async (_event, workspace: string, relativePath?: string): Promise<WorkspaceDirectoryListing> => {
     if (typeof workspace !== "string" || !workspace.trim()) throw new Error("请指定要浏览的工作区");
     return listWorkspaceDirectory(workspace, relativePath);
+  });
+  ipcMain.handle("desktop:search-workspace-files", async (_event, workspace: string, query: string): Promise<WorkspaceFileSearchResult> => {
+    if (typeof workspace !== "string" || !workspace.trim()) throw new Error("请指定要搜索的工作区");
+    if (typeof query !== "string") throw new Error("搜索词无效");
+    return searchWorkspaceFiles(workspace, query);
   });
   ipcMain.handle("desktop:create-workspace-file", async (_event, workspace: string, relativePath: string): Promise<WorkspaceEntryResult> => {
     if (typeof workspace !== "string" || !workspace.trim()) throw new Error("请指定要操作的工作区");
@@ -260,8 +302,12 @@ function registerIpc(): void {
     if (!browserPreviewController) throw new Error("浏览器预览当前不可用");
     return browserPreviewController.handle(command);
   });
+  ipcMain.handle("terminal:command", (_event, command: TerminalCommand): void => {
+    if (!isTerminalCommand(command)) throw new Error("终端命令无效");
+    terminalManager.handle(command);
+  });
   ipcMain.handle("runtime:send", (_event, command: RuntimeCommand): void => { updateSettings(command); sendToRuntime(command); });
 }
 app.whenReady().then(() => { Menu.setApplicationMenu(null); registerIpc(); startRuntime(); createWindow(); app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); }); });
 app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
-app.on("before-quit", () => { browserPreviewController?.dispose(); runtimeProcess?.kill(); });
+app.on("before-quit", () => { browserPreviewController?.dispose(); terminalManager.disposeAll(); runtimeProcess?.kill(); });
