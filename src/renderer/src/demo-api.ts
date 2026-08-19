@@ -86,6 +86,7 @@ const demoSnapshot: RuntimeSnapshot = {
   busy: false,
   status: "就绪",
   contextUsage: demoContextUsage(),
+  queuedMessages: [],
   backgroundProcesses: [],
   recentWorkspaces: [
     { path: "D:\\Projects\\chat-anytime-demo", openedAt: Date.now() },
@@ -245,6 +246,12 @@ function applyDemoAgentSkillOverrides(): void {
 function recordDemoWorkspace(workspaces: RecentWorkspace[], path: string): RecentWorkspace[] {
   const key = path.replaceAll("\\", "/").toLowerCase();
   return [{ path, openedAt: Date.now() }, ...workspaces.filter((item) => item.path.replaceAll("\\", "/").toLowerCase() !== key)].slice(0, 15);
+}
+
+/** 演示队列增删后按 kind 重排下标，保持与真实运行时一致的寻址方式。 */
+function reindexDemoQueue(queue: import("../../shared/protocol").QueuedMessage[]): import("../../shared/protocol").QueuedMessage[] {
+  const counters: Record<"steering" | "followUp", number> = { steering: 0, followUp: 0 };
+  return queue.map((item) => ({ ...item, index: counters[item.kind]++ }));
 }
 
 export function createDemoApi(): DesktopApi {
@@ -481,6 +488,29 @@ export function createDemoApi(): DesktopApi {
               messages: [...demoSnapshot.messages, { id: `demo-regenerated-${Date.now()}`, role: "assistant", timestamp: Date.now(), blocks: [{ type: "text", text: `已重新生成：${command.text}` }] }]
             });
           }, 80);
+          break;
+        }
+        case "session.abort": {
+          updateSnapshot({ busy: false, status: "就绪", queuedMessages: [] });
+          break;
+        }
+        case "session.queue.add": {
+          const text = command.skillName ? `【Skill：${command.skillName}】${command.text}` : command.text;
+          const followUpCount = demoSnapshot.queuedMessages.filter((item) => item.kind === "followUp").length;
+          updateSnapshot({ queuedMessages: [...demoSnapshot.queuedMessages, { kind: "followUp", index: followUpCount, text }] });
+          break;
+        }
+        case "session.queue.sendNow": {
+          const target = demoSnapshot.queuedMessages.find((item) => item.kind === command.kind && item.index === command.index);
+          if (!target || target.text !== command.text) break;
+          const rest = demoSnapshot.queuedMessages.filter((item) => item !== target);
+          updateSnapshot({ queuedMessages: reindexDemoQueue([{ ...target, kind: "steering" }, ...rest]) });
+          break;
+        }
+        case "session.queue.remove": {
+          const target = demoSnapshot.queuedMessages.find((item) => item.kind === command.kind && item.index === command.index);
+          if (!target || target.text !== command.text) break;
+          updateSnapshot({ queuedMessages: reindexDemoQueue(demoSnapshot.queuedMessages.filter((item) => item !== target)) });
           break;
         }
         case "permission.resolve": {

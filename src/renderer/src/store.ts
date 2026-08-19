@@ -13,6 +13,13 @@ import type {
   Todo
 } from "../../shared/protocol";
 
+function queuedMessagesEqual(left: RuntimeSnapshot["queuedMessages"], right: RuntimeSnapshot["queuedMessages"]): boolean {
+  return left.length === right.length && left.every((item, index) => {
+    const other = right[index];
+    return other && item.kind === other.kind && item.index === other.index && item.text === other.text;
+  });
+}
+
 interface DesktopState {
   ready: boolean;
   snapshot: RuntimeSnapshot;
@@ -47,7 +54,8 @@ const emptySnapshot: RuntimeSnapshot = {
   executions: [],
   backgroundProcesses: [],
   sessions: [],
-  recentWorkspaces: []
+  recentWorkspaces: [],
+  queuedMessages: []
 };
 const emptySettings: DesktopSettings = { version: 2, thinkingLevel: "medium", accessMode: "ask", providers: [], agents: [], currentAgentId: "default", appearance: { theme: "system", themePreset: "default", customCss: "", customThemes: [], showThinking: true } };
 const emptyResources: ResourceCatalog = { skills: [], mcpServers: [], todos: [], diagnostics: [] };
@@ -111,6 +119,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
               previous.sessions === incoming.sessions && previous.recentWorkspaces === incoming.recentWorkspaces &&
               previous.model === incoming.model &&
               previous.sessionId === incoming.sessionId && previous.sessionFile === incoming.sessionFile &&
+              queuedMessagesEqual(previous.queuedMessages, incoming.queuedMessages) &&
               previous.thinkingLevel === incoming.thinkingLevel) {
             // Nothing changed at all — keep the exact same snapshot reference
             // so downstream useMemo/useEffect dependency checks stay no-ops.

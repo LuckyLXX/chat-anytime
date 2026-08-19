@@ -3,6 +3,7 @@ import {
   Brain,
   Bot,
   Check,
+  Clock,
   Copy,
   ChevronDown,
   CircleStop,
@@ -41,7 +42,8 @@ import {
   FolderTree,
   ChevronLeft,
   Pin,
-  X
+  X,
+  Zap
 } from "lucide-react";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import type {
@@ -67,6 +69,7 @@ import type {
   ResourceCatalog,
   ResourceScope,
   McpServerConfigDraft,
+  QueuedMessage,
   RuntimeCommand,
   WorkspaceFileSearchEntry
 } from "../../shared/protocol";
@@ -1284,6 +1287,7 @@ export function App(): ReactNode {
   const workingLabel = `${snapshot.agentName}正在努力输出中……`;
   let composerPlaceholder = "请先打开一个项目";
   if (snapshot.workspace) composerPlaceholder = selectedSkill ? "输入任务要求" : "让 Pi 检查、修改或运行这个项目，@ 可引用文件";
+  if (snapshot.workspace && snapshot.busy) composerPlaceholder = "连续输入以排队后续修改";
 
   // 斜杠指令清单：固定会话命令 + 已发现的 Skill
   const slashCommands = useMemo<SlashCommand[]>(() => {
@@ -1632,9 +1636,9 @@ export function App(): ReactNode {
   async function submit(event: FormEvent): Promise<void> {
     event.preventDefault();
     const text = input.trim();
-    const isNewSessionCommand = !selectedSkill && text === "/new";
-    if ((!text && attachments.length === 0 && !selectedSkill && mentionedFiles.length === 0) || (snapshot.busy && !isNewSessionCommand)) return;
-    // 客户端执行的固定指令：不透传给 Pi（会话层会当噪声），直接发协议命令
+    if (!text && attachments.length === 0 && !selectedSkill && mentionedFiles.length === 0) return;
+    // 客户端执行的固定指令：不透传给 Pi（会话层会当噪声），直接发协议命令。
+    // /new 在生成中也可用：新会话独立于正在运行的旧会话。
     if (!selectedSkill && text === "/new") {
       try {
         await createNewSession();
@@ -1661,6 +1665,21 @@ export function App(): ReactNode {
     const skillName = selectedSkill ?? skillMatch?.[1];
     const skillInstructions = selectedSkill ? composedText || undefined : skillMatch?.[2]?.trim() || undefined;
     if (attachments.some((item) => item.kind === "image") && !modelAcceptsImages && !visionFallbackAvailable) { setAttachmentError("当前模型不支持图片输入，请先切换多模态模型，或在设置的模型服务中启用视觉识别"); return; }
+    // 生成中回车不丢弃输入：进入输入框上方的待发送队列，默认在本轮回复
+    // 结束后作为下一轮消息发出，可编辑、立即发送或删除。
+    if (snapshot.busy) {
+      if (editingMessageTimestamp !== undefined) return; // 编辑重发要求会话空闲，不排队
+      try {
+        await window.piDesktop.send({ type: "session.queue.add", text: skillName ? skillInstructions ?? "" : composedText, skillName, attachments });
+        setInput("");
+        setSelectedSkill(undefined);
+        setAttachments([]);
+        setMentionedFiles([]);
+      } catch (error) {
+        setAttachmentError(error instanceof Error ? error.message : "消息排队失败");
+      }
+      return;
+    }
     setLocalTurn({ startedAt: Date.now(), sessionId: snapshot.sessionId });
     try {
       if (editingMessageTimestamp !== undefined) {
@@ -1710,6 +1729,40 @@ export function App(): ReactNode {
     setMessageActionError(undefined);
     setTimeout(() => textareaRef.current?.focus(), 0);
   }, []);
+
+  /** 编辑排队消息：文本回填输入框（Skill 消息回填展开后的提示词），同时从队列移除。 */
+  function editQueuedMessage(item: QueuedMessage): void {
+    setInput(item.text);
+    setSelectedSkill(undefined);
+    setAttachments([]);
+    setMentionedFiles([]);
+    setEditingMessageTimestamp(undefined);
+    removeQueuedMessage(item);
+    setTimeout(() => textareaRef.current?.focus(), 0);
+  }
+
+  /** 立即发送：升级为 steering，AI 在当前回合下一次模型调用前就能读到，不打断正在执行的工具。 */
+  function sendQueuedMessageNow(item: QueuedMessage): void {
+    void window.piDesktop.send({ type: "session.queue.sendNow", kind: item.kind, index: item.index, text: item.text }).catch((error) => {
+      setMessageActionError(error instanceof Error ? error.message : "立即发送失败");
+    });
+  }
+
+  function removeQueuedMessage(item: QueuedMessage): void {
+    void window.piDesktop.send({ type: "session.queue.remove", kind: item.kind, index: item.index, text: item.text }).catch((error) => {
+      setMessageActionError(error instanceof Error ? error.message : "移除排队消息失败");
+    });
+  }
+
+  function stopGeneration(): void {
+    // 先取队列再发中断：主进程 abort 会清空队列，这里把文本回填输入框供编辑
+    // 重发；输入框已有草稿时追加在草稿之后，不丢内容。
+    const pending = snapshot.queuedMessages;
+    void window.piDesktop.send({ type: "session.abort" }).catch((error) => {
+      setMessageActionError(error instanceof Error ? error.message : "停止失败");
+    });
+    if (pending.length > 0) setInput((current) => current.trim() ? `${current}\n\n${pending.map((item) => item.text).join("\n\n")}` : pending.map((item) => item.text).join("\n\n"));
+  }
 
   const handleHtmlAction = useCallback((text: string): void => {
     setInput((current) => current.trim() ? `${current.trim()}\n${text}` : text);
@@ -2312,7 +2365,23 @@ export function App(): ReactNode {
               </>}
             </div>
             {question && <QuestionPanel request={question} />}
-            <form ref={composerRef} className="composer" data-pane="composer" onSubmit={submit} onDragOver={(event) => event.preventDefault()} onDrop={handleDrop}>
+            <form ref={composerRef} className={`composer${snapshot.queuedMessages.length > 0 ? " has-queue" : ""}`} data-pane="composer" onSubmit={submit} onDragOver={(event) => event.preventDefault()} onDrop={handleDrop}>
+              {snapshot.queuedMessages.length > 0 && (
+                <div className="composer-queue" role="list" aria-label="排队输入">
+                  <div className="composer-queue-caption"><Clock size={11} /><span>排队输入 {snapshot.queuedMessages.length} 条 · 本轮回复结束后自动发出</span></div>
+                  {snapshot.queuedMessages.map((item) => (
+                    <div className="composer-queue-item" role="listitem" data-queue-kind={item.kind} key={`${item.kind}:${item.index}`} title={item.text}>
+                      {item.kind === "steering" && <span className="composer-queue-badge">即将插入</span>}
+                      <span className="composer-queue-text">{item.text}</span>
+                      <span className="composer-queue-actions">
+                        <button type="button" className="composer-queue-send" data-control="queue-send-now" title="立即发送：AI 下一轮模型调用前插入，不打断工具执行" aria-label="立即发送这条消息" onClick={() => sendQueuedMessageNow(item)}><Zap size={11} />立即</button>
+                        <button type="button" data-control="queue-edit" title="编辑这条排队消息" aria-label="编辑排队消息" onClick={() => editQueuedMessage(item)}><Pencil size={12} /></button>
+                        <button type="button" data-control="queue-remove" title="删除这条排队消息" aria-label="删除排队消息" onClick={() => removeQueuedMessage(item)}><Trash2 size={12} /></button>
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
               {attachments.length > 0 && <div className="attachment-list">{attachments.map((attachment, index) => <span className="attachment-chip" key={`${attachment.name}-${index}`}>{attachment.kind === "image" ? <img src={`data:${attachment.mimeType};base64,${attachment.data}`} alt="" /> : <FileDiff size={12} />}<span>{attachment.name}</span>{attachment.kind === "image" && !modelAcceptsImages && visionFallbackAvailable && <small className="attachment-chip-note" title="当前模型不支持图片，将自动调用视觉模型识别">视觉识别</small>}<button type="button" title="移除附件" aria-label={`移除 ${attachment.name}`} onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={12} /></button></span>)}</div>}
               {attachmentError && <div className="attachment-error" role="alert">{attachmentError}<button type="button" title="关闭提示" aria-label="关闭附件提示" onClick={() => setAttachmentError(undefined)}><X size={12} /></button></div>}
               <input ref={fileInputRef} type="file" hidden multiple accept="image/png,image/jpeg,image/webp,image/gif,.txt,.md,.json,.js,.ts,.tsx,.jsx,.py,.go,.rs,.java,.css,.html" onChange={(event) => { void addLocalFiles(event.target.files ?? []); event.currentTarget.value = ""; }} />
@@ -2408,7 +2477,7 @@ export function App(): ReactNode {
                     {composerMenu === "thinking" && <div className="composer-select-menu thinking-select-menu" role="menu" aria-label="思考级别">{thinkingLevels.map((level) => <button className={level === snapshot.thinkingLevel ? "active" : ""} type="button" role="menuitemradio" aria-checked={level === snapshot.thinkingLevel} key={level} onClick={() => void selectThinkingLevel(level)}><span>{thinkingLevelLabels[level]}</span>{level === snapshot.thinkingLevel && <Check size={13} />}</button>)}</div>}
                   </div>
                   {snapshot.busy ? (
-                    <button className="stop-button" data-control="stop" type="button" title="停止" aria-label="停止" onClick={() => void window.piDesktop.send({ type: "session.abort" })}><CircleStop size={18} /></button>
+                    <button className="stop-button" data-control="stop" type="button" title="停止" aria-label="停止" onClick={stopGeneration}><CircleStop size={18} /></button>
                   ) : (
                     <button className="send-button" data-control="send" type="submit" title="发送" aria-label="发送" disabled={!canSubmit}><Play size={17} fill="currentColor" /></button>
                   )}

@@ -54,6 +54,7 @@
 | 发送 | `send` |
 | 停止（生成中与发送互换显示） | `stop` |
 | 添加附件 | `attach` |
+| 待发送队列条目操作 | `queue-edit` / `queue-send-now` / `queue-remove` |
 | 访问模式 | `access-mode` |
 | 模型快捷切换 | `model-select` |
 | 思考级别 | `thinking-select` |
@@ -68,7 +69,7 @@
 [data-pane="composer"] textarea { font-family: "Brand", monospace; caret-color: var(--accent); }
 ```
 
-`send` / `stop` 占据同一位置、按生成状态互换；重设计时建议两个一起写，避免状态切换时跳变。模型/思考菜单、斜杠指令面板都是 `composer` 区域的子元素，用 `[data-pane="composer"]` 后代选择器即可命中。
+`send` / `stop` 占据同一位置、按生成状态互换；重设计时建议两个一起写，避免状态切换时跳变。模型/思考菜单、斜杠指令面板都是 `composer` 区域的子元素，用 `[data-pane="composer"]` 后代选择器即可命中。生成中回车排队的消息显示在 `composer` 区域顶部的待发送列表（条目带 `data-queue-kind="steering|followUp"`，`steering` 为“立即发送”升级后的优先形态）。
 
 **覆盖层级**：① 契约控件（上表，跨版本安全）；② 钩子区域内用元素选择器统改（`[data-pane="sidebar"] button`、`[data-pane="settings-dialog"] select`，同样安全）；③ 区域内类名命中（事实稳定、无契约）。右键菜单、错误提示 toast、重命名小对话框和内嵌编辑器（Markdown 工具栏、Mermaid）在契约之外，只受颜色 token 影响。立体按钮、clip-path 异形容器、霓虹描边、扫描线等创意技法的可复制配方见 `pidesktop-theme-creator` skill 的 `references/recipes.md`。
 

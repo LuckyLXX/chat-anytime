@@ -466,6 +466,18 @@ export interface DelegationSummary {
   error?: string;
 }
 
+/**
+ * AI 回复期间排队的待发送消息（Pi 会话 steering/followUp 队列的快照投影，
+ * 只含当前激活会话）。followUp 是默认形态：本轮回复结束后作为下一轮 user
+ * 消息注入；steering 由“立即发送”升级而来：当前回合下一次模型调用前插入。
+ */
+export interface QueuedMessage {
+  kind: "steering" | "followUp";
+  /** 在同类队列中的下标；命令以 kind+index+text 寻址，列表变动后校验失败即拒绝。 */
+  index: number;
+  text: string;
+}
+
 export interface RuntimeSnapshot {
   workspace?: string;
   agentId: string;
@@ -477,6 +489,8 @@ export interface RuntimeSnapshot {
   busy: boolean;
   status: string;
   turnTiming?: TurnTiming;
+  /** 激活会话的待发送队列；空闲会话为空数组。 */
+  queuedMessages: QueuedMessage[];
   /** 激活会话的上下文占用估算；无会话或模型窗口未知时缺省。 */
   contextUsage?: ContextUsage;
   messages: ChatMessage[];
@@ -533,6 +547,9 @@ export type RuntimeCommand =
   | { type: "session.regenerate"; text: string; timestamp?: number; skillName?: string; attachments?: PromptAttachment[] }
   | { type: "session.compact"; instructions?: string }
   | { type: "session.abort" }
+  | { type: "session.queue.add"; text: string; skillName?: string; attachments?: PromptAttachment[] }
+  | { type: "session.queue.sendNow"; kind: QueuedMessage["kind"]; index: number; text: string }
+  | { type: "session.queue.remove"; kind: QueuedMessage["kind"]; index: number; text: string }
   | { type: "agent.select"; agentId: string }
   | { type: "agent.save"; agent: AgentProfile }
   | { type: "agent.archive"; agentId: string; archived: boolean }

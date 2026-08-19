@@ -471,6 +471,24 @@ select option:checked { color: var(--on-accent); background-color: var(--accent)
 .composer.has-extension-widgets { grid-template-rows: auto minmax(32px, 1fr) auto auto; }
 .composer.has-extension-widgets .composer-input-row { grid-row: 2; }
 .composer.has-extension-widgets .composer-footer { grid-row: 3; }
+/* 待发送队列：生成中回车的消息排在输入框上方，带编辑/立即发送/删除。 */
+.composer.has-queue { grid-template-rows: auto minmax(32px, 1fr) auto; }
+.composer.has-queue .composer-queue { grid-row: 1; }
+.composer.has-queue .composer-input-row { grid-row: 2; }
+.composer.has-queue .composer-footer { grid-row: 3; }
+.composer-queue { display: grid; grid-column: 1; gap: 4px; max-height: 138px; padding: 2px 2px 4px; overflow-y: auto; min-width: 0; }
+.composer-queue-caption { display: flex; align-items: center; gap: 5px; color: var(--text-muted); font-size: 10px; }
+.composer-queue-caption svg { flex: 0 0 auto; }
+.composer-queue-item { display: flex; align-items: center; gap: 6px; min-width: 0; padding: 3px 4px 3px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-raised); }
+.composer-queue-item[data-queue-kind="steering"] { border-color: var(--accent-border); background: var(--accent-soft); }
+.composer-queue-badge { flex: 0 0 auto; padding: 1px 5px; border-radius: 999px; color: var(--accent-text); background: var(--surface); font-size: 9px; font-weight: 600; }
+.composer-queue-text { flex: 1 1 auto; overflow: hidden; color: var(--text); font-size: 11px; line-height: 1.5; text-overflow: ellipsis; white-space: nowrap; }
+.composer-queue-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 2px; }
+.composer-queue-actions button { display: grid; place-items: center; width: 21px; height: 21px; padding: 0; border: 0; border-radius: 4px; color: var(--text-muted); background: transparent; cursor: pointer; }
+.composer-queue-actions button:hover { color: var(--text); background: var(--surface-button-hover); }
+/* 「立即」：带文字的强调按钮（对齐 ZCode 排队输入的操作形态）。 */
+.composer-queue-actions .composer-queue-send { display: inline-flex; align-items: center; gap: 3px; width: auto; height: 19px; padding: 0 7px; border-radius: 999px; color: var(--accent-text); background: var(--accent-soft); font-size: 10px; font-weight: 600; }
+.composer-queue-actions .composer-queue-send:hover { color: var(--on-accent); background: var(--accent); }
 .extension-widget-list { display: grid; grid-column: 1; gap: 4px; min-width: 0; }
 .extension-widget-above { grid-row: 1; }
 .extension-widget-below { grid-row: 4; }
