@@ -8,6 +8,12 @@ type PanelState = "closed" | "open" | "collapsed";
 
 const statusLabels: Record<TodoStatus, string> = { pending: "待办", in_progress: "进行中", completed: "已完成" };
 
+/**
+ * 正在执行的工具调用至少运行这么久才显示在面板里（与后台进程的 MIN_AGE 对齐），
+ * 避免 `echo` 这类秒回命令在"运行中的终端"里闪进闪出。
+ */
+const MIN_RUNNING_AGE_MS = 5_000;
+
 function executionCommand(execution: ToolExecution): string {
   if (execution.name === "bash") {
     const command = (execution.args as { command?: unknown } | undefined)?.command;
@@ -39,15 +45,23 @@ export function TaskPanel(): ReactNode {
   const [error, setError] = useState<string>();
   const [now, setNow] = useState(() => Date.now());
 
-  const running = useMemo(() => executions.filter((execution) => execution.status === "running"), [executions]);
+  // 只显示已运行超过阈值的执行；now 每秒刷新一次，命令跑够时长后自然出现。
+  const running = useMemo(
+    () => executions.filter((execution) => execution.status === "running" && now - execution.startedAt >= MIN_RUNNING_AGE_MS),
+    [executions, now]
+  );
   const collapsed = panel === "collapsed";
   const backgroundCount = running.length + backgroundProcesses.length;
 
+  // 只要有工具在跑（无论是否已达显示阈值）或后台进程存在，就每秒刷新 now：
+  // 未达阈值的命令需要靠 tick 在到点后进入面板，后台进程的耗时显示也要实时更新。
+  const hasLiveExecution = executions.some((execution) => execution.status === "running");
+  const hasBackground = backgroundProcesses.length > 0;
   useEffect(() => {
-    if (panel === "closed" || collapsed || backgroundCount === 0) return;
+    if (!hasLiveExecution && !hasBackground) return;
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
-  }, [panel, collapsed, backgroundCount]);
+  }, [hasLiveExecution, hasBackground]);
 
   async function run(command: RuntimeCommand): Promise<boolean> {
     setBusy(true);
