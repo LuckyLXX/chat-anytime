@@ -1267,14 +1267,14 @@ async function initialize(command: Extract<RuntimeCommand, { type: "initialize" 
     registerCustomProvider(provider);
     initializedProviderIds.add(provider.id);
     const key = apiKeys[provider.id];
-    if (key) await modelRuntime.setRuntimeApiKey(provider.id, key, { allowNetwork: false });
+    if (key) await modelRuntime.setRuntimeApiKey(provider.id, key);
   }
   // `auth.set` stores built-in provider keys separately from provider settings.
   // Rehydrate those keys after restart so explicit app configuration remains
   // distinguishable from inherited environment credentials.
   for (const [providerId, key] of Object.entries(apiKeys)) {
     if (initializedProviderIds.has(providerId) || !key || !modelRuntime.getProvider(providerId)) continue;
-    await modelRuntime.setRuntimeApiKey(providerId, key, { allowNetwork: false });
+    await modelRuntime.setRuntimeApiKey(providerId, key);
   }
   visionModel = resolveVisionModel(settings.vision, modelRuntime);
   await refreshCatalog();
@@ -1647,7 +1647,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       break;
     case "auth.set":
       if (!modelRuntime) break;
-      await modelRuntime.setRuntimeApiKey(command.provider, command.apiKey, { allowNetwork: false });
+      await modelRuntime.setRuntimeApiKey(command.provider, command.apiKey);
       await refreshCatalog();
       if (!activeRuntime?.session.model || activeRuntime.session.model.provider === command.provider) {
         const enabledModels = new Set(settings?.providers.flatMap((provider) => provider.models.filter((item) => item.enabled !== false).map((item) => `${provider.id}/${item.id}`)) ?? []);
@@ -1666,7 +1666,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       if (settings) settings.providers = settings.providers.some((provider) => provider.id === command.provider.id) ? settings.providers.map((provider) => provider.id === command.provider.id ? command.provider : provider) : [...settings.providers, command.provider];
       if (command.apiKey?.trim()) {
         apiKeys[command.provider.id] = command.apiKey.trim();
-        await modelRuntime.setRuntimeApiKey(command.provider.id, command.apiKey.trim(), { allowNetwork: false });
+        await modelRuntime.setRuntimeApiKey(command.provider.id, command.apiKey.trim());
       }
       await refreshCatalog();
       {
