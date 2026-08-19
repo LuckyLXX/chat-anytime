@@ -217,7 +217,7 @@ export interface ToolExecution {
   changedFile?: { relativePath: string };
 }
 
-export type WorkspaceFilePreviewKind = "markdown" | "code" | "html" | "svg" | "image" | "text" | "binary";
+export type WorkspaceFilePreviewKind = "markdown" | "code" | "html" | "svg" | "image" | "text" | "binary" | "pdf";
 
 /** 图片预览内联为 base64 数据 URL 的体积上限（与聊天附件 20MB 限制一致）。 */
 export const IMAGE_PREVIEW_LIMIT_BYTES = 20 * 1024 * 1024;
@@ -240,6 +240,33 @@ export interface WorkspaceFileWriteResult {
   saved: true;
   size: number;
   relativePath: string;
+}
+
+/** 工作区文件预览的自定义协议：PDF 等大文件由主进程流式读取，避免内联拷贝。 */
+export const PREVIEW_FILE_SCHEME = "pidesktop-file";
+
+/**
+ * 生成工作区文件的协议 URL，形如 pidesktop-file://preview/<enc(workspace)>/<enc(relativePath)>。
+ * 工作区与相对路径分别 encodeURIComponent 后以 path 段承载（host 会被小写化，不能放路径）。
+ */
+export function workspaceFilePreviewUrl(workspace: string, relativePath: string): string {
+  return `${PREVIEW_FILE_SCHEME}://preview/${encodeURIComponent(workspace)}/${encodeURIComponent(relativePath)}`;
+}
+
+/** 解析预览 URL，返回 {""} 表示非法；分段解码，path 段缺失/多余一律拒绝。 */
+export function parseWorkspaceFilePreviewUrl(input: string): { workspace: string; relativePath: string } | undefined {
+  try {
+    const url = new URL(input);
+    if (url.protocol !== `${PREVIEW_FILE_SCHEME}:` || url.hostname !== "preview") return undefined;
+    const segments = url.pathname.split("/").filter(Boolean);
+    if (segments.length !== 2) return undefined;
+    const workspace = decodeURIComponent(segments[0]!);
+    const relativePath = decodeURIComponent(segments[1]!);
+    if (!workspace || !relativePath || relativePath.includes("..")) return undefined;
+    return { workspace, relativePath };
+  } catch {
+    return undefined;
+  }
 }
 
 export interface WorkspaceDirectoryEntry {

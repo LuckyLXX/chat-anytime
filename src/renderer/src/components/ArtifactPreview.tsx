@@ -1,7 +1,7 @@
 import { AlertCircle, Check, Code2, Eye, File, FileCode2, FileDiff, FileText, Globe2, LoaderCircle, MessageSquare, Pause, Pencil, Play, Plus, Terminal, X } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode, type SyntheticEvent } from "react";
 import type { WorkspaceFilePreview } from "../../../shared/protocol";
-import { IMAGE_PREVIEW_LIMIT_BYTES } from "../../../shared/protocol";
+import { IMAGE_PREVIEW_LIMIT_BYTES, workspaceFilePreviewUrl } from "../../../shared/protocol";
 import { artifactSandbox, buildArtifactPreviewSource, DYNAMIC_PREVIEW_ACTIONS, isDynamicArtifact, type Artifact, type DynamicPreviewAction } from "../lib/content";
 import { DiffView } from "./DiffView";
 import { MarkdownEditor, type EditorSaveStatus } from "./MarkdownEditor";
@@ -103,6 +103,15 @@ function FilePreviewContent({ file, tabId, onOpenArtifact, workspace, editorStat
   }
   if (file.kind === "text" && file.content !== undefined) {
     return <div className="preview-scroll"><pre className="preview-plain-text">{file.content}</pre></div>;
+  }
+  if (file.kind === "pdf") {
+    const root = file.workspace ?? workspace;
+    if (!root) {
+      return <div className="preview-empty preview-error"><FileText size={28} /><strong>PDF 预览需要有效工作区路径</strong><span>{file.name}</span></div>;
+    }
+    // 经自定义协议 pidesktop-file:// 流式读取，Chromium 内置 PDF 查看器渲染。
+    const pdfUrl = workspaceFilePreviewUrl(root, file.relativePath);
+    return <div className="preview-pdf"><iframe src={pdfUrl} title={file.name} /></div>;
   }
   return <div className="preview-empty"><FileText size={28} /><strong>此文件无法预览</strong><span>{file.size.toLocaleString("zh-CN")} bytes</span></div>;
 }

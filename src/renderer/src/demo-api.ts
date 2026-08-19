@@ -287,6 +287,9 @@ export function createDemoApi(): DesktopApi {
       if (relativePath === "README.md") {
         return { relativePath, name: "README.md", kind: "markdown", language: "markdown", size: 70, content: "# Pi Desktop\n\n- Electron 主进程\n- Pi 工具进程\n- React 渲染进程\n" };
       }
+      if (relativePath.endsWith(".pdf")) {
+        return { relativePath, name: "spec.pdf", kind: "pdf", size: 2048, workspace: demoSettings.workspace };
+      }
       throw new Error(`找不到演示文件：${relativePath}`);
     },
     async writeWorkspaceFile(relativePath: string, content: string, _workspace?: string): Promise<import("../../shared/protocol").WorkspaceFileWriteResult> {

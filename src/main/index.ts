@@ -1,12 +1,14 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { extname, join, resolve } from "node:path";
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, safeStorage, utilityProcess, type UtilityProcess } from "electron";
+import { Readable } from "node:stream";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, protocol, safeStorage, utilityProcess, type UtilityProcess } from "electron";
 import { spawn } from "node-pty";
 import { migrateSettings, normalizeVision } from "./settings.js";
 import { importExternalAttachment, workspaceRelativeAttachment } from "./attachments.js";
 import type { BrowserPreviewCommand, BrowserPreviewState, DesktopBootstrap, DesktopSettings, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot, TerminalCommand, TerminalEventData, WorkspaceDirectoryListing, WorkspaceEntryResult, WorkspaceFilePreview, WorkspaceFileSearchResult, WorkspaceFileWriteResult } from "../shared/protocol.js";
-import { createWorkspaceDirectory, createWorkspaceFile, deleteWorkspaceEntry, listWorkspaceDirectory, readWorkspaceFilePreview, renameWorkspaceEntry, searchWorkspaceFiles, writeWorkspaceFile } from "./workspace-preview.js";
+import { PREVIEW_FILE_SCHEME, parseWorkspaceFilePreviewUrl } from "../shared/protocol.js";
+import { createWorkspaceDirectory, createWorkspaceFile, deleteWorkspaceEntry, listWorkspaceDirectory, readWorkspaceFilePreview, renameWorkspaceEntry, safeRelativePath, searchWorkspaceFiles, writeWorkspaceFile } from "./workspace-preview.js";
 import { BrowserPreviewController } from "./browser-preview.js";
 import { TerminalManager, type PtyProcess, type PtySpawnOptions } from "./terminal-pty.js";
 
@@ -39,6 +41,36 @@ function readJson(path: string): unknown {
   try { return existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : undefined; } catch { return undefined; }
 }
 const imageMimeByExtension: Record<string, string> = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif" };
+
+// PDF 等大文件走自定义协议 pidesktop-file:// 由主进程流式读取，iframe 内
+// Chromium 内置查看器渲染。必须在 app ready 之前注册 scheme 特权。
+protocol.registerSchemesAsPrivileged([
+  { scheme: PREVIEW_FILE_SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, bypassCSP: true } }
+]);
+
+function registerPreviewFileProtocol(): void {
+  protocol.handle(PREVIEW_FILE_SCHEME, async (request) => {
+    const parsed = parseWorkspaceFilePreviewUrl(request.url);
+    if (!parsed) return new Response("预览地址无效", { status: 400 });
+    try {
+      const rootReal = await realpath(resolve(parsed.workspace));
+      if (rootReal && !safeRelativePath(rootReal, parsed.relativePath)) {
+        return new Response("预览文件必须位于当前工作区内", { status: 403 });
+      }
+      const candidate = resolve(rootReal, ...parsed.relativePath.split("/"));
+      const info = await stat(candidate);
+      if (!info.isFile()) return new Response("只能预览普通文件", { status: 404 });
+      if (extname(candidate).toLowerCase() !== ".pdf") return new Response("仅支持 PDF 预览", { status: 415 });
+      return new Response(Readable.toWeb(createReadStream(candidate)) as ReadableStream, {
+        headers: { "Content-Type": "application/pdf", "Content-Length": String(info.size) }
+      });
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException | undefined)?.code;
+      if (code === "ENOENT" || code === "ENOTDIR") return new Response("文件不存在或已被删除", { status: 404 });
+      throw error;
+    }
+  });
+}
 
 async function readAttachmentSelection(paths: string[], workspace?: string): Promise<PromptAttachment[]> {
   const root = workspace ? resolve(workspace) : undefined;
@@ -232,7 +264,7 @@ function registerIpc(): void {
     const workspace = loadSettings().workspace;
     if (!workspace) throw new Error("请先打开工作区，再选择预览文件");
     const result = mainWindow
-      ? await dialog.showOpenDialog(mainWindow, { title: "选择预览文件", defaultPath: workspace, properties: ["openFile"], filters: [{ name: "常见代码、Markdown 和资源", extensions: ["md", "markdown", "mdx", "js", "ts", "tsx", "jsx", "json", "css", "html", "htm", "svg", "png", "jpg", "jpeg", "gif", "webp", "bmp", "avif", "ico", "*" ] }] })
+      ? await dialog.showOpenDialog(mainWindow, { title: "选择预览文件", defaultPath: workspace, properties: ["openFile"], filters: [{ name: "常见代码、Markdown 和资源", extensions: ["md", "markdown", "mdx", "js", "ts", "tsx", "jsx", "json", "css", "html", "htm", "svg", "pdf", "png", "jpg", "jpeg", "gif", "webp", "bmp", "avif", "ico", "*" ] }] })
       : await dialog.showOpenDialog({ title: "选择预览文件", defaultPath: workspace, properties: ["openFile"] });
     if (result.canceled || !result.filePaths[0]) return undefined;
     const rootReal = await realpath(resolve(workspace));
@@ -308,6 +340,6 @@ function registerIpc(): void {
   });
   ipcMain.handle("runtime:send", (_event, command: RuntimeCommand): void => { updateSettings(command); sendToRuntime(command); });
 }
-app.whenReady().then(() => { Menu.setApplicationMenu(null); registerIpc(); startRuntime(); createWindow(); app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); }); });
+app.whenReady().then(() => { Menu.setApplicationMenu(null); registerPreviewFileProtocol(); registerIpc(); startRuntime(); createWindow(); app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); }); });
 app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
 app.on("before-quit", () => { browserPreviewController?.dispose(); terminalManager.disposeAll(); runtimeProcess?.kill(); });

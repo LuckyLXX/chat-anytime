@@ -71,7 +71,7 @@ const filenameLanguages: Record<string, string> = {
   makefile: "makefile"
 };
 
-function safeRelativePath(workspace: string, filePath: string): string | undefined {
+export function safeRelativePath(workspace: string, filePath: string): string | undefined {
   if (!filePath.trim()) return undefined;
   const root = resolve(workspace);
   const target = isAbsolute(filePath) ? resolve(filePath) : resolve(root, filePath);
@@ -137,6 +137,9 @@ export async function readWorkspaceFilePreview(workspace: string, requestedPath:
     const data = await readPrefix(candidate, imagePreviewLimit);
     return { ...base, kind: "image", mimeType: imageMimeType, data: data.toString("base64") };
   }
+  // PDF 由自定义协议 pidesktop-file:// 流式加载（渲染端 iframe 内 Chromium 查看器），
+  // 不在此处读取内容，避免大文件在 IPC 与渲染内存中复制。
+  if (extension === ".pdf") return { ...base, kind: "pdf" };
 
   const data = await readPrefix(candidate, textPreviewLimit);
   if (looksBinary(data)) return { ...base, kind: "binary" };

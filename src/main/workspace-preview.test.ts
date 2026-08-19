@@ -102,6 +102,17 @@ describe("workspace file preview", () => {
     expect(huge.data).toBeUndefined();
   });
 
+  it("classifies PDF as a streamed preview kind without reading content", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "pidesktop-pdf-"));
+    const pdfBytes = Buffer.from("%PDF-1.7\n%%EOF\n");
+    await writeFile(join(workspace, "manual.pdf"), pdfBytes);
+
+    const preview = await readWorkspaceFilePreview(workspace, "manual.pdf");
+    expect(preview).toMatchObject({ kind: "pdf", relativePath: "manual.pdf", name: "manual.pdf", size: pdfBytes.length, workspace });
+    expect(preview.content).toBeUndefined();
+    expect(preview.data).toBeUndefined();
+  });
+
   it("rejects traversal, absolute paths, directories and symlinks outside the workspace", async () => {
     const root = await mkdtemp(join(tmpdir(), "pidesktop-preview-boundary-"));
     const workspace = join(root, "workspace");
