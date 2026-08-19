@@ -425,14 +425,10 @@ export interface ResourceCatalog {
 
 export type TodoStatus = "pending" | "in_progress" | "completed";
 
+/** dsh 式最小条目形状：整表替换语义下不需要稳定 id / 备注 / 时间戳。 */
 export interface Todo {
-  id: string;
-  title: string;
+  content: string;
   status: TodoStatus;
-  notes?: string;
-  createdAt: number;
-  updatedAt: number;
-  completedAt?: number;
 }
 
 /**
@@ -568,9 +564,6 @@ export type RuntimeCommand =
   | { type: "mcp.server.toggle"; name: string; enabled: boolean }
   | { type: "mcp.server.delete"; name: string; scope: "project" | "global" }
   | { type: "skill.toggle"; id: string; enabled: boolean }
-  | { type: "todo.create"; title: string; notes?: string }
-  | { type: "todo.update"; id: string; title?: string; notes?: string; status?: TodoStatus }
-  | { type: "todo.delete"; id: string }
   | { type: "background.kill"; id: string }
   | { type: "resources.reload" }
   | { type: "permission.resolve"; id: string; decision: PermissionDecision }

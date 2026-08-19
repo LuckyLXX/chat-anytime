@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { Check, ChevronDown, ChevronUp, ListTodo, Pencil, Square, Terminal, Trash2, X } from "lucide-react";
+import { Check, ChevronDown, ChevronUp, ListTodo, Square, Terminal, X } from "lucide-react";
 import type { BackgroundProcess, RuntimeCommand, Todo, TodoStatus, ToolExecution } from "../../shared/protocol";
 import { toolLabel } from "../../shared/locale";
 import { useDesktopStore } from "./store";
@@ -7,11 +7,6 @@ import { useDesktopStore } from "./store";
 type PanelState = "closed" | "open" | "collapsed";
 
 const statusLabels: Record<TodoStatus, string> = { pending: "待办", in_progress: "进行中", completed: "已完成" };
-const statusCycle: TodoStatus[] = ["pending", "in_progress", "completed"];
-
-function nextStatus(status: TodoStatus): TodoStatus {
-  return statusCycle[(statusCycle.indexOf(status) + 1) % statusCycle.length]!;
-}
 
 function executionCommand(execution: ToolExecution): string {
   if (execution.name === "bash") {
@@ -30,8 +25,8 @@ function formatElapsed(startedAt: number, now: number): string {
 
 /**
  * Floating task panel in the chat window (collapsible). Shows the live todo
- * list (read-only for the user — tasks are created and executed by the agent
- * via todo_create/todo_update/todo_delete) plus anything running in the
+ * list — read-only for the user (dsh-style single owner: the agent maintains
+ * it via todo_write whole-list replacement) — plus anything running in the
  * background: running bash tool executions and detached background processes
  * (dev servers etc.), each with a stop control.
  */
@@ -42,10 +37,6 @@ export function TaskPanel(): ReactNode {
   const [panel, setPanel] = useState<PanelState>("closed");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
-  const [editingId, setEditingId] = useState<string>();
-  const [editTitle, setEditTitle] = useState("");
-  const [editNotes, setEditNotes] = useState("");
-  const [editStatus, setEditStatus] = useState<TodoStatus>("pending");
   const [now, setNow] = useState(() => Date.now());
 
   const running = useMemo(() => executions.filter((execution) => execution.status === "running"), [executions]);
@@ -72,23 +63,11 @@ export function TaskPanel(): ReactNode {
     }
   }
 
-  function startEdit(todo: Todo): void {
-    setEditingId(todo.id);
-    setEditTitle(todo.title);
-    setEditNotes(todo.notes ?? "");
-    setEditStatus(todo.status);
-  }
-
-  function saveEdit(todo: Todo): void {
-    if (!editTitle.trim()) return;
-    void run({ type: "todo.update", id: todo.id, title: editTitle.trim(), notes: editNotes, status: editStatus }).then((ok) => {
-      if (ok) setEditingId(undefined);
-    });
-  }
-
+  // Completed items sink to the bottom; the model-controlled list order is
+  // preserved within each group (sort is stable).
   const ordered = [...todos].sort((left, right) => {
     const rank = (todo: Todo): number => (todo.status === "completed" ? 1 : 0);
-    return rank(left) - rank(right) || left.createdAt - right.createdAt;
+    return rank(left) - rank(right);
   });
   const activeCount = todos.filter((todo) => todo.status !== "completed").length;
 
@@ -142,35 +121,13 @@ export function TaskPanel(): ReactNode {
             </div>
           )}
           <div className="task-panel-list">
-            {todos.length === 0 ? <p className="task-panel-empty">暂无任务。让助手用 todo_create 创建任务。</p> : ordered.map((todo) => (
-              editingId === todo.id ? (
-                <div className="task-panel-item task-panel-editing" key={todo.id}>
-                  <div className="task-panel-edit-fields">
-                    <input value={editTitle} placeholder="任务标题" aria-label="任务标题" disabled={busy} onChange={(event) => setEditTitle(event.target.value)} />
-                    <input value={editNotes} placeholder="备注（可选）" aria-label="任务备注" disabled={busy} onChange={(event) => setEditNotes(event.target.value)} />
-                    <select value={editStatus} aria-label="任务状态" disabled={busy} onChange={(event) => setEditStatus(event.target.value as TodoStatus)}>
-                      {statusCycle.map((status) => <option key={status} value={status}>{statusLabels[status]}</option>)}
-                    </select>
-                  </div>
-                  <div className="task-panel-edit-actions">
-                    <button type="button" title="保存修改" aria-label="保存修改" disabled={busy || !editTitle.trim()} onClick={() => saveEdit(todo)}><Check size={12} />保存</button>
-                    <button type="button" title="取消编辑" aria-label="取消编辑" disabled={busy} onClick={() => setEditingId(undefined)}><X size={12} />取消</button>
-                  </div>
+            {todos.length === 0 ? <p className="task-panel-empty">暂无任务。让助手用 todo_write 维护任务清单。</p> : ordered.map((todo, index) => (
+              <div className={`task-panel-item${todo.status === "completed" ? " completed" : ""}`} key={`${index}-${todo.content}`}>
+                <div className="task-panel-copy">
+                  <strong>{todo.content}</strong>
+                  <span className={`task-panel-status ${todo.status}`}>{statusLabels[todo.status]}</span>
                 </div>
-              ) : (
-                <div className={`task-panel-item${todo.status === "completed" ? " completed" : ""}`} key={todo.id}>
-                  <label className="task-panel-check" title={todo.status === "completed" ? "标回待办" : "标记完成"}>
-                    <input type="checkbox" checked={todo.status === "completed"} disabled={busy} onChange={(event) => void run({ type: "todo.update", id: todo.id, status: event.target.checked ? "completed" : "pending" })} />
-                  </label>
-                  <div className="task-panel-copy">
-                    <strong>{todo.title}</strong>
-                    {todo.notes && <small>{todo.notes}</small>}
-                    <button className={`task-panel-status ${todo.status}`} type="button" title="点击切换状态（待办 → 进行中 → 已完成）" disabled={busy} onClick={() => void run({ type: "todo.update", id: todo.id, status: nextStatus(todo.status) })}>{statusLabels[todo.status]}</button>
-                  </div>
-                  <button className="task-panel-edit" type="button" title="编辑任务" aria-label={`编辑任务 ${todo.title}`} disabled={busy} onClick={() => startEdit(todo)}><Pencil size={12} /></button>
-                  <button className="task-panel-remove" type="button" title="删除任务" aria-label={`删除任务 ${todo.title}`} disabled={busy} onClick={() => void run({ type: "todo.delete", id: todo.id })}><Trash2 size={13} /></button>
-                </div>
-              )
+              </div>
             ))}
           </div>
         </>

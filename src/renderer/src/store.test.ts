@@ -49,14 +49,14 @@ describe("desktop permission queue", () => {
   it("publishes the native todo list over the todos channel", () => {
     const state = useDesktopStore.getState();
     const todos: Todo[] = [
-      { id: "todo-1", title: "审阅变更", status: "in_progress", createdAt: 1, updatedAt: 2 },
-      { id: "todo-2", title: "提交", status: "pending", createdAt: 3, updatedAt: 3 }
+      { content: "审阅变更", status: "in_progress" },
+      { content: "提交", status: "pending" }
     ];
     state.handleRuntimeMessage({ type: "todos", todos });
 
     expect(useDesktopStore.getState().todos).toEqual(todos);
 
-    state.handleRuntimeMessage({ type: "todos", todos: [{ ...todos[0]!, status: "completed", completedAt: 5 }] });
+    state.handleRuntimeMessage({ type: "todos", todos: [{ ...todos[0]!, status: "completed" }] });
     expect(useDesktopStore.getState().todos).toHaveLength(1);
     expect(useDesktopStore.getState().todos[0]?.status).toBe("completed");
   });

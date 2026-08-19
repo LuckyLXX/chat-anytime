@@ -24,7 +24,8 @@ const toolLabels: Record<string, string> = {
   grep: "搜索内容",
   find: "查找文件",
   ls: "列出目录",
-  ask_question: "向用户提问"
+  ask_question: "向用户提问",
+  todo_write: "更新任务清单"
 };
 
 export function toolLabel(name: string): string {

@@ -1,14 +1,12 @@
-import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Todo, TodoStatus } from "../shared/protocol.js";
 
 /**
- * JSON-backed Todo store (atomic tmp+rename). Lives at
- * `<agentDir>/pidesktop-todos.json`. Both the agent (via customTools) and the
- * UI (via the `todo.*` commands) mutate through this store; every mutation
- * fires `onChanged` so the runtime can broadcast the fresh list to the
- * renderer.
+ * JSON-backed Todo store (atomic tmp+rename), session-scoped at
+ * `chatanytime-sessions/<agentId>/todos/<sessionId>.json`. dsh 式整表替换
+ * 语义：清单归模型单一所有，`todo_write` 每次整体覆盖，UI 只读渲染；
+ * 每次写入触发 `onChanged` 把最新列表广播给渲染端。
  */
 
 interface TodoFile {
@@ -17,25 +15,29 @@ interface TodoFile {
 
 export interface TodoStore {
   list(): Todo[];
-  create(title: string, notes?: string): Todo;
-  update(id: string, patch: { title?: string; notes?: string; status?: TodoStatus }): Todo | undefined;
-  remove(id: string): boolean;
+  replaceAll(items: readonly Todo[]): void;
 }
 
+const STATUSES: readonly TodoStatus[] = ["pending", "in_progress", "completed"];
+
+/**
+ * 读取时归一化磁盘形状。接受当前 `{content, status}`；也接受旧版
+ * `{id, title, notes?, status}`（title/notes 合并进 content），让既有会话
+ * 文件与 legacy 全局文件迁移后仍可读。
+ */
 function normalizeTodo(value: unknown): Todo | undefined {
   if (!value || typeof value !== "object") return undefined;
   const todo = value as Record<string, unknown>;
-  if (typeof todo.id !== "string" || typeof todo.title !== "string" || typeof todo.status !== "string") return undefined;
-  const now = Date.now();
-  return {
-    id: todo.id,
-    title: todo.title,
-    status: todo.status as TodoStatus,
-    ...(typeof todo.notes === "string" && todo.notes ? { notes: todo.notes } : {}),
-    createdAt: typeof todo.createdAt === "number" ? todo.createdAt : now,
-    updatedAt: typeof todo.updatedAt === "number" ? todo.updatedAt : now,
-    ...(typeof todo.completedAt === "number" ? { completedAt: todo.completedAt } : {})
-  };
+  const status = STATUSES.find((candidate) => candidate === todo.status);
+  if (!status) return undefined;
+  if (typeof todo.content === "string" && todo.content.trim()) {
+    return { content: todo.content.trim(), status };
+  }
+  if (typeof todo.title === "string" && todo.title.trim()) {
+    const notes = typeof todo.notes === "string" && todo.notes.trim() ? `（${todo.notes.trim()}）` : "";
+    return { content: `${todo.title.trim()}${notes}`, status };
+  }
+  return undefined;
 }
 
 /**
@@ -79,59 +81,13 @@ export function createTodoStore(filePath: string, onChanged: () => void): TodoSt
     renameSync(tempPath, filePath);
   }
 
-  function commit(mutate: (todos: Todo[]) => void): void {
-    const file = readFile();
-    mutate(file.todos);
-    writeFile(file);
-    onChanged();
-  }
-
   return {
     list(): Todo[] {
-      return readFile().todos.sort((left, right) => left.createdAt - right.createdAt);
+      return readFile().todos;
     },
-    create(title: string, notes?: string): Todo {
-      const now = Date.now();
-      const todo: Todo = {
-        id: randomUUID(),
-        title: title.trim(),
-        status: "pending",
-        ...(notes?.trim() ? { notes: notes.trim() } : {}),
-        createdAt: now,
-        updatedAt: now
-      };
-      commit((todos) => { todos.push(todo); });
-      return todo;
-    },
-    update(id: string, patch: { title?: string; notes?: string; status?: TodoStatus }): Todo | undefined {
-      let updated: Todo | undefined;
-      commit((todos) => {
-        const index = todos.findIndex((todo) => todo.id === id);
-        if (index < 0) return;
-        const current = todos[index]!;
-        const next: Todo = { ...current, updatedAt: Date.now() };
-        if (typeof patch.title === "string" && patch.title.trim()) next.title = patch.title.trim();
-        if (patch.notes !== undefined) {
-          if (patch.notes.trim()) next.notes = patch.notes.trim();
-          else delete next.notes;
-        }
-        if (patch.status && patch.status !== current.status) {
-          next.status = patch.status;
-          if (patch.status === "completed") next.completedAt = Date.now();
-          else delete next.completedAt;
-        }
-        todos[index] = next;
-        updated = next;
-      });
-      return updated;
-    },
-    remove(id: string): boolean {
-      let removed = false;
-      commit((todos) => {
-        const index = todos.findIndex((todo) => todo.id === id);
-        if (index >= 0) { todos.splice(index, 1); removed = true; }
-      });
-      return removed;
+    replaceAll(items: readonly Todo[]): void {
+      writeFile({ todos: items.map((item) => ({ content: item.content.trim(), status: item.status })) });
+      onChanged();
     }
   };
 }

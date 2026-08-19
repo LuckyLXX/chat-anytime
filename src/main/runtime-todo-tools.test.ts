@@ -1,75 +1,78 @@
-import { describe, expect, it } from "vitest";
-import type { Todo } from "../shared/protocol.js";
-import { buildTodoPromptBlock, createTodoContextExtension, summarizeTodos } from "./runtime-todo-tools.js";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { buildTodoTools } from "./runtime-todo-tools.js";
+import { createTodoStore } from "./todo-store.js";
 
-interface FakePi {
-  handlers: Map<string, (event: Record<string, unknown>) => unknown>;
-  on(event: string, handler: (event: Record<string, unknown>) => unknown): void;
-}
+const temporaryDirectories: string[] = [];
 
-function makeFakePi(): FakePi {
-  return {
-    handlers: new Map(),
-    on(event, handler) {
-      this.handlers.set(event, handler);
-    }
-  };
-}
-
-function bind(deps: { todos: () => readonly Todo[] }): FakePi {
-  const pi = makeFakePi();
-  (createTodoContextExtension(deps) as unknown as { factory: (pi: FakePi) => void }).factory(pi);
-  return pi;
-}
-
-const sampleTodos: Todo[] = [
-  { id: "todo-1", title: "审阅变更", status: "in_progress", createdAt: 1, updatedAt: 2 },
-  { id: "todo-2", title: "提交", status: "completed", createdAt: 3, updatedAt: 3 }
-];
-
-describe("todo prompt block", () => {
-  it("returns undefined for an empty list", () => {
-    expect(buildTodoPromptBlock([])).toBeUndefined();
-  });
-
-  it("summarizes todos with status marks", () => {
-    expect(summarizeTodos(sampleTodos)).toContain("- [~] 审阅变更");
-    expect(summarizeTodos(sampleTodos)).toContain("- [x] 提交");
-  });
+afterEach(async () => {
+  await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
-describe("todo context extension", () => {
-  it("injects the current todo list into the per-turn system prompt", () => {
-    const pi = bind({ todos: () => sampleTodos });
-    const handler = pi.handlers.get("before_agent_start")!;
+async function makeTool() {
+  const directory = await mkdtemp(join(tmpdir(), "pi-desktop-todo-tool-"));
+  temporaryDirectories.push(directory);
+  let changes = 0;
+  const store = createTodoStore(join(directory, "todos.json"), () => { changes += 1; });
+  const tools = buildTodoTools({ store });
+  return { tool: tools[0]!, store, get changes() { return changes; } };
+}
 
-    const result = handler({ type: "before_agent_start", prompt: "继续", systemPrompt: "基础提示词" });
+interface ToolRunResult {
+  content: { type: string; text?: string }[];
+}
 
-    expect(result).toBeDefined();
-    const { systemPrompt } = result as { systemPrompt: string };
-    expect(systemPrompt).toContain("基础提示词");
-    expect(systemPrompt).toContain("当前任务清单（Todo 面板）");
-    expect(systemPrompt).toContain("- [x] 提交");
-    // The user prompt itself must stay untouched.
-    expect(systemPrompt).not.toContain("继续");
+// defineTool 推断的 execute 需要全部 5 个参数；测试里其余参数恒为空。
+async function runTool(tool: { execute?: unknown } | undefined, id: string, params: unknown): Promise<ToolRunResult> {
+  if (typeof tool?.execute !== "function") throw new Error("tool has no execute");
+  const execute = tool.execute as (toolCallId: string, params: unknown, signal: undefined, onUpdate: undefined, ctx: undefined) => Promise<ToolRunResult>;
+  return execute(id, params, undefined, undefined, undefined);
+}
+
+function resultText(result: ToolRunResult): string {
+  return result.content.map((part) => part.text ?? "").join("\n");
+}
+
+describe("todo_write tool", () => {
+  it("replaces the whole list and returns compact counts only", async () => {
+    const harness = await makeTool();
+    const { tool, store } = harness;
+
+    const first = await runTool(tool, "call-1", { todos: [
+      { content: "审阅变更", status: "in_progress" },
+      { content: "提交", status: "pending" }
+    ] });
+    expect(resultText(first)).toContain("1 项待办、1 项进行中、0 项已完成");
+    // The whole list already lives in the call args — the result must not echo it.
+    expect(resultText(first)).not.toContain("审阅变更");
+
+    const second = await runTool(tool, "call-2", { todos: [{ content: "审阅变更", status: "completed" }] });
+    expect(resultText(second)).toContain("0 项待办、0 项进行中、1 项已完成");
+
+    // Whole-list replacement: the second write replaced the first.
+    expect(store.list()).toEqual([{ content: "审阅变更", status: "completed" }]);
+    expect(harness.changes).toBe(2);
   });
 
-  it("leaves the system prompt unchanged when there are no todos", () => {
-    const pi = bind({ todos: () => [] });
-    const handler = pi.handlers.get("before_agent_start")!;
+  it("rejects empty or duplicate content and parallel in_progress items", async () => {
+    const { tool } = await makeTool();
 
-    expect(handler({ type: "before_agent_start", prompt: "继续", systemPrompt: "基础提示词" })).toBeUndefined();
+    await expect(runTool(tool, "call-1", { todos: [{ content: "  ", status: "pending" }] })).rejects.toThrow("非空");
+    await expect(runTool(tool, "call-2", { todos: [
+      { content: "同名", status: "pending" },
+      { content: "同名", status: "completed" }
+    ] })).rejects.toThrow("重复");
+    await expect(runTool(tool, "call-3", { todos: [
+      { content: "任务一", status: "in_progress" },
+      { content: "任务二", status: "in_progress" }
+    ] })).rejects.toThrow("in_progress");
   });
 
-  it("re-reads the todo list lazily so each turn sees the latest state", () => {
-    let current: readonly Todo[] = [];
-    const pi = bind({ todos: () => current });
-    const handler = pi.handlers.get("before_agent_start")!;
-
-    expect(handler({ type: "before_agent_start", prompt: "继续", systemPrompt: "基础提示词" })).toBeUndefined();
-
-    current = sampleTodos;
-    const result = handler({ type: "before_agent_start", prompt: "继续", systemPrompt: "基础提示词" }) as { systemPrompt: string };
-    expect(result.systemPrompt).toContain("当前任务清单（Todo 面板）");
+  it("trims content before persisting", async () => {
+    const { tool, store } = await makeTool();
+    await runTool(tool, "call-1", { todos: [{ content: "  审阅变更  ", status: "pending" }] });
+    expect(store.list()).toEqual([{ content: "审阅变更", status: "pending" }]);
   });
 });

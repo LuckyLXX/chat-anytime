@@ -92,7 +92,7 @@ npm run package:win
 
 - **MCP Server**：支持 stdio/HTTP，配置写入项目 `.mcp.json` 或全局 `mcp.json`，启用/停用/删除，状态与工具数实时显示
 - **Skill**：把 `<slug>/SKILL.md` 放到全局 `pidesktop-skills/` 或项目 `.pidesktop-skills/` 即可被发现，勾选启用后注入系统提示，用 `/skill:<name>` 调用
-- **Todo**：本地待办清单（AI 任务），按会话维度存储（每个会话一份，切换会话自动跟随）。聊天窗口右上角有悬浮「任务」面板（可折叠/关闭），实时展示并支持手动新增/勾选完成/删除；助手可通过 `todo_create`/`todo_list`/`todo_update`/`todo_delete` 工具维护
+- **Todo**：本地待办清单（AI 任务），按会话维度存储（每个会话一份，切换会话自动跟随）。dsh 式单一所有者语义：助手通过 `todo_write` 整表替换维护清单（状态只随工具调用追加在对话尾部，不破坏提示词前缀缓存）；聊天窗口右上角的悬浮「任务」面板（可折叠/关闭）只读实时展示
 - **子代理**：助手可通过 `delegate_agent` 把独立子任务委派给子代理（单层，权限走同一审批闸口）
 
 ## 当前限制

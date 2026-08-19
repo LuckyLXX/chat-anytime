@@ -148,8 +148,9 @@ let activeRuntime: SessionRuntimeRecord | undefined;
 // disk and is rebuilt on reopen); running sessions are never evicted.
 const MAX_PARKED_SESSIONS = 4;
 
-// Mirrors of the active record's todo state: the task panel and the per-turn
-// todo context (injected into the system prompt) follow the session being viewed.
+// Mirrors of the active record's todo state: the read-only task panel follows
+// the session being viewed (no prompt injection — todo_write args are the only
+// model-visible channel).
 let todoStore: TodoStore | undefined;
 let todos: Todo[] = [];
 let resourceOperationBusy = false;
@@ -305,7 +306,7 @@ function sessionTodosPath(sessionId: string): string {
 
 /** Build the Todo customTools for a session-scoped store. */
 function buildTodoTools(store: TodoStore): ToolDefinition[] {
-  return runtimeTodoTools.buildTodoTools({ store, onChanged: refreshTodos });
+  return runtimeTodoTools.buildTodoTools({ store });
 }
 
 function errorText(error: unknown): string {
@@ -1120,12 +1121,9 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
         auditDir: () => agentSessionRoot(),
         sessionId: () => sessionHolder.session?.sessionId ?? activeSessionManager.getSessionId(),
         warn: (message) => void post({ type: "log", level: "warn", message })
-      }).extension,
-      // Current task list goes into the per-turn system prompt (before_agent_start)
-      // instead of the user message, so the bubble never shows todo content.
-      runtimeTodoTools.createTodoContextExtension({ todos: () => recordBox?.todoStore.list() ?? [] })
+      }).extension
     ],
-    systemPromptOverride: (base) => [base, recordAgent.systemPrompt, recordAgent.divMode ? buildDivModePrompt() : undefined, buildSkillsSystemPromptBlock(runtimeSkills.activeSkillsFor(nativeSkills, recordAgent)), runtimeTodoTools.buildTodoSystemPromptBlock()].filter(Boolean).join("\n\n")
+    systemPromptOverride: (base) => [base, recordAgent.systemPrompt, recordAgent.divMode ? buildDivModePrompt() : undefined, buildSkillsSystemPromptBlock(runtimeSkills.activeSkillsFor(nativeSkills, recordAgent))].filter(Boolean).join("\n\n")
   });
   await resourceLoader.reload();
   syncSkills();
@@ -1391,8 +1389,8 @@ async function preparePromptPayload(text: string, attachments: PromptAttachment[
   const attachmentsBlock = fileRefs.length
     ? `项目文件附件（请使用 read 工具按需读取）：\n${fileRefs.map((path) => `- ${path}`).join("\n")}`
     : undefined;
-  // 注意：当前任务清单不再拼进用户消息文本（否则会随气泡一起发给 AI），
-  // 改由 createTodoContextExtension 通过 before_agent_start 注入当轮系统提示词。
+  // 注意：当前任务清单不再进入任何提示词位置。dsh 式单一所有者语义下
+  // 清单状态只通过 todo_write 的调用参数出现在对话尾部（纯追加）。
   return {
     text: attachmentsBlock ? `${text}\n\n${attachmentsBlock}` : text,
     images
@@ -1915,24 +1913,6 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         setSkillEnabled(skillPaths().statePath, command.id, command.enabled);
         await reloadRuntimeResources();
       });
-      break;
-    }
-    case "todo.create": {
-      if (!todoStore) throw new Error("请先打开一个会话，再管理任务");
-      todoStore.create(command.title, command.notes);
-      refreshTodos();
-      break;
-    }
-    case "todo.update": {
-      if (!todoStore) throw new Error("请先打开一个会话，再管理任务");
-      if (!todoStore.update(command.id, { ...(command.title !== undefined ? { title: command.title } : {}), ...(command.notes !== undefined ? { notes: command.notes } : {}), ...(command.status !== undefined ? { status: command.status } : {}) })) throw new Error("找不到要更新的 Todo");
-      refreshTodos();
-      break;
-    }
-    case "todo.delete": {
-      if (!todoStore) throw new Error("请先打开一个会话，再管理任务");
-      if (!todoStore.remove(command.id)) throw new Error("找不到要删除的 Todo");
-      refreshTodos();
       break;
     }
     case "background.kill":
