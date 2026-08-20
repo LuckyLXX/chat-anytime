@@ -1250,7 +1250,11 @@ html[data-theme-wallpaper="true"] .desktop-shell { background: transparent; }
 html[data-theme-wallpaper="true"] .sidebar,
 html[data-theme-wallpaper="true"] .topbar,
 html[data-theme-wallpaper="true"] .right-panel,
-html[data-theme-wallpaper="true"] .composer {
+html[data-theme-wallpaper="true"] .composer,
+/* 面板内部自带不透明底色的分栏条也纳入同一透明度：设置页左导航、右面板顶部标签、侧栏分页。 */
+html[data-theme-wallpaper="true"] .panel-tabs,
+html[data-theme-wallpaper="true"] .settings-tabs,
+html[data-theme-wallpaper="true"] .sidebar-tabs {
   background: color-mix(in srgb, var(--panel-bg) var(--panel-alpha, 100%), transparent);
   backdrop-filter: blur(16px) saturate(120%);
   -webkit-backdrop-filter: blur(16px) saturate(120%);
