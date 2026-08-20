@@ -246,8 +246,15 @@ describe("buildVisionTools", () => {
     const tool = toolOf(h);
     expect(tool.name).toBe("recognize_images");
     expect(tool.label).toBe("识别图片");
-    // Schema must never carry dynamic state: only the optional files array.
-    expect(tool.parameters).toEqual({ type: "object", properties: { files: expect.objectContaining({ type: "array" }) } });
+    // Schema must never carry dynamic state: only the optional files array
+    // and the per-call guidance prompt.
+    expect(tool.parameters).toEqual({
+      type: "object",
+      properties: {
+        files: expect.objectContaining({ type: "array" }),
+        prompt: expect.objectContaining({ type: "string" })
+      }
+    });
   });
 
   it("returns a no-op hint when neither pending images nor files are present", async () => {
@@ -270,6 +277,31 @@ describe("buildVisionTools", () => {
     const firstContent = JSON.stringify(h.completeSimple.mock.calls[0]);
     expect(firstContent).toContain("aaa");
     expect(firstContent).toContain("这张图讲什么？");
+  });
+
+  it("uses the model-supplied prompt as the vision system prompt, trimmed", async () => {
+    const h = harness({ prompt: "设置里的全局自定义提示词" });
+    h.setPending({ images: [image("aaa")], question: "" });
+    await runTool(toolOf(h), "call-1", { prompt: "  逐字转写报错对话框中的全部文字  " });
+    const systemPrompt = (h.completeSimple.mock.calls[0] as unknown[])[1] as { systemPrompt: string };
+    expect(systemPrompt.systemPrompt).toBe("逐字转写报错对话框中的全部文字");
+  });
+
+  it("falls back to the settings prompt when the model passes none or only whitespace", async () => {
+    for (const params of [{}, { prompt: "   " }]) {
+      const h = harness({ prompt: "设置里的全局自定义提示词" });
+      h.setPending({ images: [image("aaa")], question: "" });
+      await runTool(toolOf(h), "call-1", params);
+      const context = (h.completeSimple.mock.calls[0] as unknown[])[1] as { systemPrompt: string };
+      expect(context.systemPrompt).toBe("设置里的全局自定义提示词");
+    }
+  });
+
+  it("guidance applies to file images too, not only pending turn images", async () => {
+    const h = harness();
+    await runTool(toolOf(h), "call-1", { files: ["shot.png"], prompt: "描述界面元素及其相对位置" });
+    const context = (h.completeSimple.mock.calls[0] as unknown[])[1] as { systemPrompt: string };
+    expect(context.systemPrompt).toBe("描述界面元素及其相对位置");
   });
 
   it("reads model-supplied image files and labels them in the result", async () => {

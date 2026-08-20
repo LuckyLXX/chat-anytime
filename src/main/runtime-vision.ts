@@ -6,10 +6,12 @@
 // the model calls the tool on its own initiative to recognize them, and may
 // pass `files` to read image files directly (e.g. its own screenshots) so
 // UI-automation loops (screenshot → look → act) work without a multimodal
-// model. Pure over injected dependencies so it is testable without Pi or
-// Electron. The tool schema is byte-stable: no dynamic state (image counts,
-// prompts) ever enters the definition — such state flows only through tool
-// arguments at the conversation tail.
+// model, or a `prompt` with per-call recognition guidance that overrides the
+// settings-level custom prompt (blank/absent falls back to it, then the
+// built-in default). Pure over injected dependencies so it is testable
+// without Pi or Electron. The tool schema is byte-stable: no dynamic state
+// (image counts, prompts) ever enters the definition — such state flows only
+// through tool arguments at the conversation tail.
 
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
@@ -175,17 +177,23 @@ export function buildVisionTools(deps: VisionToolDeps): ToolDefinition[] {
       name: "recognize_images",
       label: "识别图片",
       description: [
-        "识别用户发送的图片或指定图片文件，返回逐图描述（文字逐字转写、物体/人物/布局、图表与数据要点等），供你基于图片内容继续回答或操作。",
-        "用法一：用户在某条消息中附带了图片，但当前对话模型不支持图片输入——先调用本工具（不传参数）识别全部附带图片，再回答。",
+        "识别用户发送的图片或指定图片文件，返回逐图描述，供你基于图片内容继续回答或操作。",
+        "用法一：用户在某条消息中附带了图片，但当前对话模型不支持图片输入——先调用本工具识别全部附带图片，再回答。",
         "用法二：自行查看工作区内的图片文件（例如你用 bash 生成的截图）——传入 files 参数（相对工作区的路径列表，最多 5 个），识别结果按调用顺序标注文件名。",
+        "prompt 参数可选：本次识别的指导提示词，由你按当前需要编写——说明重点识别什么、按什么格式描述（如「逐字转写报错对话框中的全部文字」「读出图表各数据点的数值并按序列出」）；不传则默认全面描述（文字转写、物体/人物/布局、图表要点）。",
         "一次调用可同时识别附带图片与文件图片；识别不成功时根据错误信息修正（路径、格式）后重试。"
       ].join(""),
       promptSnippet: "recognize_images: 识别用户附图或工作区图片文件",
       parameters: Type.Object({
-        files: Type.Optional(Type.Array(Type.String({ description: "可选，工作区内的图片文件路径（相对路径，如 screenshot.png），最多 5 个" }), { maxItems: MAX_VISION_FILES }))
+        files: Type.Optional(Type.Array(Type.String({ description: "可选，工作区内的图片文件路径（相对路径，如 screenshot.png），最多 5 个" }), { maxItems: MAX_VISION_FILES })),
+        prompt: Type.Optional(Type.String({ description: "可选，本次识别的指导提示词：告诉视觉模型重点识别什么、按什么格式描述；不传则默认全面描述" }))
       }),
       execute: async (_id, params) => {
         const files = (Array.isArray(params?.files) ? params.files.filter((f): f is string => typeof f === "string").map((f) => f.trim()).filter((f) => f.length > 0) : []).slice(0, MAX_VISION_FILES);
+        // The calling model's per-call guidance wins over the settings-level
+        // custom prompt; blank/absent falls back to it, then the built-in
+        // default (buildVisionSystemPrompt).
+        const guidance = typeof params?.prompt === "string" && params.prompt.trim() ? params.prompt.trim() : undefined;
         const pending = deps.pendingUserImages();
         const pendingImages = pending?.images ?? [];
         if (files.length === 0 && pendingImages.length === 0) {
@@ -203,7 +211,7 @@ export function buildVisionTools(deps: VisionToolDeps): ToolDefinition[] {
         try {
           const labels = [...pendingImages.map(() => undefined), ...files];
           const images = [...pendingImages, ...fileImages];
-          const results = await recognizeImages(runtime, model, { prompt, question: pending?.question ?? "", images });
+          const results = await recognizeImages(runtime, model, { prompt: guidance ?? prompt, question: pending?.question ?? "", images });
           return { content: [{ type: "text" as const, text: formatVisionBlock(results, model.name || model.id, labels) }], details: { consumed: images.length } };
         } catch (error) {
           throw new Error(`图片识别失败：${deps.errorText(error)}`);
