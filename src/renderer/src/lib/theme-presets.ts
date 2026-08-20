@@ -1,4 +1,4 @@
-import type { ThemeMode, ThemePresetId, WallpaperOpacityOverrides } from "../../../shared/protocol";
+import type { ThemeMode, ThemePresetId, WallpaperOpacityOverrides, BubbleOpacityOverrides } from "../../../shared/protocol";
 import blueDreamWallpaper from "../assets/blue-dream-wallpaper.png";
 
 export interface ThemePresetDefinition {
@@ -345,6 +345,25 @@ export function wallpaperOpacityCss(overrides: WallpaperOpacityOverrides | undef
     const value = overrides[mode];
     if (typeof value !== "number" || !Number.isFinite(value)) return [];
     return [`${scopeSelector}[data-theme-wallpaper="true"][data-theme-effective="${mode}"] {\n  --chat-bg-opacity: ${String(Number(clampWallpaperOpacity(value).toFixed(4)))} !important;\n}`];
+  }).join("\n");
+}
+
+/**
+ * Emit the bubble-opacity slider preference for the main document or a
+ * preview scope. Same mechanics as wallpaperOpacityCss: injected after the
+ * custom CSS on a more specific selector so it beats the base stylesheet
+ * defaults; the value is an integer percentage for the --bubble-alpha
+ * variable that the wallpaper-mode bubble rules consume via
+ * `var(--bubble-alpha, 80%)`.
+ */
+export function bubbleOpacityCss(overrides: BubbleOpacityOverrides | undefined, scopeSelector = ":root"): string {
+  if (!overrides) return "";
+  return (["light", "dark"] as const).flatMap((mode) => {
+    const value = overrides[mode];
+    if (typeof value !== "number" || !Number.isFinite(value)) return [];
+    return [`${scopeSelector}[data-theme-wallpaper="true"][data-theme-effective="${mode}"] {
+  --bubble-alpha: ${String(Math.round(clampWallpaperOpacity(value) * 100))}% !important;
+}`];
   }).join("\n");
 }
 

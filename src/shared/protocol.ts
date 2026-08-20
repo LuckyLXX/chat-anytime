@@ -91,6 +91,16 @@ export interface WallpaperOpacityOverrides {
   dark?: number;
 }
 
+/**
+ * Per-mode user preference for the chat-bubble translucency slider (widget /
+ * bubble-mode only): the wallpaper-mode alpha for message bubbles and their
+ * inner fills, 0-1. Undefined means the application default (0.8) applies.
+ */
+export interface BubbleOpacityOverrides {
+  light?: number;
+  dark?: number;
+}
+
 export interface AppearanceSettings {
   theme: "system" | "light" | "dark";
   themePreset: ThemePresetId;
@@ -99,6 +109,7 @@ export interface AppearanceSettings {
   customCssAssets?: ThemeAssetMap;
   customThemes: CustomThemeDefinition[];
   wallpaperOpacity?: WallpaperOpacityOverrides;
+  bubbleOpacity?: BubbleOpacityOverrides;
   showThinking: boolean;
 }
 
@@ -120,6 +131,14 @@ export interface MemorySettings {
   enabled: boolean;
 }
 
+/**
+ * 钩子系统总开关：关闭后所有事件不触发任何动作（规则保留在配置文件中）。
+ * 与 memory 同款语义：字段缺省视为启用，消费方用 `settings.hooks?.enabled !== false` 判断。
+ */
+export interface HooksSettings {
+  enabled: boolean;
+}
+
 export interface DesktopSettings {
   version: 2;
   workspace?: string;
@@ -132,6 +151,7 @@ export interface DesktopSettings {
   appearance: AppearanceSettings;
   vision?: VisionSettings;
   memory?: MemorySettings;
+  hooks?: HooksSettings;
   customProvider?: CustomProviderSettings;
   customProviderKeyConfigured?: boolean;
   pinnedSessionPaths?: string[];
@@ -416,12 +436,68 @@ export interface McpServerConfigDraft {
   env?: Record<string, string>;
 }
 
+/** 钩子监听的会话生命周期事件（Pi 扩展事件名的稳定子集）。 */
+export type HookEventName = "session_start" | "tool_call" | "tool_execution_end" | "turn_end";
+
+/**
+ * 钩子动作。notify/http/block 是 app 内置动作（零脚本），command 是用户 shell
+ * 逃生舱。block 与 command.blocking 只在 tool_call 事件上有阻断语义。
+ */
+export type HookAction =
+  | { kind: "notify"; title?: string; body?: string }
+  | { kind: "http"; url: string }
+  | { kind: "block"; deny: string[] }
+  | { kind: "command"; command: string; blocking?: boolean };
+
+/** pidesktop-hooks.json 中的一条钩子规则；name 在单个配置文件内唯一。 */
+export interface HookRule {
+  name: string;
+  event: HookEventName;
+  /** 工具名正则（仅 tool_call / tool_execution_end 有意义）；缺省匹配全部工具。 */
+  matcher?: string;
+  /** App-owned 停用标记，语义与 MCP 的 disabled 一致。 */
+  disabled?: boolean;
+  /** command 动作超时毫秒；缺省 10s，允许 1s–120s。 */
+  timeoutMs?: number;
+  action: HookAction;
+}
+
+/** 面板保存钩子时的载荷（规则 + 写入哪个作用域文件）。 */
+export interface HookRuleDraft {
+  name: string;
+  scope: "project" | "global";
+  event: HookEventName;
+  matcher?: string;
+  timeoutMs?: number;
+  action: HookAction;
+}
+
+/** 资源目录中的钩子投影（面板列表项）。 */
+export interface HookSummary {
+  name: string;
+  event: HookEventName;
+  matcher?: string;
+  actionKind: HookAction["kind"];
+  /** 完整动作定义（面板“编辑”回填表单用）。 */
+  action: HookAction;
+  /** 动作的一行摘要（命令 / URL / 正则条数 / 通知文案）。 */
+  actionPreview: string;
+  /** tool_call 事件上的拦截型钩子（block 或 blocking command）。 */
+  blocking: boolean;
+  scope: "project" | "global";
+  enabled: boolean;
+}
+
 export interface ResourceCatalog {
   skills: SkillSummary[];
   mcpServers: McpServerSummary[];
   todos: Todo[];
   /** 激活助手的全量记忆主题（面板治理视图，不经工作区过滤）。 */
   memory: MemoryTopic[];
+  /** 双作用域合并后的钩子规则（项目覆盖全局）。 */
+  hooks: HookSummary[];
+  /** 钩子总开关（settings.hooks 的实时投影），面板头部的治理开关。 */
+  hooksEnabled: boolean;
   diagnostics: string[];
 }
 
@@ -595,6 +671,12 @@ export type RuntimeCommand =
   | { type: "mcp.server.save"; server: McpServerConfigDraft }
   | { type: "mcp.server.toggle"; name: string; enabled: boolean }
   | { type: "mcp.server.delete"; name: string; scope: "project" | "global" }
+  | { type: "hooks.save"; hook: HookRuleDraft }
+  | { type: "hooks.toggle"; name: string; scope: "project" | "global"; enabled: boolean }
+  | { type: "hooks.delete"; name: string; scope: "project" | "global" }
+  | { type: "hooks.settings"; hooks: HooksSettings }
+  /** 用样例上下文试跑一条钩子（面板“测试”按钮）；sample 是给 bash/拦截正则用的样例行。 */
+  | { type: "hooks.run"; name: string; scope: "project" | "global"; sample?: string }
   | { type: "skill.toggle"; id: string; enabled: boolean }
   | { type: "background.kill"; id: string }
   | { type: "resources.reload" }
@@ -615,6 +697,8 @@ export type RuntimeMessage =
   | { type: "permission.dismiss"; id: string }
   | { type: "question"; request: QuestionRequest }
   | { type: "question.dismiss"; id: string }
+  | { type: "hook-notify"; title: string; body: string }
+  | { type: "hook-run"; name: string; scope: "project" | "global"; ok: boolean; blocked?: boolean; detail: string; durationMs: number }
   | { type: "error"; message: string }
   | { type: "log"; level: "info" | "warn"; message: string };
 

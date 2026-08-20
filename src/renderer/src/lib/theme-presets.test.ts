@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { THEME_PRESETS, collectThemeLayers, scopeCustomThemeCss, scopeCustomThemeCssForPreview, themePresetCss, themePreviewCss, themeWallpaperOpacity, wallpaperOpacityCss } from "./theme-presets";
+import { THEME_PRESETS, bubbleOpacityCss, collectThemeLayers, scopeCustomThemeCss, scopeCustomThemeCssForPreview, themePresetCss, themePreviewCss, themeWallpaperOpacity, wallpaperOpacityCss } from "./theme-presets";
 
 describe("theme presets", () => {
   it("contains the reference palette families", () => {
@@ -70,6 +70,20 @@ describe("theme presets", () => {
   it("emits nothing without a stored slider preference", () => {
     expect(wallpaperOpacityCss(undefined, ".preview")).toBe("");
     expect(wallpaperOpacityCss({ light: Number.NaN }, ".preview")).toBe("");
+  });
+
+  it("emits bubble-alpha per mode with rounded integer percentages", () => {
+    const css = bubbleOpacityCss({ light: 0.8, dark: 0.65 }, ".preview");
+
+    expect(css).toContain('.preview[data-theme-wallpaper="true"][data-theme-effective="light"] {\n  --bubble-alpha: 80% !important;\n}');
+    expect(css).toContain('.preview[data-theme-wallpaper="true"][data-theme-effective="dark"] {\n  --bubble-alpha: 65% !important;\n}');
+  });
+
+  it("clamps and drops invalid bubble-opacity values", () => {
+    expect(bubbleOpacityCss({ light: 1.9, dark: -0.3 }, ".preview"))
+      .toBe('.preview[data-theme-wallpaper="true"][data-theme-effective="light"] {\n  --bubble-alpha: 100% !important;\n}\n.preview[data-theme-wallpaper="true"][data-theme-effective="dark"] {\n  --bubble-alpha: 0% !important;\n}');
+    expect(bubbleOpacityCss(undefined, ".preview")).toBe("");
+    expect(bubbleOpacityCss({ dark: Number.NaN }, ".preview")).toBe("");
   });
 
   it("redirects ChatAnyTime mode selectors into a preview scope", () => {
