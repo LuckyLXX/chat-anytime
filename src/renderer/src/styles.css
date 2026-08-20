@@ -1265,10 +1265,12 @@ html[data-theme-wallpaper="true"] .sidebar-tabs {
    stays opaque — that is the document itself. */
 [data-theme-wallpaper="true"] .content-preview-body,
 [data-theme-wallpaper="true"] .preview-pdf,
+[data-theme-wallpaper="true"] .preview-empty-state,
 [data-theme-wallpaper="true"] .content-preview-body > iframe {
   background: color-mix(in srgb, var(--surface-muted) var(--panel-alpha, 100%), transparent);
 }
-[data-theme-wallpaper="true"] .preview-markdown {
+[data-theme-wallpaper="true"] .preview-markdown,
+[data-theme-wallpaper="true"] .preview-tabs {
   background: color-mix(in srgb, var(--surface) var(--panel-alpha, 100%), transparent);
 }
 [data-theme-wallpaper="true"] .preview-code,
