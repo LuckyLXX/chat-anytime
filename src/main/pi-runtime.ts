@@ -468,6 +468,18 @@ function clearRecordVisionInbox(record: SessionRuntimeRecord): void {
   record.visionInbox = undefined;
 }
 
+/**
+ * Turn-end backstop for the vision inbox: images the model never picked up
+ * (tool not offered, hint ignored, or the run aborted) are discarded with a
+ * warn log instead of leaking into a later turn's recognize_images call.
+ */
+function discardUnconsumedVisionInbox(record: SessionRuntimeRecord): void {
+  const count = record.visionInbox?.images.length ?? 0;
+  if (!count) return;
+  post({ type: "log", level: "warn", message: `本轮未调用 recognize_images，${count} 张待识别图片已作废，需要时请重新发送` });
+  clearRecordVisionInbox(record);
+}
+
 /** Overlay a session's run status onto the sidebar list. */
 function patchSessionRunStatus(record: SessionRuntimeRecord): void {
   currentSessions = currentSessions.map((item) => item.id === record.session.sessionId ? { ...item, runStatus: record.runStatus } : item);
@@ -669,6 +681,19 @@ function reconcileVisionTool(record: SessionRuntimeRecord | undefined): void {
   record.session.setActiveToolsByName(toolNamesFor(record, includeVision));
 }
 
+/**
+ * Switch a live record's conversation model and re-align the active tool set.
+ * Every setModel call site must go through here: a bare setModel keeps the
+ * recognize_images activation computed for the previous model — e.g. a session
+ * created under a multimodal model never offers the tool after switching to a
+ * text-only one, so staged images could never be recognized.
+ */
+async function switchSessionModel(record: SessionRuntimeRecord | undefined, model: Model<Api>): Promise<void> {
+  if (!record) return;
+  await record.session.setModel(model);
+  reconcileVisionTool(record);
+}
+
 function emitState(): void {
   // Default callers (commands, lifecycle hooks) flush immediately.
   scheduleEmit(true);
@@ -756,6 +781,7 @@ function handleSessionEvent(record: SessionRuntimeRecord, event: AgentSessionEve
         record.busy = false;
         record.status = "就绪";
         resolveRunOutcome(record, event.messages);
+        discardUnconsumedVisionInbox(record);
         // Idempotent backstop: regenerate/navigateTree truncates the transcript,
         // so re-derive the counters from what actually remains.
         record.cacheUsage = runtimeContextUsage.scanCacheUsage(record.session.state.messages);
@@ -772,6 +798,7 @@ function handleSessionEvent(record: SessionRuntimeRecord, event: AgentSessionEve
         record.cacheUsage = runtimeContextUsage.scanCacheUsage(record.session.state.messages);
         lifecycle = true;
       }
+      discardUnconsumedVisionInbox(record);
       break;
     case "message_start":
       if (event.message.role === "assistant") markAnswerStarted(record);
@@ -1271,7 +1298,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     },
     inbox: () => recordBox?.visionInbox,
     clearInbox: () => { if (recordBox) recordBox.visionInbox = undefined; },
-    readImageFile,
+    readImageFile: (path) => readImageFile(recordWorkspace, path),
     errorText
   });
   // Each record owns its customTools array: Pi stores it by reference and
@@ -1511,17 +1538,18 @@ async function preparePromptPayload(text: string, attachments: PromptAttachment[
  * Read an image file for the recognize_images tool: workspace-bounded via
  * realpath + workspaceRelativeAttachment (mirrors the attachment import
  * checks), size and MIME whitelisted. Model-supplied paths are its own
- * screenshots/artifacts inside the workspace.
+ * screenshots/artifacts inside the workspace. The root is the record's own
+ * workspace, not the global one, so a parked background session keeps reading
+ * its own files after the user switches workspaces.
  */
-async function readImageFile(path: string): Promise<ImageContent> {
-  if (!workspace) throw new Error("请先打开工作区");
-  const mimeType = runtimeVision.imageMimeForPath(path);
+async function readImageFile(root: string, imagePath: string): Promise<ImageContent> {
+  const mimeType = runtimeVision.imageMimeForPath(imagePath);
   if (!mimeType) throw new Error("不支持的图片格式（支持 png/jpg/jpeg/webp/gif）");
-  const candidate = resolve(workspace, path);
+  const candidate = resolve(root, imagePath);
   const info = await stat(candidate);
   if (!info.isFile()) throw new Error("不是普通文件");
-  if (info.size > runtimeVision.MAX_VISION_FILE_BYTES) throw new Error(`图片文件超过 20 MB 限制：${path}`);
-  const rootReal = await realpath(resolve(workspace));
+  if (info.size > runtimeVision.MAX_VISION_FILE_BYTES) throw new Error(`图片文件超过 20 MB 限制：${imagePath}`);
+  const rootReal = await realpath(resolve(root));
   const targetReal = await realpath(candidate);
   workspaceRelativeAttachment(rootReal, targetReal); // 越界抛错
   const data = await readFile(targetReal);
@@ -1799,7 +1827,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       const model = modelRuntime.getModel(command.provider, command.id);
       if (!model) throw new Error(`无法识别模型 ${command.provider}/${command.id}`);
       selectedModel = { provider: command.provider, id: command.id };
-      if (activeRuntime) await activeRuntime.session.setModel(model);
+      await switchSessionModel(activeRuntime, model);
       emitState();
       break;
     }
@@ -1818,7 +1846,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
           ?? modelRuntime.getModels(command.provider)[0];
         if (first) {
           selectedModel = { provider: first.provider, id: first.id };
-          if (activeRuntime) await activeRuntime.session.setModel(first);
+          await switchSessionModel(activeRuntime, first);
         }
       }
       emitState();
@@ -1836,11 +1864,11 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         const first = modelRuntime.getModels(command.provider.id)[0];
         if (first) {
           selectedModel = { provider: first.provider, id: first.id };
-          if (activeRuntime) await activeRuntime.session.setModel(first);
+          await switchSessionModel(activeRuntime, first);
         } else if (selectedModel?.provider === command.provider.id) {
           const fallback = modelRuntime.getModels().find((model) => modelRuntime?.getProviderAuthStatus(model.provider)?.configured);
           selectedModel = fallback ? { provider: fallback.provider, id: fallback.id } : undefined;
-          if (activeRuntime && fallback) await activeRuntime.session.setModel(fallback);
+          if (fallback) await switchSessionModel(activeRuntime, fallback);
           applyStatusToActive(fallback ? `当前服务没有启用模型，已切换到 ${fallback.name}` : "当前服务没有启用模型，请在设置中勾选模型");
         }
       }
@@ -1862,7 +1890,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         if (selectedModel?.provider === command.providerId) {
           const fallbackModel = modelRuntime?.getModels().find((model) => modelRuntime?.getProviderAuthStatus(model.provider)?.configured);
           selectedModel = fallbackModel ? { provider: fallbackModel.provider, id: fallbackModel.id } : undefined;
-          if (activeRuntime && fallbackModel) await activeRuntime.session.setModel(fallbackModel);
+          if (fallbackModel) await switchSessionModel(activeRuntime, fallbackModel);
           applyStatusToActive(fallbackModel ? `原模型已删除，已切换到 ${fallbackModel.name}` : "原模型已删除，请先配置模型");
           emitState();
         }
@@ -1980,7 +2008,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       }
       break;
     case "settings.save":
-      if (settings) { settings.model = command.settings.model; settings.thinkingLevel = command.settings.thinkingLevel; settings.accessMode = command.settings.accessMode; settings.appearance = command.settings.appearance; thinkingLevel = command.settings.thinkingLevel; accessMode = command.settings.accessMode; selectedModel = command.settings.model; if (activeRuntime) { activeRuntime.session.setThinkingLevel(thinkingLevel); if (selectedModel) { const model = modelRuntime?.getModel(selectedModel.provider, selectedModel.id); if (model) await activeRuntime.session.setModel(model); } } emitState(); }
+      if (settings) { settings.model = command.settings.model; settings.thinkingLevel = command.settings.thinkingLevel; settings.accessMode = command.settings.accessMode; settings.appearance = command.settings.appearance; thinkingLevel = command.settings.thinkingLevel; accessMode = command.settings.accessMode; selectedModel = command.settings.model; if (activeRuntime) { activeRuntime.session.setThinkingLevel(thinkingLevel); if (selectedModel) { const model = modelRuntime?.getModel(selectedModel.provider, selectedModel.id); if (model) await switchSessionModel(activeRuntime, model); } } emitState(); }
       break;
     case "agent.archive":
       if (settings && command.agentId !== "default") { settings.agents = settings.agents.map((item) => item.id === command.agentId ? { ...item, archived: command.archived } : item); if (settings.currentAgentId === command.agentId) { settings.currentAgentId = "default"; currentAgent = activeAgent(); } if (workspace) await createSession(undefined, { reactivate: true }); }
