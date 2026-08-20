@@ -1,7 +1,7 @@
 import { readFile, readdir, realpath, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative as relativePath, resolve, sep } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { Api, AssistantMessage, UserMessage, ImageContent, Model } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, UserMessage, ImageContent, Model, Context, ModelsSimpleStreamOptions } from "@earendil-works/pi-ai";
 import {
   createAgentSession,
   DefaultResourceLoader,
@@ -135,8 +135,6 @@ interface SessionRuntimeRecord {
   /** Captured at bindExtensions(); drives MCP hot-reload for this session only. */
   extensionApi: ExtensionAPI | undefined;
   permissionDeps: runtimePermissions.PermissionGateDeps;
-  /** 用户附图待识别槽（仅文本模型会话使用）；recognize_images 消费后或轮末未消费时清空。 */
-  visionInbox: runtimeVision.VisionInbox | undefined;
   visionTools: ToolDefinition[];
   runStatus: SessionRunStatus | undefined;
   /** True from session.abort() until the run settles — resolves the dot to red. */
@@ -339,8 +337,10 @@ function errorText(error: unknown): string {
 
 function userMessageText(message: AgentMessage): string {
   if (message.role !== "user") return "";
-  if (typeof message.content === "string") return message.content;
-  return message.content.filter((block) => block.type === "text").map((block) => block.text).join("");
+  const text = typeof message.content === "string" ? message.content : message.content.filter((block) => block.type === "text").map((block) => block.text).join("");
+  // The vision hint is model-directed transport, not user content: display and
+  // regenerate matching see the original text without it.
+  return runtimeVision.stripVisionHint(text);
 }
 
 function blocksFromMessage(message: AgentMessage, skillPrompt?: SkillPromptDisplay): MessageBlock[] {
@@ -353,12 +353,15 @@ function blocksFromMessage(message: AgentMessage, skillPrompt?: SkillPromptDispl
       }
       return blocks;
     }
-    if (typeof user.content === "string") return [{ type: "text", text: user.content }];
-    return user.content.map((content) =>
+    if (typeof user.content === "string") return [{ type: "text", text: runtimeVision.stripVisionHint(user.content) }];
+    // Attached images stay in the transcript (rendered here) even for text-only
+    // conversation models; the vision hint suffix is stripped from display.
+    const blocks = user.content.map((content) =>
       content.type === "text"
-        ? { type: "text" as const, text: content.text }
+        ? { type: "text" as const, text: runtimeVision.stripVisionHint(content.text) }
         : { type: "image" as const, data: content.data, mimeType: content.mimeType }
     );
+    return blocks.filter((block) => block.type !== "text" || block.text.length > 0);
   }
 
   if (message.role === "custom") {
@@ -462,22 +465,6 @@ function snapshot(): RuntimeSnapshot {
     sessions: currentSessions,
     recentWorkspaces
   };
-}
-
-function clearRecordVisionInbox(record: SessionRuntimeRecord): void {
-  record.visionInbox = undefined;
-}
-
-/**
- * Turn-end backstop for the vision inbox: images the model never picked up
- * (tool not offered, hint ignored, or the run aborted) are discarded with a
- * warn log instead of leaking into a later turn's recognize_images call.
- */
-function discardUnconsumedVisionInbox(record: SessionRuntimeRecord): void {
-  const count = record.visionInbox?.images.length ?? 0;
-  if (!count) return;
-  post({ type: "log", level: "warn", message: `本轮未调用 recognize_images，${count} 张待识别图片已作废，需要时请重新发送` });
-  clearRecordVisionInbox(record);
 }
 
 /** Overlay a session's run status onto the sidebar list. */
@@ -628,6 +615,29 @@ function defaultModel(): { provider: string; id: string } | undefined {
 function hasImageInput(model: { input?: readonly string[] } | undefined): boolean { return Boolean(model?.input?.includes("image")); }
 
 /**
+ * Transport guard enforcing the vision invariant at the single choke point
+ * every LLM request passes (main sessions and subagents share this runtime): a
+ * model without image input never receives image parts. Attached images stay
+ * in the session transcript — the renderer shows them in the user's bubble,
+ * the JSONL persists them, reopen/regenerate replay them — and the trailing
+ * hint tells the model to call recognize_images instead. Multimodal models
+ * pass through untouched. completeSimple bypasses the guard on purpose: the
+ * only caller is the recognize_images tool, whose vision model takes images.
+ */
+function wrapModelRuntimeForVision(runtime: ModelRuntime): ModelRuntime {
+  return new Proxy(runtime, {
+    get(target, property) {
+      if (property === "streamSimple") {
+        return (model: Model<Api>, context: Context, options?: ModelsSimpleStreamOptions) =>
+          target.streamSimple(model, hasImageInput(model) ? context : runtimeVision.stripContextImages(context), options);
+      }
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+    }
+  });
+}
+
+/**
  * Rebuild the full registered customTool set for a record (MCP + app-owned).
  * customTools arrays are held by reference inside Pi, so hot-path updates
  * rebuild in place (`length = 0` + push) instead of swapping the array.
@@ -656,16 +666,16 @@ function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "subagentTool
 }
 
 /**
- * Stage user-attached images into the record's inbox and switch the payload to
- * a text-only prompt telling the model to call recognize_images. The dynamic
- * image count lives in the trailing user text (conversation tail), never in
- * the tool schema or system prompt — the provider prefix cache is untouched.
+ * Append the model-directed hint to a prompt whose images the conversation
+ * model cannot see. The images themselves stay in the payload: they live in
+ * the session transcript (rendered in the user's bubble, persisted to the
+ * JSONL) and are stripped per-request by the wrapped ModelRuntime, so they
+ * never reach a text-only model. The dynamic image count lives in the
+ * trailing user text (conversation tail), never in the tool schema or system
+ * prompt — the provider prefix cache is untouched.
  */
-function stageVisionImages(record: SessionRuntimeRecord, payload: { text: string; images: ImageContent[] }): void {
-  record.visionInbox = { images: payload.images, question: payload.text };
-  const count = payload.images.length;
-  payload.text += `\n\n【附带 ${count} 张图片，请调用 recognize_images 工具识别后再回答。】`;
-  payload.images = [];
+function appendVisionHint(payload: { text: string; images: ImageContent[] }): void {
+  payload.text += runtimeVision.visionHintText(payload.images.length);
 }
 
 /**
@@ -781,7 +791,6 @@ function handleSessionEvent(record: SessionRuntimeRecord, event: AgentSessionEve
         record.busy = false;
         record.status = "就绪";
         resolveRunOutcome(record, event.messages);
-        discardUnconsumedVisionInbox(record);
         // Idempotent backstop: regenerate/navigateTree truncates the transcript,
         // so re-derive the counters from what actually remains.
         record.cacheUsage = runtimeContextUsage.scanCacheUsage(record.session.state.messages);
@@ -798,7 +807,6 @@ function handleSessionEvent(record: SessionRuntimeRecord, event: AgentSessionEve
         record.cacheUsage = runtimeContextUsage.scanCacheUsage(record.session.state.messages);
         lifecycle = true;
       }
-      discardUnconsumedVisionInbox(record);
       break;
     case "message_start":
       if (event.message.role === "assistant") markAnswerStarted(record);
@@ -1290,14 +1298,15 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   });
   // recognize_images 始终注册（定义字节恒定），是否激活由会话模型是否支持
   // 图片决定（见 reconcileVisionTool / createSession 的 setActiveToolsByName）。
-  // execute 闭包运行时读取全局 visionModel，vision.save 后无需重注册。
+  // execute 闭包运行时读取全局 visionModel，vision.save 后无需重注册；待识别
+  // 图片不暂存——每次调用实时扫描会话消息中当前轮的用户附图（见
+  // currentTurnUserImages），传输层由包装后的 ModelRuntime 剥离图片部分。
   const visionTools = runtimeVision.buildVisionTools({
     resolve: () => {
       if (!visionModel || !modelRuntime) throw new Error("当前模型不支持图片输入，请先切换多模态模型，或在设置的模型服务中启用视觉识别");
       return { runtime: modelRuntime, model: visionModel, prompt: settings?.vision?.prompt };
     },
-    inbox: () => recordBox?.visionInbox,
-    clearInbox: () => { if (recordBox) recordBox.visionInbox = undefined; },
+    pendingUserImages: () => runtimeVision.currentTurnUserImages(recordBox?.session.state.messages ?? []),
     readImageFile: (path) => readImageFile(recordWorkspace, path),
     errorText
   });
@@ -1339,7 +1348,6 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     questionTools,
     extensionApi: undefined,
     permissionDeps,
-    visionInbox: undefined,
     visionTools,
     runStatus: undefined,
     abortRequested: false,
@@ -1403,7 +1411,7 @@ async function initialize(command: Extract<RuntimeCommand, { type: "initialize" 
   thinkingLevel = settings.thinkingLevel ?? "medium";
   accessMode = settings.accessMode ?? "ask";
   selectedModel = settings.model;
-  modelRuntime = await ModelRuntime.create();
+  modelRuntime = wrapModelRuntimeForVision(await ModelRuntime.create());
   const initializedProviderIds = new Set<string>();
   for (const provider of settings.providers) {
     registerCustomProvider(provider);
@@ -1657,7 +1665,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       const prompt = await preparePromptPayload(command.text, command.attachments);
       if (prompt.images.length && !hasImageInput(record.session.model)) {
         if (!visionModel) throw new Error("当前模型不支持图片输入，请先切换多模态模型，或在设置的模型服务中启用视觉识别");
-        stageVisionImages(record, prompt);
+        appendVisionHint(prompt);
       }
       record.busy = true;
       record.status = "Pi 正在工作";
@@ -1670,7 +1678,6 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         // The record may have been parked (still live — update it so the dot
         // resolves) or torn down (workspace removal — nothing left to update).
         if (!liveSessions.has(record.session.sessionId)) return;
-        clearRecordVisionInbox(record);
         completeTurn(record);
         record.busy = false;
         record.status = "请求失败";
@@ -1734,7 +1741,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       const regeneratedPrompt = await preparePromptPayload(regeneratedText, command.attachments);
       if (regeneratedPrompt.images.length && !hasImageInput(record.session.model)) {
         if (!visionModel) throw new Error("当前模型不支持图片输入，请先切换多模态模型，或在设置的模型服务中启用视觉识别");
-        stageVisionImages(record, regeneratedPrompt);
+        appendVisionHint(regeneratedPrompt);
       }
       const regenerateSession = record.session;
       record.busy = true;
@@ -1759,7 +1766,6 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         await regenerateSession.prompt(regeneratedPrompt.text, regeneratedPrompt.images.length ? { images: regeneratedPrompt.images } : undefined);
       })().catch((error) => {
         if (!liveSessions.has(record.session.sessionId)) return;
-        clearRecordVisionInbox(record);
         completeTurn(record);
         record.busy = false;
         record.status = "请求失败";

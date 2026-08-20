@@ -1,7 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
-import type { Api, AssistantMessage, ImageContent, Model } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, Context, ImageContent, Model } from "@earendil-works/pi-ai";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { buildVisionTools, imageMimeForPath, type VisionInbox } from "./runtime-vision.js";
+import {
+  buildVisionTools,
+  currentTurnUserImages,
+  imageMimeForPath,
+  stripContextImages,
+  stripVisionHint,
+  visionHintText,
+  type PendingTurnImages,
+  type VisionTranscriptMessage
+} from "./runtime-vision.js";
 
 function model(): Model<Api> {
   return { id: "glm-4v-flash", name: "GLM-4V Flash", provider: "proxy", input: ["text", "image"] } as unknown as Model<Api>;
@@ -24,29 +33,27 @@ function runnerStub(text: string): { runtime: ModelRuntime; completeSimple: Retu
 interface Harness {
   deps: {
     resolve: () => { runtime: ModelRuntime; model: Model<Api>; prompt: string | undefined };
-    inbox: () => VisionInbox | undefined;
-    clearInbox: () => void;
+    pendingUserImages: () => PendingTurnImages | undefined;
     readImageFile: (path: string) => Promise<ImageContent>;
     errorText: (error: unknown) => string;
   };
-  setInbox: (inbox: VisionInbox | undefined) => void;
+  setPending: (pending: PendingTurnImages | undefined) => void;
   completeSimple: ReturnType<typeof vi.fn>;
   readImageFile: ReturnType<typeof vi.fn>;
 }
 
 function harness(overrides: { readImageFile?: (path: string) => Promise<ImageContent>; model?: Model<Api>; prompt?: string } = {}): Harness {
-  let inbox: VisionInbox | undefined;
+  let pending: PendingTurnImages | undefined;
   const { completeSimple, runtime } = runnerStub("识别结果内容");
   const readImageFile = vi.fn(overrides.readImageFile ?? (async (path: string) => image(`data-of-${path}`)));
   return {
     deps: {
       resolve: () => ({ runtime, model: overrides.model ?? model(), prompt: overrides.prompt }),
-      inbox: () => inbox,
-      clearInbox: () => { inbox = undefined; },
+      pendingUserImages: () => pending,
       readImageFile,
       errorText: (e) => (e instanceof Error ? e.message : String(e))
     },
-    setInbox: (value) => { inbox = value; },
+    setPending: (value) => { pending = value; },
     completeSimple,
     readImageFile
   };
@@ -87,6 +94,152 @@ describe("imageMimeForPath", () => {
   });
 });
 
+describe("vision hint", () => {
+  it("round-trips: strip removes exactly what visionHintText appended", () => {
+    const text = "这张图讲什么？";
+    const stored = text + visionHintText(3);
+    expect(stored).toContain("【附带 3 张图片");
+    expect(stripVisionHint(stored)).toBe(text);
+  });
+
+  it("leaves texts without the hint untouched (including similar wording)", () => {
+    expect(stripVisionHint("普通消息")).toBe("普通消息");
+    expect(stripVisionHint("【附带 3 张图片，请调用 recognize_images 工具识别后再回答。】开头而不是结尾")).toBe("【附带 3 张图片，请调用 recognize_images 工具识别后再回答。】开头而不是结尾");
+  });
+});
+
+describe("stripContextImages", () => {
+  function context(messages: unknown[]): Context {
+    return { systemPrompt: "s", messages } as unknown as Context;
+  }
+
+  it("removes image parts from user and toolResult messages, keeps text", () => {
+    const source = context([
+      { role: "user", content: [{ type: "text", text: "看看" }, { type: "image", data: "aaa", mimeType: "image/png" }] },
+      { role: "toolResult", content: [{ type: "image", data: "bbb", mimeType: "image/png" }], toolCallId: "t1" }
+    ]);
+    const stripped = stripContextImages(source);
+    expect(stripped.messages[0]).toEqual({ role: "user", content: [{ type: "text", text: "看看" }] });
+    // Image-only content degrades to a placeholder pointing at the tool.
+    const toolContent = (stripped.messages[1] as { content: { type: string; text?: string }[] }).content;
+    expect(toolContent).toHaveLength(1);
+    expect(toolContent[0]!.text).toContain("recognize_images");
+  });
+
+  it("returns the same context object when no image parts exist", () => {
+    const source = context([{ role: "user", content: [{ type: "text", text: "hi" }] }]);
+    expect(stripContextImages(source)).toBe(source);
+  });
+});
+
+describe("currentTurnUserImages", () => {
+  function userMessage(content: unknown, timestamp = 1): VisionTranscriptMessage {
+    return { role: "user", content, timestamp };
+  }
+
+  it("collects images from user messages after the last assistant message, in order", () => {
+    const messages: VisionTranscriptMessage[] = [
+      userMessage([{ type: "text", text: "旧问题" }, { type: "image", data: "old", mimeType: "image/png" }]),
+      { role: "assistant", content: [], timestamp: 2 },
+      userMessage([{ type: "text", text: "新问题" }]),
+      userMessage([{ type: "image", data: "first", mimeType: "image/png" }]),
+      userMessage([{ type: "image", data: "second", mimeType: "image/png" }])
+    ];
+    const pending = currentTurnUserImages(messages);
+    expect(pending?.images.map((part) => part.data)).toEqual(["first", "second"]);
+    // Question = most recent user text of the turn.
+    expect(pending?.question).toBe("新问题");
+  });
+
+  it("strips the vision hint from the question and skips string-only content", () => {
+    const messages: VisionTranscriptMessage[] = [
+      userMessage("纯文本消息" + visionHintText(1)),
+      userMessage([{ type: "image", data: "aaa", mimeType: "image/png" }])
+    ];
+    const pending = currentTurnUserImages(messages);
+    expect(pending?.images).toHaveLength(1);
+    expect(pending?.question).toBe("");
+  });
+
+  it("returns undefined when the current turn has no attached images", () => {
+    expect(currentTurnUserImages([userMessage([{ type: "text", text: "没有图" }])])).toBeUndefined();
+    expect(currentTurnUserImages([])).toBeUndefined();
+  });
+
+  it("ignores non-user roles without stopping the scan", () => {
+    const messages: VisionTranscriptMessage[] = [
+      userMessage([{ type: "image", data: "old", mimeType: "image/png" }]),
+      { role: "assistant", content: [], timestamp: 2 },
+      { role: "toolResult", content: [{ type: "text", text: "tool output" }], timestamp: 3 },
+      userMessage([{ type: "text", text: "继续" }, { type: "image", data: "new", mimeType: "image/png" }])
+    ];
+    const pending = currentTurnUserImages(messages);
+    expect(pending?.images.map((part) => part.data)).toEqual(["new"]);
+  });
+
+  // Pi appends the tool-calling assistant message to the transcript BEFORE
+  // executing the call — while recognize_images runs, the transcript ends
+  // with the very assistant message that issued it. These shapes reproduce
+  // the live mid-run transcript, not the settled post-turn one.
+  function midRunAssistant(stopReason: string, content: unknown[] = [{ type: "toolCall", id: "t1", toolName: "recognize_images", arguments: {} }]): VisionTranscriptMessage {
+    return { role: "assistant", content, timestamp: 9, stopReason };
+  }
+
+  it("finds images even though the transcript ends with the calling assistant message", () => {
+    const messages: VisionTranscriptMessage[] = [
+      { role: "assistant", content: [], timestamp: 2, stopReason: "stop" },
+      userMessage([{ type: "text", text: "这张图讲什么？" }, { type: "image", data: "aaa", mimeType: "image/png" }]),
+      midRunAssistant("toolUse")
+    ];
+    const pending = currentTurnUserImages(messages);
+    expect(pending?.images.map((part) => part.data)).toEqual(["aaa"]);
+    expect(pending?.question).toBe("这张图讲什么？");
+  });
+
+  it("keeps scanning across earlier tool steps and results of the same run", () => {
+    const messages: VisionTranscriptMessage[] = [
+      userMessage([{ type: "image", data: "first", mimeType: "image/png" }]),
+      midRunAssistant("toolUse"),
+      { role: "toolResult", content: [{ type: "text", text: "ok" }], timestamp: 5 },
+      userMessage([{ type: "text", text: "顺便看这张" }, { type: "image", data: "second", mimeType: "image/png" }]),
+      midRunAssistant("toolUse")
+    ];
+    const pending = currentTurnUserImages(messages);
+    expect(pending?.images.map((part) => part.data)).toEqual(["first", "second"]);
+    expect(pending?.question).toBe("顺便看这张");
+  });
+
+  it("treats a truncated tool-call retry step (stopReason length with tool calls) as mid-run", () => {
+    const messages: VisionTranscriptMessage[] = [
+      userMessage([{ type: "image", data: "aaa", mimeType: "image/png" }]),
+      midRunAssistant("length"),
+      { role: "toolResult", content: [{ type: "text", text: "failed" }], timestamp: 5 },
+      midRunAssistant("toolUse")
+    ];
+    expect(currentTurnUserImages(messages)?.images).toHaveLength(1);
+  });
+
+  it("stops at a previous run's final message — stale images are not current-turn", () => {
+    const messages: VisionTranscriptMessage[] = [
+      userMessage([{ type: "image", data: "old", mimeType: "image/png" }]),
+      { role: "assistant", content: [{ type: "text", text: "done" }], timestamp: 2, stopReason: "stop" },
+      userMessage([{ type: "text", text: "没有新图" }]),
+      midRunAssistant("toolUse")
+    ];
+    expect(currentTurnUserImages(messages)).toBeUndefined();
+  });
+
+  it("treats length without tool calls as a run boundary", () => {
+    const messages: VisionTranscriptMessage[] = [
+      userMessage([{ type: "image", data: "old", mimeType: "image/png" }]),
+      { role: "assistant", content: [{ type: "text", text: "trunc" }], timestamp: 2, stopReason: "length" },
+      userMessage([{ type: "text", text: "继续" }]),
+      midRunAssistant("toolUse")
+    ];
+    expect(currentTurnUserImages(messages)).toBeUndefined();
+  });
+});
+
 describe("buildVisionTools", () => {
   it("registers a single recognize_images tool with a byte-stable schema", () => {
     const h = harness();
@@ -97,28 +250,26 @@ describe("buildVisionTools", () => {
     expect(tool.parameters).toEqual({ type: "object", properties: { files: expect.objectContaining({ type: "array" }) } });
   });
 
-  it("returns a no-op hint when neither inbox nor files are present", async () => {
+  it("returns a no-op hint when neither pending images nor files are present", async () => {
     const h = harness();
     const result = await runTool(toolOf(h), "call-1", {});
     expect(resultText(result)).toContain("当前没有待识别的图片");
     expect(h.completeSimple).not.toHaveBeenCalled();
   });
 
-  it("recognizes staged user images and clears the inbox", async () => {
+  it("recognizes current-turn user images", async () => {
     const h = harness();
-    h.setInbox({ images: [image("aaa"), image("bbb")], question: "这张图讲什么？" });
+    h.setPending({ images: [image("aaa"), image("bbb")], question: "这张图讲什么？" });
     const result = await runTool(toolOf(h), "call-1", {});
     const text = resultText(result);
     expect(text).toContain("【图片 1】");
     expect(text).toContain("【图片 2】");
     expect(text).toContain("GLM-4V Flash");
     expect(h.completeSimple).toHaveBeenCalledTimes(2);
-    // Staged images go to the vision model, question travels as context.
+    // Turn images go to the vision model, question travels as context.
     const firstContent = JSON.stringify(h.completeSimple.mock.calls[0]);
     expect(firstContent).toContain("aaa");
     expect(firstContent).toContain("这张图讲什么？");
-    // Tool consumption clears the inbox for the next turn.
-    expect(h.deps.inbox()).toBeUndefined();
   });
 
   it("reads model-supplied image files and labels them in the result", async () => {
@@ -132,15 +283,13 @@ describe("buildVisionTools", () => {
     expect(text).toContain("【图片 2 · diagram.jpg】");
   });
 
-  it("recognizes staged images and file images in one call, labels only the files", async () => {
+  it("recognizes turn images and file images in one call, labels only the files", async () => {
     const h = harness();
-    h.setInbox({ images: [image("aaa")], question: "看这张图" });
+    h.setPending({ images: [image("aaa")], question: "看这张图" });
     const result = await runTool(toolOf(h), "call-1", { files: ["shot.png"] });
     const text = resultText(result);
     expect(text).toContain("【图片 1】\n");
     expect(text).toContain("【图片 2 · shot.png】");
-    // Inbox was consumed even when mixed with file images.
-    expect(h.deps.inbox()).toBeUndefined();
   });
 
   it("propagates file read failures with the offending path", async () => {
@@ -151,7 +300,7 @@ describe("buildVisionTools", () => {
 
   it("propagates recognition failures", async () => {
     const h = harness();
-    h.setInbox({ images: [image("aaa")], question: "" });
+    h.setPending({ images: [image("aaa")], question: "" });
     h.completeSimple.mockRejectedValue(new Error("上游 HTTP 500"));
     await expect(runTool(toolOf(h), "call-1", {})).rejects.toThrow("图片识别失败：上游 HTTP 500");
   });
@@ -160,7 +309,7 @@ describe("buildVisionTools", () => {
     const h = harness();
     const deps = { ...h.deps, resolve: () => { throw new Error("当前模型不支持图片输入，请先切换多模态模型"); } };
     const tools = buildVisionTools(deps);
-    h.setInbox({ images: [image("aaa")], question: "" });
+    h.setPending({ images: [image("aaa")], question: "" });
     await expect(runTool(tools[0], "call-1", {})).rejects.toThrow("当前模型不支持图片输入");
   });
 

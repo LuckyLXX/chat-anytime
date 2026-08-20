@@ -1,17 +1,19 @@
-// Vision capability cluster: the recognize_images customTool plus the
-// per-session inbox that stages user-attached images for text-only
-// conversation models. The model calls the tool on its own initiative:
-// without arguments it recognizes the staged user images; with `files` it
-// reads image files directly (e.g. its own screenshots) so UI-automation
-// loops (screenshot → look → act) work without a multimodal model. Raw image
-// parts never reach the text-only model. Pure over injected dependencies so
-// it is testable without Pi or Electron. The tool schema is byte-stable: no
-// dynamic state (pending image counts, prompts) ever enters the definition —
-// such state flows only through tool arguments at the conversation tail.
+// Vision capability cluster: the recognize_images customTool, the
+// model-directed hint appended to image-bearing prompts of text-only
+// conversation models, and the request-layer image strip that keeps raw image
+// parts away from those models. Attached images stay in the session transcript
+// (the renderer shows them in the user's bubble and the JSONL persists them);
+// the model calls the tool on its own initiative to recognize them, and may
+// pass `files` to read image files directly (e.g. its own screenshots) so
+// UI-automation loops (screenshot → look → act) work without a multimodal
+// model. Pure over injected dependencies so it is testable without Pi or
+// Electron. The tool schema is byte-stable: no dynamic state (image counts,
+// prompts) ever enters the definition — such state flows only through tool
+// arguments at the conversation tail.
 
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import type { Api, ImageContent, Model } from "@earendil-works/pi-ai";
+import type { Api, Context, ImageContent, Model } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { formatVisionBlock, recognizeImages } from "./vision.js";
 
@@ -35,20 +37,130 @@ export function imageMimeForPath(path: string): string | undefined {
   return ext ? IMAGE_MIME_BY_EXTENSION[ext] : undefined;
 }
 
-/** Images staged from a user message, awaiting the model's recognize_images call. */
-export interface VisionInbox {
+const VISION_HINT_PATTERN = /\n\n【附带 \d+ 张图片，请调用 recognize_images 工具识别后再回答。】$/u;
+
+/**
+ * The hint appended to a prompt whose images the conversation model cannot
+ * see. It rides the conversation tail (never the system prompt) so the
+ * provider prefix cache stays untouched, and is stripped again for display
+ * and regenerate matching via {@link stripVisionHint}.
+ */
+export function visionHintText(count: number): string {
+  return `\n\n【附带 ${count} 张图片，请调用 recognize_images 工具识别后再回答。】`;
+}
+
+/** Remove the trailing vision hint from a stored user text (display/matching). */
+export function stripVisionHint(text: string): string {
+  return text.replace(VISION_HINT_PATTERN, "");
+}
+
+/** Placeholder left where an image part was stripped from a text-only request. */
+const STRIPPED_IMAGE_PLACEHOLDER = "（此处为图片附件，当前模型不支持图片输入，可调用 recognize_images 工具识别）";
+
+function isImageContent(part: unknown): part is ImageContent {
+  if (!part || typeof part !== "object") return false;
+  const candidate = part as { type?: unknown; data?: unknown; mimeType?: unknown };
+  return candidate.type === "image" && typeof candidate.data === "string" && typeof candidate.mimeType === "string";
+}
+
+/**
+ * Remove every image part from user and toolResult messages of an LLM request
+ * context — the transport half of the vision invariant (the tool is the other
+ * half). Images from a `read` on a screenshot become a placeholder pointing at
+ * recognize_images, so text-only screenshot loops stay coherent. Contexts
+ * without image parts are returned unchanged.
+ */
+export function stripContextImages(context: Context): Context {
+  let changed = false;
+  const messages = context.messages.map((message) => {
+    if (message.role !== "user" && message.role !== "toolResult") return message;
+    if (!Array.isArray(message.content)) return message;
+    let hasImage = false;
+    const content = message.content.filter((part) => {
+      if (part.type === "image") { hasImage = true; return false; }
+      return true;
+    });
+    if (!hasImage) return message;
+    changed = true;
+    if (content.length === 0) content.push({ type: "text", text: STRIPPED_IMAGE_PLACEHOLDER });
+    return { ...message, content };
+  });
+  return changed ? { ...context, messages } : context;
+}
+
+/** Structural slice of Pi's AgentMessage needed to find current-turn images. */
+export interface VisionTranscriptMessage {
+  role: string;
+  content?: unknown;
+  timestamp?: number;
+  stopReason?: string;
+}
+
+function hasToolCallPart(message: VisionTranscriptMessage): boolean {
+  return Array.isArray(message.content)
+    && message.content.some((part) => part && typeof part === "object" && (part as { type?: unknown }).type === "toolCall");
+}
+
+/**
+ * True for assistant messages that are intermediate steps of the run in
+ * flight. Pi appends the tool-calling assistant message to the transcript
+ * BEFORE executing the call, so while recognize_images runs the transcript
+ * always ends with one — the turn boundary is the last assistant message
+ * that ended a previous run, not merely the last assistant message. A
+ * "length"-stopped message with salvaged tool calls is also a mid-run step
+ * (the loop fails the truncated calls and keeps going); without tool calls
+ * it ended the run.
+ */
+function isMidRunAssistant(message: VisionTranscriptMessage): boolean {
+  return message.stopReason === "toolUse" || (message.stopReason === "length" && hasToolCallPart(message));
+}
+
+/** Images the user attached in the current turn, plus their latest text. */
+export interface PendingTurnImages {
   images: ImageContent[];
-  /** Original user text (pre-injection), used as recognition context. */
+  /** Most recent user text of the turn (hint already stripped) — recognition context only. */
   question: string;
+}
+
+/**
+ * Collect images from user messages of the current run (everything after the
+ * last assistant message that concluded a previous run; tool-calling steps of
+ * the run in flight do not end it). Stateless — the tool re-reads the live
+ * transcript on every call, so there is no inbox to stage, consume, or leak
+ * across turns.
+ */
+export function currentTurnUserImages(messages: readonly VisionTranscriptMessage[]): PendingTurnImages | undefined {
+  const images: ImageContent[] = [];
+  let question = "";
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index]!;
+    if (message.role === "assistant") {
+      if (!isMidRunAssistant(message)) break;
+      continue;
+    }
+    if (message.role !== "user") continue;
+    if (Array.isArray(message.content)) {
+      for (const part of message.content) {
+        if (isImageContent(part)) images.unshift(part);
+      }
+    }
+    if (!question && Array.isArray(message.content)) {
+      const text = message.content
+        .filter((part) => part && typeof part === "object" && (part as { type?: unknown }).type === "text")
+        .map((part) => (part as { text?: unknown }).text)
+        .filter((text): text is string => typeof text === "string")
+        .join("");
+      question = stripVisionHint(text);
+    }
+  }
+  return images.length ? { images, question } : undefined;
 }
 
 export interface VisionToolDeps {
   /** Throws a user-facing error when no vision model/runtime is available. */
   resolve: () => { runtime: ModelRuntime; model: Model<Api>; prompt: string | undefined };
-  /** The session's staged inbox; undefined when nothing is pending. */
-  inbox: () => VisionInbox | undefined;
-  /** Clear the staged inbox after successful recognition. */
-  clearInbox: () => void;
+  /** Images attached by the user in the current turn; undefined when none are pending. */
+  pendingUserImages: () => PendingTurnImages | undefined;
   /** Read an image file inside the workspace (validates path, size, mime). */
   readImageFile: (path: string) => Promise<ImageContent>;
   errorText: (error: unknown) => string;
@@ -74,9 +186,9 @@ export function buildVisionTools(deps: VisionToolDeps): ToolDefinition[] {
       }),
       execute: async (_id, params) => {
         const files = (Array.isArray(params?.files) ? params.files.filter((f): f is string => typeof f === "string").map((f) => f.trim()).filter((f) => f.length > 0) : []).slice(0, MAX_VISION_FILES);
-        const inbox = deps.inbox();
-        const inboxImages = inbox?.images ?? [];
-        if (files.length === 0 && inboxImages.length === 0) {
+        const pending = deps.pendingUserImages();
+        const pendingImages = pending?.images ?? [];
+        if (files.length === 0 && pendingImages.length === 0) {
           return { content: [{ type: "text" as const, text: NO_PENDING_TEXT }], details: { consumed: 0 } };
         }
         const { runtime, model, prompt } = deps.resolve();
@@ -89,10 +201,9 @@ export function buildVisionTools(deps: VisionToolDeps): ToolDefinition[] {
           }
         }
         try {
-          const labels = [...inboxImages.map(() => undefined), ...files];
-          const images = [...inboxImages, ...fileImages];
-          const results = await recognizeImages(runtime, model, { prompt, question: inbox?.question ?? "", images });
-          deps.clearInbox();
+          const labels = [...pendingImages.map(() => undefined), ...files];
+          const images = [...pendingImages, ...fileImages];
+          const results = await recognizeImages(runtime, model, { prompt, question: pending?.question ?? "", images });
           return { content: [{ type: "text" as const, text: formatVisionBlock(results, model.name || model.id, labels) }], details: { consumed: images.length } };
         } catch (error) {
           throw new Error(`图片识别失败：${deps.errorText(error)}`);
