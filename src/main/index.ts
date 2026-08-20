@@ -190,6 +190,9 @@ function updateSettings(command: RuntimeCommand): void {
     case "vision.save":
       settings.vision = normalizeVision(command.vision) ?? { enabled: false, provider: "", model: "" };
       break;
+    case "memory.save":
+      settings.memory = command.memory;
+      break;
   }
   persistSettings();
 }

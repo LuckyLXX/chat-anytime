@@ -2,6 +2,7 @@ import { create } from "zustand";
 import type {
   CustomProviderModel,
   DesktopSettings,
+  MemoryTopic,
   ModelOption,
   PermissionRequest,
   ProviderOption,
@@ -27,6 +28,7 @@ interface DesktopState {
   providers: ProviderOption[];
   resources: ResourceCatalog;
   todos: Todo[];
+  memory: MemoryTopic[];
   settings: DesktopSettings;
   customProvider?: ProviderSettings;
   customProviderKeyConfigured: boolean;
@@ -58,7 +60,7 @@ const emptySnapshot: RuntimeSnapshot = {
   queuedMessages: []
 };
 const emptySettings: DesktopSettings = { version: 2, thinkingLevel: "medium", accessMode: "ask", providers: [], agents: [], currentAgentId: "default", appearance: { theme: "system", themePreset: "default", customCss: "", customThemes: [], showThinking: true } };
-const emptyResources: ResourceCatalog = { skills: [], mcpServers: [], todos: [], diagnostics: [] };
+const emptyResources: ResourceCatalog = { skills: [], mcpServers: [], todos: [], memory: [], diagnostics: [] };
 
 export const useDesktopStore = create<DesktopState>((set, get) => ({
   ready: false,
@@ -67,6 +69,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   providers: [],
   resources: emptyResources,
   todos: [],
+  memory: [],
   permissions: [],
   questions: [],
   settings: emptySettings,
@@ -86,6 +89,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
       providers: bootstrap.catalog?.providers ?? [],
       resources: bootstrap.resources ?? get().resources,
       todos: bootstrap.resources?.todos ?? get().todos,
+      memory: bootstrap.resources?.memory ?? get().memory,
       customProvider: bootstrap.settings.providers.find((provider) => provider.id === "chatanytime-openai-compatible"),
       customProviderKeyConfigured: Boolean(bootstrap.settings.providers.find((provider) => provider.id === "chatanytime-openai-compatible")?.keyConfigured),
       customModels: bootstrap.settings.providers.find((provider) => provider.id === "chatanytime-openai-compatible")?.models ?? []
@@ -133,6 +137,9 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
         break;
       case "todos":
         set({ todos: message.todos });
+        break;
+      case "memory":
+        set({ memory: message.memory });
         break;
       case "catalog":
         set({ models: message.models, providers: message.providers });

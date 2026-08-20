@@ -25,7 +25,12 @@ const toolLabels: Record<string, string> = {
   find: "查找文件",
   ls: "列出目录",
   ask_question: "向用户提问",
-  todo_write: "更新任务清单"
+  todo_write: "更新任务清单",
+  memory_write: "写入长期记忆",
+  memory_read: "读取长期记忆",
+  memory_list: "列出长期记忆",
+  memory_search: "检索长期记忆",
+  memory_delete: "删除长期记忆"
 };
 
 export function toolLabel(name: string): string {

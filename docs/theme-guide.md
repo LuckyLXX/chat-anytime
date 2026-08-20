@@ -30,10 +30,11 @@
 
 类名属于实现细节，可能随版本变化；以下属性是稳定契约，结构化主题请只依赖它们：
 
-**区域钩子 `data-pane`**：`sidebar` `topbar` `work-area` `conversation` `timeline` `composer` `task-panel` `preview` `terminal` `question-panel` `settings-dialog` `permission-dialog`
+**区域钩子 `data-pane`**：`sidebar` `topbar` `work-area` `conversation` `timeline` `composer` `task-panel` `memory-panel` `preview` `terminal` `question-panel` `settings-dialog` `permission-dialog`
 
 > `terminal` 是预览面板内的嵌入式终端区域（xterm.js 宿主）。终端配色由 `--code-surface` / `--code-text` / `--selection-bg` token 驱动，主题改这三个 token 即可换终端配色；`[data-pane="terminal"]` 钩子可用于边框、内边距等容器装饰。
 > `question-panel` 是 AI 提问（ask_question 工具）时从输入栏上方向上展开的应答面板，位于 `conversation` 区域内、`composer` 正上方。
+> `memory-panel` 是会话区右上方的长期记忆治理面板（与 `task-panel` 同族的浮动卡片，含主题编辑器与总开关）。
 
 ```css
 [data-pane="composer"] { border-image: url(frame.webp) 0 220 fill; border-radius: 0; }
@@ -51,6 +52,7 @@
 | 打开工作区（顶栏 + 空态主按钮） | `workspace-open` |
 | 预览面板开关（顶栏） | `preview-toggle` |
 | 任务面板开关（右下浮球） | `task-panel-toggle` |
+| 记忆面板开关（会话区右上方浮球） | `memory-toggle` |
 | 发送 | `send` |
 | 停止（生成中与发送互换显示） | `stop` |
 | 添加附件 | `attach` |

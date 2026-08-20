@@ -8,6 +8,7 @@ describe("buildResourceCatalog", () => {
       skills: [],
       mcpServers: [],
       todos: [],
+      memory: [],
       diagnostics: []
     });
   });
@@ -61,6 +62,7 @@ describe("buildResourceCatalog", () => {
       skills: [],
       mcpServers: [],
       todos: [],
+      memory: [],
       diagnostics: []
     });
   });

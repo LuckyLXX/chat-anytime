@@ -115,6 +115,11 @@ export interface VisionSettings {
   prompt?: string;
 }
 
+/** 长期记忆总开关：关闭后不注入索引快照、memory_* 工具返回停用提示（工具保持注册，无需重建会话）。 */
+export interface MemorySettings {
+  enabled: boolean;
+}
+
 export interface DesktopSettings {
   version: 2;
   workspace?: string;
@@ -126,6 +131,7 @@ export interface DesktopSettings {
   currentAgentId: string;
   appearance: AppearanceSettings;
   vision?: VisionSettings;
+  memory?: MemorySettings;
   customProvider?: CustomProviderSettings;
   customProviderKeyConfigured?: boolean;
   pinnedSessionPaths?: string[];
@@ -414,6 +420,8 @@ export interface ResourceCatalog {
   skills: SkillSummary[];
   mcpServers: McpServerSummary[];
   todos: Todo[];
+  /** 激活助手的全量记忆主题（面板治理视图，不经工作区过滤）。 */
+  memory: MemoryTopic[];
   diagnostics: string[];
 }
 
@@ -429,6 +437,24 @@ export type TodoStatus = "pending" | "in_progress" | "completed";
 export interface Todo {
   content: string;
   status: TodoStatus;
+}
+
+/**
+ * 长期记忆主题：`pidesktop-memory/<agentId>/topics/<id>.md` 的协议投影。
+ * 正文只在面板编辑时随推送全量下发；模型侧细节按需经 memory_read 取。
+ */
+export interface MemoryTopic {
+  /** 稳定文件名 id（topics/<id>.md 的 stem，不随标题变化）。 */
+  id: string;
+  title: string;
+  /** 一句话索引行描述（存在性编码：只路由，不承载正文）。 */
+  description: string;
+  /** 绑定的工作区绝对路径；缺省为全局记忆（所有会话可见）。 */
+  workspace?: string;
+  content: string;
+  /** YYYY-MM-DD；时间敏感事实还应在正文内另行标注日期。 */
+  createdAt: string;
+  updatedAt: string;
 }
 
 /**
@@ -559,6 +585,10 @@ export type RuntimeCommand =
   | { type: "provider.models.fetch"; providerId: string; baseUrl: string; apiKey?: string }
   | { type: "provider.models.refresh"; providerId: string }
   | { type: "vision.save"; vision: VisionSettings }
+  | { type: "memory.save"; memory: MemorySettings }
+  | { type: "memory.create"; topic: string; description: string; content: string; workspaceScoped?: boolean }
+  | { type: "memory.update"; topic: string; description: string; content: string }
+  | { type: "memory.delete"; topic: string }
   | { type: "appearance.save"; appearance: AppearanceSettings }
   | { type: "mcp.server.save"; server: McpServerConfigDraft }
   | { type: "mcp.server.toggle"; name: string; enabled: boolean }
@@ -578,6 +608,7 @@ export type RuntimeMessage =
   | { type: "state"; snapshot: RuntimeSnapshot }
   | { type: "resources"; resources: ResourceCatalog }
   | { type: "todos"; todos: Todo[] }
+  | { type: "memory"; memory: MemoryTopic[] }
   | { type: "permission"; request: PermissionRequest }
   | { type: "permission.dismiss"; id: string }
   | { type: "question"; request: QuestionRequest }

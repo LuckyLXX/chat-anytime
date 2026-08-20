@@ -22,6 +22,7 @@ import type {
   ContextUsage,
   DesktopSettings,
   McpServerSummary,
+  MemoryTopic,
   MessageBlock,
   ModelOption,
   PromptAttachment,
@@ -54,7 +55,7 @@ import { buildSkillsSystemPromptBlock, setSkillEnabled, type DiscoveredSkill } f
 import { createTodoStore, migrateLegacyTodoFile, type TodoStore } from "./todo-store.js";
 import { resolveVisionModel } from "./vision.js";
 import { buildResourceCatalog } from "./resource-catalog.js";
-import { agentWorkspaceSessionDir } from "./session-scope.js";
+import { agentWorkspaceSessionDir, sessionListReadyFor } from "./session-scope.js";
 import { isDesktopConfiguredProvider } from "./model-catalog.js";
 import { mergeProviderModels } from "./settings.js";
 import { buildSkillPrompt, parseSkillPrompt, type SkillPromptDisplay } from "./skill-prompt.js";
@@ -69,6 +70,8 @@ import { changedWorkspaceFile } from "./workspace-preview.js";
 import { createToolAudit } from "./tool-audit.js";
 import { diffToolNames } from "./tool-delta.js";
 import * as runtimeTodoTools from "./runtime-todo-tools.js";
+import * as runtimeMemoryTools from "./runtime-memory-tools.js";
+import { createMemoryStore, memoryDirFor, type MemoryStore } from "./memory-store.js";
 import * as runtimeQuestionTool from "./runtime-question-tool.js";
 import * as runtimeSkills from "./runtime-skills.js";
 import * as runtimeVision from "./runtime-vision.js";
@@ -85,6 +88,8 @@ let thinkingLevel: ThinkingLevel = "medium";
 let accessMode: AccessMode = "ask";
 let status = "请选择一个项目开始使用";
 let currentSessions: SessionSummary[] = [];
+/** `currentSessions` 是按哪个 Agent 的目录拉取的；换过角色的旧列表视为失效。 */
+let currentSessionsAgentId: string | undefined;
 let recentWorkspaces: RecentWorkspace[] = [];
 let selectedModel: { provider: string; id: string } | undefined;
 let settings: DesktopSettings | undefined;
@@ -120,9 +125,12 @@ interface SessionRuntimeRecord {
   executions: Map<string, ToolExecution>;
   controlMessages: ChatMessage[];
   todoStore: TodoStore;
+  /** 按助手划分的长期记忆库（跨会话）；工具闭包读它，提示词快照在创建时冻结。 */
+  memoryStore: MemoryStore;
   customTools: ToolDefinition[];
   subagentTools: ToolDefinition[];
   todoTools: ToolDefinition[];
+  memoryTools: ToolDefinition[];
   questionTools: ToolDefinition[];
   /** Captured at bindExtensions(); drives MCP hot-reload for this session only. */
   extensionApi: ExtensionAPI | undefined;
@@ -153,6 +161,10 @@ const MAX_PARKED_SESSIONS = 4;
 // model-visible channel).
 let todoStore: TodoStore | undefined;
 let todos: Todo[] = [];
+// 长期记忆镜像（面板治理视图，全量、不经工作区过滤）：跟随激活助手，
+// 与 todo 镜像同模式；模型侧走会话创建时的索引快照注入（见 createSession）。
+let memoryStore: MemoryStore | undefined;
+let memoryTopics: MemoryTopic[] = [];
 let resourceOperationBusy = false;
 let sessionGeneration = 0;
 const customProviderId = "chatanytime-openai-compatible";
@@ -283,7 +295,7 @@ async function syncMcpServers(refresh = false): Promise<void> {
 }
 
 function emitResourceCatalog(): void {
-  post({ type: "resources", resources: buildResourceCatalog({ skills: nativeSkills, mcpServers, todos }) });
+  post({ type: "resources", resources: buildResourceCatalog({ skills: nativeSkills, mcpServers, todos, memory: memoryTopics }) });
 }
 
 function emitTodos(): void {
@@ -294,6 +306,17 @@ function emitTodos(): void {
 function refreshTodos(): void {
   if (todoStore) todos = todoStore.list();
   emitTodos();
+  emitResourceCatalog();
+}
+
+function emitMemory(): void {
+  post({ type: "memory", memory: memoryTopics });
+}
+
+/** Reload memory topics from the active store and broadcast to the renderer. */
+function refreshMemory(): void {
+  if (memoryStore) memoryTopics = memoryStore.list();
+  emitMemory();
   emitResourceCatalog();
 }
 
@@ -493,6 +516,8 @@ function disposeRecord(record: SessionRuntimeRecord): void {
     activeRuntime = undefined;
     todoStore = undefined;
     todos = [];
+    memoryStore = undefined;
+    memoryTopics = [];
   }
 }
 
@@ -530,6 +555,9 @@ function activate(record: SessionRuntimeRecord): void {
   todoStore = record.todoStore;
   todos = record.todoStore.list();
   emitTodos();
+  memoryStore = record.memoryStore;
+  memoryTopics = record.memoryStore.list();
+  emitMemory();
   syncSkills();
   emitResourceCatalog();
   evictParkedSessions();
@@ -1025,9 +1053,13 @@ async function refreshBuiltinModelsFallback(providerId: string): Promise<void> {
 }
 
 async function refreshSessions(): Promise<void> {
+  // Stamp the scope the listing actually runs against: currentAgent can change
+  // while the awaits below run (agent switch mid-refresh).
+  const listAgentId = currentAgent?.id;
   const directories = await sessionDirectories();
   if (directories.length === 0) {
     currentSessions = [];
+    currentSessionsAgentId = listAgentId;
     return;
   }
 
@@ -1048,6 +1080,7 @@ async function refreshSessions(): Promise<void> {
       ...(runStatus ? { runStatus } : {})
     };
   });
+  currentSessionsAgentId = listAgentId;
 }
 
 function sessionReadyStatus(hasModel: boolean, usedFallback: boolean): string {
@@ -1101,6 +1134,14 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   const sessionHolder: { session: AgentSession | undefined } = { session: undefined };
   let recordBox: SessionRuntimeRecord | undefined;
   const permissionDeps = permissionDepsFor(sessionHolder, recordWorkspace, recordAgent);
+  // 长期记忆：按助手划分、跨会话（pidesktop-memory/<agentId>/）。治理块与
+  // 索引快照在此一次性冻结、整个会话字节不变（dsh 缓存纪律：系统提示词只含
+  // 会话级常量，后续记忆变化全部经 memory_* 工具调用出现在对话尾部）。
+  // enabled 开关从下一个会话起改变注入；工具 execute 则按实时开关判断。
+  const recordMemoryStore = createMemoryStore(memoryDirFor(getAgentDir(), recordAgent.id), refreshMemory);
+  const memoryPromptBlock = settings?.memory?.enabled === false
+    ? undefined
+    : [runtimeMemoryTools.buildMemorySystemPromptBlock(), runtimeMemoryTools.buildMemorySnapshotBlock(recordMemoryStore.indexMarkdown(recordWorkspace))].filter(Boolean).join("\n\n");
   const resourceLoader = new DefaultResourceLoader({
     cwd: recordWorkspace,
     agentDir: getAgentDir(),
@@ -1123,7 +1164,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
         warn: (message) => void post({ type: "log", level: "warn", message })
       }).extension
     ],
-    systemPromptOverride: (base) => [base, recordAgent.systemPrompt, recordAgent.divMode ? buildDivModePrompt() : undefined, buildSkillsSystemPromptBlock(runtimeSkills.activeSkillsFor(nativeSkills, recordAgent))].filter(Boolean).join("\n\n")
+    systemPromptOverride: (base) => [base, recordAgent.systemPrompt, recordAgent.divMode ? buildDivModePrompt() : undefined, buildSkillsSystemPromptBlock(runtimeSkills.activeSkillsFor(nativeSkills, recordAgent)), memoryPromptBlock].filter(Boolean).join("\n\n")
   });
   await resourceLoader.reload();
   syncSkills();
@@ -1151,13 +1192,18 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   // is slow with many/large sessions. It only needs to be fresh for the sidebar,
   // so on switches with a known list it runs in the background instead of
   // delaying the state emit; the follow-up emit is generation-guarded.
-  const hasSessionList = currentSessions.length > 0;
+  const hasSessionList = sessionListReadyFor(currentSessions.length, currentSessionsAgentId, recordAgent.id);
   const sessionsPromise = hasSessionList ? undefined : refreshSessions();
   await mcpPromise;
   emitResourceCatalog();
   const sessionRecordSeed: Pick<SessionRuntimeRecord, "workspace" | "agent" | "permissionDeps"> = { workspace: recordWorkspace, agent: recordAgent, permissionDeps };
   const subagentTools = buildSubagentTools(sessionRecordSeed, activeSessionManager.getSessionId(), requested ?? selectedModel, false);
   const todoTools = buildTodoTools(recordTodoStore);
+  const memoryTools = runtimeMemoryTools.buildMemoryTools({
+    store: recordMemoryStore,
+    workspace: recordWorkspace,
+    enabled: () => settings?.memory?.enabled !== false
+  });
   // ask_question 的挂起按会话清理（disposeRecord → broker.reset），而新会话的
   // sessionId 在 createAgentSession 之后才确定，因此以 getter 延迟读取。
   let recordSessionId = activeSessionManager.getSessionId();
@@ -1168,7 +1214,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   // Each record owns its customTools array: Pi stores it by reference and
   // re-reads it on every tool-registry refresh, so per-record arrays let parked
   // sessions keep their tool set while the active one hot-swaps MCP tools.
-  const recordCustomTools: ToolDefinition[] = [...mcpTools, ...subagentTools, ...todoTools, ...questionTools];
+  const recordCustomTools: ToolDefinition[] = [...mcpTools, ...subagentTools, ...todoTools, ...memoryTools, ...questionTools];
   const result = await createAgentSession({
     cwd: recordWorkspace,
     modelRuntime,
@@ -1195,9 +1241,11 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     executions: new Map(),
     controlMessages: restoreControlMessages(activeSessionManager.getBranch() as unknown as PersistedSessionEntry[]),
     todoStore: recordTodoStore,
+    memoryStore: recordMemoryStore,
     customTools: recordCustomTools,
     subagentTools,
     todoTools,
+    memoryTools,
     questionTools,
     extensionApi: undefined,
     permissionDeps,
@@ -1231,7 +1279,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   // subagent delegation, todo). customTools are registered but not active
   // unless explicitly enabled here.
   const enabledBuiltinTools = Object.entries(recordAgent.tools ?? {}).filter(([, enabled]) => enabled).map(([name]) => name);
-  result.session.setActiveToolsByName([...enabledBuiltinTools, ...mcpTools.map((tool) => tool.name), ...subagentTools.map((tool) => tool.name), ...todoTools.map((tool) => tool.name), ...questionTools.map((tool) => tool.name)]);
+  result.session.setActiveToolsByName([...enabledBuiltinTools, ...mcpTools.map((tool) => tool.name), ...subagentTools.map((tool) => tool.name), ...todoTools.map((tool) => tool.name), ...memoryTools.map((tool) => tool.name), ...questionTools.map((tool) => tool.name)]);
   record.executions = new Map(restoreToolExecutions(result.session.state.messages as unknown as PersistedSessionMessage[], recordWorkspace).map((execution) => [execution.id, execution]));
   // Background processes launched by earlier sessions keep running across
   // restarts; rediscover them from the session's bash history (throttled).
@@ -1347,13 +1395,13 @@ async function applyMcpToolChanges(): Promise<void> {
     const subagentTools = buildSubagentTools(record, record.session.sessionId, selectedModel, false);
     record.subagentTools = subagentTools;
     record.customTools.length = 0;
-    record.customTools.push(...mcpTools, ...subagentTools, ...record.todoTools, ...record.questionTools);
+    record.customTools.push(...mcpTools, ...subagentTools, ...record.todoTools, ...record.memoryTools, ...record.questionTools);
     // Re-registering every MCP tool covers additions and same-name schema
     // changes alike, and triggers the registry refresh that re-reads the
     // record's customTools.
     for (const tool of mcpTools) record.extensionApi.registerTool(tool);
     const enabledBuiltinTools = Object.entries(record.agent.tools ?? {}).filter(([, enabled]) => enabled).map(([name]) => name);
-    record.session.setActiveToolsByName([...enabledBuiltinTools, ...mcpTools.map((tool) => tool.name), ...subagentTools.map((tool) => tool.name), ...record.todoTools.map((tool) => tool.name), ...record.questionTools.map((tool) => tool.name)]);
+    record.session.setActiveToolsByName([...enabledBuiltinTools, ...mcpTools.map((tool) => tool.name), ...subagentTools.map((tool) => tool.name), ...record.todoTools.map((tool) => tool.name), ...record.memoryTools.map((tool) => tool.name), ...record.questionTools.map((tool) => tool.name)]);
   } catch (error) {
     // A stale extension handle (session swapped mid-operation) or any registry
     // hiccup: recover via the rebuild path.
@@ -1807,6 +1855,11 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       visionModel = modelRuntime ? resolveVisionModel(command.vision, modelRuntime) : undefined;
       break;
     }
+    case "memory.save": {
+      // 快照/治理块按会话冻结，开关自下一个会话生效；工具 execute 实时判断。
+      if (settings) settings.memory = command.memory;
+      break;
+    }
     case "agent.select": {
       if (!settings?.agents.some((agent) => agent.id === command.agentId && !agent.archived)) throw new Error("Agent 不存在或已归档");
       // A running session is parked, not killed: switching agents while a turn
@@ -1826,6 +1879,10 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         currentAgent = activeAgent();
         selectedModel = previousModel;
         status = "Agent 切换失败";
+        // createSession 可能已按切换目标重拉过会话列表，回滚后需按原角色再刷。
+        void refreshSessions().then(() => emitState()).catch((refreshError) => {
+          post({ type: "log", level: "warn", message: `刷新会话列表失败：${errorText(refreshError)}` });
+        });
         emitState();
         throw error;
       } finally {
@@ -1913,6 +1970,28 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         setSkillEnabled(skillPaths().statePath, command.id, command.enabled);
         await reloadRuntimeResources();
       });
+      break;
+    }
+    case "memory.create": {
+      if (!memoryStore) throw new Error("当前没有可用的记忆存储，请先打开一个会话");
+      memoryStore.save({
+        title: command.topic,
+        description: command.description,
+        content: command.content,
+        ...(command.workspaceScoped && workspace ? { bindWorkspace: workspace } : {})
+      });
+      break;
+    }
+    case "memory.update": {
+      if (!memoryStore) throw new Error("当前没有可用的记忆存储，请先打开一个会话");
+      if (!memoryStore.read(command.topic)) throw new Error(`未找到记忆主题「${command.topic}」`);
+      // 不传 bindWorkspace：面板编辑保留既有工作区绑定（store upsert 语义）。
+      memoryStore.save({ title: command.topic, description: command.description, content: command.content });
+      break;
+    }
+    case "memory.delete": {
+      if (!memoryStore) throw new Error("当前没有可用的记忆存储，请先打开一个会话");
+      if (!memoryStore.remove(command.topic)) throw new Error(`未找到记忆主题「${command.topic}」`);
       break;
     }
     case "background.kill":

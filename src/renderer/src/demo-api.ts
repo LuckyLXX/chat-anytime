@@ -201,6 +201,7 @@ const demoResources: ResourceCatalog = {
     { name: "browser", status: "disabled", toolCount: 0, disabled: true }
   ],
   todos: [],
+  memory: [],
   diagnostics: []
 };
 
