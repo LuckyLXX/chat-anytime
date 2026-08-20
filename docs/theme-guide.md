@@ -17,14 +17,15 @@
 
 主题通过覆盖语义变量换肤（完整清单见 `pidesktop-theme-creator` skill 的 `references/variables.md`）。核心几组：
 
-| 用途 | 变量 |
-| --- | --- |
+
+| 用途 | 变量                                                                                          |
+| ---- | --------------------------------------------------------------------------------------------- |
 | 表面 | `--surface` `--surface-muted` `--surface-raised` `--surface-sidebar` `--surface-conversation` |
-| 文本 | `--text` `--text-muted` `--text-on-accent` `--text-on-user-bubble` |
-| 强调 | `--accent` `--accent-hover` `--accent-soft` `--accent-text` `--focus-ring` |
-| 气泡 | `--user-bubble` `--user-bubble-border` `--ai-bubble` `--tool-bubble-bg` |
-| 代码 | `--code-surface` `--code-text` `--inline-code-surface` `--syntax-*` |
-| 状态 | `--success` `--danger` `--warning` 及其 `-soft` / `-text` |
+| 文本 | `--text` `--text-muted` `--text-on-accent` `--text-on-user-bubble`                            |
+| 强调 | `--accent` `--accent-hover` `--accent-soft` `--accent-text` `--focus-ring`                    |
+| 气泡 | `--user-bubble` `--user-bubble-border` `--ai-bubble` `--tool-bubble-bg`                       |
+| 代码 | `--code-surface` `--code-text` `--inline-code-surface` `--syntax-*`                           |
+| 状态 | `--success` `--danger` `--warning` 及其 `-soft` / `-text`                                     |
 
 ## 结构钩子（公开 API）
 
@@ -45,22 +46,23 @@
 
 **控件钩子 `data-control`**（关键按钮与输入控件，同样有契约保障）：
 
-| 控件 | 值 |
-| --- | --- |
-| 新建话题（侧栏） | `new-session` |
-| 设置（侧栏底部） | `settings` |
-| 打开工作区（顶栏 + 空态主按钮） | `workspace-open` |
-| 预览面板开关（顶栏） | `preview-toggle` |
-| 面板坞开关 + 待办页 tab（会话区右上方 FAB） | `task-panel-toggle` |
-| 记忆页 tab（面板坞内） | `memory-toggle` |
-| 发送 | `send` |
-| 停止（生成中与发送互换显示） | `stop` |
-| 添加附件 | `attach` |
-| 待发送队列条目操作 | `queue-edit` / `queue-send-now` / `queue-remove` |
-| 访问模式 | `access-mode` |
-| 模型快捷切换 | `model-select` |
-| 思考级别 | `thinking-select` |
-| 消息操作 | `copy` / `edit` / `regenerate` / `share` |
+
+| 控件                                        | 值                                               |
+| ------------------------------------------- | ------------------------------------------------ |
+| 新建话题（侧栏）                            | `new-session`                                    |
+| 设置（侧栏底部）                            | `settings`                                       |
+| 打开工作区（顶栏 + 空态主按钮）             | `workspace-open`                                 |
+| 预览面板开关（顶栏）                        | `preview-toggle`                                 |
+| 面板坞开关 + 待办页 tab（会话区右上方 FAB） | `task-panel-toggle`                              |
+| 记忆页 tab（面板坞内）                      | `memory-toggle`                                  |
+| 发送                                        | `send`                                           |
+| 停止（生成中与发送互换显示）                | `stop`                                           |
+| 添加附件                                    | `attach`                                         |
+| 待发送队列条目操作                          | `queue-edit` / `queue-send-now` / `queue-remove` |
+| 访问模式                                    | `access-mode`                                    |
+| 模型快捷切换                                | `model-select`                                   |
+| 思考级别                                    | `thinking-select`                                |
+| 消息操作                                    | `copy` / `edit` / `regenerate` / `share`         |
 
 ```css
 /* 圆形发送按钮，生成中换成呼吸的停止按钮 */
@@ -121,7 +123,7 @@
 }
 ```
 
-声明壁纸后应用会自动为面板加透明 + 毛玻璃效果。图片保持相对路径引用，应用单独存储图片数据。
+声明壁纸后应用会自动为面板加透明 + 毛玻璃效果；消息气泡及其内嵌块（代码块/引用/表格折叠项等）也会自动降为半透明底色（纯 alpha、不模糊）让壁纸透出。若需自定义：在主题 CSS 里用 `[data-theme-wallpaper="true"] .message-assistant .message-body { background: ...; }` 等同特异性选择器覆盖即可（浅色/深色模式按 `:root[data-theme-effective=...]` 分别声明）。图片保持相对路径引用，应用单独存储图片数据。
 
 ## 分发
 

@@ -1258,6 +1258,44 @@ html[data-theme-wallpaper="true"] .settings-dialog,
 html[data-theme-wallpaper="true"] .permission-dialog,
 html[data-theme-wallpaper="true"] .content-preview-panel { background: var(--panel-bg); backdrop-filter: blur(20px) saturate(120%); -webkit-backdrop-filter: blur(20px) saturate(120%); }
 
+/* Wallpaper mode: chat bubbles and their inner fills drop to translucent
+   blends so the wallpaper stays visible — plain alpha only, no backdrop-filter
+   (per-bubble blur was removed earlier for streaming-repaint and long-scroll
+   cost). Alphas balance translucency against readability: assistant 78%
+   (largest surface, high-contrast text), user 90% (white-on-blue), code and
+   surface fills 86% (dense content, readability first). Themes can override
+   any of these with a matching `[data-theme-wallpaper="true"]` selector. */
+[data-theme-wallpaper="true"] .message-assistant .message-body {
+  background: color-mix(in srgb, var(--ai-bubble) 78%, transparent);
+}
+[data-theme-wallpaper="true"] .message-user .message-body,
+[data-theme-wallpaper="true"] .theme-preview-user-bubble {
+  background: color-mix(in srgb, var(--user-bubble) 90%, transparent);
+}
+[data-theme-wallpaper="true"] .code-block,
+[data-theme-wallpaper="true"] .action-timeline-call-code,
+[data-theme-wallpaper="true"] .mermaid-source pre,
+[data-theme-wallpaper="true"] .html-bubble pre,
+[data-theme-wallpaper="true"] .artifact-source pre {
+  background: color-mix(in srgb, var(--code-surface) 86%, transparent);
+}
+[data-theme-wallpaper="true"] .mermaid-block,
+[data-theme-wallpaper="true"] .mermaid-canvas,
+[data-theme-wallpaper="true"] .reply-files-panel {
+  background: color-mix(in srgb, var(--surface-raised) 86%, transparent);
+}
+[data-theme-wallpaper="true"] .html-bubble details {
+  background: color-mix(in srgb, var(--surface) 86%, transparent);
+}
+[data-theme-wallpaper="true"] .html-bubble blockquote,
+[data-theme-wallpaper="true"] .rich-content :not(pre) > code,
+[data-theme-wallpaper="true"] .extension-message-callout {
+  background: color-mix(in srgb, var(--accent-soft) 86%, transparent);
+}
+[data-theme-wallpaper="true"] .action-timeline-node-icon {
+  background: color-mix(in srgb, var(--ai-bubble) 78%, transparent);
+}
+
 /* 主题装饰层（公开主题 API）：--pi-layer-* 画在壁纸之上、界面之下；
    --pi-overlay-* 画在界面之上、对话框/菜单之下。值是完整 background 简写，
    由 var() 经 CSS 级联解析，主题可按明暗模式分别声明。 */
