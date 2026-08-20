@@ -1259,6 +1259,26 @@ html[data-theme-wallpaper="true"] .sidebar-tabs {
   backdrop-filter: blur(16px) saturate(120%);
   -webkit-backdrop-filter: blur(16px) saturate(120%);
 }
+/* Wallpaper mode: the right preview surfaces (markdown / code / text / image /
+   PDF container shells) follow the same panel alpha so the wallpaper shows
+   through the preview area too. iframe content (browser pages, rendered PDFs)
+   stays opaque — that is the document itself. */
+[data-theme-wallpaper="true"] .content-preview-body,
+[data-theme-wallpaper="true"] .preview-pdf,
+[data-theme-wallpaper="true"] .content-preview-body > iframe {
+  background: color-mix(in srgb, var(--surface-muted) var(--panel-alpha, 100%), transparent);
+}
+[data-theme-wallpaper="true"] .preview-markdown {
+  background: color-mix(in srgb, var(--surface) var(--panel-alpha, 100%), transparent);
+}
+[data-theme-wallpaper="true"] .preview-code,
+[data-theme-wallpaper="true"] .preview-code .code-block,
+[data-theme-wallpaper="true"] .preview-plain-text {
+  background: color-mix(in srgb, var(--code-surface) var(--panel-alpha, 100%), transparent);
+}
+[data-theme-wallpaper="true"] .preview-image {
+  background: color-mix(in srgb, var(--surface-detail) var(--panel-alpha, 100%), transparent);
+}
 html[data-theme-wallpaper="true"] .workspace-main,
 html[data-theme-wallpaper="true"] .conversation-pane { background: transparent; }
 html[data-theme-wallpaper="true"] .sidebar { border-right-color: transparent; }
