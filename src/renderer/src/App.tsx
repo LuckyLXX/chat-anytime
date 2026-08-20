@@ -1646,7 +1646,7 @@ export function App(): ReactNode {
       delete root.dataset.themeCustom;
       delete root.dataset.themeWallpaper;
     };
-  }, [settings.appearance.themePreset, settings.appearance.wallpaperOpacity, settings.appearance.customCss, settings.appearance.customCssAssets, settings.appearance.customThemes, themeAssetUrls]);
+  }, [settings.appearance.themePreset, settings.appearance.wallpaperOpacity, settings.appearance.bubbleOpacity, settings.appearance.panelOpacity, settings.appearance.customCss, settings.appearance.customCssAssets, settings.appearance.customThemes, themeAssetUrls]);
 
   // Project UI state onto the document root so custom themes can react to
   // settings/preview/chat state without observing the DOM. Attribute presence
