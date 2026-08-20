@@ -98,8 +98,17 @@ export async function recognizeImages(caller: VisionModelCaller, model: Model<Ap
   return Promise.all(options.images.map((image, index) => recognizeImage(caller, model, options.prompt, index + 1, options.images.length, options.question, image, timeoutMs)));
 }
 
-/** Format recognition results as the delimited block appended to the prompt text. */
-export function formatVisionBlock(results: string[], modelName: string): string {
-  const parts = results.map((result, index) => `【图片 ${index + 1}】\n${result.trim()}`);
-  return `\n\n---\n[图片识别结果] 当前对话模型不支持图片输入，以下内容改由视觉模型 ${modelName} 识别提供：\n${parts.join("\n\n")}\n---`;
+/**
+ * Format recognition results as the delimited block returned to the calling
+ * model. Optional per-image labels (e.g. file names for model-supplied image
+ * paths) appear in the header; user attachments carry no label. The wording
+ * stays neutral — the block is the recognize_images tool's output, not a
+ * transport note about the conversation model.
+ */
+export function formatVisionBlock(results: string[], modelName: string, labels: (string | undefined)[] = []): string {
+  const parts = results.map((result, index) => {
+    const suffix = labels[index]?.trim() ? ` · ${labels[index]!.trim()}` : "";
+    return `【图片 ${index + 1}${suffix}】\n${result.trim()}`;
+  });
+  return `\n\n---\n[图片识别结果]（视觉模型 ${modelName} 识别）：\n${parts.join("\n\n")}\n---`;
 }

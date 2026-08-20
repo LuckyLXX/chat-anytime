@@ -30,7 +30,8 @@ const toolLabels: Record<string, string> = {
   memory_read: "读取长期记忆",
   memory_list: "列出长期记忆",
   memory_search: "检索长期记忆",
-  memory_delete: "删除长期记忆"
+  memory_delete: "删除长期记忆",
+  recognize_images: "识别图片"
 };
 
 export function toolLabel(name: string): string {

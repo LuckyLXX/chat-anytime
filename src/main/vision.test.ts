@@ -120,4 +120,10 @@ describe("vision prompt block", () => {
     expect(block).toContain("GLM-4V Flash");
     expect(block.startsWith("\n\n---\n")).toBe(true);
   });
+
+  it("annotates model-supplied file names and drops the old fallback wording", () => {
+    const block = formatVisionBlock(["截图内容"], "GLM-4V Flash", ["shot.png"]);
+    expect(block).toContain("【图片 1 · shot.png】\n截图内容");
+    expect(block).not.toContain("当前对话模型不支持图片输入");
+  });
 });

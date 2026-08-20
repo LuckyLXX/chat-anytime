@@ -135,8 +135,9 @@ interface SessionRuntimeRecord {
   /** Captured at bindExtensions(); drives MCP hot-reload for this session only. */
   extensionApi: ExtensionAPI | undefined;
   permissionDeps: runtimePermissions.PermissionGateDeps;
-  pendingVisionMessage: ChatMessage | undefined;
-  pendingVisionSince: number | undefined;
+  /** 用户附图待识别槽（仅文本模型会话使用）；recognize_images 消费后或轮末未消费时清空。 */
+  visionInbox: runtimeVision.VisionInbox | undefined;
+  visionTools: ToolDefinition[];
   runStatus: SessionRunStatus | undefined;
   /** True from session.abort() until the run settles — resolves the dot to red. */
   abortRequested: boolean;
@@ -436,11 +437,7 @@ function snapshot(): RuntimeSnapshot {
   const sessionMessages = record && activeSession
     ? normalizeMessages(activeSession.state.messages, activeSession.state.streamingMessage)
     : [];
-  // Swap the transient recognition bubble for the committed user message in
-  // the same frame the latter appears, so neither a gap nor a duplicate shows.
-  const pendingSince = record?.pendingVisionSince;
-  if (record && pendingSince !== undefined && sessionMessages.some((message) => message.role === "user" && message.timestamp >= pendingSince)) clearRecordPendingVision(record);
-  const messages = [...(record?.pendingVisionMessage ? [record.pendingVisionMessage] : []), ...sessionMessages, ...(record?.controlMessages ?? [])].sort((left, right) => left.timestamp - right.timestamp);
+  const messages = [...sessionMessages, ...(record?.controlMessages ?? [])].sort((left, right) => left.timestamp - right.timestamp);
   return {
     workspace: record?.workspace ?? workspace,
     agentId: currentAgent?.id ?? "default",
@@ -467,9 +464,8 @@ function snapshot(): RuntimeSnapshot {
   };
 }
 
-function clearRecordPendingVision(record: SessionRuntimeRecord): void {
-  record.pendingVisionMessage = undefined;
-  record.pendingVisionSince = undefined;
+function clearRecordVisionInbox(record: SessionRuntimeRecord): void {
+  record.visionInbox = undefined;
 }
 
 /** Overlay a session's run status onto the sidebar list. */
@@ -618,6 +614,60 @@ function defaultModel(): { provider: string; id: string } | undefined {
 }
 
 function hasImageInput(model: { input?: readonly string[] } | undefined): boolean { return Boolean(model?.input?.includes("image")); }
+
+/**
+ * Rebuild the full registered customTool set for a record (MCP + app-owned).
+ * customTools arrays are held by reference inside Pi, so hot-path updates
+ * rebuild in place (`length = 0` + push) instead of swapping the array.
+ */
+function buildRecordTools(record: Pick<SessionRuntimeRecord, "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "visionTools">): ToolDefinition[] {
+  return [...mcpTools, ...record.subagentTools, ...record.todoTools, ...record.memoryTools, ...record.questionTools, ...record.visionTools];
+}
+
+/**
+ * Active tool names for a record. Vision tools are registered for every
+ * session (byte-stable definition) but active only for text-only conversation
+ * models — multimodal models see the same tool set as before, so the request
+ * prefix stays stable within each session/model configuration (cache discipline).
+ */
+function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "visionTools">, includeVision: boolean): string[] {
+  const builtin = Object.entries(record.agent.tools ?? {}).filter(([, enabled]) => enabled).map(([name]) => name);
+  return [
+    ...builtin,
+    ...mcpTools.map((tool) => tool.name),
+    ...record.subagentTools.map((tool) => tool.name),
+    ...record.todoTools.map((tool) => tool.name),
+    ...record.memoryTools.map((tool) => tool.name),
+    ...record.questionTools.map((tool) => tool.name),
+    ...(includeVision ? record.visionTools.map((tool) => tool.name) : [])
+  ];
+}
+
+/**
+ * Stage user-attached images into the record's inbox and switch the payload to
+ * a text-only prompt telling the model to call recognize_images. The dynamic
+ * image count lives in the trailing user text (conversation tail), never in
+ * the tool schema or system prompt — the provider prefix cache is untouched.
+ */
+function stageVisionImages(record: SessionRuntimeRecord, payload: { text: string; images: ImageContent[] }): void {
+  record.visionInbox = { images: payload.images, question: payload.text };
+  const count = payload.images.length;
+  payload.text += `\n\n【附带 ${count} 张图片，请调用 recognize_images 工具识别后再回答。】`;
+  payload.images = [];
+}
+
+/**
+ * Re-align the live session's active tool set after a model switch: the
+ * recognize_images tool is activated only when the conversation model cannot
+ * take image input itself. Registered-but-inactive tools are never offered to
+ * multimodal models, so their request prefix stays identical to the pre-tool
+ * era.
+ */
+function reconcileVisionTool(record: SessionRuntimeRecord | undefined): void {
+  if (!record || record.visionTools.length === 0) return;
+  const includeVision = !hasImageInput(record.session.model);
+  record.session.setActiveToolsByName(toolNamesFor(record, includeVision));
+}
 
 function emitState(): void {
   // Default callers (commands, lifecycle hooks) flush immediately.
@@ -1211,10 +1261,23 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     getSessionId: () => recordSessionId,
     broker: questionBroker
   });
+  // recognize_images 始终注册（定义字节恒定），是否激活由会话模型是否支持
+  // 图片决定（见 reconcileVisionTool / createSession 的 setActiveToolsByName）。
+  // execute 闭包运行时读取全局 visionModel，vision.save 后无需重注册。
+  const visionTools = runtimeVision.buildVisionTools({
+    resolve: () => {
+      if (!visionModel || !modelRuntime) throw new Error("当前模型不支持图片输入，请先切换多模态模型，或在设置的模型服务中启用视觉识别");
+      return { runtime: modelRuntime, model: visionModel, prompt: settings?.vision?.prompt };
+    },
+    inbox: () => recordBox?.visionInbox,
+    clearInbox: () => { if (recordBox) recordBox.visionInbox = undefined; },
+    readImageFile,
+    errorText
+  });
   // Each record owns its customTools array: Pi stores it by reference and
   // re-reads it on every tool-registry refresh, so per-record arrays let parked
   // sessions keep their tool set while the active one hot-swaps MCP tools.
-  const recordCustomTools: ToolDefinition[] = [...mcpTools, ...subagentTools, ...todoTools, ...memoryTools, ...questionTools];
+  const recordCustomTools: ToolDefinition[] = [...mcpTools, ...subagentTools, ...todoTools, ...memoryTools, ...questionTools, ...visionTools];
   const result = await createAgentSession({
     cwd: recordWorkspace,
     modelRuntime,
@@ -1249,8 +1312,8 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     questionTools,
     extensionApi: undefined,
     permissionDeps,
-    pendingVisionMessage: undefined,
-    pendingVisionSince: undefined,
+    visionInbox: undefined,
+    visionTools,
     runStatus: undefined,
     abortRequested: false,
     cacheUsage: runtimeContextUsage.scanCacheUsage(result.session.state.messages),
@@ -1276,10 +1339,10 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     return;
   }
   // Activate the agent's enabled built-in tools plus every customTool (MCP,
-  // subagent delegation, todo). customTools are registered but not active
-  // unless explicitly enabled here.
-  const enabledBuiltinTools = Object.entries(recordAgent.tools ?? {}).filter(([, enabled]) => enabled).map(([name]) => name);
-  result.session.setActiveToolsByName([...enabledBuiltinTools, ...mcpTools.map((tool) => tool.name), ...subagentTools.map((tool) => tool.name), ...todoTools.map((tool) => tool.name), ...memoryTools.map((tool) => tool.name), ...questionTools.map((tool) => tool.name)]);
+  // subagent delegation, todo, memory, question, vision). customTools are
+  // registered but not active unless explicitly enabled here; the vision tool
+  // is activated only for text-only conversation models (toolNamesFor).
+  result.session.setActiveToolsByName(toolNamesFor(record, !hasImageInput(result.session.model)));
   record.executions = new Map(restoreToolExecutions(result.session.state.messages as unknown as PersistedSessionMessage[], recordWorkspace).map((execution) => [execution.id, execution]));
   // Background processes launched by earlier sessions keep running across
   // restarts; rediscover them from the session's bash history (throttled).
@@ -1395,13 +1458,12 @@ async function applyMcpToolChanges(): Promise<void> {
     const subagentTools = buildSubagentTools(record, record.session.sessionId, selectedModel, false);
     record.subagentTools = subagentTools;
     record.customTools.length = 0;
-    record.customTools.push(...mcpTools, ...subagentTools, ...record.todoTools, ...record.memoryTools, ...record.questionTools);
+    record.customTools.push(...buildRecordTools(record));
     // Re-registering every MCP tool covers additions and same-name schema
     // changes alike, and triggers the registry refresh that re-reads the
     // record's customTools.
     for (const tool of mcpTools) record.extensionApi.registerTool(tool);
-    const enabledBuiltinTools = Object.entries(record.agent.tools ?? {}).filter(([, enabled]) => enabled).map(([name]) => name);
-    record.session.setActiveToolsByName([...enabledBuiltinTools, ...mcpTools.map((tool) => tool.name), ...subagentTools.map((tool) => tool.name), ...record.todoTools.map((tool) => tool.name), ...record.memoryTools.map((tool) => tool.name), ...record.questionTools.map((tool) => tool.name)]);
+    record.session.setActiveToolsByName(toolNamesFor(record, !hasImageInput(record.session.model)));
   } catch (error) {
     // A stale extension handle (session swapped mid-operation) or any registry
     // hiccup: recover via the rebuild path.
@@ -1445,28 +1507,25 @@ async function preparePromptPayload(text: string, attachments: PromptAttachment[
   };
 }
 
-// Fallback for text-only conversation models: recognize attached images with
-// the configured vision model (one of the registered provider models) and
-// inject the descriptions into the prompt text, so raw image parts never
-// reach a model that cannot read them.
-async function applyVisionFallback(record: SessionRuntimeRecord, payload: { text: string; images: ImageContent[] }): Promise<void> {
-  await runtimeVision.runVisionFallback(
-    {
-      resolve: () => {
-        if (!visionModel || !modelRuntime) throw new Error("当前模型不支持图片输入，请先切换多模态模型，或在设置的模型服务中启用视觉识别");
-        return { runtime: modelRuntime, model: visionModel, prompt: settings?.vision?.prompt };
-      },
-      apply: (state) => {
-        record.busy = state.busy;
-        record.status = state.status;
-        record.pendingVisionMessage = state.pendingMessage;
-        record.pendingVisionSince = state.pendingMessage?.timestamp;
-        emitState();
-      },
-      errorText
-    },
-    payload
-  );
+/**
+ * Read an image file for the recognize_images tool: workspace-bounded via
+ * realpath + workspaceRelativeAttachment (mirrors the attachment import
+ * checks), size and MIME whitelisted. Model-supplied paths are its own
+ * screenshots/artifacts inside the workspace.
+ */
+async function readImageFile(path: string): Promise<ImageContent> {
+  if (!workspace) throw new Error("请先打开工作区");
+  const mimeType = runtimeVision.imageMimeForPath(path);
+  if (!mimeType) throw new Error("不支持的图片格式（支持 png/jpg/jpeg/webp/gif）");
+  const candidate = resolve(workspace, path);
+  const info = await stat(candidate);
+  if (!info.isFile()) throw new Error("不是普通文件");
+  if (info.size > runtimeVision.MAX_VISION_FILE_BYTES) throw new Error(`图片文件超过 20 MB 限制：${path}`);
+  const rootReal = await realpath(resolve(workspace));
+  const targetReal = await realpath(candidate);
+  workspaceRelativeAttachment(rootReal, targetReal); // 越界抛错
+  const data = await readFile(targetReal);
+  return { type: "image", data: data.toString("base64"), mimeType };
 }
 
 async function handleCommand(command: RuntimeCommand): Promise<void> {
@@ -1568,7 +1627,10 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       if (!record.session.model) throw new Error("请先配置并选择模型，再发送消息");
       if (record.busy) throw new Error("当前话题正在执行，请等待完成或停止后再发送");
       const prompt = await preparePromptPayload(command.text, command.attachments);
-      if (prompt.images.length && !hasImageInput(record.session.model)) await applyVisionFallback(record, prompt);
+      if (prompt.images.length && !hasImageInput(record.session.model)) {
+        if (!visionModel) throw new Error("当前模型不支持图片输入，请先切换多模态模型，或在设置的模型服务中启用视觉识别");
+        stageVisionImages(record, prompt);
+      }
       record.busy = true;
       record.status = "Pi 正在工作";
       record.abortRequested = false;
@@ -1580,7 +1642,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         // The record may have been parked (still live — update it so the dot
         // resolves) or torn down (workspace removal — nothing left to update).
         if (!liveSessions.has(record.session.sessionId)) return;
-        clearRecordPendingVision(record);
+        clearRecordVisionInbox(record);
         completeTurn(record);
         record.busy = false;
         record.status = "请求失败";
@@ -1597,7 +1659,6 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       if (!record.session.model) throw new Error("请先配置并选择模型，再发送消息");
       const queueText = command.skillName ? runtimeSkillPrompt(command.skillName, command.text || undefined) : command.text;
       const prompt = await preparePromptPayload(queueText, command.attachments);
-      if (prompt.images.length && !hasImageInput(record.session.model)) await applyVisionFallback(record, prompt);
       // Pi 的队列以纯文本存储，编辑/删除/立即发送需要整队重建，图片附件会
       // 丢失——排队仅支持文本与文件附件（文件附件已折叠为路径清单）。
       if (prompt.images.length) throw new Error("排队消息暂不支持图片附件，请等本轮回复结束后再发送");
@@ -1643,7 +1704,10 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       if (!command.text.trim() && !command.skillName) throw new Error("没有可重新生成的用户消息");
       const regeneratedText = command.skillName ? runtimeSkillPrompt(command.skillName, command.text) : command.text.trim();
       const regeneratedPrompt = await preparePromptPayload(regeneratedText, command.attachments);
-      if (regeneratedPrompt.images.length && !hasImageInput(record.session.model)) await applyVisionFallback(record, regeneratedPrompt);
+      if (regeneratedPrompt.images.length && !hasImageInput(record.session.model)) {
+        if (!visionModel) throw new Error("当前模型不支持图片输入，请先切换多模态模型，或在设置的模型服务中启用视觉识别");
+        stageVisionImages(record, regeneratedPrompt);
+      }
       const regenerateSession = record.session;
       record.busy = true;
       record.status = "Pi 正在重新生成";
@@ -1667,7 +1731,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         await regenerateSession.prompt(regeneratedPrompt.text, regeneratedPrompt.images.length ? { images: regeneratedPrompt.images } : undefined);
       })().catch((error) => {
         if (!liveSessions.has(record.session.sessionId)) return;
-        clearRecordPendingVision(record);
+        clearRecordVisionInbox(record);
         completeTurn(record);
         record.busy = false;
         record.status = "请求失败";
