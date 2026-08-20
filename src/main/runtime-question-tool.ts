@@ -115,7 +115,7 @@ export function buildQuestionTools({ getSessionId, broker }: QuestionToolContext
     defineTool({
       name: "ask_question",
       label: "向用户提问",
-      description: `向用户提出 ${QUESTION_MAX_COUNT} 个以内的问题以澄清需求、确认方案或收集信息。工具会阻塞等待用户在输入栏上方的提问面板中作答，回答会原样返回。问题可以是纯文本（直接传字符串），或对象形式的选择题：{ text, type: "single"|"multiple", options: [...] }（2-${QUESTION_MAX_OPTIONS} 个选项）；选择题同时提供自定义输入，用户可勾选也可自行填写。缺少关键信息时优先用它提问，而不是自行假设。`,
+      description: `向用户提出 ${QUESTION_MAX_COUNT} 个以内的问题以澄清需求、确认方案或收集信息。工具会阻塞等待用户在输入栏上方的提问面板中作答，回答会原样返回。问题可以是纯文本（直接传字符串），或对象形式的选择题：{ text, type: "single"|"multiple", options: [...] }（2-${QUESTION_MAX_OPTIONS} 个选项）；选择题同时提供自定义输入，用户可勾选也可自行填写。选择题请把最推荐的选项放在 options 的第一位，界面会自动在其后标注（推荐），提示用户这是你的建议项。缺少关键信息时优先用它提问，而不是自行假设。`,
       promptSnippet: "ask_question: 向用户提问（文本/单选/多选）并等待回答",
       parameters: Type.Object({
         questions: Type.Array(
@@ -124,7 +124,7 @@ export function buildQuestionTools({ getSessionId, broker }: QuestionToolContext
             Type.Object({
               text: Type.String({ description: "问题文本，简洁明确" }),
               type: Type.Optional(Type.Union([Type.Literal("single"), Type.Literal("multiple"), Type.Literal("text")], { description: "题型：single 单选 / multiple 多选，缺省为文本题" })),
-              options: Type.Optional(Type.Array(Type.String(), { description: "选项列表，选择题必填（2-8 个）" }))
+              options: Type.Optional(Type.Array(Type.String(), { description: "选项列表，选择题必填（2-8 个）；把最推荐的选项放在第一位，界面会标注「推荐」" }))
             })
           ]),
           {

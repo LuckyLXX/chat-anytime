@@ -31,19 +31,34 @@ export function serializeAnswer(item: QuestionItem, draft: QuestionDraft): strin
 
 /**
  * ask_question 的应答面板：从输入栏上方向上展开，逐条回答 AI 的提问。
- * 选择题（single/multiple）提供选项按钮，并始终附带一个自定义输入框；
- * 挂起期间工具执行阻塞，提交/取消经 question.resolve 返回给模型。
+ * 分页式：一次展示一个问题，右上角页码/箭头切换（草稿跨页保留），底部
+ * 「忽略」取消整个提问、「继续」翻页或提交；快捷键 ↑↓/Tab 移动选择、
+ * 回车或空格选中。选择题第一个选项自动标注「（推荐）」——与 ask_question
+ * 工具描述的约定一致：模型把最推荐的选项放在第一位。
  */
 export function QuestionPanel({ request }: { request: QuestionRequest }): ReactNode {
   const [drafts, setDrafts] = useState<QuestionDraft[]>(() => request.questions.map(() => emptyQuestionDraft()));
+  const [current, setCurrent] = useState(0);
   const [submitting, setSubmitting] = useState(false);
-  const inputRefs = useRef<(HTMLInputElement | undefined)[]>([]);
+  const optionRefs = useRef<(HTMLButtonElement | undefined)[]>([]);
+  const inputRef = useRef<HTMLInputElement | undefined>(undefined);
 
   useEffect(() => {
     setDrafts(request.questions.map(() => emptyQuestionDraft()));
+    setCurrent(0);
     setSubmitting(false);
-    inputRefs.current[0]?.focus();
   }, [request.id, request.questions]);
+
+  // 翻页/挂载后聚焦当前题第一个可交互元素（选择题聚焦首选项，文本题聚焦输入框）。
+  useEffect(() => {
+    const item = request.questions[current];
+    if (!item) return;
+    if (item.options.length > 0) {
+      optionRefs.current[0]?.focus();
+    } else {
+      inputRef.current?.focus();
+    }
+  }, [current, request.questions]);
 
   async function resolve(answers?: string[]): Promise<void> {
     setSubmitting(true);
@@ -56,11 +71,11 @@ export function QuestionPanel({ request }: { request: QuestionRequest }): ReactN
   }
 
   function patchDraft(index: number, patch: Partial<QuestionDraft>): void {
-    setDrafts((current) => current.map((draft, i) => i === index ? { ...draft, ...patch } : draft));
+    setDrafts((currentDrafts) => currentDrafts.map((draft, i) => i === index ? { ...draft, ...patch } : draft));
   }
 
   function toggleOption(item: QuestionItem, index: number, option: string): void {
-    setDrafts((current) => current.map((draft, i) => {
+    setDrafts((currentDrafts) => currentDrafts.map((draft, i) => {
       if (i !== index) return draft;
       if (item.type === "single") {
         return { ...draft, selected: draft.selected[0] === option ? [] : [option] };
@@ -69,70 +84,111 @@ export function QuestionPanel({ request }: { request: QuestionRequest }): ReactN
     }));
   }
 
-  const allAnswered = request.questions.every((item, index) => isQuestionAnswered(item, drafts[index] ?? emptyQuestionDraft()));
+  const item = request.questions[current] ?? request.questions[0]!;
+  const isLast = current === request.questions.length - 1;
+  const answered = isQuestionAnswered(item, drafts[current] ?? emptyQuestionDraft());
 
+  /** 忽略 = 取消整个提问；继续 = 翻到下一题，最后一题提交全部答案。 */
+  function continueToNext(): void {
+    if (!answered || submitting) return;
+    if (!isLast) {
+      setCurrent(current + 1);
+    } else {
+      void resolve(request.questions.map((question, index) => serializeAnswer(question, drafts[index] ?? emptyQuestionDraft())));
+    }
+  }
+
+  /** 选项键盘：↑↓ 移动焦点（单选同步移动选中），回车/空格选中（阻止默认滚动）。 */
+  function handleOptionKey(event: KeyboardEvent<HTMLButtonElement>, question: QuestionItem, optionIndex: number): void {
+    const options = question.options;
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const delta = event.key === "ArrowDown" ? 1 : -1;
+      const next = (optionIndex + delta + options.length) % options.length;
+      if (question.type === "single") {
+        patchDraft(current, { selected: [options[next]!] });
+      }
+      optionRefs.current[next]?.focus();
+      return;
+    }
+    if ((event.key === "Enter" || event.key === " ") && !event.nativeEvent.isComposing) {
+      event.preventDefault();
+      toggleOption(question, current, options[optionIndex]!);
+    }
+  }
+
+  /** 自定义输入回车：翻到下一题，最后一题作答后提交。 */
   function handleInputKey(event: KeyboardEvent<HTMLInputElement>, index: number): void {
     if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
     event.preventDefault();
     if (index < request.questions.length - 1) {
-      inputRefs.current[index + 1]?.focus();
+      setCurrent(index + 1);
       return;
     }
-    if (allAnswered && !submitting) void resolve(request.questions.map((item, index) => serializeAnswer(item, drafts[index] ?? emptyQuestionDraft())));
+    if (answered && !submitting) {
+      void resolve(request.questions.map((question, i) => serializeAnswer(question, drafts[i] ?? emptyQuestionDraft())));
+    }
   }
 
   return (
     <div className="question-panel" data-pane="question-panel" role="form" aria-label="AI 提问">
-      <header>
-        <CircleHelp size={16} />
-        <strong>AI 想确认 {request.questions.length} 个问题</strong>
-        <span>回答后 AI 会继续执行</span>
+      <header className="question-panel-header">
+        <span className="question-step-tag">{isLast ? "最后一步" : "下一步"}</span>
+        <h2 className="question-title">{item.text}</h2>
+        <div className="question-pager">
+          <span>{current + 1} / {request.questions.length}</span>
+          <button type="button" aria-label="上一题" disabled={current === 0 || submitting} onClick={() => setCurrent((value) => Math.max(0, value - 1))}>◀</button>
+          <button type="button" aria-label="下一题" disabled={isLast || submitting} onClick={() => setCurrent((value) => Math.min(request.questions.length - 1, value + 1))}>▶</button>
+        </div>
       </header>
-      <div className="question-panel-items">
-        {request.questions.map((item, index) => (
-          <div className="question-panel-item" key={index}>
-            <label htmlFor={`question-${request.id}-${index}`}>{index + 1}. {item.text}</label>
-            {item.options.length > 0 && (
-              <div
-                className="question-options"
-                role={item.type === "single" ? "radiogroup" : "group"}
-                aria-label={`问题 ${index + 1} 选项`}
-              >
-                {item.options.map((option) => {
-                  const active = (drafts[index] ?? emptyQuestionDraft()).selected.includes(option);
-                  return (
-                    <button
-                      key={option}
-                      type="button"
-                      className={`question-option${active ? " active" : ""}`}
-                      role={item.type === "single" ? "radio" : "checkbox"}
-                      aria-checked={active}
-                      disabled={submitting}
-                      onClick={() => toggleOption(item, index, option)}
-                    >
-                      {option}
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-            <input
-              ref={(element) => { inputRefs.current[index] = element ?? undefined; }}
-              id={`question-${request.id}-${index}`}
-              value={drafts[index]?.custom ?? ""}
-              disabled={submitting}
-              placeholder={item.options.length > 0 ? "或自定义输入，回车跳到下一问" : index === request.questions.length - 1 ? "回答后回车提交" : "输入回答，回车跳到下一问"}
-              onChange={(event) => patchDraft(index, { custom: event.target.value })}
-              onKeyDown={(event) => handleInputKey(event, index)}
-            />
-          </div>
-        ))}
+      {item.options.length > 0 && (
+        <ol
+          className="question-options"
+          role={item.type === "single" ? "radiogroup" : "group"}
+          aria-label={`问题 ${current + 1} 选项`}
+        >
+          {item.options.map((option, optionIndex) => {
+            const active = (drafts[current] ?? emptyQuestionDraft()).selected.includes(option);
+            return (
+              <li key={option}>
+                <button
+                  ref={(element) => { optionRefs.current[optionIndex] = element ?? undefined; }}
+                  type="button"
+                  className={`question-option${active ? " active" : ""}`}
+                  role={item.type === "single" ? "radio" : "checkbox"}
+                  aria-checked={active}
+                  disabled={submitting}
+                  onClick={() => toggleOption(item, current, option)}
+                  onKeyDown={(event) => handleOptionKey(event, item, optionIndex)}
+                >
+                  <span className="question-option-index">{optionIndex + 1}</span>
+                  <span className="question-option-label">{option}</span>
+                  {optionIndex === 0 && <span className="question-recommended">（推荐）</span>}
+                </button>
+              </li>
+            );
+          })}
+        </ol>
+      )}
+      <div className="question-custom-row">
+        <span className="question-custom-index">{item.options.length + 1}</span>
+        <input
+          ref={(element) => { inputRef.current = element ?? undefined; }}
+          value={drafts[current]?.custom ?? ""}
+          disabled={submitting}
+          placeholder="输入你的回答..."
+          onChange={(event) => patchDraft(current, { custom: event.target.value })}
+          onKeyDown={(event) => handleInputKey(event, current)}
+        />
       </div>
-      <footer>
-        <button className="secondary-button" type="button" disabled={submitting} onClick={() => void resolve()}>取消提问</button>
-        <button className="primary-button" type="button" disabled={!allAnswered || submitting} onClick={() => void resolve(request.questions.map((item, index) => serializeAnswer(item, drafts[index] ?? emptyQuestionDraft())))}>
-          {submitting ? "提交中…" : "提交回答"}
-        </button>
+      <footer className="question-panel-footer">
+        <span className="question-hint"><CircleHelp size={12} /> 使用 Tab / 上下键选择，回车或空格选中</span>
+        <div className="question-footer-actions">
+          <button className="secondary-button" type="button" disabled={submitting} onClick={() => void resolve()}>忽略</button>
+          <button className="primary-button" type="button" disabled={!answered || submitting} onClick={continueToNext}>
+            {submitting ? "提交中…" : "继续"}
+          </button>
+        </div>
       </footer>
     </div>
   );

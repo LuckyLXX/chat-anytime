@@ -163,4 +163,11 @@ describe("ask_question tool", () => {
     const { tools } = toolWithBroker();
     expect(tools.map((tool) => tool.name)).toEqual(["ask_question"]);
   });
+
+  it("tells the model that the first option is shown as the recommendation", () => {
+    const { tools } = toolWithBroker();
+    const description = tools[0]?.description ?? "";
+    expect(description).toContain("第一位");
+    expect(description).toContain("（推荐）");
+  });
 });
