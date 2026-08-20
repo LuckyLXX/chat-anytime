@@ -353,6 +353,34 @@ function ToolCallDetails({ call, execution, streaming }: { call: Extract<Message
   );
 }
 
+/**
+ * 思考内容块：折叠时限制在固定高度内滚动输出，超出限高才出现展开按钮；
+ * 点击展开后展示全文，再点收起恢复限高。流式输出期间文本变化会重新测量。
+ */
+function ThinkingBlock({ text, label }: { text: string; label: string }): ReactNode {
+  const [expanded, setExpanded] = useState(false);
+  const [overflowing, setOverflowing] = useState(false);
+  const bodyRef = useRef<HTMLParagraphElement | null>(null);
+
+  useLayoutEffect(() => {
+    const el = bodyRef.current;
+    if (!el || expanded) return; // 展开时保持按钮状态，避免测量全高后误判为不溢出
+    setOverflowing(el.scrollHeight > el.clientHeight + 1);
+  }, [text, expanded]);
+
+  return (
+    <>
+      <strong>{label}</strong>
+      <p ref={bodyRef} className={`thinking-body${expanded ? " expanded" : ""}`}>{text}</p>
+      {overflowing && (
+        <button type="button" className="thinking-expand" data-control="thinking-expand" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>
+          {expanded ? "收起" : "展开全文"}
+        </button>
+      )}
+    </>
+  );
+}
+
 interface ActionTimelineProps {
   message: ChatMessage;
   executions: ToolExecution[];
@@ -395,7 +423,7 @@ function ActionTimeline({ message, executions, turnActive, showThinking, thinkin
               <div className={`action-timeline-node ${segment.type} ${stateClass}`} key={segment.type === "tool-call" ? segment.call.id : `${segment.type}-${index}`}>
                 <span className="action-timeline-node-icon">{actionTimelineIcon(segment, execution, processActive)}</span>
                 <div className="action-timeline-node-content">
-                  {segment.type === "thinking" ? <><strong>{thinkingLabel || "思考过程"}</strong><p>{segment.text}</p></> : segment.type === "tool-call" ? <ToolCallDetails call={segment.call} execution={execution} streaming={Boolean(message.streaming)} /> : <RichContent streaming={false} artifactPrefix={`${message.id}-process-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction}>{segment.text}</RichContent>}
+                  {segment.type === "thinking" ? <ThinkingBlock text={segment.text} label={thinkingLabel || "思考过程"} /> : segment.type === "tool-call" ? <ToolCallDetails call={segment.call} execution={execution} streaming={Boolean(message.streaming)} /> : <RichContent streaming={false} artifactPrefix={`${message.id}-process-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction}>{segment.text}</RichContent>}
                 </div>
               </div>
             );

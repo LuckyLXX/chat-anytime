@@ -336,6 +336,11 @@ select option:checked { color: var(--on-accent); background-color: var(--accent)
 .action-timeline-node-content > strong { display: inline; color: var(--text); font-size: 11px; font-weight: 650; }
 .action-timeline-node-content > span { margin-left: 7px; color: var(--text-muted); font-size: 10px; }
 .action-timeline-node-content > p { margin: 3px 0 0; color: var(--text-muted); white-space: pre-wrap; }
+/* 思考内容：未展开时限制在固定高度内滚动输出，展开后显示全文 */
+.action-timeline-node.thinking .thinking-body { max-height: 160px; overflow-y: auto; overscroll-behavior: contain; }
+.action-timeline-node.thinking .thinking-body.expanded { max-height: none; overflow: visible; }
+.action-timeline-node.thinking .thinking-expand { display: block; margin: 6px 0 0; padding: 0; border: 0; color: var(--accent-text); background: transparent; font-size: 10px; line-height: 1.4; cursor: pointer; }
+.action-timeline-node.thinking .thinking-expand:hover { text-decoration: underline; }
 .action-timeline-node.text .action-timeline-node-content { padding-top: 0; color: var(--text); font-size: 12px; }
 .action-timeline-node.text .rich-content > :first-child { margin-top: 0; }
 .action-timeline-node.text .rich-content > :last-child { margin-bottom: 0; }
