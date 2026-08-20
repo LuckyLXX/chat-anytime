@@ -92,8 +92,7 @@ import { CSS_URL_PATTERN, createThemeAssetUrls, isExternalThemeReference, normal
 import { THEME_PRESETS, collectThemeLayers, scopeCustomThemeCss, scopeCustomThemeCssForPreview, themePresetCss, themePreviewCss, themeWallpaperOpacity, wallpaperOpacityCss } from "./lib/theme-presets";
 import { shareElementAsImage } from "./lib/share-image";
 import { useDesktopStore } from "./store";
-import { TaskPanel } from "./TaskPanel";
-import { MemoryPanel } from "./MemoryPanel";
+import { PanelDock } from "./PanelDock";
 
 const thinkingLevels: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 const accessModeOptions: readonly { value: AccessMode; label: string }[] = [
@@ -2378,8 +2377,7 @@ export function App(): ReactNode {
             style={previewOpened ? { "--preview-split": `${previewSplit}%` } as CSSProperties : undefined}
           >
           <section className="conversation-pane" data-pane="conversation">
-            <TaskPanel />
-            <MemoryPanel />
+            <PanelDock />
             <div className="timeline" data-pane="timeline" ref={timelineRef}>
               {!snapshot.workspace ? (
                 <div className="empty-workspace"><div className="empty-icon"><FolderOpen size={27} /></div><h1>打开一个项目</h1><button className="primary-button" data-control="workspace-open" type="button" onClick={() => void openWorkspace()}><FolderOpen size={16} />选择文件夹</button></div>

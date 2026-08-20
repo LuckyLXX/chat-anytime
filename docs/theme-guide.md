@@ -34,7 +34,7 @@
 
 > `terminal` 是预览面板内的嵌入式终端区域（xterm.js 宿主）。终端配色由 `--code-surface` / `--code-text` / `--selection-bg` token 驱动，主题改这三个 token 即可换终端配色；`[data-pane="terminal"]` 钩子可用于边框、内边距等容器装饰。
 > `question-panel` 是 AI 提问（ask_question 工具）时从输入栏上方向上展开的应答面板，位于 `conversation` 区域内、`composer` 正上方。
-> `memory-panel` 是会话区右上方的长期记忆治理面板（与 `task-panel` 同族的浮动卡片，含主题编辑器与总开关）。
+> `memory-panel` 是会话区右上方面板坞的记忆页（待办页 `task-panel` 居前，两者合并为一个浮动面板坞，头部 tab 切换，关闭态为单个 FAB）。
 
 ```css
 [data-pane="composer"] { border-image: url(frame.webp) 0 220 fill; border-radius: 0; }
@@ -51,8 +51,8 @@
 | 设置（侧栏底部） | `settings` |
 | 打开工作区（顶栏 + 空态主按钮） | `workspace-open` |
 | 预览面板开关（顶栏） | `preview-toggle` |
-| 任务面板开关（右下浮球） | `task-panel-toggle` |
-| 记忆面板开关（会话区右上方浮球） | `memory-toggle` |
+| 面板坞开关 + 待办页 tab（会话区右上方 FAB） | `task-panel-toggle` |
+| 记忆页 tab（面板坞内） | `memory-toggle` |
 | 发送 | `send` |
 | 停止（生成中与发送互换显示） | `stop` |
 | 添加附件 | `attach` |

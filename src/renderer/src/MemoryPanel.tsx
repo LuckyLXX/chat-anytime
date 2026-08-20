@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { Brain, Plus, X } from "lucide-react";
+import { Plus } from "lucide-react";
 import type { MemoryTopic, RuntimeCommand } from "../../shared/protocol";
 import { useDesktopStore } from "./store";
 
@@ -13,17 +13,16 @@ interface TopicDraft {
 const emptyDraft: TopicDraft = { title: "", description: "", content: "", scoped: false };
 
 /**
- * 浮动长期记忆面板（仿 TaskPanel 的卡片形态）。与只读的任务面板不同，这里
- * 是用户的治理入口：查看/编辑/删除/新建当前助手的记忆主题。面板写走 IPC
- * 直改 store（不经过模型上下文，也不碰会话内已冻结的索引快照——手改从下
- * 一个会话起生效）。模型侧的写入经 memory_write 工具，同样落到这份 store。
+ * 记忆页内容（由 PanelDock 的 tab 承载）。与只读的待办页不同，这里是用户
+ * 的治理入口：查看/编辑/删除/新建当前助手的记忆主题。面板写走 IPC 直改
+ * store（不经过模型上下文，也不碰会话内已冻结的索引快照——手改从下一个
+ * 会话起生效）。模型侧的写入经 memory_write 工具，同样落到这份 store。
  */
-export function MemoryPanel(): ReactNode {
+export function MemoryPanelContent(): ReactNode {
   const memory = useDesktopStore((state) => state.memory);
   const workspace = useDesktopStore((state) => state.snapshot.workspace);
   const settings = useDesktopStore((state) => state.settings);
   const memoryEnabled = settings.memory?.enabled !== false;
-  const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [editingId, setEditingId] = useState<string>();
@@ -86,15 +85,6 @@ export function MemoryPanel(): ReactNode {
     }
   }
 
-  if (!open) {
-    return (
-      <button className="memory-panel-fab" data-control="memory-toggle" type="button" title={`长期记忆，${memory.length} 个主题${memoryEnabled ? "" : "（已停用）"}`} aria-label={`打开长期记忆面板，${memory.length} 个主题`} onClick={() => setOpen(true)}>
-        <Brain size={15} />
-        {memory.length > 0 && <span className="task-panel-badge">{memory.length}</span>}
-      </button>
-    );
-  }
-
   const globalTopics = memory.filter((topic) => !topic.workspace);
   const currentTopics = workspace ? memory.filter((topic) => topic.workspace === workspace) : [];
   const otherTopics = memory.filter((topic) => topic.workspace && topic.workspace !== workspace);
@@ -138,21 +128,18 @@ export function MemoryPanel(): ReactNode {
 
   return (
     <div className="memory-panel" data-pane="memory-panel">
-      <header className="memory-panel-header">
-        <Brain size={14} />
-        <span>长期记忆</span>
+      <div className="memory-panel-toolbar">
         <small>{memory.length} 个主题 · {settings.agents.find((agent) => agent.id === settings.currentAgentId)?.name ?? "当前助手"}</small>
         <label className="memory-panel-enabled" title="停用后不注入索引快照、memory_* 工具拒绝执行；面板编辑仍可用">
           <input type="checkbox" checked={memoryEnabled} onChange={toggleEnabled} />
           <span>启用</span>
         </label>
-        <button className="task-panel-close" type="button" title="关闭记忆面板" aria-label="关闭长期记忆面板" onClick={() => setOpen(false)}><X size={14} /></button>
-      </header>
+      </div>
       {!memoryEnabled && <p className="memory-panel-notice">记忆已停用：不注入索引，memory_* 工具将拒绝执行。此处的人工编辑仍会保存，重新启用后生效。</p>}
       {error && <p className="task-panel-error">{error}</p>}
       <div className="memory-panel-list">
         {memory.length === 0 && !creating && (
-          <p className="task-panel-empty">暂无记忆主题。对话中说“记住 …”让助手写入，或点上方“新建”手动添加。</p>
+          <p className="task-panel-empty">暂无记忆主题。对话中说“记住 …”让助手写入，或点下方“新建主题”手动添加。</p>
         )}
         {globalTopics.length > 0 && (
           <section className="memory-panel-group">
