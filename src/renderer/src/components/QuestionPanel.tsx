@@ -74,28 +74,38 @@ export function QuestionPanel({ request }: { request: QuestionRequest }): ReactN
     setDrafts((currentDrafts) => currentDrafts.map((draft, i) => i === index ? { ...draft, ...patch } : draft));
   }
 
+  /** 推进到下一题；末题提交全部答案（未答的前置题以空串计入，用户可用页码翻回补答）。 */
+  function advance(): void {
+    if (submitting) return;
+    if (isLast) {
+      void resolve(request.questions.map((question, index) => serializeAnswer(question, drafts[index] ?? emptyQuestionDraft())));
+    } else {
+      setCurrent(current + 1);
+    }
+  }
+
+  /** 选项切换：单选点选（含回车/空格）即自动推进，多选只勾选、由「继续」或输入框回车推进。 */
   function toggleOption(item: QuestionItem, index: number, option: string): void {
+    const currentDraft = drafts[index] ?? emptyQuestionDraft();
+    const willSelect = item.type !== "single" || currentDraft.selected[0] !== option;
     setDrafts((currentDrafts) => currentDrafts.map((draft, i) => {
       if (i !== index) return draft;
       if (item.type === "single") {
-        return { ...draft, selected: draft.selected[0] === option ? [] : [option] };
+        return { ...draft, selected: willSelect ? [option] : [] };
       }
       return { ...draft, selected: draft.selected.includes(option) ? draft.selected.filter((value) => value !== option) : [...draft.selected, option] };
     }));
+    if (item.type === "single" && willSelect) advance();
   }
 
   const item = request.questions[current] ?? request.questions[0]!;
   const isLast = current === request.questions.length - 1;
   const answered = isQuestionAnswered(item, drafts[current] ?? emptyQuestionDraft());
 
-  /** 忽略 = 取消整个提问；继续 = 翻到下一题，最后一题提交全部答案。 */
+  /** 忽略 = 取消整个提问；继续 = 手动推进（多选勾选后、或想停留再确认时用）。 */
   function continueToNext(): void {
     if (!answered || submitting) return;
-    if (!isLast) {
-      setCurrent(current + 1);
-    } else {
-      void resolve(request.questions.map((question, index) => serializeAnswer(question, drafts[index] ?? emptyQuestionDraft())));
-    }
+    advance();
   }
 
   /** 选项键盘：↑↓ 移动焦点（单选同步移动选中），回车/空格选中（阻止默认滚动）。 */

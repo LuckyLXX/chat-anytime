@@ -33,7 +33,7 @@
 **区域钩子 `data-pane`**：`sidebar` `topbar` `work-area` `conversation` `timeline` `composer` `task-panel` `memory-panel` `preview` `terminal` `question-panel` `settings-dialog` `permission-dialog`
 
 > `terminal` 是预览面板内的嵌入式终端区域（xterm.js 宿主）。终端配色由 `--code-surface` / `--code-text` / `--selection-bg` token 驱动，主题改这三个 token 即可换终端配色；`[data-pane="terminal"]` 钩子可用于边框、内边距等容器装饰。
-> `question-panel` 是 AI 提问（ask_question 工具）时从输入栏上方向上展开的应答面板，位于 `conversation` 区域内、`composer` 正上方。面板分页式逐题作答（右上角页码/箭头切换，草稿跨页保留），底部「忽略」取消提问、「继续」翻页或提交；选择题第一个选项自动标注「（推荐）」——与工具描述约定一致（模型把最推荐的选项放第一位），面板内快捷键：Tab/上下键移动选择、回车或空格选中。
+> `question-panel` 是 AI 提问（ask_question 工具）时从输入栏上方向上展开的应答面板，位于 `conversation` 区域内、`composer` 正上方。面板分页式逐题作答（右上角页码/箭头切换，草稿跨页保留），底部「忽略」取消提问、「继续」手动推进或提交；选择题第一个选项自动标注「（推荐）」——与工具描述约定一致（模型把最推荐的选项放第一位），单选点选/回车即自动进入下一题（末题自动提交），多选保持勾选多个、由「继续」或输入框回车推进；面板内快捷键：Tab/上下键移动选择、回车或空格选中。
 > `memory-panel` 是会话区右上方面板坞的记忆页（待办页 `task-panel` 居前，两者合并为一个浮动面板坞，头部 tab 切换，关闭态为单个 FAB）。
 
 ```css
