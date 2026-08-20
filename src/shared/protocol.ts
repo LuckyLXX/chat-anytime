@@ -502,6 +502,8 @@ export interface QueuedMessage {
 
 export interface RuntimeSnapshot {
   workspace?: string;
+  /** 当前工作区的 git 分支（非 git 项目或缺省为空时不提供）。 */
+  gitBranch?: string;
   agentId: string;
   agentName: string;
   sessionId?: string;

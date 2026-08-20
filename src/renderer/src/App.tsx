@@ -40,6 +40,7 @@ import {
   Trash2,
   Workflow,
   FolderTree,
+  GitBranch,
   ChevronLeft,
   Pin,
   X,
@@ -2355,7 +2356,7 @@ export function App(): ReactNode {
 
       <main className="workspace-main" data-pane="workspace">
         <header className="topbar" data-pane="topbar">
-          <div className="project-title"><Folder size={17} /><span><strong>{snapshot.workspace?.split(/[\\/]/u).at(-1) ?? "ChatAnyTime"}</strong><small>{snapshot.agentName} · {snapshot.sessionId ? "当前话题" : "未开始话题"}</small></span></div>
+          <div className="project-title"><Folder size={17} /><span><strong>{snapshot.workspace?.split(/[\\/]/u).at(-1) ?? "ChatAnyTime"}</strong><small>{snapshot.agentName} · {snapshot.sessionId ? "当前话题" : "未开始话题"}</small></span>{snapshot.gitBranch && <span className="git-branch-badge" title={`当前 Git 分支：${snapshot.gitBranch}`}><GitBranch size={13} />{snapshot.gitBranch}</span>}</div>
           <div className="runtime-controls">
             <button className="workspace-top-button" data-control="workspace-open" type="button" onClick={() => void openWorkspace()}><FolderOpen size={15} /><span>工作区</span><strong>{compactPath(snapshot.workspace)}</strong><ChevronDown size={13} /></button>
             <button className="icon-button preview-panel-toggle" data-control="preview-toggle" type="button" aria-label={previewOpened ? "关闭预览" : "打开预览"} title={previewOpened ? "关闭预览" : "打开预览"} onClick={() => {

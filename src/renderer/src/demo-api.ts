@@ -78,6 +78,7 @@ const demoSettings: DesktopSettings = {
 
 const demoSnapshot: RuntimeSnapshot = {
   workspace: "D:\\Projects\\chat-anytime-demo",
+  gitBranch: "main",
   agentId: "default",
   agentName: "默认助手",
   sessionId: "demo-session",

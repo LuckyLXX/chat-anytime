@@ -44,6 +44,7 @@ import type {
 import { toolLabel } from "../shared/locale.js";
 import { workspaceRelativeAttachment } from "./attachments.js";
 import { runManualCompaction } from "./compaction-lifecycle.js";
+import { readGitBranch } from "./git-branch.js";
 import { customProviderModelDefinition, inferCustomModelImageInput } from "./custom-provider.js";
 import { buildDivModePrompt } from "./div-prompt.js";
 import { McpClientManager } from "./mcp-client.js";
@@ -84,6 +85,8 @@ if (!parentPort) throw new Error("Pi 运行时必须作为 Electron 工具进程
 
 let modelRuntime: ModelRuntime | undefined;
 let workspace: string | undefined;
+/** 当前工作区的 git 分支；非 git 项目为 undefined，随工作区切换异步刷新。 */
+let gitBranch: string | undefined;
 let thinkingLevel: ThinkingLevel = "medium";
 let accessMode: AccessMode = "ask";
 let status = "请选择一个项目开始使用";
@@ -443,6 +446,7 @@ function snapshot(): RuntimeSnapshot {
   const messages = [...sessionMessages, ...(record?.controlMessages ?? [])].sort((left, right) => left.timestamp - right.timestamp);
   return {
     workspace: record?.workspace ?? workspace,
+    gitBranch,
     agentId: currentAgent?.id ?? "default",
     agentName: currentAgent?.name ?? "默认助手",
     sessionId: activeSession?.sessionId,
@@ -513,6 +517,7 @@ function disposeRecord(record: SessionRuntimeRecord): void {
     todos = [];
     memoryStore = undefined;
     memoryTopics = [];
+    refreshGitBranch();
   }
 }
 
@@ -565,6 +570,7 @@ function activate(record: SessionRuntimeRecord): void {
       post({ type: "log", level: "warn", message: `同步 MCP 服务器失败：${errorText(error)}` });
     });
   }
+  refreshGitBranch();
 }
 
 function workspaceSessionDir(): string | undefined {
@@ -707,6 +713,32 @@ async function switchSessionModel(record: SessionRuntimeRecord | undefined, mode
 function emitState(): void {
   // Default callers (commands, lifecycle hooks) flush immediately.
   scheduleEmit(true);
+}
+
+/**
+ * 异步刷新当前工作区的 git 分支。工作区在读取期间切换时丢弃过期结果
+ * （分支属于工作区级别，跟随激活会话/全局 workspace，不做常驻监听）。
+ */
+function refreshGitBranch(): void {
+  const target = activeRuntime?.workspace ?? workspace;
+  if (!target) {
+    gitBranch = undefined;
+    return;
+  }
+  void readGitBranch(target)
+    .then((branch) => {
+      if ((activeRuntime?.workspace ?? workspace) !== target) return;
+      if (gitBranch === branch) return;
+      gitBranch = branch;
+      emitState();
+    })
+    .catch(() => {
+      // 读取失败按非 git 项目处理；只在工作区仍为当前目标时才落值。
+      if ((activeRuntime?.workspace ?? workspace) !== target) return;
+      if (gitBranch === undefined) return;
+      gitBranch = undefined;
+      emitState();
+    });
 }
 
 function beginTurn(record: SessionRuntimeRecord): void {
