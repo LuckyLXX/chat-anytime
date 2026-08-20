@@ -101,6 +101,17 @@ export interface BubbleOpacityOverrides {
   dark?: number;
 }
 
+/**
+ * Per-mode user preference for the sidebar/topbar/right-panel/composer
+ * translucency slider (wallpaper mode only): how much of the theme's
+ * --panel-bg survives the color-mix blend, 0-1. Undefined (or 1) keeps the
+ * theme's panel background as-is.
+ */
+export interface PanelOpacityOverrides {
+  light?: number;
+  dark?: number;
+}
+
 export interface AppearanceSettings {
   theme: "system" | "light" | "dark";
   themePreset: ThemePresetId;
@@ -110,6 +121,7 @@ export interface AppearanceSettings {
   customThemes: CustomThemeDefinition[];
   wallpaperOpacity?: WallpaperOpacityOverrides;
   bubbleOpacity?: BubbleOpacityOverrides;
+  panelOpacity?: PanelOpacityOverrides;
   showThinking: boolean;
 }
 
@@ -697,7 +709,8 @@ export type RuntimeMessage =
   | { type: "permission.dismiss"; id: string }
   | { type: "question"; request: QuestionRequest }
   | { type: "question.dismiss"; id: string }
-  | { type: "hook-notify"; title: string; body: string }
+  | { type: "hook-notify"; title: string; body: string; /** 触发钩子的会话；主进程据此在“正在查看且窗口聚焦”时免打扰。 */
+    sessionId?: string }
   | { type: "hook-run"; name: string; scope: "project" | "global"; ok: boolean; blocked?: boolean; detail: string; durationMs: number }
   | { type: "error"; message: string }
   | { type: "log"; level: "info" | "warn"; message: string };

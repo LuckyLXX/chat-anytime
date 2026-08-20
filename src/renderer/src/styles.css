@@ -1251,7 +1251,7 @@ html[data-theme-wallpaper="true"] .sidebar,
 html[data-theme-wallpaper="true"] .topbar,
 html[data-theme-wallpaper="true"] .right-panel,
 html[data-theme-wallpaper="true"] .composer {
-  background: var(--panel-bg);
+  background: color-mix(in srgb, var(--panel-bg) var(--panel-alpha, 100%), transparent);
   backdrop-filter: blur(16px) saturate(120%);
   -webkit-backdrop-filter: blur(16px) saturate(120%);
 }
@@ -1262,7 +1262,7 @@ html[data-theme-wallpaper="true"] .topbar { border-bottom-color: transparent; }
 html[data-theme-wallpaper="true"] .right-panel { border-left-color: transparent; }
 html[data-theme-wallpaper="true"] .settings-dialog,
 html[data-theme-wallpaper="true"] .permission-dialog,
-html[data-theme-wallpaper="true"] .content-preview-panel { background: var(--panel-bg); backdrop-filter: blur(20px) saturate(120%); -webkit-backdrop-filter: blur(20px) saturate(120%); }
+html[data-theme-wallpaper="true"] .content-preview-panel { background: color-mix(in srgb, var(--panel-bg) var(--panel-alpha, 100%), transparent); backdrop-filter: blur(20px) saturate(120%); -webkit-backdrop-filter: blur(20px) saturate(120%); }
 
 /* Wallpaper mode: chat bubbles and their inner fills drop to translucent
    blends so the wallpaper stays visible — plain alpha only, no backdrop-filter

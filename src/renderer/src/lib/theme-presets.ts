@@ -1,4 +1,4 @@
-import type { ThemeMode, ThemePresetId, WallpaperOpacityOverrides, BubbleOpacityOverrides } from "../../../shared/protocol";
+import type { ThemeMode, ThemePresetId, WallpaperOpacityOverrides, BubbleOpacityOverrides, PanelOpacityOverrides } from "../../../shared/protocol";
 import blueDreamWallpaper from "../assets/blue-dream-wallpaper.png";
 
 export interface ThemePresetDefinition {
@@ -363,6 +363,24 @@ export function bubbleOpacityCss(overrides: BubbleOpacityOverrides | undefined, 
     if (typeof value !== "number" || !Number.isFinite(value)) return [];
     return [`${scopeSelector}[data-theme-wallpaper="true"][data-theme-effective="${mode}"] {
   --bubble-alpha: ${String(Math.round(clampWallpaperOpacity(value) * 100))}% !important;
+}`];
+  }).join("\n");
+}
+
+/**
+ * Emit the panel-opacity slider preference for the main document or a preview
+ * scope. Controls how much of the theme's --panel-bg survives the wallpaper
+ * mode color-mix blend (sidebar / topbar / right-panel / composer / dialogs);
+ * the injected integer percentage feeds --panel-alpha with a 100% fallback in
+ * the base stylesheet, keeping the theme's own panel color untouched.
+ */
+export function panelOpacityCss(overrides: PanelOpacityOverrides | undefined, scopeSelector = ":root"): string {
+  if (!overrides) return "";
+  return (["light", "dark"] as const).flatMap((mode) => {
+    const value = overrides[mode];
+    if (typeof value !== "number" || !Number.isFinite(value)) return [];
+    return [`${scopeSelector}[data-theme-wallpaper="true"][data-theme-effective="${mode}"] {
+  --panel-alpha: ${String(Math.round(clampWallpaperOpacity(value) * 100))}% !important;
 }`];
   }).join("\n");
 }

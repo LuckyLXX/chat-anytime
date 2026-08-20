@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { THEME_PRESETS, bubbleOpacityCss, collectThemeLayers, scopeCustomThemeCss, scopeCustomThemeCssForPreview, themePresetCss, themePreviewCss, themeWallpaperOpacity, wallpaperOpacityCss } from "./theme-presets";
+import { THEME_PRESETS, bubbleOpacityCss, collectThemeLayers, panelOpacityCss, scopeCustomThemeCss, scopeCustomThemeCssForPreview, themePresetCss, themePreviewCss, themeWallpaperOpacity, wallpaperOpacityCss } from "./theme-presets";
 
 describe("theme presets", () => {
   it("contains the reference palette families", () => {
@@ -84,6 +84,20 @@ describe("theme presets", () => {
       .toBe('.preview[data-theme-wallpaper="true"][data-theme-effective="light"] {\n  --bubble-alpha: 100% !important;\n}\n.preview[data-theme-wallpaper="true"][data-theme-effective="dark"] {\n  --bubble-alpha: 0% !important;\n}');
     expect(bubbleOpacityCss(undefined, ".preview")).toBe("");
     expect(bubbleOpacityCss({ dark: Number.NaN }, ".preview")).toBe("");
+  });
+
+  it("emits panel-alpha per mode with rounded integer percentages", () => {
+    const css = panelOpacityCss({ light: 0.75, dark: 1 }, ".preview");
+
+    expect(css).toContain('.preview[data-theme-wallpaper="true"][data-theme-effective="light"] {\n  --panel-alpha: 75% !important;\n}');
+    expect(css).toContain('.preview[data-theme-wallpaper="true"][data-theme-effective="dark"] {\n  --panel-alpha: 100% !important;\n}');
+  });
+
+  it("clamps and drops invalid panel-opacity values", () => {
+    expect(panelOpacityCss({ light: 1.9, dark: -0.3 }, ".preview"))
+      .toBe('.preview[data-theme-wallpaper="true"][data-theme-effective="light"] {\n  --panel-alpha: 100% !important;\n}\n.preview[data-theme-wallpaper="true"][data-theme-effective="dark"] {\n  --panel-alpha: 0% !important;\n}');
+    expect(panelOpacityCss(undefined, ".preview")).toBe("");
+    expect(panelOpacityCss({ light: Number.NaN }, ".preview")).toBe("");
   });
 
   it("redirects ChatAnyTime mode selectors into a preview scope", () => {

@@ -90,7 +90,7 @@ import { groupAssistantMessages } from "./lib/chat-layout";
 import { clampPreviewSplit, PREVIEW_SPLIT_MAX, PREVIEW_SPLIT_MIN, previewSplitFromKey } from "./lib/preview-split";
 import { groupSessionsByWorkspace, workspaceKey } from "./lib/session-groups";
 import { CSS_URL_PATTERN, createThemeAssetUrls, isExternalThemeReference, normalizeThemeAssetReference, resolveThemeAssets } from "./lib/theme-assets";
-import { THEME_PRESETS, bubbleOpacityCss, collectThemeLayers, scopeCustomThemeCss, scopeCustomThemeCssForPreview, themePresetCss, themePreviewCss, themeWallpaperOpacity, wallpaperOpacityCss } from "./lib/theme-presets";
+import { THEME_PRESETS, bubbleOpacityCss, collectThemeLayers, panelOpacityCss, scopeCustomThemeCss, scopeCustomThemeCssForPreview, themePresetCss, themePreviewCss, themeWallpaperOpacity, wallpaperOpacityCss } from "./lib/theme-presets";
 import { shareElementAsImage } from "./lib/share-image";
 import { useDesktopStore } from "./store";
 import { PanelDock } from "./PanelDock";
@@ -98,6 +98,8 @@ import { HooksSettings } from "./HooksSettings";
 
 const thinkingLevels: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 const DEFAULT_BUBBLE_OPACITY = 0.8;
+// Panel translucency keeps the theme's own --panel-bg by default (100%).
+const DEFAULT_PANEL_OPACITY = 1;
 const accessModeOptions: readonly { value: AccessMode; label: string }[] = [
   { value: "read-only", label: "只读" },
   { value: "ask", label: "每次询问" },
@@ -606,7 +608,7 @@ flowchart LR
 \`\`\`
 
 <assistant_html><div><strong>HTML 片段</strong><p>安全清洗后仍保留布局和交互样式。</p></div></assistant_html>`;
-  const previewCss = `${themePreviewCss(appearance.themePreset)}\n${scopeCustomThemeCssForPreview(resolveThemeAssets(appearance.customCss, themeAssetUrls))}\n${wallpaperOpacityCss(appearance.wallpaperOpacity, ".theme-preview-scope[data-theme-custom]")}\n${bubbleOpacityCss(appearance.bubbleOpacity, ".theme-preview-scope[data-theme-custom]")}`;
+  const previewCss = `${themePreviewCss(appearance.themePreset)}\n${scopeCustomThemeCssForPreview(resolveThemeAssets(appearance.customCss, themeAssetUrls))}\n${wallpaperOpacityCss(appearance.wallpaperOpacity, ".theme-preview-scope[data-theme-custom]")}\n${bubbleOpacityCss(appearance.bubbleOpacity, ".theme-preview-scope[data-theme-custom]")}\n${panelOpacityCss(appearance.panelOpacity, ".theme-preview-scope[data-theme-custom]")}`;
   const hasWallpaper = customCssHasWallpaper(appearance.customCss);
   const panes = [
     { id: "dark", label: "深色", effective: "dark" },
@@ -883,6 +885,9 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
   const bubbleOpacityOverride = settings.appearance.bubbleOpacity?.[opacityMode];
   const bubbleOpacity = bubbleOpacityOverride ?? DEFAULT_BUBBLE_OPACITY;
   const bubbleOpacityPercent = Math.round(bubbleOpacity * 100);
+  const panelOpacityOverride = settings.appearance.panelOpacity?.[opacityMode];
+  const panelOpacity = panelOpacityOverride ?? DEFAULT_PANEL_OPACITY;
+  const panelOpacityPercent = Math.round(panelOpacity * 100);
   function closeSettings(): void { useDesktopStore.setState({ settings: structuredClone(initialSettingsRef.current) }); onClose(); }
   function markSettingsSaved(nextSettings: import("../../shared/protocol").DesktopSettings): void {
     const saved = structuredClone(nextSettings);
@@ -942,6 +947,19 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
     const bubbleOpacity = structuredClone(current);
     delete bubbleOpacity[opacityMode];
     updateAppearance(Object.keys(bubbleOpacity).length > 0 ? { bubbleOpacity } : { bubbleOpacity: undefined });
+  }
+
+  function updatePanelOpacity(value: number): void {
+    const panelOpacity = { ...settings.appearance.panelOpacity, [opacityMode]: Math.min(1, Math.max(0, value)) };
+    updateAppearance({ panelOpacity });
+  }
+
+  function resetPanelOpacity(): void {
+    const current = settings.appearance.panelOpacity;
+    if (!current?.[opacityMode]) return;
+    const panelOpacity = structuredClone(current);
+    delete panelOpacity[opacityMode];
+    updateAppearance(Object.keys(panelOpacity).length > 0 ? { panelOpacity } : { panelOpacity: undefined });
   }
 
   async function importCustomCss(event: React.ChangeEvent<HTMLInputElement>): Promise<void> {
@@ -1229,9 +1247,10 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
               <div className="theme-preset-field"><span className="settings-field-label">主题预设</span><div className="theme-preset-grid">{THEME_PRESETS.map((preset) => <button type="button" key={preset.id} className={`theme-preset-card${settings.appearance.themePreset === preset.id ? " active" : ""}`} onClick={() => useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, themePreset: preset.id as ThemePresetId } } })}><span className="theme-swatches">{preset.swatches.map((color) => <i key={color} style={{ backgroundColor: color }} />)}</span><strong>{preset.name}</strong><small>{preset.description}</small></button>)}</div></div>
               <section className="theme-color-settings" aria-label="壁纸透明度">
                 <div className="theme-color-heading"><span className="settings-field-label">背景图片透明度</span><div className="theme-color-mode-switch" role="tablist" aria-label="透明度模式"><button type="button" className={opacityMode === "light" ? "active" : ""} role="tab" aria-selected={opacityMode === "light"} onClick={() => setOpacityMode("light")}>浅色</button><button type="button" className={opacityMode === "dark" ? "active" : ""} role="tab" aria-selected={opacityMode === "dark"} onClick={() => setOpacityMode("dark")}>深色</button></div></div>
-                <p className="theme-color-hint">背景透明度覆盖主题声明的壁纸不透明度；气泡透明度控制壁纸模式下消息气泡及内嵌块底色透明程度（默认 80%，建议不低于 60% 保证文字可读）。颜色完全由主题 CSS 决定，主题未设置壁纸时不生效。</p>
+                <p className="theme-color-hint">背景透明度覆盖主题声明的壁纸不透明度；气泡/面板透明度控制壁纸模式下消息气泡与左右上下栏底色透明程度（气泡默认 80%、面板默认 100% 即保持现状，建议不低于 60% 保证文字可读）。颜色完全由主题 CSS 决定，主题未设置壁纸时不生效。</p>
                  <div className="theme-opacity-row"><label htmlFor="theme-wallpaper-opacity">背景透明度</label><input id="theme-wallpaper-opacity" type="range" min="0" max="100" step="1" value={wallpaperOpacityPercent} aria-valuetext={`${wallpaperOpacityPercent}%`} onChange={(event) => updateWallpaperOpacity(Number(event.target.value) / 100)} /><output>{wallpaperOpacityPercent}%</output><button className="icon-button theme-color-reset" type="button" disabled={wallpaperOpacityOverride === undefined} title="恢复主题默认透明度" aria-label="恢复主题默认透明度" onClick={resetWallpaperOpacity}><RotateCcw size={14} /></button></div>
                  <div className="theme-opacity-row"><label htmlFor="theme-bubble-opacity">气泡透明度</label><input id="theme-bubble-opacity" type="range" min="40" max="100" step="1" value={bubbleOpacityPercent} aria-valuetext={`${bubbleOpacityPercent}%`} onChange={(event) => updateBubbleOpacity(Number(event.target.value) / 100)} /><output>{bubbleOpacityPercent}%</output><button className="icon-button theme-color-reset" type="button" disabled={bubbleOpacityOverride === undefined} title="恢复默认气泡透明度（80%）" aria-label="恢复默认气泡透明度" onClick={resetBubbleOpacity}><RotateCcw size={14} /></button></div>
+                 <div className="theme-opacity-row"><label htmlFor="theme-panel-opacity">面板透明度</label><input id="theme-panel-opacity" type="range" min="40" max="100" step="1" value={panelOpacityPercent} aria-valuetext={`${panelOpacityPercent}%`} onChange={(event) => updatePanelOpacity(Number(event.target.value) / 100)} /><output>{panelOpacityPercent}%</output><button className="icon-button theme-color-reset" type="button" disabled={panelOpacityOverride === undefined} title="恢复默认面板透明度（100%）" aria-label="恢复默认面板透明度" onClick={resetPanelOpacity}><RotateCcw size={14} /></button></div>
                </section>
             </div>
             <ThemePreview appearance={settings.appearance} />
@@ -1620,7 +1639,7 @@ export function App(): ReactNode {
       document.head.appendChild(style);
     }
     const customCss = resolveThemeAssets(settings.appearance.customCss, themeAssetUrls);
-    style.textContent = `${themePresetCss(settings.appearance.themePreset)}\n${scopeCustomThemeCss(customCss)}\n${wallpaperOpacityCss(settings.appearance.wallpaperOpacity, ":root[data-theme-custom]")}\n${bubbleOpacityCss(settings.appearance.bubbleOpacity, ":root[data-theme-custom]")}`;
+    style.textContent = `${themePresetCss(settings.appearance.themePreset)}\n${scopeCustomThemeCss(customCss)}\n${wallpaperOpacityCss(settings.appearance.wallpaperOpacity, ":root[data-theme-custom]")}\n${bubbleOpacityCss(settings.appearance.bubbleOpacity, ":root[data-theme-custom]")}\n${panelOpacityCss(settings.appearance.panelOpacity, ":root[data-theme-custom]")}`;
     return () => {
       style?.remove();
       delete root.dataset.themePreset;
