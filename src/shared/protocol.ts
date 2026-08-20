@@ -448,8 +448,12 @@ export interface McpServerConfigDraft {
   env?: Record<string, string>;
 }
 
-/** 钩子监听的会话生命周期事件（Pi 扩展事件名的稳定子集）。 */
-export type HookEventName = "session_start" | "tool_call" | "tool_execution_end" | "turn_end";
+/**
+ * 钩子监听的会话生命周期事件（Pi 扩展事件名的稳定子集）。
+ * 注意粒度：agent_end 是一次完整回复（含全部工具调用小轮）结束，只触发一次；
+ * turn_end 是每个模型调用小轮结束，一次回复会触发多次。
+ */
+export type HookEventName = "session_start" | "tool_call" | "tool_execution_end" | "agent_end" | "turn_end";
 
 /**
  * 钩子动作。notify/http/block 是 app 内置动作（零脚本），command 是用户 shell

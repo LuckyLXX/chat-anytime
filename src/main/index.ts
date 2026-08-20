@@ -2,7 +2,7 @@ import { createReadStream, existsSync, mkdirSync, readFileSync, writeFileSync } 
 import { readFile, realpath, stat } from "node:fs/promises";
 import { extname, join, resolve } from "node:path";
 import { Readable } from "node:stream";
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, protocol, safeStorage, utilityProcess, type UtilityProcess } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, protocol, safeStorage, utilityProcess, type UtilityProcess } from "electron";
 import { spawn } from "node-pty";
 import { migrateSettings, normalizeVision } from "./settings.js";
 import { importExternalAttachment, workspaceRelativeAttachment } from "./attachments.js";
@@ -193,14 +193,48 @@ function updateSettings(command: RuntimeCommand): void {
     case "memory.save":
       settings.memory = command.memory;
       break;
+    case "hooks.settings":
+      settings.hooks = command.hooks;
+      break;
   }
   persistSettings();
 }
 function runtimeEntry(): string { return join(__dirname, "pi-runtime.js"); }
 function sendToRuntime(command: RuntimeCommand): void { if (!runtimeProcess) throw new Error("Pi 运行时当前不可用"); runtimeProcess.postMessage(command); }
+
+// 桌面通知是主进程专属能力（utility 进程没有 Electron API），钩子的 notify
+// 动作经 hook-notify 推送到达这里；该消息不转发渲染器。聊天软件同款免打扰
+// 语义：通知关于用户正在查看的会话、且窗口处于焦点且未最小化时不再打扰——
+// 回复就在眼前；后台会话跑完、窗口失焦/最小化时照常提醒。
+function showHookNotification(title: string, body: string, sessionId?: string): void {
+  if (
+    sessionId &&
+    latestSnapshot?.sessionId === sessionId &&
+    mainWindow && !mainWindow.isDestroyed() &&
+    mainWindow.isFocused() && !mainWindow.isMinimized()
+  ) {
+    return;
+  }
+  if (!Notification.isSupported()) {
+    console.warn(`钩子通知（系统不支持桌面通知）：${title} ${body}`);
+    return;
+  }
+  const notification = new Notification({ title, body });
+  notification.on("click", () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  });
+  notification.show();
+}
 function startRuntime(): void {
   runtimeProcess = utilityProcess.fork(runtimeEntry(), [], { serviceName: "Pi 运行时", stdio: "pipe" });
   runtimeProcess.on("message", (message: RuntimeMessage) => {
+    if (message.type === "hook-notify") {
+      showHookNotification(message.title, message.body, message.sessionId);
+      return;
+    }
     if (message.type === "state") latestSnapshot = message.snapshot;
     if (message.type === "catalog") latestCatalog = message;
     if (message.type === "resources") latestResources = message.resources;

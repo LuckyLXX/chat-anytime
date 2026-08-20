@@ -21,6 +21,8 @@ import type {
   ChatMessage,
   ContextUsage,
   DesktopSettings,
+  HookRule,
+  HookSummary,
   McpServerSummary,
   MemoryTopic,
   MessageBlock,
@@ -79,6 +81,8 @@ import * as runtimeVision from "./runtime-vision.js";
 import * as runtimePermissions from "./runtime-permissions.js";
 import * as runtimeMcp from "./runtime-mcp.js";
 import * as runtimeContextUsage from "./runtime-context-usage.js";
+import * as runtimeHooks from "./runtime-hooks.js";
+import { hookActionPreview, readConfiguredHooks, removeHookConfig, setHookDisabled, upsertHookConfig, validateHookRule, type ConfiguredHook } from "./hooks-config.js";
 
 const parentPort = process.parentPort;
 if (!parentPort) throw new Error("Pi 运行时必须作为 Electron 工具进程启动");
@@ -289,6 +293,39 @@ function mcpConfigPaths(): { project: string; global: string } {
   return runtimeMcp.mcpConfigPathsFor(workspace, getAgentDir());
 }
 
+/** 钩子配置双作用域：项目 <workspace>/.pidesktop-hooks.json，全局 <agentDir>/pidesktop-hooks.json。 */
+function hooksConfigPaths(): { project: string | undefined; global: string } {
+  return {
+    project: workspace ? join(workspace, ".pidesktop-hooks.json") : undefined,
+    global: join(getAgentDir(), "pidesktop-hooks.json")
+  };
+}
+
+/**
+ * 双作用域合并后的钩子规则缓存。事件 handler 触发时读取（runtime-hooks 的
+ * rules getter），因此这里的刷新即“热更新”——规则增删改不需要重建会话。
+ */
+let hooksRules: ConfiguredHook[] = [];
+
+function refreshHooksConfig(): void {
+  const { project, global } = hooksConfigPaths();
+  hooksRules = readConfiguredHooks(project, global);
+}
+
+function hookSummaries(): HookSummary[] {
+  return hooksRules.map(({ name, rule, scope }) => ({
+    name,
+    event: rule.event,
+    ...(rule.matcher ? { matcher: rule.matcher } : {}),
+    actionKind: rule.action.kind,
+    action: rule.action,
+    actionPreview: hookActionPreview(rule.action),
+    blocking: rule.action.kind === "block" || (rule.action.kind === "command" && rule.action.blocking === true),
+    scope,
+    enabled: rule.disabled !== true
+  }));
+}
+
 /** Connect to all configured MCP servers and refresh tool definitions + catalog status. */
 async function syncMcpServers(refresh = false): Promise<void> {
   const synced = await runtimeMcp.syncMcpServers(mcpClient, mcpConfigPaths(), refresh);
@@ -297,7 +334,7 @@ async function syncMcpServers(refresh = false): Promise<void> {
 }
 
 function emitResourceCatalog(): void {
-  post({ type: "resources", resources: buildResourceCatalog({ skills: nativeSkills, mcpServers, todos, memory: memoryTopics }) });
+  post({ type: "resources", resources: buildResourceCatalog({ skills: nativeSkills, mcpServers, todos, memory: memoryTopics, hooks: hookSummaries(), hooksEnabled: settings?.hooks?.enabled !== false }) });
 }
 
 function emitTodos(): void {
@@ -1219,6 +1256,8 @@ function sessionReadyStatus(hasModel: boolean, usedFallback: boolean): string {
  */
 async function createSession(sessionManager?: SessionManager, options: { reactivate?: boolean } = {}): Promise<void> {
   if (!workspace || !modelRuntime || !currentAgent) return;
+  // 工作区可能已切换（workspace.open / session.*）：先重读双作用域钩子配置。
+  refreshHooksConfig();
   const generation = ++sessionGeneration;
   // Drop any pending throttled emit so a stale streaming flush from the
   // previous session cannot fire against the freshly reset state below.
@@ -1272,6 +1311,21 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
         // Rebound on every session creation; the captured API drives the MCP
         // hot-reload path (registerTool rebuilds Pi's registry on a live session).
         if (recordBox) recordBox.extensionApi = api;
+      }),
+      // 用户钩子（第三内联扩展）：事件触发时读 hooksRules 缓存，配置增删改
+      // 只需 refreshHooksConfig()，无需重建会话。命令是用户自写配置，等同
+      // 终端输入，不经 agent 权限门；输出只走 stdin/通知/日志，不进提示词。
+      runtimeHooks.createHooksExtension({
+        rules: () => hooksRules,
+        enabled: () => settings?.hooks?.enabled !== false,
+        workspace: () => recordWorkspace,
+        agentName: () => recordAgent.name,
+        sessionId: () => sessionHolder.session?.sessionId ?? activeSessionManager.getSessionId(),
+        sessionTitle: () => {
+          const sessionId = sessionHolder.session?.sessionId ?? activeSessionManager.getSessionId();
+          return currentSessions.find((item) => item.id === sessionId)?.title ?? sessionId;
+        },
+        post
       }),
       // Tool executions land in chatanytime-sessions/<agentId>/tool-audit.jsonl
       // for post-hoc debugging; write failures never affect the turn.
@@ -1437,6 +1491,7 @@ async function initialize(command: Extract<RuntimeCommand, { type: "initialize" 
   settings = command.settings;
   apiKeys = command.apiKeys;
   workspace = settings.workspace;
+  refreshHooksConfig();
   recentWorkspaces = loadRecentWorkspaces(recentWorkspacesPath());
   if (workspace) touchRecentWorkspace(workspace);
   currentAgent = activeAgent();
@@ -2093,6 +2148,58 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         // session rebuild (Pi has no tool-removal API).
         await applyMcpToolChanges();
       });
+      break;
+    }
+    case "hooks.save": {
+      const draft = command.hook;
+      const rule: HookRule = {
+        name: draft.name.trim(),
+        event: draft.event,
+        ...(draft.matcher?.trim() ? { matcher: draft.matcher.trim() } : {}),
+        ...(draft.timeoutMs ? { timeoutMs: draft.timeoutMs } : {}),
+        action: draft.action
+      };
+      validateHookRule(rule);
+      const { project, global } = hooksConfigPaths();
+      const target = draft.scope === "project" ? project : global;
+      if (!target) throw new Error("请先打开工作区，再保存项目级钩子");
+      // 钩子规则是事件触发时读取的缓存，不重建会话；也无需像 MCP 一样拒绝
+      // 运行中的会话——用户可能正想在中途停用某条危险钩子。
+      upsertHookConfig(target, rule);
+      refreshHooksConfig();
+      emitResourceCatalog();
+      break;
+    }
+    case "hooks.toggle": {
+      const { project, global } = hooksConfigPaths();
+      const toggled = (project ? setHookDisabled(project, command.name, !command.enabled) : false) || setHookDisabled(global, command.name, !command.enabled);
+      if (!toggled) throw new Error("找不到要切换的钩子");
+      refreshHooksConfig();
+      emitResourceCatalog();
+      break;
+    }
+    case "hooks.delete": {
+      const { project, global } = hooksConfigPaths();
+      const target = command.scope === "project" ? project : global;
+      if (!target || !removeHookConfig(target, command.name)) throw new Error("找不到要删除的钩子");
+      refreshHooksConfig();
+      emitResourceCatalog();
+      break;
+    }
+    case "hooks.settings": {
+      if (settings) settings.hooks = command.hooks;
+      emitResourceCatalog();
+      break;
+    }
+    case "hooks.run": {
+      const entry = hooksRules.find((item) => item.name === command.name && item.scope === command.scope);
+      if (!entry) throw new Error("找不到要测试的钩子");
+      const outcome = await runtimeHooks.testHook(entry.rule, command.sample, {
+        agentName: () => currentAgent?.name ?? "",
+        workspace: () => workspace,
+        post
+      });
+      post({ type: "hook-run", name: command.name, scope: command.scope, ok: outcome.ok, ...(outcome.blocked ? { blocked: outcome.blocked } : {}), detail: outcome.detail, durationMs: outcome.durationMs });
       break;
     }
     case "skill.toggle": {

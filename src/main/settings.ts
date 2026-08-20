@@ -6,6 +6,7 @@ import type {
   BuiltinToolName,
   CustomThemeDefinition,
   DesktopSettings,
+  HooksSettings,
   MemorySettings,
   ProviderModelSettings,
   ProviderSettings,
@@ -185,6 +186,12 @@ export function normalizeMemory(value: unknown): MemorySettings | undefined {
   return { enabled: (value as Record<string, unknown>).enabled !== false };
 }
 
+/** 钩子总开关，语义与 memory 相同：缺省视为启用。 */
+export function normalizeHooks(value: unknown): HooksSettings | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  return { enabled: (value as Record<string, unknown>).enabled !== false };
+}
+
 export function defaultSettings(): DesktopSettings {
   return {
     version: 2,
@@ -252,7 +259,8 @@ export function migrateSettings(raw: unknown): { settings: DesktopSettings; lega
     currentAgentId,
     appearance: { theme, themePreset, customCss, ...(Object.keys(customCssAssets).length > 0 ? { customCssAssets } : {}), customThemes, ...(wallpaperOpacity ? { wallpaperOpacity } : {}), showThinking: appearanceSource.showThinking !== false },
     vision: normalizeVision(source.vision),
-    memory: normalizeMemory(source.memory)
+    memory: normalizeMemory(source.memory),
+    hooks: normalizeHooks(source.hooks)
   };
   const legacyApiKey = typeof source.customProviderApiKey === "string" ? source.customProviderApiKey : undefined;
   return { settings, legacyApiKey };

@@ -14,6 +14,17 @@ import type {
   Todo
 } from "../../shared/protocol";
 
+/** 面板“测试”按钮最近一次钩子试跑的结果（hooks.run → hook-run 推送）。 */
+export interface HookRunResult {
+  name: string;
+  scope: "project" | "global";
+  ok: boolean;
+  blocked?: boolean;
+  detail: string;
+  durationMs: number;
+  at: number;
+}
+
 function queuedMessagesEqual(left: RuntimeSnapshot["queuedMessages"], right: RuntimeSnapshot["queuedMessages"]): boolean {
   return left.length === right.length && left.every((item, index) => {
     const other = right[index];
@@ -40,6 +51,8 @@ interface DesktopState {
   modelRefreshProvider?: string;
   permissions: PermissionRequest[];
   questions: QuestionRequest[];
+  /** 最近一次钩子测试结果；面板按 name+scope 匹配展示。 */
+  hookRun?: HookRunResult;
   error?: string;
   initialize(): Promise<() => void>;
   handleRuntimeMessage(message: RuntimeMessage): void;
@@ -60,7 +73,7 @@ const emptySnapshot: RuntimeSnapshot = {
   queuedMessages: []
 };
 const emptySettings: DesktopSettings = { version: 2, thinkingLevel: "medium", accessMode: "ask", providers: [], agents: [], currentAgentId: "default", appearance: { theme: "system", themePreset: "default", customCss: "", customThemes: [], showThinking: true } };
-const emptyResources: ResourceCatalog = { skills: [], mcpServers: [], todos: [], memory: [], diagnostics: [] };
+const emptyResources: ResourceCatalog = { skills: [], mcpServers: [], todos: [], memory: [], hooks: [], hooksEnabled: true, diagnostics: [] };
 
 export const useDesktopStore = create<DesktopState>((set, get) => ({
   ready: false,
@@ -180,6 +193,19 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
         break;
       case "question.dismiss":
         set((state) => ({ questions: state.questions.filter((request) => request.id !== message.id) }));
+        break;
+      case "hook-run":
+        set({
+          hookRun: {
+            name: message.name,
+            scope: message.scope,
+            ok: message.ok,
+            blocked: message.blocked,
+            detail: message.detail,
+            durationMs: message.durationMs,
+            at: Date.now()
+          }
+        });
         break;
       case "error":
         set({ error: message.message });

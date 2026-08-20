@@ -203,6 +203,11 @@ const demoResources: ResourceCatalog = {
   ],
   todos: [],
   memory: [],
+  hooks: [
+    { name: "跑完通知", event: "agent_end", actionKind: "notify", action: { kind: "notify" }, actionPreview: "桌面通知", blocking: false, scope: "global", enabled: true },
+    { name: "git防火墙", event: "tool_call", matcher: "bash", actionKind: "block", action: { kind: "block", deny: ["git\\s+push.*--force"] }, actionPreview: "拦截 1 条规则", blocking: true, scope: "project", enabled: true }
+  ],
+  hooksEnabled: true,
   diagnostics: []
 };
 
@@ -570,6 +575,51 @@ export function createDemoApi(): DesktopApi {
           emit({ type: "resources", resources: structuredClone(demoResources) });
           break;
         }
+        case "hooks.save": {
+          const draft = command.hook;
+          const preview = draft.action.kind === "command"
+            ? draft.action.command
+            : draft.action.kind === "http"
+              ? draft.action.url
+              : draft.action.kind === "block"
+                ? `拦截 ${draft.action.deny.length} 条规则`
+                : draft.action.title || "桌面通知";
+          demoResources.hooks = [
+            ...demoResources.hooks.filter((item) => !(item.name === draft.name && item.scope === draft.scope)),
+            {
+              name: draft.name,
+              event: draft.event,
+              ...(draft.matcher ? { matcher: draft.matcher } : {}),
+              actionKind: draft.action.kind,
+              action: structuredClone(draft.action),
+              actionPreview: preview,
+              blocking: draft.action.kind === "block" || (draft.action.kind === "command" && draft.action.blocking === true),
+              scope: draft.scope,
+              enabled: true
+            }
+          ];
+          emit({ type: "resources", resources: structuredClone(demoResources) });
+          break;
+        }
+        case "hooks.toggle": {
+          const hook = demoResources.hooks.find((item) => item.name === command.name && item.scope === command.scope);
+          if (hook) hook.enabled = command.enabled;
+          emit({ type: "resources", resources: structuredClone(demoResources) });
+          break;
+        }
+        case "hooks.delete": {
+          demoResources.hooks = demoResources.hooks.filter((item) => !(item.name === command.name && item.scope === command.scope));
+          emit({ type: "resources", resources: structuredClone(demoResources) });
+          break;
+        }
+        case "hooks.settings":
+          demoSettings.hooks = { ...command.hooks };
+          demoResources.hooksEnabled = command.hooks.enabled;
+          emit({ type: "resources", resources: structuredClone(demoResources) });
+          break;
+        case "hooks.run":
+          emit({ type: "hook-run", name: command.name, scope: command.scope, ok: true, detail: "演示环境不会执行钩子动作", durationMs: 0 });
+          break;
       }
     },
     onRuntimeMessage(listener) {

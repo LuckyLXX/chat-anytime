@@ -9,6 +9,8 @@ describe("buildResourceCatalog", () => {
       mcpServers: [],
       todos: [],
       memory: [],
+      hooks: [],
+      hooksEnabled: true,
       diagnostics: []
     });
   });
@@ -63,6 +65,8 @@ describe("buildResourceCatalog", () => {
       mcpServers: [],
       todos: [],
       memory: [],
+      hooks: [],
+      hooksEnabled: true,
       diagnostics: []
     });
   });
