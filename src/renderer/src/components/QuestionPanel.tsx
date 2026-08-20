@@ -84,18 +84,17 @@ export function QuestionPanel({ request }: { request: QuestionRequest }): ReactN
     }
   }
 
-  /** 选项切换：单选点选（含回车/空格）即自动推进，多选只勾选、由「继续」或输入框回车推进。 */
+  /** 选项切换：单选任意点选（含回车/空格）都选中并立即推进（点选即走，重选直接换项）；多选切换勾选、由「继续」或输入框回车推进。 */
   function toggleOption(item: QuestionItem, index: number, option: string): void {
     const currentDraft = drafts[index] ?? emptyQuestionDraft();
-    const willSelect = item.type !== "single" || currentDraft.selected[0] !== option;
-    setDrafts((currentDrafts) => currentDrafts.map((draft, i) => {
-      if (i !== index) return draft;
-      if (item.type === "single") {
-        return { ...draft, selected: willSelect ? [option] : [] };
-      }
-      return { ...draft, selected: draft.selected.includes(option) ? draft.selected.filter((value) => value !== option) : [...draft.selected, option] };
-    }));
-    if (item.type === "single" && willSelect) advance();
+    const single = item.type === "single";
+    const nextSelected = single
+      ? [option]
+      : currentDraft.selected.includes(option)
+        ? currentDraft.selected.filter((value) => value !== option)
+        : [...currentDraft.selected, option];
+    setDrafts((currentDrafts) => currentDrafts.map((draft, i) => i === index ? { ...draft, selected: nextSelected } : draft));
+    if (single) advance();
   }
 
   const item = request.questions[current] ?? request.questions[0]!;
