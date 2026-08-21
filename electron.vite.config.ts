@@ -62,6 +62,11 @@ export default defineConfig({
     plugins: [externalizeDepsPlugin()],
     build: {
       rollupOptions: {
+        input: {
+          index: resolve("src/preload/index.ts"),
+          // 内置浏览器 WebContentsView 的手动元素选择桥（与 app 渲染端 preload 分开）。
+          "browser-pick": resolve("src/preload/browser-pick.ts")
+        },
         output: {
           format: "cjs",
           entryFileNames: "[name].cjs"

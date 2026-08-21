@@ -31,7 +31,21 @@ const toolLabels: Record<string, string> = {
   memory_list: "列出长期记忆",
   memory_search: "检索长期记忆",
   memory_delete: "删除长期记忆",
-  recognize_images: "识别图片"
+  recognize_images: "识别图片",
+  browser_navigate: "浏览器导航",
+  browser_snapshot: "浏览器页面快照",
+  browser_click: "浏览器点击",
+  browser_type: "浏览器输入",
+  browser_press: "浏览器按键",
+  browser_scroll: "浏览器滚动",
+  browser_eval: "浏览器执行脚本",
+  browser_screenshot: "浏览器截图",
+  browser_wait: "浏览器等待",
+  browser_get: "浏览器读取信息",
+  browser_select: "浏览器下拉选择",
+  browser_upload: "浏览器上传文件",
+  browser_screenshot_full: "浏览器整页截图",
+  browser_tabs: "浏览器标签页"
 };
 
 export function toolLabel(name: string): string {

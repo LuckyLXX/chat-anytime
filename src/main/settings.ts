@@ -3,6 +3,7 @@ import type {
   AccessMode,
   AgentProfile,
   AppearanceSettings,
+  BrowserSettings,
   BuiltinToolName,
   CustomThemeDefinition,
   DesktopSettings,
@@ -192,6 +193,12 @@ export function normalizeHooks(value: unknown): HooksSettings | undefined {
   return { enabled: (value as Record<string, unknown>).enabled !== false };
 }
 
+/** 浏览器自动化总开关，语义与 memory/hooks 相同：缺省视为启用。 */
+export function normalizeBrowser(value: unknown): BrowserSettings | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  return { enabled: (value as Record<string, unknown>).enabled !== false };
+}
+
 export function defaultSettings(): DesktopSettings {
   return {
     version: 2,
@@ -260,7 +267,8 @@ export function migrateSettings(raw: unknown): { settings: DesktopSettings; lega
     appearance: { theme, themePreset, customCss, ...(Object.keys(customCssAssets).length > 0 ? { customCssAssets } : {}), customThemes, ...(wallpaperOpacity ? { wallpaperOpacity } : {}), showThinking: appearanceSource.showThinking !== false },
     vision: normalizeVision(source.vision),
     memory: normalizeMemory(source.memory),
-    hooks: normalizeHooks(source.hooks)
+    hooks: normalizeHooks(source.hooks),
+    browser: normalizeBrowser(source.browser)
   };
   const legacyApiKey = typeof source.customProviderApiKey === "string" ? source.customProviderApiKey : undefined;
   return { settings, legacyApiKey };

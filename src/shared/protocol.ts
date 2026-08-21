@@ -164,6 +164,7 @@ export interface DesktopSettings {
   vision?: VisionSettings;
   memory?: MemorySettings;
   hooks?: HooksSettings;
+  browser?: BrowserSettings;
   customProvider?: CustomProviderSettings;
   customProviderKeyConfigured?: boolean;
   pinnedSessionPaths?: string[];
@@ -350,6 +351,8 @@ export interface BrowserPreviewState {
   canGoBack: boolean;
   canGoForward: boolean;
   error?: string;
+  /** AI 正在操作此标签页时的操作描述（如「点击 @e3」）；缺省表示无 AI 操作。 */
+  automating?: string;
 }
 
 export type BrowserPreviewCommand =
@@ -361,7 +364,109 @@ export type BrowserPreviewCommand =
   | { type: "reload"; tabId?: string }
   | { type: "stop"; tabId?: string }
   | { type: "open-external"; tabId?: string }
-  | { type: "close"; tabId?: string };
+  | { type: "close"; tabId?: string }
+  /** 手动元素选择模式：开启后用户点击页面元素会被捕获并推送给渲染端。 */
+  | { type: "pick-mode"; tabId?: string; enabled: boolean };
+
+/**
+ * 手动元素选择结果：用户在预览浏览器点击元素后，页面 preload 在点击位置
+ * 就地弹出的迷你输入卡上确认（可带备注文本），随元素一起经 main 进程转发
+ * 给渲染端（browser-preview:pick 推送），写入聊天输入框。
+ */
+export interface BrowserElementPick {
+  tabId: string;
+  /** 选中时刻的页面 URL（元素引用来源；同源 iframe 内的元素为该 iframe 的 URL）。 */
+  url: string;
+  /** 用户在就地输入卡里填写、随元素一起发送的备注（可空）。 */
+  note?: string;
+  element: {
+    tag: string;
+    /** 从文档根（或最近的 id 锚点）到该元素的 CSS 选择器路径，AI 可用于精确定位。 */
+    path?: string;
+    role?: string;
+    type?: string;
+    /** aria-label / placeholder / alt / title 之一。 */
+    name?: string;
+    /** 元素的文本或值（已压缩空白、截断）。 */
+    text?: string;
+    /** 最近的 <a> 链接（含元素自身）。 */
+    href?: string;
+    /** <img> 的图片地址。 */
+    src?: string;
+  };
+}
+
+/**
+ * 内置浏览器自动化（AI 操作内置浏览器）。工具在 utility 进程执行，
+ * 操作在 main 进程通过 CDP 驱动可见预览标签页；请求经
+ * RuntimeMessage["browser-automation.request"] 上行、结果经
+ * RuntimeCommand["browser-automation.result"] 回传。sessionKey 是发起
+ * 操作的 Pi 会话 id，main 用它维护「会话 → 标签页」绑定。
+ */
+
+/** browser_wait 的等待条件。 */
+export type BrowserAutomationWait =
+  | { kind: "load"; timeoutMs: number }
+  | { kind: "selector"; selector: string; timeoutMs: number }
+  | { kind: "url"; pattern: string; timeoutMs: number }
+  | { kind: "ms"; ms: number };
+
+export type BrowserAutomationRequest =
+  | { op: "attach" }
+  | { op: "navigate"; url: string }
+  | { op: "snapshot" }
+  | { op: "click"; ref: string }
+  | { op: "type"; ref: string; text: string; mode: "fill" | "append" }
+  | { op: "press"; key: string }
+  | { op: "scroll"; direction: "up" | "down"; amount: number; ref?: string }
+  | { op: "eval"; expression: string; mode: "read" | "write" }
+  | { op: "select"; ref: string; values: string[] }
+  | { op: "upload"; ref: string; files: string[] }
+  | { op: "screenshot"; fullPage?: boolean; scale?: number; maxWidth?: number; format?: "png" | "jpeg"; quality?: number }
+  | { op: "wait"; wait: BrowserAutomationWait }
+  | { op: "get"; what: "url" | "title" | "text"; ref?: string }
+  | { op: "tabs"; action: "list" | "new" | "switch" | "close"; tabId?: string };
+
+/** 各操作的成功载荷。 */
+export type BrowserAutomationData =
+  | { kind: "attach"; tabId: string; url: string }
+  | { kind: "navigate"; url: string; title: string }
+  | { kind: "snapshot"; text: string; refCount: number; truncated: boolean }
+  | { kind: "click"; description: string }
+  | { kind: "type"; description: string }
+  | { kind: "press"; key: string }
+  | { kind: "scroll"; description: string }
+  | { kind: "select"; description: string }
+  | { kind: "upload"; description: string }
+  | { kind: "eval"; value: string }
+  | { kind: "screenshot"; data: string; width: number; height: number; mimeType: "image/png" | "image/jpeg" }
+  | { kind: "wait"; description: string }
+  | { kind: "get"; value: string }
+  | { kind: "tabs"; tabs: BrowserTabSummary[] };
+
+export type BrowserAutomationResult =
+  | { ok: true; data: BrowserAutomationData }
+  | { ok: false; error: string };
+
+export interface BrowserTabSummary {
+  id: string;
+  url: string;
+  title: string;
+  /** 该标签页是否是发起方会话当前绑定的标签页。 */
+  active: boolean;
+}
+
+/** 标签页生命周期推送：AI（或用户）创建/关闭标签页时通知渲染端同步预览面板。 */
+export type BrowserTabsEvent =
+  | { action: "created"; tabId: string; url: string }
+  | { action: "closed"; tabId: string }
+  /** AI 会话开始操作某个标签页：渲染端自动展开预览面板并激活该标签（用户可见）。 */
+  | { action: "automation-started"; tabId: string };
+
+/** 浏览器自动化总开关；缺省视为启用（settings.browser?.enabled !== false）。 */
+export interface BrowserSettings {
+  enabled: boolean;
+}
 
 /**
  * User terminal (PTY) hosted in the main process, rendered with xterm.js in a
@@ -629,7 +734,7 @@ export interface PermissionRequest {
   toolName: string;
   summary: string;
   args: unknown;
-  risk: "write" | "command" | "outside-workspace";
+  risk: "write" | "command" | "outside-workspace" | "browse";
   principal: ExecutionPrincipal;
 }
 
@@ -669,7 +774,7 @@ export type RuntimeCommand =
   | { type: "agent.select"; agentId: string }
   | { type: "agent.save"; agent: AgentProfile }
   | { type: "agent.archive"; agentId: string; archived: boolean }
-  | { type: "settings.save"; settings: Pick<DesktopSettings, "model" | "thinkingLevel" | "accessMode" | "appearance"> }
+  | { type: "settings.save"; settings: Pick<DesktopSettings, "model" | "thinkingLevel" | "accessMode" | "appearance" | "browser"> }
   | { type: "model.select"; provider: string; id: string }
   | { type: "thinking.select"; level: ThinkingLevel }
   | { type: "auth.set"; provider: string; apiKey: string }
@@ -697,7 +802,9 @@ export type RuntimeCommand =
   | { type: "background.kill"; id: string }
   | { type: "resources.reload" }
   | { type: "permission.resolve"; id: string; decision: PermissionDecision }
-  | { type: "question.resolve"; id: string; answers?: string[] };
+  | { type: "question.resolve"; id: string; answers?: string[] }
+  /** main 进程回传的浏览器自动化结果（响应 utility 的 browser-automation.request）。 */
+  | { type: "browser-automation.result"; requestId: string; result: BrowserAutomationResult };
 
 export type RuntimeMessage =
   | { type: "catalog"; models: ModelOption[]; providers: ProviderOption[] }
@@ -716,6 +823,8 @@ export type RuntimeMessage =
   | { type: "hook-notify"; title: string; body: string; /** 触发钩子的会话；主进程据此在“正在查看且窗口聚焦”时免打扰。 */
     sessionId?: string }
   | { type: "hook-run"; name: string; scope: "project" | "global"; ok: boolean; blocked?: boolean; detail: string; durationMs: number }
+  /** utility 进程发起的浏览器自动化操作；main 完成后以 browser-automation.result 命令回传。 */
+  | { type: "browser-automation.request"; requestId: string; sessionKey: string; request: BrowserAutomationRequest }
   | { type: "error"; message: string }
   | { type: "log"; level: "info" | "warn"; message: string };
 
@@ -745,9 +854,12 @@ export interface DesktopApi {
   deleteWorkspaceEntry(workspace: string, relativePath: string): Promise<WorkspaceEntryResult>;
   renameWorkspaceEntry(workspace: string, relativePath: string, newName: string): Promise<WorkspaceEntryResult>;
   browserPreview(command: BrowserPreviewCommand): Promise<BrowserPreviewState>;
+  browserAutomationCancel(tabId: string): Promise<void>;
   terminal(command: TerminalCommand): Promise<void>;
   send(command: RuntimeCommand): Promise<void>;
   onRuntimeMessage(listener: (message: RuntimeMessage) => void): () => void;
   onBrowserPreviewState(tabId?: string, listener?: (state: BrowserPreviewState) => void): () => void;
+  onBrowserTabsChanged(listener: (event: BrowserTabsEvent) => void): () => void;
+  onBrowserElementPicked(listener: (pick: BrowserElementPick) => void): () => void;
   onTerminalData(terminalId: string, listener: (event: TerminalEventData) => void): () => void;
 }

@@ -1,6 +1,6 @@
 import { AlertCircle, Check, Code2, Eye, File, FileCode2, FileDiff, FileText, Globe2, LoaderCircle, MessageSquare, Pause, Pencil, Play, Plus, Terminal, X } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode, type SyntheticEvent } from "react";
-import type { WorkspaceFilePreview } from "../../../shared/protocol";
+import type { BrowserElementPick, BrowserPreviewState, WorkspaceFilePreview } from "../../../shared/protocol";
 import { IMAGE_PREVIEW_LIMIT_BYTES, workspaceFilePreviewUrl } from "../../../shared/protocol";
 import { artifactSandbox, buildArtifactPreviewSource, DYNAMIC_PREVIEW_ACTIONS, isDynamicArtifact, type Artifact, type DynamicPreviewAction } from "../lib/content";
 import { DiffView } from "./DiffView";
@@ -11,7 +11,7 @@ import { TerminalPanel } from "./TerminalPanel";
 
 export type PreviewTarget =
   | { type: "artifact"; artifact: Artifact }
-  | { type: "browser"; id?: string }
+  | { type: "browser"; id?: string; title?: string; loading?: boolean }
   | { type: "terminal" }
   | { type: "file"; file: WorkspaceFilePreview; workspace?: string }
   | { type: "diff"; title: string; path?: string; patch: string }
@@ -45,7 +45,7 @@ function targetArtifact(target: PreviewTarget): Artifact | undefined {
 
 function targetMetadata(target: PreviewTarget): { title: string; path?: string; label: string } {
   if (target.type === "artifact") return { title: target.artifact.title, label: target.artifact.language.toUpperCase() };
-  if (target.type === "browser") return { title: "内置浏览器", label: "WEB" };
+  if (target.type === "browser") return { title: target.title || "内置浏览器", label: "WEB" };
   if (target.type === "terminal") return { title: "终端", label: "TERM" };
   if (target.type === "file") return { title: target.file.name, path: target.file.relativePath, label: target.file.kind === "code" ? (target.file.language ?? "CODE").toUpperCase() : target.file.kind.toUpperCase() };
   if (target.type === "diff") return { title: target.title, path: target.path, label: "DIFF" };
@@ -116,7 +116,7 @@ function FilePreviewContent({ file, tabId, onOpenArtifact, workspace, editorStat
   return <div className="preview-empty"><FileText size={28} /><strong>此文件无法预览</strong><span>{file.size.toLocaleString("zh-CN")} bytes</span></div>;
 }
 
-export function ArtifactPreview({ tabs, activeTabId, browserSuspended, onSelectTab, onCloseTab, onOpenArtifact, onAddBrowser, onAddTerminal, onAddFile, onAddReview, onAddMenuOpenChange, reviewAvailable, workspace, activeEditorState, onActiveEditorChange, onActiveEditorContentChange, onActiveEditorSaved, onActiveEditorStatusChange, onActiveEditorSaveError, onActiveEditorResolveConflict, onToggleEditing }: { tabs: PreviewTab[]; activeTabId: string; browserSuspended?: boolean; onSelectTab(id: string): void; onCloseTab(id: string): void; onOpenArtifact(artifact: Artifact): void; onAddBrowser?(): void; onAddTerminal?(): void; onAddFile?(): void; onAddReview?(): void; onAddMenuOpenChange?(open: boolean): void; reviewAvailable?: boolean; workspace?: string; activeEditorState?: PreviewEditorState; onActiveEditorChange?(patch: Partial<PreviewEditorState>): void; onActiveEditorContentChange?(tabId: string, content: string): void; onActiveEditorSaved?(tabId: string, content: string): void; onActiveEditorStatusChange?(tabId: string, status: EditorSaveStatus): void; onActiveEditorSaveError?(message: string): void; onActiveEditorResolveConflict?(choice: "keep-local" | "load-remote"): void; onToggleEditing?(): void }): ReactNode {
+export function ArtifactPreview({ tabs, activeTabId, browserSuspended, onSelectTab, onCloseTab, onOpenArtifact, onAddBrowser, onAddTerminal, onAddFile, onAddReview, onAddMenuOpenChange, reviewAvailable, workspace, activeEditorState, onActiveEditorChange, onActiveEditorContentChange, onActiveEditorSaved, onActiveEditorStatusChange, onActiveEditorSaveError, onActiveEditorResolveConflict, onToggleEditing, onBrowserStateChange, onBrowserPickSend }: { tabs: PreviewTab[]; activeTabId: string; browserSuspended?: boolean; onSelectTab(id: string): void; onCloseTab(id: string): void; onOpenArtifact(artifact: Artifact): void; onAddBrowser?(): void; onAddTerminal?(): void; onAddFile?(): void; onAddReview?(): void; onAddMenuOpenChange?(open: boolean): void; reviewAvailable?: boolean; workspace?: string; activeEditorState?: PreviewEditorState; onActiveEditorChange?(patch: Partial<PreviewEditorState>): void; onActiveEditorContentChange?(tabId: string, content: string): void; onActiveEditorSaved?(tabId: string, content: string): void; onActiveEditorStatusChange?(tabId: string, status: EditorSaveStatus): void; onActiveEditorSaveError?(message: string): void; onActiveEditorResolveConflict?(choice: "keep-local" | "load-remote"): void; onToggleEditing?(): void; onBrowserStateChange?(tabId: string, state: BrowserPreviewState): void; onBrowserPickSend?(pick: BrowserElementPick, note: string): void }): ReactNode {
   const active = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0];
   if (!active) {
     return (
@@ -223,7 +223,7 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, onSelectT
           return (
             <div className={`preview-tab${tab.id === activeTabId ? " active" : ""}`} key={tab.id} role="presentation">
               <button type="button" className="preview-tab-main" role="tab" aria-selected={tab.id === activeTabId} title={tabMeta.path ?? tabMeta.title} onClick={() => onSelectTab(tab.id)}>
-                {targetIcon(tab.target)}
+                {tab.target.type === "browser" && tab.target.loading ? <LoaderCircle className="spinning" size={15} /> : targetIcon(tab.target)}
                 <span>{tabMeta.title}</span>
               </button>
               <button type="button" className="preview-tab-close" aria-label={`关闭 ${tabMeta.title}`} onClick={() => onCloseTab(tab.id)}><X size={12} /></button>
@@ -261,7 +261,7 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, onSelectT
         {showSource && artifact && <div className="preview-scroll preview-code"><CodeBlock language={artifact.language} code={artifact.content} /></div>}
         {showSource && !artifact && target.type === "file" && target.file.content !== undefined && <div className="preview-scroll preview-code"><CodeBlock language={target.file.kind === "markdown" ? "markdown" : target.file.language ?? "text"} code={target.file.content} /></div>}
         {!showSource && artifact && <iframe ref={frameRef} title={artifact.title} sandbox={artifactSandbox(artifact)} referrerPolicy="no-referrer" srcDoc={buildArtifactPreviewSource(artifact)} onLoad={handleLoad} />}
-        {!showSource && target.type === "browser" && <BrowserPreview suspended={browserSuspended} tabId={activeTabId} />}
+        {!showSource && target.type === "browser" && <BrowserPreview suspended={browserSuspended} tabId={activeTabId} onPickSend={onBrowserPickSend} onStateChange={(state) => onBrowserStateChange?.(activeTabId, state)} />}
         {target.type === "terminal" && <TerminalPanel terminalId={active.id} workspace={workspace} />}
         {!showSource && !artifact && target.type === "file" && <FilePreviewContent file={target.file} tabId={activeTabId} onOpenArtifact={onOpenArtifact} workspace={target.workspace ?? workspace} editorState={activeEditorState} onEditorChange={onActiveEditorChange} onEditorContentChange={onActiveEditorContentChange} onEditorSaved={onActiveEditorSaved} onEditorStatusChange={onActiveEditorStatusChange} onEditorSaveError={onActiveEditorSaveError} onResolveConflict={onActiveEditorResolveConflict} />}
         {target.type === "diff" && <div className="preview-scroll preview-diff"><DiffView patch={target.patch} /></div>}

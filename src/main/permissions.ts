@@ -20,6 +20,11 @@ export function toolRisk(
   if (pathLeavesWorkspace(workspace, toolPath(args))) return "outside-workspace";
   if (toolName === "bash" || toolName === "mcp" || toolName.startsWith("mcp_") || toolName.startsWith("server_")) return "command";
   if (toolName === "edit" || toolName === "write") return "write";
+  // 浏览器自动化：导航与写入型 eval 过门；页面内操作（快照/点击/输入/滚动/
+  // 截图/等待/读取）信任模型直接执行。
+  if (toolName === "browser_navigate") return "browse";
+  if (toolName === "browser_eval") return args.mode === "write" ? "browse" : undefined;
+  if (toolName === "browser_tabs") return args.action === "close" ? "browse" : undefined;
   return undefined;
 }
 
@@ -31,7 +36,7 @@ export type PermissionAction = "allow" | "ask" | "deny";
 
 export function permissionAction(mode: AccessMode, toolName: string, risk: PermissionRequest["risk"] | undefined): PermissionAction {
   if (mode === "full" || !risk) return "allow";
-  if (mode === "read-only" && (risk === "command" || risk === "write")) return "deny";
+  if (mode === "read-only" && (risk === "command" || risk === "write" || risk === "browse")) return "deny";
   if (mode === "workspace" && risk === "write") return "allow";
   return "ask";
 }

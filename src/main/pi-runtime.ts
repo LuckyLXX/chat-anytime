@@ -18,6 +18,8 @@ import { BackgroundProcessRegistry, bashCommandsFromMessages, isBackgroundComman
 import type {
   AccessMode,
   AgentProfile,
+  BrowserAutomationRequest,
+  BrowserAutomationResult,
   ChatMessage,
   ContextUsage,
   DesktopSettings,
@@ -78,6 +80,7 @@ import { createMemoryStore, memoryDirFor, type MemoryStore } from "./memory-stor
 import * as runtimeQuestionTool from "./runtime-question-tool.js";
 import * as runtimeSkills from "./runtime-skills.js";
 import * as runtimeVision from "./runtime-vision.js";
+import * as runtimeBrowser from "./runtime-browser.js";
 import * as runtimePermissions from "./runtime-permissions.js";
 import * as runtimeMcp from "./runtime-mcp.js";
 import * as runtimeContextUsage from "./runtime-context-usage.js";
@@ -143,6 +146,7 @@ interface SessionRuntimeRecord {
   extensionApi: ExtensionAPI | undefined;
   permissionDeps: runtimePermissions.PermissionGateDeps;
   visionTools: ToolDefinition[];
+  browserTools: ToolDefinition[];
   runStatus: SessionRunStatus | undefined;
   /** True from session.abort() until the run settles — resolves the dot to red. */
   abortRequested: boolean;
@@ -242,6 +246,34 @@ function scheduleEmit(immediate: boolean): void {
 
 function post(message: RuntimeMessage): void {
   parentPort.postMessage(message);
+}
+
+// Browser automation RPC: the utility process asks the main process to drive
+// the visible preview tabs (CDP lives there); results come back as
+// browser-automation.result commands handled outside the serial command
+// queue so tool executions are never blocked behind unrelated commands.
+let browserRequestSequence = 0;
+const BROWSER_RPC_TIMEOUT_MS = 120_000;
+const pendingBrowserRequests = new Map<string, { resolve: (result: BrowserAutomationResult) => void; timer: ReturnType<typeof setTimeout> }>();
+
+function requestBrowserAutomation(sessionKey: string, request: BrowserAutomationRequest): Promise<BrowserAutomationResult> {
+  return new Promise((resolve, reject) => {
+    const requestId = `browser-rpc-${++browserRequestSequence}`;
+    const timer = setTimeout(() => {
+      pendingBrowserRequests.delete(requestId);
+      reject(new Error("浏览器操作超时（120 秒无响应），请重试"));
+    }, BROWSER_RPC_TIMEOUT_MS);
+    pendingBrowserRequests.set(requestId, { resolve, timer });
+    post({ type: "browser-automation.request", requestId, sessionKey, request });
+  });
+}
+
+function resolveBrowserAutomation(requestId: string, result: BrowserAutomationResult): void {
+  const pending = pendingBrowserRequests.get(requestId);
+  if (!pending) return;
+  pendingBrowserRequests.delete(requestId);
+  clearTimeout(pending.timer);
+  pending.resolve(result);
 }
 
 const permissionBroker = new PermissionBroker(
@@ -635,6 +667,16 @@ function pathIsWithin(root: string, target: string): boolean {
   return Boolean(relation) && relation !== ".." && !relation.startsWith(`..${sep}`) && !isAbsolute(relation);
 }
 
+/** Resolve browser_upload file arguments to absolute paths inside the record workspace. */
+function resolveWorkspaceUploadFiles(recordWorkspace: string, files: string[]): string[] {
+  return files.map((file) => {
+    if (isAbsolute(file)) throw new Error(`browser_upload 只接受工作区相对路径：${file}`);
+    const target = resolve(recordWorkspace, file);
+    if (!pathIsWithin(recordWorkspace, target)) throw new Error(`上传文件必须位于当前工作区内：${file}`);
+    return target;
+  });
+}
+
 async function sessionDirectories(): Promise<string[]> {
   const root = agentSessionRoot();
   if (!root) return [];
@@ -685,8 +727,8 @@ function wrapModelRuntimeForVision(runtime: ModelRuntime): ModelRuntime {
  * customTools arrays are held by reference inside Pi, so hot-path updates
  * rebuild in place (`length = 0` + push) instead of swapping the array.
  */
-function buildRecordTools(record: Pick<SessionRuntimeRecord, "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "visionTools">): ToolDefinition[] {
-  return [...mcpTools, ...record.subagentTools, ...record.todoTools, ...record.memoryTools, ...record.questionTools, ...record.visionTools];
+function buildRecordTools(record: Pick<SessionRuntimeRecord, "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "visionTools" | "browserTools">): ToolDefinition[] {
+  return [...mcpTools, ...record.subagentTools, ...record.todoTools, ...record.memoryTools, ...record.questionTools, ...record.visionTools, ...record.browserTools];
 }
 
 /**
@@ -695,7 +737,7 @@ function buildRecordTools(record: Pick<SessionRuntimeRecord, "subagentTools" | "
  * models — multimodal models see the same tool set as before, so the request
  * prefix stays stable within each session/model configuration (cache discipline).
  */
-function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "visionTools">, includeVision: boolean): string[] {
+function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "visionTools" | "browserTools">, includeVision: boolean): string[] {
   const builtin = Object.entries(record.agent.tools ?? {}).filter(([, enabled]) => enabled).map(([name]) => name);
   return [
     ...builtin,
@@ -704,7 +746,10 @@ function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "subagentTool
     ...record.todoTools.map((tool) => tool.name),
     ...record.memoryTools.map((tool) => tool.name),
     ...record.questionTools.map((tool) => tool.name),
-    ...(includeVision ? record.visionTools.map((tool) => tool.name) : [])
+    ...(includeVision ? record.visionTools.map((tool) => tool.name) : []),
+    // Browser tools stay active regardless of the settings switch: the
+    // execute closure reports the disabled state instead (no session rebuild).
+    ...record.browserTools.map((tool) => tool.name)
   ];
 }
 
@@ -1396,10 +1441,21 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     readImageFile: (path) => readImageFile(recordWorkspace, path),
     errorText
   });
+  // 浏览器自动化工具：操作经 RPC 转发到 main 进程的 CDP 控制器（复用可见
+  // 预览标签页）。sessionKey 与 ask_question 同模式——createAgentSession 之后
+  // 才确定 sessionId，因此 request 闭包延迟读取 recordSessionId。权限上
+  // browser_navigate / write 型 browser_eval 经 toolRisk 标记 browse 风险走
+  // permission gate，其余页面内操作放行；总开关 settings.browser.enabled
+  // 在 execute 内实时读取（关闭时工具保留注册、返回停用提示，无需重建会话）。
+  const browserTools = runtimeBrowser.buildBrowserTools({
+    request: (op) => requestBrowserAutomation(recordSessionId, op),
+    enabled: () => settings?.browser?.enabled !== false,
+      resolveUploadFiles: (files) => Promise.resolve(resolveWorkspaceUploadFiles(recordWorkspace, files))
+  });
   // Each record owns its customTools array: Pi stores it by reference and
   // re-reads it on every tool-registry refresh, so per-record arrays let parked
   // sessions keep their tool set while the active one hot-swaps MCP tools.
-  const recordCustomTools: ToolDefinition[] = [...mcpTools, ...subagentTools, ...todoTools, ...memoryTools, ...questionTools, ...visionTools];
+  const recordCustomTools: ToolDefinition[] = [...mcpTools, ...subagentTools, ...todoTools, ...memoryTools, ...questionTools, ...visionTools, ...browserTools];
   const result = await createAgentSession({
     cwd: recordWorkspace,
     modelRuntime,
@@ -1435,6 +1491,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     extensionApi: undefined,
     permissionDeps,
     visionTools,
+    browserTools,
     runStatus: undefined,
     abortRequested: false,
     cacheUsage: runtimeContextUsage.scanCacheUsage(result.session.state.messages),
@@ -2247,6 +2304,12 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
 
 let commandQueue = Promise.resolve();
 parentPort.on("message", (event: { data: RuntimeCommand }) => {
+  // Browser RPC results resolve tool executions directly — queueing them
+  // behind serialized commands would stall the run for no reason.
+  if (event.data.type === "browser-automation.result") {
+    resolveBrowserAutomation(event.data.requestId, event.data.result);
+    return;
+  }
   commandQueue = commandQueue
     .then(() => handleCommand(event.data))
     .catch((error) => {

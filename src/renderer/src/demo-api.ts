@@ -1,7 +1,9 @@
 import type {
   AgentProfile,
+  BrowserElementPick,
   BrowserPreviewCommand,
   BrowserPreviewState,
+  BrowserTabsEvent,
   ContextUsage,
   DesktopApi,
   DesktopBootstrap,
@@ -346,8 +348,12 @@ export function createDemoApi(): DesktopApi {
         const url = normalizeDemoBrowserUrl(command.url);
         return emitBrowserPreview({ attached: false, url, title: "浏览器演示", loading: false, error: "网页内容仅在 Electron 桌面窗口中显示" });
       }
+      // pick-mode 在浏览器演示环境无原生视图可点选，静默忽略。
       return structuredClone(browserPreviewState);
     },
+      async browserAutomationCancel(_tabId: string): Promise<void> {
+        // 浏览器演示环境没有原生自动化操作可取消。
+      },
     async terminal(command: TerminalCommand): Promise<void> {
       if (command.type === "create") {
         emitTerminalData(command.terminalId, { type: "error", terminalId: command.terminalId, message: "终端仅在 Electron 桌面窗口中可用" });
@@ -399,6 +405,7 @@ export function createDemoApi(): DesktopApi {
           demoSettings.thinkingLevel = command.settings.thinkingLevel;
           demoSettings.accessMode = command.settings.accessMode;
           demoSettings.appearance = structuredClone(command.settings.appearance);
+            demoSettings.browser = command.settings.browser;
           updateSnapshot({ model: command.settings.model, thinkingLevel: command.settings.thinkingLevel });
           break;
         case "appearance.save":
@@ -630,6 +637,14 @@ export function createDemoApi(): DesktopApi {
       const l = listener ?? (() => {});
       browserPreviewListeners.add(l);
       return () => browserPreviewListeners.delete(l);
+    },
+    onBrowserTabsChanged(_listener: (event: BrowserTabsEvent) => void) {
+      // 浏览器演示环境没有原生标签页生命周期。
+      return () => {};
+    },
+    onBrowserElementPicked(_listener: (pick: BrowserElementPick) => void) {
+      // 浏览器演示环境没有原生页面可点选。
+      return () => {};
     },
     onTerminalData(terminalId: string, listener: (event: TerminalEventData) => void) {
       const listeners = terminalListeners.get(terminalId) ?? new Set();

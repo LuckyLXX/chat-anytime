@@ -10,6 +10,7 @@ import type { BrowserPreviewCommand, BrowserPreviewState, DesktopBootstrap, Desk
 import { PREVIEW_FILE_SCHEME, parseWorkspaceFilePreviewUrl } from "../shared/protocol.js";
 import { createWorkspaceDirectory, createWorkspaceFile, deleteWorkspaceEntry, listWorkspaceDirectory, readWorkspaceFilePreview, renameWorkspaceEntry, safeRelativePath, searchWorkspaceFiles, writeWorkspaceFile } from "./workspace-preview.js";
 import { BrowserPreviewController } from "./browser-preview.js";
+import { BrowserAutomationController } from "./browser-automation.js";
 import { TerminalManager, type PtyProcess, type PtySpawnOptions } from "./terminal-pty.js";
 
 let mainWindow: BrowserWindow | undefined;
@@ -21,6 +22,7 @@ let settingsCache: DesktopSettings | undefined;
 let credentialsCache: Record<string, string> = {};
 let securityWarning: string | undefined;
 let browserPreviewController: BrowserPreviewController | undefined;
+let browserAutomationController: BrowserAutomationController | undefined;
 
 const spawnNodePty = (file: string, args: string[], options: PtySpawnOptions): PtyProcess => spawn(file, args, options);
 const terminalManager = new TerminalManager({
@@ -164,7 +166,7 @@ function updateSettings(command: RuntimeCommand): void {
       settings.agents = settings.agents.map((item) => item.id === command.agentId && item.id !== "default" ? { ...item, archived: command.archived } : item);
       if (settings.currentAgentId === command.agentId && command.archived) settings.currentAgentId = "default";
       break;
-    case "settings.save": settings.model = command.settings.model; settings.thinkingLevel = command.settings.thinkingLevel; settings.accessMode = command.settings.accessMode; settings.appearance = command.settings.appearance; break;
+    case "settings.save": settings.model = command.settings.model; settings.thinkingLevel = command.settings.thinkingLevel; settings.accessMode = command.settings.accessMode; settings.appearance = command.settings.appearance; settings.browser = command.settings.browser; break;
     case "appearance.save": settings.appearance = command.appearance; break;
     case "provider.save": {
       settings.providers = settings.providers.some((item) => item.id === command.provider.id) ? settings.providers.map((item) => item.id === command.provider.id ? command.provider : item) : [...settings.providers, command.provider];
@@ -235,6 +237,17 @@ function startRuntime(): void {
       showHookNotification(message.title, message.body, message.sessionId);
       return;
     }
+    if (message.type === "browser-automation.request") {
+      // AI 浏览器操作：在 main 进程驱动可见预览标签页，完成后原路回传。
+      if (browserAutomationController) {
+        void browserAutomationController.handle(message.sessionKey, message.request).then((result) => {
+          runtimeProcess?.postMessage({ type: "browser-automation.result", requestId: message.requestId, result });
+        });
+      } else {
+        runtimeProcess?.postMessage({ type: "browser-automation.result", requestId: message.requestId, result: { ok: false, error: "浏览器自动化控制器当前不可用（窗口未创建）" } });
+      }
+      return;
+    }
     if (message.type === "state") latestSnapshot = message.snapshot;
     if (message.type === "catalog") latestCatalog = message;
     if (message.type === "resources") latestResources = message.resources;
@@ -261,12 +274,24 @@ function createWindow(): void {
   const nextWindow = new BrowserWindow({ width: 1440, height: 920, minWidth: 1040, minHeight: 680, backgroundColor: "#f5f5f2", titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default", webPreferences: { preload: join(__dirname, "../preload/index.cjs"), contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: !rendererUrl } });
   const previewController = new BrowserPreviewController(nextWindow, (state, tabId) => {
     if (!nextWindow.isDestroyed()) nextWindow.webContents.send(`browser-preview:state:${tabId}`, state);
+  }, (event) => {
+    // AI（或用户）创建/关闭标签页时同步预览面板的标签列表。
+    if (!nextWindow.isDestroyed()) nextWindow.webContents.send("browser-preview:tabs", event);
+  }, (pick) => {
+    // 用户手动点选的页面元素（发送到聊天框流程）。
+    if (!nextWindow.isDestroyed()) nextWindow.webContents.send("browser-preview:pick", pick);
   });
   mainWindow = nextWindow;
   browserPreviewController = previewController;
+  browserAutomationController = new BrowserAutomationController(previewController, (tabId) => {
+    // AI 开始操作某个标签页：让预览面板自动展开并激活它（用户可见）。
+    if (!nextWindow.isDestroyed()) nextWindow.webContents.send("browser-preview:tabs", { action: "automation-started", tabId });
+  });
   nextWindow.on("closed", () => {
     previewController.dispose();
+    browserAutomationController?.dispose();
     if (browserPreviewController === previewController) browserPreviewController = undefined;
+    if (browserAutomationController) browserAutomationController = undefined;
     if (mainWindow === nextWindow) mainWindow = undefined;
   });
   nextWindow.webContents.setWindowOpenHandler(({ url }) => { void import("electron").then(({ shell }) => shell.openExternal(url)); return { action: "deny" }; });
@@ -371,6 +396,11 @@ function registerIpc(): void {
     if (!browserPreviewController) throw new Error("浏览器预览当前不可用");
     return browserPreviewController.handle(command);
   });
+  ipcMain.handle("browser-automation:cancel", (_event, tabId: string): void => {
+    if (!browserAutomationController) throw new Error("浏览器自动化当前不可用");
+    if (typeof tabId !== "string" || !tabId.trim()) throw new Error("标签页 id 无效");
+    browserAutomationController.cancelTab(tabId);
+  });
   ipcMain.handle("terminal:command", (_event, command: TerminalCommand): void => {
     if (!isTerminalCommand(command)) throw new Error("终端命令无效");
     terminalManager.handle(command);
@@ -379,4 +409,4 @@ function registerIpc(): void {
 }
 app.whenReady().then(() => { Menu.setApplicationMenu(null); registerPreviewFileProtocol(); registerIpc(); startRuntime(); createWindow(); app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); }); });
 app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
-app.on("before-quit", () => { browserPreviewController?.dispose(); terminalManager.disposeAll(); runtimeProcess?.kill(); });
+app.on("before-quit", () => { browserAutomationController?.dispose(); browserPreviewController?.dispose(); terminalManager.disposeAll(); runtimeProcess?.kill(); });

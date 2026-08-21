@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { BrowserPreviewCommand, BrowserPreviewState, DesktopApi, RuntimeCommand, RuntimeMessage, TerminalCommand, TerminalEventData } from "../shared/protocol.js";
+import type { BrowserElementPick, BrowserPreviewCommand, BrowserPreviewState, BrowserTabsEvent, DesktopApi, RuntimeCommand, RuntimeMessage, TerminalCommand, TerminalEventData } from "../shared/protocol.js";
 
 const api: DesktopApi = {
   bootstrap: () => ipcRenderer.invoke("desktop:bootstrap"),
@@ -16,6 +16,7 @@ const api: DesktopApi = {
   deleteWorkspaceEntry: (workspace: string, relativePath: string) => ipcRenderer.invoke("desktop:delete-workspace-entry", workspace, relativePath),
   renameWorkspaceEntry: (workspace: string, relativePath: string, newName: string) => ipcRenderer.invoke("desktop:rename-workspace-entry", workspace, relativePath, newName),
   browserPreview: (command: BrowserPreviewCommand) => ipcRenderer.invoke("browser-preview:command", command),
+  browserAutomationCancel: (tabId: string) => ipcRenderer.invoke("browser-automation:cancel", tabId),
   terminal: (command: TerminalCommand) => ipcRenderer.invoke("terminal:command", command),
   send: (command: RuntimeCommand) => ipcRenderer.invoke("runtime:send", command),
   onRuntimeMessage: (listener: (message: RuntimeMessage) => void) => {
@@ -29,6 +30,16 @@ const api: DesktopApi = {
     const handler = (_event: Electron.IpcRendererEvent, state: BrowserPreviewState): void => stateListener(state);
     ipcRenderer.on(eventChannel, handler);
     return () => ipcRenderer.removeListener(eventChannel, handler);
+  },
+  onBrowserTabsChanged: (listener: (event: BrowserTabsEvent) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, event: BrowserTabsEvent): void => listener(event);
+    ipcRenderer.on("browser-preview:tabs", handler);
+    return () => ipcRenderer.removeListener("browser-preview:tabs", handler);
+  },
+  onBrowserElementPicked: (listener: (pick: BrowserElementPick) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, pick: BrowserElementPick): void => listener(pick);
+    ipcRenderer.on("browser-preview:pick", handler);
+    return () => ipcRenderer.removeListener("browser-preview:pick", handler);
   },
   onTerminalData: (terminalId: string, listener: (event: TerminalEventData) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, event: TerminalEventData): void => listener(event);

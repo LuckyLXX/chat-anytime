@@ -57,4 +57,22 @@ describe("desktop tool permissions", () => {
     expect(permissionAction("read-only", "mcp", "command")).toBe("deny");
     expect(permissionNeedsApproval("ask", "mcp", "command")).toBe(true);
   });
+
+  it("gates browser navigation through the browse risk", () => {
+    expect(toolRisk(workspace, "browser_navigate", { url: "https://example.com" })).toBe("browse");
+    expect(toolRisk(workspace, "browser_snapshot", {})).toBeUndefined();
+    expect(toolRisk(workspace, "browser_click", { ref: "@e1" })).toBeUndefined();
+    expect(permissionAction("ask", "browser_navigate", "browse")).toBe("ask");
+    expect(permissionAction("read-only", "browser_navigate", "browse")).toBe("deny");
+    expect(permissionAction("full", "browser_navigate", "browse")).toBe("allow");
+    // 工作区模式不覆盖网络动作：仍需询问。
+    expect(permissionAction("workspace", "browser_navigate", "browse")).toBe("ask");
+  });
+
+  it("gates write-mode browser eval but lets read-mode eval through", () => {
+    expect(toolRisk(workspace, "browser_eval", { expression: "document.title", mode: "read" })).toBeUndefined();
+    expect(toolRisk(workspace, "browser_eval", { expression: "document.body.remove()", mode: "write" })).toBe("browse");
+    expect(permissionAction("read-only", "browser_eval", "browse")).toBe("deny");
+    expect(permissionNeedsApproval("ask", "browser_eval", "browse")).toBe(true);
+  });
 });
