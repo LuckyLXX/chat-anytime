@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai/compat";
 import { convertMessages } from "@earendil-works/pi-ai/api/openai-completions";
-import { customProviderModelDefinition, inferCustomModelImageInput } from "./custom-provider.js";
+import { customProviderModelDefinition, inferCustomModelImageInput, resolveCustomProviderRegistration } from "./custom-provider.js";
 
 describe("custom OpenAI-compatible models", () => {
   it("keeps thinking levels available when the upstream catalog omits capabilities", () => {
@@ -61,5 +61,46 @@ describe("custom OpenAI-compatible models", () => {
       supportsLongCacheRetention: false
     });
     expect(messages[0]).toMatchObject({ role: "system", content: "你是开发助手" });
+  });
+});
+
+describe("resolveCustomProviderRegistration", () => {
+  it("skips built-in model-visibility entries instead of failing validation", () => {
+    // Regression: initialize() feeds every settings.providers entry through
+    // registerCustomProvider. A `custom: false` entry (empty baseUrl by
+    // design) used to throw 「自定义服务商需要填写名称和接口地址」 and abort
+    // startup — sessions never loaded and the error popped up as a dialog.
+    const entry = { id: "openrouter", name: "OpenRouter", baseUrl: "", models: [{ id: "a", name: "A" }], custom: false as const };
+    expect(resolveCustomProviderRegistration(entry)).toBeNull();
+  });
+
+  it("rejects custom entries missing name or baseUrl", () => {
+    expect(() => resolveCustomProviderRegistration({ id: "provider-1", name: "", baseUrl: "https://api.example.com/v1", models: [] }))
+      .toThrow("自定义服务商需要填写名称和接口地址");
+    expect(() => resolveCustomProviderRegistration({ id: "provider-1", name: "中转", baseUrl: "  ", models: [] }))
+      .toThrow("自定义服务商需要填写名称和接口地址");
+  });
+
+  it("rejects a baseUrl that is not a valid URL", () => {
+    expect(() => resolveCustomProviderRegistration({ id: "provider-1", name: "中转", baseUrl: "not-a-url", models: [] }))
+      .toThrow("接口地址必须是有效的 URL");
+  });
+
+  it("trims name/baseUrl and keeps only enabled models with real ids", () => {
+    const payload = resolveCustomProviderRegistration({
+      id: "provider-1",
+      name: "  中转  ",
+      baseUrl: "https://api.example.com/v1///",
+      models: [
+        { id: " m1 ", name: "", imageInput: true },
+        { id: "m2", name: "M2", enabled: false },
+        { id: "  ", name: "blank id" }
+      ]
+    });
+    expect(payload?.name).toBe("中转");
+    expect(payload?.baseUrl).toBe("https://api.example.com/v1");
+    expect(payload?.models.map((model) => model.id)).toEqual(["m1"]);
+    expect(payload?.models[0]?.name).toBe("m1");
+    expect(payload?.models[0]?.input).toEqual(["text", "image"]);
   });
 });

@@ -49,7 +49,7 @@ import { toolLabel } from "../shared/locale.js";
 import { workspaceRelativeAttachment } from "./attachments.js";
 import { runManualCompaction } from "./compaction-lifecycle.js";
 import { readGitBranch } from "./git-branch.js";
-import { customProviderModelDefinition, inferCustomModelImageInput } from "./custom-provider.js";
+import { inferCustomModelImageInput, resolveCustomProviderRegistration } from "./custom-provider.js";
 import { buildDivModePrompt } from "./div-prompt.js";
 import { McpClientManager } from "./mcp-client.js";
 import { removeMcpServerConfig, setMcpServerDisabled, upsertMcpServerConfig } from "./mcp-config.js";
@@ -1053,23 +1053,15 @@ async function refreshCatalog(): Promise<void> {
 }
 
 function registerCustomProvider(config: ProviderSettings): void {
-  const baseUrl = config.baseUrl.trim().replace(/\/+$/u, "");
-  const name = config.name.trim();
-  if (!name || !baseUrl) throw new Error("自定义服务商需要填写名称和接口地址");
-  try {
-    new URL(baseUrl);
-  } catch {
-    throw new Error("接口地址必须是有效的 URL，例如 https://api.example.com/v1");
-  }
-  const configuredModels = (config.models?.length ? config.models : [])
-    .filter((model) => model.id.trim())
-    .filter((model) => model.enabled !== false)
-    .map((model) => ({ id: model.id.trim(), name: model.name.trim() || model.id.trim(), imageInput: model.imageInput, enabled: true }));
+  const registration = resolveCustomProviderRegistration(config);
+  // null = built-in visibility marker entry (`custom: false`): the catalog
+  // already defines the provider, so there is nothing to register.
+  if (!registration) return;
   modelRuntime?.registerProvider(config.id, {
-    name,
-    baseUrl,
+    name: registration.name,
+    baseUrl: registration.baseUrl,
     api: "openai-completions",
-    models: configuredModels.map((model) => customProviderModelDefinition(model))
+    models: registration.models
   });
 }
 

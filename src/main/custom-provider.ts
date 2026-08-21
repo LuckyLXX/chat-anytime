@@ -1,4 +1,4 @@
-import type { CustomProviderModel } from "../shared/protocol.js";
+import type { CustomProviderModel, ProviderSettings } from "../shared/protocol.js";
 
 export function inferCustomModelImageInput(modelId: string): boolean {
   const value = modelId.trim().toLowerCase();
@@ -35,5 +35,40 @@ export function customProviderModelDefinition(model: CustomProviderModel) {
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 128000,
     maxTokens: 16384
+  };
+}
+
+/**
+ * Validate a settings provider entry and build its registration payload.
+ *
+ * `custom: false` entries only record per-model visibility for built-in
+ * providers (no baseUrl of their own — the catalog already defines them);
+ * they return null instead of failing name/baseUrl validation. Startup feeds
+ * every settings.providers entry through this path, so treating them as
+ * malformed custom providers used to abort the whole initialize (sessions
+ * never load, error dialog on every launch).
+ */
+export function resolveCustomProviderRegistration(config: ProviderSettings): {
+  name: string;
+  baseUrl: string;
+  models: ReturnType<typeof customProviderModelDefinition>[];
+} | null {
+  if (config.custom === false) return null;
+  const baseUrl = config.baseUrl.trim().replace(/\/+$/u, "");
+  const name = config.name.trim();
+  if (!name || !baseUrl) throw new Error("自定义服务商需要填写名称和接口地址");
+  try {
+    new URL(baseUrl);
+  } catch {
+    throw new Error("接口地址必须是有效的 URL，例如 https://api.example.com/v1");
+  }
+  const configuredModels = (config.models?.length ? config.models : [])
+    .filter((model) => model.id.trim())
+    .filter((model) => model.enabled !== false)
+    .map((model) => ({ id: model.id.trim(), name: model.name.trim() || model.id.trim(), imageInput: model.imageInput, enabled: true }));
+  return {
+    name,
+    baseUrl,
+    models: configuredModels.map((model) => customProviderModelDefinition(model))
   };
 }
