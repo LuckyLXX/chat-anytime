@@ -15,6 +15,7 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { BackgroundProcessRegistry, bashCommandsFromMessages, isBackgroundCommand } from "./background-processes.js";
+import { messageUuid } from "./message-identity.js";
 import type {
   AccessMode,
   AgentProfile,
@@ -459,18 +460,10 @@ function blocksFromMessage(message: AgentMessage, skillPrompt?: SkillPromptDispl
 
 // Maps each Pi AgentMessage object to a stable uuid so a message keeps its
 // identity across the partial (streamingMessage) and final (committed into
-// session.state.messages) frames. Fall-back key handles the rare case of two
-// messages sharing a timestamp (counter appended within timestamp bucket).
-const messageUuids = new WeakMap<AgentMessage, string>();
-let uuidSequence = 0;
-
-function messageUuid(message: AgentMessage, index: number): string {
-  const cached = messageUuids.get(message);
-  if (cached) return cached;
-  const uuid = `${message.timestamp ?? 0}-${message.role}-${index}-${++uuidSequence}`;
-  messageUuids.set(message, uuid);
-  return uuid;
-}
+// session.state.messages) frames. Pi 每个流式事件都 spread 出新对象、提交时
+// 又是另一对象，但 timestamp/role/index 三者全帧一致，故用确定性 uuid
+// （message-identity.ts）；含自增序号的旧实现会让每帧 uuid 不同，渲染端
+// key 逐帧变化、气泡每帧重挂载闪烁。
 
 function normalizeMessages(messages: AgentMessage[], streamingMessage?: AgentMessage): ChatMessage[] {
   const visible = messages.filter((message) => message.role === "user" || message.role === "assistant" || (message.role === "custom" && (message as unknown as RuntimeCustomMessage).display));
