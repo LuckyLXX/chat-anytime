@@ -31,7 +31,9 @@
 
 类名属于实现细节，可能随版本变化；以下属性是稳定契约，结构化主题请只依赖它们：
 
-**区域钩子 `data-pane`**：`sidebar` `topbar` `work-area` `conversation` `timeline` `composer` `task-panel` `memory-panel` `preview` `terminal` `question-panel` `settings-dialog` `permission-dialog`
+**区域钩子 `data-pane`**：`sidebar` `topbar` `workspace` `work-area` `conversation` `timeline` `composer` `task-panel` `memory-panel` `preview` `terminal` `question-panel` `settings-dialog` `permission-dialog`
+
+> `workspace` 是侧栏右侧的整个主工作区容器（含顶栏、会话区与预览面板），适合整体背景、圆角等容器级装饰；其内部的顶栏、会话区等各自另有更细粒度的区域钩子。
 
 > `terminal` 是预览面板内的嵌入式终端区域（xterm.js 宿主）。终端配色由 `--code-surface` / `--code-text` / `--selection-bg` token 驱动，主题改这三个 token 即可换终端配色；`[data-pane="terminal"]` 钩子可用于边框、内边距等容器装饰。
 > `question-panel` 是 AI 提问（ask_question 工具）时从输入栏上方向上展开的应答面板，位于 `conversation` 区域内、`composer` 正上方。面板分页式逐题作答（右上角页码/箭头切换，草稿跨页保留），底部「忽略」取消提问、「继续」手动推进或提交；选择题第一个选项自动标注「（推荐）」——与工具描述约定一致（模型把最推荐的选项放第一位），单选点选/回车/空格即选中并自动进入下一题（末题自动提交，重选直接换项），多选保持勾选多个、由「继续」或输入框回车推进；面板内快捷键：Tab/上下键移动选择（单选上下键移动时同步改选但不跳页）、回车或空格确认（单选确认即跳页）。
@@ -62,6 +64,9 @@
 | 访问模式                                    | `access-mode`                                    |
 | 模型快捷切换                                | `model-select`                                   |
 | 思考级别                                    | `thinking-select`                                |
+| 思考块展开/收起（消息内）                   | `thinking-expand`                                |
+| 上下文占用指示（顶栏）                      | `context-usage`                                  |
+| 预览工具栏元素选择                          | `browser-pick`                                   |
 | 消息操作                                    | `copy` / `edit` / `regenerate` / `share`         |
 
 ```css
