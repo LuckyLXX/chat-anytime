@@ -1,0 +1,444 @@
+/* Theme Name: 极光夜航 Aurora Voyage */
+/* Theme Type: structural */
+/*
+ * 极光夜航：极夜天幕上的流动极光。
+ * 暗色 = 极夜：深空底色、星野闪烁、极光缎带漂移、偶发流星；
+ * 亮色 = 极昼：冰原晨空、淡彩极光。玻璃拟态面板 + 霓虹描边 +
+ * 立体发送按钮 + 生成状态呼吸反应。全部动效尊重系统减少动态偏好。
+ * 纯 CSS，无外部资产；在 PiDesktop 中以「导入主题目录」导入本目录。
+ */
+
+/* ============================================================
+ * 一、语义调色板 —— 暗色（极夜）
+ * ============================================================ */
+:root[data-theme-effective="dark"] {
+  --chat-bg-image: none;
+  --chat-bg-opacity: 0;
+  --chat-bg-size: cover;
+  --chat-bg-repeat: no-repeat;
+  --chat-bg-position: center;
+
+  --surface: #0b1a2a;
+  --surface-muted: #071120;
+  --surface-raised: #12253a;
+  --surface-conversation: #0a1728;
+  --surface-sidebar: #0a1524;
+  --surface-sidebar-tabs: #102131;
+  --surface-sidebar-hover: #14293e;
+  --surface-sidebar-active: #0f3346;
+  --surface-sidebar-badge: #123044;
+  --surface-input: #0c1c2e;
+  --surface-footer: #081523;
+  --surface-detail: #081523;
+  --surface-button-hover: #173249;
+  --preview-surface: #0b1b2c;
+  --blockquote-surface: #0e2733;
+  --panel-bg: rgb(9 22 36 / 88%);
+
+  --text: #e6f3fb;
+  --text-muted: #94aec2;
+  --text-sidebar-active: #a9f5ea;
+  --text-on-accent: #ffffff;
+  --on-accent: #ffffff;
+  --text-on-user-bubble: #ffffff;
+  --avatar-user-text: #ffffff;
+  --avatar-assistant-text: #06222e;
+  --link: #7dd3fc;
+
+  --border: #1d3a52;
+  --border-strong: #2b4d6b;
+  --border-message: #1d3a52;
+  --border-assistant: #1d3a52;
+  --blockquote-border: #3f97ad;
+  --user-bubble-border: #22d3ee;
+  --accent-border: #155e75;
+
+  --accent: #0e7490;
+  --accent-hover: #0f7d9c;
+  --accent-soft: #0d2f3d;
+  --accent-text: #67e8f9;
+  --focus-ring: rgb(103 232 249 / 35%);
+  --selection-bg: #0e7490;
+  --selection-text: #ffffff;
+
+  --success: #34d399;
+  --success-soft: #0c3327;
+  --success-border: #2bbd89;
+  --completed-border: #34d399;
+  --warning: #fbbf24;
+  --warning-soft: #38290c;
+  --danger: #fb7185;
+  --danger-soft: #3a1424;
+  --danger-border: #d94f68;
+  --danger-text: #fda4af;
+
+  --blue: #7dd3fc;
+  --user-bubble: #0e7490;
+  --ai-bubble: #0f2136;
+  --avatar-user: #0e7490;
+  --avatar-assistant: #9defff;
+  --tool-bubble-bg: #0e2534;
+  --tool-bubble-border: #1d3a52;
+
+  --code-surface: #05101c;
+  --code-text: #d9f2fa;
+  --inline-code-surface: #0e2f3a;
+  --inline-code-text: #7df0e0;
+  --syntax-keyword: #7dd3fc;
+  --syntax-string: #6ee7b7;
+  --syntax-number: #fcd34d;
+  --syntax-comment: #7e96aa;
+  --syntax-title: #93c5fd;
+  --syntax-meta: #f9a8d4;
+
+  --diff-add-text: #6ee7b7;
+  --diff-remove-text: #fda4af;
+  --diff-hunk-text: #7dd3fc;
+  --diff-meta-text: #67e8f9;
+
+  --user-action-border: rgb(255 255 255 / 40%);
+  --user-action-surface: rgb(255 255 255 / 12%);
+  --overlay: rgb(2 10 20 / 55%);
+
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 30%);
+  --shadow-md: 0 8px 24px rgb(0 0 0 / 35%);
+  --shadow-lg: 0 24px 70px rgb(0 0 0 / 50%);
+  --scrollbar-track: #071120;
+  --scrollbar-thumb: rgb(103 232 249 / 32%);
+  --scrollbar-thumb-hover: rgb(103 232 249 / 55%);
+}
+
+/* ============================================================
+ * 二、语义调色板 —— 亮色（极昼）
+ * ============================================================ */
+:root[data-theme-effective="light"] {
+  --chat-bg-image: none;
+  --chat-bg-opacity: 0;
+  --chat-bg-size: cover;
+  --chat-bg-repeat: no-repeat;
+  --chat-bg-position: center;
+
+  --surface: #f3fafc;
+  --surface-muted: #e6f2f6;
+  --surface-raised: #fbfeff;
+  --surface-conversation: #eff8fb;
+  --surface-sidebar: #e9f4f8;
+  --surface-sidebar-tabs: #dfeef4;
+  --surface-sidebar-hover: #d2e7ef;
+  --surface-sidebar-active: #c9ebf2;
+  --surface-sidebar-badge: #d5ecf3;
+  --surface-input: #ffffff;
+  --surface-footer: #e9f4f8;
+  --surface-detail: #e9f4f8;
+  --surface-button-hover: #dcecf3;
+  --preview-surface: #ffffff;
+  --blockquote-surface: #e0f2f0;
+  --panel-bg: rgb(245 251 253 / 92%);
+
+  --text: #122a3c;
+  --text-muted: #4c6a80;
+  --text-sidebar-active: #0b5468;
+  --text-on-accent: #ffffff;
+  --on-accent: #ffffff;
+  --text-on-user-bubble: #ffffff;
+  --avatar-user-text: #ffffff;
+  --avatar-assistant-text: #d6f7f2;
+  --link: #0369a1;
+
+  --border: #c9dde6;
+  --border-strong: #a8c5d3;
+  --border-message: #c9dde6;
+  --border-assistant: #c9dde6;
+  --blockquote-border: #6ba8b8;
+  --user-bubble-border: #0e7490;
+  --accent-border: #8ac8d8;
+
+  --accent: #0e7490;
+  --accent-hover: #0c637c;
+  --accent-soft: #d9f1f6;
+  --accent-text: #0b5468;
+  --focus-ring: rgb(14 116 144 / 30%);
+  --selection-bg: #b9ecf4;
+  --selection-text: #0b3947;
+
+  --success: #059669;
+  --success-soft: #d7f5e7;
+  --success-border: #5ed3ab;
+  --completed-border: #34d399;
+  --warning: #b45309;
+  --warning-soft: #fdf0d3;
+  --danger: #e11d48;
+  --danger-soft: #fde3ea;
+  --danger-border: #f6a8bb;
+  --danger-text: #b01247;
+
+  --blue: #2563eb;
+  --user-bubble: #0e7490;
+  --ai-bubble: #ffffff;
+  --avatar-user: #0e7490;
+  --avatar-assistant: #0b5468;
+  --tool-bubble-bg: #e4f2f6;
+  --tool-bubble-border: #c3dbe4;
+
+  /* 明亮模式保留深色代码块——冰面上的一扇夜窗 */
+  --code-surface: #0d2030;
+  --code-text: #d9f2fa;
+  --inline-code-surface: #ddf0f4;
+  --inline-code-text: #0b5468;
+  --syntax-keyword: #7dd3fc;
+  --syntax-string: #6ee7b7;
+  --syntax-number: #fcd34d;
+  --syntax-comment: #7e96aa;
+  --syntax-title: #93c5fd;
+  --syntax-meta: #f9a8d4;
+
+  --diff-add-text: #0b6b4f;
+  --diff-remove-text: #b01247;
+  --diff-hunk-text: #0b5468;
+  --diff-meta-text: #0b5468;
+
+  --user-action-border: rgb(255 255 255 / 55%);
+  --user-action-surface: rgb(255 255 255 / 30%);
+  --overlay: rgb(15 40 60 / 32%);
+
+  --shadow-sm: 0 1px 2px rgb(10 40 60 / 8%);
+  --shadow-md: 0 8px 24px rgb(10 40 60 / 10%);
+  --shadow-lg: 0 24px 70px rgb(10 40 60 / 18%);
+  --scrollbar-track: #e9f4f8;
+  --scrollbar-thumb: rgb(14 116 144 / 30%);
+  --scrollbar-thumb-hover: rgb(14 116 144 / 50%);
+}
+
+/* ============================================================
+ * 三、视口装饰层 —— 极夜天幕（暗）/ 极昼晴空（明）
+ *    sky 静态天幕 → aurora 极光缎带（漂移）→ stars 星野（闪烁）
+ *    overlay-meteor 流星划过界面之上、对话框之下
+ * ============================================================ */
+:root {
+  --pi-layer-sky: linear-gradient(180deg, #02060d 0%, #04101d 52%, #062031 100%);
+  --pi-layer-aurora:
+    radial-gradient(52rem 30rem at 78% -8%, rgb(45 212 191 / 17%), transparent 62%) 0 0 / auto no-repeat,
+    radial-gradient(46rem 26rem at 10% 6%, rgb(103 232 249 / 13%), transparent 64%) 0 0 / auto no-repeat,
+    radial-gradient(64rem 34rem at 46% 114%, rgb(139 92 246 / 12%), transparent 66%) 0 0 / auto no-repeat;
+  --pi-layer-stars:
+    radial-gradient(rgb(255 255 255 / 75%) 1px, transparent 1.5px) 12px 18px / 210px 190px repeat,
+    radial-gradient(rgb(214 246 255 / 60%) 1px, transparent 1.4px) 105px 95px / 280px 240px repeat,
+    radial-gradient(rgb(255 255 255 / 90%) 1.4px, transparent 2px) 54px 140px / 420px 380px repeat;
+  --pi-overlay-meteor: linear-gradient(to right, transparent, rgb(190 242 255 / 55%), transparent) 15% 20% / 220px 2px no-repeat;
+}
+
+:root[data-theme-effective="light"] {
+  --pi-layer-sky: linear-gradient(180deg, #d5ebf4 0%, #e9f6fa 48%, #f7fcfe 100%);
+  --pi-layer-aurora:
+    radial-gradient(52rem 30rem at 78% -8%, rgb(94 211 195 / 12%), transparent 62%) 0 0 / auto no-repeat,
+    radial-gradient(46rem 26rem at 10% 6%, rgb(125 211 252 / 10%), transparent 64%) 0 0 / auto no-repeat,
+    radial-gradient(64rem 34rem at 46% 114%, rgb(196 181 253 / 9%), transparent 66%) 0 0 / auto no-repeat;
+  --pi-layer-stars: none;
+  --pi-overlay-meteor: none;
+}
+
+/* ============================================================
+ * 四、玻璃拟态面板 —— 让极光从界面缝隙里透出来
+ * ============================================================ */
+[data-pane="sidebar"],
+[data-pane="topbar"],
+[data-pane="composer"],
+[data-pane="task-panel"],
+[data-pane="memory-panel"],
+[data-pane="question-panel"] {
+  backdrop-filter: blur(16px) saturate(130%);
+}
+
+:root[data-theme-effective="dark"] [data-pane="sidebar"] { background: rgb(6 14 24 / 82%); }
+:root[data-theme-effective="dark"] [data-pane="topbar"] { background: rgb(7 16 26 / 76%); }
+:root[data-theme-effective="dark"] [data-pane="conversation"] { background: rgb(6 17 28 / 78%); }
+:root[data-theme-effective="dark"] [data-pane="composer"] { background: rgb(9 22 36 / 88%); }
+:root[data-theme-effective="dark"] [data-pane="task-panel"],
+:root[data-theme-effective="dark"] [data-pane="memory-panel"] { background: rgb(10 24 38 / 92%); }
+:root[data-theme-effective="dark"] [data-pane="question-panel"] { background: rgb(11 26 41 / 94%); }
+:root[data-theme-effective="dark"] [data-pane="preview"] { background: rgb(10 24 38 / 92%); }
+:root[data-theme-effective="dark"] [data-pane="settings-dialog"] { background: rgb(9 22 36 / 94%); }
+:root[data-theme-effective="dark"] [data-pane="permission-dialog"] { background: rgb(12 20 32 / 96%); }
+
+:root[data-theme-effective="light"] [data-pane="sidebar"] { background: rgb(238 247 250 / 84%); }
+:root[data-theme-effective="light"] [data-pane="topbar"] { background: rgb(242 250 252 / 78%); }
+:root[data-theme-effective="light"] [data-pane="conversation"] { background: rgb(240 249 252 / 80%); }
+:root[data-theme-effective="light"] [data-pane="composer"] { background: rgb(248 253 254 / 90%); }
+:root[data-theme-effective="light"] [data-pane="task-panel"],
+:root[data-theme-effective="light"] [data-pane="memory-panel"] { background: rgb(250 253 254 / 93%); }
+:root[data-theme-effective="light"] [data-pane="question-panel"] { background: rgb(251 254 255 / 95%); }
+:root[data-theme-effective="light"] [data-pane="preview"] { background: rgb(250 253 254 / 93%); }
+:root[data-theme-effective="light"] [data-pane="settings-dialog"] { background: rgb(248 253 254 / 95%); }
+:root[data-theme-effective="light"] [data-pane="permission-dialog"] { background: rgb(252 253 254 / 97%); }
+
+/* ============================================================
+ * 五、霓虹描边 —— 侧栏与顶栏的极光接缝
+ * ============================================================ */
+[data-pane="sidebar"] {
+  border-right: 1px solid;
+  border-image: linear-gradient(to bottom, rgb(103 232 249 / 85%), rgb(139 92 246 / 70%) 55%, transparent) 1;
+}
+[data-pane="topbar"] {
+  border-bottom: 1px solid;
+  border-image: linear-gradient(to right, rgb(103 232 249 / 85%), rgb(139 92 246 / 70%) 60%, transparent) 1;
+}
+
+/* ============================================================
+ * 六、输入卡 —— 渐变霓虹描边
+ * ============================================================ */
+[data-pane="composer"] {
+  isolation: isolate;
+  border-color: transparent;
+  box-shadow: var(--shadow-lg);
+}
+[data-pane="composer"]::before {
+  content: "";
+  position: absolute;
+  inset: -1.5px;
+  z-index: -1;
+  border-radius: 11.5px;
+  background: linear-gradient(120deg, #22d3ee, #8b5cf6 45%, #2dd4bf 90%);
+  opacity: .85;
+}
+[data-pane="composer"]:focus-within::before { opacity: 1; }
+[data-pane="composer"] textarea { caret-color: var(--accent-text); }
+
+/* ============================================================
+ * 七、立体发送 / 停止按钮 —— 成对设计，按压有物理感
+ * ============================================================ */
+[data-pane="composer"] [data-control="send"],
+[data-pane="composer"] [data-control="stop"] {
+  color: #ffffff;
+  border: none;
+  border-radius: 9px;
+  background: linear-gradient(180deg, #1793b5, var(--accent) 48%, #0a5468);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 40%),
+    inset 0 -3px 5px rgb(0 20 30 / 30%),
+    0 4px 0 #083c4c,
+    0 7px 16px rgb(2 12 24 / 45%);
+  transition: transform .08s ease, box-shadow .08s ease, filter .18s ease;
+}
+[data-pane="composer"] [data-control="send"]:hover,
+[data-pane="composer"] [data-control="stop"]:hover { filter: brightness(1.1); }
+[data-pane="composer"] [data-control="send"]:focus-visible,
+[data-pane="composer"] [data-control="stop"]:focus-visible {
+  outline: 2px solid transparent;
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 40%),
+    inset 0 -3px 5px rgb(0 20 30 / 30%),
+    0 4px 0 #083c4c,
+    0 0 0 3px var(--focus-ring);
+}
+[data-pane="composer"] [data-control="send"]:active,
+[data-pane="composer"] [data-control="stop"]:active {
+  transform: translateY(3px);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 28%),
+    0 1px 0 #083c4c,
+    0 2px 6px rgb(2 12 24 / 40%);
+}
+[data-pane="composer"] [data-control="send"]:disabled {
+  filter: saturate(.35) brightness(.72);
+  transform: none;
+}
+
+/* ============================================================
+ * 八、侧栏新建话题 —— 极光胶囊
+ * ============================================================ */
+[data-pane="sidebar"] [data-control="new-session"] {
+  color: #ffffff;
+  border: none;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #0e7490, #0b5468);
+  box-shadow: 0 0 0 1px rgb(103 232 249 / 25%), 0 4px 14px rgb(14 116 144 / 35%);
+}
+[data-pane="sidebar"] [data-control="new-session"]:hover { filter: brightness(1.12); }
+[data-pane="sidebar"] [data-control="new-session"]:focus-visible {
+  outline: 2px solid transparent;
+  box-shadow: 0 0 0 1px rgb(103 232 249 / 25%), 0 0 0 3px var(--focus-ring);
+}
+
+/* ============================================================
+ * 九、状态反应 —— 待提问辉光 / 权限警示 / 设置打开压暗
+ * ============================================================ */
+[data-ui-question-pending] [data-pane="question-panel"] {
+  box-shadow:
+    0 18px 50px rgb(2 12 24 / 45%),
+    0 0 0 1px rgb(103 232 249 / 35%),
+    0 0 24px rgb(34 211 238 / 22%);
+}
+[data-ui-permission-pending] [data-pane="permission-dialog"] {
+  box-shadow: 0 0 0 1px rgb(251 113 133 / 45%), 0 0 28px rgb(251 113 133 / 20%);
+}
+[data-ui-settings-open] [data-pane="work-area"] { filter: saturate(.85) brightness(.92); }
+
+/* ============================================================
+ * 十、空态标题 —— 渐变流光大字（仅空会话时可见）
+ * ============================================================ */
+[data-ui-chat-empty] [data-pane="timeline"] h1 {
+  background: linear-gradient(100deg, #0e7490, #0891b2 35%, #7c3aed 70%, #0e7490) 0 0 / 220% 100%;
+}
+:root[data-theme-effective="dark"] [data-ui-chat-empty] [data-pane="timeline"] h1 {
+  background: linear-gradient(100deg, #67e8f9, #2dd4bf 35%, #a78bfa 70%, #67e8f9) 0 0 / 220% 100%;
+}
+[data-ui-chat-empty] [data-pane="timeline"] h1 {
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+:root[data-theme-effective="dark"] [data-ui-chat-empty] [data-pane="timeline"] h1 {
+  filter: drop-shadow(0 0 14px rgb(103 232 249 / 30%));
+}
+
+/* ============================================================
+ * 十一、动效层 —— 全部包裹减少动态偏好
+ * ============================================================ */
+@media (prefers-reduced-motion: no-preference) {
+  /* 极光缎带缓慢摇摆（合成器动画，不重绘） */
+  [data-theme-layer="aurora"] {
+    transform-origin: 50% 0%;
+    animation: av-sway 30s ease-in-out infinite alternate;
+    will-change: transform;
+  }
+  /* 星野呼吸闪烁 */
+  [data-theme-layer="stars"] { animation: av-twinkle 9s ease-in-out infinite alternate; }
+  /* 流星：13 秒周期，多数时间隐没 */
+  [data-theme-layer="meteor"] { animation: av-meteor 13s linear infinite; will-change: transform, opacity; }
+
+  /* 输入卡霓虹边随焦点呼吸；生成中转为急促脉动 */
+  [data-pane="composer"]::before { transition: opacity .3s ease; }
+  [data-ui-generating] [data-pane="composer"]::before { animation: av-rim 2.2s ease-in-out infinite; }
+
+  /* 停止按钮生成中脉冲 */
+  [data-ui-generating] [data-pane="composer"] [data-control="stop"] { animation: av-pulse 1.3s ease-in-out infinite; }
+
+  /* 空态标题流光扫过 */
+  [data-ui-chat-empty] [data-pane="timeline"] h1 { animation: av-shine 7s linear infinite; }
+}
+
+@keyframes av-sway {
+  from { transform: translate3d(-1.6%, .8%, 0) scale(1.05); }
+  to { transform: translate3d(1.6%, -.6%, 0) scale(1.09); }
+}
+@keyframes av-twinkle {
+  from { opacity: .55; }
+  to { opacity: .95; }
+}
+@keyframes av-meteor {
+  0% { transform: translate3d(-30vw, -14vh, 0) rotate(14deg); opacity: 0; }
+  4% { opacity: 1; }
+  11% { transform: translate3d(112vw, 54vh, 0) rotate(14deg); opacity: 0; }
+  100% { transform: translate3d(112vw, 54vh, 0) rotate(14deg); opacity: 0; }
+}
+@keyframes av-rim {
+  0%, 100% { opacity: .55; }
+  50% { opacity: 1; }
+}
+@keyframes av-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.07); }
+}
+@keyframes av-shine {
+  to { background-position: -220% 0; }
+}
