@@ -340,6 +340,9 @@ button, input, select, textarea, summary, label {
 .message-user .message-actions button { color: var(--text-on-user-bubble); }
 .message-user .message-actions button:hover { color: var(--text-on-user-bubble); border-color: var(--user-action-border); background: var(--user-action-surface); }
 .message-timing { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 9px; color: var(--text-muted); font-size: 10px; line-height: 1.4; }
+/* 耗时/压缩耗时是气泡外的 caption 行（不占气泡内容）：作为 .message 网格第二列
+   的新行渲染，与气泡左缘对齐（同底部行内进度）；流式期间由行内进度展示，避免重复。 */
+.message-assistant > .message-timing { grid-column: 2; margin-top: 0; }
 .action-timeline { margin: 0 0 12px; color: var(--text-muted); }
 .action-timeline-summary { display: grid; grid-template-columns: max-content minmax(0, 1fr) 20px; align-items: center; gap: 10px; min-height: 34px; padding: 3px 0; cursor: pointer; list-style: none; user-select: none; }
 .action-timeline-summary::-webkit-details-marker { display: none; }

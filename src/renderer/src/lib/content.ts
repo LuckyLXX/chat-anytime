@@ -263,7 +263,9 @@ export function artifactSandbox(artifact: Pick<Artifact, "language" | "content">
 export function formatDuration(startedAt: number, completedAt?: number): string {
   const duration = (completedAt ?? Date.now()) - startedAt;
   if (duration < 1000) return `${duration}ms`;
-  return `${(duration / 1000).toFixed(1)}s`;
+  const seconds = duration / 1000;
+  if (seconds < 60) return `${seconds.toFixed(1)}s`;
+  return `${(seconds / 60).toFixed(1)}m`;
 }
 
 export function compactPath(path?: string): string {

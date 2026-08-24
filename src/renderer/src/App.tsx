@@ -270,8 +270,8 @@ function PendingResponse({ label, timing, now }: { label: string; timing?: TurnT
       <div className="message-avatar pi-avatar"><Bot size={17} /></div>
       <div className="message-body message-bubble pending-response-body">
         <div className="response-progress"><LoaderCircle size={14} className="spinning" /><span>{label}</span></div>
-        {timing && <TimingMeta timing={timing} now={now} />}
       </div>
+      {timing && <TimingMeta timing={timing} now={now} />}
     </article>
   );
 }
@@ -635,11 +635,11 @@ const MessageView = memo(function MessageView({ message, executions, onOpenArtif
         <div className="assistant-share-content" ref={shareTargetRef}>
           <ActionTimeline message={message} executions={executions} turnActive={turnActive} showThinking={showThinking} thinkingLabel={hiddenThinkingLabel} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} timing={timing} now={now} />
           {message.error && <p className="inline-error"><AlertCircle size={15} />{message.error}</p>}
-          {timing && (isControlMessage ? <CompactTimingMeta timing={timing} now={now} /> : <TimingMeta timing={timing} now={now} />)}
         </div>
         {changedFiles.length > 0 && <ChangedFilesPanel files={changedFiles} onOpenFile={onOpenFile} onOpenDiff={onOpenDiff} />}
         {!isControlMessage && !message.streaming && !busy && <div className="message-actions"><button type="button" data-control="regenerate" title="重新生成" aria-label="重新生成回复" onClick={() => onRegenerate(message)}><RefreshCw size={13} /></button><button type="button" data-control="copy" title="复制" aria-label="复制 AI 回复" onClick={() => onCopy(message)}><Copy size={13} /></button>{hasShareableContent && <button type="button" data-control="share" title={sharing ? "正在生成图片" : shared ? "已复制图片" : "分享图片"} aria-label={sharing ? "正在生成回复图片" : shared ? "回复图片已复制" : "分享 AI 回复图片"} disabled={sharing} onClick={() => void share()}>{sharing ? <LoaderCircle size={13} className="spinning" /> : shared ? <Check size={13} /> : <Share2 size={13} />}</button>}</div>}
       </div>
+      {timing && (isControlMessage ? <CompactTimingMeta timing={timing} now={now} /> : <TimingMeta timing={timing} now={now} />)}
     </article>
   );
 });
@@ -1443,7 +1443,10 @@ export function App(): ReactNode {
   // progress row continues under the existing assistant bubble.
   const lastDisplayMessage = displayMessages[displayMessages.length - 1];
   const assistantBubbleVisible = !localTurnPending && lastDisplayMessage?.role === "assistant" && !lastDisplayMessage.control;
-  const showTurnTimingOnLatest = Boolean(snapshot.turnTiming && (!snapshot.busy || displayMessages[latestAssistantMessageIndex]?.streaming));
+  // 耗时元信息只在气泡外出现：回合进行中由底部行内进度（response-progress-inline
+  // / PendingResponse 的 caption）展示实时耗时；回合结束后在最新一条回复的气泡
+  // 下方展示定格值，不再嵌进气泡内容（用户反馈：气泡内不应出现回答耗时/总耗时）。
+  const showTurnTimingOnLatest = Boolean(snapshot.turnTiming && !isGenerating);
   const canSubmit = Boolean(snapshot.workspace && (input.trim() || attachments.length > 0 || selectedSkill || mentionedFiles.length > 0) && snapshot.model);
   const workingLabel = `${snapshot.agentName}正在努力输出中……`;
   let composerPlaceholder = "请先打开一个项目";

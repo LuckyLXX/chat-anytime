@@ -16,6 +16,9 @@ describe("rich content helpers", () => {
   it("formats short and long tool durations", () => {
     expect(formatDuration(1000, 1450)).toBe("450ms");
     expect(formatDuration(1000, 3250)).toBe("2.3s");
+    expect(formatDuration(1000, 61_500)).toBe("1.0m");
+    expect(formatDuration(1000, 345_000)).toBe("5.7m");
+    expect(formatDuration(1000, 59_999)).toBe("59.0s");
   });
 
   it("extracts @file mentions into badges and cleans the body text", () => {
