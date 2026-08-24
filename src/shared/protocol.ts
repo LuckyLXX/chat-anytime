@@ -10,6 +10,8 @@ export interface ModelOption {
   configured: boolean;
   input: ("text" | "image")[];
   imageInput: boolean;
+  /** 目录条目的启用状态（settings.providers 的勾选结果）；缺省视为启用。目录必须包含被禁用的模型（设置页要还原勾选），选择器类消费方自行过滤 enabled !== false。 */
+  enabled?: boolean;
 }
 
 export interface ProviderModelSettings {

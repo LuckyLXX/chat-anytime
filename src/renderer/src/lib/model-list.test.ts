@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { buildBuiltinProviderEntry, filterProviderModels, setProviderModelsEnabled } from "./model-list";
+import { buildBuiltinProviderEntry, filterProviderModels, setProviderModelsEnabled, selectableCatalogModels } from "./model-list";
+import type { ModelOption } from "../../../shared/protocol";
 
 const models = [
   { id: "openai/gpt-4o", name: "GPT-4o", enabled: true },
@@ -44,6 +45,20 @@ describe("provider model list", () => {
 
   it("is a no-op for an empty target set", () => {
     expect(setProviderModelsEnabled(models, [], true)).toBe(models);
+  });
+});
+
+describe("selectable catalog view", () => {
+  const option = (overrides: Partial<ModelOption>): ModelOption => ({ provider: "p", id: "m", name: "M", configured: true, input: ["text"], imageInput: false, ...overrides });
+
+  it("drops disabled models and keeps enabled or default ones", () => {
+    const catalog = [option({ enabled: true }), option({ id: "off", enabled: false }), option({ id: "default" })];
+    expect(selectableCatalogModels(catalog).map((model) => model.id)).toEqual(["m", "default"]);
+  });
+
+  it("returns an empty view when every model is disabled", () => {
+    const catalog = [option({ enabled: false }), option({ id: "off2", enabled: false })];
+    expect(selectableCatalogModels(catalog)).toEqual([]);
   });
 });
 

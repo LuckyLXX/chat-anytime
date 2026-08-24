@@ -16,6 +16,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { BackgroundProcessRegistry, bashCommandsFromMessages, isBackgroundCommand } from "./background-processes.js";
 import { messageUuid } from "./message-identity.js";
+import { buildCatalogModels } from "./model-catalog.js";
 import type {
   AccessMode,
   AgentProfile,
@@ -1029,19 +1030,7 @@ async function refreshCatalog(): Promise<void> {
   if (!providers.some((provider) => provider.id === customProviderId)) {
     providers.push({ id: customProviderId, name: settings?.providers.find((item) => item.id === customProviderId)?.name ?? "自定义 OpenAI 兼容服务", configured: false });
   }
-  const models: ModelOption[] = runtime.getModels().filter((model) => {
-    const providerSettings = settings?.providers.find((provider) => provider.id === model.provider);
-    if (!providerSettings) return true;
-    const stored = providerSettings.models.find((item) => item.id === model.id);
-    return stored ? stored.enabled !== false : true;
-  }).map((model) => ({
-    provider: model.provider,
-    id: model.id,
-    name: model.name,
-    configured: configured.has(model.provider),
-    input: model.input,
-    imageInput: model.input.includes("image")
-  }));
+  const models: ModelOption[] = buildCatalogModels(runtime.getModels(), settings?.providers, configured);
   post({ type: "catalog", models, providers });
 }
 

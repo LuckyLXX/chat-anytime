@@ -1,4 +1,4 @@
-import type { ProviderModelSettings, ProviderSettings } from "../../../shared/protocol";
+import type { ModelOption, ProviderModelSettings, ProviderSettings } from "../../../shared/protocol";
 
 interface ModelListItem {
   id: string;
@@ -13,6 +13,14 @@ export function filterProviderModels<T extends ModelListItem>(models: T[], query
   const normalized = query.trim().toLowerCase();
   if (!normalized) return models;
   return models.filter((model) => model.name.toLowerCase().includes(normalized) || model.id.toLowerCase().includes(normalized));
+}
+
+/**
+ * 选择器类消费方（顶栏/菜单/默认模型下拉）的目录视图：只保留启用或缺省的模型。
+ * 目录本身包含被禁用的模型（设置页要还原勾选），在这里统一剔除。
+ */
+export function selectableCatalogModels<T extends ModelOption>(models: T[]): T[] {
+  return models.filter((model) => model.enabled !== false);
 }
 
 /**
