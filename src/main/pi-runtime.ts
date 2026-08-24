@@ -137,6 +137,8 @@ interface SessionRuntimeRecord {
   executions: Map<string, ToolExecution>;
   controlMessages: ChatMessage[];
   todoStore: TodoStore;
+  /** Per-session tool-call pacer backing the todo_write anti-batching reminder. */
+  todoPace: runtimeTodoTools.TodoPaceTracker;
   /** 按助手划分的长期记忆库（跨会话）；工具闭包读它，提示词快照在创建时冻结。 */
   memoryStore: MemoryStore;
   customTools: ToolDefinition[];
@@ -400,9 +402,9 @@ function sessionTodosPath(sessionId: string): string {
   return join(root, "todos", `${sessionId}.json`);
 }
 
-/** Build the Todo customTools for a session-scoped store. */
-function buildTodoTools(store: TodoStore): ToolDefinition[] {
-  return runtimeTodoTools.buildTodoTools({ store });
+/** Build the Todo customTools for a session-scoped store + pace tracker. */
+function buildTodoTools(store: TodoStore, pace: runtimeTodoTools.TodoPaceTracker): ToolDefinition[] {
+  return runtimeTodoTools.buildTodoTools({ store, pace });
 }
 
 function errorText(error: unknown): string {
@@ -1357,11 +1359,13 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
         post
       }),
       // Tool executions land in chatanytime-sessions/<agentId>/tool-audit.jsonl
-      // for post-hoc debugging; write failures never affect the turn.
+      // for post-hoc debugging; write failures never affect the turn. The start
+      // hook also feeds the per-session todo pace tracker (anti-batching nudge).
       createToolAudit({
         auditDir: () => agentSessionRoot(),
         sessionId: () => sessionHolder.session?.sessionId ?? activeSessionManager.getSessionId(),
-        warn: (message) => void post({ type: "log", level: "warn", message })
+        warn: (message) => void post({ type: "log", level: "warn", message }),
+        onToolStart: () => recordBox?.todoPace.record()
       }).extension
     ],
     systemPromptOverride: (base) => [base, recordAgent.systemPrompt, recordAgent.divMode ? buildDivModePrompt() : undefined, buildSkillsSystemPromptBlock(runtimeSkills.activeSkillsFor(nativeSkills, recordAgent)), memoryPromptBlock].filter(Boolean).join("\n\n")
@@ -1398,7 +1402,8 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   emitResourceCatalog();
   const sessionRecordSeed: Pick<SessionRuntimeRecord, "workspace" | "agent" | "permissionDeps"> = { workspace: recordWorkspace, agent: recordAgent, permissionDeps };
   const subagentTools = buildSubagentTools(sessionRecordSeed, activeSessionManager.getSessionId(), requested ?? selectedModel, false);
-  const todoTools = buildTodoTools(recordTodoStore);
+  const recordTodoPace = runtimeTodoTools.createTodoPaceTracker();
+  const todoTools = buildTodoTools(recordTodoStore, recordTodoPace);
   const memoryTools = runtimeMemoryTools.buildMemoryTools({
     store: recordMemoryStore,
     workspace: recordWorkspace,
@@ -1466,6 +1471,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     executions: new Map(),
     controlMessages: restoreControlMessages(activeSessionManager.getBranch() as unknown as PersistedSessionEntry[]),
     todoStore: recordTodoStore,
+    todoPace: recordTodoPace,
     memoryStore: recordMemoryStore,
     customTools: recordCustomTools,
     subagentTools,
@@ -1820,6 +1826,11 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         if (!visionModel) throw new Error("当前模型不支持图片输入，请先切换多模态模型，或在设置的模型服务中启用视觉识别");
         appendVisionHint(prompt);
       }
+      // dsh 式回合边界寿命（todo-plan-clears-on-next-turn）：显式发起新消息 =
+      // 新任务周期，上一单的待办清单翻篇清空（写盘 + 广播），避免陈旧清单跨
+      // 回合悬挂误导「本轮在做什么」。排队注入（followUp/steering，同一 agent
+      // run 的延续）与 regenerate（重跑当前任务）不算边界、不清。
+      if (record.todoStore.list().length > 0) record.todoStore.replaceAll([]);
       record.busy = true;
       record.status = "Pi 正在工作";
       record.abortRequested = false;

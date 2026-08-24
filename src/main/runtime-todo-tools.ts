@@ -10,6 +10,51 @@ import { Type } from "typebox";
 
 export interface TodoToolContext {
   store: TodoStore;
+  /** Per-session tool-call pacer backing the anti-batching reminder. */
+  pace: TodoPaceTracker;
+}
+
+/**
+ * 距上次清单更新多少个工具调用后，todo_write 的返回文本开始附攒批提醒。
+ * 审计实测模型平均隔 8~16 个调用才更新一次；理想节奏是每 1~2 步一更，
+ * 取 4 作为提醒门槛——低于此不打扰，超过即温和戳一下。
+ */
+export const PACE_REMINDER_THRESHOLD = 4;
+
+/**
+ * Per-session counter of tool executions since the last todo_write. The audit
+ * extension's tool_execution_start hook calls {@link TodoPaceTracker.record};
+ * todo_write itself calls {@link TodoPaceTracker.consume} to read and reset.
+ * A write's own start event lands before execute runs, so it is counted and
+ * then wiped by the same call — no special-casing needed.
+ */
+export interface TodoPaceTracker {
+  record(): void;
+  /** Read the count of tool calls since the last write and reset it to zero. */
+  consume(): number;
+}
+
+export function createTodoPaceTracker(): TodoPaceTracker {
+  let count = 0;
+  return {
+    record: () => { count += 1; },
+    consume: () => {
+      const value = count;
+      count = 0;
+      return value;
+    }
+  };
+}
+
+/**
+ * Result text for one todo_write. Beyond the compact counts, a large gap since
+ * the previous write appends a batching nudge — appended at the conversation
+ * tail only, so the prefix KV cache stays intact.
+ */
+export function todoWriteResultText(counts: { pending: number; inProgress: number; completed: number }, toolsSinceLastWrite: number): string {
+  const base = `已更新任务清单：${counts.pending} 项待办、${counts.inProgress} 项进行中、${counts.completed} 项已完成。`;
+  if (toolsSinceLastWrite < PACE_REMINDER_THRESHOLD) return base;
+  return `${base}\n提示：距上次清单更新已执行 ${toolsSinceLastWrite} 个工具调用——一项完成立即标记 completed，不要攒批。`;
 }
 
 /**
@@ -34,8 +79,8 @@ function toTodoList(raw: readonly { content?: unknown; status?: unknown }[]): To
   return todos;
 }
 
-/** Build the Todo customTool（todo_write，整表替换）. */
-export function buildTodoTools({ store }: TodoToolContext): ToolDefinition[] {
+/** Build the Todo customTool（todo_write，整表替换 + 攒批软提醒）. */
+export function buildTodoTools({ store, pace }: TodoToolContext): ToolDefinition[] {
   return [
     defineTool({
       name: "todo_write",
@@ -59,9 +104,10 @@ export function buildTodoTools({ store }: TodoToolContext): ToolDefinition[] {
         const todos = toTodoList((params?.todos ?? []) as { content?: unknown; status?: unknown }[]);
         store.replaceAll(todos);
         const count = (status: TodoStatus): number => todos.filter((todo) => todo.status === status).length;
+        const counts = { pending: count("pending"), inProgress: count("in_progress"), completed: count("completed") };
         return {
-          content: [{ type: "text" as const, text: `已更新任务清单：${count("pending")} 项待办、${count("in_progress")} 项进行中、${count("completed")} 项已完成。` }],
-          details: { count: todos.length, pending: count("pending"), inProgress: count("in_progress"), completed: count("completed") }
+          content: [{ type: "text" as const, text: todoWriteResultText(counts, pace.consume()) }],
+          details: { count: todos.length, ...counts }
         };
       }
     })

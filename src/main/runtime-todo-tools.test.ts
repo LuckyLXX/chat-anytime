@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { buildTodoTools } from "./runtime-todo-tools.js";
+import { buildTodoTools, createTodoPaceTracker, PACE_REMINDER_THRESHOLD } from "./runtime-todo-tools.js";
 import { createTodoStore } from "./todo-store.js";
 
 const temporaryDirectories: string[] = [];
@@ -16,8 +16,9 @@ async function makeTool() {
   temporaryDirectories.push(directory);
   let changes = 0;
   const store = createTodoStore(join(directory, "todos.json"), () => { changes += 1; });
-  const tools = buildTodoTools({ store });
-  return { tool: tools[0]!, store, get changes() { return changes; } };
+  const pace = createTodoPaceTracker();
+  const tools = buildTodoTools({ store, pace });
+  return { tool: tools[0]!, store, pace, get changes() { return changes; } };
 }
 
 interface ToolRunResult {
@@ -74,5 +75,26 @@ describe("todo_write tool", () => {
     const { tool, store } = await makeTool();
     await runTool(tool, "call-1", { todos: [{ content: "  审阅变更  ", status: "pending" }] });
     expect(store.list()).toEqual([{ content: "审阅变更", status: "pending" }]);
+  });
+
+  it("appends the anti-batching reminder only after the tool-call threshold since the last write", async () => {
+    const { tool, pace } = await makeTool();
+
+    // Below the threshold (including a fresh session) the result stays quiet.
+    const first = await runTool(tool, "call-1", { todos: [{ content: "任务一", status: "in_progress" }] });
+    expect(resultText(first)).not.toContain("提示");
+
+    for (let index = 0; index < PACE_REMINDER_THRESHOLD - 1; index++) pace.record();
+    const below = await runTool(tool, "call-2", { todos: [{ content: "任务一", status: "completed" }] });
+    expect(resultText(below)).not.toContain("提示");
+
+    for (let index = 0; index < PACE_REMINDER_THRESHOLD; index++) pace.record();
+    const above = await runTool(tool, "call-3", { todos: [{ content: "任务二", status: "in_progress" }] });
+    expect(resultText(above)).toContain(`距上次清单更新已执行 ${PACE_REMINDER_THRESHOLD} 个工具调用`);
+    expect(resultText(above)).toContain("不要攒批");
+
+    // consume() resets: the next write without intervening calls stays quiet.
+    const after = await runTool(tool, "call-4", { todos: [{ content: "任务二", status: "completed" }] });
+    expect(resultText(after)).not.toContain("提示");
   });
 });

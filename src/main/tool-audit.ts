@@ -44,6 +44,12 @@ export interface ToolAuditDeps {
   auditDir: () => string | undefined;
   sessionId: () => string;
   warn: (message: string) => void;
+  /**
+   * Optional observer fired on every tool_execution_start (before the tool
+   * runs). Used by the todo pace tracker to count calls between todo_write s;
+   * observer failures must never affect auditing, so it is wrapped defensively.
+   */
+  onToolStart?: (toolName: string) => void;
 }
 
 export interface ToolAuditController {
@@ -65,6 +71,9 @@ export function createToolAudit(deps: ToolAuditDeps): ToolAuditController {
         pi.on("tool_execution_start", (event) => {
           if (inFlight.size > 1_000) inFlight.clear();
           inFlight.set(event.toolCallId, { startedAt: Date.now(), args: event.args });
+          if (deps.onToolStart) {
+            try { deps.onToolStart(event.toolName); } catch { /* observer must never break the turn */ }
+          }
         });
         pi.on("tool_execution_end", (event) => {
           const started = inFlight.get(event.toolCallId);
