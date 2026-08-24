@@ -765,6 +765,7 @@ export type RuntimeCommand =
   | { type: "session.open"; path: string; workspace?: string }
   | { type: "session.rename"; path: string; title: string }
   | { type: "session.pin"; path: string; pinned: boolean }
+  | { type: "session.delete"; path: string }
   | { type: "session.prompt"; text: string; attachments?: PromptAttachment[] }
   | { type: "session.skill"; name: string; instructions?: string; attachments?: PromptAttachment[] }
   | { type: "session.regenerate"; text: string; timestamp?: number; skillName?: string; attachments?: PromptAttachment[] }

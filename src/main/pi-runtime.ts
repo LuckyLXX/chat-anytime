@@ -1757,6 +1757,31 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       emitState();
       break;
     }
+    case "session.delete": {
+      const deleteRoot = agentSessionRoot();
+      const deleteTarget = resolve(command.path);
+      if (!deleteRoot || !pathIsWithin(deleteRoot, deleteTarget) || !deleteTarget.toLowerCase().endsWith(".jsonl")) throw new Error("只能删除当前 Agent 的会话");
+      // 会话 id 与 todos 文件名同源（JSONL 文件名），以列表中的 id 为准。
+      const listItem = currentSessions.find((candidate) => resolve(candidate.path).toLowerCase() === deleteTarget.toLowerCase());
+      const sessionId = listItem?.id ?? deleteTarget.slice(deleteTarget.lastIndexOf(sep) + 1).replace(/\.jsonl$/iu, "");
+      // 若目标会话仍在运行（live record），一并销毁——与移除整个工作区的语义一致。
+      const live = [...liveSessions.values()].find((record) => {
+        const liveFile = record.session.sessionManager.getSessionFile();
+        return Boolean(liveFile) && resolve(liveFile!).toLowerCase() === deleteTarget.toLowerCase();
+      });
+      const wasActive = live === activeRuntime;
+      if (live) disposeRecord(live);
+      try { await unlink(deleteTarget); } catch { /* 会话文件可能已不存在 */ }
+      try { await unlink(join(deleteRoot, "todos", `${sessionId}.json`)); } catch { /* 任务文件可能不存在 */ }
+      // 删除当前在用的会话后立即补一个空白会话，保持「当前话题」可用。
+      if (wasActive && workspace) {
+        const sessionDir = workspaceSessionDir();
+        if (sessionDir) await createSession(SessionManager.create(workspace, sessionDir));
+      }
+      await refreshSessions();
+      emitState();
+      break;
+    }
     case "workspace.remove": {
       recentWorkspaces = removeRecentWorkspace(recentWorkspaces, command.workspace);
       writeRecentWorkspaces(recentWorkspacesPath(), recentWorkspaces);

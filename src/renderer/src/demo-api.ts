@@ -429,6 +429,9 @@ export function createDemoApi(): DesktopApi {
         case "session.pin":
           updateSnapshot({ sessions: demoSnapshot.sessions.map((item) => item.path === command.path ? { ...item, pinned: command.pinned || undefined } : item) });
           break;
+        case "session.delete":
+          updateSnapshot({ sessions: demoSnapshot.sessions.filter((item) => item.path !== command.path) });
+          break;
         case "workspace.remove":
           updateSnapshot({
             sessions: demoSnapshot.sessions.filter((item) => item.workspace !== command.workspace),

@@ -1375,6 +1375,7 @@ export function App(): ReactNode {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: ContextMenuItem[] } | null>(null);
   const [renameSession, setRenameSession] = useState<{ path: string; title: string } | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  const [deleteSession, setDeleteSession] = useState<{ path: string; title: string } | null>(null);
   const [removeWorkspace, setRemoveWorkspace] = useState<{ workspace: string; name: string; count: number } | null>(null);
   const [previewSplit, setPreviewSplit] = useState(readStoredPreviewSplit);
   const [previewDragging, setPreviewDragging] = useState(false);
@@ -2521,7 +2522,7 @@ export function App(): ReactNode {
                 {!collapsed && <div className="session-workspace-items">
                   {group.sessions.length === 0
                     ? <div className="session-workspace-empty">暂无话题，点击右上角新建</div>
-                    : group.sessions.map((item) => <button className={item.id === snapshot.sessionId ? "active" : ""} type="button" key={item.path} title={item.title} data-row-kind="session" data-row-active={item.id === snapshot.sessionId || undefined} onClick={() => void openSession(item.path, item.workspace)} onContextMenu={(event) => { event.preventDefault(); setContextMenu({ x: event.clientX, y: event.clientY, items: [{ label: "重命名", onClick: () => { setRenameSession({ path: item.path, title: item.title }); setRenameValue(item.title); } }, { label: item.pinned ? "取消置顶" : "置顶", onClick: () => { void window.piDesktop.send({ type: "session.pin", path: item.path, pinned: !item.pinned }); } }] }); }}><MessageCircle size={14} /><span><strong>{item.title}</strong><small>{new Date(item.modifiedAt).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}</small></span>{(item.runStatus || item.pinned) && <div className="session-item-meta">{item.runStatus && <i className={`session-status-dot ${item.runStatus}`} title={sessionRunStatusLabels[item.runStatus]} aria-label={sessionRunStatusLabels[item.runStatus]!} />}{item.pinned && <Pin size={11} className="session-pin-indicator" />}</div>}</button>)}
+                    : group.sessions.map((item) => <button className={item.id === snapshot.sessionId ? "active" : ""} type="button" key={item.path} title={item.title} data-row-kind="session" data-row-active={item.id === snapshot.sessionId || undefined} onClick={() => void openSession(item.path, item.workspace)} onContextMenu={(event) => { event.preventDefault(); setContextMenu({ x: event.clientX, y: event.clientY, items: [{ label: "重命名", onClick: () => { setRenameSession({ path: item.path, title: item.title }); setRenameValue(item.title); } }, { label: item.pinned ? "取消置顶" : "置顶", onClick: () => { void window.piDesktop.send({ type: "session.pin", path: item.path, pinned: !item.pinned }); } }, { label: "删除会话", danger: true, onClick: () => setDeleteSession({ path: item.path, title: item.title }) }] }); }}><MessageCircle size={14} /><span><strong>{item.title}</strong><small>{new Date(item.modifiedAt).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}</small></span>{(item.runStatus || item.pinned) && <div className="session-item-meta">{item.runStatus && <i className={`session-status-dot ${item.runStatus}`} title={sessionRunStatusLabels[item.runStatus]} aria-label={sessionRunStatusLabels[item.runStatus]!} />}{item.pinned && <Pin size={11} className="session-pin-indicator" />}</div>}</button>)}
                 </div>}
               </section>
             );
@@ -2723,6 +2724,14 @@ export function App(): ReactNode {
               <div className="field"><label>会话名称</label><input value={renameValue} placeholder="输入会话名称" autoFocus onChange={(event) => setRenameValue(event.target.value)} /></div>
               <footer><button className="secondary-button" type="button" onClick={() => setRenameSession(null)}>取消</button><button className="primary-button" type="submit" disabled={!renameValue.trim()}>确定</button></footer>
             </form>
+          </div>
+        </div>
+      )}
+      {deleteSession && (
+        <div className="modal-backdrop permission-backdrop" onClick={() => setDeleteSession(null)}>
+          <div className="permission-dialog" role="alertdialog" aria-modal="true" aria-label="删除会话" onClick={(event) => event.stopPropagation()}>
+            <header><div className="risk-icon outside-workspace"><Trash2 size={20} /></div><div><h2>删除会话「{deleteSession.title}」？</h2><p>将永久删除该会话及其关联的任务清单，此操作不可恢复。</p></div></header>
+            <footer><button className="secondary-button" type="button" onClick={() => setDeleteSession(null)}>取消</button><button className="danger-button" type="button" onClick={() => { void window.piDesktop.send({ type: "session.delete", path: deleteSession.path }); setDeleteSession(null); }}>删除</button></footer>
           </div>
         </div>
       )}
