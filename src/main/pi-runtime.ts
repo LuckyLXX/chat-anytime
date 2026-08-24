@@ -1962,7 +1962,10 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       break;
     case "auth.set":
       if (!modelRuntime) break;
-      await modelRuntime.setRuntimeApiKey(command.provider, command.apiKey);
+      // 空 key = 沿用已保存的 key：不要用空串覆盖运行中的凭据。否则覆盖后
+      // checkAuth 立即失败，配置页“仅勾选模型、留空 key”保存时会误报
+      // “No API key for …”（自定义服务商 provider.save 已有此保护）。
+      if (command.apiKey.trim()) await modelRuntime.setRuntimeApiKey(command.provider, command.apiKey.trim());
       await refreshCatalog();
       if (!activeRuntime?.session.model || activeRuntime.session.model.provider === command.provider) {
         const enabledModels = new Set(settings?.providers.flatMap((provider) => provider.models.filter((item) => item.enabled !== false).map((item) => `${provider.id}/${item.id}`)) ?? []);

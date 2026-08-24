@@ -1196,7 +1196,9 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
             ...(settings.vision?.provider === provider && !enabledIds.has(settings.vision.model) ? { vision: { ...settings.vision, enabled: false } } : {})
           });
         }
-        await window.piDesktop.send({ type: "auth.set", provider, apiKey: apiKey.trim() });
+        // 留空 = 沿用已保存的 key：不发 auth.set，避免空 key 覆盖运行中的凭据，
+        // 导致随后的模型校验误报 "No API key for …"。
+        if (apiKey.trim()) await window.piDesktop.send({ type: "auth.set", provider, apiKey: apiKey.trim() });
       }
       setApiKey("");
       onClose();
