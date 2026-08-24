@@ -485,7 +485,7 @@ function ActionTimeline({ message, executions, turnActive, showThinking, thinkin
             const execution = segment.type === "tool-call" ? executionById.get(segment.call.id) : undefined;
             const stateClass = actionTimelineNodeState(segment, execution, processActive);
             return (
-              <div className={`action-timeline-node ${segment.type} ${stateClass}`} key={segment.type === "tool-call" ? segment.call.id : `${segment.type}-${index}`}>
+              <div className={`action-timeline-node ${segment.type} ${stateClass}`} data-node-kind={segment.type} data-node-state={stateClass || undefined} key={segment.type === "tool-call" ? segment.call.id : `${segment.type}-${index}`}>
                 <span className="action-timeline-node-icon">{actionTimelineIcon(segment, execution, processActive)}</span>
                 <div className="action-timeline-node-content">
                   {segment.type === "thinking" ? <ThinkingBlock text={segment.text} label={thinkingLabel || "思考过程"} /> : segment.type === "tool-call" ? <ToolCallDetails call={segment.call} execution={execution} streaming={Boolean(message.streaming)} /> : <RichContent streaming={false} artifactPrefix={`${message.id}-process-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction}>{segment.text}</RichContent>}
@@ -1310,7 +1310,7 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
         {formError && <p className="form-error">{formError}</p>}
         <footer><button type="button" className="secondary-button" onClick={closeSettings}>取消</button><button className="primary-button" disabled={saving || (!apiKey.trim() && !hasSavedCustomKey) || (isCustomProvider && (!customName.trim() || !customBaseUrl.trim() || !customModelId.trim() || (providerModels.length > 0 && enabledProviderModels.length === 0))) || (!isCustomProvider && providerModels.length > 0 && enabledProviderModels.length === 0)} type="submit">{saving ? "正在应用" : "保存设置"}</button></footer>
         </form> : tab === "agents" ? <div className="agent-settings">
-          <div className="agent-list">{agentList.filter((agent) => !agent.archived).map((agent) => <button type="button" key={agent.id} className={agent.id === selectedAgent?.id ? "active" : ""} onClick={() => setSelectedAgentId(agent.id)}><strong>{agent.name}</strong><small>{agent.description || "未填写说明"}</small></button>)}<button type="button" className="secondary-button agent-new-button" onClick={newAgent}>+ 新建 Agent</button></div>
+          <div className="settings-agent-list">{agentList.filter((agent) => !agent.archived).map((agent) => <button type="button" key={agent.id} className={agent.id === selectedAgent?.id ? "active" : ""} onClick={() => setSelectedAgentId(agent.id)}><strong>{agent.name}</strong><small>{agent.description || "未填写说明"}</small></button>)}<button type="button" className="secondary-button agent-new-button" onClick={newAgent}>+ 新建 Agent</button></div>
           {selectedAgent && <div className="agent-editor"><label>名称<input value={selectedAgent.name} onChange={(event) => updateAgent({ name: event.target.value })} /></label><label>说明<input value={selectedAgent.description} onChange={(event) => updateAgent({ description: event.target.value })} /></label><label>系统提示词<textarea value={selectedAgent.systemPrompt} rows={6} onChange={(event) => updateAgent({ systemPrompt: event.target.value })} /></label><label className="checkbox-setting"><input type="checkbox" checked={selectedAgent.divMode} onChange={(event) => updateAgent({ divMode: event.target.checked })} />启用 Div 气泡模式</label><label>默认模型<select value={selectedAgent.defaultModel ? `${selectedAgent.defaultModel.provider}/${selectedAgent.defaultModel.id}` : ""} onChange={(event) => { const value = event.target.value; updateAgent({ defaultModel: value ? { provider: value.slice(0, value.indexOf("/")), id: value.slice(value.indexOf("/") + 1) } : undefined }); }}><option value="">跟随全局默认模型</option>{configuredModels.map((model) => <option key={`${model.provider}/${model.id}`} value={`${model.provider}/${model.id}`}>{model.name}</option>)}</select></label><label>默认思考等级<select value={selectedAgent.defaultThinkingLevel} onChange={(event) => updateAgent({ defaultThinkingLevel: event.target.value as ThinkingLevel })}>{thinkingLevels.map((level) => <option key={level} value={level}>{thinkingLevelLabels[level]}</option>)}</select></label><AgentSkillSelector agent={selectedAgent} skills={resources.skills} onChange={updateAgentSkillOverride} /><fieldset><legend>工具权限</legend>{agentTools.map((tool) => <label className="tool-toggle" key={tool}><input type="checkbox" checked={selectedAgent.tools[tool]} onChange={(event) => updateAgent({ tools: { ...selectedAgent.tools, [tool]: event.target.checked } })} />{tool}</label>)}</fieldset><footer><button type="button" className="danger-button" disabled={selectedAgent.id === "default"} onClick={() => void archiveAgent()}>归档</button><button type="button" className="secondary-button" onClick={duplicateAgent}>复制</button><button type="button" className="primary-button" onClick={() => void saveAgent()}>保存 Agent</button></footer></div>}
         </div> : tab === "resources" ? <ResourceSettings resources={resources} /> : tab === "hooks" ? <HooksSettings resources={resources} workspaceOpen={workspaceOpen} /> : <form className="appearance-settings" onSubmit={(event) => { event.preventDefault(); const nextSettings = structuredClone(settings); void window.piDesktop.send({ type: "appearance.save", appearance: nextSettings.appearance }); markSettingsSaved(nextSettings); onClose(); }}>
           <div className="appearance-grid">
@@ -1757,16 +1757,22 @@ export function App(): ReactNode {
       ["data-ui-generating", isGenerating],
       ["data-ui-preview-open", previewOpened],
       ["data-ui-permission-pending", Boolean(permission)],
-      ["data-ui-question-pending", Boolean(question)]
+      ["data-ui-question-pending", Boolean(question)],
+      ["data-ui-attachments", attachments.length > 0]
+    ];
+    const valueStates: readonly [string, string][] = [
+      ["data-ui-sidebar-view", sidebarView]
     ];
     for (const [name, active] of states) {
       if (active) root.setAttribute(name, "");
       else root.removeAttribute(name);
     }
+    for (const [name, value] of valueStates) root.setAttribute(name, value);
     return () => {
       for (const [name] of states) root.removeAttribute(name);
+      for (const [name] of valueStates) root.removeAttribute(name);
     };
-  }, [settingsOpen, snapshot.workspace, displayMessages.length, isGenerating, previewOpened, permission, question]);
+  }, [settingsOpen, snapshot.workspace, displayMessages.length, isGenerating, previewOpened, permission, question, attachments.length, sidebarView]);
 
   async function openWorkspace(): Promise<void> {
     const path = await window.piDesktop.chooseWorkspace();
@@ -2452,14 +2458,14 @@ export function App(): ReactNode {
         <label className="sidebar-search"><Search size={14} /><input value={sidebarQuery} placeholder={sidebarTab === "agents" ? "搜索助手" : "搜索话题"} aria-label={sidebarTab === "agents" ? "搜索助手" : "搜索话题"} onChange={(event) => setSidebarQuery(event.target.value)} /></label>
         <div className="sidebar-section-label">{sidebarTab === "agents" ? "角色" : "最近话题"}</div>
         {sidebarTab === "agents" ? <nav className="agent-list" aria-label="助手列表">
-          {visibleAgents.map((agent) => <button className={agent.id === snapshot.agentId ? "active" : ""} type="button" key={agent.id} onClick={() => { useDesktopStore.setState({ settings: { ...settings, currentAgentId: agent.id } }); void window.piDesktop.send({ type: "agent.select", agentId: agent.id }); }}><span className="agent-list-icon"><Bot size={15} /></span><span><strong>{agent.name}</strong><small>{agent.description || "未填写说明"}</small></span></button>)}
+          {visibleAgents.map((agent) => <button className={agent.id === snapshot.agentId ? "active" : ""} type="button" key={agent.id} data-row-kind="agent" data-row-active={agent.id === snapshot.agentId || undefined} onClick={() => { useDesktopStore.setState({ settings: { ...settings, currentAgentId: agent.id } }); void window.piDesktop.send({ type: "agent.select", agentId: agent.id }); }}><span className="agent-list-icon"><Bot size={15} /></span><span><strong>{agent.name}</strong><small>{agent.description || "未填写说明"}</small></span></button>)}
         </nav> : <nav className="session-list" aria-label="话题列表">
           {sessionGroups.length === 0 ? <div className="session-list-empty">暂无匹配话题</div> : sessionGroups.map((group) => {
             const collapsed = expandedWorkspaceGroups[group.key] !== true;
             const workspaceName = group.workspace.split(/[\\/]/u).at(-1) || group.workspace;
             return (
               <section className="session-workspace-group" key={group.key}>
-                <div className="session-workspace-heading" onContextMenu={(event) => { event.preventDefault(); setContextMenu({ x: event.clientX, y: event.clientY, items: [{ label: "打开文件目录", onClick: () => { setBrowsingWorkspace(group.workspace); setTreeRefreshSignal(0); setSidebarView("files"); } }, { label: "移除工作区", danger: true, onClick: () => setRemoveWorkspace({ workspace: group.workspace, name: workspaceName, count: group.sessions.length }) }] }); }}>
+                <div className="session-workspace-heading" data-row-kind="workspace" data-row-expanded={!collapsed || undefined} onContextMenu={(event) => { event.preventDefault(); setContextMenu({ x: event.clientX, y: event.clientY, items: [{ label: "打开文件目录", onClick: () => { setBrowsingWorkspace(group.workspace); setTreeRefreshSignal(0); setSidebarView("files"); } }, { label: "移除工作区", danger: true, onClick: () => setRemoveWorkspace({ workspace: group.workspace, name: workspaceName, count: group.sessions.length }) }] }); }}>
                   <button
                     className="session-workspace-toggle"
                     type="button"
@@ -2493,7 +2499,7 @@ export function App(): ReactNode {
                 {!collapsed && <div className="session-workspace-items">
                   {group.sessions.length === 0
                     ? <div className="session-workspace-empty">暂无话题，点击右上角新建</div>
-                    : group.sessions.map((item) => <button className={item.id === snapshot.sessionId ? "active" : ""} type="button" key={item.path} title={item.title} onClick={() => void openSession(item.path, item.workspace)} onContextMenu={(event) => { event.preventDefault(); setContextMenu({ x: event.clientX, y: event.clientY, items: [{ label: "重命名", onClick: () => { setRenameSession({ path: item.path, title: item.title }); setRenameValue(item.title); } }, { label: item.pinned ? "取消置顶" : "置顶", onClick: () => { void window.piDesktop.send({ type: "session.pin", path: item.path, pinned: !item.pinned }); } }] }); }}><MessageCircle size={14} /><span><strong>{item.title}</strong><small>{new Date(item.modifiedAt).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}</small></span>{(item.runStatus || item.pinned) && <div className="session-item-meta">{item.runStatus && <i className={`session-status-dot ${item.runStatus}`} title={sessionRunStatusLabels[item.runStatus]} aria-label={sessionRunStatusLabels[item.runStatus]!} />}{item.pinned && <Pin size={11} className="session-pin-indicator" />}</div>}</button>)}
+                    : group.sessions.map((item) => <button className={item.id === snapshot.sessionId ? "active" : ""} type="button" key={item.path} title={item.title} data-row-kind="session" data-row-active={item.id === snapshot.sessionId || undefined} onClick={() => void openSession(item.path, item.workspace)} onContextMenu={(event) => { event.preventDefault(); setContextMenu({ x: event.clientX, y: event.clientY, items: [{ label: "重命名", onClick: () => { setRenameSession({ path: item.path, title: item.title }); setRenameValue(item.title); } }, { label: item.pinned ? "取消置顶" : "置顶", onClick: () => { void window.piDesktop.send({ type: "session.pin", path: item.path, pinned: !item.pinned }); } }] }); }}><MessageCircle size={14} /><span><strong>{item.title}</strong><small>{new Date(item.modifiedAt).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}</small></span>{(item.runStatus || item.pinned) && <div className="session-item-meta">{item.runStatus && <i className={`session-status-dot ${item.runStatus}`} title={sessionRunStatusLabels[item.runStatus]} aria-label={sessionRunStatusLabels[item.runStatus]!} />}{item.pinned && <Pin size={11} className="session-pin-indicator" />}</div>}</button>)}
                 </div>}
               </section>
             );
@@ -2535,9 +2541,9 @@ export function App(): ReactNode {
             <PanelDock />
             <div className="timeline" data-pane="timeline" ref={timelineRef}>
               {!snapshot.workspace ? (
-                <div className="empty-workspace"><div className="empty-icon"><FolderOpen size={27} /></div><h1>打开一个项目</h1><button className="primary-button" data-control="workspace-open" type="button" onClick={() => void openWorkspace()}><FolderOpen size={16} />选择文件夹</button></div>
+                <div className="empty-workspace" data-pane="landing"><div className="empty-icon"><FolderOpen size={27} /></div><h1>打开一个项目</h1><button className="primary-button" data-control="workspace-open" type="button" onClick={() => void openWorkspace()}><FolderOpen size={16} />选择文件夹</button></div>
               ) : displayMessages.length === 0 && !isGenerating ? (
-                <div className="empty-conversation"><div className="empty-icon"><CodeXml size={27} /></div><h1>今天想开发什么？</h1></div>
+                <div className="empty-conversation" data-pane="landing"><div className="empty-icon"><CodeXml size={27} /></div><h1>今天想开发什么？</h1></div>
               ) : <>
                 {displayMessages.map((message, index) => {
                   const timing = showTurnTimingOnLatest && index === latestAssistantMessageIndex && message.role === "assistant" ? snapshot.turnTiming : undefined;
@@ -2550,7 +2556,7 @@ export function App(): ReactNode {
             {question && <QuestionPanel request={question} />}
             <form ref={composerRef} className={`composer${snapshot.queuedMessages.length > 0 ? " has-queue" : ""}`} data-pane="composer" onSubmit={submit} onDragOver={(event) => event.preventDefault()} onDrop={handleDrop}>
               {snapshot.queuedMessages.length > 0 && (
-                <div className="composer-queue" role="list" aria-label="排队输入">
+                <div className="composer-queue" role="list" aria-label="排队输入" data-composer-zone="queue">
                   <div className="composer-queue-caption"><Clock size={11} /><span>排队输入 {snapshot.queuedMessages.length} 条 · 本轮回复结束后自动发出</span></div>
                   {snapshot.queuedMessages.map((item) => (
                     <div className="composer-queue-item" role="listitem" data-queue-kind={item.kind} key={`${item.kind}:${item.index}`} title={item.text}>
@@ -2565,11 +2571,11 @@ export function App(): ReactNode {
                   ))}
                 </div>
               )}
-              {attachments.length > 0 && <div className="attachment-list">{attachments.map((attachment, index) => <span className="attachment-chip" key={`${attachment.name}-${index}`}>{attachment.kind === "image" ? <img src={`data:${attachment.mimeType};base64,${attachment.data}`} alt="" /> : <FileDiff size={12} />}<span>{attachment.name}</span>{attachment.kind === "image" && !modelAcceptsImages && visionFallbackAvailable && <small className="attachment-chip-note" title="当前模型不支持图片，将自动调用视觉模型识别">视觉识别</small>}<button type="button" title="移除附件" aria-label={`移除 ${attachment.name}`} onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={12} /></button></span>)}</div>}
-              {attachmentError && <div className="attachment-error" role="alert">{attachmentError}<button type="button" title="关闭提示" aria-label="关闭附件提示" onClick={() => setAttachmentError(undefined)}><X size={12} /></button></div>}
+              {attachments.length > 0 && <div className="attachment-list" data-composer-zone="attachments">{attachments.map((attachment, index) => <span className="attachment-chip" key={`${attachment.name}-${index}`}>{attachment.kind === "image" ? <img src={`data:${attachment.mimeType};base64,${attachment.data}`} alt="" /> : <FileDiff size={12} />}<span>{attachment.name}</span>{attachment.kind === "image" && !modelAcceptsImages && visionFallbackAvailable && <small className="attachment-chip-note" title="当前模型不支持图片，将自动调用视觉模型识别">视觉识别</small>}<button type="button" title="移除附件" aria-label={`移除 ${attachment.name}`} onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={12} /></button></span>)}</div>}
+              {attachmentError && <div className="attachment-error" data-composer-zone="error" role="alert">{attachmentError}<button type="button" title="关闭提示" aria-label="关闭附件提示" onClick={() => setAttachmentError(undefined)}><X size={12} /></button></div>}
               <input ref={fileInputRef} type="file" hidden multiple accept="image/png,image/jpeg,image/webp,image/gif,.txt,.md,.json,.js,.ts,.tsx,.jsx,.py,.go,.rs,.java,.css,.html" onChange={(event) => { void addLocalFiles(event.target.files ?? []); event.currentTarget.value = ""; }} />
               {slashOpen && (
-                <div className="slash-menu" role="listbox" aria-label="斜杠指令">
+                <div className="slash-menu" role="listbox" aria-label="斜杠指令" data-composer-zone="popup">
                   {slashMatches.map((cmd, index) => (
                     <button
                       type="button"
@@ -2589,7 +2595,7 @@ export function App(): ReactNode {
               )}
 
               {mentionOpen && (
-                <div className="slash-menu mention-menu" role="listbox" aria-label="引用工作区文件">
+                <div className="slash-menu mention-menu" role="listbox" aria-label="引用工作区文件" data-composer-zone="popup">
                   {mentionResults.map((entry, index) => (
                     <button
                       type="button"
@@ -2607,7 +2613,7 @@ export function App(): ReactNode {
                 </div>
               )}
 
-              <div className="composer-input-row">
+              <div className="composer-input-row" data-composer-zone="input">
                 {selectedSkill && <span className="composer-skill-chip"><Puzzle size={13} /><strong>{selectedSkill}</strong><button type="button" title="取消 Skill" aria-label={`取消 Skill ${selectedSkill}`} onClick={() => setSelectedSkill(undefined)}><X size={12} /></button></span>}
                 {mentionedFiles.length > 0 && (
                   <span className="composer-mention-chips">
@@ -2632,12 +2638,12 @@ export function App(): ReactNode {
                   onSelect={(event) => updateMentionFromCaret(event.currentTarget)}
                 />
               </div>
-              <div className="composer-footer">
+              <div className="composer-footer" data-composer-zone="footer">
                 <div className="composer-footer-left">
                   <button className="icon-button attach-button" data-control="attach" type="button" title="添加附件" aria-label="添加附件" disabled={snapshot.busy || attachments.length >= 5} onClick={() => void addAttachments()}><Plus size={18} /></button>
                   <div className="access-mode-menu-shell" ref={accessModeMenuRef}>
                     <button className={`access-mode-button${settings.accessMode === "full" ? " full" : ""}`} data-control="access-mode" type="button" aria-haspopup="menu" aria-expanded={accessModeMenuOpen} onClick={() => { setComposerMenu(undefined); setAccessModeMenuOpen((open) => !open); }}>{settings.accessMode === "full" ? <ShieldAlert size={15} /> : <ShieldCheck size={15} />}<span>{accessModeOptions.find((option) => option.value === settings.accessMode)?.label ?? "访问模式"}</span><ChevronDown size={13} /></button>
-                    {accessModeMenuOpen && <div className="access-mode-menu" role="menu" aria-label="访问模式">
+                    {accessModeMenuOpen && <div className="access-mode-menu" data-composer-zone="popup" role="menu" aria-label="访问模式">
                       {accessModeOptions.map((option) => <button className={`access-mode-menu-item${option.value === settings.accessMode ? " active" : ""}${option.value === "full" ? " full" : ""}`} type="button" role="menuitemradio" aria-checked={option.value === settings.accessMode} key={option.value} onClick={() => void selectAccessMode(option.value)}>{option.value === "full" ? <ShieldAlert size={15} /> : <ShieldCheck size={15} />}<span><strong>{option.label}</strong><small>{accessModeDescriptions[option.value]}</small></span>{option.value === settings.accessMode && <Check size={14} />}</button>)}
                     </div>}
                   </div>
@@ -2651,13 +2657,13 @@ export function App(): ReactNode {
                 <div className="composer-footer-right">
                   <div className="composer-control-menu">
                     <button className="composer-menu-trigger" data-control="model-select" type="button" title="模型快捷切换" aria-label="模型快捷切换" aria-haspopup="menu" aria-expanded={composerMenu === "model"} disabled={snapshot.busy} onClick={() => { setAccessModeMenuOpen(false); setComposerMenu((current) => current === "model" ? undefined : "model"); }}><Bot size={14} /><span>{selectedModelOption?.name ?? snapshot.model?.id ?? "选择模型"}</span><ChevronDown size={13} /></button>
-                    {composerMenu === "model" && <div className="composer-select-menu model-select-menu" ref={modelMenuRef} role="menu" aria-label="模型快捷切换">
+                    {composerMenu === "model" && <div className="composer-select-menu model-select-menu" data-composer-zone="popup" ref={modelMenuRef} role="menu" aria-label="模型快捷切换">
                       {Array.from(new Set(availableModels.map((model) => model.provider))).map((providerId) => <div className="composer-menu-group" key={providerId}><small>{providers.find((provider) => provider.id === providerId)?.name ?? providerId}</small>{availableModels.filter((model) => model.provider === providerId).map((model) => { const value = `${model.provider}/${model.id}`; return <button className={value === selectedModel ? "active" : ""} type="button" role="menuitemradio" aria-checked={value === selectedModel} key={value} onClick={() => void selectModel(value)}><span>{model.name}</span>{value === selectedModel && <Check size={13} />}</button>; })}</div>)}
                     </div>}
                   </div>
                   <div className="composer-control-menu thinking-control">
                     <button className="composer-menu-trigger" data-control="thinking-select" type="button" title="思考级别" aria-label="思考级别" aria-haspopup="menu" aria-expanded={composerMenu === "thinking"} disabled={snapshot.busy} onClick={() => { setAccessModeMenuOpen(false); setComposerMenu((current) => current === "thinking" ? undefined : "thinking"); }}><span>思考</span><strong>{thinkingLevelLabels[snapshot.thinkingLevel]}</strong><ChevronDown size={13} /></button>
-                    {composerMenu === "thinking" && <div className="composer-select-menu thinking-select-menu" role="menu" aria-label="思考级别">{thinkingLevels.map((level) => <button className={level === snapshot.thinkingLevel ? "active" : ""} type="button" role="menuitemradio" aria-checked={level === snapshot.thinkingLevel} key={level} onClick={() => void selectThinkingLevel(level)}><span>{thinkingLevelLabels[level]}</span>{level === snapshot.thinkingLevel && <Check size={13} />}</button>)}</div>}
+                    {composerMenu === "thinking" && <div className="composer-select-menu thinking-select-menu" data-composer-zone="popup" role="menu" aria-label="思考级别">{thinkingLevels.map((level) => <button className={level === snapshot.thinkingLevel ? "active" : ""} type="button" role="menuitemradio" aria-checked={level === snapshot.thinkingLevel} key={level} onClick={() => void selectThinkingLevel(level)}><span>{thinkingLevelLabels[level]}</span>{level === snapshot.thinkingLevel && <Check size={13} />}</button>)}</div>}
                   </div>
                   {snapshot.busy ? (
                     <button className="stop-button" data-control="stop" type="button" title="停止" aria-label="停止" onClick={stopGeneration}><CircleStop size={18} /></button>

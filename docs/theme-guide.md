@@ -31,7 +31,9 @@
 
 类名属于实现细节，可能随版本变化；以下属性是稳定契约，结构化主题请只依赖它们：
 
-**区域钩子 `data-pane`**：`sidebar` `topbar` `workspace` `work-area` `conversation` `timeline` `composer` `task-panel` `memory-panel` `preview` `terminal` `question-panel` `settings-dialog` `permission-dialog`
+**区域钩子 `data-pane`**：`sidebar` `topbar` `workspace` `work-area` `conversation` `timeline` `composer` `task-panel` `memory-panel` `preview` `terminal` `question-panel` `settings-dialog` `permission-dialog` `landing`
+
+> `landing` 是空态构图（未打开工作区 / 未开始对话时的居中提示块，含图标与主按钮），主题可据其做"着陆页"式重设计。
 
 > `workspace` 是侧栏右侧的整个主工作区容器（含顶栏、会话区与预览面板），适合整体背景、圆角等容器级装饰；其内部的顶栏、会话区等各自另有更细粒度的区域钩子。
 
@@ -80,9 +82,21 @@
 
 `send` / `stop` 占据同一位置、按生成状态互换；重设计时建议两个一起写，避免状态切换时跳变。模型/思考菜单、斜杠指令面板都是 `composer` 区域的子元素，用 `[data-pane="composer"]` 后代选择器即可命中。生成中回车排队的消息显示在 `composer` 区域顶部的待发送列表（条目带 `data-queue-kind="steering|followUp"`，`steering` 为“立即发送”升级后的优先形态）。
 
+**行级钩子（侧栏列表内部）**：`data-row-kind`（`workspace` 工作区分组头 / `session` 会话行 / `agent` 助手行）+ 布尔 `data-row-active`（选中行）+ 布尔 `data-row-expanded`（工作区分组展开）。主题可精确重设计行、牌匾、折叠与展开态。
+
+**节点级钩子（时间线内部）**：`data-node-kind`（时间线段类型：`thinking` / `tool-call` / `text`）+ `data-node-state`（`running` / `completed` / `error`，缺失为普通态）。用于"思考中扫光""工具运行微光"等状态动画。
+
+**输入框分区钩子 `data-composer-zone`**：`queue`（排队列表）`attachments`（附件预览条）`error`（附件错误条）`input`（输入行）`footer`（工具栏行）`popup`（斜杠/引用/访问模式/模型/思考菜单）。
+
+> `popup` 是绝对定位浮层：主题**不得修改其 `position`**（改成 `relative` 会落入网格隐式行并把排布打乱）；给浮层加层级请只改 `z-index`。
+
 **覆盖层级**：① 契约控件（上表，跨版本安全）；② 钩子区域内用元素选择器统改（`[data-pane="sidebar"] button`、`[data-pane="settings-dialog"] select`，同样安全）；③ 区域内类名命中（事实稳定、无契约）。右键菜单、错误提示 toast、重命名小对话框和内嵌编辑器（Markdown 工具栏、Mermaid）在契约之外，只受颜色 token 影响。立体按钮、clip-path 异形容器、霓虹描边、扫描线等创意技法的可复制配方见 `pidesktop-theme-creator` skill 的 `references/recipes.md`。
 
-**UI 状态（`<html>` 布尔属性，出现即真）**：`data-ui-settings-open` `data-ui-workspace-open` `data-ui-chat-empty` `data-ui-generating` `data-ui-preview-open` `data-ui-permission-pending` `data-ui-question-pending`
+> ⚠️ 不要对钩子区域写 `[data-pane="x"] > * { position: relative; z-index: n }` 这类"全体抬升"规则：会把区域内绝对定位的浮层（附件预览条、错误条、菜单）改为流内元素。只抬 `data-composer-zone` 排布分区与明确的流内子项。
+
+**特异性（覆盖规则能否生效）**：应用壁纸模式的基础规则写成 `[data-theme-wallpaper="true"] .sidebar` 等（(0,2,0) 特异性，两个属性/类选择器）。主题用等特异性选择器（`[data-theme-wallpaper="true"] [data-pane="sidebar"]`）即可凭"后注入"胜出，不需要 `html` 前缀。区域自身的非壁纸规则（如 `[data-pane="sidebar"]`）与应用的 `.sidebar`（(0,1,0)）同特异性、靠后注入胜出。自定义 CSS 注入顺序在应用样式之后。
+
+**UI 状态（`<html>` 属性，存在即真；带值状态例外）**：`data-ui-settings-open` `data-ui-workspace-open` `data-ui-chat-empty` `data-ui-generating` `data-ui-preview-open` `data-ui-permission-pending` `data-ui-question-pending` `data-ui-attachments`（输入框有附件）。带值状态：`data-ui-sidebar-view="topics|files|agents"`（取值匹配，如 `[data-ui-sidebar-view="files"]`）。
 
 ```css
 /* 生成中给输入框加呼吸光晕 */
@@ -108,6 +122,16 @@
 - `--pi-overlay-<name>`：画在界面之上、对话框 / 菜单之下（`pointer-events: none`，不挡交互）；
 - 同名数字按自然顺序叠放（`mascot-2` 在 `mascot-10` 之下）；
 - 值经 CSS 级联解析，按明暗模式分别声明即可自动切换。
+
+**装饰层元素（公开契约）**：每个已声明变量有一个 `<div class="theme-layer">` 渲染节点，带 `data-theme-layer="<name>"` 与 `data-layer-kind="layer|overlay"` 属性。主题可定向访问为层施加 `filter` / `opacity` / `transform` / `transition`（例如暗色模式压暗立绘、`scaleX(-1)` 镜像角饰、状态切换位移）：
+
+```css
+:root[data-theme-effective="dark"] [data-theme-layer="maid-left"] { filter: brightness(0.84) saturate(0.92) drop-shadow(0 6px 12px rgb(0 0 0 / 0.3)); }
+[data-ui-chat-empty] [data-theme-layer="side-art"] { opacity: 1; }
+:root:not([data-ui-chat-empty]) [data-theme-layer="side-art"] { opacity: 0.9; transform: translateY(12px); }
+```
+
+**布局量（公开 API）**：`--layout-sidebar-width`（侧栏列宽，明暗一致，随应用布局变化联动；立绘/装饰偏移用 `calc(... + var(--layout-sidebar-width))`，不要硬编码像素）。
 
 ## 字体
 
@@ -136,7 +160,17 @@
 }
 ```
 
-声明壁纸后应用会自动为面板加透明 + 毛玻璃效果——面板底色保留比例由设置面板「外观 → 面板透明度」滑块控制（左右上下栏及对话框，浅色/深色分别记忆，默认 100% 即保持主题原样、可调 40%~100%）；消息气泡及其内嵌块（代码块/引用/表格折叠项等）也会自动降为半透明底色（纯 alpha、不模糊）让壁纸透出，统一的透明程度由设置面板「外观 → 气泡透明度」滑块控制（默认 80%，可用 `appearance.bubbleOpacity` 覆盖）。若需完全自定义：在主题 CSS 里用 `[data-theme-wallpaper="true"] .message-assistant .message-body { background: ...; }` 等同特异性选择器覆盖即可（浅色/深色模式按 `:root[data-theme-effective=...]` 分别声明）。图片保持相对路径引用，应用单独存储图片数据。
+声明壁纸后应用会自动为面板加透明 + 毛玻璃效果——面板底色保留比例由设置面板「外观 → 面板透明度」滑块控制；面板底色按面分解为公开 token，主题分别覆盖：
+
+| 面 | token |
+| --- | --- |
+| 侧栏 / 侧栏分页条 | `--panel-bg-sidebar` |
+| 顶栏 | `--panel-bg-topbar` |
+| 输入框 | `--panel-bg-composer` |
+| 设置/权限对话框与面板坞标签条 | `--panel-bg-dialog` |
+| 预览面板 | `--panel-bg-preview` |
+
+各 token 默认 `var(--panel-bg)`（使用点解析，明暗两板只需覆写后者即联动）；主题亦可各自覆写（如输入框瓷面、对话框瓷面而侧栏深蓝）。消息气泡及其内嵌块（代码块/引用/表格折叠项等）也会自动降为半透明底色（纯 alpha、不模糊）让壁纸透出，统一的透明程度由设置面板「外观 → 气泡透明度」滑块控制（默认 80%，可用 `appearance.bubbleOpacity` 覆盖）。若需完全自定义：在主题 CSS 里用 `[data-theme-wallpaper="true"] .message-assistant .message-body { background: ...; }` 等同特异性选择器覆盖即可（浅色/深色模式按 `:root[data-theme-effective=...]` 分别声明）。图片保持相对路径引用，应用单独存储图片数据。
 
 ## 分发
 
