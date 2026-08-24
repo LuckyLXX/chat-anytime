@@ -1,0 +1,858 @@
+/* Theme Name: 深海女仆工坊 · PiDesktop 移植版
+   Theme Type: structural
+
+   展示层与配色移植自 DeepSeek Harness 皮肤 dsh-deep-whale / maid-atelier
+   （作者 Small-tailqwq，整体 CC BY-NC-SA 4.0，禁止商业使用；形象署名链见该
+   皮肤仓库 NOTICE）。全部为纯 CSS + 资产目录，无脚本、无 DOM 注入。
+
+   导入：设置 → 外观 → 导入主题目录（选择 maid-atelier 整个文件夹）。
+   说明：结构类规则只依赖 data-pane / data-control / data-role / data-ui-*
+   契约钩子；区域内少数类名命中（如 .session-list，事实稳定但无契约）已全部
+   限定在钩子区域内，类名变动时只降级对应小块、不影响其余主题。 */
+
+/* ============ 0. 模式无关的通用量 ============ */
+
+:root {
+  --maid-gold: #c5a468;
+  --maid-gold-soft: #e2cfaa;
+  --maid-ink: #172347;
+  --maid-serif: Georgia, "Times New Roman", "Microsoft YaHei", serif;
+}
+
+/* ============ 1. 调色板 · 浅色 ============ */
+
+:root[data-theme-effective="light"] {
+  /* 宫殿壁纸（亮/暗两张，自动切换） */
+  --chat-bg-image: url("assets/palace-day.webp");
+  --chat-bg-opacity: 1;
+  --chat-bg-size: cover;
+  --chat-bg-repeat: no-repeat;
+  --chat-bg-position: center top;
+
+  --surface: #fbfaf6;
+  --surface-muted: #e9eef9;
+  --surface-raised: #dfe7f6;
+  --surface-conversation: rgb(233 238 249 / 0.5);
+  --surface-sidebar: #0a173b;
+  --surface-sidebar-tabs: rgb(255 255 255 / 0.07);
+  --surface-sidebar-hover: rgb(97 122 183 / 0.14);
+  --surface-sidebar-active: #2c447f;
+  --surface-sidebar-badge: #1c326b;
+  --surface-input: #fbfaf6;
+  --surface-footer: #e9eef9;
+  --surface-detail: #e9eef9;
+  --surface-button-hover: #dfe7f6;
+  --preview-surface: #fbfaf6;
+  --panel-bg: rgb(251 250 246 / 0.92);
+  /* 深蓝只归侧栏/顶栏两面的玻璃底（分页条/搜索胶囊等在其内部跟随）。 */
+  --panel-bg-sidebar: rgb(10 23 59 / 0.88);
+  --panel-bg-topbar: rgb(10 23 59 / 0.88);
+
+  --border: #c7d3ea;
+  --border-strong: #a9bce0;
+  --border-message: rgb(197 164 104 / 0.5);
+  --border-assistant: rgb(197 164 104 / 0.42);
+  --blockquote-border: #c5a468;
+
+  --text: #172347;
+  --text-muted: #4d5d7f;
+  --text-sidebar-active: #fff8e8;
+  --text-on-accent: #f8f6f0;
+  --on-accent: var(--text-on-accent);
+  --text-on-user-bubble: #172347;
+  --avatar-user-text: #172347;
+  --avatar-user: #e8edf9;
+  --avatar-assistant-text: #fbfaf6;
+  --avatar-assistant: #172347;
+  --link: #3e6bd6;
+
+  --accent: #4763b3;
+  --accent-hover: #3a4f96;
+  --accent-soft: #dfe6f6;
+  --accent-text: #2c4276;
+  --accent-border: #4763b3;
+  --focus-ring: rgb(197 164 104 / 45%);
+  --selection-bg: #c5d4f0;
+  --selection-text: #172347;
+
+  --success: #2e9d68;
+  --success-soft: #d8efe3;
+  --success-border: #2e9d68;
+  --completed-border: #2e9d68;
+  --danger: #c25b6a;
+  --danger-soft: #f7dde1;
+  --danger-border: #e49aa6;
+  --danger-text: #a03044;
+  --warning: #c08d2f;
+  --warning-soft: #f7ecd6;
+  --blue: #3e6bd6;
+
+  --user-bubble: #e8edf9;
+  --user-bubble-border: rgb(197 164 104 / 0.55);
+  --ai-bubble: #f8faff;
+  --tool-bubble-bg: #dfe6f6;
+  --tool-bubble-border: #c7d3ea;
+
+  --code-surface: #0d1b3d;
+  --code-text: #e8edf9;
+  --inline-code-surface: #dfe6f6;
+  --inline-code-text: #2c4276;
+  --syntax-keyword: #b8c8f0;
+  --syntax-string: #9fd8b6;
+  --syntax-number: #e8c77f;
+  --syntax-comment: #8090b6;
+  --syntax-title: #cfe0ff;
+  --syntax-meta: #e8a0ae;
+  --blockquote-surface: #e3ecf9;
+
+  --diff-add-text: #166534;
+  --diff-remove-text: #a03044;
+  --diff-hunk-text: #2c4276;
+  --diff-meta-text: #3f5aa0;
+
+  --user-action-border: rgb(255 255 255 / 42%);
+  --user-action-surface: rgb(255 255 255 / 16%);
+  --overlay: rgb(4 10 30 / 0.6);
+
+  --shadow-sm: 0 1px 2px rgb(15 30 72 / 7%);
+  --shadow-md: 0 18px 54px rgb(15 30 72 / 20%);
+  --shadow-lg: 0 22px 70px rgb(15 30 72 / 30%);
+
+  --scrollbar-track: #e9eef9;
+  --scrollbar-thumb: rgb(90 110 160 / 55%);
+  --scrollbar-thumb-hover: rgb(197 164 104 / 70%);
+}
+
+/* ============ 2. 调色板 · 深色 ============ */
+
+:root[data-theme-effective="dark"] {
+  --chat-bg-image: url("assets/palace-night.webp");
+  --chat-bg-opacity: 1;
+  --chat-bg-size: cover;
+  --chat-bg-repeat: no-repeat;
+  --chat-bg-position: center top;
+
+  --surface: #0d193b;
+  --surface-muted: #0a142f;
+  --surface-raised: #182c57;
+  --surface-conversation: rgb(8 15 39 / 0.5);
+  --surface-sidebar: #050d28;
+  --surface-sidebar-tabs: rgb(255 255 255 / 0.06);
+  --surface-sidebar-hover: rgb(97 122 183 / 0.16);
+  --surface-sidebar-active: #27407c;
+  --surface-sidebar-badge: #22366e;
+  --surface-input: #0d193b;
+  --surface-footer: #0a142f;
+  --surface-detail: #0a142f;
+  --surface-button-hover: #182c57;
+  --preview-surface: #0d193b;
+  --panel-bg: rgb(5 13 40 / 0.92);
+  --panel-bg-sidebar: rgb(5 13 40 / 0.92);
+  --panel-bg-topbar: rgb(8 20 50 / 0.92);
+
+  --border: #2c3f6f;
+  --border-strong: #45598f;
+  --border-message: rgb(211 180 119 / 0.45);
+  --border-assistant: rgb(211 180 119 / 0.4);
+  --blockquote-border: #d3b477;
+
+  --text: #e7ecf7;
+  --text-muted: #96a6c9;
+  --text-sidebar-active: #fff8e8;
+  --text-on-accent: #081226;
+  --on-accent: var(--text-on-accent);
+  --text-on-user-bubble: #e7ecf7;
+  --avatar-user-text: #e7ecf7;
+  --avatar-user: #1e2f5a;
+  --avatar-assistant-text: #081226;
+  --avatar-assistant: #e7ecf7;
+  --link: #9db4e8;
+
+  --accent: #a8bce8;
+  --accent-hover: #c0cff0;
+  --accent-soft: #22366e;
+  --accent-text: #d5dff3;
+  --accent-border: #a8bce8;
+  --focus-ring: rgb(211 180 119 / 42%);
+  --selection-bg: #35548f;
+  --selection-text: #e7ecf7;
+
+  --success: #7fd7a8;
+  --success-soft: #11352a;
+  --success-border: #7fd7a8;
+  --completed-border: #7fd7a8;
+  --danger: #e8889a;
+  --danger-soft: #4a1d2b;
+  --danger-border: #e8889a;
+  --danger-text: #f5a9b8;
+  --warning: #e8c77f;
+  --warning-soft: #453516;
+  --blue: #9db4e8;
+
+  --user-bubble: #1e2f5a;
+  --user-bubble-border: rgb(211 180 119 / 0.5);
+  --ai-bubble: #121f43;
+  --tool-bubble-bg: #22366e;
+  --tool-bubble-border: #2c3f6f;
+
+  --code-surface: #0a1430;
+  --code-text: #edf1fa;
+  --inline-code-surface: #22366e;
+  --inline-code-text: #d5dff3;
+  --syntax-keyword: #b8c8f0;
+  --syntax-string: #9fd8b6;
+  --syntax-number: #e8c77f;
+  --syntax-comment: #8090b6;
+  --syntax-title: #cfe0ff;
+  --syntax-meta: #e8a0ae;
+  --blockquote-surface: #182f5d;
+
+  --diff-add-text: #86efac;
+  --diff-remove-text: #f5a9b8;
+  --diff-hunk-text: #d5dff3;
+  --diff-meta-text: #b8c8f0;
+
+  --user-action-border: rgb(255 255 255 / 42%);
+  --user-action-surface: rgb(255 255 255 / 16%);
+  --overlay: rgb(2 6 18 / 0.68);
+
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 28%);
+  --shadow-md: 0 18px 54px rgb(0 0 0 / 38%);
+  --shadow-lg: 0 24px 70px rgb(0 0 0 / 50%);
+
+  --scrollbar-track: #0c1834;
+  --scrollbar-thumb: rgb(155 176 225 / 50%);
+  --scrollbar-thumb-hover: rgb(211 180 119 / 70%);
+}
+
+/* ============ 3. 声明式装饰层（视口 fixed，pointer-events:none）============
+   女仆立绘与底部饰带按「着陆 / 对话中」两档状态切换：
+   --data-ui-chat-empty 为真 = 着陆页（放大立绘 + 底部饰带）。 */
+
+:root[data-theme-effective="light"] {
+  --pi-layer-maid-left:
+    url("assets/maid-left.webp") left calc(clamp(8px, 1.3vw, 24px) + var(--layout-sidebar-width)) bottom -20px
+    / auto clamp(560px, 96vh, 1180px) no-repeat;
+  --pi-layer-maid-right:
+    url("assets/maid-right.webp") right clamp(0px, 0.2vw, 8px) bottom -14px
+    / auto clamp(540px, 92vh, 1120px) no-repeat;
+  --pi-layer-bottom-band: url("assets/bottom-trim-tile.webp") left bottom / auto 30px repeat-x;
+  --pi-layer-bottom-crest: url("assets/bottom-crest.webp") calc(50% - var(--layout-sidebar-width) / 2 - 4px) bottom / 94px 54px no-repeat;
+}
+
+:root[data-theme-effective="dark"] {
+  --pi-layer-maid-left:
+    url("assets/maid-left-dark.webp") left calc(clamp(8px, 1.3vw, 24px) + var(--layout-sidebar-width)) bottom -20px
+    / auto clamp(560px, 96vh, 1180px) no-repeat;
+  --pi-layer-maid-right:
+    url("assets/maid-right-dark.webp") right clamp(0px, 0.2vw, 8px) bottom -14px
+    / auto clamp(540px, 92vh, 1120px) no-repeat;
+  --pi-layer-bottom-band: url("assets/bottom-trim-tile.webp") left bottom / auto 30px repeat-x;
+  --pi-layer-bottom-crest: url("assets/bottom-crest.webp") calc(50% - var(--layout-sidebar-width) / 2 - 4px) bottom / 94px 54px no-repeat;
+}
+
+/* 对话进行中：立绘退向边缘并缩小，底部饰带收起（同 dsh-deep-whale 的行为）。 */
+:root[data-theme-effective="light"]:not([data-ui-chat-empty]) {
+  --pi-layer-maid-left:
+    url("assets/maid-left.webp") left calc(clamp(8px, 1.3vw, 24px) + var(--layout-sidebar-width)) bottom -14px
+    / auto clamp(420px, 64vh, 760px) no-repeat;
+  --pi-layer-maid-right:
+    url("assets/maid-right.webp") right clamp(0px, 0.5vw, 8px) bottom -14px
+    / auto clamp(420px, 62vh, 730px) no-repeat;
+  --pi-layer-bottom-band: none;
+  --pi-layer-bottom-crest: none;
+}
+
+:root[data-theme-effective="dark"]:not([data-ui-chat-empty]) {
+  --pi-layer-maid-left:
+    url("assets/maid-left-dark.webp") left calc(clamp(8px, 1.3vw, 24px) + var(--layout-sidebar-width)) bottom -14px
+    / auto clamp(420px, 64vh, 760px) no-repeat;
+  --pi-layer-maid-right:
+    url("assets/maid-right-dark.webp") right clamp(0px, 0.5vw, 8px) bottom -14px
+    / auto clamp(420px, 62vh, 730px) no-repeat;
+  --pi-layer-bottom-band: none;
+  --pi-layer-bottom-crest: none;
+}
+
+@media (max-width: 1080px) {
+  /* 与模式规则同特异性（列于其后），窄屏只收紧着陆档几何；对话档本已收紧。 */
+  :root[data-theme-effective] {
+    --pi-layer-maid-left:
+      url("assets/maid-left.webp") left calc(var(--layout-sidebar-width) + 2px) bottom -12px / auto clamp(360px, 66vh, 700px) no-repeat;
+    --pi-layer-maid-right:
+      url("assets/maid-right.webp") right 0 bottom -10px / auto clamp(360px, 64vh, 680px) no-repeat;
+  }
+  :root[data-theme-effective="dark"] {
+    --pi-layer-maid-left:
+      url("assets/maid-left-dark.webp") left calc(var(--layout-sidebar-width) + 2px) bottom -12px / auto clamp(360px, 66vh, 700px) no-repeat;
+    --pi-layer-maid-right:
+      url("assets/maid-right-dark.webp") right 0 bottom -10px / auto clamp(360px, 64vh, 680px) no-repeat;
+  }
+}
+
+/* ============ 4. 顶栏 = 深蓝织带 + 顶饰 + 蝴蝶结 ============ */
+
+:root { /* 织带常伴随金线底边与洋蓟色文字，明暗一致（同皮肤语义）。 */
+  --topbar-trim-art: url("assets/top-trim-tile.webp") left 0 / auto 149px repeat-x;
+}
+
+[data-pane="topbar"] {
+  color: #f8f3e8;
+  border-bottom: 1px solid rgb(197 164 104 / 0.55);
+  box-shadow: 0 6px 18px rgb(4 11 35 / 0.18);
+}
+
+[data-theme-wallpaper="true"] [data-pane="topbar"] {
+  background: var(--topbar-trim-art);
+}
+:root:not([data-theme-wallpaper="true"]) [data-pane="topbar"] {
+  background: #0a173b;
+}
+
+/* 蝴蝶结居中于工作区主列（侧栏列宽的一半偏移，跟随应用布局量）。 */
+[data-pane="topbar"]::after {
+  content: "";
+  position: absolute;
+  top: -3px;
+  left: calc(50% + var(--layout-sidebar-width) / 2);
+  z-index: 1;
+  width: 80px;
+  height: 42px;
+  transform: translateX(-50%);
+  background: url("assets/bow.webp") center / contain no-repeat;
+  filter: drop-shadow(0 3px 6px rgb(4 11 35 / 0.32));
+  pointer-events: none;
+}
+
+[data-pane="topbar"] > .project-title,
+[data-pane="topbar"] > .runtime-controls { position: relative; z-index: 1; }
+
+[data-pane="topbar"] .project-title strong { color: #f8f3e8; text-shadow: 0 1px 2px rgb(4 11 35 / 0.5); }
+[data-pane="topbar"] .project-title small { color: #b5c1dd; }
+[data-pane="topbar"] .git-branch-badge {
+  color: #e9c87f;
+  border-color: rgb(226 207 170 / 0.55);
+  background: rgb(197 164 104 / 0.16);
+}
+[data-pane="topbar"] button {
+  color: #f0e6cf;
+  border-color: rgb(226 207 170 / 0.45);
+  background: rgb(255 252 243 / 0.08);
+}
+[data-pane="topbar"] button:hover,
+[data-pane="topbar"] button:focus-visible {
+  color: #ffe9b8;
+  border-color: rgb(244 218 164 / 0.8);
+  background: rgb(255 252 243 / 0.14);
+}
+
+/* ============ 5. 侧栏 = 深海蓝蕾丝 + 金边画框 + Q 版吉祥物 ============ */
+
+[data-pane="sidebar"] {
+  position: relative;
+  /* 区域内部 token 局部化：侧栏内容置于深蓝上，正文换衬线色系。 */
+  --text: #e7ecf7;
+  --text-muted: #b5c1dd;
+  --border: rgb(151 169 216 / 0.28);
+  --border-strong: rgb(226 207 170 / 0.45);
+  --surface-sidebar-hover: rgb(97 122 183 / 0.14);
+  --surface-sidebar-active: #2c447f;
+  --surface-sidebar-badge: #1c326b;
+  --accent-soft: rgb(197 164 104 / 0.22);
+  --accent-text: #e9c87f;
+  --accent-border: rgb(226 207 170 / 0.55);
+  --surface-button-hover: rgb(97 122 183 / 0.16);
+  overflow: hidden;
+}
+
+/* 侧栏纵列重排（纯 order，不改 DOM）：品牌卡 → 蕾丝「新会话」→ 列表 →
+   织带「设置」卡。还原 dsh-deep-whale 构图，让底部舞台区只承载吉祥物。 */
+[data-pane="sidebar"] > .brand-row { order: 1; }
+[data-pane="sidebar"] > [data-control="new-session"] { order: 2; margin: 2px 0 10px; }
+[data-pane="sidebar"] > .sidebar-tabs { order: 3; }
+[data-pane="sidebar"] > .sidebar-search { order: 4; }
+[data-pane="sidebar"] > .sidebar-section-label { order: 5; }
+[data-pane="sidebar"] > nav { order: 6; }
+[data-pane="sidebar"] > .workspace-tree-header,
+[data-pane="sidebar"] > .workspace-tree { order: 6; }
+[data-pane="sidebar"] > .sidebar-footer { order: 7; }
+
+/* 织带背景与应用的 [data-theme-wallpaper="true"] .topbar 规则同特异性 (0,2,0)，
+   主题后注入胜出。 */
+[data-theme-wallpaper="true"] [data-pane="sidebar"] {
+  background:
+    radial-gradient(circle at 50% 14%, rgb(91 119 188 / 0.23), transparent 31%),
+    linear-gradient(180deg, rgb(16 36 86 / 0.97), rgb(5 14 43 / 0.96)),
+    repeating-linear-gradient(135deg, rgb(255 255 255 / 0.026) 0 1px, transparent 1px 7px);
+  border-right: 0;
+  box-shadow:
+    8px 0 34px rgb(8 17 48 / 0.22),
+    inset -1px 0 rgb(255 245 215 / 0.82),
+    inset -3px 0 rgb(226 207 166 / 0.72);
+}
+:root:not([data-theme-wallpaper="true"]) [data-pane="sidebar"] {
+  background:
+    radial-gradient(circle at 50% 14%, rgb(91 119 188 / 0.23), transparent 31%),
+    linear-gradient(180deg, rgb(16 36 86 / 0.97), rgb(5 14 43 / 0.96)),
+    repeating-linear-gradient(135deg, rgb(255 255 255 / 0.026) 0 1px, transparent 1px 7px);
+  border-right: 0;
+  box-shadow:
+    8px 0 34px rgb(8 17 48 / 0.22),
+    inset -1px 0 rgb(255 245 215 / 0.82),
+    inset -3px 0 rgb(226 207 166 / 0.72);
+}
+
+/* 金线画框：四角饰件（预镜像变体）+ 中段直描线，位于内容之上、命中区之外。 */
+[data-pane="sidebar"]::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  pointer-events: none;
+  background:
+    url("assets/sidebar-corner.webp") right 1px top 1px / 130px 130px no-repeat,
+    url("assets/sidebar-corner-tl.webp") left 1px top 1px / 130px 130px no-repeat,
+    url("assets/sidebar-corner-bl.webp") left 1px bottom 1px / 130px 130px no-repeat,
+    url("assets/sidebar-corner-br.webp") right 1px bottom 1px / 130px 130px no-repeat,
+    linear-gradient(90deg, #eecE99, #be914b, #eecE99) left 62px top 8.875px / calc(100% - 124px) 1.35px no-repeat,
+    linear-gradient(90deg, #eecE99, #be914b, #eecE99) left 62px bottom 8.875px / calc(100% - 124px) 1.35px no-repeat,
+    linear-gradient(180deg, #eecE99, #be914b, #eecE99) left 8.05px top 62px / 1.35px calc(100% - 124px) no-repeat,
+    linear-gradient(180deg, #eecE99, #be914b, #eecE99) right 8.05px top 62px / 1.35px calc(100% - 124px) no-repeat;
+}
+
+/* Q 版吉祥物：缩小并站立在底部织带之上（不再压住整行会话），加投影使其读作
+   陈列立绘而非贴纸；会话列表底部渐隐（见下）给它留出舞台。 */
+[data-pane="sidebar"]::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: 148px;
+  z-index: 1;
+  width: 200px;
+  height: 178px;
+  transform: translateX(-50%);
+  background: url("assets/chibi.webp") center bottom / contain no-repeat;
+  filter: drop-shadow(0 5px 12px rgb(2 7 24 / 0.32));
+  pointer-events: none;
+  opacity: 0.88;
+}
+
+/* 侧栏内容一律抬到吉祥物与画框之上（显式子项列表，区域无绝对定位直接子级）。 */
+[data-pane="sidebar"] > .brand-row,
+[data-pane="sidebar"] > [data-control="new-session"],
+[data-pane="sidebar"] > .sidebar-tabs,
+[data-pane="sidebar"] > .sidebar-search,
+[data-pane="sidebar"] > .sidebar-section-label,
+[data-pane="sidebar"] > nav,
+[data-pane="sidebar"] > .workspace-tree-header,
+[data-pane="sidebar"] > .workspace-tree,
+[data-pane="sidebar"] > .sidebar-footer { position: relative; z-index: 2; }
+
+/* 区域化字体：衬线用于侧栏标题类与按钮。 */
+[data-pane="sidebar"] .sidebar-section-label {
+  color: #d9bd83;
+  font-family: var(--maid-serif);
+  letter-spacing: 0.025em;
+}
+
+/* 品牌区（描边卡片，同 dsh-deep-whale 的 logoRow）。 */
+[data-pane="sidebar"] .brand-row {
+  box-sizing: border-box;
+  height: auto;
+  min-height: 60px;
+  margin: 2px 4px 12px;
+  padding: 8px 9px 10px;
+  border: 1px solid rgb(226 207 170 / 0.72);
+  border-radius: 10px;
+  background:
+    linear-gradient(135deg, rgb(92 119 187 / 0.26), transparent 44%),
+    linear-gradient(180deg, rgb(18 40 92 / 0.98), rgb(7 18 54 / 0.98));
+  box-shadow:
+    inset 0 0 0 2px rgb(8 18 51 / 0.88),
+    inset 0 0 0 3px rgb(197 164 104 / 0.2),
+    0 7px 18px rgb(2 7 25 / 0.28);
+}
+[data-pane="sidebar"] .brand-row strong { color: #f8f3e8; font-family: var(--maid-serif); }
+[data-pane="sidebar"] .brand-row span { color: #b5a06a; }
+[data-pane="sidebar"] .brand-mark {
+  color: #10204d;
+  background: linear-gradient(145deg, #d8c08a, #c5a468);
+  border: 1px solid #e2cfaa;
+}
+
+/* 顶部分页 tab 与胶囊搜索（深蓝玻璃）。 */
+[data-pane="sidebar"] .sidebar-tabs button.active { color: #172347; }
+[data-pane="sidebar"] .sidebar-tabs button.active span { color: #2c4276; }
+[data-pane="sidebar"] .sidebar-search {
+  border: 1px solid rgb(226 207 170 / 0.5);
+  background: rgb(7 20 55 / 0.4);
+}
+[data-pane="sidebar"] .sidebar-search input { color: #f8f3e8; }
+[data-pane="sidebar"] .sidebar-search input::placeholder { color: #96a8ce; opacity: 1; }
+
+/* 会话列表：米金标签行、金色行首饰线、选中行细金边轻牌匾（浅渐变，
+   避免与吉祥物叠成"卡片打架"，同 dsh-deep-whale 的悬浮牌匾质感）。 */
+[data-pane="sidebar"] .session-list button,
+[data-pane="sidebar"] .agent-list button {
+  color: #d7c8a8;
+  font-family: var(--maid-serif);
+  border-radius: 8px;
+}
+[data-pane="sidebar"] .session-list button:hover,
+[data-pane="sidebar"] .agent-list button:hover { background: rgb(97 122 183 / 0.1); }
+[data-pane="sidebar"] .session-list button.active,
+[data-pane="sidebar"] .agent-list button.active {
+  color: #fff8e8;
+  background: linear-gradient(90deg, rgb(82 111 184 / 0.5), rgb(43 70 139 / 0.38) 72%, rgb(20 42 94 / 0.28));
+  box-shadow:
+    inset 0 0 0 1px rgb(226 190 112 / 0.5),
+    inset 0 1px rgb(255 244 215 / 0.12);
+}
+[data-pane="sidebar"] .session-list button small,
+[data-pane="sidebar"] .agent-list button small { color: #c8b891; }
+[data-pane="sidebar"] .session-list button.active strong { color: #fffaf0; text-shadow: 0 1px 3px rgb(2 8 28 / 0.72); }
+[data-pane="sidebar"] .session-list button.active small { color: #ead29c; }
+[data-pane="sidebar"] .session-list-empty { color: #b5c1dd; }
+
+/* 「助手」列表回收：应用里 .agent-list 与设置页同名（settings 内的规则给
+   .agent-list 设置了 var(--surface-muted) 瓷底、padding 14px、右边框），
+   侧栏的 nav.agent-list 也会命中——深蓝侧栏下会整块泛白。同样 `!重要`
+   的绑定：hover/active 也要压过设置页那条 background: var(--surface)。 */
+[data-pane="sidebar"] nav.agent-list {
+  padding: 0;
+  border-right: 0;
+  background: transparent;
+}
+[data-pane="sidebar"] .agent-list button:not(.secondary-button) {
+  box-sizing: border-box;
+  min-height: 50px;
+  padding: 7px 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: #d7c8a8;
+  font-family: var(--maid-serif);
+}
+[data-pane="sidebar"] .agent-list button:not(.secondary-button):hover {
+  border-color: transparent;
+  background: rgb(97 122 183 / 0.1);
+}
+[data-pane="sidebar"] .agent-list button.active {
+  border-color: transparent;
+  color: #fff8e8;
+  background: linear-gradient(90deg, rgb(82 111 184 / 0.5), rgb(43 70 139 / 0.38) 72%, rgb(20 42 94 / 0.28));
+  box-shadow:
+    inset 0 0 0 1px rgb(226 190 112 / 0.5),
+    inset 0 1px rgb(255 244 215 / 0.12);
+}
+[data-pane="sidebar"] .agent-list button.active strong { color: #fffaf0; text-shadow: 0 1px 3px rgb(2 8 28 / 0.72); }
+[data-pane="sidebar"] .agent-list button.active small { color: #ead29c; }
+[data-pane="sidebar"] .agent-list button small,
+[data-pane="sidebar"] .agent-list button > span:last-child small { color: #c8b891; }
+[data-pane="sidebar"] .agent-list-icon {
+  border-radius: 7px;
+  border: 1px solid rgb(226 207 170 / 0.5);
+  color: #e9c87f;
+  background: rgb(197 164 104 / 0.2);
+}
+
+/* 列表底部渐隐：最后一屏会话淡出，为底部吉祥物舞台让出空间。 */
+[data-pane="sidebar"] .session-list,
+[data-pane="sidebar"] .agent-list {
+  -webkit-mask-image: linear-gradient(180deg, #000 0, #000 calc(100% - 200px), rgb(0 0 0 / 0.45) calc(100% - 140px), transparent calc(100% - 96px));
+  mask-image: linear-gradient(180deg, #000 0, #000 calc(100% - 200px), rgb(0 0 0 / 0.45) calc(100% - 140px), transparent calc(100% - 96px));
+}
+
+/* 文件树视图（侧栏第二页）。 */
+[data-pane="sidebar"] .workspace-tree-row { color: #e7ecf7; }
+[data-pane="sidebar"] .workspace-tree-back,
+[data-pane="sidebar"] .workspace-tree-refresh { color: #314979; }
+[data-pane="sidebar"] .workspace-tree-header > span { color: #f8f3e8; }
+
+/* 「新建话题」蕾丝按钮：边框画框九宫格，与 dsh-deep-whale 同源切片。 */
+[data-pane="sidebar"] [data-control="new-session"] {
+  box-sizing: border-box;
+  min-height: 54px;
+  color: #152246;
+  border-style: solid;
+  border-width: 0 40px;
+  border-image-source: url("assets/new-session.webp");
+  border-image-slice: 0 210 0 210 fill;
+  border-image-width: 0 40px;
+  border-image-repeat: stretch;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  font-family: var(--maid-serif);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  filter: drop-shadow(0 5px 9px rgb(2 8 28 / 0.22));
+  transition: filter 150ms ease, transform 150ms ease;
+}
+[data-pane="sidebar"] [data-control="new-session"]:hover:not(:disabled) {
+  filter: brightness(1.06) drop-shadow(0 7px 12px rgb(2 8 28 / 0.28));
+  transform: translateY(-1px);
+}
+[data-pane="sidebar"] [data-control="new-session"] svg { color: #24345c; stroke-width: 1.8; }
+
+/* 侧栏底部：织带长饰 + 设置按钮画框。 */
+[data-pane="sidebar"] > :last-child {
+  position: relative;
+  border-top: 0;
+}
+[data-pane="sidebar"] > :last-child::before {
+  content: "";
+  position: absolute;
+  right: -12px;
+  bottom: calc(100% - 4px);
+  left: -12px;
+  height: 64px;
+  background: url("assets/sidebar-swag.webp") center top / 100% 100% no-repeat;
+  filter: brightness(1.08) saturate(1.04) drop-shadow(0 4px 9px rgb(2 8 28 / 0.26));
+  pointer-events: none;
+}
+[data-pane="sidebar"] > :last-child > * { position: relative; z-index: 1; }
+[data-pane="sidebar"] [data-control="settings"] {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 48px;
+  padding-inline: 34px;
+  color: #f2dfba;
+  border-style: solid;
+  border-width: 0 34px;
+  border-image-source: url("assets/settings-frame.webp");
+  border-image-slice: 0 220 0 220 fill;
+  border-image-width: 0 34px;
+  border-image-repeat: stretch;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  font-family: var(--maid-serif);
+  letter-spacing: 0.02em;
+  filter: drop-shadow(0 4px 10px rgb(2 8 28 / 0.26));
+  transition: color 150ms ease, filter 150ms ease, transform 150ms ease;
+}
+[data-pane="sidebar"] [data-control="settings"]:hover,
+[data-pane="sidebar"] [data-control="settings"]:focus-visible {
+  color: #fff8e8;
+  background: none;
+  filter: brightness(1.1) drop-shadow(0 5px 12px rgb(2 8 28 / 0.3));
+  transform: translateY(-1px);
+}
+[data-pane="sidebar"] [data-control="settings"] svg { color: #e8c77f; }
+[data-pane="sidebar"] .runtime-indicator { color: #96a8ce; }
+
+/* 侧栏口袋控件兜底（保留可读性）：凡保留瓷底的小控件统一深蓝字。 */
+[data-pane="sidebar"] .sidebar-view-toggle,
+[data-pane="sidebar"] .workspace-tree-back,
+[data-pane="sidebar"] .workspace-tree-refresh { color: #314979; }
+
+/* ============ 6. 输入栏 = 镂空蕾丝画框 + 瓷面玻璃 ============ */
+
+:root[data-theme-effective="light"] [data-pane="composer"] {
+  --panel-bg-composer: rgb(253 252 248 / 0.9);
+  --panel-bg: rgb(253 252 248 / 0.9); /* 兼容旧应用包（旧规则读 --panel-bg） */
+}
+:root[data-theme-effective="dark"] [data-pane="composer"] {
+  --panel-bg-composer: rgb(13 25 59 / 0.86);
+  --panel-bg: rgb(13 25 59 / 0.86);
+}
+
+/* 输入栏容器保持内容驱动（不要给大的 min-height）：应用网格为
+   minmax(32px, 1fr) auto，容器高度确定时 1fr 行会吃满富余空间，
+   导致 textarea 与工具栏之间出现大面积空白（原版输入框是紧凑的）。
+   108px 只是下限，实际高度由 textarea（自动增高）与工具栏决定。 */
+[data-pane="composer"] {
+  border: 0;
+  border-radius: 34px;
+  min-height: 108px;
+  padding: 30px 12px 8px;
+  box-shadow: none;
+}
+
+/* 画框悬于输入栏之外一圈（9 宫格，同源切片 170/120/115/120）。 */
+[data-pane="composer"]::before {
+  content: "";
+  position: absolute;
+  box-sizing: border-box;
+  inset: -22px -16px -14px;
+  z-index: 1;
+  border-style: solid;
+  border-width: 72px 54px 52px 54px;
+  border-image-source: url("assets/composer-frame.webp");
+  border-image-slice: 170 120 115 120;
+  border-image-width: 72px 54px 52px 54px;
+  border-image-repeat: stretch;
+  filter: drop-shadow(0 9px 18px rgb(5 13 38 / 0.22));
+  pointer-events: none;
+}
+
+/* 输入栏内控件抬到画框之上。只抬排布型子元素；绝对定位的附件托盘 / 附件错误条 /
+   斜杠与引用菜单必须保持应用样式的 absolute（不可被 relative 覆盖，否则它们会
+   变成网格隐式行、掉到 footer 下方）——这里只提升它们的层序。 */
+[data-pane="composer"] > .composer-queue,
+[data-pane="composer"] > .composer-input-row,
+[data-pane="composer"] > .composer-footer {
+  position: relative;
+  z-index: 2;
+}
+[data-pane="composer"] > .attachment-list,
+[data-pane="composer"] > .attachment-error {
+  z-index: 3;
+}
+[data-pane="composer"] .attachment-chip {
+  border-color: rgb(197 164 104 / 0.5);
+  background: rgb(251 250 246 / 0.96);
+}
+:root[data-theme-effective="dark"] [data-pane="composer"] .attachment-chip {
+  color: #d7c8a8;
+  background: rgb(28 45 88 / 0.92);
+}
+
+[data-pane="composer"] textarea { caret-color: #405a99; }
+:root[data-theme-effective="dark"] [data-pane="composer"] textarea { caret-color: #bcd2ff; }
+
+/* 圆环控件：附加 / 发送 / 停止（金色描边瓷面圆钮，明暗同源）。 */
+[data-pane="composer"] [data-control="send"],
+[data-pane="composer"] [data-control="stop"] {
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border: 1px solid rgb(197 164 104 / 0.82);
+  border-radius: 50%;
+  color: #405a99;
+  background: rgb(255 253 248 / 0.68);
+  box-shadow:
+    0 3px 10px rgb(37 54 99 / 0.12),
+    inset 0 0 0 3px rgb(255 255 255 / 0.42);
+}
+:root[data-theme-effective="dark"] [data-pane="composer"] [data-control="send"],
+:root[data-theme-effective="dark"] [data-pane="composer"] [data-control="stop"] {
+  border-color: rgb(211 180 119 / 0.72);
+  color: #ead39f;
+  background: rgb(28 45 88 / 0.82);
+  box-shadow:
+    0 3px 12px rgb(0 0 0 / 0.26),
+    inset 0 0 0 3px rgb(255 255 255 / 0.05);
+}
+[data-pane="composer"] [data-control="send"]:hover:not(:disabled),
+[data-pane="composer"] [data-control="stop"]:hover:not(:disabled) {
+  transform: translateY(-1px);
+  color: #f2dfba;
+  border-color: rgb(244 218 164 / 0.9);
+}
+:root[data-theme-effective="dark"] [data-pane="composer"] [data-control="send"]:hover:not(:disabled),
+:root[data-theme-effective="dark"] [data-pane="composer"] [data-control="stop"]:hover:not(:disabled) {
+  color: #fff1ce;
+}
+
+/* 其余输入栏工具（附件 / 访问模式 / 模型 / 思考 / 上下文占用）。 */
+[data-pane="composer"] [data-control="attach"],
+[data-pane="composer"] [data-control="access-mode"],
+[data-pane="composer"] [data-control="model-select"],
+[data-pane="composer"] [data-control="thinking-select"] {
+  border-color: rgb(197 164 104 / 0.55);
+  color: #314979;
+  background: rgb(255 253 248 / 0.72);
+}
+:root[data-theme-effective="dark"] [data-pane="composer"] [data-control="attach"],
+:root[data-theme-effective="dark"] [data-pane="composer"] [data-control="access-mode"],
+:root[data-theme-effective="dark"] [data-pane="composer"] [data-control="model-select"],
+:root[data-theme-effective="dark"] [data-pane="composer"] [data-control="thinking-select"] {
+  color: #e7ecf7;
+  background: rgb(28 45 88 / 0.82);
+}
+[data-pane="composer"] [data-control="context-usage"] {
+  border-color: rgb(69 94 153 / 0.22);
+  background: rgb(225 233 251 / 0.5);
+}
+
+/* 生成中的输入栏光环（画框呼吸金晕）。 */
+@media (prefers-reduced-motion: no-preference) {
+  [data-ui-generating] [data-pane="composer"]::before {
+    animation: maid-frame-breathe 2.2s ease-in-out infinite;
+  }
+  [data-ui-generating] [data-control="stop"] {
+    animation: maid-stop-breathe 1.6s ease-in-out infinite;
+  }
+}
+
+@keyframes maid-frame-breathe {
+  0%, 100% { filter: drop-shadow(0 9px 18px rgb(5 13 38 / 0.22)); }
+  50% { filter: drop-shadow(0 9px 24px rgb(5 13 38 / 0.3)) drop-shadow(0 0 14px rgb(197 164 104 / 0.35)); }
+}
+
+@keyframes maid-stop-breathe {
+  0%, 100% { box-shadow: 0 3px 12px rgb(0 0 0 / 0.26), inset 0 0 0 3px rgb(255 255 255 / 0.08); }
+  50% { box-shadow: 0 3px 14px rgb(0 0 0 / 0.32), 0 0 12px rgb(226 190 112 / 0.55), inset 0 0 0 3px rgb(255 255 255 / 0.12); }
+}
+
+/* ============ 7. 会话区：气泡金边、空态、面板坞 ============ */
+
+[data-role="user"] .message-body {
+  border: 1px solid var(--user-bubble-border);
+  border-radius: 18px 18px 7px 18px;
+  box-shadow: 0 6px 20px rgb(19 38 87 / 0.1);
+}
+[data-role="assistant"] .message-body {
+  border: 1px solid var(--border-assistant);
+  border-radius: 18px 18px 18px 7px;
+}
+
+[data-role="assistant"] .message-body h1,
+[data-role="assistant"] .message-body h2,
+[data-role="assistant"] .message-body h3,
+[data-role="assistant"] .message-body h4,
+[data-role="user"] .message-body h1,
+[data-role="user"] .message-body h2,
+[data-role="user"] .message-body h3,
+[data-role="user"] .message-body h4 {
+  font-family: var(--maid-serif);
+}
+
+/* 空态（着陆页）：金色图章与衬线标题。 */
+[data-pane="timeline"] .empty-icon {
+  border: 1px solid rgb(197 164 104 / 0.55);
+  color: #8a6a33;
+  background: rgb(197 164 104 / 0.12);
+}
+[data-pane="timeline"] .empty-workspace h1 { font-family: var(--maid-serif); }
+
+/* 面板坞与提问/权限/设置面板统一金边瓷面。 */
+[data-pane="task-panel"],
+[data-pane="memory-panel"] {
+  border-color: rgb(197 164 104 / 0.5);
+}
+[data-pane="settings-dialog"] {
+  --panel-bg-dialog: rgb(251 250 246 / 0.96);
+  --panel-bg: rgb(251 250 246 / 0.96); /* 兼容旧应用包 */
+  border-color: rgb(197 164 104 / 0.45);
+}
+[data-pane="permission-dialog"] {
+  --panel-bg-dialog: rgb(251 250 246 / 0.96);
+  --panel-bg: rgb(251 250 246 / 0.96);
+  border-color: rgb(197 164 104 / 0.45);
+}
+:root[data-theme-effective="dark"] [data-pane="settings-dialog"],
+:root[data-theme-effective="dark"] [data-pane="permission-dialog"] {
+  --panel-bg-dialog: rgb(13 25 59 / 0.96);
+  --panel-bg: rgb(13 25 59 / 0.96);
+}
+[data-pane="preview"] { --panel-bg-preview: rgb(242 246 253 / 0.82); --panel-bg: rgb(242 246 253 / 0.82); }
+:root[data-theme-effective="dark"] [data-pane="preview"] { --panel-bg-preview: rgb(11 23 55 / 0.9); --panel-bg: rgb(11 23 55 / 0.9); }
+[data-pane="question-panel"] { border-color: rgb(197 164 104 / 0.5); }
+[data-pane="terminal"] { border-color: rgb(197 164 104 / 0.45); }
+
+/* ============ 8. 细节：选区 / 链接 / 生成中会话点 ============ */
+
+::selection { color: var(--selection-text); background: var(--selection-bg); }
+
+:root[data-theme-effective="light"] ::selection { color: #172347; background: #c5d4f0; }
+:root[data-theme-effective="dark"] ::selection { color: #e7ecf7; background: #35548f; }
+
+@media (prefers-reduced-motion: no-preference) {
+  [data-pane="sidebar"] .session-status-dot.running {
+    box-shadow: 0 0 0 3px var(--warning-soft), 0 0 6px rgb(226 190 112 / 0.7);
+  }
+  [data-pane="sidebar"] .session-status-dot.completed { background: #e8c77f; }
+}
