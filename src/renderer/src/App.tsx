@@ -80,7 +80,7 @@ import { ArtifactPreview, type PreviewEditorState, type PreviewTab, type Preview
 import type { EditorSaveStatus } from "./components/MarkdownEditor";
 import { WorkspaceTree } from "./components/WorkspaceTree";
 import { ContextMenu, type ContextMenuItem } from "./components/ContextMenu";
-import { RichContent } from "./components/RichContent";
+import { CodeBlock, RichContent } from "./components/RichContent";
 import { PermissionDialog } from "./components/RuntimeDialogs";
 import { QuestionPanel } from "./components/QuestionPanel";
 import { compactPath, extractMentionTokens, formatDuration, type Artifact } from "./lib/content";
@@ -89,6 +89,8 @@ import { contextUsageCacheLabel, contextUsagePercentLabel, contextUsageTone, con
 import { actionTimelineSegments, actionTimelineStats, formatProcessDuration, type ActionTimelineSegment } from "./lib/action-timeline";
 import { changedFilesForMessage, type ReplyChangedFile } from "./lib/changed-files";
 import { groupAssistantMessages } from "./lib/chat-layout";
+import { buildEditDiffs, editArgsSummary, languageFromPath, parseEditCallArgs, parseReadCallArgs, parseWriteCallArgs, writeArgsSummary, type EditCallPreview, type EditDiffBlock, type WriteCallPreview } from "./lib/tool-call-preview";
+import { DiffView } from "./components/DiffView";
 import { clampPreviewSplit, PREVIEW_SPLIT_MAX, PREVIEW_SPLIT_MIN, previewSplitFromKey } from "./lib/preview-split";
 import { groupSessionsByWorkspace, workspaceKey } from "./lib/session-groups";
 import { filterProviderModels, setProviderModelsEnabled, buildBuiltinProviderEntry, selectableCatalogModels } from "./lib/model-list";
@@ -316,6 +318,8 @@ function formatToolArgs(args: unknown): string {
 }
 
 const MAX_TOOL_OUTPUT_CHARS = 20_000;
+/** 工具内容走 CodeBlock 语法高亮的字符上限；超过则退化为可截断的纯文本块。 */
+const MAX_TOOL_PREVIEW_CHARS = 60_000;
 
 function truncateToolOutput(output: string): string {
   return output.length > MAX_TOOL_OUTPUT_CHARS ? `${output.slice(0, MAX_TOOL_OUTPUT_CHARS)}\n…（输出过长，已截断显示）` : output;
@@ -336,10 +340,27 @@ function actionTimelineNodeState(segment: ActionTimelineSegment, execution: Tool
 /** Expandable tool-call node: shows the call arguments and the tool output. */
 function ToolCallDetails({ call, execution, streaming }: { call: Extract<MessageBlock, { type: "tool-call" }>; execution: ToolExecution | undefined; streaming: boolean }): ReactNode {
   const running = execution?.status === "running" || (!execution && streaming);
-  const [open, setOpen] = useState(() => running);
+  // 默认收拢：运行中的调用自动展开（实时进度反馈），结束瞬间自动收拢恢复折叠，
+  // 长会话不会被一排展开的工具调用节点淹没；用户手动展开/收拢不受影响（toggle 自行记录）。
+  const [open, setOpen] = useState(false);
+  const settledAfterRunningRef = useRef(false);
   useEffect(() => {
-    if (running) setOpen(true);
+    if (running) {
+      settledAfterRunningRef.current = true;
+      setOpen(true);
+    } else if (settledAfterRunningRef.current) {
+      settledAfterRunningRef.current = false;
+      setOpen(false);
+    }
   }, [running]);
+  const args = execution?.args ?? call.arguments;
+  const editPreview = useMemo(() => (call.name === "edit" ? parseEditCallArgs(args) : undefined), [call.name, args]);
+  const writePreview = useMemo(() => (call.name === "write" ? parseWriteCallArgs(args) : undefined), [call.name, args]);
+  const readPreview = useMemo(() => (call.name === "read" ? parseReadCallArgs(args) : undefined), [call.name, args]);
+  const editDiffs = useMemo(() => (editPreview ? buildEditDiffs(editPreview.edits) : undefined), [editPreview]);
+  const patch = execution?.status === "completed" ? execution.patch : undefined;
+  const writeContent = writePreview && writePreview.content.length <= MAX_TOOL_PREVIEW_CHARS ? writePreview.content : undefined;
+  const readContent = execution && execution.status === "completed" && readPreview && execution.output && execution.output.length <= MAX_TOOL_PREVIEW_CHARS ? execution.output : undefined;
   return (
     <details className="action-timeline-call" open={open} onToggle={(event) => setOpen((event.currentTarget as HTMLDetailsElement).open)}>
       <summary className="action-timeline-call-summary">
@@ -348,16 +369,52 @@ function ToolCallDetails({ call, execution, streaming }: { call: Extract<Message
         <ChevronDown size={12} className="action-timeline-call-chevron" />
       </summary>
       <div className="action-timeline-call-detail">
+        {editPreview && <EditChangeSection preview={editPreview} diffs={editDiffs} patch={patch} />}
+        {writePreview && (
+          <div className="action-timeline-call-section">
+            <span className="action-timeline-call-section-title">写入内容</span>
+            <div className="action-timeline-call-meta">
+              {writePreview.path && <span className="action-timeline-call-path" title={writePreview.path}>{compactPath(writePreview.path)}</span>}
+              <span>{writePreview.content.length} 字符</span>
+            </div>
+            {writeContent ? <CodeBlock language={languageFromPath(writePreview.path) ?? ""} code={writeContent} /> : <pre className="action-timeline-call-code">{writePreview.content.length > MAX_TOOL_OUTPUT_CHARS ? `${writePreview.content.slice(0, MAX_TOOL_OUTPUT_CHARS)}\n…（内容过长，已截断显示）` : writePreview.content}</pre>}
+          </div>
+        )}
         <div className="action-timeline-call-section">
           <span className="action-timeline-call-section-title">调用指令</span>
-          <pre className="action-timeline-call-code">{formatToolArgs(execution?.args ?? call.arguments)}</pre>
+          <pre className="action-timeline-call-code">{editPreview ? editArgsSummary(editPreview) : writePreview ? writeArgsSummary(writePreview) : formatToolArgs(args)}</pre>
         </div>
         <div className="action-timeline-call-section">
           <span className="action-timeline-call-section-title">输出</span>
-          {execution?.output ? <pre className="action-timeline-call-code">{truncateToolOutput(execution.output)}</pre> : <span className="action-timeline-call-empty">{running ? "运行中…" : "（无输出）"}</span>}
+          {execution?.output ? (readContent ? <CodeBlock language={languageFromPath(readPreview?.path) ?? ""} code={readContent} /> : <pre className="action-timeline-call-code">{truncateToolOutput(execution.output)}</pre>) : <span className="action-timeline-call-empty">{running ? "运行中…" : "（无输出）"}</span>}
         </div>
       </div>
     </details>
+  );
+}
+
+/** `edit` 调用的人类可读变更视图：优先展示工具返回的统一 patch，否则按 edits 计算行级 diff。 */
+function EditChangeSection({ preview, diffs, patch }: { preview: EditCallPreview; diffs: EditDiffBlock[] | undefined; patch: string | undefined }): ReactNode {
+  return (
+    <div className="action-timeline-call-section">
+      <span className="action-timeline-call-section-title">变更</span>
+      <div className="action-timeline-call-meta">
+        {preview.path && <span className="action-timeline-call-path" title={preview.path}>{compactPath(preview.path)}</span>}
+        <span>{preview.edits.length} 处编辑</span>
+      </div>
+      <div className="action-timeline-call-diff-scroll">
+        {patch ? <DiffView patch={patch} /> : diffs?.map((block, index) => (
+          <div className="action-timeline-edit-block" key={index}>
+            {diffs.length > 1 && <span className="action-timeline-edit-block-label">变更 {index + 1}</span>}
+            {block.lines ? (
+              <pre className="diff-view">{block.lines.map((line, lineIndex) => <span className={line.type === "context" ? "diff-context" : `diff-${line.type}`} key={lineIndex}>{line.text || " "}{"\n"}</span>)}</pre>
+            ) : (
+              <pre className="action-timeline-call-code">…（变更区域过长，请展开查看调用指令）</pre>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 

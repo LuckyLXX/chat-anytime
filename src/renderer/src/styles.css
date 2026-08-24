@@ -380,6 +380,15 @@ button, input, select, textarea, summary, label {
 .action-timeline-call-section-title { display: block; margin-bottom: 4px; color: var(--text-muted); font-size: 10px; font-weight: 650; text-transform: uppercase; letter-spacing: .05em; }
 .action-timeline-call-code { max-height: 260px; margin: 0; padding: 8px 10px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; color: var(--code-text); background: var(--code-surface); font-size: 10px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
 .action-timeline-call-empty { color: var(--text-muted); font-size: 10px; font-style: italic; }
+/* 编辑/写入工具的人类可读预览：path+统计 meta 行 + 可滚动 diff/内容区。 */
+.action-timeline-call-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 6px; color: var(--text-muted); font-size: 10px; }
+.action-timeline-call-path { color: var(--text-muted); font-size: 10px; }
+.action-timeline-call-diff-scroll { max-height: 320px; overflow: auto; }
+.action-timeline-call-diff-scroll .diff-view { border-top: 0; }
+.action-timeline-edit-block + .action-timeline-edit-block { margin-top: 10px; }
+.action-timeline-edit-block-label { display: block; margin: 0 0 3px; color: var(--text-muted); font-size: 10px; }
+/* 工具节点内的语法高亮代码块：去掉 RichContent 版式的上下外边距，贴合分区网格。 */
+.action-timeline-call-detail .code-block { margin: 0; }
 .reply-files-panel { margin-top: 10px; overflow: hidden; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-raised); }
 .reply-files-panel > summary { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 36px; padding: 6px 9px; cursor: pointer; list-style: none; }
 .reply-files-panel > summary::-webkit-details-marker { display: none; }
