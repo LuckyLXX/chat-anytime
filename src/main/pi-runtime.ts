@@ -62,7 +62,7 @@ import { buildSkillsSystemPromptBlock, setSkillEnabled, type DiscoveredSkill } f
 import { createTodoStore, migrateLegacyTodoFile, type TodoStore } from "./todo-store.js";
 import { resolveVisionModel } from "./vision.js";
 import { buildResourceCatalog } from "./resource-catalog.js";
-import { agentWorkspaceSessionDir, sessionListReadyFor } from "./session-scope.js";
+import { agentWorkspaceSessionDir, mergeSessionSummary, sessionListReadyFor } from "./session-scope.js";
 import { isDesktopConfiguredProvider } from "./model-catalog.js";
 import { mergeProviderModels } from "./settings.js";
 import { buildSkillPrompt, parseSkillPrompt, type SkillPromptDisplay } from "./skill-prompt.js";
@@ -539,6 +539,31 @@ function snapshot(): RuntimeSnapshot {
 /** Overlay a session's run status onto the sidebar list. */
 function patchSessionRunStatus(record: SessionRuntimeRecord): void {
   currentSessions = currentSessions.map((item) => item.id === record.session.sessionId ? { ...item, runStatus: record.runStatus } : item);
+}
+
+/**
+ * 新会话（新建话题、删除当前会话后自动补的空白会话）创建后立即合并进侧边栏
+ * 列表，无需等全量 refreshSessions 的磁盘扫描：左侧第一时间出现该话题，发送
+ * 消息时 runStatus "running" 也能经 patchSessionRunStatus 即时打上「执行中」
+ * 圆点。列表作用域不是当前 Agent 时跳过（该场景由 sessionListReadyFor=false
+ * 触发重拉建表）；已在列表中的会话保持不动，精确信息仍由 refreshSessions 校正。
+ */
+function ensureSessionInList(record: SessionRuntimeRecord): void {
+  if (currentSessionsAgentId !== record.agent.id) return;
+  const manager = record.session.sessionManager;
+  // A freshly created session always carries a file; guard the optional for safety.
+  const path = manager.getSessionFile();
+  if (!path) return;
+  const incoming: SessionSummary = {
+    id: manager.getSessionId(),
+    path,
+    workspace: record.workspace,
+    title: "新会话",
+    modifiedAt: Date.now(),
+    messageCount: 0
+  };
+  const alreadyListed = currentSessions.some((item) => resolve(item.path).toLowerCase() === resolve(incoming.path).toLowerCase());
+  if (!alreadyListed) currentSessions = mergeSessionSummary(currentSessions, incoming);
 }
 
 /**
@@ -1527,6 +1552,11 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     // First list (app start): wait so the sidebar is populated on the first emit.
     await sessionsPromise;
   }
+  // Newly created sessions are not on disk (or not yet) and refreshSessions is
+  // intentionally skipped on switches with a known list — merge it into the
+  // sidebar list in memory right now so it shows up immediately, and the
+  // "running" dot can be patched on instantly once a turn starts.
+  ensureSessionInList(record);
   // Note: emitResourceCatalog()/emitTodos() are intentionally NOT re-called
   // here. Todos were published right after the session-scoped store was built,
   // the resource catalog right after the MCP sync completed, and none of the
