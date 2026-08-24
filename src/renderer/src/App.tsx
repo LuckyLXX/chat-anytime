@@ -1455,7 +1455,9 @@ export function App(): ReactNode {
   if (snapshot.workspace) composerPlaceholder = selectedSkill ? "输入任务要求" : "让 Pi 检查、修改或运行这个项目，@ 可引用文件";
   if (snapshot.workspace && snapshot.busy) composerPlaceholder = "连续输入以排队后续修改";
 
-  // 斜杠指令清单：固定会话命令 + 已发现的 Skill
+  // 斜杠指令清单：固定会话命令 + 已发现的 Skill。
+  // Skill 的 trigger 仍是 /skill:<名字>（选中后回填用），但候选框里只展示裸名，
+  // 匹配时同时接受 /sk 前缀与裸名前缀两种输入方式。
   const slashCommands = useMemo<SlashCommand[]>(() => {
     const fixed: SlashCommand[] = [
       { trigger: "/compact", label: "/compact", description: "压缩当前会话上下文", kind: "command", command: { type: "session.compact" } },
@@ -1463,7 +1465,7 @@ export function App(): ReactNode {
     ];
     const skills: SlashCommand[] = resources.skills.filter((skill) => skill.enabled).map((skill) => ({
       trigger: `/skill:${skill.name}`,
-      label: `/skill:${skill.name}`,
+      label: skill.name,
       description: skill.description || "调用 Skill",
       kind: "skill",
       skillName: skill.name
@@ -1483,8 +1485,26 @@ export function App(): ReactNode {
 
   const slashMatches = useMemo(() => {
     if (!slashToken) return [];
-    return slashCommands.filter((cmd) => cmd.trigger.toLowerCase().startsWith(slashToken) && cmd.trigger.toLowerCase() !== slashToken);
+    return slashCommands.filter((cmd) => {
+      const trigger = cmd.trigger.toLowerCase();
+      if (trigger.startsWith(slashToken) && trigger !== slashToken) return true;
+      // 裸名匹配：/design 也能命中 /skill:design-xxx（去掉开头的 / 再比对）
+      if (cmd.kind === "skill") return cmd.skillName.toLowerCase().startsWith(slashToken.slice(1));
+      return false;
+    });
   }, [slashToken, slashCommands]);
+
+  // 候选框按「会话指令 / 技能」分组渲染；flatIndex 保持键盘导航指向扁平 slashMatches。
+  const slashGroups = useMemo(() => {
+    const groups = [
+      { key: "command", title: "会话指令", items: new Array<{ cmd: SlashCommand; flatIndex: number }>() },
+      { key: "skill", title: "技能", items: new Array<{ cmd: SlashCommand; flatIndex: number }>() }
+    ];
+    slashMatches.forEach((cmd, flatIndex) => {
+      groups.find((group) => group.key === cmd.kind)?.items.push({ cmd, flatIndex });
+    });
+    return groups.filter((group) => group.items.length > 0);
+  }, [slashMatches]);
 
   const slashOpen = slashMatches.length > 0;
   const activeSlashIndex = Math.min(slashIndex, slashMatches.length - 1);
@@ -2578,20 +2598,25 @@ export function App(): ReactNode {
               <input ref={fileInputRef} type="file" hidden multiple accept="image/png,image/jpeg,image/webp,image/gif,.txt,.md,.json,.js,.ts,.tsx,.jsx,.py,.go,.rs,.java,.css,.html" onChange={(event) => { void addLocalFiles(event.target.files ?? []); event.currentTarget.value = ""; }} />
               {slashOpen && (
                 <div className="slash-menu" role="listbox" aria-label="斜杠指令" data-composer-zone="popup">
-                  {slashMatches.map((cmd, index) => (
-                    <button
-                      type="button"
-                      role="option"
-                      aria-selected={index === activeSlashIndex}
-                      key={`${cmd.kind}:${cmd.trigger}`}
-                      className={`slash-menu-item${index === activeSlashIndex ? " active" : ""}`}
-                      disabled={cmd.kind === "command" && snapshot.busy && cmd.command.type !== "session.new"}
-                      onMouseEnter={() => setSlashIndex(index)}
-                      onClick={() => applySlashCommand(cmd)}
-                    >
-                      <span className="slash-menu-icon">{cmd.trigger.startsWith("/skill:") ? <Puzzle size={14} /> : cmd.trigger === "/compact" ? <Layers size={14} /> : <MessageSquarePlus size={14} />}</span>
-                      <span className="slash-menu-copy"><strong>{cmd.label}</strong><small>{cmd.description}</small></span>
-                    </button>
+                  {slashGroups.map((group) => (
+                    <div className="composer-menu-group slash-menu-group" role="group" aria-label={group.title} key={group.key}>
+                      <small>{group.title}</small>
+                      {group.items.map(({ cmd, flatIndex }) => (
+                        <button
+                          type="button"
+                          role="option"
+                          aria-selected={flatIndex === activeSlashIndex}
+                          key={`${cmd.kind}:${cmd.trigger}`}
+                          className={`slash-menu-item${flatIndex === activeSlashIndex ? " active" : ""}`}
+                          disabled={cmd.kind === "command" && snapshot.busy && cmd.command.type !== "session.new"}
+                          onMouseEnter={() => setSlashIndex(flatIndex)}
+                          onClick={() => applySlashCommand(cmd)}
+                        >
+                          <span className="slash-menu-icon">{cmd.kind === "skill" ? <Puzzle size={14} /> : cmd.command.type === "session.compact" ? <Layers size={14} /> : <MessageSquarePlus size={14} />}</span>
+                          <span className="slash-menu-copy"><strong>{cmd.label}</strong><small>{cmd.description}</small></span>
+                        </button>
+                      ))}
+                    </div>
                   ))}
                 </div>
               )}

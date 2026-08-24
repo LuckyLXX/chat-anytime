@@ -633,6 +633,9 @@ button, input, select, textarea, summary, label {
 /* @ 提及菜单：复用 slash-menu 骨架，行更紧凑、路径更长。 */
 .mention-menu { gap: 1px; max-height: 232px; }
 .mention-menu .slash-menu-item { min-height: 32px; }
+/* 斜杠菜单分组：复用 composer-menu-group 骨架；标题吸顶，组间用分隔线区分。 */
+.slash-menu-group > small { position: sticky; top: 0; z-index: 1; padding: 3px 8px 2px; background: var(--surface); color: var(--text-muted); font-size: 10px; font-weight: 700; letter-spacing: .06em; }
+.slash-menu-group + .slash-menu-group { margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--border); }
 .composer:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus-ring); }
 .composer textarea { width: 100%; max-height: 140px; resize: none; border: 0; outline: 0; color: var(--text); background: transparent; font-size: 13px; line-height: 1.5; }
 .send-button, .stop-button { display: grid; place-items: center; align-self: end; width: 33px; height: 33px; padding: 0; border: 0; border-radius: 6px; color: var(--on-accent); background: var(--accent); cursor: pointer; }
