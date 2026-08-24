@@ -1106,7 +1106,14 @@ const BUILTIN_MODELS_ENDPOINTS: Readonly<Record<string, BuiltinModelsEndpoint>> 
   "xiaomi-token-plan-ams": { url: "https://token-plan-ams.xiaomimimo.com/v1/models", auth: "bearer" },
   "xiaomi-token-plan-sgp": { url: "https://token-plan-sgp.xiaomimimo.com/v1/models", auth: "bearer" },
   google: { url: "https://generativelanguage.googleapis.com/v1beta/models", auth: "query", keyParam: "key" },
-  openrouter: { url: "https://openrouter.ai/api/v1/models", auth: "none" }
+  openrouter: { url: "https://openrouter.ai/api/v1/models", auth: "none" },
+  // —— 以下为 SDK 内置静态模型表渠道：官方均提供 OpenAI 兼容 /models 列表接口，
+  // 点“拉取最新模型”只能通过这里直连获取最新目录 ——
+  "opencode-go": { url: "https://opencode.ai/zen/go/v1/models", auth: "none" },
+  opencode: { url: "https://opencode.ai/zen/v1/models", auth: "none" },
+  "zai-coding-cn": { url: "https://open.bigmodel.cn/api/coding/paas/v4/models", auth: "bearer" },
+  minimax: { url: "https://api.minimax.io/v1/models", auth: "bearer" },
+  "minimax-cn": { url: "https://api.minimaxi.com/v1/models", auth: "bearer" }
 };
 
 /** 解析服务商已保存/环境提供的 API Key（供直连拉取使用）。 */
@@ -1208,10 +1215,13 @@ async function refreshBuiltinModelsFallback(providerId: string): Promise<void> {
     const baselineById = new Map(baseline.map((model) => [model.id, model]));
     const template = baseline[0];
     // 已知模型保留本地完整元数据（api/baseUrl/价格/输入类型等），新模型克隆
-    // 模板元数据，只覆盖 id/name，避免覆盖层丢失流式所需字段。
+    // 模板元数据，只覆盖 id/name，避免覆盖层丢失流式所需字段。注意不覆盖
+    // 已知模型的显示名——不少官方 /models 列表项只有 id 没有 name（如
+    // opencode/minimax），若强行覆盖会把内置的 “MiniMax-M3” 退化成
+    // “minimax-m3”。
     const overlay = fetched.map((model) => {
       const base = baselineById.get(model.id);
-      if (base) return { ...base, name: model.name };
+      if (base) return base;
       if (template) return { ...template, id: model.id, name: model.name };
       return { id: model.id, name: model.name, provider: providerId };
     });
@@ -2033,11 +2043,24 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       }
       break;
     case "provider.models.refresh": {
-      // 内置服务商拉取最新模型：主路径走 SDK 远程目录覆盖（pi.dev catalog），
-      // 该服务偶发超时/不可达，因此带 30 秒超时并在失败后直连服务商接口兜底，
-      // 避免"拉取中"无限转圈。
+      // 内置服务商拉取最新模型。SDK 的目录刷新仅覆盖 Radius 网关等实现了
+      // refreshModels 的渠道；大多数内置渠道（opencode-go/zai-coding-cn/minimax/
+      // deepseek 等）的模型表是随应用版本打包的静态表，主路径 refresh 对它们
+      // 无操作且不报错——若按“errors 为空即成功”判定会误报刷新完成而模型
+      // 一个都没更新。这里改为：目标渠道有官方 /models 接口（直连表）就一律
+      // 直连拉最新并注入覆盖层；只有 Radius 类远程目录渠道走 SDK 远程刷新；
+      // 其余无官方列表接口的渠道给出明确提示，不假装成功。
       if (!modelRuntime) break;
       const refreshProviderId = command.providerId;
+      if (refreshProviderId in BUILTIN_MODELS_ENDPOINTS) {
+        await refreshBuiltinModelsFallback(refreshProviderId);
+        break;
+      }
+      if (refreshProviderId !== "radius") {
+        post({ type: "models-refresh-error", providerId: refreshProviderId, message: "该服务商暂未开放官方模型列表接口，模型目录随应用版本更新" });
+        break;
+      }
+      // Radius 网关：走 SDK 远程目录刷新（带 30 秒超时，失败给出可读错误）。
       const refreshController = new AbortController();
       const refreshTimeout = setTimeout(() => refreshController.abort(), 30_000);
       try {
@@ -2058,10 +2081,9 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         }
         if (!refreshController.signal.aborted && relevantErrors.length === 0) {
           post({ type: "models-refreshed", providerId: refreshProviderId });
-          break;
+        } else {
+          post({ type: "models-refresh-error", providerId: refreshProviderId, message: refreshController.signal.aborted ? "拉取模型列表超时" : (relevantErrors.map(([, error]) => errorText(error)).join("；") || "拉取模型列表失败") });
         }
-        post({ type: "log", level: "warn", message: `远程目录拉取未成功（${refreshController.signal.aborted ? "超时" : relevantErrors.map(([, error]) => errorText(error)).join("；") || "无错误"}），尝试直连服务商接口` });
-        await refreshBuiltinModelsFallback(refreshProviderId);
       } catch (error) {
         post({ type: "models-refresh-error", providerId: refreshProviderId, message: errorText(error) });
       } finally {
