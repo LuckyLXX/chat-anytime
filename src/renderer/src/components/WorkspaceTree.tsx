@@ -196,13 +196,13 @@ export function WorkspaceTree({ workspace, onOpenFile, refreshSignal }: { worksp
     return () => { window.clearInterval(interval); window.removeEventListener("focus", onFocus); };
   }, [refresh]);
 
-  // AI 写文件即时刷新：快照中出现新的带 changedFile 的写/编辑工具执行时立刻重载。
+  // AI 写文件即时刷新：快照中出现新的带 changedFile / 产物列表的工具执行时立刻重载。
   // 选择器返回原始值（id:status 字符串），zustand 仅在变化时触发重渲染。
   const lastChangedExecutionKey = useDesktopStore((state) => {
     const executions = state.snapshot.executions;
     for (let index = executions.length - 1; index >= 0; index -= 1) {
       const execution = executions[index];
-      if (execution?.changedFile) return `${execution.id}:${execution.status}`;
+      if (execution && (execution.changedFile || (execution.changedFiles?.length ?? 0) > 0)) return `${execution.id}:${execution.status}`;
     }
     return undefined;
   });

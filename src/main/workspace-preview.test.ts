@@ -2,7 +2,7 @@ import { access, mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { changedWorkspaceFile, createWorkspaceDirectory, createWorkspaceFile, deleteWorkspaceEntry, listWorkspaceDirectory, readWorkspaceFilePreview, renameWorkspaceEntry, searchWorkspaceFiles, writeWorkspaceFile } from "./workspace-preview.js";
+import { artifactCandidatesFromOutput, changedWorkspaceFile, changedWorkspaceFiles, createWorkspaceDirectory, createWorkspaceFile, deleteWorkspaceEntry, existingWorkspaceFiles, isArtifactProducingTool, listWorkspaceDirectory, readWorkspaceFilePreview, renameWorkspaceEntry, searchWorkspaceFiles, writeWorkspaceFile } from "./workspace-preview.js";
 import { IMAGE_PREVIEW_LIMIT_BYTES } from "../shared/protocol.js";
 
 const TINY_PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
@@ -132,6 +132,50 @@ describe("workspace file preview", () => {
     expect(changedWorkspaceFile("C:/work/demo", "write", { file_path: "C:/work/demo/README.md" })).toEqual({ relativePath: "README.md" });
     expect(changedWorkspaceFile("C:/work/demo", "read", { path: "src/app.ts" })).toBeUndefined();
     expect(changedWorkspaceFile("C:/work/demo", "write", { path: "../outside.txt" })).toBeUndefined();
+  });
+
+  it("exposes the changed file as an array and only treats read-only tools as artifact producers", () => {
+    expect(changedWorkspaceFiles("C:/work/demo", "edit", { path: "src/app.ts" })).toEqual([{ relativePath: "src/app.ts" }]);
+    expect(changedWorkspaceFiles("C:/work/demo", "read", { path: "src/app.ts" })).toBeUndefined();
+    expect(isArtifactProducingTool("bash")).toBe(true);
+    expect(isArtifactProducingTool("mcp_fal_generate")).toBe(true);
+    expect(isArtifactProducingTool("write")).toBe(false);
+    expect(isArtifactProducingTool("read")).toBe(false);
+    expect(isArtifactProducingTool("grep")).toBe(false);
+    expect(isArtifactProducingTool("ls")).toBe(false);
+  });
+
+  it("extracts workspace-relative artifact candidates from tool output text", () => {
+    const workspace = "C:/work/demo";
+    const output = [
+      "图片已保存：C:/work/demo/outputs/fox.png。",
+      "Saved: ./assets/海报.webp",
+      "json: { path: \"docs/报告.md\" }",
+      "ignored: node_modules/pkg/icon.png",
+      "outside: ../other/gone.jpg",
+      "non-artifact: bundle.exe"
+    ].join("\n");
+    expect(artifactCandidatesFromOutput(workspace, output)).toEqual([
+      "outputs/fox.png",
+      "assets/海报.webp",
+      "docs/报告.md"
+    ]);
+    expect(artifactCandidatesFromOutput(workspace, "")).toEqual([]);
+    expect(artifactCandidatesFromOutput(undefined, "fox.png")).toEqual([]);
+  });
+
+  it("keeps only artifact candidates that actually exist as files inside the workspace", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "pidesktop-artifact-"));
+    await mkdir(join(workspace, "outputs"));
+    await writeFile(join(workspace, "outputs", "fox.png"), "png", "utf8");
+    await writeFile(join(workspace, "image.png"), "png", "utf8");
+
+    await expect(existingWorkspaceFiles(workspace, ["outputs/fox.png", "image.png", "missing.png"])).resolves.toEqual([
+      { relativePath: "outputs/fox.png" },
+      { relativePath: "image.png" }
+    ]);
+    await expect(existingWorkspaceFiles(workspace, ["missing.png"])).resolves.toEqual([]);
+    await expect(existingWorkspaceFiles(undefined, ["image.png"])).resolves.toEqual([]);
   });
 
   it("writes a new markdown file (creating parent dirs) and overwrites existing files inside the workspace", async () => {

@@ -73,7 +73,7 @@ import {
   type PersistedSessionEntry,
   type PersistedSessionMessage
 } from "./session-history.js";
-import { changedWorkspaceFile } from "./workspace-preview.js";
+import { artifactCandidatesFromOutput, changedWorkspaceFile, changedWorkspaceFiles, existingWorkspaceFiles, isArtifactProducingTool } from "./workspace-preview.js";
 import { createToolAudit } from "./tool-audit.js";
 import { diffToolNames } from "./tool-delta.js";
 import * as runtimeTodoTools from "./runtime-todo-tools.js";
@@ -963,7 +963,8 @@ function handleSessionEvent(record: SessionRuntimeRecord, event: AgentSessionEve
         args: event.args,
         status: "running",
         startedAt: Date.now(),
-        changedFile: changedWorkspaceFile(record.workspace, event.toolName, event.args)
+        changedFile: changedWorkspaceFile(record.workspace, event.toolName, event.args),
+        changedFiles: changedWorkspaceFiles(record.workspace, event.toolName, event.args)
       });
       record.status = `正在${toolLabel(event.toolName)}`;
       break;
@@ -976,6 +977,11 @@ function handleSessionEvent(record: SessionRuntimeRecord, event: AgentSessionEve
     }
     case "tool_execution_end": {
       const current = record.executions.get(event.toolCallId);
+      const output = textFromToolResult(event.result);
+      const changedFiles = current?.changedFiles
+        ?? (current?.changedFile
+          ? [current.changedFile]
+          : changedWorkspaceFiles(record.workspace, event.toolName, current?.args));
       record.executions.set(event.toolCallId, {
         id: event.toolCallId,
         name: event.toolName,
@@ -983,10 +989,30 @@ function handleSessionEvent(record: SessionRuntimeRecord, event: AgentSessionEve
         startedAt: current?.startedAt ?? Date.now(),
         completedAt: Date.now(),
         status: event.isError ? "error" : "completed",
-        output: textFromToolResult(event.result),
+        output,
         patch: patchFromToolResult(event.result),
-        changedFile: current?.changedFile ?? changedWorkspaceFile(record.workspace, event.toolName, current?.args)
+        changedFile: current?.changedFile ?? changedWorkspaceFile(record.workspace, event.toolName, current?.args),
+        changedFiles
       });
+      // 产出型工具（bash 落盘、MCP 生图、扩展工具等）的结果文本里可能携带
+      // 工作区内新生成的文件路径（如图片），异步校验存在性后回填到产物列表。
+      if (!event.isError && current && isArtifactProducingTool(event.toolName)) {
+        const workspace = record.workspace;
+        const candidates = artifactCandidatesFromOutput(workspace, output);
+        if (candidates.length > 0 && workspace) {
+          void existingWorkspaceFiles(workspace, candidates).then((artifacts) => {
+            if (artifacts.length === 0) return;
+            const execution = record.executions.get(event.toolCallId);
+            if (!execution || execution.status !== "completed") return;
+            const merged = new Map<string, { relativePath: string }>();
+            for (const item of [...(execution.changedFiles ?? []), ...(execution.changedFile ? [execution.changedFile] : []), ...artifacts]) {
+              merged.set(item.relativePath.toLowerCase(), item);
+            }
+            execution.changedFiles = [...merged.values()];
+            if (record === activeRuntime) emitState();
+          });
+        }
+      }
       // Bash commands with background patterns (`nohup ... &`, `( ... & )`)
       // leave detached descendants running after the shell exits. Scan for
       // survivors so the task panel can show and kill them.

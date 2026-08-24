@@ -89,6 +89,82 @@ export function changedWorkspaceFile(workspace: string | undefined, toolName: st
   return relativePath ? { relativePath } : undefined;
 }
 
+/** edit/write 的产物数组形态（与 changedFile 单文件语义一致，供渲染端聚合）。 */
+export function changedWorkspaceFiles(workspace: string | undefined, toolName: string, args: unknown): { relativePath: string }[] | undefined {
+  const single = changedWorkspaceFile(workspace, toolName, args);
+  return single ? [single] : undefined;
+}
+
+/**
+ * 纯读类工具：输出是文件内容/目录列表本身，对其结果做路径扫描误报率高，
+ * 不参与“交付产物”识别。
+ */
+const readerToolNames = new Set([
+  "read", "grep", "find", "ls", "cat", "head", "tail", "wc", "echo", "sed", "awk", "sort", "less", "more", "file"
+]);
+
+/** 该工具调用可能产出工作区文件（bash 落盘、MCP 生图、扩展工具等），结果文本值得做产物扫描。 */
+export function isArtifactProducingTool(toolName: string): boolean {
+  return toolName !== "edit" && toolName !== "write" && !readerToolNames.has(toolName);
+}
+
+/** 工具结果文本中可识别为“交付产物”的文件扩展名（图片优先，含常见交付格式）。 */
+const artifactExtensions = new Set([
+  ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".avif", ".ico", ".svg",
+  ".pdf", ".zip", ".docx", ".xlsx", ".pptx", ".md", ".markdown",
+  ".mp4", ".mov", ".mp3", ".wav", ".json", ".html", ".htm", ".csv", ".txt"
+]);
+
+/**
+ * 从工具结果文本中提取“看起来像已落盘文件路径”的候选（相对路径或绝对路径均可）。
+ * 纯函数不做磁盘校验：候选需在工作区内、非忽略目录、扩展名属常见产物格式，
+ * 去重并限制数量；真正的存在性校验由调用方异步 stat 完成。
+ */
+export function artifactCandidatesFromOutput(workspace: string | undefined, output: string): string[] {
+  if (!workspace || !output) return [];
+  const root = resolve(workspace);
+  const seen = new Set<string>();
+  const candidates: string[] = [];
+  const tokenPattern = /(?:[A-Za-z]:[\\/]|\.{0,2}[\\/])?[^\s"'`<>\[\](){}|;，。；：、！？【】“”‘’*]+\.(?:png|jpe?g|webp|gif|bmp|avif|ico|svg|pdf|zip|docx|xlsx|pptx|md|markdown|mp4|mov|mp3|wav|json|html?|csv|txt)(?![A-Za-z0-9])/giu;
+  for (const match of output.matchAll(tokenPattern)) {
+    if (candidates.length >= 16) break;
+    // 去掉结尾可能粘连的标点/引号（如 “已保存 fox.png。”）。
+    let raw = match[0].trim();
+    raw = raw.replace(/[^A-Za-z0-9_./\\-]+$/u, "");
+    if (!raw) continue;
+    const relativePath = safeRelativePath(root, raw);
+    if (!relativePath) continue;
+    const key = relativePath.toLowerCase();
+    if (seen.has(key)) continue;
+    if (relativePath.split("/").some((segment) => ignoredWorkspaceEntries.has(segment))) continue;
+    const extension = extname(relativePath).toLowerCase();
+    if (!artifactExtensions.has(extension)) continue;
+    seen.add(key);
+    candidates.push(relativePath);
+  }
+  return candidates;
+}
+
+/**
+ * 对候选产物做存在性校验：仅保留工作区内真实存在的普通文件（含符号链接落点校验），
+ * 并限制数量防止超长输出拖慢回填。供 pi-runtime 在工具结束后异步调用。
+ */
+export async function existingWorkspaceFiles(workspace: string | undefined, candidates: string[]): Promise<{ relativePath: string }[]> {
+  if (!workspace) return [];
+  const rootReal = await realpath(resolve(workspace));
+  const found: { relativePath: string }[] = [];
+  for (const relativePath of candidates) {
+    if (found.length >= 12) break;
+    const candidate = resolve(rootReal, ...relativePath.split("/"));
+    const info = await stat(candidate).catch(() => undefined);
+    if (!info?.isFile()) continue;
+    const real = await realpath(candidate).catch(() => candidate);
+    if (real !== rootReal && !safeRelativePath(rootReal, real)) continue;
+    found.push({ relativePath });
+  }
+  return found;
+}
+
 async function readPrefix(path: string, limit: number): Promise<Buffer> {
   const handle = await open(path, "r");
   try {

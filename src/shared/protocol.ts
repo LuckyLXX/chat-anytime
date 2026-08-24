@@ -256,6 +256,13 @@ export interface ToolExecution {
   patch?: string;
   /** Workspace-relative file changed by a write/edit tool. */
   changedFile?: { relativePath: string };
+  /**
+   * 交付产物：本次工具调用产出/改动的工作区内文件（可多个）。
+   * edit/write 直接取路径；其它产出型工具（bash、MCP 等）从工具结果文本
+   * 解析候选路径并校验存在性后回填。changedFile 为其单文件兼容形态，
+   * 渲染端优先读取本数组。
+   */
+  changedFiles?: { relativePath: string }[];
 }
 
 export type WorkspaceFilePreviewKind = "markdown" | "code" | "html" | "svg" | "image" | "text" | "binary" | "pdf";

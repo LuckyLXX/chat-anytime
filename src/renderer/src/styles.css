@@ -418,7 +418,12 @@ button, input, select, textarea, summary, label {
 .reply-files-list { display: grid; border-top: 1px solid var(--border); }
 .reply-file-row { display: flex; align-items: center; gap: 6px; min-width: 0; min-height: 42px; padding: 5px 8px; border-bottom: 1px solid var(--border); }
 .reply-file-row:last-child { border-bottom: 0; }
-.reply-file-info { display: flex; align-items: center; gap: 7px; min-width: 0; flex: 1 1 0; color: var(--text-muted); }
+.reply-file-open { display: flex; align-items: center; gap: 7px; min-width: 0; flex: 1 1 0; padding: 4px 6px; border: 0; border-radius: 6px; color: var(--text-muted); background: transparent; cursor: pointer; text-align: left; }
+.reply-file-open:hover { color: var(--text); background: var(--surface-button-hover); }
+.reply-file-open:focus-visible { outline: 2px solid var(--accent-soft); outline-offset: -2px; }
+/* 图片产物：图标用强调色突出，一眼区分“可预览的图”与普通文件。 */
+.reply-file-open-image > svg { color: var(--accent-text); }
+.reply-file-open-image:hover > svg { color: var(--accent-text); }
 .reply-file-text { display: grid; gap: 2px; min-width: 0; }
 .reply-file-text strong { color: var(--text); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .reply-file-text small { color: var(--text-muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

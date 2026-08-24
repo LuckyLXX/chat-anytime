@@ -115,6 +115,7 @@ const demoSnapshot: RuntimeSnapshot = {
         { type: "thinking", text: "我会先检查项目结构、运行时入口和桌面端边界，再整理结论。" },
         { type: "tool-call", id: "tool-read", name: "read", arguments: { path: "package.json" } },
         { type: "tool-call", id: "tool-edit", name: "edit", arguments: { path: "src/runtime.ts" } },
+        { type: "tool-call", id: "tool-image", name: "bash", arguments: { command: "python ~/.agents/skills/rolldek-image/rolldek_image.py generate 架构简图 -o demo.png" } },
         {
           type: "text",
           text: `第一版包含三个清晰的进程边界：
@@ -190,6 +191,16 @@ flowchart LR
       startedAt: Date.now() - 13_000,
       completedAt: Date.now() - 10_800,
       output: "TypeScript 检查通过\nElectron 渲染进程构建成功"
+    },
+    {
+      id: "tool-image",
+      name: "bash",
+      args: { command: "python ~/.agents/skills/rolldek-image/rolldek_image.py generate 架构简图 -o demo.png" },
+      status: "completed",
+      startedAt: Date.now() - 10_000,
+      completedAt: Date.now() - 9_200,
+      output: "demo.png",
+      changedFiles: [{ relativePath: "demo.png" }]
     }
   ]
 };

@@ -1,5 +1,5 @@
 import type { ChatMessage, ToolExecution } from "../shared/protocol.js";
-import { changedWorkspaceFile } from "./workspace-preview.js";
+import { changedWorkspaceFile, changedWorkspaceFiles } from "./workspace-preview.js";
 
 export const PI_DESKTOP_CONTROL_ENTRY_TYPE = "pidesktop-control";
 
@@ -101,7 +101,8 @@ export function restoreToolExecutions(messages: readonly PersistedSessionMessage
           args: block.arguments,
           status: "running",
           startedAt: message.timestamp,
-          changedFile: changedWorkspaceFile(workspace, block.name, block.arguments)
+          changedFile: changedWorkspaceFile(workspace, block.name, block.arguments),
+          changedFiles: changedWorkspaceFiles(workspace, block.name, block.arguments)
         });
       }
       continue;
@@ -118,6 +119,7 @@ export function restoreToolExecutions(messages: readonly PersistedSessionMessage
       startedAt: previous?.startedAt ?? message.timestamp,
       completedAt: message.timestamp,
       changedFile: previous?.changedFile ?? changedWorkspaceFile(workspace, message.toolName, previous?.args),
+      changedFiles: previous?.changedFiles ?? changedWorkspaceFiles(workspace, message.toolName, previous?.args),
       ...(output ? { output } : {}),
       ...(resultPatch(message) ? { patch: resultPatch(message) } : {})
     });

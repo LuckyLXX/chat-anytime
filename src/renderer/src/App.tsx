@@ -14,6 +14,7 @@ import {
   FileDiff,
   Folder,
   FolderOpen,
+  Image as ImageIcon,
   KeyRound,
   Layers,
   LoaderCircle,
@@ -553,19 +554,28 @@ function ChangedFilesPanel({ files, onOpenFile, onOpenDiff }: { files: ReplyChan
   return (
     <details className="reply-files-panel">
       <summary>
-        <span><FileDiff size={14} /><strong>本次变更文件</strong><em>{files.length}</em></span>
+        <span><PackageOpen size={14} /><strong>交付产物</strong><em>{files.length}</em></span>
         <span className="reply-files-toggle" aria-hidden="true" />
       </summary>
       <div className="reply-files-list">
-        {files.map(({ relativePath, execution }) => {
+        {files.map(({ relativePath, kind, execution }) => {
           const name = relativePath.split("/").at(-1) ?? relativePath;
           const hasDiff = Boolean(execution.patch);
+          const isImage = kind === "image";
           return (
             <div className="reply-file-row" key={relativePath}>
-              <span className="reply-file-info"><File size={14} /><span className="reply-file-text"><strong>{name}</strong><small>{relativePath}</small></span></span>
+              <button
+                type="button"
+                className={isImage ? "reply-file-open reply-file-open-image" : "reply-file-open"}
+                title={isImage ? `预览图片 ${relativePath}` : `预览 ${relativePath}`}
+                aria-label={`预览 ${name}`}
+                onClick={() => onOpenFile(relativePath)}
+              >
+                {isImage ? <ImageIcon size={14} /> : <File size={14} />}
+                <span className="reply-file-text"><strong>{name}</strong><small>{relativePath}</small></span>
+              </button>
               <span className="reply-file-actions">
-                <button type="button" className="reply-file-action" title={`预览 ${relativePath}`} aria-label={`预览 ${name}`} onClick={() => onOpenFile(relativePath)}><Eye size={14} /></button>
-                <button type="button" className="reply-file-action" title={hasDiff ? `查看 ${relativePath} 变更` : "暂无变更记录"} aria-label={`查看 ${name} 变更`} disabled={!hasDiff} onClick={() => onOpenDiff(execution)}><FileDiff size={14} /></button>
+                {!isImage && <button type="button" className="reply-file-action" title={hasDiff ? `查看 ${relativePath} 变更` : "暂无变更记录"} aria-label={`查看 ${name} 变更`} disabled={!hasDiff} onClick={() => onOpenDiff(execution)}><FileDiff size={14} /></button>}
               </span>
             </div>
           );
