@@ -160,8 +160,14 @@ button, input, select, textarea, summary, label {
 .sidebar { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; padding: 14px 10px 10px; border-right: 1px solid var(--border); background: var(--surface-sidebar); transition: width .18s ease; }
 /* 折叠态窄条 + hover 浮层 */
 .sidebar-rail { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; padding: 10px 0; border-right: 1px solid var(--border); background-color: var(--surface-sidebar); background-image: none; width: var(--layout-sidebar-collapsed-width); }
+/* 折叠态顶部品牌/展开按钮：默认显示项目名 CA，hover 变展开图标 */
+.sidebar-rail .rail-brand { display: grid; place-items: center; width: 32px; height: 32px; flex: 0 0 auto; margin: 0 auto 8px; border: 1px solid var(--border-strong); border-radius: 50%; color: var(--text); background: var(--surface); cursor: pointer; }
+.sidebar-rail .rail-brand-mark { font-size: 11px; font-weight: 800; line-height: 1; }
+.sidebar-rail .rail-brand-expand { display: none; }
+.sidebar-rail .rail-brand:hover { color: var(--accent-text); background: var(--accent-soft); border-color: var(--accent); }
+.sidebar-rail .rail-brand:hover .rail-brand-mark { display: none; }
+.sidebar-rail .rail-brand:hover .rail-brand-expand { display: grid; }
 .sidebar-rail-items { display: flex; flex: 1; flex-direction: column; align-items: center; gap: 6px; padding: 0; }
-.sidebar-rail-footer { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 10px 0 0; border-top: 1px solid var(--border); }
 .sidebar-rail .rail-icon, .brand-collapse-button { display: grid; place-items: center; width: 32px; height: 32px; flex: 0 0 auto; border: 0; border-radius: 8px; color: var(--text-muted); background: transparent; cursor: pointer; }
 .sidebar-rail .rail-icon:hover, .brand-collapse-button:hover { color: var(--text); background: var(--surface-sidebar-hover); }
 .sidebar-rail .rail-icon.active { color: var(--accent-text); background: var(--surface-sidebar-active); }
