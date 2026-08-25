@@ -2575,13 +2575,14 @@ export function App(): ReactNode {
       ))}
       {sidebarCollapsed ? (
         <div className="sidebar-rail" data-pane="sidebar" data-ui-sidebar-collapsed onMouseEnter={() => openSidebarFlyout()} onMouseLeave={() => scheduleCloseSidebarFlyout()}>
+          <button type="button" className="rail-brand" data-control="sidebar-expand" title="展开侧边栏" aria-label="展开侧边栏" onClick={() => setSidebarCollapsed(false)}><span className="rail-brand-mark">CA</span><PanelLeftOpen className="rail-brand-expand" size={18} /></button>
           <div className="sidebar-rail-items">
             <button type="button" className="rail-new-session" data-control="new-session" title="在当前工作区新建话题" aria-label="在当前工作区新建话题" disabled={!snapshot.workspace} onClick={() => { void createNewSession(); openSidebarFlyout(); }}><MessageSquarePlus size={18} /></button>
             <button type="button" className="rail-icon" data-control="rail-topics" title="话题列表" aria-label="话题列表" onClick={() => { setSidebarView("topics"); setSidebarTab("topics"); openSidebarFlyout(); }}><MessageCircle size={18} /></button>
             <button type="button" className="rail-icon" data-control="rail-agents" title="助手" aria-label="助手" onClick={() => { setSidebarView("topics"); setSidebarTab("agents"); openSidebarFlyout(); }}><Users size={18} /></button>
           </div>
           <div className="sidebar-rail-footer">
-            <button type="button" className="rail-icon" data-control="sidebar-expand" title="展开侧边栏" aria-label="展开侧边栏" onClick={() => setSidebarCollapsed(false)}><PanelLeftOpen size={18} /></button>
+            <button type="button" className="rail-icon" data-control="rail-settings" title="设置" aria-label="设置" onClick={() => setSettingsOpen(true)}><Settings size={18} /></button>
           </div>
           {sidebarFlyoutOpen && (
             <aside className="sidebar sidebar-flyout" data-pane="sidebar" onMouseEnter={() => openSidebarFlyout()} onMouseLeave={() => scheduleCloseSidebarFlyout()}>
