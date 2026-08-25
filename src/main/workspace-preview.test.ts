@@ -2,7 +2,7 @@ import { access, mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { artifactCandidatesFromOutput, changedWorkspaceFile, changedWorkspaceFiles, createWorkspaceDirectory, createWorkspaceFile, deleteWorkspaceEntry, existingWorkspaceFiles, isArtifactProducingTool, listWorkspaceDirectory, readWorkspaceFilePreview, renameWorkspaceEntry, searchWorkspaceFiles, writeWorkspaceFile } from "./workspace-preview.js";
+import { artifactCandidatesFromBashCommand, artifactCandidatesFromOutput, changedWorkspaceFile, changedWorkspaceFiles, createWorkspaceDirectory, createWorkspaceFile, deleteWorkspaceEntry, existingWorkspaceFiles, isArtifactProducingTool, listWorkspaceDirectory, readWorkspaceFilePreview, renameWorkspaceEntry, searchWorkspaceFiles, writeWorkspaceFile } from "./workspace-preview.js";
 import { IMAGE_PREVIEW_LIMIT_BYTES } from "../shared/protocol.js";
 
 const TINY_PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
@@ -143,14 +143,22 @@ describe("workspace file preview", () => {
     expect(isArtifactProducingTool("read")).toBe(false);
     expect(isArtifactProducingTool("grep")).toBe(false);
     expect(isArtifactProducingTool("ls")).toBe(false);
+    expect(isArtifactProducingTool("memory_read")).toBe(false);
+    expect(isArtifactProducingTool("memory_write")).toBe(false);
+    expect(isArtifactProducingTool("todo_write")).toBe(false);
+    expect(isArtifactProducingTool("browser_snapshot")).toBe(false);
+    expect(isArtifactProducingTool("browser_eval")).toBe(false);
+    expect(isArtifactProducingTool("ask_question")).toBe(false);
+    expect(isArtifactProducingTool("recognize_images")).toBe(false);
   });
 
-  it("extracts workspace-relative artifact candidates from tool output text", () => {
+  it("extracts workspace-relative artifact candidates near save signals from tool output text", () => {
     const workspace = "C:/work/demo";
     const output = [
       "图片已保存：C:/work/demo/outputs/fox.png。",
       "Saved: ./assets/海报.webp",
       "json: { path: \"docs/报告.md\" }",
+      "写入 docs/说明.md 完成",
       "ignored: node_modules/pkg/icon.png",
       "outside: ../other/gone.jpg",
       "non-artifact: bundle.exe"
@@ -158,10 +166,33 @@ describe("workspace file preview", () => {
     expect(artifactCandidatesFromOutput(workspace, output)).toEqual([
       "outputs/fox.png",
       "assets/海报.webp",
-      "docs/报告.md"
+      "docs/说明.md"
     ]);
     expect(artifactCandidatesFromOutput(workspace, "")).toEqual([]);
     expect(artifactCandidatesFromOutput(undefined, "fox.png")).toEqual([]);
+  });
+
+  it("ignores plain reads, diffs and listings without save signals", () => {
+    const workspace = "D:/proj";
+    const catContent = "# Report\n详见 docs/guide.md 与 src/main.ts 的实现。\n";
+    const diff = "diff --git a/src/main/workspace-preview.ts b/src/main/workspace-preview.ts\n+      \"relativePath\": \"outputs/fox.png\",\n";
+    const gitLog = "e17f3be feat(chat): 交付产物\n docs/迭代记录.md | 1 +\n";
+    const listing = "demo.png\nREADME.md\nassets/poster.png\n";
+    expect(artifactCandidatesFromOutput(workspace, catContent)).toEqual([]);
+    expect(artifactCandidatesFromOutput(workspace, diff)).toEqual([]);
+    expect(artifactCandidatesFromOutput(workspace, gitLog)).toEqual([]);
+    expect(artifactCandidatesFromOutput(workspace, listing)).toEqual([]);
+  });
+
+  it("extracts explicit output paths from bash commands", () => {
+    const workspace = "C:/work/demo";
+    expect(artifactCandidatesFromBashCommand(workspace, "python ~/.agents/skills/rolldek-image/rolldek_image.py generate 雪狐 -o outputs/fox.png")).toEqual(["outputs/fox.png"]);
+    expect(artifactCandidatesFromBashCommand(workspace, "node gen.mjs --output gen/cover.webp && npm test")).toEqual(["gen/cover.webp"]);
+    expect(artifactCandidatesFromBashCommand(workspace, "curl -s https://x.com/a.png -o assets/logo.png")).toEqual(["assets/logo.png"]);
+    expect(artifactCandidatesFromBashCommand(workspace, "cat src/main.ts > docs/out.md && git add docs/out.md")).toEqual(["docs/out.md"]);
+    expect(artifactCandidatesFromBashCommand(workspace, "convert a.png b.png && mv b.png outputs/final.png")).toEqual(["b.png", "outputs/final.png"]);
+    expect(artifactCandidatesFromBashCommand(workspace, "ls *.txt")).toEqual([]);
+    expect(artifactCandidatesFromBashCommand(undefined, "touch a.txt")).toEqual([]);
   });
 
   it("keeps only artifact candidates that actually exist as files inside the workspace", async () => {

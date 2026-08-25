@@ -103,9 +103,14 @@ const readerToolNames = new Set([
   "read", "grep", "find", "ls", "cat", "head", "tail", "wc", "echo", "sed", "awk", "sort", "less", "more", "file"
 ]);
 
+/** 不落盘工作区的内置工具：输出是清单/记忆/网页/问答文本，路径扫描误报率高。 */
+const nonProducingToolNames = new Set(["ask_question", "recognize_images", "subagent", "memory_read"]);
+const nonProducingToolPrefixes = ["todo_", "memory_", "browser_"];
+
 /** 该工具调用可能产出工作区文件（bash 落盘、MCP 生图、扩展工具等），结果文本值得做产物扫描。 */
 export function isArtifactProducingTool(toolName: string): boolean {
-  return toolName !== "edit" && toolName !== "write" && !readerToolNames.has(toolName);
+  if (toolName === "edit" || toolName === "write" || readerToolNames.has(toolName) || nonProducingToolNames.has(toolName)) return false;
+  return !nonProducingToolPrefixes.some((prefix) => toolName.startsWith(prefix));
 }
 
 /** 工具结果文本中可识别为“交付产物”的文件扩展名（图片优先，含常见交付格式）。 */
@@ -115,8 +120,62 @@ const artifactExtensions = new Set([
   ".mp4", ".mov", ".mp3", ".wav", ".json", ".html", ".htm", ".csv", ".txt"
 ]);
 
+const artifactTokenPattern = /(?:[A-Za-z]:[\\/]|\.{0,2}[\\/])?[^\s"'`<>\[\](){}|;，。；：、！？【】“”‘’*]+\.(?:png|jpe?g|webp|gif|bmp|avif|ico|svg|pdf|zip|docx|xlsx|pptx|md|markdown|mp4|mov|mp3|wav|json|html?|csv|txt)(?![A-Za-z0-9])/giu;
+
+/**
+ * bash 命令中显式写出的输出路径：-o/--output/--save* 的值、> 重定向目标、
+ * cp/mv/convert/tee 的目标参数。这是“脚本把文件写到哪”的最强信号。
+ */
+const bashOutputFlagPattern = /(?:^|[\s;&|(])(?:-o|-O|--output|--save|--save-to|--out|--outdir|--export|--download|--write)(?:\s*=\s*|\s+)([^\s;&|()<>"'`]+)/giu;
+const bashRedirectPattern = /(?:^|[;&|]\s*)[^;&|()<>"'`]*>{1,2}\s*([^\s;&|()<>"'`]+)/giu;
+const bashCopyTargetPattern = /\b(?:cp|mv|move|copy|convert|tee)\s+[^\s;&|()<>"'`]+\s+([^\s;&|()<>"'`]+)/giu;
+
+/**
+ * 把单个疑似路径的 token 归一成工作区相对路径候选：工作区内、非忽略目录、
+ * 扩展名属常见产物格式，去重并计入 totalCap 上限。
+ */
+function pushArtifactCandidate(root: string, rawToken: string, seen: Set<string>, candidates: string[], totalCap: number): void {
+  if (candidates.length >= totalCap) return;
+  let raw = rawToken.trim();
+  // 去掉结尾可能粘连的标点/引号（如 “已保存 fox.png。”）。
+  raw = raw.replace(/[^A-Za-z0-9_.\\/-]+$/u, "");
+  if (!raw) return;
+  const relativePath = safeRelativePath(root, raw);
+  if (!relativePath) return;
+  const key = relativePath.toLowerCase();
+  if (seen.has(key)) return;
+  if (relativePath.split("/").some((segment) => ignoredWorkspaceEntries.has(segment))) return;
+  const extension = extname(relativePath).toLowerCase();
+  if (!artifactExtensions.has(extension)) return;
+  seen.add(key);
+  candidates.push(relativePath);
+}
+
+/**
+ * 从 bash 命令文本中提取“脚本显式写文件”的路径候选（-o/--output/重定向/cp/mv/tee）。
+ * 纯函数不做磁盘校验，存在性由调用方异步 stat 完成。
+ */
+export function artifactCandidatesFromBashCommand(workspace: string | undefined, command: string): string[] {
+  if (!workspace || !command) return [];
+  const root = resolve(workspace);
+  const seen = new Set<string>();
+  const candidates: string[] = [];
+  for (const pattern of [bashOutputFlagPattern, bashRedirectPattern, bashCopyTargetPattern]) {
+    for (const match of command.matchAll(pattern)) {
+      pushArtifactCandidate(root, match[1] ?? "", seen, candidates, 16);
+      if (candidates.length >= 16) break;
+    }
+    if (candidates.length >= 16) break;
+  }
+  return candidates;
+}
+
+/** 输出文本中表示“文件被保存/生成”的指示词：缺失则路径大概率只是被读/列出/提到。 */
+const artifactSignalPattern = /(?:保存|生成|写出|导出|下载|写入|已存|Saved|saved|Generated|generated|Created|created|Wrote|wrote|Exported|exported|Downloaded|downloaded|written|successfully|成功|✔|✓|=>|→)/u;
+
 /**
  * 从工具结果文本中提取“看起来像已落盘文件路径”的候选（相对路径或绝对路径均可）。
+ * 只保留“保存类指示词”附近出现的路径（cat ls git diff 等普通输出不含此类语境），
  * 纯函数不做磁盘校验：候选需在工作区内、非忽略目录、扩展名属常见产物格式，
  * 去重并限制数量；真正的存在性校验由调用方异步 stat 完成。
  */
@@ -125,22 +184,17 @@ export function artifactCandidatesFromOutput(workspace: string | undefined, outp
   const root = resolve(workspace);
   const seen = new Set<string>();
   const candidates: string[] = [];
-  const tokenPattern = /(?:[A-Za-z]:[\\/]|\.{0,2}[\\/])?[^\s"'`<>\[\](){}|;，。；：、！？【】“”‘’*]+\.(?:png|jpe?g|webp|gif|bmp|avif|ico|svg|pdf|zip|docx|xlsx|pptx|md|markdown|mp4|mov|mp3|wav|json|html?|csv|txt)(?![A-Za-z0-9])/giu;
-  for (const match of output.matchAll(tokenPattern)) {
+  for (const match of output.matchAll(artifactTokenPattern)) {
     if (candidates.length >= 16) break;
-    // 去掉结尾可能粘连的标点/引号（如 “已保存 fox.png。”）。
-    let raw = match[0].trim();
-    raw = raw.replace(/[^A-Za-z0-9_./\\-]+$/u, "");
-    if (!raw) continue;
-    const relativePath = safeRelativePath(root, raw);
-    if (!relativePath) continue;
-    const key = relativePath.toLowerCase();
-    if (seen.has(key)) continue;
-    if (relativePath.split("/").some((segment) => ignoredWorkspaceEntries.has(segment))) continue;
-    const extension = extname(relativePath).toLowerCase();
-    if (!artifactExtensions.has(extension)) continue;
-    seen.add(key);
-    candidates.push(relativePath);
+    // 只认保存语境：同一行内“路径前 60 字符 / 后 24 字符”窗口有指示词
+    // （“已保存 fox.png” / “Saved: fox.png”）；窗口不跨行，避免相邻行的
+    // git 提交信息、标题等无关词污染判定。
+    const lineStart = output.lastIndexOf("\n", match.index - 1) + 1;
+    const nextBreak = output.indexOf("\n", match.index);
+    const windowStart = Math.max(lineStart, match.index - 60);
+    const windowEnd = Math.min(nextBreak < 0 ? match.index + 24 : nextBreak, match.index + 24);
+    if (!artifactSignalPattern.test(output.slice(windowStart, windowEnd))) continue;
+    pushArtifactCandidate(root, match[0], seen, candidates, 16);
   }
   return candidates;
 }

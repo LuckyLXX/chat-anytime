@@ -73,7 +73,7 @@ import {
   type PersistedSessionEntry,
   type PersistedSessionMessage
 } from "./session-history.js";
-import { artifactCandidatesFromOutput, changedWorkspaceFile, changedWorkspaceFiles, existingWorkspaceFiles, isArtifactProducingTool } from "./workspace-preview.js";
+import { artifactCandidatesFromBashCommand, artifactCandidatesFromOutput, changedWorkspaceFile, changedWorkspaceFiles, existingWorkspaceFiles, isArtifactProducingTool } from "./workspace-preview.js";
 import { createToolAudit } from "./tool-audit.js";
 import { diffToolNames } from "./tool-delta.js";
 import * as runtimeTodoTools from "./runtime-todo-tools.js";
@@ -994,11 +994,17 @@ function handleSessionEvent(record: SessionRuntimeRecord, event: AgentSessionEve
         changedFile: current?.changedFile ?? changedWorkspaceFile(record.workspace, event.toolName, current?.args),
         changedFiles
       });
-      // 产出型工具（bash 落盘、MCP 生图、扩展工具等）的结果文本里可能携带
-      // 工作区内新生成的文件路径（如图片），异步校验存在性后回填到产物列表。
+      // 产出型工具（bash 落盘、MCP 生图、扩展工具等）可能生成工作区文件：
+      // bash 优先从命令参数（-o/重定向/cp/mv）解析显式输出路径，再补扫描结果
+      // 文本中“保存类指示词”附近的路径；两者都经异步 stat 存在性校验后回填。
       if (!event.isError && current && isArtifactProducingTool(event.toolName)) {
         const workspace = record.workspace;
-        const candidates = artifactCandidatesFromOutput(workspace, output);
+        let candidates: string[] = [];
+        if (event.toolName === "bash") {
+          const command = (current.args as { command?: unknown } | undefined)?.command;
+          if (typeof command === "string") candidates = artifactCandidatesFromBashCommand(workspace, command);
+        }
+        candidates = [...new Set([...candidates, ...artifactCandidatesFromOutput(workspace, output)])];
         if (candidates.length > 0 && workspace) {
           void existingWorkspaceFiles(workspace, candidates).then((artifacts) => {
             if (artifacts.length === 0) return;
