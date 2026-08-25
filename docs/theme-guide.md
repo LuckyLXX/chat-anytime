@@ -87,7 +87,7 @@
 
 **节点级钩子（时间线内部）**：`data-node-kind`（时间线段类型：`thinking` / `tool-call` / `text`）+ `data-node-state`（`running` / `completed` / `error`，缺失为普通态）。用于"思考中扫光""工具运行微光"等状态动画。
 
-**输入框分区钩子 `data-composer-zone`**：`queue`（排队列表）`attachments`（附件预览条）`error`（附件错误条）`input`（输入行）`footer`（工具栏行）`popup`（斜杠/引用/访问模式/模型/思考菜单）。
+**输入框分区钩子 `data-composer-zone`**：`queue`（排队列表）`plan`（计划模式状态条）`attachments`（附件预览条）`error`（附件错误条）`input`（输入行）`footer`（工具栏行）`popup`（斜杠/引用/访问模式/模型/思考菜单）。
 
 > `popup` 是绝对定位浮层：主题**不得修改其 `position`**（改成 `relative` 会落入网格隐式行并把排布打乱）；给浮层加层级请只改 `z-index`。
 
