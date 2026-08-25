@@ -1385,7 +1385,6 @@ export function App(): ReactNode {
   const [sidebarView, setSidebarView] = useState<"topics" | "files">("topics");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sidebarFlyoutOpen, setSidebarFlyoutOpen] = useState(false);
-  const flyoutCloseTimerRef = useRef<number | undefined>(undefined);
   const sidebarSearchRef = useRef<HTMLInputElement>(null);
   const [browsingWorkspace, setBrowsingWorkspace] = useState("");
   const [treeRefreshSignal, setTreeRefreshSignal] = useState(0);
@@ -2479,15 +2478,6 @@ export function App(): ReactNode {
     await window.piDesktop.send({ type: "thinking.select", level });
   }
 
-  function openSidebarFlyout(): void {
-    if (flyoutCloseTimerRef.current) window.clearTimeout(flyoutCloseTimerRef.current);
-    setSidebarFlyoutOpen(true);
-  }
-  function scheduleCloseSidebarFlyout(): void {
-    if (flyoutCloseTimerRef.current) window.clearTimeout(flyoutCloseTimerRef.current);
-    flyoutCloseTimerRef.current = window.setTimeout(() => setSidebarFlyoutOpen(false), 150);
-  }
-
   const sidebarInner = (
     <>
       {sidebarView === "files" ? (
@@ -2575,16 +2565,16 @@ export function App(): ReactNode {
         <div key={`${kind}-${name}`} className="theme-layer" data-theme-layer={name} data-layer-kind={kind} style={{ background: `var(--pi-${kind}-${name}, none)` }} />
       ))}
       {sidebarCollapsed ? (
-        <div className="sidebar-rail" data-pane="sidebar" data-ui-sidebar-collapsed onMouseEnter={() => openSidebarFlyout()} onMouseLeave={() => scheduleCloseSidebarFlyout()}>
-          <button type="button" className="rail-brand" data-control="sidebar-expand" title="展开侧边栏" aria-label="展开侧边栏" onClick={() => setSidebarCollapsed(false)}><span className="rail-brand-mark">CA</span><PanelLeftOpen className="rail-brand-expand" size={18} /></button>
+        <div className="sidebar-rail" data-pane="sidebar" data-ui-sidebar-collapsed>
+          <button type="button" className="rail-brand" data-control="sidebar-expand" title="展开侧边栏" aria-label="展开侧边栏" onClick={() => { if (sidebarFlyoutOpen) { setSidebarFlyoutOpen(false); } else { setSidebarCollapsed(false); } }}><span className="rail-brand-mark">CA</span><PanelLeftOpen className="rail-brand-expand" size={18} /></button>
           <div className="sidebar-rail-items">
-            <button type="button" className="rail-new-session" data-control="new-session" title="在当前工作区新建话题" aria-label="在当前工作区新建话题" disabled={!snapshot.workspace} onClick={() => { void createNewSession(); openSidebarFlyout(); }}><Plus size={18} /></button>
-            <button type="button" className="rail-icon" data-control="rail-topics" title="话题列表" aria-label="话题列表" onClick={() => { setSidebarView("topics"); setSidebarTab("topics"); openSidebarFlyout(); }}><MessageCircle size={18} /></button>
-            <button type="button" className="rail-icon" data-control="rail-search" title="搜索" aria-label="搜索" onClick={() => { setSidebarView("topics"); openSidebarFlyout(); window.setTimeout(() => sidebarSearchRef.current?.focus(), 30); }}><Search size={18} /></button>
-            <button type="button" className="rail-icon" data-control="rail-agents" title="助手" aria-label="助手" onClick={() => { setSidebarView("topics"); setSidebarTab("agents"); openSidebarFlyout(); }}><Users size={18} /></button>
+            <button type="button" className="rail-new-session" data-control="new-session" title="在当前工作区新建话题" aria-label="在当前工作区新建话题" disabled={!snapshot.workspace} onClick={() => void createNewSession()}><Plus size={18} /></button>
+            <button type="button" className="rail-icon" data-control="rail-topics" title="话题列表" aria-label="话题列表" onClick={() => { setSidebarView("topics"); setSidebarTab("topics"); setSidebarFlyoutOpen(true); }}><MessageCircle size={18} /></button>
+            <button type="button" className="rail-icon" data-control="rail-search" title="搜索" aria-label="搜索" onClick={() => { setSidebarView("topics"); setSidebarFlyoutOpen(true); window.setTimeout(() => sidebarSearchRef.current?.focus(), 30); }}><Search size={18} /></button>
+            <button type="button" className="rail-icon" data-control="rail-agents" title="助手" aria-label="助手" onClick={() => { setSidebarView("topics"); setSidebarTab("agents"); setSidebarFlyoutOpen(true); }}><Users size={18} /></button>
           </div>
           {sidebarFlyoutOpen && (
-            <aside className="sidebar sidebar-flyout" data-pane="sidebar" onMouseEnter={() => openSidebarFlyout()} onMouseLeave={() => scheduleCloseSidebarFlyout()}>
+            <aside className="sidebar sidebar-flyout" data-pane="sidebar">
               <div className="brand-row"><div className="brand-mark">CA</div><div><strong>ChatAnyTime</strong><span>桌面端</span></div></div>
               {sidebarInner}
             </aside>
