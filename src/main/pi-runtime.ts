@@ -407,20 +407,20 @@ function sessionTodosPath(sessionId: string): string {
   return join(root, "todos", `${sessionId}.json`);
 }
 
-function sessionPlansPath(sessionId: string): string {
-  const root = agentSessionRoot();
-  if (!root) throw new Error("当前没有可用的 Agent，无法定位计划模式存储");
-  return join(root, "plans", `${sessionId}.json`);
+function sessionPlansPath(agentId: string, sessionId: string): string {
+  return join(getAgentDir(), "chatanytime-sessions", agentId, "plans", `${sessionId}.json`);
 }
 
 /**
  * 切换会话的计划模式：更新 record 状态（进入时挂上完整叙事待注入）、原子写盘
  * （会话级，重开后恢复）并广播快照。写入失败不影响内存状态（best-effort）。
+ * 路径按 record.agent 计算——后台 parked 会话切换时全局 currentAgent 可能已
+ * 指向别的助手，不能用全局算存储目录。
  */
 function setPlanMode(record: SessionRuntimeRecord, enabled: boolean): void {
   record.planState = { enabled, narrate: enabled ? "full" : undefined };
   try {
-    writePlanMode(sessionPlansPath(record.session.sessionId), enabled);
+    writePlanMode(sessionPlansPath(record.agent.id, record.session.sessionId), enabled);
   } catch (error) {
     void post({ type: "log", level: "warn", message: `保存计划模式状态失败：${errorText(error)}` });
   }
@@ -1507,7 +1507,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   // 计划模式：会话级状态从磁盘恢复（enabled 保留，narrate 从空开始——
   // 完整指引仅在新进入时注入，恢复的会话由 agent_start 安排短提醒）。
   const recordPlanState: runtimePlanTools.PlanModeState = {
-    enabled: readPlanMode(sessionPlansPath(activeSessionManager.getSessionId())),
+    enabled: readPlanMode(sessionPlansPath(recordAgent.id, activeSessionManager.getSessionId())),
     narrate: undefined
   };
   const planTools = runtimePlanTools.buildPlanTools({
@@ -1898,6 +1898,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       if (live) disposeRecord(live);
       try { await unlink(deleteTarget); } catch { /* 会话文件可能已不存在 */ }
       try { await unlink(join(deleteRoot, "todos", `${sessionId}.json`)); } catch { /* 任务文件可能不存在 */ }
+      try { await unlink(join(deleteRoot, "plans", `${sessionId}.json`)); } catch { /* 计划模式状态文件可能不存在 */ }
       // 删除当前在用的会话后立即补一个空白会话，保持「当前话题」可用。
       if (wasActive && workspace) {
         const sessionDir = workspaceSessionDir();
@@ -1924,6 +1925,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
           try { await unlink(item.path); } catch { /* 会话文件可能已释放或不存在 */ }
           // Session-scoped todo file lives next to the session list under todos/.
           try { await unlink(join(removeRoot, "todos", `${item.id}.json`)); } catch { /* 任务文件可能不存在 */ }
+          try { await unlink(join(removeRoot, "plans", `${item.id}.json`)); } catch { /* 计划模式状态文件可能不存在 */ }
         }
       }
       await refreshSessions();

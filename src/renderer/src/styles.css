@@ -523,7 +523,7 @@ button, input, select, textarea, summary, label {
 .question-options { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
 /* 问题详情（计划审查等）：题目下方的 markdown 区，独立滚动不挤压选项。 */
 .question-detail { flex: 0 0 auto; max-height: min(38vh, 300px); overflow-y: auto; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-muted); }
-.question-detail .rich-content { font-size: 12.5px; }
+.question-detail .rich-content { font-size: 13px; }
 .question-option { display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 12px; border: 1px solid transparent; border-radius: 6px; color: var(--text); background: transparent; font-size: 13px; line-height: 1.4; text-align: left; cursor: pointer; transition: color .12s ease, border-color .12s ease, background .12s ease; }
 .question-option:hover, .question-option:focus-visible { border-color: var(--border-strong); background: var(--surface-input); }
 .question-option:focus-visible { outline: none; border-color: var(--accent); }

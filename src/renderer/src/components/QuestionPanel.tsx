@@ -152,7 +152,7 @@ export function QuestionPanel({ request }: { request: QuestionRequest }): ReactN
         </div>
       </header>
       {item.detail && (
-        <div className="question-detail" data-role="question-detail" aria-label="问题详情">
+        <div className="question-detail" aria-label="问题详情">
           <RichContent artifactPrefix="question-detail" onOpenArtifact={() => undefined}>{item.detail}</RichContent>
         </div>
       )}

@@ -73,6 +73,16 @@ export function createPlanModeExtension(deps: { state: () => PlanModeState | und
         state.narrate = undefined;
         return { messages };
       });
+      // 叙事只注入一次（保前缀缓存），但注入的那次请求可能失败重试——
+      // 重试请求读不到已清除的叙事。失败响应后重新挂上短提醒，下一次
+      // context 注入再次生效；未重试直接失败的 run 则留给下个 agent_start。
+      pi.on("after_provider_response", (event) => {
+        if (event.status < 400) return;
+        const state = deps.state();
+        if (state?.enabled && state.narrate === undefined) {
+          state.narrate = "reminder";
+        }
+      });
     }
   };
 }

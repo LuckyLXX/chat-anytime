@@ -381,12 +381,12 @@ export function createDemoApi(): DesktopApi {
           break;
         case "workspace.open":
           resetDemoContext(0);
-          updateSnapshot({ workspace: command.path, sessionId: undefined, messages: [], executions: [], contextUsage: demoContextUsage(), recentWorkspaces: recordDemoWorkspace(demoSnapshot.recentWorkspaces, command.path) });
+          updateSnapshot({ workspace: command.path, sessionId: undefined, messages: [], executions: [], contextUsage: demoContextUsage(), planMode: false, recentWorkspaces: recordDemoWorkspace(demoSnapshot.recentWorkspaces, command.path) });
           break;
         case "agent.select":
           demoSettings.currentAgentId = command.agentId;
           resetDemoContext(0);
-          updateSnapshot({ agentId: command.agentId, agentName: activeDemoAgent().name, sessionId: `${command.agentId}-demo-session`, messages: [], contextUsage: demoContextUsage() });
+          updateSnapshot({ agentId: command.agentId, agentName: activeDemoAgent().name, sessionId: `${command.agentId}-demo-session`, messages: [], contextUsage: demoContextUsage(), planMode: false });
           applyDemoAgentSkillOverrides();
           emit({ type: "resources", resources: structuredClone(demoResources) });
           break;
@@ -426,13 +426,13 @@ export function createDemoApi(): DesktopApi {
         case "session.new": {
           const workspace = command.workspace ?? demoSnapshot.workspace ?? "D:\\Projects\\chat-anytime-demo";
           resetDemoContext(0);
-          updateSnapshot({ workspace, messages: [], executions: [], sessionId: "new-demo-session", contextUsage: demoContextUsage(), recentWorkspaces: recordDemoWorkspace(demoSnapshot.recentWorkspaces, workspace) });
+          updateSnapshot({ workspace, messages: [], executions: [], sessionId: "new-demo-session", contextUsage: demoContextUsage(), planMode: false, recentWorkspaces: recordDemoWorkspace(demoSnapshot.recentWorkspaces, workspace) });
           break;
         }
         case "session.open": {
           const workspace = command.workspace ?? demoSnapshot.workspace ?? "D:\\Projects\\chat-anytime-demo";
           resetDemoContext(2_600);
-          updateSnapshot({ workspace, sessionId: command.path.replace(/.*[\\/]/u, "").replace(/\.jsonl$/u, ""), messages: [], executions: [], contextUsage: demoContextUsage(), recentWorkspaces: recordDemoWorkspace(demoSnapshot.recentWorkspaces, workspace) });
+          updateSnapshot({ workspace, sessionId: command.path.replace(/.*[\\/]/u, "").replace(/\.jsonl$/u, ""), messages: [], executions: [], contextUsage: demoContextUsage(), planMode: false, recentWorkspaces: recordDemoWorkspace(demoSnapshot.recentWorkspaces, workspace) });
           break;
         }
         case "session.planMode":

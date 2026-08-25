@@ -5,6 +5,7 @@ import {
   PLAN_MODE_GUIDANCE_REMINDER,
   PLAN_REVISE_OPTION,
   buildPlanTools,
+  createPlanModeExtension,
   injectPlanNarration,
   parsePlanReview,
   planNarrationText,
@@ -13,6 +14,8 @@ import {
   type PlanToolDeps
 } from "./runtime-plan-tools.js";
 import type { QuestionBroker, QuestionOutcome } from "./runtime-question-tool.js";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 
 const idleState: PlanModeState = { enabled: false, narrate: undefined };
 
@@ -98,6 +101,73 @@ describe("plan review question", () => {
     expect(parsePlanReview(undefined)).toEqual({ status: "cancelled" });
     expect(parsePlanReview([])).toEqual({ status: "cancelled" });
     expect(parsePlanReview([`  ${PLAN_APPROVE_OPTION}  `])).toEqual({ status: "approved" });
+  });
+});
+
+describe("plan mode extension (context injection + retry backstop)", () => {
+  interface CapturedHandlers {
+    context: ((event: { messages: AgentMessage[] }) => { messages: AgentMessage[] } | undefined)[];
+    afterProviderResponse: ((event: { status: number }) => void)[];
+  }
+
+  function capture(state: PlanModeState): { state: PlanModeState; handlers: CapturedHandlers } {
+    const handlers: CapturedHandlers = { context: [], afterProviderResponse: [] };
+    const pi = {
+      on(event: string, handler: unknown): void {
+        if (event === "context") handlers.context.push(handler as CapturedHandlers["context"][number]);
+        if (event === "after_provider_response") handlers.afterProviderResponse.push(handler as CapturedHandlers["afterProviderResponse"][number]);
+      }
+    };
+    const extension = createPlanModeExtension({ state: () => state }) as { factory: (pi: ExtensionAPI) => void | Promise<void> };
+    extension.factory(pi as ExtensionAPI);
+    return { state, handlers };
+  }
+
+  const messages = (): AgentMessage[] => [{ role: "user", content: [{ type: "text", text: "任务" }] } as AgentMessage];
+
+  it("injects full guidance on entry and clears the pending narration", () => {
+    const state: PlanModeState = { enabled: true, narrate: "full" };
+    const { handlers } = capture(state);
+    const result = handlers.context[0]!({ messages: messages() });
+    const serialized = JSON.stringify(result?.messages);
+    expect(serialized).toContain("计划模式已开启");
+    expect(serialized).toContain("批准之前绝对不要开始实施");
+    expect(state.narrate).toBeUndefined();
+  });
+
+  it("leaves requests untouched when there is no pending narration", () => {
+    const state: PlanModeState = { enabled: true, narrate: undefined };
+    const { handlers } = capture(state);
+    const result = handlers.context[0]!({ messages: messages() });
+    expect(result).toBeUndefined();
+  });
+
+  it("re-arms a reminder after a failed provider response so retries see the guidance", () => {
+    const state: PlanModeState = { enabled: true, narrate: undefined };
+    const { handlers } = capture(state);
+    handlers.afterProviderResponse[0]!({ status: 500 });
+    expect(state.narrate).toBe("reminder");
+    const result = handlers.context[0]!({ messages: messages() });
+    expect(JSON.stringify(result?.messages)).toContain("提醒：本会话仍处于计划模式");
+  });
+
+  it("ignores successful responses and disabled mode", () => {
+    const enabled: PlanModeState = { enabled: true, narrate: undefined };
+    const { handlers: okHandlers } = capture(enabled);
+    okHandlers.afterProviderResponse[0]!({ status: 200 });
+    expect(enabled.narrate).toBeUndefined();
+
+    const disabled: PlanModeState = { enabled: false, narrate: undefined };
+    const { handlers: offHandlers } = capture(disabled);
+    offHandlers.afterProviderResponse[0]!({ status: 429 });
+    expect(disabled.narrate).toBeUndefined();
+  });
+
+  it("keeps a pending full narration through a failure (no downgrade)", () => {
+    const state: PlanModeState = { enabled: true, narrate: "full" };
+    const { handlers } = capture(state);
+    handlers.afterProviderResponse[0]!({ status: 503 });
+    expect(state.narrate).toBe("full");
   });
 });
 
