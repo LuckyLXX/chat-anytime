@@ -86,7 +86,7 @@ import { WorkspaceTree } from "./components/WorkspaceTree";
 import { ContextMenu, type ContextMenuItem } from "./components/ContextMenu";
 import { CodeBlock, RichContent } from "./components/RichContent";
 import { PermissionDialog } from "./components/RuntimeDialogs";
-import { QuestionPanel } from "./components/QuestionPanel";
+import { QuestionPanel, detailTitle } from "./components/QuestionPanel";
 import { compactPath, extractMentionTokens, formatDuration, type Artifact } from "./lib/content";
 import { composePickMessage } from "./lib/browser-pick";
 import { contextUsageCacheLabel, contextUsagePercentLabel, contextUsageTone, contextUsageTooltip } from "./lib/context-usage";
@@ -128,6 +128,7 @@ function previewTargetKey(target: PreviewTarget): string {
     case "browser": return target.id ?? "browser";
     case "terminal": return "terminal";
     case "file": return target.file.relativePath;
+    case "plan": return "plan";
     default: return `${target.type}-${target.path ?? target.title}`;
   }
 }
@@ -2074,6 +2075,11 @@ export function App(): ReactNode {
     openPreviewTarget({ type: "browser", id: `browser-${crypto.randomUUID()}` });
   }
 
+  /** 打开计划全文预览（内存 markdown，不落盘），供审查面板「查看完整」跳转。 */
+  function openPlanPreview(detail: string): void {
+    openPreviewTarget({ type: "plan", title: detailTitle(detail), content: detail });
+  }
+
   function openTerminalPreview(): void {
     openPreviewTarget({ type: "terminal" }, `terminal-${crypto.randomUUID()}`);
   }
@@ -2631,7 +2637,7 @@ export function App(): ReactNode {
                 {isGenerating && (assistantBubbleVisible ? <div className="response-progress response-progress-inline"><LoaderCircle size={14} className="spinning" /><span>{workingLabel}</span>{activeTurnTiming && <TimingMeta timing={activeTurnTiming} now={now} />}</div> : <PendingResponse label={workingLabel} timing={activeTurnTiming} now={now} />)}
               </>}
             </div>
-            {question && <QuestionPanel request={question} />}
+            {question && <QuestionPanel request={question} onOpenDetail={openPlanPreview} />}
             <form ref={composerRef} className={`composer${snapshot.queuedMessages.length > 0 ? " has-queue" : ""}`} data-pane="composer" onSubmit={submit} onDragOver={(event) => event.preventDefault()} onDrop={handleDrop}>
               {snapshot.queuedMessages.length > 0 && (
                 <div className="composer-queue" role="list" aria-label="排队输入" data-composer-zone="queue">

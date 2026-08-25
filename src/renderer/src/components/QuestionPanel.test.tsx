@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { QuestionItem, QuestionRequest } from "../../../shared/protocol";
-import { emptyQuestionDraft, isQuestionAnswered, QuestionPanel, serializeAnswer, singleSelectionAnswer } from "./QuestionPanel";
+import { detailPreviewText, detailTitle, emptyQuestionDraft, isQuestionAnswered, QuestionPanel, serializeAnswer, singleSelectionAnswer } from "./QuestionPanel";
 
 function item(input: Partial<QuestionItem> & { text: string }): QuestionItem {
   return { type: "text", options: [], ...input };
@@ -44,6 +44,45 @@ describe("isQuestionAnswered", () => {
     expect(isQuestionAnswered(single, { custom: "", selected: ["React"] })).toBe(true);
     expect(isQuestionAnswered(single, { custom: "Svelte", selected: [] })).toBe(true);
     expect(isQuestionAnswered(single, emptyQuestionDraft())).toBe(false);
+  });
+});
+
+describe("detailPreviewText", () => {
+  it("returns the detail unchanged when within the limit", () => {
+    const result = detailPreviewText("# 计划\n\n短文本", 100);
+    expect(result.preview).toBe("# 计划\n\n短文本");
+    expect(result.truncated).toBe(false);
+  });
+
+  it("cuts long details back to the last newline before the limit", () => {
+    const long = `# 计划\n\n第一步计划内容……${"篇幅内容".repeat(50)}`;
+    const result = detailPreviewText(long, 100);
+    expect(result.truncated).toBe(true);
+    expect(result.preview.length).toBeLessThanOrEqual(104);
+    expect(result.preview.endsWith("…")).toBe(true);
+    // 预览不包含截断点之后的内容。
+    expect(long.slice(result.preview.length - 1)).toContain("篇幅内容");
+  });
+
+  it("hard-cuts when there is no newline before the limit", () => {
+    const result = detailPreviewText("无换行内容".repeat(50), 20);
+    expect(result.truncated).toBe(true);
+    expect(result.preview.length).toBeLessThanOrEqual(24);
+  });
+
+  it("uses the default 1600-char limit", () => {
+    expect(detailPreviewText("短").truncated).toBe(false);
+    expect(detailPreviewText("长".repeat(2000)).truncated).toBe(true);
+  });
+});
+
+describe("detailTitle", () => {
+  it("extracts the first markdown heading", () => {
+    expect(detailTitle("# 状态栏时钟实现计划\n\n正文")).toBe("状态栏时钟实现计划");
+  });
+
+  it("falls back to 计划 without a heading", () => {
+    expect(detailTitle("无标题内容")).toBe("计划");
   });
 });
 

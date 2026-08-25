@@ -1,4 +1,4 @@
-import { CircleHelp } from "lucide-react";
+import { CircleHelp, Maximize2 } from "lucide-react";
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import type { QuestionItem, QuestionRequest } from "../../../shared/protocol";
 import { useDesktopStore } from "../store";
@@ -8,6 +8,26 @@ import { RichContent } from "./RichContent";
 export interface QuestionDraft {
   custom: string;
   selected: string[];
+}
+
+/** 详情预览的默认截断长度（字符）；超出后展示预览 + 「查看完整」按钮。 */
+export const DETAIL_PREVIEW_MAX_CHARS = 1600;
+
+/** 从 markdown 详情提取标题（首个 `# ` 行），无标题回落为「计划」。 */
+export function detailTitle(detail: string): string {
+  const heading = /^#\s+(.+?)\s*$/mu.exec(detail.trim());
+  return heading?.[1]?.trim() || "计划";
+}
+
+/**
+ * 详情预览文本：截断到 {@link DETAIL_PREVIEW_MAX_CHARS} 字符，并回退到最近的
+ * 换行边界（没有换行则硬截）；返回截断后的预览与是否截断标记。
+ */
+export function detailPreviewText(detail: string, maxChars = DETAIL_PREVIEW_MAX_CHARS): { preview: string; truncated: boolean } {
+  if (detail.length <= maxChars) return { preview: detail, truncated: false };
+  let cut = detail.lastIndexOf("\n", maxChars);
+  if (cut <= 0) cut = maxChars;
+  return { preview: `${detail.slice(0, cut).trimEnd()}\n…`, truncated: true };
 }
 
 export function emptyQuestionDraft(): QuestionDraft {
@@ -42,7 +62,7 @@ export function serializeAnswer(item: QuestionItem, draft: QuestionDraft): strin
  * 回车或空格选中。选择题第一个选项自动标注「（推荐）」——与 ask_question
  * 工具描述的约定一致：模型把最推荐的选项放在第一位。
  */
-export function QuestionPanel({ request }: { request: QuestionRequest }): ReactNode {
+export function QuestionPanel({ request, onOpenDetail }: { request: QuestionRequest; onOpenDetail?: (detail: string) => void }): ReactNode {
   const [drafts, setDrafts] = useState<QuestionDraft[]>(() => request.questions.map(() => emptyQuestionDraft()));
   const [current, setCurrent] = useState(0);
   const [submitting, setSubmitting] = useState(false);
@@ -115,6 +135,7 @@ export function QuestionPanel({ request }: { request: QuestionRequest }): ReactN
   const item = request.questions[current] ?? request.questions[0]!;
   const isLast = current === request.questions.length - 1;
   const answered = isQuestionAnswered(item, drafts[current] ?? emptyQuestionDraft());
+  const detailPreview = item.detail ? detailPreviewText(item.detail) : undefined;
 
   /** 忽略 = 取消整个提问；继续 = 手动推进（多选勾选后、或想停留再确认时用）。 */
   function continueToNext(): void {
@@ -165,9 +186,14 @@ export function QuestionPanel({ request }: { request: QuestionRequest }): ReactN
           <button type="button" aria-label="下一题" disabled={isLast || submitting} onClick={() => setCurrent((value) => Math.min(request.questions.length - 1, value + 1))}>▶</button>
         </div>
       </header>
-      {item.detail && (
+      {detailPreview && (
         <div className="question-detail" aria-label="问题详情">
-          <RichContent artifactPrefix="question-detail" onOpenArtifact={() => undefined}>{item.detail}</RichContent>
+          <RichContent artifactPrefix="question-detail" onOpenArtifact={() => undefined}>{detailPreview.preview}</RichContent>
+          {detailPreview.truncated && (
+            <div className="question-detail-actions">
+              <button type="button" className="question-detail-open" onClick={() => onOpenDetail?.(item.detail!)}><Maximize2 size={12} />查看完整</button>
+            </div>
+          )}
         </div>
       )}
       {item.options.length > 0 && (

@@ -1,4 +1,4 @@
-import { AlertCircle, Check, Code2, Eye, File, FileCode2, FileDiff, FileText, Globe2, LoaderCircle, MessageSquare, Pause, Pencil, Play, Plus, Terminal, X } from "lucide-react";
+import { AlertCircle, Check, ClipboardList, Code2, Eye, File, FileCode2, FileDiff, FileText, Globe2, LoaderCircle, MessageSquare, Pause, Pencil, Play, Plus, Terminal, X } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode, type SyntheticEvent } from "react";
 import type { BrowserElementPick, BrowserPreviewState, WorkspaceFilePreview } from "../../../shared/protocol";
 import { IMAGE_PREVIEW_LIMIT_BYTES, workspaceFilePreviewUrl } from "../../../shared/protocol";
@@ -15,6 +15,7 @@ export type PreviewTarget =
   | { type: "terminal" }
   | { type: "file"; file: WorkspaceFilePreview; workspace?: string }
   | { type: "diff"; title: string; path?: string; patch: string }
+  | { type: "plan"; title: string; content: string }
   | { type: "loading"; title: string; path: string }
   | { type: "error"; title: string; path: string; message: string };
 
@@ -48,6 +49,7 @@ function targetMetadata(target: PreviewTarget): { title: string; path?: string; 
   if (target.type === "browser") return { title: target.title || "内置浏览器", label: "WEB" };
   if (target.type === "terminal") return { title: "终端", label: "TERM" };
   if (target.type === "file") return { title: target.file.name, path: target.file.relativePath, label: target.file.kind === "code" ? (target.file.language ?? "CODE").toUpperCase() : target.file.kind.toUpperCase() };
+  if (target.type === "plan") return { title: target.title, label: "PLAN" };
   if (target.type === "diff") return { title: target.title, path: target.path, label: "DIFF" };
   return { title: target.title, path: target.path, label: target.type === "loading" ? "LOADING" : "ERROR" };
 }
@@ -56,6 +58,7 @@ function targetIcon(target: PreviewTarget): ReactNode {
   if (target.type === "diff") return <Code2 size={15} />;
   if (target.type === "browser") return <Globe2 size={15} />;
   if (target.type === "terminal") return <Terminal size={15} />;
+  if (target.type === "plan") return <ClipboardList size={15} />;
   return <FileCode2 size={15} />;
 }
 
@@ -162,7 +165,7 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, onSelectT
   const frameRef = useRef<HTMLIFrameElement | null>(null);
 
   const showSource = sourceModes[activeTabId] === true;
-  const sourceable = Boolean(artifact) || (target.type === "file" && target.file.kind === "markdown" && target.file.content !== undefined);
+  const sourceable = Boolean(artifact) || (target.type === "file" && target.file.kind === "markdown" && target.file.content !== undefined) || target.type === "plan";
 
   function postPreviewAction(action: DynamicPreviewAction): void {
     frameRef.current?.contentWindow?.postMessage({ action }, "*");
@@ -260,9 +263,11 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, onSelectT
       <div className="content-preview-body">
         {showSource && artifact && <div className="preview-scroll preview-code"><CodeBlock language={artifact.language} code={artifact.content} /></div>}
         {showSource && !artifact && target.type === "file" && target.file.content !== undefined && <div className="preview-scroll preview-code"><CodeBlock language={target.file.kind === "markdown" ? "markdown" : target.file.language ?? "text"} code={target.file.content} /></div>}
+        {showSource && target.type === "plan" && <div className="preview-scroll preview-code"><CodeBlock language="markdown" code={target.content} /></div>}
         {!showSource && artifact && <iframe ref={frameRef} title={artifact.title} sandbox={artifactSandbox(artifact)} referrerPolicy="no-referrer" srcDoc={buildArtifactPreviewSource(artifact)} onLoad={handleLoad} />}
         {!showSource && target.type === "browser" && <BrowserPreview suspended={browserSuspended} tabId={activeTabId} onPickSend={onBrowserPickSend} onStateChange={(state) => onBrowserStateChange?.(activeTabId, state)} />}
         {target.type === "terminal" && <TerminalPanel terminalId={active.id} workspace={workspace} />}
+        {!showSource && target.type === "plan" && <div className="preview-scroll preview-markdown"><RichContent streaming={false} artifactPrefix={`plan-${activeTabId}`} onOpenArtifact={onOpenArtifact}>{target.content}</RichContent></div>}
         {!showSource && !artifact && target.type === "file" && <FilePreviewContent file={target.file} tabId={activeTabId} onOpenArtifact={onOpenArtifact} workspace={target.workspace ?? workspace} editorState={activeEditorState} onEditorChange={onActiveEditorChange} onEditorContentChange={onActiveEditorContentChange} onEditorSaved={onActiveEditorSaved} onEditorStatusChange={onActiveEditorStatusChange} onEditorSaveError={onActiveEditorSaveError} onResolveConflict={onActiveEditorResolveConflict} />}
         {target.type === "diff" && <div className="preview-scroll preview-diff"><DiffView patch={target.patch} /></div>}
         {target.type === "loading" && <div className="preview-empty"><LoaderCircle className="spinning" size={26} /><strong>正在读取文件</strong><span>{target.path}</span></div>}
