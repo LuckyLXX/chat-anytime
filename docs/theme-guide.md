@@ -64,6 +64,7 @@
 | 添加附件                                    | `attach`                                         |
 | 待发送队列条目操作                          | `queue-edit` / `queue-send-now` / `queue-remove` |
 | 访问模式                                    | `access-mode`                                    |
+| 计划模式开关（访问模式下拉内）              | `plan-toggle`                                    |
 | 模型快捷切换                                | `model-select`                                   |
 | 思考级别                                    | `thinking-select`                                |
 | 思考块展开/收起（消息内）                   | `thinking-expand`                                |

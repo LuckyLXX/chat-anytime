@@ -87,6 +87,8 @@ import * as runtimePermissions from "./runtime-permissions.js";
 import * as runtimeMcp from "./runtime-mcp.js";
 import * as runtimeContextUsage from "./runtime-context-usage.js";
 import * as runtimeHooks from "./runtime-hooks.js";
+import * as runtimePlanTools from "./runtime-plan-tools.js";
+import { readPlanMode, saveApprovedPlan, writePlanMode } from "./plan-store.js";
 import { hookActionPreview, readConfiguredHooks, removeHookConfig, setHookDisabled, upsertHookConfig, validateHookRule, type ConfiguredHook } from "./hooks-config.js";
 
 const parentPort = process.parentPort;
@@ -139,6 +141,8 @@ interface SessionRuntimeRecord {
   todoStore: TodoStore;
   /** Per-session tool-call pacer backing the todo_write anti-batching reminder. */
   todoPace: runtimeTodoTools.TodoPaceTracker;
+  /** 计划模式状态（会话级，磁盘恢复；narrate 驱动一次性 context 注入）。 */
+  planState: runtimePlanTools.PlanModeState;
   /** 按助手划分的长期记忆库（跨会话）；工具闭包读它，提示词快照在创建时冻结。 */
   memoryStore: MemoryStore;
   customTools: ToolDefinition[];
@@ -146,6 +150,7 @@ interface SessionRuntimeRecord {
   todoTools: ToolDefinition[];
   memoryTools: ToolDefinition[];
   questionTools: ToolDefinition[];
+  planTools: ToolDefinition[];
   /** Captured at bindExtensions(); drives MCP hot-reload for this session only. */
   extensionApi: ExtensionAPI | undefined;
   permissionDeps: runtimePermissions.PermissionGateDeps;
@@ -402,6 +407,26 @@ function sessionTodosPath(sessionId: string): string {
   return join(root, "todos", `${sessionId}.json`);
 }
 
+function sessionPlansPath(sessionId: string): string {
+  const root = agentSessionRoot();
+  if (!root) throw new Error("当前没有可用的 Agent，无法定位计划模式存储");
+  return join(root, "plans", `${sessionId}.json`);
+}
+
+/**
+ * 切换会话的计划模式：更新 record 状态（进入时挂上完整叙事待注入）、原子写盘
+ * （会话级，重开后恢复）并广播快照。写入失败不影响内存状态（best-effort）。
+ */
+function setPlanMode(record: SessionRuntimeRecord, enabled: boolean): void {
+  record.planState = { enabled, narrate: enabled ? "full" : undefined };
+  try {
+    writePlanMode(sessionPlansPath(record.session.sessionId), enabled);
+  } catch (error) {
+    void post({ type: "log", level: "warn", message: `保存计划模式状态失败：${errorText(error)}` });
+  }
+  if (record === activeRuntime) emitState();
+}
+
 /** Build the Todo customTools for a session-scoped store + pace tracker. */
 function buildTodoTools(store: TodoStore, pace: runtimeTodoTools.TodoPaceTracker): ToolDefinition[] {
   return runtimeTodoTools.buildTodoTools({ store, pace });
@@ -528,6 +553,8 @@ function snapshot(): RuntimeSnapshot {
       ...record.session.getFollowUpMessages().map((text, index) => ({ kind: "followUp" as const, index, text }))
     ] : [],
     contextUsage: snapshotContextUsage(record),
+    // 计划模式是会话级协作状态（与访问模式独立）：快照只反映激活会话。
+    planMode: record?.planState.enabled ?? false,
     messages,
     executions: record ? [...record.executions.values()] : [],
     backgroundProcesses: backgroundProcesses.list(),
@@ -748,8 +775,8 @@ function wrapModelRuntimeForVision(runtime: ModelRuntime): ModelRuntime {
  * customTools arrays are held by reference inside Pi, so hot-path updates
  * rebuild in place (`length = 0` + push) instead of swapping the array.
  */
-function buildRecordTools(record: Pick<SessionRuntimeRecord, "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "visionTools" | "browserTools">): ToolDefinition[] {
-  return [...mcpTools, ...record.subagentTools, ...record.todoTools, ...record.memoryTools, ...record.questionTools, ...record.visionTools, ...record.browserTools];
+function buildRecordTools(record: Pick<SessionRuntimeRecord, "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "planTools" | "visionTools" | "browserTools">): ToolDefinition[] {
+  return [...mcpTools, ...record.subagentTools, ...record.todoTools, ...record.memoryTools, ...record.questionTools, ...record.planTools, ...record.visionTools, ...record.browserTools];
 }
 
 /**
@@ -758,7 +785,7 @@ function buildRecordTools(record: Pick<SessionRuntimeRecord, "subagentTools" | "
  * models — multimodal models see the same tool set as before, so the request
  * prefix stays stable within each session/model configuration (cache discipline).
  */
-function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "visionTools" | "browserTools">, includeVision: boolean): string[] {
+function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "planTools" | "visionTools" | "browserTools">, includeVision: boolean): string[] {
   const builtin = Object.entries(record.agent.tools ?? {}).filter(([, enabled]) => enabled).map(([name]) => name);
   return [
     ...builtin,
@@ -767,6 +794,7 @@ function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "subagentTool
     ...record.todoTools.map((tool) => tool.name),
     ...record.memoryTools.map((tool) => tool.name),
     ...record.questionTools.map((tool) => tool.name),
+    ...record.planTools.map((tool) => tool.name),
     ...(includeVision ? record.visionTools.map((tool) => tool.name) : []),
     // Browser tools stay active regardless of the settings switch: the
     // execute closure reports the disabled state instead (no session rebuild).
@@ -915,6 +943,11 @@ function handleSessionEvent(record: SessionRuntimeRecord, event: AgentSessionEve
       record.status = "Pi 正在工作";
       record.abortRequested = false;
       record.runStatus = "running";
+      // 新回合开始：若计划模式仍开启且无待注入叙事，安排一段短提醒（完整
+      // 指引只在进入时注入一次；regenerate/截断重放不携带注入，需重新提示）。
+      if (record.planState.enabled && record.planState.narrate === undefined) {
+        record.planState = { ...record.planState, narrate: "reminder" };
+      }
       lifecycle = true;
       break;
     case "agent_end":
@@ -1423,7 +1456,12 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
         sessionId: () => sessionHolder.session?.sessionId ?? activeSessionManager.getSessionId(),
         warn: (message) => void post({ type: "log", level: "warn", message }),
         onToolStart: () => recordBox?.todoPace.record()
-      }).extension
+      }).extension,
+      // 计划模式叙事注入（第四个内联扩展）：只改「有叙事待注入的那一次」LLM
+      // 请求的消息尾部，其余请求原样放行（保前缀缓存）；叙事不进 transcript。
+      runtimePlanTools.createPlanModeExtension({
+        state: () => recordBox?.planState
+      })
     ],
     systemPromptOverride: (base) => [base, recordAgent.systemPrompt, recordAgent.divMode ? buildDivModePrompt() : undefined, buildSkillsSystemPromptBlock(runtimeSkills.activeSkillsFor(nativeSkills, recordAgent)), memoryPromptBlock].filter(Boolean).join("\n\n")
   });
@@ -1466,6 +1504,23 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     workspace: recordWorkspace,
     enabled: () => settings?.memory?.enabled !== false
   });
+  // 计划模式：会话级状态从磁盘恢复（enabled 保留，narrate 从空开始——
+  // 完整指引仅在新进入时注入，恢复的会话由 agent_start 安排短提醒）。
+  const recordPlanState: runtimePlanTools.PlanModeState = {
+    enabled: readPlanMode(sessionPlansPath(activeSessionManager.getSessionId())),
+    narrate: undefined
+  };
+  const planTools = runtimePlanTools.buildPlanTools({
+    getSessionId: () => recordSessionId,
+    getEnabled: () => recordBox?.planState.enabled ?? false,
+    setEnabled: (enabled) => {
+      if (recordBox) setPlanMode(recordBox, enabled);
+    },
+    broker: questionBroker,
+    workspace: () => recordWorkspace,
+    // 批准落盘：主进程侧直接写 docs/plans/（不经过模型工具，无权限门语义）。
+    savePlan: (plan) => saveApprovedPlan(recordWorkspace, plan)
+  });
   // ask_question 的挂起按会话清理（disposeRecord → broker.reset），而新会话的
   // sessionId 在 createAgentSession 之后才确定，因此以 getter 延迟读取。
   let recordSessionId = activeSessionManager.getSessionId();
@@ -1501,7 +1556,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   // Each record owns its customTools array: Pi stores it by reference and
   // re-reads it on every tool-registry refresh, so per-record arrays let parked
   // sessions keep their tool set while the active one hot-swaps MCP tools.
-  const recordCustomTools: ToolDefinition[] = [...mcpTools, ...subagentTools, ...todoTools, ...memoryTools, ...questionTools, ...visionTools, ...browserTools];
+  const recordCustomTools: ToolDefinition[] = [...mcpTools, ...subagentTools, ...todoTools, ...memoryTools, ...questionTools, ...planTools, ...visionTools, ...browserTools];
   const result = await createAgentSession({
     cwd: recordWorkspace,
     modelRuntime,
@@ -1529,12 +1584,14 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     controlMessages: restoreControlMessages(activeSessionManager.getBranch() as unknown as PersistedSessionEntry[]),
     todoStore: recordTodoStore,
     todoPace: recordTodoPace,
+    planState: recordPlanState,
     memoryStore: recordMemoryStore,
     customTools: recordCustomTools,
     subagentTools,
     todoTools,
     memoryTools,
     questionTools,
+    planTools,
     extensionApi: undefined,
     permissionDeps,
     visionTools,
@@ -2028,6 +2085,13 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         }
         if (changed) emitState();
       }
+      break;
+    }
+    case "session.planMode": {
+      const record = activeRuntime;
+      if (!record) throw new Error("请先打开一个会话，再切换计划模式");
+      setPlanMode(record, command.enabled);
+      emitState();
       break;
     }
     case "session.compact": {

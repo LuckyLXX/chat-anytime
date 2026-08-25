@@ -45,7 +45,8 @@ import {
   ChevronLeft,
   Pin,
   X,
-  Zap
+  Zap,
+  ClipboardList
 } from "lucide-react";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import type {
@@ -1472,7 +1473,8 @@ export function App(): ReactNode {
   const slashCommands = useMemo<SlashCommand[]>(() => {
     const fixed: SlashCommand[] = [
       { trigger: "/compact", label: "/compact", description: "压缩当前会话上下文", kind: "command", command: { type: "session.compact" } },
-      { trigger: "/new", label: "/new", description: "开启新话题", kind: "command", command: { type: "session.new" } }
+      { trigger: "/new", label: "/new", description: "开启新话题", kind: "command", command: { type: "session.new" } },
+      { trigger: "/plan", label: "/plan", description: snapshot.planMode ? "退出计划模式" : "进入计划模式：先出计划，批准后实施", kind: "command", command: { type: "session.planMode", enabled: !snapshot.planMode } }
     ];
     const skills: SlashCommand[] = resources.skills.filter((skill) => skill.enabled).map((skill) => ({
       trigger: `/skill:${skill.name}`,
@@ -1482,7 +1484,7 @@ export function App(): ReactNode {
       skillName: skill.name
     }));
     return [...fixed, ...skills];
-  }, [resources.skills]);
+  }, [resources.skills, snapshot.planMode]);
 
   // 仅当输入以 / 开头且光标仍处于首个 token（无空格）时才过滤指令
   const slashToken = useMemo(() => {
@@ -2442,6 +2444,15 @@ export function App(): ReactNode {
     await window.piDesktop.send({ type: "model.select", provider: value.slice(0, slash), id: value.slice(slash + 1) });
   }
 
+  /** 计划模式是独立于访问模式的协作轴：下拉项只做开关入口，不写 settings。 */
+  function togglePlanMode(): void {
+    setAccessModeMenuOpen(false);
+    setComposerMenu(undefined);
+    void window.piDesktop.send({ type: "session.planMode", enabled: !snapshot.planMode }).catch((error) => {
+      setMessageActionError(error instanceof Error ? error.message : "计划模式切换失败");
+    });
+  }
+
   async function selectAccessMode(value: AccessMode): Promise<void> {
     setAccessModeMenuOpen(false);
     setComposerMenu(undefined);
@@ -2683,6 +2694,8 @@ export function App(): ReactNode {
                     <button className={`access-mode-button${settings.accessMode === "full" ? " full" : ""}`} data-control="access-mode" type="button" aria-haspopup="menu" aria-expanded={accessModeMenuOpen} onClick={() => { setComposerMenu(undefined); setAccessModeMenuOpen((open) => !open); }}>{settings.accessMode === "full" ? <ShieldAlert size={15} /> : <ShieldCheck size={15} />}<span>{accessModeOptions.find((option) => option.value === settings.accessMode)?.label ?? "访问模式"}</span><ChevronDown size={13} /></button>
                     {accessModeMenuOpen && <div className="access-mode-menu" data-composer-zone="popup" role="menu" aria-label="访问模式">
                       {accessModeOptions.map((option) => <button className={`access-mode-menu-item${option.value === settings.accessMode ? " active" : ""}${option.value === "full" ? " full" : ""}`} type="button" role="menuitemradio" aria-checked={option.value === settings.accessMode} key={option.value} onClick={() => void selectAccessMode(option.value)}>{option.value === "full" ? <ShieldAlert size={15} /> : <ShieldCheck size={15} />}<span><strong>{option.label}</strong><small>{accessModeDescriptions[option.value]}</small></span>{option.value === settings.accessMode && <Check size={14} />}</button>)}
+                    <div className="access-mode-menu-divider" />
+                    <button className={`access-mode-menu-item plan-mode${snapshot.planMode ? " active" : ""}`} data-control="plan-toggle" type="button" role="menuitem" aria-checked={snapshot.planMode} onClick={togglePlanMode}><ClipboardList size={15} /><span><strong>计划模式</strong><small>{snapshot.planMode ? "已开启：先产出计划，批准后才实施" : "先产出计划，批准后才实施"}</small></span>{snapshot.planMode && <Check size={14} />}</button>
                     </div>}
                   </div>
                   {snapshot.contextUsage && (

@@ -521,6 +521,9 @@ button, input, select, textarea, summary, label {
 .question-pager button:hover:not(:disabled) { color: var(--text); border-color: var(--accent); }
 .question-pager button:disabled { opacity: 0.4; cursor: default; }
 .question-options { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+/* 问题详情（计划审查等）：题目下方的 markdown 区，独立滚动不挤压选项。 */
+.question-detail { flex: 0 0 auto; max-height: min(38vh, 300px); overflow-y: auto; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-muted); }
+.question-detail .rich-content { font-size: 12.5px; }
 .question-option { display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 12px; border: 1px solid transparent; border-radius: 6px; color: var(--text); background: transparent; font-size: 13px; line-height: 1.4; text-align: left; cursor: pointer; transition: color .12s ease, border-color .12s ease, background .12s ease; }
 .question-option:hover, .question-option:focus-visible { border-color: var(--border-strong); background: var(--surface-input); }
 .question-option:focus-visible { outline: none; border-color: var(--accent); }
@@ -602,6 +605,7 @@ button, input, select, textarea, summary, label {
 .access-mode-menu-item > span { display: grid; gap: 2px; min-width: 0; }
 .access-mode-menu-item strong { font-size: 11px; font-weight: 650; }
 .access-mode-menu-item small { overflow: hidden; color: var(--text-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.access-mode-menu-divider { height: 1px; margin: 3px 2px; background: var(--border); }
 .composer-control-menu { position: relative; min-width: 0; }
 .composer-menu-trigger { display: inline-flex; align-items: center; gap: 4px; min-width: 0; min-height: 29px; max-width: 180px; padding: 0 4px; overflow: hidden; border: 0; border-radius: 6px; color: var(--text-muted); background: transparent; font-size: 10px; cursor: pointer; }
 .composer-menu-trigger:hover, .composer-menu-trigger[aria-expanded="true"] { color: var(--text); background: var(--surface-button-hover); }

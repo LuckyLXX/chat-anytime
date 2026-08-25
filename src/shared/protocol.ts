@@ -723,6 +723,8 @@ export interface RuntimeSnapshot {
   queuedMessages: QueuedMessage[];
   /** 激活会话的上下文占用估算；无会话或模型窗口未知时缺省。 */
   contextUsage?: ContextUsage;
+  /** 激活会话是否处于计划模式（先产出计划、审查批准后才实施）。 */
+  planMode?: boolean;
   messages: ChatMessage[];
   executions: ToolExecution[];
   backgroundProcesses: BackgroundProcess[];
@@ -754,6 +756,8 @@ export interface QuestionItem {
   text: string;
   type: "text" | "single" | "multiple";
   options: string[];
+  /** 可选 markdown 详情（如计划审查展示计划全文），渲染在题目文本与选项之间；缺省不渲染。 */
+  detail?: string;
 }
 
 /** ask_question 工具发给渲染端的提问请求；answers 缺省即视为用户取消。 */
@@ -777,6 +781,7 @@ export type RuntimeCommand =
   | { type: "session.skill"; name: string; instructions?: string; attachments?: PromptAttachment[] }
   | { type: "session.regenerate"; text: string; timestamp?: number; skillName?: string; attachments?: PromptAttachment[] }
   | { type: "session.compact"; instructions?: string }
+  | { type: "session.planMode"; enabled: boolean }
   | { type: "session.abort" }
   | { type: "session.queue.add"; text: string; skillName?: string; attachments?: PromptAttachment[] }
   | { type: "session.queue.sendNow"; kind: QueuedMessage["kind"]; index: number; text: string }

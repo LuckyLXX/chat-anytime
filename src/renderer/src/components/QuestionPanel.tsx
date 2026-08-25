@@ -2,6 +2,7 @@ import { CircleHelp } from "lucide-react";
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import type { QuestionItem, QuestionRequest } from "../../../shared/protocol";
 import { useDesktopStore } from "../store";
+import { RichContent } from "./RichContent";
 
 /** 每题的作答草稿：选项勾选 + 自定义输入（文本题只用 custom）。 */
 export interface QuestionDraft {
@@ -150,6 +151,11 @@ export function QuestionPanel({ request }: { request: QuestionRequest }): ReactN
           <button type="button" aria-label="下一题" disabled={isLast || submitting} onClick={() => setCurrent((value) => Math.min(request.questions.length - 1, value + 1))}>▶</button>
         </div>
       </header>
+      {item.detail && (
+        <div className="question-detail" data-role="question-detail" aria-label="问题详情">
+          <RichContent artifactPrefix="question-detail" onOpenArtifact={() => undefined}>{item.detail}</RichContent>
+        </div>
+      )}
       {item.options.length > 0 && (
         <ol
           className="question-options"

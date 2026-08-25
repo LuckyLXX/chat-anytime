@@ -89,6 +89,7 @@ const demoSnapshot: RuntimeSnapshot = {
   busy: false,
   status: "就绪",
   contextUsage: demoContextUsage(),
+  planMode: false,
   queuedMessages: [],
   backgroundProcesses: [],
   recentWorkspaces: [
@@ -434,6 +435,9 @@ export function createDemoApi(): DesktopApi {
           updateSnapshot({ workspace, sessionId: command.path.replace(/.*[\\/]/u, "").replace(/\.jsonl$/u, ""), messages: [], executions: [], contextUsage: demoContextUsage(), recentWorkspaces: recordDemoWorkspace(demoSnapshot.recentWorkspaces, workspace) });
           break;
         }
+        case "session.planMode":
+          updateSnapshot({ planMode: command.enabled });
+          break;
         case "session.rename":
           updateSnapshot({ sessions: demoSnapshot.sessions.map((item) => item.path === command.path ? { ...item, title: command.title } : item) });
           break;
