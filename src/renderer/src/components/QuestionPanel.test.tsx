@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { QuestionItem, QuestionRequest } from "../../../shared/protocol";
-import { emptyQuestionDraft, isQuestionAnswered, QuestionPanel, serializeAnswer } from "./QuestionPanel";
+import { emptyQuestionDraft, isQuestionAnswered, QuestionPanel, serializeAnswer, singleSelectionAnswer } from "./QuestionPanel";
 
 function item(input: Partial<QuestionItem> & { text: string }): QuestionItem {
   return { type: "text", options: [], ...input };
@@ -44,6 +44,14 @@ describe("isQuestionAnswered", () => {
     expect(isQuestionAnswered(single, { custom: "", selected: ["React"] })).toBe(true);
     expect(isQuestionAnswered(single, { custom: "Svelte", selected: [] })).toBe(true);
     expect(isQuestionAnswered(single, emptyQuestionDraft())).toBe(false);
+  });
+});
+
+describe("singleSelectionAnswer", () => {
+  it("prefers trimmed custom input over the clicked option", () => {
+    expect(singleSelectionAnswer("", "批准计划，开始实施")).toBe("批准计划，开始实施");
+    expect(singleSelectionAnswer("   ", "批准计划，开始实施")).toBe("批准计划，开始实施");
+    expect(singleSelectionAnswer("步骤太少", "批准计划，开始实施")).toBe("步骤太少");
   });
 });
 

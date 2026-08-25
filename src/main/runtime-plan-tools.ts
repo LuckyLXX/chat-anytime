@@ -144,7 +144,7 @@ export interface PlanToolDeps {
 /** 审查问题：计划全文作为 detail 展示，单选批准/继续完善，自定义输入即反馈。 */
 export function planReviewQuestion(plan: string): QuestionItem {
   return {
-    text: "请审查这份计划：批准后我将退出计划模式并严格按计划开始实施。",
+    text: "请审查这份计划：批准后我将退出计划模式并严格按计划开始实施。（点选项即提交；如需修改，请在输入框中写下意见。）",
     type: "single",
     options: [PLAN_APPROVE_OPTION, PLAN_REVISE_OPTION],
     detail: plan

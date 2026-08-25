@@ -28,6 +28,8 @@ import {
   Share2,
   SquarePen,
   Users,
+  PanelLeftClose,
+  PanelLeftOpen,
   PanelRightClose,
   Play,
   Plus,
@@ -1381,6 +1383,9 @@ export function App(): ReactNode {
   previewRef.current = preview;
   const [previewEditorStates, setPreviewEditorStates] = useState<Record<string, PreviewEditorState>>({});
   const [sidebarView, setSidebarView] = useState<"topics" | "files">("topics");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarFlyoutOpen, setSidebarFlyoutOpen] = useState(false);
+  const flyoutCloseTimerRef = useRef<number | undefined>(undefined);
   const [browsingWorkspace, setBrowsingWorkspace] = useState("");
   const [treeRefreshSignal, setTreeRefreshSignal] = useState(0);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: ContextMenuItem[] } | null>(null);
@@ -2473,90 +2478,129 @@ export function App(): ReactNode {
     await window.piDesktop.send({ type: "thinking.select", level });
   }
 
+  function openSidebarFlyout(): void {
+    if (flyoutCloseTimerRef.current) window.clearTimeout(flyoutCloseTimerRef.current);
+    setSidebarFlyoutOpen(true);
+  }
+  function scheduleCloseSidebarFlyout(): void {
+    if (flyoutCloseTimerRef.current) window.clearTimeout(flyoutCloseTimerRef.current);
+    flyoutCloseTimerRef.current = window.setTimeout(() => setSidebarFlyoutOpen(false), 150);
+  }
+
+  const sidebarInner = (
+    <>
+      {sidebarView === "files" ? (
+        <>
+          <div className="workspace-tree-header">
+            <button type="button" className="workspace-tree-back" onClick={() => setSidebarView("topics")}><ChevronLeft size={14} />返回</button>
+            <span title={browsingWorkspace}>{browsingWorkspace ? (browsingWorkspace.split(/[\\/]/u).at(-1) ?? browsingWorkspace) : "工作区文件"}</span>
+            <button type="button" className="workspace-tree-refresh" title="刷新文件列表" aria-label="刷新文件列表" onClick={() => setTreeRefreshSignal((signal) => signal + 1)}><RefreshCw size={13} /></button>
+          </div>
+          {browsingWorkspace
+            ? <WorkspaceTree key={browsingWorkspace} workspace={browsingWorkspace} onOpenFile={(relativePath) => openFilePreview(relativePath, browsingWorkspace)} refreshSignal={treeRefreshSignal} />
+            : <div className="session-list-empty">请从话题列表选择工作区</div>}
+        </>
+      ) : (
+        <>
+          <div className="sidebar-tabs" role="tablist" aria-label="侧栏视图">
+            <button type="button" role="tab" aria-selected={sidebarTab === "agents"} className={sidebarTab === "agents" ? "active" : ""} onClick={() => { setSidebarTab("agents"); setSidebarQuery(""); }}><Users size={14} />助手<span>{settings.agents.filter((agent) => !agent.archived).length}</span></button>
+            <button type="button" role="tab" aria-selected={sidebarTab === "topics"} className={sidebarTab === "topics" ? "active" : ""} onClick={() => { setSidebarTab("topics"); setSidebarQuery(""); }}><MessageCircle size={14} />话题<span>{snapshot.sessions.length}</span></button>
+          </div>
+          <label className="sidebar-search"><Search size={14} /><input value={sidebarQuery} placeholder={sidebarTab === "agents" ? "搜索助手" : "搜索话题"} aria-label={sidebarTab === "agents" ? "搜索助手" : "搜索话题"} onChange={(event) => setSidebarQuery(event.target.value)} /></label>
+          <div className="sidebar-section-label">{sidebarTab === "agents" ? "角色" : "最近话题"}</div>
+          {sidebarTab === "agents" ? <nav className="agent-list" aria-label="助手列表">
+            {visibleAgents.map((agent) => <button className={agent.id === snapshot.agentId ? "active" : ""} type="button" key={agent.id} data-row-kind="agent" data-row-active={agent.id === snapshot.agentId || undefined} onClick={() => { useDesktopStore.setState({ settings: { ...settings, currentAgentId: agent.id } }); void window.piDesktop.send({ type: "agent.select", agentId: agent.id }); }}><span className="agent-list-icon"><Bot size={15} /></span><span><strong>{agent.name}</strong><small>{agent.description || "未填写说明"}</small></span></button>)}
+          </nav> : <nav className="session-list" aria-label="话题列表">
+            {sessionGroups.length === 0 ? <div className="session-list-empty">暂无匹配话题</div> : sessionGroups.map((group) => {
+              const collapsed = expandedWorkspaceGroups[group.key] !== true;
+              const workspaceName = group.workspace.split(/[\\/]/u).at(-1) || group.workspace;
+              return (
+                <section className="session-workspace-group" key={group.key}>
+                  <div className="session-workspace-heading" data-row-kind="workspace" data-row-expanded={!collapsed || undefined} onContextMenu={(event) => { event.preventDefault(); setContextMenu({ x: event.clientX, y: event.clientY, items: [{ label: "打开文件目录", onClick: () => { setBrowsingWorkspace(group.workspace); setTreeRefreshSignal(0); setSidebarView("files"); } }, { label: "移除工作区", danger: true, onClick: () => setRemoveWorkspace({ workspace: group.workspace, name: workspaceName, count: group.sessions.length }) }] }); }}>
+                    <button
+                      className="session-workspace-toggle"
+                      type="button"
+                      aria-expanded={!collapsed}
+                      onClick={() => setExpandedWorkspaceGroups((current) => ({ ...current, [group.key]: collapsed }))}
+                    >
+                      <Folder size={15} />
+                      <span><strong>{workspaceName}</strong><small>{compactPath(group.workspace)}</small></span>
+                      <em>{group.sessions.length}</em>
+                      <ChevronDown size={14} className={collapsed ? "collapsed" : ""} />
+                    </button>
+                    <button
+                      className="session-workspace-files-button"
+                      type="button"
+                      title={`查看 ${workspaceName} 文件`}
+                      aria-label={`查看 ${workspaceName} 文件`}
+                      onClick={() => { setBrowsingWorkspace(group.workspace); setTreeRefreshSignal(0); setSidebarView("files"); }}
+                    >
+                      <FolderTree size={14} />
+                    </button>
+                    <button
+                      className="session-workspace-new-button"
+                      type="button"
+                      title={`在 ${workspaceName} 中新建话题`}
+                      aria-label={`在 ${workspaceName} 中新建话题`}
+                      onClick={() => void createNewSession(group.workspace)}
+                    >
+                      <SquarePen size={14} />
+                    </button>
+                  </div>
+                  {!collapsed && <div className="session-workspace-items">
+                    {group.sessions.length === 0
+                      ? <div className="session-workspace-empty">暂无话题，点击右上角新建</div>
+                      : group.sessions.map((item) => <button className={item.id === snapshot.sessionId ? "active" : ""} type="button" key={item.path} title={item.title} data-row-kind="session" data-row-active={item.id === snapshot.sessionId || undefined} onClick={() => void openSession(item.path, item.workspace)} onContextMenu={(event) => { event.preventDefault(); setContextMenu({ x: event.clientX, y: event.clientY, items: [{ label: "重命名", onClick: () => { setRenameSession({ path: item.path, title: item.title }); setRenameValue(item.title); } }, { label: item.pinned ? "取消置顶" : "置顶", onClick: () => { void window.piDesktop.send({ type: "session.pin", path: item.path, pinned: !item.pinned }); } }, { label: "删除会话", danger: true, onClick: () => setDeleteSession({ path: item.path, title: item.title }) }] }); }}><MessageCircle size={14} /><span><strong>{item.title}</strong><small>{new Date(item.modifiedAt).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}</small></span>{(item.runStatus || item.pinned) && <div className="session-item-meta">{item.runStatus && <i className={`session-status-dot ${item.runStatus}`} title={sessionRunStatusLabels[item.runStatus]} aria-label={sessionRunStatusLabels[item.runStatus]!} />}{item.pinned && <Pin size={11} className="session-pin-indicator" />}</div>}</button>)}
+                  </div>}
+                </section>
+              );
+            })}
+          </nav>}
+        </>
+      )}
+      <button className="new-session-button" data-control="new-session" type="button" disabled={!snapshot.workspace} onClick={() => void createNewSession()}><MessageSquarePlus size={16} />新建话题</button>
+      <div className="sidebar-footer">
+        <button type="button" data-control="settings" onClick={() => setSettingsOpen(true)}><Settings size={16} />设置</button>
+        <span className={`runtime-indicator${snapshot.busy ? " busy" : ""}`}><i />{snapshot.status}</span>
+      </div>
+    </>
+  );
+
   if (!ready) return <div className="app-loading"><div className="brand-mark">CA</div><LoaderCircle className="spinning" size={22} /></div>;
 
   return (
-    <div className="desktop-shell">
+    <div className={`desktop-shell${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
       {themeLayers.map(({ kind, name }) => (
         <div key={`${kind}-${name}`} className="theme-layer" data-theme-layer={name} data-layer-kind={kind} style={{ background: `var(--pi-${kind}-${name}, none)` }} />
       ))}
-      <aside className="sidebar" data-pane="sidebar">
-        <div className="brand-row"><div className="brand-mark">CA</div><div><strong>ChatAnyTime</strong><span>桌面端</span></div></div>
-        {sidebarView === "files" ? (
-          <>
-            <div className="workspace-tree-header">
-              <button type="button" className="workspace-tree-back" onClick={() => setSidebarView("topics")}><ChevronLeft size={14} />返回</button>
-              <span title={browsingWorkspace}>{browsingWorkspace ? (browsingWorkspace.split(/[\\/]/u).at(-1) ?? browsingWorkspace) : "工作区文件"}</span>
-              <button type="button" className="workspace-tree-refresh" title="刷新文件列表" aria-label="刷新文件列表" onClick={() => setTreeRefreshSignal((signal) => signal + 1)}><RefreshCw size={13} /></button>
-            </div>
-            {browsingWorkspace
-              ? <WorkspaceTree key={browsingWorkspace} workspace={browsingWorkspace} onOpenFile={(relativePath) => openFilePreview(relativePath, browsingWorkspace)} refreshSignal={treeRefreshSignal} />
-              : <div className="session-list-empty">请从话题列表选择工作区</div>}
-          </>
-        ) : (
-          <>
-        <div className="sidebar-tabs" role="tablist" aria-label="侧栏视图">
-          <button type="button" role="tab" aria-selected={sidebarTab === "agents"} className={sidebarTab === "agents" ? "active" : ""} onClick={() => { setSidebarTab("agents"); setSidebarQuery(""); }}><Users size={14} />助手<span>{settings.agents.filter((agent) => !agent.archived).length}</span></button>
-          <button type="button" role="tab" aria-selected={sidebarTab === "topics"} className={sidebarTab === "topics" ? "active" : ""} onClick={() => { setSidebarTab("topics"); setSidebarQuery(""); }}><MessageCircle size={14} />话题<span>{snapshot.sessions.length}</span></button>
+      {sidebarCollapsed ? (
+        <div className="sidebar-rail" data-pane="sidebar" data-ui-sidebar-collapsed onMouseEnter={() => openSidebarFlyout()} onMouseLeave={() => scheduleCloseSidebarFlyout()}>
+          <div className="sidebar-rail-items">
+            <button type="button" className="rail-new-session" data-control="new-session" title="在当前工作区新建话题" aria-label="在当前工作区新建话题" disabled={!snapshot.workspace} onClick={() => { void createNewSession(); openSidebarFlyout(); }}><MessageSquarePlus size={18} /></button>
+            <button type="button" className="rail-icon" data-control="rail-topics" title="话题列表" aria-label="话题列表" onClick={() => { setSidebarTab("topics"); openSidebarFlyout(); }}><MessageCircle size={18} /></button>
+            <button type="button" className="rail-icon" data-control="rail-agents" title="助手" aria-label="助手" onClick={() => { setSidebarTab("agents"); openSidebarFlyout(); }}><Users size={18} /></button>
+          </div>
+          <div className="sidebar-rail-footer">
+            <button type="button" className="rail-icon" data-control="sidebar-expand" title="展开侧边栏" aria-label="展开侧边栏" onClick={() => setSidebarCollapsed(false)}><PanelLeftOpen size={18} /></button>
+          </div>
+          {sidebarFlyoutOpen && (
+            <aside className="sidebar sidebar-flyout" data-pane="sidebar" onMouseEnter={() => openSidebarFlyout()} onMouseLeave={() => scheduleCloseSidebarFlyout()}>
+              <div className="brand-row"><div className="brand-mark">CA</div><div><strong>ChatAnyTime</strong><span>桌面端</span></div></div>
+              {sidebarInner}
+            </aside>
+          )}
         </div>
-        <label className="sidebar-search"><Search size={14} /><input value={sidebarQuery} placeholder={sidebarTab === "agents" ? "搜索助手" : "搜索话题"} aria-label={sidebarTab === "agents" ? "搜索助手" : "搜索话题"} onChange={(event) => setSidebarQuery(event.target.value)} /></label>
-        <div className="sidebar-section-label">{sidebarTab === "agents" ? "角色" : "最近话题"}</div>
-        {sidebarTab === "agents" ? <nav className="agent-list" aria-label="助手列表">
-          {visibleAgents.map((agent) => <button className={agent.id === snapshot.agentId ? "active" : ""} type="button" key={agent.id} data-row-kind="agent" data-row-active={agent.id === snapshot.agentId || undefined} onClick={() => { useDesktopStore.setState({ settings: { ...settings, currentAgentId: agent.id } }); void window.piDesktop.send({ type: "agent.select", agentId: agent.id }); }}><span className="agent-list-icon"><Bot size={15} /></span><span><strong>{agent.name}</strong><small>{agent.description || "未填写说明"}</small></span></button>)}
-        </nav> : <nav className="session-list" aria-label="话题列表">
-          {sessionGroups.length === 0 ? <div className="session-list-empty">暂无匹配话题</div> : sessionGroups.map((group) => {
-            const collapsed = expandedWorkspaceGroups[group.key] !== true;
-            const workspaceName = group.workspace.split(/[\\/]/u).at(-1) || group.workspace;
-            return (
-              <section className="session-workspace-group" key={group.key}>
-                <div className="session-workspace-heading" data-row-kind="workspace" data-row-expanded={!collapsed || undefined} onContextMenu={(event) => { event.preventDefault(); setContextMenu({ x: event.clientX, y: event.clientY, items: [{ label: "打开文件目录", onClick: () => { setBrowsingWorkspace(group.workspace); setTreeRefreshSignal(0); setSidebarView("files"); } }, { label: "移除工作区", danger: true, onClick: () => setRemoveWorkspace({ workspace: group.workspace, name: workspaceName, count: group.sessions.length }) }] }); }}>
-                  <button
-                    className="session-workspace-toggle"
-                    type="button"
-                    aria-expanded={!collapsed}
-                    onClick={() => setExpandedWorkspaceGroups((current) => ({ ...current, [group.key]: collapsed }))}
-                  >
-                    <Folder size={15} />
-                    <span><strong>{workspaceName}</strong><small>{compactPath(group.workspace)}</small></span>
-                    <em>{group.sessions.length}</em>
-                    <ChevronDown size={14} className={collapsed ? "collapsed" : ""} />
-                  </button>
-                  <button
-                    className="session-workspace-files-button"
-                    type="button"
-                    title={`查看 ${workspaceName} 文件`}
-                    aria-label={`查看 ${workspaceName} 文件`}
-                    onClick={() => { setBrowsingWorkspace(group.workspace); setTreeRefreshSignal(0); setSidebarView("files"); }}
-                  >
-                    <FolderTree size={14} />
-                  </button>
-                  <button
-                    className="session-workspace-new-button"
-                    type="button"
-                    title={`在 ${workspaceName} 中新建话题`}
-                    aria-label={`在 ${workspaceName} 中新建话题`}
-                    onClick={() => void createNewSession(group.workspace)}
-                  >
-                    <SquarePen size={14} />
-                  </button>
-                </div>
-                {!collapsed && <div className="session-workspace-items">
-                  {group.sessions.length === 0
-                    ? <div className="session-workspace-empty">暂无话题，点击右上角新建</div>
-                    : group.sessions.map((item) => <button className={item.id === snapshot.sessionId ? "active" : ""} type="button" key={item.path} title={item.title} data-row-kind="session" data-row-active={item.id === snapshot.sessionId || undefined} onClick={() => void openSession(item.path, item.workspace)} onContextMenu={(event) => { event.preventDefault(); setContextMenu({ x: event.clientX, y: event.clientY, items: [{ label: "重命名", onClick: () => { setRenameSession({ path: item.path, title: item.title }); setRenameValue(item.title); } }, { label: item.pinned ? "取消置顶" : "置顶", onClick: () => { void window.piDesktop.send({ type: "session.pin", path: item.path, pinned: !item.pinned }); } }, { label: "删除会话", danger: true, onClick: () => setDeleteSession({ path: item.path, title: item.title }) }] }); }}><MessageCircle size={14} /><span><strong>{item.title}</strong><small>{new Date(item.modifiedAt).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}</small></span>{(item.runStatus || item.pinned) && <div className="session-item-meta">{item.runStatus && <i className={`session-status-dot ${item.runStatus}`} title={sessionRunStatusLabels[item.runStatus]} aria-label={sessionRunStatusLabels[item.runStatus]!} />}{item.pinned && <Pin size={11} className="session-pin-indicator" />}</div>}</button>)}
-                </div>}
-              </section>
-            );
-          })}
-        </nav>}
-          </>
-        )}
-        <button className="new-session-button" data-control="new-session" type="button" disabled={!snapshot.workspace} onClick={() => void createNewSession()}><MessageSquarePlus size={16} />新建话题</button>
-        <div className="sidebar-footer">
-          <button type="button" data-control="settings" onClick={() => setSettingsOpen(true)}><Settings size={16} />设置</button>
-          <span className={`runtime-indicator${snapshot.busy ? " busy" : ""}`}><i />{snapshot.status}</span>
-        </div>
-      </aside>
+      ) : (
+        <aside className="sidebar" data-pane="sidebar">
+          <div className="brand-row">
+            <div className="brand-mark">CA</div>
+            <div><strong>ChatAnyTime</strong><span>桌面端</span></div>
+            <button type="button" className="brand-collapse-button" data-control="sidebar-collapse" title="折叠侧边栏" aria-label="折叠侧边栏" onClick={() => setSidebarCollapsed(true)}><PanelLeftClose size={16} /></button>
+          </div>
+          {sidebarInner}
+        </aside>
+      )}
+
 
       <main className="workspace-main" data-pane="workspace">
         <header className="topbar" data-pane="topbar">

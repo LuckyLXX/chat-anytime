@@ -20,6 +20,11 @@ export function isQuestionAnswered(item: QuestionItem, draft: QuestionDraft): bo
   return draft.custom.trim().length > 0;
 }
 
+/** 单选点选即提交时的答案：自定义输入优先（与 serializeAnswer 语义一致），否则为所点选项。 */
+export function singleSelectionAnswer(custom: string, option: string): string {
+  return custom.trim() || option;
+}
+
 /** 把草稿序列化为返回给模型的字符串；多选时自定义输入追加在末尾。 */
 export function serializeAnswer(item: QuestionItem, draft: QuestionDraft): string {
   const custom = draft.custom.trim();
@@ -95,7 +100,16 @@ export function QuestionPanel({ request }: { request: QuestionRequest }): ReactN
         ? currentDraft.selected.filter((value) => value !== option)
         : [...currentDraft.selected, option];
     setDrafts((currentDrafts) => currentDrafts.map((draft, i) => i === index ? { ...draft, selected: nextSelected } : draft));
-    if (single) advance();
+    if (single) {
+      if (index === request.questions.length - 1) {
+        // 单选点选即提交：答案必须基于本次点击的选项。setDrafts 是异步的，
+        // 闭包里的 drafts 还是点击前的旧状态——走 advance() 会提交空选/旧选
+        // （serializeAnswer 单选无自定义输入时返回空串，审查批准被误判拒绝）。
+        void resolve([singleSelectionAnswer(currentDraft.custom, option)]);
+      } else {
+        setCurrent(index + 1);
+      }
+    }
   }
 
   const item = request.questions[current] ?? request.questions[0]!;
