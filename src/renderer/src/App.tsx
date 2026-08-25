@@ -1386,6 +1386,7 @@ export function App(): ReactNode {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sidebarFlyoutOpen, setSidebarFlyoutOpen] = useState(false);
   const flyoutCloseTimerRef = useRef<number | undefined>(undefined);
+  const sidebarSearchRef = useRef<HTMLInputElement>(null);
   const [browsingWorkspace, setBrowsingWorkspace] = useState("");
   const [treeRefreshSignal, setTreeRefreshSignal] = useState(0);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: ContextMenuItem[] } | null>(null);
@@ -2506,7 +2507,7 @@ export function App(): ReactNode {
             <button type="button" role="tab" aria-selected={sidebarTab === "agents"} className={sidebarTab === "agents" ? "active" : ""} onClick={() => { setSidebarTab("agents"); setSidebarQuery(""); }}><Users size={14} />助手<span>{settings.agents.filter((agent) => !agent.archived).length}</span></button>
             <button type="button" role="tab" aria-selected={sidebarTab === "topics"} className={sidebarTab === "topics" ? "active" : ""} onClick={() => { setSidebarTab("topics"); setSidebarQuery(""); }}><MessageCircle size={14} />话题<span>{snapshot.sessions.length}</span></button>
           </div>
-          <label className="sidebar-search"><Search size={14} /><input value={sidebarQuery} placeholder={sidebarTab === "agents" ? "搜索助手" : "搜索话题"} aria-label={sidebarTab === "agents" ? "搜索助手" : "搜索话题"} onChange={(event) => setSidebarQuery(event.target.value)} /></label>
+          <label className="sidebar-search"><Search size={14} /><input ref={sidebarSearchRef} value={sidebarQuery} placeholder={sidebarTab === "agents" ? "搜索助手" : "搜索话题"} aria-label={sidebarTab === "agents" ? "搜索助手" : "搜索话题"} onChange={(event) => setSidebarQuery(event.target.value)} /></label>
           <div className="sidebar-section-label">{sidebarTab === "agents" ? "角色" : "最近话题"}</div>
           {sidebarTab === "agents" ? <nav className="agent-list" aria-label="助手列表">
             {visibleAgents.map((agent) => <button className={agent.id === snapshot.agentId ? "active" : ""} type="button" key={agent.id} data-row-kind="agent" data-row-active={agent.id === snapshot.agentId || undefined} onClick={() => { useDesktopStore.setState({ settings: { ...settings, currentAgentId: agent.id } }); void window.piDesktop.send({ type: "agent.select", agentId: agent.id }); }}><span className="agent-list-icon"><Bot size={15} /></span><span><strong>{agent.name}</strong><small>{agent.description || "未填写说明"}</small></span></button>)}
@@ -2575,14 +2576,14 @@ export function App(): ReactNode {
       ))}
       {sidebarCollapsed ? (
         <div className="sidebar-rail" data-pane="sidebar" data-ui-sidebar-collapsed onMouseEnter={() => openSidebarFlyout()} onMouseLeave={() => scheduleCloseSidebarFlyout()}>
-          <button type="button" className="rail-brand" data-control="sidebar-expand" title="展开侧边栏" aria-label="展开侧边栏" onClick={() => setSidebarCollapsed(false)}><span className="rail-brand-mark">CA</span><PanelLeftOpen className="rail-brand-expand" size={18} /></button>
           <div className="sidebar-rail-items">
-            <button type="button" className="rail-new-session" data-control="new-session" title="在当前工作区新建话题" aria-label="在当前工作区新建话题" disabled={!snapshot.workspace} onClick={() => { void createNewSession(); openSidebarFlyout(); }}><MessageSquarePlus size={18} /></button>
+            <button type="button" className="rail-new-session" data-control="new-session" title="在当前工作区新建话题" aria-label="在当前工作区新建话题" disabled={!snapshot.workspace} onClick={() => { void createNewSession(); openSidebarFlyout(); }}><Plus size={18} /></button>
             <button type="button" className="rail-icon" data-control="rail-topics" title="话题列表" aria-label="话题列表" onClick={() => { setSidebarView("topics"); setSidebarTab("topics"); openSidebarFlyout(); }}><MessageCircle size={18} /></button>
+            <button type="button" className="rail-icon" data-control="rail-search" title="搜索" aria-label="搜索" onClick={() => { setSidebarView("topics"); openSidebarFlyout(); window.setTimeout(() => sidebarSearchRef.current?.focus(), 30); }}><Search size={18} /></button>
             <button type="button" className="rail-icon" data-control="rail-agents" title="助手" aria-label="助手" onClick={() => { setSidebarView("topics"); setSidebarTab("agents"); openSidebarFlyout(); }}><Users size={18} /></button>
           </div>
           <div className="sidebar-rail-footer">
-            <button type="button" className="rail-icon" data-control="rail-settings" title="设置" aria-label="设置" onClick={() => setSettingsOpen(true)}><Settings size={18} /></button>
+            <button type="button" className="rail-icon" data-control="sidebar-expand" title="展开侧边栏" aria-label="展开侧边栏" onClick={() => setSidebarCollapsed(false)}><PanelLeftOpen size={18} /></button>
           </div>
           {sidebarFlyoutOpen && (
             <aside className="sidebar sidebar-flyout" data-pane="sidebar" onMouseEnter={() => openSidebarFlyout()} onMouseLeave={() => scheduleCloseSidebarFlyout()}>
