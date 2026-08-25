@@ -581,12 +581,9 @@ button, input, select, textarea, summary, label {
 .composer.has-plan.has-queue .composer-queue { grid-row: 2; }
 .composer.has-plan.has-queue .composer-input-row { grid-row: 3; }
 .composer.has-plan.has-queue .composer-footer { grid-row: 4; }
-.composer-plan-banner { display: flex; align-items: center; gap: 7px; grid-column: 1; padding: 5px 8px; border: 1px solid var(--accent-border); border-radius: 8px; background: var(--accent-soft); }
+.composer-plan-banner { display: inline-flex; align-items: center; gap: 5px; justify-self: start; grid-column: 1; padding: 2px 8px; border: 1px solid var(--accent-border); border-radius: 999px; background: var(--accent-soft); }
 .composer-plan-banner > svg { flex: 0 0 auto; color: var(--accent-text); }
-.composer-plan-banner-title { color: var(--accent-text); font-size: 11px; font-weight: 700; }
-.composer-plan-banner-note { overflow: hidden; flex: 1 1 auto; min-width: 0; color: var(--text-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-.composer-plan-banner-exit { display: grid; flex: 0 0 auto; place-items: center; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 5px; color: var(--text-muted); background: transparent; cursor: pointer; }
-.composer-plan-banner-exit:hover { color: var(--text); background: var(--surface-button-hover); }
+.composer-plan-banner-title { color: var(--accent-text); font-size: 11px; font-weight: 700; line-height: 1.6; }
 .composer-queue { display: grid; grid-column: 1; gap: 4px; max-height: 138px; padding: 2px 2px 4px; overflow-y: auto; min-width: 0; }
 .composer-queue-caption { display: flex; align-items: center; gap: 5px; color: var(--text-muted); font-size: 10px; }
 .composer-queue-caption svg { flex: 0 0 auto; }

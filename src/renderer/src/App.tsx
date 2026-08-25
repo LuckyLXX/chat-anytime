@@ -2640,11 +2640,9 @@ export function App(): ReactNode {
             {question && <QuestionPanel request={question} onOpenDetail={openPlanPreview} />}
             <form ref={composerRef} className={`composer${snapshot.queuedMessages.length > 0 ? " has-queue" : ""}${snapshot.planMode ? " has-plan" : ""}`} data-pane="composer" onSubmit={submit} onDragOver={(event) => event.preventDefault()} onDrop={handleDrop}>
               {snapshot.planMode && (
-                <div className="composer-plan-banner" data-composer-zone="plan" role="status">
-                  <ClipboardList size={13} />
+                <div className="composer-plan-banner" data-composer-zone="plan" role="status" title="计划模式：先产出计划，审查批准后才实施。退出请使用访问权限下拉或 /plan">
+                  <ClipboardList size={12} />
                   <span className="composer-plan-banner-title">计划模式</span>
-                  <span className="composer-plan-banner-note">先产出计划，审查批准后才实施</span>
-                  <button type="button" className="composer-plan-banner-exit" data-control="plan-toggle" title="退出计划模式" aria-label="退出计划模式" onClick={togglePlanMode}><X size={12} /></button>
                 </div>
               )}
               {snapshot.queuedMessages.length > 0 && (
