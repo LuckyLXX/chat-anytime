@@ -97,7 +97,7 @@
 
 **特异性（覆盖规则能否生效）**：应用壁纸模式的基础规则写成 `[data-theme-wallpaper="true"] .sidebar` 等（(0,2,0) 特异性，两个属性/类选择器）。主题用等特异性选择器（`[data-theme-wallpaper="true"] [data-pane="sidebar"]`）即可凭"后注入"胜出，不需要 `html` 前缀。区域自身的非壁纸规则（如 `[data-pane="sidebar"]`）与应用的 `.sidebar`（(0,1,0)）同特异性、靠后注入胜出。自定义 CSS 注入顺序在应用样式之后。
 
-**UI 状态（`<html>` 属性，存在即真；带值状态例外）**：`data-ui-settings-open` `data-ui-workspace-open` `data-ui-chat-empty` `data-ui-generating` `data-ui-preview-open` `data-ui-permission-pending` `data-ui-question-pending` `data-ui-attachments`（输入框有附件）。带值状态：`data-ui-sidebar-view="topics|files|agents"`（取值匹配，如 `[data-ui-sidebar-view="files"]`）。
+**UI 状态（`<html>` 属性，存在即真；带值状态例外）**：`data-ui-settings-open` `data-ui-workspace-open` `data-ui-chat-empty` `data-ui-generating` `data-ui-preview-open` `data-ui-permission-pending` `data-ui-question-pending` `data-ui-attachments`（输入框有附件）`data-ui-sidebar-collapsed`（侧栏折叠为图标窄条，存在即真）。带值状态：`data-ui-sidebar-view="topics|files|agents"`（取值匹配，如 `[data-ui-sidebar-view="files"]`）。
 
 ```css
 /* 生成中给输入框加呼吸光晕 */
@@ -132,7 +132,7 @@
 :root:not([data-ui-chat-empty]) [data-theme-layer="side-art"] { opacity: 0.9; transform: translateY(12px); }
 ```
 
-**布局量（公开 API）**：`--layout-sidebar-width`（侧栏列宽，明暗一致，随应用布局变化联动；立绘/装饰偏移用 `calc(... + var(--layout-sidebar-width))`，不要硬编码像素）。
+**布局量（公开 API）**：`--layout-sidebar-width`（侧栏列宽，明暗一致，随应用布局变化联动；立绘/装饰偏移用 `calc(... + var(--layout-sidebar-width))`，不要硬编码像素）。`--layout-sidebar-collapsed-width`（折叠态窄条宽度，48px；侧栏折叠时首列改为它，立绘/装饰可一并偏移）。
 
 ## 字体
 
