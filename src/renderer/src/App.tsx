@@ -101,7 +101,7 @@ import { filterProviderModels, setProviderModelsEnabled, buildBuiltinProviderEnt
 import { CSS_URL_PATTERN, createThemeAssetUrls, isExternalThemeReference, normalizeThemeAssetReference, resolveThemeAssets } from "./lib/theme-assets";
 import { THEME_PRESETS, bubbleOpacityCss, collectThemeLayers, panelOpacityCss, scopeCustomThemeCss, scopeCustomThemeCssForPreview, themePresetCss, themePreviewCss, themeWallpaperOpacity, wallpaperOpacityCss } from "./lib/theme-presets";
 import { shareElementAsImage } from "./lib/share-image";
-import { useDesktopStore } from "./store";
+import { currentPermissionRequest, currentQuestionRequest, useDesktopStore } from "./store";
 import { PanelDock } from "./PanelDock";
 import { HooksSettings } from "./HooksSettings";
 
@@ -1348,8 +1348,10 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
 
 export function App(): ReactNode {
   const { ready, snapshot, models, providers, resources, customProvider, customProviderKeyConfigured, customModels, customModelFetchStatus, customModelFetchError, modelRefreshStatus, modelRefreshError, modelRefreshProvider, permissions, questions, error, initialize, clearError } = useDesktopStore();
-  const permission = permissions[0];
-  const question = questions[0];
+  // 权限/提问按当前激活会话过滤：store 的数组跨会话累积，直接取 [0] 会在切换会话后
+  // 把上一个（后台/parked）会话待决的弹窗冒到新会话视图里。取不到当前会话的就不展示。
+  const permission = currentPermissionRequest(permissions, snapshot.sessionId);
+  const question = currentQuestionRequest(questions, snapshot.sessionId);
   const settings = useDesktopStore((state) => state.settings);
   const themeAssetUrls = useThemeAssetUrls(themeAssetsForAppearance(settings.appearance));
   const [input, setInput] = useState("");

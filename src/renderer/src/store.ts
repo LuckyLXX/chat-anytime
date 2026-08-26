@@ -32,6 +32,23 @@ function queuedMessagesEqual(left: RuntimeSnapshot["queuedMessages"], right: Run
   });
 }
 
+/**
+ * 当前激活会话应展示的权限请求。store 的 permissions 是跨会话累积的全局数组，
+ * 若不做会话过滤，切换到新会话时仍会取出上一个（后台/parked）会话待决的权限弹窗。
+ * 这里按请求携带的 principal.sessionId 匹配 snapshot.sessionId；非激活会话的请求
+ * 保留在数组里（等切回对应会话时再浮出），仅不向当前视图冒泡。
+ */
+export function currentPermissionRequest(permissions: PermissionRequest[], sessionId: string | undefined): PermissionRequest | undefined {
+  if (!sessionId) return undefined;
+  return permissions.find((request) => request.principal.sessionId === sessionId);
+}
+
+/** 当前激活会话应展示的提问（ask_question）请求；与非激活会话的权限弹窗同理做会话过滤。 */
+export function currentQuestionRequest(questions: QuestionRequest[], sessionId: string | undefined): QuestionRequest | undefined {
+  if (!sessionId) return undefined;
+  return questions.find((request) => request.sessionId === sessionId);
+}
+
 interface DesktopState {
   ready: boolean;
   snapshot: RuntimeSnapshot;

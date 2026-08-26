@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import type { PermissionRequest, Todo } from "../../shared/protocol.js";
-import { useDesktopStore } from "./store.js";
+import type { PermissionRequest, QuestionRequest, Todo } from "../../shared/protocol.js";
+import { currentPermissionRequest, currentQuestionRequest, useDesktopStore } from "./store.js";
 
 function permission(id: string, sessionId: string): PermissionRequest {
   return {
@@ -73,5 +73,39 @@ describe("desktop permission queue", () => {
     expect(useDesktopStore.getState().modelRefreshStatus).toBe("success");
     expect(useDesktopStore.getState().modelRefreshError).toBeUndefined();
     expect(useDesktopStore.getState().modelRefreshProvider).toBe("deepseek");
+  });
+});
+
+describe("session-scoped pending panels", () => {
+  function question(id: string, sessionId: string): QuestionRequest {
+    return { id, sessionId, toolCallId: `tool-${id}`, questions: [{ text: "请选择", type: "single", options: ["A", "B"] }] };
+  }
+
+  it("returns only the request belonging to the active session", () => {
+    const permissions = [permission("permission-a", "session-a"), permission("permission-b", "session-b")];
+    const questions = [question("question-a", "session-a"), question("question-b", "session-b")];
+
+    expect(currentPermissionRequest(permissions, "session-a")?.id).toBe("permission-a");
+    expect(currentQuestionRequest(questions, "session-a")?.id).toBe("question-a");
+  });
+
+  it("hides a parked/background session's request from the current view", () => {
+    const permissions = [permission("permission-a", "session-a")];
+    const questions = [question("question-a", "session-a")];
+
+    expect(currentPermissionRequest(permissions, "session-b")).toBeUndefined();
+    expect(currentQuestionRequest(questions, "session-b")).toBeUndefined();
+  });
+
+  it("keeps the non-active request in the store until that session is viewed again", () => {
+    const questions = [question("question-a", "session-a")];
+    // 切到 session-b 时不展示，切回 session-a 时再次浮出。
+    expect(currentQuestionRequest(questions, "session-b")).toBeUndefined();
+    expect(currentQuestionRequest(questions, "session-a")?.id).toBe("question-a");
+  });
+
+  it("returns nothing when there is no active session", () => {
+    expect(currentPermissionRequest([permission("permission-a", "session-a")], undefined)).toBeUndefined();
+    expect(currentQuestionRequest([question("question-a", "session-a")], undefined)).toBeUndefined();
   });
 });
