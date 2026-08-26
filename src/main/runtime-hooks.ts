@@ -45,6 +45,8 @@ export interface HooksExtensionDeps {
   sessionId: () => string;
   sessionTitle: () => string;
   post: (message: RuntimeMessage) => void;
+  /** 分屏/激活可见性：通知动作据此携带 visible，主进程在“用户正盯着看”时免打扰。 */
+  isSessionRendered?: (sessionId: string | undefined) => boolean;
 }
 
 export interface CommandRunResult {
@@ -230,13 +232,14 @@ function blockingCommandVerdict(result: CommandRunResult): { blocked: boolean; r
 }
 
 /** 执行单条钩子动作（block 除外——它只在 tool_call 路径做纯评估）。 */
-export async function executeHookAction(rule: HookRule, context: HookContext, deps: Pick<HooksExtensionDeps, "post">): Promise<HookActionOutcome> {
+export async function executeHookAction(rule: HookRule, context: HookContext, deps: Pick<HooksExtensionDeps, "post" | "isSessionRendered">): Promise<HookActionOutcome> {
   const action = rule.action;
   if (action.kind === "notify") {
     const title = fillTemplate(action.title?.trim() || `PiDesktop：${context.event}`, context);
     const body = fillTemplate(action.body?.trim() || `${context.sessionTitle}${context.toolName ? ` · ${context.toolName}` : ""}`, context);
-    // sessionId 让主进程能判断“这条通知是否关于用户正盯着看的会话”，聚焦时免打扰。
-    deps.post({ type: "hook-notify", title, body, sessionId: context.sessionId });
+    // sessionId 让主进程能判断“这条通知是否关于用户正盯着看的会话”，聚焦时免打扰；
+    // visible 进一步覆盖分屏：watched 格子里的会话同样算“正盯着看”。
+    deps.post({ type: "hook-notify", title, body, sessionId: context.sessionId, visible: deps.isSessionRendered?.(context.sessionId) });
     return { ok: true, detail: `通知：${title}`, durationMs: 0 };
   }
   if (action.kind === "http") {

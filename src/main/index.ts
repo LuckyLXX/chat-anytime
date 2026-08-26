@@ -206,12 +206,13 @@ function sendToRuntime(command: RuntimeCommand): void { if (!runtimeProcess) thr
 
 // 桌面通知是主进程专属能力（utility 进程没有 Electron API），钩子的 notify
 // 动作经 hook-notify 推送到达这里；该消息不转发渲染器。聊天软件同款免打扰
-// 语义：通知关于用户正在查看的会话、且窗口处于焦点且未最小化时不再打扰——
-// 回复就在眼前；后台会话跑完、窗口失焦/最小化时照常提醒。
-function showHookNotification(title: string, body: string, sessionId?: string): void {
+// 语义：通知关于用户正在查看的会话（激活或分屏格子中可见，由 utility 端以
+// visible 标记）、且窗口处于焦点且未最小化时不再打扰——回复就在眼前；后台
+// 会话跑完、窗口失焦/最小化时照常提醒。visible 缺省时回退到激活会话比对。
+function showHookNotification(title: string, body: string, sessionId?: string, visible?: boolean): void {
+  const beingViewed = visible ?? (sessionId !== undefined && latestSnapshot?.sessionId === sessionId);
   if (
-    sessionId &&
-    latestSnapshot?.sessionId === sessionId &&
+    beingViewed &&
     mainWindow && !mainWindow.isDestroyed() &&
     mainWindow.isFocused() && !mainWindow.isMinimized()
   ) {
@@ -234,7 +235,7 @@ function startRuntime(): void {
   runtimeProcess = utilityProcess.fork(runtimeEntry(), [], { serviceName: "Pi 运行时", stdio: "pipe" });
   runtimeProcess.on("message", (message: RuntimeMessage) => {
     if (message.type === "hook-notify") {
-      showHookNotification(message.title, message.body, message.sessionId);
+      showHookNotification(message.title, message.body, message.sessionId, message.visible);
       return;
     }
     if (message.type === "browser-automation.request") {

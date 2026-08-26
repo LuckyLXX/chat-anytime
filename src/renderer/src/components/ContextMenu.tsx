@@ -3,6 +3,8 @@ import { type ReactNode } from "react";
 export interface ContextMenuItem {
   label: string;
   danger?: boolean;
+  /** 置灰不可点（如分屏格满时的「分屏到右侧」）。 */
+  disabled?: boolean;
   onClick(): void;
 }
 
@@ -23,7 +25,7 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps): ReactNo
         onClick={(event) => event.stopPropagation()}
       >
         {items.map((item) => (
-          <button key={item.label} type="button" className={`context-menu-item${item.danger ? " danger" : ""}`} role="menuitem" onClick={() => { onClose(); item.onClick(); }}>
+          <button key={item.label} type="button" className={`context-menu-item${item.danger ? " danger" : ""}`} role="menuitem" aria-disabled={item.disabled} disabled={item.disabled} onClick={() => { if (item.disabled) return; onClose(); item.onClick(); }}>
             {item.label}
           </button>
         ))}

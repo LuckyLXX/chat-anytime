@@ -11,6 +11,7 @@ import type {
   ResourceCatalog,
   RuntimeMessage,
   RuntimeSnapshot,
+  SessionPaneSnapshot,
   Todo
 } from "../../shared/protocol";
 
@@ -49,9 +50,33 @@ export function currentQuestionRequest(questions: QuestionRequest[], sessionId: 
   return questions.find((request) => request.sessionId === sessionId);
 }
 
+/**
+ * 分屏格子集合应展示的权限请求：焦点格（激活会话）优先，其余按格子顺序取
+ * 第一个命中的——多个格子同时待决时一次只弹一个，处理完自动轮到下一个。
+ * 单窗口调用方传 [activeSessionId]，行为与 currentPermissionRequest 一致。
+ */
+export function panePermissionRequest(permissions: PermissionRequest[], sessionIds: string[]): PermissionRequest | undefined {
+  for (const sessionId of sessionIds) {
+    const found = currentPermissionRequest(permissions, sessionId);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/** 分屏格子集合应展示的提问请求；与 panePermissionRequest 同理，焦点格优先。 */
+export function paneQuestionRequest(questions: QuestionRequest[], sessionIds: string[]): QuestionRequest | undefined {
+  for (const sessionId of sessionIds) {
+    const found = currentQuestionRequest(questions, sessionId);
+    if (found) return found;
+  }
+  return undefined;
+}
+
 interface DesktopState {
   ready: boolean;
   snapshot: RuntimeSnapshot;
+  /** 分屏格子（watched 非激活会话）的会话级快照，按 sessionId 键控。 */
+  paneStates: Record<string, SessionPaneSnapshot>;
   models: ModelOption[];
   providers: ProviderOption[];
   resources: ResourceCatalog;
@@ -92,9 +117,48 @@ const emptySnapshot: RuntimeSnapshot = {
 const emptySettings: DesktopSettings = { version: 2, thinkingLevel: "medium", accessMode: "ask", providers: [], agents: [], currentAgentId: "default", appearance: { theme: "system", themePreset: "default", customCss: "", customThemes: [], showThinking: true } };
 const emptyResources: ResourceCatalog = { skills: [], mcpServers: [], todos: [], memory: [], hooks: [], hooksEnabled: true, diagnostics: [] };
 
+/**
+ * 高频流式推送的消息数组按 uuid 复用旧对象引用：内容未变的消息保持同一
+ * ChatMessage 引用，让 memo 化的气泡在只影响别的气泡的流式更新中跳过重渲染。
+ */
+function mergeMessagesPreservingIdentity(previous: RuntimeSnapshot["messages"], incoming: RuntimeSnapshot["messages"]): { messages: RuntimeSnapshot["messages"]; changed: boolean } {
+  const prevByUuid = new Map(previous.map((msg) => [msg.uuid, msg]));
+  let changed = previous.length !== incoming.length;
+  const messages = incoming.map((msg) => {
+    const prev = msg.uuid !== undefined ? prevByUuid.get(msg.uuid) : undefined;
+    // Skip streaming messages when reusing the identity: a streaming
+    // bubble keeps the same uuid while its content grows token by
+    // token, so we must take the fresh reference to render new tokens.
+    if (prev && !msg.streaming && prev.streaming === msg.streaming && prev.error === msg.error) return prev;
+    changed = true;
+    return msg;
+  });
+  return { messages, changed };
+}
+
+export function handleRuntimeMessage(message: RuntimeMessage): void {
+  useDesktopStore.getState().handleRuntimeMessage(message);
+}
+
+/** 分屏格子移除（关闭/布局裁剪）后丢弃对应的 paneStates 缓存；再次 watch 会重新水合。 */
+export function dropPaneStates(sessionIds: string[]): void {
+  useDesktopStore.setState((state) => {
+    let changed = false;
+    const next = { ...state.paneStates };
+    for (const id of sessionIds) {
+      if (next[id]) {
+        delete next[id];
+        changed = true;
+      }
+    }
+    return changed ? { paneStates: next } : state;
+  });
+}
+
 export const useDesktopStore = create<DesktopState>((set, get) => ({
   ready: false,
   snapshot: emptySnapshot,
+  paneStates: {},
   models: [],
   providers: [],
   resources: emptyResources,
@@ -132,22 +196,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
         set((state) => {
           const incoming = message.snapshot;
           const previous = state.snapshot;
-          // Preserve object identity for unchanged messages: match by uuid
-          // (stable across streaming/final frames) and reuse the previous
-          // ChatMessage reference when no lifecycle field changed. This lets
-          // memoized list items skip re-rendering during high-frequency
-          // streaming updates that only touch other bubbles.
-          const prevByUuid = new Map(previous.messages.map((msg) => [msg.uuid, msg]));
-          let changed = previous.messages.length !== incoming.messages.length;
-          const mergedMessages = incoming.messages.map((msg) => {
-            const prev = msg.uuid !== undefined ? prevByUuid.get(msg.uuid) : undefined;
-            // Skip streaming messages when reusing the identity: a streaming
-            // bubble keeps the same uuid while its content grows token by
-            // token, so we must take the fresh reference to render new tokens.
-            if (prev && !msg.streaming && prev.streaming === msg.streaming && prev.error === msg.error) return prev;
-            changed = true;
-            return msg;
-          });
+          const { messages: mergedMessages, changed } = mergeMessagesPreservingIdentity(previous.messages, incoming.messages);
           if (!changed && previous.busy === incoming.busy && previous.status === incoming.status &&
               previous.turnTiming === incoming.turnTiming && previous.executions === incoming.executions &&
               previous.sessions === incoming.sessions && previous.recentWorkspaces === incoming.recentWorkspaces &&
@@ -160,6 +209,30 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
             return state;
           }
           return { snapshot: { ...incoming, messages: mergedMessages } };
+        });
+        break;
+      case "session.state":
+        set((state) => {
+          const incoming = message.snapshot;
+          const sessionId = incoming.sessionId;
+          // 激活会话的更新走 state 通道：这里只接收分屏格子（parked）的快照；
+          // 会话在格子间切换焦点的瞬间可能收到迟到的 session.state，直接跳过
+          // （下一帧 state 快照已携带最新内容）。
+          if (!sessionId || sessionId === state.snapshot.sessionId) return state;
+          const previous = state.paneStates[sessionId];
+          if (previous) {
+            const { messages: mergedMessages, changed } = mergeMessagesPreservingIdentity(previous.messages, incoming.messages);
+            if (!changed && previous.busy === incoming.busy && previous.status === incoming.status &&
+                previous.turnTiming === incoming.turnTiming && previous.executions === incoming.executions &&
+                previous.model === incoming.model && previous.workspace === incoming.workspace &&
+                queuedMessagesEqual(previous.queuedMessages, incoming.queuedMessages) &&
+                previous.thinkingLevel === incoming.thinkingLevel && previous.planMode === incoming.planMode &&
+                previous.contextUsage === incoming.contextUsage) {
+              return state;
+            }
+            return { paneStates: { ...state.paneStates, [sessionId]: { ...incoming, messages: mergedMessages } } };
+          }
+          return { paneStates: { ...state.paneStates, [sessionId]: incoming } };
         });
         break;
       case "resources":

@@ -732,6 +732,29 @@ export interface RuntimeSnapshot {
   recentWorkspaces: RecentWorkspace[];
 }
 
+/**
+ * 分屏格子的会话级快照：渲染端同时展示多个会话时，非激活（parked 但被
+ * watch 的）会话通过 `session.state` 推送获得与 RuntimeSnapshot 同构的会话
+ * 字段；激活会话仍走完整 `state` 推送（两通道字段一致，渲染端按 sessionId
+ * 归一）。构建逻辑见 pi-runtime 的 `paneSnapshotFrom`（snapshot() 复用它）。
+ */
+export interface SessionPaneSnapshot {
+  sessionId?: string;
+  sessionFile?: string;
+  /** 该会话的工作区（record 捕获值）：格子的发送/@提及/附件据此判断。 */
+  workspace?: string;
+  model?: { provider: string; id: string };
+  thinkingLevel: ThinkingLevel;
+  busy: boolean;
+  status: string;
+  turnTiming?: TurnTiming;
+  queuedMessages: QueuedMessage[];
+  contextUsage?: ContextUsage;
+  planMode?: boolean;
+  messages: ChatMessage[];
+  executions: ToolExecution[];
+}
+
 export interface ExecutionPrincipal {
   kind: "root-agent" | "subagent";
   sessionId: string;
@@ -777,21 +800,25 @@ export type RuntimeCommand =
   | { type: "session.rename"; path: string; title: string }
   | { type: "session.pin"; path: string; pinned: boolean }
   | { type: "session.delete"; path: string }
-  | { type: "session.prompt"; text: string; attachments?: PromptAttachment[] }
-  | { type: "session.skill"; name: string; instructions?: string; attachments?: PromptAttachment[] }
-  | { type: "session.regenerate"; text: string; timestamp?: number; skillName?: string; attachments?: PromptAttachment[] }
-  | { type: "session.compact"; instructions?: string }
-  | { type: "session.planMode"; enabled: boolean }
-  | { type: "session.abort" }
-  | { type: "session.queue.add"; text: string; skillName?: string; attachments?: PromptAttachment[] }
-  | { type: "session.queue.sendNow"; kind: QueuedMessage["kind"]; index: number; text: string }
-  | { type: "session.queue.remove"; kind: QueuedMessage["kind"]; index: number; text: string }
+  | { type: "session.prompt"; text: string; attachments?: PromptAttachment[]; sessionId?: string }
+  | { type: "session.skill"; name: string; instructions?: string; attachments?: PromptAttachment[]; sessionId?: string }
+  | { type: "session.regenerate"; text: string; timestamp?: number; skillName?: string; attachments?: PromptAttachment[]; sessionId?: string }
+  | { type: "session.compact"; instructions?: string; sessionId?: string }
+  | { type: "session.planMode"; enabled: boolean; sessionId?: string }
+  | { type: "session.abort"; sessionId?: string }
+  | { type: "session.queue.add"; text: string; skillName?: string; attachments?: PromptAttachment[]; sessionId?: string }
+  | { type: "session.queue.sendNow"; kind: QueuedMessage["kind"]; index: number; text: string; sessionId?: string }
+  | { type: "session.queue.remove"; kind: QueuedMessage["kind"]; index: number; text: string; sessionId?: string }
+  /** 分屏：渲染端注册/注销某会话为“正在渲染”（watched）。watched 会话豁免空闲
+   * 驱逐、流式事件改走 session.state 推送、不设侧栏终端圆点；首次 watch 立即
+   * 推送一次全量 session.state 供水合。 */
+  | { type: "session.watch"; sessionId: string; watch: boolean }
   | { type: "agent.select"; agentId: string }
   | { type: "agent.save"; agent: AgentProfile }
   | { type: "agent.archive"; agentId: string; archived: boolean }
   | { type: "settings.save"; settings: Pick<DesktopSettings, "model" | "thinkingLevel" | "accessMode" | "appearance" | "browser"> }
-  | { type: "model.select"; provider: string; id: string }
-  | { type: "thinking.select"; level: ThinkingLevel }
+  | { type: "model.select"; provider: string; id: string; sessionId?: string }
+  | { type: "thinking.select"; level: ThinkingLevel; sessionId?: string }
   | { type: "auth.set"; provider: string; apiKey: string }
   | { type: "provider.save"; provider: ProviderSettings; apiKey?: string }
   | { type: "provider.models.save"; provider: ProviderSettings }
@@ -828,6 +855,8 @@ export type RuntimeMessage =
   | { type: "models-refreshed"; providerId: string }
   | { type: "models-refresh-error"; providerId: string; message: string }
   | { type: "state"; snapshot: RuntimeSnapshot }
+  /** 分屏格子（watched 非激活会话）的会话级快照；与 state 的节流节奏一致（50ms 批量、生命周期立即）。 */
+  | { type: "session.state"; snapshot: SessionPaneSnapshot }
   | { type: "resources"; resources: ResourceCatalog }
   | { type: "todos"; todos: Todo[] }
   | { type: "memory"; memory: MemoryTopic[] }
@@ -836,7 +865,9 @@ export type RuntimeMessage =
   | { type: "question"; request: QuestionRequest }
   | { type: "question.dismiss"; id: string }
   | { type: "hook-notify"; title: string; body: string; /** 触发钩子的会话；主进程据此在“正在查看且窗口聚焦”时免打扰。 */
-    sessionId?: string }
+    sessionId?: string;
+    /** 该会话当前是否正被渲染端展示（激活或分屏 watch）；main 端免打扰判断用。 */
+    visible?: boolean }
   | { type: "hook-run"; name: string; scope: "project" | "global"; ok: boolean; blocked?: boolean; detail: string; durationMs: number }
   /** utility 进程发起的浏览器自动化操作；main 完成后以 browser-automation.result 命令回传。 */
   | { type: "browser-automation.request"; requestId: string; sessionKey: string; request: BrowserAutomationRequest }

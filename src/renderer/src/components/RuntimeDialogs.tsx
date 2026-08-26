@@ -13,10 +13,13 @@ function permissionPrincipalLabel(kind: ExecutionPrincipal["kind"]): string {
 
 interface PermissionDialogProps {
   request: PermissionRequest;
+  /** 分屏/多会话并发时标注来源会话标题（渲染端从会话列表解析）。 */
+  sessionTitle?: string;
 }
 
-export function PermissionDialog({ request }: PermissionDialogProps): ReactNode {
+export function PermissionDialog({ request, sessionTitle }: PermissionDialogProps): ReactNode {
   const principalLabel = permissionPrincipalLabel(request.principal.kind);
+  const contextLabel = [principalLabel, sessionTitle, request.summary].filter(Boolean).join(" · ");
 
   async function resolve(decision: PermissionDecision): Promise<void> {
     await window.piDesktop.send({ type: "permission.resolve", id: request.id, decision });
@@ -30,7 +33,7 @@ export function PermissionDialog({ request }: PermissionDialogProps): ReactNode 
       <div className="permission-dialog" data-pane="permission-dialog" role="alertdialog" aria-modal="true" aria-label="工具权限确认">
         <header>
           <div className={`risk-icon ${request.risk}`}><TerminalSquare size={20} /></div>
-          <div><h2>允许{toolLabel(request.toolName)}？</h2><p>{principalLabel} · {request.summary}</p></div>
+          <div><h2>允许{toolLabel(request.toolName)}？</h2><p>{contextLabel}</p></div>
         </header>
         <pre>{JSON.stringify(request.args, null, 2)}</pre>
         <footer>

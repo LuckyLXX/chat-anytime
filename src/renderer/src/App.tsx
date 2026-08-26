@@ -1,61 +1,41 @@
 import {
   AlertCircle,
-  Brain,
   Bot,
   Check,
-  Clock,
-  Copy,
   ChevronDown,
-  CircleStop,
-  CodeXml,
   Download,
   Eye,
-  File,
-  FileDiff,
   Folder,
   FolderOpen,
-  Image as ImageIcon,
-  KeyRound,
-  Layers,
   LoaderCircle,
   MessageSquarePlus,
   MessageCircle,
-  PackageOpen,
-  PlugZap,
   Puzzle,
   Search,
   Server,
-  Share2,
   SquarePen,
   Users,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightClose,
-  Play,
   Plus,
   RefreshCw,
   RotateCcw,
   Pencil,
   Save,
-  ShieldAlert,
   Settings,
-  ShieldCheck,
   Trash2,
-  Workflow,
   FolderTree,
   GitBranch,
   ChevronLeft,
   Pin,
-  X,
-  Zap,
-  ClipboardList
+  X
 } from "lucide-react";
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import type {
   AccessMode,
   AppearanceSettings,
   BrowserElementPick,
-  ChatMessage,
   AgentProfile,
   BuiltinToolName,
   ProviderSettings,
@@ -70,39 +50,45 @@ import type {
   ThemeMode,
   ThemePresetId,
   ToolExecution,
-  MessageBlock,
-  TurnTiming,
   ResourceCatalog,
   ResourceScope,
   McpServerConfigDraft,
-  QueuedMessage,
   RuntimeCommand,
-  WorkspaceFileSearchEntry
+  SessionSummary
 } from "../../shared/protocol";
 import { sessionRunStatusLabels, thinkingLevelLabels, toolLabel } from "../../shared/locale";
 import { ArtifactPreview, type PreviewEditorState, type PreviewTab, type PreviewTarget } from "./components/ArtifactPreview";
 import type { EditorSaveStatus } from "./components/MarkdownEditor";
 import { WorkspaceTree } from "./components/WorkspaceTree";
 import { ContextMenu, type ContextMenuItem } from "./components/ContextMenu";
-import { CodeBlock, RichContent } from "./components/RichContent";
+import { RichContent } from "./components/RichContent";
 import { PermissionDialog } from "./components/RuntimeDialogs";
-import { QuestionPanel, detailTitle } from "./components/QuestionPanel";
-import { compactPath, extractMentionTokens, formatDuration, type Artifact } from "./lib/content";
+import { detailTitle } from "./components/QuestionPanel";
+import { compactPath, type Artifact } from "./lib/content";
 import { composePickMessage } from "./lib/browser-pick";
-import { contextUsageCacheLabel, contextUsagePercentLabel, contextUsageTone, contextUsageTooltip } from "./lib/context-usage";
-import { actionTimelineSegments, actionTimelineStats, formatProcessDuration, type ActionTimelineSegment } from "./lib/action-timeline";
-import { changedFilesForMessage, type ReplyChangedFile } from "./lib/changed-files";
-import { groupAssistantMessages } from "./lib/chat-layout";
-import { buildEditDiffs, editArgsSummary, languageFromPath, parseEditCallArgs, parseReadCallArgs, parseWriteCallArgs, writeArgsSummary, type EditCallPreview, type EditDiffBlock, type WriteCallPreview } from "./lib/tool-call-preview";
 import { DiffView } from "./components/DiffView";
 import { clampPreviewSplit, PREVIEW_SPLIT_MAX, PREVIEW_SPLIT_MIN, previewSplitFromKey } from "./lib/preview-split";
 import { groupSessionsByWorkspace, workspaceKey } from "./lib/session-groups";
 import { filterProviderModels, setProviderModelsEnabled, buildBuiltinProviderEntry, selectableCatalogModels } from "./lib/model-list";
 import { CSS_URL_PATTERN, createThemeAssetUrls, isExternalThemeReference, normalizeThemeAssetReference, resolveThemeAssets } from "./lib/theme-assets";
 import { THEME_PRESETS, bubbleOpacityCss, collectThemeLayers, panelOpacityCss, scopeCustomThemeCss, scopeCustomThemeCssForPreview, themePresetCss, themePreviewCss, themeWallpaperOpacity, wallpaperOpacityCss } from "./lib/theme-presets";
-import { shareElementAsImage } from "./lib/share-image";
-import { currentPermissionRequest, currentQuestionRequest, useDesktopStore } from "./store";
-import { PanelDock } from "./PanelDock";
+import { panePermissionRequest, paneQuestionRequest, dropPaneStates, useDesktopStore } from "./store";
+import { ConversationPane, type PaneComposerApi, type PaneDraftStore } from "./ConversationPane";
+import { SplitLayout } from "./SplitLayout";
+import {
+  MAX_SPLIT_PANES,
+  addPane,
+  countLeaves,
+  firstLeafId,
+  leafIds,
+  parseStoredSplitLayout,
+  pruneToIds,
+  removePane,
+  replaceLeaf,
+  updateRatio,
+  type SplitDirection,
+  type SplitNode
+} from "./lib/split-layout";
 import { HooksSettings } from "./HooksSettings";
 
 const thinkingLevels: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
@@ -115,12 +101,6 @@ const accessModeOptions: readonly { value: AccessMode; label: string }[] = [
   { value: "workspace", label: "工作区访问" },
   { value: "full", label: "完全访问" }
 ];
-const accessModeDescriptions: Record<AccessMode, string> = {
-  "read-only": "只允许读取，不执行修改和命令",
-  ask: "危险操作执行前逐次询问",
-  workspace: "工作区内文件写入自动允许",
-  full: "自动允许全部工具操作"
-};
 
 function previewTargetKey(target: PreviewTarget): string {
   switch (target.type) {
@@ -219,28 +199,6 @@ function useThemeAssetUrls(assets: ThemeAssetMap | undefined): ThemeAssetMap {
   return urls;
 }
 
-function messageText(message: ChatMessage): string {
-  return message.blocks
-    .filter((block) => block.type === "text")
-    .map((block) => block.text)
-    .join("");
-}
-
-function useElapsedNow(active: boolean): number {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (!active) {
-      setNow(Date.now());
-      return;
-    }
-    const update = (): void => setNow(Date.now());
-    update();
-    const timer = window.setInterval(update, 100);
-    return () => window.clearInterval(timer);
-  }, [active]);
-  return now;
-}
-
 function readStoredBoolean(key: string, fallback: boolean): boolean {
   try {
     const value = window.localStorage.getItem(key);
@@ -259,241 +217,16 @@ function readStoredPreviewSplit(): number {
   }
 }
 
-function TimingMeta({ timing, now }: { timing: TurnTiming; now: number }): ReactNode {
-  const completedAt = timing.completedAt ?? now;
-  return (
-    <div className="message-timing" aria-label="回答耗时与总耗时">
-      <span>回答耗时 {timing.answerStartedAt === undefined ? "等待输出" : formatDuration(timing.answerStartedAt, completedAt)}</span>
-      <span>总耗时 {formatDuration(timing.startedAt, completedAt)}</span>
-    </div>
-  );
-}
-
-function PendingResponse({ label, timing, now }: { label: string; timing?: TurnTiming; now: number }): ReactNode {
-  return (
-    <article className="message message-assistant pending-response" data-role="assistant">
-      <div className="message-avatar pi-avatar"><Bot size={17} /></div>
-      <div className="message-body message-bubble pending-response-body">
-        <div className="response-progress"><LoaderCircle size={14} className="spinning" /><span>{label}</span></div>
-      </div>
-      {timing && <TimingMeta timing={timing} now={now} />}
-    </article>
-  );
-}
-
-function ImageMessageBlock({ block }: { block: Extract<MessageBlock, { type: "image" }> }): ReactNode {
-  const [expanded, setExpanded] = useState(false);
-  const src = `data:${block.mimeType};base64,${block.data}`;
-  useEffect(() => {
-    if (!expanded) return;
-    function close(event: KeyboardEvent): void {
-      if (event.key === "Escape") setExpanded(false);
-    }
-    window.addEventListener("keydown", close);
-    return () => window.removeEventListener("keydown", close);
-  }, [expanded]);
-  return (
-    <>
-      <button className="image-message" type="button" aria-label="放大图片" onClick={() => setExpanded(true)}><img src={src} alt="用户上传的图片" /></button>
-      {expanded && <div className="modal-backdrop image-lightbox" role="presentation" onMouseDown={() => setExpanded(false)}><div className="image-lightbox-content" role="dialog" aria-modal="true" aria-label="图片预览" onMouseDown={(event) => event.stopPropagation()}><button className="icon-button modal-close" type="button" title="关闭图片" aria-label="关闭图片" onClick={() => setExpanded(false)}><X size={17} /></button><img src={src} alt="用户上传的图片" /></div></div>}
-    </>
-  );
-}
-
-function toolCallStatusIcon(execution: ToolExecution | undefined, streaming?: boolean): ReactNode {
-  if (execution?.status === "running" || (!execution && streaming)) return <LoaderCircle size={14} className="spinning" />;
-  if (execution?.status === "error") return <AlertCircle size={14} />;
-  return <Check size={14} />;
-}
-
-function toolCallStatusLabel(execution: ToolExecution | undefined, streaming?: boolean): string {
-  if (execution?.status === "error") return "失败";
-  if (execution?.status === "completed") return "已运行";
-  return streaming ? "运行中" : "已运行";
-}
-
-function formatToolArgs(args: unknown): string {
-  if (args === undefined || args === null) return "（无参数）";
+/** 启动时恢复上次的分屏布局（会话列表就绪后逐格激活；失效格子被修剪）。
+ *  单叶布局归一化为 null（单格不该走分屏渲染分支）。 */
+function readStoredSplitState(): { tree: SplitNode | null; focusedPane?: string } {
   try {
-    const text = JSON.stringify(args, null, 2);
-    return text === undefined ? String(args) : text;
+    const parsed = parseStoredSplitLayout(window.localStorage.getItem("pidesktop.split-layout"));
+    if (!parsed || parsed.tree.kind === "leaf") return { tree: null };
+    return parsed;
   } catch {
-    return String(args);
+    return { tree: null };
   }
-}
-
-const MAX_TOOL_OUTPUT_CHARS = 20_000;
-/** 工具内容走 CodeBlock 语法高亮的字符上限；超过则退化为可截断的纯文本块。 */
-const MAX_TOOL_PREVIEW_CHARS = 60_000;
-
-function truncateToolOutput(output: string): string {
-  return output.length > MAX_TOOL_OUTPUT_CHARS ? `${output.slice(0, MAX_TOOL_OUTPUT_CHARS)}\n…（输出过长，已截断显示）` : output;
-}
-
-function actionTimelineIcon(segment: ActionTimelineSegment, execution: ToolExecution | undefined, streaming: boolean): ReactNode {
-  if (segment.type === "thinking") return <Brain size={14} />;
-  if (segment.type === "text") return <MessageCircle size={14} />;
-  return toolCallStatusIcon(execution, streaming);
-}
-
-function actionTimelineNodeState(segment: ActionTimelineSegment, execution: ToolExecution | undefined, streaming: boolean): string {
-  if (segment.type === "thinking") return "thinking";
-  if (segment.type === "text") return "text";
-  return execution?.status ?? (streaming ? "running" : "completed");
-}
-
-/** Expandable tool-call node: shows the call arguments and the tool output. */
-function ToolCallDetails({ call, execution, streaming }: { call: Extract<MessageBlock, { type: "tool-call" }>; execution: ToolExecution | undefined; streaming: boolean }): ReactNode {
-  const running = execution?.status === "running" || (!execution && streaming);
-  // 默认全部折叠：工具调用气泡初始收拢，程序不干预开合——运行中 / 已结束都不自动展开，
-  // 长会话不会被一排展开的工具调用节点淹没；运行状态由 summary 的「运行中 · 转圈」提示承载。
-  // 用户想看细节时手动点开，开合状态完全由用户控制（onToggle 记录）。
-  const [open, setOpen] = useState(false);
-  const args = execution?.args ?? call.arguments;
-  const editPreview = useMemo(() => (call.name === "edit" ? parseEditCallArgs(args) : undefined), [call.name, args]);
-  const writePreview = useMemo(() => (call.name === "write" ? parseWriteCallArgs(args) : undefined), [call.name, args]);
-  const readPreview = useMemo(() => (call.name === "read" ? parseReadCallArgs(args) : undefined), [call.name, args]);
-  const editDiffs = useMemo(() => (editPreview ? buildEditDiffs(editPreview.edits) : undefined), [editPreview]);
-  const patch = execution?.status === "completed" ? execution.patch : undefined;
-  const writeContent = writePreview && writePreview.content.length <= MAX_TOOL_PREVIEW_CHARS ? writePreview.content : undefined;
-  const readContent = execution && execution.status === "completed" && readPreview && execution.output && execution.output.length <= MAX_TOOL_PREVIEW_CHARS ? execution.output : undefined;
-  return (
-    <details className="action-timeline-call" open={open} onToggle={(event) => setOpen((event.currentTarget as HTMLDetailsElement).open)}>
-      <summary className="action-timeline-call-summary">
-        <strong>{toolLabel(call.name)}</strong>
-        <span>{toolCallStatusLabel(execution, streaming)}{execution?.completedAt ? ` · ${formatDuration(execution.startedAt, execution.completedAt)}` : ""}</span>
-        <ChevronDown size={12} className="action-timeline-call-chevron" />
-      </summary>
-      <div className="action-timeline-call-detail">
-        {editPreview && <EditChangeSection preview={editPreview} diffs={editDiffs} patch={patch} />}
-        {writePreview && (
-          <div className="action-timeline-call-section">
-            <span className="action-timeline-call-section-title">写入内容</span>
-            <div className="action-timeline-call-meta">
-              {writePreview.path && <span className="action-timeline-call-path" title={writePreview.path}>{compactPath(writePreview.path)}</span>}
-              <span>{writePreview.content.length} 字符</span>
-            </div>
-            {writeContent ? <CodeBlock language={languageFromPath(writePreview.path) ?? ""} code={writeContent} /> : <pre className="action-timeline-call-code">{writePreview.content.length > MAX_TOOL_OUTPUT_CHARS ? `${writePreview.content.slice(0, MAX_TOOL_OUTPUT_CHARS)}\n…（内容过长，已截断显示）` : writePreview.content}</pre>}
-          </div>
-        )}
-        <div className="action-timeline-call-section">
-          <span className="action-timeline-call-section-title">调用指令</span>
-          <pre className="action-timeline-call-code">{editPreview ? editArgsSummary(editPreview) : writePreview ? writeArgsSummary(writePreview) : formatToolArgs(args)}</pre>
-        </div>
-        <div className="action-timeline-call-section">
-          <span className="action-timeline-call-section-title">输出</span>
-          {execution?.output ? (readContent ? <CodeBlock language={languageFromPath(readPreview?.path) ?? ""} code={readContent} /> : <pre className="action-timeline-call-code">{truncateToolOutput(execution.output)}</pre>) : <span className="action-timeline-call-empty">{running ? "运行中…" : "（无输出）"}</span>}
-        </div>
-      </div>
-    </details>
-  );
-}
-
-/** `edit` 调用的人类可读变更视图：优先展示工具返回的统一 patch，否则按 edits 计算行级 diff。 */
-function EditChangeSection({ preview, diffs, patch }: { preview: EditCallPreview; diffs: EditDiffBlock[] | undefined; patch: string | undefined }): ReactNode {
-  return (
-    <div className="action-timeline-call-section">
-      <span className="action-timeline-call-section-title">变更</span>
-      <div className="action-timeline-call-meta">
-        {preview.path && <span className="action-timeline-call-path" title={preview.path}>{compactPath(preview.path)}</span>}
-        <span>{preview.edits.length} 处编辑</span>
-      </div>
-      <div className="action-timeline-call-diff-scroll">
-        {patch ? <DiffView patch={patch} /> : diffs?.map((block, index) => (
-          <div className="action-timeline-edit-block" key={index}>
-            {diffs.length > 1 && <span className="action-timeline-edit-block-label">变更 {index + 1}</span>}
-            {block.lines ? (
-              <pre className="diff-view">{block.lines.map((line, lineIndex) => <span className={line.type === "context" ? "diff-context" : `diff-${line.type}`} key={lineIndex}>{line.text || " "}{"\n"}</span>)}</pre>
-            ) : (
-              <pre className="action-timeline-call-code">…（变更区域过长，请展开查看调用指令）</pre>
-            )}
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-/**
- * 思考内容块：折叠时限制在固定高度内滚动输出，超出限高才出现展开按钮；
- * 点击展开后展示全文，再点收起恢复限高。流式输出期间文本变化会重新测量。
- */
-function ThinkingBlock({ text, label }: { text: string; label: string }): ReactNode {
-  const [expanded, setExpanded] = useState(false);
-  const [overflowing, setOverflowing] = useState(false);
-  const bodyRef = useRef<HTMLParagraphElement | null>(null);
-
-  useLayoutEffect(() => {
-    const el = bodyRef.current;
-    if (!el || expanded) return; // 展开时保持按钮状态，避免测量全高后误判为不溢出
-    setOverflowing(el.scrollHeight > el.clientHeight + 1);
-  }, [text, expanded]);
-
-  return (
-    <>
-      <strong>{label}</strong>
-      <p ref={bodyRef} className={`thinking-body${expanded ? " expanded" : ""}`}>{text}</p>
-      {overflowing && (
-        <button type="button" className="thinking-expand" data-control="thinking-expand" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>
-          {expanded ? "收起" : "展开全文"}
-        </button>
-      )}
-    </>
-  );
-}
-
-interface ActionTimelineProps {
-  message: ChatMessage;
-  executions: ToolExecution[];
-  turnActive: boolean;
-  showThinking: boolean;
-  thinkingLabel?: string;
-  onOpenArtifact(artifact: Artifact): void;
-  onHtmlAction(text: string): void;
-  timing?: TurnTiming;
-  now: number;
-}
-
-function ActionTimeline({ message, executions, turnActive, showThinking, thinkingLabel, onOpenArtifact, onHtmlAction, timing, now }: ActionTimelineProps): ReactNode {
-  const segments = actionTimelineSegments(message, showThinking);
-  const lastActionIndex = segments.reduce((index, segment, currentIndex) => segment.type === "thinking" || segment.type === "tool-call" ? currentIndex : index, -1);
-  if (lastActionIndex < 0) return segments[0]?.type === "text" ? <RichContent streaming={message.streaming} artifactPrefix={message.id} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction}>{segments[0].text}</RichContent> : null;
-  const process = segments.slice(0, lastActionIndex + 1);
-  const trailing = segments.slice(lastActionIndex + 1).filter((segment): segment is Extract<ActionTimelineSegment, { type: "text" }> => segment.type === "text");
-  const processActive = turnActive || Boolean(message.streaming);
-  const stats = actionTimelineStats(process, executions, processActive);
-  const executionById = new Map(executions.map((execution) => [execution.id, execution]));
-  const historicalStartedAt = stats.startedAt === undefined ? message.timestamp : Math.min(message.timestamp, stats.startedAt);
-  const startedAt = timing?.startedAt ?? historicalStartedAt;
-  const completedAt = stats.active ? now : timing?.completedAt ?? stats.completedAt;
-  const elapsed = startedAt === undefined ? undefined : formatProcessDuration(startedAt, completedAt ?? now);
-  const summary = stats.active ? "正在处理" : elapsed ? `已处理 ${elapsed}` : "已处理";
-  return (
-    <>
-      <details className={`action-timeline${stats.active ? " active" : ""}`} open={stats.active}>
-        <summary className="action-timeline-summary">
-          <span className="action-timeline-summary-title"><Workflow size={15} /><strong>{summary}</strong></span>
-          <span className="action-timeline-summary-meta">{stats.thinkingCount > 0 && `${stats.thinkingCount} 段思考`}{stats.thinkingCount > 0 && stats.toolCount > 0 ? " · " : ""}{stats.toolCount > 0 && `${stats.toolCount} 次工具调用`}{stats.failedCount > 0 && ` · ${stats.failedCount} 个失败`}</span>
-          <ChevronDown size={14} className="action-timeline-chevron" />
-        </summary>
-        <div className="action-timeline-body">
-          {process.map((segment, index) => {
-            const execution = segment.type === "tool-call" ? executionById.get(segment.call.id) : undefined;
-            const stateClass = actionTimelineNodeState(segment, execution, processActive);
-            return (
-              <div className={`action-timeline-node ${segment.type} ${stateClass}`} data-node-kind={segment.type} data-node-state={stateClass || undefined} key={segment.type === "tool-call" ? segment.call.id : `${segment.type}-${index}`}>
-                <span className="action-timeline-node-icon">{actionTimelineIcon(segment, execution, processActive)}</span>
-                <div className="action-timeline-node-content">
-                  {segment.type === "thinking" ? <ThinkingBlock text={segment.text} label={thinkingLabel || "思考过程"} /> : segment.type === "tool-call" ? <ToolCallDetails call={segment.call} execution={execution} streaming={Boolean(message.streaming)} /> : <RichContent streaming={false} artifactPrefix={`${message.id}-process-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction}>{segment.text}</RichContent>}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </details>
-      {trailing.map((segment, index) => <RichContent key={`trailing-${index}`} streaming={message.streaming} artifactPrefix={`${message.id}-trailing-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction}>{segment.text}</RichContent>)}
-    </>
-  );
 }
 
 function PreviewDivider({ split, dragging, onStart, onMove, onEnd, onCancel, onKeyDown, onReset }: {
@@ -536,119 +269,6 @@ function PreviewDivider({ split, dragging, onStart, onMove, onEnd, onCancel, onK
     />
   );
 }
-
-function CompactTimingMeta({ timing, now }: { timing: TurnTiming; now: number }): ReactNode {
-  return (
-    <div className="message-timing" aria-label="压缩耗时">
-      <span>压缩耗时 {formatDuration(timing.startedAt, timing.completedAt ?? now)}</span>
-    </div>
-  );
-}
-
-function ChangedFilesPanel({ files, onOpenFile, onOpenDiff }: { files: ReplyChangedFile[]; onOpenFile(relativePath: string): void; onOpenDiff(execution: ToolExecution): void }): ReactNode {
-  return (
-    <details className="reply-files-panel">
-      <summary>
-        <span><PackageOpen size={14} /><strong>交付产物</strong><em>{files.length}</em></span>
-        <span className="reply-files-toggle" aria-hidden="true" />
-      </summary>
-      <div className="reply-files-list">
-        {files.map(({ relativePath, kind, execution }) => {
-          const name = relativePath.split("/").at(-1) ?? relativePath;
-          const hasDiff = Boolean(execution.patch);
-          const isImage = kind === "image";
-          return (
-            <div className="reply-file-row" key={relativePath}>
-              <button
-                type="button"
-                className={isImage ? "reply-file-open reply-file-open-image" : "reply-file-open"}
-                title={isImage ? `预览图片 ${relativePath}` : `预览 ${relativePath}`}
-                aria-label={`预览 ${name}`}
-                onClick={() => onOpenFile(relativePath)}
-              >
-                {isImage ? <ImageIcon size={14} /> : <File size={14} />}
-                <span className="reply-file-text"><strong>{name}</strong><small>{relativePath}</small></span>
-              </button>
-              <span className="reply-file-actions">
-                {!isImage && <button type="button" className="reply-file-action" title={hasDiff ? `查看 ${relativePath} 变更` : "暂无变更记录"} aria-label={`查看 ${name} 变更`} disabled={!hasDiff} onClick={() => onOpenDiff(execution)}><FileDiff size={14} /></button>}
-              </span>
-            </div>
-          );
-        })}
-      </div>
-    </details>
-  );
-}
-
-// Memoized so an unchanged message bubble (stable ChatMessage reference from
-// the store's uuid-based reuse) is skipped during high-frequency streaming
-// updates that only mutate other bubbles.
-const MessageView = memo(function MessageView({ message, executions, onOpenArtifact, onOpenFile, onOpenDiff, onHtmlAction, onCopy, onEdit, onRegenerate, onShare, showThinking = true, hiddenThinkingLabel, busy = false, turnActive = false, timing, now = Date.now() }: { message: ChatMessage; executions: ToolExecution[]; onOpenArtifact(artifact: Artifact): void; onOpenFile(relativePath: string): void; onOpenDiff(execution: ToolExecution): void; onHtmlAction(text: string): void; onCopy(message: ChatMessage): void; onEdit(message: ChatMessage): void; onRegenerate(message: ChatMessage): void; onShare(message: ChatMessage, target: HTMLElement): Promise<void>; showThinking?: boolean; hiddenThinkingLabel?: string; busy?: boolean; turnActive?: boolean; timing?: TurnTiming; now?: number }): ReactNode {
-  const text = messageText(message);
-  const shareTargetRef = useRef<HTMLDivElement | null>(null);
-  const [sharing, setSharing] = useState(false);
-  const [shared, setShared] = useState(false);
-  const isControlMessage = message.control !== undefined;
-  const hasShareableContent = Boolean(text);
-  const changedFiles = changedFilesForMessage(message, executions);
-
-  async function share(): Promise<void> {
-    const target = shareTargetRef.current;
-    if (!target || sharing) return;
-    setSharing(true);
-    setShared(false);
-    try {
-      await onShare(message, target);
-      setShared(true);
-      window.setTimeout(() => setShared(false), 1500);
-    } finally {
-      setSharing(false);
-    }
-  }
-
-  if (message.role === "extension") {
-    const images = message.blocks.filter((block): block is Extract<MessageBlock, { type: "image" }> => block.type === "image");
-    return (
-      <article className="message message-extension" data-role="extension">
-        <div className="message-avatar extension-avatar"><PlugZap size={16} /></div>
-        <div className="message-body extension-message-callout">
-          <strong>{message.extension?.customType || "扩展消息"}</strong>
-          {images.length > 0 && <div className="image-message-list">{images.map((block, index) => <ImageMessageBlock key={`${message.id}-extension-image-${index}`} block={block} />)}</div>}
-          {text && <RichContent streaming={false} artifactPrefix={`${message.id}-extension`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction}>{text}</RichContent>}
-        </div>
-      </article>
-    );
-  }
-
-  if (message.role === "user") {
-    const images = message.blocks.filter((block): block is Extract<MessageBlock, { type: "image" }> => block.type === "image");
-    // @文件引用在气泡里渲染为 chip 行（同 skill badge），正文去掉路径尾巴；
-    // 复制/编辑仍用原始全文，重新发送后同样回环成 chip。
-    const { mentions, body } = extractMentionTokens(text);
-    return (
-      <article className="message message-user" data-role="user">
-        <div className="message-avatar user-avatar">我</div>
-        <div className="message-body message-bubble">{message.skill && <div className="message-skill-badge"><Puzzle size={13} /><strong>{message.skill.name}</strong></div>}{mentions.length > 0 && <div className="message-mention-badges">{mentions.map((token) => <span className="message-skill-badge" key={token} title={token}><File size={13} /><strong>{token}</strong></span>)}</div>}{images.length > 0 && <div className="image-message-list">{images.map((block, index) => <ImageMessageBlock key={`${message.id}-image-${index}`} block={block} />)}</div>}{body && <p className="user-text">{body}</p>}{!isControlMessage && <div className="message-actions"><button type="button" data-control="copy" title="复制" aria-label="复制用户消息" onClick={() => onCopy(message)}><Copy size={13} /></button><button type="button" data-control="edit" title="重新编辑" aria-label="重新编辑用户消息" onClick={() => onEdit(message)}><Pencil size={13} /></button></div>}</div>
-      </article>
-    );
-  }
-
-  return (
-    <article className="message message-assistant" data-role="assistant">
-      <div className="message-avatar pi-avatar"><Bot size={17} /></div>
-      <div className="message-body message-bubble">
-        <div className="assistant-share-content" ref={shareTargetRef}>
-          <ActionTimeline message={message} executions={executions} turnActive={turnActive} showThinking={showThinking} thinkingLabel={hiddenThinkingLabel} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} timing={timing} now={now} />
-          {message.error && <p className="inline-error"><AlertCircle size={15} />{message.error}</p>}
-        </div>
-        {changedFiles.length > 0 && <ChangedFilesPanel files={changedFiles} onOpenFile={onOpenFile} onOpenDiff={onOpenDiff} />}
-        {!isControlMessage && !message.streaming && !busy && <div className="message-actions"><button type="button" data-control="regenerate" title="重新生成" aria-label="重新生成回复" onClick={() => onRegenerate(message)}><RefreshCw size={13} /></button><button type="button" data-control="copy" title="复制" aria-label="复制 AI 回复" onClick={() => onCopy(message)}><Copy size={13} /></button>{hasShareableContent && <button type="button" data-control="share" title={sharing ? "正在生成图片" : shared ? "已复制图片" : "分享图片"} aria-label={sharing ? "正在生成回复图片" : shared ? "回复图片已复制" : "分享 AI 回复图片"} disabled={sharing} onClick={() => void share()}>{sharing ? <LoaderCircle size={13} className="spinning" /> : shared ? <Check size={13} /> : <Share2 size={13} />}</button>}</div>}
-      </div>
-      {timing && (isControlMessage ? <CompactTimingMeta timing={timing} now={now} /> : <TimingMeta timing={timing} now={now} />)}
-    </article>
-  );
-});
-
 function ThemePreview({ appearance }: { appearance: AppearanceSettings }): ReactNode {
   const themeAssetUrls = useThemeAssetUrls(themeAssetsForAppearance(appearance));
   const previewContent = `**实时主题预览**
@@ -1348,28 +968,32 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
 
 export function App(): ReactNode {
   const { ready, snapshot, models, providers, resources, customProvider, customProviderKeyConfigured, customModels, customModelFetchStatus, customModelFetchError, modelRefreshStatus, modelRefreshError, modelRefreshProvider, permissions, questions, error, initialize, clearError } = useDesktopStore();
-  // 权限/提问按当前激活会话过滤：store 的数组跨会话累积，直接取 [0] 会在切换会话后
-  // 把上一个（后台/parked）会话待决的弹窗冒到新会话视图里。取不到当前会话的就不展示。
-  const permission = currentPermissionRequest(permissions, snapshot.sessionId);
-  const question = currentQuestionRequest(questions, snapshot.sessionId);
+  // 分屏布局：tree 为递归二叉分割树，focusedPane 是焦点格（= 激活会话）。
+  // 权限/提问按格子集合过滤（焦点格优先），store 的数组跨会话累积，直接取
+  // [0] 会把后台会话待决的弹窗冒到别的格子视图里；单窗口退化为 [激活会话]，
+  // 与旧的“按当前激活会话过滤”行为一致。
+  const [splitState, setSplitState] = useState(readStoredSplitState);
+  const splitTree = splitState.tree;
+  const focusedPaneId = splitState.focusedPane;
+  const [maximizedPaneId, setMaximizedPaneId] = useState<string>();
+  const paneIds = useMemo(() => (splitTree ? leafIds(splitTree) : []), [splitTree]);
+  const paneFocusOrder = useMemo(() => {
+    const active = focusedPaneId ?? snapshot.sessionId;
+    return [active, ...paneIds.filter((id) => id !== active)].filter((id): id is string => Boolean(id));
+  }, [paneIds, focusedPaneId, snapshot.sessionId]);
+  const permission = panePermissionRequest(permissions, paneFocusOrder);
+  const question = paneQuestionRequest(questions, paneFocusOrder);
   const settings = useDesktopStore((state) => state.settings);
   const themeAssetUrls = useThemeAssetUrls(themeAssetsForAppearance(settings.appearance));
-  const [input, setInput] = useState("");
-  const [selectedSkill, setSelectedSkill] = useState<string>();
-  const [editingMessageTimestamp, setEditingMessageTimestamp] = useState<number>();
-  // 本地待回复计时必须绑定发起回合时的会话：两个会话同时执行时 busy 恒为
-  // true，按 busy 清理的 effect 不会触发；若不绑定，切到另一会话后会用本会话
-  // 的本地计时去比较对方 turnTiming.startedAt，把空壳待回复气泡误渲染到对方
-  // 会话底部（耗时还从本会话发送时刻起算）。绑定 sessionId 后跨会话自动失效。
-  const [localTurn, setLocalTurn] = useState<{ startedAt: number; sessionId: string | undefined }>();
   const [messageActionError, setMessageActionError] = useState<string>();
+  const setActionError = useCallback((message?: string): void => {
+    setMessageActionError(message);
+  }, []);
   const [sidebarTab, setSidebarTab] = useState<"agents" | "topics">("topics");
   const [sidebarQuery, setSidebarQuery] = useState("");
   // 启动时所有工作区分组默认折叠（空表 = 无展开项）；用户展开后保持到退出。
   const [expandedWorkspaceGroups, setExpandedWorkspaceGroups] = useState<Record<string, boolean>>({});
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [accessModeMenuOpen, setAccessModeMenuOpen] = useState(false);
-  const [composerMenu, setComposerMenu] = useState<"model" | "thinking">();
   const [previewOpened, setPreviewOpened] = useState(false);
   const [preview, setPreview] = useState<PreviewState>();
   const [previewAddMenuOpen, setPreviewAddMenuOpen] = useState(false);
@@ -1389,25 +1013,34 @@ export function App(): ReactNode {
   const [removeWorkspace, setRemoveWorkspace] = useState<{ workspace: string; name: string; count: number } | null>(null);
   const [previewSplit, setPreviewSplit] = useState(readStoredPreviewSplit);
   const [previewDragging, setPreviewDragging] = useState(false);
-  const [attachments, setAttachments] = useState<import("../../shared/protocol").PromptAttachment[]>([]);
-  const [attachmentError, setAttachmentError] = useState<string>();
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const accessModeMenuRef = useRef<HTMLDivElement>(null);
-  const modelMenuRef = useRef<HTMLDivElement>(null);
-  const composerRef = useRef<HTMLFormElement>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-  // 浏览器元素选择「发送到聊天框」：选中卡片上的输入（可空备注）与元素块
-  // 直接写入聊天输入框并聚焦——用户可继续编辑，随下一条消息一起发出。
+  const previewDragPointerRef = useRef<number | undefined>(undefined);
+  const workAreaRef = useRef<HTMLDivElement>(null);
+  // —— 分屏支撑：会话草稿（格子 remount 恢复）与 composer 主动写入桥 ——
+  const draftsRef = useRef(new Map<string, string>());
+  const draftStore = useMemo<PaneDraftStore>(() => ({
+    load: (sessionId) => draftsRef.current.get(sessionId),
+    save: (sessionId, text) => {
+      if (text) draftsRef.current.set(sessionId, text);
+      else draftsRef.current.delete(sessionId);
+    }
+  }), []);
+  const composerBridge = useRef(new Map<string, PaneComposerApi>());
+  const registerComposerApi = useCallback((api: PaneComposerApi | undefined, sessionId: string | undefined): void => {
+    if (sessionId === undefined) return;
+    if (api) composerBridge.current.set(sessionId, api);
+    else composerBridge.current.delete(sessionId);
+  }, []);
+  // 已 watch 的格子集合（effect 维护）；session.new 在分屏中替换某格时记录待替换格。
+  const watchedPaneIdsRef = useRef(new Set<string>());
+  const pendingPaneReplaceRef = useRef<string | undefined>(undefined);
+  // 浏览器元素选择「发送到聊天框」：元素块写入焦点格输入框并聚焦——用户可
+  // 继续编辑，随下一条消息一起发出。
   const sendPickedElement = useCallback((pick: BrowserElementPick, note: string): void => {
     const block = composePickMessage(pick, note);
-    setInput((current) => current ? `${current}\n\n${block}` : block);
-    setTimeout(() => {
-      const textarea = textareaRef.current;
-      if (!textarea) return;
-      textarea.focus();
-      textarea.setSelectionRange(textarea.value.length, textarea.value.length);
-    }, 0);
-  }, []);
+    const targetId = focusedPaneId ?? snapshot.sessionId;
+    if (!targetId) return;
+    composerBridge.current.get(targetId)?.insertText(block);
+  }, [focusedPaneId, snapshot.sessionId]);
   // 浏览器标签页状态回流：用页面标题/加载态更新预览标签的元数据。
   const handleBrowserStateChange = useCallback((tabId: string, state: import("../../shared/protocol").BrowserPreviewState): void => {
     setPreview((current) => current ? {
@@ -1417,150 +1050,13 @@ export function App(): ReactNode {
         : tab)
     } : current);
   }, []);
-  const processedComposerRequestsRef = useRef(new Set<string>());
-  const previewDragPointerRef = useRef<number | undefined>(undefined);
-  const workAreaRef = useRef<HTMLDivElement>(null);
-  const timelineRef = useRef<HTMLDivElement>(null);
-  const stickToBottomRef = useRef(true);
-  const previousSessionIdRef = useRef<string | undefined>(undefined);
-  const [slashIndex, setSlashIndex] = useState(0);
-  // @ 提及：tokenStart 为输入串中 @ 的下标；Esc 后按 token 记忆“已关闭”，
-  // 继续输入（token 变化）才重新弹出。
-  const [mention, setMention] = useState<{ query: string; tokenStart: number }>();
-  const [mentionResults, setMentionResults] = useState<WorkspaceFileSearchEntry[]>([]);
-  const [mentionIndex, setMentionIndex] = useState(0);
-  const [mentionDismissedToken, setMentionDismissedToken] = useState<string>();
-  // @ 选中的文件引用：与 skill chip 同样的气泡交互，发送时拼回 @路径。
-  const [mentionedFiles, setMentionedFiles] = useState<WorkspaceFileSearchEntry[]>([]);
-  const selectedModel = snapshot.model ? `${snapshot.model.provider}/${snapshot.model.id}` : "";
-  const availableModels = useMemo(() => selectableCatalogModels(models).filter((model) => model.configured), [models]);
-  const selectedModelOption = availableModels.find((model) => `${model.provider}/${model.id}` === selectedModel);
-  const visionFallbackAvailable = Boolean(settings.vision?.enabled && settings.vision.provider && settings.vision.model
-    && models.some((item) => item.provider === settings.vision?.provider && item.id === settings.vision?.model && item.configured && item.imageInput && item.enabled !== false));
-  const modelAcceptsImages = Boolean(models.find((item) => `${item.provider}/${item.id}` === selectedModel)?.imageInput);
   const visibleAgents = useMemo(() => settings.agents.filter((agent) => !agent.archived && `${agent.name} ${agent.description}`.toLowerCase().includes(sidebarQuery.trim().toLowerCase())), [settings.agents, sidebarQuery]);
   const sessionGroups = useMemo(() => groupSessionsByWorkspace(snapshot.sessions, sidebarQuery, snapshot.recentWorkspaces), [snapshot.sessions, snapshot.recentWorkspaces, sidebarQuery]);
   const themeLayers = useMemo(() => collectThemeLayers(settings.appearance.customCss), [settings.appearance.customCss]);
-  const displayMessages = useMemo(() => groupAssistantMessages(snapshot.messages), [snapshot.messages]);
-  const latestAssistantIndex = useMemo(() => [...displayMessages].reverse().findIndex((message) => message.role === "assistant"), [displayMessages]);
-  const latestAssistantMessageIndex = latestAssistantIndex < 0 ? -1 : displayMessages.length - 1 - latestAssistantIndex;
-  const localTiming = localTurn !== undefined && localTurn.sessionId === snapshot.sessionId ? { startedAt: localTurn.startedAt } satisfies TurnTiming : undefined;
-  const localTurnPending = localTiming !== undefined && (snapshot.turnTiming === undefined || snapshot.turnTiming.startedAt < localTiming.startedAt);
-  const activeTurnTiming = localTurnPending ? localTiming : snapshot.turnTiming;
-  const isGenerating = localTurnPending || Boolean(snapshot.busy && snapshot.turnTiming && snapshot.turnTiming.completedAt === undefined);
+  // 主题根属性（data-ui-*）反映焦点格（分屏下即激活会话）的状态。
+  const isGenerating = Boolean(snapshot.busy && snapshot.turnTiming && snapshot.turnTiming.completedAt === undefined);
+  const isChatEmpty = !snapshot.workspace || (snapshot.messages.length === 0 && !isGenerating);
   const activePreviewTab = preview?.tabs.find((tab) => tab.id === preview.activeTabId);
-  const now = useElapsedNow(isGenerating);
-  // The avatar'd pending bubble shows from the moment a turn starts (including
-  // the local-pending window before the snapshot round-trips) until this
-  // turn's assistant reply actually renders; afterwards the plain inline
-  // progress row continues under the existing assistant bubble.
-  const lastDisplayMessage = displayMessages[displayMessages.length - 1];
-  const assistantBubbleVisible = !localTurnPending && lastDisplayMessage?.role === "assistant" && !lastDisplayMessage.control;
-  // 耗时元信息只在气泡外出现：回合进行中由底部行内进度（response-progress-inline
-  // / PendingResponse 的 caption）展示实时耗时；回合结束后在最新一条回复的气泡
-  // 下方展示定格值，不再嵌进气泡内容（用户反馈：气泡内不应出现回答耗时/总耗时）。
-  const showTurnTimingOnLatest = Boolean(snapshot.turnTiming && !isGenerating);
-  const canSubmit = Boolean(snapshot.workspace && (input.trim() || attachments.length > 0 || selectedSkill || mentionedFiles.length > 0) && snapshot.model);
-  const workingLabel = `${snapshot.agentName}正在努力输出中……`;
-  let composerPlaceholder = "请先打开一个项目";
-  if (snapshot.workspace) composerPlaceholder = selectedSkill ? "输入任务要求" : "让 Pi 检查、修改或运行这个项目，@ 可引用文件";
-  if (snapshot.workspace && snapshot.busy) composerPlaceholder = "连续输入以排队后续修改";
-
-  // 斜杠指令清单：固定会话命令 + 已发现的 Skill。
-  // Skill 的 trigger 仍是 /skill:<名字>（选中后回填用），但候选框里只展示裸名，
-  // 匹配时同时接受 /sk 前缀与裸名前缀两种输入方式。
-  const slashCommands = useMemo<SlashCommand[]>(() => {
-    const fixed: SlashCommand[] = [
-      { trigger: "/compact", label: "/compact", description: "压缩当前会话上下文", kind: "command", command: { type: "session.compact" } },
-      { trigger: "/new", label: "/new", description: "开启新话题", kind: "command", command: { type: "session.new" } },
-      { trigger: "/plan", label: "/plan", description: snapshot.planMode ? "退出计划模式" : "进入计划模式：先出计划，批准后实施", kind: "command", command: { type: "session.planMode", enabled: !snapshot.planMode } }
-    ];
-    const skills: SlashCommand[] = resources.skills.filter((skill) => skill.enabled).map((skill) => ({
-      trigger: `/skill:${skill.name}`,
-      label: skill.name,
-      description: skill.description || "调用 Skill",
-      kind: "skill",
-      skillName: skill.name
-    }));
-    return [...fixed, ...skills];
-  }, [resources.skills, snapshot.planMode]);
-
-  // 仅当输入以 / 开头且光标仍处于首个 token（无空格）时才过滤指令
-  const slashToken = useMemo(() => {
-    if (selectedSkill) return null;
-    const trimmed = input.trimStart();
-    if (!trimmed.startsWith("/")) return null;
-    const tail = trimmed.slice(1);
-    if (tail.includes(" ")) return null; // 首个 token 已结束，补全关闭
-    return trimmed.toLowerCase();
-  }, [input, selectedSkill]);
-
-  const slashMatches = useMemo(() => {
-    if (!slashToken) return [];
-    return slashCommands.filter((cmd) => {
-      const trigger = cmd.trigger.toLowerCase();
-      if (trigger.startsWith(slashToken) && trigger !== slashToken) return true;
-      // 裸名匹配：/design 也能命中 /skill:design-xxx（去掉开头的 / 再比对）
-      if (cmd.kind === "skill") return cmd.skillName.toLowerCase().startsWith(slashToken.slice(1));
-      return false;
-    });
-  }, [slashToken, slashCommands]);
-
-  // 候选框按「会话指令 / 技能」分组渲染；flatIndex 保持键盘导航指向扁平 slashMatches。
-  const slashGroups = useMemo(() => {
-    const groups = [
-      { key: "command", title: "会话指令", items: new Array<{ cmd: SlashCommand; flatIndex: number }>() },
-      { key: "skill", title: "技能", items: new Array<{ cmd: SlashCommand; flatIndex: number }>() }
-    ];
-    slashMatches.forEach((cmd, flatIndex) => {
-      groups.find((group) => group.key === cmd.kind)?.items.push({ cmd, flatIndex });
-    });
-    return groups.filter((group) => group.items.length > 0);
-  }, [slashMatches]);
-
-  const slashOpen = slashMatches.length > 0;
-  const activeSlashIndex = Math.min(slashIndex, slashMatches.length - 1);
-
-  useEffect(() => {
-    if (slashIndex > slashMatches.length - 1) setSlashIndex(Math.max(0, slashMatches.length - 1));
-  }, [slashMatches.length, slashIndex]);
-
-  // —— @ 提及工作区文件 ——
-  const mentionToken = mention ? `${mention.tokenStart}:${mention.query}` : "";
-  const mentionOpen = Boolean(mention && snapshot.workspace && mentionToken !== mentionDismissedToken && mentionResults.length > 0);
-  const activeMentionIndex = Math.min(mentionIndex, mentionResults.length - 1);
-
-  useEffect(() => {
-    if (mentionIndex > mentionResults.length - 1) setMentionIndex(Math.max(0, mentionResults.length - 1));
-  }, [mentionResults.length, mentionIndex]);
-
-  // 输入被外部清空/替换（发送、编辑消息回填等）后，失效的 tokenStart 需要清理，
-  // 否则菜单会挂在错误的插入位置上。
-  useEffect(() => {
-    if (mention && (mention.tokenStart >= input.length || input[mention.tokenStart] !== "@")) setMention(undefined);
-  }, [input, mention]);
-
-  useEffect(() => {
-    const workspace = snapshot.workspace;
-    if (!mention || !workspace || mentionToken === mentionDismissedToken) return;
-    let cancelled = false;
-    const timer = setTimeout(() => {
-      void window.piDesktop.searchWorkspaceFiles(workspace, mention.query)
-        .then((result) => { if (!cancelled) setMentionResults(result.entries); })
-        .catch(() => { if (!cancelled) setMentionResults([]); });
-    }, 120);
-    return () => { cancelled = true; clearTimeout(timer); };
-  }, [mention, mentionToken, mentionDismissedToken, snapshot.workspace]);
-
-  useEffect(() => {
-    setMentionIndex(0);
-  }, [mentionToken]);
-
-  // 菜单关闭时清空旧结果，避免下次弹开瞬间闪现上一次的列表；
-  // 打开状态下连续输入时保留旧列表直到新结果到达（标准自动补全体验）。
-  useEffect(() => {
-    if (!mention) setMentionResults([]);
-  }, [mention]);
 
   // Race-safe subscription: if the component unmounts before initialize()
   // resolves (e.g. React.StrictMode's mount-unmount-mount in dev), the cleanup
@@ -1583,70 +1079,6 @@ export function App(): ReactNode {
     document.title = "ChatAnyTime";
   }, []);
 
-  useEffect(() => {
-    if (!ready) return;
-    const composer = composerRef.current;
-    const pane = composer?.parentElement;
-    if (!composer || !pane) return;
-    const update = (): void => {
-      const height = composer.getBoundingClientRect().height;
-      pane.style.setProperty("--composer-space", `${height + 40}px`);
-      // 提问面板锚定在输入栏正上方，需要输入栏的精确高度。
-      pane.style.setProperty("--composer-height", `${height}px`);
-    };
-    update();
-    const observer = new ResizeObserver(update);
-    observer.observe(composer);
-    return () => {
-      observer.disconnect();
-      pane.style.removeProperty("--composer-space");
-      pane.style.removeProperty("--composer-height");
-    };
-  }, [ready]);
-
-  useEffect(() => {
-    const timeline = timelineRef.current;
-    if (!timeline) return;
-    const updateScrollIntent = (): void => {
-      const gap = timeline.scrollHeight - timeline.clientHeight - timeline.scrollTop;
-      stickToBottomRef.current = gap <= 64;
-    };
-    updateScrollIntent();
-    timeline.addEventListener("scroll", updateScrollIntent, { passive: true });
-    return () => timeline.removeEventListener("scroll", updateScrollIntent);
-  }, []);
-
-  useLayoutEffect(() => {
-    const timeline = timelineRef.current;
-    if (!timeline) return;
-    const sessionChanged = previousSessionIdRef.current !== snapshot.sessionId;
-    previousSessionIdRef.current = snapshot.sessionId;
-    if (sessionChanged) {
-      // Session switch: jump straight to the newest content instead of smooth-
-      // scrolling through the swapped-in history. Images/code may still be
-      // measuring, so re-jump on the next frames while still stuck to bottom.
-      stickToBottomRef.current = true;
-      timeline.scrollTo({ top: timeline.scrollHeight, behavior: "auto" });
-      requestAnimationFrame(() => {
-        const element = timelineRef.current;
-        if (element && stickToBottomRef.current) element.scrollTo({ top: element.scrollHeight, behavior: "auto" });
-      });
-      requestAnimationFrame(() => requestAnimationFrame(() => {
-        const element = timelineRef.current;
-        if (element && stickToBottomRef.current) element.scrollTo({ top: element.scrollHeight, behavior: "auto" });
-      }));
-      return;
-    }
-    if (!stickToBottomRef.current) return;
-    // Instant scroll while busy: streaming fires frequent updates, and smooth
-    // scrolling on every frame stacks competing animations and janks. Reserve
-    // smooth scrolling for the occasional new message when idle.
-    timeline.scrollTo({ top: timeline.scrollHeight, behavior: snapshot.busy ? "auto" : "smooth" });
-  }, [snapshot.messages, snapshot.busy, snapshot.sessionId]);
-
-  useEffect(() => {
-    if (!snapshot.busy) setLocalTurn(undefined);
-  }, [snapshot.busy]);
 
   useEffect(() => {
     try { window.localStorage.setItem("pidesktop.preview-split", String(previewSplit)); } catch { /* storage may be unavailable in browser demo */ }
@@ -1659,8 +1091,6 @@ export function App(): ReactNode {
   }, [preview]);
 
   useEffect(() => {
-    setEditingMessageTimestamp(undefined);
-    setSelectedSkill(undefined);
     if (!preview) return;
     // 会话切换不收回右侧边栏：只清理会话级标签（artifact/diff），面板保持
     // 展开；跨会话标签（browser/terminal/file）全部保留。浏览器视图由
@@ -1715,31 +1145,6 @@ export function App(): ReactNode {
     return () => document.removeEventListener("keydown", toggleTerminal);
   }, [preview, previewOpened]);
 
-  useEffect(() => {
-    if (!accessModeMenuOpen && !composerMenu) return;
-    const closeOnPointerDown = (event: PointerEvent): void => {
-      if (!accessModeMenuRef.current?.contains(event.target as Node)) setAccessModeMenuOpen(false);
-      if (!composerRef.current?.contains(event.target as Node)) setComposerMenu(undefined);
-    };
-    const closeOnEscape = (event: KeyboardEvent): void => {
-      if (event.key === "Escape") {
-        setAccessModeMenuOpen(false);
-        setComposerMenu(undefined);
-      }
-    };
-    document.addEventListener("pointerdown", closeOnPointerDown);
-    document.addEventListener("keydown", closeOnEscape);
-    return () => {
-      document.removeEventListener("pointerdown", closeOnPointerDown);
-      document.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [accessModeMenuOpen, composerMenu]);
-
-  useEffect(() => {
-    if (composerMenu !== "model") return;
-    const active = modelMenuRef.current?.querySelector<HTMLButtonElement>("button.active");
-    active?.scrollIntoView({ block: "nearest" });
-  }, [composerMenu]);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -1782,17 +1187,19 @@ export function App(): ReactNode {
   // Project UI state onto the document root so custom themes can react to
   // settings/preview/chat state without observing the DOM. Attribute presence
   // means true; these names are part of the stable theme-hook contract.
+  // 分屏语义：generating/chat-empty/attachments 反映焦点格（= 激活会话）；
+  // permission/question 是“任一格有待决”的聚合。
   useEffect(() => {
     const root = document.documentElement;
     const states: readonly [string, boolean][] = [
       ["data-ui-settings-open", settingsOpen],
       ["data-ui-workspace-open", Boolean(snapshot.workspace)],
-      ["data-ui-chat-empty", !snapshot.workspace || (displayMessages.length === 0 && !isGenerating)],
+      ["data-ui-chat-empty", isChatEmpty],
       ["data-ui-generating", isGenerating],
       ["data-ui-preview-open", previewOpened],
       ["data-ui-permission-pending", Boolean(permission)],
       ["data-ui-question-pending", Boolean(question)],
-      ["data-ui-attachments", attachments.length > 0]
+      ["data-ui-split-open", paneIds.length > 1]
     ];
     const valueStates: readonly [string, string][] = [
       ["data-ui-sidebar-view", sidebarView]
@@ -1806,174 +1213,200 @@ export function App(): ReactNode {
       for (const [name] of states) root.removeAttribute(name);
       for (const [name] of valueStates) root.removeAttribute(name);
     };
-  }, [settingsOpen, snapshot.workspace, displayMessages.length, isGenerating, previewOpened, permission, question, attachments.length, sidebarView]);
+  }, [settingsOpen, snapshot.workspace, isChatEmpty, isGenerating, previewOpened, permission, question, paneIds.length, sidebarView]);
 
   async function openWorkspace(): Promise<void> {
     const path = await window.piDesktop.chooseWorkspace();
     if (path) await window.piDesktop.send({ type: "workspace.open", path });
   }
 
-  async function createNewSession(workspace?: string): Promise<void> {
+  /**
+   * 新建话题：分屏中替换 paneSessionId 指定的格子（缺省焦点格）。新会话 id
+   * 要等主进程激活后才知道，先记 pending，snapshot.sessionId 变化时落位。
+   */
+  async function createNewSession(workspace?: string, paneSessionId?: string): Promise<void> {
     try {
+      if (splitTree) {
+        const target = paneSessionId ?? focusedPaneId ?? snapshot.sessionId;
+        if (target) pendingPaneReplaceRef.current = target;
+      }
       await window.piDesktop.send({ type: "session.new", workspace });
       // 分组默认折叠，新建后展开目标工作区，让新话题立即可见。
       const key = workspaceKey(workspace ?? snapshot.workspace ?? "");
       if (key) setExpandedWorkspaceGroups((current) => ({ ...current, [key]: true }));
-      setInput("");
-      setAttachments([]);
-      setMentionedFiles([]);
-      setSelectedSkill(undefined);
-      setEditingMessageTimestamp(undefined);
     } catch (error) {
       setMessageActionError(error instanceof Error ? error.message : "新建话题失败");
     }
   }
 
-  async function openSession(path: string, sessionWorkspace: string): Promise<void> {
+  async function openSession(path: string, sessionWorkspace: string, sessionId?: string): Promise<void> {
     try {
+      // 分屏中：已在格子里的会话只聚焦；不在的替换焦点格（草稿/焦点随之迁移）。
+      if (splitTree && sessionId) {
+        if (leafIds(splitTree).includes(sessionId)) {
+          focusPane(sessionId);
+          return;
+        }
+        const target = focusedPaneId ?? snapshot.sessionId;
+        if (target && sessionId) setSplitState((current) => current.tree ? { tree: replaceLeaf(current.tree, target, { kind: "leaf", sessionId }), focusedPane: sessionId } : current);
+      }
       await window.piDesktop.send({ type: "session.open", path, workspace: sessionWorkspace });
     } catch (error) {
       setMessageActionError(error instanceof Error ? error.message : "打开话题失败");
     }
   }
 
-  async function submit(event: FormEvent): Promise<void> {
-    event.preventDefault();
-    const text = input.trim();
-    if (!text && attachments.length === 0 && !selectedSkill && mentionedFiles.length === 0) return;
-    // 客户端执行的固定指令：不透传给 Pi（会话层会当噪声），直接发协议命令。
-    // /new 在生成中也可用：新会话独立于正在运行的旧会话。
-    if (!selectedSkill && text === "/new") {
-      try {
-        await createNewSession();
-      } catch (error) {
-        setMessageActionError(error instanceof Error ? error.message : "新建话题失败");
-      }
-      return;
-    }
-    if (!selectedSkill && (text === "/compact" || text.startsWith("/compact "))) {
-      const instructions = text.startsWith("/compact ") ? text.slice("/compact ".length).trim() || undefined : undefined;
-      try {
-        await window.piDesktop.send({ type: "session.compact", instructions });
-        setInput("");
-        setAttachments([]);
-        setEditingMessageTimestamp(undefined);
-      } catch (error) {
-        setMessageActionError(error instanceof Error ? error.message : "压缩上下文失败");
-      }
-      return;
-    }
-    const skillMatch = selectedSkill ? undefined : text.match(/^\/skill:([^\s]+)(?:\s+([\s\S]*))?$/u);
-    // @ 提及在发送时拼回文本末尾——模型拿到的是可读的完整上下文。
-    const composedText = [text, ...mentionedFiles.map((entry) => `@${entry.relativePath}`)].filter(Boolean).join("\n\n");
-    const skillName = selectedSkill ?? skillMatch?.[1];
-    const skillInstructions = selectedSkill ? composedText || undefined : skillMatch?.[2]?.trim() || undefined;
-    if (attachments.some((item) => item.kind === "image") && !modelAcceptsImages && !visionFallbackAvailable) { setAttachmentError("当前模型不支持图片输入，请先切换多模态模型，或在设置的模型服务中启用视觉识别"); return; }
-    // 生成中回车不丢弃输入：进入输入框上方的待发送队列，默认在本轮回复
-    // 结束后作为下一轮消息发出，可编辑、立即发送或删除。
-    if (snapshot.busy) {
-      if (editingMessageTimestamp !== undefined) return; // 编辑重发要求会话空闲，不排队
-      try {
-        await window.piDesktop.send({ type: "session.queue.add", text: skillName ? skillInstructions ?? "" : composedText, skillName, attachments });
-        setInput("");
-        setSelectedSkill(undefined);
-        setAttachments([]);
-        setMentionedFiles([]);
-      } catch (error) {
-        setAttachmentError(error instanceof Error ? error.message : "消息排队失败");
-      }
-      return;
-    }
-    setLocalTurn({ startedAt: Date.now(), sessionId: snapshot.sessionId });
-    try {
-      if (editingMessageTimestamp !== undefined) {
-        await window.piDesktop.send({ type: "session.regenerate", text: composedText, timestamp: editingMessageTimestamp, skillName, attachments });
-      } else if (skillName) {
-        await window.piDesktop.send({ type: "session.skill", name: skillName, instructions: skillInstructions, attachments });
-      } else {
-        await window.piDesktop.send({ type: "session.prompt", text: composedText, attachments });
-      }
-      setInput("");
-      setSelectedSkill(undefined);
-      setAttachments([]);
-      setMentionedFiles([]);
-      setEditingMessageTimestamp(undefined);
-    } catch (error) {
-      setLocalTurn(undefined);
-      setAttachmentError(error instanceof Error ? error.message : "附件发送失败");
+  // —— 分屏：焦点 / 增删格 / 最大化 ——
+
+  /** 聚焦某格 = 激活该会话（live 快路径），全局镜像（topbar/任务面板）随焦点切换。 */
+  function focusPane(sessionId: string): void {
+    if (sessionId === focusedPaneId && sessionId === snapshot.sessionId) return;
+    setSplitState((current) => ({ tree: current.tree, focusedPane: sessionId }));
+    setMaximizedPaneId((current) => (current !== undefined && current !== sessionId ? undefined : current));
+    if (sessionId === snapshot.sessionId) return;
+    const item = snapshot.sessions.find((summary) => summary.id === sessionId);
+    if (item) {
+      void window.piDesktop.send({ type: "session.open", path: item.path, workspace: item.workspace }).catch((error) => {
+        setMessageActionError(error instanceof Error ? error.message : "切换分屏失败");
+      });
     }
   }
 
-  const copyMessage = useCallback(async (message: ChatMessage): Promise<void> => {
-    const text = messageText(message);
-    if (!text) return;
-    try {
-      await navigator.clipboard.writeText(text);
-    } catch {
-      setMessageActionError("复制失败，请检查剪贴板权限");
+  /** 侧栏右键「分屏到右侧/下方」：对焦点叶再分割，新格成为焦点并被激活。 */
+  function addSplitPane(item: SessionSummary, side: "right" | "bottom"): void {
+    if (!snapshot.sessionId) return;
+    if (splitTree && leafIds(splitTree).includes(item.id)) {
+      focusPane(item.id);
+      return;
     }
-  }, []);
-
-  const shareMessage = useCallback(async (_message: ChatMessage, target: HTMLElement): Promise<void> => {
-    setMessageActionError(undefined);
-    try {
-      await shareElementAsImage(target);
-    } catch (error) {
-      setMessageActionError(error instanceof Error ? `分享失败：${error.message}` : "分享失败，请重试");
-      throw error;
-    }
-  }, []);
-
-  const editMessage = useCallback((message: ChatMessage): void => {
-    setInput(messageText(message));
-    setSelectedSkill(message.skill?.name);
-    setAttachments([]);
-    setMentionedFiles([]);
-    setEditingMessageTimestamp(message.timestamp);
-    setMessageActionError(undefined);
-    setTimeout(() => textareaRef.current?.focus(), 0);
-  }, []);
-
-  /** 编辑排队消息：文本回填输入框（Skill 消息回填展开后的提示词），同时从队列移除。 */
-  function editQueuedMessage(item: QueuedMessage): void {
-    setInput(item.text);
-    setSelectedSkill(undefined);
-    setAttachments([]);
-    setMentionedFiles([]);
-    setEditingMessageTimestamp(undefined);
-    removeQueuedMessage(item);
-    setTimeout(() => textareaRef.current?.focus(), 0);
-  }
-
-  /** 立即发送：升级为 steering，AI 在当前回合下一次模型调用前就能读到，不打断正在执行的工具。 */
-  function sendQueuedMessageNow(item: QueuedMessage): void {
-    void window.piDesktop.send({ type: "session.queue.sendNow", kind: item.kind, index: item.index, text: item.text }).catch((error) => {
-      setMessageActionError(error instanceof Error ? error.message : "立即发送失败");
+    if (splitTree && countLeaves(splitTree) >= MAX_SPLIT_PANES) return;
+    const direction: SplitDirection = side === "right" ? "row" : "column";
+    const anchor = focusedPaneId ?? snapshot.sessionId;
+    setSplitState((current) => ({ tree: addPane(current.tree, anchor, item.id, direction), focusedPane: item.id }));
+    void window.piDesktop.send({ type: "session.open", path: item.path, workspace: item.workspace }).catch((error) => {
+      setMessageActionError(error instanceof Error ? error.message : "分屏打开会话失败");
     });
   }
 
-  function removeQueuedMessage(item: QueuedMessage): void {
-    void window.piDesktop.send({ type: "session.queue.remove", kind: item.kind, index: item.index, text: item.text }).catch((error) => {
-      setMessageActionError(error instanceof Error ? error.message : "移除排队消息失败");
+  /** 关闭一格：剪叶塌缩；只剩一格退出分屏（该会话保持运行，回到单窗口视图）。 */
+  function removeSplitPane(sessionId: string): void {
+    if (!splitTree) return;
+    setSplitState((current) => {
+      if (!current.tree) return current;
+      const collapsed = removePane(current.tree, sessionId);
+      // 单叶 = 退出分屏：树置 null，渲染条件回到单窗口分支。
+      const next = collapsed?.kind === "leaf" ? null : collapsed;
+      const focusedGone = current.focusedPane === sessionId;
+      const focusedPane = focusedGone ? (next ? firstLeafId(next) : snapshot.sessionId) : current.focusedPane;
+      return { tree: next, focusedPane };
     });
+    setMaximizedPaneId((current) => (current === sessionId ? undefined : current));
   }
 
-  function stopGeneration(): void {
-    // 先取队列再发中断：主进程 abort 会清空队列，这里把文本回填输入框供编辑
-    // 重发；输入框已有草稿时追加在草稿之后，不丢内容。
-    const pending = snapshot.queuedMessages;
-    void window.piDesktop.send({ type: "session.abort" }).catch((error) => {
-      setMessageActionError(error instanceof Error ? error.message : "停止失败");
-    });
-    if (pending.length > 0) setInput((current) => current.trim() ? `${current}\n\n${pending.map((item) => item.text).join("\n\n")}` : pending.map((item) => item.text).join("\n\n"));
+  function toggleMaximizePane(sessionId: string): void {
+    setMaximizedPaneId((current) => (current === sessionId ? undefined : sessionId));
   }
 
-  const handleHtmlAction = useCallback((text: string): void => {
-    setInput((current) => current.trim() ? `${current.trim()}\n${text}` : text);
-    setSelectedSkill(undefined);
-    setEditingMessageTimestamp(undefined);
-    setMessageActionError(undefined);
-  }, []);
+  // —— 分屏 effects ——
+
+  /** 格子集合变化时同步 session.watch：非激活格子注册推送（主进程豁免驱逐、
+   *  不设终端圆点、streaming 走 session.state 通道）；移出的格子注销并清缓存。 */
+  useEffect(() => {
+    if (!ready) return;
+    const previous = watchedPaneIdsRef.current;
+    const next = new Set(paneIds);
+    const activeId = snapshot.sessionId;
+    for (const id of next) {
+      if (id === activeId || previous.has(id)) continue;
+      void window.piDesktop.send({ type: "session.watch", sessionId: id, watch: true }).catch(() => undefined);
+    }
+    const removed: string[] = [];
+    for (const id of previous) {
+      if (next.has(id)) continue;
+      removed.push(id);
+      void window.piDesktop.send({ type: "session.watch", sessionId: id, watch: false }).catch(() => undefined);
+    }
+    if (removed.length > 0) dropPaneStates(removed);
+    watchedPaneIdsRef.current = next;
+  }, [paneIds, snapshot.sessionId, ready]);
+
+  /** 分屏布局持久化（localStorage，重启恢复；失效格子由修剪 effect 清理）。 */
+  useEffect(() => {
+    try {
+      if (splitTree && focusedPaneId) window.localStorage.setItem("pidesktop.split-layout", JSON.stringify({ tree: splitTree, focusedPane: focusedPaneId }));
+      else window.localStorage.removeItem("pidesktop.split-layout");
+    } catch { /* storage 可能不可用 */ }
+  }, [splitTree, focusedPaneId]);
+
+  /** 会话消失（删除/工作区移除）时修剪格子；焦点格被剪则回退到首个叶子。 */
+  useEffect(() => {
+    if (!splitTree || snapshot.sessions.length === 0) return;
+    const valid = new Set(snapshot.sessions.map((item) => item.id));
+    if (snapshot.sessionId) valid.add(snapshot.sessionId);
+    setSplitState((current) => {
+      if (!current.tree) return current;
+      const { tree, removed } = pruneToIds(current.tree, valid);
+      if (removed.length === 0) return current;
+      const focusedGone = current.focusedPane !== undefined && removed.includes(current.focusedPane);
+      const focusedPane = focusedGone ? (tree ? firstLeafId(tree) : snapshot.sessionId) : current.focusedPane;
+      return { tree, focusedPane };
+    });
+  }, [snapshot.sessions, snapshot.sessionId, splitTree]);
+
+  /** session.new 在分屏中替换某格：新会话激活（snapshot.sessionId 变化）后落位。 */
+  useEffect(() => {
+    const pending = pendingPaneReplaceRef.current;
+    if (!pending) return;
+    if (!splitTree || !snapshot.sessionId || snapshot.sessionId === pending) {
+      if (!splitTree) pendingPaneReplaceRef.current = undefined;
+      return;
+    }
+    if (!leafIds(splitTree).includes(pending)) {
+      pendingPaneReplaceRef.current = undefined;
+      return;
+    }
+    pendingPaneReplaceRef.current = undefined;
+    const newSessionId = snapshot.sessionId;
+    setSplitState((current) => current.tree ? { tree: replaceLeaf(current.tree, pending, { kind: "leaf", sessionId: newSessionId }), focusedPane: newSessionId } : current);
+  }, [snapshot.sessionId, splitTree]);
+
+  /** 切换助手清空分屏（会话列表按助手划分，旧格子全部失效）。 */
+  const agentIdRef = useRef(snapshot.agentId);
+  useEffect(() => {
+    if (agentIdRef.current === snapshot.agentId) return;
+    agentIdRef.current = snapshot.agentId;
+    setSplitState({ tree: null });
+    setMaximizedPaneId(undefined);
+    draftsRef.current.clear();
+  }, [snapshot.agentId]);
+
+  /** 启动恢复分屏：会话列表就绪后逐格打开（焦点格最后激活，保证它成为激活会话），
+   *  watch effect 随每次激活重跑，先前格子逐个进入 watched 推送。 */
+  const splitRestoreDoneRef = useRef(false);
+  useEffect(() => {
+    if (splitRestoreDoneRef.current || !ready || !splitTree || snapshot.sessions.length === 0) return;
+    splitRestoreDoneRef.current = true;
+    const ordered = [
+      ...paneIds.filter((id) => id !== focusedPaneId),
+      ...(focusedPaneId && paneIds.includes(focusedPaneId) ? [focusedPaneId] : [])
+    ];
+    void (async () => {
+      for (const id of ordered) {
+        const item = snapshot.sessions.find((summary) => summary.id === id);
+        if (!item) continue;
+        try {
+          await window.piDesktop.send({ type: "session.open", path: item.path, workspace: item.workspace });
+        } catch {
+          /* 单格失败不阻断其余格子 */
+        }
+      }
+    })();
+  }, [ready, splitTree, paneIds, focusedPaneId, snapshot.sessions]);
+
+  /** 最大化目标格子被剪/退出分屏时清除最大化态。 */
+  useEffect(() => {
+    if (maximizedPaneId && (!splitTree || !leafIds(splitTree).includes(maximizedPaneId))) setMaximizedPaneId(undefined);
+  }, [splitTree, maximizedPaneId]);
 
   function updatePreviewSplitFromPointer(clientX: number, clientY: number): void {
     const bounds = workAreaRef.current?.getBoundingClientRect();
@@ -2116,6 +1549,40 @@ export function App(): ReactNode {
     if (latestReviewExecution) openDiffPreview(latestReviewExecution);
   }, [latestReviewExecution, openDiffPreview]);
 
+  /** 分屏格子的渲染器：头部信息来自会话列表摘要，交互回调全部绑定本格 sessionId。 */
+  const renderSplitLeaf = useCallback((leafSessionId: string): ReactNode => {
+    const summary = snapshot.sessions.find((item) => item.id === leafSessionId);
+    return (
+      <div className="split-pane" key={leafSessionId} data-pane-active={leafSessionId === focusedPaneId || undefined}>
+        <ConversationPane
+          sessionId={leafSessionId}
+          compact
+          focused={leafSessionId === focusedPaneId}
+          maximized={leafSessionId === maximizedPaneId}
+          title={summary?.title}
+          runStatus={summary?.runStatus}
+          showDock={leafSessionId === focusedPaneId}
+          onFocus={() => focusPane(leafSessionId)}
+          onClose={() => removeSplitPane(leafSessionId)}
+          onToggleMaximize={() => toggleMaximizePane(leafSessionId)}
+          onNewSession={() => createNewSession(undefined, leafSessionId)}
+          registerComposerApi={registerComposerApi}
+          draftStore={draftStore}
+          onOpenArtifact={openArtifactPreview}
+          onOpenFile={openFilePreview}
+          onOpenDiff={openDiffPreview}
+          onOpenPlanDetail={openPlanPreview}
+          onActionError={setActionError}
+        />
+      </div>
+    );
+  }, [snapshot.sessions, focusedPaneId, maximizedPaneId, openArtifactPreview, openFilePreview, openDiffPreview, registerComposerApi, draftStore, setActionError]);
+
+  /** 分隔条拖动：按 split 节点路径更新比例（夹取在 SplitDivider 内完成）。 */
+  const handleSplitRatioChange = useCallback((path: readonly number[], ratio: number): void => {
+    setSplitState((current) => current.tree ? { ...current, tree: updateRatio(current.tree, path, ratio) } : current);
+  }, []);
+
   // —— Markdown 编辑器状态与 AI 变更智能合并 ——
   const previewEditorStatesRef = useRef(previewEditorStates);
   previewEditorStatesRef.current = previewEditorStates;
@@ -2217,266 +1684,6 @@ export function App(): ReactNode {
     });
   }), []);
 
-  // Latest snapshot ref so regenerateMessage keeps a stable identity instead of
-  // rebuilding on every streaming frame — rebuilding it would hand a new
-  // onRegenerate to every MessageView and bust their memo during streaming.
-  const latestSnapshotRef = useRef(snapshot);
-  latestSnapshotRef.current = snapshot;
-  const regenerateMessage = useCallback(async (message: ChatMessage): Promise<void> => {
-    const { busy, messages } = latestSnapshotRef.current;
-    if (busy) return;
-    const index = messages.findIndex((item) => item.id === message.id);
-    const previousUser = index > 0 ? [...messages.slice(0, index)].reverse().find((item) => item.role === "user") : undefined;
-    const text = previousUser ? messageText(previousUser) : "";
-    if (!text && !previousUser?.skill) return;
-    setLocalTurn({ startedAt: Date.now(), sessionId: latestSnapshotRef.current.sessionId });
-    try {
-      await window.piDesktop.send({ type: "session.regenerate", text, timestamp: previousUser?.timestamp, skillName: previousUser?.skill?.name });
-    } catch (error) {
-      setLocalTurn(undefined);
-      setMessageActionError(error instanceof Error ? error.message : "重新生成失败");
-    }
-  }, []);
-
-  async function addAttachments(): Promise<void> {
-    let selected: import("../../shared/protocol").PromptAttachment[];
-    try {
-      selected = await window.piDesktop.chooseAttachments(snapshot.workspace);
-    } catch (error) {
-      setAttachmentError(error instanceof Error ? error.message : "读取附件失败");
-      return;
-    }
-    const remaining = Math.max(0, 5 - attachments.length);
-    const seen = new Set(attachments.map((item) => item.kind === "file" ? item.relativePath : `${item.name}:${item.size}`));
-    const next = selected.filter((item) => {
-      const key = item.kind === "file" ? item.relativePath : `${item.name}:${item.size}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    }).slice(0, remaining);
-    if (next.length < selected.length) setAttachmentError("已跳过重复附件或超出 5 个附件上限");
-    setAttachments((current) => [...current, ...next]);
-  }
-
-  async function addLocalFiles(files: FileList | File[]): Promise<void> {
-    const remaining = Math.max(0, 5 - attachments.length);
-    const accepted: import("../../shared/protocol").PromptAttachment[] = [];
-    for (const file of Array.from(files).slice(0, remaining)) {
-      if (file.size > 20 * 1024 * 1024) { setAttachmentError(`${file.name} 超过 20 MB 限制`); continue; }
-      const isImage = ["image/png", "image/jpeg", "image/webp", "image/gif"].includes(file.type);
-      if (isImage) {
-        const data = await new Promise<string>((resolve) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result).split(",", 2)[1] ?? ""); reader.readAsDataURL(file); });
-        accepted.push({ kind: "image", name: file.name, mimeType: file.type, size: file.size, data });
-      } else if ((file as File & { path?: string }).path) {
-        const path = (file as File & { path: string }).path;
-        if (snapshot.workspace) {
-          const root = snapshot.workspace.replace(/[\\/]+$/u, "").replaceAll("\\", "/");
-          const candidate = path.replaceAll("\\", "/");
-          if (!(candidate.toLowerCase().startsWith(`${root.toLowerCase()}/`) && candidate !== root)) { setAttachmentError(`${file.name} 不在当前工作区内`); continue; }
-          const relativePath = candidate.slice(root.length + 1);
-          if (!relativePath) { setAttachmentError(`${file.name} 不在当前工作区内`); continue; }
-          accepted.push({ kind: "file", name: file.name, path: relativePath, relativePath, size: file.size });
-          continue;
-        }
-        setAttachmentError(`${file.name} 不是可读取的工作区文件`);
-      } else setAttachmentError(`${file.name} 不是可读取的工作区文件`);
-    }
-    const keys = new Set(attachments.map((item) => item.kind === "file" ? item.relativePath : `${item.name}:${item.size}`));
-    const unique = accepted.filter((item) => { const key = item.kind === "file" ? item.relativePath : `${item.name}:${item.size}`; if (keys.has(key)) return false; keys.add(key); return true; });
-    if (unique.length < accepted.length) setAttachmentError("已跳过重复附件");
-    setAttachments((current) => [...current, ...unique]);
-  }
-
-  function handlePaste(event: React.ClipboardEvent<HTMLTextAreaElement>): void {
-    const files = Array.from(event.clipboardData.files);
-    // 部分来源的图片只出现在 items 里（files 为空），用 getAsFile 补齐。
-    const pastedFiles = files.length ? files : Array.from(event.clipboardData.items)
-      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
-      .map((item) => item.getAsFile())
-      .filter((item): item is File => item !== null);
-    if (pastedFiles.length) { event.preventDefault(); void addLocalFiles(pastedFiles); return; }
-    // 无文件也无文本（微信/QQ 截图、浏览器“复制图片”只写位图格式）：交给主进程
-    // 读系统剪贴板兜底，同时拦截原生粘贴，避免系统弹“不支持图片插入”提示。
-    if (!event.clipboardData.getData("text/plain").trim()) {
-      event.preventDefault();
-      void pasteClipboardImage();
-    }
-  }
-
-  async function pasteClipboardImage(): Promise<void> {
-    try {
-      const image = await window.piDesktop.readClipboardImage();
-      if (!image?.data) return;
-      const bytes = Uint8Array.from(atob(image.data), (char) => char.charCodeAt(0));
-      if (bytes.byteLength === 0) return;
-      const stamp = new Date().toLocaleTimeString("zh-CN", { hour12: false });
-      // lucide-react 的 File 图标遮蔽了 DOM 构造器，这里走 window.File。
-      const file = new window.File([bytes], `剪贴板图片 ${stamp}.png`, { type: "image/png" });
-      await addLocalFiles([file]);
-    } catch {
-      /* 剪贴板不可读时保持静默，等价于无图可贴 */
-    }
-  }
-
-  function handleDrop(event: React.DragEvent<HTMLFormElement>): void {
-    event.preventDefault();
-    void addLocalFiles(event.dataTransfer.files);
-  }
-
-  function applySlashCommand(command: SlashCommand): void {
-    setEditingMessageTimestamp(undefined);
-    if (command.kind === "skill") {
-      setSelectedSkill(command.skillName);
-      setInput("");
-      setMentionedFiles([]);
-      setSlashIndex(0);
-      setTimeout(() => textareaRef.current?.focus(), 0);
-      return;
-    }
-    if (snapshot.busy && command.command.type !== "session.new") return;
-    setSelectedSkill(undefined);
-    setInput("");
-    setAttachments([]);
-    setMentionedFiles([]);
-    setSlashIndex(0);
-    void window.piDesktop.send(command.command).catch((error) => {
-      setMessageActionError(error instanceof Error ? error.message : "指令执行失败");
-    });
-  }
-
-  /** 从光标位置反推 @token：@ 必须位于行首或空白之后，避免误伤邮箱类文本。 */
-  function updateMentionFromCaret(target: HTMLTextAreaElement): void {
-    const caret = target.selectionStart ?? 0;
-    const match = /(?:^|\s)@([^\s@]*)$/u.exec(target.value.slice(0, caret));
-    if (!match) {
-      setMention(undefined);
-      return;
-    }
-    const query = match[1]!;
-    setMention({ query, tokenStart: caret - query.length - 1 });
-  }
-
-  function applyMention(entry: WorkspaceFileSearchEntry): void {
-    const textarea = textareaRef.current;
-    if (!textarea || !mention) return;
-    const caret = textarea.selectionStart ?? input.length;
-    if (caret < mention.tokenStart || input[mention.tokenStart] !== "@") return;
-    // 目录以 / 结尾且不补空格：token 未断开，菜单继续列出该目录的子级，可逐层钻取。
-    if (entry.kind === "directory") {
-      const insert = `${entry.relativePath}/`;
-      const nextValue = `${input.slice(0, mention.tokenStart)}${insert}${input.slice(caret)}`;
-      const nextCaret = mention.tokenStart + insert.length;
-      setInput(nextValue);
-      requestAnimationFrame(() => {
-        textarea.focus();
-        textarea.setSelectionRange(nextCaret, nextCaret);
-      });
-      setMention({ query: insert, tokenStart: mention.tokenStart });
-      return;
-    }
-    // 文件：从文本中摘除整个 @token，转为输入框内的引用 chip；
-    // 发送时再把 @相对路径拼回 prompt，文本里不留痕迹。
-    const nextValue = `${input.slice(0, mention.tokenStart)}${input.slice(caret)}`;
-    setInput(nextValue);
-    setMentionedFiles((current) => current.some((item) => item.relativePath === entry.relativePath) ? current : [...current, entry]);
-    setMention(undefined);
-    requestAnimationFrame(() => {
-      textarea.focus();
-      textarea.setSelectionRange(mention.tokenStart, mention.tokenStart);
-    });
-  }
-
-  function handleComposerKey(event: React.KeyboardEvent<HTMLTextAreaElement>): void {
-    // IME 组合期（拼音候选、回车上屏）不劫持按键，避免选词被菜单吞掉。
-    if (mentionOpen && !event.nativeEvent.isComposing) {
-      if (event.key === "ArrowDown") {
-        event.preventDefault();
-        setMentionIndex((current) => (current + 1) % mentionResults.length);
-        return;
-      }
-      if (event.key === "ArrowUp") {
-        event.preventDefault();
-        setMentionIndex((current) => (current - 1 + mentionResults.length) % mentionResults.length);
-        return;
-      }
-      if (event.key === "Tab" || (event.key === "Enter" && !event.shiftKey)) {
-        event.preventDefault();
-        const selected = mentionResults[activeMentionIndex];
-        if (selected) applyMention(selected);
-        return;
-      }
-      if (event.key === "Escape") {
-        event.preventDefault();
-        setMentionDismissedToken(mentionToken);
-        return;
-      }
-    }
-    if (slashOpen) {
-      if (event.key === "ArrowDown") {
-        event.preventDefault();
-        setSlashIndex((current) => (current + 1) % slashMatches.length);
-        return;
-      }
-      if (event.key === "ArrowUp") {
-        event.preventDefault();
-        setSlashIndex((current) => (current - 1 + slashMatches.length) % slashMatches.length);
-        return;
-      }
-      if (event.key === "Tab" || (event.key === "Enter" && !event.shiftKey)) {
-        event.preventDefault();
-        const selected = slashMatches[activeSlashIndex];
-        if (selected) applySlashCommand(selected);
-        return;
-      }
-      if (event.key === "Escape") {
-        event.preventDefault();
-        setSlashIndex(0);
-        setInput("");
-        return;
-      }
-    }
-    if (event.key === "Enter" && !event.shiftKey) {
-      event.preventDefault();
-      event.currentTarget.form?.requestSubmit();
-    }
-  }
-
-  async function selectModel(value: string): Promise<void> {
-    setComposerMenu(undefined);
-    const slash = value.indexOf("/");
-    if (slash < 1) return;
-    await window.piDesktop.send({ type: "model.select", provider: value.slice(0, slash), id: value.slice(slash + 1) });
-  }
-
-  /** 计划模式是独立于访问模式的协作轴：下拉项只做开关入口，不写 settings。 */
-  function togglePlanMode(): void {
-    setAccessModeMenuOpen(false);
-    setComposerMenu(undefined);
-    void window.piDesktop.send({ type: "session.planMode", enabled: !snapshot.planMode }).catch((error) => {
-      setMessageActionError(error instanceof Error ? error.message : "计划模式切换失败");
-    });
-  }
-
-  async function selectAccessMode(value: AccessMode): Promise<void> {
-    setAccessModeMenuOpen(false);
-    setComposerMenu(undefined);
-    if (value === settings.accessMode) return;
-    const previousSettings = settings;
-    const nextSettings = { ...settings, accessMode: value };
-    useDesktopStore.setState({ settings: nextSettings });
-    try {
-      await window.piDesktop.send({ type: "settings.save", settings: { model: nextSettings.model, thinkingLevel: nextSettings.thinkingLevel, accessMode: value, appearance: nextSettings.appearance, browser: nextSettings.browser } });
-    } catch (error) {
-      useDesktopStore.setState({ settings: previousSettings });
-      setMessageActionError(error instanceof Error ? error.message : "访问模式切换失败");
-    }
-  }
-
-  async function selectThinkingLevel(level: ThinkingLevel): Promise<void> {
-    setComposerMenu(undefined);
-    await window.piDesktop.send({ type: "thinking.select", level });
-  }
-
   const sidebarInner = (
     <>
       {sidebarView === "files" ? (
@@ -2540,7 +1747,7 @@ export function App(): ReactNode {
                   {!collapsed && <div className="session-workspace-items">
                     {group.sessions.length === 0
                       ? <div className="session-workspace-empty">暂无话题，点击右上角新建</div>
-                      : group.sessions.map((item) => <button className={item.id === snapshot.sessionId ? "active" : ""} type="button" key={item.path} title={item.title} data-row-kind="session" data-row-active={item.id === snapshot.sessionId || undefined} onClick={() => void openSession(item.path, item.workspace)} onContextMenu={(event) => { event.preventDefault(); setContextMenu({ x: event.clientX, y: event.clientY, items: [{ label: "重命名", onClick: () => { setRenameSession({ path: item.path, title: item.title }); setRenameValue(item.title); } }, { label: item.pinned ? "取消置顶" : "置顶", onClick: () => { void window.piDesktop.send({ type: "session.pin", path: item.path, pinned: !item.pinned }); } }, { label: "删除会话", danger: true, onClick: () => setDeleteSession({ path: item.path, title: item.title }) }] }); }}><MessageCircle size={14} /><span><strong>{item.title}</strong><small>{new Date(item.modifiedAt).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}</small></span>{(item.runStatus || item.pinned) && <div className="session-item-meta">{item.runStatus && <i className={`session-status-dot ${item.runStatus}`} title={sessionRunStatusLabels[item.runStatus]} aria-label={sessionRunStatusLabels[item.runStatus]!} />}{item.pinned && <Pin size={11} className="session-pin-indicator" />}</div>}</button>)}
+                      : group.sessions.map((item) => <button className={item.id === snapshot.sessionId || (splitTree ? paneIds.includes(item.id) : false) ? "active" : ""} type="button" key={item.path} title={item.title} data-row-kind="session" data-row-active={item.id === snapshot.sessionId || (splitTree ? paneIds.includes(item.id) : false) || undefined} onClick={() => void openSession(item.path, item.workspace, item.id)} onContextMenu={(event) => { event.preventDefault(); const splitDisabled = !snapshot.sessionId || (splitTree ? countLeaves(splitTree) >= MAX_SPLIT_PANES : false); const inPane = splitTree ? leafIds(splitTree).includes(item.id) : false; setContextMenu({ x: event.clientX, y: event.clientY, items: [{ label: "重命名", onClick: () => { setRenameSession({ path: item.path, title: item.title }); setRenameValue(item.title); } }, { label: item.pinned ? "取消置顶" : "置顶", onClick: () => { void window.piDesktop.send({ type: "session.pin", path: item.path, pinned: !item.pinned }); } }, { label: inPane ? "已分屏，切换到该格" : "分屏到右侧", disabled: !inPane && splitDisabled, onClick: () => addSplitPane(item, "right") }, { label: "分屏到下方", disabled: splitDisabled, onClick: () => addSplitPane(item, "bottom") }, { label: "删除会话", danger: true, onClick: () => setDeleteSession({ path: item.path, title: item.title }) }] }); }}><MessageCircle size={14} /><span><strong>{item.title}</strong><small>{new Date(item.modifiedAt).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}</small></span>{(item.runStatus || item.pinned) && <div className="session-item-meta">{item.runStatus && <i className={`session-status-dot ${item.runStatus}`} title={sessionRunStatusLabels[item.runStatus]} aria-label={sessionRunStatusLabels[item.runStatus]!} />}{item.pinned && <Pin size={11} className="session-pin-indicator" />}</div>}</button>)}
                   </div>}
                 </section>
               );
@@ -2614,156 +1821,30 @@ export function App(): ReactNode {
             className={`work-area${previewOpened && preview && preview.tabs.length > 0 ? " with-preview" : previewOpened ? " with-preview-empty" : ""}${previewDragging ? " is-preview-dragging" : ""}`}
             style={previewOpened ? { "--preview-split": `${previewSplit}%` } as CSSProperties : undefined}
           >
-          <section className="conversation-pane" data-pane="conversation">
-            <PanelDock />
-            <div className="timeline" data-pane="timeline" ref={timelineRef}>
-              {!snapshot.workspace ? (
-                <div className="empty-workspace" data-pane="landing"><div className="empty-icon"><FolderOpen size={27} /></div><h1>打开一个项目</h1><button className="primary-button" data-control="workspace-open" type="button" onClick={() => void openWorkspace()}><FolderOpen size={16} />选择文件夹</button></div>
-              ) : displayMessages.length === 0 && !isGenerating ? (
-                <div className="empty-conversation" data-pane="landing"><div className="empty-icon"><CodeXml size={27} /></div><h1>今天想开发什么？</h1></div>
-              ) : <>
-                {displayMessages.map((message, index) => {
-                  const timing = showTurnTimingOnLatest && index === latestAssistantMessageIndex && message.role === "assistant" ? snapshot.turnTiming : undefined;
-                  const turnActive = snapshot.busy && index === latestAssistantMessageIndex && message.role === "assistant";
-                  return <MessageView key={message.uuid ?? message.id} message={message} executions={snapshot.executions} onOpenArtifact={openArtifactPreview} onOpenFile={openFilePreview} onOpenDiff={openDiffPreview} onHtmlAction={handleHtmlAction} onCopy={copyMessage} onEdit={editMessage} onRegenerate={regenerateMessage} onShare={shareMessage} showThinking={settings.appearance.showThinking} busy={snapshot.busy} turnActive={turnActive} timing={timing} now={timing ? now : undefined} />;
-                })}
-                {isGenerating && (assistantBubbleVisible ? <div className="response-progress response-progress-inline"><LoaderCircle size={14} className="spinning" /><span>{workingLabel}</span>{activeTurnTiming && <TimingMeta timing={activeTurnTiming} now={now} />}</div> : <PendingResponse label={workingLabel} timing={activeTurnTiming} now={now} />)}
-              </>}
+          {/* 会话槽位：单窗口 = 一个 ConversationPane；分屏 = 布局树递归渲染，
+              最大化时只渲染目标格（树保留，还原即恢复）。预览面板/终端是全局
+              标签页，与会话槽位并存于 work-area 网格。 */}
+          {splitTree && paneIds.length > 0 ? (
+            <div className={`split-view${maximizedPaneId ? " maximized" : ""}`}>
+              {maximizedPaneId && paneIds.includes(maximizedPaneId)
+                ? renderSplitLeaf(maximizedPaneId)
+                : <SplitLayout node={splitTree} renderLeaf={renderSplitLeaf} onRatioChange={handleSplitRatioChange} />}
             </div>
-            {question && <QuestionPanel request={question} onOpenDetail={openPlanPreview} />}
-            <form ref={composerRef} className={`composer${snapshot.queuedMessages.length > 0 ? " has-queue" : ""}${snapshot.planMode ? " has-plan" : ""}`} data-pane="composer" onSubmit={submit} onDragOver={(event) => event.preventDefault()} onDrop={handleDrop}>
-              {snapshot.planMode && (
-                <div className="composer-plan-banner" data-composer-zone="plan" role="status" title="计划模式：先产出计划，审查批准后才实施。退出请使用访问权限下拉或 /plan">
-                  <ClipboardList size={12} />
-                  <span className="composer-plan-banner-title">计划模式</span>
-                </div>
-              )}
-              {snapshot.queuedMessages.length > 0 && (
-              <div className="composer-queue" role="list" aria-label="排队输入" data-composer-zone="queue">
-                  <div className="composer-queue-caption"><Clock size={11} /><span>排队输入 {snapshot.queuedMessages.length} 条 · 本轮回复结束后自动发出</span></div>
-                  {snapshot.queuedMessages.map((item) => (
-                    <div className="composer-queue-item" role="listitem" data-queue-kind={item.kind} key={`${item.kind}:${item.index}`} title={item.text}>
-                      {item.kind === "steering" && <span className="composer-queue-badge">即将插入</span>}
-                      <span className="composer-queue-text">{item.text}</span>
-                      <span className="composer-queue-actions">
-                        <button type="button" className="composer-queue-send" data-control="queue-send-now" title="立即发送：AI 下一轮模型调用前插入，不打断工具执行" aria-label="立即发送这条消息" onClick={() => sendQueuedMessageNow(item)}><Zap size={11} />立即</button>
-                        <button type="button" data-control="queue-edit" title="编辑这条排队消息" aria-label="编辑排队消息" onClick={() => editQueuedMessage(item)}><Pencil size={12} /></button>
-                        <button type="button" data-control="queue-remove" title="删除这条排队消息" aria-label="删除排队消息" onClick={() => removeQueuedMessage(item)}><Trash2 size={12} /></button>
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              )}
-              {attachments.length > 0 && <div className="attachment-list" data-composer-zone="attachments">{attachments.map((attachment, index) => <span className="attachment-chip" key={`${attachment.name}-${index}`}>{attachment.kind === "image" ? <img src={`data:${attachment.mimeType};base64,${attachment.data}`} alt="" /> : <FileDiff size={12} />}<span>{attachment.name}</span>{attachment.kind === "image" && !modelAcceptsImages && visionFallbackAvailable && <small className="attachment-chip-note" title="当前模型不支持图片，将自动调用视觉模型识别">视觉识别</small>}<button type="button" title="移除附件" aria-label={`移除 ${attachment.name}`} onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={12} /></button></span>)}</div>}
-              {attachmentError && <div className="attachment-error" data-composer-zone="error" role="alert">{attachmentError}<button type="button" title="关闭提示" aria-label="关闭附件提示" onClick={() => setAttachmentError(undefined)}><X size={12} /></button></div>}
-              <input ref={fileInputRef} type="file" hidden multiple accept="image/png,image/jpeg,image/webp,image/gif,.txt,.md,.json,.js,.ts,.tsx,.jsx,.py,.go,.rs,.java,.css,.html" onChange={(event) => { void addLocalFiles(event.target.files ?? []); event.currentTarget.value = ""; }} />
-              {slashOpen && (
-                <div className="slash-menu" role="listbox" aria-label="斜杠指令" data-composer-zone="popup">
-                  {slashGroups.map((group) => (
-                    <div className="composer-menu-group slash-menu-group" role="group" aria-label={group.title} key={group.key}>
-                      <small>{group.title}</small>
-                      {group.items.map(({ cmd, flatIndex }) => (
-                        <button
-                          type="button"
-                          role="option"
-                          aria-selected={flatIndex === activeSlashIndex}
-                          key={`${cmd.kind}:${cmd.trigger}`}
-                          className={`slash-menu-item${flatIndex === activeSlashIndex ? " active" : ""}`}
-                          disabled={cmd.kind === "command" && snapshot.busy && cmd.command.type !== "session.new"}
-                          onMouseEnter={() => setSlashIndex(flatIndex)}
-                          onClick={() => applySlashCommand(cmd)}
-                        >
-                          <span className="slash-menu-icon">{cmd.kind === "skill" ? <Puzzle size={14} /> : cmd.command.type === "session.compact" ? <Layers size={14} /> : <MessageSquarePlus size={14} />}</span>
-                          <span className="slash-menu-copy"><strong>{cmd.label}</strong><small>{cmd.description}</small></span>
-                        </button>
-                      ))}
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {mentionOpen && (
-                <div className="slash-menu mention-menu" role="listbox" aria-label="引用工作区文件" data-composer-zone="popup">
-                  {mentionResults.map((entry, index) => (
-                    <button
-                      type="button"
-                      role="option"
-                      aria-selected={index === activeMentionIndex}
-                      key={entry.relativePath}
-                      className={`slash-menu-item${index === activeMentionIndex ? " active" : ""}`}
-                      onMouseEnter={() => setMentionIndex(index)}
-                      onClick={() => applyMention(entry)}
-                    >
-                      <span className="slash-menu-icon">{entry.kind === "directory" ? <Folder size={14} /> : <File size={14} />}</span>
-                      <span className="slash-menu-copy"><strong>{entry.name}</strong><small>{entry.relativePath.includes("/") ? entry.relativePath.slice(0, entry.relativePath.lastIndexOf("/")) : "工作区根目录"}</small></span>
-                    </button>
-                  ))}
-                </div>
-              )}
-
-              <div className="composer-input-row" data-composer-zone="input">
-                {selectedSkill && <span className="composer-skill-chip"><Puzzle size={13} /><strong>{selectedSkill}</strong><button type="button" title="取消 Skill" aria-label={`取消 Skill ${selectedSkill}`} onClick={() => setSelectedSkill(undefined)}><X size={12} /></button></span>}
-                {mentionedFiles.length > 0 && (
-                  <span className="composer-mention-chips">
-                    {mentionedFiles.map((entry) => (
-                      <span className="composer-skill-chip" key={entry.relativePath} title={entry.relativePath}>
-                        <File size={13} />
-                        <strong>{entry.name}</strong>
-                        <button type="button" title="移除引用" aria-label={`移除引用 ${entry.relativePath}`} onClick={() => setMentionedFiles((current) => current.filter((item) => item.relativePath !== entry.relativePath))}><X size={12} /></button>
-                      </span>
-                    ))}
-                  </span>
-                )}
-                <textarea
-                  ref={textareaRef}
-                  value={input}
-                  rows={1}
-                  disabled={!snapshot.workspace}
-                  placeholder={composerPlaceholder}
-                  onKeyDown={handleComposerKey}
-                  onPaste={handlePaste}
-                  onChange={(event) => { setInput(event.target.value); updateMentionFromCaret(event.target); }}
-                  onSelect={(event) => updateMentionFromCaret(event.currentTarget)}
-                />
-              </div>
-              <div className="composer-footer" data-composer-zone="footer">
-                <div className="composer-footer-left">
-                  <button className="icon-button attach-button" data-control="attach" type="button" title="添加附件" aria-label="添加附件" disabled={snapshot.busy || attachments.length >= 5} onClick={() => void addAttachments()}><Plus size={18} /></button>
-                  <div className="access-mode-menu-shell" ref={accessModeMenuRef}>
-                    <button className={`access-mode-button${settings.accessMode === "full" ? " full" : ""}`} data-control="access-mode" type="button" aria-haspopup="menu" aria-expanded={accessModeMenuOpen} onClick={() => { setComposerMenu(undefined); setAccessModeMenuOpen((open) => !open); }}>{settings.accessMode === "full" ? <ShieldAlert size={15} /> : <ShieldCheck size={15} />}<span>{accessModeOptions.find((option) => option.value === settings.accessMode)?.label ?? "访问模式"}</span><ChevronDown size={13} /></button>
-                    {accessModeMenuOpen && <div className="access-mode-menu" data-composer-zone="popup" role="menu" aria-label="访问模式">
-                      {accessModeOptions.map((option) => <button className={`access-mode-menu-item${option.value === settings.accessMode ? " active" : ""}${option.value === "full" ? " full" : ""}`} type="button" role="menuitemradio" aria-checked={option.value === settings.accessMode} key={option.value} onClick={() => void selectAccessMode(option.value)}>{option.value === "full" ? <ShieldAlert size={15} /> : <ShieldCheck size={15} />}<span><strong>{option.label}</strong><small>{accessModeDescriptions[option.value]}</small></span>{option.value === settings.accessMode && <Check size={14} />}</button>)}
-                    <div className="access-mode-menu-divider" />
-                    <button className={`access-mode-menu-item plan-mode${snapshot.planMode ? " active" : ""}`} data-control="plan-toggle" type="button" role="menuitemcheckbox" aria-checked={snapshot.planMode} onClick={togglePlanMode}><ClipboardList size={15} /><span><strong>计划模式</strong><small>{snapshot.planMode ? "已开启：先产出计划，批准后才实施" : "先产出计划，批准后才实施"}</small></span>{snapshot.planMode && <Check size={14} />}</button>
-                    </div>}
-                  </div>
-                  {snapshot.contextUsage && (
-                    <div className={`context-usage-chip tone-${contextUsageTone(snapshot.contextUsage)}`} data-control="context-usage" role="status" title={contextUsageTooltip(snapshot.contextUsage)} aria-label={`上下文占用 ${contextUsagePercentLabel(snapshot.contextUsage)}`}>
-                      <span>上下文</span><strong>{contextUsagePercentLabel(snapshot.contextUsage)}</strong>
-                      {snapshot.contextUsage.cacheHitRate != null && <span className="context-usage-cache">缓存 {contextUsageCacheLabel(snapshot.contextUsage)}</span>}
-                    </div>
-                  )}
-                </div>
-                <div className="composer-footer-right">
-                  <div className="composer-control-menu">
-                    <button className="composer-menu-trigger" data-control="model-select" type="button" title="模型快捷切换" aria-label="模型快捷切换" aria-haspopup="menu" aria-expanded={composerMenu === "model"} disabled={snapshot.busy} onClick={() => { setAccessModeMenuOpen(false); setComposerMenu((current) => current === "model" ? undefined : "model"); }}><Bot size={14} /><span>{selectedModelOption?.name ?? snapshot.model?.id ?? "选择模型"}</span><ChevronDown size={13} /></button>
-                    {composerMenu === "model" && <div className="composer-select-menu model-select-menu" data-composer-zone="popup" ref={modelMenuRef} role="menu" aria-label="模型快捷切换">
-                      {Array.from(new Set(availableModels.map((model) => model.provider))).map((providerId) => <div className="composer-menu-group" key={providerId}><small>{providers.find((provider) => provider.id === providerId)?.name ?? providerId}</small>{availableModels.filter((model) => model.provider === providerId).map((model) => { const value = `${model.provider}/${model.id}`; return <button className={value === selectedModel ? "active" : ""} type="button" role="menuitemradio" aria-checked={value === selectedModel} key={value} onClick={() => void selectModel(value)}><span>{model.name}</span>{value === selectedModel && <Check size={13} />}</button>; })}</div>)}
-                    </div>}
-                  </div>
-                  <div className="composer-control-menu thinking-control">
-                    <button className="composer-menu-trigger" data-control="thinking-select" type="button" title="思考级别" aria-label="思考级别" aria-haspopup="menu" aria-expanded={composerMenu === "thinking"} disabled={snapshot.busy} onClick={() => { setAccessModeMenuOpen(false); setComposerMenu((current) => current === "thinking" ? undefined : "thinking"); }}><span>思考</span><strong>{thinkingLevelLabels[snapshot.thinkingLevel]}</strong><ChevronDown size={13} /></button>
-                    {composerMenu === "thinking" && <div className="composer-select-menu thinking-select-menu" data-composer-zone="popup" role="menu" aria-label="思考级别">{thinkingLevels.map((level) => <button className={level === snapshot.thinkingLevel ? "active" : ""} type="button" role="menuitemradio" aria-checked={level === snapshot.thinkingLevel} key={level} onClick={() => void selectThinkingLevel(level)}><span>{thinkingLevelLabels[level]}</span>{level === snapshot.thinkingLevel && <Check size={13} />}</button>)}</div>}
-                  </div>
-                  {snapshot.busy ? (
-                    <button className="stop-button" data-control="stop" type="button" title="停止" aria-label="停止" onClick={stopGeneration}><CircleStop size={18} /></button>
-                  ) : (
-                    <button className="send-button" data-control="send" type="submit" title="发送" aria-label="发送" disabled={!canSubmit}><Play size={17} fill="currentColor" /></button>
-                  )}
-                </div>
-              </div>
-            </form>
-          </section>
+          ) : (
+            <ConversationPane
+              sessionId={snapshot.sessionId}
+              showDock
+              focused
+              onNewSession={() => createNewSession()}
+              registerComposerApi={registerComposerApi}
+              draftStore={draftStore}
+              onOpenArtifact={openArtifactPreview}
+              onOpenFile={openFilePreview}
+              onOpenDiff={openDiffPreview}
+              onOpenPlanDetail={openPlanPreview}
+              onActionError={setActionError}
+            />
+          )}
 
           {previewOpened && preview && <PreviewDivider split={previewSplit} dragging={previewDragging} onStart={startPreviewResize} onMove={movePreviewResize} onEnd={endPreviewResize} onCancel={cancelPreviewResize} onKeyDown={resizePreviewWithKeyboard} onReset={() => setPreviewSplit(50)} />}
 
@@ -2776,7 +1857,7 @@ export function App(): ReactNode {
       </main>
 
       {settingsOpen && <SettingsDialog settings={settings} models={models} providers={providers} customProvider={customProvider} customProviderKeyConfigured={customProviderKeyConfigured} customModels={customModels} customModelFetchStatus={customModelFetchStatus} customModelFetchError={customModelFetchError} modelRefreshStatus={modelRefreshStatus} modelRefreshError={modelRefreshError} modelRefreshProvider={modelRefreshProvider} resources={resources} workspaceOpen={Boolean(snapshot.workspace)} onClose={() => setSettingsOpen(false)} />}
-      {permission && <PermissionDialog request={permission} />}
+      {permission && <PermissionDialog request={permission} sessionTitle={snapshot.sessions.find((item) => item.id === permission.principal.sessionId)?.title} />}
       {contextMenu && <ContextMenu x={contextMenu.x} y={contextMenu.y} items={contextMenu.items} onClose={() => setContextMenu(null)} />}
       {renameSession && (
         <div className="modal-backdrop permission-backdrop" onClick={() => setRenameSession(null)}>

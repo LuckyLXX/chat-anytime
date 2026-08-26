@@ -39,6 +39,7 @@ import type {
   RuntimeCommand,
   RuntimeMessage,
   RuntimeSnapshot,
+  SessionPaneSnapshot,
   SessionRunStatus,
   SessionSummary,
   SkillSummary,
@@ -167,10 +168,19 @@ interface SessionRuntimeRecord {
    */
   cacheUsage: runtimeContextUsage.CacheUsageTotals;
   activatedAt: number;
+  /** 分屏格子（watched）流式推送的节流定时器；激活会话不走此通道。 */
+  paneFlushTimer?: ReturnType<typeof setTimeout>;
 }
 
 const liveSessions = new Map<string, SessionRuntimeRecord>();
 let activeRuntime: SessionRuntimeRecord | undefined;
+// 分屏中正被渲染端展示的会话（session.watch 注册）：parked 也能收到
+// session.state 推送、豁免空闲驱逐、不设侧栏终端圆点。激活会话隐含在内
+//（它走 state 通道，schedulePaneEmit 对激活记录是 no-op）。
+const renderedSessions = new Set<string>();
+// 渲染端想 watch 但会话尚未 live（启动恢复逐格打开的间隙）：先挂起，
+// createSession 建立记录后自动补注册并推送水合帧。
+const pendingWatchSessions = new Set<string>();
 // Idle parked sessions beyond this count are disposed (their history stays on
 // disk and is rebuilt on reopen); running sessions are never evicted.
 const MAX_PARKED_SESSIONS = 4;
@@ -425,6 +435,7 @@ function setPlanMode(record: SessionRuntimeRecord, enabled: boolean): void {
     void post({ type: "log", level: "warn", message: `保存计划模式状态失败：${errorText(error)}` });
   }
   if (record === activeRuntime) emitState();
+  else emitPaneStateFor(record);
 }
 
 /** Build the Todo customTools for a session-scoped store + pace tracker. */
@@ -523,44 +534,109 @@ function snapshotContextUsage(record: SessionRuntimeRecord | undefined): Context
   return { ...base, cacheHitRate: runtimeContextUsage.cacheHitRateFrom(record.cacheUsage) };
 }
 
-function runtimeSkillPrompt(name: string, instructions?: string): string {
-  return runtimeSkills.buildRuntimeSkillPrompt(discoveredSkills, name, instructions, activeRuntime?.session.getActiveToolNames().includes("read") ?? false);
+function runtimeSkillPrompt(name: string, instructions?: string, record: SessionRuntimeRecord | undefined = activeRuntime): string {
+  return runtimeSkills.buildRuntimeSkillPrompt(discoveredSkills, name, instructions, record?.session.getActiveToolNames().includes("read") ?? false);
+}
+
+/**
+ * 分屏目标解析：带 sessionId 的命令定位到对应 live record（parked 亦可），
+ * 缺省为激活会话。目标不在运行中（被回收/删除）时抛错——渲染端格子随会话
+ * 列表修剪，正常流程不会命中。
+ */
+function resolveTargetRecord(sessionId: string | undefined): SessionRuntimeRecord {
+  if (!sessionId) {
+    if (!activeRuntime) throw new Error("请先打开工作区，再发送消息");
+    return activeRuntime;
+  }
+  const record = liveSessions.get(sessionId);
+  if (!record) throw new Error("该会话不在运行中（可能已被回收），请重新打开");
+  return record;
+}
+
+/** 会话级字段构建（snapshot 与分屏 session.state 共用）：全部来自该 record。 */
+function paneSnapshotFrom(record: SessionRuntimeRecord): SessionPaneSnapshot {
+  const session = record.session;
+  const sessionMessages = normalizeMessages(session.state.messages, session.state.streamingMessage);
+  const messages = [...sessionMessages, ...(record.controlMessages ?? [])].sort((left, right) => left.timestamp - right.timestamp);
+  return {
+    sessionId: session.sessionId,
+    sessionFile: session.sessionManager.getSessionFile(),
+    workspace: record.workspace,
+    model: session.model ? { provider: session.model.provider, id: session.model.id } : undefined,
+    thinkingLevel: session.thinkingLevel,
+    busy: record.busy,
+    status: record.status,
+    turnTiming: record.turnTiming,
+    // 待发送队列实时读取 Pi 会话的 steering/followUp 状态；queue_update 事件
+    // 走 default 分支立即 flush，渲染端随 emit 同步。
+    queuedMessages: [
+      ...session.getSteeringMessages().map((text, index) => ({ kind: "steering" as const, index, text })),
+      ...session.getFollowUpMessages().map((text, index) => ({ kind: "followUp" as const, index, text }))
+    ],
+    contextUsage: snapshotContextUsage(record),
+    planMode: record.planState.enabled,
+    messages,
+    executions: [...record.executions.values()]
+  };
 }
 
 function snapshot(): RuntimeSnapshot {
   const record = activeRuntime;
-  const activeSession = record?.session;
-  const sessionMessages = record && activeSession
-    ? normalizeMessages(activeSession.state.messages, activeSession.state.streamingMessage)
-    : [];
-  const messages = [...sessionMessages, ...(record?.controlMessages ?? [])].sort((left, right) => left.timestamp - right.timestamp);
+  const pane = record ? paneSnapshotFrom(record) : undefined;
   return {
     workspace: record?.workspace ?? workspace,
     gitBranch,
     agentId: currentAgent?.id ?? "default",
     agentName: currentAgent?.name ?? "默认助手",
-    sessionId: activeSession?.sessionId,
-    sessionFile: activeSession?.sessionManager.getSessionFile(),
-    model: activeSession?.model ? { provider: activeSession.model.provider, id: activeSession.model.id } : selectedModel,
-    thinkingLevel: activeSession?.thinkingLevel ?? thinkingLevel,
+    sessionId: pane?.sessionId,
+    sessionFile: pane?.sessionFile,
+    model: pane?.model ?? selectedModel,
+    thinkingLevel: pane?.thinkingLevel ?? thinkingLevel,
     busy: (record?.busy ?? false) || transitionStatus !== undefined,
     status: transitionStatus ?? record?.status ?? status,
-    turnTiming: record?.turnTiming,
-    // 待发送队列实时读取 Pi 会话的 steering/followUp 状态；queue_update 事件
-    // 走 default 分支立即 flush，渲染端随 emitState 同步。
-    queuedMessages: record ? [
-      ...record.session.getSteeringMessages().map((text, index) => ({ kind: "steering" as const, index, text })),
-      ...record.session.getFollowUpMessages().map((text, index) => ({ kind: "followUp" as const, index, text }))
-    ] : [],
-    contextUsage: snapshotContextUsage(record),
+    turnTiming: pane?.turnTiming,
+    queuedMessages: pane?.queuedMessages ?? [],
+    contextUsage: pane?.contextUsage,
     // 计划模式是会话级协作状态（与访问模式独立）：快照只反映激活会话。
-    planMode: record?.planState.enabled ?? false,
-    messages,
-    executions: record ? [...record.executions.values()] : [],
+    planMode: pane?.planMode ?? false,
+    messages: pane?.messages ?? [],
+    executions: pane?.executions ?? [],
     backgroundProcesses: backgroundProcesses.list(),
     sessions: currentSessions,
     recentWorkspaces
   };
+}
+
+/**
+ * 推送一个分屏格子（watched 非激活会话）的会话级快照。节流节奏与主
+ * snapshot 一致：immediate 生命周期转换立即 flush，流式 token 批量按
+ * 50ms（20fps）合帧；定时器挂在 record 上，各格子互不影响。激活或未
+ * watch 的记录是 no-op（激活会话走 state 通道）。
+ */
+function schedulePaneEmit(record: SessionRuntimeRecord, immediate: boolean): void {
+  if (record === activeRuntime || !renderedSessions.has(record.session.sessionId)) return;
+  if (immediate) {
+    if (record.paneFlushTimer) {
+      clearTimeout(record.paneFlushTimer);
+      record.paneFlushTimer = undefined;
+    }
+    post({ type: "session.state", snapshot: paneSnapshotFrom(record) });
+    return;
+  }
+  if (record.paneFlushTimer) return;
+  record.paneFlushTimer = setTimeout(() => {
+    record.paneFlushTimer = undefined;
+    post({ type: "session.state", snapshot: paneSnapshotFrom(record) });
+  }, STREAM_FLUSH_INTERVAL_MS);
+}
+
+/**
+ * 命令直接改动某 record 后：parked 且 watched 时把该格快照推给渲染端。
+ * 激活会话由调用点已有的 emitState() 覆盖（此处 no-op），未 watch 的
+ * parked 会话无处渲染（同样 no-op）。
+ */
+function emitPaneStateFor(record: SessionRuntimeRecord): void {
+  schedulePaneEmit(record, true);
 }
 
 /** Overlay a session's run status onto the sidebar list. */
@@ -600,7 +676,9 @@ function ensureSessionInList(record: SessionRuntimeRecord): void {
  * session's outcome is already visible in the conversation, so it gets none.
  */
 function setTerminalRunStatus(record: SessionRuntimeRecord, failed: boolean): void {
-  record.runStatus = record === activeRuntime ? undefined : failed ? "failed" : "completed";
+  // 分屏中被 watch 的会话与激活会话同待遇：结果直接可见，不设终端圆点。
+  const visible = record === activeRuntime || renderedSessions.has(record.session.sessionId);
+  record.runStatus = visible ? undefined : failed ? "failed" : "completed";
   patchSessionRunStatus(record);
 }
 
@@ -627,6 +705,12 @@ function disposeRecord(record: SessionRuntimeRecord): void {
   permissionBroker.reset(record.session.sessionId);
   questionBroker.reset(record.session.sessionId);
   liveSessions.delete(record.session.sessionId);
+  renderedSessions.delete(record.session.sessionId);
+  pendingWatchSessions.delete(record.session.sessionId);
+  if (record.paneFlushTimer) {
+    clearTimeout(record.paneFlushTimer);
+    record.paneFlushTimer = undefined;
+  }
   record.extensionApi = undefined;
   if (activeRuntime === record) {
     activeRuntime = undefined;
@@ -638,10 +722,10 @@ function disposeRecord(record: SessionRuntimeRecord): void {
   }
 }
 
-/** Keep the parked-session set bounded; running sessions are never evicted. */
+/** Keep the parked-session set bounded; running and split-rendered sessions are never evicted. */
 function evictParkedSessions(): void {
   const parked = [...liveSessions.values()]
-    .filter((record) => record !== activeRuntime && !record.busy)
+    .filter((record) => record !== activeRuntime && !record.busy && !renderedSessions.has(record.session.sessionId))
     .sort((left, right) => right.activatedAt - left.activatedAt);
   for (const record of parked.slice(MAX_PARKED_SESSIONS)) disposeRecord(record);
 }
@@ -657,6 +741,7 @@ let mcpSyncedWorkspace: string | undefined;
  * still in flight so it cannot steal the active slot on completion.
  */
 function activate(record: SessionRuntimeRecord): void {
+  const previous = activeRuntime;
   sessionGeneration++;
   activeRuntime = record;
   record.activatedAt = Date.now();
@@ -688,6 +773,11 @@ function activate(record: SessionRuntimeRecord): void {
     });
   }
   refreshGitBranch();
+  // 焦点从格子 A 切到 B：A 变回 parked，此后的更新只走 session.state 通道。
+  // 立即推一帧，否则渲染端在 A 的下一个事件到来之前拿不到 paneStates[A]。
+  if (previous && previous !== record && renderedSessions.has(previous.session.sessionId)) {
+    post({ type: "session.state", snapshot: paneSnapshotFrom(previous) });
+  }
 }
 
 function workspaceSessionDir(): string | undefined {
@@ -1074,13 +1164,15 @@ function handleSessionEvent(record: SessionRuntimeRecord, event: AgentSessionEve
       break;
   }
   if (record !== activeRuntime) {
-    // Parked session: only lifecycle changes matter (sidebar dot + list
-    // freshness); streaming content is not rendered anywhere.
+    // Parked session: lifecycle changes drive the sidebar dot + list freshness;
+    // streaming content is dropped unless the session is rendered in a split
+    // pane (watched), which keeps streaming over its own session.state channel.
     if (lifecycle) {
       patchSessionRunStatus(record);
       emitState();
       scheduleSessionsRefresh();
     }
+    if (renderedSessions.has(record.session.sessionId)) schedulePaneEmit(record, immediate);
     return;
   }
   if (lifecycle) scheduleSessionsRefresh();
@@ -1446,6 +1538,9 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
           const sessionId = sessionHolder.session?.sessionId ?? activeSessionManager.getSessionId();
           return currentSessions.find((item) => item.id === sessionId)?.title ?? sessionId;
         },
+        // 通知免打扰：该会话当前是否正被渲染（激活或分屏格子）——可见时主
+        // 进程在窗口聚焦的情况下抑制系统通知。
+        isSessionRendered: (sessionId) => Boolean(sessionId && (sessionId === activeRuntime?.session.sessionId || renderedSessions.has(sessionId))),
         post
       }),
       // Tool executions land in chatanytime-sessions/<agentId>/tool-audit.jsonl
@@ -1636,6 +1731,12 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   record.unsubscribe = result.session.subscribe((event) => handleSessionEvent(record, event));
   record.status = sessionReadyStatus(Boolean(result.session.model), Boolean(result.modelFallbackMessage));
   liveSessions.set(result.session.sessionId, record);
+  // 启动恢复的分屏格子：watch 先于会话 live 到达（pendingWatchSessions），
+  // 记录建立后补注册并立即推送水合帧。该记录随即被 activate，激活期间的
+  // 更新走 state 通道，失焦后自然切回 session.state。
+  if (pendingWatchSessions.delete(result.session.sessionId)) {
+    renderedSessions.add(result.session.sessionId);
+  }
   activate(record);
   if (sessionsPromise) {
     // First list (app start): wait so the sidebar is populated on the first emit.
@@ -1932,14 +2033,36 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       emitState();
       break;
     }
+    case "session.watch": {
+      if (!command.watch) {
+        renderedSessions.delete(command.sessionId);
+        pendingWatchSessions.delete(command.sessionId);
+        const watched = liveSessions.get(command.sessionId);
+        if (watched?.paneFlushTimer) {
+          clearTimeout(watched.paneFlushTimer);
+          watched.paneFlushTimer = undefined;
+        }
+        break;
+      }
+      const record = liveSessions.get(command.sessionId);
+      renderedSessions.add(command.sessionId);
+      if (record) {
+        // 立即推一帧全量，格子无需等该会话的下一个事件即可水合。
+        post({ type: "session.state", snapshot: paneSnapshotFrom(record) });
+      } else {
+        // 会话还没 live（启动恢复逐格打开中）：挂起，createSession 后补挂。
+        pendingWatchSessions.add(command.sessionId);
+      }
+      break;
+    }
     case "session.skill": {
-      const prompt = runtimeSkillPrompt(command.name, command.instructions);
-      await handleCommand({ type: "session.prompt", text: prompt, attachments: command.attachments });
+      const skillRecord = resolveTargetRecord(command.sessionId);
+      const prompt = runtimeSkillPrompt(command.name, command.instructions, skillRecord);
+      await handleCommand({ type: "session.prompt", text: prompt, attachments: command.attachments, sessionId: command.sessionId });
       break;
     }
     case "session.prompt": {
-      const record = activeRuntime;
-      if (!record) throw new Error("请先打开工作区，再发送消息");
+      const record = resolveTargetRecord(command.sessionId);
       if (!record.session.model) throw new Error("请先配置并选择模型，再发送消息");
       if (record.busy) throw new Error("当前话题正在执行，请等待完成或停止后再发送");
       const prompt = await preparePromptPayload(command.text, command.attachments);
@@ -1959,6 +2082,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       patchSessionRunStatus(record);
       beginTurn(record);
       emitState();
+      emitPaneStateFor(record);
       void record.session.prompt(prompt.text, prompt.images.length ? { images: prompt.images } : undefined).catch((error) => {
         // The record may have been parked (still live — update it so the dot
         // resolves) or torn down (workspace removal — nothing left to update).
@@ -1969,15 +2093,15 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         setTerminalRunStatus(record, true);
         post({ type: "error", message: errorText(error) });
         emitState();
+        emitPaneStateFor(record);
         scheduleSessionsRefresh();
       });
       break;
     }
     case "session.queue.add": {
-      const record = activeRuntime;
-      if (!record) throw new Error("请先打开工作区，再发送消息");
+      const record = resolveTargetRecord(command.sessionId);
       if (!record.session.model) throw new Error("请先配置并选择模型，再发送消息");
-      const queueText = command.skillName ? runtimeSkillPrompt(command.skillName, command.text || undefined) : command.text;
+      const queueText = command.skillName ? runtimeSkillPrompt(command.skillName, command.text || undefined, record) : command.text;
       const prompt = await preparePromptPayload(queueText, command.attachments);
       // Pi 的队列以纯文本存储，编辑/删除/立即发送需要整队重建，图片附件会
       // 丢失——排队仅支持文本与文件附件（文件附件已折叠为路径清单）。
@@ -1987,14 +2111,15 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         await record.session.prompt(prompt.text, { streamingBehavior: "followUp" });
       } else {
         // 排队瞬间回合恰好结束：直接按普通消息发送，避免消息滞留队列。
-        await handleCommand({ type: "session.prompt", text: prompt.text });
+        await handleCommand({ type: "session.prompt", text: prompt.text, sessionId: command.sessionId });
       }
       emitState();
+      emitPaneStateFor(record);
       break;
     }
     case "session.queue.sendNow":
     case "session.queue.remove": {
-      const record = activeRuntime;
+      const record = command.sessionId ? liveSessions.get(command.sessionId) : activeRuntime;
       if (!record) break;
       const steering = [...record.session.getSteeringMessages()];
       const followUp = [...record.session.getFollowUpMessages()];
@@ -2011,18 +2136,18 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       for (const text of followUp) await record.session.followUp(text);
       if (sendNow && !(record.busy || record.session.isStreaming)) {
         // 回合已结束（如失败收尾后队列仍在）：立即发送退化为直接开新回合。
-        await handleCommand({ type: "session.prompt", text: command.text });
+        await handleCommand({ type: "session.prompt", text: command.text, sessionId: command.sessionId });
       }
       emitState();
+      emitPaneStateFor(record);
       break;
     }
     case "session.regenerate": {
-      const record = activeRuntime;
-      if (!record) throw new Error("请先打开工作区，再重新生成");
+      const record = resolveTargetRecord(command.sessionId);
       if (!record.session.model) throw new Error("请先配置并选择模型，再重新生成");
       if (record.busy) throw new Error("当前话题正在执行，请等待完成或停止后再重新生成");
       if (!command.text.trim() && !command.skillName) throw new Error("没有可重新生成的用户消息");
-      const regeneratedText = command.skillName ? runtimeSkillPrompt(command.skillName, command.text) : command.text.trim();
+      const regeneratedText = command.skillName ? runtimeSkillPrompt(command.skillName, command.text, record) : command.text.trim();
       const regeneratedPrompt = await preparePromptPayload(regeneratedText, command.attachments);
       if (regeneratedPrompt.images.length && !hasImageInput(record.session.model)) {
         if (!visionModel) throw new Error("当前模型不支持图片输入，请先切换多模态模型，或在设置的模型服务中启用视觉识别");
@@ -2036,6 +2161,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       patchSessionRunStatus(record);
       beginTurn(record);
       emitState();
+      emitPaneStateFor(record);
       void (async () => {
         const branch = regenerateSession.sessionManager.getBranch();
         const target = branch.filter((entry) => {
@@ -2057,12 +2183,13 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         setTerminalRunStatus(record, true);
         post({ type: "error", message: errorText(error) });
         emitState();
+        emitPaneStateFor(record);
         scheduleSessionsRefresh();
       });
       break;
     }
     case "session.abort": {
-      const record = activeRuntime;
+      const record = command.sessionId ? liveSessions.get(command.sessionId) : activeRuntime;
       if (!record) break;
       // Aborts resolve the status dot to red: the run did not complete.
       record.abortRequested = true;
@@ -2086,19 +2213,16 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
           }
         }
         if (changed) emitState();
+        emitPaneStateFor(record);
       }
       break;
     }
     case "session.planMode": {
-      const record = activeRuntime;
-      if (!record) throw new Error("请先打开一个会话，再切换计划模式");
-      setPlanMode(record, command.enabled);
-      emitState();
+      setPlanMode(resolveTargetRecord(command.sessionId), command.enabled);
       break;
     }
     case "session.compact": {
-      const record = activeRuntime;
-      if (!record) throw new Error("请先打开工作区，再压缩上下文");
+      const record = resolveTargetRecord(command.sessionId);
       if (!record.session.model) throw new Error("请先配置并选择模型，再压缩上下文");
       if (record.busy) throw new Error("当前话题正在执行，请等待完成后再压缩上下文");
       record.busy = true;
@@ -2108,6 +2232,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       beginTurn(record);
       appendCompactControlMessage(record, "compact-command", command.instructions ? `/compact ${command.instructions}` : "/compact");
       emitState();
+      emitPaneStateFor(record);
       void runManualCompaction(() => record.session.compact(command.instructions)).then((outcome) => {
         if (!liveSessions.has(record.session.sessionId)) return;
         appendCompactControlMessage(record, "compact-result", outcome.message);
@@ -2117,6 +2242,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         setTerminalRunStatus(record, outcome.type === "failed");
         if (outcome.type === "failed") post({ type: "error", message: errorText(outcome.error) });
         emitState();
+        emitPaneStateFor(record);
       });
       break;
     }
@@ -2124,16 +2250,38 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       if (!modelRuntime) break;
       const model = modelRuntime.getModel(command.provider, command.id);
       if (!model) throw new Error(`无法识别模型 ${command.provider}/${command.id}`);
-      selectedModel = { provider: command.provider, id: command.id };
-      await switchSessionModel(activeRuntime, model);
-      emitState();
+      const record = command.sessionId ? liveSessions.get(command.sessionId) : activeRuntime;
+      if (record) {
+        await switchSessionModel(record, model);
+        // 全局镜像（新建会话的默认模型）只跟随激活会话的选择。
+        if (record === activeRuntime) {
+          selectedModel = { provider: command.provider, id: command.id };
+          emitState();
+        } else {
+          emitPaneStateFor(record);
+        }
+      } else {
+        selectedModel = { provider: command.provider, id: command.id };
+        emitState();
+      }
       break;
     }
-    case "thinking.select":
-      thinkingLevel = command.level;
-      activeRuntime?.session.setThinkingLevel(command.level);
-      emitState();
+    case "thinking.select": {
+      const record = command.sessionId ? liveSessions.get(command.sessionId) : activeRuntime;
+      if (record) {
+        record.session.setThinkingLevel(command.level);
+        if (record === activeRuntime) {
+          thinkingLevel = command.level;
+          emitState();
+        } else {
+          emitPaneStateFor(record);
+        }
+      } else {
+        thinkingLevel = command.level;
+        emitState();
+      }
       break;
+    }
     case "auth.set":
       if (!modelRuntime) break;
       // 空 key = 沿用已保存的 key：不要用空串覆盖运行中的凭据。否则覆盖后
