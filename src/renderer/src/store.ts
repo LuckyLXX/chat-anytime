@@ -77,6 +77,13 @@ interface DesktopState {
   snapshot: RuntimeSnapshot;
   /** 分屏格子（watched 非激活会话）的会话级快照，按 sessionId 键控。 */
   paneStates: Record<string, SessionPaneSnapshot>;
+  /**
+   * 焦点切换瞬间的单槽种子：旧激活会话刚变成 parked 格子时，主进程的
+   * session.state 水合帧还在路上（watch 补发需要一个 IPC 往返），先用
+   * 切换前最后一份完整快照渲染该格子，避免闪“正在载入会话”。真实的
+   * session.state 到达后写入 paneStates 接管；下一次切换覆盖本槽。
+   */
+  parkedSeed?: { sessionId: string; data: SessionPaneSnapshot };
   models: ModelOption[];
   providers: ProviderOption[];
   resources: ResourceCatalog;
@@ -208,7 +215,12 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
             // so downstream useMemo/useEffect dependency checks stay no-ops.
             return state;
           }
-          return { snapshot: { ...incoming, messages: mergedMessages } };
+          // 焦点切换种子：旧激活会话的完整数据就在手上，同步转入 parkedSeed，
+          // 它若是一个分屏格子则立刻有内容可渲染（水合帧随后接管）。
+          const parkedSeed = previous.sessionId && previous.sessionId !== incoming.sessionId
+            ? { sessionId: previous.sessionId, data: previous satisfies SessionPaneSnapshot }
+            : state.parkedSeed;
+          return { snapshot: { ...incoming, messages: mergedMessages }, parkedSeed };
         });
         break;
       case "session.state":

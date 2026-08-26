@@ -105,9 +105,13 @@ const emptyPaneData: SessionPaneSnapshot = {
 };
 
 function usePaneData(sessionId: string | undefined): PaneConversationData {
-  const selector = useCallback((state: { snapshot: RuntimeSnapshot; paneStates: Record<string, SessionPaneSnapshot> }): PaneConversationData => {
+  const selector = useCallback((state: { snapshot: RuntimeSnapshot; paneStates: Record<string, SessionPaneSnapshot>; parkedSeed?: { sessionId: string; data: SessionPaneSnapshot } }): PaneConversationData => {
     if (sessionId === undefined || state.snapshot.sessionId === sessionId) return state.snapshot;
-    return state.paneStates[sessionId] ?? emptyPaneData;
+    if (state.paneStates[sessionId]) return state.paneStates[sessionId];
+    // 焦点刚切走：该会话的最后一份完整快照在 parkedSeed 里，
+    // 主进程的 session.state 水合帧到达前先用它渲染（零闪烁）。
+    if (state.parkedSeed?.sessionId === sessionId) return state.parkedSeed.data;
+    return emptyPaneData;
   }, [sessionId]);
   return useDesktopStore(selector);
 }

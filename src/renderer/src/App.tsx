@@ -1310,24 +1310,30 @@ export function App(): ReactNode {
   // —— 分屏 effects ——
 
   /** 格子集合变化时同步 session.watch：非激活格子注册推送（主进程豁免驱逐、
-   *  不设终端圆点、streaming 走 session.state 通道）；移出的格子注销并清缓存。 */
+   *  不设终端圆点、streaming 走 session.state 通道）；移出的格子注销并清缓存。
+   *  登记簿只收“真正发送过 watch 的 id”：格子首次成为焦点（激活）时被跳过、
+   *  后来失焦的，会在本 effect 随 snapshot.sessionId 变化重跑时补发——主进程
+   *  幂等接受并立即回推一帧全量水合。 */
   useEffect(() => {
     if (!ready) return;
-    const previous = watchedPaneIdsRef.current;
-    const next = new Set(paneIds);
+    const registered = watchedPaneIdsRef.current;
+    const panes = new Set(paneIds);
     const activeId = snapshot.sessionId;
-    for (const id of next) {
-      if (id === activeId || previous.has(id)) continue;
-      void window.piDesktop.send({ type: "session.watch", sessionId: id, watch: true }).catch(() => undefined);
+    for (const id of panes) {
+      if (id === activeId || registered.has(id)) continue;
+      registered.add(id);
+      void window.piDesktop.send({ type: "session.watch", sessionId: id, watch: true }).catch(() => {
+        registered.delete(id);
+      });
     }
     const removed: string[] = [];
-    for (const id of previous) {
-      if (next.has(id)) continue;
+    for (const id of registered) {
+      if (panes.has(id)) continue;
       removed.push(id);
       void window.piDesktop.send({ type: "session.watch", sessionId: id, watch: false }).catch(() => undefined);
     }
+    for (const id of removed) registered.delete(id);
     if (removed.length > 0) dropPaneStates(removed);
-    watchedPaneIdsRef.current = next;
   }, [paneIds, snapshot.sessionId, ready]);
 
   /** 分屏布局持久化（localStorage，重启恢复；失效格子由修剪 effect 清理）。 */
