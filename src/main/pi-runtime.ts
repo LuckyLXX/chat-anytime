@@ -1667,6 +1667,29 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     if (sessionsPromise) await sessionsPromise;
     return;
   }
+  // 早水合（分屏）：历史已由 createAgentSession 装载，而扩展绑定/工具激活/
+  // activate 还要一小会儿。若该会话已被渲染端 watch（或等待 watch），先推一
+  // 帧会话级快照让格子显示历史，随后的 activate/emitState 与常规推送接管。
+  const earlyPaneId = result.session.sessionId;
+  if (pendingWatchSessions.has(earlyPaneId) || renderedSessions.has(earlyPaneId)) {
+    const earlySession = result.session;
+    post({
+      type: "session.state",
+      snapshot: {
+        sessionId: earlyPaneId,
+        sessionFile: activeSessionManager.getSessionFile(),
+        workspace: recordWorkspace,
+        model: earlySession.model ? { provider: earlySession.model.provider, id: earlySession.model.id } : undefined,
+        thinkingLevel: earlySession.thinkingLevel,
+        busy: false,
+        status: "",
+        queuedMessages: [],
+        planMode: recordPlanState.enabled,
+        messages: normalizeMessages(earlySession.state.messages, earlySession.state.streamingMessage),
+        executions: []
+      }
+    });
+  }
   const record: SessionRuntimeRecord = {
     session: result.session,
     unsubscribe: () => undefined,

@@ -1322,7 +1322,7 @@ export function ConversationPane({
       {showDock && <PanelDock />}
       <div className="timeline" data-pane="timeline" ref={timelineRef}>
         {awaitingHydration ? (
-          <div className="empty-conversation" data-pane="landing"><div className="empty-icon"><LoaderCircle size={22} className="spinning" /></div><h1>正在载入会话…</h1></div>
+          <div className="empty-conversation" data-pane="landing"><div className="empty-icon"><LoaderCircle size={22} className="spinning" /></div><h1>正在载入会话{title ? `「${title}」` : ""}…</h1></div>
         ) : !data.workspace ? (
           <div className="empty-workspace" data-pane="landing"><div className="empty-icon"><FolderOpen size={27} /></div><h1>打开一个项目</h1><button className="primary-button" data-control="workspace-open" type="button" onClick={() => void openWorkspace()}><FolderOpen size={16} />选择文件夹</button></div>
         ) : displayMessages.length === 0 && !isGenerating ? (

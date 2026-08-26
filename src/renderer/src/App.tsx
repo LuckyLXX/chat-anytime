@@ -1288,19 +1288,24 @@ export function App(): ReactNode {
     });
   }
 
-  /** 关闭一格：剪叶塌缩；只剩一格退出分屏（该会话保持运行，回到单窗口视图）。 */
+  /** 关闭一格：剪叶塌缩；只剩一格退出分屏（该会话保持运行，回到单窗口视图）。
+   *  关闭的是焦点格时激活接替格（首叶），否则激活会话仍指向刚被移出屏幕的
+   *  那个会话，全局镜像（topbar/任务面板/权限过滤）会跟着一个看不见的会话走。 */
   function removeSplitPane(sessionId: string): void {
     if (!splitTree) return;
+    let successor: string | undefined;
     setSplitState((current) => {
       if (!current.tree) return current;
       const collapsed = removePane(current.tree, sessionId);
       // 单叶 = 退出分屏：树置 null，渲染条件回到单窗口分支。
       const next = collapsed?.kind === "leaf" ? null : collapsed;
       const focusedGone = current.focusedPane === sessionId;
+      if (focusedGone && next) successor = firstLeafId(next);
       const focusedPane = focusedGone ? (next ? firstLeafId(next) : snapshot.sessionId) : current.focusedPane;
       return { tree: next, focusedPane };
     });
     setMaximizedPaneId((current) => (current === sessionId ? undefined : current));
+    if (successor !== undefined) focusPane(successor);
   }
 
   function toggleMaximizePane(sessionId: string): void {
@@ -1359,22 +1364,35 @@ export function App(): ReactNode {
     });
   }, [snapshot.sessions, snapshot.sessionId, splitTree]);
 
-  /** session.new 在分屏中替换某格：新会话激活（snapshot.sessionId 变化）后落位。 */
+  /**
+   * 激活会话落位（按“激活 id 迁移”触发，树变化不触发）：维持「焦点格 =
+   * 激活会话」不变量。三条路径——
+   * ① 激活会话在格子集合里：聚焦跟随（focusPane / 侧栏打开 / 启动恢复的常规落位）；
+   * ② 激活的会话在格子外且 pending 指定了目标格（/new 来自非焦点格）：替换该格；
+   * ③ 其余格子外激活（session.new 默认、workspace.open、删除会话后的补空白等
+   *   外部路径）：替换焦点格——否则激活会话不在任何格子里，分屏视图与全局
+   *   镜像（topbar/任务面板/权限过滤）会指向一个看不见的会话。
+   */
+  const previousActiveIdRef = useRef<string | undefined>(snapshot.sessionId);
   useEffect(() => {
+    const activeId = snapshot.sessionId;
+    if (previousActiveIdRef.current === activeId) return;
+    previousActiveIdRef.current = activeId;
+    if (!splitTree || !activeId) return;
+    if (paneIds.includes(activeId)) {
+      setSplitState((current) => current.focusedPane === activeId ? current : { tree: current.tree, focusedPane: activeId });
+      return;
+    }
     const pending = pendingPaneReplaceRef.current;
-    if (!pending) return;
-    if (!splitTree || !snapshot.sessionId || snapshot.sessionId === pending) {
-      if (!splitTree) pendingPaneReplaceRef.current = undefined;
-      return;
-    }
-    if (!leafIds(splitTree).includes(pending)) {
-      pendingPaneReplaceRef.current = undefined;
-      return;
-    }
     pendingPaneReplaceRef.current = undefined;
-    const newSessionId = snapshot.sessionId;
-    setSplitState((current) => current.tree ? { tree: replaceLeaf(current.tree, pending, { kind: "leaf", sessionId: newSessionId }), focusedPane: newSessionId } : current);
-  }, [snapshot.sessionId, splitTree]);
+    const target = pending !== undefined && paneIds.includes(pending)
+      ? pending
+      : focusedPaneId ?? (splitTree ? firstLeafId(splitTree) : undefined);
+    if (!target) return;
+    setSplitState((current) => current.tree
+      ? { tree: replaceLeaf(current.tree, target, { kind: "leaf", sessionId: activeId }), focusedPane: activeId }
+      : current);
+  }, [snapshot.sessionId, splitTree, paneIds, focusedPaneId]);
 
   /** 切换助手清空分屏（会话列表按助手划分，旧格子全部失效）。 */
   const agentIdRef = useRef(snapshot.agentId);
