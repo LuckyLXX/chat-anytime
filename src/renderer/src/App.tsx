@@ -345,19 +345,10 @@ function actionTimelineNodeState(segment: ActionTimelineSegment, execution: Tool
 /** Expandable tool-call node: shows the call arguments and the tool output. */
 function ToolCallDetails({ call, execution, streaming }: { call: Extract<MessageBlock, { type: "tool-call" }>; execution: ToolExecution | undefined; streaming: boolean }): ReactNode {
   const running = execution?.status === "running" || (!execution && streaming);
-  // 默认收拢：运行中的调用自动展开（实时进度反馈），结束瞬间自动收拢恢复折叠，
-  // 长会话不会被一排展开的工具调用节点淹没；用户手动展开/收拢不受影响（toggle 自行记录）。
+  // 默认全部折叠：工具调用气泡初始收拢，程序不干预开合——运行中 / 已结束都不自动展开，
+  // 长会话不会被一排展开的工具调用节点淹没；运行状态由 summary 的「运行中 · 转圈」提示承载。
+  // 用户想看细节时手动点开，开合状态完全由用户控制（onToggle 记录）。
   const [open, setOpen] = useState(false);
-  const settledAfterRunningRef = useRef(false);
-  useEffect(() => {
-    if (running) {
-      settledAfterRunningRef.current = true;
-      setOpen(true);
-    } else if (settledAfterRunningRef.current) {
-      settledAfterRunningRef.current = false;
-      setOpen(false);
-    }
-  }, [running]);
   const args = execution?.args ?? call.arguments;
   const editPreview = useMemo(() => (call.name === "edit" ? parseEditCallArgs(args) : undefined), [call.name, args]);
   const writePreview = useMemo(() => (call.name === "write" ? parseWriteCallArgs(args) : undefined), [call.name, args]);
