@@ -71,9 +71,9 @@ function walkLeafs(node: SplitNode, rowCount: number, columnCount: number, visit
  * 替代「固定从焦点格分裂」——后者每次分屏后焦点跳新格子，连续分屏越分越窄。
  * 算法：树内所有 split 恒 ratio 0.5，叶子归一化尺寸为 宽∝0.5^(路径 row split 数)、
  * 高∝0.5^(路径 column split 数)。选「面积最大（路径 split 数之和最小）」的叶子拆、
- * 平局取最左（深优先第一个，保持行列顺序稳定）；方向 = 该叶 rowCount > columnCount
- * ? column : row（高瘦→上下减高、矮胖→左右减宽、方正→左右）。无树（首次分屏）时
- * 默认左右、anchor 在第一格；anchor 缺失或与新会话同 id 时返回单叶。
+ * 平局取最右（深优先最后一个，让扩展按图示顺时针、相邻格再分）；方向 = 该叶
+ * rowCount > columnCount ? column : row（高瘦→上下减高、矮胖→左右减宽、方正→左右）。
+ * 无树（首次分屏）时默认左右、anchor 在第一格；anchor 缺失或与新会话同 id 时返回单叶。
  */
 export function balancedAddPane(tree: SplitNode | null, anchorSessionId: string | undefined, newSessionId: string): SplitNode {
   const newLeaf: SplitNode = { kind: "leaf", sessionId: newSessionId };
@@ -87,7 +87,9 @@ export function balancedAddPane(tree: SplitNode | null, anchorSessionId: string 
   let bestColumnCount = 0;
   walkLeafs(tree, 0, 0, (leaf) => {
     const sum = leaf.rowCount + leaf.columnCount;
-    if (sum < bestSum) {
+    // 面积最大（sum 最小）优先；多个同样最大时取最右（最后一个）——
+    // 使扩展顺序按图示顺时针（相邻格再分）而非一直从左分，布局更均衡、可预期。
+    if (sum <= bestSum) {
       bestSum = sum;
       bestId = leaf.sessionId;
       bestRowCount = leaf.rowCount;

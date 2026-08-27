@@ -50,27 +50,27 @@ describe("balancedAddPane", () => {
     expect(balancedAddPane(null, undefined, "b")).toEqual(leaf("b"));
   });
 
-  it("2 分后加第 3 格：平局取最左叶子、方向 column → 左半上下", () => {
+  it("2 分后加第 3 格：平局取最右叶子、方向 column → 右半上下（图示②）", () => {
     const tree = addPane(null, "a", "b", "row"); // row[a,b]
-    // a / b 面积相同（各一个 row split），平局取深优先第一个 a；a 高瘦（row 1 > col 0）→ column
+    // a / b 面积相同（各一个 row split），平局取最右 b；b 高瘦（row 1 > col 0）→ column → row[a|column[b,c]]
     expect(balancedAddPane(tree, "a", "c")).toEqual({
       kind: "split", direction: "row", ratio: 0.5,
       children: [
-        { kind: "split", direction: "column", ratio: 0.5, children: [leaf("a"), leaf("c")] },
-        leaf("b")
+        leaf("a"),
+        { kind: "split", direction: "column", ratio: 0.5, children: [leaf("b"), leaf("c")] }
       ]
     });
   });
 
-  it("3 分后加第 4 格：选面积最大的 b 拆成 column → 田字格", () => {
+  it("3 分后加第 4 格：选面积最大的左侧 a 拆成 column → 田字格（顺时针，图示③）", () => {
     let tree = addPane(null, "a", "b", "row");
-    tree = balancedAddPane(tree, "a", "c"); // row[column[a,c]|b]
-    // b 面积最大（sum=1 < a/c 的 sum=2），b 高瘦（row 1 > col 0）→ column
+    tree = balancedAddPane(tree, "a", "c"); // row[a | column[b,c]]
+    // 叶子 a(sum1)、b(sum2)、c(sum2)：a 面积最大，a 高瘦（row 1 > col 0）→ column
     expect(balancedAddPane(tree, "a", "d")).toEqual({
       kind: "split", direction: "row", ratio: 0.5,
       children: [
-        { kind: "split", direction: "column", ratio: 0.5, children: [leaf("a"), leaf("c")] },
-        { kind: "split", direction: "column", ratio: 0.5, children: [leaf("b"), leaf("d")] }
+        { kind: "split", direction: "column", ratio: 0.5, children: [leaf("a"), leaf("d")] },
+        { kind: "split", direction: "column", ratio: 0.5, children: [leaf("b"), leaf("c")] }
       ]
     });
   });
