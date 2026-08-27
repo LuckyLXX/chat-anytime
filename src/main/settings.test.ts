@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CUSTOM_PROVIDER_ID, createDefaultAgent, mergeProviderModels, migrateSettings, normalizeAccessMode, normalizeAgent, normalizeCustomThemes, normalizeThemeAssets, normalizeVision, normalizeWallpaperOpacity } from "./settings.js";
+import { CUSTOM_PROVIDER_ID, createDefaultAgent, isPositiveInt, mergeProviderModels, migrateSettings, normalizeAccessMode, normalizeAgent, normalizeCustomThemes, normalizeProvider, normalizeThemeAssets, normalizeVision, normalizeWallpaperOpacity } from "./settings.js";
 
 describe("desktop settings migration", () => {
   it("migrates the legacy custom provider without changing its stable id", () => {
@@ -73,6 +73,28 @@ describe("desktop settings migration", () => {
       { id: "vision", name: "Vision upstream", imageInput: false, enabled: false },
       { id: "new", name: "New", imageInput: undefined, enabled: false }
     ]);
+  });
+
+  it("keeps user-corrected token limits through an upstream refresh and normalization", () => {
+    // 手动修正的限额不能被「拉取最新模型」冲掉。
+    const merged = mergeProviderModels(
+      [{ id: "glm-4.6", name: "GLM", contextWindow: 200000, maxTokens: 32000, imageInput: true, enabled: true }],
+      [{ id: "glm-4.6", name: "GLM upstream", imageInput: false }]
+    );
+    expect(merged[0]).toMatchObject({ contextWindow: 200000, maxTokens: 32000 });
+    // 非法/缺省值在规范化时被丢弃，不会流入运行时。
+    const normalized = normalizeProvider({
+      id: "p",
+      name: "P",
+      baseUrl: "",
+      models: [
+        { id: "a", name: "a", contextWindow: -5, maxTokens: Number.NaN },
+        { id: "b", name: "b", contextWindow: 65536, maxTokens: 8192 }
+      ]
+    });
+    expect(normalized.models[0]).not.toHaveProperty("contextWindow");
+    expect(normalized.models[0]).not.toHaveProperty("maxTokens");
+    expect(normalized.models[1]).toMatchObject({ contextWindow: 65536, maxTokens: 8192 });
   });
 
   it("migrates the live theme controls and custom CSS", () => {

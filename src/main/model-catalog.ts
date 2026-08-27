@@ -1,4 +1,5 @@
 import type { ModelOption, ProviderSettings } from "../shared/protocol.js";
+import { isPositiveInt } from "./settings.js";
 
 export interface CatalogAuthStatus {
   configured: boolean;
@@ -20,6 +21,9 @@ export interface CatalogModelInput {
   id: string;
   name: string;
   input: ("text" | "image")[];
+  /** SDK 目录的限额原值；用户在设置里手动修正后以此覆盖。 */
+  contextWindow?: number;
+  maxTokens?: number;
 }
 
 /**
@@ -56,6 +60,9 @@ export function buildCatalogModels(models: readonly CatalogModelInput[], provide
       input: model.input,
       // 目录元数据可被设置里的手动标记覆盖（内置服务商拉取的新模型没有输入类型信息，靠用户勾选）。
       imageInput: stored?.imageInput ?? model.input.includes("image"),
+      // 同理，token 限额的手动修正优先于目录原值。
+      ...(isPositiveInt(stored?.contextWindow) || isPositiveInt(model.contextWindow) ? { contextWindow: stored?.contextWindow ?? model.contextWindow } : {}),
+      ...(isPositiveInt(stored?.maxTokens) || isPositiveInt(model.maxTokens) ? { maxTokens: stored?.maxTokens ?? model.maxTokens } : {}),
       ...(stored ? { enabled: stored.enabled !== false } : {})
     };
   });

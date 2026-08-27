@@ -1,4 +1,5 @@
 import type { CustomProviderModel, ProviderSettings } from "../shared/protocol.js";
+import { isPositiveInt } from "./settings.js";
 
 export function inferCustomModelImageInput(modelId: string): boolean {
   const value = modelId.trim().toLowerCase();
@@ -33,8 +34,10 @@ export function customProviderModelDefinition(model: CustomProviderModel) {
       supportsStore: false
     },
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 128000,
-    maxTokens: 16384
+    // 上游 /models 不提供限额信息，这里只能给保守占位；用户在设置里手动
+    // 修正过的值（settings.providers 的 contextWindow/maxTokens）优先。
+    contextWindow: model.contextWindow ?? 128000,
+    maxTokens: model.maxTokens ?? 16384
   };
 }
 
@@ -65,7 +68,14 @@ export function resolveCustomProviderRegistration(config: ProviderSettings): {
   const configuredModels = (config.models?.length ? config.models : [])
     .filter((model) => model.id.trim())
     .filter((model) => model.enabled !== false)
-    .map((model) => ({ id: model.id.trim(), name: model.name.trim() || model.id.trim(), imageInput: model.imageInput, enabled: true }));
+    .map((model) => ({
+      id: model.id.trim(),
+      name: model.name.trim() || model.id.trim(),
+      imageInput: model.imageInput,
+      contextWindow: isPositiveInt(model.contextWindow) ? model.contextWindow : undefined,
+      maxTokens: isPositiveInt(model.maxTokens) ? model.maxTokens : undefined,
+      enabled: true
+    }));
   return {
     name,
     baseUrl,

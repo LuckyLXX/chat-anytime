@@ -65,7 +65,7 @@ import { resolveVisionModel } from "./vision.js";
 import { buildResourceCatalog } from "./resource-catalog.js";
 import { agentWorkspaceSessionDir, mergeSessionSummary, sessionListReadyFor } from "./session-scope.js";
 import { isDesktopConfiguredProvider } from "./model-catalog.js";
-import { mergeProviderModels } from "./settings.js";
+import { isPositiveInt, mergeProviderModels } from "./settings.js";
 import { buildSkillPrompt, parseSkillPrompt, type SkillPromptDisplay } from "./skill-prompt.js";
 import {
   PI_DESKTOP_CONTROL_ENTRY_TYPE,
@@ -333,6 +333,8 @@ function buildSubagentTools(record: Pick<SessionRuntimeRecord, "workspace" | "ag
     thinkingLevel,
     accessMode,
     model: model ?? { provider: "", id: "" },
+    // 子代理与主会话同口径：目录模型交给子代理前套上 token-limit 覆盖。
+    transformModel: (candidate) => applyModelOverrides(candidate),
     parentSessionId: sessionId,
     requestPermission: (toolName, args, toolCallId) => runtimePermissions.requestPermission(record.permissionDeps, toolName, args, toolCallId, "subagent"),
     isDelegationChild
@@ -842,6 +844,23 @@ function hasImageInput(model: { provider?: string; id?: string; input?: readonly
 }
 
 /**
+ * Apply per-model token-limit overrides stored in settings.providers (the
+ * settings dialog's edit affordance) onto a catalog Model. Returns a shallow
+ * clone when an override hits — never mutate the shared runtime objects.
+ * Custom providers register with conservative placeholder limits
+ * (custom-provider.ts), and fetched built-in models clone template metadata,
+ * so both benefit from user-corrected values.
+ */
+function applyModelOverrides<T extends Model<Api>>(model: T): T {
+  const entry = settings?.providers.find((provider) => provider.id === model.provider)?.models.find((item) => item.id === model.id);
+  if (!entry) return model;
+  const contextWindow = isPositiveInt(entry.contextWindow) ? entry.contextWindow : undefined;
+  const maxTokens = isPositiveInt(entry.maxTokens) ? entry.maxTokens : undefined;
+  if (contextWindow === undefined && maxTokens === undefined) return model;
+  return { ...model, ...(contextWindow !== undefined ? { contextWindow } : {}), ...(maxTokens !== undefined ? { maxTokens } : {}) };
+}
+
+/**
  * Transport guard enforcing the vision invariant at the single choke point
  * every LLM request passes (main sessions and subagents share this runtime): a
  * model without image input never receives image parts. Attached images stay
@@ -931,7 +950,8 @@ function reconcileVisionTool(record: SessionRuntimeRecord | undefined): void {
  */
 async function switchSessionModel(record: SessionRuntimeRecord | undefined, model: Model<Api>): Promise<void> {
   if (!record) return;
-  await record.session.setModel(model);
+  // Token-limit overrides ride along on every model handoff to a session.
+  await record.session.setModel(applyModelOverrides(model));
   reconcileVisionTool(record);
 }
 
@@ -1586,6 +1606,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   const requestedModel = requested
     ? modelRuntime.getModel(requested.provider, requested.id)
     : undefined;
+  const resolvedModel = requestedModel ? applyModelOverrides(requestedModel) : undefined;
   // refreshSessions re-reads every session file from disk (line-by-line), which
   // is slow with many/large sessions. It only needs to be fresh for the sidebar,
   // so on switches with a known list it runs in the background instead of
@@ -1659,7 +1680,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   const result = await createAgentSession({
     cwd: recordWorkspace,
     modelRuntime,
-    model: requestedModel,
+    model: resolvedModel,
     thinkingLevel: hasExistingMessages ? undefined : (recordAgent.defaultThinkingLevel ?? settings?.thinkingLevel ?? "medium"),
     sessionManager: activeSessionManager,
     settingsManager,
@@ -2350,12 +2371,21 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       }
       emitState();
       break;
-    case "provider.models.save":
+    case "provider.models.save": {
       if (!modelRuntime) break;
       if (settings) settings.providers = settings.providers.some((provider) => provider.id === command.provider.id) ? settings.providers.map((provider) => provider.id === command.provider.id ? command.provider : provider) : [...settings.providers, command.provider];
       await refreshCatalog();
+      // Token 限额手动修正后立即对正使用该服务商模型的空闲会话生效
+      // （switchSessionModel 内部走 applyModelOverrides）；运行中的会话等下一
+      // 次模型切换/重启，避免中途换模型对象。
+      for (const record of liveSessions.values()) {
+        const current = record.session.model;
+        if (!current || record.busy || current.provider !== command.provider.id) continue;
+        await switchSessionModel(record, modelRuntime.getModel(current.provider, current.id) ?? current);
+      }
       emitState();
       break;
+    }
     case "provider.delete":
       modelRuntime?.unregisterProvider(command.providerId);
       await refreshCatalog();

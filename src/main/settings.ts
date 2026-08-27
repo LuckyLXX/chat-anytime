@@ -102,6 +102,11 @@ export function normalizeCustomThemes(value: unknown): CustomThemeDefinition[] {
 
 const THEME_ASSET_DATA_PATTERN = /^data:(?:image|font)\/|application\/(?:font-woff|x-font-woff|vnd\.ms-fontobject)\//iu;
 
+/** 用户手动修正的 token 限额只接受正整数（既当存储过滤，也当运行时防线）。 */
+export function isPositiveInt(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 && value <= Number.MAX_SAFE_INTEGER;
+}
+
 export function normalizeThemeAssets(value: unknown): ThemeAssetMap {
   if (!value || typeof value !== "object") return {};
   return Object.fromEntries(Object.entries(value as Record<string, unknown>).flatMap(([path, data]) => {
@@ -140,7 +145,15 @@ export function normalizeProvider(provider: Partial<ProviderSettings>): Provider
   const models = Array.isArray(provider.models)
     ? provider.models
       .filter((model) => model && typeof model.id === "string" && model.id.trim())
-      .map((model) => ({ id: model.id.trim(), name: String(model.name || model.id).trim() || model.id.trim(), imageInput: model.imageInput, enabled: model.enabled !== false }))
+      .map((model) => ({
+        id: model.id.trim(),
+        name: String(model.name || model.id).trim() || model.id.trim(),
+        imageInput: model.imageInput,
+        // 用户手动修正的 token 限额：仅保留合法正整数，避免非法值流入运行时。
+        ...(isPositiveInt(model.contextWindow) ? { contextWindow: model.contextWindow } : {}),
+        ...(isPositiveInt(model.maxTokens) ? { maxTokens: model.maxTokens } : {}),
+        enabled: model.enabled !== false
+      }))
     : [];
   return {
     id: String(provider.id || CUSTOM_PROVIDER_ID),
@@ -159,6 +172,9 @@ export function mergeProviderModels(existing: ProviderModelSettings[], fetched: 
     return {
       ...model,
       imageInput: old?.imageInput ?? model.imageInput,
+      // 用户手动修正过的限额在上游刷新后保持不变。
+      contextWindow: old?.contextWindow ?? model.contextWindow,
+      maxTokens: old?.maxTokens ?? model.maxTokens,
       enabled: old ? old.enabled !== false : model.enabled === true
     };
   });

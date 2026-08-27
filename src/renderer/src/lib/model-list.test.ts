@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildBuiltinProviderEntry, filterProviderModels, setProviderModelsEnabled, selectableCatalogModels } from "./model-list";
+import { buildBuiltinProviderEntry, filterProviderModels, formatTokenLimit, parseTokenLimit, setProviderModelsEnabled, selectableCatalogModels } from "./model-list";
 import type { ModelOption } from "../../../shared/protocol";
 
 const models = [
@@ -82,5 +82,27 @@ describe("builtin provider entry rebuild", () => {
   it("leaves keyConfigured unset when neither source says the key is saved", () => {
     expect(buildBuiltinProviderEntry("zhipu", undefined, "智谱开放平台", false, models).keyConfigured).toBeUndefined();
     expect(buildBuiltinProviderEntry("zhipu", { id: "zhipu", name: "智谱", baseUrl: "", models: [], keyConfigured: false }, "智谱开放平台", false, models).keyConfigured).toBeUndefined();
+  });
+});
+
+describe("token limit editor helpers", () => {
+  it("parses raw numbers and k/m shorthands, rejecting garbage", () => {
+    expect(parseTokenLimit("128000")).toBe(128000);
+    expect(parseTokenLimit(" 65536 ")).toBe(65536);
+    expect(parseTokenLimit("128k")).toBe(128000);
+    expect(parseTokenLimit("1.5m")).toBe(1_500_000);
+    expect(parseTokenLimit("1K")).toBe(1000);
+    expect(parseTokenLimit("abc")).toBeUndefined();
+    expect(parseTokenLimit("-5")).toBeUndefined();
+    expect(parseTokenLimit("12x")).toBeUndefined();
+    expect(parseTokenLimit("")).toBeUndefined();
+    expect(parseTokenLimit("   ")).toBeUndefined();
+  });
+
+  it("formats stored overrides for echo-back and clears to empty", () => {
+    expect(formatTokenLimit(200000)).toBe("200000");
+    expect(formatTokenLimit(undefined)).toBe("");
+    expect(formatTokenLimit(-3)).toBe("");
+    expect(formatTokenLimit(Number.NaN)).toBe("");
   });
 });

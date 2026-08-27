@@ -103,4 +103,27 @@ describe("resolveCustomProviderRegistration", () => {
     expect(payload?.models[0]?.name).toBe("m1");
     expect(payload?.models[0]?.input).toEqual(["text", "image"]);
   });
+
+  it("applies user-corrected token limits and keeps placeholders otherwise", () => {
+    // 拉取的模型上游不给限额，注册定义只能占位；用户修正过的值优先。
+    const payload = resolveCustomProviderRegistration({
+      id: "provider-1",
+      name: "中转",
+      baseUrl: "https://api.example.com/v1",
+      models: [
+        { id: "m1", name: "M1" },
+        { id: "m2", name: "M2", contextWindow: 200000, maxTokens: 32000 }
+      ]
+    });
+    expect(payload?.models[0]).toMatchObject({ contextWindow: 128000, maxTokens: 16384 });
+    expect(payload?.models[1]).toMatchObject({ contextWindow: 200000, maxTokens: 32000 });
+    // 非法数值不进入注册定义（回退到占位值）。
+    const guarded = resolveCustomProviderRegistration({
+      id: "provider-1",
+      name: "中转",
+      baseUrl: "https://api.example.com/v1",
+      models: [{ id: "m3", name: "M3", contextWindow: 0, maxTokens: -100 }]
+    });
+    expect(guarded?.models[0]).toMatchObject({ contextWindow: 128000, maxTokens: 16384 });
+  });
 });

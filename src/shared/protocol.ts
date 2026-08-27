@@ -10,6 +10,9 @@ export interface ModelOption {
   configured: boolean;
   input: ("text" | "image")[];
   imageInput: boolean;
+  /** 目录元数据（含用户修正后的生效值）。 */
+  contextWindow?: number;
+  maxTokens?: number;
   /** 目录条目的启用状态（settings.providers 的勾选结果）；缺省视为启用。目录必须包含被禁用的模型（设置页要还原勾选），选择器类消费方自行过滤 enabled !== false。 */
   enabled?: boolean;
 }
@@ -18,6 +21,10 @@ export interface ProviderModelSettings {
   id: string;
   name: string;
   imageInput?: boolean;
+  /** 用户手动修正的最大上下文窗口（tokens）；缺省回退到目录/模板值。 */
+  contextWindow?: number;
+  /** 用户手动修正的最大输出 token；缺省回退到目录/模板值。 */
+  maxTokens?: number;
   /** Whether this model is shown in the composer model switcher. */
   enabled?: boolean;
 }

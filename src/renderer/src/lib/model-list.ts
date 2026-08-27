@@ -16,6 +16,27 @@ export function filterProviderModels<T extends ModelListItem>(models: T[], query
 }
 
 /**
+ * 解析模型限额编辑框的输入：空/空白 → undefined（清除覆盖，回退目录值）；
+ * 正整数 → 数值；其余非法输入 → undefined。同时接受「128k / 1.5m」式的
+ * 缩写，避免用户数零数到眼花。
+ */
+export function parseTokenLimit(input: string): number | undefined {
+  const trimmed = input.trim().toLowerCase();
+  if (!trimmed) return undefined;
+  const shorthand = trimmed.match(/^(\d+(?:\.\d+)?)(k|m)?$/u);
+  if (shorthand) {
+    const base = Number(shorthand[1]);
+    const scale = shorthand[2] === "m" ? 1_000_000 : shorthand[2] === "k" ? 1000 : 1;
+    return Number.isFinite(base) ? Math.round(base * scale) : undefined;
+  }
+  return undefined;
+}
+
+/** 编辑框回显：已设置的覆盖值转字符串；未设置显示空串（placeholder 承担提示）。 */
+export function formatTokenLimit(value: number | undefined): string {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? String(value) : "";
+}
+/**
  * 选择器类消费方（顶栏/菜单/默认模型下拉）的目录视图：只保留启用或缺省的模型。
  * 目录本身包含被禁用的模型（设置页要还原勾选），在这里统一剔除。
  */

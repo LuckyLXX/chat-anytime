@@ -69,7 +69,7 @@ import { composePickMessage } from "./lib/browser-pick";
 import { DiffView } from "./components/DiffView";
 import { clampPreviewSplit, PREVIEW_SPLIT_MAX, PREVIEW_SPLIT_MIN, previewSplitFromKey } from "./lib/preview-split";
 import { groupSessionsByWorkspace, workspaceKey } from "./lib/session-groups";
-import { filterProviderModels, setProviderModelsEnabled, buildBuiltinProviderEntry, selectableCatalogModels } from "./lib/model-list";
+import { filterProviderModels, setProviderModelsEnabled, buildBuiltinProviderEntry, selectableCatalogModels, parseTokenLimit, formatTokenLimit } from "./lib/model-list";
 import { CSS_URL_PATTERN, createThemeAssetUrls, isExternalThemeReference, normalizeThemeAssetReference, resolveThemeAssets } from "./lib/theme-assets";
 import { THEME_PRESETS, bubbleOpacityCss, collectThemeLayers, panelOpacityCss, scopeCustomThemeCss, scopeCustomThemeCssForPreview, themePresetCss, themePreviewCss, themeWallpaperOpacity, wallpaperOpacityCss } from "./lib/theme-presets";
 import { panePermissionRequest, paneQuestionRequest, dropPaneStates, useDesktopStore } from "./store";
@@ -560,10 +560,22 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
     ? (selectedProvider?.models ?? customModels)
     : models.filter((model) => model.provider === provider).map((model) => {
       const stored = selectedProvider?.models.find((item) => item.id === model.id);
-      return { id: model.id, name: model.name, imageInput: stored?.imageInput ?? model.imageInput, enabled: stored ? stored.enabled !== false : true };
+      return {
+        id: model.id,
+        name: model.name,
+        imageInput: stored?.imageInput ?? model.imageInput,
+        // 限额显示生效值（用户修正优先，否则目录原值），供编辑框 placeholder 回显。
+        contextWindow: stored?.contextWindow ?? (typeof model.contextWindow === "number" ? model.contextWindow : undefined),
+        maxTokens: stored?.maxTokens ?? (typeof model.maxTokens === "number" ? model.maxTokens : undefined),
+        enabled: stored ? stored.enabled !== false : true
+      };
     });
   const enabledProviderModels = providerModels.filter((model) => model.enabled !== false);
   const [modelSearch, setModelSearch] = useState("");
+  // 限额行内编辑态：正在编辑的模型 id + 两个输入框草稿（字符串，空 = 清除覆盖）。
+  const [editingModelId, setEditingModelId] = useState<string | undefined>();
+  const [limitDraftContext, setLimitDraftContext] = useState("");
+  const [limitDraftMaxTokens, setLimitDraftMaxTokens] = useState("");
   const visibleProviderModels = filterProviderModels(providerModels, modelSearch);
   const allVisibleModelsEnabled = visibleProviderModels.length > 0 && visibleProviderModels.every((model) => model.enabled !== false);
   const someVisibleModelsEnabled = visibleProviderModels.some((model) => model.enabled !== false);
@@ -604,6 +616,24 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
 
   function updateProviderModel(modelId: string, patch: Partial<ProviderModelSettings>): void {
     applyProviderModels(providerModels.map((model) => model.id === modelId ? { ...model, ...patch } : model));
+  }
+
+  /** 打开某模型的限额编辑：草稿回显已设置值；上下文/最大输出留空 = 清除覆盖。 */
+  function beginEditModelLimits(model: ProviderModelSettings): void {
+    setEditingModelId(current => current === model.id ? undefined : model.id);
+    setLimitDraftContext(formatTokenLimit(model.contextWindow));
+    setLimitDraftMaxTokens(formatTokenLimit(model.maxTokens));
+  }
+
+  function commitModelLimits(model: ProviderModelSettings): void {
+    updateProviderModel(model.id, { contextWindow: parseTokenLimit(limitDraftContext), maxTokens: parseTokenLimit(limitDraftMaxTokens) });
+    setEditingModelId(undefined);
+  }
+
+  /** 该模型是否已有手动设置的限额（编辑按钮点亮提示）。 */
+  function hasModelLimitOverride(modelId: string): boolean {
+    const stored = selectedProvider?.models.find((item) => item.id === modelId);
+    return Boolean(stored && (stored.contextWindow !== undefined || stored.maxTokens !== undefined));
   }
 
   /** 全选/全取消：作用于当前搜索可见的模型（未过滤时即全部），OpenRouter 长列表先全取消再搜出想要的几个勾上。 */
@@ -914,7 +944,7 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
           <label>服务名称<input value={customName} placeholder="例如：公司中转站" onChange={(event) => setCustomName(event.target.value)} /></label>
           <div className="settings-action-row"><label>OpenAI 兼容接口地址<input value={customBaseUrl} placeholder="https://api.example.com/v1" onChange={(event) => setCustomBaseUrl(event.target.value)} /></label><button className="secondary-button" type="button" disabled={customModelFetchStatus === "loading" || !customBaseUrl.trim() || (!apiKey.trim() && !customProviderKeyConfigured)} onClick={() => void fetchModels()}><RefreshCw size={14} className={customModelFetchStatus === "loading" ? "spinning" : undefined} />{customModelFetchStatus === "loading" ? "拉取中" : "拉取模型"}</button></div>
         </>}
-        <div className="model-selection"><div className="model-selection-heading"><span>可用模型</span><small>左侧控制显示，右侧标记图片输入</small>{!isCustomProvider && <button className="secondary-button model-refresh-button" type="button" title="从服务商目录拉取最新模型列表" disabled={modelRefreshStatus === "loading" && modelRefreshProvider === provider} onClick={() => void refreshBuiltinModels()}><RefreshCw size={14} className={modelRefreshStatus === "loading" && modelRefreshProvider === provider ? "spinning" : undefined} />{modelRefreshStatus === "loading" && modelRefreshProvider === provider ? "拉取中" : "拉取模型"}</button>}</div>{providerModels.length > 0 && <div className="model-list-toolbar"><label className="checkbox-setting model-select-all" title={modelSearch.trim() ? "勾选或取消当前匹配到的模型" : "勾选或取消全部模型"}><input type="checkbox" checked={allVisibleModelsEnabled} disabled={visibleProviderModels.length === 0} ref={(el) => { if (el) el.indeterminate = !allVisibleModelsEnabled && someVisibleModelsEnabled; }} onChange={(event) => setAllVisibleModelsEnabled(event.target.checked)} />全选</label><small className="model-enabled-count">已启用 {enabledProviderModels.length}/{providerModels.length}</small>{providerModels.length > 8 && <div className="model-search-box"><Search size={13} /><input value={modelSearch} placeholder="搜索模型名称或 ID" aria-label="搜索模型" onChange={(event) => setModelSearch(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) event.preventDefault(); }} /></div>}</div>}{!isCustomProvider && modelRefreshError && <p className="form-error model-refresh-error">{modelRefreshError}</p>}{!isCustomProvider && modelRefreshStatus === "success" && modelRefreshProvider === provider && <p className="form-hint model-refresh-hint">模型列表已更新</p>}{providerModels.length === 0 ? <p className="panel-empty">{isCustomProvider ? "请先拉取模型，或手动填写模型 ID" : "该服务商暂无可用模型，请先配置 API 密钥"}</p> : visibleProviderModels.length === 0 ? <p className="panel-empty">没有匹配「{modelSearch.trim()}」的模型</p> : visibleProviderModels.map((model) => <div className="model-option" key={model.id}><label className="checkbox-setting model-enabled-option"><input type="checkbox" checked={model.enabled !== false} onChange={(event) => { const next = event.target.checked; updateProviderModel(model.id, { enabled: next }); if (isCustomProvider && model.id === customModelId && !next) setCustomModelId(providerModels.find((item) => item.id !== model.id && item.enabled !== false)?.id ?? model.id); }} /><span><strong>{model.name}</strong><small>{model.id}</small></span></label><label className="checkbox-setting model-image-option" title={isCustomProvider ? "允许向此模型发送图片" : "手动标记该模型是否支持图片输入：目录元数据滞后或缺失时以这里的勾选为准"}><input type="checkbox" checked={model.imageInput === true} onChange={(event) => updateProviderModel(model.id, { imageInput: event.target.checked })} />图片输入</label></div>)}</div>
+        <div className="model-selection"><div className="model-selection-heading"><span>可用模型</span><small>左侧控制显示，右侧标记图片输入</small>{!isCustomProvider && <button className="secondary-button model-refresh-button" type="button" title="从服务商目录拉取最新模型列表" disabled={modelRefreshStatus === "loading" && modelRefreshProvider === provider} onClick={() => void refreshBuiltinModels()}><RefreshCw size={14} className={modelRefreshStatus === "loading" && modelRefreshProvider === provider ? "spinning" : undefined} />{modelRefreshStatus === "loading" && modelRefreshProvider === provider ? "拉取中" : "拉取模型"}</button>}</div>{providerModels.length > 0 && <div className="model-list-toolbar"><label className="checkbox-setting model-select-all" title={modelSearch.trim() ? "勾选或取消当前匹配到的模型" : "勾选或取消全部模型"}><input type="checkbox" checked={allVisibleModelsEnabled} disabled={visibleProviderModels.length === 0} ref={(el) => { if (el) el.indeterminate = !allVisibleModelsEnabled && someVisibleModelsEnabled; }} onChange={(event) => setAllVisibleModelsEnabled(event.target.checked)} />全选</label><small className="model-enabled-count">已启用 {enabledProviderModels.length}/{providerModels.length}</small>{providerModels.length > 8 && <div className="model-search-box"><Search size={13} /><input value={modelSearch} placeholder="搜索模型名称或 ID" aria-label="搜索模型" onChange={(event) => setModelSearch(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) event.preventDefault(); }} /></div>}</div>}{!isCustomProvider && modelRefreshError && <p className="form-error model-refresh-error">{modelRefreshError}</p>}{!isCustomProvider && modelRefreshStatus === "success" && modelRefreshProvider === provider && <p className="form-hint model-refresh-hint">模型列表已更新</p>}{providerModels.length === 0 ? <p className="panel-empty">{isCustomProvider ? "请先拉取模型，或手动填写模型 ID" : "该服务商暂无可用模型，请先配置 API 密钥"}</p> : visibleProviderModels.length === 0 ? <p className="panel-empty">没有匹配「{modelSearch.trim()}」的模型</p> : visibleProviderModels.map((model) => <div className="model-option" key={model.id}><label className="checkbox-setting model-enabled-option"><input type="checkbox" checked={model.enabled !== false} onChange={(event) => { const next = event.target.checked; updateProviderModel(model.id, { enabled: next }); if (isCustomProvider && model.id === customModelId && !next) setCustomModelId(providerModels.find((item) => item.id !== model.id && item.enabled !== false)?.id ?? model.id); }} /><span><strong>{model.name}</strong><small>{model.id}</small></span></label><label className="checkbox-setting model-image-option" title={isCustomProvider ? "允许向此模型发送图片" : "手动标记该模型是否支持图片输入：目录元数据滞后或缺失时以这里的勾选为准"}><input type="checkbox" checked={model.imageInput === true} onChange={(event) => updateProviderModel(model.id, { imageInput: event.target.checked })} />图片输入</label><button className={hasModelLimitOverride(model.id) ? "icon-button model-edit-limits active" : "icon-button model-edit-limits"} type="button" title={editingModelId === model.id ? "收起限额编辑" : "修正上下文窗口与最大输出（服务商标错时手动覆盖）"} aria-expanded={editingModelId === model.id} onClick={() => beginEditModelLimits(model)}><Pencil size={13} /></button>{editingModelId === model.id && <div className="model-limits-editor"><label>上下文窗口<input inputMode="numeric" autoComplete="off" value={limitDraftContext} placeholder={typeof model.contextWindow === "number" ? String(model.contextWindow) : "如 128k 或 128000"} onChange={(event) => setLimitDraftContext(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commitModelLimits(model); } }} /><small>tokens</small></label><label>最大输出<input inputMode="numeric" autoComplete="off" value={limitDraftMaxTokens} placeholder={typeof model.maxTokens === "number" ? String(model.maxTokens) : "如 16k 或 16384"} onChange={(event) => setLimitDraftMaxTokens(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commitModelLimits(model); } }} /><small>tokens</small></label><div className="model-limits-actions"><button className="secondary-button" type="button" onClick={() => { setLimitDraftContext(""); setLimitDraftMaxTokens(""); }}>清空</button><button className="primary-button" type="button" onClick={() => commitModelLimits(model)}>完成</button></div><p className="model-limits-hint">留空后点完成 = 清除手动设置，回退目录值；最后点下方「保存设置」持久化。</p></div>}</div>)}</div>
         {isCustomProvider && providerModels.length === 0 && customModelId && <label className="checkbox-setting"><input type="checkbox" checked={imageInputOverride ?? false} onChange={(event) => setImageInputOverride(event.target.checked)} />支持图片输入（手动覆盖推断）</label>}
         {providerModels.length > 0 && enabledProviderModels.length === 0 && <p className="form-error">请至少勾选一个模型</p>}
         {isCustomProvider && customModelFetchError && <p className="form-error">{customModelFetchError}</p>}

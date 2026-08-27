@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
 import {
   createAgentSession,
   DefaultResourceLoader,
@@ -33,6 +33,8 @@ export interface SubagentContext {
   thinkingLevel: ThinkingLevel;
   accessMode: AccessMode;
   model: { provider: string; id: string };
+  /** 将目录 Model 交给子代理前的变换钩子（主进程用来套 token-limit 覆盖）。 */
+  transformModel?: (model: Model<Api>) => Model<Api>;
   parentSessionId?: string;
   /** Route risky tool calls from the child through the same permission broker. */
   requestPermission(toolName: string, args: Record<string, unknown>, toolCallId: string): Promise<PermissionDecision>;
@@ -113,6 +115,7 @@ async function runDelegation(ctx: SubagentContext, params: { goal?: unknown; rol
   const modelTarget = modelIdRaw ? parseModelId(modelIdRaw, ctx.model) : ctx.model;
   const childModel = ctx.modelRuntime.getModel(modelTarget.provider, modelTarget.id);
   if (!childModel) throw new Error(`子代理模型不可用：${modelTarget.provider}/${modelTarget.id}`);
+  const resolvedChildModel = ctx.transformModel ? ctx.transformModel(childModel) : childModel;
 
   const delegationsDir = join(ctx.agentDir, "chatanytime-sessions", ctx.agent.id, "delegations");
   const sessionManager = SessionManager.create(ctx.workspace, delegationsDir);
@@ -132,7 +135,7 @@ async function runDelegation(ctx: SubagentContext, params: { goal?: unknown; rol
   const { session: child } = await createAgentSession({
     cwd: ctx.workspace,
     modelRuntime: ctx.modelRuntime,
-    model: childModel,
+    model: resolvedChildModel,
     thinkingLevel: ctx.thinkingLevel,
     sessionManager,
     settingsManager,

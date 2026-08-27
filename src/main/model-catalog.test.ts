@@ -95,4 +95,26 @@ describe("imageInputOverride", () => {
     expect(imageInputOverride({ provider: "zai-coding-cn", id: "missing" }, providers)).toBeUndefined();
     expect(imageInputOverride({}, providers)).toBeUndefined();
   });
+
+  it("pushes effective token limits (user override first, catalog value otherwise)", () => {
+    // 目录原值直接下发；用户手动修正后以修正值为准（设置页编辑框回显的口径）。
+    const withLimits = [
+      ...catalog,
+      { provider: "openrouter", id: "x/limited", name: "Limited", input: ["text"] as ("text" | "image")[], contextWindow: 65536, maxTokens: 8192 }
+    ];
+    const providers: ProviderSettings[] = [{
+      id: "openrouter",
+      name: "OpenRouter",
+      baseUrl: "",
+      custom: false,
+      models: [{ id: "openai/gpt-4o", name: "GPT-4o", contextWindow: 400000 }]
+    }];
+    const options = buildCatalogModels(withLimits, providers, new Set());
+    expect(options[0]).toMatchObject({ id: "openai/gpt-4o", contextWindow: 400000 });
+    expect(options[0]!.maxTokens).toBeUndefined();
+    expect(options.find((model) => model.id === "x/limited")).toMatchObject({ contextWindow: 65536, maxTokens: 8192 });
+    // 无限额信息的条目不携带这两个字段。
+    const bare = options.find((model) => model.id === "claude-sonnet-4");
+    expect(bare).not.toHaveProperty("contextWindow");
+  });
 });
