@@ -1302,7 +1302,13 @@ export function ConversationPane({
   const headerTiming = isGenerating && activeTurnTiming ? formatDuration(activeTurnTiming.startedAt, now) : undefined;
 
   return (
-    <section className={`conversation-pane${compact ? " pane-compact" : ""}`} data-pane="conversation" data-pane-active={focused || undefined} onPointerDownCapture={onFocus ? () => onFocus() : undefined}>
+    <section className={`conversation-pane${compact ? " pane-compact" : ""}`} data-pane="conversation" data-pane-active={focused || undefined} onPointerDownCapture={onFocus ? (event) => {
+      // 关闭按钮点击不应先聚焦激活该格：关闭动作与「点击即聚焦」解耦。
+      // 否则关闭非焦点格会先 focusPane（异步 session.open 激活它）再 removePane，
+      // 产生两次激活竞态，用户会感知为「关错格」。最大化按钮仍要聚焦（用户想专注看它）。
+      if ((event.target as Element).closest('[data-control="pane-close"]')) return;
+      onFocus();
+    } : undefined}>
       {compact && (
         <header className="split-pane-header">
           <span className="split-pane-title" title={title ?? data.sessionId ?? ""}>
