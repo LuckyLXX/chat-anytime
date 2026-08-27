@@ -593,10 +593,9 @@ export function ConversationPane({
   const composerRef = useRef<HTMLFormElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
-  // 单窗口（compact=false）默认粘底：切会话/新消息自动跟到最新。
-  // 分屏格子（compact=true）默认不粘底：打开时停在历史顶部，不做“从头滚到尾部”
-  // 的自动滚动；用户滚到底部后（stickToBottom 置真）才跟随增量新消息。
-  const stickToBottomRef = useRef(!compact);
+  // 默认粘底：单窗口切会话、分屏格子打开都直接位于底部（最新消息），保持与
+  // 单窗口一致；用户上滚历史时 stickToBottom 置假、停止跟随，滚到底即恢复。
+  const stickToBottomRef = useRef(true);
   const previousSessionIdRef = useRef<string | undefined>(sessionId);
   const previousDraftSessionIdRef = useRef<string | undefined>(sessionId);
   const inputRef = useRef(input);
@@ -786,8 +785,10 @@ export function ConversationPane({
     // Instant scroll while busy: streaming fires frequent updates, and smooth
     // scrolling on every frame stacks competing animations and janks. Reserve
     // smooth scrolling for the occasional new message when idle.
-    timeline.scrollTo({ top: timeline.scrollHeight, behavior: data.busy ? "auto" : "smooth" });
-  }, [data.messages, data.busy, data.sessionId, sessionId]);
+    // 分屏格子（compact）数据更新一律瞬跳到底（auto）：它打开/水合时自带一次大的
+    // 平滑滚动，正是“从头滚到尾部”动画的来源；单窗口 idle 则保留 smooth。
+    timeline.scrollTo({ top: timeline.scrollHeight, behavior: data.busy || compact ? "auto" : "smooth" });
+  }, [data.messages, data.busy, data.sessionId, sessionId, compact]);
 
   useEffect(() => {
     if (!data.busy) setLocalTurn(undefined);
