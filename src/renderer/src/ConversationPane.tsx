@@ -596,7 +596,10 @@ export function ConversationPane({
   // 默认粘底：单窗口切会话、分屏格子打开都直接位于底部（最新消息），保持与
   // 单窗口一致；用户上滚历史时 stickToBottom 置假、停止跟随，滚到底即恢复。
   const stickToBottomRef = useRef(true);
-  const previousSessionIdRef = useRef<string | undefined>(sessionId);
+  // 初始 undefined：任何新挂载（分屏格子初次、分屏回归单窗口、应用启动）首次都
+  // 按「会话切换」处理，直接 auto 瞬跳到底部（无平滑滚动动画）。若初始等于 sessionId，
+  // 新挂载会走 idle 的 smooth 滚动，正是「从顶滚到底部」动画的来源。
+  const previousSessionIdRef = useRef<string | undefined>(undefined);
   const previousDraftSessionIdRef = useRef<string | undefined>(sessionId);
   const inputRef = useRef(input);
   inputRef.current = input;
