@@ -803,7 +803,9 @@ export type RuntimeCommand =
   | { type: "workspace.open"; path: string }
   | { type: "workspace.remove"; workspace: string }
   | { type: "session.new"; workspace?: string }
-  | { type: "session.open"; path: string; workspace?: string }
+  /** activate=false（分屏启动恢复的背景格）：创建 record 但不激活——全局镜像
+   * 与 state 通道保持焦点格，格子数据走 session.state（watch 已先行排队）。 */
+  | { type: "session.open"; path: string; workspace?: string; activate?: boolean }
   | { type: "session.rename"; path: string; title: string }
   | { type: "session.pin"; path: string; pinned: boolean }
   | { type: "session.delete"; path: string }

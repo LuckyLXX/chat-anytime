@@ -1428,7 +1428,7 @@ function sessionReadyStatus(hasModel: boolean, usedFallback: boolean): string {
  * - otherwise (explicit sessionManager, or agent.save's config-apply rebuild)
  *   the record is rebuilt over the same history.
  */
-async function createSession(sessionManager?: SessionManager, options: { reactivate?: boolean } = {}): Promise<void> {
+async function createSession(sessionManager?: SessionManager, options: { reactivate?: boolean; skipActivate?: boolean } = {}): Promise<void> {
   if (!workspace || !modelRuntime || !currentAgent) return;
   // 工作区可能已切换（workspace.open / session.*）：先重读双作用域钩子配置。
   refreshHooksConfig();
@@ -1722,6 +1722,16 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   if (pendingWatchSessions.delete(result.session.sessionId)) {
     renderedSessions.add(result.session.sessionId);
   }
+  // 背景格（skipActivate，session.open activate:false）：不激活、不动全局
+  // 镜像（workspace/model/todo/memory 保持焦点格），watch 排队已在上面补挂，
+  // 立即推一帧水合让格子显示历史。
+  if (options.skipActivate) {
+    emitPaneStateFor(record);
+    if (sessionsPromise) await sessionsPromise;
+    ensureSessionInList(record);
+    emitState();
+    return;
+  }
   activate(record);
   if (sessionsPromise) {
     // First list (app start): wait so the sidebar is populated on the first emit.
@@ -1929,7 +1939,21 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       const discovered = SessionManager.open(target);
       const sessionWorkspace = discovered.getCwd();
       if (!sessionWorkspace) throw new Error("会话缺少工作区信息");
-      workspace = resolve(sessionWorkspace);
+      const recordWorkspace = resolve(sessionWorkspace);
+      // activate:false（分屏启动恢复的背景格）：创建 record 但不激活，全局
+      // workspace 镜像与 state 通道保持焦点格，会话数据走 session.state。
+      // sessionRoot 按 record 自己的工作区计算，不经过全局 workspace。
+      if (command.activate === false) {
+        const live = liveSessions.get(discovered.getSessionId());
+        if (live) break; // 已 live：无需重建，也不激活
+        const backgroundRoot = currentAgent ? agentWorkspaceSessionDir(getAgentDir(), currentAgent.id, recordWorkspace) : undefined;
+        if (!backgroundRoot || (resolve(dirname(target)).toLowerCase() !== resolve(backgroundRoot).toLowerCase() && resolve(dirname(target)).toLowerCase() !== resolve(root).toLowerCase())) {
+          throw new Error("会话路径与工作区不匹配");
+        }
+        await createSession(SessionManager.open(target, backgroundRoot, recordWorkspace), { skipActivate: true });
+        break;
+      }
+      workspace = recordWorkspace;
       touchRecentWorkspace(workspace);
       const sessionRoot = workspaceSessionDir();
       if (!sessionRoot || (resolve(dirname(target)).toLowerCase() !== resolve(sessionRoot).toLowerCase() && resolve(dirname(target)).toLowerCase() !== resolve(root).toLowerCase())) {

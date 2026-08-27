@@ -1495,22 +1495,30 @@ export function App(): ReactNode {
     draftsRef.current.clear();
   }, [snapshot.agentId]);
 
-  /** 启动恢复分屏：会话列表就绪后逐格打开（焦点格最后激活，保证它成为激活会话），
-   *  watch effect 随每次激活重跑，先前格子逐个进入 watched 推送。 */
+  /** 启动恢复分屏：会话列表就绪后先打开焦点格（用户注视的画面最先出现，不排
+   *  在 N-1 个背景会话构建之后），再逐个以 activate:false 打开背景格（创建
+   *  record 但不激活，全局镜像保持焦点格）。背景格的 session.watch 已由 watch
+   *  effect 先行发出（主进程 pendingWatchSessions 排队，创建即补水合帧）。 */
   const splitRestoreDoneRef = useRef(false);
   useEffect(() => {
     if (splitRestoreDoneRef.current || !ready || !splitTree || snapshot.sessions.length === 0) return;
     splitRestoreDoneRef.current = true;
-    const ordered = [
-      ...paneIds.filter((id) => id !== focusedPaneId),
-      ...(focusedPaneId && paneIds.includes(focusedPaneId) ? [focusedPaneId] : [])
-    ];
+    const focused = focusedPaneId && paneIds.includes(focusedPaneId) ? focusedPaneId : paneIds[0];
+    const background = paneIds.filter((id) => id !== focused);
     void (async () => {
-      for (const id of ordered) {
+      const focusedItem = snapshot.sessions.find((summary) => summary.id === focused);
+      if (focusedItem) {
+        try {
+          await window.piDesktop.send({ type: "session.open", path: focusedItem.path, workspace: focusedItem.workspace });
+        } catch {
+          /* 焦点格失败不阻断背景格恢复 */
+        }
+      }
+      for (const id of background) {
         const item = snapshot.sessions.find((summary) => summary.id === id);
         if (!item) continue;
         try {
-          await window.piDesktop.send({ type: "session.open", path: item.path, workspace: item.workspace });
+          await window.piDesktop.send({ type: "session.open", path: item.path, workspace: item.workspace, activate: false });
         } catch {
           /* 单格失败不阻断其余格子 */
         }
