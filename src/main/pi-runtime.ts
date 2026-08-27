@@ -555,6 +555,18 @@ function resolveTargetRecord(sessionId: string | undefined): SessionRuntimeRecor
   return record;
 }
 
+/**
+ * 传输层 tool 输出字符上限：渲染端只做截断展示（20K/60K 两档），超长输出
+ * 不必整份过 IPC——record.executions 保留原文（主进程还要从输出解析产物路径），
+ * 仅在构建快照时截断。
+ */
+const MAX_TRANSFERRED_OUTPUT_CHARS = 60_000;
+
+function truncateTransferredOutput(output: string | undefined): string | undefined {
+  if (output === undefined || output.length <= MAX_TRANSFERRED_OUTPUT_CHARS) return output;
+  return `${output.slice(0, MAX_TRANSFERRED_OUTPUT_CHARS)}\n…（输出过长，已截断显示）`;
+}
+
 /** 会话级字段构建（snapshot 与分屏 session.state 共用）：全部来自该 record。 */
 function paneSnapshotFrom(record: SessionRuntimeRecord): SessionPaneSnapshot {
   const session = record.session;
@@ -578,7 +590,10 @@ function paneSnapshotFrom(record: SessionRuntimeRecord): SessionPaneSnapshot {
     contextUsage: snapshotContextUsage(record),
     planMode: record.planState.enabled,
     messages,
-    executions: [...record.executions.values()]
+    executions: [...record.executions.values()].map((execution) => {
+      const output = truncateTransferredOutput(execution.output);
+      return output === execution.output ? execution : { ...execution, output };
+    })
   };
 }
 

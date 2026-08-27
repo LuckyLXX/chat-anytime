@@ -34,6 +34,29 @@ function queuedMessagesEqual(left: RuntimeSnapshot["queuedMessages"], right: Run
 }
 
 /**
+ * 快照合并的 executions 身份保留：主进程每帧都 spread 出新数组，若直接透传，
+ * memo 化的消息气泡（executions 是其 props）在流式期间会每帧全量重渲染。
+ * 内容未变时复用旧数组引用。args 在 tool_execution_start 后内容恒定，不参与
+ * 比较（深度比较大且无必要）；output 已由主进程截断到 60K，字符串比较有界。
+ */
+function mergeExecutionsPreservingIdentity(previous: RuntimeSnapshot["executions"], incoming: RuntimeSnapshot["executions"]): RuntimeSnapshot["executions"] {
+  if (previous === incoming) return previous;
+  if (previous.length !== incoming.length) return incoming;
+  const equal = previous.every((item, index) => {
+    const other = incoming[index];
+    if (!other
+      || item.id !== other.id || item.name !== other.name || item.status !== other.status
+      || item.startedAt !== other.startedAt || item.completedAt !== other.completedAt
+      || item.output !== other.output || item.patch !== other.patch
+      || item.changedFile?.relativePath !== other.changedFile?.relativePath) return false;
+    const leftFiles = item.changedFiles ?? [];
+    const rightFiles = other.changedFiles ?? [];
+    return leftFiles.length === rightFiles.length && leftFiles.every((file, fileIndex) => file.relativePath === rightFiles[fileIndex]?.relativePath);
+  });
+  return equal ? previous : incoming;
+}
+
+/**
  * 当前激活会话应展示的权限请求。store 的 permissions 是跨会话累积的全局数组，
  * 若不做会话过滤，切换到新会话时仍会取出上一个（后台/parked）会话待决的权限弹窗。
  * 这里按请求携带的 principal.sessionId 匹配 snapshot.sessionId；非激活会话的请求
@@ -172,6 +195,22 @@ export function dropPaneStates(sessionIds: string[]): void {
   });
 }
 
+/**
+ * 修剪 parkedPanels 留档：state 通道在每次焦点切换时无条件写入旧会话的完整
+ * 快照（防分屏格子闪烁），但单窗口模式下切过的会话永远不会再被读取——没有
+ * 这道修剪，切 N 个话题就永久保留 N 份完整消息数组（含 base64 图片）。
+ * 由 App 的 watch 同步 effect 在格子集合稳定后调用，keep = 当前格子集合。
+ */
+export function pruneParkedPanels(keepIds: ReadonlySet<string>): void {
+  useDesktopStore.setState((state) => {
+    const stale = Object.keys(state.parkedPanels).filter((id) => !keepIds.has(id));
+    if (stale.length === 0) return state;
+    const nextParked = { ...state.parkedPanels };
+    for (const id of stale) delete nextParked[id];
+    return { parkedPanels: nextParked };
+  });
+}
+
 export const useDesktopStore = create<DesktopState>((set, get) => ({
   ready: false,
   snapshot: emptySnapshot,
@@ -215,8 +254,9 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
           const incoming = message.snapshot;
           const previous = state.snapshot;
           const { messages: mergedMessages, changed } = mergeMessagesPreservingIdentity(previous.messages, incoming.messages);
+          const mergedExecutions = mergeExecutionsPreservingIdentity(previous.executions, incoming.executions);
           if (!changed && previous.busy === incoming.busy && previous.status === incoming.status &&
-              previous.turnTiming === incoming.turnTiming && previous.executions === incoming.executions &&
+              previous.turnTiming === incoming.turnTiming && previous.executions === mergedExecutions &&
               previous.sessions === incoming.sessions && previous.recentWorkspaces === incoming.recentWorkspaces &&
               previous.model === incoming.model &&
               previous.sessionId === incoming.sessionId && previous.sessionFile === incoming.sessionFile &&
@@ -233,7 +273,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
           const parkedPanels = previous.sessionId && previous.sessionId !== incoming.sessionId
             ? { ...state.parkedPanels, [previous.sessionId]: previous satisfies SessionPaneSnapshot }
             : state.parkedPanels;
-          return { snapshot: { ...incoming, messages: mergedMessages }, parkedPanels };
+          return { snapshot: { ...incoming, messages: mergedMessages, executions: mergedExecutions }, parkedPanels };
         });
         break;
       case "session.state":
@@ -247,15 +287,16 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
           const previous = state.paneStates[sessionId];
           if (previous) {
             const { messages: mergedMessages, changed } = mergeMessagesPreservingIdentity(previous.messages, incoming.messages);
+            const mergedExecutions = mergeExecutionsPreservingIdentity(previous.executions, incoming.executions);
             if (!changed && previous.busy === incoming.busy && previous.status === incoming.status &&
-                previous.turnTiming === incoming.turnTiming && previous.executions === incoming.executions &&
+                previous.turnTiming === incoming.turnTiming && previous.executions === mergedExecutions &&
                 previous.model === incoming.model && previous.workspace === incoming.workspace &&
                 queuedMessagesEqual(previous.queuedMessages, incoming.queuedMessages) &&
                 previous.thinkingLevel === incoming.thinkingLevel && previous.planMode === incoming.planMode &&
                 previous.contextUsage === incoming.contextUsage) {
               return state;
             }
-            return { paneStates: { ...state.paneStates, [sessionId]: { ...incoming, messages: mergedMessages } } };
+            return { paneStates: { ...state.paneStates, [sessionId]: { ...incoming, messages: mergedMessages, executions: mergedExecutions } } };
           }
           return { paneStates: { ...state.paneStates, [sessionId]: incoming } };
         });

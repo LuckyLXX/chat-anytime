@@ -72,7 +72,7 @@ import { groupSessionsByWorkspace, workspaceKey } from "./lib/session-groups";
 import { filterProviderModels, setProviderModelsEnabled, buildBuiltinProviderEntry, selectableCatalogModels, parseTokenLimit, formatTokenLimit } from "./lib/model-list";
 import { CSS_URL_PATTERN, createThemeAssetUrls, isExternalThemeReference, normalizeThemeAssetReference, resolveThemeAssets } from "./lib/theme-assets";
 import { THEME_PRESETS, bubbleOpacityCss, collectThemeLayers, panelOpacityCss, scopeCustomThemeCss, scopeCustomThemeCssForPreview, themePresetCss, themePreviewCss, themeWallpaperOpacity, wallpaperOpacityCss } from "./lib/theme-presets";
-import { panePermissionRequest, paneQuestionRequest, dropPaneStates, useDesktopStore } from "./store";
+import { panePermissionRequest, paneQuestionRequest, dropPaneStates, pruneParkedPanels, useDesktopStore } from "./store";
 import { ConversationPane, type PaneComposerApi, type PaneDraftStore } from "./ConversationPane";
 import { SplitLayout } from "./SplitLayout";
 import {
@@ -1367,14 +1367,22 @@ export function App(): ReactNode {
     }
     for (const id of removed) registered.delete(id);
     if (removed.length > 0) dropPaneStates(removed);
+    // 单窗口（无格子）下 state 通道每次切会话都会写 parkedPanels 留档，而这些
+    // 条目永远不会被读取——按当前格子集合修剪，防止内存无界增长。
+    pruneParkedPanels(panes);
   }, [paneIds, snapshot.sessionId, ready]);
 
-  /** 分屏布局持久化（localStorage，重启恢复；失效格子由修剪 effect 清理）。 */
+  /** 分屏布局持久化（localStorage，重启恢复；失效格子由修剪 effect 清理）。
+   *  尾随防抖：拖动分隔条时布局树每个 pointermove 帧都在变，同步写盘既卡主线程
+   *  又磨损存储；停留 400ms 后落一次最终值。 */
   useEffect(() => {
-    try {
-      if (splitTree && focusedPaneId) window.localStorage.setItem("pidesktop.split-layout", JSON.stringify({ tree: splitTree, focusedPane: focusedPaneId }));
-      else window.localStorage.removeItem("pidesktop.split-layout");
-    } catch { /* storage 可能不可用 */ }
+    const timer = window.setTimeout(() => {
+      try {
+        if (splitTree && focusedPaneId) window.localStorage.setItem("pidesktop.split-layout", JSON.stringify({ tree: splitTree, focusedPane: focusedPaneId }));
+        else window.localStorage.removeItem("pidesktop.split-layout");
+      } catch { /* storage 可能不可用 */ }
+    }, 400);
+    return () => window.clearTimeout(timer);
   }, [splitTree, focusedPaneId]);
 
   /** 会话消失（删除/工作区移除）时修剪格子；焦点格被剪则回退到首个叶子。 */

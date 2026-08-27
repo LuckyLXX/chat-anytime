@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import type { PermissionRequest, QuestionRequest, RuntimeSnapshot, Todo } from "../../shared/protocol.js";
-import { currentPermissionRequest, currentQuestionRequest, dropPaneStates, useDesktopStore } from "./store.js";
+import type { PermissionRequest, QuestionRequest, RuntimeSnapshot, SessionPaneSnapshot, ToolExecution, Todo } from "../../shared/protocol.js";
+import { currentPermissionRequest, currentQuestionRequest, dropPaneStates, pruneParkedPanels, useDesktopStore } from "./store.js";
 
 function permission(id: string, sessionId: string): PermissionRequest {
   return {
@@ -11,6 +11,24 @@ function permission(id: string, sessionId: string): PermissionRequest {
     risk: "command",
     principal: { kind: "root-agent", sessionId, toolCallId: `tool-${id}` }
   };
+}
+
+const emptySnapshot: RuntimeSnapshot = {
+  agentId: "default",
+  agentName: "默认助手",
+  thinkingLevel: "medium",
+  busy: false,
+  status: "",
+  queuedMessages: [],
+  messages: [],
+  executions: [],
+  backgroundProcesses: [],
+  sessions: [],
+  recentWorkspaces: []
+};
+
+function snap(sessionId: string, workspace = `/w/${sessionId}`): RuntimeSnapshot {
+  return { ...emptySnapshot, sessionId, sessionFile: `/p/${sessionId}.jsonl`, workspace };
 }
 
 describe("desktop permission queue", () => {
@@ -77,24 +95,6 @@ describe("desktop permission queue", () => {
 });
 
 describe("split-pane parked data cache", () => {
-  const emptySnapshot: RuntimeSnapshot = {
-    agentId: "default",
-    agentName: "默认助手",
-    thinkingLevel: "medium",
-    busy: false,
-    status: "",
-    queuedMessages: [],
-    messages: [],
-    executions: [],
-    backgroundProcesses: [],
-    sessions: [],
-    recentWorkspaces: []
-  };
-
-  function snap(sessionId: string, workspace = `/w/${sessionId}`): RuntimeSnapshot {
-    return { ...emptySnapshot, sessionId, sessionFile: `/p/${sessionId}.jsonl`, workspace };
-  }
-
   beforeEach(() => {
     useDesktopStore.setState({ snapshot: emptySnapshot, paneStates: {}, parkedPanels: {} });
   });
@@ -128,6 +128,77 @@ describe("split-pane parked data cache", () => {
     const parked = useDesktopStore.getState().parkedPanels;
     expect(parked["a"]).toBeUndefined();
     expect(parked["b"]?.sessionId).toBe("b");
+  });
+
+  it("pruneParkedPanels 清掉不在格子集合里的留档（单窗口切话题不积累），保留仍在格子里的", () => {
+    const state = useDesktopStore.getState();
+    state.handleRuntimeMessage({ type: "state", snapshot: snap("a") });
+    state.handleRuntimeMessage({ type: "state", snapshot: snap("b") });
+    state.handleRuntimeMessage({ type: "state", snapshot: snap("c") });
+    pruneParkedPanels(new Set(["b"]));
+    let parked = useDesktopStore.getState().parkedPanels;
+    expect(parked["a"]).toBeUndefined();
+    expect(parked["b"]?.sessionId).toBe("b");
+    expect(parked["c"]).toBeUndefined();
+    // 空集合（单窗口）全部清空。
+    pruneParkedPanels(new Set());
+    parked = useDesktopStore.getState().parkedPanels;
+    expect(Object.keys(parked)).toEqual([]);
+  });
+});
+
+describe("snapshot merge execution identity", () => {
+  function execution(id: string, output: string): ToolExecution {
+    return { id, name: "bash", args: { command: "ls" }, status: "completed", startedAt: 1, completedAt: 2, output };
+  }
+
+  function paneState(sessionId: string, executions: ToolExecution[]): SessionPaneSnapshot {
+    return { sessionId, thinkingLevel: "medium", busy: false, status: "", queuedMessages: [], messages: [], executions };
+  }
+
+  beforeEach(() => {
+    useDesktopStore.setState({ snapshot: { ...emptySnapshot, sessionId: "active" }, paneStates: {}, parkedPanels: {} });
+  });
+
+  it("session.state 内容未变（含全新 args 引用）时复用旧 executions 数组引用", () => {
+    const state = useDesktopStore.getState();
+    state.handleRuntimeMessage({ type: "session.state", snapshot: paneState("pane-1", [execution("t1", "out")]) });
+    const first = useDesktopStore.getState().paneStates["pane-1"]!;
+    // 主进程每帧 spread 新数组 + IPC 克隆出新 args 对象，内容相同。
+    state.handleRuntimeMessage({ type: "session.state", snapshot: paneState("pane-1", [{ ...execution("t1", "out"), args: { command: "ls" } }]) });
+    const second = useDesktopStore.getState().paneStates["pane-1"]!;
+    expect(second.executions).toBe(first.executions);
+  });
+
+  it("executions 完全相同的一帧不触发 store 更新（paneStates 引用不变）", () => {
+    const state = useDesktopStore.getState();
+    state.handleRuntimeMessage({ type: "session.state", snapshot: paneState("pane-1", [execution("t1", "out")]) });
+    const panesBefore = useDesktopStore.getState().paneStates;
+    state.handleRuntimeMessage({ type: "session.state", snapshot: paneState("pane-1", [{ ...execution("t1", "out"), args: { command: "ls" } }]) });
+    expect(useDesktopStore.getState().paneStates).toBe(panesBefore);
+  });
+
+  it("output 或状态变化时换新引用", () => {
+    const state = useDesktopStore.getState();
+    state.handleRuntimeMessage({ type: "session.state", snapshot: paneState("pane-1", [execution("t1", "out-1")]) });
+    const first = useDesktopStore.getState().paneStates["pane-1"]!;
+    state.handleRuntimeMessage({ type: "session.state", snapshot: paneState("pane-1", [execution("t1", "out-2")]) });
+    const second = useDesktopStore.getState().paneStates["pane-1"]!;
+    expect(second.executions).not.toBe(first.executions);
+    expect(second.executions[0]?.output).toBe("out-2");
+    state.handleRuntimeMessage({ type: "session.state", snapshot: paneState("pane-1", [execution("t1", "out-2"), execution("t2", "")]) });
+    const third = useDesktopStore.getState().paneStates["pane-1"]!;
+    expect(third.executions).not.toBe(second.executions);
+    expect(third.executions).toHaveLength(2);
+  });
+
+  it("state 通道（激活会话）同样复用未变 executions 的数组引用", () => {
+    const state = useDesktopStore.getState();
+    state.handleRuntimeMessage({ type: "state", snapshot: { ...snap("active"), executions: [execution("t1", "out")] } });
+    const first = useDesktopStore.getState().snapshot;
+    state.handleRuntimeMessage({ type: "state", snapshot: { ...snap("active"), executions: [{ ...execution("t1", "out"), args: { command: "ls" } }] } });
+    const second = useDesktopStore.getState().snapshot;
+    expect(second.executions).toBe(first.executions);
   });
 });
 
