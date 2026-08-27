@@ -78,12 +78,17 @@ interface DesktopState {
   /** 分屏格子（watched 非激活会话）的会话级快照，按 sessionId 键控。 */
   paneStates: Record<string, SessionPaneSnapshot>;
   /**
-   * 焦点切换瞬间的单槽种子：旧激活会话刚变成 parked 格子时，主进程的
-   * session.state 水合帧还在路上（watch 补发需要一个 IPC 往返），先用
-   * 切换前最后一份完整快照渲染该格子，避免闪“正在载入会话”。真实的
-   * session.state 到达后写入 paneStates 接管；下一次切换覆盖本槽。
+   * 焦点切换留档的多槽缓存：旧激活会话刚变成 parked 格子时，主进程的
+   * session.state 水合帧还在路上（watch 补发需要一个 IPC 往返），先用切换
+   * 前最后一份完整快照渲染该格子，避免闪“正在载入会话”。真实的
+   * session.state 到达后写入 paneStates 接管。
+   * 用多槽而非单槽：三分屏下焦点在多个格子间切换，非“上一任”的格子也必须
+   * 兜得住，否则会一直被误渲染成“正在载入会话”（parkedSeed 旧实现只保
+   * 上一次被切走的格子，多格场景必然有格子漏兜）。key = sessionId，值 = 最近
+   * 一次完整快照；格子数上限 MAX_SPLIT_PANES(=4)，内存恒定有界，格子移除
+   * 时随 dropPaneStates 一并清理。
    */
-  parkedSeed?: { sessionId: string; data: SessionPaneSnapshot };
+  parkedPanels: Record<string, SessionPaneSnapshot>;
   models: ModelOption[];
   providers: ProviderOption[];
   resources: ResourceCatalog;
@@ -147,18 +152,23 @@ export function handleRuntimeMessage(message: RuntimeMessage): void {
   useDesktopStore.getState().handleRuntimeMessage(message);
 }
 
-/** 分屏格子移除（关闭/布局裁剪）后丢弃对应的 paneStates 缓存；再次 watch 会重新水合。 */
+/** 分屏格子移除（关闭/布局裁剪）后丢弃对应的 paneStates 与 parkedPanels 缓存；再次 watch 会重新水合。 */
 export function dropPaneStates(sessionIds: string[]): void {
   useDesktopStore.setState((state) => {
     let changed = false;
     const next = { ...state.paneStates };
+    const nextParked = { ...state.parkedPanels };
     for (const id of sessionIds) {
       if (next[id]) {
         delete next[id];
         changed = true;
       }
+      if (nextParked[id]) {
+        delete nextParked[id];
+        changed = true;
+      }
     }
-    return changed ? { paneStates: next } : state;
+    return changed ? { paneStates: next, parkedPanels: nextParked } : state;
   });
 }
 
@@ -166,6 +176,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   ready: false,
   snapshot: emptySnapshot,
   paneStates: {},
+  parkedPanels: {},
   models: [],
   providers: [],
   resources: emptyResources,
@@ -215,12 +226,14 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
             // so downstream useMemo/useEffect dependency checks stay no-ops.
             return state;
           }
-          // 焦点切换种子：旧激活会话的完整数据就在手上，同步转入 parkedSeed，
-          // 它若是一个分屏格子则立刻有内容可渲染（水合帧随后接管）。
-          const parkedSeed = previous.sessionId && previous.sessionId !== incoming.sessionId
-            ? { sessionId: previous.sessionId, data: previous satisfies SessionPaneSnapshot }
-            : state.parkedSeed;
-          return { snapshot: { ...incoming, messages: mergedMessages }, parkedSeed };
+          // 焦点切换留档：旧激活会话的完整数据就在手上，写入 parkedPanels[旧格]，
+          // 它若是分屏格子则立刻有内容可渲染（水合帧随后写入 paneStates 接管）。
+          // 多槽而非单槽：三分屏焦点在多格间切换时，非“上一任”的格子也有数据可
+          // 兜住，不会误显示“正在载入会话”。
+          const parkedPanels = previous.sessionId && previous.sessionId !== incoming.sessionId
+            ? { ...state.parkedPanels, [previous.sessionId]: previous satisfies SessionPaneSnapshot }
+            : state.parkedPanels;
+          return { snapshot: { ...incoming, messages: mergedMessages }, parkedPanels };
         });
         break;
       case "session.state":

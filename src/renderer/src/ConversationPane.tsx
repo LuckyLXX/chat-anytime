@@ -105,12 +105,13 @@ const emptyPaneData: SessionPaneSnapshot = {
 };
 
 function usePaneData(sessionId: string | undefined): PaneConversationData {
-  const selector = useCallback((state: { snapshot: RuntimeSnapshot; paneStates: Record<string, SessionPaneSnapshot>; parkedSeed?: { sessionId: string; data: SessionPaneSnapshot } }): PaneConversationData => {
+  const selector = useCallback((state: { snapshot: RuntimeSnapshot; paneStates: Record<string, SessionPaneSnapshot>; parkedPanels: Record<string, SessionPaneSnapshot> }): PaneConversationData => {
     if (sessionId === undefined || state.snapshot.sessionId === sessionId) return state.snapshot;
     if (state.paneStates[sessionId]) return state.paneStates[sessionId];
-    // 焦点刚切走：该会话的最后一份完整快照在 parkedSeed 里，
-    // 主进程的 session.state 水合帧到达前先用它渲染（零闪烁）。
-    if (state.parkedSeed?.sessionId === sessionId) return state.parkedSeed.data;
+    // 焦点刚切走：该会话最近一份完整快照在 parkedPanels 里，主进程的
+    // session.state 水合帧到达前先用它渲染（零闪烁）。多槽：三分屏里非
+    // “上一任”的格子也能兜住，不会被误渲染成“正在载入会话”。
+    if (state.parkedPanels[sessionId]) return state.parkedPanels[sessionId];
     return emptyPaneData;
   }, [sessionId]);
   return useDesktopStore(selector);

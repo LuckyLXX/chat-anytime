@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import type { PermissionRequest, QuestionRequest, Todo } from "../../shared/protocol.js";
-import { currentPermissionRequest, currentQuestionRequest, useDesktopStore } from "./store.js";
+import type { PermissionRequest, QuestionRequest, RuntimeSnapshot, Todo } from "../../shared/protocol.js";
+import { currentPermissionRequest, currentQuestionRequest, dropPaneStates, useDesktopStore } from "./store.js";
 
 function permission(id: string, sessionId: string): PermissionRequest {
   return {
@@ -73,6 +73,61 @@ describe("desktop permission queue", () => {
     expect(useDesktopStore.getState().modelRefreshStatus).toBe("success");
     expect(useDesktopStore.getState().modelRefreshError).toBeUndefined();
     expect(useDesktopStore.getState().modelRefreshProvider).toBe("deepseek");
+  });
+});
+
+describe("split-pane parked data cache", () => {
+  const emptySnapshot: RuntimeSnapshot = {
+    agentId: "default",
+    agentName: "默认助手",
+    thinkingLevel: "medium",
+    busy: false,
+    status: "",
+    queuedMessages: [],
+    messages: [],
+    executions: [],
+    backgroundProcesses: [],
+    sessions: [],
+    recentWorkspaces: []
+  };
+
+  function snap(sessionId: string, workspace = `/w/${sessionId}`): RuntimeSnapshot {
+    return { ...emptySnapshot, sessionId, sessionFile: `/p/${sessionId}.jsonl`, workspace };
+  }
+
+  beforeEach(() => {
+    useDesktopStore.setState({ snapshot: emptySnapshot, paneStates: {}, parkedPanels: {} });
+  });
+
+  it("焦点切换到 B 时，把旧激活格 A 的数据写入 parkedPanels[A]", () => {
+    const state = useDesktopStore.getState();
+    state.handleRuntimeMessage({ type: "state", snapshot: snap("a", "/w/a") });
+    state.handleRuntimeMessage({ type: "state", snapshot: snap("b", "/w/b") });
+    const parked = useDesktopStore.getState().parkedPanels;
+    expect(parked["a"]?.workspace).toBe("/w/a");
+    expect(parked["b"]).toBeUndefined(); // 当前激活格不应留档
+  });
+
+  it("三分屏焦点依次 A→B→C 后，同时保留 A 与 B（旧单槽会丢 A）", () => {
+    const state = useDesktopStore.getState();
+    state.handleRuntimeMessage({ type: "state", snapshot: snap("a") });
+    state.handleRuntimeMessage({ type: "state", snapshot: snap("b") });
+    state.handleRuntimeMessage({ type: "state", snapshot: snap("c") });
+    const parked = useDesktopStore.getState().parkedPanels;
+    expect(parked["a"]?.sessionId).toBe("a");
+    expect(parked["b"]?.sessionId).toBe("b");
+    expect(parked["c"]).toBeUndefined();
+  });
+
+  it("dropPaneStates 清理对应格的 parkedPanels，不影响其余格", () => {
+    const state = useDesktopStore.getState();
+    state.handleRuntimeMessage({ type: "state", snapshot: snap("a") });
+    state.handleRuntimeMessage({ type: "state", snapshot: snap("b") });
+    state.handleRuntimeMessage({ type: "state", snapshot: snap("c") });
+    dropPaneStates(["a"]);
+    const parked = useDesktopStore.getState().parkedPanels;
+    expect(parked["a"]).toBeUndefined();
+    expect(parked["b"]?.sessionId).toBe("b");
   });
 });
 
