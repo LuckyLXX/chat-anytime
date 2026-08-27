@@ -15,7 +15,7 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { BackgroundProcessRegistry, bashCommandsFromMessages, isBackgroundCommand } from "./background-processes.js";
-import { messageUuid } from "./message-identity.js";
+import { normalizeMessages, userMessageText } from "./message-normalize.js";
 import { applyModelOverrides as applyStoredModelOverrides, buildCatalogModels, imageInputOverride } from "./model-catalog.js";
 import type {
   AccessMode,
@@ -29,7 +29,6 @@ import type {
   HookSummary,
   McpServerSummary,
   MemoryTopic,
-  MessageBlock,
   ModelOption,
   PromptAttachment,
   ProviderModelSettings,
@@ -66,7 +65,7 @@ import { buildResourceCatalog } from "./resource-catalog.js";
 import { agentWorkspaceSessionDir, mergeSessionSummary, sessionListReadyFor } from "./session-scope.js";
 import { isDesktopConfiguredProvider } from "./model-catalog.js";
 import { isPositiveInt, mergeProviderModels } from "./settings.js";
-import { buildSkillPrompt, parseSkillPrompt, type SkillPromptDisplay } from "./skill-prompt.js";
+import { buildSkillPrompt, parseSkillPrompt } from "./skill-prompt.js";
 import {
   PI_DESKTOP_CONTROL_ENTRY_TYPE,
   restoreControlMessages,
@@ -214,25 +213,12 @@ let lastBackgroundDiscoveryAt = 0;
 // storms. State transitions that change busy/status/executions flush
 // immediately so the UI never lags on real lifecycle changes.
 const STREAM_FLUSH_INTERVAL_MS = 50;
+// 分屏格子（watched 非激活会话）的流式合帧间隔：后台格不是用户注视的主画面，
+// 10fps 足够；全量快照过 IPC 的成本随历史长度增长，放宽一倍换一半流量。
+// 生命周期转换仍立即 flush（与激活会话同节奏）。
+const PANE_STREAM_FLUSH_INTERVAL_MS = 100;
 let pendingFlushTimer: ReturnType<typeof setTimeout> | undefined;
 let hasPendingFlush = false;
-
-interface RuntimeCustomMessage {
-  role: "custom";
-  customType: string;
-  content: string | Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }>;
-  display: boolean;
-  details?: unknown;
-  timestamp: number;
-}
-
-function cloneProtocolValue(value: unknown): unknown {
-  try {
-    return structuredClone(value);
-  } catch {
-    return undefined;
-  }
-}
 
 function flushState(): void {
   pendingFlushTimer = undefined;
@@ -449,85 +435,6 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function userMessageText(message: AgentMessage): string {
-  if (message.role !== "user") return "";
-  const text = typeof message.content === "string" ? message.content : message.content.filter((block) => block.type === "text").map((block) => block.text).join("");
-  // The vision hint is model-directed transport, not user content: display and
-  // regenerate matching see the original text without it.
-  return runtimeVision.stripVisionHint(text);
-}
-
-function blocksFromMessage(message: AgentMessage, skillPrompt?: SkillPromptDisplay): MessageBlock[] {
-  if (message.role === "user") {
-    const user = message as UserMessage;
-    if (skillPrompt) {
-      const blocks: MessageBlock[] = skillPrompt.instructions ? [{ type: "text", text: skillPrompt.instructions }] : [];
-      if (typeof user.content !== "string") {
-        blocks.push(...user.content.filter((content) => content.type === "image").map((content) => ({ type: "image" as const, data: content.data, mimeType: content.mimeType })));
-      }
-      return blocks;
-    }
-    if (typeof user.content === "string") return [{ type: "text", text: runtimeVision.stripVisionHint(user.content) }];
-    // Attached images stay in the transcript (rendered here) even for text-only
-    // conversation models; the vision hint suffix is stripped from display.
-    const blocks = user.content.map((content) =>
-      content.type === "text"
-        ? { type: "text" as const, text: runtimeVision.stripVisionHint(content.text) }
-        : { type: "image" as const, data: content.data, mimeType: content.mimeType }
-    );
-    return blocks.filter((block) => block.type !== "text" || block.text.length > 0);
-  }
-
-  if (message.role === "custom") {
-    const custom = message as unknown as RuntimeCustomMessage;
-    if (typeof custom.content === "string") return [{ type: "text", text: custom.content }];
-    return custom.content.map((content) => content.type === "text"
-      ? { type: "text" as const, text: content.text }
-      : { type: "image" as const, data: content.data, mimeType: content.mimeType });
-  }
-
-  if (message.role !== "assistant") return [];
-  return (message as AssistantMessage).content.map((content) => {
-    if (content.type === "text") return { type: "text" as const, text: content.text };
-    if (content.type === "thinking") return { type: "thinking" as const, text: content.thinking };
-    return {
-      type: "tool-call" as const,
-      id: content.id,
-      name: content.name,
-      arguments: content.arguments
-    };
-  });
-}
-
-// Maps each Pi AgentMessage object to a stable uuid so a message keeps its
-// identity across the partial (streamingMessage) and final (committed into
-// session.state.messages) frames. Pi 每个流式事件都 spread 出新对象、提交时
-// 又是另一对象，但 timestamp/role/index 三者全帧一致，故用确定性 uuid
-// （message-identity.ts）；含自增序号的旧实现会让每帧 uuid 不同，渲染端
-// key 逐帧变化、气泡每帧重挂载闪烁。
-
-function normalizeMessages(messages: AgentMessage[], streamingMessage?: AgentMessage): ChatMessage[] {
-  const visible = messages.filter((message) => message.role === "user" || message.role === "assistant" || (message.role === "custom" && (message as unknown as RuntimeCustomMessage).display));
-  if (streamingMessage && streamingMessage.role === "assistant") {
-    const last = visible.at(-1);
-    if (last !== streamingMessage) visible.push(streamingMessage);
-  }
-  return visible.map((message, index) => {
-    const skillPrompt = message.role === "user" ? parseSkillPrompt(userMessageText(message)) : undefined;
-    return {
-      id: `${message.timestamp ?? 0}-${index}-${message.role}`,
-      uuid: messageUuid(message, index),
-      role: message.role === "custom" ? "extension" : message.role as "user" | "assistant",
-      timestamp: message.timestamp ?? Date.now(),
-      blocks: blocksFromMessage(message, skillPrompt),
-      extension: message.role === "custom" ? { customType: (message as unknown as RuntimeCustomMessage).customType, details: cloneProtocolValue((message as unknown as RuntimeCustomMessage).details) } : undefined,
-      skill: skillPrompt ? { name: skillPrompt.name } : undefined,
-      streaming: message === streamingMessage,
-      error: message.role === "assistant" ? (message as AssistantMessage).errorMessage : undefined
-    };
-  });
-}
-
 /** 快照的上下文占用：Pi 官方估算 + record 上的会话累计缓存命中率。 */
 function snapshotContextUsage(record: SessionRuntimeRecord | undefined): ContextUsage | undefined {
   if (!record) return undefined;
@@ -625,10 +532,10 @@ function snapshot(): RuntimeSnapshot {
 }
 
 /**
- * 推送一个分屏格子（watched 非激活会话）的会话级快照。节流节奏与主
- * snapshot 一致：immediate 生命周期转换立即 flush，流式 token 批量按
- * 50ms（20fps）合帧；定时器挂在 record 上，各格子互不影响。激活或未
- * watch 的记录是 no-op（激活会话走 state 通道）。
+ * 推送一个分屏格子（watched 非激活会话）的会话级快照。immediate 生命周期转换
+ * 立即 flush，流式 token 批量按 100ms（10fps）合帧（宽于激活会话的 50ms）；
+ * 定时器挂在 record 上，各格子互不影响。激活或未 watch 的记录是 no-op
+ * （激活会话走 state 通道）。
  */
 function schedulePaneEmit(record: SessionRuntimeRecord, immediate: boolean): void {
   if (record === activeRuntime || !renderedSessions.has(record.session.sessionId)) return;
@@ -644,7 +551,7 @@ function schedulePaneEmit(record: SessionRuntimeRecord, immediate: boolean): voi
   record.paneFlushTimer = setTimeout(() => {
     record.paneFlushTimer = undefined;
     post({ type: "session.state", snapshot: paneSnapshotFrom(record) });
-  }, STREAM_FLUSH_INTERVAL_MS);
+  }, PANE_STREAM_FLUSH_INTERVAL_MS);
 }
 
 /**

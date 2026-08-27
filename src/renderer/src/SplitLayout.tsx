@@ -1,4 +1,4 @@
-import { useRef, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { memo, useRef, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { clampRatio, type SplitNode } from "./lib/split-layout";
 
 /** 分隔条最小可拖半宽（px）：两侧格子都不小于此宽度。 */
@@ -21,7 +21,12 @@ export function SplitLayout({ node, renderLeaf, onRatioChange }: SplitLayoutProp
   return <SplitBranch node={node} path={[]} renderLeaf={renderLeaf} onRatioChange={onRatioChange} />;
 }
 
-function SplitBranch({ node, path, renderLeaf, onRatioChange }: SplitLayoutProps & { path: readonly number[] }): ReactNode {
+/**
+ * memo 化的分枝：node 引用未变即整棵子树跳过——updateRatio 只沿拖动路径
+ * spread 新节点，路径外子树保持原引用。path 不参与比较：同一和解位置的
+ * path 内容恒定（仅数组身份逐帧新建）。格子因此只在自身节点变化时重渲染。
+ */
+const SplitBranch = memo(function SplitBranch({ node, path, renderLeaf, onRatioChange }: SplitLayoutProps & { path: readonly number[] }): ReactNode {
   if (node.kind === "leaf") return <>{renderLeaf(node.sessionId)}</>;
   return (
     <div className={`split-node ${node.direction}`}>
@@ -38,7 +43,7 @@ function SplitBranch({ node, path, renderLeaf, onRatioChange }: SplitLayoutProps
       </div>
     </div>
   );
-}
+}, (prev, next) => prev.node === next.node && prev.renderLeaf === next.renderLeaf && prev.onRatioChange === next.onRatioChange);
 
 function SplitDivider({ direction, ratio, onRatio }: { direction: "row" | "column"; ratio: number; onRatio(ratio: number): void }): ReactNode {
   const dividerRef = useRef<HTMLDivElement>(null);

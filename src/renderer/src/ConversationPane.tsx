@@ -536,8 +536,12 @@ export interface ConversationPaneProps {
  * 通过 sessionId 订阅自己的数据切片（焦点格 = 主快照，parked 格 =
  * store.paneStates），所有发送类命令都携带本格 sessionId，多个格子并发
  * 运行互不干扰。
+ *
+ * memo：格子 props（含 App 层稳定化的分屏回调）在无关渲染中保持身份，
+ * 拖动分隔条等布局变化只重渲染受影响的 split 容器；会话数据经 usePaneData
+ * 订阅 store，不依赖 props 驱动更新。
  */
-export function ConversationPane({
+export const ConversationPane = memo(function ConversationPane({
   sessionId,
   compact = false,
   focused = false,
@@ -1485,4 +1489,4 @@ export function ConversationPane({
       </form>
     </section>
   );
-}
+});

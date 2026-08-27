@@ -1340,6 +1340,30 @@ export function App(): ReactNode {
     setMaximizedPaneId((current) => (current === sessionId ? undefined : sessionId));
   }
 
+  // —— 分屏格子回调的稳定身份 ——
+  // 上面四个分屏函数每次渲染都重建；直接内联进格子 props 会让 memo 化的
+  // ConversationPane 在布局树任何变化（拖分隔条每帧）时全体重渲染。这里持有
+  // 最新函数版本的 ref + 按 sessionId 缓存的回调（闭包只捕获 leafSessionId，
+  // 行为经 ref 永远取到当次渲染的函数），格子 props 身份跨渲染恒定。
+  const paneActionsRef = useRef({ focusPane, removeSplitPane, toggleMaximizePane, createNewSession });
+  paneActionsRef.current = { focusPane, removeSplitPane, toggleMaximizePane, createNewSession };
+  const paneCallbacksRef = useRef(new Map<string, { onFocus(): void; onClose(): void; onToggleMaximize(): void; onNewSession(): Promise<void> }>());
+  const getPaneCallbacks = useCallback((leafSessionId: string) => {
+    let callbacks = paneCallbacksRef.current.get(leafSessionId);
+    if (!callbacks) {
+      callbacks = {
+        onFocus: () => paneActionsRef.current.focusPane(leafSessionId),
+        onClose: () => paneActionsRef.current.removeSplitPane(leafSessionId),
+        onToggleMaximize: () => paneActionsRef.current.toggleMaximizePane(leafSessionId),
+        onNewSession: () => paneActionsRef.current.createNewSession(undefined, leafSessionId)
+      };
+      paneCallbacksRef.current.set(leafSessionId, callbacks);
+    }
+    return callbacks;
+  }, []);
+  /** 单窗口 /new：与格子回调同模式走 ref，保持稳定身份。 */
+  const defaultNewSession = useCallback((): Promise<void> => paneActionsRef.current.createNewSession(), []);
+
   // —— 分屏 effects ——
 
   /** 格子集合变化时同步 session.watch：非激活格子注册推送（主进程豁免驱逐、
@@ -1366,7 +1390,11 @@ export function App(): ReactNode {
       void window.piDesktop.send({ type: "session.watch", sessionId: id, watch: false }).catch(() => undefined);
     }
     for (const id of removed) registered.delete(id);
-    if (removed.length > 0) dropPaneStates(removed);
+    if (removed.length > 0) {
+      dropPaneStates(removed);
+      // 回调缓存随格子一并释放（Map 不随会话消失自动清理）。
+      for (const id of removed) paneCallbacksRef.current.delete(id);
+    }
     // 单窗口（无格子）下 state 通道每次切会话都会写 parkedPanels 留档，而这些
     // 条目永远不会被读取——按当前格子集合修剪，防止内存无界增长。
     pruneParkedPanels(panes);
@@ -1612,6 +1640,7 @@ export function App(): ReactNode {
   /** 分屏格子的渲染器：头部信息来自会话列表摘要，交互回调全部绑定本格 sessionId。 */
   const renderSplitLeaf = useCallback((leafSessionId: string): ReactNode => {
     const summary = snapshot.sessions.find((item) => item.id === leafSessionId);
+    const { onFocus, onClose, onToggleMaximize, onNewSession } = getPaneCallbacks(leafSessionId);
     return (
       <div className="split-pane" key={leafSessionId} data-pane-active={leafSessionId === focusedPaneId || undefined}>
         <ConversationPane
@@ -1622,10 +1651,10 @@ export function App(): ReactNode {
           title={summary?.title}
           runStatus={summary?.runStatus}
           showDock={leafSessionId === focusedPaneId}
-          onFocus={() => focusPane(leafSessionId)}
-          onClose={() => removeSplitPane(leafSessionId)}
-          onToggleMaximize={() => toggleMaximizePane(leafSessionId)}
-          onNewSession={() => createNewSession(undefined, leafSessionId)}
+          onFocus={onFocus}
+          onClose={onClose}
+          onToggleMaximize={onToggleMaximize}
+          onNewSession={onNewSession}
           registerComposerApi={registerComposerApi}
           draftStore={draftStore}
           onOpenArtifact={openArtifactPreview}
@@ -1636,7 +1665,7 @@ export function App(): ReactNode {
         />
       </div>
     );
-  }, [snapshot.sessions, focusedPaneId, maximizedPaneId, openArtifactPreview, openFilePreview, openDiffPreview, registerComposerApi, draftStore, setActionError]);
+  }, [snapshot.sessions, focusedPaneId, maximizedPaneId, openArtifactPreview, openFilePreview, openDiffPreview, registerComposerApi, draftStore, setActionError, getPaneCallbacks]);
 
   /** 分隔条拖动：按 split 节点路径更新比例（夹取在 SplitDivider 内完成）。 */
   const handleSplitRatioChange = useCallback((path: readonly number[], ratio: number): void => {
@@ -1895,7 +1924,7 @@ export function App(): ReactNode {
               sessionId={snapshot.sessionId}
               showDock
               focused
-              onNewSession={() => createNewSession()}
+              onNewSession={defaultNewSession}
               registerComposerApi={registerComposerApi}
               draftStore={draftStore}
               onOpenArtifact={openArtifactPreview}
