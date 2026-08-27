@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildCatalogModels, imageInputOverride, isDesktopConfiguredProvider } from "./model-catalog.js";
+import { applyModelOverrides, buildCatalogModels, imageInputOverride, isDesktopConfiguredProvider } from "./model-catalog.js";
 import type { ProviderSettings } from "../shared/protocol.js";
 
 describe("desktop model catalog visibility", () => {
@@ -116,5 +116,34 @@ describe("imageInputOverride", () => {
     // 无限额信息的条目不携带这两个字段。
     const bare = options.find((model) => model.id === "claude-sonnet-4");
     expect(bare).not.toHaveProperty("contextWindow");
+  });
+});
+
+describe("applyModelOverrides", () => {
+  const target = (input: ("text" | "image")[]) => ({ provider: "zai-coding-cn", id: "glm-5.3-flash", input });
+
+  it("marks image input onto Model.input when the user forces it on", () => {
+    // 回归：Pi 的各 API 适配器每次请求按 model.input 把图片降级成
+    // "(image omitted: model does not support images)" 占位文本——应用侧的
+    // hasImageInput 放行了，图片在 Pi 内部还是会被丢掉，勾选等于没生效。
+    const result = applyModelOverrides(target(["text"]), [{ id: "zai-coding-cn", name: "z.ai", baseUrl: "", custom: false, models: [{ id: "glm-5.3-flash", name: "GLM", imageInput: true }] }]);
+    expect(result.input).toEqual(["text", "image"]);
+  });
+
+  it("removes image input when the user explicitly unchecks it", () => {
+    const result = applyModelOverrides(target(["text", "image"]), [{ id: "zai-coding-cn", name: "z.ai", baseUrl: "", custom: false, models: [{ id: "glm-5.3-flash", name: "GLM", imageInput: false }] }]);
+    expect(result.input).toEqual(["text"]);
+  });
+
+  it("returns the same object when the mark matches the catalog or is absent", () => {
+    const text = target(["text"]);
+    expect(applyModelOverrides(text, [{ id: "zai-coding-cn", name: "z.ai", baseUrl: "", custom: false, models: [{ id: "glm-5.3-flash", name: "GLM", imageInput: false }] }])).toBe(text);
+    expect(applyModelOverrides(text, [{ id: "zai-coding-cn", name: "z.ai", baseUrl: "", custom: false, models: [{ id: "glm-5.3-flash", name: "GLM" }] }])).toBe(text);
+    expect(applyModelOverrides(text, [])).toBe(text);
+  });
+
+  it("clones once and combines token limits with the input patch", () => {
+    const result = applyModelOverrides({ ...target(["text"]), contextWindow: 128000, maxTokens: 16384 }, [{ id: "zai-coding-cn", name: "z.ai", baseUrl: "", custom: false, models: [{ id: "glm-5.3-flash", name: "GLM", imageInput: true, contextWindow: 200000 }] }]);
+    expect(result).toEqual({ provider: "zai-coding-cn", id: "glm-5.3-flash", input: ["text", "image"], contextWindow: 200000, maxTokens: 16384 });
   });
 });

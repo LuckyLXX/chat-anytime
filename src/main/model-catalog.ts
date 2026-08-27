@@ -38,6 +38,40 @@ export function imageInputOverride(model: { provider?: string; id?: string }, pr
   return providers?.find((provider) => provider.id === model.provider)?.models.find((item) => item.id === model.id)?.imageInput;
 }
 
+/** applyModelOverrides 的输入下界（Pi `Model` 的相关子集，避免本文件依赖 Pi 类型）。 */
+export interface ModelOverrideTarget {
+  provider?: string;
+  id?: string;
+  input: ("text" | "image")[];
+}
+
+/**
+ * 把设置里的用户修正（token 限额、图片输入标记）覆盖到目录 Model 上；命中
+ * 任何覆盖时返回浅克隆，绝不改动共享的运行时对象。图片输入标记必须落到
+ * Model.input 本身：Pi 的各 API 适配器每次请求都按 model.input 把图片降级成
+ * "(image omitted: …)" 占位文本，只改应用侧的 hasImageInput 判定挡不住它。
+ * 覆盖是双向的：true 补上 image，false 摘掉（目录误报多模态时封住）。
+ */
+export function applyModelOverrides<T extends ModelOverrideTarget>(model: T, providers: ProviderSettings[] | undefined): T {
+  const entry = providers?.find((provider) => provider.id === model.provider)?.models.find((item) => item.id === model.id);
+  if (!entry) return model;
+  const contextWindow = isPositiveInt(entry.contextWindow) ? entry.contextWindow : undefined;
+  const maxTokens = isPositiveInt(entry.maxTokens) ? entry.maxTokens : undefined;
+  const hasImage = model.input.includes("image");
+  const input = entry.imageInput === true && !hasImage
+    ? [...model.input, "image" as const]
+    : entry.imageInput === false && hasImage
+      ? model.input.filter((kind) => kind !== "image")
+      : undefined;
+  if (contextWindow === undefined && maxTokens === undefined && input === undefined) return model;
+  return {
+    ...model,
+    ...(contextWindow !== undefined ? { contextWindow } : {}),
+    ...(maxTokens !== undefined ? { maxTokens } : {}),
+    ...(input !== undefined ? { input: input as T["input"] } : {})
+  };
+}
+
 /**
  * 构建推送给渲染端的模型目录：不剔除被禁用的模型，而是逐条标注 enabled。
  *

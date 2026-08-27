@@ -16,7 +16,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { BackgroundProcessRegistry, bashCommandsFromMessages, isBackgroundCommand } from "./background-processes.js";
 import { messageUuid } from "./message-identity.js";
-import { buildCatalogModels, imageInputOverride } from "./model-catalog.js";
+import { applyModelOverrides as applyStoredModelOverrides, buildCatalogModels, imageInputOverride } from "./model-catalog.js";
 import type {
   AccessMode,
   AgentProfile,
@@ -844,20 +844,14 @@ function hasImageInput(model: { provider?: string; id?: string; input?: readonly
 }
 
 /**
- * Apply per-model token-limit overrides stored in settings.providers (the
- * settings dialog's edit affordance) onto a catalog Model. Returns a shallow
- * clone when an override hits — never mutate the shared runtime objects.
- * Custom providers register with conservative placeholder limits
- * (custom-provider.ts), and fetched built-in models clone template metadata,
- * so both benefit from user-corrected values.
+ * Apply per-model overrides stored in settings.providers onto the catalog
+ * Model — token limits plus the imageInput mark landing on Model.input (why:
+ * see model-catalog.applyModelOverrides). Rides every model→session handoff;
+ * returns a shallow clone when an override hits — never mutate the shared
+ * runtime objects.
  */
 function applyModelOverrides<T extends Model<Api>>(model: T): T {
-  const entry = settings?.providers.find((provider) => provider.id === model.provider)?.models.find((item) => item.id === model.id);
-  if (!entry) return model;
-  const contextWindow = isPositiveInt(entry.contextWindow) ? entry.contextWindow : undefined;
-  const maxTokens = isPositiveInt(entry.maxTokens) ? entry.maxTokens : undefined;
-  if (contextWindow === undefined && maxTokens === undefined) return model;
-  return { ...model, ...(contextWindow !== undefined ? { contextWindow } : {}), ...(maxTokens !== undefined ? { maxTokens } : {}) };
+  return applyStoredModelOverrides(model, settings?.providers);
 }
 
 /**
@@ -874,8 +868,24 @@ function wrapModelRuntimeForVision(runtime: ModelRuntime): ModelRuntime {
   return new Proxy(runtime, {
     get(target, property) {
       if (property === "streamSimple") {
+        // 每次请求前对模型套上 settings.providers 里的覆盖值（图片输入标记落到
+        // model.input、token 限额同样生效），让 hasImageInput 与实际发给 Pi 的
+        // 模型对象同源。否则会分叉：hasImageInput 逐请求读覆盖值（判定能收图
+        // → 不剥离上下文），但传给 streamSimple 的还是未刷新的会话模型，Pi 的
+        // transformMessages 按 model.input 判断又把图片降级成占位符——「图片输入
+        // 勾选不生效」。applyModelOverrides 只在命中覆盖时返回浅克隆，绝不改动
+        // 共享的会话模型对象。
+        return (model: Model<Api>, context: Context, options?: ModelsSimpleStreamOptions) => {
+          const effectiveModel = applyModelOverrides(model);
+          return target.streamSimple(effectiveModel, hasImageInput(effectiveModel) ? context : runtimeVision.stripContextImages(context), options);
+        };
+      }
+      if (property === "completeSimple") {
+        // 视觉兜底模型同样套覆盖：识别工具的模型可能被用户在目录里手动标记了
+        // 「支持图片输入」（目录元数据滞后），否则 completeSimple 按未刷新的
+        // model.input 又把图片降级，视觉识别拿不到图。
         return (model: Model<Api>, context: Context, options?: ModelsSimpleStreamOptions) =>
-          target.streamSimple(model, hasImageInput(model) ? context : runtimeVision.stripContextImages(context), options);
+          target.completeSimple(applyModelOverrides(model), context, options);
       }
       const value = Reflect.get(target, property, target);
       return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
