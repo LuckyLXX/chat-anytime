@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   addPane,
+  balancedAddPane,
   clampRatio,
   countLeaves,
   firstLeafId,
@@ -42,7 +43,53 @@ describe("addPane", () => {
   });
 });
 
+describe("balancedAddPane", () => {
+  it("无树时首次分屏默认左右、anchor 在第一格", () => {
+    expect(balancedAddPane(null, "a", "b")).toEqual({ kind: "split", direction: "row", ratio: 0.5, children: [leaf("a"), leaf("b")] });
+    expect(balancedAddPane(null, "a", "a")).toEqual(leaf("a"));
+    expect(balancedAddPane(null, undefined, "b")).toEqual(leaf("b"));
+  });
+
+  it("2 分后加第 3 格：平局取最左叶子、方向 column → 左半上下", () => {
+    const tree = addPane(null, "a", "b", "row"); // row[a,b]
+    // a / b 面积相同（各一个 row split），平局取深优先第一个 a；a 高瘦（row 1 > col 0）→ column
+    expect(balancedAddPane(tree, "a", "c")).toEqual({
+      kind: "split", direction: "row", ratio: 0.5,
+      children: [
+        { kind: "split", direction: "column", ratio: 0.5, children: [leaf("a"), leaf("c")] },
+        leaf("b")
+      ]
+    });
+  });
+
+  it("3 分后加第 4 格：选面积最大的 b 拆成 column → 田字格", () => {
+    let tree = addPane(null, "a", "b", "row");
+    tree = balancedAddPane(tree, "a", "c"); // row[column[a,c]|b]
+    // b 面积最大（sum=1 < a/c 的 sum=2），b 高瘦（row 1 > col 0）→ column
+    expect(balancedAddPane(tree, "a", "d")).toEqual({
+      kind: "split", direction: "row", ratio: 0.5,
+      children: [
+        { kind: "split", direction: "column", ratio: 0.5, children: [leaf("a"), leaf("c")] },
+        { kind: "split", direction: "column", ratio: 0.5, children: [leaf("b"), leaf("d")] }
+      ]
+    });
+  });
+
+  it("4 格后不再通过 balancedAddPane 扩张（由调用方按 MAX_SPLIT_PANES 拦截）", () => {
+    let tree = addPane(null, "a", "b", "row");
+    tree = balancedAddPane(tree, "a", "c");
+    tree = balancedAddPane(tree, "a", "d");
+    // 4 格已是田字格；若再插，会从某个叶继续拆（算法不主动限制上限，上限由调用侧守护）。
+    const next = balancedAddPane(tree, "a", "e");
+    expect(countLeaves(next)).toBe(5);
+  });
+});
+
 describe("removePane", () => {
+  it("剪叶后单子塌缩", () => {
+    let tree: SplitNode = { kind: "split", direction: "row", ratio: 0.5, children: [{ kind: "split", direction: "column", ratio: 0.5, children: [leaf("a"), leaf("c")] }, leaf("b")] };
+    expect(removePane(tree, "c")).toEqual({ kind: "split", direction: "row", ratio: 0.5, children: [leaf("a"), leaf("b")] });
+  });
   it("剪叶后单子塌缩", () => {
     let tree: SplitNode = { kind: "split", direction: "row", ratio: 0.5, children: [{ kind: "split", direction: "column", ratio: 0.5, children: [leaf("a"), leaf("c")] }, leaf("b")] };
     expect(removePane(tree, "c")).toEqual({ kind: "split", direction: "row", ratio: 0.5, children: [leaf("a"), leaf("b")] });

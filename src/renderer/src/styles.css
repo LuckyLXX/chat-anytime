@@ -355,6 +355,14 @@ button, input, select, textarea, summary, label {
 .split-divider:hover::before, .split-divider:focus-visible::before { left: 2px; width: 3px; background: var(--accent); }
 .split-divider.column:hover::before, .split-divider.column:focus-visible::before { top: 2px; height: 3px; width: auto; }
 
+/* —— 分屏格子（pane-compact）输入区紧凑化：窄格隐藏次要控件、突出输入框 ——
+   隐藏访问模式（全局设置，可在设置/单窗口改）与上下文占用（窄格纯展示）
+   思考级别按钮只留级别值、去掉「思考」前缀；footer 间距收紧。单窗口不触发。 */
+.conversation-pane.pane-compact .access-mode-menu-shell,
+.conversation-pane.pane-compact .context-usage-chip { display: none; }
+.conversation-pane.pane-compact .thinking-control .composer-menu-trigger > span { display: none; }
+.conversation-pane.pane-compact .composer-footer { gap: 4px 8px; }
+
 .preview-divider { position: relative; z-index: 3; width: 7px; min-width: 7px; height: 100%; align-self: stretch; touch-action: none; cursor: col-resize; outline: none; background: var(--surface-muted); }
 .preview-divider::before { position: absolute; top: 0; bottom: 0; left: 3px; width: 1px; background: var(--border-strong); content: ""; transition: width .12s ease, left .12s ease, background .12s ease; }
 .preview-divider:hover::before, .preview-divider:focus-visible::before, .preview-divider.dragging::before { left: 2px; width: 3px; background: var(--accent); }

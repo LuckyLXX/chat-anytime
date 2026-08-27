@@ -77,7 +77,7 @@ import { ConversationPane, type PaneComposerApi, type PaneDraftStore } from "./C
 import { SplitLayout } from "./SplitLayout";
 import {
   MAX_SPLIT_PANES,
-  addPane,
+  balancedAddPane,
   countLeaves,
   firstLeafId,
   leafIds,
@@ -86,7 +86,6 @@ import {
   removePane,
   replaceLeaf,
   updateRatio,
-  type SplitDirection,
   type SplitNode
 } from "./lib/split-layout";
 import { HooksSettings } from "./HooksSettings";
@@ -1302,17 +1301,16 @@ export function App(): ReactNode {
     }
   }
 
-  /** 侧栏右键「分屏到右侧/下方」：对焦点叶再分割，新格成为焦点并被激活。 */
-  function addSplitPane(item: SessionSummary, side: "right" | "bottom"): void {
+  /** 侧栏右键「分屏」：自动把新会话插入到最接近方形的格子（方向由算法决定），新格成为焦点并被激活。 */
+  function addSplitPane(item: SessionSummary): void {
     if (!snapshot.sessionId) return;
     if (splitTree && leafIds(splitTree).includes(item.id)) {
       focusPane(item.id);
       return;
     }
     if (splitTree && countLeaves(splitTree) >= MAX_SPLIT_PANES) return;
-    const direction: SplitDirection = side === "right" ? "row" : "column";
-    const anchor = focusedPaneId ?? snapshot.sessionId;
-    setSplitState((current) => ({ tree: addPane(current.tree, anchor, item.id, direction), focusedPane: item.id }));
+    // 自动均衡：不再固定「从焦点格链式分裂」，而是选最接近方形的格子落位、方向自动。
+    setSplitState((current) => ({ tree: balancedAddPane(current.tree, snapshot.sessionId, item.id), focusedPane: item.id }));
     void window.piDesktop.send({ type: "session.open", path: item.path, workspace: item.workspace }).catch((error) => {
       setMessageActionError(error instanceof Error ? error.message : "分屏打开会话失败");
     });
@@ -1801,7 +1799,7 @@ export function App(): ReactNode {
                   {!collapsed && <div className="session-workspace-items">
                     {group.sessions.length === 0
                       ? <div className="session-workspace-empty">暂无话题，点击右上角新建</div>
-                      : group.sessions.map((item) => <button className={item.id === snapshot.sessionId || (splitTree ? paneIds.includes(item.id) : false) ? "active" : ""} type="button" key={item.path} title={item.title} data-row-kind="session" data-row-active={item.id === snapshot.sessionId || (splitTree ? paneIds.includes(item.id) : false) || undefined} onClick={() => void openSession(item.path, item.workspace, item.id)} onContextMenu={(event) => { event.preventDefault(); const splitDisabled = !snapshot.sessionId || (splitTree ? countLeaves(splitTree) >= MAX_SPLIT_PANES : false); const inPane = splitTree ? leafIds(splitTree).includes(item.id) : false; setContextMenu({ x: event.clientX, y: event.clientY, items: [{ label: "重命名", onClick: () => { setRenameSession({ path: item.path, title: item.title }); setRenameValue(item.title); } }, { label: item.pinned ? "取消置顶" : "置顶", onClick: () => { void window.piDesktop.send({ type: "session.pin", path: item.path, pinned: !item.pinned }); } }, { label: inPane ? "已分屏，切换到该格" : "分屏到右侧", disabled: !inPane && splitDisabled, onClick: () => addSplitPane(item, "right") }, { label: "分屏到下方", disabled: splitDisabled, onClick: () => addSplitPane(item, "bottom") }, { label: "删除会话", danger: true, onClick: () => setDeleteSession({ path: item.path, title: item.title }) }] }); }}><MessageCircle size={14} /><span><strong>{item.title}</strong><small>{new Date(item.modifiedAt).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}</small></span>{(item.runStatus || item.pinned) && <div className="session-item-meta">{item.runStatus && <i className={`session-status-dot ${item.runStatus}`} title={sessionRunStatusLabels[item.runStatus]} aria-label={sessionRunStatusLabels[item.runStatus]!} />}{item.pinned && <Pin size={11} className="session-pin-indicator" />}</div>}</button>)}
+                      : group.sessions.map((item) => <button className={item.id === snapshot.sessionId || (splitTree ? paneIds.includes(item.id) : false) ? "active" : ""} type="button" key={item.path} title={item.title} data-row-kind="session" data-row-active={item.id === snapshot.sessionId || (splitTree ? paneIds.includes(item.id) : false) || undefined} onClick={() => void openSession(item.path, item.workspace, item.id)} onContextMenu={(event) => { event.preventDefault(); const splitDisabled = !snapshot.sessionId || (splitTree ? countLeaves(splitTree) >= MAX_SPLIT_PANES : false); const inPane = splitTree ? leafIds(splitTree).includes(item.id) : false; setContextMenu({ x: event.clientX, y: event.clientY, items: [{ label: "重命名", onClick: () => { setRenameSession({ path: item.path, title: item.title }); setRenameValue(item.title); } }, { label: item.pinned ? "取消置顶" : "置顶", onClick: () => { void window.piDesktop.send({ type: "session.pin", path: item.path, pinned: !item.pinned }); } }, { label: inPane ? "已分屏，切换到该格" : "分屏", disabled: !inPane && splitDisabled, onClick: () => addSplitPane(item) }, { label: "删除会话", danger: true, onClick: () => setDeleteSession({ path: item.path, title: item.title }) }] }); }}><MessageCircle size={14} /><span><strong>{item.title}</strong><small>{new Date(item.modifiedAt).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}</small></span>{(item.runStatus || item.pinned) && <div className="session-item-meta">{item.runStatus && <i className={`session-status-dot ${item.runStatus}`} title={sessionRunStatusLabels[item.runStatus]} aria-label={sessionRunStatusLabels[item.runStatus]!} />}{item.pinned && <Pin size={11} className="session-pin-indicator" />}</div>}</button>)}
                   </div>}
                 </section>
               );

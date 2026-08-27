@@ -48,6 +48,57 @@ export function addPane(tree: SplitNode | null, focusedSessionId: string | undef
   return replaceLeaf(tree, anchorId, { kind: "split", direction, ratio: 0.5, children: [{ kind: "leaf", sessionId: anchorId }, newLeaf] } as SplitNode);
 }
 
+interface LeafMetrics {
+  sessionId: string;
+  rowCount: number;
+  columnCount: number;
+}
+
+/** 深度优先遍历并累计每个叶子沿路径的 row/column split 数（方向逻辑与 addPane 同源）。 */
+function walkLeafs(node: SplitNode, rowCount: number, columnCount: number, visit: (leaf: LeafMetrics) => void): void {
+  if (node.kind === "leaf") {
+    visit({ sessionId: node.sessionId, rowCount, columnCount });
+    return;
+  }
+  const nextRow = rowCount + (node.direction === "row" ? 1 : 0);
+  const nextColumn = columnCount + (node.direction === "column" ? 1 : 0);
+  walkLeafs(node.children[0], nextRow, nextColumn, visit);
+  walkLeafs(node.children[1], nextRow, nextColumn, visit);
+}
+
+/**
+ * 自动均衡分屏：把新会话插入到让布局最接近方形/田字格的位置，方向自动选。
+ * 替代「固定从焦点格分裂」——后者每次分屏后焦点跳新格子，连续分屏越分越窄。
+ * 算法：树内所有 split 恒 ratio 0.5，叶子归一化尺寸为 宽∝0.5^(路径 row split 数)、
+ * 高∝0.5^(路径 column split 数)。选「面积最大（路径 split 数之和最小）」的叶子拆、
+ * 平局取最左（深优先第一个，保持行列顺序稳定）；方向 = 该叶 rowCount > columnCount
+ * ? column : row（高瘦→上下减高、矮胖→左右减宽、方正→左右）。无树（首次分屏）时
+ * 默认左右、anchor 在第一格；anchor 缺失或与新会话同 id 时返回单叶。
+ */
+export function balancedAddPane(tree: SplitNode | null, anchorSessionId: string | undefined, newSessionId: string): SplitNode {
+  const newLeaf: SplitNode = { kind: "leaf", sessionId: newSessionId };
+  if (!tree) {
+    if (anchorSessionId === undefined || anchorSessionId === newSessionId) return newLeaf;
+    return { kind: "split", direction: "row", ratio: 0.5, children: [{ kind: "leaf", sessionId: anchorSessionId }, newLeaf] };
+  }
+  let bestId: string | undefined;
+  let bestSum = Number.POSITIVE_INFINITY;
+  let bestRowCount = 0;
+  let bestColumnCount = 0;
+  walkLeafs(tree, 0, 0, (leaf) => {
+    const sum = leaf.rowCount + leaf.columnCount;
+    if (sum < bestSum) {
+      bestSum = sum;
+      bestId = leaf.sessionId;
+      bestRowCount = leaf.rowCount;
+      bestColumnCount = leaf.columnCount;
+    }
+  });
+  if (bestId === undefined) return newLeaf; // 树非空必有叶，理论上不可达
+  const direction: SplitDirection = bestRowCount > bestColumnCount ? "column" : "row";
+  return replaceLeaf(tree, bestId, { kind: "split", direction, ratio: 0.5, children: [{ kind: "leaf", sessionId: bestId }, newLeaf] } as SplitNode);
+}
+
 /** 单子树塌缩：剪掉一个叶子后，只剩单子的 split 节点被其子树取代；剩一个叶子返回 null（退出分屏）。 */
 export function removePane(tree: SplitNode, sessionId: string): SplitNode | null {
   if (tree.kind === "leaf") return tree.sessionId === sessionId ? null : tree;
