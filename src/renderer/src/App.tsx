@@ -1061,6 +1061,8 @@ export function App(): ReactNode {
   }, []);
   // 已 watch 的格子集合（effect 维护）；session.new 在分屏中替换某格时记录待替换格。
   const watchedPaneIdsRef = useRef(new Set<string>());
+  // 当前处于 hidden 模式（最大化中被隐藏、主进程停推）的格子集合。
+  const hiddenPaneIdsRef = useRef(new Set<string>());
   const pendingPaneReplaceRef = useRef<string | undefined>(undefined);
   // 浏览器元素选择「发送到聊天框」：元素块写入焦点格输入框并聚焦——用户可
   // 继续编辑，随下一条消息一起发出。
@@ -1366,17 +1368,39 @@ export function App(): ReactNode {
 
   // —— 分屏 effects ——
 
-  /** 格子集合变化时同步 session.watch：非激活格子注册推送（主进程豁免驱逐、
-   *  不设终端圆点、streaming 走 session.state 通道）；移出的格子注销并清缓存。
-   *  登记簿只收“真正发送过 watch 的 id”：格子首次成为焦点（激活）时被跳过、
-   *  后来失焦的，会在本 effect 随 snapshot.sessionId 变化重跑时补发——主进程
-   *  幂等接受并立即回推一帧全量水合。 */
+  /** 格子集合/可见性变化时同步 session.watch：非激活格子注册推送（主进程豁免
+   *  驱逐、不设终端圆点、streaming 走 session.state 通道）；移出的格子注销并清
+   *  缓存。最大化时其余格子转 hidden 模式（保留 watch 与驱逐豁免，只停推送），
+   *  恢复可见时主进程补推水合帧。登记簿只收“真正发送过 watch 的 id”：格子首次
+   *  成为焦点（激活）时被跳过、后来失焦的，会在本 effect 随 snapshot.sessionId
+   *  变化重跑时补发——主进程幂等接受并立即回推一帧全量水合。 */
   useEffect(() => {
     if (!ready) return;
     const registered = watchedPaneIdsRef.current;
+    const hiddenRegistered = hiddenPaneIdsRef.current;
     const panes = new Set(paneIds);
     const activeId = snapshot.sessionId;
+    const visible = maximizedPaneId !== undefined && panes.has(maximizedPaneId)
+      ? new Set([maximizedPaneId])
+      : panes;
+    // 可见性切换：visible → hidden 停推，hidden → visible 恢复（主进程补水合帧）。
+    // 激活会话走 state 通道，不参与 hidden（即便瞬时不可见）。
     for (const id of panes) {
+      const wantHidden = !visible.has(id) && id !== activeId;
+      if (wantHidden === hiddenRegistered.has(id)) continue;
+      if (wantHidden) {
+        hiddenRegistered.add(id);
+        void window.piDesktop.send({ type: "session.watch", sessionId: id, watch: true, hidden: true }).catch(() => {
+          hiddenRegistered.delete(id);
+        });
+      } else {
+        hiddenRegistered.delete(id);
+        if (id !== activeId) {
+          void window.piDesktop.send({ type: "session.watch", sessionId: id, watch: true }).catch(() => undefined);
+        }
+      }
+    }
+    for (const id of visible) {
       if (id === activeId || registered.has(id)) continue;
       registered.add(id);
       void window.piDesktop.send({ type: "session.watch", sessionId: id, watch: true }).catch(() => {
@@ -1389,7 +1413,10 @@ export function App(): ReactNode {
       removed.push(id);
       void window.piDesktop.send({ type: "session.watch", sessionId: id, watch: false }).catch(() => undefined);
     }
-    for (const id of removed) registered.delete(id);
+    for (const id of removed) {
+      registered.delete(id);
+      hiddenRegistered.delete(id);
+    }
     if (removed.length > 0) {
       dropPaneStates(removed);
       // 回调缓存随格子一并释放（Map 不随会话消失自动清理）。
@@ -1398,7 +1425,7 @@ export function App(): ReactNode {
     // 单窗口（无格子）下 state 通道每次切会话都会写 parkedPanels 留档，而这些
     // 条目永远不会被读取——按当前格子集合修剪，防止内存无界增长。
     pruneParkedPanels(panes);
-  }, [paneIds, snapshot.sessionId, ready]);
+  }, [paneIds, snapshot.sessionId, ready, maximizedPaneId]);
 
   /** 分屏布局持久化（localStorage，重启恢复；失效格子由修剪 effect 清理）。
    *  尾随防抖：拖动分隔条时布局树每个 pointermove 帧都在变，同步写盘既卡主线程

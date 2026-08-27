@@ -180,6 +180,10 @@ const renderedSessions = new Set<string>();
 // 渲染端想 watch 但会话尚未 live（启动恢复逐格打开的间隙）：先挂起，
 // createSession 建立记录后自动补注册并推送水合帧。
 const pendingWatchSessions = new Set<string>();
+// hidden 模式的 watched 格子（最大化时被隐藏）：保留 renderedSessions 成员资格
+// （驱逐豁免、无终端圆点），但 schedulePaneEmit 停止推送——避免全量快照流进
+// 没有渲染的格子。切回可见时由 watch handler 补推一帧水合。
+const hiddenPaneSessions = new Set<string>();
 // Idle parked sessions beyond this count are disposed (their history stays on
 // disk and is rebuilt on reopen); running sessions are never evicted.
 const MAX_PARKED_SESSIONS = 4;
@@ -538,7 +542,7 @@ function snapshot(): RuntimeSnapshot {
  * （激活会话走 state 通道）。
  */
 function schedulePaneEmit(record: SessionRuntimeRecord, immediate: boolean): void {
-  if (record === activeRuntime || !renderedSessions.has(record.session.sessionId)) return;
+  if (record === activeRuntime || !renderedSessions.has(record.session.sessionId) || hiddenPaneSessions.has(record.session.sessionId)) return;
   if (immediate) {
     if (record.paneFlushTimer) {
       clearTimeout(record.paneFlushTimer);
@@ -631,6 +635,7 @@ function disposeRecord(record: SessionRuntimeRecord): void {
   liveSessions.delete(record.session.sessionId);
   renderedSessions.delete(record.session.sessionId);
   pendingWatchSessions.delete(record.session.sessionId);
+  hiddenPaneSessions.delete(record.session.sessionId);
   if (record.paneFlushTimer) {
     clearTimeout(record.paneFlushTimer);
     record.paneFlushTimer = undefined;
@@ -2017,6 +2022,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       if (!command.watch) {
         renderedSessions.delete(command.sessionId);
         pendingWatchSessions.delete(command.sessionId);
+        hiddenPaneSessions.delete(command.sessionId);
         const watched = liveSessions.get(command.sessionId);
         if (watched?.paneFlushTimer) {
           clearTimeout(watched.paneFlushTimer);
@@ -2026,6 +2032,20 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       }
       const record = liveSessions.get(command.sessionId);
       renderedSessions.add(command.sessionId);
+      if (command.hidden) {
+        // 隐藏格：只登记模式，不推帧（渲染端仍有旧 paneStates，恢复可见时补水合）。
+        hiddenPaneSessions.add(command.sessionId);
+        if (record?.paneFlushTimer) {
+          clearTimeout(record.paneFlushTimer);
+          record.paneFlushTimer = undefined;
+        }
+        break;
+      }
+      if (hiddenPaneSessions.delete(command.sessionId) && record) {
+        // 从隐藏切回可见：补推一帧，补上隐藏期间错过的更新。
+        post({ type: "session.state", snapshot: paneSnapshotFrom(record) });
+        break;
+      }
       if (record) {
         // 立即推一帧全量，格子无需等该会话的下一个事件即可水合。
         post({ type: "session.state", snapshot: paneSnapshotFrom(record) });

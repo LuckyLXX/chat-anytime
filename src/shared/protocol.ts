@@ -818,8 +818,10 @@ export type RuntimeCommand =
   | { type: "session.queue.remove"; kind: QueuedMessage["kind"]; index: number; text: string; sessionId?: string }
   /** 分屏：渲染端注册/注销某会话为“正在渲染”（watched）。watched 会话豁免空闲
    * 驱逐、流式事件改走 session.state 推送、不设侧栏终端圆点；首次 watch 立即
-   * 推送一次全量 session.state 供水合。 */
-  | { type: "session.watch"; sessionId: string; watch: boolean }
+   * 推送一次全量 session.state 供水合。hidden=true 是“注册但暂停推送”模式
+   * （最大化时其余格子）：保留驱逐豁免与圆点语义，只停 session.state 流，
+   * 从 hidden 切回可见时主进程补推一帧水合。 */
+  | { type: "session.watch"; sessionId: string; watch: boolean; hidden?: boolean }
   | { type: "agent.select"; agentId: string }
   | { type: "agent.save"; agent: AgentProfile }
   | { type: "agent.archive"; agentId: string; archived: boolean }
