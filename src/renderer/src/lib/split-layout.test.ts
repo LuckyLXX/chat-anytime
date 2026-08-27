@@ -113,11 +113,23 @@ describe("replaceLeaf / updateRatio / pruneToIds", () => {
     expect(replaceLeaf(tree, "b", leaf("new"))).toEqual({ kind: "split", direction: "row", ratio: 0.5, children: [leaf("a"), leaf("new")] });
   });
 
-  it("updateRatio 按路径定位并夹取范围", () => {
+  it("updateRatio 按路径定位目标节点并夹取范围（路径末位即目标自身，空路径 = 根）", () => {
     const tree: SplitNode = { kind: "split", direction: "row", ratio: 0.5, children: [{ kind: "split", direction: "column", ratio: 0.5, children: [leaf("a"), leaf("c")] }, leaf("b")] };
-    expect(updateRatio(tree, [0], 0.7)).toEqual({ ...tree, ratio: 0.7 });
-    expect(updateRatio(tree, [0, 1], 0.05)).toEqual({ ...tree, children: [{ ...tree.children[0], ratio: clampRatio(0.05) }, tree.children[1]] });
+    // 空路径 = 根节点（两格分屏拖根分隔条）。
+    expect(updateRatio(tree, [], 0.7)).toEqual({ ...tree, ratio: 0.7 });
+    // [0] = 根的 children[0]（内层 column）。
+    expect(updateRatio(tree, [0], 0.05)).toEqual({ ...tree, children: [{ ...tree.children[0], ratio: clampRatio(0.05) }, tree.children[1]] });
+    // 越界步长返回原树。
     expect(updateRatio(tree, [9], 0.7)).toBe(tree);
+    expect(updateRatio(tree, [0, 0], 0.3)).toBe(tree); // 叶子下无 split，原样返回
+  });
+
+  it("updateRatio 回归：三分屏 row(A, column(B,C)) 拖横分隔条只改 column，不动根", () => {
+    const tree: SplitNode = { kind: "split", direction: "row", ratio: 0.5, children: [leaf("a"), { kind: "split", direction: "column", ratio: 0.5, children: [leaf("b"), leaf("c")] }] };
+    const next = updateRatio(tree, [1], 0.8) as Extract<SplitNode, { kind: "split" }>;
+    expect(next.ratio).toBe(0.5); // 根（左右）比例不动
+    expect(next.children[1]).toEqual({ kind: "split", direction: "column", ratio: 0.8, children: [leaf("b"), leaf("c")] });
+    expect(next.children[0]).toBe((tree as Extract<SplitNode, { kind: "split" }>).children[0]); // 未受影响子树保持原引用（memo 前提）
   });
 
   it("pruneToIds 移除全部失效叶子并在仅剩一格时退出", () => {

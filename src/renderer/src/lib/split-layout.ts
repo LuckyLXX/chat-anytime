@@ -116,13 +116,20 @@ export function replaceLeaf(tree: SplitNode, sessionId: string, next: SplitNode)
   return { ...tree, children: [replaceLeaf(tree.children[0], sessionId, next), replaceLeaf(tree.children[1], sessionId, next)] as [SplitNode, SplitNode] };
 }
 
-/** 按 split 节点路径（0/1 序列）更新比例；路径越界返回原树。 */
+/** 按 split 节点路径（0/1 序列，从根到该节点）更新该节点的比例——路径的
+ *  最后一位即目标自身（SplitDivider 发出的就是本节点的完整路径）；空路径 =
+ *  根节点。路径越界或指向叶子返回原树引用（无效输入不产生新对象，保住
+ *  SplitBranch memo 的引用比较）。 */
 export function updateRatio(tree: SplitNode, path: readonly number[], ratio: number): SplitNode {
-  if (tree.kind === "leaf" || path.length === 0) return tree;
-  const [head, ...rest] = path;
-  if (head !== 0 && head !== 1) return tree;
-  if (rest.length === 0) return { ...tree, ratio: clampRatio(ratio) };
-  return { ...tree, children: [head === 0 ? updateRatio(tree.children[0], rest, ratio) : tree.children[0], head === 1 ? updateRatio(tree.children[1], rest, ratio) : tree.children[1]] as [SplitNode, SplitNode] };
+  return updateRatioNode(tree, path, ratio) ?? tree;
+}
+
+function updateRatioNode(tree: SplitNode, path: readonly number[], ratio: number): SplitNode | undefined {
+  if (path.length === 0) return tree.kind === "leaf" ? undefined : { ...tree, ratio: clampRatio(ratio) };
+  if (tree.kind === "leaf" || (path[0] !== 0 && path[0] !== 1)) return undefined;
+  const next = updateRatioNode(tree.children[path[0]], path.slice(1), ratio);
+  if (next === undefined) return undefined;
+  return { ...tree, children: [path[0] === 0 ? next : tree.children[0], path[0] === 1 ? next : tree.children[1]] as [SplitNode, SplitNode] };
 }
 
 /**
