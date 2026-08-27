@@ -45,6 +45,15 @@ describe("vision model resolution", () => {
     expect(resolver.getModel).toHaveBeenCalledWith("proxy", "glm-4v-flash");
   });
 
+  it("accepts a caller-supplied image-capability predicate (settings overrides catalog metadata)", () => {
+    // 内置服务商模型被用户手动标记为支持图片输入时，即便目录元数据仍是纯文本，
+    // 也应有资格当选视觉兜底（与设置页下拉列表同口径）。
+    const textOnly = multimodalModel(["text"]);
+    expect(resolveVisionModel(vision, { getModel: () => textOnly }, (candidate) => candidate.id === "glm-4v-flash")).toBe(textOnly);
+    // 谓词拒绝时仍然不可当选。
+    expect(resolveVisionModel(vision, { getModel: () => textOnly }, () => false)).toBeUndefined();
+  });
+
   it("prefers the custom recognition prompt but falls back to the built-in one", () => {
     expect(buildVisionSystemPrompt("  只描述文字  ")).toBe("只描述文字");
     expect(buildVisionSystemPrompt("   ")).toContain("图片识别助手");

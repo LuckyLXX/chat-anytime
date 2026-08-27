@@ -16,7 +16,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { BackgroundProcessRegistry, bashCommandsFromMessages, isBackgroundCommand } from "./background-processes.js";
 import { messageUuid } from "./message-identity.js";
-import { buildCatalogModels } from "./model-catalog.js";
+import { buildCatalogModels, imageInputOverride } from "./model-catalog.js";
 import type {
   AccessMode,
   AgentProfile,
@@ -835,7 +835,11 @@ function defaultModel(): { provider: string; id: string } | undefined {
   return currentAgent?.defaultModel ?? settings?.model;
 }
 
-function hasImageInput(model: { input?: readonly string[] } | undefined): boolean { return Boolean(model?.input?.includes("image")); }
+function hasImageInput(model: { provider?: string; id?: string; input?: readonly string[] } | undefined): boolean {
+  // 设置里手动标记的图片输入覆盖目录元数据（内置服务商拉取的新模型没有输入类型信息）。
+  const override = imageInputOverride(model ?? {}, settings?.providers);
+  return override ?? Boolean(model?.input?.includes("image"));
+}
 
 /**
  * Transport guard enforcing the vision invariant at the single choke point
@@ -1803,7 +1807,7 @@ async function initialize(command: Extract<RuntimeCommand, { type: "initialize" 
     if (initializedProviderIds.has(providerId) || !key || !modelRuntime.getProvider(providerId)) continue;
     await modelRuntime.setRuntimeApiKey(providerId, key);
   }
-  visionModel = resolveVisionModel(settings.vision, modelRuntime);
+  visionModel = resolveVisionModel(settings.vision, modelRuntime, (model) => hasImageInput(model));
   await refreshCatalog();
   if (workspace) await createSession();
   else {
@@ -2428,7 +2432,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     }
     case "vision.save": {
       if (settings) settings.vision = command.vision;
-      visionModel = modelRuntime ? resolveVisionModel(command.vision, modelRuntime) : undefined;
+      visionModel = modelRuntime ? resolveVisionModel(command.vision, modelRuntime, (model) => hasImageInput(model)) : undefined;
       break;
     }
     case "memory.save": {

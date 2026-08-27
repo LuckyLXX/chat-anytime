@@ -34,13 +34,16 @@ const DEFAULT_VISION_SYSTEM_PROMPT = [
 ].join("\n");
 
 /** Resolve the configured vision model from the registered provider catalog. */
-export function resolveVisionModel(vision: VisionSettings | undefined, resolver: VisionModelResolver): Model<Api> | undefined {
+export function resolveVisionModel(vision: VisionSettings | undefined, resolver: VisionModelResolver, acceptsImages?: (model: Model<Api>) => boolean): Model<Api> | undefined {
   if (!vision?.enabled) return undefined;
   const provider = vision.provider.trim();
   const modelId = vision.model.trim();
   if (!provider || !modelId) return undefined;
+  const eligible = acceptsImages ?? ((candidate: Model<Api>) => candidate.input.includes("image"));
   const model = resolver.getModel(provider, modelId);
-  if (!model || !model.input.includes("image")) return undefined;
+  // 能力判定用调用方传入的谓词（含用户手动标记）：目录元数据滞后时，设置里
+  // 勾了「支持图片输入」的内置模型也应能当选视觉兜底，与下拉列表口径一致。
+  if (!model || !eligible(model)) return undefined;
   return model;
 }
 

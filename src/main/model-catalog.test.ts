@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildCatalogModels, isDesktopConfiguredProvider } from "./model-catalog.js";
+import { buildCatalogModels, imageInputOverride, isDesktopConfiguredProvider } from "./model-catalog.js";
 import type { ProviderSettings } from "../shared/protocol.js";
 
 describe("desktop model catalog visibility", () => {
@@ -56,5 +56,43 @@ describe("buildCatalogModels", () => {
     expect(options[0]).toMatchObject({ provider: "openrouter", id: "openai/gpt-4o", name: "GPT-4o", configured: false, imageInput: true });
     expect(options[1]).toMatchObject({ imageInput: false });
     expect(options[2]).toMatchObject({ configured: true });
+  });
+
+  it("lets stored settings override the catalog's image input flag in both directions", () => {
+    // 回归：内置服务商手动拉取的新模型只有 id/name、输入类型克隆模板，用户
+    // 需要在设置里手动标记「图片输入」；目录推送必须尊重这个覆盖值，否则
+    // 顶栏/附件逻辑仍按旧元数据判定。覆盖是双向的（false 也能封住误报的多模态）。
+    const providers: ProviderSettings[] = [{
+      id: "openrouter",
+      name: "OpenRouter",
+      baseUrl: "",
+      custom: false,
+      models: [
+        { id: "openai/gpt-4o", name: "GPT-4o", imageInput: false },
+        { id: "openai/gpt-4o-mini", name: "GPT-4o mini", imageInput: true }
+      ]
+    }];
+    const options = buildCatalogModels(catalog, providers, new Set());
+    expect(options[0]).toMatchObject({ id: "openai/gpt-4o", imageInput: false });
+    expect(options[1]).toMatchObject({ id: "openai/gpt-4o-mini", imageInput: true });
+    // 未标注的模型回退到目录元数据。
+    expect(options[2]).toMatchObject({ id: "claude-sonnet-4", imageInput: false });
+  });
+});
+
+describe("imageInputOverride", () => {
+  it("looks up the per-model mark from settings providers", () => {
+    const providers: ProviderSettings[] = [{
+      id: "zai-coding-cn",
+      name: "z.ai coding cn",
+      baseUrl: "",
+      custom: false,
+      models: [{ id: "glm-4.6", name: "GLM-4.6", imageInput: true }]
+    }];
+    expect(imageInputOverride({ provider: "zai-coding-cn", id: "glm-4.6" }, providers)).toBe(true);
+    expect(imageInputOverride({ provider: "zai-coding-cn", id: "glm-4.6" }, undefined)).toBeUndefined();
+    expect(imageInputOverride({ provider: "other", id: "glm-4.6" }, providers)).toBeUndefined();
+    expect(imageInputOverride({ provider: "zai-coding-cn", id: "missing" }, providers)).toBeUndefined();
+    expect(imageInputOverride({}, providers)).toBeUndefined();
   });
 });

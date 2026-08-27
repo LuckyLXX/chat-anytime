@@ -23,6 +23,18 @@ export interface CatalogModelInput {
 }
 
 /**
+ * 单个模型的图片输入覆盖值（settings.providers 条目里用户勾选的结果）。
+ * 内置服务商的 catalog 元数据滞后且不完整——尤其「拉取最新模型」新到的
+ * 模型只有 id/name、输入类型克隆模板；允许用户在设置里手动标记，未标记
+ * （undefined）时回退到目录元数据。自定义服务商注册时就把 imageInput 写
+ * 进了 input，查出的覆盖值与之同源，行为不变。
+ */
+export function imageInputOverride(model: { provider?: string; id?: string }, providers: ProviderSettings[] | undefined): boolean | undefined {
+  if (!model.provider || !model.id) return undefined;
+  return providers?.find((provider) => provider.id === model.provider)?.models.find((item) => item.id === model.id)?.imageInput;
+}
+
+/**
  * 构建推送给渲染端的模型目录：不剔除被禁用的模型，而是逐条标注 enabled。
  *
  * 历史教训（2026-08-24）：旧实现直接 filter 掉 settings.providers 里
@@ -42,7 +54,8 @@ export function buildCatalogModels(models: readonly CatalogModelInput[], provide
       name: model.name,
       configured: configuredProviders.has(model.provider),
       input: model.input,
-      imageInput: model.input.includes("image"),
+      // 目录元数据可被设置里的手动标记覆盖（内置服务商拉取的新模型没有输入类型信息，靠用户勾选）。
+      imageInput: stored?.imageInput ?? model.input.includes("image"),
       ...(stored ? { enabled: stored.enabled !== false } : {})
     };
   });
