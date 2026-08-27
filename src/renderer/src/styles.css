@@ -362,6 +362,10 @@ button, input, select, textarea, summary, label {
 .conversation-pane.pane-compact .context-usage-chip { display: none; }
 .conversation-pane.pane-compact .thinking-control .composer-menu-trigger > span { display: none; }
 .conversation-pane.pane-compact .composer-footer { gap: 4px 8px; }
+/* 分屏格子头部（split-pane-header，30px）在顶部右侧有最大化/关闭按钮，
+   面板坞（待办/记忆）下移避开，否则与其重叠。单窗口无头部、保持 14px。 */
+.conversation-pane.pane-compact .panel-dock-fab,
+.conversation-pane.pane-compact .panel-dock { top: 44px; }
 
 .preview-divider { position: relative; z-index: 3; width: 7px; min-width: 7px; height: 100%; align-self: stretch; touch-action: none; cursor: col-resize; outline: none; background: var(--surface-muted); }
 .preview-divider::before { position: absolute; top: 0; bottom: 0; left: 3px; width: 1px; background: var(--border-strong); content: ""; transition: width .12s ease, left .12s ease, background .12s ease; }

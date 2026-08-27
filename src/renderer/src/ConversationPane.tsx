@@ -593,7 +593,10 @@ export function ConversationPane({
   const composerRef = useRef<HTMLFormElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
-  const stickToBottomRef = useRef(true);
+  // 单窗口（compact=false）默认粘底：切会话/新消息自动跟到最新。
+  // 分屏格子（compact=true）默认不粘底：打开时停在历史顶部，不做“从头滚到尾部”
+  // 的自动滚动；用户滚到底部后（stickToBottom 置真）才跟随增量新消息。
+  const stickToBottomRef = useRef(!compact);
   const previousSessionIdRef = useRef<string | undefined>(sessionId);
   const previousDraftSessionIdRef = useRef<string | undefined>(sessionId);
   const inputRef = useRef(input);
@@ -761,8 +764,8 @@ export function ConversationPane({
   useLayoutEffect(() => {
     const timeline = timelineRef.current;
     if (!timeline) return;
-    const sessionChanged = previousSessionIdRef.current !== data.sessionId;
-    previousSessionIdRef.current = data.sessionId;
+    const sessionChanged = previousSessionIdRef.current !== sessionId;
+    previousSessionIdRef.current = sessionId;
     if (sessionChanged) {
       // Session switch: jump straight to the newest content instead of smooth-
       // scrolling through the swapped-in history. Images/code may still be
@@ -784,7 +787,7 @@ export function ConversationPane({
     // scrolling on every frame stacks competing animations and janks. Reserve
     // smooth scrolling for the occasional new message when idle.
     timeline.scrollTo({ top: timeline.scrollHeight, behavior: data.busy ? "auto" : "smooth" });
-  }, [data.messages, data.busy, data.sessionId]);
+  }, [data.messages, data.busy, data.sessionId, sessionId]);
 
   useEffect(() => {
     if (!data.busy) setLocalTurn(undefined);
