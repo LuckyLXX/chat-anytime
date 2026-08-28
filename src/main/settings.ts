@@ -8,6 +8,7 @@ import type {
   CustomThemeDefinition,
   DesktopSettings,
   HooksSettings,
+  InterfaceTuning,
   MemorySettings,
   ProviderModelSettings,
   ProviderSettings,
@@ -40,6 +41,22 @@ export function createDefaultAgent(): AgentProfile {
     defaultThinkingLevel: "medium",
     tools: defaultTools()
   };
+}
+
+const DENSITY_OPTIONS: readonly InterfaceTuning["density"][] = ["compact", "comfortable", "relaxed"];
+const RADIUS_OPTIONS: readonly InterfaceTuning["radius"][] = ["square", "small", "medium", "round"];
+
+/**
+ * 校验运行时界面微调（密度/圆角）：只保留合法枚举值，非法/缺失丢弃。
+ * 缺省返回 undefined（跟随主题默认视觉），与 AppearanceSettings.tune 可选语义一致。
+ */
+export function normalizeInterfaceTuning(value: unknown): InterfaceTuning | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const source = value as Record<string, unknown>;
+  const tune: InterfaceTuning = {};
+  if (DENSITY_OPTIONS.includes(source.density as InterfaceTuning["density"])) tune.density = source.density as InterfaceTuning["density"];
+  if (RADIUS_OPTIONS.includes(source.radius as InterfaceTuning["radius"])) tune.radius = source.radius as InterfaceTuning["radius"];
+  return Object.keys(tune).length > 0 ? tune : undefined;
 }
 
 export function defaultAppearance(): AppearanceSettings {
@@ -267,6 +284,7 @@ export function migrateSettings(raw: unknown): { settings: DesktopSettings; lega
   const customThemes = normalizeCustomThemes(appearanceSource.customThemes);
   const wallpaperOpacity = normalizeWallpaperOpacity(appearanceSource.wallpaperOpacity)
     ?? normalizeWallpaperOpacity(appearanceSource.themeOverrides);
+  const tune = normalizeInterfaceTuning(appearanceSource.tune);
   const thinkingLevel = ["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(String(source.thinkingLevel))
     ? source.thinkingLevel as ThinkingLevel
     : "medium";
@@ -280,7 +298,7 @@ export function migrateSettings(raw: unknown): { settings: DesktopSettings; lega
     providers,
     agents: normalizedAgents,
     currentAgentId,
-    appearance: { theme, themePreset, customCss, ...(Object.keys(customCssAssets).length > 0 ? { customCssAssets } : {}), customThemes, ...(wallpaperOpacity ? { wallpaperOpacity } : {}), showThinking: appearanceSource.showThinking !== false },
+    appearance: { theme, themePreset, customCss, ...(Object.keys(customCssAssets).length > 0 ? { customCssAssets } : {}), customThemes, ...(wallpaperOpacity ? { wallpaperOpacity } : {}), ...(tune ? { tune } : {}), showThinking: appearanceSource.showThinking !== false },
     vision: normalizeVision(source.vision),
     memory: normalizeMemory(source.memory),
     hooks: normalizeHooks(source.hooks),

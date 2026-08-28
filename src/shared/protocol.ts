@@ -121,10 +121,22 @@ export interface PanelOpacityOverrides {
   dark?: number;
 }
 
+/**
+ * 运行时界面微调（主题之上的可选覆盖层）。缺省 undefined = 跟随主题/默认视觉。
+ * density 控制侧栏列表行高与主控件高度；radius 控制控件/容器圆角。
+ * 默认值等于当前视觉现状，主题可忽略或覆盖对应 token。
+ */
+export interface InterfaceTuning {
+  density?: "compact" | "comfortable" | "relaxed";
+  radius?: "square" | "small" | "medium" | "round";
+}
+
 export interface AppearanceSettings {
   theme: "system" | "light" | "dark";
   themePreset: ThemePresetId;
   customCss: string;
+  /** 运行时界面微调（密度/圆角），缺省时保持主题默认。 */
+  tune?: InterfaceTuning;
   /** Imported image/font data keyed by the relative url used in customCss. */
   customCssAssets?: ThemeAssetMap;
   customThemes: CustomThemeDefinition[];

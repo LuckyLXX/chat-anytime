@@ -1576,3 +1576,34 @@ button, input, select, textarea, summary, label {
 .browser-preview-error span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .browser-preview-error button { border: 0; background: transparent; color: inherit; font-weight: 700; cursor: pointer; padding: 2px 6px; border-radius: 6px; }
 .browser-preview-error button:hover { background: rgba(255, 255, 255, .14); }
+
+/* ============================================================
+ * 界面微调（运行时覆盖层）：data-ui-density / data-ui-radius。
+ * 由设置【外观 → 界面微调】写入 <html> 属性（App.tsx 投影）。默认值
+ * = 当前视觉现状，未切换时所有 token 等于现值、无任何覆盖——与既有
+ * 主题/默认完全兼容。主题可覆盖这些 token 或忽略这些属性。覆盖段
+ * 置后 + 同特异性，后写生效；不修改任何既有规则，可整段回退。
+ * ============================================================ */
+:root {
+  --ui-density-scale: 1;
+  --ui-control-radius: 6px;   /* 控件圆角（按钮/输入/chip/列表行/图标钮） */
+  --ui-container-radius: 10px;/* 容器圆角（气泡/面板/菜单弹层/代码块） */
+}
+:root[data-ui-density="compact"] { --ui-density-scale: 0.85; }
+:root[data-ui-density="comfortable"] { --ui-density-scale: 1; }
+:root[data-ui-density="relaxed"] { --ui-density-scale: 1.15; }
+:root[data-ui-radius="square"] { --ui-control-radius: 0px; --ui-container-radius: 0px; }
+:root[data-ui-radius="small"] { --ui-control-radius: 4px; --ui-container-radius: 6px; }
+:root[data-ui-radius="medium"] { --ui-control-radius: 6px; --ui-container-radius: 10px; }
+:root[data-ui-radius="round"] { --ui-control-radius: 999px; --ui-container-radius: 14px; }
+
+/* 列表行高随密度缩放（侧栏话题/助手行、侧栏底部按钮） */
+.session-list button { min-height: calc(48px * var(--ui-density-scale)); }
+.agent-list button { min-height: calc(50px * var(--ui-density-scale)); }
+.sidebar-footer > button { height: calc(32px * var(--ui-density-scale)); }
+
+/* 代表性控件/容器圆角走 token；其余保持默认（默认=现值不变） */
+.icon-button, .new-session-button, .sidebar-search, .context-menu-item,
+.sidebar-tabs button, .preview-open-trigger { border-radius: var(--ui-control-radius); }
+.context-menu, .composer, .question-panel, .sidebar-flyout,
+.message-assistant .message-body, .artifact-card, .code-block, .mermaid-block { border-radius: var(--ui-container-radius); }

@@ -35,6 +35,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, 
 import type {
   AccessMode,
   AppearanceSettings,
+  InterfaceTuning,
   BrowserElementPick,
   AgentProfile,
   BuiltinToolName,
@@ -648,6 +649,16 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
     useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, ...patch } } });
   }
 
+  /** 更新运行时界面微调（密度/圆角）；全为空/非法时清除 tune 字段回跟随主题。 */
+  function updateTune(patch: { density?: InterfaceTuning["density"] | ""; radius?: InterfaceTuning["radius"] | "" }): void {
+    const current = { ...(settings.appearance.tune ?? {}) } as InterfaceTuning;
+    if (patch.density) current.density = patch.density;
+    else delete current.density;
+    if (patch.radius) current.radius = patch.radius;
+    else delete current.radius;
+    updateAppearance({ tune: Object.keys(current).length > 0 ? current : undefined });
+  }
+
   function updateWallpaperOpacity(value: number): void {
     const wallpaperOpacity = { ...settings.appearance.wallpaperOpacity, [opacityMode]: Math.min(1, Math.max(0, value)) };
     updateAppearance({ wallpaperOpacity });
@@ -971,6 +982,12 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
         </div> : tab === "resources" ? <ResourceSettings resources={resources} /> : tab === "hooks" ? <HooksSettings resources={resources} workspaceOpen={workspaceOpen} /> : <form className="appearance-settings" onSubmit={(event) => { event.preventDefault(); const nextSettings = structuredClone(settings); void window.piDesktop.send({ type: "appearance.save", appearance: nextSettings.appearance }); markSettingsSaved(nextSettings); onClose(); }}>
           <div className="appearance-grid">
             <div>
+              <section className="interface-tuning-settings" aria-label="界面微调">
+                <div className="theme-color-heading"><span className="settings-field-label">界面微调</span></div>
+                <p className="theme-color-hint">不改主题，微调界面密度与圆角，切换后实时生效；默认跟随主题。</p>
+                <label>界面密度<select value={settings.appearance.tune?.density ?? ""} onChange={(event) => updateTune({ density: event.target.value as InterfaceTuning["density"] | "" })}><option value="">跟随主题</option><option value="compact">紧凑</option><option value="comfortable">舒适</option><option value="relaxed">宽松</option></select></label>
+                <label>圆角<select value={settings.appearance.tune?.radius ?? ""} onChange={(event) => updateTune({ radius: event.target.value as InterfaceTuning["radius"] | "" })}><option value="">跟随主题</option><option value="square">方角</option><option value="small">小圆</option><option value="medium">中圆</option><option value="round">圆润</option></select></label>
+              </section>
               <label>主题模式<select value={settings.appearance.theme} onChange={(event) => { const next = event.target.value as "system" | "light" | "dark"; useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, theme: next } } }); setOpacityMode(next === "light" ? "light" : next === "dark" ? "dark" : (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")); }}><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></label>
               <label className="checkbox-setting"><input type="checkbox" checked={settings.appearance.showThinking} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, showThinking: event.target.checked } } })} />展示思考过程</label>
               <div className="theme-preset-field"><span className="settings-field-label">主题预设</span><div className="theme-preset-grid">{THEME_PRESETS.map((preset) => <button type="button" key={preset.id} className={`theme-preset-card${settings.appearance.themePreset === preset.id ? " active" : ""}`} onClick={() => useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, themePreset: preset.id as ThemePresetId } } })}><span className="theme-swatches">{preset.swatches.map((color) => <i key={color} style={{ backgroundColor: color }} />)}</span><strong>{preset.name}</strong><small>{preset.description}</small></button>)}</div></div>
@@ -1232,19 +1249,24 @@ export function App(): ReactNode {
       ["data-ui-question-pending", Boolean(question)],
       ["data-ui-split-open", paneIds.length > 1]
     ];
-    const valueStates: readonly [string, string][] = [
-      ["data-ui-sidebar-view", sidebarView]
+    const valueStates: readonly [string, string | undefined][] = [
+      ["data-ui-sidebar-view", sidebarView],
+      ["data-ui-density", settings.appearance.tune?.density],
+      ["data-ui-radius", settings.appearance.tune?.radius]
     ];
     for (const [name, active] of states) {
       if (active) root.setAttribute(name, "");
       else root.removeAttribute(name);
     }
-    for (const [name, value] of valueStates) root.setAttribute(name, value);
+    for (const [name, value] of valueStates) {
+      if (value) root.setAttribute(name, value);
+      else root.removeAttribute(name);
+    }
     return () => {
       for (const [name] of states) root.removeAttribute(name);
       for (const [name] of valueStates) root.removeAttribute(name);
     };
-  }, [settingsOpen, snapshot.workspace, isChatEmpty, isGenerating, previewOpened, permission, question, paneIds.length, sidebarView]);
+  }, [settingsOpen, snapshot.workspace, isChatEmpty, isGenerating, previewOpened, permission, question, paneIds.length, sidebarView, settings.appearance.tune]);
 
   async function openWorkspace(): Promise<void> {
     const path = await window.piDesktop.chooseWorkspace();

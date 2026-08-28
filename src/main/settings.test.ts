@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CUSTOM_PROVIDER_ID, createDefaultAgent, isPositiveInt, mergeProviderModels, migrateSettings, normalizeAccessMode, normalizeAgent, normalizeCustomThemes, normalizeProvider, normalizeThemeAssets, normalizeVision, normalizeWallpaperOpacity } from "./settings.js";
+import { CUSTOM_PROVIDER_ID, createDefaultAgent, isPositiveInt, mergeProviderModels, migrateSettings, normalizeAccessMode, normalizeAgent, normalizeCustomThemes, normalizeInterfaceTuning, normalizeProvider, normalizeThemeAssets, normalizeVision, normalizeWallpaperOpacity } from "./settings.js";
 
 describe("desktop settings migration", () => {
   it("migrates the legacy custom provider without changing its stable id", () => {
@@ -8,6 +8,15 @@ describe("desktop settings migration", () => {
     expect(result.settings.providers[0]).toMatchObject({ id: CUSTOM_PROVIDER_ID, baseUrl: "https://example.com/v1" });
     expect(result.legacyApiKey).toBe("secret");
     expect(result.settings.agents).toHaveLength(1);
+  });
+
+  it("keeps interface tuning and drops invalid density/radius values", () => {
+    const result = migrateSettings({ appearance: { theme: "dark", tune: { density: "compact", radius: "round" } } });
+    expect(result.settings.appearance.tune).toEqual({ density: "compact", radius: "round" });
+    expect(normalizeInterfaceTuning({ density: "huge", radius: "blob" })).toBeUndefined();
+    expect(normalizeInterfaceTuning({ density: "relaxed", radius: "blob" })).toEqual({ density: "relaxed" });
+    expect(normalizeInterfaceTuning(undefined)).toBeUndefined();
+    expect(migrateSettings({ appearance: { theme: "system" } }).settings.appearance.tune).toBeUndefined();
   });
 
   it("keeps custom agent prompts empty and always provides the default assistant", () => {
