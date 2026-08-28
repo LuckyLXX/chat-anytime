@@ -139,7 +139,7 @@ button, input, select, textarea, summary, label {
   *, *::before, *::after { transition: none !important; }
   /* 装饰性/反馈性动画全部关停；保留 .spinning 加载指示（语义必要） */
   .message, .panel-dock, .question-panel, .context-menu, .preview-open-menu,
-  .access-mode-menu, .composer-select-menu, .slash-menu { animation: none !important; }
+  .access-mode-menu, .composer-select-menu, .slash-menu, .turn-thumb-pop { animation: none !important; }
   .session-status-dot.running { animation: none !important; }
 }
 
@@ -1634,3 +1634,27 @@ button, input, select, textarea, summary, label {
 :root[data-ui-radius] .artifact-card,
 :root[data-ui-radius] .code-block,
 :root[data-ui-radius] .mermaid-block { border-radius: var(--ui-container-radius); }
+
+/* ============================================================
+ * 会话内「轮次缩略导航」（TurnMinimap）：
+ * 贴在会话区右缘的垂直缩略栏，每个缩略块对应一轮对话；hover 放大成浮出
+ * 卡片展示该轮用户输入 + AI 输出摘要，点击滚动到该轮。默认背景用
+ * var(--panel-bg) 派生、状态色走既有 token，主题可覆盖。
+ * ============================================================ */
+.turn-minimap { position: absolute; top: 52px; right: 8px; bottom: calc(var(--composer-space, 122px) + 12px); z-index: 30; display: flex; flex-direction: column; gap: 4px; width: 34px; pointer-events: none; }
+.turn-minimap > * { pointer-events: auto; }
+.turn-thumb { position: relative; display: grid; place-items: center; flex: 0 0 auto; width: 34px; height: 26px; border: 1px solid transparent; border-radius: 6px; color: var(--text-muted); background: var(--surface); box-shadow: var(--shadow-sm); cursor: pointer; }
+.turn-thumb:hover, .turn-thumb:focus-visible { border-color: var(--border-strong); color: var(--text); outline: none; }
+.turn-thumb.active { border-color: var(--accent); color: var(--accent-text); background: var(--accent-soft); }
+.turn-thumb-index { font-size: 10px; font-weight: 650; line-height: 1; }
+.turn-thumb:hover { background: var(--surface-button-hover); }
+.turn-thumb:active { transform: scale(.94); }
+.turn-thumb-pop { position: absolute; right: 42px; top: 50%; z-index: 60; display: flex; flex-direction: column; gap: 6px; width: min(300px, calc(100vw - 24px)); padding: 10px 12px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow-lg); transform: translateY(-50%); animation: turn-pop-in .16s cubic-bezier(0.16, 1, 0.3, 1); }
+.turn-thumb-pop-head { display: flex; align-items: center; gap: 5px; color: var(--text-muted); }
+.turn-thumb-pop-head.ai { color: var(--accent-text); }
+.turn-thumb-pop-label { font-size: 11px; font-weight: 650; }
+.turn-thumb-pop-text { margin: 0; color: var(--text); font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+@keyframes turn-pop-in { from { opacity: 0; transform: translateY(-50%) translateX(4px); } to { opacity: 1; transform: translateY(-50%) translateX(0); } }
+:root[data-ui-density] .turn-thumb { height: calc(26px * var(--ui-density-scale)); }
+:root[data-ui-radius] .turn-thumb { border-radius: var(--ui-control-radius); }
+:root[data-ui-radius] .turn-thumb-pop { border-radius: var(--ui-container-radius); }

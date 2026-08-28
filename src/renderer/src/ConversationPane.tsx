@@ -55,8 +55,10 @@ import { contextUsageCacheLabel, contextUsagePercentLabel, contextUsageTone, con
 import { actionTimelineSegments, actionTimelineStats, formatProcessDuration, type ActionTimelineSegment } from "./lib/action-timeline";
 import { changedFilesForMessage, type ReplyChangedFile } from "./lib/changed-files";
 import { groupAssistantMessages } from "./lib/chat-layout";
+import { buildTurnSummaries } from "./lib/turn-summary";
 import { buildEditDiffs, editArgsSummary, languageFromPath, parseEditCallArgs, parseReadCallArgs, parseWriteCallArgs, writeArgsSummary, type EditCallPreview, type EditDiffBlock, type WriteCallPreview } from "./lib/tool-call-preview";
 import { DiffView } from "./components/DiffView";
+import { TurnMinimap } from "./components/TurnMinimap";
 import { shareElementAsImage } from "./lib/share-image";
 import { selectableCatalogModels } from "./lib/model-list";
 import { currentQuestionRequest, useDesktopStore } from "./store";
@@ -221,6 +223,25 @@ const MAX_TOOL_PREVIEW_CHARS = 60_000;
 
 function truncateToolOutput(output: string): string {
   return output.length > MAX_TOOL_OUTPUT_CHARS ? `${output.slice(0, MAX_TOOL_OUTPUT_CHARS)}\n…（输出过长，已截断显示）` : output;
+}
+
+/**
+ * 根据时间线滚动位置，找出「当前可视区中最靠下的轮次锚点」的 key：
+ * 这些锚点即每轮首条消息的 [data-turn-key]。滚动在锚点下方（或粘底）时返回
+ * 最近一个位于视口内的锚点，用于高亮缩略导航的当前轮。无可用锚点返回 undefined。
+ */
+function nearestVisibleTurnKey(timeline: HTMLElement, turnStartKeys: ReadonlySet<string>): string | undefined {
+  const anchors = [...timeline.querySelectorAll<HTMLElement>("[data-turn-key]")];
+  if (anchors.length === 0) return undefined;
+  const viewportBottom = timeline.scrollTop + timeline.clientHeight;
+  let best: { offsetTop: number; key: string } | undefined;
+  for (const anchor of anchors) {
+    const key = anchor.dataset.turnKey;
+    if (!key || !turnStartKeys.has(key)) continue;
+    const top = anchor.offsetTop;
+    if (top <= viewportBottom && (!best || top > best.offsetTop)) best = { offsetTop: top, key };
+  }
+  return best?.key;
 }
 
 function actionTimelineIcon(segment: ActionTimelineSegment, execution: ToolExecution | undefined, streaming: boolean): ReactNode {
@@ -435,7 +456,7 @@ function ChangedFilesPanel({ files, onOpenFile, onOpenDiff }: { files: ReplyChan
 // Memoized so an unchanged message bubble (stable ChatMessage reference from
 // the store's uuid-based reuse) is skipped during high-frequency streaming
 // updates that only mutate other bubbles.
-const MessageView = memo(function MessageView({ message, executions, onOpenArtifact, onOpenFile, onOpenDiff, onHtmlAction, onCopy, onEdit, onRegenerate, onShare, showThinking = true, hiddenThinkingLabel, busy = false, turnActive = false, timing, now = Date.now() }: { message: ChatMessage; executions: ToolExecution[]; onOpenArtifact(artifact: Artifact): void; onOpenFile(relativePath: string): void; onOpenDiff(execution: ToolExecution): void; onHtmlAction(text: string): void; onCopy(message: ChatMessage): void; onEdit(message: ChatMessage): void; onRegenerate(message: ChatMessage): void; onShare(message: ChatMessage, target: HTMLElement): Promise<void>; showThinking?: boolean; hiddenThinkingLabel?: string; busy?: boolean; turnActive?: boolean; timing?: TurnTiming; now?: number }): ReactNode {
+const MessageView = memo(function MessageView({ message, executions, onOpenArtifact, onOpenFile, onOpenDiff, onHtmlAction, onCopy, onEdit, onRegenerate, onShare, showThinking = true, hiddenThinkingLabel, busy = false, turnActive = false, timing, now = Date.now(), turnKey }: { message: ChatMessage; executions: ToolExecution[]; onOpenArtifact(artifact: Artifact): void; onOpenFile(relativePath: string): void; onOpenDiff(execution: ToolExecution): void; onHtmlAction(text: string): void; onCopy(message: ChatMessage): void; onEdit(message: ChatMessage): void; onRegenerate(message: ChatMessage): void; onShare(message: ChatMessage, target: HTMLElement): Promise<void>; showThinking?: boolean; hiddenThinkingLabel?: string; busy?: boolean; turnActive?: boolean; timing?: TurnTiming; now?: number; turnKey?: string }): ReactNode {
   const text = messageText(message);
   const shareTargetRef = useRef<HTMLDivElement | null>(null);
   const [sharing, setSharing] = useState(false);
@@ -461,7 +482,7 @@ const MessageView = memo(function MessageView({ message, executions, onOpenArtif
   if (message.role === "extension") {
     const images = message.blocks.filter((block): block is Extract<import("../../shared/protocol").MessageBlock, { type: "image" }> => block.type === "image");
     return (
-      <article className="message message-extension" data-role="extension">
+      <article className="message message-extension" data-role="extension" data-turn-key={turnKey}>
         <div className="message-avatar extension-avatar"><Puzzle size={16} /></div>
         <div className="message-body extension-message-callout">
           <strong>{message.extension?.customType || "扩展消息"}</strong>
@@ -478,7 +499,7 @@ const MessageView = memo(function MessageView({ message, executions, onOpenArtif
     // 复制/编辑仍用原始全文，重新发送后同样回环成 chip。
     const { mentions, body } = extractMentionTokens(text);
     return (
-      <article className="message message-user" data-role="user">
+      <article className="message message-user" data-role="user" data-turn-key={turnKey}>
         <div className="message-avatar user-avatar">我</div>
         <div className="message-body message-bubble">{message.skill && <div className="message-skill-badge"><Puzzle size={13} /><strong>{message.skill.name}</strong></div>}{mentions.length > 0 && <div className="message-mention-badges">{mentions.map((token) => <span className="message-skill-badge" key={token} title={token}><File size={13} /><strong>{token}</strong></span>)}</div>}{images.length > 0 && <div className="image-message-list">{images.map((block, index) => <ImageMessageBlock key={`${message.id}-image-${index}`} block={block} />)}</div>}{body && <p className="user-text">{body}</p>}{!isControlMessage && <div className="message-actions"><button type="button" data-control="copy" title="复制" aria-label="复制用户消息" onClick={() => onCopy(message)}><Copy size={13} /></button><button type="button" data-control="edit" title="重新编辑" aria-label="重新编辑用户消息" onClick={() => onEdit(message)}><Pencil size={13} /></button></div>}</div>
       </article>
@@ -486,7 +507,7 @@ const MessageView = memo(function MessageView({ message, executions, onOpenArtif
   }
 
   return (
-    <article className="message message-assistant" data-role="assistant">
+    <article className="message message-assistant" data-role="assistant" data-turn-key={turnKey}>
       <div className="message-avatar pi-avatar"><Bot size={17} /></div>
       <div className="message-body message-bubble">
         <div className="assistant-share-content" ref={shareTargetRef}>
@@ -605,6 +626,9 @@ export const ConversationPane = memo(function ConversationPane({
   // 新挂载会走 idle 的 smooth 滚动，正是「从顶滚到底部」动画的来源。
   const previousSessionIdRef = useRef<string | undefined>(undefined);
   const previousDraftSessionIdRef = useRef<string | undefined>(sessionId);
+  const [activeTurnKey, setActiveTurnKey] = useState<string | undefined>(undefined);
+  const activeTurnKeyRef = useRef<string | undefined>(undefined);
+  activeTurnKeyRef.current = activeTurnKey;
   const inputRef = useRef(input);
   inputRef.current = input;
   const selectedModel = data.model ? `${data.model.provider}/${data.model.id}` : "";
@@ -614,6 +638,9 @@ export const ConversationPane = memo(function ConversationPane({
     && models.some((item) => item.provider === settings.vision?.provider && item.id === settings.vision?.model && item.configured && item.imageInput && item.enabled !== false));
   const modelAcceptsImages = Boolean(models.find((item) => `${item.provider}/${item.id}` === selectedModel)?.imageInput);
   const displayMessages = useMemo(() => groupAssistantMessages(data.messages), [data.messages]);
+  // 每轮以 user 消息为錨点；turn 首条的 key 用于缩略导航定位（data-turn-key）。
+  const turns = useMemo(() => buildTurnSummaries(displayMessages), [displayMessages]);
+  const turnStartKeys = useMemo(() => new Set(turns.map((turn) => turn.key)), [turns]);
   const latestAssistantIndex = useMemo(() => [...displayMessages].reverse().findIndex((message) => message.role === "assistant"), [displayMessages]);
   const latestAssistantMessageIndex = latestAssistantIndex < 0 ? -1 : displayMessages.length - 1 - latestAssistantIndex;
   const localTiming = localTurn !== undefined && localTurn.sessionId === data.sessionId ? { startedAt: localTurn.startedAt } satisfies TurnTiming : undefined;
@@ -800,6 +827,32 @@ export const ConversationPane = memo(function ConversationPane({
   useEffect(() => {
     if (!data.busy) setLocalTurn(undefined);
   }, [data.busy]);
+
+  // 估算当前可视底部所属的轮次（缩略导航高亮用）。滚动监听写入 ref 避免频繁 setState；
+  // turnStartKeys 变化时取一次初始值（粘底即最新轮）。
+  useEffect(() => {
+    const timeline = timelineRef.current;
+    if (!timeline) return;
+    const updateActiveTurn = (): void => {
+      const key = nearestVisibleTurnKey(timeline, turnStartKeys);
+      if (key !== activeTurnKeyRef.current) setActiveTurnKey(key);
+    };
+    updateActiveTurn();
+    timeline.addEventListener("scroll", updateActiveTurn, { passive: true });
+    return () => timeline.removeEventListener("scroll", updateActiveTurn);
+  }, [turnStartKeys, data.messages.length]);
+
+  // 点击缩略导航 → 平滑滚动到该轮首条消息，并解除粘底（否则会被拉回底部）。
+  const navigateToTurn = useCallback((key: string): void => {
+    const timeline = timelineRef.current;
+    if (!timeline) return;
+    const anchor = timeline.querySelector<HTMLElement>(`[data-turn-key="${CSS.escape(key)}"]`);
+    if (!anchor) return;
+    stickToBottomRef.current = false;
+    const target = anchor.offsetTop - timeline.clientHeight * 0.2;
+    timeline.scrollTo({ top: Math.max(0, target), behavior: "smooth" });
+    setActiveTurnKey(key);
+  }, []);
 
   // 会话切换：草稿属于会话（存/取互逆）；Skill 选择与编辑态复位（沿用单窗口语义）。
   // 独立 ref：滚动 effect（useLayoutEffect 先执行）也写 previousSessionIdRef，
@@ -1349,11 +1402,13 @@ export const ConversationPane = memo(function ConversationPane({
           {displayMessages.map((message, index) => {
             const timing = showTurnTimingOnLatest && index === latestAssistantMessageIndex && message.role === "assistant" ? data.turnTiming : undefined;
             const turnActive = data.busy && index === latestAssistantMessageIndex && message.role === "assistant";
-            return <MessageView key={message.uuid ?? message.id} message={message} executions={data.executions} onOpenArtifact={onOpenArtifact} onOpenFile={onOpenFile} onOpenDiff={onOpenDiff} onHtmlAction={handleHtmlAction} onCopy={copyMessage} onEdit={editMessage} onRegenerate={regenerateMessage} onShare={shareMessage} showThinking={showThinking} busy={data.busy} turnActive={turnActive} timing={timing} now={timing ? now : undefined} />;
+            const turnKey = turnStartKeys.has(message.uuid ?? message.id) ? (message.uuid ?? message.id) : undefined;
+            return <MessageView key={message.uuid ?? message.id} message={message} executions={data.executions} onOpenArtifact={onOpenArtifact} onOpenFile={onOpenFile} onOpenDiff={onOpenDiff} onHtmlAction={handleHtmlAction} onCopy={copyMessage} onEdit={editMessage} onRegenerate={regenerateMessage} onShare={shareMessage} showThinking={showThinking} busy={data.busy} turnActive={turnActive} timing={timing} now={timing ? now : undefined} turnKey={turnKey} />;
           })}
           {isGenerating && (assistantBubbleVisible ? <div className="response-progress response-progress-inline"><LoaderCircle size={14} className="spinning" /><span>{workingLabel}</span>{activeTurnTiming && <TimingMeta timing={activeTurnTiming} now={now} />}</div> : <PendingResponse label={workingLabel} timing={activeTurnTiming} now={now} />)}
         </>}
       </div>
+      {turns.length >= 2 && <TurnMinimap turns={turns} activeKey={activeTurnKey} onNavigate={navigateToTurn} />}
       {question && <QuestionPanel request={question} onOpenDetail={onOpenPlanDetail} />}
       <form ref={composerRef} className={`composer${data.queuedMessages.length > 0 ? " has-queue" : ""}${data.planMode ? " has-plan" : ""}`} data-pane="composer" onSubmit={submit} onDragOver={(event) => event.preventDefault()} onDrop={handleDrop}>
         {data.planMode && (
