@@ -649,13 +649,19 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
     useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, ...patch } } });
   }
 
-  /** 更新运行时界面微调（密度/圆角）；全为空/非法时清除 tune 字段回跟随主题。 */
+  /** 更新运行时界面微调（密度/圆角）。同一次调用只更新显式传入的字段：
+   *  传非空值=设为该档、传空串=清除该字段回跟随主题；未传（undefined）的字段保留现状，
+   *  避免「设密度顺手清掉圆角、反之亦然」。全字段清空才置 tune=undefined。 */
   function updateTune(patch: { density?: InterfaceTuning["density"] | ""; radius?: InterfaceTuning["radius"] | "" }): void {
     const current = { ...(settings.appearance.tune ?? {}) } as InterfaceTuning;
-    if (patch.density) current.density = patch.density;
-    else delete current.density;
-    if (patch.radius) current.radius = patch.radius;
-    else delete current.radius;
+    if (patch.density !== undefined) {
+      if (patch.density) current.density = patch.density;
+      else delete current.density;
+    }
+    if (patch.radius !== undefined) {
+      if (patch.radius) current.radius = patch.radius;
+      else delete current.radius;
+    }
     updateAppearance({ tune: Object.keys(current).length > 0 ? current : undefined });
   }
 
