@@ -768,7 +768,10 @@ export const ConversationPane = memo(function ConversationPane({
     if (!composer || !pane) return;
     const update = (): void => {
       const height = composer.getBoundingClientRect().height;
-      pane.style.setProperty("--composer-space", `${height + 40}px`);
+      // 底部预留 = composer 高度 + margin-bottom(15px) + 一个与消息之间的呼吸间距。
+      // 之前固定 +40 在 composer 较高（占位/多行/交付产物面板）时余量偏小，
+      // 最后一条消息底部会与 composer 顶部贴得过近乃至重叠——放宽到 +56。
+      pane.style.setProperty("--composer-space", `${height + 56}px`);
       // 提问面板锚定在输入栏正上方，需要输入栏的精确高度。
       pane.style.setProperty("--composer-height", `${height}px`);
     };
