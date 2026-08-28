@@ -11,11 +11,12 @@ interface TurnMinimapProps {
 }
 
 /**
- * 会话时间线右侧贴边的「轮次缩略导航」（minimap 风格）。每个缩略块对应一
- * 轮；鼠标移到块上会放大成一张浮出卡片，展示该轮的用户输入与 AI 输出摘要。
- * 点击块滚动到该轮首条消息。纯展示 + 回调，不持有滚动逻辑。
+ * 会话时间线左缘的「轮次缩略导航」（minimap 风格）。每个缩略块对应一轮，
+ * 显示为一根小横杠；鼠标移到某条横杠上会放大一点，并展开一张浮出卡片，
+ * 展示该轮的用户输入与 AI 输出摘要。点击横杠滚动到该轮首条消息。
+ * 纯展示 + 回调，不持有滚动逻辑。
  *
- * hover 卡片用 transform/opacity 进场（遵循 styles.css 的动效规范），向左
+ * hover 卡片用 transform/opacity 进场（遵循 styles.css 的动效规范），向右
  * 浮出避免遮挡时间线。仅当至少 2 轮时才渲染（单轮无导航价值，由父级判断）。
  */
 export function TurnMinimap({ turns, activeKey, onNavigate }: TurnMinimapProps): ReactNode {
@@ -43,7 +44,7 @@ export function TurnMinimap({ turns, activeKey, onNavigate }: TurnMinimapProps):
             aria-label={`第 ${turn.index + 1} 轮：${turn.userText || "（图片/无文本）"}`}
             title={`第 ${turn.index + 1} 轮：${turn.userText || "（图片/无文本）"}`}
           >
-            <span className="turn-thumb-index">{turn.index + 1}</span>
+            <span className="turn-thumb-bar" />
             {hover && (
               <div className="turn-thumb-pop">
                 <div className="turn-thumb-pop-head">
