@@ -371,6 +371,13 @@ button, input, select, textarea, summary, label {
 .preview-divider::before { position: absolute; top: 0; bottom: 0; left: 3px; width: 1px; background: var(--border-strong); content: ""; transition: width .12s ease, left .12s ease, background .12s ease; }
 .preview-divider:hover::before, .preview-divider:focus-visible::before, .preview-divider.dragging::before { left: 2px; width: 3px; background: var(--accent); }
 .timeline { height: 100%; min-height: 0; padding-bottom: var(--composer-space, 122px); overflow-x: hidden; overflow-y: auto; }
+/* 长对话只渲染可视区内消息（参考 VCPChat 的「墓碑冻结 + 涟漪优先」思路，通用手段）：
+   content-visibility:auto 让滚出可视区的历史消息「跳过渲染」，流式重绘与滚动重算的
+   负担集中在用户正在看的范围；文字/图片测量留给可视区。contain-intrinsic-size:auto
+   记住该条上次实际渲染高度（96px 仅为从未渲染过的兜底），跳过时仍占位，滚动条不因
+   惯性跳变而抖动。只作用于 .timeline 直接子元素 .message（含 pending-response），
+   不误伤空态容器与进度行。流式/粘底均不受影响——可视区内的消息照常渲染。 */
+.timeline > .message { content-visibility: auto; contain-intrinsic-size: auto 96px; }
 .message { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 12px; width: min(840px, calc(100% - 48px)); max-width: 100%; min-width: 0; margin: 0 auto; padding: 20px 0; overflow: hidden; }
 .message + .message { border-top: 1px solid var(--border-message); }
 /* 消息入场：新消息淡入上移（状态反馈）。流式更新时 React 复用 DOM 节点，
