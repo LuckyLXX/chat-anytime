@@ -1643,7 +1643,7 @@ button, input, select, textarea, summary, label {
  * 卡片展示该轮用户输入 + AI 输出摘要，点击滚动到该轮。默认背景用
  * var(--panel-bg) 派生、状态色走既有 token，主题可覆盖。
  * ============================================================ */
-.turn-minimap { position: absolute; top: 52px; left: 8px; bottom: calc(var(--composer-space, 122px) + 12px); z-index: 30; display: flex; flex-direction: column; gap: 7px; width: 34px; pointer-events: none; }
+.turn-minimap { position: absolute; top: 52px; left: 8px; bottom: calc(var(--composer-space, 122px) + 12px); z-index: 30; display: flex; flex-direction: column; justify-content: center; gap: 7px; width: 34px; pointer-events: none; }
 .turn-minimap > * { pointer-events: auto; }
 .turn-thumb { position: relative; display: flex; align-items: center; flex: 0 0 auto; width: 30px; height: 12px; cursor: pointer; }
 .turn-thumb:focus-visible { outline: none; }
