@@ -40,7 +40,7 @@
 > `terminal` 是预览面板内的嵌入式终端区域（xterm.js 宿主）。终端配色由 `--code-surface` / `--code-text` / `--selection-bg` token 驱动，主题改这三个 token 即可换终端配色；`[data-pane="terminal"]` 钩子可用于边框、内边距等容器装饰。
 > `question-panel` 是 AI 提问（ask_question 工具）时从输入栏上方向上展开的应答面板，位于 `conversation` 区域内、`composer` 正上方。面板分页式逐题作答（右上角页码/箭头切换，草稿跨页保留），底部「忽略」取消提问、「继续」手动推进或提交；选择题第一个选项自动标注「（推荐）」——与工具描述约定一致（模型把最推荐的选项放第一位），单选点选/回车/空格即选中并自动进入下一题（末题自动提交，重选直接换项），多选保持勾选多个、由「继续」或输入框回车推进；面板内快捷键：Tab/上下键移动选择（单选上下键移动时同步改选但不跳页）、回车或空格确认（单选确认即跳页）。
 > `memory-panel` 是会话区右上方面板坞的记忆页（待办页 `task-panel` 居前，两者合并为一个浮动面板坞，头部 tab 切换，关闭态为单个 FAB）。
-> `turn-minimap` 是会话时间线右缘的「轮次缩略导航」——每个缩略块对应一轮对话（一次用户提问 + 对应 AI 回复），hover 放大成浮出卡片展示该轮摘要、点击滚动到该轮。`.turn-minimap` 窄条用 `var(--panel-bg)` 派生背景，`.turn-thumb` 缩略块、`.turn-thumb.active` 当前轮、`.turn-thumb-pop` 悬停放大的浮出卡片均可用 `[data-pane="turn-minimap"]` 后代选择器重设计。默认背景色走 `--surface`/`--accent-soft`，主题可覆盖。
+> `turn-minimap` 是会话时间线左缘（聊天气泡左侧空位）的「轮次缩略导航」——每个缩略块对应一轮对话（一次用户提问 + 对应 AI 回复），hover 放大成浮出卡片展示该轮摘要、点击滚动到该轮。`.turn-minimap` 窄条用 `var(--panel-bg)` 派生背景，`.turn-thumb` 缩略块、`.turn-thumb.active` 当前轮、`.turn-thumb-pop` 悬停放大的浮出卡片均可用 `[data-pane="turn-minimap"]` 后代选择器重设计。默认背景色走 `--surface`/`--accent-soft`，主题可覆盖。
 
 ```css
 [data-pane="composer"] { border-image: url(frame.webp) 0 220 fill; border-radius: 0; }

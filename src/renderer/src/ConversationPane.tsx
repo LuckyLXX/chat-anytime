@@ -1391,7 +1391,7 @@ export const ConversationPane = memo(function ConversationPane({
         </header>
       )}
       {showDock && <PanelDock />}
-      <div className="timeline" data-pane="timeline" ref={timelineRef}>
+      <div className={`timeline${turns.length >= 2 ? " has-turn-minimap" : ""}`} data-pane="timeline" ref={timelineRef}>
         {awaitingHydration ? (
           <div className="empty-conversation" data-pane="landing"><div className="empty-icon"><LoaderCircle size={22} className="spinning" /></div><h1>正在载入会话{title ? `「${title}」` : ""}…</h1></div>
         ) : !data.workspace ? (

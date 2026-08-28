@@ -378,6 +378,8 @@ button, input, select, textarea, summary, label {
    惯性跳变而抖动。只作用于 .timeline 直接子元素 .message（含 pending-response），
    不误伤空态容器与进度行。流式/粘底均不受影响——可视区内的消息照常渲染。 */
 .timeline > .message { content-visibility: auto; contain-intrinsic-size: auto 96px; }
+/* 缩略导航存在时，消息居中时两侧留出更宽的边距，让左侧缩略列不与气泡重叠。 */
+.timeline.has-turn-minimap > .message { width: min(840px, calc(100% - 116px)); }
 .message { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 12px; width: min(840px, calc(100% - 48px)); max-width: 100%; min-width: 0; margin: 0 auto; padding: 20px 0; overflow: hidden; }
 .message + .message { border-top: 1px solid var(--border-message); }
 /* 消息入场：新消息淡入上移（状态反馈）。流式更新时 React 复用 DOM 节点，
@@ -1641,7 +1643,7 @@ button, input, select, textarea, summary, label {
  * 卡片展示该轮用户输入 + AI 输出摘要，点击滚动到该轮。默认背景用
  * var(--panel-bg) 派生、状态色走既有 token，主题可覆盖。
  * ============================================================ */
-.turn-minimap { position: absolute; top: 52px; right: 8px; bottom: calc(var(--composer-space, 122px) + 12px); z-index: 30; display: flex; flex-direction: column; gap: 4px; width: 34px; pointer-events: none; }
+.turn-minimap { position: absolute; top: 52px; left: 8px; bottom: calc(var(--composer-space, 122px) + 12px); z-index: 30; display: flex; flex-direction: column; gap: 4px; width: 34px; pointer-events: none; }
 .turn-minimap > * { pointer-events: auto; }
 .turn-thumb { position: relative; display: grid; place-items: center; flex: 0 0 auto; width: 34px; height: 26px; border: 1px solid transparent; border-radius: 6px; color: var(--text-muted); background: var(--surface); box-shadow: var(--shadow-sm); cursor: pointer; }
 .turn-thumb:hover, .turn-thumb:focus-visible { border-color: var(--border-strong); color: var(--text); outline: none; }
@@ -1649,12 +1651,12 @@ button, input, select, textarea, summary, label {
 .turn-thumb-index { font-size: 10px; font-weight: 650; line-height: 1; }
 .turn-thumb:hover { background: var(--surface-button-hover); }
 .turn-thumb:active { transform: scale(.94); }
-.turn-thumb-pop { position: absolute; right: 42px; top: 50%; z-index: 60; display: flex; flex-direction: column; gap: 6px; width: min(300px, calc(100vw - 24px)); padding: 10px 12px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow-lg); transform: translateY(-50%); animation: turn-pop-in .16s cubic-bezier(0.16, 1, 0.3, 1); }
+.turn-thumb-pop { position: absolute; left: 42px; top: 50%; z-index: 60; display: flex; flex-direction: column; gap: 6px; width: min(300px, calc(100vw - 24px)); padding: 10px 12px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow-lg); transform: translateY(-50%); animation: turn-pop-in .16s cubic-bezier(0.16, 1, 0.3, 1); }
 .turn-thumb-pop-head { display: flex; align-items: center; gap: 5px; color: var(--text-muted); }
 .turn-thumb-pop-head.ai { color: var(--accent-text); }
 .turn-thumb-pop-label { font-size: 11px; font-weight: 650; }
 .turn-thumb-pop-text { margin: 0; color: var(--text); font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
-@keyframes turn-pop-in { from { opacity: 0; transform: translateY(-50%) translateX(4px); } to { opacity: 1; transform: translateY(-50%) translateX(0); } }
+@keyframes turn-pop-in { from { opacity: 0; transform: translateY(-50%) translateX(-4px); } to { opacity: 1; transform: translateY(-50%) translateX(0); } }
 :root[data-ui-density] .turn-thumb { height: calc(26px * var(--ui-density-scale)); }
 :root[data-ui-radius] .turn-thumb { border-radius: var(--ui-control-radius); }
 :root[data-ui-radius] .turn-thumb-pop { border-radius: var(--ui-container-radius); }
