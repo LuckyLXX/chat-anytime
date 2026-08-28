@@ -1584,26 +1584,53 @@ button, input, select, textarea, summary, label {
  * 主题/默认完全兼容。主题可覆盖这些 token 或忽略这些属性。覆盖段
  * 置后 + 同特异性，后写生效；不修改任何既有规则，可整段回退。
  * ============================================================ */
+/* ============================================================
+ * 界面微调（运行时覆盖层）：data-ui-density / data-ui-radius。
+ * 由设置【外观 → 界面微调】写入 <html>（App.tsx 投影）。默认值 = 当前
+ * 视觉现状，未切换时 token 等于现值、无覆盖。覆盖层统一用
+ * `:root[data-ui-*]` 前缀抬高特异性（≥0,3,0）压过主题对尺寸/圆角的属性选择器
+ * （data-pane/data-control 等），符合「用户显式微调 > 主题默认」优先级，
+ * 但不覆盖颜色。不修改任何既有规则，可整段回退。
+ * ============================================================ */
 :root {
   --ui-density-scale: 1;
-  --ui-control-radius: 6px;   /* 控件圆角（按钮/输入/chip/列表行/图标钮） */
-  --ui-container-radius: 10px;/* 容器圆角（气泡/面板/菜单弹层/代码块） */
+  --ui-control-radius: 6px;    /* 控件圆角（按钮/输入/chip/列表行/图标钮） */
+  --ui-container-radius: 10px; /* 容器圆角（气泡/面板/菜单弹层/代码块） */
 }
-:root[data-ui-density="compact"] { --ui-density-scale: 0.85; }
+:root[data-ui-density="compact"] { --ui-density-scale: 0.82; }
 :root[data-ui-density="comfortable"] { --ui-density-scale: 1; }
-:root[data-ui-density="relaxed"] { --ui-density-scale: 1.15; }
+:root[data-ui-density="relaxed"] { --ui-density-scale: 1.18; }
 :root[data-ui-radius="square"] { --ui-control-radius: 0px; --ui-container-radius: 0px; }
 :root[data-ui-radius="small"] { --ui-control-radius: 4px; --ui-container-radius: 6px; }
 :root[data-ui-radius="medium"] { --ui-control-radius: 6px; --ui-container-radius: 10px; }
-:root[data-ui-radius="round"] { --ui-control-radius: 999px; --ui-container-radius: 14px; }
+:root[data-ui-radius="round"] { --ui-control-radius: 999px; --ui-container-radius: 16px; }
 
-/* 列表行高随密度缩放（侧栏话题/助手行、侧栏底部按钮） */
-.session-list button { min-height: calc(48px * var(--ui-density-scale)); }
-.agent-list button { min-height: calc(50px * var(--ui-density-scale)); }
-.sidebar-footer > button { height: calc(32px * var(--ui-density-scale)); }
+/* —— 密度：侧栏列表/工作区树/侧栏控件/新建话题按钮随系数缩放 —— */
+:root[data-ui-density] .session-list button { min-height: calc(48px * var(--ui-density-scale)); }
+:root[data-ui-density] .session-workspace-toggle { min-height: calc(43px * var(--ui-density-scale)); }
+:root[data-ui-density] .session-workspace-items button { min-height: calc(44px * var(--ui-density-scale)); }
+:root[data-ui-density] .agent-list button { min-height: calc(50px * var(--ui-density-scale)); }
+:root[data-ui-density] .workspace-tree-row { min-height: calc(26px * var(--ui-density-scale)); }
+:root[data-ui-density] .sidebar-tabs button { height: calc(34px * var(--ui-density-scale)); }
+:root[data-ui-density] .sidebar-footer > button { height: calc(32px * var(--ui-density-scale)); }
+:root[data-ui-density] .new-session-button { height: calc(36px * var(--ui-density-scale)); }
 
-/* 代表性控件/容器圆角走 token；其余保持默认（默认=现值不变） */
-.icon-button, .new-session-button, .sidebar-search, .context-menu-item,
-.sidebar-tabs button, .preview-open-trigger { border-radius: var(--ui-control-radius); }
-.context-menu, .composer, .question-panel, .sidebar-flyout,
-.message-assistant .message-body, .artifact-card, .code-block, .mermaid-block { border-radius: var(--ui-container-radius); }
+/* —— 圆角：代表性控件/容器走 token（其余保持默认，默认=现值不变） —— */
+:root[data-ui-radius] .icon-button,
+:root[data-ui-radius] .new-session-button,
+:root[data-ui-radius] .sidebar-search,
+:root[data-ui-radius] .context-menu-item,
+:root[data-ui-radius] .sidebar-tabs button,
+:root[data-ui-radius] .preview-open-trigger,
+:root[data-ui-radius] .sidebar-view-toggle,
+:root[data-ui-radius] .workspace-tree-back { border-radius: var(--ui-control-radius); }
+:root[data-ui-radius] .context-menu,
+:root[data-ui-radius] .composer,
+:root[data-ui-radius] .question-panel,
+:root[data-ui-radius] .sidebar-flyout,
+:root[data-ui-radius] .preview-open-menu,
+:root[data-ui-radius] .message-assistant .message-body,
+:root[data-ui-radius] .message-user .message-body,
+:root[data-ui-radius] .artifact-card,
+:root[data-ui-radius] .code-block,
+:root[data-ui-radius] .mermaid-block { border-radius: var(--ui-container-radius); }
