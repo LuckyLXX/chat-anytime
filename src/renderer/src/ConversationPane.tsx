@@ -30,7 +30,8 @@ import {
   Workflow,
   X,
   Zap,
-  ClipboardList
+  ClipboardList,
+  History
 } from "lucide-react";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import type {
@@ -418,13 +419,27 @@ function CompactTimingMeta({ timing, now }: { timing: TurnTiming; now: number })
   );
 }
 
-function ChangedFilesPanel({ files, onOpenFile, onOpenDiff }: { files: ReplyChangedFile[]; onOpenFile(relativePath: string): void; onOpenDiff(execution: ToolExecution): void }): ReactNode {
+function ChangedFilesPanel({ files, onOpenFile, onOpenDiff, onRollback, message, rollbackDisabled }: { files: ReplyChangedFile[]; onOpenFile(relativePath: string): void; onOpenDiff(execution: ToolExecution): void; onRollback?(message: ChatMessage): void; message: ChatMessage; rollbackDisabled?: boolean }): ReactNode {
   return (
     <details className="reply-files-panel">
       <summary>
         <span><PackageOpen size={14} /><strong>交付产物</strong><em>{files.length}</em></span>
         <span className="reply-files-toggle" aria-hidden="true" />
       </summary>
+      {onRollback && !rollbackDisabled && (
+        <div className="reply-files-rollback">
+          <button
+            type="button"
+            className="reply-file-action"
+            title="把这些文件恢复到本回复改动前的状态（AI 新建的文件将被删除）"
+            aria-label="回滚本次变更"
+            onClick={(event) => { event.preventDefault(); event.stopPropagation(); onRollback(message); }}
+          >
+            <History size={13} />
+            <span>回滚本次变更</span>
+          </button>
+        </div>
+      )}
       <div className="reply-files-list">
         {files.map(({ relativePath, kind, execution }) => {
           const name = relativePath.split("/").at(-1) ?? relativePath;
@@ -456,7 +471,7 @@ function ChangedFilesPanel({ files, onOpenFile, onOpenDiff }: { files: ReplyChan
 // Memoized so an unchanged message bubble (stable ChatMessage reference from
 // the store's uuid-based reuse) is skipped during high-frequency streaming
 // updates that only mutate other bubbles.
-const MessageView = memo(function MessageView({ message, executions, onOpenArtifact, onOpenFile, onOpenDiff, onHtmlAction, onCopy, onEdit, onRegenerate, onShare, showThinking = true, hiddenThinkingLabel, busy = false, turnActive = false, timing, now = Date.now(), turnKey }: { message: ChatMessage; executions: ToolExecution[]; onOpenArtifact(artifact: Artifact): void; onOpenFile(relativePath: string): void; onOpenDiff(execution: ToolExecution): void; onHtmlAction(text: string): void; onCopy(message: ChatMessage): void; onEdit(message: ChatMessage): void; onRegenerate(message: ChatMessage): void; onShare(message: ChatMessage, target: HTMLElement): Promise<void>; showThinking?: boolean; hiddenThinkingLabel?: string; busy?: boolean; turnActive?: boolean; timing?: TurnTiming; now?: number; turnKey?: string }): ReactNode {
+const MessageView = memo(function MessageView({ message, executions, onOpenArtifact, onOpenFile, onOpenDiff, onHtmlAction, onCopy, onEdit, onRegenerate, onShare, onRollback, showThinking = true, hiddenThinkingLabel, busy = false, turnActive = false, timing, now = Date.now(), turnKey }: { message: ChatMessage; executions: ToolExecution[]; onOpenArtifact(artifact: Artifact): void; onOpenFile(relativePath: string): void; onOpenDiff(execution: ToolExecution): void; onHtmlAction(text: string): void; onCopy(message: ChatMessage): void; onEdit(message: ChatMessage): void; onRegenerate(message: ChatMessage): void; onShare(message: ChatMessage, target: HTMLElement): Promise<void>; onRollback?(message: ChatMessage): void; showThinking?: boolean; hiddenThinkingLabel?: string; busy?: boolean; turnActive?: boolean; timing?: TurnTiming; now?: number; turnKey?: string }): ReactNode {
   const text = messageText(message);
   const shareTargetRef = useRef<HTMLDivElement | null>(null);
   const [sharing, setSharing] = useState(false);
@@ -514,7 +529,7 @@ const MessageView = memo(function MessageView({ message, executions, onOpenArtif
           <ActionTimeline message={message} executions={executions} turnActive={turnActive} showThinking={showThinking} thinkingLabel={hiddenThinkingLabel} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} timing={timing} now={now} />
           {message.error && <p className="inline-error"><AlertCircle size={15} />{message.error}</p>}
         </div>
-        {changedFiles.length > 0 && <ChangedFilesPanel files={changedFiles} onOpenFile={onOpenFile} onOpenDiff={onOpenDiff} />}
+        {changedFiles.length > 0 && <ChangedFilesPanel files={changedFiles} message={message} onOpenFile={onOpenFile} onOpenDiff={onOpenDiff} onRollback={onRollback} rollbackDisabled={busy} />}
         {!isControlMessage && !message.streaming && !busy && <div className="message-actions"><button type="button" data-control="regenerate" title="重新生成" aria-label="重新生成回复" onClick={() => onRegenerate(message)}><RefreshCw size={13} /></button><button type="button" data-control="copy" title="复制" aria-label="复制 AI 回复" onClick={() => onCopy(message)}><Copy size={13} /></button>{hasShareableContent && <button type="button" data-control="share" title={sharing ? "正在生成图片" : shared ? "已复制图片" : "分享图片"} aria-label={sharing ? "正在生成回复图片" : shared ? "回复图片已复制" : "分享 AI 回复图片"} disabled={sharing} onClick={() => void share()}>{sharing ? <LoaderCircle size={13} className="spinning" /> : shared ? <Check size={13} /> : <Share2 size={13} />}</button>}</div>}
       </div>
       {timing && (isControlMessage ? <CompactTimingMeta timing={timing} now={now} /> : <TimingMeta timing={timing} now={now} />)}
@@ -550,6 +565,8 @@ export interface ConversationPaneProps {
   onOpenPlanDetail(detail: string): void;
   /** 会话操作失败提示（App 层 toast）。传 undefined 清除。 */
   onActionError(message?: string): void;
+  /** 回滚该条回复对文件的改动（App 层弹确认对话框后发命令）。缺省不显示回滚按钮。 */
+  onRollback?(message: ChatMessage): void;
 }
 
 /**
@@ -580,7 +597,8 @@ export const ConversationPane = memo(function ConversationPane({
   onOpenFile,
   onOpenDiff,
   onOpenPlanDetail,
-  onActionError
+  onActionError,
+  onRollback
 }: ConversationPaneProps): ReactNode {
   const data = usePaneData(sessionId);
   const settings = useDesktopStore((state) => state.settings);
@@ -1406,7 +1424,7 @@ export const ConversationPane = memo(function ConversationPane({
             const timing = showTurnTimingOnLatest && index === latestAssistantMessageIndex && message.role === "assistant" ? data.turnTiming : undefined;
             const turnActive = data.busy && index === latestAssistantMessageIndex && message.role === "assistant";
             const turnKey = turnStartKeys.has(message.uuid ?? message.id) ? (message.uuid ?? message.id) : undefined;
-            return <MessageView key={message.uuid ?? message.id} message={message} executions={data.executions} onOpenArtifact={onOpenArtifact} onOpenFile={onOpenFile} onOpenDiff={onOpenDiff} onHtmlAction={handleHtmlAction} onCopy={copyMessage} onEdit={editMessage} onRegenerate={regenerateMessage} onShare={shareMessage} showThinking={showThinking} busy={data.busy} turnActive={turnActive} timing={timing} now={timing ? now : undefined} turnKey={turnKey} />;
+            return <MessageView key={message.uuid ?? message.id} message={message} executions={data.executions} onOpenArtifact={onOpenArtifact} onOpenFile={onOpenFile} onOpenDiff={onOpenDiff} onHtmlAction={handleHtmlAction} onCopy={copyMessage} onEdit={editMessage} onRegenerate={regenerateMessage} onShare={shareMessage} onRollback={onRollback} showThinking={showThinking} busy={data.busy} turnActive={turnActive} timing={timing} now={timing ? now : undefined} turnKey={turnKey} />;
           })}
           {isGenerating && (assistantBubbleVisible ? <div className="response-progress response-progress-inline"><LoaderCircle size={14} className="spinning" /><span>{workingLabel}</span>{activeTurnTiming && <TimingMeta timing={activeTurnTiming} now={now} />}</div> : <PendingResponse label={workingLabel} timing={activeTurnTiming} now={now} />)}
         </>}

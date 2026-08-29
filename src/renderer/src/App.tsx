@@ -29,12 +29,15 @@ import {
   GitBranch,
   ChevronLeft,
   Pin,
+  History,
+  File as FileIcon,
   X
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import type {
   AccessMode,
   AppearanceSettings,
+  ChatMessage,
   InterfaceTuning,
   BrowserElementPick,
   AgentProfile,
@@ -59,6 +62,7 @@ import type {
   SessionSummary
 } from "../../shared/protocol";
 import { sessionRunStatusLabels, thinkingLevelLabels, toolLabel } from "../../shared/locale";
+import { changedFilesForMessage, type ReplyChangedFile } from "./lib/changed-files";
 import { ArtifactPreview, type PreviewEditorState, type PreviewTab, type PreviewTarget } from "./components/ArtifactPreview";
 import type { EditorSaveStatus } from "./components/MarkdownEditor";
 import { WorkspaceTree } from "./components/WorkspaceTree";
@@ -1020,7 +1024,7 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
 }
 
 export function App(): ReactNode {
-  const { ready, snapshot, models, providers, resources, customProvider, customProviderKeyConfigured, customModels, customModelFetchStatus, customModelFetchError, modelRefreshStatus, modelRefreshError, modelRefreshProvider, permissions, questions, error, initialize, clearError } = useDesktopStore();
+  const { ready, snapshot, models, providers, resources, customProvider, customProviderKeyConfigured, customModels, customModelFetchStatus, customModelFetchError, modelRefreshStatus, modelRefreshError, modelRefreshProvider, permissions, questions, error, checkpointResult, initialize, clearError } = useDesktopStore();
   // 分屏布局：tree 为递归二叉分割树，focusedPane 是焦点格（= 激活会话）。
   // 权限/提问按格子集合过滤（焦点格优先），store 的数组跨会话累积，直接取
   // [0] 会把后台会话待决的弹窗冒到别的格子视图里；单窗口退化为 [激活会话]，
@@ -1041,6 +1045,16 @@ export function App(): ReactNode {
   const [messageActionError, setMessageActionError] = useState<string>();
   const setActionError = useCallback((message?: string): void => {
     setMessageActionError(message);
+  }, []);
+  /** 打开回滚确认框：按消息的 tool-call 块聚合交付产物，无产物不弹。 */
+  const openRollbackConfirm = useCallback((message: ChatMessage, sessionId: string | undefined): void => {
+    if (!sessionId) return;
+    const state = useDesktopStore.getState();
+    const source = state.snapshot.sessionId === sessionId ? state.snapshot : state.paneStates[sessionId];
+    if (!source) return;
+    const files = changedFilesForMessage(message, source.executions);
+    if (files.length === 0) return;
+    setRollbackTarget({ message, sessionId, files });
   }, []);
   const [sidebarTab, setSidebarTab] = useState<"agents" | "topics">("topics");
   const [sidebarQuery, setSidebarQuery] = useState("");
@@ -1064,6 +1078,17 @@ export function App(): ReactNode {
   const [renameValue, setRenameValue] = useState("");
   const [deleteSession, setDeleteSession] = useState<{ path: string; title: string } | null>(null);
   const [removeWorkspace, setRemoveWorkspace] = useState<{ workspace: string; name: string; count: number } | null>(null);
+  // —— checkpoint 回滚：确认对话框目标 + 完成后的 toast ——
+  const [rollbackTarget, setRollbackTarget] = useState<{ message: ChatMessage; sessionId: string; files: ReplyChangedFile[] } | null>(null);
+  const [checkpointToast, setCheckpointToast] = useState<string>();
+  const lastCheckpointAtRef = useRef(0);
+  useEffect(() => {
+    if (!checkpointResult || checkpointResult.at === lastCheckpointAtRef.current) return;
+    lastCheckpointAtRef.current = checkpointResult.at;
+    setCheckpointToast(checkpointResult.message ?? "回滚完成");
+    // 回滚改了盘上文件：文件树重新拉取（预览重开时自然读到新内容）。
+    setTreeRefreshSignal((value) => value + 1);
+  }, [checkpointResult]);
   const [previewSplit, setPreviewSplit] = useState(readStoredPreviewSplit);
   const [previewDragging, setPreviewDragging] = useState(false);
   const previewDragPointerRef = useRef<number | undefined>(undefined);
@@ -1726,10 +1751,11 @@ export function App(): ReactNode {
           onOpenDiff={openDiffPreview}
           onOpenPlanDetail={openPlanPreview}
           onActionError={setActionError}
+          onRollback={(message) => openRollbackConfirm(message, leafSessionId)}
         />
       </div>
     );
-  }, [snapshot.sessions, focusedPaneId, maximizedPaneId, openArtifactPreview, openFilePreview, openDiffPreview, registerComposerApi, draftStore, setActionError, getPaneCallbacks]);
+  }, [snapshot.sessions, focusedPaneId, maximizedPaneId, openArtifactPreview, openFilePreview, openDiffPreview, registerComposerApi, draftStore, setActionError, getPaneCallbacks, openRollbackConfirm]);
 
   /** 分隔条拖动：按 split 节点路径更新比例（夹取在 SplitDivider 内完成）。 */
   const handleSplitRatioChange = useCallback((path: readonly number[], ratio: number): void => {
@@ -1996,6 +2022,7 @@ export function App(): ReactNode {
               onOpenDiff={openDiffPreview}
               onOpenPlanDetail={openPlanPreview}
               onActionError={setActionError}
+              onRollback={(message) => openRollbackConfirm(message, snapshot.sessionId)}
             />
           )}
 
@@ -2030,6 +2057,33 @@ export function App(): ReactNode {
             <footer><button className="secondary-button" type="button" onClick={() => setDeleteSession(null)}>取消</button><button className="danger-button" type="button" onClick={() => { void window.piDesktop.send({ type: "session.delete", path: deleteSession.path }); setDeleteSession(null); }}>删除</button></footer>
           </div>
         </div>
+      )}
+      {rollbackTarget && (
+        <div className="modal-backdrop permission-backdrop" onClick={() => setRollbackTarget(null)}>
+          <div className="permission-dialog" role="alertdialog" aria-modal="true" aria-label="回滚本次变更" onClick={(event) => event.stopPropagation()}>
+            <header><div className="risk-icon write"><History size={20} /></div><div><h2>回滚本回复的文件变更？</h2><p>以下文件将恢复到本次改动前的状态；AI 新建的文件将被删除，已修改文件的当前内容会被覆盖。</p></div></header>
+            <div className="rollback-file-list">
+              {rollbackTarget.files.map((file) => (
+                <div className="rollback-file-row" key={file.relativePath}><FileIcon size={13} /><span title={file.relativePath}>{file.relativePath}</span></div>
+              ))}
+            </div>
+            <footer>
+              <button className="secondary-button" type="button" onClick={() => setRollbackTarget(null)}>取消</button>
+              <button
+                className="primary-button"
+                type="button"
+                onClick={() => {
+                  const toolCallIds = rollbackTarget.message.blocks.filter((block) => block.type === "tool-call").map((block) => block.id);
+                  void window.piDesktop.send({ type: "checkpoint.rollback", sessionId: rollbackTarget.sessionId, toolCallIds });
+                  setRollbackTarget(null);
+                }}
+              >回滚</button>
+            </footer>
+          </div>
+        </div>
+      )}
+      {checkpointToast && (
+        <div className="error-toast checkpoint-toast"><History size={18} /><span>{checkpointToast}</span><button className="icon-button" type="button" title="关闭提示" aria-label="关闭提示" onClick={() => setCheckpointToast(undefined)}><X size={16} /></button></div>
       )}
       {removeWorkspace && (
         <div className="modal-backdrop permission-backdrop" onClick={() => setRemoveWorkspace(null)}>

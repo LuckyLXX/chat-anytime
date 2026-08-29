@@ -438,6 +438,12 @@ export function createDemoApi(): DesktopApi {
         case "session.planMode":
           updateSnapshot({ planMode: command.enabled });
           break;
+        case "checkpoint.rollback": {
+          // 演示：逐文件报告恢复完成，随即模拟主进程的 checkpoint-result 推送。
+          const results = command.toolCallIds.map((id, index) => ({ relativePath: `demo/rollback-${index + 1}.txt`, action: "restored" as const }));
+          emit({ type: "checkpoint-result", sessionId: command.sessionId ?? demoSnapshot.sessionId ?? "demo", results, message: `已回滚：恢复 ${results.length} 个文件` });
+          break;
+        }
         case "session.rename":
           updateSnapshot({ sessions: demoSnapshot.sessions.map((item) => item.path === command.path ? { ...item, title: command.title } : item) });
           break;

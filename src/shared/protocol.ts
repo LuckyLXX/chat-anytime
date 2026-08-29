@@ -189,9 +189,22 @@ export interface DesktopSettings {
   memory?: MemorySettings;
   hooks?: HooksSettings;
   browser?: BrowserSettings;
+  checkpoint?: CheckpointSettings;
   customProvider?: CustomProviderSettings;
   customProviderKeyConfigured?: boolean;
   pinnedSessionPaths?: string[];
+}
+
+/** checkpoint 回滚总开关，语义与 memory/hooks/browser 相同：缺省视为启用。 */
+export interface CheckpointSettings {
+  enabled?: boolean;
+}
+
+/** 单个文件的回滚结果；action=skipped 时 detail 说明原因。 */
+export interface CheckpointRollbackResult {
+  relativePath: string;
+  action: "restored" | "deleted" | "skipped";
+  detail?: string;
 }
 
 export interface ImageAttachment {
@@ -871,6 +884,8 @@ export type RuntimeCommand =
   | { type: "resources.reload" }
   | { type: "permission.resolve"; id: string; decision: PermissionDecision }
   | { type: "question.resolve"; id: string; answers?: string[] }
+  /** 回滚一条 AI 回复对文件的改动：按消息内工具调用的 id 定位快照，每文件取最早快照恢复。 */
+  | { type: "checkpoint.rollback"; sessionId?: string; toolCallIds: string[] }
   /** main 进程回传的浏览器自动化结果（响应 utility 的 browser-automation.request）。 */
   | { type: "browser-automation.result"; requestId: string; result: BrowserAutomationResult };
 
@@ -895,6 +910,8 @@ export type RuntimeMessage =
     /** 该会话当前是否正被渲染端展示（激活或分屏 watch）；main 端免打扰判断用。 */
     visible?: boolean }
   | { type: "hook-run"; name: string; scope: "project" | "global"; ok: boolean; blocked?: boolean; detail: string; durationMs: number }
+  /** checkpoint 回滚完成：逐文件结果随推送展示；渲染端据此刷新工作区树。 */
+  | { type: "checkpoint-result"; sessionId: string; results: CheckpointRollbackResult[]; message?: string }
   /** utility 进程发起的浏览器自动化操作；main 完成后以 browser-automation.result 命令回传。 */
   | { type: "browser-automation.request"; requestId: string; sessionKey: string; request: BrowserAutomationRequest }
   | { type: "error"; message: string }

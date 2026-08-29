@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type {
+  CheckpointRollbackResult,
   CustomProviderModel,
   DesktopSettings,
   MemoryTopic,
@@ -23,6 +24,14 @@ export interface HookRunResult {
   blocked?: boolean;
   detail: string;
   durationMs: number;
+  at: number;
+}
+
+/** 最近一次 checkpoint 回滚结果（checkpoint-result 推送）；App 据此 toast + 刷新工作区树。 */
+export interface CheckpointResultInfo {
+  sessionId: string;
+  results: CheckpointRollbackResult[];
+  message?: string;
   at: number;
 }
 
@@ -130,6 +139,8 @@ interface DesktopState {
   questions: QuestionRequest[];
   /** 最近一次钩子测试结果；面板按 name+scope 匹配展示。 */
   hookRun?: HookRunResult;
+  /** 最近一次 checkpoint 回滚结果；App 监听变化弹 toast 并刷新工作区树。 */
+  checkpointResult?: CheckpointResultInfo;
   error?: string;
   initialize(): Promise<() => void>;
   handleRuntimeMessage(message: RuntimeMessage): void;
@@ -362,6 +373,9 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
             at: Date.now()
           }
         });
+        break;
+      case "checkpoint-result":
+        set({ checkpointResult: { sessionId: message.sessionId, results: message.results, message: message.message, at: Date.now() } });
         break;
       case "error":
         set({ error: message.message });

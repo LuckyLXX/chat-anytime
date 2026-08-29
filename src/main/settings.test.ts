@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CUSTOM_PROVIDER_ID, createDefaultAgent, isPositiveInt, mergeProviderModels, migrateSettings, normalizeAccessMode, normalizeAgent, normalizeCustomThemes, normalizeDivBubbleMode, normalizeInterfaceTuning, normalizeProvider, normalizeThemeAssets, normalizeVision, normalizeWallpaperOpacity } from "./settings.js";
+import { CUSTOM_PROVIDER_ID, createDefaultAgent, isPositiveInt, mergeProviderModels, migrateSettings, normalizeAccessMode, normalizeAgent, normalizeCheckpoint, normalizeCustomThemes, normalizeDivBubbleMode, normalizeInterfaceTuning, normalizeProvider, normalizeThemeAssets, normalizeVision, normalizeWallpaperOpacity } from "./settings.js";
 
 describe("desktop settings migration", () => {
   it("migrates the legacy custom provider without changing its stable id", () => {
@@ -181,5 +181,15 @@ describe("desktop settings migration", () => {
     expect(normalizeVision({ enabled: false, provider: "", model: "" })).toBeUndefined();
     expect(normalizeVision({ enabled: false, provider: "proxy", model: "glm-4v-flash", prompt: "详细描述" })).toEqual({ enabled: false, provider: "proxy", model: "glm-4v-flash", prompt: "详细描述" });
     expect(normalizeVision("invalid")).toBeUndefined();
+  });
+
+  it("normalizes the checkpoint toggle with default-enabled semantics", () => {
+    expect(normalizeCheckpoint({ enabled: false })).toEqual({ enabled: false });
+    expect(normalizeCheckpoint({})).toEqual({ enabled: true });
+    expect(normalizeCheckpoint("invalid")).toBeUndefined();
+    // 缺省视为启用（enabled !== false），落盘读回不漂移。
+    expect(migrateSettings({ checkpoint: { enabled: false } }).settings.checkpoint).toEqual({ enabled: false });
+    expect(migrateSettings({ checkpoint: { enabled: true } }).settings.checkpoint).toEqual({ enabled: true });
+    expect(migrateSettings({}).settings.checkpoint).toBeUndefined();
   });
 });

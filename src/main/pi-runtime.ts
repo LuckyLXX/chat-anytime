@@ -89,6 +89,8 @@ import * as runtimeContextUsage from "./runtime-context-usage.js";
 import * as runtimeHooks from "./runtime-hooks.js";
 import * as runtimePlanTools from "./runtime-plan-tools.js";
 import { readPlanMode, saveApprovedPlan, writePlanMode } from "./plan-store.js";
+import { checkpointPathFor, readCheckpoints, sweepCheckpoints } from "./checkpoint-store.js";
+import { createCheckpointExtension, rollbackPlan } from "./runtime-checkpoint.js";
 import { hookActionPreview, readConfiguredHooks, removeHookConfig, setHookDisabled, upsertHookConfig, validateHookRule, type ConfiguredHook } from "./hooks-config.js";
 
 const parentPort = process.parentPort;
@@ -1549,6 +1551,17 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
         warn: (message) => void post({ type: "log", level: "warn", message }),
         onToolStart: () => recordBox?.todoPace.record()
       }).extension,
+      // checkpoint 快照（第五个内联扩展）：write/edit 与 bash 显式输出路径动手前
+      // 把目标文件「改之前」的内容存进会话级 JSONL，供渲染端按消息一键回滚。Pi
+      // 会 await tool_execution_start handler，快照完成后工具才开始执行，无竞态；
+      // 路径按 record.agent.id 计算（parked 会话切助手不写错目录），best-effort。
+      createCheckpointExtension({
+        workspace: () => recordWorkspace,
+        sessionId: () => sessionHolder.session?.sessionId ?? activeSessionManager.getSessionId(),
+        agentSessionRoot: () => join(getAgentDir(), "chatanytime-sessions", recordAgent.id),
+        enabled: () => settings?.checkpoint?.enabled !== false,
+        warn: (message) => void post({ type: "log", level: "warn", message })
+      }),
       // 计划模式叙事注入（第四个内联扩展）：只改「有叙事待注入的那一次」LLM
       // 请求的消息尾部，其余请求原样放行（保前缀缓存）；叙事不进 transcript。
       runtimePlanTools.createPlanModeExtension({
@@ -1814,6 +1827,8 @@ async function initialize(command: Extract<RuntimeCommand, { type: "initialize" 
   }
   visionModel = resolveVisionModel(settings.vision, modelRuntime, (model) => hasImageInput(model));
   await refreshCatalog();
+  // checkpoint 快照的全局清扫（mtime 过期/总量超限）：异步不阻塞启动。
+  void sweepCheckpoints(getAgentDir(), Date.now(), (message) => void post({ type: "log", level: "warn", message }));
   if (workspace) await createSession();
   else {
     refreshTodos();
@@ -2046,6 +2061,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       try { await unlink(deleteTarget); } catch { /* 会话文件可能已不存在 */ }
       try { await unlink(join(deleteRoot, "todos", `${sessionId}.json`)); } catch { /* 任务文件可能不存在 */ }
       try { await unlink(join(deleteRoot, "plans", `${sessionId}.json`)); } catch { /* 计划模式状态文件可能不存在 */ }
+      try { await unlink(join(deleteRoot, "checkpoints", `${sessionId}.jsonl`)); } catch { /* 快照文件可能不存在 */ }
       // 删除当前在用的会话后立即补一个空白会话，保持「当前话题」可用。
       if (wasActive && workspace) {
         const sessionDir = workspaceSessionDir();
@@ -2073,6 +2089,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
           // Session-scoped todo file lives next to the session list under todos/.
           try { await unlink(join(removeRoot, "todos", `${item.id}.json`)); } catch { /* 任务文件可能不存在 */ }
           try { await unlink(join(removeRoot, "plans", `${item.id}.json`)); } catch { /* 计划模式状态文件可能不存在 */ }
+          try { await unlink(join(removeRoot, "checkpoints", `${item.id}.jsonl`)); } catch { /* 快照文件可能不存在 */ }
         }
       }
       await refreshSessions();
@@ -2280,6 +2297,27 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     }
     case "session.planMode": {
       setPlanMode(resolveTargetRecord(command.sessionId), command.enabled);
+      break;
+    }
+    case "checkpoint.rollback": {
+      const record = resolveTargetRecord(command.sessionId);
+      const sessionId = record.session.sessionId;
+      // 快照文件按 record.agent.id 算目录（同 plan-store 的教训：parked 会话
+      // 切助手后不能用全局 currentAgent，否则写错目录）。
+      const filePath = checkpointPathFor(join(getAgentDir(), "chatanytime-sessions", record.agent.id), sessionId);
+      const entries = await readCheckpoints(filePath);
+      const results = await rollbackPlan(record.workspace, command.toolCallIds, entries);
+      const restored = results.filter((item) => item.action === "restored").length;
+      const deleted = results.filter((item) => item.action === "deleted").length;
+      const skipped = results.filter((item) => item.action === "skipped").length;
+      const message = results.length === 0
+        ? "本回复没有可回滚的快照（可能早于该功能上线，或改动不经 write/edit/显式输出路径）"
+        : `已回滚：恢复 ${restored} 个文件、删除 ${deleted} 个新建文件${skipped ? `、跳过 ${skipped} 个（详见结果）` : ""}`;
+      post({ type: "checkpoint-result", sessionId, results, message });
+      // 回滚改了盘上文件：重拉会话标题等不受影响，但需要刷新激活快照让渲染端
+      // 重新读取预览索引（writeWorkspaceFile 内部已失效索引缓存）。
+      emitState();
+      emitPaneStateFor(record);
       break;
     }
     case "session.compact": {

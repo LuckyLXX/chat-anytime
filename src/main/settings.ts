@@ -5,6 +5,7 @@ import type {
   AppearanceSettings,
   BrowserSettings,
   BuiltinToolName,
+  CheckpointSettings,
   CustomThemeDefinition,
   DesktopSettings,
   DivBubbleMode,
@@ -240,6 +241,12 @@ export function normalizeBrowser(value: unknown): BrowserSettings | undefined {
   return { enabled: (value as Record<string, unknown>).enabled !== false };
 }
 
+/** checkpoint 回滚总开关，语义与 memory/hooks/browser 相同：缺省视为启用。 */
+export function normalizeCheckpoint(value: unknown): CheckpointSettings | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  return { enabled: (value as Record<string, unknown>).enabled !== false };
+}
+
 export function defaultSettings(): DesktopSettings {
   return {
     version: 2,
@@ -310,7 +317,8 @@ export function migrateSettings(raw: unknown): { settings: DesktopSettings; lega
     vision: normalizeVision(source.vision),
     memory: normalizeMemory(source.memory),
     hooks: normalizeHooks(source.hooks),
-    browser: normalizeBrowser(source.browser)
+    browser: normalizeBrowser(source.browser),
+    checkpoint: normalizeCheckpoint(source.checkpoint)
   };
   const legacyApiKey = typeof source.customProviderApiKey === "string" ? source.customProviderApiKey : undefined;
   return { settings, legacyApiKey };
