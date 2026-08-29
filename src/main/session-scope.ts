@@ -37,3 +37,54 @@ export function mergeSessionSummary(list: SessionSummary[], incoming: SessionSum
   const keyOfIncoming = key(incoming);
   return [...list.filter((item) => key(item) !== keyOfIncoming), incoming].sort((left, right) => right.modifiedAt - left.modifiedAt);
 }
+
+/** 回填用的活跃会话最小投影（来自 liveSessions 记录，见 backfillUnpersistedSessions）。 */
+export interface LiveSessionSeed {
+  sessionId: string;
+  path: string | undefined;
+  workspace: string;
+  agentId: string;
+  activatedAt: number;
+  title?: string;
+  runStatus?: SessionSummary["runStatus"];
+}
+
+/**
+ * 全量磁盘重建后的回填：会话文件直到首条 assistant 消息才落盘（Pi
+ * SessionManager._persist 的 hasAssistant 门槛），新建的空会话只存在于
+ * liveSessions。refreshSessions 若不回填，任何迟到的全量刷新（后台/停靠
+ * 会话回合结束后的 500ms 防抖、pin/rename/delete 后的显式刷新）都会把刚建
+ * 的新话题从侧边栏抹掉，直到用户发出第一条消息。已在磁盘列表中的会话不动；
+ * 回填优先沿用重建前列表里的同名条目（保留重命名/置顶/圆点），否则按 seed
+ * 合成；runStatus 以 live 记录为准覆盖。无回填时原样返回入参引用。
+ */
+export function backfillUnpersistedSessions(
+  list: SessionSummary[],
+  previous: readonly SessionSummary[],
+  live: readonly LiveSessionSeed[],
+  listAgentId: string | undefined
+): SessionSummary[] {
+  if (live.length === 0) return list;
+  const key = (path: string) => resolve(path).toLowerCase();
+  const listedKeys = new Set(list.map((item) => key(item.path)));
+  const previousByKey = new Map(previous.map((item) => [key(item.path), item]));
+  let next = list;
+  for (const seed of live) {
+    if (!seed.path || seed.agentId !== listAgentId) continue;
+    const seedKey = key(seed.path);
+    if (listedKeys.has(seedKey)) continue;
+    listedKeys.add(seedKey);
+    const prior = previousByKey.get(seedKey);
+    const synthetic: SessionSummary = {
+      id: seed.sessionId,
+      path: seed.path,
+      workspace: seed.workspace,
+      title: seed.title ?? "新会话",
+      modifiedAt: seed.activatedAt,
+      messageCount: 0
+    };
+    const base = prior ?? synthetic;
+    next = mergeSessionSummary(next, seed.runStatus ? { ...base, runStatus: seed.runStatus } : base);
+  }
+  return next;
+}

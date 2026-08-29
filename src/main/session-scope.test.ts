@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentWorkspaceSessionDir, mergeSessionSummary, resolveNewSessionDefaults, sessionListReadyFor, workspaceHash } from "./session-scope.js";
+import { agentWorkspaceSessionDir, backfillUnpersistedSessions, mergeSessionSummary, resolveNewSessionDefaults, sessionListReadyFor, workspaceHash, type LiveSessionSeed } from "./session-scope.js";
 
 describe("Agent workspace session scope", () => {
   it("keeps agents and workspaces in separate deterministic directories", () => {
@@ -45,5 +45,44 @@ describe("Agent workspace session scope", () => {
     // Empty lists are never ready, even for the same agent.
     expect(sessionListReadyFor(0, "coder", "coder")).toBe(false);
     expect(sessionListReadyFor(0, undefined, undefined)).toBe(false);
+  });
+});
+
+describe("backfillUnpersistedSessions", () => {
+  const onDisk = { id: "disk", path: "C:/pi/sessions/disk.jsonl", workspace: "C:/work", title: "磁盘话题", modifiedAt: 100, messageCount: 5 };
+
+  it("re-adds live sessions whose file is not on disk yet (fresh 新会话 not wiped by a full refresh)", () => {
+    const seed: LiveSessionSeed = { sessionId: "fresh", path: "C:/pi/sessions/fresh.jsonl", workspace: "C:/work", agentId: "coder", activatedAt: 400 };
+    const backfilled = backfillUnpersistedSessions([onDisk], [onDisk], [seed], "coder");
+    expect(backfilled.map((item) => item.id)).toEqual(["fresh", "disk"]);
+    expect(backfilled[0]).toMatchObject({ id: "fresh", title: "新会话", workspace: "C:/work", messageCount: 0 });
+  });
+
+  it("returns the list reference untouched when there is nothing to backfill", () => {
+    const seed: LiveSessionSeed = { sessionId: "disk", path: "C:/pi/sessions/disk.jsonl", workspace: "C:/work", agentId: "coder", activatedAt: 400 };
+    const list = [onDisk];
+    expect(backfillUnpersistedSessions(list, [onDisk], [seed], "coder")).toBe(list);
+    expect(backfillUnpersistedSessions(list, [onDisk], [], "coder")).toBe(list);
+  });
+
+  it("skips live records of another agent (agent-scoped listing) and records without a file", () => {
+    const other: LiveSessionSeed = { sessionId: "other", path: "C:/pi/sessions/other.jsonl", workspace: "C:/work", agentId: "default", activatedAt: 400 };
+    const fileless: LiveSessionSeed = { sessionId: "fileless", path: undefined, workspace: "C:/work", agentId: "coder", activatedAt: 400 };
+    const list = [onDisk];
+    expect(backfillUnpersistedSessions(list, [onDisk], [other, fileless], "coder")).toBe(list);
+  });
+
+  it("prefers the pre-refresh entry to preserve renames/pins and overlays the live runStatus", () => {
+    const prior = { id: "fresh", path: "C:/pi/sessions/fresh.jsonl", workspace: "C:/work", title: "用户改过名", modifiedAt: 300, messageCount: 0, pinned: true };
+    const seed: LiveSessionSeed = { sessionId: "fresh", path: "c:/pi/sessions/FRESH.jsonl", workspace: "C:/work", agentId: "coder", activatedAt: 400, title: undefined, runStatus: "running" };
+    const backfilled = backfillUnpersistedSessions([onDisk], [prior], [seed], "coder");
+    expect(backfilled.map((item) => item.id)).toEqual(["fresh", "disk"]);
+    expect(backfilled[0]).toEqual({ ...prior, runStatus: "running" });
+  });
+
+  it("deduplicates against the disk list by path (case-insensitive)", () => {
+    const seed: LiveSessionSeed = { sessionId: "disk", path: "c:/pi/sessions/DISK.jsonl", workspace: "C:/work", agentId: "coder", activatedAt: 400 };
+    const backfilled = backfillUnpersistedSessions([onDisk], [onDisk], [seed], "coder");
+    expect(backfilled.map((item) => item.id)).toEqual(["disk"]);
   });
 });
