@@ -1,8 +1,8 @@
-import { access, mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { artifactCandidatesFromBashCommand, artifactCandidatesFromOutput, changedWorkspaceFile, changedWorkspaceFiles, createWorkspaceDirectory, createWorkspaceFile, deleteWorkspaceEntry, existingWorkspaceFiles, isArtifactProducingTool, listWorkspaceDirectory, readWorkspaceFilePreview, renameWorkspaceEntry, searchWorkspaceFiles, writeWorkspaceFile } from "./workspace-preview.js";
+import { artifactCandidatesFromBashCommand, artifactCandidatesFromOutput, changedWorkspaceFile, changedWorkspaceFiles, collectProducedArtifacts, createWorkspaceDirectory, createWorkspaceFile, deleteWorkspaceEntry, existingWorkspaceFiles, isArtifactProducingTool, listWorkspaceDirectory, readWorkspaceFilePreview, renameWorkspaceEntry, searchWorkspaceFiles, writeWorkspaceFile } from "./workspace-preview.js";
 import { IMAGE_PREVIEW_LIMIT_BYTES } from "../shared/protocol.js";
 
 const TINY_PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
@@ -152,36 +152,25 @@ describe("workspace file preview", () => {
     expect(isArtifactProducingTool("recognize_images")).toBe(false);
   });
 
-  it("extracts workspace-relative artifact candidates near save signals from tool output text", () => {
+  it("extracts artifact paths from tool output text regardless of save wording", () => {
     const workspace = "C:/work/demo";
     const output = [
-      "图片已保存：C:/work/demo/outputs/fox.png。",
+      "[OK] C:/work/demo/outputs/报告.pdf — 3 page(s)",
+      "outputs/fox.png",
       "Saved: ./assets/海报.webp",
       "json: { path: \"docs/报告.md\" }",
-      "写入 docs/说明.md 完成",
       "ignored: node_modules/pkg/icon.png",
       "outside: ../other/gone.jpg",
       "non-artifact: bundle.exe"
     ].join("\n");
     expect(artifactCandidatesFromOutput(workspace, output)).toEqual([
+      "outputs/报告.pdf",
       "outputs/fox.png",
       "assets/海报.webp",
-      "docs/说明.md"
+      "docs/报告.md"
     ]);
     expect(artifactCandidatesFromOutput(workspace, "")).toEqual([]);
     expect(artifactCandidatesFromOutput(undefined, "fox.png")).toEqual([]);
-  });
-
-  it("ignores plain reads, diffs and listings without save signals", () => {
-    const workspace = "D:/proj";
-    const catContent = "# Report\n详见 docs/guide.md 与 src/main.ts 的实现。\n";
-    const diff = "diff --git a/src/main/workspace-preview.ts b/src/main/workspace-preview.ts\n+      \"relativePath\": \"outputs/fox.png\",\n";
-    const gitLog = "e17f3be feat(chat): 交付产物\n docs/迭代记录.md | 1 +\n";
-    const listing = "demo.png\nREADME.md\nassets/poster.png\n";
-    expect(artifactCandidatesFromOutput(workspace, catContent)).toEqual([]);
-    expect(artifactCandidatesFromOutput(workspace, diff)).toEqual([]);
-    expect(artifactCandidatesFromOutput(workspace, gitLog)).toEqual([]);
-    expect(artifactCandidatesFromOutput(workspace, listing)).toEqual([]);
   });
 
   it("extracts explicit output paths from bash commands", () => {
@@ -207,6 +196,43 @@ describe("workspace file preview", () => {
     ]);
     await expect(existingWorkspaceFiles(workspace, ["missing.png"])).resolves.toEqual([]);
     await expect(existingWorkspaceFiles(undefined, ["image.png"])).resolves.toEqual([]);
+  });
+
+  it("drops mentioned-but-not-written files through the mtime gate, keeps command-explicit paths", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "pidesktop-artifact-mtime-"));
+    await mkdir(join(workspace, "outputs"));
+    await writeFile(join(workspace, "outputs", "fresh.png"), "png", "utf8");
+    await writeFile(join(workspace, "outputs", "stale.png"), "png", "utf8");
+    const old = new Date(Date.now() - 60_000);
+    await utimes(join(workspace, "outputs", "stale.png"), old, old);
+    const startedAt = Date.now() - 30_000;
+
+    await expect(existingWorkspaceFiles(workspace, ["outputs/fresh.png", "outputs/stale.png"], { minModifiedAt: startedAt }))
+      .resolves.toEqual([{ relativePath: "outputs/fresh.png" }]);
+    // 命令显式写出的路径不走 mtime 门槛：cp -p/mv 保留旧 mtime 的目标也算产物。
+    await expect(existingWorkspaceFiles(workspace, ["outputs/stale.png"])).resolves.toEqual([{ relativePath: "outputs/stale.png" }]);
+  });
+
+  it("collects produced artifacts per tool call: explicit command paths pass, output mentions need fresh mtime", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "pidesktop-artifact-collect-"));
+    await mkdir(join(workspace, "outputs"));
+    await writeFile(join(workspace, "outputs", "gen.png"), "png", "utf8");
+    await writeFile(join(workspace, "outputs", "old.png"), "png", "utf8");
+    const old = new Date(Date.now() - 60_000);
+    await utimes(join(workspace, "outputs", "old.png"), old, old);
+    const startedAt = Date.now() - 30_000;
+
+    // rolldek-image 非 verbose 风格：输出只有裸路径，没有保存指示词。
+    await expect(collectProducedArtifacts(workspace, "bash", { command: "python gen.py -o outputs/gen.png" }, "outputs/gen.png\noutputs/old.png\n", startedAt))
+      .resolves.toEqual([{ relativePath: "outputs/gen.png" }]);
+    // cat 旧文件的场景：输出提及但不曾写出，mtime 门槛剔除。
+    await expect(collectProducedArtifacts(workspace, "bash", { command: "cat outputs/old.png" }, "outputs/old.png\n", startedAt))
+      .resolves.toEqual([]);
+    // 纯读类工具不参与产物识别。
+    await expect(collectProducedArtifacts(workspace, "read", { path: "outputs/gen.png" }, "outputs/gen.png\n", startedAt))
+      .resolves.toEqual([]);
+    await expect(collectProducedArtifacts(undefined, "bash", { command: "python gen.py" }, "", startedAt))
+      .resolves.toEqual([]);
   });
 
   it("writes a new markdown file (creating parent dirs) and overwrites existing files inside the workspace", async () => {

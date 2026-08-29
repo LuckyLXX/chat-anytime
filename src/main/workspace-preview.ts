@@ -170,14 +170,12 @@ export function artifactCandidatesFromBashCommand(workspace: string | undefined,
   return candidates;
 }
 
-/** 输出文本中表示“文件被保存/生成”的指示词：缺失则路径大概率只是被读/列出/提到。 */
-const artifactSignalPattern = /(?:保存|生成|写出|导出|下载|写入|已存|Saved|saved|Generated|generated|Created|created|Wrote|wrote|Exported|exported|Downloaded|downloaded|written|successfully|成功|✔|✓|=>|→)/u;
-
 /**
- * 从工具结果文本中提取“看起来像已落盘文件路径”的候选（相对路径或绝对路径均可）。
- * 只保留“保存类指示词”附近出现的路径（cat ls git diff 等普通输出不含此类语境），
- * 纯函数不做磁盘校验：候选需在工作区内、非忽略目录、扩展名属常见产物格式，
- * 去重并限制数量；真正的存在性校验由调用方异步 stat 完成。
+ * 从工具结果文本中提取“看起来像已落盘文件路径”的候选（相对路径或绝对路径均可，
+ * 不做措辞判断——技能脚本常打印裸路径或 “[OK] 报告.pdf” 这类无保存指示词的行）。
+ * cat 内容/git log/目录清单里的提及也在此阶段放行，误报由 existingWorkspaceFiles
+ * 的 mtime 门槛剔除：本次调用没写过的文件修改时间早于执行开始。纯函数不做磁盘
+ * 校验：候选需在工作区内、非忽略目录、扩展名属常见产物格式，去重并限制数量。
  */
 export function artifactCandidatesFromOutput(workspace: string | undefined, output: string): string[] {
   if (!workspace || !output) return [];
@@ -185,25 +183,24 @@ export function artifactCandidatesFromOutput(workspace: string | undefined, outp
   const seen = new Set<string>();
   const candidates: string[] = [];
   for (const match of output.matchAll(artifactTokenPattern)) {
-    if (candidates.length >= 16) break;
-    // 只认保存语境：同一行内“路径前 60 字符 / 后 24 字符”窗口有指示词
-    // （“已保存 fox.png” / “Saved: fox.png”）；窗口不跨行，避免相邻行的
-    // git 提交信息、标题等无关词污染判定。
-    const lineStart = output.lastIndexOf("\n", match.index - 1) + 1;
-    const nextBreak = output.indexOf("\n", match.index);
-    const windowStart = Math.max(lineStart, match.index - 60);
-    const windowEnd = Math.min(nextBreak < 0 ? match.index + 24 : nextBreak, match.index + 24);
-    if (!artifactSignalPattern.test(output.slice(windowStart, windowEnd))) continue;
-    pushArtifactCandidate(root, match[0], seen, candidates, 16);
+    if (candidates.length >= 24) break;
+    pushArtifactCandidate(root, match[0], seen, candidates, 24);
   }
   return candidates;
 }
 
 /**
- * 对候选产物做存在性校验：仅保留工作区内真实存在的普通文件（含符号链接落点校验），
- * 并限制数量防止超长输出拖慢回填。供 pi-runtime 在工具结束后异步调用。
+ * 对候选产物做存在性校验：仅保留工作区内真实存在的普通文件（含符号链接落点校验）。
+ * 传入 minModifiedAt（工具执行的开始时刻）时还要求文件修改时间不早于它——输出文本
+ * “被提及”的旧文件不是本次调用写出的，据此剔除；命令里显式写出的路径（-o/重定向/
+ * cp/mv）不传该门槛，cp -p/mv 保留旧 mtime 的目标也按产物对待。限制数量防止超长
+ * 输出拖慢回填。供 pi-runtime 在工具结束后异步调用。
  */
-export async function existingWorkspaceFiles(workspace: string | undefined, candidates: string[]): Promise<{ relativePath: string }[]> {
+export async function existingWorkspaceFiles(
+  workspace: string | undefined,
+  candidates: string[],
+  options?: { minModifiedAt?: number }
+): Promise<{ relativePath: string }[]> {
   if (!workspace) return [];
   const rootReal = await realpath(resolve(workspace));
   const found: { relativePath: string }[] = [];
@@ -212,11 +209,43 @@ export async function existingWorkspaceFiles(workspace: string | undefined, cand
     const candidate = resolve(rootReal, ...relativePath.split("/"));
     const info = await stat(candidate).catch(() => undefined);
     if (!info?.isFile()) continue;
+    if (options?.minModifiedAt !== undefined && info.mtimeMs < options.minModifiedAt) continue;
     const real = await realpath(candidate).catch(() => candidate);
     if (real !== rootReal && !safeRelativePath(rootReal, real)) continue;
     found.push({ relativePath });
   }
   return found;
+}
+
+/** mtime 门槛的回退量：容忍事件时间戳与文件系统时间戳之间的微小偏差。 */
+const ARTIFACT_MTIME_SLACK_MS = 5_000;
+
+/**
+ * 工具调用的交付产物判定（产出型工具专用，实时路径与会话恢复路径共用）：
+ * bash 命令里显式写出的路径（-o/--output/重定向/cp/mv/tee）只做存在性校验；
+ * 输出文本扫描到的候选还要通过 mtime 门槛——修改时间落在本次执行窗口内才算
+ * 本调用写出的文件。返回去重后的工作区相对路径。
+ */
+export async function collectProducedArtifacts(
+  workspace: string | undefined,
+  toolName: string,
+  args: unknown,
+  output: string | undefined,
+  startedAt: number
+): Promise<{ relativePath: string }[]> {
+  if (!workspace || !isArtifactProducingTool(toolName)) return [];
+  const command = toolName === "bash" ? (args as { command?: unknown } | undefined)?.command : undefined;
+  const commandCandidates = typeof command === "string" ? artifactCandidatesFromBashCommand(workspace, command) : [];
+  const outputCandidates = artifactCandidatesFromOutput(workspace, output ?? "");
+  const [commandFiles, outputFiles] = await Promise.all([
+    commandCandidates.length > 0 ? existingWorkspaceFiles(workspace, commandCandidates) : Promise.resolve([]),
+    outputCandidates.length > 0
+      ? existingWorkspaceFiles(workspace, outputCandidates, { minModifiedAt: startedAt - ARTIFACT_MTIME_SLACK_MS })
+      : Promise.resolve([])
+  ]);
+  const merged = new Map<string, { relativePath: string }>();
+  for (const item of [...commandFiles, ...outputFiles]) merged.set(item.relativePath.toLowerCase(), item);
+  return [...merged.values()];
 }
 
 async function readPrefix(path: string, limit: number): Promise<Buffer> {
