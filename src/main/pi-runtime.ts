@@ -62,7 +62,7 @@ import { buildSkillsSystemPromptBlock, setSkillEnabled, type DiscoveredSkill } f
 import { createTodoStore, migrateLegacyTodoFile, type TodoStore } from "./todo-store.js";
 import { resolveVisionModel } from "./vision.js";
 import { buildResourceCatalog } from "./resource-catalog.js";
-import { agentWorkspaceSessionDir, mergeSessionSummary, sessionListReadyFor } from "./session-scope.js";
+import { agentWorkspaceSessionDir, backfillUnpersistedSessions, mergeSessionSummary, sessionListReadyFor } from "./session-scope.js";
 import { isDesktopConfiguredProvider } from "./model-catalog.js";
 import { isPositiveInt, mergeProviderModels } from "./settings.js";
 import { buildSkillPrompt, parseSkillPrompt } from "./skill-prompt.js";
@@ -73,7 +73,7 @@ import {
   type PersistedSessionEntry,
   type PersistedSessionMessage
 } from "./session-history.js";
-import { artifactCandidatesFromBashCommand, artifactCandidatesFromOutput, changedWorkspaceFile, changedWorkspaceFiles, existingWorkspaceFiles, isArtifactProducingTool } from "./workspace-preview.js";
+import { changedWorkspaceFile, changedWorkspaceFiles, collectProducedArtifacts, isArtifactProducingTool } from "./workspace-preview.js";
 import { createToolAudit } from "./tool-audit.js";
 import { diffToolNames } from "./tool-delta.js";
 import * as runtimeTodoTools from "./runtime-todo-tools.js";
@@ -757,7 +757,7 @@ async function sessionDirectories(): Promise<string[]> {
 
 function activeAgent(): AgentProfile {
   const list = settings?.agents ?? [];
-  return list.find((agent) => agent.id === settings?.currentAgentId && !agent.archived) ?? list.find((agent) => agent.id === "default") ?? list[0] ?? { id: "default", name: "默认助手", description: "", systemPrompt: "", divMode: false, defaultThinkingLevel: "medium", tools: { read: true, bash: true, edit: true, write: true, grep: true, find: true, ls: true } };
+  return list.find((agent) => agent.id === settings?.currentAgentId && !agent.archived) ?? list.find((agent) => agent.id === "default") ?? list[0] ?? { id: "default", name: "默认助手", description: "", systemPrompt: "", divMode: "off", defaultThinkingLevel: "medium", tools: { read: true, bash: true, edit: true, write: true, grep: true, find: true, ls: true } };
 }
 
 function defaultModel(): { provider: string; id: string } | undefined {
@@ -1080,28 +1080,11 @@ function handleSessionEvent(record: SessionRuntimeRecord, event: AgentSessionEve
       });
       // 产出型工具（bash 落盘、MCP 生图、扩展工具等）可能生成工作区文件：
       // bash 优先从命令参数（-o/重定向/cp/mv）解析显式输出路径，再补扫描结果
-      // 文本中“保存类指示词”附近的路径；两者都经异步 stat 存在性校验后回填。
-      if (!event.isError && current && isArtifactProducingTool(event.toolName)) {
-        const workspace = record.workspace;
-        let candidates: string[] = [];
-        if (event.toolName === "bash") {
-          const command = (current.args as { command?: unknown } | undefined)?.command;
-          if (typeof command === "string") candidates = artifactCandidatesFromBashCommand(workspace, command);
-        }
-        candidates = [...new Set([...candidates, ...artifactCandidatesFromOutput(workspace, output)])];
-        if (candidates.length > 0 && workspace) {
-          void existingWorkspaceFiles(workspace, candidates).then((artifacts) => {
-            if (artifacts.length === 0) return;
-            const execution = record.executions.get(event.toolCallId);
-            if (!execution || execution.status !== "completed") return;
-            const merged = new Map<string, { relativePath: string }>();
-            for (const item of [...(execution.changedFiles ?? []), ...(execution.changedFile ? [execution.changedFile] : []), ...artifacts]) {
-              merged.set(item.relativePath.toLowerCase(), item);
-            }
-            execution.changedFiles = [...merged.values()];
-            if (record === activeRuntime) emitState();
-          });
-        }
+      // 文本中的路径；输出扫描候选经 mtime 门槛（本次执行窗口内写出的才算）+
+      // 异步 stat 存在性校验后回填。
+      if (!event.isError && current && record.workspace && isArtifactProducingTool(event.toolName)) {
+        void collectProducedArtifacts(record.workspace, event.toolName, current.args, output, current.startedAt)
+          .then((artifacts) => applyArtifactBackfill(record, event.toolCallId, artifacts));
       }
       // Bash commands with background patterns (`nohup ... &`, `( ... & )`)
       // leave detached descendants running after the shell exits. Scan for
@@ -1138,6 +1121,41 @@ function handleSessionEvent(record: SessionRuntimeRecord, event: AgentSessionEve
   }
   if (lifecycle) scheduleSessionsRefresh();
   scheduleEmit(immediate);
+}
+
+/** 把存在性校验通过的产物合并进执行记录并推送刷新（活动会话全量推，分屏格走 pane 通道）。 */
+function applyArtifactBackfill(record: SessionRuntimeRecord, executionId: string, artifacts: { relativePath: string }[]): void {
+  if (artifacts.length === 0) return;
+  const execution = record.executions.get(executionId);
+  if (!execution || execution.status !== "completed") return;
+  const merged = new Map<string, { relativePath: string }>();
+  for (const item of [...(execution.changedFiles ?? []), ...(execution.changedFile ? [execution.changedFile] : []), ...artifacts]) {
+    merged.set(item.relativePath.toLowerCase(), item);
+  }
+  execution.changedFiles = [...merged.values()];
+  if (record === activeRuntime) {
+    emitState();
+  } else if (renderedSessions.has(record.session.sessionId)) {
+    schedulePaneEmit(record, true);
+  }
+}
+
+/**
+ * 历史会话恢复时重建的执行记录只带 edit/write 的 changedFile：bash/MCP 产出型
+ * 工具的交付产物（技能脚本生成的 png/pdf 等）在此异步回填——扫描持久化的输出
+ * 文本 + mtime 门槛（文件修改时间须落在该次执行窗口内）+ 存在性校验。只看最近
+ * 一段产出型执行，防止超长会话拖慢打开。
+ */
+function backfillRestoredArtifacts(record: SessionRuntimeRecord): void {
+  const workspace = record.workspace;
+  if (!workspace) return;
+  const producing = [...record.executions.values()]
+    .filter((execution) => execution.status === "completed" && isArtifactProducingTool(execution.name))
+    .slice(-30);
+  for (const execution of producing) {
+    void collectProducedArtifacts(workspace, execution.name, execution.args, execution.output, execution.startedAt)
+      .then((artifacts) => applyArtifactBackfill(record, execution.id, artifacts));
+  }
 }
 
 function appendCompactControlMessage(record: SessionRuntimeRecord, kind: "compact-command" | "compact-result", text: string): void {
@@ -1384,6 +1402,7 @@ async function refreshSessions(): Promise<void> {
   // Stamp the scope the listing actually runs against: currentAgent can change
   // while the awaits below run (agent switch mid-refresh).
   const listAgentId = currentAgent?.id;
+  const previousSessions = currentSessions;
   const directories = await sessionDirectories();
   if (directories.length === 0) {
     currentSessions = [];
@@ -1409,6 +1428,23 @@ async function refreshSessions(): Promise<void> {
     };
   });
   currentSessionsAgentId = listAgentId;
+  // 会话文件直到首条 assistant 消息才落盘（Pi _persist 的 hasAssistant 门槛），
+  // 新建的空会话只存在于 liveSessions——防抖刷新/后台回合结束触发的全量重建若
+  // 不回填，会把刚建的新话题从侧边栏抹掉（见 backfillUnpersistedSessions）。
+  currentSessions = backfillUnpersistedSessions(
+    currentSessions,
+    previousSessions,
+    [...liveSessions.values()].map((record) => ({
+      sessionId: record.session.sessionId,
+      path: record.session.sessionManager.getSessionFile(),
+      workspace: record.workspace,
+      agentId: record.agent.id,
+      activatedAt: record.activatedAt,
+      title: record.session.sessionManager.getSessionName(),
+      runStatus: record.runStatus
+    })),
+    listAgentId
+  );
 }
 
 function sessionReadyStatus(hasModel: boolean, usedFallback: boolean): string {
@@ -1519,7 +1555,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
         state: () => recordBox?.planState
       })
     ],
-    systemPromptOverride: (base) => [base, recordAgent.systemPrompt, recordAgent.divMode ? buildDivModePrompt() : undefined, buildSkillsSystemPromptBlock(runtimeSkills.activeSkillsFor(nativeSkills, recordAgent)), memoryPromptBlock].filter(Boolean).join("\n\n")
+    systemPromptOverride: (base) => [base, recordAgent.systemPrompt, buildDivModePrompt(recordAgent.divMode), buildSkillsSystemPromptBlock(runtimeSkills.activeSkillsFor(nativeSkills, recordAgent)), memoryPromptBlock].filter(Boolean).join("\n\n")
   });
   await resourceLoader.reload();
   syncSkills();
@@ -1706,6 +1742,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   // is activated only for text-only conversation models (toolNamesFor).
   result.session.setActiveToolsByName(toolNamesFor(record, !hasImageInput(result.session.model)));
   record.executions = new Map(restoreToolExecutions(result.session.state.messages as unknown as PersistedSessionMessage[], recordWorkspace).map((execution) => [execution.id, execution]));
+  backfillRestoredArtifacts(record);
   // Background processes launched by earlier sessions keep running across
   // restarts; rediscover them from the session's bash history (throttled).
   const discoveryNow = Date.now();

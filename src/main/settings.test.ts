@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CUSTOM_PROVIDER_ID, createDefaultAgent, isPositiveInt, mergeProviderModels, migrateSettings, normalizeAccessMode, normalizeAgent, normalizeCustomThemes, normalizeInterfaceTuning, normalizeProvider, normalizeThemeAssets, normalizeVision, normalizeWallpaperOpacity } from "./settings.js";
+import { CUSTOM_PROVIDER_ID, createDefaultAgent, isPositiveInt, mergeProviderModels, migrateSettings, normalizeAccessMode, normalizeAgent, normalizeCustomThemes, normalizeDivBubbleMode, normalizeInterfaceTuning, normalizeProvider, normalizeThemeAssets, normalizeVision, normalizeWallpaperOpacity } from "./settings.js";
 
 describe("desktop settings migration", () => {
   it("migrates the legacy custom provider without changing its stable id", () => {
@@ -22,15 +22,27 @@ describe("desktop settings migration", () => {
   it("keeps custom agent prompts empty and always provides the default assistant", () => {
     const result = migrateSettings({ agents: [{ id: "coder", name: "代码助手", systemPrompt: "" }] });
     expect(result.settings.agents.find((agent) => agent.id === "coder")?.systemPrompt).toBe("");
-    expect(result.settings.agents.find((agent) => agent.id === "coder")?.divMode).toBe(false);
+    expect(result.settings.agents.find((agent) => agent.id === "coder")?.divMode).toBe("off");
     expect(result.settings.agents.some((agent) => agent.id === "default")).toBe(true);
     expect(createDefaultAgent().id).toBe("default");
   });
 
   it("persists the Agent-level Div mode switch", () => {
     const result = migrateSettings({ agents: [{ id: "designer", name: "设计助手", divMode: true }] });
-    expect(result.settings.agents.find((agent) => agent.id === "designer")).toMatchObject({ divMode: true });
-    expect(createDefaultAgent().divMode).toBe(false);
+    expect(result.settings.agents.find((agent) => agent.id === "designer")).toMatchObject({ divMode: "always" });
+    expect(createDefaultAgent().divMode).toBe("auto");
+  });
+
+  it("migrates the legacy boolean divMode and keeps valid tri-state values idempotently", () => {
+    expect(normalizeDivBubbleMode(true)).toBe("always");
+    expect(normalizeDivBubbleMode(false)).toBe("off");
+    expect(normalizeDivBubbleMode(undefined)).toBe("off");
+    expect(normalizeDivBubbleMode("auto")).toBe("auto");
+    expect(normalizeDivBubbleMode("always")).toBe("always");
+    expect(normalizeDivBubbleMode("sideways" as unknown as string)).toBe("off");
+    // 已迁移的设置再次落盘-读回应原样保留（幂等）。
+    const result = migrateSettings({ agents: [{ id: "designer", divMode: "auto" as unknown as boolean }] });
+    expect(result.settings.agents.find((agent) => agent.id === "designer")?.divMode).toBe("auto");
   });
 
   it("preserves only valid Agent-level Skill overrides", () => {

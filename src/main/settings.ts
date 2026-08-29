@@ -7,6 +7,7 @@ import type {
   BuiltinToolName,
   CustomThemeDefinition,
   DesktopSettings,
+  DivBubbleMode,
   HooksSettings,
   InterfaceTuning,
   MemorySettings,
@@ -37,7 +38,7 @@ export function createDefaultAgent(): AgentProfile {
     name: "默认助手",
     description: "使用 Pi 工具协助完成项目开发任务",
     systemPrompt: "你是 ChatAnyTime 的默认开发助手。请先理解项目结构，再谨慎地检查、修改和验证代码。",
-    divMode: false,
+    divMode: "auto",
     defaultThinkingLevel: "medium",
     tools: defaultTools()
   };
@@ -132,6 +133,12 @@ export function normalizeThemeAssets(value: unknown): ThemeAssetMap {
   }));
 }
 
+/** Div 气泡模式三档迁移：合法枚举保留；旧版 boolean true→always；其余（false/缺省/非法）→off。 */
+export function normalizeDivBubbleMode(value: unknown): DivBubbleMode {
+  if (value === "auto" || value === "always" || value === "off") return value;
+  return value === true ? "always" : "off";
+}
+
 export function normalizeSkillOverrides(value: unknown): Record<string, boolean> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   return Object.fromEntries(Object.entries(value as Record<string, unknown>).flatMap(([rawId, enabled]) => {
@@ -149,7 +156,8 @@ export function normalizeAgent(agent: Partial<AgentProfile> | undefined): AgentP
     name: String(agent?.name || fallback.name),
     description: String(agent?.description ?? ""),
     systemPrompt: String(agent?.systemPrompt ?? (agent?.id === DEFAULT_AGENT_ID ? fallback.systemPrompt : "")),
-    divMode: agent?.divMode === true,
+    // 三档迁移：合法枚举原样保留（幂等）；旧版 boolean true → always、false/缺省/非法 → off。
+    divMode: normalizeDivBubbleMode(agent?.divMode),
     defaultModel: agent?.defaultModel,
     defaultThinkingLevel: agent?.defaultThinkingLevel ?? fallback.defaultThinkingLevel,
     tools: Object.fromEntries(BUILTIN_TOOLS.map((tool) => [tool, sourceTools[tool] !== false])) as Record<BuiltinToolName, boolean>,

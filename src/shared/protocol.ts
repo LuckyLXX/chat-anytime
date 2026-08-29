@@ -62,12 +62,15 @@ export interface CustomProviderSettings {
 
 export type CustomProviderModel = ProviderModelSettings;
 
+/** Div 气泡模式三档：off 不注入提示词；auto 按场景酌情使用；always 所有回复强制气泡。 */
+export type DivBubbleMode = "off" | "auto" | "always";
+
 export interface AgentProfile {
   id: string;
   name: string;
   description: string;
   systemPrompt: string;
-  divMode: boolean;
+  divMode: DivBubbleMode;
   defaultModel?: { provider: string; id: string };
   defaultThinkingLevel: ThinkingLevel;
   tools: Record<BuiltinToolName, boolean>;

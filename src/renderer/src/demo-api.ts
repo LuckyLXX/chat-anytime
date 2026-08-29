@@ -61,7 +61,7 @@ const demoDefaultAgent: AgentProfile = {
   name: "默认助手",
   description: "",
   systemPrompt: "",
-  divMode: false,
+  divMode: "auto",
   defaultThinkingLevel: "medium",
   tools: { read: true, bash: true, edit: true, write: true, grep: true, find: true, ls: true }
 };

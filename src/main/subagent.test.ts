@@ -8,7 +8,7 @@ function makeCtx(overrides: Partial<SubagentContext> = {}): SubagentContext {
     modelRuntime: {} as SubagentContext["modelRuntime"],
     workspace: "/ws",
     agentDir: "/agent",
-    agent: { id: "default", name: "默认", description: "", systemPrompt: "", divMode: false, defaultThinkingLevel: "medium", tools: { read: true, bash: true, edit: true, write: true, grep: true, find: true, ls: true } },
+    agent: { id: "default", name: "默认", description: "", systemPrompt: "", divMode: "off", defaultThinkingLevel: "medium", tools: { read: true, bash: true, edit: true, write: true, grep: true, find: true, ls: true } },
     thinkingLevel: "medium",
     accessMode: "ask",
     model: { provider: "p", id: "m" },

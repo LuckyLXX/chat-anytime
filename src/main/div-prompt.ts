@@ -1,5 +1,8 @@
+import type { DivBubbleMode } from "../shared/protocol.js";
+
 const htmlFence = "```";
 
+/** always 档：所有正常最终回复强制且只输出一个 Div 气泡。 */
 export const DIV_MODE_PROMPT = `
 【Div 气泡模式：输出优先级】
 1. 用户明确要求完整 HTML 页面、独立网页、可运行页面或使用 ${htmlFence}html 包裹：输出 ${htmlFence}html 完整文档。
@@ -13,6 +16,14 @@ export const DIV_MODE_PROMPT = `
 - 根画板设置不透明背景、border-radius、padding 和 border，确保正文与背景有足够对比度。
 - 代码使用 <pre><code class="language-语言">...</code></pre>，快捷回复使用 <button data-send="内容">文案</button>。`;
 
+/** auto 档：按场景酌情使用——适合可视化的内容才上气泡，编码过程与简短答复保持普通文本。 */
+export const DIV_AUTO_MODE_PROMPT = `
+【Div 气泡模式：按场景使用】
+Div 气泡（<assistant_html><div>...</div></assistant_html>）是可渲染富样式卡片的输出通道。根据当前任务的性质自行判断是否使用：
+- 适合使用：原型图与样式预览、界面或交互流程示意、方案对比、阶段性总结与交付报告、计划/清单面板、数据可视化等从图形化呈现中受益的内容。
+- 不应使用：编写或修改代码的过程中、简短答复与确认、用户明确要求纯文本或 Markdown 时、需要完整 ${htmlFence}html 页面的场景（改用隔离预览）。
+- 同一轮回复至多一个气泡；连续多轮相似的小答复（如简单确认）不重复使用。判断标准：这个内容是否会因卡片化而更易读、更直观；不会就普通 Markdown。`;
+
 export const DIV_DYNAMIC_MODE_PROMPT = `
 【Div 动态内容】
 - 需要按钮交互、折叠展开、实时计时、进度变化、Canvas 动画或数据可视化时，可以在同一个 <assistant_html> 气泡中加入 <script>；PiDesktop 会在聊天窗口内实时渲染气泡，并在气泡完整结束后于受控作用域中激活脚本。完整 HTML 页面仍使用隔离的 HTML Artifact 预览。
@@ -21,6 +32,9 @@ export const DIV_DYNAMIC_MODE_PROMPT = `
 - 可以使用 setTimeout、setInterval、requestAnimationFrame 和 Canvas；动画需要在合理时机停止或复用，避免无休止创建计时器和渲染器。
 - 静态内容不需要为了装饰而添加脚本；脚本失败时，核心信息仍应保持可读。`;
 
-export function buildDivModePrompt(): string {
-  return `${DIV_MODE_PROMPT}\n\n${DIV_DYNAMIC_MODE_PROMPT}`;
+/** 按档位构建注入系统提示词的 Div 气泡规范；off 档返回 undefined（不注入）。 */
+export function buildDivModePrompt(mode: DivBubbleMode): string | undefined {
+  if (mode === "off") return undefined;
+  const policy = mode === "always" ? DIV_MODE_PROMPT : DIV_AUTO_MODE_PROMPT;
+  return `${policy}\n\n${DIV_DYNAMIC_MODE_PROMPT}`;
 }
