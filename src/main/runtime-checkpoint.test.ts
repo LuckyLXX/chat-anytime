@@ -130,7 +130,11 @@ describe("rollbackPlan", () => {
       { ts: "2026-08-29T00:00:01.000Z", toolCallId: "c2", toolName: "write", relativePath: "created.txt", existed: false },
       { ts: "2026-08-29T00:00:02.000Z", toolCallId: "c3", toolName: "write", relativePath: "huge.txt", existed: true, truncated: true }
     ];
-    const results = await rollbackPlan(workspace, ["c1", "c2", "c3"], entries);
+    const results = await rollbackPlan(workspace, [
+      { relativePath: "edited.txt", toolCallIds: ["c1"] },
+      { relativePath: "created.txt", toolCallIds: ["c2"] },
+      { relativePath: "huge.txt", toolCallIds: ["c3"] }
+    ], entries);
     expect(results).toEqual([
       { relativePath: "edited.txt", action: "restored" },
       { relativePath: "created.txt", action: "deleted" },
@@ -146,7 +150,10 @@ describe("rollbackPlan", () => {
       { ts: "2026-08-29T00:00:00.000Z", toolCallId: "c1", toolName: "write", relativePath: "deep/nested/file.txt", existed: true, content: "restored" },
       { ts: "2026-08-29T00:00:01.000Z", toolCallId: "c2", toolName: "write", relativePath: "../escaped.txt", existed: true, content: "evil" }
     ];
-    const results = await rollbackPlan(workspace, ["c1", "c2"], entries);
+    const results = await rollbackPlan(workspace, [
+      { relativePath: "deep/nested/file.txt", toolCallIds: ["c1"] },
+      { relativePath: "../escaped.txt", toolCallIds: ["c2"] }
+    ], entries);
     expect(results[0]).toMatchObject({ relativePath: "deep/nested/file.txt", action: "restored" });
     await expect(readFile(join(workspace, "deep", "nested", "file.txt"), "utf8")).resolves.toBe("restored");
     expect(results[1]).toMatchObject({ relativePath: "../escaped.txt", action: "skipped" });

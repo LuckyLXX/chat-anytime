@@ -45,19 +45,29 @@ describe("checkpoint-store helpers", () => {
     expect(truncated?.content).toBeUndefined();
   });
 
-  it("selectRollbackPlan keeps the earliest snapshot per file and filters by toolCallIds", () => {
+  it("selectRollbackPlan keeps the earliest snapshot per targeted file and ignores unrelated calls", () => {
     const entries = [
       entry({ toolCallId: "call-1", relativePath: "a.txt", content: "first" }),
       entry({ toolCallId: "call-2", relativePath: "a.txt", content: "second" }),
       entry({ toolCallId: "call-2", relativePath: "b.txt", existed: false }),
       entry({ toolCallId: "call-3", relativePath: "c.txt", content: "unrelated" })
     ];
-    const plan = selectRollbackPlan(entries, ["call-1", "call-2"]);
-    expect(plan).toHaveLength(2);
+    // 单文件目标：取该文件在目标调用集合内的最早快照（= 回复动手前状态）。
+    const plan = selectRollbackPlan(entries, [{ relativePath: "a.txt", toolCallIds: ["call-1", "call-2"] }]);
+    expect(plan).toHaveLength(1);
     expect(plan[0]).toMatchObject({ relativePath: "a.txt", content: "first" });
-    expect(plan[1]).toMatchObject({ relativePath: "b.txt", existed: false });
-    expect(selectRollbackPlan(entries, ["call-3"])).toHaveLength(1);
-    expect(selectRollbackPlan(entries, ["missing"])).toHaveLength(0);
+    // 只发后一次调用的 id 也按该调用过滤；不相关文件不受影响。
+    expect(selectRollbackPlan(entries, [{ relativePath: "a.txt", toolCallIds: ["call-2"] }])[0]).toMatchObject({ content: "second" });
+    expect(selectRollbackPlan(entries, [{ relativePath: "b.txt", toolCallIds: ["call-2"] }])).toHaveLength(1);
+    // 路径不匹配 / id 不匹配 / 未知文件：无计划。
+    expect(selectRollbackPlan(entries, [{ relativePath: "a.txt", toolCallIds: ["call-3"] }])).toHaveLength(0);
+    expect(selectRollbackPlan(entries, [{ relativePath: "missing.txt", toolCallIds: ["call-1"] }])).toHaveLength(0);
+    // 多目标顺序保持。
+    const multi = selectRollbackPlan(entries, [
+      { relativePath: "b.txt", toolCallIds: ["call-2"] },
+      { relativePath: "a.txt", toolCallIds: ["call-1", "call-2"] }
+    ]);
+    expect(multi.map((item) => item.relativePath)).toEqual(["b.txt", "a.txt"]);
   });
 
   it("compressEntries drops expired items first, then trims to the keep limit", () => {

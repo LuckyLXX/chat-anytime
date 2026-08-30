@@ -30,14 +30,12 @@ import {
   ChevronLeft,
   Pin,
   History,
-  File as FileIcon,
   X
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import type {
   AccessMode,
   AppearanceSettings,
-  ChatMessage,
   InterfaceTuning,
   BrowserElementPick,
   AgentProfile,
@@ -62,7 +60,7 @@ import type {
   SessionSummary
 } from "../../shared/protocol";
 import { sessionRunStatusLabels, thinkingLevelLabels, toolLabel } from "../../shared/locale";
-import { changedFilesForMessage, type ReplyChangedFile } from "./lib/changed-files";
+import type { ReplyChangedFile } from "./lib/changed-files";
 import { ArtifactPreview, type PreviewEditorState, type PreviewTab, type PreviewTarget } from "./components/ArtifactPreview";
 import type { EditorSaveStatus } from "./components/MarkdownEditor";
 import { WorkspaceTree } from "./components/WorkspaceTree";
@@ -1046,15 +1044,10 @@ export function App(): ReactNode {
   const setActionError = useCallback((message?: string): void => {
     setMessageActionError(message);
   }, []);
-  /** 打开回滚确认框：按消息的 tool-call 块聚合交付产物，无产物不弹。 */
-  const openRollbackConfirm = useCallback((message: ChatMessage, sessionId: string | undefined): void => {
-    if (!sessionId) return;
-    const state = useDesktopStore.getState();
-    const source = state.snapshot.sessionId === sessionId ? state.snapshot : state.paneStates[sessionId];
-    if (!source) return;
-    const files = changedFilesForMessage(message, source.executions);
-    if (files.length === 0) return;
-    setRollbackTarget({ message, sessionId, files });
+  /** 打开单文件回滚确认框：产物行自带该文件的 toolCallIds，无产物不弹。 */
+  const openRollbackConfirm = useCallback((file: ReplyChangedFile, sessionId: string | undefined): void => {
+    if (!sessionId || file.toolCallIds.length === 0) return;
+    setRollbackTarget({ file, sessionId });
   }, []);
   const [sidebarTab, setSidebarTab] = useState<"agents" | "topics">("topics");
   const [sidebarQuery, setSidebarQuery] = useState("");
@@ -1078,8 +1071,8 @@ export function App(): ReactNode {
   const [renameValue, setRenameValue] = useState("");
   const [deleteSession, setDeleteSession] = useState<{ path: string; title: string } | null>(null);
   const [removeWorkspace, setRemoveWorkspace] = useState<{ workspace: string; name: string; count: number } | null>(null);
-  // —— checkpoint 回滚：确认对话框目标 + 完成后的 toast ——
-  const [rollbackTarget, setRollbackTarget] = useState<{ message: ChatMessage; sessionId: string; files: ReplyChangedFile[] } | null>(null);
+  // —— checkpoint 回滚：单文件确认对话框目标 + 完成后的 toast ——
+  const [rollbackTarget, setRollbackTarget] = useState<{ file: ReplyChangedFile; sessionId: string } | null>(null);
   const [checkpointToast, setCheckpointToast] = useState<string>();
   const lastCheckpointAtRef = useRef(0);
   useEffect(() => {
@@ -1751,7 +1744,7 @@ export function App(): ReactNode {
           onOpenDiff={openDiffPreview}
           onOpenPlanDetail={openPlanPreview}
           onActionError={setActionError}
-          onRollback={(message) => openRollbackConfirm(message, leafSessionId)}
+          onRollback={(file) => openRollbackConfirm(file, leafSessionId)}
         />
       </div>
     );
@@ -2022,7 +2015,7 @@ export function App(): ReactNode {
               onOpenDiff={openDiffPreview}
               onOpenPlanDetail={openPlanPreview}
               onActionError={setActionError}
-              onRollback={(message) => openRollbackConfirm(message, snapshot.sessionId)}
+              onRollback={(file) => openRollbackConfirm(file, snapshot.sessionId)}
             />
           )}
 
@@ -2060,21 +2053,19 @@ export function App(): ReactNode {
       )}
       {rollbackTarget && (
         <div className="modal-backdrop permission-backdrop" onClick={() => setRollbackTarget(null)}>
-          <div className="permission-dialog" role="alertdialog" aria-modal="true" aria-label="回滚本次变更" onClick={(event) => event.stopPropagation()}>
-            <header><div className="risk-icon write"><History size={20} /></div><div><h2>回滚本回复的文件变更？</h2><p>以下文件将恢复到本次改动前的状态；AI 新建的文件将被删除，已修改文件的当前内容会被覆盖。</p></div></header>
-            <div className="rollback-file-list">
-              {rollbackTarget.files.map((file) => (
-                <div className="rollback-file-row" key={file.relativePath}><FileIcon size={13} /><span title={file.relativePath}>{file.relativePath}</span></div>
-              ))}
-            </div>
+          <div className="permission-dialog" role="alertdialog" aria-modal="true" aria-label="回滚文件" onClick={(event) => event.stopPropagation()}>
+            <header><div className="risk-icon write"><History size={20} /></div><div><h2>回滚文件「{rollbackTarget.file.relativePath.split("/").at(-1)}」？</h2><p>{rollbackTarget.file.relativePath}</p><p>该文件将恢复到本次改动前的状态；若它是本次新建的文件则会被删除，当前内容会被覆盖。</p></div></header>
             <footer>
               <button className="secondary-button" type="button" onClick={() => setRollbackTarget(null)}>取消</button>
               <button
                 className="primary-button"
                 type="button"
                 onClick={() => {
-                  const toolCallIds = rollbackTarget.message.blocks.filter((block) => block.type === "tool-call").map((block) => block.id);
-                  void window.piDesktop.send({ type: "checkpoint.rollback", sessionId: rollbackTarget.sessionId, toolCallIds });
+                  void window.piDesktop.send({
+                    type: "checkpoint.rollback",
+                    sessionId: rollbackTarget.sessionId,
+                    targets: [{ relativePath: rollbackTarget.file.relativePath, toolCallIds: rollbackTarget.file.toolCallIds }]
+                  });
                   setRollbackTarget(null);
                 }}
               >回滚</button>

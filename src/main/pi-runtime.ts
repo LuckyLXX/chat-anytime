@@ -2306,12 +2306,12 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       // 切助手后不能用全局 currentAgent，否则写错目录）。
       const filePath = checkpointPathFor(join(getAgentDir(), "chatanytime-sessions", record.agent.id), sessionId);
       const entries = await readCheckpoints(filePath);
-      const results = await rollbackPlan(record.workspace, command.toolCallIds, entries);
+      const results = await rollbackPlan(record.workspace, command.targets, entries);
       const restored = results.filter((item) => item.action === "restored").length;
       const deleted = results.filter((item) => item.action === "deleted").length;
       const skipped = results.filter((item) => item.action === "skipped").length;
       const message = results.length === 0
-        ? "本回复没有可回滚的快照（可能早于该功能上线，或改动不经 write/edit/显式输出路径）"
+        ? "该文件没有可回滚的快照（可能早于该功能上线，或改动不经 write/edit/显式输出路径）"
         : `已回滚：恢复 ${restored} 个文件、删除 ${deleted} 个新建文件${skipped ? `、跳过 ${skipped} 个（详见结果）` : ""}`;
       post({ type: "checkpoint-result", sessionId, results, message });
       // 回滚改了盘上文件：重拉会话标题等不受影响，但需要刷新激活快照让渲染端

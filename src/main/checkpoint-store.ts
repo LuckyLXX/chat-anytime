@@ -84,21 +84,18 @@ export async function readCheckpoints(filePath: string): Promise<CheckpointEntry
 }
 
 /**
- * 回滚计划：从快照条目中选出属于目标 toolCallIds 的部分，按文件分组取
- * 「最早」一条（JSONL 行序即时间序 = 该回复动手前的状态）。同一文件在该
- * 回复里被多次改写时，最早快照才是回滚目标。
+ * 回滚计划：对每个目标（文件 + 该回复内涉及它的全部调用 id），从快照条目中取
+ * 「relativePath 精确匹配且 toolCallId ∈ 集合」的最早一条（JSONL 行序即时间序
+ * = 该文件在本回复动手前的状态）。单文件粒度：每个目标至多产出一条计划。
  */
-export function selectRollbackPlan(entries: readonly CheckpointEntry[], toolCallIds: readonly string[]): CheckpointEntry[] {
-  const wanted = new Set(toolCallIds);
-  const earliestByFile = new Map<string, CheckpointEntry>();
-  for (const entry of entries) {
-    if (!wanted.has(entry.toolCallId)) continue;
-    const key = entry.relativePath;
-    const previous = earliestByFile.get(key);
-    // entries 已按行序（时间序）排列；首次遇到即最早。
-    if (!previous) earliestByFile.set(key, entry);
+export function selectRollbackPlan(entries: readonly CheckpointEntry[], targets: readonly { relativePath: string; toolCallIds: readonly string[] }[]): CheckpointEntry[] {
+  const plan: CheckpointEntry[] = [];
+  for (const target of targets) {
+    const wanted = new Set(target.toolCallIds);
+    const earliest = entries.find((entry) => entry.relativePath === target.relativePath && wanted.has(entry.toolCallId));
+    if (earliest) plan.push(earliest);
   }
-  return [...earliestByFile.values()];
+  return plan;
 }
 
 /**

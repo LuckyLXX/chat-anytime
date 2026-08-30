@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 import { appendCheckpoint, CHECKPOINT_FILE_LIMIT, checkpointPathFor, selectRollbackPlan, type CheckpointEntry } from "./checkpoint-store.js";
 import { artifactCandidatesFromBashCommand, changedWorkspaceFile, writeWorkspaceFile } from "./workspace-preview.js";
-import type { CheckpointRollbackResult } from "../shared/protocol.js";
+import type { CheckpointRollbackResult, CheckpointRollbackTarget } from "../shared/protocol.js";
 
 /**
  * 第五个 app-owned 内联扩展（pidesktop-checkpoint）：在 write/edit（及 bash
@@ -81,12 +81,12 @@ export async function snapshotTarget(deps: CheckpointExtensionDeps, ts: string, 
 }
 
 /**
- * 回滚一条 AI 回复对文件的改动：每文件取最早快照恢复；AI 新建的文件删除；
+ * 回滚单条回复内指定文件的改动：每文件取最早快照恢复；AI 新建的文件删除；
  * 超限未存内容的跳过并报告。恢复走 writeWorkspaceFile（realpath 越界校验），
  * 单项失败记 skipped 不中断整体。
  */
-export async function rollbackPlan(workspace: string, toolCallIds: readonly string[], entries: readonly CheckpointEntry[]): Promise<CheckpointRollbackResult[]> {
-  const plan = selectRollbackPlan(entries, toolCallIds);
+export async function rollbackPlan(workspace: string, targets: readonly CheckpointRollbackTarget[], entries: readonly CheckpointEntry[]): Promise<CheckpointRollbackResult[]> {
+  const plan = selectRollbackPlan(entries, targets);
   const results: CheckpointRollbackResult[] = [];
   for (const item of plan) {
     try {

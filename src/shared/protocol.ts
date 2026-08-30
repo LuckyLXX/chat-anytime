@@ -207,6 +207,12 @@ export interface CheckpointRollbackResult {
   detail?: string;
 }
 
+/** 回滚目标：单个文件 + 它在该回复内被改动的全部工具调用 id（主进程据此取该文件最早快照 = 回复动手前状态）。 */
+export interface CheckpointRollbackTarget {
+  relativePath: string;
+  toolCallIds: string[];
+}
+
 export interface ImageAttachment {
   kind: "image";
   name: string;
@@ -884,8 +890,8 @@ export type RuntimeCommand =
   | { type: "resources.reload" }
   | { type: "permission.resolve"; id: string; decision: PermissionDecision }
   | { type: "question.resolve"; id: string; answers?: string[] }
-  /** 回滚一条 AI 回复对文件的改动：按消息内工具调用的 id 定位快照，每文件取最早快照恢复。 */
-  | { type: "checkpoint.rollback"; sessionId?: string; toolCallIds: string[] }
+  /** 回滚单条回复内指定文件的改动：按（文件 + 调用 id）定位快照，每文件取最早快照恢复；targets 可含多个文件。 */
+  | { type: "checkpoint.rollback"; sessionId?: string; targets: CheckpointRollbackTarget[] }
   /** main 进程回传的浏览器自动化结果（响应 utility 的 browser-automation.request）。 */
   | { type: "browser-automation.result"; requestId: string; result: BrowserAutomationResult };
 
