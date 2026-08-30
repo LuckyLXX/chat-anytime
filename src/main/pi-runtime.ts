@@ -6,6 +6,7 @@ import {
   createAgentSession,
   DefaultResourceLoader,
   getAgentDir,
+  detectSupportedImageMimeTypeFromFile,
   ModelRuntime,
   SessionManager,
   SettingsManager,
@@ -1977,7 +1978,7 @@ async function preparePromptPayload(text: string, attachments: PromptAttachment[
  */
 async function readImageFile(root: string, imagePath: string): Promise<ImageContent> {
   const mimeType = runtimeVision.imageMimeForPath(imagePath);
-  if (!mimeType) throw new Error("不支持的图片格式（支持 png/jpg/jpeg/webp/gif）");
+  if (!mimeType) throw new Error("不支持的图片格式（支持 png/jpg/jpeg/webp/gif/bmp）");
   const candidate = resolve(root, imagePath);
   const info = await stat(candidate);
   if (!info.isFile()) throw new Error("不是普通文件");
@@ -1985,8 +1986,13 @@ async function readImageFile(root: string, imagePath: string): Promise<ImageCont
   const rootReal = await realpath(resolve(root));
   const targetReal = await realpath(candidate);
   workspaceRelativeAttachment(rootReal, targetReal); // 越界抛错
+  // 扩展名只是快速预门：真实格式按字节嗅探（Pi 0.84.4 公开导出，含 PNG 结构/
+  // 动图与 BMP 头校验），防改名文件把垃圾喂给视觉模型；嗅探结果即权威 MIME
+  // （jpg 扩展名的 png 会按 image/png 上送）。
+  const sniffed = await detectSupportedImageMimeTypeFromFile(targetReal);
+  if (!sniffed) throw new Error("文件内容不是有效的图片（png/jpg/webp/gif/bmp）");
   const data = await readFile(targetReal);
-  return { type: "image", data: data.toString("base64"), mimeType };
+  return { type: "image", data: data.toString("base64"), mimeType: sniffed };
 }
 
 async function handleCommand(command: RuntimeCommand): Promise<void> {

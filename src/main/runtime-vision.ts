@@ -30,7 +30,8 @@ const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
   jpg: "image/jpeg",
   jpeg: "image/jpeg",
   webp: "image/webp",
-  gif: "image/gif"
+  gif: "image/gif",
+  bmp: "image/bmp"
 };
 
 /** Map a file path to its image MIME type; undefined when unsupported. */

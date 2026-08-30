@@ -86,6 +86,7 @@ describe("imageMimeForPath", () => {
     expect(imageMimeForPath("SHOT.JPEG")).toBe("image/jpeg");
     expect(imageMimeForPath("anim.webp")).toBe("image/webp");
     expect(imageMimeForPath("anim.gif")).toBe("image/gif");
+    expect(imageMimeForPath("logo.bmp")).toBe("image/bmp");
   });
 
   it("rejects unsupported extensions and dotless paths", () => {
