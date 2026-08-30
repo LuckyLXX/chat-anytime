@@ -46,6 +46,22 @@ export interface ModelOverrideTarget {
 }
 
 /**
+ * 恢复会话时的模型落位：注册表模型 + 鉴权门槛 + settings 覆盖，一步到位。
+ *
+ * 为什么恢复路径不能交给 Pi（2026-08-30 教训）：Pi createAgentSession 的缺省
+ * 恢复分支按 provider/id 从注册表裸取模型，绕过 applyModelOverrides——「拉取
+ * 模型」注入覆盖层的新模型只带模板克隆的限额（glm-5.3-flash 落了模板
+ * glm-4.5 的 204800），重启后 settings 修正的 1000000 全部丢失，上下文占用
+ * 显示与自动压缩阈值同时失准。鉴权门槛与 Pi 恢复分支一致：模型不在注册表
+ * 或未配置鉴权时返回 undefined，让 Pi 走自己的 findInitialModel 回退与
+ * modelFallbackMessage。
+ */
+export function resolveRestoredSessionModel<T extends ModelOverrideTarget>(registryModel: T | undefined, hasConfiguredAuth: boolean, providers: ProviderSettings[] | undefined): T | undefined {
+  if (!registryModel || !hasConfiguredAuth) return undefined;
+  return applyModelOverrides(registryModel, providers);
+}
+
+/**
  * 把设置里的用户修正（token 限额、图片输入标记）覆盖到目录 Model 上；命中
  * 任何覆盖时返回浅克隆，绝不改动共享的运行时对象。图片输入标记必须落到
  * Model.input 本身：Pi 的各 API 适配器每次请求都按 model.input 把图片降级成

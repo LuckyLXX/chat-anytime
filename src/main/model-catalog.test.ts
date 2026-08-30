@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyModelOverrides, buildCatalogModels, imageInputOverride, isDesktopConfiguredProvider } from "./model-catalog.js";
+import { applyModelOverrides, buildCatalogModels, imageInputOverride, isDesktopConfiguredProvider, resolveRestoredSessionModel } from "./model-catalog.js";
 import type { ProviderSettings } from "../shared/protocol.js";
 
 describe("desktop model catalog visibility", () => {
@@ -145,5 +145,37 @@ describe("applyModelOverrides", () => {
   it("clones once and combines token limits with the input patch", () => {
     const result = applyModelOverrides({ ...target(["text"]), contextWindow: 128000, maxTokens: 16384 }, [{ id: "zai-coding-cn", name: "z.ai", baseUrl: "", custom: false, models: [{ id: "glm-5.3-flash", name: "GLM", imageInput: true, contextWindow: 200000 }] }]);
     expect(result).toEqual({ provider: "zai-coding-cn", id: "glm-5.3-flash", input: ["text", "image"], contextWindow: 200000, maxTokens: 16384 });
+  });
+});
+
+describe("resolveRestoredSessionModel", () => {
+  // 回归（2026-08-30）：恢复会话原先交给 Pi 的缺省恢复分支，它从注册表裸取
+  // 模型绕过 applyModelOverrides——「拉取模型」注入的新模型只带模板克隆的限额
+  // （glm-5.3-flash 落了模板 glm-4.5 的 204800），重启后 settings 修正丢失，
+  // 上下文占用显示与自动压缩阈值同时失准。
+  const registryModel = { provider: "zai-coding-cn", id: "glm-5.3-flash", name: "GLM", input: ["text"] as ("text" | "image")[], contextWindow: 204800, maxTokens: 131072 };
+  const providers: ProviderSettings[] = [{
+    id: "zai-coding-cn",
+    name: "z.ai",
+    baseUrl: "",
+    custom: false,
+    models: [{ id: "glm-5.3-flash", name: "GLM", imageInput: true, contextWindow: 1000000, maxTokens: 128000 }]
+  }];
+
+  it("applies the settings overrides onto the restored registry model", () => {
+    const result = resolveRestoredSessionModel(registryModel, true, providers);
+    expect(result).toEqual({ provider: "zai-coding-cn", id: "glm-5.3-flash", name: "GLM", input: ["text", "image"], contextWindow: 1000000, maxTokens: 128000 });
+    expect(result).not.toBe(registryModel);
+    expect(registryModel.contextWindow).toBe(204800);
+  });
+
+  it("returns the registry model untouched when no override is stored", () => {
+    const plain = { provider: "zai-coding-cn", id: "glm-5.3-flash", input: ["text"] as ("text" | "image")[] };
+    expect(resolveRestoredSessionModel(plain, true, undefined)).toBe(plain);
+  });
+
+  it("keeps Pi's fallback by returning undefined when the model is missing or unauthenticated", () => {
+    expect(resolveRestoredSessionModel(undefined, true, providers)).toBeUndefined();
+    expect(resolveRestoredSessionModel(registryModel, false, providers)).toBeUndefined();
   });
 });

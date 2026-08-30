@@ -16,7 +16,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { BackgroundProcessRegistry, bashCommandsFromMessages, isBackgroundCommand } from "./background-processes.js";
 import { normalizeMessages, userMessageText } from "./message-normalize.js";
-import { applyModelOverrides as applyStoredModelOverrides, buildCatalogModels, imageInputOverride } from "./model-catalog.js";
+import { applyModelOverrides as applyStoredModelOverrides, buildCatalogModels, imageInputOverride, resolveRestoredSessionModel } from "./model-catalog.js";
 import type {
   AccessMode,
   AgentProfile,
@@ -1587,11 +1587,24 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   const todosPath = sessionTodosPath(activeSessionManager.getSessionId());
   migrateLegacyTodoFile(todosPath, join(getAgentDir(), "pidesktop-todos.json"));
   const recordTodoStore = createTodoStore(todosPath, refreshTodos);
-  const hasExistingMessages = activeSessionManager.buildSessionContext().messages.length > 0;
-  const requested = hasExistingMessages ? undefined : defaultModel();
-  const requestedModel = requested
-    ? modelRuntime.getModel(requested.provider, requested.id)
+  const sessionContext = activeSessionManager.buildSessionContext();
+  const hasExistingMessages = sessionContext.messages.length > 0;
+  // 恢复路径的模型必须在应用侧解析并套覆盖：Pi 的缺省恢复分支从注册表裸取
+  // 模型，绕过 applyModelOverrides——「拉取模型」注入覆盖层的新模型只带模板
+  // 克隆的限额（glm-5.3-flash 落了模板 glm-4.5 的 204800），重启后 settings
+  // 修正全部丢失。注册表没有该模型或未配置鉴权时保持 undefined，沿用 Pi 恢复
+  // 分支的门槛，保留其 findInitialModel 回退与 modelFallbackMessage。
+  const persistedModel = hasExistingMessages && sessionContext.model
+    ? modelRuntime.getModel(sessionContext.model.provider, sessionContext.model.modelId)
     : undefined;
+  const restoredModel = resolveRestoredSessionModel(
+    persistedModel,
+    Boolean(persistedModel && modelRuntime.hasConfiguredAuth(persistedModel.provider)),
+    settings?.providers
+  );
+  const requested = hasExistingMessages ? undefined : defaultModel();
+  const requestedModel = restoredModel
+    ?? (requested ? modelRuntime.getModel(requested.provider, requested.id) : undefined);
   const resolvedModel = requestedModel ? applyModelOverrides(requestedModel) : undefined;
   // refreshSessions re-reads every session file from disk (line-by-line), which
   // is slow with many/large sessions. It only needs to be fresh for the sidebar,
