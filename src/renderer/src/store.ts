@@ -141,6 +141,12 @@ interface DesktopState {
   hookRun?: HookRunResult;
   /** 最近一次 checkpoint 回滚结果；App 监听变化弹 toast 并刷新工作区树。 */
   checkpointResult?: CheckpointResultInfo;
+  /**
+   * 已回滚标记：key = `${sessionId}:${toolCallId}`，值 = 回滚动作。产物行内
+   * 任一调用 id 命中即显示「已回滚/已删除」徽标（新回复的新调用 id 不受影响）。
+   * 内存态：应用重启后消失，重复回滚无害（幂等恢复同一内容）。
+   */
+  rollbacks: Record<string, "restored" | "deleted">;
   error?: string;
   initialize(): Promise<() => void>;
   handleRuntimeMessage(message: RuntimeMessage): void;
@@ -234,6 +240,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   memory: [],
   permissions: [],
   questions: [],
+  rollbacks: {},
   settings: emptySettings,
   customProviderKeyConfigured: false,
   customModels: [],
@@ -375,7 +382,19 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
         });
         break;
       case "checkpoint-result":
-        set({ checkpointResult: { sessionId: message.sessionId, results: message.results, message: message.message, at: Date.now() } });
+        set((state) => {
+          const rollbacks = { ...state.rollbacks };
+          for (const result of message.results) {
+            if (result.action === "skipped") continue;
+            for (const toolCallId of result.toolCallIds ?? []) {
+              rollbacks[`${message.sessionId}:${toolCallId}`] = result.action;
+            }
+          }
+          return {
+            rollbacks,
+            checkpointResult: { sessionId: message.sessionId, results: message.results, message: message.message, at: Date.now() }
+          };
+        });
         break;
       case "error":
         set({ error: message.message });

@@ -419,7 +419,7 @@ function CompactTimingMeta({ timing, now }: { timing: TurnTiming; now: number })
   );
 }
 
-function ChangedFilesPanel({ files, onOpenFile, onOpenDiff, onRollback, rollbackDisabled }: { files: ReplyChangedFile[]; onOpenFile(relativePath: string): void; onOpenDiff(execution: ToolExecution): void; onRollback?(file: ReplyChangedFile): void; rollbackDisabled?: boolean }): ReactNode {
+function ChangedFilesPanel({ files, onOpenFile, onOpenDiff, onRollback, rollbackStates, rollbackDisabled }: { files: ReplyChangedFile[]; onOpenFile(relativePath: string): void; onOpenDiff(execution: ToolExecution): void; onRollback?(file: ReplyChangedFile): void; rollbackStates?: ReadonlyMap<string, "restored" | "deleted">; rollbackDisabled?: boolean }): ReactNode {
   return (
     <details className="reply-files-panel">
       <summary>
@@ -432,6 +432,8 @@ function ChangedFilesPanel({ files, onOpenFile, onOpenDiff, onRollback, rollback
           const name = relativePath.split("/").at(-1) ?? relativePath;
           const hasDiff = Boolean(execution.patch);
           const isImage = kind === "image";
+          // 本文件已回滚：任一调用 id 命中即展示状态徽标，替换可点的回滚按钮。
+          const rollbackAction = file.toolCallIds.map((id) => rollbackStates?.get(id)).find((action) => action !== undefined);
           return (
             <div className="reply-file-row" key={relativePath}>
               <button
@@ -446,17 +448,19 @@ function ChangedFilesPanel({ files, onOpenFile, onOpenDiff, onRollback, rollback
               </button>
               <span className="reply-file-actions">
                 {!isImage && <button type="button" className="reply-file-action" title={hasDiff ? `查看 ${relativePath} 变更` : "暂无变更记录"} aria-label={`查看 ${name} 变更`} disabled={!hasDiff} onClick={() => onOpenDiff(execution)}><FileDiff size={14} /></button>}
-                {onRollback && !rollbackDisabled && (
-                  <button
-                    type="button"
-                    className="reply-file-action"
-                    title={`回滚 ${relativePath} 到本次改动前（若是本次新建的文件则删除）`}
-                    aria-label={`回滚 ${name}`}
-                    onClick={() => onRollback(file)}
-                  >
-                    <History size={14} />
-                  </button>
-                )}
+                {rollbackAction
+                  ? <span className={`reply-file-rolled-back${rollbackAction === "deleted" ? " deleted" : ""}`} title={rollbackAction === "deleted" ? "该文件是本次新建，已随回滚删除" : "该文件已恢复到本次改动前的状态"}><Check size={12} />{rollbackAction === "deleted" ? "已删除" : "已回滚"}</span>
+                  : onRollback && !rollbackDisabled && (
+                    <button
+                      type="button"
+                      className="reply-file-action"
+                      title={`回滚 ${relativePath} 到本次改动前（若是本次新建的文件则删除）`}
+                      aria-label={`回滚 ${name}`}
+                      onClick={() => onRollback(file)}
+                    >
+                      <History size={14} />
+                    </button>
+                  )}
               </span>
             </div>
           );
@@ -469,7 +473,7 @@ function ChangedFilesPanel({ files, onOpenFile, onOpenDiff, onRollback, rollback
 // Memoized so an unchanged message bubble (stable ChatMessage reference from
 // the store's uuid-based reuse) is skipped during high-frequency streaming
 // updates that only mutate other bubbles.
-const MessageView = memo(function MessageView({ message, executions, onOpenArtifact, onOpenFile, onOpenDiff, onHtmlAction, onCopy, onEdit, onRegenerate, onShare, onRollback, showThinking = true, hiddenThinkingLabel, busy = false, turnActive = false, timing, now = Date.now(), turnKey }: { message: ChatMessage; executions: ToolExecution[]; onOpenArtifact(artifact: Artifact): void; onOpenFile(relativePath: string): void; onOpenDiff(execution: ToolExecution): void; onHtmlAction(text: string): void; onCopy(message: ChatMessage): void; onEdit(message: ChatMessage): void; onRegenerate(message: ChatMessage): void; onShare(message: ChatMessage, target: HTMLElement): Promise<void>; onRollback?(file: ReplyChangedFile): void; showThinking?: boolean; hiddenThinkingLabel?: string; busy?: boolean; turnActive?: boolean; timing?: TurnTiming; now?: number; turnKey?: string }): ReactNode {
+const MessageView = memo(function MessageView({ message, executions, onOpenArtifact, onOpenFile, onOpenDiff, onHtmlAction, onCopy, onEdit, onRegenerate, onShare, onRollback, rollbackStates, showThinking = true, hiddenThinkingLabel, busy = false, turnActive = false, timing, now = Date.now(), turnKey }: { message: ChatMessage; executions: ToolExecution[]; onOpenArtifact(artifact: Artifact): void; onOpenFile(relativePath: string): void; onOpenDiff(execution: ToolExecution): void; onHtmlAction(text: string): void; onCopy(message: ChatMessage): void; onEdit(message: ChatMessage): void; onRegenerate(message: ChatMessage): void; onShare(message: ChatMessage, target: HTMLElement): Promise<void>; onRollback?(file: ReplyChangedFile): void; rollbackStates?: ReadonlyMap<string, "restored" | "deleted">; showThinking?: boolean; hiddenThinkingLabel?: string; busy?: boolean; turnActive?: boolean; timing?: TurnTiming; now?: number; turnKey?: string }): ReactNode {
   const text = messageText(message);
   const shareTargetRef = useRef<HTMLDivElement | null>(null);
   const [sharing, setSharing] = useState(false);
@@ -527,7 +531,7 @@ const MessageView = memo(function MessageView({ message, executions, onOpenArtif
           <ActionTimeline message={message} executions={executions} turnActive={turnActive} showThinking={showThinking} thinkingLabel={hiddenThinkingLabel} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} timing={timing} now={now} />
           {message.error && <p className="inline-error"><AlertCircle size={15} />{message.error}</p>}
         </div>
-        {changedFiles.length > 0 && <ChangedFilesPanel files={changedFiles} onOpenFile={onOpenFile} onOpenDiff={onOpenDiff} onRollback={onRollback} rollbackDisabled={busy} />}
+        {changedFiles.length > 0 && <ChangedFilesPanel files={changedFiles} onOpenFile={onOpenFile} onOpenDiff={onOpenDiff} onRollback={onRollback} rollbackStates={rollbackStates} rollbackDisabled={busy} />}
         {!isControlMessage && !message.streaming && !busy && <div className="message-actions"><button type="button" data-control="regenerate" title="重新生成" aria-label="重新生成回复" onClick={() => onRegenerate(message)}><RefreshCw size={13} /></button><button type="button" data-control="copy" title="复制" aria-label="复制 AI 回复" onClick={() => onCopy(message)}><Copy size={13} /></button>{hasShareableContent && <button type="button" data-control="share" title={sharing ? "正在生成图片" : shared ? "已复制图片" : "分享图片"} aria-label={sharing ? "正在生成回复图片" : shared ? "回复图片已复制" : "分享 AI 回复图片"} disabled={sharing} onClick={() => void share()}>{sharing ? <LoaderCircle size={13} className="spinning" /> : shared ? <Check size={13} /> : <Share2 size={13} />}</button>}</div>}
       </div>
       {timing && (isControlMessage ? <CompactTimingMeta timing={timing} now={now} /> : <TimingMeta timing={timing} now={now} />)}
@@ -600,6 +604,21 @@ export const ConversationPane = memo(function ConversationPane({
 }: ConversationPaneProps): ReactNode {
   const data = usePaneData(sessionId);
   const settings = useDesktopStore((state) => state.settings);
+  // 本会话已回滚标记（callId → 动作）：产物行内任一调用 id 命中即显示已回滚徽标。
+  const rollbacks = useDesktopStore((state) => state.rollbacks);
+  const rollbackStates = useMemo(() => {
+    const prefix = `${data.sessionId ?? ""}:`;
+    if (prefix === ":") return undefined;
+    let hit = false;
+    const map = new Map<string, "restored" | "deleted">();
+    for (const [key, action] of Object.entries(rollbacks)) {
+      if (key.startsWith(prefix)) {
+        map.set(key.slice(prefix.length), action);
+        hit = true;
+      }
+    }
+    return hit ? map : undefined;
+  }, [data.sessionId, rollbacks]);
   const models = useDesktopStore((state) => state.models);
   const providers = useDesktopStore((state) => state.providers);
   const resources = useDesktopStore((state) => state.resources);
@@ -1422,7 +1441,7 @@ export const ConversationPane = memo(function ConversationPane({
             const timing = showTurnTimingOnLatest && index === latestAssistantMessageIndex && message.role === "assistant" ? data.turnTiming : undefined;
             const turnActive = data.busy && index === latestAssistantMessageIndex && message.role === "assistant";
             const turnKey = turnStartKeys.has(message.uuid ?? message.id) ? (message.uuid ?? message.id) : undefined;
-            return <MessageView key={message.uuid ?? message.id} message={message} executions={data.executions} onOpenArtifact={onOpenArtifact} onOpenFile={onOpenFile} onOpenDiff={onOpenDiff} onHtmlAction={handleHtmlAction} onCopy={copyMessage} onEdit={editMessage} onRegenerate={regenerateMessage} onShare={shareMessage} onRollback={onRollback} showThinking={showThinking} busy={data.busy} turnActive={turnActive} timing={timing} now={timing ? now : undefined} turnKey={turnKey} />;
+            return <MessageView key={message.uuid ?? message.id} message={message} executions={data.executions} onOpenArtifact={onOpenArtifact} onOpenFile={onOpenFile} onOpenDiff={onOpenDiff} onHtmlAction={handleHtmlAction} onCopy={copyMessage} onEdit={editMessage} onRegenerate={regenerateMessage} onShare={shareMessage} onRollback={onRollback} rollbackStates={rollbackStates} showThinking={showThinking} busy={data.busy} turnActive={turnActive} timing={timing} now={timing ? now : undefined} turnKey={turnKey} />;
           })}
           {isGenerating && (assistantBubbleVisible ? <div className="response-progress response-progress-inline"><LoaderCircle size={14} className="spinning" /><span>{workingLabel}</span>{activeTurnTiming && <TimingMeta timing={activeTurnTiming} now={now} />}</div> : <PendingResponse label={workingLabel} timing={activeTurnTiming} now={now} />)}
         </>}

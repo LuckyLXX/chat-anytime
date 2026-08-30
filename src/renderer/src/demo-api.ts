@@ -439,8 +439,8 @@ export function createDemoApi(): DesktopApi {
           updateSnapshot({ planMode: command.enabled });
           break;
         case "checkpoint.rollback": {
-          // 演示：逐目标报告恢复完成，随即模拟主进程的 checkpoint-result 推送。
-          const results = command.targets.map((target) => ({ relativePath: target.relativePath, action: "restored" as const }));
+          // 演示：逐目标报告恢复完成（带调用 id 供渲染端标记已回滚），模拟主进程推送。
+          const results = command.targets.map((target) => ({ relativePath: target.relativePath, action: "restored" as const, toolCallIds: target.toolCallIds }));
           emit({ type: "checkpoint-result", sessionId: command.sessionId ?? demoSnapshot.sessionId ?? "demo", results, message: `已回滚：恢复 ${results.length} 个文件` });
           break;
         }

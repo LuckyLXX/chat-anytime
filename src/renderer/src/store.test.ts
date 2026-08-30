@@ -235,3 +235,48 @@ describe("session-scoped pending panels", () => {
     expect(currentQuestionRequest([question("question-a", "session-a")], undefined)).toBeUndefined();
   });
 });
+
+describe("checkpoint rollback markers", () => {
+  beforeEach(() => {
+    useDesktopStore.setState({ rollbacks: {}, checkpointResult: undefined });
+  });
+
+  it("records per-call rollback markers from checkpoint-result and skips skipped files", () => {
+    const state = useDesktopStore.getState();
+    state.handleRuntimeMessage({
+      type: "checkpoint-result",
+      sessionId: "session-a",
+      results: [
+        { relativePath: "a.txt", action: "restored", toolCallIds: ["call-1", "call-2"] },
+        { relativePath: "created.txt", action: "deleted", toolCallIds: ["call-3"] },
+        { relativePath: "huge.txt", action: "skipped" }
+      ],
+      message: "已回滚"
+    });
+    const rollbacks = useDesktopStore.getState().rollbacks;
+    // 每个调用 id 独立标记（产物行内任一命中即显示徽标）。
+    expect(rollbacks).toEqual({
+      "session-a:call-1": "restored",
+      "session-a:call-2": "restored",
+      "session-a:call-3": "deleted"
+    });
+    // skipped 不标记（按钮保持可点）。
+    expect(Object.keys(rollbacks).some((key) => key.includes("huge"))).toBe(false);
+    expect(useDesktopStore.getState().checkpointResult?.sessionId).toBe("session-a");
+  });
+
+  it("scopes markers by session so a new turn's fresh call ids are unaffected", () => {
+    useDesktopStore.setState({ rollbacks: { "session-a:call-1": "restored" } });
+    useDesktopStore.getState().handleRuntimeMessage({
+      type: "checkpoint-result",
+      sessionId: "session-b",
+      results: [{ relativePath: "a.txt", action: "restored", toolCallIds: ["call-9"] }],
+      message: "已回滚"
+    });
+    const rollbacks = useDesktopStore.getState().rollbacks;
+    expect(rollbacks["session-a:call-1"]).toBe("restored");
+    expect(rollbacks["session-b:call-9"]).toBe("restored");
+    // 同会话同文件的新回复（新 call id）不会命中旧标记。
+    expect(rollbacks["session-a:call-2"]).toBeUndefined();
+  });
+});

@@ -200,11 +200,13 @@ export interface CheckpointSettings {
   enabled?: boolean;
 }
 
-/** 单个文件的回滚结果；action=skipped 时 detail 说明原因。 */
+/** 单个文件的回滚结果；action=skipped 时 detail 说明原因。toolCallIds 供渲染端把行标记为已回滚。 */
 export interface CheckpointRollbackResult {
   relativePath: string;
   action: "restored" | "deleted" | "skipped";
   detail?: string;
+  /** 该文件在本回复内被改动的全部调用 id；skipped 时缺省。 */
+  toolCallIds?: string[];
 }
 
 /** 回滚目标：单个文件 + 它在该回复内被改动的全部工具调用 id（主进程据此取该文件最早快照 = 回复动手前状态）。 */

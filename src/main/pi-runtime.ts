@@ -2307,13 +2307,16 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       const filePath = checkpointPathFor(join(getAgentDir(), "chatanytime-sessions", record.agent.id), sessionId);
       const entries = await readCheckpoints(filePath);
       const results = await rollbackPlan(record.workspace, command.targets, entries);
-      const restored = results.filter((item) => item.action === "restored").length;
-      const deleted = results.filter((item) => item.action === "deleted").length;
-      const skipped = results.filter((item) => item.action === "skipped").length;
-      const message = results.length === 0
+      // 给每个成功结果回填它的调用 id：渲染端据此把对应产物行标记为已回滚。
+      const callIdsByPath = new Map(command.targets.map((target) => [target.relativePath, target.toolCallIds]));
+      const annotated = results.map((result) => result.action === "skipped" ? result : { ...result, toolCallIds: callIdsByPath.get(result.relativePath) ?? [] });
+      const restored = annotated.filter((item) => item.action === "restored").length;
+      const deleted = annotated.filter((item) => item.action === "deleted").length;
+      const skipped = annotated.filter((item) => item.action === "skipped").length;
+      const message = annotated.length === 0
         ? "该文件没有可回滚的快照（可能早于该功能上线，或改动不经 write/edit/显式输出路径）"
         : `已回滚：恢复 ${restored} 个文件、删除 ${deleted} 个新建文件${skipped ? `、跳过 ${skipped} 个（详见结果）` : ""}`;
-      post({ type: "checkpoint-result", sessionId, results, message });
+      post({ type: "checkpoint-result", sessionId, results: annotated, message });
       // 回滚改了盘上文件：重拉会话标题等不受影响，但需要刷新激活快照让渲染端
       // 重新读取预览索引（writeWorkspaceFile 内部已失效索引缓存）。
       emitState();
