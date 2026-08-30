@@ -18,7 +18,7 @@ export function toolRisk(
   args: Record<string, unknown>
 ): PermissionRequest["risk"] | undefined {
   if (pathLeavesWorkspace(workspace, toolPath(args))) return "outside-workspace";
-  if (toolName === "bash" || toolName === "mcp" || toolName.startsWith("mcp_") || toolName.startsWith("server_")) return "command";
+  if (toolName === "bash" || toolName === "powershell" || toolName === "mcp" || toolName.startsWith("mcp_") || toolName.startsWith("server_")) return "command";
   if (toolName === "edit" || toolName === "write") return "write";
   // 浏览器自动化：导航与写入型 eval 过门；页面内操作（快照/点击/输入/滚动/
   // 截图/等待/读取）信任模型直接执行。

@@ -19,6 +19,7 @@ export const sessionRunStatusLabels: Record<SessionRunStatus, string> = {
 const toolLabels: Record<string, string> = {
   read: "读取文件",
   bash: "执行命令",
+  powershell: "执行 PowerShell",
   edit: "编辑文件",
   write: "写入文件",
   grep: "搜索内容",

@@ -1,7 +1,8 @@
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 export type AccessMode = "read-only" | "ask" | "workspace" | "full";
 
-export type BuiltinToolName = "read" | "bash" | "edit" | "write" | "grep" | "find" | "ls";
+/** powershell 为 opt-in 工具：存量 Agent 配置缺键时默认关闭（见 settings.ts defaultToolEnabled）。 */
+export type BuiltinToolName = "read" | "bash" | "powershell" | "edit" | "write" | "grep" | "find" | "ls";
 
 export interface ModelOption {
   provider: string;

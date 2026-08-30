@@ -73,9 +73,9 @@ function truncateOutput(value: string): string {
   return value.length <= OUTPUT_CAP ? value : `${value.slice(0, OUTPUT_CAP)}…<截断>`;
 }
 
-/** 钩子匹配的目标文本：bash 用命令行，其余工具用参数 JSON（覆盖 path/file_path 等）。 */
+/** 钩子匹配的目标文本：bash/powershell 用命令行，其余工具用参数 JSON（覆盖 path/file_path 等）。 */
 export function hookMatchText(toolName: string, toolInput: unknown): string {
-  if (toolName === "bash") {
+  if (toolName === "bash" || toolName === "powershell") {
     const command = (toolInput as { command?: unknown } | undefined)?.command;
     if (typeof command === "string") return command;
   }

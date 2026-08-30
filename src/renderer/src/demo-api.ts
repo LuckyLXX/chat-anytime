@@ -63,7 +63,7 @@ const demoDefaultAgent: AgentProfile = {
   systemPrompt: "",
   divMode: "auto",
   defaultThinkingLevel: "medium",
-  tools: { read: true, bash: true, edit: true, write: true, grep: true, find: true, ls: true }
+  tools: { read: true, bash: true, powershell: false, edit: true, write: true, grep: true, find: true, ls: true }
 };
 
 const demoSettings: DesktopSettings = {

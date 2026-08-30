@@ -24,6 +24,7 @@ describe("desktop tool permissions", () => {
 
   it("requires approval for every command scope", () => {
     expect(toolRisk(workspace, "bash", { command: "npm test" })).toBe("command");
+    expect(toolRisk(workspace, "powershell", { command: "Remove-Item -Recurse build" })).toBe("command");
   });
 
   it("keeps the default mode asking for every risky operation", () => {

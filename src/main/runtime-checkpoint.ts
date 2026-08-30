@@ -19,13 +19,13 @@ export interface SnapshotTarget {
   requireExisting: boolean;
 }
 
-/** 从工具调用参数解析值得快照的目标；write/edit 精确一个，bash 取显式输出路径候选。 */
+/** 从工具调用参数解析值得快照的目标；write/edit 精确一个，bash/powershell 取显式输出路径候选。 */
 export function snapshotTargetsFor(workspace: string, toolName: string, args: unknown): SnapshotTarget[] {
   if (toolName === "write" || toolName === "edit") {
     const changed = changedWorkspaceFile(workspace, toolName, args);
     return changed ? [{ relativePath: changed.relativePath, requireExisting: false }] : [];
   }
-  if (toolName === "bash" && args && typeof args === "object") {
+  if ((toolName === "bash" || toolName === "powershell") && args && typeof args === "object") {
     const command = (args as Record<string, unknown>).command;
     if (typeof command !== "string") return [];
     return artifactCandidatesFromBashCommand(workspace, command)

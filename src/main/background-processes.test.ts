@@ -59,6 +59,19 @@ describe("bashCommandsFromMessages", () => {
     expect(bashCommandsFromMessages(messages)).toEqual(["nohup dsh web &", "ls"]);
     expect(bashCommandsFromMessages([])).toEqual([]);
   });
+
+  it("extracts powershell commands alongside bash ones", () => {
+    const messages = [
+      {
+        role: "assistant",
+        content: [
+          { type: "toolCall", id: "p1", name: "powershell", arguments: { command: "Start-Process node -ArgumentList 'server.js'" } },
+          { type: "toolCall", id: "p2", name: "bash", arguments: { command: "npm run dev &" } }
+        ]
+      }
+    ];
+    expect(bashCommandsFromMessages(messages)).toEqual(["Start-Process node -ArgumentList 'server.js'", "npm run dev &"]);
+  });
 });
 
 function entry(pid: number, ppid: number, name: string, created: string): ProcessSnapshotEntry {

@@ -184,6 +184,16 @@ describe("workspace file preview", () => {
     expect(artifactCandidatesFromBashCommand(undefined, "touch a.txt")).toEqual([]);
   });
 
+  it("extracts explicit output paths from powershell commands", () => {
+    const workspace = "C:/work/demo";
+    // > / >> 重定向与 Out-File/Set-Content 等 cmdlet 的显式目标。
+    expect(artifactCandidatesFromBashCommand(workspace, "Get-ChildItem > docs/listing.txt")).toEqual(["docs/listing.txt"]);
+    expect(artifactCandidatesFromBashCommand(workspace, "Get-Date >> logs/today.txt")).toEqual(["logs/today.txt"]);
+    expect(artifactCandidatesFromBashCommand(workspace, "Get-Process | Out-File -FilePath reports/procs.txt")).toEqual(["reports/procs.txt"]);
+    expect(artifactCandidatesFromBashCommand(workspace, "Set-Content notes/status.txt ok")).toEqual(["notes/status.txt"]);
+    expect(artifactCandidatesFromBashCommand(workspace, "Get-Location")).toEqual([]);
+  });
+
   it("keeps only artifact candidates that actually exist as files inside the workspace", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "pidesktop-artifact-"));
     await mkdir(join(workspace, "outputs"));

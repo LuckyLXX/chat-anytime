@@ -146,7 +146,7 @@ export function hasUserDesktopAncestor(entry: ProcessSnapshotEntry, index: Map<n
   return false;
 }
 
-/** Extract bash commands from persisted session messages (assistant tool-call blocks). */
+/** Extract shell commands (bash/powershell tool calls) from persisted session messages (assistant tool-call blocks). */
 export function bashCommandsFromMessages(messages: readonly unknown[]): string[] {
   const commands: string[] = [];
   for (const message of messages) {
@@ -156,7 +156,7 @@ export function bashCommandsFromMessages(messages: readonly unknown[]): string[]
     for (const block of record.content) {
       if (!block || typeof block !== "object") continue;
       const call = block as { type?: unknown; name?: unknown; arguments?: unknown };
-      if (call.type !== "toolCall" || call.name !== "bash") continue;
+      if (call.type !== "toolCall" || (call.name !== "bash" && call.name !== "powershell")) continue;
       const command = (call.arguments as { command?: unknown } | undefined)?.command;
       if (typeof command === "string" && command.trim()) commands.push(command);
     }

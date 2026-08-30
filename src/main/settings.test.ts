@@ -66,6 +66,15 @@ describe("desktop settings migration", () => {
     expect(result.settings.agents.find((agent) => agent.id === "coder")).toMatchObject({ defaultThinkingLevel: "high", tools: { bash: false, read: true } });
   });
 
+  it("treats powershell as opt-in: absent keys default off, explicit true survives", () => {
+    // 存量配置缺 powershell 键 → 默认关闭，其余工具缺省开启语义不变。
+    expect(normalizeAgent({ id: "legacy", tools: { bash: false } }).tools).toMatchObject({ bash: false, read: true, powershell: false });
+    // 显式开启则保留。
+    expect(normalizeAgent({ id: "ps", tools: { powershell: true } }).tools).toMatchObject({ powershell: true, bash: true });
+    // 默认 Agent 与新建路径同样默认关闭。
+    expect(createDefaultAgent().tools).toMatchObject({ powershell: false, bash: true });
+  });
+
   it("keeps legacy provider models enabled by default", () => {
     const result = migrateSettings({ providers: [{ id: "proxy", name: "代理", baseUrl: "https://proxy.test/v1", models: [{ id: "model-a" }, { id: "model-b", enabled: false }] }] });
     expect(result.settings.providers[0]?.models).toEqual([

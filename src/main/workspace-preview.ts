@@ -123,12 +123,16 @@ const artifactExtensions = new Set([
 const artifactTokenPattern = /(?:[A-Za-z]:[\\/]|\.{0,2}[\\/])?[^\s"'`<>\[\](){}|;，。；：、！？【】“”‘’*]+\.(?:png|jpe?g|webp|gif|bmp|avif|ico|svg|pdf|zip|docx|xlsx|pptx|md|markdown|mp4|mov|mp3|wav|json|html?|csv|txt)(?![A-Za-z0-9])/giu;
 
 /**
- * bash 命令中显式写出的输出路径：-o/--output/--save* 的值、> 重定向目标、
- * cp/mv/convert/tee 的目标参数。这是“脚本把文件写到哪”的最强信号。
+ * 命令文本中显式写出的输出路径：-o/--output/--save* 的值、> / >> 重定向目标、
+ * cp/mv/convert/tee 的目标参数（bash 与 powershell 通吃——PS 原生支持 >/>>
+ * 重定向，CLI 工具的输出旗标也不随外壳变化）。
+ * 这是“脚本把文件写到哪”的最强信号。
  */
 const bashOutputFlagPattern = /(?:^|[\s;&|(])(?:-o|-O|--output|--save|--save-to|--out|--outdir|--export|--download|--write)(?:\s*=\s*|\s+)([^\s;&|()<>"'`]+)/giu;
 const bashRedirectPattern = /(?:^|[;&|]\s*)[^;&|()<>"'`]*>{1,2}\s*([^\s;&|()<>"'`]+)/giu;
 const bashCopyTargetPattern = /\b(?:cp|mv|move|copy|convert|tee)\s+[^\s;&|()<>"'`]+\s+([^\s;&|()<>"'`]+)/giu;
+/** PowerShell 专属写文件 cmdlet（Out-File/Set-Content/Add-Content，-FilePath/-Path 可省略走位置参数）。 */
+const powershellCmdletOutputPattern = /\b(?:Out-File|Set-Content|Add-Content)\s+(?:-(?:FilePath|Path)\s+)?([^\s;&|()<>"'`]+)/giu;
 
 /**
  * 把单个疑似路径的 token 归一成工作区相对路径候选：工作区内、非忽略目录、
@@ -160,7 +164,7 @@ export function artifactCandidatesFromBashCommand(workspace: string | undefined,
   const root = resolve(workspace);
   const seen = new Set<string>();
   const candidates: string[] = [];
-  for (const pattern of [bashOutputFlagPattern, bashRedirectPattern, bashCopyTargetPattern]) {
+  for (const pattern of [bashOutputFlagPattern, bashRedirectPattern, bashCopyTargetPattern, powershellCmdletOutputPattern]) {
     for (const match of command.matchAll(pattern)) {
       pushArtifactCandidate(root, match[1] ?? "", seen, candidates, 16);
       if (candidates.length >= 16) break;

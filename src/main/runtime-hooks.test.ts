@@ -48,6 +48,15 @@ describe("hooks extension tool_call", () => {
     expect(verdict?.reason).toContain("git防火墙");
   });
 
+  it("blocks a matching deny pattern on the powershell command line too", async () => {
+    // matcher 按工具名匹配（用户配置维度），deny 正则同样作用于命令行文本。
+    const psRule: HookRule = { ...blockRule, name: "git防火墙PS", matcher: "powershell" };
+    const harness = createHarness([psRule]);
+    const verdict = await callToolCall(harness, "powershell", { command: "git push --force origin main" });
+    expect(verdict).toMatchObject({ block: true });
+    expect(verdict?.reason).toContain("git防火墙PS");
+  });
+
   it("allows non-matching commands and other tools", async () => {
     const harness = createHarness([blockRule]);
     expect(await callToolCall(harness, "bash", { command: "npm test" })).toBeUndefined();

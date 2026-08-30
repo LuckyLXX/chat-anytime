@@ -64,7 +64,7 @@ import { resolveVisionModel } from "./vision.js";
 import { buildResourceCatalog } from "./resource-catalog.js";
 import { agentWorkspaceSessionDir, backfillUnpersistedSessions, mergeSessionSummary, sessionListReadyFor } from "./session-scope.js";
 import { isDesktopConfiguredProvider } from "./model-catalog.js";
-import { isPositiveInt, mergeProviderModels } from "./settings.js";
+import { defaultTools, isPositiveInt, mergeProviderModels } from "./settings.js";
 import { buildSkillPrompt, parseSkillPrompt } from "./skill-prompt.js";
 import {
   PI_DESKTOP_CONTROL_ENTRY_TYPE,
@@ -759,7 +759,7 @@ async function sessionDirectories(): Promise<string[]> {
 
 function activeAgent(): AgentProfile {
   const list = settings?.agents ?? [];
-  return list.find((agent) => agent.id === settings?.currentAgentId && !agent.archived) ?? list.find((agent) => agent.id === "default") ?? list[0] ?? { id: "default", name: "默认助手", description: "", systemPrompt: "", divMode: "off", defaultThinkingLevel: "medium", tools: { read: true, bash: true, edit: true, write: true, grep: true, find: true, ls: true } };
+  return list.find((agent) => agent.id === settings?.currentAgentId && !agent.archived) ?? list.find((agent) => agent.id === "default") ?? list[0] ?? { id: "default", name: "默认助手", description: "", systemPrompt: "", divMode: "off", defaultThinkingLevel: "medium", tools: defaultTools() };
 }
 
 function defaultModel(): { provider: string; id: string } | undefined {

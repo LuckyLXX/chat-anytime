@@ -58,6 +58,19 @@ describe("snapshotTargetsFor", () => {
     expect(bashTargets).toEqual([{ relativePath: "out.png", requireExisting: true }]);
     expect(snapshotTargetsFor(workspace, "read", { path: "src/a.ts" })).toEqual([]);
   });
+
+  it("maps powershell to the same explicit output candidates (redirect and cmdlet)", () => {
+    const workspace = "D:\\ws";
+    expect(snapshotTargetsFor(workspace, "powershell", { command: "Get-ChildItem > docs/listing.txt" })).toEqual([
+      { relativePath: "docs/listing.txt", requireExisting: true }
+    ]);
+    expect(snapshotTargetsFor(workspace, "powershell", { command: "Get-Process | Out-File -FilePath reports/procs.txt" })).toEqual([
+      { relativePath: "reports/procs.txt", requireExisting: true }
+    ]);
+    expect(snapshotTargetsFor(workspace, "powershell", { command: "Set-Content notes/status.txt ok" })).toEqual([
+      { relativePath: "notes/status.txt", requireExisting: true }
+    ]);
+  });
 });
 
 describe("checkpoint extension", () => {

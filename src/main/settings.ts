@@ -21,7 +21,7 @@ import type {
   WallpaperOpacityOverrides
 } from "../shared/protocol.js";
 
-export const BUILTIN_TOOLS: BuiltinToolName[] = ["read", "bash", "edit", "write", "grep", "find", "ls"];
+export const BUILTIN_TOOLS: BuiltinToolName[] = ["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"];
 export const DEFAULT_AGENT_ID = "default";
 export const CUSTOM_PROVIDER_ID = "chatanytime-openai-compatible";
 
@@ -29,8 +29,16 @@ export function normalizeAccessMode(value: unknown): AccessMode {
   return value === "read-only" || value === "workspace" || value === "full" ? value : "ask";
 }
 
+/**
+ * opt-in 内建工具（当前仅 powershell）：存量 Agent 配置缺键时默认关闭，
+ * 其余工具沿用「缺省开启」语义——升级不改变既有 Agent 的工具集与请求前缀。
+ */
+export function defaultToolEnabled(tool: BuiltinToolName): boolean {
+  return tool !== "powershell";
+}
+
 export function defaultTools(): Record<BuiltinToolName, boolean> {
-  return Object.fromEntries(BUILTIN_TOOLS.map((tool) => [tool, true])) as Record<BuiltinToolName, boolean>;
+  return Object.fromEntries(BUILTIN_TOOLS.map((tool) => [tool, defaultToolEnabled(tool)])) as Record<BuiltinToolName, boolean>;
 }
 
 export function createDefaultAgent(): AgentProfile {
@@ -148,7 +156,7 @@ export function normalizeSkillOverrides(value: unknown): Record<string, boolean>
   }));
 }
 
-export function normalizeAgent(agent: Partial<AgentProfile> | undefined): AgentProfile {
+export function normalizeAgent(agent: (Omit<Partial<AgentProfile>, "tools"> & { tools?: Partial<Record<BuiltinToolName, boolean>> }) | undefined): AgentProfile {
   const fallback = createDefaultAgent();
   const sourceTools = (agent?.tools ?? {}) as Partial<Record<BuiltinToolName, boolean>>;
   const skillOverrides = normalizeSkillOverrides(agent?.skillOverrides);
@@ -161,7 +169,7 @@ export function normalizeAgent(agent: Partial<AgentProfile> | undefined): AgentP
     divMode: normalizeDivBubbleMode(agent?.divMode),
     defaultModel: agent?.defaultModel,
     defaultThinkingLevel: agent?.defaultThinkingLevel ?? fallback.defaultThinkingLevel,
-    tools: Object.fromEntries(BUILTIN_TOOLS.map((tool) => [tool, sourceTools[tool] !== false])) as Record<BuiltinToolName, boolean>,
+    tools: Object.fromEntries(BUILTIN_TOOLS.map((tool) => [tool, sourceTools[tool] ?? defaultToolEnabled(tool)])) as Record<BuiltinToolName, boolean>,
     ...(Object.keys(skillOverrides).length > 0 ? { skillOverrides } : {}),
     archived: Boolean(agent?.archived)
   };
