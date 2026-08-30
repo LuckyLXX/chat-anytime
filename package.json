@@ -13,9 +13,9 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@earendil-works/pi-agent-core": "0.84.2",
-    "@earendil-works/pi-ai": "0.84.2",
-    "@earendil-works/pi-coding-agent": "0.84.2",
+    "@earendil-works/pi-agent-core": "0.84.4",
+    "@earendil-works/pi-ai": "0.84.4",
+    "@earendil-works/pi-coding-agent": "0.84.4",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "node-pty": "^1.1.0",
     "strip-json-comments": "5.0.3",
@@ -38,6 +38,7 @@
     "mermaid": "11.16.1",
     "react": "19.1.1",
     "react-dom": "19.1.1",
+    "zustand": "5.0.8",
     "react-markdown": "10.1.0",
     "rehype-katex": "7.0.1",
     "rehype-raw": "7.0.0",
@@ -50,10 +51,10 @@
     "vitest": "4.0.18"
   },
   "overrides": {
-    "@earendil-works/pi-agent-core": "0.84.2",
-    "@earendil-works/pi-ai": "0.84.2",
-    "@earendil-works/pi-coding-agent": "0.84.2",
-    "@earendil-works/pi-tui": "0.84.2"
+    "@earendil-works/pi-agent-core": "0.84.4",
+    "@earendil-works/pi-ai": "0.84.4",
+    "@earendil-works/pi-coding-agent": "0.84.4",
+    "@earendil-works/pi-tui": "0.84.4"
   },
   "build": {
     "appId": "dev.chatanytime.desktop",
