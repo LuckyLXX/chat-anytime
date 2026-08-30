@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import type { PermissionRequest, QuestionRequest, RuntimeSnapshot, SessionPaneSnapshot, ToolExecution, Todo } from "../../shared/protocol.js";
+import type { PermissionRequest, QuestionRequest, RuntimeSnapshot, SessionPaneSnapshot, ToolExecution, Todo, UsageStats } from "../../shared/protocol.js";
 import { currentPermissionRequest, currentQuestionRequest, dropPaneStates, pruneParkedPanels, useDesktopStore } from "./store.js";
 
 function permission(id: string, sessionId: string): PermissionRequest {
@@ -278,5 +278,25 @@ describe("checkpoint rollback markers", () => {
     expect(rollbacks["session-b:call-9"]).toBe("restored");
     // 同会话同文件的新回复（新 call id）不会命中旧标记。
     expect(rollbacks["session-a:call-2"]).toBeUndefined();
+  });
+});
+
+describe("usage stats", () => {
+  it("usage-stats-result stores the payload and clears the loading flag", () => {
+    useDesktopStore.setState({ usageStats: undefined, usageStatsLoading: true });
+    const stats: UsageStats = {
+      generatedAt: 1,
+      scannedFiles: 2,
+      scanMs: 5,
+      total: { requests: 3, input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: 0, cacheHitRate: null },
+      byDay: [],
+      byModel: [],
+      byAgent: [],
+      bySession: []
+    };
+    useDesktopStore.getState().handleRuntimeMessage({ type: "usage-stats-result", stats });
+    const state = useDesktopStore.getState();
+    expect(state.usageStats).toEqual(stats);
+    expect(state.usageStatsLoading).toBe(false);
   });
 });

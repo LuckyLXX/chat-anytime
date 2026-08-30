@@ -13,7 +13,8 @@ import type {
   RuntimeMessage,
   RuntimeSnapshot,
   SessionPaneSnapshot,
-  Todo
+  Todo,
+  UsageStats
 } from "../../shared/protocol";
 
 /** 面板“测试”按钮最近一次钩子试跑的结果（hooks.run → hook-run 推送）。 */
@@ -141,6 +142,10 @@ interface DesktopState {
   hookRun?: HookRunResult;
   /** 最近一次 checkpoint 回滚结果；App 监听变化弹 toast 并刷新工作区树。 */
   checkpointResult?: CheckpointResultInfo;
+  /** 用量统计（设置页「用量统计」tab，按需拉取）；undefined=尚未请求。 */
+  usageStats?: UsageStats;
+  /** 用量统计请求中（面板显示载入态）。 */
+  usageStatsLoading: boolean;
   /**
    * 已回滚标记：key = `${sessionId}:${toolCallId}`，值 = 回滚动作。产物行内
    * 任一调用 id 命中即显示「已回滚/已删除」徽标（新回复的新调用 id 不受影响）。
@@ -151,6 +156,7 @@ interface DesktopState {
   initialize(): Promise<() => void>;
   handleRuntimeMessage(message: RuntimeMessage): void;
   clearError(): void;
+  requestUsageStats(agentId?: string): void;
 }
 
 const emptySnapshot: RuntimeSnapshot = {
@@ -241,6 +247,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   permissions: [],
   questions: [],
   rollbacks: {},
+  usageStatsLoading: false,
   settings: emptySettings,
   customProviderKeyConfigured: false,
   customModels: [],
@@ -396,6 +403,9 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
           };
         });
         break;
+      case "usage-stats-result":
+        set({ usageStats: message.stats, usageStatsLoading: false });
+        break;
       case "error":
         set({ error: message.message });
         break;
@@ -406,5 +416,11 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   },
   clearError() {
     set({ error: undefined });
+  },
+  /** 拉取用量统计（设置页「用量统计」tab 进入/切筛选时调）；重复点击防抖由 loading 门闸承担。 */
+  requestUsageStats(agentId?: string) {
+    if (get().usageStatsLoading) return;
+    set({ usageStatsLoading: true });
+    void window.piDesktop.send({ type: "usage.stats.request", ...(agentId ? { agentId } : {}) });
   }
 }));

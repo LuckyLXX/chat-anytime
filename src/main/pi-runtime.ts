@@ -76,6 +76,7 @@ import {
 } from "./session-history.js";
 import { changedWorkspaceFile, changedWorkspaceFiles, collectProducedArtifacts, isArtifactProducingTool } from "./workspace-preview.js";
 import { createToolAudit } from "./tool-audit.js";
+import { collectUsageStats, createUsageStatsCache } from "./usage-stats.js";
 import { diffToolNames } from "./tool-delta.js";
 import * as runtimeTodoTools from "./runtime-todo-tools.js";
 import * as runtimeMemoryTools from "./runtime-memory-tools.js";
@@ -207,6 +208,9 @@ const imageMimeTypes = new Set(["image/png", "image/jpeg", "image/webp", "image/
 let nativeSkills: SkillSummary[] = [];
 let discoveredSkills: DiscoveredSkill[] = [];
 let mcpServers: McpServerSummary[] = [];
+// 用量统计的按文件扫描缓存（utility 生命周期内存态；键 mtimeMs+size，
+// 会话内容不变时零重扫，助手筛选切换只重聚合）。
+const usageStatsCache = createUsageStatsCache();
 // Set when the user explicitly reloads resources or changes MCP config, so the
 // next createSession forces a network sync instead of serving the tool cache.
 let forceMcpRefresh = false;
@@ -765,6 +769,19 @@ function activeAgent(): AgentProfile {
 
 function defaultModel(): { provider: string; id: string } | undefined {
   return currentAgent?.defaultModel ?? settings?.model;
+}
+
+/**
+ * 应用侧默认（助手 defaultModel → 全局 settings.model）之后的第三来源：Pi 自己
+ * 持久化的默认模型（agentDir settings.json）。我们每次 switchSessionModel 都会
+ * 经 Pi 的 setModel 把当前模型写进去，等于「最近一次使用的模型」——新会话在
+ * 未设默认的助手下沿用它，是 Pi findInitialModel 的既有行为，这里只是把解析
+ * 挪到应用侧以便套覆盖。
+ */
+function piPersistedDefaultModel(manager: SettingsManager): { provider: string; id: string } | undefined {
+  const provider = manager.getDefaultProvider();
+  const modelId = manager.getDefaultModel();
+  return provider && modelId ? { provider, id: modelId } : undefined;
 }
 
 function hasImageInput(model: { provider?: string; id?: string; input?: readonly string[] } | undefined): boolean {
@@ -1615,8 +1632,20 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     settings?.providers
   );
   const requested = hasExistingMessages ? undefined : defaultModel();
+  // 新会话且应用侧无默认（助手未设、全局 settings.model 未设）时，Pi 会走
+  // findInitialModel 的 settings-default 分支——用它自己持久化的默认模型裸取
+  // 注册表（我们每次 switchSessionModel 都会写进去），同样绕过覆盖。这里镜像
+  // 该分支自行解析并套覆盖；鉴权不通过或解析不出时保持 undefined，交给 Pi 的
+  // 后续兜底（首个可用模型），行为与之前一致。
+  const piDefault = requested ? undefined : piPersistedDefaultModel(settingsManager);
+  const piDefaultModel = piDefault ? modelRuntime.getModel(piDefault.provider, piDefault.id) : undefined;
   const requestedModel = restoredModel
-    ?? (requested ? modelRuntime.getModel(requested.provider, requested.id) : undefined);
+    ?? (requested ? modelRuntime.getModel(requested.provider, requested.id) : undefined)
+    ?? resolveRestoredSessionModel(
+      piDefaultModel,
+      Boolean(piDefaultModel && modelRuntime.hasConfiguredAuth(piDefaultModel.provider)),
+      settings?.providers
+    );
   const resolvedModel = requestedModel ? applyModelOverrides(requestedModel) : undefined;
   // refreshSessions re-reads every session file from disk (line-by-line), which
   // is slow with many/large sessions. It only needs to be fresh for the sidebar,
@@ -1702,6 +1731,15 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     result.session.dispose();
     if (sessionsPromise) await sessionsPromise;
     return;
+  }
+  // 交给 Pi 兜底落位的模型（首个可用模型等更深的 findInitialModel 分支）同样
+  // 可能命中用户修正。这里做纯元数据纠偏——不走 setModel（会追加 model_change
+  // 条目、重写 Pi 默认），直接替换 state.model 引用，与 Pi 自身的
+  // _refreshCurrentModelFromRegistry 同一姿势；覆盖只动 contextWindow/maxTokens/
+  // input，不影响 setModel 时已按模型能力钳过的思考档位。
+  if (!resolvedModel && result.session.model) {
+    const corrected = applyModelOverrides(result.session.model);
+    if (corrected !== result.session.model) result.session.agent.state.model = corrected;
   }
   // 早水合（分屏）：历史已由 createAgentSession 装载，而扩展绑定/工具激活/
   // activate 还要一小会儿。若该会话已被渲染端 watch（或等待 watch），先推一
@@ -2351,6 +2389,17 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       // 重新读取预览索引（writeWorkspaceFile 内部已失效索引缓存）。
       emitState();
       emitPaneStateFor(record);
+      break;
+    }
+    case "usage.stats.request": {
+      // 跨助手扫会话 JSONL 聚合用量（按需拉取，不进快照）；按文件缓存命中时
+      // 只重聚合，毫秒级返回。扫盘在 utility 进程，不阻塞主进程/渲染端。
+      const filterAgentId = command.agentId;
+      void collectUsageStats(join(getAgentDir(), "chatanytime-sessions"), usageStatsCache, filterAgentId)
+        .then((stats) => post({ type: "usage-stats-result", stats }))
+        .catch((error: unknown) => {
+          post({ type: "error", message: `用量统计失败：${error instanceof Error ? error.message : String(error)}` });
+        });
       break;
     }
     case "session.compact": {

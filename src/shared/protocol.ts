@@ -289,6 +289,69 @@ export interface ContextUsage {
   cacheHitRate: number | null;
 }
 
+// ─── 用量统计（usage.stats.request → usage-stats-result）───
+
+/** 聚合后的单项用量小计；四类维度（总览/按天/按模型/按会话）共用。 */
+export interface UsageAmount {
+  /** LLM 请求次数（每条有效 assistant 消息 = 1 次）。 */
+  requests: number;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  /** 推理 token（部分模型才返回，全量累加）。 */
+  reasoning?: number;
+  /** 服务商报告的成本（多数中转报 0，有值才有意义）。 */
+  cost: number;
+}
+
+export interface UsageTotals extends UsageAmount {
+  /** 缓存命中率 %：cacheRead/(input+cacheRead+cacheWrite)；无计费输入时为 null。 */
+  cacheHitRate: number | null;
+  /** 覆盖范围内最早/最新的消息时间戳（毫秒）。 */
+  firstAt?: number;
+  lastAt?: number;
+}
+
+export interface UsageDayEntry extends UsageAmount {
+  /** 本地时区日期 YYYY-MM-DD（按消息时间戳）。 */
+  date: string;
+}
+
+export interface UsageModelEntry extends UsageAmount {
+  model: string;
+  provider: string;
+  lastAt: number;
+}
+
+export interface UsageAgentEntry extends UsageAmount {
+  agentId: string;
+}
+
+export interface UsageSessionEntry extends UsageAmount {
+  agentId: string;
+  sessionPath: string;
+  /** 首条 user 消息前 60 字符；无 user 消息时用文件名。 */
+  title: string;
+  lastAt: number;
+}
+
+export interface UsageStats {
+  generatedAt: number;
+  /** 本次实际解析的会话文件数（缓存命中跳过的不计）。 */
+  scannedFiles: number;
+  scanMs: number;
+  total: UsageTotals;
+  /** 按本地日期升序。 */
+  byDay: UsageDayEntry[];
+  /** 按累计输出 token 降序。 */
+  byModel: UsageModelEntry[];
+  /** 按累计输出 token 降序（助手筛选下拉的数据源）。 */
+  byAgent: UsageAgentEntry[];
+  /** 最近使用的会话（按 lastAt 降序，截前 60 条）。 */
+  bySession: UsageSessionEntry[];
+}
+
 export interface ToolExecution {
   id: string;
   name: string;
@@ -895,6 +958,8 @@ export type RuntimeCommand =
   | { type: "question.resolve"; id: string; answers?: string[] }
   /** 回滚单条回复内指定文件的改动：按（文件 + 调用 id）定位快照，每文件取最早快照恢复；targets 可含多个文件。 */
   | { type: "checkpoint.rollback"; sessionId?: string; targets: CheckpointRollbackTarget[] }
+  /** 用量统计：跨助手扫描会话 JSONL 聚合 token 用量；agentId 缺省=全部助手。 */
+  | { type: "usage.stats.request"; agentId?: string }
   /** main 进程回传的浏览器自动化结果（响应 utility 的 browser-automation.request）。 */
   | { type: "browser-automation.result"; requestId: string; result: BrowserAutomationResult };
 
@@ -921,6 +986,8 @@ export type RuntimeMessage =
   | { type: "hook-run"; name: string; scope: "project" | "global"; ok: boolean; blocked?: boolean; detail: string; durationMs: number }
   /** checkpoint 回滚完成：逐文件结果随推送展示；渲染端据此刷新工作区树。 */
   | { type: "checkpoint-result"; sessionId: string; results: CheckpointRollbackResult[]; message?: string }
+  /** 用量统计结果（响应 usage.stats.request；按需拉取，不进快照）。 */
+  | { type: "usage-stats-result"; stats: UsageStats }
   /** utility 进程发起的浏览器自动化操作；main 完成后以 browser-automation.result 命令回传。 */
   | { type: "browser-automation.request"; requestId: string; sessionKey: string; request: BrowserAutomationRequest }
   | { type: "error"; message: string }

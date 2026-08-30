@@ -15,7 +15,8 @@ import type {
   RuntimeSnapshot,
   ResourceCatalog,
   TerminalCommand,
-  TerminalEventData
+  TerminalEventData,
+  UsageStats
 } from "../../shared/protocol";
 
 const listeners = new Set<(message: RuntimeMessage) => void>();
@@ -54,6 +55,59 @@ function growDemoContext(...texts: string[]): void {
 function resetDemoContext(tokens: number | null): void {
   demoContextTokens = tokens;
   demoCacheHitRate = tokens == null || tokens === 0 ? null : 85;
+}
+
+/** 本地 YYYY-MM-DD 平移（演示统计样例的日期生成）。 */
+function demoDateShift(daysAgo: number): string {
+  const date = new Date();
+  date.setDate(date.getDate() - daysAgo);
+  const pad = (value: number) => `${value}`.padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+/** 演示用量统计：三天样例（今天/昨天/三天前），agentId 缺省聚合全部。 */
+function demoUsageStats(agentId?: string): UsageStats {
+  const days = [
+    { date: demoDateShift(2), requests: 14, input: 41_000, output: 6_200, cacheRead: 210_000, cacheWrite: 18_000, cost: 0 },
+    { date: demoDateShift(1), requests: 27, input: 66_500, output: 12_800, cacheRead: 380_000, cacheWrite: 26_500, cost: 0 },
+    { date: demoDateShift(0), requests: 9, input: 24_000, output: 3_900, cacheRead: 150_000, cacheWrite: 12_000, cost: 0 }
+  ];
+  const filter = agentId && agentId !== "default" ? 0.4 : 1;
+  const scale = (day: (typeof days)[number]) => ({
+    ...day,
+    requests: Math.max(1, Math.round(day.requests * filter)),
+    input: Math.round(day.input * filter),
+    output: Math.round(day.output * filter),
+    cacheRead: Math.round(day.cacheRead * filter),
+    cacheWrite: Math.round(day.cacheWrite * filter)
+  });
+  const scaledDays = days.map(scale);
+  const total = scaledDays.reduce((acc, day) => ({
+    requests: acc.requests + day.requests,
+    input: acc.input + day.input,
+    output: acc.output + day.output,
+    cacheRead: acc.cacheRead + day.cacheRead,
+    cacheWrite: acc.cacheWrite + day.cacheWrite,
+    cost: acc.cost + day.cost
+  }), { requests: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 });
+  const promptTokens = total.input + total.cacheRead + total.cacheWrite;
+  const agentIdFor = agentId || "default";
+  return {
+    generatedAt: Date.now(),
+    scannedFiles: 6,
+    scanMs: 180,
+    total: { ...total, cacheHitRate: promptTokens > 0 ? (total.cacheRead / promptTokens) * 100 : null, firstAt: Date.now() - 3 * 86_400_000, lastAt: Date.now() - 600_000 },
+    byDay: scaledDays,
+    byModel: [
+      { model: "deepseek-v4-flash", provider: "chatanytime-openai-compatible", requests: Math.round(total.requests * 0.7), input: Math.round(total.input * 0.7), output: Math.round(total.output * 0.7), cacheRead: Math.round(total.cacheRead * 0.7), cacheWrite: Math.round(total.cacheWrite * 0.7), cost: 0, lastAt: Date.now() - 600_000 },
+      { model: "claude-sonnet-4-5", provider: "chatanytime-openai-compatible", requests: total.requests - Math.round(total.requests * 0.7), input: total.input - Math.round(total.input * 0.7), output: total.output - Math.round(total.output * 0.7), cacheRead: total.cacheRead - Math.round(total.cacheRead * 0.7), cacheWrite: total.cacheWrite - Math.round(total.cacheWrite * 0.7), cost: 0, lastAt: Date.now() - 3_600_000 }
+    ],
+    byAgent: [{ agentId: agentIdFor, ...total }],
+    bySession: [
+      { agentId: agentIdFor, sessionPath: "~/demo/sessions/demo-1.jsonl", title: "用量统计面板功能实现", requests: Math.round(total.requests * 0.5), input: Math.round(total.input * 0.5), output: Math.round(total.output * 0.5), cacheRead: Math.round(total.cacheRead * 0.5), cacheWrite: Math.round(total.cacheWrite * 0.5), cost: 0, lastAt: Date.now() - 600_000 },
+      { agentId: agentIdFor, sessionPath: "~/demo/sessions/demo-2.jsonl", title: "修复分屏关闭竞态问题", requests: Math.round(total.requests * 0.3), input: Math.round(total.input * 0.3), output: Math.round(total.output * 0.3), cacheRead: Math.round(total.cacheRead * 0.3), cacheWrite: Math.round(total.cacheWrite * 0.3), cost: 0, lastAt: Date.now() - 7_200_000 }
+    ]
+  };
 }
 
 const demoDefaultAgent: AgentProfile = {
@@ -442,6 +496,11 @@ export function createDemoApi(): DesktopApi {
           // 演示：逐目标报告恢复完成（带调用 id 供渲染端标记已回滚），模拟主进程推送。
           const results = command.targets.map((target) => ({ relativePath: target.relativePath, action: "restored" as const, toolCallIds: target.toolCallIds }));
           emit({ type: "checkpoint-result", sessionId: command.sessionId ?? demoSnapshot.sessionId ?? "demo", results, message: `已回滚：恢复 ${results.length} 个文件` });
+          break;
+        }
+        case "usage.stats.request": {
+          // 演示：静态样例聚合（近几天的用量曲线 + 两个模型 + 会话列表），模拟 utility 推送。
+          emit({ type: "usage-stats-result", stats: demoUsageStats(command.agentId) });
           break;
         }
         case "session.rename":
