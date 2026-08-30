@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { runManualCompaction } from "./compaction-lifecycle.js";
+import { autoCompactionFailureNotice, runManualCompaction } from "./compaction-lifecycle.js";
 
 describe("manual compaction lifecycle", () => {
   it("settles successful compaction instead of leaving the caller busy", async () => {
@@ -27,5 +27,21 @@ describe("manual compaction lifecycle", () => {
       message: "压缩上下文失败：provider unavailable",
       error: failure
     });
+  });
+});
+
+describe("auto compaction failure notice", () => {
+  it("surfaces threshold and overflow failures", () => {
+    expect(autoCompactionFailureNotice({ reason: "threshold", errorMessage: "Compaction failed: 503" }))
+      .toBe("自动压缩上下文失败：Compaction failed: 503");
+    expect(autoCompactionFailureNotice({ reason: "overflow", errorMessage: "Compaction failed: 503" }))
+      .toBe("自动压缩上下文失败：Compaction failed: 503");
+  });
+
+  it("stays silent for manual compaction (control message path), aborts, and successes", () => {
+    expect(autoCompactionFailureNotice({ reason: "manual", errorMessage: "Compaction failed: 503" })).toBeUndefined();
+    // 中止路径 Pi 不带 errorMessage；成功同理。
+    expect(autoCompactionFailureNotice({ reason: "threshold" })).toBeUndefined();
+    expect(autoCompactionFailureNotice({ reason: "overflow" })).toBeUndefined();
   });
 });

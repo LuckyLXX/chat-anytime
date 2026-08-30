@@ -49,7 +49,7 @@ import type {
 } from "../shared/protocol.js";
 import { toolLabel } from "../shared/locale.js";
 import { workspaceRelativeAttachment } from "./attachments.js";
-import { runManualCompaction } from "./compaction-lifecycle.js";
+import { autoCompactionFailureNotice, runManualCompaction } from "./compaction-lifecycle.js";
 import { readGitBranch } from "./git-branch.js";
 import { inferCustomModelImageInput, resolveCustomProviderRegistration } from "./custom-provider.js";
 import { buildDivModePrompt } from "./div-prompt.js";
@@ -1102,6 +1102,17 @@ function handleSessionEvent(record: SessionRuntimeRecord, event: AgentSessionEve
     case "compaction_start":
       record.status = "正在压缩上下文";
       break;
+    case "compaction_end": {
+      // 手动 /compact 的失败已由 runManualCompaction 的控制消息兜底；这里只暴露
+      // 自动压缩（阈值触发/溢出恢复，0.84.4 起可发生在工具执行与下次请求之间）
+      // 的失败——此前完全静默，用户只会看到上下文用量没有下降。中止（用户停止）
+      // 不带 errorMessage，不会误报。
+      const failureNotice = autoCompactionFailureNotice(event);
+      if (failureNotice) {
+        post({ type: "error", message: `话题「${record.session.sessionManager.getSessionName()}」${failureNotice}` });
+      }
+      break;
+    }
     case "auto_retry_start":
       record.status = `正在重试（${event.attempt}/${event.maxAttempts}）`;
       break;
