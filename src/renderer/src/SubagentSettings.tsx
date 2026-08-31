@@ -2,7 +2,7 @@ import { Bot, Pencil, Plus, Trash2, X } from "lucide-react";
 import { useState, type FormEvent, type ReactNode } from "react";
 import type { BuiltinToolName, ModelOption, ProviderOption, ResourceCatalog, RuntimeCommand, SubagentDefinition, SubagentScope } from "../../shared/protocol";
 import { toolLabel } from "../../shared/locale";
-import { groupModelsByProvider } from "./lib/model-list";
+import { groupModelsByProvider, selectableCatalogModels } from "./lib/model-list";
 import { useDesktopStore } from "./store";
 
 const SUBAGENT_TOOLS: BuiltinToolName[] = ["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"];
@@ -43,7 +43,8 @@ export function SubagentSettings({ resources, workspaceOpen, models, providers }
   const [inherited, setInherited] = useState<boolean>(true);
   const [tools, setTools] = useState<Record<BuiltinToolName, boolean>>(() => Object.fromEntries(SUBAGENT_TOOLS.map((tool) => [tool, true])) as Record<BuiltinToolName, boolean>);
 
-  const configuredModels = models.filter((model) => model.configured);
+  // 与顶栏模型选择器/Agent 默认模型下拉同口径：只保留已勾选（enabled !== false）且已配置的模型。
+  const configuredModels = selectableCatalogModels(models).filter((model) => model.configured);
   const groupedConfiguredModels = groupModelsByProvider(configuredModels, (providerId) => providers.find((item) => item.id === providerId)?.name);
 
   async function run(command: RuntimeCommand): Promise<boolean> {
