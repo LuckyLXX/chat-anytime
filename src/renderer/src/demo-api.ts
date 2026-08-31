@@ -14,6 +14,7 @@ import type {
   RuntimeMessage,
   RuntimeSnapshot,
   ResourceCatalog,
+  CommandSummary,
   TerminalCommand,
   TerminalEventData,
   UsageStats
@@ -266,8 +267,8 @@ const demoResources: ResourceCatalog = {
     { id: "skill:project-notes", name: "project-notes", description: "整理项目文档和工作记录。", source: "当前项目", scope: "project", defaultEnabled: true, enabled: true, toggleable: true, disableModelInvocation: false }
   ],
   commands: [
-    { name: "commit", description: "按规范为当前改动生成提交信息", scope: "global", filePath: "~/.pi/agent/pidesktop-commands/commit.md" },
-    { name: "review", description: "审查指定文件的改动（$ARGUMENTS 传入路径）", scope: "project", filePath: "./.pidesktop-commands/review.md" }
+    { name: "commit", description: "按规范为当前改动生成提交信息", scope: "global", filePath: "~/.pi/agent/pidesktop-commands/commit.md", template: "读取暂存区改动，按 type(scope): 中文描述 规范生成提交：$ARGUMENTS" },
+    { name: "review", description: "审查指定文件的改动（$ARGUMENTS 传入路径）", scope: "project", filePath: "./.pidesktop-commands/review.md", template: "审查以下文件的改动并指出风险：$ARGUMENTS" }
   ],
   mcpServers: [
     { name: "docs", status: "connected", toolCount: 8, resourceCount: 2, disabled: false },
@@ -658,6 +659,23 @@ export function createDemoApi(): DesktopApi {
         case "resources.reload":
           emit({ type: "resources", resources: structuredClone(demoResources) });
           break;
+        case "command.save": {
+          const draft = command.command;
+          const name = draft.name.trim() || "未命名";
+          const scope = draft.scope;
+          const existing = demoResources.commands.find((entry) => entry.name === name && entry.scope === scope);
+          const summary: CommandSummary = { name, description: draft.description?.trim() ?? "", scope, filePath: scope === "project" ? `./.pidesktop-commands/${name}.md` : `~/.pi/agent/pidesktop-commands/${name}.md`, template: draft.template };
+          demoResources.commands = existing
+            ? demoResources.commands.map((entry) => entry === existing ? summary : entry)
+            : [...demoResources.commands.filter((entry) => !(entry.name === name && entry.scope === scope)), summary].sort((left, right) => left.name.localeCompare(right.name));
+          emit({ type: "resources", resources: structuredClone(demoResources) });
+          break;
+        }
+        case "command.delete": {
+          demoResources.commands = demoResources.commands.filter((entry) => !(entry.name === command.name && (entry.scope === command.scope || entry.scope === "unknown")));
+          emit({ type: "resources", resources: structuredClone(demoResources) });
+          break;
+        }
         case "mcp.server.save": {
           const existing = demoResources.mcpServers.find((item) => item.name === command.server.name);
           if (existing) {

@@ -62,7 +62,7 @@ import { loadRecentWorkspaces, recordRecentWorkspace, removeRecentWorkspace, wri
 import { createSubagentTools, type SubagentContext } from "./subagent.js";
 import { buildSkillsSystemPromptBlock, setSkillEnabled, type DiscoveredSkill } from "./skill-catalog.js";
 import * as commandCatalog from "./command-catalog.js";
-import type { DiscoveredCommand } from "./command-catalog.js";
+import { COMMAND_NAME_PATTERN, type DiscoveredCommand } from "./command-catalog.js";
 import { createTodoStore, migrateLegacyTodoFile, type TodoStore } from "./todo-store.js";
 import { resolveVisionModel } from "./vision.js";
 import { buildResourceCatalog } from "./resource-catalog.js";
@@ -2747,6 +2747,26 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         // session rebuild (Pi has no tool-removal API).
         await applyMcpToolChanges();
       });
+      break;
+    }
+    case "command.save": {
+      // 与 hooks.save 同款轻量模式：只写文件 + 刷目录，不重建会话、不拒绝
+      // 运行中的会话（发送时重读文件，下一次发送自然生效）。
+      const draft = commandCatalog.validateCommandDraft(command.command);
+      const { globalDir, projectDir } = commandPaths();
+      if (command.command.scope === "project" && !workspace) throw new Error("请先打开工作区，再保存项目级命令");
+      commandCatalog.writeCommandFile(command.command.scope === "project" ? projectDir : globalDir, draft.name, draft.description, draft.template);
+      syncCommands();
+      emitResourceCatalog();
+      break;
+    }
+    case "command.delete": {
+      if (!COMMAND_NAME_PATTERN.test(command.name)) throw new Error("命令名无效");
+      const { globalDir, projectDir } = commandPaths();
+      if (command.scope === "project" && !workspace) throw new Error("请先打开工作区，再删除项目级命令");
+      if (!commandCatalog.deleteCommandFile(command.scope === "project" ? projectDir : globalDir, command.name)) throw new Error("找不到要删除的命令文件");
+      syncCommands();
+      emitResourceCatalog();
       break;
     }
     case "hooks.save": {

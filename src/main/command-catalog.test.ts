@@ -1,15 +1,19 @@
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   buildCommandPrompt,
   buildRuntimeCommandPrompt,
+  deleteCommandFile,
   discoverCommands,
   expandCommandTemplate,
   parseCommandPrompt,
+  serializeCommandFile,
   stripCommandFrontmatter,
   toCommandSummaries,
+  validateCommandDraft,
+  writeCommandFile,
   type DiscoveredCommand
 } from "./command-catalog.js";
 
@@ -130,5 +134,40 @@ describe("stripCommandFrontmatter / buildRuntimeCommandPrompt", () => {
 
   it("命令不存在时抛出可读错误", () => {
     expect(() => buildRuntimeCommandPrompt([], "nope", undefined)).toThrow("未找到自定义命令");
+  });
+});
+
+describe("命令文件管理（设置页保存/删除）", () => {
+  it("writeCommandFile 原子写：目录不存在则创建，带/不带 description 两种序列化", () => {
+    const dir = join(makeTempDir(), "pidesktop-commands");
+    writeCommandFile(dir, "提交", "生成提交信息", "模板：$ARGUMENTS");
+    expect(readFileSync(join(dir, "提交.md"), "utf8")).toBe("---\ndescription: 生成提交信息\n---\n\n模板：$ARGUMENTS\n");
+    writeCommandFile(dir, "plain", "", "纯模板");
+    expect(readFileSync(join(dir, "plain.md"), "utf8")).toBe("纯模板\n");
+    expect(readdirSync(dir).length).toBe(2);
+  });
+
+  it("写→扫描→汇总往返：description 与模板正文无损回读（编辑表单回填链路）", () => {
+    const dir = makeTempDir();
+    writeCommandFile(dir, "commit", "生成提交信息", "按规范生成提交：$ARGUMENTS");
+    const summaries = toCommandSummaries(discoverCommands(dir, join(dir, "missing")));
+    expect(summaries[0]).toMatchObject({ name: "commit", description: "生成提交信息", template: "按规范生成提交：$ARGUMENTS", scope: "global" });
+  });
+
+  it("deleteCommandFile：删除返回 true，文件不存在返回 false", () => {
+    const dir = makeTempDir();
+    writeCommandFile(dir, "tmp", "", "x");
+    expect(deleteCommandFile(dir, "tmp")).toBe(true);
+    expect(deleteCommandFile(dir, "tmp")).toBe(false);
+  });
+
+  it("validateCommandDraft：非法名/空模板抛错，合法时净化两端空白", () => {
+    expect(() => validateCommandDraft({ name: "bad:name", template: "x" })).toThrow("命令名");
+    expect(() => validateCommandDraft({ name: "ok", template: "   " })).toThrow("不能为空");
+    expect(validateCommandDraft({ name: " ok ", description: " d ", template: " t " })).toEqual({ name: "ok", description: "d", template: "t" });
+  });
+
+  it("serializeCommandFile：description 换行压成空行（frontmatter 单行合法）", () => {
+    expect(serializeCommandFile("两行\n说明", "模板")).toBe("---\ndescription: 两行 说明\n---\n\n模板\n");
   });
 });

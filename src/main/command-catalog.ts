@@ -13,7 +13,7 @@
  * （regenerate 重发同样从 marker 之外的链路重建，编辑回填只取参数）。
  */
 
-import { readFileSync, readdirSync, existsSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { CommandSummary, ResourceScope } from "../shared/protocol.js";
 import { parseSkillFrontmatter } from "./skill-catalog.js";
@@ -59,20 +59,25 @@ export function discoverCommands(globalDir: string, projectDir: string): Discove
 }
 
 export function toCommandSummaries(commands: DiscoveredCommand[]): CommandSummary[] {
-  // frontmatter 只在汇总时读一次（description 展示用）；模板正文发送时重读。
-  return commands.map((command) => ({
-    name: command.name,
-    description: commandDescription(command.filePath),
-    scope: command.scope,
-    filePath: command.filePath
-  }));
+  // 每个文件只读一次：description（frontmatter）与 template（正文）一起带出。
+  return commands.map((command) => {
+    const content = readCommandFile(command.filePath);
+    const frontmatter = content === undefined ? {} : parseSkillFrontmatter(content);
+    return {
+      name: command.name,
+      description: frontmatter.description?.trim() ?? "",
+      scope: command.scope,
+      filePath: command.filePath,
+      ...(content === undefined ? {} : { template: stripCommandFrontmatter(content).trim() })
+    };
+  });
 }
 
-function commandDescription(filePath: string): string {
+function readCommandFile(filePath: string): string | undefined {
   try {
-    return parseSkillFrontmatter(readFileSync(filePath, "utf8")).description?.trim() ?? "";
+    return readFileSync(filePath, "utf8");
   } catch {
-    return "";
+    return undefined;
   }
 }
 
@@ -81,6 +86,41 @@ const FRONTMATTER_PATTERN = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/u;
 /** 剥离 frontmatter，返回模板正文。 */
 export function stripCommandFrontmatter(content: string): string {
   return content.replace(FRONTMATTER_PATTERN, "");
+}
+
+/** 校验保存载荷：名字合法且模板非空，返回净化后的值（不合法抛错）。 */
+export function validateCommandDraft(draft: { name: string; description?: string; template: string }): { name: string; description: string; template: string } {
+  const name = draft.name.trim();
+  if (!COMMAND_NAME_PATTERN.test(name)) throw new Error("命令名只能包含字母、数字、下划线、短横线和中文，且不能为空");
+  const template = draft.template.trim();
+  if (!template) throw new Error("命令模板内容不能为空");
+  return { name, description: draft.description?.trim() ?? "", template };
+}
+
+/** 序列化回 md：有 description 才写 frontmatter（与手工编辑的文件双向兼容）。 */
+export function serializeCommandFile(description: string, template: string): string {
+  return description ? `---\ndescription: ${description.replace(/\r?\n/u, " ")}\n---\n\n${template}\n` : `${template}\n`;
+}
+
+/** 原子写命令文件（目录不存在则创建；temp+rename 防半写）。 */
+export function writeCommandFile(dir: string, name: string, description: string, template: string): string {
+  const filePath = join(dir, `${name}.md`);
+  mkdirSync(dir, { recursive: true });
+  const tempPath = `${filePath}.${process.pid}.tmp`;
+  writeFileSync(tempPath, serializeCommandFile(description, template), "utf8");
+  renameSync(tempPath, filePath);
+  return filePath;
+}
+
+/** 删除命令文件；文件不存在返回 false（由调用方转成可读错误）。 */
+export function deleteCommandFile(dir: string, name: string): boolean {
+  const filePath = join(dir, `${name}.md`);
+  try {
+    unlinkSync(filePath);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 const ARGUMENTS_PLACEHOLDER = /\$\{?ARGUMENTS\}?/gu;

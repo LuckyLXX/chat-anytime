@@ -56,6 +56,8 @@ import type {
   ToolExecution,
   ResourceCatalog,
   ResourceScope,
+  CommandDraft,
+  CommandSummary,
   McpServerConfigDraft,
   RuntimeCommand,
   SessionSummary
@@ -404,6 +406,13 @@ function ResourceSettings({ resources }: ResourceSettingsProps): ReactNode {
   const [mcpAuth, setMcpAuth] = useState<NonNullable<McpServerConfigDraft["auth"]>>("none");
   const [mcpBearerTokenEnv, setMcpBearerTokenEnv] = useState("");
   const [mcpEnv, setMcpEnv] = useState("");
+  const [commandFormOpen, setCommandFormOpen] = useState(false);
+  const [editingCommand, setEditingCommand] = useState<string>();
+  const [commandName, setCommandName] = useState("");
+  const [commandDescription, setCommandDescription] = useState("");
+  const [commandTemplate, setCommandTemplate] = useState("");
+  const [commandScope, setCommandScope] = useState<CommandDraft["scope"]>("project");
+  const workspaceOpen = useDesktopStore((state) => Boolean(state.snapshot.workspace));
   const runtimeBusy = useDesktopStore((state) => state.snapshot.busy);
   const controlsBusy = busy || runtimeBusy;
 
@@ -419,6 +428,27 @@ function ResourceSettings({ resources }: ResourceSettingsProps): ReactNode {
     } finally {
       setBusy(false);
     }
+  }
+
+  /** 编辑已有命令：回填表单并展开（名字锁定，改名=删旧建新）。 */
+  function editCommand(entry: CommandSummary): void {
+    setEditingCommand(entry.name);
+    setCommandName(entry.name);
+    setCommandDescription(entry.description);
+    setCommandTemplate(entry.template ?? "");
+    setCommandScope(entry.scope === "project" ? "project" : "global");
+    setCommandFormOpen(true);
+  }
+
+  async function saveCommand(event: FormEvent): Promise<void> {
+    event.preventDefault();
+    const success = await run({ type: "command.save", command: { name: commandName.trim(), description: commandDescription.trim() || undefined, template: commandTemplate, scope: commandScope } });
+    if (!success) return;
+    setCommandFormOpen(false);
+    setEditingCommand(undefined);
+    setCommandName("");
+    setCommandDescription("");
+    setCommandTemplate("");
   }
 
   async function addMcpServer(event: FormEvent): Promise<void> {
@@ -485,9 +515,18 @@ function ResourceSettings({ resources }: ResourceSettingsProps): ReactNode {
         {resources.skills.length === 0 ? <p className="resource-empty">当前没有发现 Skill。</p> : <div className="resource-list">{resources.skills.map((skill) => <div className="resource-item" key={skill.id}><div className="resource-item-icon"><Puzzle size={14} /></div><div className="resource-item-copy"><strong>/skill:{skill.name}</strong><small>{skill.description}</small><em>{resourceScopeLabels[skill.scope]} · {skill.source}{skill.disableModelInvocation ? " · 仅手动调用" : ""}</em></div><label className="resource-toggle"><input type="checkbox" checked={skill.enabled} disabled={controlsBusy || !skill.toggleable} onChange={(event) => void run({ type: "skill.toggle", id: skill.id, enabled: event.target.checked })} /><span>启用</span></label></div>)}</div>}
       </section>
       <section className="resource-section">
-        <div className="resource-section-heading"><span><Zap size={14} />自定义命令</span><small>{resources.commands.length} 个已发现</small></div>
-        <p className="resource-form-help">把 md 模板文件（文件名即命令名，正文支持 <code>$ARGUMENTS</code> 占位符，可选 frontmatter 写 <code>description</code>）放到全局目录 <code>pidesktop-commands/</code> 或项目目录 <code>.pidesktop-commands/</code>，即可在输入框以 <code>/命令名</code> 调用，项目同名覆盖全局。</p>
-        {resources.commands.length === 0 ? <p className="resource-empty">当前没有发现自定义命令。</p> : <div className="resource-list">{resources.commands.map((entry) => <div className="resource-item" key={entry.name}><div className="resource-item-icon"><Zap size={14} /></div><div className="resource-item-copy"><strong>/{entry.name}</strong><small>{entry.description || "自定义命令"}</small><em>{resourceScopeLabels[entry.scope]}{entry.filePath ? ` · ${entry.filePath}` : ""}</em></div></div>)}</div>}
+        <div className="resource-section-heading"><span><Zap size={14} />自定义命令</span><div className="resource-section-actions"><small>{resources.commands.length} 个</small><button className="secondary-button compact-button" type="button" disabled={controlsBusy} onClick={() => { if (!commandFormOpen) { setEditingCommand(undefined); setCommandName(""); setCommandDescription(""); setCommandTemplate(""); setCommandScope(workspaceOpen ? "project" : "global"); } setCommandFormOpen((open) => !open); }}><Plus size={13} />{commandFormOpen ? "收起" : "添加"}</button></div></div>
+        <p className="resource-form-help">md 模板文件名即命令名，正文支持 <code>$ARGUMENTS</code> 占位符；放到全局目录 <code>pidesktop-commands/</code> 或项目目录 <code>.pidesktop-commands/</code>（项目同名覆盖全局），也可直接在这里创建维护。输入框 <code>/命令名</code> 调用，改完下次发送即生效。</p>
+        {commandFormOpen && <form className="mcp-config-form" onSubmit={(event) => void saveCommand(event)}>
+          <div className="mcp-form-grid">
+            <label>命令名{editingCommand ? <input value={commandName} disabled title="编辑时不改名；需要改名请删除后新建" /> : <input value={commandName} placeholder="例如 commit（支持中文）" onChange={(event) => setCommandName(event.target.value)} />}</label>
+            <label>写入范围<select value={commandScope} onChange={(event) => setCommandScope(event.target.value as CommandDraft["scope"])}><option value="project">当前项目 .pidesktop-commands/</option><option value="global">用户全局 pidesktop-commands/</option></select></label>
+            <label className="mcp-form-wide">说明（菜单副标题，可空）<input value={commandDescription} placeholder="例如 为当前改动生成提交信息" onChange={(event) => setCommandDescription(event.target.value)} /></label>
+            <label className="mcp-form-wide">提示词模板（$ARGUMENTS 替换为发送时输入的参数）<textarea value={commandTemplate} rows={6} placeholder={"读取暂存区改动，按 type(scope): 中文描述 规范生成提交：$ARGUMENTS"} onChange={(event) => setCommandTemplate(event.target.value)} /></label>
+          </div>
+          <footer className="mcp-form-actions"><button className="secondary-button" type="button" disabled={controlsBusy} onClick={() => setCommandFormOpen(false)}><X size={13} />取消</button><button className="primary-button" type="submit" disabled={controlsBusy}>{editingCommand ? <Pencil size={13} /> : <Plus size={13} />}{editingCommand ? "保存修改" : "添加命令"}</button></footer>
+        </form>}
+        {resources.commands.length === 0 ? <p className="resource-empty">当前没有发现自定义命令。点击“添加”创建，或把 md 模板放入命令目录。</p> : <div className="resource-list">{resources.commands.map((entry) => <div className="resource-item" key={entry.name}><div className="resource-item-icon"><Zap size={14} /></div><div className="resource-item-copy"><strong>/{entry.name}</strong><small>{entry.description || "自定义命令"}</small><em>{resourceScopeLabels[entry.scope]}{entry.filePath ? ` · ${entry.filePath}` : ""}</em></div><button className="icon-button" type="button" title={`编辑 ${entry.name}`} aria-label={`编辑命令 ${entry.name}`} disabled={controlsBusy} onClick={() => editCommand(entry)}><Pencil size={14} /></button><button className="icon-button resource-remove" type="button" title={`删除 ${entry.name}`} aria-label={`删除命令 ${entry.name}`} disabled={controlsBusy} onClick={() => void run({ type: "command.delete", name: entry.name, scope: entry.scope === "project" ? "project" : "global" })}><Trash2 size={14} /></button></div>)}</div>}
       </section>
       {resources.diagnostics.length > 0 && <div className="resource-diagnostics"><strong>资源诊断</strong>{resources.diagnostics.map((diagnostic) => <p key={diagnostic}>{diagnostic}</p>)}</div>}
 

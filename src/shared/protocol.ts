@@ -655,6 +655,16 @@ export interface CommandSummary {
   scope: ResourceScope;
   /** 模板文件绝对路径。 */
   filePath?: string;
+  /** 模板正文（剥掉 frontmatter），设置页编辑表单回填用。 */
+  template?: string;
+}
+
+/** 设置页保存命令的载荷（写入哪个作用域目录）。 */
+export interface CommandDraft {
+  name: string;
+  description?: string;
+  template: string;
+  scope: "project" | "global";
 }
 
 export type McpServerStatus = "connected" | "cached" | "failed" | "needs-auth" | "not-connected" | "disabled";
@@ -966,6 +976,9 @@ export type RuntimeCommand =
   | { type: "hooks.settings"; hooks: HooksSettings }
   /** 用样例上下文试跑一条钩子（面板“测试”按钮）；sample 是给 bash/拦截正则用的样例行。 */
   | { type: "hooks.run"; name: string; scope: "project" | "global"; sample?: string }
+  /** 自定义斜杠命令管理：写/删命令目录下的 md 模板并刷新目录（不重建会话）。 */
+  | { type: "command.save"; command: CommandDraft }
+  | { type: "command.delete"; name: string; scope: "project" | "global" }
   | { type: "skill.toggle"; id: string; enabled: boolean }
   | { type: "background.kill"; id: string }
   | { type: "resources.reload" }
