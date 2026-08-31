@@ -44,6 +44,37 @@ export function selectableCatalogModels<T extends ModelOption>(models: T[]): T[]
   return models.filter((model) => model.enabled !== false);
 }
 
+/** 模型选择下拉的供应商分组视图（optgroup 用）。 */
+export interface ProviderModelGroup<T extends ModelOption = ModelOption> {
+  /** 供应商 id（目录的 provider 字段）。 */
+  provider: string;
+  /** 展示名：目录名优先，缺失时回退 provider id。 */
+  providerName: string;
+  models: T[];
+}
+
+/**
+ * 把可勾选模型按供应商分组，保持首次出现顺序（与目录顺序一致）。
+ * providerName 解析器用于取供应商展示名（来自 ProviderOption 目录），不传时用 id。
+ */
+export function groupModelsByProvider<T extends ModelOption>(
+  models: T[],
+  resolveProviderName: (providerId: string) => string | undefined = () => undefined
+): ProviderModelGroup<T>[] {
+  const groups: ProviderModelGroup<T>[] = [];
+  const index = new Map<string, ProviderModelGroup<T>>();
+  for (const model of models) {
+    let group = index.get(model.provider);
+    if (!group) {
+      group = { provider: model.provider, providerName: resolveProviderName(model.provider) ?? model.provider, models: [] };
+      index.set(model.provider, group);
+      groups.push(group);
+    }
+    group.models.push(model);
+  }
+  return groups;
+}
+
 /**
  * 批量设置启用状态（全选/全取消）。只改 targets 命中的条目，其余保持原对象引用，
  * 与逐条 updateProviderModel 写出的 `{ enabled: boolean }` 形状一致。

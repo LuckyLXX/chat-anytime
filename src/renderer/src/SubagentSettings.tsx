@@ -1,12 +1,23 @@
 import { Bot, Pencil, Plus, Trash2, X } from "lucide-react";
 import { useState, type FormEvent, type ReactNode } from "react";
-import type { BuiltinToolName, ModelOption, ResourceCatalog, RuntimeCommand, SubagentDefinition, SubagentScope } from "../../shared/protocol";
+import type { BuiltinToolName, ModelOption, ProviderOption, ResourceCatalog, RuntimeCommand, SubagentDefinition, SubagentScope } from "../../shared/protocol";
 import { toolLabel } from "../../shared/locale";
+import { groupModelsByProvider } from "./lib/model-list";
 import { useDesktopStore } from "./store";
 
 const SUBAGENT_TOOLS: BuiltinToolName[] = ["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"];
 const SCOPE_LABELS: Record<SubagentScope, string> = { global: "用户（全局）", project: "当前项目" };
 const COLOR_OPTIONS = ["amber", "rose", "orange", "emerald", "teal", "blue", "violet", "slate"];
+const COLOR_SWATCHES: Record<string, string> = {
+  amber: "#d97706",
+  rose: "#e11d48",
+  orange: "#ea580c",
+  emerald: "#059669",
+  teal: "#0d9488",
+  blue: "#2563eb",
+  violet: "#7c3aed",
+  slate: "#64748b",
+};
 
 const subagentScopeLabel = (scope: SubagentScope): string => SCOPE_LABELS[scope];
 
@@ -14,9 +25,10 @@ interface SubagentSettingsProps {
   resources: ResourceCatalog;
   workspaceOpen: boolean;
   models: ModelOption[];
+  providers: ProviderOption[];
 }
 
-export function SubagentSettings({ resources, workspaceOpen, models }: SubagentSettingsProps): ReactNode {
+export function SubagentSettings({ resources, workspaceOpen, models, providers }: SubagentSettingsProps): ReactNode {
   const [busy, setBusy] = useState(false);
   const [localError, setLocalError] = useState<string>();
   const [formOpen, setFormOpen] = useState(false);
@@ -32,6 +44,7 @@ export function SubagentSettings({ resources, workspaceOpen, models }: SubagentS
   const [tools, setTools] = useState<Record<BuiltinToolName, boolean>>(() => Object.fromEntries(SUBAGENT_TOOLS.map((tool) => [tool, true])) as Record<BuiltinToolName, boolean>);
 
   const configuredModels = models.filter((model) => model.configured);
+  const groupedConfiguredModels = groupModelsByProvider(configuredModels, (providerId) => providers.find((item) => item.id === providerId)?.name);
 
   async function run(command: RuntimeCommand): Promise<boolean> {
     setBusy(true);
@@ -153,14 +166,24 @@ export function SubagentSettings({ resources, workspaceOpen, models }: SubagentS
           <div className="mcp-form-grid">
             <label>名称<input value={name} placeholder="例如 code-reviewer" autoFocus onChange={(changeEvent) => setName(changeEvent.target.value)} /></label>
             <label>颜色标记
-              <select value={color} onChange={(changeEvent) => setColor(changeEvent.target.value)}>
-                {COLOR_OPTIONS.map((item) => <option key={item} value={item}>{item}</option>)}
-              </select>
+              <div className="subagent-color-picker">
+                {COLOR_OPTIONS.map((item) => (
+                  <button
+                    key={item}
+                    type="button"
+                    className={`subagent-color-swatch ${color === item ? "selected" : ""}`}
+                    style={{ backgroundColor: COLOR_SWATCHES[item] }}
+                    onClick={() => setColor(item)}
+                    title={item}
+                    aria-label={`选择颜色 ${item}`}
+                  />
+                ))}
+              </div>
             </label>
             <label>模型
               <select value={model} onChange={(changeEvent) => setModel(changeEvent.target.value)}>
                 <option value="">继承默认模型</option>
-                {configuredModels.map((item) => <option key={`${item.provider}/${item.id}`} value={`${item.provider}/${item.id}`}>{item.name}</option>)}
+                {groupedConfiguredModels.map((group) => <optgroup key={group.provider} label={group.providerName}>{group.models.map((item) => <option key={`${item.provider}/${item.id}`} value={`${item.provider}/${item.id}`}>{item.name}</option>)}</optgroup>)}
               </select>
             </label>
             <label>作用域

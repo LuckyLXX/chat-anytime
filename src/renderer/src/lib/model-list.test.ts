@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildBuiltinProviderEntry, filterProviderModels, formatTokenLimit, parseTokenLimit, providerFormBlocker, setProviderModelsEnabled, selectableCatalogModels } from "./model-list";
+import { buildBuiltinProviderEntry, filterProviderModels, formatTokenLimit, groupModelsByProvider, parseTokenLimit, providerFormBlocker, setProviderModelsEnabled, selectableCatalogModels } from "./model-list";
 import type { ModelOption } from "../../../shared/protocol";
 
 const models = [
@@ -59,6 +59,28 @@ describe("selectable catalog view", () => {
   it("returns an empty view when every model is disabled", () => {
     const catalog = [option({ enabled: false }), option({ id: "off2", enabled: false })];
     expect(selectableCatalogModels(catalog)).toEqual([]);
+  });
+});
+
+describe("provider-grouped model view", () => {
+  const option = (overrides: Partial<ModelOption>): ModelOption => ({ provider: "p", id: "m", name: "M", configured: true, input: ["text"], imageInput: false, ...overrides });
+
+  it("groups models by provider keeping first-seen order", () => {
+    const models = [
+      option({ provider: "openrouter", id: "openai/gpt-4o", name: "GPT-4o" }),
+      option({ provider: "anthropic", id: "claude-sonnet-4", name: "Claude Sonnet 4" }),
+      option({ provider: "openrouter", id: "openai/gpt-4o-mini", name: "GPT-4o mini" })
+    ];
+    const groups = groupModelsByProvider(models);
+    expect(groups.map((group) => group.provider)).toEqual(["openrouter", "anthropic"]);
+    expect(groups[0]!.models.map((model) => model.id)).toEqual(["openai/gpt-4o", "openai/gpt-4o-mini"]);
+  });
+
+  it("uses the provider name resolver and falls back to the id", () => {
+    const models = [option({ provider: "openrouter", id: "a", name: "A" }), option({ provider: "unknown", id: "b", name: "B" })];
+    const groups = groupModelsByProvider(models, (providerId) => providerId === "openrouter" ? "OpenRouter" : undefined);
+    expect(groups[0]!.providerName).toBe("OpenRouter");
+    expect(groups[1]!.providerName).toBe("unknown");
   });
 });
 
