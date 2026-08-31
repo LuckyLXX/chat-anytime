@@ -3,22 +3,57 @@
 
 import { RefreshCw } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import type { UsageStats, UsageTotals } from "../../shared/protocol";
-import { formatCost, formatDayLabel, formatHitRate, formatLastUsed, formatTokenCount, todayLocalDate, windowTotalsFromDays } from "./lib/usage-format";
+import type { UsageDayEntry, UsageStats, UsageTotals } from "../../shared/protocol";
+import { buildUsageHeatmap, formatCost, formatDayLabel, formatHitRate, formatLastUsed, formatTokenCount, todayLocalDate, windowTotalsFromDays } from "./lib/usage-format";
 import { useDesktopStore } from "./store";
 
-/** 总览卡：时间窗合计 + 请求次数 + 缓存命中率。 */
+/** 总览卡：标签 + 请求次数，输入/输出大数字，其余指标收进脚注行。 */
 function UsageSummaryCard({ label, totals }: { label: string; totals: UsageTotals }): ReactNode {
   return (
     <div className="usage-summary-card" data-role="usage-summary">
       <header><strong>{label}</strong><span>{totals.requests} 次请求</span></header>
-      <dl>
+      <dl className="usage-summary-hero">
         <div><dt>输入</dt><dd>{formatTokenCount(totals.input + totals.cacheWrite)}</dd></div>
         <div><dt>输出</dt><dd>{formatTokenCount(totals.output)}</dd></div>
-        <div><dt>缓存读</dt><dd>{formatTokenCount(totals.cacheRead)}</dd></div>
-        <div><dt>缓存命中率</dt><dd>{formatHitRate(totals.cacheHitRate)}</dd></div>
-        <div><dt>成本</dt><dd>{formatCost(totals.cost)}</dd></div>
       </dl>
+      <footer className="usage-summary-foot">
+        <span>缓存读 {formatTokenCount(totals.cacheRead)}</span>
+        <span>命中率 {formatHitRate(totals.cacheHitRate)}</span>
+        <span>成本 {formatCost(totals.cost)}</span>
+      </footer>
+    </div>
+  );
+}
+
+/** 左侧星期标签只标 一/三/五/日，其余行留空（与列对齐交给 grid 布局）。 */
+const HEATMAP_WEEKDAY_LABELS: (string | null)[] = ["一", null, "三", null, "五", null, "日"];
+
+/** 按天活跃热力图：周列网格（周一开头），强度 = 当日请求次数相对峰值分档，悬浮显示当日明细。 */
+function UsageHeatmap({ byDay, today }: { byDay: readonly UsageDayEntry[]; today: string }): ReactNode {
+  const layout = useMemo(() => buildUsageHeatmap(byDay, today), [byDay, today]);
+  if (layout.weeks.length === 0) return null;
+  return (
+    <div className="usage-heatmap">
+      <div className="usage-heatmap-scroll">
+        <div className="usage-heatmap-grid" style={{ gridTemplateColumns: `auto repeat(${layout.weeks.length}, 13px)` }}>
+          {HEATMAP_WEEKDAY_LABELS.map((label, day) => label && (
+            <span key={label} className="usage-heatmap-wday" style={{ gridColumn: 1, gridRow: day + 2 }}>{label}</span>
+          ))}
+          {layout.monthLabels.map(({ column, label }) => (
+            <span key={column} className="usage-heatmap-month" style={{ gridColumn: `${column + 2} / span ${Math.min(3, layout.weeks.length - column)}`, gridRow: 1 }}>{label}</span>
+          ))}
+          {layout.weeks.map((week, weekIndex) => week.map((cell, day) => {
+            const style = { gridColumn: weekIndex + 2, gridRow: day + 2 };
+            if (!cell) return <span key={`blank-${weekIndex}-${day}`} className="usage-heatmap-cell" data-blank style={style} />;
+            const detail = `${formatDayLabel(cell.date, today)}：${cell.requests} 次请求 · 输入 ${formatTokenCount(cell.input)} · 输出 ${formatTokenCount(cell.output)} · 成本 ${formatCost(cell.cost)}`;
+            return <span key={cell.date} className="usage-heatmap-cell" data-level={cell.level} data-today={cell.date === today || undefined} title={detail} style={style} />;
+          }))}
+        </div>
+      </div>
+      <footer className="usage-heatmap-foot">
+        <span>按请求次数，颜色越深用量越大</span>
+        <span className="usage-heatmap-legend">少{[0, 1, 2, 3, 4].map((level) => <i key={level} data-level={level} />)}多</span>
+      </footer>
     </div>
   );
 }
@@ -55,6 +90,10 @@ export function UsageSettings(): ReactNode {
   const today = todayLocalDate();
   const todayTotals = useMemo(() => (usageStats ? windowTotalsFromDays(usageStats.byDay, today, 1) : undefined), [usageStats, today]);
   const weekTotals = useMemo(() => (usageStats ? windowTotalsFromDays(usageStats.byDay, today, 7) : undefined), [usageStats, today]);
+  const scanMeta = usageStats && (
+    usageStats.byDay.length > 0 ? `覆盖 ${formatDayLabel(usageStats.byDay[0]!.date, today)} 起` : "暂无用量数据"
+  ) + (usageStats.byDay.length > 1 ? ` 至 ${formatDayLabel(usageStats.byDay[usageStats.byDay.length - 1]!.date, today)}` : "")
+    + ` · 本次扫描 ${usageStats.scannedFiles} 个文件 · ${usageStats.scanMs}ms`;
 
   return (
     <div className="usage-settings">
@@ -70,20 +109,20 @@ export function UsageSettings(): ReactNode {
           <RefreshCw size={13} className={usageStatsLoading ? "spinning" : undefined} />
           {usageStatsLoading ? "统计中…" : "刷新"}
         </button>
+        {scanMeta && <p className="usage-scan-meta">{scanMeta}</p>}
       </div>
-      {usageStats && (
-        <p className="usage-scan-meta">
-          {usageStats.byDay.length > 0 ? `覆盖 ${formatDayLabel(usageStats.byDay[0]!.date, today)} 起` : "暂无用量数据"}
-          {usageStats.byDay.length > 1 ? ` 至 ${formatDayLabel(usageStats.byDay[usageStats.byDay.length - 1]!.date, today)}` : ""}
-          {` · 本次扫描 ${usageStats.scannedFiles} 个文件 · ${usageStats.scanMs}ms`}
-        </p>
-      )}
       {usageStats && todayTotals && weekTotals && (
         <div className="usage-summary-row">
           <UsageSummaryCard label="今日" totals={todayTotals} />
           <UsageSummaryCard label="近 7 天" totals={weekTotals} />
           <UsageSummaryCard label="累计" totals={usageStats.total} />
         </div>
+      )}
+      {usageStats && usageStats.byDay.length > 0 && (
+        <section className="usage-section">
+          <h4>活跃热力</h4>
+          <UsageHeatmap byDay={usageStats.byDay} today={today} />
+        </section>
       )}
       {usageStats && (
         <>
