@@ -1806,9 +1806,11 @@ button, input, select, textarea, summary, label {
 .automation-filter-tabs button.active { color: var(--text); background: var(--surface-raised); }
 .automation-filter-count { display: inline-grid; place-items: center; min-width: 16px; height: 14px; padding: 0 4px; border-radius: 999px; background: var(--surface-input); color: var(--text-muted); font-size: 9px; font-variant-numeric: tabular-nums; }
 .automation-filter-tabs button.active .automation-filter-count { color: var(--text); }
-.automation-search { display: inline-flex; align-items: center; gap: 6px; width: min(220px, 100%); padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-input); color: var(--text-muted); }
-.automation-search input { flex: 1; min-width: 0; border: 0; padding: 0; background: transparent; color: var(--text); font-size: 11px; }
-.automation-search input::placeholder { color: var(--text-muted); }
+/* 特异性压过 .settings-dialog label/input 全局规则（grid 布局 + 38px 高），保持过滤栏一行紧凑。 */
+.automation-settings .automation-search { display: inline-flex; align-items: center; gap: 6px; width: min(220px, 100%); height: 28px; margin: 0; padding: 0 9px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-input); color: var(--text-muted); font-weight: 400; }
+.automation-settings .automation-search:focus-within { border-color: var(--accent); }
+.automation-settings .automation-search input { flex: 1; width: auto; height: auto; min-width: 0; margin: 0; border: 0; padding: 0; background: transparent; color: var(--text); font-size: 11px; font-weight: 400; }
+.automation-settings .automation-search input::placeholder { color: var(--text-muted); }
 .automation-list { display: grid; gap: 7px; }
 .automation-row { position: relative; display: flex; align-items: center; gap: 10px; padding: 10px 11px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface-raised); transition: border-color .15s ease, background .15s ease; }
 .automation-row:hover { border-color: var(--border-strong); background: var(--surface-button-hover); }
