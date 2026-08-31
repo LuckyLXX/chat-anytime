@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildBuiltinProviderEntry, filterProviderModels, formatTokenLimit, parseTokenLimit, setProviderModelsEnabled, selectableCatalogModels } from "./model-list";
+import { buildBuiltinProviderEntry, filterProviderModels, formatTokenLimit, parseTokenLimit, providerFormBlocker, setProviderModelsEnabled, selectableCatalogModels } from "./model-list";
 import type { ModelOption } from "../../../shared/protocol";
 
 const models = [
@@ -82,6 +82,31 @@ describe("builtin provider entry rebuild", () => {
   it("leaves keyConfigured unset when neither source says the key is saved", () => {
     expect(buildBuiltinProviderEntry("zhipu", undefined, "智谱开放平台", false, models).keyConfigured).toBeUndefined();
     expect(buildBuiltinProviderEntry("zhipu", { id: "zhipu", name: "智谱", baseUrl: "", models: [], keyConfigured: false }, "智谱开放平台", false, models).keyConfigured).toBeUndefined();
+  });
+});
+
+describe("provider form save check", () => {
+  const valid = { hasApiKey: true, isCustomProvider: false, customName: "x", customBaseUrl: "https://api.example.com/v1", customModelId: "m1", totalModels: 3 };
+
+  it("blocks when no API key is present (saved or typed)", () => {
+    expect(providerFormBlocker({ ...valid, hasApiKey: false })).toContain("API 密钥");
+  });
+
+  it("never blocks on zero enabled models — clearing a whole provider is legal", () => {
+    // 内置服务：即使把全部模型取消勾选，只要密钥在位就可保存。
+    expect(providerFormBlocker({ ...valid, totalModels: 2 })).toBeUndefined();
+    // 自定义服务：拉到列表后同样由勾选决定，模型 ID 不再必需。
+    expect(providerFormBlocker({ ...valid, isCustomProvider: true, customModelId: "" })).toBeUndefined();
+  });
+
+  it("requires name and baseUrl for custom providers", () => {
+    expect(providerFormBlocker({ ...valid, isCustomProvider: true, customName: "  " })).toContain("服务名称");
+    expect(providerFormBlocker({ ...valid, isCustomProvider: true, customBaseUrl: "" })).toContain("接口地址");
+  });
+
+  it("requires a model id only when no model list was fetched yet", () => {
+    expect(providerFormBlocker({ ...valid, isCustomProvider: true, totalModels: 0, customModelId: "" })).toContain("模型 ID");
+    expect(providerFormBlocker({ ...valid, isCustomProvider: true, totalModels: 0, customModelId: "m1" })).toBeUndefined();
   });
 });
 

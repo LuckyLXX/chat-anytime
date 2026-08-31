@@ -9,6 +9,7 @@ import { importExternalAttachment, workspaceRelativeAttachment } from "./attachm
 import type { BrowserPreviewCommand, BrowserPreviewState, DesktopBootstrap, DesktopSettings, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot, TerminalCommand, TerminalEventData, WorkspaceDirectoryListing, WorkspaceEntryResult, WorkspaceFilePreview, WorkspaceFileSearchResult, WorkspaceFileWriteResult } from "../shared/protocol.js";
 import { PREVIEW_FILE_SCHEME, parseWorkspaceFilePreviewUrl } from "../shared/protocol.js";
 import { createWorkspaceDirectory, createWorkspaceFile, deleteWorkspaceEntry, listWorkspaceDirectory, readWorkspaceFilePreview, renameWorkspaceEntry, safeRelativePath, searchWorkspaceFiles, writeWorkspaceFile } from "./workspace-preview.js";
+import { pruneDisabledModelRefs } from "./model-catalog.js";
 import { BrowserPreviewController } from "./browser-preview.js";
 import { BrowserAutomationController } from "./browser-automation.js";
 import { TerminalManager, type PtyProcess, type PtySpawnOptions } from "./terminal-pty.js";
@@ -170,6 +171,9 @@ function updateSettings(command: RuntimeCommand): void {
     case "appearance.save": settings.appearance = command.appearance; break;
     case "provider.save": {
       settings.providers = settings.providers.some((item) => item.id === command.provider.id) ? settings.providers.map((item) => item.id === command.provider.id ? command.provider : item) : [...settings.providers, command.provider];
+      // 自定义服务清空全部模型也是合法操作：持久化的默认/助手默认/视觉引用
+      // 不能继续指向已移除的模型（与 provider.models.save 同款落位）。
+      Object.assign(settings, pruneDisabledModelRefs(settings, command.provider.id, command.provider.models));
       if (command.apiKey?.trim() && !saveCredential(command.provider.id, command.apiKey.trim())) {
         mainWindow?.webContents.send("runtime:message", { type: "log", level: "warn", message: "系统加密存储不可用，API Key 未保存。" } satisfies RuntimeMessage);
       }
@@ -177,6 +181,11 @@ function updateSettings(command: RuntimeCommand): void {
     }
     case "provider.models.save":
       settings.providers = settings.providers.some((item) => item.id === command.provider.id) ? settings.providers.map((item) => item.id === command.provider.id ? command.provider : item) : [...settings.providers, command.provider];
+      // 与 provider.delete 同款落位：持久化的默认模型/助手默认/视觉模型不能
+      // 指向已取消勾选的模型（否则重启后又拉起被移除的模型，与 utility 端现
+      // 存副本行为不一致）。取消全部模型以清空某服务是合法操作（2026-09）。
+      // Object.assign 保持 loadSettings 缓存对象身份，persistSettings 落盘的是同一引用。
+      Object.assign(settings, pruneDisabledModelRefs(settings, command.provider.id, command.provider.models));
       break;
     case "auth.set":
       if (command.apiKey.trim() && !saveCredential(command.provider, command.apiKey.trim())) {

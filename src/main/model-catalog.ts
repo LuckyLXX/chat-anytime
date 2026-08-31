@@ -89,6 +89,66 @@ export function applyModelOverrides<T extends ModelOverrideTarget>(model: T, pro
 }
 
 /**
+ * 模型在设置里的启用状态（与 buildCatalogModels 的 `enabled` 标注同源口径）：
+ * 服务商或模型未出现在 settings.providers 里时视为启用（协议缺省即启用），
+ * 只有显式 `enabled === false`（设置页取消勾选）才算禁用。
+ */
+export function isModelEnabled(providerId: string, modelId: string, providers: ProviderSettings[] | undefined): boolean {
+  const stored = providers?.find((provider) => provider.id === providerId)?.models.find((model) => model.id === modelId);
+  return stored ? stored.enabled !== false : true;
+}
+
+/**
+ * 从候选模型里挑一个「鉴权已配置 + 未被取消勾选」的落位模型（可排除某服务商）。
+ *
+ * 取消全部模型（=清空某服务商的模型，2026-09 修复前无法保存）后，正在使用该
+ * 服务商的会话需要地方可去；旧回退写法只看鉴权不看勾选，会把会话切到一个
+ * 已被用户取消勾选的模型上。
+ */
+export function pickFallbackModel<T extends { provider: string; id: string }>(
+  candidates: readonly T[],
+  providers: ProviderSettings[] | undefined,
+  isConfigured: (providerId: string) => boolean,
+  excludeProviderId?: string
+): T | undefined {
+  return candidates.find((model) => model.provider !== excludeProviderId
+    && isConfigured(model.provider)
+    && isModelEnabled(model.provider, model.id, providers));
+}
+
+/** 设置里指向某个模型引用的最小形状（DesktopSettings 的可赋值子集）。 */
+export interface ModelReferenceHolder {
+  model?: { provider: string; id: string } | undefined;
+  agents: { defaultModel?: { provider: string; id: string } | undefined }[];
+  vision?: { provider: string; model: string; enabled?: boolean } | undefined;
+}
+
+/**
+ * 取消勾选落位：把所有指向该服务商「被禁用模型」的引用清掉（全局默认模型、
+ * 助手默认模型、视觉模型）。返回新对象，未命中时逐字段保持原引用（幂等）。
+ *
+ * 服务商/models 未出现在 settings.providers 时视为启用（口径同 buildCatalogModels）；
+ * 只有显式 enabled === false 才算被禁用。
+ */
+export function pruneDisabledModelRefs<T extends ModelReferenceHolder>(
+  settings: T,
+  providerId: string,
+  models: readonly { id: string; enabled?: boolean }[]
+): T {
+  const enabledIds = new Set(models.filter((model) => model.enabled !== false).map((model) => model.id));
+  const removed = (ref: { provider: string; id: string } | undefined): boolean => Boolean(ref && ref.provider === providerId && !enabledIds.has(ref.id));
+  const next = { ...settings } as T;
+  if (removed(next.model)) next.model = undefined;
+  if (next.agents.some((agent) => removed(agent.defaultModel))) {
+    next.agents = next.agents.map((agent) => removed(agent.defaultModel) ? { ...agent, defaultModel: undefined } : agent);
+  }
+  if (next.vision && next.vision.provider === providerId && !enabledIds.has(next.vision.model) && next.vision.enabled !== false) {
+    next.vision = { ...next.vision, enabled: false };
+  }
+  return next;
+}
+
+/**
  * 构建推送给渲染端的模型目录：不剔除被禁用的模型，而是逐条标注 enabled。
  *
  * 历史教训（2026-08-24）：旧实现直接 filter 掉 settings.providers 里

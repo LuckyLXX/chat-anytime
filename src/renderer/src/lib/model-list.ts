@@ -54,6 +54,35 @@ export function setProviderModelsEnabled<T extends ModelListItem & { enabled?: b
   return models.map((model) => targetIds.has(model.id) ? { ...model, enabled } : model);
 }
 
+/** providerFormBlocker 的输入：设置页「保存设置」所需的最小表单状态。 */
+export interface ProviderFormState {
+  /** 本次填了密钥，或服务商已有保存的密钥（留空即沿用）。 */
+  hasApiKey: boolean;
+  isCustomProvider: boolean;
+  customName: string;
+  customBaseUrl: string;
+  customModelId: string;
+  /** 该服务商当前可勾选的模型总数（0 = 还没拉取到列表，需手动指定模型 ID）。 */
+  totalModels: number;
+}
+
+/**
+ * 设置页「保存设置」的必填项校验：返回第一条阻断原因，全部满足时 undefined。
+ *
+ * 模型勾选数**不在**校验范围内——「取消全部模型」是合法操作（清空某服务的全部模型）。
+ * 旧实现把「至少勾选一个模型」当成保存前置条件，导致该服务一旦全取消就再也无法保存，
+ * 用户只能整服务删除（2026-09-02 修复）。渲染端只给提示不拦截，落位逻辑交给主进程。
+ */
+export function providerFormBlocker(state: ProviderFormState): string | undefined {
+  if (!state.hasApiKey) return "请填写 API 密钥（已保存的密钥留空即沿用）";
+  if (!state.isCustomProvider) return undefined;
+  if (!state.customName.trim()) return "请填写服务名称";
+  if (!state.customBaseUrl.trim()) return "请填写 OpenAI 兼容接口地址";
+  // 已拉取到模型列表时模型由勾选决定，无需模型 ID；只有空列表才要求手动指定。
+  if (state.totalModels === 0 && !state.customModelId.trim()) return "请先拉取模型或填写模型 ID";
+  return undefined;
+}
+
 /**
  * 重建内置服务商的设置条目（只记录模型勾选，无自定义 baseUrl）。
  * 必须保留主进程推送设置时盖上的 keyConfigured 章（index.ts 会按凭据缓存回填）；

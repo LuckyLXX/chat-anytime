@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyModelOverrides, buildCatalogModels, imageInputOverride, isDesktopConfiguredProvider, resolveRestoredSessionModel } from "./model-catalog.js";
+import { applyModelOverrides, buildCatalogModels, imageInputOverride, isDesktopConfiguredProvider, isModelEnabled, pickFallbackModel, pruneDisabledModelRefs, resolveRestoredSessionModel } from "./model-catalog.js";
 import type { ProviderSettings } from "../shared/protocol.js";
 
 describe("desktop model catalog visibility", () => {
@@ -116,6 +116,108 @@ describe("imageInputOverride", () => {
     // 无限额信息的条目不携带这两个字段。
     const bare = options.find((model) => model.id === "claude-sonnet-4");
     expect(bare).not.toHaveProperty("contextWindow");
+  });
+});
+
+describe("isModelEnabled", () => {
+  const providers: ProviderSettings[] = [{
+    id: "openrouter",
+    name: "OpenRouter",
+    baseUrl: "",
+    custom: false,
+    models: [
+      { id: "openai/gpt-4o", name: "GPT-4o", enabled: true },
+      { id: "openai/gpt-4o-mini", name: "GPT-4o mini", enabled: false }
+    ]
+  }];
+
+  it("treats explicit enabled:false as disabled and everything else as enabled", () => {
+    expect(isModelEnabled("openrouter", "openai/gpt-4o", providers)).toBe(true);
+    expect(isModelEnabled("openrouter", "openai/gpt-4o-mini", providers)).toBe(false);
+  });
+
+  it("defaults providers and models missing from settings to enabled", () => {
+    expect(isModelEnabled("openrouter", "openai/gpt-4o", undefined)).toBe(true);
+    expect(isModelEnabled("anthropic", "claude-sonnet-4", providers)).toBe(true);
+    expect(isModelEnabled("openrouter", "not-listed", providers)).toBe(true);
+  });
+});
+
+describe("pickFallbackModel", () => {
+  const providers: ProviderSettings[] = [{
+    id: "openrouter",
+    name: "OpenRouter",
+    baseUrl: "",
+    custom: false,
+    models: [{ id: "openai/gpt-4o-mini", name: "GPT-4o mini", enabled: false }]
+  }];
+  const candidates = [
+    { provider: "openrouter", id: "openai/gpt-4o", name: "GPT-4o" },
+    { provider: "openrouter", id: "openai/gpt-4o-mini", name: "GPT-4o mini" },
+    { provider: "anthropic", id: "claude-sonnet-4", name: "Claude Sonnet 4" }
+  ];
+
+  it("picks the first enabled model of a configured provider", () => {
+    expect(pickFallbackModel(candidates, providers, (providerId) => providerId === "openrouter")?.id).toBe("openai/gpt-4o");
+  });
+
+  it("skips disabled models even when their provider is configured (2026-09 regression)", () => {
+    // 用户取消了某模型勾选，回退绝不能又把它选回去。
+    expect(pickFallbackModel(candidates, providers, () => true)?.id).toBe("openai/gpt-4o");
+    expect(pickFallbackModel(candidates, providers, () => true, "openrouter")?.id).toBe("claude-sonnet-4");
+  });
+
+  it("requires the provider to be configured", () => {
+    expect(pickFallbackModel(candidates, providers, () => false)).toBeUndefined();
+  });
+});
+
+describe("pruneDisabledModelRefs", () => {
+  const providers: ProviderSettings[] = [{
+    id: "openrouter",
+    name: "OpenRouter",
+    baseUrl: "",
+    custom: false,
+    models: [
+      { id: "openai/gpt-4o", name: "GPT-4o", enabled: true },
+      { id: "openai/gpt-4o-mini", name: "GPT-4o mini", enabled: false }
+    ]
+  }];
+  const base = {
+    model: { provider: "openrouter", id: "openai/gpt-4o-mini" },
+    agents: [
+      { id: "a", defaultModel: { provider: "openrouter", id: "openai/gpt-4o-mini" } },
+      { id: "b", defaultModel: { provider: "anthropic", id: "claude-sonnet-4" } },
+      { id: "c" }
+    ],
+    vision: undefined as { provider: string; model: string; enabled?: boolean } | undefined
+  };
+
+  it("clears every reference to a disabled model of the provider", () => {
+    const pruned = pruneDisabledModelRefs(base, "openrouter", providers[0]!.models);
+    expect(pruned.model).toBeUndefined();
+    expect(pruned.agents[0]!.defaultModel).toBeUndefined();
+    // 其他服务商的引用与无默认模型的助手原样保留（引用相等）。
+    expect(pruned.agents[1]!.defaultModel).toBe(base.agents[1]!.defaultModel);
+    expect(pruned.agents[2]).toBe(base.agents[2]);
+  });
+
+  it("disables vision when it points at a removed model, keeps it otherwise", () => {
+    const withVision = { ...base, vision: { provider: "openrouter", model: "openai/gpt-4o-mini", enabled: true } };
+    expect(pruneDisabledModelRefs(withVision, "openrouter", providers[0]!.models).vision).toMatchObject({ provider: "openrouter", model: "openai/gpt-4o-mini", enabled: false });
+    const untouched = { ...base, vision: { provider: "anthropic", model: "claude-sonnet-4", enabled: true } };
+    expect(pruneDisabledModelRefs(untouched, "openrouter", providers[0]!.models).vision).toBe(untouched.vision);
+  });
+
+  it("is a no-op when every referenced model stays enabled", () => {
+    const keep = {
+      ...base,
+      model: { provider: "openrouter", id: "openai/gpt-4o" },
+      agents: [{ id: "a", defaultModel: { provider: "openrouter", id: "openai/gpt-4o" } }, { id: "c" }]
+    };
+    const pruned = pruneDisabledModelRefs(keep, "openrouter", providers[0]!.models);
+    expect(pruned.model).toBe(keep.model);
+    expect(pruned.agents).toBe(keep.agents);
   });
 });
 
