@@ -618,6 +618,14 @@ button, input, select, textarea, summary, label {
 .question-custom-row:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus-ring); }
 .question-custom-row input { flex: 1 1 auto; min-width: 0; padding: 0; border: none; background: transparent; color: var(--text); font-size: 13px; font-family: inherit; outline: none; }
 .question-custom-row input::placeholder { color: var(--text-muted); }
+/* 移交出口（handoffOption）的模型选择行：两段式第二段，全部位于 data-pane=question-panel 区域内。 */
+.question-handoff-row { display: grid; gap: 7px; padding: 10px 12px; border: 1px solid var(--accent-border); border-radius: 8px; background: var(--surface-muted); animation: question-handoff-in .18s cubic-bezier(0.16, 1, 0.3, 1); }
+.question-handoff-label { color: var(--accent-text); font-size: 12px; font-weight: 650; line-height: 1.5; }
+.question-handoff-select { width: 100%; min-height: 32px; padding: 0 8px; border: 1px solid var(--border-strong); border-radius: 6px; outline: none; color: var(--text); font-size: 12px; font-family: inherit; background: var(--surface-input); transition: border-color .12s ease, box-shadow .12s ease; }
+.question-handoff-select:focus-visible { border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus-ring); }
+.question-handoff-hint { margin: 0; color: var(--text-muted); font-size: 11px; line-height: 1.5; }
+.question-handoff-actions { display: flex; justify-content: flex-end; gap: 8px; }
+@keyframes question-handoff-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 .question-panel-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .question-hint { display: flex; align-items: center; gap: 5px; color: var(--text-muted); font-size: 11px; }
 .question-hint svg { flex: 0 0 auto; color: var(--accent); }

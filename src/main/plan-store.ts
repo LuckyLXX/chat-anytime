@@ -22,12 +22,21 @@ export const PLANS_DIR = "docs/plans";
 const INVALID_FILENAME_CHARS = /[<>:"/\\|?*\u0000-\u001f]/gu;
 
 /**
+ * 提取计划文档的首个 markdown 标题（`# xxx`）；无标题（或标题为空）返回 undefined。
+ * planFileName 与计划移交（新会话标题）共用，保证文件名与标题同源。
+ */
+export function planHeading(plan: string): string | undefined {
+  const heading = /^#\s+(.+?)\s*$/mu.exec(plan.trim());
+  const base = heading?.[1]?.trim();
+  return base || undefined;
+}
+
+/**
  * 派生落盘文件名：优先取计划首个 markdown 标题（`# xxx`），否则回落为
  * 「plan」。净化路径分隔符与 Windows 非法字符，防目录穿越。
  */
 export function planFileName(plan: string, date = new Date()): string {
-  const heading = /^#\s+(.+?)\s*$/mu.exec(plan.trim());
-  const base = heading?.[1]?.trim() || "plan";
+  const base = planHeading(plan) || "plan";
   const safe = base.replace(INVALID_FILENAME_CHARS, "-").replace(/\s+/gu, "-").replace(/-+/gu, "-").replace(/\.md$/iu, "").replace(/^[-.]+|[-.]+$/gu, "").slice(0, 80);
   const stamp = date.toISOString().slice(0, 10);
   return `${stamp}-${safe || "plan"}.md`;

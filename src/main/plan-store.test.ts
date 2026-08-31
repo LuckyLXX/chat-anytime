@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { planFileName, readPlanMode, saveApprovedPlan, writePlanMode } from "./plan-store.js";
+import { planFileName, planHeading, readPlanMode, saveApprovedPlan, writePlanMode } from "./plan-store.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -40,6 +40,20 @@ describe("plan mode state store", () => {
     const corrupt = join(dir, "plans", "corrupt.json");
     await writeText(corrupt, "{not json");
     expect(readPlanMode(corrupt)).toBe(false);
+  });
+});
+
+describe("planHeading", () => {
+  it("extracts the first markdown heading", () => {
+    expect(planHeading("# 状态栏时钟功能实现计划\n\n正文")).toBe("状态栏时钟功能实现计划");
+    expect(planHeading("\n# 前导空行\n")).toBe("前导空行");
+  });
+
+  it("returns undefined without a heading (or blank heading)", () => {
+    expect(planHeading("无标题计划")).toBeUndefined();
+    expect(planHeading("## 二级标题不算")).toBeUndefined();
+    expect(planHeading("#   \n")).toBeUndefined();
+    expect(planHeading("")).toBeUndefined();
   });
 });
 

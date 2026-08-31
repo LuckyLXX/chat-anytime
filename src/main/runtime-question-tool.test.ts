@@ -31,6 +31,24 @@ describe("QuestionBroker", () => {
     await expect(promise).resolves.toEqual({ status: "answered", answers: ["PiDesktop", "1.0"] });
   });
 
+  it("carries the handoff model when well-formed", async () => {
+    const { broker, emitted } = createBroker();
+    const promise = broker.request({ sessionId: "s1", toolCallId: "t1", questions: [{ text: "审查？", type: "single", options: ["批准", "不批准"] }] });
+    broker.resolve(emitted[0]!.id, ["批准计划，移交新会话实施"], { provider: "anthropic", id: "claude-haiku" });
+    await expect(promise).resolves.toEqual({ status: "answered", answers: ["批准计划，移交新会话实施"], model: { provider: "anthropic", id: "claude-haiku" } });
+  });
+
+  it("ignores malformed handoff models (treated as absent)", async () => {
+    const { broker, emitted } = createBroker();
+    const blank = broker.request({ sessionId: "s1", toolCallId: "t1", questions: [{ text: "审查？", type: "single", options: ["批准", "不批准"] }] });
+    broker.resolve(emitted[0]!.id, ["批准"], { provider: "  ", id: "anthropic" });
+    await expect(blank).resolves.toEqual({ status: "answered", answers: ["批准"] });
+
+    const wrongShape = broker.request({ sessionId: "s2", toolCallId: "t2", questions: [{ text: "审查？", type: "single", options: ["批准", "不批准"] }] });
+    broker.resolve(emitted[1]!.id, ["批准"], { provider: "anthropic" } as { provider: string; id: string });
+    await expect(wrongShape).resolves.toEqual({ status: "answered", answers: ["批准"] });
+  });
+
   it("treats missing or mismatched answers as cancelled", async () => {
     const { broker, emitted } = createBroker();
     const cancelled = broker.request({ sessionId: "s1", toolCallId: "t1", questions: [{ text: "A？", type: "text", options: [] }] });

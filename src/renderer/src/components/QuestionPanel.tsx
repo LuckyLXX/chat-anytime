@@ -1,7 +1,8 @@
 import { CircleHelp, Maximize2 } from "lucide-react";
-import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
-import type { QuestionItem, QuestionRequest } from "../../../shared/protocol";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import type { DesktopSettings, QuestionItem, QuestionRequest } from "../../../shared/protocol";
 import { useDesktopStore } from "../store";
+import { groupModelsByProvider, selectableCatalogModels } from "../lib/model-list";
 import { RichContent } from "./RichContent";
 
 /** 每题的作答草稿：选项勾选 + 自定义输入（文本题只用 custom）。 */
@@ -66,14 +67,34 @@ export function QuestionPanel({ request, onOpenDetail }: { request: QuestionRequ
   const [drafts, setDrafts] = useState<QuestionDraft[]>(() => request.questions.map(() => emptyQuestionDraft()));
   const [current, setCurrent] = useState(0);
   const [submitting, setSubmitting] = useState(false);
+  // 移交出口（handoffOption）的两段式状态：展开实施模型选择行；选中模型存
+  // 「provider/id」字符串（下拉 value），提交时再拆回引用。
+  const [handoffOpen, setHandoffOpen] = useState(false);
+  const [handoffModel, setHandoffModel] = useState("");
   const optionRefs = useRef<(HTMLButtonElement | undefined)[]>([]);
   const inputRef = useRef<HTMLInputElement | undefined>(undefined);
+  const handoffSelectRef = useRef<HTMLSelectElement | undefined>(undefined);
+  const settings = useDesktopStore((state) => state.settings);
+  const models = useDesktopStore((state) => state.models);
+  const providers = useDesktopStore((state) => state.providers);
+  // 与 composer 模型菜单同口径：只保留已勾选（enabled !== false）且已配置的模型。
+  const handoffGroups = useMemo(
+    () => groupModelsByProvider(selectableCatalogModels(models).filter((model) => model.configured), (providerId) => providers.find((item) => item.id === providerId)?.name),
+    [models, providers]
+  );
 
   useEffect(() => {
     setDrafts(request.questions.map(() => emptyQuestionDraft()));
     setCurrent(0);
     setSubmitting(false);
+    setHandoffOpen(false);
+    setHandoffModel("");
   }, [request.id, request.questions]);
+
+  // 选择行展开时聚焦模型下拉（键盘路径：Enter 确认移交、Esc 返回）。
+  useEffect(() => {
+    if (handoffOpen) handoffSelectRef.current?.focus();
+  }, [handoffOpen]);
 
   // 翻页/挂载后聚焦当前题第一个可交互元素（选择题聚焦首选项，文本题聚焦输入框）。
   useEffect(() => {
@@ -86,10 +107,10 @@ export function QuestionPanel({ request, onOpenDetail }: { request: QuestionRequ
     }
   }, [current, request.questions]);
 
-  async function resolve(answers?: string[]): Promise<void> {
+  async function resolve(answers?: string[], model?: { provider: string; id: string }): Promise<void> {
     setSubmitting(true);
     try {
-      await window.piDesktop.send({ type: "question.resolve", id: request.id, ...(answers ? { answers } : {}) });
+      await window.piDesktop.send({ type: "question.resolve", id: request.id, ...(answers ? { answers } : {}), ...(model ? { model } : {}) });
       useDesktopStore.setState((state) => ({ questions: state.questions.filter((item) => item.id !== request.id) }));
     } catch {
       setSubmitting(false);
@@ -110,16 +131,70 @@ export function QuestionPanel({ request, onOpenDetail }: { request: QuestionRequ
     }
   }
 
-  /** 选项切换：单选任意点选（含回车/空格）都选中并立即推进（点选即走，重选直接换项）；多选切换勾选、由「继续」或输入框回车推进。 */
+  /** 移交出口预选模型：当前 Agent 的默认模型，无则回落全局默认；命中下拉列表才预选。 */
+  function presetHandoffModel(): string {
+    const ref = settings.agents.find((item) => item.id === settings.currentAgentId)?.defaultModel ?? settings.model;
+    if (!ref) return "";
+    const found = handoffGroups.some((group) => group.models.some((model) => model.provider === ref.provider && model.id === ref.id));
+    return found ? `${ref.provider}/${ref.id}` : "";
+  }
+
+  /** 展开模型选择行：清空自定义输入（与移交互斥，防残留文本被误判为拒绝反馈）。 */
+  function openHandoff(): void {
+    setHandoffModel(presetHandoffModel());
+    setHandoffOpen(true);
+  }
+
+  /** 返回：收起选择行并回到未选状态（问题仍挂起，可改选其它选项或以「忽略」取消）。 */
+  function cancelHandoff(): void {
+    setHandoffOpen(false);
+    setHandoffModel("");
+    patchDraft(current, { selected: [], custom: "" });
+  }
+
+  /** 确认移交：答案恒为移交选项原文（保证 parsePlanReview 精确匹配），携带所选实施模型。 */
+  function confirmHandoff(): void {
+    if (!handoffModel || submitting) return;
+    const slash = handoffModel.lastIndexOf("/");
+    if (slash <= 0) return;
+    const model = { provider: handoffModel.slice(0, slash), id: handoffModel.slice(slash + 1) };
+    const answers = request.questions.map((question, index) => {
+      if (index === current && question.handoffOption) return question.handoffOption;
+      return serializeAnswer(question, drafts[index] ?? emptyQuestionDraft());
+    });
+    void resolve(answers, model);
+  }
+
+  /** 选择行键盘：Enter 确认移交（已选模型时）、Esc 返回。 */
+  function handleHandoffKey(event: KeyboardEvent<HTMLDivElement>): void {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      cancelHandoff();
+      return;
+    }
+    if (event.key === "Enter" && handoffModel && !submitting) {
+      event.preventDefault();
+      confirmHandoff();
+    }
+  }
+
+  /** 选项切换：单选任意点选（含回车/空格）都选中并立即推进（点选即走，重选直接换项）；多选切换勾选、由「继续」或输入框回车推进。移交选项（单选）走两段式：不立即提交。 */
   function toggleOption(item: QuestionItem, index: number, option: string): void {
     const currentDraft = drafts[index] ?? emptyQuestionDraft();
     const single = item.type === "single";
+    if (single && option === item.handoffOption) {
+      patchDraft(index, { selected: [option], custom: "" });
+      openHandoff();
+      return;
+    }
     const nextSelected = single
       ? [option]
       : currentDraft.selected.includes(option)
         ? currentDraft.selected.filter((value) => value !== option)
         : [...currentDraft.selected, option];
     setDrafts((currentDrafts) => currentDrafts.map((draft, i) => i === index ? { ...draft, selected: nextSelected } : draft));
+    setHandoffOpen(false);
     if (single) {
       if (index === request.questions.length - 1) {
         // 单选点选即提交：答案必须基于本次点击的选项。setDrafts 是异步的，
@@ -182,8 +257,8 @@ export function QuestionPanel({ request, onOpenDetail }: { request: QuestionRequ
         <h2 className="question-title">{item.text}</h2>
         <div className="question-pager">
           <span>{current + 1} / {request.questions.length}</span>
-          <button type="button" aria-label="上一题" disabled={current === 0 || submitting} onClick={() => setCurrent((value) => Math.max(0, value - 1))}>◀</button>
-          <button type="button" aria-label="下一题" disabled={isLast || submitting} onClick={() => setCurrent((value) => Math.min(request.questions.length - 1, value + 1))}>▶</button>
+          <button type="button" aria-label="上一题" disabled={current === 0 || submitting || handoffOpen} onClick={() => setCurrent((value) => Math.max(0, value - 1))}>◀</button>
+          <button type="button" aria-label="下一题" disabled={isLast || submitting || handoffOpen} onClick={() => setCurrent((value) => Math.min(request.questions.length - 1, value + 1))}>▶</button>
         </div>
       </header>
       {detailPreview && (
@@ -212,7 +287,7 @@ export function QuestionPanel({ request, onOpenDetail }: { request: QuestionRequ
                   className={`question-option${active ? " active" : ""}`}
                   role={item.type === "single" ? "radio" : "checkbox"}
                   aria-checked={active}
-                  disabled={submitting}
+                  disabled={submitting || handoffOpen}
                   onClick={() => toggleOption(item, current, option)}
                   onKeyDown={(event) => handleOptionKey(event, item, optionIndex)}
                 >
@@ -225,12 +300,41 @@ export function QuestionPanel({ request, onOpenDetail }: { request: QuestionRequ
           })}
         </ol>
       )}
+      {handoffOpen && item.handoffOption && (
+        <div className="question-handoff-row" onKeyDown={handleHandoffKey}>
+          <label className="question-handoff-label" htmlFor="question-handoff-select">实施模型</label>
+          <select
+            id="question-handoff-select"
+            ref={(element) => { handoffSelectRef.current = element ?? undefined; }}
+            className="question-handoff-select"
+            value={handoffModel}
+            disabled={submitting}
+            onChange={(event) => setHandoffModel(event.target.value)}
+          >
+            {!handoffModel && <option value="">选择模型…</option>}
+            {handoffGroups.map((group) => (
+              <optgroup key={group.provider} label={group.providerName}>
+                {group.models.map((model) => (
+                  <option key={`${model.provider}/${model.id}`} value={`${model.provider}/${model.id}`}>{model.name}（{model.id}）</option>
+                ))}
+              </optgroup>
+            ))}
+          </select>
+          <p className="question-handoff-hint">新会话将以所选模型严格按计划文档实施</p>
+          <div className="question-handoff-actions">
+            <button className="secondary-button" type="button" disabled={submitting} onClick={cancelHandoff}>返回</button>
+            <button className="primary-button" type="button" disabled={!handoffModel || submitting} onClick={confirmHandoff}>
+              {submitting ? "提交中…" : "移交实施"}
+            </button>
+          </div>
+        </div>
+      )}
       <div className="question-custom-row">
         <span className="question-custom-index">{item.options.length + 1}</span>
         <input
           ref={(element) => { inputRef.current = element ?? undefined; }}
           value={drafts[current]?.custom ?? ""}
-          disabled={submitting}
+          disabled={submitting || handoffOpen}
           placeholder="输入你的回答..."
           onChange={(event) => patchDraft(current, { custom: event.target.value })}
           onKeyDown={(event) => handleInputKey(event, current)}
@@ -240,7 +344,7 @@ export function QuestionPanel({ request, onOpenDetail }: { request: QuestionRequ
         <span className="question-hint"><CircleHelp size={12} /> 使用 Tab / 上下键选择，回车或空格选中</span>
         <div className="question-footer-actions">
           <button className="secondary-button" type="button" disabled={submitting} onClick={() => void resolve()}>忽略</button>
-          <button className="primary-button" type="button" disabled={!answered || submitting} onClick={continueToNext}>
+          <button className="primary-button" type="button" disabled={!answered || submitting || handoffOpen} onClick={continueToNext}>
             {submitting ? "提交中…" : "继续"}
           </button>
         </div>

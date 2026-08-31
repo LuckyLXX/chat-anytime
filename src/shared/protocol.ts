@@ -1022,6 +1022,12 @@ export interface QuestionItem {
   options: string[];
   /** 可选 markdown 详情（如计划审查展示计划全文），渲染在题目文本与选项之间；缺省不渲染。 */
   detail?: string;
+  /**
+   * 移交出口（计划审查专用）：值为 options 中某一选项的原文。渲染端点选该选项时
+   * 不立即提交，而是先展开实施模型选择，确认后连同 question.resolve.model 一起提交。
+   * ask_question 永不设置该字段。
+   */
+  handoffOption?: string;
 }
 
 /** ask_question 工具发给渲染端的提问请求；answers 缺省即视为用户取消。 */
@@ -1103,7 +1109,7 @@ export type RuntimeCommand =
   | { type: "automation.toggle"; id: string; enabled: boolean }
   | { type: "automation.run"; id: string }
   | { type: "permission.resolve"; id: string; decision: PermissionDecision }
-  | { type: "question.resolve"; id: string; answers?: string[] }
+  | { type: "question.resolve"; id: string; answers?: string[]; /** 移交出口选定的实施模型（handoffOption 流程携带；ask_question 忽略）。 */ model?: { provider: string; id: string } }
   /** 回滚单条回复内指定文件的改动：按（文件 + 调用 id）定位快照，每文件取最早快照恢复；targets 可含多个文件。 */
   | { type: "checkpoint.rollback"; sessionId?: string; targets: CheckpointRollbackTarget[] }
   /** 用量统计：跨助手扫描会话 JSONL 聚合 token 用量；agentId 缺省=全部助手。 */

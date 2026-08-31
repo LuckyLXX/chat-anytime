@@ -8,7 +8,7 @@ import type { QuestionItem, QuestionRequest } from "../shared/protocol.js";
 import { Type } from "typebox";
 
 export type QuestionOutcome =
-  | { status: "answered"; answers: string[] }
+  | { status: "answered"; answers: string[]; /** 移交出口（计划审查）随答案携带的实施模型；ask_question 流程恒缺省。 */ model?: { provider: string; id: string } }
   | { status: "cancelled" };
 
 export const QUESTION_MAX_COUNT = 5;
@@ -37,8 +37,12 @@ export class QuestionBroker {
     });
   }
 
-  /** answers 缺省（或与问题数不符）视为用户取消。 */
-  resolve(id: string, answers?: string[]): boolean {
+  /**
+   * answers 缺省（或与问题数不符）视为用户取消。model 为移交出口（计划审查）
+   * 随答案携带的实施模型：provider/id 必须是非空字符串，非法形状一律按缺省
+   * 忽略（ask_question 流程无感知）。
+   */
+  resolve(id: string, answers?: string[], model?: { provider: string; id: string }): boolean {
     const pending = this.pending.get(id);
     if (!pending) return false;
     this.pending.delete(id);
@@ -46,7 +50,13 @@ export class QuestionBroker {
     const valid = Array.isArray(answers)
       && answers.length === pending.request.questions.length
       && answers.every((answer) => typeof answer === "string");
-    pending.resolve(valid ? { status: "answered", answers: answers!.map((answer) => answer.trim()) } : { status: "cancelled" });
+    const validModel = model && typeof model.provider === "string" && typeof model.id === "string"
+      && model.provider.trim().length > 0 && model.id.trim().length > 0
+      ? { provider: model.provider.trim(), id: model.id.trim() }
+      : undefined;
+    pending.resolve(valid
+      ? { status: "answered", answers: answers!.map((answer) => answer.trim()), ...(validModel ? { model: validModel } : {}) }
+      : { status: "cancelled" });
     return true;
   }
 

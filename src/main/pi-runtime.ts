@@ -102,7 +102,7 @@ import * as runtimeMcp from "./runtime-mcp.js";
 import * as runtimeContextUsage from "./runtime-context-usage.js";
 import * as runtimeHooks from "./runtime-hooks.js";
 import * as runtimePlanTools from "./runtime-plan-tools.js";
-import { readPlanMode, saveApprovedPlan, writePlanMode } from "./plan-store.js";
+import { planHeading, readPlanMode, saveApprovedPlan, writePlanMode } from "./plan-store.js";
 import { checkpointPathFor, readCheckpoints, sweepCheckpoints } from "./checkpoint-store.js";
 import { createCheckpointExtension, rollbackPlan } from "./runtime-checkpoint.js";
 import { hookActionPreview, readConfiguredHooks, removeHookConfig, setHookDisabled, upsertHookConfig, validateHookRule, type ConfiguredHook } from "./hooks-config.js";
@@ -564,6 +564,57 @@ async function runAutomationTask(task: AutomationTask): Promise<void> {
     emitState();
     emitPaneStateFor(record);
   }
+}
+
+/**
+ * 批准并移交：在规划会话所属 Agent + 工作区下新建前台会话，以所选模型按计划
+ * 文档开始实施（runAutomationTask 同款纪律）。与自动化后台会话的对照：那是
+ * skipActivate + unattended + noGenerationGuard；这里是默认激活 + 有人值守
+ * （权限门、ask_question、代际竞争保护照常）。
+ */
+async function handoffPlanToNewSession(input: {
+  source: SessionRuntimeRecord;
+  plan: string;
+  planPath?: string;
+  title: string;
+  model: { provider: string; id: string };
+}): Promise<{ sessionId: string }> {
+  const { source, model } = input;
+  if (!modelRuntime || !currentAgent || !workspace) throw new Error("当前没有可用的工作区或 Agent，无法移交");
+  // 快照守卫（自动化同款）：createSession 派生自全局 workspace/currentAgent，
+  // 若规划会话落位与当前不一致，新建会话会错位——分屏内会话同属当前 Agent，
+  // 正常路径必过。
+  if (source.agent.id !== currentAgent.id || resolve(source.workspace) !== resolve(workspace)) {
+    throw new Error("规划会话与当前 Agent/工作区不一致，无法移交");
+  }
+  // 模型校验（自动化同款口径）：所选模型必须存在且已勾选，绝不静默回落默认模型。
+  if (!modelRuntime.getModel(model.provider, model.id) || !isModelEnabled(model.provider, model.id, settings?.providers)) {
+    throw new Error(`所选模型不可用（已删除或未勾选）：${model.provider}/${model.id}`);
+  }
+  const sessionDir = workspaceSessionDir();
+  if (!sessionDir) throw new Error("无法定位会话目录");
+  const manager = SessionManager.create(workspace, sessionDir);
+  const sessionId = manager.getSessionId();
+  // 默认激活：焦点切到实施会话（用户直接看到实施进展）；有人值守不传
+  // unattended/noGenerationGuard——权限门与提问工具照常，与其他前台会话一致。
+  await createSession(manager, { modelOverride: model });
+  const record = liveSessions.get(sessionId);
+  if (!record) throw new Error("实施会话创建失败");
+  // 以计划标题命名新会话；对未持久化会话（首条助手消息前 JSONL 未落盘）的
+  // appendSessionInfo 行为可能受限，命名失败只记日志不阻塞（锦上添花）。
+  try {
+    manager.appendSessionInfo(input.title);
+  } catch (error) {
+    void post({ type: "log", level: "warn", message: `为实施会话命名「${input.title}」失败：${errorText(error)}` });
+  }
+  // 复用完整命令语义：模型就绪/busy 守卫、todo 回合清空（新会话空表无副作用）、
+  // busy/runStatus/beginTurn/emitState 与错误兜底全部照常。
+  await handleCommand({
+    type: "session.prompt",
+    text: runtimePlanTools.buildPlanHandoffPrompt({ plan: input.plan, planPath: input.planPath, title: input.title }),
+    sessionId
+  });
+  return { sessionId };
 }
 
 /** 绑定到某 Agent 的自动化工具上下文（会话内 automation.* 工具用）。 */
@@ -1936,7 +1987,14 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     broker: questionBroker,
     workspace: () => recordWorkspace,
     // 批准落盘：主进程侧直接写 docs/plans/（不经过模型工具，无权限门语义）。
-    savePlan: (plan) => saveApprovedPlan(recordWorkspace, plan)
+    savePlan: (plan) => saveApprovedPlan(recordWorkspace, plan),
+    // 批准移交：闭包捕获规划会话自身的 record（不是 activeRuntime——用户可能在
+    // 规划进行中把焦点切到了别的会话/格子），由编排函数在 utility 内新建前台会话。
+    handoff: (input) => {
+      const source = recordBox;
+      if (!source) throw new Error("规划会话运行记录不可用");
+      return handoffPlanToNewSession({ source, ...input });
+    }
   });
   // ask_question 的挂起按会话清理（disposeRecord → broker.reset），而新会话的
   // sessionId 在 createAgentSession 之后才确定，因此以 getter 延迟读取。
@@ -3242,7 +3300,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       break;
     }
     case "question.resolve": {
-      questionBroker.resolve(command.id, command.answers);
+      questionBroker.resolve(command.id, command.answers, command.model);
       break;
     }
   }

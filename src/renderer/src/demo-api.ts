@@ -660,6 +660,10 @@ export function createDemoApi(): DesktopApi {
           if (decision === "deny") emit({ type: "log", level: "warn", message: "已拒绝演示工具请求" });
           break;
         }
+        case "question.resolve": {
+          // 纯浏览器演示没有真实提问推送；静默接受（含 handoffOption 流程携带的 model 字段，不解析也不报错）。
+          break;
+        }
         case "provider.save":
           demoSettings.providers = demoSettings.providers.some((provider) => provider.id === command.provider.id)
             ? demoSettings.providers.map((provider) => provider.id === command.provider.id ? { ...command.provider, keyConfigured: Boolean(command.apiKey) || provider.keyConfigured } : provider)
