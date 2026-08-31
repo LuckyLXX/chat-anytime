@@ -4,6 +4,7 @@
 import { Clock, Folder, ListChecks, MessageSquarePlus, Pause, Pencil, Play, Plus, Search, Trash2, X, Zap } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 import type { AccessMode, AutomationTask, DesktopSettings, ModelOption, ProviderOption } from "../../shared/protocol";
+import { buildCron, describeCron, DEFAULT_SCHEDULE_PARTS, pad2, SCHEDULE_PRESETS, WEEKDAY_OPTIONS, type SchedulePreset } from "./lib/automation-schedule";
 import { groupModelsByProvider, selectableCatalogModels } from "./lib/model-list";
 import { useDesktopStore } from "./store";
 
@@ -40,6 +41,10 @@ const ACCESS_MODE_SHORT: Record<AccessMode, string> = { full: "完全访问", wo
 
 const CRON_HINT = "cron 为 5 字段（分 时 日 月 周）。例：0 9 * * 1-5 = 工作日每天 09:00；0 18 * * * = 每天 18:00；*/15 * * * * = 每 15 分钟。";
 
+function numberOptions(from: number, to: number, suffix = ""): { value: number; label: string }[] {
+  return Array.from({ length: to - from + 1 }, (_, index) => ({ value: from + index, label: `${pad2(from + index)}${suffix}` }));
+}
+
 function agentDefaultModel(settings: DesktopSettings): { provider: string; id: string } | undefined {
   const agent = settings.agents.find((item) => item.id === settings.currentAgentId);
   return agent?.defaultModel ?? settings.model;
@@ -60,7 +65,13 @@ function lastRunTitle(task: AutomationTask): string | undefined {
 
 function AutomationForm({ initial, models, providers, settings, workspaceName, onSubmit, onCancel }: AutomationFormProps): ReactNode {
   const [name, setName] = useState(initial?.name ?? "");
-  const [cron, setCron] = useState(initial?.schedule.cron ?? "");
+  const initialSchedule = useMemo(() => (initial ? describeCron(initial.schedule.cron) : DEFAULT_SCHEDULE_PARTS), [initial]);
+  const [preset, setPreset] = useState<SchedulePreset>(initialSchedule.preset);
+  const [minute, setMinute] = useState(initialSchedule.minute);
+  const [hour, setHour] = useState(initialSchedule.hour);
+  const [weekday, setWeekday] = useState(initialSchedule.weekday);
+  const [monthDay, setMonthDay] = useState(initialSchedule.monthDay);
+  const [customCron, setCustomCron] = useState(initial?.schedule.cron ?? "0 9 * * *");
   const [timezone, setTimezone] = useState(initial?.schedule.timezone ?? "");
   const [prompt, setPrompt] = useState(initial?.prompt ?? "");
   const [modelValue, setModelValue] = useState(initial?.model ? `${initial.model.provider}/${initial.model.id}` : "");
@@ -70,17 +81,18 @@ function AutomationForm({ initial, models, providers, settings, workspaceName, o
 
   const defaultModel = agentDefaultModel(settings);
   const groups = useMemo(() => groupModelsByProvider(selectableCatalogModels(models), (providerId) => providers.find((item) => item.id === providerId)?.name), [models, providers]);
+  const resolvedCron = preset === "custom" ? customCron.trim() : buildCron({ preset, minute, hour, weekday, monthDay });
 
   function submit(): void {
     if (!name.trim()) { setError("请填写任务名称"); return; }
-    if (!cron.trim()) { setError("请填写 cron 调度表达式"); return; }
-    if (cron.trim().split(/\s+/u).length !== 5) { setError("cron 需要 5 个字段（分 时 日 月 周），如 0 9 * * 1-5"); return; }
+    if (!resolvedCron) { setError("请填写 cron 调度表达式"); return; }
+    if (resolvedCron.split(/\s+/u).length !== 5) { setError("cron 需要 5 个字段（分 时 日 月 周），如 0 9 * * 1-5"); return; }
     if (!prompt.trim()) { setError("请填写任务提示词"); return; }
     const model = modelValue ? (() => { const slash = modelValue.indexOf("/"); return slash > 0 ? { provider: modelValue.slice(0, slash), id: modelValue.slice(slash + 1) } : undefined; })() : undefined;
     onSubmit({
       id: initial?.id ?? "",
       name: name.trim(),
-      schedule: { cron: cron.trim(), ...(timezone.trim() ? { timezone: timezone.trim() } : {}) },
+      schedule: { cron: resolvedCron, ...(timezone.trim() ? { timezone: timezone.trim() } : {}) },
       prompt: prompt.trim(),
       agentId: settings.currentAgentId,
       workspace: workspace === "current" ? workspaceName : undefined,
@@ -105,8 +117,23 @@ function AutomationForm({ initial, models, providers, settings, workspaceName, o
             <label>任务名称<input value={name} onChange={(event) => setName(event.target.value)} placeholder="例如: 每日项目巡检" /></label>
             <label>时区<input value={timezone} onChange={(event) => setTimezone(event.target.value)} placeholder="跟随系统（留空）" /></label>
           </div>
-          <label>调度方式（cron）<input value={cron} onChange={(event) => setCron(event.target.value)} placeholder="0 9 * * 1-5" /></label>
-          <p className="automation-hint">{CRON_HINT}</p>
+          <label>调度方式<select value={preset} onChange={(event) => setPreset(event.target.value as SchedulePreset)}>{SCHEDULE_PRESETS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>
+          {preset === "custom" ? (
+            <>
+              <label>调度表达式（cron）<input value={customCron} onChange={(event) => setCustomCron(event.target.value)} placeholder="0 9 * * 1-5" /></label>
+              <p className="automation-hint">{CRON_HINT}</p>
+            </>
+          ) : (
+            <>
+              <div className="automation-field-grid">
+                {preset === "hourly" && <label>第几分钟<select value={minute} onChange={(event) => setMinute(Number(event.target.value))}>{numberOptions(0, 59, " 分").map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>}
+                {preset === "weekly" && <label>周几<select value={weekday} onChange={(event) => setWeekday(Number(event.target.value))}>{WEEKDAY_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>}
+                {preset === "monthly" && <label>每月几号<select value={monthDay} onChange={(event) => setMonthDay(Number(event.target.value))}>{numberOptions(1, 31, " 日").map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>}
+                {preset !== "hourly" && <label>执行时间<div className="automation-time-pair"><select value={hour} onChange={(event) => setHour(Number(event.target.value))} aria-label="小时">{numberOptions(0, 23, " 时").map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select><select value={minute} onChange={(event) => setMinute(Number(event.target.value))} aria-label="分钟">{numberOptions(0, 59, " 分").map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></div></label>}
+              </div>
+              <p className="automation-hint">等价表达式：<code className="automation-cron-preview">{resolvedCron}</code>{preset === "monthly" && "（部分月份无该日期时当月不触发）"}</p>
+            </>
+          )}
           <label>模型<select value={modelValue} onChange={(event) => setModelValue(event.target.value)}>
             <option value="">{defaultModel ? `继承默认（${defaultModel.id}）` : "请先配置并选择模型"}</option>
             {modelValue && !groups.some((group) => group.models.some((model) => `${group.provider}/${model.id}` === modelValue)) && <option value={modelValue}>{modelValue}</option>}

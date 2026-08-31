@@ -663,6 +663,8 @@ button, input, select, textarea, summary, label {
 .attachment-list { position: absolute; right: 10px; bottom: calc(100% + 7px); left: 10px; display: flex; flex-wrap: wrap; gap: 5px; }
 .attachment-chip { display: inline-flex; align-items: center; gap: 4px; max-width: 230px; padding: 4px 6px; overflow: hidden; border: 1px solid var(--border); border-radius: 6px; color: var(--text-muted); background: var(--surface-raised); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .attachment-chip img { width: 22px; height: 22px; flex: 0 0 auto; object-fit: cover; border-radius: 4px; }
+.attachment-chip .attachment-chip-preview { display: grid; flex: 0 0 auto; place-items: center; width: 22px; height: 22px; padding: 0; overflow: hidden; border: 0; border-radius: 4px; background: transparent; cursor: zoom-in; }
+.attachment-chip .attachment-chip-preview:hover { opacity: .8; }
 .attachment-chip > span { overflow: hidden; text-overflow: ellipsis; }
 .attachment-chip button { border: 0; color: var(--text-muted); background: transparent; cursor: pointer; }
 .attachment-error { position: absolute; right: 10px; bottom: calc(100% + 39px); left: 10px; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px; color: var(--danger-text); border: 1px solid var(--danger-border); border-radius: 6px; background: var(--danger-soft); font-size: 10px; }
@@ -1851,6 +1853,9 @@ button, input, select, textarea, summary, label {
 .automation-dialog-body textarea { min-height: 88px; resize: vertical; }
 .automation-field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
 .automation-hint { margin: 0; color: var(--text-muted); font-size: 9.5px; line-height: 1.45; }
+.automation-cron-preview { padding: 1px 5px; border-radius: 4px; background: var(--surface-muted); color: var(--text); font-size: 10px; font-variant-numeric: tabular-nums; }
+.automation-time-pair { display: flex; gap: 6px; }
+.automation-time-pair select { flex: 1; min-width: 0; }
 .automation-form-error { margin: 0; color: var(--danger); font-size: 10px; }
 .automation-dialog > footer { display: flex; justify-content: flex-end; gap: 8px; padding: 11px 15px; border-top: 1px solid var(--border); }
 :root[data-ui-radius] .automation-dialog { border-radius: var(--ui-container-radius); }
