@@ -274,14 +274,20 @@ function DelegationSummaryBadge({ delegation, preview }: { delegation: Delegatio
   );
 }
 
-/** 委派执行步骤段：running=转圈、completed=✓、error=✗，行尾时长。 */
+/** 节点内直接可见的步骤数上限：只显示最近几步，早期步骤折叠为占位行，完整列表走「查看完整记录」。 */
+const MAX_VISIBLE_DELEGATION_STEPS = 5;
+
+/** 委派执行步骤段：只显示最近几步（running=转圈、completed=✓、error=✗，行尾时长），更早的折叠为一行占位。 */
 function DelegationStepsSection({ steps }: { steps: DelegationStep[] }): ReactNode {
   if (steps.length === 0) return null;
+  const visible = steps.length > MAX_VISIBLE_DELEGATION_STEPS ? steps.slice(-MAX_VISIBLE_DELEGATION_STEPS) : steps;
+  const omitted = steps.length - visible.length;
   return (
     <div className="action-timeline-call-section">
-      <span className="action-timeline-call-section-title">执行步骤</span>
+      <span className="action-timeline-call-section-title">执行步骤（共 {steps.length} 步）</span>
       <ol className="delegation-steps">
-        {steps.map((step) => (
+        {omitted > 0 && <li className="delegation-step omitted"><span className="delegation-step-label">… 已省略 {omitted} 个早期步骤，完整列表见「查看完整记录」</span></li>}
+        {visible.map((step) => (
           <li key={step.toolCallId} className={`delegation-step ${step.status}`}>
             <span className="delegation-step-icon">{step.status === "running" ? <LoaderCircle size={12} className="spinning" /> : step.status === "error" ? <AlertCircle size={12} /> : <Check size={12} />}</span>
             <span className="delegation-step-label" title={step.label}>{step.label}</span>
@@ -1553,6 +1559,11 @@ export const ConversationPane = memo(function ConversationPane({
             {data.queuedMessages.map((item) => (
               <div className="composer-queue-item" role="listitem" data-queue-kind={item.kind} key={`${item.kind}:${item.index}`} title={item.text}>
                 {item.kind === "steering" && <span className="composer-queue-badge">即将插入</span>}
+                {item.imageCount !== undefined && item.imageCount > 0 && (
+                  <span className="composer-queue-badge composer-queue-images" title={`${item.imageCount} 张图片`}>
+                    <ImageIcon size={9} />{item.imageCount}
+                  </span>
+                )}
                 <span className="composer-queue-text">{item.text}</span>
                 <span className="composer-queue-actions">
                   <button type="button" className="composer-queue-send" data-control="queue-send-now" title="立即发送：AI 下一轮模型调用前插入，不打断工具执行" aria-label="立即发送这条消息" onClick={() => sendQueuedMessageNow(item)}><Zap size={11} />立即</button>

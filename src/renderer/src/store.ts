@@ -50,7 +50,7 @@ export interface AutomationRunInfo {
 function queuedMessagesEqual(left: RuntimeSnapshot["queuedMessages"], right: RuntimeSnapshot["queuedMessages"]): boolean {
   return left.length === right.length && left.every((item, index) => {
     const other = right[index];
-    return other && item.kind === other.kind && item.index === other.index && item.text === other.text;
+    return other && item.kind === other.kind && item.index === other.index && item.text === other.text && item.imageCount === other.imageCount;
   });
 }
 

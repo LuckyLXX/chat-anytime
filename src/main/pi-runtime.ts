@@ -16,6 +16,7 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { BackgroundProcessRegistry, bashCommandsFromMessages, isBackgroundCommand } from "./background-processes.js";
+import { alignQueueState, imageAttachmentsFrom, promoteQueueMessage, queuedMessageText, queueSnapshotMessages, removeQueueMessage, replayQueueArgs, type PromoteOutcome } from "./queue-images.js";
 import { normalizeMessages, userMessageText } from "./message-normalize.js";
 import { applyModelOverrides as applyStoredModelOverrides, buildCatalogModels, imageInputOverride, isModelEnabled, pickFallbackModel, pruneDisabledModelRefs, resolveRestoredSessionModel } from "./model-catalog.js";
 import type {
@@ -178,6 +179,14 @@ interface SessionRuntimeRecord {
   visionTools: ToolDefinition[];
   browserTools: ToolDefinition[];
   automationTools: ToolDefinition[];
+  /**
+   * 排队消息的图片镜像：与 Pi 会话 steering/followUp 文本数组 index 严格对齐
+   * （无图项 = 空数组）。Pi 队列本体完整保存带图消息，但对外只有纯文本数组；
+   * 这块镜像支撑快照展示（imageCount）与整队重建（sendNow/remove）时的图片
+   * 重放。Pi 队列只从头部消费，读侧按 queue-images 的 alignQueueState 截断对齐。
+   */
+  steeringImages: ImageContent[][];
+  followUpImages: ImageContent[][];
   runStatus: SessionRunStatus | undefined;
   /** True from session.abort() until the run settles — resolves the dot to red. */
   abortRequested: boolean;
@@ -701,12 +710,14 @@ function paneSnapshotFrom(record: SessionRuntimeRecord): SessionPaneSnapshot {
     busy: record.busy,
     status: record.status,
     turnTiming: record.turnTiming,
-    // 待发送队列实时读取 Pi 会话的 steering/followUp 状态；queue_update 事件
+    // 待发送队列实时读取 Pi 会话的 steering/followUp 状态（图片镜像随之按
+    // 队列当前长度对齐截断，多出的头部 = 已注入回合的项）；queue_update 事件
     // 走 default 分支立即 flush，渲染端随 emit 同步。
-    queuedMessages: [
-      ...session.getSteeringMessages().map((text, index) => ({ kind: "steering" as const, index, text })),
-      ...session.getFollowUpMessages().map((text, index) => ({ kind: "followUp" as const, index, text }))
-    ],
+    queuedMessages: queueSnapshotMessages(alignQueueState(
+      session.getSteeringMessages(),
+      session.getFollowUpMessages(),
+      record
+    )),
     contextUsage: snapshotContextUsage(record),
     planMode: record.planState.enabled,
     messages,
@@ -2037,6 +2048,8 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     visionTools,
     browserTools,
     automationTools,
+    steeringImages: [],
+    followUpImages: [],
     unattended: Boolean(options.unattended),
     runStatus: undefined,
     abortRequested: false,
@@ -2518,15 +2531,32 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
           ? runtimeSkillPrompt(command.skillName, command.text || undefined, record)
           : command.text;
       const prompt = await preparePromptPayload(queueText, command.attachments);
-      // Pi 的队列以纯文本存储，编辑/删除/立即发送需要整队重建，图片附件会
-      // 丢失——排队仅支持文本与文件附件（文件附件已折叠为路径清单）。
-      if (prompt.images.length) throw new Error("排队消息暂不支持图片附件，请等本轮回复结束后再发送");
+      // Pi 的队列显示数组按非空文本寻址移除：空串会残留成幽灵队列项，之后任何
+      // 整队重建还会把它（含图片）重新入队重复投递。纯图片排队没有正文时补一个
+      // 占位文本（与文件附件折叠为路径清单同理，正文只进显示/注入，图仍完整）。
+      const queueMessage = queuedMessageText(prompt.text, prompt.images.length);
+      // 图片排队与直接发送同口径：模型不支持图片输入时给 recognize_images 提示
+      // （不入队列拒绝——Pi 的 followUp 队列原生保存带图消息）。
+      if (prompt.images.length && !hasImageInput(record.session.model)) {
+        if (!visionModel) throw new Error("当前模型不支持图片输入，请先切换多模态模型，或在设置的模型服务中启用视觉识别");
+        appendVisionHint(prompt);
+      }
       if (record.busy || record.session.isStreaming) {
-        // followUp 语义：本轮回复自然结束后，该消息作为下一轮 user 消息注入。
-        await record.session.prompt(prompt.text, { streamingBehavior: "followUp" });
+        // followUp 语义：本轮回复自然结束后，该消息（含图片）作为下一轮 user
+        // 消息注入。Pi 队列本体完整保存带图消息；record.followUpImages 镜像与
+        // Pi 的文本数组 index 对齐，供快照展示与整队重建时图片重放。
+        await record.session.prompt(queueMessage, { streamingBehavior: "followUp", ...(prompt.images.length ? { images: prompt.images } : {}) });
+        if (prompt.images.length) record.followUpImages.push(prompt.images);
       } else {
-        // 排队瞬间回合恰好结束：直接按普通消息发送，避免消息滞留队列。
-        await handleCommand({ type: "session.prompt", text: prompt.text, sessionId: command.sessionId });
+        // 排队瞬间回合恰好结束：直接按普通消息发送，避免消息滞留队列。文件附件
+        // 已折叠进 prompt.text，只回传图片附件，防第二次折叠；hint 先剥一次让
+        // session.prompt 管线重新追加，避免重复拼接。
+        await handleCommand({
+          type: "session.prompt",
+          text: runtimeVision.stripVisionHint(queueMessage),
+          attachments: prompt.images.length ? imageAttachmentsFrom(prompt.images) : undefined,
+          sessionId: command.sessionId
+        });
       }
       emitState();
       emitPaneStateFor(record);
@@ -2536,22 +2566,35 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     case "session.queue.remove": {
       const record = command.sessionId ? liveSessions.get(command.sessionId) : activeRuntime;
       if (!record) break;
-      const steering = [...record.session.getSteeringMessages()];
-      const followUp = [...record.session.getFollowUpMessages()];
-      const target = command.kind === "steering" ? steering : followUp;
-      // 快照与点击之间队列可能已投递/变动：text 校验失败即拒绝，防止误伤相邻消息。
-      if (target[command.index] !== command.text) throw new Error("待发送列表已变化，请重试");
-      target.splice(command.index, 1);
       const sendNow = command.type === "session.queue.sendNow";
-      if (sendNow && (record.busy || record.session.isStreaming)) steering.push(command.text);
+      const state = alignQueueState(record.session.getSteeringMessages(), record.session.getFollowUpMessages(), record);
+      // 快照与点击之间队列可能已投递/变动：text 校验失败即拒绝，防止误伤相邻消息。
+      const outcome: PromoteOutcome = sendNow
+        ? promoteQueueMessage(state, command.kind, command.index, command.text, record.busy || record.session.isStreaming)
+        : { state: removeQueueMessage(state, command.kind, command.index, command.text), target: undefined };
+      // 图片镜像跟随新队列（Pi 队列由 clearQueue + 重放重建；无图项为空数组）。
+      record.steeringImages = outcome.state.steeringImages;
+      record.followUpImages = outcome.state.followUpImages;
       // Pi 队列没有单项编辑 API：整队清空后按原顺序重建（sendNow 把目标提升为
       // steering，在当前回合下一次模型调用前插入，无需中断工具执行）。
       record.session.clearQueue();
-      for (const text of steering) await record.session.steer(text);
-      for (const text of followUp) await record.session.followUp(text);
-      if (sendNow && !(record.busy || record.session.isStreaming)) {
-        // 回合已结束（如失败收尾后队列仍在）：立即发送退化为直接开新回合。
-        await handleCommand({ type: "session.prompt", text: command.text, sessionId: command.sessionId });
+      for (const item of replayQueueArgs(outcome.state)) {
+        if (item.images.length) {
+          await record.session[item.kind === "steering" ? "steer" : "followUp"](item.text, item.images);
+        } else {
+          await record.session[item.kind === "steering" ? "steer" : "followUp"](item.text);
+        }
+      }
+      if (sendNow && !(record.busy || record.session.isStreaming) && outcome.target) {
+        // 回合已结束（如失败收尾后队列仍在）：立即发送退化为直接开新回合，
+        // 目标带图时还原为附件载荷走完整发送管线（hint 剥一次让管线重新
+        // 追加，避免与排队时已拼入的提示重复）。
+        await handleCommand({
+          type: "session.prompt",
+          text: runtimeVision.stripVisionHint(outcome.target.text),
+          attachments: outcome.target.images.length ? imageAttachmentsFrom(outcome.target.images) : undefined,
+          sessionId: command.sessionId
+        });
       }
       emitState();
       emitPaneStateFor(record);
@@ -2616,6 +2659,8 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       // 中断即放弃排队消息（Pi CLI 同款语义）：渲染端在点停止时把队列文本
       // 回填输入框供编辑重发；不清空的话滞留消息会混进下一次运行。
       record.session.clearQueue();
+      record.steeringImages = [];
+      record.followUpImages = [];
       void record.session.abort();
       // Make the task panel reflect the abort immediately: mark every running
       // tool execution as aborted so its card disappears without waiting for

@@ -638,7 +638,8 @@ export function createDemoApi(): DesktopApi {
         case "session.queue.add": {
           const text = command.commandName ? `【命令：/${command.commandName}】${command.text}` : command.skillName ? `【Skill：${command.skillName}】${command.text}` : command.text;
           const followUpCount = demoSnapshot.queuedMessages.filter((item) => item.kind === "followUp").length;
-          updateSnapshot({ queuedMessages: [...demoSnapshot.queuedMessages, { kind: "followUp", index: followUpCount, text }] });
+          const imageCount = (command.attachments ?? []).filter((item) => item.kind === "image").length;
+          updateSnapshot({ queuedMessages: [...demoSnapshot.queuedMessages, { kind: "followUp", index: followUpCount, text, ...(imageCount > 0 ? { imageCount } : {}) }] });
           break;
         }
         case "session.queue.sendNow": {

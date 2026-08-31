@@ -935,12 +935,16 @@ export interface DelegationSummary {
  * AI 回复期间排队的待发送消息（Pi 会话 steering/followUp 队列的快照投影，
  * 只含当前激活会话）。followUp 是默认形态：本轮回复结束后作为下一轮 user
  * 消息注入；steering 由“立即发送”升级而来：当前回合下一次模型调用前插入。
+ * 消息带图片时主进程在队列镜像里保存完整图片数据，快照只投影数量——
+ * 高频快照不携带大 base64，编辑/删除/立即发送仍按既有 kind+index+text 寻址。
  */
 export interface QueuedMessage {
   kind: "steering" | "followUp";
   /** 在同类队列中的下标；命令以 kind+index+text 寻址，列表变动后校验失败即拒绝。 */
   index: number;
   text: string;
+  /** 该排队消息附带图片数（缺省/0 = 无图）；图片数据不进快照。 */
+  imageCount?: number;
 }
 
 export interface RuntimeSnapshot {
