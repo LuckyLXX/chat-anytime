@@ -34,6 +34,15 @@ export interface ReadCallPreview {
   path?: string;
 }
 
+export interface DelegateCallPreview {
+  /** goal 首行（≤80 字符，用于节点 summary 与调用指令区）。 */
+  goal: string;
+  role: string;
+  /** 命中的自定义子智能体（id 或名称）；提供时优先于 role 渲染。 */
+  subagent?: string;
+  modelId?: string;
+}
+
 /** 文件扩展名 → highlight.js 语言 id（未登记的扩展名由 CodeBlock 自动识别兜底）。 */
 const EXTENSION_LANGUAGES: Record<string, string> = {
   ts: "typescript", tsx: "typescript", mts: "typescript", cts: "typescript",
@@ -233,5 +242,28 @@ export function writeArgsSummary(preview: WriteCallPreview): string {
   const lines: string[] = [];
   if (preview.path) lines.push(`path: ${preview.path}`);
   lines.push(`content: ${preview.content.length} 字符`);
+  return lines.join("\n");
+}
+
+/** 解析 `delegate_agent` 工具参数：goal 首行 ≤80 字符 + role/subagent/modelId，替代表原始 JSON。 */
+export function parseDelegateCallArgs(args: unknown): DelegateCallPreview | undefined {
+  if (!args || typeof args !== "object") return undefined;
+  const record = args as Record<string, unknown>;
+  const goal = typeof record.goal === "string" ? record.goal.trim().split(/\r?\n/u)[0] ?? "" : "";
+  if (!goal) return undefined;
+  return {
+    goal: goal.length > 80 ? `${goal.slice(0, 79)}…` : goal,
+    role: typeof record.role === "string" && record.role ? record.role : "custom",
+    ...(typeof record.subagent === "string" && record.subagent ? { subagent: record.subagent } : {}),
+    ...(typeof record.modelId === "string" && record.modelId ? { modelId: record.modelId } : {})
+  };
+}
+
+/** `delegate_agent` 调用指令的紧凑摘要（取代原始 JSON）。 */
+export function delegateArgsSummary(preview: DelegateCallPreview): string {
+  const lines = [`goal: ${preview.goal}`];
+  lines.push(`role: ${preview.role}`);
+  if (preview.subagent) lines.push(`subagent: ${preview.subagent}`);
+  if (preview.modelId) lines.push(`modelId: ${preview.modelId}`);
   return lines.join("\n");
 }

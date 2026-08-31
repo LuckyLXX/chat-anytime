@@ -31,12 +31,15 @@ import {
   X,
   Zap,
   ClipboardList,
-  History
+  History,
+  ScrollText
 } from "lucide-react";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import type {
   AccessMode,
   ChatMessage,
+  DelegationProgress,
+  DelegationStep,
   PromptAttachment,
   QueuedMessage,
   RuntimeCommand,
@@ -48,7 +51,7 @@ import type {
   TurnTiming,
   WorkspaceFileSearchEntry
 } from "../../shared/protocol";
-import { sessionRunStatusLabels, thinkingLevelLabels, toolLabel } from "../../shared/locale";
+import { delegationRoleLabels, sessionRunStatusLabels, thinkingLevelLabels, toolLabel } from "../../shared/locale";
 import { CodeBlock, RichContent } from "./components/RichContent";
 import { QuestionPanel } from "./components/QuestionPanel";
 import { compactPath, extractMentionTokens, formatDuration, type Artifact } from "./lib/content";
@@ -57,7 +60,7 @@ import { actionTimelineSegments, actionTimelineStats, formatProcessDuration, typ
 import { changedFilesForMessage, type ReplyChangedFile } from "./lib/changed-files";
 import { groupAssistantMessages } from "./lib/chat-layout";
 import { buildTurnSummaries } from "./lib/turn-summary";
-import { buildEditDiffs, editArgsSummary, languageFromPath, parseEditCallArgs, parseReadCallArgs, parseWriteCallArgs, writeArgsSummary, type EditCallPreview, type EditDiffBlock, type WriteCallPreview } from "./lib/tool-call-preview";
+import { buildEditDiffs, delegateArgsSummary, editArgsSummary, languageFromPath, parseDelegateCallArgs, parseEditCallArgs, parseReadCallArgs, parseWriteCallArgs, writeArgsSummary, type DelegateCallPreview, type EditCallPreview, type EditDiffBlock, type WriteCallPreview } from "./lib/tool-call-preview";
 import { DiffView } from "./components/DiffView";
 import { TurnMinimap } from "./components/TurnMinimap";
 import { shareElementAsImage } from "./lib/share-image";
@@ -258,8 +261,40 @@ function actionTimelineNodeState(segment: ActionTimelineSegment, execution: Tool
   return execution?.status ?? (streaming ? "running" : "completed");
 }
 
+/** 委派节点：subagent 徽标（带 color 圆点）或 role 标签 + goal 首行。 */
+function DelegationSummaryBadge({ delegation, preview }: { delegation: DelegationProgress; preview: DelegateCallPreview | undefined }): ReactNode {
+  return (
+    <span className="action-timeline-call-delegation-title">
+      <strong>{toolLabel("delegate_agent")}</strong>
+      {delegation.subagentName
+        ? <span className="delegation-badge" data-color={delegation.subagentColor} title={`自定义子智能体：${delegation.subagentName}`}><span className="delegation-dot" /><em>{delegation.subagentName}</em></span>
+        : <span className="delegation-role">{delegationRoleLabels[delegation.role] ?? delegation.role}</span>}
+      {preview && <span className="delegation-goal" title={preview.goal}>{preview.goal}</span>}
+    </span>
+  );
+}
+
+/** 委派执行步骤段：running=转圈、completed=✓、error=✗，行尾时长。 */
+function DelegationStepsSection({ steps }: { steps: DelegationStep[] }): ReactNode {
+  if (steps.length === 0) return null;
+  return (
+    <div className="action-timeline-call-section">
+      <span className="action-timeline-call-section-title">执行步骤</span>
+      <ol className="delegation-steps">
+        {steps.map((step) => (
+          <li key={step.toolCallId} className={`delegation-step ${step.status}`}>
+            <span className="delegation-step-icon">{step.status === "running" ? <LoaderCircle size={12} className="spinning" /> : step.status === "error" ? <AlertCircle size={12} /> : <Check size={12} />}</span>
+            <span className="delegation-step-label" title={step.label}>{step.label}</span>
+            {step.completedAt !== undefined && <span className="delegation-step-duration">{formatDuration(step.startedAt, step.completedAt)}</span>}
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
 /** Expandable tool-call node: shows the call arguments and the tool output. */
-function ToolCallDetails({ call, execution, streaming }: { call: Extract<import("../../shared/protocol").MessageBlock, { type: "tool-call" }>; execution: ToolExecution | undefined; streaming: boolean }): ReactNode {
+function ToolCallDetails({ call, execution, streaming, onOpenTranscript }: { call: Extract<import("../../shared/protocol").MessageBlock, { type: "tool-call" }>; execution: ToolExecution | undefined; streaming: boolean; onOpenTranscript?(delegation: DelegationProgress): void }): ReactNode {
   const running = execution?.status === "running" || (!execution && streaming);
   // 默认全部折叠：工具调用气泡初始收拢，程序不干预开合——运行中 / 已结束都不自动展开，
   // 长会话不会被一排展开的工具调用节点淹没；运行状态由 summary 的「运行中 · 转圈」提示承载。
@@ -269,14 +304,18 @@ function ToolCallDetails({ call, execution, streaming }: { call: Extract<import(
   const editPreview = useMemo(() => (call.name === "edit" ? parseEditCallArgs(args) : undefined), [call.name, args]);
   const writePreview = useMemo(() => (call.name === "write" ? parseWriteCallArgs(args) : undefined), [call.name, args]);
   const readPreview = useMemo(() => (call.name === "read" ? parseReadCallArgs(args) : undefined), [call.name, args]);
+  const delegatePreview = useMemo(() => (call.name === "delegate_agent" ? parseDelegateCallArgs(args) : undefined), [call.name, args]);
   const editDiffs = useMemo(() => (editPreview ? buildEditDiffs(editPreview.edits) : undefined), [editPreview]);
   const patch = execution?.status === "completed" ? execution.patch : undefined;
   const writeContent = writePreview && writePreview.content.length <= MAX_TOOL_PREVIEW_CHARS ? writePreview.content : undefined;
   const readContent = execution && execution.status === "completed" && readPreview && execution.output && execution.output.length <= MAX_TOOL_PREVIEW_CHARS ? execution.output : undefined;
+  const delegation = execution?.delegation;
   return (
     <details className="action-timeline-call" open={open} onToggle={(event) => setOpen((event.currentTarget as HTMLDetailsElement).open)}>
       <summary className="action-timeline-call-summary">
-        <strong>{toolLabel(call.name)}</strong>
+        {delegation
+          ? <DelegationSummaryBadge delegation={delegation} preview={delegatePreview} />
+          : <strong>{toolLabel(call.name)}</strong>}
         <span>{toolCallStatusLabel(execution, streaming)}{execution?.completedAt ? ` · ${formatDuration(execution.startedAt, execution.completedAt)}` : ""}</span>
         <ChevronDown size={12} className="action-timeline-call-chevron" />
       </summary>
@@ -292,14 +331,20 @@ function ToolCallDetails({ call, execution, streaming }: { call: Extract<import(
             {writeContent ? <CodeBlock language={languageFromPath(writePreview.path) ?? ""} code={writeContent} /> : <pre className="action-timeline-call-code">{writePreview.content.length > MAX_TOOL_OUTPUT_CHARS ? `${writePreview.content.slice(0, MAX_TOOL_OUTPUT_CHARS)}\n…（内容过长，已截断显示）` : writePreview.content}</pre>}
           </div>
         )}
+        {delegation && <DelegationStepsSection steps={delegation.steps} />}
         <div className="action-timeline-call-section">
           <span className="action-timeline-call-section-title">调用指令</span>
-          <pre className="action-timeline-call-code">{editPreview ? editArgsSummary(editPreview) : writePreview ? writeArgsSummary(writePreview) : formatToolArgs(args)}</pre>
+          <pre className="action-timeline-call-code">{editPreview ? editArgsSummary(editPreview) : writePreview ? writeArgsSummary(writePreview) : delegatePreview ? delegateArgsSummary(delegatePreview) : formatToolArgs(args)}</pre>
         </div>
         <div className="action-timeline-call-section">
           <span className="action-timeline-call-section-title">输出</span>
           {execution?.output ? (readContent ? <CodeBlock language={languageFromPath(readPreview?.path) ?? ""} code={readContent} /> : <pre className="action-timeline-call-code">{truncateToolOutput(execution.output)}</pre>) : <span className="action-timeline-call-empty">{running ? "运行中…" : "（无输出）"}</span>}
         </div>
+        {delegation && (
+          <div className="action-timeline-call-section delegation-outro">
+            <button className="delegation-transcript-button" type="button" title="查看子代理完整记录（只读）" aria-label="查看子代理完整记录" onClick={() => onOpenTranscript?.(delegation)}><ScrollText size={13} />查看完整记录</button>
+          </div>
+        )}
       </div>
     </details>
   );
@@ -366,11 +411,12 @@ interface ActionTimelineProps {
   thinkingLabel?: string;
   onOpenArtifact(artifact: Artifact): void;
   onHtmlAction(text: string): void;
+  onOpenTranscript?(delegation: DelegationProgress): void;
   timing?: TurnTiming;
   now: number;
 }
 
-function ActionTimeline({ message, executions, turnActive, showThinking, thinkingLabel, onOpenArtifact, onHtmlAction, timing, now }: ActionTimelineProps): ReactNode {
+function ActionTimeline({ message, executions, turnActive, showThinking, thinkingLabel, onOpenArtifact, onHtmlAction, timing, now, onOpenTranscript }: ActionTimelineProps): ReactNode {
   const segments = actionTimelineSegments(message, showThinking);
   const lastActionIndex = segments.reduce((index, segment, currentIndex) => segment.type === "thinking" || segment.type === "tool-call" ? currentIndex : index, -1);
   if (lastActionIndex < 0) return segments[0]?.type === "text" ? <RichContent streaming={message.streaming} artifactPrefix={message.id} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction}>{segments[0].text}</RichContent> : null;
@@ -400,7 +446,7 @@ function ActionTimeline({ message, executions, turnActive, showThinking, thinkin
               <div className={`action-timeline-node ${segment.type} ${stateClass}`} data-node-kind={segment.type} data-node-state={stateClass || undefined} key={segment.type === "tool-call" ? segment.call.id : `${segment.type}-${index}`}>
                 <span className="action-timeline-node-icon">{actionTimelineIcon(segment, execution, processActive)}</span>
                 <div className="action-timeline-node-content">
-                  {segment.type === "thinking" ? <ThinkingBlock text={segment.text} label={thinkingLabel || "思考过程"} /> : segment.type === "tool-call" ? <ToolCallDetails call={segment.call} execution={execution} streaming={Boolean(message.streaming)} /> : <RichContent streaming={false} artifactPrefix={`${message.id}-process-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction}>{segment.text}</RichContent>}
+                  {segment.type === "thinking" ? <ThinkingBlock text={segment.text} label={thinkingLabel || "思考过程"} /> : segment.type === "tool-call" ? <ToolCallDetails call={segment.call} execution={execution} streaming={Boolean(message.streaming)} onOpenTranscript={onOpenTranscript} /> : <RichContent streaming={false} artifactPrefix={`${message.id}-process-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction}>{segment.text}</RichContent>}
                 </div>
               </div>
             );
@@ -474,7 +520,7 @@ function ChangedFilesPanel({ files, onOpenFile, onOpenDiff, onRollback, rollback
 // Memoized so an unchanged message bubble (stable ChatMessage reference from
 // the store's uuid-based reuse) is skipped during high-frequency streaming
 // updates that only mutate other bubbles.
-const MessageView = memo(function MessageView({ message, executions, onOpenArtifact, onOpenFile, onOpenDiff, onHtmlAction, onCopy, onEdit, onRegenerate, onShare, onRollback, rollbackStates, showThinking = true, hiddenThinkingLabel, busy = false, turnActive = false, timing, now = Date.now(), turnKey }: { message: ChatMessage; executions: ToolExecution[]; onOpenArtifact(artifact: Artifact): void; onOpenFile(relativePath: string): void; onOpenDiff(execution: ToolExecution): void; onHtmlAction(text: string): void; onCopy(message: ChatMessage): void; onEdit(message: ChatMessage): void; onRegenerate(message: ChatMessage): void; onShare(message: ChatMessage, target: HTMLElement): Promise<void>; onRollback?(file: ReplyChangedFile): void; rollbackStates?: ReadonlyMap<string, "restored" | "deleted">; showThinking?: boolean; hiddenThinkingLabel?: string; busy?: boolean; turnActive?: boolean; timing?: TurnTiming; now?: number; turnKey?: string }): ReactNode {
+const MessageView = memo(function MessageView({ message, executions, onOpenArtifact, onOpenFile, onOpenDiff, onHtmlAction, onCopy, onEdit, onRegenerate, onShare, onRollback, rollbackStates, showThinking = true, hiddenThinkingLabel, busy = false, turnActive = false, timing, now = Date.now(), turnKey, onOpenTranscript }: { message: ChatMessage; executions: ToolExecution[]; onOpenArtifact(artifact: Artifact): void; onOpenFile(relativePath: string): void; onOpenDiff(execution: ToolExecution): void; onHtmlAction(text: string): void; onCopy(message: ChatMessage): void; onEdit(message: ChatMessage): void; onRegenerate(message: ChatMessage): void; onShare(message: ChatMessage, target: HTMLElement): Promise<void>; onRollback?(file: ReplyChangedFile): void; rollbackStates?: ReadonlyMap<string, "restored" | "deleted">; showThinking?: boolean; hiddenThinkingLabel?: string; busy?: boolean; turnActive?: boolean; timing?: TurnTiming; now?: number; turnKey?: string; onOpenTranscript?(delegation: DelegationProgress): void }): ReactNode {
   const text = messageText(message);
   const shareTargetRef = useRef<HTMLDivElement | null>(null);
   const [sharing, setSharing] = useState(false);
@@ -529,7 +575,7 @@ const MessageView = memo(function MessageView({ message, executions, onOpenArtif
       <div className="message-avatar pi-avatar"><Bot size={17} /></div>
       <div className="message-body message-bubble">
         <div className="assistant-share-content" ref={shareTargetRef}>
-          <ActionTimeline message={message} executions={executions} turnActive={turnActive} showThinking={showThinking} thinkingLabel={hiddenThinkingLabel} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} timing={timing} now={now} />
+          <ActionTimeline message={message} executions={executions} turnActive={turnActive} showThinking={showThinking} thinkingLabel={hiddenThinkingLabel} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} timing={timing} now={now} onOpenTranscript={onOpenTranscript} />
           {message.error && <p className="inline-error"><AlertCircle size={15} />{message.error}</p>}
         </div>
         {changedFiles.length > 0 && <ChangedFilesPanel files={changedFiles} onOpenFile={onOpenFile} onOpenDiff={onOpenDiff} onRollback={onRollback} rollbackStates={rollbackStates} rollbackDisabled={busy} />}
@@ -566,6 +612,8 @@ export interface ConversationPaneProps {
   onOpenFile(relativePath: string, workspace?: string): void;
   onOpenDiff(execution: ToolExecution): void;
   onOpenPlanDetail(detail: string): void;
+  /** 查看委派子代理的完整记录（App 层弹只读弹窗）。 */
+  onOpenTranscript?(delegation: DelegationProgress): void;
   /** 会话操作失败提示（App 层 toast）。传 undefined 清除。 */
   onActionError(message?: string): void;
   /** 回滚该回复内单个文件的改动（App 层弹确认对话框后发命令）。缺省不显示回滚按钮。 */
@@ -600,6 +648,7 @@ export const ConversationPane = memo(function ConversationPane({
   onOpenFile,
   onOpenDiff,
   onOpenPlanDetail,
+  onOpenTranscript,
   onActionError,
   onRollback
 }: ConversationPaneProps): ReactNode {
@@ -1474,7 +1523,7 @@ export const ConversationPane = memo(function ConversationPane({
             const timing = showTurnTimingOnLatest && index === latestAssistantMessageIndex && message.role === "assistant" ? data.turnTiming : undefined;
             const turnActive = data.busy && index === latestAssistantMessageIndex && message.role === "assistant";
             const turnKey = turnStartKeys.has(message.uuid ?? message.id) ? (message.uuid ?? message.id) : undefined;
-            return <MessageView key={message.uuid ?? message.id} message={message} executions={data.executions} onOpenArtifact={onOpenArtifact} onOpenFile={onOpenFile} onOpenDiff={onOpenDiff} onHtmlAction={handleHtmlAction} onCopy={copyMessage} onEdit={editMessage} onRegenerate={regenerateMessage} onShare={shareMessage} onRollback={onRollback} rollbackStates={rollbackStates} showThinking={showThinking} busy={data.busy} turnActive={turnActive} timing={timing} now={timing ? now : undefined} turnKey={turnKey} />;
+            return <MessageView key={message.uuid ?? message.id} message={message} executions={data.executions} onOpenArtifact={onOpenArtifact} onOpenFile={onOpenFile} onOpenDiff={onOpenDiff} onHtmlAction={handleHtmlAction} onCopy={copyMessage} onEdit={editMessage} onRegenerate={regenerateMessage} onShare={shareMessage} onRollback={onRollback} rollbackStates={rollbackStates} showThinking={showThinking} busy={data.busy} turnActive={turnActive} timing={timing} now={timing ? now : undefined} turnKey={turnKey} onOpenTranscript={onOpenTranscript} />;
           })}
           {isGenerating && (assistantBubbleVisible ? <div className="response-progress response-progress-inline"><LoaderCircle size={14} className="spinning" /><span>{workingLabel}</span>{activeTurnTiming && <TimingMeta timing={activeTurnTiming} now={now} />}</div> : <PendingResponse label={workingLabel} timing={activeTurnTiming} now={now} />)}
         </>}

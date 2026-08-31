@@ -393,6 +393,46 @@ export interface ToolExecution {
    * 渲染端优先读取本数组。
    */
   changedFiles?: { relativePath: string }[];
+  /** delegate_agent 的实时/最终委派进度（见 DelegationProgress）；其余工具缺省。 */
+  delegation?: DelegationProgress;
+}
+
+/** 子代理执行中的一步（对应子会话的一次工具调用）。 */
+export interface DelegationStep {
+  /** 子会话内的 toolCallId，用于完整记录查看时对齐。 */
+  toolCallId: string;
+  tool: string;
+  /** 人类可读摘要（summarizeArgs 生成，如命令行、文件路径），≤120 字符。 */
+  label: string;
+  status: "running" | "completed" | "error";
+  startedAt: number;
+  completedAt?: number;
+}
+
+/** delegate_agent 工具执行的实时/最终进度，挂 ToolExecution.delegation。 */
+export interface DelegationProgress {
+  childSessionId: string;
+  /** 子会话 JSONL 绝对路径（完整记录查看的入口凭据）。 */
+  childSessionFile: string;
+  /** 命中的自定义子智能体名（未命中时无此字段，走 role 渲染）。 */
+  subagentName?: string;
+  subagentColor?: string;
+  role: DelegationRole;
+  model: { provider: string; id: string };
+  steps: DelegationStep[];
+}
+
+/**
+ * DelegationProgress 形状校验（details 会经 JSONL 持久化/恢复，需防御脏数据；
+ * 渲染端与 session-history 恢复共用）。
+ */
+export function isDelegationProgress(value: unknown): value is DelegationProgress {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Partial<DelegationProgress>;
+  return typeof record.childSessionId === "string"
+    && typeof record.childSessionFile === "string"
+    && typeof record.role === "string"
+    && Array.isArray(record.steps);
 }
 
 export type WorkspaceFilePreviewKind = "markdown" | "code" | "html" | "svg" | "image" | "text" | "binary" | "pdf";
@@ -991,6 +1031,8 @@ export type RuntimeCommand =
   | { type: "memory.delete"; topic: string }
   | { type: "subagent.save"; subagent: SubagentDefinition }
   | { type: "subagent.delete"; id: string; scope: SubagentScope }
+  /** 读取子代理完整记录（JSONL 转 ChatMessage[]，结果经 subagent.transcript-result 推送）。 */
+  | { type: "subagent.transcript"; childSessionId: string; path: string }
   | { type: "appearance.save"; appearance: AppearanceSettings }
   | { type: "mcp.server.save"; server: McpServerConfigDraft }
   | { type: "mcp.server.toggle"; name: string; enabled: boolean }
@@ -1044,6 +1086,10 @@ export type RuntimeMessage =
   /** utility 进程发起的浏览器自动化操作；main 完成后以 browser-automation.result 命令回传。 */
   | { type: "browser-automation.request"; requestId: string; sessionKey: string; request: BrowserAutomationRequest }
   | { type: "error"; message: string }
+  /** 子代理完整记录（响应 subagent.transcript）；childSessionId 用于对齐请求。 */
+  | { type: "subagent.transcript-result"; childSessionId: string; messages: ChatMessage[] }
+  /** 子代理完整记录读取失败（文件不存在等）；弹窗内展示，不走全局 toast。 */
+  | { type: "subagent.transcript-error"; childSessionId: string; message: string }
   | { type: "log"; level: "info" | "warn"; message: string };
 
 export interface DesktopBootstrap {

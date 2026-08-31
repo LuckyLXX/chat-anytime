@@ -1,6 +1,6 @@
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
-import { PI_DESKTOP_CONTROL_ENTRY_TYPE, restoreControlMessages, restoreToolExecutions, type PersistedSessionMessage } from "./session-history.js";
+import { PI_DESKTOP_CONTROL_ENTRY_TYPE, restoreControlMessages, restoreToolExecutions, transcriptMessagesFromEntries, type PersistedSessionMessage } from "./session-history.js";
 
 describe("persisted activity history", () => {
   it("restores completed tool calls with their output and patch", () => {
@@ -34,6 +34,57 @@ describe("persisted activity history", () => {
     ];
 
     expect(restoreToolExecutions(messages, "C:/work/demo")[0]?.changedFile).toEqual({ relativePath: "src/new.ts" });
+  });
+
+  it("restores delegation progress from toolResult details (flattened DelegationProgress shape)", () => {
+    const delegation = {
+      goal: "审查本次改动",
+      childSessionId: "child-1",
+      childSessionFile: "C:/agent/chatanytime-sessions/default/delegations/child-1.jsonl",
+      subagentName: "Code Reviewer",
+      subagentColor: "amber",
+      role: "review",
+      model: { provider: "p", id: "m" },
+      steps: [
+        { toolCallId: "t1", tool: "read", label: "读取文件：src/a.ts", status: "completed", startedAt: 100, completedAt: 120 },
+        { toolCallId: "t2", tool: "bash", label: "执行命令 npm test", status: "running", startedAt: 130 }
+      ]
+    };
+    const messages: PersistedSessionMessage[] = [
+      { role: "assistant", timestamp: 100, content: [{ type: "toolCall", id: "call-1", name: "delegate_agent", arguments: { goal: "审查本次改动" } }] },
+      { role: "toolResult", timestamp: 200, toolCallId: "call-1", toolName: "delegate_agent", content: [{ type: "text", text: "审查完成" }], details: delegation, isError: false }
+    ];
+
+    expect(restoreToolExecutions(messages)).toMatchObject([{
+      id: "call-1",
+      name: "delegate_agent",
+      delegation: expect.objectContaining({ childSessionId: "child-1", subagentName: "Code Reviewer", steps: delegation.steps })
+    }]);
+  });
+
+  it("falls back to the generic view when a persisted result carries no delegation details", () => {
+    const messages: PersistedSessionMessage[] = [
+      { role: "assistant", timestamp: 100, content: [{ type: "toolCall", id: "call-1", name: "delegate_agent", arguments: { goal: "x" } }] },
+      { role: "toolResult", timestamp: 200, toolCallId: "call-1", toolName: "delegate_agent", content: [{ type: "text", text: "ok" }], details: { goal: "x" }, isError: false }
+    ];
+
+    expect(restoreToolExecutions(messages)[0]).not.toHaveProperty("delegation");
+  });
+
+  it("parses delegation transcripts into normalized chat messages", () => {
+    const messages = transcriptMessagesFromEntries([
+      { id: "e1", type: "message", message: { role: "user", timestamp: 100, content: "审阅 src/a.ts" } },
+      { id: "e2", type: "message", message: { role: "assistant", timestamp: 200, content: [{ type: "toolCall", id: "t1", name: "read", arguments: { path: "src/a.ts" } }] } },
+      { id: "e3", type: "message", message: { role: "toolResult", timestamp: 250, toolCallId: "t1", toolName: "read", content: [{ type: "text", text: "content" }], isError: false } },
+      { id: "e4", type: "message", message: { role: "assistant", timestamp: 300, content: [{ type: "text", text: "结论" }] } },
+      { id: "e5", type: "message", message: { role: "custom", customType: "other", content: "x", display: false } },
+      { id: "garbage", type: "message" }
+    ]);
+
+    expect(messages.map((message) => message.role)).toEqual(["user", "assistant", "assistant"]);
+    expect(messages[0]?.blocks).toEqual([{ type: "text", text: "审阅 src/a.ts" }]);
+    expect(messages[1]?.blocks).toEqual([{ type: "tool-call", id: "t1", name: "read", arguments: { path: "src/a.ts" } }]);
+    expect(messages[2]?.blocks).toEqual([{ type: "text", text: "结论" }]);
   });
 });
 

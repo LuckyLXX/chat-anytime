@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type {
+  ChatMessage,
   CheckpointRollbackResult,
   CustomProviderModel,
   DesktopSettings,
@@ -14,6 +15,7 @@ import type {
   RuntimeSnapshot,
   SessionPaneSnapshot,
   Todo,
+  ToolExecution,
   UsageStats
 } from "../../shared/protocol";
 
@@ -44,6 +46,17 @@ function queuedMessagesEqual(left: RuntimeSnapshot["queuedMessages"], right: Run
 }
 
 /**
+ * delegation 进度的轻量指纹：步骤变化（长度/末步状态/label）都会改变签名。
+ * 当前 delegation 与 output（tracker.logText）同源，output 已驱动数组替换；
+ * 这里做防御性比较，防止未来 output 与进度解耦后委托步骤视图陈旧。
+ */
+function delegationSignature(delegation: ToolExecution["delegation"] | undefined): string {
+  if (!delegation) return "";
+  const last = delegation.steps.at(-1);
+  return `${delegation.childSessionId}:${delegation.steps.length}:${last?.status ?? ""}:${last?.label ?? ""}`;
+}
+
+/**
  * 快照合并的 executions 身份保留：主进程每帧都 spread 出新数组，若直接透传，
  * memo 化的消息气泡（executions 是其 props）在流式期间会每帧全量重渲染。
  * 内容未变时复用旧数组引用。args 在 tool_execution_start 后内容恒定，不参与
@@ -59,6 +72,7 @@ function mergeExecutionsPreservingIdentity(previous: RuntimeSnapshot["executions
       || item.startedAt !== other.startedAt || item.completedAt !== other.completedAt
       || item.output !== other.output || item.patch !== other.patch
       || item.changedFile?.relativePath !== other.changedFile?.relativePath) return false;
+    if (item.delegation !== other.delegation && delegationSignature(item.delegation) !== delegationSignature(other.delegation)) return false;
     const leftFiles = item.changedFiles ?? [];
     const rightFiles = other.changedFiles ?? [];
     return leftFiles.length === rightFiles.length && leftFiles.every((file, fileIndex) => file.relativePath === rightFiles[fileIndex]?.relativePath);
@@ -152,6 +166,10 @@ interface DesktopState {
    * 内存态：应用重启后消失，重复回滚无害（幂等恢复同一内容）。
    */
   rollbacks: Record<string, "restored" | "deleted">;
+  /** 子代理完整记录缓存：childSessionId → ChatMessage[]（响应 subagent.transcript）。 */
+  transcripts: Record<string, ChatMessage[]>;
+  /** 子代理完整记录读取失败：childSessionId → 错误文案。 */
+  transcriptErrors: Record<string, string>;
   error?: string;
   initialize(): Promise<() => void>;
   handleRuntimeMessage(message: RuntimeMessage): void;
@@ -247,6 +265,8 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   permissions: [],
   questions: [],
   rollbacks: {},
+  transcripts: {},
+  transcriptErrors: {},
   usageStatsLoading: false,
   settings: emptySettings,
   customProviderKeyConfigured: false,
@@ -402,6 +422,12 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
             checkpointResult: { sessionId: message.sessionId, results: message.results, message: message.message, at: Date.now() }
           };
         });
+        break;
+      case "subagent.transcript-result":
+        set((state) => ({ transcripts: { ...state.transcripts, [message.childSessionId]: message.messages } }));
+        break;
+      case "subagent.transcript-error":
+        set((state) => ({ transcriptErrors: { ...state.transcriptErrors, [message.childSessionId]: message.message } }));
         break;
       case "usage-stats-result":
         set({ usageStats: message.stats, usageStatsLoading: false });

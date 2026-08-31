@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assistantText, buildSubagentPromptBlock, createSubagentTools, delegationModelEnabled, parseModelId, resolveDelegationModelTarget, resolveSubagentDefinition, type SubagentContext } from "./subagent.js";
+import { assistantText, buildSubagentPromptBlock, createSubagentTools, DelegationTracker, delegationModelEnabled, parseModelId, resolveDelegationModelTarget, resolveSubagentDefinition, type SubagentContext } from "./subagent.js";
 import type { SubagentDefinition } from "../shared/protocol.js";
 
 function makeCtx(overrides: Partial<SubagentContext> = {}): SubagentContext {
@@ -72,5 +72,78 @@ describe("subagent tools", () => {
     expect(block).toContain("Code Reviewer");
     expect(buildSubagentPromptBlock([])).toBeUndefined();
     expect(buildSubagentPromptBlock(undefined)).toBeUndefined();
+  });
+});
+
+describe("DelegationTracker", () => {
+  const base = {
+    childSessionId: "child-1",
+    childSessionFile: "/agent/sessions/default/delegations/child-1.jsonl",
+    subagentName: "Explorer",
+    subagentColor: "amber",
+    role: "explore" as const,
+    model: { provider: "p", id: "m" }
+  };
+
+  it("accumulates steps with running/completed transitions and logs", () => {
+    const tracker = new DelegationTracker(base);
+    tracker.onToolStart("t1", "read", "读取文件：src/a.ts", 100);
+    expect(tracker.logText()).toBe("● 读取文件：src/a.ts");
+    tracker.onToolEnd("t1", false);
+    expect(tracker.snapshot().steps[0]).toMatchObject({ toolCallId: "t1", status: "completed" });
+    expect(tracker.snapshot().steps[0]?.completedAt).toBeGreaterThanOrEqual(100);
+    expect(tracker.logText()).toMatch(/^✓ 读取文件：src\/a\.ts · /u);
+    expect(tracker.snapshot()).toMatchObject({ childSessionId: "child-1", subagentName: "Explorer", role: "explore" });
+  });
+
+  it("marks errors and seals still-running steps on settle", () => {
+    const tracker = new DelegationTracker(base);
+    tracker.onToolStart("t1", "bash", "执行命令 npm test", 100);
+    tracker.onToolStart("t2", "edit", "编辑文件：src/b.ts", 120);
+    tracker.onToolEnd("t1", true);
+    expect(tracker.snapshot().steps.find((step) => step.toolCallId === "t1")?.status).toBe("error");
+    tracker.seal();
+    const steps = tracker.snapshot().steps;
+    expect(steps.find((step) => step.toolCallId === "t2")?.status).toBe("error");
+    expect(steps.find((step) => step.toolCallId === "t2")?.completedAt).toBeDefined();
+  });
+
+  it("caps steps at 200 (placeholder included) and drops the oldest with a header", () => {
+    const tracker = new DelegationTracker(base);
+    for (let i = 0; i < 205; i++) tracker.onToolStart(`t${i}`, "read", `步骤 ${i}`, 1000 + i);
+    const steps = tracker.snapshot().steps;
+    expect(steps).toHaveLength(200);
+    expect(steps[0]?.toolCallId).toBe("__dropped__");
+    expect(steps[0]?.label).toContain("已省略 6 个早期步骤");
+    expect(steps[1]?.toolCallId).toBe("t6");
+  });
+
+  it("keeps the placeholder label in sync as more steps are dropped", () => {
+    const tracker = new DelegationTracker(base);
+    for (let i = 0; i < 210; i++) tracker.onToolStart(`t${i}`, "read", `步骤 ${i}`, 1000 + i);
+    const steps = tracker.snapshot().steps;
+    expect(steps).toHaveLength(200);
+    expect(steps[0]?.label).toContain("已省略 11 个早期步骤");
+    expect(steps[1]?.toolCallId).toBe("t11");
+  });
+
+  it("truncates long labels to 120 characters", () => {
+    const tracker = new DelegationTracker(base);
+    tracker.onToolStart("t1", "bash", "x".repeat(300), 0);
+    expect(tracker.snapshot().steps[0]?.label.length).toBeLessThanOrEqual(120);
+    expect(tracker.snapshot().steps[0]?.label.endsWith("…")).toBe(true);
+  });
+
+  it("returns an empty log placeholder before any step", () => {
+    const tracker = new DelegationTracker(base);
+    expect(tracker.logText()).toBe("● 子代理正在启动…");
+    expect(tracker.snapshot().steps).toEqual([]);
+  });
+
+  it("ignores end events for steps dropped by the cap", () => {
+    const tracker = new DelegationTracker(base);
+    for (let i = 0; i < 205; i++) tracker.onToolStart(`t${i}`, "read", `步骤 ${i}`, 1000 + i);
+    tracker.onToolEnd("t0", false); // 已被截断丢弃，不抛错也不改动
+    expect(tracker.snapshot().steps).toHaveLength(200);
   });
 });

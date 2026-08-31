@@ -1,4 +1,12 @@
-import type { SessionRunStatus, ThinkingLevel } from "./protocol.js";
+import type { DelegationRole, SessionRunStatus, ThinkingLevel } from "./protocol.js";
+
+export const delegationRoleLabels: Record<DelegationRole, string> = {
+  explore: "探索",
+  research: "研究",
+  implement: "实施",
+  review: "审查",
+  custom: "自定义"
+};
 
 export const thinkingLevelLabels: Record<ThinkingLevel, string> = {
   off: "关闭",
@@ -26,6 +34,7 @@ const toolLabels: Record<string, string> = {
   find: "查找文件",
   ls: "列出目录",
   ask_question: "向用户提问",
+  delegate_agent: "委派子代理",
   todo_write: "更新任务清单",
   memory_write: "写入长期记忆",
   memory_read: "读取长期记忆",

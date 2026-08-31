@@ -50,6 +50,7 @@ import type {
   CustomThemeDefinition,
   DivBubbleMode,
   ThinkingLevel,
+  DelegationProgress,
   ThemeAssetMap,
   ThemeMode,
   ThemePresetId,
@@ -70,6 +71,7 @@ import { WorkspaceTree } from "./components/WorkspaceTree";
 import { ContextMenu, type ContextMenuItem } from "./components/ContextMenu";
 import { RichContent } from "./components/RichContent";
 import { PermissionDialog } from "./components/RuntimeDialogs";
+import { DelegationTranscript } from "./components/DelegationTranscript";
 import { detailTitle } from "./components/QuestionPanel";
 import { compactPath, type Artifact } from "./lib/content";
 import { composePickMessage } from "./lib/browser-pick";
@@ -1128,6 +1130,8 @@ export function App(): ReactNode {
   // —— checkpoint 回滚：单文件确认对话框目标 + 完成后的 toast ——
   const [rollbackTarget, setRollbackTarget] = useState<{ file: ReplyChangedFile; sessionId: string } | null>(null);
   const [checkpointToast, setCheckpointToast] = useState<string>();
+  // —— 子代理完整记录（只读弹窗目标）；App 层开关，DelegationTranscript 挂在这里 ——
+  const [transcriptTarget, setTranscriptTarget] = useState<DelegationProgress>();
   const lastCheckpointAtRef = useRef(0);
   useEffect(() => {
     if (!checkpointResult || checkpointResult.at === lastCheckpointAtRef.current) return;
@@ -1797,6 +1801,7 @@ export function App(): ReactNode {
           onOpenFile={openFilePreview}
           onOpenDiff={openDiffPreview}
           onOpenPlanDetail={openPlanPreview}
+          onOpenTranscript={setTranscriptTarget}
           onActionError={setActionError}
           onRollback={(file) => openRollbackConfirm(file, leafSessionId)}
         />
@@ -2068,6 +2073,7 @@ export function App(): ReactNode {
               onOpenFile={openFilePreview}
               onOpenDiff={openDiffPreview}
               onOpenPlanDetail={openPlanPreview}
+              onOpenTranscript={setTranscriptTarget}
               onActionError={setActionError}
               onRollback={(file) => openRollbackConfirm(file, snapshot.sessionId)}
             />
@@ -2085,6 +2091,7 @@ export function App(): ReactNode {
 
       {settingsOpen && <SettingsDialog settings={settings} models={models} providers={providers} customProvider={customProvider} customProviderKeyConfigured={customProviderKeyConfigured} customModels={customModels} customModelFetchStatus={customModelFetchStatus} customModelFetchError={customModelFetchError} modelRefreshStatus={modelRefreshStatus} modelRefreshError={modelRefreshError} modelRefreshProvider={modelRefreshProvider} resources={resources} workspaceOpen={Boolean(snapshot.workspace)} onClose={() => setSettingsOpen(false)} />}
       {permission && <PermissionDialog request={permission} sessionTitle={snapshot.sessions.find((item) => item.id === permission.principal.sessionId)?.title} />}
+      {transcriptTarget && <DelegationTranscript delegation={transcriptTarget} onClose={() => setTranscriptTarget(undefined)} onOpenArtifact={openArtifactPreview} />}
       {contextMenu && <ContextMenu x={contextMenu.x} y={contextMenu.y} items={contextMenu.items} onClose={() => setContextMenu(null)} />}
       {renameSession && (
         <div className="modal-backdrop permission-backdrop" onClick={() => setRenameSession(null)}>

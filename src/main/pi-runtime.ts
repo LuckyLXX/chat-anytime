@@ -49,6 +49,7 @@ import type {
   ToolExecution,
   TurnTiming
 } from "../shared/protocol.js";
+import { isDelegationProgress } from "../shared/protocol.js";
 import { toolLabel } from "../shared/locale.js";
 import { workspaceRelativeAttachment } from "./attachments.js";
 import { autoCompactionFailureNotice, runManualCompaction } from "./compaction-lifecycle.js";
@@ -61,7 +62,7 @@ import { PermissionBroker } from "./permission-broker.js";
 import { loadRecentWorkspaces, recordRecentWorkspace, removeRecentWorkspace, writeRecentWorkspaces } from "./recent-workspaces.js";
 import { createSubagentTools, buildSubagentPromptBlock, type SubagentContext } from "./subagent.js";
 import { readSubagents, saveSubagent, deleteSubagent } from "./subagents-store.js";
-import type { SubagentDefinition, SubagentScope } from "../shared/protocol.js";
+import type { SubagentDefinition, SubagentScope, DelegationProgress } from "../shared/protocol.js";
 import { buildSkillsSystemPromptBlock, setSkillEnabled, type DiscoveredSkill } from "./skill-catalog.js";
 import * as commandCatalog from "./command-catalog.js";
 import { COMMAND_NAME_PATTERN, type DiscoveredCommand } from "./command-catalog.js";
@@ -76,6 +77,7 @@ import {
   PI_DESKTOP_CONTROL_ENTRY_TYPE,
   restoreControlMessages,
   restoreToolExecutions,
+  transcriptMessagesFromEntries,
   type PersistedSessionEntry,
   type PersistedSessionMessage
 } from "./session-history.js";
@@ -795,7 +797,9 @@ async function sessionDirectories(): Promise<string[]> {
   if (!root) return [];
   try {
     const entries = await readdir(root, { withFileTypes: true });
-    return [root, ...entries.filter((entry) => entry.isDirectory()).map((entry) => join(root, entry.name))];
+    // 排除 delegations 子目录：子会话以 goal 文本为标题混进侧边栏话题列表是噪声
+    // （checkpoints/*.jsonl 已被 buildSessionInfo 的首行校验自然过滤，无需处理）。
+    return [root, ...entries.filter((entry) => entry.isDirectory() && entry.name !== "delegations").map((entry) => join(root, entry.name))];
   } catch {
     return [root];
   }
@@ -1028,6 +1032,21 @@ function patchFromToolResult(result: unknown): string | undefined {
 }
 
 /**
+ * 从工具结果（partial/最终）的 details 提取 delegate_agent 进度快照；形状不符返回
+ * undefined。两种形态都兼容：onUpdate 转发的 partial details 是嵌套的
+ * `{ delegation }`，最终 toolResult 的 details 是顶层扁平展开的 DelegationProgress
+ * （runDelegation 返回值，也是持久化进父会话 JSONL 的形态）。
+ */
+function delegationFromToolResult(result: unknown): DelegationProgress | undefined {
+  if (!result || typeof result !== "object") return undefined;
+  const details = (result as { details?: unknown }).details;
+  if (!details || typeof details !== "object") return undefined;
+  if (isDelegationProgress(details)) return details;
+  const delegation = (details as { delegation?: unknown }).delegation;
+  return isDelegationProgress(delegation) ? delegation : undefined;
+}
+
+/**
  * Resolve the sidebar dot at the end of a run: red when the turn was aborted
  * or ended with an assistant error message, green otherwise. Active sessions
  * get no terminal dot (see setTerminalRunStatus).
@@ -1114,7 +1133,16 @@ function handleSessionEvent(record: SessionRuntimeRecord, event: AgentSessionEve
     case "tool_execution_update": {
       // Partial tool output; high frequency — throttle.
       const current = record.executions.get(event.toolCallId);
-      if (current) current.output = textFromToolResult(event.partialResult);
+      if (current) {
+        current.output = textFromToolResult(event.partialResult);
+        const delegation = delegationFromToolResult(event.partialResult);
+        if (delegation) {
+          current.delegation = delegation;
+          // 状态栏同步最后一步（事件本就经 50ms 节流推送）。
+          const lastStep = delegation.steps.at(-1);
+          record.status = lastStep ? `子代理·${lastStep.label}` : "子代理·正在启动";
+        }
+      }
       immediate = false;
       break;
     }
@@ -1125,6 +1153,7 @@ function handleSessionEvent(record: SessionRuntimeRecord, event: AgentSessionEve
         ?? (current?.changedFile
           ? [current.changedFile]
           : changedWorkspaceFiles(record.workspace, event.toolName, current?.args));
+      const delegation = delegationFromToolResult(event.result) ?? current?.delegation;
       record.executions.set(event.toolCallId, {
         id: event.toolCallId,
         name: event.toolName,
@@ -1135,7 +1164,8 @@ function handleSessionEvent(record: SessionRuntimeRecord, event: AgentSessionEve
         output,
         patch: patchFromToolResult(event.result),
         changedFile: current?.changedFile ?? changedWorkspaceFile(record.workspace, event.toolName, current?.args),
-        changedFiles
+        changedFiles,
+        ...(delegation ? { delegation } : {})
       });
       // 产出型工具（bash 落盘、MCP 生图、扩展工具等）可能生成工作区文件：
       // bash 优先从命令参数（-o/重定向/cp/mv）解析显式输出路径，再补扫描结果
@@ -2896,6 +2926,32 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       if (!deleteSubagent(workspace, getAgentDir(), command.id, scope)) throw new Error("找不到要删除的子智能体");
       refreshSubagents();
       emitResourceCatalog();
+      break;
+    }
+    case "subagent.transcript": {
+      // 只读子代理完整记录：校验路径落在当前 Agent 的 delegations/ 内（防目录逃逸，
+      // pathIsWithin 现成），逐行 parse JSONL 的 message entries，经 normalizeMessages
+      // 归一化为 ChatMessage[] 推送回渲染端；文件不存在（子代理尚无 assistant 输出，
+      // Pi _persist 的 hasAssistant 门槛）或校验失败时走专用错误消息（弹窗内展示），
+      // 不走全局 toast——否则弹窗会一直停在「正在读取」spinner。
+      const root = agentSessionRoot();
+      const delegationsRoot = root ? join(root, "delegations") : undefined;
+      const target = resolve(command.path);
+      if (!delegationsRoot || !pathIsWithin(delegationsRoot, target) || !target.toLowerCase().endsWith(".jsonl")) {
+        post({ type: "subagent.transcript-error", childSessionId: command.childSessionId, message: "只能读取当前 Agent 的委派子代理记录。" });
+        break;
+      }
+      let content: string;
+      try {
+        content = await readFile(target, "utf8");
+      } catch {
+        post({ type: "subagent.transcript-error", childSessionId: command.childSessionId, message: "子代理尚未产生输出，无法查看完整记录。" });
+        break;
+      }
+      const rows = content.split(/\r?\n/u).filter(Boolean).map((line) => {
+        try { return JSON.parse(line) as PersistedSessionEntry; } catch { return undefined; }
+      }).filter((entry): entry is PersistedSessionEntry => Boolean(entry));
+      post({ type: "subagent.transcript-result", childSessionId: command.childSessionId, messages: transcriptMessagesFromEntries(rows) });
       break;
     }
     case "memory.create": {

@@ -4,6 +4,7 @@ import type {
   BrowserPreviewCommand,
   BrowserPreviewState,
   BrowserTabsEvent,
+  ChatMessage,
   ContextUsage,
   DesktopApi,
   DesktopBootstrap,
@@ -257,6 +258,30 @@ flowchart LR
       completedAt: Date.now() - 9_200,
       output: "demo.png",
       changedFiles: [{ relativePath: "demo.png" }]
+    },
+    {
+      id: "tool-delegate",
+      name: "delegate_agent",
+      args: { goal: "审查本次改动并整理风险清单", role: "review", subagent: "code-reviewer" },
+      status: "completed",
+      startedAt: Date.now() - 9_000,
+      completedAt: Date.now() - 3_400,
+      output: "审查完成：共 3 处风险，其中 1 处 P1。\n\n**风险清单**\n1. tool_execution_update 未处理 delegation 字段（P2）\n2. sessionDirectories 未排除 delegations 子目录（P2）\n3. runChildToCompletion 的 onUpdate 参数被忽略（P1）\n\n建议修复优先级：P1 > P2。",
+      delegation: {
+        childSessionId: "demo-child-1",
+        childSessionFile: "C:/demo-agent/chatanytime-sessions/default/delegations/demo-child-1.jsonl",
+        subagentName: "Code Reviewer",
+        subagentColor: "amber",
+        role: "review",
+        model: { provider: "anthropic", id: "claude-4-sonnet" },
+        steps: [
+          { toolCallId: "demo-t1", tool: "read", label: "读取文件：src/main/subagent.ts", status: "completed", startedAt: Date.now() - 8_800, completedAt: Date.now() - 8_600 },
+          { toolCallId: "demo-t2", tool: "grep", label: "搜索内容：DelegationTracker", status: "completed", startedAt: Date.now() - 8_500, completedAt: Date.now() - 8_100 },
+          { toolCallId: "demo-t3", tool: "read", label: "读取文件：src/main/pi-runtime.ts", status: "completed", startedAt: Date.now() - 8_000, completedAt: Date.now() - 7_600 },
+          { toolCallId: "demo-t4", tool: "bash", label: "执行命令 npx vitest run", status: "completed", startedAt: Date.now() - 7_400, completedAt: Date.now() - 6_900 },
+          { toolCallId: "demo-t5", tool: "write", label: "写入文件：docs/审查报告.md", status: "completed", startedAt: Date.now() - 6_600, completedAt: Date.now() - 6_100 }
+        ]
+      }
     }
   ]
 };
@@ -276,7 +301,9 @@ const demoResources: ResourceCatalog = {
   ],
   todos: [],
   memory: [],
-  subagents: [],
+  subagents: [
+    { id: "code-reviewer", name: "Code Reviewer", description: "独立审查本次代码变更，列出风险与建议。", color: "amber", systemPrompt: "你是一名严格的代码审查员。", tools: "inherit", scope: "global" }
+  ],
   hooks: [
     { name: "跑完通知", event: "agent_end", actionKind: "notify", action: { kind: "notify" }, actionPreview: "桌面通知", blocking: false, scope: "global", enabled: true },
     { name: "git防火墙", event: "tool_call", matcher: "bash", actionKind: "block", action: { kind: "block", deny: ["git\\s+push.*--force"] }, actionPreview: "拦截 1 条规则", blocking: true, scope: "project", enabled: true }
@@ -675,6 +702,21 @@ export function createDemoApi(): DesktopApi {
         case "command.delete": {
           demoResources.commands = demoResources.commands.filter((entry) => !(entry.name === command.name && (entry.scope === command.scope || entry.scope === "unknown")));
           emit({ type: "resources", resources: structuredClone(demoResources) });
+          break;
+        }
+        case "subagent.transcript": {
+          // 离线演示：返回固定的委托会话时间线 fixture。
+          const now = Date.now();
+          const messages: ChatMessage[] = [
+            { id: "demo-transcript-1", uuid: "demo-transcript-1", role: "user", timestamp: now - 9_000, blocks: [{ type: "text", text: "审查本次改动并整理风险清单" }] },
+            { id: "demo-transcript-2", uuid: "demo-transcript-2", role: "assistant", timestamp: now - 8_700, blocks: [{ type: "tool-call", id: "demo-t1", name: "read", arguments: { path: "src/main/subagent.ts" } }] },
+            { id: "demo-transcript-3", uuid: "demo-transcript-3", role: "assistant", timestamp: now - 8_100, blocks: [{ type: "text", text: "已读完 subagent.ts。" }] },
+            { id: "demo-transcript-4", uuid: "demo-transcript-4", role: "assistant", timestamp: now - 7_900, blocks: [{ type: "tool-call", id: "demo-t2", name: "grep", arguments: { pattern: "DelegationTracker", path: "src/main" } }] },
+            { id: "demo-transcript-5", uuid: "demo-transcript-5", role: "assistant", timestamp: now - 7_000, blocks: [{ type: "tool-call", id: "demo-t3", name: "bash", arguments: { command: "npx vitest run" } }] },
+            { id: "demo-transcript-6", uuid: "demo-transcript-6", role: "assistant", timestamp: now - 6_000, blocks: [{ type: "tool-call", id: "demo-t4", name: "write", arguments: { path: "docs/审查报告.md" } }] },
+            { id: "demo-transcript-7", uuid: "demo-transcript-7", role: "assistant", timestamp: now - 5_000, blocks: [{ type: "text", text: "审查完成：共 3 处风险，其中 1 处 P1。\n\n**建议修复优先级**：P1 > P2。" }] }
+          ];
+          emit({ type: "subagent.transcript-result", childSessionId: command.childSessionId, messages });
           break;
         }
         case "mcp.server.save": {

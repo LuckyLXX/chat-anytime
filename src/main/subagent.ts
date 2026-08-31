@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import type { AgentToolResult } from "@earendil-works/pi-agent-core";
+import type { AgentToolResult, AgentToolUpdateCallback } from "@earendil-works/pi-agent-core";
 import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
 import {
   createAgentSession,
@@ -14,7 +14,8 @@ import {
   type ToolDefinition
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import type { AccessMode, AgentProfile, DelegationRole, PermissionDecision, SubagentDefinition, ThinkingLevel } from "../shared/protocol.js";
+import type { AccessMode, AgentProfile, DelegationProgress, DelegationRole, DelegationStep, PermissionDecision, SubagentDefinition, ThinkingLevel } from "../shared/protocol.js";
+import { summarizeArgs } from "./runtime-permissions.js";
 
 /**
  * Self-built subagent delegation. Replaces the old `pi-subagents` CLI shim that
@@ -48,6 +49,111 @@ export interface SubagentContext {
 
 const DELEGATION_TIMEOUT_MS = 30 * 60 * 1000;
 
+/** steps 上限：超出丢最老并在头部合成占位步骤（体积纪律，防快照过大）。 */
+const MAX_DELEGATION_STEPS = 200;
+/** label 长度上限（summarizeArgs 输出的命令行可能很长）。 */
+const MAX_STEP_LABEL_CHARS = 120;
+/** 被丢弃步骤的占位 toolCallId（不会与真实工具调用冲突）。 */
+const DROPPED_PLACEHOLDER_ID = "__dropped__";
+
+function truncatedLabel(label: string): string {
+  return label.length > MAX_STEP_LABEL_CHARS ? `${label.slice(0, MAX_STEP_LABEL_CHARS - 1)}…` : label;
+}
+
+function durationText(from: number, to: number): string {
+  const ms = Math.max(0, to - from);
+  if (ms < 1000) return `${ms}ms`;
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  return `${Math.floor(seconds / 60)}m${seconds % 60}s`;
+}
+
+/**
+ * 子代理执行进度追踪：子会话的工具调用事件 → DelegationStep 列表 + 累计日志行。
+ * 只存 label 不存 args/output（体积纪律），上限 200 步，超出丢最老并合成占位；
+ * 结束/中止时把仍 running 的步骤封口为 error。snapshot() 供 onUpdate 转发与最终
+ * toolResult details 复用（两者形状一致，渲染端同一套渲染逻辑）。
+ */
+export class DelegationTracker {
+  private readonly steps: DelegationStep[] = [];
+  private readonly stepById = new Map<string, DelegationStep>();
+  private droppedCount = 0;
+
+  constructor(private readonly base: Omit<DelegationProgress, "steps">) {}
+
+  onToolStart(toolCallId: string, tool: string, rawLabel: string, startedAt: number): void {
+    const step: DelegationStep = { toolCallId, tool, label: truncatedLabel(rawLabel), status: "running", startedAt };
+    this.steps.push(step);
+    this.stepById.set(toolCallId, step);
+    this.trim();
+  }
+
+  onToolEnd(toolCallId: string, isError: boolean): void {
+    const step = this.stepById.get(toolCallId);
+    if (!step) return; // 已被 200 步截断丢弃
+    step.status = isError ? "error" : "completed";
+    step.completedAt = Date.now();
+  }
+
+  /** 结束/中止兜底：把仍 running 的步骤封口为 error。 */
+  seal(): void {
+    const now = Date.now();
+    for (const step of this.steps) {
+      if (step.status === "running") {
+        step.status = "error";
+        step.completedAt = now;
+      }
+    }
+  }
+
+  /** onUpdate 的 details 载荷：完整 DelegationProgress（含执行上下文）。 */
+  snapshot(): DelegationProgress {
+    return { ...this.base, steps: [...this.steps] };
+  }
+
+  /** UI 兜底文本：每步一行（● 运行中 / ✓ 完成 / ✗ 出错）。 */
+  logText(): string {
+    if (this.steps.length === 0) return "● 子代理正在启动…";
+    return this.steps.map((step) => {
+      if (step.status === "running") return `● ${step.label}`;
+      const duration = step.completedAt !== undefined ? ` · ${durationText(step.startedAt, step.completedAt)}` : "";
+      return `${step.status === "error" ? "✗" : "✓"} ${step.label}${duration}`;
+    }).join("\n");
+  }
+
+  /** 超出上限时丢最老的真实步骤，占位保留并更新省略计数；总量恒 ≤ MAX（含占位）。 */
+  private trim(): void {
+    while (this.steps.length > MAX_DELEGATION_STEPS) {
+      const first = this.steps.shift();
+      if (!first) break;
+      if (first.toolCallId !== DROPPED_PLACEHOLDER_ID) {
+        this.droppedCount++;
+        this.stepById.delete(first.toolCallId);
+      }
+    }
+    if (this.droppedCount === 0) return;
+    if (this.steps[0]?.toolCallId === DROPPED_PLACEHOLDER_ID) {
+      this.steps[0]!.label = `（已省略 ${this.droppedCount} 个早期步骤）`;
+      return;
+    }
+    // 头部没有占位：放入占位会超容量时先丢最老的真实步骤（首次触发会多丢一个）。
+    if (this.steps.length >= MAX_DELEGATION_STEPS) {
+      const first = this.steps.shift();
+      if (first) {
+        this.droppedCount++;
+        this.stepById.delete(first.toolCallId);
+      }
+    }
+    this.steps.unshift({
+      toolCallId: DROPPED_PLACEHOLDER_ID,
+      tool: "…",
+      label: `（已省略 ${this.droppedCount} 个早期步骤）`,
+      status: "completed",
+      startedAt: this.steps[0]?.startedAt ?? Date.now()
+    });
+  }
+}
+
 export function assistantText(message: unknown): string {
   if (!message || typeof message !== "object") return "";
   const content = (message as AssistantMessage).content;
@@ -70,31 +176,69 @@ function createChildPermissionExtension(ctx: SubagentContext): InlineExtension {
   };
 }
 
-function runChildToCompletion(child: AgentSession, goal: string, signal: AbortSignal | undefined): Promise<string> {
+function runChildToCompletion(child: AgentSession, goal: string, signal: AbortSignal | undefined, onUpdate: AgentToolUpdateCallback<unknown> | undefined, tracker: DelegationTracker): Promise<string> {
   return new Promise((resolve, reject) => {
     let settled = false;
     let lastText = "";
+    // 每次 tracker 变更后转发一次：content=累计日志行（UI 兜底文本），details=结构化进度。
+    const emit = (): void => {
+      if (!onUpdate || settled) return;
+      onUpdate({
+        content: [{ type: "text", text: tracker.logText() }],
+        details: { delegation: tracker.snapshot() }
+      });
+    };
     const finish = (action: () => void): void => {
       if (settled) return;
       settled = true;
       action();
     };
+    // 事件白名单（其余事件忽略，控制推送频率）：工具 start/end 驱动步骤列表，
+    // message_end 只取最终文本，agent_end/agent_settled 封口并结算。
     const unsubscribe = child.subscribe((event: AgentSessionEvent) => {
-      if (event.type === "message_end" && event.message.role === "assistant") {
-        lastText = assistantText(event.message) || lastText;
-      } else if (event.type === "agent_end" && !event.willRetry) {
-        finish(() => { unsubscribe(); resolve(lastText || "(子代理未返回文本)"); });
-      } else if (event.type === "agent_settled") {
-        finish(() => { unsubscribe(); resolve(lastText || "(子代理未返回文本)"); });
+      switch (event.type) {
+        case "tool_execution_start": {
+          const args = (event.args ?? {}) as Record<string, unknown>;
+          tracker.onToolStart(event.toolCallId, event.toolName, summarizeArgs(event.toolName, args), Date.now());
+          emit();
+          break;
+        }
+        case "tool_execution_end":
+          tracker.onToolEnd(event.toolCallId, Boolean(event.isError));
+          emit();
+          break;
+        case "message_end":
+          if (event.message.role === "assistant") {
+            lastText = assistantText(event.message) || lastText;
+          }
+          break;
+        case "agent_end":
+          if (!event.willRetry) {
+            tracker.seal();
+            emit();
+            finish(() => { unsubscribe(); resolve(lastText || "(子代理未返回文本)"); });
+          }
+          break;
+        case "agent_settled":
+          tracker.seal();
+          emit();
+          finish(() => { unsubscribe(); resolve(lastText || "(子代理未返回文本)"); });
+          break;
       }
     });
     const timeout = setTimeout(() => {
+      tracker.seal();
+      emit();
       finish(() => { unsubscribe(); void child.abort(); reject(new Error("子代理执行超时（30 分钟）")); });
     }, DELEGATION_TIMEOUT_MS);
     signal?.addEventListener("abort", () => {
+      tracker.seal();
+      emit();
       finish(() => { clearTimeout(timeout); unsubscribe(); void child.abort(); reject(new Error("子代理被中止")); });
     });
     void child.prompt(goal).catch((error) => {
+      tracker.seal();
+      emit();
       finish(() => { clearTimeout(timeout); unsubscribe(); reject(error instanceof Error ? error : new Error(String(error))); });
     });
   });
@@ -110,7 +254,7 @@ function roleGuideline(role: DelegationRole | undefined): string {
   }
 }
 
-async function runDelegation(ctx: SubagentContext, params: { goal?: unknown; role?: unknown; modelId?: unknown; subagent?: unknown }, signal: AbortSignal | undefined): Promise<AgentToolResult<unknown>> {
+async function runDelegation(ctx: SubagentContext, params: { goal?: unknown; role?: unknown; modelId?: unknown; subagent?: unknown }, signal: AbortSignal | undefined, onUpdate: AgentToolUpdateCallback<unknown> | undefined): Promise<AgentToolResult<unknown>> {
   if (ctx.isDelegationChild) throw new Error("子代理不能再创建子代理（仅支持一层委派）");
   const goal = String(params.goal ?? "").trim();
   if (!goal) throw new Error("delegate_agent 需要 goal 参数");
@@ -169,10 +313,18 @@ async function runDelegation(ctx: SubagentContext, params: { goal?: unknown; rol
   child.setActiveToolsByName(enabledBuiltinTools);
 
   try {
-    const result = await runChildToCompletion(child, goal, signal);
+    const tracker = new DelegationTracker({
+      childSessionId: child.sessionId,
+      childSessionFile: child.sessionManager.getSessionFile() ?? child.sessionId,
+      ...(subagentDef?.name ? { subagentName: subagentDef.name } : {}),
+      ...(subagentDef?.color ? { subagentColor: subagentDef.color } : {}),
+      role,
+      model: modelTarget
+    });
+    const result = await runChildToCompletion(child, goal, signal, onUpdate, tracker);
     return {
       content: [{ type: "text", text: result }],
-      details: { goal, role, childSessionId: child.sessionId, model: modelTarget }
+      details: { goal, ...tracker.snapshot() }
     };
   } finally {
     child.dispose();
@@ -236,7 +388,7 @@ export function createSubagentTools(ctx: SubagentContext): ToolDefinition[] {
         modelId: Type.Optional(Type.String({ description: "可选，provider/id 形式的模型；缺省沿用当前模型" })),
         subagent: Type.Optional(Type.String({ description: "可选，自定义子智能体的 id 或名称；提供时按该定义的系统提示/模型/工具集运行，优先于 role" }))
       }),
-      execute: async (_toolCallId, params, signal) => runDelegation(ctx, (params ?? {}) as { goal?: unknown; role?: unknown; modelId?: unknown; subagent?: unknown }, signal)
+      execute: async (_toolCallId, params, signal, onUpdate) => runDelegation(ctx, (params ?? {}) as { goal?: unknown; role?: unknown; modelId?: unknown; subagent?: unknown }, signal, onUpdate)
     })
   ];
 }
