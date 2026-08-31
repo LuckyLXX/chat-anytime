@@ -17,7 +17,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { BackgroundProcessRegistry, bashCommandsFromMessages, isBackgroundCommand } from "./background-processes.js";
 import { normalizeMessages, userMessageText } from "./message-normalize.js";
-import { applyModelOverrides as applyStoredModelOverrides, buildCatalogModels, imageInputOverride, pickFallbackModel, pruneDisabledModelRefs, resolveRestoredSessionModel } from "./model-catalog.js";
+import { applyModelOverrides as applyStoredModelOverrides, buildCatalogModels, imageInputOverride, isModelEnabled, pickFallbackModel, pruneDisabledModelRefs, resolveRestoredSessionModel } from "./model-catalog.js";
 import type {
   AccessMode,
   AgentProfile,
@@ -354,6 +354,8 @@ function buildSubagentTools(record: Pick<SessionRuntimeRecord, "workspace" | "ag
     model: model ?? { provider: "", id: "" },
     // 双作用域合并后的自定义子智能体定义（delegate_agent 按名称引用）。
     subagentCatalog,
+    // 运行时与设置页模型下拉同口径：被取消勾选的模型不再用于委派。
+    isModelEnabled: (providerId, modelId) => isModelEnabled(providerId, modelId, settings?.providers),
     // 子代理与主会话同口径：目录模型交给子代理前套上 token-limit 覆盖。
     transformModel: (candidate) => applyModelOverrides(candidate),
     parentSessionId: sessionId,
@@ -1231,6 +1233,11 @@ function appendCompactControlMessage(record: SessionRuntimeRecord, kind: "compac
   const entry = record.session.sessionManager.getEntry(entryId);
   if (!entry || entry.type !== "custom") return;
   record.controlMessages = [...record.controlMessages, ...restoreControlMessages([entry as unknown as PersistedSessionEntry])];
+}
+
+/** 服务商是否有已配置鉴权（会话模型回退用，口径同 provider.delete 旧实现）。 */
+function providerConfigured(providerId: string): boolean {
+  return Boolean(modelRuntime?.getProviderAuthStatus(providerId)?.configured);
 }
 
 async function refreshCatalog(): Promise<void> {
@@ -2556,7 +2563,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
           selectedModel = { provider: first.provider, id: first.id };
           await switchSessionModel(activeRuntime, first);
         } else if (selectedModel?.provider === command.provider.id) {
-          const fallback = pickFallbackModel(modelRuntime.getModels(), settings?.providers, (providerId) => Boolean(modelRuntime?.getProviderAuthStatus(providerId)?.configured), command.provider.id);
+          const fallback = pickFallbackModel(modelRuntime.getModels(), settings?.providers, providerConfigured, command.provider.id);
           selectedModel = fallback ? { provider: fallback.provider, id: fallback.id } : undefined;
           if (fallback) await switchSessionModel(activeRuntime, fallback);
           applyStatusToActive(fallback ? `当前服务没有启用模型，已切换到 ${fallback.name}` : "当前服务没有启用模型，请在设置中勾选模型");
@@ -2574,7 +2581,15 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       // 退回任意已配置且启用的模型；运行中的会话不动，等下一次手动切换。
       for (const record of liveSessions.values()) {
         const current = record.session.model;
-        if (!current || record.busy || current.provider !== command.provider.id) continue;
+        if (!current || current.provider !== command.provider.id) continue;
+        if (record.busy) {
+          // 运行中的会话不中途换模型（与既有取舍一致），但被取消勾选至少要有感知：
+          // 提示用户本轮结束后手动切换（2026-09-02 审查）。
+          if (record === activeRuntime && !enabledIds.has(current.id)) {
+            applyStatusToActive(`当前会话正在使用已取消勾选的模型 ${current.name}，本轮结束后请在顶栏切换`);
+          }
+          continue;
+        }
         if (enabledIds.has(current.id)) {
           // Token 限额/图片标记手动修正后立即对正使用该服务商模型的空闲会话生效
           // （switchSessionModel 内部走 applyModelOverrides）。
@@ -2582,7 +2597,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
           continue;
         }
         const next = modelRuntime.getModels(command.provider.id).find((model) => enabledIds.has(model.id))
-          ?? pickFallbackModel(modelRuntime.getModels(), settings?.providers, (providerId) => Boolean(modelRuntime?.getProviderAuthStatus(providerId)?.configured), command.provider.id);
+          ?? pickFallbackModel(modelRuntime.getModels(), settings?.providers, providerConfigured, command.provider.id);
         if (record === activeRuntime) selectedModel = next ? { provider: next.provider, id: next.id } : undefined;
         if (next) {
           await switchSessionModel(record, next);
@@ -2606,8 +2621,10 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         settings.providers = settings.providers.filter((provider) => provider.id !== command.providerId);
         settings.model = settings.model?.provider === command.providerId ? undefined : settings.model;
         settings.agents = settings.agents.map((agent) => agent.defaultModel?.provider === command.providerId ? { ...agent, defaultModel: undefined } : agent);
+        // 视觉模型引用一并失效（2026-09-02 审查：与模型清理同口径）。
+        if (settings.vision?.provider === command.providerId) settings.vision = { ...settings.vision, enabled: false };
         if (selectedModel?.provider === command.providerId) {
-          const fallbackModel = modelRuntime ? pickFallbackModel(modelRuntime.getModels(), settings?.providers, (providerId) => Boolean(modelRuntime?.getProviderAuthStatus(providerId)?.configured), command.providerId) : undefined;
+          const fallbackModel = modelRuntime ? pickFallbackModel(modelRuntime.getModels(), settings?.providers, providerConfigured, command.providerId) : undefined;
           selectedModel = fallbackModel ? { provider: fallbackModel.provider, id: fallbackModel.id } : undefined;
           if (fallbackModel) await switchSessionModel(activeRuntime, fallbackModel);
           applyStatusToActive(fallbackModel ? `原模型已删除，已切换到 ${fallbackModel.name}` : "原模型已删除，请先配置模型");

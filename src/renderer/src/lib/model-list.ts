@@ -114,6 +114,41 @@ export function providerFormBlocker(state: ProviderFormState): string | undefine
   return undefined;
 }
 
+/** 渲染端乐观副本里指向某个模型引用的最小形状（DesktopSettings 的可赋值子集）。 */
+export interface ModelReferenceSettings {
+  model?: { provider: string; id: string } | undefined;
+  agents: { defaultModel?: { provider: string; id: string } | undefined }[];
+  vision?: { provider: string; model: string; enabled?: boolean } | undefined;
+}
+
+/**
+ * 保存模型勾选后的本地落位：把设置里指向该服务商「已取消勾选模型」的引用清掉
+ * （全局默认模型、助手默认模型、视觉模型），与主进程 pruneDisabledModelRefs
+ * 同口径。返回新对象，未命中时逐字段保持原引用（幂等）。
+ *
+ * 2026-09-02 教训（code-review P1）：自定义服务保存分支此前只更新 providers、
+ * 不清理引用，而主进程两侧已清理并落盘——渲染端 store 的陈旧引用会在下一次
+ * 「保存通用设置 / 保存 Agent / 保存视觉识别」时被整体写回磁盘，被移除的模型
+ * 引用经此复活。两个保存分支都必须走同一清理，防止镜像漂移。
+ */
+export function pruneDisabledModelRefs<T extends ModelReferenceSettings>(
+  settings: T,
+  providerId: string,
+  models: readonly { id: string; enabled?: boolean }[]
+): T {
+  const enabledIds = new Set(models.filter((model) => model.enabled !== false).map((model) => model.id));
+  const removed = (ref: { provider: string; id: string } | undefined): boolean => Boolean(ref && ref.provider === providerId && !enabledIds.has(ref.id));
+  const next = { ...settings } as T;
+  if (removed(next.model)) next.model = undefined;
+  if (next.agents.some((agent) => removed(agent.defaultModel))) {
+    next.agents = next.agents.map((agent) => removed(agent.defaultModel) ? { ...agent, defaultModel: undefined } : agent);
+  }
+  if (next.vision && next.vision.provider === providerId && !enabledIds.has(next.vision.model) && next.vision.enabled !== false) {
+    next.vision = { ...next.vision, enabled: false };
+  }
+  return next;
+}
+
 /**
  * 重建内置服务商的设置条目（只记录模型勾选，无自定义 baseUrl）。
  * 必须保留主进程推送设置时盖上的 keyConfigured 章（index.ts 会按凭据缓存回填）；

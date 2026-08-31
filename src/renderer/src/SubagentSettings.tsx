@@ -84,7 +84,10 @@ export function SubagentSettings({ resources, workspaceOpen, models, providers }
     setName(subagent.name);
     setColor(subagent.color ?? "amber");
     setDescription(subagent.description);
-    setModel(subagent.model ? `${subagent.model.provider}/${subagent.model.id}` : "");
+    // 已取消勾选的模型不在可选项中：回落为「继承默认模型」，避免受控 select 无
+    // 匹配 option 显示空白、且原样保存把失效引用写回定义文件（2026-09-02 审查）。
+    const modelValue = subagent.model ? `${subagent.model.provider}/${subagent.model.id}` : "";
+    setModel(modelValue && configuredModels.some((item) => `${item.provider}/${item.id}` === modelValue) ? modelValue : "");
     setSystemPrompt(subagent.systemPrompt);
     setScope(subagent.scope);
     setInjectAgentsMd(subagent.injectAgentsMd === true);
@@ -105,12 +108,14 @@ export function SubagentSettings({ resources, workspaceOpen, models, providers }
       return;
     }
     const id = editingId ?? `subagent-${Date.now().toString(36)}`;
+    // 保存兜底：表单打开期间模型被取消勾选时同样回落（与 openEdit 同口径）。
+    const modelValue = model && configuredModels.some((item) => `${item.provider}/${item.id}` === model) ? model : "";
     const definition: SubagentDefinition = {
       id,
       name: name.trim(),
       description: description.trim(),
       color,
-      ...(model ? { model: { provider: model.slice(0, model.indexOf("/")), id: model.slice(model.indexOf("/") + 1) } } : {}),
+      ...(modelValue ? { model: { provider: modelValue.slice(0, modelValue.indexOf("/")), id: modelValue.slice(modelValue.indexOf("/") + 1) } } : {}),
       systemPrompt: systemPrompt.trim() || "完成委派给你的独立子任务。",
       scope,
       ...(injectAgentsMd ? { injectAgentsMd: true } : {}),

@@ -196,6 +196,8 @@ function updateSettings(command: RuntimeCommand): void {
       settings.providers = settings.providers.filter((item) => item.id !== command.providerId);
       if (settings.model?.provider === command.providerId) settings.model = undefined;
       settings.agents = settings.agents.map((agent) => agent.defaultModel?.provider === command.providerId ? { ...agent, defaultModel: undefined } : agent);
+      // 视觉模型引用同一并失效（2026-09-02 审查：与模型清理同口径，否则视觉识别持续失败且无提示）。
+      if (settings.vision?.provider === command.providerId) settings.vision = { ...settings.vision, enabled: false };
       deleteCredential(command.providerId);
       break;
     case "vision.save":

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildBuiltinProviderEntry, filterProviderModels, formatTokenLimit, groupModelsByProvider, parseTokenLimit, providerFormBlocker, setProviderModelsEnabled, selectableCatalogModels } from "./model-list";
+import { buildBuiltinProviderEntry, filterProviderModels, formatTokenLimit, groupModelsByProvider, parseTokenLimit, providerFormBlocker, pruneDisabledModelRefs, setProviderModelsEnabled, selectableCatalogModels } from "./model-list";
 import type { ModelOption } from "../../../shared/protocol";
 
 const models = [
@@ -81,6 +81,40 @@ describe("provider-grouped model view", () => {
     const groups = groupModelsByProvider(models, (providerId) => providerId === "openrouter" ? "OpenRouter" : undefined);
     expect(groups[0]!.providerName).toBe("OpenRouter");
     expect(groups[1]!.providerName).toBe("unknown");
+  });
+});
+
+describe("renderer pruneDisabledModelRefs", () => {
+  it("clears global default, agent defaults and vision pointing at disabled models", () => {
+    const models = [{ id: "keep", enabled: true }, { id: "gone", enabled: false }];
+    const settings = {
+      model: { provider: "p", id: "gone" },
+      agents: [
+        { id: "a", defaultModel: { provider: "p", id: "gone" } },
+        { id: "b", defaultModel: { provider: "p", id: "keep" } },
+        { id: "c" }
+      ],
+      vision: { provider: "p", model: "gone", enabled: true }
+    };
+    const pruned = pruneDisabledModelRefs(settings, "p", models);
+    expect(pruned.model).toBeUndefined();
+    expect(pruned.agents[0]!.defaultModel).toBeUndefined();
+    expect(pruned.agents[1]!.defaultModel).toBe(settings.agents[1]!.defaultModel);
+    expect(pruned.agents[2]).toBe(settings.agents[2]);
+    expect(pruned.vision).toMatchObject({ provider: "p", model: "gone", enabled: false });
+  });
+
+  it("keeps references untouched when everything is still enabled", () => {
+    const models = [{ id: "keep", enabled: true }];
+    const settings = {
+      model: { provider: "p", id: "keep" },
+      agents: [{ id: "a", defaultModel: { provider: "p", id: "keep" } }],
+      vision: { provider: "p", model: "keep", enabled: true }
+    };
+    const pruned = pruneDisabledModelRefs(settings, "p", models);
+    expect(pruned.model).toBe(settings.model);
+    expect(pruned.agents).toBe(settings.agents);
+    expect(pruned.vision).toBe(settings.vision);
   });
 });
 

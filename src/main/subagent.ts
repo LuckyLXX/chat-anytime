@@ -35,6 +35,8 @@ export interface SubagentContext {
   model: { provider: string; id: string };
   /** 双作用域合并后的自定义子智能体定义（delegate_agent 按名称引用）。 */
   subagentCatalog?: SubagentDefinition[];
+  /** 模型是否仍被勾选（用户在各服务商取消勾选后不应再被委派使用；缺省视为可用）。 */
+  isModelEnabled?: (providerId: string, modelId: string) => boolean;
   /** 将目录 Model 交给子代理前的变换钩子（主进程用来套 token-limit 覆盖）。 */
   transformModel?: (model: Model<Api>) => Model<Api>;
   parentSessionId?: string;
@@ -117,9 +119,14 @@ async function runDelegation(ctx: SubagentContext, params: { goal?: unknown; rol
   const subagentRaw = typeof params.subagent === "string" ? params.subagent.trim() : "";
   // 优先匹配自定义子智能体定义（按 id 或名称）；命中后其系统提示/模型/工具集覆盖默认。
   const subagentDef = resolveSubagentDefinition(ctx.subagentCatalog, subagentRaw);
-  const modelTarget = subagentDef?.model ?? (modelIdRaw ? parseModelId(modelIdRaw, ctx.model) : ctx.model);
+  const requestedTarget = subagentDef?.model ?? (modelIdRaw ? parseModelId(modelIdRaw, ctx.model) : ctx.model);
+  // 显式指定的模型已被取消勾选时回退主会话模型（2026-09-02 审查：与设置页模型
+  // 下拉同口径——被移除的模型不应再被委派使用；主会话模型通常不可能被移除）。
+  const modelTarget = resolveDelegationModelTarget(requestedTarget, ctx.model, ctx.isModelEnabled);
   const childModel = ctx.modelRuntime.getModel(modelTarget.provider, modelTarget.id);
-  if (!childModel) throw new Error(`子代理模型不可用：${modelTarget.provider}/${modelTarget.id}`);
+  if (!childModel || !delegationModelEnabled(modelTarget, ctx.isModelEnabled)) {
+    throw new Error(`子代理模型不可用：${modelTarget.provider}/${modelTarget.id}`);
+  }
   const resolvedChildModel = ctx.transformModel ? ctx.transformModel(childModel) : childModel;
   // 子代理系统提示：有了自定义定义时用它的 systemPrompt（+可选 AGENTS.md）；否则用主会话 + role 指导词。
   const childSystemPrompt = subagentDef
@@ -175,6 +182,24 @@ async function runDelegation(ctx: SubagentContext, params: { goal?: unknown; rol
 export function parseModelId(modelId: string, fallback: { provider: string; id: string }): { provider: string; id: string } {
   const slash = modelId.indexOf("/");
   return slash > 0 ? { provider: modelId.slice(0, slash), id: modelId.slice(slash + 1) } : fallback;
+}
+
+/** 委派模型是否可用：无校验器（主进程未挂目录）时一律视为可用。 */
+export function delegationModelEnabled(target: { provider: string; id: string }, isModelEnabled: ((providerId: string, modelId: string) => boolean) | undefined): boolean {
+  return !isModelEnabled || isModelEnabled(target.provider, target.id);
+}
+
+/**
+ * 子代理模型目标解析：显式指定（子智能体定义 / modelId 参数）且未被取消勾选时
+ * 用之，否则回退主会话模型（与设置页模型下拉同口径）。纯函数，供 runDelegation
+ * 使用并独立单测。
+ */
+export function resolveDelegationModelTarget(
+  requested: { provider: string; id: string },
+  fallback: { provider: string; id: string },
+  isModelEnabled: ((providerId: string, modelId: string) => boolean) | undefined
+): { provider: string; id: string } {
+  return delegationModelEnabled(requested, isModelEnabled) ? requested : fallback;
 }
 
 /** 按 id（优先）或名称匹配自定义子智能体定义；未命中返回 undefined。 */

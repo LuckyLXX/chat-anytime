@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assistantText, buildSubagentPromptBlock, createSubagentTools, parseModelId, resolveSubagentDefinition, type SubagentContext } from "./subagent.js";
+import { assistantText, buildSubagentPromptBlock, createSubagentTools, delegationModelEnabled, parseModelId, resolveDelegationModelTarget, resolveSubagentDefinition, type SubagentContext } from "./subagent.js";
 import type { SubagentDefinition } from "../shared/protocol.js";
 
 function makeCtx(overrides: Partial<SubagentContext> = {}): SubagentContext {
@@ -33,6 +33,18 @@ describe("subagent tools", () => {
   it("parses provider/id model identifiers and falls back otherwise", () => {
     expect(parseModelId("anthropic/claude-4", { provider: "x", id: "y" })).toEqual({ provider: "anthropic", id: "claude-4" });
     expect(parseModelId("no-slash", { provider: "x", id: "y" })).toEqual({ provider: "x", id: "y" });
+  });
+
+  it("falls back to the parent model when an explicit target was unchecked", () => {
+    const enabled = (providerId: string, modelId: string): boolean => !(providerId === "p" && modelId === "gone");
+    // 未被取消勾选：保留显式指定。
+    expect(resolveDelegationModelTarget({ provider: "p", id: "keep" }, { provider: "q", id: "m" }, enabled)).toEqual({ provider: "p", id: "keep" });
+    // 已被取消勾选：回退主会话模型。
+    expect(resolveDelegationModelTarget({ provider: "p", id: "gone" }, { provider: "q", id: "m" }, enabled)).toEqual({ provider: "q", id: "m" });
+    // 无校验器（主进程未挂目录）时显式指定照用，兼容旧行为。
+    expect(resolveDelegationModelTarget({ provider: "p", id: "gone" }, { provider: "q", id: "m" }, undefined)).toEqual({ provider: "p", id: "gone" });
+    expect(delegationModelEnabled({ provider: "p", id: "x" }, undefined)).toBe(true);
+    expect(delegationModelEnabled({ provider: "p", id: "gone" }, enabled)).toBe(false);
   });
 
   it("extracts concatenated text from an assistant message", () => {
