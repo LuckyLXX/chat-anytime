@@ -1,7 +1,7 @@
 // 设置页「自动化任务」tab：定时任务列表（全部/进行中/已暂停过滤 + 搜索）+ 创建/编辑表单弹窗。
 // 数据源 store.automation（automation 推送维护）；增删改走 automation.* 命令。
 
-import { Clock, Folder, ListChecks, MessageSquarePlus, Pause, Pencil, Play, Plus, Search, Trash2, X, Zap } from "lucide-react";
+import { Clock, Folder, ListChecks, MessageSquarePlus, Pencil, Play, Plus, Search, Trash2, X, Zap } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 import type { AccessMode, AutomationTask, DesktopSettings, ModelOption, ProviderOption } from "../../shared/protocol";
 import { buildCron, describeCron, DEFAULT_SCHEDULE_PARTS, pad2, SCHEDULE_PRESETS, WEEKDAY_OPTIONS, type SchedulePreset } from "./lib/automation-schedule";
@@ -221,8 +221,8 @@ export function AutomationSettings({ models, providers, settings, workspaceConfi
                   <p className="automation-row-prompt">{task.prompt}</p>
                 </div>
                 <div className="automation-row-actions">
+                  <button type="button" className={`automation-row-toggle ${task.enabled ? "on" : ""}`} role="switch" aria-checked={task.enabled} title={task.enabled ? "暂停任务" : "启用任务"} aria-label={task.enabled ? "暂停任务" : "启用任务"} onClick={() => send({ type: "automation.toggle", id: task.id, enabled: !task.enabled })} />
                   <button type="button" title="运行一次" aria-label="运行一次" onClick={() => send({ type: "automation.run", id: task.id })}><Play size={15} /></button>
-                  <button type="button" title={task.enabled ? "暂停" : "启用"} aria-label={task.enabled ? "暂停" : "启用"} onClick={() => send({ type: "automation.toggle", id: task.id, enabled: !task.enabled })}>{task.enabled ? <Pause size={15} /> : <Play size={15} />}</button>
                   <button type="button" title="编辑" aria-label="编辑" onClick={() => setForm({ mode: "edit", task })}><Pencil size={15} /></button>
                   <button type="button" title="删除" aria-label="删除" className="danger" onClick={() => { if (window.confirm(`删除定时任务「${task.name}」？`)) send({ type: "automation.delete", id: task.id }); }}><Trash2 size={15} /></button>
                 </div>
