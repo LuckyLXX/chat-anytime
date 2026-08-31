@@ -1,4 +1,4 @@
-import type { HookSummary, McpServerSummary, MemoryTopic, ResourceCatalog, SkillSummary, Todo } from "../shared/protocol.js";
+import type { CommandSummary, HookSummary, McpServerSummary, MemoryTopic, ResourceCatalog, SkillSummary, Todo } from "../shared/protocol.js";
 
 /**
  * The resource catalog is now a thin aggregate over the self-built capability
@@ -9,6 +9,7 @@ import type { HookSummary, McpServerSummary, MemoryTopic, ResourceCatalog, Skill
 
 export interface ResourceCatalogInput {
   skills?: SkillSummary[];
+  commands?: CommandSummary[];
   mcpServers?: McpServerSummary[];
   todos?: Todo[];
   /** 激活助手的全量记忆主题（面板治理视图，不经工作区过滤）。 */
@@ -22,6 +23,7 @@ export interface ResourceCatalogInput {
 
 export const emptyResourceCatalog: ResourceCatalog = {
   skills: [],
+  commands: [],
   mcpServers: [],
   todos: [],
   memory: [],
@@ -33,6 +35,7 @@ export const emptyResourceCatalog: ResourceCatalog = {
 export function buildResourceCatalog(input: ResourceCatalogInput): ResourceCatalog {
   return {
     skills: input.skills ? structuredClone(input.skills) : [],
+    commands: input.commands ? structuredClone(input.commands) : [],
     mcpServers: input.mcpServers ? structuredClone(input.mcpServers) : [],
     todos: input.todos ? structuredClone(input.todos) : [],
     memory: input.memory ? structuredClone(input.memory) : [],

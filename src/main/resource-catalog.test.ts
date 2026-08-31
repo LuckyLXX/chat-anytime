@@ -6,6 +6,7 @@ describe("buildResourceCatalog", () => {
   it("returns an empty catalog when no providers are given", () => {
     expect(buildResourceCatalog({})).toEqual({
       skills: [],
+      commands: [],
       mcpServers: [],
       todos: [],
       memory: [],
@@ -62,6 +63,7 @@ describe("buildResourceCatalog", () => {
   it("exposes an empty catalog constant with the new shape", () => {
     expect(emptyResourceCatalog).toEqual({
       skills: [],
+      commands: [],
       mcpServers: [],
       todos: [],
       memory: [],

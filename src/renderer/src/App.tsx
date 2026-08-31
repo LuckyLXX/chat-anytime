@@ -14,6 +14,7 @@ import {
   Search,
   Server,
   SquarePen,
+  Zap,
   Users,
   PanelLeftClose,
   PanelLeftOpen,
@@ -482,6 +483,11 @@ function ResourceSettings({ resources }: ResourceSettingsProps): ReactNode {
         <div className="resource-section-heading"><span><Puzzle size={14} />Skill</span><small>{resources.skills.length} 个已发现</small></div>
         <p className="resource-form-help">把 <code>{`<slug>/SKILL.md`}</code> 放到全局目录 <code>pidesktop-skills/</code>、共享目录 <code>~/.agents/skills/</code> 或项目目录 <code>.pidesktop-skills/</code> 即可被发现，启用后会注入系统提示供模型调用。</p>
         {resources.skills.length === 0 ? <p className="resource-empty">当前没有发现 Skill。</p> : <div className="resource-list">{resources.skills.map((skill) => <div className="resource-item" key={skill.id}><div className="resource-item-icon"><Puzzle size={14} /></div><div className="resource-item-copy"><strong>/skill:{skill.name}</strong><small>{skill.description}</small><em>{resourceScopeLabels[skill.scope]} · {skill.source}{skill.disableModelInvocation ? " · 仅手动调用" : ""}</em></div><label className="resource-toggle"><input type="checkbox" checked={skill.enabled} disabled={controlsBusy || !skill.toggleable} onChange={(event) => void run({ type: "skill.toggle", id: skill.id, enabled: event.target.checked })} /><span>启用</span></label></div>)}</div>}
+      </section>
+      <section className="resource-section">
+        <div className="resource-section-heading"><span><Zap size={14} />自定义命令</span><small>{resources.commands.length} 个已发现</small></div>
+        <p className="resource-form-help">把 md 模板文件（文件名即命令名，正文支持 <code>$ARGUMENTS</code> 占位符，可选 frontmatter 写 <code>description</code>）放到全局目录 <code>pidesktop-commands/</code> 或项目目录 <code>.pidesktop-commands/</code>，即可在输入框以 <code>/命令名</code> 调用，项目同名覆盖全局。</p>
+        {resources.commands.length === 0 ? <p className="resource-empty">当前没有发现自定义命令。</p> : <div className="resource-list">{resources.commands.map((entry) => <div className="resource-item" key={entry.name}><div className="resource-item-icon"><Zap size={14} /></div><div className="resource-item-copy"><strong>/{entry.name}</strong><small>{entry.description || "自定义命令"}</small><em>{resourceScopeLabels[entry.scope]}{entry.filePath ? ` · ${entry.filePath}` : ""}</em></div></div>)}</div>}
       </section>
       {resources.diagnostics.length > 0 && <div className="resource-diagnostics"><strong>资源诊断</strong>{resources.diagnostics.map((diagnostic) => <p key={diagnostic}>{diagnostic}</p>)}</div>}
 

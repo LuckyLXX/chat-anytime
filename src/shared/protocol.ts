@@ -257,6 +257,8 @@ export interface ChatMessage {
   /** Desktop-generated control messages are visible but not editable or regenerable. */
   control?: "compact";
   skill?: { name: string };
+  /** 自定义斜杠命令消息（与 skill 徽标互斥：一次只携带一种调用标记）。 */
+  command?: { name: string };
   attachments?: Array<{ kind: PromptAttachment["kind"]; name: string; relativePath?: string }>;
   streaming?: boolean;
   error?: string;
@@ -645,6 +647,16 @@ export interface SkillSummary {
   disableModelInvocation: boolean;
 }
 
+/** 自定义斜杠命令摘要（命令目录下的 md 模板文件）。 */
+export interface CommandSummary {
+  /** 命令名 = md 文件名去扩展；斜杠菜单展示为 /<name>。 */
+  name: string;
+  description: string;
+  scope: ResourceScope;
+  /** 模板文件绝对路径。 */
+  filePath?: string;
+}
+
 export type McpServerStatus = "connected" | "cached" | "failed" | "needs-auth" | "not-connected" | "disabled";
 
 export interface McpServerSummary {
@@ -727,6 +739,7 @@ export interface HookSummary {
 
 export interface ResourceCatalog {
   skills: SkillSummary[];
+  commands: CommandSummary[];
   mcpServers: McpServerSummary[];
   todos: Todo[];
   /** 激活助手的全量记忆主题（面板治理视图，不经工作区过滤）。 */
@@ -911,11 +924,13 @@ export type RuntimeCommand =
   | { type: "session.delete"; path: string }
   | { type: "session.prompt"; text: string; attachments?: PromptAttachment[]; sessionId?: string }
   | { type: "session.skill"; name: string; instructions?: string; attachments?: PromptAttachment[]; sessionId?: string }
-  | { type: "session.regenerate"; text: string; timestamp?: number; skillName?: string; attachments?: PromptAttachment[]; sessionId?: string }
+  /** 自定义斜杠命令：name=命令目录中的 md 文件名，arguments=占位符 $ARGUMENTS 的替换文本。 */
+  | { type: "session.command"; name: string; arguments?: string; attachments?: PromptAttachment[]; sessionId?: string }
+  | { type: "session.regenerate"; text: string; timestamp?: number; skillName?: string; commandName?: string; attachments?: PromptAttachment[]; sessionId?: string }
   | { type: "session.compact"; instructions?: string; sessionId?: string }
   | { type: "session.planMode"; enabled: boolean; sessionId?: string }
   | { type: "session.abort"; sessionId?: string }
-  | { type: "session.queue.add"; text: string; skillName?: string; attachments?: PromptAttachment[]; sessionId?: string }
+  | { type: "session.queue.add"; text: string; skillName?: string; commandName?: string; attachments?: PromptAttachment[]; sessionId?: string }
   | { type: "session.queue.sendNow"; kind: QueuedMessage["kind"]; index: number; text: string; sessionId?: string }
   | { type: "session.queue.remove"; kind: QueuedMessage["kind"]; index: number; text: string; sessionId?: string }
   /** 分屏：渲染端注册/注销某会话为“正在渲染”（watched）。watched 会话豁免空闲

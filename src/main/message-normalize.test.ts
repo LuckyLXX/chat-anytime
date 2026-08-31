@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { buildCommandPrompt } from "./command-catalog.js";
+import { buildSkillPrompt } from "./skill-prompt.js";
 import { normalizeMessages, resetNormalizeCacheForTest } from "./message-normalize.js";
 
 function user(text: string, timestamp: number): AgentMessage {
@@ -58,5 +60,41 @@ describe("normalizeMessages 身份缓存", () => {
     expect(result[0]?.blocks).toEqual([{ type: "text", text: "半截" }]);
     expect(result[0]?.error).toBe("超时");
     expect(result[0]?.streaming).toBe(false);
+  });
+});
+
+describe("normalizeMessages 自定义命令徽标", () => {
+  beforeEach(() => {
+    resetNormalizeCacheForTest();
+  });
+
+  it("命令消息：徽标带命令名，气泡只回显参数正文，模板本体不透出", () => {
+    const prompt = buildCommandPrompt("commit", "feat: 登录修复", "按规范生成提交信息：feat: 登录修复");
+    const result = normalizeMessages([user(prompt, 1)]);
+    expect(result[0]?.command).toEqual({ name: "commit" });
+    expect(result[0]?.skill).toBeUndefined();
+    expect(result[0]?.blocks).toEqual([{ type: "text", text: "feat: 登录修复" }]);
+  });
+
+  it("无参数命令：徽标仍在，正文为空块列表", () => {
+    const prompt = buildCommandPrompt("review", "", "审查当前分支");
+    const result = normalizeMessages([user(prompt, 1)]);
+    expect(result[0]?.command).toEqual({ name: "review" });
+    expect(result[0]?.blocks).toEqual([]);
+  });
+
+  it("skill 优先：同时命中两种 marker 时（不可能出现）按 skill 处理，command 为空", () => {
+    const skillExecution = buildSkillPrompt("demo", "要求", "使用 Skill「demo」完成任务。");
+    const result = normalizeMessages([user(skillExecution, 1)]);
+    expect(result[0]?.skill).toEqual({ name: "demo" });
+    expect(result[0]?.command).toBeUndefined();
+  });
+
+  it("命令消息携带图片附件时图片块保留", () => {
+    const prompt = buildCommandPrompt("截图分析", "看这张图", "分析：看这张图");
+    const withImage = { role: "user", content: [{ type: "text", text: prompt }, { type: "image", data: "abc", mimeType: "image/png" }], timestamp: 2 } as unknown as AgentMessage;
+    const result = normalizeMessages([withImage]);
+    expect(result[0]?.command).toEqual({ name: "截图分析" });
+    expect(result[0]?.blocks).toEqual([{ type: "text", text: "看这张图" }, { type: "image", data: "abc", mimeType: "image/png" }]);
   });
 });

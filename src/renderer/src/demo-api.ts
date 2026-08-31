@@ -265,6 +265,10 @@ const demoResources: ResourceCatalog = {
     { id: "skill:code-review", name: "code-review", description: "审查代码变更并整理风险与建议。", source: "用户资源", scope: "global", defaultEnabled: true, enabled: true, toggleable: true, disableModelInvocation: false },
     { id: "skill:project-notes", name: "project-notes", description: "整理项目文档和工作记录。", source: "当前项目", scope: "project", defaultEnabled: true, enabled: true, toggleable: true, disableModelInvocation: false }
   ],
+  commands: [
+    { name: "commit", description: "按规范为当前改动生成提交信息", scope: "global", filePath: "~/.pi/agent/pidesktop-commands/commit.md" },
+    { name: "review", description: "审查指定文件的改动（$ARGUMENTS 传入路径）", scope: "project", filePath: "./.pidesktop-commands/review.md" }
+  ],
   mcpServers: [
     { name: "docs", status: "connected", toolCount: 8, resourceCount: 2, disabled: false },
     { name: "browser", status: "disabled", toolCount: 0, disabled: true }
@@ -564,12 +568,18 @@ export function createDemoApi(): DesktopApi {
           });
           break;
         }
+        case "session.command": {
+          updateSnapshot({
+            messages: [...demoSnapshot.messages, { id: `user-${Date.now()}`, role: "user", timestamp: Date.now(), command: { name: command.name }, blocks: command.arguments ? [{ type: "text", text: command.arguments }] : [] }]
+          });
+          break;
+        }
         case "session.regenerate": {
           const targetIndex = demoSnapshot.messages.findIndex((message) => message.role === "user" && (command.timestamp === undefined || message.timestamp === command.timestamp));
           const editedTimestamp = Date.now();
           const editedMessages = [
             ...(targetIndex >= 0 ? demoSnapshot.messages.slice(0, targetIndex) : demoSnapshot.messages),
-            { id: `demo-edited-${editedTimestamp}`, role: "user" as const, timestamp: editedTimestamp, skill: command.skillName ? { name: command.skillName } : undefined, blocks: command.text ? [{ type: "text" as const, text: command.text }] : [] }
+            { id: `demo-edited-${editedTimestamp}`, role: "user" as const, timestamp: editedTimestamp, skill: command.skillName ? { name: command.skillName } : undefined, command: command.commandName ? { name: command.commandName } : undefined, blocks: command.text ? [{ type: "text" as const, text: command.text }] : [] }
           ];
           updateSnapshot({
             busy: true,
@@ -592,7 +602,7 @@ export function createDemoApi(): DesktopApi {
           break;
         }
         case "session.queue.add": {
-          const text = command.skillName ? `【Skill：${command.skillName}】${command.text}` : command.text;
+          const text = command.commandName ? `【命令：/${command.commandName}】${command.text}` : command.skillName ? `【Skill：${command.skillName}】${command.text}` : command.text;
           const followUpCount = demoSnapshot.queuedMessages.filter((item) => item.kind === "followUp").length;
           updateSnapshot({ queuedMessages: [...demoSnapshot.queuedMessages, { kind: "followUp", index: followUpCount, text }] });
           break;

@@ -37,6 +37,7 @@ import type {
   ProviderSettings,
   RecentWorkspace,
   RuntimeCommand,
+  CommandSummary,
   RuntimeMessage,
   RuntimeSnapshot,
   SessionPaneSnapshot,
@@ -60,6 +61,8 @@ import { PermissionBroker } from "./permission-broker.js";
 import { loadRecentWorkspaces, recordRecentWorkspace, removeRecentWorkspace, writeRecentWorkspaces } from "./recent-workspaces.js";
 import { createSubagentTools, type SubagentContext } from "./subagent.js";
 import { buildSkillsSystemPromptBlock, setSkillEnabled, type DiscoveredSkill } from "./skill-catalog.js";
+import * as commandCatalog from "./command-catalog.js";
+import type { DiscoveredCommand } from "./command-catalog.js";
 import { createTodoStore, migrateLegacyTodoFile, type TodoStore } from "./todo-store.js";
 import { resolveVisionModel } from "./vision.js";
 import { buildResourceCatalog } from "./resource-catalog.js";
@@ -207,6 +210,8 @@ const customProviderId = "chatanytime-openai-compatible";
 const imageMimeTypes = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 let nativeSkills: SkillSummary[] = [];
 let discoveredSkills: DiscoveredSkill[] = [];
+let nativeCommands: CommandSummary[] = [];
+let discoveredCommands: DiscoveredCommand[] = [];
 let mcpServers: McpServerSummary[] = [];
 // 用量统计的按文件扫描缓存（utility 生命周期内存态；键 mtimeMs+size，
 // 会话内容不变时零重扫，助手筛选切换只重聚合）。
@@ -307,6 +312,21 @@ function skillPaths(): ReturnType<typeof runtimeSkills.skillPathsFor> {
   return runtimeSkills.skillPathsFor(workspace, getAgentDir());
 }
 
+/** 自定义命令双作用域目录：项目 <workspace>/.pidesktop-commands，全局 <agentDir>/pidesktop-commands。 */
+function commandPaths(): { globalDir: string; projectDir: string } {
+  return {
+    globalDir: join(getAgentDir(), "pidesktop-commands"),
+    projectDir: workspace ? resolve(workspace, ".pidesktop-commands") : join(getAgentDir(), "pidesktop-commands")
+  };
+}
+
+/** Scan custom command dirs and refresh the published CommandSummary catalog. */
+function syncCommands(): void {
+  const { globalDir, projectDir } = commandPaths();
+  discoveredCommands = commandCatalog.discoverCommands(globalDir, projectDir);
+  nativeCommands = commandCatalog.toCommandSummaries(discoveredCommands);
+}
+
 /** Scan skill dirs and refresh the published SkillSummary catalog. */
 function syncSkills(): void {
   const scanned = runtimeSkills.scanSkills(skillPaths());
@@ -384,7 +404,7 @@ async function syncMcpServers(refresh = false): Promise<void> {
 }
 
 function emitResourceCatalog(): void {
-  post({ type: "resources", resources: buildResourceCatalog({ skills: nativeSkills, mcpServers, todos, memory: memoryTopics, hooks: hookSummaries(), hooksEnabled: settings?.hooks?.enabled !== false }) });
+  post({ type: "resources", resources: buildResourceCatalog({ skills: nativeSkills, commands: nativeCommands, mcpServers, todos, memory: memoryTopics, hooks: hookSummaries(), hooksEnabled: settings?.hooks?.enabled !== false }) });
 }
 
 function emitTodos(): void {
@@ -456,6 +476,11 @@ function snapshotContextUsage(record: SessionRuntimeRecord | undefined): Context
 
 function runtimeSkillPrompt(name: string, instructions?: string, record: SessionRuntimeRecord | undefined = activeRuntime): string {
   return runtimeSkills.buildRuntimeSkillPrompt(discoveredSkills, name, instructions, record?.session.getActiveToolNames().includes("read") ?? false);
+}
+
+/** 自定义命令发送时展开（重读模板文件，热更新无需重载资源）。 */
+function runtimeCommandPrompt(name: string, args?: string): string {
+  return commandCatalog.buildRuntimeCommandPrompt(discoveredCommands, name, args);
 }
 
 /**
@@ -697,6 +722,7 @@ function activate(record: SessionRuntimeRecord): void {
   memoryTopics = record.memoryStore.list();
   emitMemory();
   syncSkills();
+  syncCommands();
   emitResourceCatalog();
   evictParkedSessions();
   // Re-sync the MCP tool cache when the active workspace changed so later
@@ -1601,6 +1627,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   });
   await resourceLoader.reload();
   syncSkills();
+  syncCommands();
   // Connect to configured MCP servers and rebuild the customTool set. Runs
   // concurrently with session manager setup since neither depends on the other.
   // Steady-state switches are served from the MCP tool cache (no network);
@@ -2207,6 +2234,12 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       await handleCommand({ type: "session.prompt", text: prompt, attachments: command.attachments, sessionId: command.sessionId });
       break;
     }
+    case "session.command": {
+      // 与 session.skill 同构：展开后的模板即 prompt，找不到命令时抛错回给渲染端。
+      const commandPrompt = runtimeCommandPrompt(command.name, command.arguments);
+      await handleCommand({ type: "session.prompt", text: commandPrompt, attachments: command.attachments, sessionId: command.sessionId });
+      break;
+    }
     case "session.prompt": {
       const record = resolveTargetRecord(command.sessionId);
       if (!record.session.model) throw new Error("请先配置并选择模型，再发送消息");
@@ -2247,7 +2280,11 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     case "session.queue.add": {
       const record = resolveTargetRecord(command.sessionId);
       if (!record.session.model) throw new Error("请先配置并选择模型，再发送消息");
-      const queueText = command.skillName ? runtimeSkillPrompt(command.skillName, command.text || undefined, record) : command.text;
+      const queueText = command.commandName
+        ? runtimeCommandPrompt(command.commandName, command.text || undefined)
+        : command.skillName
+          ? runtimeSkillPrompt(command.skillName, command.text || undefined, record)
+          : command.text;
       const prompt = await preparePromptPayload(queueText, command.attachments);
       // Pi 的队列以纯文本存储，编辑/删除/立即发送需要整队重建，图片附件会
       // 丢失——排队仅支持文本与文件附件（文件附件已折叠为路径清单）。
@@ -2292,8 +2329,12 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       const record = resolveTargetRecord(command.sessionId);
       if (!record.session.model) throw new Error("请先配置并选择模型，再重新生成");
       if (record.busy) throw new Error("当前话题正在执行，请等待完成或停止后再重新生成");
-      if (!command.text.trim() && !command.skillName) throw new Error("没有可重新生成的用户消息");
-      const regeneratedText = command.skillName ? runtimeSkillPrompt(command.skillName, command.text, record) : command.text.trim();
+      if (!command.text.trim() && !command.skillName && !command.commandName) throw new Error("没有可重新生成的用户消息");
+      const regeneratedText = command.commandName
+        ? runtimeCommandPrompt(command.commandName, command.text)
+        : command.skillName
+          ? runtimeSkillPrompt(command.skillName, command.text, record)
+          : command.text.trim();
       const regeneratedPrompt = await preparePromptPayload(regeneratedText, command.attachments);
       if (regeneratedPrompt.images.length && !hasImageInput(record.session.model)) {
         if (!visionModel) throw new Error("当前模型不支持图片输入，请先切换多模态模型，或在设置的模型服务中启用视觉识别");

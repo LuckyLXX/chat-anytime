@@ -89,6 +89,7 @@ type SlashCommand = {
 } & (
   | { kind: "skill"; skillName: string }
   | { kind: "command"; command: SessionTargetCommand }
+  | { kind: "custom"; commandName: string }
   | { kind: "new" }
 );
 
@@ -518,7 +519,7 @@ const MessageView = memo(function MessageView({ message, executions, onOpenArtif
     return (
       <article className="message message-user" data-role="user" data-turn-key={turnKey}>
         <div className="message-avatar user-avatar">我</div>
-        <div className="message-body message-bubble">{message.skill && <div className="message-skill-badge"><Puzzle size={13} /><strong>{message.skill.name}</strong></div>}{mentions.length > 0 && <div className="message-mention-badges">{mentions.map((token) => <span className="message-skill-badge" key={token} title={token}><File size={13} /><strong>{token}</strong></span>)}</div>}{images.length > 0 && <div className="image-message-list">{images.map((block, index) => <ImageMessageBlock key={`${message.id}-image-${index}`} block={block} />)}</div>}{body && <p className="user-text">{body}</p>}{!isControlMessage && <div className="message-actions"><button type="button" data-control="copy" title="复制" aria-label="复制用户消息" onClick={() => onCopy(message)}><Copy size={13} /></button><button type="button" data-control="edit" title="重新编辑" aria-label="重新编辑用户消息" onClick={() => onEdit(message)}><Pencil size={13} /></button></div>}</div>
+        <div className="message-body message-bubble">{message.skill && <div className="message-skill-badge"><Puzzle size={13} /><strong>{message.skill.name}</strong></div>}{message.command && <div className="message-skill-badge"><Zap size={13} /><strong>/{message.command.name}</strong></div>}{mentions.length > 0 && <div className="message-mention-badges">{mentions.map((token) => <span className="message-skill-badge" key={token} title={token}><File size={13} /><strong>{token}</strong></span>)}</div>}{images.length > 0 && <div className="image-message-list">{images.map((block, index) => <ImageMessageBlock key={`${message.id}-image-${index}`} block={block} />)}</div>}{body && <p className="user-text">{body}</p>}{!isControlMessage && <div className="message-actions"><button type="button" data-control="copy" title="复制" aria-label="复制用户消息" onClick={() => onCopy(message)}><Copy size={13} /></button><button type="button" data-control="edit" title="重新编辑" aria-label="重新编辑用户消息" onClick={() => onEdit(message)}><Pencil size={13} /></button></div>}</div>
       </article>
     );
   }
@@ -629,6 +630,7 @@ export const ConversationPane = memo(function ConversationPane({
 
   const [input, setInput] = useState(() => (sessionId !== undefined ? draftStore?.load(sessionId) ?? "" : ""));
   const [selectedSkill, setSelectedSkill] = useState<string>();
+  const [selectedCommand, setSelectedCommand] = useState<string>();
   const [editingMessageTimestamp, setEditingMessageTimestamp] = useState<number>();
   // 本地待回复计时必须绑定发起回合时的会话：跨会话/跨格子同时执行时 busy 恒为
   // true，按 busy 清理的 effect 不会触发；绑定 sessionId 后格子间自动失效。
@@ -693,10 +695,10 @@ export const ConversationPane = memo(function ConversationPane({
   // / PendingResponse 的 caption）展示实时耗时；回合结束后在最新一条回复的气泡
   // 下方展示定格值，不再嵌进气泡内容（用户反馈：气泡内不应出现回答耗时/总耗时）。
   const showTurnTimingOnLatest = Boolean(data.turnTiming && !isGenerating);
-  const canSubmit = Boolean(data.workspace && (input.trim() || attachments.length > 0 || selectedSkill || mentionedFiles.length > 0) && data.model);
+  const canSubmit = Boolean(data.workspace && (input.trim() || attachments.length > 0 || selectedSkill || selectedCommand || mentionedFiles.length > 0) && data.model);
   const workingLabel = `${title ?? "Pi"}正在努力输出中……`;
   let composerPlaceholder = "请先打开一个项目";
-  if (data.workspace) composerPlaceholder = selectedSkill ? "输入任务要求" : "让 Pi 检查、修改或运行这个项目，@ 可引用文件";
+  if (data.workspace) composerPlaceholder = selectedSkill ? "输入任务要求" : selectedCommand ? "输入命令参数（可留空直接发送）" : "让 Pi 检查、修改或运行这个项目，@ 可引用文件";
   if (data.workspace && data.busy) composerPlaceholder = "连续输入以排队后续修改";
 
   // —— 斜杠指令 ——
@@ -708,6 +710,13 @@ export const ConversationPane = memo(function ConversationPane({
       { trigger: "/new", label: "/new", description: "开启新话题", kind: "new" },
       { trigger: "/plan", label: "/plan", description: data.planMode ? "退出计划模式" : "进入计划模式：先出计划，批准后实施", kind: "command", command: { type: "session.planMode", enabled: !data.planMode } }
     ];
+    const commands: SlashCommand[] = resources.commands.map((entry) => ({
+      trigger: `/${entry.name}`,
+      label: `/${entry.name}`,
+      description: entry.description || "自定义命令",
+      kind: "custom",
+      commandName: entry.name
+    }));
     const skills: SlashCommand[] = resources.skills.filter((skill) => skill.enabled).map((skill) => ({
       trigger: `/skill:${skill.name}`,
       label: skill.name,
@@ -715,18 +724,18 @@ export const ConversationPane = memo(function ConversationPane({
       kind: "skill",
       skillName: skill.name
     }));
-    return [...fixed, ...skills];
-  }, [resources.skills, data.planMode]);
+    return [...fixed, ...commands, ...skills];
+  }, [resources.commands, resources.skills, data.planMode]);
 
   // 仅当输入以 / 开头且光标仍处于首个 token（无空格）时才过滤指令
   const slashToken = useMemo(() => {
-    if (selectedSkill) return null;
+    if (selectedSkill || selectedCommand) return null;
     const trimmed = input.trimStart();
     if (!trimmed.startsWith("/")) return null;
     const tail = trimmed.slice(1);
     if (tail.includes(" ")) return null; // 首个 token 已结束，补全关闭
     return trimmed.toLowerCase();
-  }, [input, selectedSkill]);
+  }, [input, selectedSkill, selectedCommand]);
 
   const slashMatches = useMemo(() => {
     if (!slashToken) return [];
@@ -743,6 +752,7 @@ export const ConversationPane = memo(function ConversationPane({
   const slashGroups = useMemo(() => {
     const groups = [
       { key: "command", title: "会话指令", items: new Array<{ cmd: SlashCommand; flatIndex: number }>() },
+      { key: "custom", title: "自定义命令", items: new Array<{ cmd: SlashCommand; flatIndex: number }>() },
       { key: "skill", title: "技能", items: new Array<{ cmd: SlashCommand; flatIndex: number }>() }
     ];
     slashMatches.forEach((cmd, flatIndex) => {
@@ -972,10 +982,10 @@ export const ConversationPane = memo(function ConversationPane({
   async function submit(event: FormEvent): Promise<void> {
     event.preventDefault();
     const text = input.trim();
-    if (!text && attachments.length === 0 && !selectedSkill && mentionedFiles.length === 0) return;
+    if (!text && attachments.length === 0 && !selectedSkill && !selectedCommand && mentionedFiles.length === 0) return;
     // 客户端执行的固定指令：不透传给 Pi（会话层会当噪声），直接发协议命令。
     // /new 在生成中也可用：新会话独立于正在运行的旧会话。
-    if (!selectedSkill && text === "/new") {
+    if (!selectedSkill && !selectedCommand && text === "/new") {
       try {
         await onNewSession();
         setInput("");
@@ -988,7 +998,7 @@ export const ConversationPane = memo(function ConversationPane({
       }
       return;
     }
-    if (!selectedSkill && (text === "/compact" || text.startsWith("/compact "))) {
+    if (!selectedSkill && !selectedCommand && (text === "/compact" || text.startsWith("/compact "))) {
       const instructions = text.startsWith("/compact ") ? text.slice("/compact ".length).trim() || undefined : undefined;
       try {
         await window.piDesktop.send({ type: "session.compact", instructions, sessionId: data.sessionId });
@@ -1000,20 +1010,26 @@ export const ConversationPane = memo(function ConversationPane({
       }
       return;
     }
-    const skillMatch = selectedSkill ? undefined : text.match(/^\/skill:([^\s]+)(?:\s+([\s\S]*))?$/u);
+    const skillMatch = selectedSkill || selectedCommand ? undefined : text.match(/^\/skill:([^\s]+)(?:\s+([\s\S]*))?$/u);
+    // 自定义命令也支持裸输入 /名字 参数 直接回车（菜单在完全匹配时会收起，与内置指令一致）；
+    // 名字必须命中资源目录里已发现的命令，否则当作普通文本发出去。
+    const commandMatch = selectedSkill || selectedCommand ? undefined : text.match(/^\/([A-Za-z0-9_\-\u4e00-\u9fff]+)(?:\s+([\s\S]*))?$/u);
+    const commandName = selectedCommand ?? (commandMatch && resources.commands.some((entry) => entry.name === commandMatch[1]) ? commandMatch[1] : undefined);
     // @ 提及在发送时拼回文本末尾——模型拿到的是可读的完整上下文。
     const composedText = [text, ...mentionedFiles.map((entry) => `@${entry.relativePath}`)].filter(Boolean).join("\n\n");
     const skillName = selectedSkill ?? skillMatch?.[1];
     const skillInstructions = selectedSkill ? composedText || undefined : skillMatch?.[2]?.trim() || undefined;
+    const commandArguments = selectedCommand ? composedText || undefined : commandMatch?.[2]?.trim() || undefined;
     if (attachments.some((item) => item.kind === "image") && !modelAcceptsImages && !visionFallbackAvailable) { setAttachmentError("当前模型不支持图片输入，请先切换多模态模型，或在设置的模型服务中启用视觉识别"); return; }
     // 生成中回车不丢弃输入：进入输入框上方的待发送队列，默认在本轮回复
     // 结束后作为下一轮消息发出，可编辑、立即发送或删除。
     if (data.busy) {
       if (editingMessageTimestamp !== undefined) return; // 编辑重发要求会话空闲，不排队
       try {
-        await window.piDesktop.send({ type: "session.queue.add", text: skillName ? skillInstructions ?? "" : composedText, skillName, attachments, sessionId: data.sessionId });
+        await window.piDesktop.send({ type: "session.queue.add", text: commandName ? commandArguments ?? "" : skillName ? skillInstructions ?? "" : composedText, skillName, commandName, attachments, sessionId: data.sessionId });
         setInput("");
         setSelectedSkill(undefined);
+        setSelectedCommand(undefined);
         setAttachments([]);
         setMentionedFiles([]);
       } catch (error) {
@@ -1024,7 +1040,9 @@ export const ConversationPane = memo(function ConversationPane({
     setLocalTurn({ startedAt: Date.now(), sessionId: data.sessionId });
     try {
       if (editingMessageTimestamp !== undefined) {
-        await window.piDesktop.send({ type: "session.regenerate", text: composedText, timestamp: editingMessageTimestamp, skillName, attachments, sessionId: data.sessionId });
+        await window.piDesktop.send({ type: "session.regenerate", text: composedText, timestamp: editingMessageTimestamp, skillName, commandName, attachments, sessionId: data.sessionId });
+      } else if (commandName) {
+        await window.piDesktop.send({ type: "session.command", name: commandName, arguments: commandArguments, attachments, sessionId: data.sessionId });
       } else if (skillName) {
         await window.piDesktop.send({ type: "session.skill", name: skillName, instructions: skillInstructions, attachments, sessionId: data.sessionId });
       } else {
@@ -1032,6 +1050,7 @@ export const ConversationPane = memo(function ConversationPane({
       }
       setInput("");
       setSelectedSkill(undefined);
+      setSelectedCommand(undefined);
       setAttachments([]);
       setMentionedFiles([]);
       setEditingMessageTimestamp(undefined);
@@ -1064,6 +1083,7 @@ export const ConversationPane = memo(function ConversationPane({
   const editMessage = useCallback((message: ChatMessage): void => {
     setInput(messageText(message));
     setSelectedSkill(message.skill?.name);
+    setSelectedCommand(message.command?.name);
     setAttachments([]);
     setMentionedFiles([]);
     setEditingMessageTimestamp(message.timestamp);
@@ -1071,10 +1091,11 @@ export const ConversationPane = memo(function ConversationPane({
     window.setTimeout(() => textareaRef.current?.focus(), 0);
   }, [onActionError]);
 
-  /** 编辑排队消息：文本回填输入框（Skill 消息回填展开后的提示词），同时从队列移除。 */
+  /** 编辑排队消息：文本回填输入框（Skill/命令消息回填展开后的提示词），同时从队列移除。 */
   function editQueuedMessage(item: QueuedMessage): void {
     setInput(item.text);
     setSelectedSkill(undefined);
+    setSelectedCommand(undefined);
     setAttachments([]);
     setMentionedFiles([]);
     setEditingMessageTimestamp(undefined);
@@ -1215,6 +1236,16 @@ export const ConversationPane = memo(function ConversationPane({
     setEditingMessageTimestamp(undefined);
     if (command.kind === "skill") {
       setSelectedSkill(command.skillName);
+      setSelectedCommand(undefined);
+      setInput("");
+      setMentionedFiles([]);
+      setSlashIndex(0);
+      window.setTimeout(() => textareaRef.current?.focus(), 0);
+      return;
+    }
+    if (command.kind === "custom") {
+      setSelectedCommand(command.commandName);
+      setSelectedSkill(undefined);
       setInput("");
       setMentionedFiles([]);
       setSlashIndex(0);
@@ -1223,6 +1254,7 @@ export const ConversationPane = memo(function ConversationPane({
     }
     if (command.kind === "new") {
       setSelectedSkill(undefined);
+      setSelectedCommand(undefined);
       setInput("");
       setAttachments([]);
       setMentionedFiles([]);
@@ -1232,6 +1264,7 @@ export const ConversationPane = memo(function ConversationPane({
     }
     if (data.busy) return;
     setSelectedSkill(undefined);
+    setSelectedCommand(undefined);
     setInput("");
     setAttachments([]);
     setMentionedFiles([]);
@@ -1490,7 +1523,7 @@ export const ConversationPane = memo(function ConversationPane({
                     onMouseEnter={() => setSlashIndex(flatIndex)}
                     onClick={() => applySlashCommand(cmd)}
                   >
-                    <span className="slash-menu-icon">{cmd.kind === "skill" ? <Puzzle size={14} /> : cmd.kind === "new" ? <MessageSquarePlus size={14} /> : <Layers size={14} />}</span>
+                    <span className="slash-menu-icon">{cmd.kind === "skill" ? <Puzzle size={14} /> : cmd.kind === "custom" ? <Zap size={14} /> : cmd.kind === "new" ? <MessageSquarePlus size={14} /> : <Layers size={14} />}</span>
                     <span className="slash-menu-copy"><strong>{cmd.label}</strong><small>{cmd.description}</small></span>
                   </button>
                 ))}
@@ -1520,6 +1553,7 @@ export const ConversationPane = memo(function ConversationPane({
 
         <div className="composer-input-row" data-composer-zone="input">
           {selectedSkill && <span className="composer-skill-chip"><Puzzle size={13} /><strong>{selectedSkill}</strong><button type="button" title="取消 Skill" aria-label={`取消 Skill ${selectedSkill}`} onClick={() => setSelectedSkill(undefined)}><X size={12} /></button></span>}
+          {selectedCommand && <span className="composer-skill-chip"><Zap size={13} /><strong>/{selectedCommand}</strong><button type="button" title="取消命令" aria-label={`取消命令 ${selectedCommand}`} onClick={() => setSelectedCommand(undefined)}><X size={12} /></button></span>}
           {mentionedFiles.length > 0 && (
             <span className="composer-mention-chips">
               {mentionedFiles.map((entry) => (
