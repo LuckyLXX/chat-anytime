@@ -1998,6 +1998,7 @@ export function App(): ReactNode {
         </>
       )}
       <button className="new-session-button" data-control="new-session" type="button" disabled={!snapshot.workspace} onClick={() => void createNewSession()}><MessageSquarePlus size={16} />新建话题</button>
+      <button className="automation-nav-button" data-control="automation-open" type="button" title="自动化任务" aria-label="自动化任务" onClick={() => openSettingsOn("automation")}><Zap size={15} /><span>自动化</span></button>
       <div className="sidebar-footer">
         <button type="button" data-control="settings" onClick={() => setSettingsOpen(true)}><Settings size={16} />设置</button>
         <span className={`runtime-indicator${snapshot.busy ? " busy" : ""}`}><i />{snapshot.status}</span>
@@ -2017,6 +2018,7 @@ export function App(): ReactNode {
           <button type="button" className="rail-brand" data-control="sidebar-expand" title="展开侧边栏" aria-label="展开侧边栏" onClick={() => { if (sidebarFlyoutOpen) { setSidebarFlyoutOpen(false); } else { setSidebarCollapsed(false); } }}><span className="rail-brand-mark">CA</span><PanelLeftOpen className="rail-brand-expand" size={18} /></button>
           <div className="sidebar-rail-items">
             <button type="button" className="rail-new-session" data-control="new-session" title="在当前工作区新建话题" aria-label="在当前工作区新建话题" disabled={!snapshot.workspace} onClick={() => void createNewSession()}><Plus size={18} /></button>
+            <button type="button" className="rail-icon" data-control="automation-open" title="自动化任务" aria-label="自动化任务" onClick={() => openSettingsOn("automation")}><Zap size={18} /></button>
             <button type="button" className="rail-icon" data-control="rail-topics" title="话题列表" aria-label="话题列表" onClick={() => { setSidebarView("topics"); setSidebarTab("topics"); setSidebarFlyoutOpen(true); }}><MessageCircle size={18} /></button>
             <button type="button" className="rail-icon" data-control="rail-search" title="搜索" aria-label="搜索" onClick={() => { setSidebarView("topics"); setSidebarFlyoutOpen(true); window.setTimeout(() => sidebarSearchRef.current?.focus(), 30); }}><Search size={18} /></button>
             <button type="button" className="rail-icon" data-control="rail-agents" title="助手" aria-label="助手" onClick={() => { setSidebarView("topics"); setSidebarTab("agents"); setSidebarFlyoutOpen(true); }}><Users size={18} /></button>
@@ -2045,7 +2047,6 @@ export function App(): ReactNode {
           <div className="project-title"><Folder size={17} /><span><strong>{snapshot.workspace?.split(/[\\/]/u).at(-1) ?? "ChatAnyTime"}</strong><small>{snapshot.agentName} · {snapshot.sessionId ? "当前话题" : "未开始话题"}</small></span>{snapshot.gitBranch && <span className="git-branch-badge" title={`当前 Git 分支：${snapshot.gitBranch}`}><GitBranch size={13} />{snapshot.gitBranch}</span>}</div>
           <div className="runtime-controls">
             <button className="workspace-top-button" data-control="workspace-open" type="button" onClick={() => void openWorkspace()}><FolderOpen size={15} /><span>工作区</span><strong>{compactPath(snapshot.workspace)}</strong><ChevronDown size={13} /></button>
-            <button className="workspace-top-button" data-control="automation-open" type="button" title="自动化任务" aria-label="自动化任务" onClick={() => openSettingsOn("automation")}><Zap size={15} /><span>自动化</span></button>
             <button className="icon-button preview-panel-toggle" data-control="preview-toggle" type="button" aria-label={previewOpened ? "关闭预览" : "打开预览"} title={previewOpened ? "关闭预览" : "打开预览"} onClick={() => {
               // 顶部按钮始终完全关闭/打开预览面板：即使已有标签页也不会
               // 折叠成残留一列栏+展开按钮的中间态。
