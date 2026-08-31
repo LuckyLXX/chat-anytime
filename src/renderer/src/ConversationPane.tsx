@@ -686,6 +686,16 @@ export const ConversationPane = memo(function ConversationPane({
   const [localTurn, setLocalTurn] = useState<{ startedAt: number; sessionId: string | undefined }>();
   const [attachments, setAttachments] = useState<PromptAttachment[]>([]);
   const [attachmentError, setAttachmentError] = useState<string>();
+  // 输入框附件条里图片缩略图的放大预览（复用 image-lightbox 模式）。
+  const [previewingAttachment, setPreviewingAttachment] = useState<PromptAttachment | null>(null);
+  useEffect(() => {
+    if (!previewingAttachment) return;
+    function close(event: KeyboardEvent): void {
+      if (event.key === "Escape") setPreviewingAttachment(null);
+    }
+    window.addEventListener("keydown", close);
+    return () => window.removeEventListener("keydown", close);
+  }, [previewingAttachment]);
   const [accessModeMenuOpen, setAccessModeMenuOpen] = useState(false);
   const [composerMenu, setComposerMenu] = useState<"model" | "thinking">();
   const [slashIndex, setSlashIndex] = useState(0);
@@ -1553,7 +1563,7 @@ export const ConversationPane = memo(function ConversationPane({
             ))}
           </div>
         )}
-        {attachments.length > 0 && <div className="attachment-list" data-composer-zone="attachments">{attachments.map((attachment, index) => <span className="attachment-chip" key={`${attachment.name}-${index}`}>{attachment.kind === "image" ? <img src={`data:${attachment.mimeType};base64,${attachment.data}`} alt="" /> : <FileDiff size={12} />}<span>{attachment.name}</span>{attachment.kind === "image" && !modelAcceptsImages && visionFallbackAvailable && <small className="attachment-chip-note" title="当前模型不支持图片，将自动调用视觉模型识别">视觉识别</small>}<button type="button" title="移除附件" aria-label={`移除 ${attachment.name}`} onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={12} /></button></span>)}</div>}
+        {attachments.length > 0 && <div className="attachment-list" data-composer-zone="attachments">{attachments.map((attachment, index) => <span className="attachment-chip" key={`${attachment.name}-${index}`}>{attachment.kind === "image" ? <button type="button" className="attachment-chip-preview" title="点击放大预览" aria-label={`放大预览 ${attachment.name}`} onClick={() => setPreviewingAttachment(attachment)}><img src={`data:${attachment.mimeType};base64,${attachment.data}`} alt="" /></button> : <FileDiff size={12} />}<span>{attachment.name}</span>{attachment.kind === "image" && !modelAcceptsImages && visionFallbackAvailable && <small className="attachment-chip-note" title="当前模型不支持图片，将自动调用视觉模型识别">视觉识别</small>}<button type="button" title="移除附件" aria-label={`移除 ${attachment.name}`} onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={12} /></button></span>)}</div>}
         {attachmentError && <div className="attachment-error" data-composer-zone="error" role="alert">{attachmentError}<button type="button" title="关闭提示" aria-label="关闭附件提示" onClick={() => setAttachmentError(undefined)}><X size={12} /></button></div>}
         <input ref={fileInputRef} type="file" hidden multiple accept="image/png,image/jpeg,image/webp,image/gif,.txt,.md,.json,.js,.ts,.tsx,.jsx,.py,.go,.rs,.java,.css,.html" onChange={(event) => { void addLocalFiles(event.target.files ?? []); event.currentTarget.value = ""; }} />
         {slashOpen && (
@@ -1663,6 +1673,14 @@ export const ConversationPane = memo(function ConversationPane({
           </div>
         </div>
       </form>
+      {previewingAttachment?.kind === "image" && (
+        <div className="modal-backdrop image-lightbox" role="presentation" onMouseDown={() => setPreviewingAttachment(null)}>
+          <div className="image-lightbox-content" role="dialog" aria-modal="true" aria-label="图片预览" onMouseDown={(event) => event.stopPropagation()}>
+            <button className="icon-button modal-close" type="button" title="关闭图片" aria-label="关闭图片" onClick={() => setPreviewingAttachment(null)}><X size={17} /></button>
+            <img src={`data:${previewingAttachment.mimeType};base64,${previewingAttachment.data}`} alt={previewingAttachment.name} />
+          </div>
+        </div>
+      )}
     </section>
   );
 });
