@@ -10,6 +10,7 @@ describe("buildResourceCatalog", () => {
       mcpServers: [],
       todos: [],
       memory: [],
+      subagents: [],
       hooks: [],
       hooksEnabled: true,
       diagnostics: []
@@ -67,6 +68,7 @@ describe("buildResourceCatalog", () => {
       mcpServers: [],
       todos: [],
       memory: [],
+      subagents: [],
       hooks: [],
       hooksEnabled: true,
       diagnostics: []

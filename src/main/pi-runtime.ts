@@ -59,7 +59,9 @@ import { McpClientManager } from "./mcp-client.js";
 import { removeMcpServerConfig, setMcpServerDisabled, upsertMcpServerConfig } from "./mcp-config.js";
 import { PermissionBroker } from "./permission-broker.js";
 import { loadRecentWorkspaces, recordRecentWorkspace, removeRecentWorkspace, writeRecentWorkspaces } from "./recent-workspaces.js";
-import { createSubagentTools, type SubagentContext } from "./subagent.js";
+import { createSubagentTools, buildSubagentPromptBlock, type SubagentContext } from "./subagent.js";
+import { readSubagents, saveSubagent, deleteSubagent } from "./subagents-store.js";
+import type { SubagentDefinition, SubagentScope } from "../shared/protocol.js";
 import { buildSkillsSystemPromptBlock, setSkillEnabled, type DiscoveredSkill } from "./skill-catalog.js";
 import * as commandCatalog from "./command-catalog.js";
 import { COMMAND_NAME_PATTERN, type DiscoveredCommand } from "./command-catalog.js";
@@ -350,6 +352,8 @@ function buildSubagentTools(record: Pick<SessionRuntimeRecord, "workspace" | "ag
     thinkingLevel,
     accessMode,
     model: model ?? { provider: "", id: "" },
+    // 双作用域合并后的自定义子智能体定义（delegate_agent 按名称引用）。
+    subagentCatalog,
     // 子代理与主会话同口径：目录模型交给子代理前套上 token-limit 覆盖。
     transformModel: (candidate) => applyModelOverrides(candidate),
     parentSessionId: sessionId,
@@ -396,6 +400,13 @@ function hookSummaries(): HookSummary[] {
   }));
 }
 
+/** 双作用域合并后的自定义子智能体定义缓存（delegate_agent 引用 + 渲染端列表）。 */
+let subagentCatalog: SubagentDefinition[] = [];
+
+function refreshSubagents(): void {
+  subagentCatalog = readSubagents(workspace, getAgentDir());
+}
+
 /** Connect to all configured MCP servers and refresh tool definitions + catalog status. */
 async function syncMcpServers(refresh = false): Promise<void> {
   const synced = await runtimeMcp.syncMcpServers(mcpClient, mcpConfigPaths(), refresh);
@@ -404,7 +415,7 @@ async function syncMcpServers(refresh = false): Promise<void> {
 }
 
 function emitResourceCatalog(): void {
-  post({ type: "resources", resources: buildResourceCatalog({ skills: nativeSkills, commands: nativeCommands, mcpServers, todos, memory: memoryTopics, hooks: hookSummaries(), hooksEnabled: settings?.hooks?.enabled !== false }) });
+  post({ type: "resources", resources: buildResourceCatalog({ skills: nativeSkills, commands: nativeCommands, mcpServers, todos, memory: memoryTopics, subagents: subagentCatalog, hooks: hookSummaries(), hooksEnabled: settings?.hooks?.enabled !== false }) });
 }
 
 function emitTodos(): void {
@@ -1525,6 +1536,8 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   if (!workspace || !modelRuntime || !currentAgent) return;
   // 工作区可能已切换（workspace.open / session.*）：先重读双作用域钩子配置。
   refreshHooksConfig();
+  // 工作区切换会改变项目级子智能体定义，一并重读。
+  refreshSubagents();
   const generation = ++sessionGeneration;
   // Drop any pending throttled emit so a stale streaming flush from the
   // previous session cannot fire against the freshly reset state below.
@@ -1623,7 +1636,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
         state: () => recordBox?.planState
       })
     ],
-    systemPromptOverride: (base) => [base, recordAgent.systemPrompt, buildDivModePrompt(recordAgent.divMode), buildSkillsSystemPromptBlock(runtimeSkills.activeSkillsFor(nativeSkills, recordAgent)), memoryPromptBlock].filter(Boolean).join("\n\n")
+    systemPromptOverride: (base) => [base, recordAgent.systemPrompt, buildDivModePrompt(recordAgent.divMode), buildSkillsSystemPromptBlock(runtimeSkills.activeSkillsFor(nativeSkills, recordAgent)), buildSubagentPromptBlock(subagentCatalog), memoryPromptBlock].filter(Boolean).join("\n\n")
   });
   await resourceLoader.reload();
   syncSkills();
@@ -1894,6 +1907,7 @@ async function initialize(command: Extract<RuntimeCommand, { type: "initialize" 
   apiKeys = command.apiKeys;
   workspace = settings.workspace;
   refreshHooksConfig();
+  refreshSubagents();
   recentWorkspaces = loadRecentWorkspaces(recentWorkspacesPath());
   if (workspace) touchRecentWorkspace(workspace);
   currentAgent = activeAgent();
@@ -2826,6 +2840,20 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         setSkillEnabled(skillPaths().statePath, command.id, command.enabled);
         await reloadRuntimeResources();
       });
+      break;
+    }
+    case "subagent.save": {
+      // 子智能体定义写入目标作用域文件（项目级用当前工作区）；刷新渲染端列表。
+      saveSubagent(workspace, getAgentDir(), command.subagent);
+      refreshSubagents();
+      emitResourceCatalog();
+      break;
+    }
+    case "subagent.delete": {
+      const scope = command.scope as SubagentScope;
+      if (!deleteSubagent(workspace, getAgentDir(), command.id, scope)) throw new Error("找不到要删除的子智能体");
+      refreshSubagents();
+      emitResourceCatalog();
       break;
     }
     case "memory.create": {

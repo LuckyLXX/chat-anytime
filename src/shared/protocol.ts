@@ -66,6 +66,27 @@ export type CustomProviderModel = ProviderModelSettings;
 /** Div 气泡模式三档：off 不注入提示词；auto 按场景酌情使用；always 所有回复强制气泡。 */
 export type DivBubbleMode = "off" | "auto" | "always";
 
+/** 子智能体作用域：global=用户级（所有工作区可见）；project=项目级（仅绑定工作区生效）。 */
+export type SubagentScope = "global" | "project";
+
+/** 自定义子智能体定义：delegate_agent 委派时可按名称引用，覆盖固定的 role 枚举。 */
+export interface SubagentDefinition {
+  id: string;
+  name: string;
+  description: string;
+  /** 列表/卡片上显示的颜色标记（一组预设色之一的 key，如 "amber"）。 */
+  color?: string;
+  /** 委派时使用的模型；缺省继承主会话当前模型。 */
+  model?: { provider: string; id: string };
+  systemPrompt: string;
+  /** 可用工具集："inherit" = 继承父会话已启用的内置工具；否则按启停数组精确控制。 */
+  tools: Record<BuiltinToolName, boolean> | "inherit";
+  scope: SubagentScope;
+  /** 是否注入工作区 AGENTS.md 作为子代理系统提示的一部分。 */
+  injectAgentsMd?: boolean;
+  builtin?: boolean;
+}
+
 export interface AgentProfile {
   id: string;
   name: string;
@@ -754,6 +775,8 @@ export interface ResourceCatalog {
   todos: Todo[];
   /** 激活助手的全量记忆主题（面板治理视图，不经工作区过滤）。 */
   memory: MemoryTopic[];
+  /** 双作用域合并后的自定义子智能体定义（项目覆盖全局）。 */
+  subagents: SubagentDefinition[];
   /** 双作用域合并后的钩子规则（项目覆盖全局）。 */
   hooks: HookSummary[];
   /** 钩子总开关（settings.hooks 的实时投影），面板头部的治理开关。 */
@@ -966,6 +989,8 @@ export type RuntimeCommand =
   | { type: "memory.create"; topic: string; description: string; content: string; workspaceScoped?: boolean }
   | { type: "memory.update"; topic: string; description: string; content: string }
   | { type: "memory.delete"; topic: string }
+  | { type: "subagent.save"; subagent: SubagentDefinition }
+  | { type: "subagent.delete"; id: string; scope: SubagentScope }
   | { type: "appearance.save"; appearance: AppearanceSettings }
   | { type: "mcp.server.save"; server: McpServerConfigDraft }
   | { type: "mcp.server.toggle"; name: string; enabled: boolean }

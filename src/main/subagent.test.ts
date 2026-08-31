@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { assistantText, createSubagentTools, parseModelId, type SubagentContext } from "./subagent.js";
+import { assistantText, buildSubagentPromptBlock, createSubagentTools, parseModelId, resolveSubagentDefinition, type SubagentContext } from "./subagent.js";
+import type { SubagentDefinition } from "../shared/protocol.js";
 
 function makeCtx(overrides: Partial<SubagentContext> = {}): SubagentContext {
   return {
@@ -38,5 +39,26 @@ describe("subagent tools", () => {
     expect(assistantText({ role: "assistant", content: [{ type: "text", text: "a" }, { type: "thinking", text: "skip" }, { type: "text", text: "b" }] })).toBe("a\nb");
     expect(assistantText({ role: "assistant", content: "plain" })).toBe("");
     expect(assistantText(undefined)).toBe("");
+  });
+
+  it("resolves a subagent definition by id or name and falls back otherwise", () => {
+    const catalog: SubagentDefinition[] = [
+      { id: "code-reviewer", name: "Code Reviewer", description: "审查代码", systemPrompt: "x", tools: "inherit", scope: "global" }
+    ];
+    expect(resolveSubagentDefinition(catalog, "code-reviewer")?.name).toBe("Code Reviewer");
+    expect(resolveSubagentDefinition(catalog, "Code Reviewer")?.id).toBe("code-reviewer");
+    expect(resolveSubagentDefinition(catalog, "missing")).toBeUndefined();
+    expect(resolveSubagentDefinition(undefined, "anything")).toBeUndefined();
+  });
+
+  it("builds a prompt block listing available subagents", () => {
+    const catalog: SubagentDefinition[] = [
+      { id: "a", name: "Code Reviewer", description: "审查代码", systemPrompt: "x", tools: "inherit", scope: "global" }
+    ];
+    const block = buildSubagentPromptBlock(catalog);
+    expect(block).toBeDefined();
+    expect(block).toContain("Code Reviewer");
+    expect(buildSubagentPromptBlock([])).toBeUndefined();
+    expect(buildSubagentPromptBlock(undefined)).toBeUndefined();
   });
 });

@@ -173,7 +173,7 @@ const emptySnapshot: RuntimeSnapshot = {
   queuedMessages: []
 };
 const emptySettings: DesktopSettings = { version: 2, thinkingLevel: "medium", accessMode: "ask", providers: [], agents: [], currentAgentId: "default", appearance: { theme: "system", themePreset: "default", customCss: "", customThemes: [], showThinking: true } };
-const emptyResources: ResourceCatalog = { skills: [], commands: [], mcpServers: [], todos: [], memory: [], hooks: [], hooksEnabled: true, diagnostics: [] };
+const emptyResources: ResourceCatalog = { skills: [], commands: [], mcpServers: [], todos: [], memory: [], subagents: [], hooks: [], hooksEnabled: true, diagnostics: [] };
 
 /**
  * 高频流式推送的消息数组按 uuid 复用旧对象引用：内容未变的消息保持同一

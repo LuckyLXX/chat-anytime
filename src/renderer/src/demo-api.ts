@@ -276,6 +276,7 @@ const demoResources: ResourceCatalog = {
   ],
   todos: [],
   memory: [],
+  subagents: [],
   hooks: [
     { name: "跑完通知", event: "agent_end", actionKind: "notify", action: { kind: "notify" }, actionPreview: "桌面通知", blocking: false, scope: "global", enabled: true },
     { name: "git防火墙", event: "tool_call", matcher: "bash", actionKind: "block", action: { kind: "block", deny: ["git\\s+push.*--force"] }, actionPreview: "拦截 1 条规则", blocking: true, scope: "project", enabled: true }
