@@ -808,6 +808,48 @@ export interface HookSummary {
   enabled: boolean;
 }
 
+/** cron 5 字段调度；timezone 缺省 = 跟随系统（留空）。"0 9 * * 1-5"=工作日每天 09:00。 */
+export interface AutomationSchedule {
+  cron: string;
+  /** IANA 时区名；缺省跟随系统。 */
+  timezone?: string;
+}
+
+/** 近一次运行摘要（列表/详情展示）。 */
+export interface AutomationRunInfo {
+  /** 运行所用会话 id（回看入口）。 */
+  sessionId: string;
+  startedAt: number;
+  status: "ok" | "error";
+  /** 结果摘要（最后一段助手文本）。 */
+  preview?: string;
+  error?: string;
+}
+
+/** 自动化任务（定时任务）。 */
+export interface AutomationTask {
+  id: string;
+  name: string;
+  schedule: AutomationSchedule;
+  /** 触发后让 Agent 做什么。 */
+  prompt: string;
+  /** 归属 Agent（创建时取当前）。 */
+  agentId: string;
+  /** 参照「空间」；v1 供展示/DSL，执行用当前工作区。 */
+  workspace?: string;
+  /** 执行时所用模型；缺省 = 该 Agent 默认模型或全局默认。 */
+  model?: { provider: string; id: string };
+  /** 权限；无人值守下受限模式会触发权限确认而挂起。 */
+  accessMode: AccessMode;
+  /** 可选绑定技能（v1 仅存，供展示）。 */
+  skillName?: string;
+  /** 可选绑定子智能体（v1 仅存，供展示）。 */
+  subagentName?: string;
+  enabled: boolean;
+  createdAt: number;
+  lastRun?: AutomationRunInfo;
+}
+
 export interface ResourceCatalog {
   skills: SkillSummary[];
   commands: CommandSummary[];
@@ -821,6 +863,8 @@ export interface ResourceCatalog {
   hooks: HookSummary[];
   /** 钩子总开关（settings.hooks 的实时投影），面板头部的治理开关。 */
   hooksEnabled: boolean;
+  /** 当前 Agent 的自动化定时任务（设置页「自动化任务」列表）。 */
+  automation: AutomationTask[];
   diagnostics: string[];
 }
 
@@ -1049,6 +1093,11 @@ export type RuntimeCommand =
   | { type: "skill.toggle"; id: string; enabled: boolean }
   | { type: "background.kill"; id: string }
   | { type: "resources.reload" }
+  /** 自动化定时任务：保存（创建/编辑整任务）、删除、开关、手动运行一次。 */
+  | { type: "automation.save"; task: AutomationTask }
+  | { type: "automation.delete"; id: string }
+  | { type: "automation.toggle"; id: string; enabled: boolean }
+  | { type: "automation.run"; id: string }
   | { type: "permission.resolve"; id: string; decision: PermissionDecision }
   | { type: "question.resolve"; id: string; answers?: string[] }
   /** 回滚单条回复内指定文件的改动：按（文件 + 调用 id）定位快照，每文件取最早快照恢复；targets 可含多个文件。 */
@@ -1083,6 +1132,10 @@ export type RuntimeMessage =
   | { type: "checkpoint-result"; sessionId: string; results: CheckpointRollbackResult[]; message?: string }
   /** 用量统计结果（响应 usage.stats.request；按需拉取，不进快照）。 */
   | { type: "usage-stats-result"; stats: UsageStats }
+  /** 自动化任务列表（store 变化时推送，当前 Agent）。 */
+  | { type: "automation"; tasks: AutomationTask[] }
+  /** 自动化任务运行结束（成功/失败）；渲染端 toast + 列表刷新。 */
+  | { type: "automation-run"; id: string; status: "ok" | "error"; message?: string }
   /** utility 进程发起的浏览器自动化操作；main 完成后以 browser-automation.result 命令回传。 */
   | { type: "browser-automation.request"; requestId: string; sessionKey: string; request: BrowserAutomationRequest }
   | { type: "error"; message: string }

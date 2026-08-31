@@ -42,6 +42,8 @@
 > `memory-panel` 是会话区右上方面板坞的记忆页（待办页 `task-panel` 居前，两者合并为一个浮动面板坞，头部 tab 切换，关闭态为单个 FAB）。
 > `turn-minimap` 是会话时间线左缘（聊天气泡左侧空位）的「轮次缩略导航」——每个缩略块对应一轮对话（一次用户提问 + 对应 AI 回复），hover 放大成浮出卡片展示该轮摘要、点击滚动到该轮。`.turn-minimap` 窄条用 `var(--panel-bg)` 派生背景，`.turn-thumb` 缩略块、`.turn-thumb.active` 当前轮、`.turn-thumb-pop` 悬停放大的浮出卡片均可用 `[data-pane="turn-minimap"]` 后代选择器重设计。默认背景色走 `--surface`/`--accent-soft`，主题可覆盖。
 
+> `automation-settings` 是设置页「自动化任务」tab（列表 + 搜索 + 过滤器，位于 `settings-dialog` 内）；`automation-dialog` 是「创建/编辑定时任务」弹窗。二者都随设置页/弹窗配色走，主题可用 `--panel-bg` 派生背景与 `--border`/`--surface-*` 控制排版。相关控件钩子：`data-control="automation-open"`（顶栏「自动化」入口）、`automation-run`（行内「运行一次」）、`automation-toggle`（启停，未在控件列枚举的地方用类名 `.automation-*` 命中）。
+
 ```css
 [data-pane="composer"] { border-image: url(frame.webp) 0 220 fill; border-radius: 0; }
 [data-pane="sidebar"]  { border-right: 2px solid var(--accent); }

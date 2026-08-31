@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type {
+  AutomationTask,
   ChatMessage,
   CheckpointRollbackResult,
   CustomProviderModel,
@@ -34,6 +35,14 @@ export interface HookRunResult {
 export interface CheckpointResultInfo {
   sessionId: string;
   results: CheckpointRollbackResult[];
+  message?: string;
+  at: number;
+}
+
+/** 最近一次自动化任务运行结果（automation-run 推送）；App 据此 toast。 */
+export interface AutomationRunInfo {
+  id: string;
+  status: "ok" | "error";
   message?: string;
   at: number;
 }
@@ -141,6 +150,10 @@ interface DesktopState {
   resources: ResourceCatalog;
   todos: Todo[];
   memory: MemoryTopic[];
+  /** 当前 Agent 的自动化定时任务列表（automation 推送/目录下发维护）。 */
+  automation: AutomationTask[];
+  /** 最近一次自动化任务运行结果；App 监听变化弹 toast。 */
+  automationRun?: AutomationRunInfo;
   settings: DesktopSettings;
   customProvider?: ProviderSettings;
   customProviderKeyConfigured: boolean;
@@ -191,7 +204,7 @@ const emptySnapshot: RuntimeSnapshot = {
   queuedMessages: []
 };
 const emptySettings: DesktopSettings = { version: 2, thinkingLevel: "medium", accessMode: "ask", providers: [], agents: [], currentAgentId: "default", appearance: { theme: "system", themePreset: "default", customCss: "", customThemes: [], showThinking: true } };
-const emptyResources: ResourceCatalog = { skills: [], commands: [], mcpServers: [], todos: [], memory: [], subagents: [], hooks: [], hooksEnabled: true, diagnostics: [] };
+const emptyResources: ResourceCatalog = { skills: [], commands: [], mcpServers: [], todos: [], memory: [], subagents: [], hooks: [], hooksEnabled: true, automation: [], diagnostics: [] };
 
 /**
  * 高频流式推送的消息数组按 uuid 复用旧对象引用：内容未变的消息保持同一
@@ -262,6 +275,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   resources: emptyResources,
   todos: [],
   memory: [],
+  automation: [],
   permissions: [],
   questions: [],
   rollbacks: {},
@@ -286,6 +300,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
       resources: bootstrap.resources ?? get().resources,
       todos: bootstrap.resources?.todos ?? get().todos,
       memory: bootstrap.resources?.memory ?? get().memory,
+      automation: bootstrap.resources?.automation ?? [],
       customProvider: bootstrap.settings.providers.find((provider) => provider.id === "chatanytime-openai-compatible"),
       customProviderKeyConfigured: Boolean(bootstrap.settings.providers.find((provider) => provider.id === "chatanytime-openai-compatible")?.keyConfigured),
       customModels: bootstrap.settings.providers.find((provider) => provider.id === "chatanytime-openai-compatible")?.models ?? []
@@ -348,6 +363,12 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
         break;
       case "resources":
         set({ resources: message.resources });
+        break;
+      case "automation":
+        set({ automation: message.tasks });
+        break;
+      case "automation-run":
+        set({ automationRun: { id: message.id, status: message.status, message: message.message, at: Date.now() } });
         break;
       case "todos":
         set({ todos: message.todos });

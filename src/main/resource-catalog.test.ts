@@ -13,6 +13,7 @@ describe("buildResourceCatalog", () => {
       subagents: [],
       hooks: [],
       hooksEnabled: true,
+      automation: [],
       diagnostics: []
     });
   });
@@ -71,6 +72,7 @@ describe("buildResourceCatalog", () => {
       subagents: [],
       hooks: [],
       hooksEnabled: true,
+      automation: [],
       diagnostics: []
     });
   });

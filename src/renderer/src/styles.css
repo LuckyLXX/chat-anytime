@@ -1787,3 +1787,50 @@ button, input, select, textarea, summary, label {
 .delegation-transcript-thinking pre { margin: 6px 0 0; padding: 8px 10px; border-radius: 6px; background: var(--surface-muted); color: var(--text); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
 :root[data-ui-radius] .delegation-transcript-dialog { border-radius: var(--ui-container-radius); }
 :root[data-ui-radius] .delegation-badge, :root[data-ui-radius] .delegation-role, :root[data-ui-radius] .delegation-transcript-button, :root[data-ui-radius] .delegation-transcript-tool { border-radius: var(--ui-control-radius); }
+
+/* —— 自动化任务（设置页 tab + 创建/编辑弹窗）—— */
+.automation-settings { min-height: 100%; padding: 17px 18px 20px; overflow-y: auto; }
+.automation-settings-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding-bottom: 14px; border-bottom: 1px solid var(--border); }
+.automation-settings-head h3 { display: flex; align-items: center; gap: 7px; margin: 0; font-size: 14px; }
+.automation-settings-head p { margin: 5px 0 0; color: var(--text-muted); font-size: 10px; line-height: 1.4; }
+.automation-head-actions { display: inline-flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.automation-head-actions .secondary-button, .automation-head-actions .primary-button { min-height: 30px; }
+.automation-filter-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 14px 0 10px; }
+.automation-filter-tabs { display: inline-flex; align-items: center; gap: 2px; padding: 2px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface-muted); }
+.automation-filter-tabs button { padding: 4px 10px; border: 0; border-radius: 5px; background: transparent; color: var(--text-muted); font-size: 10px; cursor: pointer; }
+.automation-filter-tabs button.active { color: var(--text); background: var(--surface-raised); }
+.automation-search { display: inline-flex; align-items: center; gap: 6px; width: min(220px, 100%); padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-input); color: var(--text-muted); }
+.automation-search input { flex: 1; min-width: 0; border: 0; padding: 0; background: transparent; color: var(--text); font-size: 11px; }
+.automation-search input::placeholder { color: var(--text-muted); }
+.automation-list { display: grid; gap: 5px; }
+.automation-row { position: relative; display: flex; align-items: center; gap: 9px; padding: 9px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-raised); }
+.automation-row-main { display: grid; flex: 1; min-width: 0; gap: 3px; }
+.automation-row-main strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-size: 12px; }
+.automation-row-schedule, .automation-row-model { display: inline-flex; align-items: center; gap: 5px; color: var(--text-muted); font-size: 10px; }
+.automation-row-schedule { font-variant-numeric: tabular-nums; }
+.automation-row-lastrun { font-size: 10px; }
+.automation-row-lastrun.ok { color: var(--success); }
+.automation-row-lastrun.error { color: var(--danger); }
+.automation-row-actions { display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; }
+.automation-row-actions button { display: grid; place-items: center; width: 27px; height: 27px; border: 0; border-radius: 6px; background: transparent; color: var(--text-muted); cursor: pointer; }
+.automation-row-actions button:hover { background: var(--surface-button-hover); color: var(--text); }
+.automation-row-actions button.danger:hover { color: var(--danger); }
+.automation-row-state { flex: 0 0 auto; padding: 2px 7px; border-radius: 999px; font-size: 10px; }
+.automation-row-state.on { color: var(--success); background: var(--success-soft); }
+.automation-row-state.off { color: var(--text-muted); background: var(--surface-muted); }
+.automation-dialog { display: grid; grid-template-rows: auto 1fr auto; width: min(560px, 94vw); max-height: min(720px, 88vh); border: 1px solid var(--border-strong); border-radius: 10px; background: var(--surface); box-shadow: 0 22px 52px rgba(0, 0, 0, .28); }
+.automation-dialog > header { display: flex; align-items: center; gap: 10px; padding: 13px 15px; border-bottom: 1px solid var(--border); }
+.automation-dialog > header > div { display: inline-flex; align-items: center; gap: 9px; min-width: 0; }
+.automation-dialog > header h2 { margin: 0; font-size: 14px; }
+.automation-dialog > header p { margin: 3px 0 0; color: var(--text-muted); font-size: 10px; }
+.automation-dialog > header .icon-button { margin-left: auto; }
+.automation-dialog-body { display: grid; gap: 9px; align-content: start; padding: 14px 15px; overflow-y: auto; }
+.automation-dialog-body label { display: grid; gap: 4px; margin: 0; color: var(--text-muted); font-size: 11px; }
+.automation-dialog-body input, .automation-dialog-body select, .automation-dialog-body textarea { width: 100%; min-width: 0; margin: 0; }
+.automation-dialog-body textarea { min-height: 88px; resize: vertical; }
+.automation-field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+.automation-hint { margin: 0; color: var(--text-muted); font-size: 9.5px; line-height: 1.45; }
+.automation-form-error { margin: 0; color: var(--danger); font-size: 10px; }
+.automation-dialog > footer { display: flex; justify-content: flex-end; gap: 8px; padding: 11px 15px; border-top: 1px solid var(--border); }
+:root[data-ui-radius] .automation-dialog { border-radius: var(--ui-container-radius); }
+:root[data-ui-radius] .automation-filter-tabs, :root[data-ui-radius] .automation-search, :root[data-ui-radius] .automation-row, :root[data-ui-radius] .automation-row-actions button { border-radius: var(--ui-control-radius); }

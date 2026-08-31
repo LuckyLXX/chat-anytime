@@ -16,6 +16,7 @@ import type {
   RuntimeSnapshot,
   ResourceCatalog,
   CommandSummary,
+  AutomationTask,
   TerminalCommand,
   TerminalEventData,
   UsageStats
@@ -309,8 +310,12 @@ const demoResources: ResourceCatalog = {
     { name: "git防火墙", event: "tool_call", matcher: "bash", actionKind: "block", action: { kind: "block", deny: ["git\\s+push.*--force"] }, actionPreview: "拦截 1 条规则", blocking: true, scope: "project", enabled: true }
   ],
   hooksEnabled: true,
+  automation: [],
   diagnostics: []
 };
+
+/** 离线演示的定时任务列表（automation.* 命令维护）。 */
+let demoAutomation: AutomationTask[] = [];
 
 function emit(message: RuntimeMessage): void {
   for (const listener of listeners) listener(message);
@@ -704,6 +709,24 @@ export function createDemoApi(): DesktopApi {
           emit({ type: "resources", resources: structuredClone(demoResources) });
           break;
         }
+        case "automation.save": {
+          const task = command.task;
+          const index = demoAutomation.findIndex((item) => item.id === task.id);
+          demoAutomation = index >= 0 ? demoAutomation.map((item) => (item.id === task.id ? task : item)) : [...demoAutomation, task];
+          emit({ type: "automation", tasks: structuredClone(demoAutomation) });
+          break;
+        }
+        case "automation.delete":
+          demoAutomation = demoAutomation.filter((item) => item.id !== command.id);
+          emit({ type: "automation", tasks: structuredClone(demoAutomation) });
+          break;
+        case "automation.toggle":
+          demoAutomation = demoAutomation.map((item) => (item.id === command.id ? { ...item, enabled: command.enabled } : item));
+          emit({ type: "automation", tasks: structuredClone(demoAutomation) });
+          break;
+        case "automation.run":
+          emit({ type: "automation-run", id: command.id, status: "ok" });
+          break;
         case "subagent.transcript": {
           // 离线演示：返回固定的委托会话时间线 fixture。
           const now = Date.now();

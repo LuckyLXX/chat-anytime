@@ -47,7 +47,8 @@ import type {
   ThinkingLevel,
   Todo,
   ToolExecution,
-  TurnTiming
+  TurnTiming,
+  AutomationTask
 } from "../shared/protocol.js";
 import { isDelegationProgress } from "../shared/protocol.js";
 import { toolLabel } from "../shared/locale.js";
@@ -60,13 +61,16 @@ import { McpClientManager } from "./mcp-client.js";
 import { removeMcpServerConfig, setMcpServerDisabled, upsertMcpServerConfig } from "./mcp-config.js";
 import { PermissionBroker } from "./permission-broker.js";
 import { loadRecentWorkspaces, recordRecentWorkspace, removeRecentWorkspace, writeRecentWorkspaces } from "./recent-workspaces.js";
-import { createSubagentTools, buildSubagentPromptBlock, type SubagentContext } from "./subagent.js";
+import { assistantText, createSubagentTools, buildSubagentPromptBlock, type SubagentContext } from "./subagent.js";
 import { readSubagents, saveSubagent, deleteSubagent } from "./subagents-store.js";
 import type { SubagentDefinition, SubagentScope, DelegationProgress } from "../shared/protocol.js";
 import { buildSkillsSystemPromptBlock, setSkillEnabled, type DiscoveredSkill } from "./skill-catalog.js";
 import * as commandCatalog from "./command-catalog.js";
 import { COMMAND_NAME_PATTERN, type DiscoveredCommand } from "./command-catalog.js";
 import { createTodoStore, migrateLegacyTodoFile, type TodoStore } from "./todo-store.js";
+import { automationPathFor, deleteAutomation, normalizeAutomation, readAutomation, recordAutomationRun, toggleAutomation, upsertAutomation } from "./automation-store.js";
+import { createAutomationScheduler, type AutomationScheduler } from "./automation-scheduler.js";
+import { buildAutomationTools, type AutomationCreateInput, type AutomationToolContext } from "./automation-tools.js";
 import { resolveVisionModel } from "./vision.js";
 import { buildResourceCatalog } from "./resource-catalog.js";
 import { agentWorkspaceSessionDir, backfillUnpersistedSessions, mergeSessionSummary, sessionListReadyFor } from "./session-scope.js";
@@ -118,6 +122,10 @@ let currentSessionsAgentId: string | undefined;
 let recentWorkspaces: RecentWorkspace[] = [];
 let selectedModel: { provider: string; id: string } | undefined;
 let settings: DesktopSettings | undefined;
+/** 当前 Agent 的自动化定时任务（设置页列表 + 目录下发）；随 Agent 切换重读。 */
+let automationTasks: AutomationTask[] = [];
+/** 自动化调度器（每分 tick，串行执行）；initialize 创建、utility 进程结束随进程清理。 */
+let automationScheduler: AutomationScheduler | undefined;
 let apiKeys: Record<string, string> = {};
 let visionModel: Model<Api> | undefined;
 let currentAgent: AgentProfile | undefined;
@@ -162,11 +170,14 @@ interface SessionRuntimeRecord {
   memoryTools: ToolDefinition[];
   questionTools: ToolDefinition[];
   planTools: ToolDefinition[];
+  /** 无人值守（后台自动化）会话：不暴露 ask_question，避免提问挂起。 */
+  unattended: boolean;
   /** Captured at bindExtensions(); drives MCP hot-reload for this session only. */
   extensionApi: ExtensionAPI | undefined;
   permissionDeps: runtimePermissions.PermissionGateDeps;
   visionTools: ToolDefinition[];
   browserTools: ToolDefinition[];
+  automationTools: ToolDefinition[];
   runStatus: SessionRunStatus | undefined;
   /** True from session.abort() until the run settles — resolves the dot to red. */
   abortRequested: boolean;
@@ -419,7 +430,7 @@ async function syncMcpServers(refresh = false): Promise<void> {
 }
 
 function emitResourceCatalog(): void {
-  post({ type: "resources", resources: buildResourceCatalog({ skills: nativeSkills, commands: nativeCommands, mcpServers, todos, memory: memoryTopics, subagents: subagentCatalog, hooks: hookSummaries(), hooksEnabled: settings?.hooks?.enabled !== false }) });
+  post({ type: "resources", resources: buildResourceCatalog({ skills: nativeSkills, commands: nativeCommands, mcpServers, todos, memory: memoryTopics, subagents: subagentCatalog, hooks: hookSummaries(), hooksEnabled: settings?.hooks?.enabled !== false, automation: automationTasks }) });
 }
 
 function emitTodos(): void {
@@ -442,6 +453,157 @@ function refreshMemory(): void {
   if (memoryStore) memoryTopics = memoryStore.list();
   emitMemory();
   emitResourceCatalog();
+}
+
+/** 某 Agent 的自动化任务文件路径。 */
+function automationStorePath(agentId: string): string {
+  return automationPathFor(getAgentDir(), agentId);
+}
+
+/** 广播当前 Agent 的自动化任务列表。 */
+function emitAutomation(): void {
+  post({ type: "automation", tasks: automationTasks });
+}
+
+/** 重读当前 Agent 的自动化任务并广播（列表 + 目录）。 */
+function refreshAutomation(): void {
+  if (currentAgent) automationTasks = readAutomation(automationStorePath(currentAgent.id));
+  emitAutomation();
+  emitResourceCatalog();
+}
+
+/** 自动化 store 变化后收口：刷新当前 Agent 列表（若变化的是当前 Agent）并让调度器重排。 */
+function afterAutomationChange(agentId: string): void {
+  if (currentAgent?.id === agentId) refreshAutomation();
+  automationScheduler?.refresh();
+}
+
+/** 最近一条非空助手文本（运行摘要预览采样）。 */
+function lastAssistantText(record: SessionRuntimeRecord): string {
+  const messages = record.session.state.messages;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const text = assistantText(messages[index]);
+    if (text) return text;
+  }
+  return "";
+}
+
+function truncatePreview(text: string, max = 200): string {
+  const collapsed = text.replace(/\s+/gu, " ").trim();
+  return collapsed.length > max ? `${collapsed.slice(0, max)}…` : collapsed;
+}
+
+/** 任务运行完成后把摘要写回 store（若任务仍存在）并让列表/调度器刷新。 */
+function afterAutomationRun(taskId: string, agentId: string, run: AutomationTask["lastRun"]): void {
+  if (run) recordAutomationRun(automationStorePath(agentId), taskId, run);
+  if (currentAgent?.id === agentId) refreshAutomation();
+  automationScheduler?.refresh();
+}
+
+/** 后台新建专用会话跑任务提示词（v1：当前 Agent + 任务模型/当前默认，skipActivate 不抢焦点）。 */
+async function runAutomationTask(task: AutomationTask): Promise<void> {
+  if (!workspace || !modelRuntime || !currentAgent) throw new Error("当前没有可用工作区或 Agent，无法运行定时任务");
+  // 快照本回合的 Agent/工作区：避免与 agent.select/workspace.open 交错时执行主体与数据落位错位。
+  const runAgent = currentAgent;
+  const runWorkspace = workspace;
+  const agentId = task.agentId || runAgent.id;
+  if (task.agentId && task.agentId !== runAgent.id) {
+    throw new Error(`定时任务「${task.name}」归属的 Agent 与当前不符（${task.agentId} vs ${runAgent.id}），跳过`);
+  }
+  const modelRef = task.model && modelRuntime.getModel(task.model.provider, task.model.id) && isModelEnabled(task.model.provider, task.model.id, settings?.providers) ? task.model : defaultModel();
+  const sessionDir = workspaceSessionDir();
+  if (!sessionDir) throw new Error("无法定位会话目录");
+  const manager = SessionManager.create(runWorkspace, sessionDir);
+  const sessionId = manager.getSessionId();
+  // 无人值守会话：注入任务级权限（默认 full 自动放行）、不暴露提问工具、不参与全局代际竞争。
+  await createSession(manager, {
+    skipActivate: true,
+    modelOverride: modelRef,
+    accessModeOverride: task.accessMode,
+    unattended: true,
+    noGenerationGuard: true
+  });
+  const record = liveSessions.get(sessionId);
+  if (!record) throw new Error("自动化会话创建失败");
+  if (!record.session.model) throw new Error("无法为任务解析模型，请检查该任务的模型配置");
+  if (task.accessMode !== "full") {
+    post({ type: "log", level: "warn", message: `自动化任务「${task.name}」使用受限权限 ${task.accessMode}，无人值守下遇权限确认会挂起，建议改为完全访问。` });
+  }
+  record.busy = true;
+  record.status = `自动化任务：${task.name}`;
+  record.runStatus = "running";
+  record.abortRequested = false;
+  patchSessionRunStatus(record);
+  beginTurn(record);
+  emitPaneStateFor(record);
+  const startedAt = Date.now();
+  let succeeded = false;
+  try {
+    await record.session.prompt(task.prompt);
+    succeeded = true;
+    const preview = truncatePreview(lastAssistantText(record));
+    afterAutomationRun(task.id, agentId, { sessionId, startedAt, status: "ok", ...(preview ? { preview } : {}) });
+    post({ type: "automation-run", id: task.id, status: "ok" });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    afterAutomationRun(task.id, agentId, { sessionId, startedAt, status: "error", error: message });
+    post({ type: "automation-run", id: task.id, status: "error", message });
+  } finally {
+    record.busy = false;
+    record.runStatus = succeeded ? "completed" : "failed";
+    patchSessionRunStatus(record);
+    emitState();
+    emitPaneStateFor(record);
+  }
+}
+
+/** 绑定到某 Agent 的自动化工具上下文（会话内 automation.* 工具用）。 */
+function automationToolContextFor(agentId: string): AutomationToolContext {
+  const storePath = () => automationStorePath(agentId);
+  return {
+    addTask: (input: AutomationCreateInput) => {
+      const raw = {
+        name: input.name,
+        schedule: { cron: input.cron, ...(input.timezone ? { timezone: input.timezone } : {}) },
+        prompt: input.prompt,
+        agentId,
+        ...(input.workspace ? { workspace: input.workspace } : {}),
+        ...(input.model ? { model: input.model } : {}),
+        accessMode: input.accessMode ?? "full",
+        ...(input.skillName ? { skillName: input.skillName } : {}),
+        ...(input.subagentName ? { subagentName: input.subagentName } : {}),
+        enabled: true,
+        createdAt: Date.now()
+      };
+      const task = normalizeAutomation(raw);
+      if (!task) throw new Error("任务字段校验失败");
+      const tasks = upsertAutomation(storePath(), task);
+      afterAutomationChange(agentId);
+      return { task, tasks };
+    },
+    listTasks: () => readAutomation(storePath()),
+    removeTask: (id) => {
+      const tasks = deleteAutomation(storePath(), id);
+      afterAutomationChange(agentId);
+      return tasks;
+    },
+    setTaskEnabled: (id, enabled) => {
+      const tasks = toggleAutomation(storePath(), id, enabled);
+      afterAutomationChange(agentId);
+      return tasks;
+    },
+    runTaskNow: async (id) => {
+      const task = readAutomation(storePath()).find((candidate) => candidate.id === id);
+      if (!task) return { ok: false, message: `未找到任务 ${id}` };
+      try {
+        await runAutomationTask(task);
+        return { ok: true, message: `已触发任务 ${id} 运行（结果见侧边栏对应会话）。` };
+      } catch (error) {
+        return { ok: false, message: error instanceof Error ? error.message : String(error) };
+      }
+    },
+    modelAvailable: (provider, id) => Boolean(modelRuntime && modelRuntime.getModel(provider, id) && isModelEnabled(provider, id, settings?.providers))
+  };
 }
 
 /** Session-scoped todo file: `<agentDir>/chatanytime-sessions/<agentId>/todos/<sessionId>.json`. */
@@ -888,8 +1050,8 @@ function wrapModelRuntimeForVision(runtime: ModelRuntime): ModelRuntime {
  * customTools arrays are held by reference inside Pi, so hot-path updates
  * rebuild in place (`length = 0` + push) instead of swapping the array.
  */
-function buildRecordTools(record: Pick<SessionRuntimeRecord, "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "planTools" | "visionTools" | "browserTools">): ToolDefinition[] {
-  return [...mcpTools, ...record.subagentTools, ...record.todoTools, ...record.memoryTools, ...record.questionTools, ...record.planTools, ...record.visionTools, ...record.browserTools];
+function buildRecordTools(record: Pick<SessionRuntimeRecord, "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "planTools" | "visionTools" | "browserTools" | "automationTools">): ToolDefinition[] {
+  return [...mcpTools, ...record.subagentTools, ...record.todoTools, ...record.memoryTools, ...record.questionTools, ...record.planTools, ...record.visionTools, ...record.browserTools, ...record.automationTools];
 }
 
 /**
@@ -898,7 +1060,7 @@ function buildRecordTools(record: Pick<SessionRuntimeRecord, "subagentTools" | "
  * models — multimodal models see the same tool set as before, so the request
  * prefix stays stable within each session/model configuration (cache discipline).
  */
-function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "planTools" | "visionTools" | "browserTools">, includeVision: boolean): string[] {
+function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "planTools" | "visionTools" | "browserTools" | "automationTools" | "unattended">, includeVision: boolean): string[] {
   const builtin = Object.entries(record.agent.tools ?? {}).filter(([, enabled]) => enabled).map(([name]) => name);
   return [
     ...builtin,
@@ -906,12 +1068,14 @@ function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "subagentTool
     ...record.subagentTools.map((tool) => tool.name),
     ...record.todoTools.map((tool) => tool.name),
     ...record.memoryTools.map((tool) => tool.name),
-    ...record.questionTools.map((tool) => tool.name),
+    // 无人值守会话不暴露提问工具：ask_question 会走 questionBroker 挂起且不可见。
+    ...(record.unattended ? [] : record.questionTools.map((tool) => tool.name)),
     ...record.planTools.map((tool) => tool.name),
     ...(includeVision ? record.visionTools.map((tool) => tool.name) : []),
     // Browser tools stay active regardless of the settings switch: the
     // execute closure reports the disabled state instead (no session rebuild).
-    ...record.browserTools.map((tool) => tool.name)
+    ...record.browserTools.map((tool) => tool.name),
+    ...record.automationTools.map((tool) => tool.name)
   ];
 }
 
@@ -1003,11 +1167,13 @@ function completeTurn(record: SessionRuntimeRecord): void {
 // Permission gate wiring: one deps object per session record so background
 // sessions gate tool calls against their own workspace/agent/session, never
 // against whatever is currently active.
-function permissionDepsFor(holder: { session: AgentSession | undefined }, recordWorkspace: string, recordAgent: AgentProfile): runtimePermissions.PermissionGateDeps {
+function permissionDepsFor(holder: { session: AgentSession | undefined }, recordWorkspace: string, recordAgent: AgentProfile, accessModeOverride?: () => AccessMode): runtimePermissions.PermissionGateDeps {
   return {
     broker: permissionBroker,
     workspace: () => recordWorkspace,
-    accessMode: () => accessMode,
+    // 后台自动化会话用任务级 accessMode（默认 full 自动放行，避免无人值守时遇权限确认挂死）；
+    // 普通会话沿用全局 accessMode。
+    accessMode: () => accessModeOverride?.() ?? accessMode,
     session: () => holder.session,
     agent: () => recordAgent
   };
@@ -1569,13 +1735,15 @@ function sessionReadyStatus(hasModel: boolean, usedFallback: boolean): string {
  * - otherwise (explicit sessionManager, or agent.save's config-apply rebuild)
  *   the record is rebuilt over the same history.
  */
-async function createSession(sessionManager?: SessionManager, options: { reactivate?: boolean; skipActivate?: boolean } = {}): Promise<void> {
+async function createSession(sessionManager?: SessionManager, options: { reactivate?: boolean; skipActivate?: boolean; modelOverride?: { provider: string; id: string }; accessModeOverride?: AccessMode; unattended?: boolean; noGenerationGuard?: boolean } = {}): Promise<void> {
   if (!workspace || !modelRuntime || !currentAgent) return;
   // 工作区可能已切换（workspace.open / session.*）：先重读双作用域钩子配置。
   refreshHooksConfig();
   // 工作区切换会改变项目级子智能体定义，一并重读。
   refreshSubagents();
-  const generation = ++sessionGeneration;
+  // noGenerationGuard（后台自动化会话）：不参与全局代际竞争，避免与用户
+  // 的新建/切会话管线互相作废（reviewer P1-2）；它捕获自己的 record 上下文。
+  const generation = options.noGenerationGuard ? sessionGeneration : ++sessionGeneration;
   // Drop any pending throttled emit so a stale streaming flush from the
   // previous session cannot fire against the freshly reset state below.
   if (pendingFlushTimer) {
@@ -1606,7 +1774,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   // the tool audit logger.
   const sessionHolder: { session: AgentSession | undefined } = { session: undefined };
   let recordBox: SessionRuntimeRecord | undefined;
-  const permissionDeps = permissionDepsFor(sessionHolder, recordWorkspace, recordAgent);
+  const permissionDeps = permissionDepsFor(sessionHolder, recordWorkspace, recordAgent, options.accessModeOverride ? () => options.accessModeOverride! : undefined);
   // 长期记忆：按助手划分、跨会话（pidesktop-memory/<agentId>/）。治理块与
   // 索引快照在此一次性冻结、整个会话字节不变（dsh 缓存纪律：系统提示词只含
   // 会话级常量，后续记忆变化全部经 memory_* 工具调用出现在对话尾部）。
@@ -1708,7 +1876,8 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     Boolean(persistedModel && modelRuntime.hasConfiguredAuth(persistedModel.provider)),
     settings?.providers
   );
-  const requested = hasExistingMessages ? undefined : defaultModel();
+  // modelOverride（自动化后台会话用）优先于默认模型；正常新建/恢复仍走 defaultModel。
+  const requested = hasExistingMessages ? undefined : (options.modelOverride ?? defaultModel());
   // 新会话且应用侧无默认（助手未设、全局 settings.model 未设）时，Pi 会走
   // findInitialModel 的 settings-default 分支——用它自己持久化的默认模型裸取
   // 注册表（我们每次 switchSessionModel 都会写进去），同样绕过覆盖。这里镜像
@@ -1790,10 +1959,12 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     enabled: () => settings?.browser?.enabled !== false,
       resolveUploadFiles: (files) => Promise.resolve(resolveWorkspaceUploadFiles(recordWorkspace, files))
   });
+  // 自动化定时任务工具（每会话注册，绑定本记录所属 Agent 的 store）。
+  const automationTools = buildAutomationTools(automationToolContextFor(recordAgent.id));
   // Each record owns its customTools array: Pi stores it by reference and
   // re-reads it on every tool-registry refresh, so per-record arrays let parked
   // sessions keep their tool set while the active one hot-swaps MCP tools.
-  const recordCustomTools: ToolDefinition[] = [...mcpTools, ...subagentTools, ...todoTools, ...memoryTools, ...questionTools, ...planTools, ...visionTools, ...browserTools];
+  const recordCustomTools: ToolDefinition[] = [...mcpTools, ...subagentTools, ...todoTools, ...memoryTools, ...questionTools, ...planTools, ...visionTools, ...browserTools, ...automationTools];
   const result = await createAgentSession({
     cwd: recordWorkspace,
     modelRuntime,
@@ -1804,7 +1975,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     resourceLoader,
     customTools: recordCustomTools
   });
-  if (generation !== sessionGeneration) {
+  if (!options.noGenerationGuard && generation !== sessionGeneration) {
     result.session.dispose();
     if (sessionsPromise) await sessionsPromise;
     return;
@@ -1865,6 +2036,8 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     permissionDeps,
     visionTools,
     browserTools,
+    automationTools,
+    unattended: Boolean(options.unattended),
     runStatus: undefined,
     abortRequested: false,
     cacheUsage: runtimeContextUsage.scanCacheUsage(result.session.state.messages),
@@ -1884,7 +2057,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   // Re-check after the awaits: a session switch that started mid-creation must
   // win, so a superseded pipeline drops its freshly built session instead of
   // stealing the active slot back.
-  if (generation !== sessionGeneration) {
+  if (!options.noGenerationGuard && generation !== sessionGeneration) {
     result.session.dispose();
     if (sessionsPromise) await sessionsPromise;
     return;
@@ -1968,6 +2141,14 @@ async function initialize(command: Extract<RuntimeCommand, { type: "initialize" 
   }
   visionModel = resolveVisionModel(settings.vision, modelRuntime, (model) => hasImageInput(model));
   await refreshCatalog();
+  // 自动化定时任务调度器：每分 tick，读取当前 Agent 任务；Agent 切换自然跟随。
+  automationScheduler = createAutomationScheduler({
+    getTasks: () => (currentAgent ? readAutomation(automationStorePath(currentAgent.id)) : []),
+    runTask: (task) => runAutomationTask(task),
+    onError: (message) => void post({ type: "log", level: "warn", message: `自动化任务错误：${message}` })
+  });
+  automationScheduler.start();
+  refreshAutomation();
   // checkpoint 快照的全局清扫（mtime 过期/总量超限）：异步不阻塞启动。
   void sweepCheckpoints(getAgentDir(), Date.now(), (message) => void post({ type: "log", level: "warn", message }));
   if (workspace) await createSession();
@@ -2494,6 +2675,35 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         });
       break;
     }
+    case "automation.save": {
+      if (!currentAgent) throw new Error("当前没有可用 Agent");
+      const task = normalizeAutomation(command.task);
+      if (!task) throw new Error("自动化任务字段校验失败");
+      upsertAutomation(automationStorePath(currentAgent.id), { ...task, agentId: currentAgent.id });
+      afterAutomationChange(currentAgent.id);
+      break;
+    }
+    case "automation.delete": {
+      if (!currentAgent) throw new Error("当前没有可用 Agent");
+      deleteAutomation(automationStorePath(currentAgent.id), command.id);
+      afterAutomationChange(currentAgent.id);
+      break;
+    }
+    case "automation.toggle": {
+      if (!currentAgent) throw new Error("当前没有可用 Agent");
+      toggleAutomation(automationStorePath(currentAgent.id), command.id, command.enabled);
+      afterAutomationChange(currentAgent.id);
+      break;
+    }
+    case "automation.run": {
+      if (!currentAgent) throw new Error("当前没有可用 Agent");
+      const runTask = readAutomation(automationStorePath(currentAgent.id)).find((candidate) => candidate.id === command.id);
+      if (!runTask) throw new Error(`未找到任务 ${command.id}`);
+      void runAutomationTask(runTask).catch((error: unknown) => {
+        post({ type: "automation-run", id: command.id, status: "error", message: error instanceof Error ? error.message : String(error) });
+      });
+      break;
+    }
     case "session.compact": {
       const record = resolveTargetRecord(command.sessionId);
       if (!record.session.model) throw new Error("请先配置并选择模型，再压缩上下文");
@@ -2739,6 +2949,9 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       settings.currentAgentId = command.agentId;
       currentAgent = activeAgent();
       selectedModel = currentAgent.defaultModel ?? settings.model;
+      // 自动化任务是 Agent 级：切换后列表与调度器的 getTasks 随之读新 Agent。
+      refreshAutomation();
+      automationScheduler?.refresh();
       transitionStatus = `正在切换到 ${currentAgent.name}`;
       emitState();
       try {
