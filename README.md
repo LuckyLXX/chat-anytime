@@ -1,6 +1,8 @@
 # ChatAnyTime
 
 ChatAnyTime 是一个面向项目开发的桌面 AI 客户端。它以 Pi 的执行、会话和工具能力为底座，重新实现桌面交互，并延续 ChatAnyTime 的富内容渲染理念。
+<img width="1426" height="913" alt="image" src="https://github.com/user-attachments/assets/133b8181-4581-4807-be4f-769f7da0b379" />
+
 
 ## 当前能力
 
