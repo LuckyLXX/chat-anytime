@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { AccessMode, AutomationTask } from "../shared/protocol.js";
 import { isValidCron } from "./automation-cron.js";
@@ -106,6 +106,24 @@ export function writeAutomation(filePath: string, tasks: readonly AutomationTask
   const tempPath = `${filePath}.${process.pid}.tmp`;
   writeFileSync(tempPath, `${JSON.stringify({ tasks }, null, 2)}\n`, "utf8");
   renameSync(tempPath, filePath);
+}
+
+/**
+ * 聚合读取全部角色的任务：遍历 `pidesktop-automation/*.json` 合并（容错跳过
+ * 缺失/损坏文件）。排序稳定：按 agentId 分组相邻（同名任务混杂时易对齐），
+ * 组内按 createdAt 升序。设置页与对话侧工具据此看到全角色任务。
+ */
+export function readAllAutomations(agentDir: string): AutomationTask[] {
+  let files: string[];
+  try {
+    files = readdirSync(join(agentDir, "pidesktop-automation")).filter((name) => name.endsWith(".json"));
+  } catch {
+    return [];
+  }
+  const tasks: AutomationTask[] = [];
+  for (const name of files) tasks.push(...readAutomation(join(agentDir, "pidesktop-automation", name)));
+  tasks.sort((a, b) => a.agentId.localeCompare(b.agentId) || a.createdAt - b.createdAt);
+  return tasks;
 }
 
 /** 保存（按 id 覆盖或追加）。任务必须在 normalize 后传入。返回最新列表。 */

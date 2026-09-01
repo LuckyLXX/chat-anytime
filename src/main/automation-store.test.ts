@@ -6,6 +6,7 @@ import {
   automationPathFor,
   deleteAutomation,
   normalizeAutomation,
+  readAllAutomations,
   readAutomation,
   recordAutomationRun,
   toggleAutomation,
@@ -88,6 +89,21 @@ describe("normalizeAutomation", () => {
     expect(task?.name).toBe("x");
     expect(task?.prompt).toBe("y");
     expect(task?.schedule).toEqual({ cron: "0 9 * * *", timezone: "Asia/Shanghai" });
+  });
+});
+
+describe("readAllAutomations", () => {
+  it("merges tasks from every agent file, sorted by agentId then createdAt", () => {
+    const agentDir = join(dir, "multi-agent");
+    upsertAutomation(automationPathFor(agentDir, "alice"), makeTask({ id: "a-1", agentId: "alice", createdAt: 500 }));
+    upsertAutomation(automationPathFor(agentDir, "bob"), makeTask({ id: "b-1", agentId: "bob", createdAt: 100 }));
+    upsertAutomation(automationPathFor(agentDir, "alice"), makeTask({ id: "a-2", agentId: "alice", createdAt: 200 }));
+    expect(readAllAutomations(agentDir).map((task) => task.id)).toEqual(["a-2", "a-1", "b-1"]);
+  });
+
+  it("returns an empty list when the directory is missing or empty", () => {
+    expect(readAllAutomations(join(dir, "no-dir"))).toEqual([]);
+    expect(readAllAutomations(join(dir, "empty-dir"))).toEqual([]);
   });
 });
 

@@ -82,6 +82,9 @@ function AutomationForm({ initial, models, providers, settings, workspaceName, o
   const defaultModel = agentDefaultModel(settings);
   const groups = useMemo(() => groupModelsByProvider(selectableCatalogModels(models), (providerId) => providers.find((item) => item.id === providerId)?.name), [models, providers]);
   const resolvedCron = preset === "custom" ? customCron.trim() : buildCron({ preset, minute, hour, weekday, monthDay });
+  // 归属角色：编辑保留原归属，新建默认当前角色；创建后不迁移。
+  const ownerAgentId = initial?.agentId ?? settings.currentAgentId;
+  const ownerName = settings.agents.find((item) => item.id === ownerAgentId)?.name ?? ownerAgentId;
 
   function submit(): void {
     if (!name.trim()) { setError("请填写任务名称"); return; }
@@ -94,7 +97,7 @@ function AutomationForm({ initial, models, providers, settings, workspaceName, o
       name: name.trim(),
       schedule: { cron: resolvedCron, ...(timezone.trim() ? { timezone: timezone.trim() } : {}) },
       prompt: prompt.trim(),
-      agentId: settings.currentAgentId,
+      agentId: ownerAgentId,
       workspace: workspace === "current" ? workspaceName : undefined,
       model,
       accessMode,
@@ -113,6 +116,7 @@ function AutomationForm({ initial, models, providers, settings, workspaceName, o
           <button className="icon-button" type="button" title="关闭" aria-label="关闭" onClick={onCancel}><X size={17} /></button>
         </header>
         <div className="automation-dialog-body">
+          <p className="automation-hint">归属角色：<strong className="automation-owner">{ownerName}</strong>{initial ? "（创建后不迁移）" : "——创建后不迁移，仅该角色激活时执行"}</p>
           <div className="automation-field-grid">
             <label>任务名称<input value={name} onChange={(event) => setName(event.target.value)} placeholder="例如: 每日项目巡检" /></label>
             <label>时区<input value={timezone} onChange={(event) => setTimezone(event.target.value)} placeholder="跟随系统（留空）" /></label>
@@ -175,6 +179,19 @@ export function AutomationSettings({ models, providers, settings, workspaceConfi
     });
   }, [automation, filter, query]);
 
+  // 按归属角色分组：组名取 Agent 显示名，找不到（归档/未知角色）回落 agentId。
+  const groups = useMemo(() => {
+    const names = new Map<string, string>();
+    for (const agent of settings.agents) names.set(agent.id, agent.name);
+    const byAgent = new Map<string, { name: string; tasks: AutomationTask[] }>();
+    for (const task of filtered) {
+      const entry = byAgent.get(task.agentId) ?? { name: names.get(task.agentId) ?? task.agentId, tasks: [] };
+      entry.tasks.push(task);
+      byAgent.set(task.agentId, entry);
+    }
+    return [...byAgent.values()];
+  }, [filtered, settings.agents]);
+
   function send(command: Parameters<typeof window.piDesktop.send>[0]): void { void window.piDesktop.send(command); }
 
   return (
@@ -200,33 +217,46 @@ export function AutomationSettings({ models, providers, settings, workspaceConfi
         ? <div className="automation-empty">
             <ListChecks size={22} />
             <strong>{automation.length === 0 ? "还没有定时任务" : "没有匹配的任务"}</strong>
-            <p>{automation.length === 0 ? "点击右上角「创建定时任务」手动配置，或「去会话中创建」让 AI 帮你设置。" : "换个关键词或切换过滤条件试试。"}</p>
+            <p>{automation.length === 0 ? "点击右上角「创建定时任务」手动配置，或「去会话中创建」让 AI 帮你设置。任务归属当前角色，其他角色的任务会按角色分组展示在这里。" : "换个关键词或切换过滤条件试试。"}</p>
           </div>
-        : <div className="automation-list">
-            {filtered.map((task) => (
-              <div className="automation-row" key={task.id} data-role="automation-task">
-                <span className={`automation-row-dot ${task.enabled ? "on" : "off"}`} aria-hidden="true" />
-                <div className="automation-row-main">
-                  <div className="automation-row-title">
-                    <strong>{task.name}</strong>
-                    {task.lastRun && <span className={`automation-row-lastrun ${task.lastRun.status}`} title={lastRunTitle(task)}>{task.lastRun.status === "ok" ? "已运行" : "运行失败"}</span>}
-                    <span className={`automation-row-state ${task.enabled ? "on" : "off"}`}>{task.enabled ? "进行中" : "已暂停"}</span>
-                  </div>
-                  <div className="automation-row-meta">
-                    <span><Clock size={12} />{scheduleLabel(task)}</span>
-                    <span>{ACCESS_MODE_SHORT[task.accessMode]}</span>
-                    {task.model && <span>{task.model.id}</span>}
-                    {task.workspace && <span><Folder size={12} />{task.workspace}</span>}
-                  </div>
-                  <p className="automation-row-prompt">{task.prompt}</p>
+        : <div className="automation-groups">
+            {groups.map((group) => (
+              <section className="automation-group" key={group.name}>
+                <header className="automation-group-head">
+                  <strong>{group.name}</strong>
+                  <span>{group.tasks.length} 条</span>
+                </header>
+                <div className="automation-list">
+                  {group.tasks.map((task) => {
+                    const runnable = task.agentId === settings.currentAgentId;
+                    return (
+                      <div className="automation-row" key={task.id} data-role="automation-task">
+                        <span className={`automation-row-dot ${task.enabled ? "on" : "off"}`} aria-hidden="true" />
+                        <div className="automation-row-main">
+                          <div className="automation-row-title">
+                            <strong>{task.name}</strong>
+                            {task.lastRun && <span className={`automation-row-lastrun ${task.lastRun.status}`} title={lastRunTitle(task)}>{task.lastRun.status === "ok" ? "已运行" : "运行失败"}</span>}
+                            <span className={`automation-row-state ${task.enabled ? "on" : "off"}`}>{task.enabled ? "进行中" : "已暂停"}</span>
+                          </div>
+                          <div className="automation-row-meta">
+                            <span><Clock size={12} />{scheduleLabel(task)}</span>
+                            <span>{ACCESS_MODE_SHORT[task.accessMode]}</span>
+                            {task.model && <span>{task.model.id}</span>}
+                            {task.workspace && <span><Folder size={12} />{task.workspace}</span>}
+                          </div>
+                          <p className="automation-row-prompt">{task.prompt}</p>
+                        </div>
+                        <div className="automation-row-actions">
+                          <button type="button" className={`automation-row-toggle ${task.enabled ? "on" : ""}`} role="switch" aria-checked={task.enabled} title={task.enabled ? "暂停任务" : "启用任务"} aria-label={task.enabled ? "暂停任务" : "启用任务"} onClick={() => send({ type: "automation.toggle", id: task.id, enabled: !task.enabled, agentId: task.agentId })} />
+                          <button type="button" title={runnable ? "运行一次" : `归属角色「${group.name}」，请切换到该角色后运行`} aria-label={runnable ? "运行一次" : "非当前角色，不可运行"} disabled={!runnable} onClick={() => send({ type: "automation.run", id: task.id, agentId: task.agentId })}><Play size={15} /></button>
+                          <button type="button" title="编辑" aria-label="编辑" onClick={() => setForm({ mode: "edit", task })}><Pencil size={15} /></button>
+                          <button type="button" title="删除" aria-label="删除" className="danger" onClick={() => { if (window.confirm(`删除定时任务「${task.name}」？`)) send({ type: "automation.delete", id: task.id, agentId: task.agentId }); }}><Trash2 size={15} /></button>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
-                <div className="automation-row-actions">
-                  <button type="button" className={`automation-row-toggle ${task.enabled ? "on" : ""}`} role="switch" aria-checked={task.enabled} title={task.enabled ? "暂停任务" : "启用任务"} aria-label={task.enabled ? "暂停任务" : "启用任务"} onClick={() => send({ type: "automation.toggle", id: task.id, enabled: !task.enabled })} />
-                  <button type="button" title="运行一次" aria-label="运行一次" onClick={() => send({ type: "automation.run", id: task.id })}><Play size={15} /></button>
-                  <button type="button" title="编辑" aria-label="编辑" onClick={() => setForm({ mode: "edit", task })}><Pencil size={15} /></button>
-                  <button type="button" title="删除" aria-label="删除" className="danger" onClick={() => { if (window.confirm(`删除定时任务「${task.name}」？`)) send({ type: "automation.delete", id: task.id }); }}><Trash2 size={15} /></button>
-                </div>
-              </div>
+              </section>
             ))}
           </div>}
 

@@ -150,7 +150,7 @@ interface DesktopState {
   resources: ResourceCatalog;
   todos: Todo[];
   memory: MemoryTopic[];
-  /** 当前 Agent 的自动化定时任务列表（automation 推送/目录下发维护）。 */
+  /** 全部角色的自动化定时任务列表（automation 推送/目录下发维护，设置页按角色分组）。 */
   automation: AutomationTask[];
   /** 最近一次自动化任务运行结果；App 监听变化弹 toast。 */
   automationRun?: AutomationRunInfo;

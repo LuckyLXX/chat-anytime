@@ -863,7 +863,7 @@ export interface ResourceCatalog {
   hooks: HookSummary[];
   /** 钩子总开关（settings.hooks 的实时投影），面板头部的治理开关。 */
   hooksEnabled: boolean;
-  /** 当前 Agent 的自动化定时任务（设置页「自动化任务」列表）。 */
+  /** 全部角色的自动化定时任务（设置页「自动化任务」列表，按角色分组展示）。 */
   automation: AutomationTask[];
   diagnostics: string[];
 }
@@ -1105,9 +1105,9 @@ export type RuntimeCommand =
   | { type: "resources.reload" }
   /** 自动化定时任务：保存（创建/编辑整任务）、删除、开关、手动运行一次。 */
   | { type: "automation.save"; task: AutomationTask }
-  | { type: "automation.delete"; id: string }
-  | { type: "automation.toggle"; id: string; enabled: boolean }
-  | { type: "automation.run"; id: string }
+  | { type: "automation.delete"; id: string; agentId?: string }
+  | { type: "automation.toggle"; id: string; enabled: boolean; agentId?: string }
+  | { type: "automation.run"; id: string; agentId?: string }
   | { type: "permission.resolve"; id: string; decision: PermissionDecision }
   | { type: "question.resolve"; id: string; answers?: string[]; /** 移交出口选定的实施模型（handoffOption 流程携带；ask_question 忽略）。 */ model?: { provider: string; id: string } }
   /** 回滚单条回复内指定文件的改动：按（文件 + 调用 id）定位快照，每文件取最早快照恢复；targets 可含多个文件。 */

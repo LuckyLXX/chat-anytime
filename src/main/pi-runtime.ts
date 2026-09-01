@@ -69,7 +69,7 @@ import { buildSkillsSystemPromptBlock, setSkillEnabled, type DiscoveredSkill } f
 import * as commandCatalog from "./command-catalog.js";
 import { COMMAND_NAME_PATTERN, type DiscoveredCommand } from "./command-catalog.js";
 import { createTodoStore, migrateLegacyTodoFile, type TodoStore } from "./todo-store.js";
-import { automationPathFor, deleteAutomation, normalizeAutomation, readAutomation, recordAutomationRun, toggleAutomation, upsertAutomation } from "./automation-store.js";
+import { automationPathFor, deleteAutomation, normalizeAutomation, readAllAutomations, readAutomation, recordAutomationRun, toggleAutomation, upsertAutomation } from "./automation-store.js";
 import { createAutomationScheduler, type AutomationScheduler } from "./automation-scheduler.js";
 import { buildAutomationTools, type AutomationCreateInput, type AutomationToolContext } from "./automation-tools.js";
 import { resolveVisionModel } from "./vision.js";
@@ -469,21 +469,21 @@ function automationStorePath(agentId: string): string {
   return automationPathFor(getAgentDir(), agentId);
 }
 
-/** 广播当前 Agent 的自动化任务列表。 */
+/** 广播自动化任务列表（全角色聚合）。 */
 function emitAutomation(): void {
   post({ type: "automation", tasks: automationTasks });
 }
 
-/** 重读当前 Agent 的自动化任务并广播（列表 + 目录）。 */
+/** 重读全部角色的自动化任务并广播（列表 + 目录）；任何角色变化都影响聚合列表。 */
 function refreshAutomation(): void {
-  if (currentAgent) automationTasks = readAutomation(automationStorePath(currentAgent.id));
+  automationTasks = readAllAutomations(getAgentDir());
   emitAutomation();
   emitResourceCatalog();
 }
 
-/** 自动化 store 变化后收口：刷新当前 Agent 列表（若变化的是当前 Agent）并让调度器重排。 */
-function afterAutomationChange(agentId: string): void {
-  if (currentAgent?.id === agentId) refreshAutomation();
+/** 自动化 store 变化后收口：刷新全角色列表并让调度器重排。 */
+function afterAutomationChange(_agentId: string): void {
+  refreshAutomation();
   automationScheduler?.refresh();
 }
 
@@ -505,7 +505,7 @@ function truncatePreview(text: string, max = 200): string {
 /** 任务运行完成后把摘要写回 store（若任务仍存在）并让列表/调度器刷新。 */
 function afterAutomationRun(taskId: string, agentId: string, run: AutomationTask["lastRun"]): void {
   if (run) recordAutomationRun(automationStorePath(agentId), taskId, run);
-  if (currentAgent?.id === agentId) refreshAutomation();
+  refreshAutomation();
   automationScheduler?.refresh();
 }
 
@@ -641,20 +641,29 @@ function automationToolContextFor(agentId: string): AutomationToolContext {
       afterAutomationChange(agentId);
       return { task, tasks };
     },
-    listTasks: () => readAutomation(storePath()),
+    listTasks: () => readAllAutomations(getAgentDir()),
     removeTask: (id) => {
-      const tasks = deleteAutomation(storePath(), id);
-      afterAutomationChange(agentId);
-      return tasks;
+      const all = readAllAutomations(getAgentDir());
+      const task = all.find((candidate) => candidate.id === id);
+      if (!task) return all;
+      deleteAutomation(automationStorePath(task.agentId), id);
+      afterAutomationChange(task.agentId);
+      return readAllAutomations(getAgentDir());
     },
     setTaskEnabled: (id, enabled) => {
-      const tasks = toggleAutomation(storePath(), id, enabled);
-      afterAutomationChange(agentId);
-      return tasks;
+      const all = readAllAutomations(getAgentDir());
+      const task = all.find((candidate) => candidate.id === id);
+      if (!task) return all;
+      toggleAutomation(automationStorePath(task.agentId), id, enabled);
+      afterAutomationChange(task.agentId);
+      return readAllAutomations(getAgentDir());
     },
     runTaskNow: async (id) => {
-      const task = readAutomation(storePath()).find((candidate) => candidate.id === id);
+      const task = readAllAutomations(getAgentDir()).find((candidate) => candidate.id === id);
       if (!task) return { ok: false, message: `未找到任务 ${id}` };
+      if (currentAgent?.id !== task.agentId) {
+        return { ok: false, message: `定时任务「${task.name}」归属角色 ${task.agentId}，请切换到该角色后运行` };
+      }
       try {
         await runAutomationTask(task);
         return { ok: true, message: `已触发任务 ${id} 运行（结果见侧边栏对应会话）。` };
@@ -2782,26 +2791,33 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       if (!currentAgent) throw new Error("当前没有可用 Agent");
       const task = normalizeAutomation(command.task);
       if (!task) throw new Error("自动化任务字段校验失败");
-      upsertAutomation(automationStorePath(currentAgent.id), { ...task, agentId: currentAgent.id });
-      afterAutomationChange(currentAgent.id);
+      // 按任务自身归属落位（设置页聚合列表可能编辑其他角色的任务）。
+      upsertAutomation(automationStorePath(task.agentId), { ...task, agentId: task.agentId });
+      afterAutomationChange(task.agentId);
       break;
     }
     case "automation.delete": {
       if (!currentAgent) throw new Error("当前没有可用 Agent");
-      deleteAutomation(automationStorePath(currentAgent.id), command.id);
-      afterAutomationChange(currentAgent.id);
+      const deleteAgentId = command.agentId || currentAgent.id;
+      deleteAutomation(automationStorePath(deleteAgentId), command.id);
+      afterAutomationChange(deleteAgentId);
       break;
     }
     case "automation.toggle": {
       if (!currentAgent) throw new Error("当前没有可用 Agent");
-      toggleAutomation(automationStorePath(currentAgent.id), command.id, command.enabled);
-      afterAutomationChange(currentAgent.id);
+      const toggleAgentId = command.agentId || currentAgent.id;
+      toggleAutomation(automationStorePath(toggleAgentId), command.id, command.enabled);
+      afterAutomationChange(toggleAgentId);
       break;
     }
     case "automation.run": {
       if (!currentAgent) throw new Error("当前没有可用 Agent");
-      const runTask = readAutomation(automationStorePath(currentAgent.id)).find((candidate) => candidate.id === command.id);
+      const runTask = readAllAutomations(getAgentDir()).find((candidate) => candidate.id === command.id);
       if (!runTask) throw new Error(`未找到任务 ${command.id}`);
+      if (runTask.agentId !== currentAgent.id) {
+        post({ type: "automation-run", id: command.id, status: "error", message: `定时任务「${runTask.name}」归属角色 ${runTask.agentId}，请切换到该角色后运行` });
+        break;
+      }
       void runAutomationTask(runTask).catch((error: unknown) => {
         post({ type: "automation-run", id: command.id, status: "error", message: error instanceof Error ? error.message : String(error) });
       });
