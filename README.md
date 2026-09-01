@@ -128,6 +128,10 @@ npm run package:win
 - Windows 目前输出解压目录，尚未生成安装程序、自动更新、代码签名和可执行文件资源定制
 - `@earendil-works/pi-coding-agent@0.84.4` 发布包的 shrinkwrap 固定了 `undici` 与 `brace-expansion` 的旧版本；截至本版，`npm audit --omit=dev` 会报告若干关联风险。根项目 override 无法可靠替换它们，需等待 Pi 上游发布更新依赖的版本，或以后改为可审计的 Pi 源码构建流程
 
+<p align="center">
+    <a href="https://linux.do" alt="LINUX DO"><img src="https://shorturl.at/ggSqS" /></a>
+</p>
+
 ## 开源协议
 
 本项目以 [MIT License](LICENSE) 开源。欢迎提交 Issue 与 Pull Request；架构约束与开发约定见 `AGENTS.md`，主题 API 见 `docs/theme-guide.md`。
