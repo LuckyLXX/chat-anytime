@@ -1178,6 +1178,22 @@ export function App(): ReactNode {
     if (!targetId) return;
     composerBridge.current.get(targetId)?.insertText(block);
   }, [focusedPaneId, snapshot.sessionId]);
+  // 文件树「添加到聊天」：工作区文件作为附件注入焦点格附件条——随下一条消息一起
+  // 发给模型（运行时按相对路径读取并生成引用块；体积/存在性校验走 statWorkspaceFile）。
+  const addFileToChat = useCallback(async (relativePath: string, workspace: string): Promise<void> => {
+    const targetId = focusedPaneId ?? snapshot.sessionId;
+    if (!targetId) { setMessageActionError("请先创建或打开一个会话"); return; }
+    let stat;
+    try {
+      stat = await window.piDesktop.statWorkspaceFile(workspace, relativePath);
+    } catch (error) {
+      setMessageActionError(error instanceof Error ? error.message : "读取文件信息失败");
+      return;
+    }
+    const api = composerBridge.current.get(targetId);
+    if (!api) { setMessageActionError("请先创建或打开一个会话"); return; }
+    api.addAttachments([{ kind: "file", name: stat.name, path: stat.relativePath, relativePath: stat.relativePath, size: stat.size }]);
+  }, [focusedPaneId, snapshot.sessionId]);
   // 浏览器标签页状态回流：用页面标题/加载态更新预览标签的元数据。
   const handleBrowserStateChange = useCallback((tabId: string, state: import("../../shared/protocol").BrowserPreviewState): void => {
     setPreview((current) => current ? {
@@ -1931,7 +1947,7 @@ export function App(): ReactNode {
             <button type="button" className="workspace-tree-refresh" title="刷新文件列表" aria-label="刷新文件列表" onClick={() => setTreeRefreshSignal((signal) => signal + 1)}><RefreshCw size={13} /></button>
           </div>
           {browsingWorkspace
-            ? <WorkspaceTree key={browsingWorkspace} workspace={browsingWorkspace} onOpenFile={(relativePath) => openFilePreview(relativePath, browsingWorkspace)} refreshSignal={treeRefreshSignal} />
+            ? <WorkspaceTree key={browsingWorkspace} workspace={browsingWorkspace} onOpenFile={(relativePath) => openFilePreview(relativePath, browsingWorkspace)} onAddToChat={(relativePath) => void addFileToChat(relativePath, browsingWorkspace)} onError={(message) => setMessageActionError(message)} refreshSignal={treeRefreshSignal} />
             : <div className="session-list-empty">请从话题列表选择工作区</div>}
         </>
       ) : (

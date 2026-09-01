@@ -129,12 +129,18 @@ export interface PaneComposerApi {
   focus(): void;
   /** 在草稿末尾追加文本块；已选 Skill/编辑态一并复位。 */
   insertText(text: string): void;
+  /** 追加附件（去重 + 5 个上限），供文件树「添加到聊天」等 App 层入口使用。 */
+  addAttachments(attachments: PromptAttachment[]): void;
 }
 
 /** 会话级草稿存取（App 层 Map 持有，格子 remount 后恢复）。 */
 export interface PaneDraftStore {
   load(sessionId: string): string | undefined;
   save(sessionId: string, text: string): void;
+}
+
+function attachmentKey(attachment: PromptAttachment): string {
+  return attachment.kind === "file" ? attachment.relativePath : `${attachment.name}:${attachment.size}`;
 }
 
 function messageText(message: ChatMessage): string {
@@ -692,6 +698,9 @@ export const ConversationPane = memo(function ConversationPane({
   const [localTurn, setLocalTurn] = useState<{ startedAt: number; sessionId: string | undefined }>();
   const [attachments, setAttachments] = useState<PromptAttachment[]>([]);
   const [attachmentError, setAttachmentError] = useState<string>();
+  // composerBridge 跨层合并附件时读取的镜像：api 闭包固定在首次挂载，状态经 ref 同步。
+  const attachmentsRef = useRef<PromptAttachment[]>([]);
+  useEffect(() => { attachmentsRef.current = attachments; }, [attachments]);
   // 输入框附件条里图片缩略图的放大预览（复用 image-lightbox 模式）。
   const [previewingAttachment, setPreviewingAttachment] = useState<PromptAttachment | null>(null);
   useEffect(() => {
@@ -1012,6 +1021,10 @@ export const ConversationPane = memo(function ConversationPane({
         setSelectedSkill(undefined);
         setEditingMessageTimestamp(undefined);
         focus();
+      },
+      addAttachments: (incoming) => {
+        mergeIncomingAttachments(incoming);
+        focus();
       }
     };
     registerComposerApi(api, sessionId);
@@ -1212,6 +1225,20 @@ export const ConversationPane = memo(function ConversationPane({
     }
   }, [onActionError]);
 
+  // 附件合并：去重（文件按相对路径、图片按名称+体积）+ 5 个上限，超出或重复时提示。
+  function mergeIncomingAttachments(incoming: PromptAttachment[]): void {
+    const current = attachmentsRef.current;
+    const seen = new Set(current.map(attachmentKey));
+    const accepted = incoming.filter((item) => {
+      const key = attachmentKey(item);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }).slice(0, Math.max(0, 5 - current.length));
+    if (accepted.length < incoming.length) setAttachmentError("已跳过重复附件或超出 5 个附件上限");
+    setAttachments([...current, ...accepted]);
+  }
+
   async function addAttachments(): Promise<void> {
     let selected: PromptAttachment[];
     try {
@@ -1220,16 +1247,7 @@ export const ConversationPane = memo(function ConversationPane({
       setAttachmentError(error instanceof Error ? error.message : "读取附件失败");
       return;
     }
-    const remaining = Math.max(0, 5 - attachments.length);
-    const seen = new Set(attachments.map((item) => item.kind === "file" ? item.relativePath : `${item.name}:${item.size}`));
-    const next = selected.filter((item) => {
-      const key = item.kind === "file" ? item.relativePath : `${item.name}:${item.size}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    }).slice(0, remaining);
-    if (next.length < selected.length) setAttachmentError("已跳过重复附件或超出 5 个附件上限");
-    setAttachments((current) => [...current, ...next]);
+    mergeIncomingAttachments(selected);
   }
 
   async function addLocalFiles(files: FileList | File[]): Promise<void> {

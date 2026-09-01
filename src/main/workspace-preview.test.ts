@@ -1,8 +1,8 @@
 import { access, mkdir, mkdtemp, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { artifactCandidatesFromBashCommand, artifactCandidatesFromOutput, changedWorkspaceFile, changedWorkspaceFiles, collectProducedArtifacts, createWorkspaceDirectory, createWorkspaceFile, deleteWorkspaceEntry, existingWorkspaceFiles, isArtifactProducingTool, listWorkspaceDirectory, readWorkspaceFilePreview, renameWorkspaceEntry, searchWorkspaceFiles, writeWorkspaceFile } from "./workspace-preview.js";
+import { artifactCandidatesFromBashCommand, artifactCandidatesFromOutput, changedWorkspaceFile, changedWorkspaceFiles, collectProducedArtifacts, createWorkspaceDirectory, createWorkspaceFile, deleteWorkspaceEntry, existingWorkspaceFiles, isArtifactProducingTool, listWorkspaceDirectory, readWorkspaceFilePreview, renameWorkspaceEntry, resolveWorkspaceEntry, searchWorkspaceFiles, statWorkspaceFile, writeWorkspaceFile } from "./workspace-preview.js";
 import { IMAGE_PREVIEW_LIMIT_BYTES } from "../shared/protocol.js";
 
 const TINY_PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
@@ -404,5 +404,38 @@ describe("workspace file preview", () => {
     await expect(renameWorkspaceEntry(workspace, "repo-link", "repo-link-2")).resolves.toEqual({ relativePath: "repo-link-2" });
     await expect(deleteWorkspaceEntry(workspace, "repo-link-2")).resolves.toEqual({ relativePath: "repo-link-2" });
     await expect(access(join(externalRepo, "skill", "SKILL.md"))).resolves.toBeUndefined();
+  });
+});
+
+describe("workspace entry reveal & stat（文件树右键）", () => {
+  it("resolveWorkspaceEntry 区分文件/目录并拒绝逃逸与不存在的条目", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "pidesktop-reveal-"));
+    await mkdir(join(workspace, "src"), { recursive: true });
+    await writeFile(join(workspace, "src", "app.ts"), "export {}", "utf8");
+
+    // 根目录：空路径/缺省 → 目录
+    await expect(resolveWorkspaceEntry(workspace, "")).resolves.toMatchObject({ kind: "directory" });
+    await expect(resolveWorkspaceEntry(workspace)).resolves.toMatchObject({ absolutePath: resolve(workspace), kind: "directory" });
+    // 文件 → showItemInFolder 选中；目录 → openPath 进入
+    await expect(resolveWorkspaceEntry(workspace, "src/app.ts")).resolves.toMatchObject({ kind: "file" });
+    await expect(resolveWorkspaceEntry(workspace, "src")).resolves.toMatchObject({ kind: "directory" });
+    // 逃逸路径与不存在路径拒绝
+    await expect(resolveWorkspaceEntry(workspace, "../outside.txt")).rejects.toThrow("当前工作区");
+    await expect(resolveWorkspaceEntry(workspace, "src/missing.ts")).rejects.toThrow("不存在");
+    // 工作区本身不存在
+    await expect(resolveWorkspaceEntry(join(workspace, "no-such-dir"))).rejects.toThrow("不存在");
+  });
+
+  it("statWorkspaceFile 返回名称/相对路径/体积，非普通文件与越界路径拒绝", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "pidesktop-stat-"));
+    await mkdir(join(workspace, "src"), { recursive: true });
+    await writeFile(join(workspace, "src", "app.ts"), "export const value = 1;\n", "utf8");
+
+    await expect(statWorkspaceFile(workspace, "src/app.ts")).resolves.toEqual({ name: "app.ts", relativePath: "src/app.ts", size: 24 });
+    // Windows 反斜杠路径与冗余前缀归一化
+    await expect(statWorkspaceFile(workspace, ".\\src\\app.ts")).resolves.toMatchObject({ relativePath: "src/app.ts" });
+    await expect(statWorkspaceFile(workspace, "src")).rejects.toThrow("普通文件");
+    await expect(statWorkspaceFile(workspace, "../escape.md")).rejects.toThrow("当前工作区");
+    await expect(statWorkspaceFile(workspace, "src/gone.ts")).rejects.toThrow("不存在");
   });
 });

@@ -18,6 +18,14 @@ function entryIcon(name: string): ReactNode {
 
 type EntryKind = "file" | "directory" | "root";
 
+// 展示用绝对路径：跟随工作区根路径自身的分隔符风格（根路径来自主进程真实路径）。
+function joinWorkspacePath(workspace: string, relativePath: string): string {
+  const base = workspace.replace(/[\\/]+$/u, "");
+  if (!relativePath) return base;
+  const sep = workspace.includes("\\") ? "\\" : "/";
+  return `${base}${sep}${relativePath.split("/").join(sep)}`;
+}
+
 interface DirectoryRowProps {
   workspace: string;
   relativePath: string;
@@ -156,7 +164,7 @@ function TreeDialogView({ dialog, onClose }: { dialog: TreeDialog; onClose(): vo
 // 目录树自动刷新周期：轮询间隔 + 窗口聚焦时立即刷新。
 const AUTO_REFRESH_INTERVAL_MS = 3000;
 
-export function WorkspaceTree({ workspace, onOpenFile, refreshSignal }: { workspace: string; onOpenFile(relativePath: string): void; refreshSignal?: number }): ReactNode {
+export function WorkspaceTree({ workspace, onOpenFile, onAddToChat, onError, refreshSignal }: { workspace: string; onOpenFile(relativePath: string): void; onAddToChat(relativePath: string): void; onError(message: string): void; refreshSignal?: number }): ReactNode {
   const [entries, setEntries] = useState<WorkspaceDirectoryEntry[]>();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
@@ -216,8 +224,22 @@ export function WorkspaceTree({ workspace, onOpenFile, refreshSignal }: { worksp
 
   const openRowMenu = useCallback((relativePath: string, name: string, kind: EntryKind, x: number, y: number): void => {
     const prefix = relativePath ? `${relativePath}/` : "";
+    const copyText = (text: string): void => {
+      navigator.clipboard.writeText(text).catch((error) => onError(error instanceof Error ? error.message : "复制失败"));
+    };
     const items: ContextMenuItem[] = [
-      ...(kind === "file" ? [{ label: "打开预览", onClick: () => onOpenFile(relativePath) }] : []),
+      ...(kind === "file" ? [
+        { label: "打开预览", onClick: () => onOpenFile(relativePath) },
+        { label: "添加到聊天", onClick: () => onAddToChat(relativePath) }
+      ] : []),
+      {
+        label: "在资源管理器中打开",
+        onClick: () => {
+          window.piDesktop.revealInExplorer(workspace, kind === "root" ? undefined : relativePath).catch((error) => onError(error instanceof Error ? error.message : "打开失败"));
+        }
+      },
+      { label: "复制绝对路径", onClick: () => copyText(joinWorkspacePath(workspace, kind === "root" ? "" : relativePath)) },
+      ...(kind !== "root" ? [{ label: "复制相对路径", onClick: () => copyText(relativePath) }] : []),
       {
         label: "新建文件",
         onClick: () => setDialog({
@@ -254,7 +276,7 @@ export function WorkspaceTree({ workspace, onOpenFile, refreshSignal }: { worksp
       ] : [])
     ];
     setMenu({ x, y, items });
-  }, [onOpenFile, refresh, workspace]);
+  }, [onAddToChat, onError, onOpenFile, refresh, workspace]);
 
   const openBackgroundMenu = useCallback((x: number, y: number): void => {
     openRowMenu("", "", "root", x, y);

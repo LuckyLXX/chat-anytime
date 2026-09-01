@@ -454,6 +454,13 @@ export interface WorkspaceFilePreview {
   workspace?: string;
 }
 
+/** 文件树「添加到聊天」前的体积探测结果（组装 FileAttachment 用）。 */
+export interface WorkspaceFileStat {
+  name: string;
+  relativePath: string;
+  size: number;
+}
+
 export interface WorkspaceFileWriteResult {
   saved: true;
   size: number;
@@ -1180,6 +1187,10 @@ export interface DesktopApi {
   createWorkspaceDirectory(workspace: string, relativePath: string): Promise<WorkspaceEntryResult>;
   deleteWorkspaceEntry(workspace: string, relativePath: string): Promise<WorkspaceEntryResult>;
   renameWorkspaceEntry(workspace: string, relativePath: string, newName: string): Promise<WorkspaceEntryResult>;
+  /** 在系统文件管理器中定位工作区条目：文件选中、文件夹进入；空路径打开工作区根目录。 */
+  revealInExplorer(workspace: string, relativePath?: string): Promise<void>;
+  /** 读取工作区文件的名称/相对路径/体积（文件树「添加到聊天」组装附件用）。 */
+  statWorkspaceFile(workspace: string, relativePath: string): Promise<WorkspaceFileStat>;
   browserPreview(command: BrowserPreviewCommand): Promise<BrowserPreviewState>;
   browserAutomationCancel(tabId: string): Promise<void>;
   terminal(command: TerminalCommand): Promise<void>;

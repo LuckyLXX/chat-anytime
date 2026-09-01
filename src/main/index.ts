@@ -2,13 +2,13 @@ import { createReadStream, existsSync, mkdirSync, readFileSync, writeFileSync } 
 import { readFile, realpath, stat } from "node:fs/promises";
 import { extname, join, resolve } from "node:path";
 import { Readable } from "node:stream";
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, protocol, safeStorage, utilityProcess, type UtilityProcess } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, protocol, safeStorage, shell, utilityProcess, type UtilityProcess } from "electron";
 import { spawn } from "node-pty";
 import { migrateSettings, normalizeVision } from "./settings.js";
 import { importExternalAttachment, workspaceRelativeAttachment } from "./attachments.js";
-import type { BrowserPreviewCommand, BrowserPreviewState, DesktopBootstrap, DesktopSettings, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot, TerminalCommand, TerminalEventData, WorkspaceDirectoryListing, WorkspaceEntryResult, WorkspaceFilePreview, WorkspaceFileSearchResult, WorkspaceFileWriteResult } from "../shared/protocol.js";
+import type { BrowserPreviewCommand, BrowserPreviewState, DesktopBootstrap, DesktopSettings, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot, TerminalCommand, TerminalEventData, WorkspaceDirectoryListing, WorkspaceEntryResult, WorkspaceFilePreview, WorkspaceFileSearchResult, WorkspaceFileStat, WorkspaceFileWriteResult } from "../shared/protocol.js";
 import { PREVIEW_FILE_SCHEME, parseWorkspaceFilePreviewUrl } from "../shared/protocol.js";
-import { createWorkspaceDirectory, createWorkspaceFile, deleteWorkspaceEntry, listWorkspaceDirectory, readWorkspaceFilePreview, renameWorkspaceEntry, safeRelativePath, searchWorkspaceFiles, writeWorkspaceFile } from "./workspace-preview.js";
+import { createWorkspaceDirectory, createWorkspaceFile, deleteWorkspaceEntry, listWorkspaceDirectory, readWorkspaceFilePreview, renameWorkspaceEntry, resolveWorkspaceEntry, safeRelativePath, searchWorkspaceFiles, statWorkspaceFile, writeWorkspaceFile } from "./workspace-preview.js";
 import { pruneDisabledModelRefs } from "./model-catalog.js";
 import { BrowserPreviewController } from "./browser-preview.js";
 import { BrowserAutomationController } from "./browser-automation.js";
@@ -403,6 +403,17 @@ function registerIpc(): void {
     if (typeof relativePath !== "string" || !relativePath.trim()) throw new Error("重命名路径无效");
     if (typeof newName !== "string") throw new Error("新名称无效");
     return renameWorkspaceEntry(workspace, relativePath, newName);
+  });
+  ipcMain.handle("desktop:reveal-in-explorer", async (_event, workspace: string, relativePath?: string): Promise<void> => {
+    // 文件选中（showItemInFolder）、目录进入（openPath）——与资源管理器「打开」语义一致。
+    const location = await resolveWorkspaceEntry(workspace, relativePath);
+    if (location.kind === "file") shell.showItemInFolder(location.absolutePath);
+    else await shell.openPath(location.absolutePath);
+  });
+  ipcMain.handle("desktop:stat-workspace-file", async (_event, workspace: string, relativePath: string): Promise<WorkspaceFileStat> => {
+    if (typeof workspace !== "string" || !workspace.trim()) throw new Error("请指定要操作的工作区");
+    if (typeof relativePath !== "string" || !relativePath.trim()) throw new Error("文件路径无效");
+    return statWorkspaceFile(workspace, relativePath);
   });
   ipcMain.handle("browser-preview:command", async (_event, command: BrowserPreviewCommand): Promise<BrowserPreviewState> => {
     if (!browserPreviewController) throw new Error("浏览器预览当前不可用");

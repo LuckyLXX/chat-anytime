@@ -1,6 +1,6 @@
 import { lstat, mkdir, open, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import type { WorkspaceDirectoryEntry, WorkspaceDirectoryListing, WorkspaceEntryResult, WorkspaceFilePreview, WorkspaceFileSearchEntry, WorkspaceFileSearchResult, WorkspaceFileWriteResult } from "../shared/protocol.js";
+import type { WorkspaceDirectoryEntry, WorkspaceDirectoryListing, WorkspaceEntryResult, WorkspaceFilePreview, WorkspaceFileSearchEntry, WorkspaceFileSearchResult, WorkspaceFileStat, WorkspaceFileWriteResult } from "../shared/protocol.js";
 import { IMAGE_PREVIEW_LIMIT_BYTES } from "../shared/protocol.js";
 
 const textPreviewLimit = 1024 * 1024;
@@ -572,4 +572,63 @@ export async function renameWorkspaceEntry(workspace: string, requestedPath: str
   invalidateWorkspaceFileIndex();
   const parent = relativePath.split("/").slice(0, -1).join("/");
   return { relativePath: parent ? `${parent}/${name}` : name };
+}
+
+/** 文件树「在资源管理器中打开」的定位信息：绝对路径 + 条目形态（文件选中 / 目录进入）。 */
+export interface WorkspaceEntryLocation {
+  absolutePath: string;
+  kind: "file" | "directory";
+}
+
+/** 解析工作区条目（空路径 = 工作区根）为绝对路径并判定形态；不存在时抛错。 */
+export async function resolveWorkspaceEntry(workspace: string, requestedPath?: string): Promise<WorkspaceEntryLocation> {
+  if (typeof workspace !== "string" || !workspace.trim()) throw new Error("请指定要操作的工作区");
+  const root = resolve(workspace);
+  const requested = requestedPath?.trim();
+  if (!requested || requested === ".") {
+    const info = await stat(root).catch(() => undefined);
+    if (!info?.isDirectory()) throw new Error("工作区目录不存在或已被删除");
+    return { absolutePath: root, kind: "directory" };
+  }
+  const relativePath = safeRelativePath(workspace, requested);
+  if (!relativePath || isAbsolute(requested)) throw new Error("路径必须位于当前工作区内");
+  const candidate = resolve(root, ...relativePath.split("/"));
+  const info = await lstat(candidate).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT" || error.code === "ENOTDIR") return undefined;
+    throw error;
+  });
+  if (info === undefined) throw new Error("文件不存在或已被删除");
+  // 目录链接允许进入（与文件树浏览同策略）；文件自身逃逸工作区外的符号链接拒绝。
+  if (info.isDirectory()) {
+    if (info.isSymbolicLink()) {
+      const rootReal = await realpath(root);
+      if (!safeRelativePath(rootReal, await realpath(candidate))) throw new Error("路径必须位于当前工作区内");
+    }
+    return { absolutePath: candidate, kind: "directory" };
+  }
+  if (info.isFile() && !info.isSymbolicLink()) return { absolutePath: candidate, kind: "file" };
+  const rootReal = await realpath(root);
+  if (!safeRelativePath(rootReal, await realpath(candidate))) throw new Error("路径必须位于当前工作区内");
+  return { absolutePath: candidate, kind: "file" };
+}
+
+/** 读取工作区普通文件的名称/相对路径/体积（文件树「添加到聊天」组装附件用）。 */
+export async function statWorkspaceFile(workspace: string, requestedPath: string): Promise<WorkspaceFileStat> {
+  const relativePath = safeRelativePath(workspace, requestedPath);
+  if (!relativePath || isAbsolute(requestedPath)) throw new Error("附件路径必须位于当前工作区内");
+  const root = resolve(workspace);
+  const candidate = resolve(root, ...relativePath.split("/"));
+  const info = await lstat(candidate).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT" || error.code === "ENOTDIR") return undefined;
+    throw error;
+  });
+  if (info === undefined) throw new Error("文件不存在或已被删除");
+  if (info.isSymbolicLink()) {
+    const rootReal = await realpath(root);
+    if (!safeRelativePath(rootReal, await realpath(candidate))) throw new Error("附件路径必须位于当前工作区内");
+  }
+  const finalInfo = await stat(candidate);
+  if (!finalInfo.isFile()) throw new Error("只能添加普通文件");
+  if (finalInfo.size > 20 * 1024 * 1024) throw new Error(`文件超过 20 MB 附件限制：${basename(candidate)}`);
+  return { name: basename(candidate), relativePath, size: finalInfo.size };
 }

@@ -444,6 +444,12 @@ export function createDemoApi(): DesktopApi {
       const parent = relativePath.includes("/") ? relativePath.slice(0, relativePath.lastIndexOf("/") + 1) : "";
       return { relativePath: `${parent}${newName}` };
     },
+    async revealInExplorer(_workspace: string, _relativePath?: string): Promise<void> {
+      // 浏览器演示环境没有系统文件管理器可打开。
+    },
+    async statWorkspaceFile(_workspace: string, relativePath: string): Promise<import("../../shared/protocol").WorkspaceFileStat> {
+      return { name: relativePath.split("/").at(-1) ?? relativePath, relativePath, size: 1024 };
+    },
     async browserPreview(command: BrowserPreviewCommand): Promise<BrowserPreviewState> {
       if (command.type === "close") {
         return emitBrowserPreview({ attached: false, url: "", title: "", loading: false, canGoBack: false, canGoForward: false, error: undefined });
