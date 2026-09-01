@@ -2,7 +2,8 @@ import { CircleHelp, Maximize2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import type { DesktopSettings, QuestionItem, QuestionRequest } from "../../../shared/protocol";
 import { useDesktopStore } from "../store";
-import { groupModelsByProvider, selectableCatalogModels } from "../lib/model-list";
+import { selectableCatalogModels } from "../lib/model-list";
+import { ModelSelect } from "./ModelSelect";
 import { RichContent } from "./RichContent";
 
 /** 每题的作答草稿：选项勾选 + 自定义输入（文本题只用 custom）。 */
@@ -78,10 +79,7 @@ export function QuestionPanel({ request, onOpenDetail }: { request: QuestionRequ
   const models = useDesktopStore((state) => state.models);
   const providers = useDesktopStore((state) => state.providers);
   // 与 composer 模型菜单同口径：只保留已勾选（enabled !== false）且已配置的模型。
-  const handoffGroups = useMemo(
-    () => groupModelsByProvider(selectableCatalogModels(models).filter((model) => model.configured), (providerId) => providers.find((item) => item.id === providerId)?.name),
-    [models, providers]
-  );
+  const handoffModels = useMemo(() => selectableCatalogModels(models).filter((model) => model.configured), [models]);
 
   useEffect(() => {
     setDrafts(request.questions.map(() => emptyQuestionDraft()));
@@ -135,7 +133,7 @@ export function QuestionPanel({ request, onOpenDetail }: { request: QuestionRequ
   function presetHandoffModel(): string {
     const ref = settings.agents.find((item) => item.id === settings.currentAgentId)?.defaultModel ?? settings.model;
     if (!ref) return "";
-    const found = handoffGroups.some((group) => group.models.some((model) => model.provider === ref.provider && model.id === ref.id));
+    const found = handoffModels.some((model) => model.provider === ref.provider && model.id === ref.id);
     return found ? `${ref.provider}/${ref.id}` : "";
   }
 
@@ -303,23 +301,17 @@ export function QuestionPanel({ request, onOpenDetail }: { request: QuestionRequ
       {handoffOpen && item.handoffOption && (
         <div className="question-handoff-row" onKeyDown={handleHandoffKey}>
           <label className="question-handoff-label" htmlFor="question-handoff-select">实施模型</label>
-          <select
+          <ModelSelect
             id="question-handoff-select"
-            ref={(element) => { handoffSelectRef.current = element ?? undefined; }}
             className="question-handoff-select"
+            models={handoffModels}
+            providers={providers}
             value={handoffModel}
+            placeholder="选择模型…"
             disabled={submitting}
-            onChange={(event) => setHandoffModel(event.target.value)}
-          >
-            {!handoffModel && <option value="">选择模型…</option>}
-            {handoffGroups.map((group) => (
-              <optgroup key={group.provider} label={group.providerName}>
-                {group.models.map((model) => (
-                  <option key={`${model.provider}/${model.id}`} value={`${model.provider}/${model.id}`}>{model.name}（{model.id}）</option>
-                ))}
-              </optgroup>
-            ))}
-          </select>
+            onChange={setHandoffModel}
+            innerRef={(element) => { handoffSelectRef.current = element ?? undefined; }}
+          />
           <p className="question-handoff-hint">新会话将以所选模型严格按计划文档实施</p>
           <div className="question-handoff-actions">
             <button className="secondary-button" type="button" disabled={submitting} onClick={cancelHandoff}>返回</button>

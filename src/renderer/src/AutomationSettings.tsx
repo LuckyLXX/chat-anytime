@@ -5,7 +5,8 @@ import { Clock, Folder, ListChecks, MessageSquarePlus, Pencil, Play, Plus, Searc
 import { useMemo, useState, type ReactNode } from "react";
 import type { AccessMode, AutomationTask, DesktopSettings, ModelOption, ProviderOption } from "../../shared/protocol";
 import { buildCron, describeCron, DEFAULT_SCHEDULE_PARTS, pad2, SCHEDULE_PRESETS, WEEKDAY_OPTIONS, type SchedulePreset } from "./lib/automation-schedule";
-import { groupModelsByProvider, selectableCatalogModels } from "./lib/model-list";
+import { selectableCatalogModels } from "./lib/model-list";
+import { ModelSelect } from "./components/ModelSelect";
 import { useDesktopStore } from "./store";
 
 type Filter = "all" | "enabled" | "paused";
@@ -80,7 +81,8 @@ function AutomationForm({ initial, models, providers, settings, workspaceName, o
   const [error, setError] = useState<string>();
 
   const defaultModel = agentDefaultModel(settings);
-  const groups = useMemo(() => groupModelsByProvider(selectableCatalogModels(models), (providerId) => providers.find((item) => item.id === providerId)?.name), [models, providers]);
+  // 与全局模型选择器同口径：只保留已勾选（enabled !== false）且已配置的模型。
+  const configuredModels = useMemo(() => selectableCatalogModels(models).filter((model) => model.configured), [models]);
   const resolvedCron = preset === "custom" ? customCron.trim() : buildCron({ preset, minute, hour, weekday, monthDay });
   // 归属角色：编辑保留原归属，新建默认当前角色；创建后不迁移。
   const ownerAgentId = initial?.agentId ?? settings.currentAgentId;
@@ -138,11 +140,7 @@ function AutomationForm({ initial, models, providers, settings, workspaceName, o
               <p className="automation-hint">等价表达式：<code className="automation-cron-preview">{resolvedCron}</code>{preset === "monthly" && "（部分月份无该日期时当月不触发）"}</p>
             </>
           )}
-          <label>模型<select value={modelValue} onChange={(event) => setModelValue(event.target.value)}>
-            <option value="">{defaultModel ? `继承默认（${defaultModel.id}）` : "请先配置并选择模型"}</option>
-            {modelValue && !groups.some((group) => group.models.some((model) => `${group.provider}/${model.id}` === modelValue)) && <option value={modelValue}>{modelValue}</option>}
-            {groups.map((group) => <optgroup key={group.provider} label={group.providerName}>{group.models.map((model) => <option key={model.id} value={`${group.provider}/${model.id}`}>{model.name}</option>)}</optgroup>)}
-          </select></label>
+          <label>模型<ModelSelect models={configuredModels} providers={providers} value={modelValue} placeholder={defaultModel ? `继承默认（${defaultModel.id}）` : "请先配置并选择模型"} onChange={setModelValue} /></label>
           <label>任务提示词<textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={4} placeholder="描述定时任务执行时要让 Agent 做什么。" /></label>
           <div className="automation-field-grid">
             <label>空间<select value={workspace} onChange={(event) => setWorkspace(event.target.value)}><option value="current">{workspaceName ? `当前工作区（${workspaceName}）` : "当前工作区"}</option><option value="none">不选择空间</option><option value="other">其它空间（仅存为元数据）</option></select></label>

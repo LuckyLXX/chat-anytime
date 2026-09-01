@@ -2,7 +2,8 @@ import { Bot, Pencil, Plus, Trash2, X } from "lucide-react";
 import { useState, type FormEvent, type ReactNode } from "react";
 import type { BuiltinToolName, ModelOption, ProviderOption, ResourceCatalog, RuntimeCommand, SubagentDefinition, SubagentScope } from "../../shared/protocol";
 import { toolLabel } from "../../shared/locale";
-import { groupModelsByProvider, selectableCatalogModels } from "./lib/model-list";
+import { selectableCatalogModels } from "./lib/model-list";
+import { ModelSelect } from "./components/ModelSelect";
 import { useDesktopStore } from "./store";
 
 const SUBAGENT_TOOLS: BuiltinToolName[] = ["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"];
@@ -45,7 +46,6 @@ export function SubagentSettings({ resources, workspaceOpen, models, providers }
 
   // 与顶栏模型选择器/Agent 默认模型下拉同口径：只保留已勾选（enabled !== false）且已配置的模型。
   const configuredModels = selectableCatalogModels(models).filter((model) => model.configured);
-  const groupedConfiguredModels = groupModelsByProvider(configuredModels, (providerId) => providers.find((item) => item.id === providerId)?.name);
 
   async function run(command: RuntimeCommand): Promise<boolean> {
     setBusy(true);
@@ -186,12 +186,7 @@ export function SubagentSettings({ resources, workspaceOpen, models, providers }
                 ))}
               </div>
             </label>
-            <label>模型
-              <select value={model} onChange={(changeEvent) => setModel(changeEvent.target.value)}>
-                <option value="">继承默认模型</option>
-                {groupedConfiguredModels.map((group) => <optgroup key={group.provider} label={group.providerName}>{group.models.map((item) => <option key={`${item.provider}/${item.id}`} value={`${item.provider}/${item.id}`}>{item.name}</option>)}</optgroup>)}
-              </select>
-            </label>
+            <label>模型<ModelSelect models={configuredModels} providers={providers} value={model} placeholder="继承默认模型" onChange={setModel} /></label>
             <label>作用域
               <select value={scope} onChange={(changeEvent) => setScope(changeEvent.target.value as SubagentScope)}>
                 <option value="project" disabled={!workspaceOpen}>{workspaceOpen ? "当前项目 .pidesktop-subagents.json" : "当前项目（需先打开工作区）"}</option>
