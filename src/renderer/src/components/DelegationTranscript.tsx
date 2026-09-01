@@ -45,7 +45,7 @@ export function DelegationTranscript({ delegation, onClose, onOpenArtifact }: {
       <div className="delegation-transcript-dialog" data-pane="settings-dialog" role="dialog" aria-modal="true" aria-label="子代理完整记录" onClick={(event) => event.stopPropagation()}>
         <header>
           <div className={`risk-icon ${delegation.subagentColor ? "subagent" : "command"}`}><ScrollText size={20} /></div>
-          <div>
+          <div className="delegation-transcript-head-copy">
             <h2>子代理完整记录</h2>
             <p>{titleParts.join(" · ")}</p>
           </div>
