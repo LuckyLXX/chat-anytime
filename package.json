@@ -1,7 +1,6 @@
 {
   "name": "chat-anytime",
   "version": "0.1.0",
-  "private": true,
   "description": "ChatAnyTime desktop client powered by the Pi coding agent SDK",
   "main": "out/main/index.js",
   "type": "module",

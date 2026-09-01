@@ -31,11 +31,11 @@ describe("memory store", () => {
 
   it("upserts by title (case-insensitive) keeping id/createdAt and workspace binding", async () => {
     const { store } = await makeStore();
-    const first = store.save({ title: "PiDesktop 协作", description: "d1", content: "v1", bindWorkspace: "D:\\Utools插件\\PiDesktop" });
+    const first = store.save({ title: "PiDesktop 协作", description: "d1", content: "v1", bindWorkspace: "D:\\workspace\\PiDesktop" });
     const second = store.save({ title: "pidesktop 协作", description: "d2", content: "v2" });
     expect(second.id).toBe(first.id);
     expect(second.createdAt).toBe(first.createdAt);
-    expect(second.workspace).toBe("D:\\Utools插件\\PiDesktop"); // bindWorkspace 缺省保留既有绑定
+    expect(second.workspace).toBe("D:\\workspace\\PiDesktop"); // bindWorkspace 缺省保留既有绑定
     expect(store.list()).toHaveLength(1);
     expect(store.read("PiDesktop 协作")?.content).toBe("v2");
 

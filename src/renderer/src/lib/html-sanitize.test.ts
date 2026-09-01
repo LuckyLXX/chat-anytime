@@ -33,13 +33,13 @@ describe("assistant HTML sanitizer", () => {
       children: [{
         type: "element",
         tagName: "img",
-        properties: { src: "file:///D:/Utools%E6%8F%92%E4%BB%B6/PiDesktop/poster.png" },
+        properties: { src: "file:///D:/workspace/PiDesktop/poster.png" },
         children: []
       }]
     };
 
     sanitizeRichHtmlTree()(tree);
-    expect(tree.children[0]?.properties.src).toBe("file:///D:/Utools%E6%8F%92%E4%BB%B6/PiDesktop/poster.png");
+    expect(tree.children[0]?.properties.src).toBe("file:///D:/workspace/PiDesktop/poster.png");
   });
 
   it("removes style tags unless the caller explicitly enables scoped styles", () => {

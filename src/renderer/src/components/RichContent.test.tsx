@@ -22,11 +22,11 @@ describe("RichContent dynamic bubbles", () => {
       <RichContent
         artifactPrefix="message-file-image"
         onOpenArtifact={() => undefined}
-        children={'<assistant_html><div><img src="file:///D:/Utools%E6%8F%92%E4%BB%B6/PiDesktop/poster.png" alt="poster" /></div></assistant_html>'}
+        children={'<assistant_html><div><img src="file:///D:/workspace/PiDesktop/poster.png" alt="poster" /></div></assistant_html>'}
       />
     );
 
-    expect(markup).toContain('src="file:///D:/Utools%E6%8F%92%E4%BB%B6/PiDesktop/poster.png"');
+    expect(markup).toContain('src="file:///D:/workspace/PiDesktop/poster.png"');
     expect(markup).toContain('alt="poster"');
   });
 

@@ -9,3 +9,13 @@ Thumbs.db
 .workbuddy/
 .pi-subagents/
 
+# 本地个人资产与内部文档（不上传 GitHub）
+themes/霓虹街区/
+wallpapers/
+.attachments/
+test-image.png
+docs/回滚测试文件.md
+docs/迭代记录.md
+docs/VCPChat前端设计分析.md
+docs/主题创作能力分析.md
+
