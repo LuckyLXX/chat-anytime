@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { BrowserAutomationRequest, BrowserAutomationResult } from "../shared/protocol.js";
 import { buildBrowserTools, type BrowserToolDeps } from "./runtime-browser.js";
@@ -13,7 +13,7 @@ function okResult(data: OkResult["data"]): BrowserAutomationResult {
 const execute = (tool: { execute: (id: string, params: never, signal: undefined, onUpdate: undefined, ctx: ExtensionContext) => Promise<unknown> }, params: unknown) =>
   tool.execute("test-call", params as never, undefined, undefined, undefined as unknown as ExtensionContext);
 
-function toolsWith(responses: Record<string, BrowserAutomationResult>, enabled = true) {
+function toolsWith(responses: Record<string, BrowserAutomationResult>, enabled = true, saveScreenshot?: (data: string, mimeType: "image/png" | "image/jpeg") => Promise<string>) {
   const calls: BrowserAutomationRequest[] = [];
   const deps: BrowserToolDeps = {
     enabled: () => enabled,
@@ -22,7 +22,8 @@ function toolsWith(responses: Record<string, BrowserAutomationResult>, enabled =
       const response = responses[op.op];
       if (!response) throw new Error(`没有为 ${op.op} 准备响应`);
       return response;
-    }
+    },
+    ...(saveScreenshot ? { saveScreenshot } : {})
   };
   return { tools: buildBrowserTools(deps), calls };
 }
@@ -121,6 +122,35 @@ describe("browser tool cluster", () => {
     const screenshot = tools.find((tool) => tool.name === "browser_screenshot")!;
     const result = await execute(screenshot, {}) as { content: Array<{ type: string }> };
     expect(result.content.some((part) => part.type === "image")).toBe(true);
+  });
+
+  it("persists the screenshot and reports its path for text-only recognition", async () => {
+    const saveScreenshot = vi.fn(async (_data: string, _mimeType: "image/png" | "image/jpeg") => ".pidesktop/screenshots/browser-20260902-101530-123.png");
+    const { tools, calls } = toolsWith(
+      { screenshot: okResult({ kind: "screenshot", data: "iVBORw0KGgo=", width: 800, height: 600, mimeType: "image/png" }) },
+      true,
+      saveScreenshot
+    );
+    const screenshot = tools.find((tool) => tool.name === "browser_screenshot")!;
+    const result = await execute(screenshot, {}) as { content: Array<{ type: string; text?: string }>; details: Record<string, unknown> };
+    expect(calls[0]).toEqual({ op: "screenshot" });
+    expect(saveScreenshot).toHaveBeenCalledWith("iVBORw0KGgo=", "image/png");
+    expect(JSON.stringify(result.content)).toContain(".pidesktop/screenshots/browser-20260902-101530-123.png");
+    expect(result.content.some((part) => part.type === "image")).toBe(true);
+    expect(result.details.savedPath).toBe(".pidesktop/screenshots/browser-20260902-101530-123.png");
+  });
+
+  it("keeps the screenshot call alive when persisting fails", async () => {
+    const saveScreenshot = vi.fn(async () => { throw new Error("disk full"); });
+    const { tools } = toolsWith(
+      { screenshot: okResult({ kind: "screenshot", data: "iVBORw0KGgo=", width: 800, height: 600, mimeType: "image/png" }) },
+      true,
+      saveScreenshot
+    );
+    const screenshot = tools.find((tool) => tool.name === "browser_screenshot")!;
+    const result = await execute(screenshot, {}) as { content: Array<{ type: string }>; details: Record<string, unknown> };
+    expect(result.content.some((part) => part.type === "image")).toBe(true);
+    expect(result.details.savedPath).toBeUndefined();
   });
 
   it("lists tabs with the bound tab marked", async () => {

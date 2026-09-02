@@ -57,6 +57,7 @@ import type {
 import { isDelegationProgress } from "../shared/protocol.js";
 import { toolLabel } from "../shared/locale.js";
 import { workspaceRelativeAttachment } from "./attachments.js";
+import { saveBrowserScreenshot } from "./browser-screenshot.js";
 import { autoCompactionFailureNotice, runManualCompaction } from "./compaction-lifecycle.js";
 import { readGitBranch } from "./git-branch.js";
 import { inferCustomModelImageInput, resolveCustomProviderRegistration } from "./custom-provider.js";
@@ -2099,7 +2100,11 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   const browserTools = runtimeBrowser.buildBrowserTools({
     request: (op) => requestBrowserAutomation(recordSessionId, op),
     enabled: () => settings?.browser?.enabled !== false,
-      resolveUploadFiles: (files) => Promise.resolve(resolveWorkspaceUploadFiles(recordWorkspace, files))
+      resolveUploadFiles: (files) => Promise.resolve(resolveWorkspaceUploadFiles(recordWorkspace, files)),
+    // 把截图落盘到本记录工作区的 .pidesktop/screenshots/，返回可交给
+    // recognize_images 的工作区相对路径；走 recordWorkspace 而非全局
+    // workspace，parked 背景会话仍写自己的目录。
+    saveScreenshot: (data, mimeType) => saveBrowserScreenshot(recordWorkspace, data, mimeType)
   });
   // 自动化定时任务工具（每会话注册，绑定本记录所属 Agent 的 store）。
   const automationTools = buildAutomationTools(automationToolContextFor(recordAgent.id));

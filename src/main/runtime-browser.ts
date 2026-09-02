@@ -27,6 +27,8 @@ export interface BrowserToolDeps {
   enabled: () => boolean;
   /** Resolve browser_upload workspace-relative files to absolute paths. */
   resolveUploadFiles?: (files: string[]) => Promise<string[]>;
+  /** Persist a captured screenshot to the workspace's default dir; returns a workspace-relative path the model can feed recognize_images. */
+  saveScreenshot?: (data: string, mimeType: "image/png" | "image/jpeg") => Promise<string>;
 }
 
 const DISABLED_TEXT = "浏览器自动化已在设置中停用（settings.browser.enabled），请在设置中开启后再试。";
@@ -49,6 +51,24 @@ async function run(deps: BrowserToolDeps, op: BrowserAutomationRequest): Promise
 
 function failIfNotOk(result: BrowserAutomationResult): asserts result is Extract<BrowserAutomationResult, { ok: true }> {
   if (!result.ok) throw new Error(result.error);
+}
+
+/**
+ * Best-effort persistence of a capture to disk. A failing save never fails the
+ * screenshot call itself (the image part is still returned); text-only models
+ * simply fall back to the hint without a concrete path.
+ */
+async function persistScreenshot(
+  deps: BrowserToolDeps,
+  data: string,
+  mimeType: "image/png" | "image/jpeg"
+): Promise<string | undefined> {
+  if (!deps.saveScreenshot) return undefined;
+  try {
+    return await deps.saveScreenshot(data, mimeType);
+  } catch {
+    return undefined;
+  }
 }
 
 function normalizeRef(input: unknown): string | undefined {
@@ -295,7 +315,8 @@ export function buildBrowserTools(deps: BrowserToolDeps): ToolDefinition[] {
       label: "浏览器截图",
       description: [
         "截取内置浏览器当前可视区域的截图并返回图片。",
-        "支持图片输入的模型可直接查看；纯文本模型会收到提示，可调用 recognize_images 工具识别截图内容（支持指定识别要点）。",
+        "截图会同步保存到工作区 .pidesktop/screenshots/ 目录（保留最近 20 张），结果文本会给出该文件的相对路径。",
+        "支持图片输入的模型可直接查看；纯文本模型看不到图片，可调用 recognize_images 工具并传入该文件路径识别截图内容（支持指定识别要点）。",
         "用于验证页面视觉效果、查看快照无法表达的布局/图表/画布内容。"
       ].join(""),
       promptSnippet: "browser_screenshot: 截取内置浏览器当前画面",
@@ -304,12 +325,13 @@ export function buildBrowserTools(deps: BrowserToolDeps): ToolDefinition[] {
         const result = await run(deps, { op: "screenshot" });
         failIfNotOk(result);
         if (result.data.kind !== "screenshot") throw new Error("截图返回了意外结果");
+        const savedPath = await persistScreenshot(deps, result.data.data, result.data.mimeType);
         return {
           content: [
-            { type: "text" as const, text: `已截取内置浏览器当前画面（${result.data.width}×${result.data.height}）。当前模型不支持图片输入时可调用 recognize_images 工具识别。` },
+            { type: "text" as const, text: `已截取内置浏览器当前画面（${result.data.width}×${result.data.height}）。${savedPath ? `截图已保存到 ${savedPath}；` : ""}当前模型不支持图片输入时可调用 recognize_images 工具${savedPath ? "识别该文件" : "识别截图"}。` },
             { type: "image" as const, data: result.data.data, mimeType: result.data.mimeType }
           ],
-          details: { width: result.data.width, height: result.data.height }
+          details: { width: result.data.width, height: result.data.height, ...(savedPath ? { savedPath } : {}) }
         };
       }
     }),
@@ -318,6 +340,7 @@ export function buildBrowserTools(deps: BrowserToolDeps): ToolDefinition[] {
         label: "浏览器整页截图",
         description: [
           "截取内置浏览器整个页面（包含当前视口之外的滚动区域）。",
+          "截图会同步保存到工作区 .pidesktop/screenshots/ 目录（保留最近 20 张），结果文本会给出该文件的相对路径。",
           "长页面可能产生大图；如需控制体积，可先用 browser_screenshot 截取可视区域。"
         ].join(""),
         promptSnippet: "browser_screenshot_full: 截取浏览器整个页面",
@@ -326,12 +349,13 @@ export function buildBrowserTools(deps: BrowserToolDeps): ToolDefinition[] {
           const result = await run(deps, { op: "screenshot", fullPage: true });
           failIfNotOk(result);
           if (result.data.kind !== "screenshot") throw new Error("截图返回了意外结果");
+          const savedPath = await persistScreenshot(deps, result.data.data, result.data.mimeType);
           return {
             content: [
-              { type: "text" as const, text: `已截取内置浏览器整个页面（${result.data.width}×${result.data.height}）。当前模型不支持图片输入时可调用 recognize_images 工具识别。` },
+              { type: "text" as const, text: `已截取内置浏览器整个页面（${result.data.width}×${result.data.height}）。${savedPath ? `截图已保存到 ${savedPath}；` : ""}当前模型不支持图片输入时可调用 recognize_images 工具${savedPath ? "识别该文件" : "识别截图"}。` },
               { type: "image" as const, data: result.data.data, mimeType: result.data.mimeType }
             ],
-            details: { width: result.data.width, height: result.data.height, fullPage: true }
+            details: { width: result.data.width, height: result.data.height, fullPage: true, ...(savedPath ? { savedPath } : {}) }
           };
         }
       }),
