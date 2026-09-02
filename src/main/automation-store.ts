@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { AccessMode, AutomationTask } from "../shared/protocol.js";
+import type { AccessMode, AgentProfile, AutomationTask } from "../shared/protocol.js";
 import { isValidCron } from "./automation-cron.js";
 
 /**
@@ -149,6 +149,14 @@ export function toggleAutomation(filePath: string, id: string, enabled: boolean)
   const next = tasks.map((candidate) => (candidate.id === id ? { ...candidate, enabled } : candidate));
   writeAutomation(filePath, next);
   return next;
+}
+
+/**
+ * 解析任务归属的角色档案（跨角色调度执行用）：id 命中且未归档才算有效；
+ * 归档/未知角色返回 undefined（调用方跳过执行——归档即停用其全部定时任务）。
+ */
+export function resolveAutomationAgent(agents: readonly AgentProfile[], agentId: string): AgentProfile | undefined {
+  return agents.find((agent) => agent.id === agentId && !agent.archived);
 }
 
 /** 更新某任务的近一次运行信息；返回最新列表。 */

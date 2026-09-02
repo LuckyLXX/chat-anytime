@@ -69,7 +69,7 @@ import { buildSkillsSystemPromptBlock, setSkillEnabled, type DiscoveredSkill } f
 import * as commandCatalog from "./command-catalog.js";
 import { COMMAND_NAME_PATTERN, type DiscoveredCommand } from "./command-catalog.js";
 import { createTodoStore, migrateLegacyTodoFile, type TodoStore } from "./todo-store.js";
-import { automationPathFor, deleteAutomation, normalizeAutomation, readAllAutomations, readAutomation, recordAutomationRun, toggleAutomation, upsertAutomation } from "./automation-store.js";
+import { automationPathFor, deleteAutomation, normalizeAutomation, readAllAutomations, recordAutomationRun, resolveAutomationAgent, toggleAutomation, upsertAutomation } from "./automation-store.js";
 import { createAutomationScheduler, type AutomationScheduler } from "./automation-scheduler.js";
 import { buildAutomationTools, type AutomationCreateInput, type AutomationToolContext } from "./automation-tools.js";
 import { resolveVisionModel } from "./vision.js";
@@ -509,24 +509,31 @@ function afterAutomationRun(taskId: string, agentId: string, run: AutomationTask
   automationScheduler?.refresh();
 }
 
-/** 后台新建专用会话跑任务提示词（v1：当前 Agent + 任务模型/当前默认，skipActivate 不抢焦点）。 */
+/** 后台新建专用会话跑任务提示词（跨角色：按任务自身 agentId 解析角色档案，skipActivate 不抢焦点）。 */
 async function runAutomationTask(task: AutomationTask): Promise<void> {
-  if (!workspace || !modelRuntime || !currentAgent) throw new Error("当前没有可用工作区或 Agent，无法运行定时任务");
-  // 快照本回合的 Agent/工作区：避免与 agent.select/workspace.open 交错时执行主体与数据落位错位。
-  const runAgent = currentAgent;
+  if (!workspace || !modelRuntime) throw new Error("当前没有可用工作区，无法运行定时任务");
+  // 快照本回合的工作区：避免与 agent.select/workspace.open 交错时执行主体与数据落位错位。
   const runWorkspace = workspace;
-  const agentId = task.agentId || runAgent.id;
-  if (task.agentId && task.agentId !== runAgent.id) {
-    throw new Error(`定时任务「${task.name}」归属的 Agent 与当前不符（${task.agentId} vs ${runAgent.id}），跳过`);
+  // 跨角色调度（2026-09-02）：按任务自身 agentId 解析角色档案，不再要求「归属角色
+  // 恰好处于激活状态」；归档/未知角色解析失败即跳过（归档=停用其全部任务）。
+  let runAgent: AgentProfile;
+  if (task.agentId) {
+    const resolved = resolveAutomationAgent(settings?.agents ?? [], task.agentId);
+    if (!resolved) throw new Error(`定时任务「${task.name}」归属的角色不存在或已归档（${task.agentId}），已跳过`);
+    runAgent = resolved;
+  } else {
+    runAgent = currentAgent ?? activeAgent();
   }
-  const modelRef = task.model && modelRuntime.getModel(task.model.provider, task.model.id) && isModelEnabled(task.model.provider, task.model.id, settings?.providers) ? task.model : defaultModel();
-  const sessionDir = workspaceSessionDir();
-  if (!sessionDir) throw new Error("无法定位会话目录");
+  const modelRef = task.model && modelRuntime.getModel(task.model.provider, task.model.id) && isModelEnabled(task.model.provider, task.model.id, settings?.providers) ? task.model : (runAgent.defaultModel ?? settings?.model);
+  // 会话目录按任务归属角色落位（与手动运行同路径）：chatanytime-sessions/<agentId>/<workspaceHash>/
+  const sessionDir = agentWorkspaceSessionDir(getAgentDir(), runAgent.id, runWorkspace);
   const manager = SessionManager.create(runWorkspace, sessionDir);
   const sessionId = manager.getSessionId();
-  // 无人值守会话：注入任务级权限（默认 full 自动放行）、不暴露提问工具、不参与全局代际竞争。
+  // 无人值守会话：注入任务级权限（默认 full 自动放行）、不暴露提问工具、不参与全局代际竞争；
+  // agentOverride 让系统提示/记忆库/审计目录全部按任务归属角色构建，与当前激活角色无关。
   await createSession(manager, {
     skipActivate: true,
+    agentOverride: runAgent,
     modelOverride: modelRef,
     accessModeOverride: task.accessMode,
     unattended: true,
@@ -551,11 +558,11 @@ async function runAutomationTask(task: AutomationTask): Promise<void> {
     await record.session.prompt(task.prompt);
     succeeded = true;
     const preview = truncatePreview(lastAssistantText(record));
-    afterAutomationRun(task.id, agentId, { sessionId, startedAt, status: "ok", ...(preview ? { preview } : {}) });
+    afterAutomationRun(task.id, runAgent.id, { sessionId, startedAt, status: "ok", ...(preview ? { preview } : {}) });
     post({ type: "automation-run", id: task.id, status: "ok" });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    afterAutomationRun(task.id, agentId, { sessionId, startedAt, status: "error", error: message });
+    afterAutomationRun(task.id, runAgent.id, { sessionId, startedAt, status: "error", error: message });
     post({ type: "automation-run", id: task.id, status: "error", message });
   } finally {
     record.busy = false;
@@ -661,9 +668,6 @@ function automationToolContextFor(agentId: string): AutomationToolContext {
     runTaskNow: async (id) => {
       const task = readAllAutomations(getAgentDir()).find((candidate) => candidate.id === id);
       if (!task) return { ok: false, message: `未找到任务 ${id}` };
-      if (currentAgent?.id !== task.agentId) {
-        return { ok: false, message: `定时任务「${task.name}」归属角色 ${task.agentId}，请切换到该角色后运行` };
-      }
       try {
         await runAutomationTask(task);
         return { ok: true, message: `已触发任务 ${id} 运行（结果见侧边栏对应会话）。` };
@@ -1806,8 +1810,8 @@ function sessionReadyStatus(hasModel: boolean, usedFallback: boolean): string {
  * - otherwise (explicit sessionManager, or agent.save's config-apply rebuild)
  *   the record is rebuilt over the same history.
  */
-async function createSession(sessionManager?: SessionManager, options: { reactivate?: boolean; skipActivate?: boolean; modelOverride?: { provider: string; id: string }; accessModeOverride?: AccessMode; unattended?: boolean; noGenerationGuard?: boolean } = {}): Promise<void> {
-  if (!workspace || !modelRuntime || !currentAgent) return;
+async function createSession(sessionManager?: SessionManager, options: { reactivate?: boolean; skipActivate?: boolean; modelOverride?: { provider: string; id: string }; accessModeOverride?: AccessMode; unattended?: boolean; noGenerationGuard?: boolean; agentOverride?: AgentProfile } = {}): Promise<void> {
+  if (!workspace || !modelRuntime) return;
   // 工作区可能已切换（workspace.open / session.*）：先重读双作用域钩子配置。
   refreshHooksConfig();
   // 工作区切换会改变项目级子智能体定义，一并重读。
@@ -1824,7 +1828,10 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   }
 
   const recordWorkspace = workspace;
-  const recordAgent = currentAgent;
+  // agentOverride（跨角色自动化会话）：record 全链路按任务归属角色构建——系统提示、
+  // 记忆库、技能开关、审计/checkpoint 目录、会话目录全部跟随任务 agent，而非当前激活角色。
+  const recordAgent = options.agentOverride ?? currentAgent;
+  if (!recordAgent) return;
   const activeSessionManager = sessionManager ?? SessionManager.continueRecent(recordWorkspace, workspaceSessionDir());
   const existing = liveSessions.get(activeSessionManager.getSessionId());
   if (existing && !sessionManager && options.reactivate) {
@@ -1890,7 +1897,9 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
       // for post-hoc debugging; write failures never affect the turn. The start
       // hook also feeds the per-session todo pace tracker (anti-batching nudge).
       createToolAudit({
-        auditDir: () => agentSessionRoot(),
+        // 按闭包 recordAgent 落位（跨角色后台会话不得随全局 currentAgent 写错目录；
+        // 手动切角色后的 parked 会话同理）。
+        auditDir: () => join(getAgentDir(), "chatanytime-sessions", recordAgent.id),
         sessionId: () => sessionHolder.session?.sessionId ?? activeSessionManager.getSessionId(),
         warn: (message) => void post({ type: "log", level: "warn", message }),
         onToolStart: () => recordBox?.todoPace.record()
@@ -2221,9 +2230,10 @@ async function initialize(command: Extract<RuntimeCommand, { type: "initialize" 
   }
   visionModel = resolveVisionModel(settings.vision, modelRuntime, (model) => hasImageInput(model));
   await refreshCatalog();
-  // 自动化定时任务调度器：每分 tick，读取当前 Agent 任务；Agent 切换自然跟随。
+  // 自动化定时任务调度器：每分 tick，跨角色扫描全部任务（2026-09-02 起不再
+  // 限定当前激活角色）；执行侧按任务自身 agentId 解析角色（runAutomationTask）。
   automationScheduler = createAutomationScheduler({
-    getTasks: () => (currentAgent ? readAutomation(automationStorePath(currentAgent.id)) : []),
+    getTasks: () => readAllAutomations(getAgentDir()),
     runTask: (task) => runAutomationTask(task),
     onError: (message) => void post({ type: "log", level: "warn", message: `自动化任务错误：${message}` })
   });
@@ -2811,13 +2821,8 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       break;
     }
     case "automation.run": {
-      if (!currentAgent) throw new Error("当前没有可用 Agent");
       const runTask = readAllAutomations(getAgentDir()).find((candidate) => candidate.id === command.id);
       if (!runTask) throw new Error(`未找到任务 ${command.id}`);
-      if (runTask.agentId !== currentAgent.id) {
-        post({ type: "automation-run", id: command.id, status: "error", message: `定时任务「${runTask.name}」归属角色 ${runTask.agentId}，请切换到该角色后运行` });
-        break;
-      }
       void runAutomationTask(runTask).catch((error: unknown) => {
         post({ type: "automation-run", id: command.id, status: "error", message: error instanceof Error ? error.message : String(error) });
       });

@@ -226,7 +226,6 @@ export function AutomationSettings({ models, providers, settings, workspaceConfi
                 </header>
                 <div className="automation-list">
                   {group.tasks.map((task) => {
-                    const runnable = task.agentId === settings.currentAgentId;
                     return (
                       <div className="automation-row" key={task.id} data-role="automation-task">
                         <span className={`automation-row-dot ${task.enabled ? "on" : "off"}`} aria-hidden="true" />
@@ -246,7 +245,7 @@ export function AutomationSettings({ models, providers, settings, workspaceConfi
                         </div>
                         <div className="automation-row-actions">
                           <button type="button" className={`automation-row-toggle ${task.enabled ? "on" : ""}`} role="switch" aria-checked={task.enabled} title={task.enabled ? "暂停任务" : "启用任务"} aria-label={task.enabled ? "暂停任务" : "启用任务"} onClick={() => send({ type: "automation.toggle", id: task.id, enabled: !task.enabled, agentId: task.agentId })} />
-                          <button type="button" title={runnable ? "运行一次" : `归属角色「${group.name}」，请切换到该角色后运行`} aria-label={runnable ? "运行一次" : "非当前角色，不可运行"} disabled={!runnable} onClick={() => send({ type: "automation.run", id: task.id, agentId: task.agentId })}><Play size={15} /></button>
+                          <button type="button" title="运行一次（按任务归属角色在后台执行）" aria-label="运行一次" onClick={() => send({ type: "automation.run", id: task.id, agentId: task.agentId })}><Play size={15} /></button>
                           <button type="button" title="编辑" aria-label="编辑" onClick={() => setForm({ mode: "edit", task })}><Pencil size={15} /></button>
                           <button type="button" title="删除" aria-label="删除" className="danger" onClick={() => { if (window.confirm(`删除定时任务「${task.name}」？`)) send({ type: "automation.delete", id: task.id, agentId: task.agentId }); }}><Trash2 size={15} /></button>
                         </div>

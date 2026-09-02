@@ -9,11 +9,13 @@ import {
   readAllAutomations,
   readAutomation,
   recordAutomationRun,
+  resolveAutomationAgent,
   toggleAutomation,
   upsertAutomation,
   writeAutomation
 } from "./automation-store.js";
-import type { AutomationTask } from "../shared/protocol.js";
+import type { AgentProfile, AutomationTask } from "../shared/protocol.js";
+import { defaultTools } from "./settings.js";
 import { dirname } from "node:path";
 
 let dir: string;
@@ -161,5 +163,33 @@ describe("read/write/upsert/delete/toggle/record", () => {
     mkdirSync(dirname(file), { recursive: true });
     writeFileSync(file, JSON.stringify({ tasks: [makeTask(), { name: "bad" }] }), "utf8");
     expect(readAutomation(file)).toEqual([makeTask()]);
+  });
+});
+
+describe("resolveAutomationAgent", () => {
+  const agent = (id: string, archived = false): AgentProfile => ({
+    id,
+    name: id,
+    description: "",
+    systemPrompt: "",
+    divMode: "off",
+    defaultThinkingLevel: "medium",
+    tools: defaultTools(),
+    archived
+  });
+
+  it("resolves the matching unarchived agent", () => {
+    const list = [agent("a"), agent("b")];
+    expect(resolveAutomationAgent(list, "b")?.id).toBe("b");
+  });
+
+  it("returns undefined for archived agents", () => {
+    const list = [agent("a"), agent("b", true)];
+    expect(resolveAutomationAgent(list, "b")).toBeUndefined();
+  });
+
+  it("returns undefined for unknown ids and empty lists", () => {
+    expect(resolveAutomationAgent([agent("a")], "zzz")).toBeUndefined();
+    expect(resolveAutomationAgent([], "a")).toBeUndefined();
   });
 });
