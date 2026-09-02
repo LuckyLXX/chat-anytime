@@ -111,7 +111,7 @@ npm run package:win
 - **Checkpoint**：AI 每次写文件前的快照 + 交付物行内「回滚」按钮，单文件粒度恢复
 - **外观**：密度（compact/comfortable/relaxed）与圆角（square/small/medium/round）运行时调节；主题可导出/导入（CSS + 资产目录，含明暗双模式语义变量）
 - **自定义命令**：`.pidesktop-commands/` 下的 `md` 模板（项目/全局双作用域），`/名字 参数` 直接调用
-- **自动化任务**：设置页「自动化任务」tab 或让 AI 用 `automation.create` 创建 cron 定时任务，后台无人值守执行
+- **自动化任务**：设置页「自动化任务」tab 或让 AI 用 `automation_create` 创建 cron 定时任务，后台无人值守执行
 - **钩子**：设置页「钩子」tab 管理规则，事件可触发桌面通知、HTTP POST、命令拦截/执行
 - **长期记忆**：`memory_write/read/list/search/delete` 工具维护按助手隔离的主题库，记忆面板可治理开关
 

@@ -63,10 +63,17 @@ describe("validateCreateInput", () => {
 });
 
 describe("buildAutomationTools", () => {
+  it("names every tool within the OpenAI-compatible [a-zA-Z0-9_-] charset", () => {
+    const tools = buildAutomationTools(makeCtx());
+    for (const tool of tools) {
+      expect(tool.name).toMatch(/^[a-zA-Z0-9_-]+$/u);
+    }
+  });
+
   it("creates a task and drops an unavailable model with a note", async () => {
     const ctx = makeCtx({ modelAvailable: () => false });
     const tools = buildAutomationTools(ctx);
-    const create = tools.find((tool) => tool.name === "automation.create")!;
+    const create = tools.find((tool) => tool.name === "automation_create")!;
     const result = await (create as unknown as { execute: (id: string, params: unknown) => Promise<{ details: Record<string, unknown> }> }).execute("call", { name: "n", cron: "0 9 * * *", prompt: "p", model: { provider: "p", id: "m" } });
     expect(result.details.count).toBe(1);
     expect(ctx.listTasks()[0]?.model).toBeUndefined();
@@ -75,7 +82,7 @@ describe("buildAutomationTools", () => {
   it("creates a task with a valid model", async () => {
     const ctx = makeCtx({ modelAvailable: () => true });
     const tools = buildAutomationTools(ctx);
-    const create = tools.find((tool) => tool.name === "automation.create")!;
+    const create = tools.find((tool) => tool.name === "automation_create")!;
     await (create as unknown as { execute: (id: string, params: unknown) => Promise<{ details: Record<string, unknown> }> }).execute("call", { name: "n", cron: "0 9 * * *", prompt: "p", model: { provider: "p", id: "m" } });
     expect(ctx.listTasks()[0]?.model).toEqual({ provider: "p", id: "m" });
   });
@@ -83,22 +90,22 @@ describe("buildAutomationTools", () => {
   it("lists tasks, deletes, toggles and runs", async () => {
     const ctx = makeCtx();
     const tools = buildAutomationTools(ctx);
-    const add = tools.find((tool) => tool.name === "automation.create")!;
+    const add = tools.find((tool) => tool.name === "automation_create")!;
     const run = async (toolName: string, params: unknown): Promise<{ details: Record<string, unknown> }> =>
       (tools.find((tool) => tool.name === toolName) as unknown as { execute: (id: string, params: unknown) => Promise<{ details: Record<string, unknown> }> }).execute("call", params);
 
     await (add as unknown as { execute: (id: string, params: unknown) => Promise<{ details: Record<string, unknown> }> }).execute("call", { name: "n", cron: "0 9 * * *", prompt: "p" });
-    expect((await run("automation.list", {})).details.count).toBe(1);
-    expect((await run("automation.toggle", { id: "new", enabled: false })).details.found).toBe(true);
+    expect((await run("automation_list", {})).details.count).toBe(1);
+    expect((await run("automation_toggle", { id: "new", enabled: false })).details.found).toBe(true);
     expect(ctx.listTasks()[0]?.enabled).toBe(false);
     const runNow = await runNowTool(tools, "new");
     expect(runNow).toBe(true);
-    expect((await run("automation.delete", { id: "new" })).details.count).toBe(0);
+    expect((await run("automation_delete", { id: "new" })).details.count).toBe(0);
   });
 });
 
 async function runNowTool(tools: ReturnType<typeof buildAutomationTools>, id: string): Promise<boolean> {
-  const found = tools.find((tool) => tool.name === "automation.run");
+  const found = tools.find((tool) => tool.name === "automation_run");
   const result = await (found as unknown as { execute: (c: string, p: unknown) => Promise<{ details: Record<string, unknown> }> }).execute("call", { id });
   return result.details.id === id;
 }

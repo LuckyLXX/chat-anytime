@@ -66,19 +66,19 @@ function taskSummary(task: AutomationTask): string {
   return `#${task.id} ${task.name}（${task.schedule.cron}${task.schedule.timezone ? ` · ${task.schedule.timezone}` : ""}${task.model ? ` · ${task.model.id}` : ""}${task.enabled ? "" : " · 已暂停"}）`;
 }
 
-/** Build the automation customTools（create/list/delete/toggle/run）. */
+/** Build the automation customTools（automation_create/list/delete/toggle/run）. */
 export function buildAutomationTools(ctx: AutomationToolContext): ToolDefinition[] {
   return [
     defineTool({
-      name: "automation.create",
+      name: "automation_create",
       label: "创建定时任务",
       description: [
         "创建一条自动化定时任务：到点（cron）后让 Agent 用给定提示词在后台跑一次。",
         "cron 为 5 字段（分 时 日 月 周），如 \"0 9 * * 1-5\" = 工作日每天 09:00、\"0 18 * * *\" = 每天 18:00。",
         "model 可选（不指定则用该 Agent 默认模型）；accessMode 建议「完全访问」（full），否则无人值守时可能因权限确认而挂起。",
-        "任务创建后即按 cron 自动调度；如需立即验证可用 automation.run。"
+        "任务创建后即按 cron 自动调度；如需立即验证可用 automation_run。"
       ].join(""),
-      promptSnippet: "automation.create: 创建定时任务",
+      promptSnippet: "automation_create: 创建定时任务",
       parameters: Type.Object({
         name: Type.String({ description: "任务名称" }),
         cron: Type.String({ description: "cron 5 字段：分 时 日 月 周" }),
@@ -103,10 +103,10 @@ export function buildAutomationTools(ctx: AutomationToolContext): ToolDefinition
       }
     }),
     defineTool({
-      name: "automation.list",
+      name: "automation_list",
       label: "列出自定义定时任务",
       description: "列出当前 Agent 的全部定时任务（名称/cron/启用状态/近一次运行）。想查具体任务的运行结果，打开对应会话即可。",
-      promptSnippet: "automation.list: 列出定时任务",
+      promptSnippet: "automation_list: 列出定时任务",
       parameters: Type.Object({}),
       execute: async () => {
         const tasks = ctx.listTasks();
@@ -118,10 +118,10 @@ export function buildAutomationTools(ctx: AutomationToolContext): ToolDefinition
       }
     }),
     defineTool({
-      name: "automation.delete",
+      name: "automation_delete",
       label: "删除定时任务",
       description: "按 id 删除一条定时任务。",
-      promptSnippet: "automation.delete: 删除定时任务",
+      promptSnippet: "automation_delete: 删除定时任务",
       parameters: Type.Object({ id: Type.String({ description: "任务 id" }) }),
       execute: async (_id, params) => {
         const id = String((params as { id?: unknown })?.id ?? "").trim();
@@ -131,10 +131,10 @@ export function buildAutomationTools(ctx: AutomationToolContext): ToolDefinition
       }
     }),
     defineTool({
-      name: "automation.toggle",
+      name: "automation_toggle",
       label: "启停定时任务",
       description: "启用/暂停一条定时任务（暂停后不再按 cron 自动触发）。",
-      promptSnippet: "automation.toggle: 启停定时任务",
+      promptSnippet: "automation_toggle: 启停定时任务",
       parameters: Type.Object({ id: Type.String(), enabled: Type.Boolean() }),
       execute: async (_id, params) => {
         const id = String((params as { id?: unknown })?.id ?? "").trim();
@@ -146,10 +146,10 @@ export function buildAutomationTools(ctx: AutomationToolContext): ToolDefinition
       }
     }),
     defineTool({
-      name: "automation.run",
+      name: "automation_run",
       label: "运行定时任务",
       description: "立即手动运行一条定时任务（不等待 cron），用于验证任务提示词与模型。",
-      promptSnippet: "automation.run: 立即运行定时任务",
+      promptSnippet: "automation_run: 立即运行定时任务",
       parameters: Type.Object({ id: Type.String() }),
       execute: async (_id, params) => {
         const id = String((params as { id?: unknown })?.id ?? "").trim();
