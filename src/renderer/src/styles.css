@@ -1895,11 +1895,12 @@ button, input, select, textarea, summary, label {
 .automation-sub-tabs button.active { color: var(--text); background: var(--surface-raised); }
 .automation-runs { min-height: 0; }
 .automation-runs-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin: 12px 0 10px; }
-/* 页面内嵌自定义控件：至少两级前缀 + 显式覆盖易被 .settings-dialog label 污染的属性（见踩坑记录）。 */
-.automation-settings .automation-runs-task-filter { display: inline-flex; align-items: center; gap: 6px; height: 28px; margin: 0; padding: 0 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-input); color: var(--text-muted); font-size: 10px; font-weight: 400; }
+/* 页面内嵌自定义控件：至少两级前缀 + 显式覆盖易被 .settings-dialog label/select 全局规则污染的属性（见踩坑记录）。 */
+.automation-settings .automation-runs-task-filter { display: inline-flex; align-items: center; gap: 5px; height: 28px; margin: 0; padding: 0 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-input); color: var(--text-muted); font-size: 10px; font-weight: 400; }
 .automation-settings .automation-runs-task-filter:focus-within { border-color: var(--accent); }
-.automation-runs-task-filter select { height: 100%; min-width: 110px; max-width: 220px; border: 0; background: transparent; color: var(--text); font-size: 10.5px; }
-.automation-runs-count { margin-left: auto; color: var(--text-muted); font-size: 9.5px; }
+.automation-settings .automation-runs-task-filter select { flex: 1 1 auto; width: auto; min-width: 92px; max-width: 200px; height: 26px; margin: 0; padding: 0 2px; border: 0; border-radius: 0; outline: 0; background: transparent; color: var(--text); font-size: 10.5px; font-weight: 400; appearance: none; }
+.automation-runs-task-chevron { flex: 0 0 auto; color: var(--text-muted); opacity: .75; pointer-events: none; }
+.automation-runs-count { flex: 0 0 auto; margin-left: auto; color: var(--text-muted); font-size: 9.5px; white-space: nowrap; }
 .automation-runs-groups { display: grid; gap: 14px; }
 .automation-runs-group-head { display: flex; align-items: center; gap: 7px; padding: 0 2px; }
 .automation-runs-group-head strong { color: var(--text); font-size: 11.5px; }

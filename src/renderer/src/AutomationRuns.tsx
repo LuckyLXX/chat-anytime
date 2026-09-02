@@ -3,7 +3,7 @@
 // automation-run running 推送合成置顶。「查看会话」只发 runId，主进程负责
 // 跨角色切换/定位/激活恢复（automation.run.open）。
 
-import { CheckCircle2, ChevronRight, Clock, Loader2, MessageSquare, XCircle } from "lucide-react";
+import { CheckCircle2, ChevronDown, ChevronRight, Clock, Loader2, MessageSquare, XCircle } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { AutomationRunRecord, DesktopSettings } from "../../shared/protocol";
 import { useDesktopStore } from "./store";
@@ -128,11 +128,12 @@ export function AutomationRuns({ settings, highlight }: AutomationRunsProps): Re
           <button type="button" className={statusFilter === "ok" ? "active" : ""} role="tab" aria-selected={statusFilter === "ok"} onClick={() => setStatusFilter("ok")}>成功</button>
           <button type="button" className={statusFilter === "error" ? "active" : ""} role="tab" aria-selected={statusFilter === "error"} onClick={() => setStatusFilter("error")}>失败</button>
         </div>
-        <label className="automation-runs-task-filter"><span>任务</span>
+        <label className="automation-runs-task-filter" aria-label="任务筛选"><span>任务</span>
           <select value={taskFilter} onChange={(event) => setTaskFilter(event.target.value)}>
             <option value="all">全部任务</option>
             {taskOptions.map((task) => <option key={task.id} value={task.id}>{task.name}{task.agentName !== task.agentId ? ` · ${task.agentName}` : ""}</option>)}
           </select>
+          <ChevronDown size={12} className="automation-runs-task-chevron" aria-hidden="true" />
         </label>
         <span className="automation-runs-count">共 {filteredCount} 条 · 保留最近 200 条</span>
       </div>
