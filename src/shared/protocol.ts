@@ -833,6 +833,33 @@ export interface AutomationRunInfo {
   error?: string;
 }
 
+/**
+ * 一条持久化的运行历史记录（`pidesktop-automation/runs.jsonl` 事件流，全角色共用）。
+ * taskName/agentName 是快照：任务/角色被删后记录仍可读。preview/error 二选一（成功/失败）。
+ * 不快照 prompt——详情展开时按 taskId 从 store.automation 现查，任务已删则不显示该行。
+ */
+export interface AutomationRunRecord {
+  /** 运行记录 id（randomUUID，与 automation.run.open 的寻址键）。 */
+  id: string;
+  taskId: string;
+  /** 快照：任务被删后记录仍可读。 */
+  taskName: string;
+  agentId: string;
+  /** 快照。 */
+  agentName: string;
+  /** 回看入口（AutomationRunInfo.sessionId 同源）。 */
+  sessionId: string;
+  startedAt: number;
+  durationMs: number;
+  status: "ok" | "error";
+  trigger: "cron" | "manual";
+  /** 实际使用的模型 id（回退链解析后的结果）。 */
+  modelId?: string;
+  /** 最后一段助手文本截断 200 字。 */
+  preview?: string;
+  error?: string;
+}
+
 /** 自动化任务（定时任务）。 */
 export interface AutomationTask {
   id: string;
@@ -872,6 +899,8 @@ export interface ResourceCatalog {
   hooksEnabled: boolean;
   /** 全部角色的自动化定时任务（设置页「自动化任务」列表，按角色分组展示）。 */
   automation: AutomationTask[];
+  /** 全角色自动化运行历史（新增/裁剪后全量推送；bootstrap 初始注入）。 */
+  automationRuns: AutomationRunRecord[];
   diagnostics: string[];
 }
 
@@ -1115,6 +1144,8 @@ export type RuntimeCommand =
   | { type: "automation.delete"; id: string; agentId?: string }
   | { type: "automation.toggle"; id: string; enabled: boolean; agentId?: string }
   | { type: "automation.run"; id: string; agentId?: string }
+  /** 运行记录「查看会话」：渲染端只发 runId；主进程负责查记录、跨角色切换、定位会话、激活/恢复。 */
+  | { type: "automation.run.open"; runId: string }
   | { type: "permission.resolve"; id: string; decision: PermissionDecision }
   | { type: "question.resolve"; id: string; answers?: string[]; /** 移交出口选定的实施模型（handoffOption 流程携带；ask_question 忽略）。 */ model?: { provider: string; id: string } }
   /** 回滚单条回复内指定文件的改动：按（文件 + 调用 id）定位快照，每文件取最早快照恢复；targets 可含多个文件。 */
@@ -1151,8 +1182,10 @@ export type RuntimeMessage =
   | { type: "usage-stats-result"; stats: UsageStats }
   /** 自动化任务列表（store 变化时推送，当前 Agent）。 */
   | { type: "automation"; tasks: AutomationTask[] }
-  /** 自动化任务运行结束（成功/失败）；渲染端 toast + 列表刷新。 */
-  | { type: "automation-run"; id: string; status: "ok" | "error"; message?: string }
+  /** 自动化任务运行状态（running=开始，ok/error=终态）；终态携带任务名（toast 文案）与运行记录 id（看结果直达）。 */
+  | { type: "automation-run"; id: string; status: "ok" | "error" | "running"; taskName?: string; runId?: string; message?: string }
+  /** 自动化运行历史全量推送（每次运行结束后随终态推送，渲染端全量替换）。 */
+  | { type: "automation-runs"; runs: AutomationRunRecord[] }
   /** utility 进程发起的浏览器自动化操作；main 完成后以 browser-automation.result 命令回传。 */
   | { type: "browser-automation.request"; requestId: string; sessionKey: string; request: BrowserAutomationRequest }
   | { type: "error"; message: string }

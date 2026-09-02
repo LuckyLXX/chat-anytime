@@ -2,12 +2,13 @@
 // 数据源 store.automation（automation 推送维护）；增删改走 automation.* 命令。
 
 import { Clock, Folder, ListChecks, MessageSquarePlus, Pencil, Play, Plus, Search, Trash2, X, Zap } from "lucide-react";
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import type { AccessMode, AutomationTask, DesktopSettings, ModelOption, ProviderOption } from "../../shared/protocol";
 import { buildCron, describeCron, DEFAULT_SCHEDULE_PARTS, pad2, SCHEDULE_PRESETS, WEEKDAY_OPTIONS, type SchedulePreset } from "./lib/automation-schedule";
 import { selectableCatalogModels } from "./lib/model-list";
 import { ModelSelect } from "./components/ModelSelect";
 import { useDesktopStore } from "./store";
+import { AutomationRuns, type AutomationRunsHighlight } from "./AutomationRuns";
 
 type Filter = "all" | "enabled" | "paused";
 
@@ -157,6 +158,17 @@ function AutomationForm({ initial, models, providers, settings, workspaceName, o
 
 export function AutomationSettings({ models, providers, settings, workspaceConfigured, workspaceName, onCreateInSession }: AutomationSettingsProps): ReactNode {
   const automation = useDesktopStore((state) => state.automation);
+  const runsSignal = useDesktopStore((state) => state.automationRunsSignal);
+  // 子页：任务列表（默认）/ 运行记录；toast「查看结果」信号切入运行记录子页并高亮该条。
+  const [runsTab, setRunsTab] = useState<"tasks" | "runs">("tasks");
+  const [pendingHighlight, setPendingHighlight] = useState<AutomationRunsHighlight | undefined>(undefined);
+  useEffect(() => {
+    if (!runsSignal) return;
+    setRunsTab("runs");
+    setPendingHighlight({ runId: runsSignal.runId, at: runsSignal.at });
+    // 一次性消费：清除信号，避免下次打开设置页仍停留在「运行记录」子页。
+    useDesktopStore.setState({ automationRunsSignal: undefined });
+  }, [runsSignal]);
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
   const [form, setForm] = useState<{ mode: "create" } | { mode: "edit"; task: AutomationTask } | null>(null);
@@ -201,6 +213,13 @@ export function AutomationSettings({ models, providers, settings, workspaceConfi
           <button type="button" className="primary-button" disabled={!workspaceConfigured} onClick={() => setForm({ mode: "create" })}><Plus size={15} />创建定时任务</button>
         </div>
       </header>
+
+      <div className="automation-sub-tabs" role="tablist" aria-label="自动化任务视图">
+        <button type="button" className={runsTab === "tasks" ? "active" : ""} role="tab" aria-selected={runsTab === "tasks"} onClick={() => setRunsTab("tasks")}>任务</button>
+        <button type="button" className={runsTab === "runs" ? "active" : ""} role="tab" aria-selected={runsTab === "runs"} data-control="automation-runs-tab" onClick={() => setRunsTab("runs")}>运行记录</button>
+      </div>
+
+      {runsTab === "runs" ? <AutomationRuns settings={settings} highlight={pendingHighlight} /> : <>
 
       <div className="automation-filter-bar">
         <div className="automation-filter-tabs">
@@ -268,6 +287,7 @@ export function AutomationSettings({ models, providers, settings, workspaceConfi
           onSubmit={(task) => { send({ type: "automation.save", task }); setForm(null); }}
         />
       )}
+      </>}
     </div>
   );
 }

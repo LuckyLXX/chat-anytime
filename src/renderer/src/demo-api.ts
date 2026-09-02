@@ -16,6 +16,7 @@ import type {
   RuntimeSnapshot,
   ResourceCatalog,
   CommandSummary,
+  AutomationRunRecord,
   AutomationTask,
   TerminalCommand,
   TerminalEventData,
@@ -123,6 +124,17 @@ const demoDefaultAgent: AgentProfile = {
   tools: { read: true, bash: true, powershell: false, edit: true, write: true, grep: true, find: true, ls: true }
 };
 
+/** 第二个演示角色：自动化运行记录的跨角色回看（「切换角色查看」）演示用。 */
+const demoSecondaryAgent: AgentProfile = {
+  id: "heiyuhe",
+  name: "黑鱼河",
+  description: "项目维护者：负责更新迭代。",
+  systemPrompt: "",
+  divMode: "auto",
+  defaultThinkingLevel: "medium",
+  tools: { read: true, bash: true, powershell: false, edit: true, write: true, grep: true, find: true, ls: true }
+};
+
 const demoSettings: DesktopSettings = {
   version: 2,
   workspace: "D:\\Projects\\chat-anytime-demo",
@@ -130,10 +142,29 @@ const demoSettings: DesktopSettings = {
   thinkingLevel: "medium",
   accessMode: "ask",
   providers: [],
-  agents: [demoDefaultAgent],
+  agents: [demoDefaultAgent, demoSecondaryAgent],
   currentAgentId: "default",
   appearance: { theme: "system", themePreset: "default", customCss: "", customThemes: [], showThinking: true }
 };
+
+/** 演示用定时任务（与运行记录 taskId 对齐，详情展开可现查 prompt）。 */
+const DEMO_AUTOMATION_TASKS: AutomationTask[] = [
+  { id: "demo-task-1", name: "每日新闻日报", schedule: { cron: "0 9 * * *" }, prompt: "每天早上汇总 AI 行业新闻：产品发布、融资与开源动态，输出十条要点。", agentId: "heiyuhe", accessMode: "full", enabled: true, createdAt: Date.now() - 30 * 86_400_000 },
+  { id: "demo-task-2", name: "项目巡检", schedule: { cron: "0 8 * * 1-5" }, prompt: "巡检当前工作区：检查未提交改动、构建状态与遗留 TODO，输出巡检报告。", agentId: "default", accessMode: "full", enabled: true, createdAt: Date.now() - 20 * 86_400_000, lastRun: { sessionId: "demo-automation-1", startedAt: Date.now() - 45 * 60_000, status: "ok", preview: "仓库状态正常：本地零未提交改动，构建通过。" } },
+  { id: "demo-task-3", name: "每小时温度记录", schedule: { cron: "0 * * * *" }, prompt: "每小时记录主要城市温度写入 temperature.log。", agentId: "heiyuhe", accessMode: "full", enabled: false, createdAt: Date.now() - 10 * 86_400_000 }
+];
+
+/** 演示用运行历史（倒序：今天两条 + 昨天两条，覆盖成功/失败/跨角色）。 */
+const DEMO_AUTOMATION_RUNS: AutomationRunRecord[] = (() => {
+  const hour = 3_600_000;
+  const now = Date.now();
+  return [
+    { id: "demo-run-1", taskId: "demo-task-2", taskName: "项目巡检", agentId: "default", agentName: "默认助手", sessionId: "demo-automation-1", startedAt: now - 45 * 60_000, durationMs: 12_000, status: "ok", trigger: "manual", modelId: "claude-sonnet-4-6", preview: "仓库状态正常：本地零未提交改动，构建通过，无遗留 TODO。" },
+    { id: "demo-run-2", taskId: "demo-task-1", taskName: "每日新闻日报", agentId: "heiyuhe", agentName: "黑鱼河", sessionId: "demo-automation-2", startedAt: now - 2 * hour, durationMs: 92_000, status: "ok", trigger: "cron", modelId: "claude-sonnet-4-6", preview: "今日要点：① AI 编码赛道融资再创新高；② 前端工程化工具链持续整合；③ 开源社区周报发布。" },
+    { id: "demo-run-3", taskId: "demo-task-1", taskName: "每日新闻日报", agentId: "heiyuhe", agentName: "黑鱼河", sessionId: "demo-automation-3", startedAt: now - 27 * hour, durationMs: 28_000, status: "error", trigger: "cron", error: "API 超时：上游服务 504，请稍后重试。" },
+    { id: "demo-run-4", taskId: "demo-task-3", taskName: "每小时温度记录", agentId: "heiyuhe", agentName: "黑鱼河", sessionId: "demo-automation-4", startedAt: now - 29 * hour, durationMs: 115_000, status: "ok", trigger: "cron", modelId: "claude-sonnet-4-6", preview: "温度记录完成：上海 31°C、北京 26°C、东京 28°C，已写入 temperature.log。" }
+  ];
+})();
 
 const demoSnapshot: RuntimeSnapshot = {
   workspace: "D:\\Projects\\chat-anytime-demo",
@@ -310,12 +341,16 @@ const demoResources: ResourceCatalog = {
     { name: "git防火墙", event: "tool_call", matcher: "bash", actionKind: "block", action: { kind: "block", deny: ["git\\s+push.*--force"] }, actionPreview: "拦截 1 条规则", blocking: true, scope: "project", enabled: true }
   ],
   hooksEnabled: true,
-  automation: [],
+  automation: DEMO_AUTOMATION_TASKS,
+  automationRuns: DEMO_AUTOMATION_RUNS,
   diagnostics: []
 };
 
-/** 离线演示的定时任务列表（automation.* 命令维护）。 */
-let demoAutomation: AutomationTask[] = [];
+/** 离线演示的定时任务列表（automation.* 命令维护）；初始即带演示数据。 */
+let demoAutomation: AutomationTask[] = structuredClone(DEMO_AUTOMATION_TASKS);
+
+/** 离线演示的运行历史（automation.run 模拟追加 + automation-runs 推送）。 */
+let demoAutomationRuns: AutomationRunRecord[] = structuredClone(DEMO_AUTOMATION_RUNS);
 
 function emit(message: RuntimeMessage): void {
   for (const listener of listeners) listener(message);
@@ -735,9 +770,50 @@ export function createDemoApi(): DesktopApi {
           demoAutomation = demoAutomation.map((item) => (item.id === command.id ? { ...item, enabled: command.enabled } : item));
           emit({ type: "automation", tasks: structuredClone(demoAutomation) });
           break;
-        case "automation.run":
-          emit({ type: "automation-run", id: command.id, status: "ok" });
+        case "automation.run": {
+          // 演示完整生命周期：先推 running（面板置顶运行中条目），短暂延迟后落盘记录 + 终态推送。
+          const task = demoAutomation.find((item) => item.id === command.id);
+          emit({ type: "automation-run", id: command.id, status: "running", taskName: task?.name ?? "定时任务" });
+          setTimeout(() => {
+            const runId = `demo-run-${Date.now()}`;
+            const agentId = task?.agentId ?? demoSettings.currentAgentId;
+            const agentName = demoSettings.agents.find((agent) => agent.id === agentId)?.name ?? agentId;
+            const record: AutomationRunRecord = {
+              id: runId,
+              taskId: command.id,
+              taskName: task?.name ?? "定时任务",
+              agentId,
+              agentName,
+              sessionId: `demo-session-${Date.now()}`,
+              startedAt: Date.now() - 900,
+              durationMs: 900,
+              status: "ok",
+              trigger: "manual",
+              modelId: "claude-sonnet-4-6",
+              preview: "演示运行完成：任务已在后台执行（浏览器演示环境不真实调用）。"
+            };
+            demoAutomationRuns = structuredClone([record, ...demoAutomationRuns]).slice(0, 200);
+            emit({ type: "automation-runs", runs: structuredClone(demoAutomationRuns) });
+            emit({ type: "automation-run", id: command.id, status: "ok", taskName: record.taskName, runId });
+          }, 1200);
           break;
+        }
+        case "automation.run.open": {
+          // 演示「查看会话/切换角色查看」：跨角色先切角色再打开对应会话。
+          const run = demoAutomationRuns.find((item) => item.id === command.runId);
+          if (!run) break;
+          if (run.agentId !== demoSettings.currentAgentId) {
+            demoSettings.currentAgentId = run.agentId;
+            resetDemoContext(0);
+            updateSnapshot({ agentId: run.agentId, agentName: run.agentName, sessionId: run.sessionId, messages: [], executions: [], contextUsage: demoContextUsage(), planMode: false });
+            applyDemoAgentSkillOverrides();
+            emit({ type: "resources", resources: structuredClone(demoResources) });
+          } else {
+            resetDemoContext(2_600);
+            updateSnapshot({ sessionId: run.sessionId, messages: [], executions: [], contextUsage: demoContextUsage(), planMode: false });
+          }
+          break;
+        }
         case "subagent.transcript": {
           // 离线演示：返回固定的委托会话时间线 fixture。
           const now = Date.now();

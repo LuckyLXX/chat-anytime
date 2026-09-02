@@ -1,4 +1,4 @@
-import type { AutomationTask, CommandSummary, HookSummary, McpServerSummary, MemoryTopic, ResourceCatalog, SkillSummary, SubagentDefinition, Todo } from "../shared/protocol.js";
+import type { AutomationRunRecord, AutomationTask, CommandSummary, HookSummary, McpServerSummary, MemoryTopic, ResourceCatalog, SkillSummary, SubagentDefinition, Todo } from "../shared/protocol.js";
 
 /**
  * The resource catalog is now a thin aggregate over the self-built capability
@@ -20,8 +20,10 @@ export interface ResourceCatalogInput {
   hooks?: HookSummary[];
   /** 钩子总开关（settings.hooks 的实时投影）。 */
   hooksEnabled?: boolean;
-  /** 当前 Agent 的自动化定时任务。 */
+  /** 全部角色的自动化任务（设置页「自动化任务」列表）。 */
   automation?: AutomationTask[];
+  /** 全角色自动化运行历史。 */
+  automationRuns?: AutomationRunRecord[];
   diagnostics?: string[];
 }
 
@@ -35,6 +37,7 @@ export const emptyResourceCatalog: ResourceCatalog = {
   hooks: [],
   hooksEnabled: true,
   automation: [],
+  automationRuns: [],
   diagnostics: []
 };
 
@@ -49,6 +52,7 @@ export function buildResourceCatalog(input: ResourceCatalogInput): ResourceCatal
     hooks: input.hooks ? structuredClone(input.hooks) : [],
     hooksEnabled: input.hooksEnabled !== false,
     automation: input.automation ? structuredClone(input.automation) : [],
+    automationRuns: input.automationRuns ? structuredClone(input.automationRuns) : [],
     diagnostics: input.diagnostics ? [...input.diagnostics] : []
   };
 }

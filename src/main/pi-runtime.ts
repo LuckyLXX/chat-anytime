@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import { statSync } from "node:fs";
 import { readFile, readdir, realpath, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative as relativePath, resolve, sep } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
@@ -49,7 +51,8 @@ import type {
   Todo,
   ToolExecution,
   TurnTiming,
-  AutomationTask
+  AutomationTask,
+  AutomationRunRecord
 } from "../shared/protocol.js";
 import { isDelegationProgress } from "../shared/protocol.js";
 import { toolLabel } from "../shared/locale.js";
@@ -70,6 +73,7 @@ import * as commandCatalog from "./command-catalog.js";
 import { COMMAND_NAME_PATTERN, type DiscoveredCommand } from "./command-catalog.js";
 import { createTodoStore, migrateLegacyTodoFile, type TodoStore } from "./todo-store.js";
 import { automationPathFor, deleteAutomation, normalizeAutomation, readAllAutomations, recordAutomationRun, resolveAutomationAgent, toggleAutomation, upsertAutomation } from "./automation-store.js";
+import { appendAutomationRun, readAutomationRuns } from "./automation-runs.js";
 import { createAutomationScheduler, type AutomationScheduler } from "./automation-scheduler.js";
 import { buildAutomationTools, type AutomationCreateInput, type AutomationToolContext } from "./automation-tools.js";
 import { resolveVisionModel } from "./vision.js";
@@ -125,6 +129,8 @@ let selectedModel: { provider: string; id: string } | undefined;
 let settings: DesktopSettings | undefined;
 /** 当前 Agent 的自动化定时任务（设置页列表 + 目录下发）；随 Agent 切换重读。 */
 let automationTasks: AutomationTask[] = [];
+/** 全角色自动化运行历史（设置页「运行记录」子页 + 目录下发）；runs.jsonl 事件流。 */
+let automationRuns: AutomationRunRecord[] = [];
 /** 自动化调度器（每分 tick，串行执行）；initialize 创建、utility 进程结束随进程清理。 */
 let automationScheduler: AutomationScheduler | undefined;
 let apiKeys: Record<string, string> = {};
@@ -439,7 +445,7 @@ async function syncMcpServers(refresh = false): Promise<void> {
 }
 
 function emitResourceCatalog(): void {
-  post({ type: "resources", resources: buildResourceCatalog({ skills: nativeSkills, commands: nativeCommands, mcpServers, todos, memory: memoryTopics, subagents: subagentCatalog, hooks: hookSummaries(), hooksEnabled: settings?.hooks?.enabled !== false, automation: automationTasks }) });
+  post({ type: "resources", resources: buildResourceCatalog({ skills: nativeSkills, commands: nativeCommands, mcpServers, todos, memory: memoryTopics, subagents: subagentCatalog, hooks: hookSummaries(), hooksEnabled: settings?.hooks?.enabled !== false, automation: automationTasks, automationRuns }) });
 }
 
 function emitTodos(): void {
@@ -474,10 +480,17 @@ function emitAutomation(): void {
   post({ type: "automation", tasks: automationTasks });
 }
 
-/** 重读全部角色的自动化任务并广播（列表 + 目录）；任何角色变化都影响聚合列表。 */
+/** 广播自动化运行历史（全角色聚合，全量替换语义）。 */
+function emitAutomationRuns(): void {
+  post({ type: "automation-runs", runs: automationRuns });
+}
+
+/** 重读全部角色的自动化任务与运行历史并广播（列表/运行记录 + 目录）；任何角色变化都影响聚合列表。 */
 function refreshAutomation(): void {
   automationTasks = readAllAutomations(getAgentDir());
+  automationRuns = readAutomationRuns(getAgentDir());
   emitAutomation();
+  emitAutomationRuns();
   emitResourceCatalog();
 }
 
@@ -510,7 +523,7 @@ function afterAutomationRun(taskId: string, agentId: string, run: AutomationTask
 }
 
 /** 后台新建专用会话跑任务提示词（跨角色：按任务自身 agentId 解析角色档案，skipActivate 不抢焦点）。 */
-async function runAutomationTask(task: AutomationTask): Promise<void> {
+async function runAutomationTask(task: AutomationTask, trigger: "cron" | "manual"): Promise<void> {
   if (!workspace || !modelRuntime) throw new Error("当前没有可用工作区，无法运行定时任务");
   // 快照本回合的工作区：避免与 agent.select/workspace.open 交错时执行主体与数据落位错位。
   const runWorkspace = workspace;
@@ -542,6 +555,13 @@ async function runAutomationTask(task: AutomationTask): Promise<void> {
   const record = liveSessions.get(sessionId);
   if (!record) throw new Error("自动化会话创建失败");
   if (!record.session.model) throw new Error("无法为任务解析模型，请检查该任务的模型配置");
+  // 运行会话在话题列表中可辨认（查看会话后的体验闭环）：为会话命名；对未持久化
+  // 会话（首条助手消息前 JSONL 未落盘）的 appendSessionInfo 行为可能受限，失败只记日志不阻塞。
+  try {
+    manager.appendSessionInfo(`自动化 · ${task.name}`);
+  } catch (error) {
+    void post({ type: "log", level: "warn", message: `为自动化会话命名「${task.name}」失败：${errorText(error)}` });
+  }
   if (task.accessMode !== "full") {
     post({ type: "log", level: "warn", message: `自动化任务「${task.name}」使用受限权限 ${task.accessMode}，无人值守下遇权限确认会挂起，建议改为完全访问。` });
   }
@@ -553,17 +573,52 @@ async function runAutomationTask(task: AutomationTask): Promise<void> {
   beginTurn(record);
   emitPaneStateFor(record);
   const startedAt = Date.now();
+  // 开始执行即推 running：渲染端据此在运行记录列表顶部显示运行中条目（不带 runId——记录在结束时才落盘）。
+  post({ type: "automation-run", id: task.id, status: "running", taskName: task.name });
   let succeeded = false;
   try {
     await record.session.prompt(task.prompt);
     succeeded = true;
     const preview = truncatePreview(lastAssistantText(record));
+    const runId = randomUUID();
+    automationRuns = appendAutomationRun(getAgentDir(), {
+      id: runId,
+      taskId: task.id,
+      taskName: task.name,
+      agentId: runAgent.id,
+      agentName: runAgent.name,
+      sessionId,
+      startedAt,
+      durationMs: Date.now() - startedAt,
+      status: "ok",
+      trigger,
+      ...(modelRef ? { modelId: modelRef.id } : {}),
+      ...(preview ? { preview } : {})
+    });
+    emitAutomationRuns();
+    // lastRun 回写（覆盖式，保留不动）与运行历史流并存：afterAutomationRun 内 refreshAutomation 会重读 runs。
     afterAutomationRun(task.id, runAgent.id, { sessionId, startedAt, status: "ok", ...(preview ? { preview } : {}) });
-    post({ type: "automation-run", id: task.id, status: "ok" });
+    post({ type: "automation-run", id: task.id, status: "ok", taskName: task.name, runId });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    const runId = randomUUID();
+    automationRuns = appendAutomationRun(getAgentDir(), {
+      id: runId,
+      taskId: task.id,
+      taskName: task.name,
+      agentId: runAgent.id,
+      agentName: runAgent.name,
+      sessionId,
+      startedAt,
+      durationMs: Date.now() - startedAt,
+      status: "error",
+      trigger,
+      ...(modelRef ? { modelId: modelRef.id } : {}),
+      error: message
+    });
+    emitAutomationRuns();
     afterAutomationRun(task.id, runAgent.id, { sessionId, startedAt, status: "error", error: message });
-    post({ type: "automation-run", id: task.id, status: "error", message });
+    post({ type: "automation-run", id: task.id, status: "error", taskName: task.name, runId, message });
   } finally {
     record.busy = false;
     record.runStatus = succeeded ? "completed" : "failed";
@@ -669,7 +724,7 @@ function automationToolContextFor(agentId: string): AutomationToolContext {
       const task = readAllAutomations(getAgentDir()).find((candidate) => candidate.id === id);
       if (!task) return { ok: false, message: `未找到任务 ${id}` };
       try {
-        await runAutomationTask(task);
+        await runAutomationTask(task, "manual");
         return { ok: true, message: `已触发任务 ${id} 运行（结果见侧边栏对应会话）。` };
       } catch (error) {
         return { ok: false, message: error instanceof Error ? error.message : String(error) };
@@ -2234,7 +2289,7 @@ async function initialize(command: Extract<RuntimeCommand, { type: "initialize" 
   // 限定当前激活角色）；执行侧按任务自身 agentId 解析角色（runAutomationTask）。
   automationScheduler = createAutomationScheduler({
     getTasks: () => readAllAutomations(getAgentDir()),
-    runTask: (task) => runAutomationTask(task),
+    runTask: (task) => runAutomationTask(task, "cron"),
     onError: (message) => void post({ type: "log", level: "warn", message: `自动化任务错误：${message}` })
   });
   automationScheduler.start();
@@ -2823,9 +2878,86 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     case "automation.run": {
       const runTask = readAllAutomations(getAgentDir()).find((candidate) => candidate.id === command.id);
       if (!runTask) throw new Error(`未找到任务 ${command.id}`);
-      void runAutomationTask(runTask).catch((error: unknown) => {
-        post({ type: "automation-run", id: command.id, status: "error", message: error instanceof Error ? error.message : String(error) });
+      void runAutomationTask(runTask, "manual").catch((error: unknown) => {
+        post({ type: "automation-run", id: command.id, status: "error", taskName: runTask.name, message: error instanceof Error ? error.message : String(error) });
       });
+      break;
+    }
+    case "automation.run.open": {
+      const run = automationRuns.find((candidate) => candidate.id === command.runId);
+      if (!run) {
+        post({ type: "error", message: "运行记录不存在（可能已被裁剪或尚未落盘）" });
+        break;
+      }
+      // 跨角色回看：运行会话归属任务的角色。同角色直接打开；跨角色先切换角色再打开
+      // （点击前用户已知晓会发生切换，不做隐式切换）——复用 agent.select 完整管线
+      // （含会话列表重拉），串行 await 后当前角色即任务归属角色。
+      if (run.agentId !== settings?.currentAgentId) {
+        try {
+          await handleCommand({ type: "agent.select", agentId: run.agentId });
+        } catch (error) {
+          post({ type: "error", message: `切换到角色「${run.agentName}」失败：${errorText(error)}` });
+          break;
+        }
+      }
+      // 定位会话：liveSessions 命中（仍在本进程存活）→ 原位激活；未命中 → 按 sessionId
+      // 在该角色的会话目录下扫描 JSONL 文件，走 session.open 相同的恢复逻辑。
+      const live = liveSessions.get(run.sessionId);
+      if (live) {
+        activate(live);
+        emitState();
+        break;
+      }
+      // 运行记录未存 workspace（历史事件流不快照运行上下文），按 sessionId 扫描任务角色的
+      // 全部工作区会话目录（<agentDir>/chatanytime-sessions/<agentId>/*/<sessionId>.jsonl）。
+      const runRoot = agentSessionRoot();
+      if (!runRoot) {
+        post({ type: "error", message: "当前没有可用 Agent，无法打开会话" });
+        break;
+      }
+      let target: string | undefined;
+      const probe = (candidate: string): void => {
+        if (target) return;
+        try {
+          if (statSync(candidate).isFile()) target = candidate;
+        } catch {
+          // 文件不存在
+        }
+      };
+      probe(join(runRoot, `${run.sessionId}.jsonl`));
+      try {
+        const entries = await readdir(runRoot, { withFileTypes: true });
+        for (const entry of entries) {
+          if (!entry.isDirectory() || entry.name === "delegations") continue;
+          probe(join(runRoot, entry.name, `${run.sessionId}.jsonl`));
+        }
+      } catch {
+        // 会话目录缺失：由下方错误提示兜底
+      }
+      if (!target) {
+        post({ type: "error", message: "该运行的会话不存在（可能未持久化或已删除）" });
+        break;
+      }
+      const discovered = SessionManager.open(target);
+      const recordWorkspace = resolve(discovered.getCwd() ?? "");
+      if (!recordWorkspace) {
+        post({ type: "error", message: "会话缺少工作区信息，无法打开" });
+        break;
+      }
+      workspace = recordWorkspace;
+      touchRecentWorkspace(workspace);
+      const sessionRoot = workspaceSessionDir();
+      const runRecordLive = liveSessions.get(discovered.getSessionId());
+      if (runRecordLive) {
+        activate(runRecordLive);
+      } else {
+        if (!sessionRoot || resolve(dirname(target)).toLowerCase() !== resolve(sessionRoot).toLowerCase()) {
+          post({ type: "error", message: "会话路径与工作区不匹配" });
+          break;
+        }
+        await createSession(SessionManager.open(target, sessionRoot, recordWorkspace));
+      }
+      emitState();
       break;
     }
     case "session.compact": {

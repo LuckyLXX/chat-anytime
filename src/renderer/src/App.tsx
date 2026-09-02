@@ -593,6 +593,10 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
   const [visionError, setVisionError] = useState<string>();
   const visionModelOptions = selectableCatalogModels(models).filter((model) => model.configured && model.imageInput);
   const [tab, setTab] = useState<"general" | "models" | "agents" | "subagents" | "appearance" | "resources" | "hooks" | "usage" | "automation">(initialTab === "automation" ? "automation" : "general");
+  // toast 直达/侧栏入口：设置页已打开（初始 tab 已固定）时也能切到「自动化」tab。
+  useEffect(() => {
+    if (initialTab === "automation") setTab("automation");
+  }, [initialTab]);
   const [opacityMode, setOpacityMode] = useState<ThemeMode>(() => {
     const { theme } = settings.appearance;
     if (theme === "light") return "light";
@@ -1128,14 +1132,26 @@ export function App(): ReactNode {
   // —— checkpoint 回滚：单文件确认对话框目标 + 完成后的 toast ——
   const [rollbackTarget, setRollbackTarget] = useState<{ file: ReplyChangedFile; sessionId: string } | null>(null);
   const [checkpointToast, setCheckpointToast] = useState<string>();
-  // —— 自动化任务运行结束 toast ——
-  const [automationToast, setAutomationToast] = useState<string>();
+  // —— 自动化任务运行结束 toast（带任务名 + 查看结果直达）——
+  const [automationToast, setAutomationToast] = useState<{ message: string; runId?: string }>();
   const lastAutomationRunAtRef = useRef(0);
   useEffect(() => {
     if (!automationRun || automationRun.at === lastAutomationRunAtRef.current) return;
     lastAutomationRunAtRef.current = automationRun.at;
-    setAutomationToast(automationRun.status === "ok" ? (automationRun.message ?? "定时任务已运行") : (automationRun.message ?? "定时任务运行失败"));
+    // 运行中不弹 toast（运行记录面板顶部有运行中条目）；终态才提示。
+    if (automationRun.status === "running") return;
+    const name = automationRun.taskName ? `「${automationRun.taskName}」` : "";
+    const message = automationRun.status === "ok"
+      ? (name ? `${name}运行完成` : "定时任务已运行")
+      : `${name}运行失败${automationRun.message ? `：${automationRun.message.length > 120 ? `${automationRun.message.slice(0, 120)}…` : automationRun.message}` : ""}`;
+    setAutomationToast({ message, runId: automationRun.runId });
   }, [automationRun]);
+  // 「查看结果」直达：打开设置页自动化 tab，写入信号让 AutomationSettings 切「运行记录」子页并高亮该条。
+  function viewAutomationRun(runId: string): void {
+    setAutomationToast(undefined);
+    openSettingsOn("automation");
+    useDesktopStore.setState({ automationRunsSignal: { runId, at: Date.now() } });
+  }
   // —— 子代理完整记录（只读弹窗目标）；App 层开关，DelegationTranscript 挂在这里 ——
   const [transcriptTarget, setTranscriptTarget] = useState<DelegationProgress>();
   const lastCheckpointAtRef = useRef(0);
@@ -2162,7 +2178,7 @@ export function App(): ReactNode {
         <div className="error-toast checkpoint-toast"><History size={18} /><span>{checkpointToast}</span><button className="icon-button" type="button" title="关闭提示" aria-label="关闭提示" onClick={() => setCheckpointToast(undefined)}><X size={16} /></button></div>
       )}
       {automationToast && (
-        <div className="error-toast checkpoint-toast"><Zap size={18} /><span>{automationToast}</span><button className="icon-button" type="button" title="关闭提示" aria-label="关闭提示" onClick={() => setAutomationToast(undefined)}><X size={16} /></button></div>
+        <div className={`error-toast checkpoint-toast${automationToast.runId ? " with-action" : ""}`}><Zap size={18} /><span>{automationToast.message}</span>{automationToast.runId && <button className="toast-action" type="button" title="打开运行记录" aria-label="查看运行结果" onClick={() => viewAutomationRun(automationToast.runId!)}>查看结果</button>}<button className="icon-button" type="button" title="关闭提示" aria-label="关闭提示" onClick={() => setAutomationToast(undefined)}><X size={16} /></button></div>
       )}
       {removeWorkspace && (
         <div className="modal-backdrop permission-backdrop" onClick={() => setRemoveWorkspace(null)}>
