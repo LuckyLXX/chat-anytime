@@ -244,12 +244,13 @@ button, input, select, textarea, summary, label {
 .context-menu-item.danger:hover { background: var(--danger-soft); }
 .session-workspace-group { display: grid; gap: 2px; }
 .session-workspace-heading { position: relative; min-height: 43px; }
-.session-list .session-workspace-toggle { grid-template-columns: 20px minmax(0, 1fr) auto 16px; width: 100%; min-height: 43px; padding: 6px 8px; color: var(--text); background: transparent; }
-.session-workspace-toggle > span { gap: 2px; }
+.session-list .session-workspace-toggle { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 43px; padding: 6px 8px; color: var(--text); background: transparent; }
+.session-workspace-toggle > span { flex: 0 1 auto; min-width: 0; gap: 2px; }
 .session-workspace-toggle > span strong { font-size: 11px; }
 .session-workspace-toggle > span small { font-size: 11px; }
+.session-workspace-toggle > svg { flex: 0 0 auto; }
 .session-workspace-toggle > svg:first-child { color: var(--accent-text); }
-.session-workspace-toggle > svg:last-child { color: var(--text-muted); transition: transform .15s ease; }
+.session-workspace-toggle > svg:last-child { margin-left: auto; color: var(--text-muted); transition: transform .15s ease; }
 .session-workspace-toggle > svg:last-child.collapsed { transform: rotate(-90deg); }
 .session-workspace-toggle em { min-width: 18px; padding: 2px 5px; border-radius: 999px; color: var(--text-muted); background: var(--surface-sidebar-badge); font-size: 10px; font-style: normal; text-align: center; transition: opacity .12s ease; }
 .session-list .session-workspace-new-button { position: absolute; top: 50%; right: 27px; display: grid; place-items: center; width: 26px; min-height: 26px; height: 26px; padding: 0; border: 1px solid transparent; color: var(--text-muted); background: var(--surface); opacity: 0; pointer-events: none; transform: translateY(-50%); transition: opacity .12s ease, color .12s ease, background .12s ease; }
