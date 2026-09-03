@@ -2006,11 +2006,12 @@ export function App(): ReactNode {
                     <button
                       className="session-workspace-toggle"
                       type="button"
+                      title={group.workspace}
                       aria-expanded={!collapsed}
                       onClick={() => setExpandedWorkspaceGroups((current) => ({ ...current, [group.key]: collapsed }))}
                     >
                       <Folder size={15} />
-                      <span><strong>{workspaceName}</strong><small>{compactPath(group.workspace)}</small></span>
+                      <span><strong>{workspaceName}</strong></span>
                       <em>{group.sessions.length}</em>
                       <ChevronDown size={14} className={collapsed ? "collapsed" : ""} />
                     </button>
