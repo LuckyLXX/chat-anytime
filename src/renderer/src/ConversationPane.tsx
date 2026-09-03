@@ -728,6 +728,8 @@ export const ConversationPane = memo(function ConversationPane({
   const modelMenuRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLFormElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const slashMenuRef = useRef<HTMLDivElement>(null);
+  const mentionMenuRef = useRef<HTMLDivElement>(null);
   const questionPanelRef = useRef<HTMLDivElement | null>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
   // 默认粘底：单窗口切会话、分屏格子打开都直接位于底部（最新消息），保持与
@@ -843,6 +845,13 @@ export const ConversationPane = memo(function ConversationPane({
     if (slashIndex > slashMatches.length - 1) setSlashIndex(Math.max(0, slashMatches.length - 1));
   }, [slashMatches.length, slashIndex]);
 
+  // 键盘上下键只移动高亮；菜单可滚动（技能多时超 max-height）时，滚动条必须跟随高亮，
+  // 否则激活项会滚出可视区，看起来像「上下键翻不动滚动条」。
+  useEffect(() => {
+    if (!slashOpen) return;
+    slashMenuRef.current?.querySelector<HTMLElement>(".slash-menu-item.active")?.scrollIntoView({ block: "nearest" });
+  }, [slashOpen, activeSlashIndex]);
+
   // —— @ 提及工作区文件 ——
   const mentionToken = mention ? `${mention.tokenStart}:${mention.query}` : "";
   const mentionOpen = Boolean(mention && data.workspace && mentionToken !== mentionDismissedToken && mentionResults.length > 0);
@@ -851,6 +860,12 @@ export const ConversationPane = memo(function ConversationPane({
   useEffect(() => {
     if (mentionIndex > mentionResults.length - 1) setMentionIndex(Math.max(0, mentionResults.length - 1));
   }, [mentionResults.length, mentionIndex]);
+
+  // @ 提及菜单可滚动时的同一跟随逻辑（复用 slash-menu 骨架）。
+  useEffect(() => {
+    if (!mentionOpen) return;
+    mentionMenuRef.current?.querySelector<HTMLElement>(".slash-menu-item.active")?.scrollIntoView({ block: "nearest" });
+  }, [mentionOpen, activeMentionIndex]);
 
   // 输入被外部清空/替换（发送、编辑消息回填等）后，失效的 tokenStart 需要清理，
   // 否则菜单会挂在错误的插入位置上。
@@ -1621,7 +1636,7 @@ export const ConversationPane = memo(function ConversationPane({
         {attachmentError && <div className="attachment-error" data-composer-zone="error" role="alert">{attachmentError}<button type="button" title="关闭提示" aria-label="关闭附件提示" onClick={() => setAttachmentError(undefined)}><X size={12} /></button></div>}
         <input ref={fileInputRef} type="file" hidden multiple accept="image/png,image/jpeg,image/webp,image/gif,.txt,.md,.json,.js,.ts,.tsx,.jsx,.py,.go,.rs,.java,.css,.html" onChange={(event) => { void addLocalFiles(event.target.files ?? []); event.currentTarget.value = ""; }} />
         {slashOpen && (
-          <div className="slash-menu" role="listbox" aria-label="斜杠指令" data-composer-zone="popup">
+          <div className="slash-menu" role="listbox" aria-label="斜杠指令" data-composer-zone="popup" ref={slashMenuRef}>
             {slashGroups.map((group) => (
               <div className="composer-menu-group slash-menu-group" role="group" aria-label={group.title} key={group.key}>
                 <small>{group.title}</small>
@@ -1646,7 +1661,7 @@ export const ConversationPane = memo(function ConversationPane({
         )}
 
         {mentionOpen && (
-          <div className="slash-menu mention-menu" role="listbox" aria-label="引用工作区文件" data-composer-zone="popup">
+          <div className="slash-menu mention-menu" role="listbox" aria-label="引用工作区文件" data-composer-zone="popup" ref={mentionMenuRef}>
             {mentionResults.map((entry, index) => (
               <button
                 type="button"
