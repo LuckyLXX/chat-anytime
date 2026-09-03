@@ -1710,7 +1710,10 @@ button, input, select, textarea, summary, label {
 
 /* —— 密度：侧栏列表/工作区树/侧栏控件/新建话题按钮随系数缩放 —— */
 :root[data-ui-density] .session-list button { min-height: calc(48px * var(--ui-density-scale)); }
-:root[data-ui-density] .session-workspace-toggle { min-height: calc(43px * var(--ui-density-scale)); }
+/* 会话分组折叠按钮与其动作钮不合入上面 .session-list button 的 48px 密度基线：
+   折叠钮有自己的 43px 行高，动作钮是 26px 图标方钮，需以更高特异性压过那条通用规则。 */
+:root[data-ui-density] .session-list .session-workspace-toggle { min-height: calc(43px * var(--ui-density-scale)); }
+:root[data-ui-density] .session-list .session-workspace-new-button, :root[data-ui-density] .session-list .session-workspace-files-button { min-height: 26px; height: 26px; }
 :root[data-ui-density] .session-workspace-items button { min-height: calc(44px * var(--ui-density-scale)); }
 :root[data-ui-density] .agent-list button { min-height: calc(50px * var(--ui-density-scale)); }
 :root[data-ui-density] .workspace-tree-row { min-height: calc(26px * var(--ui-density-scale)); }
