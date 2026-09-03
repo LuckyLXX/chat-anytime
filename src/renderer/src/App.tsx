@@ -1,6 +1,7 @@
 import {
   AlertCircle,
   Bot,
+  Brain,
   Check,
   ChevronDown,
   Download,
@@ -85,6 +86,7 @@ import { CSS_URL_PATTERN, createThemeAssetUrls, isExternalThemeReference, normal
 import { THEME_PRESETS, bubbleOpacityCss, collectThemeLayers, panelOpacityCss, scopeCustomThemeCss, scopeCustomThemeCssForPreview, themePresetCss, themePreviewCss, themeWallpaperOpacity, wallpaperOpacityCss } from "./lib/theme-presets";
 import { panePermissionRequest, paneQuestionRequest, dropPaneStates, pruneParkedPanels, useDesktopStore } from "./store";
 import { ConversationPane, type PaneComposerApi, type PaneDraftStore } from "./ConversationPane";
+import { MemoryPanelContent } from "./MemoryPanel";
 import { SplitLayout } from "./SplitLayout";
 import {
   MAX_SPLIT_PANES,
@@ -1096,6 +1098,7 @@ export function App(): ReactNode {
   const permission = panePermissionRequest(permissions, paneFocusOrder);
   const question = paneQuestionRequest(questions, paneFocusOrder);
   const settings = useDesktopStore((state) => state.settings);
+  const memoryTopics = useDesktopStore((state) => state.memory);
   const themeAssetUrls = useThemeAssetUrls(themeAssetsForAppearance(settings.appearance));
   const [messageActionError, setMessageActionError] = useState<string>();
   const setActionError = useCallback((message?: string): void => {
@@ -1119,7 +1122,7 @@ export function App(): ReactNode {
   const previewRef = useRef<PreviewState | undefined>(preview);
   previewRef.current = preview;
   const [previewEditorStates, setPreviewEditorStates] = useState<Record<string, PreviewEditorState>>({});
-  const [sidebarView, setSidebarView] = useState<"topics" | "files">("topics");
+  const [sidebarView, setSidebarView] = useState<"topics" | "files" | "memory">("topics");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sidebarFlyoutOpen, setSidebarFlyoutOpen] = useState(false);
   const sidebarSearchRef = useRef<HTMLInputElement>(null);
@@ -1967,6 +1970,14 @@ export function App(): ReactNode {
             ? <WorkspaceTree key={browsingWorkspace} workspace={browsingWorkspace} onOpenFile={(relativePath) => openFilePreview(relativePath, browsingWorkspace)} onAddToChat={(relativePath) => void addFileToChat(relativePath, browsingWorkspace)} onError={(message) => setMessageActionError(message)} refreshSignal={treeRefreshSignal} />
             : <div className="session-list-empty">请从话题列表选择工作区</div>}
         </>
+      ) : sidebarView === "memory" ? (
+        <>
+          <div className="workspace-tree-header">
+            <button type="button" className="workspace-tree-back" onClick={() => setSidebarView("topics")}><ChevronLeft size={14} />返回</button>
+            <span>长期记忆</span>
+          </div>
+          <MemoryPanelContent />
+        </>
       ) : (
         <>
           <div className="sidebar-tabs" role="tablist" aria-label="侧栏视图">
@@ -2026,6 +2037,7 @@ export function App(): ReactNode {
         </>
       )}
       <button className="new-session-button" data-control="new-session" type="button" disabled={!snapshot.workspace} onClick={() => void createNewSession()}><MessageSquarePlus size={16} />新建话题</button>
+      <button className={`memory-nav-button${sidebarView === "memory" ? " active" : ""}`} data-control="memory-toggle" type="button" title="长期记忆治理：查看/编辑当前助手的记忆主题" onClick={() => setSidebarView("memory")}><Brain size={15} /><span>长期记忆</span>{memoryTopics.length > 0 && <em>{memoryTopics.length}</em>}</button>
       <button className="automation-nav-button" data-control="automation-open" type="button" title="自动化任务" aria-label="自动化任务" onClick={() => openSettingsOn("automation")}><Zap size={15} /><span>自动化</span></button>
       <div className="sidebar-footer">
         <button type="button" data-control="settings" onClick={() => setSettingsOpen(true)}><Settings size={16} />设置</button>
@@ -2050,6 +2062,7 @@ export function App(): ReactNode {
             <button type="button" className="rail-icon" data-control="rail-topics" title="话题列表" aria-label="话题列表" onClick={() => { setSidebarView("topics"); setSidebarTab("topics"); setSidebarFlyoutOpen(true); }}><MessageCircle size={18} /></button>
             <button type="button" className="rail-icon" data-control="rail-search" title="搜索" aria-label="搜索" onClick={() => { setSidebarView("topics"); setSidebarFlyoutOpen(true); window.setTimeout(() => sidebarSearchRef.current?.focus(), 30); }}><Search size={18} /></button>
             <button type="button" className="rail-icon" data-control="rail-agents" title="助手" aria-label="助手" onClick={() => { setSidebarView("topics"); setSidebarTab("agents"); setSidebarFlyoutOpen(true); }}><Users size={18} /></button>
+            <button type="button" className="rail-icon" data-control="rail-memory" title="长期记忆" aria-label="长期记忆" onClick={() => { setSidebarView("memory"); setSidebarFlyoutOpen(true); }}><Brain size={18} /></button>
           </div>
           {sidebarFlyoutOpen && (
             <aside className="sidebar sidebar-flyout" data-pane="sidebar">

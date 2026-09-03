@@ -13,8 +13,8 @@ interface TopicDraft {
 const emptyDraft: TopicDraft = { title: "", description: "", content: "", scoped: false };
 
 /**
- * 记忆页内容（由 PanelDock 的 tab 承载）。与只读的待办页不同，这里是用户
- * 的治理入口：查看/编辑/删除/新建当前助手的记忆主题。面板写走 IPC 直改
+ * 记忆视图内容（由侧边栏 memory 视图承载，悬浮面板装不下长正文的预览/编辑）。
+ * 与只读的待办页不同，这里是用户的治理入口：查看/编辑/删除/新建当前助手的记忆主题。面板写走 IPC 直改
  * store（不经过模型上下文，也不碰会话内已冻结的索引快照——手改从下一个
  * 会话起生效）。模型侧的写入经 memory_write 工具，同样落到这份 store。
  */
