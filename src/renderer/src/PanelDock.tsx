@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from "react";
 import { Brain, ListTodo, NotebookTabs, Terminal, X } from "lucide-react";
+import type { MemoryTopic } from "../../shared/protocol";
 import { useDesktopStore } from "./store";
 import { MIN_RUNNING_AGE_MS, TaskPanelContent } from "./TaskPanel";
 import { MemoryPanelContent } from "./MemoryPanel";
@@ -11,13 +12,14 @@ type PanelTab = "tasks" | "memory";
  * 右上角区域时会重叠）。关闭态是一个 FAB：badge 显示待办未完成数与记忆
  * 主题数，运行中的终端沿用小图标。打开态是单一浮动面板，head 为两个
  * tab——待办（默认在前）与记忆；两个内容页始终挂载（隐藏而非卸载），
- * tab 切换不丢各自的编辑/展开状态。
+ * tab 切换不丢各自的展开/新建状态。记忆主题的正文预览/编辑在右侧预览
+ * 窗口进行（onOpenMemoryTopic，面板内不再塞内联编辑器）。
  *
  * 主题钩子保持不变：data-pane="task-panel"/"memory-panel" 各自留在内容页
  * 根节点上；data-control="task-panel-toggle" 在 FAB 与待办 tab 上，
  * data-control="memory-toggle" 在记忆 tab 上。
  */
-export function PanelDock(): ReactNode {
+export function PanelDock({ onOpenMemoryTopic }: { onOpenMemoryTopic(topic: MemoryTopic): void }): ReactNode {
   const todos = useDesktopStore((state) => state.todos);
   const memory = useDesktopStore((state) => state.memory);
   const executions = useDesktopStore((state) => state.snapshot.executions);
@@ -59,7 +61,7 @@ export function PanelDock(): ReactNode {
           <TaskPanelContent />
         </div>
         <div className="panel-dock-pane" hidden={tab !== "memory"}>
-          <MemoryPanelContent />
+          <MemoryPanelContent onOpenTopic={onOpenMemoryTopic} />
         </div>
       </div>
     </div>

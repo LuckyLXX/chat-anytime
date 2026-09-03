@@ -46,6 +46,7 @@ import type {
   CustomProviderModel,
   ModelOption,
   McpServerStatus,
+  MemoryTopic,
   ProviderOption,
   CustomThemeDefinition,
   DivBubbleMode,
@@ -122,6 +123,7 @@ function previewTargetKey(target: PreviewTarget): string {
     case "terminal": return "terminal";
     case "file": return target.file.relativePath;
     case "plan": return "plan";
+    case "memory": return `memory-${target.topicId}`;
     default: return `${target.type}-${target.path ?? target.title}`;
   }
 }
@@ -1773,6 +1775,11 @@ export function App(): ReactNode {
     openPreviewTarget({ type: "plan", title: detailTitle(detail), content: detail });
   }
 
+  /** 记忆面板点击主题：右侧预览窗口打开该主题正文（查看/编辑/源码，保存走 memory.update）。 */
+  const openMemoryTopic = useCallback((topic: MemoryTopic): void => {
+    openPreviewTarget({ type: "memory", topicId: topic.id, title: topic.title });
+  }, []);
+
   function openTerminalPreview(): void {
     openPreviewTarget({ type: "terminal" }, `terminal-${crypto.randomUUID()}`);
   }
@@ -1840,6 +1847,7 @@ export function App(): ReactNode {
           onOpenFile={openFilePreview}
           onOpenDiff={openDiffPreview}
           onOpenPlanDetail={openPlanPreview}
+          onOpenMemoryTopic={openMemoryTopic}
           onOpenTranscript={setTranscriptTarget}
           onActionError={setActionError}
           onRollback={(file) => openRollbackConfirm(file, leafSessionId)}
@@ -2114,6 +2122,7 @@ export function App(): ReactNode {
               onOpenFile={openFilePreview}
               onOpenDiff={openDiffPreview}
               onOpenPlanDetail={openPlanPreview}
+              onOpenMemoryTopic={openMemoryTopic}
               onOpenTranscript={setTranscriptTarget}
               onActionError={setActionError}
               onRollback={(file) => openRollbackConfirm(file, snapshot.sessionId)}
@@ -2123,7 +2132,7 @@ export function App(): ReactNode {
           {previewOpened && preview && <PreviewDivider split={previewSplit} dragging={previewDragging} onStart={startPreviewResize} onMove={movePreviewResize} onEnd={endPreviewResize} onCancel={cancelPreviewResize} onKeyDown={resizePreviewWithKeyboard} onReset={() => setPreviewSplit(50)} />}
 
           {previewOpened && (preview && preview.tabs.length > 0 ? (
-            <ArtifactPreview tabs={preview.tabs} activeTabId={preview.activeTabId} browserSuspended={previewDragging || settingsOpen || Boolean(permission) || Boolean(messageActionError) || previewAddMenuOpen} onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddTerminal={openTerminalPreview} onAddFile={() => void openManualFilePreview()} onAddReview={openLatestReview} onAddMenuOpenChange={setPreviewAddMenuOpen} reviewAvailable={Boolean(latestReviewExecution)} workspace={snapshot.workspace} activeEditorState={activePreviewTab?.target.type === "file" && activePreviewTab.target.file.kind === "markdown" ? getEditorState(activePreviewTab.id) : undefined} onActiveEditorChange={(patch) => { if (activePreviewTab) patchEditorState(activePreviewTab.id, patch); }} onActiveEditorContentChange={handleActiveEditorContentChange} onActiveEditorSaved={handleActiveEditorSaved} onActiveEditorStatusChange={handleActiveEditorStatusChange} onActiveEditorSaveError={(message) => setMessageActionError(`保存 ${activePreviewTab?.target.type === "file" ? activePreviewTab.target.file.name : "Markdown"} 失败：${message}`)} onActiveEditorResolveConflict={(choice) => { if (activePreviewTab) handleEditorResolveConflict(activePreviewTab.id, choice); }} onToggleEditing={() => { if (activePreviewTab) patchEditorState(activePreviewTab.id, { editing: !getEditorState(activePreviewTab.id).editing }); }} onBrowserStateChange={handleBrowserStateChange} onBrowserPickSend={sendPickedElement} />
+            <ArtifactPreview tabs={preview.tabs} activeTabId={preview.activeTabId} browserSuspended={previewDragging || settingsOpen || Boolean(permission) || Boolean(messageActionError) || previewAddMenuOpen} onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddTerminal={openTerminalPreview} onAddFile={() => void openManualFilePreview()} onAddReview={openLatestReview} onAddMenuOpenChange={setPreviewAddMenuOpen} reviewAvailable={Boolean(latestReviewExecution)} workspace={snapshot.workspace} activeEditorState={activePreviewTab && ((activePreviewTab.target.type === "file" && activePreviewTab.target.file.kind === "markdown") || activePreviewTab.target.type === "memory") ? getEditorState(activePreviewTab.id) : undefined} onActiveEditorChange={(patch) => { if (activePreviewTab) patchEditorState(activePreviewTab.id, patch); }} onActiveEditorContentChange={handleActiveEditorContentChange} onActiveEditorSaved={handleActiveEditorSaved} onActiveEditorStatusChange={handleActiveEditorStatusChange} onActiveEditorSaveError={(message) => setMessageActionError(`保存 ${activePreviewTab?.target.type === "file" ? activePreviewTab.target.file.name : activePreviewTab?.target.type === "memory" ? "记忆主题" : "Markdown"} 失败：${message}`)} onActiveEditorResolveConflict={(choice) => { if (activePreviewTab) handleEditorResolveConflict(activePreviewTab.id, choice); }} onToggleEditing={() => { if (activePreviewTab) patchEditorState(activePreviewTab.id, { editing: !getEditorState(activePreviewTab.id).editing }); }} onBrowserStateChange={handleBrowserStateChange} onBrowserPickSend={sendPickedElement} />
           ) : (
             <ArtifactPreview key="empty-state" tabs={[]} activeTabId="" onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddTerminal={openTerminalPreview} onAddFile={() => void openManualFilePreview()} onBrowserPickSend={sendPickedElement} />
           ))}

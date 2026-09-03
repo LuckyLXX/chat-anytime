@@ -22,6 +22,11 @@ export interface MarkdownEditorProps {
   initialContent: string;
   workspace?: string;
   /**
+   * 自定义保存动作（缺省写工作区文件）。非工作区文档（如长期记忆主题）用它把
+   * 保存改道到自有命令（memory.update）；自动保存/Ctrl+S/卸载冲刷走同一条路。
+   */
+  persistContent?: (content: string) => Promise<void>;
+  /**
    * initialContent 是否来自磁盘（或已成功落盘）。父组件对正在编辑的 tab 维护乐观
    * 快照：切走再切回时 initialContent 可能含尚未写盘的改动，此时置 false，避免
    * 重挂载后把未保存内容误判为“已保存”。默认 true。
@@ -98,6 +103,8 @@ export function MarkdownEditor(props: MarkdownEditorProps): ReactNode {
   relativePathRef.current = relativePath;
   const workspaceRef = useRef(props.workspace);
   workspaceRef.current = props.workspace;
+  const persistContentRef = useRef(props.persistContent);
+  persistContentRef.current = props.persistContent;
   const onDirtyChangeRef = useRef(props.onDirtyChange);
   onDirtyChangeRef.current = props.onDirtyChange;
   const onContentChangeRef = useRef(props.onContentChange);
@@ -136,8 +143,10 @@ export function MarkdownEditor(props: MarkdownEditorProps): ReactNode {
     }
     writingRef.current = true;
     reportStatus("saving");
-    window.piDesktop
-      .writeWorkspaceFile(relativePathRef.current, value, workspaceRef.current)
+    const write = persistContentRef.current
+      ? persistContentRef.current(value)
+      : window.piDesktop.writeWorkspaceFile(relativePathRef.current, value, workspaceRef.current);
+    write
       .then(() => {
         lastSavedRef.current = value;
         dirtyRef.current = false;
@@ -154,7 +163,7 @@ export function MarkdownEditor(props: MarkdownEditorProps): ReactNode {
       })
       .catch((error: unknown) => {
         writingRef.current = false;
-        const message = error instanceof Error ? error.message : "保存文件失败";
+        const message = error instanceof Error ? error.message : persistContentRef.current ? "保存失败" : "保存文件失败";
         if (aliveRef.current) setSaveError(message);
         reportStatus("error");
         onSaveErrorRef.current?.(message);
