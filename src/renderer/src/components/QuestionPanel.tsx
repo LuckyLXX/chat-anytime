@@ -76,7 +76,7 @@ export function singleClickSubmitAnswers(questions: QuestionItem[], drafts: Ques
  * 回车或空格选中。选择题第一个选项自动标注「（推荐）」——与 ask_question
  * 工具描述的约定一致：模型把最推荐的选项放在第一位。
  */
-export function QuestionPanel({ request, onOpenDetail }: { request: QuestionRequest; onOpenDetail?: (detail: string) => void }): ReactNode {
+export function QuestionPanel({ request, onOpenDetail, rootRef }: { request: QuestionRequest; onOpenDetail?: (detail: string) => void; rootRef?: (element: HTMLDivElement | null) => void }): ReactNode {
   const [drafts, setDrafts] = useState<QuestionDraft[]>(() => request.questions.map(() => emptyQuestionDraft()));
   const [current, setCurrent] = useState(0);
   const [submitting, setSubmitting] = useState(false);
@@ -261,7 +261,7 @@ export function QuestionPanel({ request, onOpenDetail }: { request: QuestionRequ
   }
 
   return (
-    <div className="question-panel" data-pane="question-panel" role="form" aria-label="AI 提问">
+    <div ref={rootRef} className="question-panel" data-pane="question-panel" role="form" aria-label="AI 提问">
       <header className="question-panel-header">
         <span className="question-step-tag">{isLast ? "最后一步" : "下一步"}</span>
         <h2 className="question-title">{item.text}</h2>

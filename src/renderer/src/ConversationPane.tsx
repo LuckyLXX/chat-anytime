@@ -728,6 +728,7 @@ export const ConversationPane = memo(function ConversationPane({
   const modelMenuRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLFormElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const questionPanelRef = useRef<HTMLDivElement | null>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
   // 默认粘底：单窗口切会话、分屏格子打开都直接位于底部（最新消息），保持与
   // 单窗口一致；用户上滚历史时 stickToBottom 置假、停止跟随，滚到底即恢复。
@@ -903,6 +904,30 @@ export const ConversationPane = memo(function ConversationPane({
       pane.style.removeProperty("--composer-height");
     };
   }, [ready]);
+
+  // 问题面板出现/高度变化（翻页、详情展开）时，时间线底部让出等高空间
+  // （--question-panel-space），最新气泡被顶到面板上方而不是被面板盖住；
+  // 粘底状态下瞬跳到底保持最新消息可见，用户上滚历史时则不打断当前位置。
+  // 面板消失后由 cleanup 移除变量，时间线恢复原底部留白（浏览器自动钳回底部）。
+  useEffect(() => {
+    const pane = composerRef.current?.parentElement;
+    const panel = questionPanelRef.current;
+    if (!question || !ready || !pane || !panel) return;
+    const update = (): void => {
+      // 面板底缘悬在 composer 上方 21px，而 --composer-space 已含 56px 余量，
+      // 补足面板实测高度后，最后一条消息与面板顶缘自然保留约 35px 呼吸间距。
+      pane.style.setProperty("--question-panel-space", `${Math.ceil(panel.getBoundingClientRect().height)}px`);
+      const timeline = timelineRef.current;
+      if (timeline && stickToBottomRef.current) timeline.scrollTo({ top: timeline.scrollHeight, behavior: "auto" });
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(panel);
+    return () => {
+      observer.disconnect();
+      pane.style.removeProperty("--question-panel-space");
+    };
+  }, [question, ready]);
 
   useEffect(() => {
     const timeline = timelineRef.current;
@@ -1563,7 +1588,7 @@ export const ConversationPane = memo(function ConversationPane({
         </>}
       </div>
       {turns.length >= 2 && <TurnMinimap turns={turns} activeKey={activeTurnKey} onNavigate={navigateToTurn} />}
-      {question && <QuestionPanel request={question} onOpenDetail={onOpenPlanDetail} />}
+      {question && <QuestionPanel request={question} onOpenDetail={onOpenPlanDetail} rootRef={(element) => { questionPanelRef.current = element; }} />}
       <form ref={composerRef} className={`composer${data.queuedMessages.length > 0 ? " has-queue" : ""}${data.planMode ? " has-plan" : ""}`} data-pane="composer" onSubmit={submit} onDragOver={(event) => event.preventDefault()} onDrop={handleDrop}>
         {data.planMode && (
           <div className="composer-plan-banner" data-composer-zone="plan" role="status" title="计划模式：先产出计划，审查批准后才实施。退出请使用访问权限下拉或 /plan">
