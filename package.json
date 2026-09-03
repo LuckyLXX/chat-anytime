@@ -73,7 +73,8 @@
     ],
     "win": {
       "target": "dir",
-      "signAndEditExecutable": false
+      "icon": "build/icon.ico",
+      "signAndEditExecutable": true
     }
   },
   "engines": {

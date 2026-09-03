@@ -4,6 +4,7 @@ import { extname, join, resolve } from "node:path";
 import { Readable } from "node:stream";
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, protocol, safeStorage, shell, utilityProcess, type UtilityProcess } from "electron";
 import { spawn } from "node-pty";
+import appIconPath from "./assets/icon.ico?asset";
 import { migrateSettings, normalizeVision } from "./settings.js";
 import { importExternalAttachment, workspaceRelativeAttachment } from "./attachments.js";
 import type { BrowserPreviewCommand, BrowserPreviewState, DesktopBootstrap, DesktopSettings, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot, TerminalCommand, TerminalEventData, WorkspaceDirectoryListing, WorkspaceEntryResult, WorkspaceFilePreview, WorkspaceFileSearchResult, WorkspaceFileStat, WorkspaceFileWriteResult } from "../shared/protocol.js";
@@ -283,7 +284,7 @@ function startRuntime(): void {
 }
 function createWindow(): void {
   const rendererUrl = process.env.ELECTRON_RENDERER_URL;
-  const nextWindow = new BrowserWindow({ width: 1440, height: 920, minWidth: 1040, minHeight: 680, backgroundColor: "#f5f5f2", titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default", webPreferences: { preload: join(__dirname, "../preload/index.cjs"), contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: !rendererUrl } });
+  const nextWindow = new BrowserWindow({ width: 1440, height: 920, minWidth: 1040, minHeight: 680, backgroundColor: "#f5f5f2", titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default", icon: process.platform === "win32" || process.platform === "linux" ? appIconPath : undefined, webPreferences: { preload: join(__dirname, "../preload/index.cjs"), contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: !rendererUrl } });
   const previewController = new BrowserPreviewController(nextWindow, (state, tabId) => {
     if (!nextWindow.isDestroyed()) nextWindow.webContents.send(`browser-preview:state:${tabId}`, state);
   }, (event) => {

@@ -77,6 +77,7 @@ import { detailTitle } from "./components/QuestionPanel";
 import { compactPath, type Artifact } from "./lib/content";
 import { composePickMessage } from "./lib/browser-pick";
 import { DiffView } from "./components/DiffView";
+import { BrandMark } from "./components/BrandMark";
 import { clampPreviewSplit, PREVIEW_SPLIT_MAX, PREVIEW_SPLIT_MIN, previewSplitFromKey } from "./lib/preview-split";
 import { groupSessionsByWorkspace, workspaceKey } from "./lib/session-groups";
 import { filterProviderModels, setProviderModelsEnabled, buildBuiltinProviderEntry, selectableCatalogModels, parseTokenLimit, formatTokenLimit, providerFormBlocker, pruneDisabledModelRefs } from "./lib/model-list";
@@ -2042,7 +2043,7 @@ export function App(): ReactNode {
       ))}
       {sidebarCollapsed ? (
         <div className="sidebar-rail" data-pane="sidebar" data-ui-sidebar-collapsed>
-          <button type="button" className="rail-brand" data-control="sidebar-expand" title="展开侧边栏" aria-label="展开侧边栏" onClick={() => { if (sidebarFlyoutOpen) { setSidebarFlyoutOpen(false); } else { setSidebarCollapsed(false); } }}><span className="rail-brand-mark">CA</span><PanelLeftOpen className="rail-brand-expand" size={18} /></button>
+          <button type="button" className="rail-brand" data-control="sidebar-expand" title="展开侧边栏" aria-label="展开侧边栏" onClick={() => { if (sidebarFlyoutOpen) { setSidebarFlyoutOpen(false); } else { setSidebarCollapsed(false); } }}><span className="rail-brand-mark"><BrandMark size={20} /></span><PanelLeftOpen className="rail-brand-expand" size={18} /></button>
           <div className="sidebar-rail-items">
             <button type="button" className="rail-new-session" data-control="new-session" title="在当前工作区新建话题" aria-label="在当前工作区新建话题" disabled={!snapshot.workspace} onClick={() => void createNewSession()}><Plus size={18} /></button>
             <button type="button" className="rail-icon" data-control="automation-open" title="自动化任务" aria-label="自动化任务" onClick={() => openSettingsOn("automation")}><Zap size={18} /></button>
@@ -2052,7 +2053,7 @@ export function App(): ReactNode {
           </div>
           {sidebarFlyoutOpen && (
             <aside className="sidebar sidebar-flyout" data-pane="sidebar">
-              <div className="brand-row"><div className="brand-mark">CA</div><div><strong>ChatAnyTime</strong><span>桌面端</span></div></div>
+              <div className="brand-row"><BrandMark size={29} /><div><strong>ChatAnyTime</strong><span>桌面端</span></div></div>
               {sidebarInner}
             </aside>
           )}
