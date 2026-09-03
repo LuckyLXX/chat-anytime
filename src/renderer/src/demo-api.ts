@@ -592,9 +592,13 @@ export function createDemoApi(): DesktopApi {
           updateSnapshot({ sessions: demoSnapshot.sessions.filter((item) => item.path !== command.path) });
           break;
         case "workspace.remove":
+          // 助手级语义：只移除当前助手的会话，不动全局最近工作区历史；
+          // 移除的是当前激活工作区时同步清空，回到未打开工作区状态。
           updateSnapshot({
             sessions: demoSnapshot.sessions.filter((item) => item.workspace !== command.workspace),
-            recentWorkspaces: demoSnapshot.recentWorkspaces.filter((item) => item.path !== command.workspace)
+            ...(demoSnapshot.workspace && demoSnapshot.workspace.toLowerCase() === command.workspace.toLowerCase()
+              ? { workspace: undefined, sessionId: undefined, messages: [], executions: [] }
+              : {})
           });
           break;
         case "session.compact": {
