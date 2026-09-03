@@ -1408,6 +1408,15 @@ button, input, select, textarea, summary, label {
 .appearance-settings { min-height: 100%; overflow-y: auto; }
 .appearance-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(230px, 34%); gap: 18px; align-items: start; }
 .settings-field-label { display: block; margin: 15px 18px 7px; color: var(--text-muted); font-size: 11px; font-weight: 600; }
+/* 通用 tab「默认工作区」行（2026-09-03 方案 B）：语义 token、两按钮 + 路径展示，跟随表单提交/取消。 */
+.default-workspace-setting { margin: 15px 18px 4px; padding-top: 13px; border-top: 1px solid var(--border); }
+.default-workspace-setting .settings-field-label { margin: 0 0 6px; }
+.default-workspace-hint { margin: 0 0 9px; color: var(--text-muted); font-size: 11px; line-height: 1.45; }
+.default-workspace-controls { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+.default-workspace-path { min-width: 0; flex: 1 1 auto; overflow: hidden; padding: 7px 9px; color: var(--text); background: var(--surface-muted); border: 1px solid var(--border); border-radius: 6px; font: 11px/1.4 "Cascadia Code", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.default-workspace-actions { flex: 0 0 auto; display: inline-flex; gap: 6px; }
+.default-workspace-actions .secondary-button { min-height: 30px; white-space: nowrap; }
+.default-workspace-actions .secondary-button:disabled { opacity: .45; cursor: default; }
 /* 以下主题预览区是缩略模型：内部字号按比例缩小（8-9px），
    不适用全局最小字号规范，勿"修复"。 */
 .theme-preset-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0 18px; }

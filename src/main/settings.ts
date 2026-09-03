@@ -1,3 +1,5 @@
+import { mkdirSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { THEME_PRESET_IDS } from "../shared/protocol.js";
 import type {
   AccessMode,
@@ -255,6 +257,75 @@ export function normalizeCheckpoint(value: unknown): CheckpointSettings | undefi
   return { enabled: (value as Record<string, unknown>).enabled !== false };
 }
 
+// —— 每助手工作区记忆 + 默认工作区（2026-09-03 方案 B）——
+
+/**
+ * agentWorkspaces 规范化：agentId → 非空 string 路径条目保留（resolve 发生在消费侧，
+ * 落盘/读回幂等），其余剔除；无合法条目时返回 undefined。
+ */
+export function normalizeAgentWorkspaces(value: unknown): Record<string, string> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const entries = Object.entries(value as Record<string, unknown>).flatMap(([agentId, path]) => {
+    const trimmed = typeof path === "string" ? path.trim() : "";
+    return trimmed ? [[agentId, trimmed] as const] : [];
+  });
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+}
+
+/**
+ * 解析默认工作区路径：custom（用户自定义）优先，否则内置目录 <agentDir>/workspace-default。
+ * 纯路径解析不落盘，内置目录首次落位时由调用方经 ensureDefaultWorkspaceDir 创建。
+ */
+export function resolveDefaultWorkspace(agentDir: string, custom?: string): string {
+  return custom ? resolve(custom) : join(agentDir, "workspace-default");
+}
+
+/**
+ * 确保默认工作区目录存在（幂等，内置目录首次落位时创建；已存在/自定义路径 no-op）。
+ * 返回最终目录；创建失败抛错，由调用方（pi-runtime 落位点）兜底走 landing。
+ */
+export function ensureDefaultWorkspaceDir(agentDir: string, custom?: string): string {
+  const target = resolveDefaultWorkspace(agentDir, custom);
+  mkdirSync(target, { recursive: true });
+  return target;
+}
+
+/**
+ * 启动首次工作区解析（兜底链）：agentWorkspaces[agentId] 命中 → legacy（老配置
+ * settings.workspace，仅迁移期）→ 默认工作区。命中路径统一 resolve 规范化；
+ * defaultWorkspace 可为 undefined（默认目录创建失败时走 landing 极端兜底）。
+ */
+export function resolveInitialWorkspace(
+  agentWorkspaces: Record<string, string> | undefined,
+  agentId: string,
+  legacyWorkspace: string | undefined,
+  defaultWorkspace: string | undefined
+): string | undefined {
+  const mapped = agentWorkspaces?.[agentId];
+  if (mapped) return resolve(mapped);
+  if (legacyWorkspace) return resolve(legacyWorkspace);
+  return defaultWorkspace;
+}
+
+/** 记录某助手最后使用的工作区：resolve 规范化后覆盖写入，其余助手键不动。 */
+export function recordAgentWorkspace(map: Record<string, string> | undefined, agentId: string, path: string): Record<string, string> {
+  return { ...(map ?? {}), [agentId]: resolve(path) };
+}
+
+/**
+ * 移除某助手对某工作区的记忆：resolve+lowercase 匹配才删（不匹配/无条目不动）；
+ * 删空返回 undefined。其他助手的键永远不受影响。
+ */
+export function forgetAgentWorkspace(map: Record<string, string> | undefined, agentId: string, removedPath: string): Record<string, string> | undefined {
+  if (!map) return undefined;
+  const entry = map[agentId];
+  if (!entry) return map;
+  if (resolve(entry).toLowerCase() !== resolve(removedPath).toLowerCase()) return map;
+  const rest = { ...map };
+  delete rest[agentId];
+  return Object.keys(rest).length > 0 ? rest : undefined;
+}
+
 export function defaultSettings(): DesktopSettings {
   return {
     version: 2,
@@ -312,9 +383,13 @@ export function migrateSettings(raw: unknown): { settings: DesktopSettings; lega
     ? source.thinkingLevel as ThinkingLevel
     : "medium";
   const accessMode = normalizeAccessMode(source.accessMode);
+  const agentWorkspaces = normalizeAgentWorkspaces(source.agentWorkspaces);
+  const defaultWorkspace = typeof source.defaultWorkspace === "string" && source.defaultWorkspace.trim() ? source.defaultWorkspace.trim() : undefined;
   const settings: DesktopSettings = {
     version: 2,
     workspace: typeof source.workspace === "string" ? source.workspace : undefined,
+    ...(agentWorkspaces ? { agentWorkspaces } : {}),
+    ...(defaultWorkspace ? { defaultWorkspace } : {}),
     model: normalizeDefaultModel(source.model),
     thinkingLevel,
     accessMode,

@@ -199,7 +199,12 @@ export interface HooksSettings {
 
 export interface DesktopSettings {
   version: 2;
+  /** 已废弃（保留为迁移期一次性兜底）：旧版全局工作区。启动 initialize 时仅当前活跃助手消费一次（提升进 agentWorkspaces）后冻结，不再写入。 */
   workspace?: string;
+  /** 每助手最后使用的工作区（agentId → resolve 后的绝对路径）。刻意不进 AgentProfile（agent.save 整对象覆盖会过期冲掉运行时字段）；与 pinnedSessionPaths 同级，设置页不渲染，渲染端类型零负担。 */
+  agentWorkspaces?: Record<string, string>;
+  /** 默认工作区：没有选择过工作区的助手所有会话落位于此；未自定义时使用内置目录 <agentDir>/workspace-default（mkdir 幂等创建）。设置页「通用」tab 可改。 */
+  defaultWorkspace?: string;
   model?: { provider: string; id: string };
   thinkingLevel: ThinkingLevel;
   accessMode: AccessMode;
@@ -1105,7 +1110,7 @@ export type RuntimeCommand =
   | { type: "agent.select"; agentId: string }
   | { type: "agent.save"; agent: AgentProfile }
   | { type: "agent.archive"; agentId: string; archived: boolean }
-  | { type: "settings.save"; settings: Pick<DesktopSettings, "model" | "thinkingLevel" | "accessMode" | "appearance" | "browser"> }
+  | { type: "settings.save"; settings: Pick<DesktopSettings, "model" | "thinkingLevel" | "accessMode" | "appearance" | "browser" | "defaultWorkspace"> }
   | { type: "model.select"; provider: string; id: string; sessionId?: string }
   | { type: "thinking.select"; level: ThinkingLevel; sessionId?: string }
   | { type: "auth.set"; provider: string; apiKey: string }

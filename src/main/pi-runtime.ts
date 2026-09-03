@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { statSync } from "node:fs";
+import { mkdirSync, statSync } from "node:fs";
 import { readFile, readdir, realpath, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative as relativePath, resolve, sep } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
@@ -65,7 +65,7 @@ import { buildDivModePrompt } from "./div-prompt.js";
 import { McpClientManager } from "./mcp-client.js";
 import { removeMcpServerConfig, setMcpServerDisabled, upsertMcpServerConfig } from "./mcp-config.js";
 import { PermissionBroker } from "./permission-broker.js";
-import { loadRecentWorkspaces, recordRecentWorkspace, removeRecentWorkspace, writeRecentWorkspaces } from "./recent-workspaces.js";
+import { loadRecentWorkspaces, recordRecentWorkspace, writeRecentWorkspaces } from "./recent-workspaces.js";
 import { assistantText, createSubagentTools, buildSubagentPromptBlock, type SubagentContext } from "./subagent.js";
 import { readSubagents, saveSubagent, deleteSubagent } from "./subagents-store.js";
 import type { SubagentDefinition, SubagentScope, DelegationProgress } from "../shared/protocol.js";
@@ -81,7 +81,7 @@ import { resolveVisionModel } from "./vision.js";
 import { buildResourceCatalog } from "./resource-catalog.js";
 import { agentWorkspaceSessionDir, backfillUnpersistedSessions, mergeSessionSummary, sessionListReadyFor } from "./session-scope.js";
 import { isDesktopConfiguredProvider } from "./model-catalog.js";
-import { defaultTools, isPositiveInt, mergeProviderModels } from "./settings.js";
+import { defaultTools, ensureDefaultWorkspaceDir, forgetAgentWorkspace, isPositiveInt, mergeProviderModels, recordAgentWorkspace, resolveDefaultWorkspace, resolveInitialWorkspace } from "./settings.js";
 import { buildSkillPrompt, parseSkillPrompt } from "./skill-prompt.js";
 import {
   PI_DESKTOP_CONTROL_ENTRY_TYPE,
@@ -1020,6 +1020,8 @@ function activate(record: SessionRuntimeRecord): void {
     record.runStatus = undefined;
     patchSessionRunStatus(record);
   }
+  // 焦点跨工作区切换：记入该助手最后工作区（同工作区切换幂等跳过，避免重复 touch 落盘）。
+  if (workspace !== record.workspace) rememberWorkspace(record.workspace);
   workspace = record.workspace;
   thinkingLevel = record.session.thinkingLevel;
   selectedModel = record.session.model ? { provider: record.session.model.provider, id: record.session.model.id } : undefined;
@@ -1057,6 +1059,31 @@ function workspaceSessionDir(): string | undefined {
 
 function recentWorkspacesPath(): string {
   return join(getAgentDir(), "pidesktop-recent-workspaces.json");
+}
+
+/**
+ * 默认工作区路径解析 + 目录确保（内置目录首次落位 mkdir 幂等，不覆盖已有内容）；
+ * 失败返回 undefined，调用方据此走 landing 极端兜底（保留现有 landing 代码路径）。
+ */
+function agentDefaultWorkspace(): string | undefined {
+  if (!settings) return undefined;
+  try {
+    return ensureDefaultWorkspaceDir(getAgentDir(), settings.defaultWorkspace);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * 把某工作区记为该助手最后使用（内存 agentWorkspaces map + 全局 recents）。
+ * 赋值点：workspace.open / session.new / session.open / automation.run.open 直达，
+ * activate（分屏聚焦其他工作区格子 = 该助手最后使用的工作区）跨工作区时记入。
+ * 主进程 updateSettings 走同一组纯函数持久化（双写对称）；此处只更新 utility 内存镜像。
+ */
+function rememberWorkspace(path: string): void {
+  if (!settings) return;
+  settings.agentWorkspaces = recordAgentWorkspace(settings.agentWorkspaces, settings.currentAgentId, path);
+  touchRecentWorkspace(path);
 }
 
 /** Record a workspace as recently opened and persist the list. */
@@ -2270,11 +2297,31 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
 async function initialize(command: Extract<RuntimeCommand, { type: "initialize" }>): Promise<void> {
   settings = command.settings;
   apiKeys = command.apiKeys;
-  workspace = settings.workspace;
   refreshHooksConfig();
   refreshSubagents();
   recentWorkspaces = loadRecentWorkspaces(recentWorkspacesPath());
-  if (workspace) touchRecentWorkspace(workspace);
+  // 工作区按助手记忆恢复（2026-09-03 方案 B）：agentWorkspaces[活跃助手] → 老配置
+  // settings.workspace（仅迁移期一次性兜底）→ 默认工作区。settings.workspace 此后
+  // 冻结不再写。默认档仅当真落到默认时才 mkdir（map/legacy 命中不产生副作用），
+  // mkdir 失败回 undefined 保留 landing 极端兜底。
+  const mappedWorkspace = settings.agentWorkspaces?.[settings.currentAgentId];
+  const legacyWorkspace = settings.workspace ? resolve(settings.workspace) : undefined;
+  workspace = resolveInitialWorkspace(
+    settings.agentWorkspaces,
+    settings.currentAgentId,
+    legacyWorkspace,
+    mappedWorkspace || legacyWorkspace
+      ? resolveDefaultWorkspace(getAgentDir(), settings.defaultWorkspace)
+      : agentDefaultWorkspace()
+  );
+  if (workspace) {
+    // legacy 命中（map 无当前助手条目且老配置存在）时提升进内存 map：本会话内
+    // agent.select 切走再切回仍能恢复老工作区，不必等下次重启落盘。
+    if (legacyWorkspace && !mappedWorkspace) {
+      settings.agentWorkspaces = recordAgentWorkspace(settings.agentWorkspaces, settings.currentAgentId, legacyWorkspace);
+    }
+    touchRecentWorkspace(workspace);
+  }
   currentAgent = activeAgent();
   thinkingLevel = settings.thinkingLevel ?? "medium";
   accessMode = settings.accessMode ?? "ask";
@@ -2455,13 +2502,13 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       break;
     case "workspace.open":
       workspace = resolve(command.path);
-      touchRecentWorkspace(workspace);
+      rememberWorkspace(workspace);
       await createSession(undefined, { reactivate: true });
       break;
     case "session.new":
       if (command.workspace) {
         workspace = resolve(command.workspace);
-        touchRecentWorkspace(workspace);
+        rememberWorkspace(workspace);
       }
       // Always a fresh session id: the previously active session is parked and
       // keeps running, so a busy turn never blocks starting a new topic.
@@ -2489,7 +2536,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         break;
       }
       workspace = recordWorkspace;
-      touchRecentWorkspace(workspace);
+      rememberWorkspace(workspace);
       const sessionRoot = workspaceSessionDir();
       if (!sessionRoot || (resolve(dirname(target)).toLowerCase() !== resolve(sessionRoot).toLowerCase() && resolve(dirname(target)).toLowerCase() !== resolve(root).toLowerCase())) {
         throw new Error("会话路径与工作区不匹配");
@@ -2555,16 +2602,16 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       break;
     }
     case "workspace.remove": {
-      recentWorkspaces = removeRecentWorkspace(recentWorkspaces, command.workspace);
-      writeRecentWorkspaces(recentWorkspacesPath(), recentWorkspaces);
+      // 助手级移除（2026-09-03 方案 B，e42c139 回退重做）：只删当前助手的会话与
+      // map 键，不动全局 recents——话题栏分组由当前助手会话 + 激活工作区驱动，
+      // 同工作区其他助手的会话/后台运行记录/空分组历史一概不受影响。
+      const removeKey = resolve(command.workspace).toLowerCase();
       const removeRoot = agentSessionRoot();
       if (removeRoot) {
-        const targetWorkspace = resolve(command.workspace).toLowerCase();
-        const removed = currentSessions.filter((item) => resolve(item.workspace).toLowerCase() === targetWorkspace);
-        // Live records in the removed workspace are torn down together with
-        // their session files, running or not.
+        const removed = currentSessions.filter((item) => resolve(item.workspace).toLowerCase() === removeKey);
+        // 只销毁当前助手在该工作区的活记录（B 助手同工作区的后台会话不随 A 的移除销毁）。
         for (const record of [...liveSessions.values()]) {
-          if (record.workspace.toLowerCase() === targetWorkspace) disposeRecord(record);
+          if (record.agent.id === currentAgent?.id && resolve(record.workspace).toLowerCase() === removeKey) disposeRecord(record);
         }
         for (const item of removed) {
           if (!pathIsWithin(removeRoot, item.path) || !item.path.toLowerCase().endsWith(".jsonl")) continue;
@@ -2573,6 +2620,29 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
           try { await unlink(join(removeRoot, "todos", `${item.id}.json`)); } catch { /* 任务文件可能不存在 */ }
           try { await unlink(join(removeRoot, "plans", `${item.id}.json`)); } catch { /* 计划模式状态文件可能不存在 */ }
           try { await unlink(join(removeRoot, "checkpoints", `${item.id}.jsonl`)); } catch { /* 快照文件可能不存在 */ }
+        }
+      }
+      // 内存 map：移除当前助手对目标工作区的记忆（键不匹配不动；其他助手键不动）。
+      if (settings) {
+        settings.agentWorkspaces = forgetAgentWorkspace(settings.agentWorkspaces, settings.currentAgentId, command.workspace);
+        // 与主进程对称：legacy settings.workspace 同路径时一并清，防重启 initialize 回潮。
+        if (settings.workspace && resolve(settings.workspace).toLowerCase() === removeKey) settings.workspace = undefined;
+      }
+      // 移除的是运行时工作区：回落默认工作区（目标本身是默认则保持）——不再回
+      // landing；激活会话已被销毁，补一个空白会话保持「直接可聊」。
+      const removingActive = workspace !== undefined && resolve(workspace).toLowerCase() === removeKey;
+      if (removingActive) {
+        const removedIsDefault = resolve(resolveDefaultWorkspace(getAgentDir(), settings?.defaultWorkspace)).toLowerCase() === removeKey;
+        if (!removedIsDefault) {
+          const fallback = agentDefaultWorkspace();
+          if (fallback) {
+            workspace = fallback;
+            touchRecentWorkspace(fallback);
+          }
+        }
+        if (workspace) {
+          const sessionDir = workspaceSessionDir();
+          if (sessionDir) await createSession(SessionManager.create(workspace, sessionDir));
         }
       }
       await refreshSessions();
@@ -2956,7 +3026,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         break;
       }
       workspace = recordWorkspace;
-      touchRecentWorkspace(workspace);
+      rememberWorkspace(workspace);
       const sessionRoot = workspaceSessionDir();
       const runRecordLive = liveSessions.get(discovered.getSessionId());
       if (runRecordLive) {
@@ -3213,8 +3283,15 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       // is executing keeps that turn running in the background.
       const previousAgentId = settings.currentAgentId;
       const previousModel = selectedModel;
+      const previousWorkspace = workspace;
+      // 目标助手的工作区记忆：显式使用过 → 恢复各自最后工作区；从未用过 → 默认工作区（开箱直接可聊）。
+      const mappedWorkspace = settings.agentWorkspaces?.[command.agentId]
+        ? resolve(settings.agentWorkspaces[command.agentId]!)
+        : agentDefaultWorkspace();
       settings.currentAgentId = command.agentId;
       currentAgent = activeAgent();
+      workspace = mappedWorkspace;
+      if (workspace) touchRecentWorkspace(workspace);
       selectedModel = currentAgent.defaultModel ?? settings.model;
       // 自动化任务是 Agent 级：切换后列表与调度器的 getTasks 随之读新 Agent。
       refreshAutomation();
@@ -3228,6 +3305,8 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         settings.currentAgentId = previousAgentId;
         currentAgent = activeAgent();
         selectedModel = previousModel;
+        // 失败回滚：workspace 不许残留目标目录（切角色失败时仍在原工作区可聊）。
+        workspace = previousWorkspace;
         status = "Agent 切换失败";
         // createSession 可能已按切换目标重拉过会话列表，回滚后需按原角色再刷。
         void refreshSessions().then(() => emitState()).catch((refreshError) => {
@@ -3265,9 +3344,40 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         } else emitState();
       }
       break;
-    case "settings.save":
-      if (settings) { settings.model = command.settings.model; settings.thinkingLevel = command.settings.thinkingLevel; settings.accessMode = command.settings.accessMode; settings.appearance = command.settings.appearance; thinkingLevel = command.settings.thinkingLevel; accessMode = command.settings.accessMode; selectedModel = command.settings.model; if (activeRuntime) { activeRuntime.session.setThinkingLevel(thinkingLevel); if (selectedModel) { const model = modelRuntime?.getModel(selectedModel.provider, selectedModel.id); if (model) await switchSessionModel(activeRuntime, model); } } emitState(); }
+    case "settings.save": {
+      if (!settings) break;
+      // 同步默认工作区前先记住旧值：当前正落在旧默认上时下面要即时切到新默认。
+      const previousDefaultPath = resolveDefaultWorkspace(getAgentDir(), settings.defaultWorkspace);
+      settings.model = command.settings.model;
+      settings.thinkingLevel = command.settings.thinkingLevel;
+      settings.accessMode = command.settings.accessMode;
+      settings.appearance = command.settings.appearance;
+      settings.defaultWorkspace = command.settings.defaultWorkspace;
+      thinkingLevel = command.settings.thinkingLevel;
+      accessMode = command.settings.accessMode;
+      selectedModel = command.settings.model;
+      if (activeRuntime) {
+        activeRuntime.session.setThinkingLevel(thinkingLevel);
+        if (selectedModel) {
+          const model = modelRuntime?.getModel(selectedModel.provider, selectedModel.id);
+          if (model) await switchSessionModel(activeRuntime, model);
+        }
+      }
+      // 更换默认工作区：当前 workspace 恰为旧默认 → 即时切到新默认（新会话继承刚
+      // 保存的模型/思考等级）；否则下次落位（新建/切换/移除回落）自然生效。
+      const nextDefaultPath = resolveDefaultWorkspace(getAgentDir(), settings.defaultWorkspace);
+      const currentKey = workspace ? resolve(workspace).toLowerCase() : undefined;
+      if (currentKey && currentKey === previousDefaultPath.toLowerCase() && currentKey !== nextDefaultPath.toLowerCase()) {
+        workspace = agentDefaultWorkspace();
+        if (workspace) {
+          touchRecentWorkspace(workspace);
+          const sessionDir = workspaceSessionDir();
+          if (sessionDir) await createSession(SessionManager.create(workspace, sessionDir));
+        }
+      }
+      emitState();
       break;
+    }
     case "agent.archive":
       if (settings && command.agentId !== "default") { settings.agents = settings.agents.map((item) => item.id === command.agentId ? { ...item, archived: command.archived } : item); if (settings.currentAgentId === command.agentId) { settings.currentAgentId = "default"; currentAgent = activeAgent(); } if (workspace) await createSession(undefined, { reactivate: true }); }
       break;

@@ -1,5 +1,93 @@
 import { describe, expect, it } from "vitest";
-import { CUSTOM_PROVIDER_ID, createDefaultAgent, isPositiveInt, mergeProviderModels, migrateSettings, normalizeAccessMode, normalizeAgent, normalizeCheckpoint, normalizeCustomThemes, normalizeDivBubbleMode, normalizeInterfaceTuning, normalizeProvider, normalizeThemeAssets, normalizeVision, normalizeWallpaperOpacity } from "./settings.js";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { CUSTOM_PROVIDER_ID, createDefaultAgent, ensureDefaultWorkspaceDir, forgetAgentWorkspace, isPositiveInt, mergeProviderModels, migrateSettings, normalizeAccessMode, normalizeAgent, normalizeAgentWorkspaces, normalizeCheckpoint, normalizeCustomThemes, normalizeDivBubbleMode, normalizeInterfaceTuning, normalizeProvider, normalizeThemeAssets, normalizeVision, normalizeWallpaperOpacity, recordAgentWorkspace, resolveDefaultWorkspace, resolveInitialWorkspace } from "./settings.js";
+
+describe("workspace per-agent memory and default workspace (方案 B)", () => {
+  it("normalizes agentWorkspaces: keeps non-empty string entries, drops garbage, defaults undefined", () => {
+    expect(normalizeAgentWorkspaces({
+      default: "D:\\Projects\\a",
+      empty: "   ",
+      heiyuhe: "D:\\Projects\\b",
+      number: 42,
+      nul: null
+    })).toEqual({ default: "D:\\Projects\\a", heiyuhe: "D:\\Projects\\b" });
+    expect(normalizeAgentWorkspaces({ a: "" })).toBeUndefined();
+    expect(normalizeAgentWorkspaces(undefined)).toBeUndefined();
+    expect(normalizeAgentWorkspaces("junk")).toBeUndefined();
+    expect(normalizeAgentWorkspaces([])).toBeUndefined();
+  });
+
+  it("migrates agentWorkspaces/defaultWorkspace and drops invalid values", () => {
+    const result = migrateSettings({
+      agentWorkspaces: { default: " D:\\Projects\\a ", bad: 42, empty: "" },
+      defaultWorkspace: "  D:\\Projects\\default  "
+    });
+    expect(result.settings.agentWorkspaces).toEqual({ default: "D:\\Projects\\a" });
+    expect(result.settings.defaultWorkspace).toBe("D:\\Projects\\default");
+    // 缺省/空白：两字段均保持 undefined，不产生空对象/空串。
+    expect(migrateSettings({}).settings.agentWorkspaces).toBeUndefined();
+    expect(migrateSettings({}).settings.defaultWorkspace).toBeUndefined();
+    expect(migrateSettings({ defaultWorkspace: "   " }).settings.defaultWorkspace).toBeUndefined();
+  });
+
+  it("resolves the default workspace: custom wins, otherwise the built-in directory", () => {
+    expect(resolveDefaultWorkspace("C:\\agent", "D:\\Projects\\default")).toBe("D:\\Projects\\default");
+    expect(resolveDefaultWorkspace("C:\\agent")).toBe(join("C:\\agent", "workspace-default"));
+  });
+
+  it("ensures the default workspace directory idempotently (mkdir recursive)", () => {
+    const root = mkdtempSync(join(tmpdir(), "pidesktop-test-"));
+    try {
+      const custom = join(root, "custom");
+      expect(ensureDefaultWorkspaceDir("C:\\agent", custom)).toBe(custom);
+      expect(existsSync(custom)).toBe(true);
+      // 幂等：重复调用不抛错、不覆盖已有内容。
+      expect(() => ensureDefaultWorkspaceDir("C:\\agent", custom)).not.toThrow();
+      const builtin = ensureDefaultWorkspaceDir(root);
+      expect(builtin).toBe(join(root, "workspace-default"));
+      expect(existsSync(builtin)).toBe(true);
+      expect(() => ensureDefaultWorkspaceDir(root)).not.toThrow();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves the initial workspace by the fallback chain: map hit → legacy → default", () => {
+    const map = { default: "D:\\Projects\\a", heiyuhe: "D:\\Projects\\b" };
+    expect(resolveInitialWorkspace(map, "default", "D:\\Projects\\legacy", "D:\\Projects\\default")).toBe("D:\\Projects\\a");
+    expect(resolveInitialWorkspace(undefined, "coder", "D:\\Projects\\legacy", "D:\\Projects\\default")).toBe("D:\\Projects\\legacy");
+    expect(resolveInitialWorkspace(undefined, "coder", undefined, "D:\\Projects\\default")).toBe("D:\\Projects\\default");
+    // 默认目录创建失败（undefined）→ landing 极端兜底。
+    expect(resolveInitialWorkspace(undefined, "coder", undefined, undefined)).toBeUndefined();
+  });
+
+  it("records a per-agent workspace: overwrite same agent, keep others, resolve to absolute", () => {
+    const map = { default: "D:\\Projects\\a", heiyuhe: "D:\\Projects\\b" };
+    const next = recordAgentWorkspace(map, "default", "D:\\Projects\\c");
+    expect(next).toEqual({ default: "D:\\Projects\\c", heiyuhe: "D:\\Projects\\b" });
+    // 原 map 不被就地修改（纯函数）。
+    expect(map.default).toBe("D:\\Projects\\a");
+    // 相对路径 resolve 规范化。
+    expect(recordAgentWorkspace(undefined, "coder", "./x").coder).toBe(join(process.cwd(), "x"));
+  });
+
+  it("forgets a per-agent workspace: case-insensitive match only, others untouched", () => {
+    const map = { default: "D:\\Projects\\a", heiyuhe: "D:\\Projects\\b" };
+    // 大小写不敏感（Windows 风格路径）匹配才删。
+    expect(forgetAgentWorkspace(map, "default", "d:\\projects\\A")).toEqual({ heiyuhe: "D:\\Projects\\b" });
+    // 不匹配（其他路径/其他助手）不动。
+    const unchanged = forgetAgentWorkspace(map, "heiyuhe", "D:\\Projects\\nope");
+    expect(unchanged).toEqual(map);
+    expect(forgetAgentWorkspace(map, "coder", "D:\\Projects\\a")).toEqual(map);
+    // 空 map / 键缺失安全；删空回 undefined。
+    expect(forgetAgentWorkspace(undefined, "default", "D:\\Projects\\a")).toBeUndefined();
+    expect(forgetAgentWorkspace({ default: "D:\\Projects\\a" }, "default", "D:\\Projects\\a")).toBeUndefined();
+    // 剩其他助手键时保留。
+    expect(forgetAgentWorkspace({ default: "D:\\Projects\\a", heiyuhe: "D:\\Projects\\b" }, "default", "D:\\Projects\\a")).toEqual({ heiyuhe: "D:\\Projects\\b" });
+  });
+});
 
 describe("desktop settings migration", () => {
   it("migrates the legacy custom provider without changing its stable id", () => {

@@ -5,7 +5,7 @@ import { Readable } from "node:stream";
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, protocol, safeStorage, shell, utilityProcess, type UtilityProcess } from "electron";
 import { spawn } from "node-pty";
 import appIconPath from "./assets/icon.ico?asset";
-import { migrateSettings, normalizeVision } from "./settings.js";
+import { migrateSettings, normalizeVision, recordAgentWorkspace, forgetAgentWorkspace } from "./settings.js";
 import { importExternalAttachment, workspaceRelativeAttachment } from "./attachments.js";
 import type { BrowserPreviewCommand, BrowserPreviewState, DesktopBootstrap, DesktopSettings, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot, TerminalCommand, TerminalEventData, WorkspaceDirectoryListing, WorkspaceEntryResult, WorkspaceFilePreview, WorkspaceFileSearchResult, WorkspaceFileStat, WorkspaceFileWriteResult } from "../shared/protocol.js";
 import { PREVIEW_FILE_SCHEME, parseWorkspaceFilePreviewUrl } from "../shared/protocol.js";
@@ -158,17 +158,25 @@ function persistSettings(): void { if (settingsCache) writeJson(settingsPath(), 
 function updateSettings(command: RuntimeCommand): void {
   const settings = loadSettings();
   switch (command.type) {
-    case "workspace.open": settings.workspace = command.path; break;
+    // 工作区按助手记忆（agentWorkspaces 双写对称：main 持久化 + utility 内存镜像共用
+    // 同一组纯函数）。settings.workspace 停写、保留为一次性迁移兜底（e42c139 回退教训）。
+    case "workspace.open": settings.agentWorkspaces = recordAgentWorkspace(settings.agentWorkspaces, settings.currentAgentId, command.path); break;
+    case "workspace.remove":
+      settings.agentWorkspaces = forgetAgentWorkspace(settings.agentWorkspaces, settings.currentAgentId, command.workspace);
+      // legacy 兜底与移除目标同路径时一并清除，否则重启 initialize 又把它拉起（回潮）。
+      if (settings.workspace && resolve(settings.workspace).toLowerCase() === resolve(command.workspace).toLowerCase()) settings.workspace = undefined;
+      break;
     case "session.pin": settings.pinnedSessionPaths = command.pinned ? [...(settings.pinnedSessionPaths ?? []), command.path] : (settings.pinnedSessionPaths ?? []).filter((item) => item !== command.path); break;
-    case "session.new": if (command.workspace) settings.workspace = command.workspace; break;
-    case "session.open": if (command.workspace) settings.workspace = command.workspace; break;
+    case "session.new": if (command.workspace) settings.agentWorkspaces = recordAgentWorkspace(settings.agentWorkspaces, settings.currentAgentId, command.workspace); break;
+    // 分屏后台格（activate:false）不激活、不改全局镜像——与 utility 端语义对称，不记。
+    case "session.open": if (command.workspace && command.activate !== false) settings.agentWorkspaces = recordAgentWorkspace(settings.agentWorkspaces, settings.currentAgentId, command.workspace); break;
     case "agent.select": settings.currentAgentId = command.agentId; break;
     case "agent.save": settings.agents = settings.agents.some((item) => item.id === command.agent.id) ? settings.agents.map((item) => item.id === command.agent.id ? command.agent : item) : [...settings.agents, command.agent]; break;
     case "agent.archive":
       settings.agents = settings.agents.map((item) => item.id === command.agentId && item.id !== "default" ? { ...item, archived: command.archived } : item);
       if (settings.currentAgentId === command.agentId && command.archived) settings.currentAgentId = "default";
       break;
-    case "settings.save": settings.model = command.settings.model; settings.thinkingLevel = command.settings.thinkingLevel; settings.accessMode = command.settings.accessMode; settings.appearance = command.settings.appearance; settings.browser = command.settings.browser; break;
+    case "settings.save": settings.model = command.settings.model; settings.thinkingLevel = command.settings.thinkingLevel; settings.accessMode = command.settings.accessMode; settings.appearance = command.settings.appearance; settings.browser = command.settings.browser; settings.defaultWorkspace = command.settings.defaultWorkspace; break;
     case "appearance.save": settings.appearance = command.appearance; break;
     case "provider.save": {
       settings.providers = settings.providers.some((item) => item.id === command.provider.id) ? settings.providers.map((item) => item.id === command.provider.id ? command.provider : item) : [...settings.providers, command.provider];
