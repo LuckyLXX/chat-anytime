@@ -42,7 +42,7 @@ export function MemoryPreviewContent({ topicId, tabId, showSource, editorState, 
     );
   }
   if (showSource) return <div className="preview-scroll preview-code"><CodeBlock language="markdown" code={topic.content} /></div>;
-  if (editorState?.editing !== false) {
+  if (editorState?.editing === true) {
     return (
       <div className="preview-markdown-editor">
         <MarkdownEditor
