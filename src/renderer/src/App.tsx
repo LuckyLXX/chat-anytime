@@ -1223,7 +1223,7 @@ export function App(): ReactNode {
     } : current);
   }, []);
   const visibleAgents = useMemo(() => settings.agents.filter((agent) => !agent.archived && `${agent.name} ${agent.description}`.toLowerCase().includes(sidebarQuery.trim().toLowerCase())), [settings.agents, sidebarQuery]);
-  const sessionGroups = useMemo(() => groupSessionsByWorkspace(snapshot.sessions, sidebarQuery, snapshot.recentWorkspaces), [snapshot.sessions, snapshot.recentWorkspaces, sidebarQuery]);
+  const sessionGroups = useMemo(() => groupSessionsByWorkspace(snapshot.sessions, sidebarQuery, snapshot.recentWorkspaces, snapshot.workspace), [snapshot.sessions, snapshot.recentWorkspaces, snapshot.workspace, sidebarQuery]);
   const themeLayers = useMemo(() => collectThemeLayers(settings.appearance.customCss), [settings.appearance.customCss]);
   // 主题根属性（data-ui-*）反映焦点格（分屏下即激活会话）的状态。
   const isGenerating = Boolean(snapshot.busy && snapshot.turnTiming && snapshot.turnTiming.completedAt === undefined);
