@@ -1414,6 +1414,12 @@ function handleSessionEvent(record: SessionRuntimeRecord, event: AgentSessionEve
       // streaming flag clears without a 50ms gap. Accumulate its usage into
       // the session-wide cache counters.
       record.cacheUsage = runtimeContextUsage.addMessageToCacheUsage(record.cacheUsage, event.message);
+      // 会话文件直到第一条 assistant 消息完成才落盘（SDK hasAssistant 门槛），
+      // 侧栏标题（firstMessage）随之才可读。此前只在 agent_end 等生命周期事件
+      // 才重扫列表，新会话要等整个回合结束才从「新会话」变成真实标题；这里在
+      // 每条 assistant 消息完成时立即调度（500ms 防抖合并），让名字在首条回复
+      // 完成时就出现，无需等回合收官。
+      if (event.message.role === "assistant") scheduleSessionsRefresh();
       break;
     case "tool_execution_start":
       record.executions.set(event.toolCallId, {
