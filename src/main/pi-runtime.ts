@@ -65,7 +65,7 @@ import { buildDivModePrompt } from "./div-prompt.js";
 import { McpClientManager } from "./mcp-client.js";
 import { removeMcpServerConfig, setMcpServerDisabled, upsertMcpServerConfig } from "./mcp-config.js";
 import { PermissionBroker } from "./permission-broker.js";
-import { loadRecentWorkspaces, recordRecentWorkspace, writeRecentWorkspaces } from "./recent-workspaces.js";
+import { loadRecentWorkspaces, recordRecentWorkspace, removeRecentWorkspace, writeRecentWorkspaces } from "./recent-workspaces.js";
 import { assistantText, createSubagentTools, buildSubagentPromptBlock, type SubagentContext } from "./subagent.js";
 import { readSubagents, saveSubagent, deleteSubagent } from "./subagents-store.js";
 import type { SubagentDefinition, SubagentScope, DelegationProgress } from "../shared/protocol.js";
@@ -2555,9 +2555,8 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       break;
     }
     case "workspace.remove": {
-      // 助手级语义：只删除当前助手在该工作区的会话与关联文件。最近工作区
-      // 历史（recent-workspaces.json）跨助手共享，不动——其他助手的话题栏
-      // 不受影响，将来重新打开该目录时 touchRecentWorkspace 会重新记录。
+      recentWorkspaces = removeRecentWorkspace(recentWorkspaces, command.workspace);
+      writeRecentWorkspaces(recentWorkspacesPath(), recentWorkspaces);
       const removeRoot = agentSessionRoot();
       if (removeRoot) {
         const targetWorkspace = resolve(command.workspace).toLowerCase();
@@ -2575,12 +2574,6 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
           try { await unlink(join(removeRoot, "plans", `${item.id}.json`)); } catch { /* 计划模式状态文件可能不存在 */ }
           try { await unlink(join(removeRoot, "checkpoints", `${item.id}.jsonl`)); } catch { /* 快照文件可能不存在 */ }
         }
-      }
-      // 移除的恰是当前激活工作区：回到未打开工作区状态（landing），否则
-      // 空分组会因 activeWorkspace 匹配立即回潮，且「新建话题」仍能在已
-      // 移除的工作区里建会话。disposeRecord 已清掉 activeRuntime 相关状态。
-      if (workspace && resolve(workspace).toLowerCase() === resolve(command.workspace).toLowerCase()) {
-        workspace = undefined;
       }
       await refreshSessions();
       emitState();

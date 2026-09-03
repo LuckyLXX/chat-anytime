@@ -2194,7 +2194,7 @@ export function App(): ReactNode {
       {removeWorkspace && (
         <div className="modal-backdrop permission-backdrop" onClick={() => setRemoveWorkspace(null)}>
           <div className="permission-dialog" role="alertdialog" aria-modal="true" aria-label="移除工作区" onClick={(event) => event.stopPropagation()}>
-            <header><div className="risk-icon outside-workspace"><Trash2 size={20} /></div><div><h2>移除工作区「{removeWorkspace.name}」？</h2><p>{removeWorkspace.count > 0 ? `将永久删除当前助手在该工作区下的 ${removeWorkspace.count} 个会话，其他助手不受影响，此操作不可恢复。` : "该工作区暂无会话，将从当前助手的话题栏移除，其他助手不受影响。"}</p></div></header>
+            <header><div className="risk-icon outside-workspace"><Trash2 size={20} /></div><div><h2>移除工作区「{removeWorkspace.name}」？</h2><p>{removeWorkspace.count > 0 ? `将永久删除该工作区下 ${removeWorkspace.count} 个会话，此操作不可恢复。` : "该工作区暂无会话，将从侧边栏移除。"}</p></div></header>
             <footer><button className="secondary-button" type="button" onClick={() => setRemoveWorkspace(null)}>取消</button><button className="danger-button" type="button" onClick={() => { void window.piDesktop.send({ type: "workspace.remove", workspace: removeWorkspace.workspace }); setRemoveWorkspace(null); }}>移除</button></footer>
           </div>
         </div>
