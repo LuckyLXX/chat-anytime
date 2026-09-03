@@ -39,7 +39,7 @@
 
 > `terminal` 是预览面板内的嵌入式终端区域（xterm.js 宿主）。终端配色由 `--code-surface` / `--code-text` / `--selection-bg` token 驱动，主题改这三个 token 即可换终端配色；`[data-pane="terminal"]` 钩子可用于边框、内边距等容器装饰。
 > `question-panel` 是 AI 提问（ask_question 工具）时从输入栏上方向上展开的应答面板，位于 `conversation` 区域内、`composer` 正上方。面板分页式逐题作答（右上角页码/箭头切换，草稿跨页保留），底部「忽略」取消提问、「继续」手动推进或提交；选择题第一个选项自动标注「（推荐）」——与工具描述约定一致（模型把最推荐的选项放第一位），单选点选/回车/空格即选中并自动进入下一题（末题自动提交，重选直接换项），多选保持勾选多个、由「继续」或输入框回车推进；面板内快捷键：Tab/上下键移动选择（单选上下键移动时同步改选但不跳页）、回车或空格确认（单选确认即跳页）。
-> `memory-panel` 是侧边栏「长期记忆」视图（`data-ui-sidebar-view="memory"`）内的记忆治理页：主题列表（全局/当前工作区/其他工作区分组）、展开编辑索引描述与正文、删除与新建、启用总开关。悬浮面板坞不再承载记忆（仅待办 `task-panel`）。入口：侧栏「新建话题」下方的「长期记忆」按钮（带主题数徽标）与折叠态窄条的大脑图标。
+> `memory-panel` 是会话区右上方面板坞的记忆页（待办页 `task-panel` 居前，两者合并为一个浮动面板坞，头部 tab 切换，关闭态为单个 FAB）。
 > `turn-minimap` 是会话时间线左缘（聊天气泡左侧空位）的「轮次缩略导航」——每个缩略块对应一轮对话（一次用户提问 + 对应 AI 回复），hover 放大成浮出卡片展示该轮摘要、点击滚动到该轮。`.turn-minimap` 窄条用 `var(--panel-bg)` 派生背景，`.turn-thumb` 缩略块、`.turn-thumb.active` 当前轮、`.turn-thumb-pop` 悬停放大的浮出卡片均可用 `[data-pane="turn-minimap"]` 后代选择器重设计。默认背景色走 `--surface`/`--accent-soft`，主题可覆盖。
 
 > `automation-settings` 是设置页「自动化任务」tab（双子页：「任务」列表 + 搜索 + 过滤器 / 「运行记录」历史面板，位于 `settings-dialog` 内）；`automation-dialog` 是「创建/编辑定时任务」弹窗。二者都随设置页/弹窗配色走，主题可用 `--panel-bg` 派生背景与 `--border`/`--surface-*` 控制排版。相关控件钩子：`data-control="automation-open"`（侧栏「新建话题」下方的「自动化」入口 + 折叠态窄条图标）、`automation-run`（行内「运行一次」）、`automation-toggle`（启停）、`automation-runs-tab`（子页「运行记录」）；未在控件列枚举的地方用类名 `.automation-*` 命中。
@@ -63,7 +63,7 @@
 | 打开工作区（顶栏 + 空态主按钮）             | `workspace-open`                                 |
 | 预览面板开关（顶栏）                        | `preview-toggle`                                 |
 | 面板坞开关 + 待办页 tab（会话区右上方 FAB） | `task-panel-toggle`                              |
-| 长期记忆入口（侧栏记忆按钮 + 折叠窄条图标） | `memory-toggle`                                  |
+| 记忆页 tab（面板坞内）                      | `memory-toggle`                                  |
 | 发送                                        | `send`                                           |
 | 停止（生成中与发送互换显示）                | `stop`                                           |
 | 添加附件                                    | `attach`                                         |
@@ -102,7 +102,7 @@
 
 **特异性（覆盖规则能否生效）**：应用壁纸模式的基础规则写成 `[data-theme-wallpaper="true"] .sidebar` 等（(0,2,0) 特异性，两个属性/类选择器）。主题用等特异性选择器（`[data-theme-wallpaper="true"] [data-pane="sidebar"]`）即可凭"后注入"胜出，不需要 `html` 前缀。区域自身的非壁纸规则（如 `[data-pane="sidebar"]`）与应用的 `.sidebar`（(0,1,0)）同特异性、靠后注入胜出。自定义 CSS 注入顺序在应用样式之后。
 
-**UI 状态（`<html>` 属性，存在即真；带值状态例外）**：`data-ui-settings-open` `data-ui-workspace-open` `data-ui-chat-empty` `data-ui-generating` `data-ui-preview-open` `data-ui-permission-pending` `data-ui-question-pending` `data-ui-attachments`（输入框有附件）`data-ui-split-open`（分屏模式，会话区同时展示 ≥2 个格子）`data-ui-sidebar-collapsed`（侧栏折叠为图标窄条，存在即真）。带值状态：`data-ui-sidebar-view="topics|files|memory"`（取值匹配，如 `[data-ui-sidebar-view="memory"]`）、`data-ui-density="compact|comfortable|relaxed"` 与 `data-ui-radius="square|small|medium|round"`（运行时界面微调层，由设置【外观 → 界面微调】写入；对应 `--ui-density-scale` / `--ui-control-radius` / `--ui-container-radius`，默认值=当前视觉，主题可覆盖 token 或忽略属性）。
+**UI 状态（`<html>` 属性，存在即真；带值状态例外）**：`data-ui-settings-open` `data-ui-workspace-open` `data-ui-chat-empty` `data-ui-generating` `data-ui-preview-open` `data-ui-permission-pending` `data-ui-question-pending` `data-ui-attachments`（输入框有附件）`data-ui-split-open`（分屏模式，会话区同时展示 ≥2 个格子）`data-ui-sidebar-collapsed`（侧栏折叠为图标窄条，存在即真）。带值状态：`data-ui-sidebar-view="topics|files|agents"`（取值匹配，如 `[data-ui-sidebar-view="files"]`）、`data-ui-density="compact|comfortable|relaxed"` 与 `data-ui-radius="square|small|medium|round"`（运行时界面微调层，由设置【外观 → 界面微调】写入；对应 `--ui-density-scale` / `--ui-control-radius` / `--ui-container-radius`，默认值=当前视觉，主题可覆盖 token 或忽略属性）。
 
 **分屏（多实例区域，v2.1 迁移说明）**：会话区支持分屏后，`conversation` / `timeline` / `composer` / `question-panel` 区域钩子**同一页面可出现多次**（每个格子一套完整实例）。属性选择器（`[data-pane="composer"]` 等）本就按元素生效，多实例无需改动；但 `[data-ui-generating] [data-pane="composer"]` 这类“根状态 × 区域”的组合在分屏下作用于**所有格子**，而 `data-ui-generating` / `data-ui-chat-empty` / `data-ui-attachments` 的语义是**焦点格**（激活会话）的状态——只想命中焦点格时请叠加 `[data-pane-active]`（焦点格的 conversation 区域携带该属性，存在即真）：
 
