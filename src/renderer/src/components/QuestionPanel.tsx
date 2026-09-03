@@ -58,6 +58,18 @@ export function serializeAnswer(item: QuestionItem, draft: QuestionDraft): strin
 }
 
 /**
+ * 末题单选「点选即提交」时的完整答案数组：当前题用本次点击的选项（闭包里的
+ * drafts 是点击前状态，当前题不能走 serializeAnswer），其余题沿用各自草稿。
+ * broker 要求 answers 与问题数等长，长度不符一律判为用户取消。
+ */
+export function singleClickSubmitAnswers(questions: QuestionItem[], drafts: QuestionDraft[], index: number, option: string): string[] {
+  return questions.map((question, i) => {
+    const draft = drafts[i] ?? emptyQuestionDraft();
+    return i === index ? singleSelectionAnswer(draft.custom, option) : serializeAnswer(question, draft);
+  });
+}
+
+/**
  * ask_question 的应答面板：从输入栏上方向上展开，逐条回答 AI 的提问。
  * 分页式：一次展示一个问题，右上角页码/箭头切换（草稿跨页保留），底部
  * 「忽略」取消整个提问、「继续」翻页或提交；快捷键 ↑↓/Tab 移动选择、
@@ -195,10 +207,10 @@ export function QuestionPanel({ request, onOpenDetail }: { request: QuestionRequ
     setHandoffOpen(false);
     if (single) {
       if (index === request.questions.length - 1) {
-        // 单选点选即提交：答案必须基于本次点击的选项。setDrafts 是异步的，
-        // 闭包里的 drafts 还是点击前的旧状态——走 advance() 会提交空选/旧选
-        // （serializeAnswer 单选无自定义输入时返回空串，审查批准被误判拒绝）。
-        void resolve([singleSelectionAnswer(currentDraft.custom, option)]);
+        // 单选点选即提交：当前题答案必须基于本次点击（setDrafts 异步，闭包里的
+        // drafts 还是点击前的旧状态，走 advance() 会提交空选/旧选），且 answers
+        // 必须与问题数等长——broker 把长度不符判为用户取消，其余题沿用草稿。
+        void resolve(singleClickSubmitAnswers(request.questions, drafts, index, option));
       } else {
         setCurrent(index + 1);
       }

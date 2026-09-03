@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { QuestionItem, QuestionRequest } from "../../../shared/protocol";
-import { detailPreviewText, detailTitle, emptyQuestionDraft, isQuestionAnswered, QuestionPanel, serializeAnswer, singleSelectionAnswer } from "./QuestionPanel";
+import { detailPreviewText, detailTitle, emptyQuestionDraft, isQuestionAnswered, QuestionPanel, serializeAnswer, singleClickSubmitAnswers, singleSelectionAnswer, type QuestionDraft } from "./QuestionPanel";
 
 function item(input: Partial<QuestionItem> & { text: string }): QuestionItem {
   return { type: "text", options: [], ...input };
@@ -110,5 +110,38 @@ describe("serializeAnswer", () => {
     expect(serializeAnswer(multiple, { custom: "", selected: ["A", "C"] })).toBe("A、C");
     expect(serializeAnswer(multiple, { custom: "其它：D", selected: ["A"] })).toBe("A、其它：D");
     expect(serializeAnswer(multiple, { custom: "只要 D", selected: [] })).toBe("只要 D");
+  });
+});
+
+describe("singleClickSubmitAnswers", () => {
+  const questions: QuestionItem[] = [
+    { text: "框架？", type: "single", options: ["React", "Vue"] },
+    { text: "功能？", type: "multiple", options: ["A", "B", "C"] },
+    { text: "现在开始？", type: "single", options: ["开始", "等等"] }
+  ];
+
+  it("submits one answer per question, keeping earlier drafts and the clicked option at the clicked index", () => {
+    // 末题点击「等等」：闭包 drafts 是点击前状态（末题旧选「开始」），当前题必须用本次点击。
+    const drafts: QuestionDraft[] = [
+      { custom: "", selected: ["React"] },
+      { custom: "其它：D", selected: ["A"] },
+      { custom: "", selected: ["开始"] }
+    ];
+    expect(singleClickSubmitAnswers(questions, drafts, 2, "等等")).toEqual(["React", "A、其它：D", "等等"]);
+  });
+
+  it("always matches the question count even when drafts are missing", () => {
+    // broker 把 answers 长度不符判为用户取消——数组长度是本修复的契约。
+    expect(singleClickSubmitAnswers(questions, [], 2, "开始")).toHaveLength(questions.length);
+    expect(singleClickSubmitAnswers(questions, [], 2, "开始")).toEqual(["", "", "开始"]);
+  });
+
+  it("prefers the clicked question's custom input over the clicked option", () => {
+    const drafts: QuestionDraft[] = [
+      { custom: "", selected: [] },
+      { custom: "", selected: [] },
+      { custom: "先写测试", selected: [] }
+    ];
+    expect(singleClickSubmitAnswers(questions, drafts, 2, "开始")).toEqual(["", "", "先写测试"]);
   });
 });
