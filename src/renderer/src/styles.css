@@ -384,8 +384,8 @@ button, input, select, textarea, summary, label {
    不误伤空态容器与进度行。流式/粘底均不受影响——可视区内的消息照常渲染。 */
 .timeline > .message { content-visibility: auto; contain-intrinsic-size: auto 96px; }
 /* 缩略导航存在时，消息居中时两侧留出更宽的边距，让左侧缩略列不与气泡重叠。 */
-.timeline.has-turn-minimap > .message { width: min(840px, calc(100% - 116px)); }
-.message { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 12px; width: min(840px, calc(100% - 48px)); max-width: 100%; min-width: 0; margin: 0 auto; padding: 20px 0; overflow: hidden; }
+.timeline.has-turn-minimap > .message { width: min(1000px, calc(100% - 116px)); }
+.message { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 12px; width: min(1000px, calc(100% - 48px)); max-width: 100%; min-width: 0; margin: 0 auto; padding: 20px 0; overflow: hidden; }
 .message + .message { border-top: 1px solid var(--border-message); }
 /* 消息入场：新消息淡入上移（状态反馈）。流式更新时 React 复用 DOM 节点，
    动画只在挂载时播一次，不会逐 chunk 重播。 */
@@ -399,15 +399,15 @@ button, input, select, textarea, summary, label {
 /* .message-bubble backdrop-filter removed: applied to every chat bubble, the
    per-bubble blur was the dominant cost during streaming repaints and long-list
    scrolling. Bubbles now use their opaque --ai-bubble / avatar backgrounds. */
-.message-assistant .message-body { width: min(100%, 760px); padding: 12px 15px; border: 1px solid var(--border-assistant); border-radius: 10px; background: var(--ai-bubble); box-shadow: var(--shadow-sm); }
+.message-assistant .message-body { width: min(100%, 920px); padding: 12px 15px; border: 1px solid var(--border-assistant); border-radius: 10px; background: var(--ai-bubble); box-shadow: var(--shadow-sm); }
 .message-extension { padding-top: 12px; padding-bottom: 12px; }
-.extension-message-callout { display: grid; width: min(100%, 760px); gap: 7px; padding: 9px 11px; border: 1px solid var(--accent-border); border-left: 3px solid var(--accent); border-radius: 6px; color: var(--text-muted); background: var(--accent-soft); font-size: 12px; }
+.extension-message-callout { display: grid; width: min(100%, 920px); gap: 7px; padding: 9px 11px; border: 1px solid var(--accent-border); border-left: 3px solid var(--accent); border-radius: 6px; color: var(--text-muted); background: var(--accent-soft); font-size: 12px; }
 .extension-message-callout > strong { color: var(--accent-text); font-size: 10px; font-weight: 700; }
 .pending-response-body { display: grid; gap: 8px; }
 .response-progress { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; color: var(--accent-text); font-size: 12px; }
-.response-progress-inline { width: min(840px, calc(100% - 48px)); margin: 0 auto; padding: 0 0 16px 42px; }
+.response-progress-inline { width: min(1000px, calc(100% - 48px)); margin: 0 auto; padding: 0 0 16px 42px; }
 .response-progress-inline .message-timing { margin: 0 0 0 auto; }
-.message-user .message-body { width: fit-content; max-width: min(100%, 760px); margin-left: auto; padding: 10px 13px; border: 1px solid var(--user-bubble-border); border-radius: 10px; color: var(--text-on-user-bubble); background: var(--user-bubble); box-shadow: var(--shadow-sm); }
+.message-user .message-body { width: fit-content; max-width: min(100%, 920px); margin-left: auto; padding: 10px 13px; border: 1px solid var(--user-bubble-border); border-radius: 10px; color: var(--text-on-user-bubble); background: var(--user-bubble); box-shadow: var(--shadow-sm); }
 .message-skill-badge { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; margin-bottom: 7px; padding: 3px 6px; overflow: hidden; border: 1px solid var(--user-action-border); border-radius: 6px; color: var(--text-on-user-bubble); background: var(--user-action-surface); font-size: 10px; }
 .message-skill-badge strong { overflow: hidden; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
 /* @ 文件引用 chip 行：复用单个 skill-badge 外观，多个时换行堆叠。 */
@@ -592,7 +592,7 @@ button, input, select, textarea, summary, label {
 .artifact-source summary { display: flex; align-items: center; gap: 6px; padding: 7px 11px; color: var(--text-muted); font-size: 10px; cursor: pointer; }
 .artifact-source pre { max-height: 270px; margin: 0; overflow: auto; padding: 11px; border-top: 1px solid var(--border); color: var(--code-text); background: var(--code-surface); font: 11px/1.55 "Cascadia Code", Consolas, monospace; white-space: pre-wrap; }
 
-.composer { position: absolute; z-index: 10; right: auto; bottom: 0; left: 50%; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(32px, 1fr) auto; gap: 5px; width: min(840px, calc(100% - 48px)); min-height: 82px; margin: 0 auto 15px; padding: 10px; transform: translateX(-50%); border: 1px solid var(--border-strong); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow-md); }
+.composer { position: absolute; z-index: 10; right: auto; bottom: 0; left: 50%; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(32px, 1fr) auto; gap: 5px; width: min(1000px, calc(100% - 48px)); min-height: 82px; margin: 0 auto 15px; padding: 10px; transform: translateX(-50%); border: 1px solid var(--border-strong); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow-md); }
 .question-panel { position: absolute; z-index: 9; bottom: calc(var(--composer-height, 82px) + 21px); left: 50%; display: flex; flex-direction: column; gap: 12px; width: min(720px, calc(100% - 48px)); max-height: min(60vh, 480px); margin: 0; padding: 14px 16px; overflow-y: auto; transform: translateX(-50%); border: 1px solid var(--accent-border); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow-lg); animation: question-panel-in .22s cubic-bezier(0.16, 1, 0.3, 1); }
 .question-panel-header { display: flex; align-items: center; gap: 10px; }
 .question-step-tag { flex: 0 0 auto; padding: 2px 10px; border: 1px solid var(--border-strong); border-radius: 999px; color: var(--text-muted); background: var(--surface-input); font-size: 11px; line-height: 1.6; }
