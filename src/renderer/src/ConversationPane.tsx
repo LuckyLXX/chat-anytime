@@ -54,6 +54,7 @@ import type {
 } from "../../shared/protocol";
 import { delegationRoleLabels, sessionRunStatusLabels, thinkingLevelLabels, toolLabel } from "../../shared/locale";
 import { CodeBlock, RichContent } from "./components/RichContent";
+import { ExitWrap, useExitPresence, useExitPresenceValue } from "./components/Presence";
 import { QuestionPanel } from "./components/QuestionPanel";
 import { compactPath, extractMentionTokens, formatDuration, type Artifact } from "./lib/content";
 import { contextUsageCacheLabel, contextUsagePercentLabel, contextUsageTone, contextUsageTooltip } from "./lib/context-usage";
@@ -190,6 +191,8 @@ function PendingResponse({ label, timing, now }: { label: string; timing?: TurnT
 
 function ImageMessageBlock({ block }: { block: Extract<import("../../shared/protocol").MessageBlock, { type: "image" }> }): ReactNode {
   const [expanded, setExpanded] = useState(false);
+  // lightbox 关闭退场（styles.css image-lightbox 退场 160ms）。
+  const lightboxPresence = useExitPresence(expanded, 160);
   const src = `data:${block.mimeType};base64,${block.data}`;
   useEffect(() => {
     if (!expanded) return;
@@ -202,7 +205,11 @@ function ImageMessageBlock({ block }: { block: Extract<import("../../shared/prot
   return (
     <>
       <button className="image-message" type="button" aria-label="放大图片" onClick={() => setExpanded(true)}><img src={src} alt="用户上传的图片" /></button>
-      {expanded && <div className="modal-backdrop image-lightbox" role="presentation" onMouseDown={() => setExpanded(false)}><div className="image-lightbox-content" role="dialog" aria-modal="true" aria-label="图片预览" onMouseDown={(event) => event.stopPropagation()}><button className="icon-button modal-close" type="button" title="关闭图片" aria-label="关闭图片" onClick={() => setExpanded(false)}><X size={17} /></button><img src={src} alt="用户上传的图片" /></div></div>}
+      {lightboxPresence.rendered && (
+        <ExitWrap exiting={lightboxPresence.exiting}>
+        <div className="modal-backdrop image-lightbox" role="presentation" onMouseDown={() => setExpanded(false)}><div className="image-lightbox-content" role="dialog" aria-modal="true" aria-label="图片预览" onMouseDown={(event) => event.stopPropagation()}><button className="icon-button modal-close" type="button" title="关闭图片" aria-label="关闭图片" onClick={() => setExpanded(false)}><X size={17} /></button><img src={src} alt="用户上传的图片" /></div></div>
+        </ExitWrap>
+      )}
     </>
   );
 }
@@ -707,6 +714,8 @@ export const ConversationPane = memo(function ConversationPane({
   useEffect(() => { attachmentsRef.current = attachments; }, [attachments]);
   // 输入框附件条里图片缩略图的放大预览（复用 image-lightbox 模式）。
   const [previewingAttachment, setPreviewingAttachment] = useState<PromptAttachment | null>(null);
+  // 附件图片 lightbox 的关闭退场（与 ImageMessageBlock 同款，退场 160ms）。
+  const attachmentLightbox = useExitPresenceValue(previewingAttachment, 160);
   useEffect(() => {
     if (!previewingAttachment) return;
     function close(event: KeyboardEvent): void {
@@ -1746,14 +1755,16 @@ export const ConversationPane = memo(function ConversationPane({
           </div>
         </div>
       </form>
-      {previewingAttachment?.kind === "image" && (
+      {attachmentLightbox.rendered && (() => { const previewingAttachment = attachmentLightbox.value; if (!previewingAttachment || previewingAttachment.kind !== "image") return null; return (
+        <ExitWrap exiting={attachmentLightbox.exiting}>
         <div className="modal-backdrop image-lightbox" role="presentation" onMouseDown={() => setPreviewingAttachment(null)}>
           <div className="image-lightbox-content" role="dialog" aria-modal="true" aria-label="图片预览" onMouseDown={(event) => event.stopPropagation()}>
             <button className="icon-button modal-close" type="button" title="关闭图片" aria-label="关闭图片" onClick={() => setPreviewingAttachment(null)}><X size={17} /></button>
             <img src={`data:${previewingAttachment.mimeType};base64,${previewingAttachment.data}`} alt={previewingAttachment.name} />
           </div>
         </div>
-      )}
+        </ExitWrap>
+      ); })()}
     </section>
   );
 });

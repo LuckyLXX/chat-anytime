@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { Brain, ListTodo, NotebookTabs, Terminal, X } from "lucide-react";
 import type { MemoryTopic } from "../../shared/protocol";
+import { ExitWrap, useExitPresence } from "./components/Presence";
 import { useDesktopStore } from "./store";
 import { MIN_RUNNING_AGE_MS, TaskPanelContent } from "./TaskPanel";
 import { MemoryPanelContent } from "./MemoryPanel";
@@ -26,11 +27,14 @@ export function PanelDock({ onOpenMemoryTopic }: { onOpenMemoryTopic(topic: Memo
   const backgroundProcesses = useDesktopStore((state) => state.snapshot.backgroundProcesses);
   const [open, setOpen] = useState(false);
   const [tab, setTab] = useState<PanelTab>("tasks");
+  // 关闭退场：open=false 后保留 160ms 渲染窗口播 dock-out（styles.css），
+  // 卸载后 FAB 才挂载并播 fab-in；两态切换的间隙由退场动画自然衔接。
+  const presence = useExitPresence(open, 160);
 
   const activeCount = todos.filter((todo) => todo.status !== "completed").length;
   const backgroundCount = executions.filter((execution) => execution.status === "running" && Date.now() - execution.startedAt >= MIN_RUNNING_AGE_MS).length + backgroundProcesses.length;
 
-  if (!open) {
+  if (!presence.rendered) {
     return (
       <button className="panel-dock-fab" data-control="task-panel-toggle" type="button" title={`待办 ${activeCount} 项未完成${backgroundCount > 0 ? `，${backgroundCount} 个终端运行中` : ""} · 长期记忆 ${memory.length} 个主题`} aria-label={`打开任务与记忆面板，待办 ${activeCount} 项未完成，记忆 ${memory.length} 个主题`} onClick={() => setOpen(true)}>
         <NotebookTabs size={16} />
@@ -42,6 +46,7 @@ export function PanelDock({ onOpenMemoryTopic }: { onOpenMemoryTopic(topic: Memo
   }
 
   return (
+    <ExitWrap exiting={presence.exiting}>
     <div className="panel-dock">
       <header className="panel-dock-tabs">
         <button className={`panel-dock-tab${tab === "tasks" ? " active" : ""}`} data-control="task-panel-toggle" type="button" role="tab" aria-selected={tab === "tasks"} title="待办清单与运行中的终端" onClick={() => setTab("tasks")}>
@@ -65,5 +70,6 @@ export function PanelDock({ onOpenMemoryTopic }: { onOpenMemoryTopic(topic: Memo
         </div>
       </div>
     </div>
+    </ExitWrap>
   );
 }

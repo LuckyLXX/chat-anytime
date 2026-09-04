@@ -30,6 +30,7 @@
     "electron": "43.2.0",
     "electron-builder": "26.0.12",
     "electron-vite": "5.0.0",
+    "happy-dom": "^20.14.0",
     "highlight.js": "11.11.1",
     "html2canvas-pro": "^2.3.3",
     "katex": "0.16.22",
@@ -37,7 +38,6 @@
     "mermaid": "11.16.1",
     "react": "19.1.1",
     "react-dom": "19.1.1",
-    "zustand": "5.0.8",
     "react-markdown": "10.1.0",
     "rehype-katex": "7.0.1",
     "rehype-raw": "7.0.0",
@@ -47,7 +47,8 @@
     "typescript": "5.9.3",
     "vditor": "^3.11.3",
     "vite": "7.3.6",
-    "vitest": "4.0.18"
+    "vitest": "4.0.18",
+    "zustand": "5.0.8"
   },
   "overrides": {
     "@earendil-works/pi-agent-core": "0.84.4",

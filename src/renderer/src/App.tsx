@@ -71,6 +71,7 @@ import { ModelSelect } from "./components/ModelSelect";
 import type { EditorSaveStatus } from "./components/MarkdownEditor";
 import { WorkspaceTree } from "./components/WorkspaceTree";
 import { ContextMenu, type ContextMenuItem } from "./components/ContextMenu";
+import { ExitWrap, useExitPresence, useExitPresenceValue } from "./components/Presence";
 import { RichContent } from "./components/RichContent";
 import { PermissionDialog } from "./components/RuntimeDialogs";
 import { DelegationTranscript } from "./components/DelegationTranscript";
@@ -1062,9 +1063,10 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
             <div>
               <section className="interface-tuning-settings" aria-label="界面微调">
                 <div className="theme-color-heading"><span className="settings-field-label">界面微调</span></div>
-                <p className="theme-color-hint">不改主题，微调界面密度与圆角，切换后实时生效；默认跟随主题。</p>
+                <p className="theme-color-hint">不改主题，微调界面密度与圆角，切换后实时生效；默认跟随主题。「界面动效」关闭后所有过渡与弹出动画停用（系统“减弱动态效果”开启时也会自动停用）。</p>
                 <label>界面密度<select value={settings.appearance.tune?.density ?? ""} onChange={(event) => updateTune({ density: event.target.value as InterfaceTuning["density"] | "" })}><option value="">跟随主题</option><option value="compact">紧凑</option><option value="comfortable">舒适</option><option value="relaxed">宽松</option></select></label>
                 <label>圆角<select value={settings.appearance.tune?.radius ?? ""} onChange={(event) => updateTune({ radius: event.target.value as InterfaceTuning["radius"] | "" })}><option value="">跟随主题</option><option value="square">方角</option><option value="small">小圆</option><option value="medium">中圆</option><option value="round">圆润</option></select></label>
+                <label className="checkbox-setting"><input type="checkbox" checked={settings.appearance.motion !== false} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, motion: event.target.checked } } })} />界面动效（关闭后过渡与弹出动画全部停用）</label>
               </section>
               <label>主题模式<select value={settings.appearance.theme} onChange={(event) => { const next = event.target.value as "system" | "light" | "dark"; useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, theme: next } } }); setOpacityMode(next === "light" ? "light" : next === "dark" ? "dark" : (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")); }}><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></label>
               <label className="checkbox-setting"><input type="checkbox" checked={settings.appearance.showThinking} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, showThinking: event.target.checked } } })} />展示思考过程</label>
@@ -1175,6 +1177,20 @@ export function App(): ReactNode {
     // 回滚改了盘上文件：文件树重新拉取（预览重开时自然读到新内容）。
     setTreeRefreshSignal((value) => value + 1);
   }, [checkpointResult]);
+  // —— 界面动效：模态/面板的退出动画窗口（useExitPresence 延迟卸载 + styles.css
+  // 退场动画；时长与 styles.css「界面动效基建」注释的对照表一致）——
+  const settingsPresence = useExitPresence(settingsOpen, 160);
+  const permissionPresence = useExitPresenceValue(permission, 130);
+  const transcriptPresence = useExitPresenceValue(transcriptTarget, 160);
+  const renamePresence = useExitPresenceValue(renameSession, 160);
+  const deletePresence = useExitPresenceValue(deleteSession, 160);
+  const rollbackPresence = useExitPresenceValue(rollbackTarget, 160);
+  const removeWorkspacePresence = useExitPresenceValue(removeWorkspace, 160);
+  const flyoutPresence = useExitPresence(sidebarFlyoutOpen, 160);
+  // 预览面板：rendered 驱动 work-area 布局 class/分割条，退场期间布局不塌缩；
+  // 退场时挂起 native 浏览器视图（browserSuspended），淡出的始终是 DOM 层。
+  const previewPresence = useExitPresence(previewOpened, 180);
+  const previewVisible = previewPresence.rendered;
   const [previewSplit, setPreviewSplit] = useState(readStoredPreviewSplit);
   const [previewDragging, setPreviewDragging] = useState(false);
   const previewDragPointerRef = useRef<number | undefined>(undefined);
@@ -1386,7 +1402,10 @@ export function App(): ReactNode {
     const valueStates: readonly [string, string | undefined][] = [
       ["data-ui-sidebar-view", sidebarView],
       ["data-ui-density", settings.appearance.tune?.density],
-      ["data-ui-radius", settings.appearance.tune?.radius]
+      ["data-ui-radius", settings.appearance.tune?.radius],
+      // 界面动效总开关：关闭时 styles.css 关停块停用全部过渡/动画，
+      // Presence 同步立即卸载（不保留退场窗口）。
+      ["data-ui-motion", settings.appearance.motion === false ? "off" : undefined]
     ];
     for (const [name, active] of states) {
       if (active) root.setAttribute(name, "");
@@ -1400,7 +1419,7 @@ export function App(): ReactNode {
       for (const [name] of states) root.removeAttribute(name);
       for (const [name] of valueStates) root.removeAttribute(name);
     };
-  }, [settingsOpen, snapshot.workspace, isChatEmpty, isGenerating, previewOpened, permission, question, paneIds.length, sidebarView, settings.appearance.tune]);
+  }, [settingsOpen, snapshot.workspace, isChatEmpty, isGenerating, previewOpened, permission, question, paneIds.length, sidebarView, settings.appearance.tune, settings.appearance.motion]);
 
   async function openWorkspace(): Promise<void> {
     const path = await window.piDesktop.chooseWorkspace();
@@ -2034,11 +2053,16 @@ export function App(): ReactNode {
                       <SquarePen size={14} />
                     </button>
                   </div>
-                  {!collapsed && <div className="session-workspace-items">
+                  {/* 分组子项常驻 DOM（collapsed 只切 class），展开/折叠由
+                      styles.css 的 grid-template-rows 过渡驱动（内层 wrapper
+                      负责剪裁），hidden 类同时阻断 Tab 焦点。 */}
+                  <div className={`session-workspace-items${collapsed ? " collapsed" : ""}`}>
+                    <div className="session-workspace-items-inner">
                     {group.sessions.length === 0
                       ? <div className="session-workspace-empty">暂无话题，点击右上角新建</div>
                       : group.sessions.map((item) => <button className={item.id === snapshot.sessionId || (splitTree ? paneIds.includes(item.id) : false) ? "active" : ""} type="button" key={item.path} title={item.title} data-row-kind="session" data-row-active={item.id === snapshot.sessionId || (splitTree ? paneIds.includes(item.id) : false) || undefined} onClick={() => void openSession(item.path, item.workspace, item.id)} onContextMenu={(event) => { event.preventDefault(); const splitDisabled = !snapshot.sessionId || (splitTree ? countLeaves(splitTree) >= MAX_SPLIT_PANES : false); const inPane = splitTree ? leafIds(splitTree).includes(item.id) : false; setContextMenu({ x: event.clientX, y: event.clientY, items: [{ label: "重命名", onClick: () => { setRenameSession({ path: item.path, title: item.title }); setRenameValue(item.title); } }, { label: item.pinned ? "取消置顶" : "置顶", onClick: () => { void window.piDesktop.send({ type: "session.pin", path: item.path, pinned: !item.pinned }); } }, { label: inPane ? "已分屏，切换到该格" : "分屏", disabled: !inPane && splitDisabled, onClick: () => addSplitPane(item) }, { label: "删除会话", danger: true, onClick: () => setDeleteSession({ path: item.path, title: item.title }) }] }); }}><MessageCircle size={14} /><span><strong>{item.title}</strong><small>{new Date(item.modifiedAt).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}</small></span>{(item.runStatus || item.pinned) && <div className="session-item-meta">{item.runStatus && <i className={`session-status-dot ${item.runStatus}`} title={sessionRunStatusLabels[item.runStatus]} aria-label={sessionRunStatusLabels[item.runStatus]!} />}{item.pinned && <Pin size={11} className="session-pin-indicator" />}</div>}</button>)}
-                  </div>}
+                    </div>
+                  </div>
                 </section>
               );
             })}
@@ -2071,11 +2095,13 @@ export function App(): ReactNode {
             <button type="button" className="rail-icon" data-control="rail-search" title="搜索" aria-label="搜索" onClick={() => { setSidebarView("topics"); setSidebarFlyoutOpen(true); window.setTimeout(() => sidebarSearchRef.current?.focus(), 30); }}><Search size={18} /></button>
             <button type="button" className="rail-icon" data-control="rail-agents" title="助手" aria-label="助手" onClick={() => { setSidebarView("topics"); setSidebarTab("agents"); setSidebarFlyoutOpen(true); }}><Users size={18} /></button>
           </div>
-          {sidebarFlyoutOpen && (
-            <aside className="sidebar sidebar-flyout" data-pane="sidebar">
-              <div className="brand-row"><BrandMark size={29} /><div><strong>ChatAnyTime</strong><span>桌面端</span></div></div>
-              {sidebarInner}
-            </aside>
+          {flyoutPresence.rendered && (
+            <ExitWrap exiting={flyoutPresence.exiting}>
+              <aside className="sidebar sidebar-flyout" data-pane="sidebar">
+                <div className="brand-row"><BrandMark size={29} /><div><strong>ChatAnyTime</strong><span>桌面端</span></div></div>
+                {sidebarInner}
+              </aside>
+            </ExitWrap>
           )}
         </div>
       ) : (
@@ -2110,8 +2136,8 @@ export function App(): ReactNode {
           <div
             ref={workAreaRef}
             data-pane="work-area"
-            className={`work-area${previewOpened && preview && preview.tabs.length > 0 ? " with-preview" : previewOpened ? " with-preview-empty" : ""}${previewDragging ? " is-preview-dragging" : ""}`}
-            style={previewOpened ? { "--preview-split": `${previewSplit}%` } as CSSProperties : undefined}
+            className={`work-area${previewVisible && preview && preview.tabs.length > 0 ? " with-preview" : previewVisible ? " with-preview-empty" : ""}${previewDragging ? " is-preview-dragging" : ""}`}
+            style={previewVisible ? { "--preview-split": `${previewSplit}%` } as CSSProperties : undefined}
           >
           {/* 会话槽位：单窗口 = 一个 ConversationPane；分屏 = 布局树递归渲染，
               最大化时只渲染目标格（树保留，还原即恢复）。预览面板/终端是全局
@@ -2141,21 +2167,22 @@ export function App(): ReactNode {
             />
           )}
 
-          {previewOpened && preview && <PreviewDivider split={previewSplit} dragging={previewDragging} onStart={startPreviewResize} onMove={movePreviewResize} onEnd={endPreviewResize} onCancel={cancelPreviewResize} onKeyDown={resizePreviewWithKeyboard} onReset={() => setPreviewSplit(50)} />}
+          {previewVisible && preview && <PreviewDivider split={previewSplit} dragging={previewDragging} onStart={startPreviewResize} onMove={movePreviewResize} onEnd={endPreviewResize} onCancel={cancelPreviewResize} onKeyDown={resizePreviewWithKeyboard} onReset={() => setPreviewSplit(50)} />}
 
-          {previewOpened && (preview && preview.tabs.length > 0 ? (
-            <ArtifactPreview tabs={preview.tabs} activeTabId={preview.activeTabId} browserSuspended={previewDragging || settingsOpen || Boolean(permission) || Boolean(messageActionError) || previewAddMenuOpen} onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddTerminal={openTerminalPreview} onAddFile={() => void openManualFilePreview()} onAddReview={openLatestReview} onAddMenuOpenChange={setPreviewAddMenuOpen} reviewAvailable={Boolean(latestReviewExecution)} workspace={snapshot.workspace} activeEditorState={activePreviewTab && ((activePreviewTab.target.type === "file" && activePreviewTab.target.file.kind === "markdown") || activePreviewTab.target.type === "memory") ? getEditorState(activePreviewTab.id) : undefined} onActiveEditorChange={(patch) => { if (activePreviewTab) patchEditorState(activePreviewTab.id, patch); }} onActiveEditorContentChange={handleActiveEditorContentChange} onActiveEditorSaved={handleActiveEditorSaved} onActiveEditorStatusChange={handleActiveEditorStatusChange} onActiveEditorSaveError={(message) => setMessageActionError(`保存 ${activePreviewTab?.target.type === "file" ? activePreviewTab.target.file.name : activePreviewTab?.target.type === "memory" ? "记忆主题" : "Markdown"} 失败：${message}`)} onActiveEditorResolveConflict={(choice) => { if (activePreviewTab) handleEditorResolveConflict(activePreviewTab.id, choice); }} onToggleEditing={() => { if (activePreviewTab) patchEditorState(activePreviewTab.id, { editing: !getEditorState(activePreviewTab.id).editing }); }} onBrowserStateChange={handleBrowserStateChange} onBrowserPickSend={sendPickedElement} />
+          {previewVisible && <ExitWrap exiting={previewPresence.exiting}>{preview && preview.tabs.length > 0 ? (
+            <ArtifactPreview tabs={preview.tabs} activeTabId={preview.activeTabId} browserSuspended={previewDragging || settingsOpen || Boolean(permission) || Boolean(messageActionError) || previewAddMenuOpen || previewPresence.exiting} onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddTerminal={openTerminalPreview} onAddFile={() => void openManualFilePreview()} onAddReview={openLatestReview} onAddMenuOpenChange={setPreviewAddMenuOpen} reviewAvailable={Boolean(latestReviewExecution)} workspace={snapshot.workspace} activeEditorState={activePreviewTab && ((activePreviewTab.target.type === "file" && activePreviewTab.target.file.kind === "markdown") || activePreviewTab.target.type === "memory") ? getEditorState(activePreviewTab.id) : undefined} onActiveEditorChange={(patch) => { if (activePreviewTab) patchEditorState(activePreviewTab.id, patch); }} onActiveEditorContentChange={handleActiveEditorContentChange} onActiveEditorSaved={handleActiveEditorSaved} onActiveEditorStatusChange={handleActiveEditorStatusChange} onActiveEditorSaveError={(message) => setMessageActionError(`保存 ${activePreviewTab?.target.type === "file" ? activePreviewTab.target.file.name : activePreviewTab?.target.type === "memory" ? "记忆主题" : "Markdown"} 失败：${message}`)} onActiveEditorResolveConflict={(choice) => { if (activePreviewTab) handleEditorResolveConflict(activePreviewTab.id, choice); }} onToggleEditing={() => { if (activePreviewTab) patchEditorState(activePreviewTab.id, { editing: !getEditorState(activePreviewTab.id).editing }); }} onBrowserStateChange={handleBrowserStateChange} onBrowserPickSend={sendPickedElement} />
           ) : (
             <ArtifactPreview key="empty-state" tabs={[]} activeTabId="" onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddTerminal={openTerminalPreview} onAddFile={() => void openManualFilePreview()} onBrowserPickSend={sendPickedElement} />
-          ))}
+          )}</ExitWrap>}
         </div>
       </main>
 
-      {settingsOpen && <SettingsDialog settings={settings} models={models} providers={providers} customProvider={customProvider} customProviderKeyConfigured={customProviderKeyConfigured} customModels={customModels} customModelFetchStatus={customModelFetchStatus} customModelFetchError={customModelFetchError} modelRefreshStatus={modelRefreshStatus} modelRefreshError={modelRefreshError} modelRefreshProvider={modelRefreshProvider} resources={resources} workspaceOpen={Boolean(snapshot.workspace)} initialTab={settingsInitialTab} onClose={() => { setSettingsOpen(false); setSettingsInitialTab(undefined); }} onCreateInSession={() => void createNewSession()} />}
-      {permission && <PermissionDialog request={permission} sessionTitle={snapshot.sessions.find((item) => item.id === permission.principal.sessionId)?.title} />}
-      {transcriptTarget && <DelegationTranscript delegation={transcriptTarget} onClose={() => setTranscriptTarget(undefined)} onOpenArtifact={openArtifactPreview} />}
+      {settingsPresence.rendered && <ExitWrap exiting={settingsPresence.exiting}><SettingsDialog settings={settings} models={models} providers={providers} customProvider={customProvider} customProviderKeyConfigured={customProviderKeyConfigured} customModels={customModels} customModelFetchStatus={customModelFetchStatus} customModelFetchError={customModelFetchError} modelRefreshStatus={modelRefreshStatus} modelRefreshError={modelRefreshError} modelRefreshProvider={modelRefreshProvider} resources={resources} workspaceOpen={Boolean(snapshot.workspace)} initialTab={settingsInitialTab} onClose={() => { setSettingsOpen(false); setSettingsInitialTab(undefined); }} onCreateInSession={() => void createNewSession()} /></ExitWrap>}
+      {permissionPresence.rendered && (() => { const permission = permissionPresence.value; return permission ? <ExitWrap exiting={permissionPresence.exiting}><PermissionDialog request={permission} sessionTitle={snapshot.sessions.find((item) => item.id === permission.principal.sessionId)?.title} /></ExitWrap> : null; })()}
+      {transcriptPresence.rendered && (() => { const transcriptTarget = transcriptPresence.value; return transcriptTarget ? <ExitWrap exiting={transcriptPresence.exiting}><DelegationTranscript delegation={transcriptTarget} onClose={() => setTranscriptTarget(undefined)} onOpenArtifact={openArtifactPreview} /></ExitWrap> : null; })()}
       {contextMenu && <ContextMenu x={contextMenu.x} y={contextMenu.y} items={contextMenu.items} onClose={() => setContextMenu(null)} />}
-      {renameSession && (
+      {renamePresence.rendered && (() => { const renameSession = renamePresence.value; if (!renameSession) return null; return (
+        <ExitWrap exiting={renamePresence.exiting}>
         <div className="modal-backdrop permission-backdrop" onClick={() => setRenameSession(null)}>
           <div className="permission-dialog extension-ui-dialog" role="dialog" aria-modal="true" aria-label="重命名会话" onClick={(event) => event.stopPropagation()}>
             <header><div className="risk-icon command"><Pencil size={20} /></div><div><h2>重命名会话</h2></div></header>
@@ -2165,16 +2192,20 @@ export function App(): ReactNode {
             </form>
           </div>
         </div>
-      )}
-      {deleteSession && (
+        </ExitWrap>
+      ); })()}
+      {deletePresence.rendered && (() => { const deleteSession = deletePresence.value; if (!deleteSession) return null; return (
+        <ExitWrap exiting={deletePresence.exiting}>
         <div className="modal-backdrop permission-backdrop" onClick={() => setDeleteSession(null)}>
           <div className="permission-dialog" role="alertdialog" aria-modal="true" aria-label="删除会话" onClick={(event) => event.stopPropagation()}>
             <header><div className="risk-icon outside-workspace"><Trash2 size={20} /></div><div><h2>删除会话「{deleteSession.title}」？</h2><p>将永久删除该会话及其关联的任务清单，此操作不可恢复。</p></div></header>
             <footer><button className="secondary-button" type="button" onClick={() => setDeleteSession(null)}>取消</button><button className="danger-button" type="button" onClick={() => { void window.piDesktop.send({ type: "session.delete", path: deleteSession.path }); setDeleteSession(null); }}>删除</button></footer>
           </div>
         </div>
-      )}
-      {rollbackTarget && (
+        </ExitWrap>
+      ); })()}
+      {rollbackPresence.rendered && (() => { const rollbackTarget = rollbackPresence.value; if (!rollbackTarget) return null; return (
+        <ExitWrap exiting={rollbackPresence.exiting}>
         <div className="modal-backdrop permission-backdrop" onClick={() => setRollbackTarget(null)}>
           <div className="permission-dialog" role="alertdialog" aria-modal="true" aria-label="回滚文件" onClick={(event) => event.stopPropagation()}>
             <header><div className="risk-icon write"><History size={20} /></div><div><h2>回滚文件「{rollbackTarget.file.relativePath.split("/").at(-1)}」？</h2><p>{rollbackTarget.file.relativePath}</p><p>该文件将恢复到本次改动前的状态；若它是本次新建的文件则会被删除，当前内容会被覆盖。</p></div></header>
@@ -2195,21 +2226,24 @@ export function App(): ReactNode {
             </footer>
           </div>
         </div>
-      )}
+        </ExitWrap>
+      ); })()}
       {checkpointToast && (
         <div className="error-toast checkpoint-toast"><History size={18} /><span>{checkpointToast}</span><button className="icon-button" type="button" title="关闭提示" aria-label="关闭提示" onClick={() => setCheckpointToast(undefined)}><X size={16} /></button></div>
       )}
       {automationToast && (
         <div className={`error-toast checkpoint-toast${automationToast.runId ? " with-action" : ""}`}><Zap size={18} /><span>{automationToast.message}</span>{automationToast.runId && <button className="toast-action" type="button" title="打开运行记录" aria-label="查看运行结果" onClick={() => viewAutomationRun(automationToast.runId!)}>查看结果</button>}<button className="icon-button" type="button" title="关闭提示" aria-label="关闭提示" onClick={() => setAutomationToast(undefined)}><X size={16} /></button></div>
       )}
-      {removeWorkspace && (
+      {removeWorkspacePresence.rendered && (() => { const removeWorkspace = removeWorkspacePresence.value; if (!removeWorkspace) return null; return (
+        <ExitWrap exiting={removeWorkspacePresence.exiting}>
         <div className="modal-backdrop permission-backdrop" onClick={() => setRemoveWorkspace(null)}>
           <div className="permission-dialog" role="alertdialog" aria-modal="true" aria-label="移除工作区" onClick={(event) => event.stopPropagation()}>
             <header><div className="risk-icon outside-workspace"><Trash2 size={20} /></div><div><h2>移除工作区「{removeWorkspace.name}」？</h2><p>{removeWorkspace.count > 0 ? `将永久删除当前助手在该工作区下的 ${removeWorkspace.count} 个会话，其他助手不受影响，此操作不可恢复。` : "该工作区暂无会话，将从当前助手的话题栏移除，其他助手不受影响。"}</p></div></header>
             <footer><button className="secondary-button" type="button" onClick={() => setRemoveWorkspace(null)}>取消</button><button className="danger-button" type="button" onClick={() => { void window.piDesktop.send({ type: "workspace.remove", workspace: removeWorkspace.workspace }); setRemoveWorkspace(null); }}>移除</button></footer>
           </div>
         </div>
-      )}
+        </ExitWrap>
+      ); })()}
       {error && <div className="error-toast"><AlertCircle size={18} /><span>{error}</span><button className="icon-button" type="button" title="关闭提示" aria-label="关闭提示" onClick={clearError}><X size={16} /></button></div>}
       {messageActionError && <div className="error-toast"><AlertCircle size={18} /><span>{messageActionError}</span><button className="icon-button" type="button" title="关闭提示" aria-label="关闭提示" onClick={() => setMessageActionError(undefined)}><X size={16} /></button></div>}
     </div>

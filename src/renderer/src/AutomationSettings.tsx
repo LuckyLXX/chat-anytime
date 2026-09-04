@@ -8,6 +8,7 @@ import { buildCron, describeCron, DEFAULT_SCHEDULE_PARTS, pad2, SCHEDULE_PRESETS
 import { selectableCatalogModels } from "./lib/model-list";
 import { ModelSelect } from "./components/ModelSelect";
 import { useDesktopStore } from "./store";
+import { ExitWrap, useExitPresenceValue } from "./components/Presence";
 import { AutomationRuns, type AutomationRunsHighlight } from "./AutomationRuns";
 
 type Filter = "all" | "enabled" | "paused";
@@ -172,6 +173,8 @@ export function AutomationSettings({ models, providers, settings, workspaceConfi
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
   const [form, setForm] = useState<{ mode: "create" } | { mode: "edit"; task: AutomationTask } | null>(null);
+  // 创建/编辑弹窗的关闭退场（styles.css automation-dialog 退场 160ms）。
+  const formPresence = useExitPresenceValue(form, 160);
 
   const counts = useMemo(() => ({
     all: automation.length,
@@ -276,7 +279,8 @@ export function AutomationSettings({ models, providers, settings, workspaceConfi
             ))}
           </div>}
 
-      {form && (
+      {formPresence.rendered && (() => { const form = formPresence.value; if (!form) return null; return (
+        <ExitWrap exiting={formPresence.exiting}>
         <AutomationForm
           initial={form.mode === "edit" ? form.task : null}
           models={models}
@@ -286,7 +290,8 @@ export function AutomationSettings({ models, providers, settings, workspaceConfi
           onCancel={() => setForm(null)}
           onSubmit={(task) => { send({ type: "automation.save", task }); setForm(null); }}
         />
-      )}
+        </ExitWrap>
+      ); })()}
       </>}
     </div>
   );

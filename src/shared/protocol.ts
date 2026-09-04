@@ -168,6 +168,10 @@ export interface AppearanceSettings {
   wallpaperOpacity?: WallpaperOpacityOverrides;
   bubbleOpacity?: BubbleOpacityOverrides;
   panelOpacity?: PanelOpacityOverrides;
+  /** 界面动效总开关：false = 关停全部过渡/弹出动画（styles.css 的
+   *  html[data-ui-motion="off"] 关停块）；缺省/true = 开启。系统
+   *  prefers-reduced-motion 时无论该值如何都会关停。 */
+  motion?: boolean;
   showThinking: boolean;
 }
 

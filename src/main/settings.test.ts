@@ -222,13 +222,14 @@ describe("desktop settings migration", () => {
       themePreset: "rose",
       customCss: ".message { outline: 1px solid red; }",
       customThemes: [],
+      motion: true,
       showThinking: false
     });
   });
 
   it("falls back to safe appearance defaults for unknown theme values", () => {
     const result = migrateSettings({ appearance: { theme: "neon", themePreset: "unknown", customCss: 42 } });
-    expect(result.settings.appearance).toEqual({ theme: "system", themePreset: "default", customCss: "", customThemes: [], showThinking: true });
+    expect(result.settings.appearance).toEqual({ theme: "system", themePreset: "default", customCss: "", customThemes: [], motion: true, showThinking: true });
   });
 
   it("accepts the expanded reference theme presets", () => {

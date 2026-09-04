@@ -4,6 +4,7 @@ import { createPortal } from "react-dom";
 import type { WorkspaceDirectoryEntry } from "../../../shared/protocol";
 import { useDesktopStore } from "../store";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
+import { ExitWrap, useExitPresenceValue } from "./Presence";
 
 const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif", "ico"];
 const CODE_EXTENSIONS = ["ts", "tsx", "js", "jsx", "cjs", "mjs", "json", "jsonc", "css", "scss", "less", "html", "htm", "py", "go", "rs", "java", "c", "cpp", "cc", "h", "hpp", "cs", "rb", "php", "sh", "bash", "zsh", "yml", "yaml", "toml", "sql", "xml"];
@@ -171,6 +172,8 @@ export function WorkspaceTree({ workspace, onOpenFile, onAddToChat, onError, ref
   const [reloadToken, setReloadToken] = useState(0);
   const [menu, setMenu] = useState<{ x: number; y: number; items: ContextMenuItem[] } | null>(null);
   const [dialog, setDialog] = useState<TreeDialog | null>(null);
+  // 重命名/新建确认弹窗的关闭退场（styles.css permission-dialog 退场 160ms）。
+  const dialogPresence = useExitPresenceValue(dialog, 160);
 
   const refresh = useCallback((): void => setReloadToken((token) => token + 1), []);
 
@@ -301,7 +304,7 @@ export function WorkspaceTree({ workspace, onOpenFile, onAddToChat, onError, ref
       {/* 菜单与弹窗必须通过 Portal 挂到 body：.sidebar 处于 .desktop-shell > * 的
           z-index:1 堆叠上下文中，fixed 浮层会被主区域盖住导致“右键没反应”。 */}
       {menu && createPortal(<ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />, document.body)}
-      {dialog && createPortal(<TreeDialogView dialog={dialog} onClose={() => setDialog(null)} />, document.body)}
+      {dialogPresence.rendered && (() => { const dialog = dialogPresence.value; if (!dialog) return null; return createPortal(<ExitWrap exiting={dialogPresence.exiting}><TreeDialogView dialog={dialog} onClose={() => setDialog(null)} /></ExitWrap>, document.body); })()}
     </>
   );
 }
