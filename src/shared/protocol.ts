@@ -1,6 +1,9 @@
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 export type AccessMode = "read-only" | "ask" | "workspace" | "full";
 
+/** 模型请求的 API 模式：OpenAI 兼容 chat completions，或较新的 Responses（/v1/responses）。 */
+export type ProviderApiMode = "openai-completions" | "openai-responses";
+
 /** powershell 为 opt-in 工具：存量 Agent 配置缺键时默认关闭（见 settings.ts defaultToolEnabled）。 */
 export type BuiltinToolName = "read" | "bash" | "powershell" | "edit" | "write" | "grep" | "find" | "ls";
 
@@ -16,6 +19,8 @@ export interface ModelOption {
   maxTokens?: number;
   /** 目录条目的启用状态（settings.providers 的勾选结果）；缺省视为启用。目录必须包含被禁用的模型（设置页要还原勾选），选择器类消费方自行过滤 enabled !== false。 */
   enabled?: boolean;
+  /** 模型当前生效的 API 模式（目录定义优先，settings 覆盖优先于目录）；仅用于设置页展示，且只携带 OpenAI 兼容两档值。 */
+  api?: ProviderApiMode;
 }
 
 export interface ProviderModelSettings {
@@ -26,6 +31,8 @@ export interface ProviderModelSettings {
   contextWindow?: number;
   /** 用户手动修正的最大输出 token；缺省回退到目录/模板值。 */
   maxTokens?: number;
+  /** 模型级 API 模式覆盖；缺省 = 跟随服务商默认（自定义）或目录定义（内置）。 */
+  api?: ProviderApiMode;
   /** Whether this model is shown in the composer model switcher. */
   enabled?: boolean;
 }
@@ -33,13 +40,22 @@ export interface ProviderModelSettings {
 export interface ProviderSettings {
   id: string;
   name: string;
+  /**
+   * 接口地址。自定义服务商必填；内置服务商（custom:false）可选携带 = 覆盖目录
+   * 默认地址（空/缺省 = 跟随目录）。
+   */
   baseUrl: string;
   models: ProviderModelSettings[];
   keyConfigured?: boolean;
   /**
+   * 服务商级 API 模式覆盖。自定义服务商缺省按 openai-completions 解析保持现状；
+   * 内置服务商（custom:false）可选携带 = 整组覆盖目录 API 模式。
+   */
+  api?: ProviderApiMode;
+  /**
    * `false` marks a built-in provider entry that only records per-model
-   * visibility (no custom baseUrl). Absent/true means an OpenAI-compatible
-   * custom provider entry.
+   * visibility (optional baseUrl/api overrides). Absent/true means an
+   * OpenAI-compatible custom provider entry.
    */
   custom?: boolean;
 }

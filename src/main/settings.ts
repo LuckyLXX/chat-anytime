@@ -10,6 +10,7 @@ import type {
   CheckpointSettings,
   CustomThemeDefinition,
   DesktopSettings,
+  ProviderApiMode,
   DivBubbleMode,
   HooksSettings,
   InterfaceTuning,
@@ -179,6 +180,8 @@ export function normalizeAgent(agent: (Omit<Partial<AgentProfile>, "tools"> & { 
 }
 
 export function normalizeProvider(provider: Partial<ProviderSettings>): ProviderSettings {
+  const normalizeApiMode = (value: unknown): ProviderApiMode | undefined =>
+    value === "openai-completions" || value === "openai-responses" ? value : undefined;
   const models = Array.isArray(provider.models)
     ? provider.models
       .filter((model) => model && typeof model.id === "string" && model.id.trim())
@@ -186,6 +189,8 @@ export function normalizeProvider(provider: Partial<ProviderSettings>): Provider
         id: model.id.trim(),
         name: String(model.name || model.id).trim() || model.id.trim(),
         imageInput: model.imageInput,
+        // 模型级 API 模式覆盖：白名单两档，非法值丢弃（不流入运行时）。
+        ...(normalizeApiMode(model.api) ? { api: normalizeApiMode(model.api) } : {}),
         // 用户手动修正的 token 限额：仅保留合法正整数，避免非法值流入运行时。
         ...(isPositiveInt(model.contextWindow) ? { contextWindow: model.contextWindow } : {}),
         ...(isPositiveInt(model.maxTokens) ? { maxTokens: model.maxTokens } : {}),
@@ -197,6 +202,8 @@ export function normalizeProvider(provider: Partial<ProviderSettings>): Provider
     name: String(provider.name || "自定义 OpenAI 服务"),
     baseUrl: String(provider.baseUrl || "").trim().replace(/\/+$/u, ""),
     models,
+    // 服务商级 API 模式覆盖：白名单两档，非法值丢弃（缺省按 openai-completions 解析）。
+    ...(normalizeApiMode(provider.api) ? { api: normalizeApiMode(provider.api) } : {}),
     ...(provider.custom === false ? { custom: false as const } : {})
   };
 }
@@ -209,7 +216,8 @@ export function mergeProviderModels(existing: ProviderModelSettings[], fetched: 
     return {
       ...model,
       imageInput: old?.imageInput ?? model.imageInput,
-      // 用户手动修正过的限额在上游刷新后保持不变。
+      // 用户手动修正过的 API 模式/限额在上游刷新后保持不变。
+      api: old?.api ?? model.api,
       contextWindow: old?.contextWindow ?? model.contextWindow,
       maxTokens: old?.maxTokens ?? model.maxTokens,
       enabled: old ? old.enabled !== false : model.enabled === true

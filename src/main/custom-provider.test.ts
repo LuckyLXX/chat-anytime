@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai/compat";
 import { convertMessages } from "@earendil-works/pi-ai/api/openai-completions";
-import { customProviderModelDefinition, inferCustomModelImageInput, resolveCustomProviderRegistration } from "./custom-provider.js";
+import { builtinProviderOverlay, customProviderModelDefinition, inferCustomModelImageInput, resolveBuiltinOverlayAction, resolveCustomProviderRegistration } from "./custom-provider.js";
 
 describe("custom OpenAI-compatible models", () => {
   it("keeps thinking levels available when the upstream catalog omits capabilities", () => {
@@ -61,6 +61,13 @@ describe("custom OpenAI-compatible models", () => {
       supportsLongCacheRetention: false
     });
     expect(messages[0]).toMatchObject({ role: "system", content: "你是开发助手" });
+  });
+
+  it("carries a model-level api override into the registration definition", () => {
+    // 模型级覆盖：同一服务商内部分模型走 /v1/responses，其余走 chat/completions。
+    const definition = customProviderModelDefinition({ id: "gpt-5.6", name: "GPT-5.6", api: "openai-responses" });
+    expect(definition).toMatchObject({ id: "gpt-5.6", api: "openai-responses" });
+    expect(customProviderModelDefinition({ id: "m1", name: "M1" }).api).toBeUndefined();
   });
 });
 
@@ -125,5 +132,121 @@ describe("resolveCustomProviderRegistration", () => {
       models: [{ id: "m3", name: "M3", contextWindow: 0, maxTokens: -100 }]
     });
     expect(guarded?.models[0]).toMatchObject({ contextWindow: 128000, maxTokens: 16384 });
+  });
+
+  it("carries the provider-level api override when present", () => {
+    // 服务商级默认 API：整个中转站走 /v1/responses（模型级未单独设置时兜底）。
+    const payload = resolveCustomProviderRegistration({
+      id: "provider-1",
+      name: "中转",
+      baseUrl: "https://api.example.com/v1",
+      api: "openai-responses",
+      models: [{ id: "m1", name: "M1" }]
+    });
+    expect(payload?.api).toBe("openai-responses");
+    // 缺省不出现 api 键，注册方按 openai-completions 兜底（历史行为不变）。
+    const plain = resolveCustomProviderRegistration({ id: "provider-1", name: "中转", baseUrl: "https://api.example.com/v1", models: [{ id: "m1", name: "M1" }] });
+    expect(plain?.api).toBeUndefined();
+  });
+
+  it("carries a model-level api override through the whole registration path", () => {
+    // 全链路断言（审查 P0-1）：中间映射不丢 api，注册定义里的模型级覆盖可达。
+    const payload = resolveCustomProviderRegistration({
+      id: "provider-1",
+      name: "中转",
+      baseUrl: "https://api.example.com/v1",
+      api: "openai-completions",
+      models: [
+        { id: "m1", name: "M1", api: "openai-responses" },
+        { id: "m2", name: "M2" }
+      ]
+    });
+    expect(payload?.models.map((model) => model.id)).toEqual(["m1", "m2"]);
+    expect(payload?.models[0]).toMatchObject({ id: "m1", api: "openai-responses" });
+    expect(payload?.models[1]?.api).toBeUndefined();
+  });
+});
+
+describe("builtinProviderOverlay", () => {
+  const baseline = [
+    { id: "a", name: "A", api: "openai-completions", baseUrl: "https://example.com/v1", input: ["text"] },
+    { id: "b", name: "B", api: "openai-completions", baseUrl: "https://example.com/v1", input: ["text"] },
+    { id: "c", name: "C", api: "openai-responses", baseUrl: "https://example.com/v1", input: ["text", "image"] }
+  ];
+  const entry = (patch: Partial<import("../shared/protocol.js").ProviderSettings>): import("../shared/protocol.js").ProviderSettings => ({
+    id: "opencode-go",
+    name: "OpenCode Go",
+    baseUrl: "",
+    models: [{ id: "a", name: "A" }],
+    custom: false as const,
+    ...patch
+  });
+
+  it("returns undefined when the entry has no overrides or is not built-in", () => {
+    expect(builtinProviderOverlay(entry({}), baseline)).toBeUndefined();
+    // 自定义服务商不走覆盖层通道。
+    expect(builtinProviderOverlay({ ...entry({}), custom: undefined }, baseline)).toBeUndefined();
+  });
+
+  it("applies a provider-level baseUrl override to every model", () => {
+    const overlay = builtinProviderOverlay(entry({ baseUrl: "https://new.example.com" }), baseline);
+    expect(overlay?.every((model) => model.baseUrl === "https://new.example.com")).toBe(true);
+    // baseUrl 全部变更：每个模型都是带覆盖的克隆，保留其余字段。
+    expect(overlay![2]).not.toBe(baseline[2]);
+    expect(overlay![2]).toMatchObject({ id: "c", api: "openai-responses", input: ["text", "image"] });
+  });
+
+  it("applies a provider-level api override to every model", () => {
+    const overlay = builtinProviderOverlay(entry({ api: "openai-responses" }), baseline);
+    expect(overlay?.map((model) => model.api)).toEqual(["openai-responses", "openai-responses", "openai-responses"]);
+    // 与目录一致时不产生新对象。
+    expect(overlay![2]).toBe(baseline[2]);
+  });
+
+  it("lets a model-level api override win over the provider level", () => {
+    const overlay = builtinProviderOverlay(entry({ api: "openai-completions", models: [{ id: "c", name: "C", api: "openai-responses" }] }), baseline);
+    expect(overlay?.map((model) => model.api)).toEqual(["openai-completions", "openai-completions", "openai-responses"]);
+  });
+
+  it("keeps untouched models on their original api", () => {
+    const overlay = builtinProviderOverlay(entry({ models: [{ id: "a", name: "A", api: "openai-responses" }] }), baseline);
+    expect(overlay).toBeDefined();
+    expect(overlay![0]).toMatchObject({ api: "openai-responses" });
+    // b（未覆盖）保持目录默认 openai-completions；c 本就是 responses。
+    expect(overlay![1]).toBe(baseline[1]);
+    expect(overlay![2]).toBe(baseline[2]);
+  });
+});
+
+describe("resolveBuiltinOverlayAction", () => {
+  const baseline = [{ id: "a", name: "A", api: "openai-completions", baseUrl: "https://example.com/v1" }];
+  const entry = (patch: Partial<import("../shared/protocol.js").ProviderSettings>): import("../shared/protocol.js").ProviderSettings => ({
+    id: "opencode-go",
+    name: "OpenCode Go",
+    baseUrl: "",
+    models: [{ id: "a", name: "A" }],
+    custom: false as const,
+    ...patch
+  });
+
+  it("returns a settings overlay when the entry has overrides", () => {
+    const action = resolveBuiltinOverlayAction(entry({ baseUrl: "https://new.example.com" }), baseline, "pull");
+    expect(action).not.toBeUndefined();
+    expect(action).not.toBe("drop");
+    if (action !== "drop" && action !== undefined) {
+      expect(action.source).toBe("settings");
+      expect(action.models[0]).toMatchObject({ baseUrl: "https://new.example.com" });
+    }
+  });
+
+  it("drops only a leftover settings overlay when overrides were cleared", () => {
+    // 用户清空覆盖后：residue（_overlaySource=settings）应被删除还原目录。
+    expect(resolveBuiltinOverlayAction(entry({}), baseline, "settings")).toBe("drop");
+    // 拉取目录 / SDK 远程目录（无标记或 pull）不能误删——审查 P1-1 回归防线。
+    expect(resolveBuiltinOverlayAction(entry({}), baseline, "pull")).toBeUndefined();
+    expect(resolveBuiltinOverlayAction(entry({}), baseline, undefined)).toBeUndefined();
+    // 条目已删（用户删除服务）等同清空覆盖。
+    expect(resolveBuiltinOverlayAction(undefined, baseline, "settings")).toBe("drop");
+    expect(resolveBuiltinOverlayAction(undefined, baseline, "pull")).toBeUndefined();
   });
 });

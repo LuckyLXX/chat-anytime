@@ -139,6 +139,17 @@ describe("builtin provider entry rebuild", () => {
     expect(buildBuiltinProviderEntry("zhipu", undefined, "智谱开放平台", false, models).keyConfigured).toBeUndefined();
     expect(buildBuiltinProviderEntry("zhipu", { id: "zhipu", name: "智谱", baseUrl: "", models: [], keyConfigured: false }, "智谱开放平台", false, models).keyConfigured).toBeUndefined();
   });
+
+  it("keeps the baseUrl/api overrides when rebuilding an existing built-in entry", () => {
+    // 内置服务商可选携带接口地址/API 模式覆盖（models-store 覆盖层消费）。
+    const entry = buildBuiltinProviderEntry("opencode-go", { id: "opencode-go", name: "OpenCode Go", baseUrl: "https://new.example.com/v1", api: "openai-responses", models: [] }, "OpenCode Go", true, models);
+    expect(entry.baseUrl).toBe("https://new.example.com/v1");
+    expect(entry.api).toBe("openai-responses");
+    // 新条目无覆盖：baseUrl 空串、api 缺省（跟随目录）。
+    const fresh = buildBuiltinProviderEntry("opencode-go", undefined, "OpenCode Go", true, models);
+    expect(fresh.baseUrl).toBe("");
+    expect(fresh.api).toBeUndefined();
+  });
 });
 
 describe("provider form save check", () => {

@@ -150,7 +150,7 @@ export function pruneDisabledModelRefs<T extends ModelReferenceSettings>(
 }
 
 /**
- * 重建内置服务商的设置条目（只记录模型勾选，无自定义 baseUrl）。
+ * 重建内置服务商的设置条目（记录模型勾选，可选携带接口地址/API 模式覆盖）。
  * 必须保留主进程推送设置时盖上的 keyConfigured 章（index.ts 会按凭据缓存回填）；
  * 条目尚不存在时用目录的「已配置」标记补上。否则勾一次模型，渲染端就忘了
  * 密钥已保存，保存按钮会因「无 API 密钥」被误置灰。
@@ -159,7 +159,10 @@ export function buildBuiltinProviderEntry(providerId: string, existing: Provider
   return {
     id: providerId,
     name: existing?.name ?? fallbackName,
-    baseUrl: "",
+    // 内置条目可选携带接口地址/API 模式覆盖（models-store 覆盖层消费），
+    // 空串 = 跟随目录默认地址；api 缺省 = 跟随目录 API 模式。
+    baseUrl: existing?.baseUrl ?? "",
+    api: existing?.api,
     models,
     custom: false,
     keyConfigured: existing?.keyConfigured || catalogConfigured || undefined

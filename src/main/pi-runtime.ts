@@ -60,7 +60,7 @@ import { workspaceRelativeAttachment } from "./attachments.js";
 import { saveBrowserScreenshot } from "./browser-screenshot.js";
 import { autoCompactionFailureNotice, runManualCompaction } from "./compaction-lifecycle.js";
 import { readGitBranch } from "./git-branch.js";
-import { inferCustomModelImageInput, resolveCustomProviderRegistration } from "./custom-provider.js";
+import { builtinProviderOverlay, inferCustomModelImageInput, resolveBuiltinOverlayAction, resolveCustomProviderRegistration } from "./custom-provider.js";
 import { buildDivModePrompt } from "./div-prompt.js";
 import { McpClientManager } from "./mcp-client.js";
 import { removeMcpServerConfig, setMcpServerDisabled, upsertMcpServerConfig } from "./mcp-config.js";
@@ -1635,14 +1635,76 @@ async function refreshCatalog(): Promise<void> {
 function registerCustomProvider(config: ProviderSettings): void {
   const registration = resolveCustomProviderRegistration(config);
   // null = built-in visibility marker entry (`custom: false`): the catalog
-  // already defines the provider, so there is nothing to register.
+  // already defines the provider, and built-in overrides (baseUrl/api) ride
+  // the models-store overlay via syncBuiltinProviderOverlays.
   if (!registration) return;
   modelRuntime?.registerProvider(config.id, {
     name: registration.name,
     baseUrl: registration.baseUrl,
-    api: "openai-completions",
+    // 服务商级 API 模式（响应式调用 /v1/responses 等）：缺省按 OpenAI 兼容
+    // chat/completions 解析，保持无配置时的历史行为。
+    api: registration.api ?? "openai-completions",
     models: registration.models
   });
+}
+
+/**
+ * 把设置里内置服务商（custom: false）的接口地址/API 模式覆盖同步进
+ * models-store 覆盖层（~/.pi/agent/models-store.json）。
+ *
+ * 为什么走覆盖层而非 registerProvider：applyExtension 的 models 数组是整体
+ * 替换语义，对内置服务商传部分模型会丢掉目录其余模型；覆盖层模型带完整元数据，
+ * 只改 api/baseUrl 不丢失流式所需字段（refreshBuiltinModelsFallback 同通道）。
+ *
+ * 只处理 BUILTIN_MODELS_ENDPOINTS 中 PiDesktop 直连管理的内置渠道：这些键由
+ * refreshBuiltinModelsFallback / 本函数写入，可安全删写；远程目录渠道（radius）
+ * 的键由 SDK 管理，不在设置覆盖能力范围内。规则：有覆盖的条目写 entry，无覆盖
+ * （或条目已删）的条目删除残留键还原目录；不产生任何变更时不写文件。
+ */
+async function syncBuiltinProviderOverlays(): Promise<void> {
+  const runtime = modelRuntime;
+  if (!runtime || !settings) return;
+  const storePath = join(getAgentDir(), "models-store.json");
+  let current: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(await readFile(storePath, "utf8")) as unknown;
+    // 畸形内容（数组/标量）按空对象处理，避免属性写入异常；不抛错放行后续覆盖。
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      current = parsed as Record<string, unknown>;
+    } else if (parsed !== undefined && parsed !== null) {
+      post({ type: "log", level: "warn", message: "models-store.json 内容异常（非对象），已忽略旧覆盖层" });
+    }
+  } catch {
+    // 文件不存在或损坏：从空对象开始（与 writeRemoteCatalogOverlay 同口径）。
+  }
+  let changed = false;
+  for (const providerId of Object.keys(BUILTIN_MODELS_ENDPOINTS)) {
+    const entry = settings.providers.find((provider) => provider.id === providerId && provider.custom === false);
+    const existing = current[providerId] as { _overlaySource?: "settings" | "pull" } | undefined;
+    const action = resolveBuiltinOverlayAction(entry, runtime.getModels(providerId), existing?._overlaySource);
+    if (!action) continue;
+    if (action === "drop") {
+      // 该覆盖层是设置覆盖残留：用户已清空接口地址/API 覆盖，删键还原目录
+      // （拉取目录与 SDK 远程目录不带 settings 标记，不会被误删——审查 P1-1）。
+      delete current[providerId];
+      changed = true;
+      continue;
+    }
+    current[providerId] = {
+      models: action.models,
+      checkedAt: Date.now(),
+      // 时间戳取当前时间，保证 SDK 的 lastModified 门控（> 本地目录生成时间）放行。
+      lastModified: Date.now(),
+      etag: undefined,
+      _overlaySource: action.source
+    };
+    changed = true;
+  }
+  if (!changed) return;
+  await writeFile(storePath, JSON.stringify(current, null, 2), "utf8");
+  // 重新加载覆盖层（allowNetwork:false 只应用已持久化的目录，不再访问网络）。
+  await runtime.refresh({ allowNetwork: false, force: true });
+  await refreshCatalog();
 }
 
 async function fetchCustomProviderModels(baseUrlInput: string, apiKey: string): Promise<ProviderModelSettings[]> {
@@ -1797,7 +1859,10 @@ async function writeRemoteCatalogOverlay(providerId: string, models: unknown[]):
     checkedAt: Date.now(),
     // 时间戳取当前时间，保证 SDK 的 lastModified 门控（> 本地目录生成时间）放行。
     lastModified: Date.now(),
-    etag: undefined
+    etag: undefined,
+    // 来源标记（拉取目录）：syncBuiltinProviderOverlays 据此区分设置覆盖残留，
+    // 无覆盖时不会误删本次拉取结果（审查 P1-1）。
+    _overlaySource: "pull"
   };
   await writeFile(storePath, JSON.stringify(current, null, 2), "utf8");
 }
@@ -1826,7 +1891,8 @@ async function refreshBuiltinModelsFallback(providerId: string): Promise<void> {
     await writeRemoteCatalogOverlay(providerId, overlay);
     // 重新加载覆盖层（allowNetwork:false 只应用已持久化的目录，不再访问网络）。
     await runtime.refresh({ allowNetwork: false, force: true });
-    await refreshCatalog();
+    // 拉取后重新叠加设置里的接口地址/API 模式覆盖（拉取结果保留，覆盖只改字段）。
+    await syncBuiltinProviderOverlays();
     post({ type: "models-refreshed", providerId });
   } catch (error) {
     post({ type: "models-refresh-error", providerId, message: `拉取模型列表失败：${errorText(error)}` });
@@ -2334,6 +2400,9 @@ async function initialize(command: Extract<RuntimeCommand, { type: "initialize" 
     const key = apiKeys[provider.id];
     if (key) await modelRuntime.setRuntimeApiKey(provider.id, key);
   }
+  // 内置服务商覆盖层（baseUrl/api 覆盖）在自定义注册后统一同步一次；
+  // 拉取造成的覆盖层变更在 refreshBuiltinModelsFallback 内再叠加设置覆盖。
+  await syncBuiltinProviderOverlays();
   // `auth.set` stores built-in provider keys separately from provider settings.
   // Rehydrate those keys after restart so explicit app configuration remains
   // distinguishable from inherited environment credentials.
@@ -3123,6 +3192,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     case "provider.save":
       if (!modelRuntime) break;
       registerCustomProvider(command.provider);
+      await syncBuiltinProviderOverlays();
       if (settings) {
         settings.providers = settings.providers.some((provider) => provider.id === command.provider.id) ? settings.providers.map((provider) => provider.id === command.provider.id ? command.provider : provider) : [...settings.providers, command.provider];
         // 取消全部模型（清空自定义服务）是合法操作：默认模型/助手默认/视觉模型
@@ -3151,6 +3221,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     case "provider.models.save": {
       if (!modelRuntime) break;
       if (settings) settings.providers = settings.providers.some((provider) => provider.id === command.provider.id) ? settings.providers.map((provider) => provider.id === command.provider.id ? command.provider : provider) : [...settings.providers, command.provider];
+      await syncBuiltinProviderOverlays();
       await refreshCatalog();
       const enabledIds = new Set(command.provider.models.filter((model) => model.enabled !== false).map((model) => model.id));
       // 取消勾选的模型不能继续留在会话上（2026-09 修复：现在允许保存「零启用
@@ -3193,6 +3264,8 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     }
     case "provider.delete":
       modelRuntime?.unregisterProvider(command.providerId);
+      // 删除条目时清掉该服务商残留的 models-store 覆盖键，还原目录（幂等）。
+      await syncBuiltinProviderOverlays();
       await refreshCatalog();
       if (settings) {
         settings.providers = settings.providers.filter((provider) => provider.id !== command.providerId);
@@ -3249,6 +3322,9 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         const result = await modelRuntime.refresh({ allowNetwork: true, force: true, signal: refreshController.signal });
         // 无论结果如何都重新发布目录，反映已应用的部分刷新。
         await refreshCatalog();
+        // 网络刷新（pi.dev 远程目录）会整体覆写各渠道的持久化条目；重放设置里的
+        // 接口地址/API 覆盖，避免 UI 显示的覆盖值与实际请求端点分叉（审查 P1-2）。
+        await syncBuiltinProviderOverlays();
         const relevantErrors = [...result.errors].filter(([providerId]) => providerId === refreshProviderId);
         for (const [providerId, error] of [...result.errors]) {
           if (providerId !== refreshProviderId) {

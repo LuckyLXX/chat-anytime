@@ -215,6 +215,32 @@ describe("desktop settings migration", () => {
     expect(normalized.models[1]).toMatchObject({ contextWindow: 65536, maxTokens: 8192 });
   });
 
+  it("keeps api-mode overrides through normalization and upstream refresh", () => {
+    // 审查 P0-2：协议扩展字段必须随持久化链路存活，否则重启/拉取后覆盖静默回退。
+    const normalized = normalizeProvider({
+      id: "p",
+      name: "P",
+      baseUrl: "https://api.example.com/v1",
+      api: "openai-responses",
+      models: [{ id: "m1", name: "M1", api: "openai-completions" }]
+    });
+    expect(normalized.api).toBe("openai-responses");
+    expect(normalized.models[0]?.api).toBe("openai-completions");
+    // 非法值丢弃（白名单两档）。
+    expect(normalizeProvider({ id: "p", name: "P", baseUrl: "", api: "anthropic-messages" as never, models: [{ id: "m", name: "M", api: "bogus" as never }] }).api).toBeUndefined();
+    expect(normalizeProvider({ id: "p", name: "P", baseUrl: "", models: [{ id: "m", name: "M", api: "bogus" as never }] }).models[0]).not.toHaveProperty("api");
+    // 拉取合并保留既有 api 覆盖。
+    const merged = mergeProviderModels(
+      [{ id: "m1", name: "M1", api: "openai-responses", enabled: true }],
+      [{ id: "m1", name: "M1 upstream" }]
+    );
+    expect(merged[0]).toMatchObject({ api: "openai-responses" });
+    // 迁移（重启读盘路径）同样保留。
+    const migrated = migrateSettings({ providers: [{ id: "p", name: "P", baseUrl: "https://api.example.com/v1", api: "openai-responses", models: [{ id: "m1", name: "M1", api: "openai-completions" }] }] });
+    expect(migrated.settings.providers[0]?.api).toBe("openai-responses");
+    expect(migrated.settings.providers[0]?.models[0]?.api).toBe("openai-completions");
+  });
+
   it("migrates the live theme controls and custom CSS", () => {
     const result = migrateSettings({ appearance: { theme: "dark", themePreset: "rose", customCss: ".message { outline: 1px solid red; }", showThinking: false } });
     expect(result.settings.appearance).toEqual({

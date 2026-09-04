@@ -1167,6 +1167,12 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 .model-option .model-enabled-option { flex: 1; min-width: 0; margin: 0; }
 .model-option .model-image-option { flex: 0 0 auto; margin: 0; color: var(--text-muted); font-size: 10px; font-weight: 500; white-space: nowrap; }
 .model-option .model-image-option input:disabled { opacity: .45; }
+/* 模型行 API 模式：徽标按钮 + 行内下拉（点击徽标展开，复用限额编辑的交互模式） */
+.model-option .model-api-badge { flex: 0 0 auto; min-width: 40px; height: 22px; padding: 0 6px; border: 1px solid transparent; border-radius: 11px; background: var(--surface-button, color-mix(in srgb, var(--text) 6%, transparent)); color: var(--text-muted); font-size: 10px; font-weight: 600; cursor: pointer; }
+.model-option .model-api-badge:hover { background: var(--surface-button-hover); color: var(--text); }
+.model-option .model-api-badge.override { color: var(--accent); background: var(--accent-soft, color-mix(in srgb, var(--accent) 12%, transparent)); border-color: color-mix(in srgb, var(--accent) 38%, transparent); }
+.model-option .model-api-badge[aria-expanded="true"] { border-color: var(--accent); color: var(--text); }
+.model-option .model-api-editor { flex: 0 0 auto; height: 26px; font-size: 11px; }
 .model-option span { display: grid; gap: 2px; min-width: 0; }
 .model-option strong { overflow-wrap: anywhere; }
 .model-option small { color: var(--text-muted); overflow-wrap: anywhere; }

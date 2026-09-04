@@ -21,6 +21,8 @@ export interface CatalogModelInput {
   id: string;
   name: string;
   input: ("text" | "image")[];
+  /** 目录 API 模式；仅 OpenAI 兼容两档透出到 ModelOption.api 供设置页展示。 */
+  api?: "openai-completions" | "openai-responses" | string;
   /** SDK 目录的限额原值；用户在设置里手动修正后以此覆盖。 */
   contextWindow?: number;
   maxTokens?: number;
@@ -162,6 +164,8 @@ export function pruneDisabledModelRefs<T extends ModelReferenceHolder>(
 export function buildCatalogModels(models: readonly CatalogModelInput[], providers: ProviderSettings[] | undefined, configuredProviders: ReadonlySet<string>): ModelOption[] {
   return models.map((model) => {
     const stored = providers?.find((provider) => provider.id === model.provider)?.models.find((item) => item.id === model.id);
+    // API 模式展示：设置覆盖优先，否则目录两档值（anthropic-messages 等其他模式不展示）。
+    const api = stored?.api ?? (model.api === "openai-completions" || model.api === "openai-responses" ? model.api : undefined);
     return {
       provider: model.provider,
       id: model.id,
@@ -173,6 +177,7 @@ export function buildCatalogModels(models: readonly CatalogModelInput[], provide
       // 同理，token 限额的手动修正优先于目录原值。
       ...(isPositiveInt(stored?.contextWindow) || isPositiveInt(model.contextWindow) ? { contextWindow: stored?.contextWindow ?? model.contextWindow } : {}),
       ...(isPositiveInt(stored?.maxTokens) || isPositiveInt(model.maxTokens) ? { maxTokens: stored?.maxTokens ?? model.maxTokens } : {}),
+      ...(api ? { api } : {}),
       ...(stored ? { enabled: stored.enabled !== false } : {})
     };
   });
