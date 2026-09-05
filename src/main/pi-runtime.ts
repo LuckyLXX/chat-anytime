@@ -102,6 +102,10 @@ import * as runtimeQuestionTool from "./runtime-question-tool.js";
 import * as runtimeSkills from "./runtime-skills.js";
 import * as runtimeVision from "./runtime-vision.js";
 import * as runtimeBrowser from "./runtime-browser.js";
+import * as runtimeDesign from "./runtime-design.js";
+import { applyDesignOps, createDesignDoc, sanitizeDesignName, type DesignDoc } from "../shared/design-schema.js";
+import { exportDesignHtml } from "../shared/design-export.js";
+import { designFilePath, exportDesignFile, listDesigns, readDesign, writeDesign, writeExportFile, DESIGN_FILE_SUFFIX } from "./design-store.js";
 import * as runtimePermissions from "./runtime-permissions.js";
 import * as runtimeMcp from "./runtime-mcp.js";
 import * as runtimeContextUsage from "./runtime-context-usage.js";
@@ -186,6 +190,9 @@ interface SessionRuntimeRecord {
   visionTools: ToolDefinition[];
   browserTools: ToolDefinition[];
   automationTools: ToolDefinition[];
+  designTools: ToolDefinition[];
+  /** 当前会话绑定的设计文档（设计模式画布的数据源；工具与用户命令共用）。 */
+  designDoc?: { doc: DesignDoc; fileName: string };
   /**
    * 排队消息的图片镜像：与 Pi 会话 steering/followUp 文本数组 index 严格对齐
    * （无图项 = 空数组）。Pi 队列本体完整保存带图消息，但对外只有纯文本数组；
@@ -772,6 +779,11 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** 推送当前设计文档全量状态（渲染端画布数据源；revision 单调递增由调用方保证）。 */
+function postDesignState(doc: DesignDoc): void {
+  post({ type: "design.state", revision: doc.revision, docId: doc.id, name: doc.name, canvas: doc.canvas, nodes: doc.nodes, dirty: false });
+}
+
 /** 快照的上下文占用：Pi 官方估算 + record 上的会话累计缓存命中率。 */
 function snapshotContextUsage(record: SessionRuntimeRecord | undefined): ContextUsage | undefined {
   if (!record) return undefined;
@@ -1208,8 +1220,8 @@ function wrapModelRuntimeForVision(runtime: ModelRuntime): ModelRuntime {
  * customTools arrays are held by reference inside Pi, so hot-path updates
  * rebuild in place (`length = 0` + push) instead of swapping the array.
  */
-function buildRecordTools(record: Pick<SessionRuntimeRecord, "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "planTools" | "visionTools" | "browserTools" | "automationTools">): ToolDefinition[] {
-  return [...mcpTools, ...record.subagentTools, ...record.todoTools, ...record.memoryTools, ...record.questionTools, ...record.planTools, ...record.visionTools, ...record.browserTools, ...record.automationTools];
+function buildRecordTools(record: Pick<SessionRuntimeRecord, "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "planTools" | "visionTools" | "browserTools" | "automationTools" | "designTools">): ToolDefinition[] {
+  return [...mcpTools, ...record.subagentTools, ...record.todoTools, ...record.memoryTools, ...record.questionTools, ...record.planTools, ...record.visionTools, ...record.browserTools, ...record.automationTools, ...record.designTools];
 }
 
 /**
@@ -1218,7 +1230,7 @@ function buildRecordTools(record: Pick<SessionRuntimeRecord, "subagentTools" | "
  * models — multimodal models see the same tool set as before, so the request
  * prefix stays stable within each session/model configuration (cache discipline).
  */
-function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "planTools" | "visionTools" | "browserTools" | "automationTools" | "unattended">, includeVision: boolean): string[] {
+function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "planTools" | "visionTools" | "browserTools" | "automationTools" | "designTools" | "unattended">, includeVision: boolean): string[] {
   const builtin = Object.entries(record.agent.tools ?? {}).filter(([, enabled]) => enabled).map(([name]) => name);
   return [
     ...builtin,
@@ -1233,7 +1245,10 @@ function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "subagentTool
     // Browser tools stay active regardless of the settings switch: the
     // execute closure reports the disabled state instead (no session rebuild).
     ...record.browserTools.map((tool) => tool.name),
-    ...record.automationTools.map((tool) => tool.name)
+    ...record.automationTools.map((tool) => tool.name),
+    // 设计工具同理常驻激活（settings.design.enabled 由 execute 实时判断）；
+    // 切换激活集会使前缀缓存整体失效，比多几个工具定义贵得多。
+    ...record.designTools.map((tool) => tool.name)
   ];
 }
 
@@ -2209,10 +2224,28 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   });
   // 自动化定时任务工具（每会话注册，绑定本记录所属 Agent 的 store）。
   const automationTools = buildAutomationTools(automationToolContextFor(recordAgent.id));
+  // 设计模式工具（每会话注册；当前文档绑定在本 record 上，工具闭包经 recordBox 读写）。
+  // enabled 实时读 settings.design.enabled；写盘与推送统一走 persistDoc/bindDoc。
+  const designTools = runtimeDesign.buildDesignTools({
+    enabled: () => settings?.design?.enabled !== false,
+    workspace: () => recordWorkspace || undefined,
+    getDoc: () => recordBox?.designDoc?.doc,
+    getDocFileName: () => recordBox?.designDoc?.fileName,
+    bindDoc: (doc, fileName) => {
+      if (recordBox) recordBox.designDoc = { doc, fileName };
+      postDesignState(doc);
+    },
+    persistDoc: (doc, previousFileName) => {
+      const fileName = writeDesign(recordWorkspace, doc, previousFileName);
+      if (recordBox) recordBox.designDoc = { doc, fileName };
+      postDesignState(doc);
+      return fileName;
+    }
+  });
   // Each record owns its customTools array: Pi stores it by reference and
   // re-reads it on every tool-registry refresh, so per-record arrays let parked
   // sessions keep their tool set while the active one hot-swaps MCP tools.
-  const recordCustomTools: ToolDefinition[] = [...mcpTools, ...subagentTools, ...todoTools, ...memoryTools, ...questionTools, ...planTools, ...visionTools, ...browserTools, ...automationTools];
+  const recordCustomTools: ToolDefinition[] = [...mcpTools, ...subagentTools, ...todoTools, ...memoryTools, ...questionTools, ...planTools, ...visionTools, ...browserTools, ...automationTools, ...designTools];
   const result = await createAgentSession({
     cwd: recordWorkspace,
     modelRuntime,
@@ -2285,6 +2318,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     visionTools,
     browserTools,
     automationTools,
+    designTools,
     steeringImages: [],
     followUpImages: [],
     unattended: Boolean(options.unattended),
@@ -3657,6 +3691,75 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     }
     case "question.resolve": {
       questionBroker.resolve(command.id, command.answers, command.model);
+      break;
+    }
+    // —— 设计模式：画布命令（与 design_* 工具共用同一存储/推送管线）——
+    case "design.list": {
+      const record = resolveTargetRecord(command.sessionId);
+      post({ type: "design.docs", docs: listDesigns(record.workspace) });
+      break;
+    }
+    case "design.new": {
+      const record = resolveTargetRecord(command.sessionId);
+      const name = sanitizeDesignName(command.name);
+      if (!name) throw new Error("请提供有效的文档名");
+      // 同名文档已存在则直接打开（与 design_create 幂等语义一致）。
+      const existing = readDesign(designFilePath(record.workspace, name));
+      const doc = existing ?? createDesignDoc(name, command.width, command.height);
+      if (!existing) writeDesign(record.workspace, doc);
+      record.designDoc = { doc, fileName: `${name}${DESIGN_FILE_SUFFIX}` };
+      postDesignState(doc);
+      break;
+    }
+    case "design.open": {
+      const record = resolveTargetRecord(command.sessionId);
+      const name = sanitizeDesignName(command.name);
+      const doc = readDesign(designFilePath(record.workspace, name));
+      if (!doc) throw new Error(`找不到设计文档「${name}」`);
+      record.designDoc = { doc, fileName: `${name}${DESIGN_FILE_SUFFIX}` };
+      postDesignState(doc);
+      break;
+    }
+    case "design.edit": {
+      const record = resolveTargetRecord(command.sessionId);
+      const bound = record.designDoc;
+      if (!bound) throw new Error("当前会话没有打开的设计文档");
+      const applied = applyDesignOps(bound.doc, command.ops);
+      if (!applied.ok) throw new Error(applied.error);
+      const next: DesignDoc = { ...applied.doc, revision: applied.doc.revision + 1 };
+      const fileName = writeDesign(record.workspace, next, bound.fileName);
+      record.designDoc = { doc: next, fileName };
+      postDesignState(next);
+      break;
+    }
+    case "design.save": {
+      const record = resolveTargetRecord(command.sessionId);
+      const bound = record.designDoc;
+      if (!bound) throw new Error("当前会话没有打开的设计文档");
+      const fileName = writeDesign(record.workspace, bound.doc, bound.fileName);
+      record.designDoc = { doc: bound.doc, fileName };
+      postDesignState(bound.doc);
+      break;
+    }
+    case "design.export": {
+      const record = resolveTargetRecord(command.sessionId);
+      const bound = record.designDoc;
+      if (!bound) throw new Error("当前会话没有打开的设计文档");
+      const html = exportDesignHtml(bound.doc);
+      const customPath = command.path?.trim() ?? "";
+      const relativePath = customPath ? writeExportFile(record.workspace, html, customPath) : exportDesignFile(record.workspace, bound.doc, html);
+      post({ type: "design.exported", relativePath });
+      break;
+    }
+    case "design.close": {
+      const record = resolveTargetRecord(command.sessionId);
+      record.designDoc = undefined;
+      break;
+    }
+    case "design.query": {
+      const record = resolveTargetRecord(command.sessionId);
+      if (record.designDoc) postDesignState(record.designDoc.doc);
+      post({ type: "design.docs", docs: listDesigns(record.workspace) });
       break;
     }
   }

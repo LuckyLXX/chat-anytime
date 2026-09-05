@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { countNodes, normalizeDesignDoc, sanitizeDesignName, type DesignDoc } from "../shared/design-schema.js";
+import type { DesignDocSummary } from "../shared/protocol.js";
 
 /**
  * 设计文档存储（utility 进程，权威数据源）。参照 todo-store / plan-store 范式：
@@ -14,18 +15,6 @@ export const DESIGNS_DIR = "designs";
 export const DESIGN_EXPORTS_DIR = "exports";
 export const DESIGN_FILE_SUFFIX = ".design.json";
 
-export interface DesignFileSummary {
-  id: string;
-  name: string;
-  revision: number;
-  width: number;
-  height: number;
-  nodeCount: number;
-  modifiedAt: number;
-  /** 工作区相对路径。 */
-  relativePath: string;
-}
-
 export function designsDirFor(workspace: string): string {
   return join(workspace, DESIGNS_DIR);
 }
@@ -36,7 +25,7 @@ export function designFilePath(workspace: string, name: string): string {
 }
 
 /** 扫描 designs/ 目录，返回全部可读文档的摘要（mtime 升序由调用方决定）。 */
-export function listDesigns(workspace: string): DesignFileSummary[] {
+export function listDesigns(workspace: string): DesignDocSummary[] {
   const dir = designsDirFor(workspace);
   let entries: string[];
   try {
@@ -44,7 +33,7 @@ export function listDesigns(workspace: string): DesignFileSummary[] {
   } catch {
     return [];
   }
-  const summaries: DesignFileSummary[] = [];
+  const summaries: DesignDocSummary[] = [];
   for (const entry of entries) {
     if (!entry.endsWith(DESIGN_FILE_SUFFIX)) continue;
     const filePath = join(dir, entry);
@@ -126,4 +115,21 @@ export function exportDesignFile(workspace: string, doc: DesignDoc, html: string
   writeFileSync(tempPath, html, "utf8");
   renameSync(tempPath, filePath);
   return join(DESIGNS_DIR, DESIGN_EXPORTS_DIR, candidate);
+}
+
+/**
+ * 导出 HTML 到用户指定的工作区相对路径（原子写，目录自动创建）；绝对路径/盘符/
+ * `..` 段一律抛错。返回规范化后的相对路径。
+ */
+export function writeExportFile(workspace: string, html: string, relativePath: string): string {
+  const normalized = relativePath.replaceAll("\\", "/").replace(/^\/+/, "");
+  if (!normalized || /^[a-zA-Z]:/u.test(normalized) || normalized.split("/").includes("..")) {
+    throw new Error("导出路径必须是工作区内相对路径");
+  }
+  const target = join(workspace, normalized);
+  mkdirSync(dirname(target), { recursive: true });
+  const tempPath = `${target}.${process.pid}.tmp`;
+  writeFileSync(tempPath, html, "utf8");
+  renameSync(tempPath, target);
+  return normalized;
 }

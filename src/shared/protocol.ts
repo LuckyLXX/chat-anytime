@@ -1,6 +1,10 @@
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 export type AccessMode = "read-only" | "ask" | "workspace" | "full";
 
+import type { DesignCanvasInfo, DesignNode, DesignOp } from "./design-schema.js";
+export type { DesignCanvasInfo, DesignDoc, DesignLayout, DesignNode, DesignNodeDraft, DesignOp, DesignNodeType } from "./design-schema.js";
+export { applyDesignOps, cloneNodeWithNewIds, countNodes, createDesignDoc, findNode, makeNodeId, normalizeDesignDoc, sanitizeDesignName, summarizeNode } from "./design-schema.js";
+
 /** 模型请求的 API 模式：OpenAI 兼容 chat completions，或较新的 Responses（/v1/responses）。 */
 export type ProviderApiMode = "openai-completions" | "openai-responses";
 
@@ -686,6 +690,20 @@ export interface DesignSettings {
   enabled: boolean;
 }
 
+/** 设计文档列表条目（designs/ 目录扫描结果，design.docs 推送）。 */
+export interface DesignDocSummary {
+  id: string;
+  name: string;
+  revision: number;
+  width: number;
+  height: number;
+  nodeCount: number;
+  /** Epoch ms。 */
+  modifiedAt: number;
+  /** 工作区相对路径。 */
+  relativePath: string;
+}
+
 /**
  * User terminal (PTY) hosted in the main process, rendered with xterm.js in a
  * preview tab. Input/output are UTF-8 strings; `create` reconnects to an
@@ -1185,7 +1203,25 @@ export type RuntimeCommand =
   /** 用量统计：跨助手扫描会话 JSONL 聚合 token 用量；agentId 缺省=全部助手。 */
   | { type: "usage.stats.request"; agentId?: string }
   /** main 进程回传的浏览器自动化结果（响应 utility 的 browser-automation.request）。 */
-  | { type: "browser-automation.result"; requestId: string; result: BrowserAutomationResult };
+  | { type: "browser-automation.result"; requestId: string; result: BrowserAutomationResult }
+  // —— 设计模式（Design Studio）：画布 ↔ utility 会话的文档命令。sessionId 走
+  // resolveTargetRecord（缺省激活会话）；designDoc 绑定是会话级，画布跟随激活会话。 ——
+  /** 列出工作区设计文档（结果经 design.docs 推送）。 */
+  | { type: "design.list"; sessionId?: string }
+  /** 新建并绑定文档（同名已存在则直接打开）；结果经 design.state 推送。 */
+  | { type: "design.new"; name: string; width?: number; height?: number; sessionId?: string }
+  /** 打开并绑定文档，结果经 design.state 推送。 */
+  | { type: "design.open"; name: string; sessionId?: string }
+  /** 批量应用 ops（原子）；成功后 revision+1 并推送 design.state，失败整批拒绝。 */
+  | { type: "design.edit"; ops: DesignOp[]; sessionId?: string }
+  /** 强制保存当前文档（每次 edit 已写盘，此处为显式落盘口）。 */
+  | { type: "design.save"; sessionId?: string }
+  /** 导出 HTML 单文件到工作区（缺省 designs/exports/<名称>.html）；结果经 design.exported 推送。 */
+  | { type: "design.export"; path?: string; sessionId?: string }
+  /** 解绑当前会话的设计文档（渲染端本地同步清空画布）。 */
+  | { type: "design.close"; sessionId?: string }
+  /** 拉取当前会话的设计状态：推送 design.state（若已绑定）+ design.docs（列表）。会话激活/创建后主动调一次。 */
+  | { type: "design.query"; sessionId?: string };
 
 export type RuntimeMessage =
   | { type: "catalog"; models: ModelOption[]; providers: ProviderOption[] }
@@ -1225,7 +1261,16 @@ export type RuntimeMessage =
   | { type: "subagent.transcript-result"; childSessionId: string; messages: ChatMessage[] }
   /** 子代理完整记录读取失败（文件不存在等）；弹窗内展示，不走全局 toast。 */
   | { type: "subagent.transcript-error"; childSessionId: string; message: string }
-  | { type: "log"; level: "info" | "warn"; message: string };
+  | { type: "log"; level: "info" | "warn"; message: string }
+  // —— 设计模式推送 ——
+  /** 当前会话绑定文档的全量状态（工具/命令变更后、会话激活、design.query 时推送）；
+   *  revision 单调递增，渲染端丢弃 revision ≤ 已见的推送（防回环重渲）。docId 缺省
+   *  （未绑定）时清空画布。 */
+  | { type: "design.state"; revision: number; docId?: string; name?: string; canvas?: DesignCanvasInfo; nodes?: DesignNode[]; dirty?: boolean }
+  /** 工作区设计文档列表（design.list / 会话激活 / design.query 时推送，全量替换）。 */
+  | { type: "design.docs"; docs: DesignDocSummary[] }
+  /** 设计导出完成（design.export 命令的成功回执；失败走 error toast）。 */
+  | { type: "design.exported"; relativePath: string };
 
 export interface DesktopBootstrap {
   platform: string;

@@ -17,7 +17,7 @@ import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent
 import { Type } from "typebox";
 import { applyDesignOps, countNodes, createDesignDoc, findNode, makeNodeId, sanitizeDesignName, type DesignDoc, type DesignNode, type DesignOp } from "../shared/design-schema.js";
 import { exportDesignHtml } from "../shared/design-export.js";
-import { designFilePath, exportDesignFile, listDesigns, readDesign, DESIGN_FILE_SUFFIX } from "./design-store.js";
+import { designFilePath, exportDesignFile, listDesigns, readDesign, writeExportFile, DESIGN_FILE_SUFFIX } from "./design-store.js";
 
 export interface DesignToolDeps {
   /** 总开关，实时读（settings.design?.enabled !== false），关闭时工具保留注册。 */
@@ -244,23 +244,9 @@ export function buildDesignTools(deps: DesignToolDeps): ToolDefinition[] {
         checkEnabled(deps);
         const workspace = requireWorkspace(deps);
         const doc = requireDoc(deps);
-        const customPath = typeof params?.path === "string" ? params.path.trim().replaceAll("\\", "/") : "";
-        let relativePath: string;
-        if (customPath) {
-          if (customPath.startsWith("/") || /^[a-zA-Z]:/u.test(customPath) || customPath.split("/").includes("..")) {
-            throw new Error("path 必须是工作区内的相对路径（不允许绝对路径或 ..）");
-          }
-          relativePath = customPath;
-          const { mkdirSync, writeFileSync, renameSync } = await import("node:fs");
-          const { dirname, join } = await import("node:path");
-          const target = join(workspace, relativePath);
-          mkdirSync(dirname(target), { recursive: true });
-          const tempPath = `${target}.${process.pid}.tmp`;
-          writeFileSync(tempPath, exportDesignHtml(doc), "utf8");
-          renameSync(tempPath, target);
-        } else {
-          relativePath = exportDesignFile(workspace, doc, exportDesignHtml(doc));
-        }
+        const customPath = typeof params?.path === "string" ? params.path.trim() : "";
+        const html = exportDesignHtml(doc);
+        const relativePath = customPath ? writeExportFile(workspace, html, customPath) : exportDesignFile(workspace, doc, html);
         return {
           content: [{ type: "text" as const, text: `已导出「${doc.name}」到 ${relativePath}。可用 browser_navigate 打开该文件预览效果。${CANVAS_HINT}` }],
           details: { relativePath, revision: doc.revision }
