@@ -17,6 +17,8 @@ export interface AutomationRunsProps {
   settings: DesktopSettings;
   /** toast「查看结果」直达信号：切到本子页后滚动+描边高亮该条（描边 2s 后消隐，展开保留）。 */
   highlight?: AutomationRunsHighlight;
+  /** 「查看会话/切换角色查看」：由宿主先关设置页（跳转后的会话不被弹窗遮挡）。 */
+  onOpenSession: () => void;
 }
 
 type StatusFilter = "all" | "ok" | "error";
@@ -64,7 +66,7 @@ function groupByDay(runs: AutomationRunRecord[]): [string, AutomationRunRecord[]
   return [...groups.entries()];
 }
 
-export function AutomationRuns({ settings, highlight }: AutomationRunsProps): ReactNode {
+export function AutomationRuns({ settings, highlight, onOpenSession }: AutomationRunsProps): ReactNode {
   const runs = useDesktopStore((state) => state.automationRuns);
   const automation = useDesktopStore((state) => state.automation);
   const automationRun = useDesktopStore((state) => state.automationRun);
@@ -201,7 +203,7 @@ export function AutomationRuns({ settings, highlight }: AutomationRunsProps): Re
                                 type="button"
                                 className="secondary-button"
                                 title={crossRole ? "该运行属于其他角色：将切换到该角色（当前会话会被保留）后打开" : "打开该运行的会话"}
-                                onClick={(event) => { event.stopPropagation(); send({ type: "automation.run.open", runId: run.id }); }}
+                                onClick={(event) => { event.stopPropagation(); send({ type: "automation.run.open", runId: run.id }); onOpenSession(); }}
                               ><MessageSquare size={14} />{crossRole ? "切换角色查看" : "查看会话"}</button>
                             </div>
                           </div>

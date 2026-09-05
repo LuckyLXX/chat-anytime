@@ -21,6 +21,8 @@ export interface AutomationSettingsProps {
   workspaceName?: string;
   /** 「去会话中创建」：由宿主先关设置页再新建会话（含分屏落位等完整逻辑）。 */
   onCreateInSession: () => void;
+  /** 运行记录「查看会话/切换角色查看」：由宿主先关设置页再跳转目标会话。 */
+  onOpenRunSession: () => void;
 }
 
 interface AutomationFormProps {
@@ -157,7 +159,7 @@ function AutomationForm({ initial, models, providers, settings, workspaceName, o
   );
 }
 
-export function AutomationSettings({ models, providers, settings, workspaceConfigured, workspaceName, onCreateInSession }: AutomationSettingsProps): ReactNode {
+export function AutomationSettings({ models, providers, settings, workspaceConfigured, workspaceName, onCreateInSession, onOpenRunSession }: AutomationSettingsProps): ReactNode {
   const automation = useDesktopStore((state) => state.automation);
   const runsSignal = useDesktopStore((state) => state.automationRunsSignal);
   // 子页：任务列表（默认）/ 运行记录；toast「查看结果」信号切入运行记录子页并高亮该条。
@@ -222,7 +224,7 @@ export function AutomationSettings({ models, providers, settings, workspaceConfi
         <button type="button" className={runsTab === "runs" ? "active" : ""} role="tab" aria-selected={runsTab === "runs"} data-control="automation-runs-tab" onClick={() => setRunsTab("runs")}>运行记录</button>
       </div>
 
-      {runsTab === "runs" ? <AutomationRuns settings={settings} highlight={pendingHighlight} /> : <>
+      {runsTab === "runs" ? <AutomationRuns settings={settings} highlight={pendingHighlight} onOpenSession={onOpenRunSession} /> : <>
 
       <div className="automation-filter-bar">
         <div className="automation-filter-tabs">

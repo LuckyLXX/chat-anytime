@@ -1,4 +1,4 @@
-import { AlertCircle, Brain, Check, ClipboardList, Code2, Eye, File, FileCode2, FileDiff, FileText, Globe2, LoaderCircle, MessageSquare, Pause, Pencil, Play, Plus, Terminal, X } from "lucide-react";
+import { AlertCircle, Brain, Check, ClipboardList, Code2, Eye, File, FileCode2, FileDiff, FileText, Globe2, LoaderCircle, Pause, Pencil, Play, Plus, Terminal, X } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode, type SyntheticEvent } from "react";
 import type { BrowserElementPick, BrowserPreviewState, WorkspaceFilePreview } from "../../../shared/protocol";
 import { IMAGE_PREVIEW_LIMIT_BYTES, workspaceFilePreviewUrl } from "../../../shared/protocol";
@@ -147,11 +147,6 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, onSelectT
               <span className="preview-empty-state-item-name">终端</span>
               <span className="preview-empty-state-key">Ctrl+`</span>
             </button>
-            <button type="button" className="preview-empty-state-item disabled" disabled aria-label="侧边聊天预览暂不支持">
-              <span className="preview-empty-state-item-icon"><MessageSquare size={17} /></span>
-              <span className="preview-empty-state-item-name">侧边聊天</span>
-              <span className="preview-empty-state-key">Ctrl+Alt+S</span>
-            </button>
           </div>
         </div>
       </aside>
@@ -244,7 +239,6 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, onSelectT
             <button type="button" role="menuitem" onClick={() => { setAddMenuOpen(false); onAddTerminal?.(); }}><Terminal size={16} /><span>终端</span><kbd>Ctrl+`</kbd></button>
             <button type="button" role="menuitem" onClick={() => { setAddMenuOpen(false); onAddBrowser?.(); }}><Globe2 size={16} /><span>浏览器</span><kbd>Ctrl+T</kbd></button>
             <button type="button" role="menuitem" onClick={() => { setAddMenuOpen(false); onAddFile?.(); }}><File size={16} /><span>文件</span><kbd>Ctrl+P</kbd></button>
-            <button type="button" role="menuitem" disabled><MessageSquare size={16} /><span>侧边聊天</span><kbd>Ctrl+Alt+S</kbd></button>
           </div>}
         </div>
         <div className="preview-tab-actions">
