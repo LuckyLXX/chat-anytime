@@ -72,8 +72,8 @@ export interface DesignDoc {
 
 export type DesignNodePatch = Partial<Omit<DesignNode, "id" | "type" | "children">>;
 
-/** create/replace 接受的节点草稿：只要求 type，其余字段由 normalizeDesignNode 容错补齐（AI 原始 JSON 直传）。 */
-export type DesignNodeDraft = Partial<DesignNode> & Pick<DesignNode, "type">;
+/** create/replace 接受的节点草稿：只要求 type，其余字段（含递归 children）由 normalizeDesignNode 容错补齐（AI 原始 JSON 直传）。 */
+export type DesignNodeDraft = Partial<Omit<DesignNode, "children">> & Pick<DesignNode, "type"> & { children?: DesignNodeDraft[] };
 
 export type DesignOp =
   | { op: "create"; parentId?: string | null; index?: number; node: DesignNodeDraft }
