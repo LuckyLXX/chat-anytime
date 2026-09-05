@@ -123,3 +123,36 @@ describe("designNodeStyle", () => {
     expect(hostile).not.toContain('onerror="alert');
   });
 });
+
+describe("exportDesignHtml 内容并集（多画板不裁剪）", () => {
+  it("内容都在画布内时保持画布矩形输出", () => {
+    const html = exportDesignHtml(cardDoc());
+    expect(html).toContain(".pi-design-canvas { position: relative; width: 960px; height: 640px; background:#f5f5f5;");
+  });
+
+  it("节点超出画布 → 容器放大到并集，画布背景层平移，节点坐标不变", () => {
+    const doc = cardDoc();
+    doc.canvas = { width: 375, height: 600, background: "#f5f5f5" };
+    doc.nodes = [
+      { type: "rect", id: "s1", name: "屏一", x: 0, y: 0, w: 375, h: 600, fill: "#fff" },
+      { type: "rect", id: "s2", name: "屏二", x: 455, y: 0, w: 375, h: 600, fill: "#fff" }
+    ];
+    const html = exportDesignHtml(doc);
+    // 并集 = (0,0)-(830,600)：容器 830×600，不再写画布原尺寸。
+    expect(html).toContain(".pi-design-canvas { position: relative; width: 830px; height: 600px; overflow: hidden; }");
+    // 画布背景层平移回 (0,0)（ox=455 被屏二右缘 830 抵消：ox=min(0,0)=0……此处 ox=0，偏移应为 0）。
+    expect(html).toContain('<div style="position:absolute;left:0px;top:0px;width:375px;height:600px;background:#f5f5f5;">');
+    // 节点保持自身 left（455 > 画布宽 375，不被裁剪）。
+    expect(html).toContain('left:455px;top:0px;width:375px;height:600px;');
+  });
+
+  it("负坐标节点 → 画布背景层负偏移，包装层承担平移", () => {
+    const doc = cardDoc();
+    doc.canvas = { width: 375, height: 600, background: "#f5f5f5" };
+    doc.nodes = [{ type: "rect", id: "s1", name: "越界", x: -120, y: -40, w: 375, h: 600, fill: "#fff" }];
+    const html = exportDesignHtml(doc);
+    expect(html).toContain('<div style="position:absolute;left:120px;top:40px;width:375px;height:600px;background:#f5f5f5;">');
+    expect(html).toContain('left:120px;top:40px;width:0;height:0');
+    expect(html).toContain('left:-120px;top:-40px;width:375px;height:600px;');
+  });
+});

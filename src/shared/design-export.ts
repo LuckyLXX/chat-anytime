@@ -108,11 +108,41 @@ function nodeHtml(node: DesignNode, indent: string, inFlexParent = false): strin
   return `${open}\n${inner}${indent}</div>\n`;
 }
 
-/** 导出为可直接打开的 HTML 单文件（body margin 0、画布尺寸与背景）。 */
+/** 导出边界：画布矩形与全部顶层可见节点矩形的并集。多画板（整套原型）内容
+ *  可以摆在画布矩形之外，导出按并集出图、绝不裁剪；内容都在画布内时退化为
+ *  画布矩形本身（输出与旧版逐字节一致）。 */
+function exportBounds(doc: DesignDoc): { ox: number; oy: number; width: number; height: number } {
+  const canvas = doc.canvas;
+  let minX = 0;
+  let minY = 0;
+  let maxX = canvas.width;
+  let maxY = canvas.height;
+  for (const node of doc.nodes) {
+    if (node.visible === false) continue;
+    minX = Math.min(minX, node.x);
+    minY = Math.min(minY, node.y);
+    maxX = Math.max(maxX, node.x + node.w);
+    maxY = Math.max(maxY, node.y + node.h);
+  }
+  return { ox: minX, oy: minY, width: maxX - minX, height: maxY - minY };
+}
+
+/** 导出为可直接打开的 HTML 单文件（body margin 0、画布尺寸与背景；内容超出
+ *  画布矩形时以画布背景层 + 平移包装层完整呈现，不裁剪）。 */
 export function exportDesignHtml(doc: DesignDoc): string {
   const canvas = doc.canvas;
   const background = canvas.background ? `background:${escapeHtml(canvas.background)};` : "";
+  const bounds = exportBounds(doc);
+  // 内容越界时：容器放大到并集，画布背景层与节点包装层都平移回原位（节点
+  // 样式保持 left:x 不变，由包装层承担偏移）。
+  const shifted = bounds.ox !== 0 || bounds.oy !== 0 || bounds.width !== canvas.width || bounds.height !== canvas.height;
   const nodesHtml = doc.nodes.map((node) => nodeHtml(node, "    ")).join("");
+  const canvasCss = shifted
+    ? `.pi-design-canvas { position: relative; width: ${bounds.width}px; height: ${bounds.height}px; overflow: hidden; }`
+    : `.pi-design-canvas { position: relative; width: ${canvas.width}px; height: ${canvas.height}px; ${background} overflow: hidden; }`;
+  const canvasLayers = shifted
+    ? `    <div style="position:absolute;left:${-bounds.ox}px;top:${-bounds.oy}px;width:${canvas.width}px;height:${canvas.height}px;${background}"></div>\n    <div style="position:absolute;left:${-bounds.ox}px;top:${-bounds.oy}px;width:0;height:0">\n${nodesHtml}    </div>\n`
+    : nodesHtml;
   return `<!DOCTYPE html>
 <!-- 由 PiDesktop 设计模式导出：${escapeHtml(doc.name)} -->
 <html lang="zh-CN">
@@ -123,13 +153,13 @@ export function exportDesignHtml(doc: DesignDoc): string {
 <style>
   html, body { margin: 0; padding: 0; }
   body { background: ${canvas.background ? escapeHtml(canvas.background) : "transparent"}; }
-  .pi-design-canvas { position: relative; width: ${canvas.width}px; height: ${canvas.height}px; ${background} overflow: hidden; }
+  ${canvasCss}
   .pi-design-canvas img { display: block; }
 </style>
 </head>
 <body>
   <div class="pi-design-canvas">
-${nodesHtml}  </div>
+${canvasLayers}  </div>
 </body>
 </html>
 `;
