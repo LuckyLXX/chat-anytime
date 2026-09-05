@@ -81,6 +81,8 @@ export type DesignOp =
   | { op: "update"; id: string; patch: DesignNodePatch }
   | { op: "delete"; id: string }
   | { op: "move"; id: string; parentId?: string | null; index?: number }
+  /** 画布尺寸/背景调整（多画板：新屏幕放不下时先扩画布，节点允许留在画布矩形外）。 */
+  | { op: "resize"; width?: number; height?: number; background?: string | null }
   /** 整树替换（undo 回写 / 大改）。 */
   | { op: "replace"; nodes: DesignNodeDraft[] };
 
@@ -95,6 +97,8 @@ export const MAX_DESIGN_NODES = 2000;
 export const MAX_DESIGN_DEPTH = 32;
 
 const NODE_TYPES: readonly DesignNodeType[] = ["frame", "rect", "text", "image"];
+/** update patch 的合法字段集（白名单之外的字段拒绝，防 AI 拼错字段被静默忽略）。 */
+const PATCHABLE_KEYS: ReadonlySet<string> = new Set(["name", "x", "y", "w", "h", "visible", "fill", "stroke", "strokeWidth", "radius", "opacity", "shadow", "text", "fontSize", "fontWeight", "color", "lineHeight", "align", "src", "layout"]);
 const TEXT_ALIGNS: readonly DesignNode["align"][] = ["left", "center", "right"];
 const JUSTIFY_VALUES = new Set(["flex-start", "flex-end", "center", "space-between", "space-around", "space-evenly"]);
 const ITEM_ALIGN_VALUES = new Set(["flex-start", "flex-end", "center", "stretch", "baseline"]);
@@ -425,6 +429,10 @@ export function applyDesignOps(doc: DesignDoc, ops: readonly DesignOp[]): Design
         if ("id" in patch || "type" in patch || "children" in patch) return "update 不允许修改 id/type/children（结构变化用 create/move/delete）";
         const node = found.node;
         const source = patch as Record<string, unknown>;
+        // 未知字段直接拒绝而不是静默忽略：否则 AI 打错字段名（如 fontsize）会拿到
+        // 「成功」回执却什么都没改（reported success but did not apply）。
+        const unknownKeys = Object.keys(source).filter((key) => !PATCHABLE_KEYS.has(key));
+        if (unknownKeys.length > 0) return `patch 含未知字段：${unknownKeys.join("、")}（可用字段：${[...PATCHABLE_KEYS].join("/")}）`;
         if ("name" in source) {
           const name = boundedString(source.name, 80);
           if (name) node.name = name;
@@ -502,6 +510,16 @@ export function applyDesignOps(doc: DesignDoc, ops: readonly DesignOp[]): Design
         const found = findNode(next.nodes, op.id);
         if (!found) return `节点不存在：${op.id}`;
         found.siblings.splice(found.index, 1);
+        return undefined;
+      }
+      case "resize": {
+        if ("width" in op) next.canvas.width = clamp(Math.round(finiteOr(op.width, next.canvas.width)), 1, 100_000);
+        if ("height" in op) next.canvas.height = clamp(Math.round(finiteOr(op.height, next.canvas.height)), 1, 100_000);
+        if ("background" in op) {
+          const background = boundedString(op.background, 512);
+          if (background) next.canvas.background = background;
+          else delete next.canvas.background;
+        }
         return undefined;
       }
       case "move": {

@@ -13,6 +13,7 @@ import {
   sanitizeDesignName,
   summarizeNode,
   type DesignDoc,
+  type DesignNodePatch,
   type DesignNode,
   type DesignOp
 } from "./design-schema.js";
@@ -322,5 +323,51 @@ describe("createDesignDoc / indexNodes / summarizeNode", () => {
     const long = textNode("t", "字".repeat(500));
     const parsedLong = JSON.parse(summarizeNode(long)) as { text: string };
     expect(parsedLong.text.length).toBeLessThanOrEqual(301);
+  });
+});
+
+describe("applyDesignOps resize / patch 字段守卫", () => {
+  it("resize 调整画布宽高与背景，null 清除背景，尺寸 clamp ≥1", () => {
+    const doc = createDesignDoc("多画板", 1440, 900);
+    doc.canvas.background = "#0a0f22";
+    const ok = applyDesignOps(doc, [{ op: "resize", width: 4560, height: 1000 }]);
+    expect(ok.ok).toBe(true);
+    if (!ok.ok) return;
+    expect(ok.doc.canvas.width).toBe(4560);
+    expect(ok.doc.canvas.height).toBe(1000);
+    expect(ok.doc.canvas.background).toBe("#0a0f22");
+    const cleared = applyDesignOps(ok.doc, [{ op: "resize", background: null, width: 0, height: -5 }]);
+    expect(cleared.ok).toBe(true);
+    if (!cleared.ok) return;
+    expect(cleared.doc.canvas.background).toBeUndefined();
+    expect(cleared.doc.canvas.width).toBe(1);
+    expect(cleared.doc.canvas.height).toBe(1);
+    // 原文档不被触碰（原子性）。
+    expect(doc.canvas.width).toBe(1440);
+  });
+
+  it("resize 只改给出的字段", () => {
+    const doc = createDesignDoc("局部", 1440, 900);
+    const ok = applyDesignOps(doc, [{ op: "resize", height: 2000 }]);
+    expect(ok.ok).toBe(true);
+    if (!ok.ok) return;
+    expect(ok.doc.canvas.width).toBe(1440);
+    expect(ok.doc.canvas.height).toBe(2000);
+  });
+
+  it("update patch 未知字段整批拒绝（防 AI 拼错字段被静默忽略）", () => {
+    const doc = createDesignDoc("守卫", 800, 600);
+    const seeded = applyDesignOps(doc, [{ op: "create", node: { type: "text", id: "t1", text: "hi", x: 0, y: 0, w: 40, h: 20 } }]);
+    expect(seeded.ok).toBe(true);
+    if (!seeded.ok) return;
+    const bad = applyDesignOps(seeded.doc, [{ op: "update", id: "t1", patch: { fontsize: 20 } as unknown as DesignNodePatch }]);
+    expect(bad.ok).toBe(false);
+    expect(bad.ok ? "" : bad.error).toContain("fontsize");
+    // 好的 patch 同批也会因坏 patch 拒绝（原子）。
+    const mixed = applyDesignOps(seeded.doc, [
+      { op: "update", id: "t1", patch: { fontSize: 20 } },
+      { op: "update", id: "t1", patch: { colour: "#fff" } as unknown as DesignNodePatch }
+    ]);
+    expect(mixed.ok).toBe(false);
   });
 });
