@@ -139,6 +139,14 @@ describe("findNode / countNodes / cloneNodeWithNewIds", () => {
     expect(loose!.siblings).toBe(doc.nodes);
   });
 
+  it("findNode 对深层节点的 parent 是直接父而非顶层祖先", () => {
+    const doc = sampleDoc();
+    const deep: DesignDoc = { ...doc, nodes: [frame({ id: "r", children: [frame({ id: "a", children: [{ type: "rect", id: "b", x: 0, y: 0, w: 5, h: 5 }] })] })] };
+    const found = findNode(deep.nodes, "b");
+    expect(found!.parent!.id).toBe("a");
+    expect(found!.siblings).toBe(found!.parent!.children);
+  });
+
   it("countNodes 统计整棵树", () => {
     const doc = sampleDoc();
     expect(countNodes(doc.nodes)).toBe(4);
@@ -200,6 +208,36 @@ describe("applyDesignOps", () => {
     expect(bad.ok).toBe(false);
     const missing = applyDesignOps(sampleDoc(), [{ op: "update", id: "ghost", patch: { x: 1 } }]);
     expect(missing.ok).toBe(false);
+  });
+
+  it("update 可添加/修改/删除 layout", () => {
+    const add = applyDesignOps(sampleDoc(), [{ op: "update", id: "btn", patch: { layout: { direction: "column", gap: 4 } } }]);
+    expect(add.ok).toBe(true);
+    if (!add.ok) return;
+    expect(findNode(add.doc.nodes, "btn")!.node.layout).toEqual({ direction: "column", gap: 4 });
+    const remove = applyDesignOps(add.doc, [{ op: "update", id: "btn", patch: { layout: undefined } }]);
+    expect(remove.ok).toBe(true);
+    if (!remove.ok) return;
+    expect(findNode(remove.doc.nodes, "btn")!.node.layout).toBeUndefined();
+    // 非法 justify 被丢弃。
+    const invalid = applyDesignOps(sampleDoc(), [{ op: "update", id: "btn", patch: { layout: { direction: "row", justify: "hacker" } } }]);
+    expect(invalid.ok).toBe(true);
+    if (!invalid.ok) return;
+    expect(findNode(invalid.doc.nodes, "btn")!.node.layout).toEqual({ direction: "row" });
+  });
+
+  it("create/replace 拒绝子树内重复或与现有文档冲突的 id", () => {
+    const duplicateSubtree = applyDesignOps(sampleDoc(), [{
+      op: "create",
+      node: { type: "frame", id: "new-frame", children: [{ type: "rect", id: "dup", x: 0, y: 0, w: 1, h: 1 }, { type: "rect", id: "dup", x: 0, y: 0, w: 1, h: 1 }] }
+    }]);
+    expect(duplicateSubtree.ok).toBe(false);
+    expect(duplicateSubtree.ok ? "" : duplicateSubtree.error).toContain("子树内 id 重复");
+    const conflict = applyDesignOps(sampleDoc(), [{ op: "create", node: { type: "rect", id: "btn", x: 0, y: 0, w: 1, h: 1 } }]);
+    expect(conflict.ok).toBe(false);
+    expect(conflict.ok ? "" : conflict.error).toContain("id 已存在");
+    const replaceDuplicate = applyDesignOps(sampleDoc(), [{ op: "replace", nodes: [{ type: "frame", id: "r", children: [{ type: "rect", id: "r", x: 0, y: 0, w: 1, h: 1 }] }] }]);
+    expect(replaceDuplicate.ok).toBe(false);
   });
 
   it("delete 删除子树", () => {

@@ -312,7 +312,7 @@ export function findNode(nodes: DesignNode[], id: string): FoundNode | undefined
     if (node.id === id) return { node, parent: undefined, siblings: nodes, index };
     if (node.children) {
       const found = findNode(node.children, id);
-      if (found) return { ...found, parent: node };
+      if (found) return found.parent ? found : { ...found, parent: node };
     }
   }
   return undefined;
@@ -369,6 +369,21 @@ export function applyDesignOps(doc: DesignDoc, ops: readonly DesignOp[]): Design
           const normalized = normalizeDesignNode(item, budget);
           if (normalized) nodes.push(normalized);
         }
+        // 新树内 id 重复拒绝（findNode/React key 歧义）。
+        const seenIds = new Set<string>();
+        const collect = (item: DesignNode): string | undefined => {
+          if (seenIds.has(item.id)) return item.id;
+          seenIds.add(item.id);
+          for (const child of item.children ?? []) {
+            const duplicate = collect(child);
+            if (duplicate) return duplicate;
+          }
+          return undefined;
+        };
+        for (const root of nodes) {
+          const duplicate = collect(root);
+          if (duplicate) return `新树内节点 id 重复：${duplicate}`;
+        }
         next.nodes = nodes;
         return undefined;
       }
@@ -378,6 +393,18 @@ export function applyDesignOps(doc: DesignDoc, ops: readonly DesignOp[]): Design
         const node = normalizeDesignNode(op.node, budget);
         if (!node) return "create 的 node 无效（缺 type 或形状非法）";
         if (node.id && findNode(next.nodes, node.id)) return `节点 id 已存在：${node.id}`;
+        // 子树内 id 重复/与现有文档冲突都会让 findNode 歧义（React key 同理），拒绝。
+        const subtreeIds: string[] = [];
+        const collect = (item: DesignNode): void => { subtreeIds.push(item.id); item.children?.forEach(collect); };
+        collect(node);
+        const seen = new Set<string>();
+        for (const id of subtreeIds) {
+          if (seen.has(id)) return `新节点子树内 id 重复：${id}`;
+          seen.add(id);
+        }
+        for (const id of seen) {
+          if (findNode(next.nodes, id)) return `节点 id 已存在：${id}`;
+        }
         let siblings: DesignNode[];
         if (op.parentId == null || op.parentId === "") {
           siblings = next.nodes;
@@ -442,6 +469,11 @@ export function applyDesignOps(doc: DesignDoc, ops: readonly DesignOp[]): Design
           else delete node.shadow;
         }
         if ("text" in source) node.text = typeof source.text === "string" ? source.text.slice(0, 10_000) : "";
+        if ("layout" in source) {
+          const layout = source.layout == null ? undefined : normalizeLayout(source.layout);
+          if (layout) node.layout = layout;
+          else delete node.layout;
+        }
         if ("fontSize" in source) node.fontSize = clamp(round2(finiteOr(source.fontSize, 14)), 1, 400);
         if ("fontWeight" in source) node.fontWeight = Math.round(clamp(finiteOr(source.fontWeight, 400), 1, 1000));
         if ("color" in source) {
