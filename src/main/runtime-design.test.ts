@@ -187,4 +187,49 @@ describe("buildDesignTools", () => {
     await expect(execute(tool("design_export"), { path: "../outside.html" })).rejects.toThrow("相对路径");
     await expect(execute(tool("design_export"), { path: "C:/tmp/x.html" })).rejects.toThrow("相对路径");
   });
+  it("design_update 带质量门：问题诊断 + 可套用的修复 ops 回执 + resize 生效", async () => {
+    const { tool, current } = await harness();
+    await execute(tool("design_create"), { name: "质检页", width: 400, height: 300 });
+    const result = await execute(tool("design_update"), {
+      ops: [
+        { op: "resize", width: 400, height: 320 },
+        { op: "create", node: { type: "frame", id: "rail", name: "轨道", x: 0, y: 0, w: 100, h: 200, layout: { direction: "row", gap: 20, padding: 16 }, children: [
+          { type: "rect", id: "c1", name: "卡一", x: 0, y: 0, w: 150, h: 100 },
+          { type: "rect", id: "c2", name: "卡二", x: 0, y: 0, w: 150, h: 100 }
+        ] } }
+      ]
+    });
+    const text = result.content[0]!.text;
+    expect(text).toContain("质量检查");
+    expect(text).toContain("container-overflow");
+    expect(text).toContain("修复 ops");
+    expect(text).toContain('"op":"update"');
+    const details = result.details as { quality: { diagnostics: string[]; repairCount: number } };
+    expect(details.quality.repairCount).toBeGreaterThanOrEqual(1);
+    expect(current()!.canvas).toEqual({ width: 400, height: 320 });
+  });
+
+  it("design_update 超过 64 条 ops 拒绝并教分批", async () => {
+    const { tool } = await harness();
+    await execute(tool("design_create"), { name: "大批" });
+    const ops = Array.from({ length: 65 }, (_, index) => ({ op: "create", node: { type: "rect", id: `r${index}`, x: index, y: 0, w: 5, h: 5 } }));
+    await expect(execute(tool("design_update"), { ops })).rejects.toThrow("分批");
+  });
+
+  it("design_update patch 拼错字段名整批拒绝（不静默忽略）", async () => {
+    const { tool } = await harness();
+    await execute(tool("design_create"), { name: "拼写" });
+    await execute(tool("design_update"), { ops: [{ op: "create", node: { type: "text", id: "t", text: "hi", x: 0, y: 0, w: 40, h: 20 } }] });
+    await expect(execute(tool("design_update"), { ops: [{ op: "update", id: "t", patch: { fontsize: 20 } }] })).rejects.toThrow("fontsize");
+  });
+
+  it("design_read 整树带布局摘要（地图先于 JSON）", async () => {
+    const { tool } = await harness();
+    await execute(tool("design_create"), { name: "摘要" });
+    await execute(tool("design_update"), { ops: [{ op: "create", node: { type: "rect", id: "hero", name: "首屏", x: 0, y: 0, w: 300, h: 200 } }] });
+    const result = await execute(tool("design_read"), {});
+    expect(result.content[0]!.text).toContain("布局摘要");
+    expect(result.content[0]!.text).toContain("首屏 rect 300×200");
+  });
 });
+

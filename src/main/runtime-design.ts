@@ -16,8 +16,13 @@
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { applyDesignOps, countNodes, createDesignDoc, findNode, makeNodeId, sanitizeDesignName, type DesignDoc, type DesignNode, type DesignOp } from "../shared/design-schema.js";
+import { inspectDesignQuality, summarizeDesignLayout } from "../shared/design-quality.js";
 import { exportDesignHtml } from "../shared/design-export.js";
 import { designFilePath, exportDesignFile, listDesigns, readDesign, writeExportFile, DESIGN_FILE_SUFFIX } from "./design-store.js";
+
+/** 单次 design_update 的 ops 数上限：逼模型分批（先第一屏/一个区域），超限的批
+ *  失败回滚也更可控（借鉴 dsh-openpencil 的两批视口预算）。 */
+const MAX_OPS_PER_UPDATE = 64;
 
 export interface DesignToolDeps {
   /** 总开关，实时读（settings.design?.enabled !== false），关闭时工具保留注册。 */
@@ -79,12 +84,15 @@ const designNodeSchema = Type.Object({
 
 /** design_update 的单条 op（宽松 schema；语义详见工具 description）。 */
 const designOpSchema = Type.Object({
-  op: Type.Union([Type.Literal("create"), Type.Literal("update"), Type.Literal("delete"), Type.Literal("move"), Type.Literal("replace")], { description: "create 新建 / update 改属性 / delete 删除 / move 换父排序 / replace 整树替换" }),
+  op: Type.Union([Type.Literal("create"), Type.Literal("update"), Type.Literal("delete"), Type.Literal("move"), Type.Literal("resize"), Type.Literal("replace")], { description: "create 新建 / update 改属性 / delete 删除 / move 换父排序 / resize 调画布尺寸 / replace 整树替换" }),
   id: Type.Optional(Type.String({ description: "update/delete/move：目标节点 id" })),
   parentId: Type.Optional(Type.Union([Type.String(), Type.Null()], { description: "create/move：目标父节点 id（必须是 frame）；null/缺省=文档根" })),
   index: Type.Optional(Type.Integer({ description: "create/move：在父 children 中的插入位置，缺省追加尾部" })),
+  width: Type.Optional(Type.Integer({ description: "resize：画布宽 px" })),
+  height: Type.Optional(Type.Integer({ description: "resize：画布高 px" })),
+  background: Type.Optional(Type.Union([Type.String(), Type.Null()], { description: "resize：画布背景色（null 清除）" })),
   node: Type.Optional(designNodeSchema),
-  patch: Type.Optional(Type.Object({}, { additionalProperties: true, description: "update：字段→新值映射（不允许改 id/type/children）" })),
+  patch: Type.Optional(Type.Object({}, { additionalProperties: true, description: "update：字段→新值映射（不允许改 id/type/children；未知字段会整批拒绝）" })),
   nodes: Type.Optional(Type.Array(Type.Object({}, { additionalProperties: true }), { description: "replace：整棵新节点树" }))
 }, { additionalProperties: true });
 
@@ -114,7 +122,7 @@ export function buildDesignTools(deps: DesignToolDeps): ToolDefinition[] {
     defineTool({
       name: "design_create",
       label: "新建设计文档",
-      description: "新建设计文档并绑定为当前文档（同名文档已存在时直接打开它）。随后用 design_update 的 create op 添加节点搭建页面；每个节点都起 name。",
+      description: "新建设计文档并绑定为当前文档（同名文档已存在时直接打开它）。随后用 design_update 的 create op 添加节点搭建页面；每个节点都起 name。整套原型（多屏幕）时：一个屏幕 = 一个顶层命名 frame，屏幕并排放置、间隔 ≥80px；画布放不下先用 {op:'resize'} 扩画布。",
       promptSnippet: "design_create: 新建并绑定设计文档",
       parameters: Type.Object({
         name: Type.String({ description: "文档名（同时是文件名，如「登录页」）" }),
@@ -138,7 +146,7 @@ export function buildDesignTools(deps: DesignToolDeps): ToolDefinition[] {
         const doc = createDesignDoc(name, width, height);
         const fileName = deps.persistDoc(doc, undefined);
         deps.bindDoc(doc, fileName);
-        return { content: [{ type: "text" as const, text: `已创建并打开「${name}」（${doc.canvas.width}×${doc.canvas.height}，id ${doc.id}）。用 design_update 添加节点开始搭建。${CANVAS_HINT}` }], details: { docId: doc.id, name, existed: false } };
+        return { content: [{ type: "text" as const, text: `已创建并打开「${name}」（${doc.canvas.width}×${doc.canvas.height}，id ${doc.id}）。下一步：用 design_update 搭建第一个屏幕（一屏 = 一个顶层命名 frame），成功后继续下一屏，无需先复述计划。${CANVAS_HINT}` }], details: { docId: doc.id, name, existed: false } };
       }
     }),
     defineTool({
@@ -165,7 +173,7 @@ export function buildDesignTools(deps: DesignToolDeps): ToolDefinition[] {
         if (!doc) throw new Error(`找不到设计文档（${name || docId}）。用 design_list 查看可用文档。`);
         const fileName = `${sanitizeDesignName(doc.name)}${DESIGN_FILE_SUFFIX}`;
         deps.bindDoc(doc, fileName);
-        return { content: [{ type: "text" as const, text: `已打开 ${formatDocSummary(doc)}。\n${docJson(doc)}` }], details: { docId: doc.id, nodes: countNodes(doc.nodes) } };
+        return { content: [{ type: "text" as const, text: `已打开 ${formatDocSummary(doc)}。\n布局摘要：\n${summarizeDesignLayout(doc)}\n${docJson(doc)}` }], details: { docId: doc.id, nodes: countNodes(doc.nodes) } };
       }
     }),
     defineTool({
@@ -182,7 +190,7 @@ export function buildDesignTools(deps: DesignToolDeps): ToolDefinition[] {
         const nodeId = typeof params?.nodeId === "string" ? params.nodeId.trim() : "";
         const found = nodeId ? findNode(doc.nodes, nodeId) : undefined;
         if (nodeId && !found) throw new Error(`节点不存在：${nodeId}`);
-        const text = found ? docJson(doc, found.node) : `${formatDocSummary(doc)}\n${docJson(doc)}`;
+        const text = found ? docJson(doc, found.node) : `${formatDocSummary(doc)}\n布局摘要：\n${summarizeDesignLayout(doc)}\n${docJson(doc)}`;
         return {
           content: [{ type: "text" as const, text }],
           details: { docId: doc.id, ...(found ? { nodeId: found.node.id } : {}), nodes: countNodes(found ? [found.node] : doc.nodes), revision: doc.revision }
@@ -194,9 +202,12 @@ export function buildDesignTools(deps: DesignToolDeps): ToolDefinition[] {
       label: "更新设计文档",
       description: [
         "对当前设计文档批量应用结构化操作（原子：任一失败整批拒绝，文档不变）。坐标系相对父节点；frame 声明 layout 后子节点按 flex 排布。",
-        "ops 形态：{op:'create', parentId?, index?, node} 新建（parentId 缺省=根）；{op:'update', id, patch} 改属性（patch 不允许改 id/type/children）；{op:'delete', id} 删除子树；{op:'move', id, parentId?, index?} 换父/排序（不能移入自身子树）；{op:'replace', nodes} 整树替换（慎用）。",
+        "ops 形态：{op:'create', parentId?, index?, node} 新建（parentId 缺省=根）；{op:'update', id, patch} 改属性（patch 不允许改 id/type/children，未知字段整批拒绝）；{op:'delete', id} 删除子树；{op:'move', id, parentId?, index?} 换父/排序（不能移入自身子树）；{op:'resize', width?, height?, background?} 调画布尺寸；{op:'replace', nodes} 整树替换（慎用）。",
         "节点字段：type(frame/rect/text/image)、name（每个节点都起）、x/y/w/h、fill/stroke/strokeWidth/radius/opacity/shadow、text 节点加 text/fontSize/fontWeight/color/align、image 加 src(http/data)、frame 加 layout({direction:'row'|'column',gap,padding,justify,align}) 与 children。",
-        "建议：一次调用完成一组相关修改（多个 ops），先 read 后改；自起 id 便于后续定位，缺省自动生成并在回执给出映射。"
+        "工作节奏：一次调用 ≤64 条 ops，先搭第一个屏幕（一屏 = 一个顶层命名 frame，屏幕并排间隔 ≥80px），成功后再继续下一屏；内容会超出画布时先发 {op:'resize'} 扩画布。",
+        "回执带「修复 ops」时，把它们作为下一条 design_update 的 ops 参数原样传入（先修复再继续新内容）。",
+        "工具成功返回后直接进行下一步操作，不要先输出叙述性文字。",
+        "建议：自起 id 便于后续定位，缺省自动生成并在回执给出映射。"
       ].join("\n"),
       promptSnippet: "design_update: 批量应用设计 ops",
       parameters: Type.Object({
@@ -208,6 +219,7 @@ export function buildDesignTools(deps: DesignToolDeps): ToolDefinition[] {
         const doc = requireDoc(deps);
         const rawOps = Array.isArray(params?.ops) ? params.ops as unknown[] : [];
         if (rawOps.length === 0) throw new Error("ops 不能为空");
+        if (rawOps.length > MAX_OPS_PER_UPDATE) throw new Error(`一次 design_update 最多 ${MAX_OPS_PER_UPDATE} 条 ops（当前 ${rawOps.length}）。分批提交：先完成第一个屏幕/一个区域，成功后继续下一批。`);
         // create 无 id 时预生成并记录映射，回执告知模型（后续 op 可直接引用）。
         const idMap: { name: string; id: string }[] = [];
         const ops: DesignOp[] = rawOps.map((raw) => {
@@ -224,10 +236,19 @@ export function buildDesignTools(deps: DesignToolDeps): ToolDefinition[] {
         if (!applied.ok) throw new Error(`${applied.error}（整批未应用；可 design_read 后修正重试）`);
         const next: DesignDoc = { ...applied.doc, revision: applied.doc.revision + 1 };
         const fileName = deps.persistDoc(next, deps.getDocFileName());
+        // 质量门：结构/对比度/出界的确定性检查；修复建议产成可直接套用的 DesignOp[]。
+        const quality = inspectDesignQuality(next);
         const mapText = idMap.length > 0 ? `\n新建节点 id：${idMap.map((entry) => `${entry.name}→${entry.id}`).join("、")}` : "";
+        const qualityText = quality.diagnostics.length > 0
+          ? `\n质量检查 ${quality.diagnostics.length} 项${quality.omitted > 0 ? `（另 ${quality.omitted} 项省略）` : ""}：\n${quality.diagnostics.slice(0, 6).map((line) => `- ${line}`).join("\n")}`
+          : "";
+        const repairText = quality.repairTargets.length > 0
+          ? `\n修复 ops（下一条 design_update 的 ops 参数原样传入）：${JSON.stringify(quality.repairTargets.slice(0, 12))}${quality.repairTargets.length > 12 ? `（共 ${quality.repairTargets.length} 条，先套用这 12 条）` : ""}`
+          : "";
+        const nextText = quality.repairTargets.length > 0 ? "先套用上述修复 ops，再继续新内容" : "继续搭建其余屏幕/区域";
         return {
-          content: [{ type: "text" as const, text: `已应用 ${ops.length} 项操作到「${next.name}」（revision ${next.revision}）。${mapText}\n${CANVAS_HINT}` }],
-          details: { applied: ops.length, revision: next.revision, fileName, ...(idMap.length > 0 ? { newIds: idMap } : {}) }
+          content: [{ type: "text" as const, text: `已应用 ${ops.length} 项操作到「${next.name}」（revision ${next.revision}）。${mapText}${qualityText}${repairText}\n下一步：${nextText}，无需向用户转述本回执。${CANVAS_HINT}` }],
+          details: { applied: ops.length, revision: next.revision, fileName, ...(idMap.length > 0 ? { newIds: idMap } : {}), ...(quality.diagnostics.length > 0 ? { quality: { diagnostics: quality.diagnostics, repairCount: quality.repairTargets.length, suggestCanvas: quality.suggestCanvas } } : {}) }
         };
       }
     }),
