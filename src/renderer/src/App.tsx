@@ -10,6 +10,7 @@ import {
   LoaderCircle,
   MessageSquarePlus,
   MessageCircle,
+  Palette,
   Puzzle,
   Search,
   Server,
@@ -87,6 +88,7 @@ import { filterProviderModels, setProviderModelsEnabled, buildBuiltinProviderEnt
 import { CSS_URL_PATTERN, createThemeAssetUrls, isExternalThemeReference, normalizeThemeAssetReference, resolveThemeAssets } from "./lib/theme-assets";
 import { THEME_PRESETS, bubbleOpacityCss, collectThemeLayers, panelOpacityCss, scopeCustomThemeCss, scopeCustomThemeCssForPreview, themePresetCss, themePreviewCss, themeWallpaperOpacity, wallpaperOpacityCss } from "./lib/theme-presets";
 import { panePermissionRequest, paneQuestionRequest, dropPaneStates, pruneParkedPanels, useDesktopStore } from "./store";
+import { DesignStudio } from "./design/DesignStudio";
 import { ConversationPane, type PaneComposerApi, type PaneDraftStore } from "./ConversationPane";
 import { SplitLayout } from "./SplitLayout";
 import {
@@ -233,6 +235,23 @@ function readStoredPreviewSplit(): number {
   } catch {
     return 50;
   }
+}
+
+/** 设计模式下画布区占比（%），可拖分隔条调整；窄窗断点 900px 由 CSS 断行。 */
+function readStoredDesignSplit(): number {
+  try {
+    const value = Number(window.localStorage.getItem("pidesktop.design-split"));
+    return Number.isFinite(value) && value > 0 ? clampDesignSplit(value) : 62;
+  } catch {
+    return 62;
+  }
+}
+
+const DESIGN_SPLIT_MIN = 25;
+const DESIGN_SPLIT_MAX = 75;
+
+function clampDesignSplit(value: number): number {
+  return Math.min(DESIGN_SPLIT_MAX, Math.max(DESIGN_SPLIT_MIN, Math.round(value * 10) / 10));
 }
 
 /** 启动时恢复上次的分屏布局（会话列表就绪后逐格激活；失效格子被修剪）。
@@ -1222,6 +1241,27 @@ export function App(): ReactNode {
   const [previewDragging, setPreviewDragging] = useState(false);
   const previewDragPointerRef = useRef<number | undefined>(undefined);
   const workAreaRef = useRef<HTMLDivElement>(null);
+  // —— 设计模式（Design Studio）：画布占主体、AI 对话收窄为侧栏；与分屏/预览互斥 ——
+  const [designMode, setDesignMode] = useState(() => readStoredBoolean("pidesktop.design-mode", false));
+  useEffect(() => {
+    try { window.localStorage.setItem("pidesktop.design-mode", designMode ? "true" : "false"); } catch { /* storage 可能不可用 */ }
+  }, [designMode]);
+  const [designSplit, setDesignSplit] = useState(readStoredDesignSplit);
+  const [designDragging, setDesignDragging] = useState(false);
+  const designDragPointerRef = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    try { window.localStorage.setItem("pidesktop.design-split", String(designSplit)); } catch { /* storage 可能不可用 */ }
+  }, [designSplit]);
+  // 设计导出完成 toast（design.exported 推送）+ 文件树刷新。
+  const designExported = useDesktopStore((state) => state.designExported);
+  const [designExportToast, setDesignExportToast] = useState<string>();
+  const lastDesignExportAtRef = useRef(0);
+  useEffect(() => {
+    if (!designExported || designExported.at === lastDesignExportAtRef.current) return;
+    lastDesignExportAtRef.current = designExported.at;
+    setDesignExportToast(`设计已导出到 ${designExported.relativePath}`);
+    setTreeRefreshSignal((value) => value + 1);
+  }, [designExported]);
   // —— 分屏支撑：会话草稿（格子 remount 恢复）与 composer 主动写入桥 ——
   const draftsRef = useRef(new Map<string, string>());
   const draftStore = useMemo<PaneDraftStore>(() => ({
@@ -1250,6 +1290,23 @@ export function App(): ReactNode {
     if (!targetId) return;
     composerBridge.current.get(targetId)?.insertText(block);
   }, [focusedPaneId, snapshot.sessionId]);
+  // 设计画布「发给 AI」：选中节点摘要写入焦点格输入框（browser-pick 同模式）。
+  const sendDesignSelection = useCallback((text: string): void => {
+    const targetId = focusedPaneId ?? snapshot.sessionId;
+    if (!targetId) {
+      setMessageActionError("请先创建或打开一个会话，再与 AI 协作设计");
+      return;
+    }
+    composerBridge.current.get(targetId)?.insertText(text);
+  }, [focusedPaneId, snapshot.sessionId]);
+  // 会话激活/创建后拉取设计状态：画布跟随焦点会话（utility 推 design.state + design.docs）。
+  const designQuerySessionRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!ready || !snapshot.workspace || !snapshot.sessionId) return;
+    if (designQuerySessionRef.current === snapshot.sessionId) return;
+    designQuerySessionRef.current = snapshot.sessionId;
+    void window.piDesktop.send({ type: "design.query" }).catch(() => undefined);
+  }, [ready, snapshot.workspace, snapshot.sessionId]);
   // 文件树「添加到聊天」：工作区文件作为附件注入焦点格附件条——随下一条消息一起
   // 发给模型（运行时按相对路径读取并生成引用块；体积/存在性校验走 statWorkspaceFile）。
   const addFileToChat = useCallback(async (relativePath: string, workspace: string): Promise<void> => {
@@ -1424,7 +1481,8 @@ export function App(): ReactNode {
       ["data-ui-preview-open", previewOpened],
       ["data-ui-permission-pending", Boolean(permission)],
       ["data-ui-question-pending", Boolean(question)],
-      ["data-ui-split-open", paneIds.length > 1]
+      ["data-ui-split-open", paneIds.length > 1],
+      ["data-ui-design-open", designMode]
     ];
     const valueStates: readonly [string, string | undefined][] = [
       ["data-ui-sidebar-view", sidebarView],
@@ -1446,7 +1504,7 @@ export function App(): ReactNode {
       for (const [name] of states) root.removeAttribute(name);
       for (const [name] of valueStates) root.removeAttribute(name);
     };
-  }, [settingsOpen, snapshot.workspace, isChatEmpty, isGenerating, previewOpened, permission, question, paneIds.length, sidebarView, settings.appearance.tune, settings.appearance.motion]);
+  }, [settingsOpen, snapshot.workspace, isChatEmpty, isGenerating, previewOpened, permission, question, paneIds.length, sidebarView, settings.appearance.tune, settings.appearance.motion, designMode]);
 
   async function openWorkspace(): Promise<void> {
     const path = await window.piDesktop.chooseWorkspace();
@@ -1507,6 +1565,7 @@ export function App(): ReactNode {
 
   /** 侧栏右键「分屏」：自动把新会话插入到最接近方形的格子（方向由算法决定），新格成为焦点并被激活。 */
   function addSplitPane(item: SessionSummary): void {
+    if (designMode) return; // 设计模式与分屏互斥（侧栏右键入口同步置灰）
     if (!snapshot.sessionId) return;
     if (splitTree && leafIds(splitTree).includes(item.id)) {
       focusPane(item.id);
@@ -1777,6 +1836,39 @@ export function App(): ReactNode {
     if (next === undefined) return;
     event.preventDefault();
     setPreviewSplit(next);
+  }
+
+  // —— 设计模式分隔条：调整画布区与 AI 侧栏的宽度占比 ——
+  function updateDesignSplitFromPointer(clientX: number, clientY: number): void {
+    const bounds = workAreaRef.current?.getBoundingClientRect();
+    if (!bounds || bounds.width <= 0 || bounds.height <= 0) return;
+    const stacked = window.matchMedia("(max-width: 900px)").matches;
+    const value = stacked
+      ? ((clientY - bounds.top) / bounds.height) * 100
+      : ((clientX - bounds.left) / bounds.width) * 100;
+    setDesignSplit(clampDesignSplit(value));
+  }
+
+  function startDesignResize(event: ReactPointerEvent<HTMLDivElement>): void {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    designDragPointerRef.current = event.pointerId;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setDesignDragging(true);
+    updateDesignSplitFromPointer(event.clientX, event.clientY);
+  }
+
+  function moveDesignResize(event: ReactPointerEvent<HTMLDivElement>): void {
+    if (designDragPointerRef.current !== event.pointerId) return;
+    updateDesignSplitFromPointer(event.clientX, event.clientY);
+  }
+
+  function endDesignResize(event: ReactPointerEvent<HTMLDivElement>): void {
+    if (designDragPointerRef.current !== event.pointerId) return;
+    updateDesignSplitFromPointer(event.clientX, event.clientY);
+    designDragPointerRef.current = undefined;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    setDesignDragging(false);
   }
 
   function openPreviewTarget(target: PreviewTarget, id: string = previewTargetKey(target)): void {
@@ -2087,7 +2179,7 @@ export function App(): ReactNode {
                     <div className="session-workspace-items-inner">
                     {group.sessions.length === 0
                       ? <div className="session-workspace-empty">暂无话题，点击右上角新建</div>
-                      : group.sessions.map((item) => <button className={item.id === snapshot.sessionId || (splitTree ? paneIds.includes(item.id) : false) ? "active" : ""} type="button" key={item.path} title={item.title} data-row-kind="session" data-row-active={item.id === snapshot.sessionId || (splitTree ? paneIds.includes(item.id) : false) || undefined} onClick={() => void openSession(item.path, item.workspace, item.id)} onContextMenu={(event) => { event.preventDefault(); const splitDisabled = !snapshot.sessionId || (splitTree ? countLeaves(splitTree) >= MAX_SPLIT_PANES : false); const inPane = splitTree ? leafIds(splitTree).includes(item.id) : false; setContextMenu({ x: event.clientX, y: event.clientY, items: [{ label: "重命名", onClick: () => { setRenameSession({ path: item.path, title: item.title }); setRenameValue(item.title); } }, { label: item.pinned ? "取消置顶" : "置顶", onClick: () => { void window.piDesktop.send({ type: "session.pin", path: item.path, pinned: !item.pinned }); } }, { label: inPane ? "已分屏，切换到该格" : "分屏", disabled: !inPane && splitDisabled, onClick: () => addSplitPane(item) }, { label: "删除会话", danger: true, onClick: () => setDeleteSession({ path: item.path, title: item.title }) }] }); }}><MessageCircle size={14} /><span><strong>{item.title}</strong><small>{new Date(item.modifiedAt).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}</small></span>{(item.runStatus || item.pinned) && <div className="session-item-meta">{item.runStatus && <i className={`session-status-dot ${item.runStatus}`} title={sessionRunStatusLabels[item.runStatus]} aria-label={sessionRunStatusLabels[item.runStatus]!} />}{item.pinned && <Pin size={11} className="session-pin-indicator" />}</div>}</button>)}
+                      : group.sessions.map((item) => <button className={item.id === snapshot.sessionId || (splitTree ? paneIds.includes(item.id) : false) ? "active" : ""} type="button" key={item.path} title={item.title} data-row-kind="session" data-row-active={item.id === snapshot.sessionId || (splitTree ? paneIds.includes(item.id) : false) || undefined} onClick={() => void openSession(item.path, item.workspace, item.id)} onContextMenu={(event) => { event.preventDefault(); const splitDisabled = !snapshot.sessionId || designMode || (splitTree ? countLeaves(splitTree) >= MAX_SPLIT_PANES : false); const inPane = splitTree ? leafIds(splitTree).includes(item.id) : false; setContextMenu({ x: event.clientX, y: event.clientY, items: [{ label: "重命名", onClick: () => { setRenameSession({ path: item.path, title: item.title }); setRenameValue(item.title); } }, { label: item.pinned ? "取消置顶" : "置顶", onClick: () => { void window.piDesktop.send({ type: "session.pin", path: item.path, pinned: !item.pinned }); } }, { label: inPane ? "已分屏，切换到该格" : "分屏", disabled: !inPane && splitDisabled, onClick: () => addSplitPane(item) }, { label: "删除会话", danger: true, onClick: () => setDeleteSession({ path: item.path, title: item.title }) }] }); }}><MessageCircle size={14} /><span><strong>{item.title}</strong><small>{new Date(item.modifiedAt).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}</small></span>{(item.runStatus || item.pinned) && <div className="session-item-meta">{item.runStatus && <i className={`session-status-dot ${item.runStatus}`} title={sessionRunStatusLabels[item.runStatus]} aria-label={sessionRunStatusLabels[item.runStatus]!} />}{item.pinned && <Pin size={11} className="session-pin-indicator" />}</div>}</button>)}
                     </div>
                   </div>
                 </section>
@@ -2148,6 +2240,7 @@ export function App(): ReactNode {
           <div className="project-title"><Folder size={17} /><span><strong>{snapshot.workspace?.split(/[\\/]/u).at(-1) ?? "ChatAnyTime"}</strong><small>{snapshot.agentName} · {snapshot.sessionId ? "当前话题" : "未开始话题"}</small></span>{snapshot.gitBranch && <span className="git-branch-badge" title={`当前 Git 分支：${snapshot.gitBranch}`}><GitBranch size={13} />{snapshot.gitBranch}</span>}</div>
           <div className="runtime-controls">
             <button className="workspace-top-button" data-control="workspace-open" type="button" onClick={() => void openWorkspace()}><FolderOpen size={15} /><span>工作区</span><strong>{compactPath(snapshot.workspace)}</strong><ChevronDown size={13} /></button>
+            <button className={`icon-button design-toggle${designMode ? " active" : ""}`} data-control="design-toggle" type="button" aria-label={designMode ? "退出设计模式" : "进入设计模式"} aria-pressed={designMode} title={designMode ? "退出设计模式" : "设计模式（AI 设计工作台）"} onClick={() => setDesignMode((open) => !open)}><Palette size={18} /></button>
             <button className="icon-button preview-panel-toggle" data-control="preview-toggle" type="button" aria-label={previewOpened ? "关闭预览" : "打开预览"} title={previewOpened ? "关闭预览" : "打开预览"} onClick={() => {
               // 顶部按钮始终完全关闭/打开预览面板：即使已有标签页也不会
               // 折叠成残留一列栏+展开按钮的中间态。
@@ -2163,9 +2256,46 @@ export function App(): ReactNode {
           <div
             ref={workAreaRef}
             data-pane="work-area"
-            className={`work-area${previewVisible && preview && preview.tabs.length > 0 ? " with-preview" : previewVisible ? " with-preview-empty" : ""}${previewDragging ? " is-preview-dragging" : ""}`}
-            style={previewVisible ? { "--preview-split": `${previewSplit}%` } as CSSProperties : undefined}
+            className={`work-area${designMode ? " design-mode" : previewVisible && preview && preview.tabs.length > 0 ? " with-preview" : previewVisible ? " with-preview-empty" : ""}${designDragging ? " is-design-dragging" : !designMode && previewDragging ? " is-preview-dragging" : ""}`}
+            style={designMode ? { "--design-split": `${designSplit}%` } as CSSProperties : previewVisible ? { "--preview-split": `${previewSplit}%` } as CSSProperties : undefined}
           >
+          {/* 设计模式：画布工作台占主体 + AI 对话侧栏（ConversationPane 完整复用）；
+              分屏树保留但不渲染，退出设计模式即恢复；预览面板不挂载（互斥）。 */}
+          {designMode ? (
+            <>
+              <DesignStudio onSendToAi={sendDesignSelection} />
+              <div
+                className={`design-divider${designDragging ? " dragging" : ""}`}
+                role="separator"
+                aria-label="调整画布与对话宽度"
+                title="拖动调整画布与对话宽度，双击恢复"
+                tabIndex={0}
+                onPointerDown={startDesignResize}
+                onPointerMove={moveDesignResize}
+                onPointerUp={endDesignResize}
+                onLostPointerCapture={endDesignResize}
+                onDoubleClick={() => setDesignSplit(62)}
+              />
+              <div className="design-chat-pane">
+                <ConversationPane
+                  sessionId={snapshot.sessionId}
+                  showDock
+                  focused
+                  onNewSession={defaultNewSession}
+                  registerComposerApi={registerComposerApi}
+                  draftStore={draftStore}
+                  onOpenArtifact={openArtifactPreview}
+                  onOpenFile={openFilePreview}
+                  onOpenDiff={openDiffPreview}
+                  onOpenPlanDetail={openPlanPreview}
+                  onOpenMemoryTopic={openMemoryTopic}
+                  onOpenTranscript={setTranscriptTarget}
+                  onActionError={setActionError}
+                  onRollback={(file) => openRollbackConfirm(file, snapshot.sessionId)}
+                />
+              </div>
+            </>
+          ) : (<>
           {/* 会话槽位：单窗口 = 一个 ConversationPane；分屏 = 布局树递归渲染，
               最大化时只渲染目标格（树保留，还原即恢复）。预览面板/终端是全局
               标签页，与会话槽位并存于 work-area 网格。 */}
@@ -2201,6 +2331,7 @@ export function App(): ReactNode {
           ) : (
             <ArtifactPreview key="empty-state" tabs={[]} activeTabId="" onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddTerminal={openTerminalPreview} onAddFile={() => void openManualFilePreview()} onBrowserPickSend={sendPickedElement} />
           )}</ExitWrap>}
+          </>)}
         </div>
       </main>
 
@@ -2257,6 +2388,9 @@ export function App(): ReactNode {
       ); })()}
       {checkpointToast && (
         <div className="error-toast checkpoint-toast"><History size={18} /><span>{checkpointToast}</span><button className="icon-button" type="button" title="关闭提示" aria-label="关闭提示" onClick={() => setCheckpointToast(undefined)}><X size={16} /></button></div>
+      )}
+      {designExportToast && (
+        <div className="error-toast checkpoint-toast"><Palette size={18} /><span>{designExportToast}</span><button className="icon-button" type="button" title="关闭提示" aria-label="关闭提示" onClick={() => setDesignExportToast(undefined)}><X size={16} /></button></div>
       )}
       {automationToast && (
         <div className={`error-toast checkpoint-toast${automationToast.runId ? " with-action" : ""}`}><Zap size={18} /><span>{automationToast.message}</span>{automationToast.runId && <button className="toast-action" type="button" title="打开运行记录" aria-label="查看运行结果" onClick={() => viewAutomationRun(automationToast.runId!)}>查看结果</button>}<button className="icon-button" type="button" title="关闭提示" aria-label="关闭提示" onClick={() => setAutomationToast(undefined)}><X size={16} /></button></div>
