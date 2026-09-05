@@ -59,6 +59,19 @@ describe("desktop tool permissions", () => {
     expect(permissionNeedsApproval("ask", "mcp", "command")).toBe(true);
   });
 
+  it("gates design doc writes as write-risk (workspace mode auto-allows)", () => {
+    expect(toolRisk(workspace, "design_update", { ops: [] })).toBe("write");
+    expect(toolRisk(workspace, "design_export", { path: "designs/exports/a.html" })).toBe("write");
+    // 免门：读取/列表/新建绑定类操作。
+    expect(toolRisk(workspace, "design_list", {})).toBeUndefined();
+    expect(toolRisk(workspace, "design_create", { name: "登录页" })).toBeUndefined();
+    expect(toolRisk(workspace, "design_open", { name: "登录页" })).toBeUndefined();
+    expect(toolRisk(workspace, "design_read", {})).toBeUndefined();
+    expect(permissionAction("workspace", "design_update", "write")).toBe("allow");
+    expect(permissionAction("ask", "design_update", "write")).toBe("ask");
+    expect(permissionAction("read-only", "design_update", "write")).toBe("deny");
+  });
+
   it("gates browser navigation through the browse risk", () => {
     expect(toolRisk(workspace, "browser_navigate", { url: "https://example.com" })).toBe("browse");
     expect(toolRisk(workspace, "browser_snapshot", {})).toBeUndefined();

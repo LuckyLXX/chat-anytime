@@ -585,6 +585,7 @@ export function createDemoApi(): DesktopApi {
           demoSettings.accessMode = command.settings.accessMode;
           demoSettings.appearance = structuredClone(command.settings.appearance);
           demoSettings.browser = command.settings.browser;
+          demoSettings.design = command.settings.design;
           demoSettings.defaultWorkspace = command.settings.defaultWorkspace;
           updateSnapshot({ model: command.settings.model, thinkingLevel: command.settings.thinkingLevel });
           // 更换默认工作区：当前正落在旧默认上 → 即时切到新默认（与真实运行时语义一致）。

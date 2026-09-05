@@ -236,6 +236,7 @@ export interface DesktopSettings {
   memory?: MemorySettings;
   hooks?: HooksSettings;
   browser?: BrowserSettings;
+  design?: DesignSettings;
   checkpoint?: CheckpointSettings;
   customProvider?: CustomProviderSettings;
   customProviderKeyConfigured?: boolean;
@@ -677,6 +678,11 @@ export type BrowserTabsEvent =
 
 /** 浏览器自动化总开关；缺省视为启用（settings.browser?.enabled !== false）。 */
 export interface BrowserSettings {
+  enabled: boolean;
+}
+
+/** 设计模式总开关；缺省视为启用（settings.design?.enabled !== false）。工具常驻注册，execute 实时判断，无需重建会话。 */
+export interface DesignSettings {
   enabled: boolean;
 }
 
@@ -1131,7 +1137,7 @@ export type RuntimeCommand =
   | { type: "agent.select"; agentId: string }
   | { type: "agent.save"; agent: AgentProfile }
   | { type: "agent.archive"; agentId: string; archived: boolean }
-  | { type: "settings.save"; settings: Pick<DesktopSettings, "model" | "thinkingLevel" | "accessMode" | "appearance" | "browser" | "defaultWorkspace"> }
+  | { type: "settings.save"; settings: Pick<DesktopSettings, "model" | "thinkingLevel" | "accessMode" | "appearance" | "browser" | "design" | "defaultWorkspace"> }
   | { type: "model.select"; provider: string; id: string; sessionId?: string }
   | { type: "thinking.select"; level: ThinkingLevel; sessionId?: string }
   | { type: "auth.set"; provider: string; apiKey: string }

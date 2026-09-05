@@ -10,6 +10,7 @@ import type {
   CheckpointSettings,
   CustomThemeDefinition,
   DesktopSettings,
+  DesignSettings,
   ProviderApiMode,
   DivBubbleMode,
   HooksSettings,
@@ -260,6 +261,12 @@ export function normalizeBrowser(value: unknown): BrowserSettings | undefined {
   return { enabled: (value as Record<string, unknown>).enabled !== false };
 }
 
+/** 设计模式总开关，语义与 browser 相同：缺省视为启用。 */
+export function normalizeDesign(value: unknown): DesignSettings | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  return { enabled: (value as Record<string, unknown>).enabled !== false };
+}
+
 /** checkpoint 回滚总开关，语义与 memory/hooks/browser 相同：缺省视为启用。 */
 export function normalizeCheckpoint(value: unknown): CheckpointSettings | undefined {
   if (!value || typeof value !== "object") return undefined;
@@ -410,6 +417,7 @@ export function migrateSettings(raw: unknown): { settings: DesktopSettings; lega
     memory: normalizeMemory(source.memory),
     hooks: normalizeHooks(source.hooks),
     browser: normalizeBrowser(source.browser),
+    design: normalizeDesign(source.design),
     checkpoint: normalizeCheckpoint(source.checkpoint)
   };
   const legacyApiKey = typeof source.customProviderApiKey === "string" ? source.customProviderApiKey : undefined;

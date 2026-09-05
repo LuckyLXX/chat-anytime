@@ -3430,6 +3430,10 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       settings.thinkingLevel = command.settings.thinkingLevel;
       settings.accessMode = command.settings.accessMode;
       settings.appearance = command.settings.appearance;
+      // browser/design 总开关镜像补齐（工具常驻注册、execute 实时读——若内存镜像
+      // 滞后，保存后开关不生效直至重启）：browser 是既有缺口，design 随新增补上。
+      settings.browser = command.settings.browser;
+      settings.design = command.settings.design;
       settings.defaultWorkspace = command.settings.defaultWorkspace;
       thinkingLevel = command.settings.thinkingLevel;
       accessMode = command.settings.accessMode;

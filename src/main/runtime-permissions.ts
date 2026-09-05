@@ -15,6 +15,8 @@ export function summarizeArgs(toolName: string, args: Record<string, unknown>): 
   if (toolName === "browser_navigate") return `导航到 ${String(args.url ?? "")}`;
   if (toolName === "browser_eval") return `执行 JavaScript（${String(args.mode ?? "read")}）：${String(args.expression ?? "").slice(0, 80)}`;
   if (toolName === "browser_tabs") return `关闭浏览器标签页 ${String(args.tabId ?? "")}`;
+  if (toolName === "design_update") return `更新设计文档（${Array.isArray(args.ops) ? args.ops.length : 0} 项变更）`;
+  if (toolName === "design_export") return `导出设计 HTML${args.path ? `到 ${String(args.path)}` : ""}`;
   const path = args.path ?? args.file_path ?? args.filePath;
   if (path) return `${toolLabel(toolName)}：${String(path)}`;
   return toolLabel(toolName);
