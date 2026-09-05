@@ -31,7 +31,9 @@
 
 类名属于实现细节，可能随版本变化；以下属性是稳定契约，结构化主题请只依赖它们：
 
-**区域钩子 `data-pane`**：`sidebar` `topbar` `workspace` `work-area` `conversation` `timeline` `composer` `task-panel` `memory-panel` `preview` `terminal` `question-panel` `settings-dialog` `permission-dialog` `landing`
+**区域钩子 `data-pane`**：`sidebar` `topbar` `workspace` `work-area` `conversation` `timeline` `composer` `task-panel` `memory-panel` `preview` `terminal` `question-panel` `settings-dialog` `permission-dialog` `landing` `design` `design-toolbar` `design-canvas` `design-layers` `design-inspector`
+
+> `design` 是设计模式（Design Studio，顶栏调色板按钮进入）的工作台外壳——顶栏工具栏 + 左侧图层树（`design-layers`）+ 中部无限画布（`design-canvas`）+ 右侧属性检查器（`design-inspector`）。工作台底色走 `--panel-bg-preview`（缺省 `--panel-bg`）与既有表面 token，跟随主题；画布点阵/参考线/选择框用 `--border`/`--accent` 派生，主题可用 `[data-pane="design"]` 后代选择器重设计。
 
 > `landing` 是空态构图（未打开工作区 / 未开始对话时的居中提示块，含图标与主按钮），主题可据其做"着陆页"式重设计。
 
@@ -62,6 +64,10 @@
 | 设置（侧栏底部）                            | `settings`                                       |
 | 打开工作区（顶栏 + 空态主按钮）             | `workspace-open`                                 |
 | 预览面板开关（顶栏）                        | `preview-toggle`                                 |
+| 设计模式开关（顶栏，aria-pressed 标记开启态） | `design-toggle`                                 |
+| 设计画布「发给 AI」（工具栏）                | `design-send-ai`                                 |
+| 设计画布「导出 HTML」（工具栏）              | `design-export`                                  |
+| 设计画布撤销/重做（工具栏）                 | `design-undo` / `design-redo`                    |
 | 面板坞开关 + 待办页 tab（会话区右上方 FAB） | `task-panel-toggle`                              |
 | 记忆页 tab（面板坞内）                      | `memory-toggle`                                  |
 | 发送                                        | `send`                                           |
@@ -102,7 +108,7 @@
 
 **特异性（覆盖规则能否生效）**：应用壁纸模式的基础规则写成 `[data-theme-wallpaper="true"] .sidebar` 等（(0,2,0) 特异性，两个属性/类选择器）。主题用等特异性选择器（`[data-theme-wallpaper="true"] [data-pane="sidebar"]`）即可凭"后注入"胜出，不需要 `html` 前缀。区域自身的非壁纸规则（如 `[data-pane="sidebar"]`）与应用的 `.sidebar`（(0,1,0)）同特异性、靠后注入胜出。自定义 CSS 注入顺序在应用样式之后。
 
-**UI 状态（`<html>` 属性，存在即真；带值状态例外）**：`data-ui-settings-open` `data-ui-workspace-open` `data-ui-chat-empty` `data-ui-generating` `data-ui-preview-open` `data-ui-permission-pending` `data-ui-question-pending` `data-ui-attachments`（输入框有附件）`data-ui-split-open`（分屏模式，会话区同时展示 ≥2 个格子）`data-ui-sidebar-collapsed`（侧栏折叠为图标窄条，存在即真）。带值状态：`data-ui-sidebar-view="topics|files|agents"`（取值匹配，如 `[data-ui-sidebar-view="files"]`）、`data-ui-density="compact|comfortable|relaxed"` 与 `data-ui-radius="square|small|medium|round"`（运行时界面微调层，由设置【外观 → 界面微调】写入；对应 `--ui-density-scale` / `--ui-control-radius` / `--ui-container-radius`，默认值=当前视觉，主题可覆盖 token 或忽略属性）、`data-ui-motion="off"`（用户在外观设置关闭「界面动效」时存在；基础样式会停用全部过渡与弹出动画，主题无需响应，但不应依赖动效传达信息）。
+**UI 状态（`<html>` 属性，存在即真；带值状态例外）**：`data-ui-settings-open` `data-ui-workspace-open` `data-ui-chat-empty` `data-ui-generating` `data-ui-preview-open` `data-ui-permission-pending` `data-ui-question-pending` `data-ui-attachments`（输入框有附件）`data-ui-split-open`（分屏模式，会话区同时展示 ≥2 个格子）`data-ui-design-open`（设计模式，画布工作台替换常规会话布局，与分屏/预览互斥）`data-ui-sidebar-collapsed`（侧栏折叠为图标窄条，存在即真）。带值状态：`data-ui-sidebar-view="topics|files|agents"`（取值匹配，如 `[data-ui-sidebar-view="files"]`）、`data-ui-density="compact|comfortable|relaxed"` 与 `data-ui-radius="square|small|medium|round"`（运行时界面微调层，由设置【外观 → 界面微调】写入；对应 `--ui-density-scale` / `--ui-control-radius` / `--ui-container-radius`，默认值=当前视觉，主题可覆盖 token 或忽略属性）、`data-ui-motion="off"`（用户在外观设置关闭「界面动效」时存在；基础样式会停用全部过渡与弹出动画，主题无需响应，但不应依赖动效传达信息）。
 
 **分屏（多实例区域，v2.1 迁移说明）**：会话区支持分屏后，`conversation` / `timeline` / `composer` / `question-panel` 区域钩子**同一页面可出现多次**（每个格子一套完整实例）。属性选择器（`[data-pane="composer"]` 等）本就按元素生效，多实例无需改动；但 `[data-ui-generating] [data-pane="composer"]` 这类“根状态 × 区域”的组合在分屏下作用于**所有格子**，而 `data-ui-generating` / `data-ui-chat-empty` / `data-ui-attachments` 的语义是**焦点格**（激活会话）的状态——只想命中焦点格时请叠加 `[data-pane-active]`（焦点格的 conversation 区域携带该属性，存在即真）：
 
