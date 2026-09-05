@@ -494,6 +494,8 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
         break;
       case "design.state":
         set((state) => {
+          // 画布只跟激活会话：后台/驻留会话的 design_* 推送不顶掉当前画布。
+          if (message.sessionId !== state.snapshot.sessionId) return state;
           if (!message.docId) return { designDoc: undefined };
           const seen = state.seenDesignRevisions[message.docId] ?? 0;
           if (message.revision <= seen) return state;

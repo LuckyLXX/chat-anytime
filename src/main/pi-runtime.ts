@@ -779,9 +779,15 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** 推送当前设计文档全量状态（渲染端画布数据源；revision 单调递增由调用方保证）。 */
-function postDesignState(doc: DesignDoc): void {
-  post({ type: "design.state", revision: doc.revision, docId: doc.id, name: doc.name, canvas: doc.canvas, nodes: doc.nodes, dirty: false });
+/** 推送当前设计文档全量状态（渲染端画布数据源；revision 单调递增由调用方保证）。
+ *  只画激活会话的画布：携带 sessionId，渲染端丢弃非激活会话的推送。 */
+function postDesignState(record: SessionRuntimeRecord, doc: DesignDoc): void {
+  post({ type: "design.state", sessionId: record.session.sessionId, revision: doc.revision, docId: doc.id, name: doc.name, canvas: doc.canvas, nodes: doc.nodes, dirty: false });
+}
+
+/** 推送「会话未绑定文档」的空状态（design.query 未绑定 / design.close 后），渲染端据此清空画布。 */
+function postEmptyDesignState(record: SessionRuntimeRecord): void {
+  post({ type: "design.state", sessionId: record.session.sessionId, revision: 0 });
 }
 
 /** 快照的上下文占用：Pi 官方估算 + record 上的会话累计缓存命中率。 */
@@ -2232,13 +2238,18 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     getDoc: () => recordBox?.designDoc?.doc,
     getDocFileName: () => recordBox?.designDoc?.fileName,
     bindDoc: (doc, fileName) => {
-      if (recordBox) recordBox.designDoc = { doc, fileName };
-      postDesignState(doc);
+      if (recordBox) {
+        recordBox.designDoc = { doc, fileName };
+        postDesignState(recordBox, doc);
+        post({ type: "design.docs", docs: listDesigns(recordWorkspace) });
+      }
     },
     persistDoc: (doc, previousFileName) => {
       const fileName = writeDesign(recordWorkspace, doc, previousFileName);
-      if (recordBox) recordBox.designDoc = { doc, fileName };
-      postDesignState(doc);
+      if (recordBox) {
+        recordBox.designDoc = { doc, fileName };
+        postDesignState(recordBox, doc);
+      }
       return fileName;
     }
   });
@@ -3708,7 +3719,8 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       const doc = existing ?? createDesignDoc(name, command.width, command.height);
       if (!existing) writeDesign(record.workspace, doc);
       record.designDoc = { doc, fileName: `${name}${DESIGN_FILE_SUFFIX}` };
-      postDesignState(doc);
+      postDesignState(record, doc);
+      post({ type: "design.docs", docs: listDesigns(record.workspace) });
       break;
     }
     case "design.open": {
@@ -3717,7 +3729,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       const doc = readDesign(designFilePath(record.workspace, name));
       if (!doc) throw new Error(`找不到设计文档「${name}」`);
       record.designDoc = { doc, fileName: `${name}${DESIGN_FILE_SUFFIX}` };
-      postDesignState(doc);
+      postDesignState(record, doc);
       break;
     }
     case "design.edit": {
@@ -3729,7 +3741,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       const next: DesignDoc = { ...applied.doc, revision: applied.doc.revision + 1 };
       const fileName = writeDesign(record.workspace, next, bound.fileName);
       record.designDoc = { doc: next, fileName };
-      postDesignState(next);
+      postDesignState(record, next);
       break;
     }
     case "design.save": {
@@ -3738,7 +3750,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       if (!bound) throw new Error("当前会话没有打开的设计文档");
       const fileName = writeDesign(record.workspace, bound.doc, bound.fileName);
       record.designDoc = { doc: bound.doc, fileName };
-      postDesignState(bound.doc);
+      postDesignState(record, bound.doc);
       break;
     }
     case "design.export": {
@@ -3754,11 +3766,14 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     case "design.close": {
       const record = resolveTargetRecord(command.sessionId);
       record.designDoc = undefined;
+      // 推空状态同步所有窗口的画布（渲染端只采纳激活会话的推送）。
+      postEmptyDesignState(record);
       break;
     }
     case "design.query": {
       const record = resolveTargetRecord(command.sessionId);
-      if (record.designDoc) postDesignState(record.designDoc.doc);
+      if (record.designDoc) postDesignState(record, record.designDoc.doc);
+      else postEmptyDesignState(record); // 未绑定也要推：切会话后画布随焦点清空
       post({ type: "design.docs", docs: listDesigns(record.workspace) });
       break;
     }

@@ -204,9 +204,10 @@ export function DesignStudio({ onSendToAi }: { onSendToAi(text: string): void })
   }, [applyWholeDoc]);
 
   const deleteSelected = useCallback((): void => {
+    const doc = workingDocRef.current;
     const id = selectedIdRef.current;
-    if (!id) return;
-    commitOps([{ op: "delete", id }]);
+    if (!doc || !id) return;
+    commitOps([{ op: "delete", id }], { preDoc: structuredClone(doc) });
     setSelectedId(undefined);
   }, [commitOps]);
 
@@ -217,7 +218,7 @@ export function DesignStudio({ onSendToAi }: { onSendToAi(text: string): void })
     const found = findNode(doc.nodes, id);
     if (!found) return;
     const clone = cloneNodeWithNewIds(found.node);
-    commitOps([{ op: "create", parentId: found.parent?.id ?? null, index: found.index + 1, node: clone }]);
+    commitOps([{ op: "create", parentId: found.parent?.id ?? null, index: found.index + 1, node: clone }], { preDoc: structuredClone(doc) });
     setSelectedId(clone.id);
   }, [commitOps]);
 
@@ -275,11 +276,18 @@ export function DesignStudio({ onSendToAi }: { onSendToAi(text: string): void })
   }
 
   function closeDoc(): void {
+    const docId = workingDoc?.id;
     undoRef.current = [];
     redoRef.current = [];
     pendingEditsRef.current = 0;
     setSelectedId(undefined);
-    useDesktopStore.setState({ designDoc: undefined });
+    // 清掉该文档的 seen revision：重开同一文档（revision 可能不增）的推送不被去重丢弃。
+    useDesktopStore.setState((state) => {
+      if (!docId) return { designDoc: undefined };
+      const seen = { ...state.seenDesignRevisions };
+      delete seen[docId];
+      return { designDoc: undefined, seenDesignRevisions: seen };
+    });
     send({ type: "design.close" });
   }
 
@@ -352,7 +360,10 @@ export function DesignStudio({ onSendToAi }: { onSendToAi(text: string): void })
           selectedId={selectedId}
           expandedIds={expandedIds}
           onSelect={(nodeId) => setSelectedId(nodeId)}
-          onToggleVisible={(node) => commitOps([{ op: "update", id: node.id, patch: { visible: node.visible === false ? true : false } }])}
+          onToggleVisible={(node) => {
+            const doc = workingDocRef.current;
+            commitOps([{ op: "update", id: node.id, patch: { visible: node.visible === false ? true : false } }], doc ? { preDoc: structuredClone(doc) } : undefined);
+          }}
         />
         <div className="design-canvas-wrapper" ref={wrapperRef}>
           <DesignCanvas

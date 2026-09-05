@@ -1264,9 +1264,9 @@ export type RuntimeMessage =
   | { type: "log"; level: "info" | "warn"; message: string }
   // —— 设计模式推送 ——
   /** 当前会话绑定文档的全量状态（工具/命令变更后、会话激活、design.query 时推送）；
-   *  revision 单调递增，渲染端丢弃 revision ≤ 已见的推送（防回环重渲）。docId 缺省
-   *  （未绑定）时清空画布。 */
-  | { type: "design.state"; revision: number; docId?: string; name?: string; canvas?: DesignCanvasInfo; nodes?: DesignNode[]; dirty?: boolean }
+   *  revision 单调递增，渲染端丢弃 revision ≤ 已见的推送（防回环重渲），且只采纳
+   *  激活会话的推送（sessionId 不匹配忽略）。docId 缺省（未绑定）时清空画布。 */
+  | { type: "design.state"; sessionId: string; revision: number; docId?: string; name?: string; canvas?: DesignCanvasInfo; nodes?: DesignNode[]; dirty?: boolean }
   /** 工作区设计文档列表（design.list / 会话激活 / design.query 时推送，全量替换）。 */
   | { type: "design.docs"; docs: DesignDocSummary[] }
   /** 设计导出完成（design.export 命令的成功回执；失败走 error toast）。 */
