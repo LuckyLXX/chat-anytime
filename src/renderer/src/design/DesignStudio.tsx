@@ -180,6 +180,25 @@ export function DesignStudio({ onSendToAi }: { onSendToAi(text: string): void })
     flushTimerRef.current = window.setTimeout(() => flushPendingRef.current(), immediate ? 0 : FLUSH_DELAY_MS);
   }, []);
 
+  // —— 画布尺寸调整（检查器数字框键入）：与节点 patch 同款防抖收敛，一次落盘 ——
+  const pendingCanvasRef = useRef<{ preDoc: DesignDoc; patch: { width?: number; height?: number } } | null>(null);
+  const canvasTimerRef = useRef<number | undefined>(undefined);
+  const resizeCanvas = useCallback((patch: { width?: number; height?: number }): void => {
+    const current = workingDocRef.current;
+    if (!current) return;
+    if (!pendingCanvasRef.current) pendingCanvasRef.current = { preDoc: structuredClone(current), patch: {} };
+    pendingCanvasRef.current.patch = { ...pendingCanvasRef.current.patch, ...patch };
+    const merged = pendingCanvasRef.current.patch;
+    setWorkingDoc((doc) => (doc ? { ...doc, canvas: { ...doc.canvas, ...merged } } : doc));
+    if (canvasTimerRef.current) window.clearTimeout(canvasTimerRef.current);
+    canvasTimerRef.current = window.setTimeout(() => {
+      const pending = pendingCanvasRef.current;
+      pendingCanvasRef.current = null;
+      if (!pending) return;
+      commitOps([{ op: "resize", ...pending.patch }], { preDoc: pending.preDoc, skipApply: true });
+    }, FLUSH_DELAY_MS);
+  }, [commitOps]);
+
   // —— undo / redo（replace 整树回写，AI 与用户改动都可撤销） ——
   const applyWholeDoc = useCallback((doc: DesignDoc): void => {
     setWorkingDoc(doc);
@@ -378,7 +397,7 @@ export function DesignStudio({ onSendToAi }: { onSendToAi(text: string): void })
             onGestureEnd={() => flushPendingRef.current()}
           />
         </div>
-        <DesignInspector doc={workingDoc} selected={selected} onPatch={(nodeId, patch) => stagePatch(nodeId, patch)} />
+        <DesignInspector doc={workingDoc} selected={selected} onPatch={(nodeId, patch) => stagePatch(nodeId, patch)} onCanvasPatch={resizeCanvas} />
       </div>
     </div>
   );

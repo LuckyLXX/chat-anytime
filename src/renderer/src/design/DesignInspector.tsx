@@ -35,11 +35,13 @@ function NumberField({ label, value, min, max, step, fallback, onChange }: Numbe
   );
 }
 
-export function DesignInspector({ doc, selected, onPatch }: {
+export function DesignInspector({ doc, selected, onPatch, onCanvasPatch }: {
   doc: DesignDoc;
   /** 当前选中节点；undefined 时显示文档信息。 */
   selected: DesignNode | undefined;
   onPatch(nodeId: string, patch: DesignNodePatch): void;
+  /** 画布尺寸调整（防抖收敛由宿主负责）。 */
+  onCanvasPatch(patch: { width?: number; height?: number }): void;
 }): ReactNode {
   const [showShadow, setShowShadow] = useState(false);
   if (!selected) {
@@ -48,7 +50,10 @@ export function DesignInspector({ doc, selected, onPatch }: {
         <div className="design-inspector-heading">属性</div>
         <div className="design-doc-info">
           <div className="design-field"><span>文档</span><strong title={doc.name}>{doc.name}</strong></div>
-          <div className="design-field"><span>画布</span><em>{doc.canvas.width} × {doc.canvas.height}</em></div>
+          <div className="design-field-grid">
+            <NumberField label="画布宽" value={doc.canvas.width} min={1} fallback={doc.canvas.width} onChange={(value) => onCanvasPatch({ width: value ?? doc.canvas.width })} />
+            <NumberField label="画布高" value={doc.canvas.height} min={1} fallback={doc.canvas.height} onChange={(value) => onCanvasPatch({ height: value ?? doc.canvas.height })} />
+          </div>
           <div className="design-field"><span>图层数</span><em>{countNodes(doc.nodes)}</em></div>
           <p className="design-inspector-hint">选中画布或图层的节点后编辑属性；双击文本节点可直接改字。</p>
         </div>
