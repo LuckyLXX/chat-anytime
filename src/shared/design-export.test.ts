@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createDesignDoc, type DesignDoc, type DesignNode } from "./design-schema.js";
-import { designNodeStyle, exportDesignHtml } from "./design-export.js";
+import { designNodeStyle, designNodeStyleObject, exportDesignHtml } from "./design-export.js";
 
 function cardDoc(): DesignDoc {
   const inner: DesignNode = { type: "text", id: "t1", name: "标题", x: 0, y: 0, w: 120, h: 32, text: "登录<Title>", fontSize: 24, fontWeight: 700, color: "#111", align: "center" };
@@ -57,6 +57,26 @@ describe("exportDesignHtml", () => {
     expect(html).not.toContain("隐藏");
   });
 
+  it("flex 子节点导出为 relative 且省略 left/top，普通节点保持绝对定位", () => {
+    const html = exportDesignHtml(cardDoc());
+    const cardIndex = html.indexOf('data-name="标题"');
+    const titleStyle = html.slice(html.lastIndexOf('<div style="', cardIndex), cardIndex);
+    expect(titleStyle).toContain("position:relative;");
+    expect(titleStyle).not.toContain("left:");
+    // 卡片外的游离矩形仍是绝对定位。
+    expect(html).toContain("position:absolute;left:400px;top:30px;");
+  });
+
+  it("样式/style 块注入被转义（shadow 双引号、background 断裂 style 均不可行）", () => {
+    const doc = cardDoc();
+    doc.nodes[0]!.shadow = 'red" onerror="alert(1)';
+    doc.canvas.background = 'blue</style><script>alert(2)</script>';
+    const html = exportDesignHtml(doc);
+    expect(html).not.toContain('onerror="alert(1)"');
+    expect(html).not.toContain("<script>");
+    expect(html).toContain("&lt;script&gt;");
+  });
+
   it("rect 的描边与透明度", () => {
     const html = exportDesignHtml(cardDoc());
     expect(html).toContain("border:2px solid #1d4ed8;");
@@ -83,5 +103,23 @@ describe("designNodeStyle", () => {
     const style = designNodeStyle({ type: "rect", id: "r", x: 1, y: 2, w: 3, h: 4 });
     expect(style).not.toContain("flex");
     expect(style).toContain("left:1px;top:2px;");
+  });
+
+  it("flex 父的子节点发 relative 且省略 left/top（真实 flex 排布）", () => {
+    const child = { type: "rect", id: "c", x: 9, y: 9, w: 30, h: 20, fill: "#fff" } as const;
+    const style = designNodeStyleObject(child, true);
+    expect(style.position).toBe("relative");
+    expect(style.left).toBeUndefined();
+    expect(style.top).toBeUndefined();
+    expect(style.width).toBe("30px");
+    const absolute = designNodeStyleObject(child, false);
+    expect(absolute.position).toBe("absolute");
+    expect(absolute.left).toBe("9px");
+  });
+
+  it("样式值中的 HTML 特殊字符被转义（防属性注入）", () => {
+    const hostile = designNodeStyle({ type: "rect", id: "r", x: 0, y: 0, w: 5, h: 5, shadow: 'red" onerror="alert(1)' });
+    expect(hostile).toContain('box-shadow:red&quot; onerror=&quot;alert(1);');
+    expect(hostile).not.toContain('onerror="alert');
   });
 });

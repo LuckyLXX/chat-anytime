@@ -1,7 +1,11 @@
 /**
  * 设计稿 → HTML+CSS 单文件导出（内联样式）。纯函数、零 DOM 依赖（utility
  * 与 renderer 都可直接用）。节点树展开规则与画布渲染（DesignNodeView）同构：
- * 绝对定位 div（left/top/width/height 内联）+ layout frame 走 flex。
+ * 默认绝对定位 div（left/top/width/height 内联）；layout frame 自身 display:flex，
+ * 其子节点发 position:relative 且省略 left/top（真实 flex 排布，x/y 忽略）。
+ *
+ * 安全：拼进 style 属性/样式块的值一律经 escapeHtml（设计字段是 AI 工具入参或
+ * 用户粘贴值，属不可信输入——`"` 会闭合 HTML 属性、`</style>` 会断裂样式块）。
  */
 
 import type { DesignDoc, DesignLayout, DesignNode } from "./design-schema.js";
@@ -25,15 +29,25 @@ function paddingValue(padding: NonNullable<DesignLayout["padding"]>): string | u
   return `${top}px ${right}px ${bottom}px ${left}px`;
 }
 
-/** 单节点共享的盒样式声明（画布/导出同构的单一来源）。 */
-export function designNodeDeclarations(node: DesignNode): [string, string][] {
-  const decls: [string, string][] = [
-    ["position", "absolute"],
-    ["left", `${node.x}px`],
-    ["top", `${node.y}px`],
-    ["width", `${node.w}px`],
-    ["height", `${node.h}px`]
-  ];
+/**
+ * 单节点共享的盒样式声明（画布/导出同构的单一来源）。
+ * `inFlexParent`：父节点声明了 layout（flex）——此时本节点由父容器排布，
+ * 发 position:relative 并省略 left/top（x/y 忽略），宽高作为弹性尺寸。
+ */
+export function designNodeDeclarations(node: DesignNode, inFlexParent = false): [string, string][] {
+  const decls: [string, string][] = inFlexParent
+    ? [
+        ["position", "relative"],
+        ["width", `${node.w}px`],
+        ["height", `${node.h}px`]
+      ]
+    : [
+        ["position", "absolute"],
+        ["left", `${node.x}px`],
+        ["top", `${node.y}px`],
+        ["width", `${node.w}px`],
+        ["height", `${node.h}px`]
+      ];
   const layout = node.layout;
   if (layout) {
     decls.push(["display", "flex"]);
@@ -64,19 +78,19 @@ export function designNodeDeclarations(node: DesignNode): [string, string][] {
   return decls;
 }
 
-/** 内联样式字符串（HTML 导出用）。 */
-export function designNodeStyle(node: DesignNode): string {
-  return designNodeDeclarations(node).map(([property, value]) => `${property}:${value};`).join("");
+/** 内联样式字符串（HTML 导出用；值经 HTML 转义，可安全拼进属性）。 */
+export function designNodeStyle(node: DesignNode, inFlexParent = false): string {
+  return designNodeDeclarations(node, inFlexParent).map(([property, value]) => `${property}:${escapeHtml(value)};`).join("");
 }
 
-/** React style 对象（画布渲染用，与导出同源；键名转 camelCase 供 React 使用）。 */
-export function designNodeStyleObject(node: DesignNode): Record<string, string> {
-  return Object.fromEntries(designNodeDeclarations(node).map(([property, value]) => [property.replace(/-([a-z])/gu, (_match, char: string) => char.toUpperCase()), value]));
+/** React style 对象（画布渲染用，与导出同源；键名转 camelCase 供 React 使用）。React 负责转义，值保持原样。 */
+export function designNodeStyleObject(node: DesignNode, inFlexParent = false): Record<string, string> {
+  return Object.fromEntries(designNodeDeclarations(node, inFlexParent).map(([property, value]) => [property.replace(/-([a-z])/gu, (_match, char: string) => char.toUpperCase()), value]));
 }
 
-function nodeHtml(node: DesignNode, indent: string): string {
+function nodeHtml(node: DesignNode, indent: string, inFlexParent = false): string {
   if (node.visible === false) return "";
-  const style = designNodeStyle(node);
+  const style = designNodeStyle(node, inFlexParent);
   const name = node.name ? ` data-name="${escapeHtml(node.name)}"` : "";
   if (node.type === "image") {
     const src = node.src ?? "";
@@ -89,14 +103,15 @@ function nodeHtml(node: DesignNode, indent: string): string {
     return `${open}${content}</div>\n`;
   }
   if (!node.children || node.children.length === 0) return `${open}</div>\n`;
-  const inner = node.children.map((child) => nodeHtml(child, `${indent}  `)).join("");
+  const childInFlex = Boolean(node.layout);
+  const inner = node.children.map((child) => nodeHtml(child, `${indent}  `, childInFlex)).join("");
   return `${open}\n${inner}${indent}</div>\n`;
 }
 
 /** 导出为可直接打开的 HTML 单文件（body margin 0、画布尺寸与背景）。 */
 export function exportDesignHtml(doc: DesignDoc): string {
   const canvas = doc.canvas;
-  const background = canvas.background ? `background:${canvas.background};` : "";
+  const background = canvas.background ? `background:${escapeHtml(canvas.background)};` : "";
   const nodesHtml = doc.nodes.map((node) => nodeHtml(node, "    ")).join("");
   return `<!DOCTYPE html>
 <!-- 由 PiDesktop 设计模式导出：${escapeHtml(doc.name)} -->
