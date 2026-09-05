@@ -15,50 +15,63 @@ function escapeHtml(text: string): string {
     .replaceAll("'", "&#39;");
 }
 
-function paddingCss(padding: NonNullable<DesignLayout["padding"]>): string | undefined {
-  if (typeof padding === "number") return padding > 0 ? `padding:${padding}px;` : undefined;
+function paddingValue(padding: NonNullable<DesignLayout["padding"]>): string | undefined {
+  if (typeof padding === "number") return padding > 0 ? `${padding}px` : undefined;
   const top = padding.top ?? 0;
   const right = padding.right ?? 0;
   const bottom = padding.bottom ?? 0;
   const left = padding.left ?? 0;
   if (top === 0 && right === 0 && bottom === 0 && left === 0) return undefined;
-  return `padding:${top}px ${right}px ${bottom}px ${left}px;`;
+  return `${top}px ${right}px ${bottom}px ${left}px`;
 }
 
-function layoutCss(node: DesignNode): string {
+/** 单节点共享的盒样式声明（画布/导出同构的单一来源）。 */
+export function designNodeDeclarations(node: DesignNode): [string, string][] {
+  const decls: [string, string][] = [
+    ["position", "absolute"],
+    ["left", `${node.x}px`],
+    ["top", `${node.y}px`],
+    ["width", `${node.w}px`],
+    ["height", `${node.h}px`]
+  ];
   const layout = node.layout;
-  if (!layout) return "";
-  let css = "display:flex;";
-  css += `flex-direction:${layout.direction === "column" ? "column" : "row"};`;
-  if (layout.gap && layout.gap > 0) css += `gap:${layout.gap}px;`;
-  if (layout.padding !== undefined) {
-    const padding = paddingCss(layout.padding);
-    if (padding) css += padding;
+  if (layout) {
+    decls.push(["display", "flex"]);
+    decls.push(["flex-direction", layout.direction === "column" ? "column" : "row"]);
+    if (layout.gap && layout.gap > 0) decls.push(["gap", `${layout.gap}px`]);
+    if (layout.padding !== undefined) {
+      const padding = paddingValue(layout.padding);
+      if (padding) decls.push(["padding", padding]);
+    }
+    if (layout.justify) decls.push(["justify-content", layout.justify]);
+    if (layout.align) decls.push(["align-items", layout.align]);
   }
-  if (layout.justify) css += `justify-content:${layout.justify};`;
-  if (layout.align) css += `align-items:${layout.align};`;
-  return css;
+  if (node.fill) decls.push(["background", node.fill]);
+  if (node.stroke) decls.push(["border", `${node.strokeWidth ?? 1}px solid ${node.stroke}`]);
+  if (node.radius) decls.push(["border-radius", `${node.radius}px`]);
+  if (node.opacity !== undefined && node.opacity < 1) decls.push(["opacity", String(node.opacity)]);
+  if (node.shadow) decls.push(["box-shadow", node.shadow]);
+  if (node.type === "text") {
+    decls.push(["font-size", `${node.fontSize ?? 14}px`]);
+    decls.push(["font-weight", String(node.fontWeight ?? 400)]);
+    if (node.color) decls.push(["color", node.color]);
+    if (node.lineHeight) decls.push(["line-height", String(node.lineHeight)]);
+    decls.push(["text-align", node.align ?? "left"]);
+    decls.push(["white-space", "pre-wrap"]);
+    decls.push(["overflow-wrap", "break-word"]);
+  }
+  if (node.type === "image") decls.push(["object-fit", "cover"]);
+  return decls;
 }
 
-/** 单节点共享的盒样式（画布与导出同一套内联样式语义）。 */
+/** 内联样式字符串（HTML 导出用）。 */
 export function designNodeStyle(node: DesignNode): string {
-  let css = `position:absolute;left:${node.x}px;top:${node.y}px;width:${node.w}px;height:${node.h}px;`;
-  css += layoutCss(node);
-  if (node.fill) css += `background:${node.fill};`;
-  if (node.stroke) css += `border:${node.strokeWidth ?? 1}px solid ${node.stroke};`;
-  if (node.radius) css += `border-radius:${node.radius}px;`;
-  if (node.opacity !== undefined && node.opacity < 1) css += `opacity:${node.opacity};`;
-  if (node.shadow) css += `box-shadow:${node.shadow};`;
-  if (node.type === "text") {
-    css += `font-size:${node.fontSize ?? 14}px;`;
-    css += `font-weight:${node.fontWeight ?? 400};`;
-    if (node.color) css += `color:${node.color};`;
-    if (node.lineHeight) css += `line-height:${node.lineHeight};`;
-    css += `text-align:${node.align ?? "left"};`;
-    css += "white-space:pre-wrap;overflow-wrap:break-word;";
-  }
-  if (node.type === "image") css += "object-fit:cover;";
-  return css;
+  return designNodeDeclarations(node).map(([property, value]) => `${property}:${value};`).join("");
+}
+
+/** React style 对象（画布渲染用，与导出同源；键名转 camelCase 供 React 使用）。 */
+export function designNodeStyleObject(node: DesignNode): Record<string, string> {
+  return Object.fromEntries(designNodeDeclarations(node).map(([property, value]) => [property.replace(/-([a-z])/gu, (_match, char: string) => char.toUpperCase()), value]));
 }
 
 function nodeHtml(node: DesignNode, indent: string): string {
