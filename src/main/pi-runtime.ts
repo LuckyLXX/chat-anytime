@@ -2199,6 +2199,8 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   const browserTools = runtimeBrowser.buildBrowserTools({
     request: (op) => requestBrowserAutomation(recordSessionId, op),
     enabled: () => settings?.browser?.enabled !== false,
+    // 本地文件导航（file:// → 静态预览服务）需要知道记录工作区，作为挂载根。
+    workspace: () => recordWorkspace || undefined,
       resolveUploadFiles: (files) => Promise.resolve(resolveWorkspaceUploadFiles(recordWorkspace, files)),
     // 把截图落盘到本记录工作区的 .pidesktop/screenshots/，返回可交给
     // recognize_images 的工作区相对路径；走 recordWorkspace 而非全局

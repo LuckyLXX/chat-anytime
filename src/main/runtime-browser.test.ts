@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { BrowserAutomationRequest, BrowserAutomationResult } from "../shared/protocol.js";
-import { buildBrowserTools, type BrowserToolDeps } from "./runtime-browser.js";
+import { buildBrowserTools, runWithBusyRetry, type BrowserToolDeps } from "./runtime-browser.js";
 
 type OkResult = Extract<BrowserAutomationResult, { ok: true }>;
 
@@ -174,5 +174,76 @@ describe("browser tool cluster", () => {
     });
     const click = tools.find((tool) => tool.name === "browser_click")!;
     await expect(execute(click, { ref: "@e3" })).rejects.toThrow(/browser_snapshot/);
+  });
+});
+
+describe("busy-tab retry", () => {
+  const busy = { ok: false, error: "浏览器操作失败：该浏览器标签页正忙（另一个会话正在操作）" } as const;
+
+  it("retries busy-tab failures with backoff and succeeds", async () => {
+    const delays: number[] = [];
+    let calls = 0;
+    const result = await runWithBusyRetry({ op: "get", what: "title" }, () => {
+      calls += 1;
+      return Promise.resolve(calls < 3 ? busy : okResult({ kind: "get", value: "标题" }));
+    }, (ms) => {
+      delays.push(ms);
+      return Promise.resolve();
+    });
+    expect(result.ok).toBe(true);
+    expect(calls).toBe(3);
+    expect(delays).toEqual([1500, 3000]);
+  });
+
+  it("gives up after the third retry and returns the busy error", async () => {
+    let calls = 0;
+    const result = await runWithBusyRetry({ op: "get", what: "title" }, () => {
+      calls += 1;
+      return Promise.resolve(busy);
+    }, () => Promise.resolve());
+    expect(result.ok).toBe(false);
+    expect(calls).toBe(4); // 1 initial + 3 retries
+  });
+
+  it("returns non-busy failures immediately without retrying", async () => {
+    let calls = 0;
+    const result = await runWithBusyRetry({ op: "get", what: "title" }, () => {
+      calls += 1;
+      return Promise.resolve({ ok: false, error: "导航失败：连接超时" });
+    }, () => Promise.resolve());
+    expect(result.ok).toBe(false);
+    expect(calls).toBe(1);
+  });
+
+  it("transparently retries through a browser tool", async () => {
+    let calls = 0;
+    const deps: BrowserToolDeps = {
+      enabled: () => true,
+      request: async () => {
+        calls += 1;
+        return calls === 1 ? busy : okResult({ kind: "get", value: "标题" });
+      }
+    };
+    const tools = buildBrowserTools(deps);
+    const get = tools.find((tool) => tool.name === "browser_get")!;
+    const result = await execute(get, { what: "title" }) as { content: Array<{ text: string }> };
+    expect(calls).toBe(2);
+    expect(result.content[0]!.text).toContain("页面标题");
+  });
+
+  it("passes the record workspace along on navigate", async () => {
+    const calls: BrowserAutomationRequest[] = [];
+    const deps: BrowserToolDeps = {
+      enabled: () => true,
+      workspace: () => "D:\\工作区",
+      request: async (op) => {
+        calls.push(op);
+        return okResult({ kind: "navigate", url: "https://example.com", title: "Example" });
+      }
+    };
+    const tools = buildBrowserTools(deps);
+    const navigate = tools.find((tool) => tool.name === "browser_navigate")!;
+    await execute(navigate, { url: "https://example.com" });
+    expect(calls[0]).toEqual({ op: "navigate", url: "https://example.com", workspace: "D:\\工作区" });
   });
 });

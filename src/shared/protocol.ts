@@ -624,7 +624,8 @@ export type BrowserAutomationWait =
 
 export type BrowserAutomationRequest =
   | { op: "attach" }
-  | { op: "navigate"; url: string }
+  /** workspace：本地文件导航（file:// / 绝对路径）挂载静态预览服务的优先根目录。 */
+  | { op: "navigate"; url: string; workspace?: string }
   | { op: "snapshot" }
   | { op: "click"; ref: string }
   | { op: "type"; ref: string; text: string; mode: "fill" | "append" }

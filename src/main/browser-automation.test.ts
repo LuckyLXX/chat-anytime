@@ -6,7 +6,9 @@ import {
   buildTypeScript,
   elementSignature,
   formatSnapshotLine,
-  urlPatternMatcher
+  isSideEffectRejection,
+  urlPatternMatcher,
+  withOpTimeout
 } from "./browser-automation.js";
 
 describe("browser automation url patterns", () => {
@@ -113,5 +115,34 @@ describe("browser automation page scripts", () => {
     expect(up).toContain("scrollBy(0, -500)");
     const element = buildScrollScript("down", 500, 2);
     expect(element).toContain("scrollIntoView");
+  });
+});
+
+describe("read-mode side-effect rejection classifier", () => {
+  it("recognizes V8 debug-evaluate rejections across message shapes", () => {
+    expect(isSideEffectRejection("EvalError: Possible side-effect in debug-evaluate")).toBe(true);
+    expect(isSideEffectRejection("EvalError: Possible side effect in debugger evaluate")).toBe(true);
+  });
+
+  it("leaves ordinary script errors alone", () => {
+    expect(isSideEffectRejection("TypeError: Cannot read properties of null (reading 'x')")).toBe(false);
+    expect(isSideEffectRejection("SyntaxError: Unexpected token")).toBe(false);
+  });
+});
+
+describe("withOpTimeout", () => {
+  it("passes through the operation result when it settles in time", async () => {
+    const result = await withOpTimeout(Promise.resolve("ok"), 1000);
+    expect(result).toBe("ok");
+  });
+
+  it("rejects with a retryable error and swallows the zombie outcome", async () => {
+    let release: (value: string) => void = () => undefined;
+    const slow = new Promise<string>((resolve) => {
+      release = resolve;
+    });
+    await expect(withOpTimeout(slow, 20)).rejects.toThrow(/超时（0 秒无响应）/);
+    release("late");
+    await new Promise((resolve) => setTimeout(resolve, 5));
   });
 });

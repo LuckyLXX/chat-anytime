@@ -23,6 +23,8 @@ import type {
   BrowserAutomationWait,
   BrowserTabSummary
 } from "../shared/protocol.js";
+import { BrowserStaticServer, detectLocalFilePath } from "./browser-static-server.js";
+import { normalizeBrowserUrl } from "./browser-preview-url.js";
 import type { BrowserPreviewController } from "./browser-preview.js";
 
 /** Hard cap of interactable elements a snapshot reports. */
@@ -498,6 +500,43 @@ function refIndex(ref: string): number | undefined {
   return Number.isInteger(index) && index >= 0 ? index : undefined;
 }
 
+/**
+ * Recognizes V8's debug-evaluate false positives: `throwOnSideEffect` rejects
+ * nearly every DOM method call (querySelectorAll, getComputedStyle, …), not
+ * just real mutations. The message differs across V8 versions, so match the
+ * stable parts ("side-effect" / "debug-evaluate").
+ */
+export function isSideEffectRejection(detail: string): boolean {
+  return /side.?effect|debug.?evaluate/iu.test(detail);
+}
+
+/** Utility-process RPC gives up at 120s; settle the main side slightly earlier so the tab lock is always released with a clear error. */
+export const MAIN_OP_TIMEOUT_MS = 110_000;
+
+/**
+ * Bounds one in-tab operation. On timeout the caller's error path releases the
+ * busy lock immediately; the underlying op keeps running detached ("zombie")
+ * and its eventual outcome is swallowed — the model gets a retryable error
+ * instead of the old behaviour where a timed-out op held the lock until it
+ * settled and every follow-up call failed with 标签页正忙.
+ */
+export async function withOpTimeout<T>(promise: Promise<T>, timeoutMs = MAIN_OP_TIMEOUT_MS): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`浏览器操作超时（${Math.round(timeoutMs / 1000)} 秒无响应），标签页已释放；原操作可能仍在后台，请稍后重试`)),
+      timeoutMs
+    );
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer);
+    // A zombie op settling later must not surface as an unhandled rejection.
+    promise.catch(() => undefined);
+  }
+}
+
 function automationTabId(): string {
   return `${AUTOMATION_TAB_PREFIX}${randomUUID()}`;
 }
@@ -515,14 +554,16 @@ export class BrowserAutomationController {
   constructor(
     private readonly preview: BrowserPreviewController,
     /** Fired when a session starts operating on a tab (bind time only) so the renderer can reveal the preview panel. */
-    private readonly notifyAutomationStarted: (tabId: string) => void = () => undefined
+    private readonly notifyAutomationStarted: (tabId: string) => void = () => undefined,
+    /** Loopback static server backing local-file navigation (file:// → http://127.0.0.1). */
+    private readonly staticFiles: BrowserStaticServer = new BrowserStaticServer()
   ) {}
 
   async handle(sessionKey: string, request: BrowserAutomationRequest): Promise<BrowserAutomationResult> {
     try {
       const tabId = request.op === "attach" ? this.attachTab(sessionKey) : this.tabFor(sessionKey);
       return await this.withTabLock(tabId, () => this.withAutomationGuard(tabId, async () => {
-          const result = await this.execute(sessionKey, tabId, request);
+          const result = await withOpTimeout(this.execute(sessionKey, tabId, request));
           this.assertNotCancelled(tabId);
           return result;
         }));
@@ -553,6 +594,7 @@ export class BrowserAutomationController {
     this.tabRefs.clear();
     this.busyTabs.clear();
       this.cancelRequests.clear();
+    this.staticFiles.dispose();
   }
 
   /** Bind a session to the foreground preview tab, creating a dedicated one if none exists. */
@@ -581,7 +623,7 @@ export class BrowserAutomationController {
   }
 
   private async withTabLock<T>(tabId: string, fn: () => Promise<T>): Promise<T> {
-    if (this.busyTabs.has(tabId)) throw new Error("该浏览器标签页正忙（另一个会话正在操作），请稍后重试");
+    if (this.busyTabs.has(tabId)) throw new Error("该浏览器标签页正忙（另一个会话正在操作）");
       this.assertNotCancelled(tabId);
     this.busyTabs.add(tabId);
     try {
@@ -626,10 +668,11 @@ export class BrowserAutomationController {
         return { ok: true, data: { kind: "attach", tabId, url: state.url } };
       }
       case "navigate": {
+        const target = await this.resolveNavigationTarget(request.url, request.workspace);
         this.tabRefs.delete(tabId);
         this.preview.setAutomating(tabId, `正在导航到 ${request.url}`);
         try {
-          const state = await this.preview.handle({ type: "navigate", tabId, url: request.url });
+          const state = await this.preview.handle({ type: "navigate", tabId, url: target });
           if (state.error) return { ok: false, error: `导航失败：${state.error}` };
           return { ok: true, data: { kind: "navigate", url: state.url, title: state.title } };
         } finally {
@@ -667,6 +710,18 @@ export class BrowserAutomationController {
     const contents = this.preview.webContentsFor(tabId);
     if (!contents) throw new Error(`浏览器标签页不存在：${tabId}（可能已被关闭，请用 browser_tabs 查看当前标签）`);
     return contents;
+  }
+
+  /**
+   * Map a navigate target onto something the preview can load: local files
+   * (file:// URLs or Windows absolute paths) are served over the loopback
+   * static server rooted at the workspace, so a file page never gets a
+   * local-file origin. Everything else keeps the http/https normalization.
+   */
+  private async resolveNavigationTarget(raw: string, workspace?: string): Promise<string> {
+    const filePath = detectLocalFilePath(raw);
+    if (!filePath) return normalizeBrowserUrl(raw);
+    return this.staticFiles.urlForFile(filePath, workspace);
   }
 
   private async cdp(contents: WebContents, method: string, params: Record<string, unknown> = {}): Promise<any> {
@@ -867,6 +922,12 @@ export class BrowserAutomationController {
       const result = await this.cdp(contents, "Runtime.evaluate", params);
       if (result.exceptionDetails) {
         const detail = result.exceptionDetails.exception?.description ?? result.exceptionDetails.text ?? "未知错误";
+        if (params.throwOnSideEffect && isSideEffectRejection(String(detail))) {
+          // V8 只读求值不认识任何 DOM 方法调用——纯读脚本（querySelectorAll /
+          // getComputedStyle 等）几乎必然被误判。给出升级路径而不是让模型
+          // 对同一表达式反复重试：write 模式有权限门控，安全性不变。
+          throw new Error("只读求值被 V8 副作用检测拦截（querySelectorAll、getComputedStyle 等纯读 DOM 调用常被误判，并非表达式真的有写入）。若确认表达式只读，请改用 mode=write 重新执行本表达式（会请求一次授权）；只想取数据时 browser_snapshot / browser_get 通常已够用。");
+        }
         throw new Error(`脚本执行失败：${String(detail).split("\n")[0]}`);
       }
       const remote = result.result as { value?: unknown; description?: string; type?: string };

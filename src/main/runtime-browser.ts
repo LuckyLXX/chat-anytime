@@ -25,6 +25,8 @@ export interface BrowserToolDeps {
   request: (op: BrowserAutomationRequest) => Promise<BrowserAutomationResult>;
   /** Master switch, read live per call (settings.browser?.enabled !== false). */
   enabled: () => boolean;
+  /** The record's workspace, passed along with navigate so local files mount under it. */
+  workspace?: () => string | undefined;
   /** Resolve browser_upload workspace-relative files to absolute paths. */
   resolveUploadFiles?: (files: string[]) => Promise<string[]>;
   /** Persist a captured screenshot to the workspace's default dir; returns a workspace-relative path the model can feed recognize_images. */
@@ -39,11 +41,36 @@ function checkEnabled(enabled: () => boolean): void {
   if (!enabled()) throw new Error(DISABLED_TEXT);
 }
 
-/** Run one operation; errors surface as tool errors with the main-process message. */
+/** Stable marker of the per-tab busy lock; the retry below keys on it. */
+const BUSY_MARKER = "标签页正忙";
+/** Short backoff for busy-tab contention (incl. a same-tab op outliving its RPC timeout). */
+const BUSY_RETRY_DELAYS_MS = [1500, 3000, 4500];
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Run one operation; errors surface as tool errors with the main-process message.
+ * A busy-tab rejection is retried with a short backoff instead of burning a
+ * whole LLM round trip on what is usually a just-finished previous operation.
+ */
+export async function runWithBusyRetry(
+  op: BrowserAutomationRequest,
+  attempt: (op: BrowserAutomationRequest) => Promise<BrowserAutomationResult>,
+  delay: (ms: number) => Promise<void> = sleep
+): Promise<BrowserAutomationResult> {
+  for (let index = 0; ; index++) {
+    const result = await attempt(op);
+    if (result.ok || !result.error.includes(BUSY_MARKER) || index >= BUSY_RETRY_DELAYS_MS.length) return result;
+    await delay(BUSY_RETRY_DELAYS_MS[index]!);
+  }
+}
+
 async function run(deps: BrowserToolDeps, op: BrowserAutomationRequest): Promise<BrowserAutomationResult> {
   checkEnabled(deps.enabled);
   try {
-    return await deps.request(op);
+    return await runWithBusyRetry(op, deps.request);
   } catch (error) {
     throw new Error(`浏览器操作失败：${error instanceof Error ? error.message : String(error)}`);
   }
@@ -111,18 +138,19 @@ export function buildBrowserTools(deps: BrowserToolDeps): ToolDefinition[] {
       label: "浏览器导航",
       description: [
         "在内置浏览器的当前标签页中打开指定 URL（http/https 或 localhost 端口）。",
+        "也支持打开本地文件：传工作区内文件的 file:/// 完整地址（如 file:///D:/工作区/index.html）或 Windows 绝对路径，会自动映射为本地静态服务地址（等价于 http 服务，脚本和相对资源正常工作）。",
         "本操作会请求用户授权（网络导航），被拒绝时会收到明确提示。",
         "导航完成后建议调用 browser_wait（页面加载）再 browser_snapshot 查看页面。",
         "多标签场景可先用 browser_tabs 管理标签页。"
       ].join(""),
-      promptSnippet: "browser_navigate: 在内置浏览器打开网址",
+      promptSnippet: "browser_navigate: 在内置浏览器打开网址或本地文件",
       parameters: Type.Object({
-        url: Type.String({ description: "要打开的完整网址，如 https://example.com 或 http://localhost:3000" })
+        url: Type.String({ description: "要打开的完整网址（https://example.com、http://localhost:3000）或本地文件 file:/// 地址" })
       }),
       execute: async (_id, params) => {
         const url = typeof params?.url === "string" ? params.url.trim() : "";
         if (!url) throw new Error("请提供要打开的 URL");
-        const result = await run(deps, { op: "navigate", url });
+        const result = await run(deps, { op: "navigate", url, workspace: deps.workspace?.() });
         failIfNotOk(result);
         if (result.data.kind !== "navigate") throw new Error("导航返回了意外结果");
         return { content: [{ type: "text" as const, text: `已导航到 ${result.data.url}（${result.data.title || "标题未知"}）。页面可能仍在加载，建议先 browser_wait（页面加载）再 browser_snapshot。` }], details: { url: result.data.url } };
@@ -290,8 +318,9 @@ export function buildBrowserTools(deps: BrowserToolDeps): ToolDefinition[] {
       label: "浏览器执行脚本",
       description: [
         "在内置浏览器当前页面执行 JavaScript 表达式并返回结果（支持 Promise）。",
-        "mode=read：只读表达式（读取 DOM、抓取数据等），直接执行。",
+        "mode=read：只读表达式（读取 DOM、抓取数据等），直接执行、无需授权；由 V8 只读检测强制保证。",
         "mode=write：可能修改页面的表达式（点击、修改内容、提交等），会请求用户授权。",
+        "注意：V8 只读检测不认识 DOM 方法调用，querySelectorAll、getComputedStyle、getBoundingClientRect 等纯读调用也会被拦截——收到「副作用检测拦截」错误时，确认表达式只读后直接改用 mode=write 重试即可。",
         "数据抓取优先用 browser_snapshot / browser_get；本工具用于快照覆盖不到的复杂提取（如 canvas、复杂 JSON 数据、SPA 动态内容）。",
         "表达式在页面上下文执行，返回值会序列化为文本（上限约 8000 字符），请让表达式返回紧凑的 JSON 字符串。"
       ].join(""),
