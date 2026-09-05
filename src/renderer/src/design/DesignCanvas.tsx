@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode, type WheelEvent as ReactWheelEvent } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode, type WheelEvent as ReactWheelEvent } from "react";
 import { designNodeStyle, designNodeStyleObject, exportDesignHtml } from "../../../shared/design-export.js";
 import type { DesignDoc, DesignNode, DesignNodePatch } from "../../../shared/design-schema.js";
 import { absoluteRects, snapDelta, type NodeRect, type SnapGuide } from "./design-geometry.js";
@@ -37,13 +37,15 @@ interface WorldPoint {
 }
 
 /** 单节点递归渲染（div/img + 内联样式，与导出同构）。 */
-const DesignNodeView = memo(function DesignNodeView({ node, onSelect, onDoubleClick }: {
+const DesignNodeView = memo(function DesignNodeView({ node, inFlexParent, onSelect, onDoubleClick }: {
   node: DesignNode;
+  /** 父节点声明了 layout（flex）：本节点由父容器排布，x/y 忽略。 */
+  inFlexParent: boolean;
   onSelect(nodeId: string, event: ReactPointerEvent<HTMLElement>): void;
   onDoubleClick(node: DesignNode): void;
 }): ReactNode {
   if (node.visible === false) return null;
-  const style = designNodeStyleObject(node);
+  const style = designNodeStyleObject(node, inFlexParent);
   const handlers = {
     "data-node-id": node.id,
     onPointerDown: (event: ReactPointerEvent<HTMLElement>) => onSelect(node.id, event),
@@ -52,9 +54,10 @@ const DesignNodeView = memo(function DesignNodeView({ node, onSelect, onDoubleCl
   if (node.type === "image") {
     return <img {...handlers} src={node.src} alt={node.name ?? ""} draggable={false} style={style} />;
   }
+  const childInFlex = Boolean(node.layout);
   return (
     <div {...handlers} style={style}>
-      {node.type === "text" ? node.text : node.children?.map((child) => <DesignNodeView key={child.id} node={child} onSelect={onSelect} onDoubleClick={onDoubleClick} />)}
+      {node.type === "text" ? node.text : node.children?.map((child) => <DesignNodeView key={child.id} node={child} inFlexParent={childInFlex} onSelect={onSelect} onDoubleClick={onDoubleClick} />)}
     </div>
   );
 });
@@ -70,12 +73,33 @@ export function DesignCanvas({ doc, zoom, pan, onPanChange, onZoomChange, select
   const gesture = useRef<
     | { kind: "pan"; startPan: { x: number; y: number }; start: WorldPoint }
     | { kind: "drag"; id: string; start: WorldPoint; origin: { x: number; y: number }; moved: boolean; rect: NodeRect }
-    | { kind: "resize"; id: string; handle: ResizeHandle; start: WorldPoint; origin: NodeRect; proportional: boolean }
+    | { kind: "resize"; id: string; handle: ResizeHandle; start: WorldPoint; /** 相对父节点的原始矩形（写回 node.x/y 的同一坐标系）。 */ origin: { x: number; y: number; w: number; h: number }; proportional: boolean }
     | undefined
   >(undefined);
 
   const rectsRef = useRef<Map<string, NodeRect>>(new Map());
   rectsRef.current = absoluteRects(doc.nodes);
+  const worldRef = useRef<HTMLDivElement>(null);
+  // DOM 实测选中节点矩形：flex 子节点的真实位置由布局引擎计算（absoluteRects 的
+  // 相对坐标近似不可用）。DOM 提交后同步测量，getBoundingClientRect 差值除以 zoom
+  // 得回 world 坐标（平移/缩放自动抵消）。
+  const [selectionRect, setSelectionRect] = useState<NodeRect | undefined>(undefined);
+  useLayoutEffect(() => {
+    if (!selectedId) {
+      setSelectionRect(undefined);
+      return;
+    }
+    const world = worldRef.current;
+    const element = world?.querySelector(`[data-node-id="${CSS.escape(selectedId)}"]`) as HTMLElement | null;
+    if (!world || !element) {
+      setSelectionRect(undefined);
+      return;
+    }
+    const worldBox = world.getBoundingClientRect();
+    const box = element.getBoundingClientRect();
+    const scale = zoom || 1;
+    setSelectionRect({ id: selectedId, x: (box.left - worldBox.left) / scale, y: (box.top - worldBox.top) / scale, w: box.width / scale, h: box.height / scale });
+  }, [selectedId, doc, zoom, pan]);
 
   useEffect(() => {
     const down = (event: KeyboardEvent): void => {
@@ -190,10 +214,14 @@ export function DesignCanvas({ doc, zoom, pan, onPanChange, onZoomChange, select
   }, [onGestureEnd]);
 
   const startResize = useCallback((handle: ResizeHandle, event: ReactPointerEvent<HTMLDivElement>) => {
-    if (!selectedRect) return;
+    if (!selectionRect || !selectedId) return;
     event.stopPropagation();
-    gesture.current = { kind: "resize", id: selectedRect.id, handle, start: toWorld(event.clientX, event.clientY), origin: selectedRect, proportional: event.shiftKey };
-  }, [selectedRect, toWorld]);
+    const node = findDeep(doc.nodes, selectedId);
+    if (!node) return;
+    // origin 必须是相对父节点的坐标（与 node.x/y 同坐标系）：absoluteRect 是 world
+    // 坐标，直接回写会把父级偏移叠进子节点（嵌套节点写坏坐标且落盘）。
+    gesture.current = { kind: "resize", id: selectionRect.id, handle, start: toWorld(event.clientX, event.clientY), origin: { x: node.x, y: node.y, w: node.w, h: node.h }, proportional: event.shiftKey };
+  }, [selectionRect, selectedId, doc.nodes, toWorld]);
 
   const editingNode = editingId ? findDeep(doc.nodes, editingId) : undefined;
   const editingRect = editingId ? rectsRef.current.get(editingId) : undefined;
@@ -216,21 +244,22 @@ export function DesignCanvas({ doc, zoom, pan, onPanChange, onZoomChange, select
       onScroll={(event) => event.preventDefault()}
     >
       <div
+        ref={worldRef}
         className="design-canvas-world"
         style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, width: doc.canvas.width, height: doc.canvas.height, background: doc.canvas.background }}
       >
         {doc.nodes.map((node) => (
-          <DesignNodeView key={node.id} node={node} onSelect={handleNodePointerDown} onDoubleClick={(node) => { if (node.type === "text") setEditingId(node.id); }} />
+          <DesignNodeView key={node.id} node={node} inFlexParent={false} onSelect={handleNodePointerDown} onDoubleClick={(node) => { if (node.type === "text") setEditingId(node.id); }} />
         ))}
-        {selectedRect && !editingId && (
+        {selectionRect && !editingId && (
           <>
-            <div className="design-selection" style={{ left: selectedRect.x, top: selectedRect.y, width: selectedRect.w, height: selectedRect.h, borderWidth: 1 / zoom }} />
+            <div className="design-selection" style={{ left: selectionRect.x, top: selectionRect.y, width: selectionRect.w, height: selectionRect.h, borderWidth: 1 / zoom }} />
             {HANDLES.map((handle) => (
               <div
                 key={handle}
                 className="design-handle"
                 data-handle={handle}
-                style={{ ...handleStyle(selectedRect, handle), width: 8 / zoom, height: 8 / zoom }}
+                style={{ ...handleStyle(selectionRect, handle), width: 8 / zoom, height: 8 / zoom }}
                 onPointerDown={(event) => startResize(handle, event)}
               />
             ))}
