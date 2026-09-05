@@ -430,7 +430,10 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 .design-layer-row:hover .design-layer-visibility, .design-layer-visibility:focus-visible { opacity: 1; }
 .design-layer-row.hidden .design-layer-visibility { opacity: 1; }
 .design-layer-visibility:hover { color: var(--text); background: var(--surface-button-hover); }
-.design-canvas { position: relative; min-width: 0; min-height: 0; overflow: hidden; background-color: var(--surface-muted); background-image: radial-gradient(circle, var(--border) 1px, transparent 1px); touch-action: none; }
+/* 画布必须绝对填充 wrapper：它唯一的子元素（world）是 absolute，普通块布局下
+   自动高度为 0 + overflow:hidden 会把整个画布裁没（真机首测白屏的根因）。 */
+.design-canvas-wrapper { position: relative; min-width: 0; min-height: 0; }
+.design-canvas { position: absolute; inset: 0; overflow: hidden; background-color: var(--surface-muted); background-image: radial-gradient(circle, var(--border) 1px, transparent 1px); touch-action: none; }
 .design-canvas-world { position: absolute; top: 0; left: 0; transform-origin: 0 0; box-shadow: 0 12px 48px rgba(0, 0, 0, .18); }
 .design-canvas-world [data-node-id] { cursor: move; }
 .design-selection { position: absolute; pointer-events: none; border: 1px solid var(--accent); }
