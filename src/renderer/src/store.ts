@@ -5,6 +5,9 @@ import type {
   ChatMessage,
   CheckpointRollbackResult,
   CustomProviderModel,
+  DesignCanvasInfo,
+  DesignDocSummary,
+  DesignNode,
   DesktopSettings,
   MemoryTopic,
   ModelOption,
@@ -48,6 +51,22 @@ export interface AutomationRunInfo {
   /** 终态推送携带的运行记录 id（toast「查看结果」直达寻址）。 */
   runId?: string;
   message?: string;
+  at: number;
+}
+
+/** 当前激活会话绑定的设计文档（design.state 推送的全量投影；画布组件据此渲染）。 */
+export interface DesignDocState {
+  docId: string;
+  name: string;
+  canvas: DesignCanvasInfo;
+  nodes: DesignNode[];
+  revision: number;
+  dirty: boolean;
+}
+
+/** 设计导出完成（design.exported 推送）；App 据此 toast。 */
+export interface DesignExportedInfo {
+  relativePath: string;
   at: number;
 }
 
@@ -177,6 +196,14 @@ interface DesktopState {
   hookRun?: HookRunResult;
   /** 最近一次 checkpoint 回滚结果；App 监听变化弹 toast 并刷新工作区树。 */
   checkpointResult?: CheckpointResultInfo;
+  /** 当前激活会话绑定的设计文档（design.state 推送；未绑定=undefined）。 */
+  designDoc?: DesignDocState;
+  /** 工作区设计文档列表（design.docs 推送全量替换）。 */
+  designDocs: DesignDocSummary[];
+  /** 每文档已见推送 revision：≤ 该值的重复/乱序推送直接跳过（防回环重渲）。 */
+  seenDesignRevisions: Record<string, number>;
+  /** 最近一次设计导出结果；App 监听变化弹 toast。 */
+  designExported?: DesignExportedInfo;
   /** 用量统计（设置页「用量统计」tab，按需拉取）；undefined=尚未请求。 */
   usageStats?: UsageStats;
   /** 用量统计请求中（面板显示载入态）。 */
@@ -290,6 +317,8 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   rollbacks: {},
   transcripts: {},
   transcriptErrors: {},
+  designDocs: [],
+  seenDesignRevisions: {},
   usageStatsLoading: false,
   settings: emptySettings,
   customProviderKeyConfigured: false,
@@ -462,6 +491,30 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
         break;
       case "subagent.transcript-error":
         set((state) => ({ transcriptErrors: { ...state.transcriptErrors, [message.childSessionId]: message.message } }));
+        break;
+      case "design.state":
+        set((state) => {
+          if (!message.docId) return { designDoc: undefined };
+          const seen = state.seenDesignRevisions[message.docId] ?? 0;
+          if (message.revision <= seen) return state;
+          return {
+            designDoc: {
+              docId: message.docId,
+              name: message.name ?? "",
+              canvas: message.canvas ?? { width: 1440, height: 1024 },
+              nodes: message.nodes ?? [],
+              revision: message.revision,
+              dirty: message.dirty ?? false
+            },
+            seenDesignRevisions: { ...state.seenDesignRevisions, [message.docId]: message.revision }
+          };
+        });
+        break;
+      case "design.docs":
+        set({ designDocs: message.docs });
+        break;
+      case "design.exported":
+        set({ designExported: { relativePath: message.relativePath, at: Date.now() } });
         break;
       case "usage-stats-result":
         set({ usageStats: message.stats, usageStatsLoading: false });
