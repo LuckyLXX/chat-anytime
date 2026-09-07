@@ -486,7 +486,7 @@ function CompactTimingMeta({ timing, now }: { timing: TurnTiming; now: number })
   );
 }
 
-function ChangedFilesPanel({ files, onOpenFile, onOpenDiff, onRollback, rollbackStates, rollbackDisabled }: { files: ReplyChangedFile[]; onOpenFile(relativePath: string): void; onOpenDiff(execution: ToolExecution): void; onRollback?(file: ReplyChangedFile): void; rollbackStates?: ReadonlyMap<string, "restored" | "deleted">; rollbackDisabled?: boolean }): ReactNode {
+function ChangedFilesPanel({ files, workspace, onOpenFile, onOpenDiff, onRollback, rollbackStates, rollbackDisabled }: { files: ReplyChangedFile[]; workspace?: string; onOpenFile(relativePath: string, workspace?: string): void; onOpenDiff(execution: ToolExecution): void; onRollback?(file: ReplyChangedFile): void; rollbackStates?: ReadonlyMap<string, "restored" | "deleted">; rollbackDisabled?: boolean }): ReactNode {
   return (
     <details className="reply-files-panel">
       <summary>
@@ -508,7 +508,7 @@ function ChangedFilesPanel({ files, onOpenFile, onOpenDiff, onRollback, rollback
                 className={isImage ? "reply-file-open reply-file-open-image" : "reply-file-open"}
                 title={isImage ? `预览图片 ${relativePath}` : `预览 ${relativePath}`}
                 aria-label={`预览 ${name}`}
-                onClick={() => onOpenFile(relativePath)}
+                onClick={() => onOpenFile(relativePath, workspace)}
               >
                 {isImage ? <ImageIcon size={14} /> : <File size={14} />}
                 <span className="reply-file-text"><strong>{name}</strong><small>{relativePath}</small></span>
@@ -540,7 +540,7 @@ function ChangedFilesPanel({ files, onOpenFile, onOpenDiff, onRollback, rollback
 // Memoized so an unchanged message bubble (stable ChatMessage reference from
 // the store's uuid-based reuse) is skipped during high-frequency streaming
 // updates that only mutate other bubbles.
-const MessageView = memo(function MessageView({ message, executions, onOpenArtifact, onOpenFile, onOpenDiff, onHtmlAction, onCopy, onEdit, onRegenerate, onShare, onRollback, rollbackStates, showThinking = true, hiddenThinkingLabel, busy = false, turnActive = false, timing, now = Date.now(), turnKey, onOpenTranscript }: { message: ChatMessage; executions: ToolExecution[]; onOpenArtifact(artifact: Artifact): void; onOpenFile(relativePath: string): void; onOpenDiff(execution: ToolExecution): void; onHtmlAction(text: string): void; onCopy(message: ChatMessage): void; onEdit(message: ChatMessage): void; onRegenerate(message: ChatMessage): void; onShare(message: ChatMessage, target: HTMLElement): Promise<void>; onRollback?(file: ReplyChangedFile): void; rollbackStates?: ReadonlyMap<string, "restored" | "deleted">; showThinking?: boolean; hiddenThinkingLabel?: string; busy?: boolean; turnActive?: boolean; timing?: TurnTiming; now?: number; turnKey?: string; onOpenTranscript?(delegation: DelegationProgress): void }): ReactNode {
+const MessageView = memo(function MessageView({ message, executions, workspace, onOpenArtifact, onOpenFile, onOpenDiff, onHtmlAction, onCopy, onEdit, onRegenerate, onShare, onRollback, rollbackStates, showThinking = true, hiddenThinkingLabel, busy = false, turnActive = false, timing, now = Date.now(), turnKey, onOpenTranscript }: { message: ChatMessage; executions: ToolExecution[]; workspace?: string; onOpenArtifact(artifact: Artifact): void; onOpenFile(relativePath: string, workspace?: string): void; onOpenDiff(execution: ToolExecution): void; onHtmlAction(text: string): void; onCopy(message: ChatMessage): void; onEdit(message: ChatMessage): void; onRegenerate(message: ChatMessage): void; onShare(message: ChatMessage, target: HTMLElement): Promise<void>; onRollback?(file: ReplyChangedFile): void; rollbackStates?: ReadonlyMap<string, "restored" | "deleted">; showThinking?: boolean; hiddenThinkingLabel?: string; busy?: boolean; turnActive?: boolean; timing?: TurnTiming; now?: number; turnKey?: string; onOpenTranscript?(delegation: DelegationProgress): void }): ReactNode {
   const text = messageText(message);
   const shareTargetRef = useRef<HTMLDivElement | null>(null);
   const [sharing, setSharing] = useState(false);
@@ -598,7 +598,7 @@ const MessageView = memo(function MessageView({ message, executions, onOpenArtif
           <ActionTimeline message={message} executions={executions} turnActive={turnActive} showThinking={showThinking} thinkingLabel={hiddenThinkingLabel} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} timing={timing} now={now} onOpenTranscript={onOpenTranscript} />
           {message.error && <p className="inline-error"><AlertCircle size={15} />{message.error}</p>}
         </div>
-        {changedFiles.length > 0 && <ChangedFilesPanel files={changedFiles} onOpenFile={onOpenFile} onOpenDiff={onOpenDiff} onRollback={onRollback} rollbackStates={rollbackStates} rollbackDisabled={busy} />}
+        {changedFiles.length > 0 && <ChangedFilesPanel files={changedFiles} workspace={workspace} onOpenFile={onOpenFile} onOpenDiff={onOpenDiff} onRollback={onRollback} rollbackStates={rollbackStates} rollbackDisabled={busy} />}
         {!isControlMessage && !message.streaming && !busy && <div className="message-actions"><button type="button" data-control="regenerate" title="重新生成" aria-label="重新生成回复" onClick={() => onRegenerate(message)}><RefreshCw size={13} /></button><button type="button" data-control="copy" title="复制" aria-label="复制 AI 回复" onClick={() => onCopy(message)}><Copy size={13} /></button>{hasShareableContent && <button type="button" data-control="share" title={sharing ? "正在生成图片" : shared ? "已复制图片" : "分享图片"} aria-label={sharing ? "正在生成回复图片" : shared ? "回复图片已复制" : "分享 AI 回复图片"} disabled={sharing} onClick={() => void share()}>{sharing ? <LoaderCircle size={13} className="spinning" /> : shared ? <Check size={13} /> : <Share2 size={13} />}</button>}</div>}
       </div>
       {timing && (isControlMessage ? <CompactTimingMeta timing={timing} now={now} /> : <TimingMeta timing={timing} now={now} />)}
@@ -1610,7 +1610,7 @@ export const ConversationPane = memo(function ConversationPane({
             const timing = showTurnTimingOnLatest && index === latestAssistantMessageIndex && message.role === "assistant" ? data.turnTiming : undefined;
             const turnActive = data.busy && index === latestAssistantMessageIndex && message.role === "assistant";
             const turnKey = turnStartKeys.has(message.uuid ?? message.id) ? (message.uuid ?? message.id) : undefined;
-            return <MessageView key={message.uuid ?? message.id} message={message} executions={data.executions} onOpenArtifact={onOpenArtifact} onOpenFile={onOpenFile} onOpenDiff={onOpenDiff} onHtmlAction={handleHtmlAction} onCopy={copyMessage} onEdit={editMessage} onRegenerate={regenerateMessage} onShare={shareMessage} onRollback={onRollback} rollbackStates={rollbackStates} showThinking={showThinking} busy={data.busy} turnActive={turnActive} timing={timing} now={timing ? now : undefined} turnKey={turnKey} onOpenTranscript={onOpenTranscript} />;
+            return <MessageView key={message.uuid ?? message.id} message={message} executions={data.executions} workspace={data.workspace} onOpenArtifact={onOpenArtifact} onOpenFile={onOpenFile} onOpenDiff={onOpenDiff} onHtmlAction={handleHtmlAction} onCopy={copyMessage} onEdit={editMessage} onRegenerate={regenerateMessage} onShare={shareMessage} onRollback={onRollback} rollbackStates={rollbackStates} showThinking={showThinking} busy={data.busy} turnActive={turnActive} timing={timing} now={timing ? now : undefined} turnKey={turnKey} onOpenTranscript={onOpenTranscript} />;
           })}
           {isGenerating && (assistantBubbleVisible ? <div className="response-progress response-progress-inline"><LoaderCircle size={14} className="spinning" /><span>{workingLabel}</span>{activeTurnTiming && <TimingMeta timing={activeTurnTiming} now={now} />}</div> : <PendingResponse label={workingLabel} timing={activeTurnTiming} now={now} />)}
         </>}

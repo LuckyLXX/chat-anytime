@@ -14,6 +14,9 @@ export const DYNAMIC_PREVIEW_ACTIONS = {
 
 export type DynamicPreviewAction = typeof DYNAMIC_PREVIEW_ACTIONS[keyof typeof DYNAMIC_PREVIEW_ACTIONS];
 
+/** 沙箱内预览页 → 父页面（预览面板）的内容尺寸上报消息 type。 */
+export const PREVIEW_SIZE_MESSAGE = "pidesktop-preview-size";
+
 const artifactPattern = /```(html|svg)\s*\n([\s\S]*?)```/giu;
 const dynamicArtifactSignalPattern = /<script\b|<canvas\b|<video\b|<audio\b|\b(?:requestAnimationFrame|cancelAnimationFrame|setInterval|setTimeout)\s*\(|\b(?:THREE|WebGLRenderer|OrbitControls)\b|\banime(?:\.min)?\.js\b|\banime\s*\(|\bElement\.prototype\.animate\b|\.(?:animate|play)\s*\(|@keyframes\b|\banimation(?:-name)?\s*:|\btransition\s*:/iu;
 
@@ -211,19 +214,49 @@ export function withDynamicArtifactFlag<T extends { language: string; content: s
   return isDynamicArtifact(artifact) ? { ...artifact, dynamic: true } : artifact;
 }
 
-function injectDynamicPreviewRuntime(source: string): string {
-  const runtime = `<script>${dynamicPreviewRuntime}</script>`;
+function injectHeadRuntime(source: string, runtime: string): string {
+  const script = `<script>${runtime}</script>`;
   if (/<head\b[^>]*>/iu.test(source)) {
-    return source.replace(/<head\b[^>]*>/iu, (match) => `${match}\n${runtime}`);
+    return source.replace(/<head\b[^>]*>/iu, (match) => `${match}\n${script}`);
   }
   if (/<html\b[^>]*>/iu.test(source)) {
-    return source.replace(/<html\b[^>]*>/iu, (match) => `${match}\n<head>${runtime}</head>`);
+    return source.replace(/<html\b[^>]*>/iu, (match) => `${match}\n<head>${script}</head>`);
   }
   if (/<body\b[^>]*>/iu.test(source)) {
-    return `<!doctype html><html><head>${runtime}</head>${source}</html>`;
+    return `<!doctype html><html><head>${script}</head>${source}</html>`;
   }
-  return `${runtime}\n${source}`;
+  return `${script}\n${source}`;
 }
+
+function injectDynamicPreviewRuntime(source: string): string {
+  return injectHeadRuntime(source, dynamicPreviewRuntime);
+}
+
+// 内容尺寸上报：预览面板的「适应窗口」要按真实内容宽缩放（设计导出的多画板
+// 并排页远宽于任何预设），沙箱 iframe 的 scrollWidth 只有页面自己量得到。
+// allow-scripts 的完整 HTML 文档里它生效；纯片段沙箱（无脚本）自动失效，
+// 由父页面走 contentDocument 兜底量测。
+const previewSizeRuntime = `
+(() => {
+  var lastW = 0; var lastH = 0;
+  function measure() {
+    var doc = document.documentElement;
+    var body = document.body;
+    var w = Math.max(doc ? doc.scrollWidth : 0, body ? body.scrollWidth : 0);
+    var h = Math.max(doc ? doc.scrollHeight : 0, body ? body.scrollHeight : 0);
+    if (!w || (Math.abs(w - lastW) < 1 && Math.abs(h - lastH) < 1)) return;
+    lastW = w; lastH = h;
+    try { window.parent.postMessage({ type: '${PREVIEW_SIZE_MESSAGE}', width: w, height: h }, '*'); } catch (e) { /* parent 不可达时静默 */ }
+  }
+  function schedule() { measure(); setTimeout(measure, 300); setTimeout(measure, 1200); }
+  window.addEventListener('load', schedule);
+  window.addEventListener('resize', measure);
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', schedule);
+  else schedule();
+  if (typeof ResizeObserver === 'function' && document.documentElement) {
+    try { new ResizeObserver(measure).observe(document.documentElement); } catch (e) { /* 观察失败靠定时兜底 */ }
+  }
+})();`;
 
 export function extractArtifacts(text: string, messageId: string): Artifact[] {
   return [...text.matchAll(artifactPattern)].map((match, index) => {
@@ -253,6 +286,7 @@ export function buildArtifactPreviewSource(artifact: Pick<Artifact, "language" |
   } else {
     source = `<!doctype html><html><head><meta charset="utf-8"></head><body style="margin:0;padding:20px;font-family:Inter,Segoe UI,Microsoft YaHei,sans-serif">${artifact.content}</body></html>`;
   }
+  if (artifact.language !== "svg") source = injectHeadRuntime(source, previewSizeRuntime);
   return isDynamicArtifact(artifact) ? injectDynamicPreviewRuntime(source) : source;
 }
 

@@ -1,12 +1,14 @@
-import { AlertCircle, Brain, Check, ClipboardList, Code2, Eye, File, FileCode2, FileDiff, FileText, Globe2, LoaderCircle, Pause, Pencil, Play, Plus, Terminal, X } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode, type SyntheticEvent } from "react";
+import { AlertCircle, Brain, Check, ClipboardList, Code2, Eye, File, FileCode2, FileDiff, FileText, Globe2, LoaderCircle, Maximize2, Minimize2, Pause, Pencil, Play, Plus, Terminal, X } from "lucide-react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type SyntheticEvent } from "react";
 import type { BrowserElementPick, BrowserPreviewState, WorkspaceFilePreview } from "../../../shared/protocol";
 import { IMAGE_PREVIEW_LIMIT_BYTES, workspaceFilePreviewUrl } from "../../../shared/protocol";
-import { artifactSandbox, buildArtifactPreviewSource, DYNAMIC_PREVIEW_ACTIONS, isDynamicArtifact, type Artifact, type DynamicPreviewAction } from "../lib/content";
+import { artifactSandbox, buildArtifactPreviewSource, DYNAMIC_PREVIEW_ACTIONS, isDynamicArtifact, PREVIEW_SIZE_MESSAGE, type Artifact, type DynamicPreviewAction } from "../lib/content";
+import { layoutDeviceFrame, storedPreviewDevice, storedPreviewFit, storePreviewDevice, storePreviewFit, type PreviewDeviceId } from "../lib/preview-device";
 import { DiffView } from "./DiffView";
 import { MemoryPreviewContent } from "./MemoryPreview";
 import { MarkdownEditor, type EditorSaveStatus } from "./MarkdownEditor";
 import { CodeBlock, RichContent } from "./RichContent";
+import { PreviewDeviceMenu } from "./PreviewDeviceMenu";
 import { BrowserPreview } from "./BrowserPreview";
 import { TerminalPanel } from "./TerminalPanel";
 
@@ -123,7 +125,7 @@ function FilePreviewContent({ file, tabId, onOpenArtifact, workspace, editorStat
   return <div className="preview-empty"><FileText size={28} /><strong>此文件无法预览</strong><span>{file.size.toLocaleString("zh-CN")} bytes</span></div>;
 }
 
-export function ArtifactPreview({ tabs, activeTabId, browserSuspended, onSelectTab, onCloseTab, onOpenArtifact, onAddBrowser, onAddTerminal, onAddFile, onAddReview, onAddMenuOpenChange, reviewAvailable, workspace, activeEditorState, onActiveEditorChange, onActiveEditorContentChange, onActiveEditorSaved, onActiveEditorStatusChange, onActiveEditorSaveError, onActiveEditorResolveConflict, onToggleEditing, onBrowserStateChange, onBrowserPickSend }: { tabs: PreviewTab[]; activeTabId: string; browserSuspended?: boolean; onSelectTab(id: string): void; onCloseTab(id: string): void; onOpenArtifact(artifact: Artifact): void; onAddBrowser?(): void; onAddTerminal?(): void; onAddFile?(): void; onAddReview?(): void; onAddMenuOpenChange?(open: boolean): void; reviewAvailable?: boolean; workspace?: string; activeEditorState?: PreviewEditorState; onActiveEditorChange?(patch: Partial<PreviewEditorState>): void; onActiveEditorContentChange?(tabId: string, content: string): void; onActiveEditorSaved?(tabId: string, content: string): void; onActiveEditorStatusChange?(tabId: string, status: EditorSaveStatus): void; onActiveEditorSaveError?(message: string): void; onActiveEditorResolveConflict?(choice: "keep-local" | "load-remote"): void; onToggleEditing?(): void; onBrowserStateChange?(tabId: string, state: BrowserPreviewState): void; onBrowserPickSend?(pick: BrowserElementPick, note: string): void }): ReactNode {
+export function ArtifactPreview({ tabs, activeTabId, browserSuspended, fullscreen, onFullscreenChange, onSelectTab, onCloseTab, onOpenArtifact, onAddBrowser, onAddTerminal, onAddFile, onAddReview, onAddMenuOpenChange, reviewAvailable, workspace, activeEditorState, onActiveEditorChange, onActiveEditorContentChange, onActiveEditorSaved, onActiveEditorStatusChange, onActiveEditorSaveError, onActiveEditorResolveConflict, onToggleEditing, onBrowserStateChange, onBrowserPickSend }: { tabs: PreviewTab[]; activeTabId: string; browserSuspended?: boolean; fullscreen?: boolean; onFullscreenChange?(next: boolean): void; onSelectTab(id: string): void; onCloseTab(id: string): void; onOpenArtifact(artifact: Artifact): void; onAddBrowser?(): void; onAddTerminal?(): void; onAddFile?(): void; onAddReview?(): void; onAddMenuOpenChange?(open: boolean): void; reviewAvailable?: boolean; workspace?: string; activeEditorState?: PreviewEditorState; onActiveEditorChange?(patch: Partial<PreviewEditorState>): void; onActiveEditorContentChange?(tabId: string, content: string): void; onActiveEditorSaved?(tabId: string, content: string): void; onActiveEditorStatusChange?(tabId: string, status: EditorSaveStatus): void; onActiveEditorSaveError?(message: string): void; onActiveEditorResolveConflict?(choice: "keep-local" | "load-remote"): void; onToggleEditing?(): void; onBrowserStateChange?(tabId: string, state: BrowserPreviewState): void; onBrowserPickSend?(pick: BrowserElementPick, note: string): void }): ReactNode {
   const active = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0];
   if (!active) {
     return (
@@ -160,11 +162,35 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, onSelectT
   const [paused, setPaused] = useState(false);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [sourceModes, setSourceModes] = useState<Record<string, boolean>>({});
+  // 设备视口按标签页记忆（新标签继承上次全局选择）；iframe 树形稳定，
+  // 切换设备只改尺寸/缩放不重挂载，动态预览的运行时状态不丢。
+  const [deviceModes, setDeviceModes] = useState<Record<string, PreviewDeviceId>>({});
+  const [deviceFits, setDeviceFits] = useState<Record<string, boolean>>({});
+  const [stageSize, setStageSize] = useState<{ width: number; height: number }>();
+  // 沙箱 iframe 的实测内容宽度（适应窗口按它放宽视口并整体缩小——设计导出的
+  // 多画板并排页远宽于任何预设，只按预设宽缩放仍会内部溢出）。
+  const [contentSizes, setContentSizes] = useState<Record<string, { width: number; height: number }>>({});
   const addMenuRef = useRef<HTMLDivElement>(null);
+  const stageRef = useRef<HTMLDivElement | null>(null);
   const frameRef = useRef<HTMLIFrameElement | null>(null);
+  const fragmentTimersRef = useRef<number[]>([]);
 
   const showSource = sourceModes[activeTabId] === true;
   const sourceable = Boolean(artifact) || (target.type === "file" && target.file.kind === "markdown" && target.file.content !== undefined) || target.type === "plan" || target.type === "memory";
+  const device = deviceModes[activeTabId] ?? storedPreviewDevice();
+  const fit = deviceFits[activeTabId] ?? storedPreviewFit();
+  const deviceable = Boolean(artifact);
+  const contentSize = contentSizes[activeTabId];
+
+  function changeDeviceMode(id: PreviewDeviceId): void {
+    setDeviceModes((prev) => ({ ...prev, [activeTabId]: id }));
+    storePreviewDevice(id);
+  }
+
+  function changeDeviceFit(next: boolean): void {
+    setDeviceFits((prev) => ({ ...prev, [activeTabId]: next }));
+    storePreviewFit(next);
+  }
 
   function postPreviewAction(action: DynamicPreviewAction): void {
     frameRef.current?.contentWindow?.postMessage({ action }, "*");
@@ -176,11 +202,45 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, onSelectT
 
   useEffect(() => {
     function close(event: KeyboardEvent): void {
-      if (event.key === "Escape") onCloseTab(activeTabId);
+      if (event.key !== "Escape") return;
+      // 全屏时 Esc 只退全屏，不误关标签页。
+      if (fullscreen) {
+        event.stopPropagation();
+        onFullscreenChange?.(false);
+        return;
+      }
+      onCloseTab(activeTabId);
     }
     window.addEventListener("keydown", close);
     return () => window.removeEventListener("keydown", close);
-  }, [onCloseTab, activeTabId]);
+  }, [onCloseTab, activeTabId, fullscreen, onFullscreenChange]);
+
+  // 量测设备舞台尺寸（工件 iframe 的可用空间），驱动设备框缩放换算。
+  useLayoutEffect(() => {
+    const stage = stageRef.current;
+    if (!stage) {
+      setStageSize(undefined);
+      return;
+    }
+    const measure = (): void => {
+      const rect = stage.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+      setStageSize((prev) => prev && prev.width === rect.width && prev.height === rect.height ? prev : { width: rect.width, height: rect.height });
+    };
+    const observer = new ResizeObserver(measure);
+    observer.observe(stage);
+    measure();
+    return () => observer.disconnect();
+  }, [activeTabId, showSource, deviceable]);
+
+  const stageLayout = useMemo(
+    () => (deviceable && stageSize ? layoutDeviceFrame(stageSize, device, { fit, clampWidth: false, contentWidth: contentSize?.width }) : undefined),
+    [deviceable, stageSize, device, fit, contentSize?.width]
+  );
+  const deviceActive = deviceable && device !== "responsive" && stageLayout !== undefined;
+  const frameStyle: CSSProperties = deviceActive && stageLayout
+    ? { width: stageLayout.contentWidth, height: stageLayout.contentHeight, marginLeft: stageLayout.offsetX, transform: stageLayout.scale < 1 ? `scale(${stageLayout.scale})` : undefined, transformOrigin: "0 0" }
+    : { width: "100%", height: "100%" };
 
   useEffect(() => {
     if (!addMenuOpen) return;
@@ -212,13 +272,62 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, onSelectT
     if (dynamic) postPreviewAction(DYNAMIC_PREVIEW_ACTIONS.destroy);
   }, [dynamic]);
 
+  // 完整 HTML 文档（allow-scripts）由注入脚本 postMessage 上报内容尺寸；
+  // 校验 event.source 防止页面伪造/串台。
+  useEffect(() => {
+    function onMessage(event: MessageEvent): void {
+      const data = event.data as { type?: string; width?: unknown; height?: unknown } | null;
+      if (!data || data.type !== PREVIEW_SIZE_MESSAGE) return;
+      if (event.source !== frameRef.current?.contentWindow) return;
+      const width = Number(data.width);
+      const height = Number(data.height);
+      if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(height)) return;
+      setContentSizes((prev) => {
+        const cur = prev[activeTabId];
+        return cur && Math.abs(cur.width - width) < 1 && Math.abs(cur.height - height) < 1 ? prev : { ...prev, [activeTabId]: { width, height } };
+      });
+    }
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, [activeTabId]);
+
+  useEffect(() => () => {
+    for (const timer of fragmentTimersRef.current) window.clearTimeout(timer);
+    fragmentTimersRef.current = [];
+  }, [activeTabId]);
+
+  function recordContentSize(tabKey: string, width: number, height: number): void {
+    setContentSizes((prev) => {
+      const cur = prev[tabKey];
+      return cur && Math.abs(cur.width - width) < 1 && Math.abs(cur.height - height) < 1 ? prev : { ...prev, [tabKey]: { width, height } };
+    });
+  }
+
+  // 纯片段沙箱（allow-same-origin 无脚本）读不到注入脚本，父页面直接量测；
+  // 完整文档的沙箱访问 contentDocument 会抛 SecurityError——静默放弃（走上报）。
+  function measureFragmentSize(frame: HTMLIFrameElement, tabKey: string, retries: number): void {
+    try {
+      const doc = frame.contentDocument;
+      const width = Math.max(doc?.documentElement?.scrollWidth ?? 0, doc?.body?.scrollWidth ?? 0);
+      const height = Math.max(doc?.documentElement?.scrollHeight ?? 0, doc?.body?.scrollHeight ?? 0);
+      if (width > 0) {
+        recordContentSize(tabKey, width, height);
+        return;
+      }
+    } catch {
+      return;
+    }
+    if (retries > 0) fragmentTimersRef.current.push(window.setTimeout(() => measureFragmentSize(frame, tabKey, retries - 1), 400));
+  }
+
   function handleLoad(event: SyntheticEvent<HTMLIFrameElement>): void {
     frameRef.current = event.currentTarget;
     if (paused) postPreviewAction(DYNAMIC_PREVIEW_ACTIONS.pause);
+    measureFragmentSize(event.currentTarget, activeTabId, 3);
   }
 
   return (
-    <aside className="content-preview-panel" data-pane="preview" aria-label={`${targetMetadata(target).title}预览`}>
+    <aside className={`content-preview-panel${fullscreen ? " preview-fullscreen" : ""}`} data-pane="preview" aria-label={`${targetMetadata(target).title}预览`}>
       <div className="preview-tabs" role="tablist" aria-label="预览标签">
         {tabs.map((tab) => {
           const tabMeta = targetMetadata(tab.target);
@@ -254,7 +363,9 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, onSelectT
           )}
           {markdownEditable && <button className="icon-button" type="button" title={editing ? "切换到预览" : "切换到编辑"} aria-label={editing ? "预览" : "编辑"} onClick={() => onToggleEditing?.()}>{editing ? <Eye size={15} /> : <Pencil size={15} />}</button>}
           {sourceable && <button className="icon-button" type="button" title={showSource ? "切换到预览" : "查看源代码"} aria-label={showSource ? "预览" : "源代码"} onClick={() => setSourceModes((prev) => ({ ...prev, [activeTabId]: !showSource }))}>{showSource ? <Eye size={15} /> : <Code2 size={15} />}</button>}
+          {deviceable && !showSource && <PreviewDeviceMenu device={device} fit={fit} scalePercent={(stageLayout?.scale ?? 1) * 100} onDeviceChange={changeDeviceMode} onFitChange={changeDeviceFit} />}
           {dynamic && <button className="icon-button" type="button" aria-label={paused ? "继续动态预览" : "暂停动态预览"} title={paused ? "继续" : "暂停"} onClick={() => { postPreviewAction(paused ? DYNAMIC_PREVIEW_ACTIONS.resume : DYNAMIC_PREVIEW_ACTIONS.pause); setPaused((current) => !current); }}>{paused ? <Play size={15} /> : <Pause size={15} />}</button>}
+          <button className="icon-button" type="button" title={fullscreen ? "退出全屏（Esc）" : "全屏预览（预览面板覆盖整个窗口，Esc 退出）"} aria-label={fullscreen ? "退出全屏" : "全屏预览"} onClick={() => onFullscreenChange?.(!fullscreen)}>{fullscreen ? <Minimize2 size={15} /> : <Maximize2 size={15} />}</button>
           <button className="icon-button" type="button" title="关闭预览" aria-label="关闭预览" onClick={() => onCloseTab(activeTabId)}><X size={16} /></button>
         </div>
       </div>
@@ -262,7 +373,13 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, onSelectT
         {showSource && artifact && <div className="preview-scroll preview-code"><CodeBlock language={artifact.language} code={artifact.content} /></div>}
         {showSource && !artifact && target.type === "file" && target.file.content !== undefined && <div className="preview-scroll preview-code"><CodeBlock language={target.file.kind === "markdown" ? "markdown" : target.file.language ?? "text"} code={target.file.content} /></div>}
         {showSource && target.type === "plan" && <div className="preview-scroll preview-code"><CodeBlock language="markdown" code={target.content} /></div>}
-        {!showSource && artifact && <iframe ref={frameRef} title={artifact.title} sandbox={artifactSandbox(artifact)} referrerPolicy="no-referrer" srcDoc={buildArtifactPreviewSource(artifact)} onLoad={handleLoad} />}
+        {!showSource && artifact && (
+          <div className={`artifact-device-stage${deviceActive ? " device-mode" : ""}${deviceActive && !fit ? " device-overflow" : ""}`} ref={stageRef}>
+            <div className="artifact-device-frame" style={frameStyle}>
+              <iframe ref={frameRef} title={artifact.title} sandbox={artifactSandbox(artifact)} referrerPolicy="no-referrer" srcDoc={buildArtifactPreviewSource(artifact)} onLoad={handleLoad} />
+            </div>
+          </div>
+        )}
         {!showSource && target.type === "browser" && <BrowserPreview suspended={browserSuspended} tabId={activeTabId} onPickSend={onBrowserPickSend} onStateChange={(state) => onBrowserStateChange?.(activeTabId, state)} />}
         {target.type === "terminal" && <TerminalPanel terminalId={active.id} workspace={workspace} />}
         {!showSource && target.type === "plan" && <div className="preview-scroll preview-markdown"><RichContent streaming={false} artifactPrefix={`plan-${activeTabId}`} onOpenArtifact={onOpenArtifact}>{target.content}</RichContent></div>}

@@ -31,6 +31,10 @@ interface BrowserTabView {
   bounds?: Rectangle;
   visible: boolean;
   state: BrowserPreviewState;
+  /** 内容尺寸量测防抖定时器（resize/zoom 后延迟量测）。 */
+  measureTimer?: ReturnType<typeof setTimeout>;
+  /** 最近一次量测并已推送的内容尺寸（1px 死带去重）。 */
+  measuredContent?: { width: number; height: number };
 }
 
 export class BrowserPreviewController {
@@ -100,6 +104,8 @@ export class BrowserPreviewController {
       case "bounds":
         this.getOrCreate(tabId).bounds = normalizedBounds(command.bounds);
         this.layoutTab(tabId);
+        // 面板尺寸变化会改变页面 CSS 视口（zoom 固定时），延迟重测内容宽。
+        this.scheduleContentMeasure(tabId, 300);
         break;
       case "visible":
         this.getOrCreate(tabId).visible = command.visible;
@@ -134,6 +140,17 @@ export class BrowserPreviewController {
       case "close":
         this.disposeTab(tabId);
         break;
+      case "zoom": {
+        // 设备视口「适应窗口」：缩小系数让超宽设备布局完整落入 bounds。
+        // 非有限值/越界一律回落 1（原始尺寸），渲染端计算错误不放大成页面损坏。
+        const factor = Number.isFinite(command.factor) ? Math.min(3, Math.max(0.25, command.factor)) : 1;
+        this.tryCommand(tabId, (contents) => {
+          if (!contents.isDestroyed()) contents.setZoomFactor(factor);
+        });
+        // zoom 改变页面 CSS 视口（视口宽 = bounds 宽 / factor），重测内容宽收敛。
+        this.scheduleContentMeasure(tabId, 200);
+        break;
+      }
     }
     return this.snapshot(tabId);
   }
@@ -199,7 +216,10 @@ export class BrowserPreviewController {
       }
     });
     contents.on("did-start-loading", () => this.updateState(tabId, { loading: true, error: undefined }));
-    contents.on("did-stop-loading", () => this.refreshState(tabId, { loading: false }));
+    contents.on("did-stop-loading", () => {
+      this.refreshState(tabId, { loading: false });
+      this.scheduleContentMeasure(tabId, 250);
+    });
     contents.on("did-navigate", (_event, url) => this.refreshState(tabId, { url, error: undefined }));
     contents.on("did-navigate-in-page", (_event, url) => this.refreshState(tabId, { url, error: undefined }));
     contents.on("page-title-updated", (event, title) => {
@@ -220,7 +240,9 @@ export class BrowserPreviewController {
   private async navigateTab(tabId: string, input: string): Promise<void> {
     const url = normalizeBrowserUrl(input);
     const wrapper = this.getOrCreate(tabId);
-    this.updateState(tabId, { attached: true, url, title: "", loading: true, error: undefined });
+    // 新页面内容未知：先清掉旧量测，等 did-stop-loading 后重测。
+    wrapper.measuredContent = undefined;
+    this.updateState(tabId, { attached: true, url, title: "", loading: true, error: undefined, contentWidth: undefined, contentHeight: undefined });
     try {
       await wrapper.view.webContents.loadURL(url);
     } catch (error) {
@@ -232,12 +254,48 @@ export class BrowserPreviewController {
     }
   }
 
+  /** 内容尺寸量测防抖：resize 风暴/连续 zoom 只在安静后测一次。 */
+  private scheduleContentMeasure(tabId: string, delayMs: number): void {
+    const wrapper = this.tabs.get(tabId);
+    if (!wrapper) return;
+    if (wrapper.measureTimer !== undefined) clearTimeout(wrapper.measureTimer);
+    wrapper.measureTimer = setTimeout(() => {
+      wrapper.measureTimer = undefined;
+      void this.measureContentSize(tabId);
+    }, delayMs);
+  }
+
+  /**
+   * 量测页面 scrollWidth/scrollHeight 并推送（适应窗口按真实内容宽缩放——
+   * 多画板导出页远宽于任何设备预设，只按预设宽缩放仍会内部溢出）。
+   * executeJavaScript 是特权调用，不受页面 CSP 限制；失败（页面崩溃等）静默。
+   */
+  private async measureContentSize(tabId: string): Promise<void> {
+    const wrapper = this.tabs.get(tabId);
+    const contents = wrapper?.view.webContents;
+    if (!wrapper || !contents || contents.isDestroyed()) return;
+    try {
+      const size = await contents.executeJavaScript("(() => { const d = document.documentElement; const b = document.body; return [Math.max(d ? d.scrollWidth : 0, b ? b.scrollWidth : 0), Math.max(d ? d.scrollHeight : 0, b ? b.scrollHeight : 0)]; })()", false);
+      if (!Array.isArray(size)) return;
+      const width = Number(size[0]);
+      const height = Number(size[1]);
+      if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(height)) return;
+      const prev = wrapper.measuredContent;
+      if (prev && Math.abs(prev.width - width) < 1 && Math.abs(prev.height - height) < 1) return;
+      wrapper.measuredContent = { width, height };
+      this.updateState(tabId, { contentWidth: width, contentHeight: height });
+    } catch {
+      // 渲染进程销毁/页面拒绝执行等——量测不可用，渲染端保持上次值。
+    }
+  }
+
   private disposeTab(tabId: string): void {
     const tab = this.tabs.get(tabId);
     if (!tab) {
       this.publish(emptyBrowserState(), tabId);
       return;
     }
+    if (tab.measureTimer !== undefined) clearTimeout(tab.measureTimer);
     this.tabs.delete(tabId);
     const { view } = tab;
     view.setVisible(false);

@@ -1239,6 +1239,11 @@ export function App(): ReactNode {
   const previewVisible = previewPresence.rendered;
   const [previewSplit, setPreviewSplit] = useState(readStoredPreviewSplit);
   const [previewDragging, setPreviewDragging] = useState(false);
+  // 预览面板全屏（覆盖整个窗口）：面板关闭或标签清空即退出，不留残留状态。
+  const [previewFullscreen, setPreviewFullscreen] = useState(false);
+  useEffect(() => {
+    if (!previewOpened || !preview || preview.tabs.length === 0) setPreviewFullscreen(false);
+  }, [previewOpened, preview]);
   const previewDragPointerRef = useRef<number | undefined>(undefined);
   const workAreaRef = useRef<HTMLDivElement>(null);
   // —— 设计模式（Design Studio）：画布占主体、AI 对话收窄为侧栏；与分屏/预览互斥 ——
@@ -1479,6 +1484,7 @@ export function App(): ReactNode {
       ["data-ui-chat-empty", isChatEmpty],
       ["data-ui-generating", isGenerating],
       ["data-ui-preview-open", previewOpened],
+      ["data-ui-preview-fullscreen", previewFullscreen],
       ["data-ui-permission-pending", Boolean(permission)],
       ["data-ui-question-pending", Boolean(question)],
       ["data-ui-split-open", paneIds.length > 1],
@@ -1504,7 +1510,7 @@ export function App(): ReactNode {
       for (const [name] of states) root.removeAttribute(name);
       for (const [name] of valueStates) root.removeAttribute(name);
     };
-  }, [settingsOpen, snapshot.workspace, isChatEmpty, isGenerating, previewOpened, permission, question, paneIds.length, sidebarView, settings.appearance.tune, settings.appearance.motion, designMode]);
+  }, [settingsOpen, snapshot.workspace, isChatEmpty, isGenerating, previewOpened, previewFullscreen, permission, question, paneIds.length, sidebarView, settings.appearance.tune, settings.appearance.motion, designMode]);
 
   async function openWorkspace(): Promise<void> {
     const path = await window.piDesktop.chooseWorkspace();
@@ -2327,7 +2333,7 @@ export function App(): ReactNode {
           {previewVisible && preview && <PreviewDivider split={previewSplit} dragging={previewDragging} onStart={startPreviewResize} onMove={movePreviewResize} onEnd={endPreviewResize} onCancel={cancelPreviewResize} onKeyDown={resizePreviewWithKeyboard} onReset={() => setPreviewSplit(50)} />}
 
           {previewVisible && <ExitWrap exiting={previewPresence.exiting}>{preview && preview.tabs.length > 0 ? (
-            <ArtifactPreview tabs={preview.tabs} activeTabId={preview.activeTabId} browserSuspended={previewDragging || settingsOpen || Boolean(permission) || Boolean(messageActionError) || previewAddMenuOpen || previewPresence.exiting} onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddTerminal={openTerminalPreview} onAddFile={() => void openManualFilePreview()} onAddReview={openLatestReview} onAddMenuOpenChange={setPreviewAddMenuOpen} reviewAvailable={Boolean(latestReviewExecution)} workspace={snapshot.workspace} activeEditorState={activePreviewTab && ((activePreviewTab.target.type === "file" && activePreviewTab.target.file.kind === "markdown") || activePreviewTab.target.type === "memory") ? getEditorState(activePreviewTab.id) : undefined} onActiveEditorChange={(patch) => { if (activePreviewTab) patchEditorState(activePreviewTab.id, patch); }} onActiveEditorContentChange={handleActiveEditorContentChange} onActiveEditorSaved={handleActiveEditorSaved} onActiveEditorStatusChange={handleActiveEditorStatusChange} onActiveEditorSaveError={(message) => setMessageActionError(`保存 ${activePreviewTab?.target.type === "file" ? activePreviewTab.target.file.name : activePreviewTab?.target.type === "memory" ? "记忆主题" : "Markdown"} 失败：${message}`)} onActiveEditorResolveConflict={(choice) => { if (activePreviewTab) handleEditorResolveConflict(activePreviewTab.id, choice); }} onToggleEditing={() => { if (activePreviewTab) patchEditorState(activePreviewTab.id, { editing: !getEditorState(activePreviewTab.id).editing }); }} onBrowserStateChange={handleBrowserStateChange} onBrowserPickSend={sendPickedElement} />
+            <ArtifactPreview tabs={preview.tabs} activeTabId={preview.activeTabId} browserSuspended={previewDragging || settingsOpen || Boolean(permission) || Boolean(messageActionError) || previewAddMenuOpen || previewPresence.exiting} fullscreen={previewFullscreen} onFullscreenChange={setPreviewFullscreen} onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddTerminal={openTerminalPreview} onAddFile={() => void openManualFilePreview()} onAddReview={openLatestReview} onAddMenuOpenChange={setPreviewAddMenuOpen} reviewAvailable={Boolean(latestReviewExecution)} workspace={snapshot.workspace} activeEditorState={activePreviewTab && ((activePreviewTab.target.type === "file" && activePreviewTab.target.file.kind === "markdown") || activePreviewTab.target.type === "memory") ? getEditorState(activePreviewTab.id) : undefined} onActiveEditorChange={(patch) => { if (activePreviewTab) patchEditorState(activePreviewTab.id, patch); }} onActiveEditorContentChange={handleActiveEditorContentChange} onActiveEditorSaved={handleActiveEditorSaved} onActiveEditorStatusChange={handleActiveEditorStatusChange} onActiveEditorSaveError={(message) => setMessageActionError(`保存 ${activePreviewTab?.target.type === "file" ? activePreviewTab.target.file.name : activePreviewTab?.target.type === "memory" ? "记忆主题" : "Markdown"} 失败：${message}`)} onActiveEditorResolveConflict={(choice) => { if (activePreviewTab) handleEditorResolveConflict(activePreviewTab.id, choice); }} onToggleEditing={() => { if (activePreviewTab) patchEditorState(activePreviewTab.id, { editing: !getEditorState(activePreviewTab.id).editing }); }} onBrowserStateChange={handleBrowserStateChange} onBrowserPickSend={sendPickedElement} />
           ) : (
             <ArtifactPreview key="empty-state" tabs={[]} activeTabId="" onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddTerminal={openTerminalPreview} onAddFile={() => void openManualFilePreview()} onBrowserPickSend={sendPickedElement} />
           )}</ExitWrap>}

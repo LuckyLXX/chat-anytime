@@ -48,6 +48,15 @@ describe("rich content helpers", () => {
     expect(buildArtifactPreviewSource(artifact)).not.toContain("pidesktop-preview-pause");
   });
 
+  it("injects the content-size reporter into every html preview (svg excluded)", () => {
+    const html = buildArtifactPreviewSource({ language: "html", content: "<!doctype html><html><head></head><body><main>双端</main></body></html>" });
+    expect(html).toContain("pidesktop-preview-size");
+    // 注入不得破坏原文档结构
+    expect(html).toContain("<!doctype html><html><head>");
+    const svg = buildArtifactPreviewSource({ language: "svg", content: "<svg xmlns='http://www.w3.org/2000/svg'/>" });
+    expect(svg).not.toContain("pidesktop-preview-size");
+  });
+
   it("marks dynamic fenced artifacts during extraction", () => {
     expect(extractArtifacts("```html\n<div><canvas></canvas></div>\n```", "message-2")).toMatchObject([
       { id: "message-2-artifact-0", language: "html", dynamic: true }

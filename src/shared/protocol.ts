@@ -569,6 +569,9 @@ export interface BrowserPreviewState {
   error?: string;
   /** AI 正在操作此标签页时的操作描述（如「点击 @e3」）；缺省表示无 AI 操作。 */
   automating?: string;
+  /** 页面实测内容尺寸（scrollWidth/Height，主进程 executeJavaScript 量测后推送）；缺省=未量测。 */
+  contentWidth?: number;
+  contentHeight?: number;
 }
 
 export type BrowserPreviewCommand =
@@ -581,6 +584,8 @@ export type BrowserPreviewCommand =
   | { type: "stop"; tabId?: string }
   | { type: "open-external"; tabId?: string }
   | { type: "close"; tabId?: string }
+  /** 设备视口缩放（适应窗口）：页面 CSS 视口 = bounds 宽 / factor，1 = 原始尺寸。 */
+  | { type: "zoom"; tabId?: string; factor: number }
   /** 手动元素选择模式：开启后用户点击页面元素会被捕获并推送给渲染端。 */
   | { type: "pick-mode"; tabId?: string; enabled: boolean };
 
