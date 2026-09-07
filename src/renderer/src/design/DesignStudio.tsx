@@ -1,8 +1,8 @@
 import { Maximize, MousePointer2, Redo2, Send, Square, Type, Undo2, X, ZoomIn, ZoomOut, Frame as FrameIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { exportBounds } from "../../../shared/design-export.js";
 import { applyDesignOps, cloneNodeWithNewIds, findNode, makeNodeId, summarizeNode, type DesignDoc, type DesignNode, type DesignOp, type DesignNodePatch } from "../../../shared/design-schema.js";
 import { useDesktopStore } from "../store";
-import { absoluteRects, boundingBox } from "./design-geometry.js";
 import { DesignCanvas, MAX_ZOOM, MIN_ZOOM, type CanvasTool } from "./DesignCanvas.js";
 import { DesignInspector } from "./DesignInspector.js";
 import { DesignLayers } from "./DesignLayers.js";
@@ -93,13 +93,13 @@ export function DesignStudio({ onSendToAi }: { onSendToAi(text: string): void })
   const fit = useCallback(() => {
     const doc = workingDocRef.current;
     if (!doc || viewport.w <= 0 || viewport.h <= 0) return;
-    const rects = [...absoluteRects(doc.nodes).values()];
-    const box = rects.length > 0 ? boundingBox(rects) : { id: "", x: 0, y: 0, w: doc.canvas.width, h: doc.canvas.height };
-    if (!box) return;
+    // 总览边界 = 画布矩形 ∪ 顶层可见内容（与导出 exportBounds 同源）：画板本体与
+    // 摆在画布外的多画板内容都完整可见。打开文档的默认视图与「适配内容」按钮共用。
+    const bounds = exportBounds(doc);
     const pad = 48;
-    const next = clamp(Math.min((viewport.w - pad * 2) / Math.max(box.w, 1), (viewport.h - pad * 2) / Math.max(box.h, 1)), MIN_ZOOM, 1);
+    const next = clamp(Math.min((viewport.w - pad * 2) / Math.max(bounds.width, 1), (viewport.h - pad * 2) / Math.max(bounds.height, 1)), MIN_ZOOM, 1);
     setZoom(next);
-    setPan({ x: (viewport.w - box.w * next) / 2 - box.x * next, y: (viewport.h - box.h * next) / 2 - box.y * next });
+    setPan({ x: (viewport.w - bounds.width * next) / 2 - bounds.ox * next, y: (viewport.h - bounds.height * next) / 2 - bounds.oy * next });
   }, [viewport]);
 
   // 切换文档时标记待适配；视口就绪后 fit 一次（首次加载视口测晚于文档到达）。

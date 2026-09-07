@@ -26,3 +26,6 @@ build/icon-master.png
 
 # 应用运行产物（预览截图等）
 .pidesktop/
+
+# 设计模式画布冒烟产物（设计稿与导出，本地保留不入库）
+designs/

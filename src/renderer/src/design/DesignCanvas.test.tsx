@@ -154,3 +154,67 @@ describe("DesignCanvas 冒烟", () => {
     expect(container!.querySelectorAll(".design-handle")).toHaveLength(0);
   });
 });
+
+describe("DesignCanvas 滚轮语义", () => {
+  interface ZoomCall { zoom: number; anchor?: { x: number; y: number } }
+
+  function renderWith(zoom: number, pan: { x: number; y: number }, handlers: { onPanChange: (pan: { x: number; y: number }) => void; onZoomChange: (zoom: number, anchor?: { x: number; y: number }) => void }): HTMLElement {
+    act(() => {
+      root?.render(
+        <DesignCanvas
+          doc={sampleDoc()}
+          zoom={zoom}
+          pan={pan}
+          onPanChange={handlers.onPanChange}
+          onZoomChange={handlers.onZoomChange}
+          selectedId={undefined}
+          onSelect={noop}
+          onNodePatch={noop}
+          onGestureEnd={noop}
+        />
+      );
+    });
+    return container!.querySelector(".design-canvas") as HTMLElement;
+  }
+
+  function wheel(target: HTMLElement, init: WheelEventInit & { ctrlKey?: boolean; shiftKey?: boolean; clientX?: number; clientY?: number }): void {
+    const event = new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaX: init.deltaX, deltaY: init.deltaY });
+    // happy-dom 的 WheelEvent 继承 UIEvent，构造器会丢弃修饰键与坐标，手动补上。
+    if (init.shiftKey !== undefined) Object.defineProperty(event, "shiftKey", { value: init.shiftKey });
+    if (init.ctrlKey !== undefined) Object.defineProperty(event, "ctrlKey", { value: init.ctrlKey });
+    if (init.clientX !== undefined) Object.defineProperty(event, "clientX", { value: init.clientX });
+    if (init.clientY !== undefined) Object.defineProperty(event, "clientY", { value: init.clientY });
+    act(() => {
+      target.dispatchEvent(event);
+    });
+  }
+
+  it("普通滚轮纵向滚动：pan.y 随 deltaY 平移，不触发缩放", () => {
+    const pans: { x: number; y: number }[] = [];
+    const zooms: ZoomCall[] = [];
+    const canvas = renderWith(1, { x: 10, y: 20 }, { onPanChange: (pan) => pans.push(pan), onZoomChange: (zoom, anchor) => zooms.push({ zoom, anchor }) });
+    wheel(canvas, { deltaY: 120 });
+    expect(pans).toEqual([{ x: 10, y: -100 }]);
+    expect(zooms).toHaveLength(0);
+  });
+
+  it("Shift+滚轮横向滚动：deltaY 兜底转横向，原生 deltaX 直接生效", () => {
+    const pans: { x: number; y: number }[] = [];
+    const canvas = renderWith(1, { x: 10, y: 20 }, { onPanChange: (pan) => pans.push(pan), onZoomChange: noop });
+    wheel(canvas, { deltaY: 120, shiftKey: true });
+    expect(pans).toEqual([{ x: -110, y: 20 }]);
+    wheel(canvas, { deltaX: 80, deltaY: 0, shiftKey: true });
+    expect(pans[1]).toEqual({ x: -70, y: 20 });
+  });
+
+  it("Ctrl+滚轮以光标为锚缩放，且不触发平移", () => {
+    const pans: { x: number; y: number }[] = [];
+    const zooms: ZoomCall[] = [];
+    const canvas = renderWith(1, { x: 0, y: 0 }, { onPanChange: (pan) => pans.push(pan), onZoomChange: (zoom, anchor) => zooms.push({ zoom, anchor }) });
+    wheel(canvas, { deltaY: -100, ctrlKey: true, clientX: 50, clientY: 60 });
+    expect(pans).toHaveLength(0);
+    expect(zooms).toHaveLength(1);
+    expect(zooms[0]!.zoom).toBeCloseTo(Math.exp(0.1), 5);
+    expect(zooms[0]!.anchor).toEqual({ x: 50, y: 60 });
+  });
+});

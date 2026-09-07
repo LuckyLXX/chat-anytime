@@ -1,10 +1,11 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode, type WheelEvent as ReactWheelEvent } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { designNodeStyle, designNodeStyleObject, exportDesignHtml } from "../../../shared/design-export.js";
 import type { DesignDoc, DesignNode, DesignNodePatch } from "../../../shared/design-schema.js";
 import { absoluteRects, findDropFrameAt, snapDelta, type NodeRect, type SnapGuide } from "./design-geometry.js";
 
 /**
- * 设计画布：无限画布（滚轮缩放 5%–400%、空格/中键/空白拖动平移）、节点递归渲染、
+ * 设计画布：无限画布（Ctrl/⌘+滚轮缩放 5%–400%、滚轮纵向滚动、Shift+滚轮横向滚动、
+ * 空格/中键/空白拖动平移）、节点递归渲染、
  * 点选/拖动（兄弟边缘与中心 6px 吸附 + 参考线）、8 手柄缩放（Shift 等比）、
  * 双击 text 行内编辑。编辑经 onNodePatch 上报（DesignStudio 负责本地应用 +
  * 变更收敛发送），画布本身不持有文档状态。
@@ -139,13 +140,28 @@ export function DesignCanvas({ doc, zoom, pan, onPanChange, onZoomChange, select
     return { x: (clientX - left - pan.x) / zoom, y: (clientY - top - pan.y) / zoom };
   }, [pan, zoom]);
 
-  const onWheel = useCallback((event: ReactWheelEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    const rect = containerRef.current?.getBoundingClientRect();
-    const anchor = { x: event.clientX - (rect?.left ?? 0), y: event.clientY - (rect?.top ?? 0) };
-    const factor = event.deltaY < 0 ? 1.1 : 1 / 1.1;
-    onZoomChange(zoom * factor, anchor);
-  }, [zoom, onZoomChange]);
+  // 滚轮：默认纵向滚动（向下滚看下方内容），Shift+滚轮横向滚动，触控板双指的
+  // deltaX 同样平移；Ctrl/⌘+滚轮以光标为锚缩放。走原生监听（passive:false）——
+  // React 合成 wheel 无法可靠 preventDefault，Ctrl+滚轮会触发页面级缩放。
+  useEffect(() => {
+    const element = containerRef.current;
+    if (!element) return;
+    const onWheel = (event: WheelEvent): void => {
+      event.preventDefault();
+      if (event.ctrlKey || event.metaKey) {
+        const rect = element.getBoundingClientRect();
+        const anchor = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+        const delta = Math.max(-400, Math.min(400, event.deltaY));
+        onZoomChange(zoom * Math.exp(-delta * 0.001), anchor);
+        return;
+      }
+      const dx = event.shiftKey ? event.deltaX || event.deltaY : event.deltaX;
+      const dy = event.shiftKey ? 0 : event.deltaY;
+      onPanChange({ x: pan.x - dx, y: pan.y - dy });
+    };
+    element.addEventListener("wheel", onWheel, { passive: false });
+    return () => element.removeEventListener("wheel", onWheel);
+  }, [zoom, pan, onZoomChange, onPanChange]);
 
   const selectedRect = selectedId ? rectsRef.current.get(selectedId) : undefined;
 
@@ -296,7 +312,6 @@ export function DesignCanvas({ doc, zoom, pan, onPanChange, onZoomChange, select
         backgroundPosition: `${pan.x}px ${pan.y}px`,
         ...(spaceDown ? { cursor: "grab" } : tool !== "select" ? { cursor: "crosshair" } : {})
       }}
-      onWheel={onWheel}
       onPointerDown={handleBackgroundPointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
