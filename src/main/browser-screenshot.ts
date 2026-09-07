@@ -19,7 +19,7 @@ const SCREENSHOT_DIR_NAME = ".pidesktop/screenshots";
 // grow the directory without bound. Recent captures are enough: a screenshot
 // is recognized in the same turn, right after it was taken.
 const SCREENSHOT_KEEP = 20;
-const SCREENSHOT_FILE_PATTERN = /^browser-.*\.(png|jpg)$/u;
+const SCREENSHOT_FILE_PATTERN = /^(?:browser|design)-.*\.(png|jpg)$/u;
 
 function pad(value: number, width = 2): string {
   return String(value).padStart(width, "0");
@@ -57,15 +57,17 @@ async function pruneScreenshots(dir: string): Promise<void> {
  * Write a captured screenshot into the workspace's default screenshots dir and
  * return the workspace-relative path (forward slashes) for the model to feed to
  * recognize_images. Timestamped names (plus a uniqueness bump) mean a capture
- * is never clobbered by a later one in the same turn.
+ * is never clobbered by a later one in the same turn. `prefix` separates the
+ * capture sources in the shared dir (browser tabs vs design export thumbnails)
+ * while the retention pattern above keeps pruning both.
  */
-export async function saveBrowserScreenshot(workspace: string, data: string, mimeType: "image/png" | "image/jpeg"): Promise<string> {
+export async function saveBrowserScreenshot(workspace: string, data: string, mimeType: "image/png" | "image/jpeg", prefix = "browser"): Promise<string> {
   const rootReal = await realpath(resolve(workspace));
   const targetDir = join(rootReal, ...SCREENSHOT_DIR_NAME.split("/"));
   await mkdir(targetDir, { recursive: true });
   const ext = mimeType === "image/jpeg" ? "jpg" : "png";
   const buffer = Buffer.from(data, "base64");
-  const base = `browser-${screenshotTimestamp()}`;
+  const base = `${prefix}-${screenshotTimestamp()}`;
   let name = `${base}.${ext}`;
   let target = join(targetDir, name);
   // Guarantee a unique name even within the same millisecond.

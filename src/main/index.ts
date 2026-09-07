@@ -13,6 +13,7 @@ import { createWorkspaceDirectory, createWorkspaceFile, deleteWorkspaceEntry, li
 import { pruneDisabledModelRefs } from "./model-catalog.js";
 import { BrowserPreviewController } from "./browser-preview.js";
 import { BrowserAutomationController } from "./browser-automation.js";
+import { DesignSnapshotController } from "./design-snapshot.js";
 import { TerminalManager, type PtyProcess, type PtySpawnOptions } from "./terminal-pty.js";
 
 let mainWindow: BrowserWindow | undefined;
@@ -25,6 +26,8 @@ let credentialsCache: Record<string, string> = {};
 let securityWarning: string | undefined;
 let browserPreviewController: BrowserPreviewController | undefined;
 let browserAutomationController: BrowserAutomationController | undefined;
+// 设计导出缩略图（design_export 回执附图）：离屏渲染导出 HTML 并截图，无需真实预览标签页。
+const designSnapshotController = new DesignSnapshotController();
 
 const spawnNodePty = (file: string, args: string[], options: PtySpawnOptions): PtyProcess => spawn(file, args, options);
 const terminalManager = new TerminalManager({
@@ -267,6 +270,13 @@ function startRuntime(): void {
       } else {
         runtimeProcess?.postMessage({ type: "browser-automation.result", requestId: message.requestId, result: { ok: false, error: "浏览器自动化控制器当前不可用（窗口未创建）" } });
       }
+      return;
+    }
+    if (message.type === "design-snapshot.request") {
+      // 设计导出缩略图：离屏渲染 + 截图，handle 永不 reject（内部兜底 ok:false）。
+      void designSnapshotController.handle(message.request).then((result) => {
+        runtimeProcess?.postMessage({ type: "design-snapshot.result", requestId: message.requestId, result });
+      });
       return;
     }
     if (message.type === "state") latestSnapshot = message.snapshot;

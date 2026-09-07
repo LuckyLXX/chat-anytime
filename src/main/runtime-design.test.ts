@@ -22,14 +22,14 @@ async function tempWorkspace(): Promise<string> {
 
 /** Run a tool with the Pi 5-arg execute signature; our closures never read the trailing context args. */
 interface ToolOutput {
-  content: { type: string; text: string }[];
+  content: { type: string; text?: string; data?: string; mimeType?: string }[];
   details?: Record<string, unknown>;
 }
 const execute = async (tool: { execute: (id: string, params: never, signal: undefined, onUpdate: undefined, ctx: ExtensionContext) => Promise<unknown> }, params: unknown): Promise<ToolOutput> =>
   (await tool.execute("test-call", params as never, undefined, undefined, undefined as unknown as ExtensionContext)) as ToolOutput;
 
 /** 内存态 deps + 真实临时工作区（写盘路径走真实 design-store）。 */
-async function harness(options: { enabled?: boolean } = {}) {
+async function harness(options: { enabled?: boolean; renderSnapshot?: DesignToolDeps["renderSnapshot"] } = {}) {
   const workspace = await tempWorkspace();
   let doc: DesignDoc | undefined;
   let fileName: string | undefined;
@@ -37,6 +37,7 @@ async function harness(options: { enabled?: boolean } = {}) {
   const deps: DesignToolDeps = {
     enabled: () => options.enabled ?? true,
     workspace: () => workspace,
+    renderSnapshot: options.renderSnapshot,
     getDoc: () => doc,
     getDocFileName: () => fileName,
     bindDoc: (next, file) => {
@@ -186,6 +187,35 @@ describe("buildDesignTools", () => {
     expect(existsSync(join(workspace, "dist", "投稿页.html"))).toBe(true);
     await expect(execute(tool("design_export"), { path: "../outside.html" })).rejects.toThrow("相对路径");
     await expect(execute(tool("design_export"), { path: "C:/tmp/x.html" })).rejects.toThrow("相对路径");
+  });
+
+  it("design_export 附缩略图：成功时回执带 image part、落盘路径与 details.thumbnail", async () => {
+    const snapshots: unknown[] = [];
+    const { tool } = await harness({
+      renderSnapshot: async (request) => {
+        snapshots.push(request);
+        return { ok: true, data: "aGVsbG8=", width: 1024, height: 640, mimeType: "image/png", savedPath: ".pidesktop/screenshots/design-1.png" };
+      }
+    });
+    await execute(tool("design_create"), { name: "海报" });
+    const result = await execute(tool("design_export"), {});
+    const image = result.content.find((part) => part.type === "image");
+    expect(image).toMatchObject({ type: "image", data: "aGVsbG8=", mimeType: "image/png" });
+    expect(result.content[0]!.text).toContain("design-1.png");
+    expect(result.content[0]!.text).toContain("recognize_images");
+    expect(result.details).toMatchObject({ thumbnail: { width: 1024, height: 640, relativePath: ".pidesktop/screenshots/design-1.png" } });
+    // 请求携带导出文件的绝对路径与内容包围盒（视口适配用）。
+    expect(snapshots[0]).toMatchObject({ contentWidth: 1440, contentHeight: 1024 });
+  });
+
+  it("design_export 缩略图失败降级：文本提示、无 image part、导出不受影响", async () => {
+    const { tool, workspace } = await harness({ renderSnapshot: async () => ({ ok: false, error: "离屏渲染未出帧" }) });
+    await execute(tool("design_create"), { name: "海报" });
+    const result = await execute(tool("design_export"), {});
+    expect(result.content).toHaveLength(1);
+    expect(result.content[0]!.text).toContain("缩略图生成失败");
+    expect(result.content[0]!.text).toContain("离屏渲染未出帧");
+    expect(existsSync(join(workspace, "designs", "exports", "海报.html"))).toBe(true);
   });
   it("design_update 带质量门：问题诊断 + 可套用的修复 ops 回执 + resize 生效", async () => {
     const { tool, current } = await harness();

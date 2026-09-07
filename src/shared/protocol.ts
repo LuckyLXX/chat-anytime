@@ -680,6 +680,26 @@ export type BrowserTabsEvent =
   /** AI 会话开始操作某个标签页：渲染端自动展开预览面板并激活该标签（用户可见）。 */
   | { action: "automation-started"; tabId: string };
 
+/**
+ * 设计导出缩略图（design_export 回执附图）。utility 请求 main 用隐藏离屏窗口
+ * 渲染导出的 HTML 单文件并截图，省掉 export→navigate→wait→screenshot→recognize
+ * 的五步视觉验证回路；请求经 RuntimeMessage["design-snapshot.request"] 上行、
+ * 结果经 RuntimeCommand["design-snapshot.result"] 回传（与浏览器 RPC 同旁路语义）。
+ */
+export interface DesignSnapshotRequest {
+  /** 导出 HTML 的绝对路径（design-store 写盘产物，workspace 内）。 */
+  htmlPath: string;
+  /** 画布 ∪ 顶层内容包围盒（exportBounds）：缩略视口按它适配缩放。 */
+  contentWidth: number;
+  contentHeight: number;
+  /** 截图落盘的工作区（saveBrowserScreenshot 写 .pidesktop/screenshots/）。 */
+  workspace: string;
+}
+
+export type DesignSnapshotResult =
+  | { ok: true; data: string; width: number; height: number; mimeType: "image/png"; savedPath: string }
+  | { ok: false; error: string };
+
 /** 浏览器自动化总开关；缺省视为启用（settings.browser?.enabled !== false）。 */
 export interface BrowserSettings {
   enabled: boolean;
@@ -1204,6 +1224,8 @@ export type RuntimeCommand =
   | { type: "usage.stats.request"; agentId?: string }
   /** main 进程回传的浏览器自动化结果（响应 utility 的 browser-automation.request）。 */
   | { type: "browser-automation.result"; requestId: string; result: BrowserAutomationResult }
+  /** main 进程回传的设计导出缩略图（响应 utility 的 design-snapshot.request）。 */
+  | { type: "design-snapshot.result"; requestId: string; result: DesignSnapshotResult }
   // —— 设计模式（Design Studio）：画布 ↔ utility 会话的文档命令。sessionId 走
   // resolveTargetRecord（缺省激活会话）；designDoc 绑定是会话级，画布跟随激活会话。 ——
   /** 列出工作区设计文档（结果经 design.docs 推送）。 */
@@ -1256,6 +1278,8 @@ export type RuntimeMessage =
   | { type: "automation-runs"; runs: AutomationRunRecord[] }
   /** utility 进程发起的浏览器自动化操作；main 完成后以 browser-automation.result 命令回传。 */
   | { type: "browser-automation.request"; requestId: string; sessionKey: string; request: BrowserAutomationRequest }
+  /** utility 进程请求渲染设计导出缩略图；main 完成后以 design-snapshot.result 命令回传。 */
+  | { type: "design-snapshot.request"; requestId: string; request: DesignSnapshotRequest }
   | { type: "error"; message: string }
   /** 子代理完整记录（响应 subagent.transcript）；childSessionId 用于对齐请求。 */
   | { type: "subagent.transcript-result"; childSessionId: string; messages: ChatMessage[] }

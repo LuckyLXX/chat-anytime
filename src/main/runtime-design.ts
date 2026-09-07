@@ -15,9 +15,11 @@
 
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { resolve } from "node:path";
 import { applyDesignOps, countNodes, createDesignDoc, findNode, makeNodeId, sanitizeDesignName, type DesignDoc, type DesignNode, type DesignOp } from "../shared/design-schema.js";
 import { inspectDesignQuality, summarizeDesignLayout } from "../shared/design-quality.js";
-import { exportDesignHtml } from "../shared/design-export.js";
+import { exportBounds, exportDesignHtml } from "../shared/design-export.js";
+import type { DesignSnapshotRequest, DesignSnapshotResult } from "../shared/protocol.js";
 import { designFilePath, exportDesignFile, listDesigns, readDesign, writeExportFile, DESIGN_FILE_SUFFIX } from "./design-store.js";
 
 /** 单次 design_update 的 ops 数上限：逼模型分批（先第一屏/一个区域），超限的批
@@ -37,6 +39,8 @@ export interface DesignToolDeps {
   bindDoc: (doc: DesignDoc, fileName: string) => void;
   /** 持久化：写盘（revision 已由工具推进）+ design.state 推送；返回落盘文件名。 */
   persistDoc: (doc: DesignDoc, previousFileName: string | undefined) => string;
+  /** 离屏渲染导出 HTML 并截图（main 进程）；缺省时 design_export 不附缩略图。永不 reject（RPC 层已兜底 ok:false）。 */
+  renderSnapshot?: (request: DesignSnapshotRequest) => Promise<DesignSnapshotResult>;
 }
 
 const DISABLED_TEXT = "设计模式已在设置中停用（settings.design.enabled），请在设置中开启后再试。";
@@ -265,7 +269,7 @@ export function buildDesignTools(deps: DesignToolDeps): ToolDefinition[] {
     defineTool({
       name: "design_export",
       label: "导出设计 HTML",
-      description: "把当前设计文档导出为内联样式的 HTML 单文件（HTML+CSS，可直接在浏览器打开）。path 缺省写到 designs/exports/<文档名>.html。",
+      description: "把当前设计文档导出为内联样式的 HTML 单文件（HTML+CSS，可直接在浏览器打开）。path 缺省写到 designs/exports/<文档名>.html。回执自动附带该文件的渲染缩略图（多模态模型直接查看，文本模型拿工作区路径喂 recognize_images），一般无需再走浏览器截图验证。",
       promptSnippet: "design_export: 导出 HTML 单文件",
       parameters: Type.Object({
         path: Type.Optional(Type.String({ description: "工作区相对路径（缺省 designs/exports/<名称>.html）" }))
@@ -278,9 +282,34 @@ export function buildDesignTools(deps: DesignToolDeps): ToolDefinition[] {
         const customPath = typeof params?.path === "string" ? params.path.trim() : "";
         const html = exportDesignHtml(doc);
         const relativePath = customPath ? writeExportFile(workspace, html, customPath) : exportDesignFile(workspace, doc, html);
+        const details: Record<string, unknown> = { relativePath, revision: doc.revision };
+        const textLines = [`已导出「${doc.name}」到 ${relativePath}。`];
+        let imagePart: { type: "image"; data: string; mimeType: "image/png" | "image/jpeg" } | undefined;
+        // 缩略图：离屏渲染导出产物并截图，随回执回传——省掉 export→navigate→wait→
+        // screenshot→recognize 的五步视觉验证回路（真实会话里这条回路占了 1/3 调用量）。
+        if (deps.renderSnapshot) {
+          const bounds = exportBounds(doc);
+          const outcome = await deps.renderSnapshot({
+            htmlPath: resolve(workspace, relativePath),
+            contentWidth: bounds.width,
+            contentHeight: bounds.height,
+            workspace
+          });
+          if (outcome.ok) {
+            textLines.push(`缩略图（${outcome.width}×${outcome.height}）已生成并附在本回执：${outcome.savedPath}。多模态模型直接查看图像做视觉复核；文本模型可把该工作区相对路径交给 recognize_images。无需再用 browser_navigate + browser_screenshot 验证本次导出。`);
+            details.thumbnail = { relativePath: outcome.savedPath, width: outcome.width, height: outcome.height };
+            imagePart = { type: "image", data: outcome.data, mimeType: outcome.mimeType };
+          } else {
+            textLines.push(`缩略图生成失败（${outcome.error}）；如需视觉验证可用 browser_navigate 打开该文件后截图。`);
+          }
+        }
+        textLines.push(CANVAS_HINT);
         return {
-          content: [{ type: "text" as const, text: `已导出「${doc.name}」到 ${relativePath}。可用 browser_navigate 打开该文件预览效果。${CANVAS_HINT}` }],
-          details: { relativePath, revision: doc.revision }
+          content: [
+            { type: "text" as const, text: textLines.join("\n") },
+            ...(imagePart ? [imagePart] : [])
+          ],
+          details
         };
       }
     })

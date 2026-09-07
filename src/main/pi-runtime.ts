@@ -29,6 +29,8 @@ import type {
   ChatMessage,
   ContextUsage,
   DesktopSettings,
+  DesignSnapshotRequest,
+  DesignSnapshotResult,
   HookRule,
   HookSummary,
   McpServerSummary,
@@ -331,6 +333,33 @@ function resolveBrowserAutomation(requestId: string, result: BrowserAutomationRe
   const pending = pendingBrowserRequests.get(requestId);
   if (!pending) return;
   pendingBrowserRequests.delete(requestId);
+  clearTimeout(pending.timer);
+  pending.resolve(result);
+}
+
+// Design export thumbnail RPC (design-snapshot.request / .result): same
+// bypass-the-command-queue semantics — the design_export tool execution awaits
+// this directly and must not stall behind unrelated serialized commands.
+let designSnapshotSequence = 0;
+const DESIGN_SNAPSHOT_RPC_TIMEOUT_MS = 60_000;
+const pendingDesignSnapshotRequests = new Map<string, { resolve: (result: DesignSnapshotResult) => void; timer: ReturnType<typeof setTimeout> }>();
+
+function requestDesignSnapshot(request: DesignSnapshotRequest): Promise<DesignSnapshotResult> {
+  return new Promise((resolve, reject) => {
+    const requestId = `design-snapshot-rpc-${++designSnapshotSequence}`;
+    const timer = setTimeout(() => {
+      pendingDesignSnapshotRequests.delete(requestId);
+      reject(new Error("缩略图生成超时（60 秒无响应）"));
+    }, DESIGN_SNAPSHOT_RPC_TIMEOUT_MS);
+    pendingDesignSnapshotRequests.set(requestId, { resolve, timer });
+    post({ type: "design-snapshot.request", requestId, request });
+  });
+}
+
+function resolveDesignSnapshot(requestId: string, result: DesignSnapshotResult): void {
+  const pending = pendingDesignSnapshotRequests.get(requestId);
+  if (!pending) return;
+  pendingDesignSnapshotRequests.delete(requestId);
   clearTimeout(pending.timer);
   pending.resolve(result);
 }
@@ -2235,6 +2264,13 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   const designTools = runtimeDesign.buildDesignTools({
     enabled: () => settings?.design?.enabled !== false,
     workspace: () => recordWorkspace || undefined,
+    renderSnapshot: async (request) => {
+      try {
+        return await requestDesignSnapshot(request);
+      } catch (error) {
+        return { ok: false, error: errorText(error) };
+      }
+    },
     getDoc: () => recordBox?.designDoc?.doc,
     getDocFileName: () => recordBox?.designDoc?.fileName,
     bindDoc: (doc, fileName) => {
@@ -3786,6 +3822,10 @@ parentPort.on("message", (event: { data: RuntimeCommand }) => {
   // behind serialized commands would stall the run for no reason.
   if (event.data.type === "browser-automation.result") {
     resolveBrowserAutomation(event.data.requestId, event.data.result);
+    return;
+  }
+  if (event.data.type === "design-snapshot.result") {
+    resolveDesignSnapshot(event.data.requestId, event.data.result);
     return;
   }
   commandQueue = commandQueue

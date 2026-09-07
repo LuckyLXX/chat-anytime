@@ -111,7 +111,8 @@ function nodeHtml(node: DesignNode, indent: string, inFlexParent = false): strin
 /** 导出边界：画布矩形与全部顶层可见节点矩形的并集。多画板（整套原型）内容
  *  可以摆在画布矩形之外，导出按并集出图、绝不裁剪；内容都在画布内时退化为
  *  画布矩形本身（输出与旧版逐字节一致）。 */
-function exportBounds(doc: DesignDoc): { ox: number; oy: number; width: number; height: number } {
+/** 画布 ∪ 顶层可见内容包围盒（导出容器与缩略图视口共用的求界逻辑）。 */
+export function exportBounds(doc: DesignDoc): { ox: number; oy: number; width: number; height: number } {
   const canvas = doc.canvas;
   let minX = 0;
   let minY = 0;
