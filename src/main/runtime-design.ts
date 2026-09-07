@@ -88,6 +88,8 @@ const designOpSchema = Type.Object({
   id: Type.Optional(Type.String({ description: "update/delete/move：目标节点 id" })),
   parentId: Type.Optional(Type.Union([Type.String(), Type.Null()], { description: "create/move：目标父节点 id（必须是 frame）；null/缺省=文档根" })),
   index: Type.Optional(Type.Integer({ description: "create/move：在父 children 中的插入位置，缺省追加尾部" })),
+  dx: Type.Optional(Type.Number({ description: "move：整树水平平移 px（多画板重排一 op 搞定）" })),
+  dy: Type.Optional(Type.Number({ description: "move：整树垂直平移 px" })),
   width: Type.Optional(Type.Integer({ description: "resize：画布宽 px" })),
   height: Type.Optional(Type.Integer({ description: "resize：画布高 px" })),
   background: Type.Optional(Type.Union([Type.String(), Type.Null()], { description: "resize：画布背景色（null 清除）" })),
@@ -116,7 +118,11 @@ export function buildDesignTools(deps: DesignToolDeps): ToolDefinition[] {
         const current = deps.getDoc();
         const lines = summaries.map((summary) => `- ${summary.name}（${summary.width}×${summary.height}，${summary.nodeCount} 节点）`);
         const currentLine = current ? `当前会话已打开：${formatDocSummary(current)}` : "当前会话未打开文档（design_update 前需先 design_open 或 design_create）。";
-        return { content: [{ type: "text" as const, text: summaries.length > 0 ? `工作区设计文档：\n${lines.join("\n")}\n${currentLine}` : `工作区还没有设计文档。${currentLine}` }], details: { count: summaries.length } };
+        // 一个文档 = 一块画布：发现多文档时补一条防拆分提示（跨文档合并没有工具路径，只能重建）。
+        const multiDocHint = summaries.length > 1
+          ? "\n提示：一个文档 = 一块画布；整套原型请放进同一个文档（一屏 = 一个顶层命名 frame 并排，画布放不下先 resize）。已拆成多文档的，建议逐屏重建合并，或分别导出 HTML 交付。"
+          : "";
+        return { content: [{ type: "text" as const, text: summaries.length > 0 ? `工作区设计文档：\n${lines.join("\n")}\n${currentLine}${multiDocHint}` : `工作区还没有设计文档。${currentLine}` }], details: { count: summaries.length } };
       }
     }),
     defineTool({
@@ -202,8 +208,9 @@ export function buildDesignTools(deps: DesignToolDeps): ToolDefinition[] {
       label: "更新设计文档",
       description: [
         "对当前设计文档批量应用结构化操作（原子：任一失败整批拒绝，文档不变）。坐标系相对父节点；frame 声明 layout 后子节点按 flex 排布。",
-        "ops 形态：{op:'create', parentId?, index?, node} 新建（parentId 缺省=根）；{op:'update', id, patch} 改属性（patch 不允许改 id/type/children，未知字段整批拒绝）；{op:'delete', id} 删除子树；{op:'move', id, parentId?, index?} 换父/排序（不能移入自身子树）；{op:'resize', width?, height?, background?} 调画布尺寸；{op:'replace', nodes} 整树替换（慎用）。",
-        "节点字段：type(frame/rect/text/image)、name（每个节点都起）、x/y/w/h、fill/stroke/strokeWidth/radius/opacity/shadow、text 节点加 text/fontSize/fontWeight/color/align、image 加 src(http/data)、frame 加 layout({direction:'row'|'column',gap,padding,justify,align}) 与 children。",
+        "ops 形态：{op:'create', parentId?, index?, node} 新建（parentId 缺省=根）；{op:'update', id, patch} 改属性（patch 不允许改 id/type/children，未知字段整批拒绝）；{op:'delete', id} 删除子树；{op:'move', id, parentId?, index?, dx?, dy?} 换父/排序（不能移入自身子树；dx/dy 对移动后的子树整体平移）；{op:'resize', width?, height?, background?} 调画布尺寸；{op:'replace', nodes} 整树替换（慎用）。",
+        "节点字段：type(frame/rect/text/image)、name（每个节点都起）、x/y/w/h、fill/stroke/strokeWidth/radius/opacity/shadow、text 节点加 text/fontSize/fontWeight/color/align、image 加 src(http/data)、frame 加 layout({direction:'row'|'column',gap,padding,justify,align}) 与 children。未知字段（如自造的 props.*）整批拒绝。",
+        "半透明直接写进 fill/stroke（rgba/hex8，如 'rgba(18,24,48,0.62)'）；带子内容的容器不要用元素级 opacity 做半透明——它会把子内容一起压淡，质量门按透明度链复核文字对比度。",
         "工作节奏：一次调用 ≤64 条 ops，先搭第一个屏幕（一屏 = 一个顶层命名 frame，屏幕并排间隔 ≥80px），成功后再继续下一屏；内容会超出画布时先发 {op:'resize'} 扩画布。",
         "回执带「修复 ops」时，把它们作为下一条 design_update 的 ops 参数原样传入（先修复再继续新内容）。",
         "工具成功返回后直接进行下一步操作，不要先输出叙述性文字。",
@@ -215,6 +222,9 @@ export function buildDesignTools(deps: DesignToolDeps): ToolDefinition[] {
       }),
       execute: async (_id, params) => {
         checkEnabled(deps);
+        // 顶层参数设防：幻觉参数（如 edits:[]）直接报错而不是静默忽略。
+        const unknownArgs = Object.keys(params ?? {}).filter((key) => key !== "ops");
+        if (unknownArgs.length > 0) throw new Error(`design_update 不支持参数：${unknownArgs.join("、")}（只接受 ops 数组）`);
         const workspace = requireWorkspace(deps);
         const doc = requireDoc(deps);
         const rawOps = Array.isArray(params?.ops) ? params.ops as unknown[] : [];

@@ -262,6 +262,27 @@ describe("applyDesignOps", () => {
     expect(self.ok).toBe(false);
   });
 
+  it("move dx/dy 整树平移（子树根位移、children 相对坐标跟随）", () => {
+    const result = applyDesignOps(sampleDoc(), [{ op: "move", id: "root", dx: 200, dy: -50 }]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const root = findNode(result.doc.nodes, "root")!.node;
+    expect(root.x).toBe(300);
+    expect(root.y).toBe(30);
+    // children 是父相对坐标，不因整树平移而变。
+    const btn = findNode(result.doc.nodes, "btn")!.node;
+    expect(btn.x).toBe(0);
+    expect(btn.y).toBe(0);
+  });
+
+  it("op 级未知参数拒绝（防顶层幻觉参数被静默忽略）", () => {
+    const bad = applyDesignOps(sampleDoc(), [{ op: "create", edits: [], node: { type: "rect", id: "x1", x: 0, y: 0, w: 10, h: 10 } } as unknown as DesignOp]);
+    expect(bad.ok).toBe(false);
+    expect(bad.ok ? "" : bad.error).toContain("edits");
+    const badMove = applyDesignOps(sampleDoc(), [{ op: "move", id: "loose", node: {} } as unknown as DesignOp]);
+    expect(badMove.ok).toBe(false);
+  });
+
   it("replace 整树替换并 normalize", () => {
     const result = applyDesignOps(sampleDoc(), [{ op: "replace", nodes: [{ type: "text", text: "全新" }] }]);
     expect(result.ok).toBe(true);
@@ -369,5 +390,24 @@ describe("applyDesignOps resize / patch 字段守卫", () => {
       { op: "update", id: "t1", patch: { colour: "#fff" } as unknown as DesignNodePatch }
     ]);
     expect(mixed.ok).toBe(false);
+  });
+
+  it("create/replace 节点草稿未知字段整批拒绝（防自造 props.* 被 normalize 静默丢弃）", () => {
+    const doc = createDesignDoc("草稿守卫", 800, 600);
+    // 顶层字段：props.strokeOpacity 是本会话真实发生过的自造字段。
+    const bad = applyDesignOps(doc, [{ op: "create", node: { type: "rect", id: "a", x: 0, y: 0, w: 10, h: 10, props: { strokeOpacity: 0.2 } } as never }]);
+    expect(bad.ok).toBe(false);
+    expect(bad.ok ? "" : bad.error).toContain("props");
+    // 子树内也查。
+    const nested = applyDesignOps(doc, [{ op: "create", node: { type: "frame", id: "f", x: 0, y: 0, w: 10, h: 10, children: [{ type: "rect", id: "c", x: 0, y: 0, w: 5, h: 5, colour: "#fff" }] } }] as unknown as DesignOp[]);
+    expect(nested.ok).toBe(false);
+    expect(nested.ok ? "" : nested.error).toContain("colour");
+    // replace 同样拒绝。
+    const rep = applyDesignOps(doc, [{ op: "replace", nodes: [{ type: "rect", id: "r", x: 0, y: 0, w: 5, h: 5, shadowOpacity: 0.5 }] }] as unknown as DesignOp[]);
+    expect(rep.ok).toBe(false);
+    expect(rep.ok ? "" : rep.error).toContain("shadowOpacity");
+    // 合法字段不受影响。
+    const good = applyDesignOps(doc, [{ op: "create", node: { type: "rect", id: "ok1", x: 0, y: 0, w: 10, h: 10, fill: "rgba(18,24,48,0.62)", opacity: 1 } }]);
+    expect(good.ok).toBe(true);
   });
 });

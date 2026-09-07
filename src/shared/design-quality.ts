@@ -86,15 +86,30 @@ function relativeLuminance(color: Rgb): number {
   return 0.2126 * srgbChannel(color.r) + 0.7152 * srgbChannel(color.g) + 0.0722 * srgbChannel(color.b);
 }
 
-/** WCAG 对比度（两色都按不透明处理；带 alpha 的前景先与背景合成）。 */
-export function contrastRatio(foreground: Rgb, background: Rgb): number {
-  const alpha = foreground.a >= 1 ? 1 : foreground.a;
-  const blended: Rgb = alpha >= 1 ? foreground : {
+/** parseColor 的 alpha 归一：hex8 量程是 0–255，rgba() 是 0–1。 */
+function normAlpha(a: number): number {
+  return a > 1 ? Math.min(1, a / 255) : Math.max(0, a);
+}
+
+/** 前景色以给定 alpha 合成到背景之上（结果不透明）。 */
+function blendOver(foreground: Rgb, background: Rgb, alpha: number): Rgb {
+  if (alpha >= 1) return { r: foreground.r, g: foreground.g, b: foreground.b, a: 1 };
+  return {
     r: foreground.r * alpha + background.r * (1 - alpha),
     g: foreground.g * alpha + background.g * (1 - alpha),
     b: foreground.b * alpha + background.b * (1 - alpha),
     a: 1
   };
+}
+
+function toHex(color: Rgb): string {
+  return `#${[color.r, color.g, color.b].map((v) => Math.round(v).toString(16).padStart(2, "0")).join("")}`;
+}
+
+/** WCAG 对比度（两色都按不透明处理；带 alpha 的前景先与背景合成，量程兼容 0–1 与 hex8 的 0–255）。 */
+export function contrastRatio(foreground: Rgb, background: Rgb): number {
+  const alpha = normAlpha(foreground.a);
+  const blended: Rgb = alpha >= 1 ? foreground : blendOver(foreground, background, alpha);
   const l1 = relativeLuminance(blended);
   const l2 = relativeLuminance(background);
   return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
@@ -107,8 +122,6 @@ interface FrameBox {
   /** 绝对坐标（仅绝对定位链上有效；flex 子树位置由浏览器布局决定，不参与出界判断）。 */
   absX: number;
   absY: number;
-  /** 从根到该节点的祖先 fill 栈（对比度回溯用）。 */
-  fills: string[];
   /** 祖先链上是否出现过 flex（flex 子树的 x/y 不可靠）。 */
   inFlex: boolean;
 }
@@ -118,13 +131,13 @@ function paddingSides(padding: DesignLayout["padding"]): { top: number; right: n
   return { top: padding?.top ?? 0, right: padding?.right ?? 0, bottom: padding?.bottom ?? 0, left: padding?.left ?? 0 };
 }
 
-function collectBoxes(nodes: readonly DesignNode[], absX: number, absY: number, fills: string[], inFlex: boolean, into: FrameBox[]): void {
+function collectBoxes(nodes: readonly DesignNode[], absX: number, absY: number, inFlex: boolean, into: FrameBox[]): void {
   for (const node of nodes) {
     if (node.visible === false) continue;
-    const box: FrameBox = { node, absX: absX + node.x, absY: absY + node.y, fills, inFlex };
+    const box: FrameBox = { node, absX: absX + node.x, absY: absY + node.y, inFlex };
     into.push(box);
     if (node.children) {
-      collectBoxes(node.children, box.absX, box.absY, node.fill ? [...fills, node.fill] : fills, inFlex || Boolean(node.layout), into);
+      collectBoxes(node.children, box.absX, box.absY, inFlex || Boolean(node.layout), into);
     }
   }
 }
@@ -166,7 +179,7 @@ export function inspectDesignQuality(doc: DesignDoc): DesignQualityReport {
   };
 
   const boxes: FrameBox[] = [];
-  collectBoxes(doc.nodes, 0, 0, [], false, boxes);
+  collectBoxes(doc.nodes, 0, 0, false, boxes);
 
   // —— 1. flex 容器装不下子内容（主轴/交叉轴溢出）→ repairTarget 放大容器 ——
   for (const { node } of boxes) {
@@ -209,29 +222,46 @@ export function inspectDesignQuality(doc: DesignDoc): DesignQualityReport {
     pushDiagnostic("empty-container", `${describeNode(node)} 是空容器（无子节点且无填充/描边），建议删除或补充内容`, false);
   }
 
-  // —— 3. 文字对比度（对最近祖先 fill 或画布背景做 WCAG AA 判定）→ repairTarget 换深/浅色 ——
-  const canvasBackground = doc.canvas.background ? parseColor(doc.canvas.background) : undefined;
-  const walkParents = (nodes: readonly DesignNode[], ancestors: readonly DesignNode[], visit: (node: DesignNode, ancestors: readonly DesignNode[]) => void): void => {
-    for (const node of nodes) {
-      if (node.visible === false) continue;
-      visit(node, ancestors);
-      if (node.children) walkParents(node.children, [...ancestors, node], visit);
+  // —— 3. 文字对比度：先合成「有效背景」再做 WCAG AA 判定 → repairTarget 换深/浅色 ——
+  // 渲染模型：每层 fill 先合成到背后的底色上，再按该节点 opacity 整组淡出；文字自身
+  // 也被祖先 opacity 链压暗。全部合成后与 AA 比较——容器级 opacity 压暗子文字在这里现形
+  // （画布上看不出的「玻璃卡片 0.5 透明度把表单文字洗灰」，导出后就是真缺陷）。
+  const OPAQUE_WHITE: Rgb = { r: 255, g: 255, b: 255, a: 1 };
+  const canvasBg = doc.canvas.background ? parseColor(doc.canvas.background) : undefined;
+
+  const checkText = (node: DesignNode, ancestors: readonly DesignNode[], absX: number, absY: number, inFlex: boolean, opacityProduct: number, rootIndex: number): void => {
+    if (!node.color || !node.text?.trim()) return;
+    const foregroundColor = parseColor(node.color);
+    if (!foregroundColor) return;
+    // 底色：画布背景 → 覆盖文字点位的更早根级 fill 节点（AI 常用满幅 rect 当底色，
+    // z 序在文字之前；取全部覆盖者按 z 序叠加）→ 白。根级近似只在绝对定位链可信时做。
+    let backdrop = canvasBg ?? OPAQUE_WHITE;
+    if (!canvasBg && !inFlex) {
+      for (let index = 0; index < rootIndex; index++) {
+        const root = doc.nodes[index]!;
+        if (root.visible === false) continue;
+        if (absX < root.x || absX > root.x + root.w || absY < root.y || absY > root.y + root.h) continue;
+        const fill = root.fill ? parseColor(root.fill) : undefined;
+        if (!fill) continue;
+        backdrop = blendOver(fill, backdrop, Math.min(1, normAlpha(fill.a) * (root.opacity ?? 1)));
+      }
     }
-  };
-  walkParents(doc.nodes, [], (node, ancestors) => {
-    if (node.type !== "text" || !node.color || !node.text?.trim()) return;
-    const backdropFill = [...ancestors].reverse().find((parent) => parent.fill);
-    const backdropRaw = backdropFill?.fill ?? doc.canvas.background;
-    if (!backdropRaw) return;
-    const foreground = parseColor(node.color);
-    const backdrop = parseColor(backdropRaw);
-    if (!foreground || !backdrop) return;
+    // 祖先链外→内逐层合成 fill：有效 alpha = fill alpha × 自身 opacity × 外层 opacity 累乘。
+    let productAbove = 1;
+    for (const ancestor of ancestors) {
+      const ownOpacity = ancestor.opacity ?? 1;
+      const fill = ancestor.fill ? parseColor(ancestor.fill) : undefined;
+      if (fill) backdrop = blendOver(fill, backdrop, Math.min(1, normAlpha(fill.a) * ownOpacity * productAbove));
+      productAbove *= ownOpacity;
+    }
+    const foreground: Rgb = { ...foregroundColor, a: normAlpha(foregroundColor.a) * opacityProduct };
     const threshold = isLargeText(node) ? 3 : 4.5;
     const ratio = contrastRatio(foreground, backdrop);
     if (ratio >= threshold - 0.01) return;
+    // 修复建议改的是 color，opacity 链原样保留 → 候选色按同样的有效 alpha 计分。
     const candidates = ["#1c1917", "#ffffff"].map((hex) => ({ hex, rgb: parseColor(hex)! }));
     const scored = candidates
-      .map((candidate) => ({ ...candidate, ratio: contrastRatio(candidate.rgb, backdrop) }))
+      .map((candidate) => ({ ...candidate, ratio: contrastRatio({ ...candidate.rgb, a: normAlpha(candidate.rgb.a) * opacityProduct }, backdrop) }))
       .sort((a, b) => b.ratio - a.ratio);
     const passing = scored.find((candidate) => candidate.ratio >= threshold);
     const chosen = passing ?? scored[0]!;
@@ -240,10 +270,23 @@ export function inspectDesignQuality(doc: DesignDoc): DesignQualityReport {
     }
     pushDiagnostic(
       "text-contrast",
-      `${describeNode(node)} 文字对比度 ${ratio.toFixed(1)}:1 低于 AA ${threshold}:1（背景 ${backdropRaw}），建议改 ${chosen.hex}`,
+      `${describeNode(node)} 文字对比度 ${ratio.toFixed(1)}:1 低于 AA ${threshold}:1（有效背景 ≈ ${toHex(backdrop)}${opacityProduct < 0.999 ? `，透明度链 ×${opacityProduct.toFixed(2)}` : ""}），建议改 ${chosen.hex}`,
       true
     );
-  });
+  };
+
+  const walkContrast = (nodes: readonly DesignNode[], ancestors: readonly DesignNode[], absX: number, absY: number, inFlex: boolean, opacityProduct: number, rootIndex: number): void => {
+    for (let index = 0; index < nodes.length; index++) {
+      const node = nodes[index]!;
+      if (node.visible === false) continue;
+      const nodeAbsX = absX + node.x;
+      const nodeAbsY = absY + node.y;
+      const effectiveRootIndex = ancestors.length === 0 ? index : rootIndex;
+      if (node.type === "text") checkText(node, ancestors, nodeAbsX, nodeAbsY, inFlex, opacityProduct, effectiveRootIndex);
+      if (node.children) walkContrast(node.children, [...ancestors, node], nodeAbsX, nodeAbsY, inFlex || Boolean(node.layout), opacityProduct * (node.opacity ?? 1), effectiveRootIndex);
+    }
+  };
+  walkContrast(doc.nodes, [], 0, 0, false, 1, 0);
 
   // —— 4. 内容超出画布 → 建议扩画布（resize repairTarget） ——
   let maxX = doc.canvas.width;

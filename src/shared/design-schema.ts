@@ -80,7 +80,8 @@ export type DesignOp =
   /** patch 不允许改 id/type/children（结构变化用 move/create/delete）。 */
   | { op: "update"; id: string; patch: DesignNodePatch }
   | { op: "delete"; id: string }
-  | { op: "move"; id: string; parentId?: string | null; index?: number }
+  /** dx/dy 对移动后的子树根做整体平移（子树坐标相对父节点，平移根即平移整树；多画板重排一 op 搞定）。 */
+  | { op: "move"; id: string; parentId?: string | null; index?: number; dx?: number; dy?: number }
   /** 画布尺寸/背景调整（多画板：新屏幕放不下时先扩画布，节点允许留在画布矩形外）。 */
   | { op: "resize"; width?: number; height?: number; background?: string | null }
   /** 整树替换（undo 回写 / 大改）。 */
@@ -99,6 +100,19 @@ export const MAX_DESIGN_DEPTH = 32;
 const NODE_TYPES: readonly DesignNodeType[] = ["frame", "rect", "text", "image"];
 /** update patch 的合法字段集（白名单之外的字段拒绝，防 AI 拼错字段被静默忽略）。 */
 const PATCHABLE_KEYS: ReadonlySet<string> = new Set(["name", "x", "y", "w", "h", "visible", "fill", "stroke", "strokeWidth", "radius", "opacity", "shadow", "text", "fontSize", "fontWeight", "color", "lineHeight", "align", "src", "layout"]);
+/** create/replace 节点草稿的合法字段集（= patch 字段 + 结构字段；与 update patch 同哲学：
+ *  自造字段如 props.strokeOpacity 直接报错而不是被 normalizeDesignNode 静默丢弃——
+ *  静默丢弃会让模型拿到「成功」回执却丢样式，导出后才发现）。 */
+const NODE_DRAFT_KEYS: ReadonlySet<string> = new Set([...PATCHABLE_KEYS, "id", "type", "children"]);
+/** 每种 op 的合法顶层参数集（防 AI 幻觉出 edits 之类的顶层参数被静默忽略）。 */
+const OP_ALLOWED_KEYS: Readonly<Record<DesignOp["op"], ReadonlySet<string>>> = {
+  create: new Set(["op", "parentId", "index", "node"]),
+  update: new Set(["op", "id", "patch"]),
+  delete: new Set(["op", "id"]),
+  move: new Set(["op", "id", "parentId", "index", "dx", "dy"]),
+  resize: new Set(["op", "width", "height", "background"]),
+  replace: new Set(["op", "nodes"])
+};
 const TEXT_ALIGNS: readonly DesignNode["align"][] = ["left", "center", "right"];
 const JUSTIFY_VALUES = new Set(["flex-start", "flex-end", "center", "space-between", "space-around", "space-evenly"]);
 const ITEM_ALIGN_VALUES = new Set(["flex-start", "flex-end", "center", "stretch", "baseline"]);
@@ -355,6 +369,27 @@ export function cloneNodeWithNewIds(node: DesignNode): DesignNode {
 }
 
 /**
+ * 递归校验 create/replace 的节点草稿字段（仅 AI op 路径调用；文件加载走
+ * normalizeDesignNode 保持容错，两套语义各司其职）。发现未知字段返回错误串。
+ */
+function draftKeyError(node: unknown, path: string): string | undefined {
+  if (!node || typeof node !== "object" || Array.isArray(node)) return undefined;
+  const source = node as Record<string, unknown>;
+  const unknownKeys = Object.keys(source).filter((key) => !NODE_DRAFT_KEYS.has(key));
+  if (unknownKeys.length > 0) {
+    return `${path}含未知字段：${unknownKeys.join("、")}（可用字段：${[...NODE_DRAFT_KEYS].join("/")}；半透明直接写进 fill/stroke 的 rgba/hex8）`;
+  }
+  const children = source.children;
+  if (Array.isArray(children)) {
+    for (let index = 0; index < children.length; index++) {
+      const error = draftKeyError(children[index], `${path}children[${index}].`);
+      if (error) return error;
+    }
+  }
+  return undefined;
+}
+
+/**
  * 原子批量应用 DesignOp：先深拷贝整份文档，逐个 op 应用；任一失败返回
  * {@link DesignOpResult} 的 error 形态并保留原文档不动（防半应用状态）。
  * revision 由调用方（design-store 写盘 / 渲染端提交）管理，这里不触碰。
@@ -363,9 +398,19 @@ export function applyDesignOps(doc: DesignDoc, ops: readonly DesignOp[]): Design
   if (!Array.isArray(ops) || ops.length === 0) return { ok: false, error: "ops 必须是非空数组" };
   const next: DesignDoc = structuredClone(doc);
   const applyOne = (op: DesignOp): string | undefined => {
+    // op 级未知参数直接拒绝（同 patch 未知字段：宁可报错也不静默忽略）。
+    const allowedKeys = OP_ALLOWED_KEYS[op.op];
+    const unknownOpKeys = Object.keys(op as Record<string, unknown>).filter((key) => !allowedKeys.has(key));
+    if (unknownOpKeys.length > 0) {
+      return `op '${op.op}' 含未知参数：${unknownOpKeys.join("、")}（允许：${[...allowedKeys].join("/")}）`;
+    }
     switch (op.op) {
       case "replace": {
         if (!Array.isArray(op.nodes)) return "replace 的 nodes 必须是数组";
+        for (let index = 0; index < op.nodes.length; index++) {
+          const keyError = draftKeyError(op.nodes[index], `replace 的 nodes[${index}].`);
+          if (keyError) return keyError;
+        }
         const budget = { count: 0 };
         const nodes: DesignNode[] = [];
         for (const item of op.nodes) {
@@ -392,6 +437,8 @@ export function applyDesignOps(doc: DesignDoc, ops: readonly DesignOp[]): Design
         return undefined;
       }
       case "create": {
+        const keyError = draftKeyError(op.node, "create 的 node.");
+        if (keyError) return keyError;
         const budget = { count: countNodes(next.nodes) };
         if (budget.count >= MAX_DESIGN_NODES) return `节点数已达上限 ${MAX_DESIGN_NODES}`;
         const node = normalizeDesignNode(op.node, budget);
@@ -539,6 +586,11 @@ export function applyDesignOps(doc: DesignDoc, ops: readonly DesignOp[]): Design
         }
         found.siblings.splice(found.index, 1);
         siblings.splice(clampIndex(op.index, siblings.length), 0, found.node);
+        // dx/dy 平移子树根（子树坐标相对父节点，children 跟随根移动）。
+        const dx = typeof op.dx === "number" && Number.isFinite(op.dx) ? round2(op.dx) : 0;
+        const dy = typeof op.dy === "number" && Number.isFinite(op.dy) ? round2(op.dy) : 0;
+        if (dx !== 0) found.node.x = round2(found.node.x + dx);
+        if (dy !== 0) found.node.y = round2(found.node.y + dy);
         return undefined;
       }
       default:

@@ -23,6 +23,8 @@ describe("颜色解析与对比度", () => {
     // 半透明白叠在黑底上 ≈ 灰，对比度远小于 21。
     const translucent = { r: 255, g: 255, b: 255, a: 0.4 };
     expect(contrastRatio(translucent, black)).toBeLessThan(10);
+    // hex8 的 alpha 量程是 0–255，同样要先归一再合成（#88 ≈ 0.53）。
+    expect(contrastRatio(parseColor("#ffffff88")!, black)).toBeLessThan(10);
   });
 });
 
@@ -102,6 +104,42 @@ describe("inspectDesignQuality", () => {
     const report = inspectDesignQuality(doc);
     // 4.6:1 左右——普通文本 4.5 过、大字 3 也过，这里验证它确实不报。
     expect(report.diagnostics.join("\n")).not.toContain("hero");
+  });
+
+  it("祖先 opacity 链纳入对比度——容器级透明度压暗子文字（玻璃卡片案例）", () => {
+    // 真会话案例：卡片用元素级 opacity 0.5 做玻璃拟态，整组（含文字）被压淡；
+    // 旧实现只看卡片 fill 原色，放行了实际发灰的小字。
+    const doc = docWith([
+      { type: "rect", id: "bg", name: "深空底色", x: 0, y: 0, w: 1440, h: 900, fill: "#0A0F22" },
+      {
+        type: "frame", id: "card", name: "玻璃卡", x: 800, y: 150, w: 420, h: 600,
+        fill: "#121830", opacity: 0.5,
+        children: [
+          { type: "text", id: "sub", name: "副标题", text: "登录 Aurora，继续你的创作之旅", x: 40, y: 86, w: 330, h: 24, fontSize: 14, color: "#9AA4C7" },
+          { type: "text", id: "title", name: "欢迎标题", text: "欢迎回来 👋", x: 40, y: 42, w: 330, h: 40, fontSize: 30, fontWeight: 800, color: "#FFFFFF" }
+        ]
+      }
+    ], { width: 1440, height: 900 });
+    const report = inspectDesignQuality(doc);
+    const text = report.diagnostics.join("\n");
+    // 14px 副标题合成后 ≈2.8:1 → 报；30px 粗体标题 ≈5:1 > 3:1 大字门槛 → 不误报。
+    expect(text).toContain("text-contrast");
+    expect(text).toContain("sub");
+    expect(text).not.toContain("title");
+    expect(text).toContain("透明度链");
+    const repair = report.repairTargets.find((op) => op.op === "update" && op.id === "sub");
+    expect(repair).toMatchObject({ op: "update", patch: { color: "#ffffff" } });
+  });
+
+  it("满幅底色 rect 当画布背景 → 根级背景板参与合成（深底白字不误报）", () => {
+    // 无 canvas.background、AI 用满幅 rect 铺底的常见画法：底色参与合成，
+    // 白字实际 ≈19:1——若按白底计算会误报。
+    const doc = docWith([
+      { type: "rect", id: "bg", name: "底色", x: 0, y: 0, w: 800, h: 600, fill: "#0A0F22" },
+      { type: "text", id: "hero", name: "白字", text: "Aurora", x: 40, y: 40, w: 300, h: 40, fontSize: 24, color: "#ffffff" }
+    ], { width: 800, height: 600 });
+    const report = inspectDesignQuality(doc);
+    expect(report.diagnostics.join("\n")).not.toContain("text-contrast");
   });
 
   it("内容超出画布 → out-of-canvas + resize repairTarget 排首位 + suggestCanvas", () => {

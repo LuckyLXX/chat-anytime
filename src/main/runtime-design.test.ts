@@ -223,6 +223,36 @@ describe("buildDesignTools", () => {
     await expect(execute(tool("design_update"), { ops: [{ op: "update", id: "t", patch: { fontsize: 20 } }] })).rejects.toThrow("fontsize");
   });
 
+  it("design_update 顶层幻觉参数拒绝（如 edits）", async () => {
+    const { tool } = await harness();
+    await execute(tool("design_create"), { name: "顶层" });
+    await expect(execute(tool("design_update"), { ops: [{ op: "resize", width: 500 }], edits: [] })).rejects.toThrow("edits");
+  });
+
+  it("design_update create 自造字段整批拒绝；move dx/dy 整树平移", async () => {
+    const { tool, current } = await harness();
+    await execute(tool("design_create"), { name: "平移" });
+    await expect(execute(tool("design_update"), {
+      ops: [{ op: "create", node: { type: "rect", id: "a", x: 0, y: 0, w: 10, h: 10, props: { strokeOpacity: 0.2 } } }]
+    })).rejects.toThrow("props");
+    const moved = await execute(tool("design_update"), {
+      ops: [
+        { op: "create", node: { type: "frame", id: "s1", name: "屏一", x: 0, y: 0, w: 100, h: 100 } },
+        { op: "move", id: "s1", dx: 180, dy: 0 }
+      ]
+    });
+    expect(moved.details).toMatchObject({ applied: 2 });
+    expect(current()!.nodes[0]!.x).toBe(180);
+  });
+
+  it("design_list 多文档时提示整套原型应同文档", async () => {
+    const { tool } = await harness();
+    await execute(tool("design_create"), { name: "首页" });
+    await execute(tool("design_create"), { name: "登录页" });
+    const result = await execute(tool("design_list"), {});
+    expect(result.content[0]!.text).toContain("一个文档 = 一块画布");
+  });
+
   it("design_read 整树带布局摘要（地图先于 JSON）", async () => {
     const { tool } = await harness();
     await execute(tool("design_create"), { name: "摘要" });
