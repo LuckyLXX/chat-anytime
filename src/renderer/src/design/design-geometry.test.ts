@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { absoluteRects, boundingBox, snapDelta, type NodeRect } from "./design-geometry.js";
+import { absoluteRects, boundingBox, findDropFrameAt, snapDelta, type NodeRect } from "./design-geometry.js";
 
 function rect(id: string, x: number, y: number, w: number, h: number): NodeRect {
   return { id, x, y, w, h };
@@ -27,6 +27,32 @@ describe("boundingBox", () => {
     expect(boundingBox([])).toBeUndefined();
     const box = boundingBox([rect("a", 0, 0, 10, 10), rect("b", 30, 40, 20, 20)]);
     expect(box).toEqual({ id: "", x: 0, y: 0, w: 50, h: 60 });
+  });
+});
+
+describe("findDropFrameAt（绘图工具落点父容器）", () => {
+  const tree = [
+    { type: "rect" as const, id: "block", x: 0, y: 0, w: 50, h: 50 },
+    { type: "frame" as const, id: "outer", x: 100, y: 100, w: 200, h: 200, children: [
+      { type: "frame" as const, id: "inner", x: 20, y: 20, w: 100, h: 100 },
+      { type: "frame" as const, id: "lockedFrame", x: 0, y: 120, w: 100, h: 60, locked: true }
+    ] }
+  ];
+
+  it("命中嵌套 frame 时取最深的", () => {
+    expect(findDropFrameAt(tree, 150, 150)?.id).toBe("inner");
+    expect(findDropFrameAt(tree, 110, 110)?.id).toBe("outer");
+  });
+
+  it("锁定 frame 跳过（取外层），rect 不是容器，空白处 undefined", () => {
+    expect(findDropFrameAt(tree, 130, 240)?.id).toBe("outer");
+    expect(findDropFrameAt(tree, 10, 10)).toBeUndefined();
+    expect(findDropFrameAt(tree, 500, 500)).toBeUndefined();
+  });
+
+  it("可见性：隐藏 frame 不作为落点", () => {
+    const hidden = [{ type: "frame" as const, id: "ghost", x: 0, y: 0, w: 100, h: 100, visible: false }];
+    expect(findDropFrameAt(hidden, 50, 50)).toBeUndefined();
   });
 });
 

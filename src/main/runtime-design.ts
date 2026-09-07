@@ -213,7 +213,7 @@ export function buildDesignTools(deps: DesignToolDeps): ToolDefinition[] {
       description: [
         "对当前设计文档批量应用结构化操作（原子：任一失败整批拒绝，文档不变）。坐标系相对父节点；frame 声明 layout 后子节点按 flex 排布。",
         "ops 形态：{op:'create', parentId?, index?, node} 新建（parentId 缺省=根）；{op:'update', id, patch} 改属性（patch 不允许改 id/type/children，未知字段整批拒绝）；{op:'delete', id} 删除子树；{op:'move', id, parentId?, index?, dx?, dy?} 换父/排序（不能移入自身子树；dx/dy 对移动后的子树整体平移）；{op:'resize', width?, height?, background?} 调画布尺寸；{op:'replace', nodes} 整树替换（慎用）。",
-        "节点字段：type(frame/rect/text/image)、name（每个节点都起）、x/y/w/h、fill/stroke/strokeWidth/radius/opacity/shadow、text 节点加 text/fontSize/fontWeight/color/align、image 加 src(http/data)、frame 加 layout({direction:'row'|'column',gap,padding,justify,align}) 与 children。未知字段（如自造的 props.*）整批拒绝。",
+        "节点字段：type(frame/rect/text/image)、name（每个节点都起）、x/y/w/h、fill/stroke/strokeWidth/radius/opacity/shadow、visible/locked（locked=用户在画布上不可拖动/删除，AI 仍可改）、text 节点加 text/fontSize/fontWeight/color/align、image 加 src(http/data)、frame 加 layout({direction:'row'|'column',gap,padding,justify,align}) 与 children。未知字段（如自造的 props.*）整批拒绝。",
         "半透明直接写进 fill/stroke（rgba/hex8，如 'rgba(18,24,48,0.62)'）；带子内容的容器不要用元素级 opacity 做半透明——它会把子内容一起压淡，质量门按透明度链复核文字对比度。",
         "工作节奏：一次调用 ≤64 条 ops，先搭第一个屏幕（一屏 = 一个顶层命名 frame，屏幕并排间隔 ≥80px），成功后再继续下一屏；内容会超出画布时先发 {op:'resize'} 扩画布。",
         "回执带「修复 ops」时，把它们作为下一条 design_update 的 ops 参数原样传入（先修复再继续新内容）。",

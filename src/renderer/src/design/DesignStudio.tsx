@@ -1,9 +1,9 @@
-import { Maximize, Redo2, Send, Undo2, ZoomIn, ZoomOut, X } from "lucide-react";
+import { Maximize, MousePointer2, Redo2, Send, Square, Type, Undo2, X, ZoomIn, ZoomOut, Frame as FrameIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { applyDesignOps, cloneNodeWithNewIds, findNode, summarizeNode, type DesignDoc, type DesignNode, type DesignOp, type DesignNodePatch } from "../../../shared/design-schema.js";
+import { applyDesignOps, cloneNodeWithNewIds, findNode, makeNodeId, summarizeNode, type DesignDoc, type DesignNode, type DesignOp, type DesignNodePatch } from "../../../shared/design-schema.js";
 import { useDesktopStore } from "../store";
 import { absoluteRects, boundingBox } from "./design-geometry.js";
-import { DesignCanvas, MAX_ZOOM, MIN_ZOOM } from "./DesignCanvas.js";
+import { DesignCanvas, MAX_ZOOM, MIN_ZOOM, type CanvasTool } from "./DesignCanvas.js";
 import { DesignInspector } from "./DesignInspector.js";
 import { DesignLayers } from "./DesignLayers.js";
 
@@ -32,6 +32,8 @@ export function DesignStudio({ onSendToAi }: { onSendToAi(text: string): void })
   const [expandedIds, setExpandedIds] = useState<ReadonlySet<string>>(new Set());
   const [newDraft, setNewDraft] = useState({ name: "未命名设计", width: 1440, height: 1024 });
   const [busy, setBusy] = useState(false);
+  // 当前绘图工具（人工操作工具栏；创建完成后自动回 select）。
+  const [tool, setTool] = useState<CanvasTool>("select");
 
   const workingDocRef = useRef<DesignDoc | undefined>(undefined);
   workingDocRef.current = workingDoc;
@@ -226,8 +228,24 @@ export function DesignStudio({ onSendToAi }: { onSendToAi(text: string): void })
     const doc = workingDocRef.current;
     const id = selectedIdRef.current;
     if (!doc || !id) return;
+    if (findNode(doc.nodes, id)?.node.locked) return; // 锁定节点不可删除（先在图层面板解锁）
     commitOps([{ op: "delete", id }], { preDoc: structuredClone(doc) });
     setSelectedId(undefined);
+  }, [commitOps]);
+
+  /** 绘图工具创建节点（画布拖拽/点击回调）；创建后选中新节点并回到选择工具。 */
+  const createNode = useCallback((spec: { type: Exclude<CanvasTool, "select">; parentId: string | null; x: number; y: number; w: number; h: number }): void => {
+    const doc = workingDocRef.current;
+    if (!doc) return;
+    const base = { id: makeNodeId(), x: spec.x, y: spec.y, w: spec.w, h: spec.h };
+    const node: DesignNode = spec.type === "text"
+      ? { ...base, type: "text", name: "文本", text: "文本", fontSize: 16, color: "#111827" }
+      : spec.type === "frame"
+        ? { ...base, type: "frame", name: "画板", fill: "#ffffff", radius: 8 }
+        : { ...base, type: "rect", name: "矩形", fill: "#cbd5e1" };
+    commitOps([{ op: "create", parentId: spec.parentId, node }], { preDoc: structuredClone(doc) });
+    setSelectedId(node.id);
+    setTool("select");
   }, [commitOps]);
 
   const duplicateSelected = useCallback((): void => {
@@ -260,6 +278,15 @@ export function DesignStudio({ onSendToAi }: { onSendToAi(text: string): void })
           event.preventDefault();
           deleteSelected();
         }
+      } else if (event.key === "Escape") {
+        setTool("select");
+      } else if (!mod && !event.altKey) {
+        // 绘图工具快捷键（参考设计工具惯例）：V 选择 / F 画板 / R 矩形 / T 文本。
+        const toolKey = event.key.toLowerCase();
+        if (toolKey === "v") setTool("select");
+        else if (toolKey === "f") setTool("frame");
+        else if (toolKey === "r") setTool("rect");
+        else if (toolKey === "t") setTool("text");
       }
     };
     window.addEventListener("keydown", onKey);
@@ -383,8 +410,26 @@ export function DesignStudio({ onSendToAi }: { onSendToAi(text: string): void })
             const doc = workingDocRef.current;
             commitOps([{ op: "update", id: node.id, patch: { visible: node.visible === false ? true : false } }], doc ? { preDoc: structuredClone(doc) } : undefined);
           }}
+          onToggleLock={(node) => {
+            const doc = workingDocRef.current;
+            commitOps([{ op: "update", id: node.id, patch: { locked: node.locked !== true } }], doc ? { preDoc: structuredClone(doc) } : undefined);
+          }}
+          onToggleExpand={(node) => {
+            setExpandedIds((current) => {
+              const next = new Set(current);
+              if (next.has(node.id)) next.delete(node.id);
+              else next.add(node.id);
+              return next;
+            });
+          }}
         />
         <div className="design-canvas-wrapper" ref={wrapperRef}>
+          <div className="design-tools" data-pane="design-tools" role="toolbar" aria-label="绘图工具">
+            <button className="icon-button" type="button" data-control="design-tool-select" title="选择 (V)" aria-label="选择工具" aria-pressed={tool === "select"} onClick={() => setTool("select")}><MousePointer2 size={14} /></button>
+            <button className="icon-button" type="button" data-control="design-tool-frame" title="画板 (F)——拖拽绘制容器" aria-label="画板工具" aria-pressed={tool === "frame"} onClick={() => setTool("frame")}><FrameIcon size={14} /></button>
+            <button className="icon-button" type="button" data-control="design-tool-rect" title="矩形 (R)——拖拽绘制色块" aria-label="矩形工具" aria-pressed={tool === "rect"} onClick={() => setTool("rect")}><Square size={14} /></button>
+            <button className="icon-button" type="button" data-control="design-tool-text" title="文本 (T)——拖拽或点击放置文字" aria-label="文本工具" aria-pressed={tool === "text"} onClick={() => setTool("text")}><Type size={14} /></button>
+          </div>
           <DesignCanvas
             doc={workingDoc}
             zoom={zoom}
@@ -395,6 +440,8 @@ export function DesignStudio({ onSendToAi }: { onSendToAi(text: string): void })
             onSelect={setSelectedId}
             onNodePatch={(nodeId, patch, immediate) => stagePatch(nodeId, patch, immediate)}
             onGestureEnd={() => flushPendingRef.current()}
+            tool={tool}
+            onCreateNode={createNode}
           />
         </div>
         <DesignInspector doc={workingDoc} selected={selected} onPatch={(nodeId, patch) => stagePatch(nodeId, patch)} onCanvasPatch={resizeCanvas} />

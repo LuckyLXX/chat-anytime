@@ -31,6 +31,8 @@ export interface DesignNode {
   w: number;
   h: number;
   visible?: boolean;
+  /** 画布锁定：用户在画布上不可拖动/缩放/删除（图层树/检查器仍可选可改；AI 不受限）。 */
+  locked?: boolean;
   fill?: string;
   stroke?: string;
   strokeWidth?: number;
@@ -99,7 +101,7 @@ export const MAX_DESIGN_DEPTH = 32;
 
 const NODE_TYPES: readonly DesignNodeType[] = ["frame", "rect", "text", "image"];
 /** update patch 的合法字段集（白名单之外的字段拒绝，防 AI 拼错字段被静默忽略）。 */
-const PATCHABLE_KEYS: ReadonlySet<string> = new Set(["name", "x", "y", "w", "h", "visible", "fill", "stroke", "strokeWidth", "radius", "opacity", "shadow", "text", "fontSize", "fontWeight", "color", "lineHeight", "align", "src", "layout"]);
+const PATCHABLE_KEYS: ReadonlySet<string> = new Set(["name", "x", "y", "w", "h", "visible", "locked", "fill", "stroke", "strokeWidth", "radius", "opacity", "shadow", "text", "fontSize", "fontWeight", "color", "lineHeight", "align", "src", "layout"]);
 /** create/replace 节点草稿的合法字段集（= patch 字段 + 结构字段；与 update patch 同哲学：
  *  自造字段如 props.strokeOpacity 直接报错而不是被 normalizeDesignNode 静默丢弃——
  *  静默丢弃会让模型拿到「成功」回执却丢样式，导出后才发现）。 */
@@ -207,6 +209,7 @@ export function normalizeDesignNode(raw: unknown, budget: { count: number }, dep
   const name = boundedString(source.name, 80);
   if (name) node.name = name;
   if (source.visible === false) node.visible = false;
+  if (source.locked === true) node.locked = true;
   const fill = boundedString(source.fill, 512);
   if (fill) node.fill = fill;
   const stroke = boundedString(source.stroke, 512);
@@ -493,6 +496,10 @@ export function applyDesignOps(doc: DesignDoc, ops: readonly DesignOp[]): Design
           if (source.visible === false) node.visible = false;
           else delete node.visible;
         }
+        if ("locked" in source) {
+          if (source.locked === true) node.locked = true;
+          else delete node.locked;
+        }
         if ("fill" in source) {
           const fill = boundedString(source.fill, 512);
           if (fill) node.fill = fill;
@@ -632,6 +639,7 @@ export function summarizeNode(node: DesignNode): string {
     if (item.stroke) entry.stroke = item.stroke;
     if (item.radius) entry.radius = item.radius;
     if (item.opacity !== undefined && item.opacity < 1) entry.opacity = item.opacity;
+    if (item.locked) entry.locked = true;
     if (item.type === "text") {
       entry.text = item.text && item.text.length > 300 ? `${item.text.slice(0, 300)}…` : item.text;
       entry.fontSize = item.fontSize;

@@ -31,9 +31,9 @@
 
 类名属于实现细节，可能随版本变化；以下属性是稳定契约，结构化主题请只依赖它们：
 
-**区域钩子 `data-pane`**：`sidebar` `topbar` `workspace` `work-area` `conversation` `timeline` `composer` `task-panel` `memory-panel` `preview` `terminal` `question-panel` `settings-dialog` `permission-dialog` `landing` `design` `design-toolbar` `design-canvas` `design-layers` `design-inspector`
+**区域钩子 `data-pane`**：`sidebar` `topbar` `workspace` `work-area` `conversation` `timeline` `composer` `task-panel` `memory-panel` `preview` `terminal` `question-panel` `settings-dialog` `permission-dialog` `landing` `design` `design-toolbar` `design-tools` `design-canvas` `design-layers` `design-inspector`
 
-> `design` 是设计模式（Design Studio，顶栏调色板按钮进入）的工作台外壳——顶栏工具栏 + 左侧图层树（`design-layers`）+ 中部无限画布（`design-canvas`）+ 右侧属性检查器（`design-inspector`）。工作台底色走 `--panel-bg-preview`（缺省 `--panel-bg`）与既有表面 token，跟随主题；画布点阵/参考线/选择框用 `--border`/`--accent` 派生，主题可用 `[data-pane="design"]` 后代选择器重设计。
+> `design` 是设计模式（Design Studio，顶栏调色板按钮进入）的工作台外壳——顶栏工具栏 + 左侧图层树（`design-layers`）+ 中部无限画布（`design-canvas`）+ 右侧属性检查器（`design-inspector`）。工作台底色走 `--panel-bg-preview`（缺省 `--panel-bg`）与既有表面 token，跟随主题；画布点阵/参考线/选择框用 `--border`/`--accent` 派生，主题可用 `[data-pane="design"]` 后代选择器重设计。 `design-tools` 是画布顶部居中的浮动绘图工具胶囊（选择/画板/矩形/文本），激活按钮带 `aria-pressed="true"`。
 
 > `landing` 是空态构图（未打开工作区 / 未开始对话时的居中提示块，含图标与主按钮），主题可据其做"着陆页"式重设计。
 
@@ -68,6 +68,8 @@
 | 设计画布「发给 AI」（工具栏）                | `design-send-ai`                                 |
 | 设计画布「导出 HTML」（工具栏）              | `design-export`                                  |
 | 设计画布撤销/重做（工具栏）                 | `design-undo` / `design-redo`                    |
+| 设计绘图工具（画布浮动工具栏，aria-pressed 标记激活） | `design-tool-select` / `design-tool-frame` / `design-tool-rect` / `design-tool-text` |
+| 图层树锁定开关（行悬停出现，aria-pressed 标记锁定） | `design-layer-lock`                              |
 | 面板坞开关 + 待办页 tab（会话区右上方 FAB） | `task-panel-toggle`                              |
 | 记忆页 tab（面板坞内）                      | `memory-toggle`                                  |
 | 发送                                        | `send`                                           |

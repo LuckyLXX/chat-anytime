@@ -44,7 +44,9 @@ function sampleDoc(): DesignDoc {
 
 const noop = (): void => undefined;
 
-function render(doc: DesignDoc, onSelect = (id: string | undefined): void => undefined): void {
+interface CreateSpec { type: "frame" | "rect" | "text"; parentId: string | null; x: number; y: number; w: number; h: number }
+
+function render(doc: DesignDoc, onSelect = (id: string | undefined): void => undefined, options: { tool?: "select" | "frame" | "rect" | "text"; onCreateNode?: (spec: CreateSpec) => void; selectedId?: string } = {}): void {
   act(() => {
     root?.render(
       <DesignCanvas
@@ -53,10 +55,12 @@ function render(doc: DesignDoc, onSelect = (id: string | undefined): void => und
         pan={{ x: 0, y: 0 }}
         onPanChange={noop}
         onZoomChange={noop}
-        selectedId="btn"
+        selectedId={options.selectedId ?? "btn"}
         onSelect={onSelect}
         onNodePatch={noop}
         onGestureEnd={noop}
+        tool={options.tool}
+        onCreateNode={options.onCreateNode}
       />
     );
   });
@@ -98,5 +102,55 @@ describe("DesignCanvas 冒烟", () => {
       btn.dispatchEvent(event);
     });
     expect(selections.at(-1)).toBe("btn");
+  });
+
+  it("rect 工具拖拽创建：坐标相对落点命中的父 frame", () => {
+    const created: CreateSpec[] = [];
+    render(sampleDoc(), noop, { tool: "rect", onCreateNode: (spec) => created.push(spec) });
+    const canvas = container!.querySelector(".design-canvas") as HTMLElement;
+    const pointer = (type: string, x: number, y: number): void => {
+      act(() => {
+        canvas.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, button: 0, clientX: x, clientY: y }));
+      });
+    };
+    // happy-dom 的容器矩形为 0，world ≈ client 坐标。按下点 (200,150) 落在 card
+    // (40,30,320,200) 内 → 父容器 card；拖到 (260,190) → 相对 card 的 (160,120) 60×40。
+    pointer("pointerdown", 200, 150);
+    pointer("pointermove", 260, 190);
+    pointer("pointerup", 260, 190);
+    expect(created).toHaveLength(1);
+    expect(created[0]).toMatchObject({ type: "rect", parentId: "card", x: 160, y: 120, w: 60, h: 40 });
+  });
+
+  it("rect 工具点击（未拖过阈值）→ 缺省尺寸落在按下点", () => {
+    const created: CreateSpec[] = [];
+    render(sampleDoc(), noop, { tool: "rect", onCreateNode: (spec) => created.push(spec) });
+    const canvas = container!.querySelector(".design-canvas") as HTMLElement;
+    const pointer = (type: string, x: number, y: number): void => {
+      act(() => {
+        canvas.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, button: 0, clientX: x, clientY: y }));
+      });
+    };
+    // 空白处 (600,500)：无父 frame → parentId null、画布坐标、缺省 160×120。
+    pointer("pointerdown", 600, 500);
+    pointer("pointerup", 600, 500);
+    expect(created).toHaveLength(1);
+    expect(created[0]).toMatchObject({ type: "rect", parentId: null, x: 600, y: 500, w: 160, h: 120 });
+  });
+
+  it("锁定节点仍可选中但进入不了拖动手势（pointerdown 不报错、选中生效）", () => {
+    const doc = sampleDoc();
+    doc.nodes[0]!.locked = true;
+    const selections: (string | undefined)[] = [];
+    render(doc, (id) => selections.push(id));
+    const card = container!.querySelector('[data-node-id="card"]') as HTMLElement;
+    act(() => {
+      card.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0, clientX: 100, clientY: 100 }));
+    });
+    expect(selections.at(-1)).toBe("card");
+    // 选中态落到锁定节点：选择框还在（只选中），但缩放手柄不渲染。
+    render(doc, noop, { selectedId: "card" });
+    expect(container!.querySelector(".design-selection")).toBeDefined();
+    expect(container!.querySelectorAll(".design-handle")).toHaveLength(0);
   });
 });

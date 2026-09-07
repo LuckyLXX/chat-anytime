@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode, type WheelEvent as ReactWheelEvent } from "react";
 import { designNodeStyle, designNodeStyleObject, exportDesignHtml } from "../../../shared/design-export.js";
 import type { DesignDoc, DesignNode, DesignNodePatch } from "../../../shared/design-schema.js";
-import { absoluteRects, snapDelta, type NodeRect, type SnapGuide } from "./design-geometry.js";
+import { absoluteRects, findDropFrameAt, snapDelta, type NodeRect, type SnapGuide } from "./design-geometry.js";
 
 /**
  * 设计画布：无限画布（滚轮缩放 5%–400%、空格/中键/空白拖动平移）、节点递归渲染、
@@ -17,6 +17,15 @@ const DRAG_THRESHOLD_PX = 3;
 
 export type ResizeHandle = "nw" | "n" | "ne" | "e" | "se" | "s" | "sw" | "w";
 
+/** 人工绘图工具：select=点选/拖移（默认），其余工具在画布按下拖拽创建对应节点。 */
+export type CanvasTool = "select" | "frame" | "rect" | "text";
+/** 点击（非拖拽）创建时的缺省尺寸。 */
+const CREATE_DEFAULT_SIZE: Record<Exclude<CanvasTool, "select">, { w: number; h: number }> = {
+  frame: { w: 320, h: 240 },
+  rect: { w: 160, h: 120 },
+  text: { w: 160, h: 32 }
+};
+
 export interface DesignCanvasProps {
   doc: DesignDoc;
   zoom: number;
@@ -29,6 +38,10 @@ export interface DesignCanvasProps {
   onNodePatch(nodeId: string, patch: DesignNodePatch, immediate?: boolean): void;
   /** 一轮手势（拖动/缩放）结束：调用方 flush 待发送变更。 */
   onGestureEnd(): void;
+  /** 当前绘图工具（缺省 select）。 */
+  tool?: CanvasTool;
+  /** 绘图工具创建节点：x/y 为相对父容器的坐标（parentId=null 时为画布坐标）。 */
+  onCreateNode?(spec: { type: Exclude<CanvasTool, "select">; parentId: string | null; x: number; y: number; w: number; h: number }): void;
 }
 
 interface WorldPoint {
@@ -64,16 +77,19 @@ const DesignNodeView = memo(function DesignNodeView({ node, inFlexParent, onSele
 
 const HANDLES: readonly ResizeHandle[] = ["nw", "n", "ne", "e", "se", "s", "sw", "w"];
 
-export function DesignCanvas({ doc, zoom, pan, onPanChange, onZoomChange, selectedId, onSelect, onNodePatch, onGestureEnd }: DesignCanvasProps): ReactNode {
+export function DesignCanvas({ doc, zoom, pan, onPanChange, onZoomChange, selectedId, onSelect, onNodePatch, onGestureEnd, tool = "select", onCreateNode = () => undefined }: DesignCanvasProps): ReactNode {
   const containerRef = useRef<HTMLDivElement>(null);
   const [spaceDown, setSpaceDown] = useState(false);
   const [guides, setGuides] = useState<SnapGuide[]>([]);
   const [editingId, setEditingId] = useState<string | undefined>(undefined);
+  // 创建工具的拖拽预览（world 坐标，归一化为正宽高）。
+  const [createPreview, setCreatePreview] = useState<{ x: number; y: number; w: number; h: number } | undefined>(undefined);
   // 拖动/缩放手势状态（ref 存，避免每帧重渲染）。
   const gesture = useRef<
     | { kind: "pan"; startPan: { x: number; y: number }; start: WorldPoint }
     | { kind: "drag"; id: string; start: WorldPoint; origin: { x: number; y: number }; moved: boolean; rect: NodeRect }
     | { kind: "resize"; id: string; handle: ResizeHandle; start: WorldPoint; /** 相对父节点的原始矩形（写回 node.x/y 的同一坐标系）。 */ origin: { x: number; y: number; w: number; h: number }; proportional: boolean }
+    | { kind: "create"; type: Exclude<CanvasTool, "select">; start: WorldPoint; parentId: string | null; parentOrigin: { x: number; y: number }; started: boolean }
     | undefined
   >(undefined);
 
@@ -135,14 +151,15 @@ export function DesignCanvas({ doc, zoom, pan, onPanChange, onZoomChange, select
 
   const handleNodePointerDown = useCallback((nodeId: string, event: ReactPointerEvent<HTMLElement>) => {
     if (spaceDown || event.button === 1) return; // 空格/中键优先平移
+    if (tool !== "select") return; // 绘图工具：不选中不拖移，让事件冒泡给画布启动创建手势
     event.stopPropagation();
     (event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId);
     onSelect(nodeId);
-    const rect = rectsRef.current.get(nodeId);
     const node = findDeep(doc.nodes, nodeId);
-    if (!rect || !node) return;
+    const rect = rectsRef.current.get(nodeId);
+    if (!rect || !node || node.locked) return; // 锁定节点只选中，不进入拖动手势
     gesture.current = { kind: "drag", id: nodeId, start: toWorld(event.clientX, event.clientY), origin: { x: node.x, y: node.y }, moved: false, rect };
-  }, [spaceDown, doc.nodes, onSelect, toWorld]);
+  }, [spaceDown, tool, doc.nodes, onSelect, toWorld]);
 
   const handleBackgroundPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.button !== 0 && event.button !== 1) return;
@@ -150,16 +167,41 @@ export function DesignCanvas({ doc, zoom, pan, onPanChange, onZoomChange, select
       setEditingId(undefined);
       onGestureEnd();
     }
+    // 绘图工具（左键、非平移）：从按下点开始创建手势；父容器取落点命中的最深 frame。
+    if (tool !== "select" && event.button === 0 && !spaceDown) {
+      const start = toWorld(event.clientX, event.clientY);
+      const parent = findDropFrameAt(doc.nodes, start.x, start.y);
+      const parentRect = parent ? rectsRef.current.get(parent.id) : undefined;
+      gesture.current = { kind: "create", type: tool, start, parentId: parent?.id ?? null, parentOrigin: { x: parentRect?.x ?? 0, y: parentRect?.y ?? 0 }, started: false };
+      setCreatePreview({ x: start.x, y: start.y, w: 0, h: 0 });
+      event.currentTarget.setPointerCapture(event.pointerId);
+      return;
+    }
     gesture.current = { kind: "pan", startPan: pan, start: { x: event.clientX, y: event.clientY } };
     event.currentTarget.setPointerCapture(event.pointerId);
     if (!spaceDown && event.button === 0) onSelect(undefined);
-  }, [pan, spaceDown, editingId, onGestureEnd, onSelect]);
+  }, [pan, spaceDown, editingId, onGestureEnd, onSelect, tool, doc.nodes, toWorld]);
 
   const handlePointerMove = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     const current = gesture.current;
     if (!current) return;
     if (current.kind === "pan") {
       onPanChange({ x: current.startPan.x + (event.clientX - current.start.x), y: current.startPan.y + (event.clientY - current.start.y) });
+      return;
+    }
+    if (current.kind === "create") {
+      const start = toWorld(event.clientX, event.clientY);
+      const dx = start.x - current.start.x;
+      const dy = start.y - current.start.y;
+      if (!current.started && Math.hypot(dx, dy) * zoom < DRAG_THRESHOLD_PX) return;
+      current.started = true;
+      // 负向拖拽归一化为正矩形（起点为左上角）。
+      setCreatePreview({
+        x: Math.min(current.start.x, start.x),
+        y: Math.min(current.start.y, start.y),
+        w: Math.abs(dx),
+        h: Math.abs(dy)
+      });
       return;
     }
     if (current.kind === "drag") {
@@ -205,36 +247,54 @@ export function DesignCanvas({ doc, zoom, pan, onPanChange, onZoomChange, select
     onNodePatch(current.id, { x: round2(x), y: round2(y), w: round2(w), h: round2(h) });
   }, [gesture, onPanChange, toWorld, zoom, onNodePatch]);
 
-  const handlePointerUp = useCallback(() => {
+  const handlePointerUp = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     const current = gesture.current;
     gesture.current = undefined;
     setGuides([]);
     if (!current) return;
+    if (current.kind === "create") {
+      const preview = createPreview;
+      setCreatePreview(undefined);
+      // 点击（未拖过阈值）或拖拽过窄（<8px）→ 缺省尺寸落在按下点（Figma 惯例）。
+      const dragged = Boolean(current.started && preview && preview.w >= 8 && preview.h >= 8);
+      const fallback = CREATE_DEFAULT_SIZE[current.type];
+      onCreateNode({
+        type: current.type,
+        parentId: current.parentId,
+        x: round2((dragged ? preview!.x : current.start.x) - current.parentOrigin.x),
+        y: round2((dragged ? preview!.y : current.start.y) - current.parentOrigin.y),
+        w: dragged ? Math.max(1, round2(preview!.w)) : fallback.w,
+        h: dragged ? Math.max(1, round2(preview!.h)) : fallback.h
+      });
+      return;
+    }
     if (current.kind !== "pan") onGestureEnd();
-  }, [onGestureEnd]);
+  }, [onGestureEnd, onCreateNode, createPreview]);
 
   const startResize = useCallback((handle: ResizeHandle, event: ReactPointerEvent<HTMLDivElement>) => {
-    if (!selectionRect || !selectedId) return;
+    if (!selectionRect || !selectedId || tool !== "select") return;
     event.stopPropagation();
     const node = findDeep(doc.nodes, selectedId);
-    if (!node) return;
+    if (!node || node.locked) return;
     // origin 必须是相对父节点的坐标（与 node.x/y 同坐标系）：absoluteRect 是 world
     // 坐标，直接回写会把父级偏移叠进子节点（嵌套节点写坏坐标且落盘）。
     gesture.current = { kind: "resize", id: selectionRect.id, handle, start: toWorld(event.clientX, event.clientY), origin: { x: node.x, y: node.y, w: node.w, h: node.h }, proportional: event.shiftKey };
-  }, [selectionRect, selectedId, doc.nodes, toWorld]);
+  }, [selectionRect, selectedId, doc.nodes, toWorld, tool]);
 
   const editingNode = editingId ? findDeep(doc.nodes, editingId) : undefined;
   const editingRect = editingId ? rectsRef.current.get(editingId) : undefined;
+  const selectedNode = selectedId ? findDeep(doc.nodes, selectedId) : undefined;
 
   return (
     <div
       ref={containerRef}
       className="design-canvas"
       data-pane="design-canvas"
+      data-tool={tool !== "select" ? tool : undefined}
       style={{
         backgroundSize: `${20 * zoom}px ${20 * zoom}px`,
         backgroundPosition: `${pan.x}px ${pan.y}px`,
-        ...(spaceDown ? { cursor: "grab" } : {})
+        ...(spaceDown ? { cursor: "grab" } : tool !== "select" ? { cursor: "crosshair" } : {})
       }}
       onWheel={onWheel}
       onPointerDown={handleBackgroundPointerDown}
@@ -251,10 +311,13 @@ export function DesignCanvas({ doc, zoom, pan, onPanChange, onZoomChange, select
         {doc.nodes.map((node) => (
           <DesignNodeView key={node.id} node={node} inFlexParent={false} onSelect={handleNodePointerDown} onDoubleClick={(node) => { if (node.type === "text") setEditingId(node.id); }} />
         ))}
+        {createPreview && (
+          <div className="design-create-preview" style={{ left: createPreview.x, top: createPreview.y, width: Math.max(createPreview.w, 1), height: Math.max(createPreview.h, 1), borderWidth: 1 / zoom }} />
+        )}
         {selectionRect && !editingId && (
           <>
             <div className="design-selection" style={{ left: selectionRect.x, top: selectionRect.y, width: selectionRect.w, height: selectionRect.h, borderWidth: 1 / zoom }} />
-            {HANDLES.map((handle) => (
+            {!selectedNode?.locked && HANDLES.map((handle) => (
               <div
                 key={handle}
                 className="design-handle"

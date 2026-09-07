@@ -283,6 +283,24 @@ describe("applyDesignOps", () => {
     expect(badMove.ok).toBe(false);
   });
 
+  it("locked 字段：create 草稿保留、patch 开关、summarize 携带", () => {
+    const doc = createDesignDoc("锁定", 800, 600);
+    const seeded = applyDesignOps(doc, [{ op: "create", node: { type: "rect", id: "r", x: 0, y: 0, w: 10, h: 10, locked: true } }]);
+    expect(seeded.ok).toBe(true);
+    if (!seeded.ok) return;
+    expect(findNode(seeded.doc.nodes, "r")!.node.locked).toBe(true);
+    const unlock = applyDesignOps(seeded.doc, [{ op: "update", id: "r", patch: { locked: false } }]);
+    expect(unlock.ok).toBe(true);
+    if (!unlock.ok) return;
+    expect(findNode(unlock.doc.nodes, "r")!.node.locked).toBeUndefined();
+    const relock = applyDesignOps(unlock.doc, [{ op: "update", id: "r", patch: { locked: true } }]);
+    expect(relock.ok).toBe(true);
+    if (!relock.ok) return;
+    expect(findNode(relock.doc.nodes, "r")!.node.locked).toBe(true);
+    // summarizeNode 携带 locked，AI 能看到锁定状态。
+    expect(summarizeNode(findNode(relock.doc.nodes, "r")!.node)).toContain('"locked":true');
+  });
+
   it("replace 整树替换并 normalize", () => {
     const result = applyDesignOps(sampleDoc(), [{ op: "replace", nodes: [{ type: "text", text: "全新" }] }]);
     expect(result.ok).toBe(true);

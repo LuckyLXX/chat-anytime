@@ -396,9 +396,11 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 .work-area.is-preview-dragging iframe { pointer-events: none; }
 
 /* —— 设计模式（Design Studio）：画布占主体 + AI 对话侧栏；窄窗 <900px 上下堆叠 ——
-   主题钩子：data-pane="design"/"design-toolbar"/"design-canvas"/"design-layers"/
-   "design-inspector"；控制项 data-control="design-toggle"/"design-send-ai"/
-   "design-export"/"design-undo"/"design-redo"；根态 html[data-ui-design-open]。配色
+   主题钩子：data-pane="design"/"design-toolbar"/"design-tools"/"design-canvas"/
+   "design-layers"/"design-inspector"；控制项 data-control="design-toggle"/
+   "design-send-ai"/"design-export"/"design-undo"/"design-redo"/
+   "design-tool-select"/"design-tool-frame"/"design-tool-rect"/"design-tool-text"/
+   "design-layer-lock"；根态 html[data-ui-design-open]。配色
    走 --panel-bg-preview（缺省 --panel-bg）与既有表面 token，跟随主题。 */
 .work-area.design-mode { grid-template-columns: minmax(0, var(--design-split, 62%)) 7px minmax(280px, 1fr); }
 .work-area.is-design-dragging { cursor: col-resize; user-select: none; }
@@ -423,19 +425,33 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 .design-layer-row:hover { background: var(--surface-raised); }
 .design-layer-row.active { background: var(--accent-soft); color: var(--accent-text); }
 .design-layer-row.hidden .design-layer-name { color: var(--text-muted); opacity: .6; }
+.design-layer-row.locked .design-layer-name { opacity: .75; }
 .design-layer-icon { display: grid; place-items: center; color: var(--text-muted); }
 .design-layer-row.active .design-layer-icon { color: var(--accent-text); }
 .design-layer-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.design-layer-visibility { display: grid; place-items: center; width: 22px; height: 22px; border: 0; border-radius: 5px; background: transparent; color: var(--text-muted); cursor: pointer; opacity: 0; }
-.design-layer-row:hover .design-layer-visibility, .design-layer-visibility:focus-visible { opacity: 1; }
-.design-layer-row.hidden .design-layer-visibility { opacity: 1; }
-.design-layer-visibility:hover { color: var(--text); background: var(--surface-button-hover); }
+.design-layer-chevron { display: grid; place-items: center; flex: none; width: 16px; height: 16px; margin-left: -4px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--text-muted); cursor: pointer; }
+.design-layer-chevron:hover { color: var(--text); background: var(--surface-button-hover); }
+.design-layer-chevron-empty { cursor: default; }
+.design-layer-chevron-empty:hover { background: transparent; color: var(--text-muted); }
+.design-layer-action { display: grid; place-items: center; width: 22px; height: 22px; border: 0; border-radius: 5px; background: transparent; color: var(--text-muted); cursor: pointer; opacity: 0; }
+.design-layer-row:hover .design-layer-action, .design-layer-action:focus-visible { opacity: 1; }
+.design-layer-row.hidden .design-layer-action:last-child, .design-layer-row.locked .design-layer-action[data-control="design-layer-lock"] { opacity: 1; }
+.design-layer-action:hover { color: var(--text); background: var(--surface-button-hover); }
+.design-layer-action[aria-pressed="true"] { color: var(--accent-text); }
+/* 画布人工操作工具栏：浮动胶囊（画布顶部居中），激活工具高亮。 */
+.design-tools { position: absolute; top: 10px; left: 50%; z-index: 3; display: flex; gap: 2px; padding: 3px; transform: translateX(-50%); border: 1px solid var(--border); border-radius: 10px; background: var(--surface); box-shadow: 0 4px 16px rgba(0, 0, 0, .14); }
+.design-tools .icon-button { display: grid; place-items: center; width: 30px; height: 30px; border: 0; border-radius: 7px; background: transparent; color: var(--text-muted); cursor: pointer; }
+.design-tools .icon-button:hover { background: var(--surface-button-hover); color: var(--text); }
+.design-tools .icon-button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-text); }
 /* 画布必须绝对填充 wrapper：它唯一的子元素（world）是 absolute，普通块布局下
    自动高度为 0 + overflow:hidden 会把整个画布裁没（真机首测白屏的根因）。 */
 .design-canvas-wrapper { position: relative; min-width: 0; min-height: 0; }
 .design-canvas { position: absolute; inset: 0; overflow: hidden; background-color: var(--surface-muted); background-image: radial-gradient(circle, var(--border) 1px, transparent 1px); touch-action: none; }
 .design-canvas-world { position: absolute; top: 0; left: 0; transform-origin: 0 0; box-shadow: 0 12px 48px rgba(0, 0, 0, .18); }
 .design-canvas-world [data-node-id] { cursor: move; }
+/* 绘图工具激活：整画布十字光标（含节点上，节点不再进入拖移）。 */
+.design-canvas[data-tool], .design-canvas[data-tool] [data-node-id] { cursor: crosshair; }
+.design-create-preview { position: absolute; border: 1px dashed var(--accent); background: var(--accent-soft); pointer-events: none; }
 .design-selection { position: absolute; pointer-events: none; border: 1px solid var(--accent); }
 .design-handle { position: absolute; border: 1px solid var(--accent); border-radius: 2px; background: var(--surface); cursor: nwse-resize; }
 .design-handle[data-handle="n"], .design-handle[data-handle="s"] { cursor: ns-resize; }

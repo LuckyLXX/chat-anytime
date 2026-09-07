@@ -24,6 +24,30 @@ export function absoluteRects(nodes: readonly DesignNode[], parentX = 0, parentY
   return into;
 }
 
+/**
+ * 绘图工具落点命中的目标 frame（新建节点的父容器）：包含该点的可见、未锁定
+ * frame 中取最深（同点取文档序靠后）的一个；都不命中返回 undefined（落到文档根）。
+ */
+export function findDropFrameAt(nodes: readonly DesignNode[], worldX: number, worldY: number, parentX = 0, parentY = 0, depth = 0): DesignNode | undefined {
+  let best: { node: DesignNode; depth: number; order: number } | undefined;
+  let order = 0;
+  const visit = (children: readonly DesignNode[], absX: number, absY: number, level: number): void => {
+    for (const node of children) {
+      const index = order++;
+      if (node.visible === false) continue;
+      const x = absX + node.x;
+      const y = absY + node.y;
+      if (node.type === "frame" && !node.locked && worldX >= x && worldX <= x + node.w && worldY >= y && worldY <= y + node.h) {
+        // 同深度取文档序靠后（渲染在上层）的 frame。
+        if (!best || level >= best.depth) best = { node, depth: level, order: index };
+      }
+      if (node.children) visit(node.children, x, y, level + 1);
+    }
+  };
+  visit(nodes, parentX, parentY, depth);
+  return best?.node;
+}
+
 /** 矩形集合的包围盒；空集返回 undefined。 */
 export function boundingBox(rects: readonly NodeRect[]): NodeRect | undefined {
   if (rects.length === 0) return undefined;
