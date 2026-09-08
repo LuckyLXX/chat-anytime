@@ -34,7 +34,7 @@ import {
   History,
   ScrollText
 } from "lucide-react";
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import type {
   AccessMode,
   ChatMessage,
@@ -57,7 +57,8 @@ import { CodeBlock, RichContent } from "./components/RichContent";
 import { ExitWrap, useExitPresence, useExitPresenceValue } from "./components/Presence";
 import { QuestionPanel } from "./components/QuestionPanel";
 import { compactPath, extractMentionTokens, formatDuration, type Artifact } from "./lib/content";
-import { contextUsageCacheLabel, contextUsagePercentLabel, contextUsageTone, contextUsageTooltip } from "./lib/context-usage";
+import { contextUsageCacheLabel, contextUsagePercentLabel, contextUsageTone, contextUsageTooltip, formatTokenCount } from "./lib/context-usage";
+import { speedStatsGroups } from "./lib/speed-stats-format";
 import { actionTimelineSegments, actionTimelineStats, formatProcessDuration, type ActionTimelineSegment } from "./lib/action-timeline";
 import { changedFilesForMessage, type ReplyChangedFile } from "./lib/changed-files";
 import { groupAssistantMessages } from "./lib/chat-layout";
@@ -726,6 +727,8 @@ export const ConversationPane = memo(function ConversationPane({
   }, [previewingAttachment]);
   const [accessModeMenuOpen, setAccessModeMenuOpen] = useState(false);
   const [composerMenu, setComposerMenu] = useState<"model" | "thinking">();
+  // 上下文占用明细卡（点击 chip 展开，dsh ContextMeter 同款三段构成）。
+  const [contextUsageOpen, setContextUsageOpen] = useState(false);
   const [slashIndex, setSlashIndex] = useState(0);
   // @ 提及：tokenStart 为输入串中 @ 的下标；Esc 后按 token 记忆“已关闭”，
   // 继续输入（token 变化）才重新弹出。
@@ -738,6 +741,7 @@ export const ConversationPane = memo(function ConversationPane({
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const accessModeMenuRef = useRef<HTMLDivElement>(null);
+  const contextUsageRef = useRef<HTMLDivElement>(null);
   const modelMenuRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLFormElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -1085,15 +1089,17 @@ export const ConversationPane = memo(function ConversationPane({
   }, [registerComposerApi, sessionId]);
 
   useEffect(() => {
-    if (!accessModeMenuOpen && !composerMenu) return;
+    if (!accessModeMenuOpen && !composerMenu && !contextUsageOpen) return;
     const closeOnPointerDown = (event: PointerEvent): void => {
       if (!accessModeMenuRef.current?.contains(event.target as Node)) setAccessModeMenuOpen(false);
       if (!composerRef.current?.contains(event.target as Node)) setComposerMenu(undefined);
+      if (!contextUsageRef.current?.contains(event.target as Node)) setContextUsageOpen(false);
     };
     const closeOnEscape = (event: KeyboardEvent): void => {
       if (event.key === "Escape") {
         setAccessModeMenuOpen(false);
         setComposerMenu(undefined);
+        setContextUsageOpen(false);
       }
     };
     document.addEventListener("pointerdown", closeOnPointerDown);
@@ -1102,7 +1108,7 @@ export const ConversationPane = memo(function ConversationPane({
       document.removeEventListener("pointerdown", closeOnPointerDown);
       document.removeEventListener("keydown", closeOnEscape);
     };
-  }, [accessModeMenuOpen, composerMenu]);
+  }, [accessModeMenuOpen, composerMenu, contextUsageOpen]);
 
   useEffect(() => {
     if (composerMenu !== "model") return;
@@ -1617,6 +1623,23 @@ export const ConversationPane = memo(function ConversationPane({
       </div>
       {turns.length >= 2 && <TurnMinimap turns={turns} activeKey={activeTurnKey} onNavigate={navigateToTurn} />}
       {question && <QuestionPanel request={question} onOpenDetail={onOpenPlanDetail} rootRef={(element) => { questionPanelRef.current = element; }} />}
+      {!question && (() => {
+        // dsh StatsLine：聊天区与输入框之间的会话性能读数（组间｜组内·，
+        // 空组省略；流式期间行首附带实时速度/首 token 计时，无数据整行隐藏）。
+        // 提问面板同锚在输入栏上方，出现时本行让位。
+        const groups = speedStatsGroups(data.speedStats, data.contextUsage?.cacheHitRate);
+        if (groups.length === 0) return null;
+        return (
+          <div className="conversation-stats-line" data-composer-zone="stats" role="status" aria-label="会话性能统计">
+            {groups.map((group, index) => (
+              <Fragment key={index}>
+                {index > 0 && <span className="conversation-stats-sep" aria-hidden="true" />}
+                <span className={index === 0 && data.speedStats?.live ? "conversation-stats-group live" : "conversation-stats-group"}>{group}</span>
+              </Fragment>
+            ))}
+          </div>
+        );
+      })()}
       <form ref={composerRef} className={`composer${data.queuedMessages.length > 0 ? " has-queue" : ""}${data.planMode ? " has-plan" : ""}`} data-pane="composer" onSubmit={submit} onDragOver={(event) => event.preventDefault()} onDrop={handleDrop}>
         {data.planMode && (
           <div className="composer-plan-banner" data-composer-zone="plan" role="status" title="计划模式：先产出计划，审查批准后才实施。退出请使用访问权限下拉或 /plan">
@@ -1722,7 +1745,7 @@ export const ConversationPane = memo(function ConversationPane({
           <div className="composer-footer-left">
             <button className="icon-button attach-button" data-control="attach" type="button" title="添加附件" aria-label="添加附件" disabled={data.busy || attachments.length >= 5} onClick={() => void addAttachments()}><Plus size={18} /></button>
             <div className="access-mode-menu-shell" ref={accessModeMenuRef}>
-              <button className={`access-mode-button${settings.accessMode === "full" ? " full" : ""}`} data-control="access-mode" type="button" aria-haspopup="menu" aria-expanded={accessModeMenuOpen} onClick={() => { setComposerMenu(undefined); setAccessModeMenuOpen((open) => !open); }}>{settings.accessMode === "full" ? <ShieldAlert size={15} /> : <ShieldCheck size={15} />}<span>{accessModeOptions.find((option) => option.value === settings.accessMode)?.label ?? "访问模式"}</span><ChevronDown size={13} /></button>
+              <button className={`access-mode-button${settings.accessMode === "full" ? " full" : ""}`} data-control="access-mode" type="button" aria-haspopup="menu" aria-expanded={accessModeMenuOpen} onClick={() => { setComposerMenu(undefined); setContextUsageOpen(false); setAccessModeMenuOpen((open) => !open); }}>{settings.accessMode === "full" ? <ShieldAlert size={15} /> : <ShieldCheck size={15} />}<span>{accessModeOptions.find((option) => option.value === settings.accessMode)?.label ?? "访问模式"}</span><ChevronDown size={13} /></button>
               {accessModeMenuOpen && <div className="access-mode-menu" data-composer-zone="popup" role="menu" aria-label="访问模式">
                 {accessModeOptions.map((option) => <button className={`access-mode-menu-item${option.value === settings.accessMode ? " active" : ""}${option.value === "full" ? " full" : ""}`} type="button" role="menuitemradio" aria-checked={option.value === settings.accessMode} key={option.value} onClick={() => void selectAccessMode(option.value)}>{option.value === "full" ? <ShieldAlert size={15} /> : <ShieldCheck size={15} />}<span><strong>{option.label}</strong><small>{accessModeDescriptions[option.value]}</small></span>{option.value === settings.accessMode && <Check size={14} />}</button>)}
                 <div className="access-mode-menu-divider" />
@@ -1730,21 +1753,56 @@ export const ConversationPane = memo(function ConversationPane({
               </div>}
             </div>
             {data.contextUsage && (
-              <div className={`context-usage-chip tone-${contextUsageTone(data.contextUsage)}`} data-control="context-usage" role="status" title={contextUsageTooltip(data.contextUsage)} aria-label={`上下文占用 ${contextUsagePercentLabel(data.contextUsage)}`}>
-                <span>上下文</span><strong>{contextUsagePercentLabel(data.contextUsage)}</strong>
-                {data.contextUsage.cacheHitRate != null && <span className="context-usage-cache">缓存 {contextUsageCacheLabel(data.contextUsage)}</span>}
+              <div className="context-usage-menu-shell" ref={contextUsageRef}>
+                <button className={`context-usage-chip tone-${contextUsageTone(data.contextUsage)}`} data-control="context-usage" type="button" aria-haspopup="dialog" aria-expanded={contextUsageOpen} aria-label={`上下文占用 ${contextUsagePercentLabel(data.contextUsage)}`} title={contextUsageTooltip(data.contextUsage)} onClick={() => { setComposerMenu(undefined); setAccessModeMenuOpen(false); setContextUsageOpen((open) => !open); }}>
+                  <span>上下文</span><strong>{contextUsagePercentLabel(data.contextUsage)}</strong>
+                  {data.contextUsage.cacheHitRate != null && <span className="context-usage-cache">缓存 {contextUsageCacheLabel(data.contextUsage)}</span>}
+                  <ChevronDown size={11} className={`context-usage-chevron${contextUsageOpen ? " open" : ""}`} />
+                </button>
+                {contextUsageOpen && (() => {
+                  const usage = data.contextUsage!;
+                  const breakdown = usage.breakdown;
+                  const breakdownTotal = breakdown ? breakdown.system + breakdown.tools + breakdown.messages : 0;
+                  return (
+                    <div className={`context-usage-popover tone-${contextUsageTone(usage)}`} data-composer-zone="popup" role="dialog" aria-label="上下文占用明细">
+                      <div className="context-usage-popover-head">
+                        <strong>{usage.percent == null ? "上下文占用" : `上下文已用 ${contextUsagePercentLabel(usage)}`}</strong>
+                        <span className="context-usage-popover-size">{usage.tokens == null ? `— / ${formatTokenCount(usage.contextWindow)}` : `~${formatTokenCount(usage.tokens)} / ${formatTokenCount(usage.contextWindow)}`}</span>
+                      </div>
+                      {usage.percent != null && breakdown && breakdownTotal > 0 && (
+                        <div className="context-usage-bar" role="presentation">
+                          <div className="context-usage-bar-fill" style={{ width: `${Math.min(100, Math.max(0, usage.percent))}%` }}>
+                            <span className="seg-system" style={{ flexGrow: Math.max(breakdown.system, 1) }} />
+                            <span className="seg-tools" style={{ flexGrow: Math.max(breakdown.tools, 1) }} />
+                            <span className="seg-messages" style={{ flexGrow: Math.max(breakdown.messages, 1) }} />
+                          </div>
+                        </div>
+                      )}
+                      {breakdown && (
+                        <dl className="context-usage-breakdown">
+                          <div><dt><span className="seg-dot seg-system" />系统提示词</dt><dd>~{formatTokenCount(breakdown.system)}</dd></div>
+                          <div><dt><span className="seg-dot seg-tools" />工具</dt><dd>~{formatTokenCount(breakdown.tools)}</dd></div>
+                          <div><dt><span className="seg-dot seg-messages" />对话消息</dt><dd>~{formatTokenCount(breakdown.messages)}</dd></div>
+                        </dl>
+                      )}
+                      {usage.tokens == null && <div className="context-usage-popover-note">压缩后暂无法估算，下一条回复后更新</div>}
+                      {usage.cacheHitRate != null && <div className="context-usage-popover-note">会话累计缓存命中 {Math.round(usage.cacheHitRate * 10) / 10}%（越接近 100% 越省钱）</div>}
+                      {breakdown && <div className="context-usage-popover-note">明细为本地估算（≈4 字符/token），加总不必等于实际占用</div>}
+                    </div>
+                  );
+                })()}
               </div>
             )}
           </div>
           <div className="composer-footer-right">
             <div className="composer-control-menu">
-              <button className="composer-menu-trigger" data-control="model-select" type="button" title="模型快捷切换" aria-label="模型快捷切换" aria-haspopup="menu" aria-expanded={composerMenu === "model"} disabled={data.busy} onClick={() => { setAccessModeMenuOpen(false); setComposerMenu((current) => current === "model" ? undefined : "model"); }}><Bot size={14} /><span>{selectedModelOption?.name ?? data.model?.id ?? "选择模型"}</span><ChevronDown size={13} /></button>
+              <button className="composer-menu-trigger" data-control="model-select" type="button" title="模型快捷切换" aria-label="模型快捷切换" aria-haspopup="menu" aria-expanded={composerMenu === "model"} disabled={data.busy} onClick={() => { setAccessModeMenuOpen(false); setContextUsageOpen(false); setComposerMenu((current) => current === "model" ? undefined : "model"); }}><Bot size={14} /><span>{selectedModelOption?.name ?? data.model?.id ?? "选择模型"}</span><ChevronDown size={13} /></button>
               {composerMenu === "model" && <div className="composer-select-menu model-select-menu" data-composer-zone="popup" ref={modelMenuRef} role="menu" aria-label="模型快捷切换">
                 {Array.from(new Set(availableModels.map((model) => model.provider))).map((providerId) => <div className="composer-menu-group" key={providerId}><small>{providers.find((provider) => provider.id === providerId)?.name ?? providerId}</small>{availableModels.filter((model) => model.provider === providerId).map((model) => { const value = `${model.provider}/${model.id}`; return <button className={value === selectedModel ? "active" : ""} type="button" role="menuitemradio" aria-checked={value === selectedModel} key={value} onClick={() => void selectModel(value)}><span>{model.name}</span>{value === selectedModel && <Check size={13} />}</button>; })}</div>)}
               </div>}
             </div>
             <div className="composer-control-menu thinking-control">
-              <button className="composer-menu-trigger" data-control="thinking-select" type="button" title="思考级别" aria-label="思考级别" aria-haspopup="menu" aria-expanded={composerMenu === "thinking"} disabled={data.busy} onClick={() => { setAccessModeMenuOpen(false); setComposerMenu((current) => current === "thinking" ? undefined : "thinking"); }}><span>思考</span><strong>{thinkingLevelLabels[data.thinkingLevel]}</strong><ChevronDown size={13} /></button>
+              <button className="composer-menu-trigger" data-control="thinking-select" type="button" title="思考级别" aria-label="思考级别" aria-haspopup="menu" aria-expanded={composerMenu === "thinking"} disabled={data.busy} onClick={() => { setAccessModeMenuOpen(false); setContextUsageOpen(false); setComposerMenu((current) => current === "thinking" ? undefined : "thinking"); }}><span>思考</span><strong>{thinkingLevelLabels[data.thinkingLevel]}</strong><ChevronDown size={13} /></button>
               {composerMenu === "thinking" && <div className="composer-select-menu thinking-select-menu" data-composer-zone="popup" role="menu" aria-label="思考级别">{thinkingLevels.map((level) => <button className={level === data.thinkingLevel ? "active" : ""} type="button" role="menuitemradio" aria-checked={level === data.thinkingLevel} key={level} onClick={() => void selectThinkingLevel(level)}><span>{thinkingLevelLabels[level]}</span>{level === data.thinkingLevel && <Check size={13} />}</button>)}</div>}
             </div>
             {data.busy ? (

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { closeSync, mkdirSync, openSync, readSync } from "node:fs";
 import { readFile, readdir, realpath, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative as relativePath, resolve, sep } from "node:path";
+import { estimateTokens } from "@earendil-works/pi-agent-core";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Api, AssistantMessage, UserMessage, ImageContent, Model, Context, ModelsSimpleStreamOptions } from "@earendil-works/pi-ai";
 import {
@@ -28,6 +29,7 @@ import type {
   BrowserAutomationResult,
   ChatMessage,
   ContextUsage,
+  ContextUsageBreakdown,
   DesktopSettings,
   DesignSnapshotRequest,
   DesignSnapshotResult,
@@ -49,6 +51,7 @@ import type {
   SessionRunStatus,
   SessionSummary,
   SkillSummary,
+  SpeedStats,
   ThinkingLevel,
   Todo,
   ToolExecution,
@@ -111,6 +114,8 @@ import { designFilePath, exportDesignFile, listDesigns, readDesign, writeDesign,
 import * as runtimePermissions from "./runtime-permissions.js";
 import * as runtimeMcp from "./runtime-mcp.js";
 import * as runtimeContextUsage from "./runtime-context-usage.js";
+import * as speedStats from "./speed-stats.js";
+import * as contextBreakdown from "./context-breakdown.js";
 import * as runtimeHooks from "./runtime-hooks.js";
 import * as runtimePlanTools from "./runtime-plan-tools.js";
 import { planHeading, readPlanMode, saveApprovedPlan, writePlanMode } from "./plan-store.js";
@@ -213,6 +218,19 @@ interface SessionRuntimeRecord {
    * the transcript). Compaction deliberately does not clear it.
    */
   cacheUsage: runtimeContextUsage.CacheUsageTotals;
+  /**
+   * dsh 风格性能统计（输入框下方状态行）：时间/轮步字段事件驱动累计，
+   * token 计数快照时从 cacheUsage 合入（单一账本）。恢复会话只回填计数。
+   */
+  speedStats: SpeedStats;
+  /** 当前模型调用周期的打点（turn_start 开、message_end 收；turn_end 兜底清）。 */
+  speedStep?: speedStats.SpeedStep;
+  /** 流式实时读数（token 估算随 message_update 节流刷新；收步/回合结束清）。 */
+  speedLive?: { startedAt: number; firstTokenAt?: number; tokens: number };
+  /** 上下文三段明细（稳定边界重算，见 refreshContextBreakdown；快照只读）。 */
+  contextBreakdown?: ContextUsageBreakdown;
+  /** 工具段估算缓存：活动工具集变化才重算（键 = 活动工具名 join）。 */
+  toolTokensCache?: { key: string; tokens: number };
   activatedAt: number;
   /** 分屏格子（watched）流式推送的节流定时器；激活会话不走此通道。 */
   paneFlushTimer?: ReturnType<typeof setTimeout>;
@@ -819,12 +837,44 @@ function postEmptyDesignState(record: SessionRuntimeRecord): void {
   post({ type: "design.state", sessionId: record.session.sessionId, revision: 0 });
 }
 
-/** 快照的上下文占用：Pi 官方估算 + record 上的会话累计缓存命中率。 */
+/** 快照的上下文占用：Pi 官方估算 + record 上的会话累计缓存命中率 + 三段明细。 */
 function snapshotContextUsage(record: SessionRuntimeRecord | undefined): ContextUsage | undefined {
   if (!record) return undefined;
   const base = record.session.getContextUsage();
   if (!base) return undefined;
-  return { ...base, cacheHitRate: runtimeContextUsage.cacheHitRateFrom(record.cacheUsage) };
+  return { ...base, cacheHitRate: runtimeContextUsage.cacheHitRateFrom(record.cacheUsage), ...(record.contextBreakdown ? { breakdown: record.contextBreakdown } : {}) };
+}
+
+/** 快照的性能统计：时间/轮步来自事件累计，token 计数合入 cacheUsage（单一账本）；流式期间附带实时读数。 */
+function snapshotSpeedStats(record: SessionRuntimeRecord | undefined): SpeedStats | undefined {
+  if (!record) return undefined;
+  return {
+    ...record.speedStats,
+    promptTokens: record.cacheUsage.promptTokens,
+    outputTokens: record.cacheUsage.outputTokens,
+    ...(record.speedLive ? { live: record.speedLive } : {})
+  };
+}
+
+/**
+ * 重算上下文三段明细。消息段是 O(transcript) 的估算，只在稳定边界调用
+ * （消息完成、压缩、切模型、活动工具集变化），流式期间沿用上一帧——dsh
+ * 的环在采样间隙同样不动。工具段按活动集缓存，避免每次 stringify 全部 schema。
+ */
+function refreshContextBreakdown(record: SessionRuntimeRecord): void {
+  const session = record.session;
+  const names = session.getActiveToolNames();
+  const key = names.join(",");
+  if (record.toolTokensCache?.key !== key) {
+    const active = new Set(names);
+    const tokens = contextBreakdown.estimateToolTokens(session.getAllTools().filter((tool) => active.has(tool.name)));
+    record.toolTokensCache = { key, tokens };
+  }
+  record.contextBreakdown = contextBreakdown.estimateContextBreakdown({
+    systemPrompt: session.systemPrompt,
+    toolTokens: record.toolTokensCache.tokens,
+    messages: session.state.messages
+  });
 }
 
 function runtimeSkillPrompt(name: string, instructions?: string, record: SessionRuntimeRecord | undefined = activeRuntime): string {
@@ -886,6 +936,7 @@ function paneSnapshotFrom(record: SessionRuntimeRecord): SessionPaneSnapshot {
       record
     )),
     contextUsage: snapshotContextUsage(record),
+    speedStats: snapshotSpeedStats(record),
     planMode: record.planState.enabled,
     messages,
     executions: [...record.executions.values()].map((execution) => {
@@ -912,6 +963,7 @@ function snapshot(): RuntimeSnapshot {
     turnTiming: pane?.turnTiming,
     queuedMessages: pane?.queuedMessages ?? [],
     contextUsage: pane?.contextUsage,
+    speedStats: pane?.speedStats,
     // 计划模式是会话级协作状态（与访问模式独立）：快照只反映激活会话。
     planMode: pane?.planMode ?? false,
     messages: pane?.messages ?? [],
@@ -1353,6 +1405,8 @@ function reconcileVisionTool(record: SessionRuntimeRecord | undefined): void {
   if (!record || record.visionTools.length === 0) return;
   const includeVision = !hasImageInput(record.session.model);
   record.session.setActiveToolsByName(toolNamesFor(record, includeVision));
+  // 活动集变化：上下文三段明细的工具段跟随（缓存键失配自动重算）。
+  refreshContextBreakdown(record);
 }
 
 /**
@@ -1402,6 +1456,7 @@ function refreshGitBranch(): void {
 
 function beginTurn(record: SessionRuntimeRecord): void {
   record.turnTiming = { startedAt: Date.now() };
+  record.speedStats = speedStats.beginSpeedTurn(record.speedStats);
 }
 
 function markAnswerStarted(record: SessionRuntimeRecord): void {
@@ -1507,6 +1562,9 @@ function handleSessionEvent(record: SessionRuntimeRecord, event: AgentSessionEve
         // Idempotent backstop: regenerate/navigateTree truncates the transcript,
         // so re-derive the counters from what actually remains.
         record.cacheUsage = runtimeContextUsage.scanCacheUsage(record.session.state.messages);
+        record.speedStats = speedStats.syncSpeedCounters(record.speedStats, record.session.state.messages);
+        record.speedStep = undefined;
+        record.speedLive = undefined;
         lifecycle = true;
       }
       break;
@@ -1518,14 +1576,40 @@ function handleSessionEvent(record: SessionRuntimeRecord, event: AgentSessionEve
       if (record.runStatus === "running") {
         resolveRunOutcome(record, record.session.state.messages);
         record.cacheUsage = runtimeContextUsage.scanCacheUsage(record.session.state.messages);
+        record.speedStats = speedStats.syncSpeedCounters(record.speedStats, record.session.state.messages);
+        record.speedStep = undefined;
+        record.speedLive = undefined;
         lifecycle = true;
       }
       break;
+    case "turn_start":
+      // 一次模型调用周期开始（步起点 ≈ 请求发出）：开新打点，覆盖残留的旧步。
+      record.speedStep = { startedAt: Date.now() };
+      record.speedLive = { startedAt: record.speedStep.startedAt, tokens: 0 };
+      break;
+    case "turn_end":
+      // 步收尾兜底：message_end 已收步，这里只清可能的残留（无消息完成的周期）。
+      record.speedStep = undefined;
+      record.speedLive = undefined;
+      break;
     case "message_start":
-      if (event.message.role === "assistant") markAnswerStarted(record);
+      if (event.message.role === "assistant") {
+        markAnswerStarted(record);
+        const firstTokenAt = Date.now();
+        if (record.speedStep && record.speedStep.firstTokenAt === undefined) {
+          record.speedStep = { ...record.speedStep, firstTokenAt };
+        }
+        if (record.speedLive && record.speedLive.firstTokenAt === undefined) {
+          record.speedLive = { ...record.speedLive, firstTokenAt };
+        }
+      }
       break;
     case "message_update":
-      // Token-batch partial; high frequency — throttle.
+      // Token-batch partial; high frequency — throttle. 实时速度读数随节流帧
+      // 刷新（当前步部分消息的本地 token 估算，收步后被 usage 口径接管）。
+      if (event.message.role === "assistant" && record.speedLive?.firstTokenAt !== undefined) {
+        record.speedLive = { ...record.speedLive, tokens: estimateTokens(event.message) };
+      }
       immediate = false;
       break;
     case "message_end":
@@ -1533,6 +1617,15 @@ function handleSessionEvent(record: SessionRuntimeRecord, event: AgentSessionEve
       // streaming flag clears without a 50ms gap. Accumulate its usage into
       // the session-wide cache counters.
       record.cacheUsage = runtimeContextUsage.addMessageToCacheUsage(record.cacheUsage, event.message);
+      if (event.message.role === "assistant" && record.speedStep) {
+        const usage = runtimeContextUsage.validAssistantUsage(event.message);
+        record.speedStats = speedStats.closeSpeedStep(record.speedStats, record.speedStep, Date.now(), usage ? { output: usage.output } : undefined);
+        record.speedStep = undefined;
+        record.speedLive = undefined;
+      }
+      // 消息落定 = 上下文构成变化的稳定边界（assistant 步 / 工具结果 / 排队
+      // 注入），重算三段明细；流式期间沿用上一帧。
+      refreshContextBreakdown(record);
       // 会话文件直到第一条 assistant 消息完成才落盘（SDK hasAssistant 门槛），
       // 侧栏标题（firstMessage）随之才可读。此前只在 agent_end 等生命周期事件
       // 才重扫列表，新会话要等整个回合结束才从「新会话」变成真实标题；这里在
@@ -1571,6 +1664,10 @@ function handleSessionEvent(record: SessionRuntimeRecord, event: AgentSessionEve
     case "tool_execution_end": {
       const current = record.executions.get(event.toolCallId);
       const output = textFromToolResult(event.result);
+      const completedAt = Date.now();
+      const startedAt = current?.startedAt ?? completedAt;
+      // 工具耗时累计（dsh 口径：单次调用 end − start；与 LLM 耗时互斥配对）。
+      record.speedStats = speedStats.addSpeedToolMs(record.speedStats, completedAt - startedAt);
       const changedFiles = current?.changedFiles
         ?? (current?.changedFile
           ? [current.changedFile]
@@ -1580,8 +1677,8 @@ function handleSessionEvent(record: SessionRuntimeRecord, event: AgentSessionEve
         id: event.toolCallId,
         name: event.toolName,
         args: current?.args ?? {},
-        startedAt: current?.startedAt ?? Date.now(),
-        completedAt: Date.now(),
+        startedAt,
+        completedAt,
         status: event.isError ? "error" : "completed",
         output,
         patch: patchFromToolResult(event.result),
@@ -1620,6 +1717,9 @@ function handleSessionEvent(record: SessionRuntimeRecord, event: AgentSessionEve
       if (failureNotice) {
         post({ type: "error", message: `话题「${record.session.sessionManager.getSessionName()}」${failureNotice}` });
       }
+      // 压缩把消息替换为摘要：构成明细立即跟随缩小（占用总量要等下一次
+      // usage 采样才更新，明细不受此限制）。
+      refreshContextBreakdown(record);
       break;
     }
     case "auto_retry_start":
@@ -1714,11 +1814,14 @@ async function refreshCatalog(): Promise<void> {
       id: provider.id,
       name: provider.name,
       configured: isDesktopConfiguredProvider(auth),
-      authSource: auth?.source
+      authSource: auth?.source,
+      // 手动添加模型只对 PiDesktop 直连管理覆盖层的内置渠道开放（radius 等
+      // 远程目录渠道的覆盖键归 SDK 管，写入会破坏其刷新门控）。
+      ...(provider.id in BUILTIN_MODELS_ENDPOINTS ? { manualModels: true } : {})
     };
   });
   if (!providers.some((provider) => provider.id === customProviderId)) {
-    providers.push({ id: customProviderId, name: settings?.providers.find((item) => item.id === customProviderId)?.name ?? "自定义 OpenAI 兼容服务", configured: false });
+    providers.push({ id: customProviderId, name: settings?.providers.find((item) => item.id === customProviderId)?.name ?? "自定义 OpenAI 兼容服务", configured: false, manualModels: true });
   }
   const models: ModelOption[] = buildCatalogModels(runtime.getModels(), settings?.providers, configured);
   post({ type: "catalog", models, providers });
@@ -2414,6 +2517,8 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     runStatus: undefined,
     abortRequested: false,
     cacheUsage: runtimeContextUsage.scanCacheUsage(result.session.state.messages),
+    // 恢复会话只回填轮步计数（时间打点不落盘，重启后从零累计）。
+    speedStats: speedStats.seedSpeedStats(result.session.state.messages),
     activatedAt: Date.now()
   };
   recordBox = record;
@@ -2440,6 +2545,8 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   // registered but not active unless explicitly enabled here; the vision tool
   // is activated only for text-only conversation models (toolNamesFor).
   result.session.setActiveToolsByName(toolNamesFor(record, !hasImageInput(result.session.model)));
+  // 工具活动集在此定型：三段明细的工具段按它缓存，首次重算放在激活之后。
+  refreshContextBreakdown(record);
   record.executions = new Map(restoreToolExecutions(result.session.state.messages as unknown as PersistedSessionMessage[], recordWorkspace).map((execution) => [execution.id, execution]));
   backfillRestoredArtifacts(record);
   // Background processes launched by earlier sessions keep running across
@@ -2619,6 +2726,8 @@ async function applyMcpToolChanges(): Promise<void> {
     // record's customTools.
     for (const tool of mcpTools) record.extensionApi.registerTool(tool);
     record.session.setActiveToolsByName(toolNamesFor(record, !hasImageInput(record.session.model)));
+    // 热更新改变了请求前缀里的工具清单：三段明细的工具段跟随重算。
+    refreshContextBreakdown(record);
   } catch (error) {
     // A stale extension handle (session swapped mid-operation) or any registry
     // hiccup: recover via the rebuild path.

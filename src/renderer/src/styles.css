@@ -176,6 +176,7 @@ button, input, select, textarea, summary, label {
   /* 装饰性/反馈性动画全部关停；保留 .spinning 加载指示（语义必要） */
   .message, .panel-dock, .question-panel, .context-menu, .preview-open-menu,
   .access-mode-menu, .composer-select-menu, .slash-menu, .turn-thumb-pop,
+  .context-usage-popover,
   .modal-backdrop, .settings-dialog, .permission-dialog, .automation-dialog,
   .delegation-transcript-dialog, .image-lightbox-content, .content-preview-panel,
   .panel-dock-fab, .error-toast, .settings-content, .agent-list, .session-list,
@@ -191,6 +192,7 @@ html[data-ui-motion="off"] *, html[data-ui-motion="off"] *::before, html[data-ui
 html[data-ui-motion="off"] .message, html[data-ui-motion="off"] .panel-dock,
 html[data-ui-motion="off"] .question-panel, html[data-ui-motion="off"] .context-menu,
 html[data-ui-motion="off"] .preview-open-menu, html[data-ui-motion="off"] .access-mode-menu,
+html[data-ui-motion="off"] .context-usage-popover,
 html[data-ui-motion="off"] .composer-select-menu, html[data-ui-motion="off"] .slash-menu,
 html[data-ui-motion="off"] .turn-thumb-pop, html[data-ui-motion="off"] .modal-backdrop,
 html[data-ui-motion="off"] .settings-dialog, html[data-ui-motion="off"] .permission-dialog,
@@ -543,7 +545,8 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
    隐藏访问模式（全局设置，可在设置/单窗口改）与上下文占用（窄格纯展示）
    思考级别按钮只留级别值、去掉「思考」前缀；footer 间距收紧。单窗口不触发。 */
 .conversation-pane.pane-compact .access-mode-menu-shell,
-.conversation-pane.pane-compact .context-usage-chip { display: none; }
+.conversation-pane.pane-compact .context-usage-chip,
+.conversation-pane.pane-compact .conversation-stats-line { display: none; }
 .conversation-pane.pane-compact .thinking-control .composer-menu-trigger > span { display: none; }
 .conversation-pane.pane-compact .composer-footer { gap: 4px 8px; }
 /* 分屏格子头部（split-pane-header，30px）在顶部右侧有最大化/关闭按钮，
@@ -900,12 +903,45 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 .composer-menu-trigger:disabled { opacity: .5; cursor: default; }
 .composer-menu-trigger > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .composer-menu-trigger strong { overflow: hidden; color: var(--text-muted); font-size: 10px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
-.context-usage-chip { display: inline-flex; flex: none; align-items: center; gap: 4px; min-height: 29px; padding: 0 4px; color: var(--text-muted); font-size: 10px; user-select: none; cursor: default; }
+.context-usage-menu-shell { position: relative; min-width: 0; }
+.context-usage-chip { display: inline-flex; flex: none; align-items: center; gap: 4px; min-height: 29px; padding: 0 4px; border: 0; border-radius: 6px; color: var(--text-muted); background: transparent; font-size: 10px; user-select: none; cursor: pointer; }
+.context-usage-chip:hover, .context-usage-chip[aria-expanded="true"] { background: var(--surface-button-hover); }
 .context-usage-chip strong { font-size: 10px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .context-usage-chip .context-usage-cache { margin-left: 2px; padding-left: 6px; border-left: 1px solid var(--border); }
+.context-usage-chip .context-usage-chevron { flex: none; color: var(--text-muted); transition: transform .14s ease; }
+.context-usage-chip .context-usage-chevron.open { transform: rotate(180deg); }
 .context-usage-chip.tone-warn { color: var(--warning); }
 .context-usage-chip.tone-danger { color: var(--danger); }
 .context-usage-chip.tone-warn strong, .context-usage-chip.tone-danger strong { color: inherit; }
+/* 上下文明细卡（dsh ContextMeter）：chip 上方弹出，三段构成 + 分段进度条。 */
+.context-usage-popover { position: absolute; z-index: 20; bottom: calc(100% + 8px); left: 0; display: grid; gap: 8px; width: min(264px, calc(100vw - 48px)); padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow-lg); animation: menu-pop-in .16s cubic-bezier(0.16, 1, 0.3, 1); }
+.context-usage-popover-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.context-usage-popover-head strong { font-size: 12px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.context-usage-popover.tone-warn .context-usage-popover-head strong { color: var(--warning); }
+.context-usage-popover.tone-danger .context-usage-popover-head strong { color: var(--danger); }
+.context-usage-popover-size { color: var(--text-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.context-usage-bar { height: 4px; overflow: hidden; border-radius: 2px; background: var(--surface-raised); }
+.context-usage-bar-fill { display: flex; height: 100%; border-radius: 2px; overflow: hidden; background: var(--accent); }
+.context-usage-popover.tone-warn .context-usage-bar-fill { background: var(--warning); }
+.context-usage-popover.tone-danger .context-usage-bar-fill { background: var(--danger); }
+.context-usage-bar-fill > span { flex-basis: 0; min-width: 2px; height: 100%; }
+.context-usage-bar-fill > .seg-system, .seg-dot.seg-system { background: var(--blue); }
+.context-usage-bar-fill > .seg-tools, .seg-dot.seg-tools { background: var(--warning); }
+.context-usage-bar-fill > .seg-messages, .seg-dot.seg-messages { background: var(--success); }
+.context-usage-breakdown { display: grid; gap: 4px; margin: 0; }
+.context-usage-breakdown > div { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.context-usage-breakdown dt { display: inline-flex; align-items: center; gap: 6px; color: var(--text-muted); font-size: 11px; }
+.context-usage-breakdown dd { margin: 0; color: var(--text); font-size: 11px; font-variant-numeric: tabular-nums; }
+.seg-dot { flex: none; width: 8px; height: 8px; border-radius: 3px; }
+.context-usage-popover-note { color: var(--text-muted); font-size: 10px; line-height: 1.4; }
+/* dsh StatsLine：聊天区与输入框之间的单行会话性能读数（组间竖线、tabular 数字；
+   live 组是流式实时速度，用主色区分累计口径）。composer 是绝对定位浮卡，时间线
+   以 --composer-space 预留底部空间（含 56px 呼吸区）——本行锚定在呼吸区内，
+   无需额外留白；提问面板出现时由 JSX 条件让位隐藏。 */
+.conversation-stats-line { position: absolute; z-index: 9; left: 50%; bottom: calc(var(--composer-space, 122px) - 34px); display: flex; align-items: center; justify-content: center; gap: 8px; max-width: min(962px, calc(100% - 48px)); overflow: hidden; padding: 2px 8px; transform: translateX(-50%); color: var(--text-muted); font-size: 11px; line-height: 18px; white-space: nowrap; user-select: none; pointer-events: none; }
+.conversation-stats-group { overflow: hidden; min-width: 0; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.conversation-stats-group.live { color: var(--accent); }
+.conversation-stats-sep { flex: none; width: 1px; height: 10px; background: var(--border); }
 .composer-select-menu { position: absolute; z-index: 20; right: 0; bottom: calc(100% + 8px); display: grid; gap: 2px; padding: 6px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow-lg); }
 .model-select-menu { width: min(280px, calc(100vw - 48px)); max-height: min(400px, 60vh); overflow-y: auto; overscroll-behavior: contain; }
 .model-select-menu .composer-menu-group > small { position: sticky; top: 0; z-index: 1; background: var(--surface); font-weight: 700; }

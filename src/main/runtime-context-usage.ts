@@ -10,14 +10,16 @@ export interface CacheUsageTotals {
   cacheRead: number;
   /** 计费 prompt 侧 token：input + cacheRead + cacheWrite。 */
   promptTokens: number;
+  /** 会话累计输出 token（speed-stats 状态行的「输出 X tok」段）。 */
+  outputTokens: number;
 }
 
 export function zeroCacheUsage(): CacheUsageTotals {
-  return { cacheRead: 0, promptTokens: 0 };
+  return { cacheRead: 0, promptTokens: 0, outputTokens: 0 };
 }
 
 /** 单条消息的有效 usage：跳过非 assistant、aborted/error、全零。 */
-function validAssistantUsage(message: AgentMessage): Usage | undefined {
+export function validAssistantUsage(message: AgentMessage): Usage | undefined {
   if (!message || message.role !== "assistant") return undefined;
   const assistant = message as AssistantMessage;
   if (assistant.stopReason === "aborted" || assistant.stopReason === "error") return undefined;
@@ -32,7 +34,8 @@ export function addMessageToCacheUsage(totals: CacheUsageTotals, message: AgentM
   if (!usage) return totals;
   return {
     cacheRead: totals.cacheRead + usage.cacheRead,
-    promptTokens: totals.promptTokens + usage.input + usage.cacheRead + usage.cacheWrite
+    promptTokens: totals.promptTokens + usage.input + usage.cacheRead + usage.cacheWrite,
+    outputTokens: totals.outputTokens + usage.output
   };
 }
 

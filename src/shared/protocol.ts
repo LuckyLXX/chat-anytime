@@ -39,6 +39,13 @@ export interface ProviderModelSettings {
   api?: ProviderApiMode;
   /** Whether this model is shown in the composer model switcher. */
   enabled?: boolean;
+  /**
+   * `true` marks a hand-added model entry（设置页「手动添加」或空列表时手填的
+   * 模型 ID）：上游 /models 刷新不会丢弃它（mergeProviderModels 保留），内置
+   * 服务商还据此把它克隆进 models-store 覆盖层（否则目录里没有这个模型，
+   * 会话无法使用）。缺省 = 目录/拉取来源的普通条目。
+   */
+  manual?: boolean;
 }
 
 export interface ProviderSettings {
@@ -70,6 +77,13 @@ export interface ProviderOption {
   configured: boolean;
   authSource?: string;
   custom?: boolean;
+  /**
+   * 该服务商是否支持「手动添加模型」。自定义服务商恒支持（模型表就是设置
+   * 条目）；内置服务商只有 PiDesktop 直连管理 models-store 覆盖层的渠道
+   * （BUILTIN_MODELS_ENDPOINTS）支持——远程目录渠道（radius 等）的覆盖键由
+   * SDK 管理，写入会破坏其 etag/lastModified 门控。缺省 = 不支持。
+   */
+  manualModels?: boolean;
 }
 
 export interface CustomProviderSettings {
@@ -322,6 +336,38 @@ export interface TurnTiming {
 }
 
 /**
+ * dsh（deepseek-harness）风格的会话性能统计，驱动输入框下方的状态行。
+ * 时间指标（llmMs/toolMs/ttft/decode）只在进程存活期内累计——时间戳不进
+ * JSONL，恢复会话时只回填可从 transcript 重派的计数字段；口径见 speed-stats.ts。
+ */
+export interface SpeedStats {
+  /** 用户轮次数：每次发送/重新生成（beginTurn）计 1。 */
+  turns: number;
+  /** 模型调用步数：每个有效完成的 assistant 消息（一次 turn 周期）= 1 步。 */
+  steps: number;
+  /** LLM 耗时累计（ms）：Σ(assistant 消息完成 − 该步 turn_start)，不含工具执行。 */
+  llmMs: number;
+  /** 工具执行耗时累计（ms）：Σ(tool_execution_end − start)。 */
+  toolMs: number;
+  /** 首 token 延迟累计与计步数（出现过流式首帧的步）；平均 = ttftMs / ttftSteps。 */
+  ttftMs: number;
+  ttftSteps: number;
+  /** 解码阶段（首帧 → 消息完成）累计，只统计带 usage 的步；tok/s = decodeTokens / decodeMs。 */
+  decodeTokens: number;
+  decodeMs: number;
+  /** 会话累计计费输入（input+cacheRead+cacheWrite）与输出 token；与缓存命中率同源（runtime-context-usage）。 */
+  promptTokens: number;
+  outputTokens: number;
+  /**
+   * 流式中的实时读数（message_update 节流帧上更新，消息完成即清除）：
+   * tokens 是当前步部分消息的本地估算（chars/4，含 thinking/toolCall），与
+   * 最终 usage 不同源——实时显示用，收步后被累计口径接管。等待首 token
+   * 期间 firstTokenAt 缺省，渲染层按 startedAt 显示计时。
+   */
+  live?: { startedAt: number; firstTokenAt?: number; tokens: number };
+}
+
+/**
  * 当前会话上下文窗口占用估算（Pi 的 AgentSession.getContextUsage()，
  * 跟随激活会话）。窗口大小来自模型定义，token 数优先取最后一次
  * LLM 响应的真实 usage，其后新消息按 chars/4 估算。
@@ -340,6 +386,20 @@ export interface ContextUsage {
    * 时为 null。独立于 tokens——压缩后估算未知时累计命中率仍有意义。
    */
   cacheHitRate: number | null;
+  /**
+   * 三段近似构成（token 估算）：系统提示词 / 活动工具 schema / 对话消息。
+   * 纯本地启发式（chars/4 + 开销），与 tokens 不同源——三行带 ~ 前缀展示，
+   * 加总不必等于 tokens（dsh 同款语义）。仅在稳定边界（消息完成/压缩/切模型）
+   * 重算，流式期间沿用上一帧。
+   */
+  breakdown?: ContextUsageBreakdown;
+}
+
+/** 上下文三段明细的本地估算（ContextUsage.breakdown）。 */
+export interface ContextUsageBreakdown {
+  system: number;
+  tools: number;
+  messages: number;
 }
 
 // ─── 用量统计（usage.stats.request → usage-stats-result）───
@@ -1075,6 +1135,8 @@ export interface RuntimeSnapshot {
   queuedMessages: QueuedMessage[];
   /** 激活会话的上下文占用估算；无会话或模型窗口未知时缺省。 */
   contextUsage?: ContextUsage;
+  /** 激活会话的 dsh 风格性能统计（输入框下方状态行）。 */
+  speedStats?: SpeedStats;
   /** 激活会话是否处于计划模式（先产出计划、审查批准后才实施）。 */
   planMode?: boolean;
   messages: ChatMessage[];
@@ -1102,6 +1164,7 @@ export interface SessionPaneSnapshot {
   turnTiming?: TurnTiming;
   queuedMessages: QueuedMessage[];
   contextUsage?: ContextUsage;
+  speedStats?: SpeedStats;
   planMode?: boolean;
   messages: ChatMessage[];
   executions: ToolExecution[];

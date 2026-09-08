@@ -25,7 +25,7 @@ function assistantUsage(partial: Partial<Usage>): AssistantMessage {
 }
 
 describe("runtime context usage accumulation", () => {
-  it("accumulates cacheRead and billed prompt tokens from assistant messages", () => {
+  it("accumulates cacheRead, billed prompt tokens and output tokens from assistant messages", () => {
     const messages: AgentMessage[] = [
       { role: "user", content: "hi", timestamp: 0 },
       assistantUsage({ input: 200, cacheRead: 800, cacheWrite: 100 }),
@@ -33,7 +33,7 @@ describe("runtime context usage accumulation", () => {
       assistantUsage({ input: 50, cacheRead: 950, cacheWrite: 20, output: 300 })
     ];
     const totals = scanCacheUsage(messages);
-    expect(totals).toEqual({ cacheRead: 1750, promptTokens: 2120 });
+    expect(totals).toEqual({ cacheRead: 1750, promptTokens: 2120, outputTokens: 300 });
     expect(cacheHitRateFrom(totals)).toBeCloseTo((1750 / 2120) * 100);
   });
 
@@ -45,19 +45,19 @@ describe("runtime context usage accumulation", () => {
     const zero = assistantUsage({});
     const valid = assistantUsage({ input: 100, cacheRead: 400, output: 50 });
     const totals = scanCacheUsage([aborted, errored, zero, valid]);
-    expect(totals).toEqual({ cacheRead: 400, promptTokens: 500 });
+    expect(totals).toEqual({ cacheRead: 400, promptTokens: 500, outputTokens: 50 });
   });
 
   it("returns null hit rate without billed input", () => {
     expect(cacheHitRateFrom(zeroCacheUsage())).toBeNull();
-    expect(cacheHitRateFrom({ cacheRead: 500, promptTokens: 0 })).toBeNull();
+    expect(cacheHitRateFrom({ cacheRead: 500, promptTokens: 0, outputTokens: 10 })).toBeNull();
   });
 
   it("adds one message without mutating the original totals", () => {
     const base = zeroCacheUsage();
-    const next = addMessageToCacheUsage(base, assistantUsage({ input: 40, cacheRead: 360 }));
-    expect(base).toEqual({ cacheRead: 0, promptTokens: 0 });
-    expect(next).toEqual({ cacheRead: 360, promptTokens: 400 });
+    const next = addMessageToCacheUsage(base, assistantUsage({ input: 40, cacheRead: 360, output: 25 }));
+    expect(base).toEqual({ cacheRead: 0, promptTokens: 0, outputTokens: 0 });
+    expect(next).toEqual({ cacheRead: 360, promptTokens: 400, outputTokens: 25 });
   });
 
   it("ignores non-assistant messages during incremental add", () => {
