@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, statSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readSync } from "node:fs";
 import { readFile, readdir, realpath, stat, unlink, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative as relativePath, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative as relativePath, resolve, sep } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Api, AssistantMessage, UserMessage, ImageContent, Model, Context, ModelsSimpleStreamOptions } from "@earendil-works/pi-ai";
 import {
@@ -81,7 +81,7 @@ import { createAutomationScheduler, type AutomationScheduler } from "./automatio
 import { buildAutomationTools, type AutomationCreateInput, type AutomationToolContext } from "./automation-tools.js";
 import { resolveVisionModel } from "./vision.js";
 import { buildResourceCatalog } from "./resource-catalog.js";
-import { agentWorkspaceSessionDir, backfillUnpersistedSessions, mergeSessionSummary, sessionListReadyFor } from "./session-scope.js";
+import { agentWorkspaceSessionDir, backfillUnpersistedSessions, mergeSessionSummary, sessionFileMatchesId, sessionListReadyFor } from "./session-scope.js";
 import { isDesktopConfiguredProvider } from "./model-catalog.js";
 import { defaultTools, ensureDefaultWorkspaceDir, forgetAgentWorkspace, isPositiveInt, mergeProviderModels, recordAgentWorkspace, resolveDefaultWorkspace, resolveInitialWorkspace } from "./settings.js";
 import { buildSkillPrompt, parseSkillPrompt } from "./skill-prompt.js";
@@ -1169,6 +1169,48 @@ async function sessionDirectories(): Promise<string[]> {
     return [root, ...entries.filter((entry) => entry.isDirectory() && entry.name !== "delegations").map((entry) => join(root, entry.name))];
   } catch {
     return [root];
+  }
+}
+
+/**
+ * 在会话目录集合里按 sessionId 定位会话文件。
+ * 文件名优先（零读盘）：Pi 的 SessionManager 以 `<ISO 时间戳>_<sessionId>.jsonl`
+ * 落盘（见 sessionFileMatchesId 注释），故**不能**按 `<sessionId>.jsonl` 拼路径。
+ * 命中后仍用首行头部校验一次：会话目录里还躺着 `checkpoints/<sessionId>.jsonl`
+ * 这类同名文件（应用自有存储），头部 `type` 不是 `session` 就不会被当成会话。
+ * 文件名没命中时退回首行 id 全扫（权威身份，与侧边栏列表同源），
+ * 这样 Pi 改命名规则也不会让运行记录回看失效。
+ */
+async function findSessionFileById(directories: readonly string[], sessionId: string): Promise<string | undefined> {
+  const candidates: string[] = [];
+  for (const directory of directories) {
+    try {
+      for (const name of await readdir(directory)) {
+        if (name.toLowerCase().endsWith(".jsonl")) candidates.push(join(directory, name));
+      }
+    } catch {
+      // 目录不存在/不可读：跳过，由调用方兜底提示
+    }
+  }
+  const byName = candidates.find((candidate) => sessionFileMatchesId(basename(candidate), sessionId));
+  if (byName && readSessionHeaderId(byName) === sessionId) return byName;
+  return candidates.find((candidate) => readSessionHeaderId(candidate) === sessionId);
+}
+
+/** 读会话文件首行的头部 id（有界读 8KB，不扫整文件）；非会话文件/损坏返回 undefined。 */
+function readSessionHeaderId(path: string): string | undefined {
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, "r");
+    const buffer = Buffer.allocUnsafe(8192);
+    const bytesRead = readSync(fd, buffer, 0, buffer.length, 0);
+    const firstLine = buffer.subarray(0, bytesRead).toString("utf8").split("\n", 1)[0] ?? "";
+    const header = JSON.parse(firstLine) as { type?: unknown; id?: unknown };
+    return header?.type === "session" && typeof header.id === "string" ? header.id : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
 }
 
@@ -3142,31 +3184,12 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         break;
       }
       // 运行记录未存 workspace（历史事件流不快照运行上下文），按 sessionId 扫描任务角色的
-      // 全部工作区会话目录（<agentDir>/chatanytime-sessions/<agentId>/*/<sessionId>.jsonl）。
-      const runRoot = agentSessionRoot();
-      if (!runRoot) {
+      // 全部工作区会话目录（<agentDir>/chatanytime-sessions/<agentId>/**）。
+      if (!agentSessionRoot()) {
         post({ type: "error", message: "当前没有可用 Agent，无法打开会话" });
         break;
       }
-      let target: string | undefined;
-      const probe = (candidate: string): void => {
-        if (target) return;
-        try {
-          if (statSync(candidate).isFile()) target = candidate;
-        } catch {
-          // 文件不存在
-        }
-      };
-      probe(join(runRoot, `${run.sessionId}.jsonl`));
-      try {
-        const entries = await readdir(runRoot, { withFileTypes: true });
-        for (const entry of entries) {
-          if (!entry.isDirectory() || entry.name === "delegations") continue;
-          probe(join(runRoot, entry.name, `${run.sessionId}.jsonl`));
-        }
-      } catch {
-        // 会话目录缺失：由下方错误提示兜底
-      }
+      const target = await findSessionFileById(await sessionDirectories(), run.sessionId);
       if (!target) {
         post({ type: "error", message: "该运行的会话不存在（可能未持久化或已删除）" });
         break;

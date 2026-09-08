@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentWorkspaceSessionDir, backfillUnpersistedSessions, mergeSessionSummary, resolveNewSessionDefaults, sessionListReadyFor, workspaceHash, type LiveSessionSeed } from "./session-scope.js";
+import { agentWorkspaceSessionDir, backfillUnpersistedSessions, mergeSessionSummary, resolveNewSessionDefaults, sessionFileMatchesId, sessionListReadyFor, workspaceHash, type LiveSessionSeed } from "./session-scope.js";
 
 describe("Agent workspace session scope", () => {
   it("keeps agents and workspaces in separate deterministic directories", () => {
@@ -7,6 +7,25 @@ describe("Agent workspace session scope", () => {
     expect(agentWorkspaceSessionDir("C:/pi", "default", "C:/projects/demo")).not.toBe(agentWorkspaceSessionDir("C:/pi", "coder", "C:/projects/demo"));
     expect(agentWorkspaceSessionDir("C:/pi", "default", "C:/projects/demo")).not.toBe(agentWorkspaceSessionDir("C:/pi", "default", "C:/projects/other"));
     expect(workspaceHash("C:/projects/demo")).toHaveLength(20);
+  });
+
+  it("matches Pi's timestamp-prefixed session file names by session id", () => {
+    // 真机文件名（Pi SessionManager 落盘命名）：<ISO 时间戳>_<sessionId>.jsonl
+    const id = "01a07e88-18bb-7668-801b-e9b169ffab65";
+    expect(sessionFileMatchesId(`2026-09-08T01-00-43-601Z_${id}.jsonl`, id)).toBe(true);
+    // 裸 <sessionId>.jsonl（旧文件/手工复制）同样命中
+    expect(sessionFileMatchesId(`${id}.jsonl`, id)).toBe(true);
+    expect(sessionFileMatchesId(`2026-09-08T01-00-43-601Z_${id.toUpperCase()}.JSONL`, id)).toBe(true);
+  });
+
+  it("rejects ids that merely overlap another session id or file name", () => {
+    const id = "01a07e88-18bb-7668-801b-e9b169ffab65";
+    // id 是另一 id 的后缀：_ 锚点拦住（否则 -e9b169ffab65 会误命中）
+    expect(sessionFileMatchesId(`2026-09-08T01-00-43-601Z_${id}.jsonl`, "e9b169ffab65")).toBe(false);
+    // 另一 id 以本 id 结尾但没有 _ 分隔
+    expect(sessionFileMatchesId("2026-09-08T01-00-43-601Z_zz01a07e88.jsonl", "01a07e88")).toBe(false);
+    expect(sessionFileMatchesId(`2026-09-08T01-00-43-601Z_${id}.jsonl.tmp`, id)).toBe(false);
+    expect(sessionFileMatchesId(`2026-09-08T01-00-43-601Z_${id}.jsonl`, "")).toBe(false);
   });
 
   it("uses Agent defaults for new sessions and leaves history to Pi restoration", () => {

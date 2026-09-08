@@ -10,6 +10,22 @@ export function agentWorkspaceSessionDir(agentRoot: string, agentId: string, wor
   return join(agentRoot, "chatanytime-sessions", agentId, workspaceHash(workspace));
 }
 
+/**
+ * 会话文件名 → sessionId 匹配。Pi 的 SessionManager 以
+ * `<ISO 时间戳>_<sessionId>.jsonl` 命名会话文件（session-manager.js 的
+ * create/fork 落盘点同构），因此**不能**按 `<sessionId>.jsonl` 拼路径
+ * （历史 bug：自动化运行记录跨角色回看永远找不到会话）；此处匹配
+ * `_<sessionId>.jsonl` 结尾，同时兼容裸 `<sessionId>.jsonl`（旧文件/手工复制）。
+ * `_` 锚点让「id 是另一个 id 的后缀」不会误命中；大小写不敏感（Windows 文件名
+ * 不区分大小写，sessionId 本身是小写 hex）。
+ */
+export function sessionFileMatchesId(fileName: string, sessionId: string): boolean {
+  if (!sessionId) return false;
+  const name = fileName.toLowerCase();
+  const id = sessionId.toLowerCase();
+  return name === `${id}.jsonl` || name.endsWith(`_${id}.jsonl`);
+}
+
 export function resolveNewSessionDefaults<TModel>(hasExistingMessages: boolean, agentModel: TModel | undefined, globalModel: TModel | undefined, agentThinking: ThinkingLevel, globalThinking: ThinkingLevel): { model: TModel | undefined; thinkingLevel: ThinkingLevel | undefined } {
   if (hasExistingMessages) return { model: undefined, thinkingLevel: undefined };
   return { model: agentModel ?? globalModel, thinkingLevel: agentThinking ?? globalThinking };
