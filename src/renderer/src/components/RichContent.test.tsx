@@ -17,6 +17,20 @@ describe("RichContent dynamic bubbles", () => {
     expect(markup).not.toContain('class="artifact-card"');
   });
 
+  it("carries the sanitized script source on data-script-source for the bubble runtime", () => {
+    // Regression: the sanitizer never wrote dataScriptSource onto the script
+    // node, so DynamicHtmlBubble's dataset.scriptSource read came back empty
+    // and bubble scripts never executed despite passing the deny-regex gate.
+    const markup = renderToStaticMarkup(
+      <RichContent
+        artifactPrefix="message-script-src"
+        onOpenArtifact={() => undefined}
+        children={'<assistant_html><div><script>container.querySelector("canvas");</script></div></assistant_html>'}
+      />
+    );
+    expect(markup).toContain('data-script-source="container.querySelector(&quot;canvas&quot;);"');
+  });
+
   it("keeps file URLs on images inside assistant HTML bubbles", () => {
     const markup = renderToStaticMarkup(
       <RichContent
@@ -97,5 +111,75 @@ describe("RichContent dynamic bubbles", () => {
     );
     expect(markup).toContain("<circle");
     expect(markup).not.toContain("onclick");
+  });
+
+  it("keeps element ids unprefixed so CSS #id selectors and url(#id) references resolve", () => {
+    // Regression: hast-util-sanitize's default clobber protection rewrites
+    // id="badge" to id="user-content-badge", which silently broke every CSS
+    // #id selector and SVG url(#id) reference inside bubbles.
+    const markup = renderToStaticMarkup(
+      <RichContent
+        artifactPrefix="message-id-keep"
+        onOpenArtifact={() => undefined}
+        children={'<assistant_html><div><span id="badge">ok</span></div></assistant_html>'}
+      />
+    );
+    expect(markup).toContain('id="badge"');
+    expect(markup).not.toContain("user-content-");
+  });
+
+  it("renders data-send buttons, canvas and structural tags as real elements", () => {
+    // Regression: none of these tags were in the sanitize schema's tagNames,
+    // so the tags were stripped and only their text content survived —
+    // data-send quick replies rendered as plain text and Canvas animations
+    // vanished entirely.
+    const markup = renderToStaticMarkup(
+      <RichContent
+        artifactPrefix="message-structure"
+        onOpenArtifact={() => undefined}
+        children={'<assistant_html><div><header class="card-head">标题</header><canvas id="stage" width="120" height="60"></canvas><button data-send="继续">下一步</button><figure><figcaption>说明</figcaption></figure></div></assistant_html>'}
+      />
+    );
+    expect(markup).toContain('<header class="card-head"');
+    expect(markup).toContain('<canvas id="stage" width="120" height="60"');
+    expect(markup).toContain('class="html-action-button"');
+    expect(markup).toContain('data-send="继续"');
+    expect(markup).toContain("<figure>");
+    expect(markup).toContain("<figcaption>");
+  });
+
+  it("preserves SVG filter, mask and clip-path definitions with url() references", () => {
+    const markup = renderToStaticMarkup(
+      <RichContent
+        artifactPrefix="message-svg-fx"
+        onOpenArtifact={() => undefined}
+        children={'<assistant_html><svg viewBox="0 0 100 100"><defs><filter id="blurFx"><feGaussianBlur stdDeviation="3"></feGaussianBlur></filter><clipPath id="clipRound"><circle cx="50" cy="50" r="40"></circle></clipPath></defs><rect x="10" y="10" width="80" height="80" filter="url(#blurFx)" clip-path="url(#clipRound)"></rect></svg></assistant_html>'}
+      />
+    );
+    expect(markup).toContain("<filter");
+    expect(markup).toContain("feGaussianBlur");
+    expect(markup).toContain('stdDeviation="3"');
+    expect(markup).toContain("<clipPath");
+    expect(markup).toContain('filter="url(#blurFx)"');
+    expect(markup).toContain('clip-path="url(#clipRound)"');
+  });
+
+  it("compresses blank lines while streaming an unclosed bubble", () => {
+    // dsh-raw-html v6.38 lesson: a blank line inside the card ends the
+    // CommonMark HTML block, so indented follow-up lines would be parsed as
+    // a code block (structure tearing / visible source). Compression keeps
+    // the whole partial card inside a single HTML block.
+    const markup = renderToStaticMarkup(
+      <RichContent
+        streaming
+        artifactPrefix="message-stream-blank"
+        onOpenArtifact={() => undefined}
+        children={'<assistant_html><div>\n\n    <span class="s1">alpha</span>\n    <span class="s2">beta</span>\n</div>'}
+      />
+    );
+    expect(markup).not.toContain("<pre>");
+    expect(markup).not.toContain("<code>");
+    expect(markup).toContain('<span class="s1"');
+    expect(markup).toContain("beta");
   });
 });

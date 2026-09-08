@@ -424,12 +424,64 @@ function ArtifactCard({ artifact, onOpenArtifact }: { artifact: Artifact; onOpen
   );
 }
 
+// SVG 呈现属性按家族分组共享，避免逐标签枚举 drifted out of sync。属性名用
+// hast camelCase 形式（fillRule 而非 fill-rule）。
+const svgPaintAttributes = ["fill", "stroke", "strokeWidth", "strokeLinecap", "strokeLinejoin", "strokeDasharray", "strokeDashoffset", "strokeOpacity", "fillOpacity", "fillRule", "clipRule", "opacity", "paintOrder", "colorInterpolation", "shapeRendering", "textRendering", "imageRendering", "isolation", "mixBlendMode", "vectorEffect", "markerStart", "markerMid", "markerEnd", "filter", "mask", "clipPath"];
+const svgGeometryAttributes = ["x", "y", "dx", "dy", "x1", "y1", "x2", "y2", "cx", "cy", "r", "rx", "ry", "width", "height", "points", "d", "transform", "textLength", "lengthAdjust", "pathLength", "rotate", "startOffset", "method", "spacing", "side", "markerWidth", "markerHeight", "markerUnits", "orient", "refX", "refY", "viewBox", "preserveAspectRatio", "patternUnits", "patternContentUnits", "patternTransform", "gradientUnits", "gradientTransform", "spreadMethod", "offset", "clipPathUnits", "filterUnits", "primitiveUnits"];
+const svgFontAttributes = ["fontFamily", "fontSize", "fontWeight", "fontStyle", "textAnchor", "dominantBaseline", "alignmentBaseline", "baselineShift", "letterSpacing", "wordSpacing", "textDecoration", "writingMode", "unicodeBidi", "direction"];
+const svgFilterAttributes = ["in", "in2", "result", "stdDeviation", "values", "type", "tableValues", "slope", "intercept", "amplitude", "exponent", "k1", "k2", "k3", "k4", "operator", "mode", "scale", "xChannelSelector", "yChannelSelector", "baseFrequency", "numOctaves", "seed", "stitchTiles", "edgeMode", "order", "divisor", "bias", "targetX", "targetY", "preserveAlpha", "azimuth", "elevation", "pointsAtX", "pointsAtY", "pointsAtZ", "specularExponent", "specularConstant", "limitingConeAngle", "surfaceScale", "diffuseConstant", "kernelUnitLength", "floodColor", "floodOpacity", "lightingColor", "colorInterpolationFilters", "href", "xLinkHref"];
+const svgAnimateAttributes = ["attributeName", "attributeType", "begin", "dur", "end", "repeatCount", "from", "to", "by", "calcMode", "additive", "accumulate", "restart", "rotate", "path", "keyPoints", "keyTimes", "keySplines"];
+const svgPaintAndGeometry = [...svgPaintAttributes, ...svgGeometryAttributes];
+const filterPrimitiveTags = ["feBlend", "feColorMatrix", "feComponentTransfer", "feComposite", "feDiffuseLighting", "feDisplacementMap", "feDistantLight", "feDropShadow", "feFlood", "feFuncA", "feFuncB", "feFuncG", "feFuncR", "feGaussianBlur", "feImage", "feMerge", "feMergeNode", "feMorphology", "feOffset", "fePointLight", "feSpecularLighting", "feSpotLight", "feTile", "feTurbulence"];
+const animateTags = ["animate", "animateTransform", "animateMotion", "set"];
+
 const richSanitizeSchema: Schema = {
   ...defaultSchema,
+  // 默认 clobber 防护会把 id 改写成 user-content-*，打断气泡 CSS 的 #id
+  // 选择器与 SVG url(#id) 渐变/滤镜/clipPath 引用；id 保留原值（渲染器是
+  // 我们自己的 React 代码，不存在依赖 window 命名元素的老脚本可被打乱）。
+  clobber: ["ariaDescribedBy", "ariaLabelledBy", "name"],
+  // 默认 schema 强制所有 input 变 disabled checkbox（GFM 任务列表语境）；
+  // 气泡里的表单控件需要保留原 type。
+  required: {},
   tagNames: [
     ...(defaultSchema.tagNames ?? []),
     "style",
     "script",
+    // 结构/交互标签：默认 schema 全部缺失，标签会被剥掉只留内容——
+    // data-send 按钮、Canvas 动画、header/footer 结构样式全靠它们。
+    "button",
+    "canvas",
+    "video",
+    "audio",
+    "figure",
+    "figcaption",
+    "header",
+    "footer",
+    "nav",
+    "main",
+    "aside",
+    "article",
+    "address",
+    "form",
+    "fieldset",
+    "label",
+    "select",
+    "option",
+    "optgroup",
+    "textarea",
+    "progress",
+    "meter",
+    "dialog",
+    "output",
+    "mark",
+    "time",
+    "small",
+    "abbr",
+    "dfn",
+    "wbr",
+    // SVG 家族：形状标签原有，这里补齐引用（use）、文本、渐变/滤镜/裁剪/
+    // 蒙版容器、动画与图样，复杂 SVG 卡片才不至于被静默剥碎。
     "svg",
     "g",
     "path",
@@ -442,7 +494,22 @@ const richSanitizeSchema: Schema = {
     "defs",
     "linearGradient",
     "radialGradient",
-    "stop"
+    "stop",
+    "filter",
+    ...filterPrimitiveTags,
+    "mask",
+    "clipPath",
+    "use",
+    "symbol",
+    "text",
+    "tspan",
+    "textPath",
+    "marker",
+    "pattern",
+    "image",
+    ...animateTags,
+    "title",
+    "desc"
   ],
   protocols: {
     ...defaultSchema.protocols,
@@ -450,26 +517,55 @@ const richSanitizeSchema: Schema = {
   },
   attributes: {
     ...defaultSchema.attributes,
-    script: ["type", "data-script-source"],
-    svg: ["viewBox", "width", "height", "xmlns", "fill", "stroke", "strokeWidth", "transform", "preserveAspectRatio", "role", "ariaLabel"],
-    g: ["fill", "stroke", "strokeWidth", "transform", "opacity"],
-    path: ["d", "fill", "stroke", "strokeWidth", "strokeLinecap", "strokeLinejoin", "transform", "opacity"],
-    circle: ["cx", "cy", "r", "fill", "stroke", "strokeWidth", "transform", "opacity"],
-    ellipse: ["cx", "cy", "rx", "ry", "fill", "stroke", "strokeWidth", "transform", "opacity"],
-    rect: ["x", "y", "width", "height", "rx", "ry", "fill", "stroke", "strokeWidth", "transform", "opacity"],
-    line: ["x1", "y1", "x2", "y2", "fill", "stroke", "strokeWidth", "transform", "opacity"],
-    polyline: ["points", "fill", "stroke", "strokeWidth", "strokeLinecap", "strokeLinejoin", "transform", "opacity"],
-    polygon: ["points", "fill", "stroke", "strokeWidth", "strokeLinecap", "strokeLinejoin", "transform", "opacity"],
-    linearGradient: ["id", "x1", "y1", "x2", "y2", "gradientUnits", "gradientTransform", "spreadMethod"],
-    radialGradient: ["id", "cx", "cy", "r", "fx", "fy", "fr", "gradientUnits", "gradientTransform", "spreadMethod"],
+    script: ["type", "dataScriptSource"],
+    svg: ["viewBox", "width", "height", "xmlns", "role", "ariaLabel", "preserveAspectRatio", "clipPath", "mask", "filter", ...svgPaintAttributes, ...svgGeometryAttributes.filter((name) => name !== "points" && name !== "d"), ...svgFontAttributes],
+    g: svgPaintAndGeometry,
+    path: [...svgPaintAndGeometry, "d"],
+    circle: [...svgPaintAndGeometry, "cx", "cy", "r"],
+    ellipse: [...svgPaintAndGeometry, "cx", "cy", "rx", "ry"],
+    rect: [...svgPaintAndGeometry, "x", "y", "width", "height", "rx", "ry"],
+    line: [...svgPaintAndGeometry, "x1", "y1", "x2", "y2"],
+    polyline: svgPaintAndGeometry,
+    polygon: svgPaintAndGeometry,
+    defs: ["id"],
+    linearGradient: ["id", "x1", "y1", "x2", "y2", "gradientUnits", "gradientTransform", "spreadMethod", "href", "xLinkHref"],
+    radialGradient: ["id", "cx", "cy", "r", "fx", "fy", "fr", "gradientUnits", "gradientTransform", "spreadMethod", "href", "xLinkHref"],
     stop: ["offset", "stopColor", "stopOpacity"],
+    filter: ["id", "x", "y", "width", "height", "filterUnits", "primitiveUnits", "colorInterpolationFilters"],
+    mask: ["id", "x", "y", "width", "height", "maskUnits", "maskContentUnits"],
+    clipPath: ["id", "clipPathUnits"],
+    marker: ["id", ...svgPaintAndGeometry.filter((name) => name !== "width" && name !== "height"), "viewBox", "preserveAspectRatio"],
+    pattern: ["id", ...svgGeometryAttributes, "href", "xLinkHref"],
+    use: ["id", "href", "xLinkHref", "x", "y", "width", "height", "transform", ...svgPaintAttributes],
+    symbol: ["id", "viewBox", "preserveAspectRatio", "x", "y", "width", "height"],
+    image: ["id", "href", "xLinkHref", "x", "y", "width", "height", "preserveAspectRatio", "crossOrigin", "decoding"],
+    text: [...svgPaintAndGeometry, ...svgFontAttributes, "content"],
+    tspan: [...svgPaintAndGeometry, ...svgFontAttributes],
+    textPath: [...svgPaintAndGeometry, ...svgFontAttributes, "startOffset", "method", "spacing", "side", "href", "xLinkHref"],
+    title: ["id"],
+    desc: ["id"],
+    video: ["controls", "autoplay", "muted", "loop", "playsInline", "preload", "poster", "width", "height"],
+    audio: ["controls", "autoplay", "muted", "loop", "preload"],
+    canvas: ["width", "height"],
+    button: ["type", "disabled", "name", "value", "form", "formAction"],
+    progress: ["max", "value"],
+    meter: ["min", "max", "value", "low", "high", "optimum"],
+    select: ["multiple", "size", "name", "disabled", "required"],
+    option: ["value", "selected", "disabled", "label"],
+    optgroup: ["label", "disabled"],
+    textarea: ["rows", "cols", "maxLength", "placeholder", "readOnly", "required", "name", "disabled"],
+    dialog: ["open"],
+    ...Object.fromEntries(filterPrimitiveTags.map((tag) => [tag, [...svgFilterAttributes, ...svgPaintAttributes, ...svgGeometryAttributes]])),
+    ...Object.fromEntries(animateTags.map((tag) => [tag, [...svgAnimateAttributes, ...svgPaintAttributes, ...svgGeometryAttributes, "href", "xLinkHref"]])),
     "*": [
       ...(defaultSchema.attributes?.["*"] ?? []),
       ["className", /^[a-zA-Z0-9_:/.[\]%-]{1,96}$/u],
       ["style", /^[^<>]{0,5000}$/u],
-      ["data-send", /^[^<>]{0,500}$/u],
-      ["data-prompt", /^[^<>]{0,500}$/u],
-      ["data-message", /^[^<>]{0,500}$/u]
+      // hast 把 data-* 属性存为 camelCase 属性名（data-send → dataSend），
+      // 白名单必须用 camel key 才放行；toJsxRuntime 传给组件时转回 dashed。
+      ["dataSend", /^[^<>]{0,500}$/u],
+      ["dataPrompt", /^[^<>]{0,500}$/u],
+      ["dataMessage", /^[^<>]{0,500}$/u]
     ]
   }
 };
@@ -725,6 +821,14 @@ const MarkdownSurface = memo(function MarkdownSurface({ content, htmlBubble, art
   );
 });
 
+// dsh-raw-html v6.38 教训：CommonMark 的 HTML 块遇到空行即结束——卡片内部
+// 排版空行会把整卡拆成多个节点（结构撕裂、后半显示源码）。流式预览先压缩
+// 空行保住单一 HTML 块；闭合后由 DynamicHtmlBubble 的 fragment 管线接管，
+// 不受 CommonMark 约束。
+function compressStreamingBubbleHtml(content: string): string {
+  return content.replace(/\n[ \t]*\n+/gu, "\n");
+}
+
 function renderSegment(segment: RichContentSegment, index: number, artifactPrefix: string, streaming: boolean, onOpenArtifact: (artifact: Artifact) => void, onHtmlAction?: (text: string) => void): ReactNode {
   if (segment.type === "mermaid") return <MermaidBlock key={`mermaid-${index}`} code={segment.content} language={segment.language} />;
   if (segment.type === "artifact") {
@@ -739,7 +843,7 @@ function renderSegment(segment: RichContentSegment, index: number, artifactPrefi
     // streaming-identity fix), and would render half-parsed intermediate HTML.
     // The interactive bubble mounts once the closing tag arrives.
     if (segment.closed === false) {
-      return <MarkdownSurface key={`assistant-html-${index}`} content={segment.content} artifactPrefix={`${artifactPrefix}-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} />;
+      return <MarkdownSurface key={`assistant-html-${index}`} content={compressStreamingBubbleHtml(segment.content)} artifactPrefix={`${artifactPrefix}-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} />;
     }
     return <DynamicHtmlBubble key={`assistant-html-${index}`} content={segment.content} closed streaming={streaming} artifactPrefix={`${artifactPrefix}-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} />;
   }

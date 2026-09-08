@@ -8,6 +8,35 @@ describe("assistant HTML sanitizer", () => {
     expect(sanitizeStyleDeclarations("color: red !important;")).toBe("color: red !important");
   });
 
+  it("keeps vendor-prefixed properties used by complex cards", () => {
+    expect(sanitizeStyleDeclarations("-webkit-text-fill-color: transparent; -webkit-background-clip: text; background: linear-gradient(135deg, #667eea, #764ba2)"))
+      .toBe("-webkit-text-fill-color: transparent; -webkit-background-clip: text; background: linear-gradient(135deg, #667eea, #764ba2)");
+    expect(sanitizeStyleDeclarations("--card-accent: #ff6b6b; color: var(--card-accent);"))
+      .toBe("--card-accent: #ff6b6b; color: var(--card-accent)");
+  });
+
+  it("allows whitelisted url() references and rejects unsafe schemes", () => {
+    // SVG fragment references are the backbone of gradients/filters/clip paths.
+    expect(sanitizeStyleDeclarations("fill: url(#grad1)")).toBe("fill: url(#grad1)");
+    expect(sanitizeStyleDeclarations("clip-path: url(#clip-round)")).toBe("clip-path: url(#clip-round)");
+    expect(sanitizeStyleDeclarations("background-image: url('https://example.com/bg.png')")).toBe("background-image: url('https://example.com/bg.png')");
+    expect(sanitizeStyleDeclarations("background-image: url(data:image/png;base64,iVBORw0KGgo=)"))
+      .toBe("background-image: url(data:image/png;base64,iVBORw0KGgo=)");
+    expect(sanitizeStyleDeclarations("src: url(data:font/woff2;base64,d09GMg==) format('woff2')"))
+      .toBe("src: url(data:font/woff2;base64,d09GMg==) format('woff2')");
+    expect(sanitizeStyleDeclarations("background: url(javascript:alert(1))")).toBe("");
+    expect(sanitizeStyleDeclarations("background: url(data:text/html;base64,PHNjcmlwdD4=)")).toBe("");
+    expect(sanitizeStyleDeclarations("background: url(vbscript:evil)")).toBe("");
+  });
+
+  it("does not split declarations on semicolons inside quotes or url()", () => {
+    expect(sanitizeStyleDeclarations('content: "a;b"; color: red')).toBe('content: "a;b"; color: red');
+    // The base64 payload contains a semicolon; a naive split would shred the
+    // declaration and leak "base64,...)" as a bogus property.
+    expect(sanitizeStyleDeclarations("background: url(data:image/svg+xml;base64,PHN2Zy8+) no-repeat"))
+      .toBe("background: url(data:image/svg+xml;base64,PHN2Zy8+) no-repeat");
+  });
+
   it("removes scripts, event handlers, unsafe URLs, and unsafe classes", () => {
     const tree = {
       type: "root",

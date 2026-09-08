@@ -2,18 +2,81 @@ const blockedTags = new Set(["base", "embed", "iframe", "link", "meta", "object"
 const urlProperties = new Set(["action", "formAction", "href", "poster", "src", "xLinkHref"]);
 const blockedBubbleScriptPattern = /(?:\beval\s*\(|\bnew\s+function\b|\bfetch\s*\(|\bxmlhttprequest\b|\bwebsocket\b|\beventsource\b|\bnavigator\b|\blocation\b|\bhistory\b|\blocalstorage\b|\bsessionstorage\b|\bindexeddb\b|\bcaches\b|document\s*\.\s*write|window\s*\.\s*open|\bglobalthis\b|\bself\b|\btop\b|\bparent\b|\bownerDocument\b|\bdefaultView\b|\bconstructor\b|\bprototype\b|__proto__|\bimport\s*\(|\brequire\s*\(|\bprocess\b)/iu;
 
+// dsh-raw-html 教训：复杂卡片（渐变文字、滤镜、图表）依赖厂商前缀属性与
+// url(#id) SVG 引用，声明级白名单一刀切会把它们静默丢掉导致"样式坏了"。
+// 上限只防 DoS，按现代卡片体量放宽。
+const styleDeclarationLimit = 128;
+const styleValueLimit = 2000;
+// CSS url() 白名单：与 richUrlTransform 的 src 策略同构（https/file/相对、
+// data: 图片与字体），另放行 url(#id)——SVG 渐变/滤镜/clipPath 引用的刚需。
+// data:image/svg+xml 亦允许：CSS 图像上下文的 SVG 运行在 secure static mode，
+// 脚本与外部资源被浏览器禁用。javascript:/data:text/html 等仍被拒绝。
+const cssUrlPattern = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)"'][^)]*))?\s*\)/giu;
+const safeCssUrlPattern = /^(?:https?:|file:\/\/|data:image\/(?:png|gif|jpe?g|webp|avif|svg\+xml);|data:(?:font\/|application\/(?:x-)?font-|vnd\.ms-fontobject)|\/|\.{1,2}\/)/iu;
+
+function isSafeCssUrl(value: string): boolean {
+  const raw = value.trim();
+  if (!raw) return false;
+  if (raw.startsWith("#")) return true;
+  return safeCssUrlPattern.test(raw);
+}
+
+/** 校验一条声明里所有 url() 引用；出现任何不安全 url 返回空串丢弃整条声明。 */
+function sanitizeStyleUrls(value: string): string {
+  let unsafe = false;
+  cssUrlPattern.lastIndex = 0;
+  value.replace(cssUrlPattern, (match: string, doubleQuoted?: string, singleQuoted?: string, bare?: string): string => {
+    if (!isSafeCssUrl(String(doubleQuoted ?? singleQuoted ?? bare ?? ""))) unsafe = true;
+    return match;
+  });
+  return unsafe ? "" : value;
+}
+
+/** 引号/括号感知的声明切分：url(data:image/png;base64,..) 与 content:"a;b" 不被 `;` 撕开。 */
+function splitStyleDeclarations(styleText: string): string[] {
+  const parts: string[] = [];
+  let current = "";
+  let quote = "";
+  let depth = 0;
+  for (const character of String(styleText || "")) {
+    if (quote) {
+      current += character;
+      if (character === quote) quote = "";
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+      current += character;
+      continue;
+    }
+    if (character === "(") depth += 1;
+    else if (character === ")") depth = Math.max(0, depth - 1);
+    if (character === ";" && depth === 0) {
+      parts.push(current);
+      current = "";
+      continue;
+    }
+    current += character;
+  }
+  parts.push(current);
+  return parts;
+}
+
 export function sanitizeStyleDeclarations(styleText: string): string {
   const safeRules: string[] = [];
-  for (const part of String(styleText || "").split(";")) {
+  for (const part of splitStyleDeclarations(styleText)) {
     const separator = part.indexOf(":");
     if (separator < 1) continue;
     const property = part.slice(0, separator).trim().toLowerCase();
     const value = part.slice(separator + 1).trim();
-    if (!/^(?:--[a-z][\w-]*|[a-z][\w-]*)$/u.test(property) || /^on/iu.test(property) || !value || value.length > 500) continue;
-    if (/expression\s*\(|javascript\s*:|behavior\s*:|-moz-binding|@import|url\s*\(/iu.test(`${property}: ${value}`)) continue;
-    safeRules.push(`${property}: ${value}`);
+    // 属性名允许厂商前缀（-webkit-text-fill-color 等）与自定义属性（--x）。
+    if (!/^(?:--[a-z][\w-]*|-?[a-z][\w-]*)$/u.test(property) || /^on/iu.test(property) || !value || value.length > styleValueLimit) continue;
+    if (/expression\s*\(|javascript\s*:|behavior\s*:|-moz-binding|@import/iu.test(`${property}: ${value}`)) continue;
+    const urlSafe = sanitizeStyleUrls(value);
+    if (!urlSafe) continue;
+    safeRules.push(`${property}: ${urlSafe}`);
   }
-  return safeRules.slice(0, 50).join("; ");
+  return safeRules.slice(0, styleDeclarationLimit).join("; ");
 }
 
 function isSafeUrl(value: string, property: string): boolean {
@@ -118,49 +181,82 @@ function scopeCssSelector(selector: string, scopeSelector: string): string {
   return replacedRoots.includes(scopeSelector) ? replacedRoots : `${scopeSelector} ${replacedRoots}`;
 }
 
-function serializeScopedCssRule(rule: CSSRule, scopeSelector: string): string {
-  const styleRuleType = typeof CSSRule === "undefined" ? 1 : CSSRule.STYLE_RULE;
-  const mediaRuleType = typeof CSSRule === "undefined" ? 4 : CSSRule.MEDIA_RULE;
-  const keyframesRuleType = typeof CSSRule === "undefined" ? 7 : CSSRule.KEYFRAMES_RULE;
-  const keyframeRuleType = typeof CSSRule === "undefined" ? 9 : CSSRule.KEYFRAME_RULE;
-  const supportsRuleType = typeof CSSRule === "undefined" ? 12 : CSSRule.SUPPORTS_RULE;
-  if (rule.type === styleRuleType) {
-    const styleRule = rule as CSSStyleRule;
-    const selector = splitCssSelectors(styleRule.selectorText)
-      .map((item) => scopeCssSelector(item, scopeSelector))
-      .filter(Boolean)
-      .join(", ");
-    const declarations = sanitizeStyleDeclarations(styleRule.style.cssText);
-    return selector && declarations ? `${selector} { ${declarations} }` : "";
+/** 嵌套子规则选择器：显式 `&` 替换为 :is(<scoped 父选择器>)，隐式嵌套保持原样（相对父级）。 */
+function scopeNestedSelector(selector: string, scopedParent: string): string {
+  return splitCssSelectors(selector)
+    .map((item) => {
+      const raw = item.trim();
+      if (!raw) return "";
+      return raw.includes("&") ? raw.replaceAll("&", `:is(${scopedParent})`) : raw;
+    })
+    .filter(Boolean)
+    .join(", ");
+}
+
+interface CssRuleLike {
+  cssText: string;
+  selectorText?: string;
+  keyText?: string;
+  style?: { cssText?: string };
+  cssRules?: ArrayLike<CssRuleLike>;
+  conditionText?: string;
+  name?: string;
+}
+
+/**
+ * 规则序列化用特征检测而不是 CSSRule 数值常量：@container 等新规则的常量
+ * 在不同环境可用性不一，而 selectorText/keyText/conditionText/name 属性
+ * （或 cssText 的 at-头）在各代 Chromium 都稳定。
+ */
+function serializeScopedCssRule(rule: CssRuleLike, scopeSelector: string, scopedParent = ""): string {
+  const text = rule.cssText || "";
+  const brace = text.indexOf("{");
+  const head = (brace < 0 ? text : text.slice(0, brace)).trim();
+
+  if (head.startsWith("@font-face")) {
+    const declarations = sanitizeStyleDeclarations(rule.style?.cssText ?? "");
+    return declarations ? `@font-face { ${declarations} }` : "";
   }
-  if (rule.type === mediaRuleType || rule.type === supportsRuleType) {
-    const groupRule = rule as CSSGroupingRule;
-    const conditionText = (rule as CSSMediaRule | CSSSupportsRule).conditionText;
-    const nested = Array.from(groupRule.cssRules)
-      .map((child) => serializeScopedCssRule(child, scopeSelector))
-      .filter(Boolean)
-      .join("\n");
-    if (!nested) return "";
-    const name = rule.type === mediaRuleType ? "media" : "supports";
-    return `@${name} ${conditionText} {\n${nested}\n}`;
-  }
-  if (rule.type === keyframesRuleType) {
-    const keyframesRule = rule as CSSKeyframesRule;
-    const keyframesName = keyframesRule.name;
-    if (!keyframesName) return "";
-    const nested = Array.from(keyframesRule.cssRules)
+  if (head.startsWith("@keyframes") && rule.cssRules && typeof rule.name === "string") {
+    const nested = Array.from(rule.cssRules)
       .map((child) => {
-        if (child.type !== keyframeRuleType) return "";
-        const keyframeRule = child as CSSKeyframeRule;
-        const key = String(keyframeRule.keyText || "").trim();
+        const key = String(child.keyText ?? "").trim();
         if (!key) return "";
-        const declarations = sanitizeStyleDeclarations(keyframeRule.style.cssText);
+        const declarations = sanitizeStyleDeclarations(child.style?.cssText ?? "");
         return declarations ? `${key} { ${declarations} }` : "";
       })
       .filter(Boolean)
       .join("\n");
     if (!nested) return "";
-    return `@keyframes ${keyframesName} {\n${nested}\n}`;
+    return `@keyframes ${rule.name} {\n${nested}\n}`;
+  }
+  // 分组规则（@media / @supports / @container）：条件保留，子规则递归作用域化。
+  if ((rule.conditionText !== undefined || head.startsWith("@container")) && rule.cssRules) {
+    const condition = head.startsWith("@container") ? head.replace(/^@container\s*/iu, "").trim() : String(rule.conditionText ?? "").trim();
+    const keyword = head.startsWith("@container") ? "container" : head.startsWith("@supports") ? "supports" : "media";
+    if (!condition) return "";
+    const nested = Array.from(rule.cssRules)
+      .map((child) => serializeScopedCssRule(child, scopeSelector, scopedParent))
+      .filter(Boolean)
+      .join("\n");
+    if (!nested) return "";
+    return `@${keyword} ${condition} {\n${nested}\n}`;
+  }
+  if (typeof rule.selectorText === "string" && rule.style) {
+    const selectorList = splitCssSelectors(rule.selectorText)
+      .map((item) => (scopedParent ? scopeNestedSelector(item, scopedParent) : scopeCssSelector(item, scopeSelector)))
+      .filter(Boolean)
+      .join(", ");
+    const declarations = sanitizeStyleDeclarations(rule.style.cssText ?? "");
+    // CSS 嵌套：style rule 的 cssRules 非空时输出嵌套块，保持浏览器嵌套语义。
+    const nested = rule.cssRules && rule.cssRules.length > 0
+      ? Array.from(rule.cssRules)
+          .map((child) => serializeScopedCssRule(child, scopeSelector, selectorList || scopedParent))
+          .filter(Boolean)
+          .join("\n")
+      : "";
+    if (!selectorList || (!declarations && !nested)) return "";
+    return nested ? `${selectorList} { ${declarations ? `${declarations}; ` : ""}\n${nested}\n}` : (declarations ? `${selectorList} { ${declarations} }` : "");
   }
   return "";
 }
@@ -171,7 +267,7 @@ export function sanitizeStyleTagCss(styleText: string, scopeSelector: string): s
   const scope = scopeSelector.trim();
   if (!raw || !scope || typeof document === "undefined") return "";
   const sourceWithoutImports = raw.replace(/@import\s+[^;{}]+;?/giu, "");
-  if (/expression\s*\(|javascript\s*:|behavior\s*:|-moz-binding|url\s*\(/iu.test(sourceWithoutImports)) return "";
+  if (/expression\s*\(|javascript\s*:|behavior\s*:|-moz-binding/iu.test(sourceWithoutImports)) return "";
 
   const openCount = (sourceWithoutImports.match(/\{/gu) ?? []).length;
   const closeCount = (sourceWithoutImports.match(/\}/gu) ?? []).length;
@@ -209,7 +305,10 @@ export function sanitizeRichHtmlTree(options: RichHtmlSanitizeOptions = {}): (tr
       if (node.type === "element" && tagName === "script") {
         const safeScript = allowBubbleScripts ? sanitizeBubbleScript(textContent(node.children)) : "";
         if (!safeScript) return false;
-        node.properties = { type: "application/x-pidesktop-bubble-script" };
+        // 源码放 dataScriptSource（hast camelCase；toJsxRuntime 序列化为
+        // data-script-source 供 DynamicHtmlBubble 的 dataset.scriptSource 读取），
+        // children 保留源码文本仅作 DOM 内可见内容——inert type 保证不执行。
+        node.properties = { type: "application/x-pidesktop-bubble-script", dataScriptSource: safeScript };
         node.children = [{ type: "text", value: safeScript }];
         return true;
       }
