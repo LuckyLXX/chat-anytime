@@ -47,6 +47,17 @@ const DISABLED_TEXT = "设计模式已在设置中停用（settings.design.enabl
 
 const CANVAS_HINT = "提示：可在界面顶部「设计」按钮打开设计画布查看与手动微调。";
 
+/** 首次 design_create/design_update 成功回执附带一次的用法要点。教学内容不进
+ *  description（tools 数组每请求常驻、破坏前缀缓存即全量重算），落回执尾部
+ *  只花一次尾部 token——与 todo/memory 的尾部注入同一纪律。 */
+const FIRST_USE_GUIDANCE = [
+  "用法要点（本会话仅提示一次）：",
+  "- 整套原型：一屏 = 一个顶层命名 frame，并排放置（间隔 ≥80px）；画布放不下先发 {op:'resize'} 扩画布。一次 ≤64 条 ops，先完成一屏/一个区域，成功后再继续下一屏。",
+  "- 每个节点都起 name；自起语义化 id 便于后续定位（缺省自动生成并在回执给出映射）。",
+  "- 半透明直接写进 fill/stroke（rgba/hex8）；不要用元素级 opacity 压淡有子内容的容器——子内容会一起变淡，质量门会拦截。",
+  "- 回执带「修复 ops」时，把它原样作为下一条 design_update 的 ops 传入，先修复再继续新内容。"
+].join("\n");
+
 function checkEnabled(deps: DesignToolDeps): void {
   if (!deps.enabled()) throw new Error(DISABLED_TEXT);
 }
@@ -78,8 +89,11 @@ const designNodeSchema = Type.Object({
   fill: Type.Optional(Type.String({ description: "背景色（CSS color）" })),
   stroke: Type.Optional(Type.String()), strokeWidth: Type.Optional(Type.Number()), radius: Type.Optional(Type.Number()),
   opacity: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
+  visible: Type.Optional(Type.Boolean({ description: "false=隐藏（画布与导出都不渲染）" })),
+  locked: Type.Optional(Type.Boolean({ description: "true=画布上不可拖动/删除；AI 与检查器仍可改" })),
+  shadow: Type.Optional(Type.String({ description: "CSS box-shadow 值" })),
   text: Type.Optional(Type.String({ description: "text 节点内容" })),
-  fontSize: Type.Optional(Type.Number()), fontWeight: Type.Optional(Type.Number()), color: Type.Optional(Type.String({ description: "text 颜色" })),
+  fontSize: Type.Optional(Type.Number()), fontWeight: Type.Optional(Type.Number()), color: Type.Optional(Type.String({ description: "text 颜色" })), lineHeight: Type.Optional(Type.Number({ description: "text 行高（字号倍数）" })),
   align: Type.Optional(Type.Union([Type.Literal("left"), Type.Literal("center"), Type.Literal("right")])),
   src: Type.Optional(Type.String({ description: "image：http(s)/data URL" })),
   layout: Type.Optional(Type.Object({}, { additionalProperties: true, description: "frame auto-layout: {direction:'row'|'column', gap?, padding?, justify?, align?}；声明后子节点按 flex 排布（x/y 忽略）" })),
@@ -108,6 +122,13 @@ function formatDocSummary(doc: DesignDoc): string {
 
 /** Build the design_* customTools (one set per session record). */
 export function buildDesignTools(deps: DesignToolDeps): ToolDefinition[] {
+  // 教学只在首个 create/update 成功回执出现一次（restore 后的会话重建会再提示一次，可接受）。
+  let guidanceShown = false;
+  const guidanceOnce = () => {
+    if (guidanceShown) return "";
+    guidanceShown = true;
+    return `\n${FIRST_USE_GUIDANCE}`;
+  };
   return [
     defineTool({
       name: "design_list",
@@ -132,7 +153,7 @@ export function buildDesignTools(deps: DesignToolDeps): ToolDefinition[] {
     defineTool({
       name: "design_create",
       label: "新建设计文档",
-      description: "新建设计文档并绑定为当前文档（同名文档已存在时直接打开它）。随后用 design_update 的 create op 添加节点搭建页面；每个节点都起 name。整套原型（多屏幕）时：一个屏幕 = 一个顶层命名 frame，屏幕并排放置、间隔 ≥80px；画布放不下先用 {op:'resize'} 扩画布。",
+      description: "新建设计文档并绑定为当前文档（同名已存在则直接打开），随后用 design_update 添加节点搭建页面。",
       promptSnippet: "design_create: 新建并绑定设计文档",
       parameters: Type.Object({
         name: Type.String({ description: "文档名（同时是文件名，如「登录页」）" }),
@@ -156,7 +177,7 @@ export function buildDesignTools(deps: DesignToolDeps): ToolDefinition[] {
         const doc = createDesignDoc(name, width, height);
         const fileName = deps.persistDoc(doc, undefined);
         deps.bindDoc(doc, fileName);
-        return { content: [{ type: "text" as const, text: `已创建并打开「${name}」（${doc.canvas.width}×${doc.canvas.height}，id ${doc.id}）。下一步：用 design_update 搭建第一个屏幕（一屏 = 一个顶层命名 frame），成功后继续下一屏，无需先复述计划。${CANVAS_HINT}` }], details: { docId: doc.id, name, existed: false } };
+        return { content: [{ type: "text" as const, text: `已创建并打开「${name}」（${doc.canvas.width}×${doc.canvas.height}，id ${doc.id}）。下一步：用 design_update 搭建第一个屏幕。${guidanceOnce()}${CANVAS_HINT}` }], details: { docId: doc.id, name, existed: false } };
       }
     }),
     defineTool({
@@ -210,16 +231,7 @@ export function buildDesignTools(deps: DesignToolDeps): ToolDefinition[] {
     defineTool({
       name: "design_update",
       label: "更新设计文档",
-      description: [
-        "对当前设计文档批量应用结构化操作（原子：任一失败整批拒绝，文档不变）。坐标系相对父节点；frame 声明 layout 后子节点按 flex 排布。",
-        "ops 形态：{op:'create', parentId?, index?, node} 新建（parentId 缺省=根）；{op:'update', id, patch} 改属性（patch 不允许改 id/type/children，未知字段整批拒绝）；{op:'delete', id} 删除子树；{op:'move', id, parentId?, index?, dx?, dy?} 换父/排序（不能移入自身子树；dx/dy 对移动后的子树整体平移）；{op:'resize', width?, height?, background?} 调画布尺寸；{op:'replace', nodes} 整树替换（慎用）。",
-        "节点字段：type(frame/rect/text/image)、name（每个节点都起）、x/y/w/h、fill/stroke/strokeWidth/radius/opacity/shadow、visible/locked（locked=用户在画布上不可拖动/删除，AI 仍可改）、text 节点加 text/fontSize/fontWeight/color/align、image 加 src(http/data)、frame 加 layout({direction:'row'|'column',gap,padding,justify,align}) 与 children。未知字段（如自造的 props.*）整批拒绝。",
-        "半透明直接写进 fill/stroke（rgba/hex8，如 'rgba(18,24,48,0.62)'）；带子内容的容器不要用元素级 opacity 做半透明——它会把子内容一起压淡，质量门按透明度链复核文字对比度。",
-        "工作节奏：一次调用 ≤64 条 ops，先搭第一个屏幕（一屏 = 一个顶层命名 frame，屏幕并排间隔 ≥80px），成功后再继续下一屏；内容会超出画布时先发 {op:'resize'} 扩画布。",
-        "回执带「修复 ops」时，把它们作为下一条 design_update 的 ops 参数原样传入（先修复再继续新内容）。",
-        "工具成功返回后直接进行下一步操作，不要先输出叙述性文字。",
-        "建议：自起 id 便于后续定位，缺省自动生成并在回执给出映射。"
-      ].join("\n"),
+      description: "对当前设计文档批量应用结构化操作：原子（任一 op 失败整批拒绝、文档不变），坐标相对父节点，frame 声明 layout 后子节点按 flex 排布（x/y 忽略）。op 与节点字段语义见参数 schema；回执带质量检查与可直接套用的修复 ops。",
       promptSnippet: "design_update: 批量应用设计 ops",
       parameters: Type.Object({
         ops: Type.Array(designOpSchema, { description: "按顺序应用的批量操作" })
@@ -261,7 +273,7 @@ export function buildDesignTools(deps: DesignToolDeps): ToolDefinition[] {
           : "";
         const nextText = quality.repairTargets.length > 0 ? "先套用上述修复 ops，再继续新内容" : "继续搭建其余屏幕/区域";
         return {
-          content: [{ type: "text" as const, text: `已应用 ${ops.length} 项操作到「${next.name}」（revision ${next.revision}）。${mapText}${qualityText}${repairText}\n下一步：${nextText}，无需向用户转述本回执。${CANVAS_HINT}` }],
+          content: [{ type: "text" as const, text: `已应用 ${ops.length} 项操作到「${next.name}」（revision ${next.revision}）。${mapText}${qualityText}${repairText}\n下一步：${nextText}，无需向用户转述本回执。${guidanceOnce()}${CANVAS_HINT}` }],
           details: { applied: ops.length, revision: next.revision, fileName, ...(idMap.length > 0 ? { newIds: idMap } : {}), ...(quality.diagnostics.length > 0 ? { quality: { diagnostics: quality.diagnostics, repairCount: quality.repairTargets.length, suggestCanvas: quality.suggestCanvas } } : {}) }
         };
       }
@@ -269,7 +281,7 @@ export function buildDesignTools(deps: DesignToolDeps): ToolDefinition[] {
     defineTool({
       name: "design_export",
       label: "导出设计 HTML",
-      description: "把当前设计文档导出为内联样式的 HTML 单文件（HTML+CSS，可直接在浏览器打开）。path 缺省写到 designs/exports/<文档名>.html。回执自动附带该文件的渲染缩略图（多模态模型直接查看，文本模型拿工作区路径喂 recognize_images），一般无需再走浏览器截图验证。",
+      description: "把当前设计文档导出为内联样式 HTML 单文件。path 缺省写 designs/exports/<文档名>.html。回执自动附渲染缩略图：多模态模型直接查看，文本模型把回执里的路径交给 recognize_images——无需再走浏览器截图验证。",
       promptSnippet: "design_export: 导出 HTML 单文件",
       parameters: Type.Object({
         path: Type.Optional(Type.String({ description: "工作区相对路径（缺省 designs/exports/<名称>.html）" }))

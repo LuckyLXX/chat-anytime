@@ -317,12 +317,9 @@ export function buildBrowserTools(deps: BrowserToolDeps): ToolDefinition[] {
       name: "browser_eval",
       label: "浏览器执行脚本",
       description: [
-        "在内置浏览器当前页面执行 JavaScript 表达式并返回结果（支持 Promise）。",
-        "mode=read：只读表达式（读取 DOM、抓取数据等），直接执行、无需授权；由 V8 只读检测强制保证。",
-        "mode=write：可能修改页面的表达式（点击、修改内容、提交等），会请求用户授权。",
-        "注意：V8 只读检测不认识 DOM 方法调用，querySelectorAll、getComputedStyle、getBoundingClientRect 等纯读调用也会被拦截——收到「副作用检测拦截」错误时，确认表达式只读后直接改用 mode=write 重试即可。",
-        "数据抓取优先用 browser_snapshot / browser_get；本工具用于快照覆盖不到的复杂提取（如 canvas、复杂 JSON 数据、SPA 动态内容）。",
-        "表达式在页面上下文执行，返回值会序列化为文本（上限约 8000 字符），请让表达式返回紧凑的 JSON 字符串。"
+        "在内置浏览器当前页面执行 JavaScript 表达式并返回结果（支持 Promise；返回值序列化为文本、上限约 8000 字符，请返回紧凑 JSON）。",
+        "mode=read 只读直接执行；mode=write 可能修改页面（需用户授权）。",
+        "数据抓取优先 browser_snapshot / browser_get；本工具用于快照覆盖不到的复杂提取（canvas、复杂 JSON 数据、SPA 动态内容）。"
       ].join(""),
       promptSnippet: "browser_eval: 在页面执行 JavaScript（write 模式需授权）",
       parameters: Type.Object({

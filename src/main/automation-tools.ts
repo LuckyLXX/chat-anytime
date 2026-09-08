@@ -73,10 +73,8 @@ export function buildAutomationTools(ctx: AutomationToolContext): ToolDefinition
       name: "automation_create",
       label: "创建定时任务",
       description: [
-        "创建一条自动化定时任务：到点（cron）后让 Agent 用给定提示词在后台跑一次。",
-        "cron 为 5 字段（分 时 日 月 周），如 \"0 9 * * 1-5\" = 工作日每天 09:00、\"0 18 * * *\" = 每天 18:00。",
-        "model 可选（不指定则用该 Agent 默认模型）；accessMode 建议「完全访问」（full），否则无人值守时可能因权限确认而挂起。",
-        "任务创建后即按 cron 自动调度；如需立即验证可用 automation_run。"
+        "创建定时任务：到点（cron，5 字段：分 时 日 月 周，如 \"0 9 * * 1-5\" = 工作日每天 09:00）后让 Agent 用给定提示词在后台跑一次。",
+        "accessMode 建议 full，无人值守时权限确认会挂起；model 缺省用该 Agent 默认模型。创建后即自动调度，需要立即验证用 automation_run。"
       ].join(""),
       promptSnippet: "automation_create: 创建定时任务",
       parameters: Type.Object({
