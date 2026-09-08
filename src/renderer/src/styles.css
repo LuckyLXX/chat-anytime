@@ -1263,6 +1263,17 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 .model-selection-heading { display: flex; justify-content: space-between; gap: 12px; padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 13px; font-weight: 650; }
 .model-selection-heading small { color: var(--text-muted); font-weight: 400; }
 .model-selection-heading .model-refresh-button { min-height: 28px; margin-left: auto; padding: 0 10px; font-size: 11px; white-space: nowrap; }
+/* 标题右侧操作组：拉取模型 + 手动添加（组内按钮不再各自 auto 对齐） */
+.model-selection-heading .model-selection-actions { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+.model-selection-actions .model-refresh-button { margin-left: 0; }
+.model-selection-heading .model-add-button { min-height: 28px; padding: 0 10px; font-size: 11px; white-space: nowrap; }
+.model-selection-heading .model-add-button[aria-expanded="true"] { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 38%, transparent); }
+/* 手动添加模型表单：ID + 显示名称 + 操作（标题下、工具栏上，空列表时也能用） */
+.model-add-form { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+.model-add-form > label { display: grid; gap: 3px; font-size: 11px; color: var(--text-muted); }
+.model-add-form input { width: 220px; }
+.model-add-form .model-add-actions { display: flex; gap: 6px; margin-left: auto; }
+.model-add-form .model-add-error { flex: 1 1 100%; margin: 0; }
 /* 模型列表工具栏：全选/全取消 + 已启用计数 + 搜索框（模型多时才渲染搜索框） */
 .model-list-toolbar { display: flex; align-items: center; gap: 12px; padding: 7px 12px; border-bottom: 1px solid var(--border); }
 .model-list-toolbar .model-select-all { margin: 0; flex: 0 0 auto; font-size: 11px; }
@@ -1290,6 +1301,10 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 .model-option span { display: grid; gap: 2px; min-width: 0; }
 .model-option strong { overflow-wrap: anywhere; }
 .model-option small { color: var(--text-muted); overflow-wrap: anywhere; }
+/* 手动添加标记：名称旁的小徽标（提示拉取列表不会移除这条模型） */
+.model-option .model-manual-badge { display: inline-block; margin-left: 6px; padding: 0 6px; border: 1px solid color-mix(in srgb, var(--accent) 38%, transparent); border-radius: 9px; background: var(--accent-soft, color-mix(in srgb, var(--accent) 12%, transparent)); color: var(--accent); font-size: 10px; font-style: normal; font-weight: 600; vertical-align: 1px; }
+.model-option .model-remove-button { flex: 0 0 auto; width: 26px; height: 26px; color: var(--text-muted); }
+.model-option .model-remove-button:hover { color: var(--danger); }
 /* 模型限额行内编辑：铅笔按钮 + 展开表单（跨满行，flex-wrap 布局） */
 .model-option .model-edit-limits { flex: 0 0 auto; width: 26px; height: 26px; }
 .model-option .model-edit-limits.active { color: var(--accent); background: var(--accent-soft, color-mix(in srgb, var(--accent) 12%, transparent)); }

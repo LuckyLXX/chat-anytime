@@ -85,6 +85,19 @@ export function setProviderModelsEnabled<T extends ModelListItem & { enabled?: b
   return models.map((model) => targetIds.has(model.id) ? { ...model, enabled } : model);
 }
 
+/**
+ * 手动添加模型（设置页「手动添加」表单提交）：追加一条 `manual: true` 的启用
+ * 条目。返回错误文案（string）而不是抛错——表单把它显示在输入框下方。
+ * 模型 ID 必须非空且不与现有条目重复；显示名称留空回退为模型 ID。
+ */
+export function addManualProviderModel(models: ProviderModelSettings[], idInput: string, nameInput: string): ProviderModelSettings[] | string {
+  const id = idInput.trim();
+  if (!id) return "请填写模型 ID（服务商文档里的模型标识，如 gpt-4o-mini）";
+  if (models.some((model) => model.id === id)) return `模型 ${id} 已在列表中`;
+  const name = nameInput.trim() || id;
+  return [...models, { id, name, manual: true, enabled: true }];
+}
+
 /** providerFormBlocker 的输入：设置页「保存设置」所需的最小表单状态。 */
 export interface ProviderFormState {
   /** 本次填了密钥，或服务商已有保存的密钥（留空即沿用）。 */

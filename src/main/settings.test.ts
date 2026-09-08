@@ -193,6 +193,33 @@ describe("desktop settings migration", () => {
     ]);
   });
 
+  it("keeps manually added models through an upstream refresh", () => {
+    const merged = mergeProviderModels(
+      [
+        { id: "kept", name: "手动模型", manual: true, enabled: true },
+        { id: "gone", name: "旧拉取结果", enabled: true },
+        { id: "shared", name: "Shared", manual: true, contextWindow: 200000, enabled: false }
+      ],
+      [{ id: "shared", name: "Shared upstream" }, { id: "fresh", name: "Fresh" }]
+    );
+    expect(merged).toHaveLength(3);
+    // 上游命中的手动条目：名称跟上游，标记与本地限额修正保留。
+    expect(merged[0]).toMatchObject({ id: "shared", name: "Shared upstream", manual: true, contextWindow: 200000 });
+    // 上游没有的手动条目整条保留（拉取是合并手动条目，不是整体替换）。
+    expect(merged[2]).toMatchObject({ id: "kept", name: "手动模型", manual: true });
+    // 非手动的本地多余条目（上游已下架）仍被丢弃。
+    expect(merged.some((model) => model.id === "gone")).toBe(false);
+  });
+
+  it("normalizes the manual marker so only true survives", () => {
+    const normalized = normalizeProvider({
+      id: "p", name: "P", baseUrl: "",
+      models: [{ id: "a", name: "a", manual: true }, { id: "b", name: "b", manual: "yes" as never }]
+    });
+    expect(normalized.models[0]?.manual).toBe(true);
+    expect(normalized.models[1]).not.toHaveProperty("manual");
+  });
+
   it("keeps user-corrected token limits through an upstream refresh and normalization", () => {
     // 手动修正的限额不能被「拉取最新模型」冲掉。
     const merged = mergeProviderModels(

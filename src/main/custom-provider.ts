@@ -99,6 +99,10 @@ export function resolveCustomProviderRegistration(config: ProviderSettings): {
  * 全部模型 api 覆盖；模型级 api → 对应模型 api 覆盖（优先级最高）。未命中任何
  * 覆盖的模型保持原对象引用（幂等），无任何覆盖时返回 undefined（调用方不写覆盖层）。
  *
+ * 手动添加的模型（manual: true）不在运行时目录里——没有覆盖层注入它会话就无法
+ * 使用。这里按「拉取新模型」同款策略克隆目录首个模型的完整元数据（流式/兼容
+ * 字段），只覆盖 id/name，并套用设置里的图片输入/限额/API 覆盖。
+ *
  * 为什么是覆盖层而非 registerProvider：applyExtension 的 models 数组是整体替换
  * 语义，对内置服务商传部分模型会丢掉目录其余模型；覆盖层模型带完整元数据，
  * 只改 api/baseUrl 不会丢失流式所需字段。
@@ -117,14 +121,45 @@ export function builtinProviderOverlay<T extends { id: string; api?: string; bas
   for (const model of config.models) {
     if (model.api) modelApiById.set(model.id, model.api);
   }
-  if (!providerBaseUrl && !providerApi && modelApiById.size === 0) return undefined;
-  return currentModels.map((model) => {
+  const manualModels = manualOverlayModels(config, currentModels);
+  if (!providerBaseUrl && !providerApi && modelApiById.size === 0 && manualModels.length === 0) return undefined;
+  // 手动条目与目录条目走同一套服务商级 baseUrl/api 覆盖（否则手动添加的模型
+  // 会漏掉用户设置的接口地址，请求打到模板克隆携带的旧地址上）。
+  return [...currentModels, ...manualModels].map((model) => {
     const api = modelApiById.get(model.id) ?? providerApi;
     const baseUrl = providerBaseUrl || undefined;
     const patch: { api?: string; baseUrl?: string } = {};
     if (api && api !== model.api) patch.api = api;
     if (baseUrl && baseUrl !== model.baseUrl) patch.baseUrl = baseUrl;
     return Object.keys(patch).length ? { ...model, ...patch } : model;
+  });
+}
+
+/**
+ * 设置条目里手动添加、目录尚未包含的模型 → 覆盖层条目（模板克隆）。
+ * 目录已含同名 id 时不重复注入（用户手动添加了已存在的模型 = 只想勾选它）。
+ * 无模板（该服务商目录为空）时退化为仅 id/name/provider 的最小条目。
+ */
+function manualOverlayModels<T extends { id: string }>(config: ProviderSettings, currentModels: readonly T[]): T[] {
+  const existingIds = new Set(currentModels.map((model) => model.id));
+  const manual = config.models.filter((model) => model.manual === true && !existingIds.has(model.id));
+  if (manual.length === 0) return [];
+  const template = currentModels[0] as (T & Record<string, unknown>) | undefined;
+  return manual.map((model) => {
+    const base: Record<string, unknown> = template ? { ...(template as unknown as Record<string, unknown>) } : { provider: config.id };
+    base.id = model.id;
+    base.name = model.name.trim() || model.id;
+    if (model.api) base.api = model.api;
+    if (isPositiveInt(model.contextWindow)) base.contextWindow = model.contextWindow;
+    if (isPositiveInt(model.maxTokens)) base.maxTokens = model.maxTokens;
+    // 图片输入标记落到 input 本身（口径同 applyModelOverrides：适配器按
+    // model.input 决定是否降级图片，只改目录展示不够）。
+    if (Array.isArray(base.input) && model.imageInput !== undefined) {
+      const hasImage = base.input.includes("image");
+      if (model.imageInput && !hasImage) base.input = [...base.input, "image"];
+      else if (!model.imageInput && hasImage) base.input = base.input.filter((kind) => kind !== "image");
+    }
+    return base as T;
   });
 }
 

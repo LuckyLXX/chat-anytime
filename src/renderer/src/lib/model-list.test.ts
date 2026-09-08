@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildBuiltinProviderEntry, filterProviderModels, formatTokenLimit, groupModelsByProvider, parseTokenLimit, providerFormBlocker, pruneDisabledModelRefs, setProviderModelsEnabled, selectableCatalogModels } from "./model-list";
+import { addManualProviderModel, buildBuiltinProviderEntry, filterProviderModels, formatTokenLimit, groupModelsByProvider, parseTokenLimit, providerFormBlocker, pruneDisabledModelRefs, setProviderModelsEnabled, selectableCatalogModels } from "./model-list";
 import type { ModelOption } from "../../../shared/protocol";
 
 const models = [
@@ -174,6 +174,29 @@ describe("provider form save check", () => {
   it("requires a model id only when no model list was fetched yet", () => {
     expect(providerFormBlocker({ ...valid, isCustomProvider: true, totalModels: 0, customModelId: "" })).toContain("模型 ID");
     expect(providerFormBlocker({ ...valid, isCustomProvider: true, totalModels: 0, customModelId: "m1" })).toBeUndefined();
+  });
+});
+
+describe("manual model add", () => {
+  it("appends a manual enabled entry, trimming the id and falling back to it as the name", () => {
+    const added = addManualProviderModel([{ id: "a", name: "A" }], "  gpt-x  ", "");
+    expect(added).toEqual([{ id: "a", name: "A" }, { id: "gpt-x", name: "gpt-x", manual: true, enabled: true }]);
+  });
+
+  it("uses the typed display name when provided", () => {
+    const added = addManualProviderModel([], "m1", "  我的模型 ");
+    expect(added).toEqual([{ id: "m1", name: "我的模型", manual: true, enabled: true }]);
+  });
+
+  it("rejects blank ids and duplicates with an error message instead of throwing", () => {
+    expect(addManualProviderModel([], "   ", "")).toBeTypeOf("string");
+    expect(addManualProviderModel([{ id: "a", name: "A" }], "a", "别名")).toBe("模型 a 已在列表中");
+  });
+
+  it("does not mutate the input list", () => {
+    const models = [{ id: "a", name: "A" }];
+    addManualProviderModel(models, "b", "B");
+    expect(models).toEqual([{ id: "a", name: "A" }]);
   });
 });
 

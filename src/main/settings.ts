@@ -195,6 +195,8 @@ export function normalizeProvider(provider: Partial<ProviderSettings>): Provider
         // 用户手动修正的 token 限额：仅保留合法正整数，避免非法值流入运行时。
         ...(isPositiveInt(model.contextWindow) ? { contextWindow: model.contextWindow } : {}),
         ...(isPositiveInt(model.maxTokens) ? { maxTokens: model.maxTokens } : {}),
+        // 手动添加标记：决定上游刷新/覆盖层同步时该条目是否被保留。
+        ...(model.manual === true ? { manual: true as const } : {}),
         enabled: model.enabled !== false
       }))
     : [];
@@ -212,7 +214,7 @@ export function normalizeProvider(provider: Partial<ProviderSettings>): Provider
 /** Merge an upstream refresh without losing local capability or visibility choices. */
 export function mergeProviderModels(existing: ProviderModelSettings[], fetched: ProviderModelSettings[]): ProviderModelSettings[] {
   const previous = new Map(existing.map((model) => [model.id, model]));
-  return fetched.map((model) => {
+  const merged = fetched.map((model) => {
     const old = previous.get(model.id);
     return {
       ...model,
@@ -221,9 +223,16 @@ export function mergeProviderModels(existing: ProviderModelSettings[], fetched: 
       api: old?.api ?? model.api,
       contextWindow: old?.contextWindow ?? model.contextWindow,
       maxTokens: old?.maxTokens ?? model.maxTokens,
+      // 手动添加的模型与上游同名命中：保留 manual 标记（用户仍可删行）。
+      manual: old?.manual || model.manual || undefined,
       enabled: old ? old.enabled !== false : model.enabled === true
     };
   });
+  // 手动添加且上游没有的模型整条保留（拉取是「合并手动条目」而不是整体替换）；
+  // 其余本地多余条目（上游已下架的旧拉取结果）仍按上游列表丢弃。
+  const fetchedIds = new Set(fetched.map((model) => model.id));
+  const manualExtras = existing.filter((model) => model.manual === true && !fetchedIds.has(model.id));
+  return [...merged, ...manualExtras];
 }
 
 export function normalizeDefaultModel(value: unknown): DesktopSettings["model"] {

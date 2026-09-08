@@ -216,6 +216,36 @@ describe("builtinProviderOverlay", () => {
     expect(overlay![1]).toBe(baseline[1]);
     expect(overlay![2]).toBe(baseline[2]);
   });
+
+  it("injects manually added models by cloning the template with their overrides", () => {
+    const overlay = builtinProviderOverlay(entry({ models: [{ id: "a", name: "A" }, { id: "manual-1", name: "手动模型", manual: true, imageInput: true, contextWindow: 200000, maxTokens: 8192 }] }), baseline);
+    expect(overlay).toHaveLength(4);
+    // 克隆目录首模型的完整元数据（流式/兼容字段），覆盖 id/name，套用图片输入与限额。
+    expect(overlay![3]).toMatchObject({ id: "manual-1", name: "手动模型", input: ["text", "image"], contextWindow: 200000, maxTokens: 8192, baseUrl: "https://example.com/v1" });
+    // 无覆盖的目录模型保持原对象引用（幂等）。
+    expect(overlay![0]).toBe(baseline[0]);
+  });
+
+  it("writes an overlay for manual models even without other overrides", () => {
+    const overlay = builtinProviderOverlay(entry({ models: [{ id: "m", name: "M", manual: true }] }), baseline);
+    expect(overlay).toBeDefined();
+    expect(overlay?.map((model) => model.id)).toEqual(["a", "b", "c", "m"]);
+  });
+
+  it("strips image input on a manual model when the template is multimodal", () => {
+    const overlay = builtinProviderOverlay(entry({ models: [{ id: "m", name: "M", manual: true, imageInput: false }] }), baseline);
+    expect(overlay![3]?.input).toEqual(["text"]);
+  });
+
+  it("does not write an overlay when the manual model already exists in the catalog", () => {
+    // 目录已含同名 id：无需注入（用户手动添加已存在的模型 = 只想勾选它），也无其他覆盖 → 不写覆盖层。
+    expect(builtinProviderOverlay(entry({ models: [{ id: "c", name: "C", manual: true }] }), baseline)).toBeUndefined();
+  });
+
+  it("falls back to a minimal entry when the provider catalog is empty", () => {
+    const overlay = builtinProviderOverlay(entry({ models: [{ id: "m", name: "M", manual: true }] }), []);
+    expect(overlay).toEqual([expect.objectContaining({ id: "m", name: "M", provider: "opencode-go" })]);
+  });
 });
 
 describe("resolveBuiltinOverlayAction", () => {
@@ -237,6 +267,15 @@ describe("resolveBuiltinOverlayAction", () => {
       expect(action.source).toBe("settings");
       expect(action.models[0]).toMatchObject({ baseUrl: "https://new.example.com" });
     }
+  });
+
+  it("treats manual models as an overlay trigger and drops it once they are gone", () => {
+    // 只有手动模型、无 baseUrl/api 覆盖也要写覆盖层（否则目录里没有该模型，会话无法使用）。
+    const withManual = resolveBuiltinOverlayAction(entry({ models: [{ id: "m", name: "M", manual: true }] }), baseline, undefined);
+    expect(withManual).toEqual({ models: expect.any(Array), source: "settings" });
+    // 手动模型移除后（无其他覆盖）：覆盖层还原目录。
+    const withoutManual = resolveBuiltinOverlayAction(entry({ models: [{ id: "m", name: "M" }] }), baseline, "settings");
+    expect(withoutManual).toBe("drop");
   });
 
   it("drops only a leftover settings overlay when overrides were cleared", () => {

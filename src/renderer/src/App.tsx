@@ -84,7 +84,7 @@ import { DiffView } from "./components/DiffView";
 import { BrandMark } from "./components/BrandMark";
 import { clampPreviewSplit, PREVIEW_SPLIT_MAX, PREVIEW_SPLIT_MIN, previewSplitFromKey } from "./lib/preview-split";
 import { groupSessionsByWorkspace, workspaceKey } from "./lib/session-groups";
-import { filterProviderModels, setProviderModelsEnabled, buildBuiltinProviderEntry, selectableCatalogModels, parseTokenLimit, formatTokenLimit, providerFormBlocker, pruneDisabledModelRefs } from "./lib/model-list";
+import { filterProviderModels, setProviderModelsEnabled, buildBuiltinProviderEntry, selectableCatalogModels, parseTokenLimit, formatTokenLimit, providerFormBlocker, pruneDisabledModelRefs, addManualProviderModel } from "./lib/model-list";
 import { CSS_URL_PATTERN, createThemeAssetUrls, isExternalThemeReference, normalizeThemeAssetReference, resolveThemeAssets } from "./lib/theme-assets";
 import { THEME_PRESETS, bubbleOpacityCss, collectThemeLayers, panelOpacityCss, scopeCustomThemeCss, scopeCustomThemeCssForPreview, themePresetCss, themePreviewCss, themeWallpaperOpacity, wallpaperOpacityCss } from "./lib/theme-presets";
 import { panePermissionRequest, paneQuestionRequest, dropPaneStates, pruneParkedPanels, useDesktopStore } from "./store";
@@ -596,12 +596,17 @@ function AgentSkillSelector({ agent, skills, onChange }: AgentSkillSelectorProps
   );
 }
 
-function SettingsDialog({ settings, models, providers, customProvider, customProviderKeyConfigured, customModels, customModelFetchStatus, customModelFetchError, modelRefreshStatus, modelRefreshError, modelRefreshProvider, resources, workspaceOpen, initialTab, onClose, onCreateInSession }: { settings: import("../../shared/protocol").DesktopSettings; models: ModelOption[]; providers: ProviderOption[]; customProvider?: ProviderSettings; customProviderKeyConfigured: boolean; customModels: CustomProviderModel[]; customModelFetchStatus: "idle" | "loading" | "success" | "error"; customModelFetchError?: string; modelRefreshStatus: "idle" | "loading" | "success" | "error"; modelRefreshError?: string; modelRefreshProvider?: string; resources: ResourceCatalog; workspaceOpen: boolean; initialTab?: string; onClose(): void; onCreateInSession(): void }): ReactNode {
+function SettingsDialog({ settings, models, providers, customProvider, customModels, customModelFetchStatus, customModelFetchError, modelRefreshStatus, modelRefreshError, modelRefreshProvider, resources, workspaceOpen, initialTab, onClose, onCreateInSession }: { settings: import("../../shared/protocol").DesktopSettings; models: ModelOption[]; providers: ProviderOption[]; customProvider?: ProviderSettings; customModels: CustomProviderModel[]; customModelFetchStatus: "idle" | "loading" | "success" | "error"; customModelFetchError?: string; modelRefreshStatus: "idle" | "loading" | "success" | "error"; modelRefreshError?: string; modelRefreshProvider?: string; resources: ResourceCatalog; workspaceOpen: boolean; initialTab?: string; onClose(): void; onCreateInSession(): void }): ReactNode {
   const customProviderId = "chatanytime-openai-compatible";
   const configuredProviders = settings.providers;
   const firstCustomProvider = configuredProviders[0];
   const [provider, setProvider] = useState(firstCustomProvider?.id ?? customProviderId);
   const selectedProvider = configuredProviders.find((item) => item.id === provider);
+  // 单例自定义服务的显示名/已配置徽标读实时 settings.providers 条目——store 的
+  // customProvider 字段只在 bootstrap 赋值，会话内重命名或存 key 后会变陈旧。
+  const liveCustomProvider = configuredProviders.find((item) => item.id === customProviderId);
+  const customProviderDisplayName = liveCustomProvider?.name ?? "新的模型服务";
+  const customProviderKeySaved = Boolean(liveCustomProvider?.keyConfigured);
   const isCustomProvider = provider === customProviderId || provider.startsWith("provider-") || (selectedProvider !== undefined && selectedProvider.custom !== false);
   const [customName, setCustomName] = useState(selectedProvider?.name ?? customProvider?.name ?? "我的中转站");
   const [customBaseUrl, setCustomBaseUrl] = useState(selectedProvider?.baseUrl ?? customProvider?.baseUrl ?? "");
@@ -641,23 +646,31 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
   const [editingCustomThemeId, setEditingCustomThemeId] = useState<string | undefined>(initialCustomTheme?.id);
   const selectedAgent = agentList.find((agent) => agent.id === selectedAgentId) ?? agentList[0];
   const configuredModels = selectableCatalogModels(models).filter((model) => model.configured);
-  const hasSavedCustomKey = Boolean(selectedProvider?.keyConfigured) || (provider === customProviderId && customProviderKeyConfigured);
+  const hasSavedCustomKey = Boolean(selectedProvider?.keyConfigured) || (provider === customProviderId && customProviderKeySaved);
   const providerModels: ProviderModelSettings[] = isCustomProvider
     ? (selectedProvider?.models ?? customModels)
-    : models.filter((model) => model.provider === provider).map((model) => {
-      const stored = selectedProvider?.models.find((item) => item.id === model.id);
-      return {
-        id: model.id,
-        name: model.name,
-        imageInput: stored?.imageInput ?? model.imageInput,
-        // 生效 API：设置覆盖优先，否则目录定义（含过渡期间 catalog 未携带时 undefined）。
-        api: stored?.api ?? model.api ?? undefined,
-        // 限额显示生效值（用户修正优先，否则目录原值），供编辑框 placeholder 回显。
-        contextWindow: stored?.contextWindow ?? (typeof model.contextWindow === "number" ? model.contextWindow : undefined),
-        maxTokens: stored?.maxTokens ?? (typeof model.maxTokens === "number" ? model.maxTokens : undefined),
-        enabled: stored ? stored.enabled !== false : true
-      };
-    });
+    : (() => {
+      const cataloged = models.filter((model) => model.provider === provider).map((model) => {
+        const stored = selectedProvider?.models.find((item) => item.id === model.id);
+        return {
+          id: model.id,
+          name: model.name,
+          imageInput: stored?.imageInput ?? model.imageInput,
+          // 生效 API：设置覆盖优先，否则目录定义（含过渡期间 catalog 未携带时 undefined）。
+          api: stored?.api ?? model.api ?? undefined,
+          // 限额显示生效值（用户修正优先，否则目录原值），供编辑框 placeholder 回显。
+          contextWindow: stored?.contextWindow ?? (typeof model.contextWindow === "number" ? model.contextWindow : undefined),
+          maxTokens: stored?.maxTokens ?? (typeof model.maxTokens === "number" ? model.maxTokens : undefined),
+          enabled: stored ? stored.enabled !== false : true,
+          // 手动添加标记跟存储条目走（目录刷新后 catalog 已含该模型，标记不能丢）。
+          ...(stored?.manual === true ? { manual: true as const } : {})
+        };
+      });
+      // 目录里还没有的手动条目（刚添加的乐观态、保存后 catalog 推送未返回）也要显示。
+      const catalogIds = new Set(cataloged.map((model) => model.id));
+      const manualExtras = (selectedProvider?.models ?? []).filter((model) => model.manual === true && !catalogIds.has(model.id));
+      return [...cataloged, ...manualExtras];
+    })();
   const enabledProviderModels = providerModels.filter((model) => model.enabled !== false);
   const [modelSearch, setModelSearch] = useState("");
   // 限额行内编辑态：正在编辑的模型 id + 两个输入框草稿（字符串，空 = 清除覆盖）。
@@ -666,6 +679,12 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
   const [limitDraftMaxTokens, setLimitDraftMaxTokens] = useState("");
   // 行内 API 模式编辑态：正在编辑的模型 id（undefined = 收起）。
   const [editingModelApi, setEditingModelApi] = useState<string | undefined>();
+  // 手动添加模型表单：展开态 + 模型 ID/显示名称草稿 + 行内错误（不动 formError，
+  // 避免把整页保存错误和表单校验混在一个位置）。
+  const [manualModelOpen, setManualModelOpen] = useState(false);
+  const [manualModelIdDraft, setManualModelIdDraft] = useState("");
+  const [manualModelNameDraft, setManualModelNameDraft] = useState("");
+  const [manualModelError, setManualModelError] = useState<string>();
   const visibleProviderModels = filterProviderModels(providerModels, modelSearch);
   const allVisibleModelsEnabled = visibleProviderModels.length > 0 && visibleProviderModels.every((model) => model.enabled !== false);
   const someVisibleModelsEnabled = visibleProviderModels.some((model) => model.enabled !== false);
@@ -737,6 +756,41 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
   function commitModelLimits(model: ProviderModelSettings): void {
     updateProviderModel(model.id, { contextWindow: parseTokenLimit(limitDraftContext), maxTokens: parseTokenLimit(limitDraftMaxTokens) });
     setEditingModelId(undefined);
+  }
+
+  // 手动添加模型只对支持的渠道开放：自定义服务商（模型表就是设置条目）与
+  // PiDesktop 直连管理覆盖层的内置渠道（ProviderOption.manualModels，radius
+  // 等远程目录渠道写入覆盖键会破坏 SDK 的 etag/lastModified 刷新门控）。
+  const manualModelsSupported = isCustomProvider || providers.find((item) => item.id === provider)?.manualModels === true;
+
+  function openManualModelForm(): void {
+    setManualModelOpen(true);
+    setManualModelError(undefined);
+  }
+
+  function closeManualModelForm(): void {
+    setManualModelOpen(false);
+    setManualModelIdDraft("");
+    setManualModelNameDraft("");
+    setManualModelError(undefined);
+  }
+
+  function commitManualModel(): void {
+    const result = addManualProviderModel(providerModels, manualModelIdDraft, manualModelNameDraft);
+    if (typeof result === "string") {
+      setManualModelError(result);
+      return;
+    }
+    applyProviderModels(result);
+    closeManualModelForm();
+  }
+
+  /** 删除手动添加的模型行（整行移除，随「保存设置」持久化；取消对话框可回滚）。 */
+  function removeManualModel(modelId: string): void {
+    applyProviderModels(providerModels.filter((model) => model.id !== modelId));
+    if (isCustomProvider && modelId === customModelId) {
+      setCustomModelId(providerModels.find((item) => item.id !== modelId && item.enabled !== false)?.id ?? "");
+    }
   }
 
   /** 模型行 API 徽标短文案：覆盖生效时显示协议名，未覆盖显示「默认」。 */
@@ -965,7 +1019,7 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
     try {
       if (isCustomProvider) {
         const modelsForProvider = providerModels;
-        const providerConfig = { id: provider, name: customName.trim(), baseUrl: customBaseUrl.trim(), ...(customApi ? { api: customApi } : {}), models: modelsForProvider.length ? modelsForProvider.map((model) => ({ ...model, enabled: model.enabled !== false })) : [{ id: customModelId.trim(), name: customModelId.trim(), imageInput: imageInputOverride ?? selectedCustomModel?.imageInput, enabled: true }] };
+        const providerConfig = { id: provider, name: customName.trim(), baseUrl: customBaseUrl.trim(), ...(customApi ? { api: customApi } : {}), models: modelsForProvider.length ? modelsForProvider.map((model) => ({ ...model, enabled: model.enabled !== false })) : [{ id: customModelId.trim(), name: customModelId.trim(), imageInput: imageInputOverride ?? selectedCustomModel?.imageInput, manual: true, enabled: true }] };
         await window.piDesktop.send({ type: "provider.save", provider: providerConfig, apiKey: apiKey.trim() || undefined });
         const nextProviders = settings.providers.some((item) => item.id === provider) ? settings.providers.map((item) => item.id === provider ? providerConfig : item) : [...settings.providers, providerConfig];
         // 与内置分支同款落位：自定义服务取消勾选（含清空全部模型）后，本地乐观副本
@@ -1002,7 +1056,7 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
 
   function newProvider(): void {
     const id = `provider-${Date.now()}`;
-    setProvider(id); setCustomName("新的模型服务"); setCustomBaseUrl(""); setCustomModelId(""); setCustomApi(undefined); setApiKey(""); setModelSearch("");
+    setProvider(id); setCustomName("新的模型服务"); setCustomBaseUrl(""); setCustomModelId(""); setCustomApi(undefined); setApiKey(""); setModelSearch(""); closeManualModelForm();
   }
 
   async function deleteProvider(): Promise<void> {
@@ -1076,14 +1130,14 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
           <label className="checkbox-setting"><input type="checkbox" checked={settings.appearance.showThinking} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, showThinking: event.target.checked } } })} />展示思考过程</label>
           <footer><button type="button" className="secondary-button" onClick={closeSettings}>取消</button><button className="primary-button" type="submit">保存通用设置</button></footer>
         </form> : tab === "models" ? <form onSubmit={save}>
-        <div className="settings-provider-heading"><label>服务商<select value={provider} onChange={(event) => { const next = event.target.value; setProvider(next); setModelSearch(""); const config = configuredProviders.find((item) => item.id === next); if (config) { setCustomName(config.name); setCustomBaseUrl(config.baseUrl); setCustomModelId(config.models[0]?.id ?? ""); setCustomApi(config.api); } else if (next !== customProviderId) { setCustomBaseUrl(""); setCustomApi(undefined); } }}><optgroup label="内置服务">{providers.filter((item) => !item.custom && !configuredProviders.some((config) => config.id === item.id)).map((item) => <option key={item.id} value={item.id}>{item.name}{item.configured ? " - 已配置" : ""}</option>)}{configuredProviders.filter((item) => item.custom === false).map((item) => <option key={item.id} value={item.id}>{item.name}{item.keyConfigured ? " - 已配置" : ""}</option>)}</optgroup><optgroup label="OpenAI 兼容服务"><option value={customProviderId}>{customProvider?.name ?? "新的模型服务"}{customProviderKeyConfigured ? " - 已配置" : ""}</option>{configuredProviders.filter((item) => item.id !== customProviderId && item.custom !== false).map((item) => <option key={item.id} value={item.id}>{item.name}{item.keyConfigured ? " - 已配置" : ""}</option>)}</optgroup></select></label><button className="secondary-button" type="button" onClick={newProvider}>+ 新增服务</button>{selectedProvider && selectedProvider.custom !== false && <button className="danger-button" type="button" onClick={() => void deleteProvider()}>删除服务</button>}</div>
+        <div className="settings-provider-heading"><label>服务商<select value={provider} onChange={(event) => { const next = event.target.value; setProvider(next); setModelSearch(""); closeManualModelForm(); const config = configuredProviders.find((item) => item.id === next); if (config) { setCustomName(config.name); setCustomBaseUrl(config.baseUrl); setCustomModelId(config.models[0]?.id ?? ""); setCustomApi(config.api); } else if (next !== customProviderId) { setCustomBaseUrl(""); setCustomApi(undefined); } }}><optgroup label="内置服务">{providers.filter((item) => !item.custom && !configuredProviders.some((config) => config.id === item.id)).map((item) => <option key={item.id} value={item.id}>{item.name}{item.configured ? " - 已配置" : ""}</option>)}{configuredProviders.filter((item) => item.custom === false).map((item) => <option key={item.id} value={item.id}>{item.name}{item.keyConfigured ? " - 已配置" : ""}</option>)}</optgroup><optgroup label="OpenAI 兼容服务"><option value={customProviderId}>{customProviderDisplayName}{customProviderKeySaved ? " - 已配置" : ""}</option>{configuredProviders.filter((item) => item.id !== customProviderId && item.custom !== false).map((item) => <option key={item.id} value={item.id}>{item.name}{item.keyConfigured ? " - 已配置" : ""}</option>)}</optgroup></select></label><button className="secondary-button" type="button" onClick={newProvider}>+ 新增服务</button>{selectedProvider && selectedProvider.custom !== false && <button className="danger-button" type="button" onClick={() => void deleteProvider()}>删除服务</button>}</div>
         {isCustomProvider && <>
           <label>服务名称<input value={customName} placeholder="例如：公司中转站" onChange={(event) => setCustomName(event.target.value)} /></label>
           <label>默认 API 协议<select value={customApi ?? "openai-completions"} onChange={(event) => setCustomApi(event.target.value as ProviderApiMode)} title="该服务商未按模型单独设置时的请求 API 模式；支持 /v1/responses 的中转站可选 Responses"><option value="openai-completions">OpenAI 兼容 chat/completions</option><option value="openai-responses">Responses（/v1/responses）</option></select></label>
-          <div className="settings-action-row"><label>OpenAI 兼容接口地址<input value={customBaseUrl} placeholder="https://api.example.com/v1" onChange={(event) => setCustomBaseUrl(event.target.value)} /></label><button className="secondary-button" type="button" disabled={customModelFetchStatus === "loading" || !customBaseUrl.trim() || (!apiKey.trim() && !customProviderKeyConfigured)} onClick={() => void fetchModels()}><RefreshCw size={14} className={customModelFetchStatus === "loading" ? "spinning" : undefined} />{customModelFetchStatus === "loading" ? "拉取中" : "拉取模型"}</button></div>
+          <div className="settings-action-row"><label>OpenAI 兼容接口地址<input value={customBaseUrl} placeholder="https://api.example.com/v1" onChange={(event) => setCustomBaseUrl(event.target.value)} /></label><button className="secondary-button" type="button" disabled={customModelFetchStatus === "loading" || !customBaseUrl.trim() || (!apiKey.trim() && !customProviderKeySaved)} onClick={() => void fetchModels()}><RefreshCw size={14} className={customModelFetchStatus === "loading" ? "spinning" : undefined} />{customModelFetchStatus === "loading" ? "拉取中" : "拉取模型"}</button></div>
         </>}
         {!isCustomProvider && <label>接口地址（可选）<input value={customBaseUrl} placeholder="留空 = 跟随服务商目录默认地址（部分模型的 API 模式不同，接口地址也可按需覆盖）" onChange={(event) => setCustomBaseUrl(event.target.value)} /></label>}
-        <div className="model-selection"><div className="model-selection-heading"><span>可用模型</span><small>左侧控制显示，右侧标记图片输入</small>{!isCustomProvider && <button className="secondary-button model-refresh-button" type="button" title="从服务商目录拉取最新模型列表" disabled={modelRefreshStatus === "loading" && modelRefreshProvider === provider} onClick={() => void refreshBuiltinModels()}><RefreshCw size={14} className={modelRefreshStatus === "loading" && modelRefreshProvider === provider ? "spinning" : undefined} />{modelRefreshStatus === "loading" && modelRefreshProvider === provider ? "拉取中" : "拉取模型"}</button>}</div>{providerModels.length > 0 && <div className="model-list-toolbar"><label className="checkbox-setting model-select-all" title={modelSearch.trim() ? "勾选或取消当前匹配到的模型" : "勾选或取消全部模型"}><input type="checkbox" checked={allVisibleModelsEnabled} disabled={visibleProviderModels.length === 0} ref={(el) => { if (el) el.indeterminate = !allVisibleModelsEnabled && someVisibleModelsEnabled; }} onChange={(event) => setAllVisibleModelsEnabled(event.target.checked)} />全选</label><small className="model-enabled-count">已启用 {enabledProviderModels.length}/{providerModels.length}</small>{providerModels.length > 8 && <div className="model-search-box"><Search size={13} /><input value={modelSearch} placeholder="搜索模型名称或 ID" aria-label="搜索模型" onChange={(event) => setModelSearch(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) event.preventDefault(); }} /></div>}</div>}{!isCustomProvider && modelRefreshError && <p className="form-error model-refresh-error">{modelRefreshError}</p>}{!isCustomProvider && modelRefreshStatus === "success" && modelRefreshProvider === provider && <p className="form-hint model-refresh-hint">模型列表已更新</p>}{providerModels.length === 0 ? <p className="panel-empty">{isCustomProvider ? "请先拉取模型，或手动填写模型 ID" : "该服务商暂无可用模型，请先配置 API 密钥"}</p> : visibleProviderModels.length === 0 ? <p className="panel-empty">没有匹配「{modelSearch.trim()}」的模型</p> : visibleProviderModels.map((model) => <div className="model-option" key={model.id}><label className="checkbox-setting model-enabled-option"><input type="checkbox" checked={model.enabled !== false} onChange={(event) => { const next = event.target.checked; updateProviderModel(model.id, { enabled: next }); if (isCustomProvider && model.id === customModelId && !next) setCustomModelId(providerModels.find((item) => item.id !== model.id && item.enabled !== false)?.id ?? model.id); }} /><span><strong>{model.name}</strong><small>{model.id}</small></span></label><label className="checkbox-setting model-image-option" title={isCustomProvider ? "允许向此模型发送图片" : "手动标记该模型是否支持图片输入：目录元数据滞后或缺失时以这里的勾选为准"}><input type="checkbox" checked={model.imageInput === true} onChange={(event) => updateProviderModel(model.id, { imageInput: event.target.checked })} />图片输入</label><button className={model.api ? "model-api-badge override" : "model-api-badge"} type="button" title={`${apiBadgeTitle(model.api)}${model.api ? "（已单独覆盖）" : "；点击单独设置"}`} aria-expanded={editingModelApi === model.id} onClick={() => setEditingModelApi(editingModelApi === model.id ? undefined : model.id)}>{apiBadgeLabel(model.api)}</button>{editingModelApi === model.id && <select className="model-api-editor" autoFocus value={model.api ?? ""} onChange={(event) => { const value = event.target.value as "" | ProviderApiMode; updateProviderModel(model.id, { api: value || undefined }); setEditingModelApi(undefined); }} onBlur={() => setEditingModelApi(undefined)} onKeyDown={(event) => { if (event.key === "Escape") setEditingModelApi(undefined); }}><option value="">跟随默认</option><option value="openai-completions">chat/completions</option><option value="openai-responses">Responses</option></select>}<button className={hasModelLimitOverride(model.id) ? "icon-button model-edit-limits active" : "icon-button model-edit-limits"} type="button" title={editingModelId === model.id ? "收起限额编辑" : "修正上下文窗口与最大输出（服务商标错时手动覆盖）"} aria-expanded={editingModelId === model.id} onClick={() => beginEditModelLimits(model)}><Pencil size={13} /></button>{editingModelId === model.id && <div className="model-limits-editor"><label>上下文窗口<input inputMode="numeric" autoComplete="off" value={limitDraftContext} placeholder={typeof model.contextWindow === "number" ? String(model.contextWindow) : "如 128k 或 128000"} onChange={(event) => setLimitDraftContext(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commitModelLimits(model); } }} /><small>tokens</small></label><label>最大输出<input inputMode="numeric" autoComplete="off" value={limitDraftMaxTokens} placeholder={typeof model.maxTokens === "number" ? String(model.maxTokens) : "如 16k 或 16384"} onChange={(event) => setLimitDraftMaxTokens(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commitModelLimits(model); } }} /><small>tokens</small></label><div className="model-limits-actions"><button className="secondary-button" type="button" onClick={() => { setLimitDraftContext(""); setLimitDraftMaxTokens(""); }}>清空</button><button className="primary-button" type="button" onClick={() => commitModelLimits(model)}>完成</button></div><p className="model-limits-hint">留空后点完成 = 清除手动设置，回退目录值；最后点下方「保存设置」持久化。</p></div>}</div>)}</div>
+        <div className="model-selection"><div className="model-selection-heading"><span>可用模型</span><small>左侧控制显示，右侧标记图片输入</small><span className="model-selection-actions">{!isCustomProvider && <button className="secondary-button model-refresh-button" type="button" title="从服务商目录拉取最新模型列表" disabled={modelRefreshStatus === "loading" && modelRefreshProvider === provider} onClick={() => void refreshBuiltinModels()}><RefreshCw size={14} className={modelRefreshStatus === "loading" && modelRefreshProvider === provider ? "spinning" : undefined} />{modelRefreshStatus === "loading" && modelRefreshProvider === provider ? "拉取中" : "拉取模型"}</button>}{manualModelsSupported && <button className="secondary-button model-add-button" type="button" data-control="model-add" title="服务商列表接口没有的模型，在这里手动登记；拉取模型列表不会覆盖手动条目" aria-expanded={manualModelOpen} onClick={() => (manualModelOpen ? closeManualModelForm() : openManualModelForm())}><Plus size={14} />{manualModelOpen ? "收起" : "手动添加"}</button>}</span></div>{providerModels.length > 0 && <div className="model-list-toolbar"><label className="checkbox-setting model-select-all" title={modelSearch.trim() ? "勾选或取消当前匹配到的模型" : "勾选或取消全部模型"}><input type="checkbox" checked={allVisibleModelsEnabled} disabled={visibleProviderModels.length === 0} ref={(el) => { if (el) el.indeterminate = !allVisibleModelsEnabled && someVisibleModelsEnabled; }} onChange={(event) => setAllVisibleModelsEnabled(event.target.checked)} />全选</label><small className="model-enabled-count">已启用 {enabledProviderModels.length}/{providerModels.length}</small>{providerModels.length > 8 && <div className="model-search-box"><Search size={13} /><input value={modelSearch} placeholder="搜索模型名称或 ID" aria-label="搜索模型" onChange={(event) => setModelSearch(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) event.preventDefault(); }} /></div>}</div>}{manualModelOpen && <div className="model-add-form"><label>模型 ID<input value={manualModelIdDraft} autoFocus autoComplete="off" spellCheck={false} placeholder="如 gpt-4o-mini（服务商文档里的模型标识）" onChange={(event) => setManualModelIdDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); commitManualModel(); } }} /></label><label>显示名称<input value={manualModelNameDraft} autoComplete="off" placeholder="留空 = 使用模型 ID" onChange={(event) => setManualModelNameDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); commitManualModel(); } }} /></label><div className="model-add-actions"><button className="primary-button" type="button" onClick={commitManualModel}><Plus size={13} />添加</button><button className="secondary-button" type="button" onClick={closeManualModelForm}>取消</button></div>{manualModelError && <p className="form-error model-add-error">{manualModelError}</p>}</div>}{!isCustomProvider && modelRefreshError && <p className="form-error model-refresh-error">{modelRefreshError}</p>}{!isCustomProvider && modelRefreshStatus === "success" && modelRefreshProvider === provider && <p className="form-hint model-refresh-hint">模型列表已更新</p>}{providerModels.length === 0 ? <p className="panel-empty">{isCustomProvider ? "请先拉取模型，或点右上「手动添加」登记模型" : manualModelsSupported ? "该服务商暂无可用模型，可先配置 API 密钥后拉取，或点右上「手动添加」登记模型" : "该服务商暂无可用模型，请先配置 API 密钥"}</p> : visibleProviderModels.length === 0 ? <p className="panel-empty">没有匹配「{modelSearch.trim()}」的模型</p> : visibleProviderModels.map((model) => <div className="model-option" key={model.id}><label className="checkbox-setting model-enabled-option"><input type="checkbox" checked={model.enabled !== false} onChange={(event) => { const next = event.target.checked; updateProviderModel(model.id, { enabled: next }); if (isCustomProvider && model.id === customModelId && !next) setCustomModelId(providerModels.find((item) => item.id !== model.id && item.enabled !== false)?.id ?? model.id); }} /><span><strong>{model.name}{model.manual === true && <em className="model-manual-badge" title="手动添加的模型：拉取模型列表不会移除它">手动</em>}</strong><small>{model.id}</small></span></label><label className="checkbox-setting model-image-option" title={isCustomProvider ? "允许向此模型发送图片" : "手动标记该模型是否支持图片输入：目录元数据滞后或缺失时以这里的勾选为准"}><input type="checkbox" checked={model.imageInput === true} onChange={(event) => updateProviderModel(model.id, { imageInput: event.target.checked })} />图片输入</label><button className={model.api ? "model-api-badge override" : "model-api-badge"} type="button" title={`${apiBadgeTitle(model.api)}${model.api ? "（已单独覆盖）" : "；点击单独设置"}`} aria-expanded={editingModelApi === model.id} onClick={() => setEditingModelApi(editingModelApi === model.id ? undefined : model.id)}>{apiBadgeLabel(model.api)}</button>{editingModelApi === model.id && <select className="model-api-editor" autoFocus value={model.api ?? ""} onChange={(event) => { const value = event.target.value as "" | ProviderApiMode; updateProviderModel(model.id, { api: value || undefined }); setEditingModelApi(undefined); }} onBlur={() => setEditingModelApi(undefined)} onKeyDown={(event) => { if (event.key === "Escape") setEditingModelApi(undefined); }}><option value="">跟随默认</option><option value="openai-completions">chat/completions</option><option value="openai-responses">Responses</option></select>}<button className={hasModelLimitOverride(model.id) ? "icon-button model-edit-limits active" : "icon-button model-edit-limits"} type="button" title={editingModelId === model.id ? "收起限额编辑" : "修正上下文窗口与最大输出（服务商标错时手动覆盖）"} aria-expanded={editingModelId === model.id} onClick={() => beginEditModelLimits(model)}><Pencil size={13} /></button>{model.manual === true && <button className="icon-button model-remove-button" type="button" title="移除这条手动添加的模型（点下方「保存设置」后生效）" onClick={() => removeManualModel(model.id)}><X size={13} /></button>}{editingModelId === model.id && <div className="model-limits-editor"><label>上下文窗口<input inputMode="numeric" autoComplete="off" value={limitDraftContext} placeholder={typeof model.contextWindow === "number" ? String(model.contextWindow) : "如 128k 或 128000"} onChange={(event) => setLimitDraftContext(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commitModelLimits(model); } }} /><small>tokens</small></label><label>最大输出<input inputMode="numeric" autoComplete="off" value={limitDraftMaxTokens} placeholder={typeof model.maxTokens === "number" ? String(model.maxTokens) : "如 16k 或 16384"} onChange={(event) => setLimitDraftMaxTokens(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commitModelLimits(model); } }} /><small>tokens</small></label><div className="model-limits-actions"><button className="secondary-button" type="button" onClick={() => { setLimitDraftContext(""); setLimitDraftMaxTokens(""); }}>清空</button><button className="primary-button" type="button" onClick={() => commitModelLimits(model)}>完成</button></div><p className="model-limits-hint">留空后点完成 = 清除手动设置，回退目录值；最后点下方「保存设置」持久化。</p></div>}</div>)}</div>
         {isCustomProvider && providerModels.length === 0 && customModelId && <label className="checkbox-setting"><input type="checkbox" checked={imageInputOverride ?? false} onChange={(event) => setImageInputOverride(event.target.checked)} />支持图片输入（手动覆盖推断）</label>}
         {providerModels.length > 0 && enabledProviderModels.length === 0 && <p className="form-hint">已取消全部模型：保存后该服务商在模型选择器中不再提供模型（若运行中会话正在用它的模型会自动切走）；想彻底移除该服务，请用上方「删除服务」。</p>}
         {isCustomProvider && customModelFetchError && <p className="form-error">{customModelFetchError}</p>}
@@ -1139,7 +1193,7 @@ function SettingsDialog({ settings, models, providers, customProvider, customPro
 }
 
 export function App(): ReactNode {
-  const { ready, snapshot, models, providers, resources, customProvider, customProviderKeyConfigured, customModels, customModelFetchStatus, customModelFetchError, modelRefreshStatus, modelRefreshError, modelRefreshProvider, permissions, questions, error, checkpointResult, automationRun, initialize, clearError } = useDesktopStore();
+  const { ready, snapshot, models, providers, resources, customProvider, customModels, customModelFetchStatus, customModelFetchError, modelRefreshStatus, modelRefreshError, modelRefreshProvider, permissions, questions, error, checkpointResult, automationRun, initialize, clearError } = useDesktopStore();
   // 分屏布局：tree 为递归二叉分割树，focusedPane 是焦点格（= 激活会话）。
   // 权限/提问按格子集合过滤（焦点格优先），store 的数组跨会话累积，直接取
   // [0] 会把后台会话待决的弹窗冒到别的格子视图里；单窗口退化为 [激活会话]，
@@ -2341,7 +2395,7 @@ export function App(): ReactNode {
         </div>
       </main>
 
-      {settingsPresence.rendered && <ExitWrap exiting={settingsPresence.exiting}><SettingsDialog settings={settings} models={models} providers={providers} customProvider={customProvider} customProviderKeyConfigured={customProviderKeyConfigured} customModels={customModels} customModelFetchStatus={customModelFetchStatus} customModelFetchError={customModelFetchError} modelRefreshStatus={modelRefreshStatus} modelRefreshError={modelRefreshError} modelRefreshProvider={modelRefreshProvider} resources={resources} workspaceOpen={Boolean(snapshot.workspace)} initialTab={settingsInitialTab} onClose={() => { setSettingsOpen(false); setSettingsInitialTab(undefined); }} onCreateInSession={() => void createNewSession()} /></ExitWrap>}
+      {settingsPresence.rendered && <ExitWrap exiting={settingsPresence.exiting}><SettingsDialog settings={settings} models={models} providers={providers} customProvider={customProvider} customModels={customModels} customModelFetchStatus={customModelFetchStatus} customModelFetchError={customModelFetchError} modelRefreshStatus={modelRefreshStatus} modelRefreshError={modelRefreshError} modelRefreshProvider={modelRefreshProvider} resources={resources} workspaceOpen={Boolean(snapshot.workspace)} initialTab={settingsInitialTab} onClose={() => { setSettingsOpen(false); setSettingsInitialTab(undefined); }} onCreateInSession={() => void createNewSession()} /></ExitWrap>}
       {permissionPresence.rendered && (() => { const permission = permissionPresence.value; return permission ? <ExitWrap exiting={permissionPresence.exiting}><PermissionDialog request={permission} sessionTitle={snapshot.sessions.find((item) => item.id === permission.principal.sessionId)?.title} /></ExitWrap> : null; })()}
       {transcriptPresence.rendered && (() => { const transcriptTarget = transcriptPresence.value; return transcriptTarget ? <ExitWrap exiting={transcriptPresence.exiting}><DelegationTranscript delegation={transcriptTarget} onClose={() => setTranscriptTarget(undefined)} onOpenArtifact={openArtifactPreview} /></ExitWrap> : null; })()}
       {contextMenu && <ContextMenu x={contextMenu.x} y={contextMenu.y} items={contextMenu.items} onClose={() => setContextMenu(null)} />}
