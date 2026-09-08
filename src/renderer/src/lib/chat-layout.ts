@@ -18,6 +18,8 @@ export function groupAssistantMessages(messages: ChatMessage[]): ChatMessage[] {
       previous.blocks = [...previous.blocks, ...message.blocks];
       previous.streaming = Boolean(previous.streaming || message.streaming);
       previous.error = message.error ?? previous.error;
+      // 中止标记同样合并：一次回复里的末段被中止时整条回复都要出中性提示。
+      previous.aborted = message.aborted ?? previous.aborted;
       continue;
     }
     grouped.push({ ...message, blocks: [...message.blocks] });

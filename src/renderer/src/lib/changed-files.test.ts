@@ -31,6 +31,10 @@ describe("reply changed files", () => {
     ])).toMatchObject([{ relativePath: "src/app.tsx", execution: { id: "write-1" } }]);
   });
 
+  it("skips aborted executions：中止不算成功产物（不展示/不可回滚）", () => {
+    expect(changedFilesForMessage(message, [execution("edit-1", "src/App.tsx", "aborted")])).toEqual([]);
+  });
+
   it("collects multiple artifacts from changedFiles, image paths marked as image kind", () => {
     const result = changedFilesForMessage(message, [
       executionWithArtifacts("bash-1", ["outputs/fox.png", "docs/说明.md"])

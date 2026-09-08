@@ -217,11 +217,14 @@ function ImageMessageBlock({ block }: { block: Extract<import("../../shared/prot
 
 function toolCallStatusIcon(execution: ToolExecution | undefined, streaming?: boolean): ReactNode {
   if (execution?.status === "running" || (!execution && streaming)) return <LoaderCircle size={14} className="spinning" />;
+  // 中止与失败分开：中止是用户主动停止，用中性停止图标而非错误警告。
+  if (execution?.status === "aborted") return <CircleStop size={14} />;
   if (execution?.status === "error") return <AlertCircle size={14} />;
   return <Check size={14} />;
 }
 
 function toolCallStatusLabel(execution: ToolExecution | undefined, streaming?: boolean): string {
+  if (execution?.status === "aborted") return "已中止";
   if (execution?.status === "error") return "失败";
   if (execution?.status === "completed") return "已运行";
   return streaming ? "运行中" : "已运行";
@@ -304,7 +307,7 @@ function DelegationStepsSection({ steps }: { steps: DelegationStep[] }): ReactNo
         {omitted > 0 && <li className="delegation-step omitted"><span className="delegation-step-label">… 已省略 {omitted} 个早期步骤，完整列表见「查看完整记录」</span></li>}
         {visible.map((step) => (
           <li key={step.toolCallId} className={`delegation-step ${step.status}`}>
-            <span className="delegation-step-icon">{step.status === "running" ? <LoaderCircle size={12} className="spinning" /> : step.status === "error" ? <AlertCircle size={12} /> : <Check size={12} />}</span>
+            <span className="delegation-step-icon">{step.status === "running" ? <LoaderCircle size={12} className="spinning" /> : step.status === "aborted" ? <CircleStop size={12} /> : step.status === "error" ? <AlertCircle size={12} /> : <Check size={12} />}</span>
             <span className="delegation-step-label" title={step.label}>{step.label}</span>
             {step.completedAt !== undefined && <span className="delegation-step-duration">{formatDuration(step.startedAt, step.completedAt)}</span>}
           </li>
@@ -598,6 +601,7 @@ const MessageView = memo(function MessageView({ message, executions, workspace, 
         <div className="assistant-share-content" ref={shareTargetRef}>
           <ActionTimeline message={message} executions={executions} turnActive={turnActive} showThinking={showThinking} thinkingLabel={hiddenThinkingLabel} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} timing={timing} now={now} onOpenTranscript={onOpenTranscript} />
           {message.error && <p className="inline-error"><AlertCircle size={15} />{message.error}</p>}
+          {message.aborted && <p className="inline-abort"><CircleStop size={14} />已停止生成</p>}
         </div>
         {changedFiles.length > 0 && <ChangedFilesPanel files={changedFiles} workspace={workspace} onOpenFile={onOpenFile} onOpenDiff={onOpenDiff} onRollback={onRollback} rollbackStates={rollbackStates} rollbackDisabled={busy} />}
         {!isControlMessage && !message.streaming && !busy && <div className="message-actions"><button type="button" data-control="regenerate" title="重新生成" aria-label="重新生成回复" onClick={() => onRegenerate(message)}><RefreshCw size={13} /></button><button type="button" data-control="copy" title="复制" aria-label="复制 AI 回复" onClick={() => onCopy(message)}><Copy size={13} /></button>{hasShareableContent && <button type="button" data-control="share" title={sharing ? "正在生成图片" : shared ? "已复制图片" : "分享图片"} aria-label={sharing ? "正在生成回复图片" : shared ? "回复图片已复制" : "分享 AI 回复图片"} disabled={sharing} onClick={() => void share()}>{sharing ? <LoaderCircle size={13} className="spinning" /> : shared ? <Check size={13} /> : <Share2 size={13} />}</button>}</div>}

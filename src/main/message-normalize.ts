@@ -14,6 +14,7 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, UserMessage } from "@earendil-works/pi-ai";
 import { messageUuid } from "./message-identity.js";
+import { isAbortedMessage } from "./run-outcome.js";
 import { parseCommandPrompt, type CommandPromptDisplay } from "./command-catalog.js";
 import { parseSkillPrompt, type SkillPromptDisplay } from "./skill-prompt.js";
 import { stripVisionHint } from "./runtime-vision.js";
@@ -113,6 +114,10 @@ export function normalizeMessages(messages: AgentMessage[], streamingMessage?: A
     if (cached && cached.index === index) return cached.message;
     const skillPrompt = message.role === "user" ? parseSkillPrompt(userMessageText(message)) : undefined;
     const commandPrompt = message.role === "user" && !skillPrompt ? parseCommandPrompt(userMessageText(message)) : undefined;
+    // 用户中止（Pi stopReason=aborted）不是失败：剥离各家 SDK 的中止英文原文，
+    // 只留 aborted 标记给渲染端做中性提示（历史会话同样受益——JSONL 里存着
+    // stopReason）。error 与 aborted 互斥。
+    const aborted = isAbortedMessage(message);
     const normalized: ChatMessage = {
       id: `${message.timestamp ?? 0}-${index}-${message.role}`,
       uuid: messageUuid(message, index),
@@ -123,7 +128,8 @@ export function normalizeMessages(messages: AgentMessage[], streamingMessage?: A
       skill: skillPrompt ? { name: skillPrompt.name } : undefined,
       command: commandPrompt ? { name: commandPrompt.name } : undefined,
       streaming: message === streamingMessage,
-      error: message.role === "assistant" ? (message as AssistantMessage).errorMessage : undefined
+      error: message.role === "assistant" && !aborted ? (message as AssistantMessage).errorMessage : undefined,
+      aborted: aborted || undefined
     };
     if (message !== streamingMessage) normalizedCache.set(message, { index, message: normalized });
     return normalized;

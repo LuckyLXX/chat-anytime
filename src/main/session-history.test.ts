@@ -27,6 +27,40 @@ describe("persisted activity history", () => {
     ])).toMatchObject([{ id: "call-1", status: "error", output: "工具执行在应用关闭或会话切换前未返回结果。" }]);
   });
 
+  it("用户中止的回合：被杀的 error 工具结果还原为 aborted（不显示失败）", () => {
+    const messages: PersistedSessionMessage[] = [
+      { role: "assistant", timestamp: 100, content: [{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "npm test" } }] },
+      { role: "toolResult", timestamp: 140, toolCallId: "call-1", toolName: "bash", content: [{ type: "text", text: "Operation aborted" }], isError: true },
+      // SDK 在 abort 时追加的失败消息：权威判定依据
+      { role: "assistant", timestamp: 141, content: [], stopReason: "aborted" }
+    ];
+
+    expect(restoreToolExecutions(messages)).toMatchObject([{ id: "call-1", status: "aborted", output: "Operation aborted" }]);
+  });
+
+  it("中止后用户重发新回合：后续工具结果不被前一条 aborted 消息误标", () => {
+    const messages: PersistedSessionMessage[] = [
+      { role: "assistant", timestamp: 100, content: [{ type: "toolCall", id: "call-1", name: "bash", arguments: {} }] },
+      { role: "toolResult", timestamp: 140, toolCallId: "call-1", toolName: "bash", content: [{ type: "text", text: "Operation aborted" }], isError: true },
+      { role: "assistant", timestamp: 141, content: [], stopReason: "aborted" },
+      { role: "user" },
+      { role: "assistant", timestamp: 200, content: [{ type: "toolCall", id: "call-2", name: "bash", arguments: {} }] },
+      { role: "toolResult", timestamp: 240, toolCallId: "call-2", toolName: "bash", content: [{ type: "text", text: "boom" }], isError: true }
+    ];
+
+    expect(restoreToolExecutions(messages)).toMatchObject([
+      { id: "call-1", status: "aborted" },
+      { id: "call-2", status: "error" }
+    ]);
+  });
+
+  it("会话以中止收尾：未闭合的调用也还原为 aborted", () => {
+    expect(restoreToolExecutions([
+      { role: "assistant", timestamp: 100, content: [{ type: "toolCall", id: "call-1", name: "bash", arguments: {} }] },
+      { role: "assistant", timestamp: 140, content: [], stopReason: "aborted" }
+    ])).toMatchObject([{ id: "call-1", status: "aborted", output: "工具执行在用户中止前未返回结果。" }]);
+  });
+
   it("restores a workspace-relative file summary for write and edit calls", () => {
     const messages: PersistedSessionMessage[] = [
       { role: "assistant", timestamp: 100, content: [{ type: "toolCall", id: "call-1", name: "write", arguments: { path: "src/new.ts" } }] },

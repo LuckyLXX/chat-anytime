@@ -9,6 +9,7 @@ import { spawn } from "node:child_process";
 import type { ExtensionAPI, InlineExtension } from "@earendil-works/pi-coding-agent";
 import type { HookAction, HookRule, RuntimeMessage } from "../shared/protocol.js";
 import { HOOK_TIMEOUT_DEFAULT_MS, HOOK_TIMEOUT_MAX_MS, type ConfiguredHook } from "./hooks-config.js";
+import { isAbortedMessage } from "./run-outcome.js";
 
 /** 事件触发时交给钩子动作的上下文（命令经 stdin JSON / HOOK_* env 获取）。 */
 export interface HookContext {
@@ -336,13 +337,14 @@ export async function testHook(rule: HookRule, sample: string | undefined, deps:
 /**
  * 整次回复的累计用量：对 agent_end 给到的消息序列求和（每条 assistant 消息
  * 带各自的 usage），并取末条 assistant 的 errorMessage 作为失败标记——与
- * pi-runtime 侧 runStatus 的失败判定同源。
+ * pi-runtime 侧 runStatus 的失败判定同源（run-outcome.ts）：用户中止
+ * （stopReason=aborted）不是失败，不置 isError。
  */
 function runUsageFromMessages(messages: unknown): { usage?: HookContext["usage"]; isError: boolean } {
   let usage: HookContext["usage"] | undefined;
   let isError = false;
   for (const message of Array.isArray(messages) ? messages : []) {
-    const entry = message as { role?: string; usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: { total?: number } }; errorMessage?: string };
+    const entry = message as { role?: string; stopReason?: string; usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: { total?: number } }; errorMessage?: string };
     if (entry.role !== "assistant") continue;
     const next = entry.usage;
     if (next) {
@@ -354,7 +356,7 @@ function runUsageFromMessages(messages: unknown): { usage?: HookContext["usage"]
         cost: (usage?.cost ?? 0) + (next.cost?.total ?? 0)
       };
     }
-    if (entry.errorMessage) isError = true;
+    if (entry.errorMessage && !isAbortedMessage(entry)) isError = true;
   }
   return { ...(usage ? { usage } : {}), isError };
 }

@@ -98,7 +98,7 @@
 
 **行级钩子（侧栏列表内部）**：`data-row-kind`（`workspace` 工作区分组头 / `session` 会话行 / `agent` 助手行）+ 布尔 `data-row-active`（选中行）+ 布尔 `data-row-expanded`（工作区分组展开）。主题可精确重设计行、牌匾、折叠与展开态。
 
-**节点级钩子（时间线内部）**：`data-node-kind`（时间线段类型：`thinking` / `tool-call` / `text`）+ `data-node-state`（`running` / `completed` / `error`，缺失为普通态）。用于"思考中扫光""工具运行微光"等状态动画。
+**节点级钩子（时间线内部）**：`data-node-kind`（时间线段类型：`thinking` / `tool-call` / `text`）+ `data-node-state`（`running` / `completed` / `error` / `aborted`，缺失为普通态）。用于“思考中扫光”“工具运行微光”等状态动画；`aborted` 是用户中止（不是失败），主题应给它中性而非告警色。
 
 **输入框分区钩子 `data-composer-zone`**：`queue`（排队列表）`plan`（计划模式状态条）`attachments`（附件预览条）`error`（附件错误条）`input`（输入行）`footer`（工具栏行）`stats`（dsh 风格会话性能统计行；渲染在输入框卡片**上方**、时间线底部呼吸区内，绝对定位 `bottom: calc(var(--composer-space) - 34px)`，流式时行首带主色实时速度组；空数据整行隐藏，分屏窄格同样隐藏）`popup`（斜杠/引用/访问模式/模型/思考/上下文明细菜单）。
 

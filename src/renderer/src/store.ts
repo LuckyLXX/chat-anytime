@@ -253,7 +253,8 @@ function mergeMessagesPreservingIdentity(previous: RuntimeSnapshot["messages"], 
     // Skip streaming messages when reusing the identity: a streaming
     // bubble keeps the same uuid while its content grows token by
     // token, so we must take the fresh reference to render new tokens.
-    if (prev && !msg.streaming && prev.streaming === msg.streaming && prev.error === msg.error) return prev;
+    // aborted 与 error 一样参与判定：中止帧若沿用旧引用，中性提示就永不出场。
+    if (prev && !msg.streaming && prev.streaming === msg.streaming && prev.error === msg.error && prev.aborted === msg.aborted) return prev;
     changed = true;
     return msg;
   });

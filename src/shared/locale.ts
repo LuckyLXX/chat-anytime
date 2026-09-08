@@ -21,7 +21,8 @@ export const thinkingLevelLabels: Record<ThinkingLevel, string> = {
 export const sessionRunStatusLabels: Record<SessionRunStatus, string> = {
   running: "执行中",
   completed: "执行完成",
-  failed: "执行失败"
+  failed: "执行失败",
+  aborted: "已中止"
 };
 
 const toolLabels: Record<string, string> = {

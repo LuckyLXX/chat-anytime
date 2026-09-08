@@ -300,3 +300,23 @@ describe("usage stats", () => {
     expect(state.usageStatsLoading).toBe(false);
   });
 });
+
+describe("message identity merge", () => {
+  it("aborted 标记变化时换新引用（否则中止提示帧被引用复用吞掉）", () => {
+    const base = snap("session-a");
+    const settled = { id: "m1", uuid: "u1", role: "assistant" as const, timestamp: 1, blocks: [], streaming: false };
+    useDesktopStore.getState().handleRuntimeMessage({ type: "state", snapshot: { ...base, messages: [settled] } });
+    const first = useDesktopStore.getState().snapshot.messages[0];
+    expect(first?.aborted).toBeUndefined();
+
+    // 同一 uuid、同一 error、仅 aborted 变化：必须换新引用，否则 memo 气泡不重渲。
+    useDesktopStore.getState().handleRuntimeMessage({ type: "state", snapshot: { ...base, messages: [{ ...settled, aborted: true }] } });
+    const second = useDesktopStore.getState().snapshot.messages[0];
+    expect(second?.aborted).toBe(true);
+    expect(second).not.toBe(first);
+
+    // 内容完全一致的重复帧仍复用旧引用（流式高频推送的既有纪律）。
+    useDesktopStore.getState().handleRuntimeMessage({ type: "state", snapshot: { ...base, messages: [{ ...settled, aborted: true }] } });
+    expect(useDesktopStore.getState().snapshot.messages[0]).toBe(second);
+  });
+});

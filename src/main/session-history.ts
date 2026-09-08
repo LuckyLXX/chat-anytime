@@ -2,6 +2,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ChatMessage, DelegationProgress, ToolExecution } from "../shared/protocol.js";
 import { isDelegationProgress } from "../shared/protocol.js";
 import { normalizeMessages } from "./message-normalize.js";
+import { isAbortedMessage } from "./run-outcome.js";
 import { changedWorkspaceFile, changedWorkspaceFiles } from "./workspace-preview.js";
 
 export const PI_DESKTOP_CONTROL_ENTRY_TYPE = "pidesktop-control";
@@ -32,6 +33,8 @@ export interface PersistedAssistantMessage {
   role: "assistant";
   timestamp: number;
   content: ReadonlyArray<PersistedToolCallBlock | { type: "text" | "thinking" | "image" }>;
+  /** Pi 持久化的停止原因（"aborted" = 用户中止）；旧会话/其他写入方可能缺省。 */
+  stopReason?: string;
 }
 
 export interface PersistedToolResultMessage {
@@ -122,8 +125,19 @@ export function transcriptMessagesFromEntries(entries: readonly PersistedSession
  */
 export function restoreToolExecutions(messages: readonly PersistedSessionMessage[], workspace?: string): ToolExecution[] {
   const executions = new Map<string, ToolExecution>();
+  // 中止回合的工具不再显示「失败」：SDK 为被中止的工具合成 isError 结果
+  // （"Operation aborted"），但紧随其后的 assistant 消息 stopReason=aborted
+  // 才是权威判定（同 run-outcome 口径，不匹配英文文案）。nextAssistant[i]
+  // = 下标 i 之后最近的一条 assistant 消息，一次反向扫描预计算。
+  const nextAssistant: Array<PersistedSessionMessage | undefined> = new Array(messages.length);
+  let seen: PersistedSessionMessage | undefined;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    nextAssistant[index] = seen;
+    if (messages[index]?.role === "assistant") seen = messages[index];
+  }
+  const trailingAborted = isAbortedMessage([...messages].reverse().find((message) => message.role === "assistant"));
 
-  for (const message of messages) {
+  for (const [index, message] of messages.entries()) {
     if (message.role === "assistant") {
       for (const block of message.content) {
         if (block.type !== "toolCall") continue;
@@ -144,11 +158,12 @@ export function restoreToolExecutions(messages: readonly PersistedSessionMessage
     const previous = executions.get(message.toolCallId);
     const output = resultText(message);
     const delegation = delegationFromDetails(message);
+    const aborted = isAbortedMessage(nextAssistant[index]);
     executions.set(message.toolCallId, {
       id: message.toolCallId,
       name: previous?.name ?? message.toolName,
       args: previous?.args ?? {},
-      status: message.isError ? "error" : "completed",
+      status: aborted ? "aborted" : message.isError ? "error" : "completed",
       startedAt: previous?.startedAt ?? message.timestamp,
       completedAt: message.timestamp,
       changedFile: previous?.changedFile ?? changedWorkspaceFile(workspace, message.toolName, previous?.args),
@@ -162,9 +177,9 @@ export function restoreToolExecutions(messages: readonly PersistedSessionMessage
   return [...executions.values()].map((execution) => execution.status === "running"
     ? {
       ...execution,
-      status: "error",
+      status: trailingAborted ? "aborted" : "error",
       completedAt: execution.startedAt,
-      output: "工具执行在应用关闭或会话切换前未返回结果。"
+      output: trailingAborted ? "工具执行在用户中止前未返回结果。" : "工具执行在应用关闭或会话切换前未返回结果。"
     }
     : execution);
 }

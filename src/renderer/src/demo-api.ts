@@ -190,6 +190,7 @@ const demoSnapshot: RuntimeSnapshot = {
   sessions: [
     { id: "demo-session", path: "demo-session.jsonl", workspace: "D:\\Projects\\chat-anytime-demo", title: "梳理项目架构", modifiedAt: Date.now(), messageCount: 4, runStatus: "completed" },
     { id: "older-session", path: "older-session.jsonl", workspace: "D:\\Projects\\chat-anytime-demo", title: "检查渲染流程", modifiedAt: Date.now() - 86_400_000, messageCount: 7, runStatus: "failed" },
+    { id: "aborted-session", path: "aborted-session.jsonl", workspace: "D:\\Projects\\PiDesktop", title: "中止的排查任务", modifiedAt: Date.now() - 7_200_000, messageCount: 5, runStatus: "aborted" },
     { id: "other-session", path: "other-session.jsonl", workspace: "D:\\Projects\\PiDesktop", title: "检查桌面端", modifiedAt: Date.now() - 43_200_000, messageCount: 3 }
   ],
   messages: [
@@ -252,6 +253,21 @@ flowchart LR
 </assistant_html>`
         }
       ]
+    },
+    // 用户中止样例：真实运行时由 Pi 的 stopReason=aborted 消息归一化而来
+    // （已生成内容保留 + aborted 标记，不再透出 SDK 的英文中止原文）。
+    {
+      id: "demo-abort-user",
+      role: "user",
+      timestamp: Date.now() - 3_000,
+      blocks: [{ type: "text", text: "再补一版流程对比图。" }]
+    },
+    {
+      id: "demo-abort-assistant",
+      role: "assistant",
+      timestamp: Date.now() - 2_000,
+      aborted: true,
+      blocks: [{ type: "text", text: "好的，我先看一下现有画布的节点结构……" }]
     }
   ],
   executions: [

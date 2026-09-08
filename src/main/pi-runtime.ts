@@ -4,7 +4,7 @@ import { readFile, readdir, realpath, stat, unlink, writeFile } from "node:fs/pr
 import { basename, dirname, isAbsolute, join, relative as relativePath, resolve, sep } from "node:path";
 import { estimateTokens } from "@earendil-works/pi-agent-core";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { Api, AssistantMessage, UserMessage, ImageContent, Model, Context, ModelsSimpleStreamOptions } from "@earendil-works/pi-ai";
+import type { Api, UserMessage, ImageContent, Model, Context, ModelsSimpleStreamOptions } from "@earendil-works/pi-ai";
 import {
   createAgentSession,
   DefaultResourceLoader,
@@ -64,6 +64,7 @@ import { toolLabel } from "../shared/locale.js";
 import { workspaceRelativeAttachment } from "./attachments.js";
 import { saveBrowserScreenshot } from "./browser-screenshot.js";
 import { autoCompactionFailureNotice, runManualCompaction } from "./compaction-lifecycle.js";
+import { resolveRunOutcomeStatus, type TerminalRunStatus } from "./run-outcome.js";
 import { readGitBranch } from "./git-branch.js";
 import { builtinProviderOverlay, inferCustomModelImageInput, resolveBuiltinOverlayAction, resolveCustomProviderRegistration } from "./custom-provider.js";
 import { buildDivModePrompt } from "./div-prompt.js";
@@ -676,7 +677,10 @@ async function runAutomationTask(task: AutomationTask, trigger: "cron" | "manual
     post({ type: "automation-run", id: task.id, status: "error", taskName: task.name, runId, message });
   } finally {
     record.busy = false;
-    record.runStatus = succeeded ? "completed" : "failed";
+    // 用户中止的自动化运行不被 finally 覆盖成「完成」：消息的 stopReason
+    // 是权威依据（结算时 abortRequested 已被 resolveRunOutcome 清空）。
+    const abortedRun = resolveRunOutcomeStatus(false, record.session.state.messages) === "aborted";
+    record.runStatus = abortedRun ? "aborted" : succeeded ? "completed" : "failed";
     patchSessionRunStatus(record);
     emitState();
     emitPaneStateFor(record);
@@ -1042,10 +1046,10 @@ function ensureSessionInList(record: SessionRuntimeRecord): void {
  * parked sessions, and clear as soon as the session is activated. The active
  * session's outcome is already visible in the conversation, so it gets none.
  */
-function setTerminalRunStatus(record: SessionRuntimeRecord, failed: boolean): void {
+function setTerminalRunStatus(record: SessionRuntimeRecord, outcome: TerminalRunStatus): void {
   // 分屏中被 watch 的会话与激活会话同待遇：结果直接可见，不设终端圆点。
   const visible = record === activeRuntime || renderedSessions.has(record.session.sessionId);
-  record.runStatus = visible ? undefined : failed ? "failed" : "completed";
+  record.runStatus = visible ? undefined : outcome;
   patchSessionRunStatus(record);
 }
 
@@ -1518,15 +1522,14 @@ function delegationFromToolResult(result: unknown): DelegationProgress | undefin
 }
 
 /**
- * Resolve the sidebar dot at the end of a run: red when the turn was aborted
- * or ended with an assistant error message, green otherwise. Active sessions
- * get no terminal dot (see setTerminalRunStatus).
+ * Resolve the sidebar dot at the end of a run: aborted（用户中止）/ failed
+ * （真实错误）/ completed。判定口径见 run-outcome.ts——中止不靠英文文案识别。
+ * 激活会话不设终端圆点（见 setTerminalRunStatus）。
  */
 function resolveRunOutcome(record: SessionRuntimeRecord, messages: readonly AgentMessage[]): void {
-  const lastAssistant = [...messages].reverse().find((message) => message.role === "assistant") as AssistantMessage | undefined;
-  const failed = record.abortRequested || Boolean(lastAssistant?.errorMessage);
+  const outcome = resolveRunOutcomeStatus(record.abortRequested, messages);
   record.abortRequested = false;
-  setTerminalRunStatus(record, failed);
+  setTerminalRunStatus(record, outcome);
 }
 
 function handleSessionEvent(record: SessionRuntimeRecord, event: AgentSessionEvent): void {
@@ -1666,6 +1669,11 @@ function handleSessionEvent(record: SessionRuntimeRecord, event: AgentSessionEve
       const output = textFromToolResult(event.result);
       const completedAt = Date.now();
       const startedAt = current?.startedAt ?? completedAt;
+      // 中止保持：session.abort 已把运行中的执行标为 aborted，但 Pi 随后的
+      // tool_execution_end（被 kill 的工具返回错误结果）不能把它改回「失败」。
+      // 只认 execution 自身的标记，不用 record.abortRequested 兜底——后者会
+      // 误标中止前已正常完成、但 end 事件延迟到达的其它工具。
+      const aborted = current?.status === "aborted";
       // 工具耗时累计（dsh 口径：单次调用 end − start；与 LLM 耗时互斥配对）。
       record.speedStats = speedStats.addSpeedToolMs(record.speedStats, completedAt - startedAt);
       const changedFiles = current?.changedFiles
@@ -1679,7 +1687,7 @@ function handleSessionEvent(record: SessionRuntimeRecord, event: AgentSessionEve
         args: current?.args ?? {},
         startedAt,
         completedAt,
-        status: event.isError ? "error" : "completed",
+        status: aborted ? "aborted" : event.isError ? "error" : "completed",
         output,
         patch: patchFromToolResult(event.result),
         changedFile: current?.changedFile ?? changedWorkspaceFile(record.workspace, event.toolName, current?.args),
@@ -3030,7 +3038,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         completeTurn(record);
         record.busy = false;
         record.status = "请求失败";
-        setTerminalRunStatus(record, true);
+        setTerminalRunStatus(record, "failed");
         post({ type: "error", message: errorText(error) });
         emitState();
         emitPaneStateFor(record);
@@ -3158,7 +3166,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         completeTurn(record);
         record.busy = false;
         record.status = "请求失败";
-        setTerminalRunStatus(record, true);
+        setTerminalRunStatus(record, "failed");
         post({ type: "error", message: errorText(error) });
         emitState();
         emitPaneStateFor(record);
@@ -3181,16 +3189,25 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       // Make the task panel reflect the abort immediately: mark every running
       // tool execution as aborted so its card disappears without waiting for
       // the SDK's tool_execution_end (which may be delayed or never arrive
-      // if the killed process tree hangs the tool promise).
+      // if the killed process tree hangs the tool promise). 中止不是失败：
+      // 状态单列 aborted，渲染端转中性「已中止」而非红色失败。
       {
         let changed = false;
         for (const execution of record.executions.values()) {
-          if (execution.status === "running") {
-            execution.status = "error";
-            execution.completedAt = Date.now();
-            execution.output = `${execution.output ?? ""}${execution.output ? "\n\n" : ""}（已中止）`;
-            changed = true;
+          if (execution.status !== "running") continue;
+          execution.status = "aborted";
+          execution.completedAt = Date.now();
+          execution.output = `${execution.output ?? ""}${execution.output ? "\n\n" : ""}（已中止）`;
+          // 委派卡内的步骤同步封口：父执行中止后子代理的后续回报不再可信，
+          // 残留的 running 步骤会在卡里无限转圈（与 subagent 的封口语义一致）。
+          if (execution.delegation) {
+            const delegation = execution.delegation;
+            execution.delegation = {
+              ...delegation,
+              steps: delegation.steps.map((step) => step.status === "running" ? { ...step, status: "aborted" as const, completedAt: execution.completedAt } : step)
+            };
           }
+          changed = true;
         }
         if (changed) emitState();
         emitPaneStateFor(record);
@@ -3343,7 +3360,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         completeTurn(record);
         record.busy = false;
         record.status = outcome.status;
-        setTerminalRunStatus(record, outcome.type === "failed");
+        setTerminalRunStatus(record, outcome.type === "failed" ? "failed" : outcome.type === "cancelled" ? "aborted" : "completed");
         if (outcome.type === "failed") post({ type: "error", message: errorText(outcome.error) });
         emitState();
         emitPaneStateFor(record);

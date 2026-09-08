@@ -60,6 +60,23 @@ describe("normalizeMessages 身份缓存", () => {
     expect(result[0]?.blocks).toEqual([{ type: "text", text: "半截" }]);
     expect(result[0]?.error).toBe("超时");
     expect(result[0]?.streaming).toBe(false);
+    expect(result[0]?.aborted).toBeUndefined();
+  });
+
+  it("用户中止（stopReason=aborted）：剥离各家 SDK 英文原文，只留 aborted 标记", () => {
+    const aborted = { role: "assistant", content: [], timestamp: 11, stopReason: "aborted", errorMessage: "This operation was aborted" } as unknown as AgentMessage;
+    const result = normalizeMessages([aborted]);
+    expect(result[0]?.error).toBeUndefined();
+    expect(result[0]?.aborted).toBe(true);
+    expect(result[0]?.blocks).toEqual([]);
+  });
+
+  it("带部分输出的中止：已生成内容保留，错误行不再透出", () => {
+    const aborted = { role: "assistant", content: [{ type: "text", text: "写到一半" }], timestamp: 12, stopReason: "aborted", errorMessage: "Request aborted by user" } as unknown as AgentMessage;
+    const result = normalizeMessages([aborted]);
+    expect(result[0]?.blocks).toEqual([{ type: "text", text: "写到一半" }]);
+    expect(result[0]?.error).toBeUndefined();
+    expect(result[0]?.aborted).toBe(true);
   });
 });
 

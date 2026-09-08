@@ -21,6 +21,18 @@ describe("chat message layout", () => {
     expect(result[1]?.id).toBe("a1");
   });
 
+  it("carries the abort marker through grouping so the neutral hint survives", () => {
+    const result = groupAssistantMessages([
+      message("u1", "user", "跑一下"),
+      message("a1", "assistant", "先读取文件", [{ type: "tool-call", id: "t1", name: "read", arguments: {} }]),
+      { ...message("a2", "assistant", "写到一半"), aborted: true }
+    ]);
+
+    expect(result).toHaveLength(2);
+    expect(result[1]?.aborted).toBe(true);
+    expect(result[1]?.blocks).toHaveLength(3);
+  });
+
   it("does not merge assistant replies across a user message", () => {
     const result = groupAssistantMessages([
       message("u1", "user", "第一问"),

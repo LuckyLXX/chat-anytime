@@ -327,6 +327,12 @@ export interface ChatMessage {
   attachments?: Array<{ kind: PromptAttachment["kind"]; name: string; relativePath?: string }>;
   streaming?: boolean;
   error?: string;
+  /**
+   * 该条 assistant 消息以「中止」结束（用户点停止；Pi 的 stopReason=aborted）。
+   * 与 error 互斥：中止不是失败，各家 SDK 的中止英文原文（This operation was
+   * aborted / Request aborted …）已在归一化时剥离，渲染端只显示中性「已停止生成」。
+   */
+  aborted?: boolean;
 }
 
 export interface TurnTiming {
@@ -469,7 +475,8 @@ export interface ToolExecution {
   id: string;
   name: string;
   args: unknown;
-  status: "running" | "completed" | "error";
+  /** aborted = 用户中止导致的结束（区别于工具自身失败的 error）。 */
+  status: "running" | "completed" | "error" | "aborted";
   startedAt: number;
   completedAt?: number;
   output?: string;
@@ -494,7 +501,8 @@ export interface DelegationStep {
   tool: string;
   /** 人类可读摘要（summarizeArgs 生成，如命令行、文件路径），≤120 字符。 */
   label: string;
-  status: "running" | "completed" | "error";
+  /** aborted = 父会话被用户中止时封口的未完成步骤（渲染中性图标，不转圈不报错）。 */
+  status: "running" | "completed" | "error" | "aborted";
   startedAt: number;
   completedAt?: number;
 }
@@ -810,7 +818,7 @@ export type TerminalEventData =
  * state; "completed"/"failed" are unseen-outcome notifications that clear as
  * soon as the session is opened (the result is then visible in the chat).
  */
-export type SessionRunStatus = "running" | "completed" | "failed";
+export type SessionRunStatus = "running" | "completed" | "failed" | "aborted";
 
 export interface SessionSummary {
   id: string;

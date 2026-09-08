@@ -29,7 +29,8 @@ export function changedFilesForMessage(message: ChatMessage, executions: ToolExe
   const callIds = new Set(message.blocks.filter((block) => block.type === "tool-call").map((block) => block.id));
   const files = new Map<string, ReplyChangedFile>();
   for (const execution of executions) {
-    if (!callIds.has(execution.id) || execution.status === "error") continue;
+    // 中止（aborted）同样不算成功产物：回滚/展示只认真正落盘的调用。
+    if (!callIds.has(execution.id) || execution.status === "error" || execution.status === "aborted") continue;
     const paths = execution.changedFiles?.map((item) => item.relativePath)
       ?? (execution.changedFile ? [execution.changedFile.relativePath] : []);
     for (const relativePath of paths) {
