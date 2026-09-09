@@ -8,6 +8,7 @@
     "dev": "electron-vite dev",
     "build": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json && electron-vite build",
     "preview": "electron-vite preview",
+    "demo": "vite --config .vite.demo.config.mjs",
     "package:win": "npm run build && electron-builder --win dir",
     "test": "vitest run"
   },

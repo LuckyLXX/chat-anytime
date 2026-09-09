@@ -261,6 +261,13 @@ function startRuntime(): void {
       showHookNotification(message.title, message.body, message.sessionId, message.visible);
       return;
     }
+    if (message.type === "open-external") {
+      // MCP OAuth 授权页：用系统默认浏览器打开（utility 进程无 Electron API）。
+      void import("electron").then(({ shell }) => shell.openExternal(message.url)).catch((error) => {
+        console.warn(`打开外部链接失败：${message.url} ${String(error)}`);
+      });
+      return;
+    }
     if (message.type === "browser-automation.request") {
       // AI 浏览器操作：在 main 进程驱动可见预览标签页，完成后原路回传。
       if (browserAutomationController) {

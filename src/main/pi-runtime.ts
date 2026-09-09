@@ -69,7 +69,8 @@ import { readGitBranch } from "./git-branch.js";
 import { builtinProviderOverlay, inferCustomModelImageInput, resolveBuiltinOverlayAction, resolveCustomProviderRegistration } from "./custom-provider.js";
 import { buildDivModePrompt } from "./div-prompt.js";
 import { McpClientManager } from "./mcp-client.js";
-import { removeMcpServerConfig, setMcpServerDisabled, upsertMcpServerConfig } from "./mcp-config.js";
+import { readConfiguredMcpServers, removeMcpServerConfig, setMcpServerDisabled, upsertMcpServerConfig } from "./mcp-config.js";
+import { McpOAuthController } from "./mcp-oauth.js";
 import { PermissionBroker } from "./permission-broker.js";
 import { loadRecentWorkspaces, recordRecentWorkspace, writeRecentWorkspaces } from "./recent-workspaces.js";
 import { assistantText, createSubagentTools, buildSubagentPromptBlock, type SubagentContext } from "./subagent.js";
@@ -391,7 +392,28 @@ const questionBroker = new runtimeQuestionTool.QuestionBroker(
   (request) => post({ type: "question", request }),
   (id) => post({ type: "question.dismiss", id })
 );
-const mcpClient = new McpClientManager();
+// OAuth：回调服务器与凭据库都在 utility 进程；打开浏览器经 main 进程
+// shell.openExternal（open-external 上行消息），授权完成后重连并刷新工具集。
+const mcpOAuth = new McpOAuthController({
+  storePath: () => join(getAgentDir(), "pidesktop-mcp-auth.json"),
+  openExternal: (url) => post({ type: "open-external", url }),
+  onAuthorized: async (serverName) => {
+    forceMcpRefresh = true;
+    if (activeRuntime) await applyMcpToolChanges();
+    else {
+      await syncMcpServers(true);
+      forceMcpRefresh = false;
+    }
+    // applyMcpToolChanges 的热更新路径（只加不减走 registerTool）不推资源目录，
+    // 这里补上——否则授权成功后面板仍显示「等待浏览器授权…」。
+    emitResourceCatalog();
+    post({ type: "log", level: "info", message: `MCP 服务器 ${serverName} 已完成 OAuth 授权` });
+  },
+  // 等待超时/回调失败发生在任何命令之外，同样要重推目录让面板离开等待态。
+  onAuthStateChanged: () => emitResourceCatalog(),
+  log: (message) => post({ type: "log", level: "warn", message })
+});
+const mcpClient = new McpClientManager({ oauth: mcpOAuth });
 let mcpTools: ToolDefinition[] = [];
 
 function skillPaths(): ReturnType<typeof runtimeSkills.skillPathsFor> {
@@ -3722,6 +3744,45 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       });
       break;
     }
+    case "mcp.server.auth": {
+      if (!/^[A-Za-z0-9._-]+$/u.test(command.name)) throw new Error("MCP Server 名称无效");
+      const { project, global } = mcpConfigPaths();
+      const target = readConfiguredMcpServers(project, global).find((server) => server.name === command.name);
+      if (!target) throw new Error("找不到要认证的 MCP Server");
+      if (!mcpOAuth.supports(target)) throw new Error("仅 HTTP（且未使用 Bearer 环境变量）的 MCP Server 支持 OAuth 认证");
+      await runResourceOperation("正在准备 MCP 授权", async () => {
+        // 已开过授权页（等待回调中）→ 重新打开，不重走发现/注册。
+        if (await mcpOAuth.reopenAuthorization(command.name)) return;
+        // 显式选了 OAuth 的 server 不等 401：直接走 SDK 的授权编排（无凭据时
+        // 打开浏览器；已有/刚刷新的 token 则直接重连）。
+        if (target.entry.auth === "oauth") {
+          const outcome = await mcpOAuth.beginAuthorization(target);
+          forceMcpRefresh = true;
+          await syncMcpServers(true);
+          forceMcpRefresh = false;
+          post({ type: "log", level: "info", message: outcome === "authorized" ? `${command.name} 已使用已保存的凭据完成授权` : `${command.name} 已在浏览器中打开授权页` });
+          return;
+        }
+        // 未显式声明的 server：强制重连，401 时由 SDK 触发授权。
+        forceMcpRefresh = true;
+        await syncMcpServers(true);
+        forceMcpRefresh = false;
+        if (!mcpOAuth.hasPending(command.name)) {
+          post({ type: "log", level: "info", message: `${command.name} 未要求 OAuth 认证，已直接连接` });
+        }
+      });
+      break;
+    }
+    case "mcp.server.auth.clear": {
+      if (!/^[A-Za-z0-9._-]+$/u.test(command.name)) throw new Error("MCP Server 名称无效");
+      await runResourceOperation("正在清除 MCP 凭据", async () => {
+        await mcpOAuth.clear(command.name);
+        forceMcpRefresh = true;
+        await syncMcpServers(true);
+        forceMcpRefresh = false;
+      });
+      break;
+    }
     case "mcp.server.toggle": {
       if (!/^[A-Za-z0-9._-]+$/u.test(command.name)) throw new Error("MCP Server 名称无效");
       await runResourceOperation(command.enabled ? "正在启用 MCP Server" : "正在停用 MCP Server", async () => {
@@ -3979,6 +4040,12 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
 }
 
 let commandQueue = Promise.resolve();
+// 主进程关掉通道（退出/重建运行时）时尽力释放 OAuth 回调服务器；监听已
+// unref，进程被 kill 时由操作系统回收，这里的 dispose 只是优雅路径。
+// （Electron 类型只声明了 message 事件，close 需按通用 EventEmitter 挂。）
+(parentPort as unknown as NodeJS.EventEmitter).on("close", () => {
+  void mcpOAuth.dispose();
+});
 parentPort.on("message", (event: { data: RuntimeCommand }) => {
   // Browser RPC results resolve tool executions directly — queueing them
   // behind serialized commands would stall the run for no reason.

@@ -880,6 +880,12 @@ export interface CommandDraft {
 
 export type McpServerStatus = "connected" | "cached" | "failed" | "needs-auth" | "not-connected" | "disabled";
 
+/**
+ * OAuth 凭据生命周期状态（HTTP server）：idle = 无凭据/未开始，pending = 已打开
+ * 授权页等回调，authorized = 已保存可用凭据，failed = 上一次授权失败。
+ */
+export type McpAuthState = "idle" | "pending" | "authorized" | "failed";
+
 export interface McpServerSummary {
   name: string;
   /** 配置所在文件：项目 `.mcp.json` / 用户全局 `mcp.json`（编辑表单回填与删除定位）。 */
@@ -894,6 +900,8 @@ export interface McpServerSummary {
   bearerTokenEnv?: string;
   env?: Record<string, string>;
   status: McpServerStatus;
+  /** OAuth 凭据状态（仅 HTTP 且非 bearer-env 的 server 会出现）。 */
+  authState?: McpAuthState;
   toolCount: number;
   resourceCount?: number;
   failedAgoSeconds?: number;
@@ -1283,6 +1291,10 @@ export type RuntimeCommand =
   | { type: "appearance.save"; appearance: AppearanceSettings }
   /** 保存 MCP Server：original = 编辑前的位置（名称/作用域），用于作用域迁移与保留停用态。 */
   | { type: "mcp.server.save"; server: McpServerConfigDraft; original?: { name: string; scope: "project" | "global" } }
+  /** 开始/重新打开 OAuth 授权（自动打开系统浏览器，回调落回应用后重连）。 */
+  | { type: "mcp.server.auth"; name: string }
+  /** 清除某个 server 已保存的 OAuth 凭据（client 注册信息 + token）。 */
+  | { type: "mcp.server.auth.clear"; name: string }
   | { type: "mcp.server.toggle"; name: string; enabled: boolean }
   | { type: "mcp.server.delete"; name: string; scope: "project" | "global" }
   | { type: "hooks.save"; hook: HookRuleDraft }
@@ -1364,6 +1376,8 @@ export type RuntimeMessage =
   | { type: "automation-run"; id: string; status: "ok" | "error" | "running"; taskName?: string; runId?: string; message?: string }
   /** 自动化运行历史全量推送（每次运行结束后随终态推送，渲染端全量替换）。 */
   | { type: "automation-runs"; runs: AutomationRunRecord[] }
+  /** utility 进程请求用系统默认浏览器打开一个 URL（OAuth 授权页）；main 进程 shell.openExternal。 */
+  | { type: "open-external"; url: string }
   /** utility 进程发起的浏览器自动化操作；main 完成后以 browser-automation.result 命令回传。 */
   | { type: "browser-automation.request"; requestId: string; sessionKey: string; request: BrowserAutomationRequest }
   /** utility 进程通知某 Pi 会话已销毁（LRU 驱逐/删除会话/移除工作区；同 id 重建不发）——main 侧释放并关闭其绑定的自动化标签页。 */

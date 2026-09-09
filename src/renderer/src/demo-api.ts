@@ -348,7 +348,8 @@ const demoResources: ResourceCatalog = {
   ],
   mcpServers: [
     { name: "docs", scope: "project", transport: "stdio", command: "npx", args: ["-y", "docs-mcp"], env: { DOCS_TOKEN: "demo-token" }, status: "connected", toolCount: 8, resourceCount: 2, disabled: false },
-    { name: "browser", scope: "global", transport: "http", url: "https://mcp.example.com/mcp", auth: "none", status: "disabled", toolCount: 0, disabled: true }
+    { name: "browser", scope: "global", transport: "http", url: "https://mcp.example.com/mcp", auth: "none", status: "disabled", toolCount: 0, disabled: true },
+    { name: "figma", scope: "global", transport: "http", url: "https://mcp.figma.com/mcp", auth: "oauth", status: "needs-auth", authState: "idle", toolCount: 0, disabled: false }
   ],
   todos: [],
   memory: [],
@@ -917,6 +918,34 @@ export function createDemoApi(): DesktopApi {
         }
         case "mcp.server.delete": {
           demoResources.mcpServers = demoResources.mcpServers.filter((item) => item.name !== command.name);
+          emit({ type: "resources", resources: structuredClone(demoResources) });
+          break;
+        }
+        case "mcp.server.auth": {
+          // 离线演示：点「认证」→ 等待浏览器授权 → 2.5s 后完成并连上。
+          const server = demoResources.mcpServers.find((item) => item.name === command.name);
+          if (server) {
+            server.status = "needs-auth";
+            server.authState = "pending";
+            server.error = undefined;
+            emit({ type: "resources", resources: structuredClone(demoResources) });
+            setTimeout(() => {
+              if (server.authState !== "pending") return;
+              server.status = "connected";
+              server.authState = "authorized";
+              server.toolCount = 4;
+              emit({ type: "resources", resources: structuredClone(demoResources) });
+            }, 2_500);
+          }
+          break;
+        }
+        case "mcp.server.auth.clear": {
+          const server = demoResources.mcpServers.find((item) => item.name === command.name);
+          if (server) {
+            server.status = "needs-auth";
+            server.authState = "idle";
+            server.toolCount = 0;
+          }
           emit({ type: "resources", resources: structuredClone(demoResources) });
           break;
         }

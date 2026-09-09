@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { combinedCallSignal, configHash, convertMcpResult, mcpToolName, toTypeBoxSchema } from "./mcp-client.js";
+import { combinedCallSignal, configHash, convertMcpResult, isUnauthorizedError, mcpToolName, toTypeBoxSchema } from "./mcp-client.js";
 
 describe("mcp-client helpers", () => {
   it("names tools as mcp__<server>__<tool> with sanitized segments", () => {
@@ -20,6 +20,14 @@ describe("mcp-client helpers", () => {
     const b = configHash({ command: "npx", args: ["x"], env: { B: "2", A: "1" } });
     expect(a).toBe(b);
     expect(configHash({ command: "npx" })).not.toBe(configHash({ command: "node" }));
+  });
+
+  it("recognizes SDK unauthorized errors so they become needs-auth instead of failed", () => {
+    const sdkError = new Error("Unauthorized");
+    sdkError.name = "UnauthorizedError";
+    expect(isUnauthorizedError(sdkError)).toBe(true);
+    expect(isUnauthorizedError(new Error("连接超时"))).toBe(false);
+    expect(isUnauthorizedError(undefined)).toBe(false);
   });
 
   it("converts MCP callTool results into Pi AgentToolResult content", () => {

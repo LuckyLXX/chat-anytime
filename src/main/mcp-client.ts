@@ -1,4 +1,5 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { UnauthorizedError, type OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
@@ -6,7 +7,9 @@ import type { TextContent, ImageContent } from "@earendil-works/pi-ai";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type, type TSchema } from "typebox";
 import type { McpServerSummary } from "../shared/protocol.js";
-import { mcpServerConfigFields, type ConfiguredMcpServer, type McpServerConfigEntry } from "./mcp-config.js";
+import type { ConfiguredMcpServer, McpServerConfigEntry } from "./mcp-config.js";
+import { mcpServerConfigFields } from "./mcp-config.js";
+import type { McpOAuthController } from "./mcp-oauth.js";
 
 /**
  * Native MCP client (runs in the utility process alongside the Pi runtime).
@@ -107,7 +110,7 @@ export function toTypeBoxSchema(schema: unknown): TSchema {
   return isObjectSchema(schema) ? Type.Unsafe(schema as TSchema) : Type.Object({});
 }
 
-function createTransport(entry: McpServerConfigEntry): StdioClientTransport | StreamableHTTPClientTransport {
+function createTransport(entry: McpServerConfigEntry, authProvider?: OAuthClientProvider): StdioClientTransport | StreamableHTTPClientTransport {
   if (entry.command) {
     // process.env values are `string | undefined`; StdioClientTransport
     // requires a flat Record<string, string>, so drop undefined entries.
@@ -128,9 +131,19 @@ function createTransport(entry: McpServerConfigEntry): StdioClientTransport | St
       const token = process.env[entry.bearerTokenEnv];
       if (token) headers.Authorization = `Bearer ${token}`;
     }
-    return new StreamableHTTPClientTransport(new URL(entry.url), { requestInit: { headers } });
+    // Bearer 环境变量优先；否则（auth: oauth 或未知）挂 OAuth provider：
+    // 公开 server 不会触发认证，401 时才走授权流程。
+    return new StreamableHTTPClientTransport(new URL(entry.url), {
+      requestInit: { headers },
+      ...(authProvider && !entry.bearerTokenEnv ? { authProvider } : {})
+    });
   }
   throw new Error("MCP 配置缺少 command（stdio）或 url（HTTP）");
+}
+
+/** 连接需要 OAuth 且尚未授权时，SDK 抛 UnauthorizedError（授权页已打开）。 */
+export function isUnauthorizedError(error: unknown): boolean {
+  return error instanceof UnauthorizedError || (typeof error === "object" && error !== null && (error as { name?: string }).name === "UnauthorizedError");
 }
 
 export function convertMcpResult(result: unknown): AgentToolResult<unknown> {
@@ -166,6 +179,9 @@ export class McpClientManager {
   private readonly toolIndex = new Map<string, { serverName: string; toolName: string }>();
   private readonly toolCache = new Map<string, McpToolCacheEntry>();
 
+  /** oauth 提供 HTTP server 的凭据/回调（utility 进程，见 mcp-oauth.ts）。 */
+  constructor(private readonly options: { oauth?: McpOAuthController } = {}) {}
+
   /**
    * Reconcile live connections with the given servers; returns status + tool
    * bindings. Steady state (connection alive, hash unchanged, tools cached)
@@ -182,13 +198,20 @@ export class McpClientManager {
       if (!wanted.has(name)) await this.disconnect(name);
     }
 
+    // OAuth 回调服务器就绪后才能建 provider（redirectUrl 依赖实际端口）。
+    if (this.options.oauth && enabled.some((server) => this.options.oauth!.supports(server))) {
+      await this.options.oauth.ensureReady();
+    }
+
     const summaries: McpServerSummary[] = [];
     const bindings: McpToolBinding[] = [];
 
     await Promise.all(servers.map(async (server) => {
       const config = mcpServerConfigFields(server);
+      const authState = this.options.oauth?.authStateOf(server.name);
+      const authFields = authState ? { authState } : {};
       if (server.entry.disabled) {
-        summaries.push({ name: server.name, ...config, status: "disabled", toolCount: 0, disabled: true });
+        summaries.push({ name: server.name, ...config, ...authFields, status: "disabled", toolCount: 0, disabled: true });
         return;
       }
       const hash = configHash(server.entry);
@@ -197,18 +220,27 @@ export class McpClientManager {
       // Fast path: nothing changed and tools are cached — no network at all.
       if (!refresh && connectionMatches && cache && cache.hash === hash) {
         bindings.push(...cache.bindings);
-        summaries.push({ name: server.name, ...config, status: "connected", toolCount: cache.toolCount, disabled: false });
+        summaries.push({ name: server.name, ...config, ...authFields, status: "connected", toolCount: cache.toolCount, disabled: false });
         return;
       }
       try {
         const fresh = await this.ensureTools(server, hash);
         bindings.push(...fresh);
-        summaries.push({ name: server.name, ...config, status: "connected", toolCount: fresh.length, disabled: false });
+        summaries.push({ name: server.name, ...config, ...authFields, status: "connected", toolCount: fresh.length, disabled: false });
       } catch (error) {
         // Keep serving cached bindings so a slow/unreachable server does not
         // strip previously working tools; the status still reports the failure.
         if (cache && cache.hash === hash) bindings.push(...cache.bindings);
-        summaries.push({ name: server.name, ...config, status: "failed", toolCount: cache?.toolCount ?? 0, disabled: false, error: errorText(error) });
+        const needsAuth = isUnauthorizedError(error);
+        summaries.push({
+          name: server.name,
+          ...config,
+          ...(needsAuth ? { authState: this.options.oauth?.authStateOf(server.name) ?? "idle" } : authFields),
+          status: needsAuth ? "needs-auth" : "failed",
+          toolCount: cache?.toolCount ?? 0,
+          disabled: false,
+          error: (needsAuth ? this.options.oauth?.authErrorOf(server.name) : undefined) ?? errorText(error)
+        });
       }
     }));
 
@@ -250,7 +282,12 @@ export class McpClientManager {
   }
 
   private async connect(server: ConfiguredMcpServer, hash: string): Promise<McpConnection> {
-    const transport = createTransport(server.entry);
+    const authProvider = this.options.oauth?.providerFor(server);
+    const transport = createTransport(server.entry, authProvider);
+    // 回调时用同一个 transport finishAuth（PKCE code verifier 就在它的 provider 里）。
+    if (transport instanceof StreamableHTTPClientTransport && this.options.oauth?.supports(server)) {
+      this.options.oauth.registerTransport(server.name, transport);
+    }
     const client = new Client({ name: "chatanytime-desktop", version: "0.1.0" }, { capabilities: {} });
     await client.connect(transport);
     const connection: McpConnection = {

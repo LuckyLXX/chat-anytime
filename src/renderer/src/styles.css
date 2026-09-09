@@ -1063,6 +1063,8 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 .resource-item-copy em { color: var(--accent-text); }
 .resource-empty { margin: 0; padding: 10px; color: var(--text-muted); border: 1px dashed var(--border-strong); font-size: 10px; line-height: 1.45; }
 .mcp-resource-item { min-height: 48px; }
+/* 两级前缀 + 显式尺寸：压过 .settings-dialog 的通用 button 规则与 .secondary-button 基线高度。 */
+.resource-item .mcp-auth-button { display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto; height: 26px; min-height: 26px; margin: 0; padding: 0 9px; font-size: 10.5px; white-space: nowrap; }
 .resource-toggle { display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto; margin: 0; color: var(--text-muted); font-size: 10px; cursor: pointer; }
 .resource-toggle input { margin: 0; accent-color: var(--accent); }
 .resource-toggle input:disabled { cursor: default; }
