@@ -272,6 +272,12 @@ function startRuntime(): void {
       }
       return;
     }
+    if (message.type === "browser-automation.session-disposed") {
+      // 会话销毁（驱逐/删除/移除工作区）：释放其绑定的自动化标签页，
+      // 防止隐藏的 pi-browser-* 标签各自挂着一个渲染进程无限累积。
+      browserAutomationController?.releaseSession(message.sessionKey);
+      return;
+    }
     if (message.type === "design-snapshot.request") {
       // 设计导出缩略图：离屏渲染 + 截图，handle 永不 reject（内部兜底 ok:false）。
       void designSnapshotController.handle(message.request).then((result) => {

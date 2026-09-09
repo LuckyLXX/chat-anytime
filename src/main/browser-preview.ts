@@ -69,6 +69,21 @@ export class BrowserPreviewController {
     return tab && !tab.view.webContents.isDestroyed() ? tab.view.webContents : undefined;
   }
 
+  /**
+   * 标签页的 native 视图当前是否真的在渲染（可见 + 已拿到布局矩形）。
+   * 截图（Page.captureScreenshot fromSurface）只对在渲染的表面有产出；
+   * 隐藏视图（面板关闭/其他标签前台/弹窗挂起）不出帧，截图会悬挂。
+   */
+  isTabRendered(tabId: string): boolean {
+    const tab = this.tabs.get(tabId);
+    return Boolean(tab && tab.visible && tab.bounds);
+  }
+
+  /** 宿主窗口当前能否出帧：最小化/隐藏的窗口会被合成器暂停渲染。 */
+  isWindowRenderable(): boolean {
+    return !this.window.isDestroyed() && this.window.isVisible() && !this.window.isMinimized();
+  }
+
   /** 取或创建标签页（自动化开新标签用；创建时广播 created 事件）。 */
   ensureTab(tabId: string): BrowserTabView {
     const existed = this.tabs.has(tabId);

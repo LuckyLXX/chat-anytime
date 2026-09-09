@@ -341,6 +341,7 @@ export function buildBrowserTools(deps: BrowserToolDeps): ToolDefinition[] {
       label: "浏览器截图",
       description: [
         "截取内置浏览器当前可视区域的截图并返回图片。",
+        "截图要求页面出帧：标签页不可见时会自动把预览面板切回该标签；主窗口最小化时截图会失败，需恢复窗口后重试。",
         "截图会同步保存到工作区 .pidesktop/screenshots/ 目录（保留最近 20 张），结果文本会给出该文件的相对路径。",
         "支持图片输入的模型可直接查看；纯文本模型看不到图片，可调用 recognize_images 工具并传入该文件路径识别截图内容（支持指定识别要点）。",
         "用于验证页面视觉效果、查看快照无法表达的布局/图表/画布内容。"
@@ -364,11 +365,12 @@ export function buildBrowserTools(deps: BrowserToolDeps): ToolDefinition[] {
       defineTool({
         name: "browser_screenshot_full",
         label: "浏览器整页截图",
-        description: [
-          "截取内置浏览器整个页面（包含当前视口之外的滚动区域）。",
-          "截图会同步保存到工作区 .pidesktop/screenshots/ 目录（保留最近 20 张），结果文本会给出该文件的相对路径。",
-          "长页面可能产生大图；如需控制体积，可先用 browser_screenshot 截取可视区域。"
-        ].join(""),
+      description: [
+        "截取内置浏览器整个页面（包含当前视口之外的滚动区域）。",
+        "与 browser_screenshot 相同的出帧要求：标签页不可见时会自动切回，主窗口最小化时需先恢复窗口。",
+        "截图会同步保存到工作区 .pidesktop/screenshots/ 目录（保留最近 20 张），结果文本会给出该文件的相对路径。",
+        "长页面可能产生大图；如需控制体积，可先用 browser_screenshot 截取可视区域。"
+      ].join(""),
         promptSnippet: "browser_screenshot_full: 截取浏览器整个页面",
         parameters: Type.Object({}),
         execute: async () => {

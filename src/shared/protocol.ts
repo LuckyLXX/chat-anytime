@@ -1366,6 +1366,8 @@ export type RuntimeMessage =
   | { type: "automation-runs"; runs: AutomationRunRecord[] }
   /** utility 进程发起的浏览器自动化操作；main 完成后以 browser-automation.result 命令回传。 */
   | { type: "browser-automation.request"; requestId: string; sessionKey: string; request: BrowserAutomationRequest }
+  /** utility 进程通知某 Pi 会话已销毁（LRU 驱逐/删除会话/移除工作区；同 id 重建不发）——main 侧释放并关闭其绑定的自动化标签页。 */
+  | { type: "browser-automation.session-disposed"; sessionKey: string }
   /** utility 进程请求渲染设计导出缩略图；main 完成后以 design-snapshot.result 命令回传。 */
   | { type: "design-snapshot.request"; requestId: string; request: DesignSnapshotRequest }
   | { type: "error"; message: string }

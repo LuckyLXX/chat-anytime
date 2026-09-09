@@ -1066,7 +1066,7 @@ function scheduleSessionsRefresh(): void {
   }, 500);
 }
 
-function disposeRecord(record: SessionRuntimeRecord): void {
+function disposeRecord(record: SessionRuntimeRecord, options: { keepBrowserTab?: boolean } = {}): void {
   record.unsubscribe();
   try {
     record.session.dispose();
@@ -1091,6 +1091,12 @@ function disposeRecord(record: SessionRuntimeRecord): void {
     memoryStore = undefined;
     memoryTopics = [];
     refreshGitBranch();
+  }
+  // 会话真正消亡时释放其绑定的浏览器自动化标签页（main 侧只关 pi-browser-*
+  // 自动化建的标签，用户自有标签不动）；同 id 重建豁免——新记录继承绑定，
+  // 关掉会把页面状态丢掉。驻留（parked）会话不经此路径，标签按设计保留。
+  if (!options.keepBrowserTab) {
+    post({ type: "browser-automation.session-disposed", sessionKey: record.session.sessionId });
   }
 }
 
@@ -2200,7 +2206,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     emitState();
     return;
   }
-  if (existing) disposeRecord(existing);
+  if (existing) disposeRecord(existing, { keepBrowserTab: true });
 
   const settingsManager = SettingsManager.create(recordWorkspace, getAgentDir());
   // Pi's own discovery is fully disabled: no extensions, no skills, no themes,

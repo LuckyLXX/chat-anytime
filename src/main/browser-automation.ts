@@ -47,6 +47,10 @@ export const MAX_EVAL_EXPRESSION_CHARS = 4000;
 export const MAX_UPLOAD_FILE_BYTES = 20 * 1024 * 1024;
 
 const AUTOMATION_TAB_PREFIX = "pi-browser-";
+/** An orphaned automation tab (no live session binds it) is swept after this idle window. */
+export const AUTOMATION_TAB_IDLE_MS = 30 * 60_000;
+/** How often the orphan sweep runs. */
+export const AUTOMATION_TAB_SWEEP_INTERVAL_MS = 5 * 60_000;
 
 /** Interactive element snapshot signature (what a snapshot line remembers). */
 export interface SnapshotElement {
@@ -514,17 +518,33 @@ export function isSideEffectRejection(detail: string): boolean {
 export const MAIN_OP_TIMEOUT_MS = 110_000;
 
 /**
+ * How long a screenshot waits for the reveal round trip (automation-started →
+ * renderer opens/switches the preview tab → bounds + visible arrive) before
+ * failing with guidance. The renderer mount + measure typically lands well
+ * under a second; the budget mainly covers a busy machine.
+ */
+export const SCREENSHOT_REVEAL_TIMEOUT_MS = 8_000;
+/** Poll interval for the same wait. */
+export const SCREENSHOT_REVEAL_POLL_MS = 100;
+/**
+ * Dedicated timeout for Page.captureScreenshot itself. A surface that is not
+ * producing frames (hidden view, occluded window) never answers the CDP call,
+ * so without this the generic 110s watchdog would be the only backstop.
+ */
+export const SCREENSHOT_CAPTURE_TIMEOUT_MS = 30_000;
+
+/**
  * Bounds one in-tab operation. On timeout the caller's error path releases the
  * busy lock immediately; the underlying op keeps running detached ("zombie")
  * and its eventual outcome is swallowed — the model gets a retryable error
  * instead of the old behaviour where a timed-out op held the lock until it
  * settled and every follow-up call failed with 标签页正忙.
  */
-export async function withOpTimeout<T>(promise: Promise<T>, timeoutMs = MAIN_OP_TIMEOUT_MS): Promise<T> {
+export async function withOpTimeout<T>(promise: Promise<T>, timeoutMs = MAIN_OP_TIMEOUT_MS, timeoutMessage?: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(
-      () => reject(new Error(`浏览器操作超时（${Math.round(timeoutMs / 1000)} 秒无响应），标签页已释放；原操作可能仍在后台，请稍后重试`)),
+      () => reject(new Error(timeoutMessage ?? `浏览器操作超时（${Math.round(timeoutMs / 1000)} 秒无响应），标签页已释放；原操作可能仍在后台，请稍后重试`)),
       timeoutMs
     );
   });
@@ -534,6 +554,16 @@ export async function withOpTimeout<T>(promise: Promise<T>, timeoutMs = MAIN_OP_
     clearTimeout(timer);
     // A zombie op settling later must not surface as an unhandled rejection.
     promise.catch(() => undefined);
+  }
+}
+
+/** Poll a condition until it holds or the budget runs out. */
+export async function awaitCondition(predicate: () => boolean, timeoutMs: number, pollMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    if (predicate()) return true;
+    if (Date.now() >= deadline) return false;
+    await sleep(pollMs);
   }
 }
 
@@ -548,20 +578,31 @@ export class BrowserAutomationController {
   private readonly tabRefs = new Map<string, RefEntry[]>();
   /** tabs with an operation in flight (per-tab serialization). */
   private readonly busyTabs = new Set<string>();
-    /** tabs whose current/next operation has been cancelled from the UI. */
+  /** tabs whose current/next operation has been cancelled from the UI. */
     private readonly cancelRequests = new Set<string>();
+  /** tab id → last activity (creation or latest op); drives the orphan sweep. */
+  private readonly tabLastActiveAt = new Map<string, number>();
+  private sweepTimer: ReturnType<typeof setInterval> | undefined;
 
   constructor(
     private readonly preview: BrowserPreviewController,
-    /** Fired when a session starts operating on a tab (bind time only) so the renderer can reveal the preview panel. */
+    /** Fired when a session starts operating on a tab (bind time, and before a screenshot reveals a hidden tab) so the renderer can reveal the preview panel. */
     private readonly notifyAutomationStarted: (tabId: string) => void = () => undefined,
     /** Loopback static server backing local-file navigation (file:// → http://127.0.0.1). */
     private readonly staticFiles: BrowserStaticServer = new BrowserStaticServer()
-  ) {}
+  ) {
+    // Orphan sweep: automation tabs can outlive every session that ever bound
+    // them (binding replaced by tabs new/switch, or a release deferred because
+    // an op was in flight). Each keeps a full renderer process alive while
+    // hidden, so unbound + invisible + idle tabs are closed periodically.
+    this.sweepTimer = setInterval(() => this.sweepIdleAutomationTabs(), AUTOMATION_TAB_SWEEP_INTERVAL_MS);
+    this.sweepTimer.unref?.();
+  }
 
   async handle(sessionKey: string, request: BrowserAutomationRequest): Promise<BrowserAutomationResult> {
     try {
       const tabId = request.op === "attach" ? this.attachTab(sessionKey) : this.tabFor(sessionKey);
+      this.tabLastActiveAt.set(tabId, Date.now());
       return await this.withTabLock(tabId, () => this.withAutomationGuard(tabId, async () => {
           const result = await withOpTimeout(this.execute(sessionKey, tabId, request));
           this.assertNotCancelled(tabId);
@@ -570,6 +611,41 @@ export class BrowserAutomationController {
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
+  }
+
+  /**
+   * A Pi session died (LRU eviction, session delete, workspace removal — same-id
+   * rebuilds are exempt because the successor record inherits the binding).
+   * Drop the binding and close the tab — but only automation-created
+   * `pi-browser-*` tabs: a session may have bound to the user's own foreground
+   * tab and must never close it on the session's behalf. A tab another session
+   * still binds, or one with an op in flight, stays for the idle sweep.
+   */
+  releaseSession(sessionKey: string): void {
+    const tabId = this.sessionTabs.get(sessionKey);
+    this.sessionTabs.delete(sessionKey);
+    if (!tabId || !tabId.startsWith(AUTOMATION_TAB_PREFIX)) return;
+    if ([...this.sessionTabs.values()].includes(tabId)) return;
+    if (this.busyTabs.has(tabId)) return;
+    this.closeAutomationTab(tabId);
+  }
+
+  /** Close orphaned automation tabs: unbound, idle past the threshold, and not what the user is currently looking at. */
+  sweepIdleAutomationTabs(now = Date.now()): void {
+    const bound = new Set(this.sessionTabs.values());
+    for (const tabId of this.preview.tabIds()) {
+      if (!tabId.startsWith(AUTOMATION_TAB_PREFIX)) continue;
+      if (bound.has(tabId) || this.busyTabs.has(tabId)) continue;
+      if (this.preview.isTabRendered(tabId)) continue;
+      if (now - (this.tabLastActiveAt.get(tabId) ?? now) < AUTOMATION_TAB_IDLE_MS) continue;
+      this.closeAutomationTab(tabId);
+    }
+  }
+
+  private closeAutomationTab(tabId: string): void {
+    this.tabRefs.delete(tabId);
+    this.tabLastActiveAt.delete(tabId);
+    void this.preview.handle({ type: "close", tabId });
   }
 
   /** Cancel the current operation on a tab (no-op when idle). */
@@ -584,6 +660,8 @@ export class BrowserAutomationController {
   }
 
   dispose(): void {
+    if (this.sweepTimer !== undefined) clearInterval(this.sweepTimer);
+    this.sweepTimer = undefined;
     for (const tabId of this.preview.tabIds()) {
       const contents = this.preview.webContentsFor(tabId);
       try {
@@ -593,7 +671,8 @@ export class BrowserAutomationController {
     this.sessionTabs.clear();
     this.tabRefs.clear();
     this.busyTabs.clear();
-      this.cancelRequests.clear();
+    this.cancelRequests.clear();
+    this.tabLastActiveAt.clear();
     this.staticFiles.dispose();
   }
 
@@ -619,6 +698,7 @@ export class BrowserAutomationController {
   private createAutomationTab(): string {
     const tabId = automationTabId();
     this.preview.ensureTab(tabId);
+    this.tabLastActiveAt.set(tabId, Date.now());
     return tabId;
   }
 
@@ -940,9 +1020,32 @@ export class BrowserAutomationController {
     }
   }
 
+  /**
+   * Page.captureScreenshot({fromSurface:true}) only completes when the surface
+   * produces compositor frames. A bound tab keeps accepting evaluate/input ops
+   * while hidden (panel closed, another preview tab foreground, dialog
+   * suspension, minimized window), so a screenshot there would hang until the
+   * generic watchdog. Reveal the tab first and wait for the render round trip;
+   * when it cannot become visible, fail fast with the actionable cause instead
+   * of burning the 110s budget.
+   */
+  private async ensureTabRenderable(tabId: string): Promise<void> {
+    const renderable = () => this.preview.isTabRendered(tabId) && this.preview.isWindowRenderable();
+    if (renderable()) return;
+    // 截图是用户想看到结果的时刻：把预览面板切到该标签（渲染端 dedup 激活）。
+    this.notifyAutomationStarted(tabId);
+    const revealed = await awaitCondition(renderable, SCREENSHOT_REVEAL_TIMEOUT_MS, SCREENSHOT_REVEAL_POLL_MS);
+    if (revealed) return;
+    if (!this.preview.isWindowRenderable()) {
+      throw new Error(`截图失败：主窗口当前最小化或隐藏，页面无法出帧。请恢复主窗口后重试。`);
+    }
+    throw new Error(`截图失败：目标浏览器标签页 ${SCREENSHOT_REVEAL_TIMEOUT_MS / 1000} 秒内未能变为可见（预览面板可能被关闭、被其他标签占用，或被设置/权限弹窗挂起）。请打开预览面板并切换到该标签后重试。`);
+  }
+
   private async screenshot(tabId: string, contents: WebContents, fullPage = false, scale?: number, maxWidth?: number, format: "png" | "jpeg" = "png", quality?: number): Promise<BrowserAutomationResult> {
     this.preview.setAutomating(tabId, "正在截图");
     try {
+      await this.ensureTabRenderable(tabId);
       const captureParams: Record<string, unknown> = { format, fromSurface: true };
         if (fullPage) captureParams.captureBeyondViewport = true;
         if (format === "jpeg") captureParams.quality = Math.max(1, Math.min(100, Math.round(quality ?? 80)));
@@ -951,7 +1054,11 @@ export class BrowserAutomationController {
           const viewport = await this.evaluate<{ width: number; height: number }>(contents, "({ width: window.innerWidth, height: window.innerHeight })");
           captureParams.scale = Math.min(Number(captureParams.scale ?? 1), Math.max(0.1, maxWidth / viewport.width));
         }
-        const captured = await this.cdp(contents, "Page.captureScreenshot", captureParams);
+        const captured = await withOpTimeout(
+          this.cdp(contents, "Page.captureScreenshot", captureParams),
+          SCREENSHOT_CAPTURE_TIMEOUT_MS,
+          `截图超时（${SCREENSHOT_CAPTURE_TIMEOUT_MS / 1000} 秒未出帧）：页面可能仍在渲染大内容；若预览面板未显示该标签、或窗口被遮挡/最小化，请恢复可见后重试。`
+        );
       const size = await this.evaluate<{ width: number; height: number }>(contents, fullPage
           ? "({ width: Math.max(document.documentElement.scrollWidth, document.body ? document.body.scrollWidth : 0), height: Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0) })"
           : "({ width: window.innerWidth, height: window.innerHeight })");

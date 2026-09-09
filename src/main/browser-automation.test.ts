@@ -1,5 +1,9 @@
-import { describe, expect, it } from "vitest";
+import type { WebContents } from "electron";
+import { afterEach, describe, expect, it } from "vitest";
 import {
+  AUTOMATION_TAB_IDLE_MS,
+  awaitCondition,
+  BrowserAutomationController,
   buildLocateScript,
   buildScrollScript,
   buildSnapshotScript,
@@ -10,6 +14,8 @@ import {
   urlPatternMatcher,
   withOpTimeout
 } from "./browser-automation.js";
+import type { BrowserPreviewController } from "./browser-preview.js";
+import type { BrowserAutomationResult } from "../shared/protocol.js";
 
 describe("browser automation url patterns", () => {
   it("treats patterns without glob characters as substring matches", () => {
@@ -144,5 +150,131 @@ describe("withOpTimeout", () => {
     await expect(withOpTimeout(slow, 20)).rejects.toThrow(/超时（0 秒无响应）/);
     release("late");
     await new Promise((resolve) => setTimeout(resolve, 5));
+  });
+
+  it("honours a custom timeout message (screenshot capture guidance)", async () => {
+    const hanging = new Promise<string>(() => undefined);
+    await expect(withOpTimeout(hanging, 20, "截图超时（30 秒未出帧）")).rejects.toThrow("截图超时（30 秒未出帧）");
+  });
+});
+
+describe("awaitCondition", () => {
+  it("resolves true once the predicate flips within the budget", async () => {
+    let ready = false;
+    setTimeout(() => {
+      ready = true;
+    }, 30);
+    await expect(awaitCondition(() => ready, 1000, 5)).resolves.toBe(true);
+  });
+
+  it("resolves false when the budget runs out first", async () => {
+    await expect(awaitCondition(() => false, 25, 5)).resolves.toBe(false);
+  });
+});
+
+// —— 会话销毁释放自动化标签（隐藏 pi-browser-* 标签泄漏治理） ——
+
+interface FakePreview {
+  closed: string[];
+  rendered: Set<string>;
+}
+
+function makeFakePreview(initialTabs: string[]): FakePreview & BrowserPreviewController {
+  const tabs = [...initialTabs];
+  const closed: string[] = [];
+  const rendered = new Set<string>();
+  const fakeContents = {
+    isDestroyed: () => false,
+    debugger: { isAttached: () => false, attach: () => undefined, sendCommand: async () => ({}) }
+  };
+  const state = () => ({ attached: true, url: "https://example.com/", title: "页", loading: false, canGoBack: false, canGoForward: false });
+  const preview: FakePreview & BrowserPreviewController = {
+    closed,
+    rendered,
+    tabIds: () => tabs.filter((id) => !closed.includes(id)),
+    foregroundTab: () => tabs[0] ?? "default",
+    ensureTab: (id: string) => {
+      if (!tabs.includes(id)) tabs.push(id);
+    },
+    webContentsFor: () => fakeContents as unknown as WebContents,
+    snapshot: () => state() as never,
+    setAutomating: () => undefined,
+    handle: async (command: { type: string; tabId?: string }) => {
+      if (command.type === "close" && command.tabId) closed.push(command.tabId);
+      return state() as never;
+    },
+    isTabRendered: (id: string) => rendered.has(id),
+    isWindowRenderable: () => true
+  } as unknown as FakePreview & BrowserPreviewController;
+  return preview;
+}
+
+describe("automation tab release on session dispose", () => {
+  const controllers: BrowserAutomationController[] = [];
+  afterEach(() => {
+    for (const controller of controllers) controller.dispose();
+    controllers.length = 0;
+  });
+  const makeController = (preview: BrowserPreviewController): BrowserAutomationController => {
+    const controller = new BrowserAutomationController(preview);
+    controllers.push(controller);
+    return controller;
+  };
+  const activeTabOf = (result: BrowserAutomationResult): string => {
+    if (!result.ok || result.data.kind !== "tabs") throw new Error(`tabs 操作意外失败：${result.ok ? "" : result.error}`);
+    return result.data.tabs.find((tab) => tab.active)!.id;
+  };
+
+  it("closes the session's bound automation tab but never a user tab", async () => {
+    const preview = makeFakePreview(["default"]);
+    const controller = makeController(preview);
+    // attach 绑前台用户标签 default，tabs new 再建 pi-browser-* 并改绑它。
+    const created = activeTabOf(await controller.handle("s1", { op: "tabs", action: "new" }));
+    expect(created).toMatch(/^pi-browser-/u);
+    controller.releaseSession("s1");
+    expect(preview.closed).toEqual([created]);
+  });
+
+  it("keeps the bound user tab untouched on release", async () => {
+    const preview = makeFakePreview(["default"]);
+    const controller = makeController(preview);
+    await controller.handle("s1", { op: "attach" });
+    controller.releaseSession("s1");
+    expect(preview.closed).toEqual([]);
+  });
+
+  it("keeps a shared tab until the last bound session goes away", async () => {
+    const preview = makeFakePreview(["default"]);
+    const controller = makeController(preview);
+    const tabId = activeTabOf(await controller.handle("s1", { op: "tabs", action: "new" }));
+    await controller.handle("s2", { op: "tabs", action: "switch", tabId });
+    controller.releaseSession("s1");
+    expect(preview.closed).toEqual([]);
+    controller.releaseSession("s2");
+    expect(preview.closed).toEqual([tabId]);
+  });
+
+  it("sweeps orphaned automation tabs only past the idle threshold", async () => {
+    const preview = makeFakePreview(["default"]);
+    const controller = makeController(preview);
+    // 两次 tabs new：第一次的标签被改绑抛弃，成为孤儿。
+    const orphan = activeTabOf(await controller.handle("s1", { op: "tabs", action: "new" }));
+    const bound = activeTabOf(await controller.handle("s1", { op: "tabs", action: "new" }));
+    controller.sweepIdleAutomationTabs();
+    expect(preview.closed).toEqual([]);
+    controller.sweepIdleAutomationTabs(Date.now() + AUTOMATION_TAB_IDLE_MS + 60_000);
+    expect(preview.closed).toEqual([orphan]);
+    expect(preview.tabIds()).toContain(bound);
+  });
+
+  it("never sweeps the tab the user is currently looking at", async () => {
+    const preview = makeFakePreview(["default"]);
+    const controller = makeController(preview);
+    const orphan = activeTabOf(await controller.handle("s1", { op: "tabs", action: "new" }));
+    controller.releaseSession("s1");
+    preview.closed.length = 0; // 模拟释放时忙锁未关、留给清扫的场景
+    preview.rendered.add(orphan);
+    controller.sweepIdleAutomationTabs(Date.now() + AUTOMATION_TAB_IDLE_MS + 60_000);
+    expect(preview.closed).toEqual([]);
   });
 });
