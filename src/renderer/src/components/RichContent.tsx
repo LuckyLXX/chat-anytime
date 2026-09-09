@@ -16,6 +16,7 @@ import { artifactSandbox, buildArtifactPreviewSource, DYNAMIC_PREVIEW_ACTIONS, i
 import { normalizeMermaidSource, parseRichContent, type RichContentSegment } from "../lib/content-pipeline";
 import { sanitizeRichHtmlTree } from "../lib/html-sanitize";
 import { resolveWorkspaceAssetUrl } from "../lib/workspace-asset";
+import { ImageLightbox } from "./ImageLightbox";
 
 interface RichContentProps {
   children: string;
@@ -177,29 +178,13 @@ function RichImage({ src, alt, title, workspace }: { src?: string; alt?: string;
   const [expanded, setExpanded] = useState(false);
   const resolvedSrc = resolveWorkspaceAssetUrl(src, workspace);
 
-  useEffect(() => {
-    if (!expanded) return;
-    function close(event: KeyboardEvent): void {
-      if (event.key === "Escape") setExpanded(false);
-    }
-    window.addEventListener("keydown", close);
-    return () => window.removeEventListener("keydown", close);
-  }, [expanded]);
-
   if (!resolvedSrc) return null;
   return (
     <>
       <button className="rich-image-button" type="button" aria-label={alt ? `放大图片：${alt}` : "放大图片"} onClick={() => setExpanded(true)}>
         <img src={resolvedSrc} alt={alt ?? ""} title={title} loading="lazy" />
       </button>
-      {expanded && (
-        <div className="modal-backdrop image-lightbox" role="presentation" onMouseDown={() => setExpanded(false)}>
-          <div className="image-lightbox-content" role="dialog" aria-modal="true" aria-label={alt ? `图片预览：${alt}` : "图片预览"} onMouseDown={(event) => event.stopPropagation()}>
-            <button className="icon-button modal-close" type="button" title="关闭图片" aria-label="关闭图片" onClick={() => setExpanded(false)}><X size={17} /></button>
-            <img src={resolvedSrc} alt={alt ?? ""} title={title} />
-          </div>
-        </div>
-      )}
+      <ImageLightbox image={expanded ? { src: resolvedSrc, alt, title } : undefined} onClose={() => setExpanded(false)} />
     </>
   );
 }
