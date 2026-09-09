@@ -89,25 +89,68 @@ function delegationSignature(delegation: ToolExecution["delegation"] | undefined
 }
 
 /**
- * 快照合并的 executions 身份保留：主进程每帧都 spread 出新数组，若直接透传，
- * memo 化的消息气泡（executions 是其 props）在流式期间会每帧全量重渲染。
- * 内容未变时复用旧数组引用。args 在 tool_execution_start 后内容恒定，不参与
- * 比较（深度比较大且无必要）；output 已由主进程截断到 60K，字符串比较有界。
+ * 单条 execution 的内容等价判定：快照合并逐项保留身份的比较依据。
+ * args 在 tool_execution_start 后内容恒定，不参与比较（深度比较大且无必要）；
+ * output 已由主进程截断到 60K，字符串比较有界。changedFiles 逐项比 relativePath
+ * （artifact backfill 异步回填时列表会变化，需据此判定为新对象）。
+ */
+function executionIdentityEqual(item: ToolExecution, other: ToolExecution): boolean {
+  if (item.id !== other.id || item.name !== other.name || item.status !== other.status
+    || item.startedAt !== other.startedAt || item.completedAt !== other.completedAt
+    || item.output !== other.output || item.patch !== other.patch
+    || item.changedFile?.relativePath !== other.changedFile?.relativePath) return false;
+  if (item.delegation !== other.delegation && delegationSignature(item.delegation) !== delegationSignature(other.delegation)) return false;
+  const leftFiles = item.changedFiles ?? [];
+  const rightFiles = other.changedFiles ?? [];
+  return leftFiles.length === rightFiles.length && leftFiles.every((file, fileIndex) => file.relativePath === rightFiles[fileIndex]?.relativePath);
+}
+
+/**
+ * 快照合并的 executions 身份保留（逐项）：主进程每帧 spread 出新数组且经结构化
+ * 克隆，若直接透传，订阅 executions 的选择器与 memo 化气泡在流式期间会每帧全量
+ * 重渲染。这里逐项比较：内容未变的 execution 复用上一帧的对象身份，仅变化的项
+ * （通常是正在流式输出 output 的那一条）取新引用；全部未变时返回原数组，命中
+ * “无变化早退”。这样历史气泡引用的已完成 execution 身份跨帧稳定，配合按消息
+ * 派生的执行子集，MessageView 的 memo 才能在流式期间真正跳过历史气泡。
+ * 长度变化（新增/移除 execution）是低频事件，直接取 incoming。
  */
 function mergeExecutionsPreservingIdentity(previous: RuntimeSnapshot["executions"], incoming: RuntimeSnapshot["executions"]): RuntimeSnapshot["executions"] {
   if (previous === incoming) return previous;
   if (previous.length !== incoming.length) return incoming;
+  let changed = false;
+  const merged = incoming.map((item, index) => {
+    const prev = previous[index];
+    if (prev && executionIdentityEqual(prev, item)) return prev;
+    changed = true;
+    return item;
+  });
+  return changed ? merged : previous;
+}
+
+/**
+ * sessions 列表的身份保留：utility 进程经结构化克隆推送，每帧的 sessions 都是
+ * 新数组引用；直接透传会让订阅它的选择器（侧栏分组、分屏校验）在流式期间每帧
+ * 触发。SessionSummary 全部是原始值字段，逐项浅比较即可。
+ */
+function mergeSessionsPreservingIdentity(previous: RuntimeSnapshot["sessions"], incoming: RuntimeSnapshot["sessions"]): RuntimeSnapshot["sessions"] {
+  if (previous === incoming) return previous;
+  if (previous.length !== incoming.length) return incoming;
   const equal = previous.every((item, index) => {
     const other = incoming[index];
-    if (!other
-      || item.id !== other.id || item.name !== other.name || item.status !== other.status
-      || item.startedAt !== other.startedAt || item.completedAt !== other.completedAt
-      || item.output !== other.output || item.patch !== other.patch
-      || item.changedFile?.relativePath !== other.changedFile?.relativePath) return false;
-    if (item.delegation !== other.delegation && delegationSignature(item.delegation) !== delegationSignature(other.delegation)) return false;
-    const leftFiles = item.changedFiles ?? [];
-    const rightFiles = other.changedFiles ?? [];
-    return leftFiles.length === rightFiles.length && leftFiles.every((file, fileIndex) => file.relativePath === rightFiles[fileIndex]?.relativePath);
+    return other !== undefined && item.id === other.id && item.path === other.path && item.workspace === other.workspace
+      && item.title === other.title && item.modifiedAt === other.modifiedAt && item.messageCount === other.messageCount
+      && item.pinned === other.pinned && item.runStatus === other.runStatus;
+  });
+  return equal ? previous : incoming;
+}
+
+/** recentWorkspaces 的身份保留：与 sessions 同理，字段全为原始值。 */
+function mergeRecentWorkspacesPreservingIdentity(previous: RuntimeSnapshot["recentWorkspaces"], incoming: RuntimeSnapshot["recentWorkspaces"]): RuntimeSnapshot["recentWorkspaces"] {
+  if (previous === incoming) return previous;
+  if (previous.length !== incoming.length) return incoming;
+  const equal = previous.every((item, index) => {
+    const other = incoming[index];
+    return other !== undefined && item.path === other.path && item.openedAt === other.openedAt;
   });
   return equal ? previous : incoming;
 }
@@ -355,9 +398,13 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
           const previous = state.snapshot;
           const { messages: mergedMessages, changed } = mergeMessagesPreservingIdentity(previous.messages, incoming.messages);
           const mergedExecutions = mergeExecutionsPreservingIdentity(previous.executions, incoming.executions);
+          // sessions/recentWorkspaces 经结构化克隆每帧都是新引用，必须走内容
+          // 比较的身份保留合并，否则“无变化早退”永远不命中、订阅方每帧重渲染。
+          const mergedSessions = mergeSessionsPreservingIdentity(previous.sessions, incoming.sessions);
+          const mergedRecentWorkspaces = mergeRecentWorkspacesPreservingIdentity(previous.recentWorkspaces, incoming.recentWorkspaces);
           if (!changed && previous.busy === incoming.busy && previous.status === incoming.status &&
               previous.turnTiming === incoming.turnTiming && previous.executions === mergedExecutions &&
-              previous.sessions === incoming.sessions && previous.recentWorkspaces === incoming.recentWorkspaces &&
+              previous.sessions === mergedSessions && previous.recentWorkspaces === mergedRecentWorkspaces &&
               previous.model === incoming.model &&
               previous.sessionId === incoming.sessionId && previous.sessionFile === incoming.sessionFile &&
               queuedMessagesEqual(previous.queuedMessages, incoming.queuedMessages) &&
@@ -373,7 +420,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
           const parkedPanels = previous.sessionId && previous.sessionId !== incoming.sessionId
             ? { ...state.parkedPanels, [previous.sessionId]: previous satisfies SessionPaneSnapshot }
             : state.parkedPanels;
-          return { snapshot: { ...incoming, messages: mergedMessages, executions: mergedExecutions }, parkedPanels };
+          return { snapshot: { ...incoming, messages: mergedMessages, executions: mergedExecutions, sessions: mergedSessions, recentWorkspaces: mergedRecentWorkspaces }, parkedPanels };
         });
         break;
       case "session.state":

@@ -61,7 +61,8 @@ import { contextUsageCacheLabel, contextUsagePercentLabel, contextUsageTone, con
 import { speedStatsGroups } from "./lib/speed-stats-format";
 import { actionTimelineSegments, actionTimelineStats, formatProcessDuration, type ActionTimelineSegment } from "./lib/action-timeline";
 import { changedFilesForMessage, type ReplyChangedFile } from "./lib/changed-files";
-import { groupAssistantMessages } from "./lib/chat-layout";
+import { createAssistantMessageGrouper } from "./lib/chat-layout";
+import { createMessageExecutionSubsetter, EMPTY_EXECUTIONS } from "./lib/message-executions";
 import { buildTurnSummaries } from "./lib/turn-summary";
 import { buildEditDiffs, delegateArgsSummary, editArgsSummary, languageFromPath, parseDelegateCallArgs, parseEditCallArgs, parseReadCallArgs, parseWriteCallArgs, writeArgsSummary, type DelegateCallPreview, type EditCallPreview, type EditDiffBlock, type WriteCallPreview } from "./lib/tool-call-preview";
 import { DiffView } from "./components/DiffView";
@@ -749,7 +750,17 @@ export const ConversationPane = memo(function ConversationPane({
   const visionFallbackAvailable = Boolean(settings.vision?.enabled && settings.vision.provider && settings.vision.model
     && models.some((item) => item.provider === settings.vision?.provider && item.id === settings.vision?.model && item.configured && item.imageInput && item.enabled !== false));
   const modelAcceptsImages = Boolean(models.find((item) => `${item.provider}/${item.id}` === selectedModel)?.imageInput);
-  const displayMessages = useMemo(() => groupAssistantMessages(data.messages), [data.messages]);
+  // 身份保留的分组器：缓存上一帧每个分组的源消息引用与输出对象，源引用未变时
+  // 复用旧输出，使历史气泡的 message prop 跨帧稳定（配合 store 的 uuid 复用）。
+  const groupMessages = useRef(createAssistantMessageGrouper()).current;
+  const displayMessages = useMemo(() => groupMessages(data.messages), [groupMessages, data.messages]);
+  // 每消息稳定执行子集：MessageView 只消费「本消息 tool-call id 命中的 execution」
+  // （changedFilesForMessage 按 callIds 过滤、ActionTimeline 按 call.id 查 Map），
+  // 传全量 data.executions 会让任一 execution 流式变化时所有气泡的 executions prop
+  // 换引用、击穿 memo。派生器跨帧缓存：消息引用与命中 execution 引用都未变时复用
+  // 上一帧子集数组，历史气泡得以在流式期间跳过重渲染。
+  const subsetExecutions = useRef(createMessageExecutionSubsetter()).current;
+  const executionsForMessages = useMemo(() => subsetExecutions(displayMessages, data.executions), [subsetExecutions, displayMessages, data.executions]);
   // 每轮以 user 消息为錨点；turn 首条的 key 用于缩略导航定位（data-turn-key）。
   const turns = useMemo(() => buildTurnSummaries(displayMessages), [displayMessages]);
   const turnStartKeys = useMemo(() => new Set(turns.map((turn) => turn.key)), [turns]);
@@ -1597,7 +1608,7 @@ export const ConversationPane = memo(function ConversationPane({
             const timing = showTurnTimingOnLatest && index === latestAssistantMessageIndex && message.role === "assistant" ? data.turnTiming : undefined;
             const turnActive = data.busy && index === latestAssistantMessageIndex && message.role === "assistant";
             const turnKey = turnStartKeys.has(message.uuid ?? message.id) ? (message.uuid ?? message.id) : undefined;
-            return <MessageView key={message.uuid ?? message.id} message={message} executions={data.executions} workspace={data.workspace} onOpenArtifact={onOpenArtifact} onOpenFile={onOpenFile} onOpenDiff={onOpenDiff} onHtmlAction={handleHtmlAction} onCopy={copyMessage} onEdit={editMessage} onRegenerate={regenerateMessage} onShare={shareMessage} onRollback={onRollback} rollbackStates={rollbackStates} showThinking={showThinking} busy={data.busy} turnActive={turnActive} timing={timing} now={timing ? now : undefined} turnKey={turnKey} onOpenTranscript={onOpenTranscript} />;
+            return <MessageView key={message.uuid ?? message.id} message={message} executions={executionsForMessages[index] ?? EMPTY_EXECUTIONS} workspace={data.workspace} onOpenArtifact={onOpenArtifact} onOpenFile={onOpenFile} onOpenDiff={onOpenDiff} onHtmlAction={handleHtmlAction} onCopy={copyMessage} onEdit={editMessage} onRegenerate={regenerateMessage} onShare={shareMessage} onRollback={onRollback} rollbackStates={rollbackStates} showThinking={showThinking} busy={data.busy} turnActive={turnActive} timing={timing} now={timing ? now : undefined} turnKey={turnKey} onOpenTranscript={onOpenTranscript} />;
           })}
           {isGenerating && (assistantBubbleVisible ? <div className="response-progress response-progress-inline"><LoaderCircle size={14} className="spinning" /><span>{workingLabel}</span>{activeTurnTiming && <TimingMeta timing={activeTurnTiming} now={now} />}</div> : <PendingResponse label={workingLabel} timing={activeTurnTiming} now={now} />)}
         </>}

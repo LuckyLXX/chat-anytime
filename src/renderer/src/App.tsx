@@ -1238,7 +1238,44 @@ function SettingsDialog({ settings, models, providers, customProvider, customMod
 }
 
 export function App(): ReactNode {
-  const { ready, snapshot, models, providers, resources, customProvider, customModels, customModelFetchStatus, customModelFetchError, modelRefreshStatus, modelRefreshError, modelRefreshProvider, permissions, questions, error, checkpointResult, automationRun, initialize, clearError } = useDesktopStore();
+  // 细粒度订阅：流式期间 store 每 50ms 收到一帧新 snapshot，全量解构会让 App
+  // 整棵子树（侧栏、标题栏、预览面板）每帧重渲染。这里只订阅真正被消费的
+  // 字段；messages/executions 整体不进入 App（消息流由 ConversationPane 自行
+  // 订阅），App 仅取派生原始值（布尔/数字）或引用稳定的数组。
+  const ready = useDesktopStore((state) => state.ready);
+  const models = useDesktopStore((state) => state.models);
+  const providers = useDesktopStore((state) => state.providers);
+  const resources = useDesktopStore((state) => state.resources);
+  const customProvider = useDesktopStore((state) => state.customProvider);
+  const customModels = useDesktopStore((state) => state.customModels);
+  const customModelFetchStatus = useDesktopStore((state) => state.customModelFetchStatus);
+  const customModelFetchError = useDesktopStore((state) => state.customModelFetchError);
+  const modelRefreshStatus = useDesktopStore((state) => state.modelRefreshStatus);
+  const modelRefreshError = useDesktopStore((state) => state.modelRefreshError);
+  const modelRefreshProvider = useDesktopStore((state) => state.modelRefreshProvider);
+  const permissions = useDesktopStore((state) => state.permissions);
+  const questions = useDesktopStore((state) => state.questions);
+  const error = useDesktopStore((state) => state.error);
+  const checkpointResult = useDesktopStore((state) => state.checkpointResult);
+  const automationRun = useDesktopStore((state) => state.automationRun);
+  const initialize = useDesktopStore((state) => state.initialize);
+  const clearError = useDesktopStore((state) => state.clearError);
+  // snapshot 字段级订阅。sessions/recentWorkspaces/executions 在 store 合并层
+  // 做了身份保留（内容不变则复用旧引用），流式帧不会触发这些选择器。
+  const activeSessionId = useDesktopStore((state) => state.snapshot.sessionId);
+  const activeWorkspace = useDesktopStore((state) => state.snapshot.workspace);
+  const sessionSummaries = useDesktopStore((state) => state.snapshot.sessions);
+  const recentWorkspaces = useDesktopStore((state) => state.snapshot.recentWorkspaces);
+  const activeAgentId = useDesktopStore((state) => state.snapshot.agentId);
+  const activeAgentName = useDesktopStore((state) => state.snapshot.agentName);
+  const gitBranch = useDesktopStore((state) => state.snapshot.gitBranch);
+  const runtimeBusy = useDesktopStore((state) => state.snapshot.busy);
+  const runtimeStatus = useDesktopStore((state) => state.snapshot.status);
+  const executions = useDesktopStore((state) => state.snapshot.executions);
+  // 派生布尔选择器：返回原始值，Object.is 比较，仅状态真正翻转时重渲染。
+  // 主题根属性（data-ui-*）反映焦点格（分屏下即激活会话）的状态。
+  const isGenerating = useDesktopStore((state) => Boolean(state.snapshot.busy && state.snapshot.turnTiming && state.snapshot.turnTiming.completedAt === undefined));
+  const isChatEmpty = useDesktopStore((state) => !state.snapshot.workspace || (state.snapshot.messages.length === 0 && !(state.snapshot.busy && state.snapshot.turnTiming && state.snapshot.turnTiming.completedAt === undefined)));
   // 分屏布局：tree 为递归二叉分割树，focusedPane 是焦点格（= 激活会话）。
   // 权限/提问按格子集合过滤（焦点格优先），store 的数组跨会话累积，直接取
   // [0] 会把后台会话待决的弹窗冒到别的格子视图里；单窗口退化为 [激活会话]，
@@ -1249,9 +1286,9 @@ export function App(): ReactNode {
   const [maximizedPaneId, setMaximizedPaneId] = useState<string>();
   const paneIds = useMemo(() => (splitTree ? leafIds(splitTree) : []), [splitTree]);
   const paneFocusOrder = useMemo(() => {
-    const active = focusedPaneId ?? snapshot.sessionId;
+    const active = focusedPaneId ?? activeSessionId;
     return [active, ...paneIds.filter((id) => id !== active)].filter((id): id is string => Boolean(id));
-  }, [paneIds, focusedPaneId, snapshot.sessionId]);
+  }, [paneIds, focusedPaneId, activeSessionId]);
   const permission = panePermissionRequest(permissions, paneFocusOrder);
   const question = paneQuestionRequest(questions, paneFocusOrder);
   const settings = useDesktopStore((state) => state.settings);
@@ -1265,6 +1302,14 @@ export function App(): ReactNode {
     if (!sessionId || file.toolCallIds.length === 0) return;
     setRollbackTarget({ file, sessionId });
   }, []);
+  // 主格 onRollback 的稳定身份：内联箭头每次渲染都是新函数，会击穿
+  // ConversationPane 的 memo（流式期间 App 因 permissions/status 等低频
+  // 订阅仍会重渲染）。经 ref 读最新激活会话 id，回调身份恒定。
+  const activeSessionIdRef = useRef(activeSessionId);
+  activeSessionIdRef.current = activeSessionId;
+  const mainPaneRollback = useCallback((file: ReplyChangedFile): void => {
+    openRollbackConfirm(file, activeSessionIdRef.current);
+  }, [openRollbackConfirm]);
   const [sidebarTab, setSidebarTab] = useState<"agents" | "topics">("topics");
   const [sidebarQuery, setSidebarQuery] = useState("");
   // 启动时所有工作区分组默认折叠（空表 = 无展开项）；用户展开后保持到退出。
@@ -1390,31 +1435,31 @@ export function App(): ReactNode {
   // 继续编辑，随下一条消息一起发出。
   const sendPickedElement = useCallback((pick: BrowserElementPick, note: string): void => {
     const block = composePickMessage(pick, note);
-    const targetId = focusedPaneId ?? snapshot.sessionId;
+    const targetId = focusedPaneId ?? activeSessionId;
     if (!targetId) return;
     composerBridge.current.get(targetId)?.insertText(block);
-  }, [focusedPaneId, snapshot.sessionId]);
+  }, [focusedPaneId, activeSessionId]);
   // 设计画布「发给 AI」：选中节点摘要写入焦点格输入框（browser-pick 同模式）。
   const sendDesignSelection = useCallback((text: string): void => {
-    const targetId = focusedPaneId ?? snapshot.sessionId;
+    const targetId = focusedPaneId ?? activeSessionId;
     if (!targetId) {
       setMessageActionError("请先创建或打开一个会话，再与 AI 协作设计");
       return;
     }
     composerBridge.current.get(targetId)?.insertText(text);
-  }, [focusedPaneId, snapshot.sessionId]);
+  }, [focusedPaneId, activeSessionId]);
   // 会话激活/创建后拉取设计状态：画布跟随焦点会话（utility 推 design.state + design.docs）。
   const designQuerySessionRef = useRef<string | undefined>(undefined);
   useEffect(() => {
-    if (!ready || !snapshot.workspace || !snapshot.sessionId) return;
-    if (designQuerySessionRef.current === snapshot.sessionId) return;
-    designQuerySessionRef.current = snapshot.sessionId;
+    if (!ready || !activeWorkspace || !activeSessionId) return;
+    if (designQuerySessionRef.current === activeSessionId) return;
+    designQuerySessionRef.current = activeSessionId;
     void window.piDesktop.send({ type: "design.query" }).catch(() => undefined);
-  }, [ready, snapshot.workspace, snapshot.sessionId]);
+  }, [ready, activeWorkspace, activeSessionId]);
   // 文件树「添加到聊天」：工作区文件作为附件注入焦点格附件条——随下一条消息一起
   // 发给模型（运行时按相对路径读取并生成引用块；体积/存在性校验走 statWorkspaceFile）。
   const addFileToChat = useCallback(async (relativePath: string, workspace: string): Promise<void> => {
-    const targetId = focusedPaneId ?? snapshot.sessionId;
+    const targetId = focusedPaneId ?? activeSessionId;
     if (!targetId) { setMessageActionError("请先创建或打开一个会话"); return; }
     let stat;
     try {
@@ -1426,7 +1471,7 @@ export function App(): ReactNode {
     const api = composerBridge.current.get(targetId);
     if (!api) { setMessageActionError("请先创建或打开一个会话"); return; }
     api.addAttachments([{ kind: "file", name: stat.name, path: stat.relativePath, relativePath: stat.relativePath, size: stat.size }]);
-  }, [focusedPaneId, snapshot.sessionId]);
+  }, [focusedPaneId, activeSessionId]);
   // 浏览器标签页状态回流：用页面标题/加载态更新预览标签的元数据。
   const handleBrowserStateChange = useCallback((tabId: string, state: import("../../shared/protocol").BrowserPreviewState): void => {
     setPreview((current) => current ? {
@@ -1437,11 +1482,8 @@ export function App(): ReactNode {
     } : current);
   }, []);
   const visibleAgents = useMemo(() => settings.agents.filter((agent) => !agent.archived && `${agent.name} ${agent.description}`.toLowerCase().includes(sidebarQuery.trim().toLowerCase())), [settings.agents, sidebarQuery]);
-  const sessionGroups = useMemo(() => groupSessionsByWorkspace(snapshot.sessions, sidebarQuery, snapshot.recentWorkspaces, snapshot.workspace), [snapshot.sessions, snapshot.recentWorkspaces, snapshot.workspace, sidebarQuery]);
+  const sessionGroups = useMemo(() => groupSessionsByWorkspace(sessionSummaries, sidebarQuery, recentWorkspaces, activeWorkspace), [sessionSummaries, recentWorkspaces, activeWorkspace, sidebarQuery]);
   const themeLayers = useMemo(() => collectThemeLayers(settings.appearance.customCss), [settings.appearance.customCss]);
-  // 主题根属性（data-ui-*）反映焦点格（分屏下即激活会话）的状态。
-  const isGenerating = Boolean(snapshot.busy && snapshot.turnTiming && snapshot.turnTiming.completedAt === undefined);
-  const isChatEmpty = !snapshot.workspace || (snapshot.messages.length === 0 && !isGenerating);
   const activePreviewTab = preview?.tabs.find((tab) => tab.id === preview.activeTabId);
 
   // Race-safe subscription: if the component unmounts before initialize()
@@ -1489,12 +1531,12 @@ export function App(): ReactNode {
     } else {
       setPreview(undefined);
     }
-  }, [snapshot.sessionId]);
+  }, [activeSessionId]);
 
-  const previousWorkspaceRef = useRef(snapshot.workspace);
+  const previousWorkspaceRef = useRef(activeWorkspace);
   useEffect(() => {
-    if (previousWorkspaceRef.current === snapshot.workspace) return;
-    previousWorkspaceRef.current = snapshot.workspace;
+    if (previousWorkspaceRef.current === activeWorkspace) return;
+    previousWorkspaceRef.current = activeWorkspace;
     // Terminals spawn with the old workspace as cwd; retire them all when it
     // changes instead of leaving shells pointing at a stale directory.
     const terminalTabs = (preview?.tabs ?? []).filter((tab) => tab.target.type === "terminal");
@@ -1507,7 +1549,7 @@ export function App(): ReactNode {
       const activeTabId = tabs.some((tab) => tab.id === current.activeTabId) ? current.activeTabId : tabs[0]!.id;
       return { tabs, activeTabId };
     });
-  }, [snapshot.workspace, preview]);
+  }, [activeWorkspace, preview]);
 
   useEffect(() => {
     const toggleTerminal = (event: KeyboardEvent): void => {
@@ -1579,7 +1621,7 @@ export function App(): ReactNode {
     const root = document.documentElement;
     const states: readonly [string, boolean][] = [
       ["data-ui-settings-open", settingsOpen],
-      ["data-ui-workspace-open", Boolean(snapshot.workspace)],
+      ["data-ui-workspace-open", Boolean(activeWorkspace)],
       ["data-ui-chat-empty", isChatEmpty],
       ["data-ui-generating", isGenerating],
       ["data-ui-preview-open", previewOpened],
@@ -1609,7 +1651,7 @@ export function App(): ReactNode {
       for (const [name] of states) root.removeAttribute(name);
       for (const [name] of valueStates) root.removeAttribute(name);
     };
-  }, [settingsOpen, snapshot.workspace, isChatEmpty, isGenerating, previewOpened, previewFullscreen, permission, question, paneIds.length, sidebarView, settings.appearance.tune, settings.appearance.motion, designMode]);
+  }, [settingsOpen, activeWorkspace, isChatEmpty, isGenerating, previewOpened, previewFullscreen, permission, question, paneIds.length, sidebarView, settings.appearance.tune, settings.appearance.motion, designMode]);
 
   async function openWorkspace(): Promise<void> {
     const path = await window.piDesktop.chooseWorkspace();
@@ -1618,17 +1660,17 @@ export function App(): ReactNode {
 
   /**
    * 新建话题：分屏中替换 paneSessionId 指定的格子（缺省焦点格）。新会话 id
-   * 要等主进程激活后才知道，先记 pending，snapshot.sessionId 变化时落位。
+   * 要等主进程激活后才知道，先记 pending，activeSessionId 变化时落位。
    */
   async function createNewSession(workspace?: string, paneSessionId?: string): Promise<void> {
     try {
       if (splitTree) {
-        const target = paneSessionId ?? focusedPaneId ?? snapshot.sessionId;
+        const target = paneSessionId ?? focusedPaneId ?? activeSessionId;
         if (target) pendingPaneReplaceRef.current = target;
       }
       await window.piDesktop.send({ type: "session.new", workspace });
       // 分组默认折叠，新建后展开目标工作区，让新话题立即可见。
-      const key = workspaceKey(workspace ?? snapshot.workspace ?? "");
+      const key = workspaceKey(workspace ?? activeWorkspace ?? "");
       if (key) setExpandedWorkspaceGroups((current) => ({ ...current, [key]: true }));
     } catch (error) {
       setMessageActionError(error instanceof Error ? error.message : "新建话题失败");
@@ -1643,7 +1685,7 @@ export function App(): ReactNode {
           focusPane(sessionId);
           return;
         }
-        const target = focusedPaneId ?? snapshot.sessionId;
+        const target = focusedPaneId ?? activeSessionId;
         if (target && sessionId) setSplitState((current) => current.tree ? { tree: replaceLeaf(current.tree, target, { kind: "leaf", sessionId }), focusedPane: sessionId } : current);
       }
       await window.piDesktop.send({ type: "session.open", path, workspace: sessionWorkspace });
@@ -1656,11 +1698,11 @@ export function App(): ReactNode {
 
   /** 聚焦某格 = 激活该会话（live 快路径），全局镜像（topbar/任务面板）随焦点切换。 */
   function focusPane(sessionId: string): void {
-    if (sessionId === focusedPaneId && sessionId === snapshot.sessionId) return;
+    if (sessionId === focusedPaneId && sessionId === activeSessionId) return;
     setSplitState((current) => ({ tree: current.tree, focusedPane: sessionId }));
     setMaximizedPaneId((current) => (current !== undefined && current !== sessionId ? undefined : current));
-    if (sessionId === snapshot.sessionId) return;
-    const item = snapshot.sessions.find((summary) => summary.id === sessionId);
+    if (sessionId === activeSessionId) return;
+    const item = sessionSummaries.find((summary) => summary.id === sessionId);
     if (item) {
       void window.piDesktop.send({ type: "session.open", path: item.path, workspace: item.workspace }).catch((error) => {
         setMessageActionError(error instanceof Error ? error.message : "切换分屏失败");
@@ -1671,14 +1713,14 @@ export function App(): ReactNode {
   /** 侧栏右键「分屏」：自动把新会话插入到最接近方形的格子（方向由算法决定），新格成为焦点并被激活。 */
   function addSplitPane(item: SessionSummary): void {
     if (designMode) return; // 设计模式与分屏互斥（侧栏右键入口同步置灰）
-    if (!snapshot.sessionId) return;
+    if (!activeSessionId) return;
     if (splitTree && leafIds(splitTree).includes(item.id)) {
       focusPane(item.id);
       return;
     }
     if (splitTree && countLeaves(splitTree) >= MAX_SPLIT_PANES) return;
     // 自动均衡：不再固定「从焦点格链式分裂」，而是选最接近方形的格子落位、方向自动。
-    setSplitState((current) => ({ tree: balancedAddPane(current.tree, snapshot.sessionId, item.id), focusedPane: item.id }));
+    setSplitState((current) => ({ tree: balancedAddPane(current.tree, activeSessionId, item.id), focusedPane: item.id }));
     void window.piDesktop.send({ type: "session.open", path: item.path, workspace: item.workspace }).catch((error) => {
       setMessageActionError(error instanceof Error ? error.message : "分屏打开会话失败");
     });
@@ -1697,7 +1739,7 @@ export function App(): ReactNode {
       const next = collapsed?.kind === "leaf" ? null : collapsed;
       const focusedGone = current.focusedPane === sessionId;
       if (focusedGone && next) successor = firstLeafId(next);
-      const focusedPane = focusedGone ? (next ? firstLeafId(next) : snapshot.sessionId) : current.focusedPane;
+      const focusedPane = focusedGone ? (next ? firstLeafId(next) : activeSessionId) : current.focusedPane;
       return { tree: next, focusedPane };
     });
     setMaximizedPaneId((current) => (current === sessionId ? undefined : current));
@@ -1713,9 +1755,9 @@ export function App(): ReactNode {
   // ConversationPane 在布局树任何变化（拖分隔条每帧）时全体重渲染。这里持有
   // 最新函数版本的 ref + 按 sessionId 缓存的回调（闭包只捕获 leafSessionId，
   // 行为经 ref 永远取到当次渲染的函数），格子 props 身份跨渲染恒定。
-  const paneActionsRef = useRef({ focusPane, removeSplitPane, toggleMaximizePane, createNewSession });
-  paneActionsRef.current = { focusPane, removeSplitPane, toggleMaximizePane, createNewSession };
-  const paneCallbacksRef = useRef(new Map<string, { onFocus(): void; onClose(): void; onToggleMaximize(): void; onNewSession(): Promise<void> }>());
+  const paneActionsRef = useRef({ focusPane, removeSplitPane, toggleMaximizePane, createNewSession, openRollbackConfirm });
+  paneActionsRef.current = { focusPane, removeSplitPane, toggleMaximizePane, createNewSession, openRollbackConfirm };
+  const paneCallbacksRef = useRef(new Map<string, { onFocus(): void; onClose(): void; onToggleMaximize(): void; onNewSession(): Promise<void>; onRollback(file: ReplyChangedFile): void }>());
   const getPaneCallbacks = useCallback((leafSessionId: string) => {
     let callbacks = paneCallbacksRef.current.get(leafSessionId);
     if (!callbacks) {
@@ -1723,7 +1765,8 @@ export function App(): ReactNode {
         onFocus: () => paneActionsRef.current.focusPane(leafSessionId),
         onClose: () => paneActionsRef.current.removeSplitPane(leafSessionId),
         onToggleMaximize: () => paneActionsRef.current.toggleMaximizePane(leafSessionId),
-        onNewSession: () => paneActionsRef.current.createNewSession(undefined, leafSessionId)
+        onNewSession: () => paneActionsRef.current.createNewSession(undefined, leafSessionId),
+        onRollback: (file) => paneActionsRef.current.openRollbackConfirm(file, leafSessionId)
       };
       paneCallbacksRef.current.set(leafSessionId, callbacks);
     }
@@ -1738,14 +1781,14 @@ export function App(): ReactNode {
    *  驱逐、不设终端圆点、streaming 走 session.state 通道）；移出的格子注销并清
    *  缓存。最大化时其余格子转 hidden 模式（保留 watch 与驱逐豁免，只停推送），
    *  恢复可见时主进程补推水合帧。登记簿只收“真正发送过 watch 的 id”：格子首次
-   *  成为焦点（激活）时被跳过、后来失焦的，会在本 effect 随 snapshot.sessionId
+   *  成为焦点（激活）时被跳过、后来失焦的，会在本 effect 随 activeSessionId
    *  变化重跑时补发——主进程幂等接受并立即回推一帧全量水合。 */
   useEffect(() => {
     if (!ready) return;
     const registered = watchedPaneIdsRef.current;
     const hiddenRegistered = hiddenPaneIdsRef.current;
     const panes = new Set(paneIds);
-    const activeId = snapshot.sessionId;
+    const activeId = activeSessionId;
     const visible = maximizedPaneId !== undefined && panes.has(maximizedPaneId)
       ? new Set([maximizedPaneId])
       : panes;
@@ -1791,7 +1834,7 @@ export function App(): ReactNode {
     // 单窗口（无格子）下 state 通道每次切会话都会写 parkedPanels 留档，而这些
     // 条目永远不会被读取——按当前格子集合修剪，防止内存无界增长。
     pruneParkedPanels(panes);
-  }, [paneIds, snapshot.sessionId, ready, maximizedPaneId]);
+  }, [paneIds, activeSessionId, ready, maximizedPaneId]);
 
   /** 分屏布局持久化（localStorage，重启恢复；失效格子由修剪 effect 清理）。
    *  尾随防抖：拖动分隔条时布局树每个 pointermove 帧都在变，同步写盘既卡主线程
@@ -1808,18 +1851,18 @@ export function App(): ReactNode {
 
   /** 会话消失（删除/工作区移除）时修剪格子；焦点格被剪则回退到首个叶子。 */
   useEffect(() => {
-    if (!splitTree || snapshot.sessions.length === 0) return;
-    const valid = new Set(snapshot.sessions.map((item) => item.id));
-    if (snapshot.sessionId) valid.add(snapshot.sessionId);
+    if (!splitTree || sessionSummaries.length === 0) return;
+    const valid = new Set(sessionSummaries.map((item) => item.id));
+    if (activeSessionId) valid.add(activeSessionId);
     setSplitState((current) => {
       if (!current.tree) return current;
       const { tree, removed } = pruneToIds(current.tree, valid);
       if (removed.length === 0) return current;
       const focusedGone = current.focusedPane !== undefined && removed.includes(current.focusedPane);
-      const focusedPane = focusedGone ? (tree ? firstLeafId(tree) : snapshot.sessionId) : current.focusedPane;
+      const focusedPane = focusedGone ? (tree ? firstLeafId(tree) : activeSessionId) : current.focusedPane;
       return { tree, focusedPane };
     });
-  }, [snapshot.sessions, snapshot.sessionId, splitTree]);
+  }, [sessionSummaries, activeSessionId, splitTree]);
 
   /**
    * 激活会话落位（按“激活 id 迁移”触发，树变化不触发）：维持「焦点格 =
@@ -1830,9 +1873,9 @@ export function App(): ReactNode {
    *   外部路径）：替换焦点格——否则激活会话不在任何格子里，分屏视图与全局
    *   镜像（topbar/任务面板/权限过滤）会指向一个看不见的会话。
    */
-  const previousActiveIdRef = useRef<string | undefined>(snapshot.sessionId);
+  const previousActiveIdRef = useRef<string | undefined>(activeSessionId);
   useEffect(() => {
-    const activeId = snapshot.sessionId;
+    const activeId = activeSessionId;
     if (previousActiveIdRef.current === activeId) return;
     previousActiveIdRef.current = activeId;
     if (!splitTree || !activeId) return;
@@ -1849,17 +1892,17 @@ export function App(): ReactNode {
     setSplitState((current) => current.tree
       ? { tree: replaceLeaf(current.tree, target, { kind: "leaf", sessionId: activeId }), focusedPane: activeId }
       : current);
-  }, [snapshot.sessionId, splitTree, paneIds, focusedPaneId]);
+  }, [activeSessionId, splitTree, paneIds, focusedPaneId]);
 
   /** 切换助手清空分屏（会话列表按助手划分，旧格子全部失效）。 */
-  const agentIdRef = useRef(snapshot.agentId);
+  const agentIdRef = useRef(activeAgentId);
   useEffect(() => {
-    if (agentIdRef.current === snapshot.agentId) return;
-    agentIdRef.current = snapshot.agentId;
+    if (agentIdRef.current === activeAgentId) return;
+    agentIdRef.current = activeAgentId;
     setSplitState({ tree: null });
     setMaximizedPaneId(undefined);
     draftsRef.current.clear();
-  }, [snapshot.agentId]);
+  }, [activeAgentId]);
 
   /** 启动恢复分屏：会话列表就绪后先打开焦点格（用户注视的画面最先出现，不排
    *  在 N-1 个背景会话构建之后），再逐个以 activate:false 打开背景格（创建
@@ -1867,12 +1910,12 @@ export function App(): ReactNode {
    *  effect 先行发出（主进程 pendingWatchSessions 排队，创建即补水合帧）。 */
   const splitRestoreDoneRef = useRef(false);
   useEffect(() => {
-    if (splitRestoreDoneRef.current || !ready || !splitTree || snapshot.sessions.length === 0) return;
+    if (splitRestoreDoneRef.current || !ready || !splitTree || sessionSummaries.length === 0) return;
     splitRestoreDoneRef.current = true;
     const focused = focusedPaneId && paneIds.includes(focusedPaneId) ? focusedPaneId : paneIds[0];
     const background = paneIds.filter((id) => id !== focused);
     void (async () => {
-      const focusedItem = snapshot.sessions.find((summary) => summary.id === focused);
+      const focusedItem = sessionSummaries.find((summary) => summary.id === focused);
       if (focusedItem) {
         try {
           await window.piDesktop.send({ type: "session.open", path: focusedItem.path, workspace: focusedItem.workspace });
@@ -1881,7 +1924,7 @@ export function App(): ReactNode {
         }
       }
       for (const id of background) {
-        const item = snapshot.sessions.find((summary) => summary.id === id);
+        const item = sessionSummaries.find((summary) => summary.id === id);
         if (!item) continue;
         try {
           await window.piDesktop.send({ type: "session.open", path: item.path, workspace: item.workspace, activate: false });
@@ -1890,7 +1933,7 @@ export function App(): ReactNode {
         }
       }
     })();
-  }, [ready, splitTree, paneIds, focusedPaneId, snapshot.sessions]);
+  }, [ready, splitTree, paneIds, focusedPaneId, sessionSummaries]);
 
   /** 最大化目标格子被剪/退出分屏时清除最大化态。 */
   useEffect(() => {
@@ -1976,18 +2019,21 @@ export function App(): ReactNode {
     setDesignDragging(false);
   }
 
-  function openPreviewTarget(target: PreviewTarget, id: string = previewTargetKey(target)): void {
+  // 预览面板开合：只走 setState 函数式更新，不读渲染作用域，可安全 useCallback
+  // 稳定身份——下游 openArtifactPreview/openFilePreview/openPlanPreview 等
+  // memo 化回调全部依赖它，不稳定会级联击穿 ConversationPane 的 memo。
+  const openPreviewTarget = useCallback((target: PreviewTarget, id: string = previewTargetKey(target)): void => {
     setPreviewOpened(true);
     setPreview((current) => {
       if (current?.tabs.some((tab) => tab.id === id)) return { ...current, activeTabId: id };
       const tab: PreviewTab = { id, target };
       return current ? { tabs: [...current.tabs, tab], activeTabId: id } : { tabs: [tab], activeTabId: id };
     });
-  }
+  }, []);
 
-  function updatePreviewTarget(id: string, target: PreviewTarget): void {
+  const updatePreviewTarget = useCallback((id: string, target: PreviewTarget): void => {
     setPreview((current) => (current ? { ...current, tabs: current.tabs.map((tab) => (tab.id === id ? { ...tab, target } : tab)) } : current));
-  }
+  }, []);
 
   function selectPreviewTab(id: string): void {
     setPreview((current) => (current ? { ...current, activeTabId: id } : current));
@@ -2024,9 +2070,9 @@ export function App(): ReactNode {
   }
 
   /** 打开计划全文预览（内存 markdown，不落盘），供审查面板「查看完整」跳转。 */
-  function openPlanPreview(detail: string): void {
+  const openPlanPreview = useCallback((detail: string): void => {
     openPreviewTarget({ type: "plan", title: detailTitle(detail), content: detail });
-  }
+  }, [openPreviewTarget]);
 
   /** 记忆面板点击主题：右侧预览窗口打开该主题正文（查看/编辑/源码，保存走 memory.update）。 */
   const openMemoryTopic = useCallback((topic: MemoryTopic): void => {
@@ -2071,15 +2117,15 @@ export function App(): ReactNode {
     openPreviewTarget({ type: "diff", title: path?.split("/").at(-1) ?? `${toolLabel(execution.name)}变更`, path, patch: execution.patch });
   }, []);
 
-  const latestReviewExecution = [...snapshot.executions].reverse().find((execution) => Boolean(execution.patch));
+  const latestReviewExecution = [...executions].reverse().find((execution) => Boolean(execution.patch));
   const openLatestReview = useCallback((): void => {
     if (latestReviewExecution) openDiffPreview(latestReviewExecution);
   }, [latestReviewExecution, openDiffPreview]);
 
   /** 分屏格子的渲染器：头部信息来自会话列表摘要，交互回调全部绑定本格 sessionId。 */
   const renderSplitLeaf = useCallback((leafSessionId: string): ReactNode => {
-    const summary = snapshot.sessions.find((item) => item.id === leafSessionId);
-    const { onFocus, onClose, onToggleMaximize, onNewSession } = getPaneCallbacks(leafSessionId);
+    const summary = sessionSummaries.find((item) => item.id === leafSessionId);
+    const { onFocus, onClose, onToggleMaximize, onNewSession, onRollback } = getPaneCallbacks(leafSessionId);
     return (
       <div className="split-pane" key={leafSessionId} data-pane-active={leafSessionId === focusedPaneId || undefined}>
         <ConversationPane
@@ -2103,11 +2149,11 @@ export function App(): ReactNode {
           onOpenMemoryTopic={openMemoryTopic}
           onOpenTranscript={setTranscriptTarget}
           onActionError={setActionError}
-          onRollback={(file) => openRollbackConfirm(file, leafSessionId)}
+          onRollback={onRollback}
         />
       </div>
     );
-  }, [snapshot.sessions, focusedPaneId, maximizedPaneId, openArtifactPreview, openFilePreview, openDiffPreview, registerComposerApi, draftStore, setActionError, getPaneCallbacks, openRollbackConfirm]);
+  }, [sessionSummaries, focusedPaneId, maximizedPaneId, openArtifactPreview, openFilePreview, openDiffPreview, openPlanPreview, openMemoryTopic, registerComposerApi, draftStore, setActionError, getPaneCallbacks]);
 
   /** 分隔条拖动：按 split 节点路径更新比例（夹取在 SplitDivider 内完成）。 */
   const handleSplitRatioChange = useCallback((path: readonly number[], ratio: number): void => {
@@ -2155,7 +2201,7 @@ export function App(): ReactNode {
     try {
       const tab = previewRef.current?.tabs.find((t) => t.id === tabId);
       const fileWorkspace = tab?.target.type === "file" ? tab.target.workspace : undefined;
-      const file = await window.piDesktop.readWorkspaceFile(relativePath, fileWorkspace ?? snapshot.workspace);
+      const file = await window.piDesktop.readWorkspaceFile(relativePath, fileWorkspace ?? activeWorkspace);
       updatePreviewTarget(tabId, { type: "file", file, workspace: fileWorkspace ?? file.workspace });
       setPreviewEditorStates((prev) => {
         const prior = prev[tabId] ?? defaultEditorState();
@@ -2169,7 +2215,7 @@ export function App(): ReactNode {
     const tab = previewRef.current?.tabs.find((t) => t.id === tabId);
     const relativePath = tab?.target.type === "file" ? tab.target.file.relativePath : undefined;
     const exec = relativePath
-      ? [...snapshot.executions].reverse().find((e) => e.status === "completed" && e.changedFile && e.changedFile.relativePath.toLowerCase() === relativePath.toLowerCase())
+      ? [...executions].reverse().find((e) => e.status === "completed" && e.changedFile && e.changedFile.relativePath.toLowerCase() === relativePath.toLowerCase())
       : undefined;
     if (tab && exec) editorSyncedExecutionsRef.current[tab.id] = exec.id;
     if (choice === "load-remote" && relativePath) {
@@ -2185,7 +2231,7 @@ export function App(): ReactNode {
     for (const tab of preview.tabs) {
       if (tab.target.type !== "file" || tab.target.file.kind !== "markdown") continue;
       const relativePath = tab.target.file.relativePath.toLowerCase();
-      const exec = [...snapshot.executions].reverse().find((e) => e.status === "completed" && e.changedFile && e.changedFile.relativePath.toLowerCase() === relativePath);
+      const exec = [...executions].reverse().find((e) => e.status === "completed" && e.changedFile && e.changedFile.relativePath.toLowerCase() === relativePath);
       if (!exec || editorSyncedExecutionsRef.current[tab.id] === exec.id) continue;
       const state = previewEditorStatesRef.current[tab.id] ?? defaultEditorState();
       if (state.dirty) {
@@ -2195,7 +2241,7 @@ export function App(): ReactNode {
         void reloadEditorFromDisk(tab.id, tab.target.file.relativePath);
       }
     }
-  }, [snapshot.executions, preview]);
+  }, [executions, preview]);
 
   // AI 浏览器自动化与预览面板同步：created 把新标签加进面板并激活；
   // automation-started 展开面板并切到 AI 正在操作的标签（面板未打开时
@@ -2233,12 +2279,12 @@ export function App(): ReactNode {
         <>
           <div className="sidebar-tabs" role="tablist" aria-label="侧栏视图">
             <button type="button" role="tab" aria-selected={sidebarTab === "agents"} className={sidebarTab === "agents" ? "active" : ""} onClick={() => { setSidebarTab("agents"); setSidebarQuery(""); }}><Users size={14} />助手<span>{settings.agents.filter((agent) => !agent.archived).length}</span></button>
-            <button type="button" role="tab" aria-selected={sidebarTab === "topics"} className={sidebarTab === "topics" ? "active" : ""} onClick={() => { setSidebarTab("topics"); setSidebarQuery(""); }}><MessageCircle size={14} />话题<span>{snapshot.sessions.length}</span></button>
+            <button type="button" role="tab" aria-selected={sidebarTab === "topics"} className={sidebarTab === "topics" ? "active" : ""} onClick={() => { setSidebarTab("topics"); setSidebarQuery(""); }}><MessageCircle size={14} />话题<span>{sessionSummaries.length}</span></button>
           </div>
           <label className="sidebar-search"><Search size={14} /><input ref={sidebarSearchRef} value={sidebarQuery} placeholder={sidebarTab === "agents" ? "搜索助手" : "搜索话题"} aria-label={sidebarTab === "agents" ? "搜索助手" : "搜索话题"} onChange={(event) => setSidebarQuery(event.target.value)} /></label>
           <div className="sidebar-section-label">{sidebarTab === "agents" ? "角色" : "最近话题"}</div>
           {sidebarTab === "agents" ? <nav className="agent-list" aria-label="助手列表">
-            {visibleAgents.map((agent) => <button className={agent.id === snapshot.agentId ? "active" : ""} type="button" key={agent.id} data-row-kind="agent" data-row-active={agent.id === snapshot.agentId || undefined} onClick={() => { useDesktopStore.setState({ settings: { ...settings, currentAgentId: agent.id } }); void window.piDesktop.send({ type: "agent.select", agentId: agent.id }); }}><span className="agent-list-icon"><Bot size={15} /></span><span><strong>{agent.name}</strong><small>{agent.description || "未填写说明"}</small></span></button>)}
+            {visibleAgents.map((agent) => <button className={agent.id === activeAgentId ? "active" : ""} type="button" key={agent.id} data-row-kind="agent" data-row-active={agent.id === activeAgentId || undefined} onClick={() => { useDesktopStore.setState({ settings: { ...settings, currentAgentId: agent.id } }); void window.piDesktop.send({ type: "agent.select", agentId: agent.id }); }}><span className="agent-list-icon"><Bot size={15} /></span><span><strong>{agent.name}</strong><small>{agent.description || "未填写说明"}</small></span></button>)}
           </nav> : <nav className="session-list" aria-label="话题列表">
             {sessionGroups.length === 0 ? <div className="session-list-empty">暂无匹配话题</div> : sessionGroups.map((group) => {
               const collapsed = expandedWorkspaceGroups[group.key] !== true;
@@ -2284,7 +2330,7 @@ export function App(): ReactNode {
                     <div className="session-workspace-items-inner">
                     {group.sessions.length === 0
                       ? <div className="session-workspace-empty">暂无话题，点击右上角新建</div>
-                      : group.sessions.map((item) => <button className={item.id === snapshot.sessionId || (splitTree ? paneIds.includes(item.id) : false) ? "active" : ""} type="button" key={item.path} title={item.title} data-row-kind="session" data-row-active={item.id === snapshot.sessionId || (splitTree ? paneIds.includes(item.id) : false) || undefined} onClick={() => void openSession(item.path, item.workspace, item.id)} onContextMenu={(event) => { event.preventDefault(); const splitDisabled = !snapshot.sessionId || designMode || (splitTree ? countLeaves(splitTree) >= MAX_SPLIT_PANES : false); const inPane = splitTree ? leafIds(splitTree).includes(item.id) : false; setContextMenu({ x: event.clientX, y: event.clientY, items: [{ label: "重命名", onClick: () => { setRenameSession({ path: item.path, title: item.title }); setRenameValue(item.title); } }, { label: item.pinned ? "取消置顶" : "置顶", onClick: () => { void window.piDesktop.send({ type: "session.pin", path: item.path, pinned: !item.pinned }); } }, { label: inPane ? "已分屏，切换到该格" : "分屏", disabled: !inPane && splitDisabled, onClick: () => addSplitPane(item) }, { label: "删除会话", danger: true, onClick: () => setDeleteSession({ path: item.path, title: item.title }) }] }); }}><MessageCircle size={14} /><span><strong>{item.title}</strong><small>{new Date(item.modifiedAt).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}</small></span>{(item.runStatus || item.pinned) && <div className="session-item-meta">{item.runStatus && <i className={`session-status-dot ${item.runStatus}`} title={sessionRunStatusLabels[item.runStatus]} aria-label={sessionRunStatusLabels[item.runStatus]!} />}{item.pinned && <Pin size={11} className="session-pin-indicator" />}</div>}</button>)}
+                      : group.sessions.map((item) => <button className={item.id === activeSessionId || (splitTree ? paneIds.includes(item.id) : false) ? "active" : ""} type="button" key={item.path} title={item.title} data-row-kind="session" data-row-active={item.id === activeSessionId || (splitTree ? paneIds.includes(item.id) : false) || undefined} onClick={() => void openSession(item.path, item.workspace, item.id)} onContextMenu={(event) => { event.preventDefault(); const splitDisabled = !activeSessionId || designMode || (splitTree ? countLeaves(splitTree) >= MAX_SPLIT_PANES : false); const inPane = splitTree ? leafIds(splitTree).includes(item.id) : false; setContextMenu({ x: event.clientX, y: event.clientY, items: [{ label: "重命名", onClick: () => { setRenameSession({ path: item.path, title: item.title }); setRenameValue(item.title); } }, { label: item.pinned ? "取消置顶" : "置顶", onClick: () => { void window.piDesktop.send({ type: "session.pin", path: item.path, pinned: !item.pinned }); } }, { label: inPane ? "已分屏，切换到该格" : "分屏", disabled: !inPane && splitDisabled, onClick: () => addSplitPane(item) }, { label: "删除会话", danger: true, onClick: () => setDeleteSession({ path: item.path, title: item.title }) }] }); }}><MessageCircle size={14} /><span><strong>{item.title}</strong><small>{new Date(item.modifiedAt).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}</small></span>{(item.runStatus || item.pinned) && <div className="session-item-meta">{item.runStatus && <i className={`session-status-dot ${item.runStatus}`} title={sessionRunStatusLabels[item.runStatus]} aria-label={sessionRunStatusLabels[item.runStatus]!} />}{item.pinned && <Pin size={11} className="session-pin-indicator" />}</div>}</button>)}
                     </div>
                   </div>
                 </section>
@@ -2293,11 +2339,11 @@ export function App(): ReactNode {
           </nav>}
         </>
       )}
-      <button className="new-session-button" data-control="new-session" type="button" disabled={!snapshot.workspace} onClick={() => void createNewSession()}><MessageSquarePlus size={16} />新建话题</button>
+      <button className="new-session-button" data-control="new-session" type="button" disabled={!activeWorkspace} onClick={() => void createNewSession()}><MessageSquarePlus size={16} />新建话题</button>
       <button className="automation-nav-button" data-control="automation-open" type="button" title="自动化任务" aria-label="自动化任务" onClick={() => openSettingsOn("automation")}><Zap size={15} /><span>自动化</span></button>
       <div className="sidebar-footer">
         <button type="button" data-control="settings" onClick={() => setSettingsOpen(true)}><Settings size={16} />设置</button>
-        <span className={`runtime-indicator${snapshot.busy ? " busy" : ""}`}><i />{snapshot.status}</span>
+        <span className={`runtime-indicator${runtimeBusy ? " busy" : ""}`}><i />{runtimeStatus}</span>
       </div>
     </>
   );
@@ -2313,7 +2359,7 @@ export function App(): ReactNode {
         <div className="sidebar-rail" data-pane="sidebar" data-ui-sidebar-collapsed>
           <button type="button" className="rail-brand" data-control="sidebar-expand" title="展开侧边栏" aria-label="展开侧边栏" onClick={() => { if (sidebarFlyoutOpen) { setSidebarFlyoutOpen(false); } else { setSidebarCollapsed(false); } }}><span className="rail-brand-mark"><BrandMark size={20} /></span><PanelLeftOpen className="rail-brand-expand" size={18} /></button>
           <div className="sidebar-rail-items">
-            <button type="button" className="rail-new-session" data-control="new-session" title="在当前工作区新建话题" aria-label="在当前工作区新建话题" disabled={!snapshot.workspace} onClick={() => void createNewSession()}><Plus size={18} /></button>
+            <button type="button" className="rail-new-session" data-control="new-session" title="在当前工作区新建话题" aria-label="在当前工作区新建话题" disabled={!activeWorkspace} onClick={() => void createNewSession()}><Plus size={18} /></button>
             <button type="button" className="rail-icon" data-control="automation-open" title="自动化任务" aria-label="自动化任务" onClick={() => openSettingsOn("automation")}><Zap size={18} /></button>
             <button type="button" className="rail-icon" data-control="rail-topics" title="话题列表" aria-label="话题列表" onClick={() => { setSidebarView("topics"); setSidebarTab("topics"); setSidebarFlyoutOpen(true); }}><MessageCircle size={18} /></button>
             <button type="button" className="rail-icon" data-control="rail-search" title="搜索" aria-label="搜索" onClick={() => { setSidebarView("topics"); setSidebarFlyoutOpen(true); window.setTimeout(() => sidebarSearchRef.current?.focus(), 30); }}><Search size={18} /></button>
@@ -2342,9 +2388,9 @@ export function App(): ReactNode {
 
       <main className="workspace-main" data-pane="workspace">
         <header className="topbar" data-pane="topbar">
-          <div className="project-title"><Folder size={17} /><span><strong>{snapshot.workspace?.split(/[\\/]/u).at(-1) ?? "ChatAnyTime"}</strong><small>{snapshot.agentName} · {snapshot.sessionId ? "当前话题" : "未开始话题"}</small></span>{snapshot.gitBranch && <span className="git-branch-badge" title={`当前 Git 分支：${snapshot.gitBranch}`}><GitBranch size={13} />{snapshot.gitBranch}</span>}</div>
+          <div className="project-title"><Folder size={17} /><span><strong>{activeWorkspace?.split(/[\\/]/u).at(-1) ?? "ChatAnyTime"}</strong><small>{activeAgentName} · {activeSessionId ? "当前话题" : "未开始话题"}</small></span>{gitBranch && <span className="git-branch-badge" title={`当前 Git 分支：${gitBranch}`}><GitBranch size={13} />{gitBranch}</span>}</div>
           <div className="runtime-controls">
-            <button className="workspace-top-button" data-control="workspace-open" type="button" onClick={() => void openWorkspace()}><FolderOpen size={15} /><span>工作区</span><strong>{compactPath(snapshot.workspace)}</strong><ChevronDown size={13} /></button>
+            <button className="workspace-top-button" data-control="workspace-open" type="button" onClick={() => void openWorkspace()}><FolderOpen size={15} /><span>工作区</span><strong>{compactPath(activeWorkspace)}</strong><ChevronDown size={13} /></button>
             <button className={`icon-button design-toggle${designMode ? " active" : ""}`} data-control="design-toggle" type="button" aria-label={designMode ? "退出设计模式" : "进入设计模式"} aria-pressed={designMode} title={designMode ? "退出设计模式" : "设计模式（AI 设计工作台）"} onClick={() => setDesignMode((open) => !open)}><Palette size={18} /></button>
             <button className="icon-button preview-panel-toggle" data-control="preview-toggle" type="button" aria-label={previewOpened ? "关闭预览" : "打开预览"} title={previewOpened ? "关闭预览" : "打开预览"} onClick={() => {
               // 顶部按钮始终完全关闭/打开预览面板：即使已有标签页也不会
@@ -2383,7 +2429,7 @@ export function App(): ReactNode {
               />
               <div className="design-chat-pane">
                 <ConversationPane
-                  sessionId={snapshot.sessionId}
+                  sessionId={activeSessionId}
                   showDock
                   focused
                   onNewSession={defaultNewSession}
@@ -2396,7 +2442,7 @@ export function App(): ReactNode {
                   onOpenMemoryTopic={openMemoryTopic}
                   onOpenTranscript={setTranscriptTarget}
                   onActionError={setActionError}
-                  onRollback={(file) => openRollbackConfirm(file, snapshot.sessionId)}
+                  onRollback={mainPaneRollback}
                 />
               </div>
             </>
@@ -2412,7 +2458,7 @@ export function App(): ReactNode {
             </div>
           ) : (
             <ConversationPane
-              sessionId={snapshot.sessionId}
+              sessionId={activeSessionId}
               showDock
               focused
               onNewSession={defaultNewSession}
@@ -2425,14 +2471,14 @@ export function App(): ReactNode {
               onOpenMemoryTopic={openMemoryTopic}
               onOpenTranscript={setTranscriptTarget}
               onActionError={setActionError}
-              onRollback={(file) => openRollbackConfirm(file, snapshot.sessionId)}
+              onRollback={mainPaneRollback}
             />
           )}
 
           {previewVisible && preview && <PreviewDivider split={previewSplit} dragging={previewDragging} onStart={startPreviewResize} onMove={movePreviewResize} onEnd={endPreviewResize} onCancel={cancelPreviewResize} onKeyDown={resizePreviewWithKeyboard} onReset={() => setPreviewSplit(50)} />}
 
           {previewVisible && <ExitWrap exiting={previewPresence.exiting}>{preview && preview.tabs.length > 0 ? (
-            <ArtifactPreview tabs={preview.tabs} activeTabId={preview.activeTabId} browserSuspended={previewDragging || settingsOpen || Boolean(permission) || Boolean(messageActionError) || previewAddMenuOpen || previewPresence.exiting} fullscreen={previewFullscreen} onFullscreenChange={setPreviewFullscreen} onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddTerminal={openTerminalPreview} onAddFile={() => void openManualFilePreview()} onAddReview={openLatestReview} onAddMenuOpenChange={setPreviewAddMenuOpen} reviewAvailable={Boolean(latestReviewExecution)} workspace={snapshot.workspace} activeEditorState={activePreviewTab && ((activePreviewTab.target.type === "file" && activePreviewTab.target.file.kind === "markdown") || activePreviewTab.target.type === "memory") ? getEditorState(activePreviewTab.id) : undefined} onActiveEditorChange={(patch) => { if (activePreviewTab) patchEditorState(activePreviewTab.id, patch); }} onActiveEditorContentChange={handleActiveEditorContentChange} onActiveEditorSaved={handleActiveEditorSaved} onActiveEditorStatusChange={handleActiveEditorStatusChange} onActiveEditorSaveError={(message) => setMessageActionError(`保存 ${activePreviewTab?.target.type === "file" ? activePreviewTab.target.file.name : activePreviewTab?.target.type === "memory" ? "记忆主题" : "Markdown"} 失败：${message}`)} onActiveEditorResolveConflict={(choice) => { if (activePreviewTab) handleEditorResolveConflict(activePreviewTab.id, choice); }} onToggleEditing={() => { if (activePreviewTab) patchEditorState(activePreviewTab.id, { editing: !getEditorState(activePreviewTab.id).editing }); }} onBrowserStateChange={handleBrowserStateChange} onBrowserPickSend={sendPickedElement} />
+            <ArtifactPreview tabs={preview.tabs} activeTabId={preview.activeTabId} browserSuspended={previewDragging || settingsOpen || Boolean(permission) || Boolean(messageActionError) || previewAddMenuOpen || previewPresence.exiting} fullscreen={previewFullscreen} onFullscreenChange={setPreviewFullscreen} onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddTerminal={openTerminalPreview} onAddFile={() => void openManualFilePreview()} onAddReview={openLatestReview} onAddMenuOpenChange={setPreviewAddMenuOpen} reviewAvailable={Boolean(latestReviewExecution)} workspace={activeWorkspace} activeEditorState={activePreviewTab && ((activePreviewTab.target.type === "file" && activePreviewTab.target.file.kind === "markdown") || activePreviewTab.target.type === "memory") ? getEditorState(activePreviewTab.id) : undefined} onActiveEditorChange={(patch) => { if (activePreviewTab) patchEditorState(activePreviewTab.id, patch); }} onActiveEditorContentChange={handleActiveEditorContentChange} onActiveEditorSaved={handleActiveEditorSaved} onActiveEditorStatusChange={handleActiveEditorStatusChange} onActiveEditorSaveError={(message) => setMessageActionError(`保存 ${activePreviewTab?.target.type === "file" ? activePreviewTab.target.file.name : activePreviewTab?.target.type === "memory" ? "记忆主题" : "Markdown"} 失败：${message}`)} onActiveEditorResolveConflict={(choice) => { if (activePreviewTab) handleEditorResolveConflict(activePreviewTab.id, choice); }} onToggleEditing={() => { if (activePreviewTab) patchEditorState(activePreviewTab.id, { editing: !getEditorState(activePreviewTab.id).editing }); }} onBrowserStateChange={handleBrowserStateChange} onBrowserPickSend={sendPickedElement} />
           ) : (
             <ArtifactPreview key="empty-state" tabs={[]} activeTabId="" onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddTerminal={openTerminalPreview} onAddFile={() => void openManualFilePreview()} onBrowserPickSend={sendPickedElement} />
           )}</ExitWrap>}
@@ -2440,8 +2486,8 @@ export function App(): ReactNode {
         </div>
       </main>
 
-      {settingsPresence.rendered && <ExitWrap exiting={settingsPresence.exiting}><SettingsDialog settings={settings} models={models} providers={providers} customProvider={customProvider} customModels={customModels} customModelFetchStatus={customModelFetchStatus} customModelFetchError={customModelFetchError} modelRefreshStatus={modelRefreshStatus} modelRefreshError={modelRefreshError} modelRefreshProvider={modelRefreshProvider} resources={resources} workspaceOpen={Boolean(snapshot.workspace)} initialTab={settingsInitialTab} onClose={() => { setSettingsOpen(false); setSettingsInitialTab(undefined); }} onCreateInSession={() => void createNewSession()} /></ExitWrap>}
-      {permissionPresence.rendered && (() => { const permission = permissionPresence.value; return permission ? <ExitWrap exiting={permissionPresence.exiting}><PermissionDialog request={permission} sessionTitle={snapshot.sessions.find((item) => item.id === permission.principal.sessionId)?.title} /></ExitWrap> : null; })()}
+      {settingsPresence.rendered && <ExitWrap exiting={settingsPresence.exiting}><SettingsDialog settings={settings} models={models} providers={providers} customProvider={customProvider} customModels={customModels} customModelFetchStatus={customModelFetchStatus} customModelFetchError={customModelFetchError} modelRefreshStatus={modelRefreshStatus} modelRefreshError={modelRefreshError} modelRefreshProvider={modelRefreshProvider} resources={resources} workspaceOpen={Boolean(activeWorkspace)} initialTab={settingsInitialTab} onClose={() => { setSettingsOpen(false); setSettingsInitialTab(undefined); }} onCreateInSession={() => void createNewSession()} /></ExitWrap>}
+      {permissionPresence.rendered && (() => { const permission = permissionPresence.value; return permission ? <ExitWrap exiting={permissionPresence.exiting}><PermissionDialog request={permission} sessionTitle={sessionSummaries.find((item) => item.id === permission.principal.sessionId)?.title} /></ExitWrap> : null; })()}
       {transcriptPresence.rendered && (() => { const transcriptTarget = transcriptPresence.value; return transcriptTarget ? <ExitWrap exiting={transcriptPresence.exiting}><DelegationTranscript delegation={transcriptTarget} onClose={() => setTranscriptTarget(undefined)} onOpenArtifact={openArtifactPreview} /></ExitWrap> : null; })()}
       {contextMenu && <ContextMenu x={contextMenu.x} y={contextMenu.y} items={contextMenu.items} onClose={() => setContextMenu(null)} />}
       {renamePresence.rendered && (() => { const renameSession = renamePresence.value; if (!renameSession) return null; return (
