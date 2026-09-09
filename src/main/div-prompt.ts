@@ -24,6 +24,13 @@ Div 气泡（<assistant_html><div>...</div></assistant_html>）是可渲染富�
 - 不应使用：编写或修改代码的过程中、简短答复与确认、用户明确要求纯文本或 Markdown 时、需要完整 ${htmlFence}html 页面的场景（改用隔离预览）。
 - 同一轮回复至多一个气泡；连续多轮相似的小答复（如简单确认）不重复使用。判断标准：这个内容是否会因卡片化而更易读、更直观；不会就普通 Markdown。`;
 
+/** 两档共用的图片规范：工作区相对路径由渲染端映射成 pidesktop-file:// 协议。 */
+export const DIV_MEDIA_PROMPT = `
+【图片】
+- 展示工作区里的图片（生成图、截图、素材）用 <img src="相对路径" alt="说明">，路径相对当前工作区，如 outputs/fox.png；不要拼绝对路径或 file:// 前缀。
+- 网络图片写完整 https 地址；不要把图片转成 base64 内联。
+- 给图片配宽度（width 或 max-width）与圆角，并保留标题/说明文字，不要让卡片只剩一张裸图。`;
+
 export const DIV_DYNAMIC_MODE_PROMPT = `
 【Div 动态内容】
 - 需要按钮交互、折叠展开、实时计时、进度变化、Canvas 动画或数据可视化时，可以在同一个 <assistant_html> 气泡中加入 <script>；PiDesktop 会在聊天窗口内实时渲染气泡，并在气泡完整结束后于受控作用域中激活脚本。完整 HTML 页面仍使用隔离的 HTML Artifact 预览。
@@ -36,5 +43,5 @@ export const DIV_DYNAMIC_MODE_PROMPT = `
 export function buildDivModePrompt(mode: DivBubbleMode): string | undefined {
   if (mode === "off") return undefined;
   const policy = mode === "always" ? DIV_MODE_PROMPT : DIV_AUTO_MODE_PROMPT;
-  return `${policy}\n\n${DIV_DYNAMIC_MODE_PROMPT}`;
+  return `${policy}\n\n${DIV_MEDIA_PROMPT}\n\n${DIV_DYNAMIC_MODE_PROMPT}`;
 }

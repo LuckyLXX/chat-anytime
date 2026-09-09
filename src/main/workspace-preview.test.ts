@@ -2,7 +2,7 @@ import { access, mkdir, mkdtemp, symlink, utimes, writeFile } from "node:fs/prom
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { artifactCandidatesFromBashCommand, artifactCandidatesFromOutput, changedWorkspaceFile, changedWorkspaceFiles, collectProducedArtifacts, createWorkspaceDirectory, createWorkspaceFile, deleteWorkspaceEntry, existingWorkspaceFiles, isArtifactProducingTool, listWorkspaceDirectory, readWorkspaceFilePreview, renameWorkspaceEntry, resolveWorkspaceEntry, searchWorkspaceFiles, statWorkspaceFile, writeWorkspaceFile } from "./workspace-preview.js";
+import { artifactCandidatesFromBashCommand, artifactCandidatesFromOutput, changedWorkspaceFile, changedWorkspaceFiles, collectProducedArtifacts, createWorkspaceDirectory, createWorkspaceFile, deleteWorkspaceEntry, existingWorkspaceFiles, isArtifactProducingTool, listWorkspaceDirectory, previewFileMimeType, readWorkspaceFilePreview, renameWorkspaceEntry, resolveWorkspaceEntry, searchWorkspaceFiles, statWorkspaceFile, writeWorkspaceFile } from "./workspace-preview.js";
 import { IMAGE_PREVIEW_LIMIT_BYTES } from "../shared/protocol.js";
 
 const TINY_PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
@@ -74,6 +74,19 @@ describe("workspace file search (@ 提及)", () => {
 });
 
 describe("workspace file preview", () => {
+  it("serves PDF and raster images over the preview protocol", () => {
+    expect(previewFileMimeType("D:/work/plan.pdf")).toBe("application/pdf");
+    expect(previewFileMimeType("D:/work/fox.PNG")).toBe("image/png");
+    expect(previewFileMimeType("D:/work/fox.jpeg")).toBe("image/jpeg");
+    expect(previewFileMimeType("D:/work/fox.webp")).toBe("image/webp");
+    expect(previewFileMimeType("D:/work/fox.gif")).toBe("image/gif");
+    expect(previewFileMimeType("D:/work/fox.avif")).toBe("image/avif");
+    expect(previewFileMimeType("D:/work/fox.bmp")).toBe("image/bmp");
+    // SVG 可携带脚本，不进协议（文本预览/artifact 分支照旧）。
+    expect(previewFileMimeType("D:/work/icon.svg")).toBeUndefined();
+    expect(previewFileMimeType("D:/work/notes.md")).toBeUndefined();
+    expect(previewFileMimeType("D:/work/noext")).toBeUndefined();
+  });
   it("classifies Markdown and common code without exposing absolute paths", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "pidesktop-preview-"));
     await mkdir(join(workspace, "src"));

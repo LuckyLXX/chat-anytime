@@ -15,6 +15,7 @@ import hljs from "highlight.js";
 import { artifactSandbox, buildArtifactPreviewSource, DYNAMIC_PREVIEW_ACTIONS, isDynamicArtifact, isFullArtifactDocument, type Artifact, type DynamicPreviewAction } from "../lib/content";
 import { normalizeMermaidSource, parseRichContent, type RichContentSegment } from "../lib/content-pipeline";
 import { sanitizeRichHtmlTree } from "../lib/html-sanitize";
+import { resolveWorkspaceAssetUrl } from "../lib/workspace-asset";
 
 interface RichContentProps {
   children: string;
@@ -22,6 +23,8 @@ interface RichContentProps {
   onOpenArtifact(artifact: Artifact): void;
   onHtmlAction?: (text: string) => void;
   artifactPrefix: string;
+  /** 会话工作区绝对路径：气泡/Markdown 里的相对图片地址经 pidesktop-file:// 映射。 */
+  workspace?: string;
 }
 
 interface ThemeTokens {
@@ -170,8 +173,9 @@ function CopyButton({ text }: { text: string }): ReactNode {
   );
 }
 
-function RichImage({ src, alt, title }: { src?: string; alt?: string; title?: string }): ReactNode {
+function RichImage({ src, alt, title, workspace }: { src?: string; alt?: string; title?: string; workspace?: string }): ReactNode {
   const [expanded, setExpanded] = useState(false);
+  const resolvedSrc = resolveWorkspaceAssetUrl(src, workspace);
 
   useEffect(() => {
     if (!expanded) return;
@@ -182,17 +186,17 @@ function RichImage({ src, alt, title }: { src?: string; alt?: string; title?: st
     return () => window.removeEventListener("keydown", close);
   }, [expanded]);
 
-  if (!src) return null;
+  if (!resolvedSrc) return null;
   return (
     <>
       <button className="rich-image-button" type="button" aria-label={alt ? `放大图片：${alt}` : "放大图片"} onClick={() => setExpanded(true)}>
-        <img src={src} alt={alt ?? ""} title={title} loading="lazy" />
+        <img src={resolvedSrc} alt={alt ?? ""} title={title} loading="lazy" />
       </button>
       {expanded && (
         <div className="modal-backdrop image-lightbox" role="presentation" onMouseDown={() => setExpanded(false)}>
           <div className="image-lightbox-content" role="dialog" aria-modal="true" aria-label={alt ? `图片预览：${alt}` : "图片预览"} onMouseDown={(event) => event.stopPropagation()}>
             <button className="icon-button modal-close" type="button" title="关闭图片" aria-label="关闭图片" onClick={() => setExpanded(false)}><X size={17} /></button>
-            <img src={src} alt={alt ?? ""} title={title} />
+            <img src={resolvedSrc} alt={alt ?? ""} title={title} />
           </div>
         </div>
       )}
@@ -576,7 +580,7 @@ const richUrlTransform: UrlTransform = (url, key) => {
   return defaultUrlTransform(url);
 };
 
-function markdownComponents(artifactIndex: { current: number }, artifactPrefix: string, onOpenArtifact: (artifact: Artifact) => void, dark: boolean, htmlBubble = false, onHtmlAction?: (text: string) => void): Components {
+function markdownComponents(artifactIndex: { current: number }, artifactPrefix: string, onOpenArtifact: (artifact: Artifact) => void, dark: boolean, htmlBubble = false, onHtmlAction?: (text: string) => void, workspace?: string): Components {
   function childrenText(value: ReactNode): string {
     if (typeof value === "string" || typeof value === "number") return String(value);
     if (Array.isArray(value)) return value.map((item) => childrenText(item)).join("");
@@ -610,7 +614,7 @@ function markdownComponents(artifactIndex: { current: number }, artifactPrefix: 
       return <a href={href} target="_blank" rel="noreferrer">{linkChildren}</a>;
     },
     img({ src, alt, title }) {
-      return <RichImage src={src} alt={alt} title={title} />;
+      return <RichImage src={src} alt={alt} title={title} workspace={workspace} />;
     },
     video({ src, poster, title, children }) {
       return <RichVideo src={src} poster={poster} title={title}>{children}</RichVideo>;
@@ -764,13 +768,13 @@ function renderAssistantHtml(content: string, components: Components, scopeSelec
   }) as ReactNode;
 }
 
-const DynamicHtmlBubble = memo(function DynamicHtmlBubble({ content, closed, streaming, artifactPrefix, onOpenArtifact, onHtmlAction }: { content: string; closed: boolean; streaming: boolean; artifactPrefix: string; onOpenArtifact(artifact: Artifact): void; onHtmlAction?: (text: string) => void }): ReactNode {
+const DynamicHtmlBubble = memo(function DynamicHtmlBubble({ content, closed, streaming, artifactPrefix, onOpenArtifact, onHtmlAction, workspace }: { content: string; closed: boolean; streaming: boolean; artifactPrefix: string; onOpenArtifact(artifact: Artifact): void; onHtmlAction?: (text: string) => void; workspace?: string }): ReactNode {
   const scopeRef = useRef<HTMLDivElement | null>(null);
   const runtimeRef = useRef<BubbleRuntime | undefined>(undefined);
   const sourceKeyRef = useRef("");
   const scopeClass = htmlBubbleScopeClass(artifactPrefix);
   const artifactIndex = useRef(0);
-  const components = useMemo(() => markdownComponents(artifactIndex, artifactPrefix, onOpenArtifact, false, true, onHtmlAction), [artifactPrefix, onHtmlAction, onOpenArtifact]);
+  const components = useMemo(() => markdownComponents(artifactIndex, artifactPrefix, onOpenArtifact, false, true, onHtmlAction, workspace), [artifactPrefix, onHtmlAction, onOpenArtifact, workspace]);
   const scopeSelector = `.${scopeClass}`;
   const renderedContent = useMemo(() => renderAssistantHtml(content, components, scopeSelector), [components, content, scopeSelector]);
 
@@ -806,10 +810,10 @@ const DynamicHtmlBubble = memo(function DynamicHtmlBubble({ content, closed, str
   );
 });
 
-const MarkdownSurface = memo(function MarkdownSurface({ content, htmlBubble, artifactPrefix, onOpenArtifact, onHtmlAction }: { content: string; htmlBubble?: boolean; artifactPrefix: string; onOpenArtifact(artifact: Artifact): void; onHtmlAction?: (text: string) => void }): ReactNode {
+const MarkdownSurface = memo(function MarkdownSurface({ content, htmlBubble, artifactPrefix, onOpenArtifact, onHtmlAction, workspace }: { content: string; htmlBubble?: boolean; artifactPrefix: string; onOpenArtifact(artifact: Artifact): void; onHtmlAction?: (text: string) => void; workspace?: string }): ReactNode {
   const dark = useThemeTokens().dark;
   const artifactIndex = useRef(0);
-  const components = markdownComponents(artifactIndex, artifactPrefix, onOpenArtifact, dark, htmlBubble, onHtmlAction);
+  const components = markdownComponents(artifactIndex, artifactPrefix, onOpenArtifact, dark, htmlBubble, onHtmlAction, workspace);
   const scopeClass = htmlBubble ? htmlBubbleScopeClass(artifactPrefix) : "";
   const scopeSelector = scopeClass ? `.${scopeClass}` : "";
   return (
@@ -829,7 +833,7 @@ function compressStreamingBubbleHtml(content: string): string {
   return content.replace(/\n[ \t]*\n+/gu, "\n");
 }
 
-function renderSegment(segment: RichContentSegment, index: number, artifactPrefix: string, streaming: boolean, onOpenArtifact: (artifact: Artifact) => void, onHtmlAction?: (text: string) => void): ReactNode {
+function renderSegment(segment: RichContentSegment, index: number, artifactPrefix: string, streaming: boolean, onOpenArtifact: (artifact: Artifact) => void, onHtmlAction?: (text: string) => void, workspace?: string): ReactNode {
   if (segment.type === "mermaid") return <MermaidBlock key={`mermaid-${index}`} code={segment.content} language={segment.language} />;
   if (segment.type === "artifact") {
     const artifact: Artifact = { ...segment.artifact, id: `${artifactPrefix}-artifact-${index}` };
@@ -843,18 +847,18 @@ function renderSegment(segment: RichContentSegment, index: number, artifactPrefi
     // streaming-identity fix), and would render half-parsed intermediate HTML.
     // The interactive bubble mounts once the closing tag arrives.
     if (segment.closed === false) {
-      return <MarkdownSurface key={`assistant-html-${index}`} content={compressStreamingBubbleHtml(segment.content)} artifactPrefix={`${artifactPrefix}-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} />;
+      return <MarkdownSurface key={`assistant-html-${index}`} content={compressStreamingBubbleHtml(segment.content)} artifactPrefix={`${artifactPrefix}-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} workspace={workspace} />;
     }
-    return <DynamicHtmlBubble key={`assistant-html-${index}`} content={segment.content} closed streaming={streaming} artifactPrefix={`${artifactPrefix}-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} />;
+    return <DynamicHtmlBubble key={`assistant-html-${index}`} content={segment.content} closed streaming={streaming} artifactPrefix={`${artifactPrefix}-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} workspace={workspace} />;
   }
-  return <MarkdownSurface key={`${segment.type}-${index}`} content={segment.content} htmlBubble={segment.type === "html"} artifactPrefix={`${artifactPrefix}-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} />;
+  return <MarkdownSurface key={`${segment.type}-${index}`} content={segment.content} htmlBubble={segment.type === "html"} artifactPrefix={`${artifactPrefix}-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} workspace={workspace} />;
 }
 
-export const RichContent = memo(function RichContent({ children, streaming, onOpenArtifact, onHtmlAction, artifactPrefix }: RichContentProps): ReactNode {
+export const RichContent = memo(function RichContent({ children, streaming, onOpenArtifact, onHtmlAction, artifactPrefix, workspace }: RichContentProps): ReactNode {
   const segments = useMemo(() => parseRichContent(children, { isStreaming: Boolean(streaming) }), [children, streaming]);
   return (
     <div className={`rich-content${streaming ? " is-streaming" : ""}`}>
-      {segments.map((segment, index) => renderSegment(segment, index, artifactPrefix, Boolean(streaming), onOpenArtifact, onHtmlAction))}
+      {segments.map((segment, index) => renderSegment(segment, index, artifactPrefix, Boolean(streaming), onOpenArtifact, onHtmlAction, workspace))}
     </div>
   );
 });

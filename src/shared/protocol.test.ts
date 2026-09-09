@@ -3,10 +3,12 @@ import { parseWorkspaceFilePreviewUrl, workspaceFilePreviewUrl } from "./protoco
 
 describe("workspace file preview URL protocol", () => {
   it("round-trips Windows workspaces and paths with non-ASCII/space segments", () => {
-    const input = { workspace: "C:\\工作区\\my project", relativePath: "docs\\需求 说明.pdf" };
-    const url = workspaceFilePreviewUrl(input.workspace, input.relativePath);
+    const url = workspaceFilePreviewUrl("C:\\工作区\\my project", "docs\\需求 说明.pdf");
     expect(url).toMatch(/^pidesktop-file:\/\/preview\//);
-    expect(parseWorkspaceFilePreviewUrl(url)).toEqual(input);
+    // 反斜杠在 standard scheme 的 URL 解析里会被规范化掉（%5C → 路径分隔符），
+    // 所以协议 URL 一律以正斜杠承载；主进程 resolve() 在 Windows 接受正斜杠。
+    expect(url).not.toContain("%5C");
+    expect(parseWorkspaceFilePreviewUrl(url)).toEqual({ workspace: "C:/工作区/my project", relativePath: "docs/需求 说明.pdf" });
   });
 
   it("round-trips POSIX-style workspaces", () => {

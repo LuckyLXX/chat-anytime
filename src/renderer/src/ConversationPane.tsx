@@ -438,12 +438,13 @@ interface ActionTimelineProps {
   onOpenTranscript?(delegation: DelegationProgress): void;
   timing?: TurnTiming;
   now: number;
+  workspace?: string;
 }
 
-function ActionTimeline({ message, executions, turnActive, showThinking, thinkingLabel, onOpenArtifact, onHtmlAction, timing, now, onOpenTranscript }: ActionTimelineProps): ReactNode {
+function ActionTimeline({ message, executions, turnActive, showThinking, thinkingLabel, onOpenArtifact, onHtmlAction, timing, now, onOpenTranscript, workspace }: ActionTimelineProps): ReactNode {
   const segments = actionTimelineSegments(message, showThinking);
   const lastActionIndex = segments.reduce((index, segment, currentIndex) => segment.type === "thinking" || segment.type === "tool-call" ? currentIndex : index, -1);
-  if (lastActionIndex < 0) return segments[0]?.type === "text" ? <RichContent streaming={message.streaming} artifactPrefix={message.id} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction}>{segments[0].text}</RichContent> : null;
+  if (lastActionIndex < 0) return segments[0]?.type === "text" ? <RichContent streaming={message.streaming} artifactPrefix={message.id} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} workspace={workspace}>{segments[0].text}</RichContent> : null;
   const process = segments.slice(0, lastActionIndex + 1);
   const trailing = segments.slice(lastActionIndex + 1).filter((segment): segment is Extract<ActionTimelineSegment, { type: "text" }> => segment.type === "text");
   const processActive = turnActive || Boolean(message.streaming);
@@ -470,14 +471,14 @@ function ActionTimeline({ message, executions, turnActive, showThinking, thinkin
               <div className={`action-timeline-node ${segment.type} ${stateClass}`} data-node-kind={segment.type} data-node-state={stateClass || undefined} key={segment.type === "tool-call" ? segment.call.id : `${segment.type}-${index}`}>
                 <span className="action-timeline-node-icon">{actionTimelineIcon(segment, execution, processActive)}</span>
                 <div className="action-timeline-node-content">
-                  {segment.type === "thinking" ? <ThinkingBlock text={segment.text} label={thinkingLabel || "思考过程"} /> : segment.type === "tool-call" ? <ToolCallDetails call={segment.call} execution={execution} streaming={Boolean(message.streaming)} onOpenTranscript={onOpenTranscript} /> : <RichContent streaming={false} artifactPrefix={`${message.id}-process-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction}>{segment.text}</RichContent>}
+                  {segment.type === "thinking" ? <ThinkingBlock text={segment.text} label={thinkingLabel || "思考过程"} /> : segment.type === "tool-call" ? <ToolCallDetails call={segment.call} execution={execution} streaming={Boolean(message.streaming)} onOpenTranscript={onOpenTranscript} /> : <RichContent streaming={false} artifactPrefix={`${message.id}-process-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} workspace={workspace}>{segment.text}</RichContent>}
                 </div>
               </div>
             );
           })}
         </div>
       </details>
-      {trailing.map((segment, index) => <RichContent key={`trailing-${index}`} streaming={message.streaming} artifactPrefix={`${message.id}-trailing-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction}>{segment.text}</RichContent>)}
+      {trailing.map((segment, index) => <RichContent key={`trailing-${index}`} streaming={message.streaming} artifactPrefix={`${message.id}-trailing-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} workspace={workspace}>{segment.text}</RichContent>)}
     </>
   );
 }
@@ -575,7 +576,7 @@ const MessageView = memo(function MessageView({ message, executions, workspace, 
         <div className="message-body extension-message-callout">
           <strong>{message.extension?.customType || "扩展消息"}</strong>
           {images.length > 0 && <div className="image-message-list">{images.map((block, index) => <ImageMessageBlock key={`${message.id}-extension-image-${index}`} block={block} />)}</div>}
-          {text && <RichContent streaming={false} artifactPrefix={`${message.id}-extension`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction}>{text}</RichContent>}
+          {text && <RichContent streaming={false} artifactPrefix={`${message.id}-extension`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} workspace={workspace}>{text}</RichContent>}
         </div>
       </article>
     );
@@ -599,7 +600,7 @@ const MessageView = memo(function MessageView({ message, executions, workspace, 
       <div className="message-avatar pi-avatar"><Bot size={17} /></div>
       <div className="message-body message-bubble">
         <div className="assistant-share-content" ref={shareTargetRef}>
-          <ActionTimeline message={message} executions={executions} turnActive={turnActive} showThinking={showThinking} thinkingLabel={hiddenThinkingLabel} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} timing={timing} now={now} onOpenTranscript={onOpenTranscript} />
+          <ActionTimeline message={message} executions={executions} turnActive={turnActive} showThinking={showThinking} thinkingLabel={hiddenThinkingLabel} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} timing={timing} now={now} onOpenTranscript={onOpenTranscript} workspace={workspace} />
           {message.error && <p className="inline-error"><AlertCircle size={15} />{message.error}</p>}
           {message.aborted && <p className="inline-abort"><CircleStop size={14} />已停止生成</p>}
         </div>

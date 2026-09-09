@@ -1,5 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import { workspaceFilePreviewUrl } from "../../../shared/protocol";
 import { RichContent } from "./RichContent";
 
 describe("RichContent dynamic bubbles", () => {
@@ -42,6 +43,37 @@ describe("RichContent dynamic bubbles", () => {
 
     expect(markup).toContain('src="file:///D:/workspace/PiDesktop/poster.png"');
     expect(markup).toContain('alt="poster"');
+  });
+
+  it("maps workspace-relative image paths onto the preview protocol", () => {
+    const workspace = "D:\\默认工作区";
+    const bubble = renderToStaticMarkup(
+      <RichContent
+        artifactPrefix="message-relative-image"
+        workspace={workspace}
+        onOpenArtifact={() => undefined}
+        children={'<assistant_html><div><img src="outputs/fox.png" alt="fox" /></div></assistant_html>'}
+      />
+    );
+    expect(bubble).toContain(`src="${workspaceFilePreviewUrl(workspace, "outputs/fox.png")}"`);
+
+    const markdown = renderToStaticMarkup(
+      <RichContent artifactPrefix="message-relative-markdown" workspace={workspace} onOpenArtifact={() => undefined}>
+        {"![fox](outputs/fox.png)"}
+      </RichContent>
+    );
+    expect(markdown).toContain(`src="${workspaceFilePreviewUrl(workspace, "outputs/fox.png")}"`);
+  });
+
+  it("leaves relative image paths untouched without a workspace context", () => {
+    const markup = renderToStaticMarkup(
+      <RichContent
+        artifactPrefix="message-relative-no-workspace"
+        onOpenArtifact={() => undefined}
+        children={'<assistant_html><div><img src="outputs/fox.png" alt="fox" /></div></assistant_html>'}
+      />
+    );
+    expect(markup).toContain('src="outputs/fox.png"');
   });
 
   it("renders unclosed assistant HTML as lightweight markdown while streaming", () => {

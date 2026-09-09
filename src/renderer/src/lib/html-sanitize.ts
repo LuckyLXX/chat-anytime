@@ -85,7 +85,11 @@ function isSafeUrl(value: string, property: string): boolean {
   if (property === "href" || property === "formAction" || property === "action") {
     return /^(?:https?:|mailto:|tel:|#|\/|\.\.?\/)/iu.test(normalized);
   }
-  return /^(?:https?:|file:\/\/|data:image\/(?:png|gif|jpe?g|webp);|\/|\.\.?\/)/iu.test(normalized);
+  if (/^(?:https?:|file:\/\/|data:image\/(?:png|gif|jpe?g|webp);|\/|\.\.?\/)/iu.test(normalized)) return true;
+  // 工作区相对路径（outputs/fox.png、./fox.png）不含任何 scheme：渲染端会把
+  // 它映射成 pidesktop-file:// 协议 URL（resolveWorkspaceAssetUrl），这里必须
+  // 放行，否则气泡里的相对图片路径在 sanitize 阶段就被静默删掉 src。
+  return !normalized.includes(":") && !normalized.startsWith("//");
 }
 
 function sanitizeClassValue(value: unknown): string[] {

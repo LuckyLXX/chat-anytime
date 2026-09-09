@@ -71,6 +71,29 @@ describe("assistant HTML sanitizer", () => {
     expect(tree.children[0]?.properties.src).toBe("file:///D:/workspace/PiDesktop/poster.png");
   });
 
+  it("keeps workspace-relative media sources so the renderer can map them", () => {
+    // 相对路径不含 scheme，由渲染端 resolveWorkspaceAssetUrl 换成 pidesktop-file://；
+    // sanitize 若在这里删掉 src，气泡里的工作区图片永远不显示。
+    const tree = {
+      type: "root",
+      children: [{
+        type: "element",
+        tagName: "img",
+        properties: { src: "outputs/fox.png" },
+        children: []
+      }, {
+        type: "element",
+        tagName: "img",
+        properties: { src: "javascript:alert(1)" },
+        children: []
+      }]
+    };
+
+    sanitizeRichHtmlTree()(tree);
+    expect(tree.children[0]?.properties.src).toBe("outputs/fox.png");
+    expect(tree.children[1]?.properties.src).toBeUndefined();
+  });
+
   it("removes style tags unless the caller explicitly enables scoped styles", () => {
     const tree = {
       type: "root",

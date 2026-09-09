@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildDivModePrompt, DIV_AUTO_MODE_PROMPT, DIV_DYNAMIC_MODE_PROMPT, DIV_MODE_PROMPT } from "./div-prompt.js";
+import { buildDivModePrompt, DIV_AUTO_MODE_PROMPT, DIV_DYNAMIC_MODE_PROMPT, DIV_MEDIA_PROMPT, DIV_MODE_PROMPT } from "./div-prompt.js";
 
 describe("Div mode prompt", () => {
   it("keeps the static bubble output contract", () => {
@@ -27,6 +27,14 @@ describe("Div mode prompt", () => {
     expect(prompt).toContain(DIV_AUTO_MODE_PROMPT);
     expect(prompt).toContain(DIV_DYNAMIC_MODE_PROMPT);
     expect(prompt).not.toContain(DIV_MODE_PROMPT);
+  });
+
+  it("teaches workspace-relative image references for both modes", () => {
+    expect(DIV_MEDIA_PROMPT).toContain('<img src="相对路径"');
+    expect(DIV_MEDIA_PROMPT).toContain("outputs/fox.png");
+    expect(DIV_MEDIA_PROMPT).toContain("不要拼绝对路径或 file:// 前缀");
+    expect(buildDivModePrompt("always")).toContain(DIV_MEDIA_PROMPT);
+    expect(buildDivModePrompt("auto")).toContain(DIV_MEDIA_PROMPT);
   });
 
   it("off mode injects nothing", () => {

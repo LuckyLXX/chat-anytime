@@ -9,7 +9,7 @@ import { migrateSettings, normalizeVision, recordAgentWorkspace, forgetAgentWork
 import { importExternalAttachment, workspaceRelativeAttachment } from "./attachments.js";
 import type { BrowserPreviewCommand, BrowserPreviewState, DesktopBootstrap, DesktopSettings, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot, TerminalCommand, TerminalEventData, WorkspaceDirectoryListing, WorkspaceEntryResult, WorkspaceFilePreview, WorkspaceFileSearchResult, WorkspaceFileStat, WorkspaceFileWriteResult } from "../shared/protocol.js";
 import { PREVIEW_FILE_SCHEME, parseWorkspaceFilePreviewUrl } from "../shared/protocol.js";
-import { createWorkspaceDirectory, createWorkspaceFile, deleteWorkspaceEntry, listWorkspaceDirectory, readWorkspaceFilePreview, renameWorkspaceEntry, resolveWorkspaceEntry, safeRelativePath, searchWorkspaceFiles, statWorkspaceFile, writeWorkspaceFile } from "./workspace-preview.js";
+import { createWorkspaceDirectory, createWorkspaceFile, deleteWorkspaceEntry, listWorkspaceDirectory, previewFileMimeType, readWorkspaceFilePreview, renameWorkspaceEntry, resolveWorkspaceEntry, safeRelativePath, searchWorkspaceFiles, statWorkspaceFile, writeWorkspaceFile } from "./workspace-preview.js";
 import { pruneDisabledModelRefs } from "./model-catalog.js";
 import { BrowserPreviewController } from "./browser-preview.js";
 import { BrowserAutomationController } from "./browser-automation.js";
@@ -49,8 +49,10 @@ function readJson(path: string): unknown {
 }
 const imageMimeByExtension: Record<string, string> = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif" };
 
-// PDF 等大文件走自定义协议 pidesktop-file:// 由主进程流式读取，iframe 内
-// Chromium 内置查看器渲染。必须在 app ready 之前注册 scheme 特权。
+// 工作区文件走自定义协议 pidesktop-file:// 由主进程流式读取：PDF 在 iframe 内
+// 交给 Chromium 内置查看器，栅格图片供聊天气泡 <img> 引用工作区相对路径
+// （渲染端 origin 不是工作区，相对路径没有基准，必须经协议映射）。
+// 必须在 app ready 之前注册 scheme 特权。
 protocol.registerSchemesAsPrivileged([
   { scheme: PREVIEW_FILE_SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, bypassCSP: true } }
 ]);
@@ -67,9 +69,16 @@ function registerPreviewFileProtocol(): void {
       const candidate = resolve(rootReal, ...parsed.relativePath.split("/"));
       const info = await stat(candidate);
       if (!info.isFile()) return new Response("只能预览普通文件", { status: 404 });
-      if (extname(candidate).toLowerCase() !== ".pdf") return new Response("仅支持 PDF 预览", { status: 415 });
+      const mimeType = previewFileMimeType(candidate);
+      if (!mimeType) return new Response("该文件类型不支持预览", { status: 415 });
       return new Response(Readable.toWeb(createReadStream(candidate)) as ReadableStream, {
-        headers: { "Content-Type": "application/pdf", "Content-Length": String(info.size) }
+        headers: {
+          "Content-Type": mimeType,
+          "Content-Length": String(info.size),
+          // 同路径文件可能被重新生成（AI 覆盖写同名图片），禁止直接复用缓存，
+          // 但保留条件请求语义（无 ETag 时 Chromium 仍会发 If-Modified-Since）。
+          "Cache-Control": "no-cache"
+        }
       });
     } catch (error) {
       const code = (error as NodeJS.ErrnoException | undefined)?.code;

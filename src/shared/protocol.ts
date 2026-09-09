@@ -571,9 +571,13 @@ export const PREVIEW_FILE_SCHEME = "pidesktop-file";
 /**
  * 生成工作区文件的协议 URL，形如 pidesktop-file://preview/<enc(workspace)>/<enc(relativePath)>。
  * 工作区与相对路径分别 encodeURIComponent 后以 path 段承载（host 会被小写化，不能放路径）。
+ * Windows 反斜杠必须先换成正斜杠：scheme 注册为 standard 时 URL 解析器会把 `%5C`
+ * 规范化成路径分隔符并丢弃，workspace 段会被拆散（图片/PDF 一并 404）。
  */
 export function workspaceFilePreviewUrl(workspace: string, relativePath: string): string {
-  return `${PREVIEW_FILE_SCHEME}://preview/${encodeURIComponent(workspace)}/${encodeURIComponent(relativePath)}`;
+  const root = workspace.replaceAll("\\", "/");
+  const relative = relativePath.replaceAll("\\", "/");
+  return `${PREVIEW_FILE_SCHEME}://preview/${encodeURIComponent(root)}/${encodeURIComponent(relative)}`;
 }
 
 /** 解析预览 URL，返回 {""} 表示非法；分段解码，path 段缺失/多余一律拒绝。 */

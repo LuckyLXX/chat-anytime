@@ -20,6 +20,17 @@ const imageMimeTypes: Record<string, string> = {
   ".png": "image/png",
   ".webp": "image/webp"
 };
+/**
+ * pidesktop-file:// 协议可流式读取的扩展名 → Content-Type：PDF 走 Chromium
+ * 内置查看器，栅格图片供聊天气泡 <img> 直接引用工作区相对路径。
+ */
+export const previewFileMimeTypes: Record<string, string> = { ".pdf": "application/pdf", ...imageMimeTypes };
+
+/** 协议可服务的文件类型；未知扩展名返回 undefined（调用方回 415）。 */
+export function previewFileMimeType(filePath: string): string | undefined {
+  return previewFileMimeTypes[extname(filePath).toLowerCase()];
+}
+
 const codeLanguages: Record<string, string> = {
   ".bat": "dos",
   ".c": "c",

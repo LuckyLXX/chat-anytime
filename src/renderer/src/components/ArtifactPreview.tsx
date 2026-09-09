@@ -102,7 +102,7 @@ function FilePreviewContent({ file, tabId, onOpenArtifact, workspace, editorStat
         </div>
       );
     }
-    return <div className="preview-scroll preview-markdown"><RichContent streaming={false} artifactPrefix={`preview-${file.relativePath}`} onOpenArtifact={onOpenArtifact}>{file.content}</RichContent></div>;
+    return <div className="preview-scroll preview-markdown"><RichContent streaming={false} artifactPrefix={`preview-${file.relativePath}`} onOpenArtifact={onOpenArtifact} workspace={file.workspace ?? workspace}>{file.content}</RichContent></div>;
   }
   if (file.kind === "code" && file.content !== undefined) {
     return <div className="preview-scroll preview-code"><CodeBlock language={file.language ?? "text"} code={file.content} /></div>;
@@ -382,7 +382,7 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, fullscree
         )}
         {!showSource && target.type === "browser" && <BrowserPreview suspended={browserSuspended} tabId={activeTabId} onPickSend={onBrowserPickSend} onStateChange={(state) => onBrowserStateChange?.(activeTabId, state)} />}
         {target.type === "terminal" && <TerminalPanel terminalId={active.id} workspace={workspace} />}
-        {!showSource && target.type === "plan" && <div className="preview-scroll preview-markdown"><RichContent streaming={false} artifactPrefix={`plan-${activeTabId}`} onOpenArtifact={onOpenArtifact}>{target.content}</RichContent></div>}
+        {!showSource && target.type === "plan" && <div className="preview-scroll preview-markdown"><RichContent streaming={false} artifactPrefix={`plan-${activeTabId}`} onOpenArtifact={onOpenArtifact} workspace={workspace}>{target.content}</RichContent></div>}
         {target.type === "memory" && <MemoryPreviewContent topicId={target.topicId} tabId={activeTabId} showSource={showSource} editorState={activeEditorState} onEditorChange={onActiveEditorChange} onEditorSaved={onActiveEditorSaved} onEditorStatusChange={onActiveEditorStatusChange} onSaveError={onActiveEditorSaveError} onOpenArtifact={onOpenArtifact} />}
         {!showSource && !artifact && target.type === "file" && <FilePreviewContent file={target.file} tabId={activeTabId} onOpenArtifact={onOpenArtifact} workspace={target.workspace ?? workspace} editorState={activeEditorState} onEditorChange={onActiveEditorChange} onEditorContentChange={onActiveEditorContentChange} onEditorSaved={onActiveEditorSaved} onEditorStatusChange={onActiveEditorStatusChange} onEditorSaveError={onActiveEditorSaveError} onResolveConflict={onActiveEditorResolveConflict} />}
         {target.type === "diff" && <div className="preview-scroll preview-diff"><DiffView patch={target.patch} /></div>}
