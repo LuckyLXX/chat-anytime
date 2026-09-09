@@ -48,6 +48,7 @@ import type {
   CustomProviderModel,
   ModelOption,
   McpServerStatus,
+  McpServerSummary,
   MemoryTopic,
   ProviderOption,
   CustomThemeDefinition,
@@ -426,6 +427,7 @@ function ResourceSettings({ resources }: ResourceSettingsProps): ReactNode {
   const [busy, setBusy] = useState(false);
   const [localError, setLocalError] = useState<string>();
   const [mcpFormOpen, setMcpFormOpen] = useState(false);
+  const [editingMcp, setEditingMcp] = useState<{ name: string; scope: McpServerConfigDraft["scope"] }>();
   const [mcpName, setMcpName] = useState("");
   const [mcpScope, setMcpScope] = useState<McpServerConfigDraft["scope"]>("project");
   const [mcpTransport, setMcpTransport] = useState<McpServerConfigDraft["transport"]>("stdio");
@@ -480,6 +482,34 @@ function ResourceSettings({ resources }: ResourceSettingsProps): ReactNode {
     setCommandTemplate("");
   }
 
+  /** 新增/编辑共用表单：编辑时记下原位置（名称锁定，写入范围可改＝迁移）。 */
+  function resetMcpForm(): void {
+    setEditingMcp(undefined);
+    setMcpName("");
+    setMcpScope("project");
+    setMcpTransport("stdio");
+    setMcpCommand("npx");
+    setMcpArgs("");
+    setMcpUrl("");
+    setMcpAuth("none");
+    setMcpBearerTokenEnv("");
+    setMcpEnv("");
+  }
+
+  function editMcpServer(server: McpServerSummary): void {
+    setEditingMcp({ name: server.name, scope: server.scope });
+    setMcpName(server.name);
+    setMcpScope(server.scope);
+    setMcpTransport(server.transport);
+    setMcpCommand(server.command ?? "npx");
+    setMcpArgs((server.args ?? []).join("\n"));
+    setMcpEnv(Object.entries(server.env ?? {}).map(([key, value]) => `${key}=${value}`).join("\n"));
+    setMcpUrl(server.url ?? "");
+    setMcpAuth(server.auth ?? "none");
+    setMcpBearerTokenEnv(server.bearerTokenEnv ?? "");
+    setMcpFormOpen(true);
+  }
+
   async function addMcpServer(event: FormEvent): Promise<void> {
     event.preventDefault();
     try {
@@ -499,13 +529,9 @@ function ResourceSettings({ resources }: ResourceSettingsProps): ReactNode {
               ...(mcpAuth === "bearer-env" ? { bearerTokenEnv: mcpBearerTokenEnv.trim() } : {})
             })
       };
-      const success = await run({ type: "mcp.server.save", server });
+      const success = await run({ type: "mcp.server.save", server, ...(editingMcp ? { original: editingMcp } : {}) });
       if (!success) return;
-      setMcpName("");
-      setMcpUrl("");
-      setMcpArgs("");
-      setMcpEnv("");
-      setMcpBearerTokenEnv("");
+      resetMcpForm();
       setMcpFormOpen(false);
     } catch (error) {
       setLocalError(error instanceof Error ? error.message : "MCP Server 配置无效");
@@ -517,10 +543,10 @@ function ResourceSettings({ resources }: ResourceSettingsProps): ReactNode {
       <div className="resource-settings-header"><div><h3><Puzzle size={16} />技能与工具</h3><p>自研 MCP / Skill / Todo / 子代理能力。Pi 的第三方扩展接入已移除，MCP 由内置客户端直连。</p></div><div className="resource-section-actions"><button className="secondary-button" type="button" disabled={controlsBusy} onClick={() => void run({ type: "resources.reload" })}><RefreshCw size={13} className={controlsBusy ? "spinning" : undefined} />重载资源</button></div></div>
       {localError && <p className="form-error resource-error">{localError}</p>}
       <section className="resource-section">
-        <div className="resource-section-heading"><span><Server size={14} />MCP Server</span><div className="resource-section-actions"><small>{resources.mcpServers.length} 个</small><button className="secondary-button compact-button" type="button" disabled={controlsBusy} onClick={() => setMcpFormOpen((open) => !open)}><Plus size={13} />{mcpFormOpen ? "收起" : "添加"}</button></div></div>
+        <div className="resource-section-heading"><span><Server size={14} />MCP Server</span><div className="resource-section-actions"><small>{resources.mcpServers.length} 个</small><button className="secondary-button compact-button" type="button" disabled={controlsBusy} onClick={() => { if (!mcpFormOpen) resetMcpForm(); setMcpFormOpen((open) => !open); }}><Plus size={13} />{mcpFormOpen ? "收起" : "添加"}</button></div></div>
         {mcpFormOpen && <form className="mcp-config-form" onSubmit={(event) => void addMcpServer(event)}>
           <div className="mcp-form-grid">
-            <label>名称<input value={mcpName} placeholder="例如 context7" onChange={(event) => setMcpName(event.target.value)} /></label>
+            <label>名称{editingMcp ? <input value={mcpName} disabled title="名称即配置键，不支持改名；需要改名请删除后新建" /> : <input value={mcpName} placeholder="例如 context7" onChange={(event) => setMcpName(event.target.value)} />}</label>
             <label>写入范围<select value={mcpScope} onChange={(event) => setMcpScope(event.target.value as McpServerConfigDraft["scope"])}><option value="project">当前项目 .mcp.json</option><option value="global">用户全局配置</option></select></label>
             <label>连接方式<select value={mcpTransport} onChange={(event) => setMcpTransport(event.target.value as McpServerConfigDraft["transport"])}><option value="stdio">本地命令（stdio）</option><option value="http">远程地址（HTTP）</option></select></label>
             {mcpTransport === "stdio" ? <>
@@ -533,10 +559,10 @@ function ResourceSettings({ resources }: ResourceSettingsProps): ReactNode {
               {mcpAuth === "bearer-env" && <label>Token 环境变量<input value={mcpBearerTokenEnv} placeholder="MCP_TOKEN" onChange={(event) => setMcpBearerTokenEnv(event.target.value)} /></label>}
             </>}
           </div>
-          <p className="resource-form-help">添加后会写入 MCP 配置并重建会话以加载新工具。stdio 服务通常由 npx 首次启动；敏感值建议用环境变量名，不要直接写入配置。</p>
-          <footer className="mcp-form-actions"><button className="secondary-button" type="button" disabled={controlsBusy} onClick={() => setMcpFormOpen(false)}><X size={13} />取消</button><button className="primary-button" type="submit" disabled={controlsBusy}><Plus size={13} />添加 MCP</button></footer>
+          <p className="resource-form-help">{editingMcp ? `正在编辑 ${editingMcp.name}：名称即配置键不可改；切换「写入范围」会把该条目迁移到另一个配置文件，停用状态保留。保存后重载工具并重建会话。` : "添加后会写入 MCP 配置并重建会话以加载新工具。stdio 服务通常由 npx 首次启动；敏感值建议用环境变量名，不要直接写入配置。"}</p>
+          <footer className="mcp-form-actions"><button className="secondary-button" type="button" disabled={controlsBusy} onClick={() => { resetMcpForm(); setMcpFormOpen(false); }}><X size={13} />取消</button><button className="primary-button" type="submit" disabled={controlsBusy}>{editingMcp ? <Pencil size={13} /> : <Plus size={13} />}{editingMcp ? "保存修改" : "添加 MCP"}</button></footer>
         </form>}
-        {resources.mcpServers.length === 0 ? <p className="resource-empty">未发现 MCP Server。点击“添加”，或将已有配置放入 `.mcp.json`。</p> : <div className="resource-list">{resources.mcpServers.map((server) => <div className="resource-item mcp-resource-item" key={server.name}><div className={`resource-item-icon mcp-status-icon ${server.status}`}><Server size={14} /></div><div className="resource-item-copy"><strong>{server.name}</strong><small>{mcpStatusLabels[server.status]} · {server.toolCount} 个工具{server.resourceCount === undefined ? "" : ` · ${server.resourceCount} 个资源`}{server.failedAgoSeconds !== undefined ? ` · ${server.failedAgoSeconds} 秒前失败` : ""}</small>{server.error && <em>{server.error}</em>}</div><label className="resource-toggle"><input type="checkbox" checked={!server.disabled} disabled={controlsBusy} onChange={(event) => void run({ type: "mcp.server.toggle", name: server.name, enabled: event.target.checked })} /><span>启用</span></label><button className="icon-button resource-remove" type="button" title={`删除 ${server.name}`} aria-label={`删除 MCP ${server.name}`} disabled={controlsBusy} onClick={() => void run({ type: "mcp.server.delete", name: server.name, scope: "project" })}><Trash2 size={14} /></button></div>)}</div>}
+        {resources.mcpServers.length === 0 ? <p className="resource-empty">未发现 MCP Server。点击“添加”，或将已有配置放入 `.mcp.json`。</p> : <div className="resource-list">{resources.mcpServers.map((server) => <div className="resource-item mcp-resource-item" key={server.name}><div className={`resource-item-icon mcp-status-icon ${server.status}`}><Server size={14} /></div><div className="resource-item-copy"><strong>{server.name}</strong><small>{resourceScopeLabels[server.scope]} · {mcpStatusLabels[server.status]} · {server.toolCount} 个工具{server.resourceCount === undefined ? "" : ` · ${server.resourceCount} 个资源`}{server.failedAgoSeconds !== undefined ? ` · ${server.failedAgoSeconds} 秒前失败` : ""}</small>{server.error && <em>{server.error}</em>}</div><label className="resource-toggle"><input type="checkbox" checked={!server.disabled} disabled={controlsBusy} onChange={(event) => void run({ type: "mcp.server.toggle", name: server.name, enabled: event.target.checked })} /><span>启用</span></label><button className="icon-button" type="button" title={`编辑 ${server.name}`} aria-label={`编辑 MCP ${server.name}`} disabled={controlsBusy} onClick={() => editMcpServer(server)}><Pencil size={14} /></button><button className="icon-button resource-remove" type="button" title={`删除 ${server.name}`} aria-label={`删除 MCP ${server.name}`} disabled={controlsBusy} onClick={() => void run({ type: "mcp.server.delete", name: server.name, scope: server.scope })}><Trash2 size={14} /></button></div>)}</div>}
       </section>
       <section className="resource-section">
         <div className="resource-section-heading"><span><Puzzle size={14} />Skill</span><small>{resources.skills.length} 个已发现</small></div>

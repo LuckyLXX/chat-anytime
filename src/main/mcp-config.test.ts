@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { readConfiguredMcpServers, removeMcpServerConfig, setMcpServerDisabled, upsertMcpServerConfig } from "./mcp-config.js";
+import { readConfiguredMcpServers, mcpServerConfigFields, readMcpServerEntry, removeMcpServerConfig, setMcpServerDisabled, upsertMcpServerConfig } from "./mcp-config.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -57,6 +57,34 @@ describe("mcp config", () => {
     const servers = readConfiguredMcpServers(projectPath, globalPath);
     expect(servers.map((server) => server.name)).toEqual(["global-only", "shared"]);
     expect(servers.find((server) => server.name === "shared")).toMatchObject({ scope: "project", entry: { url: "https://project.example/mcp" } });
+  });
+
+  it("projects an entry into edit-form fields and round-trips a saved draft", async () => {
+    const path = await temporaryConfig();
+    upsertMcpServerConfig(path, "docs", { command: "npx", args: ["-y", "docs-mcp"], env: { DOCS_TOKEN: "secret" } });
+    upsertMcpServerConfig(path, "remote", { url: "https://remote.example/mcp", bearerTokenEnv: "MCP_TOKEN" });
+    upsertMcpServerConfig(path, "oauth", { url: "https://oauth.example/mcp", auth: "oauth" });
+
+    const servers = readConfiguredMcpServers(path, join(path, "..", "missing.json"));
+    const fields = Object.fromEntries(servers.map((server) => [server.name, mcpServerConfigFields(server)]));
+
+    expect(fields.docs).toEqual({ scope: "project", transport: "stdio", command: "npx", args: ["-y", "docs-mcp"], env: { DOCS_TOKEN: "secret" } });
+    expect(fields.remote).toEqual({ scope: "project", transport: "http", url: "https://remote.example/mcp", auth: "bearer-env", bearerTokenEnv: "MCP_TOKEN" });
+    expect(fields.oauth).toEqual({ scope: "project", transport: "http", url: "https://oauth.example/mcp", auth: "oauth" });
+    // 投影是副本：改它不应回写配置对象
+    fields.docs!.env!.DOCS_TOKEN = "changed";
+    expect(servers.find((server) => server.name === "docs")!.entry.env).toEqual({ DOCS_TOKEN: "secret" });
+  });
+
+  it("reads a single entry tolerantly and treats missing files/entries as absent", async () => {
+    const path = await temporaryConfig();
+    expect(readMcpServerEntry(path, "docs")).toBeUndefined();
+    upsertMcpServerConfig(path, "docs", { command: "npx", disabled: true });
+    expect(readMcpServerEntry(path, "docs")).toEqual({ command: "npx", disabled: true });
+    expect(readMcpServerEntry(path, "missing")).toBeUndefined();
+
+    await writeFile(path, "{ not json", "utf8");
+    expect(readMcpServerEntry(path, "docs")).toBeUndefined();
   });
 
   it("removes and disables servers", async () => {

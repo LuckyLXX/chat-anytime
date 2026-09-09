@@ -3703,10 +3703,14 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       const server = command.server;
       const name = server.name.trim();
       if (!/^[A-Za-z0-9._-]+$/u.test(name)) throw new Error("MCP Server 名称只能包含字母、数字、点、下划线和短横线");
-      const { project, global } = mcpConfigPaths();
-      const target = server.scope === "project" ? project : global;
+      const paths = mcpConfigPaths();
+      const original = command.original;
       await runResourceOperation("正在保存 MCP Server", async () => {
-        upsertMcpServerConfig(target, name, runtimeMcp.mcpConfigEntry({ ...server, name }));
+        // 计划里带「原位置删除」：编辑时切换写入范围 = 迁移条目，而不是在两个
+        // 文件里各留一份（同名时项目配置优先，残留副本会静默遮蔽这次修改）。
+        const plan = runtimeMcp.planMcpServerSave(paths, { ...server, name }, original);
+        if (plan.remove) removeMcpServerConfig(plan.remove.path, plan.remove.name);
+        upsertMcpServerConfig(plan.targetPath, name, plan.entry);
         forceMcpRefresh = true;
         await applyMcpToolChanges();
       });
@@ -3729,7 +3733,10 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       await runResourceOperation("正在删除 MCP Server", async () => {
         const { project, global } = mcpConfigPaths();
         const target = command.scope === "project" ? project : global;
-        if (!removeMcpServerConfig(target, command.name)) throw new Error("找不到要删除的 MCP Server");
+        const other = command.scope === "project" ? global : project;
+        // 作用域提示可能过期（条目已被迁移到另一个文件）：先按声明的位置删，
+        // 找不到再尝试另一个文件，避免「明明看得见却删不掉」。
+        if (!removeMcpServerConfig(target, command.name) && !removeMcpServerConfig(other, command.name)) throw new Error("找不到要删除的 MCP Server");
         forceMcpRefresh = true;
         // Deletion always removes tools → applyMcpToolChanges falls back to a
         // session rebuild (Pi has no tool-removal API).

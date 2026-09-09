@@ -33,6 +33,9 @@ describe("buildResourceCatalog", () => {
     };
     const server: McpServerSummary = {
       name: "context7",
+      scope: "project",
+      transport: "stdio",
+      command: "npx",
       status: "connected",
       toolCount: 3,
       disabled: false

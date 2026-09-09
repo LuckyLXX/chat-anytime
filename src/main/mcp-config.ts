@@ -24,6 +24,18 @@ export interface ConfiguredMcpServer {
   scope: "project" | "global";
 }
 
+/** 设置页编辑表单回填用的配置投影（明文，与配置文件内容一致）。 */
+export interface McpServerConfigFields {
+  scope: "project" | "global";
+  transport: "stdio" | "http";
+  command?: string;
+  args?: string[];
+  url?: string;
+  auth?: "none" | "oauth" | "bearer-env";
+  bearerTokenEnv?: string;
+  env?: Record<string, string>;
+}
+
 type JsonRecord = Record<string, unknown>;
 
 function readConfig(filePath: string): JsonRecord {
@@ -48,6 +60,32 @@ function readServers(config: JsonRecord): { key: "mcpServers" | "mcp-servers"; s
     throw new Error(`MCP 配置中的 ${key} 必须是对象`);
   }
   return { key, servers: { ...(value as Record<string, unknown>) } };
+}
+
+/** Project a config entry for the settings edit form (same transport rule as the client). */
+export function mcpServerConfigFields(server: ConfiguredMcpServer): McpServerConfigFields {
+  const entry = server.entry;
+  const transport: "stdio" | "http" = entry.command ? "stdio" : "http";
+  return {
+    scope: server.scope,
+    transport,
+    ...(entry.command ? { command: entry.command } : {}),
+    ...(entry.args && entry.args.length > 0 ? { args: [...entry.args] } : {}),
+    ...(entry.url ? { url: entry.url } : {}),
+    ...(transport === "http" ? { auth: entry.bearerTokenEnv ? "bearer-env" as const : entry.auth === "oauth" ? "oauth" as const : "none" as const } : {}),
+    ...(entry.bearerTokenEnv ? { bearerTokenEnv: entry.bearerTokenEnv } : {}),
+    ...(entry.env && Object.keys(entry.env).length > 0 ? { env: { ...entry.env } } : {})
+  };
+}
+
+/** Read one entry for form round-trips; missing/corrupt file or entry yields undefined. */
+export function readMcpServerEntry(filePath: string, name: string): McpServerConfigEntry | undefined {
+  try {
+    const entry = readServers(readConfig(filePath)).servers[name];
+    return isEntry(entry) ? entry : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function writeConfig(filePath: string, config: JsonRecord): void {

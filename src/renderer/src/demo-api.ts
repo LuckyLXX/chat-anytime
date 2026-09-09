@@ -347,8 +347,8 @@ const demoResources: ResourceCatalog = {
     { name: "review", description: "审查指定文件的改动（$ARGUMENTS 传入路径）", scope: "project", filePath: "./.pidesktop-commands/review.md", template: "审查以下文件的改动并指出风险：$ARGUMENTS" }
   ],
   mcpServers: [
-    { name: "docs", status: "connected", toolCount: 8, resourceCount: 2, disabled: false },
-    { name: "browser", status: "disabled", toolCount: 0, disabled: true }
+    { name: "docs", scope: "project", transport: "stdio", command: "npx", args: ["-y", "docs-mcp"], env: { DOCS_TOKEN: "demo-token" }, status: "connected", toolCount: 8, resourceCount: 2, disabled: false },
+    { name: "browser", scope: "global", transport: "http", url: "https://mcp.example.com/mcp", auth: "none", status: "disabled", toolCount: 0, disabled: true }
   ],
   todos: [],
   memory: [],
@@ -899,13 +899,24 @@ export function createDemoApi(): DesktopApi {
           break;
         }
         case "mcp.server.save": {
-          const existing = demoResources.mcpServers.find((item) => item.name === command.server.name);
+          // 与主进程同口径：按 original 迁移作用域、保留停用态。
+          const draft = command.server;
+          const original = command.original;
+          const config = draft.transport === "stdio"
+            ? { scope: draft.scope, transport: "stdio" as const, command: draft.command, args: draft.args, env: draft.env }
+            : { scope: draft.scope, transport: "http" as const, url: draft.url, auth: draft.auth ?? "none", bearerTokenEnv: draft.bearerTokenEnv };
+          const existing = demoResources.mcpServers.find((item) => item.name === draft.name)
+            ?? (original ? demoResources.mcpServers.find((item) => item.name === original.name) : undefined);
           if (existing) {
-            existing.disabled = false;
-            existing.status = "not-connected";
+            Object.assign(existing, config, { name: draft.name, status: existing.disabled ? "disabled" as const : "not-connected" as const });
           } else {
-            demoResources.mcpServers.push({ name: command.server.name, status: "not-connected", toolCount: 0, disabled: false });
+            demoResources.mcpServers.push({ name: draft.name, ...config, status: "not-connected", toolCount: 0, disabled: false });
           }
+          emit({ type: "resources", resources: structuredClone(demoResources) });
+          break;
+        }
+        case "mcp.server.delete": {
+          demoResources.mcpServers = demoResources.mcpServers.filter((item) => item.name !== command.name);
           emit({ type: "resources", resources: structuredClone(demoResources) });
           break;
         }

@@ -6,7 +6,7 @@ import type { TextContent, ImageContent } from "@earendil-works/pi-ai";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type, type TSchema } from "typebox";
 import type { McpServerSummary } from "../shared/protocol.js";
-import type { ConfiguredMcpServer, McpServerConfigEntry } from "./mcp-config.js";
+import { mcpServerConfigFields, type ConfiguredMcpServer, type McpServerConfigEntry } from "./mcp-config.js";
 
 /**
  * Native MCP client (runs in the utility process alongside the Pi runtime).
@@ -186,8 +186,9 @@ export class McpClientManager {
     const bindings: McpToolBinding[] = [];
 
     await Promise.all(servers.map(async (server) => {
+      const config = mcpServerConfigFields(server);
       if (server.entry.disabled) {
-        summaries.push({ name: server.name, status: "disabled", toolCount: 0, disabled: true });
+        summaries.push({ name: server.name, ...config, status: "disabled", toolCount: 0, disabled: true });
         return;
       }
       const hash = configHash(server.entry);
@@ -196,18 +197,18 @@ export class McpClientManager {
       // Fast path: nothing changed and tools are cached — no network at all.
       if (!refresh && connectionMatches && cache && cache.hash === hash) {
         bindings.push(...cache.bindings);
-        summaries.push({ name: server.name, status: "connected", toolCount: cache.toolCount, disabled: false });
+        summaries.push({ name: server.name, ...config, status: "connected", toolCount: cache.toolCount, disabled: false });
         return;
       }
       try {
         const fresh = await this.ensureTools(server, hash);
         bindings.push(...fresh);
-        summaries.push({ name: server.name, status: "connected", toolCount: fresh.length, disabled: false });
+        summaries.push({ name: server.name, ...config, status: "connected", toolCount: fresh.length, disabled: false });
       } catch (error) {
         // Keep serving cached bindings so a slow/unreachable server does not
         // strip previously working tools; the status still reports the failure.
         if (cache && cache.hash === hash) bindings.push(...cache.bindings);
-        summaries.push({ name: server.name, status: "failed", toolCount: cache?.toolCount ?? 0, disabled: false, error: errorText(error) });
+        summaries.push({ name: server.name, ...config, status: "failed", toolCount: cache?.toolCount ?? 0, disabled: false, error: errorText(error) });
       }
     }));
 

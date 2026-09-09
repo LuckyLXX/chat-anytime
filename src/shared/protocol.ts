@@ -882,6 +882,17 @@ export type McpServerStatus = "connected" | "cached" | "failed" | "needs-auth" |
 
 export interface McpServerSummary {
   name: string;
+  /** 配置所在文件：项目 `.mcp.json` / 用户全局 `mcp.json`（编辑表单回填与删除定位）。 */
+  scope: "project" | "global";
+  /** 连接方式：有 command 即 stdio，否则 HTTP。 */
+  transport: "stdio" | "http";
+  /** 以下为配置投影，供设置页编辑表单明文回填（与配置文件内容一致）。 */
+  command?: string;
+  args?: string[];
+  url?: string;
+  auth?: "none" | "oauth" | "bearer-env";
+  bearerTokenEnv?: string;
+  env?: Record<string, string>;
   status: McpServerStatus;
   toolCount: number;
   resourceCount?: number;
@@ -1270,7 +1281,8 @@ export type RuntimeCommand =
   /** 读取子代理完整记录（JSONL 转 ChatMessage[]，结果经 subagent.transcript-result 推送）。 */
   | { type: "subagent.transcript"; childSessionId: string; path: string }
   | { type: "appearance.save"; appearance: AppearanceSettings }
-  | { type: "mcp.server.save"; server: McpServerConfigDraft }
+  /** 保存 MCP Server：original = 编辑前的位置（名称/作用域），用于作用域迁移与保留停用态。 */
+  | { type: "mcp.server.save"; server: McpServerConfigDraft; original?: { name: string; scope: "project" | "global" } }
   | { type: "mcp.server.toggle"; name: string; enabled: boolean }
   | { type: "mcp.server.delete"; name: string; scope: "project" | "global" }
   | { type: "hooks.save"; hook: HookRuleDraft }
