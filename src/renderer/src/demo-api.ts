@@ -707,15 +707,9 @@ export function createDemoApi(): DesktopApi {
           }, 80);
           break;
         }
-        case "session.skill": {
+        case "session.invoke": {
           updateSnapshot({
-            messages: [...demoSnapshot.messages, { id: `user-${Date.now()}`, role: "user", timestamp: Date.now(), skill: { name: command.name }, blocks: command.instructions ? [{ type: "text", text: command.instructions }] : [] }]
-          });
-          break;
-        }
-        case "session.command": {
-          updateSnapshot({
-            messages: [...demoSnapshot.messages, { id: `user-${Date.now()}`, role: "user", timestamp: Date.now(), command: { name: command.name }, blocks: command.arguments ? [{ type: "text", text: command.arguments }] : [] }]
+            messages: [...demoSnapshot.messages, { id: `user-${Date.now()}`, role: "user", timestamp: Date.now(), invocations: command.invocations, blocks: command.text ? [{ type: "text", text: command.text }] : [] }]
           });
           break;
         }
@@ -724,7 +718,7 @@ export function createDemoApi(): DesktopApi {
           const editedTimestamp = Date.now();
           const editedMessages = [
             ...(targetIndex >= 0 ? demoSnapshot.messages.slice(0, targetIndex) : demoSnapshot.messages),
-            { id: `demo-edited-${editedTimestamp}`, role: "user" as const, timestamp: editedTimestamp, skill: command.skillName ? { name: command.skillName } : undefined, command: command.commandName ? { name: command.commandName } : undefined, blocks: command.text ? [{ type: "text" as const, text: command.text }] : [] }
+            { id: `demo-edited-${editedTimestamp}`, role: "user" as const, timestamp: editedTimestamp, invocations: command.invocations?.length ? command.invocations : undefined, blocks: command.text ? [{ type: "text" as const, text: command.text }] : [] }
           ];
           updateSnapshot({
             busy: true,
@@ -751,7 +745,9 @@ export function createDemoApi(): DesktopApi {
           break;
         }
         case "session.queue.add": {
-          const text = command.commandName ? `【命令：/${command.commandName}】${command.text}` : command.skillName ? `【Skill：${command.skillName}】${command.text}` : command.text;
+          const text = command.invocations?.length
+            ? `${command.invocations.map((item) => item.kind === "skill" ? `【Skill：${item.name}】` : `【命令：/${item.name}】`).join("")}${command.text}`
+            : command.text;
           const followUpCount = demoSnapshot.queuedMessages.filter((item) => item.kind === "followUp").length;
           const imageCount = (command.attachments ?? []).filter((item) => item.kind === "image").length;
           updateSnapshot({ queuedMessages: [...demoSnapshot.queuedMessages, { kind: "followUp", index: followUpCount, text, ...(imageCount > 0 ? { imageCount } : {}) }] });

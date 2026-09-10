@@ -321,9 +321,13 @@ export interface ChatMessage {
   extension?: { customType: string; details?: unknown };
   /** Desktop-generated control messages are visible but not editable or regenerable. */
   control?: "compact";
-  skill?: { name: string };
-  /** 自定义斜杠命令消息（与 skill 徽标互斥：一次只携带一种调用标记）。 */
-  command?: { name: string };
+  /**
+   * 本消息携带的斜杠调用（Skill / 自定义命令），按选择顺序排列——一条消息可挂
+   * 多个、可混搭（composer 多次「空格 + /」挑选）。气泡按此渲染徽标、编辑重发
+   * 按此回填 chips。历史消息里的旧 marker（单 skill / 单命令）由 message-normalize
+   * 归一成只含一项的数组，读旧会话没有差异。
+   */
+  invocations?: SlashInvocation[];
   attachments?: Array<{ kind: PromptAttachment["kind"]; name: string; relativePath?: string }>;
   streaming?: boolean;
   error?: string;
@@ -1140,6 +1144,12 @@ export interface DelegationSummary {
  * 消息带图片时主进程在队列镜像里保存完整图片数据，快照只投影数量——
  * 高频快照不携带大 base64，编辑/删除/立即发送仍按既有 kind+index+text 寻址。
  */
+/** 一次斜杠调用：Skill（读 SKILL.md 后执行）或自定义命令（展开 md 模板）。 */
+export interface SlashInvocation {
+  kind: "skill" | "command";
+  name: string;
+}
+
 export interface QueuedMessage {
   kind: "steering" | "followUp";
   /** 在同类队列中的下标；命令以 kind+index+text 寻址，列表变动后校验失败即拒绝。 */
@@ -1255,10 +1265,13 @@ export type RuntimeCommand =
   | { type: "session.pin"; path: string; pinned: boolean }
   | { type: "session.delete"; path: string }
   | { type: "session.prompt"; text: string; attachments?: PromptAttachment[]; sessionId?: string }
-  | { type: "session.skill"; name: string; instructions?: string; attachments?: PromptAttachment[]; sessionId?: string }
-  /** 自定义斜杠命令：name=命令目录中的 md 文件名，arguments=占位符 $ARGUMENTS 的替换文本。 */
-  | { type: "session.command"; name: string; arguments?: string; attachments?: PromptAttachment[]; sessionId?: string }
-  | { type: "session.regenerate"; text: string; timestamp?: number; skillName?: string; commandName?: string; attachments?: PromptAttachment[]; sessionId?: string }
+  /**
+   * 斜杠调用（Skill / 自定义命令，可多个混搭）：invocations 决定要展开什么，
+   * text 是同时作为每个 Skill「用户要求」与每个命令 $ARGUMENTS 的共享文本
+   * （单调用时沿用既有的 skill/command 展开语义与 marker，字节不变）。
+   */
+  | { type: "session.invoke"; invocations: SlashInvocation[]; text: string; attachments?: PromptAttachment[]; sessionId?: string }
+  | { type: "session.regenerate"; text: string; timestamp?: number; invocations?: SlashInvocation[]; attachments?: PromptAttachment[]; sessionId?: string }
   | { type: "session.compact"; instructions?: string; sessionId?: string }
   | { type: "session.planMode"; enabled: boolean; sessionId?: string }
   | { type: "session.abort"; sessionId?: string }
@@ -1266,7 +1279,7 @@ export type RuntimeCommand =
    * 不中止整个会话——工具以错误结果收场供模型继续本轮。executionId 即
    * ToolExecution.id（Pi toolCallId）。 */
   | { type: "session.killExecution"; sessionId?: string; executionId: string }
-  | { type: "session.queue.add"; text: string; skillName?: string; commandName?: string; attachments?: PromptAttachment[]; sessionId?: string }
+  | { type: "session.queue.add"; text: string; invocations?: SlashInvocation[]; attachments?: PromptAttachment[]; sessionId?: string }
   | { type: "session.queue.sendNow"; kind: QueuedMessage["kind"]; index: number; text: string; sessionId?: string }
   | { type: "session.queue.remove"; kind: QueuedMessage["kind"]; index: number; text: string; sessionId?: string }
   /** 分屏：渲染端注册/注销某会话为“正在渲染”（watched）。watched 会话豁免空闲

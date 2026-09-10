@@ -171,10 +171,11 @@ export function parseCommandPrompt(text: string): CommandPromptDisplay | undefin
 }
 
 /**
- * 发送时构建完整 prompt：重读模板文件（发送即热更新，无需重载资源），
- * frontmatter 剥离 + 参数展开 + marker。找不到命令（目录变动/删除）时抛错。
+ * 发送时重读模板文件（发送即热更新，无需重载资源）：frontmatter 剥离 + 参数展开。
+ * 返回展开后的正文（不含展示 marker）供单/多调用共用；找不到命令（目录变动/
+ * 删除）时抛错。
  */
-export function buildRuntimeCommandPrompt(discovered: readonly DiscoveredCommand[], name: string, args: string | undefined): string {
+export function expandRuntimeCommand(discovered: readonly DiscoveredCommand[], name: string, args: string | undefined): string {
   const command = discovered.find((item) => item.name === name);
   if (!command) throw new Error(`未找到自定义命令：/${name}`);
   let content: string;
@@ -183,5 +184,10 @@ export function buildRuntimeCommandPrompt(discovered: readonly DiscoveredCommand
   } catch (error) {
     throw new Error(`读取命令模板失败 /${name}：${error instanceof Error ? error.message : String(error)}`);
   }
-  return buildCommandPrompt(name, args, expandCommandTemplate(stripCommandFrontmatter(content), args));
+  return expandCommandTemplate(stripCommandFrontmatter(content), args);
+}
+
+/** 单调用完整 prompt：marker + 展开后的模板文本。 */
+export function buildRuntimeCommandPrompt(discovered: readonly DiscoveredCommand[], name: string, args: string | undefined): string {
+  return buildCommandPrompt(name, args, expandRuntimeCommand(discovered, name, args));
 }

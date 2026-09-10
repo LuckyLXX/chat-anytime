@@ -15,8 +15,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, UserMessage } from "@earendil-works/pi-ai";
 import { messageUuid } from "./message-identity.js";
 import { isAbortedMessage } from "./run-outcome.js";
-import { parseCommandPrompt, type CommandPromptDisplay } from "./command-catalog.js";
-import { parseSkillPrompt, type SkillPromptDisplay } from "./skill-prompt.js";
+import { parseInvocationPrompt, type InvocationDisplay } from "./invocation-prompt.js";
 import { stripVisionHint } from "./runtime-vision.js";
 import type { ChatMessage, MessageBlock } from "../shared/protocol.js";
 
@@ -45,19 +44,13 @@ export function userMessageText(message: AgentMessage): string {
   return stripVisionHint(text);
 }
 
-function blocksFromMessage(message: AgentMessage, skillPrompt?: SkillPromptDisplay, commandPrompt?: CommandPromptDisplay): MessageBlock[] {
+function blocksFromMessage(message: AgentMessage, invocation?: InvocationDisplay): MessageBlock[] {
   if (message.role === "user") {
     const user = message as UserMessage;
-    if (skillPrompt) {
-      const blocks: MessageBlock[] = skillPrompt.instructions ? [{ type: "text", text: skillPrompt.instructions }] : [];
-      if (typeof user.content !== "string") {
-        blocks.push(...user.content.filter((content) => content.type === "image").map((content) => ({ type: "image" as const, data: content.data, mimeType: content.mimeType })));
-      }
-      return blocks;
-    }
-    if (commandPrompt) {
-      // 命令消息与 skill 同构：气泡只回显参数正文，模板本体留在文件里。
-      const blocks: MessageBlock[] = commandPrompt.args ? [{ type: "text", text: commandPrompt.args }] : [];
+    if (invocation) {
+      // Skill/命令消息同构：气泡只回显共享的用户要求/参数正文，展开的提示词
+      // （SKILL.md 路径与命令模板本体）只进请求不进展示层。
+      const blocks: MessageBlock[] = invocation.text ? [{ type: "text", text: invocation.text }] : [];
       if (typeof user.content !== "string") {
         blocks.push(...user.content.filter((content) => content.type === "image").map((content) => ({ type: "image" as const, data: content.data, mimeType: content.mimeType })));
       }
@@ -112,8 +105,7 @@ export function normalizeMessages(messages: AgentMessage[], streamingMessage?: A
   return visible.map((message, index) => {
     const cached = normalizedCache.get(message);
     if (cached && cached.index === index) return cached.message;
-    const skillPrompt = message.role === "user" ? parseSkillPrompt(userMessageText(message)) : undefined;
-    const commandPrompt = message.role === "user" && !skillPrompt ? parseCommandPrompt(userMessageText(message)) : undefined;
+    const invocation = message.role === "user" ? parseInvocationPrompt(userMessageText(message)) : undefined;
     // 用户中止（Pi stopReason=aborted）不是失败：剥离各家 SDK 的中止英文原文，
     // 只留 aborted 标记给渲染端做中性提示（历史会话同样受益——JSONL 里存着
     // stopReason）。error 与 aborted 互斥。
@@ -123,10 +115,9 @@ export function normalizeMessages(messages: AgentMessage[], streamingMessage?: A
       uuid: messageUuid(message, index),
       role: message.role === "custom" ? "extension" : message.role as "user" | "assistant",
       timestamp: message.timestamp ?? Date.now(),
-      blocks: blocksFromMessage(message, skillPrompt, commandPrompt),
+      blocks: blocksFromMessage(message, invocation),
       extension: message.role === "custom" ? { customType: (message as unknown as RuntimeCustomMessage).customType, details: cloneProtocolValue((message as unknown as RuntimeCustomMessage).details) } : undefined,
-      skill: skillPrompt ? { name: skillPrompt.name } : undefined,
-      command: commandPrompt ? { name: commandPrompt.name } : undefined,
+      invocations: invocation?.invocations,
       streaming: message === streamingMessage,
       error: message.role === "assistant" && !aborted ? (message as AssistantMessage).errorMessage : undefined,
       aborted: aborted || undefined

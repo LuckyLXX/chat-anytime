@@ -45,17 +45,26 @@ export function activeSkillsFor(summaries: readonly SkillSummary[], agent: Agent
   });
 }
 
-/** Prompt that steers the model to read the SKILL.md and follow it. */
-export function buildRuntimeSkillPrompt(discovered: readonly DiscoveredSkill[], name: string, instructions: string | undefined, hasReadTool: boolean): string {
+/**
+ * Prompt that steers the model to read the SKILL.md and follow it.
+ * 返回片段（不含展示 marker）供多调用合并复用；单调用经 buildRuntimeSkillPrompt
+ * 包上 marker，字节与历史版本一致。
+ */
+export function buildRuntimeSkillBody(discovered: readonly DiscoveredSkill[], name: string, instructions: string | undefined, hasReadTool: boolean): { name: string; instructions: string; body: string } {
   const skill = discovered.find((item) => item.name === name || item.slug === name);
   if (!skill) throw new Error(`未找到 Skill：${name}`);
   if (!hasReadTool) throw new Error("当前 Agent 未启用 read 工具，无法读取 Skill");
   const userInstructions = instructions?.trim() ?? "";
-  const executionPrompt = [
+  const body = [
     `使用 Skill「${skill.name}」完成任务。`,
     `首先调用 read 工具读取 Skill 文件：${skill.filePath}`,
     "完整阅读后遵循其中的说明；其中的相对路径均以该 Skill 文件所在目录为基准。",
     userInstructions ? `用户要求：\n${userInstructions}` : undefined
   ].filter(Boolean).join("\n\n");
-  return buildSkillPrompt(skill.name, userInstructions, executionPrompt);
+  return { name: skill.name, instructions: userInstructions, body };
+}
+
+export function buildRuntimeSkillPrompt(discovered: readonly DiscoveredSkill[], name: string, instructions: string | undefined, hasReadTool: boolean): string {
+  const resolved = buildRuntimeSkillBody(discovered, name, instructions, hasReadTool);
+  return buildSkillPrompt(resolved.name, resolved.instructions, resolved.body);
 }

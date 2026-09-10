@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { buildCommandPrompt } from "./command-catalog.js";
+import { buildMultiInvocationPrompt } from "./invocation-prompt.js";
 import { buildSkillPrompt } from "./skill-prompt.js";
 import { normalizeMessages, resetNormalizeCacheForTest } from "./message-normalize.js";
 
@@ -80,7 +81,7 @@ describe("normalizeMessages 身份缓存", () => {
   });
 });
 
-describe("normalizeMessages 自定义命令徽标", () => {
+describe("normalizeMessages 斜杠调用徽标", () => {
   beforeEach(() => {
     resetNormalizeCacheForTest();
   });
@@ -88,30 +89,53 @@ describe("normalizeMessages 自定义命令徽标", () => {
   it("命令消息：徽标带命令名，气泡只回显参数正文，模板本体不透出", () => {
     const prompt = buildCommandPrompt("commit", "feat: 登录修复", "按规范生成提交信息：feat: 登录修复");
     const result = normalizeMessages([user(prompt, 1)]);
-    expect(result[0]?.command).toEqual({ name: "commit" });
-    expect(result[0]?.skill).toBeUndefined();
+    expect(result[0]?.invocations).toEqual([{ kind: "command", name: "commit" }]);
     expect(result[0]?.blocks).toEqual([{ type: "text", text: "feat: 登录修复" }]);
   });
 
   it("无参数命令：徽标仍在，正文为空块列表", () => {
     const prompt = buildCommandPrompt("review", "", "审查当前分支");
     const result = normalizeMessages([user(prompt, 1)]);
-    expect(result[0]?.command).toEqual({ name: "review" });
+    expect(result[0]?.invocations).toEqual([{ kind: "command", name: "review" }]);
     expect(result[0]?.blocks).toEqual([]);
   });
 
-  it("skill 优先：同时命中两种 marker 时（不可能出现）按 skill 处理，command 为空", () => {
+  it("旧 skill marker 归一成单项调用（读旧会话无差异）", () => {
     const skillExecution = buildSkillPrompt("demo", "要求", "使用 Skill「demo」完成任务。");
     const result = normalizeMessages([user(skillExecution, 1)]);
-    expect(result[0]?.skill).toEqual({ name: "demo" });
-    expect(result[0]?.command).toBeUndefined();
+    expect(result[0]?.invocations).toEqual([{ kind: "skill", name: "demo" }]);
+  });
+
+  it("多调用 marker：徽标按选择顺序保留全部调用，气泡只回显共享文本一次", () => {
+    const prompt = buildMultiInvocationPrompt(
+      [{ kind: "skill", name: "a" }, { kind: "command", name: "commit" }],
+      "修复登录",
+      [
+        "使用以下 Skill / 命令完成任务（共 2 项，按顺序执行）。",
+        "【Skill：a】",
+        "读取文件",
+        "【命令：/commit】",
+        "按规范生成",
+        "用户要求：",
+        "修复登录"
+      ].join("\n\n")
+    );
+    const result = normalizeMessages([user(prompt, 3)]);
+    expect(result[0]?.invocations).toEqual([{ kind: "skill", name: "a" }, { kind: "command", name: "commit" }]);
+    expect(result[0]?.blocks).toEqual([{ type: "text", text: "修复登录" }]);
+  });
+
+  it("坏 marker（空调用清单）当普通文本，不误判", () => {
+    const broken = buildMultiInvocationPrompt([], "", "正文");
+    const result = normalizeMessages([user(broken, 4)]);
+    expect(result[0]?.invocations).toBeUndefined();
   });
 
   it("命令消息携带图片附件时图片块保留", () => {
     const prompt = buildCommandPrompt("截图分析", "看这张图", "分析：看这张图");
     const withImage = { role: "user", content: [{ type: "text", text: prompt }, { type: "image", data: "abc", mimeType: "image/png" }], timestamp: 2 } as unknown as AgentMessage;
     const result = normalizeMessages([withImage]);
-    expect(result[0]?.command).toEqual({ name: "截图分析" });
+    expect(result[0]?.invocations).toEqual([{ kind: "command", name: "截图分析" }]);
     expect(result[0]?.blocks).toEqual([{ type: "text", text: "看这张图" }, { type: "image", data: "abc", mimeType: "image/png" }]);
   });
 });

@@ -75,7 +75,7 @@ import { PermissionBroker } from "./permission-broker.js";
 import { loadRecentWorkspaces, recordRecentWorkspace, writeRecentWorkspaces } from "./recent-workspaces.js";
 import { assistantText, createSubagentTools, buildSubagentPromptBlock, type SubagentContext } from "./subagent.js";
 import { readSubagents, saveSubagent, deleteSubagent } from "./subagents-store.js";
-import type { SubagentDefinition, SubagentScope, DelegationProgress } from "../shared/protocol.js";
+import type { SubagentDefinition, SubagentScope, DelegationProgress, SlashInvocation } from "../shared/protocol.js";
 import { buildSkillsSystemPromptBlock, setSkillEnabled, type DiscoveredSkill } from "./skill-catalog.js";
 import * as commandCatalog from "./command-catalog.js";
 import { COMMAND_NAME_PATTERN, type DiscoveredCommand } from "./command-catalog.js";
@@ -89,7 +89,7 @@ import { buildResourceCatalog } from "./resource-catalog.js";
 import { agentWorkspaceSessionDir, backfillUnpersistedSessions, mergeSessionSummary, sessionFileMatchesId, sessionListReadyFor } from "./session-scope.js";
 import { isDesktopConfiguredProvider } from "./model-catalog.js";
 import { defaultTools, ensureDefaultWorkspaceDir, forgetAgentWorkspace, isPositiveInt, mergeProviderModels, recordAgentWorkspace, resolveDefaultWorkspace, resolveInitialWorkspace } from "./settings.js";
-import { buildSkillPrompt, parseSkillPrompt } from "./skill-prompt.js";
+import { buildMultiInvocationPrompt, composeInvocationBody, parseInvocationPrompt, sameInvocations, type InvocationSegment } from "./invocation-prompt.js";
 import {
   PI_DESKTOP_CONTROL_ENTRY_TYPE,
   restoreControlMessages,
@@ -913,6 +913,28 @@ function runtimeSkillPrompt(name: string, instructions?: string, record: Session
 /** 自定义命令发送时展开（重读模板文件，热更新无需重载资源）。 */
 function runtimeCommandPrompt(name: string, args?: string): string {
   return commandCatalog.buildRuntimeCommandPrompt(discoveredCommands, name, args);
+}
+
+/**
+ * 斜杠调用 prompt：invocations 决定展开什么，text 是共享的用户要求/命令参数。
+ * 单调用沿用既有 skill/command 展开与 marker（字节与历史版本一致）；≥两个调用
+ * 各自取一段正文（不含共享文本）合并，共享文本只在末尾出现一次。
+ */
+function runtimeInvocationPrompt(invocations: readonly SlashInvocation[], text: string | undefined, record: SessionRuntimeRecord | undefined = activeRuntime): string {
+  const shared = text?.trim() ?? "";
+  const single = invocations.length === 1 ? invocations[0] : undefined;
+  if (single) {
+    return single.kind === "skill" ? runtimeSkillPrompt(single.name, shared, record) : runtimeCommandPrompt(single.name, shared);
+  }
+  const hasReadTool = record?.session.getActiveToolNames().includes("read") ?? false;
+  const segments: InvocationSegment[] = invocations.map((item) => {
+    if (item.kind === "skill") {
+      const resolved = runtimeSkills.buildRuntimeSkillBody(discoveredSkills, item.name, undefined, hasReadTool);
+      return { kind: item.kind, name: resolved.name, body: resolved.body };
+    }
+    return { kind: item.kind, name: item.name, body: commandCatalog.expandRuntimeCommand(discoveredCommands, item.name, undefined) };
+  });
+  return buildMultiInvocationPrompt(invocations, shared, composeInvocationBody(segments, shared));
 }
 
 /**
@@ -3037,16 +3059,9 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       }
       break;
     }
-    case "session.skill": {
-      const skillRecord = resolveTargetRecord(command.sessionId);
-      const prompt = runtimeSkillPrompt(command.name, command.instructions, skillRecord);
+    case "session.invoke": {
+      const prompt = runtimeInvocationPrompt(command.invocations, command.text, resolveTargetRecord(command.sessionId));
       await handleCommand({ type: "session.prompt", text: prompt, attachments: command.attachments, sessionId: command.sessionId });
-      break;
-    }
-    case "session.command": {
-      // 与 session.skill 同构：展开后的模板即 prompt，找不到命令时抛错回给渲染端。
-      const commandPrompt = runtimeCommandPrompt(command.name, command.arguments);
-      await handleCommand({ type: "session.prompt", text: commandPrompt, attachments: command.attachments, sessionId: command.sessionId });
       break;
     }
     case "session.prompt": {
@@ -3089,11 +3104,9 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     case "session.queue.add": {
       const record = resolveTargetRecord(command.sessionId);
       if (!record.session.model) throw new Error("请先配置并选择模型，再发送消息");
-      const queueText = command.commandName
-        ? runtimeCommandPrompt(command.commandName, command.text || undefined)
-        : command.skillName
-          ? runtimeSkillPrompt(command.skillName, command.text || undefined, record)
-          : command.text;
+      const queueText = command.invocations?.length
+        ? runtimeInvocationPrompt(command.invocations, command.text, record)
+        : command.text;
       const prompt = await preparePromptPayload(queueText, command.attachments);
       // Pi 的队列显示数组按非空文本寻址移除：空串会残留成幽灵队列项，之后任何
       // 整队重建还会把它（含图片）重新入队重复投递。纯图片排队没有正文时补一个
@@ -3168,12 +3181,10 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       const record = resolveTargetRecord(command.sessionId);
       if (!record.session.model) throw new Error("请先配置并选择模型，再重新生成");
       if (record.busy) throw new Error("当前话题正在执行，请等待完成或停止后再重新生成");
-      if (!command.text.trim() && !command.skillName && !command.commandName) throw new Error("没有可重新生成的用户消息");
-      const regeneratedText = command.commandName
-        ? runtimeCommandPrompt(command.commandName, command.text)
-        : command.skillName
-          ? runtimeSkillPrompt(command.skillName, command.text, record)
-          : command.text.trim();
+      if (!command.text.trim() && !command.invocations?.length) throw new Error("没有可重新生成的用户消息");
+      const regeneratedText = command.invocations?.length
+        ? runtimeInvocationPrompt(command.invocations, command.text, record)
+        : command.text.trim();
       const regeneratedPrompt = await preparePromptPayload(regeneratedText, command.attachments);
       if (regeneratedPrompt.images.length && !hasImageInput(record.session.model)) {
         if (!visionModel) throw new Error("当前模型不支持图片输入，请先切换多模态模型，或在设置的模型服务中启用视觉识别");
@@ -3194,9 +3205,11 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
           if (entry.type !== "message" || entry.message.role !== "user") return false;
           if (command.timestamp !== undefined) return entry.message.timestamp === command.timestamp;
           const text = userMessageText(entry.message);
-          if (!command.skillName) return text === command.text.trim();
-          const skillPrompt = parseSkillPrompt(text);
-          return skillPrompt?.name === command.skillName && skillPrompt.instructions === command.text.trim();
+          if (!command.invocations?.length) return text === command.text.trim();
+          // 斜杠调用消息本体是展开后的 prompt：按展示 marker 还原调用清单与共享文本
+          // 再比对（skill/命令单调用走 legacy marker，多调用走 invoke marker，同一入口）。
+          const display = parseInvocationPrompt(text);
+          return sameInvocations(display?.invocations, command.invocations) && display?.text === command.text.trim();
         }).at(-1);
         if (!target || target.type !== "message") throw new Error("找不到要重新生成的用户消息");
         await regenerateSession.navigateTree(target.id);
