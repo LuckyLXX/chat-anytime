@@ -43,10 +43,10 @@ export interface CheckpointResultInfo {
   at: number;
 }
 
-/** 最近一次自动化任务运行结果（automation-run 推送）；App 据此 toast。running=开始（置顶运行中条目），ok/error=终态。 */
+/** 最近一次自动化任务运行结果（automation-run 推送）；App 据此 toast。running=开始（置顶运行中条目），ok/error/aborted=终态。 */
 export interface AutomationRunInfo {
   id: string;
-  status: "ok" | "error" | "running";
+  status: "ok" | "error" | "aborted" | "running";
   taskName?: string;
   /** 终态推送携带的运行记录 id（toast「查看结果」直达寻址）。 */
   runId?: string;

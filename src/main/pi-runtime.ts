@@ -64,7 +64,7 @@ import { toolLabel } from "../shared/locale.js";
 import { workspaceRelativeAttachment } from "./attachments.js";
 import { saveBrowserScreenshot } from "./browser-screenshot.js";
 import { autoCompactionFailureNotice, runManualCompaction } from "./compaction-lifecycle.js";
-import { resolveRunOutcomeStatus, type TerminalRunStatus } from "./run-outcome.js";
+import { isAbortErrorMessage, resolveRunOutcomeStatus, type TerminalRunStatus } from "./run-outcome.js";
 import { readGitBranch } from "./git-branch.js";
 import { builtinProviderOverlay, inferCustomModelImageInput, resolveBuiltinOverlayAction, resolveCustomProviderRegistration } from "./custom-provider.js";
 import { buildDivModePrompt } from "./div-prompt.js";
@@ -656,11 +656,20 @@ async function runAutomationTask(task: AutomationTask, trigger: "cron" | "manual
   const startedAt = Date.now();
   // 开始执行即推 running：渲染端据此在运行记录列表顶部显示运行中条目（不带 runId——记录在结束时才落盘）。
   post({ type: "automation-run", id: task.id, status: "running", taskName: task.name });
-  let succeeded = false;
+  // 结算状态：ok / error / aborted。不能用「prompt 是否抛异常」判定——Pi 把
+  // provider 的流式错误写进消息列表而非抛出（2026-09-08 那次日报文被截断却
+  // 记为 ok），结算一律以末条 assistant 消息为准（run-outcome 同口径）。
+  let outcome: "ok" | "error" | "aborted" = "ok";
   try {
     await record.session.prompt(task.prompt);
-    succeeded = true;
+    const messages = record.session.state.messages;
+    const runOutcome = resolveRunOutcomeStatus(false, messages);
     const preview = truncatePreview(lastAssistantText(record));
+    // 失败/中止时把末条 assistant 的 errorMessage 落进记录，让失败可诊断。
+    const runError = runOutcome === "completed"
+      ? undefined
+      : [...messages].reverse().find((message) => message.role === "assistant")?.errorMessage;
+    outcome = runOutcome === "completed" ? "ok" : runOutcome === "aborted" ? "aborted" : "error";
     const runId = randomUUID();
     automationRuns = appendAutomationRun(getAgentDir(), {
       id: runId,
@@ -671,17 +680,21 @@ async function runAutomationTask(task: AutomationTask, trigger: "cron" | "manual
       sessionId,
       startedAt,
       durationMs: Date.now() - startedAt,
-      status: "ok",
+      status: outcome,
       trigger,
       ...(modelRef ? { modelId: modelRef.id } : {}),
-      ...(preview ? { preview } : {})
+      ...(preview ? { preview } : {}),
+      ...(runError ? { error: runError } : {})
     });
     emitAutomationRuns();
     // lastRun 回写（覆盖式，保留不动）与运行历史流并存：afterAutomationRun 内 refreshAutomation 会重读 runs。
-    afterAutomationRun(task.id, runAgent.id, { sessionId, startedAt, status: "ok", ...(preview ? { preview } : {}) });
-    post({ type: "automation-run", id: task.id, status: "ok", taskName: task.name, runId });
+    afterAutomationRun(task.id, runAgent.id, { sessionId, startedAt, status: outcome, ...(preview ? { preview } : {}), ...(runError ? { error: runError } : {}) });
+    post({ type: "automation-run", id: task.id, status: outcome, taskName: task.name, runId, ...(runError ? { message: runError } : {}) });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    // 抛出的是执行层异常（会话创建失败、模型解析失败…）；中止原文也走这里时
+    // 仍按中止记，避免把用户停止显示成红色失败。
+    outcome = isAbortErrorMessage(message) ? "aborted" : "error";
     const runId = randomUUID();
     automationRuns = appendAutomationRun(getAgentDir(), {
       id: runId,
@@ -692,20 +705,17 @@ async function runAutomationTask(task: AutomationTask, trigger: "cron" | "manual
       sessionId,
       startedAt,
       durationMs: Date.now() - startedAt,
-      status: "error",
+      status: outcome,
       trigger,
       ...(modelRef ? { modelId: modelRef.id } : {}),
       error: message
     });
     emitAutomationRuns();
-    afterAutomationRun(task.id, runAgent.id, { sessionId, startedAt, status: "error", error: message });
-    post({ type: "automation-run", id: task.id, status: "error", taskName: task.name, runId, message });
+    afterAutomationRun(task.id, runAgent.id, { sessionId, startedAt, status: outcome, error: message });
+    post({ type: "automation-run", id: task.id, status: outcome, taskName: task.name, runId, message });
   } finally {
     record.busy = false;
-    // 用户中止的自动化运行不被 finally 覆盖成「完成」：消息的 stopReason
-    // 是权威依据（结算时 abortRequested 已被 resolveRunOutcome 清空）。
-    const abortedRun = resolveRunOutcomeStatus(false, record.session.state.messages) === "aborted";
-    record.runStatus = abortedRun ? "aborted" : succeeded ? "completed" : "failed";
+    record.runStatus = outcome === "ok" ? "completed" : outcome === "aborted" ? "aborted" : "failed";
     patchSessionRunStatus(record);
     emitState();
     emitPaneStateFor(record);

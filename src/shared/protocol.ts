@@ -997,7 +997,12 @@ export interface AutomationRunInfo {
   /** 运行所用会话 id（回看入口）。 */
   sessionId: string;
   startedAt: number;
-  status: "ok" | "error";
+  /**
+   * ok=正常完成；error=真实失败；aborted=运行被中止（用户停止或连接中断）。
+   * aborted 与 error 分开：中止不是失败，运行记录页不该给它红色失败态
+   * （2026-09-10 会话复盘：ok/err 二态把一次「流被截断」的日报记成了成功）。
+   */
+  status: "ok" | "error" | "aborted";
   /** 结果摘要（最后一段助手文本）。 */
   preview?: string;
   error?: string;
@@ -1021,7 +1026,8 @@ export interface AutomationRunRecord {
   sessionId: string;
   startedAt: number;
   durationMs: number;
-  status: "ok" | "error";
+  /** 同 {@link AutomationRunInfo.status}：ok / error / aborted。 */
+  status: "ok" | "error" | "aborted";
   trigger: "cron" | "manual";
   /** 实际使用的模型 id（回退链解析后的结果）。 */
   modelId?: string;
@@ -1393,8 +1399,8 @@ export type RuntimeMessage =
   | { type: "usage-stats-result"; stats: UsageStats }
   /** 自动化任务列表（store 变化时推送，当前 Agent）。 */
   | { type: "automation"; tasks: AutomationTask[] }
-  /** 自动化任务运行状态（running=开始，ok/error=终态）；终态携带任务名（toast 文案）与运行记录 id（看结果直达）。 */
-  | { type: "automation-run"; id: string; status: "ok" | "error" | "running"; taskName?: string; runId?: string; message?: string }
+  /** 自动化任务运行状态（running=开始，ok/error/aborted=终态）；终态携带任务名（toast 文案）与运行记录 id（看结果直达）。 */
+  | { type: "automation-run"; id: string; status: "ok" | "error" | "aborted" | "running"; taskName?: string; runId?: string; message?: string }
   /** 自动化运行历史全量推送（每次运行结束后随终态推送，渲染端全量替换）。 */
   | { type: "automation-runs"; runs: AutomationRunRecord[] }
   /** utility 进程请求用系统默认浏览器打开一个 URL（OAuth 授权页）；main 进程 shell.openExternal。 */

@@ -158,6 +158,15 @@ describe("read/write/upsert/delete/toggle/record", () => {
     expect(updated[0]!.lastRun).toEqual(run);
   });
 
+  it("keeps the aborted status through a store round-trip (不塌成 error)", () => {
+    const file = automationPathFor(agentDir, "default");
+    upsertAutomation(file, makeTask());
+    const run = { sessionId: "sess-1", startedAt: 2000, status: "aborted" as const, error: "This operation was aborted" };
+    recordAutomationRun(file, "task-1", run);
+    // 重新读取（normalizeAutomation 走一遍）：aborted 必须原样保住。
+    expect(readAutomation(file)[0]!.lastRun?.status).toBe("aborted");
+  });
+
   it("normalizes legacy/corrupt entries on read", () => {
     const file = automationPathFor(agentDir, "default");
     mkdirSync(dirname(file), { recursive: true });

@@ -30,7 +30,7 @@ export function normalizeAutomationRun(raw: unknown): AutomationRunRecord | unde
   if (!str(run.id) || !str(run.taskId) || !str(run.taskName) || !str(run.agentId) || !str(run.agentName) || !str(run.sessionId)) return undefined;
   if (typeof run.startedAt !== "number" || !Number.isFinite(run.startedAt)) return undefined;
   if (typeof run.durationMs !== "number" || !Number.isFinite(run.durationMs)) return undefined;
-  if (run.status !== "ok" && run.status !== "error") return undefined;
+  if (run.status !== "ok" && run.status !== "error" && run.status !== "aborted") return undefined;
   if (run.trigger !== "cron" && run.trigger !== "manual") return undefined;
   return {
     id: run.id,

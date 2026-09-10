@@ -256,7 +256,7 @@ export function AutomationSettings({ models, providers, settings, workspaceConfi
                         <div className="automation-row-main">
                           <div className="automation-row-title">
                             <strong>{task.name}</strong>
-                            {task.lastRun && <span className={`automation-row-lastrun ${task.lastRun.status}`} title={lastRunTitle(task)}>{task.lastRun.status === "ok" ? "已运行" : "运行失败"}</span>}
+                            {task.lastRun && <span className={`automation-row-lastrun ${task.lastRun.status}`} title={lastRunTitle(task)}>{task.lastRun.status === "ok" ? "已运行" : task.lastRun.status === "aborted" ? "已中止" : "运行失败"}</span>}
                             <span className={`automation-row-state ${task.enabled ? "on" : "off"}`}>{task.enabled ? "进行中" : "已暂停"}</span>
                           </div>
                           <div className="automation-row-meta">

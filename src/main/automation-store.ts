@@ -74,7 +74,7 @@ export function normalizeAutomation(raw: unknown): AutomationTask | undefined {
             const run = task.lastRun as Record<string, unknown>;
             if (typeof run.sessionId !== "string" || !run.sessionId) return undefined;
             const startedAt = typeof run.startedAt === "number" && Number.isFinite(run.startedAt) ? run.startedAt : Date.now();
-            const status = run.status === "error" ? "error" : "ok";
+            const status = run.status === "error" ? "error" : run.status === "aborted" ? "aborted" : "ok";
             return {
               sessionId: run.sessionId,
               startedAt,

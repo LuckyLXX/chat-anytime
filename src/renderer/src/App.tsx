@@ -1346,9 +1346,12 @@ export function App(): ReactNode {
     // 运行中不弹 toast（运行记录面板顶部有运行中条目）；终态才提示。
     if (automationRun.status === "running") return;
     const name = automationRun.taskName ? `「${automationRun.taskName}」` : "";
+    // 中止不是失败：单独给一句中性文案，不套「运行失败」。
     const message = automationRun.status === "ok"
       ? (name ? `${name}运行完成` : "定时任务已运行")
-      : `${name}运行失败${automationRun.message ? `：${automationRun.message.length > 120 ? `${automationRun.message.slice(0, 120)}…` : automationRun.message}` : ""}`;
+      : automationRun.status === "aborted"
+        ? (name ? `${name}运行已中止` : "定时任务运行已中止")
+        : `${name}运行失败${automationRun.message ? `：${automationRun.message.length > 120 ? `${automationRun.message.slice(0, 120)}…` : automationRun.message}` : ""}`;
     setAutomationToast({ message, runId: automationRun.runId });
   }, [automationRun]);
   // 「查看结果」直达：打开设置页自动化 tab，写入信号让 AutomationSettings 切「运行记录」子页并高亮该条。

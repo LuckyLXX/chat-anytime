@@ -71,6 +71,12 @@ describe("normalizeAutomationRun", () => {
     expect(normalizeAutomationRun("run")).toBeUndefined();
     expect(normalizeAutomationRun(42)).toBeUndefined();
   });
+
+  it("accepts the aborted status (中止不是失败，与 ok/error 并列的第三态)", () => {
+    const record = makeRun({ status: "aborted", error: "This operation was aborted" });
+    expect(normalizeAutomationRun(record)).toEqual(record);
+    expect(normalizeAutomationRun({ ...makeRun(), status: "cancelled" })).toBeUndefined();
+  });
 });
 
 describe("readAutomationRuns", () => {

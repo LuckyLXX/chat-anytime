@@ -3,7 +3,7 @@
 // automation-run running 推送合成置顶。「查看会话」只发 runId，主进程负责
 // 跨角色切换/定位/激活恢复（automation.run.open）。
 
-import { CheckCircle2, ChevronDown, ChevronRight, Clock, Loader2, MessageSquare, XCircle } from "lucide-react";
+import { CheckCircle2, ChevronDown, ChevronRight, CircleStop, Clock, Loader2, MessageSquare, XCircle } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { AutomationRunRecord, DesktopSettings } from "../../shared/protocol";
 import { useDesktopStore } from "./store";
@@ -21,7 +21,7 @@ export interface AutomationRunsProps {
   onOpenSession: () => void;
 }
 
-type StatusFilter = "all" | "ok" | "error";
+type StatusFilter = "all" | "ok" | "error" | "aborted";
 
 function pad2(value: number): string {
   return `${value}`.padStart(2, "0");
@@ -129,6 +129,7 @@ export function AutomationRuns({ settings, highlight, onOpenSession }: Automatio
           <button type="button" className={statusFilter === "all" ? "active" : ""} role="tab" aria-selected={statusFilter === "all"} onClick={() => setStatusFilter("all")}>全部</button>
           <button type="button" className={statusFilter === "ok" ? "active" : ""} role="tab" aria-selected={statusFilter === "ok"} onClick={() => setStatusFilter("ok")}>成功</button>
           <button type="button" className={statusFilter === "error" ? "active" : ""} role="tab" aria-selected={statusFilter === "error"} onClick={() => setStatusFilter("error")}>失败</button>
+          <button type="button" className={statusFilter === "aborted" ? "active" : ""} role="tab" aria-selected={statusFilter === "aborted"} onClick={() => setStatusFilter("aborted")}>已中止</button>
         </div>
         <label className="automation-runs-task-filter" aria-label="任务筛选"><span>任务</span>
           <select value={taskFilter} onChange={(event) => setTaskFilter(event.target.value)}>
@@ -175,7 +176,7 @@ export function AutomationRuns({ settings, highlight, onOpenSession }: Automatio
                         onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); toggleExpand(run.id); } }}
                       >
                         <div className="automation-runs-row-line">
-                          <span className={`automation-runs-status ${run.status}`} aria-hidden="true">{run.status === "ok" ? <CheckCircle2 size={14} /> : <XCircle size={14} />}</span>
+                          <span className={`automation-runs-status ${run.status}`} aria-hidden="true">{run.status === "ok" ? <CheckCircle2 size={14} /> : run.status === "aborted" ? <CircleStop size={14} /> : <XCircle size={14} />}</span>
                           <strong>{run.taskName}</strong>
                           <span className="automation-runs-agent">{run.agentName}</span>
                           <span className="automation-runs-time">{formatTime(run.startedAt)}</span>
@@ -183,14 +184,15 @@ export function AutomationRuns({ settings, highlight, onOpenSession }: Automatio
                           <span className={`automation-runs-trigger ${run.trigger}`}>{run.trigger === "cron" ? "定时" : "手动"}</span>
                           <ChevronRight size={14} className="automation-runs-chevron" />
                         </div>
-                        {/* 失败优先可见：error 与 preview 折叠态都行内截断展示 */}
+                        {/* 失败优先可见：error 与 preview 折叠态都行内截断展示；中止是中性态，不套 error 样式 */}
                         {!expanded && run.status === "error" && run.error && <p className="automation-runs-summary error"><span className="automation-runs-summary-label">错误：</span>{run.error}</p>}
+                        {!expanded && run.status === "aborted" && run.error && <p className="automation-runs-summary aborted"><span className="automation-runs-summary-label">中止：</span>{run.error}</p>}
                         {!expanded && run.status === "ok" && run.preview && <p className="automation-runs-summary">{run.preview}</p>}
                         {expanded && (
                           <div className="automation-runs-detail">
                             <div className="automation-runs-detail-block">
-                              <strong>{run.status === "ok" ? "结果" : "错误详情"}</strong>
-                              <p>{run.status === "ok" ? (run.preview || "运行成功（无文本输出）") : (run.error || "运行失败（无错误详情）")}</p>
+                              <strong>{run.status === "ok" ? "结果" : run.status === "aborted" ? "中止详情" : "错误详情"}</strong>
+                              <p>{run.status === "ok" ? (run.preview || "运行成功（无文本输出）") : run.status === "aborted" ? (run.error || "运行已中止（无详情）") : (run.error || "运行失败（无错误详情）")}</p>
                             </div>
                             {task && <div className="automation-runs-detail-block"><strong>任务提示词</strong><p className="automation-runs-prompt">{task.prompt}</p></div>}
                             <div className="automation-runs-detail-meta">
