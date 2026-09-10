@@ -12,8 +12,11 @@ const statusLabels: Record<TodoStatus, string> = { pending: "待办", in_progres
  */
 export const MIN_RUNNING_AGE_MS = 5_000;
 
+/** 有单独终止通道的 shell 工具（经 session.killExecution 杀进程树，会话继续）。 */
+const KILLABLE_SHELL_TOOLS = new Set(["bash", "powershell"]);
+
 function executionCommand(execution: ToolExecution): string {
-  if (execution.name === "bash") {
+  if (execution.name === "bash" || execution.name === "powershell") {
     const command = (execution.args as { command?: unknown } | undefined)?.command;
     return typeof command === "string" && command.trim() ? command.trim() : "执行命令";
   }
@@ -30,7 +33,8 @@ function formatElapsed(startedAt: number, now: number): string {
 /**
  * 待办页内容（由 PanelDock 的 tab 承载）。只读待办清单——用户不直接改
  * （dsh 式单所有者：模型经 todo_write 整表替换维护）——外加后台运行中的
- * bash 工具调用与游离后台进程（dev server 等），各带停止控制。
+ * bash/powershell 工具调用（停止只杀该命令的进程树，会话继续本轮）与
+ * 游离后台进程（dev server 等，结束进程）。
  */
 export function TaskPanelContent(): ReactNode {
   const todos = useDesktopStore((state) => state.todos);
@@ -90,7 +94,9 @@ export function TaskPanelContent(): ReactNode {
                 <Terminal size={12} className="spinning" />
                 <strong title={executionCommand(execution)}>{executionCommand(execution)}</strong>
                 <small>{formatElapsed(execution.startedAt, now)}</small>
-                <button className="task-panel-running-stop" type="button" title="停止运行" aria-label={`停止 ${executionCommand(execution)}`} disabled={busy} onClick={() => void run({ type: "session.abort" })}><Square size={10} /></button>
+                {KILLABLE_SHELL_TOOLS.has(execution.name) && (
+                  <button className="task-panel-running-stop" type="button" title="停止运行" aria-label={`停止 ${executionCommand(execution)}`} disabled={busy} onClick={() => void run({ type: "session.killExecution", executionId: execution.id })}><Square size={10} /></button>
+                )}
               </div>
             </div>
           ))}

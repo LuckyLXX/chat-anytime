@@ -120,6 +120,7 @@ import * as speedStats from "./speed-stats.js";
 import * as contextBreakdown from "./context-breakdown.js";
 import * as runtimeHooks from "./runtime-hooks.js";
 import * as runtimePlanTools from "./runtime-plan-tools.js";
+import * as runtimeShellKill from "./runtime-shell-kill.js";
 import { planHeading, readPlanMode, saveApprovedPlan, writePlanMode } from "./plan-store.js";
 import { checkpointPathFor, readCheckpoints, sweepCheckpoints } from "./checkpoint-store.js";
 import { createCheckpointExtension, rollbackPlan } from "./runtime-checkpoint.js";
@@ -200,6 +201,8 @@ interface SessionRuntimeRecord {
   browserTools: ToolDefinition[];
   automationTools: ToolDefinition[];
   designTools: ToolDefinition[];
+  /** 可单独终止的 bash/powershell 工具（同名覆盖内建定义）；任务面板按命令停止的执行端。 */
+  shellKill: runtimeShellKill.KillableShellTools;
   /** 当前会话绑定的设计文档（设计模式画布的数据源；工具与用户命令共用）。 */
   designDoc?: { doc: DesignDoc; fileName: string };
   /**
@@ -2470,10 +2473,18 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
       return fileName;
     }
   });
+  // 可单独终止的 shell 工具：同名 customTools 覆盖内建 bash/powershell（工厂与
+  // 选项同 Pi 内部构造，schema/description 字节不变、不影响前缀缓存）。任务面板
+  // 「按命令停止」经 record.shellKill 只杀该调用的进程树，会话继续本轮。
+  const shellKill = runtimeShellKill.buildKillableShellTools({
+    cwd: recordWorkspace,
+    commandPrefix: settingsManager.getShellCommandPrefix() ?? undefined,
+    shellPath: settingsManager.getShellPath() ?? undefined
+  });
   // Each record owns its customTools array: Pi stores it by reference and
   // re-reads it on every tool-registry refresh, so per-record arrays let parked
   // sessions keep their tool set while the active one hot-swaps MCP tools.
-  const recordCustomTools: ToolDefinition[] = [...mcpTools, ...subagentTools, ...todoTools, ...memoryTools, ...questionTools, ...planTools, ...visionTools, ...browserTools, ...automationTools, ...designTools];
+  const recordCustomTools: ToolDefinition[] = [shellKill.tools[0]!, shellKill.tools[1]!, ...mcpTools, ...subagentTools, ...todoTools, ...memoryTools, ...questionTools, ...planTools, ...visionTools, ...browserTools, ...automationTools, ...designTools];
   const result = await createAgentSession({
     cwd: recordWorkspace,
     modelRuntime,
@@ -2547,6 +2558,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     browserTools,
     automationTools,
     designTools,
+    shellKill,
     steeringImages: [],
     followUpImages: [],
     unattended: Boolean(options.unattended),
@@ -3238,6 +3250,22 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
           changed = true;
         }
         if (changed) emitState();
+        emitPaneStateFor(record);
+      }
+      break;
+    }
+    case "session.killExecution": {
+      // 任务面板按命令停止：只杀这一条 shell 调用的进程树，会话不中止。
+      // 工具会以错误结果收场（模型收到用户终止说明后继续本轮）；先标记
+      // aborted 让面板卡片立即消失，tool_execution_end 的「中止保持」检查
+      // 保证延迟到达的 end 事件不会把它翻回失败。
+      const record = resolveTargetRecord(command.sessionId);
+      if (!record.shellKill.kill(command.executionId)) throw new Error("该命令已结束，无需停止");
+      const execution = record.executions.get(command.executionId);
+      if (execution && execution.status === "running") {
+        execution.status = "aborted";
+        execution.completedAt = Date.now();
+        emitState();
         emitPaneStateFor(record);
       }
       break;

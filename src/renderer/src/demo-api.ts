@@ -746,6 +746,10 @@ export function createDemoApi(): DesktopApi {
           updateSnapshot({ busy: false, status: "就绪", queuedMessages: [] });
           break;
         }
+        case "session.killExecution": {
+          updateSnapshot({ executions: demoSnapshot.executions.map((item) => item.id === command.executionId && item.status === "running" ? { ...item, status: "aborted" as const, completedAt: Date.now(), output: "（演示）用户在任务面板停止了该命令。" } : item) });
+          break;
+        }
         case "session.queue.add": {
           const text = command.commandName ? `【命令：/${command.commandName}】${command.text}` : command.skillName ? `【Skill：${command.skillName}】${command.text}` : command.text;
           const followUpCount = demoSnapshot.queuedMessages.filter((item) => item.kind === "followUp").length;

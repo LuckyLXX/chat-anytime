@@ -1262,6 +1262,10 @@ export type RuntimeCommand =
   | { type: "session.compact"; instructions?: string; sessionId?: string }
   | { type: "session.planMode"; enabled: boolean; sessionId?: string }
   | { type: "session.abort"; sessionId?: string }
+  /** 任务面板按命令停止：只终止一条正在执行的 bash/powershell 调用（杀进程树），
+   * 不中止整个会话——工具以错误结果收场供模型继续本轮。executionId 即
+   * ToolExecution.id（Pi toolCallId）。 */
+  | { type: "session.killExecution"; sessionId?: string; executionId: string }
   | { type: "session.queue.add"; text: string; skillName?: string; commandName?: string; attachments?: PromptAttachment[]; sessionId?: string }
   | { type: "session.queue.sendNow"; kind: QueuedMessage["kind"]; index: number; text: string; sessionId?: string }
   | { type: "session.queue.remove"; kind: QueuedMessage["kind"]; index: number; text: string; sessionId?: string }
