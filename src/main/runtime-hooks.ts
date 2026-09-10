@@ -9,7 +9,7 @@ import { spawn } from "node:child_process";
 import type { ExtensionAPI, InlineExtension } from "@earendil-works/pi-coding-agent";
 import type { HookAction, HookRule, RuntimeMessage } from "../shared/protocol.js";
 import { HOOK_TIMEOUT_DEFAULT_MS, HOOK_TIMEOUT_MAX_MS, type ConfiguredHook } from "./hooks-config.js";
-import { isAbortedMessage } from "./run-outcome.js";
+import { isAbortedOutcome } from "./run-outcome.js";
 
 /** 事件触发时交给钩子动作的上下文（命令经 stdin JSON / HOOK_* env 获取）。 */
 export interface HookContext {
@@ -356,7 +356,8 @@ function runUsageFromMessages(messages: unknown): { usage?: HookContext["usage"]
         cost: (usage?.cost ?? 0) + (next.cost?.total ?? 0)
       };
     }
-    if (entry.errorMessage && !isAbortedMessage(entry)) isError = true;
+    // 宽版口径：Pi 把中止报成 error 态时也不算失败（同 run-outcome）。
+    if (entry.errorMessage && !isAbortedOutcome(entry)) isError = true;
   }
   return { ...(usage ? { usage } : {}), isError };
 }

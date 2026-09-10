@@ -79,6 +79,20 @@ describe("normalizeMessages 身份缓存", () => {
     expect(result[0]?.error).toBeUndefined();
     expect(result[0]?.aborted).toBe(true);
   });
+
+  it("Pi 把中止报成 stopReason=error 时也不爆红（中止原文降级为 aborted）", () => {
+    const aborted = { role: "assistant", content: [{ type: "text", text: "半截输出" }], timestamp: 13, stopReason: "error", errorMessage: "This operation was aborted" } as unknown as AgentMessage;
+    const result = normalizeMessages([aborted]);
+    expect(result[0]?.error).toBeUndefined();
+    expect(result[0]?.aborted).toBe(true);
+  });
+
+  it("stopReason=error + 真实错误仍然爆红（补救判定不洗白失败）", () => {
+    const failed = { role: "assistant", content: [], timestamp: 14, stopReason: "error", errorMessage: "429 status code (no body)" } as unknown as AgentMessage;
+    const result = normalizeMessages([failed]);
+    expect(result[0]?.error).toBe("429 status code (no body)");
+    expect(result[0]?.aborted).toBeUndefined();
+  });
 });
 
 describe("normalizeMessages 斜杠调用徽标", () => {

@@ -2,7 +2,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ChatMessage, DelegationProgress, ToolExecution } from "../shared/protocol.js";
 import { isDelegationProgress } from "../shared/protocol.js";
 import { normalizeMessages } from "./message-normalize.js";
-import { isAbortedMessage } from "./run-outcome.js";
+import { isAbortedOutcome } from "./run-outcome.js";
 import { changedWorkspaceFile, changedWorkspaceFiles } from "./workspace-preview.js";
 
 export const PI_DESKTOP_CONTROL_ENTRY_TYPE = "pidesktop-control";
@@ -127,7 +127,7 @@ export function restoreToolExecutions(messages: readonly PersistedSessionMessage
   const executions = new Map<string, ToolExecution>();
   // 中止回合的工具不再显示「失败」：SDK 为被中止的工具合成 isError 结果
   // （"Operation aborted"），但紧随其后的 assistant 消息 stopReason=aborted
-  // 才是权威判定（同 run-outcome 口径，不匹配英文文案）。nextAssistant[i]
+  // 才是权威判定（同 run-outcome 宽版口径：stopReason=error + 中止原文也算中止）。nextAssistant[i]
   // = 下标 i 之后最近的一条 assistant 消息，一次反向扫描预计算。
   const nextAssistant: Array<PersistedSessionMessage | undefined> = new Array(messages.length);
   let seen: PersistedSessionMessage | undefined;
@@ -135,7 +135,7 @@ export function restoreToolExecutions(messages: readonly PersistedSessionMessage
     nextAssistant[index] = seen;
     if (messages[index]?.role === "assistant") seen = messages[index];
   }
-  const trailingAborted = isAbortedMessage([...messages].reverse().find((message) => message.role === "assistant"));
+  const trailingAborted = isAbortedOutcome([...messages].reverse().find((message) => message.role === "assistant"));
 
   for (const [index, message] of messages.entries()) {
     if (message.role === "assistant") {
@@ -158,7 +158,7 @@ export function restoreToolExecutions(messages: readonly PersistedSessionMessage
     const previous = executions.get(message.toolCallId);
     const output = resultText(message);
     const delegation = delegationFromDetails(message);
-    const aborted = isAbortedMessage(nextAssistant[index]);
+    const aborted = isAbortedOutcome(nextAssistant[index]);
     executions.set(message.toolCallId, {
       id: message.toolCallId,
       name: previous?.name ?? message.toolName,

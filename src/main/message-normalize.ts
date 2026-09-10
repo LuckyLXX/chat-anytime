@@ -14,7 +14,7 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, UserMessage } from "@earendil-works/pi-ai";
 import { messageUuid } from "./message-identity.js";
-import { isAbortedMessage } from "./run-outcome.js";
+import { isAbortedOutcome } from "./run-outcome.js";
 import { parseInvocationPrompt, type InvocationDisplay } from "./invocation-prompt.js";
 import { stripVisionHint } from "./runtime-vision.js";
 import type { ChatMessage, MessageBlock } from "../shared/protocol.js";
@@ -106,10 +106,11 @@ export function normalizeMessages(messages: AgentMessage[], streamingMessage?: A
     const cached = normalizedCache.get(message);
     if (cached && cached.index === index) return cached.message;
     const invocation = message.role === "user" ? parseInvocationPrompt(userMessageText(message)) : undefined;
-    // 用户中止（Pi stopReason=aborted）不是失败：剥离各家 SDK 的中止英文原文，
-    // 只留 aborted 标记给渲染端做中性提示（历史会话同样受益——JSONL 里存着
-    // stopReason）。error 与 aborted 互斥。
-    const aborted = isAbortedMessage(message);
+    // 用户中止不是失败：剥离各家 SDK 的中止英文原文，只留 aborted 标记给渲染
+    // 端做中性提示（历史会话同样受益——JSONL 里存着 stopReason）。error 与
+    // aborted 互斥。这里用宽版判定：Pi 偶尔把中止落成 stopReason=error + 中止
+    // 原文，只认 stopReason 会让用户主动停止爆红（run-outcome.ts 同口径）。
+    const aborted = isAbortedOutcome(message);
     const normalized: ChatMessage = {
       id: `${message.timestamp ?? 0}-${index}-${message.role}`,
       uuid: messageUuid(message, index),
