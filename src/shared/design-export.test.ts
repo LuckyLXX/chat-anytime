@@ -51,10 +51,29 @@ describe("exportDesignHtml", () => {
 
   it("text 节点带字体样式且 HTML 转义；image 导出 <img>；隐藏节点不导出", () => {
     const html = exportDesignHtml(cardDoc());
-    expect(html).toContain("font-size:24px;font-weight:700;color:#111;text-align:center;");
+    expect(html).toContain("font-family:Inter, system-ui, sans-serif;font-size:24px;font-weight:700;color:#111;text-align:center;");
     expect(html).toContain("登录&lt;Title&gt;");
     expect(html).toContain('<img src="https://example.com/a.png" alt="缩略图"');
     expect(html).not.toContain("隐藏");
+  });
+
+  it("未声明 fontFamily 的 text 节点也导出默认字体栈（锁住「导出零 font-family」bug）", () => {
+    const html = exportDesignHtml(cardDoc());
+    // 整份导出里每个 text 节点都有 font-family，body 也有兜底栈。
+    expect(html).toContain("body { font-family: Inter, system-ui, sans-serif;");
+    const textStyles = html.match(/font-family:[^;"]*;/gu) ?? [];
+    expect(textStyles.length).toBeGreaterThanOrEqual(2);
+    expect(textStyles.every((entry) => entry.includes("Inter, system-ui, sans-serif"))).toBe(true);
+  });
+
+  it("声明了 fontFamily 的 text 节点用设定值，letterSpacing 输出为 px", () => {
+    const doc = cardDoc();
+    const card = doc.nodes[0]!;
+    card.children![0]!.fontFamily = "\"Noto Serif SC\", Georgia, serif";
+    card.children![0]!.letterSpacing = -0.4;
+    const html = exportDesignHtml(doc);
+    expect(html).toContain("font-family:&quot;Noto Serif SC&quot;, Georgia, serif;");
+    expect(html).toContain("letter-spacing:-0.4px;");
   });
 
   it("flex 子节点导出为 relative 且省略 left/top，普通节点保持绝对定位", () => {
@@ -121,6 +140,13 @@ describe("designNodeStyle", () => {
     const hostile = designNodeStyle({ type: "rect", id: "r", x: 0, y: 0, w: 5, h: 5, shadow: 'red" onerror="alert(1)' });
     expect(hostile).toContain('box-shadow:red&quot; onerror=&quot;alert(1);');
     expect(hostile).not.toContain('onerror="alert');
+  });
+
+  it("designNodeStyleObject 返回 camelCase 的 fontFamily（画布渲染同构）", () => {
+    const style = designNodeStyleObject({ type: "text", id: "t", x: 0, y: 0, w: 10, h: 10, text: "a", fontFamily: "Inter, sans-serif", letterSpacing: 1.2 });
+    expect(style.fontFamily).toBe("Inter, sans-serif");
+    expect(style.letterSpacing).toBe("1.2px");
+    expect(style.fontSize).toBe("14px");
   });
 });
 

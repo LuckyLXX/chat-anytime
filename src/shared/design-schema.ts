@@ -48,6 +48,10 @@ export interface DesignNode {
   color?: string;
   /** 行高（数字 = 字号倍数）。 */
   lineHeight?: number;
+  /** CSS font-family 字体栈（缺省用 {@link DESIGN_DEFAULT_FONT_FAMILY}；导出与画布同源）。 */
+  fontFamily?: string;
+  /** 字距（px）：负值收紧（大标题常用），正值放开（全大写标签常用）。 */
+  letterSpacing?: number;
   align?: "left" | "center" | "right";
   // —— image 节点：http(s) / data URL（v1 不做本地文件路径） ——
   src?: string;
@@ -98,10 +102,18 @@ export type DesignOpResult =
 export const MAX_DESIGN_NODES = 2000;
 /** 节点树最大深度（防病态嵌套爆栈）。 */
 export const MAX_DESIGN_DEPTH = 32;
+/**
+ * 默认字体栈：text 节点没显式声明 fontFamily 时导出与画布都用它。
+ * 曾经导出 HTML 里一个 font-family 都没有，中文稿落到浏览器默认衬线字体（宋体）——
+ * 画布看着正常、导出立刻崩坏。现在每个 text 节点都发字体栈，这里是唯一来源。
+ */
+export const DESIGN_DEFAULT_FONT_FAMILY = "Inter, system-ui, sans-serif";
+/** fontFamily 字符上限（值会拼进导出 HTML 的 style 属性，只允许有限长度）。 */
+export const MAX_FONT_FAMILY_CHARS = 200;
 
 const NODE_TYPES: readonly DesignNodeType[] = ["frame", "rect", "text", "image"];
 /** update patch 的合法字段集（白名单之外的字段拒绝，防 AI 拼错字段被静默忽略）。 */
-const PATCHABLE_KEYS: ReadonlySet<string> = new Set(["name", "x", "y", "w", "h", "visible", "locked", "fill", "stroke", "strokeWidth", "radius", "opacity", "shadow", "text", "fontSize", "fontWeight", "color", "lineHeight", "align", "src", "layout"]);
+const PATCHABLE_KEYS: ReadonlySet<string> = new Set(["name", "x", "y", "w", "h", "visible", "locked", "fill", "stroke", "strokeWidth", "radius", "opacity", "shadow", "text", "fontSize", "fontWeight", "color", "lineHeight", "fontFamily", "letterSpacing", "align", "src", "layout"]);
 /** create/replace 节点草稿的合法字段集（= patch 字段 + 结构字段；与 update patch 同哲学：
  *  自造字段如 props.strokeOpacity 直接报错而不是被 normalizeDesignNode 静默丢弃——
  *  静默丢弃会让模型拿到「成功」回执却丢样式，导出后才发现）。 */
@@ -144,6 +156,11 @@ function boundedString(value: unknown, max: number): string | undefined {
   if (typeof value !== "string") return undefined;
   const trimmed = value.slice(0, max);
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/** fontFamily 归一：去首尾空白 + 长度上限（空串 = 未设置）；字体栈内部空格保留。 */
+function normalizeFontFamily(value: unknown): string | undefined {
+  return boundedString(typeof value === "string" ? value.trim() : value, MAX_FONT_FAMILY_CHARS);
 }
 
 /** image src 只接受 http(s) 与 data:image URL（v1 不做本地文件路径）。 */
@@ -233,6 +250,12 @@ export function normalizeDesignNode(raw: unknown, budget: { count: number }, dep
     if (color) node.color = color;
     const lineHeight = finiteOr(source.lineHeight, 0);
     if (lineHeight > 0) node.lineHeight = clamp(round2(lineHeight), 0.5, 10);
+    const fontFamily = normalizeFontFamily(source.fontFamily);
+    if (fontFamily) node.fontFamily = fontFamily;
+    if (source.letterSpacing !== undefined) {
+      const letterSpacing = finiteOr(source.letterSpacing, 0);
+      if (letterSpacing !== 0) node.letterSpacing = clamp(round2(letterSpacing), -10, 20);
+    }
     const align = TEXT_ALIGNS.find((candidate) => candidate === source.align);
     if (align) node.align = align;
   }
@@ -548,6 +571,16 @@ export function applyDesignOps(doc: DesignDoc, ops: readonly DesignOp[]): Design
           if (lineHeight > 0) node.lineHeight = clamp(round2(lineHeight), 0.5, 10);
           else delete node.lineHeight;
         }
+        if ("fontFamily" in source) {
+          const fontFamily = normalizeFontFamily(source.fontFamily);
+          if (fontFamily) node.fontFamily = fontFamily;
+          else delete node.fontFamily;
+        }
+        if ("letterSpacing" in source) {
+          const letterSpacing = source.letterSpacing === undefined || source.letterSpacing === null ? 0 : finiteOr(source.letterSpacing, 0);
+          if (letterSpacing !== 0) node.letterSpacing = clamp(round2(letterSpacing), -10, 20);
+          else delete node.letterSpacing;
+        }
         if ("align" in source) {
           const align = TEXT_ALIGNS.find((candidate) => candidate === source.align);
           if (align) node.align = align;
@@ -645,6 +678,8 @@ export function summarizeNode(node: DesignNode): string {
       entry.fontSize = item.fontSize;
       if (item.fontWeight !== 400) entry.fontWeight = item.fontWeight;
       if (item.color) entry.color = item.color;
+      if (item.fontFamily) entry.fontFamily = item.fontFamily;
+      if (item.letterSpacing) entry.letterSpacing = item.letterSpacing;
       if (item.align) entry.align = item.align;
     }
     if (item.type === "image" && item.src) entry.src = item.src.length > 200 ? `${item.src.slice(0, 200)}…` : item.src;

@@ -145,6 +145,26 @@ describe("buildDesignTools", () => {
     expect(result.content[0]!.text).toContain(`卡片→${details.newIds[0]!.id}`);
   });
 
+  it("design_create 首次用法要点包含字体栈纪律（尾部注入，不进 description）", async () => {
+    const { tool } = await harness();
+    const created = await execute(tool("design_create"), { name: "字体纪律" });
+    expect(created.content[0]!.text).toContain("fontFamily");
+    // 只提示一次：第二次 create 不再带用法要点（省尾部 token）。
+    const again = await execute(tool("design_create"), { name: "字体纪律二" });
+    expect(again.content[0]!.text).not.toContain("用法要点");
+  });
+
+  it("design_update 接受 fontFamily / letterSpacing 并落盘", async () => {
+    const { tool, current } = await harness();
+    await execute(tool("design_create"), { name: "字体落盘" });
+    await execute(tool("design_update"), {
+      ops: [{ op: "create", node: { type: "text", id: "t1", text: "标题", x: 0, y: 0, w: 100, h: 30, fontFamily: "Inter, sans-serif", letterSpacing: -0.3 } }]
+    });
+    const node = current()!.nodes[0]!;
+    expect(node.fontFamily).toBe("Inter, sans-serif");
+    expect(node.letterSpacing).toBe(-0.3);
+  });
+
   it("design_update 原子拒绝：失败时文档与磁盘不变", async () => {
     const { tool, current, pushes } = await harness();
     await execute(tool("design_create"), { name: "原子" });

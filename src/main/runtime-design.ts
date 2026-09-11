@@ -54,6 +54,7 @@ const FIRST_USE_GUIDANCE = [
   "用法要点（本会话仅提示一次）：",
   "- 整套原型：一屏 = 一个顶层命名 frame，并排放置（间隔 ≥80px）；画布放不下先发 {op:'resize'} 扩画布。一次 ≤64 条 ops，先完成一屏/一个区域，成功后再继续下一屏。",
   "- 每个节点都起 name；自起语义化 id 便于后续定位（缺省自动生成并在回执给出映射）。",
+  "- 每个 text 节点都显式声明 fontFamily（如 'Inter, system-ui, sans-serif'，中文稿带上中文字体），字号/字重与字距按层级递进；缺省会用内置默认栈，但显式声明才能与选定风格一致。",
   "- 半透明直接写进 fill/stroke（rgba/hex8）；不要用元素级 opacity 压淡有子内容的容器——子内容会一起变淡，质量门会拦截。",
   "- 回执带「修复 ops」时，把它原样作为下一条 design_update 的 ops 传入，先修复再继续新内容。"
 ].join("\n");
@@ -94,6 +95,8 @@ const designNodeSchema = Type.Object({
   shadow: Type.Optional(Type.String({ description: "CSS box-shadow 值" })),
   text: Type.Optional(Type.String({ description: "text 节点内容" })),
   fontSize: Type.Optional(Type.Number()), fontWeight: Type.Optional(Type.Number()), color: Type.Optional(Type.String({ description: "text 颜色" })), lineHeight: Type.Optional(Type.Number({ description: "text 行高（字号倍数）" })),
+  fontFamily: Type.Optional(Type.String({ description: "text 字体栈（CSS font-family，如 'Inter, system-ui, sans-serif'）；每个 text 节点都建议显式声明，缺省用内置默认栈" })),
+  letterSpacing: Type.Optional(Type.Number({ description: "text 字距（px，-10..20）：大标题略负收紧，全大写小标签略正放开" })),
   align: Type.Optional(Type.Union([Type.Literal("left"), Type.Literal("center"), Type.Literal("right")])),
   src: Type.Optional(Type.String({ description: "image：http(s)/data URL" })),
   layout: Type.Optional(Type.Object({}, { additionalProperties: true, description: "frame auto-layout: {direction:'row'|'column', gap?, padding?, justify?, align?}；声明后子节点按 flex 排布（x/y 忽略）" })),

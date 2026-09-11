@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import type { DesignDoc, DesignNode, DesignNodePatch } from "../../../shared/design-schema.js";
+import { DESIGN_DEFAULT_FONT_FAMILY, type DesignDoc, type DesignNode, type DesignNodePatch } from "../../../shared/design-schema.js";
 
 /** 属性检查器：选中节点的几何/外观/文本属性编辑（输入 → onNodePatch，防抖收敛由宿主负责）。 */
 
@@ -99,6 +99,7 @@ export function DesignInspector({ doc, selected, onPatch, onCanvasPatch }: {
             <NumberField label="字重" value={selected.fontWeight} min={1} max={1000} fallback={400} onChange={(value) => patch({ fontWeight: value ?? 400 })} />
           </div>
           <label className="design-field design-field-color"><span>颜色</span><span className="design-color-input"><input type="color" value={safeColor(selected.color)} aria-label="文字颜色" onChange={(event) => patch({ color: event.target.value })} /><input value={selected.color ?? ""} placeholder="#111827" onChange={(event) => patch({ color: event.target.value })} /></span></label>
+          <label className="design-field"><span>字体</span><input value={selected.fontFamily ?? ""} placeholder={DESIGN_DEFAULT_FONT_FAMILY} onChange={(event) => patch({ fontFamily: event.target.value === "" ? undefined : event.target.value })} /></label>
           <label className="design-field"><span>对齐</span>
             <select value={selected.align ?? "left"} onChange={(event) => patch({ align: event.target.value as DesignNode["align"] })}>
               <option value="left">左对齐</option>
@@ -106,7 +107,10 @@ export function DesignInspector({ doc, selected, onPatch, onCanvasPatch }: {
               <option value="right">右对齐</option>
             </select>
           </label>
-          <NumberField label="行高" value={selected.lineHeight} min={0.5} max={10} step={0.1} fallback={1.4} onChange={(value) => patch({ lineHeight: value ?? 1.4 })} />
+          <div className="design-field-grid">
+            <NumberField label="行高" value={selected.lineHeight} min={0.5} max={10} step={0.1} fallback={1.4} onChange={(value) => patch({ lineHeight: value ?? 1.4 })} />
+            <NumberField label="字距" value={selected.letterSpacing} min={-10} max={20} step={0.1} fallback={0} onChange={(value) => patch({ letterSpacing: value === undefined || value === 0 ? undefined : value })} />
+          </div>
         </>
       )}
       {selected.type === "image" && (

@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { designNodeStyle, designNodeStyleObject, exportDesignHtml } from "../../../shared/design-export.js";
 import type { DesignDoc, DesignNode, DesignNodePatch } from "../../../shared/design-schema.js";
+import { DESIGN_DEFAULT_FONT_FAMILY } from "../../../shared/design-schema.js";
 import { absoluteRects, findDropFrameAt, snapDelta, type NodeRect, type SnapGuide } from "./design-geometry.js";
 
 /**
@@ -365,6 +366,8 @@ export function DesignCanvas({ doc, zoom, pan, onPanChange, onZoomChange, select
               fontSize: (editingNode.fontSize ?? 14),
               fontWeight: editingNode.fontWeight ?? 400,
               color: editingNode.color,
+              fontFamily: editingNode.fontFamily ?? DESIGN_DEFAULT_FONT_FAMILY,
+              letterSpacing: editingNode.letterSpacing === undefined ? undefined : `${editingNode.letterSpacing}px`,
               textAlign: editingNode.align ?? "left",
               lineHeight: editingNode.lineHeight ?? 1.2
             }}

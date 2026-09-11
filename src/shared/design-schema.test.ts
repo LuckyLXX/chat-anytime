@@ -8,6 +8,7 @@ import {
   indexNodes,
   makeNodeId,
   MAX_DESIGN_NODES,
+  MAX_FONT_FAMILY_CHARS,
   normalizeDesignDoc,
   normalizeDesignNode,
   sanitizeDesignName,
@@ -427,5 +428,55 @@ describe("applyDesignOps resize / patch 字段守卫", () => {
     // 合法字段不受影响。
     const good = applyDesignOps(doc, [{ op: "create", node: { type: "rect", id: "ok1", x: 0, y: 0, w: 10, h: 10, fill: "rgba(18,24,48,0.62)", opacity: 1 } }]);
     expect(good.ok).toBe(true);
+  });
+});
+
+describe("文本字体字段（fontFamily / letterSpacing）", () => {
+  it("合法值保留、超长截断、越界 clamp", () => {
+    const node = normalizeDesignNode({ type: "text", id: "t", text: "hi", fontFamily: "Inter, system-ui, sans-serif", letterSpacing: -0.5 }, { count: 0 });
+    expect(node?.fontFamily).toBe("Inter, system-ui, sans-serif");
+    expect(node?.letterSpacing).toBe(-0.5);
+    const long = normalizeDesignNode({ type: "text", id: "t", text: "hi", fontFamily: "a".repeat(500) }, { count: 0 });
+    expect(long?.fontFamily!.length).toBe(MAX_FONT_FAMILY_CHARS);
+    const clamped = normalizeDesignNode({ type: "text", id: "t", text: "hi", letterSpacing: 999 }, { count: 0 });
+    expect(clamped?.letterSpacing).toBe(20);
+    const negative = normalizeDesignNode({ type: "text", id: "t", text: "hi", letterSpacing: -99 }, { count: 0 });
+    expect(negative?.letterSpacing).toBe(-10);
+    // 0 等价于未设置（不写进节点，避免冗余字段）。
+    expect(normalizeDesignNode({ type: "text", id: "t", text: "hi", letterSpacing: 0 }, { count: 0 })?.letterSpacing).toBeUndefined();
+    // 空白字符串视为未设置。
+    expect(normalizeDesignNode({ type: "text", id: "t", text: "hi", fontFamily: "   " }, { count: 0 })?.fontFamily).toBeUndefined();
+  });
+
+  it("非 text 节点不吸收字体字段", () => {
+    const node = normalizeDesignNode({ type: "rect", id: "r", x: 0, y: 0, w: 10, h: 10, fontFamily: "X", letterSpacing: 2 }, { count: 0 });
+    expect(node?.fontFamily).toBeUndefined();
+    expect(node?.letterSpacing).toBeUndefined();
+  });
+
+  it("PATCHABLE_KEYS 接受新字段（否则 AI 传它们会整批报错）", () => {
+    const doc = createDesignDoc("字体", 800, 600);
+    const seeded = applyDesignOps(doc, [{ op: "create", node: { type: "text", id: "t1", text: "标题", x: 0, y: 0, w: 80, h: 24 } }]);
+    expect(seeded.ok).toBe(true);
+    if (!seeded.ok) return;
+    const patched = applyDesignOps(seeded.doc, [{ op: "update", id: "t1", patch: { fontFamily: "Georgia, serif", letterSpacing: 1.5 } }]);
+    expect(patched.ok).toBe(true);
+    if (!patched.ok) return;
+    const node = findNode(patched.doc.nodes, "t1")!.node;
+    expect(node.fontFamily).toBe("Georgia, serif");
+    expect(node.letterSpacing).toBe(1.5);
+    // 清除：fontFamily 空串删除，letterSpacing 0 删除。
+    const cleared = applyDesignOps(patched.doc, [{ op: "update", id: "t1", patch: { fontFamily: "", letterSpacing: 0 } }]);
+    expect(cleared.ok).toBe(true);
+    if (!cleared.ok) return;
+    const after = findNode(cleared.doc.nodes, "t1")!.node;
+    expect(after.fontFamily).toBeUndefined();
+    expect(after.letterSpacing).toBeUndefined();
+  });
+
+  it("summarizeNode 带上字体字段（发给 AI 的摘要不丢样式）", () => {
+    const summary = summarizeNode({ type: "text", id: "t", x: 0, y: 0, w: 10, h: 10, text: "hi", fontFamily: "Inter", letterSpacing: -0.2 });
+    expect(summary).toContain('"fontFamily":"Inter"');
+    expect(summary).toContain('"letterSpacing":-0.2');
   });
 });

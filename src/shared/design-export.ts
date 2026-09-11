@@ -8,7 +8,7 @@
  * 用户粘贴值，属不可信输入——`"` 会闭合 HTML 属性、`</style>` 会断裂样式块）。
  */
 
-import type { DesignDoc, DesignLayout, DesignNode } from "./design-schema.js";
+import { DESIGN_DEFAULT_FONT_FAMILY, type DesignDoc, type DesignLayout, type DesignNode } from "./design-schema.js";
 
 function escapeHtml(text: string): string {
   return text
@@ -66,8 +66,12 @@ export function designNodeDeclarations(node: DesignNode, inFlexParent = false): 
   if (node.opacity !== undefined && node.opacity < 1) decls.push(["opacity", String(node.opacity)]);
   if (node.shadow) decls.push(["box-shadow", node.shadow]);
   if (node.type === "text") {
+    // font-family 一律显式发出（未声明时用默认栈）：曾经导出 HTML 里一个 font-family
+    // 都没有，中文稿落到浏览器默认衬线字体；画布靠 styles.css 继承看着正常，导出即崩。
+    decls.push(["font-family", node.fontFamily ?? DESIGN_DEFAULT_FONT_FAMILY]);
     decls.push(["font-size", `${node.fontSize ?? 14}px`]);
     decls.push(["font-weight", String(node.fontWeight ?? 400)]);
+    if (node.letterSpacing) decls.push(["letter-spacing", `${node.letterSpacing}px`]);
     if (node.color) decls.push(["color", node.color]);
     if (node.lineHeight) decls.push(["line-height", String(node.lineHeight)]);
     decls.push(["text-align", node.align ?? "left"]);
@@ -153,7 +157,7 @@ export function exportDesignHtml(doc: DesignDoc): string {
 <title>${escapeHtml(doc.name)}</title>
 <style>
   html, body { margin: 0; padding: 0; }
-  body { background: ${canvas.background ? escapeHtml(canvas.background) : "transparent"}; }
+  body { font-family: ${escapeHtml(DESIGN_DEFAULT_FONT_FAMILY)}; background: ${canvas.background ? escapeHtml(canvas.background) : "transparent"}; }
   ${canvasCss}
   .pi-design-canvas img { display: block; }
 </style>
