@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { DesignDoc } from "../shared/design-schema.js";
@@ -62,9 +62,9 @@ async function harness(options: { enabled?: boolean; renderSnapshot?: DesignTool
 }
 
 describe("buildDesignTools", () => {
-  it("注册 6 个工具", async () => {
+  it("注册 8 个工具", async () => {
     const { tools } = await harness();
-    expect(tools.map((tool) => tool.name)).toEqual(["design_list", "design_create", "design_open", "design_read", "design_update", "design_export"]);
+    expect(tools.map((tool) => tool.name)).toEqual(["design_list", "design_create", "design_guides", "design_set_guide", "design_open", "design_read", "design_update", "design_export"]);
   });
 
   it("总开关关闭时所有工具拒绝且不触碰状态", async () => {
@@ -251,6 +251,89 @@ describe("buildDesignTools", () => {
     expect(text).toContain("off-scale-font-size");
     expect(text).toContain('"radius":12');
     expect(text).toContain('"fontSize":18');
+  });
+
+  it("design_create 带 brief 注入设计规格并把指南写进文档（后续质量门用它的标尺）", async () => {
+    const { tool, current } = await harness();
+    const result = await execute(tool("design_create"), { name: "咖啡首页", brief: "咖啡外卖 App 首页", width: 390, height: 844 });
+    const text = result.content[0]!.text;
+    expect(text).toContain("设计规格");
+    expect(text).toContain("warm-food-mobile-light");
+    expect(text).toContain("间距标尺");
+    expect(text).toContain("圆角标尺");
+    expect(current()!.guide).toBe("warm-food-mobile-light");
+    expect(result.details).toMatchObject({ guide: "warm-food-mobile-light" });
+  });
+
+  it("design_create 未命中时给索引导航（不内联 63 行全文）", async () => {
+    const { tool, current } = await harness();
+    const result = await execute(tool("design_create"), { name: "qwertyuiop" });
+    const text = result.content[0]!.text;
+    expect(text).toContain("未按需求命中风格指南");
+    expect(text).toContain("design_guides");
+    expect(current()!.guide).toBeUndefined();
+  });
+
+  it("design_create 的 guide 参数显式指定（并拒绝不存在的指南名）", async () => {
+    const { tool, current } = await harness();
+    const result = await execute(tool("design_create"), { name: "指定风格", guide: "ai-product-dark" });
+    expect(result.content[0]!.text).toContain("已按 guide 参数载入");
+    expect(current()!.guide).toBe("ai-product-dark");
+    await expect(execute(tool("design_create"), { name: "错名", guide: "no-such-guide" })).rejects.toThrow("风格指南不存在");
+  });
+
+  it("design_guides 列表/筛选/推荐", async () => {
+    const { tool } = await harness();
+    const all = await execute(tool("design_guides"), {});
+    expect(all.content[0]!.text).toContain("风格指南");
+    expect(all.details).toMatchObject({ count: 63 });
+    const mobile = await execute(tool("design_guides"), { platform: "mobile" });
+    expect(mobile.details).toMatchObject({ count: 15 });
+    const dark = await execute(tool("design_guides"), { tags: ["dark-mode", "mobile"] });
+    expect((dark.details as { count: number }).count).toBeGreaterThan(0);
+    expect((dark.details as { count: number }).count).toBeLessThan(15);
+    const recommended = await execute(tool("design_guides"), { brief: "咖啡外卖 App" });
+    expect(recommended.content[0]!.text).toContain("★");
+    await expect(execute(tool("design_guides"), { tags: ["no-such-tag"] })).rejects.toThrow("没有匹配的指南");
+  });
+
+  it("design_set_guide 换风格 / 解除绑定，落盘并推进 revision", async () => {
+    const { tool, current, workspace } = await harness();
+    await execute(tool("design_create"), { name: "换风格" });
+    const set = await execute(tool("design_set_guide"), { name: "dashboard-analytics-dark" });
+    expect(set.content[0]!.text).toContain("dashboard-analytics-dark");
+    expect(current()!.guide).toBe("dashboard-analytics-dark");
+    expect(current()!.revision).toBe(2);
+    // 落盘保留 guide（跨会话保持）。
+    const onDisk = JSON.parse(await readFile(designFilePath(workspace, "换风格"), "utf8")) as { guide?: string };
+    expect(onDisk.guide).toBe("dashboard-analytics-dark");
+    const cleared = await execute(tool("design_set_guide"), { name: "none" });
+    expect(cleared.content[0]!.text).toContain("已解除");
+    expect(current()!.guide).toBeUndefined();
+    await expect(execute(tool("design_set_guide"), { name: "nope" })).rejects.toThrow("风格指南不存在");
+  });
+
+  it("design_update 质量门用文档绑定的指南标尺（非默认标尺）", async () => {
+    const { tool } = await harness();
+    // ai-product-dark 的圆角档位是 6/8/12/16/20/9999——14 不在其上，报；
+    // 而默认标尺里也没有 14，所以真正的证据是回执里的「质量门标尺」行与修复值。
+    await execute(tool("design_create"), { name: "标尺绑定", guide: "ai-product-dark" });
+    const result = await execute(tool("design_update"), {
+      ops: [{ op: "create", node: { type: "rect", id: "card", name: "卡", x: 0, y: 0, w: 200, h: 100, radius: 14 } }]
+    });
+    const text = result.content[0]!.text;
+    expect(text).toContain("质量门标尺：文档已绑定风格指南「ai-product-dark」");
+    expect(text).toContain("圆角 6/8/12/16/20/9999");
+    expect(text).toContain("off-scale-radius");
+    // 吸附到该指南标尺的最近档（12），而不是默认标尺。
+    expect(text).toContain('"radius":12');
+  });
+
+  it("design_list 提示当前文档的风格指南绑定", async () => {
+    const { tool } = await harness();
+    await execute(tool("design_create"), { name: "带风格", guide: "ai-product-dark" });
+    const listed = await execute(tool("design_list"), {});
+    expect(listed.content[0]!.text).toContain("ai-product-dark");
   });
 
   it("design_update 带质量门：问题诊断 + 可套用的修复 ops 回执 + resize 生效", async () => {

@@ -72,6 +72,9 @@ export interface DesignDoc {
   name: string;
   canvas: DesignCanvasInfo;
   nodes: DesignNode[];
+  /** 已绑定的风格指南名（可选；旧文件无此字段照常加载）。
+   *  绑定时质量门用该指南自带的间距/圆角/字号标尺，未绑定则用默认标尺。 */
+  guide?: string;
   /** 单调递增的文档版本号；由 design-store 写入时推进，applyDesignOps 不触碰。 */
   revision: number;
 }
@@ -279,6 +282,9 @@ export function normalizeDesignNode(raw: unknown, budget: { count: number }, dep
   return node;
 }
 
+/** 风格指南名上限（仅作字符串长度防呆；合法性由 runtime-design 查目录校验）。 */
+export const MAX_GUIDE_NAME_CHARS = 120;
+
 /** 文档名净化：只留文件名安全字符，截断 80；空输入回落 fallback。 */
 export function sanitizeDesignName(value: unknown, fallback = "未命名设计"): string {
   const name = typeof value === "string" ? value.replace(INVALID_FILENAME_CHARS, "-").replace(/\s+/gu, " ").trim().slice(0, 80) : "";
@@ -313,12 +319,14 @@ export function normalizeDesignDoc(raw: unknown): DesignDoc | undefined {
     }
   }
   const revision = Math.round(finiteOr(source.revision, 1));
+  const guide = boundedString(typeof source.guide === "string" ? source.guide.trim() : source.guide, MAX_GUIDE_NAME_CHARS);
   return {
     version: 1,
     id: typeof source.id === "string" && source.id.trim() ? source.id.trim().slice(0, 64) : randomId(),
     name: sanitizeDesignName(source.name),
     canvas: canvasOf(source.canvas),
     nodes,
+    ...(guide ? { guide } : {}),
     revision: clamp(revision, 1, Number.MAX_SAFE_INTEGER)
   };
 }

@@ -18,6 +18,17 @@ import { Type } from "typebox";
 import { resolve } from "node:path";
 import { applyDesignOps, countNodes, createDesignDoc, findNode, makeNodeId, sanitizeDesignName, type DesignDoc, type DesignNode, type DesignOp } from "../shared/design-schema.js";
 import { inspectDesignQuality, summarizeDesignLayout } from "../shared/design-quality.js";
+import {
+  buildGuideInjection,
+  filterGuideIndex,
+  formatGuideIndexLine,
+  getStyleGuide,
+  listGuideIndex,
+  platformForWidth,
+  selectStyleGuide,
+  type DesignPlatform,
+  type SelectedStyleGuide
+} from "../shared/design-guides.js";
 import { exportBounds, exportDesignHtml } from "../shared/design-export.js";
 import type { DesignSnapshotRequest, DesignSnapshotResult } from "../shared/protocol.js";
 import { designFilePath, exportDesignFile, listDesigns, readDesign, writeExportFile, DESIGN_FILE_SUFFIX } from "./design-store.js";
@@ -25,6 +36,32 @@ import { designFilePath, exportDesignFile, listDesigns, readDesign, writeExportF
 /** 单次 design_update 的 ops 数上限：逼模型分批（先第一屏/一个区域），超限的批
  *  失败回滚也更可控（借鉴 dsh-openpencil 的两批视口预算）。 */
 const MAX_OPS_PER_UPDATE = 64;
+
+/**
+ * 设计知识注入（风格指南三层供给的第 1、2 层）：
+ *  1. `design_create` 带 brief → 确定性匹配一套指南，完整规格（调色板/字体/字号/
+ *     间距/圆角标尺）骑在回执尾部；同时把指南名写进文档（guide 字段），后续
+ *     design_update 的质量门用该指南的标尺。
+ *  2. `design_guides` 工具 → 列 63 套索引，模型自己按 brief/tags/platform 挑。
+ *  3. 标尺兜底在 design-tokens（无论命中与否，稿子都要落在标尺上）。
+ *
+ * 缓存纪律：全部走工具结果尾部，description/schema 保持字节稳定。
+ */
+
+/** 未命中时的索引导航提示（不内联 63 行全文，只给前若干条 + 查看方式）。 */
+const GUIDE_FALLBACK_INDEX_LINES = 12;
+
+function resolveGuide(doc: DesignDoc): SelectedStyleGuide | undefined {
+  // 文档绑定的指南名可能对应已被语料下线的条目（`getStyleGuide` 返回 undefined 时
+  // 静默回落默认标尺，不报错——旧文档在新版本里必须照样能打开）。
+  if (!doc.guide) return undefined;
+  return selectStyleGuide("", platformForWidth(doc.canvas.width), doc.guide);
+}
+
+function guideIndexText(platform?: DesignPlatform, tags?: readonly string[]): string {
+  const entries = filterGuideIndex(listGuideIndex(platform), tags ?? []);
+  return entries.map((entry) => formatGuideIndexLine(entry)).join("\n");
+}
 
 export interface DesignToolDeps {
   /** 总开关，实时读（settings.design?.enabled !== false），关闭时工具保留注册。 */
@@ -146,29 +183,37 @@ export function buildDesignTools(deps: DesignToolDeps): ToolDefinition[] {
         const summaries = listDesigns(workspace);
         const current = deps.getDoc();
         const lines = summaries.map((summary) => `- ${summary.name}（${summary.width}×${summary.height}，${summary.nodeCount} 节点）`);
-        const currentLine = current ? `当前会话已打开：${formatDocSummary(current)}` : "当前会话未打开文档（design_update 前需先 design_open 或 design_create）。";
+        const guideHint = current?.guide ? `风格指南：${current.guide}（design_set_guide 可换）` : "未绑定风格指南（design_create 带 brief/guide 可自动载入；design_guides 查看目录）";
+        const currentLine = current ? `当前会话已打开：${formatDocSummary(current)}；${guideHint}` : `当前会话未打开文档（design_update 前需先 design_open 或 design_create）。${guideHint}`;
         // 一个文档 = 一块画布：发现多文档时补一条防拆分提示（跨文档合并没有工具路径，只能重建）。
         const multiDocHint = summaries.length > 1
           ? "\n提示：一个文档 = 一块画布；整套原型请放进同一个文档（一屏 = 一个顶层命名 frame 并排，画布放不下先 resize）。已拆成多文档的，建议逐屏重建合并，或分别导出 HTML 交付。"
           : "";
-        return { content: [{ type: "text" as const, text: summaries.length > 0 ? `工作区设计文档：\n${lines.join("\n")}\n${currentLine}${multiDocHint}` : `工作区还没有设计文档。${currentLine}` }], details: { count: summaries.length } };
+        return { content: [{ type: "text" as const, text: summaries.length > 0 ? `工作区设计文档：\n${lines.join("\n")}\n${currentLine}${multiDocHint}` : `工作区还没有设计文档。${currentLine}${multiDocHint}` }], details: { count: summaries.length } };
       }
     }),
     defineTool({
       name: "design_create",
       label: "新建设计文档",
-      description: "新建设计文档并绑定为当前文档（同名已存在则直接打开），随后用 design_update 添加节点搭建页面。",
-      promptSnippet: "design_create: 新建并绑定设计文档",
+      description: "新建设计文档并绑定为当前文档（同名已存在则直接打开），随后用 design_update 添加节点搭建页面。带 brief（需求自然语言）或 guide（指南名，见 design_guides）时回执会附该风格的结构化设计规格（调色板/字体/字号/间距/圆角标尺），照着搭才有设计感。",
+      promptSnippet: "design_create: 新建并绑定设计文档（可带 brief/guide 获取风格规格）",
       parameters: Type.Object({
         name: Type.String({ description: "文档名（同时是文件名，如「登录页」）" }),
-        width: Type.Optional(Type.Integer({ description: "画布宽 px，缺省 1440" })),
-        height: Type.Optional(Type.Integer({ description: "画布高 px，缺省 1024" }))
+        width: Type.Optional(Type.Integer({ description: "画布宽 px，缺省 1440；≤600 视为移动端（决定风格匹配的平台）" })),
+        height: Type.Optional(Type.Integer({ description: "画布高 px，缺省 1024" })),
+        brief: Type.Optional(Type.String({ description: "需求自然语言（如「咖啡外卖 App 首页」「暗色数据看板」）：用于确定性匹配风格指南并把设计规格写进回执。缺省用 name" })),
+        guide: Type.Optional(Type.String({ description: "显式指定风格指南名（用 design_guides 查看全部 63 套）；给了就用它并跳过关键词匹配" }))
       }),
       execute: async (_id, params) => {
         checkEnabled(deps);
         const workspace = requireWorkspace(deps);
         const name = sanitizeDesignName(params?.name);
         if (!name) throw new Error("请提供有效的文档名");
+        const brief = typeof params?.brief === "string" && params.brief.trim() ? params.brief.trim() : name;
+        const explicitGuide = typeof params?.guide === "string" ? params.guide.trim() : "";
+        if (explicitGuide && !getStyleGuide(explicitGuide)) {
+          throw new Error(`风格指南不存在：${explicitGuide}（用 design_guides 查看可用指南名）`);
+        }
         const filePath = designFilePath(workspace, name);
         const existing = readDesign(filePath);
         if (existing) {
@@ -178,10 +223,74 @@ export function buildDesignTools(deps: DesignToolDeps): ToolDefinition[] {
         }
         const width = typeof params?.width === "number" ? params.width : 1440;
         const height = typeof params?.height === "number" ? params.height : 1024;
-        const doc = createDesignDoc(name, width, height);
+        const base = createDesignDoc(name, width, height);
+        const platform = platformForWidth(base.canvas.width);
+        const selected = selectStyleGuide(brief, platform, explicitGuide || undefined);
+        const doc: DesignDoc = selected ? { ...base, guide: selected.name } : base;
         const fileName = deps.persistDoc(doc, undefined);
         deps.bindDoc(doc, fileName);
-        return { content: [{ type: "text" as const, text: `已创建并打开「${name}」（${doc.canvas.width}×${doc.canvas.height}，id ${doc.id}）。下一步：用 design_update 搭建第一个屏幕。${guidanceOnce()}${CANVAS_HINT}` }], details: { docId: doc.id, name, existed: false } };
+        // 第 1 层：命中就下发完整设计规格；未命中给索引导航（第 2 层入口）。
+        const knowledgeText = selected
+          ? `\n\n${buildGuideInjection(selected, explicitGuide ? "explicit" : "brief")}`
+          : `\n\n未按需求命中风格指南（可用关键词不够具体）：先用 design_guides 查看 63 套目录选一套，再用 design_create 的 guide 参数指定（同名文档已建立，直接重发带 guide 的调用即可重新载入规格）。目录节选（名称（平台｜标签）：摘要）：\n${listGuideIndex().slice(0, GUIDE_FALLBACK_INDEX_LINES).map((entry) => formatGuideIndexLine(entry)).join("\n")}\n（共 ${listGuideIndex().length} 套；完整列表与筛选用 design_guides）`;
+        return { content: [{ type: "text" as const, text: `已创建并打开「${name}」（${doc.canvas.width}×${doc.canvas.height}，id ${doc.id}）。下一步：用 design_update 搭建第一个屏幕。${knowledgeText}${guidanceOnce()}${CANVAS_HINT}` }], details: { docId: doc.id, name, existed: false, ...(selected ? { guide: selected.name } : {}) } };
+      }
+    }),
+    defineTool({
+      name: "design_guides",
+      label: "查看风格指南",
+      description: "列出内置风格指南（63 套）的 name/平台/标签/一句话摘要；可按 brief 关键词、tags 与 platform 筛选。选中后用 design_create 的 guide 参数载入该风格的完整设计规格（调色板/字体/字号/间距/圆角标尺），或用 design_set_guide 给已打开的文档换风格。",
+      promptSnippet: "design_guides: 列出/筛选风格指南目录",
+      parameters: Type.Object({
+        brief: Type.Optional(Type.String({ description: "需求自然语言：命中的那套会在列表里标 ★ 推荐" })),
+        tags: Type.Optional(Type.Array(Type.String(), { description: "标签过滤（如 ['dark-mode','mobile']，取交集）" })),
+        platform: Type.Optional(Type.Union([Type.Literal("web"), Type.Literal("mobile")], { description: "平台过滤（缺省全部）" }))
+      }),
+      execute: async (_id, params) => {
+        checkEnabled(deps);
+        const platform = params?.platform === "mobile" ? "mobile" as const : params?.platform === "web" ? "web" as const : undefined;
+        const tags = Array.isArray(params?.tags) ? params.tags.filter((tag): tag is string => typeof tag === "string") : [];
+        const brief = typeof params?.brief === "string" ? params.brief : "";
+        const entries = filterGuideIndex(listGuideIndex(), tags).filter((entry) => !platform || (platform === "mobile" ? entry.platform === "mobile" : entry.platform === "webapp"));
+        if (entries.length === 0) throw new Error(`没有匹配的指南（platform=${platform ?? "全部"}，tags=${tags.join("/") || "无"}）；试试放宽条件或去掉 tags。`);
+        const recommended = brief.trim() ? selectStyleGuide(brief.trim(), platform ?? platformForWidth(undefined))?.name : undefined;
+        const head = `风格指南 ${entries.length} 套${platform ? `（platform=${platform}）` : ""}${tags.length > 0 ? `（tags=${tags.join("/")}）` : ""}${recommended ? `；★ 按 brief 推荐「${recommended}」` : ""}：`;
+        const current = deps.getDoc()?.guide;
+        const currentLine = current ? `\n当前文档绑定：「${current}」（换风格用 design_set_guide，或直接新建文档）。` : "";
+        const usage = `\n选定后：design_create 带 guide=<名> 新建，或 design_set_guide 给当前文档换上（质量门随即改用该指南的标尺）。`;
+        return {
+          content: [{ type: "text" as const, text: `${head}\n${entries.map((entry) => formatGuideIndexLine(entry, entry.name === recommended)).join("\n")}${currentLine}${usage}` }],
+          details: { count: entries.length, ...(recommended ? { recommended } : {}), ...(current ? { current } : {}) }
+        };
+      }
+    }),
+    defineTool({
+      name: "design_set_guide",
+      label: "切换风格指南",
+      description: "给当前文档绑定/更换风格指南（写入文档的 guide 字段，跨会话与重启保持）。绑定后 design_update 的质量门改用该指南自带的间距/圆角/字号标尺。回执附该风格的完整设计规格。",
+      promptSnippet: "design_set_guide: 切换文档风格指南",
+      parameters: Type.Object({
+        name: Type.String({ description: "风格指南名（design_guides 列出）；传空串或 \"none\" 解除绑定回到默认标尺" })
+      }),
+      execute: async (_id, params) => {
+        checkEnabled(deps);
+        const raw = typeof params?.name === "string" ? params.name.trim() : "";
+        const doc = requireDoc(deps);
+        const clearing = raw === "" || raw.toLowerCase() === "none";
+        if (!clearing && !getStyleGuide(raw)) throw new Error(`风格指南不存在：${raw}（用 design_guides 查看可用指南名）`);
+        const next: DesignDoc = { ...doc, revision: doc.revision + 1 };
+        if (clearing) delete next.guide;
+        else next.guide = raw;
+        const fileName = deps.persistDoc(next, deps.getDocFileName());
+        const details: Record<string, unknown> = { revision: next.revision, fileName, guide: clearing ? "" : raw };
+        if (clearing) {
+          return { content: [{ type: "text" as const, text: `已解除「${next.name}」的风格指南绑定（revision ${next.revision}），质量门回到默认标尺。` }], details };
+        }
+        const selected = selectStyleGuide("", platformForWidth(next.canvas.width), raw)!;
+        return {
+          content: [{ type: "text" as const, text: `已给「${next.name}」绑定风格指南（revision ${next.revision}）。\n\n${buildGuideInjection(selected, "explicit")}` }],
+          details
+        };
       }
     }),
     defineTool({
@@ -266,8 +375,10 @@ export function buildDesignTools(deps: DesignToolDeps): ToolDefinition[] {
         if (!applied.ok) throw new Error(`${applied.error}（整批未应用；可 design_read 后修正重试）`);
         const next: DesignDoc = { ...applied.doc, revision: applied.doc.revision + 1 };
         const fileName = deps.persistDoc(next, deps.getDocFileName());
-        // 质量门：结构/对比度/出界的确定性检查；修复建议产成可直接套用的 DesignOp[]。
-        const quality = inspectDesignQuality(next);
+        // 质量门：结构/对比度/出界的确定性检查 + 审美标尺；修复建议产成可直接套用的 DesignOp[]。
+        // 文档绑定了风格指南时用该指南自带的标尺（它比默认标尺更贴该风格）；未绑定用默认。
+        const bound = resolveGuide(next);
+        const quality = inspectDesignQuality(next, bound ? { tokens: bound.tokens } : {});
         const mapText = idMap.length > 0 ? `\n新建节点 id：${idMap.map((entry) => `${entry.name}→${entry.id}`).join("、")}` : "";
         const qualityText = quality.diagnostics.length > 0
           ? `\n质量检查 ${quality.diagnostics.length} 项${quality.omitted > 0 ? `（另 ${quality.omitted} 项省略）` : ""}：\n${quality.diagnostics.slice(0, 8).map((line) => `- ${line}`).join("\n")}`
@@ -276,9 +387,10 @@ export function buildDesignTools(deps: DesignToolDeps): ToolDefinition[] {
           ? `\n修复 ops（下一条 design_update 的 ops 参数原样传入）：${JSON.stringify(quality.repairTargets.slice(0, 24))}${quality.repairTargets.length > 24 ? `（共 ${quality.repairTargets.length} 条，先套用这 24 条，剩余数量已按同一标尺吸附，可自行改完）` : ""}`
           : "";
         const nextText = quality.repairTargets.length > 0 ? "先套用上述修复 ops，再继续新内容" : "继续搭建其余屏幕/区域";
+        const scaleText = bound ? `\n质量门标尺：文档已绑定风格指南「${bound.name}」（间距 ${bound.tokens.spacing.join("/")}；圆角 ${bound.tokens.radius.join("/")}；字号 ${bound.tokens.fontSize.join("/")}）。新建/修改节点必须落在这些档位上。` : "";
         return {
-          content: [{ type: "text" as const, text: `已应用 ${ops.length} 项操作到「${next.name}」（revision ${next.revision}）。${mapText}${qualityText}${repairText}\n下一步：${nextText}，无需向用户转述本回执。${guidanceOnce()}${CANVAS_HINT}` }],
-          details: { applied: ops.length, revision: next.revision, fileName, ...(idMap.length > 0 ? { newIds: idMap } : {}), ...(quality.diagnostics.length > 0 ? { quality: { diagnostics: quality.diagnostics, repairCount: quality.repairTargets.length, suggestCanvas: quality.suggestCanvas } } : {}) }
+          content: [{ type: "text" as const, text: `已应用 ${ops.length} 项操作到「${next.name}」（revision ${next.revision}）。${mapText}${scaleText}${qualityText}${repairText}\n下一步：${nextText}，无需向用户转述本回执。${guidanceOnce()}${CANVAS_HINT}` }],
+          details: { applied: ops.length, revision: next.revision, fileName, ...(idMap.length > 0 ? { newIds: idMap } : {}), ...(bound ? { guide: bound.name } : {}), ...(quality.diagnostics.length > 0 ? { quality: { diagnostics: quality.diagnostics, repairCount: quality.repairTargets.length, suggestCanvas: quality.suggestCanvas } } : {}) }
         };
       }
     }),
