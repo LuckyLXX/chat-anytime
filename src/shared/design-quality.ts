@@ -8,15 +8,57 @@
  * 本文件被 utility（工具回执）与 renderer（可共享）共用，零 node API 依赖。
  */
 
-import type { DesignCanvasInfo, DesignDoc, DesignLayout, DesignNode, DesignOp } from "./design-schema.js";
+import { findNode, type DesignCanvasInfo, type DesignDoc, type DesignLayout, type DesignNode, type DesignOp } from "./design-schema.js";
+import {
+  DEFAULT_DESIGN_TOKENS,
+  formatScale,
+  nearestRadius,
+  nearestScaleValue,
+  radiusOnScale,
+  snapToScale,
+  tokensFromScales,
+  type DesignTokens
+} from "./design-tokens.js";
 
 /** 诊断/修复目标上限（控制工具回执体积）。 */
 const MAX_DIAGNOSTICS = 12;
 const MAX_RULE_DIAGNOSTICS = 4;
 const MAX_REPAIR_TARGETS = 32;
+/** 审美标尺规则的诊断配额：单独特算，不占结构规则的 12 条额度。
+ *  审美规则已聚合（每规则一条），所以 3 条就是「圆角/间距/字号各一条」的满额。
+ *  两侧各自限额是为了避免结构问题（溢出/对比度）多到 12 条时把审美提示挤光——
+ *  那恰好就回到了「只有防错、没有审美」的老样子。 */
+const MAX_AESTHETIC_DIAGNOSTICS = 3;
 const MAX_MESSAGE_CHARS = 160;
 /** 建议画布比内容包围盒多留的边距。 */
 const CANVAS_MARGIN = 80;
+
+/** 审美标尺规则的修复 op 总上限（跨三条规则共享；与结构规则的 MAX_REPAIR_TARGETS 分开计数，
+ *  新增审美规则不得挤占「容器装不下 / 内容出界」这类必须修的修复位）。
+ *  分配方式是按规则轮转（圆角→字号→间距→圆角…），保证回执里可见的那一批（设计_update 只展示
+ *  前 12 条）三条规则都覆盖得到，而不是被数量最多的圆角占满。 */
+const MAX_AESTHETIC_REPAIR_TARGETS = 24;
+/** 聚合诊断里列出的示例数（超出的用「等」收尾）。 */
+const MAX_SCALE_EXAMPLES = 3;
+/** 至少这么多子节点才当作「一叠」评间距节奏（两两以上才有内边距可谈）。 */
+const MIN_STACK_SIZE = 2;
+
+export interface DesignQualityOptions {
+  /**
+   * 审美标尺：间距/圆角/字号白名单。缺省用 {@link DEFAULT_DESIGN_TOKENS}；
+   * 文档绑定了风格指南时由调用方传该指南的标尺（指南可自带更贴合自身的档位）。
+   */
+  tokens?: Partial<DesignTokens>;
+}
+
+/** 一条审美标尺问题的聚合结果。 */
+export interface DesignScaleIssue {
+  rule: "off-scale-radius" | "off-scale-spacing" | "off-scale-font-size";
+  /** 聚合后的一条诊断文本（不是逐节点刷屏）。 */
+  message: string;
+  /** 可直接套用的修复 ops（已按目标节点去重、已限量）。 */
+  repairs: DesignOp[];
+}
 
 export interface DesignQualityReport {
   /** 人类可读诊断（已截断、已限量）。 */
@@ -156,7 +198,7 @@ function describeNode(node: DesignNode): string {
  * 确定性质量检查。返回的诊断与修复目标都已限量；repairTargets 是合法的
  * DesignOp[]（update/resize），模型原样传入 design_update 即可应用。
  */
-export function inspectDesignQuality(doc: DesignDoc): DesignQualityReport {
+export function inspectDesignQuality(doc: DesignDoc, options: DesignQualityOptions = {}): DesignQualityReport {
   const diagnostics: string[] = [];
   const repairTargets: DesignOp[] = [];
   const ruleCounts = new Map<string, number>();
@@ -164,11 +206,19 @@ export function inspectDesignQuality(doc: DesignDoc): DesignQualityReport {
   let omitted = 0;
 
   const pushDiagnostic = (rule: string, message: string, repairable: boolean): void => {
+    // 审美规则走独立配额（见 MAX_AESTHETIC_DIAGNOSTICS）。
+    const reserved = rule.startsWith("off-scale-");
     if ((ruleCounts.get(rule) ?? 0) >= MAX_RULE_DIAGNOSTICS) {
       omitted += 1;
       return;
     }
-    if (diagnostics.length >= MAX_DIAGNOSTICS) {
+    if (reserved) {
+      const reservedUsed = [...ruleCounts.keys()].filter((key) => key.startsWith("off-scale-")).length;
+      if (reservedUsed >= MAX_AESTHETIC_DIAGNOSTICS) {
+        omitted += 1;
+        return;
+      }
+    } else if (diagnostics.length >= MAX_DIAGNOSTICS) {
       omitted += 1;
       return;
     }
@@ -312,6 +362,17 @@ export function inspectDesignQuality(doc: DesignDoc): DesignQualityReport {
     pushDiagnostic("out-of-canvas", `内容超出画布（${describeNode(overflowNode)} 最远到 ${Math.ceil(maxX)}×${Math.ceil(maxY)}，画布 ${doc.canvas.width}×${doc.canvas.height}）`, true);
   }
 
+  // —— 5–7. 审美标尺（间距/圆角/字号）：聚合诊断 + 吸附修复 ——
+  // 结构规则跑完之后才追加，且修复预算（MAX_AESTHETIC_REPAIR_TARGETS）独立于结构修复：
+  // 新增审美规则绝不挤占「容器装不下 / 内容出界」这类必须修的修复位。
+  for (const issue of inspectDesignScale(doc, options)) {
+    pushDiagnostic(issue.rule, issue.message, issue.repairs.length > 0);
+    for (const repair of issue.repairs) {
+      if (repairTargets.length >= MAX_REPAIR_TARGETS + MAX_AESTHETIC_REPAIR_TARGETS) break;
+      repairTargets.push(repair);
+    }
+  }
+
   return {
     diagnostics,
     repairTargets,
@@ -319,6 +380,126 @@ export function inspectDesignQuality(doc: DesignDoc): DesignQualityReport {
     omitted,
     ...(suggestCanvas ? { suggestCanvas } : {})
   };
+}
+
+/**
+ * 审美标尺检查（间距/圆角/字号）：把「22 种圆角、37 种间距」这类散沙聚合成
+ * 一条条可执行的提示（而非逐节点刷屏），并给出可直接套用的吸附修复 ops。
+ *
+ * 与 {@link inspectDesignQuality} 分开导出（后者也调用它并把结果合并进回执）：
+ * 风格指南可以带自己的标尺，文档绑定了指南时调用方传对应的 `tokens`。
+ */
+export function inspectDesignScale(doc: DesignDoc, options: DesignQualityOptions = {}): DesignScaleIssue[] {
+  const tokens = tokensFromScales(options.tokens);
+  const issues: DesignScaleIssue[] = [];
+  const seen = new Set<string>();
+  const push = (rule: DesignScaleIssue["rule"], message: string, repair: DesignOp, key: string): void => {
+    if (seen.has(key)) return;
+    seen.add(key);
+    const existing = issues.find((candidate) => candidate.rule === rule);
+    if (!existing) {
+      issues.push({ rule, message, repairs: [repair] });
+      return;
+    }
+    if (existing.repairs.length < MAX_AESTHETIC_REPAIR_TARGETS) existing.repairs.push(repair);
+  };
+
+  // —— 5. 圆角不在标尺上 ——
+  const offRadius = new Map<string, { node: DesignNode; next: number }>();
+  const radiusNodes: DesignNode[] = [];
+  const collectRadius = (nodes: readonly DesignNode[]): void => {
+    for (const node of nodes) {
+      if (node.visible === false) continue;
+      if (node.radius !== undefined && !radiusOnScale(node.radius, tokens.radius)) {
+        radiusNodes.push(node);
+        offRadius.set(node.id, { node, next: nearestRadius(node.radius, tokens.radius) });
+      }
+      if (node.children) collectRadius(node.children);
+    }
+  };
+  collectRadius(doc.nodes);
+  if (radiusNodes.length > 0) {
+    const examples = radiusNodes.slice(0, MAX_SCALE_EXAMPLES).map((node) => `${node.radius}→${offRadius.get(node.id)!.next}`).join("、");
+    const message = `${radiusNodes.length} 个节点圆角不在标尺上（${examples}${radiusNodes.length > MAX_SCALE_EXAMPLES ? " 等" : ""}）；建议吸附到 ${formatScale(tokens.radius)}`;
+    for (const [id, entry] of offRadius) push("off-scale-radius", message, { op: "update", id, patch: { radius: entry.next } }, `radius:${id}`);
+  }
+
+  // —— 6. 字号不在标尺上 ——
+  const offFont: { node: DesignNode; next: number }[] = [];
+  const collectFont = (nodes: readonly DesignNode[]): void => {
+    for (const node of nodes) {
+      if (node.visible === false) continue;
+      if (node.type === "text" && node.fontSize !== undefined && snapToScale(node.fontSize, tokens.fontSize) === undefined) {
+        const next = nearestScaleValue(node.fontSize, tokens.fontSize);
+        if (next !== undefined) offFont.push({ node, next });
+      }
+      if (node.children) collectFont(node.children);
+    }
+  };
+  collectFont(doc.nodes);
+  if (offFont.length > 0) {
+    const examples = offFont.slice(0, MAX_SCALE_EXAMPLES).map((entry) => `${entry.node.fontSize}→${entry.next}`).join("、");
+    const message = `${offFont.length} 个文本字号不在标尺上（${examples}${offFont.length > MAX_SCALE_EXAMPLES ? " 等" : ""}）；建议吸附到 ${formatScale(tokens.fontSize)}`;
+    for (const entry of offFont) push("off-scale-font-size", message, { op: "update", id: entry.node.id, patch: { fontSize: entry.next } }, `font:${entry.node.id}`);
+  }
+
+  // —— 7. 同级重叠兄弟的视觉间隙不在标尺上（只评确实叠在一起的，不误判并排内容） ——
+  const offSpace: { node: DesignNode; next: number }[] = [];
+  const collectSpacing = (nodes: readonly DesignNode[]): void => {
+    // 至少 3 个兄弟才当作一叠列表；两两相邻容易是刻意的排版组合。
+    const candidates = nodes.filter((node) => node.visible !== false).sort((left, right) => left.y - right.y);
+    if (candidates.length >= 3) {
+      for (let index = 1; index < candidates.length; index++) {
+        const previous = candidates[index - 1]!;
+        const current = candidates[index]!;
+        const centerX = current.x + current.w / 2;
+        if (centerX < previous.x || centerX > previous.x + previous.w) continue;
+        const gap = current.y - (previous.y + previous.h);
+        if (gap <= 0) continue;
+        if (snapToScale(gap, tokens.spacing) === undefined) {
+          const next = nearestScaleValue(gap, tokens.spacing);
+          if (next !== undefined && next !== gap) offSpace.push({ node: current, next });
+        }
+      }
+    }
+    for (const node of nodes) if (node.children) collectSpacing(node.children);
+  };
+  collectSpacing(doc.nodes);
+  if (offSpace.length > 0) {
+    const examples = offSpace.slice(0, MAX_SCALE_EXAMPLES).map((entry) => `${entry.node.name ?? entry.node.id} 上移到 y=${entry.next}`).join("、");
+    const message = `${offSpace.length} 处同级间隙不在标尺上（${examples}${offSpace.length > MAX_SCALE_EXAMPLES ? " 等" : ""}）；建议吸附到 ${formatScale(tokens.spacing)}`;
+    for (const entry of offSpace) {
+      // 只提交非重叠部分（同层重叠会乱套，交给模型自己调）。
+      const found = findNode(doc.nodes, entry.node.id);
+      if (!found || !found.parent) continue;
+      const previousBottom = found.parent.children!
+        .filter((sibling) => sibling !== entry.node && sibling.visible !== false && sibling.y + sibling.h <= entry.node.y)
+        .reduce((lowest, sibling) => Math.max(lowest, sibling.y + sibling.h), Number.NEGATIVE_INFINITY);
+      if (!Number.isFinite(previousBottom)) continue;
+      push("off-scale-spacing", message, { op: "update", id: entry.node.id, patch: { y: Math.round((previousBottom + entry.next) * 100) / 100 } }, `space:${entry.node.id}`);
+    }
+  }
+
+  const capped = (): DesignScaleIssue[] => {
+    // 轮转截断：每条规则轮流取一条，直到总额度用完（不是把额度先给排在前面的规则）。
+    const queues = issues.map((issue) => [...issue.repairs]);
+    const out: DesignScaleIssue[] = issues.map((issue) => ({ ...issue, repairs: [] }));
+    let budget = MAX_AESTHETIC_REPAIR_TARGETS;
+    let moved = true;
+    while (budget > 0 && moved) {
+      moved = false;
+      for (let index = 0; index < queues.length && budget > 0; index++) {
+        const next = queues[index]!.shift();
+        if (!next) continue;
+        out[index]!.repairs.push(next);
+        budget -= 1;
+        moved = true;
+      }
+    }
+    return out.filter((issue) => issue.repairs.length > 0);
+  };
+
+  return capped();
 }
 
 /** 布局摘要的行数与每行预算（控制回执体积）。 */

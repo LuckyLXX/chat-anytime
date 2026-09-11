@@ -237,6 +237,22 @@ describe("buildDesignTools", () => {
     expect(result.content[0]!.text).toContain("离屏渲染未出帧");
     expect(existsSync(join(workspace, "designs", "exports", "海报.html"))).toBe(true);
   });
+  it("design_update 回执带审美标尺诊断与吸附修复（off-scale-radius/off-scale-font-size）", async () => {
+    const { tool } = await harness();
+    await execute(tool("design_create"), { name: "标尺页" });
+    const result = await execute(tool("design_update"), {
+      ops: [
+        { op: "create", node: { type: "rect", id: "card", name: "卡", x: 0, y: 0, w: 200, h: 100, radius: 14 } },
+        { op: "create", node: { type: "text", id: "title", name: "标题", text: "你好", x: 0, y: 120, w: 200, h: 30, fontSize: 19 } }
+      ]
+    });
+    const text = result.content[0]!.text;
+    expect(text).toContain("off-scale-radius");
+    expect(text).toContain("off-scale-font-size");
+    expect(text).toContain('"radius":12');
+    expect(text).toContain('"fontSize":18');
+  });
+
   it("design_update 带质量门：问题诊断 + 可套用的修复 ops 回执 + resize 生效", async () => {
     const { tool, current } = await harness();
     await execute(tool("design_create"), { name: "质检页", width: 400, height: 300 });

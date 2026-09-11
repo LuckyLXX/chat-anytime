@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createDesignDoc, type DesignDoc, type DesignNode } from "./design-schema.js";
-import { contrastRatio, inspectDesignQuality, parseColor, summarizeDesignLayout } from "./design-quality.js";
+import { contrastRatio, inspectDesignQuality, inspectDesignScale, parseColor, summarizeDesignLayout } from "./design-quality.js";
 
 function docWith(nodes: DesignNode[], canvas: { width: number; height: number; background?: string }): DesignDoc {
   return { ...createDesignDoc("质检", canvas.width, canvas.height), canvas, nodes };
@@ -165,6 +165,176 @@ describe("inspectDesignQuality", () => {
     expect(report.diagnostics).toHaveLength(0);
     expect(report.repairTargets).toHaveLength(0);
     expect(report.omitted).toBe(0);
+  });
+});
+
+describe("审美标尺规则（off-scale-*）", () => {
+  it("圆角不在标尺上 → 聚合诊断一条 + 逐节点吸附修复", () => {
+    const doc = docWith([
+      { type: "rect", id: "a", name: "卡一", x: 0, y: 0, w: 100, h: 100, radius: 14 },
+      { type: "rect", id: "b", name: "卡二", x: 200, y: 0, w: 100, h: 100, radius: 29 },
+      { type: "rect", id: "ok", name: "合规", x: 400, y: 0, w: 100, h: 100, radius: 12 }
+    ], { width: 800, height: 600 });
+    const report = inspectDesignQuality(doc);
+    const lines = report.diagnostics.filter((line) => line.includes("off-scale-radius"));
+    // 聚合：一条诊断（不是逐节点刷屏）。
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("2 个节点圆角不在标尺上");
+    expect(report.repairTargets).toContainEqual({ op: "update", id: "a", patch: { radius: 12 } });
+    expect(report.repairTargets).toContainEqual({ op: "update", id: "b", patch: { radius: 24 } });
+    // 已在标尺上的节点不产修复。
+    expect(report.repairTargets.some((op) => op.op === "update" && op.id === "ok")).toBe(false);
+  });
+
+  it("胶囊半径（≥100）不被拉回，也不误报", () => {
+    const doc = docWith([
+      { type: "rect", id: "pill", name: "胶囊", x: 0, y: 0, w: 200, h: 40, radius: 9999 },
+      { type: "rect", id: "big", name: "超大", x: 300, y: 0, w: 200, h: 200, radius: 220 }
+    ], { width: 800, height: 600 });
+    const report = inspectDesignQuality(doc);
+    expect(report.diagnostics.join("\n")).not.toContain("off-scale-radius");
+  });
+
+  it("字号不在标尺上 → 聚合诊断 + 吸附修复；半档值（12.5/13.5/19）被抓出", () => {
+    const doc = docWith([
+      { type: "text", id: "t1", name: "甲", text: "a", x: 0, y: 0, w: 100, h: 20, fontSize: 13.5, color: "#111111" },
+      { type: "text", id: "t2", name: "乙", text: "b", x: 0, y: 40, w: 100, h: 20, fontSize: 19, color: "#111111" },
+      { type: "text", id: "ok", name: "丙", text: "c", x: 0, y: 80, w: 100, h: 20, fontSize: 16, color: "#111111" }
+    ], { width: 800, height: 600, background: "#ffffff" });
+    const report = inspectDesignQuality(doc);
+    const line = report.diagnostics.find((entry) => entry.includes("off-scale-font-size"));
+    expect(line).toBeDefined();
+    expect(line).toContain("2 个文本字号不在标尺上");
+    // 13.5 与 13/14 等距 → 确定性取较小档（升序首个），同输入同结果。
+    expect(report.repairTargets).toContainEqual({ op: "update", id: "t1", patch: { fontSize: 13 } });
+    expect(report.repairTargets).toContainEqual({ op: "update", id: "t2", patch: { fontSize: 18 } });
+  });
+
+  it("同级纵向叠放的间隙不在标尺上 → off-scale-spacing + 上移 y 的修复", () => {
+    const doc = docWith([
+      {
+        type: "frame", id: "form", name: "表单", x: 0, y: 0, w: 320, h: 400,
+        children: [
+          { type: "rect", id: "f1", name: "输入一", x: 20, y: 20, w: 280, h: 40 },
+          // 间隙 5（标尺外）→ 应吸附到 4，y 从 65 变 64。
+          { type: "rect", id: "f2", name: "输入二", x: 20, y: 65, w: 280, h: 40 },
+          // 间隙 (125-109)=16，标尺上 → 不报。
+          { type: "rect", id: "f3", name: "输入三", x: 20, y: 125, w: 280, h: 40 }
+        ]
+      }
+    ], { width: 800, height: 600 });
+    const report = inspectDesignQuality(doc);
+    const line = report.diagnostics.find((entry) => entry.includes("off-scale-spacing"));
+    expect(line).toBeDefined();
+    expect(line).toContain("1 处同级间隙不在标尺上");
+    expect(report.repairTargets).toContainEqual({ op: "update", id: "f2", patch: { y: 64 } });
+    expect(report.repairTargets.some((op) => op.op === "update" && op.id === "f3")).toBe(false);
+  });
+
+  it("横向并排内容不被当成间距节奏误报", () => {
+    const doc = docWith([
+      {
+        type: "frame", id: "rail", name: "横排", x: 0, y: 0, w: 800, h: 200,
+        children: [
+          { type: "rect", id: "c1", name: "卡一", x: 0, y: 0, w: 200, h: 120 },
+          { type: "rect", id: "c2", name: "卡二", x: 233, y: 0, w: 200, h: 120 },
+          { type: "rect", id: "c3", name: "卡三", x: 461, y: 0, w: 200, h: 120 }
+        ]
+      }
+    ], { width: 800, height: 600 });
+    const report = inspectDesignQuality(doc);
+    // y 完全一致（间隙 0）→ 不触发间距规则（重曠不问）。
+    expect(report.diagnostics.join("\n")).not.toContain("off-scale-spacing");
+  });
+
+  it("风格指南自带标尺：tokens 参数覆盖默认（指南的档位说了算）", () => {
+    const doc = docWith([
+      { type: "rect", id: "a", name: "卡", x: 0, y: 0, w: 100, h: 100, radius: 14 },
+      { type: "text", id: "t", name: "字", text: "a", x: 200, y: 0, w: 100, h: 20, fontSize: 17, color: "#111111" }
+    ], { width: 800, height: 600, background: "#ffffff" });
+    // 指南认为 14 与 17 是合法档位 → 不报。
+    const guide = inspectDesignQuality(doc, { tokens: { radius: [0, 14, 16], fontSize: [13, 17, 24], spacing: [4, 8] } });
+    expect(guide.diagnostics.join("\n")).not.toContain("off-scale-radius");
+    expect(guide.diagnostics.join("\n")).not.toContain("off-scale-font-size");
+    // 默认标尺下同样一份稿子两个都报（证明 tokens 真的生效而不是被忽略）。
+    const fallback = inspectDesignQuality(doc);
+    expect(fallback.diagnostics.join("\n")).toContain("off-scale-radius");
+    expect(fallback.diagnostics.join("\n")).toContain("off-scale-font-size");
+  });
+
+  it("审美规则不得刷屏：聚合为一条诊断、修复按上限截断", () => {
+    const nodes: DesignNode[] = Array.from({ length: 40 }, (_, index) => ({ type: "rect", id: `r${index}`, name: `块${index}`, x: 0, y: index * 30, w: 100, h: 20, radius: 14 }));
+    const doc = docWith(nodes, { width: 800, height: 600 });
+    const report = inspectDesignQuality(doc);
+    const radiusLines = report.diagnostics.filter((line) => line.includes("off-scale-radius"));
+    expect(radiusLines).toHaveLength(1);
+    expect(radiusLines[0]).toContain("40 个节点圆角不在标尺上");
+    // 诊断总数远小于节点数（聚合生效，不是 40 行刷屏）。
+    expect(report.diagnostics.length).toBeLessThanOrEqual(3);
+    // 修复 op 按 MAX_AESTHETIC_REPAIR_TARGETS（24）截断。
+    expect(report.repairTargets.filter((op) => op.op === "update" && (op.patch as { radius?: number }).radius !== undefined)).toHaveLength(24);
+  });
+
+  it("修复预算轮转分配：数量最多的规则不把额度占满（三条规则都能拿到）", () => {
+    // 圆角越标 30 个（数量最多）+ 字号 3 个 + 间距 2 处：轮转后后两者不被挤光。
+    const cards: DesignNode[] = Array.from({ length: 30 }, (_, index) => ({ type: "rect", id: `c${index}`, name: `卡${index}`, x: 0, y: index * 30, w: 100, h: 20, radius: 14 }));
+    const texts: DesignNode[] = Array.from({ length: 3 }, (_, index) => ({ type: "text", id: `t${index}`, name: `字${index}`, text: "a", x: 200, y: index * 30, w: 100, h: 20, fontSize: 19, color: "#111111" }));
+    const doc = docWith([...cards, ...texts], { width: 800, height: 1200, background: "#ffffff" });
+    const report = inspectDesignQuality(doc);
+    const radiusRepairs = report.repairTargets.filter((op) => op.op === "update" && (op.patch as { radius?: number }).radius !== undefined);
+    const fontRepairs = report.repairTargets.filter((op) => op.op === "update" && (op.patch as { fontSize?: number }).fontSize !== undefined);
+    expect(radiusRepairs.length + fontRepairs.length).toBe(24);
+    expect(fontRepairs).toHaveLength(3);
+    expect(radiusRepairs).toHaveLength(21);
+  });
+
+  it("现有四条规则行为不变（回归锁定）：同一稿子的结构诊断与修复原样保留", () => {
+    // 同时含旧规则（容器溢出/空容器/对比度/出界）与新规则（标尺）的稿子：
+    // 新规则只能追加，不得改变旧规则诊断文本与修复 ops 的语义。
+    const doc = docWith([
+      {
+        type: "frame", id: "rail", name: "轨道", x: 0, y: 0, w: 300, h: 200, radius: 14,
+        layout: { direction: "row", gap: 20, padding: 16 },
+        children: [
+          { type: "rect", id: "c1", name: "卡一", x: 0, y: 0, w: 150, h: 100 },
+          { type: "rect", id: "c2", name: "卡二", x: 0, y: 0, w: 150, h: 100 }
+        ]
+      },
+      { type: "frame", id: "empty", name: "空壳", x: 0, y: 300, w: 200, h: 100 },
+      { type: "text", id: "dim", name: "暗字", text: "看不清", x: 0, y: 420, w: 200, h: 30, fontSize: 14, color: "#71717a" }
+    ], { width: 400, height: 320, background: "#1c1917" });
+    const report = inspectDesignQuality(doc);
+    const text = report.diagnostics.join("\n");
+    expect(text).toContain("container-overflow");
+    expect(text).toContain("empty-container");
+    expect(text).toContain("text-contrast");
+    expect(text).toContain("out-of-canvas");
+    // 旧规则的修复 ops 一个不少。
+    expect(report.repairTargets).toContainEqual({ op: "update", id: "rail", patch: { w: 352 } });
+    expect(report.repairTargets[0]).toMatchObject({ op: "resize" });
+    expect(report.repairTargets).toContainEqual({ op: "update", id: "dim", patch: { color: "#ffffff" } });
+    expect(report.unrepairableCount).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe("inspectDesignScale（可单独调用：风格指南标尺注入用）", () => {
+  it("返回聚合后的 rule/message/repairs，同一节点只产一条修复", () => {
+    const doc = docWith([
+      { type: "rect", id: "a", name: "卡", x: 0, y: 0, w: 100, h: 100, radius: 14 },
+      { type: "text", id: "t", name: "字", text: "a", x: 0, y: 200, w: 100, h: 20, fontSize: 19, color: "#111111" }
+    ], { width: 800, height: 600, background: "#ffffff" });
+    const issues = inspectDesignScale(doc);
+    expect(issues.map((issue) => issue.rule).sort()).toEqual(["off-scale-font-size", "off-scale-radius"]);
+    expect(issues.every((issue) => issue.repairs.length === 1)).toBe(true);
+    expect(issues.every((issue) => issue.message.length > 0)).toBe(true);
+  });
+
+  it("合规稿子返回空数组", () => {
+    const doc = docWith([
+      { type: "rect", id: "a", name: "卡", x: 0, y: 0, w: 100, h: 100, radius: 12 },
+      { type: "text", id: "t", name: "字", text: "a", x: 0, y: 200, w: 100, h: 20, fontSize: 16, color: "#111111" }
+    ], { width: 800, height: 600, background: "#ffffff" });
+    expect(inspectDesignScale(doc)).toHaveLength(0);
   });
 });
 

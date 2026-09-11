@@ -55,6 +55,7 @@ const FIRST_USE_GUIDANCE = [
   "- 整套原型：一屏 = 一个顶层命名 frame，并排放置（间隔 ≥80px）；画布放不下先发 {op:'resize'} 扩画布。一次 ≤64 条 ops，先完成一屏/一个区域，成功后再继续下一屏。",
   "- 每个节点都起 name；自起语义化 id 便于后续定位（缺省自动生成并在回执给出映射）。",
   "- 每个 text 节点都显式声明 fontFamily（如 'Inter, system-ui, sans-serif'，中文稿带上中文字体），字号/字重与字距按层级递进；缺省会用内置默认栈，但显式声明才能与选定风格一致。",
+  "- 全稿只用一套标尺：圆角、间距、字号都取自固定档位（如圆角 0/2/4/6/8/10/12/16/20/24/9999，间距 2/4/6/8/12/16/20/24/32/40/48/64，字号 11/12/13/14/16/18/20/24/28/32/40/48），不要逐节点微调 0.5px 级别的「差不多」值——这是稿子看着碎的根因，质量门会报 off-scale-* 并给出吸附修复。",
   "- 半透明直接写进 fill/stroke（rgba/hex8）；不要用元素级 opacity 压淡有子内容的容器——子内容会一起变淡，质量门会拦截。",
   "- 回执带「修复 ops」时，把它原样作为下一条 design_update 的 ops 传入，先修复再继续新内容。"
 ].join("\n");
@@ -269,10 +270,10 @@ export function buildDesignTools(deps: DesignToolDeps): ToolDefinition[] {
         const quality = inspectDesignQuality(next);
         const mapText = idMap.length > 0 ? `\n新建节点 id：${idMap.map((entry) => `${entry.name}→${entry.id}`).join("、")}` : "";
         const qualityText = quality.diagnostics.length > 0
-          ? `\n质量检查 ${quality.diagnostics.length} 项${quality.omitted > 0 ? `（另 ${quality.omitted} 项省略）` : ""}：\n${quality.diagnostics.slice(0, 6).map((line) => `- ${line}`).join("\n")}`
+          ? `\n质量检查 ${quality.diagnostics.length} 项${quality.omitted > 0 ? `（另 ${quality.omitted} 项省略）` : ""}：\n${quality.diagnostics.slice(0, 8).map((line) => `- ${line}`).join("\n")}`
           : "";
         const repairText = quality.repairTargets.length > 0
-          ? `\n修复 ops（下一条 design_update 的 ops 参数原样传入）：${JSON.stringify(quality.repairTargets.slice(0, 12))}${quality.repairTargets.length > 12 ? `（共 ${quality.repairTargets.length} 条，先套用这 12 条）` : ""}`
+          ? `\n修复 ops（下一条 design_update 的 ops 参数原样传入）：${JSON.stringify(quality.repairTargets.slice(0, 24))}${quality.repairTargets.length > 24 ? `（共 ${quality.repairTargets.length} 条，先套用这 24 条，剩余数量已按同一标尺吸附，可自行改完）` : ""}`
           : "";
         const nextText = quality.repairTargets.length > 0 ? "先套用上述修复 ops，再继续新内容" : "继续搭建其余屏幕/区域";
         return {
