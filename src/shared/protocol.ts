@@ -786,7 +786,10 @@ export interface BrowserSettings {
   enabled: boolean;
 }
 
-/** 设计模式总开关；缺省视为启用（settings.design?.enabled !== false）。工具常驻注册，execute 实时判断，无需重建会话。 */
+/** 设计模式总开关（全局总闸）；缺省视为启用（settings.design?.enabled !== false）。
+ *  与 browser 的关键差别：browser_* 常驻激活、execute 实时判断；design_* 的工具
+ *  定义较重（8 个≈1.5K tokens），仅在本会话开了设计模式时才注入活动工具集
+ *  （session.designMode / 会话级状态文件），本总闸关闭时任何会话都不注入。 */
 export interface DesignSettings {
   enabled: boolean;
 }
@@ -1186,6 +1189,8 @@ export interface RuntimeSnapshot {
   speedStats?: SpeedStats;
   /** 激活会话是否处于计划模式（先产出计划、审查批准后才实施）。 */
   planMode?: boolean;
+  /** 激活会话是否处于设计模式（design_* 工具已注入 + 画布工作台打开）。 */
+  designMode?: boolean;
   messages: ChatMessage[];
   executions: ToolExecution[];
   backgroundProcesses: BackgroundProcess[];
@@ -1213,6 +1218,8 @@ export interface SessionPaneSnapshot {
   contextUsage?: ContextUsage;
   speedStats?: SpeedStats;
   planMode?: boolean;
+  /** 该会话是否处于设计模式；分屏格子据此跟随显隐（画布只展激活格）。 */
+  designMode?: boolean;
   messages: ChatMessage[];
   executions: ToolExecution[];
 }
@@ -1280,6 +1287,10 @@ export type RuntimeCommand =
   | { type: "session.regenerate"; text: string; timestamp?: number; invocations?: SlashInvocation[]; attachments?: PromptAttachment[]; sessionId?: string }
   | { type: "session.compact"; instructions?: string; sessionId?: string }
   | { type: "session.planMode"; enabled: boolean; sessionId?: string }
+  /** 会话级设计模式开关：决定 design_* 工具是否进入本会话的活动工具集（前缀
+   *  缓存纪律：会话内不再变动），并联动渲染端画布。全局总闸 settings.design.enabled
+   *  关闭时工具一律不注入（本命令仍记录会话意愿，总闸恢复后即可生效）。 */
+  | { type: "session.designMode"; enabled: boolean; sessionId?: string }
   | { type: "session.abort"; sessionId?: string }
   /** 任务面板按命令停止：只终止一条正在执行的 bash/powershell 调用（杀进程树），
    * 不中止整个会话——工具以错误结果收场供模型继续本轮。executionId 即

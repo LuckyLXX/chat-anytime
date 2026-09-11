@@ -402,10 +402,14 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
           // 比较的身份保留合并，否则“无变化早退”永远不命中、订阅方每帧重渲染。
           const mergedSessions = mergeSessionsPreservingIdentity(previous.sessions, incoming.sessions);
           const mergedRecentWorkspaces = mergeRecentWorkspacesPreservingIdentity(previous.recentWorkspaces, incoming.recentWorkspaces);
+          // 会话级布尔标志（计划模式/设计模式）必须入比较：两者都可能整帧只有自己
+          // 变化（其余字段与上帧恒等，如 model/speedStats 同为 undefined 时），漏比
+          // 会让本次切换被早退吐掉——画布/计划横幅不响应。
           if (!changed && previous.busy === incoming.busy && previous.status === incoming.status &&
               previous.turnTiming === incoming.turnTiming && previous.executions === mergedExecutions &&
               previous.sessions === mergedSessions && previous.recentWorkspaces === mergedRecentWorkspaces &&
               previous.model === incoming.model &&
+              previous.planMode === incoming.planMode && previous.designMode === incoming.designMode &&
               previous.sessionId === incoming.sessionId && previous.sessionFile === incoming.sessionFile &&
               queuedMessagesEqual(previous.queuedMessages, incoming.queuedMessages) &&
               previous.thinkingLevel === incoming.thinkingLevel) {
@@ -440,6 +444,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
                 previous.model === incoming.model && previous.workspace === incoming.workspace &&
                 queuedMessagesEqual(previous.queuedMessages, incoming.queuedMessages) &&
                 previous.thinkingLevel === incoming.thinkingLevel && previous.planMode === incoming.planMode &&
+                previous.designMode === incoming.designMode &&
                 previous.contextUsage === incoming.contextUsage) {
               return state;
             }

@@ -635,6 +635,11 @@ export function createDemoApi(): DesktopApi {
         case "session.planMode":
           updateSnapshot({ planMode: command.enabled });
           break;
+        case "session.designMode":
+          // 设计模式会话级开关：真实运行时还会重算活动工具集（design_* 注入/移除），
+          // 演示端只须同步快照让画布与顶栏按钮跟随。
+          updateSnapshot({ designMode: command.enabled });
+          break;
         case "checkpoint.rollback": {
           // 演示：逐目标报告恢复完成（带调用 id 供渲染端标记已回滚），模拟主进程推送。
           const results = command.targets.map((target) => ({ relativePath: target.relativePath, action: "restored" as const, toolCallIds: target.toolCallIds }));

@@ -301,6 +301,44 @@ describe("usage stats", () => {
   });
 });
 
+describe("session-level collaboration flags", () => {
+  beforeEach(() => {
+    useDesktopStore.setState({ snapshot: emptySnapshot, paneStates: {}, parkedPanels: {} });
+  });
+
+  it("整帧只有 designMode 变化时不被早退吐掉（否则设计画布不响应开关）", () => {
+    const state = useDesktopStore.getState();
+    state.handleRuntimeMessage({ type: "state", snapshot: snap("a") });
+    expect(useDesktopStore.getState().snapshot.designMode).toBeFalsy();
+
+    state.handleRuntimeMessage({ type: "state", snapshot: { ...snap("a"), designMode: true } });
+    expect(useDesktopStore.getState().snapshot.designMode).toBe(true);
+
+    // 关回去同样要生效（否则画布关不掉）。
+    state.handleRuntimeMessage({ type: "state", snapshot: { ...snap("a"), designMode: false } });
+    expect(useDesktopStore.getState().snapshot.designMode).toBe(false);
+  });
+
+  it("整帧只有 planMode 变化时同样不被早退吐掉（同一早退比较里的邻座字段）", () => {
+    const state = useDesktopStore.getState();
+    state.handleRuntimeMessage({ type: "state", snapshot: snap("a") });
+    state.handleRuntimeMessage({ type: "state", snapshot: { ...snap("a"), planMode: true } });
+    expect(useDesktopStore.getState().snapshot.planMode).toBe(true);
+  });
+
+  it("分屏格子推送的 designMode 变化不被引用早退吞掉", () => {
+    function pane(sessionId: string, designMode: boolean): SessionPaneSnapshot {
+      return { sessionId, thinkingLevel: "medium", busy: false, status: "", queuedMessages: [], messages: [], executions: [], designMode };
+    }
+    const state = useDesktopStore.getState();
+    state.handleRuntimeMessage({ type: "session.state", snapshot: pane("pane-1", false) });
+    const before = useDesktopStore.getState().paneStates["pane-1"]!;
+    expect(before.designMode).toBe(false);
+    state.handleRuntimeMessage({ type: "session.state", snapshot: pane("pane-1", true) });
+    expect(useDesktopStore.getState().paneStates["pane-1"]?.designMode).toBe(true);
+  });
+});
+
 describe("message identity merge", () => {
   it("aborted 标记变化时换新引用（否则中止提示帧被引用复用吞掉）", () => {
     const base = snap("session-a");

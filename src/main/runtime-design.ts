@@ -8,10 +8,19 @@
 // Cache discipline (mirrors browser/vision clusters): tool definitions are
 // byte-stable (no dynamic state in description or schema — the model pulls
 // fresh document state via design_read/design_list, whose results land at the
-// conversation tail). Tools stay registered/active regardless of the settings
-// switch; `enabled` is read live per call (no session rebuild). Subagents do
-// not get design tools. design_update/design_export carry the "write" risk
-// (permissions.ts), so workspace access mode auto-allows them.
+// conversation tail). Subagents do not get design tools.
+// design_update/design_export carry the "write" risk (permissions.ts), so
+// workspace access mode auto-allows them.
+//
+// Activation: the 8 definitions cost ≈1.5K tokens of PREFIX on every request,
+// so they are ACTIVE only for sessions that opted into design mode
+// (see shouldActivateDesignTools) — a plain coding chat no longer pays for a
+// canvas it has no UI for. The active set is fixed when the session is created
+// and only changes when the user toggles design mode, so the prefix stays
+// byte-stable for the whole design session (the user does not flip mid-session).
+// `enabled` (the global settings switch) is additionally read live per call:
+// turning the master switch off mid-session deactivates the tools AND makes any
+// already-running call report the disabled state instead of writing.
 
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -64,7 +73,8 @@ function guideIndexText(platform?: DesignPlatform, tags?: readonly string[]): st
 }
 
 export interface DesignToolDeps {
-  /** 总开关，实时读（settings.design?.enabled !== false），关闭时工具保留注册。 */
+  /** 全局总闸（settings.design?.enabled !== false）：关闭时任何调用都报错，
+   *  即使工具因会话开关而处于活动状态。实时读，不重建会话。 */
   enabled: () => boolean;
   /** 记录工作区（landing 态无工作区时工具给可读错误）。 */
   workspace: () => string | undefined;
@@ -82,7 +92,28 @@ export interface DesignToolDeps {
 
 const DISABLED_TEXT = "设计模式已在设置中停用（settings.design.enabled），请在设置中开启后再试。";
 
-const CANVAS_HINT = "提示：可在界面顶部「设计」按钮打开设计画布查看与手动微调。";
+/**
+ * 设计工具只在设计模式会话里激活（见 shouldActivateDesignTools），因此画布必然
+ * 已经打开——回执不必再教模型「点顶栏按钮」，只提示改动即时可见即可。
+ */
+const CANVAS_HINT = "提示：改动会实时显示在界面的设计画布上，用户可直接手动微调。";
+
+/**
+ * 设计工具的激活判据（前缀缓存纪律的核心）：两个条件都满足才把 8 个 design_*
+ * 定义放进本次请求的活动工具集。
+ *
+ * - `sessionEnabled`：会话级设计模式开关（design-mode-store 持久化，用户在设计
+ *   模式下新建话题时继承）。会话内不再变动，前缀缓存整段有效。
+ * - `globalEnabled`：设置页总闸 settings.design.enabled（缺省启用）。用户显式关掉
+ *   即任何会话都不注入——包括设计会话，符合「总闸优先」语义。
+ *
+ * 无人值守的自动化后台会话天然不满足条件：每次触发都是全新会话 id，没有对应的
+ * 设计模式状态文件（读盘即 false），因此定时任务默认拿不到设计工具——这是有意
+ * 取舍（省下每次运行的前缀成本），不是遗漏。
+ */
+export function shouldActivateDesignTools(input: { sessionEnabled: boolean; globalEnabled: boolean }): boolean {
+  return input.sessionEnabled && input.globalEnabled;
+}
 
 /** 首次 design_create/design_update 成功回执附带一次的用法要点。教学内容不进
  *  description（tools 数组每请求常驻、破坏前缀缓存即全量重算），落回执尾部

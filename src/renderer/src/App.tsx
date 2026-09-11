@@ -221,15 +221,6 @@ function useThemeAssetUrls(assets: ThemeAssetMap | undefined): ThemeAssetMap {
   return urls;
 }
 
-function readStoredBoolean(key: string, fallback: boolean): boolean {
-  try {
-    const value = window.localStorage.getItem(key);
-    return value === null ? fallback : value === "true";
-  } catch {
-    return fallback;
-  }
-}
-
 function readStoredPreviewSplit(): number {
   try {
     const value = window.localStorage.getItem("pidesktop.preview-split");
@@ -1172,6 +1163,7 @@ function SettingsDialog({ settings, models, providers, customProvider, customMod
           {settings.accessMode === "workspace" && <p className="access-mode-hint">工作区内的文件写入会自动允许；bash 命令和工作区外路径仍会询问。</p>}
           <div className="default-workspace-setting"><span className="settings-field-label">默认工作区</span><p className="default-workspace-hint">没有选择过工作区的助手，所有话题都落在默认工作区里，开箱即可对话；未自定义时使用内置目录 workspace-default。已选过工作区的助手仍各自记忆、互不影响。</p><div className="default-workspace-controls"><code className="default-workspace-path" title={settings.defaultWorkspace ?? undefined}>{settings.defaultWorkspace ?? "未自定义（使用内置目录）"}</code><span className="default-workspace-actions"><button className="secondary-button" type="button" onClick={() => void chooseDefaultWorkspace()}><FolderOpen size={13} />选择文件夹</button><button className="secondary-button" type="button" disabled={!settings.defaultWorkspace} onClick={resetDefaultWorkspace}><RotateCcw size={13} />恢复默认</button></span></div></div>
             <label className="checkbox-setting"><input type="checkbox" checked={settings.browser?.enabled !== false} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, browser: { enabled: event.target.checked } } })} />启用 AI 浏览器自动化（browser_* 工具）</label>
+            <label className="checkbox-setting" title="总闸：关掉后即使会话处于设计模式也不注入 design_* 工具"><input type="checkbox" checked={settings.design?.enabled !== false} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, design: { enabled: event.target.checked } } })} />启用设计模式（design_* 工具仅在开了设计模式的会话里注入）</label>
           <label className="checkbox-setting"><input type="checkbox" checked={settings.appearance.showThinking} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, showThinking: event.target.checked } } })} />展示思考过程</label>
           <footer><button type="button" className="secondary-button" onClick={closeSettings}>取消</button><button className="primary-button" type="submit">保存通用设置</button></footer>
         </form> : tab === "models" ? <form onSubmit={save}>
@@ -1394,10 +1386,13 @@ export function App(): ReactNode {
   const previewDragPointerRef = useRef<number | undefined>(undefined);
   const workAreaRef = useRef<HTMLDivElement>(null);
   // —— 设计模式（Design Studio）：画布占主体、AI 对话收窄为侧栏；与分屏/预览互斥 ——
-  const [designMode, setDesignMode] = useState(() => readStoredBoolean("pidesktop.design-mode", false));
-  useEffect(() => {
-    try { window.localStorage.setItem("pidesktop.design-mode", designMode ? "true" : "false"); } catch { /* storage 可能不可用 */ }
-  }, [designMode]);
+  //
+  // 状态源是会话（快照的 designMode）而不是本地开关：设计模式决定 design_* 工具
+  // 是否进本会话的活动工具集（≈1.5K tokens 的每请求前缀成本），所以它必须跟着会话
+  // 落盘、跟着会话恢复；画布只是它的投影——切回一个设计会话画布自动打开，切到普通
+  // 会话自动收起，重启后也会回到设计会话的画布（不再用 localStorage，否则会和会话
+  // 真实状态各说各话）。顶栏按钮与设置页总闸都发命令，由 utility 统一裁决。
+  const designMode = useDesktopStore((state) => state.snapshot.designMode === true);
   const [designSplit, setDesignSplit] = useState(readStoredDesignSplit);
   const [designDragging, setDesignDragging] = useState(false);
   const designDragPointerRef = useRef<number | undefined>(undefined);
@@ -2394,7 +2389,7 @@ export function App(): ReactNode {
           <div className="project-title"><Folder size={17} /><span><strong>{activeWorkspace?.split(/[\\/]/u).at(-1) ?? "ChatAnyTime"}</strong><small>{activeAgentName} · {activeSessionId ? "当前话题" : "未开始话题"}</small></span>{gitBranch && <span className="git-branch-badge" title={`当前 Git 分支：${gitBranch}`}><GitBranch size={13} />{gitBranch}</span>}</div>
           <div className="runtime-controls">
             <button className="workspace-top-button" data-control="workspace-open" type="button" onClick={() => void openWorkspace()}><FolderOpen size={15} /><span>工作区</span><strong>{compactPath(activeWorkspace)}</strong><ChevronDown size={13} /></button>
-            <button className={`icon-button design-toggle${designMode ? " active" : ""}`} data-control="design-toggle" type="button" aria-label={designMode ? "退出设计模式" : "进入设计模式"} aria-pressed={designMode} title={designMode ? "退出设计模式" : "设计模式（AI 设计工作台）"} onClick={() => setDesignMode((open) => !open)}><Palette size={18} /></button>
+            <button className={`icon-button design-toggle${designMode ? " active" : ""}`} data-control="design-toggle" type="button" disabled={!activeSessionId} aria-label={designMode ? "退出设计模式" : "进入设计模式"} aria-pressed={designMode} title={!activeSessionId ? "请先创建或打开一个话题" : designMode ? "退出设计模式（本会话将不再注入设计工具）" : "设计模式（AI 设计工作台；本会话注入 design_* 工具）"} onClick={() => void window.piDesktop.send({ type: "session.designMode", enabled: !designMode }).catch((error) => setMessageActionError(error instanceof Error ? error.message : "设计模式切换失败"))}><Palette size={18} /></button>
             <button className="icon-button preview-panel-toggle" data-control="preview-toggle" type="button" aria-label={previewOpened ? "关闭预览" : "打开预览"} title={previewOpened ? "关闭预览" : "打开预览"} onClick={() => {
               // 顶部按钮始终完全关闭/打开预览面板：即使已有标签页也不会
               // 折叠成残留一列栏+展开按钮的中间态。

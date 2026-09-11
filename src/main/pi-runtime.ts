@@ -122,6 +122,7 @@ import * as runtimeHooks from "./runtime-hooks.js";
 import * as runtimePlanTools from "./runtime-plan-tools.js";
 import * as runtimeShellKill from "./runtime-shell-kill.js";
 import { planHeading, readPlanMode, saveApprovedPlan, writePlanMode } from "./plan-store.js";
+import { readDesignMode, writeDesignMode } from "./design-mode-store.js";
 import { checkpointPathFor, readCheckpoints, sweepCheckpoints } from "./checkpoint-store.js";
 import { createCheckpointExtension, rollbackPlan } from "./runtime-checkpoint.js";
 import { hookActionPreview, readConfiguredHooks, removeHookConfig, setHookDisabled, upsertHookConfig, validateHookRule, type ConfiguredHook } from "./hooks-config.js";
@@ -184,6 +185,12 @@ interface SessionRuntimeRecord {
   todoPace: runtimeTodoTools.TodoPaceTracker;
   /** 计划模式状态（会话级，磁盘恢复；narrate 驱动一次性 context 注入）。 */
   planState: runtimePlanTools.PlanModeState;
+  /**
+   * 设计模式（会话级，磁盘恢复）：决定 design_* 工具是否进活动工具集。
+   * 冻结在会话维度——用户在设计会话里连续工作时工具集字节不变（前缀缓存），
+   * 切到别的会话也不受牵连。
+   */
+  designMode: { enabled: boolean };
   /** 按助手划分的长期记忆库（跨会话）；工具闭包读它，提示词快照在创建时冻结。 */
   memoryStore: MemoryStore;
   customTools: ToolDefinition[];
@@ -201,6 +208,8 @@ interface SessionRuntimeRecord {
   browserTools: ToolDefinition[];
   automationTools: ToolDefinition[];
   designTools: ToolDefinition[];
+  /** 设计模式总闸的实时读取（settings.design?.enabled !== false）；活动集重算时用。 */
+  designGlobalEnabled: () => boolean;
   /** 可单独终止的 bash/powershell 工具（同名覆盖内建定义）；任务面板按命令停止的执行端。 */
   shellKill: runtimeShellKill.KillableShellTools;
   /** 当前会话绑定的设计文档（设计模式画布的数据源；工具与用户命令共用）。 */
@@ -631,7 +640,10 @@ async function runAutomationTask(task: AutomationTask, trigger: "cron" | "manual
     modelOverride: modelRef,
     accessModeOverride: task.accessMode,
     unattended: true,
-    noGenerationGuard: true
+    noGenerationGuard: true,
+    // 无人值守后台会话不继承设计模式：每次触发都是全新会话，没有界面能开关，
+    // 默认不给 design_*（省下约 1.5K tokens/次的前缀成本，已与用户对齐）。
+    inheritDesignMode: false
   });
   const record = liveSessions.get(sessionId);
   if (!record) throw new Error("自动化会话创建失败");
@@ -753,7 +765,8 @@ async function handoffPlanToNewSession(input: {
   const sessionId = manager.getSessionId();
   // 默认激活：焦点切到实施会话（用户直接看到实施进展）；有人值守不传
   // unattended/noGenerationGuard——权限门与提问工具照常，与其他前台会话一致。
-  await createSession(manager, { modelOverride: model });
+  // 不继承设计模式：实施计划是编码任务，不需要 8 个设计工具的前缀开销。
+  await createSession(manager, { modelOverride: model, inheritDesignMode: false });
   const record = liveSessions.get(sessionId);
   if (!record) throw new Error("实施会话创建失败");
   // 以计划标题命名新会话；对未持久化会话（首条助手消息前 JSONL 未落盘）的
@@ -837,6 +850,35 @@ function sessionTodosPath(sessionId: string): string {
 
 function sessionPlansPath(agentId: string, sessionId: string): string {
   return join(getAgentDir(), "chatanytime-sessions", agentId, "plans", `${sessionId}.json`);
+}
+
+/** 会话级设计模式状态：`<agentDir>/chatanytime-sessions/<agentId>/design-mode/<sessionId>.json`。 */
+function sessionDesignModePath(agentId: string, sessionId: string): string {
+  return join(getAgentDir(), "chatanytime-sessions", agentId, "design-mode", `${sessionId}.json`);
+}
+
+/**
+ * 切换会话的设计模式：更新 record 状态 → 原子写盘（会话级，重开后恢复）→
+ * 重算活动工具集（design_* 注入/移除）→ 广播快照（渲染端据此开关画布）。
+ *
+ * 前缀缓存代价：本次切换使该会话的请求前缀变一次（缓存键失配重算），之后整个
+ * 设计会话字节稳定——用户不会在同一会话里反复开关，这正是本设计的成立前提。
+ * 状态未变时直接早退（幂等）：同一开关重复到达不会白做一次前缀重算。
+ *
+ * 写盘是 best-effort，失败不影响内存状态。
+ */
+function setDesignMode(record: SessionRuntimeRecord, enabled: boolean): void {
+  if (record.designMode.enabled === enabled) return;
+  record.designMode = { enabled };
+  try {
+    writeDesignMode(sessionDesignModePath(record.agent.id, record.session.sessionId), enabled);
+  } catch (error) {
+    void post({ type: "log", level: "warn", message: `保存设计模式状态失败：${errorText(error)}` });
+  }
+  // 活动集变化：工具清单与系统提示的工具段同步重算。
+  reconcileActiveTools(record);
+  if (record === activeRuntime) emitState();
+  else emitPaneStateFor(record);
 }
 
 /**
@@ -999,6 +1041,7 @@ function paneSnapshotFrom(record: SessionRuntimeRecord): SessionPaneSnapshot {
     contextUsage: snapshotContextUsage(record),
     speedStats: snapshotSpeedStats(record),
     planMode: record.planState.enabled,
+    designMode: record.designMode.enabled,
     messages,
     executions: [...record.executions.values()].map((execution) => {
       const output = truncateTransferredOutput(execution.output);
@@ -1025,8 +1068,9 @@ function snapshot(): RuntimeSnapshot {
     queuedMessages: pane?.queuedMessages ?? [],
     contextUsage: pane?.contextUsage,
     speedStats: pane?.speedStats,
-    // 计划模式是会话级协作状态（与访问模式独立）：快照只反映激活会话。
+    // 计划模式与设计模式都是会话级协作状态（与访问模式独立）：快照只反映激活会话。
     planMode: pane?.planMode ?? false,
+    designMode: pane?.designMode ?? false,
     messages: pane?.messages ?? [],
     executions: pane?.executions ?? [],
     backgroundProcesses: backgroundProcesses.list(),
@@ -1425,8 +1469,14 @@ function buildRecordTools(record: Pick<SessionRuntimeRecord, "subagentTools" | "
  * session (byte-stable definition) but active only for text-only conversation
  * models — multimodal models see the same tool set as before, so the request
  * prefix stays stable within each session/model configuration (cache discipline).
+ *
+ * Design tools are the same discipline with a different trigger: their 8
+ * definitions cost ≈1.5K tokens, so they are active only for sessions that
+ * opted into design mode (record.designMode + the global master switch). The
+ * design flag is fixed per session, so the prefix stays byte-stable for the
+ * whole design session; a plain coding chat never pays for the canvas.
  */
-function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "planTools" | "visionTools" | "browserTools" | "automationTools" | "designTools" | "unattended">, includeVision: boolean): string[] {
+function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "planTools" | "visionTools" | "browserTools" | "automationTools" | "designTools" | "designMode" | "designGlobalEnabled" | "unattended">, includeVision: boolean): string[] {
   const builtin = Object.entries(record.agent.tools ?? {}).filter(([, enabled]) => enabled).map(([name]) => name);
   return [
     ...builtin,
@@ -1442,9 +1492,12 @@ function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "subagentTool
     // execute closure reports the disabled state instead (no session rebuild).
     ...record.browserTools.map((tool) => tool.name),
     ...record.automationTools.map((tool) => tool.name),
-    // 设计工具同理常驻激活（settings.design.enabled 由 execute 实时判断）；
-    // 切换激活集会使前缀缓存整体失效，比多几个工具定义贵得多。
-    ...record.designTools.map((tool) => tool.name)
+    // 设计工具仅在设计模式会话里激活（≈1.5K tokens/请求的前缀成本）；总闸
+    // settings.design.enabled 关闭时任何会话都不注入。会话内开关不变，因此
+    // 前缀缓存整段有效（区别于 browser 的常驻激活策略）。
+    ...(runtimeDesign.shouldActivateDesignTools({ sessionEnabled: record.designMode.enabled, globalEnabled: record.designGlobalEnabled() })
+      ? record.designTools.map((tool) => tool.name)
+      : [])
   ];
 }
 
@@ -1470,6 +1523,15 @@ function appendVisionHint(payload: { text: string; images: ImageContent[] }): vo
  */
 function reconcileVisionTool(record: SessionRuntimeRecord | undefined): void {
   if (!record || record.visionTools.length === 0) return;
+  reconcileActiveTools(record);
+}
+
+/**
+ * 重算会话的活动工具集（模型切换、设计模式切换、MCP 热更新共用）。活动集变化
+ * 即请求前缀变化（缓存键失配自动重算），因此只在真实状态切换时调用——不要在
+ * 每回合调用。
+ */
+function reconcileActiveTools(record: SessionRuntimeRecord): void {
   const includeVision = !hasImageInput(record.session.model);
   record.session.setActiveToolsByName(toolNamesFor(record, includeVision));
   // 活动集变化：上下文三段明细的工具段跟随（缓存键失配自动重算）。
@@ -2231,7 +2293,7 @@ function sessionReadyStatus(hasModel: boolean, usedFallback: boolean): string {
  * - otherwise (explicit sessionManager, or agent.save's config-apply rebuild)
  *   the record is rebuilt over the same history.
  */
-async function createSession(sessionManager?: SessionManager, options: { reactivate?: boolean; skipActivate?: boolean; modelOverride?: { provider: string; id: string }; accessModeOverride?: AccessMode; unattended?: boolean; noGenerationGuard?: boolean; agentOverride?: AgentProfile } = {}): Promise<void> {
+async function createSession(sessionManager?: SessionManager, options: { reactivate?: boolean; skipActivate?: boolean; modelOverride?: { provider: string; id: string }; accessModeOverride?: AccessMode; unattended?: boolean; noGenerationGuard?: boolean; agentOverride?: AgentProfile; inheritDesignMode?: boolean } = {}): Promise<void> {
   if (!workspace || !modelRuntime) return;
   // 工作区可能已切换（workspace.open / session.*）：先重读双作用域钩子配置。
   refreshHooksConfig();
@@ -2417,6 +2479,20 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     enabled: readPlanMode(sessionPlansPath(recordAgent.id, activeSessionManager.getSessionId())),
     narrate: undefined
   };
+  // 设计模式：同上从磁盘恢复（会话内不再变动，前缀缓存整段有效）。新建会话
+  // 默认不继承——只有 session.new（用户在设计模式里点「新建话题」）显式传
+  // inheritDesignMode，避免工作区/角色切换时意外把设计模式带过去。
+  const inheritDesignMode = !hasExistingMessages && options.inheritDesignMode === true;
+  const recordDesignMode: { enabled: boolean } = {
+    enabled: inheritDesignMode || readDesignMode(sessionDesignModePath(recordAgent.id, activeSessionManager.getSessionId()))
+  };
+  if (inheritDesignMode) {
+    try {
+      writeDesignMode(sessionDesignModePath(recordAgent.id, activeSessionManager.getSessionId()), true);
+    } catch (error) {
+      void post({ type: "log", level: "warn", message: `继承设计模式状态失败：${errorText(error)}` });
+    }
+  }
   const planTools = runtimePlanTools.buildPlanTools({
     getSessionId: () => recordSessionId,
     getEnabled: () => recordBox?.planState.enabled ?? false,
@@ -2476,7 +2552,9 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   // 自动化定时任务工具（每会话注册，绑定本记录所属 Agent 的 store）。
   const automationTools = buildAutomationTools(automationToolContextFor(recordAgent.id));
   // 设计模式工具（每会话注册；当前文档绑定在本 record 上，工具闭包经 recordBox 读写）。
-  // enabled 实时读 settings.design.enabled；写盘与推送统一走 persistDoc/bindDoc。
+  // 注册常驻（注册 ≠ 激活），是否进活动工具集由 shouldActivateDesignTools 判定
+  // （会话级 designMode + 全局总闸）；enabled 实时读总闸，双保险防总闸刚关时
+  // 已有调用继续写盘。写盘与推送统一走 persistDoc/bindDoc。
   const designTools = runtimeDesign.buildDesignTools({
     enabled: () => settings?.design?.enabled !== false,
     workspace: () => recordWorkspace || undefined,
@@ -2559,6 +2637,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
         status: "",
         queuedMessages: [],
         planMode: recordPlanState.enabled,
+        designMode: recordDesignMode.enabled,
         messages: normalizeMessages(earlySession.state.messages, earlySession.state.streamingMessage),
         executions: []
       }
@@ -2577,6 +2656,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     todoStore: recordTodoStore,
     todoPace: recordTodoPace,
     planState: recordPlanState,
+    designMode: recordDesignMode,
     memoryStore: recordMemoryStore,
     customTools: recordCustomTools,
     subagentTools,
@@ -2590,6 +2670,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     browserTools,
     automationTools,
     designTools,
+    designGlobalEnabled: () => settings?.design?.enabled !== false,
     shellKill,
     steeringImages: [],
     followUpImages: [],
@@ -2895,7 +2976,9 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       }
       // Always a fresh session id: the previously active session is parked and
       // keeps running, so a busy turn never blocks starting a new topic.
-      if (workspace) await createSession(SessionManager.create(workspace, workspaceSessionDir()));
+      // 设计模式下新建话题继承设计模式：用户在连续做设计，新话题不该丢掉画布
+      // 与 design_* 工具（继承结果同步落盘，重启后恢复一致）。
+      if (workspace) await createSession(SessionManager.create(workspace, workspaceSessionDir()), { inheritDesignMode: activeRuntime?.designMode.enabled === true });
       break;
     case "session.open": {
       const root = agentSessionRoot();
@@ -2974,6 +3057,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       try { await unlink(deleteTarget); } catch { /* 会话文件可能已不存在 */ }
       try { await unlink(join(deleteRoot, "todos", `${sessionId}.json`)); } catch { /* 任务文件可能不存在 */ }
       try { await unlink(join(deleteRoot, "plans", `${sessionId}.json`)); } catch { /* 计划模式状态文件可能不存在 */ }
+      try { await unlink(join(deleteRoot, "design-mode", `${sessionId}.json`)); } catch { /* 设计模式状态文件可能不存在 */ }
       try { await unlink(join(deleteRoot, "checkpoints", `${sessionId}.jsonl`)); } catch { /* 快照文件可能不存在 */ }
       // 删除当前在用的会话后立即补一个空白会话，保持「当前话题」可用。
       if (wasActive && workspace) {
@@ -3002,6 +3086,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
           // Session-scoped todo file lives next to the session list under todos/.
           try { await unlink(join(removeRoot, "todos", `${item.id}.json`)); } catch { /* 任务文件可能不存在 */ }
           try { await unlink(join(removeRoot, "plans", `${item.id}.json`)); } catch { /* 计划模式状态文件可能不存在 */ }
+          try { await unlink(join(removeRoot, "design-mode", `${item.id}.json`)); } catch { /* 设计模式状态文件可能不存在 */ }
           try { await unlink(join(removeRoot, "checkpoints", `${item.id}.jsonl`)); } catch { /* 快照文件可能不存在 */ }
         }
       }
@@ -3295,6 +3380,10 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     }
     case "session.planMode": {
       setPlanMode(resolveTargetRecord(command.sessionId), command.enabled);
+      break;
+    }
+    case "session.designMode": {
+      setDesignMode(resolveTargetRecord(command.sessionId), command.enabled);
       break;
     }
     case "checkpoint.rollback": {
@@ -3735,12 +3824,16 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       if (!settings) break;
       // 同步默认工作区前先记住旧值：当前正落在旧默认上时下面要即时切到新默认。
       const previousDefaultPath = resolveDefaultWorkspace(getAgentDir(), settings.defaultWorkspace);
+      // 总闸是否真的翻转：只有翻转才需要重算活动集（design_* 注入与否）。
+      // 无关保存（只改模型/外观等）不碰活动集，避免白做一次前缀重算。
+      const designSwitchChanged = (settings.design?.enabled !== false) !== (command.settings.design?.enabled !== false);
       settings.model = command.settings.model;
       settings.thinkingLevel = command.settings.thinkingLevel;
       settings.accessMode = command.settings.accessMode;
       settings.appearance = command.settings.appearance;
-      // browser/design 总开关镜像补齐（工具常驻注册、execute 实时读——若内存镜像
-      // 滞后，保存后开关不生效直至重启）：browser 是既有缺口，design 随新增补上。
+      // browser/design 总开关镜像补齐（若内存镜像滞后，保存后开关不生效直至重启）。
+      // browser 工具常驻激活、execute 实时读镜像；design 总闸额外要重算活动集
+      // （它决定 design_* 是否注入前缀）——在下方完成镜像赋值后统一 reconcile。
       settings.browser = command.settings.browser;
       settings.design = command.settings.design;
       settings.defaultWorkspace = command.settings.defaultWorkspace;
@@ -3753,6 +3846,10 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
           const model = modelRuntime?.getModel(selectedModel.provider, selectedModel.id);
           if (model) await switchSessionModel(activeRuntime, model);
         }
+        // 总闸刚被切换（settings.design.enabled）：设计工具的注入由它把关，重算活动
+        // 集——设计会话内关总闸立即撤工具，不必重建会话。放在模型切换之后，保证最终
+        // 活动集以最新镜像为准。
+        if (designSwitchChanged) reconcileActiveTools(activeRuntime);
       }
       // 更换默认工作区：当前 workspace 恰为旧默认 → 即时切到新默认（新会话继承刚
       // 保存的模型/思考等级）；否则下次落位（新建/切换/移除回落）自然生效。
