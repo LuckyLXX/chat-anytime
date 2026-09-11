@@ -54,12 +54,31 @@ function parseFrontmatter(markdown) {
   return { name, platform: platform ?? "webapp", tags, body: markdown.slice(match[0].length) };
 }
 
-/** `## Style Summary` 下的首段，压成一行并截断。 */
+/**
+ * `## Style Summary` 下的首段，压成一行并截断到预算内。
+ *
+ * 截断必须在**词边界 + 完整 token** 上收尾：直接 `slice(0, 220)` 会把半个 hex
+ * 切出来（实测 "#21140F" → "#21"），而摘要是要发给模型的——残值会被当成合法
+ * 颜色照抄（画布上真的出现 #21 这种值）。优先在句尾断，否则退到最后一个空格，
+ * 再剥掉末尾不完整的 `#hex` / 半词。
+ */
 function summaryOf(body) {
   const section = /## Style Summary\s*\n+([\s\S]*?)(?:\n##|\n### )/.exec(body)?.[1] ?? "";
   const paragraph = section.split(/\n\s*\n/).map((part) => part.trim()).find((part) => part.length > 0) ?? "";
-  return paragraph.replace(/\s+/gu, " ").slice(0, 220);
+  const flat = paragraph.replace(/\s+/gu, " ");
+  if (flat.length <= SUMMARY_CHARS) return flat;
+  const window = flat.slice(0, SUMMARY_CHARS + 1);
+  const sentenceEnd = Math.max(window.lastIndexOf(". "), window.lastIndexOf("。"));
+  let cut = sentenceEnd > SUMMARY_CHARS * 0.6 ? sentenceEnd + 1 : window.lastIndexOf(" ");
+  if (cut <= 0) cut = SUMMARY_CHARS;
+  let text = flat.slice(0, cut).trim();
+  // 末尾可能落在半个 hex 或半个词上：剥到最后一个完整 token 为止。
+  text = text.replace(/\s*#[0-9A-Fa-f]{0,5}$/u, "").replace(/[\s,;:—-]+$/u, "");
+  return text.length > 0 ? text : flat.slice(0, SUMMARY_CHARS);
 }
+
+/** 摘要字符预算（后续 buildGuideInjection 还会再裁一次字节）。 */
+const SUMMARY_CHARS = 220;
 
 /** Key aesthetics 里的 `- **Label**: text` 条目，取前 5 条。 */
 function aestheticsOf(body) {
@@ -209,7 +228,7 @@ function digestGuide(markdown) {
     if (digest.aesthetics.length > 2) digest.aesthetics.pop();
     else if (digest.lineHeight.length > 0) digest.lineHeight.pop();
     else if (digest.letterSpacing.length > 0) digest.letterSpacing.pop();
-    else if (digest.summary.length > 80) digest.summary = digest.summary.slice(0, digest.summary.length - 40);
+    else if (digest.summary.length > 80) digest.summary = trimToToken(digest.summary, digest.summary.length - 40);
     else if (digest.type.length > 4) digest.type.pop();
     else if (digest.spacing.length > 6) digest.spacing.pop();
     else if (digest.radius.length > 5) digest.radius.pop();
@@ -220,6 +239,15 @@ function digestGuide(markdown) {
     }
   }
   return digest;
+}
+
+/** 截到 limit 并在词边界收尾，剥掉末尾不完整的 `#hex`（同 summaryOf 的纪律）。 */
+function trimToToken(text, limit) {
+  // 先退到最近的空格，避免切在半个词上。
+  const window = text.slice(0, limit);
+  const cut = window.lastIndexOf(" ");
+  const base = cut > limit * 0.6 ? window.slice(0, cut) : window;
+  return base.replace(/\s*#[0-9A-Fa-f]{0,5}$/u, "").replace(/[\s,;:—-]+$/u, "");
 }
 
 /** 纯函数入口（便于测试与复用）：sources = [文件名, markdown][]。 */

@@ -66,6 +66,15 @@ describe("语料完整性（src/shared/design-guides.json）", () => {
     expect(guides.filter((entry) => entry.radius.length >= 3).length).toBeGreaterThanOrEqual(50);
   });
 
+  it("摘要不截在半个 hex 上（摘要要发给模型，残值会被当合法颜色照抄）", () => {
+    // 构建脚本的 summaryOf 在词边界收尾并剥掉不完整 token；
+    // 历史上 "...espresso text (#21140F)" 被切成 "(#21"，画布上真的出现了 #21。
+    for (const entry of allStyleGuides()) {
+      expect(entry.summary).not.toMatch(/#[0-9A-Fa-f]{1,5}$/u);
+      expect(entry.summary).not.toMatch(/\($/u);
+    }
+  });
+
   it("单套 digest 体积可接受（≤ 1.5KB，注入预算的前提）", () => {
     for (const entry of allStyleGuides()) {
       expect(utf8Bytes(JSON.stringify(entry))).toBeLessThanOrEqual(1500);
@@ -308,6 +317,20 @@ describe("buildGuideInjection", () => {
     const selected = selectStyleGuide("咖啡外卖 App 首页", "mobile")!;
     expect(selected.cjk).toBe(true);
     expect(buildGuideInjection(selected)).toContain(CJK_FONT_STACK_HINT.slice(0, 20));
+  });
+
+  it("美学方向按整段拼接：超预算丢尾段，绝不切进半个 hex 让模型照抄残值", () => {
+    // 真实案例：直接 slice(0,460) 把 "#21140F" 切成 "#21"。
+    const selected = selectStyleGuide("咖啡外卖 App 首页", "mobile")!;
+    expect(selected.direction).not.toMatch(/#[0-9A-Fa-f]{1,5}$/u);
+    // 每条 aesthetics 要么完整出现，要么整段不出现。
+    const guideEntry = getStyleGuide(selected.name)!;
+    for (const item of guideEntry.aesthetics.slice(0, 3)) {
+      const appears = selected.direction.includes(item);
+      const truncated = selected.direction.includes(item.slice(0, Math.max(1, item.length - 10))) && !appears;
+      expect(truncated).toBe(false);
+    }
+    expect(utf8Bytes(selected.direction)).toBeLessThanOrEqual(460);
   });
 
   it("超长指南也裁到预算内（从尾部裁，标题与标尺永远保留）", () => {

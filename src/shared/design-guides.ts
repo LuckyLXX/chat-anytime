@@ -215,6 +215,20 @@ function bestContrast(on: string, candidates: readonly string[]): string {
   return best;
 }
 
+/** 美学方向文本的字节预算：超出时整段丢弃（不切半句）。 */
+const DIRECTION_BUDGET = 460;
+
+/**
+ * 拼接美学方向：summary + 前 3 条 aesthetics，超预算**整段丢弃**。
+ * 不能直接 `slice(0, N)`——实测定向文本被切在半个 hex 中间（"#21140F" → "#21"），
+ * 模型会把这个残值当成合法颜色照抄。
+ */
+function directionOf(guide: StyleGuideDigest): string {
+  const parts = [guide.summary, ...guide.aesthetics.slice(0, 3)].filter((part) => part.length > 0);
+  while (parts.length > 1 && utf8Bytes(parts.join(" ")) > DIRECTION_BUDGET) parts.pop();
+  return parts.join(" ");
+}
+
 /**
  * 指南命名 token → 固定调色板形状；任何一项缺失都回落 fallback 的同名项，
  * 因此稀疏的指南永远不会产出不完整的调色板。返回值带上是否整块回落了默认。
@@ -361,7 +375,6 @@ export function selectStyleGuide(brief: string, platform: DesignPlatform, explic
     guide = getStyleGuide(darkName) ?? guide;
   }
   const mapped = mapGuidePaletteWithFallback(guide);
-  const direction = [guide.summary, ...guide.aesthetics.slice(0, 3)].filter((part) => part.length > 0).join(" ").slice(0, 460);
   return {
     name: guide.name,
     platform: guide.platform,
@@ -371,7 +384,7 @@ export function selectStyleGuide(brief: string, platform: DesignPlatform, explic
     fonts: guide.fonts,
     typeScale: typeScaleOf(guide),
     tokens: tokensOf(guide),
-    direction,
+    direction: directionOf(guide),
     details: guide.aesthetics.slice(3, 5).join(" ").slice(0, 220),
     letterSpacing: guide.letterSpacing,
     lineHeight: guide.lineHeight,
