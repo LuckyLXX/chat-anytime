@@ -21,8 +21,10 @@ export function toolRisk(
   if (toolName === "bash" || toolName === "powershell" || toolName === "mcp" || toolName.startsWith("mcp_") || toolName.startsWith("server_")) return "command";
   if (toolName === "edit" || toolName === "write") return "write";
   // 设计模式：改 workspace 内的 .design.json 文档 / 写导出 HTML，与 write 同风险
-  //（workspace 模式自动放行，read-only 拒绝）；design_list/open/read/create 免门。
-  if (toolName === "design_update" || toolName === "design_export") return "write";
+  //（workspace 模式自动放行，read-only 拒绝）；design_list/guides/open/read/create 免门。
+  // design_set_guide 虽只写 guide 一个字段，也是一次真实落盘（推进 revision），
+  // 与 design_update 同门——否则 read-only 模式下能绕过 write 门改文档。
+  if (toolName === "design_update" || toolName === "design_export" || toolName === "design_set_guide") return "write";
   // 浏览器自动化：导航与写入型 eval 过门；页面内操作（快照/点击/输入/滚动/
   // 截图/等待/读取）信任模型直接执行。
   if (toolName === "browser_navigate") return "browse";

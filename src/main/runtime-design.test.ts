@@ -265,12 +265,15 @@ describe("buildDesignTools", () => {
     expect(result.details).toMatchObject({ guide: "warm-food-mobile-light" });
   });
 
-  it("design_create 未命中时给索引导航（不内联 63 行全文）", async () => {
+  it("design_create 未命中时给索引导航（不内联 63 行全文），并把换风格入口指向 design_set_guide", async () => {
     const { tool, current } = await harness();
     const result = await execute(tool("design_create"), { name: "qwertyuiop" });
     const text = result.content[0]!.text;
     expect(text).toContain("未按需求命中风格指南");
     expect(text).toContain("design_guides");
+    // 关键：不能叫模型「重发带 guide 的 create」——同名已存在会走短路分支白跑一趟。
+    expect(text).toContain("design_set_guide");
+    expect(text).not.toContain("重发带 guide 的调用");
     expect(current()!.guide).toBeUndefined();
   });
 
@@ -280,6 +283,25 @@ describe("buildDesignTools", () => {
     expect(result.content[0]!.text).toContain("已按 guide 参数载入");
     expect(current()!.guide).toBe("ai-product-dark");
     await expect(execute(tool("design_create"), { name: "错名", guide: "no-such-guide" })).rejects.toThrow("风格指南不存在");
+  });
+
+  it("design_create 同名已存在时不改绑定，并指向 design_set_guide 换风格", async () => {
+    const { tool, current } = await harness();
+    await execute(tool("design_create"), { name: "重开", guide: "ai-product-dark" });
+    // 同名再来一次（哪怕带不同 guide）不得重建/换绑定——用户可能已改过稿。
+    const again = await execute(tool("design_create"), { name: "重开", guide: "crypto-dark-bold" });
+    expect(again.details).toMatchObject({ existed: true, guide: "ai-product-dark" });
+    expect(current()!.guide).toBe("ai-product-dark");
+    expect(again.content[0]!.text).toContain("已绑定风格指南「ai-product-dark」");
+  });
+
+  it("design_create 同名已存在且未绑定时指向 design_set_guide（换风格入口不是重发 create）", async () => {
+    const { tool, current } = await harness();
+    await execute(tool("design_create"), { name: "无名风格" });
+    const again = await execute(tool("design_create"), { name: "无名风格", guide: "ai-product-dark" });
+    // 同名短路：仍不改绑定（用户可能已改过稿），但把入口说清楚。
+    expect(current()!.guide).toBeUndefined();
+    expect(again.content[0]!.text).toContain("design_set_guide");
   });
 
   it("design_guides 列表/筛选/推荐", async () => {
@@ -313,20 +335,33 @@ describe("buildDesignTools", () => {
     await expect(execute(tool("design_set_guide"), { name: "nope" })).rejects.toThrow("风格指南不存在");
   });
 
-  it("design_update 质量门用文档绑定的指南标尺（非默认标尺）", async () => {
+  it("design_update 质量门用文档绑定的指南标尺（非默认标尺）——用两者查向相反的值验证", async () => {
     const { tool } = await harness();
-    // ai-product-dark 的圆角档位是 6/8/12/16/20/9999——14 不在其上，报；
-    // 而默认标尺里也没有 14，所以真正的证据是回执里的「质量门标尺」行与修复值。
     await execute(tool("design_create"), { name: "标尺绑定", guide: "ai-product-dark" });
+    // radius 24 在默认标尺上（0/2/4/6/8/10/12/16/20/24/9999），
+    // 但不在 ai-product-dark 的圆角档位（6/8/12/16/20/9999）上。
+    // 如果质量门用的是默认标尺，这个节点就不会报 off-scale-radius。
     const result = await execute(tool("design_update"), {
-      ops: [{ op: "create", node: { type: "rect", id: "card", name: "卡", x: 0, y: 0, w: 200, h: 100, radius: 14 } }]
+      ops: [{ op: "create", node: { type: "rect", id: "card", name: "卡", x: 0, y: 0, w: 200, h: 100, radius: 24 } }]
     });
     const text = result.content[0]!.text;
     expect(text).toContain("质量门标尺：文档已绑定风格指南「ai-product-dark」");
     expect(text).toContain("圆角 6/8/12/16/20/9999");
     expect(text).toContain("off-scale-radius");
-    // 吸附到该指南标尺的最近档（12），而不是默认标尺。
-    expect(text).toContain('"radius":12');
+    // 吸附到该指南标尺的最近档（20），而不是默认标尺上的 24。
+    expect(text).toContain('"radius":20');
+    expect(text).not.toContain('"radius":24');
+  });
+
+  it("未绑定指南的文档用默认标尺（radius 24 合法，不报 off-scale-radius）", async () => {
+    const { tool } = await harness();
+    await execute(tool("design_create"), { name: "默认标尺" });
+    const result = await execute(tool("design_update"), {
+      ops: [{ op: "create", node: { type: "rect", id: "card", name: "卡", x: 0, y: 0, w: 200, h: 100, radius: 24 } }]
+    });
+    const text = result.content[0]!.text;
+    expect(text).not.toContain("off-scale-radius");
+    expect(text).toContain("继续搭建其余屏幕/区域");
   });
 
   it("design_list 提示当前文档的风格指南绑定", async () => {

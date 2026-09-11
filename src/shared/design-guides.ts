@@ -466,6 +466,7 @@ export function buildGuideInjection(guide: SelectedStyleGuide, source: "brief" |
     headline,
     "设计规格（本稿必须照此执行；每个 text 节点的 fontFamily/字号都要显式写进节点）：",
     ...paletteLines(guide.palette),
+    ...(guide.paletteFallback ? ["（注：该指南调色板未通过 WCAG AA 可读性校验，上面是内置中性回退配色——按它执行，不要自己造一套。）"] : []),
     ...(fontParts.length > 0 ? [`字体：${fontParts.join("、")}`] : []),
     ...(typeLine ? [`字号档位：${typeLine}`] : []),
     `间距标尺（gap/padding 只能取这些值）：${guide.tokens.spacing.join("/")}`,

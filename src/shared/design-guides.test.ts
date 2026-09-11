@@ -313,6 +313,32 @@ describe("buildGuideInjection", () => {
     expect(buildGuideInjection(selected, "brief")).toContain("已按需求匹配");
   });
 
+  it("调色板整块回落时注入文本明确说明（模型不会以为拿到的就是指南原配色）", () => {
+    const broken = guide({
+      name: "broken",
+      palette: { "Page Background": "#F0F0F0", "Card Surface": "#F0F0F0", "Primary Text": "#E8E8E8", "Primary Accent": "#2563EB" }
+    });
+    const mapped = mapGuidePaletteWithFallback(broken);
+    expect(mapped.fallback).toBe(true);
+    const text = buildGuideInjection({
+      name: broken.name,
+      platform: broken.platform,
+      tags: broken.tags,
+      palette: mapped.palette,
+      paletteFallback: true,
+      fonts: broken.fonts,
+      typeScale: {},
+      tokens: { spacing: [...DEFAULT_SPACING_SCALE], radius: [...DEFAULT_RADIUS_SCALE], fontSize: [12, 16] },
+      direction: "摘要",
+      details: "",
+      letterSpacing: [],
+      lineHeight: [],
+      cjk: false
+    });
+    expect(text).toContain("未通过 WCAG AA 可读性校验");
+    expect(text).toContain(DEFAULT_GUIDE_PALETTE.page);
+  });
+
   it("中文 brief 附中文字体栈提示", () => {
     const selected = selectStyleGuide("咖啡外卖 App 首页", "mobile")!;
     expect(selected.cjk).toBe(true);

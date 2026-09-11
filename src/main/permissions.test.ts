@@ -62,8 +62,12 @@ describe("desktop tool permissions", () => {
   it("gates design doc writes as write-risk (workspace mode auto-allows)", () => {
     expect(toolRisk(workspace, "design_update", { ops: [] })).toBe("write");
     expect(toolRisk(workspace, "design_export", { path: "designs/exports/a.html" })).toBe("write");
+    // design_set_guide 也是真实落盘（改文档 guide 字段 + 推进 revision），与 update 同门。
+    expect(toolRisk(workspace, "design_set_guide", { name: "ai-product-dark" })).toBe("write");
+    expect(permissionAction("read-only", "design_set_guide", "write")).toBe("deny");
     // 免门：读取/列表/新建绑定类操作。
     expect(toolRisk(workspace, "design_list", {})).toBeUndefined();
+    expect(toolRisk(workspace, "design_guides", { brief: "咖啡 App" })).toBeUndefined();
     expect(toolRisk(workspace, "design_create", { name: "登录页" })).toBeUndefined();
     expect(toolRisk(workspace, "design_open", { name: "登录页" })).toBeUndefined();
     expect(toolRisk(workspace, "design_read", {})).toBeUndefined();
