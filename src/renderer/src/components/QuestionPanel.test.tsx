@@ -145,3 +145,28 @@ describe("singleClickSubmitAnswers", () => {
     expect(singleClickSubmitAnswers(questions, drafts, 2, "开始")).toEqual(["", "", "先写测试"]);
   });
 });
+
+describe("QuestionPanel hint line", () => {
+  function request(item: QuestionItem): QuestionRequest {
+    return { id: "q1", sessionId: "s1", toolCallId: "t1", questions: [item] };
+  }
+
+  it("shows the selection shortcut hint only when the question has options", () => {
+    const choice = renderToStaticMarkup(<QuestionPanel request={request(item({ text: "范围？", type: "single", options: ["全部", "已填"] }))} />);
+    expect(choice).toContain("使用 Tab / 上下键选择，回车或空格选中");
+  });
+
+  it("does not advertise selection shortcuts on a text question", () => {
+    const text = renderToStaticMarkup(<QuestionPanel request={request(item({ text: "版本？" }))} />);
+    expect(text).not.toContain("使用 Tab / 上下键选择");
+    expect(text).toContain("回车提交");
+  });
+
+  it("renders options whenever they are present, regardless of the declared type", () => {
+    // 模型只给 options 不给 type 的形状经主进程归一后是 single——渲染端只看 options。
+    const markup = renderToStaticMarkup(<QuestionPanel request={request(item({ text: "范围？", type: "text", options: ["全部", "已填"] }))} />);
+    expect(markup).toContain("全部");
+    expect(markup).toContain("已填");
+    expect(markup).toContain("question-options");
+  });
+});

@@ -90,7 +90,14 @@ function normalizeOptions(input: unknown): string[] {
 
 /**
  * 模型可用字符串简写（纯文本题），或对象形式指定 single/multiple 选择题。
- * 选择题选项不足 2 个时降级为文本题，保证渲染端拿到的永远是合法结构。
+ *
+ * 判定以**选项在不在**为准，而不是以 type 写没写为准：`type` 是可选字段，
+ * 模型经常只给 `options` 不给 `type`（2026-09-11 实测 tool-audit：连续 15 组
+ * 提问的每个问题都带 2-4 个 options、type 全缺省）。旧实现按「type 不是
+ * single/multiple 就当文本题」处理，会把这些选项**静默丢弃**——用户看到面板
+ * 里只有输入框、没有单选项（原始调用报文里明明有 options）。因此：
+ * options ≥ 2 即视为选择题，显式 multiple 保留多选，其余（缺省/text/非法值）
+ * 一律按单选；只有 options 不足 2 个才降级为文本题（无可选，保留输入框即可）。
  */
 export function normalizeQuestionItem(input: unknown): QuestionItem | undefined {
   if (typeof input === "string") {
@@ -101,10 +108,9 @@ export function normalizeQuestionItem(input: unknown): QuestionItem | undefined 
   const raw = input as RawQuestionObject;
   const text = typeof raw.text === "string" ? raw.text.trim() : "";
   if (!text) return undefined;
-  const type = raw.type === "single" || raw.type === "multiple" || raw.type === "text" ? raw.type : "text";
   const options = normalizeOptions(raw.options);
-  const choiceType = (type === "single" || type === "multiple") && options.length >= 2 ? type : "text";
-  return { text, type: choiceType, options: choiceType === "text" ? [] : options };
+  if (options.length < 2) return { text, type: "text", options: [] };
+  return { text, type: raw.type === "multiple" ? "multiple" : "single", options };
 }
 
 function normalizeQuestions(input: unknown): QuestionItem[] {
@@ -125,7 +131,7 @@ export function buildQuestionTools({ getSessionId, broker }: QuestionToolContext
     defineTool({
       name: "ask_question",
       label: "向用户提问",
-      description: `向用户提出 ${QUESTION_MAX_COUNT} 个以内的问题以澄清需求、确认方案或收集信息；工具阻塞等待用户在提问面板作答，回答原样返回（问题形态与选项见参数 schema）。选择题把最推荐的选项放第一位，界面会自动在其后标注（推荐）。缺少关键信息时优先用它提问，而不是自行假设。`,
+      description: `向用户提出 ${QUESTION_MAX_COUNT} 个以内的问题以澄清需求、确认方案或收集信息；工具阻塞等待用户在提问面板作答，回答原样返回（问题形态与选项见参数 schema）。需要用户选择时用对象形式并提供 options：给出 ≥2 个 options 就是选择题（type 缺省即单选，可显式写 multiple 多选），不要只给 text 不给 options；选择题把最推荐的选项放在第一位，界面会自动在其后标注（推荐）。缺少关键信息时优先用它提问，而不是自行假设。`,
       promptSnippet: "ask_question: 向用户提问（文本/单选/多选）并等待回答",
       parameters: Type.Object({
         questions: Type.Array(
@@ -133,8 +139,8 @@ export function buildQuestionTools({ getSessionId, broker }: QuestionToolContext
             Type.String({ description: "纯文本问题" }),
             Type.Object({
               text: Type.String({ description: "问题文本，简洁明确" }),
-              type: Type.Optional(Type.Union([Type.Literal("single"), Type.Literal("multiple"), Type.Literal("text")], { description: "题型：single 单选 / multiple 多选，缺省为文本题" })),
-              options: Type.Optional(Type.Array(Type.String(), { description: "选项列表，选择题必填（2-8 个）；把最推荐的选项放在第一位，界面会标注「推荐」" }))
+              type: Type.Optional(Type.Union([Type.Literal("single"), Type.Literal("multiple"), Type.Literal("text")], { description: "题型：multiple 多选；single 或省略（给 options 时缺省即单选）单选" })),
+              options: Type.Optional(Type.Array(Type.String(), { description: "选项列表，2-8 个；给出 ≥2 个即成为选择题（type 缺省为单选）。把最推荐的选项放在第一位，界面会标注「推荐」" }))
             })
           ]),
           {

@@ -97,10 +97,17 @@ describe("normalizeQuestionItem", () => {
     expect(normalizeQuestionItem({ text: "框架？", type: "single" })).toEqual({ text: "框架？", type: "text", options: [] });
   });
 
+  it("infers a choice question whenever options are present, even without a usable type", () => {
+    // 2026-09-11 实测：模型常只给 options 不给 type，旧行为会静默丢弃选项。
+    expect(normalizeQuestionItem({ text: "范围？", options: ["全部", "已填"] })).toEqual({ text: "范围？", type: "single", options: ["全部", "已填"] });
+    expect(normalizeQuestionItem({ text: "范围？", type: "text", options: ["全部", "已填"] })).toEqual({ text: "范围？", type: "single", options: ["全部", "已填"] });
+    expect(normalizeQuestionItem({ text: "范围？", type: "radio", options: ["全部", "已填"] })?.type).toBe("single");
+    expect(normalizeQuestionItem({ text: "范围？", type: "multiple", options: ["全部", "已填"] })?.type).toBe("multiple");
+  });
+
   it("caps options and rejects unknown types", () => {
     const capped = normalizeQuestionItem({ text: "功能？", type: "multiple", options: ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"] });
     expect(capped).toEqual({ text: "功能？", type: "multiple", options: ["1", "2", "3", "4", "5", "6", "7", "8"] });
-    expect(normalizeQuestionItem({ text: "X?", type: "radio", options: ["A", "B"] })?.type).toBe("text");
     expect(normalizeQuestionItem({ type: "text" })).toBeUndefined();
     expect(normalizeQuestionItem(42)).toBeUndefined();
   });
@@ -177,15 +184,28 @@ describe("ask_question tool", () => {
     expect(result.details).toEqual({ status: "answered", count: 5 });
   });
 
+  it("keeps options from the model payload (type omitted) as a single-choice question", async () => {
+    // 回归：真实 tool-audit 的 args——只有 options + text，没有 type。
+    const { tools, broker, emitted } = toolWithBroker();
+    const execution = runTool(tools[0], "call-1", { questions: [
+      { text: "收集范围？", options: ["只拉有内容的", "拉全部 32 人", "只拉必看范围"] }
+    ] });
+    await Promise.resolve();
+    expect(emitted[0]!.questions[0]).toEqual({ text: "收集范围？", type: "single", options: ["只拉有内容的", "拉全部 32 人", "只拉必看范围"] });
+    broker.resolve(emitted[0]!.id, ["只拉有内容的"]);
+    await execution;
+  });
+
   it("declares one ask_question tool with the expected shape", () => {
     const { tools } = toolWithBroker();
     expect(tools.map((tool) => tool.name)).toEqual(["ask_question"]);
   });
 
-  it("tells the model that the first option is shown as the recommendation", () => {
+  it("tells the model that options alone make a choice question", () => {
     const { tools } = toolWithBroker();
     const description = tools[0]?.description ?? "";
     expect(description).toContain("第一位");
     expect(description).toContain("（推荐）");
+    expect(description).toContain("options");
   });
 });

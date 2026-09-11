@@ -73,8 +73,12 @@ export function singleClickSubmitAnswers(questions: QuestionItem[], drafts: Ques
  * ask_question 的应答面板：从输入栏上方向上展开，逐条回答 AI 的提问。
  * 分页式：一次展示一个问题，右上角页码/箭头切换（草稿跨页保留），底部
  * 「忽略」取消整个提问、「继续」翻页或提交；快捷键 ↑↓/Tab 移动选择、
- * 回车或空格选中。选择题第一个选项自动标注「（推荐）」——与 ask_question
- * 工具描述的约定一致：模型把最推荐的选项放在第一位。
+ * 回车或空格选中（仅选择题展示该提示，文本题只提示回车提交）。选择题第一个
+ * 选项自动标注「（推荐）」——与 ask_question 工具描述的约定一致：模型把最推荐
+ * 的选项放在第一位。
+ *
+ * 注：选项是否存在只看 item.options（主进程 normalizeQuestionItem 已保证
+ * 「有选项就是选择题」），面板不再依赖模型是否写了 type。
  */
 export function QuestionPanel({ request, onOpenDetail, rootRef }: { request: QuestionRequest; onOpenDetail?: (detail: string) => void; rootRef?: (element: HTMLDivElement | null) => void }): ReactNode {
   const [drafts, setDrafts] = useState<QuestionDraft[]>(() => request.questions.map(() => emptyQuestionDraft()));
@@ -345,7 +349,7 @@ export function QuestionPanel({ request, onOpenDetail, rootRef }: { request: Que
         />
       </div>
       <footer className="question-panel-footer">
-        <span className="question-hint"><CircleHelp size={12} /> 使用 Tab / 上下键选择，回车或空格选中</span>
+        <span className="question-hint"><CircleHelp size={12} /> {item.options.length > 0 ? "使用 Tab / 上下键选择，回车或空格选中" : "回车提交"}</span>
         <div className="question-footer-actions">
           <button className="secondary-button" type="button" disabled={submitting} onClick={() => void resolve()}>忽略</button>
           <button className="primary-button" type="button" disabled={!answered || submitting || handoffOpen} onClick={continueToNext}>
