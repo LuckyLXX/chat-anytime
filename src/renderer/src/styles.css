@@ -1412,7 +1412,41 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 .terminal-ended { position: absolute; inset: 0; z-index: 5; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 20px; text-align: center; color: var(--code-text); background: color-mix(in srgb, var(--code-surface) 82%, transparent); }
 .terminal-ended span { max-width: 46ch; font-size: 13px; line-height: 1.5; opacity: 0.78; }
 .preview-scroll { width: 100%; height: 100%; overflow: auto; }
+/*
+ * 长文档预览只渲染可视区（右侧 Markdown 预览性能优化）。
+ *
+ * 落点是 markdown 包装层（.markdown-surface）的**内容块**，不是 .preview-scroll
+ * 自身——实测（真实 Electron 窗口、~318KB 输入）：cv 加在滚动容器自身时，该容器
+ * 永远「与用户相关」、子内容永远全量布局，零跳过收益；加在内容块上才有真实跳过
+ * （39 块中文档首帧挂载 545ms → 9.9ms）。
+ *
+ * contain-intrinsic-size 用 `auto`：首次渲染前用 300px 占位，渲染过后记住实测
+ * 高度，滚动条在通读一遍后收敛到真实总高（实测 21010 → 50498 = 真值）。不要去掉
+ * 这里的 `auto`，否则滚动条会长期停在估算值上。
+ */
+.preview-markdown .markdown-surface > * { content-visibility: auto; contain-intrinsic-size: auto 300px; }
+/* 大纲栏展开时内容区有独立的滚动基准，保持 cv（量测走 offsetTop，不受影响）。 */
 .preview-markdown { padding: 22px 24px 36px; background: var(--surface); }
+
+/*
+ * Markdown 预览外壳：内容区 + 可选大纲栏并排。
+ * 大纲栏宽度固定 200px（对标 dock-markdown 的 outline rail），窄面板下由下方
+ * 媒体查询隐藏，不抢正文宽度。
+ */
+.preview-markdown-shell { display: flex; width: 100%; height: 100%; min-height: 0; background: var(--surface); }
+.preview-markdown-shell > .preview-scroll { flex: 1 1 0; min-width: 0; }
+.markdown-outline { display: flex; flex-direction: column; flex: 0 0 200px; width: 200px; min-height: 0; overflow: hidden; border-right: 1px solid var(--border); background: var(--surface-muted); }
+.markdown-outline-title { flex: 0 0 auto; padding: 10px 10px 6px; color: var(--text-muted); font-size: 11px; font-weight: 600; }
+.markdown-outline-list { flex: 1 1 0; min-height: 0; overflow: auto; padding: 0 6px 12px; }
+.markdown-outline-item { display: block; width: 100%; margin-bottom: 1px; padding: 3px 8px; border: 0; border-radius: 5px; color: var(--text-muted); background: transparent; font-size: 12px; line-height: 1.5; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+.markdown-outline-item:hover { color: var(--text); background: var(--surface-button-hover); }
+.markdown-outline-item.active { color: var(--accent-text); background: var(--accent-soft); }
+.markdown-outline.is-empty { justify-content: flex-start; padding: 10px; color: var(--text-muted); font-size: 12px; }
+/* 窄面板（分屏/小窗）下大纲栏退化为悬浮在上方的一行，避免正文过窄。 */
+@media (max-width: 760px) {
+  .preview-markdown-shell.has-outline { flex-direction: column; }
+  .preview-markdown-shell > .markdown-outline { flex: 0 0 auto; width: 100%; max-height: 132px; border-right: 0; border-bottom: 1px solid var(--border); }
+}
 .preview-markdown-editor { width: 100%; height: 100%; background: var(--surface); }
 .markdown-editor { display: flex; flex-direction: column; width: 100%; height: 100%; min-height: 0; }
 .markdown-editor-host { flex: 1 1 0; min-height: 0; }

@@ -1,13 +1,15 @@
-import { AlertCircle, Brain, Check, ClipboardList, Code2, Eye, File, FileCode2, FileDiff, FileText, Globe2, LoaderCircle, Maximize2, Minimize2, Pause, Pencil, Play, Plus, Terminal, X } from "lucide-react";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type SyntheticEvent } from "react";
+import { AlertCircle, Brain, Check, ClipboardList, Code2, Eye, File, FileCode2, FileDiff, FileText, Globe2, ListTree, LoaderCircle, Maximize2, Minimize2, Pause, Pencil, Play, Plus, Terminal, X } from "lucide-react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type SyntheticEvent } from "react";
 import type { BrowserElementPick, BrowserPreviewState, WorkspaceFilePreview } from "../../../shared/protocol";
 import { IMAGE_PREVIEW_LIMIT_BYTES, workspaceFilePreviewUrl } from "../../../shared/protocol";
 import { artifactSandbox, buildArtifactPreviewSource, DYNAMIC_PREVIEW_ACTIONS, isDynamicArtifact, PREVIEW_SIZE_MESSAGE, type Artifact, type DynamicPreviewAction } from "../lib/content";
+import { extractMarkdownHeadings } from "../lib/content-pipeline";
 import { layoutDeviceFrame, storedPreviewDevice, storedPreviewFit, storePreviewDevice, storePreviewFit, type PreviewDeviceId } from "../lib/preview-device";
 import { DiffView } from "./DiffView";
+import { MarkdownOutline } from "./MarkdownOutline";
 import { MemoryPreviewContent } from "./MemoryPreview";
 import { MarkdownEditor, type EditorSaveStatus } from "./MarkdownEditor";
-import { CodeBlock, RichContent } from "./RichContent";
+import { CodeBlock, MarkdownPreviewContent } from "./RichContent";
 import { PreviewDeviceMenu } from "./PreviewDeviceMenu";
 import { BrowserPreview } from "./BrowserPreview";
 import { TerminalPanel } from "./TerminalPanel";
@@ -43,6 +45,36 @@ function fileArtifact(file: WorkspaceFilePreview): Artifact | undefined {
   return { id: `workspace-file-${file.relativePath}`, title: file.name, language: file.kind, content: file.content };
 }
 
+/**
+ * Markdown 预览内容块（memo）。
+ *
+ * 抽成独立 memo 组件的目的：预览内容与 App 的其它状态（对话框、toast、权限弹窗）
+ * 在同一渲染树，父级每次状态变化都会重渲染 ArtifactPreview；而 markdown 渲染本身
+ * 是这里最贵的一步。props 只含内容与身份标识，handler 由 App 的 useCallback 保证
+ * 引用稳定，内容不变时 React 直接跳过整棵子树 diff。
+ *
+ * 大纲（outline）也在这里：滚动容器与内容根的 ref 是本地 ref（不走 props，避免
+ * 每次渲染重建对象导致 memo 失效），大纲栏与滚动 spy 共享同一对 ref。
+ */
+const MarkdownPreviewBlock = memo(function MarkdownPreviewBlock({ content, identity, artifactPrefix, onOpenArtifact, workspace, markdownPath, outlineOpen }: { content: string; identity: string; artifactPrefix: string; onOpenArtifact(artifact: Artifact): void; workspace?: string; markdownPath?: string; outlineOpen: boolean }): ReactNode {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  // 大纲只依赖源文本，与滚动无关；空文档不算大纲，工具条按钮据此隐藏。
+  const headings = useMemo(() => extractMarkdownHeadings(content), [content]);
+  return (
+    <div className={`preview-markdown-shell${outlineOpen ? " has-outline" : ""}`}>
+      {outlineOpen && <MarkdownOutline headings={headings} scrollRef={scrollRef} contentRef={contentRef} measureKey={identity} />}
+      {/* 滚动容器不加 content-visibility：它在视口内永远“与用户相关”，子内容会全量
+          布局（零收益），而非渲染态下反而把内容塌成占位——cv 加在内容块上（styles.css）。 */}
+      <div className="preview-scroll preview-markdown" ref={scrollRef}>
+        <div ref={contentRef}>
+          <MarkdownPreviewContent content={content} headings={headings} artifactPrefix={artifactPrefix} onOpenArtifact={onOpenArtifact} workspace={workspace} markdownPath={markdownPath} />
+        </div>
+      </div>
+    </div>
+  );
+});
+
 function targetArtifact(target: PreviewTarget): Artifact | undefined {
   if (target.type === "artifact") return target.artifact;
   return target.type === "file" ? fileArtifact(target.file) : undefined;
@@ -68,7 +100,7 @@ function targetIcon(target: PreviewTarget): ReactNode {
   return <FileCode2 size={15} />;
 }
 
-function FilePreviewContent({ file, tabId, onOpenArtifact, workspace, editorState, onEditorChange, onEditorContentChange, onEditorSaved, onEditorStatusChange, onEditorSaveError, onResolveConflict }: { file: WorkspaceFilePreview; tabId: string; onOpenArtifact(artifact: Artifact): void; workspace?: string; editorState?: PreviewEditorState; onEditorChange?(patch: Partial<PreviewEditorState>): void; onEditorContentChange?(tabId: string, content: string): void; onEditorSaved?(tabId: string, content: string): void; onEditorStatusChange?(tabId: string, status: EditorSaveStatus): void; onEditorSaveError?(message: string): void; onResolveConflict?(choice: "keep-local" | "load-remote"): void }): ReactNode {
+function FilePreviewContent({ file, tabId, onOpenArtifact, workspace, editorState, outlineOpen, onEditorChange, onEditorContentChange, onEditorSaved, onEditorStatusChange, onEditorSaveError, onResolveConflict }: { file: WorkspaceFilePreview; tabId: string; onOpenArtifact(artifact: Artifact): void; workspace?: string; editorState?: PreviewEditorState; outlineOpen: boolean; onEditorChange?(patch: Partial<PreviewEditorState>): void; onEditorContentChange?(tabId: string, content: string): void; onEditorSaved?(tabId: string, content: string): void; onEditorStatusChange?(tabId: string, status: EditorSaveStatus): void; onEditorSaveError?(message: string): void; onResolveConflict?(choice: "keep-local" | "load-remote"): void }): ReactNode {
   if (file.kind === "image" && file.data && file.mimeType) {
     return <div className="preview-image"><img src={`data:${file.mimeType};base64,${file.data}`} alt={file.name} /></div>;
   }
@@ -102,7 +134,18 @@ function FilePreviewContent({ file, tabId, onOpenArtifact, workspace, editorStat
         </div>
       );
     }
-    return <div className="preview-scroll preview-markdown"><RichContent streaming={false} artifactPrefix={`preview-${file.relativePath}`} onOpenArtifact={onOpenArtifact} workspace={file.workspace ?? workspace}>{file.content}</RichContent></div>;
+    // 预览：markdownPath 让图片按「md 文件所在目录 → 工作区根」解析相对路径。
+    return (
+      <MarkdownPreviewBlock
+        content={file.content}
+        identity={file.relativePath}
+        outlineOpen={outlineOpen}
+        artifactPrefix={`preview-${file.relativePath}`}
+        markdownPath={file.relativePath}
+        onOpenArtifact={onOpenArtifact}
+        workspace={file.workspace ?? workspace}
+      />
+    );
   }
   if (file.kind === "code" && file.content !== undefined) {
     return <div className="preview-scroll preview-code"><CodeBlock language={file.language ?? "text"} code={file.content} /></div>;
@@ -162,6 +205,8 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, fullscree
   const [paused, setPaused] = useState(false);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [sourceModes, setSourceModes] = useState<Record<string, boolean>>({});
+  // 大纲栏按标签页记忆（默认关闭：窄面板下不抢内容宽度）。
+  const [outlineModes, setOutlineModes] = useState<Record<string, boolean>>({});
   // 设备视口按标签页记忆（新标签继承上次全局选择）；iframe 树形稳定，
   // 切换设备只改尺寸/缩放不重挂载，动态预览的运行时状态不丢。
   const [deviceModes, setDeviceModes] = useState<Record<string, PreviewDeviceId>>({});
@@ -176,6 +221,9 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, fullscree
   const fragmentTimersRef = useRef<number[]>([]);
 
   const showSource = sourceModes[activeTabId] === true;
+  const outlineOpen = outlineModes[activeTabId] === true;
+  // 大纲按钮只对 markdown 类预览有意义（文件预览 / 计划）。
+  const outlineable = !showSource && !artifact && (target.type === "plan" || (target.type === "file" && target.file.kind === "markdown" && target.file.content !== undefined && !target.file.truncated));
   const sourceable = Boolean(artifact) || (target.type === "file" && target.file.kind === "markdown" && target.file.content !== undefined) || target.type === "plan" || target.type === "memory";
   const device = deviceModes[activeTabId] ?? storedPreviewDevice();
   const fit = deviceFits[activeTabId] ?? storedPreviewFit();
@@ -362,6 +410,7 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, fullscree
             </span>
           )}
           {markdownEditable && <button className="icon-button" type="button" title={editing ? "切换到预览" : "切换到编辑"} aria-label={editing ? "预览" : "编辑"} onClick={() => onToggleEditing?.()}>{editing ? <Eye size={15} /> : <Pencil size={15} />}</button>}
+          {outlineable && <button className="icon-button" data-control="preview-outline-toggle" type="button" aria-pressed={outlineOpen} title={outlineOpen ? "隐藏大纲" : "显示文档大纲"} aria-label={outlineOpen ? "隐藏大纲" : "显示文档大纲"} onClick={() => setOutlineModes((prev) => ({ ...prev, [activeTabId]: !outlineOpen }))}><ListTree size={15} /></button>}
           {sourceable && <button className="icon-button" type="button" title={showSource ? "切换到预览" : "查看源代码"} aria-label={showSource ? "预览" : "源代码"} onClick={() => setSourceModes((prev) => ({ ...prev, [activeTabId]: !showSource }))}>{showSource ? <Eye size={15} /> : <Code2 size={15} />}</button>}
           {deviceable && !showSource && <PreviewDeviceMenu device={device} fit={fit} scalePercent={(stageLayout?.scale ?? 1) * 100} onDeviceChange={changeDeviceMode} onFitChange={changeDeviceFit} />}
           {dynamic && <button className="icon-button" type="button" aria-label={paused ? "继续动态预览" : "暂停动态预览"} title={paused ? "继续" : "暂停"} onClick={() => { postPreviewAction(paused ? DYNAMIC_PREVIEW_ACTIONS.resume : DYNAMIC_PREVIEW_ACTIONS.pause); setPaused((current) => !current); }}>{paused ? <Play size={15} /> : <Pause size={15} />}</button>}
@@ -382,9 +431,9 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, fullscree
         )}
         {!showSource && target.type === "browser" && <BrowserPreview suspended={browserSuspended} tabId={activeTabId} onPickSend={onBrowserPickSend} onStateChange={(state) => onBrowserStateChange?.(activeTabId, state)} />}
         {target.type === "terminal" && <TerminalPanel terminalId={active.id} workspace={workspace} />}
-        {!showSource && target.type === "plan" && <div className="preview-scroll preview-markdown"><RichContent streaming={false} artifactPrefix={`plan-${activeTabId}`} onOpenArtifact={onOpenArtifact} workspace={workspace}>{target.content}</RichContent></div>}
+        {!showSource && target.type === "plan" && <MarkdownPreviewBlock content={target.content} identity={`plan-${activeTabId}`} outlineOpen={outlineOpen} artifactPrefix={`plan-${activeTabId}`} onOpenArtifact={onOpenArtifact} workspace={workspace} />}
         {target.type === "memory" && <MemoryPreviewContent topicId={target.topicId} tabId={activeTabId} showSource={showSource} editorState={activeEditorState} onEditorChange={onActiveEditorChange} onEditorSaved={onActiveEditorSaved} onEditorStatusChange={onActiveEditorStatusChange} onSaveError={onActiveEditorSaveError} onOpenArtifact={onOpenArtifact} />}
-        {!showSource && !artifact && target.type === "file" && <FilePreviewContent file={target.file} tabId={activeTabId} onOpenArtifact={onOpenArtifact} workspace={target.workspace ?? workspace} editorState={activeEditorState} onEditorChange={onActiveEditorChange} onEditorContentChange={onActiveEditorContentChange} onEditorSaved={onActiveEditorSaved} onEditorStatusChange={onActiveEditorStatusChange} onEditorSaveError={onActiveEditorSaveError} onResolveConflict={onActiveEditorResolveConflict} />}
+        {!showSource && !artifact && target.type === "file" && <FilePreviewContent file={target.file} tabId={activeTabId} onOpenArtifact={onOpenArtifact} workspace={target.workspace ?? workspace} editorState={activeEditorState} outlineOpen={outlineOpen} onEditorChange={onActiveEditorChange} onEditorContentChange={onActiveEditorContentChange} onEditorSaved={onActiveEditorSaved} onEditorStatusChange={onActiveEditorStatusChange} onEditorSaveError={onActiveEditorSaveError} onResolveConflict={onActiveEditorResolveConflict} />}
         {target.type === "diff" && <div className="preview-scroll preview-diff"><DiffView patch={target.patch} /></div>}
         {target.type === "loading" && <div className="preview-empty"><LoaderCircle className="spinning" size={26} /><strong>正在读取文件</strong><span>{target.path}</span></div>}
         {target.type === "error" && <div className="preview-empty preview-error"><AlertCircle size={26} /><strong>无法打开预览</strong><span>{target.message}</span></div>}

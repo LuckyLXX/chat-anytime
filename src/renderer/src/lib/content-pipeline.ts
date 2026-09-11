@@ -41,6 +41,195 @@ function looksLikeUnifiedDiff(text: string): boolean {
     || /^@@\s.+\s@@/.test(raw);
 }
 
+// ── 数学语法探测（KaTeX 按需启用） ────────────────────────────────────────
+//
+// 完整管线里 rehypeKatex 占据近一半的解析耗时（318KB 输入实测 +540ms），而中文
+// 文档里的 `$ARGUMENTS`、`${sessionId}`、`价格 $100 到 $200 元` 会被当 LaTeX 解析，
+// 除了变慢还会持续刷 `LaTeX-incompatible input` 警告。这里用启发式判断「这份文本
+// 里是否真有 LaTeX」，无数学时不装配 remarkMath/rehypeKatex。
+//
+// 两道闸：① 候选段内不含反引号与空行（排除代码片段误配）；② 候选段内必须命中
+// LaTeX 特征（反斜杠命令 / 上下标 / 等式）。任意一对 `$...$`、`$$...$$` 通过即真。
+const latexCommandPattern = /\\[a-zA-Z]{2,}/u;
+const latexScriptPattern = /[A-Za-z0-9)\]}*]\s*[\^_]\s*[A-Za-z0-9({\\]/u;
+const latexEquationPattern = /[A-Za-z0-9)\]}*]\s*=\s*[A-Za-z0-9({\[]/u;
+/** 候选段长度上限：越过它的「配对」几乎一定是两处无关的 `$` 之间夹了整段正文。 */
+const MATH_CANDIDATE_LIMIT = 400;
+/** 扫描的 `$` 数量上限（极端文本的保护；正常文档远低于此）。 */
+const MATH_DOLLAR_SCAN_LIMIT = 500;
+
+/** 把围栏代码块与行内代码清空，避免代码里的 `$x$` 被当成数学。 */
+function stripCodeForMathScan(text: string): string {
+  const out: string[] = [];
+  let fence: { marker: string } | undefined;
+  for (const line of text.split("\n")) {
+    if (!fence) {
+      const opening = isFenceLine(line);
+      if (opening) {
+        fence = { marker: opening.marker };
+        out.push("");
+        continue;
+      }
+      out.push(line.replace(/`[^`]*`/gu, " "));
+      continue;
+    }
+    if (isClosingFence(line, fence.marker)) fence = undefined;
+    out.push("");
+  }
+  return out.join("\n");
+}
+
+function isMathCandidate(body: string): boolean {
+  const value = body.trim();
+  if (!value || value.length > MATH_CANDIDATE_LIMIT) return false;
+  if (value.includes("`")) return false;
+  if (/\n[ \t]*\n/u.test(value)) return false;
+  return latexCommandPattern.test(value) || latexScriptPattern.test(value) || latexEquationPattern.test(value);
+}
+
+/** 收集所有 `$$` 定界段的区间（先处理块级公式，再从扫描里挖掉）。 */
+function displayMathSpans(source: string): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
+  for (const match of source.matchAll(/\$\$([\s\S]*?)\$\$/gu)) {
+    if (isMathCandidate(match[1] ?? "")) return [[-1, -1]];
+    const start = match.index ?? 0;
+    spans.push([start, start + match[0].length]);
+  }
+  return spans;
+}
+
+/**
+ * 粗略判断 markdown 文本里是否含 LaTeX 数学语法（决定是否装配 KaTeX 插件）。
+ * 纯函数、不依赖 DOM，误判代价是「无数学文档变慢」或「数学显示为原文」。
+ */
+export function hasMathSyntax(text: string): boolean {
+  const source = stripCodeForMathScan(String(text ?? "").replace(/\r\n?/gu, "\n"));
+  if (!source.includes("$")) return false;
+
+  const display = displayMathSpans(source);
+  if (display.length === 1 && display[0]![0] === -1) return true;
+  // 挖掉已识别的 `$$...$$` 区间（保长度，避免后续下标错位）
+  let scannable = source;
+  for (const [start, end] of display) scannable = `${scannable.slice(0, start)}${" ".repeat(end - start)}${scannable.slice(end)}`;
+
+  // 逐个 `$` 当作候选起点，取它之后**最近的** `$` 作终点。
+  // 不做非重叠贪心配对：`$ARGUMENTS 与 $\frac{1}{2}$` 里第一个 `$` 会把真公式
+  // 一起吞掉，导致漏判；从每一个 `$` 都试一次就能在后者处命中。
+  const positions: number[] = [];
+  for (let i = 0; i < scannable.length; i += 1) {
+    if (scannable[i] !== "$") continue;
+    positions.push(i);
+    if (positions.length >= MATH_DOLLAR_SCAN_LIMIT) break;
+  }
+  for (let i = 0; i + 1 < positions.length; i += 1) {
+    // 只把「最近的」下一个 `$` 当作终点：配对跨过另一个 `$` 时那不是公式定界
+    //（`价格 $100 到 $200 元` 的两处 `$` 刚好配对但内容无数学特征，同样被否决）。
+    if (isMathCandidate(scannable.slice(positions[i]! + 1, positions[i + 1]!))) return true;
+  }
+  return false;
+}
+
+// ── 文档大纲（标题提取 + GitHub 风格 slug） ────────────────────────────────
+
+/** 文档大纲条目；`line` 是它在源文本里的行号（1 起），用于精确锚定渲染出的标题。 */
+export interface MarkdownHeading {
+  depth: number;
+  text: string;
+  index: number;
+  id: string;
+  /** 源文本行号（1 起）：react-markdown 的 `node.position.start.line` 用它对齐标题。 */
+  line: number;
+}
+
+/**
+ * GitHub 风格 slugger：小写、去标点、空格转 `-`、重名加数字后缀。
+ * 与 dock-markdown 的 makeSlugger 同构（保留 CJK 字符，HTML5 id 允许）。
+ */
+export function createHeadingSlugger(): (text: string) => string {
+  const seen = new Map<string, number>();
+  return (text: string): string => {
+    const base = text.toLowerCase().trim().replace(/[^\p{L}\p{N}\s-]/gu, "").replace(/\s+/gu, "-");
+    const slug = base || "section";
+    const count = seen.get(slug) ?? 0;
+    seen.set(slug, count + 1);
+    return count === 0 ? slug : `${slug}-${count}`;
+  };
+}
+
+/** 标题显示文本：去掉行内 markdown 标记（链接/图片/强调/行内代码/HTML 标签）。 */
+function headingTextFromMarkdown(raw: string): string {
+  return raw
+    .replace(/!\[([^\]]*)\]\([^)]*\)/gu, "$1")
+    .replace(/\[([^\]]*)\]\([^)]*\)/gu, "$1")
+    .replace(/`([^`]*)`/gu, "$1")
+    .replace(/[*_~]{1,3}/gu, "")
+    .replace(/<[^>]+>/gu, "")
+    .trim();
+}
+
+/** 内部共用：扫描 markdown 文本里的标题行（`line` 为 1 起行号）。 */
+function scanHeadings(text: string, slugger: (text: string) => string): MarkdownHeading[] {
+  const headings: MarkdownHeading[] = [];
+  let fence: { marker: string } | undefined;
+  let line = 0;
+  for (const raw of String(text ?? "").replace(/\r\n?/gu, "\n").split("\n")) {
+    line += 1;
+    if (!fence) {
+      const opening = isFenceLine(raw);
+      if (opening) {
+        fence = { marker: opening.marker };
+        continue;
+      }
+      const match = /^ {0,3}(#{1,6})\s+(.+?)\s*#*\s*$/u.exec(raw);
+      if (!match) continue;
+      const headingText = headingTextFromMarkdown(match[2] ?? "");
+      if (!headingText) continue;
+      headings.push({ depth: match[1]!.length, text: headingText, index: headings.length, id: slugger(headingText), line });
+      continue;
+    }
+    if (isClosingFence(raw, fence.marker)) fence = undefined;
+  }
+  return headings;
+}
+
+/**
+ * 从 markdown 源文本按行扫描标题（跳过围栏代码块内的 `#`），得到大纲列表。
+ * 纯函数、不查 DOM。
+ */
+export function extractMarkdownHeadings(text: string): MarkdownHeading[] {
+  return scanHeadings(text, createHeadingSlugger());
+}
+
+/**
+ * 把「某个 markdown segment 的局部标题」对齐到「全文大纲条目」，返回「段内行号 → 全局条目」映射。
+ *
+ * 为什么需要对齐：`parseRichContent` 会把正文按围栏/HTML 片段切成多段，每段各自交给
+ * 一个 `MarkdownSurface` 渲染，react-markdown 报的 `node.position.start.line` 是**段内**
+ * 行号；而大纲是全文级别的。两边的标题（层级 + 文本）用同一套规范化扫描得到，按顺序
+ * 匹配即可精确对齐，无需往 segment 里塞行号偏移。
+ *
+ * 对齐不上的标题（例如只在段内出现、与全文扫描不一致的异常情况）不入映射，调用方
+ * 就不给它注 id——宁缺不锚错。
+ */
+export function alignSegmentHeadings(globalHeadings: MarkdownHeading[], segmentContent: string): Map<number, MarkdownHeading> {
+  const aligned = new Map<number, MarkdownHeading>();
+  if (globalHeadings.length === 0) return aligned;
+  // 用一次性 slugger 取层级/文本/行号（id 不取，用全文那份）。
+  const local = scanHeadings(segmentContent, createHeadingSlugger());
+  let cursor = 0;
+  for (const heading of local) {
+    while (cursor < globalHeadings.length) {
+      const candidate = globalHeadings[cursor]!;
+      cursor += 1;
+      if (candidate.depth === heading.depth && candidate.text === heading.text) {
+        aligned.set(heading.line, candidate);
+        break;
+      }
+    }
+  }
+  return aligned;
+}
+
 export function normalizeMermaidSource(code: string, language = "mermaid"): string {
   const normalized = String(code || "").replace(/[—–－]/gu, "--").trim();
   if (!normalized) return "";

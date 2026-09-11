@@ -1,7 +1,103 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { workspaceFilePreviewUrl } from "../../../shared/protocol";
-import { RichContent } from "./RichContent";
+import { MarkdownPreviewContent, RichContent } from "./RichContent";
+
+describe("RichContent preview rendering", () => {
+  it("does not emit KaTeX markup for documents without math", () => {
+    // 中文文档里的 ${sessionId} / $ARGUMENTS 曾被当 LaTeX 解析（性能 + 警告刷屏）。
+    const markup = renderToStaticMarkup(
+      <MarkdownPreviewContent
+        content={"启动参数是 $ARGUMENTS，会话 id 是 ${sessionId}，预算 $100 到 $200 元。"}
+        artifactPrefix="preview-doc"
+        onOpenArtifact={() => undefined}
+      />
+    );
+    expect(markup).not.toContain("katex");
+    expect(markup).not.toContain("math-inline");
+    // 原文照常显示（不做任何吞掉）
+    expect(markup).toContain("$ARGUMENTS");
+  });
+
+  it("renders real LaTeX through KaTeX when present", () => {
+    const markup = renderToStaticMarkup(
+      <MarkdownPreviewContent content={"质能方程 $E = mc^2$ 很简洁。"} artifactPrefix="preview-math" onOpenArtifact={() => undefined} />
+    );
+    expect(markup).toContain("katex");
+  });
+
+  it("renders fences without a language as plain text instead of highlightAuto", () => {
+    // highlightAuto 要遍历 192 种语法（150 行无语言围栏实测 703ms），改为纯文本输出。
+    const code = Array.from({ length: 20 }, (_, i) => `const value${i} = ${i}; // 注释`).join("\n");
+    const markup = renderToStaticMarkup(
+      <MarkdownPreviewContent content={`\`\`\`\n${code}\n\`\`\``} artifactPrefix="preview-plain" onOpenArtifact={() => undefined} />
+    );
+    expect(markup).toContain("code-block");
+    // 无语言时工具条显示 text，且不带任何 hljs 高亮 span。
+    expect(markup).toContain("<span>text</span>");
+    expect(markup).not.toContain("hljs");
+  });
+
+  it("still highlights code when a known language is declared", () => {
+    const markup = renderToStaticMarkup(
+      <MarkdownPreviewContent content={"```ts\nconst value = 1;\n```"} artifactPrefix="preview-ts" onOpenArtifact={() => undefined} />
+    );
+    expect(markup).toContain("hljs-keyword");
+    expect(markup).toContain("<span>ts</span>");
+  });
+
+  it("injects heading ids for the outline and keeps them stable", () => {
+    const content = "# 第一章\n\n正文\n\n## 小节\n\n### 第一章\n";
+    const markup = renderToStaticMarkup(<MarkdownPreviewContent content={content} artifactPrefix="preview-outline" onOpenArtifact={() => undefined} />);
+    expect(markup).toContain('<h1 id="第一章">');
+    expect(markup).toContain('<h2 id="小节">');
+    // 重名标题追加数字后缀（与 extractMarkdownHeadings 的 slugger 一致）。
+    expect(markup).toContain('<h3 id="第一章-1">');
+  });
+
+  it("keeps heading ids aligned after the component re-renders", () => {
+    // 回归（demo 冒烟实测发现）：早期实现用「闭包内计数器」按出现顺序分配 id，
+    // 而 markdownComponents 被 useMemo 缓存、计数器会跨渲染持续累加，于是二次
+    // 渲染后除个别标题外全部拿不到 id。现按 react-markdown 的 node.position
+    // 行号查表，重复渲染必须每个标题都有稳定 id。
+    const content = "# 标题甲\n\n## 标题乙\n\n### 标题丙\n\n#### 标题丁\n";
+    const render = () => renderToStaticMarkup(<MarkdownPreviewContent content={content} artifactPrefix="preview-stable" onOpenArtifact={() => undefined} />);
+    const first = render();
+    const second = render();
+    expect(first).toContain('<h1 id="标题甲">');
+    expect(first).toContain('<h2 id="标题乙">');
+    expect(first).toContain('<h3 id="标题丙">');
+    expect(first).toContain('<h4 id="标题丁">');
+    // 同一份内容重复渲染，id 序列完全一致（无漂移、无丢失）。
+    expect(second).toBe(first);
+  });
+
+  it("assigns ids across segmented documents without drift", () => {
+    // parseRichContent 会把含围栏 artifact 的文档切成多段，每段各自渲染。
+    // 段内行号 → 全文条目对齐后，两段里的标题都能拿到正确 id。
+    const content = ["# 开头", "", "正文", "", "```mermaid", "flowchart LR", " A --> B", "```", "", "## 图表之后", "", "### 结尾"].join("\n");
+    const markup = renderToStaticMarkup(<MarkdownPreviewContent content={content} artifactPrefix="preview-seg" onOpenArtifact={() => undefined} />);
+    expect(markup).toContain('id="开头"');
+    expect(markup).toContain('id="图表之后"');
+    expect(markup).toContain('id="结尾"');
+  });
+
+  it("does not inject heading ids when no outline is provided (chat bubbles)", () => {
+    const markup = renderToStaticMarkup(
+      <RichContent artifactPrefix="message-no-outline" onOpenArtifact={() => undefined}>{"# 气泡标题"}</RichContent>
+    );
+    expect(markup).toContain("气泡标题");
+    expect(markup).not.toContain('id="气泡标题"');
+  });
+
+  it("resolves preview images against the markdown file directory", () => {
+    const workspace = "D:\\\\workspace\\\\PiDesktop";
+    const markup = renderToStaticMarkup(
+      <MarkdownPreviewContent content={"![fig](../assets/fig.png)"} markdownPath="docs/guide/note.md" workspace={workspace} artifactPrefix="preview-img" onOpenArtifact={() => undefined} />
+    );
+    expect(markup).toContain(`src="${workspaceFilePreviewUrl(workspace, "docs/assets/fig.png")}"`);
+  });
+});
 
 describe("RichContent dynamic bubbles", () => {
   it("renders dynamic assistant HTML directly in the chat bubble with an inert script", () => {

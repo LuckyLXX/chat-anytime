@@ -1,5 +1,104 @@
 import { describe, expect, it } from "vitest";
-import { findStableCutoff, normalizeMermaidSource, normalizeRichContent, parseRichContent } from "./content-pipeline";
+import { alignSegmentHeadings, createHeadingSlugger, extractMarkdownHeadings, findStableCutoff, hasMathSyntax, normalizeMermaidSource, normalizeRichContent, parseRichContent } from "./content-pipeline";
+
+describe("hasMathSyntax", () => {
+  it("detects real LaTeX in display and inline math", () => {
+    for (const source of [
+      "$E = mc^2$",
+      "$E=mc^2$",
+      "$$E=mc^2$$",
+      String.raw`$$\int_0^1 x dx$$`,
+      String.raw`$\frac{a}{b}$`,
+      String.raw`$\alpha + \beta$`,
+      String.raw`$\sqrt{2}$`,
+      String.raw`$x \to \infty$`,
+      "$x^2+y^2=z^2$",
+      "前文说明\n\n$$\\sum_{i=1}^n i$$\n\n后文"
+    ]) {
+      expect(hasMathSyntax(source), source).toBe(true);
+    }
+  });
+
+  it("ignores dollar signs that come from scripts, prices and code", () => {
+    // 中文文档最常见的三类误报：shell 变量、模板字符串、价格区间。
+    for (const source of [
+      "$ARGUMENTS",
+      "${sessionId}",
+      "价格 $100 到 $200 元",
+      "导出到 $HOME/.config 目录",
+      "没有美元符号的普通中文",
+      "a $ b $$ c",
+      // 数学特征不足：单个变量名不算公式（计划已知取舍）。
+      "$x$",
+      "$foo$"
+    ]) {
+      expect(hasMathSyntax(source), source).toBe(false);
+    }
+  });
+
+  it("skips fenced and inline code", () => {
+    expect(hasMathSyntax("```\n$x^2=4$\n```")).toBe(false);
+    expect(hasMathSyntax("~~~text\n$a = b$\n~~~")).toBe(false);
+    expect(hasMathSyntax("行内 `$x^2=4$` 是代码")).toBe(false);
+  });
+
+  it("still detects math alongside unrelated dollar signs", () => {
+    expect(hasMathSyntax("价格 $100 到 $200 元，但 $x^2=4$ 是数学")).toBe(true);
+    expect(hasMathSyntax("$ARGUMENTS 与 $\\frac{1}{2}$ 混排")).toBe(true);
+  });
+
+  it("does not pair dollar signs across distant prose", () => {
+    // 配对内容超过候选上限（含整段正文）时直接否决，避免整篇误开 KaTeX。
+    const long = `价格 $100，${'这是一段很长的中文正文。'.repeat(40)} 编号 $200`;
+    expect(hasMathSyntax(long)).toBe(false);
+  });
+});
+
+describe("extractMarkdownHeadings", () => {
+  it("collects h1-h6 with depth, display text, source line and stable slugs", () => {
+    const headings = extractMarkdownHeadings("# 标题一\n\n### 深一层\n\n## 标题一\n");
+    expect(headings).toEqual([
+      { depth: 1, text: "标题一", index: 0, id: "标题一", line: 1 },
+      { depth: 3, text: "深一层", index: 1, id: "深一层", line: 3 },
+      // 重名追加数字后缀（GitHub slugger 同构）
+      { depth: 2, text: "标题一", index: 2, id: "标题一-1", line: 5 }
+    ]);
+  });
+
+  it("ignores `#` inside fenced code blocks", () => {
+    const headings = extractMarkdownHeadings("# 真标题\n\n```bash\n# 这是注释不是标题\n```\n\n~~~\n## 也不是\n~~~\n");
+    expect(headings.map((heading) => heading.text)).toEqual(["真标题"]);
+  });
+
+  it("strips inline markdown from the heading text", () => {
+    const headings = extractMarkdownHeadings("## [链接](docs/a.md) 与 `代码` 和 **强调**\n");
+    expect(headings[0]?.text).toBe("链接 与 代码 和 强调");
+  });
+
+  it("returns an empty list for documents without headings", () => {
+    expect(extractMarkdownHeadings("只有正文，没有标题。")).toEqual([]);
+    expect(extractMarkdownHeadings("####### 七级不算标题")).toEqual([]);
+  });
+
+  it("aligns a segment's local line numbers onto the global outline", () => {
+    // parseRichContent 切段后，react-markdown 报的是段内行号；对齐靠「层级 + 文本」。
+    const global = extractMarkdownHeadings("# 开头\n\n正文\n\n## 图表之后\n\n### 结尾\n");
+    const aligned = alignSegmentHeadings(global, "## 图表之后\n\n正文\n\n### 结尾\n");
+    expect(aligned.get(1)?.id).toBe("图表之后");
+    expect(aligned.get(5)?.id).toBe("结尾");
+    // 不在全文大纲里的标题不入映射（宁缺不锚错）。
+    expect(aligned.size).toBe(2);
+  });
+
+  it("dedupes punctuation-only headings into a shared slug", () => {
+    const slugger = createHeadingSlugger();
+    // 去标点后为空 → 固定 "section"，重名走数字后缀。
+    expect(slugger("!!!")).toBe("section");
+    expect(slugger("???")).toBe("section-1");
+    expect(slugger("Hello World")).toBe("hello-world");
+    expect(slugger("hello world")).toBe("hello-world-1");
+  });
+});
 
 describe("rich content pipeline", () => {
   it("keeps ordinary code fences as markdown and promotes special fences", () => {

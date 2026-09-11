@@ -1,7 +1,9 @@
 import { Check, Code2, Copy, Expand, Eye, EyeOff, FileCode2, ExternalLink, Pause, Play, X } from "lucide-react";
 import { isValidElement, memo, useEffect, useId, useMemo, useRef, useState, type ReactNode, type SyntheticEvent } from "react";
+import { createPortal } from "react-dom";
 import { Fragment, jsx, jsxs } from "react/jsx-runtime";
 import ReactMarkdown, { defaultUrlTransform, type Components, type UrlTransform } from "react-markdown";
+import type { PluggableList } from "unified";
 import { fromHtml } from "hast-util-from-html";
 import { sanitize } from "hast-util-sanitize";
 import { toJsxRuntime } from "hast-util-to-jsx-runtime";
@@ -13,9 +15,9 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import hljs from "highlight.js";
 import { artifactSandbox, buildArtifactPreviewSource, DYNAMIC_PREVIEW_ACTIONS, isDynamicArtifact, isFullArtifactDocument, type Artifact, type DynamicPreviewAction } from "../lib/content";
-import { normalizeMermaidSource, parseRichContent, type RichContentSegment } from "../lib/content-pipeline";
+import { alignSegmentHeadings, extractMarkdownHeadings, hasMathSyntax, normalizeMermaidSource, parseRichContent, type MarkdownHeading, type RichContentSegment } from "../lib/content-pipeline";
+import { resolveMarkdownAssetUrl } from "../lib/workspace-asset";
 import { sanitizeRichHtmlTree } from "../lib/html-sanitize";
-import { resolveWorkspaceAssetUrl } from "../lib/workspace-asset";
 import { ImageLightbox } from "./ImageLightbox";
 
 interface RichContentProps {
@@ -26,6 +28,8 @@ interface RichContentProps {
   artifactPrefix: string;
   /** 会话工作区绝对路径：气泡/Markdown 里的相对图片地址经 pidesktop-file:// 映射。 */
   workspace?: string;
+  /** 当前 markdown 文件的工作区相对路径：预览面板专用，图片走「文件所在目录」优先解析。 */
+  markdownPath?: string;
 }
 
 interface ThemeTokens {
@@ -174,9 +178,12 @@ function CopyButton({ text }: { text: string }): ReactNode {
   );
 }
 
-function RichImage({ src, alt, title, workspace }: { src?: string; alt?: string; title?: string; workspace?: string }): ReactNode {
+function RichImage({ src, alt, title, workspace, markdownPath }: { src?: string; alt?: string; title?: string; workspace?: string; markdownPath?: string }): ReactNode {
   const [expanded, setExpanded] = useState(false);
-  const resolvedSrc = resolveWorkspaceAssetUrl(src, workspace);
+  // 预览面板传 markdownPath（按 md 所在目录 → 工作区根解析）；聊天气泡不传，
+  // 行为不变（resolveMarkdownAssetUrl 会回退到 resolveWorkspaceAssetUrl 的
+  // 工作区根语义）。
+  const resolvedSrc = resolveMarkdownAssetUrl(src, { markdownPath, workspace });
 
   if (!resolvedSrc) return null;
   return (
@@ -281,24 +288,64 @@ const MermaidBlock = memo(function MermaidBlock({ code, language }: { code: stri
          <button type="button" className="mermaid-canvas" aria-label="放大 Mermaid 图表" aria-busy={!svg} onClick={() => setExpanded(true)} dangerouslySetInnerHTML={{ __html: svg }} />
          <details className="mermaid-source"><summary>查看源码</summary><pre><code>{source}</code></pre></details>
       </div>
-      {expanded && (
+      {expanded && createPortal(
         <div className="modal-backdrop" role="presentation" onMouseDown={() => setExpanded(false)}>
           <div className="diagram-modal" role="dialog" aria-modal="true" aria-label="放大的 Mermaid 图表" onMouseDown={(event) => event.stopPropagation()}>
             <button className="icon-button modal-close" type="button" title="关闭图表" aria-label="关闭图表" onClick={() => setExpanded(false)}><X size={17} /></button>
             <div className="expanded-diagram" dangerouslySetInnerHTML={{ __html: svg }} />
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </>
   );
 });
 
+// 高亮的两个性能陷阱（均有实测数据）：
+// ① `hljs.highlightAuto` 要遍历 192 种语法，且有约 600ms 的首次冷启动预热成本——
+//    150 行**无语言**围栏代码块实测 703ms，同一段标注 ```text 只要 23ms。仓库里
+//    无语言围栏是普遍现象（.zcode/plans、.pi-subagents/artifacts、SKILL.md …），
+//    所以无语言/未知语言一律按纯文本输出，不再走 highlightAuto。
+// ② 超长代码块即使有语言也降级为纯文本，避免一次性阻塞主线程。
+const CODE_HIGHLIGHT_MAX_LINES = 800;
+const CODE_HIGHLIGHT_CACHE_LIMIT = 50;
+
+/**
+ * 高亮结果 LRU 缓存（`language + code` → HTML）。
+ * CodeBlock 自身已 memo，但父级内容变化（编辑器保存后刷新、切 tab 再切回）会让
+ * 同一个代码块重新高亮；缓存把这些重算变成命中。Map 的插入序即 LRU 序。
+ */
+const highlightCache = new Map<string, string>();
+
+function escapeCodeHtml(code: string): string {
+  return code.replace(/[&<>"']/gu, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character] ?? character);
+}
+
+function highlightCode(code: string, language: string): string {
+  const lineCount = code.split("\n").length;
+  // 无语言 / 语言未知 / 超长：纯文本转义输出（保留 language-unknown 的工具条显示）。
+  if (!language || !hljs.getLanguage(language) || lineCount > CODE_HIGHLIGHT_MAX_LINES) return escapeCodeHtml(code);
+  const key = `${language}\u0000${code}`;
+  const cached = highlightCache.get(key);
+  if (cached !== undefined) {
+    // 命中：刷新 LRU 位置（删除再插入，保持 Map 尾部为最新）。
+    highlightCache.delete(key);
+    highlightCache.set(key, cached);
+    return cached;
+  }
+  const value = hljs.highlight(code, { language }).value;
+  highlightCache.set(key, value);
+  if (highlightCache.size > CODE_HIGHLIGHT_CACHE_LIMIT) {
+    const oldest = highlightCache.keys().next();
+    if (!oldest.done) highlightCache.delete(oldest.value);
+  }
+  return value;
+}
+
 export const CodeBlock = memo(function CodeBlock({ language, code }: { language: string; code: string }): ReactNode {
   // Memoize so streaming code blocks only re-highlight when the code string
   // actually changes, not on every parent re-render.
-  const highlighted = useMemo(() => language && hljs.getLanguage(language)
-    ? hljs.highlight(code, { language }).value
-    : hljs.highlightAuto(code).value, [code, language]);
+  const highlighted = useMemo(() => highlightCode(code, language), [code, language]);
   return (
     <div className="code-block">
       <div className="code-toolbar"><span>{language || "text"}</span><div className="code-actions"><CopyButton text={code} /></div></div>
@@ -565,7 +612,29 @@ const richUrlTransform: UrlTransform = (url, key) => {
   return defaultUrlTransform(url);
 };
 
-function markdownComponents(artifactIndex: { current: number }, artifactPrefix: string, onOpenArtifact: (artifact: Artifact) => void, dark: boolean, htmlBubble = false, onHtmlAction?: (text: string) => void, workspace?: string): Components {
+function markdownComponents(artifactIndex: { current: number }, artifactPrefix: string, onOpenArtifact: (artifact: Artifact) => void, dark: boolean, htmlBubble = false, onHtmlAction?: (text: string) => void, workspace?: string, options: { markdownPath?: string; headings?: MarkdownHeading[]; headingByLine?: { current?: Map<number, MarkdownHeading> } } = {}): Components {
+  const { markdownPath, headings, headingByLine } = options;
+  // 标题 id 按「段内行号 → 全文大纲条目」的映射注入，不用「按出现顺序计数」：
+  // markdownComponents 被 useMemo 缓存，闭包里的计数器会跨渲染持续累加，导致
+  // 重渲染后 id 漂移（实测：首次渲染正确、二次渲染后大部分标题 id 变空）。
+  // react-markdown 给每个组件传了带 position 的 hast node，行号稳定且唯一。
+  // 映射放进 ref（而不是常量）：闭包只看到首次渲染的值，每次渲染刷新 ref.current。
+  function headingTag(depth: number): Components["h1"] {
+    return ({ children, node, ...rest }) => {
+      const Tag = `h${depth}` as "h1";
+      // 无大纲（气泡、assistant_html 直渲）时原样透传：h1-h6 本来就是自然标签，
+      // 映射后必须把其余属性（class/id/style/data-*）继续交给 DOM，否则气泡里
+      // 的 `<h1 class=...>` 会被静默剥掉属性。`node` 是 react-markdown 注入的
+      // AST 引用，不能落到 DOM 上。
+      if (!headings) return <Tag {...rest}>{children}</Tag>;
+      // 按「段内行号 → 全文大纲条目」映射取 id（node.position 是段内行号）。
+      const startLine = node?.position?.start?.line;
+      const heading = startLine === undefined ? undefined : headingByLine?.current?.get(startLine);
+      // 行号对不上（正文内嵌 HTML 自带标题等）时不注 id：宁缺不锚错。
+      if (!heading || heading.depth !== depth) return <Tag {...rest}>{children}</Tag>;
+      return <Tag {...rest} id={heading.id}>{children}</Tag>;
+    };
+  }
   function childrenText(value: ReactNode): string {
     if (typeof value === "string" || typeof value === "number") return String(value);
     if (Array.isArray(value)) return value.map((item) => childrenText(item)).join("");
@@ -599,7 +668,7 @@ function markdownComponents(artifactIndex: { current: number }, artifactPrefix: 
       return <a href={href} target="_blank" rel="noreferrer">{linkChildren}</a>;
     },
     img({ src, alt, title }) {
-      return <RichImage src={src} alt={alt} title={title} workspace={workspace} />;
+      return <RichImage src={src} alt={alt} title={title} workspace={workspace} markdownPath={markdownPath} />;
     },
     video({ src, poster, title, children }) {
       return <RichVideo src={src} poster={poster} title={title}>{children}</RichVideo>;
@@ -616,6 +685,12 @@ function markdownComponents(artifactIndex: { current: number }, artifactPrefix: 
       const classes = [typeof className === "string" ? className : "", action ? "html-action-button" : ""].filter(Boolean).join(" ");
       return <button {...buttonProps} className={classes || undefined} type="button" onClick={action && onHtmlAction ? () => onHtmlAction(action) : undefined}>{children}</button>;
     },
+    h1: headingTag(1),
+    h2: headingTag(2),
+    h3: headingTag(3),
+    h4: headingTag(4),
+    h5: headingTag(5),
+    h6: headingTag(6),
     // Keep the render contract explicit: complete documents never enter this
     // component; they become sandboxed Artifact previews in parseRichContent.
     html({ children }) {
@@ -753,13 +828,13 @@ function renderAssistantHtml(content: string, components: Components, scopeSelec
   }) as ReactNode;
 }
 
-const DynamicHtmlBubble = memo(function DynamicHtmlBubble({ content, closed, streaming, artifactPrefix, onOpenArtifact, onHtmlAction, workspace }: { content: string; closed: boolean; streaming: boolean; artifactPrefix: string; onOpenArtifact(artifact: Artifact): void; onHtmlAction?: (text: string) => void; workspace?: string }): ReactNode {
+const DynamicHtmlBubble = memo(function DynamicHtmlBubble({ content, closed, streaming, artifactPrefix, onOpenArtifact, onHtmlAction, workspace, markdownPath }: { content: string; closed: boolean; streaming: boolean; artifactPrefix: string; onOpenArtifact(artifact: Artifact): void; onHtmlAction?: (text: string) => void; workspace?: string; markdownPath?: string }): ReactNode {
   const scopeRef = useRef<HTMLDivElement | null>(null);
   const runtimeRef = useRef<BubbleRuntime | undefined>(undefined);
   const sourceKeyRef = useRef("");
   const scopeClass = htmlBubbleScopeClass(artifactPrefix);
   const artifactIndex = useRef(0);
-  const components = useMemo(() => markdownComponents(artifactIndex, artifactPrefix, onOpenArtifact, false, true, onHtmlAction, workspace), [artifactPrefix, onHtmlAction, onOpenArtifact, workspace]);
+  const components = useMemo(() => markdownComponents(artifactIndex, artifactPrefix, onOpenArtifact, false, true, onHtmlAction, workspace, { markdownPath }), [artifactPrefix, markdownPath, onHtmlAction, onOpenArtifact, workspace]);
   const scopeSelector = `.${scopeClass}`;
   const renderedContent = useMemo(() => renderAssistantHtml(content, components, scopeSelector), [components, content, scopeSelector]);
 
@@ -795,15 +870,37 @@ const DynamicHtmlBubble = memo(function DynamicHtmlBubble({ content, closed, str
   );
 });
 
-const MarkdownSurface = memo(function MarkdownSurface({ content, htmlBubble, artifactPrefix, onOpenArtifact, onHtmlAction, workspace }: { content: string; htmlBubble?: boolean; artifactPrefix: string; onOpenArtifact(artifact: Artifact): void; onHtmlAction?: (text: string) => void; workspace?: string }): ReactNode {
+const MarkdownSurface = memo(function MarkdownSurface({ content, htmlBubble, artifactPrefix, onOpenArtifact, onHtmlAction, workspace, markdownPath, headings }: { content: string; htmlBubble?: boolean; artifactPrefix: string; onOpenArtifact(artifact: Artifact): void; onHtmlAction?: (text: string) => void; workspace?: string; markdownPath?: string; headings?: MarkdownHeading[] }): ReactNode {
   const dark = useThemeTokens().dark;
   const artifactIndex = useRef(0);
-  const components = markdownComponents(artifactIndex, artifactPrefix, onOpenArtifact, dark, htmlBubble, onHtmlAction, workspace);
+  // 段内行号 → 全文大纲条目。放在 ref 里并每次渲染刷新：components 被 useMemo 缓存，
+  // 闭包不会随 content 变化而重建（重建反而会让 react-markdown 的组件缓存失效）。
+  const headingByLine = useRef<Map<number, MarkdownHeading> | undefined>(undefined);
+  // MarkdownSurface 已 memo，函数体只在 content/props 变化时执行，直接算即可。
+  headingByLine.current = headings ? alignSegmentHeadings(headings, content) : undefined;
+  const components = useMemo(
+    () => markdownComponents(artifactIndex, artifactPrefix, onOpenArtifact, dark, htmlBubble, onHtmlAction, workspace, { markdownPath, headings, headingByLine }),
+    [artifactPrefix, dark, headings, htmlBubble, markdownPath, onHtmlAction, onOpenArtifact, workspace]
+  );
   const scopeClass = htmlBubble ? htmlBubbleScopeClass(artifactPrefix) : "";
   const scopeSelector = scopeClass ? `.${scopeClass}` : "";
+
+  // KaTeX 按需装配：无数学语法时不装 remarkMath/rehypeKatex（318KB 输入实测
+  // 省 ~540ms，同时消除中文文档的 `LaTeX-incompatible input` 警告刷屏）。
+  const math = useMemo(() => hasMathSyntax(content), [content]);
+  // 插件数组必须 memo 化：每次渲染新建数组会让 react-markdown 内部缓存失效、
+  // 整篇重新解析。
+  const remarkPlugins = useMemo<PluggableList>(() => (math ? [remarkGfm, remarkMath] : [remarkGfm]), [math]);
+  const rehypePlugins = useMemo<PluggableList>(
+    () => math
+      ? [rehypeRaw, [sanitizeRichHtmlTree, { allowStyleTags: Boolean(htmlBubble), scopeSelector }], [rehypeSanitize, richSanitizeSchema], rehypeKatex]
+      : [rehypeRaw, [sanitizeRichHtmlTree, { allowStyleTags: Boolean(htmlBubble), scopeSelector }], [rehypeSanitize, richSanitizeSchema]],
+    [htmlBubble, math, scopeSelector]
+  );
+
   return (
-    <div className={htmlBubble ? `html-bubble ${scopeClass}` : undefined}>
-      <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeRaw, [sanitizeRichHtmlTree, { allowStyleTags: Boolean(htmlBubble), scopeSelector }], [rehypeSanitize, richSanitizeSchema], rehypeKatex]} components={components} urlTransform={richUrlTransform}>
+    <div className={htmlBubble ? `html-bubble ${scopeClass}` : "markdown-surface"}>
+      <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins} components={components} urlTransform={richUrlTransform}>
         {content}
       </ReactMarkdown>
     </div>
@@ -818,7 +915,7 @@ function compressStreamingBubbleHtml(content: string): string {
   return content.replace(/\n[ \t]*\n+/gu, "\n");
 }
 
-function renderSegment(segment: RichContentSegment, index: number, artifactPrefix: string, streaming: boolean, onOpenArtifact: (artifact: Artifact) => void, onHtmlAction?: (text: string) => void, workspace?: string): ReactNode {
+function renderSegment(segment: RichContentSegment, index: number, artifactPrefix: string, streaming: boolean, onOpenArtifact: (artifact: Artifact) => void, onHtmlAction?: (text: string) => void, workspace?: string, markdownPath?: string, headings?: MarkdownHeading[]): ReactNode {
   if (segment.type === "mermaid") return <MermaidBlock key={`mermaid-${index}`} code={segment.content} language={segment.language} />;
   if (segment.type === "artifact") {
     const artifact: Artifact = { ...segment.artifact, id: `${artifactPrefix}-artifact-${index}` };
@@ -832,18 +929,36 @@ function renderSegment(segment: RichContentSegment, index: number, artifactPrefi
     // streaming-identity fix), and would render half-parsed intermediate HTML.
     // The interactive bubble mounts once the closing tag arrives.
     if (segment.closed === false) {
-      return <MarkdownSurface key={`assistant-html-${index}`} content={compressStreamingBubbleHtml(segment.content)} artifactPrefix={`${artifactPrefix}-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} workspace={workspace} />;
+      return <MarkdownSurface key={`assistant-html-${index}`} content={compressStreamingBubbleHtml(segment.content)} artifactPrefix={`${artifactPrefix}-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} workspace={workspace} markdownPath={markdownPath} />;
     }
-    return <DynamicHtmlBubble key={`assistant-html-${index}`} content={segment.content} closed streaming={streaming} artifactPrefix={`${artifactPrefix}-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} workspace={workspace} />;
+    return <DynamicHtmlBubble key={`assistant-html-${index}`} content={segment.content} closed streaming={streaming} artifactPrefix={`${artifactPrefix}-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} workspace={workspace} markdownPath={markdownPath} />;
   }
-  return <MarkdownSurface key={`${segment.type}-${index}`} content={segment.content} htmlBubble={segment.type === "html"} artifactPrefix={`${artifactPrefix}-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} workspace={workspace} />;
+  return <MarkdownSurface key={`${segment.type}-${index}`} content={segment.content} htmlBubble={segment.type === "html"} artifactPrefix={`${artifactPrefix}-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} workspace={workspace} markdownPath={markdownPath} headings={headings} />;
 }
 
-export const RichContent = memo(function RichContent({ children, streaming, onOpenArtifact, onHtmlAction, artifactPrefix, workspace }: RichContentProps): ReactNode {
+/**
+ * 预览专用渲染入口：先算大纲（纯函数扫源文本），再把大纲交给每个 markdown segment。
+ * 各段自己用 `alignSegmentHeadings` 把「段内行号」对到「全文条目」（parseRichContent
+ * 可能把正文按围栏/artifact 切成多段），所以每段都能正确注 id，不会因分段而错位。
+ */
+export const MarkdownPreviewContent = memo(function MarkdownPreviewContent({ content, headings: providedHeadings, artifactPrefix, onOpenArtifact, workspace, markdownPath }: { content: string; headings?: MarkdownHeading[]; artifactPrefix: string; onOpenArtifact(artifact: Artifact): void; workspace?: string; markdownPath?: string }): ReactNode {
+  // 未显式传入时自己算（自包含，单测/其它调用点无需先调纯函数）；
+  // 传入时复用（预览块已算过一次，不必重算）。
+  const derived = useMemo(() => providedHeadings ?? extractMarkdownHeadings(content), [content, providedHeadings]);
+  const headings = providedHeadings ?? derived;
+  const segments = useMemo(() => parseRichContent(content, { isStreaming: false }), [content]);
+  return (
+    <div className="rich-content">
+      {segments.map((segment, index) => renderSegment(segment, index, artifactPrefix, false, onOpenArtifact, undefined, workspace, markdownPath, headings))}
+    </div>
+  );
+});
+
+export const RichContent = memo(function RichContent({ children, streaming, onOpenArtifact, onHtmlAction, artifactPrefix, workspace, markdownPath }: RichContentProps): ReactNode {
   const segments = useMemo(() => parseRichContent(children, { isStreaming: Boolean(streaming) }), [children, streaming]);
   return (
     <div className={`rich-content${streaming ? " is-streaming" : ""}`}>
-      {segments.map((segment, index) => renderSegment(segment, index, artifactPrefix, Boolean(streaming), onOpenArtifact, onHtmlAction, workspace))}
+      {segments.map((segment, index) => renderSegment(segment, index, artifactPrefix, Boolean(streaming), onOpenArtifact, onHtmlAction, workspace, markdownPath))}
     </div>
   );
 });
