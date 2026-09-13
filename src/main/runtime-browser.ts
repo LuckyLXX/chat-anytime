@@ -364,7 +364,8 @@ export function buildBrowserTools(deps: BrowserToolDeps): ToolDefinition[] {
       name: "browser_eval",
       label: "浏览器执行脚本",
       description: [
-        "在内置浏览器当前页面执行 JavaScript 表达式并返回结果（支持 Promise；返回值序列化为文本、上限约 8000 字符，请返回紧凑 JSON）。",
+        "在内置浏览器当前页面执行 JavaScript 表达式并返回结果（支持 Promise；返回值序列化为文本，请返回紧凑 JSON）。",
+        "返回值超过约 8000 字符时会自动把完整结果保存到工作区并在回执里给出路径（可用 read 分段读取，或调整表达式只取需要的字段），回执只带前 8000 字符预览。",
         "mode=read 只读直接执行；mode=write 可能修改页面（需用户授权）。",
         "数据抓取优先 browser_snapshot / browser_get；本工具用于快照覆盖不到的复杂提取（canvas、复杂 JSON 数据、SPA 动态内容）。"
       ].join(""),
@@ -377,10 +378,19 @@ export function buildBrowserTools(deps: BrowserToolDeps): ToolDefinition[] {
         const expression = typeof params?.expression === "string" ? params.expression.trim() : "";
         if (!expression) throw new Error("请提供要执行的 JavaScript 表达式");
         const mode = params?.mode === "write" ? "write" : "read";
-        const result = await run(deps, { op: "eval", expression, mode });
+        const result = await run(deps, { op: "eval", expression, mode, workspace: deps.workspace?.() });
         failIfNotOk(result);
         if (result.data.kind !== "eval") throw new Error("脚本返回了意外结果");
-        return { content: [{ type: "text" as const, text: withDownloads(`执行结果（${mode}）：\n${result.data.value}`, result) }], details: { mode } };
+        const { value, totalChars, savedPath } = result.data;
+        // 超限时回执三要素缺一不可：总量（模型才知道缺多少）、完整路径（知道能读）、
+        // 两个可行动作（分段 read / 缩小表达式）。截断本身仍可能切在 JSON 中间——
+        // 这是可接受的，因为模型现在能自行判断是否要读全。
+        const overflow = totalChars
+          ? savedPath
+            ? `\n\n（结果共 ${totalChars} 字符，已完整保存到 \`${savedPath}\`；上为前 ${value.length} 字符预览，完整内容请用 read 工具分段读取，或调整表达式只取需要的字段）`
+            : `\n\n（结果共 ${totalChars} 字符，超出单次返回上限且未能保存到工作区；上为前 ${value.length} 字符预览，请调整表达式缩小返回量）`
+          : "";
+        return { content: [{ type: "text" as const, text: withDownloads(`执行结果（${mode}）：\n${value}${overflow}`, result) }], details: { mode, ...(savedPath ? { savedPath } : {}) } };
       }
     }),
     defineTool({

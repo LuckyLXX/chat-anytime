@@ -301,3 +301,60 @@ describe("browser download receipts", () => {
     expect(text).toContain("不要当成失败");
   });
 });
+
+/**
+ * browser_eval 大结果回执：超限时三要素缺一不可——总量、完整路径（或明确说
+ * 未能保存）、可行动作。未超限时必须逐字不变。
+ */
+describe("browser eval overflow receipts", () => {
+  const evalWith = async (data: OkResult["data"], workspace?: string) => {
+    const deps: BrowserToolDeps = {
+      enabled: () => true,
+      ...(workspace ? { workspace: () => workspace } : {}),
+      request: async () => okResult(data)
+    };
+    const tools = buildBrowserTools(deps);
+    const evalTool = tools.find((tool) => tool.name === "browser_eval")!;
+    return await execute(evalTool, { expression: "rows", mode: "read" }) as { content: Array<{ text: string }>; details: Record<string, unknown> };
+  };
+
+  it("keeps a small result byte-identical", async () => {
+    const result = await evalWith({ kind: "eval", value: "42" });
+    expect(result.content[0]!.text).toBe("执行结果（read）：\n42");
+  });
+
+  it("names the total size, the path and both actions when the result was spilled", async () => {
+    const result = await evalWith({ kind: "eval", value: "[{\"id\":1}…（已截断）", totalChars: 24000, savedPath: ".pidesktop/eval/eval-20260913-101500-001.json" });
+    const text = result.content[0]!.text;
+    expect(text).toContain("24000 字符");
+    expect(text).toContain("`.pidesktop/eval/eval-20260913-101500-001.json`");
+    expect(text).toContain("read 工具分段读取");
+    expect(text).toContain("调整表达式只取需要的字段");
+    expect(result.details.savedPath).toBe(".pidesktop/eval/eval-20260913-101500-001.json");
+  });
+
+  it("says the spill failed instead of inventing a path", async () => {
+    const result = await evalWith({ kind: "eval", value: "xxx…（已截断）", totalChars: 24000 });
+    const text = result.content[0]!.text;
+    expect(text).toContain("24000 字符");
+    expect(text).toContain("未能保存到工作区");
+    expect(text).not.toContain(".pidesktop/eval");
+    expect(result.details.savedPath).toBeUndefined();
+  });
+
+  it("carries the record workspace so the main process can spill", async () => {
+    const calls: BrowserAutomationRequest[] = [];
+    const deps: BrowserToolDeps = {
+      enabled: () => true,
+      workspace: () => "D:\工作区",
+      request: async (op) => {
+        calls.push(op);
+        return okResult({ kind: "eval", value: "1" });
+      }
+    };
+    const tools = buildBrowserTools(deps);
+    const evalTool = tools.find((tool) => tool.name === "browser_eval")!;
+    await execute(evalTool, { expression: "1", mode: "read" });
+    expect(calls[0]).toEqual({ op: "eval", expression: "1", mode: "read", workspace: "D:\工作区" });
+  });
+});

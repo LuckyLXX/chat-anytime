@@ -27,6 +27,7 @@ import type {
   BrowserTabSummary
 } from "../shared/protocol.js";
 import { downloadDirFor, downloadRelativePath } from "./browser-downloads.js";
+import { isJsonLikeText, saveBrowserEvalResult } from "./browser-eval-result.js";
 import { BrowserStaticServer, detectLocalFilePath } from "./browser-static-server.js";
 import { normalizeBrowserUrl } from "./browser-preview-url.js";
 import type { BrowserPreviewController, DownloadInfo } from "./browser-preview.js";
@@ -911,7 +912,7 @@ export class BrowserAutomationController {
       case "upload":
         return this.upload(tabId, contents, request.ref, request.files);
       case "eval":
-        return this.evaluateJs(tabId, contents, request.expression, request.mode);
+        return this.evaluateJs(tabId, contents, request.expression, request.mode, request.workspace);
       case "screenshot":
         return this.screenshot(tabId, contents, request.fullPage, request.scale, request.maxWidth, request.format, request.quality);
       case "wait":
@@ -1156,7 +1157,7 @@ export class BrowserAutomationController {
     }
   }
 
-  private async evaluateJs(tabId: string, contents: WebContents, expression: string, mode: "read" | "write"): Promise<BrowserAutomationResult> {
+  private async evaluateJs(tabId: string, contents: WebContents, expression: string, mode: "read" | "write", workspace?: string): Promise<BrowserAutomationResult> {
     if (expression.length > MAX_EVAL_EXPRESSION_CHARS) throw new Error(`表达式过长（上限 ${MAX_EVAL_EXPRESSION_CHARS} 字符）`);
     this.preview.setAutomating(tabId, mode === "read" ? "正在执行页面脚本（读取）" : "正在执行页面脚本（写入）");
     try {
@@ -1177,10 +1178,33 @@ export class BrowserAutomationController {
       const serialized = remote.value !== undefined
         ? safeStringify(remote.value)
         : remote.description ?? remote.type ?? "undefined";
-      return { ok: true, data: { kind: "eval", value: truncate(serialized, MAX_EVAL_RESULT_CHARS) } };
+      return { ok: true, data: await this.evalPayload(serialized, workspace) };
     } finally {
       this.preview.setAutomating(tabId, undefined);
     }
+  }
+
+  /**
+   * Build the eval payload: the capped preview plus — when the serialized value
+   * exceeded the cap — its TOTAL length and (best-effort) the workspace path of
+   * the full spill. A plain head-first cut leaves the model with syntax-broken
+   * JSON and no way to tell how much is missing, so the receipt must always be
+   * able to answer both. Spilling is an enhancement, never a precondition: a
+   * failed save degrades to the truncation-only receipt.
+   */
+  private async evalPayload(serialized: string, workspace?: string): Promise<Extract<BrowserAutomationData, { kind: "eval" }>> {
+    const head = truncate(serialized, MAX_EVAL_RESULT_CHARS);
+    if (serialized.length <= MAX_EVAL_RESULT_CHARS) return { kind: "eval", value: head };
+    let savedPath: string | undefined;
+    const root = this.resolveDownloadWorkspace(workspace);
+    if (root) {
+      try {
+        savedPath = await saveBrowserEvalResult(root, serialized, isJsonLikeText(serialized));
+      } catch {
+        // 目录不可写：保持纯截断，不阻塞 eval 本身。
+      }
+    }
+    return { kind: "eval", value: head, totalChars: serialized.length, ...(savedPath ? { savedPath } : {}) };
   }
 
   /**

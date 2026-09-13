@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   AUTOMATION_TAB_IDLE_MS,
   awaitCondition,
+  MAX_EVAL_RESULT_CHARS,
   BrowserAutomationController,
   buildLocateScript,
   buildScrollScript,
@@ -16,7 +17,7 @@ import {
 } from "./browser-automation.js";
 import type { BrowserPreviewController, DownloadInfo } from "./browser-preview.js";
 import type { BrowserAutomationResult } from "../shared/protocol.js";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -459,5 +460,106 @@ describe("automation tab release on session dispose", () => {
     preview.rendered.add(orphan);
     controller.sweepIdleAutomationTabs(Date.now() + AUTOMATION_TAB_IDLE_MS + 60_000);
     expect(preview.closed).toEqual([]);
+  });
+});
+
+/**
+ * 大 eval 结果的落盘与回执：超限时必须同时给出「总量」与「完整路径」，
+ * 落盘失败或无工作区时才降级为纯截断。落盘本身是增强，绝不阻塞 eval。
+ */
+describe("automation eval result spill", () => {
+  const controllers: BrowserAutomationController[] = [];
+  const workspaces: string[] = [];
+  afterEach(() => {
+    for (const controller of controllers) controller.dispose();
+    controllers.length = 0;
+    for (const workspace of workspaces) rmSync(workspace, { recursive: true, force: true });
+    workspaces.length = 0;
+  });
+  const makeController = (preview: BrowserPreviewController): BrowserAutomationController => {
+    const controller = new BrowserAutomationController(preview);
+    controllers.push(controller);
+    return controller;
+  };
+  const makeWorkspace = (): string => {
+    const dir = mkdtempSync(join(tmpdir(), "pidesktop-evalspill-"));
+    workspaces.push(dir);
+    return dir;
+  };
+  /** 让下一次 eval 返回给定长度的字符串（假 debugger 只回一个 value）。 */
+  const evalReturns = (preview: BrowserPreviewController, tabId: string, value: unknown): void => {
+    const contents = preview.webContentsFor(tabId) as unknown as { debugger: { sendCommand: (method: string) => Promise<unknown> } };
+    contents.debugger.sendCommand = async (method) => (method === "Runtime.evaluate" ? { result: { value } } : {});
+  };
+  const boundTab = async (controller: BrowserAutomationController, sessionKey = "s1"): Promise<string> => {
+    const result = await controller.handle(sessionKey, { op: "tabs", action: "new" });
+    if (!result.ok || result.data.kind !== "tabs") throw new Error("tabs new 失败");
+    return result.data.tabs.find((tab) => tab.active)!.id;
+  };
+  const evalData = (result: BrowserAutomationResult) => {
+    if (!result.ok || result.data.kind !== "eval") throw new Error(`eval 返回了意外结果：${result.ok ? "" : result.error}`);
+    return result.data;
+  };
+
+  it("leaves a small result byte-identical (no new fields)", async () => {
+    const preview = makeFakePreview(["default"]);
+    const controller = makeController(preview);
+    const workspace = makeWorkspace();
+    const tabId = await boundTab(controller);
+    await controller.handle("s1", { op: "navigate", url: "https://example.com/", workspace });
+    evalReturns(preview, tabId, 42);
+    const data = evalData(await controller.handle("s1", { op: "eval", expression: "42", mode: "read", workspace }));
+    expect(data).toEqual({ kind: "eval", value: "42" });
+    expect(() => readdirSync(join(workspace, ".pidesktop", "eval"))).toThrow();
+  });
+
+  it("spills an oversized result and reports the total size plus the path", async () => {
+    const preview = makeFakePreview(["default"]);
+    const controller = makeController(preview);
+    const workspace = makeWorkspace();
+    const tabId = await boundTab(controller);
+    await controller.handle("s1", { op: "navigate", url: "https://example.com/", workspace });
+    const rows = Array.from({ length: 2000 }, (_, index) => ({ id: index, name: `item${index}` }));
+    evalReturns(preview, tabId, rows);
+    const full = JSON.stringify(rows);
+    const data = evalData(await controller.handle("s1", { op: "eval", expression: "rows", mode: "read", workspace }));
+    expect(data.totalChars).toBe(full.length);
+    // 预览 = 前 MAX_EVAL_RESULT_CHARS 字符 + truncate 自带的截断标记。
+    expect(data.value.length).toBeGreaterThanOrEqual(MAX_EVAL_RESULT_CHARS);
+    expect(data.value.length).toBeLessThan(MAX_EVAL_RESULT_CHARS + 20);
+    expect(data.value).toContain("已截断");
+    expect(data.savedPath).toMatch(/^\.pidesktop\/eval\/eval-.*\.json$/u);
+    // 落盘的必须是**完整**内容（可 JSON.parse），而回执里的只是预览。
+    const spilled = readFileSync(join(workspace, ...data.savedPath!.split("/")), "utf8");
+    expect(spilled).toBe(full);
+    expect(JSON.parse(spilled)).toHaveLength(2000);
+  });
+
+  it("degrades to truncation-only without a workspace", async () => {
+    const preview = makeFakePreview(["default"]);
+    const controller = makeController(preview);
+    const tabId = await boundTab(controller);
+    evalReturns(preview, tabId, "x".repeat(9000));
+    const data = evalData(await controller.handle("s1", { op: "eval", expression: "big", mode: "read" }));
+    // 回执里的长度是**序列化后**的字符数（字符串值 JSON 序列化会多一对引号）。
+    expect(data.totalChars).toBe(9002);
+    expect(data.savedPath).toBeUndefined();
+    expect(data.value.length).toBeGreaterThanOrEqual(MAX_EVAL_RESULT_CHARS);
+  });
+
+  it("degrades to truncation-only when the spill itself fails", async () => {
+    const preview = makeFakePreview(["default"]);
+    const controller = makeController(preview);
+    // 工作区存在（downloadPolicy 认它），但把文件写盘前的 realpath 目标做成不可写：
+    // 用一个同名文件冒充工作区目录，saveBrowserEvalResult 的 mkdir 会失败。
+    const workspaceFile = join(tmpdir(), `pidesktop-evalspill-file-${Date.now()}`);
+    writeFileSync(workspaceFile, "not a directory");
+    const tabId = await boundTab(controller);
+    await controller.handle("s1", { op: "navigate", url: "https://example.com/", workspace: workspaceFile });
+    evalReturns(preview, tabId, "y".repeat(9000));
+    const data = evalData(await controller.handle("s1", { op: "eval", expression: "big", mode: "read", workspace: workspaceFile }));
+    expect(data.totalChars).toBe(9002);
+    expect(data.savedPath).toBeUndefined();
+    rmSync(workspaceFile, { force: true });
   });
 });

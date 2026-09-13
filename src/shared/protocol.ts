@@ -717,7 +717,7 @@ export type BrowserAutomationRequest =
   | { op: "type"; ref: string; text: string; mode: "fill" | "append" }
   | { op: "press"; key: string }
   | { op: "scroll"; direction: "up" | "down"; amount: number; ref?: string }
-  | { op: "eval"; expression: string; mode: "read" | "write" }
+  | { op: "eval"; expression: string; mode: "read" | "write"; workspace?: string }
   | { op: "select"; ref: string; values: string[] }
   | { op: "upload"; ref: string; files: string[] }
   | { op: "screenshot"; fullPage?: boolean; scale?: number; maxWidth?: number; format?: "png" | "jpeg"; quality?: number }
@@ -736,7 +736,8 @@ export type BrowserAutomationData =
   | { kind: "scroll"; description: string }
   | { kind: "select"; description: string }
   | { kind: "upload"; description: string }
-  | { kind: "eval"; value: string }
+  /** totalChars/savedPath 只在结果超出单次返回上限时出现：value 是前 8000 字符预览。 */
+  | { kind: "eval"; value: string; totalChars?: number; savedPath?: string }
   | { kind: "screenshot"; data: string; width: number; height: number; mimeType: "image/png" | "image/jpeg" }
   | { kind: "wait"; description: string }
   | { kind: "get"; value: string }
