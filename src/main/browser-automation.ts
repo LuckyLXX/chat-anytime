@@ -72,6 +72,13 @@ export interface SnapshotElement {
   selected?: boolean | null;
   expanded?: boolean | null;
   href?: string | null;
+  /**
+   * 元素在视口内可见、但中心点被另一元素挡住时的遮挡者描述（如 `div.modal-mask`）。
+   * 仅前 OBSTRUCTION_PROBE_LIMIT 个元素会探测，超出者为 null（undefined = 未探测）。
+   * **刻意不参与 elementSignature**：遮挡随滚动/悬停/动画瞬时变化，纳入签名会让
+   * 「滚动后遮挡消失」被误判为「引用失效」（比不标注更糟）。
+   */
+  obstructedBy?: string | null;
   x: number;
   y: number;
 }
@@ -268,19 +275,34 @@ const QUERY_DEEP_FN = `function queryDeep(selector) {
    return found;
  }`;
 
+/** Elements probed for obstruction per snapshot (elementFromPoint is cheap, but 200× per snapshot adds up). */
+export const OBSTRUCTION_PROBE_LIMIT = 60;
+
 /** Page snapshot: URL/title/page text + signatures of every interactive element. */
 export function buildSnapshotScript(cap: number, pageTextCap: number): string {
   return `(() => {
    ${VIEWPORT_POSITION_FN}
    ${PAGE_TEXT_FN}
+   ${HIT_TEST_FN}
    const collectInteractiveElements = ${COLLECT_CORE};
    const collected = collectInteractiveElements(${cap} + 1);
     const els = collected.slice(0, ${cap});
-   const items = els.slice(0, ${cap}).map((el) => {
+   const items = els.slice(0, ${cap}).map((el, index) => {
      const rect = el.getBoundingClientRect();
      const pos = viewportPosition(el);
      const expanded = typeof el.open === 'boolean' ? el.open : (el.getAttribute('aria-expanded') === 'true' ? true : el.getAttribute('aria-expanded') === 'false' ? false : null);
      const href = typeof el.href === 'string' && el.href.startsWith('http') ? el.href.slice(0, 300) : null;
+     // 遮挡预标注：只在点击时才知道「被盖住」太晚（一次甚至多次白轮）。复用点击
+     // 路径已有的 hitTest（它已处理 iframe/Shadow 的根空间差异），只探测前
+     // OBSTRUCTION_PROBE_LIMIT 个元素以控制开销。
+     let obstructedBy = null;
+     if (index < ${OBSTRUCTION_PROBE_LIMIT}) {
+       const top = hitTest(el);
+       if (top && top !== el && !el.contains(top)) {
+         const cls = typeof top.className === 'string' && top.className.trim() ? top.className.trim().split(/\s+/)[0] : null;
+         obstructedBy = top.tagName.toLowerCase() + (top.id ? '#' + top.id : '') + (cls ? '.' + cls : '');
+       }
+     }
      return {
        tag: el.tagName.toLowerCase(),
        role: el.getAttribute('role'),
@@ -294,6 +316,7 @@ export function buildSnapshotScript(cap: number, pageTextCap: number): string {
        selected: typeof el.selected === 'boolean' ? el.selected : null,
        expanded,
        href,
+       obstructedBy,
        x: Math.round(pos.x + rect.width / 2),
        y: Math.round(pos.y + rect.height / 2)
      };
@@ -453,10 +476,19 @@ export function formatSnapshotLine(item: SnapshotElement, index: number): string
     item.expanded ? "已展开" : ""
   ].filter(Boolean);
   const label = item.text || item.name || item.value;
-  return `@e${index + 1} <${item.tag}${attrs}>${label ? ` ${JSON.stringify(label)}` : ""}${states.length > 0 ? ` [${states.join("、")}]` : ""}`;
+  // 遮挡提示放行尾：行首必须留给 @eN（模型靠它扫描引用）。
+  const obstructed = item.obstructedBy ? `（被 ${item.obstructedBy} 遮挡，点击会失败）` : "";
+  return `@e${index + 1} <${item.tag}${attrs}>${label ? ` ${JSON.stringify(label)}` : ""}${states.length > 0 ? ` [${states.join("、")}]` : ""}${obstructed}`;
 }
 
-/** Stable element identity: everything the snapshot saw about this ref. */
+/**
+ * Stable element identity: everything the snapshot saw about this ref.
+ *
+ * `obstructedBy` is DELIBERATELY excluded: obstruction is a transient state
+ * (scroll, hover, animation). Including it would turn 「snapshot 时被遮挡 →
+ * 用户滚了一下 → click 时不再遮挡」 into a signature mismatch — i.e. 「页面已
+ * 变化，引用失效」 — forcing a re-snapshot on a click that would have succeeded.
+ */
 export function elementSignature(item: SnapshotElement): string {
   return [item.tag, item.role, item.type, item.id, item.cls, item.name, item.text, item.value, item.checked, item.selected, item.expanded, item.href]
     .map((value) => (value === null || value === undefined ? "" : String(value)))

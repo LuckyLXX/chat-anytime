@@ -12,6 +12,7 @@ import {
   elementSignature,
   formatSnapshotLine,
   isSideEffectRejection,
+  OBSTRUCTION_PROBE_LIMIT,
   urlPatternMatcher,
   withOpTimeout
 } from "./browser-automation.js";
@@ -82,6 +83,30 @@ describe("browser automation snapshot formatting", () => {
     expect(elementSignature(element)).toBe(signature);
     expect(elementSignature({ ...element, text: "退出" })).not.toBe(signature);
   });
+
+  it("marks obstructed elements at the end of the line", () => {
+    const line = formatSnapshotLine({ ...element, obstructedBy: "div.modal-mask" }, 0);
+    expect(line).toContain("（被 div.modal-mask 遮挡，点击会失败）");
+    // 行首必须留给 @eN（模型靠它扫描引用）。
+    expect(line.startsWith("@e1 <button")).toBe(true);
+  });
+
+  it("keeps an unobstructed line byte-identical to the pre-change format", () => {
+    // 防回归：新增字段不得影响普通页面（含显式 null 与缺省两种形态）。
+    expect(formatSnapshotLine({ ...element, obstructedBy: null }, 2)).toBe('@e3 <button type="submit"#login.primary.large> "登录"');
+    expect(formatSnapshotLine(element, 2)).toBe('@e3 <button type="submit"#login.primary.large> "登录"');
+  });
+
+  /**
+   * 关键约束回归：遮挡状态绝不能进签名。遮挡随滚动/动画瞬时变化，纳入签名会把
+   * 「snapshot 时被遮挡 → 滚动后不再遮挡」判成「页面已变化、引用失效」——比不标注
+   * 更糟（一个本可成功的点击被强制重快照）。
+   */
+  it("never lets obstruction state enter the element signature", () => {
+    const clear = { ...element, obstructedBy: null };
+    const covered = { ...element, obstructedBy: "div.mask" };
+    expect(elementSignature(covered)).toBe(elementSignature(clear));
+  });
 });
 
 describe("browser automation page scripts", () => {
@@ -108,6 +133,15 @@ describe("browser automation page scripts", () => {
     expect(script).toContain("scrollIntoView");
     expect(script).toContain("elementFromPoint");
     expect(script).toContain("signature");
+  });
+
+  it("probes obstruction inside the snapshot script itself", () => {
+    const script = buildSnapshotScript(200, 3000);
+    // 模板拼接漏掉 HIT_TEST_FN 会让整段脚本在页面里 undefined 报错。
+    expect(script).toContain("function hitTest(el)");
+    expect(script).toContain("obstructedBy");
+    expect(script).toContain(`index < ${OBSTRUCTION_PROBE_LIMIT}`);
+    expect(script).toContain("el.contains(top)");
   });
 
   it("clears inputs via the native setter in fill mode only", () => {
