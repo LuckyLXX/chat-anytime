@@ -120,6 +120,17 @@ describe("memory prompt blocks", () => {
     expect(block).toContain("todo_write");
     expect(block).toContain("确认边界");
     expect(block).toContain("memory_read");
+    expect(block).toContain("成功的工具调用结果");
+    expect(block).toContain("无行动不记忆");
+  });
+
+  it("governance block requires an action-verified source for new memories", () => {
+    const block = buildMemorySystemPromptBlock();
+    // 来源要求：必须来自成功工具调用或用户陈述（用户说「记住 X」也是合法来源）。
+    expect(block).toMatch(/成功的工具调用结果|用户明确陈述/);
+    // 反例枚举：三类禁止写入的内容（断言只钉语义要点，容忍措辞微调）。
+    expect(block).toContain("推理猜测");
+    expect(block).toMatch(/未验证的假设|未执行的计划/);
   });
 
   it("snapshot block is undefined for an empty library and truncates beyond 40 lines", () => {
