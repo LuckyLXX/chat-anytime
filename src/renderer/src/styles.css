@@ -2255,6 +2255,8 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 .automation-runs-status.ok { color: var(--success); }
 .automation-runs-status.error { color: var(--danger); }
 .automation-runs-status.aborted { color: var(--text-muted); }
+/* skipped 与 aborted 同为中性态：跳过不是失败，绝不用 danger 色 */
+.automation-runs-status.skipped { color: var(--text-muted); }
 .automation-runs-status.running { color: var(--warning); }
 .automation-runs-row.running { cursor: default; border-color: var(--border-strong); background: var(--surface-muted); }
 .automation-runs-running-since { color: var(--warning); font-size: 10px; }
@@ -2269,6 +2271,7 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 .automation-runs-summary { overflow: hidden; margin: 5px 0 0 24px; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); font-size: 10px; line-height: 1.5; }
 .automation-runs-summary.error { color: var(--danger); }
 .automation-runs-summary.aborted { color: var(--text-muted); }
+.automation-runs-summary.skipped { color: var(--text-muted); }
 .automation-runs-summary-label { opacity: .85; }
 .automation-runs-detail { display: grid; gap: 9px; margin: 8px 0 0 24px; padding-top: 9px; border-top: 1px dashed var(--border); }
 .automation-runs-detail-block { display: grid; gap: 3px; min-width: 0; }

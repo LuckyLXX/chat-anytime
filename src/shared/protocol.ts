@@ -1048,12 +1048,22 @@ export interface AutomationRunRecord {
   agentId: string;
   /** 快照。 */
   agentName: string;
-  /** 回看入口（AutomationRunInfo.sessionId 同源）。 */
-  sessionId: string;
+  /**
+   * 回看入口（AutomationRunInfo.sessionId 同源）。**skipped 记录没有会话，故可选**：
+   * 跳过不是一次运行，不该出现在会话列表里，也没有可打开的会话。
+   */
+  sessionId?: string;
   startedAt: number;
   durationMs: number;
-  /** 同 {@link AutomationRunInfo.status}：ok / error / aborted。 */
-  status: "ok" | "error" | "aborted";
+  /**
+   * 同 {@link AutomationRunInfo.status}：ok / error / aborted；
+   * 外加 **skipped** = 本轮本该运行但被跳过（应用未运行 / 任务被暂停 / 上一轮未结束）。
+   * skipped 是中性态，不是失败：它只进运行记录，**绝不写 task.lastRun**
+   * （lastRun 语义是「上一次实际运行」，被跳过覆盖会让「上次成功时间」丢失）。
+   */
+  status: "ok" | "error" | "aborted" | "skipped";
+  /** 跳过原因（仅 skipped）；同时作为界面上的说明文案。 */
+  skipReason?: string;
   trigger: "cron" | "manual";
   /** 实际使用的模型 id（回退链解析后的结果）。 */
   modelId?: string;

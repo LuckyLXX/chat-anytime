@@ -612,6 +612,42 @@ function afterAutomationRun(taskId: string, agentId: string, run: AutomationTask
   automationScheduler?.refresh();
 }
 
+/**
+ * 落一条 skipped 运行记录（「本轮本该运行但没运行」）。
+ *
+ * 三条纪律（与计划的设计决策一一对应）：
+ *  ① **不写 task.lastRun**：lastRun 语义是「上一次实际运行」，被跳过覆盖会让
+ *     「上次成功时间」丢失，而调度与用户判断都依赖它；
+ *  ② **不发 automation-run 推送**：跳过不该弹 toast 打扰用户（只有运行记录里可查）；
+ *  ③ **前置去重**：同一任务同一时间点的「错过」只记一次，且同任务 1 小时内最多
+ *     一条 skipped——否则高频跳过会把 MAX_RUNS=200 的环形空间挤满，冲掉有价值的
+ *     历史。
+ */
+const SKIPPED_DEDUPE_WINDOW_MS = 60 * 60_000;
+
+function recordSkippedRun(task: AutomationTask, reason: string, at: number): void {
+  // 已有该时间点之后的记录 → 说明已正常运行过（或刚记过），不重复记。
+  const existing = automationRuns.some((run) => run.taskId === task.id && run.startedAt >= at);
+  if (existing) return;
+  // 同任务 1 小时内已有 skipped 记录：合并掉（高频任务不刷屏）。
+  const recentSkip = automationRuns.some((run) => run.taskId === task.id && run.status === "skipped" && at - run.startedAt < SKIPPED_DEDUPE_WINDOW_MS);
+  if (recentSkip) return;
+  const agent = resolveAutomationAgent(settings?.agents ?? [], task.agentId);
+  automationRuns = appendAutomationRun(getAgentDir(), {
+    id: randomUUID(),
+    taskId: task.id,
+    taskName: task.name,
+    agentId: task.agentId,
+    agentName: agent?.name ?? task.agentId,
+    startedAt: at,
+    durationMs: 0,
+    status: "skipped",
+    trigger: "cron",
+    skipReason: reason
+  });
+  emitAutomationRuns();
+}
+
 /** 后台新建专用会话跑任务提示词（跨角色：按任务自身 agentId 解析角色档案，skipActivate 不抢焦点）。 */
 async function runAutomationTask(task: AutomationTask, trigger: "cron" | "manual"): Promise<void> {
   if (!workspace || !modelRuntime) throw new Error("当前没有可用工作区，无法运行定时任务");
@@ -2810,9 +2846,15 @@ async function initialize(command: Extract<RuntimeCommand, { type: "initialize" 
   automationScheduler = createAutomationScheduler({
     getTasks: () => readAllAutomations(getAgentDir()),
     runTask: (task) => runAutomationTask(task, "cron"),
-    onError: (message) => void post({ type: "log", level: "warn", message: `自动化任务错误：${message}` })
+    onError: (message) => void post({ type: "log", level: "warn", message: `自动化任务错误：${message}` }),
+    // 跳过只写运行记录（不写 lastRun、不弹 toast）：调度器保持零存储依赖，
+    // 「是否已跑过 / 要不要落盘」的判据都在这一侧。
+    onSkip: (task, reason, at) => recordSkippedRun(task, reason, at),
+    hasRunSince: (taskId, since) => automationRuns.some((run) => run.taskId === taskId && run.status !== "skipped" && run.startedAt >= since)
   });
   automationScheduler.start();
+  // 启动错过扫描：一次性的可观测性补位（「昨天没跑」现在能在运行记录里看到原因）。
+  automationScheduler.reportMissed();
   refreshAutomation();
   // checkpoint 快照的全局清扫（mtime 过期/总量超限）：异步不阻塞启动。
   void sweepCheckpoints(getAgentDir(), Date.now(), (message) => void post({ type: "log", level: "warn", message }));
@@ -3458,6 +3500,13 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         post({ type: "error", message: "运行记录不存在（可能已被裁剪或尚未落盘）" });
         break;
       }
+      // skipped 记录没有会话（跳过不是一次运行）：入口显式拒绝，给中性提示而不是
+      // 让下游按 sessionId 去扫一个不存在的文件。
+      if (run.status === "skipped" || !run.sessionId) {
+        post({ type: "log", level: "info", message: `该条目是「已跳过」记录（${run.skipReason ?? "本轮未运行"}）：没有可回看的会话。` });
+        break;
+      }
+      const runSessionId = run.sessionId;
       // 跨角色回看：运行会话归属任务的角色。同角色直接打开；跨角色先切换角色再打开
       // （点击前用户已知晓会发生切换，不做隐式切换）——复用 agent.select 完整管线
       // （含会话列表重拉），串行 await 后当前角色即任务归属角色。
@@ -3471,7 +3520,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       }
       // 定位会话：liveSessions 命中（仍在本进程存活）→ 原位激活；未命中 → 按 sessionId
       // 在该角色的会话目录下扫描 JSONL 文件，走 session.open 相同的恢复逻辑。
-      const live = liveSessions.get(run.sessionId);
+      const live = liveSessions.get(runSessionId);
       if (live) {
         activate(live);
         emitState();
@@ -3483,7 +3532,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         post({ type: "error", message: "当前没有可用 Agent，无法打开会话" });
         break;
       }
-      const target = await findSessionFileById(await sessionDirectories(), run.sessionId);
+      const target = await findSessionFileById(await sessionDirectories(), runSessionId);
       if (!target) {
         post({ type: "error", message: "该运行的会话不存在（可能未持久化或已删除）" });
         break;

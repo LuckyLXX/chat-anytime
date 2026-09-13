@@ -166,7 +166,9 @@ const DEMO_AUTOMATION_RUNS: AutomationRunRecord[] = (() => {
     { id: "demo-run-2", taskId: "demo-task-1", taskName: "每日新闻日报", agentId: "heiyuhe", agentName: "黑鱼河", sessionId: "demo-automation-2", startedAt: now - 2 * hour, durationMs: 92_000, status: "ok", trigger: "cron", modelId: "claude-sonnet-4-6", preview: "今日要点：① AI 编码赛道融资再创新高；② 前端工程化工具链持续整合；③ 开源社区周报发布。" },
     { id: "demo-run-3", taskId: "demo-task-1", taskName: "每日新闻日报", agentId: "heiyuhe", agentName: "黑鱼河", sessionId: "demo-automation-3", startedAt: now - 27 * hour, durationMs: 28_000, status: "error", trigger: "cron", error: "API 超时：上游服务 504，请稍后重试。" },
     { id: "demo-run-4", taskId: "demo-task-3", taskName: "每小时温度记录", agentId: "heiyuhe", agentName: "黑鱼河", sessionId: "demo-automation-4", startedAt: now - 29 * hour, durationMs: 115_000, status: "ok", trigger: "cron", modelId: "claude-sonnet-4-6", preview: "温度记录完成：上海 31°C、北京 26°C、东京 28°C，已写入 temperature.log。" },
-    { id: "demo-run-5", taskId: "demo-task-2", taskName: "项目巡检", agentId: "heiyuhe", agentName: "黑鱼河", sessionId: "demo-automation-5", startedAt: now - 3 * hour, durationMs: 41_000, status: "aborted", trigger: "manual", modelId: "claude-sonnet-4-6", error: "用户在任务面板手动终止了这条命令（会话未中止）" }
+    { id: "demo-run-5", taskId: "demo-task-2", taskName: "项目巡检", agentId: "heiyuhe", agentName: "黑鱼河", sessionId: "demo-automation-5", startedAt: now - 3 * hour, durationMs: 41_000, status: "aborted", trigger: "manual", modelId: "claude-sonnet-4-6", error: "用户在任务面板手动终止了这条命令（会话未中止）" },
+    // skipped：本轮本该运行但被跳过（应用未运行/被暂停/队列跳过）——没有会话，中性态。
+    { id: "demo-run-6", taskId: "demo-task-3", taskName: "每小时温度记录", agentId: "heiyuhe", agentName: "黑鱼河", startedAt: now - 4 * hour, durationMs: 0, status: "skipped", trigger: "cron", skipReason: "应用未在计划时间运行（今日已错过该时间点）" }
   ];
 })();
 

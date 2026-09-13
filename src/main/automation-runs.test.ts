@@ -141,3 +141,46 @@ describe("appendAutomationRun", () => {
     expect(readFileSync(automationRunsPath(dir), "utf8")).toContain("run-202");
   });
 });
+/**
+ * skipped 态（2026-09-13 C1）：可观测性补位——用户发现「今天没跑」时，运行记录
+ * 必须能区分「应用没开 / 被暂停 / 队列跳过」，而不是一片空白。
+ */
+describe("skipped run records", () => {
+  const skipped = (overrides: Partial<AutomationRunRecord> = {}): AutomationRunRecord => {
+    const { sessionId: _sessionId, ...base } = makeRun({ status: "skipped", durationMs: 0, skipReason: "应用未在计划时间运行（今日已错过该时间点）", ...overrides }) as AutomationRunRecord & { sessionId?: string };
+    return base as AutomationRunRecord;
+  };
+
+  it("accepts a skipped record without a sessionId and keeps the reason", () => {
+    const record = skipped();
+    const normalized = normalizeAutomationRun(record);
+    expect(normalized?.status).toBe("skipped");
+    expect(normalized?.skipReason).toBe("应用未在计划时间运行（今日已错过该时间点）");
+    expect(normalized?.sessionId).toBeUndefined();
+  });
+
+  it("still drops a non-skipped record without a sessionId", () => {
+    // 放宽不能过度：普通运行没有会话仍是坏数据（回看入口会指向不存在的文件）。
+    const { sessionId: _drop, ...withoutSession } = makeRun();
+    expect(normalizeAutomationRun(withoutSession)).toBeUndefined();
+  });
+
+  it("round-trips a skipped record through the jsonl file", () => {
+    appendAutomationRun(dir, skipped({ id: "run-skip", startedAt: 5000 }));
+    appendAutomationRun(dir, makeRun({ id: "run-ok", startedAt: 6000 }));
+    const runs = readAutomationRuns(dir);
+    expect(runs.map((run) => run.id)).toEqual(["run-ok", "run-skip"]);
+    expect(runs[1]?.skipReason).toContain("今日已错过");
+    expect(runs[1]?.sessionId).toBeUndefined();
+  });
+
+  it("survives a MAX_RUNS trim alongside ordinary records", () => {
+    for (let index = 0; index < MAX_RUNS + 5; index++) {
+      appendAutomationRun(dir, index % 2 === 0 ? skipped({ id: `skip-${index}`, startedAt: 1000 + index }) : makeRun({ id: `ok-${index}`, startedAt: 1000 + index }));
+    }
+    const runs = readAutomationRuns(dir);
+    expect(runs).toHaveLength(MAX_RUNS);
+    expect(runs.some((run) => run.status === "skipped")).toBe(true);
+    expect(runs.some((run) => run.status === "ok")).toBe(true);
+  });
+});
