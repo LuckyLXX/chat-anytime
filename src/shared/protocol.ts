@@ -743,8 +743,17 @@ export type BrowserAutomationData =
   | { kind: "tabs"; tabs: BrowserTabSummary[] };
 
 export type BrowserAutomationResult =
-  | { ok: true; data: BrowserAutomationData }
+  | { ok: true; data: BrowserAutomationData; notices?: BrowserAutomationNotice[] }
   | { ok: false; error: string };
+
+/**
+ * 操作回执尾部的「待读通知」：操作本身成功、但控制器在旁路上收集到了需要
+ * 告知模型的事实（下载被取消 / 已落盘）。由 utility 侧渲染成文本；为空时
+ * 结果不带该字段（字节兼容）。
+ */
+export type BrowserAutomationNotice =
+  | { kind: "download"; filename: string; url: string; saved: true; bytes?: number; relativePath?: string }
+  | { kind: "download"; filename: string; url: string; saved: false; reason?: "limit" | "prepare-failed" | "interrupted"; limitReached?: boolean; relativePath?: string };
 
 export interface BrowserTabSummary {
   id: string;

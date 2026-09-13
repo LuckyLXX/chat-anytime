@@ -19,6 +19,7 @@ import type {
   BrowserAutomationResult,
   BrowserAutomationWait
 } from "../shared/protocol.js";
+import { DOWNLOAD_DIR_SEGMENTS, MAX_TAB_DOWNLOADS } from "./browser-downloads.js";
 
 export interface BrowserToolDeps {
   /** Forward one browser operation to the main process and await its result. */
@@ -78,6 +79,51 @@ async function run(deps: BrowserToolDeps, op: BrowserAutomationRequest): Promise
 
 function failIfNotOk(result: BrowserAutomationResult): asserts result is Extract<BrowserAutomationResult, { ok: true }> {
   if (!result.ok) throw new Error(result.error);
+}
+
+const DOWNLOAD_DIR_LABEL = DOWNLOAD_DIR_SEGMENTS.join("/");
+
+/**
+ * 把主进程收集的下载事实渲染成回执尾部的提示。
+ *
+ * 存在的意义：`will-download` 被取消（或落盘失败）时点击本身仍然成功，模型若无
+ * 这条提示就会把「已点击导出」当成「文件已导出」。所以**取消路径必须给改道指引**
+ * （用 browser_eval 取数据后自行写文件），不能只说一句失败。
+ */
+export function formatDownloadNotices(result: BrowserAutomationResult): string {
+  if (!result.ok || !result.notices?.length) return "";
+  const lines = result.notices.map((notice) => {
+    if (notice.kind !== "download") return "";
+    if (notice.saved) {
+      const where = notice.relativePath ? `\`${notice.relativePath}\`` : `工作区 \`${DOWNLOAD_DIR_LABEL}/\``;
+      const size = typeof notice.bytes === "number" ? `（${formatBytes(notice.bytes)}）` : "";
+      return `⬇ 该操作触发了下载，已保存到 ${where}${size}——可用 read/bash 直接读取。`;
+    }
+    if (notice.reason === "limit") {
+      return `⚠ 该操作触发了下载（${notice.filename}），但本标签页本轮下载数量已达上限（${MAX_TAB_DOWNLOADS} 个），已取消保存。请先处理已下载的文件，或在新标签页重试。`;
+    }
+    if (notice.reason === "interrupted") {
+      const where = notice.relativePath ? `（\`${notice.relativePath}\`）` : `（工作区 ${DOWNLOAD_DIR_LABEL}/）`;
+      return `⬇ 该操作触发了下载 ${notice.filename}${where}，但本次操作返回时它尚未落盘完成——请用 ls/read 确认文件是否已出现，不要当成失败。`;
+    }
+    if (notice.reason === "prepare-failed") {
+      return `⚠ 该操作触发了下载（${notice.filename}），但未能保存到工作区 ${DOWNLOAD_DIR_LABEL}/（目录不可写）。如需文件内容，请用 browser_eval 取数据后由 bash/写入工具保存到工作区。`;
+    }
+    return `⚠ 该操作触发了下载（${notice.filename}），但内置浏览器已取消下载（预览页不向磁盘写文件）。如需文件内容，请用 browser_eval 取数据后由 bash/写入工具保存到工作区；自动化标签页在 browser_navigate 过工作区目录后会自动把下载保存到 ${DOWNLOAD_DIR_LABEL}/。`;
+  });
+  return lines.filter(Boolean).join("\n");
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} 字节`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/** 回执文本 + 下载提示（无通知时逐字不变）。 */
+function withDownloads(text: string, result: BrowserAutomationResult): string {
+  const notices = formatDownloadNotices(result);
+  return notices ? `${text}\n\n${notices}` : text;
 }
 
 /**
@@ -153,7 +199,7 @@ export function buildBrowserTools(deps: BrowserToolDeps): ToolDefinition[] {
         const result = await run(deps, { op: "navigate", url, workspace: deps.workspace?.() });
         failIfNotOk(result);
         if (result.data.kind !== "navigate") throw new Error("导航返回了意外结果");
-        return { content: [{ type: "text" as const, text: `已导航到 ${result.data.url}（${result.data.title || "标题未知"}）。页面可能仍在加载，建议先 browser_wait（页面加载）再 browser_snapshot。` }], details: { url: result.data.url } };
+        return { content: [{ type: "text" as const, text: withDownloads(`已导航到 ${result.data.url}（${result.data.title || "标题未知"}）。页面可能仍在加载，建议先 browser_wait（页面加载）再 browser_snapshot。`, result) }], details: { url: result.data.url } };
       }
     }),
     defineTool({
@@ -171,7 +217,7 @@ export function buildBrowserTools(deps: BrowserToolDeps): ToolDefinition[] {
         const result = await run(deps, { op: "snapshot" });
         failIfNotOk(result);
         if (result.data.kind !== "snapshot") throw new Error("快照返回了意外结果");
-        return { content: [{ type: "text" as const, text: result.data.text }], details: { refCount: result.data.refCount, truncated: result.data.truncated } };
+        return { content: [{ type: "text" as const, text: withDownloads(result.data.text, result) }], details: { refCount: result.data.refCount, truncated: result.data.truncated } };
       }
     }),
     defineTool({
@@ -180,7 +226,8 @@ export function buildBrowserTools(deps: BrowserToolDeps): ToolDefinition[] {
       description: [
         "点击内置浏览器页面中的元素（用真实鼠标事件，触发页面所有监听器）。",
         "ref 必须是最近一次 browser_snapshot 返回的 @eN 引用；页面变化后引用失效，报错时重新 snapshot。",
-        "点击后可能发生导航或内容更新，必要时重新 browser_snapshot 确认结果。"
+        "点击后可能发生导航或内容更新，必要时重新 browser_snapshot 确认结果。",
+        `点击可能触发页面下载（导出/下载按钮）：本会话 navigate 过工作区后，下载会自动保存到工作区 \`${DOWNLOAD_DIR_LABEL}/\`（回执给出相对路径）；尚未 navigate 过工作区时下载会被取消，回执会明确告知并提供改道方式。`
       ].join(""),
       promptSnippet: "browser_click: 点击页面元素（@eN 引用）",
       parameters: Type.Object({
@@ -192,7 +239,7 @@ export function buildBrowserTools(deps: BrowserToolDeps): ToolDefinition[] {
         const result = await run(deps, { op: "click", ref });
         failIfNotOk(result);
         if (result.data.kind !== "click") throw new Error("点击返回了意外结果");
-        return { content: [{ type: "text" as const, text: `已点击 ${ref}：${result.data.description}。${SNAPSHOT_HINT}` }], details: { ref } };
+        return { content: [{ type: "text" as const, text: withDownloads(`已点击 ${ref}：${result.data.description}。${SNAPSHOT_HINT}`, result) }], details: { ref } };
       }
     }),
     defineTool({
@@ -218,7 +265,7 @@ export function buildBrowserTools(deps: BrowserToolDeps): ToolDefinition[] {
         const result = await run(deps, { op: "type", ref, text, mode });
         failIfNotOk(result);
         if (result.data.kind !== "type") throw new Error("输入返回了意外结果");
-        return { content: [{ type: "text" as const, text: `已向 ${ref} 输入${mode === "fill" ? "（已清空原内容）" : "（追加）"}：${JSON.stringify(text.slice(0, 200))}` }], details: { ref, mode } };
+        return { content: [{ type: "text" as const, text: withDownloads(`已向 ${ref} 输入${mode === "fill" ? "（已清空原内容）" : "（追加）"}：${JSON.stringify(text.slice(0, 200))}`, result) }], details: { ref, mode } };
       }
     }),
       defineTool({
@@ -242,7 +289,7 @@ export function buildBrowserTools(deps: BrowserToolDeps): ToolDefinition[] {
           const result = await run(deps, { op: "select", ref, values });
           failIfNotOk(result);
           if (result.data.kind !== "select") throw new Error("选择返回了意外结果");
-          return { content: [{ type: "text" as const, text: `已选择：${result.data.description}` }], details: { ref, values } };
+          return { content: [{ type: "text" as const, text: withDownloads(`已选择：${result.data.description}`, result) }], details: { ref, values } };
         }
       }),
       defineTool({
@@ -267,7 +314,7 @@ export function buildBrowserTools(deps: BrowserToolDeps): ToolDefinition[] {
           const result = await run(deps, { op: "upload", ref, files: resolved ?? files });
           failIfNotOk(result);
           if (result.data.kind !== "upload") throw new Error("上传返回了意外结果");
-          return { content: [{ type: "text" as const, text: `已上传：${result.data.description}` }], details: { ref, files } };
+          return { content: [{ type: "text" as const, text: withDownloads(`已上传：${result.data.description}`, result) }], details: { ref, files } };
         }
       }),
     defineTool({
@@ -287,7 +334,7 @@ export function buildBrowserTools(deps: BrowserToolDeps): ToolDefinition[] {
         const result = await run(deps, { op: "press", key });
         failIfNotOk(result);
         if (result.data.kind !== "press") throw new Error("按键返回了意外结果");
-        return { content: [{ type: "text" as const, text: `已按键：${key}` }], details: { key } };
+        return { content: [{ type: "text" as const, text: withDownloads(`已按键：${key}`, result) }], details: { key } };
       }
     }),
     defineTool({
@@ -310,7 +357,7 @@ export function buildBrowserTools(deps: BrowserToolDeps): ToolDefinition[] {
         const result = await run(deps, { op: "scroll", direction, amount, ref });
         failIfNotOk(result);
         if (result.data.kind !== "scroll") throw new Error("滚动返回了意外结果");
-        return { content: [{ type: "text" as const, text: `已滚动：${result.data.description}` }], details: { direction, amount } };
+        return { content: [{ type: "text" as const, text: withDownloads(`已滚动：${result.data.description}`, result) }], details: { direction, amount } };
       }
     }),
     defineTool({
@@ -333,7 +380,7 @@ export function buildBrowserTools(deps: BrowserToolDeps): ToolDefinition[] {
         const result = await run(deps, { op: "eval", expression, mode });
         failIfNotOk(result);
         if (result.data.kind !== "eval") throw new Error("脚本返回了意外结果");
-        return { content: [{ type: "text" as const, text: `执行结果（${mode}）：\n${result.data.value}` }], details: { mode } };
+        return { content: [{ type: "text" as const, text: withDownloads(`执行结果（${mode}）：\n${result.data.value}`, result) }], details: { mode } };
       }
     }),
     defineTool({
@@ -355,7 +402,7 @@ export function buildBrowserTools(deps: BrowserToolDeps): ToolDefinition[] {
         const savedPath = await persistScreenshot(deps, result.data.data, result.data.mimeType);
         return {
           content: [
-            { type: "text" as const, text: `已截取内置浏览器当前画面（${result.data.width}×${result.data.height}）。${savedPath ? `截图已保存到 ${savedPath}；` : ""}当前模型不支持图片输入时可调用 recognize_images 工具${savedPath ? "识别该文件" : "识别截图"}。` },
+            { type: "text" as const, text: withDownloads(`已截取内置浏览器当前画面（${result.data.width}×${result.data.height}）。${savedPath ? `截图已保存到 ${savedPath}；` : ""}当前模型不支持图片输入时可调用 recognize_images 工具${savedPath ? "识别该文件" : "识别截图"}。`, result) },
             { type: "image" as const, data: result.data.data, mimeType: result.data.mimeType }
           ],
           details: { width: result.data.width, height: result.data.height, ...(savedPath ? { savedPath } : {}) }
@@ -380,7 +427,7 @@ export function buildBrowserTools(deps: BrowserToolDeps): ToolDefinition[] {
           const savedPath = await persistScreenshot(deps, result.data.data, result.data.mimeType);
           return {
             content: [
-              { type: "text" as const, text: `已截取内置浏览器整个页面（${result.data.width}×${result.data.height}）。${savedPath ? `截图已保存到 ${savedPath}；` : ""}当前模型不支持图片输入时可调用 recognize_images 工具${savedPath ? "识别该文件" : "识别截图"}。` },
+              { type: "text" as const, text: withDownloads(`已截取内置浏览器整个页面（${result.data.width}×${result.data.height}）。${savedPath ? `截图已保存到 ${savedPath}；` : ""}当前模型不支持图片输入时可调用 recognize_images 工具${savedPath ? "识别该文件" : "识别截图"}。`, result) },
               { type: "image" as const, data: result.data.data, mimeType: result.data.mimeType }
             ],
             details: { width: result.data.width, height: result.data.height, fullPage: true, ...(savedPath ? { savedPath } : {}) }
@@ -409,7 +456,7 @@ export function buildBrowserTools(deps: BrowserToolDeps): ToolDefinition[] {
         const result = await run(deps, { op: "wait", wait });
         failIfNotOk(result);
         if (result.data.kind !== "wait") throw new Error("等待返回了意外结果");
-        return { content: [{ type: "text" as const, text: `等待完成：${result.data.description}` }], details: { wait: wait.kind } };
+        return { content: [{ type: "text" as const, text: withDownloads(`等待完成：${result.data.description}`, result) }], details: { wait: wait.kind } };
       }
     }),
     defineTool({
@@ -431,7 +478,7 @@ export function buildBrowserTools(deps: BrowserToolDeps): ToolDefinition[] {
         failIfNotOk(result);
         if (result.data.kind !== "get") throw new Error("读取返回了意外结果");
         const label = what === "url" ? "当前地址" : what === "title" ? "页面标题" : ref ? `元素 ${ref} 的文本` : "页面文本";
-        return { content: [{ type: "text" as const, text: `${label}：\n${result.data.value || "（空）"}` }], details: { what } };
+        return { content: [{ type: "text" as const, text: withDownloads(`${label}：\n${result.data.value || "（空）"}`, result) }], details: { what } };
       }
     }),
     defineTool({
@@ -455,7 +502,7 @@ export function buildBrowserTools(deps: BrowserToolDeps): ToolDefinition[] {
         if (action !== "list" && action !== "new" && action !== "switch" && action !== "close") throw new Error("action 必须是 list/new/switch/close");
         const tabId = typeof params?.tabId === "string" && params.tabId.trim() ? params.tabId.trim() : undefined;
         const result = await run(deps, { op: "tabs", action, tabId });
-        return { content: [{ type: "text" as const, text: formatTabs(result) }], details: { action } };
+        return { content: [{ type: "text" as const, text: withDownloads(formatTabs(result), result) }], details: { action } };
       }
     })
   ];

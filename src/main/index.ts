@@ -333,6 +333,12 @@ function createWindow(): void {
   }, (pick) => {
     // 用户手动点选的页面元素（发送到聊天框流程）。
     if (!nextWindow.isDestroyed()) nextWindow.webContents.send("browser-preview:pick", pick);
+  }, (tabId) => {
+    // 下载策略：自动化绑定且 navigate 过工作区的标签页定向落盘，其余取消。
+    return browserAutomationController?.downloadPolicy(tabId) ?? "cancel";
+  }, (info) => {
+    // 下载结果（已保存/已取消）由自动化控制器汇总进下一次操作回执。
+    browserAutomationController?.handleDownload(info);
   });
   mainWindow = nextWindow;
   browserPreviewController = previewController;

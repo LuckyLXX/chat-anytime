@@ -14,18 +14,22 @@
 // "re-snapshot" error instead of clicking the wrong element.
 
 import { randomUUID } from "node:crypto";
+import { statSync } from "node:fs";
 import { stat } from "node:fs/promises";
+import { resolve, sep } from "node:path";
 import type { WebContents } from "electron";
 import type {
   BrowserAutomationData,
+  BrowserAutomationNotice,
   BrowserAutomationRequest,
   BrowserAutomationResult,
   BrowserAutomationWait,
   BrowserTabSummary
 } from "../shared/protocol.js";
+import { downloadDirFor, downloadRelativePath } from "./browser-downloads.js";
 import { BrowserStaticServer, detectLocalFilePath } from "./browser-static-server.js";
 import { normalizeBrowserUrl } from "./browser-preview-url.js";
-import type { BrowserPreviewController } from "./browser-preview.js";
+import type { BrowserPreviewController, DownloadInfo } from "./browser-preview.js";
 
 /** Hard cap of interactable elements a snapshot reports. */
 export const MAX_SNAPSHOT_ELEMENTS = 200;
@@ -470,6 +474,15 @@ interface RefEntry {
   url: string;
 }
 
+/**
+ * 原地换掉一条回执的字段（占位 → 终态）。先清空再赋值，避免旧字段残留
+ * （例如占位的 reason: "interrupted" 不能留在已保存的终态里）。
+ */
+function replaceNotice(target: BrowserAutomationNotice, next: BrowserAutomationNotice): void {
+  for (const key of Object.keys(target)) delete (target as unknown as Record<string, unknown>)[key];
+  Object.assign(target, next);
+}
+
 interface PressKeySpec {
   key: string;
   code: string;
@@ -576,6 +589,15 @@ export class BrowserAutomationController {
   private readonly sessionTabs = new Map<string, string>();
   /** tab id → per-ref signatures remembered by the last snapshot. */
   private readonly tabRefs = new Map<string, RefEntry[]>();
+  /** tab id → 该标签页的下载落盘工作区（navigate 带 workspace 时确定）。 */
+  private readonly downloadDirs = new Map<string, string>();
+  /**
+   * tab id → 本次操作窗口内收集到的下载记录。窗口在操作开始时清空、结束时
+   * 取走并渲染进回执（与 snapshot refs 同一周期，不需要跨操作队列）。
+   */
+  private readonly pendingDownloads = new Map<string, BrowserAutomationNotice[]>();
+  /** 已定向落盘、等 done 终态的下载：占位回执对象 + 文件名（终态到达后就地替换）。 */
+  private readonly settleWaiters = new Map<string, Set<{ notice: BrowserAutomationNotice; filename: string }>>();
   /** tabs with an operation in flight (per-tab serialization). */
   private readonly busyTabs = new Set<string>();
   /** tabs whose current/next operation has been cancelled from the UI. */
@@ -604,13 +626,121 @@ export class BrowserAutomationController {
       const tabId = request.op === "attach" ? this.attachTab(sessionKey) : this.tabFor(sessionKey);
       this.tabLastActiveAt.set(tabId, Date.now());
       return await this.withTabLock(tabId, () => this.withAutomationGuard(tabId, async () => {
+          // 下载回执窗口：本次操作之前发生的下载已由上一个操作回执发出（或在
+          // 无人操作时丢弃）——窗口只覆盖「本次操作触发的下载」。
+          this.pendingDownloads.delete(tabId);
           const result = await withOpTimeout(this.execute(sessionKey, tabId, request));
           this.assertNotCancelled(tabId);
-          return result;
+          // 本次操作可能触发了下载：「导出」类点击是异步落盘的，多等一拍让回执
+          // 能给出文件名与大小，而不是把「已取消/未知」报给模型。
+          await this.preview.awaitDownloadsSettled?.(tabId);
+          if (!result.ok) return result;
+          const notices = this.takeDownloadNotices(tabId);
+          return notices.length > 0 ? { ok: true as const, data: result.data, notices } : result;
         }));
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
+  }
+
+  /**
+   * 下载策略：只给「自动化会话已绑定 + 已 navigate 过工作区」的标签页放行，
+   * 其余一律取消。预览页（用户自己浏览）保持原来的「一个字节不落盘」姿态。
+   * 传给 BrowserPreviewController，后者在 will-download 时按标签页调用。
+   */
+  downloadPolicy = (tabId: string): "cancel" | { dir: string } => {
+    const workspace = this.downloadDirs.get(tabId);
+    if (!workspace) return "cancel";
+    return { dir: downloadDirFor(workspace) };
+  };
+
+  /**
+   * 预览控制器上报的每次下载。只保留「本次操作窗口内发生、且有会话绑定该标签页」
+   * 的事件：用户手动浏览触发的下载仍然被取消，但不会写进任何 AI 回执。
+   */
+  handleDownload(info: DownloadInfo): void {
+    if (this.sessionsBoundTo(info.tabId).length === 0) return;
+    const records = this.pendingDownloads.get(info.tabId) ?? [];
+    if (info.status === "started") {
+      // 先落一条「已开始、结果未知」的占位：done 到达后**原地替换**成终态。
+      // 占位必须已是回执形态（而不是另立一种中间态）——它在数组里的身份要
+      // 保持稳定，模型读到的字段名也必须前后一致。
+      const placeholder: BrowserAutomationNotice = {
+        kind: "download",
+        filename: info.filename,
+        url: info.url,
+        saved: false,
+        reason: "interrupted",
+        ...this.relativePathOf({ ...info, status: "saved" })
+      };
+      records.push(placeholder);
+      this.pendingDownloads.set(info.tabId, records);
+      const waiting = this.settleWaiters.get(info.tabId) ?? new Set<{ notice: BrowserAutomationNotice; filename: string }>();
+      waiting.add({ notice: placeholder, filename: info.filename });
+      this.settleWaiters.set(info.tabId, waiting);
+      return;
+    }
+    // 终态事件：替换对应的占位；找不到占用（事件乱序/已被取走）就补一条。
+    const waiting = this.settleWaiters.get(info.tabId);
+    for (const entry of waiting ?? []) {
+      if (entry.filename !== info.filename) continue;
+      replaceNotice(entry.notice, this.toTerminal(info));
+      waiting?.delete(entry);
+      if (waiting && waiting.size === 0) this.settleWaiters.delete(info.tabId);
+      return;
+    }
+    records.push(this.toTerminal(info));
+    this.pendingDownloads.set(info.tabId, records);
+  }
+
+  /** 落盘路径 → 工作区相对路径（.pidesktop/downloads/ 之外不谎报路径）。 */
+  private relativePathOf(info: DownloadInfo): { relativePath?: string } {
+    if (info.status !== "saved" || !info.filePath) return {};
+    const workspace = this.downloadDirs.get(info.tabId);
+    if (!workspace) return {};
+    const dir = resolve(downloadDirFor(workspace)).toLowerCase();
+    const file = resolve(info.filePath).toLowerCase();
+    if (file !== dir && !file.startsWith(dir + sep)) return {};
+    return { relativePath: downloadRelativePath(info.filename) };
+  }
+
+  /** 终态下载事件 → 回执形态（判别式联合）。 */
+  private toTerminal(info: DownloadInfo): BrowserAutomationNotice {
+    if (info.status === "saved") {
+      return {
+        kind: "download",
+        filename: info.filename,
+        url: info.url,
+        saved: true,
+        ...(typeof info.bytes === "number" ? { bytes: info.bytes } : {}),
+        ...this.relativePathOf(info)
+      };
+    }
+    return {
+      kind: "download",
+      filename: info.filename,
+      url: info.url,
+      saved: false,
+      ...(info.reason ? { reason: info.reason } : {}),
+      ...(info.limitReached ? { limitReached: true } : {})
+    };
+  }
+
+  private takeDownloadNotices(tabId: string): BrowserAutomationNotice[] {
+    const records = this.pendingDownloads.get(tabId) ?? [];
+    this.pendingDownloads.delete(tabId);
+    // 大文件/慢网络下 done 可能晚于操作返回：留下的占位照原样上报
+    // （「已开始、结果未知」，绝不谎报成失败或成功）。
+    this.settleWaiters.delete(tabId);
+    return records;
+  }
+
+  private sessionsBoundTo(tabId: string): string[] {
+    const keys: string[] = [];
+    for (const [sessionKey, bound] of this.sessionTabs) {
+      if (bound === tabId) keys.push(sessionKey);
+    }
+    return keys;
   }
 
   /**
@@ -645,6 +775,9 @@ export class BrowserAutomationController {
   private closeAutomationTab(tabId: string): void {
     this.tabRefs.delete(tabId);
     this.tabLastActiveAt.delete(tabId);
+    this.downloadDirs.delete(tabId);
+    this.pendingDownloads.delete(tabId);
+    this.settleWaiters.delete(tabId);
     void this.preview.handle({ type: "close", tabId });
   }
 
@@ -670,6 +803,9 @@ export class BrowserAutomationController {
     }
     this.sessionTabs.clear();
     this.tabRefs.clear();
+    this.downloadDirs.clear();
+    this.pendingDownloads.clear();
+    this.settleWaiters.clear();
     this.busyTabs.clear();
     this.cancelRequests.clear();
     this.tabLastActiveAt.clear();
@@ -749,6 +885,7 @@ export class BrowserAutomationController {
       }
       case "navigate": {
         const target = await this.resolveNavigationTarget(request.url, request.workspace);
+        this.setDownloadDir(tabId, request.workspace);
         this.tabRefs.delete(tabId);
         this.preview.setAutomating(tabId, `正在导航到 ${request.url}`);
         try {
@@ -783,6 +920,32 @@ export class BrowserAutomationController {
         return this.get(tabId, contents, request.what, request.ref);
       case "tabs":
         return this.tabs(sessionKey, tabId, request.action, request.tabId);
+    }
+  }
+
+  /**
+   * 记住「这个标签页的下载该落到哪个工作区」。只有真实存在的工作区目录才生效
+   * （工作区缺失/失效时策略退回 cancel，下载不会静默落到别处）；换工作区（或从
+   * 有到无）时丢弃上一轮遗留的下载记录，避免把上个工作区的路径报给模型。
+   */
+  private setDownloadDir(tabId: string, workspace?: string): void {
+    const next = this.resolveDownloadWorkspace(workspace);
+    if (!next) {
+      this.downloadDirs.delete(tabId);
+      return;
+    }
+    if (this.downloadDirs.get(tabId) === next) return;
+    this.downloadDirs.set(tabId, next);
+    this.pendingDownloads.delete(tabId);
+  }
+
+  private resolveDownloadWorkspace(workspace?: string): string | undefined {
+    if (typeof workspace !== "string" || !workspace.trim()) return undefined;
+    const root = resolve(workspace);
+    try {
+      return statSync(root).isDirectory() ? root : undefined;
+    } catch {
+      return undefined;
     }
   }
 
@@ -1184,6 +1347,8 @@ export class BrowserAutomationController {
         if (!targetTabId) throw new Error("请提供要关闭的 tabId（用 browser_tabs list 查看）");
         await this.preview.handle({ type: "close", tabId: targetTabId });
         this.tabRefs.delete(targetTabId);
+        this.downloadDirs.delete(targetTabId);
+        this.pendingDownloads.delete(targetTabId);
         if (this.sessionTabs.get(sessionKey) === targetTabId) this.sessionTabs.delete(sessionKey);
         const remaining: BrowserTabSummary[] = this.preview.tabIds().map((id) => {
           const state = this.preview.snapshot(id);

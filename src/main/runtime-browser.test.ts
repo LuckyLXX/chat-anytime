@@ -247,3 +247,57 @@ describe("busy-tab retry", () => {
     expect(calls[0]).toEqual({ op: "navigate", url: "https://example.com", workspace: "D:\\工作区" });
   });
 });
+
+/** 回执里的下载提示：取消路径必须给改道指引，落盘路径必须给可读的文件位置。 */
+describe("browser download receipts", () => {
+  const clickWith = (notices?: OkResult["notices"]) => {
+    const result: BrowserAutomationResult = notices
+      ? { ok: true, data: { kind: "click", description: "<button> 导出" }, notices }
+      : { ok: true, data: { kind: "click", description: "<button> 导出" } };
+    const { tools } = toolsWith({ click: result });
+    return tools.find((tool) => tool.name === "browser_click")!;
+  };
+  const clickText = async (notices?: OkResult["notices"]) => {
+    const result = await execute(clickWith(notices), { ref: "@e1" }) as { content: Array<{ text: string }> };
+    return result.content[0]!.text;
+  };
+
+  it("keeps the receipt byte-identical when no download happened", async () => {
+    const text = await clickText();
+    expect(text).toBe("已点击 @e1：<button> 导出。提示：使用 @eN 引用元素；页面导航或内容变化后引用会失效，操作报错时请重新调用 browser_snapshot。");
+  });
+
+  it("tells the model the download was cancelled and how to reroute", async () => {
+    const text = await clickText([{ kind: "download", filename: "a.csv", url: "https://example.com/export", saved: false }]);
+    expect(text).toContain("该操作触发了下载（a.csv）");
+    expect(text).toContain("已取消下载");
+    // 关键：必须给出改道方式，否则模型只知道失败不知道怎么做。
+    expect(text).toContain("browser_eval");
+    expect(text).toContain(".pidesktop/downloads/");
+  });
+
+  it("reports the workspace-relative path and size of a saved download", async () => {
+    const text = await clickText([{ kind: "download", filename: "a.csv", url: "u", saved: true, bytes: 2048, relativePath: ".pidesktop/downloads/a.csv" }]);
+    expect(text).toContain("`.pidesktop/downloads/a.csv`");
+    expect(text).toContain("2.0 KB");
+    expect(text).toContain("read/bash");
+  });
+
+  it("names the cap when further downloads are refused", async () => {
+    const text = await clickText([{ kind: "download", filename: "a.csv", url: "u", saved: false, reason: "limit", limitReached: true }]);
+    expect(text).toContain("已达上限");
+    expect(text).toContain("20");
+  });
+
+  it("points at 目录不可写 for a failed save", async () => {
+    const text = await clickText([{ kind: "download", filename: "a.csv", url: "u", saved: false, reason: "prepare-failed" }]);
+    expect(text).toContain("目录不可写");
+    expect(text).toContain("browser_eval");
+  });
+
+  it("says a slow download is unfinished rather than failed", async () => {
+    const text = await clickText([{ kind: "download", filename: "big.zip", url: "u", saved: false, reason: "interrupted", relativePath: ".pidesktop/downloads/big.zip" }]);
+    expect(text).toContain("尚未落盘完成");
+    expect(text).toContain("不要当成失败");
+  });
+});

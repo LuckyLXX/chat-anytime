@@ -14,8 +14,11 @@ import {
   urlPatternMatcher,
   withOpTimeout
 } from "./browser-automation.js";
-import type { BrowserPreviewController } from "./browser-preview.js";
+import type { BrowserPreviewController, DownloadInfo } from "./browser-preview.js";
 import type { BrowserAutomationResult } from "../shared/protocol.js";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 describe("browser automation url patterns", () => {
   it("treats patterns without glob characters as substring matches", () => {
@@ -208,6 +211,186 @@ function makeFakePreview(initialTabs: string[]): FakePreview & BrowserPreviewCon
   } as unknown as FakePreview & BrowserPreviewController;
   return preview;
 }
+
+describe("automation download receipts", () => {
+  const controllers: BrowserAutomationController[] = [];
+  const workspaces: string[] = [];
+  afterEach(() => {
+    for (const controller of controllers) controller.dispose();
+    controllers.length = 0;
+    for (const workspace of workspaces) rmSync(workspace, { recursive: true, force: true });
+    workspaces.length = 0;
+  });
+  const makeController = (preview: BrowserPreviewController): BrowserAutomationController => {
+    const controller = new BrowserAutomationController(preview);
+    controllers.push(controller);
+    return controller;
+  };
+  const makeWorkspace = (): string => {
+    const dir = mkdtempSync(join(tmpdir(), "pidesktop-dl-"));
+    workspaces.push(dir);
+    return dir;
+  };
+  const boundTab = async (controller: BrowserAutomationController, sessionKey = "s1"): Promise<string> => {
+    const result = await controller.handle(sessionKey, { op: "tabs", action: "new" });
+    if (!result.ok || result.data.kind !== "tabs") throw new Error("tabs new 失败");
+    return result.data.tabs.find((tab) => tab.active)!.id;
+  };
+  const noticesOf = (result: BrowserAutomationResult) => (result.ok ? result.notices ?? [] : []);
+
+  it("cancels downloads until the session navigated with a workspace", async () => {
+    const preview = makeFakePreview(["default"]);
+    const controller = makeController(preview);
+    const tabId = await boundTab(controller);
+    expect(controller.downloadPolicy(tabId)).toBe("cancel");
+    // navigate 没带 workspace（远程 URL）→ 仍然取消，不是静默，而是会回执的取消。
+    await controller.handle("s1", { op: "navigate", url: "https://example.com/" });
+    expect(controller.downloadPolicy(tabId)).toBe("cancel");
+  });
+
+  it("ignores a workspace that does not exist on disk", async () => {
+    const preview = makeFakePreview(["default"]);
+    const controller = makeController(preview);
+    const tabId = await boundTab(controller);
+    await controller.handle("s1", { op: "navigate", url: "https://example.com/", workspace: join(tmpdir(), "pidesktop-missing-ws") });
+    expect(controller.downloadPolicy(tabId)).toBe("cancel");
+  });
+
+  it("routes downloads into the workspace once navigate carried one", async () => {
+    const preview = makeFakePreview(["default"]);
+    const controller = makeController(preview);
+    const workspace = makeWorkspace();
+    const tabId = await boundTab(controller);
+    await controller.handle("s1", { op: "navigate", url: "https://example.com/", workspace });
+    const policy = controller.downloadPolicy(tabId);
+    expect(policy).not.toBe("cancel");
+    expect((policy as { dir: string }).dir.replaceAll("\\", "/")).toBe(`${workspace.replaceAll("\\", "/")}/.pidesktop/downloads`);
+  });
+
+  it("never lets a user-only tab (no bound session) see download receipts", async () => {
+    const preview = makeFakePreview(["default"]);
+    const controller = makeController(preview);
+    const tabId = await boundTab(controller);
+    const workspace = makeWorkspace();
+    await controller.handle("s1", { op: "navigate", url: "https://example.com/", workspace });
+    controller.releaseSession("s1");
+    const download: DownloadInfo = { tabId, filename: "a.csv", url: "https://example.com/a.csv", status: "cancelled" };
+    controller.handleDownload(download);
+    // 无人绑定的标签页：下载照旧被取消，但不进任何 AI 回执。
+    expect(controller.downloadPolicy(tabId)).toBe("cancel");
+    const result = await controller.handle("s1", { op: "tabs", action: "list" });
+    expect(noticesOf(result)).toEqual([]);
+  });
+
+  /**
+   * 让下一次操作在执行期间触发给定下载事件：main 侧只在操作执行中收集下载通知，
+   * 把假 debugger 命令换成回调就是在测真实时序。
+   */
+  const downloadDuringNextOp = (preview: BrowserPreviewController, tabId: string, controller: BrowserAutomationController, infos: DownloadInfo[], method = "Runtime.evaluate"): void => {
+    const contents = preview.webContentsFor(tabId) as unknown as { debugger: { sendCommand: (method: string) => Promise<unknown> } };
+    let fired = false;
+    contents.debugger.sendCommand = async (called) => {
+      // 只在操作自身的那条 CDP 命令上触发一次：守卫的 Input.setIgnoreInputEvents
+      // 发生在回执窗口重置之前，用方法名把它排除掉（那是真实时序，不是要测的东西）。
+      if (!fired && called === method) {
+        fired = true;
+        for (const info of infos) controller.handleDownload(info);
+      }
+      return { result: { value: 1 } };
+    };
+  };
+
+  it("attaches a saved download to the operation window and reports its workspace path", async () => {
+    const preview = makeFakePreview(["default"]);
+    const controller = makeController(preview);
+    const workspace = makeWorkspace();
+    const tabId = await boundTab(controller);
+    await controller.handle("s1", { op: "navigate", url: "https://example.com/", workspace });
+    const filePath = join(workspace, ".pidesktop", "downloads", "a.csv");
+    const downloadsDir = join(workspace, ".pidesktop", "downloads");
+    downloadDuringNextOp(preview, tabId, controller, [
+      { tabId, filename: "a.csv", url: "https://example.com/a.csv", status: "started", filePath, directory: downloadsDir },
+      { tabId, filename: "a.csv", url: "https://example.com/a.csv", status: "saved", bytes: 4, filePath, directory: downloadsDir },
+      { tabId, filename: "b.csv", url: "https://example.com/b.csv", status: "saved", filePath: join(tmpdir(), "elsewhere", "b.csv") },
+      { tabId, filename: "c.csv", url: "https://example.com/c.csv", status: "cancelled", reason: "limit", limitReached: true }
+    ]);
+    const result = await controller.handle("s1", { op: "eval", expression: "1", mode: "read" });
+    const notices = noticesOf(result);
+    expect(notices[0]).toEqual({ kind: "download", filename: "a.csv", url: "https://example.com/a.csv", saved: true, bytes: 4, relativePath: ".pidesktop/downloads/a.csv" });
+    // 落在下载目录之外的“已保存”不谎报工作区相对路径（但仍如实告知）。
+    expect(notices[1]).toEqual({ kind: "download", filename: "b.csv", url: "https://example.com/b.csv", saved: true });
+    expect(notices[2]).toEqual({ kind: "download", filename: "c.csv", url: "https://example.com/c.csv", saved: false, reason: "limit", limitReached: true });
+    // 窗口语义：取走即清空（下一次操作不再重复报告）。
+    const second = await controller.handle("s1", { op: "eval", expression: "1", mode: "read" });
+    expect(noticesOf(second)).toEqual([]);
+  });
+
+  /** started 占位必须被 done 终态**原地替换**（不是追加一条、也不留中间态字段）。 */
+  it("upgrades the started placeholder in place when the download finishes", async () => {
+    const preview = makeFakePreview(["default"]);
+    const controller = makeController(preview);
+    const workspace = makeWorkspace();
+    const tabId = await boundTab(controller);
+    await controller.handle("s1", { op: "navigate", url: "https://example.com/", workspace });
+    const downloadsDir = join(workspace, ".pidesktop", "downloads");
+    const filePath = join(downloadsDir, "a.csv");
+    downloadDuringNextOp(preview, tabId, controller, [
+      { tabId, filename: "a.csv", url: "https://example.com/a.csv", status: "started", filePath, directory: downloadsDir },
+      { tabId, filename: "a.csv", url: "https://example.com/a.csv", status: "saved", bytes: 12, filePath, directory: downloadsDir }
+    ]);
+    const notices = noticesOf(await controller.handle("s1", { op: "eval", expression: "1", mode: "read" }));
+    expect(notices).toHaveLength(1);
+    // 占位里的 relativePath 保留，终态补上 bytes，且不留 reason 等占位字段。
+    expect(notices[0]).toEqual({ kind: "download", filename: "a.csv", url: "https://example.com/a.csv", saved: true, bytes: 12, relativePath: ".pidesktop/downloads/a.csv" });
+  });
+
+  /** 下载未在预算内完成：如实说「已开始、结果未知」，不谎报成功也不谎报失败。 */
+  it("keeps a still-running download as an honest unknown", async () => {
+    const preview = makeFakePreview(["default"]);
+    const controller = makeController(preview);
+    const workspace = makeWorkspace();
+    const tabId = await boundTab(controller);
+    await controller.handle("s1", { op: "navigate", url: "https://example.com/", workspace });
+    const downloadsDir = join(workspace, ".pidesktop", "downloads");
+    downloadDuringNextOp(preview, tabId, controller, [
+      { tabId, filename: "big.zip", url: "https://example.com/big.zip", status: "started", filePath: join(downloadsDir, "big.zip"), directory: downloadsDir }
+    ]);
+    const notices = noticesOf(await controller.handle("s1", { op: "eval", expression: "1", mode: "read" }));
+    expect(notices).toEqual([{ kind: "download", filename: "big.zip", url: "https://example.com/big.zip", saved: false, reason: "interrupted", relativePath: ".pidesktop/downloads/big.zip" }]);
+  });
+
+  it("does not report a download that happened outside the current operation window", async () => {
+    const preview = makeFakePreview(["default"]);
+    const controller = makeController(preview);
+    const workspace = makeWorkspace();
+    const tabId = await boundTab(controller);
+    await controller.handle("s1", { op: "navigate", url: "https://example.com/", workspace });
+    // 无人操作期间发生的下载（例如用户在页面里点了什么、或上个操作的超时僵尸）
+    // 不应粘到下一个操作的回执上。
+    controller.handleDownload({ tabId, filename: "stale.csv", url: "u", status: "cancelled" });
+    const result = await controller.handle("s1", { op: "eval", expression: "1", mode: "read" });
+    expect(noticesOf(result)).toEqual([]);
+  });
+
+  it("keeps traffic from other sessions out of the receipt", async () => {
+    const preview = makeFakePreview(["default"]);
+    const controller = makeController(preview);
+    const tabId = await boundTab(controller);
+    controller.handleDownload({ tabId: "unrelated-tab", filename: "x.csv", url: "u", status: "cancelled" });
+    const result = await controller.handle("s1", { op: "tabs", action: "list" });
+    expect(noticesOf(result)).toEqual([]);
+  });
+
+  it("drops download state when the tab is closed or swept", async () => {
+    const preview = makeFakePreview(["default"]);
+    const controller = makeController(preview);
+    const workspace = makeWorkspace();
+    const tabId = await boundTab(controller);
+    await controller.handle("s1", { op: "navigate", url: "https://example.com/", workspace });
+    await controller.handle("s1", { op: "tabs", action: "close", tabId });
+    expect(controller.downloadPolicy(tabId)).toBe("cancel");
+  });
+});
 
 describe("automation tab release on session dispose", () => {
   const controllers: BrowserAutomationController[] = [];

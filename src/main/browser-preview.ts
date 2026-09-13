@@ -1,10 +1,40 @@
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { shell, WebContentsView, type BrowserWindow, type Rectangle, type Session } from "electron";
 import type { BrowserElementPick, BrowserPreviewBounds, BrowserPreviewCommand, BrowserPreviewState, BrowserTabsEvent } from "../shared/protocol.js";
+import { MAX_TAB_DOWNLOADS, sanitizeDownloadName } from "./browser-downloads.js";
 import { parseElementPickMessage } from "./browser-preview-pick.js";
 import { normalizeBrowserUrl } from "./browser-preview-url.js";
 
 const DEFAULT_TAB_ID = "default";
+
+/** 自动化操作返回前等待「本次触发的下载」落盘的上限。 */
+export const DOWNLOAD_SETTLE_TIMEOUT_MS = 3_000;
+/** 上述等待的轮询间隔。 */
+export const DOWNLOAD_SETTLE_POLL_MS = 25;
+
+/**
+ * 一次下载事件（预览控制器 → 自动化控制器）。
+ *
+ * `status`：cancelled=已取消；started=已定向落盘但尚未完成（done 事件未到）；
+ * saved=已完成落盘；failed=保存中断。回执只渲染终态（started 只用于等 done）。
+ */
+export interface DownloadInfo {
+  tabId: string;
+  /** 页面给出的原始文件名；保存路径用的是清洗后的名字。 */
+  filename: string;
+  url: string;
+  status: "cancelled" | "started" | "saved" | "failed";
+  /** cancelled/failed 的原因：limit=超出每标签页上限；prepare-failed=目录/路径准备失败。 */
+  reason?: "limit" | "prepare-failed";
+  /** 触发了每标签页上限（此后本次导航内不再保存下载）。 */
+  limitReached?: boolean;
+  /** started/saved/failed 时的落盘绝对路径与目录。 */
+  filePath?: string;
+  directory?: string;
+  /** saved 时的字节数。 */
+  bytes?: number;
+}
 
 const emptyBrowserState = (): BrowserPreviewState => ({
   attached: false,
@@ -44,6 +74,10 @@ export class BrowserPreviewController {
   /** AI operations that just finished: short window where CDP click pick messages may still arrive. */
   private readonly automationEndedAt = new Map<string, number>();
   private readonly downloadGuardSessions = new Set<Session>();
+  /** 每个标签页当前导航轮已保存的下载数（导航时重置，防恶意页面刷满磁盘）。 */
+  private readonly downloadCounts = new Map<string, number>();
+  /** 每个标签页「已定向落盘但 done 未到」的下载 id（操作返回前等它们收敛）。 */
+  private readonly downloadStarts = new Map<string, Set<string>>();
 
   constructor(
     private readonly window: BrowserWindow,
@@ -51,7 +85,16 @@ export class BrowserPreviewController {
     /** 标签创建/关闭时的生命周期通知（渲染端同步预览面板用）。 */
     private readonly onTabLifecycle?: (event: BrowserTabsEvent) => void,
     /** 页面 preload 捕获的手动元素选择结果（转发给应用渲染端）。 */
-    private readonly onPickResult?: (pick: BrowserElementPick) => void
+    private readonly onPickResult?: (pick: BrowserElementPick) => void,
+    /**
+     * 下载策略（按标签页判定）：返回 "cancel" 取消并只报告（预览页默认的安全
+     * 姿态）；返回 { dir } 则把下载定向到该目录（自动化会话已绑定该标签页且
+     * navigate 过带工作区的目录时）。缺省返回 = cancel；未提供该钩子时全部取消
+     * （保持原行为，向后兼容）。
+     */
+    private readonly downloadPolicy?: (tabId: string) => "cancel" | { dir: string } | undefined,
+    /** 下载事件回调（saved 表示是否真的落盘）。自动化控制器据此给模型回执。 */
+    private readonly onDownload?: (info: DownloadInfo) => void
   ) {}
 
   snapshot(tabId: string): BrowserPreviewState {
@@ -215,10 +258,10 @@ export class BrowserPreviewController {
     });
     contents.session.setPermissionCheckHandler(() => false);
     contents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
-      if (!this.downloadGuardSessions.has(contents.session)) {
-        this.downloadGuardSessions.add(contents.session);
-        contents.session.on("will-download", (_event, item) => item.cancel());
-      }
+    if (!this.downloadGuardSessions.has(contents.session)) {
+      this.downloadGuardSessions.add(contents.session);
+      contents.session.on("will-download", (event, item, webContents) => this.handleDownload(event, item, webContents));
+    }
     contents.setWindowOpenHandler(({ url }) => {
       void this.navigateTab(tabId, url);
       return { action: "deny" };
@@ -252,7 +295,93 @@ export class BrowserPreviewController {
     return wrapper;
   }
 
+  /** 反查某个 WebContents 属于哪个标签页（下载事件按标签页定策略）。 */
+  private tabIdFor(contents: Electron.WebContents): string | undefined {
+    for (const [tabId, tab] of this.tabs) {
+      if (tab.view.webContents === contents) return tabId;
+    }
+    return undefined;
+  }
+
+  /**
+   * 下载守卫：按 session 只注册一次，按标签页决定策略。
+   *
+   * 实测结论（Electron 43，探针脚本见 docs/迭代记录.md 本条）：
+   * - `event.preventDefault()` 会让 `item.setSavePath()` **完全失效**（done 事件
+   *   直接是 cancelled、不产生任何文件）——取消只能取消，保存只能保存；
+   * - 不 preventDefault + setSavePath → done: completed，目录不存在时 Electron
+   *   会递归自建；
+   * - 第三个参数 webContents 非空且能定位到具体标签页，`item.getFilename()` 拿到的
+   *   是 Chromium 反穿越后的名字（`../../../evil.csv` → `_.._.._evil.csv`）。
+   */
+  private handleDownload(event: Electron.Event, item: Electron.DownloadItem, webContents: Electron.WebContents): void {
+    const tabId = webContents && !webContents.isDestroyed() ? this.tabIdFor(webContents) : undefined;
+    const filename = item.getFilename();
+    const url = item.getURL();
+    const policy = tabId ? this.downloadPolicy?.(tabId) : undefined;
+    // 预览页（用户自己浏览的标签）默认安全姿态：一个字节都不落盘；但自动化
+    // 标签页上的取消必须回执，否则模型会把「点击成功」当成「文件已导出」。
+    if (!tabId || !policy || policy === "cancel") {
+      item.cancel();
+      this.onDownload?.({ tabId: tabId ?? "", filename, url, status: "cancelled" });
+      return;
+    }
+    const planned = (this.downloadCounts.get(tabId) ?? 0) + 1;
+    this.downloadCounts.set(tabId, planned);
+    if (planned > MAX_TAB_DOWNLOADS) {
+      item.cancel();
+      this.onDownload?.({ tabId, filename, url, status: "cancelled", reason: "limit", limitReached: true });
+      return;
+    }
+    const safeName = sanitizeDownloadName(filename);
+    const filePath = join(policy.dir, safeName);
+    try {
+      mkdirSync(policy.dir, { recursive: true });
+      item.setSavePath(filePath);
+    } catch {
+      item.cancel();
+      this.onDownload?.({ tabId, filename: safeName, url, status: "failed", reason: "prepare-failed" });
+      return;
+    }
+    // 先把「已定向落盘、终态未到」报出去：done 事件要等字节收完（实测 100ms~秒级），
+    // 自动化操作会为它多等一拍，从而在回执里给出文件名与大小。
+    this.onDownload?.({ tabId, filename: safeName, url, status: "started", filePath, directory: policy.dir });
+    const downloadId = `${filePath}#${Date.now()}#${Math.random().toString(36).slice(2, 8)}`;
+    const running = this.downloadStarts.get(tabId) ?? new Set<string>();
+    running.add(downloadId);
+    this.downloadStarts.set(tabId, running);
+    item.on("done", (_event, state) => {
+      const pending = this.downloadStarts.get(tabId);
+      pending?.delete(downloadId);
+      if (pending && pending.size === 0) this.downloadStarts.delete(tabId);
+      const completed = state === "completed";
+      this.onDownload?.({
+        tabId,
+        filename: safeName,
+        url,
+        status: completed ? "saved" : "failed",
+        ...(completed ? { bytes: item.getReceivedBytes() } : {}),
+        filePath,
+        directory: policy.dir
+      });
+    });
+  }
+
+  /**
+   * 等到该标签页上没有「已落盘但终态未到」的下载（自动化操作返回前调用）。
+   * 普通点击不触发下载 → 立即返回；导出类点击最多等一个下载完成的时间，
+   * 换来回执里的文件名与大小。
+   */
+  async awaitDownloadsSettled(tabId: string): Promise<void> {
+    const deadline = Date.now() + DOWNLOAD_SETTLE_TIMEOUT_MS;
+    while ((this.downloadStarts.get(tabId)?.size ?? 0) > 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, DOWNLOAD_SETTLE_POLL_MS));
+    }
+  }
+
   private async navigateTab(tabId: string, input: string): Promise<void> {
+    // 新页面 = 新的下载额度（上限防的是单个恶意页面，不是整轮会话）。
+    this.downloadCounts.delete(tabId);
     const url = normalizeBrowserUrl(input);
     const wrapper = this.getOrCreate(tabId);
     // 新页面内容未知：先清掉旧量测，等 did-stop-loading 后重测。
@@ -312,6 +441,8 @@ export class BrowserPreviewController {
     }
     if (tab.measureTimer !== undefined) clearTimeout(tab.measureTimer);
     this.tabs.delete(tabId);
+    this.downloadCounts.delete(tabId);
+    this.downloadStarts.delete(tabId);
     const { view } = tab;
     view.setVisible(false);
     if (!this.window.isDestroyed()) this.window.contentView.removeChildView(view);
