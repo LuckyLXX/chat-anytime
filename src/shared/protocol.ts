@@ -744,8 +744,21 @@ export type BrowserAutomationData =
   | { kind: "tabs"; tabs: BrowserTabSummary[] };
 
 export type BrowserAutomationResult =
-  | { ok: true; data: BrowserAutomationData; notices?: BrowserAutomationNotice[] }
-  | { ok: false; error: string };
+  | { ok: true; data: BrowserAutomationData; notices?: BrowserAutomationNotice[]; dialogs?: BrowserAutomationDialogNote[] }
+  | { ok: false; error: string; dialogs?: BrowserAutomationDialogNote[] };
+
+/**
+ * 自动化操作期间页面弹出的 JavaScript 对话框（alert/confirm/prompt/beforeunload）。
+ * 弹窗会让该标签页的 JS 暂停等待应答，CDP 求值永远不 settle——控制器一律自动接受
+ * 并把内容回传，模型才知道页面弹过什么（否则会在错误假设上继续决策）。
+ */
+export interface BrowserAutomationDialogNote {
+  /** alert / confirm / prompt / beforeunload。 */
+  type: string;
+  message: string;
+  /** 是否被自动接受（true）或取消（false）。 */
+  accepted: boolean;
+}
 
 /**
  * 操作回执尾部的「待读通知」：操作本身成功、但控制器在旁路上收集到了需要

@@ -20,6 +20,7 @@ import { resolve, sep } from "node:path";
 import type { WebContents } from "electron";
 import type {
   BrowserAutomationData,
+  BrowserAutomationDialogNote,
   BrowserAutomationNotice,
   BrowserAutomationRequest,
   BrowserAutomationResult,
@@ -596,7 +597,17 @@ export class BrowserAutomationController {
    * tab id → 本次操作窗口内收集到的下载记录。窗口在操作开始时清空、结束时
    * 取走并渲染进回执（与 snapshot refs 同一周期，不需要跨操作队列）。
    */
-  private readonly pendingDownloads = new Map<string, BrowserAutomationNotice[]>();
+/** 下载回执收集与弹窗回执共用的操作窗口边界：reset 是本次操作的起点。 */
+    private readonly pendingDownloads = new Map<string, BrowserAutomationNotice[]>();
+  /**
+   * tab id → 本标签页已自动应答、尚未回传的弹窗记录。与下载回执同一个操作窗口：
+   * 操作开始时清空、结束时取走并渲染进回执。弹窗事件（Page.javascriptDialogOpening）
+   * 可能在任何时刻到达，所以它无法像点击那样“只算本次操作里发生的”——事件来的时候
+   * 我们只能接受它，回执窗口只决定何时告知模型。
+   */
+  private readonly pendingDialogs = new Map<string, BrowserAutomationDialogNote[]>();
+  /** 已注册 Page 域与弹窗监听的标签页（每个标签页一次，不在 cdp() 里重复注册）。 */
+  private readonly dialogWatchTabs = new Set<string>();
   /** 已定向落盘、等 done 终态的下载：占位回执对象 + 文件名（终态到达后就地替换）。 */
   private readonly settleWaiters = new Map<string, Set<{ notice: BrowserAutomationNotice; filename: string }>>();
   /** tabs with an operation in flight (per-tab serialization). */
@@ -623,24 +634,49 @@ export class BrowserAutomationController {
   }
 
   async handle(sessionKey: string, request: BrowserAutomationRequest): Promise<BrowserAutomationResult> {
+    let resolvedTabId: string | undefined;
     try {
       const tabId = request.op === "attach" ? this.attachTab(sessionKey) : this.tabFor(sessionKey);
+      resolvedTabId = tabId;
       this.tabLastActiveAt.set(tabId, Date.now());
       return await this.withTabLock(tabId, () => this.withAutomationGuard(tabId, async () => {
-          // 下载回执窗口：本次操作之前发生的下载已由上一个操作回执发出（或在
-          // 无人操作时丢弃）——窗口只覆盖「本次操作触发的下载」。
+          // 下载与弹窗共用的回执窗口：本次操作之前发生的下载已由上一个操作回执
+          // 发出（或在无人操作时丢弃）——窗口只覆盖「本次操作期间发生的事件」。
           this.pendingDownloads.delete(tabId);
+          this.pendingDialogs.delete(tabId);
           const result = await withOpTimeout(this.execute(sessionKey, tabId, request));
           this.assertNotCancelled(tabId);
           // 本次操作可能触发了下载：「导出」类点击是异步落盘的，多等一拍让回执
           // 能给出文件名与大小，而不是把「已取消/未知」报给模型。
           await this.preview.awaitDownloadsSettled?.(tabId);
-          if (!result.ok) return result;
           const notices = this.takeDownloadNotices(tabId);
-          return notices.length > 0 ? { ok: true as const, data: result.data, notices } : result;
+          const dialogs = this.takeDialogNotes(tabId);
+          // 失败回执也带弹窗记录：超时了才知道页面弹过窗，是排除「页面卡死 vs
+          // 弹窗阻塞」的唯一线索（这里是最有价值的一处回传）。
+          if (!result.ok) {
+            return {
+              ok: false as const,
+              error: result.error,
+              ...(notices.length > 0 ? { notices } : {}),
+              ...(dialogs.length > 0 ? { dialogs } : {})
+            };
+          }
+          return {
+            ok: true as const,
+            data: result.data,
+            ...(notices.length > 0 ? { notices } : {}),
+            ...(dialogs.length > 0 ? { dialogs } : {})
+          };
         }));
     } catch (error) {
-      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      // 操作直接抛错（不是返回 ok:false）时同样要把弹窗线报带上：页面被弹窗
+      // 阻塞正是它超时/报错的最常见原因。
+      const dialogs = resolvedTabId ? this.takeDialogNotes(resolvedTabId) : [];
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+        ...(dialogs.length > 0 ? { dialogs } : {})
+      };
     }
   }
 
@@ -736,6 +772,70 @@ export class BrowserAutomationController {
     return records;
   }
 
+  /**
+   * Ensure this tab auto-answers page dialogs. Called once per operation (never
+   * from `cdp()` itself, which would re-issue `Page.enable` on every single
+   * command). A dialog PAUSES the tab's JS until it is answered, so a page that
+   * fires `alert()`/`confirm()`/`beforeunload` during an operation would hang
+   * every CDP evaluation until the 110s watchdog — the model would burn two
+   * minutes to learn only 「浏览器操作超时」, with no hint that a dialog was the
+   * cause. `Page.enable` arms the `Page.javascriptDialogOpening` event.
+   */
+  private async ensureDialogWatch(tabId: string, contents: WebContents): Promise<void> {
+    if (this.dialogWatchTabs.has(tabId) || contents.isDestroyed()) return;
+    this.dialogWatchTabs.add(tabId);
+    try {
+      await this.cdp(contents, "Page.enable");
+    } catch {
+      // 不支持 Page 域的 target：退回原行为（弹窗仍会阻塞，但至少不报错）。
+      this.dialogWatchTabs.delete(tabId);
+      return;
+    }
+    // 监听器随 WebContents 销毁自动失效（debugger detach），无需手动 off。
+    // `debugger.on` 在少数 target 上不可用（或测试替身未实现）：降级为不监听，
+    // 不让整个操作因此失败。
+    try {
+      contents.debugger.on("message", (_event, method, params) => {
+        if (method !== "Page.javascriptDialogOpening") return;
+        const record = params as { type?: unknown; message?: unknown } | undefined;
+        const type = typeof record?.type === "string" && record.type ? record.type : "alert";
+        const message = typeof record?.message === "string" ? record.message : "";
+        void this.autoAcceptDialog(tabId, contents, type, message);
+      });
+    } catch {
+      // 不支持事件监听的 target：保持「至少已装上 Page 域」的状态。
+    }
+  }
+
+  /**
+   * 自动化期间一律接受弹窗：`beforeunload` 的离站确认不应拦住 AI 导航，
+   * `confirm`/`prompt` 的默认「取消」会让页面走另一条分支，与模型看到的 DOM
+   * 不一致（更难排查）。内容回传由回执承担，策略集中在这一处，日后要改宽松
+   * 只改这里。
+   */
+  private async autoAcceptDialog(tabId: string, contents: WebContents, type: string, message: string): Promise<void> {
+    // 记录**同步**入队（不接受失败时再回滚）——弹窗事件到达时弹窗确实开着，而
+    // 且调用方可能是「操作正在报错/超时」的路径：若先 await 应答再 push，失败
+    // 回执很可能取不到这条记录，而那正是最需要它的时刻（「弹窗阻塞」还是「页面
+    // 卡死」）。
+    const notes = this.pendingDialogs.get(tabId) ?? [];
+    notes.push({ type, message: message.slice(0, 200), accepted: true });
+    this.pendingDialogs.set(tabId, notes);
+    try {
+      await this.cdp(contents, "Page.handleJavaScriptDialog", { accept: true });
+    } catch {
+      // 弹窗可能已被页面自行关闭（或另一路径已应答）：无论哪种，页面都不会
+      // 再被这个弹窗阻塞，记录保持原样即可，不报噪声。
+    }
+  }
+
+  /** 取出待读弹窗并清空（与下载回执同窗口语义）。 */
+  private takeDialogNotes(tabId: string): BrowserAutomationDialogNote[] {
+    const notes = this.pendingDialogs.get(tabId) ?? [];
+    this.pendingDialogs.delete(tabId);
+    return notes;
+  }
+
   private sessionsBoundTo(tabId: string): string[] {
     const keys: string[] = [];
     for (const [sessionKey, bound] of this.sessionTabs) {
@@ -779,6 +879,8 @@ export class BrowserAutomationController {
     this.downloadDirs.delete(tabId);
     this.pendingDownloads.delete(tabId);
     this.settleWaiters.delete(tabId);
+    this.pendingDialogs.delete(tabId);
+    this.dialogWatchTabs.delete(tabId);
     void this.preview.handle({ type: "close", tabId });
   }
 
@@ -807,6 +909,8 @@ export class BrowserAutomationController {
     this.downloadDirs.clear();
     this.pendingDownloads.clear();
     this.settleWaiters.clear();
+    this.pendingDialogs.clear();
+    this.dialogWatchTabs.clear();
     this.busyTabs.clear();
     this.cancelRequests.clear();
     this.tabLastActiveAt.clear();
@@ -879,6 +983,9 @@ export class BrowserAutomationController {
 
     private async execute(sessionKey: string, tabId: string, request: BrowserAutomationRequest): Promise<BrowserAutomationResult> {
     const contents = this.requireContents(tabId);
+    // 每个操作开始前保证弹窗监听已就绪（每标签页一次；这里 await 的是已注册
+    // 时的立即返回，不在 cdp() 内部做，以免每条命令都 Page.enable）。
+    await this.ensureDialogWatch(tabId, contents);
     switch (request.op) {
       case "attach": {
         const state = this.preview.snapshot(tabId);
@@ -920,6 +1027,7 @@ export class BrowserAutomationController {
       case "get":
         return this.get(tabId, contents, request.what, request.ref);
       case "tabs":
+        await this.ensureDialogWatch(tabId, contents);
         return this.tabs(sessionKey, tabId, request.action, request.tabId);
     }
   }

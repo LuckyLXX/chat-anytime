@@ -563,3 +563,174 @@ describe("automation eval result spill", () => {
     rmSync(workspaceFile, { force: true });
   });
 });
+
+/**
+ * 页面弹窗自动应答：alert/confirm/beforeunload 会暂停标签页 JS，CDP 求值永不
+ * settle——正确行为是自动接受并把内容回传给模型（而不是白等 110s 超时）。
+ */
+describe("automation dialog auto-answer", () => {
+  const controllers: BrowserAutomationController[] = [];
+  afterEach(() => {
+    for (const controller of controllers) controller.dispose();
+    controllers.length = 0;
+  });
+  interface FakeDebugger { isAttached: () => boolean; attach: () => void; sendCommand: (method: string, params?: Record<string, unknown>) => Promise<unknown>; on: (event: string, listener: (...args: unknown[]) => void) => void; }
+  const debuggerOf = (preview: BrowserPreviewController, tabId: string): FakeDebugger =>
+    (preview.webContentsFor(tabId) as unknown as { debugger: FakeDebugger }).debugger;
+  /**
+   * 单个共享的 contents 替身：`webContentsFor` 必须每次返回**同一个**对象，否则
+   * 测试里装的 spy/监听器与控制器内部拿到的不是一份（这条踩过）。
+   */
+  const makeFake = (): BrowserPreviewController => {
+    const preview = makeFakePreview(["default"]) as FakePreview & BrowserPreviewController;
+    const listeners: Array<(...args: unknown[]) => void> = [];
+    const contents = {
+      isDestroyed: () => false,
+      debugger: {
+        isAttached: () => false,
+        attach: () => undefined,
+        sendCommand: async () => ({ result: { value: 1 } }),
+        on: (_event: string, listener: (...args: unknown[]) => void) => listeners.push(listener)
+      }
+    };
+    (preview as unknown as { webContentsFor: (id: string) => unknown }).webContentsFor = () => contents;
+    (preview as unknown as { dialogListeners: unknown[] }).dialogListeners = listeners;
+    return preview;
+  };
+  const listenersOf = (preview: BrowserPreviewController): Array<(...args: unknown[]) => void> =>
+    (preview as unknown as { dialogListeners: Array<(...args: unknown[]) => void> }).dialogListeners;
+  /**
+   * 在当前操作执行期间派发一次弹窗事件（真实时序：事件来自 CDP，不在我们的调用栈里）。
+   * 转发必须把参数原样带上——早期版本只转发 method，把后面包上来的 spy 看到成
+   * `undefined`，于是测试报「参数丢了」而实际是替身自己吞掉了。
+   */
+  const dialogDuringNextOp = (preview: BrowserPreviewController, payload: Record<string, unknown>): void => {
+    const listeners = listenersOf(preview);
+    const contents = preview.webContentsFor("default") as unknown as { debugger: { sendCommand: (...args: unknown[]) => Promise<unknown> } };
+    const original = contents.debugger.sendCommand;
+    let fired = false;
+    contents.debugger.sendCommand = async (...args: unknown[]) => {
+      const method = args[0] as string;
+      if (!fired && method === "Runtime.evaluate") {
+        fired = true;
+        for (const listener of listeners) listener({}, "Page.javascriptDialogOpening", payload, "s1");
+      }
+      return original(...args);
+    };
+  };
+  const newController = (preview: BrowserPreviewController): BrowserAutomationController => {
+    const controller = new BrowserAutomationController(preview);
+    controllers.push(controller);
+    return controller;
+  };
+  const dialogsOf = (result: BrowserAutomationResult) => result.dialogs ?? [];
+
+  it("arms the Page domain once per tab, never per command", async () => {
+    const preview = makeFake();
+    const controller = newController(preview);
+    const calls: string[] = [];
+    const contents = preview.webContentsFor("default") as unknown as { debugger: { sendCommand: (method: string) => Promise<unknown> } };
+    const original = contents.debugger.sendCommand;
+    contents.debugger.sendCommand = async (method: string) => { calls.push(method); return original(method); };
+    await controller.handle("s1", { op: "eval", expression: "1", mode: "read" });
+    await controller.handle("s1", { op: "eval", expression: "2", mode: "read" });
+    expect(calls.filter((method) => method === "Page.enable")).toHaveLength(1);
+    expect(listenersOf(preview)).toHaveLength(1);
+  });
+
+  it("auto-accepts a dialog and reports it in the operation receipt", async () => {
+    const preview = makeFake();
+    const controller = newController(preview);
+    const answered: Array<Record<string, unknown>> = [];
+    const contents = preview.webContentsFor("default") as unknown as { debugger: { sendCommand: (method: string, params?: Record<string, unknown>) => Promise<unknown> } };
+    const original = contents.debugger.sendCommand;
+    contents.debugger.sendCommand = async (method: string, params?: Record<string, unknown>) => {
+      if (method === "Page.handleJavaScriptDialog") answered.push({ ...(params as Record<string, unknown>) });
+      return original(method as never, params as never);
+    };
+    dialogDuringNextOp(preview, { type: "confirm", message: "确定要删除吗？" });
+    const result = await controller.handle("s1", { op: "eval", expression: "1", mode: "read" });
+    expect(answered).toEqual([{ accept: true }]);
+    expect(dialogsOf(result)).toEqual([{ type: "confirm", message: "确定要删除吗？", accepted: true }]);
+    // 窗口语义：取走即清空（下一次操作不再重复报告）。
+    const second = await controller.handle("s1", { op: "eval", expression: "1", mode: "read" });
+    expect(dialogsOf(second)).toEqual([]);
+  });
+
+  it("truncates a huge dialog message instead of dumping it into the receipt", async () => {
+    const preview = makeFake();
+    const controller = newController(preview);
+    dialogDuringNextOp(preview, { type: "alert", message: "x".repeat(5000) });
+    const dialogs = dialogsOf(await controller.handle("s1", { op: "eval", expression: "1", mode: "read" }));
+    expect(dialogs[0]?.message).toHaveLength(200);
+  });
+
+  it("ignores unrelated CDP events and malformed payloads", async () => {
+    const preview = makeFake();
+    const controller = newController(preview);
+    dialogDuringNextOp(preview, { type: "alert", message: "real" });
+    const listeners = listenersOf(preview);
+    for (const listener of listeners) listener({}, "Page.frameNavigated", { frame: {} }, "s1");
+    const dialogs = dialogsOf(await controller.handle("s1", { op: "eval", expression: "1", mode: "read" }));
+    // 只有真正开过的那个弹窗被记录，且缺 type 时退化为 alert。
+    expect(dialogs).toEqual([{ type: "alert", message: "real", accepted: true }]);
+  });
+
+  it("keeps dialog records out of unrelated tabs", async () => {
+    const preview = makeFake();
+    const controller = newController(preview);
+    const other = await controller.handle("s2", { op: "tabs", action: "new" });
+    if (!other.ok || other.data.kind !== "tabs") throw new Error("tabs new 失败");
+    const otherTab = other.data.tabs.find((tab) => tab.active)!.id;
+    // s1 绑 default（第一次 eval 时绑过去），s2 绑新建的自动化标签。
+    await controller.handle("s1", { op: "eval", expression: "1", mode: "read" });
+    const note = { type: "alert", message: "只属于 default", accepted: true };
+    for (const listener of listenersOf(preview)) listener({}, "Page.javascriptDialogOpening", note, "s1");
+    const result = await controller.handle("s2", { op: "eval", expression: "1", mode: "read" });
+    expect(dialogsOf(result)).toEqual([]);
+    expect(otherTab).toMatch(/^pi-browser-/u);
+  });
+
+  it("still reports a dialog when the operation itself failed", async () => {
+    const preview = makeFake();
+    const controller = newController(preview);
+    const contents = preview.webContentsFor("default") as unknown as { debugger: { sendCommand: (method: string) => Promise<unknown> } };
+    const original = contents.debugger.sendCommand;
+    contents.debugger.sendCommand = async (method: string) => {
+      if (method === "Runtime.evaluate") {
+        for (const listener of listenersOf(preview)) listener({}, "Page.javascriptDialogOpening", { type: "beforeunload", message: "" }, "s1");
+        throw new Error("模拟超时");
+      }
+      return original(method);
+    };
+    const result = await controller.handle("s1", { op: "eval", expression: "1", mode: "read" });
+    expect(result.ok).toBe(false);
+    // 失败回执里的弹窗线报是最有价值的一处：模型能分辨「弹窗阻塞」而不是「页面卡死」。
+    expect(dialogsOf(result)).toEqual([{ type: "beforeunload", message: "", accepted: true }]);
+  });
+
+  it("drops dialog state when the tab is closed", async () => {
+    const preview = makeFake();
+    const controller = newController(preview);
+    await controller.handle("s1", { op: "tabs", action: "new" });
+    const created = preview.tabIds().find((id) => id.startsWith("pi-browser-"))!;
+    const note = { type: "alert", message: "残留", accepted: true };
+    for (const listener of listenersOf(preview)) listener({}, "Page.javascriptDialogOpening", note, "s1");
+    await controller.handle("s1", { op: "tabs", action: "close", tabId: created });
+    // 关标签页后再弹窗（残留事件）不产生新记录：该标签的待读队列已随关闭清空。
+    for (const listener of listenersOf(preview)) listener({}, "Page.javascriptDialogOpening", note, "s1");
+    const result = await controller.handle("s1", { op: "tabs", action: "list" });
+    expect(dialogsOf(result)).toEqual([]);
+  });
+
+  it("does not let a dialog from outside the operation window leak into the next receipt", async () => {
+    const preview = makeFake();
+    const controller = newController(preview);
+    await controller.handle("s1", { op: "eval", expression: "1", mode: "read" });
+    // 无人操作期间弹的窗（页面自己的定时器定时弹）：照旧会被自动应答，但不粘到
+    // 下一个操作的回执上——与下载回执同一窗口语义。
+    for (const listener of listenersOf(preview)) listener({}, "Page.javascriptDialogOpening", { type: "alert", message: "空闲期" }, "s1");
+    const result = await controller.handle("s1", { op: "eval", expression: "2", mode: "read" });
+    expect(dialogsOf(result)).toEqual([]);
+  });
+});

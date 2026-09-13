@@ -358,3 +358,48 @@ describe("browser eval overflow receipts", () => {
     expect(calls[0]).toEqual({ op: "eval", expression: "1", mode: "read", workspace: "D:\工作区" });
   });
 });
+
+/**
+ * 页面弹窗回执：自动应答之后必须把「页面弹过什么」告诉模型，否则它会在错误
+ * 假设上继续决策；失败回执也要带（弹窗是超时/报错的最常见原因）。
+ */
+describe("browser dialog receipts", () => {
+  const clickWithDialogs = async (dialogs?: OkResult["dialogs"]) => {
+    const result: BrowserAutomationResult = dialogs
+      ? { ok: true, data: { kind: "click", description: "<button> 删除" }, dialogs }
+      : { ok: true, data: { kind: "click", description: "<button> 删除" } };
+    const { tools } = toolsWith({ click: result });
+    const click = tools.find((tool) => tool.name === "browser_click")!;
+    const executed = await execute(click, { ref: "@e1" }) as { content: Array<{ text: string }> };
+    return executed.content[0]!.text;
+  };
+
+  it("keeps the receipt byte-identical when no dialog appeared", async () => {
+    expect(await clickWithDialogs()).toBe("已点击 @e1：<button> 删除。提示：使用 @eN 引用元素；页面导航或内容变化后引用会失效，操作报错时请重新调用 browser_snapshot。");
+  });
+
+  it("reports the dialog message and that it was auto-accepted", async () => {
+    const text = await clickWithDialogs([{ type: "confirm", message: "确定要删除吗？", accepted: true }]);
+    expect(text).toContain("页面弹出了 confirm：「确定要删除吗？」");
+    expect(text).toContain("已自动确认");
+    expect(text).toContain("未阻塞操作");
+  });
+
+  it("labels beforeunload in words a model can act on", async () => {
+    const text = await clickWithDialogs([{ type: "beforeunload", message: "", accepted: true }]);
+    expect(text).toContain("离站确认（beforeunload）");
+    // 没有 message 时不要渲染出一个空引号对。
+    expect(text).not.toContain("：「」");
+  });
+
+  it("appends dialogs to a failed operation so the cause is visible", async () => {
+    const result: BrowserAutomationResult = {
+      ok: false,
+      error: "浏览器操作超时（110 秒无响应）",
+      dialogs: [{ type: "alert", message: "请稍候", accepted: true }]
+    };
+    const { tools } = toolsWith({ click: result });
+    const click = tools.find((tool) => tool.name === "browser_click")!;
+    await expect(execute(click, { ref: "@e1" })).rejects.toThrow(/页面弹出了 alert：「请稍候」/);
+  });
+});
