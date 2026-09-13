@@ -322,7 +322,8 @@ export function buildBrowserTools(deps: BrowserToolDeps): ToolDefinition[] {
         description: [
           "向页面中的 <input type=file> 设置本地文件（触发 change 事件）。",
           "files 必须是当前工作区内的相对路径；最多 20 个文件，单个不超过 20MB。",
-          "文件由主进程直接交给 Chromium 文件选择器，页面无法读到绝对路径。"
+          "文件由主进程直接交给 Chromium 文件选择器，页面无法读到绝对路径。",
+          "ref 指向的不是 file input 时会明确告知该元素是什么；控件被页面重新挂载时自动重试一次。"
         ].join(""),
         promptSnippet: "browser_upload: 向页面文件控件上传工作区文件",
         parameters: Type.Object({

@@ -9,10 +9,13 @@ import {
   buildScrollScript,
   buildSnapshotScript,
   buildTypeScript,
+  classifyUploadFailure,
   elementSignature,
   formatSnapshotLine,
   isSideEffectRejection,
   OBSTRUCTION_PROBE_LIMIT,
+  setFileInputFiles,
+  UPLOAD_REMOUNT_ATTEMPTS,
   urlPatternMatcher,
   withOpTimeout
 } from "./browser-automation.js";
@@ -766,5 +769,179 @@ describe("automation dialog auto-answer", () => {
     for (const listener of listenersOf(preview)) listener({}, "Page.javascriptDialogOpening", { type: "alert", message: "空闲期" }, "s1");
     const result = await controller.handle("s1", { op: "eval", expression: "2", mode: "read" });
     expect(dialogsOf(result)).toEqual([]);
+  });
+});
+
+/**
+ * upload 路径：实测（Electron 43）`DOM.setFileInputFiles` 接受 objectId，可跳过
+ * 最易失效的 `DOM.requestNode`；降级路径必须先 `DOM.getDocument`（否则 nodeId
+ * 恒为 0 → 「Could not find node with given id」）。
+ */
+describe("automation upload file-input path", () => {
+  type Cdp = (method: string, params: Record<string, unknown>) => Promise<unknown>;
+
+  it("uses objectId directly and never touches the DOM domain", async () => {
+    const calls: string[] = [];
+    const cdp: Cdp = async (method) => { calls.push(method); return {}; };
+    await expect(setFileInputFiles(cdp, ["a.txt"], "obj-1")).resolves.toBe("objectId");
+    expect(calls).toEqual(["DOM.setFileInputFiles"]);
+  });
+
+  it("falls back to requestNode after DOM.getDocument when objectId is rejected", async () => {
+    const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+    const cdp: Cdp = async (method, params) => {
+      calls.push({ method, params });
+      if (method === "DOM.setFileInputFiles" && "objectId" in params) throw new Error("Invalid parameters");
+      if (method === "DOM.requestNode") return { nodeId: 7 };
+      return {};
+    };
+    await expect(setFileInputFiles(cdp, ["a.txt"], "obj-1")).resolves.toBe("requestNode");
+    expect(calls.map((call) => call.method)).toEqual(["DOM.setFileInputFiles", "DOM.getDocument", "DOM.requestNode", "DOM.setFileInputFiles"]);
+    // 关键：降级路径必须先 getDocument，否则 requestNode 返回 nodeId=0（实测）。
+    expect(calls[2]!.params).toEqual({ objectId: "obj-1" });
+    expect(calls[3]!.params).toEqual({ files: ["a.txt"], nodeId: 7 });
+  });
+
+  it("does not retry through requestNode when the target is not a file input", async () => {
+    let calls = 0;
+    const cdp: Cdp = async (method) => {
+      calls += 1;
+      if (method === "DOM.setFileInputFiles") throw new Error("Node is not a file input element");
+      return {};
+    };
+    await expect(setFileInputFiles(cdp, ["a.txt"], "btn")).rejects.toThrow(/not a file input/i);
+    // 同一节点换路径只会得到同样的错误：不白跑一次 requestNode。
+    expect(calls).toBe(1);
+  });
+
+  it("gives up when requestNode still yields no usable nodeId", async () => {
+    const cdp: Cdp = async (method) => {
+      if (method === "DOM.setFileInputFiles") throw new Error("Could not find node with given id");
+      if (method === "DOM.requestNode") return { nodeId: 0 };
+      return {};
+    };
+    await expect(setFileInputFiles(cdp, ["a.txt"], "obj")).rejects.toThrow(/Could not find node/);
+  });
+
+  it("classifies CDP upload failures into actionable kinds", () => {
+    expect(classifyUploadFailure("Node is not a file input element")).toBe("not-file-input");
+    expect(classifyUploadFailure("Could not find node with given id")).toBe("stale");
+    expect(classifyUploadFailure("Node with given id does not belong to the document")).toBe("stale");
+    expect(classifyUploadFailure("something else entirely")).toBe("unknown");
+  });
+
+  it("reports both upload preconditions from the locate script", () => {
+    const script = buildLocateScript(2);
+    expect(script).toContain("isFileInput");
+    expect(script).toContain("connected");
+  });
+});
+
+describe("automation upload remount retry", () => {
+  const controllers: BrowserAutomationController[] = [];
+  afterEach(() => {
+    for (const controller of controllers) controller.dispose();
+    controllers.length = 0;
+  });
+  interface FakeDebugger { isAttached: () => boolean; attach: () => void; sendCommand: (method: string, params?: Record<string, unknown>) => Promise<unknown>; }
+  const URL_UNDER_TEST = "https://example.com/form";
+  /**
+   * 一个「按脚本内容分流」的假 CDP：快照脚本回一条可签名的元素、定位脚本回给定
+   * 的 located、DOM 命令按脚本化结果应答。refs 的签名一致性由真实的
+   * elementSignature/formatSnapshotLine 逻辑保证，所以这里测的是真链路。
+   */
+  const snapshotItem = { tag: "input", role: null, type: "file", id: "f", cls: null, name: null, text: null, value: null, checked: null, selected: null, expanded: null, href: null, x: 10, y: 20 };
+  const makeHarness = (options: { locate: (attempt: number) => Record<string, unknown>; setFiles: (attempt: number) => "ok" | Error }) => {
+    const preview = makeFakePreview(["default"]) as FakePreview & BrowserPreviewController;
+    const contents = {
+      isDestroyed: () => false,
+      debugger: { isAttached: () => false, attach: () => undefined, sendCommand: async () => ({}) }
+    };
+    (preview as unknown as { webContentsFor: (id: string) => unknown }).webContentsFor = () => contents;
+    (preview as unknown as { snapshot: () => unknown }).snapshot = () => ({ url: URL_UNDER_TEST, title: "表单" });
+    let locateAttempts = 0;
+    let setAttempts = 0;
+    const methods: string[] = [];
+    (contents as unknown as { debugger: FakeDebugger }).debugger.sendCommand = async (method, params) => {
+      methods.push(method);
+      if (method === "Runtime.evaluate") {
+        const expression = String(params?.expression ?? "");
+        if (expression.includes("collectInteractiveElements") && expression.includes("pageText")) {
+          return { result: { value: { url: URL_UNDER_TEST, title: "表单", pageText: "", items: [snapshotItem], truncated: false } } };
+        }
+        if (params?.returnByValue === false) return { result: { objectId: `obj-${locateAttempts || 1}` } };
+        locateAttempts += 1;
+        return { result: { value: { ok: true, x: 10, y: 20, signature: elementSignature(snapshotItem), description: "input#f", isFileInput: true, connected: true, ...options.locate(locateAttempts) } } };
+      }
+      if (method === "DOM.setFileInputFiles") {
+        setAttempts += 1;
+        const outcome = options.setFiles(setAttempts);
+        if (outcome instanceof Error) throw outcome;
+        return {};
+      }
+      return {};
+    };
+    const controller = new BrowserAutomationController(preview);
+    controllers.push(controller);
+    return { controller, methods, attempts: () => ({ locate: locateAttempts, set: setAttempts }) };
+  };
+  const uploadFile = (): string => {
+    const file = join(tmpdir(), `pidesktop-upload-${Date.now()}-${Math.random().toString(16).slice(2)}.txt`);
+    writeFileSync(file, "payload");
+    return file;
+  };
+
+  it("retries the whole chain once when the control was remounted", async () => {
+    const harness = makeHarness({
+      // 第一次定位到的是已卸载的旧节点（瞬态控件刚被替换）
+      locate: (attempt) => (attempt === 1 ? { connected: false } : {}),
+      setFiles: () => "ok"
+    });
+    await harness.controller.handle("s1", { op: "snapshot" });
+    const result = await harness.controller.handle("s1", { op: "upload", ref: "@e1", files: [uploadFile()] });
+    expect(result.ok).toBe(true);
+    if (!result.ok || result.data.kind !== "upload") throw new Error("upload 返回了意外结果");
+    expect(result.data.description).toContain("input#f");
+    // 控件被重新挂载 → 必须重新走一遍定位，并在回执里如实说明重试过。
+    expect(result.data.description).toContain("已重试一次");
+    expect(harness.attempts().locate).toBe(2);
+  });
+
+  it("retries once when setFileInputFiles reports a stale node", async () => {
+    const harness = makeHarness({
+      locate: () => ({}),
+      setFiles: (attempt) => (attempt === 1 ? new Error("Could not find node with given id") : "ok")
+    });
+    await harness.controller.handle("s1", { op: "snapshot" });
+    const result = await harness.controller.handle("s1", { op: "upload", ref: "@e1", files: [uploadFile()] });
+    expect(result.ok).toBe(true);
+    expect(harness.attempts().set).toBe(2);
+  });
+
+  it("gives up after the retry budget instead of looping forever", async () => {
+    const harness = makeHarness({
+      locate: () => ({}),
+      setFiles: () => new Error("Could not find node with given id")
+    });
+    await harness.controller.handle("s1", { op: "snapshot" });
+    const result = await harness.controller.handle("s1", { op: "upload", ref: "@e1", files: [uploadFile()] });
+    expect(result.ok).toBe(false);
+    // 上限 1 次重试（共 2 次尝试），不会变成无限循环。
+    expect(harness.attempts().set).toBe(UPLOAD_REMOUNT_ATTEMPTS + 1);
+  });
+
+  it("refuses a ref that is not a file input, with the element named", async () => {
+    const harness = makeHarness({
+      locate: () => ({ isFileInput: false, description: "button#go" }),
+      setFiles: () => "ok"
+    });
+    await harness.controller.handle("s1", { op: "snapshot" });
+    const result = await harness.controller.handle("s1", { op: "upload", ref: "@e1", files: [uploadFile()] });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("预期失败");
+    expect(result.error).toContain("不是文件上传控件");
+    expect(result.error).toContain("button#go");
+    // 判据在定位阶段就成立：不该白跑一次 setFileInputFiles。
+    expect(harness.attempts().set).toBe(0);
   });
 });

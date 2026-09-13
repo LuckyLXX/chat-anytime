@@ -51,6 +51,10 @@ export const MAX_WAIT_TIMEOUT_MS = 60000;
 export const MAX_EVAL_EXPRESSION_CHARS = 4000;
 /** Upload size limit for browser_upload (matches the attachment cap). */
 export const MAX_UPLOAD_FILE_BYTES = 20 * 1024 * 1024;
+/** 瞬态上传控件的整链路重试次数上限（防无限循环）。 */
+export const UPLOAD_REMOUNT_ATTEMPTS = 1;
+/** 重试前的等待（给页面时间把控件挂回来）。 */
+export const UPLOAD_REMOUNT_RETRY_MS = 150;
 
 const AUTOMATION_TAB_PREFIX = "pi-browser-";
 /** An orphaned automation tab (no live session binds it) is swept after this idle window. */
@@ -93,6 +97,10 @@ interface LocatedElement {
   description?: string;
   cleared?: boolean;
   scrollY?: number;
+  /** 该元素是否是 `<input type=file>`（上传路径据此提前给出可行动错误）。 */
+  isFileInput?: boolean;
+  /** 该元素是否仍在文档里（瞬态挂载的控件可能已经卸载）。 */
+  connected?: boolean;
 }
 
 /**
@@ -346,7 +354,16 @@ export function buildLocateScript(index: number): string {
   const cy = pos.y + rect.height / 2;
   const top = hitTest(el);
   if (top && top !== el && !el.contains(top)) return { ok: false, error: '元素被遮挡，无法点击（请先关闭遮挡层或滚动后重试）' };
-  return { ok: true, x: Math.round(cx), y: Math.round(cy), signature: ${SIG_OF_EL}, description: ${DESCRIBE_EL} };
+  return {
+    ok: true,
+    x: Math.round(cx),
+    y: Math.round(cy),
+    signature: ${SIG_OF_EL},
+    description: ${DESCRIBE_EL},
+    // 上传路径的两个提前判据（同一趟脚本里带出，不额外花往返）。
+    isFileInput: el.tagName === 'INPUT' && el.type === 'file',
+    connected: el.isConnected
+  };
 })()`;
 }
 
@@ -1265,14 +1282,37 @@ export class BrowserAutomationController {
     }
     this.preview.setAutomating(tabId, `正在向 ${ref} 上传文件`);
     try {
-      const located = await this.locate(contents, ref);
-      this.verifyRef(tabId, ref, located.signature);
-      const remote = await this.cdp(contents, "Runtime.evaluate", { expression: `(${COLLECT_CORE})[${index}]`, returnByValue: false });
-      const objectId = remote.result?.objectId as string | undefined;
-      if (!objectId) throw new Error("无法定位上传控件（页面可能已变化，请重新 browser_snapshot）");
-      const node = await this.cdp(contents, "DOM.requestNode", { objectId });
-      await this.cdp(contents, "DOM.setFileInputFiles", { files, nodeId: node.nodeId });
-      return { ok: true, data: { kind: "upload", description: `${located.description ?? ref} ← ${files.join(", ")}` } };
+      // 瞬态 file input（点击「选择文件」后才挂载的站点）在「定位 → 设文件」之间
+      // 可能已被卸载，所以整条链路允许重试一次（重新定位 + 重设，幂等）。
+      for (let attempt = 1; ; attempt++) {
+        const located = await this.locate(contents, ref);
+        this.verifyRef(tabId, ref, located.signature);
+        if (located.isFileInput === false) {
+          throw new Error(`${ref} 不是文件上传控件（该元素是 <${located.description ?? "未知"}>），请 snapshot 后选择 input[type=file]`);
+        }
+        const remote = await this.cdp(contents, "Runtime.evaluate", { expression: `(${COLLECT_CORE})[${index}]`, returnByValue: false });
+        const objectId = remote.result?.objectId as string | undefined;
+        const remounted = located.connected === false || !objectId;
+        if (remounted && attempt <= UPLOAD_REMOUNT_ATTEMPTS) {
+          // 页面把控件重新挂了一遍：等一拍再走一次完整链路（重新定位会拿到新节点）。
+          await sleep(UPLOAD_REMOUNT_RETRY_MS);
+          continue;
+        }
+        if (!objectId) {
+          throw new Error(`上传控件已从页面移除（页面可能已变化，请重新 browser_snapshot）`);
+        }
+        try {
+          await setFileInputFiles((method, params) => this.cdp(contents, method, params), files, objectId);
+        } catch (error) {
+          if (attempt <= UPLOAD_REMOUNT_ATTEMPTS) {
+            await sleep(UPLOAD_REMOUNT_RETRY_MS);
+            continue;
+          }
+          throw error;
+        }
+        const retried = attempt > 1 ? "（控件曾被重新挂载，已重试一次）" : "";
+        return { ok: true, data: { kind: "upload", description: `${located.description ?? ref} ← ${files.join(", ")}${retried}` } };
+      }
     } finally {
       this.preview.setAutomating(tabId, undefined);
     }
@@ -1521,6 +1561,51 @@ export class BrowserAutomationController {
         return { ok: true, data: { kind: "tabs", tabs: remaining } };
       }
     }
+  }
+}
+
+/**
+ * `DOM.setFileInputFiles` 的失败分类（纯函数，错误文案来自 CDP 实测）。
+ * 上传的每一类失败要给模型一句能照着做的话，而不是笼统的「无法定位上传控件」。
+ */
+export type UploadFailureKind = "not-file-input" | "stale" | "unknown";
+
+export function classifyUploadFailure(message: string): UploadFailureKind {
+  if (/not a file input/i.test(message)) return "not-file-input";
+  if (/could not find node|no node with given id|node with given id|detached/i.test(message)) return "stale";
+  return "unknown";
+}
+
+/**
+ * 把工作区文件设到已定位的 file input 上。
+ *
+ * 实测（Electron 43，2026-09-13）：`DOM.setFileInputFiles` **接受 `objectId`**，
+ * 因此可以跳过 `DOM.requestNode` 这个最易失效的环节——而且实测 `requestNode`
+ * 在**没有先调用 `DOM.getDocument`** 时返回 `nodeId: 0`，随后 setFileInputFiles
+ * 报「Could not find node with given id」（本函数落地前的上传路径正是这个 bug，
+ * 即 browser_upload 一直是坏的）。所以降级路径必须先 `DOM.getDocument`。
+ *
+ * 返回实际生效的路径，供回执/测试断言「走的是哪一条」。
+ */
+export async function setFileInputFiles(
+  cdp: (method: string, params: Record<string, unknown>) => Promise<unknown>,
+  files: string[],
+  objectId: string
+): Promise<"objectId" | "requestNode"> {
+  try {
+    await cdp("DOM.setFileInputFiles", { files, objectId });
+    return "objectId";
+  } catch (error) {
+    const kind = classifyUploadFailure(error instanceof Error ? error.message : String(error));
+    // 不是 file input 属调用方错误：换 requestNode 走同一节点只会得到同样的错。
+    if (kind === "not-file-input") throw error;
+    // 降级：requestNode 之前必须先 getDocument，否则 nodeId 恒为 0。
+    await cdp("DOM.getDocument", { depth: 1 });
+    const node = (await cdp("DOM.requestNode", { objectId })) as { nodeId?: unknown } | undefined;
+    const nodeId = typeof node?.nodeId === "number" && node.nodeId > 0 ? node.nodeId : undefined;
+    if (nodeId === undefined) throw error;
+    await cdp("DOM.setFileInputFiles", { files, nodeId });
+    return "requestNode";
   }
 }
 
