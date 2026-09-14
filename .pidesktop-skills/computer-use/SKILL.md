@@ -24,7 +24,9 @@ description: 当用户想让你操作桌面上的其他应用窗口（打开/切
 python -c "import win32gui, win32api, win32clipboard, PIL; print('ok')"
 ```
 
-报 ImportError 就先装依赖：`pip install pywin32 pillow`（仅这两个，勿装 pyautogui/opencv）。
+报 ImportError 就先装依赖：`pip install pywin32 pillow`（基础四件，勿装 pyautogui/opencv）。
+可选增强：`pip install uiautomation`（UIA 控件树，第 3 节）、
+`pip install rapidocr-onnxruntime`（视觉检测 OCR，第 4 节）。
 `python` 不存在时先向用户说明并请求安装 Python 3.10+。
 
 ## 1. 写脚本调用 ljqCtrl（长尾场景）
@@ -58,7 +60,42 @@ import ljqCtrl
 | `ljqCtrl.ScreenCapAt(x, y)` | 物理坐标周边 ±100px 截图（验证点击效果用） |
 | `ljqCtrl.dpi_scale` | 逻辑=物理×dpi_scale；外部来源的**逻辑**坐标要 `÷dpi_scale` 转物理 |
 
-## 3. 标准工作流（每一步都要验证）
+## 3. UIA 控件树（uia.py，原生应用首选探测路线）
+
+依赖 `pip install uiautomation`。**比截图估坐标稳定得多**：免坐标读写控件，
+原生应用（记事本/资源管理器/计算器/传统 Win32/Qt）优先走这条路线。
+
+| API | 说明 |
+|---|---|
+| `uia.Tree(window, depth=8, query=None)` | 枚举控件树 → `[{role,name,value,rect,enabled,auto_id,depth}]`（≤300 节点） |
+| `uia.Find(window, name=, control_type=, exact=False)` | 按名称子串/类型查找（exact=True 精确匹配，**同名前缀控件必须用 exact**） |
+| `uia.ClickEl(window, name=, exact=)` | 免坐标点击：Invoke/Select/Toggle 模式优先，无模式回退矩形中心坐标 |
+| `uia.SetTextEl(window, text, name=)` | ValuePattern 直接写文本（比键入快、不抢输入法） |
+| `uia.GetValue(window, name=)` | 读控件当前值 |
+
+CLI：`python uia.py "窗口名" --find 按钮` / `--click 确定` / `--tree`。
+
+**坑**：① control_type 传 `Button`/`ListItem`/`Edit` 即可（与 `ButtonControl` 等价）；
+② 下拉/弹出菜单是**独立顶层窗口**，不在原窗口树里——切选项优先用控件自身的
+ Select/Value 模式，不行再枚举全部窗口找弹出层；③ 游戏窗口禁用 UIA（反作弊），
+某窗口无效则降级截图路线；④ Electron/Chromium 窗口的树依赖无障碍，拿不到就
+ Activate 后重试，仍不行用第 4 节视觉检测。
+
+## 4. 视觉检测（ui_detect.py，截图定位控件）
+
+依赖 `pip install rapidocr-onnxruntime`（开箱可用：全图 OCR 文本元素）。
+可选增强：`pip install ultralytics` + OmniParser-2.0 icon_detect YOLO 权重放
+ `<skill目录>/weights/icon_detect/model.pt`（额外检测无文字图标）。
+
+```python
+from ui_detect import detect
+els = detect("shot.png")   # 或 PIL Image；返回 [{bbox,type:'text'|'icon',label,confidence}]
+```
+
+CLI：`python ui_detect.py shot.png --json`。**附送 OCR 不要单独再跑**。
+坐标换算：`bbox 中心 + ljqCtrl.ClientRectScreen(hwnd) 左上角` → 屏幕物理坐标。
+
+## 5. 标准工作流（每一步都要验证）
 
 1. **探测**：`ListWindows()` 找目标窗口（按 title 子串/class 匹配），核对 hwnd。
 2. **看屏**：`GrabWindow(hwnd)` 截图存 `<工作区>/.pidesktop/cu-shot.png`（固定名覆盖）。
@@ -73,7 +110,7 @@ import ljqCtrl
 节奏纪律：新界面**先探测后操作**；一轮只做一个决策动作，读实际输出再决定下一步；
 不要在未知状态下把多步操作写进一个脚本连跑。
 
-## 4. 避坑清单（来自真实踩坑，违反必出错）
+## 6. 避坑清单（来自真实踩坑，违反必出错）
 
 1. **一律物理坐标**：Click/SetCursorPos/截图坐标系都是物理像素。从 UIA/其他工具拿到
    逻辑坐标时 `÷ ljqCtrl.dpi_scale`。
@@ -96,7 +133,7 @@ import ljqCtrl
    窗口未必是空白的——输入前先核对窗口标题与实际内容，别把文本粘进用户的
    未保存文档；验证输入效果用 Ctrl+A → Ctrl+C → GetClipboardText 读回比对。
 
-## 5. 示例：向某窗口的输入框输入文本
+## 7. 示例：向某窗口的输入框输入文本
 
 ```python
 import sys, json
@@ -112,7 +149,7 @@ print(json.dumps(ljqCtrl.ClientRectScreen(hwnd)))   # 4. 坐标基准（截图�
 # ljqCtrl.type_text("你好")                     # 6. 输入
 ```
 
-## 6. 来源与许可
+## 8. 来源与许可
 
 `ljqCtrl.py` 裁剪自 [GenericAgent](https://github.com/) 的 `memory/ljqCtrl.py` +
 `memory/ljqCtrlBg.py`（MIT License, Copyright (c) 2025 lsdefine）：去掉 numpy/opencv/
