@@ -37,3 +37,4 @@ icon-sets/
 
 # 内部计划文档（本地保留，不入库）
 docs/plans/2026-09-11-右侧-Markdown-预览性能与体验优化（借鉴-dock-markdown）.md
+__pycache__/
