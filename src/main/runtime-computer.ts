@@ -32,6 +32,13 @@ import { Type } from "typebox";
 /** Marker prefix of the JSON result line printed by the generated Python scripts. */
 export const CU_RESULT_MARKER = "__CU__";
 
+/**
+ * Diagnostic line prefixes ljqCtrl prints on stdout that must be surfaced to
+ * the model verbatim (they carry the on-screen truth the structured result
+ * cannot express).
+ */
+const NOTE_PREFIXES = ["[Click check]", "[TIPS]", "[Activate]", "[GrabWindow]"] as const;
+
 /** Operation timeout: ljqCtrl's GrabWindow sleeps ~0.4s (activate + settle); everything else is sub-second. */
 const CU_SPAWN_TIMEOUT_MS = 30_000;
 
@@ -179,7 +186,10 @@ export const OP_SCREENSHOT = [
   "buf = io.BytesIO()",
   "img.save(buf, format='PNG')",
   "ox, oy = ljqCtrl.ClientOrigin(hwnd)",
-  "out({'ok': True, 'width': img.size[0], 'height': img.size[1], 'origin': [ox, oy], 'title': ljqCtrl.win32gui.GetWindowText(hwnd), 'png_b64': base64.b64encode(buf.getvalue()).decode('ascii')})"
+  "info = getattr(img, 'info', {}) or {}",
+  "# cu_fg_ok=False 表示截图时前台不是目标窗口：这张图可能压根不是目标窗口的画面，",
+  "# 必须让模型看到（GrabWindow 只截那块屏幕区域，它不知道上面盖着谁）。",
+  "out({'ok': True, 'width': img.size[0], 'height': img.size[1], 'origin': [ox, oy], 'title': ljqCtrl.win32gui.GetWindowText(hwnd), 'fg_ok': bool(info.get('cu_fg_ok', True)), 'fg_title': str(info.get('cu_fg_title') or ''), 'png_b64': base64.b64encode(buf.getvalue()).decode('ascii')})"
 ].join("\n");
 
 export const OP_CLICK = [
@@ -188,13 +198,12 @@ export const OP_CLICK = [
   "ox, oy = ljqCtrl.ClientOrigin(hwnd)",
   "x, y = ox + int(ARGS['x']), oy + int(ARGS['y'])",
   "title = ljqCtrl.win32gui.GetWindowText(hwnd)",
-  "if ARGS.get('button') == 'double':",
-  "    ljqCtrl.SetCursorPos((x, y))",
-  "    ljqCtrl.MouseDClick()",
-  "    out({'ok': True, 'action': 'double-click', 'screen': [x, y], 'title': title})",
-  "else:",
-  "    ljqCtrl.Click(x, y)   # prints the [Click check] report",
-  "    out({'ok': True, 'action': 'click', 'screen': [x, y], 'title': title})"
+  "# 三件套验证（命中窗口 / 客户区变化 / 前台）由 ljqCtrl.Click 统一负责；",
+  "# hwnd= 是关键：命中校验要拿它比对，否则「点到了别的窗口」永远发现不了。",
+  "report = ljqCtrl.Click(x, y, hwnd=hwnd, double=(ARGS.get('button') == 'double'))",
+  "report['title'] = title",
+  "report['client'] = [int(ARGS['x']), int(ARGS['y'])]",
+  "out(report)"
 ].join("\n");
 
 export const OP_TYPE = [
@@ -229,16 +238,18 @@ export interface ComputerOperationOutcome {
 
 /**
  * Parse the spawned process output: the `__CU__<json>` line is the result,
- * `[Click check]`/ljqCtrl diagnostic lines are collected verbatim as notes
- * (the pixel-change report is the model's only feedback on whether the click
- * landed — it must survive the transport).
+ * runtime diagnostics are collected verbatim as notes. These notes are the
+ * model's only feedback on what actually happened on screen — the click
+ * verification report (`[Click check]`), a window that failed to come to the
+ * foreground (`[Activate]`), a screenshot whose foreground was a different
+ * window (`[GrabWindow]`) — so every one of them must survive the transport.
  */
 export function parseComputerOutput(stdout: string, stderr: string): ComputerOperationOutcome {
   const notes: string[] = [];
   for (const line of stdout.split(/\r?\n/u)) {
     const trimmed = line.trim();
     if (!trimmed) continue;
-    if (trimmed.startsWith("[Click check]") || trimmed.startsWith("[TIPS]")) {
+    if (NOTE_PREFIXES.some((prefix) => trimmed.startsWith(prefix))) {
       notes.push(trimmed);
       continue;
     }
@@ -313,13 +324,70 @@ const WINDOW_PARAM = Type.Union([Type.String(), Type.Number()], { description: "
 
 const WINDOWS_TOOL_TEXT = "枚举本机可见顶层窗口（标题/类名/句柄/客户区尺寸，标记当前前台窗口）。控制桌面其他应用的第一步：先枚举定位目标窗口，再截图看清内容。query 可按标题/类名过滤。只读操作。";
 
-const SCREENSHOT_TOOL_TEXT = "截取目标窗口客户区图像（自动切到前台）。返回图片（支持图片输入的模型直接查看；纯文本模型用 recognize_images 识别保存的文件）。回执带 origin（客户区原点屏幕坐标）：computer_click 的 x/y 就用这张截图的坐标系，不要自行换算。只读操作。";
+const SCREENSHOT_TOOL_TEXT = "截取目标窗口客户区图像（自动切到前台）。返回图片（支持图片输入的模型直接查看；纯文本模型用 recognize_images 识别保存的文件）。回执带 origin（客户区原点屏幕坐标）：computer_click 的 x/y 就用这张截图的坐标系，不要自行换算。回执同时报告截图时前台是否就是目标窗口（fg_ok=false 说明这张图可能不是目标窗口的画面，不可信）；只读操作。";
 
-const CLICK_TOOL_TEXT = "点击目标窗口客户区的指定坐标。x/y 是 computer_screenshot 截图内的坐标（工具自动换算屏幕物理坐标并先激活窗口）。回执带 [Click check] 像素变化验证：0% 变化说明点歪，必须停下重新截图诊断，禁止盲目重试。";
+const CLICK_TOOL_TEXT = "点击目标窗口客户区的指定坐标。x/y 是 computer_screenshot 截图内的坐标（工具自动换算屏幕物理坐标并先激活窗口）。**点击前会先校对坐标上真正躺着哪个窗口：不是目标窗口（且不属于同一进程）就直接拒绝点击**——避免在用户别的窗口里乱点；被拒绝时坐标就是错的，重新截图算一遍。回执带三项验证：① 命中窗口（「点到了别的窗口」比坐标算错更常见）；② 屏幕变化（客户区整体与光标局部）；③ 前台校验（焦点被抢时后续键盘会落到别处）。**「无变化」不等于点歪**（静态区域正常无变化），先看命中与前台两项；命中失败时先重新截图核对，禁止盲目重试。";
 
 const TYPE_TOOL_TEXT = "向目标窗口输入文本（剪贴板 + ctrl+v；输入框必须已有焦点，必要时先 computer_click 点击输入框）。会临时借用系统剪贴板并自动恢复。";
 
 const PRESS_TOOL_TEXT = "向目标窗口发送组合键（如 'ctrl+s'、'alt+tab'、'enter'、'esc'；键名见 computer-use skill）。可选 window 先激活目标窗口。";
+
+interface ClickReportView {
+  window: string;
+  x?: unknown;
+  y?: unknown;
+  button?: unknown;
+  double?: boolean;
+  screen?: unknown;
+  title?: unknown;
+  hitOk?: boolean;
+  hitTitle?: unknown;
+  inClient?: boolean;
+  fgOk?: boolean;
+  fgTitle?: unknown;
+  clientChanged?: boolean;
+  clientDiffRatio?: unknown;
+  roiChanged?: boolean;
+  verdict?: unknown;
+  advice?: unknown;
+}
+
+function verdictIcon(ok: boolean | undefined): string {
+  return ok === false ? "⚠️" : ok === true ? "✓" : "?";
+}
+
+/**
+ * Render the multi-signal click report as model-facing prose.
+ *
+ * Kept as a pure function so the wording IS the contract under test: the whole
+ * point of this change is that the receipt must (a) name the window the click
+ * actually landed on, (b) stop equating 「no pixel change」 with 「clicked
+ * wrong」, and (c) tell the model what to do next. The Python side already
+ * picks the verdict; this only formats it.
+ */
+export function describeClickReport(report: ClickReportView): string {
+  const action = report.double ? "已双击" : "已点击";
+  const client = `${String(report.x ?? "?")}, ${String(report.y ?? "?")}`;
+  const screen = Array.isArray(report.screen) ? (report.screen as number[]).join(", ") : "?";
+  const title = String(report.title ?? report.window ?? "");
+  const lines = [`${action}「${title}」客户区 (${client}) → 屏幕 (${screen})。`];
+  const hit = report.hitOk === false
+    ? `⚠️ 该坐标上的顶层窗口是「${String(report.hitTitle ?? "?")}」，不是目标窗口`
+    : `${verdictIcon(true)} 命中目标窗口`;
+  lines.push(`- 命中：${hit}`);
+  const change = report.clientChanged === undefined
+    ? "未测"
+    : report.clientChanged
+      ? `有（客户区变化 ${report.clientDiffRatio === undefined ? "?" : String(report.clientDiffRatio)}）`
+      : `无（客户区变化 ${report.clientDiffRatio === undefined ? "0" : String(report.clientDiffRatio)}）`;
+  const roi = report.roiChanged === undefined ? "未测" : report.roiChanged ? "有" : "无";
+  lines.push(`- 变化：客户区 ${change}；光标局部 ${roi}`);
+  lines.push(report.fgOk === false
+    ? `- 前台：⚠️ 焦点在「${String(report.fgTitle ?? "?")}」（不是目标窗口）——后续电脑键盘会落到它那里，需要键盘时先 Activate`
+    : `- 前台：${verdictIcon(true)}「${String(report.fgTitle ?? title)}」`);
+  if (typeof report.advice === "string" && report.advice) lines.push(`- 结论：${report.advice}`);
+  return lines.join("\n");
+}
 
 export function buildComputerTools(deps: ComputerToolDeps): ToolDefinition[] {
   const spawn = deps.spawnPython ?? defaultSpawnPython;
@@ -361,6 +429,8 @@ export function buildComputerTools(deps: ComputerToolDeps): ToolDefinition[] {
       const height = outcome.data?.height;
       const origin = Array.isArray(outcome.data?.origin) ? (outcome.data!.origin as number[]).join(", ") : "?";
       const title = String(outcome.data?.title ?? "");
+      const fgOk = outcome.data?.fg_ok !== false;
+      const fgTitle = String(outcome.data?.fg_title ?? "");
       const pngB64 = typeof outcome.data?.png_b64 === "string" ? (outcome.data!.png_b64 as string) : "";
       let savedPath: string | undefined;
       if (pngB64 && deps.saveScreenshot && deps.workspace()) {
@@ -370,7 +440,10 @@ export function buildComputerTools(deps: ComputerToolDeps): ToolDefinition[] {
           // persistence is an enhancement, never a precondition
         }
       }
-      const text = `已截取窗口「${title}」（${String(width)}×${String(height)}）。点击坐标就用这张截图的坐标系：computer_click { window, x, y }。${savedPath ? `截图已保存到 ${savedPath}；` : ""}当前模型不支持图片输入时可调用 recognize_images 工具${savedPath ? "识别该文件" : "识别截图"}。客户区屏幕原点：(${origin})。`;
+      const fgWarning = fgOk
+        ? ""
+        : `⚠️ 截图时前台是「${fgTitle}」不是目标窗口「${title}」——GrabWindow 只截目标客户区那块屏幕区域，前台被抢时拿到的是**别的窗口的画面**。先重新 computer_screenshot 确认，不要基于这张图算坐标。`;
+      const text = `${fgWarning ? `${fgWarning}\n` : ""}已截取窗口「${title}」（${String(width)}×${String(height)}）。点击坐标就用这张截图的坐标系：computer_click { window, x, y }。${savedPath ? `截图已保存到 ${savedPath}；` : ""}当前模型不支持图片输入时可调用 recognize_images 工具${savedPath ? "识别该文件" : "识别截图"}。客户区屏幕原点：(${origin})。`;
       return {
         content: [
           { type: "text" as const, text },
@@ -393,15 +466,44 @@ export function buildComputerTools(deps: ComputerToolDeps): ToolDefinition[] {
     }),
     async execute(_id, params) {
       const outcome = await runComputerOperation(context, OP_CLICK, { window: params?.window, x: params?.x, y: params?.y, button: params?.button });
+      // 点击前守卫拦下（坐标上坐的是别的应用的窗口）：这是可修正的模型错误，不是崩溃——
+      // 报错文案里已经写了怎么办，模型据此重新截图算坐标即可。
+      if (outcome.data?.verdict === "refused_hit") {
+        const notes = outcome.notes.length ? `\n\n诊断输出：\n${outcome.notes.join("\n")}` : "";
+        // 坐标要两个坐标系都报：模型给的是客户区坐标，守卫看到的是屏幕坐标，只报后者会让人对不上号。
+        const screen = Array.isArray(outcome.data?.screen) ? (outcome.data!.screen as number[]).join(", ") : "?";
+        const mapping = `坐标映射：客户区 (${String(params?.x)}, ${String(params?.y)}) → 屏幕 (${screen})。\n`;
+        throw new Error(`${mapping}${outcome.error ?? "点击已被安全守卫拦下"}${notes}`);
+      }
       if (!outcome.ok) throw new Error(outcome.error);
-      const screen = Array.isArray(outcome.data?.screen) ? (outcome.data!.screen as number[]).join(", ") : "?";
-      const title = String(outcome.data?.title ?? "");
-      const action = outcome.data?.action === "double-click" ? "已双击" : "已点击";
-      const notes = outcome.notes.length ? `\n${outcome.notes.join("\n")}` : "";
-      const verify = outcome.data?.action === "double-click"
-        ? "双击不自带验证，请截图确认效果。"
-        : "若上方报告 0% 像素变化，说明点击落点不对——重新截图核对坐标，禁止盲目重试。";
-      return { content: [{ type: "text" as const, text: `${action}「${title}」客户区 (${String(params?.x)}, ${String(params?.y)}) → 屏幕 (${screen})。${verify}${notes}` }], details: {} };
+      const data = outcome.data ?? {};
+      const notes = outcome.notes.length ? `\n\n诊断输出：\n${outcome.notes.join("\n")}` : "";
+      const verdict = String(data.verdict ?? "");
+      const tail = verdict === "changed"
+        ? "\n关键动作建议再用 computer_screenshot 确认效果。"
+        : "";
+      const text = `${
+        describeClickReport({
+          window: params?.window as string,
+          x: params?.x,
+          y: params?.y,
+          button: params?.button,
+          double: params?.button === "double",
+          screen: data.screen,
+          title: data.title,
+          hitOk: data.hit_ok as boolean | undefined,
+          hitTitle: data.hit_title,
+          inClient: data.in_client as boolean | undefined,
+          fgOk: data.fg_ok as boolean | undefined,
+          fgTitle: data.fg_title_after,
+          clientChanged: data.client_changed as boolean | undefined,
+          clientDiffRatio: data.client_diff_ratio,
+          roiChanged: data.roi_changed as boolean | undefined,
+          verdict: data.verdict,
+          advice: data.advice
+        })
+      }${tail}${notes}`;
+      return { content: [{ type: "text" as const, text }], details: {} };
     }
   });
 

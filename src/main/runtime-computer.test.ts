@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { permissionAction, toolRisk } from "./permissions.js";
 import {
   CU_RESULT_MARKER,
+  OP_CLICK,
   buildComputerScript,
   buildComputerTools,
   describeComputerSpawnFailure,
@@ -54,15 +55,15 @@ describe("parseComputerOutput", () => {
   it("extracts the marker line as JSON and collects Click-check diagnostics as notes", () => {
     const stdout = [
       "[TIPS] always use physical coordinates!",
-      "[Click check] 有像素变化 | fg: \"记事本\" ",
-      `${CU_RESULT_MARKER}${JSON.stringify({ ok: true, action: "click", screen: [100, 200] })}`
+      "[Click check] changed | 命中 '✓' | fg: \"记事本\" ",
+      `${CU_RESULT_MARKER}${JSON.stringify({ ok: true, verdict: "changed", screen: [100, 200] })}`
     ].join("\n");
     const outcome = parseComputerOutput(stdout, "");
     expect(outcome.ok).toBe(true);
     expect(outcome.data?.screen).toEqual([100, 200]);
     expect(outcome.notes).toHaveLength(2);
     expect(outcome.notes[0]).toContain("physical coordinates");
-    expect(outcome.notes[1]).toContain("有像素变化");
+    expect(outcome.notes[1]).toContain("命中");
   });
 
   it("surfaces the python-side error payload", () => {
@@ -172,14 +173,146 @@ describe("buildComputerTools", () => {
     expect(saveScreenshot).toHaveBeenCalledWith("aGVsbG8=", "image/png");
   });
 
-  it("computer_click echoes client→screen coordinates and the pixel-change note", async () => {
-    const spawn = mockSpawn({ ok: true, action: "click", screen: [410, 640], title: "记事本" }, ["[Click check] 有像素变化 | fg: \"记事本\""]);
+  it("computer_click renders the three-signal report (hit / change / foreground)", async () => {
+    const spawn = mockSpawn(
+      {
+        ok: true,
+        screen: [410, 640],
+        title: "记事本",
+        hit_ok: true,
+        hit_title: "记事本",
+        in_client: true,
+        client_changed: true,
+        client_diff_ratio: 0.2292,
+        roi_changed: false,
+        fg_ok: true,
+        fg_title_after: "记事本",
+        verdict: "changed",
+        advice: "点击落到了目标窗口且界面有重绘，看起来生效了；关键动作仍建议截图确认。"
+      },
+      ["[Click check] changed | 命中 '✓' | 变化 有(整体 0.2292)/无(局部) | fg: '记事本'"]
+    );
     const tools = buildComputerTools(makeDeps({ spawnPython: spawn }));
     const result = await tools[2]!.execute("id", { window: "记事本", x: 400, y: 600 } as never, undefined, undefined, undefined as never) as { content: { text: string }[] };
     const text = result.content[0]!.text;
     expect(text).toContain("已点击「记事本」客户区 (400, 600) → 屏幕 (410, 640)");
+    expect(text).toContain("命中目标窗口");
+    expect(text).toContain("客户区 有（客户区变化 0.2292）");
+    expect(text).toContain("光标局部 无");
+    expect(text).toContain("结论：点击落到了目标窗口");
     expect(text).toContain("[Click check]");
-    expect(text).toContain("0% 像素变化");
+  });
+
+  it("computer_click names the window the click actually landed on instead of blaming the coordinates", async () => {
+    const tools = buildComputerTools(makeDeps({ spawnPython: mockSpawn({
+      ok: true,
+      screen: [410, 640],
+      title: "记事本",
+      hit_ok: false,
+      hit_title: "微信",
+      in_client: true,
+      client_changed: false,
+      client_diff_ratio: 0,
+      roi_changed: false,
+      fg_ok: true,
+      fg_title_after: "记事本",
+      verdict: "warn_hit",
+      advice: "点击坐标上的顶层窗口是 hwnd=22（'微信'），不是目标 hwnd=11（'记事本'）。"
+    }) }));
+    const result = await tools[2]!.execute("id", { window: "记事本", x: 400, y: 600 } as never, undefined, undefined, undefined as never) as { content: { text: string }[] };
+    const text = result.content[0]!.text;
+    expect(text).toContain("该坐标上的顶层窗口是「微信」，不是目标窗口");
+    expect(text).toContain("结论：");
+    // 命中失败时绝不能再说“点歪了/坐标错了”式无害描述
+    expect(text).not.toContain("0% 像素变化，说明点击落点不对");
+  });
+
+  it("treats 「no pixel change」 as a warning, never as a failure", async () => {
+    const tools = buildComputerTools(makeDeps({ spawnPython: mockSpawn({
+      ok: true,
+      screen: [410, 640],
+      title: "记事本",
+      hit_ok: true,
+      hit_title: "记事本",
+      client_changed: false,
+      client_diff_ratio: 0,
+      roi_changed: false,
+      fg_ok: true,
+      fg_title_after: "记事本",
+      verdict: "warn_static",
+      advice: "点击后像素无变化——这可能正常（静态区域/无视觉回馈的控件），也可能点歪。"
+    }) }));
+    const result = await tools[2]!.execute("id", { window: "记事本", x: 10, y: 10 } as never, undefined, undefined, undefined as never) as { content: { text: string }[] };
+    const text = result.content[0]!.text;
+    expect(text).toContain("客户区 无（客户区变化 0）");
+    expect(text).toContain("这可能正常");
+    expect(text).toContain("命中目标窗口");
+  });
+
+  it("warns when the screenshot's foreground was a different window", async () => {
+    const tools = buildComputerTools(makeDeps({ spawnPython: mockSpawn({
+      ok: true,
+      width: 800,
+      height: 600,
+      origin: [10, 40],
+      title: "记事本",
+      fg_ok: false,
+      fg_title: "微信",
+      png_b64: "aGVsbG8="
+    }) }));
+    const result = await tools[1]!.execute("id", { window: "记事本" } as never, undefined, undefined, undefined as never) as { content: { text: string }[] };
+    const text = result.content[0]!.text;
+    expect(text).toContain("截图时前台是「微信」不是目标窗口「记事本」");
+    expect(text).toContain("不要基于这张图算坐标");
+  });
+
+  it("does not warn when the foreground check passed", async () => {
+    const tools = buildComputerTools(makeDeps({ spawnPython: mockSpawn({ ok: true, width: 10, height: 10, origin: [0, 0], title: "记事本", fg_ok: true, fg_title: "记事本", png_b64: "" }) }));
+    const result = await tools[1]!.execute("id", { window: "记事本" } as never, undefined, undefined, undefined as never) as { content: { text: string }[] };
+    expect(result.content[0]!.text).not.toContain("⚠️");
+  });
+
+  it("collects Activate/GrabWindow diagnostics as notes, not just Click check", () => {
+    const outcome = parseComputerOutput([
+      "[Activate] ⚠️ 前台切换未生效：想要 hwnd=11",
+      "[GrabWindow] ⚠️ 截图时前台不是目标窗口",
+      `${CU_RESULT_MARKER}${JSON.stringify({ ok: true })}`
+    ].join("\n"), "");
+    expect(outcome.notes).toHaveLength(2);
+    expect(outcome.notes[0]).toContain("[Activate]");
+    expect(outcome.notes[1]).toContain("[GrabWindow]");
+  });
+
+  it("refuses a click whose coordinates sit on another application's window", async () => {
+    // 这是本修复最关键的回归：坐标越界时**不能真的点下去**（实测会点到用户的浏览器）。
+    const tools = buildComputerTools(makeDeps({ spawnPython: mockSpawn({
+      ok: false,
+      refused: true,
+      error: "**未点击**：坐标 (2000, 900) 上的顶层窗口是 hwnd=131836（'Edge'），不是目标 hwnd=11（'记事本'）",
+      verdict: "refused_hit",
+      screen: [2000, 900],
+      hit_hwnd: 131836,
+      hit_title: "Edge",
+      hit_ok: false
+    }, ["[Click check] refused_hit | 未点击：该坐标上是 hwnd=131836（'Edge'）"]) }));
+    await expect(
+      tools[2]!.execute("id", { window: "记事本", x: 2000, y: 900 } as never, undefined, undefined, undefined as never)
+    ).rejects.toThrow(/未点击/);
+    try {
+      await tools[2]!.execute("id", { window: "记事本", x: 2000, y: 900 } as never, undefined, undefined, undefined as never);
+    } catch (error) {
+      // 拒绝原因（该坐标上是哪个窗口）必须传下去，而不是只给一句“失败”
+      expect((error as Error).message).toContain("refused_hit");
+      expect((error as Error).message).toContain("Edge");
+      // 两个坐标系都要在：模型给客户区坐标，守卫看到屏幕坐标
+      expect((error as Error).message).toContain("客户区 (2000, 900) → 屏幕 (2000, 900)");
+    }
+  });
+
+  it("drives the click script through ljqCtrl.Click with the target hwnd (hit check needs it)", () => {
+    const script = buildComputerScript("D:\\skill", OP_CLICK, { window: "记事本", x: 1, y: 2 });
+    expect(script).toContain("ljqCtrl.Click(x, y, hwnd=hwnd");
+    expect(script).toContain("report['client']");
   });
 
   it("fails fast when the script dir is missing", async () => {

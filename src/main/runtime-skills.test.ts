@@ -47,15 +47,36 @@ describe("bundled skill assets (repo contract)", () => {
     for (const slug of ["automation", "computer-use"]) {
       expect(existsSync(join(skillsRoot, slug, "SKILL.md")), `${slug}/SKILL.md 缺失`).toBe(true);
     }
-    for (const asset of ["ljqCtrl.py", "uia.py", "ui_detect.py"]) {
+    for (const asset of ["ljqCtrl.py", "uia.py", "ui_detect.py", "test/selfcheck.py"]) {
       expect(existsSync(join(skillsRoot, "computer-use", asset)), `computer-use/${asset} 缺失`).toBe(true);
     }
+    // `test/` 下不是 Skill 资产而是自检脚本，不能带第二个 SKILL.md（否则 skill 扫描会多发现一个）
+    expect(existsSync(join(skillsRoot, "computer-use", "test", "SKILL.md"))).toBe(false);
+  });
+
+  it("keeps bytecode out of the shipped tree (extraResources filter contract)", () => {
+    // 安装目录的 resources/skills 是**只读随包分发**的资产：Python 一 import 就会在
+    // 旁边生成 __pycache__，所以 package.json 的 extraResources 必须显式过滤掉它，
+    // 否则每次打包都会把开发机生成的字节码带进去（历史事故）。这条测试锁住过滤器，
+    // 而不是锁住磁盘上有没有 __pycache__（那取决于本机跑没跑过 python）。
+    const pkg = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")) as {
+      build: { extraResources: { from: string; filter: string[] }[] };
+    };
+    const entry = pkg.build.extraResources.find((item) => item.from === "resources/skills");
+    expect(entry, "extraResources 里缺 resources/skills 条目").toBeTruthy();
+    expect(entry!.filter).toContain("!**/__pycache__/**");
+    expect(entry!.filter).toContain("!**/*.pyc");
   });
 
   it("parses frontmatter of every bundled skill", async () => {
     const { readdir } = await import("node:fs/promises");
     const entries = await readdir(skillsRoot, { withFileTypes: true });
-    const slugs = entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
+    // 只把「含 SKILL.md 的目录」当 skill：computer-use/test 是自检脚本目录，
+    // 没有 SKILL.md 也不算 skill（skill 扫描自身就是这么判定的）。
+    const slugs = entries
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .filter((slug) => existsSync(join(skillsRoot, slug, "SKILL.md")));
     expect(slugs.sort()).toEqual(["automation", "computer-use"]);
     for (const slug of slugs) {
       const parsed = parseSkillFrontmatter(readFileSync(join(skillsRoot, slug, "SKILL.md"), "utf8"));

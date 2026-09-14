@@ -4,25 +4,36 @@ UI元素视觉检测 - 截图 → 控件 bbox + 文本（computer-use skill 资�
 
 源自 GenericAgent memory/ui_detect.py（MIT, Copyright (c) 2025 lsdefine），
 按 PiDesktop 移植改造为双档依赖：
-- 必需（开箱可用）：rapidocr-onnxruntime —— 全图 OCR，返回文本元素
+- 必需（开箱可用）：rapidocr-onnxruntime + numpy —— 全图 OCR，返回文本元素
   [{bbox:[x1,y1,x2,y2], type:'text', label, confidence}]，覆盖大多数
   定位需求（按钮/菜单/输入框都有文字）
 - 可选（增强）：ultralytics + OmniParser-2.0 icon_detect YOLO 权重 ——
   额外检测无文字图标（type:'icon'，label=None 可交给 VLM 识别）
   权重放 <skill目录>/weights/icon_detect/model.pt，从 OmniParser-2.0 下载
 
+输入兼容性（实测）：rapidocr-onnxruntime 各版本对输入类型的容忍度不同——
+1.3.24 只接受 str/Path/ndarray/bytes（传 PIL.Image 报
+`LoadImageError: The img type <class 'PIL.Image.Image'> does not in ...`），
+1.4.x 内部会自己转。**所以本模块统一把 PIL 转成 ndarray 再喂给 OCR**，
+不依赖某个版本的宽容度（numpy 随 rapidocr 必装）。
+
 用法（脚本内）:
   from ui_detect import detect
-  elements = detect("screenshot.png")     # PIL.Image 或路径
+  elements = detect("screenshot.png")     # 路径 / PIL.Image / ndarray / bytes 都行
 用法（CLI）:
   python ui_detect.py shot.png --json     # JSON 输出（Agent 友好）
 
 坐标注意：bbox 是截图内坐标；转屏幕物理坐标 =
   ljqCtrl.ClientRectScreen(hwnd) 左上角 + bbox 中心（见 SKILL.md）。
+
+临时文件纪律：YOLO 需要磁盘路径时才落临时文件，一律 try/finally 删除
+（历史版本只在 PIL 入参时落临时文件且从不清理，长跑会话会积一堆 png）。
 """
 from pathlib import Path
 from PIL import Image, ImageDraw
 import json
+import os
+import tempfile
 import urllib.request
 import subprocess
 import sys
@@ -89,11 +100,38 @@ def _yolo(image_path, conf=0.25):
         return _yolo_local(image_path, conf)
 
 
-def _ocr_full(image_path):
-    """全图 OCR → list of [x1,y1,x2,y2,text,conf]"""
+def _as_ndarray(image):
+    """统一把输入转成 OCR 能吃的形式。
+
+    返回 (payload, temp_path)：payload 是 str(路径)/bytes/ndarray；temp_path 非空时
+    调用方必须在 finally 里删除。PIL.Image 一律转 ndarray——不依赖 rapidocr 版本
+    对 PIL 的容忍度（1.3.24 直接报 LoadImageError）。
+    """
+    if isinstance(image, Image.Image):
+        try:
+            import numpy as np
+        except ImportError:
+            # numpy 缺失时才退回磁盘临时文件（比报错好）
+            tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+            image.save(tmp.name)
+            tmp.close()
+            return tmp.name, tmp.name
+        return np.asarray(image.convert("RGB")), None
+    return image, None
+
+def _ocr_full(image):
+    """全图 OCR → list of [x1,y1,x2,y2,text,conf]（输入可为 路径/PIL/ndarray/bytes）"""
     if not _ocr:
         return []
-    result, _ = _ocr(image_path)
+    payload, temp_path = _as_ndarray(image)
+    try:
+        result, _ = _ocr(payload)
+    finally:
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
     if not result:
         return []
     out = []
@@ -122,7 +160,7 @@ def _ocr_crops_batch(img, yolo_boxes):
     stitched = Image.new("RGB", (max_w, y_cursor), (255, 255, 255))
     for i, crop in enumerate(crops):
         stitched.paste(crop, (0, offsets[i][0]))
-    result, _ = _ocr(stitched)
+    result, _ = _ocr(_as_ndarray(stitched)[0])   # ndarray：不依赖 rapidocr 版本的 PIL 兼容度
     if not result:
         return {}
     labels = {}
@@ -149,21 +187,38 @@ def detect(image_path, mode="match", conf=0.25, iou_thresh=0.5):
     [{'bbox':[x1,y1,x2,y2], 'type':'icon'|'text', 'label':str|None, 'confidence':float}]
     - YOLO 可用: match 模式（YOLO+全图OCR IoU 匹配，~1.2s）/ crop 模式（拼接 OCR，更准，~2.3s）
     - YOLO 不可用: 自动降级 OCR-only（只有 type:'text' 元素，无文字图标检不到）
-    附送 OCR——不要单独再跑 OCR。"""
+    附送 OCR——不要单独再跑 OCR。
+    入参 image_path：文件路径 / PIL.Image / ndarray / bytes 都行（PIL 会转 ndarray）。"""
     if _ocr is None:
         raise RuntimeError("缺少依赖: pip install rapidocr-onnxruntime")
-    if isinstance(image_path, Image.Image):
-        import tempfile
-        import os
-        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-        image_path.save(tmp.name)
-        image_path = tmp.name
-    img = Image.open(image_path)
+    payload, temp_path = _as_ndarray(image_path)
+    # YOLO 只吃磁盘路径 → 只有在 YOLO 开启时才落一个临时文件，且无论成败都删。
+    yolo_temp = None
+    try:
+        if _yolo_available() and not isinstance(payload, (str, Path, bytes)):
+            yolo_temp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+            yolo_temp.close()
+            yolo_temp = yolo_temp.name
+            Image.fromarray(payload).save(yolo_temp)
+        return _detect_impl(payload, yolo_path=yolo_temp or payload, mode=mode, conf=conf, iou_thresh=iou_thresh)
+    finally:
+        for path in (temp_path, yolo_temp if isinstance(yolo_temp, str) else None):
+            if path:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+
+def _detect_impl(image_path, yolo_path=None, mode="match", conf=0.25, iou_thresh=0.5):
+    """detect() 的实现体。image_path 已规一化（路径/ndarray/bytes）；yolo_path 是同一个
+    图像在磁盘上的位置（YOLO 需要），缺省时直接用它（本身是文件路径的情形）。"""
+    yolo_path = yolo_path if yolo_path is not None else image_path
+    img = Image.open(image_path) if not hasattr(image_path, "shape") else Image.fromarray(image_path)
 
     yolo_boxes = []
     yolo_on = _yolo_available()
     if yolo_on:
-        yolo_boxes = _yolo(image_path, conf)
+        yolo_boxes = _yolo(yolo_path, conf)
     elements = []
 
     if not yolo_on:

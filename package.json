@@ -76,7 +76,9 @@
         "from": "resources/skills",
         "to": "skills",
         "filter": [
-          "**/*"
+          "**/*",
+          "!**/__pycache__/**",
+          "!**/*.pyc"
         ]
       }
     ],
