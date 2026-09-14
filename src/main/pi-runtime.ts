@@ -2601,7 +2601,10 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     enabled: () => settings?.computer?.enabled !== false,
     workspace: () => recordWorkspace || undefined,
     locateScriptDir: () => runtimeComputer.locateLjqCtrlDir(getAgentDir(), recordWorkspace || undefined),
-    saveScreenshot: (data, mimeType) => saveBrowserScreenshot(recordWorkspace, data, mimeType, "computer")
+    saveScreenshot: (data, mimeType) => saveBrowserScreenshot(recordWorkspace, data, mimeType, "computer"),
+    // 屏幕悬浮提示条（main 进程 ComputerOverlayController）：操作前告知用户
+    // 「AI 正在操作 XX」；fire-and-forget，失败静默（纯增益不阻塞工具）。
+    notify: (text) => post({ type: "computer-overlay.request", kind: "show", text })
   });
   // 设计模式工具（每会话注册；当前文档绑定在本 record 上，工具闭包经 recordBox 读写）。
   // 注册常驻（注册 ≠ 激活），是否进活动工具集由 shouldActivateDesignTools 判定

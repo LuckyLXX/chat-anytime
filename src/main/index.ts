@@ -13,6 +13,7 @@ import { createWorkspaceDirectory, createWorkspaceFile, deleteWorkspaceEntry, li
 import { pruneDisabledModelRefs } from "./model-catalog.js";
 import { BrowserPreviewController } from "./browser-preview.js";
 import { BrowserAutomationController } from "./browser-automation.js";
+import { ComputerOverlayController } from "./computer-overlay.js";
 import { DesignSnapshotController } from "./design-snapshot.js";
 import { TerminalManager, type PtyProcess, type PtySpawnOptions } from "./terminal-pty.js";
 
@@ -26,6 +27,7 @@ let credentialsCache: Record<string, string> = {};
 let securityWarning: string | undefined;
 let browserPreviewController: BrowserPreviewController | undefined;
 let browserAutomationController: BrowserAutomationController | undefined;
+let computerOverlayController: ComputerOverlayController | undefined;
 // 设计导出缩略图（design_export 回执附图）：离屏渲染导出 HTML 并截图，无需真实预览标签页。
 const designSnapshotController = new DesignSnapshotController();
 
@@ -288,6 +290,13 @@ function startRuntime(): void {
       }
       return;
     }
+    if (message.type === "computer-overlay.request") {
+      // 电脑控制操作提示条：在屏幕右下角显示「AI 正在操作 XX」（用户焦点在目标窗口，
+      // 应用内 toast 看不到；悬浮条 click-through、自动淡出，纯提示不拦截输入）。
+      if (message.kind === "hide") computerOverlayController?.hide();
+      else computerOverlayController?.show(message.text ?? "");
+      return;
+    }
     if (message.type === "browser-automation.session-disposed") {
       // 会话销毁（驱逐/删除/移除工作区）：释放其绑定的自动化标签页，
       // 防止隐藏的 pi-browser-* 标签各自挂着一个渲染进程无限累积。
@@ -346,6 +355,7 @@ function createWindow(): void {
     // AI 开始操作某个标签页：让预览面板自动展开并激活它（用户可见）。
     if (!nextWindow.isDestroyed()) nextWindow.webContents.send("browser-preview:tabs", { action: "automation-started", tabId });
   });
+  computerOverlayController ??= new ComputerOverlayController();
   nextWindow.on("closed", () => {
     previewController.dispose();
     browserAutomationController?.dispose();
@@ -479,4 +489,4 @@ function registerIpc(): void {
 }
 app.whenReady().then(() => { Menu.setApplicationMenu(null); registerPreviewFileProtocol(); registerIpc(); startRuntime(); createWindow(); app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); }); });
 app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
-app.on("before-quit", () => { browserAutomationController?.dispose(); browserPreviewController?.dispose(); terminalManager.disposeAll(); runtimeProcess?.kill(); });
+app.on("before-quit", () => { browserAutomationController?.dispose(); computerOverlayController?.dispose(); browserPreviewController?.dispose(); terminalManager.disposeAll(); runtimeProcess?.kill(); });

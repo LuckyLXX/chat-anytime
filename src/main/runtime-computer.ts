@@ -54,6 +54,8 @@ export interface ComputerToolDeps {
   locateScriptDir: () => string | undefined;
   /** Persist a captured screenshot to the workspace's default dir; returns a workspace-relative path. */
   saveScreenshot?: (data: string, mimeType: "image/png" | "image/jpeg") => Promise<string>;
+  /** Show the screen overlay "AI 正在操作 XX" before activating/acting on a window (fire-and-forget). */
+  notify?: (text: string) => void;
   /** Python runner (injectable for tests). Defaults to execFile with a 30s timeout. */
   spawnPython?: PythonSpawn;
 }
@@ -279,6 +281,11 @@ interface ComputerExecuteContext {
 
 async function runComputerOperation(context: ComputerExecuteContext, operation: string, args: Record<string, unknown>): Promise<ComputerOperationOutcome> {
   if (!context.deps.enabled()) throw new Error(DISABLED_TEXT);
+  // 屏幕提示条：用户焦点在目标窗口上，只有屏幕级提示有效；screenshot 的激活
+  // 抢焦点也算操作，windows 枚举（无 window 参数）不打扰。
+  if (context.deps.notify && args.window !== undefined && args.window !== null && String(args.window).trim()) {
+    context.deps.notify(`AI 正在操作「${String(args.window)}」`);
+  }
   const scriptDir = context.deps.locateScriptDir();
   if (!scriptDir) throw new Error(describeComputerSpawnFailure(undefined, true));
   const command = await context.detect();

@@ -1461,6 +1461,8 @@ export type RuntimeMessage =
   | { type: "browser-automation.session-disposed"; sessionKey: string }
   /** utility 进程请求渲染设计导出缩略图；main 完成后以 design-snapshot.result 命令回传。 */
   | { type: "design-snapshot.request"; requestId: string; request: DesignSnapshotRequest }
+  /** utility 进程请求显示/隐藏电脑控制悬浮提示条（computer_* 操作期间告知用户「AI 正在操作 XX」）。 */
+  | { type: "computer-overlay.request"; kind: "show" | "hide"; text?: string }
   | { type: "error"; message: string }
   /** 子代理完整记录（响应 subagent.transcript）；childSessionId 用于对齐请求。 */
   | { type: "subagent.transcript-result"; childSessionId: string; messages: ChatMessage[] }
