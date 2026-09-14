@@ -5,16 +5,22 @@ import type { SkillSummary, SkillSummary as _SS } from "../shared/protocol.js";
 
 /**
  * Self-built Skill discovery. Skills live as `SKILL.md` files (one per
- * directory) under a global dir (`<agentDir>/pidesktop-skills/`), the shared
- * cross-agent dir (`~/.agents/skills/`), and a project dir
- * (`<workspace>/.pidesktop-skills/`). Skill directories may be links
- * (e.g. a Windows junction to an external git checkout) — they are followed
- * transparently so the linked repo can be updated in place with git.
- * Each SKILL.md has a YAML-ish
- * frontmatter (`name`, `description`). The agent never imports these through
- * Pi's skill loader — instead the runtime injects an "available skills" list
- * into the system prompt and the user invokes a skill by asking the agent to
- * `read` its file.
+ * directory) under four kinds of source dir, scanned in ascending precedence
+ * (entry order wins on slug clash):
+ *
+ *   1. the shared cross-agent dir (`~/.agents/skills/`)
+ *   2. the app's bundled skills (`<install dir>/resources/skills/`, dev:
+ *      `<repo>/resources/skills/`) — shipped with the installer, read directly
+ *   3. the user global dir (`<agentDir>/pidesktop-skills/`)
+ *   4. the project dir (`<workspace>/.pidesktop-skills/`)
+ *
+ * Skill directories may be links (e.g. a Windows junction to an external git
+ * checkout) — they are followed transparently so the linked repo can be
+ * updated in place with git.
+ * Each SKILL.md has a YAML-ish frontmatter (`name`, `description`). The agent
+ * never imports these through Pi's skill loader — instead the runtime injects
+ * an "available skills" list into the system prompt and the user invokes a
+ * skill by asking the agent to `read` its file.
  */
 
 export interface DiscoveredSkill {
@@ -22,8 +28,23 @@ export interface DiscoveredSkill {
   name: string;
   description: string;
   filePath: string;
-  scope: "global" | "project";
+  scope: "global" | "project" | "bundled";
+  /** 展示用的来源名（「随应用分发」/「用户资源」/「共享目录」/「当前项目」）。 */
+  source: string;
 }
+
+/** 一个待扫描的 skill 源目录：数组顺序 = 优先级由低到高（同名 slug 后者覆盖前者）。 */
+export interface SkillSourceDir {
+  dir: string;
+  scope: DiscoveredSkill["scope"];
+  source: string;
+}
+
+/** 四种来源的标准展示名与作用域。 */
+export const SHARED_SKILL_SOURCE: Omit<SkillSourceDir, "dir"> = { scope: "global", source: "共享目录" };
+export const BUNDLED_SKILL_SOURCE: Omit<SkillSourceDir, "dir"> = { scope: "bundled", source: "随应用分发" };
+export const GLOBAL_SKILL_SOURCE: Omit<SkillSourceDir, "dir"> = { scope: "global", source: "用户资源" };
+export const PROJECT_SKILL_SOURCE: Omit<SkillSourceDir, "dir"> = { scope: "project", source: "当前项目" };
 
 const FRONTMATTER_PATTERN = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/u;
 
@@ -64,10 +85,10 @@ function readSkillFile(filePath: string): { name: string; description: string } 
   };
 }
 
-function scanSkillDir(rootDir: string, scope: "global" | "project"): DiscoveredSkill[] {
+function scanSkillDir(source: SkillSourceDir): DiscoveredSkill[] {
   let entries: Dirent[];
   try {
-    entries = readdirSync(rootDir, { withFileTypes: true });
+    entries = readdirSync(source.dir, { withFileTypes: true });
   } catch {
     return [];
   }
@@ -77,27 +98,27 @@ function scanSkillDir(rootDir: string, scope: "global" | "project"): DiscoveredS
     // skill live in an external git checkout; the SKILL.md existence check
     // below filters out file links and dead targets.
     if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
-    const skillFile = join(rootDir, entry.name, "SKILL.md");
+    const skillFile = join(source.dir, entry.name, "SKILL.md");
     if (!existsSync(skillFile)) continue;
     const parsed = readSkillFile(skillFile);
     if (!parsed) continue;
-    skills.push({ slug: entry.name, name: parsed.name, description: parsed.description, filePath: skillFile, scope });
+    skills.push({ slug: entry.name, name: parsed.name, description: parsed.description, filePath: skillFile, scope: source.scope, source: source.source });
   }
   return skills;
 }
 
 /**
- * Discover skills from the app global dir, the shared `~/.agents/skills` dir,
- * and the project dir. On slug clash, project entries win, then the app
- * global dir, then the shared agents dir.
+ * Discover skills from an ordered source list. Sources are scanned in order
+ * and later entries OVERWRITE earlier ones on a slug clash, so callers pass
+ * them from lowest to highest precedence — typically
+ * `[shared ~/.agents/skills, bundled app skills, user global, project]`.
  */
-export function discoverSkills(globalDir: string, projectDir: string, agentsDir?: string): DiscoveredSkill[] {
+export function discoverSkills(sources: readonly SkillSourceDir[]): DiscoveredSkill[] {
   const merged = new Map<string, DiscoveredSkill>();
-  if (agentsDir) {
-    for (const skill of scanSkillDir(agentsDir, "global")) merged.set(skill.slug, skill);
+  for (const source of sources) {
+    if (!source.dir) continue;
+    for (const skill of scanSkillDir(source)) merged.set(skill.slug, skill);
   }
-  for (const skill of scanSkillDir(globalDir, "global")) merged.set(skill.slug, skill);
-  for (const skill of scanSkillDir(projectDir, "project")) merged.set(skill.slug, skill);
   return [...merged.values()].sort((left, right) => left.name.localeCompare(right.name));
 }
 
@@ -145,7 +166,7 @@ export function toSkillSummaries(skills: DiscoveredSkill[], disabledIds: Set<str
       id,
       name: skill.name,
       description: skill.description || "无描述",
-      source: skill.scope === "project" ? "当前项目" : "用户资源",
+      source: skill.source,
       scope: skill.scope,
       filePath: skill.filePath,
       defaultEnabled: true,

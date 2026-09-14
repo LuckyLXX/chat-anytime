@@ -1306,7 +1306,10 @@ export interface QuestionRequest {
 }
 
 export type RuntimeCommand =
-  | { type: "initialize"; settings: DesktopSettings; apiKeys: Record<string, string> }
+  /** bundledSkillsDir：随安装包分发的内置 Skill 目录（<安装目录>/resources/skills，
+   * dev 下为仓库 resources/skills），由主进程解析（utility 进程无 Electron API）；
+   * 缺省/不存在时该来源不参与扫描。 */
+  | { type: "initialize"; settings: DesktopSettings; apiKeys: Record<string, string>; bundledSkillsDir?: string }
   | { type: "workspace.open"; path: string }
   | { type: "workspace.remove"; workspace: string }
   | { type: "session.new"; workspace?: string }

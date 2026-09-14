@@ -3,9 +3,9 @@
 // click / type / press). The tools validate arguments and translate results;
 // every operation executes by spawning a short-lived Python process that
 // imports the `ljqCtrl` module shipped with the `computer-use` skill asset
-// (`.pidesktop-skills/computer-use/ljqCtrl.py`, trimmed from GenericAgent,
-// MIT). Script location is injected so the tools and the skill share ONE
-// implementation — the skill stays the home of the long-tail operations
+// (`resources/skills/computer-use/ljqCtrl.py` in the repo / install dir,
+// trimmed from GenericAgent, MIT). Script location is injected so the tools
+// and the skill share ONE implementation — the skill stays the home of the long-tail operations
 // (UIA probing, template matching, background message-level control) the
 // model writes as ad-hoc code, while the high-frequency perceive-act loop
 // gets structured tools.
@@ -24,6 +24,7 @@
 
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
+import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -61,15 +62,19 @@ export interface ComputerToolDeps {
 }
 
 /**
- * Locate the computer-use skill dir containing ljqCtrl.py — project scope first
- * (`<workspace>/.pidesktop-skills/computer-use`), then the global dir
- * (`<agentDir>/pidesktop-skills/computer-use`) — the same precedence
- * skill-catalog applies to SKILL.md discovery.
+ * Locate the computer-use skill dir containing ljqCtrl.py. Candidates follow
+ * the same precedence as skill discovery (highest first): project
+ * (`<workspace>/.pidesktop-skills/computer-use`) → user global
+ * (`<agentDir>/pidesktop-skills/computer-use`) → bundled app skills
+ * (`<install dir>/resources/skills/computer-use`, passed in by main) → the
+ * shared cross-agent dir (`~/.agents/skills/computer-use`).
  */
-export function locateLjqCtrlDir(agentDir: string | undefined, workspace: string | undefined): string | undefined {
+export function locateLjqCtrlDir(agentDir: string | undefined, workspace: string | undefined, bundledDir?: string): string | undefined {
   const candidates = [
     ...(workspace ? [join(resolve(workspace), ".pidesktop-skills", "computer-use")] : []),
-    ...(agentDir ? [join(agentDir, "pidesktop-skills", "computer-use")] : [])
+    ...(agentDir ? [join(agentDir, "pidesktop-skills", "computer-use")] : []),
+    ...(bundledDir ? [join(bundledDir, "computer-use")] : []),
+    join(homedir(), ".agents", "skills", "computer-use")
   ];
   for (const dir of candidates) {
     if (existsSync(join(dir, "ljqCtrl.py"))) return dir;
@@ -258,7 +263,7 @@ export function parseComputerOutput(stdout: string, stderr: string): ComputerOpe
 /** Turn low-level failures into actionable guidance (missing python / deps / script). */
 export function describeComputerSpawnFailure(error: unknown, scriptDirMissing: boolean): string {
   if (scriptDirMissing) {
-    return "电脑控制脚本未找到：需要 .pidesktop-skills/computer-use/ljqCtrl.py（computer-use skill 资产）。请确认 skill 已安装。";
+    return "电脑控制脚本未找到：需要 computer-use skill 资产（ljqCtrl.py）。内置资产缺失请重装应用，或把 computer-use 目录放到全局技能目录 ~/.pi/agent/pidesktop-skills/ 或项目 .pidesktop-skills/。";
   }
   const message = error instanceof Error ? error.message : String(error);
   if (/ModuleNotFoundError: No module named '(win32\w+|PIL\w*)'/.test(message)) {

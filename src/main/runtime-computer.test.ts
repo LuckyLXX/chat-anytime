@@ -1,5 +1,5 @@
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { permissionAction, toolRisk } from "./permissions.js";
@@ -101,6 +101,42 @@ describe("locateLjqCtrlDir", () => {
       writeFileSync(join(global, "ljqCtrl.py"), "# stub");
       expect(locateLjqCtrlDir(join(root, "agent"), join(root, "ws"))).toBe(project);
       expect(locateLjqCtrlDir(join(root, "agent"), undefined)).toBe(global);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to the bundled app skills dir after project and global", () => {
+    const root = mkdtempSync(join(tmpdir(), "cu-bundled-"));
+    try {
+      const global = join(root, "agent", "pidesktop-skills", "computer-use");
+      const bundled = join(root, "resources", "skills", "computer-use");
+      mkdirSync(bundled, { recursive: true });
+      writeFileSync(join(bundled, "ljqCtrl.py"), "# stub");
+      // 仅内置存在：任意工作区都能命中。优先级最低的是共享目录 ~/.agents/skills，
+      // 它在开发机上可能也有同名 skill（那时它胜出），所以按优先级推期望值。
+      const sharedDir = join(homedir(), ".agents", "skills", "computer-use");
+      const onlyBundled = existsSync(sharedDir) ? sharedDir : bundled;
+      expect(locateLjqCtrlDir(join(root, "agent"), join(root, "ws"), join(root, "resources", "skills"))).toBe(onlyBundled);
+      expect(locateLjqCtrlDir(join(root, "agent"), undefined, join(root, "resources", "skills"))).toBe(onlyBundled);
+      // 用户全局存在时优先于内置（用户可覆盖内置行为）
+      mkdirSync(global, { recursive: true });
+      writeFileSync(join(global, "ljqCtrl.py"), "# stub");
+      expect(locateLjqCtrlDir(join(root, "agent"), join(root, "ws"), join(root, "resources", "skills"))).toBe(global);
+      // 项目优先于全局与内置
+      const project = join(root, "ws", ".pidesktop-skills", "computer-use");
+      mkdirSync(project, { recursive: true });
+      writeFileSync(join(project, "ljqCtrl.py"), "# stub");
+      expect(locateLjqCtrlDir(join(root, "agent"), join(root, "ws"), join(root, "resources", "skills"))).toBe(project);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+  it("treats the shared ~/.agents/skills dir as the last resort", () => {
+    const root = mkdtempSync(join(tmpdir(), "cu-last-"));
+    try {
+      const sharedDir = join(homedir(), ".agents", "skills", "computer-use");
+      expect(locateLjqCtrlDir(undefined, undefined, join(root, "missing"))).toBe(existsSync(join(sharedDir, "ljqCtrl.py")) ? sharedDir : undefined);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

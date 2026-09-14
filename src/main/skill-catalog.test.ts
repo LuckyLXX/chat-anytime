@@ -3,7 +3,7 @@ import { symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { buildSkillsSystemPromptBlock, discoverSkills, isSkillDisabled, parseSkillFrontmatter, setSkillEnabled, skillIdFromPath, toSkillSummaries } from "./skill-catalog.js";
+import { BUNDLED_SKILL_SOURCE, GLOBAL_SKILL_SOURCE, PROJECT_SKILL_SOURCE, SHARED_SKILL_SOURCE, buildSkillsSystemPromptBlock, discoverSkills, isSkillDisabled, parseSkillFrontmatter, setSkillEnabled, skillIdFromPath, toSkillSummaries, type SkillSourceDir } from "./skill-catalog.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -15,6 +15,11 @@ async function makeSkillDir(): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "pi-desktop-skills-"));
   temporaryDirectories.push(directory);
   return directory;
+}
+
+async function writeSkill(root: string, slug: string, description: string): Promise<void> {
+  await mkdir(join(root, slug), { recursive: true });
+  await writeFile(join(root, slug, "SKILL.md"), `---\nname: ${slug}\ndescription: ${description}\n---\n`, "utf8");
 }
 
 describe("skill frontmatter", () => {
@@ -37,56 +42,78 @@ describe("skill discovery", () => {
   it("discovers skills from global and project dirs with project precedence", async () => {
     const globalDir = await makeSkillDir();
     const projectDir = await makeSkillDir();
-    await mkdir(join(globalDir, "alpha"), { recursive: true });
-    await writeFile(join(globalDir, "alpha", "SKILL.md"), "---\nname: alpha\ndescription: 全局 alpha\n---\n", "utf8");
-    await mkdir(join(globalDir, "beta"), { recursive: true });
-    await writeFile(join(globalDir, "beta", "SKILL.md"), "---\nname: beta\ndescription: 全局 beta\n---\n", "utf8");
-    await mkdir(join(projectDir, "beta"), { recursive: true });
-    await writeFile(join(projectDir, "beta", "SKILL.md"), "---\nname: beta\ndescription: 项目 beta 覆盖\n---\n", "utf8");
+    await writeSkill(globalDir, "alpha", "全局 alpha");
+    await writeSkill(globalDir, "beta", "全局 beta");
+    await writeSkill(projectDir, "beta", "项目 beta 覆盖");
 
-    const skills = discoverSkills(globalDir, projectDir);
+    const skills = discoverSkills([
+      { dir: globalDir, ...GLOBAL_SKILL_SOURCE },
+      { dir: projectDir, ...PROJECT_SKILL_SOURCE }
+    ]);
     expect(skills.map((skill) => skill.slug)).toEqual(["alpha", "beta"]);
     const beta = skills.find((skill) => skill.slug === "beta");
     expect(beta?.scope).toBe("project");
+    expect(beta?.source).toBe("当前项目");
     expect(beta?.description).toBe("项目 beta 覆盖");
+    expect(skills.find((skill) => skill.slug === "alpha")?.source).toBe("用户资源");
   });
 
-  it("discovers skills from the shared ~/.agents/skills dir with lowest precedence", async () => {
+  it("applies the four-source precedence: shared < bundled < user global < project", async () => {
+    const sharedDir = await makeSkillDir();
+    const bundledDir = await makeSkillDir();
     const globalDir = await makeSkillDir();
-    const agentsDir = await makeSkillDir();
     const projectDir = await makeSkillDir();
-    // 仅存在于共享目录
-    await mkdir(join(agentsDir, "gamma"), { recursive: true });
-    await writeFile(join(agentsDir, "gamma", "SKILL.md"), "---\nname: gamma\ndescription: 共享 gamma\n---\n", "utf8");
-    // 共享目录 vs 全局目录 → 全局目录胜出
-    await mkdir(join(agentsDir, "delta"), { recursive: true });
-    await writeFile(join(agentsDir, "delta", "SKILL.md"), "---\nname: delta\ndescription: 共享 delta\n---\n", "utf8");
-    await mkdir(join(globalDir, "delta"), { recursive: true });
-    await writeFile(join(globalDir, "delta", "SKILL.md"), "---\nname: delta\ndescription: 全局 delta\n---\n", "utf8");
-    // 共享目录 vs 项目目录 → 项目目录胜出
-    await mkdir(join(agentsDir, "epsilon"), { recursive: true });
-    await writeFile(join(agentsDir, "epsilon", "SKILL.md"), "---\nname: epsilon\ndescription: 共享 epsilon\n---\n", "utf8");
-    await mkdir(join(projectDir, "epsilon"), { recursive: true });
-    await writeFile(join(projectDir, "epsilon", "SKILL.md"), "---\nname: epsilon\ndescription: 项目 epsilon\n---\n", "utf8");
+    // 只在共享目录存在的
+    await writeSkill(sharedDir, "gamma", "共享 gamma");
+    // 共享 vs 内置 → 内置胜出
+    await writeSkill(sharedDir, "delta", "共享 delta");
+    await writeSkill(bundledDir, "delta", "内置 delta");
+    // 内置 vs 用户全局 → 用户全局胜出
+    await writeSkill(bundledDir, "epsilon", "内置 epsilon");
+    await writeSkill(globalDir, "epsilon", "全局 epsilon");
+    // 用户全局 vs 项目 → 项目胜出
+    await writeSkill(globalDir, "zeta", "全局 zeta");
+    await writeSkill(projectDir, "zeta", "项目 zeta");
 
-    const skills = discoverSkills(globalDir, projectDir, agentsDir);
+    const skills = discoverSkills([
+      { dir: sharedDir, ...SHARED_SKILL_SOURCE },
+      { dir: bundledDir, ...BUNDLED_SKILL_SOURCE },
+      { dir: globalDir, ...GLOBAL_SKILL_SOURCE },
+      { dir: projectDir, ...PROJECT_SKILL_SOURCE }
+    ]);
     const bySlug = new Map(skills.map((skill) => [skill.slug, skill]));
     expect(bySlug.get("gamma")?.description).toBe("共享 gamma");
     expect(bySlug.get("gamma")?.scope).toBe("global");
-    expect(bySlug.get("delta")?.description).toBe("全局 delta");
-    expect(bySlug.get("delta")?.scope).toBe("global");
-    expect(bySlug.get("epsilon")?.description).toBe("项目 epsilon");
-    expect(bySlug.get("epsilon")?.scope).toBe("project");
+    expect(bySlug.get("gamma")?.source).toBe("共享目录");
+    // 内置来源：scope 是 bundled（渲染端显示「内置」），来源名是「随应用分发」
+    expect(bySlug.get("delta")?.description).toBe("内置 delta");
+    expect(bySlug.get("delta")?.scope).toBe("bundled");
+    expect(bySlug.get("delta")?.source).toBe("随应用分发");
+    expect(bySlug.get("epsilon")?.description).toBe("全局 epsilon");
+    expect(bySlug.get("epsilon")?.scope).toBe("global");
+    expect(bySlug.get("zeta")?.description).toBe("项目 zeta");
+    expect(bySlug.get("zeta")?.scope).toBe("project");
   });
 
-  it("ignores a missing or unreadable shared dir", async () => {
+  it("ignores a missing or unreadable source dir", async () => {
     const globalDir = await makeSkillDir();
-    const projectDir = await makeSkillDir();
-    await mkdir(join(globalDir, "alpha"), { recursive: true });
-    await writeFile(join(globalDir, "alpha", "SKILL.md"), "---\nname: alpha\ndescription: a\n---\n", "utf8");
+    await writeSkill(globalDir, "alpha", "a");
 
-    const skills = discoverSkills(globalDir, projectDir, join(globalDir, "does-not-exist"));
+    const skills = discoverSkills([
+      { dir: join(globalDir, "does-not-exist"), ...SHARED_SKILL_SOURCE },
+      { dir: globalDir, ...GLOBAL_SKILL_SOURCE }
+    ]);
     expect(skills.map((skill) => skill.slug)).toEqual(["alpha"]);
+  });
+
+  it("skips sources without a dir (optional bundled/global/project slots)", async () => {
+    const globalDir = await makeSkillDir();
+    await writeSkill(globalDir, "alpha", "a");
+    const sources: SkillSourceDir[] = [
+      { dir: "", ...SHARED_SKILL_SOURCE },
+      { dir: globalDir, ...GLOBAL_SKILL_SOURCE }
+    ];
+    expect(discoverSkills(sources).map((skill) => skill.slug)).toEqual(["alpha"]);
   });
 
   it("follows linked skill dirs (junction/symlink) and skips dead or file links", async (context) => {
@@ -94,8 +121,7 @@ describe("skill discovery", () => {
     const sourceRepo = await mkdtemp(join(tmpdir(), "pi-desktop-skill-repo-"));
     temporaryDirectories.push(sourceRepo);
     const linkedSkill = join(sourceRepo, "ppt-master");
-    await mkdir(linkedSkill, { recursive: true });
-    await writeFile(join(linkedSkill, "SKILL.md"), "---\nname: ppt-master\ndescription: 外部仓库链接\n---\n", "utf8");
+    await writeSkill(sourceRepo, "ppt-master", "外部仓库链接");
     const linkType = process.platform === "win32" ? "junction" : "dir";
     try {
       symlinkSync(linkedSkill, join(globalDir, "ppt-master"), linkType);
@@ -114,7 +140,7 @@ describe("skill discovery", () => {
     } catch { /* 平台不允许悬挂链接 */
     }
 
-    const skills = discoverSkills(globalDir, globalDir);
+    const skills = discoverSkills([{ dir: globalDir, ...GLOBAL_SKILL_SOURCE }]);
     expect(skills.map((skill) => skill.slug)).toEqual(["ppt-master"]);
     expect(skills[0]!.filePath).toBe(join(globalDir, "ppt-master", "SKILL.md"));
     expect(skills[0]!.description).toBe("外部仓库链接");
@@ -122,18 +148,16 @@ describe("skill discovery", () => {
 
   it("derives a stable id and maps to summaries with disabled state", async () => {
     const globalDir = await makeSkillDir();
-    const projectDir = await makeSkillDir();
     const statePath = join(globalDir, "state.json");
-    await mkdir(join(globalDir, "alpha"), { recursive: true });
-    await writeFile(join(globalDir, "alpha", "SKILL.md"), "---\nname: alpha\ndescription: a\n---\n", "utf8");
+    await writeSkill(globalDir, "alpha", "a");
 
-    const discovered = discoverSkills(globalDir, projectDir);
+    const discovered = discoverSkills([{ dir: globalDir, ...GLOBAL_SKILL_SOURCE }]);
     const id = skillIdFromPath(discovered[0]!.filePath);
     setSkillEnabled(statePath, id, false);
     expect(isSkillDisabled(statePath, id)).toBe(true);
 
     const summaries = toSkillSummaries(discovered, new Set([id]));
-    expect(summaries[0]).toMatchObject({ name: "alpha", enabled: false, defaultEnabled: true, toggleable: true, scope: "global" });
+    expect(summaries[0]).toMatchObject({ name: "alpha", enabled: false, defaultEnabled: true, toggleable: true, scope: "global", source: "用户资源" });
     expect(summaries[0]?.filePath).toBe(discovered[0]!.filePath);
 
     setSkillEnabled(statePath, id, true);

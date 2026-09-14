@@ -5,6 +5,7 @@ import { Readable } from "node:stream";
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, protocol, safeStorage, shell, utilityProcess, type UtilityProcess } from "electron";
 import { spawn } from "node-pty";
 import appIconPath from "./assets/icon.ico?asset";
+import { resolveBundledSkillsDir } from "./bundled-skills.js";
 import { migrateSettings, normalizeVision, recordAgentWorkspace, forgetAgentWorkspace } from "./settings.js";
 import { importExternalAttachment, workspaceRelativeAttachment } from "./attachments.js";
 import type { BrowserPreviewCommand, BrowserPreviewState, DesktopBootstrap, DesktopSettings, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot, TerminalCommand, TerminalEventData, WorkspaceDirectoryListing, WorkspaceEntryResult, WorkspaceFilePreview, WorkspaceFileSearchResult, WorkspaceFileStat, WorkspaceFileWriteResult } from "../shared/protocol.js";
@@ -329,7 +330,12 @@ function startRuntime(): void {
     runtimeProcess.stderr?.on("data", (chunk) => console.error(`[pi-runtime] ${String(chunk).trimEnd()}`));
   }
   const settings = loadSettings();
-  sendToRuntime({ type: "initialize", settings, apiKeys: credentialsCache });
+  // 内置 Skill 目录（安装目录 resources/skills，dev 下是仓库 resources/skills）
+  // 由主进程解析后随 initialize 下发：utility 进程没有 Electron API。安装目录的
+  // skill 目录就是「内置 skill 的目录」，运行时直接扫（不复制到用户目录）。
+  const bundledSkillsDir = resolveBundledSkillsDir(app.getAppPath(), app.isPackaged);
+  if (!bundledSkillsDir) console.warn("未找到内置 Skill 目录（resources/skills），本次不注入内置来源");
+  sendToRuntime({ type: "initialize", settings, apiKeys: credentialsCache, bundledSkillsDir });
 }
 function createWindow(): void {
   const rendererUrl = process.env.ELECTRON_RENDERER_URL;

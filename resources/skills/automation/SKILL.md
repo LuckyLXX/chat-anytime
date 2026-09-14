@@ -5,6 +5,10 @@ description: 当用户想创建、查看、修改或删除「定时任务 / 自�
 
 # 创建与管理自动化定时任务
 
+> 本目录随应用分发（安装目录 `resources/skills/automation/`），是**内置资产**：所有工作区、所有角色可见，
+> 随应用升级。要自定义就把本目录复制到全局技能目录 `~/.pi/agent/pidesktop-skills/automation/`（同名覆盖内置）
+> 或项目技能目录 `<工作区>/.pidesktop-skills/automation/`。
+
 PiDesktop 的「自动化任务」让用户配置「在什么时间、让 Agent 用什么提示词跑一次」。你负责把用户的自然语言定时需求，转换成一条**合法、可读、能落库**的定时任务。
 
 ## 什么时候用

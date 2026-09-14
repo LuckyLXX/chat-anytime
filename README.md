@@ -105,7 +105,7 @@ npm run package:win
 打开「设置 → 技能与工具」即可管理自研能力：
 
 - **MCP Server**：支持 stdio/HTTP，配置写入项目 `.mcp.json` 或全局 `mcp.json`，启用/停用/删除，状态与工具数实时显示
-- **Skill**：把 `<slug>/SKILL.md` 放到全局 `pidesktop-skills/` 或项目 `.pidesktop-skills/` 即可被发现，勾选启用后注入系统提示，用 `/skill:<name>` 调用
+- **Skill**：把 `<slug>/SKILL.md` 放到全局 `pidesktop-skills/`、项目 `.pidesktop-skills/` 或共享 `~/.agents/skills/` 即可被发现，勾选启用后注入系统提示，用 `/skill:<name>` 调用；随安装包分发的内置 Skill（安装目录 `resources/skills/`，如电脑控制、自动化任务）开箱即用，放一份同名副本到全局目录即可覆盖
 - **Todo**：本地待办清单（AI 任务），按会话维度存储（每个会话一份，切换会话自动跟随）。dsh 式单一所有者语义：助手通过 `todo_write` 整表替换维护清单（状态只随工具调用追加在对话尾部，不破坏提示词前缀缓存）；聊天窗口右上角的悬浮「任务」面板（可折叠/关闭）只读实时展示
 - **子代理**：助手可通过 `delegate_agent` 把独立子任务委派给子代理（单层，权限走同一审批闸口）；设置页可自定义子智能体（系统提示/模型/工具集，全局或项目作用域）
 - **浏览器与终端**：预览面板提供隔离标签页；浏览器自动化工具经权限门控，终端是用户自己输入的真实 PTY

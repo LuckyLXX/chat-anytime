@@ -7,27 +7,35 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import type { AgentProfile, SkillSummary } from "../shared/protocol.js";
 import { buildSkillPrompt } from "./skill-prompt.js";
-import { discoverSkills, isSkillDisabled, skillIdFromPath, toSkillSummaries, type DiscoveredSkill } from "./skill-catalog.js";
+import { BUNDLED_SKILL_SOURCE, GLOBAL_SKILL_SOURCE, PROJECT_SKILL_SOURCE, SHARED_SKILL_SOURCE, discoverSkills, isSkillDisabled, skillIdFromPath, toSkillSummaries, type DiscoveredSkill, type SkillSourceDir } from "./skill-catalog.js";
 
 export interface SkillPaths {
-  globalDir: string;
-  agentsDir: string;
-  projectDir: string;
+  /** 按优先级**由低到高**的扫描源（同名 slug 后者覆盖前者）。 */
+  dirs: SkillSourceDir[];
   statePath: string;
 }
 
-export function skillPathsFor(workspace: string | undefined, agentDir: string): SkillPaths {
-  return {
-    globalDir: join(agentDir, "pidesktop-skills"),
-    agentsDir: join(homedir(), ".agents", "skills"),
-    projectDir: workspace ? resolve(workspace, ".pidesktop-skills") : join(agentDir, "pidesktop-skills"),
-    statePath: join(agentDir, "pidesktop-skill-state.json")
-  };
+/**
+ * Four skill sources, lowest precedence first:
+ * shared `~/.agents/skills` → bundled app skills (only when the app bundle
+ * actually has one) → user global `<agentDir>/pidesktop-skills` → project
+ * `<workspace>/.pidesktop-skills`. No workspace means NO project source (a
+ * previous version fell back to the global dir here, which mislabelled global
+ * skills as 「当前项目」).
+ */
+export function skillPathsFor(workspace: string | undefined, agentDir: string, bundledDir?: string): SkillPaths {
+  const dirs: SkillSourceDir[] = [
+    { dir: join(homedir(), ".agents", "skills"), ...SHARED_SKILL_SOURCE },
+    ...(bundledDir ? [{ dir: bundledDir, ...BUNDLED_SKILL_SOURCE }] : []),
+    { dir: join(agentDir, "pidesktop-skills"), ...GLOBAL_SKILL_SOURCE },
+    ...(workspace ? [{ dir: resolve(workspace, ".pidesktop-skills"), ...PROJECT_SKILL_SOURCE }] : [])
+  ];
+  return { dirs, statePath: join(agentDir, "pidesktop-skill-state.json") };
 }
 
 /** Scan skill sources and apply the persisted enable/disable state. */
 export function scanSkills(paths: SkillPaths): { discovered: DiscoveredSkill[]; summaries: SkillSummary[] } {
-  const discovered = discoverSkills(paths.globalDir, paths.projectDir, paths.agentsDir);
+  const discovered = discoverSkills(paths.dirs);
   const disabled = new Set<string>();
   for (const skill of discovered) {
     const id = skillIdFromPath(skill.filePath);

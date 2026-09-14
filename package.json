@@ -71,6 +71,15 @@
       "!**/node_modules/@esbuild/**",
       "**/node_modules/@esbuild/win32-x64/**"
     ],
+    "extraResources": [
+      {
+        "from": "resources/skills",
+        "to": "skills",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
     "asarUnpack": [
       "**/node_modules/@modelcontextprotocol/**",
       "**/node_modules/typebox/**",

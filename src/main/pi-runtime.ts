@@ -144,6 +144,8 @@ let currentSessionsAgentId: string | undefined;
 let recentWorkspaces: RecentWorkspace[] = [];
 let selectedModel: { provider: string; id: string } | undefined;
 let settings: DesktopSettings | undefined;
+/** 随安装包分发的内置 Skill 目录（安装目录 resources/skills），由主进程经 initialize 下发。 */
+let bundledSkillsDir: string | undefined;
 /** 当前 Agent 的自动化定时任务（设置页列表 + 目录下发）；随 Agent 切换重读。 */
 let automationTasks: AutomationTask[] = [];
 /** 全角色自动化运行历史（设置页「运行记录」子页 + 目录下发）；runs.jsonl 事件流。 */
@@ -431,7 +433,7 @@ const mcpClient = new McpClientManager({ oauth: mcpOAuth });
 let mcpTools: ToolDefinition[] = [];
 
 function skillPaths(): ReturnType<typeof runtimeSkills.skillPathsFor> {
-  return runtimeSkills.skillPathsFor(workspace, getAgentDir());
+  return runtimeSkills.skillPathsFor(workspace, getAgentDir(), bundledSkillsDir);
 }
 
 /** 自定义命令双作用域目录：项目 <workspace>/.pidesktop-commands，全局 <agentDir>/pidesktop-commands。 */
@@ -2600,7 +2602,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   const computerTools = runtimeComputer.buildComputerTools({
     enabled: () => settings?.computer?.enabled !== false,
     workspace: () => recordWorkspace || undefined,
-    locateScriptDir: () => runtimeComputer.locateLjqCtrlDir(getAgentDir(), recordWorkspace || undefined),
+    locateScriptDir: () => runtimeComputer.locateLjqCtrlDir(getAgentDir(), recordWorkspace || undefined, bundledSkillsDir),
     saveScreenshot: (data, mimeType) => saveBrowserScreenshot(recordWorkspace, data, mimeType, "computer"),
     // 屏幕悬浮提示条（main 进程 ComputerOverlayController）：操作前告知用户
     // 「AI 正在操作 XX」；fire-and-forget，失败静默（纯增益不阻塞工具）。
@@ -2812,6 +2814,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
 async function initialize(command: Extract<RuntimeCommand, { type: "initialize" }>): Promise<void> {
   settings = command.settings;
   apiKeys = command.apiKeys;
+  bundledSkillsDir = command.bundledSkillsDir;
   refreshHooksConfig();
   refreshSubagents();
   recentWorkspaces = loadRecentWorkspaces(recentWorkspacesPath());

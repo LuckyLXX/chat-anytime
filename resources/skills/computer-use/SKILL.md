@@ -5,6 +5,11 @@ description: 当用户想让你操作桌面上的其他应用窗口（打开/切
 
 # 电脑控制（computer use）
 
+> 本目录随应用分发（安装目录 `resources/skills/computer-use/`，仓库源 `resources/skills/`），是**内置资产**：
+> 所有工作区、所有角色都能看到它，随应用升级。要自定义就把整个 `computer-use/` 目录复制到
+> 全局技能目录 `~/.pi/agent/pidesktop-skills/computer-use/`（同名会覆盖内置），或复制到
+> 项目技能目录 `<工作区>/.pidesktop-skills/computer-use/`（项目优先于全局与内置）。
+
 控制本机任意桌面窗口。能力分两层，**优先用内置工具，工具不够再写脚本**：
 
 1. **内置 `computer_*` 工具**（推荐，结构化 + 权限门 + 截图直返图片）：
@@ -35,7 +40,7 @@ python -c "import win32gui, win32api, win32clipboard, PIL; print('ok')"
 
 ```python
 import sys
-sys.path.insert(0, r"<本 SKILL.md 所在目录>")   # 例如 D:\ws\.pidesktop-skills\computer-use
+sys.path.insert(0, r"<本 SKILL.md 所在目录>")   # 内置资产：<安装目录>\resources\skills\computer-use
 import ljqCtrl
 ```
 

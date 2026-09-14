@@ -342,6 +342,7 @@ flowchart LR
 
 const demoResources: ResourceCatalog = {
   skills: [
+    { id: "skill:computer-use", name: "电脑控制", description: "操作桌面上的其他应用窗口：枚举、截图、点击、输入。", source: "随应用分发", scope: "bundled", defaultEnabled: true, enabled: true, toggleable: true, disableModelInvocation: false },
     { id: "skill:code-review", name: "code-review", description: "审查代码变更并整理风险与建议。", source: "用户资源", scope: "global", defaultEnabled: true, enabled: true, toggleable: true, disableModelInvocation: false },
     { id: "skill:project-notes", name: "project-notes", description: "整理项目文档和工作记录。", source: "当前项目", scope: "project", defaultEnabled: true, enabled: true, toggleable: true, disableModelInvocation: false }
   ],
