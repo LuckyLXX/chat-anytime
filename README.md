@@ -1,6 +1,8 @@
 # ChatAnyTime
 
 ChatAnyTime 是一个面向项目开发的桌面 AI 客户端。它以 Pi 的执行、会话和工具能力为底座，重新实现桌面交互，并延续 ChatAnyTime 的富内容渲染理念。
+<img width="1426" height="913" alt="image" src="https://github.com/user-attachments/assets/133b8181-4581-4807-be4f-769f7da0b379" />
+
 
 ## 当前能力
 
@@ -125,6 +127,10 @@ npm run package:win
 - HTML/SVG Artifact 只提供隔离预览，不提供桌面能力桥接
 - Windows 目前输出解压目录，尚未生成安装程序、自动更新、代码签名和可执行文件资源定制
 - `@earendil-works/pi-coding-agent@0.84.4` 发布包的 shrinkwrap 固定了 `undici` 与 `brace-expansion` 的旧版本；截至本版，`npm audit --omit=dev` 会报告若干关联风险。根项目 override 无法可靠替换它们，需等待 Pi 上游发布更新依赖的版本，或以后改为可审计的 Pi 源码构建流程
+
+<p align="center">
+    <a href="https://linux.do" alt="LINUX DO"><img src="https://shorturl.at/ggSqS" /></a>
+</p>
 
 ## 开源协议
 
