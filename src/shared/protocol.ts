@@ -254,6 +254,7 @@ export interface DesktopSettings {
   memory?: MemorySettings;
   hooks?: HooksSettings;
   browser?: BrowserSettings;
+  computer?: ComputerSettings;
   design?: DesignSettings;
   checkpoint?: CheckpointSettings;
   customProvider?: CustomProviderSettings;
@@ -809,6 +810,11 @@ export interface BrowserSettings {
   enabled: boolean;
 }
 
+/** 电脑控制（computer_* 桌面窗口控制）总开关；缺省视为启用（settings.computer?.enabled !== false）。 */
+export interface ComputerSettings {
+  enabled: boolean;
+}
+
 /** 设计模式总开关（全局总闸）；缺省视为启用（settings.design?.enabled !== false）。
  *  与 browser 的关键差别：browser_* 常驻激活、execute 实时判断；design_* 的工具
  *  定义较重（8 个≈1.5K tokens），仅在本会话开了设计模式时才注入活动工具集
@@ -1270,7 +1276,7 @@ export interface PermissionRequest {
   toolName: string;
   summary: string;
   args: unknown;
-  risk: "write" | "command" | "outside-workspace" | "browse";
+  risk: "write" | "command" | "outside-workspace" | "browse" | "desktop";
   principal: ExecutionPrincipal;
 }
 
@@ -1341,7 +1347,7 @@ export type RuntimeCommand =
   | { type: "agent.select"; agentId: string }
   | { type: "agent.save"; agent: AgentProfile }
   | { type: "agent.archive"; agentId: string; archived: boolean }
-  | { type: "settings.save"; settings: Pick<DesktopSettings, "model" | "thinkingLevel" | "accessMode" | "appearance" | "browser" | "design" | "defaultWorkspace"> }
+  | { type: "settings.save"; settings: Pick<DesktopSettings, "model" | "thinkingLevel" | "accessMode" | "appearance" | "browser" | "computer" | "design" | "defaultWorkspace"> }
   | { type: "model.select"; provider: string; id: string; sessionId?: string }
   | { type: "thinking.select"; level: ThinkingLevel; sessionId?: string }
   | { type: "auth.set"; provider: string; apiKey: string }

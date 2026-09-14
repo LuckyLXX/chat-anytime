@@ -56,7 +56,12 @@ const toolLabels: Record<string, string> = {
   browser_select: "浏览器下拉选择",
   browser_upload: "浏览器上传文件",
   browser_screenshot_full: "浏览器整页截图",
-  browser_tabs: "浏览器标签页"
+  browser_tabs: "浏览器标签页",
+  computer_windows: "枚举桌面窗口",
+  computer_screenshot: "窗口截图",
+  computer_click: "桌面点击",
+  computer_type: "桌面输入文本",
+  computer_press: "桌面按键"
 };
 
 export function toolLabel(name: string): string {

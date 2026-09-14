@@ -109,6 +109,7 @@ import * as runtimeQuestionTool from "./runtime-question-tool.js";
 import * as runtimeSkills from "./runtime-skills.js";
 import * as runtimeVision from "./runtime-vision.js";
 import * as runtimeBrowser from "./runtime-browser.js";
+import * as runtimeComputer from "./runtime-computer.js";
 import * as runtimeDesign from "./runtime-design.js";
 import { applyDesignOps, createDesignDoc, sanitizeDesignName, type DesignDoc } from "../shared/design-schema.js";
 import { exportDesignHtml } from "../shared/design-export.js";
@@ -206,6 +207,7 @@ interface SessionRuntimeRecord {
   permissionDeps: runtimePermissions.PermissionGateDeps;
   visionTools: ToolDefinition[];
   browserTools: ToolDefinition[];
+  computerTools: ToolDefinition[];
   automationTools: ToolDefinition[];
   designTools: ToolDefinition[];
   /** 设计模式总闸的实时读取（settings.design?.enabled !== false）；活动集重算时用。 */
@@ -1496,8 +1498,8 @@ function wrapModelRuntimeForVision(runtime: ModelRuntime): ModelRuntime {
  * customTools arrays are held by reference inside Pi, so hot-path updates
  * rebuild in place (`length = 0` + push) instead of swapping the array.
  */
-function buildRecordTools(record: Pick<SessionRuntimeRecord, "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "planTools" | "visionTools" | "browserTools" | "automationTools" | "designTools">): ToolDefinition[] {
-  return [...mcpTools, ...record.subagentTools, ...record.todoTools, ...record.memoryTools, ...record.questionTools, ...record.planTools, ...record.visionTools, ...record.browserTools, ...record.automationTools, ...record.designTools];
+function buildRecordTools(record: Pick<SessionRuntimeRecord, "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "planTools" | "visionTools" | "browserTools" | "computerTools" | "automationTools" | "designTools">): ToolDefinition[] {
+  return [...mcpTools, ...record.subagentTools, ...record.todoTools, ...record.memoryTools, ...record.questionTools, ...record.planTools, ...record.visionTools, ...record.browserTools, ...record.computerTools, ...record.automationTools, ...record.designTools];
 }
 
 /**
@@ -1512,7 +1514,7 @@ function buildRecordTools(record: Pick<SessionRuntimeRecord, "subagentTools" | "
  * design flag is fixed per session, so the prefix stays byte-stable for the
  * whole design session; a plain coding chat never pays for the canvas.
  */
-function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "planTools" | "visionTools" | "browserTools" | "automationTools" | "designTools" | "designMode" | "designGlobalEnabled" | "unattended">, includeVision: boolean): string[] {
+function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "planTools" | "visionTools" | "browserTools" | "computerTools" | "automationTools" | "designTools" | "designMode" | "designGlobalEnabled" | "unattended">, includeVision: boolean): string[] {
   const builtin = Object.entries(record.agent.tools ?? {}).filter(([, enabled]) => enabled).map(([name]) => name);
   return [
     ...builtin,
@@ -1527,6 +1529,9 @@ function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "subagentTool
     // Browser tools stay active regardless of the settings switch: the
     // execute closure reports the disabled state instead (no session rebuild).
     ...record.browserTools.map((tool) => tool.name),
+    // 电脑控制工具与 browser 同策略：常驻激活、execute 实时读总闸（关闭时返回
+    // 停用提示，无会话重建）；敏感动作靠 desktop 风险权限门把关。
+    ...record.computerTools.map((tool) => tool.name),
     ...record.automationTools.map((tool) => tool.name),
     // 设计工具仅在设计模式会话里激活（≈1.5K tokens/请求的前缀成本）；总闸
     // settings.design.enabled 关闭时任何会话都不注入。会话内开关不变，因此
@@ -2587,6 +2592,17 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   });
   // 自动化定时任务工具（每会话注册，绑定本记录所属 Agent 的 store）。
   const automationTools = buildAutomationTools(automationToolContextFor(recordAgent.id));
+  // 电脑控制工具：高频「感知→行动」循环结构化（computer_windows/screenshot/
+  // click/type/press），执行层 spawn Python 复用 computer-use skill 的
+  // ljqCtrl.py（工具与 skill 共享同一份实现；skill 保留长尾操作如 UIA/找图）。
+  // 权限：click/type/press 走 desktop 风险门（read-only 拒/ask 逐次确认/
+  // workspace+ 放行）；总开关 settings.computer.enabled 实时读取。
+  const computerTools = runtimeComputer.buildComputerTools({
+    enabled: () => settings?.computer?.enabled !== false,
+    workspace: () => recordWorkspace || undefined,
+    locateScriptDir: () => runtimeComputer.locateLjqCtrlDir(getAgentDir(), recordWorkspace || undefined),
+    saveScreenshot: (data, mimeType) => saveBrowserScreenshot(recordWorkspace, data, mimeType, "computer")
+  });
   // 设计模式工具（每会话注册；当前文档绑定在本 record 上，工具闭包经 recordBox 读写）。
   // 注册常驻（注册 ≠ 激活），是否进活动工具集由 shouldActivateDesignTools 判定
   // （会话级 designMode + 全局总闸）；enabled 实时读总闸，双保险防总闸刚关时
@@ -2630,7 +2646,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   // Each record owns its customTools array: Pi stores it by reference and
   // re-reads it on every tool-registry refresh, so per-record arrays let parked
   // sessions keep their tool set while the active one hot-swaps MCP tools.
-  const recordCustomTools: ToolDefinition[] = [shellKill.tools[0]!, shellKill.tools[1]!, ...mcpTools, ...subagentTools, ...todoTools, ...memoryTools, ...questionTools, ...planTools, ...visionTools, ...browserTools, ...automationTools, ...designTools];
+  const recordCustomTools: ToolDefinition[] = [shellKill.tools[0]!, shellKill.tools[1]!, ...mcpTools, ...subagentTools, ...todoTools, ...memoryTools, ...questionTools, ...planTools, ...visionTools, ...browserTools, ...computerTools, ...automationTools, ...designTools];
   const result = await createAgentSession({
     cwd: recordWorkspace,
     modelRuntime,
@@ -2704,6 +2720,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     permissionDeps,
     visionTools,
     browserTools,
+    computerTools,
     automationTools,
     designTools,
     designGlobalEnabled: () => settings?.design?.enabled !== false,
@@ -3884,6 +3901,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       // browser 工具常驻激活、execute 实时读镜像；design 总闸额外要重算活动集
       // （它决定 design_* 是否注入前缀）——在下方完成镜像赋值后统一 reconcile。
       settings.browser = command.settings.browser;
+      settings.computer = command.settings.computer;
       settings.design = command.settings.design;
       settings.defaultWorkspace = command.settings.defaultWorkspace;
       thinkingLevel = command.settings.thinkingLevel;

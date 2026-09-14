@@ -17,6 +17,9 @@ export function summarizeArgs(toolName: string, args: Record<string, unknown>): 
   if (toolName === "browser_tabs") return `关闭浏览器标签页 ${String(args.tabId ?? "")}`;
   if (toolName === "design_update") return `更新设计文档（${Array.isArray(args.ops) ? args.ops.length : 0} 项变更）`;
   if (toolName === "design_export") return `导出设计 HTML${args.path ? `到 ${String(args.path)}` : ""}`;
+  if (toolName === "computer_click") return `点击窗口「${String(args.window ?? "")}」客户区 (${String(args.x ?? "?")}, ${String(args.y ?? "?")})`;
+  if (toolName === "computer_type") return `向窗口输入文本：${String(args.text ?? "").slice(0, 60)}`;
+  if (toolName === "computer_press") return `发送按键 ${String(args.key ?? "")}${args.window ? ` 到窗口「${String(args.window)}」` : ""}`;
   const path = args.path ?? args.file_path ?? args.filePath;
   if (path) return `${toolLabel(toolName)}：${String(path)}`;
   return toolLabel(toolName);

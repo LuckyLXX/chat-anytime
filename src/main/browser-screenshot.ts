@@ -19,7 +19,7 @@ const SCREENSHOT_DIR_NAME = ".pidesktop/screenshots";
 // grow the directory without bound. Recent captures are enough: a screenshot
 // is recognized in the same turn, right after it was taken.
 const SCREENSHOT_KEEP = 20;
-const SCREENSHOT_FILE_PATTERN = /^(?:browser|design)-.*\.(png|jpg)$/u;
+const SCREENSHOT_FILE_PATTERN = /^(?:browser|design|computer)-.*\.(png|jpg)$/u;
 
 function pad(value: number, width = 2): string {
   return String(value).padStart(width, "0");

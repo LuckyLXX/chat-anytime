@@ -3,9 +3,19 @@ name: 电脑控制
 description: 当用户想让你操作桌面上的其他应用窗口（打开/切换程序、点击按钮、填写输入框、敲键盘快捷键、读取屏幕内容、对屏幕截图识别）时使用。通过 Windows 原生 win32 API 控制本机任意窗口：窗口枚举、前后台截图、鼠标点击（带效果验证）、键盘输入。当前任务只涉及内置浏览器标签页时优先用 browser_* 工具，不要用本 skill。
 ---
 
-# 电脑控制（computer use · 最小集）
+# 电脑控制（computer use）
 
-通过同目录的 `ljqCtrl.py`（源自开源项目 GenericAgent，MIT）用 win32 API 控制本机窗口。
+控制本机任意桌面窗口。能力分两层，**优先用内置工具，工具不够再写脚本**：
+
+1. **内置 `computer_*` 工具**（推荐，结构化 + 权限门 + 截图直返图片）：
+   `computer_windows`（枚举窗口）→ `computer_screenshot`（截图，坐标就用截图坐标系）→
+   `computer_click`（点击，自动激活+像素验证）/ `computer_type`（输入文本）/
+   `computer_press`（组合键）。标准节奏：枚举 → 截图看清 → 点击/输入 → 再截图验证，
+   一步一验证，不要在未知状态下连续多步。
+2. **本 skill 的 `ljqCtrl.py`**（长尾操作，用 bash/powershell 写 python 调用）：
+   UIA 控件树探测、模板找图、后台消息级控制、WGC 后台截图等工具未覆盖的场景。
+   调用方式见第 1 节。
+
 **一律物理坐标**、**操作前先激活窗口**、**一步一验证**。
 
 ## 0. 环境自检（首次使用必做）
@@ -17,7 +27,7 @@ python -c "import win32gui, win32api, win32clipboard, PIL; print('ok')"
 报 ImportError 就先装依赖：`pip install pywin32 pillow`（仅这两个，勿装 pyautogui/opencv）。
 `python` 不存在时先向用户说明并请求安装 Python 3.10+。
 
-## 1. 标准调用方式
+## 1. 写脚本调用 ljqCtrl（长尾场景）
 
 把 `ljqCtrl.py` 所在目录（即本 SKILL.md 所在目录，read 时你知道路径）加进 sys.path：
 

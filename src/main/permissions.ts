@@ -30,6 +30,10 @@ export function toolRisk(
   if (toolName === "browser_navigate") return "browse";
   if (toolName === "browser_eval") return args.mode === "write" ? "browse" : undefined;
   if (toolName === "browser_tabs") return args.action === "close" ? "browse" : undefined;
+  // 电脑控制：全局键鼠注入是比命令执行更做作的风险面——read-only 拒绝、
+  // ask 逐次确认（权限卡显示目标窗口与坐标）、workspace 以上自动放行。
+  // computer_windows / computer_screenshot 是只读观察，免门。
+  if (toolName === "computer_click" || toolName === "computer_type" || toolName === "computer_press") return "desktop";
   return undefined;
 }
 
@@ -41,8 +45,8 @@ export type PermissionAction = "allow" | "ask" | "deny";
 
 export function permissionAction(mode: AccessMode, toolName: string, risk: PermissionRequest["risk"] | undefined): PermissionAction {
   if (mode === "full" || !risk) return "allow";
-  if (mode === "read-only" && (risk === "command" || risk === "write" || risk === "browse")) return "deny";
-  if (mode === "workspace" && risk === "write") return "allow";
+  if (mode === "read-only" && (risk === "command" || risk === "write" || risk === "browse" || risk === "desktop")) return "deny";
+  if (mode === "workspace" && (risk === "write" || risk === "desktop")) return "allow";
   return "ask";
 }
 
