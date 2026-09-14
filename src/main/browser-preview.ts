@@ -306,7 +306,7 @@ export class BrowserPreviewController {
   /**
    * 下载守卫：按 session 只注册一次，按标签页决定策略。
    *
-   * 实测结论（Electron 43，探针脚本见 docs/迭代记录.md 本条）：
+   * 实测结论（Electron 43，探针脚本见 docs/迭代记录/2026-09.md 的 2026-09-13 A3 条目）：
    * - `event.preventDefault()` 会让 `item.setSavePath()` **完全失效**（done 事件
    *   直接是 cancelled、不产生任何文件）——取消只能取消，保存只能保存；
    * - 不 preventDefault + setSavePath → done: completed，目录不存在时 Electron
