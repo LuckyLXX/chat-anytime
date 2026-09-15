@@ -422,25 +422,38 @@ export function buildBrowserTools(deps: BrowserToolDeps): ToolDefinition[] {
       name: "browser_screenshot",
       label: "浏览器截图",
       description: [
-        "截取内置浏览器当前可视区域的截图并返回图片。",
+        "截取内置浏览器当前可视区域的截图并返回图片；传 ref 或 selector（二选一）则截取该元素的完整区域（可超出视口高度，含滚动区域外内容，会自动滚动到该元素，无需先滚动）。",
+        "selector 是 CSS 选择器（可穿 shadow DOM 与同源 iframe）；ref 是 browser_snapshot 返回的 @eN 引用——注意 snapshot 只收录交互元素，画板/图表等容器请用 selector。",
+        "scale 可选 1 或 2，默认 1；传 2 得到双倍像素的高清图（适合文字密集的移动端原型）。",
         "截图要求页面出帧：标签页不可见时会自动把预览面板切回该标签；主窗口最小化时截图会失败，需恢复窗口后重试。",
         "截图会同步保存到工作区 .pidesktop/screenshots/ 目录（保留最近 20 张），结果文本会给出该文件的相对路径。",
         "支持图片输入的模型可直接查看；纯文本模型看不到图片，可调用 recognize_images 工具并传入该文件路径识别截图内容（支持指定识别要点）。",
-        "用于验证页面视觉效果、查看快照无法表达的布局/图表/画布内容。"
+        "用于验证页面视觉效果、查看快照无法表达的布局/图表/画布内容，以及把页面中的各个区块/画板/卡片分别截成独立图片。"
       ].join(""),
-      promptSnippet: "browser_screenshot: 截取内置浏览器当前画面",
-      parameters: Type.Object({}),
-      execute: async () => {
-        const result = await run(deps, { op: "screenshot" });
+      promptSnippet: "browser_screenshot: 截取浏览器当前画面或指定元素（ref/selector）",
+      parameters: Type.Object({
+        ref: Type.Optional(Type.String({ description: "browser_snapshot 返回的 @eN 元素引用，截取该元素完整区域" })),
+        selector: Type.Optional(Type.String({ description: "CSS 选择器，截取匹配元素的完整区域（可穿 shadow DOM/iframe；与 ref 二选一）" })),
+        scale: Type.Optional(Type.Union([Type.Literal(1), Type.Literal(2)], { description: "输出缩放倍数，默认 1；2 为高清双倍像素" }))
+      }),
+      execute: async (_id, params) => {
+        if (params?.ref && params?.selector) throw new Error("ref 与 selector 只能二选一");
+        const result = await run(deps, {
+          op: "screenshot",
+          ...(params?.ref ? { ref: params.ref } : {}),
+          ...(params?.selector ? { selector: params.selector } : {}),
+          ...(params?.scale ? { scale: params.scale } : {})
+        });
         failIfNotOk(result);
         if (result.data.kind !== "screenshot") throw new Error("截图返回了意外结果");
         const savedPath = await persistScreenshot(deps, result.data.data, result.data.mimeType);
+        const target = params?.ref ? `元素 ${params.ref}` : params?.selector ? `元素 ${params.selector}` : "当前画面";
         return {
           content: [
-            { type: "text" as const, text: withNotices(`已截取内置浏览器当前画面（${result.data.width}×${result.data.height}）。${savedPath ? `截图已保存到 ${savedPath}；` : ""}当前模型不支持图片输入时可调用 recognize_images 工具${savedPath ? "识别该文件" : "识别截图"}。`, result) },
+            { type: "text" as const, text: withNotices(`已截取${target}（${result.data.width}×${result.data.height}）。${savedPath ? `截图已保存到 ${savedPath}；` : ""}当前模型不支持图片输入时可调用 recognize_images 工具${savedPath ? "识别该文件" : "识别截图"}。`, result) },
             { type: "image" as const, data: result.data.data, mimeType: result.data.mimeType }
           ],
-          details: { width: result.data.width, height: result.data.height, ...(savedPath ? { savedPath } : {}) }
+          details: { width: result.data.width, height: result.data.height, ...(params?.ref ? { ref: params.ref } : {}), ...(params?.selector ? { selector: params.selector } : {}), ...(savedPath ? { savedPath } : {}) }
         };
       }
     }),

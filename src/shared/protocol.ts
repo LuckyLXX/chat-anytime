@@ -721,7 +721,8 @@ export type BrowserAutomationRequest =
   | { op: "eval"; expression: string; mode: "read" | "write"; workspace?: string }
   | { op: "select"; ref: string; values: string[] }
   | { op: "upload"; ref: string; files: string[] }
-  | { op: "screenshot"; fullPage?: boolean; scale?: number; maxWidth?: number; format?: "png" | "jpeg"; quality?: number }
+  /** ref/selector 二选一：指定后截取该元素的完整区域（clip 模式，可超出视口，无需先滚动）。 */
+  | { op: "screenshot"; fullPage?: boolean; scale?: number; maxWidth?: number; format?: "png" | "jpeg"; quality?: number; ref?: string; selector?: string }
   | { op: "wait"; wait: BrowserAutomationWait }
   | { op: "get"; what: "url" | "title" | "text"; ref?: string }
   | { op: "tabs"; action: "list" | "new" | "switch" | "close"; tabId?: string };

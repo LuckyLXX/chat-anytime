@@ -1,8 +1,11 @@
 import type { WebContents } from "electron";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AUTOMATION_TAB_IDLE_MS,
+  armWithTimeout,
   awaitCondition,
+  buildElementRectScript,
+  CDP_ARM_TIMEOUT_MS,
   MAX_EVAL_RESULT_CHARS,
   BrowserAutomationController,
   buildLocateScript,
@@ -943,5 +946,191 @@ describe("automation upload remount retry", () => {
     expect(result.error).toContain("button#go");
     // 判据在定位阶段就成立：不该白跑一次 setFileInputFiles。
     expect(harness.attempts().set).toBe(0);
+  });
+});
+
+// —— 元素截图（clip 路径）与 arming 超时容错（2026-09-15 P0+P1） ——
+
+describe("armWithTimeout", () => {
+  it("resolves ok when the cdp call settles in time", async () => {
+    await expect(armWithTimeout(Promise.resolve({}), 50)).resolves.toBe("ok");
+  });
+
+  it("resolves timeout when the cdp call never settles, and swallows the late rejection", async () => {
+    let rejectLate!: (reason: Error) => void;
+    const never = new Promise<unknown>((_resolve, reject) => { rejectLate = reject; });
+    await expect(armWithTimeout(never, 25)).resolves.toBe("timeout");
+    // 晚到的拒绝不允许变成 unhandled rejection。
+    rejectLate(new Error("late"));
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  });
+
+  it("propagates rejections so callers can distinguish unsupported targets", async () => {
+    await expect(armWithTimeout(Promise.reject(new Error("not supported")), 50)).rejects.toThrow("not supported");
+  });
+});
+
+describe("browser automation element screenshots", () => {
+  const controllers: BrowserAutomationController[] = [];
+  afterEach(() => {
+    for (const controller of controllers) controller.dispose();
+    controllers.length = 0;
+  });
+
+  it("builds a locator script that deep-queries a selector and reports document coordinates", () => {
+    const script = buildElementRectScript(undefined, 'div[data-name="S1"]');
+    expect(script).toContain("queryDeep");
+    expect(script).toContain('div[data-name=');
+    expect(script).toContain("scrollIntoView");
+    expect(script).toContain("window.scrollX");
+    expect(script).toContain("选择器未命中任何元素");
+  });
+
+  it("builds a locator script from a snapshot ref index", () => {
+    const script = buildElementRectScript("@e2", undefined, 1);
+    expect(script).toContain("collectInteractiveElements");
+    expect(script).toContain("元素不存在（页面可能已变化，请重新 browser_snapshot）");
+  });
+
+  interface ShotHarness {
+    controller: BrowserAutomationController;
+    captured: Array<Record<string, unknown>>;
+  }
+  const makeShotHarness = (rect: Record<string, unknown>): ShotHarness => {
+    const preview = makeFakePreview(["default"]) as FakePreview & BrowserPreviewController;
+    preview.rendered.add("default");
+    const captured: Array<Record<string, unknown>> = [];
+    const contents = {
+      isDestroyed: () => false,
+      debugger: {
+        isAttached: () => false,
+        attach: () => undefined,
+        sendCommand: async (method: string, params?: Record<string, unknown>) => {
+          if (method === "Runtime.evaluate") {
+            const expression = String(params?.expression ?? "");
+            if (expression.includes("scrollIntoView")) return { result: { value: rect } };
+            return { result: { value: { width: 1000, height: 800 } } };
+          }
+          if (method === "Page.captureScreenshot") {
+            captured.push(params ?? {});
+            return { data: "iVBORw0KGgo=" };
+          }
+          return {};
+        },
+        on: () => undefined
+      }
+    };
+    (preview as unknown as { webContentsFor: (id: string) => unknown }).webContentsFor = () => contents;
+    const controller = new BrowserAutomationController(preview);
+    controllers.push(controller);
+    return { controller, captured };
+  };
+
+  it("clips the capture to the element rect with scale folded into clip.scale", async () => {
+    const harness = makeShotHarness({ ok: true, x: 80, y: 96, width: 390, height: 1300 });
+    const result = await harness.controller.handle("s1", { op: "screenshot", selector: 'div[data-name^="S1"]', scale: 2 });
+    expect(result.ok).toBe(true);
+    const params = harness.captured[0]!;
+    expect(params.clip).toEqual({ x: 80, y: 96, width: 390, height: 1300, scale: 2 });
+    expect(params.captureBeyondViewport).toBe(true);
+    // clip 模式下缩放由 clip.scale 承担，顶层 scale 不叠加。
+    expect(params.scale).toBeUndefined();
+    expect(params.fromSurface).toBe(true);
+    if (result.ok && result.data.kind === "screenshot") {
+      expect(result.data.width).toBe(780);
+      expect(result.data.height).toBe(2600);
+    }
+  });
+
+  it("reports a missing selector target as an actionable error", async () => {
+    const harness = makeShotHarness({ ok: false, error: "选择器未命中任何元素：.gone" });
+    const result = await harness.controller.handle("s1", { op: "screenshot", selector: ".gone" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("选择器未命中");
+  });
+
+  it("rejects an invalid ref before touching the page", async () => {
+    const harness = makeShotHarness({ ok: true, x: 0, y: 0, width: 1, height: 1 });
+    const result = await harness.controller.handle("s1", { op: "screenshot", ref: "@zero" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("无效的元素引用");
+    expect(harness.captured).toHaveLength(0);
+  });
+
+  it("keeps viewport screenshots free of clip parameters", async () => {
+    const harness = makeShotHarness({ ok: true, x: 0, y: 0, width: 1, height: 1 });
+    const result = await harness.controller.handle("s1", { op: "screenshot" });
+    expect(result.ok).toBe(true);
+    const params = harness.captured[0]!;
+    expect(params.clip).toBeUndefined();
+    expect(params.captureBeyondViewport).toBeUndefined();
+  });
+});
+
+describe("arming timeouts keep wedged renderers from stalling pure ops", () => {
+  const controllers: BrowserAutomationController[] = [];
+  afterEach(() => {
+    for (const controller of controllers) controller.dispose();
+    controllers.length = 0;
+    vi.useRealTimers();
+  });
+
+  /**
+   * 复现 2026-09-15 事故：残留标签页 renderer 假死（CDP 命令永不返回），
+   * tabs(list) 之前要先武装输入守卫与弹窗监听——旧实现会一路挂到 110s 看门狗。
+   * 现在 arming 各 8 秒超时容错，纯内存的 tabs list 应在两个预算内返回。
+   */
+  it("returns tabs(list) within the two arming budgets on a wedged tab", async () => {
+    vi.useFakeTimers();
+    const preview = makeFakePreview(["default"]) as FakePreview & BrowserPreviewController;
+    const contents = {
+      isDestroyed: () => false,
+      debugger: {
+        isAttached: () => false,
+        attach: () => undefined,
+        sendCommand: () => new Promise(() => undefined), // 永不返回：假死 renderer
+        on: () => undefined
+      }
+    };
+    (preview as unknown as { webContentsFor: (id: string) => unknown }).webContentsFor = () => contents;
+    const controller = new BrowserAutomationController(preview);
+    controllers.push(controller);
+    const pending = controller.handle("s1", { op: "tabs", action: "list" });
+    await vi.advanceTimersByTimeAsync(CDP_ARM_TIMEOUT_MS * 2 + 500);
+    const result = await pending;
+    expect(result.ok).toBe(true);
+    if (result.ok && result.data.kind === "tabs") {
+      expect(result.data.tabs.map((tab) => tab.id)).toEqual(["default"]);
+    }
+  });
+
+  it("does not re-pay the dialog-watch budget on the following op", async () => {
+    vi.useFakeTimers();
+    const preview = makeFakePreview(["default"]) as FakePreview & BrowserPreviewController;
+    const sendCounts: Record<string, number> = {};
+    const contents = {
+      isDestroyed: () => false,
+      debugger: {
+        isAttached: () => false,
+        attach: () => undefined,
+        sendCommand: (method: string) => {
+          sendCounts[method] = (sendCounts[method] ?? 0) + 1;
+          if (method === "Page.enable") return new Promise(() => undefined);
+          return Promise.resolve({ result: { value: 1 } });
+        },
+        on: () => undefined
+      }
+    };
+    (preview as unknown as { webContentsFor: (id: string) => unknown }).webContentsFor = () => contents;
+    const controller = new BrowserAutomationController(preview);
+    controllers.push(controller);
+    const first = controller.handle("s1", { op: "tabs", action: "list" });
+    await vi.advanceTimersByTimeAsync(CDP_ARM_TIMEOUT_MS * 2 + 500);
+    expect((await first).ok).toBe(true);
+    // 第二次操作：弹窗监听已被标记跳过（不再重试 Page.enable），只剩输入守卫一个预算。
+    const second = controller.handle("s1", { op: "tabs", action: "list" });
+    await vi.advanceTimersByTimeAsync(CDP_ARM_TIMEOUT_MS + 500);
+    expect((await second).ok).toBe(true);
+    expect(sendCounts["Page.enable"]).toBe(1);
   });
 });

@@ -153,6 +153,24 @@ describe("browser tool cluster", () => {
     expect(result.details.savedPath).toBeUndefined();
   });
 
+  it("forwards ref/selector/scale to the element-screenshot clip path", async () => {
+    const { tools, calls } = toolsWith({
+      screenshot: okResult({ kind: "screenshot", data: "iVBORw0KGgo=", width: 780, height: 2680, mimeType: "image/png" })
+    });
+    const screenshot = tools.find((tool) => tool.name === "browser_screenshot")!;
+    await execute(screenshot, { selector: '.pi-design-canvas > div[data-name^="S1"]', scale: 2 });
+    expect(calls[0]).toEqual({ op: "screenshot", selector: '.pi-design-canvas > div[data-name^="S1"]', scale: 2 });
+    await execute(screenshot, { ref: "@e3" });
+    expect(calls[1]).toEqual({ op: "screenshot", ref: "@e3" });
+  });
+
+  it("rejects screenshot calls that pass both ref and selector without a request", async () => {
+    const { tools, calls } = toolsWith({});
+    const screenshot = tools.find((tool) => tool.name === "browser_screenshot")!;
+    await expect(execute(screenshot, { ref: "@e1", selector: "#x" })).rejects.toThrow(/二选一/);
+    expect(calls).toHaveLength(0);
+  });
+
   it("lists tabs with the bound tab marked", async () => {
     const { tools } = toolsWith({
       tabs: okResult({

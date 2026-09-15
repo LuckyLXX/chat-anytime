@@ -339,6 +339,32 @@ export function buildSnapshotScript(cap: number, pageTextCap: number): string {
  })()`;
 }
 
+/**
+ * Element-screenshot locator: resolve a selector (queryDeep — 穿 shadow root 与同源 iframe)
+ * 或 ref（@eN，snapshot 交互元素索引，TS 侧已解析为 index）到元素，滚动到视口顶
+ * （把光栅区域拉近视口——captureBeyondViewport 只需向外扩展元素自身的溢出部分），
+ * 返回文档坐标矩形供 CDP Page.captureScreenshot 的 clip 使用。
+ * 文档坐标 = 视口坐标（viewportPosition 已累加 frameElement 偏移）+ 主文档滚动量；
+ * 嵌套 iframe 内部滚动的二级偏移是已知近似（首版不支持），顶层文档元素完全精确。
+ */
+export function buildElementRectScript(ref: string | undefined, selector: string | undefined, index?: number): string {
+  const locator = selector !== undefined
+    ? `const el = queryDeep(${JSON.stringify(selector)});
+  if (!el) return { ok: false, error: '选择器未命中任何元素：' + ${JSON.stringify(selector)} };`
+    : `const el = ${COLLECT_CORE}[${index ?? -1}];
+  if (!el) return { ok: false, error: '元素不存在（页面可能已变化，请重新 browser_snapshot）' };`;
+  return `(() => {
+  ${QUERY_DEEP_FN}
+  ${VIEWPORT_POSITION_FN}
+  ${locator}
+  el.scrollIntoView({ block: 'start' });
+  const rect = el.getBoundingClientRect();
+  if (!rect.width || !rect.height) return { ok: false, error: '元素尺寸为零（可能 display:none 或不可见）' };
+  const pos = viewportPosition(el);
+  return { ok: true, x: Math.round(pos.x + window.scrollX), y: Math.round(pos.y + window.scrollY), width: Math.round(rect.width), height: Math.round(rect.height) };
+})()`;
+}
+
 /** Locate the index-th interactive element, scroll it into view, return coordinates + signature. */
 export function buildLocateScript(index: number): string {
   return `(() => {
@@ -598,6 +624,43 @@ export const SCREENSHOT_REVEAL_POLL_MS = 100;
 export const SCREENSHOT_CAPTURE_TIMEOUT_MS = 30_000;
 
 /**
+ * Timeout for "arming" CDP calls that precede every operation (the input
+ * guard's Input.setIgnoreInputEvents, the dialog watcher's Page.enable).
+ * These normally answer in milliseconds, but on a wedged renderer (e.g. a
+ * leftover tab stuck rendering a huge canvas) the command never settles —
+ * and because the guard runs *outside* withOpTimeout, a hang here would stall
+ * the whole handle() RPC until the 120s utility-side deadline. Worse, even a
+ * pure-memory op like tabs(list) pays for it: it only lists preview state but
+ * still arms the guard + dialog watch first. Real-world case (2026-09-15):
+ * browser_tabs list on a tab left over from the previous day's session burned
+ * the full 110s and the model abandoned the built-in browser entirely. Arm
+ * calls are best-effort by design — on timeout we proceed without the guard /
+ * dialog receipts instead of hanging.
+ */
+export const CDP_ARM_TIMEOUT_MS = 8_000;
+
+/**
+ * Race a best-effort "arming" CDP call against a timeout. Resolves "ok" when
+ * the call settles, "timeout" when the budget runs out — the caller keeps
+ * going without the guard/receipt instead of hanging. Rejections still
+ * propagate (callers distinguish "unsupported target" from "wedged target").
+ * A late settlement is swallowed so it cannot surface as an unhandled
+ * rejection.
+ */
+export async function armWithTimeout(promise: Promise<unknown>, timeoutMs = CDP_ARM_TIMEOUT_MS): Promise<"ok" | "timeout"> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<"timeout">((resolve) => {
+    timer = setTimeout(() => resolve("timeout"), timeoutMs);
+  });
+  try {
+    return await Promise.race([promise.then(() => "ok" as const), timeout]);
+  } finally {
+    clearTimeout(timer);
+    promise.catch(() => undefined);
+  }
+}
+
+/**
  * Bounds one in-tab operation. On timeout the caller's error path releases the
  * busy lock immediately; the underlying op keeps running detached ("zombie")
  * and its eventual outcome is swallowed — the model gets a retryable error
@@ -834,9 +897,15 @@ export class BrowserAutomationController {
     if (this.dialogWatchTabs.has(tabId) || contents.isDestroyed()) return;
     this.dialogWatchTabs.add(tabId);
     try {
-      await this.cdp(contents, "Page.enable");
+      const outcome = await armWithTimeout(this.cdp(contents, "Page.enable"));
+      if (outcome === "timeout") {
+        // renderer 假死：保留 dialogWatchTabs 标记（后续操作不再重试、不再每次多等一个超时），
+        // 本次操作继续——弹窗线报缺席，但纯内存操作（tabs list 等）能立即返回。
+        // 真正要碰页面的操作随后会在自己的 CDP 调用上拿到明确的超时文案。
+        return;
+      }
     } catch {
-      // 不支持 Page 域的 target：退回原行为（弹窗仍会阻塞，但至少不报错）。
+      // 不支持 Page 域的 target：退回原行为（弹窗仍会阻塞，但至少不报错），下次重试。
       this.dialogWatchTabs.delete(tabId);
       return;
     }
@@ -1017,14 +1086,16 @@ export class BrowserAutomationController {
     private async withAutomationGuard<T>(tabId: string, fn: () => Promise<T>): Promise<T> {
       const contents = this.requireContents(tabId);
       try {
-        await this.cdp(contents, "Input.setIgnoreInputEvents", { ignore: true });
+        // 假死 renderer 上这条命令永不返回，且守卫在 withOpTimeout 覆盖之外：
+        // 超时后放弃守卫继续执行，而不是把整个操作拖到 RPC 兑底。
+        await armWithTimeout(this.cdp(contents, "Input.setIgnoreInputEvents", { ignore: true }));
       } catch { /* unsupported CDP target: keep operating without the guard */ }
       try {
         return await fn();
       } finally {
         try {
           if (!contents.isDestroyed() && contents.debugger.isAttached()) {
-            await this.cdp(contents, "Input.setIgnoreInputEvents", { ignore: false });
+            await armWithTimeout(this.cdp(contents, "Input.setIgnoreInputEvents", { ignore: false }));
           }
         } catch { /* tab may have closed while the operation was running */ }
       }
@@ -1044,6 +1115,8 @@ export class BrowserAutomationController {
         const target = await this.resolveNavigationTarget(request.url, request.workspace);
         this.setDownloadDir(tabId, request.workspace);
         this.tabRefs.delete(tabId);
+        // 导航成功 = renderer 活着：若 Page.enable 曾因假死被跳过，重新武装弹窗监听。
+        this.dialogWatchTabs.delete(tabId);
         this.preview.setAutomating(tabId, `正在导航到 ${request.url}`);
         try {
           const state = await this.preview.handle({ type: "navigate", tabId, url: target });
@@ -1070,7 +1143,7 @@ export class BrowserAutomationController {
       case "eval":
         return this.evaluateJs(tabId, contents, request.expression, request.mode, request.workspace);
       case "screenshot":
-        return this.screenshot(tabId, contents, request.fullPage, request.scale, request.maxWidth, request.format, request.quality);
+        return this.screenshot(tabId, contents, request.fullPage, request.scale, request.maxWidth, request.format, request.quality, request.ref, request.selector);
       case "wait":
         return this.wait(tabId, contents, request.wait);
       case "get":
@@ -1409,23 +1482,67 @@ export class BrowserAutomationController {
     throw new Error(`截图失败：目标浏览器标签页 ${SCREENSHOT_REVEAL_TIMEOUT_MS / 1000} 秒内未能变为可见（预览面板可能被关闭、被其他标签占用，或被设置/权限弹窗挂起）。请打开预览面板并切换到该标签后重试。`);
   }
 
-  private async screenshot(tabId: string, contents: WebContents, fullPage = false, scale?: number, maxWidth?: number, format: "png" | "jpeg" = "png", quality?: number): Promise<BrowserAutomationResult> {
+  private async screenshot(
+    tabId: string,
+    contents: WebContents,
+    fullPage = false,
+    scale?: number,
+    maxWidth?: number,
+    format: "png" | "jpeg" = "png",
+    quality?: number,
+    ref?: string,
+    selector?: string
+  ): Promise<BrowserAutomationResult> {
     this.preview.setAutomating(tabId, "正在截图");
     try {
       await this.ensureTabRenderable(tabId);
       const captureParams: Record<string, unknown> = { format, fromSurface: true };
-        if (fullPage) captureParams.captureBeyondViewport = true;
-        if (format === "jpeg") captureParams.quality = Math.max(1, Math.min(100, Math.round(quality ?? 80)));
-        if (typeof scale === "number" && Number.isFinite(scale) && scale > 0) captureParams.scale = Math.min(2, scale);
-        if (typeof maxWidth === "number" && Number.isFinite(maxWidth) && maxWidth > 0) {
-          const viewport = await this.evaluate<{ width: number; height: number }>(contents, "({ width: window.innerWidth, height: window.innerHeight })");
-          captureParams.scale = Math.min(Number(captureParams.scale ?? 1), Math.max(0.1, maxWidth / viewport.width));
-        }
-        const captured = await withOpTimeout(
-          this.cdp(contents, "Page.captureScreenshot", captureParams),
-          SCREENSHOT_CAPTURE_TIMEOUT_MS,
-          `截图超时（${SCREENSHOT_CAPTURE_TIMEOUT_MS / 1000} 秒未出帧）：页面可能仍在渲染大内容；若预览面板未显示该标签、或窗口被遮挡/最小化，请恢复可见后重试。`
+      if (fullPage) captureParams.captureBeyondViewport = true;
+      if (format === "jpeg") captureParams.quality = Math.max(1, Math.min(100, Math.round(quality ?? 80)));
+      if (typeof scale === "number" && Number.isFinite(scale) && scale > 0) captureParams.scale = Math.min(2, scale);
+      // 元素截图（clip 模式）：探针实测（2026-09-15，真 Electron + 1350×16808 画布原型）
+      // clip + captureBeyondViewport + fromSurface 对视口外/超视口高元素全部 <600ms 且
+      // 像素尺寸精确匹配；clip.scale 承担缩放，顶层 scale 不叠加。
+      let clipRect: { width: number; height: number; scale: number } | undefined;
+      if (ref !== undefined || selector !== undefined) {
+        const index = ref !== undefined ? refIndex(ref) : undefined;
+        if (ref !== undefined && index === undefined) throw new Error(`无效的元素引用：${ref}`);
+        const located = await this.evaluate<{ ok: boolean; error?: string; x?: number; y?: number; width?: number; height?: number }>(
+          contents,
+          buildElementRectScript(ref, selector, index)
         );
+        if (!located || located.ok !== true || typeof located.x !== "number" || typeof located.width !== "number") {
+          throw new Error(located?.error ?? "未能定位目标元素");
+        }
+        let clipScale = Number(captureParams.scale ?? 1);
+        if (typeof maxWidth === "number" && Number.isFinite(maxWidth) && maxWidth > 0) {
+          clipScale = Math.min(clipScale, Math.max(0.1, maxWidth / located.width));
+        }
+        captureParams.clip = { x: located.x, y: located.y, width: located.width, height: located.height, scale: clipScale };
+        captureParams.captureBeyondViewport = true;
+        delete captureParams.scale;
+        clipRect = { width: located.width, height: located.height ?? 0, scale: clipScale };
+      } else if (typeof maxWidth === "number" && Number.isFinite(maxWidth) && maxWidth > 0) {
+        const viewport = await this.evaluate<{ width: number; height: number }>(contents, "({ width: window.innerWidth, height: window.innerHeight })");
+        captureParams.scale = Math.min(Number(captureParams.scale ?? 1), Math.max(0.1, maxWidth / viewport.width));
+      }
+      const captured = await withOpTimeout(
+        this.cdp(contents, "Page.captureScreenshot", captureParams),
+        SCREENSHOT_CAPTURE_TIMEOUT_MS,
+        `截图超时（${SCREENSHOT_CAPTURE_TIMEOUT_MS / 1000} 秒未出帧）：页面可能仍在渲染大内容；若预览面板未显示该标签、或窗口被遮挡/最小化，请恢复可见后重试。`
+      );
+      if (clipRect) {
+        return {
+          ok: true,
+          data: {
+            kind: "screenshot",
+            data: String(captured.data),
+            width: Math.round(clipRect.width * clipRect.scale),
+            height: Math.round(clipRect.height * clipRect.scale),
+            mimeType: format === "jpeg" ? "image/jpeg" : "image/png"
+          }
+        };
+      }
       const size = await this.evaluate<{ width: number; height: number }>(contents, fullPage
           ? "({ width: Math.max(document.documentElement.scrollWidth, document.body ? document.body.scrollWidth : 0), height: Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0) })"
           : "({ width: window.innerWidth, height: window.innerHeight })");
