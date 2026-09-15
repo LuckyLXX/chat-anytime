@@ -553,22 +553,25 @@ function ResourceSettings({ resources }: ResourceSettingsProps): ReactNode {
             </>}
           </div>
           <p className="resource-form-help">{editingMcp ? `正在编辑 ${editingMcp.name}：名称即配置键不可改；切换「写入范围」会把该条目迁移到另一个配置文件，停用状态保留。保存后重载工具并重建会话。` : "添加后会写入 MCP 配置并重建会话以加载新工具。stdio 服务通常由 npx 首次启动；敏感值建议用环境变量名，不要直接写入配置。"}</p>
-          {mcpTransport === "http" && <p className="resource-form-help">认证选 OAuth：保存后回到列表点「认证」，会自动打开系统浏览器完成授权，回调后自动重连；凭据保存在本地，可随时「清除凭据」重新授权。Bearer 环境变量优先于 OAuth。</p>}
+          {mcpTransport === "http" && <p className="resource-form-help">认证选 OAuth：保存后回到列表点「认证」，会自动打开系统浏览器完成授权，回调后自动重连；凭据保存在本地（刷新令牌长期有效），只有被授权服务器判定失效时才会提示「重新授权」——那时已保存的凭据仍会保留并优先重试。Bearer 环境变量优先于 OAuth。</p>}
           <footer className="mcp-form-actions"><button className="secondary-button" type="button" disabled={controlsBusy} onClick={() => { resetMcpForm(); setMcpFormOpen(false); }}><X size={13} />取消</button><button className="primary-button" type="submit" disabled={controlsBusy}>{editingMcp ? <Pencil size={13} /> : <Plus size={13} />}{editingMcp ? "保存修改" : "添加 MCP"}</button></footer>
         </form>}
         {resources.mcpServers.length === 0 ? <p className="resource-empty">未发现 MCP Server。点击“添加”，或将已有配置放入 `.mcp.json`。</p> : <div className="resource-list">{resources.mcpServers.map((server) => {
           const authorized = server.authState === "authorized";
+          // 授权失败但凭据仍保留（可重试）的 server：文案要说清楚「已保留凭据」，
+          // 否则用户会以为凭据丢了、只能从头授权。
+          const retryable = server.authState === "failed";
           // 需要认证（401 / 授权中 / 上次失败）或显式选了 OAuth 才给入口；已授权则给「清除凭据」。
           const showAuth = !authorized && (server.status === "needs-auth" || server.authState === "pending" || server.authState === "failed" || server.auth === "oauth");
           return <div className="resource-item mcp-resource-item" key={server.name}>
             <div className={`resource-item-icon mcp-status-icon ${server.status}`}><Server size={14} /></div>
             <div className="resource-item-copy">
               <strong>{server.name}</strong>
-              <small>{resourceScopeLabels[server.scope]} · {server.authState === "pending" ? "等待浏览器授权…" : mcpStatusLabels[server.status]} · {server.toolCount} 个工具{server.resourceCount === undefined ? "" : ` · ${server.resourceCount} 个资源`}{server.failedAgoSeconds !== undefined ? ` · ${server.failedAgoSeconds} 秒前失败` : ""}</small>
+              <small>{resourceScopeLabels[server.scope]} · {server.authState === "pending" ? "等待浏览器授权…" : retryable ? "凭据已保留，待重新授权" : mcpStatusLabels[server.status]} · {server.toolCount} 个工具{server.resourceCount === undefined ? "" : ` · ${server.resourceCount} 个资源`}{server.failedAgoSeconds !== undefined ? ` · ${server.failedAgoSeconds} 秒前失败` : ""}</small>
               {server.error && <em>{server.error}</em>}
             </div>
             <label className="resource-toggle"><input type="checkbox" checked={!server.disabled} disabled={controlsBusy} onChange={(event) => void run({ type: "mcp.server.toggle", name: server.name, enabled: event.target.checked })} /><span>启用</span></label>
-            {showAuth && <button className="secondary-button compact-button mcp-auth-button" type="button" disabled={controlsBusy} title={server.authState === "pending" ? "重新打开浏览器里的授权页" : `用浏览器完成 ${server.name} 的 OAuth 授权`} onClick={() => void run({ type: "mcp.server.auth", name: server.name })}><KeyRound size={13} />{server.authState === "pending" ? "重新打开授权页" : "认证"}</button>}
+            {showAuth && <button className="secondary-button compact-button mcp-auth-button" type="button" disabled={controlsBusy} title={server.authState === "pending" ? "重新打开浏览器里的授权页" : retryable ? `先用已保留的凭据重试 ${server.name}；不行会打开浏览器授权页` : `用浏览器完成 ${server.name} 的 OAuth 授权`} onClick={() => void run({ type: "mcp.server.auth", name: server.name })}><KeyRound size={13} />{server.authState === "pending" ? "重新打开授权页" : retryable ? "重新授权" : "认证"}</button>}
             {authorized && <button className="secondary-button compact-button mcp-auth-button" type="button" disabled={controlsBusy} title={`清除 ${server.name} 已保存的 OAuth 凭据`} onClick={() => void run({ type: "mcp.server.auth.clear", name: server.name })}>清除凭据</button>}
             <button className="icon-button" type="button" title={`编辑 ${server.name}`} aria-label={`编辑 MCP ${server.name}`} disabled={controlsBusy} onClick={() => editMcpServer(server)}><Pencil size={14} /></button>
             <button className="icon-button resource-remove" type="button" title={`删除 ${server.name}`} aria-label={`删除 MCP ${server.name}`} disabled={controlsBusy} onClick={() => void run({ type: "mcp.server.delete", name: server.name, scope: server.scope })}><Trash2 size={14} /></button>

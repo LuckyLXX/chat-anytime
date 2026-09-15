@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { McpClientManager, type McpToolBinding } from "./mcp-client.js";
+import type { ConfiguredMcpServer } from "./mcp-config.js";
 import { combinedCallSignal, configHash, convertMcpResult, isUnauthorizedError, mcpToolName, toTypeBoxSchema } from "./mcp-client.js";
 
 describe("mcp-client helpers", () => {
@@ -74,5 +76,67 @@ describe("mcp call signal", () => {
     controller.abort();
     expect(signal.aborted).toBe(true);
     expect(signal.aborted && !controller.signal.aborted ? "unexpected" : "propagated").toBe("propagated");
+  });
+});
+
+describe("mcp concurrent sync serialization", () => {
+  it("runs two concurrent syncs of the same server one after another (no double OAuth refresh)", async () => {
+    const events: string[] = [];
+    let concurrent = 0;
+    let peak = 0;
+    const oauth = {
+      supports: () => true,
+      ensureReady: async () => "http://127.0.0.1:1456/callback",
+      beginSync: () => { events.push("beginSync"); },
+      endSync: () => { events.push("endSync"); },
+      authStateOf: () => "authorized" as const,
+      authErrorOf: () => undefined,
+      providerFor: () => undefined,
+      registerTransport: () => undefined
+    };
+    const manager = new McpClientManager({ oauth: oauth as never });
+    const servers: ConfiguredMcpServer[] = [{ name: "exa", scope: "global", entry: { url: "https://mcp.example.com/mcp", auth: "oauth" } }];
+    // 打桩：每次真正进入单 server 同步体时登记并发度，并用假连接替代网络。
+    const internals = manager as unknown as {
+      syncOne: (server: ConfiguredMcpServer, refresh: boolean) => Promise<McpToolBinding[]>;
+    };
+    const original = internals.syncOne.bind(manager);
+    internals.syncOne = async (server, refresh) => {
+      concurrent += 1;
+      peak = Math.max(peak, concurrent);
+      await new Promise((resolve) => setTimeout(resolve, 15));
+      concurrent -= 1;
+      return original(server, refresh).catch(() => []);
+    };
+    await Promise.all([manager.sync(servers, { refresh: true }), manager.sync(servers, { refresh: true })]);
+    // 关键：同一个 server 的两条 sync 不得同时进入同步体。
+    expect(peak).toBe(1);
+    // 同步期间的授权页抑制闸门要成对开关（否则会一直不弹授权页）
+    expect(events.filter((event) => event.startsWith("beginSync")).length).toBe(2);
+    expect(events.filter((event) => event.startsWith("endSync")).length).toBe(2);
+  });
+});
+
+describe("disabled servers stay untouched", () => {
+  it("makes no network request and opens no connection for a disabled server", async () => {
+    const requested: string[] = [];
+    const manager = new McpClientManager();
+    const internals = manager as unknown as {
+      syncOne: (server: ConfiguredMcpServer, refresh: boolean) => Promise<McpToolBinding[]>;
+      connect: (server: ConfiguredMcpServer, hash: string) => Promise<unknown>;
+    };
+    const originalConnect = internals.connect.bind(manager);
+    internals.connect = async (server, hash) => {
+      requested.push(server.name);
+      return originalConnect(server, hash);
+    };
+    const servers: ConfiguredMcpServer[] = [{ name: "off", scope: "global", entry: { url: "https://mcp.example.com/mcp", disabled: true } }];
+    const result = await manager.sync(servers, { refresh: true });
+
+    // 停用不是「列表里跳过」：它不能建连、不能保活（stdio server 每次 sync 被拉起
+    // 会白烧 npx 冷启动，OAuth server 还会每次被 401 打一次）。
+    expect(requested).toEqual([]);
+    expect(result.summaries[0]).toMatchObject({ name: "off", status: "disabled", disabled: true });
+    expect((manager as unknown as { connections: Map<string, unknown> }).connections.size).toBe(0);
   });
 });

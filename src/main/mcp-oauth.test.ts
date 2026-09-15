@@ -262,3 +262,128 @@ describe("McpOAuthController", () => {
     }
   });
 });
+
+describe("credential survival (regression: 重启后反复重新授权)", () => {
+  it("keeps the refresh_token when the authorization server rejects it, and reports why", async () => {
+    const path = await storePath();
+    const logs: string[] = [];
+    const controller = new McpOAuthController({
+      storePath: () => path,
+      openExternal: vi.fn(),
+      onAuthorized: async () => undefined,
+      log: (message) => logs.push(message)
+    });
+    try {
+      await controller.ensureReady();
+      const provider = controller.providerFor(httpServer("exa"))!;
+      // 模拟「SDK 发现 refresh 被拒」：先读到凭据，再由 invalid_grant 触发失效处理
+      provider.saveTokens({ access_token: "expired", refresh_token: "rt-1", token_type: "Bearer" });
+      expect(await provider.tokens()).toMatchObject({ refresh_token: "rt-1" });
+
+      provider.invalidateCredentials!("tokens");
+
+      // 旧行为是真删（tokens: undefined）——轮换型服务器上一次竞态失败就永久丢凭据，
+      // 这正是「每次重启都要重新授权」的根因。现在只标记失败、保留 refresh_token。
+      const record = new McpAuthStore(() => path).get("exa");
+      expect(record?.tokens?.refresh_token).toBe("rt-1");
+      expect(record?.refreshFailed?.reason).toBeTruthy();
+      // 标记期间不再把死 token 交给 SDK 反复刷
+      expect(await provider.tokens()).toBeUndefined();
+      // 面板要能看到真实原因，而不是笼统的 Unauthorized
+      expect(controller.authStateOf("exa")).toBe("failed");
+      expect(controller.authErrorOf("exa")).toMatch(/刷新令牌|重新授权/u);
+      expect(logs.join("\n")).toContain("已保留凭据");
+    } finally {
+      await controller.dispose();
+    }
+  });
+
+  it("ignores an invalidation whose credentials were already replaced by a concurrent refresh", async () => {
+    const path = await storePath();
+    const controller = new McpOAuthController({ storePath: () => path, openExternal: vi.fn(), onAuthorized: async () => undefined });
+    try {
+      await controller.ensureReady();
+      const provider = controller.providerFor(httpServer("exa"))!;
+      provider.saveTokens({ access_token: "old", refresh_token: "rt-1", token_type: "Bearer" });
+      await provider.tokens();
+      // 并发刷新的赢家写入新凭据后，输家的 invalid_grant 不得销毁它（指纹守卫）
+      provider.saveTokens({ access_token: "new", refresh_token: "rt-2", token_type: "Bearer" });
+      provider.invalidateCredentials!("tokens");
+
+      const record = new McpAuthStore(() => path).get("exa");
+      expect(record?.tokens?.refresh_token).toBe("rt-2");
+      expect(record?.refreshFailed).toBeUndefined();
+      expect(controller.authStateOf("exa")).toBe("authorized");
+    } finally {
+      await controller.dispose();
+    }
+  });
+
+  it("does not pop the browser on its own, but a user-initiated authorize clears the failure for one retry", async () => {
+    const path = await storePath();
+    const store = new McpAuthStore(() => path);
+    store.update("exa", {
+      tokens: { access_token: "expired", refresh_token: "rt-1", token_type: "Bearer" },
+      refreshFailed: { reason: "invalid_grant", at: Date.now() }
+    });
+    const opened: string[] = [];
+    const controller = new McpOAuthController({ storePath: () => path, openExternal: (url) => { opened.push(url); }, onAuthorized: async () => undefined });
+    try {
+      await controller.ensureReady();
+      const server = httpServer("exa", { auth: "oauth" });
+      // 自动路径：不弹授权页，只提示（启动时不打扰用户）
+      authMock.mockImplementation(async (provider: { redirectToAuthorization: (url: URL) => Promise<void> }) => {
+        await provider.redirectToAuthorization(new URL("https://auth.example.com/authorize?auto=1"));
+        return "REDIRECT";
+      });
+      // 授权页被抑制 ≠ 元数据缺失：报「需要重新登录授权」而不是误导性的
+      // 「未提供 OAuth 元数据」（P2-4）。
+      await expect(controller.beginAuthorization(server)).rejects.toThrow("需要重新登录授权");
+      expect(opened).toEqual([]);
+      expect(controller.authErrorOf("exa")).toContain("需重新授权");
+
+      // 用户主动「认证」：清标记 → 保留的 refresh_token 得以重试一次；仍不行则照常弹页
+      const retried: (string | undefined)[] = [];
+      authMock.mockImplementation(async (provider: { tokens: () => Promise<{ refresh_token?: string } | undefined>; redirectToAuthorization: (url: URL) => Promise<void> }) => {
+        retried.push((await provider.tokens())?.refresh_token);
+        await provider.redirectToAuthorization(new URL("https://auth.example.com/authorize?user=1"));
+        return "REDIRECT";
+      });
+      await expect(controller.authorizeInteractive(server)).resolves.toBe("pending");
+      expect(retried).toEqual(["rt-1"]);
+      expect(opened).toEqual(["https://auth.example.com/authorize?user=1"]);
+    } finally {
+      await controller.dispose();
+    }
+  });
+
+  it("serializes concurrent auth rounds for the same server so only one refresh runs", async () => {
+    const path = await storePath();
+    const controller = new McpOAuthController({ storePath: () => path, openExternal: vi.fn(), onAuthorized: async () => undefined });
+    try {
+      await controller.ensureReady();
+      const server = httpServer("exa");
+      let concurrent = 0;
+      let peak = 0;
+      const order: string[] = [];
+      authMock.mockImplementation(async () => {
+        concurrent += 1;
+        peak = Math.max(peak, concurrent);
+        order.push(`start-${order.length}`);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        concurrent -= 1;
+        return "AUTHORIZED";
+      });
+      await Promise.all([
+        controller.runExclusiveAuth("exa", () => authMock(controller.providerFor(server), { serverUrl: "https://mcp.example.com/mcp" })),
+        controller.runExclusiveAuth("exa", () => authMock(controller.providerFor(server), { serverUrl: "https://mcp.example.com/mcp" }))
+      ]);
+      // 两个并发调用必须依次执行：上游 auth() 没有并发去重，重叠就是同一个
+      // refresh_token 被刷两次 → 轮换型服务器撤销整个令牌族。
+      expect(peak).toBe(1);
+      expect(order).toEqual(["start-0", "start-1"]);
+    } finally {
+      await controller.dispose();
+    }
+  });
+});

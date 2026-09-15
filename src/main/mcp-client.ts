@@ -178,6 +178,10 @@ export class McpClientManager {
   private readonly connections = new Map<string, McpConnection>();
   private readonly toolIndex = new Map<string, { serverName: string; toolName: string }>();
   private readonly toolCache = new Map<string, McpToolCacheEntry>();
+  /** per-server 串行队列：同一 server 的并发 sync/connect 依次执行（见 sync 注释）。 */
+  private readonly serialized = new Map<string, Promise<unknown>>();
+  /** 最近一次同步看到的 server 配置（callTool 的到期刷新要回查 url / OAuth 归属）。 */
+  private readonly configuredServers = new Map<string, ConfiguredMcpServer>();
 
   /** oauth 提供 HTTP server 的凭据/回调（utility 进程，见 mcp-oauth.ts）。 */
   constructor(private readonly options: { oauth?: McpOAuthController } = {}) {}
@@ -191,64 +195,128 @@ export class McpClientManager {
    */
   async sync(servers: ConfiguredMcpServer[], options?: { refresh?: boolean }): Promise<McpSyncResult> {
     const refresh = options?.refresh === true;
-    const enabled = servers.filter((server) => !server.entry.disabled);
-    const wanted = new Set(enabled.map((server) => server.name));
-
+    for (const server of servers) this.configuredServers.set(server.name, server);
+    for (const name of [...this.configuredServers.keys()]) {
+      if (!servers.some((server) => server.name === name)) this.configuredServers.delete(name);
+    }
+    // 已移除/停用的 server 不再维持连接。断开也走 per-server 队列：否则「一条 sync 正在
+    // 队列里建连、另一条 sync 因停用而直接断开」会交错，把停用的连接又装回去。
+    const wanted = new Set(servers.filter((server) => !server.entry.disabled).map((server) => server.name));
     for (const name of [...this.connections.keys()]) {
-      if (!wanted.has(name)) await this.disconnect(name);
+      if (!wanted.has(name)) await this.runExclusive(`server:${name}`, () => this.disconnect(name));
     }
 
     // OAuth 回调服务器就绪后才能建 provider（redirectUrl 依赖实际端口）。
-    if (this.options.oauth && enabled.some((server) => this.options.oauth!.supports(server))) {
+    const hasOAuthServers = Boolean(this.options.oauth) && servers.some((server) => !server.entry.disabled && this.options.oauth!.supports(server));
+    if (this.options.oauth && hasOAuthServers) {
       await this.options.oauth.ensureReady();
+      // 同步期间不自动弹授权页（启动时每次开机弹一个浏览器窗口太打扰）。
+      this.options.oauth.beginSync();
+    }
+
+    // 串行化：同一个 server 的并发 sync 依次跑。启动会有两条都带 refresh 的 sync
+    // 并发（会话创建 + 工作区切换），两条都撞 401 时会各自拿同一个 refresh_token
+    // 去刷——轮换型服务器判为重放并撤销令牌族，凭据就没了。串行后后者看到的是
+    // 前者刚接好的活连接（fast path 无网络），不会再刷第二次。
+    // 注意：断连（syncOne 内的 refresh 分支）先于建连验证，这样排在后面的 sync
+    // 一定会重新连接，不会误用上一条可能已死的连接。
+    const results = new Map<string, { ok: true; bindings: McpToolBinding[] } | { ok: false; error: unknown }>();
+    try {
+      await Promise.all(servers.filter((server) => !server.entry.disabled).map((server) => this.runExclusive(`server:${server.name}`, async () => {
+        try {
+          results.set(server.name, { ok: true, bindings: await this.syncOne(server, refresh) });
+        } catch (error) {
+          results.set(server.name, { ok: false, error });
+        }
+      })));
+    } finally {
+      if (this.options.oauth && hasOAuthServers) this.options.oauth.endSync();
     }
 
     const summaries: McpServerSummary[] = [];
     const bindings: McpToolBinding[] = [];
-
-    await Promise.all(servers.map(async (server) => {
+    for (const server of servers) {
       const config = mcpServerConfigFields(server);
       const authState = this.options.oauth?.authStateOf(server.name);
       const authFields = authState ? { authState } : {};
+      const outcome = results.get(server.name);
       if (server.entry.disabled) {
         summaries.push({ name: server.name, ...config, ...authFields, status: "disabled", toolCount: 0, disabled: true });
-        return;
+        continue;
       }
-      const hash = configHash(server.entry);
+      if (!outcome) {
+        summaries.push({ name: server.name, ...config, ...authFields, status: "not-connected", toolCount: 0, disabled: false });
+        continue;
+      }
+      if (outcome.ok) {
+        bindings.push(...outcome.bindings);
+        summaries.push({ name: server.name, ...config, ...authFields, status: "connected", toolCount: outcome.bindings.length, disabled: false });
+        continue;
+      }
+      const error = outcome.error;
+      // Keep serving cached bindings so a slow/unreachable server does not
+      // strip previously working tools; the status still reports the failure.
       const cache = this.toolCache.get(server.name);
-      const connectionMatches = this.connections.get(server.name)?.configHash === hash;
-      // Fast path: nothing changed and tools are cached — no network at all.
-      if (!refresh && connectionMatches && cache && cache.hash === hash) {
-        bindings.push(...cache.bindings);
-        summaries.push({ name: server.name, ...config, ...authFields, status: "connected", toolCount: cache.toolCount, disabled: false });
-        return;
-      }
-      try {
-        const fresh = await this.ensureTools(server, hash);
-        bindings.push(...fresh);
-        summaries.push({ name: server.name, ...config, ...authFields, status: "connected", toolCount: fresh.length, disabled: false });
-      } catch (error) {
-        // Keep serving cached bindings so a slow/unreachable server does not
-        // strip previously working tools; the status still reports the failure.
-        if (cache && cache.hash === hash) bindings.push(...cache.bindings);
-        const needsAuth = isUnauthorizedError(error);
-        summaries.push({
-          name: server.name,
-          ...config,
-          ...(needsAuth ? { authState: this.options.oauth?.authStateOf(server.name) ?? "idle" } : authFields),
-          status: needsAuth ? "needs-auth" : "failed",
-          toolCount: cache?.toolCount ?? 0,
-          disabled: false,
-          error: (needsAuth ? this.options.oauth?.authErrorOf(server.name) : undefined) ?? errorText(error)
-        });
-      }
-    }));
+      const hash = configHash(server.entry);
+      if (cache && cache.hash === hash) bindings.push(...cache.bindings);
+      const needsAuth = isUnauthorizedError(error);
+      summaries.push({
+        name: server.name,
+        ...config,
+        ...(needsAuth ? { authState: this.options.oauth?.authStateOf(server.name) ?? "idle" } : authFields),
+        status: needsAuth ? "needs-auth" : "failed",
+        toolCount: cache?.toolCount ?? 0,
+        disabled: false,
+        // 优先给 OAuth 侧记录的真实原因（invalid_grant / 令牌被撤销），
+        // 否则只剩一句笼统的 Unauthorized。
+        error: (needsAuth ? this.options.oauth?.authErrorOf(server.name) : undefined) ?? errorText(error)
+      });
+    }
 
     this.toolIndex.clear();
     for (const binding of bindings) {
       this.toolIndex.set(mcpToolName(binding.serverName, binding.toolName), { serverName: binding.serverName, toolName: binding.toolName });
     }
     return { summaries, bindings };
+  }
+
+  /** 同一 key 上的操作依次执行（后者等前者结束），用于避免并发重复授权。 */
+  private runExclusive<T>(key: string, run: () => Promise<T>): Promise<T> {
+    const previous = this.serialized.get(key) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(run);
+    this.serialized.set(key, next);
+    void next.catch(() => undefined).finally(() => {
+      if (this.serialized.get(key) === next) this.serialized.delete(key);
+    });
+    return next;
+  }
+
+  /** 单个 server 的同步主体（在 per-server 串行队列里跑）。 */
+  private async syncOne(server: ConfiguredMcpServer, refresh: boolean): Promise<McpToolBinding[]> {
+    // 停用的 server 不做任何网络动作（重启前的旧语义）：否则「停用」开关等于失效，
+    // stdio server 每次 sync 都会被拉起并保活，OAuth server 每次都被打 401。
+    if (server.entry.disabled) return [];
+    const hash = configHash(server.entry);
+    const cache = this.toolCache.get(server.name);
+    const connectionMatches = this.connections.get(server.name)?.configHash === hash;
+    // Fast path: nothing changed and tools are cached — no network at all.
+    if (!refresh && connectionMatches && cache && cache.hash === hash) return cache.bindings;
+    // 配置变了才重连。显式 refresh 只强制重新列一次工具（沿用原语义：不无条件重连，
+    // 否则每个 stdio server 都要冷启动，resources.reload 会明显变慢甚至超时）；
+    // 凭据失效依然会被 401 驱动，SDK 自己走刷新/授权。
+    const network = async (): Promise<McpToolBinding[]> => {
+      if (!connectionMatches) await this.disconnect(server.name);
+      return await this.ensureTools(server, hash);
+    };
+    // OAuth server 的连接/列工具段要进 auth 闸门：这一步的 401 由 SDK 内部直接调
+    // auth() 刷新（不经过我们的任何入口），只有与 callTool 的刷新共用同一把锁，
+    // 才能保证「同一个 refresh_token 不会在两条路径上被并发使用」。
+    // 锁序恒为 server:/send: → auth:，auth: 永远最内层，不存在环。
+    const oauth = this.options.oauth;
+    if (oauth?.supports(server) && oauth.providerFor(server)) {
+      return await oauth.runExclusiveAuth(server.name, network);
+    }
+    return await network();
   }
 
   /** Connect if needed, list tools, and refresh the per-server tool cache. */
@@ -303,6 +371,8 @@ export class McpClientManager {
   }
 
   private async disconnect(name: string): Promise<void> {
+    // 注意：不要在这里等待该 server 的串行队列——syncOne 本身就跑在队列里，
+    // 等待自己会死锁。队列保证同一 server 上不会同时出现连接与断开。
     const connection = this.connections.get(name);
     if (!connection) return;
     this.connections.delete(name);
@@ -315,13 +385,54 @@ export class McpClientManager {
     if (!binding) throw new Error(`未找到 MCP 工具：${piToolName}`);
     const connection = this.connections.get(binding.serverName);
     if (!connection) throw new Error(`MCP 服务器未连接：${binding.serverName}`);
-    const callSignal = combinedCallSignal(signal, MCP_CALL_TIMEOUT_MS);
-    try {
+    return await this.sendWithOAuthGate(binding.serverName, async (callSignal) => {
       const result = await connection.client.callTool({ name: binding.toolName, arguments: args }, undefined, { signal: callSignal });
       return convertMcpResult(result);
+    }, signal, piToolName);
+  }
+
+  /**
+   * OAuth server 的工具调用收进 per-server 闸门；非 OAuth server 直接放行（保持并行度）。
+   *
+   * 为什么连「发送」也要串行：SDK 的 StreamableHTTPClientTransport 在 401 时自己调
+   * `auth()`，我们无法拦截；而当 access token 不是可解析 exp 的 JWT（opaque token、
+   * 或服务器提前吊销）时，发送前的到期判断看不见它——两个并行调用会同时撞 401、
+   * 各拿同一个 refresh_token 去换。把发送本身串行，第二个调用必然在第一个完成
+   * 刷新与重试之后才发出，不会再出现同 token 并发的窗口。代价只落在 OAuth server 上。
+   */
+  private async sendWithOAuthGate(
+    serverName: string,
+    send: (callSignal: AbortSignal) => Promise<AgentToolResult<unknown>>,
+    signal: AbortSignal | undefined,
+    piToolName: string
+  ): Promise<AgentToolResult<unknown>> {
+    const oauth = this.options.oauth;
+    const server = this.configuredServers.get(serverName);
+    const gated = Boolean(oauth) && Boolean(server) && oauth!.supports(server!);
+    const queuedAt = Date.now();
+    let callSignal: AbortSignal | undefined;
+    const attempt = async (): Promise<AgentToolResult<unknown>> => {
+      // 排队等待也算在总时限里：否则同 server 上一串长调用会让后来者无限期等待。
+      const waited = Date.now() - queuedAt;
+      if (waited >= MCP_CALL_TIMEOUT_MS) {
+        throw new Error(`MCP 工具调用排队超时（${MCP_CALL_TIMEOUT_MS}ms）：${piToolName}（同一服务器上还有未完成的调用或同步）`);
+      }
+      if (oauth && server) {
+        const provider = oauth.providerFor(server);
+        // 已在 auth 锁内，用不取锁的版本（再取一次会自锁）。
+        if (provider) await oauth.refreshIfExpiredLocked(serverName, server.entry.url, provider);
+      }
+      // 真正的发送计时从开始发送算起：排队等待不该占用这次调用的预算。
+      callSignal = combinedCallSignal(signal, MCP_CALL_TIMEOUT_MS);
+      return await send(callSignal);
+    };
+    try {
+      // 与 syncOne 的网络段共用 controller 的 auth 锁：SDK 在 401 时自己调 auth()
+      // 刷新，两条路径不共锁就会拿同一个 refresh_token 并发去换。
+      return gated ? await oauth!.runExclusiveAuth(serverName, attempt) : await attempt();
     } catch (error) {
       // Our timeout fired while the caller did not abort → report a hang, not a cancel.
-      if (!signal?.aborted && callSignal.aborted) {
+      if (!signal?.aborted && callSignal?.aborted) {
         throw new Error(`MCP 工具调用超时（${MCP_CALL_TIMEOUT_MS}ms）：${piToolName}`);
       }
       throw error;

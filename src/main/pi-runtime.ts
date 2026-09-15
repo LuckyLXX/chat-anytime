@@ -4076,16 +4076,23 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         // 显式选了 OAuth 的 server 不等 401：直接走 SDK 的授权编排（无凭据时
         // 打开浏览器；已有/刚刷新的 token 则直接重连）。
         if (target.entry.auth === "oauth") {
-          const outcome = await mcpOAuth.beginAuthorization(target);
+          // 用户主动点「认证」：允许把上一次被判失效、但仍保留着的 refresh_token
+          // 再试一次（成功即免去浏览器往返）。
+          const outcome = await mcpOAuth.authorizeInteractive(target);
+          // 已开授权页等回调：不要再强制重连一次。重连会再走一遍 SDK auth()，把凭据库里的
+          // state/codeVerifier 覆写成新流程的，用户浏览器里那个授权页回来就成了废页。
+          // 授权成功的重连由 onAuthorized 兜底。
+          if (outcome === "pending") return;
           forceMcpRefresh = true;
           await syncMcpServers(true);
           forceMcpRefresh = false;
           post({ type: "log", level: "info", message: outcome === "authorized" ? `${command.name} 已使用已保存的凭据完成授权` : `${command.name} 已在浏览器中打开授权页` });
           return;
         }
-        // 未显式声明的 server：强制重连，401 时由 SDK 触发授权。
+        // 未显式声明的 server：强制重连，401 时由 SDK 触发授权。同样借用用户主动
+        // 意图的闸门，让保留的凭据有机会重试一次。
         forceMcpRefresh = true;
-        await syncMcpServers(true);
+        await mcpOAuth.runUserInitiated(command.name, () => syncMcpServers(true));
         forceMcpRefresh = false;
         if (!mcpOAuth.hasPending(command.name)) {
           post({ type: "log", level: "info", message: `${command.name} 未要求 OAuth 认证，已直接连接` });
