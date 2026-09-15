@@ -124,6 +124,7 @@ import * as runtimePlanTools from "./runtime-plan-tools.js";
 import * as runtimeShellKill from "./runtime-shell-kill.js";
 import { planHeading, readPlanMode, saveApprovedPlan, writePlanMode } from "./plan-store.js";
 import { readDesignMode, writeDesignMode } from "./design-mode-store.js";
+import { readComputerMode, writeComputerMode } from "./computer-mode-store.js";
 import { checkpointPathFor, readCheckpoints, sweepCheckpoints } from "./checkpoint-store.js";
 import { createCheckpointExtension, rollbackPlan } from "./runtime-checkpoint.js";
 import { hookActionPreview, readConfiguredHooks, removeHookConfig, setHookDisabled, upsertHookConfig, validateHookRule, type ConfiguredHook } from "./hooks-config.js";
@@ -194,6 +195,11 @@ interface SessionRuntimeRecord {
    * 切到别的会话也不受牵连。
    */
   designMode: { enabled: boolean };
+  /**
+   * 电脑控制模式（会话级，磁盘恢复）：决定 computer_* 工具是否进活动工具集。
+   * 与 designMode 同款纪律——冻结在会话维度，前缀缓存整段有效；新会话默认不开。
+   */
+  computerMode: { enabled: boolean };
   /** 按助手划分的长期记忆库（跨会话）；工具闭包读它，提示词快照在创建时冻结。 */
   memoryStore: MemoryStore;
   customTools: ToolDefinition[];
@@ -214,6 +220,8 @@ interface SessionRuntimeRecord {
   designTools: ToolDefinition[];
   /** 设计模式总闸的实时读取（settings.design?.enabled !== false）；活动集重算时用。 */
   designGlobalEnabled: () => boolean;
+  /** 电脑控制总闸的实时读取（settings.computer?.enabled !== false）；活动集重算时用。 */
+  computerGlobalEnabled: () => boolean;
   /** 可单独终止的 bash/powershell 工具（同名覆盖内建定义）；任务面板按命令停止的执行端。 */
   shellKill: runtimeShellKill.KillableShellTools;
   /** 当前会话绑定的设计文档（设计模式画布的数据源；工具与用户命令共用）。 */
@@ -897,6 +905,31 @@ function sessionDesignModePath(agentId: string, sessionId: string): string {
   return join(getAgentDir(), "chatanytime-sessions", agentId, "design-mode", `${sessionId}.json`);
 }
 
+/** 会话级电脑控制模式状态：`<agentDir>/chatanytime-sessions/<agentId>/computer-mode/<sessionId>.json`。 */
+function sessionComputerModePath(agentId: string, sessionId: string): string {
+  return join(getAgentDir(), "chatanytime-sessions", agentId, "computer-mode", `${sessionId}.json`);
+}
+
+/**
+ * 切换会话的电脑控制模式：更新 record 状态 → 原子写盘（会话级，重开后恢复）→
+ * 重算活动工具集（computer_* 注入/移除）→ 广播快照（渲染端据此置亮顶栏按钮）。
+ *
+ * 与 setDesignMode 同款纪律：状态未变时幂等早退（同一开关重复到达不白做一次
+ * 前缀重算）；写盘 best-effort，失败不影响内存状态。
+ */
+function setComputerMode(record: SessionRuntimeRecord, enabled: boolean): void {
+  if (record.computerMode.enabled === enabled) return;
+  record.computerMode = { enabled };
+  try {
+    writeComputerMode(sessionComputerModePath(record.agent.id, record.session.sessionId), enabled);
+  } catch (error) {
+    void post({ type: "log", level: "warn", message: `保存电脑控制模式状态失败：${errorText(error)}` });
+  }
+  reconcileActiveTools(record);
+  if (record === activeRuntime) emitState();
+  else emitPaneStateFor(record);
+}
+
 /**
  * 切换会话的设计模式：更新 record 状态 → 原子写盘（会话级，重开后恢复）→
  * 重算活动工具集（design_* 注入/移除）→ 广播快照（渲染端据此开关画布）。
@@ -1081,6 +1114,7 @@ function paneSnapshotFrom(record: SessionRuntimeRecord): SessionPaneSnapshot {
     contextUsage: snapshotContextUsage(record),
     speedStats: snapshotSpeedStats(record),
     planMode: record.planState.enabled,
+    computerMode: record.computerMode.enabled,
     designMode: record.designMode.enabled,
     messages,
     executions: [...record.executions.values()].map((execution) => {
@@ -1108,8 +1142,9 @@ function snapshot(): RuntimeSnapshot {
     queuedMessages: pane?.queuedMessages ?? [],
     contextUsage: pane?.contextUsage,
     speedStats: pane?.speedStats,
-    // 计划模式与设计模式都是会话级协作状态（与访问模式独立）：快照只反映激活会话。
+    // 计划模式/电脑控制模式/设计模式都是会话级协作状态（与访问模式独立）：快照只反映激活会话。
     planMode: pane?.planMode ?? false,
+    computerMode: pane?.computerMode ?? false,
     designMode: pane?.designMode ?? false,
     messages: pane?.messages ?? [],
     executions: pane?.executions ?? [],
@@ -1515,8 +1550,13 @@ function buildRecordTools(record: Pick<SessionRuntimeRecord, "subagentTools" | "
  * opted into design mode (record.designMode + the global master switch). The
  * design flag is fixed per session, so the prefix stays byte-stable for the
  * whole design session; a plain coding chat never pays for the canvas.
+ *
+ * Computer tools (5 definitions, ≈580 tokens measured) follow the design
+ * discipline rather than the browser one: a desktop-driving capability nobody
+ * asked for in a coding/document chat is pure prefix waste, and its global
+ * switch is a capability toggle (下架), not a per-call gate.
  */
-function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "planTools" | "visionTools" | "browserTools" | "computerTools" | "automationTools" | "designTools" | "designMode" | "designGlobalEnabled" | "unattended">, includeVision: boolean): string[] {
+function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "planTools" | "visionTools" | "browserTools" | "computerTools" | "automationTools" | "designTools" | "designMode" | "computerMode" | "designGlobalEnabled" | "computerGlobalEnabled" | "unattended">, includeVision: boolean): string[] {
   const builtin = Object.entries(record.agent.tools ?? {}).filter(([, enabled]) => enabled).map(([name]) => name);
   return [
     ...builtin,
@@ -1531,9 +1571,11 @@ function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "subagentTool
     // Browser tools stay active regardless of the settings switch: the
     // execute closure reports the disabled state instead (no session rebuild).
     ...record.browserTools.map((tool) => tool.name),
-    // 电脑控制工具与 browser 同策略：常驻激活、execute 实时读总闸（关闭时返回
-    // 停用提示，无会话重建）；敏感动作靠 desktop 风险权限门把关。
-    ...record.computerTools.map((tool) => tool.name),
+    // 电脑控制工具与 design 同策略：仅在本会话开了电脑控制模式且总闸开着时
+    // 注入（五个定义实测 ≈580 tokens/请求）；无人值守后台会话天然不满足。
+    ...(runtimeComputer.shouldActivateComputerTools({ sessionEnabled: record.computerMode.enabled, globalEnabled: record.computerGlobalEnabled() })
+      ? record.computerTools.map((tool) => tool.name)
+      : []),
     ...record.automationTools.map((tool) => tool.name),
     // 设计工具仅在设计模式会话里激活（≈1.5K tokens/请求的前缀成本）；总闸
     // settings.design.enabled 关闭时任何会话都不注入。会话内开关不变，因此
@@ -2336,7 +2378,7 @@ function sessionReadyStatus(hasModel: boolean, usedFallback: boolean): string {
  * - otherwise (explicit sessionManager, or agent.save's config-apply rebuild)
  *   the record is rebuilt over the same history.
  */
-async function createSession(sessionManager?: SessionManager, options: { reactivate?: boolean; skipActivate?: boolean; modelOverride?: { provider: string; id: string }; accessModeOverride?: AccessMode; unattended?: boolean; noGenerationGuard?: boolean; agentOverride?: AgentProfile; inheritDesignMode?: boolean } = {}): Promise<void> {
+async function createSession(sessionManager?: SessionManager, options: { reactivate?: boolean; skipActivate?: boolean; modelOverride?: { provider: string; id: string }; accessModeOverride?: AccessMode; unattended?: boolean; noGenerationGuard?: boolean; agentOverride?: AgentProfile; inheritDesignMode?: boolean; inheritComputerMode?: boolean } = {}): Promise<void> {
   if (!workspace || !modelRuntime) return;
   // 工作区可能已切换（workspace.open / session.*）：先重读双作用域钩子配置。
   refreshHooksConfig();
@@ -2536,6 +2578,20 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
       void post({ type: "log", level: "warn", message: `继承设计模式状态失败：${errorText(error)}` });
     }
   }
+  // 电脑控制模式：与 designMode 完全同构（会话级开关 + 总闸，两者都满足才注入
+  // computer_*，省下 ≈580 tokens/请求）；同样只在 session.new 显式继承，工作区/
+  // 角色切换与自动化后台会话都不带过去。
+  const inheritComputerMode = !hasExistingMessages && options.inheritComputerMode === true;
+  const recordComputerMode: { enabled: boolean } = {
+    enabled: inheritComputerMode || readComputerMode(sessionComputerModePath(recordAgent.id, activeSessionManager.getSessionId()))
+  };
+  if (inheritComputerMode) {
+    try {
+      writeComputerMode(sessionComputerModePath(recordAgent.id, activeSessionManager.getSessionId()), true);
+    } catch (error) {
+      void post({ type: "log", level: "warn", message: `继承电脑控制模式状态失败：${errorText(error)}` });
+    }
+  }
   const planTools = runtimePlanTools.buildPlanTools({
     getSessionId: () => recordSessionId,
     getEnabled: () => recordBox?.planState.enabled ?? false,
@@ -2598,7 +2654,9 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   // click/type/press），执行层 spawn Python 复用 computer-use skill 的
   // ljqCtrl.py（工具与 skill 共享同一份实现；skill 保留长尾操作如 UIA/找图）。
   // 权限：click/type/press 走 desktop 风险门（read-only 拒/ask 逐次确认/
-  // workspace+ 放行）；总开关 settings.computer.enabled 实时读取。
+  // workspace+ 放行）；enabled 实时读总闸是第二道防线（总闸刚关、活动集尚未
+  // 重算时的在途调用不得落盘）；是否进活动工具集由 shouldActivateComputerTools
+  // 判定（会话级 computerMode + 总闸），注册常驻（注册 ≠ 激活）。
   const computerTools = runtimeComputer.buildComputerTools({
     enabled: () => settings?.computer?.enabled !== false,
     workspace: () => recordWorkspace || undefined,
@@ -2694,6 +2752,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
         status: "",
         queuedMessages: [],
         planMode: recordPlanState.enabled,
+        computerMode: recordComputerMode.enabled,
         designMode: recordDesignMode.enabled,
         messages: normalizeMessages(earlySession.state.messages, earlySession.state.streamingMessage),
         executions: []
@@ -2713,6 +2772,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     todoStore: recordTodoStore,
     todoPace: recordTodoPace,
     planState: recordPlanState,
+    computerMode: recordComputerMode,
     designMode: recordDesignMode,
     memoryStore: recordMemoryStore,
     customTools: recordCustomTools,
@@ -2729,6 +2789,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     automationTools,
     designTools,
     designGlobalEnabled: () => settings?.design?.enabled !== false,
+    computerGlobalEnabled: () => settings?.computer?.enabled !== false,
     shellKill,
     steeringImages: [],
     followUpImages: [],
@@ -3043,7 +3104,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       // keeps running, so a busy turn never blocks starting a new topic.
       // 设计模式下新建话题继承设计模式：用户在连续做设计，新话题不该丢掉画布
       // 与 design_* 工具（继承结果同步落盘，重启后恢复一致）。
-      if (workspace) await createSession(SessionManager.create(workspace, workspaceSessionDir()), { inheritDesignMode: activeRuntime?.designMode.enabled === true });
+      if (workspace) await createSession(SessionManager.create(workspace, workspaceSessionDir()), { inheritDesignMode: activeRuntime?.designMode.enabled === true, inheritComputerMode: activeRuntime?.computerMode.enabled === true });
       break;
     case "session.open": {
       const root = agentSessionRoot();
@@ -3123,6 +3184,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       try { await unlink(join(deleteRoot, "todos", `${sessionId}.json`)); } catch { /* 任务文件可能不存在 */ }
       try { await unlink(join(deleteRoot, "plans", `${sessionId}.json`)); } catch { /* 计划模式状态文件可能不存在 */ }
       try { await unlink(join(deleteRoot, "design-mode", `${sessionId}.json`)); } catch { /* 设计模式状态文件可能不存在 */ }
+      try { await unlink(join(deleteRoot, "computer-mode", `${sessionId}.json`)); } catch { /* 电脑控制模式状态文件可能不存在 */ }
       try { await unlink(join(deleteRoot, "checkpoints", `${sessionId}.jsonl`)); } catch { /* 快照文件可能不存在 */ }
       // 删除当前在用的会话后立即补一个空白会话，保持「当前话题」可用。
       if (wasActive && workspace) {
@@ -3152,6 +3214,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
           try { await unlink(join(removeRoot, "todos", `${item.id}.json`)); } catch { /* 任务文件可能不存在 */ }
           try { await unlink(join(removeRoot, "plans", `${item.id}.json`)); } catch { /* 计划模式状态文件可能不存在 */ }
           try { await unlink(join(removeRoot, "design-mode", `${item.id}.json`)); } catch { /* 设计模式状态文件可能不存在 */ }
+          try { await unlink(join(removeRoot, "computer-mode", `${item.id}.json`)); } catch { /* 电脑控制模式状态文件可能不存在 */ }
           try { await unlink(join(removeRoot, "checkpoints", `${item.id}.jsonl`)); } catch { /* 快照文件可能不存在 */ }
         }
       }
@@ -3449,6 +3512,10 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     }
     case "session.designMode": {
       setDesignMode(resolveTargetRecord(command.sessionId), command.enabled);
+      break;
+    }
+    case "session.computerMode": {
+      setComputerMode(resolveTargetRecord(command.sessionId), command.enabled);
       break;
     }
     case "checkpoint.rollback": {
@@ -3896,16 +3963,18 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       if (!settings) break;
       // 同步默认工作区前先记住旧值：当前正落在旧默认上时下面要即时切到新默认。
       const previousDefaultPath = resolveDefaultWorkspace(getAgentDir(), settings.defaultWorkspace);
-      // 总闸是否真的翻转：只有翻转才需要重算活动集（design_* 注入与否）。
+      // 总闸是否真的翻转：只有翻转才需要重算活动集（design_* / computer_* 注入与否）。
       // 无关保存（只改模型/外观等）不碰活动集，避免白做一次前缀重算。
       const designSwitchChanged = (settings.design?.enabled !== false) !== (command.settings.design?.enabled !== false);
+      // 电脑控制总闸同理：它同时是能力下架开关与会话级注入的总闸。
+      const computerSwitchChanged = (settings.computer?.enabled !== false) !== (command.settings.computer?.enabled !== false);
       settings.model = command.settings.model;
       settings.thinkingLevel = command.settings.thinkingLevel;
       settings.accessMode = command.settings.accessMode;
       settings.appearance = command.settings.appearance;
-      // browser/design 总开关镜像补齐（若内存镜像滞后，保存后开关不生效直至重启）。
-      // browser 工具常驻激活、execute 实时读镜像；design 总闸额外要重算活动集
-      // （它决定 design_* 是否注入前缀）——在下方完成镜像赋值后统一 reconcile。
+      // browser/computer/design 总开关镜像补齐（若内存镜像滞后，保存后开关不生效直至重启）。
+      // browser 工具常驻激活、execute 实时读镜像；computer/design 总闸额外要重算活动集
+      // （它们决定 computer_* / design_* 是否注入前缀）——在下方完成镜像赋值后统一 reconcile。
       settings.browser = command.settings.browser;
       settings.computer = command.settings.computer;
       settings.design = command.settings.design;
@@ -3919,10 +3988,10 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
           const model = modelRuntime?.getModel(selectedModel.provider, selectedModel.id);
           if (model) await switchSessionModel(activeRuntime, model);
         }
-        // 总闸刚被切换（settings.design.enabled）：设计工具的注入由它把关，重算活动
-        // 集——设计会话内关总闸立即撤工具，不必重建会话。放在模型切换之后，保证最终
-        // 活动集以最新镜像为准。
-        if (designSwitchChanged) reconcileActiveTools(activeRuntime);
+        // 总闸刚被切换（settings.design.enabled / settings.computer.enabled）：工具的注入
+        // 由它们把关，重算活动集——已开的会话内关总闸立即撤工具，不必重建会话。放在模型
+        // 切换之后，保证最终活动集以最新镜像为准。
+        if (designSwitchChanged || computerSwitchChanged) reconcileActiveTools(activeRuntime);
       }
       // 更换默认工作区：当前 workspace 恰为旧默认 → 即时切到新默认（新会话继承刚
       // 保存的模型/思考等级）；否则下次落位（新建/切换/移除回落）自然生效。

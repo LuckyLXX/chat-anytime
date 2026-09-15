@@ -409,7 +409,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
               previous.turnTiming === incoming.turnTiming && previous.executions === mergedExecutions &&
               previous.sessions === mergedSessions && previous.recentWorkspaces === mergedRecentWorkspaces &&
               previous.model === incoming.model &&
-              previous.planMode === incoming.planMode && previous.designMode === incoming.designMode &&
+              previous.planMode === incoming.planMode && previous.computerMode === incoming.computerMode && previous.designMode === incoming.designMode &&
               previous.sessionId === incoming.sessionId && previous.sessionFile === incoming.sessionFile &&
               queuedMessagesEqual(previous.queuedMessages, incoming.queuedMessages) &&
               previous.thinkingLevel === incoming.thinkingLevel) {
@@ -444,6 +444,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
                 previous.model === incoming.model && previous.workspace === incoming.workspace &&
                 queuedMessagesEqual(previous.queuedMessages, incoming.queuedMessages) &&
                 previous.thinkingLevel === incoming.thinkingLevel && previous.planMode === incoming.planMode &&
+                previous.computerMode === incoming.computerMode &&
                 previous.designMode === incoming.designMode &&
                 previous.contextUsage === incoming.contextUsage) {
               return state;

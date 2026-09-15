@@ -512,6 +512,7 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
   .design-layers { display: none; }
 }
 .design-toggle.active { color: var(--accent); background: var(--accent-soft); }
+.computer-toggle.active { color: var(--accent); background: var(--accent-soft); }
 .conversation-pane { position: relative; display: block; min-width: 0; min-height: 0; overflow: hidden; background: var(--surface-conversation); }
 
 /* —— 分屏（Split View）：work-area 会话槽位内的递归二叉分割 ——

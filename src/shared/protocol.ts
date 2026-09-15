@@ -810,7 +810,10 @@ export interface BrowserSettings {
   enabled: boolean;
 }
 
-/** 电脑控制（computer_* 桌面窗口控制）总开关；缺省视为启用（settings.computer?.enabled !== false）。 */
+/** 电脑控制（computer_* 桌面窗口控制）总闸；缺省视为启用（settings.computer?.enabled !== false）。
+ *  与 browser 的关键差别：browser_* 常驻激活、execute 实时判断；computer_* 的五个
+ *  定义实测 ≈580 tokens/请求，仅在本会话开了电脑控制模式时才注入活动工具集
+ *  （session.computerMode / 会话级状态文件），本总闸关闭时任何会话都不注入。 */
 export interface ComputerSettings {
   enabled: boolean;
 }
@@ -1228,6 +1231,8 @@ export interface RuntimeSnapshot {
   speedStats?: SpeedStats;
   /** 激活会话是否处于计划模式（先产出计划、审查批准后才实施）。 */
   planMode?: boolean;
+  /** 激活会话是否开了电脑控制模式（computer_* 工具已注入，可操作桌面窗口）。 */
+  computerMode?: boolean;
   /** 激活会话是否处于设计模式（design_* 工具已注入 + 画布工作台打开）。 */
   designMode?: boolean;
   messages: ChatMessage[];
@@ -1257,6 +1262,8 @@ export interface SessionPaneSnapshot {
   contextUsage?: ContextUsage;
   speedStats?: SpeedStats;
   planMode?: boolean;
+  /** 该会话是否开了电脑控制模式（computer_* 工具注入状态）。 */
+  computerMode?: boolean;
   /** 该会话是否处于设计模式；分屏格子据此跟随显隐（画布只展激活格）。 */
   designMode?: boolean;
   messages: ChatMessage[];
@@ -1332,6 +1339,7 @@ export type RuntimeCommand =
   /** 会话级设计模式开关：决定 design_* 工具是否进入本会话的活动工具集（前缀
    *  缓存纪律：会话内不再变动），并联动渲染端画布。全局总闸 settings.design.enabled
    *  关闭时工具一律不注入（本命令仍记录会话意愿，总闸恢复后即可生效）。 */
+  | { type: "session.computerMode"; enabled: boolean; sessionId?: string }
   | { type: "session.designMode"; enabled: boolean; sessionId?: string }
   | { type: "session.abort"; sessionId?: string }
   /** 任务面板按命令停止：只终止一条正在执行的 bash/powershell 调用（杀进程树），

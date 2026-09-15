@@ -8,6 +8,7 @@ import type {
   BrowserSettings,
   BuiltinToolName,
   CheckpointSettings,
+  ComputerSettings,
   CustomThemeDefinition,
   DesktopSettings,
   DesignSettings,
@@ -276,6 +277,13 @@ export function normalizeDesign(value: unknown): DesignSettings | undefined {
   return { enabled: (value as Record<string, unknown>).enabled !== false };
 }
 
+/** 电脑控制总闸，语义与 browser/design 相同：缺省视为启用（设置页可下架）。
+ *  注意：它只决定「能不能用」；能不能注入工具还看会话级 computerMode。 */
+export function normalizeComputer(value: unknown): ComputerSettings | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  return { enabled: (value as Record<string, unknown>).enabled !== false };
+}
+
 /** checkpoint 回滚总开关，语义与 memory/hooks/browser 相同：缺省视为启用。 */
 export function normalizeCheckpoint(value: unknown): CheckpointSettings | undefined {
   if (!value || typeof value !== "object") return undefined;
@@ -426,6 +434,7 @@ export function migrateSettings(raw: unknown): { settings: DesktopSettings; lega
     memory: normalizeMemory(source.memory),
     hooks: normalizeHooks(source.hooks),
     browser: normalizeBrowser(source.browser),
+    computer: normalizeComputer(source.computer),
     design: normalizeDesign(source.design),
     checkpoint: normalizeCheckpoint(source.checkpoint)
   };

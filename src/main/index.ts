@@ -191,7 +191,7 @@ function updateSettings(command: RuntimeCommand): void {
       settings.agents = settings.agents.map((item) => item.id === command.agentId && item.id !== "default" ? { ...item, archived: command.archived } : item);
       if (settings.currentAgentId === command.agentId && command.archived) settings.currentAgentId = "default";
       break;
-    case "settings.save": settings.model = command.settings.model; settings.thinkingLevel = command.settings.thinkingLevel; settings.accessMode = command.settings.accessMode; settings.appearance = command.settings.appearance; settings.browser = command.settings.browser; settings.design = command.settings.design; settings.defaultWorkspace = command.settings.defaultWorkspace; break;
+    case "settings.save": settings.model = command.settings.model; settings.thinkingLevel = command.settings.thinkingLevel; settings.accessMode = command.settings.accessMode; settings.appearance = command.settings.appearance; settings.browser = command.settings.browser; settings.computer = command.settings.computer; settings.design = command.settings.design; settings.defaultWorkspace = command.settings.defaultWorkspace; break;
     case "appearance.save": settings.appearance = command.appearance; break;
     case "provider.save": {
       settings.providers = settings.providers.some((item) => item.id === command.provider.id) ? settings.providers.map((item) => item.id === command.provider.id ? command.provider : item) : [...settings.providers, command.provider];

@@ -87,8 +87,8 @@ const accessModeDescriptions: Record<AccessMode, string> = {
   full: "自动允许全部工具操作"
 };
 
-/** 会话级指令（/compact、/plan）——发送时附加格子 sessionId 定位目标会话。 */
-type SessionTargetCommand = Extract<RuntimeCommand, { type: "session.compact" } | { type: "session.planMode" }>;
+/** 会话级指令（/compact、/plan、/computer）——发送时附加格子 sessionId 定位目标会话。 */
+type SessionTargetCommand = Extract<RuntimeCommand, { type: "session.compact" } | { type: "session.planMode" } | { type: "session.computerMode" }>;
 
 type SlashCommand = {
   trigger: string;
@@ -805,7 +805,8 @@ export const ConversationPane = memo(function ConversationPane({
     const fixed: SlashCommand[] = [
       { trigger: "/compact", label: "/compact", description: "压缩当前会话上下文", kind: "command", command: { type: "session.compact" } },
       { trigger: "/new", label: "/new", description: "开启新话题", kind: "new" },
-      { trigger: "/plan", label: "/plan", description: data.planMode ? "退出计划模式" : "进入计划模式：先出计划，批准后实施", kind: "command", command: { type: "session.planMode", enabled: !data.planMode } }
+      { trigger: "/plan", label: "/plan", description: data.planMode ? "退出计划模式" : "进入计划模式：先出计划，批准后实施", kind: "command", command: { type: "session.planMode", enabled: !data.planMode } },
+      { trigger: "/computer", label: "/computer", description: data.computerMode ? "关闭电脑控制（撤下 computer_* 工具）" : "开启电脑控制：AI 可操作本机窗口（约 580 tokens/请求）", kind: "command", command: { type: "session.computerMode", enabled: !data.computerMode } }
     ];
     const commands: SlashCommand[] = resources.commands.map((entry) => ({
       trigger: `/${entry.name}`,
@@ -822,7 +823,7 @@ export const ConversationPane = memo(function ConversationPane({
       skillName: skill.name
     }));
     return [...fixed, ...commands, ...skills];
-  }, [resources.commands, resources.skills, data.planMode]);
+  }, [resources.commands, resources.skills, data.planMode, data.computerMode]);
 
   // 仅当光标前的最后一个 token 是 /xxx（/ 位于行首或空白之后）时才过滤指令——
   // 「空格 + /」即可重新匹配，与 @ 提及同一套光标规则（不再要求整串以 / 开头）。
@@ -1562,7 +1563,7 @@ export const ConversationPane = memo(function ConversationPane({
     const nextSettings = { ...settings, accessMode: value };
     useDesktopStore.setState({ settings: nextSettings });
     try {
-      await window.piDesktop.send({ type: "settings.save", settings: { model: nextSettings.model, thinkingLevel: nextSettings.thinkingLevel, accessMode: value, appearance: nextSettings.appearance, browser: nextSettings.browser, design: nextSettings.design } });
+      await window.piDesktop.send({ type: "settings.save", settings: { model: nextSettings.model, thinkingLevel: nextSettings.thinkingLevel, accessMode: value, appearance: nextSettings.appearance, browser: nextSettings.browser, computer: nextSettings.computer, design: nextSettings.design } });
     } catch (error) {
       useDesktopStore.setState({ settings: previousSettings });
       onActionError(error instanceof Error ? error.message : "访问模式切换失败");

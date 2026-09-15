@@ -326,6 +326,27 @@ describe("session-level collaboration flags", () => {
     expect(useDesktopStore.getState().snapshot.planMode).toBe(true);
   });
 
+  it("整帧只有 computerMode 变化时不被早退吐掉（否则顶栏开关点了没反应）", () => {
+    const state = useDesktopStore.getState();
+    state.handleRuntimeMessage({ type: "state", snapshot: snap("a") });
+    expect(useDesktopStore.getState().snapshot.computerMode).toBeFalsy();
+    state.handleRuntimeMessage({ type: "state", snapshot: { ...snap("a"), computerMode: true } });
+    expect(useDesktopStore.getState().snapshot.computerMode).toBe(true);
+    state.handleRuntimeMessage({ type: "state", snapshot: { ...snap("a"), computerMode: false } });
+    expect(useDesktopStore.getState().snapshot.computerMode).toBe(false);
+  });
+
+  it("分屏格子推送的 computerMode 变化不被引用早退吞掉", () => {
+    function pane(sessionId: string, computerMode: boolean): SessionPaneSnapshot {
+      return { sessionId, thinkingLevel: "medium", busy: false, status: "", queuedMessages: [], messages: [], executions: [], computerMode };
+    }
+    const state = useDesktopStore.getState();
+    state.handleRuntimeMessage({ type: "session.state", snapshot: pane("pane-c1", false) });
+    expect(useDesktopStore.getState().paneStates["pane-c1"]?.computerMode).toBe(false);
+    state.handleRuntimeMessage({ type: "session.state", snapshot: pane("pane-c1", true) });
+    expect(useDesktopStore.getState().paneStates["pane-c1"]?.computerMode).toBe(true);
+  });
+
   it("分屏格子推送的 designMode 变化不被引用早退吞掉", () => {
     function pane(sessionId: string, designMode: boolean): SessionPaneSnapshot {
       return { sessionId, thinkingLevel: "medium", busy: false, status: "", queuedMessages: [], messages: [], executions: [], designMode };

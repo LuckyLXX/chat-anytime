@@ -70,6 +70,7 @@
 | 预览面板开关（顶栏）                        | `preview-toggle`                                 |
 | 预览大纲开关（预览工具条）                  | `preview-outline-toggle`                         |
 | 设计模式开关（顶栏，aria-pressed 标记开启态） | `design-toggle`                                 |
+| 电脑控制开关（顶栏，aria-pressed 标记开启态） | `computer-toggle`                              |
 | 设计画布「发给 AI」（工具栏）                | `design-send-ai`                                 |
 | 设计画布「导出 HTML」（工具栏）              | `design-export`                                  |
 | 设计画布撤销/重做（工具栏）                 | `design-undo` / `design-redo`                    |

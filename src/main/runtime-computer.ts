@@ -91,6 +91,26 @@ export function locateLjqCtrlDir(agentDir: string | undefined, workspace: string
 
 const DISABLED_TEXT = "电脑控制已在设置中停用（settings.computer.enabled），请在设置中开启后再试。";
 
+/**
+ * 电脑控制工具的激活判据（前缀缓存纪律）：两个条件都满足才把五个 computer_*
+ * 定义放进本次请求的活动工具集。
+ *
+ * - `sessionEnabled`：会话级电脑控制模式（computer-mode-store 持久化，用户点顶栏
+ *   开关或在对话框输入 /computer 打开；「新建话题」在开着时会话id 下继承）。会话内
+ *   不再变动，因此前缀缓存整段有效。
+ * - `globalEnabled`：设置页总闸 settings.computer.enabled（缺省启用）。用户显式关掉
+ *   即任何会话都不注入——能力下架，不只是拒绝执行。
+ *
+ * 与 browser_* 的差别：浏览器自动化工具常驻激活、execute 实时读总闸（它对「看
+ * 网页」这类常见需求有用，且定义轻）；桌面键鼠注入是更窄也更敏感的能力，代价是
+ * 每个会话每轮 ≈580 tokens，默认不开。无人值守的自动化后台会话天然不满足：每次
+ * 触发都是全新 session id，没有对应状态文件（读盘即 false）——定时任务默认拿不到
+ * 桌面控制工具，这是有意取舍。
+ */
+export function shouldActivateComputerTools(input: { sessionEnabled: boolean; globalEnabled: boolean }): boolean {
+  return input.sessionEnabled && input.globalEnabled;
+}
+
 // ---------------------------------------------------------------- python transport
 
 async function defaultSpawnPython(command: string[], script: string): Promise<PythonSpawnResult> {

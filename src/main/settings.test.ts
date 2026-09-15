@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CUSTOM_PROVIDER_ID, createDefaultAgent, ensureDefaultWorkspaceDir, forgetAgentWorkspace, isPositiveInt, mergeProviderModels, migrateSettings, normalizeAccessMode, normalizeAgent, normalizeAgentWorkspaces, normalizeCheckpoint, normalizeCustomThemes, normalizeDivBubbleMode, normalizeInterfaceTuning, normalizeProvider, normalizeThemeAssets, normalizeVision, normalizeWallpaperOpacity, recordAgentWorkspace, resolveDefaultWorkspace, resolveInitialWorkspace } from "./settings.js";
+import { CUSTOM_PROVIDER_ID, createDefaultAgent, ensureDefaultWorkspaceDir, forgetAgentWorkspace, isPositiveInt, mergeProviderModels, migrateSettings, normalizeAccessMode, normalizeAgent, normalizeAgentWorkspaces, normalizeCheckpoint, normalizeComputer, normalizeCustomThemes, normalizeDivBubbleMode, normalizeInterfaceTuning, normalizeProvider, normalizeThemeAssets, normalizeVision, normalizeWallpaperOpacity, recordAgentWorkspace, resolveDefaultWorkspace, resolveInitialWorkspace } from "./settings.js";
 
 describe("workspace per-agent memory and default workspace (方案 B)", () => {
   it("normalizes agentWorkspaces: keeps non-empty string entries, drops garbage, defaults undefined", () => {
@@ -342,5 +342,16 @@ describe("desktop settings migration", () => {
     expect(migrateSettings({ checkpoint: { enabled: false } }).settings.checkpoint).toEqual({ enabled: false });
     expect(migrateSettings({ checkpoint: { enabled: true } }).settings.checkpoint).toEqual({ enabled: true });
     expect(migrateSettings({}).settings.checkpoint).toBeUndefined();
+  });
+
+  it("keeps the computer master switch across a settings round-trip", () => {
+    expect(normalizeComputer({ enabled: false })).toEqual({ enabled: false });
+    expect(normalizeComputer({})).toEqual({ enabled: true });
+    expect(normalizeComputer("invalid")).toBeUndefined();
+    // 回归网：migrateSettings 曾漏掉 computer 字段，写进 settings.json 的
+    // {enabled:false} 重启即被丢弃，运行时总闸恒为 true（总闸形同虚设）。
+    expect(migrateSettings({ computer: { enabled: false } }).settings.computer).toEqual({ enabled: false });
+    expect(migrateSettings({ computer: { enabled: true } }).settings.computer).toEqual({ enabled: true });
+    expect(migrateSettings({}).settings.computer).toBeUndefined();
   });
 });

@@ -184,6 +184,7 @@ const demoSnapshot: RuntimeSnapshot = {
   status: "就绪",
   contextUsage: demoContextUsage(),
   planMode: false,
+  computerMode: false,
   queuedMessages: [],
   backgroundProcesses: [],
   recentWorkspaces: [
@@ -606,6 +607,7 @@ export function createDemoApi(): DesktopApi {
           demoSettings.accessMode = command.settings.accessMode;
           demoSettings.appearance = structuredClone(command.settings.appearance);
           demoSettings.browser = command.settings.browser;
+          demoSettings.computer = command.settings.computer;
           demoSettings.design = command.settings.design;
           demoSettings.defaultWorkspace = command.settings.defaultWorkspace;
           updateSnapshot({ model: command.settings.model, thinkingLevel: command.settings.thinkingLevel });
@@ -637,6 +639,11 @@ export function createDemoApi(): DesktopApi {
         }
         case "session.planMode":
           updateSnapshot({ planMode: command.enabled });
+          break;
+        case "session.computerMode":
+          // 电脑控制模式会话级开关：真实运行时还会重算活动工具集（computer_* 注入/
+          // 移除），演示端只须同步快照让顶栏按钮跟随。
+          updateSnapshot({ computerMode: command.enabled });
           break;
         case "session.designMode":
           // 设计模式会话级开关：真实运行时还会重算活动工具集（design_* 注入/移除），
