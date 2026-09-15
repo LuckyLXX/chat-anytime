@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { assistantText, buildSubagentPromptBlock, createSubagentTools, DelegationTracker, delegationModelEnabled, parseModelId, resolveDelegationModelTarget, resolveSubagentDefinition, type SubagentContext } from "./subagent.js";
+import { assistantText, buildEmptyDelegationOutputError, buildSubagentPromptBlock, buildSubagentReferenceError, createSubagentTools, DelegationTracker, delegationModelEnabled, parseModelId, resolveDelegationModelTarget, resolveSubagentDefinition, type SubagentContext } from "./subagent.js";
 import type { SubagentDefinition } from "../shared/protocol.js";
+
+const catalog: SubagentDefinition[] = [
+  { id: "subagent-a", name: "code-reviewer", description: "审查代码", systemPrompt: "x", tools: "inherit", scope: "global" }
+];
 
 function makeCtx(overrides: Partial<SubagentContext> = {}): SubagentContext {
   return {
@@ -13,6 +17,7 @@ function makeCtx(overrides: Partial<SubagentContext> = {}): SubagentContext {
     thinkingLevel: "medium",
     accessMode: "ask",
     model: { provider: "p", id: "m" },
+    getSubagentCatalog: () => catalog,
     requestPermission: async () => "allow-once",
     isDelegationChild: false,
     ...overrides
@@ -54,24 +59,48 @@ describe("subagent tools", () => {
   });
 
   it("resolves a subagent definition by id or name and falls back otherwise", () => {
-    const catalog: SubagentDefinition[] = [
-      { id: "code-reviewer", name: "Code Reviewer", description: "审查代码", systemPrompt: "x", tools: "inherit", scope: "global" }
-    ];
-    expect(resolveSubagentDefinition(catalog, "code-reviewer")?.name).toBe("Code Reviewer");
-    expect(resolveSubagentDefinition(catalog, "Code Reviewer")?.id).toBe("code-reviewer");
+    expect(resolveSubagentDefinition(catalog, "subagent-a")?.name).toBe("code-reviewer");
+    expect(resolveSubagentDefinition(catalog, "code-reviewer")?.id).toBe("subagent-a");
     expect(resolveSubagentDefinition(catalog, "missing")).toBeUndefined();
     expect(resolveSubagentDefinition(undefined, "anything")).toBeUndefined();
   });
 
-  it("builds a prompt block listing available subagents", () => {
-    const catalog: SubagentDefinition[] = [
-      { id: "a", name: "Code Reviewer", description: "审查代码", systemPrompt: "x", tools: "inherit", scope: "global" }
-    ];
+  it("builds a prompt block listing available subagents as the only delegation target", () => {
     const block = buildSubagentPromptBlock(catalog);
     expect(block).toBeDefined();
-    expect(block).toContain("Code Reviewer");
+    expect(block).toContain("code-reviewer");
+    // 硬约束口径：唯一委派对象 + subagent 必填，挡住模型自由发明子代理。
+    expect(block).toContain("唯一委派对象");
+    expect(block).toContain("subagent 参数必填");
     expect(buildSubagentPromptBlock([])).toBeUndefined();
     expect(buildSubagentPromptBlock(undefined)).toBeUndefined();
+  });
+
+  it("names the available subagents when a delegation misses", () => {
+    const missing = buildSubagentReferenceError("invented-agent", catalog);
+    expect(missing).toContain("invented-agent");
+    expect(missing).toContain("code-reviewer（subagent-a）");
+    const omitted = buildSubagentReferenceError("", catalog);
+    expect(omitted).toContain("必须指定 subagent");
+    // 目录为空时给出「先定义或不要委派」而不是一个空清单。
+    expect(buildSubagentReferenceError("x", [])).toContain("没有可用的子智能体");
+    expect(buildSubagentReferenceError("x", undefined)).toContain("没有可用的子智能体");
+  });
+
+  it("turns an empty delegation output into an explicit error", () => {
+    expect(buildEmptyDelegationOutputError("code-reviewer", 0, "/agent/delegations/c.jsonl")).toContain("空响应");
+    expect(buildEmptyDelegationOutputError("code-reviewer", 12, "/agent/delegations/c.jsonl")).toContain("12 个步骤");
+    expect(buildEmptyDelegationOutputError("code-reviewer", 0, "/agent/delegations/c.jsonl")).toContain("/agent/delegations/c.jsonl");
+  });
+
+  it("rejects a delegation without a matching subagent before touching the model runtime", async () => {
+    const tool = createSubagentTools(makeCtx())[0]!;
+    const execute = (tool as unknown as { execute: (id: string, params: unknown) => Promise<unknown> }).execute;
+    await expect(execute("call", { goal: "做点事" })).rejects.toThrow(/必须指定 subagent/u);
+    await expect(execute("call", { goal: "做点事", role: "review" })).rejects.toThrow(/必须指定 subagent/u);
+    await expect(execute("call", { goal: "做点事", subagent: "not-defined" })).rejects.toThrow(/没有名为「not-defined」的子智能体/u);
+    // 报错要带上可用名单，否则模型只会反复换名字重试。
+    await expect(execute("call", { goal: "做点事", subagent: "not-defined" })).rejects.toThrow(/code-reviewer/u);
   });
 });
 

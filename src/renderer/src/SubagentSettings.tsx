@@ -148,7 +148,7 @@ export function SubagentSettings({ resources, workspaceOpen, models, providers }
           <div className="resource-section-actions"><small>{resources.subagents.length} 个</small><button className="secondary-button compact-button" type="button" disabled={controlsBusy} onClick={openCreate}><Plus size={13} />新建子智能体</button></div>
         </div>
         <p className="resource-form-help">
-          子智能体与主会话共享同一套白名单工具，但可按需收窄；模型缺省继承当前会话模型。作用域：项目级（<code>.pidesktop-subagents.json</code>）覆盖全局（同 id 时生效前者）。委派时传给 <code>delegate_agent</code> 的 <code>subagent</code> 参数即可引用。
+          子智能体与主会话共享同一套白名单工具，但可按需收窄；模型缺省继承当前会话模型。作用域：项目级（<code>.pidesktop-subagents.json</code>）覆盖全局（同 id 时生效前者）。委派 <code>delegate_agent</code> 时 <code>subagent</code> 参数必填，且只能填这里的名称或 id——未命中会被直接拒绝，委派只会在已定义好的子智能体上执行。
         </p>
         {resources.subagents.length === 0 ? <p className="resource-empty">还没有子智能体。点击“新建子智能体”，定义名称、系统提示词与工具范围后保存。</p> : (
           <div className="resource-list">
@@ -208,7 +208,7 @@ export function SubagentSettings({ resources, workspaceOpen, models, providers }
               </div>
             )}
           </fieldset>
-          <p className="resource-form-help">运行时：子代理与主会话同口径套用用户手动修正的 token 限额；风险工具（bash/edit/write 等）仍走同一审批闸口。委派时按名称传给 <code>delegate_agent</code> 的 <code>subagent</code> 参数，名称与 id 均可。</p>
+          <p className="resource-form-help">运行时：子代理与主会话同口径套用用户手动修正的 token 限额；风险工具（bash/edit/write 等）仍走同一审批闸口。子代理空产出（既不返回文本也无工具调用）计为失败并上报原因，不再伪装成成功；新增定义后活动会话会自动重建以刷新可用清单（会话忙时跳过，下次重建生效）。</p>
           <footer className="mcp-form-actions">
             <button className="secondary-button" type="button" disabled={controlsBusy} onClick={() => { setFormOpen(false); setEditingId(undefined); }}><X size={13} />取消</button>
             <button className="primary-button" type="submit" disabled={controlsBusy || !name.trim()}>{editingId !== undefined ? "保存修改" : "添加子智能体"}</button>

@@ -254,7 +254,7 @@ export function parseDelegateCallArgs(args: unknown): DelegateCallPreview | unde
   return {
     goal: goal.length > 80 ? `${goal.slice(0, 79)}…` : goal,
     role: typeof record.role === "string" && record.role ? record.role : "custom",
-    ...(typeof record.subagent === "string" && record.subagent ? { subagent: record.subagent } : {}),
+    ...(typeof record.subagent === "string" && record.subagent.trim() ? { subagent: record.subagent.trim() } : {}),
     ...(typeof record.modelId === "string" && record.modelId ? { modelId: record.modelId } : {})
   };
 }

@@ -471,6 +471,8 @@ function syncSkills(): void {
  * from the record (workspace/agent/model captured at creation), so parked
  * background sessions keep delegating against their own configuration. The
  * child flag disables nesting (delegations cannot spawn further delegations).
+ * 工具始终注册（注册≠激活的纪律，也让会话内前缀字节稳定），定义清单在 execute
+ * 时经 getSubagentCatalog 实读：定义为空时调用只会拿到一条明确的报错。
  */
 function buildSubagentTools(record: Pick<SessionRuntimeRecord, "workspace" | "agent" | "permissionDeps">, sessionId: string | undefined, model: { provider: string; id: string } | undefined, isDelegationChild: boolean): ToolDefinition[] {
   if (!modelRuntime) return [];
@@ -482,8 +484,9 @@ function buildSubagentTools(record: Pick<SessionRuntimeRecord, "workspace" | "ag
     thinkingLevel,
     accessMode,
     model: model ?? { provider: "", id: "" },
-    // 双作用域合并后的自定义子智能体定义（delegate_agent 按名称引用）。
-    subagentCatalog,
+    // 读器而非快照：refreshSubagents() 会换掉模块级数组引用，旧会话必须总能看到
+    // 最新定义（否则设置页新增子智能体后，已打开的会话引用不到）。
+    getSubagentCatalog: () => subagentCatalog,
     // 运行时与设置页模型下拉同口径：被取消勾选的模型不再用于委派。
     isModelEnabled: (providerId, modelId) => isModelEnabled(providerId, modelId, settings?.providers),
     // 子代理与主会话同口径：目录模型交给子代理前套上 token-limit 覆盖。
@@ -2984,6 +2987,28 @@ async function reloadRuntimeResources(): Promise<void> {
 }
 
 /**
+ * 保存子智能体定义后重建活动会话：定义本身在 execute 时实读（新增即可引用），但
+ * 系统提示里的「可用子智能体」清单是创建会话时写入的——新增与修改描述（两者都要
+ * 被模型看到）不重建就不生效。与 skill.toggle 同款纪律：忙时不打断（只记日志，回退
+ * 到「已保存，下次重建生效」），失败不阻断保存。空闲时重建代价可忽略。
+ */
+async function refreshActiveSessionForSubagents(): Promise<void> {
+  const record = activeRuntime;
+  if (!record || !record.extensionApi) return;
+  if (record.busy || record.session.isStreaming) {
+    // 与 skill.toggle 同款纪律：不打断进行中的回合；渲染端的 log 通道只转 warn，
+    // 所以这里用 warn 级别（info 会被静默丢掉）。
+    void post({ type: "log", level: "warn", message: "子智能体已保存；当前会话正在运行，新定义将在下次重建会话后出现在可用清单里。" });
+    return;
+  }
+  try {
+    await createSession(record.session.sessionManager);
+  } catch (error) {
+    void post({ type: "log", level: "warn", message: `子智能体已保存，但刷新会话失败（新定义将在下次重建会话后生效）：${errorText(error)}` });
+  }
+}
+
+/**
  * Apply MCP config changes to the live (active) session. Tool additions and
  * same-name replacements take the hot path: the record's stable customTools
  * array is swapped in place and registerTool() makes Pi rebuild the registry
@@ -4182,9 +4207,12 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     }
     case "subagent.save": {
       // 子智能体定义写入目标作用域文件（项目级用当前工作区）；刷新渲染端列表。
+      // 保存后重建活动会话：按名委派靠 execute 实读的定义已即时可用，但系统提示里
+      // 的可用清单与会话内新增的参考文本是创建会话时写入的，不重建就看不到改动。
       saveSubagent(workspace, getAgentDir(), command.subagent);
       refreshSubagents();
       emitResourceCatalog();
+      await refreshActiveSessionForSubagents();
       break;
     }
     case "subagent.delete": {

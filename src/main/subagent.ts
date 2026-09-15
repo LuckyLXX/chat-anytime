@@ -24,6 +24,12 @@ import { summarizeArgs } from "./runtime-permissions.js";
  * runs it headlessly to completion, and returns the final assistant text. Only
  * one level of delegation is allowed: child sessions are created without the
  * delegate tool, so they cannot spawn grandchildren.
+ *
+ * 自定义子智能体是唯一的委派对象（2026-09-15 收敛）：`subagent` 必填且必须命中
+ * 定义，未命中直接报错并列出可用名称。此前 `subagent` 可选、role 枚举同时是一条
+ * 独立执行路径，AI 因此自由发明子代理——历史 36 次调用里 19 次（53%）没传
+ * subagent，且最近 6 次全部如此，用户定义好的 code-reviewer/explorer 反而闲置。
+ * role 现在只是展示用标签（DelegationProgress.role），不再影响子会话行为。
  */
 
 export interface SubagentContext {
@@ -34,8 +40,12 @@ export interface SubagentContext {
   thinkingLevel: ThinkingLevel;
   accessMode: AccessMode;
   model: { provider: string; id: string };
-  /** 双作用域合并后的自定义子智能体定义（delegate_agent 按名称引用）。 */
-  subagentCatalog?: SubagentDefinition[];
+  /**
+   * 双作用域合并后的自定义子智能体定义的读取器（delegate_agent 按名称引用）。
+   * 必须用 getter 而不是数组快照：refreshSubagents() 换的是模块级数组引用，
+   * 旧会话若捕获了旧数组，设置页新增/删除定义后就再也引用不到（2026-09-15 修）。
+   */
+  getSubagentCatalog?: () => SubagentDefinition[];
   /** 模型是否仍被勾选（用户在各服务商取消勾选后不应再被委派使用；缺省视为可用）。 */
   isModelEnabled?: (providerId: string, modelId: string) => boolean;
   /** 将目录 Model 交给子代理前的变换钩子（主进程用来套 token-limit 覆盖）。 */
@@ -216,13 +226,13 @@ function runChildToCompletion(child: AgentSession, goal: string, signal: AbortSi
           if (!event.willRetry) {
             tracker.seal();
             emit();
-            finish(() => { unsubscribe(); resolve(lastText || "(子代理未返回文本)"); });
+            finish(() => { unsubscribe(); resolve(lastText); });
           }
           break;
         case "agent_settled":
           tracker.seal();
           emit();
-          finish(() => { unsubscribe(); resolve(lastText || "(子代理未返回文本)"); });
+          finish(() => { unsubscribe(); resolve(lastText); });
           break;
       }
     });
@@ -244,14 +254,29 @@ function runChildToCompletion(child: AgentSession, goal: string, signal: AbortSi
   });
 }
 
-function roleGuideline(role: DelegationRole | undefined): string {
-  switch (role) {
-    case "explore": return "你的职责是探索与信息收集，不要修改文件。";
-    case "research": return "你的职责是研究与方案分析，给出结论与建议。";
-    case "implement": return "你的职责是具体实现，可使用工具修改文件并验证。";
-    case "review": return "你的职责是审查现有改动，列出风险与改进建议。";
-    default: return "完成委派给你的独立子任务。";
-  }
+/**
+ * 未提供 / 未命中 subagent 时的中文报错：把可用名称直接摆出来，避免模型再次
+ * 凭空发明一个子代理。纯函数，供 runDelegation 使用并独立单测。
+ */
+export function buildSubagentReferenceError(key: string, catalog: SubagentDefinition[] | undefined): string {
+  const available = catalog && catalog.length > 0
+    ? `当前可用子智能体：${catalog.map((entry) => `${entry.name}（${entry.id}）`).join("、")}。`
+    : "当前没有可用的子智能体，请先在「设置 → 资源 → 子智能体」中定义，或不要委派。";
+  return key
+    ? `没有名为「${key}」的子智能体，委派已拒绝。${available}`
+    : `delegate_agent 必须指定 subagent（自定义子智能体的名称或 id）。${available}`;
+}
+
+/**
+ * 子代理空产出时的报错。旧行为是把 `(子代理未返回文本)` 当正常结果返回，于是
+ * 「模型空响应」被渲染成一次成功的委派（实测 4 次，全部是同一模型的空响应）；
+ * 现在改为明确失败，并带上完整记录路径便于追查。纯函数，独立单测。
+ */
+export function buildEmptyDelegationOutputError(subagentName: string, stepCount: number, childSessionFile: string): string {
+  const detail = stepCount === 0
+    ? "子代理没有返回任何文本，也没有执行任何工具调用（通常是子代理模型返回了空响应）。"
+    : `子代理执行了 ${stepCount} 个步骤，但没有返回任何文本。`;
+  return `${detail}子智能体：${subagentName}；完整记录：${childSessionFile}`;
 }
 
 async function runDelegation(ctx: SubagentContext, params: { goal?: unknown; role?: unknown; modelId?: unknown; subagent?: unknown }, signal: AbortSignal | undefined, onUpdate: AgentToolUpdateCallback<unknown> | undefined): Promise<AgentToolResult<unknown>> {
@@ -261,9 +286,12 @@ async function runDelegation(ctx: SubagentContext, params: { goal?: unknown; rol
   const role = (typeof params.role === "string" ? params.role : "custom") as DelegationRole;
   const modelIdRaw = typeof params.modelId === "string" ? params.modelId.trim() : "";
   const subagentRaw = typeof params.subagent === "string" ? params.subagent.trim() : "";
-  // 优先匹配自定义子智能体定义（按 id 或名称）；命中后其系统提示/模型/工具集覆盖默认。
-  const subagentDef = resolveSubagentDefinition(ctx.subagentCatalog, subagentRaw);
-  const requestedTarget = subagentDef?.model ?? (modelIdRaw ? parseModelId(modelIdRaw, ctx.model) : ctx.model);
+  // 唯一执行路径：必须命中自定义子智能体定义（按 id 或名称），否则直接拒绝并列出
+  // 可用名称（旧行为是静默降级成 role 通用提示词，见文件头注释）。
+  const catalog = ctx.getSubagentCatalog?.();
+  const subagentDef = resolveSubagentDefinition(catalog, subagentRaw);
+  if (!subagentDef) throw new Error(buildSubagentReferenceError(subagentRaw, catalog));
+  const requestedTarget = subagentDef.model ?? (modelIdRaw ? parseModelId(modelIdRaw, ctx.model) : ctx.model);
   // 显式指定的模型已被取消勾选时回退主会话模型（2026-09-02 审查：与设置页模型
   // 下拉同口径——被移除的模型不应再被委派使用；主会话模型通常不可能被移除）。
   const modelTarget = resolveDelegationModelTarget(requestedTarget, ctx.model, ctx.isModelEnabled);
@@ -272,13 +300,10 @@ async function runDelegation(ctx: SubagentContext, params: { goal?: unknown; rol
     throw new Error(`子代理模型不可用：${modelTarget.provider}/${modelTarget.id}`);
   }
   const resolvedChildModel = ctx.transformModel ? ctx.transformModel(childModel) : childModel;
-  // 子代理系统提示：有了自定义定义时用它的 systemPrompt（+可选 AGENTS.md）；否则用主会话 + role 指导词。
-  const childSystemPrompt = subagentDef
-    ? [subagentDef.systemPrompt, subagentDef.injectAgentsMd ? "请阅读并遵循当前工作区的 AGENTS.md。" : null].filter(Boolean).join("\n\n")
-    : `${roleGuideline(role)}`;
-  const childInstruction = subagentDef
-    ? [`你是被主会话委派的子代理“${subagentDef.name}”。${subagentDef.description ? `${subagentDef.description}` : ""}`.trim()]
-    : [`你是被主会话委派的子代理。${roleGuideline(role)}`];
+  // 子代理系统提示 = 定义自己的 systemPrompt（+可选 AGENTS.md）+ 一行身份说明；
+  // role 不参与提示词构造（它只是展示标签）。
+  const childSystemPrompt = [subagentDef.systemPrompt, subagentDef.injectAgentsMd ? "请阅读并遵循当前工作区的 AGENTS.md。" : null].filter(Boolean).join("\n\n");
+  const childInstruction = [`你是被主会话委派的子代理“${subagentDef.name}”。${subagentDef.description}`.trim()];
 
   const delegationsDir = join(ctx.agentDir, "chatanytime-sessions", ctx.agent.id, "delegations");
   const sessionManager = SessionManager.create(ctx.workspace, delegationsDir);
@@ -292,9 +317,7 @@ async function runDelegation(ctx: SubagentContext, params: { goal?: unknown; rol
     noThemes: true,
     noContextFiles: true,
     extensionFactories: [createChildPermissionExtension(ctx)],
-    systemPromptOverride: (base) => subagentDef
-      ? [base, childSystemPrompt, ...childInstruction].filter(Boolean).join("\n\n")
-      : [base, ctx.agent.systemPrompt, ...childInstruction].filter(Boolean).join("\n\n")
+    systemPromptOverride: (base) => [base, childSystemPrompt, ...childInstruction].filter(Boolean).join("\n\n")
   });
   await resourceLoader.reload();
   const { session: child } = await createAgentSession({
@@ -306,7 +329,7 @@ async function runDelegation(ctx: SubagentContext, params: { goal?: unknown; rol
     settingsManager,
     resourceLoader
   });
-  const enabledBuiltinTools = subagentDef && subagentDef.tools !== "inherit"
+  const enabledBuiltinTools = subagentDef.tools !== "inherit"
     ? Object.entries(subagentDef.tools).filter(([, enabled]) => enabled).map(([name]) => name)
     : Object.entries(ctx.agent.tools ?? {}).filter(([, enabled]) => enabled).map(([name]) => name);
   await child.bindExtensions({ onError: () => { /* logged via permission broker path */ } });
@@ -316,15 +339,20 @@ async function runDelegation(ctx: SubagentContext, params: { goal?: unknown; rol
     const tracker = new DelegationTracker({
       childSessionId: child.sessionId,
       childSessionFile: child.sessionManager.getSessionFile() ?? child.sessionId,
-      ...(subagentDef?.name ? { subagentName: subagentDef.name } : {}),
-      ...(subagentDef?.color ? { subagentColor: subagentDef.color } : {}),
+      subagentName: subagentDef.name,
+      ...(subagentDef.color ? { subagentColor: subagentDef.color } : {}),
       role,
       model: modelTarget
     });
     const result = await runChildToCompletion(child, goal, signal, onUpdate, tracker);
+    const progress = tracker.snapshot();
+    // 空产出不再伪装成成功结果（旧行为返回 `(子代理未返回文本)` 占位文本）。
+    if (!result.trim()) {
+      throw new Error(buildEmptyDelegationOutputError(subagentDef.name, progress.steps.length, progress.childSessionFile));
+    }
     return {
       content: [{ type: "text", text: result }],
-      details: { goal, ...tracker.snapshot() }
+      details: { goal, ...progress }
     };
   } finally {
     child.dispose();
@@ -360,11 +388,19 @@ export function resolveSubagentDefinition(catalog: SubagentDefinition[] | undefi
   return catalog.find((entry) => entry.id === key) ?? catalog.find((entry) => entry.name === key);
 }
 
-/** 构建“可用子智能体清单”注入主会话系统提示，让 AI 感知并选择。 */
+/**
+ * 构建“可用子智能体清单”注入主会话系统提示。文案是硬约束而不是建议：清单是委派的
+ * 唯一对象，subagent 必填、只能填这里的名称或 id（旧文案「需要时按名称传给」实测挡
+ * 不住模型自由发挥）。catalog 为空返回 undefined（不注入，也不注册工具）。
+ */
 export function buildSubagentPromptBlock(catalog: SubagentDefinition[] | undefined): string | undefined {
   if (!catalog || catalog.length === 0) return undefined;
   const lines = catalog.map((entry) => `- ${entry.name}${entry.color ? ` （${entry.color}）` : ""} — ${entry.description || "自定义子智能体"}`);
-  return ["以下自定义子智能体可用于委派，需要时按名称传给 delegate_agent 的 subagent 参数：", ...lines].join("\n");
+  return [
+    "以下自定义子智能体是 delegate_agent 的唯一委派对象：subagent 参数必填，且只能填下面清单里的名称或 id，名字对不上会被直接拒绝。没有合适的子智能体时不要委派，也不要自己发明名称或改用 role。",
+    "（role 只是展示用标签，不构成一条独立的委派路径。）",
+    ...lines
+  ].join("\n");
 }
 
 /** Build the subagent customTools for a session. Empty when nesting is blocked. */
@@ -374,7 +410,7 @@ export function createSubagentTools(ctx: SubagentContext): ToolDefinition[] {
     defineTool({
       name: "delegate_agent",
       label: "委派子代理",
-      description: "把一个独立子任务委派给子代理执行并等待结果返回。子代理在同一工作区内运行，不能再创建子代理。适用于可并行/隔离的子任务。",
+      description: "把一个独立子任务委派给子代理执行并等待结果返回。subagent 必填，取值为系统提示「可用子智能体」清单里的名称或 id，未命中会被拒绝。子代理在同一工作区内运行，不能再创建子代理。适用于可并行/隔离的子任务。",
       promptSnippet: "delegate_agent: 委派独立子任务给子代理并等待结果",
       parameters: Type.Object({
         goal: Type.String({ description: "子代理要完成的具体目标，应足够独立、可单独完成" }),
@@ -384,9 +420,9 @@ export function createSubagentTools(ctx: SubagentContext): ToolDefinition[] {
           Type.Literal("implement"),
           Type.Literal("review"),
           Type.Literal("custom")
-        ], { description: "子代理角色，影响其系统提示约束" })),
-        modelId: Type.Optional(Type.String({ description: "可选，provider/id 形式的模型；缺省沿用当前模型" })),
-        subagent: Type.Optional(Type.String({ description: "可选，自定义子智能体的 id 或名称；提供时按该定义的系统提示/模型/工具集运行，优先于 role" }))
+        ], { description: "可选展示标签，仅用于委派节点上的文字，不影响子代理行为" })),
+        modelId: Type.Optional(Type.String({ description: "可选，provider/id 形式的模型；缺省沿用子智能体定义或当前会话模型" })),
+        subagent: Type.String({ description: "必填：可用子智能体的名称或 id（见系统提示的「可用子智能体」清单）" })
       }),
       execute: async (_toolCallId, params, signal, onUpdate) => runDelegation(ctx, (params ?? {}) as { goal?: unknown; role?: unknown; modelId?: unknown; subagent?: unknown }, signal, onUpdate)
     })
