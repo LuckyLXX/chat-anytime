@@ -100,8 +100,8 @@ export type CustomProviderModel = ProviderModelSettings;
 /** Div 气泡模式三档：off 不注入提示词；auto 按场景酌情使用；always 所有回复强制气泡。 */
 export type DivBubbleMode = "off" | "auto" | "always";
 
-/** 子智能体作用域：global=用户级（所有工作区可见）；project=项目级（仅绑定工作区生效）。 */
-export type SubagentScope = "global" | "project";
+/** 子智能体作用域：bundled=随安装包分发的内置定义（只读，只有执行模型可改）；global=用户级（所有工作区可见）；project=项目级（仅绑定工作区生效）。 */
+export type SubagentScope = "bundled" | "global" | "project";
 
 /** 自定义子智能体定义：delegate_agent 委派时可按名称引用，覆盖固定的 role 枚举。 */
 export interface SubagentDefinition {
@@ -1112,7 +1112,7 @@ export interface ResourceCatalog {
   todos: Todo[];
   /** 激活助手的全量记忆主题（面板治理视图，不经工作区过滤）。 */
   memory: MemoryTopic[];
-  /** 双作用域合并后的自定义子智能体定义（项目覆盖全局）。 */
+  /** 三档合并后的子智能体定义（项目 > 用户全局 > 内置；同 id 或同名后者覆盖前者）。 */
   subagents: SubagentDefinition[];
   /** 双作用域合并后的钩子规则（项目覆盖全局）。 */
   hooks: HookSummary[];
@@ -1313,10 +1313,10 @@ export interface QuestionRequest {
 }
 
 export type RuntimeCommand =
-  /** bundledSkillsDir：随安装包分发的内置 Skill 目录（<安装目录>/resources/skills，
-   * dev 下为仓库 resources/skills），由主进程解析（utility 进程无 Electron API）；
-   * 缺省/不存在时该来源不参与扫描。 */
-  | { type: "initialize"; settings: DesktopSettings; apiKeys: Record<string, string>; bundledSkillsDir?: string }
+  /** bundledSkillsDir / bundledSubagentsDir：随安装包分发的内置资产目录（
+   * <安装目录>/skills 与 <安装目录>/subagents，dev 下为仓库 resources/ 下同名目录），
+   * 由主进程解析（utility 进程无 Electron API）；缺省/不存在时该来源不参与扫描。 */
+  | { type: "initialize"; settings: DesktopSettings; apiKeys: Record<string, string>; bundledSkillsDir?: string; bundledSubagentsDir?: string }
   | { type: "workspace.open"; path: string }
   | { type: "workspace.remove"; workspace: string }
   | { type: "session.new"; workspace?: string }
@@ -1374,6 +1374,8 @@ export type RuntimeCommand =
   | { type: "memory.delete"; topic: string }
   | { type: "subagent.save"; subagent: SubagentDefinition }
   | { type: "subagent.delete"; id: string; scope: SubagentScope }
+  /** 仅改内置子智能体的执行模型（内置定义本体只读）；model 缺省 = 回到继承默认模型。 */
+  | { type: "subagent.model"; id: string; model?: { provider: string; id: string } }
   /** 读取子代理完整记录（JSONL 转 ChatMessage[]，结果经 subagent.transcript-result 推送）。 */
   | { type: "subagent.transcript"; childSessionId: string; path: string }
   | { type: "appearance.save"; appearance: AppearanceSettings }

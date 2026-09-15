@@ -1057,6 +1057,11 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 .subagent-color[data-color="violet"] { color: #7c3aed; background: color-mix(in srgb, #7c3aed 12%, transparent); }
 .subagent-color[data-color="slate"] { color: #64748b; background: color-mix(in srgb, #64748b 12%, transparent); }
 .subagent-color-picker { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 4px 0; }
+/* 内置子智能体：只读行——行内模型选择与用户定义行在观感上区分开（主题只认 data-* 钩子）。 */
+.resource-item[data-subagent-scope="bundled"] { border-style: dashed; }
+.subagent-model-edit { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; }
+/* 两级前缀 + 显式尺寸：压过 .settings-dialog 的通用 select 规则（0,1,1）。 */
+.subagent-model-edit select { width: auto; min-width: 132px; max-width: 210px; height: 26px; margin: 0; padding: 0 6px; font-size: 10.5px; }
 .subagent-color-swatch { width: 20px; height: 20px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0; margin: 0; background-clip: padding-box; transition: transform .15s ease, border-color .15s ease, box-shadow .15s ease; }
 .subagent-color-swatch:hover { transform: scale(1.15); }
 .subagent-color-swatch.selected { border-color: var(--text); box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--text); }

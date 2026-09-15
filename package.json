@@ -80,6 +80,10 @@
           "!**/__pycache__/**",
           "!**/*.pyc"
         ]
+      },
+      {
+        "from": "resources/subagents",
+        "to": "subagents"
       }
     ],
     "asarUnpack": [

@@ -74,7 +74,7 @@ import { McpOAuthController } from "./mcp-oauth.js";
 import { PermissionBroker } from "./permission-broker.js";
 import { loadRecentWorkspaces, recordRecentWorkspace, writeRecentWorkspaces } from "./recent-workspaces.js";
 import { assistantText, createSubagentTools, buildSubagentPromptBlock, type SubagentContext } from "./subagent.js";
-import { readSubagents, saveSubagent, deleteSubagent } from "./subagents-store.js";
+import { readSubagents, saveSubagent, deleteSubagent, saveSubagentModelOverride } from "./subagents-store.js";
 import type { SubagentDefinition, SubagentScope, DelegationProgress, SlashInvocation } from "../shared/protocol.js";
 import { buildSkillsSystemPromptBlock, setSkillEnabled, type DiscoveredSkill } from "./skill-catalog.js";
 import * as commandCatalog from "./command-catalog.js";
@@ -147,6 +147,9 @@ let selectedModel: { provider: string; id: string } | undefined;
 let settings: DesktopSettings | undefined;
 /** 随安装包分发的内置 Skill 目录（安装目录 resources/skills），由主进程经 initialize 下发。 */
 let bundledSkillsDir: string | undefined;
+/** 随安装包分发的内置子智能体目录（安装目录 resources/subagents），同由主进程下发；
+ * 缺省时该档不参与合并（用户目录里的定义照常生效）。 */
+let bundledSubagentsDir: string | undefined;
 /** 当前 Agent 的自动化定时任务（设置页列表 + 目录下发）；随 Agent 切换重读。 */
 let automationTasks: AutomationTask[] = [];
 /** 全角色自动化运行历史（设置页「运行记录」子页 + 目录下发）；runs.jsonl 事件流。 */
@@ -535,11 +538,12 @@ function hookSummaries(): HookSummary[] {
   }));
 }
 
-/** 双作用域合并后的自定义子智能体定义缓存（delegate_agent 引用 + 渲染端列表）。 */
+/** 双作用域合并后的自定义子智能体定义缓存（delegate_agent 引用 + 渲染端列表）。
+ * 三档：内置（随安装包分发，只读）→ 用户全局 → 项目，同名后者覆盖前者。 */
 let subagentCatalog: SubagentDefinition[] = [];
 
 function refreshSubagents(): void {
-  subagentCatalog = readSubagents(workspace, getAgentDir());
+  subagentCatalog = readSubagents(workspace, getAgentDir(), bundledSubagentsDir);
 }
 
 /** Connect to all configured MCP servers and refresh tool definitions + catalog status. */
@@ -2879,6 +2883,7 @@ async function initialize(command: Extract<RuntimeCommand, { type: "initialize" 
   settings = command.settings;
   apiKeys = command.apiKeys;
   bundledSkillsDir = command.bundledSkillsDir;
+  bundledSubagentsDir = command.bundledSubagentsDir;
   refreshHooksConfig();
   refreshSubagents();
   recentWorkspaces = loadRecentWorkspaces(recentWorkspacesPath());
@@ -4218,6 +4223,13 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     case "subagent.delete": {
       const scope = command.scope as SubagentScope;
       if (!deleteSubagent(workspace, getAgentDir(), command.id, scope)) throw new Error("找不到要删除的子智能体");
+      refreshSubagents();
+      emitResourceCatalog();
+      break;
+    }
+    case "subagent.model": {
+      // 内置定义只读，用户能改的只有「执行模型」：写覆盖表 → 重读目录 → 刷新列表。
+      saveSubagentModelOverride(getAgentDir(), command.id, command.model);
       refreshSubagents();
       emitResourceCatalog();
       break;

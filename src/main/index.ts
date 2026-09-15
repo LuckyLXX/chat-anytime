@@ -5,7 +5,7 @@ import { Readable } from "node:stream";
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, protocol, safeStorage, shell, utilityProcess, type UtilityProcess } from "electron";
 import { spawn } from "node-pty";
 import appIconPath from "./assets/icon.ico?asset";
-import { resolveBundledSkillsDir } from "./bundled-skills.js";
+import { resolveBundledSkillsDir, resolveBundledSubagentsDir } from "./bundled-skills.js";
 import { migrateSettings, normalizeVision, recordAgentWorkspace, forgetAgentWorkspace } from "./settings.js";
 import { importExternalAttachment, workspaceRelativeAttachment } from "./attachments.js";
 import type { BrowserPreviewCommand, BrowserPreviewState, DesktopBootstrap, DesktopSettings, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot, TerminalCommand, TerminalEventData, WorkspaceDirectoryListing, WorkspaceEntryResult, WorkspaceFilePreview, WorkspaceFileSearchResult, WorkspaceFileStat, WorkspaceFileWriteResult } from "../shared/protocol.js";
@@ -335,7 +335,11 @@ function startRuntime(): void {
   // skill 目录就是「内置 skill 的目录」，运行时直接扫（不复制到用户目录）。
   const bundledSkillsDir = resolveBundledSkillsDir(app.getAppPath(), app.isPackaged);
   if (!bundledSkillsDir) console.warn("未找到内置 Skill 目录（resources/skills），本次不注入内置来源");
-  sendToRuntime({ type: "initialize", settings, apiKeys: credentialsCache, bundledSkillsDir });
+  // 内置子智能体目录（<安装目录>/subagents，dev 下是仓库 resources/subagents）：
+  // 同 skills 口径，直接读取、不复制到用户目录；用户自建的同名定义会盖掉它。
+  const bundledSubagentsDir = resolveBundledSubagentsDir(app.getAppPath(), app.isPackaged);
+  if (!bundledSubagentsDir) console.warn("未找到内置子智能体目录（resources/subagents），本次不注入内置来源");
+  sendToRuntime({ type: "initialize", settings, apiKeys: credentialsCache, bundledSkillsDir, bundledSubagentsDir });
 }
 function createWindow(): void {
   const rendererUrl = process.env.ELECTRON_RENDERER_URL;

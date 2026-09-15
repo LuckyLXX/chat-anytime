@@ -7,7 +7,7 @@ import { ModelSelect } from "./components/ModelSelect";
 import { useDesktopStore } from "./store";
 
 const SUBAGENT_TOOLS: BuiltinToolName[] = ["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"];
-const SCOPE_LABELS: Record<SubagentScope, string> = { global: "用户（全局）", project: "当前项目" };
+const SCOPE_LABELS: Record<SubagentScope, string> = { bundled: "内置", global: "用户（全局）", project: "当前项目" };
 const COLOR_OPTIONS = ["amber", "rose", "orange", "emerald", "teal", "blue", "violet", "slate"];
 const COLOR_SWATCHES: Record<string, string> = {
   amber: "#d97706",
@@ -38,6 +38,8 @@ export function SubagentSettings({ resources, workspaceOpen, models, providers }
   const [color, setColor] = useState("amber");
   const [description, setDescription] = useState("");
   const [model, setModel] = useState("");
+  // 内置条目：只开放「执行模型」选择（定义本体只读），行内内联一个下拉而不是弹表单。
+  const [modelEditingId, setModelEditingId] = useState<string>();
   const [systemPrompt, setSystemPrompt] = useState("");
   const [scope, setScope] = useState<SubagentScope>("global");
   const [injectAgentsMd, setInjectAgentsMd] = useState(false);
@@ -131,6 +133,18 @@ export function SubagentSettings({ resources, workspaceOpen, models, providers }
     await run({ type: "subagent.delete", id: subagent.id, scope: subagent.scope });
   }
 
+  /** 内置定义的执行模型：写覆盖表（不走定义文件），空串 = 回到继承默认模型。 */
+  async function saveBundledModel(id: string, value: string): Promise<void> {
+    const slash = value.indexOf("/");
+    const modelValue = value && configuredModels.some((item) => `${item.provider}/${item.id}` === value) ? value : "";
+    const ok = await run({
+      type: "subagent.model",
+      id,
+      ...(modelValue ? { model: { provider: modelValue.slice(0, slash), id: modelValue.slice(slash + 1) } } : {})
+    });
+    if (ok) setModelEditingId(undefined);
+  }
+
   const controlsBusy = busy;
 
   return (
@@ -148,20 +162,33 @@ export function SubagentSettings({ resources, workspaceOpen, models, providers }
           <div className="resource-section-actions"><small>{resources.subagents.length} 个</small><button className="secondary-button compact-button" type="button" disabled={controlsBusy} onClick={openCreate}><Plus size={13} />新建子智能体</button></div>
         </div>
         <p className="resource-form-help">
-          子智能体与主会话共享同一套白名单工具，但可按需收窄；模型缺省继承当前会话模型。作用域：项目级（<code>.pidesktop-subagents.json</code>）覆盖全局（同 id 时生效前者）。委派 <code>delegate_agent</code> 时 <code>subagent</code> 参数必填，且只能填这里的名称或 id——未命中会被直接拒绝，委派只会在已定义好的子智能体上执行。
+          子智能体与主会话共享同一套白名单工具，但可按需收窄；模型缺省继承当前会话模型。作用域优先级：项目级（<code>.pidesktop-subagents.json</code>）&gt; 用户全局 &gt; 内置（随应用分发；同 id 时后者覆盖前者）。内置子智能体只读，只能选择执行模型。委派 <code>delegate_agent</code> 时 <code>subagent</code> 参数必填，且只能填这里的名称或 id，未命中会被直接拒绝。
         </p>
         {resources.subagents.length === 0 ? <p className="resource-empty">还没有子智能体。点击“新建子智能体”，定义名称、系统提示词与工具范围后保存。</p> : (
           <div className="resource-list">
             {resources.subagents.map((subagent) => (
-              <div className="resource-item" key={`${subagent.scope}/${subagent.id}`}>
+              <div className="resource-item" key={`${subagent.scope}/${subagent.id}`} data-subagent-scope={subagent.scope}>
                 <div className="resource-item-icon subagent-color" data-color={subagent.color ?? "amber"}><Bot size={14} /></div>
                 <div className="resource-item-copy">
                   <strong>{subagent.name}</strong>
                   <small>{subagentScopeLabel(subagent.scope)} · {subagent.model ? `${subagent.model.provider}/${subagent.model.id}` : "继承默认模型"} · {subagent.tools === "inherit" ? "继承父会话工具" : "自定义工具"}</small>
                   <em>{subagent.description || subagent.systemPrompt}</em>
                 </div>
-                <button className="icon-button" type="button" title={`编辑 ${subagent.name}`} aria-label={`编辑子智能体 ${subagent.name}`} disabled={controlsBusy} onClick={() => openEdit(subagent)}><Pencil size={14} /></button>
-                <button className="icon-button resource-remove" type="button" title={`删除 ${subagent.name}`} aria-label={`删除子智能体 ${subagent.name}`} disabled={controlsBusy} onClick={() => void deleteSubagent(subagent)}><Trash2 size={14} /></button>
+                {subagent.scope === "bundled" ? (
+                  modelEditingId === subagent.id ? (
+                    <div className="subagent-model-edit">
+                      <ModelSelect models={configuredModels} providers={providers} value={subagent.model ? `${subagent.model.provider}/${subagent.model.id}` : ""} placeholder="继承当前会话模型" onChange={(value) => void saveBundledModel(subagent.id, value)} />
+                      <button className="secondary-button compact-button" type="button" disabled={controlsBusy} onClick={() => setModelEditingId(undefined)}>取消</button>
+                    </div>
+                  ) : (
+                    <button className="secondary-button compact-button" type="button" disabled={controlsBusy} title={`选择 ${subagent.name} 的执行模型`} onClick={() => setModelEditingId(subagent.id)}><Pencil size={13} />执行模型</button>
+                  )
+                ) : (
+                  <>
+                    <button className="icon-button" type="button" title={`编辑 ${subagent.name}`} aria-label={`编辑子智能体 ${subagent.name}`} disabled={controlsBusy} onClick={() => openEdit(subagent)}><Pencil size={14} /></button>
+                    <button className="icon-button resource-remove" type="button" title={`删除 ${subagent.name}`} aria-label={`删除子智能体 ${subagent.name}`} disabled={controlsBusy} onClick={() => void deleteSubagent(subagent)}><Trash2 size={14} /></button>
+                  </>
+                )}
               </div>
             ))}
           </div>

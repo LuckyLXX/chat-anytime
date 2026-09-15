@@ -359,7 +359,10 @@ const demoResources: ResourceCatalog = {
   todos: [],
   memory: [],
   subagents: [
-    { id: "code-reviewer", name: "Code Reviewer", description: "独立审查本次代码变更，列出风险与建议。", color: "amber", systemPrompt: "你是一名严格的代码审查员。", tools: "inherit", scope: "global" }
+    { id: "code-reviewer", name: "code-reviewer", description: "独立审查已经完成的代码改动，列出有证据的问题与建议。", color: "amber", systemPrompt: "你是独立代码审查者。", tools: { read: true, bash: true, powershell: false, edit: false, write: false, grep: true, find: true, ls: true }, scope: "bundled", builtin: true, injectAgentsMd: true },
+    { id: "explorer", name: "explorer", description: "深入理解现有项目：跨模块调用链、数据流转与修改影响范围。", color: "blue", systemPrompt: "你是项目探索者。", tools: { read: true, bash: true, powershell: false, edit: false, write: false, grep: true, find: true, ls: true }, scope: "bundled", builtin: true, model: { provider: "anthropic", id: "claude-sonnet-4-6" } },
+    { id: "general-purpose", name: "general-purpose", description: "没有专用子智能体适配、但任务仍可独立完成时使用。", color: "violet", systemPrompt: "你是通用子代理。", tools: "inherit", scope: "bundled", builtin: true },
+    { id: "subagent-demo", name: "my-helper", description: "用户自建示例：按项目约定生成变更日志。", color: "emerald", systemPrompt: "你负责生成变更日志。", tools: "inherit", scope: "global" }
   ],
   hooks: [
     { name: "跑完通知", event: "agent_end", actionKind: "notify", action: { kind: "notify" }, actionPreview: "桌面通知", blocking: false, scope: "global", enabled: true },
@@ -898,6 +901,28 @@ export function createDemoApi(): DesktopApi {
             resetDemoContext(2_600);
             updateSnapshot({ sessionId: run.sessionId, messages: [], executions: [], contextUsage: demoContextUsage(), planMode: false });
           }
+          break;
+        }
+        case "subagent.save": {
+          // 与主进程同口径：内置档只读；其余按 scope 落位（演示环境只更新内存镜像）。
+          if (command.subagent.scope === "bundled") throw new Error("内置子智能体不可修改（只能在列表里选择执行模型）");
+          demoResources.subagents = [...demoResources.subagents.filter((item) => item.id !== command.subagent.id), structuredClone(command.subagent)];
+          emit({ type: "resources", resources: structuredClone(demoResources) });
+          break;
+        }
+        case "subagent.delete": {
+          if (command.scope === "bundled") throw new Error("内置子智能体不可删除");
+          demoResources.subagents = demoResources.subagents.filter((item) => !(item.id === command.id && item.scope === command.scope));
+          emit({ type: "resources", resources: structuredClone(demoResources) });
+          break;
+        }
+        case "subagent.model": {
+          const entry = demoResources.subagents.find((item) => item.id === command.id);
+          if (entry) {
+            if (command.model) entry.model = { ...command.model };
+            else delete entry.model;
+          }
+          emit({ type: "resources", resources: structuredClone(demoResources) });
           break;
         }
         case "subagent.transcript": {
