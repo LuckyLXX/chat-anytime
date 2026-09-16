@@ -211,6 +211,25 @@ describe("desktop settings migration", () => {
     expect(merged.some((model) => model.id === "gone")).toBe(false);
   });
 
+  it("keeps a declared thinking level map through an upstream refresh and normalization", () => {
+    // 用户声明不能被「拉取最新模型」冲掉（同限额/图片标记的既有口径）。
+    const merged = mergeProviderModels(
+      [{ id: "qwen3.8-27b", name: "qwen3.8-27b", thinkingLevelMap: { high: "xhigh", xhigh: "xhigh" }, enabled: true }],
+      [{ id: "qwen3.8-27b", name: "qwen3.8-27b upstream" }]
+    );
+    expect(merged[0]).toMatchObject({ thinkingLevelMap: { high: "xhigh", xhigh: "xhigh" } });
+    // 规范化只保留合法档位键与合法取值（非法值 = 该档位回到未声明）。
+    const normalized = normalizeProvider({
+      id: "p", name: "P", baseUrl: "",
+      models: [
+        { id: "a", name: "a", thinkingLevelMap: { high: "xhigh", off: null, xhigh: "  xhigh  ", bogus: "x", minimal: 3 } as never },
+        { id: "b", name: "b", thinkingLevelMap: { bogus: "x" } as never }
+      ]
+    });
+    expect(normalized.models[0]?.thinkingLevelMap).toEqual({ high: "xhigh", off: null, xhigh: "xhigh" });
+    expect(normalized.models[1]).not.toHaveProperty("thinkingLevelMap");
+  });
+
   it("normalizes the manual marker so only true survives", () => {
     const normalized = normalizeProvider({
       id: "p", name: "P", baseUrl: "",

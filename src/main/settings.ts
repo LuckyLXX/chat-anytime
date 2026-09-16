@@ -1,6 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { THEME_PRESET_IDS } from "../shared/protocol.js";
+import { normalizeThinkingLevelMap } from "../shared/thinking-levels.js";
 import type {
   AccessMode,
   AgentProfile,
@@ -196,6 +197,8 @@ export function normalizeProvider(provider: Partial<ProviderSettings>): Provider
         // 用户手动修正的 token 限额：仅保留合法正整数，避免非法值流入运行时。
         ...(isPositiveInt(model.contextWindow) ? { contextWindow: model.contextWindow } : {}),
         ...(isPositiveInt(model.maxTokens) ? { maxTokens: model.maxTokens } : {}),
+        // 思考等级声明：只保留合法档位键与非空字符串/null 取值（非法值丢弃 = 该档位回到未声明）。
+        ...(normalizeThinkingLevelMap(model.thinkingLevelMap) ? { thinkingLevelMap: normalizeThinkingLevelMap(model.thinkingLevelMap) } : {}),
         // 手动添加标记：决定上游刷新/覆盖层同步时该条目是否被保留。
         ...(model.manual === true ? { manual: true as const } : {}),
         enabled: model.enabled !== false
@@ -220,10 +223,11 @@ export function mergeProviderModels(existing: ProviderModelSettings[], fetched: 
     return {
       ...model,
       imageInput: old?.imageInput ?? model.imageInput,
-      // 用户手动修正过的 API 模式/限额在上游刷新后保持不变。
+      // 用户手动修正过的 API 模式/限额/思考等级在上游刷新后保持不变。
       api: old?.api ?? model.api,
       contextWindow: old?.contextWindow ?? model.contextWindow,
       maxTokens: old?.maxTokens ?? model.maxTokens,
+      thinkingLevelMap: old?.thinkingLevelMap ?? model.thinkingLevelMap,
       // 手动添加的模型与上游同名命中：保留 manual 标记（用户仍可删行）。
       manual: old?.manual || model.manual || undefined,
       enabled: old ? old.enabled !== false : model.enabled === true

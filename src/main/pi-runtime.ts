@@ -53,6 +53,7 @@ import type {
   SkillSummary,
   SpeedStats,
   ThinkingLevel,
+  ThinkingLevelMap,
   Todo,
   ToolExecution,
   TurnTiming,
@@ -60,6 +61,7 @@ import type {
   AutomationRunRecord
 } from "../shared/protocol.js";
 import { isDelegationProgress } from "../shared/protocol.js";
+import { THINKING_LEVELS, clampThinkingLevel, supportedThinkingLevels } from "../shared/thinking-levels.js";
 import { toolLabel } from "../shared/locale.js";
 import { workspaceRelativeAttachment } from "./attachments.js";
 import { saveBrowserScreenshot } from "./browser-screenshot.js";
@@ -1513,6 +1515,50 @@ function hasImageInput(model: { provider?: string; id?: string; input?: readonly
   // 设置里手动标记的图片输入覆盖目录元数据（内置服务商拉取的新模型没有输入类型信息）。
   const override = imageInputOverride(model ?? {}, settings?.providers);
   return override ?? Boolean(model?.input?.includes("image"));
+}
+
+/**
+ * 某个会话当前模型真实可用的思考等级。Pi 的 getAvailableThinkingLevels 已经做了
+ * 这一步，但它读的是**会话里那个模型对象**；模型切换/叠加用户声明后可能滞后，
+ * 所以对当前会话模型再跑一次共享纯函数（两者口径逐行对齐，见 shared/thinking-levels）。
+ * 无模型时返回全档（无能力信息可判定，不偷藏档位）。
+ */
+function availableThinkingLevels(record: { session: AgentSession }): ThinkingLevel[] {
+  const model = record.session.model as Model<Api> | undefined;
+  if (!model) return [...THINKING_LEVELS];
+  // 先叠设置里的声明再算能力：会话模型本身可能还是不带声明的旧对象（声明只在
+  // 「下一个模型对象」上生效），而请求前 streamSimple 那层会叠——这里必须同源，
+  // 否则菜单说「很高」可用、会话层却按未声明把请求钳回 high，又是「点了没反应」。
+  const effective = applyModelOverrides(model) as { reasoning?: boolean; thinkingLevelMap?: ThinkingLevelMap };
+  return supportedThinkingLevels(effective.thinkingLevelMap, effective.reasoning);
+}
+
+/**
+ * 把设置里的 per-model 覆盖（含思考等级声明）落到**会话里那个模型对象**上。
+ *
+ * 为什么必须做：Pi 的 `setThinkingLevel` / `getAvailableThinkingLevels` 直接读
+ * `model.thinkingLevelMap`，而声明只在使用**下一个模型对象**时才生效——用户在设置页
+ * 刚声明「支持很高」后，会话模型仍是不带声明的旧对象，`setThinkingLevel("xhigh")`
+ * 照样被钳回 high（用户看到的就是「声明了还是切不过去」）。这里做纯元数据纠偏，
+ * 与 createSession 的兜底纠偏同一姿势：不走 setModel（那会追加 model_change 条目、
+ * 重写 Pi 默认），直接替换 state.model 引用；只在真有覆盖时替换。
+ */
+function syncSessionModelMetadata(record: SessionRuntimeRecord): void {
+  const current = record.session.model as Model<Api> | undefined;
+  if (!current) return;
+  const corrected = applyModelOverrides(current);
+  if (corrected !== current) record.session.agent.state.model = corrected;
+}
+
+/**
+ * 声明刚落盘后补一次落值：用当前档位在**新能力**下重新钳制，避免「声明了很高但
+ * 档位还停在 high」。`setThinkingLevel` 自带 clamp，这里只是把起点交给它。
+ */
+function applyDeclaredThinkingLevel(record: SessionRuntimeRecord | undefined, model: Model<Api>): void {
+  if (!record) return;
+  const target = applyModelOverrides(model) as { reasoning?: boolean; thinkingLevelMap?: ThinkingLevelMap };
+  const desired = clampThinkingLevel(supportedThinkingLevels(target.thinkingLevelMap, target.reasoning), record.session.thinkingLevel);
+  if (desired !== record.session.thinkingLevel) record.session.setThinkingLevel(desired);
 }
 
 /**
@@ -3779,14 +3825,26 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     case "thinking.select": {
       const record = command.sessionId ? liveSessions.get(command.sessionId) : activeRuntime;
       if (record) {
-        record.session.setThinkingLevel(command.level);
+        // 先算出该会话当前模型真实可用的档位再落值：Pi 的 setThinkingLevel 对不支持
+        // 的档位会**静默 clamp**（比如请求 xhigh 而模型未声明映射 → 落回 high），
+        // 用户看到的是「点了没反应」。这里把降级结果如实回报，菜单也有据可依。
+        // 先把设置里的声明落到会话模型对象上：否则 Pi 会按「未声明」把很高/最高
+        // 静默钳回 high，用户看到的就是「声明了还是选不中」。
+        syncSessionModelMetadata(record);
+        const available = availableThinkingLevels(record);
+        const effective = clampThinkingLevel(available, command.level);
+        record.session.setThinkingLevel(effective);
+        if (effective !== command.level) {
+          post({ type: "log", level: "warn", message: `思考等级 ${command.level} 在该模型上不可用，已使用 ${effective}（可选：${available.join("/") || "无"}）` });
+        }
         if (record === activeRuntime) {
-          thinkingLevel = command.level;
+          thinkingLevel = record.session.thinkingLevel;
           emitState();
         } else {
           emitPaneStateFor(record);
         }
       } else {
+        // 无活动会话（落地页）：只记全局默认，七档全开（无模型可判定）。
         thinkingLevel = command.level;
         emitState();
       }
@@ -3830,6 +3888,8 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         if (first) {
           selectedModel = { provider: first.provider, id: first.id };
           await switchSessionModel(activeRuntime, first);
+          // 思考等级声明顺带落值（原因见 applyDeclaredThinkingLevel）。
+          applyDeclaredThinkingLevel(activeRuntime, first);
         } else if (selectedModel?.provider === command.provider.id) {
           const fallback = pickFallbackModel(modelRuntime.getModels(), settings?.providers, providerConfigured, command.provider.id);
           selectedModel = fallback ? { provider: fallback.provider, id: fallback.id } : undefined;
@@ -3860,9 +3920,11 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
           continue;
         }
         if (enabledIds.has(current.id)) {
-          // Token 限额/图片标记手动修正后立即对正使用该服务商模型的空闲会话生效
-          // （switchSessionModel 内部走 applyModelOverrides）。
-          await switchSessionModel(record, modelRuntime.getModel(current.provider, current.id) ?? current);
+          // Token 限额/图片标记/思考等级声明手动修正后立即对正使用该服务商模型的空闲
+          // 会话生效（switchSessionModel 内部走 applyModelOverrides）。
+          const refreshed = modelRuntime.getModel(current.provider, current.id) ?? current;
+          await switchSessionModel(record, refreshed);
+          applyDeclaredThinkingLevel(record, refreshed);
           continue;
         }
         const next = modelRuntime.getModels(command.provider.id).find((model) => enabledIds.has(model.id))

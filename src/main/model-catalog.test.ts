@@ -172,6 +172,33 @@ describe("pickFallbackModel", () => {
   });
 });
 
+describe("buildCatalogModels thinking capability", () => {
+  it("prefers the user-declared map over the catalog one and passes reasoning through", () => {
+    const providers: ProviderSettings[] = [{
+      id: "proxy",
+      name: "代理",
+      baseUrl: "https://proxy.test/v1",
+      models: [{ id: "qwen3.8-27b", name: "qwen3.8-27b", thinkingLevelMap: { high: "xhigh", xhigh: "xhigh" } }]
+    }];
+    const [option] = buildCatalogModels(
+      [{ provider: "proxy", id: "qwen3.8-27b", name: "qwen3.8-27b", input: ["text"], reasoning: true, thinkingLevelMap: { low: "low" } }],
+      providers,
+      new Set(["proxy"])
+    );
+    expect(option?.thinkingLevelMap).toEqual({ high: "xhigh", xhigh: "xhigh" });
+    expect(option?.reasoning).toBe(true);
+  });
+
+  it("falls back to the catalog declaration when the user declared nothing", () => {
+    const [option] = buildCatalogModels(
+      [{ provider: "qwen-token-plan-cn", id: "qwen3.8-flash", name: "Qwen3.8 Flash", input: ["text"], reasoning: true, thinkingLevelMap: { high: null, xhigh: "xhigh" } }],
+      [],
+      new Set(["qwen-token-plan-cn"])
+    );
+    expect(option?.thinkingLevelMap).toEqual({ high: null, xhigh: "xhigh" });
+  });
+});
+
 describe("pruneDisabledModelRefs", () => {
   const providers: ProviderSettings[] = [{
     id: "openrouter",
@@ -247,6 +274,23 @@ describe("applyModelOverrides", () => {
   it("clones once and combines token limits with the input patch", () => {
     const result = applyModelOverrides({ ...target(["text"]), contextWindow: 128000, maxTokens: 16384 }, [{ id: "zai-coding-cn", name: "z.ai", baseUrl: "", custom: false, models: [{ id: "glm-5.3-flash", name: "GLM", imageInput: true, contextWindow: 200000 }] }]);
     expect(result).toEqual({ provider: "zai-coding-cn", id: "glm-5.3-flash", input: ["text", "image"], contextWindow: 200000, maxTokens: 16384 });
+  });
+
+  // 2026-09-16：用户声明的思考等级映射必须落到 Model 本身——Pi 的
+  // clampThinkingLevel 与各 API 适配器都直接读 model.thinkingLevelMap，
+  // 只改应用侧菜单挡不住「选很高被静默降级回 high」。
+  it("lands the declared thinking levels on the model (merged over the catalog map)", () => {
+    const entry = [{ id: "p", name: "P", baseUrl: "", models: [{ id: "m", name: "M", thinkingLevelMap: { high: "xhigh" } }] }];
+    // 内置渠道：目录模型自带生成映射，用户声明叠加在其上（同键取用户值）。
+    const applied = applyModelOverrides({ ...target(["text"]), thinkingLevelMap: { off: null, minimal: null, low: "low", medium: "medium", high: null, xhigh: null, max: null } }, entry);
+    // 用户声明优先级更高，同键取用户值（声明的 high: null 覆盖目录的 high: "xhigh"）。
+    expect(applied.thinkingLevelMap).toEqual({ off: null, minimal: null, low: "low", medium: "medium", high: null, xhigh: null, max: null });
+    // 目录模型自带的生成映射是叠加基线：用户没声明到的档位保持目录值。
+    const mapped = applyModelOverrides({ ...target(["text"]), thinkingLevelMap: { high: "xhigh" } }, entry);
+    expect(mapped.thinkingLevelMap).toEqual({ high: "xhigh" });
+    // 声明与模型当前映射完全一致时不克隆（保持对象引用，避免每轮重建模型对象）。
+    const same = { ...target(["text"]), thinkingLevelMap: { high: "xhigh" } };
+    expect(applyModelOverrides(same, entry)).toBe(same);
   });
 });
 

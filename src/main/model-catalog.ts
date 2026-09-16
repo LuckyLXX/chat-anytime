@@ -26,6 +26,9 @@ export interface CatalogModelInput {
   /** SDK 目录的限额原值；用户在设置里手动修正后以此覆盖。 */
   contextWindow?: number;
   maxTokens?: number;
+  /** 推理能力与思考等级映射（目录原值）；用户在设置里声明后以此覆盖。 */
+  reasoning?: boolean;
+  thinkingLevelMap?: ModelThinkingLevelMap;
 }
 
 /**
@@ -45,7 +48,12 @@ export interface ModelOverrideTarget {
   provider?: string;
   id?: string;
   input: ("text" | "image")[];
+  /** 目录已声明的思考等级映射（applyModelOverrides 在其上叠加用户声明）。 */
+  thinkingLevelMap?: ModelThinkingLevelMap;
 }
+
+/** 与 shared/protocol 的 ThinkingLevelMap 同形（这里只取形状，避免循环依赖 Pi 类型）。 */
+type ModelThinkingLevelMap = Partial<Record<string, string | null>>;
 
 /**
  * 恢复会话时的模型落位：注册表模型 + 鉴权门槛 + settings 覆盖，一步到位。
@@ -81,13 +89,24 @@ export function applyModelOverrides<T extends ModelOverrideTarget>(model: T, pro
     : entry.imageInput === false && hasImage
       ? model.input.filter((kind) => kind !== "image")
       : undefined;
-  if (contextWindow === undefined && maxTokens === undefined && input === undefined) return model;
+  // 思考等级声明同样落到 Model 本身：Pi 的 clampThinkingLevel / 各 API 适配器
+  // 都直接读 model.thinkingLevelMap，只改应用侧菜单挡不住 session.setThinkingLevel
+  // 把「很高」静默降级回 high（那正是用户报的「选了没反应」）。
+  const thinkingLevelMap = entry.thinkingLevelMap;
+  const overridesThinking = thinkingLevelMap !== undefined && hasThinkingLevelOverride(model.thinkingLevelMap, thinkingLevelMap);
+  if (contextWindow === undefined && maxTokens === undefined && input === undefined && !overridesThinking) return model;
   return {
     ...model,
     ...(contextWindow !== undefined ? { contextWindow } : {}),
     ...(maxTokens !== undefined ? { maxTokens } : {}),
-    ...(input !== undefined ? { input: input as T["input"] } : {})
+    ...(input !== undefined ? { input: input as T["input"] } : {}),
+    ...(overridesThinking ? { thinkingLevelMap: { ...model.thinkingLevelMap, ...thinkingLevelMap } } : {})
   };
+}
+
+/** 声明的映射是否真的改变了生效结果（全等于目录值时返回 false，保持对象引用）。 */
+function hasThinkingLevelOverride(existing: ModelThinkingLevelMap | undefined, declared: ModelThinkingLevelMap): boolean {
+  return Object.entries(declared).some(([level, mapped]) => (existing as Record<string, unknown> | undefined)?.[level] !== mapped);
 }
 
 /**
@@ -166,6 +185,10 @@ export function buildCatalogModels(models: readonly CatalogModelInput[], provide
     const stored = providers?.find((provider) => provider.id === model.provider)?.models.find((item) => item.id === model.id);
     // API 模式展示：设置覆盖优先，否则目录两档值（anthropic-messages 等其他模式不展示）。
     const api = stored?.api ?? (model.api === "openai-completions" || model.api === "openai-responses" ? model.api : undefined);
+    // 思考等级声明的生效值：设置里用户声明优先，否则回退目录声明（口径同
+    // imageInput / token 限额）。reasoning 同构透出，让菜单能直接显示
+    // 「该模型不支持思考」而不是把七档全置灰得莫名其妙。
+    const thinkingLevelMap = stored?.thinkingLevelMap ?? model.thinkingLevelMap;
     return {
       provider: model.provider,
       id: model.id,
@@ -174,9 +197,13 @@ export function buildCatalogModels(models: readonly CatalogModelInput[], provide
       input: model.input,
       // 目录元数据可被设置里的手动标记覆盖（内置服务商拉取的新模型没有输入类型信息，靠用户勾选）。
       imageInput: stored?.imageInput ?? model.input.includes("image"),
-      // 同理，token 限额的手动修正优先于目录原值。
+      // 同理，token 限额与思考等级声明的手动修正优先于目录原值。
       ...(isPositiveInt(stored?.contextWindow) || isPositiveInt(model.contextWindow) ? { contextWindow: stored?.contextWindow ?? model.contextWindow } : {}),
       ...(isPositiveInt(stored?.maxTokens) || isPositiveInt(model.maxTokens) ? { maxTokens: stored?.maxTokens ?? model.maxTokens } : {}),
+      ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
+      ...(model.reasoning !== undefined ? { reasoning: model.reasoning } : {}),
+      ...(stored?.thinkingLevelMap ?? model.thinkingLevelMap ? { thinkingLevelMap: stored?.thinkingLevelMap ?? model.thinkingLevelMap } : {}),
+      ...(model.reasoning !== undefined ? { reasoning: model.reasoning } : {}),
       ...(api ? { api } : {}),
       ...(stored ? { enabled: stored.enabled !== false } : {})
     };

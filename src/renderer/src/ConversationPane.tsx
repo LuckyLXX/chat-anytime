@@ -54,6 +54,7 @@ import type {
   WorkspaceFileSearchEntry
 } from "../../shared/protocol";
 import { delegationRoleLabels, sessionRunStatusLabels, thinkingLevelLabels, toolLabel } from "../../shared/locale";
+import { THINKING_LEVELS, thinkingLevelDraftFrom, thinkingLevelMapFromDraft, thinkingLevelMenu, type ThinkingLevelDraft } from "../../shared/thinking-levels";
 import { CodeBlock, RichContent } from "./components/RichContent";
 import { ImageLightbox } from "./components/ImageLightbox";
 import { QuestionPanel } from "./components/QuestionPanel";
@@ -73,7 +74,6 @@ import { selectableCatalogModels } from "./lib/model-list";
 import { currentQuestionRequest, useDesktopStore } from "./store";
 import { PanelDock } from "./PanelDock";
 
-const thinkingLevels: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 const accessModeOptions: readonly { value: AccessMode; label: string }[] = [
   { value: "read-only", label: "只读" },
   { value: "ask", label: "每次询问" },
@@ -753,6 +753,17 @@ export const ConversationPane = memo(function ConversationPane({
   const selectedModel = data.model ? `${data.model.provider}/${data.model.id}` : "";
   const availableModels = useMemo(() => selectableCatalogModels(models).filter((model) => model.configured), [models]);
   const selectedModelOption = availableModels.find((model) => `${model.provider}/${model.id}` === selectedModel);
+  // 思考等级菜单：固定七行，但「支持与否」按该模型声明推导（与主进程/Pi 同口径）。
+  // 不支持的档位置灰并说明——此前菜单七档全可点，而 Pi 会把不支持的档位静默
+  // clamp（点「很高」落到 high、请求带着 high 被上游 400 拒），用户只能看到
+  // 「点了没反应」。
+  const thinkingMenu = useMemo(
+    () => thinkingLevelMenu(selectedModelOption?.thinkingLevelMap, selectedModelOption?.reasoning),
+    [selectedModelOption]
+  );
+  const unsupportedThinkingHint = thinkingMenu.every((option) => !option.supported)
+    ? "当前模型未声明支持思考"
+    : `当前模型仅支持：${thinkingMenu.filter((option) => option.supported).map((option) => thinkingLevelLabels[option.level]).join("、")}`;
   const visionFallbackAvailable = Boolean(settings.vision?.enabled && settings.vision.provider && settings.vision.model
     && models.some((item) => item.provider === settings.vision?.provider && item.id === settings.vision?.model && item.configured && item.imageInput && item.enabled !== false));
   const modelAcceptsImages = Boolean(models.find((item) => `${item.provider}/${item.id}` === selectedModel)?.imageInput);
@@ -1839,7 +1850,7 @@ export const ConversationPane = memo(function ConversationPane({
             </div>
             <div className="composer-control-menu thinking-control">
               <button className="composer-menu-trigger" data-control="thinking-select" type="button" title="思考级别" aria-label="思考级别" aria-haspopup="menu" aria-expanded={composerMenu === "thinking"} disabled={data.busy} onClick={() => { setAccessModeMenuOpen(false); setContextUsageOpen(false); setComposerMenu((current) => current === "thinking" ? undefined : "thinking"); }}><span>思考</span><strong>{thinkingLevelLabels[data.thinkingLevel]}</strong><ChevronDown size={13} /></button>
-              {composerMenu === "thinking" && <div className="composer-select-menu thinking-select-menu" data-composer-zone="popup" role="menu" aria-label="思考级别">{thinkingLevels.map((level) => <button className={level === data.thinkingLevel ? "active" : ""} type="button" role="menuitemradio" aria-checked={level === data.thinkingLevel} key={level} onClick={() => void selectThinkingLevel(level)}><span>{thinkingLevelLabels[level]}</span>{level === data.thinkingLevel && <Check size={13} />}</button>)}</div>}
+              {composerMenu === "thinking" && <div className="composer-select-menu thinking-select-menu" data-composer-zone="popup" role="menu" aria-label="思考级别">{thinkingMenu.map((option) => <button className={[option.level === data.thinkingLevel ? "active" : "", option.supported ? "" : "unsupported"].filter(Boolean).join(" ")} type="button" role="menuitemradio" aria-checked={option.level === data.thinkingLevel} aria-disabled={!option.supported} title={option.supported ? undefined : `该档位不可选：${unsupportedThinkingHint}。它会被自动降级为${option.fallback ? thinkingLevelLabels[option.fallback] : "无"}；想启用请在设置 → 模型服务里为该模型声明`} key={option.level} onClick={() => { if (option.supported) void selectThinkingLevel(option.level); }}><span>{thinkingLevelLabels[option.level]}</span>{!option.supported ? <AlertCircle size={12} /> : option.level === data.thinkingLevel ? <Check size={13} /> : null}</button>)}{thinkingMenu.some((option) => !option.supported) && <p className="thinking-select-note" role="note">{unsupportedThinkingHint}。其余档位会被自动降级；要放开请在设置 → 模型服务里点该模型的「思考等级」声明。</p>}</div>}
             </div>
             {data.busy ? (
               <button className="stop-button" data-control="stop" type="button" title="停止" aria-label="停止" onClick={stopGeneration}><CircleStop size={18} /></button>

@@ -20,11 +20,18 @@ export function inferCustomModelImageInput(modelId: string): boolean {
  * Pi still applies provider-specific compatibility and level clamping when a
  * request is sent.
  */
+/**
+ * 自定义服务商注册的模型直接透传用户声明的思考等级映射（缺省 = 不声明，Pi 按
+ * 「关闭…高」处理）。上游 /models 不描述推理能力，而「很高/最高」需要显式声明
+ * 才会被 Pi 放行——用户可在设置里逐模型声明（thinkingLevelMap），这里只负责
+ * 把声明送到注册层。
+ */
 export function customProviderModelDefinition(model: CustomProviderModel) {
   return {
     id: model.id,
     name: model.name,
     reasoning: true,
+    ...(model.thinkingLevelMap ? { thinkingLevelMap: model.thinkingLevelMap } : {}),
     input: (model.imageInput ? ["text", "image"] : ["text"]) as ("text" | "image")[],
     // 模型级 API 模式覆盖：缺省由 provider 级 api（或 openai-completions）兜底。
     ...(model.api ? { api: model.api } : {}),
@@ -81,6 +88,9 @@ export function resolveCustomProviderRegistration(config: ProviderSettings): {
       ...(model.api ? { api: model.api } : {}),
       contextWindow: isPositiveInt(model.contextWindow) ? model.contextWindow : undefined,
       maxTokens: isPositiveInt(model.maxTokens) ? model.maxTokens : undefined,
+      // 思考等级声明透传（2026-09-16）：中间映射丢字段会让设置页的声明永远
+      // 到不了注册层（同 2026-09-04 审查 P0-1 的 api 字段教训）。
+      thinkingLevelMap: model.thinkingLevelMap,
       enabled: true
     }));
   return {

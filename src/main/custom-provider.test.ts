@@ -20,6 +20,17 @@ describe("custom OpenAI-compatible models", () => {
     expect(getSupportedThinkingLevels(registeredModel)).toEqual(["off", "minimal", "low", "medium", "high"]);
   });
 
+  // 2026-09-16：声明必须真正落到注册模型上——否则 Pi 的 getSupportedThinkingLevels
+  // 仍只给 off…high，用户在设置里打开「很高」也切不过去（就是用户报的那个问题）。
+  it("lands a declared thinking level map on the registered model", () => {
+    const withMap = customProviderModelDefinition({ id: "qwen3.8-27b", name: "qwen3.8-27b", thinkingLevelMap: { low: "low", medium: "medium", high: "xhigh", xhigh: "xhigh" } });
+    expect(withMap.thinkingLevelMap).toEqual({ low: "low", medium: "medium", high: "xhigh", xhigh: "xhigh" });
+    const registered = { ...withMap, api: "openai-completions" as const, provider: "chatanytime-openai-compatible", baseUrl: "https://api.example.com/v1" } as Parameters<typeof getSupportedThinkingLevels>[0];
+    expect(getSupportedThinkingLevels(registered)).toEqual(["off", "minimal", "low", "medium", "high", "xhigh"]);
+    // 未声明时保持历史行为：不写字段，Pi 按缺省口径给 off…high。
+    expect(customProviderModelDefinition({ id: "m", name: "M" })).not.toHaveProperty("thinkingLevelMap");
+  });
+
   it("uses conservative image capability inference", () => {
     expect(inferCustomModelImageInput("gpt-4o-mini")).toBe(true);
     expect(inferCustomModelImageInput("qwen2.5-vl-instruct")).toBe(true);
@@ -109,6 +120,16 @@ describe("resolveCustomProviderRegistration", () => {
     expect(payload?.models.map((model) => model.id)).toEqual(["m1"]);
     expect(payload?.models[0]?.name).toBe("m1");
     expect(payload?.models[0]?.input).toEqual(["text", "image"]);
+  });
+
+  it("passes a declared thinking level map through the registration mapping", () => {
+    const payload = resolveCustomProviderRegistration({
+      id: "provider-1",
+      name: "中转",
+      baseUrl: "https://api.example.com/v1",
+      models: [{ id: "qwen3.8-27b", name: "qwen3.8-27b", thinkingLevelMap: { high: "xhigh", xhigh: "xhigh" } }]
+    });
+    expect(payload?.models[0]?.thinkingLevelMap).toEqual({ high: "xhigh", xhigh: "xhigh" });
   });
 
   it("applies user-corrected token limits and keeps placeholders otherwise", () => {

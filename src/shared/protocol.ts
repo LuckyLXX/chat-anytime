@@ -1,6 +1,14 @@
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 export type AccessMode = "read-only" | "ask" | "workspace" | "full";
 
+/**
+ * 思考等级映射：pi 档位 → 发给上游的取值，`null` = 该档位不被支持。
+ *
+ * 缺键 = 未声明：`xhigh`/`max` 未声明即不可用，其余档位默认可用（口径同 Pi 的
+ * `getSupportedThinkingLevels`），所以「只声明 xhigh」不等于「只支持 xhigh」。
+ */
+export type ThinkingLevelMap = Partial<Record<ThinkingLevel, string | null>>;
+
 import type { DesignCanvasInfo, DesignNode, DesignOp } from "./design-schema.js";
 export type { DesignCanvasInfo, DesignDoc, DesignLayout, DesignNode, DesignNodeDraft, DesignOp, DesignNodeType } from "./design-schema.js";
 export { applyDesignOps, cloneNodeWithNewIds, countNodes, createDesignDoc, findNode, makeNodeId, normalizeDesignDoc, sanitizeDesignName, summarizeNode } from "./design-schema.js";
@@ -21,6 +29,10 @@ export interface ModelOption {
   /** 目录元数据（含用户修正后的生效值）。 */
   contextWindow?: number;
   maxTokens?: number;
+  /** 该模型是否声明支持推理（目录原值）；缺省 = 未知，按支持处理。 */
+  reasoning?: boolean;
+  /** 思考等级映射（用户声明优先，否则目录声明）；缺省 = 未声明，按 Pi 缺省口径推导。 */
+  thinkingLevelMap?: ThinkingLevelMap;
   /** 目录条目的启用状态（settings.providers 的勾选结果）；缺省视为启用。目录必须包含被禁用的模型（设置页要还原勾选），选择器类消费方自行过滤 enabled !== false。 */
   enabled?: boolean;
   /** 模型当前生效的 API 模式（目录定义优先，settings 覆盖优先于目录）；仅用于设置页展示，且只携带 OpenAI 兼容两档值。 */
@@ -37,6 +49,14 @@ export interface ProviderModelSettings {
   maxTokens?: number;
   /** 模型级 API 模式覆盖；缺省 = 跟随服务商默认（自定义）或目录定义（内置）。 */
   api?: ProviderApiMode;
+  /**
+   * 用户手动声明的思考等级支持范围（缺省 = 跟随目录/自定义注册模板）。
+   *
+   * 为什么需要它：上游 /models 接口不描述推理能力，Pi 与 PiDesktop 对
+   * reasoning 模型一律注册成「支持 off…high」，于是「很高/最高」在中转站模型上
+   * 永远选不到——而这类模型（如 qwen3.8-27b）恰恰只认 `xhigh`。
+   */
+  thinkingLevelMap?: ThinkingLevelMap;
   /** Whether this model is shown in the composer model switcher. */
   enabled?: boolean;
   /**
