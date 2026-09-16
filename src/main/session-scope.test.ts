@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentWorkspaceSessionDir, backfillUnpersistedSessions, mergeSessionSummary, resolveNewSessionDefaults, sessionFileMatchesId, sessionListReadyFor, workspaceHash, type LiveSessionSeed } from "./session-scope.js";
+import { agentWorkspaceSessionDir, backfillUnpersistedSessions, mergeSessionSummary, pruneVanishedSessions, resolveNewSessionDefaults, sameSessionDir, sessionFileMatchesId, sessionListReadyFor, workspaceHash, type LiveSessionSeed } from "./session-scope.js";
 
 describe("Agent workspace session scope", () => {
   it("keeps agents and workspaces in separate deterministic directories", () => {
@@ -67,6 +67,47 @@ describe("Agent workspace session scope", () => {
   });
 });
 
+describe("sameSessionDir", () => {
+  it("compares absolute directories case-insensitively and rejects a missing expectation", () => {
+    expect(sameSessionDir("C:/pi/sessions/hash-a", "c:\\pi\\sessions\\HASH-A")).toBe(true);
+    expect(sameSessionDir("C:/pi/sessions/hash-a", "C:/pi/sessions/hash-b")).toBe(false);
+    expect(sameSessionDir("C:/pi/sessions/hash-a", "C:/pi/sessions/hash-a/nested")).toBe(false);
+    expect(sameSessionDir(undefined, "C:/pi/sessions/hash-a")).toBe(false);
+  });
+});
+
+describe("pruneVanishedSessions", () => {
+  const vanished = { id: "ghost", path: "C:/pi/sessions/ghost.jsonl", workspace: "C:/work", title: "新会话", modifiedAt: 500, messageCount: 0 };
+  const persisted = { id: "disk", path: "C:/pi/sessions/disk.jsonl", workspace: "C:/work", title: "磁盘话题", modifiedAt: 100, messageCount: 5 };
+
+  it("drops an empty topic whose file was never written and whose live record is gone", () => {
+    const list = [vanished, persisted];
+    expect(pruneVanishedSessions(list, [], () => false).map((item) => item.id)).toEqual(["disk"]);
+  });
+
+  it("keeps an unpersisted topic while its live record still exists", () => {
+    const list = [vanished, persisted];
+    expect(pruneVanishedSessions(list, ["c:/pi/sessions/GHOST.jsonl"], () => false)).toBe(list);
+  });
+
+  it("keeps an empty topic whose file does exist", () => {
+    const list = [vanished];
+    expect(pruneVanishedSessions(list, [], (path) => path === vanished.path)).toBe(list);
+  });
+
+  it("never prunes a non-empty topic or a pinned one", () => {
+    const renamed = { ...vanished, messageCount: 2 };
+    const pinned = { ...vanished, id: "pinned", pinned: true };
+    expect(pruneVanishedSessions([renamed], [], () => false).map((item) => item.id)).toEqual(["ghost"]);
+    expect(pruneVanishedSessions([pinned], [], () => false).map((item) => item.id)).toEqual(["pinned"]);
+  });
+
+  it("returns the list reference untouched when nothing is pruned", () => {
+    const list = [persisted];
+    expect(pruneVanishedSessions(list, [], () => false)).toBe(list);
+  });
+});
+
 describe("backfillUnpersistedSessions", () => {
   const onDisk = { id: "disk", path: "C:/pi/sessions/disk.jsonl", workspace: "C:/work", title: "磁盘话题", modifiedAt: 100, messageCount: 5 };
 
@@ -103,5 +144,21 @@ describe("backfillUnpersistedSessions", () => {
     const seed: LiveSessionSeed = { sessionId: "disk", path: "c:/pi/sessions/DISK.jsonl", workspace: "C:/work", agentId: "coder", activatedAt: 400 };
     const backfilled = backfillUnpersistedSessions([onDisk], [onDisk], [seed], "coder");
     expect(backfilled.map((item) => item.id)).toEqual(["disk"]);
+  });
+});
+
+describe("unpersisted session targets (the /new row opened from the sidebar)", () => {
+  it("resolves a workspace session dir to the real file directory, case-insensitively", () => {
+    // 守卫：sameSessionDir 必须与 agentWorkspaceSessionDir 的输出同形，否则 session.open
+    // 的目录校验会把合法会话判成「路径与工作区不匹配」。期望值从函数自身派生——
+    // 不硬编码 hash（hash 随平台 path.resolve 语义变化，硬编码会在 POSIX 上挂）。
+    const dir = agentWorkspaceSessionDir("C:/pi", "coder", "C:/work/demo");
+    const hashDir = dir.slice(dir.lastIndexOf("/") + 1 || dir.lastIndexOf("\\") + 1);
+    expect(sameSessionDir(dir, dir)).toBe(true);
+    expect(sameSessionDir(dir, dir.toUpperCase())).toBe(true);
+    // 误传会话根、上一级目录或别的哈希目录必须判不匹配（否则校验形同虚设）
+    expect(sameSessionDir(dir, dir.slice(0, dir.length - hashDir.length - 1))).toBe(false);
+    expect(sameSessionDir(dir, agentWorkspaceSessionDir("C:/pi", "coder", "C:/work/other"))).toBe(false);
+    expect(sameSessionDir(undefined, dir)).toBe(false);
   });
 });

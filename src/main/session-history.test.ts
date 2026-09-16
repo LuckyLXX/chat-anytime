@@ -1,3 +1,6 @@
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, join } from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import { PI_DESKTOP_CONTROL_ENTRY_TYPE, restoreControlMessages, restoreToolExecutions, transcriptMessagesFromEntries, type PersistedSessionMessage } from "./session-history.js";
@@ -144,5 +147,58 @@ describe("persisted desktop control messages", () => {
       { id: "pidesktop-control-entry-command", role: "user", control: "compact", blocks: [{ type: "text", text: "/compact 保留当前修改" }] },
       { id: "pidesktop-control-entry-result", role: "assistant", control: "compact", blocks: [{ type: "text", text: "已压缩上下文。" }] }
     ]);
+  });
+});
+
+/**
+ * 侧边栏「未落盘空话题」点击路径依赖的 Pi 文件生命周期事实（2026-09-16 根因修复）。
+ * 若上游改为创建即写文件/打开不存在文件时保留文件名里的 id，这两条会失败——那时
+ * session.open 的「按 live 记录激活」快路径判据（pathExists）可以照旧成立，但注释与
+ * 取舍需要重新核对（见 pi-runtime.ts 的 session.open 分支注释）。
+ */
+describe("Pi session file lifecycle facts", () => {
+  it("does not write the session file until the first assistant message", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pidesktop-session-"));
+    try {
+      const manager = SessionManager.create("C:/work/demo", dir);
+      const file = manager.getSessionFile()!;
+      expect(existsSync(file)).toBe(false);
+      manager.appendMessage({ role: "user", content: "hi" } as never);
+      expect(existsSync(file)).toBe(false);
+      manager.appendMessage({ role: "assistant", content: [{ type: "text", text: "ok" }] } as never);
+      expect(existsSync(file)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("mints a NEW id when opening a file that does not exist yet", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pidesktop-session-"));
+    try {
+      const manager = SessionManager.create("C:/work/demo", dir);
+      const file = manager.getSessionFile()!;
+      const intendedId = basename(file).replace(/^.*_/u, "").replace(/\.jsonl$/u, "");
+      // 1 参调用（不传 cwdOverride）才是 session.open 真实走的路：缺文件 ⇒ 铸新 id。
+      // 注意不能传 cwdOverride——那种调用对存在的文件也不读 header，钉不住事实。
+      const reopened = SessionManager.open(file);
+      // 这正是「点侧边栏那条未落盘的新会话报错」的机制：按 id 查 liveSessions 必然落空。
+      expect(reopened.getSessionId()).not.toBe(intendedId);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the real id once the file exists (control case for the guard above)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pidesktop-session-"));
+    try {
+      const manager = SessionManager.create("C:/work/demo", dir);
+      manager.appendMessage({ role: "user", content: "hi" } as never);
+      manager.appendMessage({ role: "assistant", content: [{ type: "text", text: "ok" }] } as never);
+      const file = manager.getSessionFile()!;
+      expect(existsSync(file)).toBe(true);
+      expect(SessionManager.open(file).getSessionId()).toBe(manager.getSessionId());
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { closeSync, mkdirSync, openSync, readSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readSync } from "node:fs";
 import { readFile, readdir, realpath, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative as relativePath, resolve, sep } from "node:path";
 import { estimateTokens } from "@earendil-works/pi-agent-core";
@@ -86,7 +86,7 @@ import { createAutomationScheduler, type AutomationScheduler } from "./automatio
 import { buildAutomationTools, type AutomationCreateInput, type AutomationToolContext } from "./automation-tools.js";
 import { resolveVisionModel } from "./vision.js";
 import { buildResourceCatalog } from "./resource-catalog.js";
-import { agentWorkspaceSessionDir, backfillUnpersistedSessions, mergeSessionSummary, sessionFileMatchesId, sessionListReadyFor } from "./session-scope.js";
+import { agentWorkspaceSessionDir, backfillUnpersistedSessions, mergeSessionSummary, pruneVanishedSessions, sameSessionDir, sessionFileMatchesId, sessionListReadyFor } from "./session-scope.js";
 import { isDesktopConfiguredProvider } from "./model-catalog.js";
 import { defaultTools, ensureDefaultWorkspaceDir, forgetAgentWorkspace, isPositiveInt, mergeProviderModels, recordAgentWorkspace, resolveDefaultWorkspace, resolveInitialWorkspace } from "./settings.js";
 import { buildMultiInvocationPrompt, composeInvocationBody, parseInvocationPrompt, sameInvocations, type InvocationSegment } from "./invocation-prompt.js";
@@ -1289,6 +1289,24 @@ function evictParkedSessions(): void {
     .filter((record) => record !== activeRuntime && !record.busy && !renderedSessions.has(record.session.sessionId))
     .sort((left, right) => right.activatedAt - left.activatedAt);
   for (const record of parked.slice(MAX_PARKED_SESSIONS)) disposeRecord(record);
+  pruneVanishedSessionRows();
+}
+
+/**
+ * 清掉侧边栏里已经没有归宿的「合成空话题」行（只改内存列表，不重扫磁盘）。
+ *
+ * 未落盘的空话题行完全由 live 记录合成，不写任何持久状态；记录被闲置驱逐后它就
+ * 成了死行（文件从未存在，点击必然失败），而下一次全量刷新不一定来——刷新由回合
+ * 结束防抖、pin/rename/delete 等驱动，连开一串空话题时一次都不会触发，那几条死行
+ * 就会一直留在侧栏（2026-09-16 用户报告的「点了报错」）。列表重建本身会自然丢掉
+ * 它们（磁盘 listAll 里没有），但驱逐发生的那一刻必须主动清一次。
+ */
+function pruneVanishedSessionRows(): void {
+  currentSessions = pruneVanishedSessions(
+    currentSessions,
+    [...liveSessions.values()].map((record) => record.session.sessionManager.getSessionFile()),
+    (path) => existsSync(path)
+  );
 }
 
 // Workspace whose MCP tool cache was last synced; activation only re-syncs
@@ -1392,6 +1410,16 @@ function agentSessionRoot(): string | undefined {
 function pathIsWithin(root: string, target: string): boolean {
   const relation = relativePath(resolve(root), resolve(target));
   return Boolean(relation) && relation !== ".." && !relation.startsWith(`..${sep}`) && !isAbsolute(relation);
+}
+
+/** 存在性判据（fs.stat，出错一律当不存在）：识别未落盘的会话文件。 */
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Resolve browser_upload file arguments to absolute paths inside the record workspace. */
@@ -2366,6 +2394,9 @@ async function refreshSessions(): Promise<void> {
     })),
     listAgentId
   );
+  // 注意：这里不需要 pruneVanishedSessions——列表刚由磁盘 listAll 重建，无文件且无 live
+  // 伪死行根本进不了入参；真正需要清的时刻是「记录被驱逐而列表没重建」（见
+  // pruneVanishedSessionRows）。
 }
 
 function sessionReadyStatus(hasModel: boolean, usedFallback: boolean): string {
@@ -3140,29 +3171,47 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       const root = agentSessionRoot();
       const target = resolve(command.path);
       if (!root || !pathIsWithin(root, target) || !target.toLowerCase().endsWith(".jsonl")) throw new Error("只能打开当前 Agent 的会话");
+      // 未落盘的会话（新建话题在首条 assistant 消息前不写文件）只能按 live 记录打开：
+      // SessionManager.open 对不存在的文件会**另生成一个新 sessionId**，cwd 回退到
+      // process.cwd()（utility 进程的 cwd 是安装目录）——随后既查不到 live 记录、
+      // 目录校验也必失败，点侧边栏那条「新会话」就是在这里报「会话路径与工作区不匹配」
+      // 并把安装目录写进助手最后工作区的（2026-09-16 根因）。判据是**文件是否存在**，
+      // 不是目录是否匹配：后者取决于全局 workspace 镜像，而分屏背景格与跨工作区打开
+      // 都要求它与镜像无关。
+      const fileLive = [...liveSessions.values()].find((candidate) => {
+        const liveFile = candidate.session.sessionManager.getSessionFile();
+        return Boolean(liveFile) && resolve(liveFile!).toLowerCase() === target.toLowerCase();
+      });
+      if (fileLive && !(await pathExists(target))) {
+        if (command.activate === false) break; // 分屏已完成前把无效格留着，无需重建
+        activate(fileLive);
+        emitState();
+        break;
+      }
       const discovered = SessionManager.open(target);
       const sessionWorkspace = discovered.getCwd();
       if (!sessionWorkspace) throw new Error("会话缺少工作区信息");
       const recordWorkspace = resolve(sessionWorkspace);
-      // activate:false（分屏启动恢复的背景格）：创建 record 但不激活，全局
-      // workspace 镜像与 state 通道保持焦点格，会话数据走 session.state。
-      // sessionRoot 按 record 自己的工作区计算，不经过全局 workspace。
+      // sessionRoot 按 record 自己的工作区计算（不经过全局 workspace），且校验必须在
+      // 任何全局镜像改写之前：失败路径不允许脏写助手最后工作区。
+      const recordRoot = currentAgent ? agentWorkspaceSessionDir(getAgentDir(), currentAgent.id, recordWorkspace) : undefined;
+      if (!recordRoot || (!sameSessionDir(recordRoot, dirname(target)) && !sameSessionDir(root, dirname(target)))) {
+        throw new Error("会话路径与工作区不匹配");
+      }
+      // 文件不存在：这行不是「路径不匹配」，而是没有任何工作区信息可依的废行（header 缺失
+      // ⇒ cwd 回退 process.cwd() = 安装目录）。必须挡在镜像改写**之前**——根目录兜底
+      // （sameSessionDir(root, ...)）会让这类行的目录校验通过，否则又会把安装目录写进
+      // 助手最后工作区，再 /new 就在那里建会话（与本次修的 bug 同类）。绝不拿它去建一个
+      // cwd 是安装目录的空会话。
+      if (!(await pathExists(target))) throw new Error("该会话文件不存在（未发过消息的空话题或已被移除）");
       if (command.activate === false) {
         const live = liveSessions.get(discovered.getSessionId());
         if (live) break; // 已 live：无需重建，也不激活
-        const backgroundRoot = currentAgent ? agentWorkspaceSessionDir(getAgentDir(), currentAgent.id, recordWorkspace) : undefined;
-        if (!backgroundRoot || (resolve(dirname(target)).toLowerCase() !== resolve(backgroundRoot).toLowerCase() && resolve(dirname(target)).toLowerCase() !== resolve(root).toLowerCase())) {
-          throw new Error("会话路径与工作区不匹配");
-        }
-        await createSession(SessionManager.open(target, backgroundRoot, recordWorkspace), { skipActivate: true });
+        await createSession(SessionManager.open(target, recordRoot, recordWorkspace), { skipActivate: true });
         break;
       }
       workspace = recordWorkspace;
       rememberWorkspace(workspace);
-      const sessionRoot = workspaceSessionDir();
-      if (!sessionRoot || (resolve(dirname(target)).toLowerCase() !== resolve(sessionRoot).toLowerCase() && resolve(dirname(target)).toLowerCase() !== resolve(root).toLowerCase())) {
-        throw new Error("会话路径与工作区不匹配");
-      }
       // A live record (e.g. a session still running in the background) is
       // reactivated in place — never rebuilt — so its in-flight turn survives.
       const live = liveSessions.get(discovered.getSessionId());
@@ -3171,7 +3220,8 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         emitState();
         break;
       }
-      await createSession(SessionManager.open(target, sessionRoot, workspace));
+      // 此处不再重做存在性校验：上面已挡（live-by-id 命中隐含文件存在，重建分支直走）。
+      await createSession(SessionManager.open(target, recordRoot, workspace));
       break;
     }
     case "session.rename": {
@@ -3663,18 +3713,20 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         post({ type: "error", message: "会话缺少工作区信息，无法打开" });
         break;
       }
-      workspace = recordWorkspace;
-      rememberWorkspace(workspace);
-      const sessionRoot = workspaceSessionDir();
+      // 校验用 record 自己的工作区目录（不经过全局 workspace 镜像），且在任何全局
+      // 镜像改写之前：失败路径不写脏助手最后工作区（与 session.open 同纪律）。
+      const recordRoot = currentAgent ? agentWorkspaceSessionDir(getAgentDir(), currentAgent.id, recordWorkspace) : undefined;
+      if (!recordRoot || !sameSessionDir(recordRoot, dirname(target))) {
+        post({ type: "error", message: "会话路径与工作区不匹配" });
+        break;
+      }
       const runRecordLive = liveSessions.get(discovered.getSessionId());
       if (runRecordLive) {
         activate(runRecordLive);
       } else {
-        if (!sessionRoot || resolve(dirname(target)).toLowerCase() !== resolve(sessionRoot).toLowerCase()) {
-          post({ type: "error", message: "会话路径与工作区不匹配" });
-          break;
-        }
-        await createSession(SessionManager.open(target, sessionRoot, recordWorkspace));
+        workspace = recordWorkspace;
+        rememberWorkspace(workspace);
+        await createSession(SessionManager.open(target, recordRoot, recordWorkspace));
       }
       emitState();
       break;

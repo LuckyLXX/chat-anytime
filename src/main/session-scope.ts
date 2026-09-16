@@ -32,6 +32,42 @@ export function resolveNewSessionDefaults<TModel>(hasExistingMessages: boolean, 
 }
 
 /**
+ * 会话文件是否落在该会话目录下（绝对路径 + 大小写不敏感；Windows/macOS 文件名
+ * 大小写不敏感，Pi 的落盘目录由 cwd 解析而来，两侧写法可能不同）。
+ */
+export function sameSessionDir(expectedDir: string | undefined, actualDir: string): boolean {
+  if (!expectedDir) return false;
+  return resolve(expectedDir).toLowerCase() === resolve(actualDir).toLowerCase();
+}
+
+/**
+ * 侧边栏「合成空话题」行的失效清理。
+ *
+ * 新建话题在首条 assistant 消息前**不落盘**（Pi `_persist` 挂在 hasAssistant）
+ * 时，列表里的那一行完全由 live 记录合成（`ensureSessionInList` /
+ * `backfillUnpersistedSessions`），**不写入任何持久状态**——所以 live 记录一旦
+ * 被闲置驱逐（`MAX_PARKED_SESSIONS`）或进程重启，那一行就成了死行：文件从未
+ * 存在，点击必然失败。它也不能靠「实例 id」之类的标记清理（重启后无从比对），
+ * 唯一可靠的判据是：空话题（messageCount 0）且既没有活记录、文件也不存在。
+ *
+ * 置顶行保留：置顶是用户显式动作，宁留一行可点失败的置顶，也不静默删除用户
+ * 标记过的条目（当前会话没有「取消置顶」以外的清理入口）。
+ */
+export function pruneVanishedSessions(
+  list: SessionSummary[],
+  liveFiles: readonly (string | undefined)[],
+  fileExists: (path: string) => boolean
+): SessionSummary[] {
+  const live = new Set(liveFiles.filter((path): path is string => Boolean(path)).map((path) => resolve(path).toLowerCase()));
+  const kept = list.filter((item) => {
+    if (item.messageCount > 0 || item.pinned) return true;
+    if (live.has(resolve(item.path).toLowerCase())) return true;
+    return fileExists(item.path);
+  });
+  return kept.length === list.length ? list : kept;
+}
+
+/**
  * 会话列表“已就绪”不只是非空：还必须是按当前 Agent 的目录作用域拉取的。
  * 切换 Agent 后旧列表虽非空，但作用域已变，createSession 必须重拉——
  * 否则话题页会继续显示上一个角色的会话。
