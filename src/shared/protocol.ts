@@ -730,7 +730,8 @@ export type BrowserAutomationRequest =
 /** 各操作的成功载荷。 */
 export type BrowserAutomationData =
   | { kind: "attach"; tabId: string; url: string }
-  | { kind: "navigate"; url: string; title: string }
+  /** pending=true：导航已放行但页面仍在加载（loadURL 预算内未 settle；不是失败）。 */
+  | { kind: "navigate"; url: string; title: string; pending?: boolean }
   | { kind: "snapshot"; text: string; refCount: number; truncated: boolean }
   | { kind: "click"; description: string }
   | { kind: "type"; description: string }

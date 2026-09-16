@@ -30,6 +30,7 @@ import type {
 import { downloadDirFor, downloadRelativePath } from "./browser-downloads.js";
 import { isJsonLikeText, saveBrowserEvalResult } from "./browser-eval-result.js";
 import { BrowserStaticServer, detectLocalFilePath } from "./browser-static-server.js";
+import { needsPageDocument } from "./browser-preview-seed.js";
 import { normalizeBrowserUrl } from "./browser-preview-url.js";
 import type { BrowserPreviewController, DownloadInfo } from "./browser-preview.js";
 
@@ -720,6 +721,13 @@ export class BrowserAutomationController {
   private readonly pendingDialogs = new Map<string, BrowserAutomationDialogNote[]>();
   /** 已注册 Page 域与弹窗监听的标签页（每个标签页一次，不在 cdp() 里重复注册）。 */
   private readonly dialogWatchTabs = new Set<string>();
+  /**
+   * 已挂过 `Page.javascriptDialogOpening` 监听的 WebContents。与 dialogWatchTabs
+   * 分开的理由：navigate 成功后要「重新武装 Page 域」（renderer 冻死时先前那次
+   * Page.enable 可能被丢弃），但监听器只能挂一次——重复挂会让每个弹窗被应答两遍。
+   * 用 WeakSet 而不是 Set：标签页关闭后由 GC 回收，无需手动清。
+   */
+  private readonly dialogListenerContents = new WeakSet<WebContents>();
   /** 已定向落盘、等 done 终态的下载：占位回执对象 + 文件名（终态到达后就地替换）。 */
   private readonly settleWaiters = new Map<string, Set<{ notice: BrowserAutomationNotice; filename: string }>>();
   /** tabs with an operation in flight (per-tab serialization). */
@@ -892,37 +900,46 @@ export class BrowserAutomationController {
    * every CDP evaluation until the 110s watchdog — the model would burn two
    * minutes to learn only 「浏览器操作超时」, with no hint that a dialog was the
    * cause. `Page.enable` arms the `Page.javascriptDialogOpening` event.
+   *
+   * `Page.enable` 绝不 await（2026-09-16 实测，见下）。这一条不是优化而是正确性：
+   * 在「从未导航过的」renderer 上（= 刚 createAutomationTab 出来的标签页），
+   * `Page.enable` 与 `Runtime.enable` / `Runtime.evaluate` / `DOM.enable` /
+   * `DOM.getDocument` / `Accessibility.enable` **全部永不回包**（真 Electron 探针：
+   * 6-8 秒预算下全部挂住），只有 `Input.setIgnoreInputEvents` 正常返回。旧实现
+   * `await armWithTimeout(Page.enable)` 让新建标签的首个操作白等 8 秒；而 110 秒
+   * 挂起（事故发生时的表现）来自安装版（1.1.0）里更早的写法 `await this.cdp(...)`。
+   * 导航一旦发生、文档建立，同一命令立刻回到毫秒级。
+   *
+   * 于是这里改为「**先同步挂监听、再把 Page.enable 发出去不管结果**」：事件订阅不
+   * 依赖 `Page.enable` 的回包，命令本身在文档就绪后照样生效（实测：fire-and-forget
+   * 之后才导航到「加载期 alert」的页面，`Page.javascriptDialogOpening` 仍然到达并
+   * 被自动应答；8 轮对照 0 漏报、0 冻结）。标记照旧只置一次，避免每条命令重复发。
    */
-  private async ensureDialogWatch(tabId: string, contents: WebContents): Promise<void> {
-    if (this.dialogWatchTabs.has(tabId) || contents.isDestroyed()) return;
-    this.dialogWatchTabs.add(tabId);
-    try {
-      const outcome = await armWithTimeout(this.cdp(contents, "Page.enable"));
-      if (outcome === "timeout") {
-        // renderer 假死：保留 dialogWatchTabs 标记（后续操作不再重试、不再每次多等一个超时），
-        // 本次操作继续——弹窗线报缺席，但纯内存操作（tabs list 等）能立即返回。
-        // 真正要碰页面的操作随后会在自己的 CDP 调用上拿到明确的超时文案。
+  private ensureDialogWatch(tabId: string, contents: WebContents): void {
+    if (contents.isDestroyed()) return;
+    if (!this.dialogListenerContents.has(contents)) {
+      // 监听器随 WebContents 销毁自动失效（debugger detach），无需手动 off。
+      // `debugger.on` 在少数 target 上不可用（或测试替身未实现）：降级为不监听，
+      // 不让整个操作因此失败。
+      try {
+        this.dialogListenerContents.add(contents);
+        contents.debugger.on("message", (_event, method, params) => {
+          if (method !== "Page.javascriptDialogOpening") return;
+          const record = params as { type?: unknown; message?: unknown } | undefined;
+          const type = typeof record?.type === "string" && record.type ? record.type : "alert";
+          const message = typeof record?.message === "string" ? record.message : "";
+          void this.autoAcceptDialog(tabId, contents, type, message);
+        });
+      } catch {
+        this.dialogListenerContents.delete(contents);
         return;
       }
-    } catch {
-      // 不支持 Page 域的 target：退回原行为（弹窗仍会阻塞，但至少不报错），下次重试。
-      this.dialogWatchTabs.delete(tabId);
-      return;
     }
-    // 监听器随 WebContents 销毁自动失效（debugger detach），无需手动 off。
-    // `debugger.on` 在少数 target 上不可用（或测试替身未实现）：降级为不监听，
-    // 不让整个操作因此失败。
-    try {
-      contents.debugger.on("message", (_event, method, params) => {
-        if (method !== "Page.javascriptDialogOpening") return;
-        const record = params as { type?: unknown; message?: unknown } | undefined;
-        const type = typeof record?.type === "string" && record.type ? record.type : "alert";
-        const message = typeof record?.message === "string" ? record.message : "";
-        void this.autoAcceptDialog(tabId, contents, type, message);
-      });
-    } catch {
-      // 不支持事件监听的 target：保持「至少已装上 Page 域」的状态。
-    }
+    if (this.dialogWatchTabs.has(tabId)) return;
+    this.dialogWatchTabs.add(tabId);
+    // 不回包不是失败信号（无文档时必然不回包），所以既不等也不因超时清标记：
+    // 把逾期结果吞掉，避免 unhandled rejection。
+    void this.cdp(contents, "Page.enable").catch(() => undefined);
   }
 
   /**
@@ -1103,9 +1120,15 @@ export class BrowserAutomationController {
 
     private async execute(sessionKey: string, tabId: string, request: BrowserAutomationRequest): Promise<BrowserAutomationResult> {
     const contents = this.requireContents(tabId);
-    // 每个操作开始前保证弹窗监听已就绪（每标签页一次；这里 await 的是已注册
-    // 时的立即返回，不在 cdp() 内部做，以免每条命令都 Page.enable）。
-    await this.ensureDialogWatch(tabId, contents);
+    // 要碰页面的操作先等预置空白文档落定：没有文档的 renderer 上文档类 CDP 命令永不
+    // 回包（见 browser-preview.createTab）。tabs / attach / get url 刻意不过这一关
+    // ——它们由主进程状态回答，不该为页面健康买单（2026-09-15 事故的教训）。
+    if (needsPageDocument(request)) {
+      await this.preview.ensurePageReady(tabId);
+    }
+    // 每个操作开始前保证弹窗监听已就绪（每标签页一次；同步注册、不等待 Page.enable
+    // 回包——无文档的 renderer 上它永不回包。见 ensureDialogWatch 的注释）。
+    this.ensureDialogWatch(tabId, contents);
     switch (request.op) {
       case "attach": {
         const state = this.preview.snapshot(tabId);
@@ -1115,13 +1138,18 @@ export class BrowserAutomationController {
         const target = await this.resolveNavigationTarget(request.url, request.workspace);
         this.setDownloadDir(tabId, request.workspace);
         this.tabRefs.delete(tabId);
-        // 导航成功 = renderer 活着：若 Page.enable 曾因假死被跳过，重新武装弹窗监听。
+        // 每次导航都重新武装 Page 域：上一次导航可能发生在 renderer 冻死/无文档时，
+        // 那次 Page.enable 会被丢弃（监听器本身只挂一次，见 ensureDialogWatch）。
         this.dialogWatchTabs.delete(tabId);
+        this.ensureDialogWatch(tabId, contents);
         this.preview.setAutomating(tabId, `正在导航到 ${request.url}`);
         try {
           const state = await this.preview.handle({ type: "navigate", tabId, url: target });
           if (state.error) return { ok: false, error: `导航失败：${state.error}` };
-          return { ok: true, data: { kind: "navigate", url: state.url, title: state.title } };
+          // pending：loadURL 没在预算内落定但页面确实在加载（也可能已在后台到位）。
+          // 回执如实说明，由工具层渲染「仍在加载」的文案。
+          const pending = state.loading === true && !state.error;
+          return { ok: true, data: { kind: "navigate", url: state.url, title: state.title, ...pending ? { pending: true } : {} } };
         } finally {
           this.preview.setAutomating(tabId, undefined);
         }
@@ -1149,7 +1177,6 @@ export class BrowserAutomationController {
       case "get":
         return this.get(tabId, contents, request.what, request.ref);
       case "tabs":
-        await this.ensureDialogWatch(tabId, contents);
         return this.tabs(sessionKey, tabId, request.action, request.tabId);
     }
   }

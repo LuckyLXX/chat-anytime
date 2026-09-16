@@ -248,7 +248,9 @@ function makeFakePreview(initialTabs: string[]): FakePreview & BrowserPreviewCon
       return state() as never;
     },
     isTabRendered: (id: string) => rendered.has(id),
-    isWindowRenderable: () => true
+    isWindowRenderable: () => true,
+    // 预置空白文档的等待：测试替身没有真实渲染进程，视为已就绪。
+    ensurePageReady: async () => undefined
   } as unknown as FakePreview & BrowserPreviewController;
   return preview;
 }
@@ -1067,7 +1069,7 @@ describe("browser automation element screenshots", () => {
   });
 });
 
-describe("arming timeouts keep wedged renderers from stalling pure ops", () => {
+describe("arming never waits for CDP calls that may never answer", () => {
   const controllers: BrowserAutomationController[] = [];
   afterEach(() => {
     for (const controller of controllers) controller.dispose();
@@ -1076,36 +1078,45 @@ describe("arming timeouts keep wedged renderers from stalling pure ops", () => {
   });
 
   /**
-   * 复现 2026-09-15 事故：残留标签页 renderer 假死（CDP 命令永不返回），
-   * tabs(list) 之前要先武装输入守卫与弹窗监听——旧实现会一路挂到 110s 看门狗。
-   * 现在 arming 各 8 秒超时容错，纯内存的 tabs list 应在两个预算内返回。
+   * 复现 2026-09-16 事故（P0）：`Page.enable` 在**从未导航过的** renderer 上永不
+   * 回包（真 Electron 探针实测：Page.enable / Runtime.enable / Runtime.evaluate /
+   * DOM.enable / DOM.getDocument / Accessibility.enable 全部挂住）。旧实现 await 它，
+   * 于是「自动化刚建出来的标签页上的第一个操作」直接挂到 110s 看门狗——真实会话
+   * browser_navigate 就是这样超时的（审计里 09-14、09-15、09-16 五次全是首次操作）。
+   *
+   * 现在监听是同步挂的，`Page.enable` 只发不等：整个 handle() 必须在**没有任何
+   * 计时器推进**的情况下立即返回。
    */
-  it("returns tabs(list) within the two arming budgets on a wedged tab", async () => {
-    vi.useFakeTimers();
+  it("returns immediately without waiting for a Page.enable that never answers", async () => {
     const preview = makeFakePreview(["default"]) as FakePreview & BrowserPreviewController;
+    const sent: string[] = [];
     const contents = {
       isDestroyed: () => false,
       debugger: {
         isAttached: () => false,
         attach: () => undefined,
-        sendCommand: () => new Promise(() => undefined), // 永不返回：假死 renderer
+        sendCommand: (method: string) => {
+          sent.push(method);
+          // 无文档 renderer 的真实行为：既不回包也不抛错。
+          return method === "Page.enable" ? new Promise(() => undefined) : Promise.resolve({ result: { value: 1 } });
+        },
         on: () => undefined
       }
     };
     (preview as unknown as { webContentsFor: (id: string) => unknown }).webContentsFor = () => contents;
     const controller = new BrowserAutomationController(preview);
     controllers.push(controller);
-    const pending = controller.handle("s1", { op: "tabs", action: "list" });
-    await vi.advanceTimersByTimeAsync(CDP_ARM_TIMEOUT_MS * 2 + 500);
-    const result = await pending;
+    // 不用 fake timers、不推进任何时间：还有等待就一定不会 settle。
+    const result = await controller.handle("s1", { op: "tabs", action: "list" });
     expect(result.ok).toBe(true);
     if (result.ok && result.data.kind === "tabs") {
       expect(result.data.tabs.map((tab) => tab.id)).toEqual(["default"]);
     }
+    // Page.enable 确实发出去了（文档就绪后会生效），只是没人等它。
+    expect(sent).toContain("Page.enable");
   });
 
-  it("does not re-pay the dialog-watch budget on the following op", async () => {
-    vi.useFakeTimers();
+  it("sends Page.enable once per tab, and re-arms it after a real navigation", async () => {
     const preview = makeFakePreview(["default"]) as FakePreview & BrowserPreviewController;
     const sendCounts: Record<string, number> = {};
     const contents = {
@@ -1115,7 +1126,6 @@ describe("arming timeouts keep wedged renderers from stalling pure ops", () => {
         attach: () => undefined,
         sendCommand: (method: string) => {
           sendCounts[method] = (sendCounts[method] ?? 0) + 1;
-          if (method === "Page.enable") return new Promise(() => undefined);
           return Promise.resolve({ result: { value: 1 } });
         },
         on: () => undefined
@@ -1124,13 +1134,71 @@ describe("arming timeouts keep wedged renderers from stalling pure ops", () => {
     (preview as unknown as { webContentsFor: (id: string) => unknown }).webContentsFor = () => contents;
     const controller = new BrowserAutomationController(preview);
     controllers.push(controller);
-    const first = controller.handle("s1", { op: "tabs", action: "list" });
-    await vi.advanceTimersByTimeAsync(CDP_ARM_TIMEOUT_MS * 2 + 500);
-    expect((await first).ok).toBe(true);
-    // 第二次操作：弹窗监听已被标记跳过（不再重试 Page.enable），只剩输入守卫一个预算。
-    const second = controller.handle("s1", { op: "tabs", action: "list" });
-    await vi.advanceTimersByTimeAsync(CDP_ARM_TIMEOUT_MS + 500);
-    expect((await second).ok).toBe(true);
+    await controller.handle("s1", { op: "tabs", action: "list" });
+    await controller.handle("s1", { op: "tabs", action: "list" });
+    // 同一个标签页不重复发（每条命令都 Page.enable 是旧版踩过的坑）。
     expect(sendCounts["Page.enable"]).toBe(1);
+    // 导航成功后重新武装：上一次导航可能发生在 renderer 冻死/无文档时，那次命令会被丢弃。
+    await controller.handle("s1", { op: "navigate", url: "https://example.com/" });
+    expect(sendCounts["Page.enable"]).toBe(2);
+  });
+
+  it("never registers two Page listeners for one tab", async () => {
+    // 监听器挂两遍会让每个弹窗被应答两次（重复 handleJavaScriptDialog）。
+    const preview = makeFakePreview(["default"]) as FakePreview & BrowserPreviewController;
+    const listeners: Array<(...args: unknown[]) => void> = [];
+    const contents = {
+      isDestroyed: () => false,
+      debugger: {
+        isAttached: () => false,
+        attach: () => undefined,
+        sendCommand: async () => ({ result: { value: 1 } }),
+        on: (_event: string, listener: (...args: unknown[]) => void) => listeners.push(listener)
+      }
+    };
+    (preview as unknown as { webContentsFor: (id: string) => unknown }).webContentsFor = () => contents;
+    const controller = new BrowserAutomationController(preview);
+    controllers.push(controller);
+    await controller.handle("s1", { op: "navigate", url: "https://example.com/" });
+    await controller.handle("s1", { op: "navigate", url: "https://example.com/next" });
+    await controller.handle("s1", { op: "tabs", action: "list" });
+    expect(listeners).toHaveLength(1);
+  });
+
+  it("never blocks a pure-memory op on the page being ready", async () => {
+    // 2026-09-15 事故：tabs(list) 这种纯内存操作因为绑到了还没准备好的标签页而白等
+    // 到看门狗。这里让 ensurePageReady 永不返回：tabs(list)/attach/读标签地址必须
+    // 仍然立即完成（它们由主进程状态回答，不碰页面）。
+    const preview = makeFakePreview(["default"]) as FakePreview & BrowserPreviewController;
+    (preview as unknown as { ensurePageReady: () => Promise<void> }).ensurePageReady = () => new Promise(() => undefined);
+    (preview as unknown as { webContentsFor: () => unknown }).webContentsFor = () => ({
+      isDestroyed: () => false,
+      getURL: () => "https://example.com/",
+      getTitle: () => "页",
+      debugger: { isAttached: () => false, attach: () => undefined, sendCommand: async () => ({ result: { value: 1 } }), on: () => undefined }
+    });
+    const controller = new BrowserAutomationController(preview);
+    controllers.push(controller);
+    const tabs = await controller.handle("s1", { op: "tabs", action: "list" });
+    expect(tabs.ok).toBe(true);
+    const attach = await controller.handle("s2", { op: "attach" });
+    expect(attach.ok).toBe(true);
+    const getUrl = await controller.handle("s1", { op: "get", what: "url" });
+    expect(getUrl.ok).toBe(true);
+    if (getUrl.ok && getUrl.data.kind === "get") expect(getUrl.data.value).toBe("https://example.com/");
+  });
+
+  it("still gates page-touching ops on the page being ready", async () => {
+    // 反向保证：上面的「不过关」不能扩成「全都不过关」——页面类操作必须等待，
+    // 否则又会回到「CDP 命令永不回包」的 110s 挂起。
+    const preview = makeFakePreview(["default"]) as FakePreview & BrowserPreviewController;
+    let called = 0;
+    (preview as unknown as { ensurePageReady: () => Promise<void> }).ensurePageReady = async () => { called += 1; };
+    const controller = new BrowserAutomationController(preview);
+    controllers.push(controller);
+    await controller.handle("s1", { op: "eval", expression: "1", mode: "read" });
+    expect(called).toBe(1);
+    await controller.handle("s1", { op: "get", what: "text" });
+    expect(called).toBe(2);
   });
 });

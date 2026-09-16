@@ -20,6 +20,7 @@ import type {
   BrowserAutomationWait
 } from "../shared/protocol.js";
 import { DOWNLOAD_DIR_SEGMENTS, MAX_TAB_DOWNLOADS } from "./browser-downloads.js";
+import { NAVIGATE_BUDGET_MS, describeNavigateOutcome } from "./browser-navigate.js";
 
 export interface BrowserToolDeps {
   /** Forward one browser operation to the main process and await its result. */
@@ -222,7 +223,13 @@ export function buildBrowserTools(deps: BrowserToolDeps): ToolDefinition[] {
         const result = await run(deps, { op: "navigate", url, workspace: deps.workspace?.() });
         failIfNotOk(result);
         if (result.data.kind !== "navigate") throw new Error("导航返回了意外结果");
-        return { content: [{ type: "text" as const, text: withNotices(`已导航到 ${result.data.url}（${result.data.title || "标题未知"}）。页面可能仍在加载，建议先 browser_wait（页面加载）再 browser_snapshot。`, result) }], details: { url: result.data.url } };
+        const summary = describeNavigateOutcome(
+          result.data.pending ? "still-loading" : "done",
+          result.data.url,
+          result.data.title,
+          NAVIGATE_BUDGET_MS / 1000
+        )!;
+        return { content: [{ type: "text" as const, text: withNotices(summary, result) }], details: { url: result.data.url } };
       }
     }),
     defineTool({

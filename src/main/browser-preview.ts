@@ -3,6 +3,8 @@ import { join } from "node:path";
 import { shell, WebContentsView, type BrowserWindow, type Rectangle, type Session } from "electron";
 import type { BrowserElementPick, BrowserPreviewBounds, BrowserPreviewCommand, BrowserPreviewState, BrowserTabsEvent } from "../shared/protocol.js";
 import { MAX_TAB_DOWNLOADS, sanitizeDownloadName } from "./browser-downloads.js";
+import { NAVIGATE_BUDGET_MS, resolveNavigateOutcome, withNavigationBudget } from "./browser-navigate.js";
+import { isSeedPhase } from "./browser-preview-seed.js";
 import { parseElementPickMessage } from "./browser-preview-pick.js";
 import { normalizeBrowserUrl } from "./browser-preview-url.js";
 
@@ -12,6 +14,14 @@ const DEFAULT_TAB_ID = "default";
 export const DOWNLOAD_SETTLE_TIMEOUT_MS = 3_000;
 /** 上述等待的轮询间隔。 */
 export const DOWNLOAD_SETTLE_POLL_MS = 25;
+
+/**
+ * 预置空白文档的等待上限。空白页是本地即时文档（实测几十毫秒），这个预算只用于
+ * 极端情况兜底；超时后照旧发真实导航，不让内部准备阻塞用户操作。
+ */
+export const SEED_SETTLE_TIMEOUT_MS = 2_000;
+/** 预置文档「彻底静下来」的轮询间隔。 */
+export const SEED_POLL_MS = 20;
 
 /**
  * 一次下载事件（预览控制器 → 自动化控制器）。
@@ -56,11 +66,29 @@ function normalizedBounds(bounds: BrowserPreviewBounds): Rectangle {
   };
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 interface BrowserTabView {
   view: WebContentsView;
   bounds?: Rectangle;
   visible: boolean;
   state: BrowserPreviewState;
+  /**
+   * 只装过「建标签时预置的空白文档」，尚未发生任何真实导航。为 true 时文档类事件
+   * 不写进 state——否则这次内部准备会被当成一次真实导航（面板会显示 attached +
+   * about:blank，并把空白页的视口尺寸当成页面内容宽去算缩放）。navigateTab 会把它
+   * 置回 false，之后一切照旧。
+   */
+  seeded?: boolean;
+  /**
+   * 预置空白文档的完成承诺（resolve 时隔离已结束、它的事件都已派发干净）。
+   * navigateTab 必须先等它：否则两次 `loadURL` 会在同一标签上互相抢占（真 Electron
+   * 探针实测：被抢占的那次以 ERR_ABORTED 结束，且标签 `getURL()` 会短暂留在旧地址
+   * 上），首个导航的回执就会报出上一个地址（about:blank）而显得「地址对不上」。
+   */
+  seed?: Promise<unknown>;
   /** 内容尺寸量测防抖定时器（resize/zoom 后延迟量测）。 */
   measureTimer?: ReturnType<typeof setTimeout>;
   /** 最近一次量测并已推送的内容尺寸（1px 死带去重）。 */
@@ -110,6 +138,21 @@ export class BrowserPreviewController {
   webContentsFor(tabId: string): Electron.WebContents | undefined {
     const tab = this.tabs.get(tabId);
     return tab && !tab.view.webContents.isDestroyed() ? tab.view.webContents : undefined;
+  }
+
+  /**
+   * 等该标签页的预置空白文档落定（每标签页只付一次）。文档类 CDP 命令在一个没有文档
+   * 的 renderer 上永不回包（见 createTab 注释），所以任何**要碰页面**的操作都应先过
+   * 这一关；纯内存操作（列表/绑定/读标签地址）不应为页面健康买单——它们直接由主进程
+   * 状态回答，能立即返回（2026-09-15 事故的直接教训）。
+   */
+  async ensurePageReady(tabId: string): Promise<void> {
+    const wrapper = this.tabs.get(tabId);
+    if (!wrapper?.seed) return;
+    const seed = wrapper.seed;
+    // 先清再等：与 downloadStarts / dialogWatch 同一纪律，已经付过的不重复付。
+    wrapper.seed = undefined;
+    await Promise.race([seed, sleep(SEED_SETTLE_TIMEOUT_MS + 500)]);
   }
 
   /**
@@ -243,10 +286,25 @@ export class BrowserPreviewController {
     view.setBackgroundColor("#ffffff");
     this.window.contentView.addChildView(view);
 
-    const wrapper: BrowserTabView = { view, visible: true, state };
+    const wrapper: BrowserTabView = { view, visible: true, state, seeded: true };
     this.tabs.set(tabId, wrapper);
 
     const contents = view.webContents;
+    // 预置一个空文档（2026-09-16）：全新的 renderer 没有任何文档时，CDP 的
+    // 文档类命令（Page.enable / Runtime.enable / Runtime.evaluate / DOM.enable /
+    // DOM.getDocument / Accessibility.enable）**永不回包**（真 Electron 探针实测），
+    // 于是「自动化刚建的标签页上的第一个操作」会挂到看门狗（真实事故：
+    // browser_navigate 110 秒超时、面板一直显示空白页）。about:blank 会立刻建出
+    // 文档，整个 CDP 面恢复正常（探针：seed 后上述命令全部毫秒级）。
+    //
+    // seeded 标记让这次内部准备不进 state：否则面板会把「初始空白」当成真实地址，
+    // 这正是旧版地址栏伪造 http://localhost:3000 的同类错误。承诺存在 wrapper 上，
+    // 供 navigateTab 在发真实导航前等它落定（避免两次导航互相抢占）。
+    //
+    // 等待口径是「隔离结束」而不是「loadURL resolve」：后者在 did-finish-load 时
+    // 就返回，did-stop-loading 可能稍后才到——那一条晚到的事件会在真实导航开始后
+    // 被当成真实事件，把加载中指示器提前抹掉。
+    wrapper.seed = this.seedBlankDocument(contents);
     contents.on("ipc-message", (_event, channel, payload) => {
       if (channel !== "browser-preview:pick-result") return;
       // CDP 合成输入在 Electron 里同样是 isTrusted（页面侧无法区分），AI 正在
@@ -273,15 +331,17 @@ export class BrowserPreviewController {
         event.preventDefault();
       }
     });
-    contents.on("did-start-loading", () => this.updateState(tabId, { loading: true, error: undefined }));
+    contents.on("did-start-loading", () => { if (this.isSeedPhase(tabId)) return; this.updateState(tabId, { loading: true, error: undefined }); });
     contents.on("did-stop-loading", () => {
+      if (this.isSeedPhase(tabId)) return;
       this.refreshState(tabId, { loading: false });
       this.scheduleContentMeasure(tabId, 250);
     });
-    contents.on("did-navigate", (_event, url) => this.refreshState(tabId, { url, error: undefined }));
-    contents.on("did-navigate-in-page", (_event, url) => this.refreshState(tabId, { url, error: undefined }));
+    contents.on("did-navigate", (_event, url) => { if (this.isSeedPhase(tabId)) return; this.refreshState(tabId, { url, error: undefined }); });
+    contents.on("did-navigate-in-page", (_event, url) => { if (this.isSeedPhase(tabId)) return; this.refreshState(tabId, { url, error: undefined }); });
     contents.on("page-title-updated", (event, title) => {
       event.preventDefault();
+      if (this.isSeedPhase(tabId)) return;
       this.updateState(tabId, { title });
     });
     contents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
@@ -293,6 +353,36 @@ export class BrowserPreviewController {
     });
     this.layoutTab(tabId);
     return wrapper;
+  }
+
+  /**
+   * 预置空白文档并等到它彻底静下来（loadURL 落定 + 不再 loading）。
+   * 失败/超时都不抛：预置只是为了让 CDP 的文档类命令能回包，目标导航不能被它拖住。
+   */
+  private async seedBlankDocument(contents: Electron.WebContents): Promise<void> {
+    try {
+      await contents.loadURL("about:blank");
+    } catch {
+      // 极罕发：即使本次 loadURL 失败，renderer 通常也已拿到文档；直接交给调用方继续。
+      return;
+    }
+    const deadline = Date.now() + SEED_SETTLE_TIMEOUT_MS;
+    while (!contents.isDestroyed() && contents.isLoading() && Date.now() < deadline) {
+      await sleep(SEED_POLL_MS);
+    }
+  }
+
+  /**
+   * 该标签页是否仍处于「只有预置空白文档」的阶段（见 BrowserTabView.seeded）。
+   * 只抑制空白页自身的加载事件；navigateTab 一开始就把 seeded 置 false，因此真实
+   * 导航（包括用户在地址栏里输入触发的）事件一律不受影响。
+   */
+  private isSeedPhase(tabId: string): boolean {
+    const wrapper = this.tabs.get(tabId);
+    if (!wrapper) return false;
+    const contents = wrapper.view.webContents;
+    if (contents.isDestroyed()) return false;
+    return isSeedPhase(wrapper.seeded, contents.getURL());
   }
 
   /** 反查某个 WebContents 属于哪个标签页（下载事件按标签页定策略）。 */
@@ -384,18 +474,42 @@ export class BrowserPreviewController {
     this.downloadCounts.delete(tabId);
     const url = normalizeBrowserUrl(input);
     const wrapper = this.getOrCreate(tabId);
+    // 先等预置空白文档落定（通常 <100ms）——两次 loadURL 在同一标签上互相抢占会让
+    // 本次导航被 abort，而回执仍会报出上一个地址（端到端探针实测：首次导航的回执
+    // 曾报 about:blank）。等失败也照旧往下走，目标导航不因内部准备而失败。
+    await this.ensurePageReady(tabId);
+    // 真实导航开始：预置空白阶段结束，文档事件自此正常写进 state。
+    wrapper.seeded = false;
     // 新页面内容未知：先清掉旧量测，等 did-stop-loading 后重测。
     wrapper.measuredContent = undefined;
     this.updateState(tabId, { attached: true, url, title: "", loading: true, error: undefined, contentWidth: undefined, contentHeight: undefined });
+    // 导航本身可能永不 settle（服务器不结束响应），也可能被上一次导航 abort 掉：
+    // 都不该把「浏览器操作超时」或假 ERR_ABORTED 报给模型（见 browser-navigate.ts）。
+    const contents = wrapper.view.webContents;
+    let timedOut = false;
+    let error: string | undefined;
     try {
-      await wrapper.view.webContents.loadURL(url);
-    } catch (error) {
-      this.refreshState(tabId, {
-        loading: false,
-        url,
-        error: error instanceof Error ? error.message : "网页加载失败"
-      });
+      await withNavigationBudget(contents.loadURL(url), () => { timedOut = true; });
+    } catch (thrown) {
+      error = thrown instanceof Error ? thrown.message : "网页加载失败";
     }
+    // 单一判定口径：只看 loadURL 的结果 + 标签此刻的真实 URL/加载态。
+    const outcome = resolveNavigateOutcome({
+      timedOut,
+      error,
+      targetUrl: url,
+      currentUrl: contents.isDestroyed() ? "" : contents.getURL(),
+      loading: !contents.isDestroyed() && contents.isLoading()
+    });
+    if (outcome === "failed") {
+      this.refreshState(tabId, { loading: false, url, error: error ?? "网页加载失败" });
+      return;
+    }
+    // done / still-loading 都以真实状态收尾（still-loading 时 loading 保持 true，
+    // 工具栏显示可点的「停止加载」按钮，用户能看到它真的还在加载）。
+    this.refreshState(tabId, { loading: outcome === "still-loading" });
+    // 超时放行时把 loadURL 的承诺留在后台：它稍后 settle（导航完成/被停）时
+    // 只是没人听结果，绝不能泄成 unhandled rejection。
   }
 
   /** 内容尺寸量测防抖：resize 风暴/连续 zoom 只在安静后测一次。 */

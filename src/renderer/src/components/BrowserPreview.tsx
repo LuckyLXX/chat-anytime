@@ -2,6 +2,7 @@ import { AlertCircle, ArrowLeft, ArrowRight, Crosshair, ExternalLink, Globe2, Lo
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import type { BrowserElementPick, BrowserPreviewBounds, BrowserPreviewCommand, BrowserPreviewState } from "../../../shared/protocol";
 import { layoutDeviceFrame, storedPreviewDevice, storedPreviewFit, storePreviewDevice, storePreviewFit, type PreviewDeviceId } from "../lib/preview-device";
+import { saveBrowserAddress, storedBrowserAddress } from "../lib/browser-address";
 import { PreviewDeviceMenu } from "./PreviewDeviceMenu";
 
 const emptyState: BrowserPreviewState = {
@@ -12,22 +13,6 @@ const emptyState: BrowserPreviewState = {
   canGoBack: false,
   canGoForward: false
 };
-
-function addressStorageKey(tabId: string): string {
-  return `pidesktop.browser-preview-url-${tabId}`;
-}
-
-function storedBrowserAddress(tabId: string): string {
-  try {
-    return window.localStorage.getItem(addressStorageKey(tabId)) ?? "http://localhost:3000";
-  } catch {
-    return "http://localhost:3000";
-  }
-}
-
-function saveBrowserAddress(tabId: string, address: string): void {
-  try { window.localStorage.setItem(addressStorageKey(tabId), address); } catch { /* storage may be unavailable in browser demo */ }
-}
 
 interface ViewportRect {
   left: number;
@@ -213,7 +198,7 @@ export function BrowserPreview({ suspended = false, tabId = "default", onPickSen
         <button type="button" title="前进" aria-label="前进" disabled={!state.canGoForward} onClick={() => void send({ type: "forward" })}><ArrowRight size={15} /></button>
         <button type="button" title={state.loading ? "停止加载" : "刷新"} aria-label={state.loading ? "停止加载" : "刷新"} disabled={!state.attached} onClick={() => void send({ type: state.loading ? "stop" : "reload" })}>{state.loading ? <X size={15} /> : <RefreshCw size={15} />}</button>
         <PreviewDeviceMenu device={device} fit={fit} scalePercent={(layout?.scale ?? 1) * 100} onDeviceChange={changeDevice} onFitChange={changeFit} onMenuOpenChange={setDeviceMenuOpen} />
-        <label className="browser-address"><Globe2 size={14} /><input value={address} aria-label="浏览器地址" placeholder="输入网址" spellCheck={false} onFocus={() => { addressFocusedRef.current = true; }} onBlur={() => { addressFocusedRef.current = false; }} onChange={(event) => setAddress(event.target.value)} /></label>
+        <label className="browser-address"><Globe2 size={14} /><input value={address} aria-label="浏览器地址" placeholder="输入网址，或用 browser_navigate 让 AI 打开页面" spellCheck={false} onFocus={() => { addressFocusedRef.current = true; }} onBlur={() => { addressFocusedRef.current = false; }} onChange={(event) => setAddress(event.target.value)} /></label>
         <button type="button" className={pickMode ? "active" : ""} data-control="browser-pick" title={pickMode ? "取消元素选择" : "选择页面元素（可发送到聊天框）"} aria-label={pickMode ? "取消元素选择" : "选择页面元素"} aria-pressed={pickMode} disabled={!state.attached} onClick={togglePickMode}><Crosshair size={15} /></button>
         <button type="button" title="在系统浏览器中打开" aria-label="在系统浏览器中打开" disabled={!state.url} onClick={() => void send({ type: "open-external" })}><ExternalLink size={15} /></button>
       </form>
