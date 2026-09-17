@@ -12,12 +12,22 @@
 // Refs are never stable handles: the page owns truth, the registry only
 // remembers what the snapshot saw, so stale refs fail with an actionable
 // "re-snapshot" error instead of clicking the wrong element.
+//
+// Concurrency protection (2026-09-17; the old `Input.setIgnoreInputEvents`
+// guard was DELETED — it suppressed real user input only in theory and CDP's
+// own synthetic mouse events in practice, making browser_click a no-op):
+//   1) a visible, user-cancellable automation banner (`automating` state),
+//   2) a per-tab serial lock — one operation at a time per tab/agent,
+//   3) click/type re-locate + signature verification before any input event.
+// Real user input is NOT suppressed during an operation (accepted tradeoff:
+// operations are short, and a human racing the AI is rarer than the AI
+// silently doing nothing).
 
 import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { resolve, sep } from "node:path";
-import type { WebContents } from "electron";
+import { nativeImage, type WebContents } from "electron";
 import type {
   BrowserAutomationData,
   BrowserAutomationDialogNote,
@@ -28,6 +38,16 @@ import type {
   BrowserTabSummary
 } from "../shared/protocol.js";
 import { downloadDirFor, downloadRelativePath } from "./browser-downloads.js";
+import {
+  classifyImageSource,
+  decodeDataUrl,
+  deriveImageFilename,
+  imageRelativePath,
+  isSameOrigin,
+  MAX_SAVE_IMAGE_BYTES,
+  saveImageBytes,
+  sniffImageMime
+} from "./browser-save-image.js";
 import { isJsonLikeText, saveBrowserEvalResult } from "./browser-eval-result.js";
 import { BrowserStaticServer, detectLocalFilePath } from "./browser-static-server.js";
 import { needsPageDocument } from "./browser-preview-seed.js";
@@ -394,7 +414,15 @@ export function buildLocateScript(index: number): string {
 })()`;
 }
 
-/** Focus the index-th element and (fill mode) clear its current value via the native setter. */
+/**
+ * Focus the index-th element and (fill mode) clear its current value via the native setter.
+ *
+ * 签名采集必须发生在清空**之前**：verifyRef 拿它和快照时的签名比对，而快照记录的
+ * 是「清空前」的元素状态。旧实现在清空后取签名——元素本来就有内容时（改提示词、
+ * 改搜索词这类最常见的场景）签名必然与快照不同，于是操作已经生效却报「引用失效」，
+ * 模型白白重快照一次（真机探针 2026-09-17 实测：input/select 两个路径都稳定复现）。
+ * 坐标不受清空影响，可以清空后再取（视口位置与尺寸不会因 value 变化而变）。
+ */
 export function buildTypeScript(index: number, mode: "fill" | "append"): string {
   const clearBlock = mode === "fill" ? `
     const tag = el.tagName.toLowerCase();
@@ -418,15 +446,24 @@ export function buildTypeScript(index: number, mode: "fill" | "append"): string 
   if (!el) return { ok: false, error: '元素不存在（页面可能已变化，请重新 browser_snapshot）' };
   reveal(el);
   el.focus();
+  const signature = ${SIG_OF_EL};
+  const description = ${DESCRIBE_EL};
   let cleared = false;
   ${clearBlock}
   const rect = el.getBoundingClientRect();
   const pos = viewportPosition(el);
-  return { ok: true, cleared, x: Math.round(pos.x + rect.width / 2), y: Math.round(pos.y + rect.height / 2), signature: ${SIG_OF_EL}, description: ${DESCRIBE_EL} };
+  return { ok: true, cleared, x: Math.round(pos.x + rect.width / 2), y: Math.round(pos.y + rect.height / 2), signature, description };
 })()`;
 }
 
-/** Set a <select> value via the native setter and dispatch input/change events. */
+/**
+ * Set a `<select>` value via the native setter and dispatch input/change events.
+ *
+ * 与 buildTypeScript 同一纪律：签名（含 `selected`）必须在改值**之前**采集，
+ * 否则任何一个非空选择都会报「与快照不匹配」——而浏览器里选中状态往往还是
+ * 上一次操作留下的（探针实测：空→red、red→green、多选三条路径全部误报，
+ * 值本身都已正确生效）。
+ */
 export function buildSelectScript(index: number, values: string[]): string {
   return `(() => {
    ${REVEAL_FN}
@@ -435,6 +472,8 @@ export function buildSelectScript(index: number, values: string[]): string {
    if (el.tagName.toLowerCase() !== 'select') return { ok: false, error: '该引用不是下拉选择框，browser_select 只能用于 select 元素' };
    reveal(el);
    el.focus();
+   const signature = ${SIG_OF_EL};
+   const description = ${DESCRIBE_EL};
    const wanted = ${JSON.stringify(values)};
    if (el.multiple) {
      for (const option of Array.from(el.options)) option.selected = wanted.includes(option.value);
@@ -445,8 +484,51 @@ export function buildSelectScript(index: number, values: string[]): string {
    }
    el.dispatchEvent(new Event('input', { bubbles: true }));
    el.dispatchEvent(new Event('change', { bubbles: true }));
-   return { ok: true, signature: ${SIG_OF_EL}, description: ${DESCRIBE_EL} };
+   return { ok: true, signature, description };
  })()`;
+}
+
+/**
+ * 图片来源定位脚本：ref/selector 定位元素（ref/selector 二选一，与元素截图同口径），
+ * 或 url 直接给定。返回一个「候选来源」描述：
+ * - `<canvas>` → toDataURL（跨域污染会抛 SecurityError，转成可行动错误）
+ * - `<img>` → currentSrc || src（currentSrc 对 srcset 更准）
+ * - CSS background-image → 解析 url()
+ * - 其它元素 → 看它自己是不是能给出源的（video poster 不在范围）——给错误提示
+ * 元素类型与候选 url 一起返回，主进程据 url 形状决定走哪条取字节的路。
+ */
+export function buildImageSourceScript(ref: string | undefined, selector: string | undefined, index?: number): string {
+  const locator = selector !== undefined
+    ? `const el = queryDeep(${JSON.stringify(selector)});
+  if (!el) return { ok: false, error: '选择器未命中任何元素：' + ${JSON.stringify(selector)} };`
+    : `const el = ${COLLECT_CORE}[${index ?? -1}];
+  if (!el) return { ok: false, error: '元素不存在（页面可能已变化，请重新 browser_snapshot）' };`;
+  return `(() => {
+  ${QUERY_DEEP_FN}
+  ${locator}
+  el.scrollIntoView({ block: 'center', inline: 'nearest' });
+  const tag = el.tagName.toLowerCase();
+  if (tag === 'canvas') {
+    try {
+      const url = el.toDataURL('image/png');
+      return { ok: true, source: 'canvas', url, element: 'canvas' + (el.id ? '#' + el.id : ''), width: el.width, height: el.height };
+    } catch (error) {
+      return { ok: false, error: 'canvas 内容无法导出（跨域图片污染了画布，浏览器安全策略不允许读取像素）。可改用 browser_screenshot 截取该区域，或让页面在画布未被污染时导出。' };
+    }
+  }
+  if (tag === 'img') {
+    const url = el.currentSrc || el.src || '';
+    if (!url) return { ok: false, error: '该 <img> 当前没有图片地址（可能还未加载，请等页面加载完成后重试）' };
+    return { ok: true, source: 'element', url, element: 'img' + (el.id ? '#' + el.id : ''), width: el.naturalWidth, height: el.naturalHeight };
+  }
+  // CSS 背景图：background-image 可能是多个 url()、渐变或 none。
+  const background = getComputedStyle(el).backgroundImage;
+  const match = /url\(\s*['"]?([^'")]+)['"]?\s*\)/u.exec(background);
+  if (match && match[1]) {
+    return { ok: true, source: 'background', url: match[1], element: tag + (el.id ? '#' + el.id : '') };
+  }
+  return { ok: false, error: '该元素不是图片（<' + tag + (el.id ? '#' + el.id : '') + '>）：请选择 <img>、<canvas> 或有 background-image 的元素，或改用 url 参数直接指定图片地址' };
+})()`;
 }
 
 /** Scroll the page (or bring a referenced element into view). */
@@ -565,13 +647,22 @@ interface PressKeySpec {
   key: string;
   code: string;
   vk: number;
+  /**
+   * 该键在真实键盘上插入的文本（Enter → CR、Space → 空格、Tab → 制表符）。
+   * 实测（2026-09-17，真 Electron 43 + 真 CDP，本地 http 页面）：不给 text 的
+   * keyDown/keyUp 只有 keydown/keyup 事件、**不触发默认行为**——`<input>` 里
+   * Enter 不提交表单、`<textarea>` 里不换行（旧实现「AI 按了回车但表单没反应」
+   * 的根因）；给 text 后 Chromium 补出 keypress 并执行默认行为，与物理键盘逐项
+   * 一致。不能同时在 keyDown 与 char 两个事件上给 text：会双触发（Enter 提交两次）。
+   */
+  text?: string;
 }
 
 /** Keys browser_press understands; single characters are inserted as text. */
 const PRESS_KEYS: Record<string, PressKeySpec> = {
-  enter: { key: "Enter", code: "Enter", vk: 13 },
-  return: { key: "Enter", code: "Enter", vk: 13 },
-  tab: { key: "Tab", code: "Tab", vk: 9 },
+  enter: { key: "Enter", code: "Enter", vk: 13, text: "\r" },
+  return: { key: "Enter", code: "Enter", vk: 13, text: "\r" },
+  tab: { key: "Tab", code: "Tab", vk: 9, text: "\t" },
   escape: { key: "Escape", code: "Escape", vk: 27 },
   esc: { key: "Escape", code: "Escape", vk: 27 },
   backspace: { key: "Backspace", code: "Backspace", vk: 8 },
@@ -584,7 +675,7 @@ const PRESS_KEYS: Record<string, PressKeySpec> = {
   end: { key: "End", code: "End", vk: 35 },
   pageup: { key: "PageUp", code: "PageUp", vk: 33 },
   pagedown: { key: "PageDown", code: "PageDown", vk: 34 },
-  space: { key: " ", code: "Space", vk: 32 },
+  space: { key: " ", code: "Space", vk: 32, text: " " },
   f5: { key: "F5", code: "F5", vk: 116 }
 };
 
@@ -625,26 +716,31 @@ export const SCREENSHOT_REVEAL_POLL_MS = 100;
 export const SCREENSHOT_CAPTURE_TIMEOUT_MS = 30_000;
 
 /**
- * Timeout for "arming" CDP calls that precede every operation (the input
- * guard's Input.setIgnoreInputEvents, the dialog watcher's Page.enable).
- * These normally answer in milliseconds, but on a wedged renderer (e.g. a
- * leftover tab stuck rendering a huge canvas) the command never settles —
- * and because the guard runs *outside* withOpTimeout, a hang here would stall
- * the whole handle() RPC until the 120s utility-side deadline. Worse, even a
- * pure-memory op like tabs(list) pays for it: it only lists preview state but
- * still arms the guard + dialog watch first. Real-world case (2026-09-15):
- * browser_tabs list on a tab left over from the previous day's session burned
- * the full 110s and the model abandoned the built-in browser entirely. Arm
- * calls are best-effort by design — on timeout we proceed without the guard /
- * dialog receipts instead of hanging.
+ * Timeout tolerance for "arming" CDP calls — commands issued on a page before
+ * the operation proper (the dialog watcher's `Page.enable` is the only remaining
+ * caller). These normally answer in milliseconds, but on a wedged renderer (e.g.
+ * a leftover tab stuck rendering a huge canvas) the command never settles — and
+ * because arming happens *outside* withOpTimeout, a hang here would stall the
+ * whole handle() RPC until the 120s utility-side deadline. Worst case even a
+ * pure-memory op like tabs(list) pays for it when it still has to arm the
+ * dialog watcher. Real-world case (2026-09-15): browser_tabs list on a tab left
+ * over from the previous day's session burned the full 110s and the model
+ * abandoned the built-in browser entirely. Arm calls are best-effort by design
+ * — on timeout we proceed without the receipt instead of hanging.
+ *
+ * Kept after the 2026-09-17 removal of the input guard (`withAutomationGuard`,
+ * whose two `Input.setIgnoreInputEvents` calls were the original reason this
+ * primitive was extracted): `Page.enable` is still armed outside the operation
+ * timeout, and ANY future arming call must go through this primitive — the
+ * 110s hang incident is the precedent.
  */
 export const CDP_ARM_TIMEOUT_MS = 8_000;
 
 /**
  * Race a best-effort "arming" CDP call against a timeout. Resolves "ok" when
  * the call settles, "timeout" when the budget runs out — the caller keeps
- * going without the guard/receipt instead of hanging. Rejections still
- * propagate (callers distinguish "unsupported target" from "wedged target").
+ * going without the receipt instead of hanging. Rejections still propagate
+ * (callers distinguish "unsupported target" from "wedged target").
  * A late settlement is swallowed so it cannot surface as an unhandled
  * rejection.
  */
@@ -660,6 +756,20 @@ export async function armWithTimeout(promise: Promise<unknown>, timeoutMs = CDP_
     promise.catch(() => undefined);
   }
 }
+
+/**
+ * click/press 后的「等下载开始」宽限（2026-09-17 真机实测新增）。
+ *
+ * 点击/按键触发的下载完全是异步的：`will-download` 事件在操作返回后 4–60ms 才到
+ * （四轮实测 4/5/4/5ms，eval 的 JS 点击 3ms 同理），而回执窗口在操作返回时已经
+ * 取走——文件真的落了盘，模型却只看到「已点击」，拿不到 `.pidesktop/downloads/`
+ * 里的路径。只有 click/press 需要付这笔钱（其他操作不会触发下载）：宽限期内出现
+ * 下载则继续等它落盘（awaitDownloadsSettled，回执带文件名/大小/路径），没有就
+ * 立即返回。代价 = 每次不触发下载的点击最多多等 800ms。
+ */
+export const DOWNLOAD_START_GRACE_MS = 800;
+/** 上述宽限的轮询间隔。 */
+export const DOWNLOAD_START_POLL_MS = 25;
 
 /**
  * Bounds one in-tab operation. On timeout the caller's error path releases the
@@ -697,6 +807,15 @@ export async function awaitCondition(predicate: () => boolean, timeoutMs: number
 
 function automationTabId(): string {
   return `${AUTOMATION_TAB_PREFIX}${randomUUID()}`;
+}
+
+/**
+ * 哪些操作需要「等下载开始」宽限：只有可能在页面内触发下载的输入操作。
+ * navigate/snapshot/eval/wait/… 不会通过点击/按键触发下载（eval 的 JS 点击另说，
+ * 但那是模型显式写脚本的场景，回执语义与点击不同，不给它加延迟）。
+ */
+export function needsDownloadStartGrace(request: BrowserAutomationRequest): boolean {
+  return request.op === "click" || request.op === "press";
 }
 
 export class BrowserAutomationController {
@@ -759,35 +878,42 @@ export class BrowserAutomationController {
       const tabId = request.op === "attach" ? this.attachTab(sessionKey) : this.tabFor(sessionKey);
       resolvedTabId = tabId;
       this.tabLastActiveAt.set(tabId, Date.now());
-      return await this.withTabLock(tabId, () => this.withAutomationGuard(tabId, async () => {
-          // 下载与弹窗共用的回执窗口：本次操作之前发生的下载已由上一个操作回执
-          // 发出（或在无人操作时丢弃）——窗口只覆盖「本次操作期间发生的事件」。
-          this.pendingDownloads.delete(tabId);
-          this.pendingDialogs.delete(tabId);
-          const result = await withOpTimeout(this.execute(sessionKey, tabId, request));
-          this.assertNotCancelled(tabId);
-          // 本次操作可能触发了下载：「导出」类点击是异步落盘的，多等一拍让回执
-          // 能给出文件名与大小，而不是把「已取消/未知」报给模型。
-          await this.preview.awaitDownloadsSettled?.(tabId);
-          const notices = this.takeDownloadNotices(tabId);
-          const dialogs = this.takeDialogNotes(tabId);
-          // 失败回执也带弹窗记录：超时了才知道页面弹过窗，是排除「页面卡死 vs
-          // 弹窗阻塞」的唯一线索（这里是最有价值的一处回传）。
-          if (!result.ok) {
-            return {
-              ok: false as const,
-              error: result.error,
-              ...(notices.length > 0 ? { notices } : {}),
-              ...(dialogs.length > 0 ? { dialogs } : {})
-            };
-          }
+      return await this.withTabLock(tabId, async () => {
+        // 下载与弹窗共用的回执窗口：本次操作之前发生的下载已由上一个操作回执
+        // 发出（或在无人操作时丢弃）——窗口只覆盖「本次操作期间发生的事件」。
+        this.pendingDownloads.delete(tabId);
+        this.pendingDialogs.delete(tabId);
+        const result = await withOpTimeout(this.execute(sessionKey, tabId, request));
+        this.assertNotCancelled(tabId);
+        // click/press 触发的下载是**异步**的（真机实测：will-download 总在操作返回后
+        // 4–60ms 才到，见 DOWNLOAD_START_GRACE_MS）：先给一个有界宽限等它发生，
+        // 发生了再等它落盘；其他操作（不可能触发下载）不等。失败的操作不付这笔钱
+        // （没派发出点击就不会有下载）。
+        if (result.ok && needsDownloadStartGrace(request)) {
+          await awaitCondition(() => (this.pendingDownloads.get(tabId)?.length ?? 0) > 0, DOWNLOAD_START_GRACE_MS, DOWNLOAD_START_POLL_MS);
+        }
+        // 本次操作可能触发了下载：「导出」类点击是异步落盘的，多等一拍让回执
+        // 能给出文件名与大小，而不是把「已取消/未知」报给模型。
+        await this.preview.awaitDownloadsSettled?.(tabId);
+        const notices = this.takeDownloadNotices(tabId);
+        const dialogs = this.takeDialogNotes(tabId);
+        // 失败回执也带弹窗记录：超时了才知道页面弹过窗，是排除「页面卡死 vs
+        // 弹窗阻塞」的唯一线索（这里是最有价值的一处回传）。
+        if (!result.ok) {
           return {
-            ok: true as const,
-            data: result.data,
+            ok: false as const,
+            error: result.error,
             ...(notices.length > 0 ? { notices } : {}),
             ...(dialogs.length > 0 ? { dialogs } : {})
           };
-        }));
+        }
+        return {
+          ok: true as const,
+          data: result.data,
+          ...(notices.length > 0 ? { notices } : {}),
+          ...(dialogs.length > 0 ? { dialogs } : {})
+        };
+      });
     } catch (error) {
       // 操作直接抛错（不是返回 ok:false）时同样要把弹窗线报带上：页面被弹窗
       // 阻塞正是它超时/报错的最常见原因。
@@ -1094,30 +1220,6 @@ export class BrowserAutomationController {
       if (this.cancelRequests.has(tabId)) throw new Error("浏览器操作已被用户取消");
     }
 
-    /**
-     * While an AI operation runs, real user input is ignored at the CDP level
-     * (`Input.setIgnoreInputEvents`) so a human click cannot race an AI click;
-     * CDP-dispatched synthetic input still reaches the page. This is best-effort:
-     * older targets that do not support the method keep the previous behaviour.
-     */
-    private async withAutomationGuard<T>(tabId: string, fn: () => Promise<T>): Promise<T> {
-      const contents = this.requireContents(tabId);
-      try {
-        // 假死 renderer 上这条命令永不返回，且守卫在 withOpTimeout 覆盖之外：
-        // 超时后放弃守卫继续执行，而不是把整个操作拖到 RPC 兑底。
-        await armWithTimeout(this.cdp(contents, "Input.setIgnoreInputEvents", { ignore: true }));
-      } catch { /* unsupported CDP target: keep operating without the guard */ }
-      try {
-        return await fn();
-      } finally {
-        try {
-          if (!contents.isDestroyed() && contents.debugger.isAttached()) {
-            await armWithTimeout(this.cdp(contents, "Input.setIgnoreInputEvents", { ignore: false }));
-          }
-        } catch { /* tab may have closed while the operation was running */ }
-      }
-    }
-
     private async execute(sessionKey: string, tabId: string, request: BrowserAutomationRequest): Promise<BrowserAutomationResult> {
     const contents = this.requireContents(tabId);
     // 要碰页面的操作先等预置空白文档落定：没有文档的 renderer 上文档类 CDP 命令永不
@@ -1168,6 +1270,8 @@ export class BrowserAutomationController {
         return this.select(tabId, contents, request.ref, request.values);
       case "upload":
         return this.upload(tabId, contents, request.ref, request.files);
+      case "saveImage":
+        return this.saveImage(tabId, contents, request.ref, request.selector, request.url);
       case "eval":
         return this.evaluateJs(tabId, contents, request.expression, request.mode, request.workspace);
       case "screenshot":
@@ -1320,12 +1424,16 @@ export class BrowserAutomationController {
     try {
       const spec = PRESS_KEYS[key.toLowerCase()];
       if (spec) {
-        await this.cdp(contents, "Input.dispatchKeyEvent", {
-          type: "keyDown", key: spec.key, code: spec.code, windowsVirtualKeyCode: spec.vk, nativeVirtualKeyCode: spec.vk
-        });
-        await this.cdp(contents, "Input.dispatchKeyEvent", {
-          type: "keyUp", key: spec.key, code: spec.code, windowsVirtualKeyCode: spec.vk, nativeVirtualKeyCode: spec.vk
-        });
+        // 发法 = rawKeyDown → char（仅当该键插入文本）→ keyUp：与物理键盘的事件序列
+        // 一致，也是 Playwright 的键盘实现。实测（2026-09-17）与「keyDown{text} +
+        // keyUp」逐项等价，但这种三段式不会像「keyDown 与 char 都给 text」那样双触发
+        // （后者在 <input> 里会提交两次表单）。
+        const base = { key: spec.key, code: spec.code, windowsVirtualKeyCode: spec.vk, nativeVirtualKeyCode: spec.vk };
+        await this.cdp(contents, "Input.dispatchKeyEvent", { type: "rawKeyDown", ...base });
+        if (spec.text !== undefined) {
+          await this.cdp(contents, "Input.dispatchKeyEvent", { type: "char", ...base, text: spec.text, unmodifiedText: spec.text });
+        }
+        await this.cdp(contents, "Input.dispatchKeyEvent", { type: "keyUp", ...base });
       } else if (key.length > 0) {
         await this.cdp(contents, "Input.insertText", { text: key });
       } else {
@@ -1413,6 +1521,166 @@ export class BrowserAutomationController {
         const retried = attempt > 1 ? "（控件曾被重新挂载，已重试一次）" : "";
         return { ok: true, data: { kind: "upload", description: `${located.description ?? ref} ← ${files.join(", ")}${retried}` } };
       }
+    } finally {
+      this.preview.setAutomating(tabId, undefined);
+    }
+  }
+
+  /**
+   * 把页面里的图片原图存成工作区文件（browser_save_image）。
+   *
+   * 三条取字节的路（真机探针定案，2026-09-17）：
+   * - `data:` —— 主进程直接解 base64（session.fetch 对 data: 报 ERR_INVALID_ARGUMENT）；
+   * - `blob:` —— 只能页面内 fetch（object URL 只在该渲染进程里可达），转 base64 回传；
+   * - `http(s)` —— 主通道 `session.fetch(url, { credentials: "include" })`（实测真的
+   *   带上 partition 的 Cookie）；失败则降级 `webContents.downloadURL(url)` 走浏览器
+   *   下载栈（Cookie 与 Referer 天然正确，落盘由既有下载回执报）。
+   *
+   * Referer 细节：`session.fetch` 只接受**与目标同源**的 Referer，跨源给了就是
+   * `net::ERR_BLOCKED_BY_CLIENT`（实测），所以仅同源时附上。
+   */
+  private async saveImage(
+    tabId: string,
+    contents: WebContents,
+    ref: string | undefined,
+    selector: string | undefined,
+    url: string | undefined
+  ): Promise<BrowserAutomationResult> {
+    const workspace = this.downloadDirs.get(tabId);
+    if (!workspace) {
+      throw new Error(
+        "浏览器保存图片需要先确定落盘位置：请先用 browser_navigate 打开页面（带工作区的自动化标签页会把产物存到工作区 .pidesktop/downloads/）"
+      );
+    }
+    this.preview.setAutomating(tabId, "正在保存页面图片");
+    try {
+      let source: "data" | "blob" | "canvas" | "http" | undefined;
+      let candidateUrl = url?.trim() ?? "";
+      let elementSize: { width: number; height: number } | undefined;
+      let declaredWidth: number | undefined;
+      let declaredHeight: number | undefined;
+
+      if (!candidateUrl) {
+        // 元素路径：ref 与 selector 二选一（与元素截图同口径）。
+        const index = ref !== undefined ? refIndex(ref) : undefined;
+        if (ref !== undefined && index === undefined) throw new Error(`无效的元素引用：${ref}`);
+        const located = await this.evaluate<{
+          ok: boolean; error?: string; source?: string; url?: string; element?: string; width?: number; height?: number;
+        }>(contents, buildImageSourceScript(ref, selector, index));
+        if (!located.ok || !located.url) throw new Error(located.error ?? "未能定位图片元素");
+        candidateUrl = located.url;
+        if (located.source === "canvas") {
+          source = "canvas";
+          declaredWidth = typeof located.width === "number" ? located.width : undefined;
+          declaredHeight = typeof located.height === "number" ? located.height : undefined;
+        } else if (typeof located.width === "number" && located.width > 0 && typeof located.height === "number" && located.height > 0) {
+          // `<img>` 的 naturalWidth/Height（background 没有这个信息）。
+          elementSize = { width: located.width, height: located.height };
+        }
+      }
+      if (!source) {
+        const kind = classifyImageSource(candidateUrl);
+        if (!kind) {
+          throw new Error(`不支持的图片来源：${candidateUrl.slice(0, 120)}（只支持 http(s)、data:、blob: 与页面 canvas）`);
+        }
+        source = kind === "blob" ? "blob" : kind;
+      }
+
+      let bytes: Buffer;
+      let sniffedMime: string | undefined;
+      if (source === "data" || source === "canvas") {
+        const decoded = decodeDataUrl(candidateUrl);
+        if (!decoded) throw new Error("data: URL 解析失败（内容为空或编码非法）");
+        bytes = decoded.bytes;
+        sniffedMime = sniffImageMime(bytes) ?? (decoded.mime !== "application/octet-stream" ? decoded.mime : undefined);
+      } else if (source === "blob") {
+        // blob: 只能在该渲染进程里取（主进程的 session.fetch 没有这个 object URL）。
+        const encoded = await this.evaluate<string>(
+          contents,
+          `(async () => {
+            try {
+              const response = await fetch(${JSON.stringify(candidateUrl)});
+              const buffer = await response.arrayBuffer();
+              const view = new Uint8Array(buffer);
+              let binary = '';
+              const chunk = 0x8000;
+              for (let index = 0; index < view.length; index += chunk) {
+                binary += String.fromCharCode.apply(null, view.subarray(index, index + chunk));
+              }
+              return 'data:;base64,' + btoa(binary);
+            } catch (error) {
+              return 'error:' + String((error && error.message) || error);
+            }
+          })()`
+        );
+        if (typeof encoded !== "string" || encoded.startsWith("error:")) {
+          throw new Error(`blob 图片读取失败：${String(encoded).slice(5, 200)}（页面可能已撤销该 object URL，请重新触发页面生成图片后重试）`);
+        }
+        const decoded = decodeDataUrl(encoded);
+        if (!decoded) throw new Error("blob 图片编码失败（内容为空）");
+        bytes = decoded.bytes;
+        sniffedMime = sniffImageMime(bytes);
+      } else {
+        // http(s)：主通道 session.fetch（带该 partition 的 Cookie）。
+        const sameOrigin = isSameOrigin(contents.getURL(), candidateUrl);
+        let response: Response | undefined;
+        try {
+          response = await contents.session.fetch(candidateUrl, {
+            credentials: "include",
+            ...(sameOrigin ? { headers: { Referer: contents.getURL() } } : {})
+          });
+        } catch {
+          response = undefined;
+        }
+        if (response && response.ok) {
+          const arrayBuffer = await response.arrayBuffer();
+          if (arrayBuffer.byteLength > MAX_SAVE_IMAGE_BYTES) {
+            throw new Error(`图片超过 ${MAX_SAVE_IMAGE_BYTES / 1024 / 1024} MB 上限，请改用页面自带的下载按钮`);
+          }
+          bytes = Buffer.from(arrayBuffer);
+          sniffedMime = sniffImageMime(bytes) ?? response.headers.get("content-type")?.split(";")[0]?.trim() ?? undefined;
+        } else {
+          // 降级：浏览器下载通道（Cookie/Referer 天然正确；落盘结果由既有下载回执报）。
+          contents.downloadURL(candidateUrl, sameOrigin ? { headers: { Referer: contents.getURL() } } : undefined);
+          return {
+            ok: true,
+            data: { kind: "saveImage", mode: "download", source }
+          };
+        }
+      }
+
+      if (bytes.length > MAX_SAVE_IMAGE_BYTES) {
+        throw new Error(`图片超过 ${MAX_SAVE_IMAGE_BYTES / 1024 / 1024} MB 上限（当前 ${(bytes.length / 1024 / 1024).toFixed(1)} MB）`);
+      }
+
+      const filename = deriveImageFilename(source === "http" ? candidateUrl : undefined, sniffedMime);
+      const saved = await saveImageBytes(workspace, filename, bytes);
+      let width: number | undefined = elementSize?.width;
+      let height: number | undefined = elementSize?.height;
+      try {
+        const image = nativeImage.createFromBuffer(bytes);
+        const size = image.getSize();
+        if (!image.isEmpty() && size.width > 0 && size.height > 0) {
+          width = size.width;
+          height = size.height;
+        }
+      } catch {
+        // svg / 未支持的格式：逐字节落盘，不给尺寸（回执里就是缺失字段）。
+      }
+      return {
+        ok: true,
+        data: {
+          kind: "saveImage",
+          mode: "inline",
+          relativePath: imageRelativePath(workspace, saved.filePath),
+          bytes: saved.bytes,
+          ...(width !== undefined ? { width } : {}),
+          ...(height !== undefined ? { height } : {}),
+          ...(sniffedMime ? { mime: sniffedMime } : {}),
+          filename: saved.filename,
+          source
+        }
+      };
     } finally {
       this.preview.setAutomating(tabId, undefined);
     }

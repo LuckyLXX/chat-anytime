@@ -93,4 +93,13 @@ describe("desktop tool permissions", () => {
     expect(permissionAction("read-only", "browser_eval", "browse")).toBe("deny");
     expect(permissionNeedsApproval("ask", "browser_eval", "browse")).toBe(true);
   });
+
+  it("leaves browser_save_image ungated, same as browser_screenshot", () => {
+    // 两者都是「AI 把看到的内容落到 .pidesktop/ 下的观察产物」：写盘目标是自动化
+    // 标签页的下载目录（网页自己触发的下载也不走权限门），不写用户工作区文件。
+    // 这条钉住口径，防止日后被“加门”成相对 browser_screenshot 的不一致行为。
+    expect(toolRisk(workspace, "browser_save_image", { selector: "img.hero" })).toBeUndefined();
+    expect(toolRisk(workspace, "browser_save_image", { url: "https://example.com/a.png" })).toBeUndefined();
+    expect(toolRisk(workspace, "browser_screenshot", { selector: "img.hero" })).toBeUndefined();
+  });
 });

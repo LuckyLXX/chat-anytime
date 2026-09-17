@@ -44,7 +44,7 @@ describe("bundled skill assets (repo contract)", () => {
     // 这些路径是发行契约：electron-builder 的 extraResources 把 resources/skills
     // 原样发成 <安装目录>/resources/skills，运行时（skill 扫描 + locateLjqCtrlDir）
     // 与文档都按它定位。改名/搬家必须同步改 main 侧与 SKILL.md。
-    for (const slug of ["automation", "computer-use"]) {
+    for (const slug of ["automation", "computer-use", "web-tasks"]) {
       expect(existsSync(join(skillsRoot, slug, "SKILL.md")), `${slug}/SKILL.md 缺失`).toBe(true);
     }
     for (const asset of ["ljqCtrl.py", "uia.py", "ui_detect.py", "test/selfcheck.py"]) {
@@ -77,7 +77,7 @@ describe("bundled skill assets (repo contract)", () => {
       .filter((entry) => entry.isDirectory())
       .map((entry) => entry.name)
       .filter((slug) => existsSync(join(skillsRoot, slug, "SKILL.md")));
-    expect(slugs.sort()).toEqual(["automation", "computer-use"]);
+    expect(slugs.sort()).toEqual(["automation", "computer-use", "web-tasks"]);
     for (const slug of slugs) {
       const parsed = parseSkillFrontmatter(readFileSync(join(skillsRoot, slug, "SKILL.md"), "utf8"));
       expect(parsed.name, `${slug} 缺 name`).toBeTruthy();
@@ -88,10 +88,11 @@ describe("bundled skill assets (repo contract)", () => {
   it("discovers the real bundled dir as bundled scope through the source pipeline", async () => {
     const skills = discoverSkills([{ dir: skillsRoot, ...BUNDLED_SKILL_SOURCE }]);
     const bySlug = new Map(skills.map((skill) => [skill.slug, skill]));
-    expect([...bySlug.keys()].sort()).toEqual(["automation", "computer-use"]);
+    expect([...bySlug.keys()].sort()).toEqual(["automation", "computer-use", "web-tasks"]);
     expect(bySlug.get("computer-use")?.scope).toBe("bundled");
     expect(bySlug.get("computer-use")?.source).toBe("随应用分发");
     expect(bySlug.get("automation")?.name).toBe("自动化任务");
+    expect(bySlug.get("web-tasks")?.name).toBe("网页任务");
     expect(bySlug.get("computer-use")?.name).toBe("电脑控制");
   });
 

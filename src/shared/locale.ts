@@ -55,6 +55,7 @@ const toolLabels: Record<string, string> = {
   browser_get: "浏览器读取信息",
   browser_select: "浏览器下拉选择",
   browser_upload: "浏览器上传文件",
+  browser_save_image: "浏览器保存图片",
   browser_screenshot_full: "浏览器整页截图",
   browser_tabs: "浏览器标签页",
   computer_windows: "枚举桌面窗口",

@@ -6,12 +6,15 @@ import {
   awaitCondition,
   buildElementRectScript,
   CDP_ARM_TIMEOUT_MS,
+  DOWNLOAD_START_GRACE_MS,
+  needsDownloadStartGrace,
   MAX_EVAL_RESULT_CHARS,
   BrowserAutomationController,
   buildLocateScript,
   buildScrollScript,
   buildSnapshotScript,
   buildTypeScript,
+  buildSelectScript,
   classifyUploadFailure,
   elementSignature,
   formatSnapshotLine,
@@ -24,7 +27,7 @@ import {
 } from "./browser-automation.js";
 import type { BrowserPreviewController, DownloadInfo } from "./browser-preview.js";
 import type { BrowserAutomationResult } from "../shared/protocol.js";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -333,8 +336,7 @@ describe("automation download receipts", () => {
     const contents = preview.webContentsFor(tabId) as unknown as { debugger: { sendCommand: (method: string) => Promise<unknown> } };
     let fired = false;
     contents.debugger.sendCommand = async (called) => {
-      // 只在操作自身的那条 CDP 命令上触发一次：守卫的 Input.setIgnoreInputEvents
-      // 发生在回执窗口重置之前，用方法名把它排除掉（那是真实时序，不是要测的东西）。
+      // 只在操作自身的那条 CDP 命令上触发一次（操作窗口在命令发出前已重置）。
       if (!fired && called === method) {
         fired = true;
         for (const info of infos) controller.handleDownload(info);
@@ -1200,5 +1202,636 @@ describe("arming never waits for CDP calls that may never answer", () => {
     expect(called).toBe(1);
     await controller.handle("s1", { op: "get", what: "text" });
     expect(called).toBe(2);
+  });
+});
+
+/**
+ * T2 回归网（2026-09-17）：`Input.setIgnoreInputEvents` 守卫已删除。
+ *
+ * 历史：守卫本意是「AI 操作期间忽略真人输入」，实际效果是 **CDP 合成的鼠标事件
+ * 在渲染器侧完全不派发**——browser_click 回执说成功、页面 onclick 不动、下载不
+ * 发生（T2，P0）。真机探针（2026-09 三组，环境归一化后 3×3 对照）实测：
+ * 守卫 ON 时 0/3 次点击落点，守卫 OFF 时 3/3 落点；删除守卫后点击与下载都恢复。
+ *
+ * 这条测试用「记录 sendCommand 方法名」的替身跑真实操作，断言整套输入路径
+ * 再也不会发出该命令（防回归：任何未来重新引入守卫的改动都会在这里转红），
+ * 并同时断言点击的三个鼠标事件按序派发（mouseMoved → mousePressed → mouseReleased）。
+ */
+describe("input guard removal (T2 regression)", () => {
+  const controllers: BrowserAutomationController[] = [];
+  afterEach(() => {
+    for (const controller of controllers) controller.dispose();
+    controllers.length = 0;
+  });
+
+  interface RecorderHarness {
+    controller: BrowserAutomationController;
+    methods: string[];
+    mouseEvents: Array<Record<string, unknown>>;
+    keyEvents: Array<Record<string, unknown>>;
+  }
+
+  /**
+   * 记录型替身：按脚本内容分流 evaluate（snapshot / locate / type / select），
+   * 其余 CDP 方法只记名字并返回空结果。签名用真实的 elementSignature 生成，
+   * 所以走的是真链路（verifyRef 是同一份逻辑）。
+   */
+  const makeRecorder = (): RecorderHarness => {
+    const preview = makeFakePreview(["default"]) as FakePreview & BrowserPreviewController;
+    const methods: string[] = [];
+    const mouseEvents: Array<Record<string, unknown>> = [];
+    const keyEvents: Array<Record<string, unknown>> = [];
+    const item = { tag: "button", role: null, type: null, id: "go", cls: null, name: null, text: "点我", value: null, checked: null, selected: null, expanded: null, href: null, x: 10, y: 20 };
+    const contents = {
+      isDestroyed: () => false,
+      debugger: {
+        isAttached: () => false,
+        attach: () => undefined,
+        on: () => undefined,
+        sendCommand: async (method: string, params?: Record<string, unknown>) => {
+          methods.push(method);
+          if (method === "Input.dispatchMouseEvent") mouseEvents.push({ ...(params as Record<string, unknown>) });
+          if (method === "Input.dispatchKeyEvent") keyEvents.push({ ...(params as Record<string, unknown>) });
+          if (method === "Runtime.evaluate") {
+            const expression = String(params?.expression ?? "");
+            if (expression.includes("collectInteractiveElements") && expression.includes("pageText")) {
+              return { result: { value: { url: "https://example.com/", title: "页", pageText: "", items: [item], truncated: false } } };
+            }
+            if (expression.includes("scrollIntoView")) {
+              return { result: { value: { ok: true, x: 10, y: 20, signature: elementSignature(item), description: "button#go", isFileInput: false, connected: true } } };
+            }
+            return { result: { value: { ok: true, x: 10, y: 20, signature: elementSignature(item), description: "button#go", cleared: true } } };
+          }
+          return {};
+        }
+      }
+    };
+    (preview as unknown as { webContentsFor: (id: string) => unknown }).webContentsFor = () => contents;
+    const controller = new BrowserAutomationController(preview);
+    controllers.push(controller);
+    return { controller, methods, mouseEvents, keyEvents };
+  };
+
+  it("never sends Input.setIgnoreInputEvents for click / type / press / eval / snapshot", async () => {
+    const harness = makeRecorder();
+    await harness.controller.handle("s1", { op: "snapshot" });
+    await harness.controller.handle("s1", { op: "click", ref: "@e1" });
+    await harness.controller.handle("s1", { op: "type", ref: "@e1", text: "hi", mode: "fill" });
+    await harness.controller.handle("s1", { op: "press", key: "Enter" });
+    await harness.controller.handle("s1", { op: "eval", expression: "1", mode: "read" });
+    expect(harness.methods).not.toContain("Input.setIgnoreInputEvents");
+    // 顺带保证替身确实跑到了输入路径（否则这条断言可能是空转）。
+    expect(harness.mouseEvents.length).toBeGreaterThanOrEqual(3);
+    expect(harness.methods).toContain("Input.insertText");
+  });
+
+  it("dispatches the three mouse events in order for one click", async () => {
+    const harness = makeRecorder();
+    await harness.controller.handle("s1", { op: "snapshot" });
+    const result = await harness.controller.handle("s1", { op: "click", ref: "@e1" });
+    expect(result.ok).toBe(true);
+    expect(harness.mouseEvents.map((event) => event.type)).toEqual(["mouseMoved", "mousePressed", "mouseReleased"]);
+    // 坐标来自 locate（视口中心），三个事件必须落在同一坐标（否则 Chromium 会
+    // 视为「按在别处、松在别处」，真实页面里通常表现为点击丢失）。
+    for (const event of harness.mouseEvents) {
+      expect(event.x).toBe(10);
+      expect(event.y).toBe(20);
+    }
+  });
+});
+
+/**
+ * press 发法（2026-09-17 真机定案）：`rawKeyDown → char? → keyUp`。
+ *
+ * 旧实现只发 keyDown/keyUp 且不带 `text`——实测（真 Electron + 真 CDP + 本地 http）
+ * 结果是「有 keydown/keyup 事件、但默认行为不发生」：`<input>` 里 Enter 不提交表单、
+ * `<textarea>` 里不换行。本项是「输提示词 → 回车发送」链路的最后一环。
+ */
+describe("press key dispatch semantics", () => {
+  const controllers: BrowserAutomationController[] = [];
+  afterEach(() => {
+    for (const controller of controllers) controller.dispose();
+    controllers.length = 0;
+  });
+
+  const makePressHarness = () => {
+    const preview = makeFakePreview(["default"]) as FakePreview & BrowserPreviewController;
+    const events: Array<Record<string, unknown>> = [];
+    const contents = {
+      isDestroyed: () => false,
+      debugger: {
+        isAttached: () => false,
+        attach: () => undefined,
+        on: () => undefined,
+        sendCommand: async (method: string, params?: Record<string, unknown>) => {
+          if (method === "Input.dispatchKeyEvent" || method === "Input.insertText") events.push({ method, ...(params as Record<string, unknown>) });
+          return { result: { value: 1 } };
+        }
+      }
+    };
+    (preview as unknown as { webContentsFor: (id: string) => unknown }).webContentsFor = () => contents;
+    const controller = new BrowserAutomationController(preview);
+    controllers.push(controller);
+    return { controller, events };
+  };
+
+  it("sends Enter as rawKeyDown + char(CR) + keyUp (default action fires, no double text)", async () => {
+    const harness = makePressHarness();
+    await harness.controller.handle("s1", { op: "press", key: "Enter" });
+    expect(harness.events.map((event) => event.type)).toEqual(["rawKeyDown", "char", "keyUp"]);
+    const [down, char, up] = harness.events;
+    // 只有 char 事件带 text：同时在 keyDown 与 char 给 text 会让表单提交两次（实测）。
+    expect(down!.text).toBeUndefined();
+    expect(char!.text).toBe("\r");
+    expect(char!.unmodifiedText).toBe("\r");
+    expect(up!.text).toBeUndefined();
+    for (const event of harness.events) {
+      expect(event.key).toBe("Enter");
+      expect(event.code).toBe("Enter");
+      expect(event.windowsVirtualKeyCode).toBe(13);
+      expect(event.nativeVirtualKeyCode).toBe(13);
+    }
+  });
+
+  it("sends Space with a literal space and Tab with a tab character", async () => {
+    const harness = makePressHarness();
+    await harness.controller.handle("s1", { op: "press", key: "Space" });
+    expect(harness.events.find((event) => event.type === "char")?.text).toBe(" ");
+    harness.events.length = 0;
+    await harness.controller.handle("s1", { op: "press", key: "Tab" });
+    // Tab 也不带 text 不会移动焦点？——真实键盘的 Tab 带制表符风格 text，
+    // Chromium 在 input 内不会把制表符写进 value（探针实测），但焦点前移依赖 keydown。
+    expect(harness.events.map((event) => event.type)).toEqual(["rawKeyDown", "char", "keyUp"]);
+    expect(harness.events.find((event) => event.type === "char")?.text).toBe("\t");
+  });
+
+  it("keeps non-text keys as rawKeyDown + keyUp without a char event", async () => {
+    const harness = makePressHarness();
+    await harness.controller.handle("s1", { op: "press", key: "Escape" });
+    expect(harness.events.map((event) => event.type)).toEqual(["rawKeyDown", "keyUp"]);
+    expect(harness.events.every((event) => event.text === undefined)).toBe(true);
+  });
+
+  it("names the cardinal arrow keys with their real key/code", async () => {
+    const harness = makePressHarness();
+    await harness.controller.handle("s1", { op: "press", key: "ArrowDown" });
+    expect(harness.events[0]!.key).toBe("ArrowDown");
+    expect(harness.events[0]!.code).toBe("ArrowDown");
+    expect(harness.events[0]!.windowsVirtualKeyCode).toBe(40);
+  });
+
+  it("falls back to insertText for a plain character", async () => {
+    const harness = makePressHarness();
+    await harness.controller.handle("s1", { op: "press", key: "x" });
+    expect(harness.events).toEqual([{ method: "Input.insertText", text: "x" }]);
+  });
+});
+
+/**
+ * 签名采集顺序回归（2026-09-17，探针实测的既有缺陷）：
+ * fill 清空 / select 改值必须发生在**签名采集之后**，否则与快照比对必然失配，
+ * 模型被告知「引用失效」而操作其实已经生效。
+ */
+describe("type/select capture the signature before mutating the value", () => {
+  it("buildTypeScript computes the signature before the fill-clear block", () => {
+    const script = buildTypeScript(0, "fill");
+    const signatureAt = script.indexOf("const signature = ");
+    const clearAt = script.indexOf("const setter = Object.getOwnPropertyDescriptor");
+    expect(signatureAt).toBeGreaterThan(-1);
+    expect(clearAt).toBeGreaterThan(-1);
+    // 关键次序：签名先于清空（同一脚本里的文本位置即执行顺序）。
+    expect(signatureAt).toBeLessThan(clearAt);
+    // description 也必须采在清空前（清空会改 value，DESCRIBE_EL 含值）。
+    expect(script.indexOf("const description = ")).toBeLessThan(clearAt);
+  });
+
+  it("buildTypeScript append mode still captures the signature first", () => {
+    const script = buildTypeScript(0, "append");
+    // 只看返回对象之前的那段（COLLECT_CORE/REVEAL_FN 等注入的辅助代码里也有同名属性）。
+    const returnAt = script.indexOf("return { ok: true, cleared");
+    const sigAt = script.indexOf("const signature = ");
+    expect(sigAt).toBeGreaterThan(-1);
+    expect(sigAt).toBeLessThan(returnAt);
+    // append 模式没有清空块，不能残留 getOwnPropertyDescriptor。
+    expect(script).not.toContain("getOwnPropertyDescriptor");
+  });
+
+  it("buildSelectScript captures the signature before setting the value", () => {
+    const script = buildSelectScript(0, ["red"]);
+    const signatureAt = script.indexOf("const signature = ");
+    const assignAt = script.indexOf("el.value = next");
+    const multiAt = script.indexOf("option.selected = wanted.includes");
+    expect(signatureAt).toBeGreaterThan(-1);
+    expect(signatureAt).toBeLessThan(assignAt);
+    expect(signatureAt).toBeLessThan(multiAt);
+    // 返回的对象里不能现场重算签名（那正是旧缺陷）。
+    expect(script).toContain("return { ok: true, signature, description };");
+  });
+});
+
+/**
+ * 下载回执的「等下载开始」宽限（2026-09-17 真机实测新增；用户决策）。
+ * click/press 后在宽限期内轮询下载事件：出现就等它落盘（回执带路径），
+ * 没出现就立即返回——不把异步事件与回执的 4–60ms 竞态留给模型去猜。
+ */
+describe("download start grace after click/press", () => {
+  const controllers: BrowserAutomationController[] = [];
+  const workspaces: string[] = [];
+  afterEach(() => {
+    for (const controller of controllers) controller.dispose();
+    controllers.length = 0;
+    for (const workspace of workspaces) rmSync(workspace, { recursive: true, force: true });
+    workspaces.length = 0;
+  });
+  const makeController = (preview: BrowserPreviewController): BrowserAutomationController => {
+    const controller = new BrowserAutomationController(preview);
+    controllers.push(controller);
+    return controller;
+  };
+  const makeWorkspace = (): string => {
+    const dir = mkdtempSync(join(tmpdir(), "pidesktop-grace-"));
+    workspaces.push(dir);
+    return dir;
+  };
+  const boundTab = async (controller: BrowserAutomationController, sessionKey = "s1"): Promise<string> => {
+    const result = await controller.handle(sessionKey, { op: "tabs", action: "new" });
+    if (!result.ok || result.data.kind !== "tabs") throw new Error("tabs new 失败");
+    return result.data.tabs.find((tab) => tab.active)!.id;
+  };
+  const noticesOf = (result: BrowserAutomationResult) => (result.ok ? result.notices ?? [] : []);
+
+  /** 装一个「可点击元素」页面替身，返回控制下载事件时序的钩子。 */
+  const clickablePreview = () => {
+    const preview = makeFakePreview(["default"]) as FakePreview & BrowserPreviewController;
+    const item = { tag: "a", role: null, type: null, id: "dl", cls: null, name: null, text: "下载", value: null, checked: null, selected: null, expanded: null, href: "https://example.com/late.png", x: 1, y: 1 };
+    const contents: { isDestroyed: () => boolean; debugger: { isAttached: () => boolean; attach: () => void; on: () => void; sendCommand: (method: string, params?: Record<string, unknown>) => Promise<unknown> } } = {
+      isDestroyed: () => false,
+      debugger: {
+        isAttached: () => false,
+        attach: () => undefined,
+        on: () => undefined,
+        sendCommand: async (method, params) => {
+          if (method === "Runtime.evaluate") {
+            const expression = String(params?.expression ?? "");
+            if (expression.includes("collectInteractiveElements") && expression.includes("pageText")) {
+              return { result: { value: { url: "https://example.com/", title: "页", pageText: "", items: [item], truncated: false } } };
+            }
+            return { result: { value: { ok: true, x: 1, y: 1, signature: elementSignature(item), description: "a#dl" } } };
+          }
+          return {};
+        }
+      }
+    };
+    (preview as unknown as { webContentsFor: (id: string) => unknown }).webContentsFor = () => contents;
+    // 生产语义：awaitDownloadsSettled 轮询到 done 事件为止（fake preview 缺这个
+    // 方法时 handle() 会跳过它，本测试必须补上，否则回执停在 started 占位态）。
+    let running = 0;
+    (preview as unknown as { awaitDownloadsSettled: (id: string) => Promise<void> }).awaitDownloadsSettled = async () => {
+      const deadline = Date.now() + 2_000;
+      while (running > 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+    };
+    /** 让「下一次 mouseReleased」之后 delayMs 派发一次下载事件（真实时序：操作返回后才有 will-download）。 */
+    const scheduleDownloadAfterClick = (controller: BrowserAutomationController, tabId: string, filePath: string, directory: string, delayMs = 30) => {
+      const original = contents.debugger.sendCommand;
+      contents.debugger.sendCommand = async (method, params) => {
+        const result = await original(method, params);
+        if (method === "Input.dispatchMouseEvent" && (params as { type?: string })?.type === "mouseReleased") {
+          running += 1;
+          setTimeout(() => controller.handleDownload({ tabId, filename: "late.png", url: "https://example.com/late.png", status: "started", filePath, directory }), delayMs);
+          setTimeout(() => {
+            controller.handleDownload({ tabId, filename: "late.png", url: "https://example.com/late.png", status: "saved", bytes: 7, filePath, directory });
+            running -= 1;
+          }, delayMs + 60);
+        }
+        return result;
+      };
+    };
+    return { preview, scheduleDownloadAfterClick };
+  };
+
+  it("waits for a download that starts shortly AFTER a click returns, then reports it", async () => {
+    const { preview, scheduleDownloadAfterClick } = clickablePreview();
+    const workspace = makeWorkspace();
+    const downloadsDir = join(workspace, ".pidesktop", "downloads");
+    const controller = makeController(preview);
+    const tabId = await boundTab(controller);
+    await controller.handle("s1", { op: "navigate", url: "https://example.com/", workspace });
+    await controller.handle("s1", { op: "snapshot" });
+    scheduleDownloadAfterClick(controller, tabId, join(downloadsDir, "late.png"), downloadsDir, 30);
+    const result = await controller.handle("s1", { op: "click", ref: "@e1" });
+    expect(noticesOf(result)).toEqual([
+      { kind: "download", filename: "late.png", url: "https://example.com/late.png", saved: true, bytes: 7, relativePath: ".pidesktop/downloads/late.png" }
+    ]);
+  });
+
+  it("reports the started placeholder honestly when the download is still in flight", async () => {
+    const { preview, scheduleDownloadAfterClick } = clickablePreview();
+    const workspace = makeWorkspace();
+    const downloadsDir = join(workspace, ".pidesktop", "downloads");
+    const controller = makeController(preview);
+    const tabId = await boundTab(controller);
+    await controller.handle("s1", { op: "navigate", url: "https://example.com/", workspace });
+    await controller.handle("s1", { op: "snapshot" });
+    // 只派发 started（done 永不到）：宽限要抓得住它；落盘等待预算（fake 里 2s，
+    // 生产 3s）内没完成则如实报「已开始、结果未知」而不是谎报成功或失败。
+    const original = (preview.webContentsFor(tabId) as unknown as { debugger: { sendCommand: (method: string, params?: Record<string, unknown>) => Promise<unknown> } }).debugger.sendCommand;
+    (preview.webContentsFor(tabId) as unknown as { debugger: { sendCommand: unknown } }).debugger.sendCommand = async (method: string, params?: Record<string, unknown>) => {
+      const result = await original(method, params);
+      if (method === "Input.dispatchMouseEvent" && (params as { type?: string })?.type === "mouseReleased") {
+        setTimeout(() => controller.handleDownload({ tabId, filename: "late.png", url: "https://example.com/late.png", status: "started", filePath: join(downloadsDir, "late.png"), directory: downloadsDir }), 20);
+      }
+      return result;
+    };
+    const result = await controller.handle("s1", { op: "click", ref: "@e1" });
+    expect(noticesOf(result)).toEqual([
+      { kind: "download", filename: "late.png", url: "https://example.com/late.png", saved: false, reason: "interrupted", relativePath: ".pidesktop/downloads/late.png" }
+    ]);
+  }, 10_000);
+
+  it("returns immediately when a click triggers no download", async () => {
+    const { preview } = clickablePreview();
+    const controller = makeController(preview);
+    await boundTab(controller);
+    await controller.handle("s1", { op: "snapshot" });
+    const started = Date.now();
+    const result = await controller.handle("s1", { op: "click", ref: "@e1" });
+    const elapsed = Date.now() - started;
+    expect(result.ok).toBe(true);
+    // 宽限是**有界**的：无下载时最多等 DOWNLOAD_START_GRACE_MS 就返回（用户已接受
+    // 每次点击最多 0.8s 的代价），绝不能无限等或拖到看门狗。
+    expect(elapsed).toBeLessThan(DOWNLOAD_START_GRACE_MS + 400);
+    expect(noticesOf(result)).toEqual([]);
+  });
+
+  it("does not add the grace to non-input operations", () => {
+    // 纯判据：只有 click/press 付费，其它操作不该被延迟。
+    expect(needsDownloadStartGrace({ op: "click", ref: "@e1" })).toBe(true);
+    expect(needsDownloadStartGrace({ op: "press", key: "Enter" })).toBe(true);
+    expect(needsDownloadStartGrace({ op: "snapshot" })).toBe(false);
+    expect(needsDownloadStartGrace({ op: "eval", expression: "1", mode: "read" })).toBe(false);
+    expect(needsDownloadStartGrace({ op: "navigate", url: "https://example.com/" })).toBe(false);
+    expect(needsDownloadStartGrace({ op: "wait", wait: { kind: "ms", ms: 10 } })).toBe(false);
+    expect(needsDownloadStartGrace({ op: "screenshot" })).toBe(false);
+  });
+});
+
+/**
+ * browser_save_image 的主进程分流（2026-09-17）。
+ * 真机探针钉死的口径：data: 主进程解码；blob: 页面内 fetch；http(s) 主通道
+ * `session.fetch({credentials:"include"})`（同源才附 Referer，跨源附了会被
+ * `net::ERR_BLOCKED_BY_CLIENT` 拦截）；取不到字节时降级 `downloadURL`。
+ */
+describe("automation saveImage dispatch", () => {
+  const controllers: BrowserAutomationController[] = [];
+  const workspaces: string[] = [];
+  afterEach(() => {
+    for (const controller of controllers) controller.dispose();
+    controllers.length = 0;
+    for (const workspace of workspaces) rmSync(workspace, { recursive: true, force: true });
+    workspaces.length = 0;
+  });
+  const makeWorkspace = (): string => {
+    const dir = mkdtempSync(join(tmpdir(), "pidesktop-saveimage-"));
+    workspaces.push(dir);
+    return dir;
+  };
+
+  interface SaveImageHarness {
+    controller: BrowserAutomationController;
+    fetchCalls: Array<{ url: string; options?: { credentials?: string; headers?: Record<string, string> } }>;
+    downloadCalls: Array<{ url: string; options?: { headers?: Record<string, string> } }>;
+    /** 让下一次 session.fetch 以给定结果应答（undefined = 拒绝）。 */
+    setFetch: (result: undefined | { ok: boolean; status?: number; bytes?: Buffer; contentType?: string }) => void;
+    setPageScriptResult: (result: unknown) => void;
+    setPageUrl: (url: string) => void;
+  }
+
+  const makeHarness = (): SaveImageHarness => {
+    const preview = makeFakePreview(["default"]) as FakePreview & BrowserPreviewController;
+    const fetchCalls: SaveImageHarness["fetchCalls"] = [];
+    const downloadCalls: SaveImageHarness["downloadCalls"] = [];
+    let fetchResult: undefined | { ok: boolean; status?: number; bytes?: Buffer; contentType?: string } = { ok: true, status: 200, bytes: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) };
+    let pageScriptResult: unknown = { ok: true, source: "element", url: "https://example.com/photo.png", element: "img#hero", width: 10, height: 20 };
+    let pageUrl = "https://example.com/page";
+    const contents = {
+      getURL: () => pageUrl,
+      isDestroyed: () => false,
+      focus: () => undefined,
+      debugger: {
+        isAttached: () => false,
+        attach: () => undefined,
+        on: () => undefined,
+        sendCommand: async (method: string, params?: Record<string, unknown>) => {
+          if (method === "Runtime.evaluate") {
+            const expression = String(params?.expression ?? "");
+            if (expression.includes("collectInteractiveElements") && expression.includes("pageText")) {
+              return { result: { value: { url: pageUrl, title: "页", pageText: "", items: [], truncated: false } } };
+            }
+            if (expression.includes("naturalWidth") || expression.includes("toDataURL") || expression.includes("backgroundImage")) {
+              return { result: { value: pageScriptResult } };
+            }
+            return { result: { value: { ok: true } } };
+          }
+          return {};
+        }
+      },
+      session: {
+        fetch: async (url: string, options?: { credentials?: string; headers?: Record<string, string> }) => {
+          fetchCalls.push({ url, options });
+          const result = fetchResult;
+          if (!result) throw new Error("net::ERR_FAILED");
+          const bytes = result.bytes ?? Buffer.alloc(0);
+          return {
+            ok: result.ok,
+            status: result.status ?? 200,
+            headers: { get: (name: string) => (name.toLowerCase() === "content-type" ? result.contentType ?? null : null) },
+            arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+          };
+        }
+      },
+      downloadURL: (url: string, options?: { headers?: Record<string, string> }) => {
+        downloadCalls.push({ url, options });
+      }
+    };
+    (preview as unknown as { webContentsFor: (id: string) => unknown }).webContentsFor = () => contents;
+    const controller = new BrowserAutomationController(preview);
+    controllers.push(controller);
+    return {
+      controller,
+      fetchCalls,
+      downloadCalls,
+      setFetch: (result) => { fetchResult = result; },
+      setPageScriptResult: (result) => { pageScriptResult = result; },
+      setPageUrl: (url) => { pageUrl = url; }
+    };
+  };
+
+  const bindWithWorkspace = async (harness: SaveImageHarness, workspace: string) => {
+    await harness.controller.handle("s1", { op: "tabs", action: "new" });
+    await harness.controller.handle("s1", { op: "navigate", url: "https://example.com/page", workspace });
+  };
+
+  const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+
+  it("fetches an http image through the partition session and writes it to the downloads dir", async () => {
+    const harness = makeHarness();
+    const workspace = makeWorkspace();
+    await bindWithWorkspace(harness, workspace);
+    harness.setFetch({ ok: true, status: 200, bytes: pngBytes });
+    const result = await harness.controller.handle("s1", { op: "saveImage", selector: "img#hero" });
+    if (!result.ok) throw new Error(result.error);
+    if (result.data.kind !== "saveImage") throw new Error("意外结果");
+    expect(result.data.mode).toBe("inline");
+    expect(result.data.relativePath).toBe(".pidesktop/downloads/photo.png");
+    expect(result.data.mime).toBe("image/png");
+    expect(result.data.source).toBe("http");
+    // 同源请求带上了 Referer（跨源会被 ERR_BLOCKED_BY_CLIENT 拦截，见下一个用例）。
+    expect(harness.fetchCalls[0]!.options?.credentials).toBe("include");
+    expect(harness.fetchCalls[0]!.options?.headers?.Referer).toBe("https://example.com/page");
+    expect(readFileSync(join(workspace, ".pidesktop", "downloads", "photo.png"))).toEqual(pngBytes);
+  });
+
+  it("omits the Referer for a cross-origin image (attaching it would be blocked)", async () => {
+    const harness = makeHarness();
+    const workspace = makeWorkspace();
+    await bindWithWorkspace(harness, workspace);
+    harness.setPageScriptResult({ ok: true, source: "element", url: "https://cdn.example.com/x.png", element: "img" });
+    harness.setFetch({ ok: true, status: 200, bytes: pngBytes });
+    const result = await harness.controller.handle("s1", { op: "saveImage", selector: "img" });
+    expect(result.ok).toBe(true);
+    expect(harness.fetchCalls[0]!.options?.credentials).toBe("include");
+    expect(harness.fetchCalls[0]!.options?.headers).toBeUndefined();
+  });
+
+  it("falls back to the browser download channel when the fetch fails", async () => {
+    const harness = makeHarness();
+    const workspace = makeWorkspace();
+    await bindWithWorkspace(harness, workspace);
+    harness.setFetch({ ok: false, status: 403 });
+    const result = await harness.controller.handle("s1", { op: "saveImage", selector: "img" });
+    if (!result.ok) throw new Error(result.error);
+    if (result.data.kind !== "saveImage") throw new Error("意外结果");
+    expect(result.data.mode).toBe("download");
+    expect(harness.downloadCalls).toHaveLength(1);
+    expect(harness.downloadCalls[0]!.url).toBe("https://example.com/photo.png");
+  });
+
+  it("decodes a data: URL in the main process without touching the network", async () => {
+    const harness = makeHarness();
+    const workspace = makeWorkspace();
+    await bindWithWorkspace(harness, workspace);
+    harness.setPageScriptResult({ ok: true, source: "element", url: `data:image/png;base64,${pngBytes.toString("base64")}`, element: "img" });
+    const result = await harness.controller.handle("s1", { op: "saveImage", ref: "@e1", });
+    if (!result.ok) throw new Error(result.error);
+    if (result.data.kind !== "saveImage") throw new Error("意外结果");
+    expect(result.data.source).toBe("data");
+    // data:/blob: 的 basename 无意义 → 时间戳命名。
+    expect(result.data.filename).toMatch(/^image-\d{8}-\d{6}\.png$/u);
+    expect(harness.fetchCalls).toHaveLength(0);
+    expect(result.data.bytes).toBe(pngBytes.length);
+  });
+
+  it("reads a blob: image through the page and reports its sniffed format", async () => {
+    const preview = makeFakePreview(["default"]) as FakePreview & BrowserPreviewController;
+    const workspace = makeWorkspace();
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 5, 5]);
+    const contents = {
+      getURL: () => "https://example.com/page",
+      isDestroyed: () => false,
+      debugger: {
+        isAttached: () => false,
+        attach: () => undefined,
+        on: () => undefined,
+        sendCommand: async (method: string, params?: Record<string, unknown>) => {
+          if (method === "Runtime.evaluate") {
+            const expression = String(params?.expression ?? "");
+            if (expression.includes("collectInteractiveElements") && expression.includes("pageText")) {
+              return { result: { value: { url: "https://example.com/page", title: "页", pageText: "", items: [], truncated: false } } };
+            }
+            if (expression.includes("btoa")) return { result: { value: `data:;base64,${png.toString("base64")}` } };
+            return { result: { value: { ok: true, source: "element", url: "blob:https://example.com/abc", element: "img", width: 3, height: 4 } } };
+          }
+          return {};
+        }
+      },
+      session: { fetch: async () => { throw new Error("blob must not go through session.fetch"); } },
+      downloadURL: () => undefined
+    };
+    (preview as unknown as { webContentsFor: (id: string) => unknown }).webContentsFor = () => contents;
+    const controller = new BrowserAutomationController(preview);
+    controllers.push(controller);
+    await controller.handle("s1", { op: "tabs", action: "new" });
+    await controller.handle("s1", { op: "navigate", url: "https://example.com/page", workspace });
+    const result = await controller.handle("s1", { op: "saveImage", selector: "img" });
+    if (!result.ok) throw new Error(result.error);
+    if (result.data.kind !== "saveImage") throw new Error("意外结果");
+    expect(result.data.source).toBe("blob");
+    expect(result.data.mime).toBe("image/png");
+    expect(result.data.relativePath).toMatch(/^\.pidesktop\/downloads\/image-\d{8}-\d{6}\.png$/u);
+  });
+
+  it("keeps the canvas branch and surfaces a tainted-canvas error verbatim", async () => {
+    const harness = makeHarness();
+    const workspace = makeWorkspace();
+    await bindWithWorkspace(harness, workspace);
+    harness.setPageScriptResult({ ok: true, source: "canvas", url: `data:image/png;base64,${pngBytes.toString("base64")}`, element: "canvas#c", width: 32, height: 16 });
+    const okResult2 = await harness.controller.handle("s1", { op: "saveImage", selector: "canvas#c" });
+    if (!okResult2.ok) throw new Error(okResult2.error);
+    if (okResult2.data.kind !== "saveImage") throw new Error("意外结果");
+    expect(okResult2.data.source).toBe("canvas");
+
+    // 污染画布：页面脚本给出可行动错误，主进程原样上抛。
+    harness.setPageScriptResult({ ok: false, error: "canvas 内容无法导出（跨域图片污染了画布，浏览器安全策略不允许读取像素）。可改用 browser_screenshot 截取该区域，或让页面在画布未被污染时导出。" });
+    const failed = await harness.controller.handle("s1", { op: "saveImage", selector: "canvas#c" });
+    expect(failed.ok).toBe(false);
+    if (!failed.ok) expect(failed.error).toContain("canvas 内容无法导出");
+  });
+
+  it("requires a workspace-bound tab and says how to get one", async () => {
+    const harness = makeHarness();
+    await harness.controller.handle("s1", { op: "tabs", action: "new" });
+    const result = await harness.controller.handle("s1", { op: "saveImage", selector: "img" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("browser_navigate");
+  });
+
+  it("refuses a non-image element with the element named", async () => {
+    const harness = makeHarness();
+    const workspace = makeWorkspace();
+    await bindWithWorkspace(harness, workspace);
+    harness.setPageScriptResult({ ok: false, error: "该元素不是图片（<button#go>）：请选择 <img>、<canvas> 或有 background-image 的元素，或改用 url 参数直接指定图片地址" });
+    const result = await harness.controller.handle("s1", { op: "saveImage", selector: "button#go" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toContain("该元素不是图片");
+      expect(result.error).toContain("button#go");
+    }
+  });
+
+  it("rejects an oversized inline image instead of writing it", async () => {
+    const harness = makeHarness();
+    const workspace = makeWorkspace();
+    await bindWithWorkspace(harness, workspace);
+    harness.setFetch({ ok: true, status: 200, bytes: Buffer.alloc(20 * 1024 * 1024 + 1) });
+    const result = await harness.controller.handle("s1", { op: "saveImage", selector: "img" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("20 MB");
+    expect(existsSync(join(workspace, ".pidesktop", "downloads"))).toBe(false);
+  });
+
+  it("uses the element's natural size when nativeImage cannot size the buffer", async () => {
+    const harness = makeHarness();
+    const workspace = makeWorkspace();
+    await bindWithWorkspace(harness, workspace);
+    // SVG：nativeImage 给 {0,0}，回退到 <img> 的 naturalWidth/Height。
+    harness.setPageScriptResult({ ok: true, source: "element", url: "https://example.com/logo.svg", element: "img#logo", width: 120, height: 40 });
+    harness.setFetch({ ok: true, status: 200, bytes: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>', "utf8") });
+    const result = await harness.controller.handle("s1", { op: "saveImage", selector: "img#logo" });
+    if (!result.ok) throw new Error(result.error);
+    if (result.data.kind !== "saveImage") throw new Error("意外结果");
+    expect(result.data.width).toBe(120);
+    expect(result.data.height).toBe(40);
+    expect(result.data.mime).toBe("image/svg+xml");
+    expect(result.data.filename).toBe("logo.svg");
   });
 });

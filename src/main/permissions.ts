@@ -27,6 +27,9 @@ export function toolRisk(
   if (toolName === "design_update" || toolName === "design_export" || toolName === "design_set_guide") return "write";
   // 浏览器自动化：导航与写入型 eval 过门；页面内操作（快照/点击/输入/滚动/
   // 截图/等待/读取）信任模型直接执行。
+  // browser_save_image 与 browser_screenshot 同口径免门：都是「AI 把看到的
+  // 内容落到 .pidesktop/ 下的观察产物」，不写用户工作区文件（写盘目标是自动化
+  // 标签页的下载目录，与网页下载同一落点——网页下载本身也不走权限门）。
   if (toolName === "browser_navigate") return "browse";
   if (toolName === "browser_eval") return args.mode === "write" ? "browse" : undefined;
   if (toolName === "browser_tabs") return args.action === "close" ? "browse" : undefined;

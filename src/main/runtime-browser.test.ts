@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { estimateToolTokens } from "./context-breakdown.js";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { BrowserAutomationRequest, BrowserAutomationResult } from "../shared/protocol.js";
 import { buildBrowserTools, runWithBusyRetry, type BrowserToolDeps } from "./runtime-browser.js";
@@ -28,7 +29,7 @@ function toolsWith(responses: Record<string, BrowserAutomationResult>, enabled =
   return { tools: buildBrowserTools(deps), calls };
 }
 
-const toolNames = ["browser_navigate", "browser_snapshot", "browser_click", "browser_type", "browser_select", "browser_upload", "browser_press", "browser_scroll", "browser_eval", "browser_screenshot", "browser_screenshot_full", "browser_wait", "browser_get", "browser_tabs"];
+const toolNames = ["browser_navigate", "browser_snapshot", "browser_click", "browser_type", "browser_select", "browser_upload", "browser_press", "browser_scroll", "browser_eval", "browser_screenshot", "browser_save_image", "browser_screenshot_full", "browser_wait", "browser_get", "browser_tabs"];
 
 describe("browser tool cluster", () => {
   it("registers the full browser_* tool set", () => {
@@ -419,5 +420,69 @@ describe("browser dialog receipts", () => {
     const { tools } = toolsWith({ click: result });
     const click = tools.find((tool) => tool.name === "browser_click")!;
     await expect(execute(click, { ref: "@e1" })).rejects.toThrow(/页面弹出了 alert：「请稍候」/);
+  });
+});
+
+/**
+ * browser_save_image 工具层：三选一参数校验 + 回执渲染 + 前缀成本。
+ * 主进程侧的分流/嗅探/命名在 browser-save-image.test.ts 里单测。
+ */
+describe("browser_save_image tool", () => {
+  const okInline = okResult({
+    kind: "saveImage",
+    mode: "inline",
+    relativePath: ".pidesktop/downloads/photo.png",
+    bytes: 2048,
+    width: 640,
+    height: 480,
+    mime: "image/png",
+    filename: "photo.png",
+    source: "http"
+  });
+
+  it("passes exactly one locator through and renders path + size + dimensions", async () => {
+    const { tools, calls } = toolsWith({ saveImage: okInline });
+    const tool = tools.find((entry) => entry.name === "browser_save_image")!;
+    const result = await execute(tool, { selector: "img.hero" });
+    expect(calls[0]).toEqual({ op: "saveImage", selector: "img.hero" });
+    const text = JSON.stringify(result);
+    expect(text).toContain(".pidesktop/downloads/photo.png");
+    expect(text).toContain("640×480");
+    expect(text).toContain("image/png");
+    expect(text).toContain("2.0 KB");
+  });
+
+  it("accepts a ref and a raw url as well", async () => {
+    const { tools, calls } = toolsWith({ saveImage: okInline });
+    const tool = tools.find((entry) => entry.name === "browser_save_image")!;
+    await execute(tool, { ref: "@e3" });
+    expect(calls[0]).toEqual({ op: "saveImage", ref: "@e3" });
+    await execute(tool, { url: "https://example.com/a.webp" });
+    expect(calls[1]).toEqual({ op: "saveImage", url: "https://example.com/a.webp" });
+  });
+
+  it("rejects two locators at once (before any request)", async () => {
+    const { tools, calls } = toolsWith({ saveImage: okInline });
+    const tool = tools.find((entry) => entry.name === "browser_save_image")!;
+    await expect(execute(tool, { ref: "@e1", selector: "img" })).rejects.toThrow(/三选一/);
+    await expect(execute(tool, { ref: "@e1", url: "https://example.com/a.png" })).rejects.toThrow(/三选一/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("renders the download fallback without pretending the file is already there", async () => {
+    const download = okResult({ kind: "saveImage", mode: "download", source: "http" });
+    const { tools } = toolsWith({ saveImage: download });
+    const tool = tools.find((entry) => entry.name === "browser_save_image")!;
+    const text = JSON.stringify(await execute(tool, { url: "https://example.com/huge.png" }));
+    expect(text).toContain("浏览器下载通道");
+    expect(text).not.toContain("已保存图片到");
+  });
+
+  it("keeps the definition lean (prefix-cost discipline)", () => {
+    // 常驻激活的 browser_* 是每请求前缀成本：描述不许长成教程（历史口径 ≤200 tokens）。
+    const { tools } = toolsWith({});
+    const tool = tools.find((entry) => entry.name === "browser_save_image")!;
+    const tokens = estimateToolTokens([{ name: tool.name, description: tool.description, parameters: tool.parameters }]);
+    expect(tokens).toBeLessThan(200);
   });
 });

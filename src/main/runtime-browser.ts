@@ -354,7 +354,9 @@ export function buildBrowserTools(deps: BrowserToolDeps): ToolDefinition[] {
       label: "浏览器按键",
       description: [
         "在内置浏览器页面中按下键盘按键：Enter、Tab、Escape、Backspace、Delete、方向键（ArrowUp/Down/Left/Right）、Home、End、PageUp、PageDown、Space、F5 或普通字符。",
-        "常用于提交表单（Enter）、关闭弹窗（Escape）、下拉选择后确认等。"
+        "按键事件与真实键盘一致：Enter 会提交表单/发送消息、Space 会插入空格、方向键会移动输入光标或滚动列表。",
+        "常用于：向输入框输入后按 Enter 提交（等价于点发送按钮）、关闭弹窗（Escape）、下拉选择后确认等。",
+        "提交前请先确保焦点在正确的输入框（用 browser_type 输入后焦点就在该输入框内）。"
       ].join(""),
       promptSnippet: "browser_press: 在浏览器页面按键",
       parameters: Type.Object({
@@ -423,6 +425,63 @@ export function buildBrowserTools(deps: BrowserToolDeps): ToolDefinition[] {
             : `\n\n（结果共 ${totalChars} 字符，超出单次返回上限且未能保存到工作区；上为前 ${value.length} 字符预览，请调整表达式缩小返回量）`
           : "";
         return { content: [{ type: "text" as const, text: withNotices(`执行结果（${mode}）：\n${value}${overflow}`, result) }], details: { mode, ...(savedPath ? { savedPath } : {}) } };
+      }
+    }),
+    defineTool({
+      name: "browser_save_image",
+      label: "浏览器保存图片",
+      description: [
+        "把页面中的图片原图保存到工作区（应对没有下载按钮、或图片是 blob/data/canvas 的站点）。",
+        `ref/selector/url 三选一：ref 与 selector 定位页面元素（ref 来自 browser_snapshot，selector 可穿 shadow DOM/iframe）；url 直接给出图片地址。`,
+        `图片存入工作区 \`${DOWNLOAD_DIR_LABEL}/\`（与下载同目录），回执给出相对路径、尺寸与格式；http 图片取字节失败时自动改走浏览器下载通道。`,
+        "跨域绘制的 canvas 无法导出（浏览器安全策略），会给出明确原因——改用 browser_screenshot 截取该区域。"
+      ].join(""),
+      promptSnippet: "browser_save_image: 把页面图片原图存到工作区",
+      parameters: Type.Object({
+        ref: Type.Optional(Type.String({ description: "browser_snapshot 返回的 @eN 元素引用（与 selector/url 三选一）" })),
+        selector: Type.Optional(Type.String({ description: "CSS 选择器（可穿 shadow DOM/iframe；与 ref/url 三选一）" })),
+        url: Type.Optional(Type.String({ description: "图片地址（http(s)/data:/blob:；与 ref/selector 三选一）" }))
+      }),
+      execute: async (_id, params) => {
+        const given = [params?.ref, params?.selector, params?.url].filter((value) => typeof value === "string" && value.trim().length > 0);
+        if (given.length > 1) throw new Error("ref、selector、url 只能三选一");
+        const result = await run(deps, {
+          op: "saveImage",
+          ...(params?.ref ? { ref: params.ref } : {}),
+          ...(params?.selector ? { selector: params.selector } : {}),
+          ...(params?.url ? { url: params.url } : {})
+        });
+        failIfNotOk(result);
+        if (result.data.kind !== "saveImage") throw new Error("保存图片返回了意外结果");
+        const data = result.data;
+        // details 形状对两个分支保持一致（全部字段都在，缺的为 undefined）——
+        // 否则 TS 会拿第一个 return 的形状推断联合类型并在第二个分支报错。
+        const details = {
+          mode: data.mode,
+          relativePath: data.relativePath,
+          bytes: data.bytes,
+          width: data.width,
+          height: data.height,
+          mime: data.mime,
+          filename: data.filename,
+          source: data.source
+        } as const;
+        if (data.mode === "download") {
+          return {
+            content: [{ type: "text" as const, text: withNotices("图片较大或直取失败，已改走浏览器下载通道——下载结果见下方提示（下载完成后可用 ls/read 读取）。", result) }],
+            details: { ...details }
+          };
+        }
+        const size = data.bytes !== undefined ? `（${formatBytes(data.bytes)}）` : "";
+        const dimensions = data.width && data.height ? `${data.width}×${data.height}` : "尺寸未知";
+        const format = data.mime ? `，${data.mime}` : "";
+        return {
+          content: [{
+            type: "text" as const,
+            text: withNotices(`已保存图片到 ${data.relativePath}${size}——${dimensions}${format}。可用 read 或 recognize_images 查看。`, result)
+          }],
+          details: { ...details }
+        };
       }
     }),
     defineTool({

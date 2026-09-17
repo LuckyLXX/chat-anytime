@@ -741,6 +741,11 @@ export type BrowserAutomationRequest =
   | { op: "eval"; expression: string; mode: "read" | "write"; workspace?: string }
   | { op: "select"; ref: string; values: string[] }
   | { op: "upload"; ref: string; files: string[] }
+  /**
+   * 把页面中的图片原图保存到工作区（应对没有下载按钮、或图片是 blob/data/canvas 的站点）。
+   * ref/selector/url 三选一：ref 与 selector 定位页面元素，url 直接给出图片地址。
+   */
+  | { op: "saveImage"; ref?: string; selector?: string; url?: string }
   /** ref/selector 二选一：指定后截取该元素的完整区域（clip 模式，可超出视口，无需先滚动）。 */
   | { op: "screenshot"; fullPage?: boolean; scale?: number; maxWidth?: number; format?: "png" | "jpeg"; quality?: number; ref?: string; selector?: string }
   | { op: "wait"; wait: BrowserAutomationWait }
@@ -759,6 +764,11 @@ export type BrowserAutomationData =
   | { kind: "scroll"; description: string }
   | { kind: "select"; description: string }
   | { kind: "upload"; description: string }
+  /**
+   * inline：主进程拿到了字节并已落盘（relativePath/bytes/width/height/mime/filename）；
+   * download：字节太大或取字节失败，已改走浏览器下载通道（下载结果由 notices 报）。
+   */
+  | { kind: "saveImage"; mode: "inline" | "download"; relativePath?: string; bytes?: number; width?: number; height?: number; mime?: string; filename?: string; source?: "data" | "blob" | "canvas" | "http" }
   /** totalChars/savedPath 只在结果超出单次返回上限时出现：value 是前 8000 字符预览。 */
   | { kind: "eval"; value: string; totalChars?: number; savedPath?: string }
   | { kind: "screenshot"; data: string; width: number; height: number; mimeType: "image/png" | "image/jpeg" }
