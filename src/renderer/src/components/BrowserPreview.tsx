@@ -3,6 +3,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, 
 import type { BrowserElementPick, BrowserPreviewBounds, BrowserPreviewCommand, BrowserPreviewState } from "../../../shared/protocol";
 import { layoutDeviceFrame, storedPreviewDevice, storedPreviewFit, storePreviewDevice, storePreviewFit, type PreviewDeviceId } from "../lib/preview-device";
 import { saveBrowserAddress, storedBrowserAddress } from "../lib/browser-address";
+import { BrowserBookmarksMenu } from "./BrowserBookmarksMenu";
 import { PreviewDeviceMenu } from "./PreviewDeviceMenu";
 
 const emptyState: BrowserPreviewState = {
@@ -35,6 +36,7 @@ export function BrowserPreview({ suspended = false, tabId = "default", onPickSen
   const [fit, setFit] = useState(() => storedPreviewFit());
   const [viewportRect, setViewportRect] = useState<ViewportRect>();
   const [deviceMenuOpen, setDeviceMenuOpen] = useState(false);
+  const [bookmarksMenuOpen, setBookmarksMenuOpen] = useState(false);
 
   async function send(command: BrowserPreviewCommand): Promise<BrowserPreviewState | undefined> {
     const payload: BrowserPreviewCommand = { ...command, tabId };
@@ -51,7 +53,13 @@ export function BrowserPreview({ suspended = false, tabId = "default", onPickSen
 
   async function navigate(event: FormEvent): Promise<void> {
     event.preventDefault();
-    const next = await send({ type: "navigate", url: address });
+    await navigateTo(address);
+  }
+
+  // 导航的唯一实现：地址栏表单提交与书签点击共用（成功后同步地址栏与该标签页
+  // 的记忆地址）。
+  async function navigateTo(url: string): Promise<void> {
+    const next = await send({ type: "navigate", url });
     if (!next?.url) return;
     setAddress(next.url);
     saveBrowserAddress(tabId, next.url);
@@ -106,15 +114,15 @@ export function BrowserPreview({ suspended = false, tabId = "default", onPickSen
   }, [tabId]);
 
   useEffect(() => {
-    void send({ type: "visible", visible: !suspended && !deviceMenuOpen });
+    void send({ type: "visible", visible: !suspended && !deviceMenuOpen && !bookmarksMenuOpen });
     // 面板挂起（切到其他标签/面板收起）时退出选择模式，避免用户回来时误点；
-    // pick-mode off 同时会让页面内已打开的就地输入卡关闭。设备菜单张开时
+    // pick-mode off 同时会让页面内已打开的就地输入卡关闭。设备/书签菜单张开时
     // 也临时隐藏 native 视图——它悬浮在所有 DOM 之上，会盖住下拉项。
     if (suspended) {
       setPickMode(false);
       void window.piDesktop.browserPreview({ type: "pick-mode", enabled: false, tabId });
     }
-  }, [suspended, tabId, deviceMenuOpen]);
+  }, [suspended, tabId, deviceMenuOpen, bookmarksMenuOpen]);
 
   useLayoutEffect(() => () => {
     // Deactivation (tab switch, panel collapse) must NOT destroy the loaded
@@ -199,6 +207,7 @@ export function BrowserPreview({ suspended = false, tabId = "default", onPickSen
         <button type="button" title={state.loading ? "停止加载" : "刷新"} aria-label={state.loading ? "停止加载" : "刷新"} disabled={!state.attached} onClick={() => void send({ type: state.loading ? "stop" : "reload" })}>{state.loading ? <X size={15} /> : <RefreshCw size={15} />}</button>
         <PreviewDeviceMenu device={device} fit={fit} scalePercent={(layout?.scale ?? 1) * 100} onDeviceChange={changeDevice} onFitChange={changeFit} onMenuOpenChange={setDeviceMenuOpen} />
         <label className="browser-address"><Globe2 size={14} /><input value={address} aria-label="浏览器地址" placeholder="输入网址，或用 browser_navigate 让 AI 打开页面" spellCheck={false} onFocus={() => { addressFocusedRef.current = true; }} onBlur={() => { addressFocusedRef.current = false; }} onChange={(event) => setAddress(event.target.value)} /></label>
+        <BrowserBookmarksMenu currentUrl={state.url} currentTitle={state.title} onNavigate={(url) => void navigateTo(url)} onMenuOpenChange={setBookmarksMenuOpen} />
         <button type="button" className={pickMode ? "active" : ""} data-control="browser-pick" title={pickMode ? "取消元素选择" : "选择页面元素（可发送到聊天框）"} aria-label={pickMode ? "取消元素选择" : "选择页面元素"} aria-pressed={pickMode} disabled={!state.attached} onClick={togglePickMode}><Crosshair size={15} /></button>
         <button type="button" title="在系统浏览器中打开" aria-label="在系统浏览器中打开" disabled={!state.url} onClick={() => void send({ type: "open-external" })}><ExternalLink size={15} /></button>
       </form>
