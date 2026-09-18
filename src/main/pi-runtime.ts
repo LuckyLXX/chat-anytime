@@ -119,6 +119,8 @@ import { designFilePath, exportDesignFile, listDesigns, readDesign, writeDesign,
 import * as runtimePermissions from "./runtime-permissions.js";
 import * as runtimeMcp from "./runtime-mcp.js";
 import * as runtimeContextUsage from "./runtime-context-usage.js";
+import { createImageDownsampler } from "./image-downsample.js";
+import { budgetedStreamSimple, createImageBudgetGate } from "./budgeted-stream.js";
 import * as speedStats from "./speed-stats.js";
 import * as contextBreakdown from "./context-breakdown.js";
 import * as runtimeHooks from "./runtime-hooks.js";
@@ -1573,14 +1575,36 @@ function applyModelOverrides<T extends Model<Api>>(model: T): T {
 }
 
 /**
+ * 图片预算门（413 防护）在请求咽喉处的单例。
+ *
+ * 压缩器是进程级单例，它的 LRU 缓存跨会话生效：同一张截图被多个会话/多个
+ * 请求重发时只压一次。日志只在真实发生裁剪时打（含前后体积与压缩/省略张数），
+ * 是这条链路上唯一的可见性来源。
+ */
+const imageBudgetGate = createImageBudgetGate({
+  downsample: createImageDownsampler(),
+  warn: (message) => void post({ type: "log", level: "warn", message }),
+  log: (message) => void post({ type: "log", level: "info", message })
+});
+
+/**
  * Transport guard enforcing the vision invariant at the single choke point
  * every LLM request passes (main sessions and subagents share this runtime): a
  * model without image input never receives image parts. Attached images stay
  * in the session transcript — the renderer shows them in the user's bubble,
  * the JSONL persists them, reopen/regenerate replay them — and the trailing
- * hint tells the model to call recognize_images instead. Multimodal models
- * pass through untouched. completeSimple bypasses the guard on purpose: the
- * only caller is the recognize_images tool, whose vision model takes images.
+ * hint tells the model to call recognize_images instead. completeSimple
+ * bypasses the guard on purpose: the only caller is the recognize_images tool,
+ * whose vision model takes images.
+ *
+ * Multimodal models get the second guard on the same choke point: an image
+ * byte budget (see request-image-budget.ts). Real 413 payload_too_large
+ * failures showed history images accumulating to 6.5–7.9MB base64 within
+ * minutes (mostly the model re-reading its own screenshots), while Pi's
+ * built-in per-image cap (4.5MB) and token-based compaction can never see the
+ * total. Budgeting runs in the async setup of lazyStream — the same shape Pi
+ * uses internally — so the synchronous "return a stream" contract holds and a
+ * budget failure only degrades to sending the original context.
  */
 function wrapModelRuntimeForVision(runtime: ModelRuntime): ModelRuntime {
   return new Proxy(runtime, {
@@ -1595,7 +1619,8 @@ function wrapModelRuntimeForVision(runtime: ModelRuntime): ModelRuntime {
         // 共享的会话模型对象。
         return (model: Model<Api>, context: Context, options?: ModelsSimpleStreamOptions) => {
           const effectiveModel = applyModelOverrides(model);
-          return target.streamSimple(effectiveModel, hasImageInput(effectiveModel) ? context : runtimeVision.stripContextImages(context), options);
+          if (!hasImageInput(effectiveModel)) return target.streamSimple(effectiveModel, runtimeVision.stripContextImages(context), options);
+          return budgetedStreamSimple((effective, ctx, opts) => target.streamSimple(effective, ctx, opts), imageBudgetGate)(effectiveModel, context, options);
         };
       }
       if (property === "completeSimple") {
