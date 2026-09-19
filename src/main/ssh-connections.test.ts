@@ -397,7 +397,30 @@ describe("SshConnectionManager.handleAutomation (AI channel)", () => {
     expect(hosts.ok).toBe(true);
     if (!hosts.ok || hosts.data.kind !== "hosts") throw new Error("unexpected");
     expect(hosts.data.hosts).toHaveLength(1);
+    expect(hosts.data.groups).toEqual([]);
     expect(hosts.data.connections).toHaveLength(1);
     expect(hosts.data.connections[0]!.hostName).toBe("prod");
+  });
+
+  it("manages groups through the renderer channel", async () => {
+    const harness = createHarness();
+    const saved = harness.manager.handle({ type: "group.save", group: { name: "生产环境" } });
+    expect(saved.kind).toBe("group-saved");
+    const groupId = saved.kind === "group-saved" ? saved.group.id : "";
+    // 主机归组 + hosts 结果带分组。
+    const hostsResult = harness.manager.handle({ type: "hosts" });
+    const hostId = hostsResult.kind === "hosts" ? hostsResult.hosts[0]!.id : "";
+    harness.manager.handle({ type: "host.save", host: { id: hostId, name: "prod", host: "10.0.0.8", username: "root", port: 2222, groupId } });
+    const after = harness.manager.handle({ type: "hosts" });
+    expect(after.kind === "hosts" && after.groups.map((group) => group.name)).toEqual(["生产环境"]);
+    expect(after.kind === "hosts" && after.hosts[0]!.groupId).toBe(groupId);
+    // 重命名 + 删除（组内主机回落未分组，不删主机）。
+    harness.manager.handle({ type: "group.save", group: { id: groupId, name: "prod-env" } });
+    harness.manager.handle({ type: "group.delete", groupId });
+    const final = harness.manager.handle({ type: "hosts" });
+    expect(final.kind === "hosts" && final.groups).toEqual([]);
+    expect(final.kind === "hosts" && final.hosts).toHaveLength(1);
+    expect(final.kind === "hosts" && final.hosts[0]!.groupId).toBeUndefined();
+    expect(() => harness.manager.handle({ type: "group.delete", groupId })).toThrow("分组不存在");
   });
 });

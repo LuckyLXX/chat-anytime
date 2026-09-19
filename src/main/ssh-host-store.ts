@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
-import type { SshHostDraft, SshHostSummary } from "../shared/protocol.js";
+import type { SshGroupSummary, SshHostDraft, SshHostSummary } from "../shared/protocol.js";
 
 /**
  * SSH 主机配置存储：`userData/pidesktop-ssh-hosts.json`，原子 tmp+rename。
@@ -17,7 +17,14 @@ export interface StoredSshHost {
   host: string;
   port: number;
   username: string;
+  /** 所属分组（不存在于 groups 表时读取侧回退为未分组）。 */
+  groupId?: string;
   secret: string;
+}
+
+export interface StoredSshGroup {
+  id: string;
+  name: string;
 }
 
 /** 加密器抽象：实现方决定 safeStorage 是否可用与降级策略。 */
@@ -30,16 +37,23 @@ export interface SshHostCrypto {
 
 export interface SshHostStore {
   list(): SshHostSummary[];
+  listGroups(): SshGroupSummary[];
   get(id: string): StoredSshHost | undefined;
   /** 解密密码；主机不存在或从未保存过密码时返回 undefined。 */
   passwordOf(id: string): string | undefined;
   /** 新建（无 id）或更新；password 为 undefined/空 = 保留原密码。 */
   save(draft: SshHostDraft, password?: string): SshHostSummary;
   remove(id: string): boolean;
+  /** 新建（无 id）或重命名分组。 */
+  saveGroup(draft: { id?: string; name: string }): SshGroupSummary;
+  /** 删除分组：组内主机回落未分组（不删主机/密码）；返回受影响主机数，-1 = 分组不存在。 */
+  removeGroup(id: string): number;
 }
 
 interface SshHostFile {
-  version: 1;
+  version: number;
+  /** v2 起存在；v1 文件缺省为空数组（全部主机归入未分组）。 */
+  groups?: StoredSshGroup[];
   hosts: StoredSshHost[];
 }
 
@@ -68,25 +82,46 @@ function normalizeHost(value: unknown): StoredSshHost | undefined {
     host,
     port: normalizePort(raw.port),
     username,
+    ...(typeof raw.groupId === "string" && raw.groupId.trim() ? { groupId: raw.groupId.trim() } : {}),
     secret
   };
 }
 
-function readFile(filePath: string): StoredSshHost[] {
+function normalizeGroup(value: unknown): StoredSshGroup | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const raw = value as Record<string, unknown>;
+  const id = typeof raw.id === "string" && raw.id.trim() ? raw.id.trim() : undefined;
+  const name = typeof raw.name === "string" && raw.name.trim() ? raw.name.trim() : "";
+  if (!id || !name) return undefined;
+  return { id, name };
+}
+
+interface SshHostFileData {
+  hosts: StoredSshHost[];
+  groups: StoredSshGroup[];
+}
+
+function readFile(filePath: string): SshHostFileData {
   try {
-    if (!existsSync(filePath)) return [];
+    if (!existsSync(filePath)) return { hosts: [], groups: [] };
     const parsed = JSON.parse(readFileSync(filePath, "utf8")) as unknown;
-    if (!parsed || typeof parsed !== "object" || !Array.isArray((parsed as { hosts?: unknown }).hosts)) return [];
-    return ((parsed as { hosts: unknown[] }).hosts)
-      .map(normalizeHost)
-      .filter((item): item is StoredSshHost => item !== undefined);
+    if (!parsed || typeof parsed !== "object" || !Array.isArray((parsed as { hosts?: unknown }).hosts)) {
+      return { hosts: [], groups: [] };
+    }
+    const groups = Array.isArray((parsed as { groups?: unknown }).groups)
+      ? ((parsed as { groups: unknown[] }).groups).map(normalizeGroup).filter((item): item is StoredSshGroup => item !== undefined)
+      : []; // v1 文件没有 groups：全部主机归入未分组
+    return {
+      hosts: ((parsed as { hosts: unknown[] }).hosts).map(normalizeHost).filter((item): item is StoredSshHost => item !== undefined),
+      groups
+    };
   } catch {
-    return [];
+    return { hosts: [], groups: [] };
   }
 }
 
-function writeFile(filePath: string, hosts: StoredSshHost[]): void {
-  const payload: SshHostFile = { version: 1, hosts };
+function writeFile(filePath: string, data: SshHostFileData): void {
+  const payload: SshHostFile = { version: 2, groups: data.groups, hosts: data.hosts };
   mkdirSync(dirname(filePath), { recursive: true });
   const tmp = `${filePath}.tmp`;
   writeFileSync(tmp, JSON.stringify(payload, null, 2), "utf8");
@@ -100,6 +135,7 @@ function toSummary(stored: StoredSshHost, insecure: boolean): SshHostSummary {
     host: stored.host,
     port: stored.port,
     username: stored.username,
+    ...(stored.groupId ? { groupId: stored.groupId } : {}),
     hasPassword: stored.secret.length > 0,
     ...(insecure && stored.secret.length > 0 ? { credentialInsecure: true } : {})
   };
@@ -118,22 +154,32 @@ export function validateHostDraft(draft: SshHostDraft): string | undefined {
 }
 
 export function createSshHostStore(deps: { filePath: string; crypto: SshHostCrypto }): SshHostStore {
-  let hosts = readFile(deps.filePath);
+  let data = readFile(deps.filePath);
+  const hosts = (): StoredSshHost[] => data.hosts;
+  const groups = (): StoredSshGroup[] => data.groups;
 
   const persist = (): void => {
-    writeFile(deps.filePath, hosts);
+    writeFile(deps.filePath, data);
+  };
+
+  const validGroupId = (groupId: string | undefined): string | undefined => {
+    if (!groupId || !groupId.trim()) return undefined;
+    return groups().some((group) => group.id === groupId) ? groupId : undefined;
   };
 
   return {
     list(): SshHostSummary[] {
       const insecure = !deps.crypto.isAvailable();
-      return hosts.map((item) => toSummary(item, insecure));
+      return hosts().map((item) => toSummary(item, insecure));
+    },
+    listGroups(): SshGroupSummary[] {
+      return groups().map((group) => ({ id: group.id, name: group.name }));
     },
     get(id: string): StoredSshHost | undefined {
-      return hosts.find((item) => item.id === id);
+      return hosts().find((item) => item.id === id);
     },
     passwordOf(id: string): string | undefined {
-      const stored = hosts.find((item) => item.id === id);
+      const stored = hosts().find((item) => item.id === id);
       if (!stored || !stored.secret) return undefined;
       const plain = deps.crypto.decrypt(stored.secret);
       return plain || undefined;
@@ -146,12 +192,14 @@ export function createSshHostStore(deps: { filePath: string; crypto: SshHostCryp
         username: draft.username.trim()
       };
       const passwordToStore = password !== undefined && password.length > 0 ? password : undefined;
-      const existing = draft.id ? hosts.find((item) => item.id === draft.id) : undefined;
+      const existing = draft.id ? hosts().find((item) => item.id === draft.id) : undefined;
       if (existing) {
         existing.name = trimmed.name;
         existing.host = trimmed.host;
         existing.port = port;
         existing.username = trimmed.username;
+        // 分组改为显式字段：草稿带空串=移出分组；缺省=保留原值；无效 id 归未分组。
+        if (draft.groupId !== undefined) existing.groupId = validGroupId(draft.groupId);
         if (passwordToStore !== undefined) existing.secret = deps.crypto.encrypt(passwordToStore).secret;
         persist();
         return toSummary(existing, !deps.crypto.isAvailable());
@@ -160,18 +208,50 @@ export function createSshHostStore(deps: { filePath: string; crypto: SshHostCryp
         id: `ssh-${randomUUID().slice(0, 8)}`,
         ...trimmed,
         port,
+        ...(validGroupId(draft.groupId) ? { groupId: validGroupId(draft.groupId)! } : {}),
         secret: passwordToStore !== undefined ? deps.crypto.encrypt(passwordToStore).secret : ""
       };
-      hosts.push(stored);
+      data.hosts.push(stored);
       persist();
       return toSummary(stored, !deps.crypto.isAvailable());
     },
     remove(id: string): boolean {
-      const index = hosts.findIndex((item) => item.id === id);
+      const index = data.hosts.findIndex((item) => item.id === id);
       if (index < 0) return false;
-      hosts.splice(index, 1);
+      data.hosts.splice(index, 1);
       persist();
       return true;
+    },
+    saveGroup(draft: { id?: string; name: string }): SshGroupSummary {
+      const name = draft.name.trim();
+      if (!name) throw new Error("分组名称不能为空");
+      const duplicate = groups().find((group) => group.name === name && group.id !== draft.id);
+      if (duplicate) throw new Error(`已存在同名分组「${name}」`);
+      const existing = draft.id ? groups().find((group) => group.id === draft.id) : undefined;
+      if (existing) {
+        existing.name = name;
+        persist();
+        return { id: existing.id, name };
+      }
+      const group: StoredSshGroup = { id: `grp-${randomUUID().slice(0, 8)}`, name };
+      data.groups.push(group);
+      persist();
+      return { id: group.id, name: group.name };
+    },
+    removeGroup(id: string): number {
+      const index = groups().findIndex((group) => group.id === id);
+      if (index < 0) return -1;
+      data.groups.splice(index, 1);
+      // 组内主机回落未分组（不删主机与密码）。
+      let moved = 0;
+      for (const item of data.hosts) {
+        if (item.groupId === id) {
+          delete item.groupId;
+          moved += 1;
+        }
+      }
+      persist();
+      return moved;
     }
   };
 }

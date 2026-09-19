@@ -50,7 +50,7 @@
 
 > `automation-settings` 是设置页「自动化任务」tab（双子页：「任务」列表 + 搜索 + 过滤器 / 「运行记录」历史面板，位于 `settings-dialog` 内）；`automation-dialog` 是「创建/编辑定时任务」弹窗。二者都随设置页/弹窗配色走，主题可用 `--panel-bg` 派生背景与 `--border`/`--surface-*` 控制排版。相关控件钩子：`data-control="automation-open"`（侧栏「新建话题」下方的「自动化」入口 + 折叠态窄条图标）、`automation-run`（行内「运行一次」）、`automation-toggle`（启停）、`automation-runs-tab`（子页「运行记录」）；未在控件列枚举的地方用类名 `.automation-*` 命中。
 
-> `ssh` 是预览面板的 SSH 主机管理 tab（`data-pane="ssh"`，与 `terminal` 同层；远程终端 tab 本体也是 `terminal` 区域）。主机列表/表单/指纹确认卡用类名 `.ssh-host-*` / `.ssh-fingerprint-*` 命中，安全存储警告条 `.ssh-insecure-warning`。相关控件钩子：`data-control="ssh-open"`（侧栏「新建话题」下方的「SSH」入口 + 折叠态窄条图标）、`ssh-host-create` / `ssh-host-save` / `ssh-host-delete` / `ssh-host-connect`（主机面板动作）、`ssh-trust-fingerprint`（首次连接指纹确认卡）。
+> `ssh` 是预览面板的 SSH 主机管理 tab（`data-pane="ssh"`，与 `terminal` 同层；远程终端 tab 本体也是 `terminal` 区域）。主机列表/表单/指纹确认卡用类名 `.ssh-host-*` / `.ssh-fingerprint-*` 命中，安全存储警告条 `.ssh-insecure-warning`；主机清单按分组折叠展示（`.ssh-group-*` 类名，未分组为固定尾节）。相关控件钩子：`data-control="ssh-open"`（侧栏「新建话题」下方的「SSH」入口 + 折叠态窄条图标）、`ssh-host-create` / `ssh-host-save` / `ssh-host-delete` / `ssh-host-connect`（主机面板动作）、`ssh-trust-fingerprint`（首次连接指纹确认卡）、`ssh-group-create` / `ssh-group-save`（分组新建/保存）。
 
 ```css
 [data-pane="composer"] { border-image: url(frame.webp) 0 220 fill; border-radius: 0; }

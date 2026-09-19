@@ -468,10 +468,16 @@ function isSshCommand(value: unknown): value is SshCommand {
       const host = command.host;
       if (!host || typeof host !== "object") return false;
       const draft = host as Record<string, unknown>;
-      return typeof draft.name === "string" && typeof draft.host === "string" && typeof draft.username === "string" && (draft.port === undefined || typeof draft.port === "number") && (command.password === undefined || typeof command.password === "string");
+      return typeof draft.name === "string" && typeof draft.host === "string" && typeof draft.username === "string" && (draft.port === undefined || typeof draft.port === "number") && (draft.groupId === undefined || typeof draft.groupId === "string") && (command.password === undefined || typeof command.password === "string");
     }
     case "host.delete":
       return typeof command.hostId === "string" && command.hostId.trim() !== "";
+    case "group.save": {
+      const group = command.group;
+      return Boolean(group) && typeof group === "object" && typeof (group as Record<string, unknown>).name === "string" && ((group as Record<string, unknown>).id === undefined || typeof (group as Record<string, unknown>).id === "string");
+    }
+    case "group.delete":
+      return typeof command.groupId === "string" && command.groupId.trim() !== "";
     case "hosts":
       return true;
     default:

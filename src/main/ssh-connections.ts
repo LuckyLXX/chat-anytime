@@ -216,8 +216,9 @@ export class SshConnectionManager {
       case "kill": this.kill(command.terminalId); return { kind: "void" };
       case "hosts": {
         const hosts = this.deps.hostStore.list();
+        const groups = this.deps.hostStore.listGroups();
         const connectedHostIds = [...this.connections.values()].filter((record) => record.status !== "closed").map((record) => record.hostId);
-        return { kind: "hosts", hosts, connectedHostIds };
+        return { kind: "hosts", hosts, groups, connectedHostIds };
       }
       case "host.save": {
         const error = validateHostDraft(command.host);
@@ -227,6 +228,13 @@ export class SshConnectionManager {
       case "host.delete": {
         if (!this.deps.hostStore.remove(command.hostId)) throw new Error("主机不存在或已删除");
         return { kind: "host-deleted" };
+      }
+      case "group.save": {
+        return { kind: "group-saved", group: this.deps.hostStore.saveGroup(command.group) };
+      }
+      case "group.delete": {
+        if (this.deps.hostStore.removeGroup(command.groupId) < 0) throw new Error("分组不存在或已删除");
+        return { kind: "group-deleted" };
       }
     }
   }
@@ -360,10 +368,11 @@ export class SshConnectionManager {
       switch (request.op) {
         case "hosts": {
           const hosts = this.deps.hostStore.list();
+          const groups = this.deps.hostStore.listGroups();
           const connections = [...this.connections.values()]
             .filter((record) => record.status === "connected")
             .map((record) => connectionInfoOf(record));
-          return { ok: true, data: { kind: "hosts", hosts, connections } };
+          return { ok: true, data: { kind: "hosts", hosts, groups, connections } };
         }
         case "connect": {
           const stored = this.findHost(request.host);

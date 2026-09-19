@@ -106,3 +106,65 @@ describe("validateHostDraft", () => {
     expect(validateHostDraft({ name: "a", host: "1.2.3.4", username: "root", port: 70000 })).toContain("端口");
   });
 });
+
+describe("ssh host groups", () => {
+  it("creates, renames, and rejects duplicate names", () => {
+    const store = createSshHostStore({ filePath: tempFile("hosts.json"), crypto: secureCrypto() });
+    const created = store.saveGroup({ name: "生产环境" });
+    expect(store.listGroups()).toEqual([{ id: created.id, name: "生产环境" }]);
+    store.saveGroup({ id: created.id, name: "生产" });
+    expect(store.listGroups()[0]!.name).toBe("生产");
+    expect(() => store.saveGroup({ name: "生产" })).toThrow("同名分组");
+  });
+
+  it("assigns hosts to groups; editing can move out via empty groupId", () => {
+    const store = createSshHostStore({ filePath: tempFile("hosts.json"), crypto: secureCrypto() });
+    const group = store.saveGroup({ name: "测试" });
+    const host = store.save({ name: "web", host: "1.2.3.4", username: "root", groupId: group.id });
+    expect(host.groupId).toBe(group.id);
+    // 编辑：不传 groupId 保留原值；传空串显式移出分组。
+    store.save({ id: host.id, name: "web", host: "1.2.3.4", username: "root" });
+    expect(store.list()[0]!.groupId).toBe(group.id);
+    store.save({ id: host.id, name: "web", host: "1.2.3.4", username: "root", groupId: "" });
+    expect(store.list()[0]!.groupId).toBeUndefined();
+    // 无效分组 id 归未分组，不报错。
+    const other = store.save({ name: "x", host: "5.6.7.8", username: "root", groupId: "grp-missing" });
+    expect(other.groupId).toBeUndefined();
+  });
+
+  it("deleting a group moves members to ungrouped instead of deleting them", () => {
+    const store = createSshHostStore({ filePath: tempFile("hosts.json"), crypto: secureCrypto() });
+    const group = store.saveGroup({ name: "生产" });
+    const a = store.save({ name: "a", host: "1.1.1.1", username: "root", groupId: group.id }, "pw1");
+    const b = store.save({ name: "b", host: "2.2.2.2", username: "root", groupId: group.id });
+    const moved = store.removeGroup(group.id);
+    expect(moved).toBe(2);
+    expect(store.listGroups()).toHaveLength(0);
+    expect(store.list().map((host) => host.id).sort()).toEqual([a.id, b.id].sort());
+    expect(store.list().every((host) => host.groupId === undefined)).toBe(true);
+    expect(store.passwordOf(a.id)).toBe("pw1"); // 密码不受分组删除影响
+    expect(store.removeGroup("grp-nope")).toBe(-1);
+  });
+
+  it("reads v1 files (no groups key) as all-ungrouped", () => {
+    const filePath = tempFile("hosts.json");
+    dirs.push(join(filePath, ".."));
+    const store = createSshHostStore({ filePath, crypto: secureCrypto() });
+    const saved = store.save({ name: "legacy", host: "9.9.9.9", username: "root" }, "pw");
+    // 手工降回 v1 形状（无 groups 字段）。
+    const parsed = JSON.parse(readFileSync(filePath, "utf8")) as Record<string, unknown>;
+    delete parsed.groups;
+    parsed.version = 1;
+    writeFileSync(filePath, JSON.stringify(parsed), "utf8");
+    const reopened = createSshHostStore({ filePath, crypto: secureCrypto() });
+    expect(reopened.listGroups()).toEqual([]);
+    expect(reopened.list()).toHaveLength(1);
+    expect(reopened.list()[0]!.id).toBe(saved.id);
+    expect(reopened.list()[0]!.groupId).toBeUndefined();
+    // v1 数据保存新分组后升到 v2，且旧主机仍可归组。
+    const group = reopened.saveGroup({ name: "新组" });
+    reopened.save({ id: saved.id, name: "legacy", host: "9.9.9.9", username: "root", groupId: group.id });
+    expect(reopened.list()[0]!.groupId).toBe(group.id);
+    expect((JSON.parse(readFileSync(filePath, "utf8")) as { version: number }).version).toBe(2);
+  });
+});

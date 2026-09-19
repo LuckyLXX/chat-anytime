@@ -889,6 +889,12 @@ export type TerminalEventData =
   | { type: "exit"; terminalId: string; exitCode?: number }
   | { type: "error"; terminalId: string; message: string };
 
+/** SSH 主机分组（面板内组织用；主机经 groupId 归属，删除分组只把主机回落到未分组）。 */
+export interface SshGroupSummary {
+  id: string;
+  name: string;
+}
+
 /**
  * SSH 远程终端。主机清单持久化在主进程（密码经 safeStorage 加密，永不回传
  * 渲染端）；连接是 ssh2 的 shell channel（远端 PTY），与本地 PTY 终端同一套
@@ -901,6 +907,8 @@ export interface SshHostSummary {
   host: string;
   port: number;
   username: string;
+  /** 所属分组；缺省 = 未分组。 */
+  groupId?: string;
   /** 是否已保存密码（编辑表单据此显示「留空=不修改」）。 */
   hasPassword: boolean;
   /** 密码以明文降级存储（safeStorage 不可用），UI 需警告。 */
@@ -914,6 +922,8 @@ export interface SshHostDraft {
   host: string;
   port?: number;
   username: string;
+  /** 归属分组；缺省/无效 = 未分组。 */
+  groupId?: string;
 }
 
 export type SshCommand =
@@ -923,12 +933,16 @@ export type SshCommand =
   | { type: "kill"; terminalId: string }
   | { type: "host.save"; host: SshHostDraft; password?: string }
   | { type: "host.delete"; hostId: string }
+  | { type: "group.save"; group: { id?: string; name: string } }
+  | { type: "group.delete"; groupId: string }
   | { type: "hosts" };
 
 export type SshCommandResult =
-  | { kind: "hosts"; hosts: SshHostSummary[]; connectedHostIds: string[] }
+  | { kind: "hosts"; hosts: SshHostSummary[]; groups: SshGroupSummary[]; connectedHostIds: string[] }
   | { kind: "host-saved"; host: SshHostSummary }
   | { kind: "host-deleted" }
+  | { kind: "group-saved"; group: SshGroupSummary }
+  | { kind: "group-deleted" }
   /** 连接已异步发起（结果经 SshEventData 事件：fingerprint / status / error）。 */
   | { kind: "connect" }
   | { kind: "void" };
@@ -965,7 +979,7 @@ export interface SshConnectionInfo {
 }
 
 export type SshAutomationData =
-  | { kind: "hosts"; hosts: SshHostSummary[]; connections: SshConnectionInfo[] }
+  | { kind: "hosts"; hosts: SshHostSummary[]; groups: SshGroupSummary[]; connections: SshConnectionInfo[] }
   | { kind: "connect"; connection: SshConnectionInfo }
   | { kind: "exec"; output: string; exitCode: number | null; timedOut?: boolean }
   | { kind: "write"; written: number }

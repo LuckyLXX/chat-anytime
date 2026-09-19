@@ -565,7 +565,7 @@ export function createDemoApi(): DesktopApi {
       }
     },
     async ssh(command: SshCommand): Promise<SshCommandResult> {
-      if (command.type === "hosts") return { kind: "hosts", hosts: [], connectedHostIds: [] };
+      if (command.type === "hosts") return { kind: "hosts", hosts: [], groups: [], connectedHostIds: [] };
       if (command.type === "connect") {
         for (const listener of sshDataListeners.get(command.terminalId) ?? []) {
           listener({ type: "error", terminalId: command.terminalId, message: "SSH 连接仅在 Electron 桌面窗口中可用" });

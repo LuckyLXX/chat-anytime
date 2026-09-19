@@ -16,7 +16,7 @@
 
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import type { SshAutomationRequest, SshAutomationResult } from "../shared/protocol.js";
+import type { SshAutomationRequest, SshAutomationResult, SshHostSummary } from "../shared/protocol.js";
 
 export interface SshToolDeps {
   /** Forward one SSH operation to the main process and await its result. */
@@ -38,20 +38,35 @@ async function run(deps: SshToolDeps, request: SshAutomationRequest): Promise<Ex
   return result;
 }
 
-function formatHosts(data: Extract<SshAutomationResult, { ok: true }>["data"] & { kind: "hosts" }): string {
+function formatHosts(data: { hosts: SshHostSummary[]; groups: { id: string; name: string }[]; connections: { hostId: string; hostName: string; terminalId: string }[] }): string {
   if (data.hosts.length === 0) {
     return [
       "尚未配置任何 SSH 主机。",
       "请让用户在侧边栏「SSH」面板新建主机（名称/地址/端口/用户名/密码），保存后即可 ssh_connect。"
     ].join("\n");
   }
-  const hostLines = data.hosts.map((host) => `- ${host.name}（${host.username}@${host.host}:${host.port}${host.hasPassword ? "" : "，未存密码"}）${data.connections.some((conn) => conn.hostId === host.id) ? " [已连接]" : ""}`);
-  const connLines = data.connections.map((conn) => `- ${conn.hostName} → ${conn.terminalId}`);
-  return [
-    `已配置 ${data.hosts.length} 台主机：`,
-    ...hostLines,
-    ...(connLines.length > 0 ? ["当前活跃连接：", ...connLines] : ["当前没有活跃连接。"])
-  ].join("\n");
+  const groupNameOf = (groupId: string | undefined): string => {
+    if (!groupId) return "未分组";
+    return data.groups.find((group) => group.id === groupId)?.name ?? "未分组";
+  };
+  const buckets = new Map<string, { label: string; hosts: SshHostSummary[] }>();
+  for (const host of data.hosts) {
+    const key = host.groupId ?? "";
+    const bucket = buckets.get(key) ?? { label: groupNameOf(host.groupId), hosts: [] };
+    bucket.hosts.push(host);
+    buckets.set(key, bucket);
+  }
+  const lines: string[] = [`已配置 ${data.hosts.length} 台主机（按分组）：`];
+  for (const bucket of buckets.values()) {
+    lines.push(`【${bucket.label}】`);
+    for (const host of bucket.hosts) {
+      lines.push(`- ${host.name}（${host.username}@${host.host}:${host.port}${host.hasPassword ? "" : "，未存密码"}）${data.connections.some((conn) => conn.hostId === host.id) ? " [已连接]" : ""}`);
+    }
+  }
+  lines.push(...(data.connections.length > 0
+    ? ["当前活跃连接：", ...data.connections.map((conn) => `- ${conn.hostName} → ${conn.terminalId}`)]
+    : ["当前没有活跃连接。"]));
+  return lines.join("\n");
 }
 
 export function buildSshTools(deps: SshToolDeps): ToolDefinition[] {
