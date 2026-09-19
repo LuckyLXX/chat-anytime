@@ -378,7 +378,10 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 .preview-empty-state > strong { color: var(--text); font-size: 13px; }
 .preview-empty-state > em { color: var(--text-muted); font-size: 10px; font-style: normal; }
 .preview-empty-state-list { display: grid; gap: 6px; width: min(360px, 88%); }
-.preview-empty-state-item { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; gap: 10px; align-items: center; min-height: 38px; padding: 6px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); cursor: pointer; }
+/* 第三列是快捷键胶囊位：SSH 行没有胶囊，若用 auto 该行第三列宽 0，
+   名称列便多分一份 1fr → 标签比上面三行右偏（约 21px）。
+   统一预留 ≥ 胶囊宽度的第三列，四行标签才落在同一条竖线上。 */
+.preview-empty-state-item { display: grid; grid-template-columns: 22px minmax(0, 1fr) minmax(44px, auto); gap: 10px; align-items: center; min-height: 38px; padding: 6px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); cursor: pointer; }
 .preview-empty-state-item:hover { background: var(--surface-button-hover); border-color: var(--accent); }
 .preview-empty-state-item.disabled { opacity: .45; cursor: default; }
 .preview-empty-state-item.disabled:hover { background: var(--surface); border-color: var(--border); }
