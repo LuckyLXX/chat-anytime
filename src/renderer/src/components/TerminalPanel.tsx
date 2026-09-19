@@ -2,6 +2,7 @@ import { RotateCw } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
+import { TERMINAL_FONT_FAMILY } from "../lib/terminal-font";
 import "@xterm/xterm/css/xterm.css";
 
 type EndedState = { kind: "exit"; code?: number } | { kind: "error"; message: string } | undefined;
@@ -26,7 +27,7 @@ export function TerminalPanel({ terminalId, workspace }: { terminalId: string; w
     const terminal = new Terminal({
       convertEol: false,
       cursorBlink: true,
-      fontFamily: '"Cascadia Mono", "JetBrains Mono", Consolas, "Courier New", monospace',
+      fontFamily: TERMINAL_FONT_FAMILY,
       fontSize: 13,
       scrollback: 4000,
       theme: readXtermTheme()
