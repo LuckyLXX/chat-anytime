@@ -141,8 +141,8 @@ export function SshPanel({ onConnect }: { onConnect(host: SshHostSummary): void 
         </div>
         <div className="ssh-host-actions">
           <button type="button" className="primary-button" data-control="ssh-host-connect" onClick={() => onConnect(host)}>连接</button>
-          <button type="button" className="ghost-button" title="编辑" aria-label={`编辑 ${host.name}`} onClick={() => beginEditHost(host)}><Pencil size={14} /></button>
-          <button type="button" className="ghost-button danger" title="删除" aria-label={`删除 ${host.name}`} onClick={() => void removeHost(host)}><Trash2 size={14} /></button>
+          <button type="button" className="ghost-button ghost-icon" title="编辑" aria-label={`编辑 ${host.name}`} onClick={() => beginEditHost(host)}><Pencil size={14} /></button>
+          <button type="button" className="ghost-button ghost-icon danger" title="删除" aria-label={`删除 ${host.name}`} onClick={() => void removeHost(host)}><Trash2 size={14} /></button>
         </div>
       </li>
     );
@@ -260,12 +260,12 @@ export function SshPanel({ onConnect }: { onConnect(host: SshHostSummary): void 
                   <span className="ssh-group-count">{bucket.hosts.length}</span>
                   {bucket.group && (
                     <span className="ssh-group-actions" onClick={(event) => event.stopPropagation()}>
-                      <button type="button" className="ghost-button" title="重命名分组" aria-label={`重命名分组 ${bucket.label}`} onClick={() => setGroupDraft({ mode: "editing", id: bucket.group!.id, name: bucket.group!.name, saving: false })}><Pencil size={13} /></button>
-                      <button type="button" className="ghost-button danger" title="删除分组" aria-label={`删除分组 ${bucket.label}`} onClick={() => void removeGroup(bucket.group!, bucket.hosts.length)}><Trash2 size={13} /></button>
+                      <button type="button" className="ghost-button ghost-icon" title="重命名分组" aria-label={`重命名分组 ${bucket.label}`} onClick={() => setGroupDraft({ mode: "editing", id: bucket.group!.id, name: bucket.group!.name, saving: false })}><Pencil size={14} /></button>
+                      <button type="button" className="ghost-button ghost-icon danger" title="删除分组" aria-label={`删除分组 ${bucket.label}`} onClick={() => void removeGroup(bucket.group!, bucket.hosts.length)}><Trash2 size={14} /></button>
                     </span>
                   )}
                   {!bucket.group && (
-                    <button type="button" className="ghost-button ssh-group-add" title="在未分组中新建主机" aria-label="新建主机" onClick={(event) => { event.stopPropagation(); beginCreateHost(); }}><Plus size={13} /></button>
+                    <button type="button" className="ghost-button ghost-icon ssh-group-add" title="在未分组中新建主机" aria-label="新建主机" onClick={(event) => { event.stopPropagation(); beginCreateHost(); }}><Plus size={14} /></button>
                   )}
                 </header>
                 {!isCollapsed && (

@@ -968,7 +968,7 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 .context-menu, .preview-open-menu, .access-mode-menu, .composer-select-menu, .slash-menu { animation: menu-pop-in .16s cubic-bezier(0.16, 1, 0.3, 1); }
 /* 按压触感：主行动按钮与图标按钮按下轻微缩放（操作反馈，transform 不触发重排）。 */
 .send-button:active, .stop-button:active, .new-session-button:active,
-.primary-button:active, .danger-button:active { transform: scale(.97); }
+.primary-button:active, .danger-button:active, .ghost-button:active { transform: scale(.97); }
 .icon-button:active, .panel-dock-fab:active { transform: scale(.94); }
 .slash-menu-item { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 8px; align-items: center; min-width: 0; min-height: 36px; padding: 5px 8px; text-align: left; border: 0; border-radius: 6px; color: var(--text-muted); background: transparent; cursor: pointer; }
 .slash-menu-item:hover, .slash-menu-item.active { color: var(--text); background: var(--surface-raised); }
@@ -1409,10 +1409,19 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 .permission-dialog header { display: flex; justify-content: flex-start; }.permission-dialog > pre { max-height: 260px; margin: 15px 18px; overflow: auto; padding: 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-detail); font-size: 10px; white-space: pre-wrap; }
 .extension-ui-dialog form .field { display: grid; gap: 6px; margin: 15px 18px; color: var(--text-muted); font-size: 11px; font-weight: 600; }.extension-ui-dialog input, .extension-ui-dialog textarea { width: 100%; padding: 9px 10px; border: 1px solid var(--border-strong); border-radius: 6px; outline: 0; color: var(--text); background: var(--surface-input); font: inherit; }.extension-ui-dialog textarea { resize: vertical; }.extension-ui-options { display: grid; gap: 8px; max-height: 280px; margin: 15px 18px; overflow: auto; }.extension-ui-options button { justify-content: flex-start; }
 .risk-icon { display: grid; place-items: center; width: 38px; height: 38px; flex: 0 0 auto; border-radius: 6px; color: var(--warning); background: var(--warning-soft); }.risk-icon.outside-workspace { color: var(--danger); background: var(--danger-soft); }.risk-icon.browse { color: var(--accent); background: var(--accent-soft, var(--focus-ring)); }.risk-icon.desktop { color: var(--danger); background: var(--danger-soft); }.risk-icon.ssh { color: var(--danger); background: var(--danger-soft); }
-.primary-button, .secondary-button, .danger-button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 34px; padding: 0 13px; border: 1px solid transparent; border-radius: 6px; font-size: 11px; font-weight: 650; cursor: pointer; }
+.primary-button, .secondary-button, .danger-button, .ghost-button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 34px; padding: 0 13px; border: 1px solid transparent; border-radius: 6px; font-size: 11px; font-weight: 650; cursor: pointer; }
 .primary-button { color: var(--on-accent); background: var(--accent); }.primary-button:hover { background: var(--accent-hover); }.primary-button:disabled { opacity: .5; }
 .secondary-button { border-color: var(--border-strong); background: var(--surface-input); }.secondary-button:hover { background: var(--surface-button-hover); }
 .danger-button { color: var(--danger); border-color: var(--danger-border); background: var(--surface-input); }
+/* ghost = 透明底次级操作（新建分组 / 取消 / 行内图标操作）：与主按钮同高同字
+   同圆角，只清空背景与边框，保证同行并排时高度与字号完全一致。纯图标的
+   ghost 按钮另加 .ghost-icon，尺寸收成 34px 方块。 */
+.ghost-button { color: var(--text-muted); background: transparent; }
+.ghost-button:hover { color: var(--text); background: var(--surface-button-hover); }
+.ghost-button:disabled { opacity: .45; cursor: default; background: transparent; color: var(--text-muted); }
+.ghost-button.danger { color: var(--danger); }
+.ghost-button.danger:hover { color: var(--danger); background: var(--danger-soft); }
+.ghost-icon { width: 34px; min-width: 34px; padding: 0; gap: 0; }
 .content-preview-panel { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; background: var(--surface); animation: preview-panel-in .2s var(--motion-ease); }
 .preview-tabs { display: flex; flex: 0 0 auto; align-items: stretch; min-width: 0; height: 38px; overflow: visible; border-bottom: 1px solid var(--border); background: var(--surface); }
 .preview-tab { display: flex; align-items: stretch; min-width: 0; max-width: 210px; margin: 4px 0 0 6px; border-radius: 6px 6px 0 0; background: var(--surface-muted); transition: background-color .15s ease; }
@@ -1459,14 +1468,14 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 /* —— 分组：可折叠节，分组头 hover 出操作，未分组为固定尾节 —— */
 .ssh-group-list { display: flex; flex-direction: column; gap: 14px; }
 .ssh-group { display: flex; flex-direction: column; gap: 6px; }
-.ssh-group-head { display: flex; align-items: center; gap: 7px; padding: 4px 2px; cursor: pointer; user-select: none; color: var(--text); border-bottom: 1px solid var(--border); padding-bottom: 7px; }
+.ssh-group-head { display: flex; align-items: center; gap: 7px; min-height: 34px; padding: 0 2px 7px; cursor: pointer; user-select: none; color: var(--text); border-bottom: 1px solid var(--border); }
 .ssh-group-head:hover { color: var(--accent-text); }
 .ssh-group-name { font-size: 12.5px; letter-spacing: 0.02em; }
 .ssh-group-count { font-size: 11px; opacity: 0.55; padding: 1px 7px; border-radius: 99px; background: var(--surface-muted); }
 .ssh-group-actions { display: none; gap: 4px; margin-left: auto; }
 .ssh-group-head:hover .ssh-group-actions { display: inline-flex; }
-.ssh-group-actions .ghost-button { padding: 3px 5px; }
-.ssh-group-add { display: none; padding: 3px 5px; margin-left: auto; }
+.ssh-group-actions .ghost-button, .ssh-group-add { padding: 0; }
+.ssh-group-add { display: none; margin-left: auto; }
 .ssh-group-head:hover .ssh-group-add { display: inline-flex; }
 .ssh-group-empty { list-style: none; font-size: 12px; opacity: 0.5; padding: 6px 2px 2px 24px; }
 .ssh-panel-head-actions { display: flex; gap: 8px; }
