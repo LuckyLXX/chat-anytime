@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { BrowserElementPick, BrowserPreviewCommand, BrowserPreviewState, BrowserTabsEvent, DesktopApi, RuntimeCommand, RuntimeMessage, TerminalCommand, TerminalEventData } from "../shared/protocol.js";
+import type { BrowserElementPick, BrowserPreviewCommand, BrowserPreviewState, BrowserTabsEvent, DesktopApi, RuntimeCommand, RuntimeMessage, SshCommand, SshEventData, SshRevealEvent, TerminalCommand, TerminalEventData } from "../shared/protocol.js";
 
 const api: DesktopApi = {
   bootstrap: () => ipcRenderer.invoke("desktop:bootstrap"),
@@ -20,6 +20,7 @@ const api: DesktopApi = {
   browserPreview: (command: BrowserPreviewCommand) => ipcRenderer.invoke("browser-preview:command", command),
   browserAutomationCancel: (tabId: string) => ipcRenderer.invoke("browser-automation:cancel", tabId),
   terminal: (command: TerminalCommand) => ipcRenderer.invoke("terminal:command", command),
+  ssh: (command: SshCommand) => ipcRenderer.invoke("ssh:command", command),
   send: (command: RuntimeCommand) => ipcRenderer.invoke("runtime:send", command),
   onRuntimeMessage: (listener: (message: RuntimeMessage) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, message: RuntimeMessage): void => listener(message);
@@ -48,6 +49,17 @@ const api: DesktopApi = {
     const channel = `terminal:data:${terminalId}`;
     ipcRenderer.on(channel, handler);
     return () => ipcRenderer.removeListener(channel, handler);
+  },
+  onSshData: (terminalId: string, listener: (event: SshEventData) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, event: SshEventData): void => listener(event);
+    const channel = `ssh:data:${terminalId}`;
+    ipcRenderer.on(channel, handler);
+    return () => ipcRenderer.removeListener(channel, handler);
+  },
+  onSshReveal: (listener: (event: SshRevealEvent) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, event: SshRevealEvent): void => listener(event);
+    ipcRenderer.on("ssh:reveal", handler);
+    return () => ipcRenderer.removeListener("ssh:reveal", handler);
   }
 };
 

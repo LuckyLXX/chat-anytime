@@ -1,4 +1,4 @@
-import { AlertCircle, Brain, Check, ClipboardList, Code2, Eye, File, FileCode2, FileDiff, FileText, Globe2, ListTree, LoaderCircle, Maximize2, Minimize2, Pause, Pencil, Play, Plus, Terminal, X } from "lucide-react";
+import { AlertCircle, Brain, Check, ClipboardList, Code2, Eye, File, FileCode2, FileDiff, FileText, Globe2, ListTree, LoaderCircle, Maximize2, Minimize2, Pause, Pencil, Play, Plus, Server, Terminal, X } from "lucide-react";
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type SyntheticEvent } from "react";
 import type { BrowserElementPick, BrowserPreviewState, WorkspaceFilePreview } from "../../../shared/protocol";
 import { IMAGE_PREVIEW_LIMIT_BYTES, workspaceFilePreviewUrl } from "../../../shared/protocol";
@@ -13,11 +13,15 @@ import { CodeBlock, MarkdownPreviewContent } from "./RichContent";
 import { PreviewDeviceMenu } from "./PreviewDeviceMenu";
 import { BrowserPreview } from "./BrowserPreview";
 import { TerminalPanel } from "./TerminalPanel";
+import { SshPanel } from "./SshPanel";
+import { SshTerminalPanel } from "./SshTerminalPanel";
 
 export type PreviewTarget =
   | { type: "artifact"; artifact: Artifact }
   | { type: "browser"; id?: string; title?: string; loading?: boolean }
   | { type: "terminal" }
+  | { type: "ssh" }
+  | { type: "ssh-terminal"; terminalId: string; hostId: string; hostName: string }
   | { type: "file"; file: WorkspaceFilePreview; workspace?: string }
   | { type: "diff"; title: string; path?: string; patch: string }
   | { type: "plan"; title: string; content: string }
@@ -84,6 +88,8 @@ function targetMetadata(target: PreviewTarget): { title: string; path?: string; 
   if (target.type === "artifact") return { title: target.artifact.title, label: target.artifact.language.toUpperCase() };
   if (target.type === "browser") return { title: target.title || "内置浏览器", label: "WEB" };
   if (target.type === "terminal") return { title: "终端", label: "TERM" };
+  if (target.type === "ssh") return { title: "SSH 主机", label: "SSH" };
+  if (target.type === "ssh-terminal") return { title: target.hostName, label: "SSH" };
   if (target.type === "file") return { title: target.file.name, path: target.file.relativePath, label: target.file.kind === "code" ? (target.file.language ?? "CODE").toUpperCase() : target.file.kind.toUpperCase() };
   if (target.type === "plan") return { title: target.title, label: "PLAN" };
   if (target.type === "memory") return { title: target.title, label: "MEMORY" };
@@ -96,6 +102,7 @@ function targetIcon(target: PreviewTarget): ReactNode {
   if (target.type === "memory") return <Brain size={15} />;
   if (target.type === "browser") return <Globe2 size={15} />;
   if (target.type === "terminal") return <Terminal size={15} />;
+  if (target.type === "ssh" || target.type === "ssh-terminal") return <Server size={15} />;
   if (target.type === "plan") return <ClipboardList size={15} />;
   return <FileCode2 size={15} />;
 }
@@ -168,7 +175,7 @@ function FilePreviewContent({ file, tabId, onOpenArtifact, workspace, editorStat
   return <div className="preview-empty"><FileText size={28} /><strong>此文件无法预览</strong><span>{file.size.toLocaleString("zh-CN")} bytes</span></div>;
 }
 
-export function ArtifactPreview({ tabs, activeTabId, browserSuspended, fullscreen, onFullscreenChange, onSelectTab, onCloseTab, onOpenArtifact, onAddBrowser, onAddTerminal, onAddFile, onAddReview, onAddMenuOpenChange, reviewAvailable, workspace, activeEditorState, onActiveEditorChange, onActiveEditorContentChange, onActiveEditorSaved, onActiveEditorStatusChange, onActiveEditorSaveError, onActiveEditorResolveConflict, onToggleEditing, onBrowserStateChange, onBrowserPickSend }: { tabs: PreviewTab[]; activeTabId: string; browserSuspended?: boolean; fullscreen?: boolean; onFullscreenChange?(next: boolean): void; onSelectTab(id: string): void; onCloseTab(id: string): void; onOpenArtifact(artifact: Artifact): void; onAddBrowser?(): void; onAddTerminal?(): void; onAddFile?(): void; onAddReview?(): void; onAddMenuOpenChange?(open: boolean): void; reviewAvailable?: boolean; workspace?: string; activeEditorState?: PreviewEditorState; onActiveEditorChange?(patch: Partial<PreviewEditorState>): void; onActiveEditorContentChange?(tabId: string, content: string): void; onActiveEditorSaved?(tabId: string, content: string): void; onActiveEditorStatusChange?(tabId: string, status: EditorSaveStatus): void; onActiveEditorSaveError?(message: string): void; onActiveEditorResolveConflict?(choice: "keep-local" | "load-remote"): void; onToggleEditing?(): void; onBrowserStateChange?(tabId: string, state: BrowserPreviewState): void; onBrowserPickSend?(pick: BrowserElementPick, note: string): void }): ReactNode {
+export function ArtifactPreview({ tabs, activeTabId, browserSuspended, fullscreen, onFullscreenChange, onSelectTab, onCloseTab, onOpenArtifact, onAddBrowser, onAddTerminal, onAddSsh, onAddFile, onAddReview, onAddMenuOpenChange, reviewAvailable, workspace, activeEditorState, onActiveEditorChange, onActiveEditorContentChange, onActiveEditorSaved, onActiveEditorStatusChange, onActiveEditorSaveError, onActiveEditorResolveConflict, onToggleEditing, onBrowserStateChange, onBrowserPickSend, onSshConnect }: { tabs: PreviewTab[]; activeTabId: string; browserSuspended?: boolean; fullscreen?: boolean; onFullscreenChange?(next: boolean): void; onSelectTab(id: string): void; onCloseTab(id: string): void; onOpenArtifact(artifact: Artifact): void; onAddBrowser?(): void; onAddTerminal?(): void; onAddSsh?(): void; onAddFile?(): void; onAddReview?(): void; onAddMenuOpenChange?(open: boolean): void; reviewAvailable?: boolean; workspace?: string; activeEditorState?: PreviewEditorState; onActiveEditorChange?(patch: Partial<PreviewEditorState>): void; onActiveEditorContentChange?(tabId: string, content: string): void; onActiveEditorSaved?(tabId: string, content: string): void; onActiveEditorStatusChange?(tabId: string, status: EditorSaveStatus): void; onActiveEditorSaveError?(message: string): void; onActiveEditorResolveConflict?(choice: "keep-local" | "load-remote"): void; onToggleEditing?(): void; onBrowserStateChange?(tabId: string, state: BrowserPreviewState): void; onBrowserPickSend?(pick: BrowserElementPick, note: string): void; onSshConnect?(host: import("../../../shared/protocol").SshHostSummary): void }): ReactNode {
   const active = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0];
   if (!active) {
     return (
@@ -191,6 +198,10 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, fullscree
               <span className="preview-empty-state-item-icon"><Terminal size={17} /></span>
               <span className="preview-empty-state-item-name">终端</span>
               <span className="preview-empty-state-key">Ctrl+`</span>
+            </button>
+            <button type="button" className="preview-empty-state-item" title="SSH 远程终端" aria-label="SSH 远程终端" onClick={() => onAddSsh?.()}>
+              <span className="preview-empty-state-item-icon"><Server size={17} /></span>
+              <span className="preview-empty-state-item-name">SSH</span>
             </button>
           </div>
         </div>
@@ -394,6 +405,7 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, fullscree
           {addMenuOpen && <div className="preview-open-menu" role="menu" aria-label="新建预览标签">
             <button type="button" role="menuitem" onClick={() => { setAddMenuOpen(false); onAddReview?.(); }} disabled={!reviewAvailable}><FileDiff size={16} /><span>审阅</span><kbd>Ctrl+Shift+G</kbd></button>
             <button type="button" role="menuitem" onClick={() => { setAddMenuOpen(false); onAddTerminal?.(); }}><Terminal size={16} /><span>终端</span><kbd>Ctrl+`</kbd></button>
+            <button type="button" role="menuitem" onClick={() => { setAddMenuOpen(false); onAddSsh?.(); }}><Server size={16} /><span>SSH</span></button>
             <button type="button" role="menuitem" onClick={() => { setAddMenuOpen(false); onAddBrowser?.(); }}><Globe2 size={16} /><span>浏览器</span><kbd>Ctrl+T</kbd></button>
             <button type="button" role="menuitem" onClick={() => { setAddMenuOpen(false); onAddFile?.(); }}><File size={16} /><span>文件</span><kbd>Ctrl+P</kbd></button>
           </div>}
@@ -431,6 +443,8 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, fullscree
         )}
         {!showSource && target.type === "browser" && <BrowserPreview suspended={browserSuspended} tabId={activeTabId} onPickSend={onBrowserPickSend} onStateChange={(state) => onBrowserStateChange?.(activeTabId, state)} />}
         {target.type === "terminal" && <TerminalPanel terminalId={active.id} workspace={workspace} />}
+        {target.type === "ssh" && <SshPanel onConnect={(host) => onSshConnect?.(host)} />}
+        {target.type === "ssh-terminal" && <SshTerminalPanel terminalId={target.terminalId} hostId={target.hostId} hostName={target.hostName} />}
         {!showSource && target.type === "plan" && <MarkdownPreviewBlock content={target.content} identity={`plan-${activeTabId}`} outlineOpen={outlineOpen} artifactPrefix={`plan-${activeTabId}`} onOpenArtifact={onOpenArtifact} workspace={workspace} />}
         {target.type === "memory" && <MemoryPreviewContent topicId={target.topicId} tabId={activeTabId} showSource={showSource} editorState={activeEditorState} onEditorChange={onActiveEditorChange} onEditorSaved={onActiveEditorSaved} onEditorStatusChange={onActiveEditorStatusChange} onSaveError={onActiveEditorSaveError} onOpenArtifact={onOpenArtifact} />}
         {!showSource && !artifact && target.type === "file" && <FilePreviewContent file={target.file} tabId={activeTabId} onOpenArtifact={onOpenArtifact} workspace={target.workspace ?? workspace} editorState={activeEditorState} outlineOpen={outlineOpen} onEditorChange={onActiveEditorChange} onEditorContentChange={onActiveEditorContentChange} onEditorSaved={onActiveEditorSaved} onEditorStatusChange={onActiveEditorStatusChange} onEditorSaveError={onActiveEditorSaveError} onResolveConflict={onActiveEditorResolveConflict} />}

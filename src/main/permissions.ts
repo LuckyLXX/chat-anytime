@@ -37,6 +37,10 @@ export function toolRisk(
   // ask 逐次确认（权限卡显示目标窗口与坐标）、workspace 以上自动放行。
   // computer_windows / computer_screenshot 是只读观察，免门。
   if (toolName === "computer_click" || toolName === "computer_type" || toolName === "computer_press") return "desktop";
+  // SSH 远程操作：云服务器命令不可回滚（无 checkpoint），风险高于本地 bash。
+  // read-only 拒绝；workspace 逐次确认（权限卡可选「本会话允许」即保留的
+  // 自动放行）；full 放行。ssh_hosts / ssh_read 是只读观察，免门。
+  if (toolName === "ssh_connect" || toolName === "ssh_exec" || toolName === "ssh_write" || toolName === "ssh_close") return "ssh";
   return undefined;
 }
 
@@ -48,8 +52,10 @@ export type PermissionAction = "allow" | "ask" | "deny";
 
 export function permissionAction(mode: AccessMode, toolName: string, risk: PermissionRequest["risk"] | undefined): PermissionAction {
   if (mode === "full" || !risk) return "allow";
-  if (mode === "read-only" && (risk === "command" || risk === "write" || risk === "browse" || risk === "desktop")) return "deny";
+  if (mode === "read-only" && (risk === "command" || risk === "write" || risk === "browse" || risk === "desktop" || risk === "ssh")) return "deny";
   if (mode === "workspace" && (risk === "write" || risk === "desktop")) return "allow";
+  // ssh 在 workspace 模式下不自动放行（远端命令无本地文件边界），逐次确认；
+  // command / browse / ssh 落到 ask。
   return "ask";
 }
 

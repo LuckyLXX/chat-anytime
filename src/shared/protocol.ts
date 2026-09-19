@@ -277,6 +277,7 @@ export interface DesktopSettings {
   computer?: ComputerSettings;
   design?: DesignSettings;
   checkpoint?: CheckpointSettings;
+  ssh?: SshSettings;
   customProvider?: CustomProviderSettings;
   customProviderKeyConfigured?: boolean;
   pinnedSessionPaths?: string[];
@@ -889,6 +890,96 @@ export type TerminalEventData =
   | { type: "error"; terminalId: string; message: string };
 
 /**
+ * SSH 远程终端。主机清单持久化在主进程（密码经 safeStorage 加密，永不回传
+ * 渲染端）；连接是 ssh2 的 shell channel（远端 PTY），与本地 PTY 终端同一套
+ * data/scrollback/flush 通道形状。AI 通过 SshAutomationRequest 操作同一条
+ * 连接，命令写入 shell 流后由远端回显，人工与 AI 共享同一个窗口。
+ */
+export interface SshHostSummary {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  /** 是否已保存密码（编辑表单据此显示「留空=不修改」）。 */
+  hasPassword: boolean;
+  /** 密码以明文降级存储（safeStorage 不可用），UI 需警告。 */
+  credentialInsecure?: boolean;
+}
+
+/** 主机保存草稿：id 缺省=新建；密码单独传（留空=保留原密码）。 */
+export interface SshHostDraft {
+  id?: string;
+  name: string;
+  host: string;
+  port?: number;
+  username: string;
+}
+
+export type SshCommand =
+  | { type: "connect"; terminalId: string; hostId: string; cols: number; rows: number; trustFingerprint?: boolean }
+  | { type: "input"; terminalId: string; data: string }
+  | { type: "resize"; terminalId: string; cols: number; rows: number }
+  | { type: "kill"; terminalId: string }
+  | { type: "host.save"; host: SshHostDraft; password?: string }
+  | { type: "host.delete"; hostId: string }
+  | { type: "hosts" };
+
+export type SshCommandResult =
+  | { kind: "hosts"; hosts: SshHostSummary[]; connectedHostIds: string[] }
+  | { kind: "host-saved"; host: SshHostSummary }
+  | { kind: "host-deleted" }
+  /** fingerprint 存在 = 首次连接待指纹确认（重发 connect 带 trustFingerprint）；否则连接已发起。 */
+  | { kind: "connect"; fingerprint?: string }
+  | { kind: "void" };
+
+export type SshEventData =
+  | { type: "data"; terminalId: string; data: string }
+  | { type: "status"; terminalId: string; status: "connecting" | "connected" | "closed"; detail?: string }
+  | { type: "error"; terminalId: string; message: string };
+
+/** AI 发起的连接：主进程推事件让渲染端自动开 tab（命令回显对用户可见）。 */
+export interface SshRevealEvent {
+  terminalId: string;
+  hostId: string;
+  hostName: string;
+}
+
+/** AI 侧 SSH 操作（utility → main RPC，与 browser-automation 同旁路语义）。 */
+export type SshAutomationRequest =
+  | { op: "hosts" }
+  | { op: "connect"; host: string }
+  | { op: "exec"; command: string; timeoutMs?: number }
+  | { op: "write"; data: string }
+  | { op: "read"; tailChars?: number }
+  | { op: "close" };
+
+export interface SshConnectionInfo {
+  terminalId: string;
+  hostId: string;
+  hostName: string;
+  host: string;
+  username: string;
+}
+
+export type SshAutomationData =
+  | { kind: "hosts"; hosts: SshHostSummary[]; connections: SshConnectionInfo[] }
+  | { kind: "connect"; connection: SshConnectionInfo }
+  | { kind: "exec"; output: string; exitCode: number | null; timedOut?: boolean }
+  | { kind: "write"; written: number }
+  | { kind: "read"; text: string; totalChars: number }
+  | { kind: "close"; closed: boolean };
+
+export type SshAutomationResult =
+  | { ok: true; data: SshAutomationData }
+  | { ok: false; error: string };
+
+/** SSH 能力总闸（含 AI 工具），语义与 checkpoint/memory 相同：缺省视为启用。 */
+export interface SshSettings {
+  enabled?: boolean;
+}
+
+/**
  * Execution state of a session, shown as a sidebar dot. "running" is live
  * state; "completed"/"failed" are unseen-outcome notifications that clear as
  * soon as the session is opened (the result is then visible in the chat).
@@ -1315,7 +1406,7 @@ export interface PermissionRequest {
   toolName: string;
   summary: string;
   args: unknown;
-  risk: "write" | "command" | "outside-workspace" | "browse" | "desktop";
+  risk: "write" | "command" | "outside-workspace" | "browse" | "desktop" | "ssh";
   principal: ExecutionPrincipal;
 }
 
@@ -1390,7 +1481,7 @@ export type RuntimeCommand =
   | { type: "agent.select"; agentId: string }
   | { type: "agent.save"; agent: AgentProfile }
   | { type: "agent.archive"; agentId: string; archived: boolean }
-  | { type: "settings.save"; settings: Pick<DesktopSettings, "model" | "thinkingLevel" | "accessMode" | "appearance" | "browser" | "computer" | "design" | "defaultWorkspace"> }
+  | { type: "settings.save"; settings: Pick<DesktopSettings, "model" | "thinkingLevel" | "accessMode" | "appearance" | "browser" | "computer" | "design" | "ssh" | "defaultWorkspace"> }
   | { type: "model.select"; provider: string; id: string; sessionId?: string }
   | { type: "thinking.select"; level: ThinkingLevel; sessionId?: string }
   | { type: "auth.set"; provider: string; apiKey: string }
@@ -1446,6 +1537,8 @@ export type RuntimeCommand =
   | { type: "usage.stats.request"; agentId?: string }
   /** main 进程回传的浏览器自动化结果（响应 utility 的 browser-automation.request）。 */
   | { type: "browser-automation.result"; requestId: string; result: BrowserAutomationResult }
+  /** main 进程回传的 SSH 操作结果（响应 utility 的 ssh-automation.request）。 */
+  | { type: "ssh-automation.result"; requestId: string; result: SshAutomationResult }
   /** main 进程回传的设计导出缩略图（响应 utility 的 design-snapshot.request）。 */
   | { type: "design-snapshot.result"; requestId: string; result: DesignSnapshotResult }
   // —— 设计模式（Design Studio）：画布 ↔ utility 会话的文档命令。sessionId 走
@@ -1502,6 +1595,8 @@ export type RuntimeMessage =
   | { type: "open-external"; url: string }
   /** utility 进程发起的浏览器自动化操作；main 完成后以 browser-automation.result 命令回传。 */
   | { type: "browser-automation.request"; requestId: string; sessionKey: string; request: BrowserAutomationRequest }
+  /** utility 进程发起的 SSH 操作（工具 execute 内 await）；main 完成后以 ssh-automation.result 回传，绕过串行命令队列。 */
+  | { type: "ssh-automation.request"; requestId: string; sessionKey: string; request: SshAutomationRequest }
   /** utility 进程通知某 Pi 会话已销毁（LRU 驱逐/删除会话/移除工作区；同 id 重建不发）——main 侧释放并关闭其绑定的自动化标签页。 */
   | { type: "browser-automation.session-disposed"; sessionKey: string }
   /** utility 进程请求渲染设计导出缩略图；main 完成后以 design-snapshot.result 命令回传。 */
@@ -1556,10 +1651,13 @@ export interface DesktopApi {
   browserPreview(command: BrowserPreviewCommand): Promise<BrowserPreviewState>;
   browserAutomationCancel(tabId: string): Promise<void>;
   terminal(command: TerminalCommand): Promise<void>;
+  ssh(command: SshCommand): Promise<SshCommandResult>;
   send(command: RuntimeCommand): Promise<void>;
   onRuntimeMessage(listener: (message: RuntimeMessage) => void): () => void;
   onBrowserPreviewState(tabId?: string, listener?: (state: BrowserPreviewState) => void): () => void;
   onBrowserTabsChanged(listener: (event: BrowserTabsEvent) => void): () => void;
   onBrowserElementPicked(listener: (pick: BrowserElementPick) => void): () => void;
   onTerminalData(terminalId: string, listener: (event: TerminalEventData) => void): () => void;
+  onSshData(terminalId: string, listener: (event: SshEventData) => void): () => void;
+  onSshReveal(listener: (event: SshRevealEvent) => void): () => void;
 }

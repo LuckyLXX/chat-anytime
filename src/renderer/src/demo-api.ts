@@ -20,12 +20,18 @@ import type {
   AutomationTask,
   TerminalCommand,
   TerminalEventData,
+  SshCommand,
+  SshCommandResult,
+  SshEventData,
+  SshRevealEvent,
   UsageStats
 } from "../../shared/protocol";
 
 const listeners = new Set<(message: RuntimeMessage) => void>();
 const browserPreviewListeners = new Set<(state: BrowserPreviewState) => void>();
 const terminalListeners = new Map<string, Set<(event: TerminalEventData) => void>>();
+const sshDataListeners = new Map<string, Set<(event: SshEventData) => void>>();
+const sshRevealListeners = new Set<(event: SshRevealEvent) => void>();
 let browserPreviewState: BrowserPreviewState = { attached: false, url: "", title: "", loading: false, canGoBack: false, canGoForward: false };
 
 // 64x64 渐变 PNG（浏览器演示模式下的图片预览样例）。
@@ -558,6 +564,16 @@ export function createDemoApi(): DesktopApi {
         emitTerminalData(command.terminalId, { type: "error", terminalId: command.terminalId, message: "终端仅在 Electron 桌面窗口中可用" });
       }
     },
+    async ssh(command: SshCommand): Promise<SshCommandResult> {
+      if (command.type === "hosts") return { kind: "hosts", hosts: [], connectedHostIds: [] };
+      if (command.type === "connect") {
+        for (const listener of sshDataListeners.get(command.terminalId) ?? []) {
+          listener({ type: "error", terminalId: command.terminalId, message: "SSH 连接仅在 Electron 桌面窗口中可用" });
+        }
+        return { kind: "connect" };
+      }
+      return { kind: "void" };
+    },
     async send(command: RuntimeCommand): Promise<void> {
       switch (command.type) {
         case "thinking.select":
@@ -1067,6 +1083,21 @@ export function createDemoApi(): DesktopApi {
       return () => {
         listeners.delete(listener);
         if (listeners.size === 0) terminalListeners.delete(terminalId);
+      };
+    },
+    onSshData(terminalId: string, listener: (event: SshEventData) => void) {
+      const listeners = sshDataListeners.get(terminalId) ?? new Set();
+      sshDataListeners.set(terminalId, listeners);
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+        if (listeners.size === 0) sshDataListeners.delete(terminalId);
+      };
+    },
+    onSshReveal(listener: (event: SshRevealEvent) => void) {
+      sshRevealListeners.add(listener);
+      return () => {
+        sshRevealListeners.delete(listener);
       };
     }
   };

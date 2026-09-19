@@ -31,7 +31,7 @@
 
 类名属于实现细节，可能随版本变化；以下属性是稳定契约，结构化主题请只依赖它们：
 
-**区域钩子 `data-pane`**：`sidebar` `topbar` `workspace` `work-area` `conversation` `timeline` `composer` `task-panel` `memory-panel` `preview` `terminal` `question-panel` `settings-dialog` `permission-dialog` `landing` `markdown-outline` `design` `design-toolbar` `design-tools` `design-canvas` `design-layers` `design-inspector`
+**区域钩子 `data-pane`**：`sidebar` `topbar` `workspace` `work-area` `conversation` `timeline` `composer` `task-panel` `memory-panel` `preview` `terminal` `ssh` `question-panel` `settings-dialog` `permission-dialog` `landing` `markdown-outline` `design` `design-toolbar` `design-tools` `design-canvas` `design-layers` `design-inspector`
 
 > `design` 是设计模式（Design Studio，顶栏调色板按钮进入）的工作台外壳——顶栏工具栏 + 左侧图层树（`design-layers`）+ 中部无限画布（`design-canvas`）+ 右侧属性检查器（`design-inspector`）。工作台底色走 `--panel-bg-preview`（缺省 `--panel-bg`）与既有表面 token，跟随主题；画布点阵/参考线/选择框用 `--border`/`--accent` 派生，主题可用 `[data-pane="design"]` 后代选择器重设计。 `design-tools` 是画布顶部居中的浮动绘图工具胶囊（选择/画板/矩形/文本），激活按钮带 `aria-pressed="true"`。
 
@@ -50,6 +50,8 @@
 
 > `automation-settings` 是设置页「自动化任务」tab（双子页：「任务」列表 + 搜索 + 过滤器 / 「运行记录」历史面板，位于 `settings-dialog` 内）；`automation-dialog` 是「创建/编辑定时任务」弹窗。二者都随设置页/弹窗配色走，主题可用 `--panel-bg` 派生背景与 `--border`/`--surface-*` 控制排版。相关控件钩子：`data-control="automation-open"`（侧栏「新建话题」下方的「自动化」入口 + 折叠态窄条图标）、`automation-run`（行内「运行一次」）、`automation-toggle`（启停）、`automation-runs-tab`（子页「运行记录」）；未在控件列枚举的地方用类名 `.automation-*` 命中。
 
+> `ssh` 是预览面板的 SSH 主机管理 tab（`data-pane="ssh"`，与 `terminal` 同层；远程终端 tab 本体也是 `terminal` 区域）。主机列表/表单/指纹确认卡用类名 `.ssh-host-*` / `.ssh-fingerprint-*` 命中，安全存储警告条 `.ssh-insecure-warning`。相关控件钩子：`data-control="ssh-open"`（侧栏「新建话题」下方的「SSH」入口 + 折叠态窄条图标）、`ssh-host-create` / `ssh-host-save` / `ssh-host-delete` / `ssh-host-connect`（主机面板动作）、`ssh-trust-fingerprint`（首次连接指纹确认卡）。
+
 ```css
 [data-pane="composer"] { border-image: url(frame.webp) 0 220 fill; border-radius: 0; }
 [data-pane="sidebar"]  { border-right: 2px solid var(--accent); }
@@ -65,6 +67,9 @@
 | 新建话题（侧栏）                            | `new-session`                                    |
 | 自动化任务（侧栏新建话题下方 + 折叠窄条）   | `automation-open`                               |
 | 自动化任务「运行记录」子页 tab（设置页内）   | `automation-runs-tab`                           |
+| SSH 远程终端（侧栏新建话题下方 + 折叠窄条） | `ssh-open`                                      |
+| SSH 主机面板：新建/保存/删除/连接           | `ssh-host-create` `ssh-host-save` `ssh-host-delete` `ssh-host-connect` |
+| SSH 首次连接指纹确认卡的「信任并连接」      | `ssh-trust-fingerprint`                          |
 | 设置（侧栏底部）                            | `settings`                                       |
 | 打开工作区（顶栏 + 空态主按钮）             | `workspace-open`                                 |
 | 预览面板开关（顶栏）                        | `preview-toggle`                                 |

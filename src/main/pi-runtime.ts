@@ -27,6 +27,8 @@ import type {
   AgentProfile,
   BrowserAutomationRequest,
   BrowserAutomationResult,
+  SshAutomationRequest,
+  SshAutomationResult,
   ChatMessage,
   ContextUsage,
   ContextUsageBreakdown,
@@ -111,6 +113,7 @@ import * as runtimeQuestionTool from "./runtime-question-tool.js";
 import * as runtimeSkills from "./runtime-skills.js";
 import * as runtimeVision from "./runtime-vision.js";
 import * as runtimeBrowser from "./runtime-browser.js";
+import * as runtimeSsh from "./runtime-ssh.js";
 import * as runtimeComputer from "./runtime-computer.js";
 import * as runtimeDesign from "./runtime-design.js";
 import { applyDesignOps, createDesignDoc, sanitizeDesignName, type DesignDoc } from "../shared/design-schema.js";
@@ -222,6 +225,7 @@ interface SessionRuntimeRecord {
   permissionDeps: runtimePermissions.PermissionGateDeps;
   visionTools: ToolDefinition[];
   browserTools: ToolDefinition[];
+  sshTools: ToolDefinition[];
   computerTools: ToolDefinition[];
   automationTools: ToolDefinition[];
   designTools: ToolDefinition[];
@@ -384,6 +388,33 @@ function resolveBrowserAutomation(requestId: string, result: BrowserAutomationRe
   const pending = pendingBrowserRequests.get(requestId);
   if (!pending) return;
   pendingBrowserRequests.delete(requestId);
+  clearTimeout(pending.timer);
+  pending.resolve(result);
+}
+
+// SSH RPC（ssh-automation.request / .result）：与 browser RPC 同旁路语义——
+// 工具 execute 内 await，绝不能排在串行命令队列后面。ssh_exec 的等待由
+// 工具内 timeoutSeconds 控制（短于这里的外层 120s 兜底）。
+let sshRequestSequence = 0;
+const SSH_RPC_TIMEOUT_MS = 120_000;
+const pendingSshRequests = new Map<string, { resolve: (result: SshAutomationResult) => void; timer: ReturnType<typeof setTimeout> }>();
+
+function requestSshAutomation(sessionKey: string, request: SshAutomationRequest): Promise<SshAutomationResult> {
+  return new Promise((resolve, reject) => {
+    const requestId = `ssh-rpc-${++sshRequestSequence}`;
+    const timer = setTimeout(() => {
+      pendingSshRequests.delete(requestId);
+      reject(new Error("SSH 操作超时（120 秒无响应），请重试"));
+    }, SSH_RPC_TIMEOUT_MS);
+    pendingSshRequests.set(requestId, { resolve, timer });
+    post({ type: "ssh-automation.request", requestId, sessionKey, request });
+  });
+}
+
+function resolveSshAutomation(requestId: string, result: SshAutomationResult): void {
+  const pending = pendingSshRequests.get(requestId);
+  if (!pending) return;
+  pendingSshRequests.delete(requestId);
   clearTimeout(pending.timer);
   pending.resolve(result);
 }
@@ -1641,8 +1672,8 @@ function wrapModelRuntimeForVision(runtime: ModelRuntime): ModelRuntime {
  * customTools arrays are held by reference inside Pi, so hot-path updates
  * rebuild in place (`length = 0` + push) instead of swapping the array.
  */
-function buildRecordTools(record: Pick<SessionRuntimeRecord, "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "planTools" | "visionTools" | "browserTools" | "computerTools" | "automationTools" | "designTools">): ToolDefinition[] {
-  return [...mcpTools, ...record.subagentTools, ...record.todoTools, ...record.memoryTools, ...record.questionTools, ...record.planTools, ...record.visionTools, ...record.browserTools, ...record.computerTools, ...record.automationTools, ...record.designTools];
+function buildRecordTools(record: Pick<SessionRuntimeRecord, "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "planTools" | "visionTools" | "browserTools" | "sshTools" | "computerTools" | "automationTools" | "designTools">): ToolDefinition[] {
+  return [...mcpTools, ...record.subagentTools, ...record.todoTools, ...record.memoryTools, ...record.questionTools, ...record.planTools, ...record.visionTools, ...record.browserTools, ...record.sshTools, ...record.computerTools, ...record.automationTools, ...record.designTools];
 }
 
 /**
@@ -1662,7 +1693,7 @@ function buildRecordTools(record: Pick<SessionRuntimeRecord, "subagentTools" | "
  * asked for in a coding/document chat is pure prefix waste, and its global
  * switch is a capability toggle (下架), not a per-call gate.
  */
-function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "planTools" | "visionTools" | "browserTools" | "computerTools" | "automationTools" | "designTools" | "designMode" | "computerMode" | "designGlobalEnabled" | "computerGlobalEnabled" | "unattended">, includeVision: boolean): string[] {
+function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "planTools" | "visionTools" | "browserTools" | "sshTools" | "computerTools" | "automationTools" | "designTools" | "designMode" | "computerMode" | "designGlobalEnabled" | "computerGlobalEnabled" | "unattended">, includeVision: boolean): string[] {
   const builtin = Object.entries(record.agent.tools ?? {}).filter(([, enabled]) => enabled).map(([name]) => name);
   return [
     ...builtin,
@@ -1677,6 +1708,7 @@ function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "subagentTool
     // Browser tools stay active regardless of the settings switch: the
     // execute closure reports the disabled state instead (no session rebuild).
     ...record.browserTools.map((tool) => tool.name),
+    ...record.sshTools.map((tool) => tool.name),
     // 电脑控制工具与 design 同策略：仅在本会话开了电脑控制模式且总闸开着时
     // 注入（五个定义实测 ≈580 tokens/请求）；无人值守后台会话天然不满足。
     ...(runtimeComputer.shouldActivateComputerTools({ sessionEnabled: record.computerMode.enabled, globalEnabled: record.computerGlobalEnabled() })
@@ -2757,6 +2789,15 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     // workspace，parked 背景会话仍写自己的目录。
     saveScreenshot: (data, mimeType) => saveBrowserScreenshot(recordWorkspace, data, mimeType)
   });
+  // SSH 远程终端工具：操作经 RPC 转发到 main 进程的连接管理器（人工与 AI
+  // 共享同一 shell 流，命令实时回显在用户终端 tab——主进程 reveal 揭示）。
+  // 权限上 ssh_connect/exec/write/close 标记 ssh 风险走 permission gate
+  //（read-only 拒、workspace 问、full 放）；总开关 settings.ssh.enabled 在
+  // execute 内实时读取，工具常驻激活（browser 同款策略，不重建会话）。
+  const sshTools = runtimeSsh.buildSshTools({
+    request: (request) => requestSshAutomation(recordSessionId, request),
+    enabled: () => settings?.ssh?.enabled !== false
+  });
   // 自动化定时任务工具（每会话注册，绑定本记录所属 Agent 的 store）。
   const automationTools = buildAutomationTools(automationToolContextFor(recordAgent.id));
   // 电脑控制工具：高频「感知→行动」循环结构化（computer_windows/screenshot/
@@ -2818,7 +2859,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   // Each record owns its customTools array: Pi stores it by reference and
   // re-reads it on every tool-registry refresh, so per-record arrays let parked
   // sessions keep their tool set while the active one hot-swaps MCP tools.
-  const recordCustomTools: ToolDefinition[] = [shellKill.tools[0]!, shellKill.tools[1]!, ...mcpTools, ...subagentTools, ...todoTools, ...memoryTools, ...questionTools, ...planTools, ...visionTools, ...browserTools, ...computerTools, ...automationTools, ...designTools];
+  const recordCustomTools: ToolDefinition[] = [shellKill.tools[0]!, shellKill.tools[1]!, ...mcpTools, ...subagentTools, ...todoTools, ...memoryTools, ...questionTools, ...planTools, ...visionTools, ...browserTools, ...sshTools, ...computerTools, ...automationTools, ...designTools];
   const result = await createAgentSession({
     cwd: recordWorkspace,
     modelRuntime,
@@ -2894,6 +2935,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     permissionDeps,
     visionTools,
     browserTools,
+    sshTools,
     computerTools,
     automationTools,
     designTools,
@@ -4147,6 +4189,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       settings.browser = command.settings.browser;
       settings.computer = command.settings.computer;
       settings.design = command.settings.design;
+      settings.ssh = command.settings.ssh;
       settings.defaultWorkspace = command.settings.defaultWorkspace;
       thinkingLevel = command.settings.thinkingLevel;
       accessMode = command.settings.accessMode;
@@ -4527,6 +4570,10 @@ parentPort.on("message", (event: { data: RuntimeCommand }) => {
   // behind serialized commands would stall the run for no reason.
   if (event.data.type === "browser-automation.result") {
     resolveBrowserAutomation(event.data.requestId, event.data.result);
+    return;
+  }
+  if (event.data.type === "ssh-automation.result") {
+    resolveSshAutomation(event.data.requestId, event.data.result);
     return;
   }
   if (event.data.type === "design-snapshot.result") {

@@ -39,6 +39,21 @@ describe("desktop tool permissions", () => {
     expect(permissionAction("workspace", "read", "outside-workspace")).toBe("ask");
   });
 
+  it("treats ssh_* as remote-irreversible: deny read-only, ask in workspace, allow in full", () => {
+    // 云服务器命令无 checkpoint 可回滚，workspace 模式不自动放行；权限卡的
+    // allow-session 是保留的自动放行路径。
+    expect(toolRisk(undefined, "ssh_exec", { command: "rm -rf /tmp/x" })).toBe("ssh");
+    expect(toolRisk(undefined, "ssh_connect", { host: "prod" })).toBe("ssh");
+    expect(toolRisk(undefined, "ssh_write", { data: "y\n" })).toBe("ssh");
+    expect(toolRisk(undefined, "ssh_close", {})).toBe("ssh");
+    expect(toolRisk(undefined, "ssh_hosts", {})).toBeUndefined();
+    expect(toolRisk(undefined, "ssh_read", {})).toBeUndefined();
+    expect(permissionAction("read-only", "ssh_exec", "ssh")).toBe("deny");
+    expect(permissionAction("workspace", "ssh_exec", "ssh")).toBe("ask");
+    expect(permissionAction("full", "ssh_exec", "ssh")).toBe("allow");
+    expect(permissionNeedsApproval("workspace", "ssh_exec", "ssh")).toBe(true);
+  });
+
   it("blocks mutating tools in read-only mode", () => {
     expect(permissionAction("read-only", "write", "write")).toBe("deny");
     expect(permissionAction("read-only", "edit", "write")).toBe("deny");

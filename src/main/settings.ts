@@ -18,6 +18,7 @@ import type {
   HooksSettings,
   InterfaceTuning,
   MemorySettings,
+  SshSettings,
   ProviderModelSettings,
   ProviderSettings,
   ThemeAssetMap,
@@ -294,6 +295,12 @@ export function normalizeCheckpoint(value: unknown): CheckpointSettings | undefi
   return { enabled: (value as Record<string, unknown>).enabled !== false };
 }
 
+/** SSH 能力总闸（含 AI 工具），语义与 checkpoint/memory 相同：缺省视为启用。 */
+export function normalizeSsh(value: unknown): SshSettings | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  return { enabled: (value as Record<string, unknown>).enabled !== false };
+}
+
 // —— 每助手工作区记忆 + 默认工作区（2026-09-03 方案 B）——
 
 /**
@@ -440,7 +447,8 @@ export function migrateSettings(raw: unknown): { settings: DesktopSettings; lega
     browser: normalizeBrowser(source.browser),
     computer: normalizeComputer(source.computer),
     design: normalizeDesign(source.design),
-    checkpoint: normalizeCheckpoint(source.checkpoint)
+    checkpoint: normalizeCheckpoint(source.checkpoint),
+    ssh: normalizeSsh(source.ssh)
   };
   const legacyApiKey = typeof source.customProviderApiKey === "string" ? source.customProviderApiKey : undefined;
   return { settings, legacyApiKey };

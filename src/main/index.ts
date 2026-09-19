@@ -8,7 +8,7 @@ import appIconPath from "./assets/icon.ico?asset";
 import { resolveBundledSkillsDir, resolveBundledSubagentsDir } from "./bundled-skills.js";
 import { migrateSettings, normalizeVision, recordAgentWorkspace, forgetAgentWorkspace } from "./settings.js";
 import { importExternalAttachment, workspaceRelativeAttachment } from "./attachments.js";
-import type { BrowserPreviewCommand, BrowserPreviewState, DesktopBootstrap, DesktopSettings, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot, TerminalCommand, TerminalEventData, WorkspaceDirectoryListing, WorkspaceEntryResult, WorkspaceFilePreview, WorkspaceFileSearchResult, WorkspaceFileStat, WorkspaceFileWriteResult } from "../shared/protocol.js";
+import type { BrowserPreviewCommand, BrowserPreviewState, DesktopBootstrap, DesktopSettings, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot, SshCommand, SshCommandResult, SshEventData, SshRevealEvent, TerminalCommand, TerminalEventData, WorkspaceDirectoryListing, WorkspaceEntryResult, WorkspaceFilePreview, WorkspaceFileSearchResult, WorkspaceFileStat, WorkspaceFileWriteResult } from "../shared/protocol.js";
 import { PREVIEW_FILE_SCHEME, parseWorkspaceFilePreviewUrl } from "../shared/protocol.js";
 import { createWorkspaceDirectory, createWorkspaceFile, deleteWorkspaceEntry, listWorkspaceDirectory, previewFileMimeType, readWorkspaceFilePreview, renameWorkspaceEntry, resolveWorkspaceEntry, safeRelativePath, searchWorkspaceFiles, statWorkspaceFile, writeWorkspaceFile } from "./workspace-preview.js";
 import { pruneDisabledModelRefs } from "./model-catalog.js";
@@ -17,6 +17,10 @@ import { BrowserAutomationController } from "./browser-automation.js";
 import { ComputerOverlayController } from "./computer-overlay.js";
 import { DesignSnapshotController } from "./design-snapshot.js";
 import { TerminalManager, type PtyProcess, type PtySpawnOptions } from "./terminal-pty.js";
+import { Client as Ssh2Client } from "ssh2";
+import { createSshHostStore, type SshHostCrypto } from "./ssh-host-store.js";
+import { createSshKnownHostsStore } from "./ssh-known-hosts.js";
+import { SshConnectionManager, type SshClientLike } from "./ssh-connections.js";
 
 let mainWindow: BrowserWindow | undefined;
 let runtimeProcess: UtilityProcess | undefined;
@@ -40,6 +44,53 @@ const terminalManager = new TerminalManager({
   },
   defaultCwd: () => loadSettings().workspace
 });
+
+// —— SSH：主机库（密码 safeStorage 加密，不可用时明文降级并标记）+ 连接管理 ——
+const sshCrypto: SshHostCrypto = {
+  encrypt: (plain) => {
+    if (safeStorage.isEncryptionAvailable()) {
+      return { secret: `enc:${safeStorage.encryptString(plain).toString("base64")}`, insecure: false };
+    }
+    return { secret: `plain:${Buffer.from(plain, "utf8").toString("base64")}`, insecure: true };
+  },
+  decrypt: (secret) => {
+    if (secret.startsWith("enc:")) {
+      try {
+        return safeStorage.decryptString(Buffer.from(secret.slice(4), "base64"));
+      } catch {
+        return "";
+      }
+    }
+    if (secret.startsWith("plain:")) {
+      try {
+        return Buffer.from(secret.slice(6), "base64").toString("utf8");
+      } catch {
+        return "";
+      }
+    }
+    return "";
+  },
+  isAvailable: () => safeStorage.isEncryptionAvailable()
+};
+// ssh2 Client 的最小结构适配（运行时形状一致，接口层只声明用到的方法）。
+const createSsh2Client = (): SshClientLike => new Ssh2Client() as unknown as SshClientLike;
+let sshConnectionManager: SshConnectionManager | undefined;
+function ensureSshManager(): SshConnectionManager {
+  // 延迟创建：app.getPath("userData") 在模块顶层即可用，但 host store 的
+  // 明文降级警告依赖 safeStorage 就绪状态，统一在首次使用时创建。
+  sshConnectionManager ??= new SshConnectionManager({
+    createClient: createSsh2Client,
+    hostStore: createSshHostStore({ filePath: join(app.getPath("userData"), "pidesktop-ssh-hosts.json"), crypto: sshCrypto }),
+    knownHosts: createSshKnownHostsStore(join(app.getPath("userData"), "pidesktop-ssh-known-hosts.json")),
+    publish: (terminalId, event: SshEventData) => {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(`ssh:data:${terminalId}`, event);
+    },
+    reveal: (event: SshRevealEvent) => {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("ssh:reveal", event);
+    }
+  });
+  return sshConnectionManager;
+}
 
 function settingsPath(): string { return join(app.getPath("userData"), "settings.json"); }
 function credentialsPath(): string { return join(app.getPath("userData"), "credentials.json"); }
@@ -291,6 +342,13 @@ function startRuntime(): void {
       }
       return;
     }
+    if (message.type === "ssh-automation.request") {
+      // AI SSH 操作（连接/执行/交互输入/读取）：连接归 tab 所有，会话销毁不释放。
+      void ensureSshManager().handleAutomation(message.sessionKey, message.request).then((result) => {
+        runtimeProcess?.postMessage({ type: "ssh-automation.result", requestId: message.requestId, result });
+      });
+      return;
+    }
     if (message.type === "computer-overlay.request") {
       // 电脑控制操作提示条：在屏幕右下角显示「AI 正在操作 XX」（用户焦点在目标窗口，
       // 应用内 toast 看不到；悬浮条 click-through、自动淡出，纯提示不拦截输入）。
@@ -388,6 +446,33 @@ function isTerminalCommand(value: unknown): value is TerminalCommand {
     case "resize":
       return typeof command.cols === "number" && typeof command.rows === "number";
     case "kill":
+      return true;
+    default:
+      return false;
+  }
+}
+
+function isSshCommand(value: unknown): value is SshCommand {
+  if (!value || typeof value !== "object") return false;
+  const command = value as Record<string, unknown>;
+  switch (command.type) {
+    case "connect":
+      return typeof command.terminalId === "string" && command.terminalId.trim() !== "" && typeof command.hostId === "string" && command.hostId.trim() !== "" && typeof command.cols === "number" && typeof command.rows === "number" && (command.trustFingerprint === undefined || typeof command.trustFingerprint === "boolean");
+    case "input":
+      return typeof command.terminalId === "string" && command.terminalId.trim() !== "" && typeof command.data === "string";
+    case "resize":
+      return typeof command.terminalId === "string" && command.terminalId.trim() !== "" && typeof command.cols === "number" && typeof command.rows === "number";
+    case "kill":
+      return typeof command.terminalId === "string" && command.terminalId.trim() !== "";
+    case "host.save": {
+      const host = command.host;
+      if (!host || typeof host !== "object") return false;
+      const draft = host as Record<string, unknown>;
+      return typeof draft.name === "string" && typeof draft.host === "string" && typeof draft.username === "string" && (draft.port === undefined || typeof draft.port === "number") && (command.password === undefined || typeof command.password === "string");
+    }
+    case "host.delete":
+      return typeof command.hostId === "string" && command.hostId.trim() !== "";
+    case "hosts":
       return true;
     default:
       return false;
@@ -495,8 +580,12 @@ function registerIpc(): void {
     if (!isTerminalCommand(command)) throw new Error("终端命令无效");
     terminalManager.handle(command);
   });
+  ipcMain.handle("ssh:command", (_event, command: SshCommand): SshCommandResult => {
+    if (!isSshCommand(command)) throw new Error("SSH 命令无效");
+    return ensureSshManager().handle(command);
+  });
   ipcMain.handle("runtime:send", (_event, command: RuntimeCommand): void => { updateSettings(command); sendToRuntime(command); });
 }
 app.whenReady().then(() => { Menu.setApplicationMenu(null); registerPreviewFileProtocol(); registerIpc(); startRuntime(); createWindow(); app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); }); });
 app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
-app.on("before-quit", () => { browserAutomationController?.dispose(); computerOverlayController?.dispose(); browserPreviewController?.dispose(); terminalManager.disposeAll(); runtimeProcess?.kill(); });
+app.on("before-quit", () => { browserAutomationController?.dispose(); computerOverlayController?.dispose(); browserPreviewController?.dispose(); terminalManager.disposeAll(); sshConnectionManager?.disposeAll(); runtimeProcess?.kill(); });

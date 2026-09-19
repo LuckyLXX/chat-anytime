@@ -68,7 +68,8 @@ import type {
   CommandSummary,
   McpServerConfigDraft,
   RuntimeCommand,
-  SessionSummary
+  SessionSummary,
+  SshHostSummary
 } from "../../shared/protocol";
 import { sessionRunStatusLabels, thinkingLevelLabels, toolLabel } from "../../shared/locale";
 import type { ThinkingLevelMap } from "../../shared/protocol";
@@ -130,6 +131,8 @@ function previewTargetKey(target: PreviewTarget): string {
     case "artifact": return target.artifact.id;
     case "browser": return target.id ?? "browser";
     case "terminal": return "terminal";
+    case "ssh": return "ssh";
+    case "ssh-terminal": return target.terminalId;
     case "file": return target.file.relativePath;
     case "plan": return "plan";
     case "memory": return `memory-${target.topicId}`;
@@ -1244,7 +1247,7 @@ function SettingsDialog({ settings, models, providers, customProvider, customMod
     <div className="modal-backdrop" role="presentation" onMouseDown={closeSettings}>
       <section className="settings-dialog settings-center" data-pane="settings-dialog" onMouseDown={(event) => event.stopPropagation()}>
         <header><div><Settings size={19} /><div><h2>ChatAnyTime 设置</h2><p>模型服务和 Agent 角色配置保存在本机。</p></div></div><button className="icon-button" type="button" title="关闭设置" aria-label="关闭设置" onClick={closeSettings}><X size={18} /></button></header>
-        <div className="settings-body"><nav className="settings-tabs"><button type="button" className={tab === "general" ? "active" : ""} onClick={() => setTab("general")}>通用</button><button type="button" className={tab === "models" ? "active" : ""} onClick={() => setTab("models")}>模型服务</button><button type="button" className={tab === "agents" ? "active" : ""} onClick={() => setTab("agents")}>Agent 角色</button><button type="button" className={tab === "subagents" ? "active" : ""} onClick={() => setTab("subagents")}>子智能体</button><button type="button" className={tab === "resources" ? "active" : ""} onClick={() => setTab("resources")}>技能与工具</button><button type="button" className={tab === "hooks" ? "active" : ""} onClick={() => setTab("hooks")}>钩子</button><button type="button" className={tab === "appearance" ? "active" : ""} onClick={() => setTab("appearance")}>外观</button><button type="button" className={tab === "usage" ? "active" : ""} onClick={() => setTab("usage")}>用量统计</button><button type="button" className={tab === "automation" ? "active" : ""} onClick={() => setTab("automation")}>自动化任务</button></nav><div className="settings-content">{tab === "general" ? <form onSubmit={(event) => { event.preventDefault(); const nextSettings = structuredClone(settings); void window.piDesktop.send({ type: "settings.save", settings: { model: nextSettings.model, thinkingLevel: nextSettings.thinkingLevel, accessMode: nextSettings.accessMode, appearance: nextSettings.appearance, browser: nextSettings.browser, computer: nextSettings.computer, design: nextSettings.design, defaultWorkspace: nextSettings.defaultWorkspace } }); markSettingsSaved(nextSettings); onClose(); }}>
+        <div className="settings-body"><nav className="settings-tabs"><button type="button" className={tab === "general" ? "active" : ""} onClick={() => setTab("general")}>通用</button><button type="button" className={tab === "models" ? "active" : ""} onClick={() => setTab("models")}>模型服务</button><button type="button" className={tab === "agents" ? "active" : ""} onClick={() => setTab("agents")}>Agent 角色</button><button type="button" className={tab === "subagents" ? "active" : ""} onClick={() => setTab("subagents")}>子智能体</button><button type="button" className={tab === "resources" ? "active" : ""} onClick={() => setTab("resources")}>技能与工具</button><button type="button" className={tab === "hooks" ? "active" : ""} onClick={() => setTab("hooks")}>钩子</button><button type="button" className={tab === "appearance" ? "active" : ""} onClick={() => setTab("appearance")}>外观</button><button type="button" className={tab === "usage" ? "active" : ""} onClick={() => setTab("usage")}>用量统计</button><button type="button" className={tab === "automation" ? "active" : ""} onClick={() => setTab("automation")}>自动化任务</button></nav><div className="settings-content">{tab === "general" ? <form onSubmit={(event) => { event.preventDefault(); const nextSettings = structuredClone(settings); void window.piDesktop.send({ type: "settings.save", settings: { model: nextSettings.model, thinkingLevel: nextSettings.thinkingLevel, accessMode: nextSettings.accessMode, appearance: nextSettings.appearance, browser: nextSettings.browser, computer: nextSettings.computer, design: nextSettings.design, ssh: nextSettings.ssh, defaultWorkspace: nextSettings.defaultWorkspace } }); markSettingsSaved(nextSettings); onClose(); }}>
           <label>全局默认模型<ModelSelect models={configuredModels} providers={providers} value={settings.model ? `${settings.model.provider}/${settings.model.id}` : ""} placeholder="请选择默认模型" onChange={(value) => { const slash = value.indexOf("/"); useDesktopStore.setState({ settings: { ...settings, model: slash > 0 ? { provider: value.slice(0, slash), id: value.slice(slash + 1) } : undefined } }); }} /></label>
           <label>默认思考等级<select value={settings.thinkingLevel} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, thinkingLevel: event.target.value as ThinkingLevel } })}>{THINKING_LEVELS.map((level) => <option key={level} value={level}>{thinkingLevelLabels[level]}</option>)}</select></label>
           <label>访问模式<select value={settings.accessMode} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, accessMode: event.target.value as AccessMode } })}>{accessModeOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
@@ -1252,6 +1255,7 @@ function SettingsDialog({ settings, models, providers, customProvider, customMod
           {settings.accessMode === "workspace" && <p className="access-mode-hint">工作区内的文件写入会自动允许；bash 命令和工作区外路径仍会询问。</p>}
           <div className="default-workspace-setting"><span className="settings-field-label">默认工作区</span><p className="default-workspace-hint">没有选择过工作区的助手，所有话题都落在默认工作区里，开箱即可对话；未自定义时使用内置目录 workspace-default。已选过工作区的助手仍各自记忆、互不影响。</p><div className="default-workspace-controls"><code className="default-workspace-path" title={settings.defaultWorkspace ?? undefined}>{settings.defaultWorkspace ?? "未自定义（使用内置目录）"}</code><span className="default-workspace-actions"><button className="secondary-button" type="button" onClick={() => void chooseDefaultWorkspace()}><FolderOpen size={13} />选择文件夹</button><button className="secondary-button" type="button" disabled={!settings.defaultWorkspace} onClick={resetDefaultWorkspace}><RotateCcw size={13} />恢复默认</button></span></div></div>
             <label className="checkbox-setting"><input type="checkbox" checked={settings.browser?.enabled !== false} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, browser: { enabled: event.target.checked } } })} />启用 AI 浏览器自动化（browser_* 工具）</label>
+            <label className="checkbox-setting" title="总闸：只管 AI 工具，不拦用户自己在 SSH 面板建立的连接"><input type="checkbox" checked={settings.ssh?.enabled !== false} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, ssh: { enabled: event.target.checked } } })} />启用 AI SSH 远程操作（ssh_* 工具；不影响人工连接）</label>
             <label className="checkbox-setting" title="总闸：关掉后任何会话都拿不到 computer_*，即使该会话开着电脑控制模式"><input type="checkbox" checked={settings.computer?.enabled !== false} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, computer: { enabled: event.target.checked } } })} />启用电脑控制（computer_* 桌面窗口工具；还须在会话顶栏开启才注入）</label>
             <label className="checkbox-setting" title="总闸：关掉后即使会话处于设计模式也不注入 design_* 工具"><input type="checkbox" checked={settings.design?.enabled !== false} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, design: { enabled: event.target.checked } } })} />启用设计模式（design_* 工具仅在开了设计模式的会话里注入）</label>
           <label className="checkbox-setting"><input type="checkbox" checked={settings.appearance.showThinking} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, showThinking: event.target.checked } } })} />展示思考过程</label>
@@ -2145,6 +2149,9 @@ export function App(): ReactNode {
     if (closing?.target.type === "terminal") {
       void window.piDesktop.terminal({ type: "kill", terminalId: id });
     }
+    if (closing?.target.type === "ssh-terminal") {
+      void window.piDesktop.ssh({ type: "kill", terminalId: closing.target.terminalId });
+    }
     setPreview((current) => {
       if (!current) return undefined;
       const index = current.tabs.findIndex((tab) => tab.id === id);
@@ -2176,6 +2183,17 @@ export function App(): ReactNode {
 
   function openTerminalPreview(): void {
     openPreviewTarget({ type: "terminal" }, `terminal-${crypto.randomUUID()}`);
+  }
+
+  /** 侧边栏 SSH 入口：打开主机管理 tab（固定 id 复用同一 tab，不叠加）。 */
+  function openSshPanel(): void {
+    openPreviewTarget({ type: "ssh" }, "ssh");
+  }
+
+  /** 主机面板点「连接」：新开一个远程终端 tab（连接由 SshTerminalPanel 发起）。 */
+  function openSshTerminalHost(host: SshHostSummary): void {
+    const terminalId = `ssh-${crypto.randomUUID()}`;
+    openPreviewTarget({ type: "ssh-terminal", terminalId, hostId: host.id, hostName: host.name }, terminalId);
   }
 
   async function openManualFilePreview(): Promise<void> {
@@ -2357,6 +2375,13 @@ export function App(): ReactNode {
     });
   }), []);
 
+  // AI 发起的 SSH 连接：主进程推 reveal，渲染端自动开/激活对应终端 tab
+  //（同 id 重连会重放 scrollback——与人工切回 tab 同一条路径）。命令回显
+  // 对用户可见是需求核心，所以 AI 连接必须揭示面板。
+  useEffect(() => window.piDesktop.onSshReveal((event) => {
+    openPreviewTarget({ type: "ssh-terminal", terminalId: event.terminalId, hostId: event.hostId, hostName: event.hostName }, event.terminalId);
+  }), []);
+
   const sidebarInner = (
     <>
       {sidebarView === "files" ? (
@@ -2436,6 +2461,7 @@ export function App(): ReactNode {
       )}
       <button className="new-session-button" data-control="new-session" type="button" disabled={!activeWorkspace} onClick={() => void createNewSession()}><MessageSquarePlus size={16} />新建话题</button>
       <button className="automation-nav-button" data-control="automation-open" type="button" title="自动化任务" aria-label="自动化任务" onClick={() => openSettingsOn("automation")}><Zap size={15} /><span>自动化</span></button>
+      <button className="automation-nav-button" data-control="ssh-open" type="button" title="SSH 远程终端" aria-label="SSH 远程终端" onClick={() => openSshPanel()}><Server size={15} /><span>SSH</span></button>
       <div className="sidebar-footer">
         <button type="button" data-control="settings" onClick={() => setSettingsOpen(true)}><Settings size={16} />设置</button>
         <span className={`runtime-indicator${runtimeBusy ? " busy" : ""}`}><i />{runtimeStatus}</span>
@@ -2456,6 +2482,7 @@ export function App(): ReactNode {
           <div className="sidebar-rail-items">
             <button type="button" className="rail-new-session" data-control="new-session" title="在当前工作区新建话题" aria-label="在当前工作区新建话题" disabled={!activeWorkspace} onClick={() => void createNewSession()}><Plus size={18} /></button>
             <button type="button" className="rail-icon" data-control="automation-open" title="自动化任务" aria-label="自动化任务" onClick={() => openSettingsOn("automation")}><Zap size={18} /></button>
+            <button type="button" className="rail-icon" data-control="ssh-open" title="SSH 远程终端" aria-label="SSH 远程终端" onClick={() => openSshPanel()}><Server size={18} /></button>
             <button type="button" className="rail-icon" data-control="rail-topics" title="话题列表" aria-label="话题列表" onClick={() => { setSidebarView("topics"); setSidebarTab("topics"); setSidebarFlyoutOpen(true); }}><MessageCircle size={18} /></button>
             <button type="button" className="rail-icon" data-control="rail-search" title="搜索" aria-label="搜索" onClick={() => { setSidebarView("topics"); setSidebarFlyoutOpen(true); window.setTimeout(() => sidebarSearchRef.current?.focus(), 30); }}><Search size={18} /></button>
             <button type="button" className="rail-icon" data-control="rail-agents" title="助手" aria-label="助手" onClick={() => { setSidebarView("topics"); setSidebarTab("agents"); setSidebarFlyoutOpen(true); }}><Users size={18} /></button>
@@ -2574,9 +2601,9 @@ export function App(): ReactNode {
           {previewVisible && preview && <PreviewDivider split={previewSplit} dragging={previewDragging} onStart={startPreviewResize} onMove={movePreviewResize} onEnd={endPreviewResize} onCancel={cancelPreviewResize} onKeyDown={resizePreviewWithKeyboard} onReset={() => setPreviewSplit(50)} />}
 
           {previewVisible && <ExitWrap exiting={previewPresence.exiting}>{preview && preview.tabs.length > 0 ? (
-            <ArtifactPreview tabs={preview.tabs} activeTabId={preview.activeTabId} browserSuspended={previewDragging || settingsOpen || Boolean(permission) || Boolean(messageActionError) || previewAddMenuOpen || previewPresence.exiting} fullscreen={previewFullscreen} onFullscreenChange={setPreviewFullscreen} onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddTerminal={openTerminalPreview} onAddFile={() => void openManualFilePreview()} onAddReview={openLatestReview} onAddMenuOpenChange={setPreviewAddMenuOpen} reviewAvailable={Boolean(latestReviewExecution)} workspace={activeWorkspace} activeEditorState={activePreviewTab && ((activePreviewTab.target.type === "file" && activePreviewTab.target.file.kind === "markdown") || activePreviewTab.target.type === "memory") ? getEditorState(activePreviewTab.id) : undefined} onActiveEditorChange={(patch) => { if (activePreviewTab) patchEditorState(activePreviewTab.id, patch); }} onActiveEditorContentChange={handleActiveEditorContentChange} onActiveEditorSaved={handleActiveEditorSaved} onActiveEditorStatusChange={handleActiveEditorStatusChange} onActiveEditorSaveError={(message) => setMessageActionError(`保存 ${activePreviewTab?.target.type === "file" ? activePreviewTab.target.file.name : activePreviewTab?.target.type === "memory" ? "记忆主题" : "Markdown"} 失败：${message}`)} onActiveEditorResolveConflict={(choice) => { if (activePreviewTab) handleEditorResolveConflict(activePreviewTab.id, choice); }} onToggleEditing={() => { if (activePreviewTab) patchEditorState(activePreviewTab.id, { editing: !getEditorState(activePreviewTab.id).editing }); }} onBrowserStateChange={handleBrowserStateChange} onBrowserPickSend={sendPickedElement} />
+            <ArtifactPreview tabs={preview.tabs} activeTabId={preview.activeTabId} browserSuspended={previewDragging || settingsOpen || Boolean(permission) || Boolean(messageActionError) || previewAddMenuOpen || previewPresence.exiting} fullscreen={previewFullscreen} onFullscreenChange={setPreviewFullscreen} onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddTerminal={openTerminalPreview} onAddSsh={openSshPanel} onSshConnect={openSshTerminalHost} onAddFile={() => void openManualFilePreview()} onAddReview={openLatestReview} onAddMenuOpenChange={setPreviewAddMenuOpen} reviewAvailable={Boolean(latestReviewExecution)} workspace={activeWorkspace} activeEditorState={activePreviewTab && ((activePreviewTab.target.type === "file" && activePreviewTab.target.file.kind === "markdown") || activePreviewTab.target.type === "memory") ? getEditorState(activePreviewTab.id) : undefined} onActiveEditorChange={(patch) => { if (activePreviewTab) patchEditorState(activePreviewTab.id, patch); }} onActiveEditorContentChange={handleActiveEditorContentChange} onActiveEditorSaved={handleActiveEditorSaved} onActiveEditorStatusChange={handleActiveEditorStatusChange} onActiveEditorSaveError={(message) => setMessageActionError(`保存 ${activePreviewTab?.target.type === "file" ? activePreviewTab.target.file.name : activePreviewTab?.target.type === "memory" ? "记忆主题" : "Markdown"} 失败：${message}`)} onActiveEditorResolveConflict={(choice) => { if (activePreviewTab) handleEditorResolveConflict(activePreviewTab.id, choice); }} onToggleEditing={() => { if (activePreviewTab) patchEditorState(activePreviewTab.id, { editing: !getEditorState(activePreviewTab.id).editing }); }} onBrowserStateChange={handleBrowserStateChange} onBrowserPickSend={sendPickedElement} />
           ) : (
-            <ArtifactPreview key="empty-state" tabs={[]} activeTabId="" onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddTerminal={openTerminalPreview} onAddFile={() => void openManualFilePreview()} onBrowserPickSend={sendPickedElement} />
+            <ArtifactPreview key="empty-state" tabs={[]} activeTabId="" onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddTerminal={openTerminalPreview} onAddSsh={openSshPanel} onSshConnect={openSshTerminalHost} onAddFile={() => void openManualFilePreview()} onBrowserPickSend={sendPickedElement} />
           )}</ExitWrap>}
           </>)}
         </div>
