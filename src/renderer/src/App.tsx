@@ -1650,28 +1650,6 @@ export function App(): ReactNode {
     });
   }, [activeWorkspace, preview]);
 
-  useEffect(() => {
-    const toggleTerminal = (event: KeyboardEvent): void => {
-      if (event.code !== "Backquote" || !(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return;
-      event.preventDefault();
-      const activeTabId = preview?.activeTabId;
-      const activeTab = preview?.tabs.find((tab) => tab.id === activeTabId);
-      if (previewOpened && activeTab?.target.type === "terminal") {
-        closePreviewTab(activeTab.id);
-        return;
-      }
-      const existing = preview?.tabs.find((tab) => tab.target.type === "terminal");
-      if (existing) {
-        setPreviewOpened(true);
-        selectPreviewTab(existing.id);
-      } else {
-        openTerminalPreview();
-      }
-    };
-    document.addEventListener("keydown", toggleTerminal);
-    return () => document.removeEventListener("keydown", toggleTerminal);
-  }, [preview, previewOpened]);
-
 
   useEffect(() => {
     const root = document.documentElement;

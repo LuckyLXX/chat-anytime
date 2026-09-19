@@ -187,17 +187,14 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, fullscree
             <button type="button" className="preview-empty-state-item" title="新建浏览器预览" aria-label="新建浏览器预览" onClick={() => onAddBrowser?.()}>
               <span className="preview-empty-state-item-icon"><Globe2 size={17} /></span>
               <span className="preview-empty-state-item-name">浏览器</span>
-              <span className="preview-empty-state-key">Ctrl+T</span>
             </button>
             <button type="button" className="preview-empty-state-item" title="新建文件预览" aria-label="新建文件预览" onClick={() => onAddFile?.()}>
               <span className="preview-empty-state-item-icon"><File size={17} /></span>
               <span className="preview-empty-state-item-name">文件</span>
-              <span className="preview-empty-state-key">Ctrl+P</span>
             </button>
             <button type="button" className="preview-empty-state-item" title="新建终端" aria-label="新建终端" onClick={() => onAddTerminal?.()}>
               <span className="preview-empty-state-item-icon"><Terminal size={17} /></span>
               <span className="preview-empty-state-item-name">终端</span>
-              <span className="preview-empty-state-key">Ctrl+`</span>
             </button>
             <button type="button" className="preview-empty-state-item" title="SSH 远程终端" aria-label="SSH 远程终端" onClick={() => onAddSsh?.()}>
               <span className="preview-empty-state-item-icon"><Server size={17} /></span>
@@ -403,11 +400,11 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, fullscree
         <div className="preview-tab-add-shell" ref={addMenuRef}>
           <button type="button" className="preview-tab-add" aria-label="新建预览标签" aria-haspopup="menu" aria-expanded={addMenuOpen} title="新建预览标签" onClick={() => setAddMenuOpen((open) => !open)}><Plus size={14} /></button>
           {addMenuOpen && <div className="preview-open-menu" role="menu" aria-label="新建预览标签">
-            <button type="button" role="menuitem" onClick={() => { setAddMenuOpen(false); onAddReview?.(); }} disabled={!reviewAvailable}><FileDiff size={16} /><span>审阅</span><kbd>Ctrl+Shift+G</kbd></button>
-            <button type="button" role="menuitem" onClick={() => { setAddMenuOpen(false); onAddTerminal?.(); }}><Terminal size={16} /><span>终端</span><kbd>Ctrl+`</kbd></button>
+            <button type="button" role="menuitem" onClick={() => { setAddMenuOpen(false); onAddReview?.(); }} disabled={!reviewAvailable}><FileDiff size={16} /><span>审阅</span></button>
+            <button type="button" role="menuitem" onClick={() => { setAddMenuOpen(false); onAddTerminal?.(); }}><Terminal size={16} /><span>终端</span></button>
             <button type="button" role="menuitem" onClick={() => { setAddMenuOpen(false); onAddSsh?.(); }}><Server size={16} /><span>SSH</span></button>
-            <button type="button" role="menuitem" onClick={() => { setAddMenuOpen(false); onAddBrowser?.(); }}><Globe2 size={16} /><span>浏览器</span><kbd>Ctrl+T</kbd></button>
-            <button type="button" role="menuitem" onClick={() => { setAddMenuOpen(false); onAddFile?.(); }}><File size={16} /><span>文件</span><kbd>Ctrl+P</kbd></button>
+            <button type="button" role="menuitem" onClick={() => { setAddMenuOpen(false); onAddBrowser?.(); }}><Globe2 size={16} /><span>浏览器</span></button>
+            <button type="button" role="menuitem" onClick={() => { setAddMenuOpen(false); onAddFile?.(); }}><File size={16} /><span>文件</span></button>
           </div>}
         </div>
         <div className="preview-tab-actions">

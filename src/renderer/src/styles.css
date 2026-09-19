@@ -360,11 +360,10 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 .preview-open-trigger { display: inline-flex; align-items: center; gap: 6px; min-height: 33px; padding: 0 9px; border: 1px solid var(--border); border-radius: 6px; color: var(--text); background: var(--surface-raised); font-size: 11px; cursor: pointer; }
 .preview-open-trigger:hover, .preview-open-trigger[aria-expanded="true"] { border-color: var(--accent); background: var(--surface-button-hover); }
 .preview-open-menu { position: absolute; z-index: 30; top: calc(100% + 6px); left: 0; display: grid; width: 220px; gap: 2px; padding: 6px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow-lg); }
-.preview-open-menu button { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; gap: 9px; align-items: center; min-width: 0; min-height: 30px; padding: 5px 8px; text-align: left; border: 0; border-radius: 6px; color: var(--text-muted); background: transparent; cursor: pointer; }
+.preview-open-menu button { display: grid; grid-template-columns: 20px minmax(0, 1fr); gap: 9px; align-items: center; min-width: 0; min-height: 30px; padding: 5px 8px; text-align: left; border: 0; border-radius: 6px; color: var(--text-muted); background: transparent; cursor: pointer; }
 .preview-open-menu button:hover:not(:disabled) { color: var(--text); background: var(--surface-raised); }
 .preview-open-menu button:disabled { opacity: .45; cursor: default; }
 .preview-open-menu button > span { min-width: 0; color: var(--text); font-size: 11px; font-weight: 500; }
-.preview-open-menu button > kbd { color: var(--text-muted); font: 9px/1.2 inherit; white-space: nowrap; }
 .icon-button { display: grid; place-items: center; width: 31px; height: 31px; padding: 0; border: 0; border-radius: 6px; background: transparent; cursor: pointer; }
 .icon-button:hover { background: var(--surface-button-hover); }
 .panel-toggle { border: 1px solid var(--border); }
@@ -378,16 +377,14 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 .preview-empty-state > strong { color: var(--text); font-size: 13px; }
 .preview-empty-state > em { color: var(--text-muted); font-size: 10px; font-style: normal; }
 .preview-empty-state-list { display: grid; gap: 6px; width: min(360px, 88%); }
-/* 第三列是快捷键胶囊位：SSH 行没有胶囊，若用 auto 该行第三列宽 0，
-   名称列便多分一份 1fr → 标签比上面三行右偏（约 21px）。
-   统一预留 ≥ 胶囊宽度的第三列，四行标签才落在同一条竖线上。 */
-.preview-empty-state-item { display: grid; grid-template-columns: 22px minmax(0, 1fr) minmax(44px, auto); gap: 10px; align-items: center; min-height: 38px; padding: 6px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); cursor: pointer; }
+/* 第三列是不放内容的 22px 占位：右列与图标列等宽，标签才能相对卡片真正居中
+   （只有两列时图标占左列、右侧无物平衡，标签会偏右）。 */
+.preview-empty-state-item { display: grid; grid-template-columns: 22px minmax(0, 1fr) 22px; gap: 10px; align-items: center; min-height: 38px; padding: 6px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); cursor: pointer; }
 .preview-empty-state-item:hover { background: var(--surface-button-hover); border-color: var(--accent); }
 .preview-empty-state-item.disabled { opacity: .45; cursor: default; }
 .preview-empty-state-item.disabled:hover { background: var(--surface); border-color: var(--border); }
 .preview-empty-state-item-icon { display: grid; place-items: center; color: var(--accent-text); }
 .preview-empty-state-item-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 600; }
-.preview-empty-state-key { padding: 2px 6px; border: 1px solid var(--border); border-radius: 4px; color: var(--text-muted); font-size: 10px; font-weight: 600; }
 .preview-tab-add-shell { position: relative; display: flex; align-items: center; flex: 0 0 auto; }
 .preview-tab-add { display: grid; place-items: center; width: 28px; height: 28px; margin: 4px 3px; border: 0; border-radius: 6px; color: var(--text-muted); background: transparent; cursor: pointer; }
 .preview-tab-add:hover { color: var(--text); background: var(--surface-button-hover); }
@@ -1459,6 +1456,21 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 .ssh-panel-loading, .ssh-panel-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 36px 12px; opacity: 0.72; font-size: 13px; text-align: center; }
 .ssh-panel-empty p { max-width: 42ch; line-height: 1.65; margin: 0; }
 .ssh-host-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+/* —— 分组：可折叠节，分组头 hover 出操作，未分组为固定尾节 —— */
+.ssh-group-list { display: flex; flex-direction: column; gap: 14px; }
+.ssh-group { display: flex; flex-direction: column; gap: 6px; }
+.ssh-group-head { display: flex; align-items: center; gap: 7px; padding: 4px 2px; cursor: pointer; user-select: none; color: var(--text); border-bottom: 1px solid var(--border); padding-bottom: 7px; }
+.ssh-group-head:hover { color: var(--accent-text); }
+.ssh-group-name { font-size: 12.5px; letter-spacing: 0.02em; }
+.ssh-group-count { font-size: 11px; opacity: 0.55; padding: 1px 7px; border-radius: 99px; background: var(--surface-muted); }
+.ssh-group-actions { display: none; gap: 4px; margin-left: auto; }
+.ssh-group-head:hover .ssh-group-actions { display: inline-flex; }
+.ssh-group-actions .ghost-button { padding: 3px 5px; }
+.ssh-group-add { display: none; padding: 3px 5px; margin-left: auto; }
+.ssh-group-head:hover .ssh-group-add { display: inline-flex; }
+.ssh-group-empty { list-style: none; font-size: 12px; opacity: 0.5; padding: 6px 2px 2px 24px; }
+.ssh-panel-head-actions { display: flex; gap: 8px; }
+.ssh-host-form .field select { height: 30px; padding: 0 6px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface-input, var(--surface)); color: var(--text); font-size: 12.5px; outline: none; }
 .ssh-host-row { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
 .ssh-host-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--text-faint, #94a3b8); opacity: 0.5; }
 .ssh-host-dot.connected { background: var(--success-text, #16a34a); opacity: 1; box-shadow: 0 0 6px color-mix(in srgb, var(--success-text, #16a34a) 55%, transparent); }
