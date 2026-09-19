@@ -157,6 +157,8 @@ export class SshConnectionManager {
   private readonly pendingFlush = new Set<ConnectionRecord>();
   /** AI 会话 → 连接绑定（连接归 tab 所有，会话 dispose 不解绑不关连接）。 */
   private readonly sessionBindings = new Map<string, string>();
+  /** 探测记录：terminalId → 指纹（TOFU 拒绝后 record 即被清理，AI 的轮询只能从这里看到探测结果）。 */
+  private readonly probedFingerprints = new Map<string, string>();
   private execSequence = 0;
   private readonly schedule: (callback: () => void) => () => void;
   private cancelFlush: (() => void) | undefined;
@@ -212,6 +214,8 @@ export class SshConnectionManager {
     if (password === undefined) throw new Error("该主机未保存密码，请先在 SSH 面板补录密码");
 
     const known = this.deps.knownHosts.get(stored.host, stored.port);
+    // 重连同 id（信任后重发 / 重新连接）：清掉旧探测记录，避免陈旧指纹误判。
+    this.probedFingerprints.delete(terminalId);
     const record: ConnectionRecord = {
       terminalId,
       hostId,
@@ -300,14 +304,20 @@ export class SshConnectionManager {
             record.trustedFingerprint = fingerprint;
             return true;
           }
-          record.probeFingerprint = fingerprint; // 拒绝握手，fingerprint 随返回值给 UI
+          // 探测：拒绝握手并**推事件**告知指纹——ssh2 的 hostVerifier 在异步握手中
+          // 才被调用，connect() 早已返回，指纹不可能随命令返回值带回（首版 bug：
+          // 渲染端永远停在「正在连接」）。渲染端收事件后显示确认卡，用户信任后
+          // 带 trustFingerprint 重发；AI 的轮询从 probedFingerprints 看到。
+          record.probeFingerprint = fingerprint;
+          this.probedFingerprints.set(terminalId, fingerprint);
+          this.deps.publish(terminalId, { type: "fingerprint", terminalId, fingerprint });
           return false;
         }
         record.fingerprintMismatch = fingerprint; // 拒绝 + error 事件给明确文案
         return false;
       }
     });
-    return record.probeFingerprint ? { kind: "connect", fingerprint: record.probeFingerprint } : { kind: "connect" };
+    return { kind: "connect" };
   }
 
   // ——— AI 操作通道（utility → main RPC） ———
@@ -330,11 +340,8 @@ export class SshConnectionManager {
             terminalId = existing.terminalId;
           } else {
             terminalId = `ssh-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-            const result = this.connect(terminalId, stored.id, 80, 24, false);
-            if (result.kind === "connect" && result.fingerprint) {
-              this.kill(terminalId);
-              throw new Error(`首次连接主机 ${stored.name}（${stored.host}）需要人工确认服务器指纹。请先在 SSH 面板连接一次该主机并信任指纹（指纹 ${result.fingerprint}），之后 AI 即可复用该连接。`);
-            }
+            this.connect(terminalId, stored.id, 80, 24, false);
+            // 连接是异步的：等就绪 / 失败 / 探测出指纹（TOFU 需人工确认，AI 拒绝）。
             await this.waitForConnected(terminalId);
           }
           this.sessionBindings.set(sessionKey, terminalId);
@@ -397,7 +404,7 @@ export class SshConnectionManager {
     return record;
   }
 
-  /** 等待连接就绪/失败（AI 新建连接用；复用已有连接时不会走到这里）。 */
+  /** 等待连接就绪/失败/指纹探测（AI 新建连接用；复用已有连接时不会走到这里）。 */
   private waitForConnected(terminalId: string, timeoutMs = CONNECT_TIMEOUT_MS + 5_000): Promise<void> {
     return new Promise((resolve, reject) => {
       const record = this.connections.get(terminalId);
@@ -413,6 +420,15 @@ export class SshConnectionManager {
         reject(new Error(`SSH 连接超时（${Math.round(timeoutMs / 1000)} 秒），请检查主机地址、端口与防火墙`));
       }, timeoutMs);
       const poll = setInterval(() => {
+        // TOFU 探测优先于「记录消失」判定：探测被拒后 record 已被静默清理。
+        const probed = this.probedFingerprints.get(terminalId);
+        if (probed) {
+          cleanup();
+          this.probedFingerprints.delete(terminalId);
+          this.kill(terminalId);
+          reject(new Error(`首次连接该主机需要人工确认服务器指纹。请先在侧边栏 SSH 面板连接一次并信任指纹（指纹 ${probed}），之后 AI 即可复用该连接。`));
+          return;
+        }
         const current = this.connections.get(terminalId);
         if (!current || current.status === "closed") {
           cleanup();

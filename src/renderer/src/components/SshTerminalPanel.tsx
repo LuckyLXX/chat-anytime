@@ -31,8 +31,6 @@ export function SshTerminalPanel({ terminalId, hostId, hostName }: { terminalId:
       cols: Math.max(2, apiRef.current?.terminal.cols ?? 80),
       rows: Math.max(2, apiRef.current?.terminal.rows ?? 24),
       ...(trustFingerprint ? { trustFingerprint: true } : {})
-    }).then((result) => {
-      if (result.kind === "connect" && result.fingerprint) setState({ status: "confirming", fingerprint: result.fingerprint });
     }).catch((error: unknown) => {
       setState({ status: "closed", error: error instanceof Error ? error.message : String(error) });
     });
@@ -56,6 +54,12 @@ export function SshTerminalPanel({ terminalId, hostId, hostName }: { terminalId:
       const api = apiRef.current;
       if (event.type === "data") {
         if (api) api.write(event.data);
+        return;
+      }
+      // TOFU 探测：hostVerifier 在异步握手中拿到指纹后推事件（connect 命令返回时
+      // 握手尚未发生），首次连接的确认卡在这里出现。
+      if (event.type === "fingerprint") {
+        setState({ status: "confirming", fingerprint: event.fingerprint });
         return;
       }
       if (event.type === "status") {

@@ -17,8 +17,9 @@ export function TerminalPanel({ terminalId, workspace }: { terminalId: string; w
 
   useEffect(() => {
     setEnded(undefined);
-    // ready = xterm 实例就绪：此刻尺寸可读，向主进程发起 create（重连时重放 scrollback）。
-    apiRef.current = undefined;
+    // 注意：绝不能在这里清 apiRef——XtermView（子组件）的 effect 先于本 effect
+    // 执行，onReady 已经把新 api 存进去；此处清空会把后续所有 data 事件丢弃
+    //（2026-09-19 终端空白的根因：光标闪、无输出）。key 重建时新实例会覆盖。
   }, [terminalId, workspace, restartNonce]);
 
   const handleReady = useCallback((api: XtermApi): void => {

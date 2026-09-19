@@ -929,14 +929,16 @@ export type SshCommandResult =
   | { kind: "hosts"; hosts: SshHostSummary[]; connectedHostIds: string[] }
   | { kind: "host-saved"; host: SshHostSummary }
   | { kind: "host-deleted" }
-  /** fingerprint 存在 = 首次连接待指纹确认（重发 connect 带 trustFingerprint）；否则连接已发起。 */
-  | { kind: "connect"; fingerprint?: string }
+  /** 连接已异步发起（结果经 SshEventData 事件：fingerprint / status / error）。 */
+  | { kind: "connect" }
   | { kind: "void" };
 
 export type SshEventData =
   | { type: "data"; terminalId: string; data: string }
   | { type: "status"; terminalId: string; status: "connecting" | "connected" | "closed"; detail?: string }
-  | { type: "error"; terminalId: string; message: string };
+  | { type: "error"; terminalId: string; message: string }
+  /** TOFU 探测：hostVerifier 在异步握手中拿到指纹后推送给渲染端显示确认卡（ssh2 的 connect() 返回时握手尚未发生，指纹不可能随命令返回值带回）。 */
+  | { type: "fingerprint"; terminalId: string; fingerprint: string };
 
 /** AI 发起的连接：主进程推事件让渲染端自动开 tab（命令回显对用户可见）。 */
 export interface SshRevealEvent {

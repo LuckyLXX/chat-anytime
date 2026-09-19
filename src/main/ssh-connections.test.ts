@@ -62,13 +62,14 @@ class FakeClient implements SshClientLike {
 
   connect(options: SshConnectOptionsLike): void {
     this.connectOptions = options;
-    // 模拟握手：hostVerifier 同步执行（ssh2 真实行为），false → error。
+    // 模拟真实 ssh2：connect() 只异步发起，hostVerifier 在握手阶段（下一微任务）
+    // 才被调用；false → error 事件（首版 bug 正是误以为它同步执行）。
     const verifier = options.hostVerifier;
-    if (verifier && !verifier(this.hostKey)) {
-      queueMicrotask(() => this.emit("error", new Error("Handshake verification failed")));
-      return;
+    if (verifier) {
+      queueMicrotask(() => {
+        if (!verifier(this.hostKey)) this.emit("error", new Error("Handshake verification failed"));
+      });
     }
-    // true / 无 verifier → 挂起，等 emitReady()（测试驱动）。
   }
 
   end(): void {
@@ -203,14 +204,19 @@ describe("SshConnectionManager.connect (renderer channel)", () => {
     expect(() => badStore.manager.handle({ type: "connect", terminalId: "t1", hostId: "whatever", cols: 80, rows: 24 })).toThrow("主机不存在");
   });
 
-  it("returns the fingerprint for an untrusted first connection (TOFU probe)", async () => {
+  it("pushes the fingerprint as an event for an untrusted first connection (TOFU probe)", async () => {
     const harness = createHarness();
     const hosts = harness.manager.handle({ type: "hosts" });
     const hostId = hosts.kind === "hosts" ? hosts.hosts[0]!.id : "";
+    // ssh2 的 hostVerifier 在异步握手中才执行：connect() 返回时指纹未知，指纹
+    // 必须作为事件推送（首版 bug：随返回值带回 → 渲染端永远「正在连接」）。
     const result = harness.manager.handle({ type: "connect", terminalId: "t1", hostId, cols: 80, rows: 24 });
-    expect(result).toEqual({ kind: "connect", fingerprint: FINGERPRINT });
+    expect(result).toEqual({ kind: "connect" });
     await sleep(5);
-    // 探测连接的握手失败是预期路径：不 publish error，只发一次 closed。
+    const fingerprints = harness.published.filter((event) => event.type === "fingerprint");
+    expect(fingerprints).toHaveLength(1);
+    expect((fingerprints[0] as { fingerprint: string }).fingerprint).toBe(FINGERPRINT);
+    // 探测连接的握手失败是预期路径：不 publish error。
     expect(harness.published.filter((event) => event.type === "error")).toHaveLength(0);
   });
 
@@ -219,12 +225,14 @@ describe("SshConnectionManager.connect (renderer channel)", () => {
     const hosts = harness.manager.handle({ type: "hosts" });
     const hostId = hosts.kind === "hosts" ? hosts.hosts[0]!.id : "";
     harness.manager.handle({ type: "connect", terminalId: "t1", hostId, cols: 100, rows: 30, trustFingerprint: true });
+    await sleep(2);
     harness.clients[0]!.emitReady();
     await sleep(5);
     expect(harness.published).toContainEqual({ type: "status", terminalId: "t1", status: "connected" });
     // 指纹已记录：第二次连接（新 terminalId）不再探测。
     const second = harness.manager.handle({ type: "connect", terminalId: "t2", hostId, cols: 80, rows: 24 });
     expect(second).toEqual({ kind: "connect" });
+    await sleep(2);
     expect(harness.clients[1]!.connectOptions?.hostVerifier?.(TEST_HOST_KEY)).toBe(true);
     expect(harness.clients[1]!.connectOptions?.hostVerifier?.(Buffer.from("other"))).toBe(false);
   });
@@ -234,6 +242,7 @@ describe("SshConnectionManager.connect (renderer channel)", () => {
     const hosts = harness.manager.handle({ type: "hosts" });
     const hostId = hosts.kind === "hosts" ? hosts.hosts[0]!.id : "";
     harness.manager.handle({ type: "connect", terminalId: "t1", hostId, cols: 80, rows: 24, trustFingerprint: true });
+    await sleep(2);
     harness.clients[0]!.emitReady();
     await sleep(5);
     // 服务器换了 hostkey：第二台 client 呈现不同指纹，握手被拒。
@@ -250,6 +259,7 @@ describe("SshConnectionManager.connect (renderer channel)", () => {
     const hosts = harness.manager.handle({ type: "hosts" });
     const hostId = hosts.kind === "hosts" ? hosts.hosts[0]!.id : "";
     harness.manager.handle({ type: "connect", terminalId: "t1", hostId, cols: 80, rows: 24, trustFingerprint: true });
+    await sleep(2);
     harness.clients[0]!.emitReady();
     await sleep(5);
     harness.clients[0]!.shellStream!.emit("welcome banner\r\n");
@@ -274,6 +284,7 @@ describe("SshConnectionManager.handleAutomation (AI channel)", () => {
     const hostId = hosts.kind === "hosts" ? hosts.hosts[0]!.id : "";
     // 人工先信任指纹（TOFU）。
     harness.manager.handle({ type: "connect", terminalId: "human", hostId, cols: 80, rows: 24, trustFingerprint: true });
+    await sleep(2);
     harness.clients[0]!.emitReady();
     await sleep(5);
     const ai = (request: SshAutomationRequest) => harness.manager.handleAutomation("session-1", request);
