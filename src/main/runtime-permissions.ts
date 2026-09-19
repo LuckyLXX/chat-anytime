@@ -19,6 +19,10 @@ export function summarizeArgs(toolName: string, args: Record<string, unknown>): 
   if (toolName === "ssh_connect") return `SSH 连接主机 ${String(args.host ?? "")}`;
   if (toolName === "ssh_write") return `SSH 写入输入（${String(args.data ?? "").length} 字符）`;
   if (toolName === "ssh_close") return "断开 SSH 连接";
+  // 上传/下载的权限卡文案要能让人一眼看出「传什么、从哪到哪」——文件路径是
+  // 唯一能让人判断该不该放行的信息。
+  if (toolName === "ssh_upload") return `SSH 上传文件：${String(args.localPath ?? "").slice(0, 80)} → ${String(args.remoteDir ?? "").slice(0, 80)}`;
+  if (toolName === "ssh_download") return `SSH 下载文件：${String(args.remotePath ?? "").slice(0, 120)} → 本地下载目录`;
   if (toolName === "design_update") return `更新设计文档（${Array.isArray(args.ops) ? args.ops.length : 0} 项变更）`;
   if (toolName === "design_export") return `导出设计 HTML${args.path ? `到 ${String(args.path)}` : ""}`;
   if (toolName === "computer_click") return `点击窗口「${String(args.window ?? "")}」客户区 (${String(args.x ?? "?")}, ${String(args.y ?? "?")})`;

@@ -1,5 +1,6 @@
-import { LoaderCircle, RotateCw, ShieldAlert, ShieldCheck } from "lucide-react";
+import { ChevronDown, FolderTree, LoaderCircle, RotateCw, ShieldAlert, ShieldCheck, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { SshFilesPanel } from "./SshFilesPanel";
 import { XtermView, type XtermApi } from "./XtermView";
 
 type ConnectionState =
@@ -16,10 +17,18 @@ type ConnectionState =
  * - 首次连接（指纹未记录）返回 fingerprint → 显示确认卡，用户「信任并
  *   连接」后带 trustFingerprint 重发（TOFU）；
  * - 断开后「重新连接」同样重发（连接由主进程持有，tab 关闭才 kill）。
+ *
+ * 文件面板（SshFilesPanel）挂在终端**下方分屏**（竖向 flex，非覆盖层）：预览面板最
+ * 小宽仅 310px（见 styles.css 的 minmax(310px, 28%)），左右分栏会把 xterm 挤到
+ * 不可用；下方分屏只压缩高度不动宽度，xterm 的 FitAddon 由 ResizeObserver 自动
+ * 跟随（fit 逻辑一行不动）。开关按钮在操作条里、面板之外，故不会被面板遮住
+ * ——初版是覆盖层且开关在面板内，打开后点不回终端（已修，见 ssh-files-layout 测试）。
  */
-export function SshTerminalPanel({ terminalId, hostId, hostName }: { terminalId: string; hostId: string; hostName: string }): ReactNode {
+export function SshTerminalPanel({ terminalId, hostId, hostName, workspace }: { terminalId: string; hostId: string; hostName: string; workspace?: string }): ReactNode {
   const [state, setState] = useState<ConnectionState>({ status: "connecting" });
   const [restartNonce, setRestartNonce] = useState(0);
+  const [filesOpen, setFilesOpen] = useState(false);
+  const [actionError, setActionError] = useState<string | undefined>(undefined);
   const apiRef = useRef<XtermApi | undefined>(undefined);
 
   const connect = useCallback((trustFingerprint: boolean): void => {
@@ -68,6 +77,9 @@ export function SshTerminalPanel({ terminalId, hostId, hostName }: { terminalId:
         else setState({ status: "closed", detail: event.detail });
         return;
       }
+      // 文件传输事件由 SshFilesPanel 单独订阅（同一通道不同事件类型），
+      // 终端面板必须忽略，否则会被误当成断连。
+      if (event.type === "transfer") return;
       setState({ status: "closed", error: event.message });
     });
     return unsubscribe;
@@ -76,6 +88,35 @@ export function SshTerminalPanel({ terminalId, hostId, hostName }: { terminalId:
   return (
     <div className="terminal-pane ssh-terminal-pane" data-pane="terminal">
       <XtermView key={`${terminalId}-${restartNonce}`} onReady={handleReady} onInput={handleInput} onResize={handleResize} focus />
+      {/* 操作条：固定在终端下方，抽屉开关就在这里（所以永远不会被抽屉盖住）。 */}
+      {state.status === "connected" && (
+        <div className="ssh-actions-bar">
+          <button
+            type="button"
+            className={`ssh-files-toggle${filesOpen ? " active" : ""}`}
+            data-control="ssh-files-toggle"
+            title={filesOpen ? "收起远端文件" : "浏览并传输远端文件"}
+            aria-expanded={filesOpen}
+            onClick={() => { setFilesOpen((open) => !open); setActionError(undefined); }}
+          >
+            {filesOpen ? <ChevronDown size={14} /> : <FolderTree size={14} />}
+            <span>{filesOpen ? "收起文件" : "远端文件"}</span>
+          </button>
+        </div>
+      )}
+      {/* 文件面板：**下方分屏**（flex 同级），不是覆盖层——终端只变矮不变窄，
+          xterm 的 FitAddon 由 ResizeObserver 自动跟随。 */}
+      {filesOpen && state.status === "connected" && (
+        <div className="ssh-files-drawer">
+          <SshFilesPanel terminalId={terminalId} workspace={workspace} onError={setActionError} />
+        </div>
+      )}
+      {actionError && (
+        <div className="ssh-files-error" role="status">
+          <span>{actionError}</span>
+          <button type="button" className="ghost-icon" aria-label="关闭提示" onClick={() => setActionError(undefined)}><X size={12} /></button>
+        </div>
+      )}
       {state.status === "connecting" && (
         <div className="terminal-overlay">
           <LoaderCircle className="spinning" size={18} />

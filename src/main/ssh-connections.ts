@@ -14,6 +14,8 @@ import type {
 import type { SshHostStore } from "./ssh-host-store.js";
 import { validateHostDraft } from "./ssh-host-store.js";
 import type { SshKnownHostsStore } from "./ssh-known-hosts.js";
+import { SshSftpTransferService, type SshSftpLike } from "./ssh-sftp.js";
+import { downloadDirFor } from "./browser-downloads.js";
 
 /**
  * SSH 连接管理：ssh2 Client + shell channel（远端 PTY），与本地 PTY 终端
@@ -33,6 +35,8 @@ export interface SshClientLike {
   end(): void;
   on(event: string, listener: (...args: never[]) => void): unknown;
   shell(options: { term: string; cols: number; rows: number }, callback: (error: Error | undefined, stream: SshShellStreamLike) => void): void;
+  /** 打开 SFTP 通道（首次文件操作时懒开，随连接销毁）。 */
+  sftp(callback: (error: Error | undefined, sftp: SshSftpLike) => void): void;
 }
 
 export interface SshConnectOptionsLike {
@@ -90,6 +94,9 @@ interface ConnectionRecord {
   /** 指纹与已记录不一致（hostVerifier 已拒绝）：error 事件用明确文案。 */
   fingerprintMismatch?: string;
   pendingExec?: PendingExec;
+  /** SFTP 通道与传输服务：首次文件操作时懒建（不用文件功能的连接零开销）。 */
+  sftp?: SshSftpTransferService;
+  sftpChannel?: SshSftpLike;
   /** 显示流净化器：剔除 marker 命令的字面回显（跨 chunk 安全）。 */
   echoFilter: (chunk: string) => string;
   disposeListeners(): void;
@@ -236,7 +243,19 @@ export class SshConnectionManager {
         if (this.deps.hostStore.removeGroup(command.groupId) < 0) throw new Error("分组不存在或已删除");
         return { kind: "group-deleted" };
       }
+      default:
+        // 所有 sftp.* 都是异步入队（流式传输），统一走 handleSftp；由 index.ts
+        // 按性质选同步/异步入口（这里只能报错，不能返回 Promise）。
+        throw new Error(`不支持同步执行的 SSH 命令：${command.type}`);
     }
+  }
+
+  /** SFTP 命令（异步入口）。`handleSftp()` 负责整个 sftp.* 命名空间。 */
+  handleAsync(command: SshCommand): Promise<SshCommandResult> | undefined {
+    if (command.type.startsWith("sftp.")) {
+      return this.handleSftp(command as Extract<SshCommand, { type: `sftp.${string}` }>);
+    }
+    return undefined;
   }
 
   /** 发起连接。返回带 fingerprint = TOFU 待确认（渲染端显示确认卡后带 trustFingerprint 重发）。 */
@@ -361,6 +380,97 @@ export class SshConnectionManager {
     return { kind: "connect" };
   }
 
+  // ——— SFTP 文件传输（人工渲染端命令） ———
+
+  /**
+   * 懒开 SFTP 通道：首次文件操作时 `client.sftp()`，随后缓存到连接记录，
+   * 连接销毁时一并 end。不用文件功能的用户不会多开任何通道。
+   */
+  private ensureSftp(record: ConnectionRecord): Promise<SshSftpTransferService> {
+    if (record.sftp) return Promise.resolve(record.sftp);
+    if (record.status !== "connected") return Promise.reject(new Error("SSH 连接尚未就绪，请等待终端连上后再传输文件"));
+    return new Promise((resolveService, rejectService) => {
+      record.client.sftp((error, sftp) => {
+        if (error || !sftp) {
+          rejectService(new Error(`无法打开 SFTP 通道（服务器可能未启用 SFTP 子系统）：${error?.message ?? "未知错误"}`));
+          return;
+        }
+        record.sftpChannel = sftp;
+        const service = new SshSftpTransferService({
+          sftp,
+          terminalId: record.terminalId,
+          publish: (event) => this.deps.publish(record.terminalId, event)
+        });
+        record.sftp = service;
+        resolveService(service);
+      });
+    });
+  }
+
+  /** 多文件时给子传输编号（`base#1`），单文件用原名（取消可按前缀匹配）。 */
+  private subTransferId(base: string, index: number, count: number): string {
+    return count > 1 ? `${base}#${index + 1}` : base;
+  }
+
+  /**
+   * 人工 SFTP 命令分派。单个文件失败**不中断**整批（失败已经通过 transfer 事件
+   * 告知用户），但全批失败时把错误抛回渲染端（否则用户看到一堆失败却没有理由）。
+   */
+  async handleSftp(command: Extract<SshCommand, { type: `sftp.${string}` }>): Promise<SshCommandResult> {
+    const record = this.connections.get(command.terminalId);
+    if (!record || record.status === "closed") throw new Error("SSH 连接未就绪或已断开，请先连接终端");
+
+    if (command.type === "sftp.cancel") {
+      const service = record.sftp;
+      if (!service) return { kind: "void" };
+      const active = service.activeTransferId();
+      // 取消按基 id 前缀匹配：多文件传输时活动 id 是 `base#N`。
+      if (active && (active === command.transferId || active.startsWith(`${command.transferId}#`))) {
+        service.cancel(active);
+      }
+      return { kind: "void" };
+    }
+
+    const service = await this.ensureSftp(record);
+
+    if (command.type === "sftp.list") {
+      const listing = await service.list(command.path);
+      return { kind: "sftp-listing", path: listing.path, ...(listing.home ? { home: listing.home } : {}), entries: listing.entries };
+    }
+
+    if (command.type === "sftp.upload") {
+      const failures: string[] = [];
+      for (const [index, localPath] of command.localPaths.entries()) {
+        const id = this.subTransferId(command.transferId, index, command.localPaths.length);
+        try {
+          await service.upload(id, { localPath, remoteDir: command.remoteDir });
+        } catch (error) {
+          failures.push(error instanceof Error ? error.message : String(error));
+        }
+      }
+      if (failures.length === command.localPaths.length && failures.length > 0) throw new Error(failures[0]!);
+      return { kind: "void" };
+    }
+
+    // sftp.download
+    // 渲染端传工作区，落盘目录在主进程按统一下载策略推导（渲染端不得自行指定
+    // 磁盘路径；与浏览器下载同一落点，也便于 AI 统一用 ls .pidesktop/downloads/ 找产物）。
+    const workspace = command.workspace.trim();
+    if (!workspace) throw new Error("下载需要先确定工作区，当前会话没有可用工作区");
+    const localDir = downloadDirFor(workspace);
+    const downloadFailures: string[] = [];
+    for (const [index, remotePath] of command.remotePaths.entries()) {
+      const id = this.subTransferId(command.transferId, index, command.remotePaths.length);
+      try {
+        await service.download(id, { remotePath, localDir });
+      } catch (error) {
+        downloadFailures.push(error instanceof Error ? error.message : String(error));
+      }
+    }
+    if (downloadFailures.length === command.remotePaths.length && downloadFailures.length > 0) throw new Error(downloadFailures[0]!);
+    return { kind: "void" };
+  }
+
   // ——— AI 操作通道（utility → main RPC） ———
 
   async handleAutomation(sessionKey: string, request: SshAutomationRequest): Promise<SshAutomationResult> {
@@ -419,6 +529,28 @@ export class SshConnectionManager {
           const had = this.connections.has(terminalId);
           this.kill(terminalId);
           return { ok: true, data: { kind: "close", closed: had } };
+        }
+        case "upload": {
+          const record = this.boundRecord(sessionKey);
+          const service = await this.ensureSftp(record);
+          const result = await service.upload(`ai-upload-${Date.now().toString(36)}`, {
+            localPath: request.localPath,
+            remoteDir: request.remoteDir,
+            ...(request.remoteName ? { remoteName: request.remoteName } : {}),
+            ...(request.timeoutMs !== undefined ? { timeoutMs: request.timeoutMs } : {})
+          });
+          return { ok: true, data: { kind: "upload", remotePath: result.path, name: result.name, bytes: result.bytes } };
+        }
+        case "download": {
+          const record = this.boundRecord(sessionKey);
+          const service = await this.ensureSftp(record);
+          const result = await service.download(`ai-download-${Date.now().toString(36)}`, {
+            remotePath: request.remotePath,
+            localDir: request.localDir,
+            ...(request.timeoutMs !== undefined ? { timeoutMs: request.timeoutMs } : {})
+          });
+          // 只回绝对路径：相对路径由 utility（知道工作区）算，主进程不猜。
+          return { ok: true, data: { kind: "download", localPath: result.path, name: result.name, bytes: result.bytes } };
         }
       }
     } catch (error) {
@@ -617,6 +749,11 @@ export class SshConnectionManager {
       record.pending = "";
       this.deps.publish(terminalId, { type: "data", terminalId, data });
     }
+    // SFTP 先于 client.end()：取消在途传输（流已被销毁）+ 关 SFTP 通道，
+    // 否则客户端断开时在途传输会以晦涩的通道错误收场。
+    record.sftp?.dispose();
+    record.sftp = undefined;
+    record.sftpChannel = undefined;
     this.pendingFlush.delete(record);
     if (this.pendingFlush.size === 0) {
       this.cancelFlush?.();

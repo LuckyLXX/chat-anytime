@@ -66,6 +66,7 @@ import { isDelegationProgress } from "../shared/protocol.js";
 import { THINKING_LEVELS, clampThinkingLevel, supportedThinkingLevels } from "../shared/thinking-levels.js";
 import { toolLabel } from "../shared/locale.js";
 import { workspaceRelativeAttachment } from "./attachments.js";
+import { downloadDirFor } from "./browser-downloads.js";
 import { saveBrowserScreenshot } from "./browser-screenshot.js";
 import { autoCompactionFailureNotice, runManualCompaction } from "./compaction-lifecycle.js";
 import { isAbortErrorMessage, resolveRunOutcomeStatus, type TerminalRunStatus } from "./run-outcome.js";
@@ -399,13 +400,16 @@ let sshRequestSequence = 0;
 const SSH_RPC_TIMEOUT_MS = 120_000;
 const pendingSshRequests = new Map<string, { resolve: (result: SshAutomationResult) => void; timer: ReturnType<typeof setTimeout> }>();
 
-function requestSshAutomation(sessionKey: string, request: SshAutomationRequest): Promise<SshAutomationResult> {
+function requestSshAutomation(sessionKey: string, request: SshAutomationRequest, timeoutMs?: number): Promise<SshAutomationResult> {
   return new Promise((resolve, reject) => {
     const requestId = `ssh-rpc-${++sshRequestSequence}`;
+    // 外层兜底超时必须**严于**主进程的传输超时：否则 500MB 传输会先被外层掐断，
+    // 而主进程仍在跑——工具报了错、文件却还在写，是最糟的组合。
+    const outerTimeoutMs = timeoutMs === undefined ? SSH_RPC_TIMEOUT_MS : timeoutMs + 30_000;
     const timer = setTimeout(() => {
       pendingSshRequests.delete(requestId);
-      reject(new Error("SSH 操作超时（120 秒无响应），请重试"));
-    }, SSH_RPC_TIMEOUT_MS);
+      reject(new Error(`SSH 操作超时（${Math.round(outerTimeoutMs / 1000)} 秒无响应），请重试`));
+    }, outerTimeoutMs);
     pendingSshRequests.set(requestId, { resolve, timer });
     post({ type: "ssh-automation.request", requestId, sessionKey, request });
   });
@@ -2795,8 +2799,14 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   //（read-only 拒、workspace 问、full 放）；总开关 settings.ssh.enabled 在
   // execute 内实时读取，工具常驻激活（browser 同款策略，不重建会话）。
   const sshTools = runtimeSsh.buildSshTools({
-    request: (request) => requestSshAutomation(recordSessionId, request),
-    enabled: () => settings?.ssh?.enabled !== false
+    request: (request, timeoutMs) => requestSshAutomation(recordSessionId, request, timeoutMs),
+    enabled: () => settings?.ssh?.enabled !== false,
+    // AI 上传本地文件锁在工作区内（与 browser_upload 同口径）；下载落到本记录
+    // 工作区的 .pidesktop/downloads/（与浏览器下载同一落点，便于模型统一 ls 找产物）。
+    // 走 recordWorkspace 而非全局 workspace：parked 背景会话仍写自己的目录。
+    resolveUploadFile: (relativePath) => resolveWorkspaceUploadFiles(recordWorkspace, [relativePath])[0]!,
+    downloadDir: () => downloadDirFor(recordWorkspace),
+    relativeDownloadPath: (absolutePath) => workspaceRelativeAttachment(recordWorkspace, absolutePath)
   });
   // 自动化定时任务工具（每会话注册，绑定本记录所属 Agent 的 store）。
   const automationTools = buildAutomationTools(automationToolContextFor(recordAgent.id));

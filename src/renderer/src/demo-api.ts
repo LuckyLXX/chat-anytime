@@ -572,7 +572,29 @@ export function createDemoApi(): DesktopApi {
         }
         return { kind: "connect" };
       }
+      // 文件传输在演示环境同样不可用：回空列表/发错误事件而不是静默成功，
+      // 免 demo 里看到“操作无反应”的假象。
+      if (command.type === "sftp.list") return { kind: "sftp-listing", path: "/", entries: [] };
+      if (command.type === "sftp.upload" || command.type === "sftp.download") {
+        for (const listener of sshDataListeners.get(command.terminalId) ?? []) {
+          listener({
+            type: "transfer",
+            terminalId: command.terminalId,
+            transferId: command.transferId,
+            direction: command.type === "sftp.upload" ? "upload" : "download",
+            name: "demo",
+            state: "error",
+            transferred: 0,
+            total: 0,
+            error: "SSH 文件传输仅在 Electron 桌面窗口中可用"
+          });
+        }
+        return { kind: "void" };
+      }
       return { kind: "void" };
+    },
+    async chooseSshUploadFiles(): Promise<string[]> {
+      return [];
     },
     async send(command: RuntimeCommand): Promise<void> {
       switch (command.type) {

@@ -40,7 +40,9 @@ export function toolRisk(
   // SSH 远程操作：云服务器命令不可回滚（无 checkpoint），风险高于本地 bash。
   // read-only 拒绝；workspace 逐次确认（权限卡可选「本会话允许」即保留的
   // 自动放行）；full 放行。ssh_hosts / ssh_read 是只读观察，免门。
-  if (toolName === "ssh_connect" || toolName === "ssh_exec" || toolName === "ssh_write" || toolName === "ssh_close") return "ssh";
+  // ssh_upload / ssh_download 同轴：两者都需先有 SSH 会话（用户已授权的能力），
+  // 且 ssh_download 是把**不可信的远端字节**落进本地磁盘——与 ssh_exec 同级待确认。
+  if (toolName === "ssh_connect" || toolName === "ssh_exec" || toolName === "ssh_write" || toolName === "ssh_close" || toolName === "ssh_upload" || toolName === "ssh_download") return "ssh";
   return undefined;
 }
 

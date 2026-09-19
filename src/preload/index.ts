@@ -5,6 +5,7 @@ const api: DesktopApi = {
   bootstrap: () => ipcRenderer.invoke("desktop:bootstrap"),
   chooseWorkspace: () => ipcRenderer.invoke("desktop:choose-workspace"),
   chooseAttachments: (workspace?: string) => ipcRenderer.invoke("desktop:choose-attachments", workspace),
+  chooseSshUploadFiles: (workspace?: string) => ipcRenderer.invoke("desktop:choose-ssh-upload-files", workspace),
   readClipboardImage: () => ipcRenderer.invoke("desktop:read-clipboard-image"),
   choosePreviewFile: () => ipcRenderer.invoke("desktop:choose-preview-file"),
   readWorkspaceFile: (relativePath: string, workspace?: string) => ipcRenderer.invoke("desktop:read-workspace-file", relativePath, workspace),

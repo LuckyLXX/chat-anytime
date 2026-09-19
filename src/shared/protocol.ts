@@ -926,6 +926,23 @@ export interface SshHostDraft {
   groupId?: string;
 }
 
+/**
+ * 远端 SFTP 目录条目。大小与修改时间在**主进程**格式化为可直接渲染的文本
+ * （单一真源，渲染端不再重复实现格式化；也便于纯函数单测）。
+ */
+export interface SshRemoteEntry {
+  name: string;
+  kind: "file" | "directory" | "link" | "other";
+  /** 字节数；目录为 0。 */
+  size: number;
+  /** 人类可读大小（目录显示 "-"）。 */
+  sizeText: string;
+  /** 人类可读修改时间；未知为空串。 */
+  mtimeText: string;
+  /** 修改时间毫秒时间戳（未知为 0）。 */
+  mtimeMs: number;
+}
+
 export type SshCommand =
   | { type: "connect"; terminalId: string; hostId: string; cols: number; rows: number; trustFingerprint?: boolean }
   | { type: "input"; terminalId: string; data: string }
@@ -935,7 +952,20 @@ export type SshCommand =
   | { type: "host.delete"; hostId: string }
   | { type: "group.save"; group: { id?: string; name: string } }
   | { type: "group.delete"; groupId: string }
-  | { type: "hosts" };
+  | { type: "hosts" }
+  // ——— SFTP 文件传输（人工，渲染端发起）———
+  /** 列远端目录；path 缺省=远端 home。 */
+  | { type: "sftp.list"; terminalId: string; path?: string }
+  /** 上传本地文件到远端目录（localPaths 为绝对路径，来自系统文件对话框）。 */
+  | { type: "sftp.upload"; terminalId: string; transferId: string; remoteDir: string; localPaths: string[] }
+  /**
+   * 下载远端文件到工作区。传 **workspace** 而非目标目录：落盘位置由主进程按
+   * 统一下载策略（`downloadDirFor` → `.pidesktop/downloads/`）推导，与浏览器
+   * 下载同一落点，渲染端不得自行指定磁盘路径。
+   */
+  | { type: "sftp.download"; terminalId: string; transferId: string; remotePaths: string[]; workspace: string }
+  /** 取消在途传输（清理半成品）。 */
+  | { type: "sftp.cancel"; terminalId: string; transferId: string };
 
 export type SshCommandResult =
   | { kind: "hosts"; hosts: SshHostSummary[]; groups: SshGroupSummary[]; connectedHostIds: string[] }
@@ -945,6 +975,8 @@ export type SshCommandResult =
   | { kind: "group-deleted" }
   /** 连接已异步发起（结果经 SshEventData 事件：fingerprint / status / error）。 */
   | { kind: "connect" }
+  /** 远端目录列表（sftp.list 的同步返回；传输进度走 transfer 事件）。 */
+  | { kind: "sftp-listing"; path: string; /** 远端 home（面包屑「主目录」用）；解析失败时缺省。 */ home?: string; entries: SshRemoteEntry[] }
   | { kind: "void" };
 
 export type SshEventData =
@@ -952,7 +984,26 @@ export type SshEventData =
   | { type: "status"; terminalId: string; status: "connecting" | "connected" | "closed"; detail?: string }
   | { type: "error"; terminalId: string; message: string }
   /** TOFU 探测：hostVerifier 在异步握手中拿到指纹后推送给渲染端显示确认卡（ssh2 的 connect() 返回时握手尚未发生，指纹不可能随命令返回值带回）。 */
-  | { type: "fingerprint"; terminalId: string; fingerprint: string };
+  | { type: "fingerprint"; terminalId: string; fingerprint: string }
+  /**
+   * SFTP 传输进度/终态。人工传输由渲染端按 transferId 关联；终态（done /
+   * error / cancelled）之后不再有该 transferId 的事件。
+   */
+  | {
+      type: "transfer";
+      terminalId: string;
+      transferId: string;
+      direction: "upload" | "download";
+      /** 展示名（文件名）。 */
+      name: string;
+      state: "running" | "done" | "error" | "cancelled";
+      transferred: number;
+      /** 总字节数；未知（stat 失败但有内容）为 0。 */
+      total: number;
+      error?: string;
+      /** done 且 direction=download：工作区相对路径（可直接 read）。 */
+      relativePath?: string;
+    };
 
 /** AI 发起的连接：主进程推事件让渲染端自动开 tab（命令回显对用户可见）。 */
 export interface SshRevealEvent {
@@ -968,7 +1019,11 @@ export type SshAutomationRequest =
   | { op: "exec"; command: string; timeoutMs?: number }
   | { op: "write"; data: string }
   | { op: "read"; tailChars?: number }
-  | { op: "close" };
+  | { op: "close" }
+  // ——— SFTP 文件传输（AI）。localPath / localDir 为**绝对路径**：工作区边界
+  // 由 utility 侧（知道 recordWorkspace）先行解析校验，主进程只负责传输。
+  | { op: "upload"; localPath: string; remoteDir: string; remoteName?: string; timeoutMs?: number }
+  | { op: "download"; remotePath: string; localDir: string; timeoutMs?: number };
 
 export interface SshConnectionInfo {
   terminalId: string;
@@ -984,7 +1039,12 @@ export type SshAutomationData =
   | { kind: "exec"; output: string; exitCode: number | null; timedOut?: boolean }
   | { kind: "write"; written: number }
   | { kind: "read"; text: string; totalChars: number }
-  | { kind: "close"; closed: boolean };
+  | { kind: "close"; closed: boolean }
+  /** 上传完成：远端最终路径（同名冲突时为递增后的名字）+ 字节数。 */
+  | { kind: "upload"; remotePath: string; name: string; bytes: number }
+  /** 下载完成：本地绝对路径 + 字节数。工作区相对路径由 utility 侧（知道工作区）
+   *  用 workspaceRelativeAttachment 计算后写进回执——主进程不掌握工作区，不自造相对路径。 */
+  | { kind: "download"; localPath: string; name: string; bytes: number };
 
 export type SshAutomationResult =
   | { ok: true; data: SshAutomationData }
@@ -1649,6 +1709,8 @@ export interface DesktopApi {
   bootstrap(): Promise<DesktopBootstrap>;
   chooseWorkspace(): Promise<string | undefined>;
   chooseAttachments(workspace?: string): Promise<PromptAttachment[]>;
+  /** 人工 SFTP 上传：系统文件对话框选文件，返回绝对路径（可含工作区外）。 */
+  chooseSshUploadFiles(workspace?: string): Promise<string[]>;
   /** 位图-only 剪贴板的兜底：无图片时返回 undefined（浏览器演示环境同样返回 undefined）。 */
   readClipboardImage(): Promise<{ data: string } | undefined>;
   choosePreviewFile(): Promise<WorkspaceFilePreview | undefined>;

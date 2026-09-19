@@ -1,8 +1,9 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync as readFileSyncNode, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Readable } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
-import type { SshAutomationRequest, SshAutomationResult, SshEventData, SshRevealEvent } from "../shared/protocol.js";
+import type { SshAutomationRequest, SshAutomationResult, SshCommandResult, SshEventData, SshRevealEvent } from "../shared/protocol.js";
 import { createSshHostStore, type SshHostCrypto } from "./ssh-host-store.js";
 import { createSshKnownHostsStore } from "./ssh-known-hosts.js";
 import {
@@ -16,6 +17,7 @@ import {
   type SshConnectOptionsLike,
   type SshShellStreamLike
 } from "./ssh-connections.js";
+import type { SshSftpLike } from "./ssh-sftp.js";
 
 // —— fakes ——
 
@@ -57,10 +59,22 @@ class FakeClient implements SshClientLike {
   ended = 0;
   shellStream: FakeShellStream | undefined;
   shellError: Error | undefined;
+  sftpError: Error | undefined;
+  /** 提前建好（而非在 sftp() 里懒建）：测试需要在连接前就预置远端目录/文件。 */
+  sftpChannel: FakeSftp | undefined = new FakeSftp();
   /** 握手时呈现的 hostkey（模拟服务器换 key）。 */
   hostKey: Buffer = TEST_HOST_KEY;
   private readonly listeners = new Map<string, Listener[]>();
 
+  sftp(callback: (error: Error | undefined, sftp: never) => void): void {
+    if (this.sftpError) {
+      queueMicrotask(() => callback(this.sftpError, undefined as never));
+      return;
+    }
+    this.sftpChannel ??= new FakeSftp();
+    const channel = this.sftpChannel;
+    queueMicrotask(() => callback(undefined, channel as never));
+  }
   connect(options: SshConnectOptionsLike): void {
     this.connectOptions = options;
     // 模拟真实 ssh2：connect() 只异步发起，hostVerifier 在握手阶段（下一微任务）
@@ -104,6 +118,52 @@ class FakeClient implements SshClientLike {
 }
 
 const TEST_HOST_KEY = Buffer.from("test-host-key-bytes");
+
+class FakeSftp implements SshSftpLike {
+  entries: Array<{ filename: string; attrs: { size: number; mtime: number; mode: number; isDirectory(): boolean; isFile(): boolean; isSymbolicLink(): boolean } }> = [];
+  /** 供下载用例预置的远端文件（路径 → 字节）。 */
+  files = new Map<string, Buffer>();
+  readdirError: Error | undefined;
+  home = "/root";
+  ended = 0;
+
+  readdir(_path: string, callback: (error: Error | undefined, list: never) => void): void {
+    if (this.readdirError) callback(this.readdirError, undefined as never);
+    else callback(undefined, this.entries as never);
+  }
+
+  stat(path: string, callback: (error: Error | undefined, stats: never) => void): void {
+    const bytes = this.files.get(path);
+    if (!bytes) {
+      callback(Object.assign(new Error("No such file"), { code: 2 }), undefined as never);
+      return;
+    }
+    callback(undefined, { size: bytes.length, mtime: 0, mode: 0, isDirectory: () => false, isFile: () => true, isSymbolicLink: () => false } as never);
+  }
+
+  realpath(_path: string, callback: (error: Error | undefined, resolved: string | undefined) => void): void {
+    callback(undefined, this.home);
+  }
+
+  unlink(_path: string, callback: (error: Error | undefined) => void): void {
+    callback(undefined);
+  }
+
+  createReadStream(path: string): never {
+    const bytes = this.files.get(path);
+    if (!bytes) throw Object.assign(new Error("No such file"), { code: 2 });
+    // 真实返回可读流（下载用例需要它真的跑完）。
+    return Readable.from([bytes]) as never;
+  }
+
+  createWriteStream(): never {
+    throw new Error("FakeSftp.createWriteStream 未实现");
+  }
+
+  end(): void {
+    this.ended += 1;
+  }
+}
 
 interface Harness {
   manager: SshConnectionManager;
@@ -263,8 +323,7 @@ describe("SshConnectionManager.connect (renderer channel)", () => {
     const hosts = harness.manager.handle({ type: "hosts" });
     const hostId = hosts.kind === "hosts" ? hosts.hosts[0]!.id : "";
     harness.manager.handle({ type: "connect", terminalId: "t1", hostId, cols: 80, rows: 24, trustFingerprint: true });
-    await sleep(2);
-    harness.clients[0]!.emitReady();
+    await sleep(2);    harness.clients[0]!.emitReady();
     await sleep(5);
     // 服务器换了 hostkey：第二台 client 呈现不同指纹，握手被拒。
     harness.setNextHostKey(Buffer.from("attacker-key"));
@@ -422,5 +481,79 @@ describe("SshConnectionManager.handleAutomation (AI channel)", () => {
     expect(final.kind === "hosts" && final.hosts).toHaveLength(1);
     expect(final.kind === "hosts" && final.hosts[0]!.groupId).toBeUndefined();
     expect(() => harness.manager.handle({ type: "group.delete", groupId })).toThrow("分组不存在");
+  });
+});
+
+describe("ssh-connections SFTP command dispatch", () => {
+  /** 连上一条连接（SFTP 通道需连接就绪后才可懒开）。 */
+  async function connected(): Promise<Harness> {
+    const harness = createHarness();
+    const hosts = harness.manager.handle({ type: "hosts" });
+    const hostId = hosts.kind === "hosts" ? hosts.hosts[0]!.id : "";
+    harness.manager.handle({ type: "connect", terminalId: "t1", hostId, cols: 80, rows: 24, trustFingerprint: true });
+    await sleep(2);
+    harness.clients[0]!.emitReady();
+    await sleep(5);
+    return harness;
+  }
+
+  it("lists a remote directory through the lazy SFTP channel", async () => {
+    const harness = await connected();
+    harness.clients[0]!.sftpChannel!.entries = [
+      { filename: "b.txt", attrs: { size: 10, mtime: 1_700_000_000, mode: 0, isDirectory: () => false, isFile: () => true, isSymbolicLink: () => false } },
+      { filename: "sub", attrs: { size: 0, mtime: 1_700_000_000, mode: 0, isDirectory: () => true, isFile: () => false, isSymbolicLink: () => false } }
+    ];
+
+    const result = await harness.manager.handleAsync({ type: "sftp.list", terminalId: "t1" });
+    expect(result?.kind).toBe("sftp-listing");
+    const listing = result as Extract<SshCommandResult, { kind: "sftp-listing" }>;
+    // 目录优先 + 名称排序（与远端列表展示同口径）
+    expect(listing.entries.map((entry) => entry.name)).toEqual(["sub", "b.txt"]);
+    expect(listing.path).toBe("/root");
+  });
+
+  it("refuses a download without a workspace instead of writing somewhere implicit", async () => {
+    const harness = await connected();
+    await expect(
+      harness.manager.handleAsync({ type: "sftp.download", terminalId: "t1", transferId: "x", remotePaths: ["/root/a.txt"], workspace: "  " })
+    ).rejects.toThrow("工作区");
+  });
+
+  it("derives the local drop directory itself and actually reaches the transfer layer", async () => {
+    // 防回归：初版渲染端**根本没传** localDir → 下载 100% 报「请先选择工作区」。
+    // 现在渲染端传 workspace，目录由主进程推导；这里断言请求真的走到了服务层
+    // （若目录推导缺失，会在到达 createReadStream 之前就抛错）。
+    const harness = await connected();
+    const channel = harness.clients[0]!.sftpChannel!;
+    channel.files.set("/root/a.txt", Buffer.from("payload"));
+    let readStreams = 0;
+    const original = channel.createReadStream.bind(channel);
+    channel.createReadStream = ((path: string) => { readStreams += 1; return original(path); }) as never;
+
+    const dir = mkdtempSync(join(tmpdir(), "pidesktop-ssh-dl-"));
+    testDirs.push(dir);
+    // 工作区指向临时目录，落盘应在 <ws>/.pidesktop/downloads/
+    const result = await harness.manager.handleAsync({
+      type: "sftp.download", terminalId: "t1", transferId: "d1", remotePaths: ["/root/a.txt"], workspace: dir
+    });
+    expect(result?.kind).toBe("void");
+    expect(readStreams).toBe(1);
+
+    const files = readdirSync(join(dir, ".pidesktop", "downloads"));
+    expect(files).toEqual(["a.txt"]);
+    expect(readFileSyncNode(join(dir, ".pidesktop", "downloads", "a.txt"), "utf8")).toBe("payload");
+  });
+
+  it("gives a clear error for SFTP commands on an unknown terminal", async () => {
+    const harness = createHarness();
+    await expect(harness.manager.handleAsync({ type: "sftp.list", terminalId: "nope" })).rejects.toThrow("未就绪或已断开");
+  });
+
+  it("closes the SFTP channel when the connection is killed", async () => {
+    const harness = await connected();
+    await harness.manager.handleAsync({ type: "sftp.list", terminalId: "t1" });
+    expect(harness.clients[0]!.sftpChannel!.ended).toBe(0);
+    harness.manager.handle({ type: "kill", terminalId: "t1" });
+    expect(harness.clients[0]!.sftpChannel!.ended).toBe(1);
   });
 });

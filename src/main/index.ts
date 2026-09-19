@@ -481,6 +481,14 @@ function isSshCommand(value: unknown): value is SshCommand {
     }
     case "group.delete":
       return typeof command.groupId === "string" && command.groupId.trim() !== "";
+    case "sftp.list":
+      return typeof command.terminalId === "string" && command.terminalId.trim() !== "" && (command.path === undefined || typeof command.path === "string");
+    case "sftp.upload":
+      return typeof command.terminalId === "string" && command.terminalId.trim() !== "" && typeof command.transferId === "string" && command.transferId.trim() !== "" && typeof command.remoteDir === "string" && Array.isArray(command.localPaths) && command.localPaths.length > 0 && command.localPaths.every((item) => typeof item === "string" && item.trim() !== "");
+    case "sftp.download":
+      return typeof command.terminalId === "string" && command.terminalId.trim() !== "" && typeof command.transferId === "string" && command.transferId.trim() !== "" && Array.isArray(command.remotePaths) && command.remotePaths.length > 0 && command.remotePaths.every((item) => typeof item === "string" && item.trim() !== "") && typeof command.workspace === "string" && command.workspace.trim() !== "";
+    case "sftp.cancel":
+      return typeof command.terminalId === "string" && command.terminalId.trim() !== "" && typeof command.transferId === "string" && command.transferId.trim() !== "";
     case "hosts":
       return true;
     default:
@@ -514,6 +522,15 @@ function registerIpc(): void {
     return readWorkspaceFilePreview(rootReal, relativePath);
   });
   ipcMain.handle("desktop:choose-attachments", async (_event, workspace?: string): Promise<PromptAttachment[]> => { const result = mainWindow ? await dialog.showOpenDialog(mainWindow, { title: "添加附件", properties: ["openFile", "multiSelections"], filters: [{ name: "图片和项目文件", extensions: ["png", "jpg", "jpeg", "webp", "gif", "*" ] }] }) : await dialog.showOpenDialog({ properties: ["openFile", "multiSelections"] }); return result.canceled ? [] : readAttachmentSelection(result.filePaths, workspace); });
+  // 人工 SFTP 上传：**不限制在工作区内**——用户上传的文件通常来自桌面/下载目录，
+  // 卡在工作区里没法用（与 AI 侧必须锁工作区的不对称是有意的：AI 是不可信调用方）。
+  // 只回路径不读内容，读取交给主进程的传输服务流式处理。
+  ipcMain.handle("desktop:choose-ssh-upload-files", async (_event, workspace?: string): Promise<string[]> => {
+    const defaultPath = typeof workspace === "string" && workspace.trim() ? workspace : undefined;
+    const options: Electron.OpenDialogOptions = { title: "选择要上传到远程主机的文件", properties: ["openFile", "multiSelections"], ...(defaultPath ? { defaultPath } : {}) };
+    const result = mainWindow ? await dialog.showOpenDialog(mainWindow, options) : await dialog.showOpenDialog(options);
+    return result.canceled ? [] : result.filePaths;
+  });
   // 部分剪贴板来源（微信/QQ 截图、浏览器“复制图片”）只写位图格式，渲染进程的
   // paste 事件里拿不到文件；由主进程读系统剪贴板兜底，PNG base64 返回。
   ipcMain.handle("desktop:read-clipboard-image", (): { data: string } | undefined => {
@@ -589,9 +606,12 @@ function registerIpc(): void {
     if (!isTerminalCommand(command)) throw new Error("终端命令无效");
     terminalManager.handle(command);
   });
-  ipcMain.handle("ssh:command", (_event, command: SshCommand): SshCommandResult => {
+  ipcMain.handle("ssh:command", (_event, command: SshCommand): SshCommandResult | Promise<SshCommandResult> => {
     if (!isSshCommand(command)) throw new Error("SSH 命令无效");
-    return ensureSshManager().handle(command);
+    // SFTP 是流式异步操作（上传/下载要跨秒到分钟），走独立异步入口；
+    // 其余命令保持原有的同步语义（终端输入/连接等必须即时返回）。
+    const manager = ensureSshManager();
+    return manager.handleAsync(command) ?? manager.handle(command);
   });
   ipcMain.handle("runtime:send", (_event, command: RuntimeCommand): void => { updateSettings(command); sendToRuntime(command); });
 }

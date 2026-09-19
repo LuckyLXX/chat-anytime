@@ -46,12 +46,19 @@ describe("desktop tool permissions", () => {
     expect(toolRisk(undefined, "ssh_connect", { host: "prod" })).toBe("ssh");
     expect(toolRisk(undefined, "ssh_write", { data: "y\n" })).toBe("ssh");
     expect(toolRisk(undefined, "ssh_close", {})).toBe("ssh");
+    // 文件传输同轴：下载是把不可信远端字节落进本地盘，与 exec 同级待确认。
+    expect(toolRisk(undefined, "ssh_upload", { localPath: "a.txt", remoteDir: "/root" })).toBe("ssh");
+    expect(toolRisk(undefined, "ssh_download", { remotePath: "/var/log/app.log" })).toBe("ssh");
     expect(toolRisk(undefined, "ssh_hosts", {})).toBeUndefined();
     expect(toolRisk(undefined, "ssh_read", {})).toBeUndefined();
     expect(permissionAction("read-only", "ssh_exec", "ssh")).toBe("deny");
     expect(permissionAction("workspace", "ssh_exec", "ssh")).toBe("ask");
     expect(permissionAction("full", "ssh_exec", "ssh")).toBe("allow");
     expect(permissionNeedsApproval("workspace", "ssh_exec", "ssh")).toBe(true);
+    expect(permissionAction("read-only", "ssh_upload", "ssh")).toBe("deny");
+    expect(permissionAction("read-only", "ssh_download", "ssh")).toBe("deny");
+    expect(permissionAction("workspace", "ssh_download", "ssh")).toBe("ask");
+    expect(permissionAction("full", "ssh_upload", "ssh")).toBe("allow");
   });
 
   it("blocks mutating tools in read-only mode", () => {

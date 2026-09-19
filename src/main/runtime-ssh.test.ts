@@ -3,13 +3,19 @@ import type { SshAutomationRequest, SshAutomationResult } from "../shared/protoc
 import { buildSshTools, dataFromLiteral } from "./runtime-ssh.js";
 
 function createHarness(options: { enabled?: boolean; result?: SshAutomationResult } = {}) {
-  const requests: SshAutomationRequest[] = [];
+  const requests: Array<{ request: SshAutomationRequest; timeoutMs: number | undefined }> = [];
   const tools = buildSshTools({
-    request: async (request) => {
-      requests.push(request);
+    request: async (request, timeoutMs) => {
+      requests.push({ request, timeoutMs });
       return options.result ?? { ok: true, data: { kind: "write", written: 1 } };
     },
-    enabled: () => options.enabled !== false
+    enabled: () => options.enabled !== false,
+    resolveUploadFile: (relativePath) => {
+      if (relativePath.startsWith("/") || relativePath.includes("..")) throw new Error(`上传文件必须位于当前工作区内：${relativePath}`);
+      return `/ws/${relativePath}`;
+    },
+    downloadDir: () => "/ws/.pidesktop/downloads",
+    relativeDownloadPath: (absolutePath) => absolutePath.replace(/^\/ws\//u, "")
   });
   return { tools, requests };
 }
@@ -21,9 +27,9 @@ function toolByName(tools: ReturnType<typeof buildSshTools>, name: string) {
 }
 
 describe("buildSshTools", () => {
-  it("exposes the six ssh_* tools with stable names", () => {
+  it("exposes the eight ssh_* tools with stable names", () => {
     const { tools } = createHarness();
-    expect(tools.map((tool) => tool.name)).toEqual(["ssh_hosts", "ssh_connect", "ssh_exec", "ssh_write", "ssh_read", "ssh_close"]);
+    expect(tools.map((tool) => tool.name)).toEqual(["ssh_hosts", "ssh_connect", "ssh_exec", "ssh_write", "ssh_read", "ssh_close", "ssh_upload", "ssh_download"]);
   });
 
   it("honors the live master switch on every tool", async () => {
@@ -34,7 +40,9 @@ describe("buildSshTools", () => {
       ssh_exec: { command: "uptime" },
       ssh_write: { data: "y" },
       ssh_read: {},
-      ssh_close: {}
+      ssh_close: {},
+      ssh_upload: { localPath: "a.txt", remoteDir: "/root" },
+      ssh_download: { remotePath: "/root/a.txt" }
     };
     for (const tool of tools) {
       await expect(tool.execute("id", payloads[tool.name] as never, undefined, undefined, undefined as never)).rejects.toThrow("已在设置中停用");
@@ -54,8 +62,44 @@ describe("buildSshTools", () => {
     });
     const tool = toolByName(tools, "ssh_exec");
     const result = await tool.execute("id", { command: "uptime", timeoutSeconds: 90 }, undefined, undefined, undefined as never);
-    expect(requests).toEqual([{ op: "exec", command: "uptime", timeoutMs: 90_000 }]);
+    expect(requests).toEqual([{ request: { op: "exec", command: "uptime", timeoutMs: 90_000 }, timeoutMs: undefined }]);
     expect(JSON.stringify(result)).toContain("退出码：0");
+  });
+
+  it("rejects an out-of-workspace upload path without any RPC", async () => {
+    const { tools, requests } = createHarness();
+    const tool = toolByName(tools, "ssh_upload");
+    await expect(tool.execute("id", { localPath: "/etc/passwd", remoteDir: "/root" }, undefined, undefined, undefined as never)).rejects.toThrow("工作区内");
+    expect(requests).toHaveLength(0);
+  });
+
+  it("resolves the upload path and passes the RPC timeout through", async () => {
+    const { tools, requests } = createHarness({
+      result: { ok: true, data: { kind: "upload", remotePath: "/root/app.zip", name: "app.zip", bytes: 42 } }
+    });
+    const tool = toolByName(tools, "ssh_upload");
+    const result = await tool.execute("id", { localPath: "dist/app.zip", remoteDir: "/root", timeoutSeconds: 120 }, undefined, undefined, undefined as never);
+    expect(requests).toEqual([{ request: { op: "upload", localPath: "/ws/dist/app.zip", remoteDir: "/root", timeoutMs: 120_000 }, timeoutMs: 120_000 }]);
+    expect(JSON.stringify(result)).toContain("/root/app.zip");
+  });
+
+  it("mentions the auto-rename when the remote name changed", async () => {
+    const { tools } = createHarness({
+      result: { ok: true, data: { kind: "upload", remotePath: "/root/a-1.txt", name: "a-1.txt", bytes: 3 } }
+    });
+    const tool = toolByName(tools, "ssh_upload");
+    const result = await tool.execute("id", { localPath: "a.txt", remoteDir: "/root" }, undefined, undefined, undefined as never);
+    expect(JSON.stringify(result)).toContain("自动改名");
+  });
+
+  it("reports the workspace-relative path after a download", async () => {
+    const { tools, requests } = createHarness({
+      result: { ok: true, data: { kind: "download", localPath: "/ws/.pidesktop/downloads/app.log", name: "app.log", bytes: 7 } }
+    });
+    const tool = toolByName(tools, "ssh_download");
+    const result = await tool.execute("id", { remotePath: "/var/log/app.log" }, undefined, undefined, undefined as never);
+    expect(requests).toEqual([{ request: { op: "download", remotePath: "/var/log/app.log", localDir: "/ws/.pidesktop/downloads" }, timeoutMs: undefined }]);
+    expect(JSON.stringify(result)).toContain(".pidesktop/downloads/app.log");
   });
 
   it("renders timed-out execs with guidance instead of a failure", async () => {
