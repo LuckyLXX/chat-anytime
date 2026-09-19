@@ -2,6 +2,7 @@ import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { THEME_PRESET_IDS } from "../shared/protocol.js";
 import { normalizeThinkingLevelMap } from "../shared/thinking-levels.js";
+import { normalizePinnedSessionPaths } from "./session-scope.js";
 import type {
   AccessMode,
   AgentProfile,
@@ -429,6 +430,11 @@ export function migrateSettings(raw: unknown): { settings: DesktopSettings; lega
   const accessMode = normalizeAccessMode(source.accessMode);
   const agentWorkspaces = normalizeAgentWorkspaces(source.agentWorkspaces);
   const defaultWorkspace = typeof source.defaultWorkspace === "string" && source.defaultWorkspace.trim() ? source.defaultWorkspace.trim() : undefined;
+  // 置顶路径必须原样读回：migrateSettings 是**唯一**的读入口，这里漏掉一个字段
+  // 等于该字段「磁盘上有、内存里没有」——而 persistSettings 会把整个内存副本
+  // 写回文件，于是下一次任何设置写入（session.new/agent.select/workspace.open…）
+  // 就把它从磁盘一并抹掉（置顶状态重启即丢，且不可恢复）。
+  const pinnedSessionPaths = normalizePinnedSessionPaths(source.pinnedSessionPaths);
   const settings: DesktopSettings = {
     version: 2,
     workspace: typeof source.workspace === "string" ? source.workspace : undefined,
@@ -448,7 +454,8 @@ export function migrateSettings(raw: unknown): { settings: DesktopSettings; lega
     computer: normalizeComputer(source.computer),
     design: normalizeDesign(source.design),
     checkpoint: normalizeCheckpoint(source.checkpoint),
-    ssh: normalizeSsh(source.ssh)
+    ssh: normalizeSsh(source.ssh),
+    ...(pinnedSessionPaths ? { pinnedSessionPaths } : {})
   };
   const legacyApiKey = typeof source.customProviderApiKey === "string" ? source.customProviderApiKey : undefined;
   return { settings, legacyApiKey };

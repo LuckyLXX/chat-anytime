@@ -31,6 +31,22 @@ describe("session workspace groups", () => {
     expect(groups[0]?.sessions.map((session) => session.id)).toEqual(["starred", "fresh", "mid"]);
   });
 
+  it("ranks a group by its newest activity, not by the pinned row on top", () => {
+    // 回归网：置顶行排第一后 groups[0].sessions[0] 是那条**旧的**置顶话题，
+    // 旧实现拿它当分组时间戳 → 「置顶一个老话题」会把整个工作区分组往列表
+    // 下方拖（新会话所在的组反超到它上面）。组排名应看组内真正最新的活动。
+    const groups = groupSessionsByWorkspace([
+      { id: "a-pinned", path: "a/p.jsonl", workspace: "C:/Projects/A", title: "置顶的老话题", modifiedAt: 10, messageCount: 3, pinned: true },
+      { id: "a-new", path: "a/n.jsonl", workspace: "C:/Projects/A", title: "A 新话题", modifiedAt: 900, messageCount: 1 },
+      { id: "b-new", path: "b/n.jsonl", workspace: "C:/Projects/B", title: "B 新话题", modifiedAt: 500, messageCount: 1 },
+      { id: "c-new", path: "c/n.jsonl", workspace: "C:/Projects/C", title: "C 新话题", modifiedAt: 100, messageCount: 1 }
+    ]);
+
+    expect(groups.map((group) => group.workspace)).toEqual(["C:/Projects/A", "C:/Projects/B", "C:/Projects/C"]);
+    // 组内顺序仍是置顶优先，但组的排名由 a-new（900）决定。
+    expect(groups[0]?.sessions.map((session) => session.id)).toEqual(["a-pinned", "a-new"]);
+  });
+
   it("shows only the active workspace when it has no session yet", () => {
     // 空工作区只在它是当前激活工作区时显示（刚打开还没建话题的项目）。歷史空工作区不再全部上屏。
     const groups = groupSessionsByWorkspace([], "", [

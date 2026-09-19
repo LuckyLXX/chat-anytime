@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentWorkspaceSessionDir, backfillUnpersistedSessions, mergeSessionSummary, pruneVanishedSessions, resolveNewSessionDefaults, sameSessionDir, sessionFileMatchesId, sessionListReadyFor, workspaceHash, type LiveSessionSeed } from "./session-scope.js";
+import { agentWorkspaceSessionDir, backfillUnpersistedSessions, isSessionPinned, mergeSessionSummary, normalizePinnedSessionPaths, pruneVanishedSessions, resolveNewSessionDefaults, sameSessionDir, sessionFileMatchesId, sessionListReadyFor, sessionPathKey, sortSessionSummaries, togglePinnedSessionPath, workspaceHash, type LiveSessionSeed } from "./session-scope.js";
 
 describe("Agent workspace session scope", () => {
   it("keeps agents and workspaces in separate deterministic directories", () => {
@@ -64,6 +64,56 @@ describe("Agent workspace session scope", () => {
     // Empty lists are never ready, even for the same agent.
     expect(sessionListReadyFor(0, "coder", "coder")).toBe(false);
     expect(sessionListReadyFor(0, undefined, undefined)).toBe(false);
+  });
+});
+
+describe("pinned session paths", () => {
+  it("keys paths independently of separators and drive-letter case", () => {
+    // 同一会话的两种写法（Windows 盘符大小写、正反斜杠）必须得到同一个键，
+    // 否则置顶标记会在列表刷新后「消失」。
+    expect(sessionPathKey("C:/pi/sessions/a.jsonl")).toBe(sessionPathKey("c:\\pi\\sessions\\a.jsonl"));
+    expect(sessionPathKey("C:/pi/sessions/a.jsonl")).not.toBe(sessionPathKey("C:/pi/sessions/b.jsonl"));
+  });
+
+  it("matches a pinned path written with different separators than the list reports", () => {
+    const pinned = ["C:/pi/sessions/A.jsonl"];
+    expect(isSessionPinned(pinned, "c:\\pi\\sessions\\a.jsonl")).toBe(true);
+    expect(isSessionPinned(pinned, "C:/pi/sessions/b.jsonl")).toBe(false);
+    expect(isSessionPinned(undefined, "C:/pi/sessions/a.jsonl")).toBe(false);
+    expect(isSessionPinned([], "C:/pi/sessions/a.jsonl")).toBe(false);
+  });
+
+  it("pins without duplicating and unpins the equivalent path written differently", () => {
+    const once = togglePinnedSessionPath(undefined, "C:/pi/sessions/a.jsonl", true);
+    expect(once).toEqual(["C:/pi/sessions/a.jsonl"]);
+    // 重复置顶（写法不同）不堆同义项，且保留先落盘的那份写法。
+    expect(togglePinnedSessionPath(once, "c:\\pi\\sessions\\a.jsonl", true)).toEqual(["C:/pi/sessions/a.jsonl"]);
+    // 取消置顶：字面量与落盘写法不同也必须删掉（旧实现 includes 精确比较删不掉）。
+    expect(togglePinnedSessionPath(once, "c:\\pi\\sessions\\a.jsonl", false)).toBeUndefined();
+    expect(togglePinnedSessionPath(["C:/pi/sessions/a.jsonl", "C:/pi/sessions/b.jsonl"], "C:/pi/sessions/a.jsonl", false)).toEqual(["C:/pi/sessions/b.jsonl"]);
+    // 取消一个从不存在的项：集合原样（不因空数组而误变 undefined 之外的东西）。
+    expect(togglePinnedSessionPath(once, "C:/pi/sessions/zz.jsonl", false)).toEqual(["C:/pi/sessions/a.jsonl"]);
+  });
+
+  it("normalizes stored values and drops empty or malformed entries", () => {
+    expect(normalizePinnedSessionPaths(undefined)).toBeUndefined();
+    expect(normalizePinnedSessionPaths("C:/pi/a.jsonl")).toBeUndefined();
+    expect(normalizePinnedSessionPaths([])).toBeUndefined();
+    expect(normalizePinnedSessionPaths(["", "   ", 42, null])).toBeUndefined();
+    expect(normalizePinnedSessionPaths(["C:/pi/a.jsonl", "c:\\pi\\A.jsonl", " ", "C:/pi/b.jsonl"])).toEqual(["C:/pi/a.jsonl", "C:/pi/b.jsonl"]);
+  });
+});
+
+describe("sortSessionSummaries", () => {
+  it("keeps pinned rows above newer unpinned ones", () => {
+    const pinned = { id: "p", path: "C:/w/p.jsonl", workspace: "C:/w", title: "置顶", modifiedAt: 10, messageCount: 3, pinned: true };
+    const fresh = { id: "n", path: "C:/w/n.jsonl", workspace: "C:/w", title: "新会话", modifiedAt: 999, messageCount: 0 };
+    const mid = { id: "m", path: "C:/w/m.jsonl", workspace: "C:/w", title: "中间", modifiedAt: 500, messageCount: 1 };
+    expect(sortSessionSummaries([mid, fresh, pinned]).map((item) => item.id)).toEqual(["p", "n", "m"]);
+    // 不修改入参
+    const source = [mid, fresh, pinned];
+    sortSessionSummaries(source);
+    expect(source.map((item) => item.id)).toEqual(["m", "n", "p"]);
   });
 });
 
@@ -138,6 +188,15 @@ describe("backfillUnpersistedSessions", () => {
     const backfilled = backfillUnpersistedSessions([onDisk], [prior], [seed], "coder");
     expect(backfilled.map((item) => item.id)).toEqual(["fresh", "disk"]);
     expect(backfilled[0]).toEqual({ ...prior, runStatus: "running" });
+  });
+
+  it("keeps the pinned flag when backfilling a live row from the pre-refresh entry", () => {
+    // 全量刷新会用 live seed 合成未落盘的新话题行；置顶标记只能来自重建前的
+    // 同名条目，丢了就会出现「置顶一个空话题 → 发消息/刷新后置顶消失」。
+    const prior = { id: "fresh", path: "C:/pi/sessions/fresh.jsonl", workspace: "C:/work", title: "新会话", modifiedAt: 300, messageCount: 0, pinned: true };
+    const seed: LiveSessionSeed = { sessionId: "fresh", path: "C:/pi/sessions/fresh.jsonl", workspace: "C:/work", agentId: "coder", activatedAt: 400, runStatus: "running" };
+    const backfilled = backfillUnpersistedSessions([onDisk], [prior], [seed], "coder");
+    expect(backfilled[0]).toMatchObject({ id: "fresh", pinned: true, runStatus: "running" });
   });
 
   it("deduplicates against the disk list by path (case-insensitive)", () => {

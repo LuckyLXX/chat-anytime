@@ -55,7 +55,17 @@ export function groupSessionsByWorkspace(sessions: readonly SessionSummary[], qu
     groups.set(key, { key, workspace: recent.path, sessions: [], openedAt: recent.openedAt });
   }
 
+  /**
+   * 分组排序取组内**真正的**最新活动，而不是排序后的第一行。
+   *
+   * 置顶项排第一后 `sessions[0]` 就是那条**旧的**置顶话题 —— 旧实现拿它当分组的
+   * 时间戳，于是「置顶一个老话题」会把整个工作区分组往列表下方拖（刷新后该组跳到
+   * 后面，别的工作区的新会话跑到它上面）。分组的时间语义应该是「这个工作区最近活动
+   * 到什么时候」，置顶只影响组内行序，不该影响组的排名。
+   */
+  const latestActivity = (group: SessionWorkspaceGroup): number => group.sessions.reduce((latest, session) => Math.max(latest, session.modifiedAt), 0);
+
   return [...groups.values()].sort((left, right) =>
-    Math.max(right.sessions[0]?.modifiedAt ?? 0, right.openedAt ?? 0) - Math.max(left.sessions[0]?.modifiedAt ?? 0, left.openedAt ?? 0)
+    Math.max(latestActivity(right), right.openedAt ?? 0) - Math.max(latestActivity(left), left.openedAt ?? 0)
   );
 }

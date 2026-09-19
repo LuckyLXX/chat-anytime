@@ -7,6 +7,7 @@ import { spawn } from "node-pty";
 import appIconPath from "./assets/icon.ico?asset";
 import { resolveBundledSkillsDir, resolveBundledSubagentsDir } from "./bundled-skills.js";
 import { migrateSettings, normalizeVision, recordAgentWorkspace, forgetAgentWorkspace } from "./settings.js";
+import { togglePinnedSessionPath } from "./session-scope.js";
 import { importExternalAttachment, workspaceRelativeAttachment } from "./attachments.js";
 import type { BrowserPreviewCommand, BrowserPreviewState, DesktopBootstrap, DesktopSettings, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot, SshCommand, SshCommandResult, SshEventData, SshRevealEvent, TerminalCommand, TerminalEventData, WorkspaceDirectoryListing, WorkspaceEntryResult, WorkspaceFilePreview, WorkspaceFileSearchResult, WorkspaceFileStat, WorkspaceFileWriteResult } from "../shared/protocol.js";
 import { PREVIEW_FILE_SCHEME, parseWorkspaceFilePreviewUrl } from "../shared/protocol.js";
@@ -232,7 +233,9 @@ function updateSettings(command: RuntimeCommand): void {
       // legacy 兜底与移除目标同路径时一并清除，否则重启 initialize 又把它拉起（回潮）。
       if (settings.workspace && resolve(settings.workspace).toLowerCase() === resolve(command.workspace).toLowerCase()) settings.workspace = undefined;
       break;
-    case "session.pin": settings.pinnedSessionPaths = command.pinned ? [...(settings.pinnedSessionPaths ?? []), command.path] : (settings.pinnedSessionPaths ?? []).filter((item) => item !== command.path); break;
+    // 置顶集合的重写走路径匹配键（分隔符/大小写归一）——见 session-scope 的
+    // togglePinnedSessionPath：字面量比较会让「同一会话的两种写法」重复落盘。
+    case "session.pin": settings.pinnedSessionPaths = togglePinnedSessionPath(settings.pinnedSessionPaths, command.path, command.pinned); break;
     case "session.new": if (command.workspace) settings.agentWorkspaces = recordAgentWorkspace(settings.agentWorkspaces, settings.currentAgentId, command.workspace); break;
     // 分屏后台格（activate:false）不激活、不改全局镜像——与 utility 端语义对称，不记。
     case "session.open": if (command.workspace && command.activate !== false) settings.agentWorkspaces = recordAgentWorkspace(settings.agentWorkspaces, settings.currentAgentId, command.workspace); break;

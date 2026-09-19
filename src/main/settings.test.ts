@@ -373,4 +373,18 @@ describe("desktop settings migration", () => {
     expect(migrateSettings({ computer: { enabled: true } }).settings.computer).toEqual({ enabled: true });
     expect(migrateSettings({}).settings.computer).toBeUndefined();
   });
+
+  it("keeps pinned session paths across a settings round-trip", () => {
+    // 回归网（与 computer 同款根因）：migrateSettings 曾经漏掉 pinnedSessionPaths，
+    // 磁盘上的置顶记录读不回内存，而 persistSettings 会把整个内存副本写回文件 ——
+    // 下一次任何设置写入（session.new / agent.select / workspace.open…）就把置顶
+    // 从磁盘一并抹掉：置顶重启即丢且不可恢复。
+    expect(migrateSettings({}).settings.pinnedSessionPaths).toBeUndefined();
+    expect(migrateSettings({ pinnedSessionPaths: ["C:/pi/sessions/a.jsonl"] }).settings.pinnedSessionPaths).toEqual(["C:/pi/sessions/a.jsonl"]);
+    // 同义重复（分隔符/盘符大小写）在读入口就归一，落盘不堆垃圾项。
+    expect(migrateSettings({ pinnedSessionPaths: ["C:/pi/sessions/a.jsonl", "c:\\pi\\sessions\\A.jsonl"] }).settings.pinnedSessionPaths)
+      .toEqual(["C:/pi/sessions/a.jsonl"]);
+    expect(migrateSettings({ pinnedSessionPaths: "junk" }).settings.pinnedSessionPaths).toBeUndefined();
+    expect(migrateSettings({ pinnedSessionPaths: ["", 7, null] }).settings.pinnedSessionPaths).toBeUndefined();
+  });
 });

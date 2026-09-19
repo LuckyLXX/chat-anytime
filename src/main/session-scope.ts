@@ -6,6 +6,59 @@ export function workspaceHash(workspace: string): string {
   return createHash("sha256").update(resolve(workspace)).digest("hex").slice(0, 20);
 }
 
+/**
+ * 置顶集合的匹配键：路径分隔符归一 + 大小写不敏感。
+ *
+ * 置顶是用户动作，落盘的是**当时那一刻**的路径写法；而侧边栏列表每帧由
+ * `refreshSessions` 从 Pi 的列表服务重建，同一会话可能以另一种分隔符/大小写
+ * 回来（Windows 盘符大小写、正反斜杠）。旧实现是 `pinnedPaths.includes(item.path)`
+ * 精确比较 —— 只要两处写法差一个字符，置顶就会「看起来没生效」（Pin 图标不出现）。
+ * 与 `mergeSessionSummary`/`backfillUnpersistedSessions` 的 key 口径保持一致。
+ */
+export function sessionPathKey(path: string): string {
+  return resolve(path).replaceAll("\\", "/").toLowerCase();
+}
+
+/**
+ * 规范化置顶路径数组：剔除空项/非字符串、按匹配键去重（保留首次出现顺序）。
+ * 读回路径与写入路径共用，保证 settings.json 里不堆积同义重复项。
+ */
+export function normalizePinnedSessionPaths(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const seen = new Set<string>();
+  const kept: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string" || !entry.trim()) continue;
+    const key = sessionPathKey(entry);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    kept.push(entry);
+  }
+  return kept.length > 0 ? kept : undefined;
+}
+
+/**
+ * 置顶/取消置顶的集合更新（不可变）。判据用匹配键而非字面量，因此：
+ * ① 取消置顶时能删掉「写法略有差异」的那一条；② 重复置顶同一会话不会堆积，
+ * 且保留**首次落盘的那份写法**（不因列表刷新的写法差异而改写用户目录）；
+ * ③ 与本次无关的项保持原顺序。
+ */
+export function togglePinnedSessionPath(pinnedPaths: readonly string[] | undefined, path: string, pinned: boolean): string[] | undefined {
+  const list = pinnedPaths ?? [];
+  const key = sessionPathKey(path);
+  const present = list.some((item) => sessionPathKey(item) === key);
+  if (pinned) return normalizePinnedSessionPaths(present ? list : [...list, path]);
+  if (!present) return normalizePinnedSessionPaths(list);
+  return normalizePinnedSessionPaths(list.filter((item) => sessionPathKey(item) !== key));
+}
+
+/** 该会话是否在置顶集合里（大小写/分隔符无关比较，见 {@link sessionPathKey}）。 */
+export function isSessionPinned(pinnedPaths: readonly string[] | undefined, path: string): boolean {
+  if (!pinnedPaths || pinnedPaths.length === 0) return false;
+  const key = sessionPathKey(path);
+  return pinnedPaths.some((item) => sessionPathKey(item) === key);
+}
+
 export function agentWorkspaceSessionDir(agentRoot: string, agentId: string, workspace: string): string {
   return join(agentRoot, "chatanytime-sessions", agentId, workspaceHash(workspace));
 }
@@ -77,17 +130,30 @@ export function sessionListReadyFor(listCount: number, listAgentId: string | und
 }
 
 /**
+ * 侧边栏列表的稳定顺序：置顶项在前，同档按 modifiedAt 降序。
+ *
+ * `mergeSessionSummary` / `backfillUnpersistedSessions` 与 `refreshSessions` 原先
+ * 一律按 modifiedAt 排序，而「置顶」只在渲染端分组排序时才生效 —— 结果是新会话
+ * 一合并进列表就可能排在置顶项**之前**（列表自身的顺序与用户看到的顺序不一致）。
+ * 排序口径统一收到这里，两端不再各自维护一套。
+ */
+export function sortSessionSummaries(list: readonly SessionSummary[]): SessionSummary[] {
+  return [...list].sort((left, right) => (Number(right.pinned ?? false) - Number(left.pinned ?? false)) || right.modifiedAt - left.modifiedAt);
+}
+
+/**
  * 把一条会话摘要合并进侧边栏列表（内存级 upsert，不触磁盘扫描）。
- * 语义与 refreshSessions 的去重/排序完全一致：按绝对路径去重、按 modifiedAt
- * 降序。已存在的条目保持不变（精确信息由 refreshSessions 校正），仅真正新增
- * 的会话（新建话题、删除当前会话后自动补的空白会话）被插入——保证新会话
- * 创建后左侧第一时间可见，发送消息时 runStatus "running" 也能通过
- * patchSessionRunStatus 即时打上「执行中」圆点，不再依赖全量磁盘扫描的耗时返回。
+ * 语义与 refreshSessions 的去重/排序完全一致：按绝对路径去重、置顶优先、同档按
+ * modifiedAt 降序（见 {@link sortSessionSummaries}）。已存在的条目保持不变（精确
+ * 信息由 refreshSessions 校正），仅真正新增的会话（新建话题、删除当前会话后自动
+ * 补的空白会话）被插入——保证新会话创建后左侧第一时间可见，发送消息时 runStatus
+ * "running" 也能通过 patchSessionRunStatus 即时打上「执行中」圆点，不再依赖全量
+ * 磁盘扫描的耗时返回。
  */
 export function mergeSessionSummary(list: SessionSummary[], incoming: SessionSummary): SessionSummary[] {
   const key = (item: SessionSummary) => resolve(item.path).toLowerCase();
   const keyOfIncoming = key(incoming);
-  return [...list.filter((item) => key(item) !== keyOfIncoming), incoming].sort((left, right) => right.modifiedAt - left.modifiedAt);
+  return sortSessionSummaries([...list.filter((item) => key(item) !== keyOfIncoming), incoming]);
 }
 
 /** 回填用的活跃会话最小投影（来自 liveSessions 记录，见 backfillUnpersistedSessions）。 */
@@ -133,7 +199,10 @@ export function backfillUnpersistedSessions(
       workspace: seed.workspace,
       title: seed.title ?? "新会话",
       modifiedAt: seed.activatedAt,
-      messageCount: 0
+      messageCount: 0,
+      // 回填行来自 live 记录，本身不知道置顶状态；但重建前列表里的同名条目知道
+      //（`prior`），必须带过来 —— 否则一次全量刷新就会把置顶标记从该行抹掉。
+      ...(prior?.pinned ? { pinned: true } : {})
     };
     const base = prior ?? synthetic;
     next = mergeSessionSummary(next, seed.runStatus ? { ...base, runStatus: seed.runStatus } : base);

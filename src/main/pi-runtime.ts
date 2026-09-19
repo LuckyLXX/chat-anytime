@@ -90,7 +90,7 @@ import { createAutomationScheduler, type AutomationScheduler } from "./automatio
 import { buildAutomationTools, type AutomationCreateInput, type AutomationToolContext } from "./automation-tools.js";
 import { resolveVisionModel } from "./vision.js";
 import { buildResourceCatalog } from "./resource-catalog.js";
-import { agentWorkspaceSessionDir, backfillUnpersistedSessions, mergeSessionSummary, pruneVanishedSessions, sameSessionDir, sessionFileMatchesId, sessionListReadyFor } from "./session-scope.js";
+import { agentWorkspaceSessionDir, backfillUnpersistedSessions, isSessionPinned, mergeSessionSummary, pruneVanishedSessions, sameSessionDir, sessionFileMatchesId, sessionListReadyFor, sortSessionSummaries, togglePinnedSessionPath } from "./session-scope.js";
 import { isDesktopConfiguredProvider } from "./model-catalog.js";
 import { defaultTools, ensureDefaultWorkspaceDir, forgetAgentWorkspace, isPositiveInt, mergeProviderModels, recordAgentWorkspace, resolveDefaultWorkspace, resolveInitialWorkspace } from "./settings.js";
 import { buildMultiInvocationPrompt, composeInvocationBody, parseInvocationPrompt, sameInvocations, type InvocationSegment } from "./invocation-prompt.js";
@@ -2465,7 +2465,7 @@ async function refreshSessions(): Promise<void> {
   const lists = await Promise.all(directories.map((directory) => SessionManager.listAll(directory)));
   const items = [...new Map(lists.flat().map((item) => [resolve(item.path).toLowerCase(), item])).values()];
   const pinnedPaths = settings?.pinnedSessionPaths ?? [];
-  currentSessions = items.sort((left, right) => right.modified.getTime() - left.modified.getTime()).map((item) => {
+  currentSessions = sortSessionSummaries(items.map((item) => {
     // Live sessions carry their execution state (sidebar dot) across refreshes.
     const runStatus = liveSessions.get(item.id)?.runStatus;
     return {
@@ -2475,10 +2475,10 @@ async function refreshSessions(): Promise<void> {
       title: item.name || item.firstMessage || "新会话",
       modifiedAt: item.modified.getTime(),
       messageCount: item.messageCount,
-      pinned: pinnedPaths.includes(item.path) || undefined,
+      pinned: isSessionPinned(pinnedPaths, item.path) || undefined,
       ...(runStatus ? { runStatus } : {})
     };
-  });
+  }));
   currentSessionsAgentId = listAgentId;
   // 会话文件直到首条 assistant 消息才落盘（Pi _persist 的 hasAssistant 门槛），
   // 新建的空会话只存在于 liveSessions——防抖刷新/后台回合结束触发的全量重建若
@@ -3350,10 +3350,10 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     }
     case "session.pin": {
       if (settings) {
-        const pinnedSet = new Set(settings.pinnedSessionPaths ?? []);
-        if (command.pinned) pinnedSet.add(command.path);
-        else pinnedSet.delete(command.path);
-        settings = { ...settings, pinnedSessionPaths: [...pinnedSet] };
+        // 集合更新走匹配键（分隔符/大小写归一）：旧实现按字面量 includes 判断，
+        // 列表里回来的路径写法与落盘时的写法只要不一致，就会置顶出两条同义记录、
+        // 取消置顶又删不掉。
+        settings = { ...settings, pinnedSessionPaths: togglePinnedSessionPath(settings.pinnedSessionPaths, command.path, command.pinned) };
       }
       await refreshSessions();
       emitState();
