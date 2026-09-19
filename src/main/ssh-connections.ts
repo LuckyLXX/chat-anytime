@@ -90,6 +90,8 @@ interface ConnectionRecord {
   /** 指纹与已记录不一致（hostVerifier 已拒绝）：error 事件用明确文案。 */
   fingerprintMismatch?: string;
   pendingExec?: PendingExec;
+  /** 显示流净化器：剔除 marker 命令的字面回显（跨 chunk 安全）。 */
+  echoFilter: (chunk: string) => string;
   disposeListeners(): void;
 }
 
@@ -145,6 +147,36 @@ export function stripAnsi(text: string): string {
 /** marker 的远端 printf 命令（POSIX printf：bash/dash/busybox 均支持 \033 与 \007）。 */
 function markerPrintfCommand(seq: number): string {
   return `printf '\\033${MARKER_PRINTF_ESCAPE}${seq};%s\\007' "$?"`;
+}
+
+/** 远端 shell 对 marker 命令的字面回显（连同行尾换行一并剔除，避免留下空提示符行）。 */
+const MARKER_ECHO_RE = /printf '\\033\]633;pi-ssh;\d+;%s\\007' "\$\?"\r?\n?/g;
+/** 跨 chunk 匹配用的固定前缀（尾部暂扣上限 = 本串长度 - 1）。 */
+const MARKER_ECHO_PREFIX = "printf '\\033]633;pi-ssh;";
+
+/**
+ * 显示流净化器：把 marker 命令的**字面回显**从数据流中剔除。AI 的 ssh_exec
+ * 在业务命令后追加一行 printf 探针，远端 shell 会把这一行原样回显（跟用户自己
+ * 敲的命令一样），会在终端里显出一行奇怪的 printf（用户实测反馈）。marker 的
+ * 完成检测靠的是 printf **输出的真实 ESC 字节**，与回显的字面 `\033` 文本天然
+ * 可分，所以剔除字面回显对检测零影响；跨 chunk 的半个前缀会被暂扣至下一块。
+ * 匹配不中（如 zsh 语法高亮在回显中插了转义）则自然退化为不过滤，无害。
+ */
+export function createMarkerEchoFilter(): (chunk: string) => string {
+  let tail = "";
+  return (chunk: string): string => {
+    let out = (tail + chunk).replace(MARKER_ECHO_RE, "");
+    tail = "";
+    // 尾部若是模式前缀的一部分（下个 chunk 可能补全），先暂扣不发出。
+    for (let keep = Math.min(MARKER_ECHO_PREFIX.length - 1, out.length); keep > 0; keep -= 1) {
+      if (MARKER_ECHO_PREFIX.startsWith(out.slice(-keep))) {
+        tail = out.slice(-keep);
+        out = out.slice(0, -keep);
+        break;
+      }
+    }
+    return out;
+  };
 }
 
 export function hostMatches(summary: SshHostSummary, query: string): boolean {
@@ -227,6 +259,7 @@ export class SshConnectionManager {
       status: "connecting",
       scrollback: "",
       pending: "",
+      echoFilter: createMarkerEchoFilter(),
       disposeListeners: () => {}
     };
     this.connections.set(terminalId, record);
@@ -485,6 +518,10 @@ export class SshConnectionManager {
   private enqueue(terminalId: string, chunk: string): void {
     const record = this.connections.get(terminalId);
     if (!record) return;
+    // 剔除 marker 命令的终端回显（用户不该看到探针行）；净化后的流同时进
+    // scrollback、AI 输出收集与 publish，三处口径一致。
+    chunk = record.echoFilter(chunk);
+    if (!chunk) return;
     record.scrollback = appendScrollback(record.scrollback, chunk);
     if (record.pendingExec) {
       record.pendingExec.chunks.push(chunk);

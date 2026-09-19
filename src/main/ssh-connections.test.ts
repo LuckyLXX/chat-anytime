@@ -9,6 +9,7 @@ import {
   SshConnectionManager,
   appendScrollback,
   clampDimension,
+  createMarkerEchoFilter,
   fingerprintOfHostKey,
   stripAnsi,
   type SshClientLike,
@@ -172,6 +173,26 @@ function emitCommandOutcome(stream: FakeShellStream, echo: string, output: strin
 }
 
 describe("ssh-connections pure helpers", () => {
+  it("filters the marker printf echo out of the display stream (across chunks)", () => {
+    const filter = createMarkerEchoFilter();
+    const echo = `printf '\\033]633;pi-ssh;7;%s\\007' "$?"`;
+    // 同一块内完整过滤
+    expect(filter(`[root@host ~]# uptime\r\n 21:07 up 3 days\r\n[root@host ~]# ${echo}\r\n`)).toBe("[root@host ~]# uptime\r\n 21:07 up 3 days\r\n[root@host ~]# ");
+    // 跨块分裂（前缀被截断）也要过滤干净
+    const halves = [`[root@host ~]# prin`, `tf '\\033]633;p`, `i-ssh;8;%s\\007' "$?"\r\n`];
+    const joined = halves.map((part) => filter(part)).join("");
+    expect(joined).toBe("[root@host ~]# ");
+    // 真实 ESC marker（printf 的输出）不被误伤
+    const realMarker = "\x1b]633;pi-ssh;9;0\x07";
+    expect(filter(`out\r\n${realMarker}$ `)).toContain(realMarker);
+    // 普通文本无损耗
+    expect(filter("plain output with printf inside\n")).toBe("plain output with printf inside\n");
+    // 尾部暂扣的前缀会在下一块补完整后一并剔除
+    const tailFilter = createMarkerEchoFilter();
+    expect(tailFilter("cmd\r\nprintf '\\033]633;pi-ss")).toBe("cmd\r\n");
+    expect(tailFilter("h;10;%s\\007' \"$?\"\r\nnext\n")).toBe("next\n");
+  });
+
   it("clamps dimensions and trims scrollback", () => {
     expect(clampDimension(Number.NaN, 80)).toBe(80);
     expect(clampDimension(999, 24)).toBe(500);
