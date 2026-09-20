@@ -287,7 +287,7 @@ const emptySnapshot: RuntimeSnapshot = {
   queuedMessages: []
 };
 const emptySettings: DesktopSettings = { version: 2, thinkingLevel: "medium", accessMode: "ask", providers: [], agents: [], currentAgentId: "default", appearance: { theme: "system", themePreset: "default", customCss: "", customThemes: [], showThinking: true } };
-const emptyResources: ResourceCatalog = { skills: [], commands: [], mcpServers: [], todos: [], memory: [], subagents: [], hooks: [], hooksEnabled: true, automation: [], automationRuns: [], diagnostics: [] };
+const emptyResources: ResourceCatalog = { skills: [], commands: [], mcpServers: [], todos: [], memory: [], subagents: [], hooks: [], hooksEnabled: true, automation: [], automationRuns: [], gallery: [], diagnostics: [] };
 
 /**
  * 高频流式推送的消息数组按 uuid 复用旧对象引用：内容未变的消息保持同一
@@ -390,6 +390,9 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
       memory: bootstrap.resources?.memory ?? get().memory,
       automation: bootstrap.resources?.automation ?? [],
       automationRuns: bootstrap.resources?.automationRuns ?? [],
+      // 作品清单必须从 bootstrap 水合一帧：utility 的启动推送早于本订阅（main 先
+      // fork runtime 再建窗口），只靠推送则冷启动后作品墙一直空到下一次变更。
+      galleryApps: bootstrap.resources?.gallery ?? get().galleryApps,
       customProvider: bootstrap.settings.providers.find((provider) => provider.id === "chatanytime-openai-compatible"),
       customProviderKeyConfigured: Boolean(bootstrap.settings.providers.find((provider) => provider.id === "chatanytime-openai-compatible")?.keyConfigured),
       customModels: bootstrap.settings.providers.find((provider) => provider.id === "chatanytime-openai-compatible")?.models ?? []

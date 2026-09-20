@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { MAX_GALLERY_APPS, type GalleryApp } from "../shared/gallery.js";
 import {
   galleryPathFor,
+  loadGalleryRepairingIds,
   galleryThumbsDirFor,
   isSafeThumbName,
   loadGallery,
@@ -140,5 +141,44 @@ describe("pruneGalleryThumbs（孤儿缩略图清理）", () => {
 
   it("目录不存在时返回 0 而不是抛", () => {
     expect(pruneGalleryThumbs(join(tempDir(), "nope"), [])).toBe(0);
+  });
+});
+
+describe("loadGalleryRepairingIds（修历史坏条目的空 id）", () => {
+  it("把磁盘上 id 为空的条目补成稳定 id 并回写（否则每次读盘都换一个新 id）", () => {
+    const dir = tempDir();
+    const file = galleryPathFor(dir);
+    writeGallery(file, []); // 建目录
+    // 首版发布路径写下的形态：id 为空
+    writeFileSync(file, JSON.stringify({ apps: [{ ...app(), id: "" }] }), "utf8");
+
+    const first = loadGalleryRepairingIds(file);
+    expect(first).toHaveLength(1);
+    expect(first[0]!.id).not.toBe("");
+    // 回写已发生：磁盘上的 id 不再是空的
+    expect(readFileSync(file, "utf8")).toContain(`"id": "${first[0]!.id}"`);
+
+    // 再读一次：id 必须与上次**完全相同**（这就是 bug 的核心症状——每次重启都变）
+    const second = loadGalleryRepairingIds(file);
+    expect(second[0]!.id).toBe(first[0]!.id);
+  });
+
+  it("id 齐全的文件不被改写（不做无谓写盘）", () => {
+    const dir = tempDir();
+    const file = galleryPathFor(dir);
+    writeGallery(file, [app({ id: "stable-id" })]);
+    const before = readFileSync(file, "utf8");
+    expect(loadGalleryRepairingIds(file)[0]!.id).toBe("stable-id");
+    expect(readFileSync(file, "utf8")).toBe(before);
+  });
+
+  it("坏 JSON / 缺文件时回空表且不写盘（宁可不修，也不能抹掉用户文件）", () => {
+    const dir = tempDir();
+    const file = galleryPathFor(dir);
+    writeGallery(file, []);
+    writeFileSync(file, "{ 坏 json", "utf8");
+    expect(loadGalleryRepairingIds(file)).toEqual([]);
+    expect(readFileSync(file, "utf8")).toBe("{ 坏 json");
+    expect(loadGalleryRepairingIds(galleryPathFor(tempDir()))).toEqual([]);
   });
 });

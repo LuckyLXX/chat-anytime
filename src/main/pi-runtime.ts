@@ -81,7 +81,7 @@ import { loadRecentWorkspaces, recordRecentWorkspace, writeRecentWorkspaces } fr
 import {
   galleryPathFor,
   galleryThumbsDirFor,
-  loadGallery,
+  loadGalleryRepairingIds,
   persistGallery,
   pruneGalleryThumbs,
   writeGalleryThumb
@@ -619,7 +619,7 @@ async function syncMcpServers(refresh = false): Promise<void> {
 }
 
 function emitResourceCatalog(): void {
-  post({ type: "resources", resources: buildResourceCatalog({ skills: nativeSkills, commands: nativeCommands, mcpServers, todos, memory: memoryTopics, subagents: subagentCatalog, hooks: hookSummaries(), hooksEnabled: settings?.hooks?.enabled !== false, automation: automationTasks, automationRuns }) });
+  post({ type: "resources", resources: buildResourceCatalog({ skills: nativeSkills, commands: nativeCommands, mcpServers, todos, memory: memoryTopics, subagents: subagentCatalog, hooks: hookSummaries(), hooksEnabled: settings?.hooks?.enabled !== false, automation: automationTasks, automationRuns, gallery: galleryApps }) });
 }
 
 function emitTodos(): void {
@@ -3162,7 +3162,8 @@ async function initialize(command: Extract<RuntimeCommand, { type: "initialize" 
   refreshSubagents();
   recentWorkspaces = loadRecentWorkspaces(recentWorkspacesPath());
   // 作品清单：全局一份池子（跨工作区），读盘 + 清掉孤儿缩略图。
-  galleryApps = loadGallery(galleryFilePath());
+  // 读盘 + 顺手修复「缺 id」的历史条目（首版发布路径写过 id:""，见 gallery-store 注释）。
+  galleryApps = loadGalleryRepairingIds(galleryFilePath());
   void pruneGalleryThumbs(galleryThumbsPath(), galleryApps);
   emitGallery();
   // 工作区按助手记忆恢复（2026-09-03 方案 B）：agentWorkspaces[活跃助手] → 老配置

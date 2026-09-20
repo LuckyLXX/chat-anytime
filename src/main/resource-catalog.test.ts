@@ -15,6 +15,7 @@ describe("buildResourceCatalog", () => {
       hooksEnabled: true,
       automation: [],
       automationRuns: [],
+      gallery: [],
       diagnostics: []
     });
   });
@@ -78,6 +79,7 @@ describe("buildResourceCatalog", () => {
       hooksEnabled: true,
       automation: [],
       automationRuns: [],
+      gallery: [],
       diagnostics: []
     });
   });

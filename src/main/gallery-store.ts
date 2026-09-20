@@ -59,6 +59,31 @@ export function loadGallery(filePath: string): GalleryApp[] {
   return [];
 }
 
+/**
+ * 读盘并修复「缺 id」的历史条目后立刻回写。
+ *
+ * 为什么需要：首版发布路径写的是 `id: ""`（生成 id 的兜底只写在读路径），而读路径
+ * 对空 id 只能**每次重新随机生成**一个 → 磁盘上的条目 id 永远为空、每次读盘都在变，
+ * 而 update/remove/run 全按 id 寻址。发布侧已修（`upsertGalleryApp` 现在自己生成），
+ * 这里负责把**已经落盘**的坏条目一次性修好，让 id 真正稳定下来。
+ */
+export function loadGalleryRepairingIds(filePath: string): GalleryApp[] {
+  const apps = loadGallery(filePath);
+  if (apps.length === 0) return apps;
+  let missing: boolean;
+  try {
+    const raw = JSON.parse(readFileSync(filePath, "utf8")) as { apps?: unknown };
+    missing = Array.isArray(raw.apps) && raw.apps.some((entry) => {
+      const id = (entry as { id?: unknown } | null)?.id;
+      return typeof id !== "string" || !id.trim();
+    });
+  } catch {
+    return apps; // 读不回来就不动它（loadGallery 已回空表，写入反而会抹掉文件）
+  }
+  if (missing) writeGallery(filePath, apps);
+  return apps;
+}
+
 export function writeGallery(filePath: string, apps: readonly GalleryApp[]): void {
   mkdirSync(dirname(filePath), { recursive: true });
   const file: GalleryFile = { apps: [...apps] };

@@ -1,4 +1,4 @@
-import type { AutomationRunRecord, AutomationTask, CommandSummary, HookSummary, McpServerSummary, MemoryTopic, ResourceCatalog, SkillSummary, SubagentDefinition, Todo } from "../shared/protocol.js";
+import type { AutomationRunRecord, AutomationTask, CommandSummary, GalleryApp, HookSummary, McpServerSummary, MemoryTopic, ResourceCatalog, SkillSummary, SubagentDefinition, Todo } from "../shared/protocol.js";
 
 /**
  * The resource catalog is now a thin aggregate over the self-built capability
@@ -24,6 +24,8 @@ export interface ResourceCatalogInput {
   automation?: AutomationTask[];
   /** 全角色自动化运行历史。 */
   automationRuns?: AutomationRunRecord[];
+  /** 作品清单（全局跨工作区；bootstrap 初始注入，见 ResourceCatalog.gallery 注释）。 */
+  gallery?: GalleryApp[];
   diagnostics?: string[];
 }
 
@@ -38,6 +40,7 @@ export const emptyResourceCatalog: ResourceCatalog = {
   hooksEnabled: true,
   automation: [],
   automationRuns: [],
+  gallery: [],
   diagnostics: []
 };
 
@@ -53,6 +56,7 @@ export function buildResourceCatalog(input: ResourceCatalogInput): ResourceCatal
     hooksEnabled: input.hooksEnabled !== false,
     automation: input.automation ? structuredClone(input.automation) : [],
     automationRuns: input.automationRuns ? structuredClone(input.automationRuns) : [],
+    gallery: input.gallery ? structuredClone(input.gallery) : [],
     diagnostics: input.diagnostics ? [...input.diagnostics] : []
   };
 }

@@ -379,3 +379,51 @@ describe("message identity merge", () => {
     expect(useDesktopStore.getState().snapshot.messages[0]).toBe(second);
   });
 });
+
+describe("作品清单的水合与推送", () => {
+  beforeEach(() => {
+    useDesktopStore.setState({ galleryApps: [] });
+  });
+
+  it("gallery.apps 推送全量替换清单（发布/删除/开机推送）", () => {
+    const state = useDesktopStore.getState();
+    const app = { id: "g1", title: "示例", kind: "file" as const, workspace: "D:/ws", entry: "a.html", createdAt: 1, updatedAt: 1 };
+    state.handleRuntimeMessage({ type: "gallery.apps", apps: [app] });
+    expect(useDesktopStore.getState().galleryApps).toHaveLength(1);
+    state.handleRuntimeMessage({ type: "gallery.apps", apps: [] });
+    expect(useDesktopStore.getState().galleryApps).toHaveLength(0);
+  });
+
+  it("启动推送早于订阅时，冷启动靠 bootstrap 水合（否则重启后作品墙一直空）", async () => {
+    // 回归：utility 的启动推送（gallery.apps）发得比渲染端订阅早（main 先 fork
+    // runtime 再建窗口）——顺序实测为 startRuntime() → createWindow()。所以只靠
+    // 推送时，冷启动后清单会**一直空到下一次清单变更**（用户报的「重启后作品没了」，
+    // 而磁盘上 gallery.json 完好）。这里走真实的 initialize() 水合路径。
+    const app = { id: "g1", title: "Jev 潜台词读心器", kind: "server" as const, workspace: "D:/日常工作区", entry: "jev-demo", command: "node proxy.cjs", url: "http://localhost:8787", createdAt: 1, updatedAt: 2 };
+    // store 在 node 环境下跑（vitest 默认 environment: node），store.initialize()
+    // 直接引用 window（生产代码如此，不该为测试改），故临时把 window 指向 globalThis。
+    const host = globalThis as { piDesktop?: unknown; window?: unknown };
+    const originalWindow = host.window;
+    const original = host.piDesktop;
+    host.window = host;
+    host.piDesktop = {
+      onRuntimeMessage: () => () => {},
+      bootstrap: async () => ({
+        platform: "test",
+        version: "0",
+        settings: { version: 2, thinkingLevel: "medium", accessMode: "ask", providers: [], agents: [], currentAgentId: "default", appearance: { theme: "system", themePreset: "default", customCss: "", customThemes: [], showThinking: true } },
+        resources: { skills: [], commands: [], mcpServers: [], todos: [], memory: [], subagents: [], hooks: [], hooksEnabled: true, automation: [], automationRuns: [], gallery: [app], diagnostics: [] }
+      })
+    };
+    try {
+      await useDesktopStore.getState().initialize();
+      expect(useDesktopStore.getState().galleryApps).toHaveLength(1);
+      expect(useDesktopStore.getState().galleryApps[0]!.title).toBe("Jev 潜台词读心器");
+      expect(useDesktopStore.getState().galleryApps[0]!.id).toBe("g1");
+    } finally {
+      host.piDesktop = original;
+      host.window = originalWindow;
+      useDesktopStore.setState({ galleryApps: [] });
+    }
+  });
+});

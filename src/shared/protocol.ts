@@ -1355,6 +1355,13 @@ export interface ResourceCatalog {
   automation: AutomationTask[];
   /** 全角色自动化运行历史（新增/裁剪后全量推送；bootstrap 初始注入）。 */
   automationRuns: AutomationRunRecord[];
+  /**
+   * 作品清单（全局跨工作区）。**必须在 bootstrap 快照里带一份**：utility 的
+   * 启动推送（`gallery.apps`）发得比渲染端订阅早（main 先 fork runtime 再建窗口），
+   * 只靠推送会让冷启动后作品墙一直空到下一次变更（实测：重启后作品「没了」，
+   * 而磁盘上清单完好）。与 todos / automation / automationRuns 同口径。
+   */
+  gallery: GalleryAppModel[];
   diagnostics: string[];
 }
 

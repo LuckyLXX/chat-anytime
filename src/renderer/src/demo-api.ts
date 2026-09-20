@@ -387,6 +387,9 @@ const demoResources: ResourceCatalog = {
   hooksEnabled: true,
   automation: DEMO_AUTOMATION_TASKS,
   automationRuns: DEMO_AUTOMATION_RUNS,
+  // bootstrap 里的作品清单要与 demoGalleryApps 同源（否则 demo 冷启动先显示空、
+  // 随后被推送覆盖——真实运行时同理，这正是「重启后作品没了」的成因）。
+  gallery: [],
   diagnostics: []
 };
 
@@ -480,7 +483,7 @@ export function createDemoApi(): DesktopApi {
         version: "0.1.0",
         settings: structuredClone(demoSettings),
         runtime: structuredClone(demoSnapshot),
-        resources: structuredClone(demoResources),
+        resources: { ...structuredClone(demoResources), gallery: structuredClone(demoGalleryApps) },
         catalog: {
           providers: [
             { id: "anthropic", name: "Anthropic", configured: true, authSource: "demo" },

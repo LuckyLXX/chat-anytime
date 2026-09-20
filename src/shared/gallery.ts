@@ -135,14 +135,21 @@ export function galleryKey(app: Pick<GalleryApp, "workspace" | "kind" | "entry">
 }
 
 /**
- * 发布/更新（纯函数，调用方负责落盘）：同 id 或同入口键视为更新，保留 createdAt 与
- * 已有缩略图（除非本次带了新缩略图）。
+ * 发布/更新（纯函数，调用方负责落盘）。
+ *
+ * id 是**本函数生成**的，调用方不应自己造：发布路径曾经传 `id: ""`，而补 id 的
+ * 兜底只写在读路径的 `normalizeGalleryApp` 里——结果每次读盘都因 id 为空而**重新
+ * 随机生成一个**，作品的 id 每次重启都在变（而 update/remove/run 全按 id 寻址）。
+ * 所以这里对空 id 兜底（draft 带 id 时照用，供测试与「换 id 重建」场景）。
+ *
+ * 同 id 或同入口键视为更新，保留 createdAt 与已有缩略图（除非本次带了新缩略图）。
  */
 export function upsertGalleryApp(list: readonly GalleryApp[], draft: GalleryApp, now = Date.now()): { list: GalleryApp[]; app: GalleryApp } {
   const key = galleryKey(draft);
-  const index = list.findIndex((item) => item.id === draft.id || galleryKey(item) === key);
+  const draftId = draft.id || randomAppId();
+  const index = list.findIndex((item) => (draft.id !== "" && item.id === draft.id) || galleryKey(item) === key);
   if (index < 0) {
-    const app: GalleryApp = { ...draft, createdAt: draft.createdAt || now, updatedAt: now };
+    const app: GalleryApp = { ...draft, id: draftId, createdAt: draft.createdAt || now, updatedAt: now };
     return { list: sortGalleryApps([app, ...list]), app };
   }
   const existing = list[index]!;

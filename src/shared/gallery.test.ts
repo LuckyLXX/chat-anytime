@@ -135,6 +135,33 @@ describe("removeGalleryApp / sortGalleryApps / trimGalleryApps", () => {
   });
 });
 
+describe("upsertGalleryApp 的 id 生成（发布路径不再依赖读路径兜底）", () => {
+  it("draft 没带 id 时由本函数生成（否则读盘时为空的 id 每次都会重新随机）", () => {
+    // 回归：首版发布路径传 id:""，而补 id 只在读路径 normalizeGalleryApp 里——
+    // 结果磁盘上 id 永远为空，每次读盘都换个新 id，update/remove/run 全按 id 寻址
+    const published = upsertGalleryApp([], app({ id: "" }), 2000);
+    expect(published.app.id).not.toBe("");
+    expect(published.app.id).toMatch(/^g-/u);
+    // 落盘 → 读回 → 再读回：id 必须**稳定不变**（这是本 bug 的核心症状）
+    const once = normalizeGalleryApp(JSON.parse(JSON.stringify(published.app)));
+    const twice = normalizeGalleryApp(JSON.parse(JSON.stringify(once)));
+    expect(once!.id).toBe(published.app.id);
+    expect(twice!.id).toBe(published.app.id);
+  });
+
+  it("draft 带了 id 时照用（测试夹具与「换 id 重建」场景）", () => {
+    expect(upsertGalleryApp([], app({ id: "custom-id" })).app.id).toBe("custom-id");
+  });
+
+  it("空 id 的重复发布按入口键仍归并为更新（不会因 id 为空而插重复项）", () => {
+    const first = upsertGalleryApp([], app({ id: "" }), 2000);
+    const second = upsertGalleryApp(first.list, app({ id: "", title: "改名了" }), 3000);
+    expect(second.list).toHaveLength(1);
+    expect(second.app.id).toBe(first.app.id);
+    expect(second.app.title).toBe("改名了");
+  });
+});
+
 describe("galleryRunTarget（运行分流的唯一判据）", () => {
   it("file 作品 → 绝对路径（走静态服务）", () => {
     expect(galleryRunTarget(app())).toEqual({ kind: "file", absolutePath: "D:/ws/designs/exports/demo.html" });
