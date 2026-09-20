@@ -12,6 +12,7 @@ import {
   clampDimension,
   createMarkerEchoFilter,
   fingerprintOfHostKey,
+  markerPrintfCommand,
   stripAnsi,
   type SshClientLike,
   type SshConnectOptionsLike,
@@ -227,7 +228,7 @@ const FINGERPRINT = fingerprintOfHostKey(TEST_HOST_KEY);
 
 /** 模拟远端对一条 AI 命令的完整回显（字面 printf 回显 + 输出 + 真实 marker）。 */
 function emitCommandOutcome(stream: FakeShellStream, echo: string, output: string, exitCode: number, seq: number): void {
-  const printfLiteral = `printf '\\033]633;pi-ssh;${seq};%s\\007' "$?"`;
+  const printfLiteral = markerPrintfCommand(seq);
   // 回显里 \033 是字面文本（反斜杠），marker 输出里是真实 ESC 字节。
   stream.emit(`$ ${echo}\r\n${output}$ ${printfLiteral}\r\n${output}\x1b]633;pi-ssh;${seq};${exitCode}\x07$ `);
 }
@@ -235,7 +236,7 @@ function emitCommandOutcome(stream: FakeShellStream, echo: string, output: strin
 describe("ssh-connections pure helpers", () => {
   it("filters the marker printf echo out of the display stream (across chunks)", () => {
     const filter = createMarkerEchoFilter();
-    const echo = `printf '\\033]633;pi-ssh;7;%s\\007' "$?"`;
+    const echo = markerPrintfCommand(7);
     // 同一块内完整过滤
     expect(filter(`[root@host ~]# uptime\r\n 21:07 up 3 days\r\n[root@host ~]# ${echo}\r\n`)).toBe("[root@host ~]# uptime\r\n 21:07 up 3 days\r\n[root@host ~]# ");
     // 跨块分裂（前缀被截断）也要过滤干净
@@ -251,6 +252,79 @@ describe("ssh-connections pure helpers", () => {
     const tailFilter = createMarkerEchoFilter();
     expect(tailFilter("cmd\r\nprintf '\\033]633;pi-ss")).toBe("cmd\r\n");
     expect(tailFilter("h;10;%s\\007' \"$?\"\r\nnext\n")).toBe("next\n");
+  });
+
+  it("filters the readline-wrapped echo (real-machine fixture: CRLF + repeated boundary char)", () => {
+    // 真机实测（阿里云主机，PTY 58 列、提示符 34 字符）：远端 readline 在换行处
+    // 插入 CRLF **并重复边界字符**，回显因此不是单行——整行正则跨不过这个 CRLF，
+    // 这正是上个版本「修了但还能看到」的根因。样本由 markerPrintfCommand 构造，
+    // 保证测试与真实回显永不漂移。
+    const seq = 12;
+    const echo = markerPrintfCommand(seq);
+    const wrapped = `${echo.slice(0, 26)}\r\n${echo[25]}${echo.slice(26)}`;
+    expect(wrapped).toContain("\r\n");
+    const prompt = "[root@iZmj7dkkjlbospsnrovsgeZ ~]# ";
+    const filter = createMarkerEchoFilter();
+    // 只剩提示符，没有探针残留，也不留空行
+    expect(filter(`${prompt}${wrapped}\r\n`)).toBe(prompt);
+    // 折行点落在任意位置（含数字段中间）都要能过滤；真实折行只在显示宽度
+    // 边界发生，这里全覆盖更严：状态机必须对任意切分鲁棒。
+    for (let cut = 1; cut < echo.length; cut += 1) {
+      const broken = `${echo.slice(0, cut)}\r\n${echo[cut - 1]}${echo.slice(cut)}`;
+      const out = createMarkerEchoFilter()(`${prompt}${broken}\r\n`);
+      expect(out).toBe(prompt);
+    }
+    // 跨 chunk 的折行回显同样过滤干净
+    const chunked = createMarkerEchoFilter();
+    const pieces = [`${prompt}pri`, `ntf '\\033]633;pi-ssh;12\r`, `\n1`, `2;%s\\007' "$?"\r\n`];
+    expect(pieces.map((part) => chunked(part)).join("")).toBe(prompt);
+    // 折行回显之后紧跟的正常输出不能受损
+    const withOutput = createMarkerEchoFilter()(`${prompt}${wrapped}\r\nsome output\r\n`);
+    expect(withOutput).toBe(`${prompt}some output\r\n`);
+  });
+
+  it("cleans the verbatim real-machine capture (folded echo + real marker output)", () => {
+    // 以下字符串是从真机 ssh_exec 回执里逐字抄下来的（阿里云主机，PTY 58 列）：
+    // 回显在 `pi-ssh;4` 后折行、下一行重复边界字符 `4`，探针的**输出**（真 ESC）
+    // 则不折行。这条 fixture 是上个版本失效现场的重演，必须永久驻留。
+    const captured =
+      "[root@iZmj7dkkjlbospsnrovsgeZ ~]# echo XYZ123\r\n" +
+      "XYZ123\r\n" +
+      "[root@iZmj7dkkjlbospsnrovsgeZ ~]# printf '\\033]633;pi-ssh;4" +
+      "\r\n" +
+      "4;%s\\007' \"$?\"\r\n" +
+      "$ \x1b]633;pi-ssh;4;0\x07$ ";
+    const expected =
+      "[root@iZmj7dkkjlbospsnrovsgeZ ~]# echo XYZ123\r\nXYZ123\r\n[root@iZmj7dkkjlbospsnrovsgeZ ~]# " +
+      "$ \x1b]633;pi-ssh;4;0\x07$ ";
+    expect(createMarkerEchoFilter()(captured)).toBe(expected);
+    // 任意切块（含逐字符）都必须得到同一结果——跨 chunk 安全性。
+    const filter = createMarkerEchoFilter();
+    let charwise = "";
+    for (const c of captured) charwise += filter(c);
+    expect(charwise).toBe(expected);
+    const random = createMarkerEchoFilter();
+    let split = "";
+    for (let i = 0; i < captured.length; ) {
+      const take = 1 + ((i * 7) % 9);
+      split += random(captured.slice(i, i + take));
+      i += take;
+    }
+    expect(split).toBe(expected);
+  });
+
+  it("never swallows real output that only looks like a marker echo prefix", () => {
+    const filter = createMarkerEchoFilter();
+    // 用户自己敲 / 输出里的普通 printf 文本：失配后原样吐回，不丢字符
+    const literal = "printf '%s\\n' hello";
+    expect(filter(`$ ${literal}\r\nhello\n`)).toBe(`$ ${literal}\r\nhello\n`);
+    // 与回显前缀同形但后续不同的文本
+    const lookalike = "printf '\\033]633;pi-ssh;not-a-number;%s\\007' \"$?\"\r\n";
+    expect(filter(lookalike)).toBe(lookalike);
+    // 被截断的候选前缀必须原样保留（暂扣后失配吐回）
+    const dangling = createMarkerEchoFilter();
+    expect(dangling("tail printf '\\033]633;pi-")).toBe("tail ");
+    expect(dangling("xyz\n")).toBe("printf '\\033]633;pi-xyz\n");
   });
 
   it("clamps dimensions and trims scrollback", () => {

@@ -151,37 +151,169 @@ export function stripAnsi(text: string): string {
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "");
 }
 
+// marker 回显的构成片段：与 markerPrintfCommand 共用同一组常量，保证「测试样本」
+// 与「真实回显」永不漂移（此前单测手写字面样本，漏掉了远端折行形态）。
+const MARKER_ECHO_HEAD = "printf '";
+const MARKER_ECHO_ESC = "\\033";
+const MARKER_ECHO_OSC = MARKER_PRINTF_ESCAPE;
+const MARKER_ECHO_TAIL = ";%s\\007' \"$?\"";
+
 /** marker 的远端 printf 命令（POSIX printf：bash/dash/busybox 均支持 \033 与 \007）。 */
-function markerPrintfCommand(seq: number): string {
-  return `printf '\\033${MARKER_PRINTF_ESCAPE}${seq};%s\\007' "$?"`;
+export function markerPrintfCommand(seq: number): string {
+  return `${MARKER_ECHO_HEAD}${MARKER_ECHO_ESC}${MARKER_ECHO_OSC}${seq}${MARKER_ECHO_TAIL}`;
 }
 
-/** 远端 shell 对 marker 命令的字面回显（连同行尾换行一并剔除，避免留下空提示符行）。 */
-const MARKER_ECHO_RE = /printf '\\033\]633;pi-ssh;\d+;%s\\007' "\$\?"\r?\n?/g;
-/** 跨 chunk 匹配用的固定前缀（尾部暂扣上限 = 本串长度 - 1）。 */
-const MARKER_ECHO_PREFIX = "printf '\\033]633;pi-ssh;";
+/**
+ * 候选回显文本的长度上限：正常回显才 50 字符左右，防的是「输出里出现回显前缀
+ * 但不是回显」时无限暂扣（如 cat 一个含该前缀且后跟大量空行的文件）。
+ */
+const MARKER_ECHO_CANDIDATE_LIMIT = 256;
 
 /**
  * 显示流净化器：把 marker 命令的**字面回显**从数据流中剔除。AI 的 ssh_exec
  * 在业务命令后追加一行 printf 探针，远端 shell 会把这一行原样回显（跟用户自己
  * 敲的命令一样），会在终端里显出一行奇怪的 printf（用户实测反馈）。marker 的
  * 完成检测靠的是 printf **输出的真实 ESC 字节**，与回显的字面 `\033` 文本天然
- * 可分，所以剔除字面回显对检测零影响；跨 chunk 的半个前缀会被暂扣至下一块。
- * 匹配不中（如 zsh 语法高亮在回显中插了转义）则自然退化为不过滤，无害。
+ * 可分，所以剔除字面回显对检测零影响。
+ *
+ * 逐字符状态机而非整行正则，原因是**远端 readline 会折行**：命令回显超过
+ * 终端列宽时，readline 在换行处插入 CRLF 并**重复边界字符**（真机实测，PTY
+ * 58 列、提示符 34 字符：`printf '\033]633;pi-ssh;8` + CRLF + `8;%s\007'
+ * "$?"`）。整行正则跨不过那个 CRLF，此前版本因此完全失效（用户报「还是
+ * 有」）；状态机把 CRLF 与重复边界字符当折行伪影吞掉，且天然跨 chunk（候选
+ * 文本暂扣到匹配完成或失配为止，失配即原样吐回输出，不丢字符）。
+ * 匹配不中（如 zsh 语法高亮在回显里插了转义）退化为不过滤，无害。
  */
 export function createMarkerEchoFilter(): (chunk: string) => string {
-  let tail = "";
-  return (chunk: string): string => {
-    let out = (tail + chunk).replace(MARKER_ECHO_RE, "");
-    tail = "";
-    // 尾部若是模式前缀的一部分（下个 chunk 可能补全），先暂扣不发出。
-    for (let keep = Math.min(MARKER_ECHO_PREFIX.length - 1, out.length); keep > 0; keep -= 1) {
-      if (MARKER_ECHO_PREFIX.startsWith(out.slice(-keep))) {
-        tail = out.slice(-keep);
-        out = out.slice(0, -keep);
-        break;
+  // 目标序列被拆成固定文本段：前 3 段是字面量（与 markerPrintfCommand 共用，
+  // 测试样本因此不会与真实回显漂移），第 4 段是序号（至少一位数字），第 5 段是尾。
+  const literals = [MARKER_ECHO_HEAD, MARKER_ECHO_ESC, MARKER_ECHO_OSC] as const;
+  const DIGITS = literals.length;
+  const TAIL = DIGITS + 1;
+  const END = TAIL + 1;
+  let out = "";
+  /** 0..DIGITS-1 = 正在匹配 literals[stage]；DIGITS = 序号数字；TAIL = 尾段；END = 回显已丢弃。 */
+  let stage = 0;
+  /** 当前段内已匹配到的字符数。 */
+  let pos = 0;
+  /** 序号段已收到的数字（至少一位才算合法）。 */
+  let digits = "";
+  /** 候选回显文本（尚未确认）。空串 = 不在候选态，普通字符直接出输出。 */
+  let matched = "";
+  /** 已匹配的最后一个字符：折行伪影重复的就是它。 */
+  let lastChar = "";
+  /** 刚吞掉一个换行（折行伪影），下一个字符若是边界字符的重复则也吞掉。 */
+  let dupPending = false;
+
+  /** 失配：候选文本不是回显（或只是回显前缀），原样吐回输出并复位。 */
+  const flush = (): void => {
+    out += matched;
+    matched = "";
+    stage = 0;
+    pos = 0;
+    digits = "";
+    lastChar = "";
+    dupPending = false;
+  };
+
+  /** 回显完整匹配：丢弃候选文本并复位（行尾伪影由 END 阶段处理）。 */
+  const drop = (): void => {
+    matched = "";
+    stage = 0;
+    pos = 0;
+    digits = "";
+    lastChar = "";
+    dupPending = false;
+  };
+
+  /** 当前段还需要等的字符（序号段接受任意数字，返回 undefined 表示「是数字即可」）。 */
+  const expected = (): string | undefined => {
+    if (stage === DIGITS) return undefined;
+    const text = stage === TAIL ? MARKER_ECHO_TAIL : literals[stage]!;
+    return text[pos];
+  };
+
+  /** 当前段的完整长度（序号段视作一位，见 feed 里的特判）。 */
+  const lengthOf = (at: number): number => (at === DIGITS ? 1 : at === TAIL ? MARKER_ECHO_TAIL.length : literals[at]!.length);
+
+  const feed = (c: string): void => {
+    // 候选过长 = 必然不是回显：原样吐出，避免无限暂扣。
+    if (matched.length > MARKER_ECHO_CANDIDATE_LIMIT) flush();
+    for (;;) {
+      if (stage === END) {
+        // 回显已丢弃；把行尾换行与紧随的重复边界字符一并吞掉，不留空提示符行。
+        if (c === "\r" || c === "\n") {
+          dupPending = true;
+          return;
+        }
+        if (dupPending && c === lastChar) {
+          dupPending = false;
+          return;
+        }
+        drop();
+        continue; // 该字符按普通输出重新处理
       }
+      const inMatch = stage > 0 || matched.length > 0 || dupPending;
+      if (c === "\r" || c === "\n") {
+        // 候选态里的换行只能是远端折行伪影（真实回显是单行命令）。
+        if (inMatch) {
+          matched += c;
+          dupPending = true;
+          return;
+        }
+        out += c;
+        return;
+      }
+      // 折行伪影重复的边界字符：先当伪影吞掉，但仍记进候选——若后续失配，
+      // 候选原样吐回输出，绝不丢字符（不变量：删掉 CR/LF 后候选 === 迄今收到的字符）。
+      if (dupPending && c === lastChar) {
+        dupPending = false;
+        matched += c;
+        return;
+      }
+      const want = expected();
+      const hit = stage === DIGITS ? c >= "0" && c <= "9" : c === want;
+      if (hit) {
+        matched += c;
+        lastChar = c;
+        dupPending = false;
+        pos += 1;
+        if (stage === DIGITS) {
+          // 序号至少一位；遇到非数字才切到尾段（同一个字符重新匹配）。
+          digits += c;
+          return;
+        }
+        if (pos === lengthOf(stage)) {
+          if (stage === TAIL) {
+            // 回显完整确认：立刻丢弃，只留 lastChar 供行尾伪影判定。
+            drop();
+            stage = END;
+            lastChar = c;
+            return;
+          }
+          stage += 1;
+          pos = 0;
+        }
+        return;
+      }
+      if (stage === DIGITS && digits.length > 0) {
+        // 序号已结束：切到尾段并用当前字符继续匹配。
+        stage = TAIL;
+        pos = 0;
+        continue;
+      }
+      if (inMatch) {
+        flush();
+        continue;
+      }
+      out += c;
+      return;
     }
+  };
+
+  return (chunk: string): string => {
+    out = "";
+    for (const c of chunk) feed(c);
     return out;
   };
 }
