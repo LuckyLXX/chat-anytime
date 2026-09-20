@@ -81,6 +81,16 @@ describe("desktop tool permissions", () => {
     expect(permissionNeedsApproval("ask", "mcp", "command")).toBe(true);
   });
 
+  it("gates gallery_publish as write-risk, and rejects entries outside the workspace", () => {
+    // 发布写全局作品清单（agentDir）+ 可能渲缩略图：与 write 同轴。
+    expect(toolRisk(workspace, "gallery_publish", { path: "designs/exports/a.html", kind: "file", title: "t" })).toBe("write");
+    expect(permissionAction("workspace", "gallery_publish", "write")).toBe("allow");
+    expect(permissionAction("read-only", "gallery_publish", "write")).toBe("deny");
+    // path 是越界检查的字段名，因此发布工作区外的文件会被拦成 outside-workspace
+    //（不是 write）——换字段名就丢掉这道门，故此处钉住。
+    expect(toolRisk(workspace, "gallery_publish", { path: "D:/elsewhere/a.html", kind: "file", title: "t" })).toBe("outside-workspace");
+  });
+
   it("gates design doc writes as write-risk (workspace mode auto-allows)", () => {
     expect(toolRisk(workspace, "design_update", { ops: [] })).toBe("write");
     expect(toolRisk(workspace, "design_export", { path: "designs/exports/a.html" })).toBe("write");

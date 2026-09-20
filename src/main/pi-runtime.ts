@@ -78,6 +78,28 @@ import { readConfiguredMcpServers, removeMcpServerConfig, setMcpServerDisabled, 
 import { McpOAuthController } from "./mcp-oauth.js";
 import { PermissionBroker } from "./permission-broker.js";
 import { loadRecentWorkspaces, recordRecentWorkspace, writeRecentWorkspaces } from "./recent-workspaces.js";
+import {
+  galleryPathFor,
+  galleryThumbsDirFor,
+  loadGallery,
+  persistGallery,
+  pruneGalleryThumbs,
+  writeGalleryThumb
+} from "./gallery-store.js";
+import {
+  galleryAbsolutePath,
+  galleryRunTarget,
+  galleryThumbEligible,
+  galleryThumbName,
+  normalizeGalleryApp,
+  normalizeGalleryEntry,
+  removeGalleryApp,
+  sortGalleryApps,
+  upsertGalleryApp,
+  type GalleryApp,
+  type GalleryDraft
+} from "../shared/gallery.js";
+import * as runtimeGallery from "./runtime-gallery.js";
 import { assistantText, createSubagentTools, buildSubagentPromptBlock, type SubagentContext } from "./subagent.js";
 import { readSubagents, saveSubagent, deleteSubagent, saveSubagentModelOverride } from "./subagents-store.js";
 import type { SubagentDefinition, SubagentScope, DelegationProgress, SlashInvocation } from "../shared/protocol.js";
@@ -151,6 +173,8 @@ let currentSessions: SessionSummary[] = [];
 /** `currentSessions` 是按哪个 Agent 的目录拉取的；换过角色的旧列表视为失效。 */
 let currentSessionsAgentId: string | undefined;
 let recentWorkspaces: RecentWorkspace[] = [];
+/** 作品清单（全局跨工作区：一份池子，换工作区也在）；初始化时读盘，变更即写盘 + 推送。 */
+let galleryApps: GalleryApp[] = [];
 let selectedModel: { provider: string; id: string } | undefined;
 let settings: DesktopSettings | undefined;
 /** 随安装包分发的内置 Skill 目录（安装目录 resources/skills），由主进程经 initialize 下发。 */
@@ -230,6 +254,8 @@ interface SessionRuntimeRecord {
   computerTools: ToolDefinition[];
   automationTools: ToolDefinition[];
   designTools: ToolDefinition[];
+  /** 作品发布工具（gallery_publish）；单个轻量定义，无条件激活。 */
+  galleryTools: ToolDefinition[];
   /** 设计模式总闸的实时读取（settings.design?.enabled !== false）；活动集重算时用。 */
   designGlobalEnabled: () => boolean;
   /** 电脑控制总闸的实时读取（settings.computer?.enabled !== false）；活动集重算时用。 */
@@ -1410,6 +1436,89 @@ function recentWorkspacesPath(): string {
   return join(getAgentDir(), "pidesktop-recent-workspaces.json");
 }
 
+// —— 作品（Gallery）：清单在全局 agentDir，跨工作区共用一份池子 ——
+
+function galleryFilePath(): string {
+  return galleryPathFor(getAgentDir());
+}
+
+function galleryThumbsPath(): string {
+  return galleryThumbsDirFor(getAgentDir());
+}
+
+/** 全量推送作品清单（发布/删除/更新/记录运行/启动时）。 */
+function emitGallery(): void {
+  post({ type: "gallery.apps", apps: galleryApps });
+}
+
+/**
+ * 发布/更新一个作品。draft.path 是工作区相对路径或绝对路径；入口一律归一到
+ * 工作区相对路径存清单（相对路径才能跨机器/跨盘符稳定重定位）。
+ *
+ * 缩略图是增益不是必要条件：失败只回一句降级说明，发布本身照常成功
+ * （同 design_export 的“截图失败不得让导出失败”）。
+ */
+async function publishGalleryApp(draft: GalleryDraft, workspaceRoot: string | undefined): Promise<{ app: GalleryApp; thumbNote: string }> {
+  const root = (draft.workspace ?? workspaceRoot ?? "").trim() || workspace;
+  if (!root) throw new Error("请先打开一个工作区，再发布作品");
+  const absolute = isAbsolute(draft.path) ? resolve(draft.path) : resolve(root, draft.path);
+  // 入口必须落在工作区内：越界路径既不可运行（静态服务只服务工作区），
+  // 也会把清单变成指向外部目录的跳板。
+  const within = pathIsWithin(root, absolute);
+  if (!within) throw new Error("作品入口必须位于当前工作区内");
+  const entry = normalizeGalleryEntry(isAbsolute(draft.path) ? (relativePath(root, absolute) || ".") : draft.path);
+
+  const app: GalleryApp = {
+    id: "",
+    title: draft.title,
+    kind: draft.kind,
+    workspace: resolve(root),
+    entry,
+    createdAt: Date.now(),
+    updatedAt: Date.now()
+  };
+  if (draft.description) app.description = draft.description;
+  if (draft.kind === "server" && draft.command) app.command = draft.command;
+  if (draft.kind === "server" && draft.url) app.url = draft.url;
+  if (draft.tags && draft.tags.length > 0) app.tags = draft.tags;
+
+  const upserted = upsertGalleryApp(galleryApps, app);
+  galleryApps = upserted.list;
+
+  let thumbNote = "";
+  if (galleryThumbEligible({ kind: upserted.app.kind, entry: upserted.app.entry })) {
+    const target = galleryAbsolutePath(upserted.app.workspace, upserted.app.entry);
+    const fileName = galleryThumbName();
+    try {
+      const shot = await requestDesignSnapshot({
+        htmlPath: target,
+        contentWidth: upserted.app.kind === "file" ? 1440 : 1440,
+        contentHeight: 900,
+        workspace: upserted.app.workspace,
+        thumbDir: galleryThumbsPath(),
+        thumbPrefix: "gallery",
+        // 作品页可能有外链资源，给比 design 导出更宽的预算。
+        loadTimeoutMs: 20_000
+      });
+      if (shot.ok) {
+        const bytes = Buffer.from(shot.data, "base64");
+        writeGalleryThumb(galleryThumbsPath(), fileName, bytes);
+        const withThumb = upsertGalleryApp(galleryApps, { ...upserted.app, thumb: fileName }).list;
+        galleryApps = withThumb;
+      } else {
+        thumbNote = `（缩略图未生成：${shot.error}）`;
+      }
+    } catch (error) {
+      thumbNote = `（缩略图未生成：${errorText(error)}）`;
+    }
+  }
+
+  galleryApps = persistGallery(galleryFilePath(), galleryApps, galleryThumbsPath());
+  emitGallery();
+  const published = galleryApps.find((candidate) => candidate.id === upserted.app.id) ?? upserted.app;
+  return { app: published, thumbNote };
+}
+
 /**
  * 默认工作区路径解析 + 目录确保（内置目录首次落位 mkdir 幂等，不覆盖已有内容）；
  * 失败返回 undefined，调用方据此走 landing 极端兜底（保留现有 landing 代码路径）。
@@ -1676,8 +1785,8 @@ function wrapModelRuntimeForVision(runtime: ModelRuntime): ModelRuntime {
  * customTools arrays are held by reference inside Pi, so hot-path updates
  * rebuild in place (`length = 0` + push) instead of swapping the array.
  */
-function buildRecordTools(record: Pick<SessionRuntimeRecord, "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "planTools" | "visionTools" | "browserTools" | "sshTools" | "computerTools" | "automationTools" | "designTools">): ToolDefinition[] {
-  return [...mcpTools, ...record.subagentTools, ...record.todoTools, ...record.memoryTools, ...record.questionTools, ...record.planTools, ...record.visionTools, ...record.browserTools, ...record.sshTools, ...record.computerTools, ...record.automationTools, ...record.designTools];
+function buildRecordTools(record: Pick<SessionRuntimeRecord, "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "planTools" | "visionTools" | "browserTools" | "sshTools" | "computerTools" | "automationTools" | "designTools" | "galleryTools">): ToolDefinition[] {
+  return [...mcpTools, ...record.subagentTools, ...record.todoTools, ...record.memoryTools, ...record.questionTools, ...record.planTools, ...record.visionTools, ...record.browserTools, ...record.sshTools, ...record.computerTools, ...record.automationTools, ...record.designTools, ...record.galleryTools];
 }
 
 /**
@@ -1697,7 +1806,7 @@ function buildRecordTools(record: Pick<SessionRuntimeRecord, "subagentTools" | "
  * asked for in a coding/document chat is pure prefix waste, and its global
  * switch is a capability toggle (下架), not a per-call gate.
  */
-function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "planTools" | "visionTools" | "browserTools" | "sshTools" | "computerTools" | "automationTools" | "designTools" | "designMode" | "computerMode" | "designGlobalEnabled" | "computerGlobalEnabled" | "unattended">, includeVision: boolean): string[] {
+function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "planTools" | "visionTools" | "browserTools" | "sshTools" | "computerTools" | "automationTools" | "designTools" | "galleryTools" | "designMode" | "computerMode" | "designGlobalEnabled" | "computerGlobalEnabled" | "unattended">, includeVision: boolean): string[] {
   const builtin = Object.entries(record.agent.tools ?? {}).filter(([, enabled]) => enabled).map(([name]) => name);
   return [
     ...builtin,
@@ -1724,7 +1833,11 @@ function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "subagentTool
     // 前缀缓存整段有效（区别于 browser 的常驻激活策略）。
     ...(runtimeDesign.shouldActivateDesignTools({ sessionEnabled: record.designMode.enabled, globalEnabled: record.designGlobalEnabled() })
       ? record.designTools.map((tool) => tool.name)
-      : [])
+      : []),
+    // 作品发布工具只有一个且很轻（≈200 tokens/请求），因此**无条件激活**
+    // （同 automation 策略）——它服务的是「做完就发布」这个随时可能发生的动作，
+    // 做成开关只会让用户/模型多用一次才能找到它。
+    ...record.galleryTools.map((tool) => tool.name)
   ];
 }
 
@@ -2858,6 +2971,12 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
       return fileName;
     }
   });
+  // 作品发布工具（每会话注册，无条件激活）：把完成的成果登记到全局作品墙。
+  // 发布是写入动作，权限走 write 风险轴（已加进 toolRisk 白名单）。
+  const galleryTools = runtimeGallery.buildGalleryTools({
+    publish: (draft) => publishGalleryApp(draft, recordWorkspace || undefined),
+    list: () => galleryApps
+  });
   // 可单独终止的 shell 工具：同名 customTools 覆盖内建 bash/powershell（工厂与
   // 选项同 Pi 内部构造，schema/description 字节不变、不影响前缀缓存）。任务面板
   // 「按命令停止」经 record.shellKill 只杀该调用的进程树，会话继续本轮。
@@ -2869,7 +2988,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   // Each record owns its customTools array: Pi stores it by reference and
   // re-reads it on every tool-registry refresh, so per-record arrays let parked
   // sessions keep their tool set while the active one hot-swaps MCP tools.
-  const recordCustomTools: ToolDefinition[] = [shellKill.tools[0]!, shellKill.tools[1]!, ...mcpTools, ...subagentTools, ...todoTools, ...memoryTools, ...questionTools, ...planTools, ...visionTools, ...browserTools, ...sshTools, ...computerTools, ...automationTools, ...designTools];
+  const recordCustomTools: ToolDefinition[] = [shellKill.tools[0]!, shellKill.tools[1]!, ...mcpTools, ...subagentTools, ...todoTools, ...memoryTools, ...questionTools, ...planTools, ...visionTools, ...browserTools, ...sshTools, ...computerTools, ...automationTools, ...designTools, ...galleryTools];
   const result = await createAgentSession({
     cwd: recordWorkspace,
     modelRuntime,
@@ -2949,6 +3068,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     computerTools,
     automationTools,
     designTools,
+    galleryTools,
     designGlobalEnabled: () => settings?.design?.enabled !== false,
     computerGlobalEnabled: () => settings?.computer?.enabled !== false,
     shellKill,
@@ -3041,6 +3161,10 @@ async function initialize(command: Extract<RuntimeCommand, { type: "initialize" 
   refreshHooksConfig();
   refreshSubagents();
   recentWorkspaces = loadRecentWorkspaces(recentWorkspacesPath());
+  // 作品清单：全局一份池子（跨工作区），读盘 + 清掉孤儿缩略图。
+  galleryApps = loadGallery(galleryFilePath());
+  void pruneGalleryThumbs(galleryThumbsPath(), galleryApps);
+  emitGallery();
   // 工作区按助手记忆恢复（2026-09-03 方案 B）：agentWorkspaces[活跃助手] → 老配置
   // settings.workspace（仅迁移期一次性兜底）→ 默认工作区。settings.workspace 此后
   // 冻结不再写。默认档仅当真落到默认时才 mkdir（map/legacy 命中不产生副作用），
@@ -4563,6 +4687,41 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       if (record.designDoc) postDesignState(record, record.designDoc.doc);
       else postEmptyDesignState(record); // 未绑定也要推：切会话后画布随焦点清空
       post({ type: "design.docs", docs: listDesigns(record.workspace) });
+      break;
+    }
+    // —— 作品（Gallery）：全局清单命令（与 gallery_publish 工具共用同一实现）——
+    case "gallery.publish": {
+      // 实体按钮路径：人操作，不过权限门；工作区缺省用当前会话的，缩略图同工具路径。
+      const record = liveSessions.get(activeRuntime?.session.sessionId ?? "") ?? activeRuntime;
+      const { app, thumbNote } = await publishGalleryApp(command.draft, record?.workspace ?? workspace);
+      if (thumbNote) post({ type: "gallery.notice", kind: "warn", message: `已发布「${app.title}」${thumbNote}` });
+      else post({ type: "gallery.notice", kind: "ok", message: `已发布作品「${app.title}」` });
+      break;
+    }
+    case "gallery.remove": {
+      const { list, removed } = removeGalleryApp(galleryApps, command.id);
+      if (!removed) throw new Error("找不到该作品");
+      galleryApps = persistGallery(galleryFilePath(), list, galleryThumbsPath());
+      emitGallery();
+      break;
+    }
+    case "gallery.update": {
+      const app = galleryApps.find((candidate) => candidate.id === command.id);
+      if (!app) throw new Error("找不到该作品");
+      // patch 走同一套读侧归一化：非法字段被丢掉，绝不会把坏数据写进文件。
+      const merged = normalizeGalleryApp({ ...app, ...command.patch, id: app.id, kind: app.kind, workspace: app.workspace, createdAt: app.createdAt, updatedAt: Date.now() });
+      if (!merged) throw new Error("作品字段校验失败");
+      galleryApps = persistGallery(galleryFilePath(), upsertGalleryApp(galleryApps, merged).list, galleryThumbsPath());
+      emitGallery();
+      break;
+    }
+    case "gallery.run": {
+      // 记录一次运行（lastRunAt + 重排）；真正的开标签在渲染端。
+      const app = galleryApps.find((candidate) => candidate.id === command.id);
+      if (!app) throw new Error("找不到该作品");
+      const { list } = upsertGalleryApp(galleryApps, { ...app, lastRunAt: Date.now() });
+      galleryApps = persistGallery(galleryFilePath(), list, galleryThumbsPath());
+      emitGallery();
       break;
     }
   }

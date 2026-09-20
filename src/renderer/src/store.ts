@@ -9,6 +9,7 @@ import type {
   DesignDocSummary,
   DesignNode,
   DesktopSettings,
+  GalleryApp,
   MemoryTopic,
   ModelOption,
   PermissionRequest,
@@ -243,10 +244,14 @@ interface DesktopState {
   designDoc?: DesignDocState;
   /** 工作区设计文档列表（design.docs 推送全量替换）。 */
   designDocs: DesignDocSummary[];
+  /** 作品清单（gallery.apps 推送全量替换）；全局跨工作区，启动时由 initialize 推一次。 */
+  galleryApps: GalleryApp[];
   /** 每文档已见推送 revision：≤ 该值的重复/乱序推送直接跳过（防回环重渲）。 */
   seenDesignRevisions: Record<string, number>;
   /** 最近一次设计导出结果；App 监听变化弹 toast。 */
   designExported?: DesignExportedInfo;
+  /** 最近一次作品发布结果（gallery.notice 推送）；App 监听变化弹 toast（含缩略图降级说明）。 */
+  galleryNotice?: { kind: "ok" | "warn"; message: string; at: number };
   /** 用量统计（设置页「用量统计」tab，按需拉取）；undefined=尚未请求。 */
   usageStats?: UsageStats;
   /** 用量统计请求中（面板显示载入态）。 */
@@ -362,6 +367,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   transcripts: {},
   transcriptErrors: {},
   designDocs: [],
+  galleryApps: [],
   seenDesignRevisions: {},
   usageStatsLoading: false,
   settings: emptySettings,
@@ -568,6 +574,13 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
         break;
       case "design.docs":
         set({ designDocs: message.docs });
+        break;
+      case "gallery.apps":
+        // 全量替换（清单在主进程；渲染端只做投影）。
+        set({ galleryApps: message.apps });
+        break;
+      case "gallery.notice":
+        set({ galleryNotice: { kind: message.kind, message: message.message, at: Date.now() } });
         break;
       case "design.exported":
         set({ designExported: { relativePath: message.relativePath, at: Date.now() } });

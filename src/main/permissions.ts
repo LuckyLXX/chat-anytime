@@ -25,6 +25,10 @@ export function toolRisk(
   // design_set_guide 虽只写 guide 一个字段，也是一次真实落盘（推进 revision），
   // 与 design_update 同门——否则 read-only 模式下能绕过 write 门改文档。
   if (toolName === "design_update" || toolName === "design_export" || toolName === "design_set_guide") return "write";
+  // 作品发布：把成果登记到全局作品清单（写 agentDir）并可能渲缩略图；与 write 同
+  // 风险轴（workspace 模式自动放行，read-only 拒绝）。args.path 是入口路径，因此
+  // 上面的 pathLeavesWorkspace 也能把「发布工作区外的文件」拦成 outside-workspace。
+  if (toolName === "gallery_publish") return "write";
   // 浏览器自动化：导航与写入型 eval 过门；页面内操作（快照/点击/输入/滚动/
   // 截图/等待/读取）信任模型直接执行。
   // browser_save_image 与 browser_screenshot 同口径免门：都是「AI 把看到的

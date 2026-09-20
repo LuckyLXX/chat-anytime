@@ -1,13 +1,21 @@
-// Design export thumbnail (main process): design_export hands the model a
-// finished HTML file, and the visual-check loop that follows (browser_navigate
-// → wait → screenshot_full → recognize_images, ×6 rounds in one real session)
-// costs more tool calls than building the design did. This controller closes
-// the loop into the export receipt itself: an offscreen hidden BrowserWindow
-// loads the exported single-file HTML, paints it without ever appearing on
+// Offscreen snapshot controller (main process): first built for design_export —
+// the tool hands the model a finished HTML file, and the visual-check loop that
+// follows (browser_navigate → wait → screenshot_full → recognize_images, ×6
+// rounds in one real session) costs more tool calls than building the design
+// did. This controller closes the loop into the receipt itself: an offscreen
+// hidden BrowserWindow loads the HTML file, paints it without ever appearing on
 // screen, capturePage grabs the frame, and the PNG rides back to the utility
-// process as an image part on the design_export result. Reuses the browser
-// screenshot persistence (.pidesktop/screenshots/, shared retention) so
-// text-only models also get a workspace path to feed recognize_images.
+// process as an image part on the tool result (or is written to a caller-chosen
+// directory for the gallery wall).
+//
+// Two persistence modes, chosen by the request:
+// - default: `<workspace>/.pidesktop/screenshots/` via saveBrowserScreenshot
+//   (shared retention, so text-only models also get a workspace path to feed
+//   recognize_images) — the design_export behaviour, byte-for-byte unchanged;
+// - `thumbDir` set (gallery): write `<thumbDir>/<thumbPrefix>-<ts>.png` directly
+//   and return the ABSOLUTE path — gallery thumbs live in the global agentDir
+//   (cross-workspace, and deliberately NOT under the 20-file screenshot
+//   retention that would evict them).
 //
 // The utility process reaches it through the design-snapshot.request /
 // design-snapshot.result message pair (same bypass-the-command-queue RPC
@@ -17,8 +25,11 @@
 // Electron runtime imports are dynamic (inside capture) so unit tests can
 // import this module's pure helpers without pulling Electron into vitest.
 
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { BrowserWindow as ElectronBrowserWindow } from "electron";
+import { galleryThumbName } from "../shared/gallery.js";
 import type { DesignSnapshotRequest, DesignSnapshotResult } from "../shared/protocol.js";
 import { saveBrowserScreenshot } from "./browser-screenshot.js";
 
@@ -26,6 +37,7 @@ import { saveBrowserScreenshot } from "./browser-screenshot.js";
 const MAX_VIEW_SIZE = 1600;
 /** 回传图像的宽度上限（token 预算；标题层级在 1024 宽下仍可辨认）。 */
 const THUMBNAIL_MAX_WIDTH = 1024;
+/** 默认加载超时；请求可覆盖（外部资源多的页面给更长预算）。 */
 const LOAD_TIMEOUT_MS = 12_000;
 const CAPTURE_TIMEOUT_MS = 6_000;
 
@@ -43,6 +55,20 @@ export function fitViewport(contentWidth: number, contentHeight: number): { widt
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
+}
+
+/**
+ * 把缩略图 PNG 写进调用方指定的目录（作品墙用），返回**绝对路径**。
+ * 与 saveBrowserScreenshot 的分工：那条路走工作区 `.pidesktop/screenshots/`（保留
+ * 最近 20 张、返回工作区相对路径）；作品缩略图存全局 agentDir，不能被那套保留
+ * 策略挤掉，所以这里直写自建目录，文件名与截图同风格（`<prefix>-<时间戳>.png`）。
+ */
+function writeGalleryThumbFile(dir: string, prefix: string, png: Buffer): string {
+  mkdirSync(dir, { recursive: true });
+  const name = prefix === "gallery" ? galleryThumbName() : `${prefix}-${Date.now()}.png`;
+  const target = join(dir, name);
+  writeFileSync(target, png);
+  return target;
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
@@ -97,7 +123,7 @@ export class DesignSnapshotController {
     try {
       const contents = win.webContents;
       await new Promise<void>((resolveLoad, rejectLoad) => {
-        const timer = setTimeout(() => rejectLoad(new Error("加载导出页超时")), LOAD_TIMEOUT_MS);
+        const timer = setTimeout(() => rejectLoad(new Error("加载导出页超时")), request.loadTimeoutMs ?? LOAD_TIMEOUT_MS);
         contents.once("did-finish-load", () => { clearTimeout(timer); resolveLoad(); });
         contents.once("did-fail-load", (_event, code, description) => {
           clearTimeout(timer);
@@ -121,7 +147,9 @@ export class DesignSnapshotController {
       const sized = image.getSize();
       const thumbnail = sized.width > THUMBNAIL_MAX_WIDTH ? image.resize({ width: THUMBNAIL_MAX_WIDTH }) : image;
       const png = thumbnail.toPNG();
-      const savedPath = await saveBrowserScreenshot(request.workspace, png.toString("base64"), "image/png", "design");
+      const savedPath = request.thumbDir
+        ? writeGalleryThumbFile(request.thumbDir, request.thumbPrefix ?? "gallery", png)
+        : await saveBrowserScreenshot(request.workspace, png.toString("base64"), "image/png", "design");
       const out = thumbnail.getSize();
       return { ok: true, data: png.toString("base64"), width: out.width, height: out.height, mimeType: "image/png", savedPath };
     } finally {

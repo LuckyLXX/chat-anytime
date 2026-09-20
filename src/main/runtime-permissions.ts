@@ -25,6 +25,7 @@ export function summarizeArgs(toolName: string, args: Record<string, unknown>): 
   if (toolName === "ssh_download") return `SSH 下载文件：${String(args.remotePath ?? "").slice(0, 120)} → 本地下载目录`;
   if (toolName === "design_update") return `更新设计文档（${Array.isArray(args.ops) ? args.ops.length : 0} 项变更）`;
   if (toolName === "design_export") return `导出设计 HTML${args.path ? `到 ${String(args.path)}` : ""}`;
+  if (toolName === "gallery_publish") return `发布作品「${String(args.title ?? "")}」：${String(args.path ?? "")}（${String(args.kind ?? "file")}）`;
   if (toolName === "computer_click") return `点击窗口「${String(args.window ?? "")}」客户区 (${String(args.x ?? "?")}, ${String(args.y ?? "?")})`;
   if (toolName === "computer_type") return `向窗口输入文本：${String(args.text ?? "").slice(0, 60)}`;
   if (toolName === "computer_press") return `发送按键 ${String(args.key ?? "")}${args.window ? ` 到窗口「${String(args.window)}」` : ""}`;

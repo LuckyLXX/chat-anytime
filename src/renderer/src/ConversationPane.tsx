@@ -634,6 +634,12 @@ export interface ConversationPaneProps {
   onActionError(message?: string): void;
   /** 回滚该回复内单个文件的改动（App 层弹确认对话框后发命令）。缺省不显示回滚按钮。 */
   onRollback?(file: ReplyChangedFile): void;
+  /**
+   * 空态（landing）里渲染的「作品墙」内容。缺省时退回原有的「今天想开发什么？」
+   * 空态。为什么要靠 App 传：作品清单与运行/发布动作都在 App 层（与顶栏下拉
+   * 共用同一套行为），且分屏下各格子传同一份（作品墙不是会话级数据）。
+   */
+  renderLanding?(): ReactNode;
 }
 
 /**
@@ -667,7 +673,8 @@ export const ConversationPane = memo(function ConversationPane({
   onOpenMemoryTopic,
   onOpenTranscript,
   onActionError,
-  onRollback
+  onRollback,
+  renderLanding
 }: ConversationPaneProps): ReactNode {
   const data = usePaneData(sessionId);
   const settings = useDesktopStore((state) => state.settings);
@@ -1647,7 +1654,8 @@ export const ConversationPane = memo(function ConversationPane({
         ) : !data.workspace ? (
           <div className="empty-workspace" data-pane="landing"><div className="empty-icon"><FolderOpen size={27} /></div><h1>打开一个项目</h1><button className="primary-button" data-control="workspace-open" type="button" onClick={() => void openWorkspace()}><FolderOpen size={16} />选择文件夹</button></div>
         ) : displayMessages.length === 0 && !isGenerating ? (
-          <div className="empty-conversation" data-pane="landing"><div className="empty-icon"><CodeXml size={27} /></div><h1>今天想开发什么？</h1></div>
+          // 空态优先渲染作品墙（App 注入）；无 renderLanding 时保留原空态文案。
+          renderLanding ? renderLanding() : <div className="empty-conversation" data-pane="landing"><div className="empty-icon"><CodeXml size={27} /></div><h1>今天想开发什么？</h1></div>
         ) : <>
           {displayMessages.map((message, index) => {
             const timing = showTurnTimingOnLatest && index === latestAssistantMessageIndex && message.role === "assistant" ? data.turnTiming : undefined;

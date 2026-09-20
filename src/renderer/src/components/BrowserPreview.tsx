@@ -113,6 +113,36 @@ export function BrowserPreview({ suspended = false, tabId = "default", onPickSen
     setPickMode(false);
   }, [tabId]);
 
+  // 作品「运行」的一次性导航：主进程通过 tab-meta 下达 initialUrl，本组件负责
+  // 消费一次。这里**主动读回**（而不是从 state 推送上读）以免与上面的 tabId 重置
+  // effect 竞争（同一 commit 内第二 effect 看到的还是上一帧的 state）。
+  // sessionStorage 标记保证切标签/折叠面板/重渲染都不会重复导航，也不会把用户
+  // 后来的手动导航冲掉。
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const snapshot = await send({ type: "tab-meta" });
+      const target = snapshot?.initialUrl;
+      if (!target || cancelled) return;
+      const key = `pidesktop.gallery-started-${tabId}`;
+      try {
+        if (window.sessionStorage.getItem(key) === target) return;
+        window.sessionStorage.setItem(key, target);
+      } catch {
+        // 演示环境等 storage 不可用：宁可重复一次也不卡死
+      }
+      const next = await send({ type: "navigate", url: target });
+      if (next?.url) {
+        setAddress(next.url);
+        saveBrowserAddress(tabId, next.url);
+      }
+    })();
+    return () => { cancelled = true; };
+    // send 是每次渲染重建的局部函数：依赖它会让 effect 每渲染都跑；只依赖 tabId，
+    // 消费标记已保证幂等（重新发布时新挂载的面板会重新读回新值）。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tabId]);
+
   useEffect(() => {
     void send({ type: "visible", visible: !suspended && !deviceMenuOpen && !bookmarksMenuOpen });
     // 面板挂起（切到其他标签/面板收起）时退出选择模式，避免用户回来时误点；

@@ -1,4 +1,4 @@
-import { AlertCircle, Brain, Check, ClipboardList, Code2, Eye, File, FileCode2, FileDiff, FileText, Globe2, ListTree, LoaderCircle, Maximize2, Minimize2, Pause, Pencil, Play, Plus, Server, Terminal, X } from "lucide-react";
+import { AlertCircle, Brain, Check, ClipboardList, Code2, Eye, File, FileCode2, FileDiff, FileText, Globe2, LayoutGrid, ListTree, LoaderCircle, Maximize2, Minimize2, Pause, Pencil, Play, Plus, Server, Terminal, X } from "lucide-react";
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type SyntheticEvent } from "react";
 import type { BrowserElementPick, BrowserPreviewState, WorkspaceFilePreview } from "../../../shared/protocol";
 import { IMAGE_PREVIEW_LIMIT_BYTES, workspaceFilePreviewUrl } from "../../../shared/protocol";
@@ -18,7 +18,8 @@ import { SshTerminalPanel } from "./SshTerminalPanel";
 
 export type PreviewTarget =
   | { type: "artifact"; artifact: Artifact }
-  | { type: "browser"; id?: string; title?: string; loading?: boolean }
+  /** galleryId：该浏览器标签属于哪个作品（「运行」重开时据此找旧标签；关闭时清理）。 */
+  | { type: "browser"; id?: string; title?: string; loading?: boolean; galleryId?: string }
   | { type: "terminal" }
   | { type: "ssh" }
   | { type: "ssh-terminal"; terminalId: string; hostId: string; hostName: string }
@@ -175,7 +176,7 @@ function FilePreviewContent({ file, tabId, onOpenArtifact, workspace, editorStat
   return <div className="preview-empty"><FileText size={28} /><strong>此文件无法预览</strong><span>{file.size.toLocaleString("zh-CN")} bytes</span></div>;
 }
 
-export function ArtifactPreview({ tabs, activeTabId, browserSuspended, fullscreen, onFullscreenChange, onSelectTab, onCloseTab, onOpenArtifact, onAddBrowser, onAddTerminal, onAddSsh, onAddFile, onAddReview, onAddMenuOpenChange, reviewAvailable, workspace, activeEditorState, onActiveEditorChange, onActiveEditorContentChange, onActiveEditorSaved, onActiveEditorStatusChange, onActiveEditorSaveError, onActiveEditorResolveConflict, onToggleEditing, onBrowserStateChange, onBrowserPickSend, onSshConnect }: { tabs: PreviewTab[]; activeTabId: string; browserSuspended?: boolean; fullscreen?: boolean; onFullscreenChange?(next: boolean): void; onSelectTab(id: string): void; onCloseTab(id: string): void; onOpenArtifact(artifact: Artifact): void; onAddBrowser?(): void; onAddTerminal?(): void; onAddSsh?(): void; onAddFile?(): void; onAddReview?(): void; onAddMenuOpenChange?(open: boolean): void; reviewAvailable?: boolean; workspace?: string; activeEditorState?: PreviewEditorState; onActiveEditorChange?(patch: Partial<PreviewEditorState>): void; onActiveEditorContentChange?(tabId: string, content: string): void; onActiveEditorSaved?(tabId: string, content: string): void; onActiveEditorStatusChange?(tabId: string, status: EditorSaveStatus): void; onActiveEditorSaveError?(message: string): void; onActiveEditorResolveConflict?(choice: "keep-local" | "load-remote"): void; onToggleEditing?(): void; onBrowserStateChange?(tabId: string, state: BrowserPreviewState): void; onBrowserPickSend?(pick: BrowserElementPick, note: string): void; onSshConnect?(host: import("../../../shared/protocol").SshHostSummary): void }): ReactNode {
+export function ArtifactPreview({ tabs, activeTabId, browserSuspended, fullscreen, onFullscreenChange, onSelectTab, onCloseTab, onOpenArtifact, onAddBrowser, onAddTerminal, onAddSsh, onAddFile, onAddReview, onAddMenuOpenChange, reviewAvailable, workspace, activeEditorState, onActiveEditorChange, onActiveEditorContentChange, onActiveEditorSaved, onActiveEditorStatusChange, onActiveEditorSaveError, onActiveEditorResolveConflict, onToggleEditing, onBrowserStateChange, onBrowserPickSend, onSshConnect, onPublishFile }: { tabs: PreviewTab[]; activeTabId: string; browserSuspended?: boolean; fullscreen?: boolean; onFullscreenChange?(next: boolean): void; onSelectTab(id: string): void; onCloseTab(id: string): void; onOpenArtifact(artifact: Artifact): void; onAddBrowser?(): void; onAddTerminal?(): void; onAddSsh?(): void; onAddFile?(): void; onAddReview?(): void; onAddMenuOpenChange?(open: boolean): void; reviewAvailable?: boolean; workspace?: string; activeEditorState?: PreviewEditorState; onActiveEditorChange?(patch: Partial<PreviewEditorState>): void; onActiveEditorContentChange?(tabId: string, content: string): void; onActiveEditorSaved?(tabId: string, content: string): void; onActiveEditorStatusChange?(tabId: string, status: EditorSaveStatus): void; onActiveEditorSaveError?(message: string): void; onActiveEditorResolveConflict?(choice: "keep-local" | "load-remote"): void; onToggleEditing?(): void; onBrowserStateChange?(tabId: string, state: BrowserPreviewState): void; onBrowserPickSend?(pick: BrowserElementPick, note: string): void; onSshConnect?(host: import("../../../shared/protocol").SshHostSummary): void; /** 「发布为作品」：当前打开的工作区 html/svg 文件（预览面板里的实体按钮）。 */ onPublishFile?(relativePath: string, name: string): void }): ReactNode {
   const active = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0];
   if (!active) {
     return (
@@ -236,6 +237,11 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, fullscree
   const device = deviceModes[activeTabId] ?? storedPreviewDevice();
   const fit = deviceFits[activeTabId] ?? storedPreviewFit();
   const deviceable = Boolean(artifact);
+  // 「发布为作品」：当前打开的是工作区里的 html/htm/svg 文件（或已渲染的 artifact）时出现；
+  // 服务型项目不从预览面板发布（是目录，从文件树右键发起）。
+  const publishablePath = !showSource && target.type === "file" && (target.file.kind === "html" || target.file.kind === "svg") ? target.file.relativePath : undefined;
+  const publishable = Boolean(publishablePath);
+  const title = target.type === "artifact" ? target.artifact.title : target.type === "file" ? target.file.name : "";
   const contentSize = contentSizes[activeTabId];
 
   function changeDeviceMode(id: PreviewDeviceId): void {
@@ -422,6 +428,7 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, fullscree
           {outlineable && <button className="icon-button" data-control="preview-outline-toggle" type="button" aria-pressed={outlineOpen} title={outlineOpen ? "隐藏大纲" : "显示文档大纲"} aria-label={outlineOpen ? "隐藏大纲" : "显示文档大纲"} onClick={() => setOutlineModes((prev) => ({ ...prev, [activeTabId]: !outlineOpen }))}><ListTree size={15} /></button>}
           {sourceable && <button className="icon-button" type="button" title={showSource ? "切换到预览" : "查看源代码"} aria-label={showSource ? "预览" : "源代码"} onClick={() => setSourceModes((prev) => ({ ...prev, [activeTabId]: !showSource }))}>{showSource ? <Eye size={15} /> : <Code2 size={15} />}</button>}
           {deviceable && !showSource && <PreviewDeviceMenu device={device} fit={fit} scalePercent={(stageLayout?.scale ?? 1) * 100} onDeviceChange={changeDeviceMode} onFitChange={changeDeviceFit} />}
+          {publishable && <button className="icon-button" data-control="gallery-publish" type="button" title="发布为作品（登记到作品墙，可一键运行/继续开发）" aria-label="发布为作品" onClick={() => onPublishFile?.(publishablePath!, title)}><LayoutGrid size={15} /></button>}
           {dynamic && <button className="icon-button" type="button" aria-label={paused ? "继续动态预览" : "暂停动态预览"} title={paused ? "继续" : "暂停"} onClick={() => { postPreviewAction(paused ? DYNAMIC_PREVIEW_ACTIONS.resume : DYNAMIC_PREVIEW_ACTIONS.pause); setPaused((current) => !current); }}>{paused ? <Play size={15} /> : <Pause size={15} />}</button>}
           <button className="icon-button" type="button" title={fullscreen ? "退出全屏（Esc）" : "全屏预览（预览面板覆盖整个窗口，Esc 退出）"} aria-label={fullscreen ? "退出全屏" : "全屏预览"} onClick={() => onFullscreenChange?.(!fullscreen)}>{fullscreen ? <Minimize2 size={15} /> : <Maximize2 size={15} />}</button>
           <button className="icon-button" type="button" title="关闭预览" aria-label="关闭预览" onClick={() => onCloseTab(activeTabId)}><X size={16} /></button>

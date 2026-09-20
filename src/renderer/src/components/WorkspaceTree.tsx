@@ -165,7 +165,7 @@ function TreeDialogView({ dialog, onClose }: { dialog: TreeDialog; onClose(): vo
 // 目录树自动刷新周期：轮询间隔 + 窗口聚焦时立即刷新。
 const AUTO_REFRESH_INTERVAL_MS = 3000;
 
-export function WorkspaceTree({ workspace, onOpenFile, onAddToChat, onError, refreshSignal }: { workspace: string; onOpenFile(relativePath: string): void; onAddToChat(relativePath: string): void; onError(message: string): void; refreshSignal?: number }): ReactNode {
+export function WorkspaceTree({ workspace, onOpenFile, onAddToChat, onError, onPublish, refreshSignal }: { workspace: string; onOpenFile(relativePath: string): void; onAddToChat(relativePath: string): void; onError(message: string): void; /** 发布为作品（文件 = 入口文件；目录 = 服务型项目目录）。 */ onPublish?(relativePath: string, name: string, kind: "file" | "directory"): void; refreshSignal?: number }): ReactNode {
   const [entries, setEntries] = useState<WorkspaceDirectoryEntry[]>();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
@@ -235,6 +235,11 @@ export function WorkspaceTree({ workspace, onOpenFile, onAddToChat, onError, ref
         { label: "打开预览", onClick: () => onOpenFile(relativePath) },
         { label: "添加到聊天", onClick: () => onAddToChat(relativePath) }
       ] : []),
+      // 发布入口（用户点名的实体按钮之一）：文件 → 网页型作品（入口=该文件）；
+      // 目录 → 服务型作品（入口=该目录，需补启动命令）。root 不发布（工作区整体不是作品）。
+      ...(onPublish && kind !== "root" ? [
+        { label: kind === "directory" ? "发布为作品（服务型）" : "发布为作品", onClick: () => onPublish(relativePath, name, kind) }
+      ] : []),
       {
         label: "在资源管理器中打开",
         onClick: () => {
@@ -279,7 +284,7 @@ export function WorkspaceTree({ workspace, onOpenFile, onAddToChat, onError, ref
       ] : [])
     ];
     setMenu({ x, y, items });
-  }, [onAddToChat, onError, onOpenFile, refresh, workspace]);
+  }, [onAddToChat, onError, onOpenFile, onPublish, refresh, workspace]);
 
   const openBackgroundMenu = useCallback((x: number, y: number): void => {
     openRowMenu("", "", "root", x, y);

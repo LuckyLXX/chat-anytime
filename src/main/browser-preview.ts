@@ -93,6 +93,11 @@ interface BrowserTabView {
   measureTimer?: ReturnType<typeof setTimeout>;
   /** 最近一次量测并已推送的内容尺寸（1px 死带去重）。 */
   measuredContent?: { width: number; height: number };
+  /**
+   * 渲染端声明的一次性导航意图（作品「运行」）。它不由主进程消费，而是推给
+   * 渲染端由 BrowserPreview 在挂载/切回时消费一次（见该组件的 initialUrl effect）。
+   */
+  meta?: { initialUrl?: string; galleryId?: string };
 }
 
 export class BrowserPreviewController {
@@ -238,6 +243,25 @@ export class BrowserPreviewController {
           if (!contents.isDestroyed()) contents.send("browser-preview:pick-mode", command.enabled);
         });
         break;
+      case "tab-meta": {
+        // 读（不传任何字段）：只回现成的元信息，**绝不 getOrCreate、绝不推送**——
+        // BrowserPreview 每次挂载都会读回一次，让它顺带建标签/推状态是纯粹的副作用。
+        if (command.initialUrl === undefined && command.galleryId === undefined) {
+          const existing = this.tabs.get(tabId);
+          if (!existing) break;
+          this.updateStateQuietly(tabId, { initialUrl: existing.meta?.initialUrl, galleryId: existing.meta?.galleryId });
+          break;
+        }
+        const tab = this.getOrCreate(tabId);
+        const next = { ...tab.meta };
+        if (command.initialUrl !== undefined) next.initialUrl = command.initialUrl || undefined;
+        if (command.galleryId !== undefined) next.galleryId = command.galleryId || undefined;
+        tab.meta = next;
+        // 显式 set 才推送（渲染端只消费一次 initialUrl）。每次 set 都重推一帧：
+        // 重新发布时即使值恰好相同，也要让新挂载的面板看到它。
+        this.updateState(tabId, { initialUrl: next.initialUrl, galleryId: next.galleryId });
+        break;
+      }
       case "close":
         this.disposeTab(tabId);
         break;
@@ -597,5 +621,15 @@ export class BrowserPreviewController {
     if (!wrapper) return;
     wrapper.state = { ...wrapper.state, ...update };
     this.publish(wrapper.state, tabId);
+  }
+
+  /**
+   * 只改状态、不推送（tab-meta 读路径专用）：元信息镜像本身不是状态变化，
+   * 没必要惊醒渲染端；下一次真实推送自然带上它。
+   */
+  private updateStateQuietly(tabId: string, update: Partial<BrowserPreviewState>): void {
+    const wrapper = this.tabs.get(tabId);
+    if (!wrapper) return;
+    wrapper.state = { ...wrapper.state, ...update };
   }
 }

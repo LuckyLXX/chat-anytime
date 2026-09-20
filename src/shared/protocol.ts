@@ -670,6 +670,14 @@ export interface BrowserPreviewState {
   /** 页面实测内容尺寸（scrollWidth/Height，主进程 executeJavaScript 量测后推送）；缺省=未量测。 */
   contentWidth?: number;
   contentHeight?: number;
+  /**
+   * 作品「运行」的一次性导航目标（tab-meta 命令写入，随状态推送）。渲染端只
+   * 消费一次（sessionStorage 标记）——切标签/折叠面板回来不重复导航，也不会
+   * 冲掉用户后来的手动导航。
+   */
+  initialUrl?: string;
+  /** 该标签页所属的作品 id（渲染端据此清理，防 tabId 复用串味）。 */
+  galleryId?: string;
 }
 
 export type BrowserPreviewCommand =
@@ -685,7 +693,14 @@ export type BrowserPreviewCommand =
   /** 设备视口缩放（适应窗口）：页面 CSS 视口 = bounds 宽 / factor，1 = 原始尺寸。 */
   | { type: "zoom"; tabId?: string; factor: number }
   /** 手动元素选择模式：开启后用户点击页面元素会被捕获并推送给渲染端。 */
-  | { type: "pick-mode"; tabId?: string; enabled: boolean };
+  | { type: "pick-mode"; tabId?: string; enabled: boolean }
+  /**
+   * 标签页元信息（作品「运行」用）：initialUrl 是「首次显示自动导航」目标，
+   * 渲染端只消费一次（sessionStorage 标记），因此切标签/折叠面板回来不会
+   * 重复导航、也不会把用户后来的手动导航冲掉。galleryId 标记该标签属于哪个
+   * 作品（关闭时清理；重新发布会先关旧标签从而彻底重置）。不传字段 = 不改。
+   */
+  | { type: "tab-meta"; tabId?: string; initialUrl?: string; galleryId?: string };
 
 /**
  * 手动元素选择结果：用户在预览浏览器点击元素后，页面 preload 在点击位置
@@ -819,23 +834,33 @@ export type BrowserTabsEvent =
   | { action: "automation-started"; tabId: string };
 
 /**
- * 设计导出缩略图（design_export 回执附图）。utility 请求 main 用隐藏离屏窗口
- * 渲染导出的 HTML 单文件并截图，省掉 export→navigate→wait→screenshot→recognize
- * 的五步视觉验证回路；请求经 RuntimeMessage["design-snapshot.request"] 上行、
- * 结果经 RuntimeCommand["design-snapshot.result"] 回传（与浏览器 RPC 同旁路语义）。
+ * 离屏缩略图（design_export 回执附图，作品墙缩略图共用同一控制器）。utility 请求
+ * main 用隐藏离屏窗口渲染一个本地 HTML 文件并截图，省掉 navigate→wait→screenshot
+ * 的验证回路；请求经 RuntimeMessage["design-snapshot.request"] 上行、结果经
+ * RuntimeCommand["design-snapshot.result"] 回传（与浏览器 RPC 同旁路语义）。
  */
 export interface DesignSnapshotRequest {
-  /** 导出 HTML 的绝对路径（design-store 写盘产物，workspace 内）。 */
+  /** 待渲染 HTML 的绝对路径（design 导出产物，或作品入口）。 */
   htmlPath: string;
   /** 画布 ∪ 顶层内容包围盒（exportBounds）：缩略视口按它适配缩放。 */
   contentWidth: number;
   contentHeight: number;
-  /** 截图落盘的工作区（saveBrowserScreenshot 写 .pidesktop/screenshots/）。 */
+  /** 缺省落盘模式的工作区（saveBrowserScreenshot 写 .pidesktop/screenshots/）。 */
   workspace: string;
+  /**
+   * 指定目录时**改走该目录**直写 `<prefix>-<时间戳>.png`（作品墙缩略图），
+   * 且 savedPath 返回**绝对路径**；不设时行为与 design_export 完全一致
+   * （工作区相对路径 + 20 张保留策略）。
+   */
+  thumbDir?: string;
+  /** 指定 thumbDir 时的文件名前缀，缺省 `gallery`。 */
+  thumbPrefix?: string;
+  /** 加载超时（ms），缺省 12s；外部资源多的页面可放宽。 */
+  loadTimeoutMs?: number;
 }
 
 export type DesignSnapshotResult =
-  | { ok: true; data: string; width: number; height: number; mimeType: "image/png"; savedPath: string }
+  | { ok: true; data: string; width: number; height: number; mimeType: "image/png"; /** 有 thumbDir 时是绝对路径，否则工作区相对路径。 */ savedPath: string }
   | { ok: false; error: string };
 
 /** 浏览器自动化总开关；缺省视为启用（settings.browser?.enabled !== false）。 */
@@ -872,6 +897,15 @@ export interface DesignDocSummary {
   /** 工作区相对路径。 */
   relativePath: string;
 }
+
+// —— 作品（Gallery）——
+// 作品清单是**全局跨工作区**的（一份池子，换工作区也在），落
+// `<agentDir>/pidesktop-gallery/gallery.json`，缩略图在同目录 thumbs/。
+// 运行一律走内置浏览器 + 本地静态服务（单文件/多文件/服务型统一心智）；
+// 数据模型与纯函数在 shared/gallery.ts，渲染端与主进程共用同一套判定。
+// 命名同 automation：**下划线工具名**（gallery_publish），命令用点号。
+import type { GalleryApp as GalleryAppModel, GalleryDraft as GalleryDraftModel } from "./gallery.js";
+export type { GalleryApp, GalleryDraft, GalleryKind, GalleryRunTarget } from "./gallery.js";
 
 /**
  * User terminal (PTY) hosted in the main process, rendered with xterm.js in a
@@ -1634,7 +1668,16 @@ export type RuntimeCommand =
   /** 解绑当前会话的设计文档（渲染端本地同步清空画布）。 */
   | { type: "design.close"; sessionId?: string }
   /** 拉取当前会话的设计状态：推送 design.state（若已绑定）+ design.docs（列表）。会话激活/创建后主动调一次。 */
-  | { type: "design.query"; sessionId?: string };
+  | { type: "design.query"; sessionId?: string }
+  // —— 作品（Gallery）——
+  /** 发布/更新作品（实体按钮与工具共用同一形状）：同「工作区+类型+入口」重复发布 = 更新；
+   *  成功后推送全量 gallery.apps。人操作，不过 AI 权限门。 */
+  | { type: "gallery.publish"; draft: GalleryDraftModel }
+  | { type: "gallery.remove"; id: string }
+  /** 改标题/描述/启动命令/url/排序（patch 的非法字段被忽略）。 */
+  | { type: "gallery.update"; id: string; patch: Partial<GalleryAppModel> }
+  /** 记录一次运行（lastRunAt + 清单重排）；真正的运行（开浏览器 tab）在渲染端。 */
+  | { type: "gallery.run"; id: string };
 
 export type RuntimeMessage =
   | { type: "catalog"; models: ModelOption[]; providers: ProviderOption[] }
@@ -1693,7 +1736,12 @@ export type RuntimeMessage =
   /** 工作区设计文档列表（design.list / 会话激活 / design.query 时推送，全量替换）。 */
   | { type: "design.docs"; docs: DesignDocSummary[] }
   /** 设计导出完成（design.export 命令的成功回执；失败走 error toast）。 */
-  | { type: "design.exported"; relativePath: string };
+  | { type: "design.exported"; relativePath: string }
+  // —— 作品（Gallery）推送 ——
+  /** 作品清单全量替换（发布/删除/更新/记录运行/启动时推送）。 */
+  | { type: "gallery.apps"; apps: GalleryAppModel[] }
+  /** 发布结果提示（缩略图成功/降级、以及失败原因）；渲染端 toast。 */
+  | { type: "gallery.notice"; kind: "ok" | "warn"; message: string };
 
 export interface DesktopBootstrap {
   platform: string;
@@ -1726,6 +1774,10 @@ export interface DesktopApi {
   revealInExplorer(workspace: string, relativePath?: string): Promise<void>;
   /** 读取工作区文件的名称/相对路径/体积（文件树「添加到聊天」组装附件用）。 */
   statWorkspaceFile(workspace: string, relativePath: string): Promise<WorkspaceFileStat>;
+  /** 作品「运行」：把入口本地文件映射成 loopback 静态服务地址（真实 http origin）。 */
+  galleryFileUrl(filePath: string, workspace?: string): Promise<string>;
+  /** 作品缩略图（data URL）：存在全局 agentDir，不在工作区内，故走专用只读通道；缺失返回 undefined。 */
+  galleryThumb(fileName: string): Promise<string | undefined>;
   browserPreview(command: BrowserPreviewCommand): Promise<BrowserPreviewState>;
   browserAutomationCancel(tabId: string): Promise<void>;
   terminal(command: TerminalCommand): Promise<void>;

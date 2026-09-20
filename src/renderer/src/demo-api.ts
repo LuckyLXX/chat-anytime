@@ -9,6 +9,7 @@ import type {
   DesktopApi,
   DesktopBootstrap,
   DesktopSettings,
+  GalleryApp,
   PermissionDecision,
   RecentWorkspace,
   RuntimeCommand,
@@ -28,11 +29,20 @@ import type {
 } from "../../shared/protocol";
 
 const listeners = new Set<(message: RuntimeMessage) => void>();
+/** 演示用作品清单（内存模拟；真实运行时在 agentDir 落盘）。默认给两个示例，
+ *  让作品墙与顶栏下拉在 demo 里一开始就有内容可看。 */
+const demoWorkspace = "D:\\Projects\\chat-anytime-demo";
+let demoGalleryApps: GalleryApp[] = [
+  { id: "gallery-demo-1", title: "收纳整理 App 原型", kind: "file", workspace: demoWorkspace, entry: "designs/exports/收纳整理App原型.html", description: "三屏原型：首页 / 分类 / 详情", createdAt: Date.now() - 86_400_000, updatedAt: Date.now() - 3_600_000, lastRunAt: Date.now() - 600_000 },
+  { id: "gallery-demo-2", title: "记账小工具", kind: "server", workspace: demoWorkspace, entry: "apps/ledger", command: "npm run dev", url: "http://localhost:5173", description: "本地记账 + 月度统计", createdAt: Date.now() - 172_800_000, updatedAt: Date.now() - 7_200_000 }
+];
 const browserPreviewListeners = new Set<(state: BrowserPreviewState) => void>();
 const terminalListeners = new Map<string, Set<(event: TerminalEventData) => void>>();
 const sshDataListeners = new Map<string, Set<(event: SshEventData) => void>>();
 const sshRevealListeners = new Set<(event: SshRevealEvent) => void>();
 let browserPreviewState: BrowserPreviewState = { attached: false, url: "", title: "", loading: false, canGoBack: false, canGoForward: false };
+/** 演示端的按标签元信息（tab-meta）：作品「运行」的一次性导航目标存在这里。 */
+const demoTabMeta = new Map<string, { initialUrl?: string; galleryId?: string }>();
 
 // 64x64 渐变 PNG（浏览器演示模式下的图片预览样例）。
 const demoPngData = "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";
@@ -545,6 +555,14 @@ export function createDemoApi(): DesktopApi {
     async statWorkspaceFile(_workspace: string, relativePath: string): Promise<import("../../shared/protocol").WorkspaceFileStat> {
       return { name: relativePath.split("/").at(-1) ?? relativePath, relativePath, size: 1024 };
     },
+    async galleryFileUrl(filePath: string): Promise<string> {
+      // 演示环境没有本地静态服务：给一个不可达的 loopback 地址，让浏览器 tab 的地址栏可读。
+      return `http://127.0.0.1:0/w/demo/1/${encodeURIComponent(filePath)}`;
+    },
+    async galleryThumb(): Promise<string | undefined> {
+      // 演示环境没有缩略图落盘：卡片降级为类型徽标（真实路径是 data URL）。
+      return undefined;
+    },
     async browserPreview(command: BrowserPreviewCommand): Promise<BrowserPreviewState> {
       if (command.type === "close") {
         return emitBrowserPreview({ attached: false, url: "", title: "", loading: false, canGoBack: false, canGoForward: false, error: undefined });
@@ -552,6 +570,20 @@ export function createDemoApi(): DesktopApi {
       if (command.type === "navigate") {
         const url = normalizeDemoBrowserUrl(command.url);
         return emitBrowserPreview({ attached: false, url, title: "浏览器演示", loading: false, error: "网页内容仅在 Electron 桌面窗口中显示" });
+      }
+      // tab-meta：作品「运行」的元信息。读路径只回镜像（与主进程同语义——
+      // 不传字段 = 读，绝不编造值），写路径存起来并随状态推一帧。
+      if (command.type === "tab-meta") {
+        const tabId = command.tabId ?? "default";
+        if (command.initialUrl === undefined && command.galleryId === undefined) {
+          const meta = demoTabMeta.get(tabId) ?? {};
+          return { ...structuredClone(browserPreviewState), ...meta };
+        }
+        const next = { ...demoTabMeta.get(tabId) };
+        if (command.initialUrl !== undefined) next.initialUrl = command.initialUrl || undefined;
+        if (command.galleryId !== undefined) next.galleryId = command.galleryId || undefined;
+        demoTabMeta.set(tabId, next);
+        return emitBrowserPreview(next);
       }
       // pick-mode 在浏览器演示环境无原生视图可点选，静默忽略。
       return structuredClone(browserPreviewState);
@@ -691,6 +723,33 @@ export function createDemoApi(): DesktopApi {
           // 演示端只须同步快照让画布与顶栏按钮跟随。
           updateSnapshot({ designMode: command.enabled });
           break;
+        // —— 作品（Gallery）：演示端在内存里模拟清单与推送（不落盘）。——
+        case "gallery.publish": {
+          const draft = command.draft;
+          const existing = demoGalleryApps.find((item) => item.workspace === (draft.workspace ?? demoWorkspace) && item.entry === (draft.entry ?? draft.path));
+          const app = existing
+            ? { ...existing, title: draft.title, updatedAt: Date.now() }
+            : { id: `gallery-${demoGalleryApps.length + 1}`, title: draft.title, kind: draft.kind, workspace: draft.workspace ?? demoWorkspace, entry: draft.entry ?? draft.path, createdAt: Date.now(), updatedAt: Date.now(), ...(draft.description ? { description: draft.description } : {}), ...(draft.command ? { command: draft.command } : {}), ...(draft.url ? { url: draft.url } : {}) };
+          demoGalleryApps = existing ? demoGalleryApps.map((item) => (item.id === app.id ? app : item)) : [app, ...demoGalleryApps];
+          emit({ type: "gallery.apps", apps: demoGalleryApps });
+          emit({ type: "gallery.notice", kind: "ok", message: `已发布作品「${app.title}」` });
+          break;
+        }
+        case "gallery.remove": {
+          demoGalleryApps = demoGalleryApps.filter((item) => item.id !== command.id);
+          emit({ type: "gallery.apps", apps: demoGalleryApps });
+          break;
+        }
+        case "gallery.update": {
+          demoGalleryApps = demoGalleryApps.map((item) => (item.id === command.id ? { ...item, ...command.patch, id: item.id, updatedAt: Date.now() } : item));
+          emit({ type: "gallery.apps", apps: demoGalleryApps });
+          break;
+        }
+        case "gallery.run": {
+          demoGalleryApps = demoGalleryApps.map((item) => (item.id === command.id ? { ...item, lastRunAt: Date.now() } : item));
+          emit({ type: "gallery.apps", apps: demoGalleryApps });
+          break;
+        }
         case "checkpoint.rollback": {
           // 演示：逐目标报告恢复完成（带调用 id 供渲染端标记已回滚），模拟主进程推送。
           const results = command.targets.map((target) => ({ relativePath: target.relativePath, action: "restored" as const, toolCallIds: target.toolCallIds }));
@@ -1083,6 +1142,8 @@ export function createDemoApi(): DesktopApi {
     },
     onRuntimeMessage(listener) {
       listeners.add(listener);
+      // 作品清单：订阅即补一帧（模拟真实运行时 initialize 的首次推送）。
+      queueMicrotask(() => listener({ type: "gallery.apps", apps: demoGalleryApps }));
       return () => listeners.delete(listener);
     },
     onBrowserPreviewState(_tabId: string, listener?: (state: BrowserPreviewState) => void) {

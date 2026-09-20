@@ -68,7 +68,8 @@ const toolLabels: Record<string, string> = {
   computer_screenshot: "窗口截图",
   computer_click: "桌面点击",
   computer_type: "桌面输入文本",
-  computer_press: "桌面按键"
+  computer_press: "桌面按键",
+  gallery_publish: "发布作品"
 };
 
 export function toolLabel(name: string): string {

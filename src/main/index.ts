@@ -17,6 +17,7 @@ import { BrowserPreviewController } from "./browser-preview.js";
 import { BrowserAutomationController } from "./browser-automation.js";
 import { ComputerOverlayController } from "./computer-overlay.js";
 import { DesignSnapshotController } from "./design-snapshot.js";
+import { galleryThumbsDirFor, readGalleryThumb, resolveGalleryAgentDir } from "./gallery-store.js";
 import { TerminalManager, type PtyProcess, type PtySpawnOptions } from "./terminal-pty.js";
 import { Client as Ssh2Client } from "ssh2";
 import { createSshHostStore, type SshHostCrypto } from "./ssh-host-store.js";
@@ -601,6 +602,23 @@ function registerIpc(): void {
     if (!browserAutomationController) throw new Error("浏览器自动化当前不可用");
     if (typeof tabId !== "string" || !tabId.trim()) throw new Error("标签页 id 无效");
     browserAutomationController.cancelTab(tabId);
+  });
+  // —— 作品（Gallery）：主进程侧的两个能力 ——
+  // ① 运行：把作品入口（本地文件/目录首页）映射成 loopback 静态服务的 http 地址。
+  //    为什么绕主进程：BrowserStaticServer 的实例归 BrowserAutomationController，
+  //    只有主进程持有它（页面因此拿到真实 http origin，而非 file://）。
+  ipcMain.handle("gallery:file-url", async (_event, filePath: string, workspace?: string): Promise<string> => {
+    if (!browserAutomationController) throw new Error("本地预览服务当前不可用");
+    if (typeof filePath !== "string" || !filePath.trim()) throw new Error("作品入口路径无效");
+    return browserAutomationController.fileUrl(filePath, workspace);
+  });
+  // ② 缩略图：作品清单全局跨工作区，缩略图存全局 agentDir（在工作区外），
+  //    而 pidesktop-file:// 只服务工作区内文件，所以走这条专用只读通道。
+  //    直接回 data URL（已缩到 1024 宽，单张 100–300 KB）。
+  ipcMain.handle("gallery:thumb", async (_event, fileName: string): Promise<string | undefined> => {
+    if (typeof fileName !== "string" || !fileName.trim()) return undefined;
+    const data = readGalleryThumb(galleryThumbsDirFor(resolveGalleryAgentDir()), fileName);
+    return data ? `data:image/png;base64,${data.toString("base64")}` : undefined;
   });
   ipcMain.handle("terminal:command", (_event, command: TerminalCommand): void => {
     if (!isTerminalCommand(command)) throw new Error("终端命令无效");

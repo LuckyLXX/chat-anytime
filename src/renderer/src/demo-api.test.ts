@@ -119,4 +119,31 @@ describe("demo session commands", () => {
     expect(states).toContain("http://localhost:4173");
     expect(closed).toMatchObject({ attached: false, url: "", loading: false });
   });
+  it("serves the gallery pool in demo mode (publish / update / remove / run)", async () => {
+    const api = createDemoApi();
+    // 订阅即补一帧（模拟真实运行时 initialize 的首次推送）。
+    const apps: { id: string; title: string; lastRunAt?: number }[] = [];
+    const unsubscribe = api.onRuntimeMessage((message) => {
+      if (message.type === "gallery.apps") apps.splice(0, apps.length, ...message.apps);
+    });
+    await Promise.resolve();
+    const seeded = apps.length;
+    expect(seeded).toBeGreaterThan(0);
+
+    await api.send({ type: "gallery.publish", draft: { title: "新作品", kind: "file", path: "demo/new.html" } });
+    expect(apps.some((app) => app.title === "新作品")).toBe(true);
+
+    // 同入口重复发布 = 更新而非新增（作品墙不出重复卡片）。
+    const target = apps.find((app) => app.title === "新作品")!;
+    await api.send({ type: "gallery.publish", draft: { title: "新作品改名", kind: "file", path: "demo/new.html" } });
+    expect(apps.filter((app) => app.id === target.id)).toHaveLength(1);
+    expect(apps.find((app) => app.id === target.id)?.title).toBe("新作品改名");
+
+    await api.send({ type: "gallery.run", id: target.id });
+    expect(apps.find((app) => app.id === target.id)?.lastRunAt).toBeGreaterThan(0);
+
+    await api.send({ type: "gallery.remove", id: target.id });
+    expect(apps.some((app) => app.id === target.id)).toBe(false);
+    unsubscribe();
+  });
 });

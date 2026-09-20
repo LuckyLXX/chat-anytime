@@ -1156,6 +1156,16 @@ export class BrowserAutomationController {
     if (tabId) this.cancelTab(tabId);
   }
 
+  /**
+   * 把一个本地文件映射成静态服务 URL（`http://127.0.0.1:<port>/w/<token>/<i>/…`）。
+   * 作品「运行」走的就是这条路：单文件也能跑，且页面拿到真实 http origin
+   * （相对资源、fetch、localStorage 全可用），比 file:// 直开或沙箱 iframe 都强。
+   * 公开给 index.ts 的 gallery.run 用（local-file navigation 的同一实现）。
+   */
+  fileUrl(filePath: string, workspace?: string): Promise<string> {
+    return this.staticFiles.urlForFile(filePath, workspace);
+  }
+
   dispose(): void {
     if (this.sweepTimer !== undefined) clearInterval(this.sweepTimer);
     this.sweepTimer = undefined;

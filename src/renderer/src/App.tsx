@@ -12,6 +12,7 @@ import {
   MessageSquarePlus,
   MessageCircle,
   Palette,
+  LayoutGrid,
   Puzzle,
   Search,
   Server,
@@ -87,6 +88,10 @@ import { DelegationTranscript } from "./components/DelegationTranscript";
 import { detailTitle } from "./components/QuestionPanel";
 import { compactPath, type Artifact } from "./lib/content";
 import { composePickMessage } from "./lib/browser-pick";
+import { composeGalleryDevMessage, galleryRunTarget, type GalleryApp, type GalleryDraft, type GalleryKind } from "../../shared/gallery";
+import { GalleryMenu } from "./components/GalleryMenu";
+import { GalleryWall } from "./components/GalleryWall";
+import { GalleryPublishDialog, GalleryWallDialog } from "./components/GalleryDialogs";
 import { DiffView } from "./components/DiffView";
 import { BrandMark } from "./components/BrandMark";
 import { clampPreviewSplit, PREVIEW_SPLIT_MAX, PREVIEW_SPLIT_MIN, previewSplitFromKey } from "./lib/preview-split";
@@ -1378,6 +1383,7 @@ export function App(): ReactNode {
   const permission = panePermissionRequest(permissions, paneFocusOrder);
   const question = paneQuestionRequest(questions, paneFocusOrder);
   const settings = useDesktopStore((state) => state.settings);
+  const galleryApps = useDesktopStore((state) => state.galleryApps);
   const themeAssetUrls = useThemeAssetUrls(themeAssetsForAppearance(settings.appearance));
   const [messageActionError, setMessageActionError] = useState<string>();
   const setActionError = useCallback((message?: string): void => {
@@ -1510,6 +1516,17 @@ export function App(): ReactNode {
     setDesignExportToast(`设计已导出到 ${designExported.relativePath}`);
     setTreeRefreshSignal((value) => value + 1);
   }, [designExported]);
+  // 作品发布结果 toast（gallery.notice）：成功也提示（用户需要知道发到哪了），
+  // 缩略图降级/失败走 warn 文案。
+  const galleryNotice = useDesktopStore((state) => state.galleryNotice);
+  const [galleryToast, setGalleryToast] = useState<string>();
+  const lastGalleryNoticeAtRef = useRef(0);
+  useEffect(() => {
+    if (!galleryNotice || galleryNotice.at === lastGalleryNoticeAtRef.current) return;
+    lastGalleryNoticeAtRef.current = galleryNotice.at;
+    setGalleryToast(galleryNotice.message);
+    setTreeRefreshSignal((value) => value + 1);
+  }, [galleryNotice]);
   // —— 分屏支撑：会话草稿（格子 remount 恢复）与 composer 主动写入桥 ——
   const draftsRef = useRef(new Map<string, string>());
   const draftStore = useMemo<PaneDraftStore>(() => ({
@@ -1547,6 +1564,84 @@ export function App(): ReactNode {
     }
     composerBridge.current.get(targetId)?.insertText(text);
   }, [focusedPaneId, activeSessionId]);
+  // —— 作品（Gallery）：运行分流 / 继续开发 / 发布 ——
+  //
+  // 运行一律走内置浏览器 + 本地静态服务（单文件多文件、console/网络/相对资源
+  // 全可用）；绝不用沙箱 iframe——它永不同时给 allow-scripts 与 allow-same-origin，
+  // 窗口内的作品会静默丢 localStorage / 相对路径 fetch。
+  //
+  // 标签页打开走 openPreviewTarget（定义在本块之后，且需要稳定身份给 memo 用），
+  // 所以用 ref 间接引用：runGalleryApp 只在事件回调里运行，那时 ref 必已就位。
+  const openPreviewTargetRef = useRef<(target: PreviewTarget, id?: string) => void>(() => {});
+  /** 打开终端标签页（服务型作品降级路径用它），同样后定义。 */
+  const openTerminalPreviewRef = useRef<() => void>(() => {});
+  const runGalleryApp = useCallback(async (app: GalleryApp): Promise<void> => {
+    try {
+      const target = galleryRunTarget(app);
+      // 每次「运行」都重开标签页：旧标签可能已被用户改过地址或处于错误页，
+      // 重开才能保证「运行」= 进到作品的初始页。
+      const existing = previewRef.current?.tabs.find((tab) => tab.target.type === "browser" && tab.target.galleryId === app.id);
+      if (existing) void window.piDesktop.browserPreview({ type: "close", tabId: existing.id });
+      if (target.kind === "server" && !target.url) {
+        // 服务型且未登记地址：本期不自动拉起进程（无可靠的就绪判定），降级为
+        // 「开终端 + 把命令复制到剪贴板」，让用户回车即可。
+        openTerminalPreviewRef.current();
+        if (target.command) {
+          await navigator.clipboard.writeText(target.command).catch(() => undefined);
+          setMessageActionError(`已打开终端并复制启动命令：${target.command}（回车执行后，再点一次「运行」）`);
+        } else {
+          setMessageActionError("该作品是服务型，但还没登记启动命令或地址；先在作品上点「继续开发」让 AI 补全。");
+        }
+        return;
+      }
+      const url = target.kind === "server" ? target.url! : await window.piDesktop.galleryFileUrl(target.absolutePath, app.workspace);
+      const tabId = `gallery-tab-${crypto.randomUUID()}`;
+      // 先把 tab-meta 写进主进程（initialUrl 由 BrowserPreview 消费一次），
+      // 再开标签——避免标签挂载早于元信息到达而错过首次导航。
+      await window.piDesktop.browserPreview({ type: "tab-meta", tabId, initialUrl: url, galleryId: app.id });
+      openPreviewTargetRef.current({ type: "browser", id: tabId, title: app.title, galleryId: app.id }, tabId);
+      void window.piDesktop.send({ type: "gallery.run", id: app.id }).catch(() => undefined);
+    } catch (error) {
+      setMessageActionError(error instanceof Error ? error.message : "运行作品失败");
+    }
+  }, []);
+  const developGalleryApp = useCallback((app: GalleryApp): void => {
+    const targetId = focusedPaneId ?? activeSessionId;
+    if (!targetId) {
+      setMessageActionError("请先创建或打开一个会话，再继续开发作品");
+      return;
+    }
+    composerBridge.current.get(targetId)?.insertText(composeGalleryDevMessage(app));
+  }, [focusedPaneId, activeSessionId]);
+  const publishGalleryDraft = useCallback(async (draft: GalleryDraft): Promise<void> => {
+    await window.piDesktop.send({ type: "gallery.publish", draft });
+  }, []);
+  const removeGalleryApp = useCallback(async (app: GalleryApp): Promise<void> => {
+    await window.piDesktop.send({ type: "gallery.remove", id: app.id }).catch((error) => {
+      setMessageActionError(error instanceof Error ? error.message : "移除作品失败");
+    });
+  }, []);
+  /** 「登记新作品」对话框的开合（顶栏下拉 / 作品墙 / 空态三处入口共用）。 */
+  const [galleryDraftOpen, setGalleryDraftOpen] = useState(false);
+  /** 登记对话框的预填（文件树/预览面板发起时带上入口路径与名称）。 */
+  const [galleryDraftInitial, setGalleryDraftInitial] = useState<{ path?: string; title?: string; kind?: GalleryKind } | undefined>(undefined);
+  const openGalleryDraft = useCallback((initial?: { path?: string; title?: string; kind?: GalleryKind }): void => {
+    setGalleryDraftInitial(initial);
+    setGalleryDraftOpen(true);
+  }, []);
+  /** 作品墙弹窗：有会话历史时空态不再出现，作品墙必须另外可达（顶栏下拉「打开作品墙」）。 */
+  const [galleryWallOpen, setGalleryWallOpen] = useState(false);
+  /** 空态作品墙（landing）：与弹窗共用同一份渲染，只是容器不同。 */
+  const renderGalleryLanding = useCallback((): ReactNode => (
+    <GalleryWall
+      apps={galleryApps}
+      workspace={activeWorkspace}
+      onRun={(app) => void runGalleryApp(app)}
+      onDevelop={developGalleryApp}
+      onPublish={openGalleryDraft}
+      onRemove={(app) => void removeGalleryApp(app)}
+    />
+  ), [galleryApps, activeWorkspace, runGalleryApp, developGalleryApp, removeGalleryApp, openGalleryDraft]);
   // 会话激活/创建后拉取设计状态：画布跟随焦点会话（utility 推 design.state + design.docs）。
   const designQuerySessionRef = useRef<string | undefined>(undefined);
   useEffect(() => {
@@ -2163,6 +2258,13 @@ export function App(): ReactNode {
     openPreviewTarget({ type: "terminal" }, `terminal-${crypto.randomUUID()}`);
   }
 
+  // 把后定义的两个入口回填给 runGalleryApp（作品运行的分流与开标签都靠它们）；
+  // 在每次提交后同步一次，事件回调触发时必为最新实现。
+  useEffect(() => {
+    openPreviewTargetRef.current = openPreviewTarget;
+    openTerminalPreviewRef.current = openTerminalPreview;
+  });
+
   /** 侧边栏 SSH 入口：打开主机管理 tab（固定 id 复用同一 tab，不叠加）。 */
   function openSshPanel(): void {
     openPreviewTarget({ type: "ssh" }, "ssh");
@@ -2370,7 +2472,7 @@ export function App(): ReactNode {
             <button type="button" className="workspace-tree-refresh" title="刷新文件列表" aria-label="刷新文件列表" onClick={() => setTreeRefreshSignal((signal) => signal + 1)}><RefreshCw size={13} /></button>
           </div>
           {browsingWorkspace
-            ? <WorkspaceTree key={browsingWorkspace} workspace={browsingWorkspace} onOpenFile={(relativePath) => openFilePreview(relativePath, browsingWorkspace)} onAddToChat={(relativePath) => void addFileToChat(relativePath, browsingWorkspace)} onError={(message) => setMessageActionError(message)} refreshSignal={treeRefreshSignal} />
+            ? <WorkspaceTree key={browsingWorkspace} workspace={browsingWorkspace} onOpenFile={(relativePath) => openFilePreview(relativePath, browsingWorkspace)} onAddToChat={(relativePath) => void addFileToChat(relativePath, browsingWorkspace)} onPublish={(relativePath, name, kind) => openGalleryDraft({ path: relativePath, title: name, kind: kind === "directory" ? "server" : "file" })} onError={(message) => setMessageActionError(message)} refreshSignal={treeRefreshSignal} />
             : <div className="session-list-empty">请从话题列表选择工作区</div>}
         </>
       ) : (
@@ -2493,8 +2595,8 @@ export function App(): ReactNode {
             <button className="workspace-top-button" data-control="workspace-open" type="button" onClick={() => void openWorkspace()}><FolderOpen size={15} /><span>工作区</span><strong>{compactPath(activeWorkspace)}</strong><ChevronDown size={13} /></button>
             <button className={`icon-button computer-toggle${computerMode ? " active" : ""}`} data-control="computer-toggle" type="button" disabled={!activeSessionId} aria-label={computerMode ? "关闭电脑控制" : "开启电脑控制"} aria-pressed={computerMode} title={!activeSessionId ? "请先创建或打开一个话题" : computerMode ? "关闭电脑控制（本会话将撤下 computer_* 工具）" : "电脑控制（AI 可枚举/截图/点击/输入本机窗口；本会话注入 computer_* 工具，约 580 tokens/请求）"} onClick={() => void window.piDesktop.send({ type: "session.computerMode", enabled: !computerMode }).catch((error) => setMessageActionError(error instanceof Error ? error.message : "电脑控制切换失败"))}><Computer size={18} /></button>
             <button className={`icon-button design-toggle${designMode ? " active" : ""}`} data-control="design-toggle" type="button" disabled={!activeSessionId} aria-label={designMode ? "退出设计模式" : "进入设计模式"} aria-pressed={designMode} title={!activeSessionId ? "请先创建或打开一个话题" : designMode ? "退出设计模式（本会话将不再注入设计工具）" : "设计模式（AI 设计工作台；本会话注入 design_* 工具）"} onClick={() => void window.piDesktop.send({ type: "session.designMode", enabled: !designMode }).catch((error) => setMessageActionError(error instanceof Error ? error.message : "设计模式切换失败"))}><Palette size={18} /></button>
-            <button className="icon-button preview-panel-toggle" data-control="preview-toggle" type="button" aria-label={previewOpened ? "关闭预览" : "打开预览"} title={previewOpened ? "关闭预览" : "打开预览"} onClick={() => {
-              // 顶部按钮始终完全关闭/打开预览面板：即使已有标签页也不会
+            <GalleryMenu apps={galleryApps} onRun={(app) => void runGalleryApp(app)} onDevelop={developGalleryApp} onOpenWall={() => setGalleryWallOpen(true)} onPublish={() => openGalleryDraft()} />
+            <button className="icon-button preview-panel-toggle" data-control="preview-toggle" type="button" aria-label={previewOpened ? "关闭预览" : "打开预览"} title={previewOpened ? "关闭预览" : "打开预览"} onClick={() => {              // 顶部按钮始终完全关闭/打开预览面板：即使已有标签页也不会
               // 折叠成残留一列栏+展开按钮的中间态。
               if (previewOpened) {
                 setPreviewOpened(false);
@@ -2544,6 +2646,7 @@ export function App(): ReactNode {
                   onOpenTranscript={setTranscriptTarget}
                   onActionError={setActionError}
                   onRollback={mainPaneRollback}
+                  renderLanding={renderGalleryLanding}
                 />
               </div>
             </>
@@ -2573,13 +2676,14 @@ export function App(): ReactNode {
               onOpenTranscript={setTranscriptTarget}
               onActionError={setActionError}
               onRollback={mainPaneRollback}
+              renderLanding={renderGalleryLanding}
             />
           )}
 
           {previewVisible && preview && <PreviewDivider split={previewSplit} dragging={previewDragging} onStart={startPreviewResize} onMove={movePreviewResize} onEnd={endPreviewResize} onCancel={cancelPreviewResize} onKeyDown={resizePreviewWithKeyboard} onReset={() => setPreviewSplit(50)} />}
 
           {previewVisible && <ExitWrap exiting={previewPresence.exiting}>{preview && preview.tabs.length > 0 ? (
-            <ArtifactPreview tabs={preview.tabs} activeTabId={preview.activeTabId} browserSuspended={previewDragging || settingsOpen || Boolean(permission) || Boolean(messageActionError) || previewAddMenuOpen || previewPresence.exiting} fullscreen={previewFullscreen} onFullscreenChange={setPreviewFullscreen} onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddTerminal={openTerminalPreview} onAddSsh={openSshPanel} onSshConnect={openSshTerminalHost} onAddFile={() => void openManualFilePreview()} onAddReview={openLatestReview} onAddMenuOpenChange={setPreviewAddMenuOpen} reviewAvailable={Boolean(latestReviewExecution)} workspace={activeWorkspace} activeEditorState={activePreviewTab && ((activePreviewTab.target.type === "file" && activePreviewTab.target.file.kind === "markdown") || activePreviewTab.target.type === "memory") ? getEditorState(activePreviewTab.id) : undefined} onActiveEditorChange={(patch) => { if (activePreviewTab) patchEditorState(activePreviewTab.id, patch); }} onActiveEditorContentChange={handleActiveEditorContentChange} onActiveEditorSaved={handleActiveEditorSaved} onActiveEditorStatusChange={handleActiveEditorStatusChange} onActiveEditorSaveError={(message) => setMessageActionError(`保存 ${activePreviewTab?.target.type === "file" ? activePreviewTab.target.file.name : activePreviewTab?.target.type === "memory" ? "记忆主题" : "Markdown"} 失败：${message}`)} onActiveEditorResolveConflict={(choice) => { if (activePreviewTab) handleEditorResolveConflict(activePreviewTab.id, choice); }} onToggleEditing={() => { if (activePreviewTab) patchEditorState(activePreviewTab.id, { editing: !getEditorState(activePreviewTab.id).editing }); }} onBrowserStateChange={handleBrowserStateChange} onBrowserPickSend={sendPickedElement} />
+            <ArtifactPreview tabs={preview.tabs} activeTabId={preview.activeTabId} browserSuspended={previewDragging || settingsOpen || Boolean(permission) || Boolean(messageActionError) || previewAddMenuOpen || previewPresence.exiting} fullscreen={previewFullscreen} onFullscreenChange={setPreviewFullscreen} onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddTerminal={openTerminalPreview} onAddSsh={openSshPanel} onSshConnect={openSshTerminalHost} onAddFile={() => void openManualFilePreview()} onAddReview={openLatestReview} onAddMenuOpenChange={setPreviewAddMenuOpen} reviewAvailable={Boolean(latestReviewExecution)} workspace={activeWorkspace} activeEditorState={activePreviewTab && ((activePreviewTab.target.type === "file" && activePreviewTab.target.file.kind === "markdown") || activePreviewTab.target.type === "memory") ? getEditorState(activePreviewTab.id) : undefined} onActiveEditorChange={(patch) => { if (activePreviewTab) patchEditorState(activePreviewTab.id, patch); }} onActiveEditorContentChange={handleActiveEditorContentChange} onActiveEditorSaved={handleActiveEditorSaved} onActiveEditorStatusChange={handleActiveEditorStatusChange} onActiveEditorSaveError={(message) => setMessageActionError(`保存 ${activePreviewTab?.target.type === "file" ? activePreviewTab.target.file.name : activePreviewTab?.target.type === "memory" ? "记忆主题" : "Markdown"} 失败：${message}`)} onActiveEditorResolveConflict={(choice) => { if (activePreviewTab) handleEditorResolveConflict(activePreviewTab.id, choice); }} onToggleEditing={() => { if (activePreviewTab) patchEditorState(activePreviewTab.id, { editing: !getEditorState(activePreviewTab.id).editing }); }} onBrowserStateChange={handleBrowserStateChange} onBrowserPickSend={sendPickedElement} onPublishFile={(relativePath, name) => openGalleryDraft({ path: relativePath, title: name, kind: "file" })} />
           ) : (
             <ArtifactPreview key="empty-state" tabs={[]} activeTabId="" onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddTerminal={openTerminalPreview} onAddSsh={openSshPanel} onSshConnect={openSshTerminalHost} onAddFile={() => void openManualFilePreview()} onBrowserPickSend={sendPickedElement} />
           )}</ExitWrap>}
@@ -2590,6 +2694,25 @@ export function App(): ReactNode {
       {settingsPresence.rendered && <ExitWrap exiting={settingsPresence.exiting}><SettingsDialog settings={settings} models={models} providers={providers} customProvider={customProvider} customModels={customModels} customModelFetchStatus={customModelFetchStatus} customModelFetchError={customModelFetchError} modelRefreshStatus={modelRefreshStatus} modelRefreshError={modelRefreshError} modelRefreshProvider={modelRefreshProvider} resources={resources} workspaceOpen={Boolean(activeWorkspace)} initialTab={settingsInitialTab} onClose={() => { setSettingsOpen(false); setSettingsInitialTab(undefined); }} onCreateInSession={() => void createNewSession()} /></ExitWrap>}
       {permissionPresence.rendered && (() => { const permission = permissionPresence.value; return permission ? <ExitWrap exiting={permissionPresence.exiting}><PermissionDialog request={permission} sessionTitle={sessionSummaries.find((item) => item.id === permission.principal.sessionId)?.title} /></ExitWrap> : null; })()}
       {transcriptPresence.rendered && (() => { const transcriptTarget = transcriptPresence.value; return transcriptTarget ? <ExitWrap exiting={transcriptPresence.exiting}><DelegationTranscript delegation={transcriptTarget} onClose={() => setTranscriptTarget(undefined)} onOpenArtifact={openArtifactPreview} /></ExitWrap> : null; })()}
+      {galleryWallOpen && (
+        <GalleryWallDialog
+          apps={galleryApps}
+          workspace={activeWorkspace}
+          onRun={(app) => { setGalleryWallOpen(false); void runGalleryApp(app); }}
+          onDevelop={(app) => { setGalleryWallOpen(false); developGalleryApp(app); }}
+          onRemove={(app) => void removeGalleryApp(app)}
+          onPublish={() => { setGalleryWallOpen(false); openGalleryDraft(); }}
+          onClose={() => setGalleryWallOpen(false)}
+        />
+      )}
+      {galleryDraftOpen && (
+        <GalleryPublishDialog
+          initial={galleryDraftInitial}
+          workspace={activeWorkspace}
+          onSubmit={(draft) => { void publishGalleryDraft(draft).catch((error) => setMessageActionError(error instanceof Error ? error.message : "发布失败")); }}
+          onClose={() => { setGalleryDraftOpen(false); setGalleryDraftInitial(undefined); }}
+        />
+      )}
       {contextMenu && <ContextMenu x={contextMenu.x} y={contextMenu.y} items={contextMenu.items} onClose={() => setContextMenu(null)} />}
       {renamePresence.rendered && (() => { const renameSession = renamePresence.value; if (!renameSession) return null; return (
         <ExitWrap exiting={renamePresence.exiting}>
@@ -2643,6 +2766,9 @@ export function App(): ReactNode {
       )}
       {designExportToast && (
         <div className="error-toast checkpoint-toast"><Palette size={18} /><span>{designExportToast}</span><button className="icon-button" type="button" title="关闭提示" aria-label="关闭提示" onClick={() => setDesignExportToast(undefined)}><X size={16} /></button></div>
+      )}
+      {galleryToast && (
+        <div className="error-toast checkpoint-toast"><LayoutGrid size={18} /><span>{galleryToast}</span><button className="icon-button" type="button" title="关闭提示" aria-label="关闭提示" onClick={() => setGalleryToast(undefined)}><X size={16} /></button></div>
       )}
       {automationToast && (
         <div className={`error-toast checkpoint-toast${automationToast.runId ? " with-action" : ""}`}><Zap size={18} /><span>{automationToast.message}</span>{automationToast.runId && <button className="toast-action" type="button" title="打开运行记录" aria-label="查看运行结果" onClick={() => viewAutomationRun(automationToast.runId!)}>查看结果</button>}<button className="icon-button" type="button" title="关闭提示" aria-label="关闭提示" onClick={() => setAutomationToast(undefined)}><X size={16} /></button></div>
