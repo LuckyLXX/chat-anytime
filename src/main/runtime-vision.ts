@@ -17,7 +17,11 @@ import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { Api, Context, ImageContent, Model } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { formatVisionBlock, recognizeImages } from "./vision.js";
+import { formatVisionBlock, recognizeImages, writeFieldTextOnce } from "./vision.js";
+
+// 文本助手（Jev 通路用）与视觉识别共用同一个 completeSimple 通道，转发在此处，
+// 让 pi-runtime 只需要一个 runtimeVision 入口。
+export { writeFieldTextOnce };
 
 /** Max image size for model-supplied image files (matches prompt attachments). */
 export const MAX_VISION_FILE_BYTES = 20 * 1024 * 1024;

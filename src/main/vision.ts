@@ -102,6 +102,55 @@ export async function recognizeImages(caller: VisionModelCaller, model: Model<Ap
 }
 
 /**
+ * 一次性文本补全（Jev 通路的文本助手：只为**已选定的字段**生成值）。
+ *
+ * 与 recognizeImages 同一个调用接口（VisionModelCaller 只是 completeSimple 的
+ * 结构化切片，不绑定图片语义），但这条路径上**没有图片**：输入是 JSON 上下文，
+ * 输出必须是一个只含 `text` 的 JSON 对象。解析失败一律抛错——绝不把模型的解说
+ * 词当成字段值填进页面。
+ */
+export async function writeFieldTextOnce(
+  caller: VisionModelCaller,
+  model: Model<Api>,
+  options: { systemPrompt: string; context: unknown; timeoutMs?: number }
+): Promise<{ text: string; model: string }> {
+  const controller = new AbortController();
+  let rejectTimeout: ((error: Error) => void) | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => { rejectTimeout = reject; });
+  const timer = setTimeout(() => {
+    controller.abort();
+    rejectTimeout?.(new Error(VISION_TIMEOUT_MESSAGE));
+  }, options.timeoutMs ?? 60_000);
+  try {
+    const result = await Promise.race([
+      caller.completeSimple(model, {
+        systemPrompt: options.systemPrompt,
+        messages: [{ role: "user", content: JSON.stringify(options.context), timestamp: Date.now() }]
+      }, { signal: controller.signal }),
+      timeoutPromise
+    ]);
+    const raw = assistantText(result).replace(/^```(?:json)?\s*|\s*```$/gu, "").trim();
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new Error("文本助手没有返回合法 JSON，本次不填入任何内容。");
+    }
+    const output = parsed as { text?: unknown };
+    const value = typeof output?.text === "string" ? output.text.trim() : "";
+    if (!value) throw new Error("文本助手没有给出字段值（返回空），本次不填入任何内容。");
+    return { text: value, model: `${model.provider}/${model.id}` };
+  } catch (error) {
+    if (error instanceof Error && (error.message === VISION_TIMEOUT_MESSAGE || error.name === "AbortError")) {
+      throw new Error("文本助手请求超时（60 秒），本次不填入任何内容。");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * Format recognition results as the delimited block returned to the calling
  * model. Optional per-image labels (e.g. file names for model-supplied image
  * paths) appear in the header; user attachments carry no label. The wording

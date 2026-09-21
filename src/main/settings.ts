@@ -1,6 +1,12 @@
 import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { THEME_PRESET_IDS } from "../shared/protocol.js";
+import {
+  JEV_DEFAULT_BASE_URL,
+  JEV_DEFAULT_MAX_STEPS,
+  JEV_DEFAULT_MODEL,
+  JEV_MAX_STEPS_LIMIT,
+  THEME_PRESET_IDS
+} from "../shared/protocol.js";
 import { normalizeThinkingLevelMap } from "../shared/thinking-levels.js";
 import { normalizePinnedSessionPaths } from "./session-scope.js";
 import type {
@@ -18,6 +24,7 @@ import type {
   DivBubbleMode,
   HooksSettings,
   InterfaceTuning,
+  JevSettings,
   MemorySettings,
   SshSettings,
   ProviderModelSettings,
@@ -302,6 +309,37 @@ export function normalizeSsh(value: unknown): SshSettings | undefined {
   return { enabled: (value as Record<string, unknown>).enabled !== false };
 }
 
+/**
+ * Jev 配置规范化。与其它总闸最大的不同：`enabled` **缺省 = 关闭**
+ * （`=== true` 才算开），因为它是内网拿不到的增强选项——未开就不该付工具描述的前缀成本。
+ *
+ * 非法/缺失字段一律回落默认值而不是丢弃整条配置：用户在设置页改了一项不该把其它项清零。
+ * 全未填充且未开启时返回 undefined，让 settings.json 保持干净（同 normalizeVision 的收敛口径）。
+ */
+export function normalizeJev(value: unknown): JevSettings | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const source = value as Record<string, unknown>;
+  const enabled = source.enabled === true;
+  const baseUrl = typeof source.baseUrl === "string" && source.baseUrl.trim()
+    ? source.baseUrl.trim().replace(/\/+$/, "")
+    : JEV_DEFAULT_BASE_URL;
+  const model = typeof source.model === "string" && source.model.trim() ? source.model.trim() : JEV_DEFAULT_MODEL;
+  const textProvider = typeof source.textProvider === "string" ? source.textProvider.trim() : "";
+  const textModel = typeof source.textModel === "string" ? source.textModel.trim() : "";
+  const rawSteps = typeof source.maxSteps === "number" && Number.isFinite(source.maxSteps) ? Math.round(source.maxSteps) : JEV_DEFAULT_MAX_STEPS;
+  const maxSteps = Math.min(JEV_MAX_STEPS_LIMIT, Math.max(1, rawSteps));
+  if (!enabled && !textProvider && !textModel && source.baseUrl === undefined && source.model === undefined && source.maxSteps === undefined) return undefined;
+  return {
+    enabled,
+    baseUrl,
+    model,
+    textProvider,
+    textModel,
+    maxSteps,
+    autoPilot: source.autoPilot !== false
+  };
+}
+
 // —— 每助手工作区记忆 + 默认工作区（2026-09-03 方案 B）——
 
 /**
@@ -455,6 +493,7 @@ export function migrateSettings(raw: unknown): { settings: DesktopSettings; lega
     design: normalizeDesign(source.design),
     checkpoint: normalizeCheckpoint(source.checkpoint),
     ssh: normalizeSsh(source.ssh),
+    jev: normalizeJev(source.jev),
     ...(pinnedSessionPaths ? { pinnedSessionPaths } : {})
   };
   const legacyApiKey = typeof source.customProviderApiKey === "string" ? source.customProviderApiKey : undefined;

@@ -271,15 +271,20 @@ export interface DesktopSettings {
   currentAgentId: string;
   appearance: AppearanceSettings;
   vision?: VisionSettings;
+  /** 长期记忆总开关（见 MemorySettings）。 */
   memory?: MemorySettings;
   hooks?: HooksSettings;
   browser?: BrowserSettings;
+  /** Jev 快速决策通路（实验性，缺省关闭）。 */
+  jev?: JevSettings;
   computer?: ComputerSettings;
   design?: DesignSettings;
   checkpoint?: CheckpointSettings;
   ssh?: SshSettings;
   customProvider?: CustomProviderSettings;
   customProviderKeyConfigured?: boolean;
+  /** 仅由主进程 bootstrap 填充：TypeSafe 密钥是否已保存（明文永不进 settings.json，也永不跨进程）。 */
+  jevKeyConfigured?: boolean;
   pinnedSessionPaths?: string[];
 }
 
@@ -750,6 +755,15 @@ export type BrowserAutomationRequest =
   /** workspace：本地文件导航（file:// / 绝对路径）挂载静态预览服务的优先根目录。 */
   | { op: "navigate"; url: string; workspace?: string }
   | { op: "snapshot" }
+  /**
+   * Jev（TypeSafe 快速决策通路）三个原语。它们与 @eN 体系**互不相干**：
+   * 元素身份用页面侧 WeakMap 分配的稳定数字 nodeId，而不是「第 N 个被收集到的
+   * 元素 + 签名」。循环本身在工具层（runtime-jev.ts），主进程只负责「读一帧页面」
+   * 与「执行一个已决策的动作」，因此每一步都是各自计时的独立操作。
+   */
+  | { op: "jevObserve" }
+  | { op: "jevAct"; nodeId: number; action: JevAction; text?: string }
+  | { op: "jevReset" }
   | { op: "click"; ref: string }
   | { op: "type"; ref: string; text: string; mode: "fill" | "append" }
   | { op: "press"; key: string }
@@ -774,6 +788,10 @@ export type BrowserAutomationData =
   /** pending=true：导航已放行但页面仍在加载（loadURL 预算内未 settle；不是失败）。 */
   | { kind: "navigate"; url: string; title: string; pending?: boolean }
   | { kind: "snapshot"; text: string; refCount: number; truncated: boolean }
+  /** Jev 观察：结构化的元素表（不回传给人看的文本格式），字节更省。 */
+  | { kind: "jevObserve"; page: JevObservePage }
+  | { kind: "jevAct"; description: string }
+  | { kind: "jevReset" }
   | { kind: "click"; description: string }
   | { kind: "type"; description: string }
   | { kind: "press"; key: string }
@@ -826,6 +844,62 @@ export interface BrowserTabSummary {
   active: boolean;
 }
 
+/**
+ * Jev 通路观察到的单个元素。`nodeId` 由页面侧 WeakMap 分配（同一真实 DOM 节点
+ * 在同一文档里恒得同一个 id），因此它比 @eN 的索引稳定——但**不是跨导航的句柄**：
+ * 导航即整表失效。执行前仍要重新校验连接性/可见性/状态/几何/遮挡。
+ */
+export interface JevObserveItem {
+  nodeId: number;
+  /**
+   * 观察时的元素签名（页面侧同一函数生成，执行前重新计算并逐字节比对）。
+   * 放在页面侧生成是因为主进程侧的另算必定与页面侧的字段/顺序漂移，
+   * 而那会把「签名不等」变成假阳性（每次操作都报「页面已变化」）。
+   */
+  sig: string;
+  /** 推导后的无障碍角色（button/link/textbox/combobox/checkbox/radio/option/…）。 */
+  role: string;
+  /** 可读名（aria-label → name → placeholder → alt → title → 文本，截断到 80 字符）。 */
+  label: string;
+  value?: string;
+  checked?: boolean | null;
+  selected?: boolean | null;
+  expanded?: boolean | null;
+  /** 可输入（textbox/searchbox/可编辑 combobox 且未只读）。 */
+  editable?: boolean;
+  /** `<select>` 的候选选项（不含当前已选中项）。 */
+  options?: { index: string; label: string; value: string }[];
+  /** 视口内可见但中心点被挡住时的遮挡者描述（仅前若干元素探测，其余为 null）。 */
+  obstructedBy?: string | null;
+  x: number;
+  y: number;
+}
+
+/** Jev 通路的一帧页面观察。 */
+export interface JevObservePage {
+  url: string;
+  title: string;
+  pageText: string;
+  /** 当前滚动位置与文档高度（决定是否提供 SCROLL_UP / SCROLL_DOWN）。 */
+  scroll: {
+    y: number;
+    height: number;
+    /** 视口高度（必要时工具层自行填；缺省视为不能向下滚动，宁可少给一个动作）。 */
+    viewH?: number;
+    /** 页面自己是否声明还能向下滚（只有真能滚才给 SCROLL_DOWN）。 */
+    canDown?: boolean;
+  };
+  items: JevObserveItem[];
+  /** 超出观察上限被丢弃的元素数（>0 时页面过大，决策可能不完整）。 */
+  omitted?: number;
+}
+
+/** Jev 已决策的动作（只允许这三种 + 工具层的 WAIT/滚动，模型永不产出选择器）。 */
+export type JevAction =
+  | { kind: "click" }
+  | { kind: "fill" }
+  | { kind: "select"; optionIndex: number };
+
 /** 标签页生命周期推送：AI（或用户）创建/关闭标签页时通知渲染端同步预览面板。 */
 export type BrowserTabsEvent =
   | { action: "created"; tabId: string; url: string }
@@ -866,6 +940,39 @@ export type DesignSnapshotResult =
 /** 浏览器自动化总开关；缺省视为启用（settings.browser?.enabled !== false）。 */
 export interface BrowserSettings {
   enabled: boolean;
+}
+
+/**
+ * Jev（TypeSafe）快速决策通路的实验性配置。
+ *
+ * 语义与 browser/ssh/computer 三个总闸**刻意相反**：缺省 = 关闭。原因是它是
+ * 增强选项——大多数部署（内网）碰不到 api.typesafe.ai，开启只会白付一份工具
+ * 描述的前缀成本；用户必须在设置里显式打开并填好密钥才能拿到 browser_jev_run。
+ *
+ * TypeSafe 密钥不进本结构（走 credentials.json 的 safeStorage 通道，provider
+ * apiKey 同款纪律）；渲染端只通过 bootstrap 的 jevKeyConfigured 布尔值知道
+ * 「是否已保存」。
+ */
+/** Jev 通路的缺省端点/模型/步数上限（单一来源：settings 归一化与工具层都从这里取）。 */
+export const JEV_DEFAULT_BASE_URL = "https://api.typesafe.ai/v1";
+export const JEV_DEFAULT_MODEL = "jev-latest";
+export const JEV_DEFAULT_MAX_STEPS = 30;
+export const JEV_MAX_STEPS_LIMIT = 100;
+
+export interface JevSettings {
+  /** 缺省 false：未显式开启时不注入 browser_jev_run，也不读任何密钥。 */
+  enabled: boolean;
+  /** TypeSafe 兼容端点（含 /v1）。默认官方；可填自建网关，内网离线部署的唯一入口。 */
+  baseUrl: string;
+  /** Jev 模型名，默认 jev-latest（可 pin 版本）。 */
+  model: string;
+  /** TYPE_TEXT 写字段值用的已配置模型（Jev 只做选择，不生成文本）。 */
+  textProvider: string;
+  textModel: string;
+  /** 单次 browser_jev_run 的动作步数上限（1–100，默认 30）。 */
+  maxSteps: number;
+  /** 自动驾驶：false 时走完一步就把控制权交回主模型（默认 true）。 */
+  autoPilot?: boolean;
 }
 
 /** 电脑控制（computer_* 桌面窗口控制）总闸；缺省视为启用（settings.computer?.enabled !== false）。
@@ -1598,7 +1705,7 @@ export type RuntimeCommand =
   | { type: "agent.select"; agentId: string }
   | { type: "agent.save"; agent: AgentProfile }
   | { type: "agent.archive"; agentId: string; archived: boolean }
-  | { type: "settings.save"; settings: Pick<DesktopSettings, "model" | "thinkingLevel" | "accessMode" | "appearance" | "browser" | "computer" | "design" | "ssh" | "defaultWorkspace"> }
+  | { type: "settings.save"; settings: Pick<DesktopSettings, "model" | "thinkingLevel" | "accessMode" | "appearance" | "browser" | "computer" | "design" | "ssh" | "jev" | "defaultWorkspace"> }
   | { type: "model.select"; provider: string; id: string; sessionId?: string }
   | { type: "thinking.select"; level: ThinkingLevel; sessionId?: string }
   | { type: "auth.set"; provider: string; apiKey: string }
@@ -1608,6 +1715,9 @@ export type RuntimeCommand =
   | { type: "provider.models.fetch"; providerId: string; baseUrl: string; apiKey?: string }
   | { type: "provider.models.refresh"; providerId: string }
   | { type: "vision.save"; vision: VisionSettings }
+  /** Jev 配置 + 可选新密钥（密钥落 credentials.json，配置落 settings.json）。 */
+  | { type: "jev.save"; jev: JevSettings; apiKey?: string }
+  | { type: "jev.clearKey" }
   | { type: "memory.save"; memory: MemorySettings }
   | { type: "memory.create"; topic: string; description: string; content: string; workspaceScoped?: boolean }
   | { type: "memory.update"; topic: string; description: string; content: string }

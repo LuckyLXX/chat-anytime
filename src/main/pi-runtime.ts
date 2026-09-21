@@ -100,6 +100,7 @@ import {
   type GalleryDraft
 } from "../shared/gallery.js";
 import * as runtimeGallery from "./runtime-gallery.js";
+import * as runtimeJev from "./runtime-jev.js";
 import { assistantText, createSubagentTools, buildSubagentPromptBlock, type SubagentContext } from "./subagent.js";
 import { readSubagents, saveSubagent, deleteSubagent, saveSubagentModelOverride } from "./subagents-store.js";
 import type { SubagentDefinition, SubagentScope, DelegationProgress, SlashInvocation } from "../shared/protocol.js";
@@ -189,6 +190,8 @@ let automationRuns: AutomationRunRecord[] = [];
 /** 自动化调度器（每分 tick，串行执行）；initialize 创建、utility 进程结束随进程清理。 */
 let automationScheduler: AutomationScheduler | undefined;
 let apiKeys: Record<string, string> = {};
+/** TypeSafe（Jev）密钥在 apiKeys 里的条目名（与 main 侧 credentials.json 的键一致）。 */
+const JEV_CREDENTIAL_ID = "typesafe";
 let visionModel: Model<Api> | undefined;
 let currentAgent: AgentProfile | undefined;
 // Transient whole-runtime transition (agent switch / profile apply): overlays
@@ -256,6 +259,10 @@ interface SessionRuntimeRecord {
   designTools: ToolDefinition[];
   /** 作品发布工具（gallery_publish）；单个轻量定义，无条件激活。 */
   galleryTools: ToolDefinition[];
+  /** Jev 快速决策通路（browser_jev_run，实验性、缺省关闭）。 */
+  jevTools: ToolDefinition[];
+  /** Jev 总闸的实时读取（settings.jev?.enabled === true，缺省关闭）；活动集重算时用。 */
+  jevGlobalEnabled: () => boolean;
   /** 设计模式总闸的实时读取（settings.design?.enabled !== false）；活动集重算时用。 */
   designGlobalEnabled: () => boolean;
   /** 电脑控制总闸的实时读取（settings.computer?.enabled !== false）；活动集重算时用。 */
@@ -1785,8 +1792,8 @@ function wrapModelRuntimeForVision(runtime: ModelRuntime): ModelRuntime {
  * customTools arrays are held by reference inside Pi, so hot-path updates
  * rebuild in place (`length = 0` + push) instead of swapping the array.
  */
-function buildRecordTools(record: Pick<SessionRuntimeRecord, "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "planTools" | "visionTools" | "browserTools" | "sshTools" | "computerTools" | "automationTools" | "designTools" | "galleryTools">): ToolDefinition[] {
-  return [...mcpTools, ...record.subagentTools, ...record.todoTools, ...record.memoryTools, ...record.questionTools, ...record.planTools, ...record.visionTools, ...record.browserTools, ...record.sshTools, ...record.computerTools, ...record.automationTools, ...record.designTools, ...record.galleryTools];
+function buildRecordTools(record: Pick<SessionRuntimeRecord, "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "planTools" | "visionTools" | "browserTools" | "sshTools" | "computerTools" | "automationTools" | "designTools" | "galleryTools" | "jevTools">): ToolDefinition[] {
+  return [...mcpTools, ...record.subagentTools, ...record.todoTools, ...record.memoryTools, ...record.questionTools, ...record.planTools, ...record.visionTools, ...record.browserTools, ...record.sshTools, ...record.computerTools, ...record.automationTools, ...record.designTools, ...record.galleryTools, ...record.jevTools];
 }
 
 /**
@@ -1806,7 +1813,7 @@ function buildRecordTools(record: Pick<SessionRuntimeRecord, "subagentTools" | "
  * asked for in a coding/document chat is pure prefix waste, and its global
  * switch is a capability toggle (下架), not a per-call gate.
  */
-function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "planTools" | "visionTools" | "browserTools" | "sshTools" | "computerTools" | "automationTools" | "designTools" | "galleryTools" | "designMode" | "computerMode" | "designGlobalEnabled" | "computerGlobalEnabled" | "unattended">, includeVision: boolean): string[] {
+function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "planTools" | "visionTools" | "browserTools" | "sshTools" | "computerTools" | "automationTools" | "designTools" | "galleryTools" | "jevTools" | "designMode" | "computerMode" | "designGlobalEnabled" | "computerGlobalEnabled" | "jevGlobalEnabled" | "unattended">, includeVision: boolean): string[] {
   const builtin = Object.entries(record.agent.tools ?? {}).filter(([, enabled]) => enabled).map(([name]) => name);
   return [
     ...builtin,
@@ -1837,7 +1844,11 @@ function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "subagentTool
     // 作品发布工具只有一个且很轻（≈200 tokens/请求），因此**无条件激活**
     // （同 automation 策略）——它服务的是「做完就发布」这个随时可能发生的动作，
     // 做成开关只会让用户/模型多用一次才能找到它。
-    ...record.galleryTools.map((tool) => tool.name)
+    ...record.galleryTools.map((tool) => tool.name),
+    // Jev 工具同样按开关注入（而不是 browser 那种常驻激活）：它的描述与内部指令块
+    // 远大于普通工具，而绝大多数部署（内网）根本连不到 TypeSafe——不该替它们付这份
+    // 前缀成本。开关 = settings.jev.enabled（缺省关闭），会话内不变则前缀整段有效。
+    ...(record.jevGlobalEnabled() ? record.jevTools.map((tool) => tool.name) : [])
   ];
 }
 
@@ -2977,6 +2988,38 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     publish: (draft) => publishGalleryApp(draft, recordWorkspace || undefined),
     list: () => galleryApps
   });
+  // Jev 快速决策通路（实验性，缺省关闭）：循环在工具层，每一步通过既有 browser RPC
+  // 落到主进程的 CDP 控制器（jevObserve/jevAct/jevReset），因此不碰任何现有 browser_* 行为。
+  // 文本助手从**本记录可见的已配置模型**里解析（settings.jev.textProvider/textModel），
+  // 走同一个 ModelRuntime.completeSimple 通道（视觉识别同款）；apiKey 走 credentials.json
+  // 下发的内存镜像，永不落进 settings。
+  const jevTools = runtimeJev.buildJevTools({
+    request: (op) => requestBrowserAutomation(recordSessionId, op),
+    enabled: () => settings?.jev?.enabled === true,
+    settings: () => settings?.jev,
+    apiKey: () => apiKeys[JEV_CREDENTIAL_ID]?.trim() || undefined,
+    callJev: (query) => {
+      const jev = settings?.jev;
+      const key = apiKeys[JEV_CREDENTIAL_ID]?.trim();
+      if (!jev || !key) throw new Error("Jev 未配置（缺少接口地址或 TypeSafe API Key）");
+      return runtimeJev.makeJevCaller({ baseUrl: jev.baseUrl, apiKey: key })(query);
+    },
+    writeFieldText: async (request) => {
+      const jev = settings?.jev;
+      const target = jev && modelRuntime ? modelRuntime.getModel(jev.textProvider, jev.textModel) : undefined;
+      if (!target || !modelRuntime) throw new Error(`Jev 的文本助手模型不可用：${jev?.textProvider ?? ""}/${jev?.textModel ?? ""}（请在设置的模型服务里配置后重选）`);
+      const result = await runtimeVision.writeFieldTextOnce(modelRuntime, target, {
+        systemPrompt: runtimeJev.TEXT_VALUE_PROMPT,
+        context: {
+          goal: request.goal,
+          field: request.action,
+          page: { title: request.page.title, text: request.page.text.slice(0, 6000) },
+          recent_actions: request.recentActions.slice(-6)
+        }
+      });
+      return result.text;
+    }
+  });
   // 可单独终止的 shell 工具：同名 customTools 覆盖内建 bash/powershell（工厂与
   // 选项同 Pi 内部构造，schema/description 字节不变、不影响前缀缓存）。任务面板
   // 「按命令停止」经 record.shellKill 只杀该调用的进程树，会话继续本轮。
@@ -2988,7 +3031,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   // Each record owns its customTools array: Pi stores it by reference and
   // re-reads it on every tool-registry refresh, so per-record arrays let parked
   // sessions keep their tool set while the active one hot-swaps MCP tools.
-  const recordCustomTools: ToolDefinition[] = [shellKill.tools[0]!, shellKill.tools[1]!, ...mcpTools, ...subagentTools, ...todoTools, ...memoryTools, ...questionTools, ...planTools, ...visionTools, ...browserTools, ...sshTools, ...computerTools, ...automationTools, ...designTools, ...galleryTools];
+  const recordCustomTools: ToolDefinition[] = [shellKill.tools[0]!, shellKill.tools[1]!, ...mcpTools, ...subagentTools, ...todoTools, ...memoryTools, ...questionTools, ...planTools, ...visionTools, ...browserTools, ...sshTools, ...computerTools, ...automationTools, ...designTools, ...galleryTools, ...jevTools];
   const result = await createAgentSession({
     cwd: recordWorkspace,
     modelRuntime,
@@ -3069,6 +3112,8 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     automationTools,
     designTools,
     galleryTools,
+    jevTools,
+    jevGlobalEnabled: () => settings?.jev?.enabled === true,
     designGlobalEnabled: () => settings?.design?.enabled !== false,
     computerGlobalEnabled: () => settings?.computer?.enabled !== false,
     shellKill,
@@ -4233,6 +4278,20 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       visionModel = modelRuntime ? resolveVisionModel(command.vision, modelRuntime, (model) => hasImageInput(model)) : undefined;
       break;
     }
+    // Jev 配置镜像与密钥写入（utility 侧）。密钥只进 apiKeys 内存表：它随 initialize
+    // 整包下发（main 侧 credentialsCache），所以这里写入后同一进程内立即生效；
+    // 下一次启动仍由 initialize 重放。总闸翻转要重算活动集（browser_jev_run 的注入
+    // 与否 = 前缀是否变化），否则已开会话要等重启才能拿到/丢掉工具。
+    case "jev.save": {
+      const switchChanged = (settings?.jev?.enabled === true) !== (command.jev?.enabled === true);
+      if (settings) settings.jev = command.jev;
+      if (command.apiKey?.trim()) apiKeys[JEV_CREDENTIAL_ID] = command.apiKey.trim();
+      if (switchChanged) for (const record of liveSessions.values()) reconcileActiveTools(record);
+      break;
+    }
+    case "jev.clearKey":
+      delete apiKeys[JEV_CREDENTIAL_ID];
+      break;
     case "memory.save": {
       // 快照/治理块按会话冻结，开关自下一个会话生效；工具 execute 实时判断。
       if (settings) settings.memory = command.memory;
@@ -4314,6 +4373,9 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       const designSwitchChanged = (settings.design?.enabled !== false) !== (command.settings.design?.enabled !== false);
       // 电脑控制总闸同理：它同时是能力下架开关与会话级注入的总闸。
       const computerSwitchChanged = (settings.computer?.enabled !== false) !== (command.settings.computer?.enabled !== false);
+      // Jev 总闸同理（缺省关闭：=== true 才算开）：它决定 browser_jev_run 是否注入
+      // 本次请求的活动工具集，所以翻转必须重算，否则已开的会话要等重启才生效。
+      const jevSwitchChanged = (settings.jev?.enabled === true) !== (command.settings.jev?.enabled === true);
       settings.model = command.settings.model;
       settings.thinkingLevel = command.settings.thinkingLevel;
       settings.accessMode = command.settings.accessMode;
@@ -4322,6 +4384,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       // browser 工具常驻激活、execute 实时读镜像；computer/design 总闸额外要重算活动集
       // （它们决定 computer_* / design_* 是否注入前缀）——在下方完成镜像赋值后统一 reconcile。
       settings.browser = command.settings.browser;
+      settings.jev = command.settings.jev;
       settings.computer = command.settings.computer;
       settings.design = command.settings.design;
       settings.ssh = command.settings.ssh;
@@ -4338,7 +4401,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         // 总闸刚被切换（settings.design.enabled / settings.computer.enabled）：工具的注入
         // 由它们把关，重算活动集——已开的会话内关总闸立即撤工具，不必重建会话。放在模型
         // 切换之后，保证最终活动集以最新镜像为准。
-        if (designSwitchChanged || computerSwitchChanged) reconcileActiveTools(activeRuntime);
+        if (designSwitchChanged || computerSwitchChanged || jevSwitchChanged) reconcileActiveTools(activeRuntime);
       }
       // 更换默认工作区：当前 workspace 恰为旧默认 → 即时切到新默认（新会话继承刚
       // 保存的模型/思考等级）；否则下次落位（新建/切换/移除回落）自然生效。

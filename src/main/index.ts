@@ -6,7 +6,7 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, pro
 import { spawn } from "node-pty";
 import appIconPath from "./assets/icon.ico?asset";
 import { resolveBundledSkillsDir, resolveBundledSubagentsDir } from "./bundled-skills.js";
-import { migrateSettings, normalizeVision, recordAgentWorkspace, forgetAgentWorkspace } from "./settings.js";
+import { migrateSettings, normalizeJev, normalizeVision, recordAgentWorkspace, forgetAgentWorkspace } from "./settings.js";
 import { togglePinnedSessionPath } from "./session-scope.js";
 import { importExternalAttachment, workspaceRelativeAttachment } from "./attachments.js";
 import type { BrowserPreviewCommand, BrowserPreviewState, DesktopBootstrap, DesktopSettings, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot, SshCommand, SshCommandResult, SshEventData, SshRevealEvent, TerminalCommand, TerminalEventData, WorkspaceDirectoryListing, WorkspaceEntryResult, WorkspaceFilePreview, WorkspaceFileSearchResult, WorkspaceFileStat, WorkspaceFileWriteResult } from "../shared/protocol.js";
@@ -37,6 +37,13 @@ let browserAutomationController: BrowserAutomationController | undefined;
 let computerOverlayController: ComputerOverlayController | undefined;
 // 设计导出缩略图（design_export 回执附图）：离屏渲染导出 HTML 并截图，无需真实预览标签页。
 const designSnapshotController = new DesignSnapshotController();
+/**
+ * TypeSafe（Jev）密钥在 credentials.json 里的条目名。它不是 Pi 的 provider——Jev
+ * 通路自己发 HTTP，而 provider 那条链已收敛到 Pi 的 ModelRuntime。凭据仍走同一
+ * safeStorage 通道与同一文件（静私不外流、不越权改 provider），所以只用一个新的
+ * 条目名而不是新增一套存储。
+ */
+const JEV_CREDENTIAL_ID = "typesafe";
 
 const spawnNodePty = (file: string, args: string[], options: PtySpawnOptions): PtyProcess => spawn(file, args, options);
 const terminalManager = new TerminalManager({
@@ -246,7 +253,10 @@ function updateSettings(command: RuntimeCommand): void {
       settings.agents = settings.agents.map((item) => item.id === command.agentId && item.id !== "default" ? { ...item, archived: command.archived } : item);
       if (settings.currentAgentId === command.agentId && command.archived) settings.currentAgentId = "default";
       break;
-    case "settings.save": settings.model = command.settings.model; settings.thinkingLevel = command.settings.thinkingLevel; settings.accessMode = command.settings.accessMode; settings.appearance = command.settings.appearance; settings.browser = command.settings.browser; settings.computer = command.settings.computer; settings.design = command.settings.design; settings.defaultWorkspace = command.settings.defaultWorkspace; break;
+    // 镜像必须与 protocol 的 settings.save Pick 逐字段对齐：漏一个字段就是「保存后重启即丢」
+    // （ssh 曾因这个 Pick 里有、这里没镜像而中招，2026-09）。jev 同时把用户填的密钥写进
+    // credentials.json 的 safeStorage 通道（配置进 settings.json、密钥不进）。
+    case "settings.save": settings.model = command.settings.model; settings.thinkingLevel = command.settings.thinkingLevel; settings.accessMode = command.settings.accessMode; settings.appearance = command.settings.appearance; settings.browser = command.settings.browser; settings.jev = normalizeJev(command.settings.jev); settings.computer = command.settings.computer; settings.design = command.settings.design; settings.ssh = command.settings.ssh; settings.defaultWorkspace = command.settings.defaultWorkspace; break;
     case "appearance.save": settings.appearance = command.appearance; break;
     case "provider.save": {
       settings.providers = settings.providers.some((item) => item.id === command.provider.id) ? settings.providers.map((item) => item.id === command.provider.id ? command.provider : item) : [...settings.providers, command.provider];
@@ -281,6 +291,19 @@ function updateSettings(command: RuntimeCommand): void {
       break;
     case "vision.save":
       settings.vision = normalizeVision(command.vision) ?? { enabled: false, provider: "", model: "" };
+      break;
+    // Jev 配置与密钥分开落位：配置进 settings.json（经 normalizeJev 归一，非法值回落
+    // 默认而不是丢弃整条），密钥进 credentials.json（与 provider apiKey 同一 safeStorage
+    // 通道；加密不可用时只发警告、不写明文）。配置里刻意不带密钥字段。
+    case "jev.save": {
+      settings.jev = normalizeJev(command.jev);
+      if (command.apiKey?.trim() && !saveCredential(JEV_CREDENTIAL_ID, command.apiKey.trim())) {
+        mainWindow?.webContents.send("runtime:message", { type: "log", level: "warn", message: "系统加密存储不可用，TypeSafe API Key 未保存。" } satisfies RuntimeMessage);
+      }
+      break;
+    }
+    case "jev.clearKey":
+      deleteCredential(JEV_CREDENTIAL_ID);
       break;
     case "memory.save":
       settings.memory = command.memory;
@@ -500,7 +523,7 @@ function isSshCommand(value: unknown): value is SshCommand {
 function registerIpc(): void {
   ipcMain.handle("desktop:bootstrap", (): DesktopBootstrap => {
     const source = loadSettings();
-    const settings: DesktopSettings = { ...source, providers: source.providers.map((provider) => ({ ...provider, keyConfigured: Boolean(credentialsCache[provider.id]) })) };
+    const settings: DesktopSettings = { ...source, providers: source.providers.map((provider) => ({ ...provider, keyConfigured: Boolean(credentialsCache[provider.id]) })), jevKeyConfigured: Boolean(credentialsCache[JEV_CREDENTIAL_ID]) };
     return { platform: process.platform, version: app.getVersion(), securityWarning, settings, runtime: latestSnapshot, catalog: latestCatalog ? { models: latestCatalog.models, providers: latestCatalog.providers } : undefined, resources: latestResources };
   });
   ipcMain.handle("desktop:choose-workspace", async (): Promise<string | undefined> => { const result = mainWindow ? await dialog.showOpenDialog(mainWindow, { title: "选择项目工作区", properties: ["openDirectory", "createDirectory"] }) : await dialog.showOpenDialog({ title: "选择项目工作区", properties: ["openDirectory", "createDirectory"] }); return result.canceled ? undefined : result.filePaths[0]; });

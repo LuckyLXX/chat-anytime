@@ -699,7 +699,7 @@ function ThinkingLevelEditor({ model, reasoning, onCommit, onCancel }: { model: 
   );
 }
 
-function SettingsDialog({ settings, models, providers, customProvider, customModels, customModelFetchStatus, customModelFetchError, modelRefreshStatus, modelRefreshError, modelRefreshProvider, resources, workspaceOpen, initialTab, onClose, onCreateInSession }: { settings: import("../../shared/protocol").DesktopSettings; models: ModelOption[]; providers: ProviderOption[]; customProvider?: ProviderSettings; customModels: CustomProviderModel[]; customModelFetchStatus: "idle" | "loading" | "success" | "error"; customModelFetchError?: string; modelRefreshStatus: "idle" | "loading" | "success" | "error"; modelRefreshError?: string; modelRefreshProvider?: string; resources: ResourceCatalog; workspaceOpen: boolean; initialTab?: string; onClose(): void; onCreateInSession(): void }): ReactNode {
+function SettingsDialog({ settings, models, providers, customProvider, customModels, customModelFetchStatus, customModelFetchError, modelRefreshStatus, modelRefreshError, modelRefreshProvider, resources, workspaceOpen, initialTab, jevKeyConfigured, onClose, onCreateInSession }: { settings: import("../../shared/protocol").DesktopSettings; jevKeyConfigured: boolean; models: ModelOption[]; providers: ProviderOption[]; customProvider?: ProviderSettings; customModels: CustomProviderModel[]; customModelFetchStatus: "idle" | "loading" | "success" | "error"; customModelFetchError?: string; modelRefreshStatus: "idle" | "loading" | "success" | "error"; modelRefreshError?: string; modelRefreshProvider?: string; resources: ResourceCatalog; workspaceOpen: boolean; initialTab?: string; onClose(): void; onCreateInSession(): void }): ReactNode {
   const customProviderId = "chatanytime-openai-compatible";
   const configuredProviders = settings.providers;
   const firstCustomProvider = configuredProviders[0];
@@ -725,6 +725,18 @@ function SettingsDialog({ settings, models, providers, customProvider, customMod
   const [visionModel, setVisionModel] = useState(settings.vision?.provider && settings.vision.model ? `${settings.vision.provider}/${settings.vision.model}` : "");
   const [visionPrompt, setVisionPrompt] = useState(settings.vision?.prompt ?? "");
   const [visionSaving, setVisionSaving] = useState(false);
+  // Jev 快速决策（实验性、缺省关闭）：字段各自本地化，保存走独立的 jev.save 命令
+  // （密钥与配置分开落位，不混进「保存通用设置」的整包提交）。
+  const [jevEnabled, setJevEnabled] = useState(settings.jev?.enabled === true);
+  const [jevBaseUrl, setJevBaseUrl] = useState(settings.jev?.baseUrl ?? "https://api.typesafe.ai/v1");
+  const [jevModel, setJevModel] = useState(settings.jev?.model ?? "jev-latest");
+  const [jevTextModel, setJevTextModel] = useState(settings.jev?.textProvider && settings.jev?.textModel ? `${settings.jev.textProvider}/${settings.jev.textModel}` : "");
+  const [jevMaxSteps, setJevMaxSteps] = useState(String(settings.jev?.maxSteps ?? 30));
+  const [jevAutoPilot, setJevAutoPilot] = useState(settings.jev?.autoPilot !== false);
+  const [jevApiKey, setJevApiKey] = useState("");
+  const [jevSaving, setJevSaving] = useState(false);
+  const [jevError, setJevError] = useState<string>();
+  const [jevSaved, setJevSaved] = useState(false);
   const [visionError, setVisionError] = useState<string>();
   const visionModelOptions = selectableCatalogModels(models).filter((model) => model.configured && model.imageInput);
   const [tab, setTab] = useState<"general" | "models" | "agents" | "subagents" | "appearance" | "resources" | "hooks" | "usage" | "automation">(initialTab === "automation" ? "automation" : "general");
@@ -1144,6 +1156,55 @@ function SettingsDialog({ settings, models, providers, customProvider, customMod
     }
   }
 
+  async function saveJev(): Promise<void> {
+    const slash = jevTextModel.indexOf("/");
+    const textProvider = slash > 0 ? jevTextModel.slice(0, slash) : "";
+    const textModelId = slash > 0 ? jevTextModel.slice(slash + 1) : "";
+    if (jevEnabled && (!textProvider || !textModelId)) {
+      setJevError("启用 Jev 前请先选择文本助手模型（用于给字段填值；Jev 本身只做选择）");
+      return;
+    }
+    if (jevEnabled && !jevBaseUrl.trim()) {
+      setJevError("请填写 TypeSafe 接口地址");
+      return;
+    }
+    setJevSaving(true);
+    setJevError(undefined);
+    try {
+      const steps = Math.min(100, Math.max(1, Math.round(Number(jevMaxSteps) || 30)));
+      const jev = {
+        enabled: jevEnabled,
+        baseUrl: jevBaseUrl.trim() || "https://api.typesafe.ai/v1",
+        model: jevModel.trim() || "jev-latest",
+        textProvider,
+        textModel: textModelId,
+        maxSteps: steps,
+        autoPilot: jevAutoPilot
+      };
+      await window.piDesktop.send({ type: "jev.save", jev, ...(jevApiKey.trim() ? { apiKey: jevApiKey.trim() } : {}) });
+      if (jevApiKey.trim()) useDesktopStore.setState({ jevKeyConfigured: true });
+      setJevApiKey("");
+      markSettingsSaved({ ...settings, jev });
+      setJevSaved(true);
+      window.setTimeout(() => setJevSaved(false), 2500);
+    } catch (error) {
+      setJevError(error instanceof Error ? error.message : "保存 Jev 设置失败");
+    } finally {
+      setJevSaving(false);
+    }
+  }
+
+  async function clearJevKey(): Promise<void> {
+    try {
+      await window.piDesktop.send({ type: "jev.clearKey" });
+      useDesktopStore.setState({ jevKeyConfigured: false });
+      setJevSaved(true);
+      window.setTimeout(() => setJevSaved(false), 2500);
+    } catch (error) {
+      setJevError(error instanceof Error ? error.message : "清除密钥失败");
+    }
+  }
+
   async function save(event: FormEvent): Promise<void> {
     event.preventDefault();
     if (!provider || formBlocker) return;
@@ -1263,6 +1324,29 @@ function SettingsDialog({ settings, models, providers, customProvider, customMod
             <label className="checkbox-setting" title="总闸：只管 AI 工具，不拦用户自己在 SSH 面板建立的连接"><input type="checkbox" checked={settings.ssh?.enabled !== false} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, ssh: { enabled: event.target.checked } } })} />启用 AI SSH 远程操作（ssh_* 工具；不影响人工连接）</label>
             <label className="checkbox-setting" title="总闸：关掉后任何会话都拿不到 computer_*，即使该会话开着电脑控制模式"><input type="checkbox" checked={settings.computer?.enabled !== false} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, computer: { enabled: event.target.checked } } })} />启用电脑控制（computer_* 桌面窗口工具；还须在会话顶栏开启才注入）</label>
             <label className="checkbox-setting" title="总闸：关掉后即使会话处于设计模式也不注入 design_* 工具"><input type="checkbox" checked={settings.design?.enabled !== false} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, design: { enabled: event.target.checked } } })} />启用设计模式（design_* 工具仅在开了设计模式的会话里注入）</label>
+            <section className="jev-settings" aria-label="Jev 快速决策">
+              <div className="jev-settings-heading">
+                <div>
+                  <h3>Jev 快速决策（实验性）</h3>
+                  <p>由 Jev（TypeSafe）逐轮决策、主模型只给一次目标，在内置浏览器里连续操作页面。它需要一个能访问的 TypeSafe 端点；<strong>内网环境通常没有，请保持关闭</strong>。关闭时不注入任何工具、不读密钥、不产生请求。</p>
+                </div>
+                <label className="checkbox-setting"><input type="checkbox" checked={jevEnabled} onChange={(event) => setJevEnabled(event.target.checked)} />启用 browser_jev_run</label>
+              </div>
+              <div className="jev-settings-grid">
+                <label>TypeSafe 接口地址<input value={jevBaseUrl} placeholder="https://api.typesafe.ai/v1" spellCheck={false} onChange={(event) => setJevBaseUrl(event.target.value)} /><small>含 /v1；也可填自建网关（如 Vercel AI Gateway 的 /typesafe/v1）</small></label>
+                <label>Jev 模型<input value={jevModel} placeholder="jev-latest" spellCheck={false} onChange={(event) => setJevModel(event.target.value)} /><small>可固定版本，例如 jev-1.13.0</small></label>
+                <label>文本助手模型<ModelSelect models={configuredModels} providers={providers} value={jevTextModel} emptyMessage="暂无已配置模型" placeholder="请选择用于给字段填值的模型" onChange={setJevTextModel} /><small>Jev 只做选择，字段值由这个模型生成（走已配置的模型服务）</small></label>
+                <label>单次步数上限<input inputMode="numeric" value={jevMaxSteps} placeholder="30" onChange={(event) => setJevMaxSteps(event.target.value)} /><small>1–100，默认 30；达到上限会把页面现状交回模型</small></label>
+              </div>
+              <label className="checkbox-setting" title="关闭后每走一步就把控制权交回主模型（不会自动连跑）"><input type="checkbox" checked={jevAutoPilot} onChange={(event) => setJevAutoPilot(event.target.checked)} />自动驾驶（连续执行到完成/阻塞；关闭则一次只走一步）</label>
+              <label>TypeSafe API Key<input type="password" value={jevApiKey} autoComplete="off" placeholder={jevKeyConfigured ? "已保存，留空则继续使用" : "请输入 API 密钥（存本机加密凭据，不进配置文件）"} onChange={(event) => setJevApiKey(event.target.value)} /></label>
+              {jevError && <p className="form-error">{jevError}</p>}
+              <div className="jev-settings-footer">
+                <button className="primary-button" type="button" disabled={jevSaving} onClick={() => void saveJev()}>{jevSaving ? "正在保存" : "保存 Jev 设置"}</button>
+                <button className="secondary-button" type="button" disabled={!jevKeyConfigured} onClick={() => void clearJevKey()}>清除密钥</button>
+                {jevSaved && <span className="form-hint">已保存</span>}
+              </div>
+            </section>
           <label className="checkbox-setting"><input type="checkbox" checked={settings.appearance.showThinking} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, showThinking: event.target.checked } } })} />展示思考过程</label>
           <footer><button type="button" className="secondary-button" onClick={closeSettings}>取消</button><button className="primary-button" type="submit">保存通用设置</button></footer>
         </form> : tab === "models" ? <form onSubmit={save}>
@@ -1338,6 +1422,7 @@ export function App(): ReactNode {
   const providers = useDesktopStore((state) => state.providers);
   const resources = useDesktopStore((state) => state.resources);
   const customProvider = useDesktopStore((state) => state.customProvider);
+  const jevKeyConfigured = useDesktopStore((state) => state.jevKeyConfigured);
   const customModels = useDesktopStore((state) => state.customModels);
   const customModelFetchStatus = useDesktopStore((state) => state.customModelFetchStatus);
   const customModelFetchError = useDesktopStore((state) => state.customModelFetchError);
@@ -2691,7 +2776,7 @@ export function App(): ReactNode {
         </div>
       </main>
 
-      {settingsPresence.rendered && <ExitWrap exiting={settingsPresence.exiting}><SettingsDialog settings={settings} models={models} providers={providers} customProvider={customProvider} customModels={customModels} customModelFetchStatus={customModelFetchStatus} customModelFetchError={customModelFetchError} modelRefreshStatus={modelRefreshStatus} modelRefreshError={modelRefreshError} modelRefreshProvider={modelRefreshProvider} resources={resources} workspaceOpen={Boolean(activeWorkspace)} initialTab={settingsInitialTab} onClose={() => { setSettingsOpen(false); setSettingsInitialTab(undefined); }} onCreateInSession={() => void createNewSession()} /></ExitWrap>}
+      {settingsPresence.rendered && <ExitWrap exiting={settingsPresence.exiting}><SettingsDialog settings={settings} models={models} providers={providers} customProvider={customProvider} customModels={customModels} customModelFetchStatus={customModelFetchStatus} customModelFetchError={customModelFetchError} modelRefreshStatus={modelRefreshStatus} modelRefreshError={modelRefreshError} modelRefreshProvider={modelRefreshProvider} resources={resources} workspaceOpen={Boolean(activeWorkspace)} initialTab={settingsInitialTab} jevKeyConfigured={jevKeyConfigured} onClose={() => { setSettingsOpen(false); setSettingsInitialTab(undefined); }} onCreateInSession={() => void createNewSession()} /></ExitWrap>}
       {permissionPresence.rendered && (() => { const permission = permissionPresence.value; return permission ? <ExitWrap exiting={permissionPresence.exiting}><PermissionDialog request={permission} sessionTitle={sessionSummaries.find((item) => item.id === permission.principal.sessionId)?.title} /></ExitWrap> : null; })()}
       {transcriptPresence.rendered && (() => { const transcriptTarget = transcriptPresence.value; return transcriptTarget ? <ExitWrap exiting={transcriptPresence.exiting}><DelegationTranscript delegation={transcriptTarget} onClose={() => setTranscriptTarget(undefined)} onOpenArtifact={openArtifactPreview} /></ExitWrap> : null; })()}
       {galleryWallOpen && (

@@ -35,7 +35,9 @@ import type {
   BrowserAutomationRequest,
   BrowserAutomationResult,
   BrowserAutomationWait,
-  BrowserTabSummary
+  BrowserTabSummary,
+  JevAction,
+  JevObservePage
 } from "../shared/protocol.js";
 import { downloadDirFor, downloadRelativePath } from "./browser-downloads.js";
 import {
@@ -58,6 +60,11 @@ import type { BrowserPreviewController, DownloadInfo } from "./browser-preview.j
 export const MAX_SNAPSHOT_ELEMENTS = 200;
 /** Hard cap of the page's visible text carried by a snapshot. */
 export const MAX_SNAPSHOT_PAGE_TEXT = 3000;
+
+/** Jev 单帧观察的元素上限（与 jev-ultrafast 的 250 一致；超过则 omitted 计数）。 */
+export const JEV_MAX_OBSERVE_ITEMS = 250;
+/** Jev 单帧观察的页面可见文本上限（jev 的 6000 字符口径）。 */
+export const JEV_MAX_PAGE_TEXT = 6000;
 /** Hard cap of one element's text/name label inside a snapshot line. */
 export const MAX_ELEMENT_LABEL_CHARS = 80;
 /** Hard cap of a browser_eval return value serialization. */
@@ -306,6 +313,242 @@ const QUERY_DEEP_FN = `function queryDeep(selector) {
 
 /** Elements probed for obstruction per snapshot (elementFromPoint is cheap, but 200× per snapshot adds up). */
 export const OBSTRUCTION_PROBE_LIMIT = 60;
+
+/**
+ * Jev（TypeSafe 快速决策通路）的页面侧运行时。与 @eN 的「索引 + 签名」体系刻意
+ * 分开：这里给每个真实 DOM 节点分配一个**稳定数字身份**（WeakMap → 自增 id），
+ * nodes Map 留着执行时按 id 取回元素；元素被移除时 WeakMap 自动回收、Map 由
+ * forget 顺手清理。
+ *
+ * 它仍然是**同文档内**的身份，不是跨导航的句柄：导航后整表作废，执行前一律重新
+ * 校验连接性/可见性/启用态/几何/遮挡。ID 也绝不是 CDP backend node id。
+ */
+const JEV_CORE = `const cache = (window.__piJev ||= { ids: new WeakMap(), nodes: new Map(), next: 1 });
+ const jevId = (el) => {
+   if (!cache.ids.has(el)) { const id = cache.next++; cache.ids.set(el, id); cache.nodes.set(id, el); }
+   return cache.ids.get(el);
+ };
+ const jevEl = (id) => { const el = cache.nodes.get(id); if (!el || !el.isConnected) { cache.nodes.delete(id); return null; } return el; };
+ for (const [id, el] of cache.nodes) if (!el.isConnected) cache.nodes.delete(id);
+ const ROLES = ['button','link','checkbox','radio','switch','tab','menuitem','menuitemradio','option','gridcell','combobox','textbox','searchbox','spinbutton'];
+ const SAFE_TYPES = (type) => !['password','file','hidden'].includes(type);
+ const jevVisible = (el) => {
+   if (el.closest('[aria-hidden="true"],[inert]')) return false;
+   if (typeof el.checkVisibility === 'function') return el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+   const rect = el.getBoundingClientRect();
+   return rect.width > 0 && rect.height > 0;
+ };
+ const jevRole = (el) => {
+   const explicit = el.getAttribute('role');
+   if (ROLES.includes(explicit)) return explicit;
+   const tag = el.tagName;
+   if (tag === 'BUTTON' || tag === 'SUMMARY') return 'button';
+   if (tag === 'A') return 'link';
+   if (tag === 'SELECT') return 'combobox';
+   if (tag === 'TEXTAREA' || el.isContentEditable) return 'textbox';
+   if (tag === 'INPUT') {
+     const type = (el.getAttribute('type') || 'text').toLowerCase();
+     if (type === 'checkbox' || type === 'radio') return type;
+     if (['button','submit','reset','image'].includes(type)) return 'button';
+     if (type === 'search') return 'searchbox';
+     if (type === 'number') return 'spinbutton';
+     if (['text','email','url','tel'].includes(type)) return 'textbox';
+   }
+   return null;
+ };
+ const jevName = (el, seen) => {
+   if (!el || (seen && seen.has(el))) return '';
+   if (seen) seen.add(el); else seen = new Set([el]);
+   const referenced = (el.getAttribute('aria-labelledby') || '').split(/\\s+/).map((id) => jevName(document.getElementById(id), seen)).filter(Boolean).join(' ');
+   return (referenced || el.getAttribute('aria-label') || [...(el.labels || [])].map((label) => jevName(label, seen)).filter(Boolean).join(' ') ||
+     (['button','submit','reset'].includes((el.getAttribute('type') || '').toLowerCase()) ? el.value : '') || el.getAttribute('alt') ||
+     (el.tagName === 'INPUT' ? '' : (el.textContent || '')) || el.getAttribute('title') || el.getAttribute('placeholder') || ''
+   ).replace(/\\s+/g, ' ').trim().slice(0, ${MAX_ELEMENT_LABEL_CHARS});
+ };
+ const jevEditable = (el, role) => {
+   if (el.readOnly === true || el.getAttribute('aria-readonly') === 'true') return false;
+   return ['textbox','searchbox','spinbutton'].includes(role) || (role === 'combobox' && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'));
+ };
+ const jevValue = (el) => {
+   if (typeof el.value === 'string') return el.value.slice(0, 40);
+   if (el.isContentEditable) return (el.innerText || '').trim().slice(0, 40);
+   return '';
+ };`;
+
+/** Query string shared with the @eN snapshot's interactive-element selector. */
+const JEV_SELECTOR = `'a[href],button,input,select,textarea,summary,[contenteditable="true"],[role="button"],[role="link"],[role="textbox"],[role="checkbox"],[role="radio"],[role="combobox"],[role="option"],[role="menuitem"],[role="tab"],[role="switch"],[onclick]'`;
+
+/**
+ * Jev observation: one atomic read of URL/title/visible text and every visible
+ * interactive element with its stable node id, role, current value/state and
+ * candidate dropdown options. Structured output only — the model-facing text
+ * rendering happens in the utility process.
+ */
+export function buildJevObserveScript(cap: number, pageTextCap: number): string {
+  return `(() => {
+   ${VIEWPORT_POSITION_FN}
+   ${PAGE_TEXT_FN}
+   ${HIT_TEST_FN}
+   ${JEV_CORE}
+   const SELECTOR = ${JEV_SELECTOR};
+   const items = [];
+   let omitted = 0;
+   const roots = [document];
+   // 同源 iframe 与开放 shadow root 一并穿：与 @eN 快照同一套遍历口径
+   // （跨域 frame 从 DOM 脚本本来就不可达，不支持即不支持）。
+   // 先用一个 Set 按 DOM 顺序收集元素（跨 root 去重），再逐个建条目——一逗代码里既能
+   // 拿到「第几个元素」（select 选项索引要用）又能保证一次遍历。
+   const collected = [];
+   const seen = new Set();
+   for (let index = 0; index < roots.length; index++) {
+     const root = roots[index];
+     let nodes;
+     try { nodes = root.querySelectorAll('*'); } catch (error) { continue; }
+     for (const el of nodes) {
+       if (el.shadowRoot) roots.push(el.shadowRoot);
+       if (el.tagName === 'IFRAME') { try { if (el.contentDocument) roots.push(el.contentDocument); } catch (error) { /* cross-origin */ } }
+     }
+   }
+   for (const root of roots) {
+     for (const el of root.querySelectorAll(SELECTOR)) {
+       if (seen.has(el)) continue;
+       seen.add(el);
+       collected.push(el);
+     }
+   }
+   for (const el of collected) {
+     {
+       const type = (el.getAttribute('type') || '').toLowerCase();
+       if (!SAFE_TYPES(type)) continue;
+       if (el.matches(':disabled') || el.closest('[aria-disabled="true"]')) continue;
+       if (!jevVisible(el)) continue;
+       const role = jevRole(el);
+       if (!role) continue;
+       const rect = el.getBoundingClientRect();
+       const pos = viewportPosition(el);
+       const cx = pos.x + rect.width / 2;
+       const cy = pos.y + rect.height / 2;
+       if (!rect.width || !rect.height || cx < 0 || cy < 0 || cx >= innerWidth || cy >= innerHeight) continue;
+       if (role === 'gridcell' && el.querySelector('button,[role="button"]')) continue;
+       if (items.length >= ${cap}) { omitted += 1; continue; }
+       let blocker = null;
+       if (items.length < ${OBSTRUCTION_PROBE_LIMIT}) {
+         const top = hitTest(el);
+         if (top && top !== el && !el.contains(top)) {
+           const cls = typeof top.className === 'string' && top.className.trim() ? top.className.trim().split(/\\s+/)[0] : '';
+           blocker = top.tagName.toLowerCase() + (top.id ? '#' + top.id : '') + (cls ? '.' + cls : '');
+         }
+       }
+       const item = {
+         nodeId: jevId(el),
+         sig: ${SIG_OF_EL},
+         role,
+         label: jevName(el) || role,
+         value: jevValue(el),
+         checked: typeof el.checked === 'boolean' ? el.checked : null,
+         selected: typeof el.selected === 'boolean' ? el.selected : null,
+         expanded: typeof el.open === 'boolean' ? el.open : (el.getAttribute('aria-expanded') === 'true' ? true : el.getAttribute('aria-expanded') === 'false' ? false : null),
+         editable: jevEditable(el, role),
+         obstructedBy: blocker,
+         x: Math.round(cx),
+         y: Math.round(cy)
+       };
+       if (el.tagName === 'SELECT') {
+         item.options = [];
+         for (const option of el.options) {
+           if (option.selected || option.disabled || option.closest('optgroup[disabled]')) continue;
+           item.options.push({ index: 'e' + (items.length + 1) + ':' + (item.options.length + 1), label: (option.label || '').trim().slice(0, ${MAX_ELEMENT_LABEL_CHARS}), value: option.value });
+         }
+       }
+       items.push(item);
+     }
+   }
+   return {
+     url: location.href,
+     title: document.title,
+     pageText: collectPageText(${pageTextCap}),
+     scroll: { y: Math.round(window.scrollY), height: Math.round(document.documentElement.scrollHeight), viewH: Math.round(innerHeight), canDown: Math.round(window.scrollY) + Math.round(innerHeight) < Math.round(document.documentElement.scrollHeight) - 2 },
+     items,
+     ...(omitted > 0 ? { omitted } : {})
+   };
+ })()`;
+}
+
+/** 观察结果里单个元素执行前的复核结果（工具层与主进程共用同一形状）。 */
+export interface JevActTarget {
+  ok: boolean;
+  error?: string;
+  x?: number;
+  y?: number;
+  signature?: string;
+  description?: string;
+}
+
+/**
+ * Locate + validate one Jev target by its stable node id, immediately before
+ * input. Every guard runs here for the same reason the @eN path re-checks
+ * geometry: the model's decision refers to an observation, and the page may
+ * have moved on since.
+ *
+ * 签名在**改值之前**采集（与 buildTypeScript/buildSelectScript 同一条纪律）。
+ */
+export function buildJevLocateScript(nodeId: number): string {
+  return `(() => {
+   ${VIEWPORT_POSITION_FN}
+   ${REVEAL_FN}
+   ${HIT_TEST_FN}
+   ${JEV_CORE}
+   const el = jevEl(${nodeId});
+   if (!el) return { ok: false, error: '元素已不在页面中（页面已变化，请重新观察）' };
+   if (el.matches(':disabled') || el.closest('[aria-disabled="true"],[inert]')) return { ok: false, error: '元素已不可用（禁用或惰性容器内）' };
+   if (!jevVisible(el)) return { ok: false, error: '元素已不可见' };
+   reveal(el);
+   const rect = el.getBoundingClientRect();
+   const pos = viewportPosition(el);
+   const cx = pos.x + rect.width / 2;
+   const cy = pos.y + rect.height / 2;
+   if (!rect.width || !rect.height || cx < 0 || cy < 0 || cx >= innerWidth || cy >= innerHeight) return { ok: false, error: '元素不在视口内（滚动后几何仍在视口外）' };
+   const top = hitTest(el);
+   if (top && top !== el && !el.contains(top)) return { ok: false, error: '元素被遮挡，无法操作（请先关闭遮挡层或滚动后重试）' };
+   return { ok: true, x: Math.round(cx), y: Math.round(cy), signature: ${SIG_OF_EL}, description: ${DESCRIBE_EL}, role: jevRole(el), editable: jevEditable(el, jevRole(el)), isSelect: el.tagName === 'SELECT' };
+ })()`;
+}
+
+/** 清空目标输入框当前内容（原生 setter，不触发 React 之外的旁路）。 */
+export function buildJevClearScript(nodeId: number): string {
+  return `(() => {
+   ${JEV_CORE}
+   const el = jevEl(${nodeId});
+   if (!el) return { ok: false, error: '元素已不在页面中（页面已变化，请重新观察）' };
+   el.focus();
+   if (el.isContentEditable) { el.textContent = ''; return { ok: true }; }
+   const tag = el.tagName;
+   if (tag !== 'INPUT' && tag !== 'TEXTAREA') return { ok: false, error: '该元素不是输入框，无法填入文本' };
+   const proto = tag === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+   const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+   setter.call(el, '');
+   el.dispatchEvent(new Event('input', { bubbles: true }));
+   return { ok: true };
+ })()`;
+}
+
+/** 按选项值设置下载框（原生 setter + input/change，实测与原生选择等价）。 */
+export function buildJevSelectScript(nodeId: number, value: string): string {
+  return `(() => {
+   ${JEV_CORE}
+   const el = jevEl(${nodeId});
+   if (!el) return { ok: false, error: '元素已不在页面中（页面已变化，请重新观察）' };
+   if (el.tagName !== 'SELECT') return { ok: false, error: '该元素不是下拉选择框' };
+   const wanted = ${JSON.stringify(value)};
+   const option = Array.from(el.options).find((candidate) => candidate.value === wanted && !candidate.disabled && !candidate.closest('optgroup[disabled]'));
+   if (!option) return { ok: false, error: '选项值已不存在：' + wanted };
+   el.value = wanted;
+   el.dispatchEvent(new Event('input', { bubbles: true }));
+   el.dispatchEvent(new Event('change', { bubbles: true }));
+   el.blur();
+   return { ok: true, description: ${DESCRIBE_EL} };
+ })()`;
+}
 
 /** Page snapshot: URL/title/page text + signatures of every interactive element. */
 export function buildSnapshotScript(cap: number, pageTextCap: number): string {
@@ -815,7 +1058,10 @@ function automationTabId(): string {
  * 但那是模型显式写脚本的场景，回执语义与点击不同，不给它加延迟）。
  */
 export function needsDownloadStartGrace(request: BrowserAutomationRequest): boolean {
-  return request.op === "click" || request.op === "press";
+  if (request.op === "click" || request.op === "press") return true;
+  // Jev 的点击同样是真实鼠标事件派发，同样会有异步到达的 will-download：
+  // 不给宽限的话，循环里下载落盘的事实会丢在两次操作之间的空隙里。
+  return request.op === "jevAct" && request.action.kind === "click";
 }
 
 export class BrowserAutomationController {
@@ -823,6 +1069,14 @@ export class BrowserAutomationController {
   private readonly sessionTabs = new Map<string, string>();
   /** tab id → per-ref signatures remembered by the last snapshot. */
   private readonly tabRefs = new Map<string, RefEntry[]>();
+  /**
+   * tab id → Jev 元素的「nodeId → 签名」表（最近一次 jevObserve 的快照）。
+   * 与 tabRefs 同一生命周期纪律：导航/关闭标签/销毁一并清空；执行前用签名比对，
+   * 不匹配即拒（页面已变化）——两套引用体系互不依赖。
+   */
+  private readonly tabJevNodes = new Map<string, Map<number, { signature: string; url: string }>>();
+  /** tab id → Jev 下拉框的「nodeId → 候选选项值数组」（索引 → 值，仅本次观察内有效）。 */
+  private readonly tabJevOptions = new Map<string, Map<number, string[]>>();
   /** tab id → 该标签页的下载落盘工作区（navigate 带 workspace 时确定）。 */
   private readonly downloadDirs = new Map<string, string>();
   /**
@@ -1136,6 +1390,8 @@ export class BrowserAutomationController {
 
   private closeAutomationTab(tabId: string): void {
     this.tabRefs.delete(tabId);
+    this.tabJevNodes.delete(tabId);
+    this.tabJevOptions.delete(tabId);
     this.tabLastActiveAt.delete(tabId);
     this.downloadDirs.delete(tabId);
     this.pendingDownloads.delete(tabId);
@@ -1177,6 +1433,8 @@ export class BrowserAutomationController {
     }
     this.sessionTabs.clear();
     this.tabRefs.clear();
+    this.tabJevNodes.clear();
+    this.tabJevOptions.clear();
     this.downloadDirs.clear();
     this.pendingDownloads.clear();
     this.settleWaiters.clear();
@@ -1250,6 +1508,9 @@ export class BrowserAutomationController {
         const target = await this.resolveNavigationTarget(request.url, request.workspace);
         this.setDownloadDir(tabId, request.workspace);
         this.tabRefs.delete(tabId);
+        // 导航使两套引用表同时作废（Jev 的 nodeId 也只是同文档内的身份）。
+        this.tabJevNodes.delete(tabId);
+        this.tabJevOptions.delete(tabId);
         // 每次导航都重新武装 Page 域：上一次导航可能发生在 renderer 冻死/无文档时，
         // 那次 Page.enable 会被丢弃（监听器本身只挂一次，见 ensureDialogWatch）。
         this.dialogWatchTabs.delete(tabId);
@@ -1292,6 +1553,14 @@ export class BrowserAutomationController {
         return this.get(tabId, contents, request.what, request.ref);
       case "tabs":
         return this.tabs(sessionKey, tabId, request.action, request.tabId);
+      case "jevObserve":
+        return this.jevObserve(tabId, contents);
+      case "jevAct":
+        return this.jevAct(tabId, contents, request.nodeId, request.action, request.text ?? "");
+      case "jevReset":
+        this.tabJevNodes.delete(tabId);
+        this.tabJevOptions.delete(tabId);
+        return { ok: true, data: { kind: "jevReset" } };
     }
   }
 
@@ -1374,6 +1643,97 @@ export class BrowserAutomationController {
     } finally {
       this.preview.setAutomating(tabId, undefined);
     }
+  }
+
+  /**
+   * Jev 观察：读一帧结构化页面（元素表 + 稳定 nodeId + 当前值与候选选项），
+   * 并把「nodeId → 签名」记入本标签的 Jev 表供执行阶段比对。
+   *
+   * 与 snapshot 分开而不是复用：@eN 那套是「给人/模型看的紧凑文本 + 索引 + 签名」，
+   * Jev 需要的是结构数据 + 稳定身份，两者各自演进（不互相污染字节格式）。
+   */
+  private async jevObserve(tabId: string, contents: WebContents): Promise<BrowserAutomationResult> {
+    const page = await this.evaluate<JevObservePage>(contents, buildJevObserveScript(JEV_MAX_OBSERVE_ITEMS, JEV_MAX_PAGE_TEXT));
+    const signatures = new Map<number, { signature: string; url: string }>();
+    const optionValues = new Map<number, string[]>();
+    for (const item of page.items) {
+      signatures.set(item.nodeId, { signature: item.sig, url: page.url });
+      if (item.options) optionValues.set(item.nodeId, item.options.map((option) => option.value));
+    }
+    this.tabJevNodes.set(tabId, signatures);
+    this.tabJevOptions.set(tabId, optionValues);
+    return { ok: true, data: { kind: "jevObserve", page } };
+  }
+
+  /**
+   * 执行一个**已决策**的 Jev 动作。模型从不产出选择器或坐标：nodeId 只用来在
+   * 本标签的 Jev 表里定位签名的元素，再交给页面脚本重新校验与定位。
+   *
+   * 点击/输入走与 browser_click/browser_type 完全相同的真实输入事件通路；
+   * select 在页面脚本内完成（原生 setter + input/change），与 browser_select 同口径。
+   */
+  private async jevAct(tabId: string, contents: WebContents, nodeId: number, action: JevAction, text: string): Promise<BrowserAutomationResult> {
+    const known = this.tabJevNodes.get(tabId)?.get(nodeId);
+    if (!known) throw new Error(`找不到 Jev 元素 #${nodeId} 的记录：请先重新观察页面（元素身份在同一次观察内有效）`);
+    const currentUrl = this.preview.snapshot(tabId).url;
+    if (currentUrl && known.url !== currentUrl) throw new Error(`页面已导航（${known.url} → ${currentUrl}）：请重新观察页面后再操作`);
+    this.preview.setAutomating(tabId, `Jev 正在${action.kind === "click" ? "点击" : action.kind === "fill" ? "输入" : "选择"}页面元素`);
+    try {
+      const located = await this.evaluate<JevActTarget>(contents, buildJevLocateScript(nodeId));
+      if (!located.ok) throw new Error(located.error ?? "元素定位失败");
+      if (!located.signature || known.signature !== located.signature) {
+        throw new Error(`元素 #${nodeId} 与观察时不一致（页面已变化）：请重新观察页面后再操作`);
+      }
+      const x = located.x ?? 0;
+      const y = located.y ?? 0;
+      if (action.kind === "select") {
+        // 选项值必须来自**本次观察**记录的候选集（索引只在那一帧里有意义），
+        // 但允许页面在两次观察之间换过内容——所以取不到就是「选项已不存在」，
+        // 绝不把索引当成值去猜。
+        const value = this.jevOptionValue(tabId, nodeId, action.optionIndex);
+        const applied = await this.evaluate<{ ok: boolean; error?: string; description?: string }>(contents, buildJevSelectScript(nodeId, value));
+        if (!applied.ok) throw new Error(applied.error ?? "选择失败");
+        return { ok: true, data: { kind: "jevAct", description: `${applied.description ?? located.description ?? `#${nodeId}`} → ${value}` } };
+      }
+      // 真实鼠标事件派发：先 mouseMoved 让页面 hover 态就位（与 click 同口径）。
+      await this.cdp(contents, "Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
+      await this.cdp(contents, "Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
+      await this.cdp(contents, "Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
+      if (action.kind === "click") {
+        return { ok: true, data: { kind: "jevAct", description: located.description ?? `#${nodeId}` } };
+      }
+      // fill：清空 → 全选 → 插入文本。清空与全选都必须在 observe 之后、insertText 之前，
+      // 且签名已在定位阶段采完（改值会改签名，顺序错了必然误报「已变化」）。
+      const cleared = await this.evaluate<{ ok: boolean; error?: string }>(contents, buildJevClearScript(nodeId));
+      if (!cleared.ok) throw new Error(cleared.error ?? "清空输入框失败");
+      await this.cdp(contents, "Input.dispatchKeyEvent", {
+        type: "keyDown",
+        key: "a",
+        code: "KeyA",
+        modifiers: process.platform === "darwin" ? 4 : 2,
+        commands: ["selectAll"]
+      });
+      await this.cdp(contents, "Input.dispatchKeyEvent", {
+        type: "keyUp",
+        key: "a",
+        code: "KeyA",
+        modifiers: process.platform === "darwin" ? 4 : 2
+      });
+      await this.cdp(contents, "Input.insertText", { text });
+      return { ok: true, data: { kind: "jevAct", description: `${located.description ?? `#${nodeId}`}（已填入文本 ${JSON.stringify(text.slice(0, 60))}）` } };
+    } finally {
+      this.preview.setAutomating(tabId, undefined);
+    }
+  }
+
+  /**
+   * 解析 select 的选项索引（"eN:k"）→ 选项值。索引只在上一次观察的候选集里有意义，
+   * 所以先按当前观察记录的顺序重取——取不到即报「选项已不存在」，绝不猜值。
+   */
+  private jevOptionValue(tabId: string, nodeId: number, optionIndex: number): string {
+    const value = this.tabJevOptions.get(tabId)?.get(nodeId)?.[optionIndex - 1];
+    if (value === undefined) throw new Error(`选项 #${optionIndex} 已不在下拉框中（页面已变化）：请重新观察页面`);
+    return value;
   }
 
   private async locate(contents: WebContents, ref: string): Promise<LocatedElement> {
@@ -1973,6 +2333,8 @@ export class BrowserAutomationController {
         if (!targetTabId) throw new Error("请提供要关闭的 tabId（用 browser_tabs list 查看）");
         await this.preview.handle({ type: "close", tabId: targetTabId });
         this.tabRefs.delete(targetTabId);
+        this.tabJevNodes.delete(targetTabId);
+        this.tabJevOptions.delete(targetTabId);
         this.downloadDirs.delete(targetTabId);
         this.pendingDownloads.delete(targetTabId);
         if (this.sessionTabs.get(sessionKey) === targetTabId) this.sessionTabs.delete(sessionKey);

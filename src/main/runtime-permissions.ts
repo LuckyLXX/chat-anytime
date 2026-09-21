@@ -15,6 +15,7 @@ export function summarizeArgs(toolName: string, args: Record<string, unknown>): 
   if (toolName === "browser_navigate") return `导航到 ${String(args.url ?? "")}`;
   if (toolName === "browser_eval") return `执行 JavaScript（${String(args.mode ?? "read")}）：${String(args.expression ?? "").slice(0, 80)}`;
   if (toolName === "browser_tabs") return `关闭浏览器标签页 ${String(args.tabId ?? "")}`;
+  if (toolName === "browser_jev_run") return `Jev 连续操作当前标签页：${String(args.goal ?? "").slice(0, 100)}${args.maxSteps ? `（最多 ${String(args.maxSteps)} 步）` : ""}`;
   if (toolName === "ssh_exec") return `SSH 执行：${String(args.command ?? "").slice(0, 120)}`;
   if (toolName === "ssh_connect") return `SSH 连接主机 ${String(args.host ?? "")}`;
   if (toolName === "ssh_write") return `SSH 写入输入（${String(args.data ?? "").length} 字符）`;

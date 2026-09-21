@@ -924,6 +924,14 @@ export function createDemoApi(): DesktopApi {
         case "vision.save":
           demoSettings.vision = { ...command.vision };
           break;
+        // Jev（TypeSafe）通路：demo 只做配置往返（真实 HTTP 在主进程，demo 里没有）。
+        case "jev.save":
+          demoSettings.jev = { ...command.jev };
+          if (command.apiKey && command.apiKey.trim()) demoSettings.jevKeyConfigured = true;
+          break;
+        case "jev.clearKey":
+          demoSettings.jevKeyConfigured = false;
+          break;
         case "resources.reload":
           emit({ type: "resources", resources: structuredClone(demoResources) });
           break;

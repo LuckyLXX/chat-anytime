@@ -228,6 +228,8 @@ interface DesktopState {
   settings: DesktopSettings;
   customProvider?: ProviderSettings;
   customProviderKeyConfigured: boolean;
+  /** TypeSafe（Jev）密钥是否已保存：仅由 bootstrap 填充（明文永不跨进程/进 settings）。 */
+  jevKeyConfigured: boolean;
   customModels: CustomProviderModel[];
   customModelFetchStatus: "idle" | "loading" | "success" | "error";
   customModelFetchError?: string;
@@ -372,6 +374,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   usageStatsLoading: false,
   settings: emptySettings,
   customProviderKeyConfigured: false,
+  jevKeyConfigured: false,
   customModels: [],
   customModelFetchStatus: "idle",
   modelRefreshStatus: "idle",
@@ -395,6 +398,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
       galleryApps: bootstrap.resources?.gallery ?? get().galleryApps,
       customProvider: bootstrap.settings.providers.find((provider) => provider.id === "chatanytime-openai-compatible"),
       customProviderKeyConfigured: Boolean(bootstrap.settings.providers.find((provider) => provider.id === "chatanytime-openai-compatible")?.keyConfigured),
+      jevKeyConfigured: Boolean(bootstrap.settings.jevKeyConfigured),
       customModels: bootstrap.settings.providers.find((provider) => provider.id === "chatanytime-openai-compatible")?.models ?? []
     });
     return unsubscribe;

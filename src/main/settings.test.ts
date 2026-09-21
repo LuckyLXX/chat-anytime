@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CUSTOM_PROVIDER_ID, createDefaultAgent, ensureDefaultWorkspaceDir, forgetAgentWorkspace, isPositiveInt, mergeProviderModels, migrateSettings, normalizeAccessMode, normalizeAgent, normalizeAgentWorkspaces, normalizeCheckpoint, normalizeComputer, normalizeCustomThemes, normalizeDivBubbleMode, normalizeInterfaceTuning, normalizeProvider, normalizeThemeAssets, normalizeVision, normalizeWallpaperOpacity, recordAgentWorkspace, resolveDefaultWorkspace, resolveInitialWorkspace } from "./settings.js";
+import { CUSTOM_PROVIDER_ID, createDefaultAgent, ensureDefaultWorkspaceDir, forgetAgentWorkspace, isPositiveInt, mergeProviderModels, migrateSettings, normalizeAccessMode, normalizeAgent, normalizeAgentWorkspaces, normalizeCheckpoint, normalizeComputer, normalizeCustomThemes, normalizeDivBubbleMode, normalizeInterfaceTuning, normalizeJev, normalizeProvider, normalizeThemeAssets, normalizeVision, normalizeWallpaperOpacity, recordAgentWorkspace, resolveDefaultWorkspace, resolveInitialWorkspace } from "./settings.js";
 
 describe("workspace per-agent memory and default workspace (方案 B)", () => {
   it("normalizes agentWorkspaces: keeps non-empty string entries, drops garbage, defaults undefined", () => {
@@ -351,6 +351,57 @@ describe("desktop settings migration", () => {
     expect(normalizeVision({ enabled: false, provider: "", model: "" })).toBeUndefined();
     expect(normalizeVision({ enabled: false, provider: "proxy", model: "glm-4v-flash", prompt: "详细描述" })).toEqual({ enabled: false, provider: "proxy", model: "glm-4v-flash", prompt: "详细描述" });
     expect(normalizeVision("invalid")).toBeUndefined();
+  });
+
+  it("normalizes Jev settings with the switch defaulting to OFF", () => {
+    // 与 browser/ssh/computer 刻意相反：未显式 enable 时整条都不该存在（增强选项，
+    // 内网环境拿不到 TypeSafe，开着只会白付一份工具描述的前缀成本）。
+    expect(normalizeJev({ enabled: false })).toBeUndefined();
+    expect(normalizeJev({})).toBeUndefined();
+    expect(normalizeJev("invalid")).toBeUndefined();
+    expect(normalizeJev(undefined)).toBeUndefined();
+    // 开启：非法/缺失字段各自回落默认值，而不是把整条配置丢掉。
+    expect(normalizeJev({ enabled: true })).toEqual({
+      enabled: true,
+      baseUrl: "https://api.typesafe.ai/v1",
+      model: "jev-latest",
+      textProvider: "",
+      textModel: "",
+      maxSteps: 30,
+      autoPilot: true
+    });
+  });
+
+  it("clamps Jev base url / model / maxSteps and keeps autoPilot opt-out", () => {
+    const normalized = normalizeJev({
+      enabled: true,
+      baseUrl: "https://gateway.local/typesafe/v1/",
+      model: "  jev-1.13.0 ",
+      textProvider: " proxy ",
+      textModel: " helper ",
+      maxSteps: 999,
+      autoPilot: false
+    })!;
+    expect(normalized.baseUrl).toBe("https://gateway.local/typesafe/v1");
+    expect(normalized.model).toBe("jev-1.13.0");
+    expect(normalized.textProvider).toBe("proxy");
+    expect(normalized.textModel).toBe("helper");
+    expect(normalized.maxSteps).toBe(100);
+    expect(normalized.autoPilot).toBe(false);
+    expect(normalizeJev({ enabled: true, maxSteps: 0 })!.maxSteps).toBe(1);
+    expect(normalizeJev({ enabled: true, maxSteps: -5 })!.maxSteps).toBe(1);
+    expect(normalizeJev({ enabled: true, maxSteps: Number.NaN })!.maxSteps).toBe(30);
+    expect(normalizeJev({ enabled: true, maxSteps: 12.6 })!.maxSteps).toBe(13);
+  });
+
+  it("keeps Jev settings across a settings round-trip", () => {
+    // 与 computer / pinnedSessionPaths 同款回归网：migrateSettings 漏读一个字段，
+    // 下一次任何设置写入（persistSettings 整体重写文件）就会把它从磁盘抹掉。
+    const jev = { enabled: true, baseUrl: "https://api.typesafe.ai/v1", model: "jev-latest", textProvider: "p", textModel: "m", maxSteps: 20, autoPilot: true };
+    expect(migrateSettings({ jev }).settings.jev).toEqual(jev);
+    expect(migrateSettings({}).settings.jev).toBeUndefined();
+    // 关闭状态的残缺配置不落盘（避免每次保存都往 settings.json 里堆空对象）。
+    expect(migrateSettings({ jev: { enabled: false } }).settings.jev).toBeUndefined();
   });
 
   it("normalizes the checkpoint toggle with default-enabled semantics", () => {

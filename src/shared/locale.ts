@@ -58,6 +58,7 @@ const toolLabels: Record<string, string> = {
   browser_save_image: "浏览器保存图片",
   browser_screenshot_full: "浏览器整页截图",
   browser_tabs: "浏览器标签页",
+  browser_jev_run: "Jev 快速浏览器执行",
   ssh_hosts: "SSH 主机列表",
   ssh_connect: "SSH 连接主机",
   ssh_exec: "SSH 执行命令",

@@ -1835,3 +1835,165 @@ describe("automation saveImage dispatch", () => {
     expect(result.data.filename).toBe("logo.svg");
   });
 });
+
+describe("jev primitives", () => {
+  const controllers: BrowserAutomationController[] = [];
+  afterEach(() => {
+    for (const controller of controllers) controller.dispose();
+    controllers.length = 0;
+  });
+
+  /** 假 debugger：记录每一条 CDP 命令，并按表达式返回预置的页面脚本结果。 */
+  interface JevHarness {
+    controller: BrowserAutomationController;
+    commands: Array<{ method: string; params: Record<string, unknown> }>;
+    setScriptResult: (value: unknown) => void;
+    setScriptError: (message: string) => void;
+  }
+  const makeJevHarness = (): JevHarness => {
+    const preview = makeFakePreview(["default"]) as FakePreview & BrowserPreviewController;
+    const commands: Array<{ method: string; params: Record<string, unknown> }> = [];
+    let scriptResult: unknown = { ok: true };
+    let scriptError: string | undefined;
+    const contents = {
+      isDestroyed: () => false,
+      debugger: {
+        isAttached: () => false,
+        attach: () => undefined,
+        sendCommand: async (method: string, params?: Record<string, unknown>) => {
+          commands.push({ method, params: params ?? {} });
+          if (method !== "Runtime.evaluate") return {};
+          if (scriptError) return { exceptionDetails: { exception: { description: scriptError } } };
+          return { result: { value: scriptResult } };
+        },
+        on: () => undefined
+      }
+    };
+    (preview as unknown as { webContentsFor: (id: string) => unknown }).webContentsFor = () => contents;
+    const controller = new BrowserAutomationController(preview);
+    controllers.push(controller);
+    return {
+      controller,
+      commands,
+      setScriptResult: (value) => { scriptResult = value; },
+      setScriptError: (message) => { scriptError = message; }
+    };
+  };
+
+  const observePage = {
+    url: "https://example.com/",
+    title: "示例",
+    pageText: "文本",
+    scroll: { y: 0, height: 100, viewH: 100, canDown: false },
+    items: [{ nodeId: 5, sig: "sig-5", role: "button", label: "提交", x: 10, y: 10 }]
+  };
+
+  it("observes the page and remembers the node signature table", async () => {
+    const harness = makeJevHarness();
+    harness.setScriptResult(observePage);
+    const result = await harness.controller.handle("s1", { op: "jevObserve" });
+    if (!result.ok) throw new Error(result.error);
+    if (result.data.kind !== "jevObserve") throw new Error("意外结果");
+    expect(result.data.page.items[0]!.nodeId).toBe(5);
+    // 观察脚本必须来自 buildJevObserveScript（节点身份在页面侧分配）。
+    const evaluated = harness.commands.find((command) => command.method === "Runtime.evaluate")!;
+    expect(String(evaluated.params.expression)).toContain("__piJev");
+  });
+
+  it("rejects a click whose node id was never observed, without dispatching input", async () => {
+    const harness = makeJevHarness();
+    const result = await harness.controller.handle("s1", { op: "jevAct", nodeId: 99, action: { kind: "click" } });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("找不到 Jev 元素");
+    // 关键：没有任何鼠标事件被派发（模型不能凭猜测点页面）。
+    expect(harness.commands.some((command) => command.method === "Input.dispatchMouseEvent")).toBe(false);
+  });
+
+  it("rejects an action whose element signature changed since the observation", async () => {
+    const harness = makeJevHarness();
+    harness.setScriptResult(observePage);
+    await harness.controller.handle("s1", { op: "jevObserve" });
+    // 页面脚本报告签名与观察时不同 → 页码已经变了，必须拒绝而不是硬点。
+    harness.setScriptResult({ ok: true, x: 10, y: 10, signature: "sig-CHANGED", description: "<button>提交</button>" });
+    const result = await harness.controller.handle("s1", { op: "jevAct", nodeId: 5, action: { kind: "click" } });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("与观察时不一致");
+    expect(harness.commands.some((command) => command.method === "Input.dispatchMouseEvent")).toBe(false);
+  });
+
+  it("dispatches real mouse events for a validated click", async () => {
+    const harness = makeJevHarness();
+    harness.setScriptResult(observePage);
+    await harness.controller.handle("s1", { op: "jevObserve" });
+    harness.setScriptResult({ ok: true, x: 12, y: 34, signature: "sig-5", description: "<button>提交</button>" });
+    const result = await harness.controller.handle("s1", { op: "jevAct", nodeId: 5, action: { kind: "click" } });
+    if (!result.ok) throw new Error(result.error);
+    if (result.data.kind !== "jevAct") throw new Error("意外结果");
+    const events = harness.commands.filter((command) => command.method === "Input.dispatchMouseEvent");
+    expect(events.map((event) => event.params.type)).toEqual(["mouseMoved", "mousePressed", "mouseReleased"]);
+    expect(events[1]!.params).toMatchObject({ x: 12, y: 34, button: "left" });
+    expect(result.data.description).toContain("提交");
+  });
+
+  it("clears then inserts text for a fill action", async () => {
+    const harness = makeJevHarness();
+    harness.setScriptResult(observePage);
+    await harness.controller.handle("s1", { op: "jevObserve" });
+    harness.setScriptResult({ ok: true, x: 5, y: 6, signature: "sig-5", description: "<input>搜索" });
+    const result = await harness.controller.handle("s1", { op: "jevAct", nodeId: 5, action: { kind: "fill" }, text: "北京" });
+    if (!result.ok) throw new Error(result.error);
+    const inserted = harness.commands.find((command) => command.method === "Input.insertText");
+    expect(inserted?.params.text).toBe("北京");
+    // 清空必须发生在插入之前（否则已有内容会与生成值粘连）。
+    const order = harness.commands.map((command) => command.method).filter((method) => method === "Runtime.evaluate" || method === "Input.insertText");
+    expect(order[order.length - 1]).toBe("Input.insertText");
+  });
+
+  it("resolves a select option through the values remembered at observation time", async () => {
+    const harness = makeJevHarness();
+    harness.setScriptResult({
+      ...observePage,
+      items: [{ nodeId: 6, sig: "sig-6", role: "combobox", label: "城市", value: "上海", options: [
+        { index: "e1:1", label: "北京", value: "bj" },
+        { index: "e1:2", label: "广州", value: "gz" }
+      ] }]
+    });
+    await harness.controller.handle("s1", { op: "jevObserve" });
+    harness.setScriptResult({ ok: true, x: 5, y: 6, signature: "sig-6", description: "<select>城市" });
+    const selectResult = await harness.controller.handle("s1", { op: "jevAct", nodeId: 6, action: { kind: "select", optionIndex: 2 }, text: "" });
+    if (!selectResult.ok) throw new Error(selectResult.error);
+    expect(selectResult.data.kind === "jevAct" && selectResult.data.description).toContain("gz");
+    // 选项索引超出观察到的候选集 → 拒绝（不猜值）。
+    harness.setScriptResult({ ok: true, x: 5, y: 6, signature: "sig-6", description: "<select>城市" });
+    const bad = await harness.controller.handle("s1", { op: "jevAct", nodeId: 6, action: { kind: "select", optionIndex: 9 }, text: "" });
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) expect(bad.error).toContain("已不在下拉框中");
+  });
+
+  it("drops the node table on reset so a stale id cannot be reused", async () => {
+    const harness = makeJevHarness();
+    harness.setScriptResult(observePage);
+    await harness.controller.handle("s1", { op: "jevObserve" });
+    await harness.controller.handle("s1", { op: "jevReset" });
+    harness.setScriptResult({ ok: true, x: 1, y: 1, signature: "sig-5", description: "x" });
+    const result = await harness.controller.handle("s1", { op: "jevAct", nodeId: 5, action: { kind: "click" } });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("找不到 Jev 元素");
+  });
+
+  it("maps a page-script failure onto an actionable error", async () => {
+    const harness = makeJevHarness();
+    harness.setScriptResult(observePage);
+    await harness.controller.handle("s1", { op: "jevObserve" });
+    harness.setScriptError("TypeError: x is not a function");
+    const result = await harness.controller.handle("s1", { op: "jevAct", nodeId: 5, action: { kind: "click" } });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("页面脚本执行失败");
+  });
+
+  it("gives a click-triggered download the same start grace as browser_click", () => {
+    expect(needsDownloadStartGrace({ op: "jevAct", nodeId: 1, action: { kind: "click" } })).toBe(true);
+    expect(needsDownloadStartGrace({ op: "jevAct", nodeId: 1, action: { kind: "fill" } })).toBe(false);
+    expect(needsDownloadStartGrace({ op: "jevObserve" })).toBe(false);
+  });
+});

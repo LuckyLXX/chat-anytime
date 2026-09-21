@@ -35,6 +35,11 @@ export function toolRisk(
   // 内容落到 .pidesktop/ 下的观察产物」，不写用户工作区文件（写盘目标是自动化
   // 标签页的下载目录，与网页下载同一落点——网页下载本身也不走权限门）。
   if (toolName === "browser_navigate") return "browse";
+  // Jev 快速执行：一次调用会在当前标签页连续操作（可能提交表单、触发下载），
+  // 远不止一次点击，所以与导航同轴走 browse——read-only 拒绝、ask 逐次确认、
+  // workspace/full 放行。**本次确认就是用户对整段循环的授权边界**：循环内部不再
+  // 逐次过门（否则每一步都要点一次确认，等于关掉这个能力）。
+  if (toolName === "browser_jev_run") return "browse";
   if (toolName === "browser_eval") return args.mode === "write" ? "browse" : undefined;
   if (toolName === "browser_tabs") return args.action === "close" ? "browse" : undefined;
   // 电脑控制：全局键鼠注入是比命令执行更做作的风险面——read-only 拒绝、
