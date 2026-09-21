@@ -64,7 +64,6 @@ import type {
   ThemePresetId,
   ToolExecution,
   ResourceCatalog,
-  ResourceScope,
   CommandDraft,
   CommandSummary,
   McpServerConfigDraft,
@@ -72,12 +71,13 @@ import type {
   SessionSummary,
   SshHostSummary
 } from "../../shared/protocol";
-import { sessionRunStatusLabels, thinkingLevelLabels, toolLabel } from "../../shared/locale";
+import { resourceScopeLabels, sessionRunStatusLabels, thinkingLevelLabels, toolLabel } from "../../shared/locale";
 import type { ThinkingLevelMap } from "../../shared/protocol";
 import { THINKING_LEVELS, thinkingLevelDraftFrom, thinkingLevelMapFromDraft } from "../../shared/thinking-levels";
 import type { ReplyChangedFile } from "./lib/changed-files";
 import { ArtifactPreview, type PreviewEditorState, type PreviewTab, type PreviewTarget } from "./components/ArtifactPreview";
 import { ModelSelect } from "./components/ModelSelect";
+import { AgentSettings } from "./AgentSettings";
 import type { EditorSaveStatus } from "./components/MarkdownEditor";
 import { WorkspaceTree } from "./components/WorkspaceTree";
 import { ContextMenu, type ContextMenuItem } from "./components/ContextMenu";
@@ -392,15 +392,6 @@ function CustomThemeLibrary({ customCss, customThemes, customThemeName, editingC
   );
 }
 
-const resourceScopeLabels: Record<ResourceScope, string> = {
-  global: "全局",
-  project: "当前项目",
-  package: "Pi Package",
-  bundled: "内置",
-  temporary: "临时",
-  unknown: "未知"
-};
-
 const mcpStatusLabels: Record<McpServerStatus, string> = {
   connected: "已连接",
   cached: "有缓存",
@@ -613,59 +604,6 @@ function ResourceSettings({ resources }: ResourceSettingsProps): ReactNode {
   );
 }
 
-interface AgentSkillSelectorProps {
-  agent: AgentProfile;
-  skills: ResourceCatalog["skills"];
-  onChange(skillId: string, enabled: boolean): void;
-}
-
-function agentSkillEnabled(agent: AgentProfile, skill: ResourceCatalog["skills"][number]): boolean {
-  return agent.skillOverrides?.[skill.id] ?? skill.defaultEnabled;
-}
-
-/** 角色级能力工具 overlay：缺省（无键）= 启用，显式 false 才禁用；键域 browser/ssh/mcp:<server>。 */
-function agentToolEnabled(agent: AgentProfile, key: string): boolean {
-  return agent.toolOverrides?.[key] !== false;
-}
-
-function AgentSkillSelector({ agent, skills, onChange }: AgentSkillSelectorProps): ReactNode {
-  const selectedSkills = skills.filter((skill) => agentSkillEnabled(agent, skill));
-  return (
-    <div className="agent-skill-field">
-      <div className="agent-skill-heading"><span>Skill</span><small>{selectedSkills.length} 个已选择</small></div>
-      {selectedSkills.length > 0
-        ? <div className="agent-skill-chips">{selectedSkills.map((skill) => <span className="agent-skill-chip" key={skill.id}><Puzzle size={12} /><span>{skill.name}</span>{skill.toggleable && <button type="button" title={`移除 ${skill.name}`} aria-label={`移除 Skill ${skill.name}`} onClick={() => onChange(skill.id, false)}><X size={12} /></button>}</span>)}</div>
-        : <p className="agent-skill-empty">未选择 Skill</p>}
-      <details className="agent-skill-picker">
-        <summary><Puzzle size={14} /><span>选择 Skill</span><ChevronDown size={14} /></summary>
-        <div className="agent-skill-menu">
-          {skills.length === 0
-            ? <p>当前没有可用 Skill</p>
-            : skills.map((skill) => {
-                const checked = agentSkillEnabled(agent, skill);
-                return <label className="agent-skill-option" key={skill.id} title={skill.toggleable ? undefined : "该 Skill 由运行时动态提供"}><input type="checkbox" checked={checked} disabled={!skill.toggleable} onChange={(event) => onChange(skill.id, event.target.checked)} /><span><strong>{skill.name}</strong><small>{skill.description}</small></span>{checked && <Check size={14} />}</label>;
-              })}
-        </div>
-      </details>
-    </div>
-  );
-}
-
-/** 角色编辑器的「能力工具」块：浏览器/SSH 整族开关 + MCP 按服务器开关（overlay 键 mcp:<server>）。 */
-function AgentCapabilityTools({ agent, mcpServers, onChange }: { agent: AgentProfile; mcpServers: ResourceCatalog["mcpServers"]; onChange(key: string, enabled: boolean): void }): ReactNode {
-  const families: Array<{ key: string; label: string; note: string }> = [
-    { key: "browser", label: "浏览器自动化", note: "16 个 browser_* 工具" },
-    { key: "ssh", label: "SSH 远程终端", note: "8 个 ssh_* 工具" }
-  ];
-  return (
-    <fieldset><legend>能力工具</legend>
-      {families.map((family) => <label className="tool-toggle" key={family.key}><input type="checkbox" checked={agentToolEnabled(agent, family.key)} onChange={(event) => onChange(family.key, event.target.checked)} />{family.label}<small>{family.note}</small></label>)}
-      {mcpServers.map((server) => <label className="tool-toggle" key={`mcp:${server.name}`} title={server.disabled ? "该服务器已在 MCP 设置中停用" : undefined}><input type="checkbox" checked={agentToolEnabled(agent, `mcp:${server.name}`)} onChange={(event) => onChange(`mcp:${server.name}`, event.target.checked)} />{server.name}<small>MCP · {server.toolCount} 个工具</small></label>)}
-      {mcpServers.length === 0 && <p className="resource-empty">未发现 MCP Server，配置后可在此按服务器启停。</p>}
-    </fieldset>
-  );
-}
-
 /**
  * 单模型的「思考等级支持」编辑器：勾选要支持的档位，并可为每一档声明发给上游的
  * 实际取值（留空 = 同名档位）。
@@ -777,6 +715,9 @@ function SettingsDialog({ settings, models, providers, customProvider, customMod
   const initialSettingsRef = useRef<import("../../shared/protocol").DesktopSettings>(structuredClone(settings));
   const [agentList, setAgentList] = useState<AgentProfile[]>(settings.agents);
   const [selectedAgentId, setSelectedAgentId] = useState(settings.currentAgentId);
+  // 列表「使用中」徽标读快照的 agentId（运行时真值），而不是 settings.currentAgentId
+  // ——后者只在 agent.select/save 时同步，切角色后可能落后一拍。
+  const activeAgentId = useDesktopStore((state) => state.snapshot.agentId);
   const cssFileInputRef = useRef<HTMLInputElement>(null);
   const themeDirectoryInputRef = useRef<HTMLInputElement>(null);
   const [themeImportError, setThemeImportError] = useState<string>();
@@ -1361,7 +1302,7 @@ function SettingsDialog({ settings, models, providers, customProvider, customMod
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={closeSettings}>
-      <section className="settings-dialog settings-center" data-pane="settings-dialog" onMouseDown={(event) => event.stopPropagation()}>
+      <section className={tab === "agents" ? "settings-dialog settings-center settings-wide" : "settings-dialog settings-center"} data-pane="settings-dialog" onMouseDown={(event) => event.stopPropagation()}>
         <header><div><Settings size={19} /><div><h2>ChatAnyTime 设置</h2><p>模型服务和 Agent 角色配置保存在本机。</p></div></div><button className="icon-button" type="button" title="关闭设置" aria-label="关闭设置" onClick={closeSettings}><X size={18} /></button></header>
         <div className="settings-body"><nav className="settings-tabs"><button type="button" className={tab === "general" ? "active" : ""} onClick={() => setTab("general")}>通用</button><button type="button" className={tab === "models" ? "active" : ""} onClick={() => setTab("models")}>模型服务</button><button type="button" className={tab === "agents" ? "active" : ""} onClick={() => setTab("agents")}>Agent 角色</button><button type="button" className={tab === "subagents" ? "active" : ""} onClick={() => setTab("subagents")}>子智能体</button><button type="button" className={tab === "resources" ? "active" : ""} onClick={() => setTab("resources")}>技能与工具</button><button type="button" className={tab === "hooks" ? "active" : ""} onClick={() => setTab("hooks")}>钩子</button><button type="button" className={tab === "appearance" ? "active" : ""} onClick={() => setTab("appearance")}>外观</button><button type="button" className={tab === "usage" ? "active" : ""} onClick={() => setTab("usage")}>用量统计</button><button type="button" className={tab === "automation" ? "active" : ""} onClick={() => setTab("automation")}>自动化任务</button></nav><div className="settings-content">{tab === "general" ? <form onSubmit={(event) => { event.preventDefault(); const nextSettings = structuredClone(settings); void window.piDesktop.send({ type: "settings.save", settings: { model: nextSettings.model, thinkingLevel: nextSettings.thinkingLevel, accessMode: nextSettings.accessMode, appearance: nextSettings.appearance, browser: nextSettings.browser, computer: nextSettings.computer, design: nextSettings.design, ssh: nextSettings.ssh, jev: nextSettings.jev, defaultWorkspace: nextSettings.defaultWorkspace } }); markSettingsSaved(nextSettings); onClose(); }}>
           <label>全局默认模型<ModelSelect models={configuredModels} providers={providers} value={settings.model ? `${settings.model.provider}/${settings.model.id}` : ""} placeholder="请选择默认模型" onChange={(value) => { const slash = value.indexOf("/"); useDesktopStore.setState({ settings: { ...settings, model: slash > 0 ? { provider: value.slice(0, slash), id: value.slice(slash + 1) } : undefined } }); }} /></label>
@@ -1427,10 +1368,7 @@ function SettingsDialog({ settings, models, providers, customProvider, customMod
         {formBlocker && <p className="form-hint">{formBlocker}</p>}
         {formError && <p className="form-error">{formError}</p>}
         <footer><button type="button" className="secondary-button" onClick={closeSettings}>取消</button><button className="primary-button" disabled={saving || Boolean(formBlocker)} type="submit">{saving ? "正在应用" : "保存设置"}</button></footer>
-        </form> : tab === "agents" ? <div className="agent-settings">
-          <div className="settings-agent-list">{agentList.filter((agent) => !agent.archived).map((agent) => <button type="button" key={agent.id} className={agent.id === selectedAgent?.id ? "active" : ""} onClick={() => setSelectedAgentId(agent.id)}><strong>{agent.name}</strong><small>{agent.description || "未填写说明"}</small></button>)}<button type="button" className="secondary-button agent-new-button" onClick={newAgent}>+ 新建 Agent</button></div>
-          {selectedAgent && <div className="agent-editor"><label>名称<input value={selectedAgent.name} onChange={(event) => updateAgent({ name: event.target.value })} /></label><label>说明<input value={selectedAgent.description} onChange={(event) => updateAgent({ description: event.target.value })} /></label><label>系统提示词<textarea value={selectedAgent.systemPrompt} rows={6} onChange={(event) => updateAgent({ systemPrompt: event.target.value })} /></label><label>Div 气泡模式<select value={selectedAgent.divMode} onChange={(event) => updateAgent({ divMode: event.target.value as DivBubbleMode })}><option value="off">关闭</option><option value="auto">智能判断（按场景使用）</option><option value="always">始终开启（全部回复使用）</option></select></label><label>默认模型<ModelSelect models={configuredModels} providers={providers} value={selectedAgent.defaultModel ? `${selectedAgent.defaultModel.provider}/${selectedAgent.defaultModel.id}` : ""} placeholder="跟随全局默认模型" onChange={(value) => { updateAgent({ defaultModel: value ? { provider: value.slice(0, value.indexOf("/")), id: value.slice(value.indexOf("/") + 1) } : undefined }); }} /></label><label>默认思考等级<select value={selectedAgent.defaultThinkingLevel} onChange={(event) => updateAgent({ defaultThinkingLevel: event.target.value as ThinkingLevel })}>{THINKING_LEVELS.map((level) => <option key={level} value={level}>{thinkingLevelLabels[level]}</option>)}</select></label><AgentSkillSelector agent={selectedAgent} skills={resources.skills} onChange={updateAgentSkillOverride} /><AgentCapabilityTools agent={selectedAgent} mcpServers={resources.mcpServers} onChange={updateAgentToolOverride} /><fieldset><legend>工具权限</legend>{agentTools.map((tool) => <label className="tool-toggle" key={tool}><input type="checkbox" checked={selectedAgent.tools[tool]} onChange={(event) => updateAgent({ tools: { ...selectedAgent.tools, [tool]: event.target.checked } })} />{toolLabel(tool)}</label>)}</fieldset><footer><button type="button" className="danger-button" disabled={selectedAgent.id === "default"} onClick={() => void archiveAgent()}>归档</button><button type="button" className="secondary-button" onClick={duplicateAgent}>复制</button><button type="button" className="primary-button" onClick={() => void saveAgent()}>保存 Agent</button></footer></div>}
-        </div> : tab === "subagents" ? <SubagentSettings resources={resources} workspaceOpen={workspaceOpen} models={models} providers={providers} /> : tab === "resources" ? <ResourceSettings resources={resources} /> : tab === "hooks" ? <HooksSettings resources={resources} workspaceOpen={workspaceOpen} /> : tab === "usage" ? <UsageSettings /> : tab === "automation" ? <AutomationSettings models={models} providers={providers} settings={settings} workspaceConfigured={workspaceOpen} workspaceName={settings.workspace ? settings.workspace.split(/[\\/]/u).at(-1) : undefined} onCreateInSession={() => { closeSettings(); onCreateInSession(); }} onOpenRunSession={closeSettings} /> : <form className="appearance-settings" onSubmit={(event) => { event.preventDefault(); const nextSettings = structuredClone(settings); void window.piDesktop.send({ type: "appearance.save", appearance: nextSettings.appearance }); markSettingsSaved(nextSettings); onClose(); }}>
+        </form> : tab === "agents" ? <AgentSettings agents={agentList} activeAgentId={activeAgentId} selectedAgentId={selectedAgent?.id ?? ""} models={configuredModels} providers={providers} resources={resources} onSelect={setSelectedAgentId} onCreate={newAgent} onUpdate={updateAgent} onUpdateSkillOverride={updateAgentSkillOverride} onUpdateToolOverride={updateAgentToolOverride} onSave={() => void saveAgent()} onDuplicate={duplicateAgent} onArchive={() => void archiveAgent()} /> : tab === "subagents" ? <SubagentSettings resources={resources} workspaceOpen={workspaceOpen} models={models} providers={providers} /> : tab === "resources" ? <ResourceSettings resources={resources} /> : tab === "hooks" ? <HooksSettings resources={resources} workspaceOpen={workspaceOpen} /> : tab === "usage" ? <UsageSettings /> : tab === "automation" ? <AutomationSettings models={models} providers={providers} settings={settings} workspaceConfigured={workspaceOpen} workspaceName={settings.workspace ? settings.workspace.split(/[\\/]/u).at(-1) : undefined} onCreateInSession={() => { closeSettings(); onCreateInSession(); }} onOpenRunSession={closeSettings} /> : <form className="appearance-settings" onSubmit={(event) => { event.preventDefault(); const nextSettings = structuredClone(settings); void window.piDesktop.send({ type: "appearance.save", appearance: nextSettings.appearance }); markSettingsSaved(nextSettings); onClose(); }}>
           <div className="appearance-grid">
             <div>
               <section className="interface-tuning-settings" aria-label="界面微调">

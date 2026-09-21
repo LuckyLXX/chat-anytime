@@ -31,7 +31,7 @@
 
 类名属于实现细节，可能随版本变化；以下属性是稳定契约，结构化主题请只依赖它们：
 
-**区域钩子 `data-pane`**：`sidebar` `topbar` `workspace` `work-area` `conversation` `timeline` `composer` `task-panel` `memory-panel` `preview` `terminal` `ssh` `question-panel` `settings-dialog` `permission-dialog` `landing` `markdown-outline` `design` `design-toolbar` `design-tools` `design-canvas` `design-layers` `design-inspector` `gallery-menu` `gallery-wall`
+**区域钩子 `data-pane`**：`sidebar` `topbar` `workspace` `work-area` `conversation` `timeline` `composer` `task-panel` `memory-panel` `preview` `terminal` `ssh` `question-panel` `settings-dialog` `permission-dialog` `landing` `markdown-outline` `design` `design-toolbar` `design-tools` `design-canvas` `design-layers` `design-inspector` `gallery-menu` `gallery-wall` `agent-settings`
 
 > `design` 是设计模式（Design Studio，顶栏调色板按钮进入）的工作台外壳——顶栏工具栏 + 左侧图层树（`design-layers`）+ 中部无限画布（`design-canvas`）+ 右侧属性检查器（`design-inspector`）。工作台底色走 `--panel-bg-preview`（缺省 `--panel-bg`）与既有表面 token，跟随主题；画布点阵/参考线/选择框用 `--border`/`--accent` 派生，主题可用 `[data-pane="design"]` 后代选择器重设计。 `design-tools` 是画布顶部居中的浮动绘图工具胶囊（选择/画板/矩形/文本），激活按钮带 `aria-pressed="true"`。
 
@@ -47,6 +47,8 @@
 > `markdown-outline` 是右侧预览面板的**文档大纲栏**（markdown 预览工具条的「大纲」按钮展开）——按标题层级缩进列出 h1–h6，点击平滑滚动到对应标题，滚动时高亮当前章节。`.markdown-outline` 是栏体（宽度 200px、`border-right`）、`.markdown-outline-title` 是「大纲」小标题、`.markdown-outline-list` 是可滚动列表、`.markdown-outline-item` 是条目（按层级设 `padding-left`）、`.markdown-outline-item.active` 是当前章节（默认走 `--accent-soft`/`--accent-text`）、`.markdown-outline.is-empty` 是无标题空态。窄面板（≤760px）下大纲栏改为在内容上方横排。相关控件钩子：`data-control="preview-outline-toggle"`（预览工具条的大纲开关，`aria-pressed` 标记展开态）。
 
 > `markdown-outline` 与预览正文同属 `preview` 区域；正文内容块带 `content-visibility: auto`（长文档只渲染可视区），主题请勿给 `.preview-scroll` / `.markdown-surface` 及其祖先加`contain`/`transform`/`filter`——那会改变包含块、影响全屏弹层的定位基准。
+
+> `agent-settings` 是设置页「Agent 角色」tab（2026-09-22 重设计）——两栏：左栏角色列表（`.agent-rail`，含搜索框与「使用中」徽标 `.agent-rail-live`）与右栏编辑器（`.agent-editor`，顶部固定操作条 `.agent-editor-bar` + 可滚动分区卡片 `.agent-card`：身份 / 人格与系统提示词 / 对话行为 / 技能 / 扩展能力 / 内建工具权限）。结构钩子由 `renderer/src/AgentSettings.tsx` 提供，契约测试在 `AgentSettings.test.tsx`；**主题注意**：该页整体用了 `.agent-settings` 前缀的 (0,2,x) 特异性类名——因为 `.settings-dialog label/input/select`（(0,1,1)）会命中本页所有 label 与输入框，覆盖时必须同样带 `.agent-settings` 或更高特异性，否则会被打回「38px 输入框 + 15px 18px 外边距」并弄坏开关/勾选行尺寸。设置弹窗在角色页走 `.settings-center.settings-wide`（1080px），其余 tab 保持 920px。相关控件钩子：`data-control="agent-new"`（新建角色）、`agent-save`（保存角色）。
 
 > `automation-settings` 是设置页「自动化任务」tab（双子页：「任务」列表 + 搜索 + 过滤器 / 「运行记录」历史面板，位于 `settings-dialog` 内）；`automation-dialog` 是「创建/编辑定时任务」弹窗。二者都随设置页/弹窗配色走，主题可用 `--panel-bg` 派生背景与 `--border`/`--surface-*` 控制排版。相关控件钩子：`data-control="automation-open"`（侧栏「新建话题」下方的「自动化」入口 + 折叠态窄条图标）、`automation-run`（行内「运行一次」）、`automation-toggle`（启停）、`automation-runs-tab`（子页「运行记录」）；未在控件列枚举的地方用类名 `.automation-*` 命中。
 
@@ -86,6 +88,7 @@
 | 图层树锁定开关（行悬停出现，aria-pressed 标记锁定） | `design-layer-lock`                              |
 | 作品下拉开关（顶栏，aria-expanded + 数量角标） | `gallery-toggle`                                 |
 | 作品：运行 / 继续开发 / 打开作品墙 / 登记新作品 / 移除 | `gallery-run` / `gallery-develop` / `gallery-open-wall` / `gallery-publish` / `gallery-remove` |
+| 角色页：新建角色 / 保存角色 | `agent-new` / `agent-save` |
 | 面板坞开关 + 待办页 tab（会话区右上方 FAB） | `task-panel-toggle`                              |
 | 记忆页 tab（面板坞内）                      | `memory-toggle`                                  |
 | 发送                                        | `send`                                           |

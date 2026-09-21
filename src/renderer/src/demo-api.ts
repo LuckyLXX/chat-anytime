@@ -358,10 +358,18 @@ flowchart LR
 };
 
 const demoResources: ResourceCatalog = {
+  // 技能刻意给到 8 个以上：角色页的 Skill 搜索框在 >8 时才渲染，只放 2–3 个的话
+  // demo（渲染端唯一目视验证途径）永远跑不到这条分支，真机上 22 个 Skill 才暴露。
   skills: [
     { id: "skill:computer-use", name: "电脑控制", description: "操作桌面上的其他应用窗口：枚举、截图、点击、输入。", source: "随应用分发", scope: "bundled", defaultEnabled: true, enabled: true, toggleable: true, disableModelInvocation: false },
     { id: "skill:code-review", name: "code-review", description: "审查代码变更并整理风险与建议。", source: "用户资源", scope: "global", defaultEnabled: true, enabled: true, toggleable: true, disableModelInvocation: false },
-    { id: "skill:project-notes", name: "project-notes", description: "整理项目文档和工作记录。", source: "当前项目", scope: "project", defaultEnabled: true, enabled: true, toggleable: true, disableModelInvocation: false }
+    { id: "skill:project-notes", name: "project-notes", description: "整理项目文档和工作记录。", source: "当前项目", scope: "project", defaultEnabled: true, enabled: true, toggleable: true, disableModelInvocation: false },
+    { id: "skill:web-tasks", name: "网页任务", description: "用内置浏览器完成登录、填表、下载与页面生图。", source: "随应用分发", scope: "bundled", defaultEnabled: true, enabled: true, toggleable: true, disableModelInvocation: false },
+    { id: "skill:automation", name: "自动化任务", description: "把定时需求转成 cron 调度 + 提示词的自动化任务。", source: "随应用分发", scope: "bundled", defaultEnabled: true, enabled: true, toggleable: true, disableModelInvocation: false },
+    { id: "skill:archify", name: "archify", description: "生成架构图、流程图、时序图等可探索的独立 HTML。", source: "共享目录", scope: "global", defaultEnabled: true, enabled: true, toggleable: true, disableModelInvocation: false },
+    { id: "skill:md-to-pdf", name: "md-to-pdf", description: "把 Markdown 转成中文友好的 PDF。", source: "共享目录", scope: "global", defaultEnabled: false, enabled: true, toggleable: true, disableModelInvocation: false },
+    { id: "skill:rolldek-image", name: "rolldek-image", description: "通过中转站生成与编辑图片。", source: "共享目录", scope: "global", defaultEnabled: false, enabled: true, toggleable: true, disableModelInvocation: false },
+    { id: "skill:find-skills", name: "find-skills", description: "发现并安装可用的 Agent 技能。", source: "共享目录", scope: "global", defaultEnabled: false, enabled: true, toggleable: true, disableModelInvocation: false }
   ],
   commands: [
     { name: "commit", description: "按规范为当前改动生成提交信息", scope: "global", filePath: "~/.pi/agent/pidesktop-commands/commit.md", template: "读取暂存区改动，按 type(scope): 中文描述 规范生成提交：$ARGUMENTS" },

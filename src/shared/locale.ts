@@ -1,4 +1,14 @@
-import type { DelegationRole, SessionRunStatus, ThinkingLevel } from "./protocol.js";
+import type { DelegationRole, ResourceScope, SessionRunStatus, ThinkingLevel } from "./protocol.js";
+
+/** 资源作用域显示名（设置页各处共用；原先在 App.tsx 内联，抽到此处避免复制）。 */
+export const resourceScopeLabels: Record<ResourceScope, string> = {
+  global: "全局",
+  project: "当前项目",
+  package: "Pi Package",
+  bundled: "内置",
+  temporary: "临时",
+  unknown: "未知"
+};
 
 export const delegationRoleLabels: Record<DelegationRole, string> = {
   explore: "探索",
