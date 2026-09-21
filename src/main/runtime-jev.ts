@@ -24,8 +24,8 @@
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { JEV_DEFAULT_MAX_STEPS, JEV_MAX_STEPS_LIMIT, type BrowserAutomationRequest, type BrowserAutomationResult, type JevObservePage, type JevSettings } from "../shared/protocol.js";
-import { buildActionSpace, buildJevRequest, resolveDecision, type JevHistoryEntry, type JevOperation } from "./jev-action-space.js";
-import { askJev, detectSensitivePage, type JevAnswerBundle, type JevFetch } from "./jev-client.js";
+import { buildActionSpace, buildJevRequest, resolveDecision, validateChoice, type JevHistoryEntry, type JevOperation } from "./jev-action-space.js";
+import { askJev, buildJevProbe, detectSensitivePage, JEV_PROBE_EXPECTED, JEV_PROBE_QUESTION, type JevAnswerBundle, type JevFetch } from "./jev-client.js";
 import { TEXT_VALUE } from "./jev-questions.js";
 
 /** 文本助手的系统提示（从 jev-questions 转出，便于接线处直接引用）。 */
@@ -36,6 +36,10 @@ export { JEV_DEFAULT_MAX_STEPS, JEV_MAX_STEPS_LIMIT };
 export const JEV_WAIT_MS = 100;
 /** 连续多少次「页面没变化」的非等待动作后判定阻塞（jev 同款启发式）。 */
 export const JEV_STALL_LIMIT = 3;
+/** 在导航中（求值暂时不可用）时的重试次数；超出则如实停止，不假装页面没变。 */
+export const JEV_NAVIGATION_RETRIES = 3;
+/** 两次导航重试之间的等待（页面通常在一帧到几百毫秒内可用）。 */
+export const JEV_NAVIGATION_RETRY_MS = 250;
 
 export interface JevTextRequest {
   goal: string;
@@ -135,6 +139,27 @@ export async function runJevLoop(
       throw new Error("Jev 观察返回了意外结果");
     })();
   };
+  /**
+   * 观察一帧，容忍「页面正在导航」。
+   *
+   * 为什么要容忍：点击链接/提交表单后紧接着的观察**必然会**撞上导航中的那一刻，
+   * 主进程的 `Runtime.evaluate` 那时会以「页面脚本执行失败：Cannot find context with
+   * specified id」收场（jev 侧对应的是 `StalePage("Document is navigating")`，它的处理是
+   * **重新观察**而不是终结整次运行）。这里同理：短暂等待后重试，重试仍失败才把
+   * 「反复观察不到页面」当作不可恢复的状态上报——不假装页面没变、也不静默丢弃这一步。
+   */
+  const observeSettled = async (): Promise<{ page: JevObservePage } | { failure: string }> => {
+    let lastError = "页面不可读取";
+    for (let attempt = 0; attempt <= JEV_NAVIGATION_RETRIES; attempt++) {
+      try {
+        return { page: await observe() };
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : String(error);
+        if (attempt < JEV_NAVIGATION_RETRIES) await wait(JEV_NAVIGATION_RETRY_MS);
+      }
+    }
+    return { failure: lastError };
+  };
   const finish = (outcome: JevOutcome): JevRunResult => ({
     text: [`【Jev 快速执行】目标：${goal}`, steps.length > 0 ? steps.map(renderStep).join("\n") : "（尚未执行任何动作）", outcomeText(outcome, steps.length, maxSteps, reason)].join("\n"),
     steps,
@@ -146,7 +171,12 @@ export async function runJevLoop(
     onStep?.(step);
   };
 
-  let page = await observe();
+  let initial = await observeSettled();
+  if ("failure" in initial) {
+    reason = `无法读取当前页面：${initial.failure}。请确认内置浏览器里有已打开的页面后重试。`;
+    return finish("blocked");
+  }
+  let page = initial.page;
   for (let step = 1; step <= maxSteps; step++) {
     if (signal?.aborted) return finish("aborted");
 
@@ -181,7 +211,12 @@ export async function runJevLoop(
       await wait(JEV_WAIT_MS);
       record({ index: step, operation: "WAIT", label: "—", confidence: decision.confidence, detail: `等待 ${JEV_WAIT_MS}ms`, pageChanged: null, latencyMs: answer.latencyMs, elapsedMs: elapsed() });
       history.push({ action: "等待", kind: "wait", page_changed: null });
-      page = await observe();
+      const next = await observeSettled();
+      if ("failure" in next) {
+        reason = `等待后无法读取页面：${next.failure}。`;
+        return finish("blocked");
+      }
+      page = next.page;
       continue;
     }
     if (decision.scroll !== undefined) {
@@ -189,7 +224,12 @@ export async function runJevLoop(
       ok(await deps.request({ op: "scroll", direction, amount: 560 }));
       record({ index: step, operation: direction === "down" ? "SCROLL_DOWN" : "SCROLL_UP", label: "—", confidence: decision.confidence, detail: `页面滚动：${direction === "down" ? "向下" : "向上"} 560px`, pageChanged: null, latencyMs: answer.latencyMs, elapsedMs: elapsed() });
       history.push({ action: `滚动（${direction === "down" ? "下" : "上"}）`, kind: "scroll", page_changed: null });
-      page = await observe();
+      const next = await observeSettled();
+      if ("failure" in next) {
+        reason = `滚动后无法读取页面：${next.failure}。`;
+        return finish("blocked");
+      }
+      page = next.page;
       continue;
     }
 
@@ -238,8 +278,16 @@ export async function runJevLoop(
     history.push({ action: target.label, kind: target.action.kind, text: text ?? null, page_changed: null });
     // 执行后立刻观察：它同时是「这一步有没有改变页面」的证据与下一轮的输入（jev 同款，
     // 不为「看变化」额外付一次往返）。
-    const after = await observe();
-    stepRecord.pageChanged = after.url !== page.url || after.pageText !== page.pageText;
+    const after = await observeSettled();
+    if ("failure" in after) {
+      // 连重试都读不到页面：把**已发生的执行事实**先入库（记录纪律：执行先于观察），
+      // 再如实停止，而不是静默丢掉这一步。
+      stepRecord.pageChanged = null;
+      record(stepRecord);
+      reason = `已执行「${target.label}」，但之后无法读取页面：${after.failure}。请重新观察页面后决定是否继续。`;
+      return finish("blocked");
+    }
+    stepRecord.pageChanged = pageChangedBetween(page, after.page);
     history[history.length - 1]!.page_changed = stepRecord.pageChanged;
     record(stepRecord);
 
@@ -249,10 +297,38 @@ export async function runJevLoop(
       reason = `连续 ${JEV_STALL_LIMIT} 次操作页面都没有变化，判定无法继续推进。`;
       return finish("blocked");
     }
-    page = after;
+    page = after.page;
     if (jev.autoPilot === false) return finish("manual");
   }
   return finish("limit");
+}
+
+/**
+ * 两个观察帧之间「页面变了吗」。
+ *
+ * 为什么不能只看 URL + 可见文本（旧实现的缺陷）：**点击复选框、切换开关、选中 tab
+ * 都不改页面文本**，于是那一步会被判成「没有变化」；连着几次就被停滞启发式误判为
+ * 「这条路走不通」而提前 blocked。关键是这个缺陷**只在等待步不参与判断时才会暴露**
+ * ——jev 原版正是用 `all(h["kind"] != "wait")` 把那类步排除掉，同时它的 `fingerprint()`
+ * 把 `actions`（每个元素的当前值/勾选态/展开态）一并算进摘要，所以「勾选态翻转」
+ * 在它那里**就是**页面变化。
+ *
+ * 这里补上后者（元素状态）：与结构无关，只比逐项的 nodeId + 值，顺序变了也不误报。
+ * 不把坐标/遮挡算进来——它们随滚动与悬停瞬时变化（与 `elementSignature` 同一取舍）。
+ */
+export function pageChangedBetween(before: JevObservePage, after: JevObservePage): boolean {
+  if (before.url !== after.url || before.pageText !== after.pageText) return true;
+  if (before.items.length !== after.items.length) return true;
+  for (let index = 0; index < before.items.length; index += 1) {
+    const left = before.items[index]!;
+    const right = after.items[index]!;
+    if (left.nodeId !== right.nodeId || left.role !== right.role) return true;
+    if ((left.value ?? "") !== (right.value ?? "")) return true;
+    if ((left.checked ?? null) !== (right.checked ?? null)) return true;
+    if ((left.selected ?? null) !== (right.selected ?? null)) return true;
+    if ((left.expanded ?? null) !== (right.expanded ?? null)) return true;
+  }
+  return false;
 }
 
 function renderStep(step: JevStep): string {
@@ -327,4 +403,58 @@ export function buildJevTools(deps: JevToolDeps): ToolDefinition[] {
 export function makeJevCaller(config: { baseUrl: string; apiKey: string }, fetchJev?: JevFetch) {
   return (query: { model: string; state: unknown; questions: Record<string, unknown> }) =>
     askJev({ ...query, baseUrl: config.baseUrl, apiKey: config.apiKey }, fetchJev);
+}
+
+export interface JevProbeResult {
+  ok: boolean;
+  /** 给人看的一句话（成功时也带模型与延迟，便于分辨「连不上」与「答得怪」）。 */
+  message: string;
+  model?: string;
+  latencyMs?: number;
+}
+
+/**
+ * 连通性探测（设置页的「测试连接」）。
+ *
+ * 只做一件事：拿用户填的地址与密钥发一次**真实的**决策请求，把响应过一遍
+ * `validateChoice`。不碰页面、不读会话、不写真配置，也不要求先启用 Jev。
+ *
+ * 失败时把原因说清（网络不可达 / 密钥被拒 / 响应形状不对），因为这一步常见的三种
+ * 失败在用户眼里长得很像，而后续行为完全不同：修网络、换密钥、或者改网关配置。
+ * 内网拿不到 TypeSafe 是预期情况，所以提示里直接给出「保持关闭」的退路。
+ */
+export async function probeJev(
+  config: { baseUrl: string; model: string; apiKey: string },
+  fetchJev?: JevFetch,
+  signal?: AbortSignal
+): Promise<JevProbeResult> {
+  const baseUrl = config.baseUrl.trim();
+  const apiKey = config.apiKey.trim();
+  const model = config.model.trim() || "jev-latest";
+  if (!baseUrl) return { ok: false, message: "请先填写 TypeSafe 接口地址（例如 https://api.typesafe.ai/v1）。" };
+  if (!apiKey) return { ok: false, message: "请先填写 TypeSafe API Key，否则无法验证连通性。" };
+  let bundle: JevAnswerBundle;
+  const probe = buildJevProbe(model);
+  try {
+    bundle = await askJev({ baseUrl, apiKey, model: probe.model, state: probe.state, questions: probe.questions }, fetchJev, signal);
+  } catch (error) {
+    // askJev 已经把网络/HTTP 错误转成了可行动的中文，直接转述。
+    return { ok: false, message: `连接失败：${error instanceof Error ? error.message : String(error)}` };
+  }
+  const answer = bundle.answers?.[JEV_PROBE_QUESTION];
+  let choice: string;
+  try {
+    choice = validateChoice(answer, [JEV_PROBE_EXPECTED, "disconnect"]).choice;
+  } catch (error) {
+    return {
+      ok: false,
+      message: `已连上 TypeSafe，但响应不符合预期形状（${error instanceof Error ? error.message : String(error)}）。检查接口地址是否指向 TypeSafe 的 /v1，或网关是否改写了响应。`,
+      latencyMs: bundle.latencyMs
+    };
+  }
+  if (choice !== JEV_PROBE_EXPECTED) {
+    return { ok: false, message: `已连上 TypeSafe，但模型答的不是预期的「已到达」选项（选了 ${choice}），请确认端点与模型名。`, latencyMs: bundle.latencyMs };
+  }
+  const answered = bundle.model ? `模型 ${bundle.model}` : `模型 ${model}`;
+  return { ok: true, message: `连接成功（${answered}，${bundle.latencyMs}ms）。`, model: bundle.model ?? model, latencyMs: bundle.latencyMs };
 }

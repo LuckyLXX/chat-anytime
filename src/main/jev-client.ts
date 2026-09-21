@@ -42,7 +42,58 @@ export interface JevQuery {
   questions: Record<string, unknown>;
 }
 
+/**
+ * 连通性探测的**固定问法**：两个选项，期望 Jev 选 `connect`。
+ *
+ * 为什么不能拿一个空对象/假问题去测：那只能证明「服务器回了 200」，证明不了
+ * 「我们的请求形状与响应形状对得上」。真实用途下的失败大多出在这一层——地址对了、
+ * 密钥也对了，但网关换了一版、响应字段改了，于是每一步都报「无效响应，不执行任何
+ * 动作」。所以探测必须走**同一套校验**（`validateChoice`），并且固定正确答案，
+ * 这样「连得上」「答得对」「答得能过校验」三件事一次问清。
+ */
+export const JEV_PROBE_QUESTION = "jev-connectivity-probe";
+export const JEV_PROBE_SYSTEM = "This is a connectivity check for the Typesafe/jev API. Pick the option that means the request arrived.";
+export const JEV_PROBE_EXPECTED = "connect";
+
+/** 探测请求体（与业务问法同一个 `questions` 形状，故能真实验证协议兼容性）。 */
+export function buildJevProbe(model: string): { model: string; state: unknown; questions: Record<string, unknown> } {
+  return {
+    model,
+    state: "connectivity probe",
+    questions: {
+      [JEV_PROBE_QUESTION]: {
+        type: "choice",
+        criteria: { connect: "the request reached the Typesafe API and this question is answered by jev", disconnect: "the request did not reach the API" },
+        instructions: { system: JEV_PROBE_SYSTEM }
+      }
+    }
+  };
+}
+
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * 从错误响应体里抽出人类可读的一句原因。
+ *
+ * 形状来自**真实端点实测**（2026-09-21）：缺少密钥回 403、密钥不对回 401，两者都是
+ * `{"detail":{"error_type":"authentication_error","message":"…"}}`。
+ * 直接把整包 JSON 丢给用户/模型看既不友好也不可操作，所以优先取
+ * `detail.message` → `message` → `error.message`，都取不到才回落原文截断。
+ */
+export function extractErrorDetail(body: string): string {
+  const trimmed = body.trim();
+  if (!trimmed) return "";
+  try {
+    const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+    const detail = parsed.detail && typeof parsed.detail === "object" ? (parsed.detail as Record<string, unknown>) : undefined;
+    for (const candidate of [detail?.message, parsed.message, (parsed.error as Record<string, unknown> | undefined)?.message]) {
+      if (typeof candidate === "string" && candidate.trim()) return candidate.trim().slice(0, 300);
+    }
+  } catch {
+    // 不是 JSON（网关的 HTML 错误页等）——用原文。
+  }
+  return trimmed.slice(0, 300);
+}
 
 /**
  * 发一次决策请求。5xx/429/529 退避重试（最多 3 次），其余错误立刻抛出。
@@ -65,7 +116,11 @@ export async function askJev(query: JevQuery, fetchJev: JevFetch = defaultJevFet
       throw new Error(`无法连接 TypeSafe（${url}）：${error instanceof Error ? error.message : String(error)}。请检查接口地址与网络——离线环境请关闭 Jev 快速决策。`);
     }
     if (response.status === 401 || response.status === 403) {
-      throw new Error(`TypeSafe 拒绝了 API Key（HTTP ${response.status}）：请在设置的 Jev 快速决策里重新填写密钥。`);
+      // 官方端点实测（2026-09-21）：未带密钥 → 403，密钥不对 → 401，两者都是
+      // `{"detail":{"error_type":"authentication_error","message":…}}`。把上游那句
+      // 原话带上：它能区分「没填密钥」「密钥被吊销」「额度用完」，比笼统的「密钥被拒」有用。
+      const detail = extractErrorDetail(await response.text().catch(() => ""));
+      throw new Error(`TypeSafe 拒绝了 API Key（HTTP ${response.status}）${detail ? `：${detail}` : ""}。请在设置的 Jev 快速决策里检查密钥。`);
     }
     if (RETRYABLE_STATUS.has(response.status)) {
       lastError = `TypeSafe 暂时不可用（HTTP ${response.status}）`;
@@ -78,8 +133,8 @@ export async function askJev(query: JevQuery, fetchJev: JevFetch = defaultJevFet
       throw new Error(`${lastError}（已重试 ${MAX_ATTEMPTS} 次）。`);
     }
     if (response.status >= 400) {
-      const detail = await response.text().catch(() => "");
-      throw new Error(`TypeSafe 返回 HTTP ${response.status}${detail ? `：${detail.slice(0, 300)}` : ""}。`);
+      const detail = extractErrorDetail(await response.text().catch(() => ""));
+      throw new Error(`TypeSafe 返回 HTTP ${response.status}${detail ? `：${detail}` : ""}。`);
     }
     let parsed: unknown;
     try {

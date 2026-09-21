@@ -72,3 +72,58 @@ describe("Jev 工具的激活与注册（源码回归网）", () => {
     expect(block).toContain("apiKeys[JEV_CREDENTIAL_ID]");
   });
 });
+
+/**
+ * 「测试连接」的接线纪律。
+ *
+ * 这一条有一个很容易写错的点：探测**必须不要求先启用 Jev**。若它复用了工具那套
+ * `requireSettings`（`!jev?.enabled` 就抛），用户就会卡在「不启用不能测、不测不敢
+ * 启用」的死循环里；而这件事在类型与运行时都不报错，只有用起来才会发现。
+ */
+describe("Jev 测试连接的接线（源码回归网）", () => {
+  it("jev.test 分支不读 enabled、也不写任何配置", () => {
+    const start = source.indexOf('case "jev.test"');
+    expect(start, "pi-runtime.ts 缺少 jev.test 分支").toBeGreaterThan(-1);
+    const rest = source.slice(start);
+    const next = rest.search(/\n {4}case "/u);
+    const body = next === -1 ? rest : rest.slice(0, next);
+    // 不能走 requireSettings（它会因 enabled !== true 而抛）；也不能落盘配置。
+    expect(body).not.toContain("requireSettings");
+    expect(body).not.toMatch(/settings\.jev\s*=/u);
+    expect(body).toContain("runtimeJev.probeJev");
+  });
+
+  it("探测用的密钥以命令草稿优先、其次已保存值（ak 镜像）", () => {
+    const start = source.indexOf('case "jev.test"');
+    const rest = source.slice(start);
+    const next = rest.search(/\n {4}case "/u);
+    const body = next === -1 ? rest : rest.slice(0, next);
+    expect(body).toContain("command.apiKey?.trim() || apiKeys[JEV_CREDENTIAL_ID]?.trim()");
+  });
+
+  it("主进程补发已保存的密钥，且不落盘用户填的草稿密钥", () => {
+    const indexSource = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "index.ts"), "utf8");
+    const start = indexSource.indexOf('case "jev.test"');
+    expect(start, "index.ts 缺少 jev.test 分支").toBeGreaterThan(-1);
+    const rest = indexSource.slice(start);
+    const next = rest.search(/\n {4}case "/u);
+    const body = next === -1 ? rest : rest.slice(0, next);
+    // 已保存的密钥在 main 侧手里（utility 只拿镜像），草稿为空时要补进去。
+    expect(body).toContain("credentialsCache[JEV_CREDENTIAL_ID]");
+    // 测试连接绝不写凭据：用户可能只是试一下。
+    expect(body).not.toContain("saveCredential");
+  });
+
+  it("渲染端设置页有测试连接入口，且不因「未启用」而禁用", () => {
+    const app = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../renderer/src/App.tsx"), "utf8");
+    expect(app).toContain('data-control="jev-test"');
+    expect(app).toContain('type: "jev.test"');
+    // 禁用条件只能与「正在测试」有关；不能带上 jevEnabled / jevKeyConfigured，
+    // 否则又回到「不启用/没存密钥就不能测」。
+    const button = app.slice(app.indexOf('data-control="jev-test"'));
+    const end = button.indexOf("</button>");
+    const tag = button.slice(0, end);
+    expect(tag).not.toContain("jevEnabled");
+    expect(tag).not.toContain("jevKeyConfigured");
+  });
+});

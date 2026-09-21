@@ -230,6 +230,9 @@ interface DesktopState {
   customProviderKeyConfigured: boolean;
   /** TypeSafe（Jev）密钥是否已保存：仅由 bootstrap 填充（明文永不跨进程/进 settings）。 */
   jevKeyConfigured: boolean;
+  /** 「测试连接」的进行状态与最近一次结果（设置页按钮与提示行用）。 */
+  jevTestStatus: "idle" | "loading" | "success" | "error";
+  jevTestMessage?: string;
   customModels: CustomProviderModel[];
   customModelFetchStatus: "idle" | "loading" | "success" | "error";
   customModelFetchError?: string;
@@ -375,6 +378,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   settings: emptySettings,
   customProviderKeyConfigured: false,
   jevKeyConfigured: false,
+  jevTestStatus: "idle",
   customModels: [],
   customModelFetchStatus: "idle",
   modelRefreshStatus: "idle",
@@ -503,8 +507,11 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
       case "custom-model-error":
         set({ customModelFetchStatus: "error", customModelFetchError: message.message });
         break;
-      case "models-refreshed":
-        set({ modelRefreshStatus: "success", modelRefreshError: undefined, modelRefreshProvider: message.providerId });
+      // 「测试连接」结果：成功/失败都在同一处收发，渲染端只做投影（不另立状态源）。
+      case "jev-test-result":
+        set({ jevTestStatus: message.ok ? "success" : "error", jevTestMessage: message.message });
+        break;
+      case "models-refreshed":        set({ modelRefreshStatus: "success", modelRefreshError: undefined, modelRefreshProvider: message.providerId });
         break;
       case "models-refresh-error":
         set({ modelRefreshStatus: "error", modelRefreshError: message.message, modelRefreshProvider: message.providerId });

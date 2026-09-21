@@ -932,6 +932,11 @@ export function createDemoApi(): DesktopApi {
         case "jev.clearKey":
           demoSettings.jevKeyConfigured = false;
           break;
+        // demo 里没有真实的 TypeSafe 请求，所以只能报「演示环境不做真实探测」而不假装成功——
+        // 假装成功会让演示环境误导用户（以为配好了）。与 gallery 的「服务型无命令时诚实降级」同一口径。
+        case "jev.test":
+          emit({ type: "jev-test-result", ok: false, message: "演示环境不会发起真实的 TypeSafe 请求：请在桌面应用里测试连接。" });
+          break;
         case "resources.reload":
           emit({ type: "resources", resources: structuredClone(demoResources) });
           break;

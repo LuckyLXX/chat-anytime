@@ -1718,6 +1718,13 @@ export type RuntimeCommand =
   /** Jev 配置 + 可选新密钥（密钥落 credentials.json，配置落 settings.json）。 */
   | { type: "jev.save"; jev: JevSettings; apiKey?: string }
   | { type: "jev.clearKey" }
+  /**
+   * 测一下能不能真的连上 TypeSafe：发一次**真实的**决策请求（固定两个选项的 choice
+   * 问法），只读、不碰任何页面。刻意**不要求先启用 Jev**——否则用户会卡在
+   * 「不启用不能测、不测不敢启用」的死循环里。配置与密钥都取自设置页的**草稿值**
+   * （尚未保存的也必须能测），草稿为空时回落已保存值。
+   */
+  | { type: "jev.test"; baseUrl?: string; model?: string; apiKey?: string }
   | { type: "memory.save"; memory: MemorySettings }
   | { type: "memory.create"; topic: string; description: string; content: string; workspaceScoped?: boolean }
   | { type: "memory.update"; topic: string; description: string; content: string }
@@ -1802,6 +1809,8 @@ export type RuntimeMessage =
   | { type: "custom-model-error"; providerId: string; message: string }
   | { type: "models-refreshed"; providerId: string }
   | { type: "models-refresh-error"; providerId: string; message: string }
+  /** Jev 「测试连接」结果：ok=true 时带实际回答的模型与延迟，ok=false 时带可行动错误。 */
+  | { type: "jev-test-result"; ok: boolean; message: string; model?: string; latencyMs?: number }
   | { type: "state"; snapshot: RuntimeSnapshot }
   /** 分屏格子（watched 非激活会话）的会话级快照；与 state 的节流节奏一致（50ms 批量、生命周期立即）。 */
   | { type: "session.state"; snapshot: SessionPaneSnapshot }
@@ -1827,8 +1836,7 @@ export type RuntimeMessage =
   | { type: "automation-run"; id: string; status: "ok" | "error" | "aborted" | "running"; taskName?: string; runId?: string; message?: string }
   /** 自动化运行历史全量推送（每次运行结束后随终态推送，渲染端全量替换）。 */
   | { type: "automation-runs"; runs: AutomationRunRecord[] }
-  /** utility 进程请求用系统默认浏览器打开一个 URL（OAuth 授权页）；main 进程 shell.openExternal。 */
-  | { type: "open-external"; url: string }
+  /** utility 进程请求用系统默认浏览器打开一个 URL（OAuth 授权页）；main 进程 shell.openExternal。 */  | { type: "open-external"; url: string }
   /** utility 进程发起的浏览器自动化操作；main 完成后以 browser-automation.result 命令回传。 */
   | { type: "browser-automation.request"; requestId: string; sessionKey: string; request: BrowserAutomationRequest }
   /** utility 进程发起的 SSH 操作（工具 execute 内 await）；main 完成后以 ssh-automation.result 回传，绕过串行命令队列。 */

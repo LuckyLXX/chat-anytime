@@ -4292,6 +4292,18 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     case "jev.clearKey":
       delete apiKeys[JEV_CREDENTIAL_ID];
       break;
+    // 「测试连接」：拿设置页的草稿值（未保存的也必须能测）发一次真实探测请求。
+    // 刻意不看 `settings.jev.enabled`、也不写任何配置——否则用户会卡在「不启用不能测、不测不敢启用」。
+    // 草稿全空时用已保存值兵底（用户已经配好、只想确认一下时不必重填）。
+    case "jev.test": {
+      const saved = settings?.jev;
+      const baseUrl = command.baseUrl?.trim() || saved?.baseUrl || "";
+      const model = command.model?.trim() || saved?.model || "jev-latest";
+      const key = command.apiKey?.trim() || apiKeys[JEV_CREDENTIAL_ID]?.trim() || "";
+      const result = await runtimeJev.probeJev({ baseUrl, model, apiKey: key });
+      post({ type: "jev-test-result", ok: result.ok, message: result.message, ...(result.model ? { model: result.model } : {}), ...(result.latencyMs !== undefined ? { latencyMs: result.latencyMs } : {}) });
+      break;
+    }
     case "memory.save": {
       // 快照/治理块按会话冻结，开关自下一个会话生效；工具 execute 实时判断。
       if (settings) settings.memory = command.memory;

@@ -736,6 +736,10 @@ function SettingsDialog({ settings, models, providers, customProvider, customMod
   const [jevApiKey, setJevApiKey] = useState("");
   const [jevSaving, setJevSaving] = useState(false);
   const [jevError, setJevError] = useState<string>();
+  // 「测试连接」的状态放全局 store（结果由 utility 以 jev-test-result 推送），
+  // 与 customModelFetchStatus 同一形状：推送 → store 投影 → 控件读。
+  const jevTestStatus = useDesktopStore((state) => state.jevTestStatus);
+  const jevTestMessage = useDesktopStore((state) => state.jevTestMessage);
   const [jevSaved, setJevSaved] = useState(false);
   const [visionError, setVisionError] = useState<string>();
   const visionModelOptions = selectableCatalogModels(models).filter((model) => model.configured && model.imageInput);
@@ -1194,6 +1198,23 @@ function SettingsDialog({ settings, models, providers, customProvider, customMod
     }
   }
 
+  async function testJev(): Promise<void> {
+    // 「测试连接」：发一次真实的 TypeSafe 决策请求（只读）。刻意不要求先勾「启用」——
+    // 否则用户会卡在「不启用不能测、不测不敢启用」。草稿为空时由 utility 侧回落已保存值。
+    useDesktopStore.setState({ jevTestStatus: "loading", jevTestMessage: undefined });
+    try {
+      await window.piDesktop.send({
+        type: "jev.test",
+        ...(jevBaseUrl.trim() ? { baseUrl: jevBaseUrl.trim() } : {}),
+        ...(jevModel.trim() ? { model: jevModel.trim() } : {}),
+        ...(jevApiKey.trim() ? { apiKey: jevApiKey.trim() } : {})
+      });
+    } catch (error) {
+      // 命令通道本身报错（不是探测失败）：也落到同一个提示位上。
+      useDesktopStore.setState({ jevTestStatus: "error", jevTestMessage: error instanceof Error ? error.message : "测试连接失败" });
+    }
+  }
+
   async function clearJevKey(): Promise<void> {
     try {
       await window.piDesktop.send({ type: "jev.clearKey" });
@@ -1313,7 +1334,7 @@ function SettingsDialog({ settings, models, providers, customProvider, customMod
     <div className="modal-backdrop" role="presentation" onMouseDown={closeSettings}>
       <section className="settings-dialog settings-center" data-pane="settings-dialog" onMouseDown={(event) => event.stopPropagation()}>
         <header><div><Settings size={19} /><div><h2>ChatAnyTime 设置</h2><p>模型服务和 Agent 角色配置保存在本机。</p></div></div><button className="icon-button" type="button" title="关闭设置" aria-label="关闭设置" onClick={closeSettings}><X size={18} /></button></header>
-        <div className="settings-body"><nav className="settings-tabs"><button type="button" className={tab === "general" ? "active" : ""} onClick={() => setTab("general")}>通用</button><button type="button" className={tab === "models" ? "active" : ""} onClick={() => setTab("models")}>模型服务</button><button type="button" className={tab === "agents" ? "active" : ""} onClick={() => setTab("agents")}>Agent 角色</button><button type="button" className={tab === "subagents" ? "active" : ""} onClick={() => setTab("subagents")}>子智能体</button><button type="button" className={tab === "resources" ? "active" : ""} onClick={() => setTab("resources")}>技能与工具</button><button type="button" className={tab === "hooks" ? "active" : ""} onClick={() => setTab("hooks")}>钩子</button><button type="button" className={tab === "appearance" ? "active" : ""} onClick={() => setTab("appearance")}>外观</button><button type="button" className={tab === "usage" ? "active" : ""} onClick={() => setTab("usage")}>用量统计</button><button type="button" className={tab === "automation" ? "active" : ""} onClick={() => setTab("automation")}>自动化任务</button></nav><div className="settings-content">{tab === "general" ? <form onSubmit={(event) => { event.preventDefault(); const nextSettings = structuredClone(settings); void window.piDesktop.send({ type: "settings.save", settings: { model: nextSettings.model, thinkingLevel: nextSettings.thinkingLevel, accessMode: nextSettings.accessMode, appearance: nextSettings.appearance, browser: nextSettings.browser, computer: nextSettings.computer, design: nextSettings.design, ssh: nextSettings.ssh, defaultWorkspace: nextSettings.defaultWorkspace } }); markSettingsSaved(nextSettings); onClose(); }}>
+        <div className="settings-body"><nav className="settings-tabs"><button type="button" className={tab === "general" ? "active" : ""} onClick={() => setTab("general")}>通用</button><button type="button" className={tab === "models" ? "active" : ""} onClick={() => setTab("models")}>模型服务</button><button type="button" className={tab === "agents" ? "active" : ""} onClick={() => setTab("agents")}>Agent 角色</button><button type="button" className={tab === "subagents" ? "active" : ""} onClick={() => setTab("subagents")}>子智能体</button><button type="button" className={tab === "resources" ? "active" : ""} onClick={() => setTab("resources")}>技能与工具</button><button type="button" className={tab === "hooks" ? "active" : ""} onClick={() => setTab("hooks")}>钩子</button><button type="button" className={tab === "appearance" ? "active" : ""} onClick={() => setTab("appearance")}>外观</button><button type="button" className={tab === "usage" ? "active" : ""} onClick={() => setTab("usage")}>用量统计</button><button type="button" className={tab === "automation" ? "active" : ""} onClick={() => setTab("automation")}>自动化任务</button></nav><div className="settings-content">{tab === "general" ? <form onSubmit={(event) => { event.preventDefault(); const nextSettings = structuredClone(settings); void window.piDesktop.send({ type: "settings.save", settings: { model: nextSettings.model, thinkingLevel: nextSettings.thinkingLevel, accessMode: nextSettings.accessMode, appearance: nextSettings.appearance, browser: nextSettings.browser, computer: nextSettings.computer, design: nextSettings.design, ssh: nextSettings.ssh, jev: nextSettings.jev, defaultWorkspace: nextSettings.defaultWorkspace } }); markSettingsSaved(nextSettings); onClose(); }}>
           <label>全局默认模型<ModelSelect models={configuredModels} providers={providers} value={settings.model ? `${settings.model.provider}/${settings.model.id}` : ""} placeholder="请选择默认模型" onChange={(value) => { const slash = value.indexOf("/"); useDesktopStore.setState({ settings: { ...settings, model: slash > 0 ? { provider: value.slice(0, slash), id: value.slice(slash + 1) } : undefined } }); }} /></label>
           <label>默认思考等级<select value={settings.thinkingLevel} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, thinkingLevel: event.target.value as ThinkingLevel } })}>{THINKING_LEVELS.map((level) => <option key={level} value={level}>{thinkingLevelLabels[level]}</option>)}</select></label>
           <label>访问模式<select value={settings.accessMode} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, accessMode: event.target.value as AccessMode } })}>{accessModeOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
@@ -1341,8 +1362,10 @@ function SettingsDialog({ settings, models, providers, customProvider, customMod
               <label className="checkbox-setting" title="关闭后每走一步就把控制权交回主模型（不会自动连跑）"><input type="checkbox" checked={jevAutoPilot} onChange={(event) => setJevAutoPilot(event.target.checked)} />自动驾驶（连续执行到完成/阻塞；关闭则一次只走一步）</label>
               <label>TypeSafe API Key<input type="password" value={jevApiKey} autoComplete="off" placeholder={jevKeyConfigured ? "已保存，留空则继续使用" : "请输入 API 密钥（存本机加密凭据，不进配置文件）"} onChange={(event) => setJevApiKey(event.target.value)} /></label>
               {jevError && <p className="form-error">{jevError}</p>}
+              {jevTestStatus !== "idle" && <p className={jevTestStatus === "error" ? "form-error jev-test-result" : "form-hint jev-test-result"} data-role="jev-test-result">{jevTestStatus === "loading" ? "正在连接 TypeSafe…" : jevTestMessage}</p>}
               <div className="jev-settings-footer">
                 <button className="primary-button" type="button" disabled={jevSaving} onClick={() => void saveJev()}>{jevSaving ? "正在保存" : "保存 Jev 设置"}</button>
+                <button className="secondary-button" type="button" data-control="jev-test" disabled={jevTestStatus === "loading"} onClick={() => void testJev()}>{jevTestStatus === "loading" ? "测试中" : "测试连接"}</button>
                 <button className="secondary-button" type="button" disabled={!jevKeyConfigured} onClick={() => void clearJevKey()}>清除密钥</button>
                 {jevSaved && <span className="form-hint">已保存</span>}
               </div>

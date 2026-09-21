@@ -305,6 +305,13 @@ function updateSettings(command: RuntimeCommand): void {
     case "jev.clearKey":
       deleteCredential(JEV_CREDENTIAL_ID);
       break;
+    // 测试连接：**不落盘任何东西**——它只是一次读操作（发一次真请求看能不能通）。
+    // 草稿密钥不写 credentials.json：用户可能只是试一下，尚未确定要保存。
+    // 但主进程手里有**已保存**的密钥，utility 侧拿不到（它只在内存镜像里），
+    // 所以这里要把保存值补进命令再下发（命令里带 key 时不覆盖）。
+    case "jev.test":
+      sendToRuntime({ ...command, ...(command.apiKey?.trim() ? {} : { apiKey: credentialsCache[JEV_CREDENTIAL_ID] }) });
+      return;
     case "memory.save":
       settings.memory = command.memory;
       break;
