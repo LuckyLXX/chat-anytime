@@ -152,6 +152,13 @@ export interface AgentProfile {
   tools: Record<BuiltinToolName, boolean>;
   /** Agent-owned Skill enablement layered over Pi's discovered defaults. */
   skillOverrides?: Record<string, boolean>;
+  /**
+   * 角色级能力工具开关（与 skillOverrides 同构的 overlay）：合法键为 "browser"、
+   * "ssh"、"mcp:<serverName>"。缺省（无字段/无键）= 启用，false = 该角色禁用；
+   * 存量角色升级后行为零变化。子代理会话不带这些工具族（child session 无
+   * customTools），本字段对委派链路无影响。
+   */
+  toolOverrides?: Record<string, boolean>;
   archived?: boolean;
 }
 

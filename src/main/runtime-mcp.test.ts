@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { readConfiguredMcpServers, upsertMcpServerConfig } from "./mcp-config.js";
-import { planMcpServerSave } from "./runtime-mcp.js";
+import { planMcpServerSave, serverToolNamesFrom } from "./runtime-mcp.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -66,5 +66,27 @@ describe("planMcpServerSave", () => {
     expect(plan.entry).toEqual({ url: "https://edited.example/mcp", disabled: true });
     // 计划是纯函数：不落盘，只描述要写哪里
     expect(readConfiguredMcpServers(configPaths.project, configPaths.global).find((server) => server.name === "shared")?.entry.url).toBe("https://project.example/mcp");
+  });
+});
+
+describe("serverToolNamesFrom", () => {
+  it("按原始服务器名分组，工具名经 mcpToolName 生成（角色级 mcp:<server> overlay 的过滤依据）", () => {
+    const map = serverToolNamesFrom([
+      { serverName: "exa", toolName: "web_search", description: "", inputSchema: {} },
+      { serverName: "exa", toolName: "web_fetch", description: "", inputSchema: {} },
+      { serverName: "deveco-mcp", toolName: "check", description: "", inputSchema: {} }
+    ]);
+    expect(map.get("exa")).toEqual(["mcp__exa__web_search", "mcp__exa__web_fetch"]);
+    // 连字符在 mcpToolName 的白名单内（[^A-Za-z0-9_-]），服务器名含 - 时原样保留。
+    expect(map.get("deveco-mcp")).toEqual(["mcp__deveco-mcp__check"]);
+  });
+
+  it("同名工具去重（与 buildToolDefinitions 的 seen 规则同源）", () => {
+    const map = serverToolNamesFrom([
+      { serverName: "s", toolName: "dup", description: "", inputSchema: {} },
+      { serverName: "s", toolName: "dup", description: "", inputSchema: {} }
+    ]);
+    expect(map.get("s")).toEqual(["mcp__s__dup"]);
+    expect(serverToolNamesFrom([]).size).toBe(0);
   });
 });

@@ -37,6 +37,15 @@ export interface SshToolDeps {
 
 const DISABLED_TEXT = "AI 的 SSH 远程操作已在设置中停用（settings.ssh.enabled），请在设置中开启后再试。";
 
+/**
+ * SSH 工具族的激活判据（toolNamesFor 消费）：全局总闸 AND 角色级 overlay。
+ * 任一关闭即整族从活动集摘除（8 个 ssh_* 同进同出）；execute 内的 enabled
+ * 闭包保留作第二道防线（在途回合/旧会话兑底）。人的 SSH 面板不受影响。
+ */
+export function shouldActivateSshTools(input: { globalEnabled: boolean; agentEnabled: boolean }): boolean {
+  return input.globalEnabled && input.agentEnabled;
+}
+
 function checkEnabled(enabled: () => boolean): void {
   if (!enabled()) throw new Error(DISABLED_TEXT);
 }

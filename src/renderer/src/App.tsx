@@ -623,6 +623,11 @@ function agentSkillEnabled(agent: AgentProfile, skill: ResourceCatalog["skills"]
   return agent.skillOverrides?.[skill.id] ?? skill.defaultEnabled;
 }
 
+/** 角色级能力工具 overlay：缺省（无键）= 启用，显式 false 才禁用；键域 browser/ssh/mcp:<server>。 */
+function agentToolEnabled(agent: AgentProfile, key: string): boolean {
+  return agent.toolOverrides?.[key] !== false;
+}
+
 function AgentSkillSelector({ agent, skills, onChange }: AgentSkillSelectorProps): ReactNode {
   const selectedSkills = skills.filter((skill) => agentSkillEnabled(agent, skill));
   return (
@@ -643,6 +648,21 @@ function AgentSkillSelector({ agent, skills, onChange }: AgentSkillSelectorProps
         </div>
       </details>
     </div>
+  );
+}
+
+/** 角色编辑器的「能力工具」块：浏览器/SSH 整族开关 + MCP 按服务器开关（overlay 键 mcp:<server>）。 */
+function AgentCapabilityTools({ agent, mcpServers, onChange }: { agent: AgentProfile; mcpServers: ResourceCatalog["mcpServers"]; onChange(key: string, enabled: boolean): void }): ReactNode {
+  const families: Array<{ key: string; label: string; note: string }> = [
+    { key: "browser", label: "浏览器自动化", note: "16 个 browser_* 工具" },
+    { key: "ssh", label: "SSH 远程终端", note: "8 个 ssh_* 工具" }
+  ];
+  return (
+    <fieldset><legend>能力工具</legend>
+      {families.map((family) => <label className="tool-toggle" key={family.key}><input type="checkbox" checked={agentToolEnabled(agent, family.key)} onChange={(event) => onChange(family.key, event.target.checked)} />{family.label}<small>{family.note}</small></label>)}
+      {mcpServers.map((server) => <label className="tool-toggle" key={`mcp:${server.name}`} title={server.disabled ? "该服务器已在 MCP 设置中停用" : undefined}><input type="checkbox" checked={agentToolEnabled(agent, `mcp:${server.name}`)} onChange={(event) => onChange(`mcp:${server.name}`, event.target.checked)} />{server.name}<small>MCP · {server.toolCount} 个工具</small></label>)}
+      {mcpServers.length === 0 && <p className="resource-empty">未发现 MCP Server，配置后可在此按服务器启停。</p>}
+    </fieldset>
   );
 }
 
@@ -1305,6 +1325,15 @@ function SettingsDialog({ settings, models, providers, customProvider, customMod
     updateAgent({ skillOverrides: { ...selectedAgent.skillOverrides, [skillId]: enabled } });
   }
 
+  /** 能力工具 overlay 写回：启用即删键（配置只存显式禁用，与迁移层 normalizeToolOverrides 对齐）。 */
+  function updateAgentToolOverride(key: string, enabled: boolean): void {
+    if (!selectedAgent) return;
+    const overrides = { ...selectedAgent.toolOverrides };
+    if (enabled) delete overrides[key];
+    else overrides[key] = false;
+    updateAgent({ toolOverrides: Object.keys(overrides).length > 0 ? overrides : undefined });
+  }
+
   async function saveAgent(): Promise<void> {
     if (!selectedAgent || !selectedAgent.name.trim()) return;
     const normalized = { ...selectedAgent, name: selectedAgent.name.trim() };
@@ -1316,7 +1345,7 @@ function SettingsDialog({ settings, models, providers, customProvider, customMod
 
   function duplicateAgent(): void {
     if (!selectedAgent) return;
-    const copy: AgentProfile = { ...selectedAgent, id: `agent-${Date.now()}`, name: `${selectedAgent.name} 副本`, tools: { ...selectedAgent.tools }, ...(selectedAgent.skillOverrides ? { skillOverrides: { ...selectedAgent.skillOverrides } } : {}) };
+    const copy: AgentProfile = { ...selectedAgent, id: `agent-${Date.now()}`, name: `${selectedAgent.name} 副本`, tools: { ...selectedAgent.tools }, ...(selectedAgent.skillOverrides ? { skillOverrides: { ...selectedAgent.skillOverrides } } : {}), ...(selectedAgent.toolOverrides ? { toolOverrides: { ...selectedAgent.toolOverrides } } : {}) };
     setAgentList((current) => [...current, copy]);
     setSelectedAgentId(copy.id);
   }
@@ -1400,7 +1429,7 @@ function SettingsDialog({ settings, models, providers, customProvider, customMod
         <footer><button type="button" className="secondary-button" onClick={closeSettings}>取消</button><button className="primary-button" disabled={saving || Boolean(formBlocker)} type="submit">{saving ? "正在应用" : "保存设置"}</button></footer>
         </form> : tab === "agents" ? <div className="agent-settings">
           <div className="settings-agent-list">{agentList.filter((agent) => !agent.archived).map((agent) => <button type="button" key={agent.id} className={agent.id === selectedAgent?.id ? "active" : ""} onClick={() => setSelectedAgentId(agent.id)}><strong>{agent.name}</strong><small>{agent.description || "未填写说明"}</small></button>)}<button type="button" className="secondary-button agent-new-button" onClick={newAgent}>+ 新建 Agent</button></div>
-          {selectedAgent && <div className="agent-editor"><label>名称<input value={selectedAgent.name} onChange={(event) => updateAgent({ name: event.target.value })} /></label><label>说明<input value={selectedAgent.description} onChange={(event) => updateAgent({ description: event.target.value })} /></label><label>系统提示词<textarea value={selectedAgent.systemPrompt} rows={6} onChange={(event) => updateAgent({ systemPrompt: event.target.value })} /></label><label>Div 气泡模式<select value={selectedAgent.divMode} onChange={(event) => updateAgent({ divMode: event.target.value as DivBubbleMode })}><option value="off">关闭</option><option value="auto">智能判断（按场景使用）</option><option value="always">始终开启（全部回复使用）</option></select></label><label>默认模型<ModelSelect models={configuredModels} providers={providers} value={selectedAgent.defaultModel ? `${selectedAgent.defaultModel.provider}/${selectedAgent.defaultModel.id}` : ""} placeholder="跟随全局默认模型" onChange={(value) => { updateAgent({ defaultModel: value ? { provider: value.slice(0, value.indexOf("/")), id: value.slice(value.indexOf("/") + 1) } : undefined }); }} /></label><label>默认思考等级<select value={selectedAgent.defaultThinkingLevel} onChange={(event) => updateAgent({ defaultThinkingLevel: event.target.value as ThinkingLevel })}>{THINKING_LEVELS.map((level) => <option key={level} value={level}>{thinkingLevelLabels[level]}</option>)}</select></label><AgentSkillSelector agent={selectedAgent} skills={resources.skills} onChange={updateAgentSkillOverride} /><fieldset><legend>工具权限</legend>{agentTools.map((tool) => <label className="tool-toggle" key={tool}><input type="checkbox" checked={selectedAgent.tools[tool]} onChange={(event) => updateAgent({ tools: { ...selectedAgent.tools, [tool]: event.target.checked } })} />{toolLabel(tool)}</label>)}</fieldset><footer><button type="button" className="danger-button" disabled={selectedAgent.id === "default"} onClick={() => void archiveAgent()}>归档</button><button type="button" className="secondary-button" onClick={duplicateAgent}>复制</button><button type="button" className="primary-button" onClick={() => void saveAgent()}>保存 Agent</button></footer></div>}
+          {selectedAgent && <div className="agent-editor"><label>名称<input value={selectedAgent.name} onChange={(event) => updateAgent({ name: event.target.value })} /></label><label>说明<input value={selectedAgent.description} onChange={(event) => updateAgent({ description: event.target.value })} /></label><label>系统提示词<textarea value={selectedAgent.systemPrompt} rows={6} onChange={(event) => updateAgent({ systemPrompt: event.target.value })} /></label><label>Div 气泡模式<select value={selectedAgent.divMode} onChange={(event) => updateAgent({ divMode: event.target.value as DivBubbleMode })}><option value="off">关闭</option><option value="auto">智能判断（按场景使用）</option><option value="always">始终开启（全部回复使用）</option></select></label><label>默认模型<ModelSelect models={configuredModels} providers={providers} value={selectedAgent.defaultModel ? `${selectedAgent.defaultModel.provider}/${selectedAgent.defaultModel.id}` : ""} placeholder="跟随全局默认模型" onChange={(value) => { updateAgent({ defaultModel: value ? { provider: value.slice(0, value.indexOf("/")), id: value.slice(value.indexOf("/") + 1) } : undefined }); }} /></label><label>默认思考等级<select value={selectedAgent.defaultThinkingLevel} onChange={(event) => updateAgent({ defaultThinkingLevel: event.target.value as ThinkingLevel })}>{THINKING_LEVELS.map((level) => <option key={level} value={level}>{thinkingLevelLabels[level]}</option>)}</select></label><AgentSkillSelector agent={selectedAgent} skills={resources.skills} onChange={updateAgentSkillOverride} /><AgentCapabilityTools agent={selectedAgent} mcpServers={resources.mcpServers} onChange={updateAgentToolOverride} /><fieldset><legend>工具权限</legend>{agentTools.map((tool) => <label className="tool-toggle" key={tool}><input type="checkbox" checked={selectedAgent.tools[tool]} onChange={(event) => updateAgent({ tools: { ...selectedAgent.tools, [tool]: event.target.checked } })} />{toolLabel(tool)}</label>)}</fieldset><footer><button type="button" className="danger-button" disabled={selectedAgent.id === "default"} onClick={() => void archiveAgent()}>归档</button><button type="button" className="secondary-button" onClick={duplicateAgent}>复制</button><button type="button" className="primary-button" onClick={() => void saveAgent()}>保存 Agent</button></footer></div>}
         </div> : tab === "subagents" ? <SubagentSettings resources={resources} workspaceOpen={workspaceOpen} models={models} providers={providers} /> : tab === "resources" ? <ResourceSettings resources={resources} /> : tab === "hooks" ? <HooksSettings resources={resources} workspaceOpen={workspaceOpen} /> : tab === "usage" ? <UsageSettings /> : tab === "automation" ? <AutomationSettings models={models} providers={providers} settings={settings} workspaceConfigured={workspaceOpen} workspaceName={settings.workspace ? settings.workspace.split(/[\\/]/u).at(-1) : undefined} onCreateInSession={() => { closeSettings(); onCreateInSession(); }} onOpenRunSession={closeSettings} /> : <form className="appearance-settings" onSubmit={(event) => { event.preventDefault(); const nextSettings = structuredClone(settings); void window.piDesktop.send({ type: "appearance.save", appearance: nextSettings.appearance }); markSettingsSaved(nextSettings); onClose(); }}>
           <div className="appearance-grid">
             <div>

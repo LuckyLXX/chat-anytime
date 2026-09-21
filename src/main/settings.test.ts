@@ -143,6 +143,20 @@ describe("desktop settings migration", () => {
     expect(normalizeAgent({ id: "plain" }).skillOverrides).toBeUndefined();
   });
 
+  it("preserves only valid Agent-level capability tool overrides", () => {
+    // 合法键：browser / ssh / mcp:<server>；缺省无字段 = 全启用（存量角色零变化）。
+    const agent = normalizeAgent({
+      id: "coder",
+      toolOverrides: { browser: false, "mcp:exa": false, ssh: true, invalid: false, "mcp": false, "mcp:": false, browser2: false, "ssh:old": "yes" as unknown as boolean }
+    });
+
+    expect(agent.toolOverrides).toEqual({ browser: false, "mcp:exa": false, ssh: true });
+    // agent.save 不过 normalize 直接落盘——重启后靠这里读回，丢了就是静默丢配置。
+    expect(migrateSettings({ agents: [{ id: "coder", toolOverrides: { browser: false, "mcp:exa": false } }] }).settings.agents.find((item) => item.id === "coder")?.toolOverrides).toEqual({ browser: false, "mcp:exa": false });
+    expect(normalizeAgent({ id: "plain" }).toolOverrides).toBeUndefined();
+    expect(normalizeAgent({ id: "empty", toolOverrides: {} }).toolOverrides).toBeUndefined();
+  });
+
   it("preserves provider and agent defaults while normalizing invalid current ids", () => {
     const result = migrateSettings({
       providers: [{ id: "proxy", name: "代理", baseUrl: "https://proxy.test/v1", models: [{ id: "vision-model" }] }],

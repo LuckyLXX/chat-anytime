@@ -8,9 +8,10 @@
 // Permission model (permissions.ts): browser_navigate and write-mode
 // browser_eval carry risk "browse" and go through the permission gate; all
 // in-page operations (snapshot/click/type/press/scroll/screenshot/wait/get/
-// tabs) are trusted to run. The master switch settings.browser.enabled is
-// read live per call (memory-style: the tools stay registered either way,
-// no session rebuild).
+// tabs) are trusted to run. The master switch settings.browser.enabled now
+// removes the whole family from the active tool set (reconcileActiveTools on
+// flip); the per-call enabled check stays as a second line of defense for
+// in-flight turns and stale sessions.
 
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -36,6 +37,15 @@ export interface BrowserToolDeps {
 }
 
 const DISABLED_TEXT = "浏览器自动化已在设置中停用（settings.browser.enabled），请在设置中开启后再试。";
+
+/**
+ * 浏览器工具族的激活判据（toolNamesFor 消费）：全局总闸 AND 角色级 overlay。
+ * 任一关闭即整族从活动集摘除（16 个 browser_* 同进同出，含 browser_jev_run 的
+ * 附加判据）；execute 内的 enabled 闭包保留作第二道防线（在途回合/旧会话兑底）。
+ */
+export function shouldActivateBrowserTools(input: { globalEnabled: boolean; agentEnabled: boolean }): boolean {
+  return input.globalEnabled && input.agentEnabled;
+}
 
 const SNAPSHOT_HINT = "提示：使用 @eN 引用元素；页面导航或内容变化后引用会失效，操作报错时请重新调用 browser_snapshot。";
 

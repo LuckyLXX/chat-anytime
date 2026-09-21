@@ -514,6 +514,8 @@ const mcpOAuth = new McpOAuthController({
 });
 const mcpClient = new McpClientManager({ oauth: mcpOAuth });
 let mcpTools: ToolDefinition[] = [];
+/** 服务器→Pi 工具名映射（syncMcpServers 同步刷新）：角色级 mcp:<server> overlay 的过滤依据。 */
+let mcpServerToolNames = new Map<string, string[]>();
 
 function skillPaths(): ReturnType<typeof runtimeSkills.skillPathsFor> {
   return runtimeSkills.skillPathsFor(workspace, getAgentDir(), bundledSkillsDir);
@@ -623,6 +625,7 @@ async function syncMcpServers(refresh = false): Promise<void> {
   const synced = await runtimeMcp.syncMcpServers(mcpClient, mcpConfigPaths(), refresh);
   mcpServers = synced.summaries;
   mcpTools = synced.tools;
+  mcpServerToolNames = synced.serverToolNames;
 }
 
 function emitResourceCatalog(): void {
@@ -1809,15 +1812,23 @@ function buildRecordTools(record: Pick<SessionRuntimeRecord, "subagentTools" | "
  * whole design session; a plain coding chat never pays for the canvas.
  *
  * Computer tools (5 definitions, ≈580 tokens measured) follow the design
- * discipline rather than the browser one: a desktop-driving capability nobody
- * asked for in a coding/document chat is pure prefix waste, and its global
- * switch is a capability toggle (下架), not a per-call gate.
+ * discipline: a desktop-driving capability nobody asked for in a
+ * coding/document chat is pure prefix waste, and its global switch is a
+ * capability toggle (下架), not a per-call gate. Browser/SSH families use the
+ * same capability-toggle semantics (master switch AND agent-level overlay).
  */
 function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "planTools" | "visionTools" | "browserTools" | "sshTools" | "computerTools" | "automationTools" | "designTools" | "galleryTools" | "jevTools" | "designMode" | "computerMode" | "designGlobalEnabled" | "computerGlobalEnabled" | "jevGlobalEnabled" | "unattended">, includeVision: boolean): string[] {
   const builtin = Object.entries(record.agent.tools ?? {}).filter(([, enabled]) => enabled).map(([name]) => name);
+  // 浏览器/SSH 整族开关：全局总闸 AND 角色级 overlay（agent.toolOverrides），任一关闭
+  // 即整族从活动集摘除（schema 不进请求前缀）；execute 内的 enabled 闭包仅作在途回合
+  // 兑底。jev 工具叠加 browser 判据：它驱动的就是内置浏览器。
+  const browserActive = runtimeBrowser.shouldActivateBrowserTools({ globalEnabled: settings?.browser?.enabled !== false, agentEnabled: record.agent.toolOverrides?.browser !== false });
+  const sshActive = runtimeSsh.shouldActivateSshTools({ globalEnabled: settings?.ssh?.enabled !== false, agentEnabled: record.agent.toolOverrides?.ssh !== false });
+  const disabledMcp = disabledMcpToolNamesFor(record);
   return [
     ...builtin,
-    ...mcpTools.map((tool) => tool.name),
+    // 角色级 mcp:<server> overlay：被禁服务器的全部工具不进活动集（前缀省下整段 schema）。
+    ...mcpTools.filter((tool) => !disabledMcp.has(tool.name)).map((tool) => tool.name),
     ...record.subagentTools.map((tool) => tool.name),
     ...record.todoTools.map((tool) => tool.name),
     ...record.memoryTools.map((tool) => tool.name),
@@ -1825,10 +1836,10 @@ function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "subagentTool
     ...(record.unattended ? [] : record.questionTools.map((tool) => tool.name)),
     ...record.planTools.map((tool) => tool.name),
     ...(includeVision ? record.visionTools.map((tool) => tool.name) : []),
-    // Browser tools stay active regardless of the settings switch: the
-    // execute closure reports the disabled state instead (no session rebuild).
-    ...record.browserTools.map((tool) => tool.name),
-    ...record.sshTools.map((tool) => tool.name),
+    // 浏览器/SSH 整族按总闸+角色开关注入（见上方 browserActive/sshActive）；总闸翻转由
+    // settings.save 遍历 liveSessions reconcile，角色开关随 agent.save 重建会话生效。
+    ...(browserActive ? record.browserTools.map((tool) => tool.name) : []),
+    ...(sshActive ? record.sshTools.map((tool) => tool.name) : []),
     // 电脑控制工具与 design 同策略：仅在本会话开了电脑控制模式且总闸开着时
     // 注入（五个定义实测 ≈580 tokens/请求）；无人值守后台会话天然不满足。
     ...(runtimeComputer.shouldActivateComputerTools({ sessionEnabled: record.computerMode.enabled, globalEnabled: record.computerGlobalEnabled() })
@@ -1848,8 +1859,25 @@ function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "subagentTool
     // Jev 工具同样按开关注入（而不是 browser 那种常驻激活）：它的描述与内部指令块
     // 远大于普通工具，而绝大多数部署（内网）根本连不到 TypeSafe——不该替它们付这份
     // 前缀成本。开关 = settings.jev.enabled（缺省关闭），会话内不变则前缀整段有效。
-    ...(record.jevGlobalEnabled() ? record.jevTools.map((tool) => tool.name) : [])
+    ...(record.jevGlobalEnabled() && browserActive ? record.jevTools.map((tool) => tool.name) : [])
   ];
+}
+
+/**
+ * 角色级 mcp:<server> overlay 展开成被禁工具名集合：键为配置原始服务器名，
+ * 与 mcpServerToolNames（syncMcpServers 由 bindings 派生）同源匹配。服务器改名/
+ * 删除后残留键无工具可匹配，自然无副作用。
+ */
+function disabledMcpToolNamesFor(record: Pick<SessionRuntimeRecord, "agent">): Set<string> {
+  const overrides = record.agent.toolOverrides;
+  if (!overrides) return new Set<string>();
+  const disabled = new Set<string>();
+  for (const [key, enabled] of Object.entries(overrides)) {
+    if (enabled || !key.startsWith("mcp:")) continue;
+    const names = mcpServerToolNames.get(key.slice("mcp:".length));
+    if (names) for (const name of names) disabled.add(name);
+  }
+  return disabled;
 }
 
 /**
@@ -4388,13 +4416,18 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       // Jev 总闸同理（缺省关闭：=== true 才算开）：它决定 browser_jev_run 是否注入
       // 本次请求的活动工具集，所以翻转必须重算，否则已开的会话要等重启才生效。
       const jevSwitchChanged = (settings.jev?.enabled === true) !== (command.settings.jev?.enabled === true);
+      // 浏览器/SSH 总闸同理：它们现在决定整族工具是否注入活动集（不再是「常驻激活 +
+      // execute 拒绝」），翻转要重算——且遍历全部 live 会话（含 parked 后台会话），与
+      // jev.save 同款。
+      const browserSwitchChanged = (settings.browser?.enabled !== false) !== (command.settings.browser?.enabled !== false);
+      const sshSwitchChanged = (settings.ssh?.enabled !== false) !== (command.settings.ssh?.enabled !== false);
       settings.model = command.settings.model;
       settings.thinkingLevel = command.settings.thinkingLevel;
       settings.accessMode = command.settings.accessMode;
       settings.appearance = command.settings.appearance;
       // browser/computer/design 总开关镜像补齐（若内存镜像滞后，保存后开关不生效直至重启）。
-      // browser 工具常驻激活、execute 实时读镜像；computer/design 总闸额外要重算活动集
-      // （它们决定 computer_* / design_* 是否注入前缀）——在下方完成镜像赋值后统一 reconcile。
+      // browser/ssh 总闸兼作活动集摘除开关（翻转在下方遍历 liveSessions 重算）；
+      // computer/design 总闸重算活动集（决定 computer_* / design_* 是否注入前缀）。
       settings.browser = command.settings.browser;
       settings.jev = command.settings.jev;
       settings.computer = command.settings.computer;
@@ -4415,6 +4448,9 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         // 切换之后，保证最终活动集以最新镜像为准。
         if (designSwitchChanged || computerSwitchChanged || jevSwitchChanged) reconcileActiveTools(activeRuntime);
       }
+      // 浏览器/SSH 总闸翻转：整族注入与否变化，遍历全部 live 会话（含 parked 后台
+      // 会话）重算活动集；无关保存不碰，避免白做前缀重算。放在镜像赋值之后，以最新镜像为准。
+      if (browserSwitchChanged || sshSwitchChanged) for (const record of liveSessions.values()) reconcileActiveTools(record);
       // 更换默认工作区：当前 workspace 恰为旧默认 → 即时切到新默认（新会话继承刚
       // 保存的模型/思考等级）；否则下次落位（新建/切换/移除回落）自然生效。
       const nextDefaultPath = resolveDefaultWorkspace(getAgentDir(), settings.defaultWorkspace);

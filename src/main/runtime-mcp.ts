@@ -6,7 +6,7 @@
 
 import { join, resolve } from "node:path";
 import type { McpServerSummary, McpServerConfigDraft } from "../shared/protocol.js";
-import { McpClientManager } from "./mcp-client.js";
+import { McpClientManager, mcpToolName, type McpToolBinding } from "./mcp-client.js";
 import { readConfiguredMcpServers, readMcpServerEntry, type McpServerConfigEntry } from "./mcp-config.js";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 
@@ -72,8 +72,27 @@ export function planMcpServerSave(
 }
 
 /** Connect to all configured MCP servers and rebuild tool definitions. */
-export async function syncMcpServers(client: McpClientManager, paths: { project: string; global: string }, refresh: boolean): Promise<{ summaries: McpServerSummary[]; tools: ToolDefinition[] }> {
+export async function syncMcpServers(client: McpClientManager, paths: { project: string; global: string }, refresh: boolean): Promise<{ summaries: McpServerSummary[]; tools: ToolDefinition[]; serverToolNames: Map<string, string[]> }> {
   const servers = readConfiguredMcpServers(paths.project, paths.global);
   const { summaries, bindings } = await client.sync(servers, { refresh });
-  return { summaries, tools: client.buildToolDefinitions(bindings) };
+  return { summaries, tools: client.buildToolDefinitions(bindings), serverToolNames: serverToolNamesFrom(bindings) };
+}
+
+/**
+ * 服务器→Pi 工具名的映射（角色级 mcp:<server> overlay 的消费依据）：键为配置
+ * 原始服务器名（与 toolOverrides 键一致，不做 sanitize），值为经 mcpToolName()
+ * 生成的完整工具名。去重规则与 buildToolDefinitions 同源（同名跳过）。
+ */
+export function serverToolNamesFrom(bindings: readonly McpToolBinding[]): Map<string, string[]> {
+  const seen = new Set<string>();
+  const map = new Map<string, string[]>();
+  for (const binding of bindings) {
+    const name = mcpToolName(binding.serverName, binding.toolName);
+    if (seen.has(name)) continue;
+    seen.add(name);
+    const names = map.get(binding.serverName);
+    if (names) names.push(name);
+    else map.set(binding.serverName, [name]);
+  }
+  return map;
 }

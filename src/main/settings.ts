@@ -172,10 +172,25 @@ export function normalizeSkillOverrides(value: unknown): Record<string, boolean>
   }));
 }
 
+/**
+ * 角色级能力工具 overlay（browser / ssh / mcp:<server>）的读回：键必须是
+ * 合法前缀且值力 boolean，其余丢弃；空对象不落盘。缺省即启用（true 不存），
+ * 只存显式禁用，与 skillOverrides 同构。
+ */
+export function normalizeToolOverrides(value: unknown): Record<string, boolean> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).flatMap(([rawKey, enabled]) => {
+    const key = rawKey.trim();
+    const legal = key === "browser" || key === "ssh" || (key.startsWith("mcp:") && key.length > 4);
+    return legal && typeof enabled === "boolean" ? [[key, enabled]] : [];
+  }));
+}
+
 export function normalizeAgent(agent: (Omit<Partial<AgentProfile>, "tools"> & { tools?: Partial<Record<BuiltinToolName, boolean>> }) | undefined): AgentProfile {
   const fallback = createDefaultAgent();
   const sourceTools = (agent?.tools ?? {}) as Partial<Record<BuiltinToolName, boolean>>;
   const skillOverrides = normalizeSkillOverrides(agent?.skillOverrides);
+  const toolOverrides = normalizeToolOverrides(agent?.toolOverrides);
   return {
     id: String(agent?.id || fallback.id),
     name: String(agent?.name || fallback.name),
@@ -187,6 +202,7 @@ export function normalizeAgent(agent: (Omit<Partial<AgentProfile>, "tools"> & { 
     defaultThinkingLevel: agent?.defaultThinkingLevel ?? fallback.defaultThinkingLevel,
     tools: Object.fromEntries(BUILTIN_TOOLS.map((tool) => [tool, sourceTools[tool] ?? defaultToolEnabled(tool)])) as Record<BuiltinToolName, boolean>,
     ...(Object.keys(skillOverrides).length > 0 ? { skillOverrides } : {}),
+    ...(Object.keys(toolOverrides).length > 0 ? { toolOverrides } : {}),
     archived: Boolean(agent?.archived)
   };
 }
