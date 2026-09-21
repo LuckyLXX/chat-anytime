@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { access, open, readdir, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PassThrough, Readable, Writable } from "node:stream";
+import { PassThrough, Readable } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { SshEventData } from "../shared/protocol.js";
@@ -124,11 +124,25 @@ class FakeSftp implements SshSftpLike {
   home = "/root";
   readdirCalls: string[] = [];
   unlinked: string[] = [];
-  /** 远端写流入参：让测试注入慢速/出错行为。 */
-  writeStreamFactory: ((path: string) => NodeJS.WritableStream) | undefined;
   readStreamFactory: ((path: string) => NodeJS.ReadableStream) | undefined;
   ended = 0;
   sftpError: Error | undefined;
+
+  // ——— 上传流水线的观测点 ———
+  /** 每次 write 的 (position, length)：用来断言「不重叠、偏移正确、字节数对得上」。 */
+  writes: Array<{ position: number; length: number }> = [];
+  /** 观测到的最大并发在途数（>1 才说明流水线真的生效）。 */
+  maxInflight = 0;
+  openCalls: string[] = [];
+  closeCalls = 0;
+  /** Test seam：单次 write 的“网络往返”延迟，用来观察并发度。 */
+  writeDelayMs = 0;
+  /** Test seam：注入 write 错误。 */
+  writeError: Error | undefined;
+  /** Test seam：close 时报错（验证「close 失败不能报 done」）。 */
+  closeError: Error | undefined;
+  /** Test seam：open 时报错。 */
+  openError: Error | undefined;
 
   readdir(path: string, callback: (error: Error | undefined, list: SshRemoteStatsEntry[] | undefined) => void): void {
     this.readdirCalls.push(path);
@@ -168,17 +182,69 @@ class FakeSftp implements SshSftpLike {
     return Readable.from([bytes]);
   }
 
-  createWriteStream(path: string): NodeJS.WritableStream {
-    if (this.writeStreamFactory) return this.writeStreamFactory(path);
-    const chunks: Buffer[] = [];
-    const stream = new Writable({
-      write(chunk: Buffer, _encoding, callback) {
-        chunks.push(Buffer.from(chunk));
-        callback();
+  // ——— 上传流水线三原语 ———
+  // 契约与真实 SFTP 一致：数据在 close 回调之后才算落盘（这样「提前报 done」会被测出来）。
+
+  private readonly openHandles = new Set<number>();
+  private readonly closedHandles = new Set<number>();
+  private readonly pending = new Map<number, Buffer[]>();
+  private readonly handlePaths = new Map<number, string>();
+  private nextHandle = 1;
+  private inflight = 0;
+
+  open(path: string, _flags: string, callback: (error: Error | undefined, handle: Buffer | undefined) => void): void {
+    this.openCalls.push(path);
+    if (this.openError) {
+      callback(this.openError, undefined);
+      return;
+    }
+    const id = this.nextHandle++;
+    this.openHandles.add(id);
+    this.handlePaths.set(id, path);
+    this.pending.set(id, []);
+    const handle = Buffer.allocUnsafe(4);
+    handle.writeUInt32BE(id, 0);
+    callback(undefined, handle);
+  }
+
+  write(handle: Buffer, buffer: Buffer, offset: number, length: number, position: number, callback: (error: Error | undefined) => void): void {
+    const id = handle.readUInt32BE(0);
+    if (!this.openHandles.has(id) || this.closedHandles.has(id)) {
+      callback(new Error(`句柄已关闭（id=${id}）`));
+      return;
+    }
+    this.inflight += 1;
+    this.maxInflight = Math.max(this.maxInflight, this.inflight);
+    this.writes.push({ position, length });
+    const slice = Buffer.from(buffer.subarray(offset, offset + length));
+    const done = (): void => {
+      this.inflight -= 1;
+      if (this.writeError) {
+        callback(this.writeError);
+        return;
       }
-    });
-    stream.on("finish", () => this.files.set(path, Buffer.concat(chunks)));
-    return stream;
+      this.pending.get(id)?.push(slice);
+      callback(undefined);
+    };
+    if (this.writeDelayMs > 0) setTimeout(done, this.writeDelayMs);
+    else done();
+  }
+
+  close(handle: Buffer, callback: (error: Error | undefined) => void): void {
+    const id = handle.readUInt32BE(0);
+    if (!this.openHandles.has(id)) {
+      callback(new Error(`未知句柄（id=${id}）`));
+      return;
+    }
+    this.closeCalls += 1;
+    if (this.closeError) {
+      callback(this.closeError);
+      return;
+    }
+    this.closedHandles.add(id);
+    this.openHandles.delete(id);
+    this.files.set(this.handlePaths.get(id)!, Buffer.concat(this.pending.get(id) ?? []));
+    callback(undefined);
   }
 
   end(): void {
@@ -253,6 +319,143 @@ describe("SshSftpTransferService", () => {
     expect(sftp.files.get("/root/a-1.txt")!.toString()).toBe("new");
   });
 
+  // ——— 上传流水线（2026-09-21 修复「上传每次都超时」后补的契约）———
+
+  it("completes an upload by CLOSE, never waiting for a write-stream finish", async () => {
+    // 回归根因：旧实现把完成判据压在 ssh2 远端 WriteStream 的 finish 上，而它永不发
+    // finish（_final 先 destroy 再回调）——于是每次都只能等超时、并把已传完的远端文件
+    // unlink 掉。现在完成判据是 CLOSE 的回调，且**不碰 createWriteStream**。
+    const { service, sftp, dir, published } = createHarness();
+    const localPath = join(dir, "payload.bin");
+    writeFileSync(localPath, "upload-me");
+    sftp.dirs.add("/root");
+
+    const outcome = await service.upload("t1", { localPath, remoteDir: "/root" });
+
+    expect(outcome.bytes).toBe(9);
+    expect(sftp.openCalls).toEqual(["/root/payload.bin"]);
+    expect(sftp.closeCalls).toBe(1);
+    expect(sftp.unlinked).toEqual([]);
+    expect(transferStates(published).at(-1)).toBe("done");
+  });
+
+  it("keeps several WRITEs in flight instead of one round trip per chunk", async () => {
+    // 旧实现是「一包一等」，吞吐 ≈ 64KB / RTT（实测海外 127ms → 约 200KB/s）。
+    // 这里给每次 write 加 20ms 延迟，断言确实同时有多个在途。
+    const { service, sftp, dir } = createHarness();
+    const localPath = join(dir, "big.bin");
+    writeFileSync(localPath, Buffer.alloc(32 * 64 * 1024, 7)); // 32 块
+    sftp.dirs.add("/root");
+    sftp.writeDelayMs = 20;
+
+    const outcome = await service.upload("t1", { localPath, remoteDir: "/root" });
+
+    expect(outcome.bytes).toBe(32 * 64 * 1024);
+    expect(sftp.maxInflight).toBeGreaterThan(1);
+    expect(sftp.files.get("/root/big.bin")!.length).toBe(32 * 64 * 1024);
+  });
+
+  it("writes each chunk once, at the right offset, without overlap", async () => {
+    const { service, sftp, dir } = createHarness();
+    const total = 5 * 64 * 1024;
+    const localPath = join(dir, "seq.bin");
+    writeFileSync(localPath, Buffer.alloc(total, 3));
+    sftp.dirs.add("/root");
+    sftp.writeDelayMs = 1; // 打乱完成顺序，暴露偏移错位
+
+    await service.upload("t1", { localPath, remoteDir: "/root" });
+
+    const writes = [...sftp.writes].sort((a, b) => a.position - b.position);
+    let cursor = 0;
+    for (const w of writes) {
+      // 每块必须紧接上一块，既不留空洞也不重叠
+      expect(w.position).toBe(cursor);
+      cursor += w.length;
+    }
+    expect(cursor).toBe(total);
+  });
+
+  it("uploads an empty file (no WRITE, still completes)", async () => {
+    const { service, sftp, dir, published } = createHarness();
+    const localPath = join(dir, "empty.bin");
+    writeFileSync(localPath, "");
+    sftp.dirs.add("/root");
+
+    const outcome = await service.upload("t1", { localPath, remoteDir: "/root" });
+
+    expect(outcome.bytes).toBe(0);
+    expect(sftp.writes).toEqual([]);
+    expect(sftp.closeCalls).toBe(1);
+    expect(transferStates(published).at(-1)).toBe("done");
+  });
+
+  it("uploads a file that is exactly one chunk", async () => {
+    const { service, sftp, dir } = createHarness();
+    const localPath = join(dir, "one.bin");
+    writeFileSync(localPath, Buffer.alloc(64 * 1024, 9));
+    sftp.dirs.add("/root");
+
+    const outcome = await service.upload("t1", { localPath, remoteDir: "/root" });
+
+    expect(outcome.bytes).toBe(64 * 1024);
+    expect(sftp.writes).toHaveLength(1);
+    expect(sftp.files.get("/root/one.bin")!.length).toBe(64 * 1024);
+  });
+
+  it("does not report done when CLOSE itself fails", async () => {
+    // 数据落盘以 close 回调为准：close 报错时必须走 error + 清理，不能算成功。
+    const { service, sftp, dir, published } = createHarness();
+    const localPath = join(dir, "x.bin");
+    writeFileSync(localPath, "data");
+    sftp.dirs.add("/root");
+    sftp.closeError = new Error("关闭句柄失败");
+
+    await expect(service.upload("t1", { localPath, remoteDir: "/root" })).rejects.toThrow("关闭句柄失败");
+    expect(transferStates(published).at(-1)).toBe("error");
+    expect(sftp.unlinked).toContain("/root/x.bin");
+  });
+
+  it("surfaces an open failure and cleans up", async () => {
+    const { service, sftp, dir, published } = createHarness();
+    const localPath = join(dir, "x.bin");
+    writeFileSync(localPath, "data");
+    sftp.dirs.add("/root");
+    sftp.openError = new Error("远端目录不存在");
+
+    await expect(service.upload("t1", { localPath, remoteDir: "/root" })).rejects.toThrow("远端目录不存在");
+    expect(transferStates(published).at(-1)).toBe("error");
+    expect(sftp.writes).toEqual([]);
+  });
+
+  it("cancels an in-flight upload and cleans both sides", async () => {
+    const { service, sftp, dir, published } = createHarness();
+    const localPath = join(dir, "big.bin");
+    writeFileSync(localPath, Buffer.alloc(64 * 64 * 1024, 5));
+    sftp.dirs.add("/root");
+    sftp.writeDelayMs = 30; // 让传输停在半路，留出 cancel 窗口
+
+    const pending = service.upload("t1", { localPath, remoteDir: "/root" });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(service.cancel("t1")).toBe(true);
+    await expect(pending).rejects.toThrow("已取消");
+
+    expect(transferStates(published).at(-1)).toBe("cancelled");
+    expect(sftp.unlinked).toContain("/root/big.bin");
+  });
+
+  it("cleans the remote half-file when an upload times out", async () => {
+    const { service, sftp, dir, published } = createHarness();
+    const localPath = join(dir, "slow.bin");
+    // 传输至少要跑过 1 秒（超时下限）才能触发超时：128 块 × 90ms ÷ 8 并发 ≈ 1.4s。
+    writeFileSync(localPath, Buffer.alloc(128 * 64 * 1024, 2));
+    sftp.dirs.add("/root");
+    sftp.writeDelayMs = 90;
+
+    await expect(service.upload("t1", { localPath, remoteDir: "/root", timeoutMs: 1000 })).rejects.toThrow("传输超时");
+    expect(transferStates(published).at(-1)).toBe("error");
+    expect(sftp.unlinked).toContain("/root/slow.bin");
+  });
+
   it("downloads into a .part then renames, leaving no partial file", async () => {
     const { service, sftp, dir } = createHarness();
     sftp.files.set("/root/data.bin", Buffer.from("remote-bytes"));
@@ -295,10 +498,7 @@ describe("SshSftpTransferService", () => {
     const localPath = join(dir, "x.txt");
     writeFileSync(localPath, "data");
     sftp.dirs.add("/root");
-    sftp.writeStreamFactory = () => {
-      const stream = new Writable({ write(_chunk, _encoding, callback) { callback(new Error("远端写入失败")); } });
-      return stream;
-    };
+    sftp.writeError = new Error("远端写入失败");
 
     await expect(service.upload("t1", { localPath, remoteDir: "/root" })).rejects.toThrow("远端写入失败");
     expect(sftp.unlinked).toContain("/root/x.txt");
@@ -382,7 +582,7 @@ describe("SshSftpTransferService", () => {
     const localPath = join(dir, "x.txt");
     writeFileSync(localPath, "data");
     sftp.dirs.add("/root");
-    sftp.writeStreamFactory = () => new Writable({ write(_c, _e, callback) { callback(new Error("原始错误")); } });
+    sftp.writeError = new Error("原始错误");
     // 远端 unlink 也失败：不得让清理错误掩盖原始错误
     sftp.unlink = (_path: string, callback: (error: Error | undefined) => void) => callback(new Error("清理也失败了"));
 

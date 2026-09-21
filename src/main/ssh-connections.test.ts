@@ -157,8 +157,17 @@ class FakeSftp implements SshSftpLike {
     return Readable.from([bytes]) as never;
   }
 
-  createWriteStream(): never {
-    throw new Error("FakeSftp.createWriteStream 未实现");
+  // 上传流水线的三原语：本文件的用例只跑下载，这里给出“能跑但用不到”的最简实现。
+  open(_path: string, _flags: string, callback: (error: Error | undefined, handle: Buffer | undefined) => void): void {
+    callback(undefined, Buffer.alloc(4));
+  }
+
+  write(_handle: Buffer, _buffer: Buffer, _offset: number, _length: number, _position: number, callback: (error: Error | undefined) => void): void {
+    callback(undefined);
+  }
+
+  close(_handle: Buffer, callback: (error: Error | undefined) => void): void {
+    callback(undefined);
   }
 
   end(): void {
