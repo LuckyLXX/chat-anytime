@@ -65,7 +65,7 @@ import { DelegationTranscript } from "./components/DelegationTranscript";
 import { detailTitle } from "./components/QuestionPanel";
 import { compactPath, type Artifact } from "./lib/content";
 import { composePickMessage } from "./lib/browser-pick";
-import { composeGalleryDevMessage, galleryRunTarget, type GalleryApp, type GalleryDraft, type GalleryKind } from "../../shared/gallery";
+import { composeGalleryDevMessage, galleryRunPlan, galleryServiceFailureMessage, GALLERY_SERVICE_WAIT_MS, type GalleryApp, type GalleryDraft, type GalleryKind } from "../../shared/gallery";
 import { GalleryMenu } from "./components/GalleryMenu";
 import { GalleryWall } from "./components/GalleryWall";
 import { GalleryPublishDialog, GalleryWallDialog } from "./components/GalleryDialogs";
@@ -540,41 +540,74 @@ export function App(): ReactNode {
   // 全可用）；绝不用沙箱 iframe——它永不同时给 allow-scripts 与 allow-same-origin，
   // 窗口内的作品会静默丢 localStorage / 相对路径 fetch。
   //
+  // 服务型作品是例外的一半：地址连不上时不再只能「开个连不上的页」，而是开一个
+  // 终端标签在那个作品目录里跑启动命令，等地址真的可访问再打开浏览器（2026-09-23
+  // 与用户对齐：进程与标签同生共死、已可达不重启）。
+  //
   // 标签页打开走 openPreviewTarget（定义在本块之后，且需要稳定身份给 memo 用），
   // 所以用 ref 间接引用：runGalleryApp 只在事件回调里运行，那时 ref 必已就位。
   const openPreviewTargetRef = useRef<(target: PreviewTarget, id?: string) => void>(() => {});
-  /** 打开终端标签页（服务型作品降级路径用它），同样后定义。 */
-  const openTerminalPreviewRef = useRef<() => void>(() => {});
+  /** 打开指定标签（服务型作品的终端标签用它，要带 cwd/initialCommand），同样后定义。 */
+  const openTerminalPreviewRef = useRef<(target: PreviewTarget, id: string) => void>(() => {});
+  /**
+   * 服务型作品的终端标签 id **按作品固定**：再点一次「运行」复用同一个 PTY
+   * （主进程 create 会复用而不是重跑命令），不会莫名多起一个服务；
+   * 关掉这个标签 = 停掉服务（关闭标签会 kill PTY，PTY 就是服务的宿主）。
+   */
+  const galleryServiceTerminalId = (app: GalleryApp): string => `terminal-gallery-${app.id}`;
+
+  /** 开浏览器标签并记一次运行（网页作品与服务型作品共用这条尾巴）。 */
+  const openGalleryBrowserTab = useCallback(async (app: GalleryApp, url: string): Promise<void> => {
+    // 每次「运行」都重开标签页：旧标签可能已被用户改过地址或处于错误页，
+    // 重开才能保证「运行」= 进到作品的初始页。
+    const existing = previewRef.current?.tabs.find((tab) => tab.target.type === "browser" && tab.target.galleryId === app.id);
+    if (existing) void window.piDesktop.browserPreview({ type: "close", tabId: existing.id });
+    const tabId = `gallery-tab-${crypto.randomUUID()}`;
+    // 先把 tab-meta 写进主进程（initialUrl 由 BrowserPreview 消费一次），
+    // 再开标签——避免标签挂载早于元信息到达而错过首次导航。
+    await window.piDesktop.browserPreview({ type: "tab-meta", tabId, initialUrl: url, galleryId: app.id });
+    openPreviewTargetRef.current({ type: "browser", id: tabId, title: app.title, galleryId: app.id }, tabId);
+    // 记录一次运行（lastRunAt + 重排）只是成功路径的事：打不开页面就不算跑过。
+    void window.piDesktop.send({ type: "gallery.run", id: app.id }).catch(() => undefined);
+  }, []);
+
   const runGalleryApp = useCallback(async (app: GalleryApp): Promise<void> => {
     try {
-      const target = galleryRunTarget(app);
-      // 每次「运行」都重开标签页：旧标签可能已被用户改过地址或处于错误页，
-      // 重开才能保证「运行」= 进到作品的初始页。
-      const existing = previewRef.current?.tabs.find((tab) => tab.target.type === "browser" && tab.target.galleryId === app.id);
-      if (existing) void window.piDesktop.browserPreview({ type: "close", tabId: existing.id });
-      if (target.kind === "server" && !target.url) {
-        // 服务型且未登记地址：本期不自动拉起进程（无可靠的就绪判定），降级为
-        // 「开终端 + 把命令复制到剪贴板」，让用户回车即可。
-        openTerminalPreviewRef.current();
-        if (target.command) {
-          await navigator.clipboard.writeText(target.command).catch(() => undefined);
-          setMessageActionError(`已打开终端并复制启动命令：${target.command}（回车执行后，再点一次「运行」）`);
-        } else {
-          setMessageActionError("该作品是服务型，但还没登记启动命令或地址；先在作品上点「继续开发」让 AI 补全。");
-        }
+      // 先探一次服务地址：已经跑着就直接进页面，不重启用户（或上次运行）起的服务。
+      const reachable = app.kind === "server" && app.url ? (await window.piDesktop.galleryAwaitService({ url: app.url })).ok : false;
+      const plan = galleryRunPlan(app, reachable);
+      if (plan.action === "open-file") {
+        await openGalleryBrowserTab(app, await window.piDesktop.galleryFileUrl(plan.absolutePath, app.workspace));
         return;
       }
-      const url = target.kind === "server" ? target.url! : await window.piDesktop.galleryFileUrl(target.absolutePath, app.workspace);
-      const tabId = `gallery-tab-${crypto.randomUUID()}`;
-      // 先把 tab-meta 写进主进程（initialUrl 由 BrowserPreview 消费一次），
-      // 再开标签——避免标签挂载早于元信息到达而错过首次导航。
-      await window.piDesktop.browserPreview({ type: "tab-meta", tabId, initialUrl: url, galleryId: app.id });
-      openPreviewTargetRef.current({ type: "browser", id: tabId, title: app.title, galleryId: app.id }, tabId);
-      void window.piDesktop.send({ type: "gallery.run", id: app.id }).catch(() => undefined);
+      if (plan.action === "start-service") {
+        // 运行 = 开一个终端标签并执行启动命令：启动输出落在用户看得见的地方，
+        // 进程与标签同生共死（用户选定：不在后台留隐藏进程）。
+        const terminalId = galleryServiceTerminalId(app);
+        openTerminalPreviewRef.current({ type: "terminal", cwd: plan.directory, initialCommand: plan.command, title: `${app.title} · 服务` }, terminalId);
+        if (!plan.url) {
+          setMessageActionError(`已在终端启动「${app.title}」：${plan.command}。该作品未登记服务地址，起好后请再点一次「运行」。`);
+          return;
+        }
+        const probe = await window.piDesktop.galleryAwaitService({ url: plan.url, terminalId, timeoutMs: GALLERY_SERVICE_WAIT_MS });
+        if (!probe.ok) {
+          setMessageActionError(galleryServiceFailureMessage(app, probe));
+          return;
+        }
+        await openGalleryBrowserTab(app, plan.url);
+        return;
+      }
+      if (plan.action === "manual") {
+        setMessageActionError(app.url
+          ? `「${app.title}」的服务没在运行（${app.url} 连不上），作品里也没登记启动命令：点「继续开发」让 AI 补上，或自己起好服务再点运行。`
+          : "该作品是服务型，但还没登记启动命令或服务地址；先在作品上点「继续开发」让 AI 补全。");
+        return;
+      }
+      await openGalleryBrowserTab(app, plan.url);
     } catch (error) {
       setMessageActionError(error instanceof Error ? error.message : "运行作品失败");
     }
-  }, []);
+  }, [openGalleryBrowserTab]);
   const developGalleryApp = useCallback((app: GalleryApp): void => {
     const targetId = focusedPaneId ?? activeSessionId;
     if (!targetId) {
@@ -703,7 +736,10 @@ export function App(): ReactNode {
     previousWorkspaceRef.current = activeWorkspace;
     // Terminals spawn with the old workspace as cwd; retire them all when it
     // changes instead of leaving shells pointing at a stale directory.
-    const terminalTabs = (preview?.tabs ?? []).filter((tab) => tab.target.type === "terminal");
+    // 例外：作品的服务终端（带 cwd，cwd 是那个作品的目录，不随工作区变）——
+    // 用户选定的语义是「关掉标签才停服务」，切工作区不是关标签，且作品清单本身
+    // 就是全局跨工作区的（浏览器标签也确实活下来了）。
+    const terminalTabs = (preview?.tabs ?? []).filter((tab) => tab.target.type === "terminal" && !tab.target.cwd);
     for (const tab of terminalTabs) void window.piDesktop.terminal({ type: "kill", terminalId: tab.id });
     if (terminalTabs.length === 0) return;
     setPreview((current) => {
@@ -1230,9 +1266,11 @@ export function App(): ReactNode {
 
   // 把后定义的两个入口回填给 runGalleryApp（作品运行的分流与开标签都靠它们）；
   // 在每次提交后同步一次，事件回调触发时必为最新实现。
+  // 终端那条直接指向 openPreviewTarget：服务型作品要带 cwd/initialCommand，
+  // 不能指向 openTerminalPreview（它只开一个普通终端）。
   useEffect(() => {
     openPreviewTargetRef.current = openPreviewTarget;
-    openTerminalPreviewRef.current = openTerminalPreview;
+    openTerminalPreviewRef.current = openPreviewTarget;
   });
 
   /** 侧边栏 SSH 入口：打开主机管理 tab（固定 id 复用同一 tab，不叠加）。 */

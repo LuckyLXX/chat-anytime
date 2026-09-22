@@ -20,7 +20,8 @@ export type PreviewTarget =
   | { type: "artifact"; artifact: Artifact }
   /** galleryId：该浏览器标签属于哪个作品（「运行」重开时据此找旧标签；关闭时清理）。 */
   | { type: "browser"; id?: string; title?: string; loading?: boolean; galleryId?: string }
-  | { type: "terminal" }
+  /** cwd/initialCommand：服务型作品「运行」在那个作品目录里直接跑启动命令（title 用作标签名）。 */
+  | { type: "terminal"; cwd?: string; initialCommand?: string; title?: string }
   | { type: "ssh" }
   | { type: "ssh-terminal"; terminalId: string; hostId: string; hostName: string }
   | { type: "file"; file: WorkspaceFilePreview; workspace?: string }
@@ -88,7 +89,7 @@ function targetArtifact(target: PreviewTarget): Artifact | undefined {
 function targetMetadata(target: PreviewTarget): { title: string; path?: string; label: string } {
   if (target.type === "artifact") return { title: target.artifact.title, label: target.artifact.language.toUpperCase() };
   if (target.type === "browser") return { title: target.title || "内置浏览器", label: "WEB" };
-  if (target.type === "terminal") return { title: "终端", label: "TERM" };
+  if (target.type === "terminal") return { title: target.title || "终端", label: "TERM" };
   if (target.type === "ssh") return { title: "SSH 主机", label: "SSH" };
   if (target.type === "ssh-terminal") return { title: target.hostName, label: "SSH" };
   if (target.type === "file") return { title: target.file.name, path: target.file.relativePath, label: target.file.kind === "code" ? (target.file.language ?? "CODE").toUpperCase() : target.file.kind.toUpperCase() };
@@ -446,7 +447,7 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, fullscree
           </div>
         )}
         {!showSource && target.type === "browser" && <BrowserPreview suspended={browserSuspended} tabId={activeTabId} onPickSend={onBrowserPickSend} onStateChange={(state) => onBrowserStateChange?.(activeTabId, state)} />}
-        {target.type === "terminal" && <TerminalPanel terminalId={active.id} workspace={workspace} />}
+        {target.type === "terminal" && <TerminalPanel terminalId={active.id} workspace={workspace} cwd={target.cwd} initialCommand={target.initialCommand} />}
         {target.type === "ssh" && <SshPanel onConnect={(host) => onSshConnect?.(host)} />}
         {target.type === "ssh-terminal" && <SshTerminalPanel terminalId={target.terminalId} hostId={target.hostId} hostName={target.hostName} workspace={workspace} />}
         {!showSource && target.type === "plan" && <MarkdownPreviewBlock content={target.content} identity={`plan-${activeTabId}`} outlineOpen={outlineOpen} artifactPrefix={`plan-${activeTabId}`} onOpenArtifact={onOpenArtifact} workspace={workspace} />}

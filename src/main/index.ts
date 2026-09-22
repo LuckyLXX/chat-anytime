@@ -9,7 +9,7 @@ import { resolveBundledSkillsDir, resolveBundledSubagentsDir } from "./bundled-s
 import { migrateSettings, normalizeJev, normalizeVision, recordAgentWorkspace, forgetAgentWorkspace } from "./settings.js";
 import { togglePinnedSessionPath } from "./session-scope.js";
 import { importExternalAttachment, workspaceRelativeAttachment } from "./attachments.js";
-import type { BrowserPreviewCommand, BrowserPreviewState, DesktopBootstrap, DesktopSettings, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot, SshCommand, SshCommandResult, SshEventData, SshRevealEvent, TerminalCommand, TerminalEventData, WorkspaceDirectoryListing, WorkspaceEntryResult, WorkspaceFilePreview, WorkspaceFileSearchResult, WorkspaceFileStat, WorkspaceFileWriteResult } from "../shared/protocol.js";
+import type { BrowserPreviewCommand, BrowserPreviewState, DesktopBootstrap, DesktopSettings, GalleryServiceProbe, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot, SshCommand, SshCommandResult, SshEventData, SshRevealEvent, TerminalCommand, TerminalEventData, WorkspaceDirectoryListing, WorkspaceEntryResult, WorkspaceFilePreview, WorkspaceFileSearchResult, WorkspaceFileStat, WorkspaceFileWriteResult } from "../shared/protocol.js";
 import { PREVIEW_FILE_SCHEME, parseWorkspaceFilePreviewUrl } from "../shared/protocol.js";
 import { createWorkspaceDirectory, createWorkspaceFile, deleteWorkspaceEntry, listWorkspaceDirectory, previewFileMimeType, readWorkspaceFilePreview, renameWorkspaceEntry, resolveWorkspaceEntry, safeRelativePath, searchWorkspaceFiles, statWorkspaceFile, writeWorkspaceFile } from "./workspace-preview.js";
 import { pruneDisabledModelRefs } from "./model-catalog.js";
@@ -18,6 +18,7 @@ import { BrowserAutomationController } from "./browser-automation.js";
 import { ComputerOverlayController } from "./computer-overlay.js";
 import { DesignSnapshotController } from "./design-snapshot.js";
 import { galleryThumbsDirFor, readGalleryThumb, resolveGalleryAgentDir } from "./gallery-store.js";
+import { clampServiceWait, waitForService } from "./gallery-service.js";
 import { TerminalManager, type PtyProcess, type PtySpawnOptions } from "./terminal-pty.js";
 import { Client as Ssh2Client } from "ssh2";
 import { createSshHostStore, type SshHostCrypto } from "./ssh-host-store.js";
@@ -474,7 +475,7 @@ function isTerminalCommand(value: unknown): value is TerminalCommand {
   if (typeof command.terminalId !== "string" || !command.terminalId.trim()) return false;
   switch (command.type) {
     case "create":
-      return typeof command.cols === "number" && typeof command.rows === "number" && (command.cwd === undefined || typeof command.cwd === "string") && (command.shell === undefined || typeof command.shell === "string");
+      return typeof command.cols === "number" && typeof command.rows === "number" && (command.cwd === undefined || typeof command.cwd === "string") && (command.shell === undefined || typeof command.shell === "string") && (command.initialCommand === undefined || typeof command.initialCommand === "string");
     case "input":
       return typeof command.data === "string";
     case "resize":
@@ -653,6 +654,24 @@ function registerIpc(): void {
   ipcMain.handle("terminal:command", (_event, command: TerminalCommand): void => {
     if (!isTerminalCommand(command)) throw new Error("终端命令无效");
     terminalManager.handle(command);
+  });
+  // 服务型作品「运行」：先探测地址，连不上就等启动命令把服务跑起来。
+  // 带 terminalId 时同时盯进程状态：命令立刻报错退出就立即回报（附退出码与输出
+  // 尾部），不让用户干等满超时——「命令写错了」与「服务还在启动」必须分得开。
+  ipcMain.handle("gallery:await-service", async (_event, input: { url?: unknown; terminalId?: unknown; timeoutMs?: unknown } | undefined): Promise<GalleryServiceProbe> => {
+    const url = typeof input?.url === "string" ? input.url : "";
+    if (!url.trim()) return { ok: false, reason: "invalid-url" };
+    const terminalId = typeof input?.terminalId === "string" && input.terminalId.trim() ? input.terminalId : undefined;
+    return waitForService({
+      url,
+      timeoutMs: clampServiceWait(input?.timeoutMs),
+      watch: terminalId ? () => {
+        const status = terminalManager.status(terminalId);
+        // exitCode 有值才算「已经退出」：未创建与还活着都返回 undefined
+        //（开标签与等待是两个 IPC，先后到达是常态）。
+        return status.exitCode === undefined ? undefined : { exited: true, exitCode: status.exitCode, tail: status.tail };
+      } : undefined
+    });
   });
   ipcMain.handle("ssh:command", (_event, command: SshCommand): SshCommandResult | Promise<SshCommandResult> => {
     if (!isSshCommand(command)) throw new Error("SSH 命令无效");

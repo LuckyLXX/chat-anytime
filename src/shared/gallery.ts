@@ -222,6 +222,90 @@ export function galleryRunTarget(app: Pick<GalleryApp, "kind" | "workspace" | "e
   return { kind: "file", absolutePath };
 }
 
+/**
+ * 服务型作品等「地址可访问」的预算（毫秒，渲染端传给主进程）。
+ *
+ * 30 秒的取舍（2026-09-23 与用户对齐）：本机 dev server 通常 1–5 秒起来，
+ * 首次 `npm install` 后的启动可能十几秒；再长就会让「点了运行」看起来像卡死。
+ * 超时不是失败终局——地址随时会就绪，提示里明确让人再点一次「运行」。
+ */
+export const GALLERY_SERVICE_WAIT_MS = 30_000;
+
+/** 失败提示里带的输出尾部长度（字符）：完整输出在终端标签里，提示只给个线头。 */
+export const GALLERY_SERVICE_TAIL_CHARS = 200;
+
+/**
+ * 运行分流结果：**唯一判据**（渲染端据此决定开浏览器还是先起服务）。
+ *
+ * 与 `galleryRunTarget` 的分工：后者只做「这个作品该怎么跑」的静态判定，
+ * 本函数把「服务此刻是否已经跑着」这一动态事实并进来——同一个作品，服务没起
+ * 时先起服务，已经起了就直接开浏览器（用户 2026-09-23 的选择：已可达不重启）。
+ */
+export type GalleryRunPlan =
+  | { action: "open-file"; absolutePath: string }
+  | { action: "open-browser"; url: string }
+  | { action: "start-service"; directory: string; command: string; url?: string }
+  /** 服务型但既连不上、又没登记启动命令：只能如实说，不能装作跑起来了。 */
+  | { action: "manual" };
+
+export function galleryRunPlan(
+  app: Pick<GalleryApp, "kind" | "workspace" | "entry" | "url" | "command">,
+  serviceReachable: boolean
+): GalleryRunPlan {
+  const target = galleryRunTarget(app);
+  if (target.kind === "file") return { action: "open-file", absolutePath: target.absolutePath };
+  if (target.url && serviceReachable) return { action: "open-browser", url: target.url };
+  if (target.command) {
+    return target.url
+      ? { action: "start-service", directory: target.directory, command: target.command, url: target.url }
+      : { action: "start-service", directory: target.directory, command: target.command };
+  }
+  return { action: "manual" };
+}
+
+/** 服务起不来的原因（主进程 await-service 回执与本地判定共用同一形状）。 */
+export interface GalleryServiceFailure {
+  reason?: "invalid-url" | "timeout" | "exited";
+  /** reason=exited：启动命令的退出码。 */
+  exitCode?: number;
+  /** reason=exited：启动命令的输出尾部（主进程已裁剪）。 */
+  tail?: string;
+}
+
+/** 输出尾部压成一行：toast 是 430px 单行流式布局，多行原文会撑成一整块。 */
+export function compactServiceTail(text: string | undefined, limit = GALLERY_SERVICE_TAIL_CHARS): string {
+  const flattened = (text ?? "").replace(/\s+/gu, " ").trim();
+  if (flattened.length <= limit) return flattened;
+  return `…${flattened.slice(flattened.length - limit)}`;
+}
+
+/**
+ * 服务启动失败的用户提示（唯一来源）。
+ *
+ * 三种原因分开写：
+ * - exited：命令自己退出了（写错了/依赖没装/端口被占）——带上退出码与输出尾部，
+ *   这是最需要「原因」的一类；
+ * - timeout：地址在预算内没就绪，但命令可能还在跑，明确给出「再点一次运行」的出路；
+ * - invalid-url：登记的服务地址连解析都不行（多是自己手写的地址写错了）。
+ */
+export function galleryServiceFailureMessage(
+  app: Pick<GalleryApp, "title" | "url">,
+  failure: GalleryServiceFailure,
+  waitMs = GALLERY_SERVICE_WAIT_MS
+): string {
+  if (failure.reason === "exited") {
+    const code = typeof failure.exitCode === "number" ? `（代码 ${failure.exitCode}）` : "";
+    const tail = compactServiceTail(failure.tail);
+    return `「${app.title}」的启动命令已退出${code}，服务没有起来。${tail ? `输出尾部：${tail}` : "请看终端标签里的输出。"}`;
+  }
+  if (failure.reason === "invalid-url") {
+    return `「${app.title}」登记的服务地址无法解析${app.url ? `（${app.url}）` : ""}：点「继续开发」让 AI 修正后再运行。`;
+  }
+  const seconds = Math.max(1, Math.round(waitMs / 1000));
+  const where = app.url ? `（${app.url} 连不上）` : "";
+  return `「${app.title}」的服务在 ${seconds} 秒内没有就绪${where}：可能还在启动，稍后再点一次「运行」；输出见终端标签。`;
+}
+
 /** 缩略图文件名（全局 thumbs 目录内）：`gallery-<yyyyMMdd-HHmmss-mmm>.png`，与截图同风格。 */
 export function galleryThumbName(at = Date.now()): string {
   const date = new Date(at);

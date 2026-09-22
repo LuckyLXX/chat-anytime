@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { delimiter, join } from "node:path";
+import { basename, delimiter, join } from "node:path";
 import type { TerminalCommand, TerminalEventData } from "../shared/protocol.js";
 
 /**
@@ -34,6 +34,10 @@ const FLUSH_MAX_CHARS = 64 * 1024;
 const SCROLLBACK_LIMIT_CHARS = 200 * 1024;
 const DIMENSION_MIN = 2;
 const DIMENSION_MAX = 500;
+/** 退出后保留的输出尾部：服务型作品的「启动失败原因」就靠它。 */
+const EXIT_TAIL_CHARS = 2000;
+/** 保留多少条已退出终端的尾部（同一作品的终端 id 固定，几条就够回看）。 */
+const EXIT_RECORD_LIMIT = 8;
 
 export interface TerminalManagerDeps {
   spawnPty(file: string, args: string[], options: PtySpawnOptions): PtyProcess;
@@ -52,6 +56,12 @@ interface TerminalRecord {
   /** Chunks accumulated since the last flush, sent as one IPC message. */
   pending: string;
   disposeListeners(): void;
+}
+
+/** 已退出终端的残留信息：进程没了以后还得能回答「为啥没起来」。 */
+interface TerminalExitRecord {
+  exitCode?: number;
+  tail: string;
 }
 
 export function clampDimension(value: number, fallback: number): number {
@@ -92,9 +102,43 @@ export function resolveShellCommand(input: { shell?: string; platform?: NodeJS.P
   return { file: "/bin/sh", args: [] };
 }
 
+/**
+ * 把一条命令交给 shell 「跑完就退出」：服务型作品「运行」用的 PTY 形态。
+ *
+ * 为什么不让 shell 保持交互、把命令当输入打进去：
+ *  - 交互 shell 在子命令退出后**自己不会退**，「命令写错了」与「服务正在跑」对
+ *    上层完全同形，等待方只能干等满超时；
+ *  - 这个 PTY 就是服务的宿主：进程退出码 = 命令退出码（可直接报「已退出（代码 N）」），
+ *    关掉标签 = 杀掉服务，正是用户 2026-09-23 选定的生命周期。
+ *
+ * 用 shell 而不是直接 spawn 命令：Windows 上 `npm`/`npx` 实际是 .cmd，不经过
+ * shell 解析会直接 ENOENT；用用户自己的 shell 也与「自己在终端里跑」一致。
+ *
+ * **cmd.exe 必须走环境变量，不能把命令当参数传**（真机实测 2026-09-23）：
+ * node-pty 在 Windows 上按 MSVCRT 规则拼命令行（用反斜杠转义引号），而 cmd 只认
+ * 自己那套引号规则——`cmd /d /s /c 'node -e "console.log(1)"'` 会静默跑出一个空
+ * 结果（退出码 0、零输出，最坑的一种错）；改传 `%PI_SERVICE_COMMAND%` 由 cmd 自己
+ * 展开，实测引号/`&`/`%`/带空格的路径/精确退出码全对。pwsh / Windows PowerShell
+ * 自己解析 -Command 的字符串，引号无此问题（两边都真机验过）。
+ */
+export const SERVICE_COMMAND_ENV = "PI_SERVICE_COMMAND";
+
+export function shellServiceInvocation(shellFile: string, command: string): { args: string[]; env?: Record<string, string> } {
+  const name = basename(shellFile).toLowerCase();
+  if (name === "cmd" || name === "cmd.exe") return { args: ["/d", "/s", "/c", `%${SERVICE_COMMAND_ENV}%`], env: { [SERVICE_COMMAND_ENV]: command } };
+  if (name === "pwsh" || name === "pwsh.exe" || name === "powershell" || name === "powershell.exe") {
+    // 不传 -NoProfile：nvm-windows 等把 PATH 写在 profile 里，跳过 profile 会让
+    // 明明能跑的 `node xxx` 变成找不到命令。
+    return { args: ["-NoLogo", "-Command", command] };
+  }
+  return { args: ["-c", command] };
+}
+
 export class TerminalManager {
   private readonly terminals = new Map<string, TerminalRecord>();
   private readonly pendingFlush = new Set<TerminalRecord>();
+  /** 已退出终端的尾部（有界）：进程没了也得能回答「为啥没起来」。 */
+  private readonly exits = new Map<string, TerminalExitRecord>();
   private readonly schedule: (callback: () => void) => () => void;
   private cancelFlush: (() => void) | undefined;
 
@@ -134,13 +178,18 @@ export class TerminalManager {
     }
     const resolve = this.deps.resolveShell ?? ((shell) => resolveShellCommand({ shell }));
     const shell = resolve(command.shell);
+    const initialCommand = command.initialCommand?.trim();
+    // 有 initialCommand = 这个 PTY 直接跑那条命令（跑完就退），见 shellServiceInvocation。
+    const service = initialCommand ? shellServiceInvocation(shell.file, initialCommand) : undefined;
+    const args = service ? service.args : shell.args;
     const cwd = command.cwd?.trim() ? command.cwd : this.deps.defaultCwd?.();
     const env: Record<string, string> = {};
     for (const [key, value] of Object.entries(process.env)) {
       if (typeof value === "string") env[key] = value;
     }
+    if (service?.env) Object.assign(env, service.env);
     try {
-      const pty = this.deps.spawnPty(shell.file, shell.args, {
+      const pty = this.deps.spawnPty(shell.file, args, {
         name: "xterm-256color",
         cols: clampDimension(command.cols, 80),
         rows: clampDimension(command.rows, 24),
@@ -217,7 +266,49 @@ export class TerminalManager {
     }
     record.disposeListeners();
     this.terminals.delete(terminalId);
+    // 尾部要在删记录之前抓：记录一删，输出就没了，而「启动命令为啥退出」
+    // 恰好只能从输出里看出来。
+    this.rememberExit(terminalId, exitCode, record.scrollback);
     this.deps.publish(terminalId, { type: "exit", terminalId, exitCode });
+  }
+
+  private rememberExit(terminalId: string, exitCode: number, scrollback: string): void {
+    this.exits.delete(terminalId);
+    this.exits.set(terminalId, { exitCode, tail: scrollback.length > EXIT_TAIL_CHARS ? scrollback.slice(scrollback.length - EXIT_TAIL_CHARS) : scrollback });
+    while (this.exits.size > EXIT_RECORD_LIMIT) {
+      const oldest = this.exits.keys().next().value;
+      if (oldest === undefined) break;
+      this.exits.delete(oldest);
+    }
+  }
+
+  /**
+   * 终端此刻的状态：服务型作品的等待方靠它决定「还值得再等吗」。
+   *
+   * 关键区分：`exitCode === undefined` 既包含活着、也包含**尚未创建**——等待方
+   * 不能把「还没创建」当成失败（渲染端开标签与等待是两个独立 IPC，先后者到是常态）。
+   *
+   * 「活着的记录」优先于「退出记录」：同一 id 重新起了进程后，上一次的失败记录
+   * 不得把新进程判死（重试即重启服务，见下测试）；这里不靠 create 时清记录，
+   * 而是把优先序放在唯一的读路径上。
+   */
+  status(terminalId: string): { alive: boolean; exitCode?: number; tail?: string } {
+    if (this.terminals.has(terminalId)) return { alive: true };
+    const exited = this.exits.get(terminalId);
+    if (!exited) return { alive: false };
+    const status: { alive: boolean; exitCode?: number; tail?: string } = { alive: false };
+    if (exited.exitCode !== undefined) status.exitCode = exited.exitCode;
+    if (exited.tail) status.tail = exited.tail;
+    return status;
+  }
+
+  /** 终端输出的尾部（活着取实时 scrollback，已退出取残留记录）。 */
+  tail(terminalId: string, chars = 2000): string | undefined {
+    const alive = this.terminals.get(terminalId);
+    if (alive) return alive.scrollback.length > chars ? alive.scrollback.slice(alive.scrollback.length - chars) : alive.scrollback;
+    const exited = this.exits.get(terminalId);
+    if (!exited) return undefined;
+    return exited.tail.length > chars ? exited.tail.slice(exited.tail.length - chars) : exited.tail;
   }
 
   private kill(terminalId: string): void {
@@ -234,5 +325,6 @@ export class TerminalManager {
       record.pty.kill();
     }
     this.terminals.clear();
+    this.exits.clear();
   }
 }

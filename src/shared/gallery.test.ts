@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  compactServiceTail,
   composeGalleryDevMessage,
   galleryAbsolutePath,
   galleryKey,
+  galleryRunPlan,
   galleryRunTarget,
+  galleryServiceFailureMessage,
   galleryThumbEligible,
   galleryThumbName,
   MAX_GALLERY_APPS,
@@ -177,6 +180,72 @@ describe("galleryRunTarget（运行分流的唯一判据）", () => {
   it("galleryAbsolutePath 处理根目录与尾部斜杠", () => {
     expect(galleryAbsolutePath("D:/ws/", ".")).toBe("D:/ws");
     expect(galleryAbsolutePath("D:\\ws", "a/b.html")).toBe("D:\\ws/a/b.html");
+  });
+});
+
+describe("galleryRunPlan（「先探测再决定」的唯一判据）", () => {
+  const server = { kind: "server" as const, entry: "apps/ledger", command: "npm run dev", url: "http://localhost:5173" };
+
+  it("file 作品与可达性无关，永远走静态服务开浏览器", () => {
+    expect(galleryRunPlan(app(), true)).toEqual({ action: "open-file", absolutePath: "D:/ws/designs/exports/demo.html" });
+    expect(galleryRunPlan(app(), false)).toEqual({ action: "open-file", absolutePath: "D:/ws/designs/exports/demo.html" });
+  });
+
+  it("server 且地址已可达 → 直接开浏览器（不重启服务）", () => {
+    expect(galleryRunPlan(app(server), true)).toEqual({ action: "open-browser", url: "http://localhost:5173" });
+  });
+
+  it("server 不可达且有启动命令 → 先起服务（带上地址，起好再开浏览器）", () => {
+    expect(galleryRunPlan(app(server), false)).toEqual({
+      action: "start-service",
+      directory: "D:/ws/apps/ledger",
+      command: "npm run dev",
+      url: "http://localhost:5173"
+    });
+  });
+
+  it("server 只有命令没有地址 → 起服务但不等待（起好由用户再点运行）", () => {
+    expect(galleryRunPlan(app({ kind: "server", entry: ".", command: "node server.js" }), false))
+      .toEqual({ action: "start-service", directory: "D:/ws", command: "node server.js" });
+  });
+
+  it("server 既不可达又没命令 → manual（绝不假装跑起来了）", () => {
+    expect(galleryRunPlan(app({ kind: "server", entry: ".", url: "http://localhost:5173" }), false)).toEqual({ action: "manual" });
+    expect(galleryRunPlan(app({ kind: "server", entry: "." }), false)).toEqual({ action: "manual" });
+  });
+});
+
+describe("galleryServiceFailureMessage / compactServiceTail", () => {
+  const target = app({ kind: "server", entry: ".", url: "http://localhost:8787" });
+
+  it("命令自己退出：给出退出码与输出尾部", () => {
+    const message = galleryServiceFailureMessage(target, { reason: "exited", exitCode: 1, tail: "Error: Cannot find module 'express'\n    at ..." });
+    expect(message).toContain("已退出（代码 1）");
+    expect(message).toContain("Cannot find module");
+    // 多行输出压成一行：toast 是单行流式布局
+    expect(message).not.toContain("\n");
+  });
+
+  it("命令退出但没抓到输出尾部时改指终端标签，不留空占位", () => {
+    expect(galleryServiceFailureMessage(target, { reason: "exited", exitCode: 0 })).toContain("终端标签");
+  });
+
+  it("超时不是终局：明确给出「再点一次运行」的出路", () => {
+    const message = galleryServiceFailureMessage(target, { reason: "timeout" }, 30_000);
+    expect(message).toContain("30 秒");
+    expect(message).toContain("再点一次「运行」");
+    expect(message).toContain("http://localhost:8787");
+  });
+
+  it("地址无法解析：指回继续开发修正", () => {
+    expect(galleryServiceFailureMessage(target, { reason: "invalid-url" })).toContain("无法解析");
+  });
+
+  it("尾部只留末尾 limit 字符并加省略号", () => {
+    expect(compactServiceTail("  a\n b\t c  ", 100)).toBe("a b c");
+    const long = "x".repeat(300);
+    expect(compactServiceTail(long, 200)).toHaveLength(201);
+    expect(compactServiceTail(long, 200).startsWith("…")).toBe(true);
   });
 });
 

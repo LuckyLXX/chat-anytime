@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { TerminalEventData } from "../shared/protocol.js";
-import { TerminalManager, appendScrollback, clampDimension, resolveShellCommand, type PtyProcess, type PtySpawnOptions } from "./terminal-pty.js";
+import { TerminalManager, appendScrollback, clampDimension, resolveShellCommand, shellServiceInvocation, SERVICE_COMMAND_ENV, type PtyProcess, type PtySpawnOptions } from "./terminal-pty.js";
 
 interface FakePty extends PtyProcess {
   written: string[];
@@ -184,6 +184,101 @@ describe("TerminalManager", () => {
     const harness = createHarness({ defaultCwd: "D:\\work\\demo" });
     harness.manager.handle({ type: "create", terminalId: "t1", cols: 80, rows: 24 });
     expect(harness.spawns[0]!.options.cwd).toBe("D:\\work\\demo");
+  });
+
+  it("initialCommand 交给 shell 跑（不是当输入打进去），且重连时不重跑", () => {
+    const harness = createHarness();
+    harness.manager.handle({ ...createCommand("svc"), cwd: "D:\\ws\\apps\\ledger", initialCommand: "npm run dev" });
+
+    expect(harness.spawns).toHaveLength(1);
+    expect(harness.spawns[0]!.file).toBe("shell.exe");
+    expect(harness.spawns[0]!.args).toEqual(["-c", "npm run dev"]);
+    expect(harness.spawns[0]!.options.cwd).toBe("D:\\ws\\apps\\ledger");
+    // 关键：命令不是「模拟输入」——否则切标签重连会再打一遍，莫名多起一个服务。
+    expect(harness.ptys[0]!.written).toEqual([]);
+
+    harness.manager.handle({ ...createCommand("svc"), cwd: "D:\\ws\\apps\\ledger", initialCommand: "npm run dev" });
+    expect(harness.spawns).toHaveLength(1);
+    expect(harness.ptys[0]!.written).toEqual([]);
+  });
+
+  it("cmd 走环境变量传命令（参数里塞不下引号），普通终端不额外传变量", () => {
+    const published: TerminalEventData[] = [];
+    const spawns: Array<{ file: string; args: string[]; options: PtySpawnOptions }> = [];
+    const manager = new TerminalManager({
+      spawnPty(file, args, options) {
+        spawns.push({ file, args, options });
+        return { pid: 1, write() {}, resize() {}, kill() {}, onData: () => ({ dispose() {} }), onExit: () => ({ dispose() {} }) };
+      },
+      publish: (terminalId, event) => published.push(event),
+      resolveShell: () => ({ file: "C:\\Windows\\system32\\cmd.exe", args: [] })
+    });
+    manager.handle({ ...createCommand("svc"), initialCommand: 'node -e "console.log(1)"' });
+    expect(spawns[0]!.args).toEqual(["/d", "/s", "/c", `%${SERVICE_COMMAND_ENV}%`]);
+    expect(spawns[0]!.options.env![SERVICE_COMMAND_ENV]).toBe('node -e "console.log(1)"');
+
+    manager.handle(createCommand("t2"));
+    expect(spawns[1]!.args).toEqual([]);
+    expect(spawns[1]!.options.env![SERVICE_COMMAND_ENV]).toBeUndefined();
+  });
+
+  it("跑完（进程退出）后重新 create 会再跑一次：重试即重启服务", () => {
+    const harness = createHarness();
+    harness.manager.handle({ ...createCommand("svc"), initialCommand: "node server.js" });
+    harness.ptys[0]!.emitExit(1);
+    harness.manager.handle({ ...createCommand("svc"), initialCommand: "node server.js" });
+    expect(harness.spawns).toHaveLength(2);
+    expect(harness.spawns[1]!.args).toEqual(["-c", "node server.js"]);
+  });
+
+  it("status/tail：未创建不算失败，退出后留退出码与输出尾部", () => {
+    const harness = createHarness();
+    // 尚未创建：没有 exitCode，等待方不得把它当成「已退出」（开标签与等待是两个 IPC）
+    expect(harness.manager.status("svc")).toEqual({ alive: false });
+
+    harness.manager.handle({ ...createCommand("svc"), initialCommand: "node server.js" });
+    expect(harness.manager.status("svc")).toEqual({ alive: true });
+    harness.ptys[0]!.emitData("listening on 8787");
+    harness.flush();
+    expect(harness.manager.tail("svc")).toBe("listening on 8787");
+
+    harness.ptys[0]!.emitData(" Error: port in use");
+    harness.ptys[0]!.emitExit(1);
+    expect(harness.manager.status("svc")).toEqual({ alive: false, exitCode: 1, tail: "listening on 8787 Error: port in use" });
+    expect(harness.manager.tail("svc")).toBe("listening on 8787 Error: port in use");
+
+    // 同一 id 重新起了进程：旧退出记录必须失效，否则等待方把上一次的失败当本次结果
+    harness.manager.handle({ ...createCommand("svc"), initialCommand: "node server.js" });
+    expect(harness.manager.status("svc")).toEqual({ alive: true });
+  });
+
+  it("tail 只留末尾 chars 字符，未知终端返回 undefined", () => {
+    const harness = createHarness();
+    harness.manager.handle(createCommand("t1"));
+    harness.ptys[0]!.emitData("abcdefg");
+    harness.flush();
+    expect(harness.manager.tail("t1", 3)).toBe("efg");
+    expect(harness.manager.tail("missing")).toBeUndefined();
+  });
+
+  it("退出记录有界：超出上限后最早的一条被淘汰", () => {
+    const harness = createHarness();
+    for (let index = 0; index < 9; index += 1) {
+      const id = `t${index}`;
+      harness.manager.handle(createCommand(id));
+      harness.ptys.at(-1)!.emitExit(index);
+    }
+    expect(harness.manager.status("t0")).toEqual({ alive: false });
+    expect(harness.manager.status("t8")).toEqual({ alive: false, exitCode: 8 });
+  });
+});
+
+describe("shellServiceInvocation", () => {
+  it("按 shell 类型选「跑完就退」的传参方式", () => {
+    expect(shellServiceInvocation("C:\\Windows\\system32\\cmd.exe", "npm run dev")).toEqual({ args: ["/d", "/s", "/c", `%${SERVICE_COMMAND_ENV}%`], env: { [SERVICE_COMMAND_ENV]: "npm run dev" } });
+    expect(shellServiceInvocation("C:\\Program Files\\PowerShell\\7\\pwsh.exe", "node proxy.cjs")).toEqual({ args: ["-NoLogo", "-Command", "node proxy.cjs"] });
+    expect(shellServiceInvocation("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", "node proxy.cjs")).toEqual({ args: ["-NoLogo", "-Command", "node proxy.cjs"] });
+    expect(shellServiceInvocation("/bin/bash", "node proxy.cjs")).toEqual({ args: ["-c", "node proxy.cjs"] });
   });
 });
 

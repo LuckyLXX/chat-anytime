@@ -1018,8 +1018,18 @@ export interface DesignDocSummary {
 // 运行一律走内置浏览器 + 本地静态服务（单文件/多文件/服务型统一心智）；
 // 数据模型与纯函数在 shared/gallery.ts，渲染端与主进程共用同一套判定。
 // 命名同 automation：**下划线工具名**（gallery_publish），命令用点号。
-import type { GalleryApp as GalleryAppModel, GalleryDraft as GalleryDraftModel } from "./gallery.js";
+import type { GalleryApp as GalleryAppModel, GalleryDraft as GalleryDraftModel, GalleryServiceFailure } from "./gallery.js";
 export type { GalleryApp, GalleryDraft, GalleryKind, GalleryRunTarget } from "./gallery.js";
+
+/**
+ * 服务型作品「运行」的探测/等待回执（gallery:await-service）。
+ *
+ * `timeoutMs: 0` = 单次探测（「服务现在跑着吗」）；带 terminalId 时主进程会同时
+ * 盯启动进程的状态，已退出就立刻回报 exited（附退出码与输出尾部），不必干等满超时。
+ */
+export interface GalleryServiceProbe extends GalleryServiceFailure {
+  ok: boolean;
+}
 
 /**
  * User terminal (PTY) hosted in the main process, rendered with xterm.js in a
@@ -1027,7 +1037,12 @@ export type { GalleryApp, GalleryDraft, GalleryKind, GalleryRunTarget } from "./
  * existing terminal and replays its scrollback instead of spawning a new one.
  */
 export type TerminalCommand =
-  | { type: "create"; terminalId: string; cwd?: string; cols: number; rows: number; shell?: string }
+  /**
+   * initialCommand：新建 PTY 时直接执行的命令（服务型作品「运行」用）。
+   * **只在真的新建进程时执行一次**：标签切回/重连会复用同一个 PTY，若每次都重
+   * 打一遍命令，用户会莫名其妙多起一个 dev server（端口冲突）。
+   */
+  | { type: "create"; terminalId: string; cwd?: string; cols: number; rows: number; shell?: string; initialCommand?: string }
   | { type: "input"; terminalId: string; data: string }
   | { type: "resize"; terminalId: string; cols: number; rows: number }
   | { type: "kill"; terminalId: string };
@@ -1910,6 +1925,11 @@ export interface DesktopApi {
   galleryFileUrl(filePath: string, workspace?: string): Promise<string>;
   /** 作品缩略图（data URL）：存在全局 agentDir，不在工作区内，故走专用只读通道；缺失返回 undefined。 */
   galleryThumb(fileName: string): Promise<string | undefined>;
+  /**
+   * 服务型作品「运行」的探测/等待：timeoutMs 缺省 0 = 只探一次；带 terminalId 时
+   * 主进程同时盯启动进程，已退出则提前回报 exited（附退出码与输出尾部）。
+   */
+  galleryAwaitService(input: { url: string; terminalId?: string; timeoutMs?: number }): Promise<GalleryServiceProbe>;
   browserPreview(command: BrowserPreviewCommand): Promise<BrowserPreviewState>;
   browserAutomationCancel(tabId: string): Promise<void>;
   terminal(command: TerminalCommand): Promise<void>;

@@ -20,6 +20,7 @@ const api: DesktopApi = {
   statWorkspaceFile: (workspace: string, relativePath: string) => ipcRenderer.invoke("desktop:stat-workspace-file", workspace, relativePath),
   galleryFileUrl: (filePath: string, workspace?: string) => ipcRenderer.invoke("gallery:file-url", filePath, workspace),
   galleryThumb: (fileName: string) => ipcRenderer.invoke("gallery:thumb", fileName),
+  galleryAwaitService: (input: { url: string; terminalId?: string; timeoutMs?: number }) => ipcRenderer.invoke("gallery:await-service", input),
   browserPreview: (command: BrowserPreviewCommand) => ipcRenderer.invoke("browser-preview:command", command),
   browserAutomationCancel: (tabId: string) => ipcRenderer.invoke("browser-automation:cancel", tabId),
   terminal: (command: TerminalCommand) => ipcRenderer.invoke("terminal:command", command),

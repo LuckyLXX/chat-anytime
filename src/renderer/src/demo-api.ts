@@ -10,6 +10,7 @@ import type {
   DesktopBootstrap,
   DesktopSettings,
   GalleryApp,
+  GalleryServiceProbe,
   PermissionDecision,
   RecentWorkspace,
   RuntimeCommand,
@@ -573,6 +574,12 @@ export function createDemoApi(): DesktopApi {
     async galleryThumb(): Promise<string | undefined> {
       // 演示环境没有缩略图落盘：卡片降级为类型徽标（真实路径是 data URL）。
       return undefined;
+    },
+    async galleryAwaitService(): Promise<GalleryServiceProbe> {
+      // 演示环境没有真进程也没有真端口：服务型作品按「已经在跑」回报，走
+      // 「已起好就直接开浏览器」那条最短路径（否则演示里会开一个永远报错的
+      // 终端标签 + 一条失败提示，把一个能看的 demo 演成坏掉的）。
+      return { ok: true };
     },
     async browserPreview(command: BrowserPreviewCommand): Promise<BrowserPreviewState> {
       if (command.type === "close") {
