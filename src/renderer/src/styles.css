@@ -1074,7 +1074,10 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 .resource-extension-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 7px; }
 .package-progress.error { color: var(--danger-text); border-color: var(--danger-border); background: var(--danger-soft); }
 .mcp-config-form { display: grid; gap: 10px; margin-bottom: 8px; padding: 11px; border: 1px solid var(--accent-border); border-radius: 6px; background: var(--surface-muted); }
-.mcp-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+/* 表单列数跟随**容器宽度**自动 1/2/3 列（原本固定 2 列）：九个设置页统一 1080px 后
+   两列会把「名称」这类短字段拉到 500+px 宽，auto-fit 让宽屏排 3 列、920px 仍是 2 列、
+   窄屏 1 列（下方 760px 媒体查询的 1 列规则保持不变）。.mcp-form-wide 跨满行。 */
+.mcp-form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 9px; }
 .mcp-form-grid label { display: grid; gap: 4px; min-width: 0; margin: 0; color: var(--text-muted); font-size: 11px; }
 .mcp-form-grid .mcp-form-wide { grid-column: 1 / -1; }
 .mcp-form-grid input, .mcp-form-grid select, .mcp-form-grid textarea { width: 100%; min-width: 0; margin: 0; }
@@ -1391,7 +1394,9 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 .agent-settings .agent-switch:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
 html[data-ui-motion="off"] .agent-settings .agent-switch, html[data-ui-motion="off"] .agent-settings .agent-switch::after { transition: none; }
 
-/* 设置弹窗加宽：角色页、通用页与模型服务页（两栏/两列字段需要横向空间），其余 tab 保持 920px */
+/* 设置弹窗宽度：九个 tab 统一 1080px（2026-09-23 用户要求「所有 tab 与通用页/模型页
+   宽度一致」——此前只有角色/通用/模型/外观四页加宽，其余 920px 会在切 tab 时跳一下）。
+   .settings-center 的 920px 只作无 settings-wide 时的兜底。 */
 .settings-center.settings-wide { width: min(1080px, calc(100vw - 48px)); }
 
 /* ============================================================
