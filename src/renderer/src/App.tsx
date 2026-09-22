@@ -120,16 +120,11 @@ import { HooksSettings } from "./HooksSettings";
 import { SubagentSettings } from "./SubagentSettings";
 import { UsageSettings } from "./UsageSettings";
 import { AutomationSettings } from "./AutomationSettings";
+import { GeneralSettings } from "./GeneralSettings";
 
 const DEFAULT_BUBBLE_OPACITY = 0.8;
 // Panel translucency keeps the theme's own --panel-bg by default (100%).
 const DEFAULT_PANEL_OPACITY = 1;
-const accessModeOptions: readonly { value: AccessMode; label: string }[] = [
-  { value: "read-only", label: "只读" },
-  { value: "ask", label: "每次询问" },
-  { value: "workspace", label: "工作区访问" },
-  { value: "full", label: "完全访问" }
-];
 
 function previewTargetKey(target: PreviewTarget): string {
   switch (target.type) {
@@ -683,22 +678,6 @@ function SettingsDialog({ settings, models, providers, customProvider, customMod
   const [visionModel, setVisionModel] = useState(settings.vision?.provider && settings.vision.model ? `${settings.vision.provider}/${settings.vision.model}` : "");
   const [visionPrompt, setVisionPrompt] = useState(settings.vision?.prompt ?? "");
   const [visionSaving, setVisionSaving] = useState(false);
-  // Jev 快速决策（实验性、缺省关闭）：字段各自本地化，保存走独立的 jev.save 命令
-  // （密钥与配置分开落位，不混进「保存通用设置」的整包提交）。
-  const [jevEnabled, setJevEnabled] = useState(settings.jev?.enabled === true);
-  const [jevBaseUrl, setJevBaseUrl] = useState(settings.jev?.baseUrl ?? "https://api.typesafe.ai/v1");
-  const [jevModel, setJevModel] = useState(settings.jev?.model ?? "jev-latest");
-  const [jevTextModel, setJevTextModel] = useState(settings.jev?.textProvider && settings.jev?.textModel ? `${settings.jev.textProvider}/${settings.jev.textModel}` : "");
-  const [jevMaxSteps, setJevMaxSteps] = useState(String(settings.jev?.maxSteps ?? 30));
-  const [jevAutoPilot, setJevAutoPilot] = useState(settings.jev?.autoPilot !== false);
-  const [jevApiKey, setJevApiKey] = useState("");
-  const [jevSaving, setJevSaving] = useState(false);
-  const [jevError, setJevError] = useState<string>();
-  // 「测试连接」的状态放全局 store（结果由 utility 以 jev-test-result 推送），
-  // 与 customModelFetchStatus 同一形状：推送 → store 投影 → 控件读。
-  const jevTestStatus = useDesktopStore((state) => state.jevTestStatus);
-  const jevTestMessage = useDesktopStore((state) => state.jevTestMessage);
-  const [jevSaved, setJevSaved] = useState(false);
   const [visionError, setVisionError] = useState<string>();
   const visionModelOptions = selectableCatalogModels(models).filter((model) => model.configured && model.imageInput);
   const [tab, setTab] = useState<"general" | "models" | "agents" | "subagents" | "appearance" | "resources" | "hooks" | "usage" | "automation">(initialTab === "automation" ? "automation" : "general");
@@ -799,15 +778,6 @@ function SettingsDialog({ settings, models, providers, customProvider, customMod
     const saved = structuredClone(nextSettings);
     initialSettingsRef.current = saved;
     useDesktopStore.setState({ settings: saved });
-  }
-
-  // 默认工作区草稿直接进 store（随「保存通用设置」提交；取消则回滚 initialSettingsRef）。
-  async function chooseDefaultWorkspace(): Promise<void> {
-    const path = await window.piDesktop.chooseWorkspace();
-    if (path) useDesktopStore.setState({ settings: { ...settings, defaultWorkspace: path } });
-  }
-  function resetDefaultWorkspace(): void {
-    useDesktopStore.setState({ settings: { ...settings, defaultWorkspace: undefined } });
   }
 
   function applyProviderModels(updated: ProviderModelSettings[]): void {
@@ -1121,72 +1091,6 @@ function SettingsDialog({ settings, models, providers, customProvider, customMod
     }
   }
 
-  async function saveJev(): Promise<void> {
-    const slash = jevTextModel.indexOf("/");
-    const textProvider = slash > 0 ? jevTextModel.slice(0, slash) : "";
-    const textModelId = slash > 0 ? jevTextModel.slice(slash + 1) : "";
-    if (jevEnabled && (!textProvider || !textModelId)) {
-      setJevError("启用 Jev 前请先选择文本助手模型（用于给字段填值；Jev 本身只做选择）");
-      return;
-    }
-    if (jevEnabled && !jevBaseUrl.trim()) {
-      setJevError("请填写 TypeSafe 接口地址");
-      return;
-    }
-    setJevSaving(true);
-    setJevError(undefined);
-    try {
-      const steps = Math.min(100, Math.max(1, Math.round(Number(jevMaxSteps) || 30)));
-      const jev = {
-        enabled: jevEnabled,
-        baseUrl: jevBaseUrl.trim() || "https://api.typesafe.ai/v1",
-        model: jevModel.trim() || "jev-latest",
-        textProvider,
-        textModel: textModelId,
-        maxSteps: steps,
-        autoPilot: jevAutoPilot
-      };
-      await window.piDesktop.send({ type: "jev.save", jev, ...(jevApiKey.trim() ? { apiKey: jevApiKey.trim() } : {}) });
-      if (jevApiKey.trim()) useDesktopStore.setState({ jevKeyConfigured: true });
-      setJevApiKey("");
-      markSettingsSaved({ ...settings, jev });
-      setJevSaved(true);
-      window.setTimeout(() => setJevSaved(false), 2500);
-    } catch (error) {
-      setJevError(error instanceof Error ? error.message : "保存 Jev 设置失败");
-    } finally {
-      setJevSaving(false);
-    }
-  }
-
-  async function testJev(): Promise<void> {
-    // 「测试连接」：发一次真实的 TypeSafe 决策请求（只读）。刻意不要求先勾「启用」——
-    // 否则用户会卡在「不启用不能测、不测不敢启用」。草稿为空时由 utility 侧回落已保存值。
-    useDesktopStore.setState({ jevTestStatus: "loading", jevTestMessage: undefined });
-    try {
-      await window.piDesktop.send({
-        type: "jev.test",
-        ...(jevBaseUrl.trim() ? { baseUrl: jevBaseUrl.trim() } : {}),
-        ...(jevModel.trim() ? { model: jevModel.trim() } : {}),
-        ...(jevApiKey.trim() ? { apiKey: jevApiKey.trim() } : {})
-      });
-    } catch (error) {
-      // 命令通道本身报错（不是探测失败）：也落到同一个提示位上。
-      useDesktopStore.setState({ jevTestStatus: "error", jevTestMessage: error instanceof Error ? error.message : "测试连接失败" });
-    }
-  }
-
-  async function clearJevKey(): Promise<void> {
-    try {
-      await window.piDesktop.send({ type: "jev.clearKey" });
-      useDesktopStore.setState({ jevKeyConfigured: false });
-      setJevSaved(true);
-      window.setTimeout(() => setJevSaved(false), 2500);
-    } catch (error) {
-      setJevError(error instanceof Error ? error.message : "清除密钥失败");
-    }
-  }
-
   async function save(event: FormEvent): Promise<void> {
     event.preventDefault();
     if (!provider || formBlocker) return;
@@ -1309,47 +1213,9 @@ function SettingsDialog({ settings, models, providers, customProvider, customMod
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={closeSettings}>
-      <section className={tab === "agents" ? "settings-dialog settings-center settings-wide" : "settings-dialog settings-center"} data-pane="settings-dialog" onMouseDown={(event) => event.stopPropagation()}>
+      <section className={tab === "agents" || tab === "general" ? "settings-dialog settings-center settings-wide" : "settings-dialog settings-center"} data-pane="settings-dialog" onMouseDown={(event) => event.stopPropagation()}>
         <header><div><Settings size={19} /><div><h2>ChatAnyTime 设置</h2><p>模型服务和 Agent 角色配置保存在本机。</p></div></div><button className="icon-button" type="button" title="关闭设置" aria-label="关闭设置" onClick={closeSettings}><X size={18} /></button></header>
-        <div className="settings-body"><nav className="settings-tabs"><button type="button" className={tab === "general" ? "active" : ""} onClick={() => setTab("general")}>通用</button><button type="button" className={tab === "models" ? "active" : ""} onClick={() => setTab("models")}>模型服务</button><button type="button" className={tab === "agents" ? "active" : ""} onClick={() => setTab("agents")}>Agent 角色</button><button type="button" className={tab === "subagents" ? "active" : ""} onClick={() => setTab("subagents")}>子智能体</button><button type="button" className={tab === "resources" ? "active" : ""} onClick={() => setTab("resources")}>技能与工具</button><button type="button" className={tab === "hooks" ? "active" : ""} onClick={() => setTab("hooks")}>钩子</button><button type="button" className={tab === "appearance" ? "active" : ""} onClick={() => setTab("appearance")}>外观</button><button type="button" className={tab === "usage" ? "active" : ""} onClick={() => setTab("usage")}>用量统计</button><button type="button" className={tab === "automation" ? "active" : ""} onClick={() => setTab("automation")}>自动化任务</button></nav><div className="settings-content">{tab === "general" ? <form onSubmit={(event) => { event.preventDefault(); const nextSettings = structuredClone(settings); void window.piDesktop.send({ type: "settings.save", settings: { model: nextSettings.model, thinkingLevel: nextSettings.thinkingLevel, accessMode: nextSettings.accessMode, appearance: nextSettings.appearance, browser: nextSettings.browser, computer: nextSettings.computer, design: nextSettings.design, ssh: nextSettings.ssh, jev: nextSettings.jev, defaultWorkspace: nextSettings.defaultWorkspace } }); markSettingsSaved(nextSettings); onClose(); }}>
-          <label>全局默认模型<ModelSelect models={configuredModels} providers={providers} value={settings.model ? `${settings.model.provider}/${settings.model.id}` : ""} placeholder="请选择默认模型" onChange={(value) => { const slash = value.indexOf("/"); useDesktopStore.setState({ settings: { ...settings, model: slash > 0 ? { provider: value.slice(0, slash), id: value.slice(slash + 1) } : undefined } }); }} /></label>
-          <label>默认思考等级<select value={settings.thinkingLevel} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, thinkingLevel: event.target.value as ThinkingLevel } })}>{THINKING_LEVELS.map((level) => <option key={level} value={level}>{thinkingLevelLabels[level]}</option>)}</select></label>
-          <label>访问模式<select value={settings.accessMode} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, accessMode: event.target.value as AccessMode } })}>{accessModeOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
-          {settings.accessMode === "full" && <p className="access-mode-warning">完全访问会允许 Pi 直接执行命令并访问工作区外路径，请只在可信项目中使用。</p>}
-          {settings.accessMode === "workspace" && <p className="access-mode-hint">工作区内的文件写入会自动允许；bash 命令和工作区外路径仍会询问。</p>}
-          <div className="default-workspace-setting"><span className="settings-field-label">默认工作区</span><p className="default-workspace-hint">没有选择过工作区的助手，所有话题都落在默认工作区里，开箱即可对话；未自定义时使用内置目录 workspace-default。已选过工作区的助手仍各自记忆、互不影响。</p><div className="default-workspace-controls"><code className="default-workspace-path" title={settings.defaultWorkspace ?? undefined}>{settings.defaultWorkspace ?? "未自定义（使用内置目录）"}</code><span className="default-workspace-actions"><button className="secondary-button" type="button" onClick={() => void chooseDefaultWorkspace()}><FolderOpen size={13} />选择文件夹</button><button className="secondary-button" type="button" disabled={!settings.defaultWorkspace} onClick={resetDefaultWorkspace}><RotateCcw size={13} />恢复默认</button></span></div></div>
-            <label className="checkbox-setting"><input type="checkbox" checked={settings.browser?.enabled !== false} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, browser: { enabled: event.target.checked } } })} />启用 AI 浏览器自动化（browser_* 工具）</label>
-            <label className="checkbox-setting" title="总闸：只管 AI 工具，不拦用户自己在 SSH 面板建立的连接"><input type="checkbox" checked={settings.ssh?.enabled !== false} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, ssh: { enabled: event.target.checked } } })} />启用 AI SSH 远程操作（ssh_* 工具；不影响人工连接）</label>
-            <label className="checkbox-setting" title="总闸：关掉后任何会话都拿不到 computer_*，即使该会话开着电脑控制模式"><input type="checkbox" checked={settings.computer?.enabled !== false} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, computer: { enabled: event.target.checked } } })} />启用电脑控制（computer_* 桌面窗口工具；还须在会话顶栏开启才注入）</label>
-            <label className="checkbox-setting" title="总闸：关掉后即使会话处于设计模式也不注入 design_* 工具"><input type="checkbox" checked={settings.design?.enabled !== false} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, design: { enabled: event.target.checked } } })} />启用设计模式（design_* 工具仅在开了设计模式的会话里注入）</label>
-            <section className="jev-settings" aria-label="Jev 快速决策">
-              <div className="jev-settings-heading">
-                <div>
-                  <h3>Jev 快速决策（实验性）</h3>
-                  <p>由 Jev（TypeSafe）逐轮决策、主模型只给一次目标，在内置浏览器里连续操作页面。它需要一个能访问的 TypeSafe 端点；<strong>内网环境通常没有，请保持关闭</strong>。关闭时不注入任何工具、不读密钥、不产生请求。</p>
-                </div>
-                <label className="checkbox-setting"><input type="checkbox" checked={jevEnabled} onChange={(event) => setJevEnabled(event.target.checked)} />启用 browser_jev_run</label>
-              </div>
-              <div className="jev-settings-grid">
-                <label>TypeSafe 接口地址<input value={jevBaseUrl} placeholder="https://api.typesafe.ai/v1" spellCheck={false} onChange={(event) => setJevBaseUrl(event.target.value)} /><small>含 /v1；也可填自建网关（如 Vercel AI Gateway 的 /typesafe/v1）</small></label>
-                <label>Jev 模型<input value={jevModel} placeholder="jev-latest" spellCheck={false} onChange={(event) => setJevModel(event.target.value)} /><small>可固定版本，例如 jev-1.13.0</small></label>
-                <label>文本助手模型<ModelSelect models={configuredModels} providers={providers} value={jevTextModel} emptyMessage="暂无已配置模型" placeholder="请选择用于给字段填值的模型" onChange={setJevTextModel} /><small>Jev 只做选择，字段值由这个模型生成（走已配置的模型服务）</small></label>
-                <label>单次步数上限<input inputMode="numeric" value={jevMaxSteps} placeholder="30" onChange={(event) => setJevMaxSteps(event.target.value)} /><small>1–100，默认 30；达到上限会把页面现状交回模型</small></label>
-              </div>
-              <label className="checkbox-setting" title="关闭后每走一步就把控制权交回主模型（不会自动连跑）"><input type="checkbox" checked={jevAutoPilot} onChange={(event) => setJevAutoPilot(event.target.checked)} />自动驾驶（连续执行到完成/阻塞；关闭则一次只走一步）</label>
-              <label>TypeSafe API Key<input type="password" value={jevApiKey} autoComplete="off" placeholder={jevKeyConfigured ? "已保存，留空则继续使用" : "请输入 API 密钥（存本机加密凭据，不进配置文件）"} onChange={(event) => setJevApiKey(event.target.value)} /></label>
-              {jevError && <p className="form-error">{jevError}</p>}
-              {jevTestStatus !== "idle" && <p className={jevTestStatus === "error" ? "form-error jev-test-result" : "form-hint jev-test-result"} data-role="jev-test-result">{jevTestStatus === "loading" ? "正在连接 TypeSafe…" : jevTestMessage}</p>}
-              <div className="jev-settings-footer">
-                <button className="primary-button" type="button" disabled={jevSaving} onClick={() => void saveJev()}>{jevSaving ? "正在保存" : "保存 Jev 设置"}</button>
-                <button className="secondary-button" type="button" data-control="jev-test" disabled={jevTestStatus === "loading"} onClick={() => void testJev()}>{jevTestStatus === "loading" ? "测试中" : "测试连接"}</button>
-                <button className="secondary-button" type="button" disabled={!jevKeyConfigured} onClick={() => void clearJevKey()}>清除密钥</button>
-                {jevSaved && <span className="form-hint">已保存</span>}
-              </div>
-            </section>
-          <label className="checkbox-setting"><input type="checkbox" checked={settings.appearance.showThinking} onChange={(event) => useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, showThinking: event.target.checked } } })} />展示思考过程</label>
-          <footer><button type="button" className="secondary-button" onClick={closeSettings}>取消</button><button className="primary-button" type="submit">保存通用设置</button></footer>
-        </form> : tab === "models" ? <form onSubmit={save}>
+        <div className="settings-body"><nav className="settings-tabs"><button type="button" className={tab === "general" ? "active" : ""} onClick={() => setTab("general")}>通用</button><button type="button" className={tab === "models" ? "active" : ""} onClick={() => setTab("models")}>模型服务</button><button type="button" className={tab === "agents" ? "active" : ""} onClick={() => setTab("agents")}>Agent 角色</button><button type="button" className={tab === "subagents" ? "active" : ""} onClick={() => setTab("subagents")}>子智能体</button><button type="button" className={tab === "resources" ? "active" : ""} onClick={() => setTab("resources")}>技能与工具</button><button type="button" className={tab === "hooks" ? "active" : ""} onClick={() => setTab("hooks")}>钩子</button><button type="button" className={tab === "appearance" ? "active" : ""} onClick={() => setTab("appearance")}>外观</button><button type="button" className={tab === "usage" ? "active" : ""} onClick={() => setTab("usage")}>用量统计</button><button type="button" className={tab === "automation" ? "active" : ""} onClick={() => setTab("automation")}>自动化任务</button></nav><div className="settings-content">{tab === "general" ? <GeneralSettings settings={settings} models={models} providers={providers} jevKeyConfigured={jevKeyConfigured} onSaved={(nextSettings) => { markSettingsSaved(nextSettings); onClose(); }} onDraftCommitted={markSettingsSaved} onCancel={closeSettings} /> : tab === "models" ? <form onSubmit={save}>
         <div className="settings-provider-heading"><label>服务商<select value={provider} onChange={(event) => { const next = event.target.value; setProvider(next); setModelSearch(""); closeManualModelForm(); const config = configuredProviders.find((item) => item.id === next); if (config) { setCustomName(config.name); setCustomBaseUrl(config.baseUrl); setCustomModelId(config.models[0]?.id ?? ""); setCustomApi(config.api); } else if (next !== customProviderId) { setCustomBaseUrl(""); setCustomApi(undefined); } }}><optgroup label="内置服务">{providers.filter((item) => !item.custom && !configuredProviders.some((config) => config.id === item.id)).map((item) => <option key={item.id} value={item.id}>{item.name}{item.configured ? " - 已配置" : ""}</option>)}{configuredProviders.filter((item) => item.custom === false).map((item) => <option key={item.id} value={item.id}>{item.name}{item.keyConfigured ? " - 已配置" : ""}</option>)}</optgroup><optgroup label="OpenAI 兼容服务"><option value={customProviderId}>{customProviderDisplayName}{customProviderKeySaved ? " - 已配置" : ""}</option>{configuredProviders.filter((item) => item.id !== customProviderId && item.custom !== false).map((item) => <option key={item.id} value={item.id}>{item.name}{item.keyConfigured ? " - 已配置" : ""}</option>)}</optgroup></select></label><button className="secondary-button" type="button" onClick={newProvider}>+ 新增服务</button>{selectedProvider && selectedProvider.custom !== false && <button className="danger-button" type="button" onClick={() => void deleteProvider()}>删除服务</button>}</div>
         {isCustomProvider && <>
           <label>服务名称<input value={customName} placeholder="例如：公司中转站" onChange={(event) => setCustomName(event.target.value)} /></label>

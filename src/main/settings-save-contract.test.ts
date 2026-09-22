@@ -32,6 +32,8 @@ const protocolSource = read("../shared/protocol.ts");
 const indexSource = read("index.ts");
 const runtimeSource = read("pi-runtime.ts");
 const appSource = read("../renderer/src/App.tsx");
+/** 「保存通用设置」的提交逻辑在通用页组件里（2026-09-23 从 App.tsx 抽出）。 */
+const generalSettingsSource = read("../renderer/src/GeneralSettings.tsx");
 
 /** 取出 `settings.save` 命令的 `Pick<DesktopSettings, …>` 键集合。 */
 function pickKeys(): string[] {
@@ -43,13 +45,15 @@ function pickKeys(): string[] {
 /**
  * 取出设置页「保存通用设置」的载荷键集合。
  * 载荷长这样：`{ type: "settings.save", settings: { model: nextSettings.model, … } }`。
+ * 提交逻辑在通用页组件 GeneralSettings.tsx（从 App.tsx 抽出后渲染端源 = 两者拼接）。
  */
 function rendererPayloadKeys(): string[] {
-  const marker = appSource.indexOf('type: "settings.save"');
+  const source = appSource + generalSettingsSource;
+  const marker = source.indexOf('type: "settings.save"');
   expect(marker, "渲染端没有提交 settings.save（此测试需要同步更新）").toBeGreaterThan(-1);
-  const open = appSource.indexOf("settings: {", marker);
+  const open = source.indexOf("settings: {", marker);
   expect(open, "找不到渲染端 settings.save 的载荷对象字面量").toBeGreaterThan(-1);
-  const body = appSource.slice(open, appSource.indexOf("}", open));
+  const body = source.slice(open, source.indexOf("}", open));
   return [...body.matchAll(/(?:^|[{,\s])([A-Za-z0-9_]+)\s*:/gu)].map((entry) => entry[1]!);
 }
 

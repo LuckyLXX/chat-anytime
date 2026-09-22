@@ -115,12 +115,16 @@ describe("Jev 测试连接的接线（源码回归网）", () => {
   });
 
   it("渲染端设置页有测试连接入口，且不因「未启用」而禁用", () => {
+    // 入口在通用页组件里（2026-09-23 从 App.tsx 抽出为 GeneralSettings.tsx）；
+    // App.tsx 仍须引用该组件（防两处都删）。
     const app = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../renderer/src/App.tsx"), "utf8");
-    expect(app).toContain('data-control="jev-test"');
-    expect(app).toContain('type: "jev.test"');
+    expect(app).toContain('from "./GeneralSettings"');
+    const settingsPage = app + readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../renderer/src/GeneralSettings.tsx"), "utf8");
+    expect(settingsPage).toContain('data-control="jev-test"');
+    expect(settingsPage).toContain('type: "jev.test"');
     // 禁用条件只能与「正在测试」有关；不能带上 jevEnabled / jevKeyConfigured，
     // 否则又回到「不启用/没存密钥就不能测」。
-    const button = app.slice(app.indexOf('data-control="jev-test"'));
+    const button = settingsPage.slice(settingsPage.indexOf('data-control="jev-test"'));
     const end = button.indexOf("</button>");
     const tag = button.slice(0, end);
     expect(tag).not.toContain("jevEnabled");

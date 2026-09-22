@@ -31,7 +31,7 @@
 
 类名属于实现细节，可能随版本变化；以下属性是稳定契约，结构化主题请只依赖它们：
 
-**区域钩子 `data-pane`**：`sidebar` `topbar` `workspace` `work-area` `conversation` `timeline` `composer` `task-panel` `memory-panel` `preview` `terminal` `ssh` `question-panel` `settings-dialog` `permission-dialog` `landing` `markdown-outline` `design` `design-toolbar` `design-tools` `design-canvas` `design-layers` `design-inspector` `gallery-menu` `gallery-wall` `agent-settings`
+**区域钩子 `data-pane`**：`sidebar` `topbar` `workspace` `work-area` `conversation` `timeline` `composer` `task-panel` `memory-panel` `preview` `terminal` `ssh` `question-panel` `settings-dialog` `permission-dialog` `landing` `markdown-outline` `design` `design-toolbar` `design-tools` `design-canvas` `design-layers` `design-inspector` `gallery-menu` `gallery-wall` `agent-settings` `general-settings`
 
 > `design` 是设计模式（Design Studio，顶栏调色板按钮进入）的工作台外壳——顶栏工具栏 + 左侧图层树（`design-layers`）+ 中部无限画布（`design-canvas`）+ 右侧属性检查器（`design-inspector`）。工作台底色走 `--panel-bg-preview`（缺省 `--panel-bg`）与既有表面 token，跟随主题；画布点阵/参考线/选择框用 `--border`/`--accent` 派生，主题可用 `[data-pane="design"]` 后代选择器重设计。 `design-tools` 是画布顶部居中的浮动绘图工具胶囊（选择/画板/矩形/文本），激活按钮带 `aria-pressed="true"`。
 
@@ -49,6 +49,8 @@
 > `markdown-outline` 与预览正文同属 `preview` 区域；正文内容块带 `content-visibility: auto`（长文档只渲染可视区），主题请勿给 `.preview-scroll` / `.markdown-surface` 及其祖先加`contain`/`transform`/`filter`——那会改变包含块、影响全屏弹层的定位基准。
 
 > `agent-settings` 是设置页「Agent 角色」tab（2026-09-22 重设计）——两栏：左栏角色列表（`.agent-rail`，含搜索框与「使用中」徽标 `.agent-rail-live`）与右栏编辑器（`.agent-editor`，顶部固定操作条 `.agent-editor-bar` + 可滚动分区卡片 `.agent-card`：身份 / 人格与系统提示词 / 对话行为 / 技能 / 扩展能力 / 内建工具权限）。结构钩子由 `renderer/src/AgentSettings.tsx` 提供，契约测试在 `AgentSettings.test.tsx`；**主题注意**：该页整体用了 `.agent-settings` 前缀的 (0,2,x) 特异性类名——因为 `.settings-dialog label/input/select`（(0,1,1)）会命中本页所有 label 与输入框，覆盖时必须同样带 `.agent-settings` 或更高特异性，否则会被打回「38px 输入框 + 15px 18px 外边距」并弄坏开关/勾选行尺寸。设置弹窗在角色页走 `.settings-center.settings-wide`（1080px），其余 tab 保持 920px。相关控件钩子：`data-control="agent-new"`（新建角色）、`agent-save`（保存角色）。
+
+> `general-settings` 是设置页「通用」tab（2026-09-23 重排）——五张分区卡片（`.general-card`，与角色页 `.agent-card` 同构）：对话与权限 / 默认工作区 / 能力总闸 / Jev 快速决策 / 界面；「取消 / 保存通用设置」固定在弹窗底部（`.general-settings-footer`），滚动收进 `.general-settings-body`。能力总闸是整行开关（`.general-switch-row`，`data-control="capability-switch"` + `data-capability="browser|ssh|computer|design"` 区分）；Jev 卡默认收起，头部一行 = 展开钮（`data-control="jev-expand"`，带 `aria-expanded`）+ 标题 + 「实验性」与状态徽标（`.general-jev-badge`，取值 `experimental`/`ok`/`warn`/`busy`/`off`）+ 右侧启用开关；展开后的字段、测试连接（`data-control="jev-test"`）与结果行（`data-role="jev-test-result"`）都在 `.general-card-body` 里。结构钩子由 `renderer/src/GeneralSettings.tsx` 提供，契约测试在 `GeneralSettings.test.tsx`。**主题注意**：与 `agent-settings` 同一条特异性纪律——覆盖本页 label/input/开关样式必须带 `.general-settings` 前缀，否则会被 `.settings-dialog` 的 (0,1,1) 全局规则压回；设置弹窗在本页也走 `.settings-center.settings-wide`（1080px）。
 
 > `automation-settings` 是设置页「自动化任务」tab（双子页：「任务」列表 + 搜索 + 过滤器 / 「运行记录」历史面板，位于 `settings-dialog` 内）；`automation-dialog` 是「创建/编辑定时任务」弹窗。二者都随设置页/弹窗配色走，主题可用 `--panel-bg` 派生背景与 `--border`/`--surface-*` 控制排版。相关控件钩子：`data-control="automation-open"`（侧栏「新建话题」下方的「自动化」入口 + 折叠态窄条图标）、`automation-run`（行内「运行一次」）、`automation-toggle`（启停）、`automation-runs-tab`（子页「运行记录」）；未在控件列枚举的地方用类名 `.automation-*` 命中。
 

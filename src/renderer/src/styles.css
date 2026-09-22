@@ -1375,8 +1375,85 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 .agent-settings .agent-switch:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
 html[data-ui-motion="off"] .agent-settings .agent-switch, html[data-ui-motion="off"] .agent-settings .agent-switch::after { transition: none; }
 
-/* 设置弹窗加宽：仅角色页（两栏 + 分区卡片需要横向空间），其余 tab 保持 920px */
+/* 设置弹窗加宽：仅角色页与通用页（两栏/两列字段需要横向空间），其余 tab 保持 920px */
 .settings-center.settings-wide { width: min(1080px, calc(100vw - 48px)); }
+
+/* ============================================================
+   通用页（GeneralSettings.tsx，2026-09-23 从 App.tsx 抽出重排）。
+   与角色页同一套设计语言：分区卡片（general-card 对齐 agent-card）、
+   整行开关（general-switch 对齐 agent-switch）、固定 footer。同样受
+   .settings-dialog label/input/select (0,1,1) 全局规则影响，全部规则
+   带 .general-settings 前缀（(0,2,x)）才不被「38px 输入框 + 15px 外边距」
+   压回（见上方 agent-settings 同款注释与踩坑记录）。
+   ============================================================ */
+.general-settings { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+/* 高度语义与 .agent-settings 同源：.settings-content 是滚动容器，本页把滚动
+   收进 .general-settings-body，footer 才能固定在弹窗底部始终可见。 */
+.general-settings-body { display: flex; flex: 1 1 auto; flex-direction: column; gap: 11px; min-height: 0; padding: 13px 16px 6px; overflow-y: auto; }
+.general-settings-footer { display: flex; flex: 0 0 auto; justify-content: flex-end; gap: 8px; padding: 11px 16px 13px; border-top: 1px solid var(--border); background: var(--surface-footer); }
+
+.general-card { flex: 0 0 auto; overflow: hidden; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+.general-card-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 9px; padding: 9px 12px; border-bottom: 1px solid var(--border); }
+.general-card-head > strong { color: var(--text); font-size: 12px; font-weight: 700; }
+.general-card-head > small { color: var(--text-muted); font-size: 11px; font-weight: 400; }
+.general-card-body { display: flex; flex-direction: column; gap: 9px; padding: 11px 12px; }
+
+/* 字段行：auto-fit 按容器宽度自动 1/2/3 列（同 agent-field-row 的取舍：
+   弹窗宽是 min(1080px, 100vw-48px)，视口媒体查询与容器宽度不同步）。 */
+.general-settings .general-field-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
+.general-settings .general-field { display: flex; flex-direction: column; gap: 5px; min-width: 0; margin: 0; color: var(--text-muted); font-size: 10px; font-weight: 700; }
+.general-settings .general-field > span { white-space: nowrap; }
+.general-settings .general-field input, .general-settings .general-field select { width: 100%; height: 32px; min-width: 0; padding: 0 9px; border: 1px solid var(--border-strong); border-radius: 6px; outline: 0; color: var(--text); background: var(--surface-input); font: inherit; font-size: 12px; font-weight: 400; }
+.general-settings .general-field small { color: var(--text-muted); font-size: 10px; font-weight: 400; line-height: 1.4; }
+.general-settings .general-field-wide { grid-column: 1 / -1; }
+.general-settings .general-hint { margin: 0; color: var(--text-muted); font-size: 11px; line-height: 1.5; }
+.general-settings .general-warning { margin: 0; color: var(--danger-text); font-size: 11px; line-height: 1.45; }
+.general-settings .general-form-error { margin: 0; }
+
+/* 默认工作区：路径展示 + 两动作钮（横排，窄容器自动换行） */
+.general-workspace-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+.general-workspace-path { flex: 1 1 260px; min-width: 0; overflow: hidden; padding: 7px 9px; color: var(--text); background: var(--surface-muted); border: 1px solid var(--border); border-radius: 6px; font: 11px/1.4 "Cascadia Code", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.general-workspace-actions { display: inline-flex; flex: 0 0 auto; gap: 6px; }
+.general-workspace-actions .compact-button { white-space: nowrap; }
+
+/* 能力总闸：整行开关（图标 + 名称 + 说明 + 右侧总开关），与角色页 agent-switch-row 同构 */
+.general-settings .general-switch-row { display: flex; align-items: center; gap: 9px; min-width: 0; min-height: 38px; margin: 0; padding: 4px 8px; border-radius: 6px; color: var(--text); font-size: 11px; font-weight: 400; cursor: pointer; }
+.general-settings .general-switch-row:hover { background: var(--surface-button-hover); }
+.general-settings .general-switch-icon { display: grid; flex: 0 0 auto; place-items: center; width: 24px; height: 24px; color: var(--accent-text); border-radius: 6px; background: var(--accent-soft); }
+.general-settings .general-switch-copy { display: grid; flex: 1 1 auto; gap: 1px; min-width: 0; }
+.general-settings .general-switch-copy strong { overflow: hidden; color: var(--text); font-size: 11.5px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.general-settings .general-switch-copy small { overflow: hidden; color: var(--text-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.general-settings .general-switch { flex: 0 0 auto; width: 32px; height: 18px; margin: 0; padding: 0; appearance: none; border: 0; border-radius: 999px; background: var(--border-strong); cursor: pointer; transition: background .15s ease; }
+.general-settings .general-switch::after { content: ""; display: block; width: 14px; height: 14px; margin: 2px; border-radius: 50%; background: #fff; transition: transform .15s ease; }
+.general-settings .general-switch:checked { background: var(--accent); }
+.general-settings .general-switch:checked::after { transform: translateX(14px); }
+.general-settings .general-switch:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+html[data-ui-motion="off"] .general-settings .general-switch, html[data-ui-motion="off"] .general-settings .general-switch::after { transition: none; }
+
+/* Jev 折叠卡：头部一行 = 展开钜 + 标题 + 状态徽标 + 右侧启用开关；
+   收起时不渲染 body（实验性能力不占首屏）。 */
+.general-card.general-card-jev > .general-card-head { padding: 0; border-bottom: 0; }
+.general-card.general-card-jev.expanded > .general-card-head { border-bottom: 1px solid var(--border); }
+.general-jev-toggle { display: flex; flex: 1 1 auto; align-items: center; gap: 8px; min-width: 0; min-height: 42px; padding: 0 12px; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.general-jev-toggle:hover { background: var(--surface-button-hover); }
+.general-jev-toggle > strong { flex: 0 0 auto; color: var(--text); font-size: 12px; font-weight: 700; }
+.general-jev-toggle .chevron { flex: 0 0 auto; color: var(--text-muted); transition: transform .15s ease; }
+.general-jev-toggle .chevron.collapsed { transform: rotate(-90deg); }
+html[data-ui-motion="off"] .general-jev-toggle .chevron { transition: none; }
+.general-jev-badge { flex: 0 0 auto; padding: 1px 6px; border-radius: 999px; color: var(--text-muted); background: var(--surface-raised); font-size: 10px; font-style: normal; font-weight: 700; }
+.general-jev-badge.experimental { color: var(--warning); background: var(--warning-soft); }
+.general-jev-badge.ok { color: var(--success); background: var(--success-soft); }
+.general-jev-badge.warn { color: var(--danger-text); background: var(--danger-soft); }
+.general-jev-badge.busy { color: var(--accent-text); background: var(--accent-soft); }
+.general-jev-badge.off { color: var(--text-muted); background: var(--surface-raised); }
+.general-settings .general-jev-switch { flex: 0 0 auto; margin: 0 12px 0 0; white-space: nowrap; }
+.general-settings .general-jev-switch input { flex: 0 0 auto; }
+.general-settings .general-jev-autopilot { margin: 0; }
+.general-settings .general-jev-autopilot input { flex: 0 0 auto; }
+.general-jev-footer { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; margin-top: 2px; }
+.general-jev-footer .form-hint { margin-left: 4px; }
+
+/* ============================================================ */
 
 .settings-dialog > header, .permission-dialog > header { display: flex; align-items: flex-start; justify-content: space-between; padding: 18px; border-bottom: 1px solid var(--border); }
 .settings-dialog > header > div, .permission-dialog > header { gap: 11px; }.settings-dialog > header > div { display: flex; }
