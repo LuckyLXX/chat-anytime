@@ -46,10 +46,6 @@ import type {
   BrowserElementPick,
   AgentProfile,
   BuiltinToolName,
-  ProviderSettings,
-  ProviderModelSettings,
-  ProviderApiMode,
-  CustomProviderModel,
   ModelOption,
   McpServerStatus,
   McpServerSummary,
@@ -71,9 +67,6 @@ import type {
   SessionSummary,
   SshHostSummary
 } from "../../shared/protocol";
-import { resourceScopeLabels, sessionRunStatusLabels, thinkingLevelLabels, toolLabel } from "../../shared/locale";
-import type { ThinkingLevelMap } from "../../shared/protocol";
-import { THINKING_LEVELS, thinkingLevelDraftFrom, thinkingLevelMapFromDraft } from "../../shared/thinking-levels";
 import type { ReplyChangedFile } from "./lib/changed-files";
 import { ArtifactPreview, type PreviewEditorState, type PreviewTab, type PreviewTarget } from "./components/ArtifactPreview";
 import { ModelSelect } from "./components/ModelSelect";
@@ -96,7 +89,6 @@ import { DiffView } from "./components/DiffView";
 import { BrandMark } from "./components/BrandMark";
 import { clampPreviewSplit, PREVIEW_SPLIT_MAX, PREVIEW_SPLIT_MIN, previewSplitFromKey } from "./lib/preview-split";
 import { groupSessionsByWorkspace, workspaceKey } from "./lib/session-groups";
-import { filterProviderModels, setProviderModelsEnabled, buildBuiltinProviderEntry, selectableCatalogModels, parseTokenLimit, formatTokenLimit, providerFormBlocker, pruneDisabledModelRefs, addManualProviderModel } from "./lib/model-list";
 import { CSS_URL_PATTERN, createThemeAssetUrls, isExternalThemeReference, normalizeThemeAssetReference, resolveThemeAssets } from "./lib/theme-assets";
 import { THEME_PRESETS, bubbleOpacityCss, collectThemeLayers, panelOpacityCss, scopeCustomThemeCss, scopeCustomThemeCssForPreview, themePresetCss, themePreviewCss, themeWallpaperOpacity, wallpaperOpacityCss } from "./lib/theme-presets";
 import { panePermissionRequest, paneQuestionRequest, dropPaneStates, pruneParkedPanels, useDesktopStore } from "./store";
@@ -117,10 +109,13 @@ import {
   type SplitNode
 } from "./lib/split-layout";
 import { HooksSettings } from "./HooksSettings";
+import { selectableCatalogModels } from "./lib/model-list";
+import { resourceScopeLabels, sessionRunStatusLabels, toolLabel } from "../../shared/locale";
 import { SubagentSettings } from "./SubagentSettings";
 import { UsageSettings } from "./UsageSettings";
 import { AutomationSettings } from "./AutomationSettings";
 import { GeneralSettings } from "./GeneralSettings";
+import { ModelSettings } from "./ModelSettings";
 
 const DEFAULT_BUBBLE_OPACITY = 0.8;
 // Panel translucency keeps the theme's own --panel-bg by default (100%).
@@ -599,87 +594,7 @@ function ResourceSettings({ resources }: ResourceSettingsProps): ReactNode {
   );
 }
 
-/**
- * 单模型的「思考等级支持」编辑器：勾选要支持的档位，并可为每一档声明发给上游的
- * 实际取值（留空 = 同名档位）。
- *
- * 为什么需要它（2026-09-16 用户反馈）：Pi 只在模型**显式声明** `thinkingLevelMap`
- * 时才放行 `xhigh`/`max`，而上游 /models 不描述推理能力、自定义/中转服务商注册时
- * 也不声明，于是「很高/最高」在这些模型上根本选不到（菜单点了没反应），而这类模型
- * （qwen3.8-27b 等）恰恰只认 `xhigh`。这里的勾选就是那份声明的写入入口。
- *
- * 只有目录明确标注 `reasoning === false` 的模型整块只读（Pi 对这类模型一律只给
- * 「关闭」，任何声明都无效）；其余模型每一档都可勾——若把「很高/最高」置灰就永远
- * 无法声明，正是本次要修的场景。
- */
-function ThinkingLevelEditor({ model, reasoning, onCommit, onCancel }: { model: ProviderModelSettings; reasoning?: boolean; onCommit(thinkingLevelMap: ThinkingLevelMap | undefined): void; onCancel(): void }): ReactNode {
-  const [draft, setDraft] = useState(() => thinkingLevelDraftFrom(model.thinkingLevelMap, reasoning));
-  const editable = reasoning !== false;
-  function patch(level: ThinkingLevel, change: Partial<{ enabled: boolean; value: string }>): void {
-    setDraft((current) => ({
-      enabled: change.enabled === undefined ? current.enabled : { ...current.enabled, [level]: change.enabled },
-      values: change.value === undefined ? current.values : { ...current.values, [level]: change.value }
-    }));
-  }
-  return (
-    <div className="model-thinking-editor" data-control="model-thinking-panel">
-      <div className="model-thinking-head">
-        <span>思考等级支持</span>
-        {!editable && <small className="model-thinking-note">目录标记该模型不支持推理，无法声明</small>}
-      </div>
-      <ul className="model-thinking-list">
-        {THINKING_LEVELS.map((level) => {
-          const isHighTier = level === "xhigh" || level === "max";
-          return (
-            <li key={level} className={editable ? "model-thinking-row" : "model-thinking-row unsupported"}>
-              <label className="checkbox-setting model-thinking-toggle">
-                <input type="checkbox" disabled={!editable} checked={draft.enabled[level]} onChange={(event) => patch(level, { enabled: event.target.checked })} />
-                <span>{thinkingLevelLabels[level]}</span>
-              </label>
-              <input className="model-thinking-value" autoComplete="off" spellCheck={false} disabled={!editable} placeholder={level} value={draft.values[level]} onChange={(event) => patch(level, { value: event.target.value })} />
-              {isHighTier && <small className="model-thinking-note">{draft.enabled[level] ? "已声明支持" : "勾选 = 声明支持（否则菜单里为灰）"}</small>}
-            </li>
-          );
-        })}
-      </ul>
-      <p className="model-thinking-hint">左侧勾选 = 该档位可选；右侧取值 = 调用上游时实际发送的 reasoning_effort（留空用同名值，例如「高」默认发 high；上游只认 xhigh 时就在这里把「高」写成 xhigh）。</p>
-      <div className="model-limits-actions">
-        <button className="secondary-button" type="button" onClick={() => setDraft(thinkingLevelDraftFrom(undefined, reasoning))}>恢复默认</button>
-        <button className="secondary-button" type="button" onClick={onCancel}>取消</button>
-        <button className="primary-button" type="button" onClick={() => onCommit(thinkingLevelMapFromDraft(draft))}>完成</button>
-      </div>
-    </div>
-  );
-}
-
-function SettingsDialog({ settings, models, providers, customProvider, customModels, customModelFetchStatus, customModelFetchError, modelRefreshStatus, modelRefreshError, modelRefreshProvider, resources, workspaceOpen, initialTab, jevKeyConfigured, onClose, onCreateInSession }: { settings: import("../../shared/protocol").DesktopSettings; jevKeyConfigured: boolean; models: ModelOption[]; providers: ProviderOption[]; customProvider?: ProviderSettings; customModels: CustomProviderModel[]; customModelFetchStatus: "idle" | "loading" | "success" | "error"; customModelFetchError?: string; modelRefreshStatus: "idle" | "loading" | "success" | "error"; modelRefreshError?: string; modelRefreshProvider?: string; resources: ResourceCatalog; workspaceOpen: boolean; initialTab?: string; onClose(): void; onCreateInSession(): void }): ReactNode {
-  const customProviderId = "chatanytime-openai-compatible";
-  const configuredProviders = settings.providers;
-  const firstCustomProvider = configuredProviders[0];
-  const [provider, setProvider] = useState(firstCustomProvider?.id ?? customProviderId);
-  const selectedProvider = configuredProviders.find((item) => item.id === provider);
-  // 单例自定义服务的显示名/已配置徽标读实时 settings.providers 条目——store 的
-  // customProvider 字段只在 bootstrap 赋值，会话内重命名或存 key 后会变陈旧。
-  const liveCustomProvider = configuredProviders.find((item) => item.id === customProviderId);
-  const customProviderDisplayName = liveCustomProvider?.name ?? "新的模型服务";
-  const customProviderKeySaved = Boolean(liveCustomProvider?.keyConfigured);
-  const isCustomProvider = provider === customProviderId || provider.startsWith("provider-") || (selectedProvider !== undefined && selectedProvider.custom !== false);
-  const [customName, setCustomName] = useState(selectedProvider?.name ?? customProvider?.name ?? "我的中转站");
-  const [customBaseUrl, setCustomBaseUrl] = useState(selectedProvider?.baseUrl ?? customProvider?.baseUrl ?? "");
-  // 自定义服务商的默认 API 协议（兜底 openai-completions 保持历史行为）；
-  // 内置服务商缺省由目录决定，不在这里配置服务商级 API。
-  const [customApi, setCustomApi] = useState<ProviderApiMode | undefined>(selectedProvider?.api ?? customProvider?.api);
-  const [customModelId, setCustomModelId] = useState(selectedProvider?.models[0]?.id ?? customProvider?.models[0]?.id ?? customModels[0]?.id ?? "");
-  const [imageInputOverride, setImageInputOverride] = useState<boolean | undefined>();
-  const [apiKey, setApiKey] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [formError, setFormError] = useState<string>();
-  const [visionEnabled, setVisionEnabled] = useState(settings.vision?.enabled ?? false);
-  const [visionModel, setVisionModel] = useState(settings.vision?.provider && settings.vision.model ? `${settings.vision.provider}/${settings.vision.model}` : "");
-  const [visionPrompt, setVisionPrompt] = useState(settings.vision?.prompt ?? "");
-  const [visionSaving, setVisionSaving] = useState(false);
-  const [visionError, setVisionError] = useState<string>();
-  const visionModelOptions = selectableCatalogModels(models).filter((model) => model.configured && model.imageInput);
+function SettingsDialog({ settings, models, providers, resources, workspaceOpen, initialTab, jevKeyConfigured, onClose, onCreateInSession }: { settings: import("../../shared/protocol").DesktopSettings; jevKeyConfigured: boolean; models: ModelOption[]; providers: ProviderOption[]; resources: ResourceCatalog; workspaceOpen: boolean; initialTab?: string; onClose(): void; onCreateInSession(): void }): ReactNode {
   const [tab, setTab] = useState<"general" | "models" | "agents" | "subagents" | "appearance" | "resources" | "hooks" | "usage" | "automation">(initialTab === "automation" ? "automation" : "general");
   // toast 直达/侧栏入口：设置页已打开（初始 tab 已固定）时也能切到「自动化」tab。
   useEffect(() => {
@@ -705,65 +620,6 @@ function SettingsDialog({ settings, models, providers, customProvider, customMod
   const [editingCustomThemeId, setEditingCustomThemeId] = useState<string | undefined>(initialCustomTheme?.id);
   const selectedAgent = agentList.find((agent) => agent.id === selectedAgentId) ?? agentList[0];
   const configuredModels = selectableCatalogModels(models).filter((model) => model.configured);
-  const hasSavedCustomKey = Boolean(selectedProvider?.keyConfigured) || (provider === customProviderId && customProviderKeySaved);
-  const providerModels: ProviderModelSettings[] = isCustomProvider
-    ? (selectedProvider?.models ?? customModels)
-    : (() => {
-      const cataloged = models.filter((model) => model.provider === provider).map((model) => {
-        const stored = selectedProvider?.models.find((item) => item.id === model.id);
-        return {
-          id: model.id,
-          name: model.name,
-          imageInput: stored?.imageInput ?? model.imageInput,
-          // 生效 API：设置覆盖优先，否则目录定义（含过渡期间 catalog 未携带时 undefined）。
-          api: stored?.api ?? model.api ?? undefined,
-          // 限额显示生效值（用户修正优先，否则目录原值），供编辑框 placeholder 回显。
-          contextWindow: stored?.contextWindow ?? (typeof model.contextWindow === "number" ? model.contextWindow : undefined),
-          maxTokens: stored?.maxTokens ?? (typeof model.maxTokens === "number" ? model.maxTokens : undefined),
-          // 思考等级声明的生效值：设置页编辑器的回显与「按当前能力填充」都靠它
-          //（口径同 imageInput / 限额）。
-          ...(stored?.thinkingLevelMap ?? model.thinkingLevelMap ? { thinkingLevelMap: stored?.thinkingLevelMap ?? model.thinkingLevelMap } : {}),
-          enabled: stored ? stored.enabled !== false : true,
-          // 手动添加标记跟存储条目走（目录刷新后 catalog 已含该模型，标记不能丢）。
-          ...(stored?.manual === true ? { manual: true as const } : {})
-        };
-      });
-      // 目录里还没有的手动条目（刚添加的乐观态、保存后 catalog 推送未返回）也要显示。
-      const catalogIds = new Set(cataloged.map((model) => model.id));
-      const manualExtras = (selectedProvider?.models ?? []).filter((model) => model.manual === true && !catalogIds.has(model.id));
-      return [...cataloged, ...manualExtras];
-    })();
-  const enabledProviderModels = providerModels.filter((model) => model.enabled !== false);
-  const [modelSearch, setModelSearch] = useState("");
-  // 限额行内编辑态：正在编辑的模型 id + 两个输入框草稿（字符串，空 = 清除覆盖）。
-  const [editingModelId, setEditingModelId] = useState<string | undefined>();
-  const [limitDraftContext, setLimitDraftContext] = useState("");
-  const [limitDraftMaxTokens, setLimitDraftMaxTokens] = useState("");
-  // 思考等级编辑态：只记「正在编辑哪个模型」，草稿状态归 ThinkingLevelEditor 自己管
-  //（key=模型 id，换模型自然重置）。
-  const [editingThinkingId, setEditingThinkingId] = useState<string | undefined>();
-  // 行内 API 模式编辑态：正在编辑的模型 id（undefined = 收起）。
-  const [editingModelApi, setEditingModelApi] = useState<string | undefined>();
-  // 手动添加模型表单：展开态 + 模型 ID/显示名称草稿 + 行内错误（不动 formError，
-  // 避免把整页保存错误和表单校验混在一个位置）。
-  const [manualModelOpen, setManualModelOpen] = useState(false);
-  const [manualModelIdDraft, setManualModelIdDraft] = useState("");
-  const [manualModelNameDraft, setManualModelNameDraft] = useState("");
-  const [manualModelError, setManualModelError] = useState<string>();
-  const visibleProviderModels = filterProviderModels(providerModels, modelSearch);
-  const allVisibleModelsEnabled = visibleProviderModels.length > 0 && visibleProviderModels.every((model) => model.enabled !== false);
-  const someVisibleModelsEnabled = visibleProviderModels.some((model) => model.enabled !== false);
-  const selectedCustomModel = providerModels.find((model) => model.id === customModelId);
-  // 保存拦截原因集（抽到 lib 层单测）：旧版在置灰条件/提交护栏/错误文案三处内联重复，
-  // 且错误地把「至少勾选一个模型」当成前置条件，导致无法保存空勾选。
-  const formBlocker = providerFormBlocker({
-    hasApiKey: Boolean(apiKey.trim()) || hasSavedCustomKey,
-    isCustomProvider,
-    customName,
-    customBaseUrl,
-    customModelId,
-    totalModels: providerModels.length
-  });
   const wallpaperOpacityOverride = settings.appearance.wallpaperOpacity?.[opacityMode];
   const wallpaperOpacity = wallpaperOpacityOverride ?? themeWallpaperOpacity(settings.appearance.customCss, opacityMode) ?? 0;
   const wallpaperOpacityPercent = Math.round(wallpaperOpacity * 100);
@@ -778,122 +634,6 @@ function SettingsDialog({ settings, models, providers, customProvider, customMod
     const saved = structuredClone(nextSettings);
     initialSettingsRef.current = saved;
     useDesktopStore.setState({ settings: saved });
-  }
-
-  function applyProviderModels(updated: ProviderModelSettings[]): void {
-    useDesktopStore.setState((state) => {
-      if (!isCustomProvider) {
-        const existing = state.settings.providers.find((item) => item.id === provider);
-        const catalog = providers.find((item) => item.id === provider);
-        const entry: ProviderSettings = buildBuiltinProviderEntry(provider, existing, catalog?.name ?? provider, catalog?.configured, updated);
-        return { settings: { ...state.settings, providers: existing ? state.settings.providers.map((item) => item.id === provider ? entry : item) : [...state.settings.providers, entry] } };
-      }
-      const hasConfiguredProvider = state.settings.providers.some((item) => item.id === provider);
-      return {
-        customModels: (!selectedProvider || provider === customProviderId) ? updated : state.customModels,
-        settings: hasConfiguredProvider
-          ? { ...state.settings, providers: state.settings.providers.map((item) => item.id === provider ? { ...item, models: updated } : item) }
-          : state.settings
-      };
-    });
-  }
-
-  /** 打开/收起某模型的思考等级编辑；限额编辑盒与它互斥（避免两行同时展开拉长列表）。 */
-  function beginEditThinkingLevels(model: ProviderModelSettings): void {
-    setEditingThinkingId((current) => current === model.id ? undefined : model.id);
-    setEditingModelId(undefined);
-  }
-
-  function commitThinkingLevels(modelId: string, thinkingLevelMap: ThinkingLevelMap | undefined): void {
-    updateProviderModel(modelId, { thinkingLevelMap });
-    setEditingThinkingId(undefined);
-  }
-
-  function updateProviderModel(modelId: string, patch: Partial<ProviderModelSettings>): void {
-    applyProviderModels(providerModels.map((model) => model.id === modelId ? { ...model, ...patch } : model));
-  }
-
-  /** 打开某模型的限额编辑：草稿回显已设置值；上下文/最大输出留空 = 清除覆盖。 */
-  function beginEditModelLimits(model: ProviderModelSettings): void {
-    setEditingModelId(current => current === model.id ? undefined : model.id);
-    setLimitDraftContext(formatTokenLimit(model.contextWindow));
-    setLimitDraftMaxTokens(formatTokenLimit(model.maxTokens));
-  }
-
-  function commitModelLimits(model: ProviderModelSettings): void {
-    updateProviderModel(model.id, { contextWindow: parseTokenLimit(limitDraftContext), maxTokens: parseTokenLimit(limitDraftMaxTokens) });
-    setEditingModelId(undefined);
-  }
-
-  // 手动添加模型只对支持的渠道开放：自定义服务商（模型表就是设置条目）与
-  // PiDesktop 直连管理覆盖层的内置渠道（ProviderOption.manualModels，radius
-  // 等远程目录渠道写入覆盖键会破坏 SDK 的 etag/lastModified 刷新门控）。
-  const manualModelsSupported = isCustomProvider || providers.find((item) => item.id === provider)?.manualModels === true;
-
-  function openManualModelForm(): void {
-    setManualModelOpen(true);
-    setManualModelError(undefined);
-  }
-
-  function closeManualModelForm(): void {
-    setManualModelOpen(false);
-    setManualModelIdDraft("");
-    setManualModelNameDraft("");
-    setManualModelError(undefined);
-  }
-
-  function commitManualModel(): void {
-    const result = addManualProviderModel(providerModels, manualModelIdDraft, manualModelNameDraft);
-    if (typeof result === "string") {
-      setManualModelError(result);
-      return;
-    }
-    applyProviderModels(result);
-    closeManualModelForm();
-  }
-
-  /** 删除手动添加的模型行（整行移除，随「保存设置」持久化；取消对话框可回滚）。 */
-  function removeManualModel(modelId: string): void {
-    applyProviderModels(providerModels.filter((model) => model.id !== modelId));
-    if (isCustomProvider && modelId === customModelId) {
-      setCustomModelId(providerModels.find((item) => item.id !== modelId && item.enabled !== false)?.id ?? "");
-    }
-  }
-
-  /** 模型行 API 徽标短文案：覆盖生效时显示协议名，未覆盖显示「默认」。 */
-  function apiBadgeLabel(api: ProviderApiMode | undefined): string {
-    return api === "openai-responses" ? "Resp" : api === "openai-completions" ? "Chat" : "默认";
-  }
-  function apiBadgeTitle(api: ProviderApiMode | undefined): string {
-    return api === "openai-responses" ? "Responses（/v1/responses）" : api === "openai-completions" ? "OpenAI 兼容 chat/completions" : "跟随服务商/目录默认 API 模式";
-  }
-
-  /** 该模型是否已有手动设置的限额（编辑按钮点亮提示）。 */
-  function hasModelLimitOverride(modelId: string): boolean {
-    const stored = selectedProvider?.models.find((item) => item.id === modelId);
-    return Boolean(stored && (stored.contextWindow !== undefined || stored.maxTokens !== undefined));
-  }
-
-  /** 全选/全取消：作用于当前搜索可见的模型（未过滤时即全部），OpenRouter 长列表先全取消再搜出想要的几个勾上。 */
-  function setAllVisibleModelsEnabled(enabled: boolean): void {
-    const updated = setProviderModelsEnabled(providerModels, visibleProviderModels, enabled);
-    applyProviderModels(updated);
-    if (isCustomProvider && !enabled && visibleProviderModels.some((model) => model.id === customModelId)) {
-      setCustomModelId(updated.find((model) => model.enabled !== false)?.id ?? customModelId);
-    }
-  }
-
-  /**
-   * 目录里的推理能力标记。模型行本身不持有该字段：它属于目录元数据而不是设置项，
-   * 只为「思考等级」编辑器判定「该档位是否本就不可用」而查询。
-   */
-  function modelReasoning(modelId: string): boolean | undefined {
-    return models.find((item) => item.provider === provider && item.id === modelId)?.reasoning;
-  }
-
-  /** 该模型是否已有思考等级声明（编辑按钮点亮提示，口径同 hasModelLimitOverride）。 */
-  function hasThinkingOverride(modelId: string): boolean {
-    return Boolean(selectedProvider?.models.find((item) => item.id === modelId)?.thinkingLevelMap);
   }
 
   function updateAppearance(patch: Partial<AppearanceSettings>): void {
@@ -1042,117 +782,6 @@ function SettingsDialog({ settings, models, providers, customProvider, customMod
     window.setTimeout(() => URL.revokeObjectURL(url), 0);
   }
 
-  useEffect(() => {
-    const firstModel = enabledProviderModels.at(0) ?? providerModels.at(0);
-    if (firstModel && !providerModels.some((model) => model.id === customModelId)) setCustomModelId(firstModel.id);
-    setImageInputOverride(providerModels.find((model) => model.id === customModelId)?.imageInput);
-  }, [customModelId, providerModels]);
-
-  async function fetchModels(): Promise<void> {
-    const fetchApiKey = apiKey.trim() || undefined;
-    if (!customBaseUrl.trim() || (!fetchApiKey && !hasSavedCustomKey)) return;
-    useDesktopStore.setState({ customModelFetchStatus: "loading", customModelFetchError: undefined });
-    await window.piDesktop.send({ type: "provider.models.fetch", providerId: provider, baseUrl: customBaseUrl.trim(), apiKey: fetchApiKey });
-  }
-
-  async function refreshBuiltinModels(): Promise<void> {
-    if (!provider) return;
-    useDesktopStore.setState({ modelRefreshStatus: "loading", modelRefreshError: undefined, modelRefreshProvider: provider });
-    await window.piDesktop.send({ type: "provider.models.refresh", providerId: provider });
-    // 兜底看门狗：主进程侧有 30 秒超时，这里再等 40 秒；若运行时始终无响应
-    // （如旧版本未重启），避免按钮一直停留在"拉取中"。
-    window.setTimeout(() => {
-      useDesktopStore.setState((state) =>
-        state.modelRefreshStatus === "loading" && state.modelRefreshProvider === provider
-          ? { modelRefreshStatus: "error", modelRefreshError: "拉取模型列表超时，请检查网络后重试；若持续无响应请重启应用" }
-          : state
-      );
-    }, 40_000);
-  }
-
-  async function saveVision(): Promise<void> {
-    const slash = visionModel.indexOf("/");
-    const provider = slash > 0 ? visionModel.slice(0, slash) : "";
-    const modelId = slash > 0 ? visionModel.slice(slash + 1) : "";
-    if (visionEnabled && (!provider || !modelId)) {
-      setVisionError("请先在上方的服务商中配置一个支持图片输入的模型");
-      return;
-    }
-    setVisionSaving(true);
-    setVisionError(undefined);
-    try {
-      const vision = { enabled: visionEnabled, provider, model: modelId, ...(visionPrompt.trim() ? { prompt: visionPrompt.trim() } : {}) };
-      await window.piDesktop.send({ type: "vision.save", vision });
-      markSettingsSaved({ ...settings, vision });
-    } catch (error) {
-      setVisionError(error instanceof Error ? error.message : "保存视觉识别设置失败");
-    } finally {
-      setVisionSaving(false);
-    }
-  }
-
-  async function save(event: FormEvent): Promise<void> {
-    event.preventDefault();
-    if (!provider || formBlocker) return;
-    setSaving(true);
-    setFormError(undefined);
-    try {
-      if (isCustomProvider) {
-        const modelsForProvider = providerModels;
-        const providerConfig = { id: provider, name: customName.trim(), baseUrl: customBaseUrl.trim(), ...(customApi ? { api: customApi } : {}), models: modelsForProvider.length ? modelsForProvider.map((model) => ({ ...model, enabled: model.enabled !== false })) : [{ id: customModelId.trim(), name: customModelId.trim(), imageInput: imageInputOverride ?? selectedCustomModel?.imageInput, manual: true, enabled: true }] };
-        await window.piDesktop.send({ type: "provider.save", provider: providerConfig, apiKey: apiKey.trim() || undefined });
-        const nextProviders = settings.providers.some((item) => item.id === provider) ? settings.providers.map((item) => item.id === provider ? providerConfig : item) : [...settings.providers, providerConfig];
-        // 与内置分支同款落位：自定义服务取消勾选（含清空全部模型）后，本地乐观副本
-        // 的默认模型/助手默认/视觉引用一并清理——否则陈旧引用会被下次保存写回磁盘
-        // （code-review P1，2026-09-02）。
-        markSettingsSaved(pruneDisabledModelRefs({ ...settings, providers: nextProviders.map((item) => item.id === provider ? { ...item, keyConfigured: Boolean(apiKey.trim()) || selectedProvider?.keyConfigured } : item) }, provider, providerConfig.models));
-      } else {
-        const builtinEntry = settings.providers.find((item) => item.id === provider && item.custom === false);
-        if (builtinEntry) {
-          // 接口地址覆盖并入条目（空 = 清除覆盖，还原目录默认）；主进程保存时
-          // 同步 models-store 覆盖层。模型级 API 覆盖已随 models 一并落位。
-          const updatedBuiltin = { ...builtinEntry, baseUrl: customBaseUrl.trim() };
-          await window.piDesktop.send({ type: "provider.models.save", provider: updatedBuiltin });
-          markSettingsSaved(pruneDisabledModelRefs({ ...settings, providers: settings.providers.map((item) => item.id === provider ? updatedBuiltin : item) }, provider, updatedBuiltin.models));
-        } else {
-          // 只填了接口地址、尚未配置模型（无条目）也要落盘覆盖：构造空模型条目发送
-          //（空勾选合法，主进程与渲染端均已支持）。
-          const freshBuiltin: ProviderSettings = { id: provider, name: providers.find((item) => item.id === provider)?.name ?? provider, baseUrl: customBaseUrl.trim(), models: [], custom: false };
-          await window.piDesktop.send({ type: "provider.models.save", provider: freshBuiltin });
-          markSettingsSaved({ ...settings, providers: [...settings.providers, freshBuiltin] });
-        }
-        // 留空 = 沿用已保存的 key：不发 auth.set，避免空 key 覆盖运行中的凭据，
-        // 导致随后的模型校验误报 "No API key for …"。
-        if (apiKey.trim()) await window.piDesktop.send({ type: "auth.set", provider, apiKey: apiKey.trim() });
-      }
-      setApiKey("");
-      onClose();
-    } catch (error) {
-      setFormError(error instanceof Error ? error.message : "应用模型服务设置失败");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  function newProvider(): void {
-    const id = `provider-${Date.now()}`;
-    setProvider(id); setCustomName("新的模型服务"); setCustomBaseUrl(""); setCustomModelId(""); setCustomApi(undefined); setApiKey(""); setModelSearch(""); closeManualModelForm();
-  }
-
-  async function deleteProvider(): Promise<void> {
-    if (!selectedProvider) return;
-    await window.piDesktop.send({ type: "provider.delete", providerId: selectedProvider.id });
-    const nextProviders = settings.providers.filter((item) => item.id !== selectedProvider.id);
-    markSettingsSaved({
-      ...settings,
-      providers: nextProviders,
-      model: settings.model?.provider === selectedProvider.id ? undefined : settings.model,
-      agents: settings.agents.map((agent) => agent.defaultModel?.provider === selectedProvider.id ? { ...agent, defaultModel: undefined } : agent)
-    });
-    setProvider(nextProviders[0]?.id ?? customProviderId);
-    setModelSearch("");
-  }
-
   function newAgent(): void {
     const id = `agent-${Date.now()}`;
     const agent: AgentProfile = { id, name: "新 Agent", description: "", systemPrompt: "", divMode: "auto", defaultThinkingLevel: "medium", tools: Object.fromEntries(agentTools.map((tool) => [tool, tool !== "powershell"])) as Record<BuiltinToolName, boolean> };
@@ -1213,35 +842,9 @@ function SettingsDialog({ settings, models, providers, customProvider, customMod
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={closeSettings}>
-      <section className={tab === "agents" || tab === "general" ? "settings-dialog settings-center settings-wide" : "settings-dialog settings-center"} data-pane="settings-dialog" onMouseDown={(event) => event.stopPropagation()}>
+      <section className={tab === "agents" || tab === "general" || tab === "models" ? "settings-dialog settings-center settings-wide" : "settings-dialog settings-center"} data-pane="settings-dialog" onMouseDown={(event) => event.stopPropagation()}>
         <header><div><Settings size={19} /><div><h2>ChatAnyTime 设置</h2><p>模型服务和 Agent 角色配置保存在本机。</p></div></div><button className="icon-button" type="button" title="关闭设置" aria-label="关闭设置" onClick={closeSettings}><X size={18} /></button></header>
-        <div className="settings-body"><nav className="settings-tabs"><button type="button" className={tab === "general" ? "active" : ""} onClick={() => setTab("general")}>通用</button><button type="button" className={tab === "models" ? "active" : ""} onClick={() => setTab("models")}>模型服务</button><button type="button" className={tab === "agents" ? "active" : ""} onClick={() => setTab("agents")}>Agent 角色</button><button type="button" className={tab === "subagents" ? "active" : ""} onClick={() => setTab("subagents")}>子智能体</button><button type="button" className={tab === "resources" ? "active" : ""} onClick={() => setTab("resources")}>技能与工具</button><button type="button" className={tab === "hooks" ? "active" : ""} onClick={() => setTab("hooks")}>钩子</button><button type="button" className={tab === "appearance" ? "active" : ""} onClick={() => setTab("appearance")}>外观</button><button type="button" className={tab === "usage" ? "active" : ""} onClick={() => setTab("usage")}>用量统计</button><button type="button" className={tab === "automation" ? "active" : ""} onClick={() => setTab("automation")}>自动化任务</button></nav><div className="settings-content">{tab === "general" ? <GeneralSettings settings={settings} models={models} providers={providers} jevKeyConfigured={jevKeyConfigured} onSaved={(nextSettings) => { markSettingsSaved(nextSettings); onClose(); }} onDraftCommitted={markSettingsSaved} onCancel={closeSettings} /> : tab === "models" ? <form onSubmit={save}>
-        <div className="settings-provider-heading"><label>服务商<select value={provider} onChange={(event) => { const next = event.target.value; setProvider(next); setModelSearch(""); closeManualModelForm(); const config = configuredProviders.find((item) => item.id === next); if (config) { setCustomName(config.name); setCustomBaseUrl(config.baseUrl); setCustomModelId(config.models[0]?.id ?? ""); setCustomApi(config.api); } else if (next !== customProviderId) { setCustomBaseUrl(""); setCustomApi(undefined); } }}><optgroup label="内置服务">{providers.filter((item) => !item.custom && !configuredProviders.some((config) => config.id === item.id)).map((item) => <option key={item.id} value={item.id}>{item.name}{item.configured ? " - 已配置" : ""}</option>)}{configuredProviders.filter((item) => item.custom === false).map((item) => <option key={item.id} value={item.id}>{item.name}{item.keyConfigured ? " - 已配置" : ""}</option>)}</optgroup><optgroup label="OpenAI 兼容服务"><option value={customProviderId}>{customProviderDisplayName}{customProviderKeySaved ? " - 已配置" : ""}</option>{configuredProviders.filter((item) => item.id !== customProviderId && item.custom !== false).map((item) => <option key={item.id} value={item.id}>{item.name}{item.keyConfigured ? " - 已配置" : ""}</option>)}</optgroup></select></label><button className="secondary-button" type="button" onClick={newProvider}>+ 新增服务</button>{selectedProvider && selectedProvider.custom !== false && <button className="danger-button" type="button" onClick={() => void deleteProvider()}>删除服务</button>}</div>
-        {isCustomProvider && <>
-          <label>服务名称<input value={customName} placeholder="例如：公司中转站" onChange={(event) => setCustomName(event.target.value)} /></label>
-          <label>默认 API 协议<select value={customApi ?? "openai-completions"} onChange={(event) => setCustomApi(event.target.value as ProviderApiMode)} title="该服务商未按模型单独设置时的请求 API 模式；支持 /v1/responses 的中转站可选 Responses"><option value="openai-completions">OpenAI 兼容 chat/completions</option><option value="openai-responses">Responses（/v1/responses）</option></select></label>
-          <div className="settings-action-row"><label>OpenAI 兼容接口地址<input value={customBaseUrl} placeholder="https://api.example.com/v1" onChange={(event) => setCustomBaseUrl(event.target.value)} /></label><button className="secondary-button" type="button" disabled={customModelFetchStatus === "loading" || !customBaseUrl.trim() || (!apiKey.trim() && !customProviderKeySaved)} onClick={() => void fetchModels()}><RefreshCw size={14} className={customModelFetchStatus === "loading" ? "spinning" : undefined} />{customModelFetchStatus === "loading" ? "拉取中" : "拉取模型"}</button></div>
-        </>}
-        {!isCustomProvider && <label>接口地址（可选）<input value={customBaseUrl} placeholder="留空 = 跟随服务商目录默认地址（部分模型的 API 模式不同，接口地址也可按需覆盖）" onChange={(event) => setCustomBaseUrl(event.target.value)} /></label>}
-        <div className="model-selection"><div className="model-selection-heading"><span>可用模型</span><small>左侧控制显示，右侧标记图片输入</small><span className="model-selection-actions">{!isCustomProvider && <button className="secondary-button model-refresh-button" type="button" title="从服务商目录拉取最新模型列表" disabled={modelRefreshStatus === "loading" && modelRefreshProvider === provider} onClick={() => void refreshBuiltinModels()}><RefreshCw size={14} className={modelRefreshStatus === "loading" && modelRefreshProvider === provider ? "spinning" : undefined} />{modelRefreshStatus === "loading" && modelRefreshProvider === provider ? "拉取中" : "拉取模型"}</button>}{manualModelsSupported && <button className="secondary-button model-add-button" type="button" data-control="model-add" title="服务商列表接口没有的模型，在这里手动登记；拉取模型列表不会覆盖手动条目" aria-expanded={manualModelOpen} onClick={() => (manualModelOpen ? closeManualModelForm() : openManualModelForm())}><Plus size={14} />{manualModelOpen ? "收起" : "手动添加"}</button>}</span></div>{providerModels.length > 0 && <div className="model-list-toolbar"><label className="checkbox-setting model-select-all" title={modelSearch.trim() ? "勾选或取消当前匹配到的模型" : "勾选或取消全部模型"}><input type="checkbox" checked={allVisibleModelsEnabled} disabled={visibleProviderModels.length === 0} ref={(el) => { if (el) el.indeterminate = !allVisibleModelsEnabled && someVisibleModelsEnabled; }} onChange={(event) => setAllVisibleModelsEnabled(event.target.checked)} />全选</label><small className="model-enabled-count">已启用 {enabledProviderModels.length}/{providerModels.length}</small>{providerModels.length > 8 && <div className="model-search-box"><Search size={13} /><input value={modelSearch} placeholder="搜索模型名称或 ID" aria-label="搜索模型" onChange={(event) => setModelSearch(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) event.preventDefault(); }} /></div>}</div>}{manualModelOpen && <div className="model-add-form"><label>模型 ID<input value={manualModelIdDraft} autoFocus autoComplete="off" spellCheck={false} placeholder="如 gpt-4o-mini（服务商文档里的模型标识）" onChange={(event) => setManualModelIdDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); commitManualModel(); } }} /></label><label>显示名称<input value={manualModelNameDraft} autoComplete="off" placeholder="留空 = 使用模型 ID" onChange={(event) => setManualModelNameDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); commitManualModel(); } }} /></label><div className="model-add-actions"><button className="primary-button" type="button" onClick={commitManualModel}><Plus size={13} />添加</button><button className="secondary-button" type="button" onClick={closeManualModelForm}>取消</button></div>{manualModelError && <p className="form-error model-add-error">{manualModelError}</p>}</div>}{!isCustomProvider && modelRefreshError && <p className="form-error model-refresh-error">{modelRefreshError}</p>}{!isCustomProvider && modelRefreshStatus === "success" && modelRefreshProvider === provider && <p className="form-hint model-refresh-hint">模型列表已更新</p>}{providerModels.length === 0 ? <p className="panel-empty">{isCustomProvider ? "请先拉取模型，或点右上「手动添加」登记模型" : manualModelsSupported ? "该服务商暂无可用模型，可先配置 API 密钥后拉取，或点右上「手动添加」登记模型" : "该服务商暂无可用模型，请先配置 API 密钥"}</p> : visibleProviderModels.length === 0 ? <p className="panel-empty">没有匹配「{modelSearch.trim()}」的模型</p> : visibleProviderModels.map((model) => <div className="model-option" key={model.id}><label className="checkbox-setting model-enabled-option"><input type="checkbox" checked={model.enabled !== false} onChange={(event) => { const next = event.target.checked; updateProviderModel(model.id, { enabled: next }); if (isCustomProvider && model.id === customModelId && !next) setCustomModelId(providerModels.find((item) => item.id !== model.id && item.enabled !== false)?.id ?? model.id); }} /><span><strong>{model.name}{model.manual === true && <em className="model-manual-badge" title="手动添加的模型：拉取模型列表不会移除它">手动</em>}</strong><small>{model.id}</small></span></label><label className="checkbox-setting model-image-option" title={isCustomProvider ? "允许向此模型发送图片（勾选会清空该模型的思考等级声明——自定义模型的模板来自代理，两者可能不匹配）" : "手动标记该模型是否支持图片输入：目录元数据滞后或缺失时以这里的勾选为准"}><input type="checkbox" checked={model.imageInput === true} onChange={(event) => updateProviderModel(model.id, { imageInput: event.target.checked, ...(event.target.checked ? { thinkingLevelMap: undefined } : {}) })} />图片输入</label><button className={model.api ? "model-api-badge override" : "model-api-badge"} type="button" title={`${apiBadgeTitle(model.api)}${model.api ? "（已单独覆盖）" : "；点击单独设置"}`} aria-expanded={editingModelApi === model.id} onClick={() => setEditingModelApi(editingModelApi === model.id ? undefined : model.id)}>{apiBadgeLabel(model.api)}</button>{editingModelApi === model.id && <select className="model-api-editor" autoFocus value={model.api ?? ""} onChange={(event) => { const value = event.target.value as "" | ProviderApiMode; updateProviderModel(model.id, { api: value || undefined }); setEditingModelApi(undefined); }} onBlur={() => setEditingModelApi(undefined)} onKeyDown={(event) => { if (event.key === "Escape") setEditingModelApi(undefined); }}><option value="">跟随默认</option><option value="openai-completions">chat/completions</option><option value="openai-responses">Responses</option></select>}<button className={hasThinkingOverride(model.id) ? "icon-button model-edit-thinking active" : "icon-button model-edit-thinking"} data-control="model-thinking-levels" type="button" title={editingThinkingId === model.id ? "收起思考等级设置" : "声明该模型支持哪些思考等级（上游不支持「很高/最高」时在这里声明，例如把 high 发给上游写 xhigh）"} aria-expanded={editingThinkingId === model.id} onClick={() => beginEditThinkingLevels(model)}><Brain size={13} /></button><button className={hasModelLimitOverride(model.id) ? "icon-button model-edit-limits active" : "icon-button model-edit-limits"} type="button" title={editingModelId === model.id ? "收起限额编辑" : "修正上下文窗口与最大输出（服务商标错时手动覆盖）"} aria-expanded={editingModelId === model.id} onClick={() => beginEditModelLimits(model)}><Pencil size={13} /></button>{model.manual === true && <button className="icon-button model-remove-button" type="button" title="移除这条手动添加的模型（点下方「保存设置」后生效）" onClick={() => removeManualModel(model.id)}><X size={13} /></button>}{editingModelId === model.id && <div className="model-limits-editor"><label>上下文窗口<input inputMode="numeric" autoComplete="off" value={limitDraftContext} placeholder={typeof model.contextWindow === "number" ? String(model.contextWindow) : "如 128k 或 128000"} onChange={(event) => setLimitDraftContext(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commitModelLimits(model); } }} /><small>tokens</small></label><label>最大输出<input inputMode="numeric" autoComplete="off" value={limitDraftMaxTokens} placeholder={typeof model.maxTokens === "number" ? String(model.maxTokens) : "如 16k 或 16384"} onChange={(event) => setLimitDraftMaxTokens(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commitModelLimits(model); } }} /><small>tokens</small></label><div className="model-limits-actions"><button className="secondary-button" type="button" onClick={() => { setLimitDraftContext(""); setLimitDraftMaxTokens(""); }}>清空</button><button className="primary-button" type="button" onClick={() => commitModelLimits(model)}>完成</button></div><p className="model-limits-hint">留空后点完成 = 清除手动设置，回退目录值；最后点下方「保存设置」持久化。</p></div>}{editingThinkingId === model.id && <ThinkingLevelEditor key={model.id} model={model} reasoning={modelReasoning(model.id)} onCancel={() => setEditingThinkingId(undefined)} onCommit={(map) => commitThinkingLevels(model.id, map)} />}</div>)}</div>
-        {isCustomProvider && providerModels.length === 0 && customModelId && <label className="checkbox-setting"><input type="checkbox" checked={imageInputOverride ?? false} onChange={(event) => setImageInputOverride(event.target.checked)} />支持图片输入（手动覆盖推断）</label>}
-        {providerModels.length > 0 && enabledProviderModels.length === 0 && <p className="form-hint">已取消全部模型：保存后该服务商在模型选择器中不再提供模型（若运行中会话正在用它的模型会自动切走）；想彻底移除该服务，请用上方「删除服务」。</p>}
-        {isCustomProvider && customModelFetchError && <p className="form-error">{customModelFetchError}</p>}
-        <label>API 密钥<input type="password" value={apiKey} autoFocus placeholder={isCustomProvider && hasSavedCustomKey ? "已保存，留空则继续使用" : "请输入 API 密钥"} onChange={(event) => setApiKey(event.target.value)} /></label>
-        <section className="vision-settings" aria-label="视觉识别设置">
-          <div className="vision-settings-heading">
-            <div><h3>视觉识别（图片兜底）</h3><p>当前对话模型不支持图片输入时，发送的图片会自动交给这里选择的多模态模型识别，识别结果以文本形式交给对话模型。模型来自上方已配置的模型服务。</p></div>
-            <label className="checkbox-setting"><input type="checkbox" checked={visionEnabled} onChange={(event) => setVisionEnabled(event.target.checked)} />启用</label>
-          </div>
-          <label>视觉模型<ModelSelect models={visionModelOptions} providers={providers} value={visionModel} disabled={visionModelOptions.length === 0} emptyMessage="暂无已配置的多模态模型" placeholder="请选择视觉模型" onChange={setVisionModel} /></label>
-          <label>识别提示词（可选）<textarea rows={3} value={visionPrompt} placeholder="留空使用默认提示词：转写图中文字、描述物体、布局与配色等" onChange={(event) => setVisionPrompt(event.target.value)} /></label>
-          {visionError && <p className="form-error">{visionError}</p>}
-          <div className="vision-settings-footer"><button className="primary-button" type="button" disabled={visionSaving} onClick={() => void saveVision()}>{visionSaving ? "正在保存" : "保存视觉识别设置"}</button></div>
-        </section>
-        {formBlocker && <p className="form-hint">{formBlocker}</p>}
-        {formError && <p className="form-error">{formError}</p>}
-        <footer><button type="button" className="secondary-button" onClick={closeSettings}>取消</button><button className="primary-button" disabled={saving || Boolean(formBlocker)} type="submit">{saving ? "正在应用" : "保存设置"}</button></footer>
-        </form> : tab === "agents" ? <AgentSettings agents={agentList} activeAgentId={activeAgentId} selectedAgentId={selectedAgent?.id ?? ""} models={configuredModels} providers={providers} resources={resources} onSelect={setSelectedAgentId} onCreate={newAgent} onUpdate={updateAgent} onUpdateSkillOverride={updateAgentSkillOverride} onUpdateToolOverride={updateAgentToolOverride} onSave={() => void saveAgent()} onDuplicate={duplicateAgent} onArchive={() => void archiveAgent()} /> : tab === "subagents" ? <SubagentSettings resources={resources} workspaceOpen={workspaceOpen} models={models} providers={providers} /> : tab === "resources" ? <ResourceSettings resources={resources} /> : tab === "hooks" ? <HooksSettings resources={resources} workspaceOpen={workspaceOpen} /> : tab === "usage" ? <UsageSettings /> : tab === "automation" ? <AutomationSettings models={models} providers={providers} settings={settings} workspaceConfigured={workspaceOpen} workspaceName={settings.workspace ? settings.workspace.split(/[\\/]/u).at(-1) : undefined} onCreateInSession={() => { closeSettings(); onCreateInSession(); }} onOpenRunSession={closeSettings} /> : <form className="appearance-settings" onSubmit={(event) => { event.preventDefault(); const nextSettings = structuredClone(settings); void window.piDesktop.send({ type: "appearance.save", appearance: nextSettings.appearance }); markSettingsSaved(nextSettings); onClose(); }}>
+        <div className="settings-body"><nav className="settings-tabs"><button type="button" className={tab === "general" ? "active" : ""} onClick={() => setTab("general")}>通用</button><button type="button" className={tab === "models" ? "active" : ""} onClick={() => setTab("models")}>模型服务</button><button type="button" className={tab === "agents" ? "active" : ""} onClick={() => setTab("agents")}>Agent 角色</button><button type="button" className={tab === "subagents" ? "active" : ""} onClick={() => setTab("subagents")}>子智能体</button><button type="button" className={tab === "resources" ? "active" : ""} onClick={() => setTab("resources")}>技能与工具</button><button type="button" className={tab === "hooks" ? "active" : ""} onClick={() => setTab("hooks")}>钩子</button><button type="button" className={tab === "appearance" ? "active" : ""} onClick={() => setTab("appearance")}>外观</button><button type="button" className={tab === "usage" ? "active" : ""} onClick={() => setTab("usage")}>用量统计</button><button type="button" className={tab === "automation" ? "active" : ""} onClick={() => setTab("automation")}>自动化任务</button></nav><div className="settings-content">{tab === "general" ? <GeneralSettings settings={settings} models={models} providers={providers} jevKeyConfigured={jevKeyConfigured} onSaved={(nextSettings) => { markSettingsSaved(nextSettings); onClose(); }} onDraftCommitted={markSettingsSaved} onCancel={closeSettings} /> : tab === "models" ? <ModelSettings settings={settings} models={models} providers={providers} onSaved={(nextSettings) => { markSettingsSaved(nextSettings); onClose(); }} onDraftCommitted={markSettingsSaved} onCancel={closeSettings} /> : tab === "agents" ? <AgentSettings agents={agentList} activeAgentId={activeAgentId} selectedAgentId={selectedAgent?.id ?? ""} models={configuredModels} providers={providers} resources={resources} onSelect={setSelectedAgentId} onCreate={newAgent} onUpdate={updateAgent} onUpdateSkillOverride={updateAgentSkillOverride} onUpdateToolOverride={updateAgentToolOverride} onSave={() => void saveAgent()} onDuplicate={duplicateAgent} onArchive={() => void archiveAgent()} /> : tab === "subagents" ? <SubagentSettings resources={resources} workspaceOpen={workspaceOpen} models={models} providers={providers} /> : tab === "resources" ? <ResourceSettings resources={resources} /> : tab === "hooks" ? <HooksSettings resources={resources} workspaceOpen={workspaceOpen} /> : tab === "usage" ? <UsageSettings /> : tab === "automation" ? <AutomationSettings models={models} providers={providers} settings={settings} workspaceConfigured={workspaceOpen} workspaceName={settings.workspace ? settings.workspace.split(/[\\/]/u).at(-1) : undefined} onCreateInSession={() => { closeSettings(); onCreateInSession(); }} onOpenRunSession={closeSettings} /> : <form className="appearance-settings" onSubmit={(event) => { event.preventDefault(); const nextSettings = structuredClone(settings); void window.piDesktop.send({ type: "appearance.save", appearance: nextSettings.appearance }); markSettingsSaved(nextSettings); onClose(); }}>
           <div className="appearance-grid">
             <div>
               <section className="interface-tuning-settings" aria-label="界面微调">
@@ -1284,14 +887,7 @@ export function App(): ReactNode {
   const models = useDesktopStore((state) => state.models);
   const providers = useDesktopStore((state) => state.providers);
   const resources = useDesktopStore((state) => state.resources);
-  const customProvider = useDesktopStore((state) => state.customProvider);
   const jevKeyConfigured = useDesktopStore((state) => state.jevKeyConfigured);
-  const customModels = useDesktopStore((state) => state.customModels);
-  const customModelFetchStatus = useDesktopStore((state) => state.customModelFetchStatus);
-  const customModelFetchError = useDesktopStore((state) => state.customModelFetchError);
-  const modelRefreshStatus = useDesktopStore((state) => state.modelRefreshStatus);
-  const modelRefreshError = useDesktopStore((state) => state.modelRefreshError);
-  const modelRefreshProvider = useDesktopStore((state) => state.modelRefreshProvider);
   const permissions = useDesktopStore((state) => state.permissions);
   const questions = useDesktopStore((state) => state.questions);
   const error = useDesktopStore((state) => state.error);
@@ -2639,7 +2235,7 @@ export function App(): ReactNode {
         </div>
       </main>
 
-      {settingsPresence.rendered && <ExitWrap exiting={settingsPresence.exiting}><SettingsDialog settings={settings} models={models} providers={providers} customProvider={customProvider} customModels={customModels} customModelFetchStatus={customModelFetchStatus} customModelFetchError={customModelFetchError} modelRefreshStatus={modelRefreshStatus} modelRefreshError={modelRefreshError} modelRefreshProvider={modelRefreshProvider} resources={resources} workspaceOpen={Boolean(activeWorkspace)} initialTab={settingsInitialTab} jevKeyConfigured={jevKeyConfigured} onClose={() => { setSettingsOpen(false); setSettingsInitialTab(undefined); }} onCreateInSession={() => void createNewSession()} /></ExitWrap>}
+      {settingsPresence.rendered && <ExitWrap exiting={settingsPresence.exiting}><SettingsDialog settings={settings} models={models} providers={providers} resources={resources} workspaceOpen={Boolean(activeWorkspace)} initialTab={settingsInitialTab} jevKeyConfigured={jevKeyConfigured} onClose={() => { setSettingsOpen(false); setSettingsInitialTab(undefined); }} onCreateInSession={() => void createNewSession()} /></ExitWrap>}
       {permissionPresence.rendered && (() => { const permission = permissionPresence.value; return permission ? <ExitWrap exiting={permissionPresence.exiting}><PermissionDialog request={permission} sessionTitle={sessionSummaries.find((item) => item.id === permission.principal.sessionId)?.title} /></ExitWrap> : null; })()}
       {transcriptPresence.rendered && (() => { const transcriptTarget = transcriptPresence.value; return transcriptTarget ? <ExitWrap exiting={transcriptPresence.exiting}><DelegationTranscript delegation={transcriptTarget} onClose={() => setTranscriptTarget(undefined)} onOpenArtifact={openArtifactPreview} /></ExitWrap> : null; })()}
       {galleryWallOpen && (
