@@ -60,7 +60,9 @@ const resources: ResourceCatalog = {
       enabled: true,
       toggleable: true,
       disableModelInvocation: false
-    }))
+    })),
+    // 运行时动态提供的 Skill（不可切换）：批量全选/全不选不得写它的键。
+    { id: "skill:runtime-dynamic", name: "runtime-dynamic", description: "运行时动态提供", source: "当前项目", scope: "project", defaultEnabled: true, enabled: true, toggleable: false, disableModelInvocation: false }
   ],
   commands: [],
   mcpServers: [
@@ -87,12 +89,13 @@ interface Handlers {
   saved: number;
   duplicated: number;
   archived: number;
+  updates: Array<Partial<AgentProfile>>;
   skillOverride: Array<[string, boolean]>;
   toolOverride: Array<[string, boolean]>;
 }
 
 function render(overrides: { activeAgentId?: string; selectedAgentId?: string; agents?: AgentProfile[] } = {}): Handlers {
-  const handlers: Handlers = { selects: [], creates: 0, saved: 0, duplicated: 0, archived: 0, skillOverride: [], toolOverride: [] };
+  const handlers: Handlers = { selects: [], creates: 0, saved: 0, duplicated: 0, archived: 0, updates: [], skillOverride: [], toolOverride: [] };
   act(() => {
     root.render(
       <AgentSettings
@@ -104,7 +107,7 @@ function render(overrides: { activeAgentId?: string; selectedAgentId?: string; a
         resources={resources}
         onSelect={(id) => handlers.selects.push(id)}
         onCreate={() => { handlers.creates += 1; }}
-        onUpdate={() => undefined}
+        onUpdate={(patch) => handlers.updates.push(patch)}
         onUpdateSkillOverride={(id, enabled) => handlers.skillOverride.push([id, enabled])}
         onUpdateToolOverride={(key, enabled) => handlers.toolOverride.push([key, enabled])}
         onSave={() => { handlers.saved += 1; }}
@@ -220,6 +223,40 @@ describe("Skill 与工具开关", () => {
     const mcpRow = rows.find((row) => row.textContent!.includes("docs"))!;
     click(mcpRow.querySelector("input")!);
     expect(handlers.toolOverride).toEqual([["mcp:docs", false]]);
+  });
+
+  it("全选/全不选一次性提交完整 overlay，不碰运行时动态提供的 Skill", () => {
+    const handlers = render();
+    const byText = (text: string) => [...container.querySelectorAll("button")].find((button) => button.textContent!.includes(text))!;
+    const toggleableIds = resources.skills.filter((skill) => skill.toggleable).map((skill) => skill.id);
+    click(byText("全选"));
+    // 关键回归点：必须是一次 patch 带上全部可切换键——旧的循环逐键写法会在
+    // 同一事件里用旧闭包互相覆盖，最终只剩最后一个技能生效（真机实测）。
+    expect(handlers.updates.length).toBe(1);
+    expect(Object.keys(handlers.updates[0]!.skillOverrides!).sort()).toEqual([...toggleableIds].sort());
+    expect(Object.values(handlers.updates[0]!.skillOverrides!).every((value) => value === true)).toBe(true);
+    click(byText("全不选"));
+    expect(handlers.updates.length).toBe(2);
+    expect(Object.values(handlers.updates[1]!.skillOverrides!).every((value) => value === false)).toBe(true);
+  });
+
+  it("恢复默认 = 清空角色级 overlay（回到各 Skill 自身 defaultEnabled）", () => {
+    const handlers = render({ selectedAgentId: "heiyuhe" });
+    const byText = (text: string) => [...container.querySelectorAll("button")].find((button) => button.textContent!.includes(text))!;
+    // heiyuhe 预置了 skillOverrides，按钮应可用
+    expect((byText("恢复默认") as HTMLButtonElement).disabled).toBe(false);
+    click(byText("恢复默认"));
+    expect(handlers.updates).toEqual([{ skillOverrides: undefined }]);
+  });
+
+  it("单键勾选回传 overlay 键；运行时动态 Skill 的勾选框禁用", () => {
+    const handlers = render();
+    const rows = [...container.querySelectorAll(".agent-picker-list label.agent-check")];
+    const dynamicRow = rows.find((row) => row.textContent!.includes("runtime-dynamic"))!;
+    expect(dynamicRow.querySelector<HTMLInputElement>("input")!.disabled).toBe(true);
+    const target = rows.find((row) => row.textContent!.includes("rolldek-image"))!;
+    click(target.querySelector("input")!);
+    expect(handlers.skillOverride).toEqual([["skill:rolldek-image", true]]);
   });
 
   it("内建工具勾选回写 tools；MCP 已停用的服务器仍可见（带说明）", () => {

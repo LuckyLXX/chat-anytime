@@ -147,11 +147,26 @@ export function AgentSettings({
   const selectableSkills = skills.filter((skill) => skill.toggleable);
   const enabledTools = AGENT_TOOLS.filter((tool) => selectedAgent.tools[tool]);
 
-  /** 批量写入 Skill overlay：只对可切换的 Skill 生效（运行时动态提供的保持原样）。 */
+  /**
+   * 批量写入 Skill overlay：一次性构造完整 overlay、单次 onUpdate 提交。
+   * 不能循环调用 onUpdateSkillOverride——同一事件里多次 setState 用的是
+   * 同一个闭包里的旧 selectedAgent.skillOverrides，逐键写入会互相覆盖，
+   * 最终只剩列表最后一个技能生效（2026-09-23「全选/全不选没反应」的根因）。
+   * 只对可切换的 Skill 写键（运行时动态提供的保持原样）。
+   */
+  /**
+   * 批量写入 Skill overlay：一次性构造完整 overlay、单次 onUpdate 提交。
+   * 不能循环调用 onUpdateSkillOverride——同一事件里多次 setState 用的是
+   * 同一个闭包里的旧 selectedAgent.skillOverrides，逐键写入会互相覆盖，
+   * 最终只剩列表最后一个技能生效（2026-09-23「全选/全不选没反应」的根因）。
+   * 只对可切换的 Skill 写键（运行时动态提供的保持原样）。
+   */
   function setAllSkills(enabled: boolean, list: ResourceCatalog["skills"]): void {
+    const overrides: Record<string, boolean> = { ...selectedAgent?.skillOverrides };
     for (const skill of list) {
-      if (skill.toggleable) onUpdateSkillOverride(skill.id, enabled);
+      if (skill.toggleable) overrides[skill.id] = enabled;
     }
+    onUpdate({ skillOverrides: overrides });
   }
 
   /** 恢复默认 = 清空角色级 Skill overlay（回到每个 Skill 自身的 defaultEnabled）。 */

@@ -1261,9 +1261,16 @@ function SettingsDialog({ settings, models, providers, customProvider, customMod
     setAgentList((current) => current.map((agent) => agent.id === selectedAgent.id ? { ...agent, ...patch } : agent));
   }
 
+  /**
+   * 单键 Skill overlay 写回：必须用函数式 setState 从 current 里取最新
+   * skillOverrides 再合并——从闭包里的 selectedAgent 取会拿到本次渲染的
+   * 旧值，同一事件里连续多次调用（批量场景）会互相覆盖只剩最后一次。
+   */
   function updateAgentSkillOverride(skillId: string, enabled: boolean): void {
     if (!selectedAgent) return;
-    updateAgent({ skillOverrides: { ...selectedAgent.skillOverrides, [skillId]: enabled } });
+    setAgentList((current) => current.map((agent) => agent.id === selectedAgent.id
+      ? { ...agent, skillOverrides: { ...agent.skillOverrides, [skillId]: enabled } }
+      : agent));
   }
 
   /** 能力工具 overlay 写回：启用即删键（配置只存显式禁用，与迁移层 normalizeToolOverrides 对齐）。 */
