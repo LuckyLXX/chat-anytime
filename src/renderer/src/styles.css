@@ -1581,6 +1581,14 @@ html[data-ui-motion="off"] .general-jev-toggle .chevron { transition: none; }
 .resource-page .mcp-form-wide { margin: 0; }
 .resource-page fieldset.mcp-form-wide { min-width: 0; margin: 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; }
 .resource-page fieldset legend { padding: 0 4px; color: var(--text-muted); font-size: 10px; font-weight: 700; }
+/* 钩子页：事件说明表（五档事件各一行，替代原来一段长句）与测试样例行 */
+.resource-page .hook-event-legend { display: grid; gap: 3px; margin: 0; padding: 0; list-style: none; }
+.resource-page .hook-event-legend li { display: flex; gap: 9px; min-width: 0; font-size: 10.5px; line-height: 1.45; }
+.resource-page .hook-event-legend strong { flex: 0 0 104px; color: var(--text); font-weight: 600; }
+.resource-page .hook-event-legend span { flex: 1 1 auto; min-width: 0; color: var(--text-muted); }
+.resource-page .hook-sample-field { display: flex; flex-direction: column; gap: 5px; margin: 0; color: var(--text-muted); font-size: 10px; font-weight: 700; }
+.resource-page .hook-sample-field input { width: 100%; height: 32px; min-width: 0; padding: 0 9px; color: var(--text); border: 1px solid var(--border-strong); border-radius: 6px; outline: 0; background: var(--surface-input); font: inherit; font-size: 12px; font-weight: 400; }
+.resource-page .hook-sample-field small { color: var(--text-muted); font-size: 10px; font-weight: 400; }
 
 /* ============================================================
    外观页（AppearanceSettings.tsx，2026-09-23 从 App.tsx 抽出重排）。
