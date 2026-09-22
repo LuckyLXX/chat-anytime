@@ -1525,6 +1525,51 @@ html[data-ui-motion="off"] .general-jev-toggle .chevron { transition: none; }
 .model-settings .model-footer-error { color: var(--danger); }
 .model-settings .model-footer-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; }
 
+/* ============================================================
+   资源页骨架（技能与工具 / 子智能体 / 钩子三页共用，2026-09-23）。
+   三页结构同源：顶部固定条（标题 + 说明 + 动作）+ 可滚动正文，正文里每个
+   主题各一张 .resource-card 分区卡片。旧的 .resource-settings /
+   .resource-section* 三页迁完后删除。
+   注意两个历史特异性坑：① .settings-dialog label (0,1,1) 在 .mcp-form-grid
+   label (0,1,1) 之后 —— 不显式压过就会给表单每行加「15px 18px」外边距；
+   ② .settings-dialog input/select (0,1,1) 会把卡片里的输入框打回 38px 高，
+   这里统一回到卡片体系（32px / 12px 字号）。
+   ============================================================ */
+.resource-page { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.resource-page-head { display: flex; flex: 0 0 auto; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--border); }
+.resource-page-title { display: grid; flex: 1 1 auto; gap: 1px; min-width: 0; }
+.resource-page-title strong { color: var(--text); font-size: 13px; font-weight: 700; }
+.resource-page-title small { color: var(--text-muted); font-size: 10.5px; line-height: 1.4; }
+.resource-page-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; }
+.resource-page-body { display: flex; flex: 1 1 auto; flex-direction: column; gap: 11px; min-height: 0; padding: 13px 16px 18px; overflow-y: auto; }
+
+.resource-card { flex: 0 0 auto; overflow: hidden; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+.resource-card-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 9px; padding: 9px 12px; border-bottom: 1px solid var(--border); }
+.resource-card-title { display: inline-flex; align-items: center; gap: 6px; color: var(--accent-text); }
+.resource-card-title > strong { color: var(--text); font-size: 12px; font-weight: 700; }
+.resource-card-head > small { color: var(--text-muted); font-size: 10.5px; font-weight: 400; }
+.resource-card-head code { padding: 0 4px; border-radius: 4px; background: var(--surface-muted); font-size: 10px; }
+.resource-card-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.resource-card-count { color: var(--text-muted); font-size: 10px; }
+.resource-card-body { display: flex; flex-direction: column; gap: 9px; padding: 11px 12px; }
+
+/* 卡片内的表单：清掉 .settings-dialog label / input 的全局副作用 */
+.resource-page .resource-error { margin: 0 !important; }
+.resource-page .mcp-form-grid label { margin: 0; }
+.resource-page .resource-form-help { margin: 0; }
+.resource-page .mcp-form-grid input, .resource-page .mcp-form-grid select { height: 32px; padding: 0 9px; font-size: 12px; font-weight: 400; }
+.resource-page .mcp-form-grid textarea { padding: 8px 10px; font-size: 12px; font-weight: 400; line-height: 1.5; }
+/* 行内开关（.resource-toggle）：.settings-dialog label 的 (0,1,1) 会把它打回
+   「display:grid + 15px 18px 外边距」——勾选框被挤到文字上方、行高虚增
+   （2026-09-23 真机截图确认）。这里整体压回 inline-flex。 */
+.resource-page .resource-toggle { display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto; margin: 0; white-space: nowrap; }
+/* 勾选框尺寸必须显式给：.settings-dialog input (0,1,1)（在 .resource-toggle input
+   之后）把 width:100% / height:38px 打在它身上，复选框被撑成大方块并把「启用」
+   文字挤出边界（2026-09-23 真机截图确认）。 */
+.resource-page .resource-toggle input { flex: 0 0 auto; width: 15px; height: 15px; padding: 0; }
+.resource-page .resource-item label, .resource-page .resource-item .checkbox-setting { margin: 0; color: var(--text-muted); }
+
+
 
 /* ============================================================ */
 
