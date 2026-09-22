@@ -226,6 +226,7 @@ export function AutomationSettings({ models, providers, settings, workspaceConfi
 
       {runsTab === "runs" ? <AutomationRuns settings={settings} highlight={pendingHighlight} onOpenSession={onOpenRunSession} /> : <>
 
+      <div className="automation-settings-body">
       <div className="automation-filter-bar">
         <div className="automation-filter-tabs">
           <button type="button" className={filter === "all" ? "active" : ""} onClick={() => setFilter("all")}>全部<span className="automation-filter-count">{counts.all}</span></button>
@@ -280,6 +281,7 @@ export function AutomationSettings({ models, providers, settings, workspaceConfi
               </section>
             ))}
           </div>}
+      </div>
 
       {formPresence.rendered && (() => { const form = formPresence.value; if (!form) return null; return (
         <ExitWrap exiting={formPresence.exiting}>
