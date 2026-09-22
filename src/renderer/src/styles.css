@@ -1485,6 +1485,12 @@ html[data-ui-motion="off"] .general-jev-toggle .chevron { transition: none; }
 
 .model-settings .model-rail { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--border); background: var(--surface-muted); }
 .model-settings .model-rail-head { flex: 0 0 auto; padding: 11px 12px 6px; color: var(--text-muted); font-size: 10px; font-weight: 700; }
+/* 左栏搜索框：内置服务商目录十几项时靠它定位（与 .agent-rail-search 同一形态） */
+.model-settings .model-rail-search { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; min-height: 28px; margin: 0 8px 6px; padding: 0 8px; color: var(--text-muted); border: 1px solid var(--border); border-radius: 6px; background: var(--surface-input); }
+.model-settings .model-rail-search:focus-within { border-color: var(--accent); }
+.model-settings .model-rail-search svg { flex: 0 0 auto; }
+.model-settings .model-rail-search input { width: 100%; min-width: 0; height: 24px; padding: 0; margin: 0; border: 0; border-radius: 0; outline: 0; color: var(--text); background: transparent; font: inherit; font-size: 11px; font-weight: 400; }
+.model-settings .model-rail-search input::placeholder { color: var(--text-muted); }
 .model-settings .model-rail-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 0 8px 8px; }
 .model-settings .model-rail-group + .model-rail-group { margin-top: 4px; }
 .model-settings .model-rail-group-label { padding: 6px 4px 3px; color: var(--text-muted); font-size: 10px; font-weight: 600; }

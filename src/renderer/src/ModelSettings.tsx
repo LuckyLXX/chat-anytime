@@ -125,6 +125,8 @@ export function ModelSettings({ settings, models, providers, onSaved, onDraftCom
     })();
   const enabledProviderModels = providerModels.filter((model) => model.enabled !== false);
   const [modelSearch, setModelSearch] = useState("");
+  // 左栏服务商搜索：内置目录长，靠它快速定位（与角色列表搜索同一交互）。
+  const [providerQuery, setProviderQuery] = useState("");
   // 限额行内编辑态：正在编辑的模型 id + 两个输入框草稿（字符串，空 = 清除覆盖）。
   const [editingModelId, setEditingModelId] = useState<string | undefined>();
   const [limitDraftContext, setLimitDraftContext] = useState("");
@@ -401,23 +403,35 @@ export function ModelSettings({ settings, models, providers, onSaved, onDraftCom
     setModelSearch("");
   }
 
-  // 左栏分组与旧下拉的 optgroup 逐项一致（内置服务：目录里未配置的 + 已配置的）。
-  const railGroups: Array<{ label: string; entries: Array<{ id: string; name: string; configured: boolean; custom: boolean }> }> = [
-    {
-      label: "内置服务",
-      entries: [
-        ...providers.filter((item) => !item.custom && !configuredProviders.some((config) => config.id === item.id)).map((item) => ({ id: item.id, name: item.name, configured: Boolean(item.configured), custom: false })),
-        ...configuredProviders.filter((item) => item.custom === false).map((item) => ({ id: item.id, name: item.name, configured: Boolean(item.keyConfigured), custom: false }))
-      ]
-    },
+  // 左栏分组：自定义服务在前、内置服务在后（用户 2026-09-23 指定——自定义的是自己配的、
+  // 常用且少，内置目录长，放后面不挡路）；每组的条目与旧下拉的 optgroup 逐项一致。
+  const railGroups: Array<{ label: string; entries: Array<{ id: string; name: string; configured: boolean; custom: boolean; draft?: boolean }> }> = [
     {
       label: "OpenAI 兼容服务",
       entries: [
         { id: CUSTOM_PROVIDER_ID, name: customProviderDisplayName, configured: customProviderKeySaved, custom: true },
         ...configuredProviders.filter((item) => item.id !== CUSTOM_PROVIDER_ID && item.custom !== false).map((item) => ({ id: item.id, name: item.name, configured: Boolean(item.keyConfigured), custom: true }))
       ]
+    },
+    {
+      label: "内置服务",
+      entries: [
+        ...providers.filter((item) => !item.custom && !configuredProviders.some((config) => config.id === item.id)).map((item) => ({ id: item.id, name: item.name, configured: Boolean(item.configured), custom: false })),
+        ...configuredProviders.filter((item) => item.custom === false).map((item) => ({ id: item.id, name: item.name, configured: Boolean(item.keyConfigured), custom: false }))
+      ]
     }
   ];
+  // 新建但尚未保存的服务不在 settings.providers 里 —— 下拉时代当前值显示在下拉框里，
+  // 换成一栏列表后必须显式补一条草稿项，否则刚点「+ 新增服务」左栏没有任何选中项
+  // （2026-09-23 实测）。名字跟随「服务名称」输入框实时变。
+  if (!railGroups.some((group) => group.entries.some((entry) => entry.id === provider))) {
+    railGroups[0]!.entries.unshift({ id: provider, name: customName.trim() || "新的模型服务", configured: false, custom: true, draft: true });
+  }
+  // 搜索过滤：按名称或 id 匹配（内置目录十几项时靠它快速定位）；全组匹配为空则整组不渲染。
+  const providerKeyword = providerQuery.trim().toLowerCase();
+  const visibleRailGroups = railGroups
+    .map((group) => ({ ...group, entries: group.entries.filter((entry) => !providerKeyword || `${entry.name} ${entry.id}`.toLowerCase().includes(providerKeyword)) }))
+    .filter((group) => group.entries.length > 0);
   const editorTitle = selectedProvider?.name ?? (isCustomProvider ? customName : providers.find((item) => item.id === provider)?.name ?? provider);
   const refreshing = modelRefreshStatus === "loading" && modelRefreshProvider === provider;
   // 拉取模型：自定义服务走接口地址拉取（provider.models.fetch），内置服务走目录刷新
@@ -430,8 +444,14 @@ export function ModelSettings({ settings, models, providers, onSaved, onDraftCom
       <div className="model-settings-body">
         <aside className="model-rail" aria-label="服务商">
           <div className="model-rail-head">服务商</div>
+          <label className="model-rail-search">
+            <Search size={13} />
+            <input value={providerQuery} placeholder="搜索服务商…" aria-label="搜索服务商" spellCheck={false} onChange={(event) => setProviderQuery(event.target.value)} />
+          </label>
           <div className="model-rail-list">
-            {railGroups.map((group) => (
+            {visibleRailGroups.length === 0
+              ? <p className="model-rail-empty">没有匹配「{providerQuery.trim()}」的服务商</p>
+              : visibleRailGroups.map((group) => (
               <div className="model-rail-group" key={group.label}>
                 <div className="model-rail-group-label">{group.label}</div>
                 {group.entries.map((entry) => (
@@ -441,19 +461,19 @@ export function ModelSettings({ settings, models, providers, onSaved, onDraftCom
                     className={entry.id === provider ? "model-rail-item active" : "model-rail-item"}
                     data-provider-id={entry.id}
                     data-provider-kind={entry.custom ? "custom" : "builtin"}
+                    data-provider-draft={entry.draft ? "true" : undefined}
                     aria-current={entry.id === provider ? "true" : undefined}
                     onClick={() => selectProvider(entry.id)}
                   >
                     <span className="model-rail-avatar">{entry.name.trim().slice(0, 1) || "?"}</span>
                     <span className="model-rail-copy">
                       <strong>{entry.name}{entry.configured && <em className="model-rail-badge">已配置</em>}</strong>
-                      <small>{entry.custom ? "OpenAI 兼容" : "内置服务"}</small>
+                      <small>{entry.draft ? "未保存" : entry.custom ? "OpenAI 兼容" : "内置服务"}</small>
                     </span>
                   </button>
                 ))}
-                {group.entries.length === 0 && <p className="model-rail-empty">暂无</p>}
               </div>
-            ))}
+              ))}
           </div>
           <button type="button" className="model-rail-new" data-control="model-provider-add" onClick={newProvider}>+ 新增服务</button>
         </aside>
