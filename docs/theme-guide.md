@@ -31,7 +31,7 @@
 
 类名属于实现细节，可能随版本变化；以下属性是稳定契约，结构化主题请只依赖它们：
 
-**区域钩子 `data-pane`**：`sidebar` `topbar` `workspace` `work-area` `conversation` `timeline` `composer` `task-panel` `memory-panel` `preview` `terminal` `ssh` `question-panel` `settings-dialog` `permission-dialog` `landing` `markdown-outline` `design` `design-toolbar` `design-tools` `design-canvas` `design-layers` `design-inspector` `gallery-menu` `gallery-wall` `agent-settings` `general-settings`
+**区域钩子 `data-pane`**：`sidebar` `topbar` `workspace` `work-area` `conversation` `timeline` `composer` `task-panel` `memory-panel` `preview` `terminal` `ssh` `question-panel` `settings-dialog` `permission-dialog` `landing` `markdown-outline` `design` `design-toolbar` `design-tools` `design-canvas` `design-layers` `design-inspector` `gallery-menu` `gallery-wall` `agent-settings` `general-settings` `model-settings` `resource-settings` `appearance-settings` `subagent-settings` `hooks-settings` `usage-settings`
 
 > `design` 是设计模式（Design Studio，顶栏调色板按钮进入）的工作台外壳——顶栏工具栏 + 左侧图层树（`design-layers`）+ 中部无限画布（`design-canvas`）+ 右侧属性检查器（`design-inspector`）。工作台底色走 `--panel-bg-preview`（缺省 `--panel-bg`）与既有表面 token，跟随主题；画布点阵/参考线/选择框用 `--border`/`--accent` 派生，主题可用 `[data-pane="design"]` 后代选择器重设计。 `design-tools` 是画布顶部居中的浮动绘图工具胶囊（选择/画板/矩形/文本），激活按钮带 `aria-pressed="true"`。
 
@@ -51,6 +51,18 @@
 > `agent-settings` 是设置页「Agent 角色」tab（2026-09-22 重设计）——两栏：左栏角色列表（`.agent-rail`，含搜索框与「使用中」徽标 `.agent-rail-live`）与右栏编辑器（`.agent-editor`，顶部固定操作条 `.agent-editor-bar` + 可滚动分区卡片 `.agent-card`：身份 / 人格与系统提示词 / 对话行为 / 技能 / 扩展能力 / 内建工具权限）。结构钩子由 `renderer/src/AgentSettings.tsx` 提供，契约测试在 `AgentSettings.test.tsx`；**主题注意**：该页整体用了 `.agent-settings` 前缀的 (0,2,x) 特异性类名——因为 `.settings-dialog label/input/select`（(0,1,1)）会命中本页所有 label 与输入框，覆盖时必须同样带 `.agent-settings` 或更高特异性，否则会被打回「38px 输入框 + 15px 18px 外边距」并弄坏开关/勾选行尺寸。设置弹窗在角色页走 `.settings-center.settings-wide`（1080px），其余 tab 保持 920px。相关控件钩子：`data-control="agent-new"`（新建角色）、`agent-save`（保存角色）。
 
 > `general-settings` 是设置页「通用」tab（2026-09-23 重排）——五张分区卡片（`.general-card`，与角色页 `.agent-card` 同构）：对话与权限 / 默认工作区 / 能力总闸 / Jev 快速决策 / 界面；「取消 / 保存通用设置」固定在弹窗底部（`.general-settings-footer`），滚动收进 `.general-settings-body`。能力总闸是整行开关（`.general-switch-row`，`data-control="capability-switch"` + `data-capability="browser|ssh|computer|design"` 区分）；Jev 卡默认收起，头部一行 = 展开钮（`data-control="jev-expand"`，带 `aria-expanded`）+ 标题 + 「实验性」与状态徽标（`.general-jev-badge`，取值 `experimental`/`ok`/`warn`/`busy`/`off`）+ 右侧启用开关；展开后的字段、测试连接（`data-control="jev-test"`）与结果行（`data-role="jev-test-result"`）都在 `.general-card-body` 里。结构钩子由 `renderer/src/GeneralSettings.tsx` 提供，契约测试在 `GeneralSettings.test.tsx`。**主题注意**：与 `agent-settings` 同一条特异性纪律——覆盖本页 label/input/开关样式必须带 `.general-settings` 前缀，否则会被 `.settings-dialog` 的 (0,1,1) 全局规则压回；设置弹窗在本页也走 `.settings-center.settings-wide`（1080px）。
+
+> `model-settings` 是设置页「模型服务」tab（2026-09-23 重设计）——两栏：左服务商栏（`.model-rail`，按内置 / OpenAI 兼容分组，行内「已配置」徽标，底部「+ 新增服务」）+ 右配置区（`.model-editor`：头部一行服务商信息 + 可滚动正文的三张分区卡片 `.model-card`：服务商信息 / 可用模型 / 视觉识别 + 固定底栏 `.model-settings-footer`）。侧栏宽度 `var()`-free（216px 固定），预览区不参与。**主题注意**：与角色页同一条特异性纪律——覆盖本页 label / input / 行内开关样式必须带 `.model-settings` 前缀（(0,2,x)），否则会被 `.settings-dialog label/input/select/footer` 的 (0,1,1) 全局规则压回（38px 输入框、15px 18px 外边距）。设置弹窗在本页也走 `.settings-center.settings-wide`（1080px）。
+
+> `resource-settings` 是设置页「技能与工具」tab（2026-09-23 重设计）——`.resource-page` 骨架（顶部固定条 `.resource-page-head` + 可滚动正文 `.resource-page-body`），正文三张 `.resource-card`（MCP Server / Skill / 自定义命令）。**本页即改即发**（没有整页保存语义，因此没有底栏）。
+
+> `subagent-settings` 是设置页「子智能体」tab（2026-09-23 重设计）——同一套 `.resource-page` 骨架，两张卡片（已定义 / 新建·编辑）；整页是 `<form>`，底部动作条 `.subagent-form-actions` 固定在滚动主体之外（表单较长时保存钮仍可见）。
+
+> `hooks-settings` 是设置页「钩子」tab（2026-09-23 重设计）——`.resource-page` 骨架，页头右侧是「启用钩子」总闸（`data-control="hooks-enable"`，`data-control="hooks-add"` 是新建）；正文两张卡片（规则 / 新建·编辑），规则卡里 `.hook-event-legend` 是五档事件的说明表；底部动作条同 `subagent-settings`。
+
+> `appearance-settings` 是设置页「外观」tab（2026-09-23 重设计）——两列：左列四张 `.appearance-card`（主题与预设 / 界面微调 / 透明度 / 自定义 CSS）+ 右列 sticky 实时预览（`.appearance-preview`，列宽 `minmax(340px, 46%)`，`.theme-preview-body` 高 460px）+ 固定底栏 `.appearance-page-footer`。弹窗在本页也走 1080px。
+
+> `usage-settings` 是设置页「用量统计」tab（2026-09-23 重设计）——纯只读页：顶部固定条（标题 + 范围筛选 `data-control="usage-agent-filter"` + 刷新）+ 可滚动正文（三张总览卡 `.usage-summary-card` + 四张 `.usage-card`：活跃热力 / 按天 / 按模型 / 最近会话）；**没有操作条**。
 
 > `automation-settings` 是设置页「自动化任务」tab（双子页：「任务」列表 + 搜索 + 过滤器 / 「运行记录」历史面板，位于 `settings-dialog` 内）；`automation-dialog` 是「创建/编辑定时任务」弹窗。二者都随设置页/弹窗配色走，主题可用 `--panel-bg` 派生背景与 `--border`/`--surface-*` 控制排版。相关控件钩子：`data-control="automation-open"`（侧栏「新建话题」下方的「自动化」入口 + 折叠态窄条图标）、`automation-run`（行内「运行一次」）、`automation-toggle`（启停）、`automation-runs-tab`（子页「运行记录」）；未在控件列枚举的地方用类名 `.automation-*` 命中。
 
@@ -91,6 +103,14 @@
 | 作品下拉开关（顶栏，aria-expanded + 数量角标） | `gallery-toggle`                                 |
 | 作品：运行 / 继续开发 / 打开作品墙 / 登记新作品 / 移除 | `gallery-run` / `gallery-develop` / `gallery-open-wall` / `gallery-publish` / `gallery-remove` |
 | 角色页：新建角色 / 保存角色 | `agent-new` / `agent-save` |
+| 通用页：能力总闸 / Jev 测试连接 / Jev 展开 | `capability-switch`（+ `data-capability`） / `jev-test` / `jev-expand` |
+| 模型服务页：新增服务 / 删除服务 / 保存 / 拉取模型 | `model-provider-add` / `model-provider-delete` / `model-save` / `model-refresh` |
+| 模型行：手动添加 / 思考等级 / 思考等级面板开关 | `model-add` / `model-thinking-levels` / `model-thinking-panel` |
+| 技能与工具页：重载资源 / 添加 MCP / 保存 MCP / 添加命令 / 保存命令 | `resource-reload` / `mcp-add` / `mcp-save` / `command-add` / `command-save` |
+| 外观页：导入 CSS / 导入主题目录 / 清空 / 保存当前主题 / 保存外观设置 | `appearance-import-css` / `appearance-import-theme` / `appearance-clear-css` / `appearance-save-theme` / `appearance-save` |
+| 子智能体页：新建 / 保存 | `subagent-add` / `subagent-save` |
+| 钩子页：总闸 / 新建 / 保存 | `hooks-enable` / `hooks-add` / `hooks-save` |
+| 用量统计页：助手范围筛选 | `usage-agent-filter` |
 | 面板坞开关 + 待办页 tab（会话区右上方 FAB） | `task-panel-toggle`                              |
 | 记忆页 tab（面板坞内）                      | `memory-toggle`                                  |
 | 发送                                        | `send`                                           |
