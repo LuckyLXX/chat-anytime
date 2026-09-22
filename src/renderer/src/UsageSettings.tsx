@@ -59,7 +59,7 @@ function UsageHeatmap({ byDay, today }: { byDay: readonly UsageDayEntry[]; today
 }
 
 function UsageTable({ head, rows, empty }: { head: string[]; rows: ReactNode[][]; empty: string }): ReactNode {
-  if (rows.length === 0) return <p className="panel-empty">{empty}</p>;
+  if (rows.length === 0) return <p className="usage-empty">{empty}</p>;
   return (
     <div className="usage-table-wrap">
       <table className="usage-table">
@@ -96,83 +96,97 @@ export function UsageSettings(): ReactNode {
     + ` · 本次扫描 ${usageStats.scannedFiles} 个文件 · ${usageStats.scanMs}ms`;
 
   return (
-    <div className="usage-settings">
-      <div className="usage-toolbar">
-        <label>
-          范围
-          <select value={agentFilter} onChange={(event) => setAgentFilter(event.target.value)} data-control="usage-agent-filter">
-            <option value="">全部助手</option>
-            {agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
-          </select>
-        </label>
-        <button className="secondary-button" type="button" disabled={usageStatsLoading} onClick={() => requestUsageStats(agentFilter || undefined)}>
-          <RefreshCw size={13} className={usageStatsLoading ? "spinning" : undefined} />
-          {usageStatsLoading ? "统计中…" : "刷新"}
-        </button>
+    <div className="usage-page" data-pane="usage-settings">
+      <header className="usage-page-head">
+        <span className="usage-page-title">
+          <strong>用量统计</strong>
+          <small>跨助手 token 用量聚合：数据源是本地会话记录的 assistant usage，按文件缓存增量扫描</small>
+        </span>
+        <span className="usage-page-actions">
+          <label className="usage-filter">
+            <span>范围</span>
+            <select value={agentFilter} onChange={(event) => setAgentFilter(event.target.value)} data-control="usage-agent-filter">
+              <option value="">全部助手</option>
+              {agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
+            </select>
+          </label>
+          <button className="secondary-button compact-button" type="button" disabled={usageStatsLoading} onClick={() => requestUsageStats(agentFilter || undefined)}>
+            <RefreshCw size={13} className={usageStatsLoading ? "spinning" : undefined} />
+            {usageStatsLoading ? "统计中…" : "刷新"}
+          </button>
+        </span>
+      </header>
+      <div className="usage-page-body">
         {scanMeta && <p className="usage-scan-meta">{scanMeta}</p>}
+        {usageStats && todayTotals && weekTotals && (
+          <div className="usage-summary-row">
+            <UsageSummaryCard label="今日" totals={todayTotals} />
+            <UsageSummaryCard label="近 7 天" totals={weekTotals} />
+            <UsageSummaryCard label="累计" totals={usageStats.total} />
+          </div>
+        )}
+        {usageStats && usageStats.byDay.length > 0 && (
+          <section className="usage-card" aria-label="活跃热力">
+            <div className="usage-card-head"><strong>活跃热力</strong><small>按请求次数分档，一天一格；悬浮看当日明细</small></div>
+            <div className="usage-card-body"><UsageHeatmap byDay={usageStats.byDay} today={today} /></div>
+          </section>
+        )}
+        {usageStats && (
+          <>
+            <section className="usage-card" aria-label="按天">
+              <div className="usage-card-head"><strong>按天</strong><small>本地日期累计，最新在前</small></div>
+              <div className="usage-card-body">
+                <UsageTable
+                  head={["日期", "请求", "输入", "输出", "缓存读", "成本"]}
+                  empty="暂无用量数据——发起对话后这里会按本地日期累计。"
+                  rows={[...usageStats.byDay].reverse().map((day) => [
+                    formatDayLabel(day.date, today),
+                    String(day.requests),
+                    formatTokenCount(day.input + day.cacheWrite),
+                    formatTokenCount(day.output),
+                    formatTokenCount(day.cacheRead),
+                    formatCost(day.cost)
+                  ])}
+                />
+              </div>
+            </section>
+            <section className="usage-card" aria-label="按模型">
+              <div className="usage-card-head"><strong>按模型</strong><small>输入含缓存写入；缓存读单列</small></div>
+              <div className="usage-card-body">
+                <UsageTable
+                  head={["模型", "请求", "输入", "输出", "缓存读", "最近使用"]}
+                  empty="暂无模型用量。"
+                  rows={usageStats.byModel.map((model) => [
+                    <span key="m" className="usage-model-cell"><strong>{model.model}</strong><small>{model.provider}</small></span>,
+                    String(model.requests),
+                    formatTokenCount(model.input + model.cacheWrite),
+                    formatTokenCount(model.output),
+                    formatTokenCount(model.cacheRead),
+                    formatLastUsed(model.lastAt)
+                  ])}
+                />
+              </div>
+            </section>
+            <section className="usage-card" aria-label="最近会话">
+              <div className="usage-card-head"><strong>最近会话</strong><small>按最近使用排序，会话名悬浮可见完整路径</small></div>
+              <div className="usage-card-body">
+                <UsageTable
+                  head={["会话", "助手", "请求", "输入", "输出", "最近使用"]}
+                  empty="暂无会话用量。"
+                  rows={usageStats.bySession.map((session) => [
+                    <span key="t" className="usage-session-cell" title={session.sessionPath}>{session.title}</span>,
+                    agentNames.get(session.agentId) ?? session.agentId,
+                    String(session.requests),
+                    formatTokenCount(session.input + session.cacheWrite),
+                    formatTokenCount(session.output),
+                    formatLastUsed(session.lastAt)
+                  ])}
+                />
+              </div>
+            </section>
+          </>
+        )}
       </div>
-      {usageStats && todayTotals && weekTotals && (
-        <div className="usage-summary-row">
-          <UsageSummaryCard label="今日" totals={todayTotals} />
-          <UsageSummaryCard label="近 7 天" totals={weekTotals} />
-          <UsageSummaryCard label="累计" totals={usageStats.total} />
-        </div>
-      )}
-      {usageStats && usageStats.byDay.length > 0 && (
-        <section className="usage-section">
-          <h4>活跃热力</h4>
-          <UsageHeatmap byDay={usageStats.byDay} today={today} />
-        </section>
-      )}
-      {usageStats && (
-        <>
-          <section className="usage-section">
-            <h4>按天</h4>
-            <UsageTable
-              head={["日期", "请求", "输入", "输出", "缓存读", "成本"]}
-              empty="暂无用量数据——发起对话后这里会按本地日期累计。"
-              rows={[...usageStats.byDay].reverse().map((day) => [
-                formatDayLabel(day.date, today),
-                String(day.requests),
-                formatTokenCount(day.input + day.cacheWrite),
-                formatTokenCount(day.output),
-                formatTokenCount(day.cacheRead),
-                formatCost(day.cost)
-              ])}
-            />
-          </section>
-          <section className="usage-section">
-            <h4>按模型</h4>
-            <UsageTable
-              head={["模型", "请求", "输入", "输出", "缓存读", "最近使用"]}
-              empty="暂无模型用量。"
-              rows={usageStats.byModel.map((model) => [
-                <span key="m" className="usage-model-cell"><strong>{model.model}</strong><small>{model.provider}</small></span>,
-                String(model.requests),
-                formatTokenCount(model.input + model.cacheWrite),
-                formatTokenCount(model.output),
-                formatTokenCount(model.cacheRead),
-                formatLastUsed(model.lastAt)
-              ])}
-            />
-          </section>
-          <section className="usage-section">
-            <h4>最近会话</h4>
-            <UsageTable
-              head={["会话", "助手", "请求", "输入", "输出", "最近使用"]}
-              empty="暂无会话用量。"
-              rows={usageStats.bySession.map((session) => [
-                <span key="t" className="usage-session-cell" title={session.sessionPath}>{session.title}</span>,
-                agentNames.get(session.agentId) ?? session.agentId,
-                String(session.requests),
-                formatTokenCount(session.input + session.cacheWrite),
-                formatTokenCount(session.output),
-                formatLastUsed(session.lastAt)
-              ])}
-            />
-          </section>
-        </>
-      )}
     </div>
   );
 }
