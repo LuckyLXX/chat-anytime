@@ -1569,6 +1569,48 @@ html[data-ui-motion="off"] .general-jev-toggle .chevron { transition: none; }
 .resource-page .resource-toggle input { flex: 0 0 auto; width: 15px; height: 15px; padding: 0; }
 .resource-page .resource-item label, .resource-page .resource-item .checkbox-setting { margin: 0; color: var(--text-muted); }
 
+/* ============================================================
+   外观页（AppearanceSettings.tsx，2026-09-23 从 App.tsx 抽出重排）。
+   左列四张分区卡片（主题与预设 / 界面微调 / 透明度 / 自定义 CSS）+ 右列
+   sticky 实时预览 + 固定底栏。弹窗在本页走 settings-wide（1080px），预览列
+   `minmax(340px, 46%)`，预览体 390→460px（用户要求「预览稍微大一点」）。
+   旧类自带 18px 外边距（.theme-color-settings / .custom-css-heading /
+   .custom-css-field / .custom-theme-library / .theme-preset-grid），进卡片后
+   必须清零，否则卡片内容被二次缩进。
+   ============================================================ */
+.appearance-page { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.appearance-page-body { flex: 1 1 auto; min-height: 0; padding: 13px 16px 16px; overflow-y: auto; }
+.appearance-columns { display: grid; grid-template-columns: minmax(0, 1fr) minmax(340px, 46%); gap: 16px; align-items: start; }
+.appearance-column { display: flex; flex-direction: column; gap: 11px; min-width: 0; }
+.appearance-preview { position: sticky; top: 0; min-width: 0; }
+
+.appearance-card { overflow: hidden; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+.appearance-card-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 9px; padding: 9px 12px; border-bottom: 1px solid var(--border); }
+.appearance-card-head > strong { color: var(--text); font-size: 12px; font-weight: 700; }
+.appearance-card-head > small { color: var(--text-muted); font-size: 10.5px; font-weight: 400; }
+.appearance-card-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+.appearance-card-body { display: flex; flex-direction: column; gap: 9px; padding: 11px 12px; }
+
+.appearance-page .appearance-field { display: flex; flex-direction: column; gap: 5px; min-width: 0; margin: 0; color: var(--text-muted); font-size: 10px; font-weight: 700; }
+.appearance-page .appearance-field > span { white-space: nowrap; }
+.appearance-page .appearance-field select, .appearance-page .appearance-field input { width: 100%; height: 32px; min-width: 0; padding: 0 9px; color: var(--text); border: 1px solid var(--border-strong); border-radius: 6px; outline: 0; background: var(--surface-input); font: inherit; font-size: 12px; font-weight: 400; }
+.appearance-page .appearance-field-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; }
+.appearance-page .appearance-field-label { display: block; margin: 0 0 6px; color: var(--text-muted); font-size: 10px; font-weight: 700; }
+.appearance-page .appearance-hint { margin: 0; color: var(--text-muted); font-size: 10.5px; line-height: 1.45; }
+.appearance-page .appearance-motion-switch { margin: 0; color: var(--text); font-size: 11px; font-weight: 500; }
+.appearance-page .appearance-motion-switch input { flex: 0 0 auto; width: 15px; height: 15px; padding: 0; }
+.appearance-page .appearance-import-error { margin: 0; }
+.appearance-opacity-body { gap: 3px; }
+
+/* 卡片内的旧布局类：清掉各自带的 18px 外边距与分隔线 */
+.appearance-page .theme-preset-grid { margin: 0; }
+.appearance-page .theme-color-settings { margin: 0; padding-top: 0; border-top: 0; }
+.appearance-page .custom-css-heading { margin: 0; }
+.appearance-page .custom-css-field { margin: 0 !important; }
+.appearance-page .custom-theme-library { margin: 0; }
+.appearance-page .appearance-page-footer { display: flex; flex: 0 0 auto; justify-content: flex-end; gap: 8px; padding: 11px 16px 13px; border-top: 1px solid var(--border); background: var(--surface-footer); }
+
+
 
 
 /* ============================================================ */
@@ -2126,8 +2168,6 @@ html[data-ui-motion="off"] .general-jev-toggle .chevron { transition: none; }
   }
 }
 
-.appearance-settings { min-height: 100%; overflow-y: auto; }
-.appearance-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(230px, 34%); gap: 18px; align-items: start; }
 .settings-field-label { display: block; margin: 15px 18px 7px; color: var(--text-muted); font-size: 11px; font-weight: 600; }
 /* 通用 tab「默认工作区」行（2026-09-03 方案 B）：语义 token、两按钮 + 路径展示，跟随表单提交/取消。 */
 .default-workspace-setting { margin: 15px 18px 4px; padding-top: 13px; border-top: 1px solid var(--border); }
@@ -2196,7 +2236,7 @@ html[data-ui-motion="off"] .general-jev-toggle .chevron { transition: none; }
 .theme-preview-pane[data-theme-effective="dark"] { color-scheme: dark; }
 .theme-preview-pane-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 10px; border-bottom: 1px solid var(--border); color: var(--text); background: var(--surface); }
 .theme-preview-pane-header strong { font-size: 10px; }.theme-preview-pane-header small { color: var(--text-muted); font-size: 8px; }
-.theme-preview-body { height: 390px; padding: 10px; overflow: auto; }
+.theme-preview-body { height: 460px; padding: 10px; overflow: auto; }
 .theme-preview-user-bubble { width: fit-content; max-width: 92%; margin: 0 0 9px auto; padding: 6px 8px; border: 1px solid var(--user-bubble-border); border-radius: 10px; color: var(--text-on-user-bubble); background: var(--user-bubble); font-size: 9px; line-height: 1.35; }
 .theme-preview-body .rich-content { font-size: 10px; line-height: 1.45; }
 .theme-preview-body .rich-content h1, .theme-preview-body .rich-content h2, .theme-preview-body .rich-content h3 { margin: .6em 0 .35em; }
@@ -2377,8 +2417,7 @@ html[data-ui-motion="off"] .general-jev-toggle .chevron { transition: none; }
   .preview-divider::before { top: 3px; right: 0; bottom: auto; left: 0; width: auto; height: 1px; }
   .preview-divider:hover::before, .preview-divider:focus-visible::before, .preview-divider.dragging::before { top: 2px; left: 0; width: auto; height: 3px; }
   .content-preview-panel { border-top: 0; }
-  .appearance-grid { grid-template-columns: 1fr; }
-  .theme-preview { margin: 0 18px 4px; }
+  .appearance-columns { grid-template-columns: minmax(0, 1fr); }
   .custom-theme-library-heading { align-items: stretch; flex-direction: column; }
   .theme-preview-modes { grid-template-columns: 1fr; }
   .mcp-form-grid { grid-template-columns: 1fr; }
