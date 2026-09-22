@@ -26,7 +26,7 @@ import { useDesktopStore } from "./store";
  * 下拉里翻。
  *
  * 本轮按角色页/通用页同一套体系重排：
- * ① 两栏——左「服务商」列表栏（按内置 / OpenAI 兼容分组，行内带「已配置」
+ * ① 两栏——左「服务商」列表栏（按自定义服务商 / 内置服务分组，行内带「已配置」
  *    徽标，底部「+ 新增服务」），右配置区；
  * ② 右栏三张分区卡片：服务商信息（名称 / 接口地址 / 默认 API 协议 / API 密钥 /
  *    拉取模型）、可用模型（工具栏 + 手动添加 + 列表 + 限额与思考等级行内编辑）、
@@ -407,7 +407,7 @@ export function ModelSettings({ settings, models, providers, onSaved, onDraftCom
   // 常用且少，内置目录长，放后面不挡路）；每组的条目与旧下拉的 optgroup 逐项一致。
   const railGroups: Array<{ label: string; entries: Array<{ id: string; name: string; configured: boolean; custom: boolean; draft?: boolean }> }> = [
     {
-      label: "OpenAI 兼容服务",
+      label: "自定义服务商",
       entries: [
         { id: CUSTOM_PROVIDER_ID, name: customProviderDisplayName, configured: customProviderKeySaved, custom: true },
         ...configuredProviders.filter((item) => item.id !== CUSTOM_PROVIDER_ID && item.custom !== false).map((item) => ({ id: item.id, name: item.name, configured: Boolean(item.keyConfigured), custom: true }))
@@ -416,7 +416,9 @@ export function ModelSettings({ settings, models, providers, onSaved, onDraftCom
     {
       label: "内置服务",
       entries: [
-        ...providers.filter((item) => !item.custom && !configuredProviders.some((config) => config.id === item.id)).map((item) => ({ id: item.id, name: item.name, configured: Boolean(item.configured), custom: false })),
+        // 排除单例自定义服务的目录条目：它在下面的「自定义服务商」组里已有一条，
+        // 不排会同一服务商在两组建两行（旧下拉时代就存在，列表化后才显眼）。
+        ...providers.filter((item) => !item.custom && item.id !== CUSTOM_PROVIDER_ID && !configuredProviders.some((config) => config.id === item.id)).map((item) => ({ id: item.id, name: item.name, configured: Boolean(item.configured), custom: false })),
         ...configuredProviders.filter((item) => item.custom === false).map((item) => ({ id: item.id, name: item.name, configured: Boolean(item.keyConfigured), custom: false }))
       ]
     }
@@ -468,7 +470,7 @@ export function ModelSettings({ settings, models, providers, onSaved, onDraftCom
                     <span className="model-rail-avatar">{entry.name.trim().slice(0, 1) || "?"}</span>
                     <span className="model-rail-copy">
                       <strong>{entry.name}{entry.configured && <em className="model-rail-badge">已配置</em>}</strong>
-                      <small>{entry.draft ? "未保存" : entry.custom ? "OpenAI 兼容" : "内置服务"}</small>
+                      <small>{entry.draft ? "未保存" : entry.custom ? "自定义" : "内置服务"}</small>
                     </span>
                   </button>
                 ))}
@@ -482,7 +484,7 @@ export function ModelSettings({ settings, models, providers, onSaved, onDraftCom
           <header className="model-editor-head">
             <span className="model-editor-title">
               <strong>{editorTitle}</strong>
-              <small>{isCustomProvider ? "OpenAI 兼容服务" : "内置服务"} · {hasSavedCustomKey ? "已保存 API 密钥" : "未保存 API 密钥"} · 已启用 {enabledProviderModels.length}/{providerModels.length} 个模型</small>
+              <small>{isCustomProvider ? "自定义服务商" : "内置服务"} · {hasSavedCustomKey ? "已保存 API 密钥" : "未保存 API 密钥"} · 已启用 {enabledProviderModels.length}/{providerModels.length} 个模型</small>
             </span>
             <span className="model-editor-actions">
               {selectedProvider && selectedProvider.custom !== false && <button className="danger-button compact-button" type="button" data-control="model-provider-delete" onClick={() => void deleteProvider()}>删除服务</button>}
@@ -502,7 +504,7 @@ export function ModelSettings({ settings, models, providers, onSaved, onDraftCom
                   <label className="model-field"><span>API 密钥</span><input type="password" value={apiKey} autoFocus autoComplete="off" placeholder={isCustomProvider && hasSavedCustomKey ? "已保存，留空则继续使用" : "请输入 API 密钥"} onChange={(event) => setApiKey(event.target.value)} /><small>存本机加密凭据，不进配置文件</small></label>
                 </div>
                 <div className="model-field-row">
-                  <label className="model-field model-field-wide"><span>{isCustomProvider ? "OpenAI 兼容接口地址" : "接口地址（可选）"}</span><input value={customBaseUrl} placeholder={isCustomProvider ? "https://api.example.com/v1" : "留空 = 跟随服务商目录默认地址（部分模型的 API 模式不同，接口地址也可按需覆盖）"} spellCheck={false} onChange={(event) => setCustomBaseUrl(event.target.value)} /></label>
+                  <label className="model-field model-field-wide"><span>{isCustomProvider ? "接口地址" : "接口地址（可选）"}</span><input value={customBaseUrl} placeholder={isCustomProvider ? "https://api.example.com/v1" : "留空 = 跟随服务商目录默认地址（部分模型的 API 模式不同，接口地址也可按需覆盖）"} spellCheck={false} onChange={(event) => setCustomBaseUrl(event.target.value)} /></label>
                 </div>
                 {isCustomProvider && customModelFetchError && <p className="model-error">{customModelFetchError}</p>}
               </div>

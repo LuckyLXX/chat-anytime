@@ -121,7 +121,7 @@ export function providerFormBlocker(state: ProviderFormState): string | undefine
   if (!state.hasApiKey) return "请填写 API 密钥（已保存的密钥留空即沿用）";
   if (!state.isCustomProvider) return undefined;
   if (!state.customName.trim()) return "请填写服务名称";
-  if (!state.customBaseUrl.trim()) return "请填写 OpenAI 兼容接口地址";
+  if (!state.customBaseUrl.trim()) return "请填写接口地址";
   // 已拉取到模型列表时模型由勾选决定，无需模型 ID；只有空列表才要求手动指定。
   if (state.totalModels === 0 && !state.customModelId.trim()) return "请先拉取模型或填写模型 ID";
   return undefined;
