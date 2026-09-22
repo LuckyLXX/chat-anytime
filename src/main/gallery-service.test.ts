@@ -23,6 +23,26 @@ afterEach(async () => {
   await Promise.all(running.splice(0).map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
 });
 
+/** 稍后再监听指定端口：端口被抢时重试（不给全量并发留下偶发红）。 */
+async function listenLater(server: Server, port: number): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const onError = (error: Error): void => reject(error);
+        server.once("error", onError);
+        server.listen(port, "127.0.0.1", () => {
+          server.off("error", onError);
+          resolve();
+        });
+      });
+      return;
+    } catch (error) {
+      if (attempt >= 4) throw error;
+      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    }
+  }
+}
+
 describe("parseServiceAddress", () => {
   it("解析 http/https 与缺省端口", () => {
     expect(parseServiceAddress("http://localhost:8787")).toEqual({ host: "localhost", port: 8787, secure: false });
@@ -169,21 +189,26 @@ describe("waitForService", () => {
   });
 
   it("真计时：服务晚 250ms 起来也能等到（轮询真的在重试，不是一次判死）", async () => {
-    // 先占一个端口再释放：拿到一个「确定闲置」的端口号，避免撞上别的进程。
+    // 先占一个端口再释放：拿到一个「当时闲置」的端口号。释放到重听之间这个端口
+    // 理论上可能被别的测试抢走（全量并发下真发生过），所以重听带重试。
     const probePort = createServer();
     const port = await listen(probePort);
     await new Promise<void>((resolve) => probePort.close(() => resolve()));
     expect(await probeService({ host: "127.0.0.1", port, secure: false }, { timeoutMs: 200 })).toBe(false);
+
     const late = createServer((_request, response) => response.end("ok"));
     running.push(late);
-    const lateStart = setTimeout(() => late.listen(port, "127.0.0.1"), 250);
     const started = Date.now();
+    const lateStart = (async () => {
+      await new Promise<void>((resolve) => setTimeout(resolve, 250));
+      await listenLater(late, port);
+    })();
     const result = await waitForService({
       url: `http://127.0.0.1:${port}`,
-      timeoutMs: 4_000,
+      timeoutMs: 6_000,
       intervalMs: SERVICE_POLL_INTERVAL_MS
     });
-    clearTimeout(lateStart);
+    await lateStart;
     expect(result).toEqual({ ok: true });
     expect(Date.now() - started).toBeGreaterThanOrEqual(200);
   });

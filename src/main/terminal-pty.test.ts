@@ -222,43 +222,44 @@ describe("TerminalManager", () => {
     expect(spawns[1]!.options.env![SERVICE_COMMAND_ENV]).toBeUndefined();
   });
 
-  it("跑完（进程退出）后重新 create 会再跑一次：重试即重启服务", () => {
+  it("重开标签不重跑命令；跑完（进程退出）后重新 create 才再跑一次：重试即重启服务", () => {
     const harness = createHarness();
+    harness.manager.handle({ ...createCommand("svc"), cwd: "D:\\ws\\apps\\ledger", initialCommand: "node server.js" });
+    expect(harness.spawns[0]!.args).toEqual(["-c", "node server.js"]);
+    expect(harness.spawns[0]!.options.cwd).toBe("D:\\ws\\apps\\ledger");
+    // 关键：命令不是「模拟输入」——否则切标签重连会再打一遍，莫名多起一个服务。
+    expect(harness.ptys[0]!.written).toEqual([]);
+
     harness.manager.handle({ ...createCommand("svc"), initialCommand: "node server.js" });
+    expect(harness.spawns).toHaveLength(1);
+    expect(harness.ptys[0]!.written).toEqual([]);
+
     harness.ptys[0]!.emitExit(1);
     harness.manager.handle({ ...createCommand("svc"), initialCommand: "node server.js" });
     expect(harness.spawns).toHaveLength(2);
     expect(harness.spawns[1]!.args).toEqual(["-c", "node server.js"]);
   });
 
-  it("status/tail：未创建不算失败，退出后留退出码与输出尾部", () => {
+  it("status：未创建不算失败，退出后留退出码与（剥了 ANSI 的）输出尾部", () => {
     const harness = createHarness();
     // 尚未创建：没有 exitCode，等待方不得把它当成「已退出」（开标签与等待是两个 IPC）
     expect(harness.manager.status("svc")).toEqual({ alive: false });
 
     harness.manager.handle({ ...createCommand("svc"), initialCommand: "node server.js" });
     expect(harness.manager.status("svc")).toEqual({ alive: true });
-    harness.ptys[0]!.emitData("listening on 8787");
-    harness.flush();
-    expect(harness.manager.tail("svc")).toBe("listening on 8787");
 
+    // ConPTY 的回显噪声不进提示：toast 只给人看
+    harness.ptys[0]!.emitData("\u001b[25hlistening on 8787\u001b]0;title\u0007");
     harness.ptys[0]!.emitData(" Error: port in use");
     harness.ptys[0]!.emitExit(1);
     expect(harness.manager.status("svc")).toEqual({ alive: false, exitCode: 1, tail: "listening on 8787 Error: port in use" });
-    expect(harness.manager.tail("svc")).toBe("listening on 8787 Error: port in use");
 
-    // 同一 id 重新起了进程：旧退出记录必须失效，否则等待方把上一次的失败当本次结果
+    // 退出记录只对「当前没有活进程」的 id 有效
+    expect(harness.manager.status("missing")).toEqual({ alive: false });
+
+    // 同一 id 重新起进程：活记录优先，上一次的退出记录不得把新进程判死（重试即重启）
     harness.manager.handle({ ...createCommand("svc"), initialCommand: "node server.js" });
     expect(harness.manager.status("svc")).toEqual({ alive: true });
-  });
-
-  it("tail 只留末尾 chars 字符，未知终端返回 undefined", () => {
-    const harness = createHarness();
-    harness.manager.handle(createCommand("t1"));
-    harness.ptys[0]!.emitData("abcdefg");
-    harness.flush();
-    expect(harness.manager.tail("t1", 3)).toBe("efg");
-    expect(harness.manager.tail("missing")).toBeUndefined();
   });
 
   it("退出记录有界：超出上限后最早的一条被淘汰", () => {

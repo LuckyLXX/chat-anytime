@@ -38,10 +38,19 @@ describe("服务型作品运行接线", () => {
     expect(app).toMatch(/galleryAwaitService\(\{\s*url: plan\.url,\s*terminalId,\s*timeoutMs: GALLERY_SERVICE_WAIT_MS\s*\}\)/u);
   });
 
-  it("preload 与主进程共用同一个通道名，且主进程按 exitCode 判「已退出」", () => {
+  it("preload 与主进程共用同一个通道名，且退出判据只看「本次的进程」", () => {
     expect(preload).toContain('ipcRenderer.invoke("gallery:await-service", input)');
     expect(main).toContain('ipcMain.handle("gallery:await-service"');
     // 未创建（status 无 exitCode）不能当成已退出：开标签与等待是两个 IPC
     expect(main).toContain("status.exitCode === undefined ? undefined : {");
+  });
+
+  it("每次「运行」先回收旧服务标签、再开一个全新 id 的终端（真机事故的接线层回归网）", () => {
+    // 事件：回用上一次的服务标签 → 不会再发 create（服务永远起不来）；
+    // 终端 id 固定 → 上一次的退出记录会把这一次判死（用户第一次真机使用就撞上）。
+    expect(app).toContain('tab.target.type === "terminal" && tab.target.galleryId === app.id');
+    expect(app).toContain("closePreviewTabRef.current(previous.id);");
+    expect(app).toMatch(/galleryServiceTerminalId\(app\.id, crypto\.randomUUID\(\)\.slice\(0, 8\)\)/u);
+    expect(app).toContain("galleryId: app.id, cwd: plan.directory");
   });
 });

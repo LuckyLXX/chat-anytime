@@ -263,6 +263,22 @@ export function galleryRunPlan(
   return { action: "manual" };
 }
 
+/**
+ * 服务型作品的「服务终端」标签 id：同一个作品**每次运行都不一样**。
+ *
+ * 第一版用固定 id（`terminal-gallery-<appId>`），用户第一次真机使用就撞上了：终端 id
+ * 是主进程记住「这个进程为啥退出」的键，固定 id 意味着上次尝试的退出记录（用户关掉
+ * 服务标签、强杀进程都会留下）还在表里——而「开标签」与「等就绪」是两个 IPC，
+ * 等待方常常在新 PTY 建好之前就读到旧记录，于是直接弹「启动命令已退出（代码
+ * -1073741510）」，可终端里服务其实正在正常启动（2026-09-23 实测）。
+ * 每次新 id 同时修掉另一个坑：旧标签的 PTY 已经死了时，重复用同一个 id 不会再发
+ * create，服务永远起不起来；现在「运行」先回收旧标签再开新标签，一定是一个全新的
+ * 服务进程（地址真的可达时根本不会走到这条分支，见 galleryRunPlan）。
+ */
+export function galleryServiceTerminalId(appId: string, nonce: string): string {
+  return `terminal-gallery-${appId}-${nonce}`;
+}
+
 /** 服务起不来的原因（主进程 await-service 回执与本地判定共用同一形状）。 */
 export interface GalleryServiceFailure {
   reason?: "invalid-url" | "timeout" | "exited";

@@ -16,6 +16,7 @@ import { validateHostDraft } from "./ssh-host-store.js";
 import type { SshKnownHostsStore } from "./ssh-known-hosts.js";
 import { SshSftpTransferService, type SshSftpLike } from "./ssh-sftp.js";
 import { downloadDirFor } from "./browser-downloads.js";
+import { stripAnsi } from "./ansi.js";
 
 /**
  * SSH 连接管理：ssh2 Client + shell channel（远端 PTY），与本地 PTY 终端
@@ -143,13 +144,9 @@ export function fingerprintOfHostKey(key: Buffer): string {
   return `SHA256:${createHash("sha256").update(key).digest("base64").replace(/=+$/, "")}`;
 }
 
-/** 剥除 ANSI OSC/CSI 序列与控制字符（AI 回执与 ssh_read 给模型干净文本）。 */
-export function stripAnsi(text: string): string {
-  return text
-    .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)?/g, "")
-    .replace(/\u001b\[[0-9;:?]*[ -/]*[@-~]/g, "")
-    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "");
-}
+/** 剥除 ANSI OSC/CSI 序列与控制字符（AI 回执与 ssh_read 给模型干净文本）。
+ *  实现已抽到 `src/main/ansi.ts`（终端侧也要用同一份），此处保留再导出以免调用方散落。 */
+export { stripAnsi };
 
 // marker 回显的构成片段：与 markerPrintfCommand 共用同一组常量，保证「测试样本」
 // 与「真实回显」永不漂移（此前单测手写字面样本，漏掉了远端折行形态）。

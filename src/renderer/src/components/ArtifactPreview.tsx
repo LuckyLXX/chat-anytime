@@ -20,8 +20,9 @@ export type PreviewTarget =
   | { type: "artifact"; artifact: Artifact }
   /** galleryId：该浏览器标签属于哪个作品（「运行」重开时据此找旧标签；关闭时清理）。 */
   | { type: "browser"; id?: string; title?: string; loading?: boolean; galleryId?: string }
-  /** cwd/initialCommand：服务型作品「运行」在那个作品目录里直接跑启动命令（title 用作标签名）。 */
-  | { type: "terminal"; cwd?: string; initialCommand?: string; title?: string }
+  /** cwd/initialCommand：服务型作品「运行」在那个作品目录里直接跑启动命令（title 用作标签名）。
+   *  galleryId：该终端属于哪个作品（「运行」重开时据此回收旧的服务标签）。 */
+  | { type: "terminal"; cwd?: string; initialCommand?: string; title?: string; galleryId?: string }
   | { type: "ssh" }
   | { type: "ssh-terminal"; terminalId: string; hostId: string; hostName: string }
   | { type: "file"; file: WorkspaceFilePreview; workspace?: string }

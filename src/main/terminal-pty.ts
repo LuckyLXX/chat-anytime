@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { basename, delimiter, join } from "node:path";
+import { stripAnsi } from "./ansi.js";
 import type { TerminalCommand, TerminalEventData } from "../shared/protocol.js";
 
 /**
@@ -61,6 +62,7 @@ interface TerminalRecord {
 /** 已退出终端的残留信息：进程没了以后还得能回答「为啥没起来」。 */
 interface TerminalExitRecord {
   exitCode?: number;
+  /** 给人看的输出尾部（已剥 ANSI/控制序列——ConPTY 的回显噪声没人读得懂）。 */
   tail: string;
 }
 
@@ -273,8 +275,12 @@ export class TerminalManager {
   }
 
   private rememberExit(terminalId: string, exitCode: number, scrollback: string): void {
+    const stripped = stripAnsi(scrollback);
     this.exits.delete(terminalId);
-    this.exits.set(terminalId, { exitCode, tail: scrollback.length > EXIT_TAIL_CHARS ? scrollback.slice(scrollback.length - EXIT_TAIL_CHARS) : scrollback });
+    this.exits.set(terminalId, {
+      exitCode,
+      tail: stripped.length > EXIT_TAIL_CHARS ? stripped.slice(stripped.length - EXIT_TAIL_CHARS) : stripped
+    });
     while (this.exits.size > EXIT_RECORD_LIMIT) {
       const oldest = this.exits.keys().next().value;
       if (oldest === undefined) break;
@@ -285,12 +291,13 @@ export class TerminalManager {
   /**
    * 终端此刻的状态：服务型作品的等待方靠它决定「还值得再等吗」。
    *
-   * 关键区分：`exitCode === undefined` 既包含活着、也包含**尚未创建**——等待方
-   * 不能把「还没创建」当成失败（渲染端开标签与等待是两个独立 IPC，先后者到是常态）。
+   * `exitCode === undefined` 既可能是还活着、也可能是**尚未创建**（渲染端开标签与
+   * 等待是两个独立 IPC，后者先到是常态），等待方绝不能把这种情形当失败。
    *
    * 「活着的记录」优先于「退出记录」：同一 id 重新起了进程后，上一次的失败记录
-   * 不得把新进程判死（重试即重启服务，见下测试）；这里不靠 create 时清记录，
-   * 而是把优先序放在唯一的读路径上。
+   * 不得把新进程判死（重试即重启服务）。作品的服务终端靠「每次运行都用新 id」
+   * 避开残留记录（见 shared/gallery.ts 的 galleryServiceTerminalId），这条优先序
+   * 是同一问题的第二道防线（普通终端会反复重连同一个 id）。
    */
   status(terminalId: string): { alive: boolean; exitCode?: number; tail?: string } {
     if (this.terminals.has(terminalId)) return { alive: true };
@@ -300,15 +307,6 @@ export class TerminalManager {
     if (exited.exitCode !== undefined) status.exitCode = exited.exitCode;
     if (exited.tail) status.tail = exited.tail;
     return status;
-  }
-
-  /** 终端输出的尾部（活着取实时 scrollback，已退出取残留记录）。 */
-  tail(terminalId: string, chars = 2000): string | undefined {
-    const alive = this.terminals.get(terminalId);
-    if (alive) return alive.scrollback.length > chars ? alive.scrollback.slice(alive.scrollback.length - chars) : alive.scrollback;
-    const exited = this.exits.get(terminalId);
-    if (!exited) return undefined;
-    return exited.tail.length > chars ? exited.tail.slice(exited.tail.length - chars) : exited.tail;
   }
 
   private kill(terminalId: string): void {

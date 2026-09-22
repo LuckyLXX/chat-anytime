@@ -65,7 +65,7 @@ import { DelegationTranscript } from "./components/DelegationTranscript";
 import { detailTitle } from "./components/QuestionPanel";
 import { compactPath, type Artifact } from "./lib/content";
 import { composePickMessage } from "./lib/browser-pick";
-import { composeGalleryDevMessage, galleryRunPlan, galleryServiceFailureMessage, GALLERY_SERVICE_WAIT_MS, type GalleryApp, type GalleryDraft, type GalleryKind } from "../../shared/gallery";
+import { composeGalleryDevMessage, galleryRunPlan, galleryServiceFailureMessage, galleryServiceTerminalId, GALLERY_SERVICE_WAIT_MS, type GalleryApp, type GalleryDraft, type GalleryKind } from "../../shared/gallery";
 import { GalleryMenu } from "./components/GalleryMenu";
 import { GalleryWall } from "./components/GalleryWall";
 import { GalleryPublishDialog, GalleryWallDialog } from "./components/GalleryDialogs";
@@ -549,12 +549,8 @@ export function App(): ReactNode {
   const openPreviewTargetRef = useRef<(target: PreviewTarget, id?: string) => void>(() => {});
   /** 打开指定标签（服务型作品的终端标签用它，要带 cwd/initialCommand），同样后定义。 */
   const openTerminalPreviewRef = useRef<(target: PreviewTarget, id: string) => void>(() => {});
-  /**
-   * 服务型作品的终端标签 id **按作品固定**：再点一次「运行」复用同一个 PTY
-   * （主进程 create 会复用而不是重跑命令），不会莫名多起一个服务；
-   * 关掉这个标签 = 停掉服务（关闭标签会 kill PTY，PTY 就是服务的宿主）。
-   */
-  const galleryServiceTerminalId = (app: GalleryApp): string => `terminal-gallery-${app.id}`;
+  /** 关掉标签（服务型作品运行前先回收同一作品的旧服务标签），同样后定义。 */
+  const closePreviewTabRef = useRef<(id: string) => void>(() => {});
 
   /** 开浏览器标签并记一次运行（网页作品与服务型作品共用这条尾巴）。 */
   const openGalleryBrowserTab = useCallback(async (app: GalleryApp, url: string): Promise<void> => {
@@ -583,8 +579,16 @@ export function App(): ReactNode {
       if (plan.action === "start-service") {
         // 运行 = 开一个终端标签并执行启动命令：启动输出落在用户看得见的地方，
         // 进程与标签同生共死（用户选定：不在后台留隐藏进程）。
-        const terminalId = galleryServiceTerminalId(app);
-        openTerminalPreviewRef.current({ type: "terminal", cwd: plan.directory, initialCommand: plan.command, title: `${app.title} · 服务` }, terminalId);
+        //
+        // 先回收同一作品上一次的服务标签：它的 PTY 可能已经死了（命令报错退出）
+        // 也可能卡在启动中；而不发 create 就永远等不到服务。关标签 = kill 它的 PTY，
+        // 所以这次运行一定是一个全新的服务进程（地址真的可达时不会走到这里）。
+        const previous = previewRef.current?.tabs.find((tab) => tab.target.type === "terminal" && tab.target.galleryId === app.id);
+        if (previous) closePreviewTabRef.current(previous.id);
+        // 终端 id 每次运行都不重样：否则上一次的退出记录会被等待方读成这一次的结果
+        //（2026-09-23 真机事故，见 galleryServiceTerminalId 注释）。
+        const terminalId = galleryServiceTerminalId(app.id, crypto.randomUUID().slice(0, 8));
+        openTerminalPreviewRef.current({ type: "terminal", galleryId: app.id, cwd: plan.directory, initialCommand: plan.command, title: `${app.title} · 服务` }, terminalId);
         if (!plan.url) {
           setMessageActionError(`已在终端启动「${app.title}」：${plan.command}。该作品未登记服务地址，起好后请再点一次「运行」。`);
           return;
@@ -1271,6 +1275,7 @@ export function App(): ReactNode {
   useEffect(() => {
     openPreviewTargetRef.current = openPreviewTarget;
     openTerminalPreviewRef.current = openPreviewTarget;
+    closePreviewTabRef.current = closePreviewTab;
   });
 
   /** 侧边栏 SSH 入口：打开主机管理 tab（固定 id 复用同一 tab，不叠加）。 */

@@ -7,6 +7,7 @@ import {
   galleryRunPlan,
   galleryRunTarget,
   galleryServiceFailureMessage,
+  galleryServiceTerminalId,
   galleryThumbEligible,
   galleryThumbName,
   MAX_GALLERY_APPS,
@@ -246,6 +247,17 @@ describe("galleryServiceFailureMessage / compactServiceTail", () => {
     const long = "x".repeat(300);
     expect(compactServiceTail(long, 200)).toHaveLength(201);
     expect(compactServiceTail(long, 200).startsWith("…")).toBe(true);
+  });
+});
+
+describe("galleryServiceTerminalId（每次运行都得是新 id）", () => {
+  it("同一作品每次运行得到不同的终端 id（否则会读到上一次的退出记录）", () => {
+    const first = galleryServiceTerminalId("g1", "aaaa1111");
+    const second = galleryServiceTerminalId("g1", "bbbb2222");
+    expect(first).toBe("terminal-gallery-g1-aaaa1111");
+    expect(second).not.toBe(first);
+    // 不再是不带 nonce 的固定 id（回到固定 id = 回到真机那个事故）
+    expect(first).not.toBe("terminal-gallery-g1");
   });
 });
 

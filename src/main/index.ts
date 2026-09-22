@@ -667,8 +667,9 @@ function registerIpc(): void {
       timeoutMs: clampServiceWait(input?.timeoutMs),
       watch: terminalId ? () => {
         const status = terminalManager.status(terminalId);
-        // exitCode 有值才算「已经退出」：未创建与还活着都返回 undefined
-        //（开标签与等待是两个 IPC，先后到达是常态）。
+        // exitCode 有值才算「本次的启动命令已经退出」；未创建与还活着都返回 undefined
+        //（开标签与等待是两个 IPC，后者先到是常态——绝不能把「还没创建」当失败）。
+        // 每次「运行」都用新的终端 id，所以这里不会读到上一次尝试的残留记录。
         return status.exitCode === undefined ? undefined : { exited: true, exitCode: status.exitCode, tail: status.tail };
       } : undefined
     });
