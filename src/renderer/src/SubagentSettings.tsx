@@ -105,6 +105,8 @@ export function SubagentSettings({ resources, workspaceOpen, models, providers }
 
   async function saveSubagent(formEvent: FormEvent): Promise<void> {
     formEvent.preventDefault();
+    // 整页是 <form>（底部动作条要在滚动主体之外），未展开编辑器时的隐式提交直接忽略。
+    if (!formOpen) return;
     if (!workspaceOpen && scope === "project") {
       setLocalError("项目级子智能体需要先打开工作区");
       return;
@@ -148,100 +150,121 @@ export function SubagentSettings({ resources, workspaceOpen, models, providers }
   const controlsBusy = busy;
 
   return (
-    <div className="resource-settings">
-      <div className="resource-settings-header">
-        <div>
-          <h3><Bot size={16} />子智能体</h3>
-          <p>定义可保存、可复用的子智能体：委派时按名称引用，覆盖固定的 role 枚举。每个子智能体有独立的系统提示词、模型与工具集。</p>
-        </div>
-      </div>
-      {localError && <p className="form-error resource-error">{localError}</p>}
-      <section className="resource-section">
-        <div className="resource-section-heading">
-          <span><Bot size={14} />定义</span>
-          <div className="resource-section-actions"><small>{resources.subagents.length} 个</small><button className="secondary-button compact-button" type="button" disabled={controlsBusy} onClick={openCreate}><Plus size={13} />新建子智能体</button></div>
-        </div>
-        <p className="resource-form-help">
-          子智能体与主会话共享同一套白名单工具，但可按需收窄；模型缺省继承当前会话模型。作用域优先级：项目级（<code>.pidesktop-subagents.json</code>）&gt; 用户全局 &gt; 内置（随应用分发；同 id 时后者覆盖前者）。内置子智能体只读，只能选择执行模型。委派 <code>delegate_agent</code> 时 <code>subagent</code> 参数必填，且只能填这里的名称或 id，未命中会被直接拒绝。
-        </p>
-        {resources.subagents.length === 0 ? <p className="resource-empty">还没有子智能体。点击“新建子智能体”，定义名称、系统提示词与工具范围后保存。</p> : (
-          <div className="resource-list">
-            {resources.subagents.map((subagent) => (
-              <div className="resource-item" key={`${subagent.scope}/${subagent.id}`} data-subagent-scope={subagent.scope}>
-                <div className="resource-item-icon subagent-color" data-color={subagent.color ?? "amber"}><Bot size={14} /></div>
-                <div className="resource-item-copy">
-                  <strong>{subagent.name}</strong>
-                  <small>{subagentScopeLabel(subagent.scope)} · {subagent.model ? `${subagent.model.provider}/${subagent.model.id}` : "继承默认模型"} · {subagent.tools === "inherit" ? "继承父会话工具" : "自定义工具"}</small>
-                  <em>{subagent.description || subagent.systemPrompt}</em>
-                </div>
-                {subagent.scope === "bundled" ? (
-                  modelEditingId === subagent.id ? (
-                    <div className="subagent-model-edit">
-                      <ModelSelect models={configuredModels} providers={providers} value={subagent.model ? `${subagent.model.provider}/${subagent.model.id}` : ""} placeholder="继承当前会话模型" onChange={(value) => void saveBundledModel(subagent.id, value)} />
-                      <button className="secondary-button compact-button" type="button" disabled={controlsBusy} onClick={() => setModelEditingId(undefined)}>取消</button>
+    <form className="resource-page" data-pane="subagent-settings" onSubmit={(formEvent) => void saveSubagent(formEvent)}>
+      <header className="resource-page-head">
+        <span className="resource-page-title">
+          <strong>子智能体</strong>
+          <small>定义可保存、可复用的子智能体：委派时按名称引用；每个子智能体有独立的系统提示词、模型与工具集</small>
+        </span>
+        <span className="resource-page-actions">
+          <button className="secondary-button compact-button" type="button" data-control="subagent-add" disabled={controlsBusy} onClick={openCreate}><Plus size={13} />新建子智能体</button>
+        </span>
+      </header>
+      <div className="resource-page-body">
+        {localError && <p className="form-error resource-error">{localError}</p>}
+
+        <section className="resource-card" aria-label="已定义子智能体">
+          <div className="resource-card-head">
+            <span className="resource-card-title"><Bot size={14} /><strong>已定义</strong></span>
+            <small>作用域优先级：项目级 &gt; 用户全局 &gt; 内置（同 id 后者覆盖前者）；内置只读，仅可选执行模型</small>
+            <span className="resource-card-actions"><small className="resource-card-count">{resources.subagents.length} 个</small></span>
+          </div>
+          <div className="resource-card-body">
+            <p className="resource-form-help">
+              子智能体与主会话共享同一套白名单工具，但可按需收窄；模型缺省继承当前会话模型。项目级放在 <code>.pidesktop-subagents.json</code>，用户全局在用户目录，内置随应用分发。委派 <code>delegate_agent</code> 时 <code>subagent</code> 参数必填，且只能填这里的名称或 id，未命中会被直接拒绝。
+            </p>
+            {resources.subagents.length === 0
+              ? <p className="resource-empty">还没有子智能体。点右上「新建子智能体」，定义名称、系统提示词与工具范围后保存。</p>
+              : (
+                <div className="resource-list">
+                  {resources.subagents.map((subagent) => (
+                    <div className="resource-item" key={`${subagent.scope}/${subagent.id}`} data-subagent-scope={subagent.scope}>
+                      <div className="resource-item-icon subagent-color" data-color={subagent.color ?? "amber"}><Bot size={14} /></div>
+                      <div className="resource-item-copy">
+                        <strong>{subagent.name}</strong>
+                        <small>{subagentScopeLabel(subagent.scope)} · {subagent.model ? `${subagent.model.provider}/${subagent.model.id}` : "继承默认模型"} · {subagent.tools === "inherit" ? "继承父会话工具" : "自定义工具"}</small>
+                        <em>{subagent.description || subagent.systemPrompt}</em>
+                      </div>
+                      {subagent.scope === "bundled" ? (
+                        modelEditingId === subagent.id ? (
+                          <div className="subagent-model-edit">
+                            <ModelSelect models={configuredModels} providers={providers} value={subagent.model ? `${subagent.model.provider}/${subagent.model.id}` : ""} placeholder="继承当前会话模型" onChange={(value) => void saveBundledModel(subagent.id, value)} />
+                            <button className="secondary-button compact-button" type="button" disabled={controlsBusy} onClick={() => setModelEditingId(undefined)}>取消</button>
+                          </div>
+                        ) : (
+                          <button className="secondary-button compact-button" type="button" disabled={controlsBusy} title={`选择 ${subagent.name} 的执行模型`} onClick={() => setModelEditingId(subagent.id)}><Pencil size={13} />执行模型</button>
+                        )
+                      ) : (
+                        <>
+                          <button className="icon-button" type="button" title={`编辑 ${subagent.name}`} aria-label={`编辑子智能体 ${subagent.name}`} disabled={controlsBusy} onClick={() => openEdit(subagent)}><Pencil size={14} /></button>
+                          <button className="icon-button resource-remove" type="button" title={`删除 ${subagent.name}`} aria-label={`删除子智能体 ${subagent.name}`} disabled={controlsBusy} onClick={() => void deleteSubagent(subagent)}><Trash2 size={14} /></button>
+                        </>
+                      )}
                     </div>
-                  ) : (
-                    <button className="secondary-button compact-button" type="button" disabled={controlsBusy} title={`选择 ${subagent.name} 的执行模型`} onClick={() => setModelEditingId(subagent.id)}><Pencil size={13} />执行模型</button>
-                  )
-                ) : (
-                  <>
-                    <button className="icon-button" type="button" title={`编辑 ${subagent.name}`} aria-label={`编辑子智能体 ${subagent.name}`} disabled={controlsBusy} onClick={() => openEdit(subagent)}><Pencil size={14} /></button>
-                    <button className="icon-button resource-remove" type="button" title={`删除 ${subagent.name}`} aria-label={`删除子智能体 ${subagent.name}`} disabled={controlsBusy} onClick={() => void deleteSubagent(subagent)}><Trash2 size={14} /></button>
-                  </>
+                  ))}
+                </div>
+              )}
+          </div>
+        </section>
+
+        {formOpen && (
+          <section className="resource-card subagent-form" aria-label="编辑子智能体">
+            <div className="resource-card-head">
+              <span className="resource-card-title"><Bot size={14} /><strong>{editingId !== undefined ? "编辑子智能体" : "新建子智能体"}</strong></span>
+              <small>{editingId !== undefined ? name.trim() || "未命名" : "保存后本条定义立即可被 delegate_agent 引用"}</small>
+            </div>
+            <div className="resource-card-body">
+              <div className="mcp-form-grid">
+                <label>名称<input value={name} placeholder="例如 code-reviewer" autoFocus onChange={(changeEvent) => setName(changeEvent.target.value)} /></label>
+                <label>颜色标记
+                  <div className="subagent-color-picker">
+                    {COLOR_OPTIONS.map((item) => (
+                      <button
+                        key={item}
+                        type="button"
+                        className={`subagent-color-swatch ${color === item ? "selected" : ""}`}
+                        style={{ backgroundColor: COLOR_SWATCHES[item] }}
+                        onClick={() => setColor(item)}
+                        title={item}
+                        aria-label={`选择颜色 ${item}`}
+                      />
+                    ))}
+                  </div>
+                </label>
+                <label>模型<ModelSelect models={configuredModels} providers={providers} value={model} placeholder="继承默认模型" onChange={setModel} /></label>
+                <label>作用域
+                  <select value={scope} onChange={(changeEvent) => setScope(changeEvent.target.value as SubagentScope)}>
+                    <option value="project" disabled={!workspaceOpen}>{workspaceOpen ? "当前项目 .pidesktop-subagents.json" : "当前项目（需先打开工作区）"}</option>
+                    <option value="global">用户全局配置</option>
+                  </select>
+                </label>
+                <label className="mcp-form-wide">描述<input value={description} placeholder="展示给模型的简短说明" onChange={(changeEvent) => setDescription(changeEvent.target.value)} /></label>
+                <label className="checkbox-setting"><input type="checkbox" checked={injectAgentsMd} onChange={(changeEvent) => setInjectAgentsMd(changeEvent.target.checked)} />注入 AGENTS.md（子代理运行前遵循工作区规范）</label>
+              </div>
+              <label className="mcp-form-wide">系统提示词<textarea value={systemPrompt} rows={6} placeholder="描述这个子智能体的角色、边界和规则…" onChange={(changeEvent) => setSystemPrompt(changeEvent.target.value)} /></label>
+              <fieldset className="mcp-form-wide">
+                <legend>可用工具</legend>
+                <label className="checkbox-setting"><input type="checkbox" checked={inherited} onChange={(changeEvent) => { setInherited(changeEvent.target.checked); if (changeEvent.target.checked) setTools(Object.fromEntries(SUBAGENT_TOOLS.map((tool) => [tool, true])) as Record<BuiltinToolName, boolean>); }} />继承父会话工具集</label>
+                {!inherited && (
+                  <div className="tool-grid">
+                    {SUBAGENT_TOOLS.map((tool) => (
+                      <label className="tool-toggle" key={tool}><input type="checkbox" checked={tools[tool]} onChange={(changeEvent) => setTools({ ...tools, [tool]: changeEvent.target.checked })} />{toolLabel(tool)}</label>
+                    ))}
+                  </div>
                 )}
-              </div>
-            ))}
-          </div>
+              </fieldset>
+              <p className="resource-form-help">运行时：子代理与主会话同口径套用用户手动修正的 token 限额；风险工具（bash/edit/write 等）仍走同一审批闸口。子代理空产出（既不返回文本也无工具调用）计为失败并上报原因，不再伪装成成功；新增定义后活动会话会自动重建以刷新可用清单（会话忙时跳过，下次重建生效）。</p>
+            </div>
+          </section>
         )}
-      </section>
+      </div>
       {formOpen && (
-        <form className="mcp-config-form" onSubmit={(formEvent) => void saveSubagent(formEvent)}>
-          <div className="mcp-form-grid">
-            <label>名称<input value={name} placeholder="例如 code-reviewer" autoFocus onChange={(changeEvent) => setName(changeEvent.target.value)} /></label>
-            <label>颜色标记
-              <div className="subagent-color-picker">
-                {COLOR_OPTIONS.map((item) => (
-                  <button
-                    key={item}
-                    type="button"
-                    className={`subagent-color-swatch ${color === item ? "selected" : ""}`}
-                    style={{ backgroundColor: COLOR_SWATCHES[item] }}
-                    onClick={() => setColor(item)}
-                    title={item}
-                    aria-label={`选择颜色 ${item}`}
-                  />
-                ))}
-              </div>
-            </label>
-            <label>模型<ModelSelect models={configuredModels} providers={providers} value={model} placeholder="继承默认模型" onChange={setModel} /></label>
-            <label>作用域
-              <select value={scope} onChange={(changeEvent) => setScope(changeEvent.target.value as SubagentScope)}>
-                <option value="project" disabled={!workspaceOpen}>{workspaceOpen ? "当前项目 .pidesktop-subagents.json" : "当前项目（需先打开工作区）"}</option>
-                <option value="global">用户全局配置</option>
-              </select>
-            </label>
-            <label className="mcp-form-wide">描述<input value={description} placeholder="展示给模型的简短说明" onChange={(changeEvent) => setDescription(changeEvent.target.value)} /></label>
-            <label className="checkbox-setting"><input type="checkbox" checked={injectAgentsMd} onChange={(changeEvent) => setInjectAgentsMd(changeEvent.target.checked)} />注入 AGENTS.md（子代理运行前遵循工作区规范）</label>
-          </div>
-          <label className="mcp-form-wide">系统提示词<textarea value={systemPrompt} rows={6} placeholder="描述这个子智能体的角色、边界和规则…" onChange={(changeEvent) => setSystemPrompt(changeEvent.target.value)} /></label>
-          <fieldset className="mcp-form-wide">
-            <legend>可用工具</legend>
-            <label className="checkbox-setting"><input type="checkbox" checked={inherited} onChange={(changeEvent) => { setInherited(changeEvent.target.checked); if (changeEvent.target.checked) setTools(Object.fromEntries(SUBAGENT_TOOLS.map((tool) => [tool, true])) as Record<BuiltinToolName, boolean>); }} />继承父会话工具集</label>
-            {!inherited && (
-              <div className="tool-grid">
-                {SUBAGENT_TOOLS.map((tool) => (
-                  <label className="tool-toggle" key={tool}><input type="checkbox" checked={tools[tool]} onChange={(changeEvent) => setTools({ ...tools, [tool]: changeEvent.target.checked })} />{toolLabel(tool)}</label>
-                ))}
-              </div>
-            )}
-          </fieldset>
-          <p className="resource-form-help">运行时：子代理与主会话同口径套用用户手动修正的 token 限额；风险工具（bash/edit/write 等）仍走同一审批闸口。子代理空产出（既不返回文本也无工具调用）计为失败并上报原因，不再伪装成成功；新增定义后活动会话会自动重建以刷新可用清单（会话忙时跳过，下次重建生效）。</p>
-          <footer className="mcp-form-actions">
-            <button className="secondary-button" type="button" disabled={controlsBusy} onClick={() => { setFormOpen(false); setEditingId(undefined); }}><X size={13} />取消</button>
-            <button className="primary-button" type="submit" disabled={controlsBusy || !name.trim()}>{editingId !== undefined ? "保存修改" : "添加子智能体"}</button>
-          </footer>
-        </form>
+        <footer className="subagent-form-actions">
+          <span className="subagent-form-note">{editingId !== undefined ? `正在编辑 ${name.trim() || "未命名"}` : "新建子智能体"}</span>
+          <button className="secondary-button compact-button" type="button" disabled={controlsBusy} onClick={() => { setFormOpen(false); setEditingId(undefined); }}><X size={13} />取消</button>
+          <button className="primary-button compact-button" type="submit" data-control="subagent-save" disabled={controlsBusy || !name.trim()}>{editingId !== undefined ? "保存修改" : "添加子智能体"}</button>
+        </footer>
       )}
-    </div>
+    </form>
   );
 }

@@ -1568,6 +1568,19 @@ html[data-ui-motion="off"] .general-jev-toggle .chevron { transition: none; }
    文字挤出边界（2026-09-23 真机截图确认）。 */
 .resource-page .resource-toggle input { flex: 0 0 auto; width: 15px; height: 15px; padding: 0; }
 .resource-page .resource-item label, .resource-page .resource-item .checkbox-setting { margin: 0; color: var(--text-muted); }
+/* 子智能体：整页是 <form>，底部动作条固定在滚动主体之外（表单较长时保存钮不再滚走）。
+   卡片自带 overflow:hidden，sticky 在那里不生效（实测 footTop 1151 落在滚动视口
+   794 之外），所以动作条必须放在 .resource-page-body 的兄弟层。 */
+.resource-page .subagent-form-actions { display: flex; flex: 0 0 auto; align-items: center; justify-content: flex-end; gap: 7px; padding: 10px 16px 12px; border-top: 1px solid var(--border); background: var(--surface-footer); }
+.resource-page .subagent-form-note { flex: 1 1 auto; min-width: 0; color: var(--text-muted); font-size: 10.5px; }
+/* 工具勾选行（.tool-toggle 原先没有任何规则，吃 .settings-dialog label 的
+   grid + 15px 18px 与 38px 高的 checkbox） */
+.resource-page .tool-toggle { display: inline-flex; align-items: center; gap: 5px; margin: 0; color: var(--text); font-size: 11px; font-weight: 500; cursor: pointer; }
+.resource-page .tool-toggle input { flex: 0 0 auto; width: 15px; height: 15px; padding: 0; }
+.resource-page .tool-grid label { margin: 0; }
+.resource-page .mcp-form-wide { margin: 0; }
+.resource-page fieldset.mcp-form-wide { min-width: 0; margin: 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; }
+.resource-page fieldset legend { padding: 0 4px; color: var(--text-muted); font-size: 10px; font-weight: 700; }
 
 /* ============================================================
    外观页（AppearanceSettings.tsx，2026-09-23 从 App.tsx 抽出重排）。
