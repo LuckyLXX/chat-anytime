@@ -4,6 +4,7 @@ import type { AccessMode, DesktopSettings, JevSettings, ModelOption, ProviderOpt
 import { THINKING_LEVELS } from "../../shared/thinking-levels";
 import { thinkingLevelLabels } from "../../shared/locale";
 import { ModelSelect } from "./components/ModelSelect";
+import { selectableCatalogModels } from "./lib/model-list";
 import { useDesktopStore } from "./store";
 
 /**
@@ -14,7 +15,9 @@ import { useDesktopStore } from "./store";
  * 语义；能力总闸是裸复选框、说明全藏在 title；Jev 区块占近一屏喧宾夺主。
  *
  * 本轮按角色页（AgentSettings.tsx）已验证的分区卡片体系重排：
- * ① 五张分区卡片：对话与权限 / 默认工作区 / 能力总闸 / Jev 快速决策 / 界面；
+ * ① 六张分区卡片：对话与权限 / 视觉识别（图片兜底）/ 默认工作区 / 能力总闸 /
+ *    Jev 快速决策 / 界面（视觉识别 2026-09-23 从「模型服务」页迁来——它是全局项，
+ *    原先挂在每个服务商的滚动内容里）；
  * ② 能力总闸改整行开关（图标 + 名称 + 一行可见说明 + 右侧开关），
  *    与角色页 agent-switch-row 同构；
  * ③ Jev 折叠成一张卡片，默认收起——头部一行显示标题 + 状态徽标 + 启用开关，
@@ -96,6 +99,15 @@ export function GeneralSettings({ settings, models, providers, jevKeyConfigured,
   const jevTestStatus = useDesktopStore((state) => state.jevTestStatus);
   const jevTestMessage = useDesktopStore((state) => state.jevTestMessage);
   const [jevSaved, setJevSaved] = useState(false);
+  // 视觉识别（图片兜底）：全局项（原先挂在「模型服务」页每个服务商的滚动内容里，
+  // 2026-09-23 用户指出它是公共选项 → 迁到本页）。与 Jev 一样走独立命令 + 独立保存，
+  // 不进「保存通用设置」的 settings.save 载荷（那份 Pick 里没有 vision 键）。
+  const [visionEnabled, setVisionEnabled] = useState(settings.vision?.enabled ?? false);
+  const [visionModel, setVisionModel] = useState(settings.vision?.provider && settings.vision.model ? `${settings.vision.provider}/${settings.vision.model}` : "");
+  const [visionPrompt, setVisionPrompt] = useState(settings.vision?.prompt ?? "");
+  const [visionSaving, setVisionSaving] = useState(false);
+  const [visionError, setVisionError] = useState<string>();
+  const visionModelOptions = selectableCatalogModels(models).filter((model) => model.configured && model.imageInput);
 
   function patchSettings(patch: Partial<DesktopSettings>): void {
     useDesktopStore.setState({ settings: { ...settings, ...patch } });
@@ -149,6 +161,28 @@ export function GeneralSettings({ settings, models, providers, jevKeyConfigured,
       setJevError(error instanceof Error ? error.message : "保存 Jev 设置失败");
     } finally {
       setJevSaving(false);
+    }
+  }
+
+  async function saveVision(): Promise<void> {
+    const slash = visionModel.indexOf("/");
+    const provider = slash > 0 ? visionModel.slice(0, slash) : "";
+    const modelId = slash > 0 ? visionModel.slice(slash + 1) : "";
+    if (visionEnabled && (!provider || !modelId)) {
+      setVisionError("请先选择一个支持图片输入的模型");
+      return;
+    }
+    setVisionSaving(true);
+    setVisionError(undefined);
+    try {
+      const vision = { enabled: visionEnabled, provider, model: modelId, ...(visionPrompt.trim() ? { prompt: visionPrompt.trim() } : {}) };
+      await window.piDesktop.send({ type: "vision.save", vision });
+      // 已落盘 → 同步刷新父级回滚基线（与 Jev 保存同一口径）。
+      onDraftCommitted({ ...settings, vision });
+    } catch (error) {
+      setVisionError(error instanceof Error ? error.message : "保存视觉识别设置失败");
+    } finally {
+      setVisionSaving(false);
     }
   }
 
@@ -221,6 +255,27 @@ export function GeneralSettings({ settings, models, providers, jevKeyConfigured,
             </div>
             {settings.accessMode === "full" && <p className="general-warning">完全访问会允许 Pi 直接执行命令并访问工作区外路径，请只在可信项目中使用。</p>}
             {settings.accessMode === "workspace" && <p className="general-hint">工作区内的文件写入会自动允许；bash 命令和工作区外路径仍会询问。</p>}
+          </div>
+        </section>
+
+        <section className="general-card" aria-label="视觉识别（图片兜底）">
+          <div className="general-card-head">
+            <strong>视觉识别（图片兜底）</strong>
+            <small>全局项：对话模型不支持图片输入时，发送的图片交给这里选的多模态模型识别，结果以文本交给对话模型</small>
+            <span className="general-card-actions">
+              <label className="checkbox-setting general-vision-switch"><input type="checkbox" checked={visionEnabled} onChange={(event) => setVisionEnabled(event.target.checked)} />启用</label>
+            </span>
+          </div>
+          <div className="general-card-body">
+            <div className="general-field-row">
+              <label className="general-field"><span>视觉模型</span><ModelSelect models={visionModelOptions} providers={providers} value={visionModel} disabled={visionModelOptions.length === 0} emptyMessage="暂无已配置的多模态模型" placeholder="请选择视觉模型" onChange={setVisionModel} /><small>只列已配置且支持图片输入的模型</small></label>
+              <label className="general-field general-field-wide"><span>识别提示词（可选）</span><textarea rows={3} value={visionPrompt} placeholder="留空使用默认提示词：转写图中文字、描述物体、布局与配色等" onChange={(event) => setVisionPrompt(event.target.value)} /></label>
+            </div>
+            {visionError && <p className="form-error general-form-error">{visionError}</p>}
+            <div className="general-card-footer">
+              <button className="primary-button compact-button" type="button" disabled={visionSaving} onClick={() => void saveVision()}>{visionSaving ? "正在保存" : "保存视觉识别设置"}</button>
+              <small>独立保存，不受「保存通用设置」影响</small>
+            </div>
           </div>
         </section>
 

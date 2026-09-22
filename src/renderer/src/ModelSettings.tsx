@@ -13,8 +13,7 @@ import type {
   ThinkingLevelMap
 } from "../../shared/protocol";
 import { THINKING_LEVELS, thinkingLevelDraftFrom, thinkingLevelMapFromDraft } from "../../shared/thinking-levels";
-import { ModelSelect } from "./components/ModelSelect";
-import { addManualProviderModel, buildBuiltinProviderEntry, filterProviderModels, formatTokenLimit, parseTokenLimit, providerFormBlocker, pruneDisabledModelRefs, selectableCatalogModels, setProviderModelsEnabled } from "./lib/model-list";
+import { addManualProviderModel, buildBuiltinProviderEntry, filterProviderModels, formatTokenLimit, parseTokenLimit, providerFormBlocker, pruneDisabledModelRefs, setProviderModelsEnabled } from "./lib/model-list";
 import { useDesktopStore } from "./store";
 
 /**
@@ -89,12 +88,6 @@ export function ModelSettings({ settings, models, providers, onSaved, onDraftCom
   const [apiKey, setApiKey] = useState("");
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string>();
-  const [visionEnabled, setVisionEnabled] = useState(settings.vision?.enabled ?? false);
-  const [visionModel, setVisionModel] = useState(settings.vision?.provider && settings.vision.model ? `${settings.vision.provider}/${settings.vision.model}` : "");
-  const [visionPrompt, setVisionPrompt] = useState(settings.vision?.prompt ?? "");
-  const [visionSaving, setVisionSaving] = useState(false);
-  const [visionError, setVisionError] = useState<string>();
-  const visionModelOptions = selectableCatalogModels(models).filter((model) => model.configured && model.imageInput);
   const hasSavedCustomKey = Boolean(selectedProvider?.keyConfigured) || (provider === CUSTOM_PROVIDER_ID && customProviderKeySaved);
   const providerModels: ProviderModelSettings[] = isCustomProvider
     ? (selectedProvider?.models ?? customModels)
@@ -316,28 +309,6 @@ export function ModelSettings({ settings, models, providers, onSaved, onDraftCom
           : state
       );
     }, 40_000);
-  }
-
-  async function saveVision(): Promise<void> {
-    const slash = visionModel.indexOf("/");
-    const visionProviderId = slash > 0 ? visionModel.slice(0, slash) : "";
-    const modelId = slash > 0 ? visionModel.slice(slash + 1) : "";
-    if (visionEnabled && (!visionProviderId || !modelId)) {
-      setVisionError("请先在上方的服务商中配置一个支持图片输入的模型");
-      return;
-    }
-    setVisionSaving(true);
-    setVisionError(undefined);
-    try {
-      const vision = { enabled: visionEnabled, provider: visionProviderId, model: modelId, ...(visionPrompt.trim() ? { prompt: visionPrompt.trim() } : {}) };
-      await window.piDesktop.send({ type: "vision.save", vision });
-      // 已落盘 → 刷新父级回滚基线（否则「取消」会把它回滚成旧值）。
-      onDraftCommitted({ ...settings, vision });
-    } catch (error) {
-      setVisionError(error instanceof Error ? error.message : "保存视觉识别设置失败");
-    } finally {
-      setVisionSaving(false);
-    }
   }
 
   async function save(event: FormEvent): Promise<void> {
@@ -567,27 +538,6 @@ export function ModelSettings({ settings, models, providers, onSaved, onDraftCom
                     )}
                 {isCustomProvider && providerModels.length === 0 && customModelId && <label className="checkbox-setting model-image-override"><input type="checkbox" checked={imageInputOverride ?? false} onChange={(event) => setImageInputOverride(event.target.checked)} />支持图片输入（手动覆盖推断）</label>}
                 {providerModels.length > 0 && enabledProviderModels.length === 0 && <p className="model-hint">已取消全部模型：保存后该服务商在模型选择器中不再提供模型（若运行中会话正在用它的模型会自动切走）；想彻底移除该服务，请用右上「删除服务」。</p>}
-              </div>
-            </section>
-
-            <section className="model-card" aria-label="视觉识别">
-              <div className="model-card-head">
-                <strong>视觉识别（图片兜底）</strong>
-                <small>对话模型不支持图片时，图片交给这里选的多模态模型识别，结果以文本交给对话模型</small>
-                <span className="model-card-actions">
-                  <label className="checkbox-setting model-vision-switch"><input type="checkbox" checked={visionEnabled} onChange={(event) => setVisionEnabled(event.target.checked)} />启用</label>
-                </span>
-              </div>
-              <div className="model-card-body">
-                <div className="model-field-row">
-                  <label className="model-field"><span>视觉模型</span><ModelSelect models={visionModelOptions} providers={providers} value={visionModel} disabled={visionModelOptions.length === 0} emptyMessage="暂无已配置的多模态模型" placeholder="请选择视觉模型" onChange={setVisionModel} /><small>只列已配置且支持图片输入的模型</small></label>
-                  <label className="model-field model-field-wide"><span>识别提示词（可选）</span><textarea rows={3} value={visionPrompt} placeholder="留空使用默认提示词：转写图中文字、描述物体、布局与配色等" onChange={(event) => setVisionPrompt(event.target.value)} /></label>
-                </div>
-                {visionError && <p className="model-error">{visionError}</p>}
-                <div className="model-card-footer">
-                  <button className="primary-button compact-button" type="button" disabled={visionSaving} onClick={() => void saveVision()}>{visionSaving ? "正在保存" : "保存视觉识别设置"}</button>
-                  <small>独立保存，不影响上方模型列表的改动</small>
-                </div>
               </div>
             </section>
           </div>

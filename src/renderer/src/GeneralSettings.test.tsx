@@ -101,13 +101,39 @@ function render(overrides: { settings?: DesktopSettings; jevKeyConfigured?: bool
 }
 
 describe("通用页结构契约", () => {
-  it("带 data-pane=general-settings 钩子与五张分区卡片", () => {
+  it("带 data-pane=general-settings 钩子与六张分区卡片", () => {
     render();
     const form = container.querySelector("[data-pane=\"general-settings\"]");
     expect(form).not.toBeNull();
+    // 视觉识别卡是 2026-09-23 从「模型服务」页迁来的全局项（原先挂在每个服务商的
+    // 滚动内容里），位置固定在「对话与权限」之后。
     expect([...container.querySelectorAll(".general-card")].map((card) => card.getAttribute("aria-label"))).toEqual([
-      "对话与权限", "默认工作区", "能力总闸", "Jev 快速决策", "界面"
+      "对话与权限", "视觉识别（图片兜底）", "默认工作区", "能力总闸", "Jev 快速决策", "界面"
     ]);
+  });
+
+  it("视觉识别卡读全局 settings.vision，并走独立的 vision.save", async () => {
+    const withVision = structuredClone(settings);
+    withVision.vision = { enabled: true, provider: "anthropic", model: "claude-opus-4-6" };
+    const handlers = render({ settings: withVision });
+    const card = container.querySelector(".general-card[aria-label=\"视觉识别（图片兜底）\"]") as HTMLElement;
+    expect(card).not.toBeNull();
+    expect((card.querySelector(".general-vision-switch input") as HTMLInputElement).checked).toBe(true);
+    const select = card.querySelector("select") as HTMLSelectElement;
+    expect(select.value).toBe("anthropic/claude-opus-4-6");
+    // 提示词是可选字段：夹具未设 → 空串
+    expect((card.querySelector("textarea") as HTMLTextAreaElement).value).toBe("");
+    await act(async () => {
+      (card.querySelector(".general-card-footer .primary-button") as HTMLButtonElement).click();
+      await Promise.resolve();
+    });
+    const sent = handlers.sends.find((command) => command.type === "vision.save") as { vision: Record<string, unknown> } | undefined;
+    expect(sent).toBeDefined();
+    expect(sent!.vision).toEqual({ enabled: true, provider: "anthropic", model: "claude-opus-4-6" });
+    // 独立保存：不走 settings.save（那份 Pick 里没有 vision 键），并刷新父级回滚基线
+    expect(handlers.sends.some((command) => command.type === "settings.save")).toBe(false);
+    expect(handlers.committed).toHaveLength(1);
+    expect(handlers.saved).toHaveLength(0);
   });
 
   it("固定 footer 带「保存通用设置」提交钮与取消钮", () => {

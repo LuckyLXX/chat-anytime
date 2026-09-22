@@ -1468,6 +1468,13 @@ html[data-ui-motion="off"] .general-jev-toggle .chevron { transition: none; }
 .general-settings .general-jev-autopilot input { flex: 0 0 auto; }
 .general-jev-footer { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; margin-top: 2px; }
 .general-jev-footer .form-hint { margin-left: 4px; }
+/* 视觉识别卡（2026-09-23 从模型服务页迁入）：卡片头右侧启用开关 + 卡片内独立保存行 */
+.general-settings .general-card-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+.general-settings .general-vision-switch { flex: 0 0 auto; margin: 0; color: var(--text); font-size: 11px; font-weight: 500; white-space: nowrap; }
+.general-settings .general-vision-switch input { flex: 0 0 auto; width: 15px; height: 15px; padding: 0; }
+.general-settings .general-field textarea { width: 100%; min-width: 0; padding: 8px 10px; color: var(--text); border: 1px solid var(--border-strong); border-radius: 6px; outline: 0; background: var(--surface-input); font: inherit; font-size: 12px; line-height: 1.55; resize: vertical; }
+.general-card-footer { display: flex; align-items: center; gap: 9px; }
+.general-card-footer small { color: var(--text-muted); font-size: 10px; }
 
 /* ============================================================
    模型服务页（ModelSettings.tsx，2026-09-23 从 App.tsx 抽出重排）。
@@ -1525,8 +1532,6 @@ html[data-ui-motion="off"] .general-jev-toggle .chevron { transition: none; }
 .model-settings .model-card-body { display: flex; flex-direction: column; gap: 9px; padding: 11px 12px; }
 /* 模型列表卡：正文不留内边距，行/工具栏/表单各自带 padding（行仍是整宽分隔线） */
 .model-settings .model-card-body.model-list-body { padding: 0; }
-.model-settings .model-card-footer { display: flex; align-items: center; gap: 9px; }
-.model-settings .model-card-footer small { color: var(--text-muted); font-size: 10px; }
 
 .model-settings .model-field-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
 .model-settings .model-field { display: flex; flex-direction: column; gap: 5px; min-width: 0; margin: 0; color: var(--text-muted); font-size: 10px; font-weight: 700; }
@@ -1540,8 +1545,6 @@ html[data-ui-motion="off"] .general-jev-toggle .chevron { transition: none; }
 .model-settings .model-error { color: var(--danger); }
 .model-settings .model-empty { margin: 0; padding: 18px 12px; color: var(--text-muted); font-size: 11px; text-align: center; }
 .model-settings .model-image-override { margin: 9px 12px 0; }
-.model-settings .model-vision-switch { flex: 0 0 auto; margin: 0; color: var(--text); font-size: 11px; font-weight: 500; white-space: nowrap; }
-.model-settings .model-vision-switch input { flex: 0 0 auto; }
 .model-settings .model-settings-footer { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 10px; padding: 11px 16px 13px; border-top: 1px solid var(--border); background: var(--surface-footer); }
 .model-settings .model-footer-note { flex: 1 1 auto; min-width: 0; color: var(--text-muted); font-size: 10.5px; line-height: 1.45; }
 .model-settings .model-footer-error { color: var(--danger); }
