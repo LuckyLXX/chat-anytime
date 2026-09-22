@@ -1344,7 +1344,12 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 .agent-settings .agent-picker-search input { width: 100%; height: 24px; min-width: 0; padding: 0; border: 0; outline: 0; color: var(--text); background: transparent; font: inherit; font-size: 11px; }
 .agent-settings .agent-picker-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(196px, 1fr)); gap: 2px; max-height: 232px; overflow-y: auto; padding: 5px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-raised); }
 .agent-settings .agent-tool-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(196px, 1fr)); gap: 2px; }
-.agent-settings .agent-check { display: flex; align-items: center; gap: 7px; min-width: 0; min-height: 28px; margin: 0; padding: 0 8px; border-radius: 6px; color: var(--text); font-size: 11px; font-weight: 400; cursor: pointer; }
+/* 勾选行本身必须是定位上下文：下面的原生 checkbox 用 1px absolute 隐藏，
+   若这里不设 relative，包含块会一路逃到 .settings-dialog（入场动画的 transform
+   创建）——列表/编辑区一滚动，隐形 checkbox 就脱离所在行悬浮在几百 px 外，
+   点击 label 聚焦它时触发 focus-scroll 沿滚动链乱滚，页面跳变「变形」
+   （2026-09-23 真机实测：行在 y=218、checkbox 在 y=957，偏差 738px）。 */
+.agent-settings .agent-check { position: relative; display: flex; align-items: center; gap: 7px; min-width: 0; min-height: 28px; margin: 0; padding: 0 8px; border-radius: 6px; color: var(--text); font-size: 11px; font-weight: 400; cursor: pointer; }
 .agent-settings .agent-check:hover { background: var(--surface-button-hover); }
 .agent-settings .agent-check:has(input:disabled) { cursor: default; opacity: .6; }
 /* 原生 checkbox 只做可访问性载体（键盘/表单语义），外观由 .agent-check-box 承担 */
