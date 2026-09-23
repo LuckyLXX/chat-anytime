@@ -550,6 +550,29 @@ describe("SshSftpTransferService", () => {
     await expect(first).rejects.toThrow("已取消");
   });
 
+  it("honours a cancel that lands before the interruptor is registered", async () => {
+    // 回归：取消若落在 download 初始化（remoteSize → mkdir → reserveLocalPart）走完之前，
+    // 早先的占位 cancel 是个空函数，请求被静默丢弃 → promise 永久 pending（过去靠 5ms 睡眠赌过去）。
+    const { service, sftp, dir } = createHarness();
+    sftp.files.set("/root/a.bin", Buffer.from("x"));
+    sftp.readStreamFactory = () => new PassThrough();
+    const first = service.download("t1", { remotePath: "/root/a.bin", localDir: dir });
+
+    expect(service.cancel("t1")).toBe(true);
+    await expect(first).rejects.toThrow("已取消");
+  });
+
+  it("honours a cancel that lands before the upload interruptor is registered", async () => {
+    const { service, sftp, dir } = createHarness();
+    const local = join(dir, "src.bin");
+    writeFileSync(local, "x");
+    sftp.writeDelayMs = 0;
+    const first = service.upload("t1", { localPath: local, remoteDir: "/root" });
+
+    expect(service.cancel("t1")).toBe(true);
+    await expect(first).rejects.toThrow("已取消");
+  });
+
   it("splits multi-file transfers into per-file sub ids", async () => {
     const { service, sftp, dir, published } = createHarness();
     sftp.files.set("/root/one.txt", Buffer.from("1"));

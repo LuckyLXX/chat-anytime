@@ -223,6 +223,8 @@ interface ActiveTransfer {
 export class SshSftpTransferService {
   private sftp: SshSftpLike;
   private active: ActiveTransfer | undefined;
+  /** beginTransfer 之后、真实中断器注册之前收到的取消请求（注册时兑现，见 beginTransfer）。 */
+  private pendingCancelId: string | undefined;
   private disposed = false;
 
   constructor(private readonly deps: SshSftpDeps) {
@@ -376,14 +378,21 @@ export class SshSftpTransferService {
     if (this.active) {
       throw new Error("该连接已有文件传输在进行中，请等待完成或先取消（同一连接同时只允许一个传输）");
     }
-    // cancel 由 pipeTransfer 覆盖为真实中断器；此处先占位，避免并发进入。
-    this.active = { transferId, cancel: () => {} };
+    // 真实中断器由 pipeUpload / pipeTransfer 在初始化完成后才注册；在那之前先记下取消请求，
+    // 注册时立即兑现——否则「刚发起就点取消」会拿到 true 却什么都没发生（传输照跑）。
+    this.active = {
+      transferId,
+      cancel: () => {
+        this.pendingCancelId = transferId;
+      }
+    };
     // direction 只用于 assertUsable 之后的语义校验，当前无额外分支。
     void direction;
   }
 
   private finish(): void {
     this.active = undefined;
+    this.pendingCancelId = undefined;
   }
 
   private async remoteNames(dir: string): Promise<Set<string>> {
@@ -505,13 +514,14 @@ export class SshSftpTransferService {
         fail(new Error(`传输超时（${Math.round(timeoutMs / 1000)} 秒），已中止并清理未完成的文件`), "error");
       }, timeoutMs);
 
-      // 注册真实中断器，供 cancel() 调用。
+      // 注册真实中断器，供 cancel() 调用；并兑现注册之前收到的取消请求。
       if (this.active && this.active.transferId === transferId) {
         this.active.cancel = () => {
           if (settled) return;
           cancelled = true;
           fail(new Error("传输已取消"), "cancelled");
         };
+        if (this.pendingCancelId === transferId) this.active.cancel();
       }
 
       source.on("error", (error: Error) => fail(error, cancelled ? "cancelled" : "error"));
@@ -678,13 +688,14 @@ export class SshSftpTransferService {
         return;
       }
 
-      // 注册真实中断器，供 cancel() 调用。
+      // 注册真实中断器，供 cancel() 调用；并兑现注册之前收到的取消请求。
       if (this.active && this.active.transferId === transferId) {
         this.active.cancel = () => {
           if (settled) return;
           cancelled = true;
           fail(new Error("传输已取消"), "cancelled");
         };
+        if (this.pendingCancelId === transferId) this.active.cancel();
       }
 
       read.on("data", (chunk: Buffer | string) => {
