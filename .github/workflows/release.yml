@@ -1,0 +1,125 @@
+name: release
+
+# 自动出安装包并挂到 Release。
+#  - 推 tag（vX.Y.Z）→ 构建 + 校验 + 上传到该 tag 的 Release
+#  - 手动 workflow_dispatch → 默认只构建并留 artifact（publish 保持 false 便于试跑）
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '版本 tag（留空 = v<package.json version>）'
+        required: false
+        default: ''
+      publish:
+        description: '构建完成后上传到该 tag 的 Release'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: 解析版本与 tag
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./package.json').version")
+          TAG='${{ inputs.tag }}'
+          if [ -z "$TAG" ]; then TAG="v$VERSION"; fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "node $(node -v) / npm $(npm -v)"
+          echo "版本 = $VERSION，tag = $TAG"
+
+      - name: 校验 tag 与 package.json 版本一致
+        if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.publish == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          REF='${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || inputs.tag }}'
+          WANT="v${{ steps.meta.outputs.version }}"
+          if [ "$REF" != "$WANT" ]; then
+            echo "::error::tag $REF 与 package.json 版本 $WANT 不一致，拒绝出包"
+            exit 1
+          fi
+          echo "版本一致：$REF"
+
+      # lock 里有一条 git+ssh 依赖（@electron/node-gyp），CI 无 SSH 密钥 → 改成匿名 HTTPS
+      - name: git 依赖改写为 HTTPS
+        shell: bash
+        run: |
+          git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+
+      # lock 里 973 条 resolved 指向腾讯镜像（海外 runner 慢/易超时）→ 覆写为官方源。
+      # 同源有保障：npm ci 校验 lock 记录的 integrity，且 @earendil-works/* 的 integrity 已与官方 registry 逐位核对一致。
+      - name: 安装依赖
+        shell: bash
+        run: npm ci --registry=https://registry.npmjs.org/ --replace-registry-host=always
+
+      # pi 运行时是指定版本（0.85.0）依赖：装错版本不往下走
+      - name: 断言 pi 依赖版本（node_modules）
+        run: node .github/scripts/verify-package.cjs --preinstall
+
+      - name: 单元测试
+        run: npm test
+
+      - name: 构建
+        run: npm run build
+
+      # 不暴露 GH_TOKEN，并用 --publish never 关掉 electron-builder 自带的发布（避免与下面的 gh 步骤重复）
+      - name: 打包安装包（NSIS）
+        run: npx electron-builder --win nsis --publish never
+
+      - name: 静态校验（版本 / NSIS / asar 内容 / 内置资产）
+        run: node .github/scripts/verify-package.cjs
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-${{ steps.meta.outputs.version }}
+          path: |
+            dist/*.exe
+            dist/*.exe.blockmap
+            dist/latest.yml
+          retention-days: 14
+
+      - name: 上传到 GitHub Release
+        if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG='${{ steps.meta.outputs.tag }}'
+          VERSION='${{ steps.meta.outputs.version }}'
+          REPO="$GITHUB_REPOSITORY"
+          # Release 通常已在本地用 gh release create 建好（带手写 notes）；此处只兜底
+          gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1 || \
+            gh release create "$TAG" --repo "$REPO" --title "${TAG#v}版本" --generate-notes
+          gh release upload "$TAG" --repo "$REPO" --clobber \
+            "dist/ChatAnyTime Setup $VERSION.exe" \
+            "dist/ChatAnyTime Setup $VERSION.exe.blockmap" \
+            dist/latest.yml
+          gh release view "$TAG" --repo "$REPO" --json tagName,assets

@@ -10,6 +10,8 @@
     "preview": "electron-vite preview",
     "demo": "vite --config .vite.demo.config.mjs",
     "package:win": "npm run build && electron-builder --win dir",
+    "package:installer": "npm run build && electron-builder --win nsis --publish never",
+    "verify:package": "node .github/scripts/verify-package.cjs",
     "test": "vitest run"
   },
   "dependencies": {
