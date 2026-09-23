@@ -48,6 +48,8 @@
 
 > `markdown-outline` 与预览正文同属 `preview` 区域；正文内容块带 `content-visibility: auto`（长文档只渲染可视区），主题请勿给 `.preview-scroll` / `.markdown-surface` 及其祖先加`contain`/`transform`/`filter`——那会改变包含块、影响全屏弹层的定位基准。
 
+> `settings-dialog` 是设置弹窗外壳：`header`（标题「ChatAnyTime 设置」+ 关闭钮）+ `.settings-body` 两栏（170px 左 tab 栏 `.settings-tabs` / 右内容区 `.settings-content`），九个 tab 的具体结构见各自条目；各类名带 `.settings-*` 前缀。**左栏底部常驻「当前版本」**（`.settings-version`，`data-control="settings-version"`）：取值来自主进程 `app.getVersion()`（打包版 = 安装包版本，dev 版 = package.json 版本），仅确认用、不可编辑；bootstrap 未回来时内容为空并 `:empty` 隐藏，不会留一条空分隔线。配色走 `--text-muted` 与 `--border`（顶部分隔线），主题可用 `[data-pane="settings-dialog"] .settings-version` 覆盖。
+
 > `agent-settings` 是设置页「Agent 角色」tab（2026-09-22 重设计）——两栏：左栏角色列表（`.agent-rail`，含搜索框与「使用中」徽标 `.agent-rail-live`）与右栏编辑器（`.agent-editor`，顶部固定操作条 `.agent-editor-bar` + 可滚动分区卡片 `.agent-card`：身份 / 人格与系统提示词 / 对话行为 / 技能 / 扩展能力 / 内建工具权限）。结构钩子由 `renderer/src/AgentSettings.tsx` 提供，契约测试在 `AgentSettings.test.tsx`；**主题注意**：该页整体用了 `.agent-settings` 前缀的 (0,2,x) 特异性类名——因为 `.settings-dialog label/input/select`（(0,1,1)）会命中本页所有 label 与输入框，覆盖时必须同样带 `.agent-settings` 或更高特异性，否则会被打回「38px 输入框 + 15px 18px 外边距」并弄坏开关/勾选行尺寸。设置弹窗宽度自 2026-09-23 起九个 tab 统一 `.settings-center.settings-wide`（1080px），切 tab 不再变宽（窄视口回落 `calc(100vw - 48px)`）。相关控件钩子：`data-control="agent-new"`（新建角色）、`agent-save`（保存角色）。
 
 > `general-settings` 是设置页「通用」tab（2026-09-23 重排）——六张分区卡片（`.general-card`，与角色页 `.agent-card` 同构）：对话与权限 / 视觉识别（图片兜底）/ 默认工作区 / 能力总闸 / Jev 快速决策 / 界面；「取消 / 保存通用设置」固定在弹窗底部（`.general-settings-footer`），滚动收进 `.general-settings-body`。能力总闸是整行开关（`.general-switch-row`，`data-control="capability-switch"` + `data-capability="browser|ssh|computer|design"` 区分）；Jev 卡默认收起，头部一行 = 展开钮（`data-control="jev-expand"`，带 `aria-expanded`）+ 标题 + 「实验性」与状态徽标（`.general-jev-badge`，取值 `experimental`/`ok`/`warn`/`busy`/`off`）+ 右侧启用开关；展开后的字段、测试连接（`data-control="jev-test"`）与结果行（`data-role="jev-test-result"`）都在 `.general-card-body` 里。结构钩子由 `renderer/src/GeneralSettings.tsx` 提供，契约测试在 `GeneralSettings.test.tsx`。**主题注意**：与 `agent-settings` 同一条特异性纪律——覆盖本页 label/input/开关样式必须带 `.general-settings` 前缀，否则会被 `.settings-dialog` 的 (0,1,1) 全局规则压回；设置弹窗在本页也走 `.settings-center.settings-wide`（1080px）。
@@ -103,6 +105,7 @@
 | 作品下拉开关（顶栏，aria-expanded + 数量角标） | `gallery-toggle`                                 |
 | 作品：运行 / 继续开发 / 打开作品墙 / 登记新作品 / 移除 | `gallery-run` / `gallery-develop` / `gallery-open-wall` / `gallery-publish` / `gallery-remove` |
 | 角色页：新建角色 / 保存角色 | `agent-new` / `agent-save` |
+| 设置弹窗左栏底部：当前版本 | `settings-version` |
 | 通用页：能力总闸 / Jev 测试连接 / Jev 展开 | `capability-switch`（+ `data-capability`） / `jev-test` / `jev-expand` |
 | 模型服务页：新增服务 / 删除服务 / 保存 / 拉取模型 | `model-provider-add` / `model-provider-delete` / `model-save` / `model-refresh` |
 | 模型行：手动添加 / 思考等级 / 思考等级面板开关 | `model-add` / `model-thinking-levels` / `model-thinking-panel` |

@@ -1027,6 +1027,10 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 .settings-tabs { display: flex; flex-direction: column; gap: 3px; padding: 14px 10px; border-right: 1px solid var(--border); background: var(--surface-muted); }
 .settings-tabs button { min-height: 38px; padding: 0 12px; text-align: left; border: 0; border-radius: 6px; color: var(--text-muted); background: transparent; cursor: pointer; }
 .settings-tabs button.active { color: var(--text); background: var(--surface); box-shadow: inset 3px 0 0 var(--accent); font-weight: 700; }
+/* 左栏底部的「当前版本」：margin-top:auto 把它推到栏底，不随 tab 增多上下浮动；
+   空值（bootstrap 还没回来）时整块隐藏，避免留一条空分隔线。 */
+.settings-version { margin-top: auto; padding: 12px 12px 2px; border-top: 1px solid var(--border); color: var(--text-muted); font-size: 11px; letter-spacing: .2px; cursor: default; user-select: text; }
+.settings-version:empty { display: none; }
 .settings-content { min-width: 0; min-height: 0; overflow-y: auto; animation: soft-fade .15s ease; }
 .resource-notice { display: flex; align-items: flex-start; gap: 7px; margin-top: 12px; padding: 9px 10px; color: var(--warning); border: 1px solid var(--warning); border-radius: 6px; background: var(--warning-soft); font-size: 10px; line-height: 1.45; }
 .resource-notice span { min-width: 0; }

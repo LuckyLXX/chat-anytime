@@ -427,3 +427,30 @@ describe("作品清单的水合与推送", () => {
     }
   });
 });
+
+describe("当前版本的水合", () => {
+  it("bootstrap 的 version 被接住（设置弹窗左栏底部的版本标签靠它，dev 版也看得到版本）", async () => {
+    const host = globalThis as { piDesktop?: unknown; window?: unknown };
+    const originalWindow = host.window;
+    const original = host.piDesktop;
+    host.window = host;
+    host.piDesktop = {
+      onRuntimeMessage: () => () => {},
+      bootstrap: async () => ({
+        platform: "test",
+        version: "1.3.1",
+        settings: { version: 2, thinkingLevel: "medium", accessMode: "ask", providers: [], agents: [], currentAgentId: "default", appearance: { theme: "system", themePreset: "default", customCss: "", customThemes: [], showThinking: true } },
+        resources: { skills: [], commands: [], mcpServers: [], todos: [], memory: [], subagents: [], hooks: [], hooksEnabled: true, automation: [], automationRuns: [], gallery: [], diagnostics: [] }
+      })
+    };
+    try {
+      useDesktopStore.setState({ appVersion: "" });
+      await useDesktopStore.getState().initialize();
+      expect(useDesktopStore.getState().appVersion).toBe("1.3.1");
+    } finally {
+      host.piDesktop = original;
+      host.window = originalWindow;
+      useDesktopStore.setState({ appVersion: "" });
+    }
+  });
+});

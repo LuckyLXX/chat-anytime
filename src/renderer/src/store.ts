@@ -197,6 +197,8 @@ export function paneQuestionRequest(questions: QuestionRequest[], sessionIds: st
 
 interface DesktopState {
   ready: boolean;
+  /** 正在运行的版本（来自主进程 bootstrap 的 `app.getVersion()`）：设置弹窗左栏底部常驻展示。 */
+  appVersion: string;
   snapshot: RuntimeSnapshot;
   /** 分屏格子（watched 非激活会话）的会话级快照，按 sessionId 键控。 */
   paneStates: Record<string, SessionPaneSnapshot>;
@@ -356,6 +358,7 @@ export function pruneParkedPanels(keepIds: ReadonlySet<string>): void {
 
 export const useDesktopStore = create<DesktopState>((set, get) => ({
   ready: false,
+  appVersion: "",
   snapshot: emptySnapshot,
   paneStates: {},
   parkedPanels: {},
@@ -387,6 +390,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
     const bootstrap = await window.piDesktop.bootstrap();
     set({
       ready: true,
+      appVersion: bootstrap.version,
       error: bootstrap.securityWarning,
       settings: bootstrap.settings,
       snapshot: bootstrap.runtime ?? get().snapshot,
