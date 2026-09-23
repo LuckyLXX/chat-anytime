@@ -72,11 +72,28 @@ jobs:
           git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
           git config --global url."https://github.com/".insteadOf "git@github.com:"
 
-      # lock 里 973 条 resolved 指向腾讯镜像（海外 runner 慢/易超时）→ 覆写为官方源。
-      # 同源有保障：npm ci 校验 lock 记录的 integrity，且 @earendil-works/* 的 integrity 已与官方 registry 逐位核对一致。
+      # lock 里 973 条 resolved 指向腾讯镜像，而镜像 URL 带 /npm/ 路径前缀
+      # （mirrors.tencent.com/npm/...）—— 只换 host 会得到 registry.npmjs.org/npm/... 而 404，
+      # 所以这里精确改写前缀。未改动的 lock 仍留在工作区（本机安装继续走镜像）。
+      - name: 规范化 lock 的 registry 前缀（腾讯镜像 → 官方源）
+        shell: bash
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const fs = require('fs')
+          const file = 'package-lock.json'
+          const MIRROR = 'https://mirrors.tencent.com/npm/'
+          const OFFICIAL = 'https://registry.npmjs.org/'
+          const text = fs.readFileSync(file, 'utf8')
+          const count = text.split(MIRROR).length - 1
+          fs.writeFileSync(file, text.split(MIRROR).join(OFFICIAL))
+          console.log(`lock 里 ${count} 条镜像 URL 已改写为官方 registry`)
+          NODE
+
+      # npm ci 严格按 lock 安装并校验 integrity，不会装出别的版本
       - name: 安装依赖
         shell: bash
-        run: npm ci --registry=https://registry.npmjs.org/ --replace-registry-host=always
+        run: npm ci --registry=https://registry.npmjs.org/
 
       # pi 运行时是指定版本（0.85.0）依赖：装错版本不往下走
       - name: 断言 pi 依赖版本（node_modules）
