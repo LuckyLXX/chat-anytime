@@ -25,6 +25,27 @@ import { createSshHostStore, type SshHostCrypto } from "./ssh-host-store.js";
 import { createSshKnownHostsStore } from "./ssh-known-hosts.js";
 import { SshConnectionManager, type SshClientLike } from "./ssh-connections.js";
 
+/**
+ * 关闭 Chromium 的「原生窗口遮挡检测」（Windows）：不关它，浏览器自动化截图会在
+ * 「主窗口被别的应用完全遮住」这个最常见的场景下必然失败。
+ *
+ * 因果链（2026-09-24 真机探针 p6，默认模式实测）：主窗口被完全遮挡 →
+ * 主渲染端 `document.visibilityState === "hidden"`、**rAF 与 ResizeObserver 回调全停**
+ * → 预览面板的视口量测永远不落定 → 浏览器自动化标签页拿不到 bounds（原生视图因此
+ * 一直 setVisible(false)）→ browser_screenshot 8 秒「标签页未能变为可见」超时。
+ * 而**出帧本身没问题**：同探针里遮挡中 CDP Page.captureScreenshot 仍 65ms 出真帧，
+ * 字节数与窗口可见时逐字节一致。同一探针加本开关后：遮挡中 visibilityState 保持
+ * "visible"、rAF/RO 照常、标签页自身 rAF 也在跑，截图恢复正常。
+ *
+ * 代价（用户 2026-09-24 明确接受）：被遮挡 / 在别的虚拟桌面时窗口仍继续渲染，
+ * 多花一点 CPU/GPU。
+ *
+ * 合并而非覆盖：将来别处若也追加 disable-features，这里把已有值接在前面。
+ */
+const disabledFeatures = ["CalculateNativeWinOcclusion"];
+const existingDisabledFeatures = app.commandLine.getSwitchValue("disable-features").split(",").filter(Boolean);
+app.commandLine.appendSwitch("disable-features", [...new Set([...existingDisabledFeatures, ...disabledFeatures])].join(","));
+
 let mainWindow: BrowserWindow | undefined;
 let runtimeProcess: UtilityProcess | undefined;
 let latestSnapshot: RuntimeSnapshot | undefined;

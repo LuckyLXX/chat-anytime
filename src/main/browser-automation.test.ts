@@ -20,6 +20,7 @@ import {
   formatSnapshotLine,
   isSideEffectRejection,
   OBSTRUCTION_PROBE_LIMIT,
+  SCREENSHOT_REVEAL_TIMEOUT_MS,
   setFileInputFiles,
   UPLOAD_REMOUNT_ATTEMPTS,
   urlPatternMatcher,
@@ -999,11 +1000,25 @@ describe("browser automation element screenshots", () => {
   interface ShotHarness {
     controller: BrowserAutomationController;
     captured: Array<Record<string, unknown>>;
+    native: { calls: number };
   }
-  const makeShotHarness = (rect: Record<string, unknown>): ShotHarness => {
+  /** 桩 NativeImage：只备 browser-automation 原生截图路径用到的那几个方法。 */
+  const fakeNativeImage = (width: number, height: number, empty = false): unknown => ({
+    isEmpty: () => empty,
+    getSize: () => ({ width, height }),
+    toPNG: () => Buffer.from("native-png"),
+    toJPEG: (quality: number) => Buffer.from(`native-jpeg-${quality}`),
+    resize: ({ width: w, height: h }: { width: number; height: number }) => fakeNativeImage(w, h)
+  });
+  const makeShotHarness = (
+    rect: Record<string, unknown>,
+    options: { windowRenderable?: boolean; nativeImage?: unknown } = {}
+  ): ShotHarness => {
     const preview = makeFakePreview(["default"]) as FakePreview & BrowserPreviewController;
     preview.rendered.add("default");
+    (preview as unknown as { isWindowRenderable: () => boolean }).isWindowRenderable = () => options.windowRenderable ?? true;
     const captured: Array<Record<string, unknown>> = [];
+    const native = { calls: 0 };
     const contents = {
       isDestroyed: () => false,
       debugger: {
@@ -1022,12 +1037,16 @@ describe("browser automation element screenshots", () => {
           return {};
         },
         on: () => undefined
+      },
+      capturePage: async () => {
+        native.calls += 1;
+        return options.nativeImage ?? fakeNativeImage(640, 360);
       }
     };
     (preview as unknown as { webContentsFor: (id: string) => unknown }).webContentsFor = () => contents;
     const controller = new BrowserAutomationController(preview);
     controllers.push(controller);
-    return { controller, captured };
+    return { controller, captured, native };
   };
 
   it("clips the capture to the element rect with scale folded into clip.scale", async () => {
@@ -1068,7 +1087,72 @@ describe("browser automation element screenshots", () => {
     const params = harness.captured[0]!;
     expect(params.clip).toBeUndefined();
     expect(params.captureBeyondViewport).toBeUndefined();
+    // 窗口能出帧时一律走 CDP，不碰原生捕获。
+    expect(harness.native.calls).toBe(0);
   });
+
+  // 2026-09-24 真机探针 p7 事实：主窗口最小化时 CDP Page.captureScreenshot 永不回包，
+  // 而 webContents.capturePage 16ms 拿到与 CDP 逐像素一致的画面（且不显窗、不抢焦点）。
+  it("falls back to the native capture when the window cannot produce frames", async () => {
+    const harness = makeShotHarness({ ok: true, x: 0, y: 0, width: 1, height: 1 }, { windowRenderable: false });
+    const result = await harness.controller.handle("s1", { op: "screenshot" });
+    expect(result.ok).toBe(true);
+    expect(harness.native.calls).toBe(1);
+    expect(harness.captured).toHaveLength(0);
+    if (result.ok && result.data.kind === "screenshot") {
+      expect(result.data).toMatchObject({ width: 640, height: 360, mimeType: "image/png" });
+      expect(Buffer.from(result.data.data, "base64").toString()).toBe("native-png");
+    }
+  });
+
+  it("honours scale and maxWidth on the native path by resampling", async () => {
+    const harness = makeShotHarness({ ok: true, x: 0, y: 0, width: 1, height: 1 }, { windowRenderable: false });
+    const result = await harness.controller.handle("s1", { op: "screenshot", scale: 2, format: "jpeg", quality: 70 });
+    expect(result.ok).toBe(true);
+    if (result.ok && result.data.kind === "screenshot") {
+      // 原生帧只有视口像素，scale=2 只能重采样放大（尺寸对得上下游消费）。
+      expect(result.data).toMatchObject({ width: 1280, height: 720, mimeType: "image/jpeg" });
+      expect(Buffer.from(result.data.data, "base64").toString()).toBe("native-jpeg-70");
+    }
+  });
+
+  it("refuses element/full-page captures when the window cannot produce frames", async () => {
+    const clipped = makeShotHarness({ ok: true, x: 0, y: 0, width: 10, height: 10 }, { windowRenderable: false });
+    const selectorResult = await clipped.controller.handle("s1", { op: "screenshot", selector: ".any" });
+    expect(selectorResult.ok).toBe(false);
+    if (!selectorResult.ok) expect(selectorResult.error).toContain("最小化或隐藏");
+
+    const full = makeShotHarness({ ok: true, x: 0, y: 0, width: 10, height: 10 }, { windowRenderable: false });
+    const fullResult = await full.controller.handle("s1", { op: "screenshot", fullPage: true });
+    expect(fullResult.ok).toBe(false);
+    // 两条路都不允许静默给半张图：既没用原生捕获，也没发 CDP 截图。
+    expect(full.native.calls).toBe(0);
+    expect(full.captured).toHaveLength(0);
+  });
+
+  it("reports an empty native frame as an honest failure", async () => {
+    const harness = makeShotHarness({ ok: true, x: 0, y: 0, width: 1, height: 1 }, { windowRenderable: false, nativeImage: fakeNativeImage(0, 0, true) });
+    const result = await harness.controller.handle("s1", { op: "screenshot" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("空图");
+  });
+
+  it("fails fast with the minimized-window cause when the tab never lays out", async () => {
+    // 窗口出不了帧 + 标签页始终没布局：预算只有 3 秒（不是 8 秒），且错误必须指向真正的原因。
+    const preview = makeFakePreview(["default"]) as FakePreview & BrowserPreviewController;
+    (preview as unknown as { isWindowRenderable: () => boolean }).isWindowRenderable = () => false;
+    const revealed: string[] = [];
+    const controller = new BrowserAutomationController(preview, (tabId) => revealed.push(tabId));
+    controllers.push(controller);
+    const started = Date.now();
+    const result = await controller.handle("s1", { op: "screenshot" });
+    const elapsed = Date.now() - started;
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("主窗口当前最小化或隐藏");
+    // 揭示事件仍然发出（面板该被打开：用户回来就能看到标签页）。
+    expect(revealed).toContain("default");
+    expect(elapsed).toBeLessThan(SCREENSHOT_REVEAL_TIMEOUT_MS);
+  }, 15_000);
 });
 
 describe("arming never waits for CDP calls that may never answer", () => {

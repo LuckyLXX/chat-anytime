@@ -952,6 +952,17 @@ export const SCREENSHOT_REVEAL_TIMEOUT_MS = 8_000;
 /** Poll interval for the same wait. */
 export const SCREENSHOT_REVEAL_POLL_MS = 100;
 /**
+ * 主窗口自己出不了帧（最小化/隐藏）时的等待预算。这条路上出帧靠 Electron 原生
+ * capturePage，只需要标签页有布局（bounds 由渲染端首帧同步量测回送，通常几十毫秒），
+ * 所以预算给短得多——等不到就快速失败，不拿 8 秒换一句含糊的错误。
+ */
+export const SCREENSHOT_LAYOUT_TIMEOUT_MS = 3_000;
+/**
+ * 原生 capturePage 的超时。本地拷贝，正常在几十毫秒级（2026-09-24 探针 p7 实测 16ms），
+ * 给 10 秒足够覆盖大图/忙机器；比 CDP 那条 30 秒的预算短得多，因为它不涉及合成器出帧。
+ */
+export const SCREENSHOT_NATIVE_CAPTURE_TIMEOUT_MS = 10_000;
+/**
  * Dedicated timeout for Page.captureScreenshot itself. A surface that is not
  * producing frames (hidden view, occluded window) never answers the CDP call,
  * so without this the generic 110s watchdog would be the only backstop.
@@ -2126,25 +2137,62 @@ export class BrowserAutomationController {
   }
 
   /**
-   * Page.captureScreenshot({fromSurface:true}) only completes when the surface
-   * produces compositor frames. A bound tab keeps accepting evaluate/input ops
-   * while hidden (panel closed, another preview tab foreground, dialog
-   * suspension, minimized window), so a screenshot there would hang until the
-   * generic watchdog. Reveal the tab first and wait for the render round trip;
-   * when it cannot become visible, fail fast with the actionable cause instead
-   * of burning the 110s budget.
+   * 截图前的「能不能出帧」判定，返回本次该走哪条出帧路径。
+   *
+   * 两级：
+   * 1. 窗口与标签页都能出帧 → "cdp"（Page.captureScreenshot，现行路径，支持 clip/整页/scale）。
+   * 2. 主窗口自己出不了帧（最小化/隐藏）但标签页有布局 → "capturePage"：Electron 原生
+   *    webContents.capturePage 在窗口最小化时**仍返回真画面**，不显窗也不抢焦点
+   *    （2026-09-24 探针 p7：像素指纹与 CDP 截图逐字节一致，调用期间窗口状态全程未变），
+   *    而 CDP 在最小化窗口上永不回包（同探针 5 秒超时）。
+   *
+   * 「被别的应用完全遮挡」曾经也会掉进这里失败（页面 hidden → 渲染端量测停摆、标签页
+   * 拿不到 bounds）。现在有两道保障：启动期关掉 Chromium 遮挡检测（src/main/index.ts）
+   * + 渲染端首帧同步量测（BrowserPreview），所以那种情况已经能正常出帧。
    */
-  private async ensureTabRenderable(tabId: string): Promise<void> {
-    const renderable = () => this.preview.isTabRendered(tabId) && this.preview.isWindowRenderable();
-    if (renderable()) return;
+  private async ensureTabRenderable(tabId: string): Promise<"cdp" | "capturePage"> {
+    if (this.preview.isTabRendered(tabId) && this.preview.isWindowRenderable()) return "cdp";
     // 截图是用户想看到结果的时刻：把预览面板切到该标签（渲染端 dedup 激活）。
     this.notifyAutomationStarted(tabId);
-    const revealed = await awaitCondition(renderable, SCREENSHOT_REVEAL_TIMEOUT_MS, SCREENSHOT_REVEAL_POLL_MS);
-    if (revealed) return;
+    const budget = this.preview.isWindowRenderable() ? SCREENSHOT_REVEAL_TIMEOUT_MS : SCREENSHOT_LAYOUT_TIMEOUT_MS;
+    const laidOut = await awaitCondition(() => this.preview.isTabRendered(tabId), budget, SCREENSHOT_REVEAL_POLL_MS);
+    if (laidOut) return this.preview.isWindowRenderable() ? "cdp" : "capturePage";
     if (!this.preview.isWindowRenderable()) {
-      throw new Error(`截图失败：主窗口当前最小化或隐藏，页面无法出帧。请恢复主窗口后重试。`);
+      throw new Error(`截图失败：主窗口当前最小化或隐藏，且目标标签页 ${SCREENSHOT_LAYOUT_TIMEOUT_MS / 1000} 秒内未完成布局，无法出帧。请恢复主窗口后重试。`);
     }
-    throw new Error(`截图失败：目标浏览器标签页 ${SCREENSHOT_REVEAL_TIMEOUT_MS / 1000} 秒内未能变为可见（预览面板可能被关闭、被其他标签占用，或被设置/权限弹窗挂起）。请打开预览面板并切换到该标签后重试。`);
+    throw new Error(`截图失败：目标浏览器标签页 ${SCREENSHOT_REVEAL_TIMEOUT_MS / 1000} 秒内未能变为可见（预览面板可能被关闭，或被设置/权限弹窗临时挂起）。请打开预览面板并切换到该标签后重试。`);
+  }
+
+  /**
+   * 原生出帧（webContents.capturePage）：主窗口自己出不了帧时的兜底（见上）。
+   * 能力边界与 CDP 的 clip 路径不同——只能给「当前视口」，不能 captureBeyondViewport，
+   * 所以元素截图/整页截图不走这条（调用方在 capturePage 模式下会直接报错，不静默给半张图）。
+   * scale 只能靠重采样放大（CDP 那条是真渲染放大），因此仅当调用方显式要 >1 时才做。
+   */
+  private async captureViewportNative(contents: WebContents, format: "png" | "jpeg", quality?: number, scale?: number, maxWidth?: number): Promise<BrowserAutomationResult> {
+    const image = await withOpTimeout(
+      contents.capturePage(),
+      SCREENSHOT_NATIVE_CAPTURE_TIMEOUT_MS,
+      `截图超时（${SCREENSHOT_NATIVE_CAPTURE_TIMEOUT_MS / 1000} 秒未出帧）：主窗口最小化/隐藏时原生捕获未返回，请恢复主窗口后重试。`
+    );
+    if (image.isEmpty()) throw new Error("截图失败：主窗口最小化/隐藏时原生捕获返回空图，请恢复主窗口后重试。");
+    const size = image.getSize();
+    let width = size.width;
+    if (typeof scale === "number" && Number.isFinite(scale) && scale > 1) width = Math.round(size.width * Math.min(2, scale));
+    if (typeof maxWidth === "number" && Number.isFinite(maxWidth) && maxWidth > 0) width = Math.min(width, Math.round(maxWidth));
+    const framed = width === size.width ? image : image.resize({ width, height: Math.max(1, Math.round((size.height * width) / size.width)), quality: "best" });
+    const out = framed.getSize();
+    const bytes = format === "jpeg" ? framed.toJPEG(Math.max(1, Math.min(100, Math.round(quality ?? 80)))) : framed.toPNG();
+    return {
+      ok: true,
+      data: {
+        kind: "screenshot",
+        data: bytes.toString("base64"),
+        width: out.width,
+        height: out.height,
+        mimeType: format === "jpeg" ? "image/jpeg" : "image/png"
+      }
+    };
   }
 
   private async screenshot(
@@ -2160,7 +2208,13 @@ export class BrowserAutomationController {
   ): Promise<BrowserAutomationResult> {
     this.preview.setAutomating(tabId, "正在截图");
     try {
-      await this.ensureTabRenderable(tabId);
+      const mode = await this.ensureTabRenderable(tabId);
+      if (mode === "capturePage") {
+        if (ref !== undefined || selector !== undefined || fullPage) {
+          throw new Error(`截图失败：主窗口当前最小化或隐藏，无法截取该${fullPage ? "整页" : "元素区域"}（需要 CDP 出帧）。请恢复主窗口后重试，或改用不带参数的整屏截图（最小化时可用原生捕获）。`);
+        }
+        return await this.captureViewportNative(contents, format, quality, scale, maxWidth);
+      }
       const captureParams: Record<string, unknown> = { format, fromSurface: true };
       if (fullPage) captureParams.captureBeyondViewport = true;
       if (format === "jpeg") captureParams.quality = Math.max(1, Math.min(100, Math.round(quality ?? 80)));

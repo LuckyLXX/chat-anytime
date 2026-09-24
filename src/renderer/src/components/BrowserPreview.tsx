@@ -163,24 +163,46 @@ export function BrowserPreview({ suspended = false, tabId = "default", onPickSen
   }, [tabId]);
 
   // 量测视口矩形（含窗口内位置）：设备框布局与 bounds 上报都从它推导。
+  //
+  // ⚠️ 首帧量测必须**同步**做，不能只挂在 requestAnimationFrame 上：主窗口被别的应用
+  // 完全遮挡或最小化时页面是 hidden，**rAF 与 ResizeObserver 回调都不会再触发**
+  //（2026-09-24 真机探针 p6 实测：hidden 时 rAF 3 秒不落、RO 只回 stall），而布局仍可
+  // 强制计算（同探针：隐藏页 getBoundingClientRect 照常返回真实尺寸）。首帧若走 rAF，
+  // 面板打开后永远不会回送 bounds，AI 的 browser_screenshot 会一直卡在「标签页未能变为
+  // 可见」8 秒超时；后续尺寸变化（拖分隔条 / 切设备框）仍走 rAF 节流路径。
   useLayoutEffect(() => {
     const viewport = viewportRef.current;
     if (!viewport) return;
     let frame = 0;
+    let retryTimer = 0;
+    let retries = 0;
+    let cancelled = false;
+    const commit = (bounds: DOMRect): boolean => {
+      if (bounds.width <= 0 || bounds.height <= 0) return false;
+      setViewportRect((prev) => prev && prev.left === bounds.left && prev.top === bounds.top && prev.width === bounds.width && prev.height === bounds.height ? prev : { left: bounds.left, top: bounds.top, width: bounds.width, height: bounds.height });
+      return true;
+    };
+    // 尺寸还没落定时（面板入场首帧）用 setTimeout 补几次：定时器在隐藏页里仍会跑（会被
+    // 节流到 ~1s，但不会像 rAF 那样完全停摆），所以这也是遮挡/最小化下的兜底。
+    const measureNow = (): void => {
+      if (cancelled) return;
+      if (commit(viewport.getBoundingClientRect())) return;
+      if (retries >= 5) return;
+      retries += 1;
+      retryTimer = window.setTimeout(measureNow, 120);
+    };
     const measure = (): void => {
       cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(() => {
-        const bounds = viewport.getBoundingClientRect();
-        if (bounds.width <= 0 || bounds.height <= 0) return;
-        setViewportRect((prev) => prev && prev.left === bounds.left && prev.top === bounds.top && prev.width === bounds.width && prev.height === bounds.height ? prev : { left: bounds.left, top: bounds.top, width: bounds.width, height: bounds.height });
-      });
+      frame = requestAnimationFrame(() => commit(viewport.getBoundingClientRect()));
     };
     const observer = new ResizeObserver(measure);
     observer.observe(viewport);
     window.addEventListener("resize", measure);
-    measure();
+    measureNow();
     return () => {
+      cancelled = true;
       cancelAnimationFrame(frame);
+      window.clearTimeout(retryTimer);
       observer.disconnect();
       window.removeEventListener("resize", measure);
     };
