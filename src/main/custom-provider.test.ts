@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai/compat";
 import { convertMessages } from "@earendil-works/pi-ai/api/openai-completions";
+// 0.86.0 起 provider 入参改用 normalizeContext 产出的 TranscriptContext（系统提示
+// 折进 messages 首条 system 消息）；直接传原始 Context 会报类型错误。
+import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
 import { builtinProviderOverlay, customProviderModelDefinition, inferCustomModelImageInput, resolveBuiltinOverlayAction, resolveCustomProviderRegistration } from "./custom-provider.js";
 
 describe("custom OpenAI-compatible models", () => {
@@ -46,7 +49,7 @@ describe("custom OpenAI-compatible models", () => {
       provider: "chatanytime-openai-compatible",
       baseUrl: "https://api.sensetime.com/v1"
     };
-    const messages = convertMessages(model, { systemPrompt: "你是开发助手", messages: [], tools: [] }, {
+    const messages = convertMessages(model, normalizeContext({ systemPrompt: "你是开发助手", messages: [], tools: [] }), {
       supportsDeveloperRole: false,
       supportsStore: false,
       supportsReasoningEffort: false,
@@ -67,7 +70,6 @@ describe("custom OpenAI-compatible models", () => {
       supportsOpenAIGrammarTools: false,
       cacheControlFormat: undefined,
       sendSessionAffinityHeaders: false,
-      deferredToolsMode: undefined,
       sessionAffinityFormat: "openai",
       supportsLongCacheRetention: false
     });

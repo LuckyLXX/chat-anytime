@@ -16,6 +16,7 @@ import {
 import { Type } from "typebox";
 import type { AccessMode, AgentProfile, DelegationProgress, DelegationRole, DelegationStep, PermissionDecision, SubagentDefinition, ThinkingLevel } from "../shared/protocol.js";
 import { summarizeArgs } from "./runtime-permissions.js";
+import { withCacheWarmingOff } from "./runtime-settings.js";
 
 /**
  * Self-built subagent delegation. Replaces the old `pi-subagents` CLI shim that
@@ -307,7 +308,7 @@ async function runDelegation(ctx: SubagentContext, params: { goal?: unknown; rol
 
   const delegationsDir = join(ctx.agentDir, "chatanytime-sessions", ctx.agent.id, "delegations");
   const sessionManager = SessionManager.create(ctx.workspace, delegationsDir);
-  const settingsManager = SettingsManager.create(ctx.workspace, ctx.agentDir);
+  const settingsManager = withCacheWarmingOff(SettingsManager.create(ctx.workspace, ctx.agentDir));
   const resourceLoader = new DefaultResourceLoader({
     cwd: ctx.workspace,
     agentDir: ctx.agentDir,

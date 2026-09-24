@@ -37,7 +37,7 @@ Electron main
 └── Pi Runtime utilityProcess 生命周期
 
 Pi Runtime utility process
-├── @earendil-works/pi-coding-agent 0.84.4
+├── @earendil-works/pi-coding-agent 0.87.1
 ├── AgentSession / SessionManager / ModelRuntime
 ├── Pi 原生项目工具
 ├── 权限扩展
@@ -54,7 +54,7 @@ React renderer
 
 ## 环境与启动
 
-依赖安装要求 Node.js `>=22.19.0`。Electron 43 自带的 Node 运行时满足 Pi `0.84.4` 的运行要求。
+依赖安装要求 Node.js `>=22.19.0`。Electron 43 自带的 Node 运行时满足 Pi `0.87.1` 的运行要求。
 
 ```powershell
 npm install
@@ -94,7 +94,7 @@ npm run package:win
 
 ## 与 Pi 及原插件的关系
 
-- Pi `0.82.1` 仅作为 Agent 运行时核心使用：模型、AgentSession、会话持久化、上下文管理、内置工具（read/bash/edit/write/grep/find/ls）
+- Pi `0.87.1` 仅作为 Agent 运行时核心使用：模型、AgentSession、会话持久化、上下文管理、内置工具（read/bash/edit/write/grep/find/ls）
 - 已移除 Pi 的「扩展接入」能力（第三方扩展加载/批准/绑定、`pi-mcp-adapter`、子代理 CLI shim、扩展 UI 桥），只保留应用自有的工具调用权限拦截 hook
 - MCP、Skill、子代理、Todo 均为自研实现：MCP 由内置 `@modelcontextprotocol/sdk` 客户端直连并把每个工具包装成 Pi `customTool`；Skill 通过扫描 `SKILL.md` 目录并注入系统提示；子代理用 `delegate_agent` 创建同进程子会话；Todo 用会话维度的本地 JSON 存储
 - 本项目沿用 ChatAnyTime 品牌与核心渲染、交互理念，没有复制原插件运行时或旧代码
@@ -126,7 +126,7 @@ npm run package:win
 - 子代理目前以工具调用结果内联展示，尚未在侧栏以嵌套会话形式呈现
 - HTML/SVG Artifact 只提供隔离预览，不提供桌面能力桥接
 - Windows 目前输出解压目录，尚未生成安装程序、自动更新、代码签名和可执行文件资源定制
-- `@earendil-works/pi-coding-agent@0.84.4` 发布包的 shrinkwrap 固定了 `undici` 与 `brace-expansion` 的旧版本；截至本版，`npm audit --omit=dev` 会报告若干关联风险。根项目 override 无法可靠替换它们，需等待 Pi 上游发布更新依赖的版本，或以后改为可审计的 Pi 源码构建流程
+- `npm audit --omit=dev` 会报告 3 项关联风险（`hono` / `qs` / `fast-uri`，均来自内置 `@modelcontextprotocol/sdk` 的传递依赖，可用 `npm audit fix` 处理）。Pi 运行时早期版本曾因发布包 shrinkwrap 固定旧 `undici` / `brace-expansion` 而被同类报告，0.87.1 已随上游依赖更新消失
 
 <p align="center">
     <a href="https://linux.do" alt="LINUX DO"><img src="https://shorturl.at/ggSqS" /></a>

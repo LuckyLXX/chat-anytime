@@ -102,6 +102,7 @@ import {
 import * as runtimeGallery from "./runtime-gallery.js";
 import * as runtimeJev from "./runtime-jev.js";
 import { assistantText, createSubagentTools, buildSubagentPromptBlock, type SubagentContext } from "./subagent.js";
+import { withCacheWarmingOff } from "./runtime-settings.js";
 import { readSubagents, saveSubagent, deleteSubagent, saveSubagentModelOverride } from "./subagents-store.js";
 import type { SubagentDefinition, SubagentScope, DelegationProgress, SlashInvocation } from "../shared/protocol.js";
 import { buildSkillsSystemPromptBlock, setSkillEnabled, type DiscoveredSkill } from "./skill-catalog.js";
@@ -2709,7 +2710,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   }
   if (existing) disposeRecord(existing, { keepBrowserTab: true });
 
-  const settingsManager = SettingsManager.create(recordWorkspace, getAgentDir());
+  const settingsManager = withCacheWarmingOff(SettingsManager.create(recordWorkspace, getAgentDir()));
   // Pi's own discovery is fully disabled: no extensions, no skills, no themes,
   // no ambient context files. The app injects its own system prompt, skills,
   // AGENTS.md instructions, MCP/subagent/todo tools explicitly (built in later
