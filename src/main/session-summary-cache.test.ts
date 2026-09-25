@@ -254,6 +254,31 @@ describe("session summary cache: cache discipline", () => {
     expect(cache.size).toBe(0);
   });
 
+  it("keeps another directory's entries cached when a later round scans only one of them", async () => {
+    // 助手的会话目录集随助手切换而变：全局 prune 会把另一个助手的缓存冲掉，
+    // 于是「切换助手」来回切就反复付全量冷扫——prune 必须限定在本轮扫过的目录内。
+    const dirA = tempDir("prune-scope-a");
+    const dirB = tempDir("prune-scope-b");
+    const pathA = writeRaw(dirA, "a.jsonl", [{ type: "session", version: 3, id: "a", timestamp: "2026-09-01T00:00:00.000Z", cwd: "C:/a" }]);
+    writeRaw(dirB, "b.jsonl", [{ type: "session", version: 3, id: "b", timestamp: "2026-09-01T00:00:00.000Z", cwd: "C:/b" }]);
+    const cache = new Map<string, any>();
+    let opens = 0;
+    const deps = { cache, openSession: (target: string) => { opens++; return SessionManager.open(target); } };
+    await listSessionSummaries([dirA, dirB], deps);
+    expect(cache.size).toBe(2);
+
+    rmSync(pathA);
+    const second = await listSessionSummaries([dirA], deps);
+    expect(second).toEqual([]);
+    expect(cache.size).toBe(1);
+    expect([...cache.keys()][0]).toContain("b.jsonl");
+
+    // 回到 dirB 仍是缓存命中（不重读）。
+    const third = await listSessionSummaries([dirB], deps);
+    expect(third.map((summary) => summary.id)).toEqual(["b"]);
+    expect(opens).toBe(2);
+  });
+
   it("prefers an in-memory live summary over the file on disk (zero I/O)", async () => {
     const dir = tempDir("cache-live");
     const path = writeRealSession(dir, "C:/work/demo", (manager) => {

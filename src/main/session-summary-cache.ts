@@ -1,6 +1,6 @@
 import { closeSync, openSync, readSync } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { SessionManager, type SessionEntry } from "@earendil-works/pi-coding-agent";
 
 /**
@@ -247,7 +247,12 @@ function readSummary(
 
 /**
  * 列出给定目录下的会话摘要。目录不存在的直接跳过（与 Pi `listAll` 同口径）。
- * 每轮结束把本次没见到的路径从缓存里 prune（删除的会话不留下永久缓存）。
+ * 每轮结束把本轮扫过的目录里、本轮没见到的路径从缓存 prune（删除的会话不留下永久缓存）。
+ *
+ * prune **只限本轮扫过的目录范围**（不整表清）：`refreshSessions` 的目录集是「当前助手的
+ * 会话根 + 其工作区子目录」，全局 prune 会在切助手时把另一个助手的缓存整体冲掉——
+ * 而「切换助手/切换会话」正是这次优化要治的场景，来回切会反复付全量冷扫（约 1.4 s）。
+ * 范围外的陈条目无害：它们只在被 readdir 枚举到时才会被读到，条目本身约 0.2 KB。
  */
 export async function listSessionSummaries(directories: readonly string[], deps: SessionSummaryDeps = {}): Promise<SessionFileSummary[]> {
   const readdirImpl = deps.readdir ?? readdir;
@@ -259,6 +264,7 @@ export async function listSessionSummaries(directories: readonly string[], deps:
   for (const summary of deps.liveSummaries ?? []) liveByPath.set(cacheKey(summary.path), summary);
 
   const seen = new Set<string>();
+  const scannedScopes = directories.map((directory) => `${resolve(directory).toLowerCase()}${sep}`);
   const summaries: SessionFileSummary[] = [];
   for (const directory of directories) {
     let names: string[];
@@ -295,6 +301,9 @@ export async function listSessionSummaries(directories: readonly string[], deps:
       if (summary) summaries.push(summary);
     }
   }
-  for (const key of [...cache.keys()]) if (!seen.has(key)) cache.delete(key);
+  for (const key of [...cache.keys()]) {
+    if (seen.has(key)) continue;
+    if (scannedScopes.some((scope) => key.startsWith(scope))) cache.delete(key);
+  }
   return summaries;
 }
