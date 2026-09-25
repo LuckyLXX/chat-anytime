@@ -319,6 +319,50 @@ export function findStableCutoff(text: string, previousCutoff = 0): number {
   return stableCutoff;
 }
 
+/**
+ * 返回「安全切分上界」：该位置之后不存在未闭合的围栏/HTML 块，可以用作
+ * 流式增量的冻结边界上界。
+ *
+ * 与 `findStableCutoff` 的关键差别：纯段落文本（没有任何围栏）这里返回全文
+ * 长度，而 `findStableCutoff` 返回 0 —— 0 是「没找到完整构造」的哨兵值，
+ * 直接当上界用会把纯段落文本的冻结全部挡掉（`parseRichContent` 里那两个
+ * 分支的使用方式就是这个语义）。
+ */
+export function safeSplitLimit(text: string): number {
+  const raw = String(text || "");
+  let index = 0;
+  let safe = 0;
+  while (index < raw.length) {
+    const atLineStart = index === 0 || raw[index - 1] === "\n";
+    if (atLineStart) {
+      const lineEnd = raw.indexOf("\n", index);
+      const line = raw.slice(index, lineEnd < 0 ? raw.length : lineEnd);
+      const opening = isFenceLine(line);
+      if (opening) {
+        const fenceEnd = findMatchingFenceEnd(raw, index, opening.marker);
+        if (fenceEnd < 0) return safe;
+        safe = fenceEnd;
+        index = fenceEnd;
+        continue;
+      }
+    }
+    if (raw[index] === "<") {
+      const blockEnd = findInlineBlockEnd(raw, index);
+      if (blockEnd === -1) return safe;
+      if (blockEnd >= 0) {
+        safe = blockEnd;
+        index = blockEnd;
+        continue;
+      }
+    }
+    const nextLine = raw.indexOf("\n", index);
+    const lineEnd = nextLine < 0 ? raw.length : nextLine + 1;
+    safe = lineEnd;
+    index = lineEnd;
+  }
+  return safe;
+}
+
 function normalizeTildeSpacing(line: string): string {
   return line.replace(/(^|[^\w/\\=~])~(?![\s~])/gu, "$1~ ");
 }

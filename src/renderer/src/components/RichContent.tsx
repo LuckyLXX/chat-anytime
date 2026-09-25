@@ -16,6 +16,7 @@ import remarkMath from "remark-math";
 import hljs from "highlight.js";
 import { artifactSandbox, buildArtifactPreviewSource, DYNAMIC_PREVIEW_ACTIONS, isDynamicArtifact, isFullArtifactDocument, type Artifact, type DynamicPreviewAction } from "../lib/content";
 import { alignSegmentHeadings, extractMarkdownHeadings, hasMathSyntax, normalizeMermaidSource, parseRichContent, type MarkdownHeading, type RichContentSegment } from "../lib/content-pipeline";
+import { useStreamingChunks } from "../lib/streaming-split";
 import { resolveMarkdownAssetUrl } from "../lib/workspace-asset";
 import { sanitizeRichHtmlTree } from "../lib/html-sanitize";
 import { ImageLightbox } from "./ImageLightbox";
@@ -883,6 +884,11 @@ const DynamicHtmlBubble = memo(function DynamicHtmlBubble({ content, closed, str
 });
 
 const MarkdownSurface = memo(function MarkdownSurface({ content, htmlBubble, artifactPrefix, onOpenArtifact, onHtmlAction, workspace, markdownPath, headings, liveTail = false }: { content: string; htmlBubble?: boolean; artifactPrefix: string; onOpenArtifact(artifact: Artifact): void; onHtmlAction?: (text: string) => void; workspace?: string; markdownPath?: string; headings?: MarkdownHeading[]; liveTail?: boolean }): ReactNode {
+  {
+    const g = globalThis as Record<string, unknown>;
+    const list = (g.__mdFingerprints as string[]) ?? (g.__mdFingerprints = []);
+    list.push(`${content.length}|${content.slice(0, 6)}|${content.slice(-6)}`);
+  }
   const dark = useThemeTokens().dark;
   const artifactIndex = useRef(0);
   // 段内行号 → 全文大纲条目。放在 ref 里并每次渲染刷新：components 被 useMemo 缓存，
@@ -966,11 +972,31 @@ export const MarkdownPreviewContent = memo(function MarkdownPreviewContent({ con
   );
 });
 
+/**
+ * 一个「文本块」的渲染单元：自己解析自己的 markdown。已冻结的块内容永不变化，
+ * memo 命中后整块子树被跳过——长回复增量渲染的落点就在这里。
+ */
+const ChunkSurface = memo(function ChunkSurface({ text, artifactPrefix, streaming, onOpenArtifact, onHtmlAction, workspace, markdownPath }: { text: string; artifactPrefix: string; streaming: boolean; onOpenArtifact: (artifact: Artifact) => void; onHtmlAction?: (text: string) => void; workspace?: string; markdownPath?: string }): ReactNode {
+  const segments = useMemo(() => parseRichContent(text, { isStreaming: streaming }), [text, streaming]);
+  return (
+    <>
+      {segments.map((segment, index) => renderSegment(segment, index, artifactPrefix, streaming, onOpenArtifact, onHtmlAction, workspace, markdownPath, undefined, streaming && index === segments.length - 1))}
+    </>
+  );
+});
+
 export const RichContent = memo(function RichContent({ children, streaming, onOpenArtifact, onHtmlAction, artifactPrefix, workspace, markdownPath }: RichContentProps): ReactNode {
-  const segments = useMemo(() => parseRichContent(children, { isStreaming: Boolean(streaming) }), [children, streaming]);
+  // 长回复增量渲染（见 lib/streaming-split.ts）：已定稿的文本块内容永不变化，
+  // 由 memo 化的 ChunkSurface 接管（渲染一次后 React 直接跳过其子树）；每帧只剩
+  // 尾部在重渲染，且尾部自身另有 100ms 合帧。未启用分块时 chunks 为空、tail ===
+  // children，渲染结果与改动前逐字一致。
+  const { chunks, tail } = useStreamingChunks(children, Boolean(streaming));
   return (
     <div className={`rich-content${streaming ? " is-streaming" : ""}`}>
-      {segments.map((segment, index) => renderSegment(segment, index, artifactPrefix, Boolean(streaming), onOpenArtifact, onHtmlAction, workspace, markdownPath, undefined, Boolean(streaming) && index === segments.length - 1))}
+      {chunks.map((chunk, index) => (
+        <ChunkSurface key={`chunk-${index}`} text={chunk} artifactPrefix={`${artifactPrefix}-chunk${index}`} streaming={false} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} workspace={workspace} markdownPath={markdownPath} />
+      ))}
+      <ChunkSurface key="tail" text={tail} artifactPrefix={artifactPrefix} streaming={Boolean(streaming)} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} workspace={workspace} markdownPath={markdownPath} />
     </div>
   );
 });
