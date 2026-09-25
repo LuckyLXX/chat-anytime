@@ -21,6 +21,7 @@ const api: DesktopApi = {
   galleryFileUrl: (filePath: string, workspace?: string) => ipcRenderer.invoke("gallery:file-url", filePath, workspace),
   galleryThumb: (fileName: string) => ipcRenderer.invoke("gallery:thumb", fileName),
   galleryAwaitService: (input: { url: string; terminalId?: string; timeoutMs?: number }) => ipcRenderer.invoke("gallery:await-service", input),
+  themeAssets: (themeId: string) => ipcRenderer.invoke("appearance:theme-assets", themeId),
   browserPreview: (command: BrowserPreviewCommand) => ipcRenderer.invoke("browser-preview:command", command),
   browserAutomationCancel: (tabId: string) => ipcRenderer.invoke("browser-automation:cancel", tabId),
   terminal: (command: TerminalCommand) => ipcRenderer.invoke("terminal:command", command),

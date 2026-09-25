@@ -192,10 +192,14 @@ export function AppearanceSettings({ settings, onSaved, onCancel }: AppearanceSe
     updateAppearance({ customThemes: nextThemes });
   }
 
-  function applyCustomTheme(theme: CustomThemeDefinition): void {
+  async function applyCustomTheme(theme: CustomThemeDefinition): Promise<void> {
     setEditingCustomThemeId(theme.id);
     setCustomThemeName(theme.name);
-    updateAppearance({ customCss: theme.css, customCssAssets: theme.assets ?? {} });
+    // 主题资产不再随 bootstrap 下发（只有当前生效的那份走 customCssAssets），
+    // 「应用某条主题」时按需取一次；主进程那份是权威副本。取不到就退化为无资产
+    // （主题的 CSS 仍然生效）——不能因此把应用主题整个搞失败。
+    const assets = theme.assets ?? await window.piDesktop.themeAssets(theme.id).catch(() => undefined) ?? {};
+    updateAppearance({ customCss: theme.css, customCssAssets: assets });
   }
 
   function deleteCustomTheme(theme: CustomThemeDefinition): void {

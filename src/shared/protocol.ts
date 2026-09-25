@@ -1930,6 +1930,11 @@ export interface DesktopApi {
    * 主进程同时盯启动进程，已退出则提前回报 exited（附退出码与输出尾部）。
    */
   galleryAwaitService(input: { url: string; terminalId?: string; timeoutMs?: number }): Promise<GalleryServiceProbe>;
+  /**
+   * 按需取一条自定义主题的资产（主题重资产不再随 bootstrap / 每次保存搭车过 IPC，
+   * 见 src/main/appearance-assets.ts）。演示环境返回 undefined。
+   */
+  themeAssets(themeId: string): Promise<ThemeAssetMap | undefined>;
   browserPreview(command: BrowserPreviewCommand): Promise<BrowserPreviewState>;
   browserAutomationCancel(tabId: string): Promise<void>;
   terminal(command: TerminalCommand): Promise<void>;

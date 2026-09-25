@@ -7,10 +7,11 @@ import { spawn } from "node-pty";
 import appIconPath from "./assets/icon.ico?asset";
 import { resolveBundledSkillsDir, resolveBundledSubagentsDir } from "./bundled-skills.js";
 import { migrateSettings, normalizeJev, normalizeVision, recordAgentWorkspace, forgetAgentWorkspace } from "./settings.js";
+import { mergeSavedAppearance, settingsForRenderer } from "./appearance-assets.js";
 import { createSettingsPersistence, diffSettings, readSettingsFile, settingsPath as settingsFilePath, type SettingsPersistence } from "./settings-store.js";
 import { togglePinnedSessionPath } from "./session-scope.js";
 import { importExternalAttachment, workspaceRelativeAttachment } from "./attachments.js";
-import type { BrowserPreviewCommand, BrowserPreviewState, DesktopBootstrap, DesktopSettings, GalleryServiceProbe, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot, SshCommand, SshCommandResult, SshEventData, SshRevealEvent, TerminalCommand, TerminalEventData, WorkspaceDirectoryListing, WorkspaceEntryResult, WorkspaceFilePreview, WorkspaceFileSearchResult, WorkspaceFileStat, WorkspaceFileWriteResult } from "../shared/protocol.js";
+import type { BrowserPreviewCommand, BrowserPreviewState, DesktopBootstrap, DesktopSettings, GalleryServiceProbe, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot, SshCommand, SshCommandResult, SshEventData, SshRevealEvent, TerminalCommand, TerminalEventData, ThemeAssetMap, WorkspaceDirectoryListing, WorkspaceEntryResult, WorkspaceFilePreview, WorkspaceFileSearchResult, WorkspaceFileStat, WorkspaceFileWriteResult } from "../shared/protocol.js";
 import { PREVIEW_FILE_SCHEME, parseWorkspaceFilePreviewUrl } from "../shared/protocol.js";
 import { createWorkspaceDirectory, createWorkspaceFile, deleteWorkspaceEntry, listWorkspaceDirectory, previewFileMimeType, readWorkspaceFilePreview, renameWorkspaceEntry, resolveWorkspaceEntry, safeRelativePath, searchWorkspaceFiles, statWorkspaceFile, writeWorkspaceFile } from "./workspace-preview.js";
 import { pruneDisabledModelRefs } from "./model-catalog.js";
@@ -294,8 +295,10 @@ function updateSettings(command: RuntimeCommand): void {
     // 镜像必须与 protocol 的 settings.save Pick 逐字段对齐：漏一个字段就是「保存后重启即丢」
     // （ssh 曾因这个 Pick 里有、这里没镜像而中招，2026-09）。jev 同时把用户填的密钥写进
     // credentials.json 的 safeStorage 通道（配置进 settings.json、密钥不进）。
-    case "settings.save": settings.model = command.settings.model; settings.thinkingLevel = command.settings.thinkingLevel; settings.accessMode = command.settings.accessMode; settings.appearance = command.settings.appearance; settings.browser = command.settings.browser; settings.jev = normalizeJev(command.settings.jev); settings.computer = command.settings.computer; settings.design = command.settings.design; settings.ssh = command.settings.ssh; settings.defaultWorkspace = command.settings.defaultWorkspace; break;
-    case "appearance.save": settings.appearance = command.appearance; break;
+    case "settings.save": settings.model = command.settings.model; settings.thinkingLevel = command.settings.thinkingLevel; settings.accessMode = command.settings.accessMode; settings.appearance = mergeSavedAppearance(command.settings.appearance, settings.appearance); settings.browser = command.settings.browser; settings.jev = normalizeJev(command.settings.jev); settings.computer = command.settings.computer; settings.design = command.settings.design; settings.ssh = command.settings.ssh; settings.defaultWorkspace = command.settings.defaultWorkspace; break;
+    // 渲染端手里的主题已没有 assets（见 appearance-assets.ts）：按 id 把主进程存的
+    // 那份保留回来，只有携带了 assets 的那条（外观页保存主题）才覆盖。
+    case "appearance.save": settings.appearance = mergeSavedAppearance(command.appearance, settings.appearance); break;
     case "provider.save": {
       settings.providers = settings.providers.some((item) => item.id === command.provider.id) ? settings.providers.map((item) => item.id === command.provider.id ? command.provider : item) : [...settings.providers, command.provider];
       // 自定义服务清空全部模型也是合法操作：持久化的默认/助手默认/视觉引用
@@ -470,7 +473,10 @@ function startRuntime(): void {
   // 同 skills 口径，直接读取、不复制到用户目录；用户自建的同名定义会盖掉它。
   const bundledSubagentsDir = resolveBundledSubagentsDir(app.getAppPath(), app.isPackaged);
   if (!bundledSubagentsDir) console.warn("未找到内置子智能体目录（resources/subagents），本次不注入内置来源");
-  sendToRuntime({ type: "initialize", settings, apiKeys: credentialsCache, bundledSkillsDir, bundledSubagentsDir });
+  // 主题重资产不过 IPC（2026-09-25）：主题 `.assets` 只有「当前生效」那一份渲染端会用，
+  // 且已通过 customCssAssets 带到，utility 侧压根不读 appearance。实测主目录里 19.6MB
+  // 的主题 base64 之前每次 bootstrap / 保存 / 初始化都搭车过一次进程边界。
+  sendToRuntime({ type: "initialize", settings: settingsForRenderer(settings), apiKeys: credentialsCache, bundledSkillsDir, bundledSubagentsDir });
 }
 function createWindow(): void {
   const rendererUrl = process.env.ELECTRON_RENDERER_URL;
@@ -569,8 +575,13 @@ function isSshCommand(value: unknown): value is SshCommand {
 function registerIpc(): void {
   ipcMain.handle("desktop:bootstrap", (): DesktopBootstrap => {
     const source = loadSettings();
-    const settings: DesktopSettings = { ...source, providers: source.providers.map((provider) => ({ ...provider, keyConfigured: Boolean(credentialsCache[provider.id]) })), jevKeyConfigured: Boolean(credentialsCache[JEV_CREDENTIAL_ID]) };
+    const settings: DesktopSettings = settingsForRenderer({ ...source, providers: source.providers.map((provider) => ({ ...provider, keyConfigured: Boolean(credentialsCache[provider.id]) })), jevKeyConfigured: Boolean(credentialsCache[JEV_CREDENTIAL_ID]) });
     return { platform: process.platform, version: app.getVersion(), securityWarning, settings, runtime: latestSnapshot, catalog: latestCatalog ? { models: latestCatalog.models, providers: latestCatalog.providers } : undefined, resources: latestResources };
+  });
+  // 渲染端按需取某条自定义主题的资产（外观页「应用/编辑该主题」时）。单条按需拉取
+  // 代替全量搭车：自定义主题目前由用户手动导入，体量一两条的量级。
+  ipcMain.handle("appearance:theme-assets", (_event, themeId: string): ThemeAssetMap | undefined => {
+    return loadSettings().appearance.customThemes.find((theme) => theme.id === themeId)?.assets;
   });
   ipcMain.handle("desktop:choose-workspace", async (): Promise<string | undefined> => { const result = mainWindow ? await dialog.showOpenDialog(mainWindow, { title: "选择项目工作区", properties: ["openDirectory", "createDirectory"] }) : await dialog.showOpenDialog({ title: "选择项目工作区", properties: ["openDirectory", "createDirectory"] }); return result.canceled ? undefined : result.filePaths[0]; });
   ipcMain.handle("desktop:choose-preview-file", async (): Promise<WorkspaceFilePreview | undefined> => {

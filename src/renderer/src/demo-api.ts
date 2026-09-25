@@ -581,6 +581,11 @@ export function createDemoApi(): DesktopApi {
       // 终端标签 + 一条失败提示，把一个能看的 demo 演成坏掉的）。
       return { ok: true };
     },
+    async themeAssets(): Promise<undefined> {
+      // 演示环境的 appearance.customThemes 为空，没有主题资产可取（与主进程同语义：
+      // 主题重资产按需拉取，不随 bootstrap 搭车）。
+      return undefined;
+    },
     async browserPreview(command: BrowserPreviewCommand): Promise<BrowserPreviewState> {
       if (command.type === "close") {
         return emitBrowserPreview({ attached: false, url: "", title: "", loading: false, canGoBack: false, canGoForward: false, error: undefined });
