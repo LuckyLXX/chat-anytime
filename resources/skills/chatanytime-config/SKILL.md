@@ -39,6 +39,7 @@ Windows 上通常是 `C:\Users\<用户名>\.pi\agent`。下面统一写作 `<age
 
 - 同名时 **当前项目 > 全局**；技能还多两档更低的来源：`~/.agents/skills/`（共享目录）、安装目录 `resources/skills/`（内置，随包分发）。
 - 安装目录里的 `resources/skills/`、`resources/subagents/` 是**只读随包资产**，升级会被覆盖——**不要改**。要覆盖同名，把内容复制到上面的全局或项目路径。
+- **这些目录/文件不是预先存在的**：全局档通常已有 `mcp.json`、`pidesktop-commands/`、`pidesktop-hooks.json`、`pidesktop-subagents.json`，而 `pidesktop-skills/` 与**全部项目档**首次使用时往往都不存在（目录存在也可能是空的）。动手前先 `ls` 确认当前状态，不存在就建（`write` 会自动创建父目录）——别假设已存在，也别因为“没有这个文件”就停下来问用户。
 - 用户没说作用域就先问一句：「只在这个项目里用，还是所有项目都要用？」
 
 ## 1. 通用纪律（每次动手前过一遍）
@@ -47,7 +48,7 @@ Windows 上通常是 `C:\Users\<用户名>\.pi\agent`。下面统一写作 `<age
    - 如果只需要给当前项目用，优先写工作区内的 `.pidesktop-*` 路径（无权限摩擦）。
 2. **合并式文件必须先读后写**：`mcp.json`、`pidesktop-hooks.json`、`pidesktop-subagents.json` 是「一个文件装全部条目」。先 `read` 现有内容，再**保留别人的条目**做增量修改；不要 `write` 覆盖一个你还没读过的文件。
 3. **注释会丢**：`mcp.json` 与 `pidesktop-hooks.json` 支持带注释的 JSONC，但一旦整体重写，注释就没了。优先用 `edit` 做增量修改；确实要重写，就告诉用户注释已丢失。
-4. **文件可能不存在**：新建前先 `ls` 一下目标目录，别假设文件已存在（首次添加 MCP / 钩子 / 子智能体时通常要新建整个文件）。
+4. **文件与目录可能不存在**：新建前先 `ls` 一下目标目录，别假设文件已存在（全局 `pidesktop-skills/` 与全部项目档首次使用时通常都没有；首次添加 MCP / 钩子 / 子智能体也常要新建整个文件）。
 5. **改完必须给生效步骤**（第 7 节），否则用户会以为没生效——这几个配置面**没有文件监听**，不重载就不生效。
 6. **不要动这些数据文件**：会话记录 `chatanytime-sessions/`、长期记忆 `pidesktop-memory/`、作品墙 `pidesktop-gallery/`、自动化任务 `pidesktop-automation/`、MCP 授权凭据 `pidesktop-mcp-auth.json`、模型缓存 `models-store.json`，以及 `%APPDATA%\chat-anytime\` 下的 `settings.json`、`credentials.json`、SSH 主机与指纹文件。它们各有 UI 或专用工具（记忆用 `memory_*` 工具、自动化用 `automation_*` 工具、作品墙用 `gallery_publish`）。
 7. **敏感值不落盘**：MCP 的 token 用 `bearerTokenEnv` 指向环境变量名，不要把 token 明文写进配置（stdio 的 `env` 是明文存盘的，非必要不写）。也不要把密钥写进钩子脚本与本 Skill 产出的文件里。
@@ -75,6 +76,7 @@ Windows 上通常是 `C:\Users\<用户名>\.pi\agent`。下面统一写作 `<age
   - 不写认证字段（或 `"auth": "oauth"`）→ 走 **OAuth**：需要授权时该条目上会出现「认证」按钮，点它会打开系统浏览器完成授权（凭据本地保存、长期有效）。
   - `"bearerTokenEnv": "环境变量名"`：Bearer 认证，token 从该环境变量读（**推荐**，不落盘明文）；它优先于 OAuth。
 - `"disabled": true`：停用（仍列在面板上，但不连接、不产生工具）。
+- 条目里可能还会看到 `"type": "stdio"` 之类**其它 MCP 客户端**写的字段——应用会忽略它们但不会报错，**保留原样**（你也别主动删用户的字段）。
 
 ### 示例（可直接照抄后改）
 
