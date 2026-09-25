@@ -5,16 +5,18 @@ import type { AppearanceSettings, CustomThemeDefinition, DesktopSettings, ThemeA
 /**
  * settings 的存储分层与写入纪律（2026-09-25 性能 P0）。
  *
- * 为什么分层：`appearance.customThemes` + `appearance.customCssAssets` 是内联
- * base64 素材，实测 24.8 MB / 25.5 MB（占 99.1%）。旧实现每次用户命令都
- * `stringify(settings, null, 2)` + 全量重写（≈170 ms 主进程阻塞），而
- * `session.open` 只改 `agentWorkspaces` 的几十字节。分层后：
+ * 为什么分层：`appearance.customThemes` + `appearance.customCssAssets` 曾经是内联
+ * base64 素材，实测 24.8 MB / 25.5 MB（占 99.1%）。2026-09-26 起主题资产落成磁盘文件
+ * （`<agentDir>/pidesktop-themes/<scope>/`），这两个字段只剩「超限/写盘失败的迁移残留」；
+ * 分层本身仍然保留：旧版本/未迁移完的数据随时可能把它们带回来，而当时的分层解决了
+ * 真实痛点（旧实现每次用户命令都 `stringify(settings, null, 2)` + 全量重写 ≈170 ms 主进程
+ * 阻塞，而 `session.open` 只改 `agentWorkspaces` 的几十字节）：
  *
- * - `settings.json`          全部字段，但两个资产字段**不写入**（实测 236 KB）
- * - `appearance-assets.json` 只装 `{ customThemes, customCssAssets }`
+ * - `settings.json`          全部字段，但两个资产字段**不写入**
+ * - `appearance-assets.json` 装 `{ customThemes, customCssAssets? }`——语义已是「主题定义文件」
  *
- * 内存里的 `settingsCache` 形状完全不变——读取时按优先级把资产合并回
- * `raw.appearance`，所以 `migrateSettings` / bootstrap / 协议 / 渲染端零改动。
+ * 内存里的 `settingsCache` 形状完全不变（兼容字段照旧读回），所以
+ * `migrateSettings` / bootstrap / 协议 / 渲染端零改动。
  *
  * 读取优先级（**必须按此实现**，否则旧版本会静默抹掉新写的主题）：
  *

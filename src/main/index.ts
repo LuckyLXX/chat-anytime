@@ -538,9 +538,9 @@ function startRuntime(): void {
   // 同 skills 口径，直接读取、不复制到用户目录；用户自建的同名定义会盖掉它。
   const bundledSubagentsDir = resolveBundledSubagentsDir(app.getAppPath(), app.isPackaged);
   if (!bundledSubagentsDir) console.warn("未找到内置子智能体目录（resources/subagents），本次不注入内置来源");
-  // 主题重资产不过 IPC（2026-09-25）：主题 `.assets` 只有「当前生效」那一份渲染端会用，
-  // 且已通过 customCssAssets 带到，utility 侧压根不读 appearance。实测主目录里 19.6MB
-  // 的主题 base64 之前每次 bootstrap / 保存 / 初始化都搭车过一次进程边界。
+  // 主题资产不过 IPC（2026-09-26）：资产已落成磁盘文件（<agentDir>/pidesktop-themes/），
+  // 渲染端按作用域拼 pidesktop-file://theme URL 直接读盘，完全不消费 base64；
+  // 只剩「超限/写盘失败」的迁移残留会被投影剥掉。utility 侧压根不读 appearance。
   sendToRuntime({ type: "initialize", settings: settingsForRenderer(settings), apiKeys: credentialsCache, bundledSkillsDir, bundledSubagentsDir });
 }
 function createWindow(): void {

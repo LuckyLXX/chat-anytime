@@ -1,72 +1,64 @@
-import type { AppearanceSettings, CustomThemeDefinition, DesktopSettings, ThemeAssetMap } from "../shared/protocol";
+import type { AppearanceSettings, CustomThemeDefinition, DesktopSettings } from "../shared/protocol";
 
 /**
- * 主题重资产的进程边界投影（2026-09-25 P1）。
+ * 主题**内联资产**（迁移残留）的进程边界投影。
  *
- * 实测：`%APPDATA%/chat-anytime/settings.json` 25.5MB，其中 `appearance` 占 25.2MB
- * —— `customThemes` 19.6MB（4 套主题的 base64 素材）+ `customCssAssets` 5.6MB。
- * 关键事实：**渲染端真正需要 base64 的只有「当前生效主题」那一份**
- * （`themeAssetsForAppearance` → customCssAssets ?? 内容相同的那条主题的 assets），
- * 非活动主题的 `.assets` 一路搭车过 bootstrap / 每次保存 / utility 初始化，
- * 没有任何消费者。
+ * 历史：2026-09-25 之前主题资产是内联 base64（`customThemes[].assets` +
+ * `appearance.customCssAssets`，实测 `settings.json` 25.5MB），P1-4 只把「渲染端真正会
+ * 用到的那一份」留下、其余剥掉，24.30MB → 5.55MB。
  *
- * 本模块只做一件事：**主进程 → 渲染端/utility 方向的投影**剥掉主题 `.assets`。
- * 反方向（渲染端 → 主进程）照旧收全量：外观页保存某个主题时确实要把活动资产
- * 附到那条主题上，而剥掉的语义需要额外的写入通道才能表达——收益（一次用户主动
- * 保存多带 5.6MB）远小于复杂度，明确不做。
+ * 2026-09-26 主题资产落磁盘（`<agentDir>/pidesktop-themes/<scope>/` + `pidesktop-file://`
+ * 协议）之后，这两个字段**只是迁移残留**：只有「超过体积上限 / 写盘失败」的资产会继续
+ * 以 base64 留在配置文件里（见 `theme-assets.ts` 的 `migrateInlineThemeAssets`）。
+ * 渲染端**完全不消费**它们——CSS 里的相对 `url()` 由 `resolveThemeAssetUrls` 改写成
+ * 协议 URL。
  *
- * 另一个必须处理的边界：老数据里 `customCss` 是某条自定义主题的 CSS、但
- * `customCssAssets` 为空（applyCustomTheme 之前的历史写法）。若只剥主题资产，
- * 这类用户的壁纸会因为「回退到主题 assets」这条路被切断而消失。所以投影时若
- * `customCssAssets` 缺失，就用「CSS 内容相同的那条主题」的资产补齐一次。
+ * 于是本模块只剩两件事：
+ *
+ * 1. 主进程 → 渲染端方向剥掉内联资产：渲染端不消费，就不该搭车过 IPC（尤其渲染端
+ *    保存时会 `structuredClone(settings)`，残留 base64 会随每次保存走一遍进程边界）。
+ * 2. 渲染端 → 主进程方向按 id / 按字段把主进程那份**保留回来**——渲染端手里没有这些
+ *    字段，直接覆盖就会把残留的 base64 抹掉（那是数据丢失，不是清理）。被删掉的主题
+ *    随条目一起消失（用户明确删了这个主题）。
  */
 
-/** 主题元数据（剥掉 assets）——渲染端只需要 id/name/css 来做列表与等值匹配。 */
+/** 主题定义（剥掉内联资产）——渲染端只需要 id/name/css 来做列表与等值匹配。 */
 function stripThemeAssets(theme: CustomThemeDefinition): CustomThemeDefinition {
   if (theme.assets === undefined) return theme;
   const { assets: _assets, ...rest } = theme;
   return rest;
 }
 
-/** 找出 `customCss` 对应的那条自定义主题（与渲染端 themeAssetsForAppearance 同口径）。 */
-function activeCustomTheme(appearance: AppearanceSettings): CustomThemeDefinition | undefined {
-  return appearance.customThemes.find((theme) => theme.css === appearance.customCss);
-}
-
 /**
- * 主进程 → 渲染端/utility 方向的外观投影：主题不带 `.assets`；
- * `customCssAssets` 缺失且当前 CSS 命中了某条自定义主题时，用那条主题的资产补齐
- * （只在这一步补齐，之后渲染端始终从 customCssAssets 取，不再依赖主题正文）。
+ * 主进程 → 渲染端/utility 方向的外观投影：不带任何内联资产。
+ * 本来就没有残留时原样返回（保持引用身份，避免无谓的重渲染与 IPC 载荷差异）。
  */
 export function appearanceForRenderer(appearance: AppearanceSettings): AppearanceSettings {
-  const customCssAssets: ThemeAssetMap | undefined = appearance.customCssAssets
-    ?? activeCustomTheme(appearance)?.assets;
-  return {
-    ...appearance,
-    ...(customCssAssets && Object.keys(customCssAssets).length > 0 ? { customCssAssets } : {}),
-    customThemes: appearance.customThemes.map(stripThemeAssets)
-  };
+  if (appearance.customCssAssets === undefined && appearance.customThemes.every((theme) => theme.assets === undefined)) return appearance;
+  const { customCssAssets: _customCssAssets, ...rest } = appearance;
+  return { ...rest, customThemes: appearance.customThemes.map(stripThemeAssets) };
 }
 
 /** 整份设置的同向投影（bootstrap 与 utility 初始化共用）。 */
 export function settingsForRenderer(settings: DesktopSettings): DesktopSettings {
-  return { ...settings, appearance: appearanceForRenderer(settings.appearance) };
+  const appearance = appearanceForRenderer(settings.appearance);
+  return appearance === settings.appearance ? settings : { ...settings, appearance };
 }
 
 /**
  * 渲染端 → 主进程方向的合并：元数据（名称/CSS/顺序）以收到的为准，
- * 主题 `.assets` 按 **id** 保留主进程已有的那份；只有收到的主题确实带了 assets
- * 才覆盖（外观页「保存主题」会把当前活动资产附到该主题上）。
- * 被删掉的主题随条目一起消失，其资产不再保留。
+ * 内联资产按 **主题 id**（以及 customCssAssets 字段本身）保留主进程已有的那份；
+ * 只有收到的载荷确实带了资产才覆盖。渲染端手里的载荷永远不带这些字段（下行已剥），
+ * 所以这条恢复路径是「残留数据不被一次保存抹掉」的唯一保障。
  */
 export function mergeSavedAppearance(incoming: AppearanceSettings, existing: AppearanceSettings): AppearanceSettings {
   const existingAssetsById = new Map(existing.customThemes.map((theme) => [theme.id, theme.assets]));
   return {
     ...incoming,
+    ...(incoming.customCssAssets === undefined && existing.customCssAssets !== undefined ? { customCssAssets: existing.customCssAssets } : {}),
     customThemes: incoming.customThemes.map((theme) => {
       const assets = theme.assets ?? existingAssetsById.get(theme.id);
-      if (assets === undefined) return stripThemeAssets(theme);
-      return { ...theme, assets };
+      return assets === undefined ? theme : { ...theme, assets };
     })
   };
 }
