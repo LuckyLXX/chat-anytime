@@ -29,6 +29,7 @@ import type {
   SshRevealEvent,
   UsageStats
 } from "../../shared/protocol";
+import type { ThemeImportOutcome } from "../../shared/theme-assets";
 
 const listeners = new Set<(message: RuntimeMessage) => void>();
 /** 演示用作品清单（内存模拟；真实运行时在 agentDir 落盘）。默认给两个示例，
@@ -599,10 +600,13 @@ export function createDemoApi(): DesktopApi {
       // 终端标签 + 一条失败提示，把一个能看的 demo 演成坏掉的）。
       return { ok: true };
     },
-    async themeAssets(): Promise<undefined> {
-      // 演示环境的 appearance.customThemes 为空，没有主题资产可取（与主进程同语义：
-      // 主题重资产按需拉取，不随 bootstrap 搭车）。
-      return undefined;
+    async themeImport(): Promise<ThemeImportOutcome> {
+      // 演示环境没有文件系统也没有原生对话框：如实告知，不伪造一个成功的导入
+      // （与 galleryThumb / galleryAwaitService 同口径的降级态度）。
+      return { ok: false, message: "演示环境不支持主题文件导入（需要真实文件系统与系统对话框）" };
+    },
+    async themePromote(): Promise<void> {
+      // 演示环境没有磁盘上的主题资产可归位。
     },
     async browserPreview(command: BrowserPreviewCommand): Promise<BrowserPreviewState> {
       if (command.type === "close") {

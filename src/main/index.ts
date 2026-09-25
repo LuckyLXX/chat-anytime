@@ -12,10 +12,11 @@ import { mergeSavedAppearance, settingsForRenderer } from "./appearance-assets.j
 import { createSettingsPersistence, diffSettings, readSettingsFile, settingsPath as settingsFilePath, type SettingsPersistence } from "./settings-store.js";
 import { togglePinnedSessionPath } from "./session-scope.js";
 import { importExternalAttachment, workspaceRelativeAttachment } from "./attachments.js";
-import type { BrowserDownloadPrefs, BrowserPreviewCommand, BrowserPreviewState, DesktopBootstrap, DesktopSettings, GalleryServiceProbe, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot, SshCommand, SshCommandResult, SshEventData, SshRevealEvent, TerminalCommand, TerminalEventData, ThemeAssetMap, WorkspaceDirectoryListing, WorkspaceEntryResult, WorkspaceFilePreview, WorkspaceFileSearchResult, WorkspaceFileStat, WorkspaceFileWriteResult } from "../shared/protocol.js";
+import type { BrowserDownloadPrefs, BrowserPreviewCommand, BrowserPreviewState, DesktopBootstrap, DesktopSettings, GalleryServiceProbe, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot, SshCommand, SshCommandResult, SshEventData, SshRevealEvent, TerminalCommand, TerminalEventData, WorkspaceDirectoryListing, WorkspaceEntryResult, WorkspaceFilePreview, WorkspaceFileSearchResult, WorkspaceFileStat, WorkspaceFileWriteResult } from "../shared/protocol.js";
 import { PREVIEW_FILE_SCHEME, parseWorkspaceFilePreviewUrl } from "../shared/protocol.js";
 import { isThemeAssetUrl, parseThemeAssetUrl } from "../shared/theme-assets.js";
-import { serveThemeAsset, migrateInlineThemeAssets, reconcileThemeAssetDirs, themeAssetsDirFor, resolveThemeAgentDir } from "./theme-assets.js";
+import type { ThemeImportOutcome } from "../shared/theme-assets.js";
+import { serveThemeAsset, migrateInlineThemeAssets, reconcileThemeAssetDirs, themeAssetsDirFor, resolveThemeAgentDir, importThemeCssFile, importThemeDirectory, promoteThemeScope } from "./theme-assets.js";
 import { createWorkspaceDirectory, createWorkspaceFile, deleteWorkspaceEntry, listWorkspaceDirectory, previewFileMimeType, readWorkspaceFilePreview, renameWorkspaceEntry, resolveWorkspaceEntry, safeRelativePath, searchWorkspaceFiles, statWorkspaceFile, writeWorkspaceFile } from "./workspace-preview.js";
 import { pruneDisabledModelRefs } from "./model-catalog.js";
 import { BrowserPreviewController } from "./browser-preview.js";
@@ -653,10 +654,23 @@ function registerIpc(): void {
     const settings: DesktopSettings = settingsForRenderer({ ...source, providers: source.providers.map((provider) => ({ ...provider, keyConfigured: Boolean(credentialsCache[provider.id]) })), jevKeyConfigured: Boolean(credentialsCache[JEV_CREDENTIAL_ID]) });
     return { platform: process.platform, version: app.getVersion(), securityWarning, settings, runtime: latestSnapshot, catalog: latestCatalog ? { models: latestCatalog.models, providers: latestCatalog.providers } : undefined, resources: latestResources };
   });
-  // 渲染端按需取某条自定义主题的资产（外观页「应用/编辑该主题」时）。单条按需拉取
-  // 代替全量搭车：自定义主题目前由用户手动导入，体量一两条的量级。
-  ipcMain.handle("appearance:theme-assets", (_event, themeId: string): ThemeAssetMap | undefined => {
-    return loadSettings().appearance.customThemes.find((theme) => theme.id === themeId)?.assets;
+  // 主题导入：对话框与全部文件工作都在主进程（渲染端不再用 webkitdirectory + FileReader
+  // 读盘、不再把资产变成 base64 过 IPC）。渲染端只拿 CSS 文本与统计。
+  ipcMain.handle("appearance:theme-import", async (_event, kind: unknown): Promise<ThemeImportOutcome> => {
+    if (kind !== "dir" && kind !== "css") return { ok: false, message: "不支持的主题导入类型" };
+    const options: Electron.OpenDialogOptions = kind === "dir"
+      ? { title: "选择主题目录", properties: ["openDirectory"] }
+      : { title: "选择主题 CSS", properties: ["openFile"], filters: [{ name: "主题 CSS", extensions: ["css"] }] };
+    const result = mainWindow ? await dialog.showOpenDialog(mainWindow, options) : await dialog.showOpenDialog(options);
+    const picked = result.filePaths[0];
+    if (result.canceled || !picked) return { ok: false, canceled: true };
+    const themesDir = themeAssetsDirFor(resolveThemeAgentDir());
+    return kind === "dir" ? importThemeDirectory(themesDir, picked) : importThemeCssFile(themesDir, picked);
+  });
+  // 「保存主题」：草稿槽 current/ → <themeId>/（立刻做，否则这中间主题资产 404）。
+  ipcMain.handle("appearance:theme-promote", (_event, themeId: unknown): void => {
+    if (typeof themeId !== "string") return;
+    promoteThemeScope(themeAssetsDirFor(resolveThemeAgentDir()), themeId);
   });
   ipcMain.handle("desktop:choose-workspace", async (): Promise<string | undefined> => { const result = mainWindow ? await dialog.showOpenDialog(mainWindow, { title: "选择项目工作区", properties: ["openDirectory", "createDirectory"] }) : await dialog.showOpenDialog({ title: "选择项目工作区", properties: ["openDirectory", "createDirectory"] }); return result.canceled ? undefined : result.filePaths[0]; });
   ipcMain.handle("desktop:choose-preview-file", async (): Promise<WorkspaceFilePreview | undefined> => {

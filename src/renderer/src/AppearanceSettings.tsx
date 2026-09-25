@@ -1,16 +1,16 @@
 import { Download, RotateCcw, Save, Trash2 } from "lucide-react";
-import { useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from "react";
+import { useState, type FormEvent, type ReactNode } from "react";
 import type {
   AppearanceSettings as AppearanceSettingsValue,
   CustomThemeDefinition,
   DesktopSettings,
   InterfaceTuning,
-  ThemeAssetMap,
   ThemeMode,
   ThemePresetId
 } from "../../shared/protocol";
 import { RichContent } from "./components/RichContent";
-import { CSS_URL_PATTERN, activeThemeScope, isExternalThemeReference, resolveThemeAssetUrls, themeAssetRelativePath } from "../../shared/theme-assets";
+import { activeThemeScope, resolveThemeAssetUrls } from "../../shared/theme-assets";
+import type { ThemeImportOutcome } from "../../shared/theme-assets";
 import { THEME_PRESETS, bubbleOpacityCss, panelOpacityCss, scopeCustomThemeCssForPreview, themePreviewCss, themeWallpaperOpacity, wallpaperOpacityCss } from "./lib/theme-presets";
 import { customCssHasWallpaper } from "./lib/theme-runtime";
 import { useDesktopStore } from "./store";
@@ -34,10 +34,14 @@ import { useDesktopStore } from "./store";
  *    "appearance-import-css" / "appearance-import-theme" / "appearance-clear-css"
  *    / "appearance-save-theme" / "appearance-save"。
  *
- * 数据流与旧实现逐字节一致：即时生效的字段仍直接写 store（取消对话框由父级
+ * 数据流与旧实现一致：即时生效的字段仍直接写 store（取消对话框由父级
  * initialSettingsRef 回滚），提交仍是 `appearance.save` 整包发 settings.appearance。
- * 主题资产/壁纸判定两个共用件（themeAssetsForAppearance / useThemeAssetUrls /
- * customCssHasWallpaper）抽到 lib/theme-runtime.ts，App 外壳与本页同源引用。
+ * 壁纸判定（customCssHasWallpaper）抽到 lib/theme-runtime.ts，App 外壳与本页同源引用。
+ *
+ * 2026-09-26 主题资产落磁盘：导入不再由渲染端读目录/读文件——`themeImport(kind)`
+ * 让主进程弹对话框、读盘、把 CSS 引用的资产写进 `<agentDir>/pidesktop-themes/current/`，
+ * 本页只拿 CSS 文本与统计（资产落盘数/未命中的引用）；`themePromote(id)` 在「保存当前
+ * 主题」时把草稿槽归到该主题 id 下。资产全程不过渲染端、不过 IPC。
  *
  * 刻意移除：本页原先重复的「展示思考过程」开关（通用页「界面」卡已声明归属）。
  */
@@ -58,8 +62,8 @@ export function AppearanceSettings({ settings, onSaved, onCancel }: AppearanceSe
     return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
   });
   const [themeImportError, setThemeImportError] = useState<string>();
-  const cssFileInputRef = useRef<HTMLInputElement>(null);
-  const themeDirectoryInputRef = useRef<HTMLInputElement>(null);
+  const [themeImportNote, setThemeImportNote] = useState<string>();
+  const [themeImporting, setThemeImporting] = useState(false);
   const initialCustomTheme = settings.appearance.customThemes.find((theme) => theme.css === settings.appearance.customCss);
   const [customThemeName, setCustomThemeName] = useState(initialCustomTheme?.name ?? "");
   const [editingCustomThemeId, setEditingCustomThemeId] = useState<string | undefined>(initialCustomTheme?.id);
@@ -135,39 +139,29 @@ export function AppearanceSettings({ settings, onSaved, onCancel }: AppearanceSe
     updateAppearance(Object.keys(panelOpacity).length > 0 ? { panelOpacity } : { panelOpacity: undefined });
   }
 
-  async function importCustomCss(event: ChangeEvent<HTMLInputElement>): Promise<void> {
-    const file = event.target.files?.[0];
-    event.target.value = "";
-    if (!file) return;
+  /**
+   * 导入主题（目录 / 单个 CSS）：**全部文件工作在主进程**——它弹选择对话框、读盘、
+   * 按 CSS 里的安全相对引用把资产写进草稿槽 `<agentDir>/pidesktop-themes/current/`，
+   * 渲染端只拿到 CSS 文本与统计（导入不再由渲染端读盘：资产全程不过渲染端、不过 IPC）。
+   */
+  async function importTheme(kind: "dir" | "css"): Promise<void> {
     setThemeImportError(undefined);
-    const css = await file.text();
-    setCustomThemeName(cssThemeNameFromFile(file.name));
-    setEditingCustomThemeId(undefined);
-    updateAppearance({ customCss: css, customCssAssets: {} });
-  }
-
-  async function importThemeDirectory(event: ChangeEvent<HTMLInputElement>): Promise<void> {
-    const files = Array.from(event.target.files ?? []) as ThemeDirectoryFile[];
-    event.target.value = "";
-    setThemeImportError(undefined);
-    if (files.length === 0) return;
-    const cssFiles = files.filter((file) => file.name.toLowerCase().endsWith(".css"));
-    if (cssFiles.length === 0) {
-      setThemeImportError("主题目录中没有找到 CSS 文件");
-      return;
-    }
+    setThemeImportNote(undefined);
+    setThemeImporting(true);
     try {
-      const rootName = themeRelativePath(cssFiles[0]!).split("/")[0] || cssThemeNameFromFile(cssFiles[0]!.name);
-      const cssFile = cssFiles.find((file) => file.name.toLowerCase() === "theme.css")
-        ?? cssFiles.find((file) => file.name.toLowerCase() === `${rootName.toLowerCase()}.css`)
-        ?? cssFiles[0]!;
-      const css = await cssFile.text();
-      const assets = await collectThemeAssets(css, cssFile, files);
-      setCustomThemeName(themeNameFromCss(css, rootName));
+      const result = await window.piDesktop.themeImport(kind);
+      if (!result.ok) {
+        if (!result.canceled) setThemeImportError(result.message ?? "主题导入失败");
+        return;
+      }
+      setCustomThemeName(result.name ?? "");
       setEditingCustomThemeId(undefined);
-      updateAppearance({ customCss: css, customCssAssets: assets });
+      updateAppearance({ customCss: result.css ?? "" });
+      setThemeImportNote(importSummary(result));
     } catch (error) {
-      setThemeImportError(error instanceof Error ? error.message : "主题目录导入失败");
+      setThemeImportError(error instanceof Error ? error.message : "主题导入失败");
+    } finally {
+      setThemeImporting(false);
     }
   }
 
@@ -177,12 +171,10 @@ export function AppearanceSettings({ settings, onSaved, onCancel }: AppearanceSe
     const currentThemes = settings.appearance.customThemes;
     const existingIndex = editingCustomThemeId ? currentThemes.findIndex((theme) => theme.id === editingCustomThemeId) : -1;
     const existing = existingIndex >= 0 ? currentThemes[existingIndex] : undefined;
-    const assets = settings.appearance.customCssAssets;
     const nextTheme: CustomThemeDefinition = {
       id: existing?.id ?? createCustomThemeId(),
       name: customThemeName.trim() || existing?.name || `自定义主题 ${currentThemes.length + 1}`,
-      css,
-      ...(assets && Object.keys(assets).length > 0 ? { assets: structuredClone(assets) } : {})
+      css
     };
     const nextThemes = existingIndex >= 0
       ? currentThemes.map((theme, index) => index === existingIndex ? nextTheme : theme)
@@ -190,16 +182,17 @@ export function AppearanceSettings({ settings, onSaved, onCancel }: AppearanceSe
     setEditingCustomThemeId(nextTheme.id);
     setCustomThemeName(nextTheme.name);
     updateAppearance({ customThemes: nextThemes });
+    setThemeImportNote(undefined);
+    // 活动资产从草稿槽 current/ 归到 <id>/ **立刻做**：作用域已随 CSS 等值命中变成
+    // 主题 id，等到「保存外观设置」才归位的话，这中间壁纸会 404。
+    void window.piDesktop.themePromote(nextTheme.id).catch(() => undefined);
   }
 
-  async function applyCustomTheme(theme: CustomThemeDefinition): Promise<void> {
+  function applyCustomTheme(theme: CustomThemeDefinition): void {
     setEditingCustomThemeId(theme.id);
     setCustomThemeName(theme.name);
-    // 主题资产不再随 bootstrap 下发（只有当前生效的那份走 customCssAssets），
-    // 「应用某条主题」时按需取一次；主进程那份是权威副本。取不到就退化为无资产
-    // （主题的 CSS 仍然生效）——不能因此把应用主题整个搞失败。
-    const assets = theme.assets ?? await window.piDesktop.themeAssets(theme.id).catch(() => undefined) ?? {};
-    updateAppearance({ customCss: theme.css, customCssAssets: assets });
+    setThemeImportNote(undefined);
+    updateAppearance({ customCss: theme.css });
   }
 
   function deleteCustomTheme(theme: CustomThemeDefinition): void {
@@ -208,7 +201,7 @@ export function AppearanceSettings({ settings, onSaved, onCancel }: AppearanceSe
     setEditingCustomThemeId(undefined);
     if (isActive) {
       setCustomThemeName("");
-      updateAppearance({ customCss: "", customCssAssets: {}, customThemes: nextThemes });
+      updateAppearance({ customCss: "", customThemes: nextThemes });
       return;
     }
     updateAppearance({ customThemes: nextThemes });
@@ -292,16 +285,15 @@ export function AppearanceSettings({ settings, onSaved, onCancel }: AppearanceSe
                 <strong>自定义 CSS</strong>
                 <small>原样应用（只做旧变量别名映射与模式选择器重定作用域）</small>
                 <span className="appearance-card-actions">
-                  <input ref={cssFileInputRef} hidden type="file" accept=".css,text/css" onChange={(event) => void importCustomCss(event)} />
-                  <input ref={(element) => { themeDirectoryInputRef.current = element; element?.setAttribute("webkitdirectory", ""); }} hidden type="file" multiple accept=".css,image/png,image/jpeg,image/webp,image/gif,.woff,.woff2,.ttf,.otf" onChange={(event) => void importThemeDirectory(event)} />
-                  <button className="secondary-button compact-button" type="button" data-control="appearance-import-css" onClick={() => cssFileInputRef.current?.click()}>导入 CSS</button>
-                  <button className="secondary-button compact-button" type="button" data-control="appearance-import-theme" onClick={() => themeDirectoryInputRef.current?.click()}>导入主题目录</button>
-                  <button className="secondary-button compact-button" type="button" data-control="appearance-clear-css" onClick={() => { setEditingCustomThemeId(undefined); setCustomThemeName(""); setThemeImportError(undefined); updateAppearance({ customCss: "", customCssAssets: {} }); }}>清空</button>
+                  <button className="secondary-button compact-button" type="button" data-control="appearance-import-css" disabled={themeImporting} onClick={() => void importTheme("css")}>导入 CSS</button>
+                  <button className="secondary-button compact-button" type="button" data-control="appearance-import-theme" disabled={themeImporting} onClick={() => void importTheme("dir")}>导入主题目录</button>
+                  <button className="secondary-button compact-button" type="button" data-control="appearance-clear-css" onClick={() => { setEditingCustomThemeId(undefined); setCustomThemeName(""); setThemeImportError(undefined); setThemeImportNote(undefined); updateAppearance({ customCss: "" }); }}>清空</button>
                 </span>
               </div>
               <div className="appearance-card-body">
                 <label className="custom-css-field"><textarea value={settings.appearance.customCss} spellCheck={false} rows={10} placeholder={":root[data-theme-effective=\"dark\"] {\n  --accent: #8b5cf6;\n}"} aria-label="自定义 CSS" onChange={(event) => useDesktopStore.setState({ settings: { ...settings, appearance: { ...settings.appearance, customCss: event.target.value } } })} /></label>
                 {themeImportError && <p className="form-error appearance-import-error">{themeImportError}</p>}
+                {themeImportNote && <p className="appearance-hint appearance-import-note">{themeImportNote}</p>}
                 <CustomThemeLibrary customCss={settings.appearance.customCss} customThemes={settings.appearance.customThemes} customThemeName={customThemeName} editingCustomThemeId={editingCustomThemeId} onNameChange={setCustomThemeName} onSave={saveCustomTheme} onExport={exportCustomCss} onApply={applyCustomTheme} onDelete={deleteCustomTheme} />
               </div>
             </section>
@@ -393,7 +385,7 @@ function CustomThemeLibrary({ customCss, customThemes, customThemeName, editingC
     <div className="custom-theme-library">
       <div className="custom-theme-library-heading">
         <label className="custom-theme-name-field">当前 CSS 主题名称<input value={customThemeName} placeholder="例如：午夜玻璃" onChange={(event) => onNameChange(event.target.value)} /></label>
-        <div className="custom-theme-library-actions"><button className="secondary-button compact-button" type="button" data-control="appearance-save-theme" disabled={!customCss.trim()} onClick={onSave}><Save size={13} />保存当前主题</button><button className="secondary-button compact-button" type="button" disabled={!customCss.trim()} onClick={onExport}><Download size={13} />导出 CSS</button></div>
+        <div className="custom-theme-library-actions"><button className="secondary-button compact-button" type="button" data-control="appearance-save-theme" disabled={!customCss.trim()} onClick={onSave}><Save size={13} />保存当前主题</button><button className="secondary-button compact-button" type="button" title="只导出 CSS 文本；图片/字体资产不包含（主题资产已落盘到 agentDir，可自行复制该目录）" disabled={!customCss.trim()} onClick={onExport}><Download size={13} />导出 CSS</button></div>
       </div>
       {customThemes.length > 0 ? (
         <div className="custom-theme-list">
@@ -417,47 +409,18 @@ function createCustomThemeId(): string {
   return `custom-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function cssThemeNameFromFile(fileName: string): string {
-  return fileName.replace(/\.[^./\\]+$/u, "").trim();
+/** 导入结果的一句话摘要（资产落盘统计 + 未命中的引用 + 下一步提示）。 */
+function importSummary(result: ThemeImportOutcome): string {
+  const parts: string[] = [];
+  parts.push(result.assetCount ? `已落盘 ${result.assetCount} 个资产（${formatBytes(result.bytes ?? 0)}）` : "主题未引用资产文件");
+  if (result.missing?.length) parts.push(`有 ${result.missing.length} 个引用没找到：${result.missing.slice(0, 3).join("、")}`);
+  if (result.skipped?.length) parts.push(`已跳过不支持的格式：${result.skipped.slice(0, 3).join("、")}`);
+  parts.push("点「保存当前主题」收进主题库");
+  return parts.join("；");
 }
 
-type ThemeDirectoryFile = File & { webkitRelativePath?: string };
-
-function themeRelativePath(file: File): string {
-  const relative = (file as ThemeDirectoryFile).webkitRelativePath || file.name;
-  return relative.replaceAll("\\", "/").replace(/^\.\/+?/u, "");
-}
-
-function readFileAsDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => typeof reader.result === "string" ? resolve(reader.result) : reject(new Error("无法读取主题资源文件"));
-    reader.onerror = () => reject(reader.error ?? new Error("无法读取主题资源文件"));
-    reader.readAsDataURL(file);
-  });
-}
-
-function themeNameFromCss(css: string, fallback: string): string {
-  const match = /(?:Theme Name|主题)\s*[:：]\s*([^\r\n*]+)/iu.exec(css);
-  return match?.[1]?.trim() || fallback;
-}
-
-async function collectThemeAssets(css: string, cssFile: File, files: File[]): Promise<ThemeAssetMap> {
-  const assetFiles = files.filter((file) => /\.(?:png|jpe?g|webp|gif|svg|avif|woff2?|ttf|otf)$/iu.test(file.name));
-  const assets = await Promise.all(assetFiles.map(async (file) => [themeRelativePath(file).toLowerCase(), await readFileAsDataUrl(file)] as const));
-  const cssPath = themeRelativePath(cssFile);
-  const cssDirectory = cssPath.includes("/") ? cssPath.slice(0, cssPath.lastIndexOf("/")) : "";
-  const result: ThemeAssetMap = {};
-  css.replace(CSS_URL_PATTERN, (match, _quote: string, rawReference: string) => {
-    const reference = themeAssetRelativePath(rawReference);
-    if (!reference || isExternalThemeReference(reference)) return match;
-    const candidates = [
-      cssDirectory ? `${cssDirectory}/${reference}` : reference,
-      reference
-    ];
-    const asset = assets.find(([path]) => candidates.includes(path) || path.endsWith(`/${reference}`) || path.split("/").at(-1) === reference);
-    if (asset) result[reference] = asset[1];
-    return match;
-  });
-  return result;
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }

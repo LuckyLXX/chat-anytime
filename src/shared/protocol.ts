@@ -10,6 +10,7 @@ export type AccessMode = "read-only" | "ask" | "workspace" | "full";
 export type ThinkingLevelMap = Partial<Record<ThinkingLevel, string | null>>;
 
 import type { DesignCanvasInfo, DesignNode, DesignOp } from "./design-schema.js";
+import type { ThemeImportOutcome } from "./theme-assets.js";
 export type { DesignCanvasInfo, DesignDoc, DesignLayout, DesignNode, DesignNodeDraft, DesignOp, DesignNodeType } from "./design-schema.js";
 export { applyDesignOps, cloneNodeWithNewIds, countNodes, createDesignDoc, findNode, makeNodeId, normalizeDesignDoc, sanitizeDesignName, summarizeNode } from "./design-schema.js";
 
@@ -165,13 +166,24 @@ export interface AgentProfile {
 export const THEME_PRESET_IDS = ["default", "ocean", "emerald", "indigo", "forest", "rose", "amber", "violet", "carbon", "blue-dream"] as const;
 export type ThemePresetId = typeof THEME_PRESET_IDS[number];
 
+/**
+ * 主题资产的内联形态（相对路径 → data URL）。
+ *
+ * 2026-09-26 起**只是迁移残留的兼容字段**：新数据一律落成磁盘文件
+ * （`<agentDir>/pidesktop-themes/<scope>/`，由 `src/shared/theme-assets.ts` 改写 CSS
+ * 里的相对 `url()`），只有「超过体积上限 / 写盘失败」的旧资产会继续以 base64
+ * 留在配置文件里（不静默丢数据）。渲染端不再消费它。
+ */
 export type ThemeAssetMap = Record<string, string>;
 
 export interface CustomThemeDefinition {
   id: string;
   name: string;
   css: string;
-  /** Image/font data is kept separately so the editable CSS stays readable. */
+  /**
+   * 迁移残留的内联资产（仅超限/失败时存在，见 ThemeAssetMap）。正常情况下主题的
+   * 资产就在 `<agentDir>/pidesktop-themes/<id>/` 目录里，不进设置 JSON。
+   */
   assets?: ThemeAssetMap;
 }
 
@@ -223,7 +235,7 @@ export interface AppearanceSettings {
   customCss: string;
   /** 运行时界面微调（密度/圆角），缺省时保持主题默认。 */
   tune?: InterfaceTuning;
-  /** Imported image/font data keyed by the relative url used in customCss. */
+  /** 内联资产（迁移残留，见 ThemeAssetMap：正常情况资产在磁盘目录里）。 */
   customCssAssets?: ThemeAssetMap;
   customThemes: CustomThemeDefinition[];
   wallpaperOpacity?: WallpaperOpacityOverrides;
@@ -1992,10 +2004,17 @@ export interface DesktopApi {
    */
   galleryAwaitService(input: { url: string; terminalId?: string; timeoutMs?: number }): Promise<GalleryServiceProbe>;
   /**
-   * 按需取一条自定义主题的资产（主题重资产不再随 bootstrap / 每次保存搭车过 IPC，
-   * 见 src/main/appearance-assets.ts）。演示环境返回 undefined。
+   * 主题导入（设置 → 外观的「导入 CSS」/「导入主题目录」）：主进程弹系统选择对话框、
+   * 读盘、按 CSS 里的安全相对引用把资产写进 `<agentDir>/pidesktop-themes/current/`，
+   * 渲染端只拿到 CSS 文本与统计。取消返回 `{ ok:false, canceled:true }`。
    */
-  themeAssets(themeId: string): Promise<ThemeAssetMap | undefined>;
+  themeImport(kind: "dir" | "css"): Promise<ThemeImportOutcome>;
+  /**
+   * 「保存主题」：把草稿槽 `current/` 的资产归到 `<themeId>/`。
+   * 刻意单独一步（不等 appearance.save）：作用域已随 CSS 等值命中变成主题 id，
+   * 晚归位会让这中间的主题资产 404。失败不抛错（主题列表照旧保存）。
+   */
+  themePromote(themeId: string): Promise<void>;
   browserPreview(command: BrowserPreviewCommand): Promise<BrowserPreviewState>;
   browserAutomationCancel(tabId: string): Promise<void>;
   terminal(command: TerminalCommand): Promise<void>;
