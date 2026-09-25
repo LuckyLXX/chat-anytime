@@ -116,7 +116,8 @@ import { buildAutomationTools, type AutomationCreateInput, type AutomationToolCo
 import { resolveVisionModel } from "./vision.js";
 import { buildResourceCatalog } from "./resource-catalog.js";
 import { agentWorkspaceSessionDir, backfillUnpersistedSessions, isSessionPinned, mergeSessionSummary, pruneVanishedSessions, sameSessionDir, sessionFileMatchesId, sessionListReadyFor, sortSessionSummaries, togglePinnedSessionPath } from "./session-scope.js";
-import { listSessionSummaries, summarizeLiveSession } from "./session-summary-cache.js";
+import { listSessionSummaries, readSessionHeaderLine, summarizeLiveSession } from "./session-summary-cache.js";
+import { planSessionOpen } from "./session-open-plan.js";
 import { isDesktopConfiguredProvider } from "./model-catalog.js";
 import { defaultTools, ensureDefaultWorkspaceDir, forgetAgentWorkspace, isPositiveInt, mergeProviderModels, recordAgentWorkspace, resolveDefaultWorkspace, resolveInitialWorkspace } from "./settings.js";
 import { buildMultiInvocationPrompt, composeInvocationBody, parseInvocationPrompt, sameInvocations, type InvocationSegment } from "./invocation-prompt.js";
@@ -3556,10 +3557,45 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         const liveFile = candidate.session.sessionManager.getSessionFile();
         return Boolean(liveFile) && resolve(liveFile!).toLowerCase() === target.toLowerCase();
       });
-      if (fileLive && !(await pathExists(target))) {
+      // 分支决策与理由见 session-open-plan.ts：live 零读盘 / cold 只 open 一次 /
+      // fallback 才是旧的探测路径（两条防御在下面完整保留）。
+      const fileExists = await pathExists(target);
+      const header = fileExists ? readSessionHeaderLine(target) : undefined;
+      const plan = planSessionOpen({ target, root, exists: fileExists, liveFileMatches: Boolean(fileLive), header });
+      if (plan === "live") {
         if (command.activate === false) break; // 分屏已完成前把无效格留着，无需重建
-        activate(fileLive);
+        // 工作区镜像：不清写助手最后工作区——activate 内部仅在跨工作区时
+        // rememberWorkspace(record.workspace)，与旧的 live 路径同效且不重复写 recents。
+        activate(fileLive!);
         emitState();
+        break;
+      }
+      if (plan === "cold") {
+        const recordWorkspace = resolve(header!.cwd);
+        // sessionRoot 按 record 自己的工作区计算（不经过全局 workspace），且校验必须在
+        // 任何全局镜像改写之前：失败路径不允许脏写助手最后工作区。
+        const recordRoot = currentAgent ? agentWorkspaceSessionDir(getAgentDir(), currentAgent.id, recordWorkspace) : undefined;
+        if (!recordRoot || (!sameSessionDir(recordRoot, dirname(target)) && !sameSessionDir(root, dirname(target)))) {
+          throw new Error("会话路径与工作区不匹配");
+        }
+        const liveById = liveSessions.get(header!.id);
+        if (command.activate === false) {
+          if (liveById) break; // 已 live：无需重建，也不激活
+          await createSession(SessionManager.open(target, recordRoot, recordWorkspace), { skipActivate: true });
+          break;
+        }
+        workspace = recordWorkspace;
+        rememberWorkspace(workspace);
+        // A live record (e.g. a session still running in the background) is
+        // reactivated in place — never rebuilt — so its in-flight turn survives.
+        if (liveById) {
+          activate(liveById);
+          emitState();
+          break;
+        }
+        // 只 open 一次：cwdOverride 跳过 Pi 内部那次头部复读（旧实现先探测再重建，
+        // 44 MB 会话白读一次）。
+        await createSession(SessionManager.open(target, recordRoot, workspace));
         break;
       }
       const discovered = SessionManager.open(target);
