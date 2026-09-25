@@ -1970,11 +1970,14 @@ html[data-ui-motion="off"] .general-jev-toggle .chevron { transition: none; }
 .content-preview-footer { display: flex; align-items: center; gap: 5px; flex: 0 0 auto; min-height: 29px; min-width: 0; padding: 0 12px; color: var(--text-muted); border-top: 1px solid var(--border); font-size: 10px; }
 .content-preview-footer em { margin-left: auto; color: var(--warning); font-style: normal; }
 .browser-preview { display: grid; grid-template-rows: 43px minmax(0, 1fr); width: 100%; height: 100%; min-width: 0; min-height: 0; background: var(--surface-muted); }
-.browser-preview:has(.browser-automating-banner), .browser-preview:has(.browser-pick-hint) { grid-template-rows: auto 43px minmax(0, 1fr); }
+/* 横幅容器：所有横幅（AI 操作中 / 选择元素 / 下载提示 / 下载决策）都在里面，
+   grid 只需认容器是否有内容，不必随横幅组合变行数。 */
+.browser-preview-banners { display: block; min-width: 0; }
+.browser-preview:has(.browser-preview-banners) { grid-template-rows: auto 43px minmax(0, 1fr); }
 .browser-automating-banner { display: flex; align-items: center; gap: 7px; min-width: 0; padding: 5px 10px; color: var(--warning); background: color-mix(in srgb, var(--warning) 10%, var(--surface)); border-bottom: 1px solid var(--border); font-size: 11px; }
 .browser-automating-banner span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .browser-pick-hint { display: flex; align-items: center; gap: 7px; min-width: 0; padding: 5px 10px; color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--surface)); border-bottom: 1px solid var(--border); font-size: 11px; }
-.browser-preview-toolbar { position: relative; display: grid; grid-template-columns: 29px 29px 29px auto minmax(0, 1fr) 29px 29px 29px; gap: 4px; align-items: center; min-width: 0; padding: 0 8px; border-bottom: 1px solid var(--border); background: var(--surface); }
+.browser-preview-toolbar { position: relative; display: grid; grid-template-columns: 29px 29px 29px auto minmax(0, 1fr) 29px 29px 29px 29px; gap: 4px; align-items: center; min-width: 0; padding: 0 8px; border-bottom: 1px solid var(--border); background: var(--surface); }
 .browser-preview-toolbar > button { display: grid; place-items: center; width: 29px; height: 29px; padding: 0; border: 0; border-radius: 6px; color: var(--text-muted); background: transparent; cursor: pointer; }
 .browser-preview-toolbar > button:hover { color: var(--text); background: var(--surface-button-hover); }
 .browser-preview-toolbar > button:disabled { opacity: .4; cursor: default; }
@@ -2006,6 +2009,40 @@ html[data-ui-motion="off"] .general-jev-toggle .chevron { transition: none; }
    面板锚定在**工具栏右缘**（而不是星标本身）：面板宽 280px，而星标右侧还有两个
    按钮；若锚在星标上，窄面板（预览面板最小 310px）会把面板左缘推出面板外、被
    .content-preview-panel 的 overflow:hidden 剪掉行首图标。 */
+/* 下载设置菜单（工具栏下载图标）：与书签菜单同骨架，面板同样锚在工具栏右缘。 */
+.browser-download-menu { display: flex; min-width: 0; }
+.browser-download-menu > button { display: grid; place-items: center; width: 29px; height: 29px; padding: 0; border: 0; border-radius: 6px; color: var(--text-muted); background: transparent; cursor: pointer; }
+.browser-download-menu > button:hover, .browser-download-menu > button[aria-expanded="true"] { color: var(--text); background: var(--surface-button-hover); }
+.browser-download-pop { position: absolute; z-index: 30; top: calc(100% + 6px); right: 8px; display: grid; gap: 2px; width: 260px; max-width: calc(100% - 16px); padding: 6px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow-lg); }
+.browser-download-dir { display: grid; gap: 2px; min-width: 0; padding: 5px 8px 7px; }
+.browser-download-dir > span { color: var(--text-muted); font-size: 10px; }
+.browser-download-dir > strong { overflow: hidden; color: var(--text); font-size: 11px; font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
+.browser-download-choose, .browser-download-ask { display: flex; align-items: center; gap: 8px; min-height: 30px; padding: 4px 8px; border: 0; border-radius: 6px; color: var(--text); background: transparent; font-size: 11px; text-align: left; cursor: pointer; }
+.browser-download-choose:hover, .browser-download-ask:hover { background: var(--surface-button-hover); }
+.browser-download-choose > svg { flex: 0 0 auto; color: var(--text-muted); }
+.browser-download-ask > span:last-child { flex: 1 1 auto; }
+.browser-download-check { display: grid; flex: 0 0 auto; place-items: center; width: 15px; height: 15px; border: 1px solid var(--border-strong); border-radius: 4px; color: var(--on-accent); background: var(--surface-input); }
+.browser-download-check.on { border-color: transparent; background: var(--accent); }
+.browser-download-sep { height: 1px; margin: 4px 2px; background: var(--border); }
+/* 人工下载决策横幅：与 AI 操作/选择元素横幅同位置（工具栏下方），因为 native
+   WebContentsView 永远盖在 DOM 之上——想覆盖页面必须先把页面隐藏。 */
+.browser-download-prompt { display: grid; gap: 6px; padding: 7px 10px; color: var(--text); background: color-mix(in srgb, var(--accent) 9%, var(--surface)); border-bottom: 1px solid var(--border); font-size: 11px; }
+.browser-download-head { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.browser-download-head > svg { flex: 0 0 auto; color: var(--accent); }
+.browser-download-copy { display: grid; gap: 1px; flex: 1 1 auto; min-width: 0; }
+.browser-download-copy > strong { overflow: hidden; font-size: 11px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.browser-download-copy > small { overflow: hidden; color: var(--text-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.browser-download-count { flex: 0 0 auto; color: var(--text-muted); font-size: 10px; font-style: normal; }
+.browser-download-actions { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.browser-download-actions > button { height: 24px; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 6px; color: var(--text); background: var(--surface-input); font-size: 11px; cursor: pointer; }
+.browser-download-actions > button:hover { background: var(--surface-button-hover); }
+.browser-download-actions > button.primary { color: var(--on-accent); border-color: transparent; background: var(--accent); }
+.browser-download-actions > button.primary:hover { background: var(--accent-hover, var(--accent)); }
+.browser-download-timer { margin-left: auto; color: var(--text-muted); font-size: 10px; font-style: normal; white-space: nowrap; }
+/* 下载一次性提示（已保存到…/另存为失败…）：4 秒后由渲染端自行隐藏。 */
+.browser-download-notice { display: flex; align-items: center; gap: 7px; min-width: 0; padding: 5px 10px; color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--surface)); border-bottom: 1px solid var(--border); font-size: 11px; }
+.browser-download-notice.error { color: var(--warning); background: color-mix(in srgb, var(--warning) 10%, var(--surface)); }
+.browser-download-notice > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .browser-bookmarks-menu { display: flex; min-width: 0; }
 .browser-bookmarks-menu > button { display: grid; place-items: center; width: 29px; height: 29px; padding: 0; border: 0; border-radius: 6px; color: var(--text-muted); background: transparent; cursor: pointer; }
 .browser-bookmarks-menu > button:hover, .browser-bookmarks-menu > button[aria-expanded="true"] { color: var(--text); background: var(--surface-button-hover); }

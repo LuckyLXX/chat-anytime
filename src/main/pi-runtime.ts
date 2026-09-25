@@ -119,7 +119,7 @@ import { agentWorkspaceSessionDir, backfillUnpersistedSessions, isSessionPinned,
 import { listSessionSummaries, readSessionHeaderLine, summarizeLiveSession } from "./session-summary-cache.js";
 import { planSessionOpen } from "./session-open-plan.js";
 import { isDesktopConfiguredProvider } from "./model-catalog.js";
-import { defaultTools, ensureDefaultWorkspaceDir, forgetAgentWorkspace, isPositiveInt, mergeProviderModels, recordAgentWorkspace, resolveDefaultWorkspace, resolveInitialWorkspace } from "./settings.js";
+import { defaultTools, ensureDefaultWorkspaceDir, forgetAgentWorkspace, isPositiveInt, mergeBrowserSettings, mergeProviderModels, recordAgentWorkspace, resolveDefaultWorkspace, resolveInitialWorkspace } from "./settings.js";
 import { buildMultiInvocationPrompt, composeInvocationBody, parseInvocationPrompt, sameInvocations, type InvocationSegment } from "./invocation-prompt.js";
 import {
   PI_DESKTOP_CONTROL_ENTRY_TYPE,
@@ -4517,7 +4517,10 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       // browser/computer/design 总开关镜像补齐（若内存镜像滞后，保存后开关不生效直至重启）。
       // browser/ssh 总闸兼作活动集摘除开关（翻转在下方遍历 liveSessions 重算）；
       // computer/design 总闸重算活动集（决定 computer_* / design_* 是否注入前缀）。
-      settings.browser = command.settings.browser;
+      // 人工下载偏好（downloadDir/downloadAsk）由主进程单点写入（浏览器面板），
+      // 渲染端提交的 browser 对象里没有它们：合并而不是直接赋值，否则在设置页
+      // 保存任意其他项就会静默抹掉下载配置。
+      settings.browser = mergeBrowserSettings(command.settings.browser, settings.browser);
       settings.jev = command.settings.jev;
       settings.computer = command.settings.computer;
       settings.design = command.settings.design;

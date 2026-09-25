@@ -127,6 +127,7 @@
 | 思考块展开/收起（消息内）                   | `thinking-expand`                                |
 | 上下文占用指示（顶栏）                      | `context-usage`                                  |
 | 预览工具栏元素选择                          | `browser-pick`                                   |
+| 预览工具栏下载设置                          | `browser-download-toggle`                        |
 | 消息操作                                    | `copy` / `edit` / `regenerate` / `share`         |
 
 ```css

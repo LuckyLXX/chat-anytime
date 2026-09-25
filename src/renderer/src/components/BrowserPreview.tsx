@@ -1,10 +1,27 @@
-import { AlertCircle, ArrowLeft, ArrowRight, Crosshair, ExternalLink, Globe2, LoaderCircle, RefreshCw, X } from "lucide-react";
+import { AlertCircle, ArrowLeft, ArrowRight, Crosshair, Download, ExternalLink, Globe2, Info, LoaderCircle, RefreshCw, X } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import type { BrowserElementPick, BrowserPreviewBounds, BrowserPreviewCommand, BrowserPreviewState } from "../../../shared/protocol";
 import { layoutDeviceFrame, storedPreviewDevice, storedPreviewFit, storePreviewDevice, storePreviewFit, type PreviewDeviceId } from "../lib/preview-device";
 import { saveBrowserAddress, storedBrowserAddress } from "../lib/browser-address";
 import { BrowserBookmarksMenu } from "./BrowserBookmarksMenu";
+import { BrowserDownloadMenu } from "./BrowserDownloadMenu";
 import { PreviewDeviceMenu } from "./PreviewDeviceMenu";
+
+/** 下载卡片上的大小文案（与 SSH 文件面板同口径：整数 + 单位）。 */
+function formatDownloadSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB"];
+  let value = bytes / 1024;
+  let unit = units[0]!;
+  for (let index = 0; index < units.length; index += 1) {
+    if (value < 1024 || index === units.length - 1) {
+      unit = units[index]!;
+      break;
+    }
+    value /= 1024;
+  }
+  return `${value >= 100 ? Math.round(value) : value.toFixed(1)} ${unit}`;
+}
 
 const emptyState: BrowserPreviewState = {
   attached: false,
@@ -37,6 +54,11 @@ export function BrowserPreview({ suspended = false, tabId = "default", onPickSen
   const [viewportRect, setViewportRect] = useState<ViewportRect>();
   const [deviceMenuOpen, setDeviceMenuOpen] = useState(false);
   const [bookmarksMenuOpen, setBookmarksMenuOpen] = useState(false);
+  const [downloadMenuOpen, setDownloadMenuOpen] = useState(false);
+  /** 已被本地计时隐藏的提示时刻（主进程不会为「隐藏」再发一帧）。 */
+  const [hiddenNoticeAt, setHiddenNoticeAt] = useState<number>();
+  /** 决策卡片倒计时的重渲触发器（只有卡片存在时才跑）。 */
+  const [, setTick] = useState(0);
 
   async function send(command: BrowserPreviewCommand): Promise<BrowserPreviewState | undefined> {
     const payload: BrowserPreviewCommand = { ...command, tabId };
@@ -87,6 +109,21 @@ export function BrowserPreview({ suspended = false, tabId = "default", onPickSen
   function changeFit(next: boolean): void {
     setFit(next);
     storePreviewFit(next);
+  }
+
+  /** 人工下载决策（保存 / 另存为… / 取消）——落盘与搬移全在主进程。 */
+  async function decideDownload(id: string, action: "save" | "save-as" | "cancel"): Promise<void> {
+    await send({ type: "download-decision", id, action });
+  }
+
+  function setDownloadPrefs(patch: { ask?: boolean; chooseDir?: boolean }): void {
+    void send({ type: "download-prefs-set", ...patch });
+  }
+
+  function toggleDownloadMenu(open: boolean): void {
+    setDownloadMenuOpen(open);
+    // 打开时读回真值：配置由主进程持有（设置页保存不会覆盖它）。
+    if (open) void send({ type: "download-prefs" });
   }
 
   useEffect(() => window.piDesktop.onBrowserPreviewState(tabId, (next) => {
@@ -144,15 +181,30 @@ export function BrowserPreview({ suspended = false, tabId = "default", onPickSen
   }, [tabId]);
 
   useEffect(() => {
-    void send({ type: "visible", visible: !suspended && !deviceMenuOpen && !bookmarksMenuOpen });
+    void send({ type: "visible", visible: !suspended && !deviceMenuOpen && !bookmarksMenuOpen && !downloadMenuOpen });
     // 面板挂起（切到其他标签/面板收起）时退出选择模式，避免用户回来时误点；
-    // pick-mode off 同时会让页面内已打开的就地输入卡关闭。设备/书签菜单张开时
+    // pick-mode off 同时会让页面内已打开的就地输入卡关闭。设备/书签/下载菜单张开时
     // 也临时隐藏 native 视图——它悬浮在所有 DOM 之上，会盖住下拉项。
     if (suspended) {
       setPickMode(false);
       void window.piDesktop.browserPreview({ type: "pick-mode", enabled: false, tabId });
     }
-  }, [suspended, tabId, deviceMenuOpen, bookmarksMenuOpen]);
+  }, [suspended, tabId, deviceMenuOpen, bookmarksMenuOpen, downloadMenuOpen]);
+
+  // 决策卡片的倒计时：只在有卡片时跑（每秒重渲一次，无卡片时零成本）。
+  useEffect(() => {
+    if (!state.pendingDownloads?.length) return;
+    const timer = window.setInterval(() => setTick((value) => value + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [state.pendingDownloads?.[0]?.id]);
+
+  // 一次性提示（已保存到…/另存为失败…）4 秒后本地隐藏。
+  useEffect(() => {
+    const notice = state.downloadNotice;
+    if (!notice) return;
+    const timer = window.setTimeout(() => setHiddenNoticeAt(notice.at), 4000);
+    return () => window.clearTimeout(timer);
+  }, [state.downloadNotice?.at]);
 
   useLayoutEffect(() => () => {
     // Deactivation (tab switch, panel collapse) must NOT destroy the loaded
@@ -238,9 +290,17 @@ export function BrowserPreview({ suspended = false, tabId = "default", onPickSen
   }, [layout, viewportRect, tabId]);
 
   const error = localError ?? state.error;
+  const pendingDownloads = state.pendingDownloads ?? [];
+  const pending = pendingDownloads[0];
+  const notice = state.downloadNotice && state.downloadNotice.at !== hiddenNoticeAt ? state.downloadNotice : undefined;
+  const secondsLeft = pending ? Math.max(0, Math.ceil((pending.deadlineAt - Date.now()) / 1000)) : 0;
   const showDeviceFrame = device !== "responsive" && layout !== undefined && layout.offsetX > 0;
   return (
     <div className="browser-preview">
+      {/* 横幅统一收进一个容器：grid 的行定义只需认容器，多条横幅（AI 操作中 /
+          选择元素 / 下载提示 / 下载决策）同时存在也不会把工具栏挤到隐式行上。 */}
+      {(state.automating !== undefined || pickMode || notice !== undefined || pending !== undefined) && (
+        <div className="browser-preview-banners">
       {state.automating && (
         <div className="browser-automating-banner" role="status" aria-live="polite">
           <LoaderCircle className="spinning" size={14} />
@@ -253,6 +313,39 @@ export function BrowserPreview({ suspended = false, tabId = "default", onPickSen
           <span>点击页面中的元素以选取，或再次点击工具栏按钮取消</span>
         </div>
       )}
+      {notice && (
+        <div className={`browser-download-notice${notice.tone === "error" ? " error" : ""}`} role="status" aria-live="polite">
+          {notice.tone === "error" ? <AlertCircle size={13} /> : <Info size={13} />}
+          <span title={notice.text}>{notice.text}</span>
+        </div>
+      )}
+      {pending && (
+        <div className="browser-download-prompt" role="dialog" aria-label="保存下载文件">
+          <div className="browser-download-head">
+            <Download size={14} />
+            <span className="browser-download-copy">
+              <strong title={pending.filename}>{pending.filename}</strong>
+              <small title={pending.filePath}>
+                {[
+                  pending.source ? `来自 ${pending.source}` : "",
+                  pending.totalBytes ? formatDownloadSize(pending.totalBytes) : "",
+                  pending.downloaded ? "已下载完成" : "下载中",
+                  `保存到 ${pending.directory}`
+                ].filter(Boolean).join(" · ")}
+              </small>
+            </span>
+            {pendingDownloads.length > 1 && <em className="browser-download-count">另有 {pendingDownloads.length - 1} 个待处理</em>}
+          </div>
+          <div className="browser-download-actions">
+            <button type="button" className="primary" onClick={() => void decideDownload(pending.id, "save")}>保存</button>
+            <button type="button" onClick={() => void decideDownload(pending.id, "save-as")}>另存为…</button>
+            <button type="button" onClick={() => void decideDownload(pending.id, "cancel")}>取消</button>
+            <em className="browser-download-timer">{secondsLeft} 秒后自动保存</em>
+          </div>
+        </div>
+      )}
+        </div>
+      )}
       <form className="browser-preview-toolbar" onSubmit={(event) => void navigate(event)}>
         <button type="button" title="后退" aria-label="后退" disabled={!state.canGoBack} onClick={() => void send({ type: "back" })}><ArrowLeft size={15} /></button>
         <button type="button" title="前进" aria-label="前进" disabled={!state.canGoForward} onClick={() => void send({ type: "forward" })}><ArrowRight size={15} /></button>
@@ -260,6 +353,7 @@ export function BrowserPreview({ suspended = false, tabId = "default", onPickSen
         <PreviewDeviceMenu device={device} fit={fit} scalePercent={(layout?.scale ?? 1) * 100} onDeviceChange={changeDevice} onFitChange={changeFit} onMenuOpenChange={setDeviceMenuOpen} />
         <label className="browser-address"><Globe2 size={14} /><input value={address} aria-label="浏览器地址" placeholder="输入网址，或用 browser_navigate 让 AI 打开页面" spellCheck={false} onFocus={() => { addressFocusedRef.current = true; }} onBlur={() => { addressFocusedRef.current = false; }} onChange={(event) => setAddress(event.target.value)} /></label>
         <BrowserBookmarksMenu currentUrl={state.url} currentTitle={state.title} onNavigate={(url) => void navigateTo(url)} onMenuOpenChange={setBookmarksMenuOpen} />
+        <BrowserDownloadMenu prefs={state.downloadPrefs} onSetPrefs={setDownloadPrefs} onMenuOpenChange={toggleDownloadMenu} />
         <button type="button" className={pickMode ? "active" : ""} data-control="browser-pick" title={pickMode ? "取消元素选择" : "选择页面元素（可发送到聊天框）"} aria-label={pickMode ? "取消元素选择" : "选择页面元素"} aria-pressed={pickMode} disabled={!state.attached} onClick={togglePickMode}><Crosshair size={15} /></button>
         <button type="button" title="在系统浏览器中打开" aria-label="在系统浏览器中打开" disabled={!state.url} onClick={() => void send({ type: "open-external" })}><ExternalLink size={15} /></button>
       </form>

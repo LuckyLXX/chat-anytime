@@ -690,6 +690,51 @@ export interface BrowserPreviewState {
   initialUrl?: string;
   /** 该标签页所属的作品 id（渲染端据此清理，防 tabId 复用串味）。 */
   galleryId?: string;
+  /** 人工下载的生效配置（打开下载菜单时读回、更改后随状态推送）。 */
+  downloadPrefs?: BrowserDownloadPrefs;
+  /** 等待用户决策的人工下载（按到达顺序；渲染端取第一个展示）。 */
+  pendingDownloads?: BrowserPendingDownload[];
+  /** 一次性提示（如「已自动保存到…」）；渲染端按 at 自行计时隐藏。 */
+  downloadNotice?: BrowserDownloadNotice;
+}
+
+/** 人工（用户在预览面板里手动点）下载的生效配置。 */
+export interface BrowserDownloadPrefs {
+  /** 默认保存目录（永远是绝对路径；未配置时 = 系统下载目录）。 */
+  dir: string;
+  /** 是否每次弹出决策卡片。 */
+  ask: boolean;
+}
+
+/**
+ * 一次等待用户决策的人工下载。主进程在 `will-download` 里已经同步把它定向到
+ * `filePath`（Electron 要求路径在回调里定死，见 browser-manual-download.ts 注释），
+ * 因此「保存」= 什么都不用做，「另存为」= 事后搬移，「取消」= 中断或删文件。
+ */
+export interface BrowserPendingDownload {
+  id: string;
+  /** 页面给出的文件名（已清洗、已避让同名）。 */
+  filename: string;
+  url: string;
+  /** 来源页域名（来源不明时为空串）。 */
+  source: string;
+  /** 当前目标目录与目标绝对路径。 */
+  directory: string;
+  filePath: string;
+  /** 服务端声明的总字节数（未知时缺省）。 */
+  totalBytes?: number;
+  /** 字节是否已收完（收完则「另存为」是瞬时的本地搬移）。 */
+  downloaded: boolean;
+  /** 超时自动保存的时刻（epoch ms）。 */
+  deadlineAt: number;
+}
+
+/** 下载相关的一次性提示（渲染端自行计时隐藏，不回主进程）。 */
+export interface BrowserDownloadNotice {
+  text: string;
+  tone: "info" | "error";
+  /** 产生时刻（epoch ms）——渲染端用它计时，重挂载后也不会重复弹很久。 */
+  at: number;
 }
 
 export type BrowserPreviewCommand =
@@ -712,7 +757,16 @@ export type BrowserPreviewCommand =
    * 重复导航、也不会把用户后来的手动导航冲掉。galleryId 标记该标签属于哪个
    * 作品（关闭时清理；重新发布会先关旧标签从而彻底重置）。不传字段 = 不改。
    */
-  | { type: "tab-meta"; tabId?: string; initialUrl?: string; galleryId?: string };
+  | { type: "tab-meta"; tabId?: string; initialUrl?: string; galleryId?: string }
+  /**
+   * 人工下载配置：读（回填状态）/ 写（ask 开关、chooseDir 弹系统目录选择器）。
+   * 配置由主进程直接落 settings —— 不经过渲染端全局 settings，因此设置页保存
+   * 别的项不会抹掉它（`mergeBrowserSettings` 兜底）。
+   */
+  | { type: "download-prefs"; tabId?: string }
+  | { type: "download-prefs-set"; tabId?: string; ask?: boolean; chooseDir?: boolean; dir?: string }
+  /** 人工下载的决策：保存（默认目录）/ 另存为（弹系统保存窗口）/ 取消。 */
+  | { type: "download-decision"; tabId?: string; id: string; action: "save" | "save-as" | "cancel" };
 
 /**
  * 手动元素选择结果：用户在预览浏览器点击元素后，页面 preload 在点击位置
@@ -947,6 +1001,13 @@ export type DesignSnapshotResult =
 /** 浏览器自动化总开关；缺省视为启用（settings.browser?.enabled !== false）。 */
 export interface BrowserSettings {
   enabled: boolean;
+  /**
+   * 人工（用户在预览面板里手动点）下载的默认保存目录；缺省 = 系统下载目录。
+   * 只对人工下载生效——AI 自动化标签页的下载仍固定落 `<工作区>/.pidesktop/downloads/`。
+   */
+  downloadDir?: string;
+  /** 人工下载是否每次弹出保存/另存为决策卡片；缺省视为 true。 */
+  downloadAsk?: boolean;
 }
 
 /**

@@ -294,10 +294,58 @@ export function normalizeHooks(value: unknown): HooksSettings | undefined {
   return { enabled: (value as Record<string, unknown>).enabled !== false };
 }
 
-/** 浏览器自动化总开关，语义与 memory/hooks 相同：缺省视为启用。 */
+/**
+ * 浏览器自动化总开关 + 人工下载偏好（默认保存目录 / 是否每次询问）。
+ * 总闸缺省视为启用；下载目录只接受 trim 后非空的字符串，询问开关只接受 boolean
+ * ——坏字段各自丢弃，绝不因为一个坏字段丢掉整条记录（`normalizeJev` 同款纪律）。
+ */
 export function normalizeBrowser(value: unknown): BrowserSettings | undefined {
   if (!value || typeof value !== "object") return undefined;
-  return { enabled: (value as Record<string, unknown>).enabled !== false };
+  const raw = value as Record<string, unknown>;
+  const downloadDir = typeof raw.downloadDir === "string" && raw.downloadDir.trim() ? raw.downloadDir.trim() : undefined;
+  return {
+    enabled: raw.enabled !== false,
+    ...(downloadDir ? { downloadDir } : {}),
+    ...(typeof raw.downloadAsk === "boolean" ? { downloadAsk: raw.downloadAsk } : {})
+  };
+}
+
+/**
+ * `settings.save` 里 browser 的合并口径：`enabled` 取本次提交，人工下载偏好
+ * （downloadDir / downloadAsk）**保留主进程已存的值**。
+ *
+ * 为什么不是直接赋值：设置页提交的是渲染端本地 `settings.browser` 整体对象，而
+ * 下载目录是在浏览器面板里改的、由主进程直接落盘——渲染端那份没有它。直接赋值
+ * 会让用户在设置页保存任意其他项时静默抹掉下载配置（与 2026-09-21 jev 丢失同型）。
+ */
+export function mergeBrowserSettings(next: BrowserSettings | undefined, current: BrowserSettings | undefined): BrowserSettings | undefined {
+  if (!next && !current) return undefined;
+  const downloadDir = current?.downloadDir ?? next?.downloadDir;
+  const downloadAsk = current?.downloadAsk ?? next?.downloadAsk;
+  return {
+    enabled: next?.enabled ?? current?.enabled ?? true,
+    ...(downloadDir ? { downloadDir } : {}),
+    ...(downloadAsk === undefined ? {} : { downloadAsk })
+  };
+}
+
+/**
+ * 人工下载偏好的单点写入（浏览器面板的「更改保存位置 / 每次询问」开关调用）。
+ * 只动这两个字段，`enabled` 与未知字段原样保留。
+ */
+export function withBrowserDownloadPrefs(current: BrowserSettings | undefined, patch: { dir?: string; ask?: boolean }): BrowserSettings {
+  const next: BrowserSettings = {
+    enabled: current?.enabled !== false,
+    ...(current?.downloadDir ? { downloadDir: current.downloadDir } : {}),
+    ...(current?.downloadAsk === undefined ? {} : { downloadAsk: current.downloadAsk })
+  };
+  if (patch.dir !== undefined) {
+    const dir = patch.dir.trim();
+    if (dir) next.downloadDir = dir;
+    else delete next.downloadDir;
+  }
+  if (patch.ask !== undefined) next.downloadAsk = patch.ask;
+  return next;
 }
 
 /** 设计模式总开关，语义与 browser 相同：缺省视为启用。 */

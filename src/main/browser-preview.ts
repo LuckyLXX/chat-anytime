@@ -1,8 +1,9 @@
-import { mkdirSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { shell, WebContentsView, type BrowserWindow, type Rectangle, type Session } from "electron";
-import type { BrowserElementPick, BrowserPreviewBounds, BrowserPreviewCommand, BrowserPreviewState, BrowserTabsEvent } from "../shared/protocol.js";
+import type { BrowserDownloadNotice, BrowserDownloadPrefs, BrowserElementPick, BrowserPendingDownload, BrowserPreviewBounds, BrowserPreviewCommand, BrowserPreviewState, BrowserTabsEvent } from "../shared/protocol.js";
 import { MAX_TAB_DOWNLOADS, sanitizeDownloadName } from "./browser-downloads.js";
+import { moveDownloadedFile, uniqueDownloadName } from "./browser-manual-download.js";
 import { NAVIGATE_BUDGET_MS, resolveNavigateOutcome, withNavigationBudget } from "./browser-navigate.js";
 import { isSeedPhase } from "./browser-preview-seed.js";
 import { parseElementPickMessage } from "./browser-preview-pick.js";
@@ -14,6 +15,51 @@ const DEFAULT_TAB_ID = "default";
 export const DOWNLOAD_SETTLE_TIMEOUT_MS = 3_000;
 /** 上述等待的轮询间隔。 */
 export const DOWNLOAD_SETTLE_POLL_MS = 25;
+
+/**
+ * 人工下载的决策窗口：这段时间内用户可以选保存/另存为/取消，超时按默认目录保存。
+ * 下载本身不受影响（路径在 will-download 里已同步定死），这里只是卡片的寿命。
+ */
+export const MANUAL_DOWNLOAD_TIMEOUT_MS = 60_000;
+
+/**
+ * 下载策略（按标签页判定）：
+ * - `"cancel"`：不落盘（预览页的旧安全姿态；未绑定工作区且用户没开询问的兜底）；
+ * - `{ dir }`：静默定向落盘（AI 自动化会话已绑定该标签页且 navigate 过工作区）；
+ * - `{ dir, ask: true }`：人工下载——先同步落到 dir，同时弹决策卡片（保存/另存为/取消）。
+ */
+export type PreviewDownloadPolicy = "cancel" | { dir: string; ask?: boolean };
+
+/**
+ * 主进程注入的人工下载钩子：配置读写与两个系统对话框。
+ * 拆成钩子是为了让纯 Electron 探针能注入假实现（见 .pidesktop/browser-probe/p8d）。
+ */
+export interface ManualDownloadHooks {
+  prefs: () => BrowserDownloadPrefs;
+  setPrefs: (patch: { dir?: string; ask?: boolean }) => BrowserDownloadPrefs;
+  /** 系统「选择文件夹」（下载设置里的「更改保存位置」）。 */
+  chooseDirectory: () => Promise<string | undefined>;
+  /** 系统「另存为」（可改目录与文件名）。 */
+  chooseSavePath: (defaultPath: string) => Promise<string | undefined>;
+}
+
+/** 等待用户决策的一次人工下载（主进程侧记录，含 DownloadItem 与定时器）。 */
+interface PendingManualDownload {
+  id: string;
+  tabId: string;
+  item: Electron.DownloadItem;
+  filename: string;
+  url: string;
+  source: string;
+  directory: string;
+  filePath: string;
+  downloaded: boolean;
+  /** 超时自动保存的时刻（epoch ms），卡片上的倒计时用它。 */
+  deadlineAt: number;
+  /** 用户选了「另存为」后的目标路径；下载未完成时等 done 再搬。 */
+  relocateTo?: string;
+  timer: ReturnType<typeof setTimeout>;
+}
 
 /**
  * 预置空白文档的等待上限。空白页是本地即时文档（实测几十毫秒），这个预算只用于
@@ -54,6 +100,31 @@ const emptyBrowserState = (): BrowserPreviewState => ({
   canGoBack: false,
   canGoForward: false
 });
+
+/** 下载来源域名（用于卡片上的「来自 …」）；不可解析时为空串。 */
+function downloadSourceHost(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return "";
+  }
+}
+
+/** 主进程记录 → 渲染端视图（不带 DownloadItem 与定时器）。 */
+function pendingDownloadView(record: PendingManualDownload): BrowserPendingDownload {
+  const total = record.item.getTotalBytes();
+  return {
+    id: record.id,
+    filename: record.filename,
+    url: record.url,
+    source: record.source,
+    directory: record.directory,
+    filePath: record.filePath,
+    ...(Number.isFinite(total) && total > 0 ? { totalBytes: total } : {}),
+    downloaded: record.downloaded,
+    deadlineAt: record.deadlineAt
+  };
+}
 
 function normalizedBounds(bounds: BrowserPreviewBounds): Rectangle {
   const values = [bounds.x, bounds.y, bounds.width, bounds.height];
@@ -111,6 +182,10 @@ export class BrowserPreviewController {
   private readonly downloadCounts = new Map<string, number>();
   /** 每个标签页「已定向落盘但 done 未到」的下载 id（操作返回前等它们收敛）。 */
   private readonly downloadStarts = new Map<string, Set<string>>();
+  /** 等待用户决策的人工下载（id → 记录）；同一标签页可以排多个。 */
+  private readonly pendingManual = new Map<string, PendingManualDownload>();
+  /** 人工下载 id 序号（只用于拼 id，不参与任何业务判定）。 */
+  private manualDownloadSeq = 0;
 
   constructor(
     private readonly window: BrowserWindow,
@@ -122,12 +197,15 @@ export class BrowserPreviewController {
     /**
      * 下载策略（按标签页判定）：返回 "cancel" 取消并只报告（预览页默认的安全
      * 姿态）；返回 { dir } 则把下载定向到该目录（自动化会话已绑定该标签页且
-     * navigate 过带工作区的目录时）。缺省返回 = cancel；未提供该钩子时全部取消
-     * （保持原行为，向后兼容）。
+     * navigate 过带工作区的目录时）；返回 { dir, ask: true } 则落盘之后还弹
+     * 决策卡片（用户在预览面板里自己点的下载）。缺省返回 = cancel；未提供该钩子
+     * 时全部取消（保持原行为，向后兼容）。
      */
-    private readonly downloadPolicy?: (tabId: string) => "cancel" | { dir: string } | undefined,
+    private readonly downloadPolicy?: (tabId: string) => PreviewDownloadPolicy | undefined,
     /** 下载事件回调（saved 表示是否真的落盘）。自动化控制器据此给模型回执。 */
-    private readonly onDownload?: (info: DownloadInfo) => void
+    private readonly onDownload?: (info: DownloadInfo) => void,
+    /** 人工下载的配置与对话框钩子；缺省时人工策略退化回 cancel（只报告、不落盘）。 */
+    private readonly manualDownloads?: ManualDownloadHooks
   ) {}
 
   snapshot(tabId: string): BrowserPreviewState {
@@ -206,6 +284,8 @@ export class BrowserPreviewController {
 
   async handle(command: BrowserPreviewCommand): Promise<BrowserPreviewState> {
     const tabId = command.tabId ?? DEFAULT_TAB_ID;
+    /** 无法写进标签页状态（标签页还没建）时随返回值一起给渲染端。 */
+    let extra: Partial<BrowserPreviewState> | undefined;
     switch (command.type) {
       case "bounds":
         this.getOrCreate(tabId).bounds = normalizedBounds(command.bounds);
@@ -276,8 +356,37 @@ export class BrowserPreviewController {
         this.scheduleContentMeasure(tabId, 200);
         break;
       }
+      case "download-prefs": {
+        const prefs = this.manualDownloads?.prefs();
+        if (prefs) {
+          // 拿不到标签页时只回在返回值里（打开下载菜单时标签页一定已存在）。
+          if (this.tabs.has(tabId)) this.updateState(tabId, { downloadPrefs: prefs });
+          else extra = { downloadPrefs: prefs };
+        }
+        break;
+      }
+      case "download-prefs-set": {
+        if (!this.manualDownloads) break;
+        let dir = command.dir;
+        if (command.chooseDir) {
+          const chosen = await this.manualDownloads.chooseDirectory();
+          // 用户在系统窗口里取消：什么都不改（不回退、不猜）。
+          if (!chosen) break;
+          dir = chosen;
+        }
+        const prefs = this.manualDownloads.setPrefs({
+          ...(dir === undefined ? {} : { dir }),
+          ...(command.ask === undefined ? {} : { ask: command.ask })
+        });
+        if (this.tabs.has(tabId)) this.updateState(tabId, { downloadPrefs: prefs });
+        else extra = { downloadPrefs: prefs };
+        break;
+      }
+      case "download-decision":
+        await this.decideManualDownload(command.id, command.action);
+        break;
     }
-    return this.snapshot(tabId);
+    return { ...this.snapshot(tabId), ...extra };
   }
 
   dispose(): void {
@@ -444,7 +553,14 @@ export class BrowserPreviewController {
     this.downloadCounts.set(tabId, planned);
     if (planned > MAX_TAB_DOWNLOADS) {
       item.cancel();
-      this.onDownload?.({ tabId, filename, url, status: "cancelled", reason: "limit", limitReached: true });
+      // 人工下载同样受每轮额度约束（防恶意页面弹满卡片）：超限直接取消并显式提示，
+      // 否则用户看到的是「点了下载没反应」。
+      if (policy.ask === true) this.pushNotice(tabId, `本轮下载已达上限（${MAX_TAB_DOWNLOADS} 个），已取消：${sanitizeDownloadName(filename)}`, "error");
+      else this.onDownload?.({ tabId, filename, url, status: "cancelled", reason: "limit", limitReached: true });
+      return;
+    }
+    if (policy.ask === true) {
+      this.beginManualDownload(tabId, item, filename, url, policy.dir);
       return;
     }
     const safeName = sanitizeDownloadName(filename);
@@ -479,6 +595,144 @@ export class BrowserPreviewController {
         directory: policy.dir
       });
     });
+  }
+
+  /**
+   * 人工下载：先在 `will-download` 里**同步**把路径定死，再弹决策卡片。
+   *
+   * 为什么不能「先挂起、等用户选完再定路径」（真机探针 p8b/p8c 实测，Electron 43）：
+   * 不在 `will-download` 里 `setSavePath` 的下载**永不 finish**（字节全到、文件停在
+   * `<downloads>/<uuid>.tmp`、state 一直 progressing）；下载启动后再改路径也不生效
+   * （getSavePath() 返回新值，实际仍落在旧路径）。所以口径是：先按默认目录落盘，
+   * 「另存为」= 事后搬移，「取消」= 中断/删文件。
+   */
+  private beginManualDownload(tabId: string, item: Electron.DownloadItem, filename: string, url: string, dir: string): void {
+    let safeName = "";
+    let filePath = "";
+    try {
+      mkdirSync(dir, { recursive: true });
+      safeName = uniqueDownloadName(dir, sanitizeDownloadName(filename));
+      filePath = join(dir, safeName);
+      item.setSavePath(filePath);
+    } catch {
+      item.cancel();
+      this.pushNotice(tabId, `无法保存到 ${dir}（目录不可写），已取消本次下载`, "error");
+      return;
+    }
+    const id = `manual-${++this.manualDownloadSeq}-${Date.now().toString(36)}`;
+    const record: PendingManualDownload = {
+      id,
+      tabId,
+      item,
+      filename: safeName,
+      url,
+      source: downloadSourceHost(url),
+      directory: dir,
+      filePath,
+      downloaded: false,
+      deadlineAt: Date.now() + MANUAL_DOWNLOAD_TIMEOUT_MS,
+      timer: setTimeout(() => this.finishManualDownload(id, `已自动保存到 ${dir}`), MANUAL_DOWNLOAD_TIMEOUT_MS)
+    };
+    // 定时器不该拖住进程退出（应用退出时记录随窗口一起消失）。
+    record.timer.unref?.();
+    this.pendingManual.set(id, record);
+    item.on("done", (_event, state) => { void this.completeManualDownload(id, state); });
+    this.pushPendingDownloads(tabId);
+  }
+
+  /** 下载终态：更新「已下载完成」标记，或执行已排队的「另存为」搬移。 */
+  private async completeManualDownload(id: string, state: string): Promise<void> {
+    const record = this.pendingManual.get(id);
+    // 记录已被清理（用户已选保存/取消、或标签页已关）：落位已定，无事可做。
+    if (!record) return;
+    if (state !== "completed") {
+      this.clearPendingDownload(id);
+      this.pushPendingDownloads(record.tabId, { text: `下载中断：${record.filename}`, tone: "error", at: Date.now() });
+      return;
+    }
+    record.downloaded = true;
+    if (!record.relocateTo) {
+      // 仍在等用户决策：只让卡片从「正在下载」变成「已下载完成」。
+      this.pushPendingDownloads(record.tabId);
+      return;
+    }
+    const target = record.relocateTo;
+    this.clearPendingDownload(id);
+    const result = await moveDownloadedFile(record.filePath, target);
+    this.pushPendingDownloads(record.tabId, result === "failed"
+      ? { text: `另存为失败：${record.filename} 仍保留在 ${record.directory}`, tone: "error", at: Date.now() }
+      : { text: `已另存为 ${target}`, tone: "info", at: Date.now() });
+  }
+
+  /** 用户/超时对某次人工下载作出决定后的收尾（清记录 + 清定时器 + 提示）。 */
+  private finishManualDownload(id: string, text?: string, tone: "info" | "error" = "info"): void {
+    const record = this.pendingManual.get(id);
+    if (!record) return;
+    this.clearPendingDownload(id);
+    if (text) this.pushPendingDownloads(record.tabId, { text, tone, at: Date.now() });
+  }
+
+  private clearPendingDownload(id: string): void {
+    const record = this.pendingManual.get(id);
+    if (!record) return;
+    clearTimeout(record.timer);
+    this.pendingManual.delete(id);
+  }
+
+  /** 把某标签页当前的待决策下载列表与可选提示推给渲染端。 */
+  private pushPendingDownloads(tabId: string, notice?: BrowserDownloadNotice): void {
+    const pending = [...this.pendingManual.values()].filter((record) => record.tabId === tabId);
+    this.updateState(tabId, {
+      pendingDownloads: pending.length > 0 ? pending.map(pendingDownloadView) : undefined,
+      ...(notice ? { downloadNotice: notice } : {})
+    });
+  }
+
+  /** 一次性下载提示（目录不可写/超限/另存为结果…）。 */
+  private pushNotice(tabId: string, text: string, tone: "info" | "error"): void {
+    this.updateState(tabId, { downloadNotice: { text, tone, at: Date.now() } });
+  }
+
+  /** 决策卡片上的三个动作。 */
+  private async decideManualDownload(id: string, action: "save" | "save-as" | "cancel"): Promise<void> {
+    const record = this.pendingManual.get(id);
+    if (!record) return;
+    if (action === "cancel") {
+      this.clearPendingDownload(id);
+      try {
+        if (!record.downloaded) record.item.cancel();
+      } catch {
+        // 已是终态：忽略
+      }
+      try {
+        rmSync(record.filePath, { force: true });
+      } catch {
+        // 文件仍被占用：交给系统清理，不报给用户一个做不到的承诺
+      }
+      this.pushPendingDownloads(record.tabId, { text: `已取消下载：${record.filename}`, tone: "info", at: Date.now() });
+      return;
+    }
+    if (action === "save") {
+      this.finishManualDownload(id, record.downloaded ? `已保存到 ${record.directory}` : `正在保存到 ${record.directory}`);
+      return;
+    }
+    // save-as：系统保存窗口（可改目录与文件名）。用户取消则卡片保持不变。
+    const chosen = await this.manualDownloads?.chooseSavePath(record.filePath);
+    if (!chosen) return;
+    const current = this.pendingManual.get(id);
+    if (!current) return;
+    if (current.downloaded) {
+      this.clearPendingDownload(id);
+      const result = await moveDownloadedFile(current.filePath, chosen);
+      this.pushPendingDownloads(current.tabId, result === "failed"
+        ? { text: `另存为失败：${current.filename} 仍保留在 ${current.directory}`, tone: "error", at: Date.now() }
+        : { text: `已另存为 ${chosen}`, tone: "info", at: Date.now() });
+      return;
+    }
+    // 还在下载：记下目标，done 到达后再搬（路径必须在 will-download 里定死，
+    // 这里改不了正在进行的下载目标）。
+    current.relocateTo = chosen;
+    this.pushPendingDownloads(current.tabId);
   }
 
   /**
@@ -581,6 +835,23 @@ export class BrowserPreviewController {
     this.tabs.delete(tabId);
     this.downloadCounts.delete(tabId);
     this.downloadStarts.delete(tabId);
+    // 该标签页上待决策的人工下载：记录随标签页一起消失。已下载完的文件保留
+    // （用户没点取消 = 不丢文件），仍在下的取消并清掉半成品。
+    for (const [id, record] of [...this.pendingManual]) {
+      if (record.tabId !== tabId) continue;
+      this.clearPendingDownload(id);
+      if (record.downloaded) continue;
+      try {
+        record.item.cancel();
+      } catch {
+        // 已终态：忽略
+      }
+      try {
+        rmSync(record.filePath, { force: true });
+      } catch {
+        // 文件仍被占用：交给系统清理
+      }
+    }
     const { view } = tab;
     view.setVisible(false);
     if (!this.window.isDestroyed()) this.window.contentView.removeChildView(view);

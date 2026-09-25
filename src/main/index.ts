@@ -6,12 +6,13 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, pro
 import { spawn } from "node-pty";
 import appIconPath from "./assets/icon.ico?asset";
 import { resolveBundledSkillsDir, resolveBundledSubagentsDir } from "./bundled-skills.js";
-import { migrateSettings, normalizeJev, normalizeVision, recordAgentWorkspace, forgetAgentWorkspace } from "./settings.js";
+import { migrateSettings, mergeBrowserSettings, normalizeJev, normalizeVision, recordAgentWorkspace, forgetAgentWorkspace, withBrowserDownloadPrefs } from "./settings.js";
+import { manualDownloadPrefs } from "./browser-manual-download.js";
 import { mergeSavedAppearance, settingsForRenderer } from "./appearance-assets.js";
 import { createSettingsPersistence, diffSettings, readSettingsFile, settingsPath as settingsFilePath, type SettingsPersistence } from "./settings-store.js";
 import { togglePinnedSessionPath } from "./session-scope.js";
 import { importExternalAttachment, workspaceRelativeAttachment } from "./attachments.js";
-import type { BrowserPreviewCommand, BrowserPreviewState, DesktopBootstrap, DesktopSettings, GalleryServiceProbe, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot, SshCommand, SshCommandResult, SshEventData, SshRevealEvent, TerminalCommand, TerminalEventData, ThemeAssetMap, WorkspaceDirectoryListing, WorkspaceEntryResult, WorkspaceFilePreview, WorkspaceFileSearchResult, WorkspaceFileStat, WorkspaceFileWriteResult } from "../shared/protocol.js";
+import type { BrowserDownloadPrefs, BrowserPreviewCommand, BrowserPreviewState, DesktopBootstrap, DesktopSettings, GalleryServiceProbe, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot, SshCommand, SshCommandResult, SshEventData, SshRevealEvent, TerminalCommand, TerminalEventData, ThemeAssetMap, WorkspaceDirectoryListing, WorkspaceEntryResult, WorkspaceFilePreview, WorkspaceFileSearchResult, WorkspaceFileStat, WorkspaceFileWriteResult } from "../shared/protocol.js";
 import { PREVIEW_FILE_SCHEME, parseWorkspaceFilePreviewUrl } from "../shared/protocol.js";
 import { createWorkspaceDirectory, createWorkspaceFile, deleteWorkspaceEntry, listWorkspaceDirectory, previewFileMimeType, readWorkspaceFilePreview, renameWorkspaceEntry, resolveWorkspaceEntry, safeRelativePath, searchWorkspaceFiles, statWorkspaceFile, writeWorkspaceFile } from "./workspace-preview.js";
 import { pruneDisabledModelRefs } from "./model-catalog.js";
@@ -295,7 +296,7 @@ function updateSettings(command: RuntimeCommand): void {
     // 镜像必须与 protocol 的 settings.save Pick 逐字段对齐：漏一个字段就是「保存后重启即丢」
     // （ssh 曾因这个 Pick 里有、这里没镜像而中招，2026-09）。jev 同时把用户填的密钥写进
     // credentials.json 的 safeStorage 通道（配置进 settings.json、密钥不进）。
-    case "settings.save": settings.model = command.settings.model; settings.thinkingLevel = command.settings.thinkingLevel; settings.accessMode = command.settings.accessMode; settings.appearance = mergeSavedAppearance(command.settings.appearance, settings.appearance); settings.browser = command.settings.browser; settings.jev = normalizeJev(command.settings.jev); settings.computer = command.settings.computer; settings.design = command.settings.design; settings.ssh = command.settings.ssh; settings.defaultWorkspace = command.settings.defaultWorkspace; break;
+    case "settings.save": settings.model = command.settings.model; settings.thinkingLevel = command.settings.thinkingLevel; settings.accessMode = command.settings.accessMode; settings.appearance = mergeSavedAppearance(command.settings.appearance, settings.appearance); settings.browser = mergeBrowserSettings(command.settings.browser, settings.browser); settings.jev = normalizeJev(command.settings.jev); settings.computer = command.settings.computer; settings.design = command.settings.design; settings.ssh = command.settings.ssh; settings.defaultWorkspace = command.settings.defaultWorkspace; break;
     // 渲染端手里的主题已没有 assets（见 appearance-assets.ts）：按 id 把主进程存的
     // 那份保留回来，只有携带了 assets 的那条（外观页保存主题）才覆盖。
     case "appearance.save": settings.appearance = mergeSavedAppearance(command.appearance, settings.appearance); break;
@@ -361,6 +362,37 @@ function updateSettings(command: RuntimeCommand): void {
       break;
   }
   persistSettings().schedule(diffSettings(previous, settings));
+}
+
+/**
+ * 人工下载的生效配置：settings.browser 的两个字段 + 系统下载目录兜底。
+ * 主进程是这两个字段的唯一写入方（浏览器面板 → `download-prefs-set`），因此
+ * 设置页保存别的项不会抹掉它（`mergeBrowserSettings` 在两侧镜像都改用合并口径）。
+ */
+function browserDownloadPrefs(): BrowserDownloadPrefs {
+  return manualDownloadPrefs(loadSettings().browser, app.getPath("downloads"));
+}
+
+function updateBrowserDownloadPrefs(patch: { dir?: string; ask?: boolean }): BrowserDownloadPrefs {
+  const settings = loadSettings();
+  const previous = { ...settings };
+  settings.browser = withBrowserDownloadPrefs(settings.browser, patch);
+  persistSettings().schedule(diffSettings(previous, settings));
+  return manualDownloadPrefs(settings.browser, app.getPath("downloads"));
+}
+
+/** 系统「选择文件夹」：用户取消返回 undefined（调用方保持原值不变）。 */
+async function chooseDownloadDirectory(owner: BrowserWindow): Promise<string | undefined> {
+  const options: Electron.OpenDialogOptions = { title: "选择下载保存位置", defaultPath: browserDownloadPrefs().dir, properties: ["openDirectory", "createDirectory"] };
+  const result = owner.isDestroyed() ? await dialog.showOpenDialog(options) : await dialog.showOpenDialog(owner, options);
+  return result.canceled ? undefined : result.filePaths[0];
+}
+
+/** 系统「另存为」：可改目录与文件名；用户取消返回 undefined（卡片保持不变）。 */
+async function chooseDownloadSavePath(owner: BrowserWindow, defaultPath: string): Promise<string | undefined> {
+  const options: Electron.SaveDialogOptions = { title: "另存为", defaultPath };
+  const result = owner.isDestroyed() ? await dialog.showSaveDialog(options) : await dialog.showSaveDialog(owner, options);
+  return result.canceled || !result.filePath ? undefined : result.filePath;
 }
 function runtimeEntry(): string { return join(__dirname, "pi-runtime.js"); }
 function sendToRuntime(command: RuntimeCommand): void { if (!runtimeProcess) throw new Error("Pi 运行时当前不可用"); runtimeProcess.postMessage(command); }
@@ -490,11 +522,22 @@ function createWindow(): void {
     // 用户手动点选的页面元素（发送到聊天框流程）。
     if (!nextWindow.isDestroyed()) nextWindow.webContents.send("browser-preview:pick", pick);
   }, (tabId) => {
-    // 下载策略：自动化绑定且 navigate 过工作区的标签页定向落盘，其余取消。
-    return browserAutomationController?.downloadPolicy(tabId) ?? "cancel";
+    // 下载策略：AI 自动化绑定且 navigate 过工作区的标签页静默落盘到工作区；其余
+    // （用户自己在预览面板里浏览的标签）走人工策略——按设置直接存默认目录，或
+    // 先落盘再弹「保存 / 另存为 / 取消」卡片。
+    const automation = browserAutomationController?.downloadPolicy(tabId);
+    if (automation && automation !== "cancel") return automation;
+    const prefs = browserDownloadPrefs();
+    return prefs.ask ? { dir: prefs.dir, ask: true } : { dir: prefs.dir };
   }, (info) => {
     // 下载结果（已保存/已取消）由自动化控制器汇总进下一次操作回执。
     browserAutomationController?.handleDownload(info);
+  }, {
+    // 人工下载的配置与两个系统对话框（设置写入由主进程单点落盘，不经渲染端 settings）。
+    prefs: () => browserDownloadPrefs(),
+    setPrefs: (patch) => updateBrowserDownloadPrefs(patch),
+    chooseDirectory: () => chooseDownloadDirectory(nextWindow),
+    chooseSavePath: (defaultPath) => chooseDownloadSavePath(nextWindow, defaultPath)
   });
   mainWindow = nextWindow;
   browserPreviewController = previewController;

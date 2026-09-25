@@ -1,6 +1,7 @@
 import type {
   AgentProfile,
   BrowserElementPick,
+  BrowserPendingDownload,
   BrowserPreviewCommand,
   BrowserPreviewState,
   BrowserTabsEvent,
@@ -42,6 +43,23 @@ const terminalListeners = new Map<string, Set<(event: TerminalEventData) => void
 const sshDataListeners = new Map<string, Set<(event: SshEventData) => void>>();
 const sshRevealListeners = new Set<(event: SshRevealEvent) => void>();
 let browserPreviewState: BrowserPreviewState = { attached: false, url: "", title: "", loading: false, canGoBack: false, canGoForward: false };
+/** 演示环境下的人工下载配置与卡片（真实落盘与系统对话框只在 Electron 里）。 */
+let demoDownloadPrefs: { dir: string; ask: boolean } = { dir: "C:\\Users\\demo\\Downloads", ask: true };
+let demoSampleDownloadShown = false;
+
+function demoSampleDownload(): BrowserPendingDownload {
+  return {
+    id: "demo-download-1",
+    filename: "产品图-封面.png",
+    url: "https://example.com/cover.png",
+    source: "example.com",
+    directory: demoDownloadPrefs.dir,
+    filePath: `${demoDownloadPrefs.dir}\\产品图-封面.png`,
+    totalBytes: 2_411_724,
+    downloaded: false,
+    deadlineAt: Date.now() + 60_000
+  };
+}
 /** 演示端的按标签元信息（tab-meta）：作品「运行」的一次性导航目标存在这里。 */
 const demoTabMeta = new Map<string, { initialUrl?: string; galleryId?: string }>();
 
@@ -592,7 +610,31 @@ export function createDemoApi(): DesktopApi {
       }
       if (command.type === "navigate") {
         const url = normalizeDemoBrowserUrl(command.url);
-        return emitBrowserPreview({ attached: false, url, title: "浏览器演示", loading: false, error: "网页内容仅在 Electron 桌面窗口中显示" });
+        // 演示环境的下载卡片：首次导航时投一张，用来看清「保存 / 另存为… / 取消」
+        // 横幅与倒计时（演示环境不会真的下载任何东西）。
+        const sample: Partial<BrowserPreviewState> = demoSampleDownloadShown ? {} : { pendingDownloads: [demoSampleDownload()], downloadPrefs: demoDownloadPrefs };
+        demoSampleDownloadShown = true;
+        return emitBrowserPreview({ attached: false, url, title: "浏览器演示", loading: false, error: "网页内容仅在 Electron 桌面窗口中显示", ...sample });
+      }
+      // 人工下载的设置与决策：演示环境只维护内存状态（无落盘、无系统对话框）。
+      if (command.type === "download-prefs") return emitBrowserPreview({ downloadPrefs: demoDownloadPrefs });
+      if (command.type === "download-prefs-set") {
+        demoDownloadPrefs = {
+          dir: command.dir !== undefined && command.dir.trim() ? command.dir.trim() : demoDownloadPrefs.dir,
+          ask: command.ask ?? demoDownloadPrefs.ask
+        };
+        return emitBrowserPreview({ downloadPrefs: demoDownloadPrefs });
+      }
+      if (command.type === "download-decision") {
+        const current = browserPreviewState.pendingDownloads ?? [];
+        const decided = current.find((item) => item.id === command.id);
+        const rest = current.filter((item) => item.id !== command.id);
+        return emitBrowserPreview({
+          pendingDownloads: rest.length > 0 ? rest : undefined,
+          downloadNotice: decided
+            ? { text: command.action === "cancel" ? `已取消下载：${decided.filename}` : `已保存到 ${decided.directory}`, tone: "info", at: Date.now() }
+            : undefined
+        });
       }
       // tab-meta：作品「运行」的元信息。读路径只回镜像（与主进程同语义——
       // 不传字段 = 读，绝不编造值），写路径存起来并随状态推一帧。

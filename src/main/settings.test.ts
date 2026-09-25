@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CUSTOM_PROVIDER_ID, createDefaultAgent, ensureDefaultWorkspaceDir, forgetAgentWorkspace, isPositiveInt, mergeProviderModels, migrateSettings, normalizeAccessMode, normalizeAgent, normalizeAgentWorkspaces, normalizeCheckpoint, normalizeComputer, normalizeCustomThemes, normalizeDivBubbleMode, normalizeInterfaceTuning, normalizeJev, normalizeProvider, normalizeThemeAssets, normalizeVision, normalizeWallpaperOpacity, recordAgentWorkspace, resolveDefaultWorkspace, resolveInitialWorkspace } from "./settings.js";
+import { CUSTOM_PROVIDER_ID, createDefaultAgent, ensureDefaultWorkspaceDir, forgetAgentWorkspace, isPositiveInt, mergeProviderModels, migrateSettings, normalizeAccessMode, normalizeAgent, normalizeAgentWorkspaces, normalizeBrowser, normalizeCheckpoint, normalizeComputer, normalizeCustomThemes, normalizeDivBubbleMode, normalizeInterfaceTuning, normalizeJev, normalizeProvider, normalizeThemeAssets, normalizeVision, normalizeWallpaperOpacity, recordAgentWorkspace, resolveDefaultWorkspace, resolveInitialWorkspace } from "./settings.js";
+import { mergeBrowserSettings, withBrowserDownloadPrefs } from "./settings.js";
 
 describe("workspace per-agent memory and default workspace (方案 B)", () => {
   it("normalizes agentWorkspaces: keeps non-empty string entries, drops garbage, defaults undefined", () => {
@@ -451,5 +452,39 @@ describe("desktop settings migration", () => {
       .toEqual(["C:/pi/sessions/a.jsonl"]);
     expect(migrateSettings({ pinnedSessionPaths: "junk" }).settings.pinnedSessionPaths).toBeUndefined();
     expect(migrateSettings({ pinnedSessionPaths: ["", 7, null] }).settings.pinnedSessionPaths).toBeUndefined();
+  });
+});
+
+describe("browser settings: 人工下载偏好（默认目录 / 每次询问）", () => {
+  it("reads the download preferences back (migrateSettings round-trip)", () => {
+    const result = migrateSettings({ browser: { enabled: false, downloadDir: " D:\\我的下载 ", downloadAsk: false } });
+    expect(result.settings.browser).toEqual({ enabled: false, downloadDir: "D:\\我的下载", downloadAsk: false });
+    // 坏字段各自丢弃：目录坏不牵连开关，开关坏不牵连目录。
+    expect(normalizeBrowser({ downloadDir: 7, downloadAsk: "yes" })).toEqual({ enabled: true });
+    expect(normalizeBrowser({ downloadDir: "  ", downloadAsk: true })).toEqual({ enabled: true, downloadAsk: true });
+    expect(normalizeBrowser({ downloadDir: "D:\\dl" })).toEqual({ enabled: true, downloadDir: "D:\\dl" });
+  });
+
+  it("mergeBrowserSettings keeps the stored download preferences when the settings page saves", () => {
+    const stored = { enabled: true, downloadDir: "D:\\dl", downloadAsk: false };
+    // 渲染端提交的 browser 对象不含下载偏好（它由主进程单点写入）。
+    expect(mergeBrowserSettings({ enabled: true }, stored)).toEqual(stored);
+    // 总闸取本次提交；下载偏好永远保留已存的那份。
+    expect(mergeBrowserSettings({ enabled: false, downloadDir: "E:\\other", downloadAsk: true }, stored))
+      .toEqual({ enabled: false, downloadDir: "D:\\dl", downloadAsk: false });
+    expect(mergeBrowserSettings(undefined, stored)).toEqual(stored);
+    expect(mergeBrowserSettings({ enabled: true }, undefined)).toEqual({ enabled: true });
+    expect(mergeBrowserSettings(undefined, undefined)).toBeUndefined();
+  });
+
+  it("withBrowserDownloadPrefs patches single fields and preserves the switch", () => {
+    expect(withBrowserDownloadPrefs({ enabled: false, downloadDir: "D:\\dl" }, { ask: false }))
+      .toEqual({ enabled: false, downloadDir: "D:\\dl", downloadAsk: false });
+    expect(withBrowserDownloadPrefs({ enabled: true, downloadAsk: false }, { dir: " E:\\new " }))
+      .toEqual({ enabled: true, downloadDir: "E:\\new", downloadAsk: false });
+    // 空目录 = 清除配置（回退系统下载目录）。
+    expect(withBrowserDownloadPrefs({ enabled: true, downloadDir: "D:\\dl", downloadAsk: true }, { dir: "" }))
+      .toEqual({ enabled: true, downloadAsk: true });
+    expect(withBrowserDownloadPrefs(undefined, {})).toEqual({ enabled: true });
   });
 });
