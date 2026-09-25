@@ -7,6 +7,7 @@ import { spawn } from "node-pty";
 import appIconPath from "./assets/icon.ico?asset";
 import { resolveBundledSkillsDir, resolveBundledSubagentsDir } from "./bundled-skills.js";
 import { migrateSettings, normalizeJev, normalizeVision, recordAgentWorkspace, forgetAgentWorkspace } from "./settings.js";
+import { createSettingsPersistence, diffSettings, readSettingsFile, settingsPath as settingsFilePath, type SettingsPersistence } from "./settings-store.js";
 import { togglePinnedSessionPath } from "./session-scope.js";
 import { importExternalAttachment, workspaceRelativeAttachment } from "./attachments.js";
 import type { BrowserPreviewCommand, BrowserPreviewState, DesktopBootstrap, DesktopSettings, GalleryServiceProbe, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot, SshCommand, SshCommandResult, SshEventData, SshRevealEvent, TerminalCommand, TerminalEventData, WorkspaceDirectoryListing, WorkspaceEntryResult, WorkspaceFilePreview, WorkspaceFileSearchResult, WorkspaceFileStat, WorkspaceFileWriteResult } from "../shared/protocol.js";
@@ -123,7 +124,7 @@ function ensureSshManager(): SshConnectionManager {
   return sshConnectionManager;
 }
 
-function settingsPath(): string { return join(app.getPath("userData"), "settings.json"); }
+function settingsPath(): string { return settingsFilePath(app.getPath("userData")); }
 function credentialsPath(): string { return join(app.getPath("userData"), "credentials.json"); }
 function writeJson(path: string, value: unknown): void {
   mkdirSync(app.getPath("userData"), { recursive: true });
@@ -236,24 +237,39 @@ function deleteCredential(providerId: string): void {
 }
 function loadSettings(): DesktopSettings {
   if (settingsCache) return settingsCache;
-  const raw = readJson(settingsPath());
+  // 资产（主题/壁纸内联 base64）按优先级从 settings.json / appearance-assets.json
+  // 合并回 raw.appearance，内存形状与旧版完全一致（migrateSettings 零改动）。
+  const { raw, assetsSource } = readSettingsFile(app.getPath("userData"));
+  if (assetsSource === "inline") persistSettings().markInlineAssets();
   const migrated = migrateSettings(raw);
   settingsCache = migrated.settings;
   credentialsCache = loadCredentials();
   if (migrated.legacyApiKey) {
     if (saveCredential("chatanytime-openai-compatible", migrated.legacyApiKey)) {
-      writeJson(settingsPath(), settingsCache);
+      persistSettings().writeNow({ small: true, assets: false });
     } else {
       credentialsCache["chatanytime-openai-compatible"] = migrated.legacyApiKey;
       securityWarning = "系统加密存储不可用，旧 API Key 未写入新明文文件，仅在本次运行中使用。";
       console.warn("系统加密存储不可用，保留旧 API Key 配置并仅在内存中使用。");
     }
-  } else if (!existsSync(settingsPath())) writeJson(settingsPath(), settingsCache);
+  } else if (!existsSync(settingsPath())) persistSettings().writeNow({ small: true, assets: false });
   return settingsCache;
 }
-function persistSettings(): void { if (settingsCache) writeJson(settingsPath(), settingsCache); }
+
+/**
+ * settings 写入纪律（2026-09-25 性能 P0）：脏标记 + 300 ms debounce + 原子写 + 存储分层。
+ * 调度器本体在 settings-store.ts（可单测）；这里只提供当前内存引用与数据目录。
+ */
+let settingsPersistence: SettingsPersistence | undefined;
+function persistSettings(): SettingsPersistence {
+  settingsPersistence ??= createSettingsPersistence({ userDataDir: app.getPath("userData"), getSettings: () => settingsCache });
+  return settingsPersistence;
+}
+
 function updateSettings(command: RuntimeCommand): void {
   const settings = loadSettings();
+  // 脏标记口径：switch 之前的浅快照（顶层键引用级，零成本）；详见 settings-store.ts。
+  const previous = { ...settings };
   switch (command.type) {
     // 工作区按助手记忆（agentWorkspaces 双写对称：main 持久化 + utility 内存镜像共用
     // 同一组纯函数）。settings.workspace 停写、保留为一次性迁移兜底（e42c139 回退教训）。
@@ -341,7 +357,7 @@ function updateSettings(command: RuntimeCommand): void {
       settings.hooks = command.hooks;
       break;
   }
-  persistSettings();
+  persistSettings().schedule(diffSettings(previous, settings));
 }
 function runtimeEntry(): string { return join(__dirname, "pi-runtime.js"); }
 function sendToRuntime(command: RuntimeCommand): void { if (!runtimeProcess) throw new Error("Pi 运行时当前不可用"); runtimeProcess.postMessage(command); }
@@ -430,8 +446,9 @@ function startRuntime(): void {
     if (message.type === "resources") latestResources = message.resources;
     if (message.type === "custom-models") {
       const source = loadSettings();
+      const previous = { ...source };
       source.providers = source.providers.map((provider) => provider.id === message.providerId ? { ...provider, models: message.models } : provider);
-      persistSettings();
+      persistSettings().schedule(diffSettings(previous, source));
     }
     mainWindow?.webContents.send("runtime:message", message);
   });
@@ -706,4 +723,4 @@ function registerIpc(): void {
 }
 app.whenReady().then(() => { Menu.setApplicationMenu(null); registerPreviewFileProtocol(); registerIpc(); startRuntime(); createWindow(); app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); }); });
 app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
-app.on("before-quit", () => { browserAutomationController?.dispose(); computerOverlayController?.dispose(); browserPreviewController?.dispose(); terminalManager.disposeAll(); sshConnectionManager?.disposeAll(); runtimeProcess?.kill(); });
+app.on("before-quit", () => { settingsPersistence?.flush(); browserAutomationController?.dispose(); computerOverlayController?.dispose(); browserPreviewController?.dispose(); terminalManager.disposeAll(); sshConnectionManager?.disposeAll(); runtimeProcess?.kill(); });
