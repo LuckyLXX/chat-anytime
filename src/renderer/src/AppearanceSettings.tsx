@@ -10,9 +10,9 @@ import type {
   ThemePresetId
 } from "../../shared/protocol";
 import { RichContent } from "./components/RichContent";
-import { CSS_URL_PATTERN, isExternalThemeReference, normalizeThemeAssetReference, resolveThemeAssets } from "./lib/theme-assets";
+import { CSS_URL_PATTERN, activeThemeScope, isExternalThemeReference, resolveThemeAssetUrls, themeAssetRelativePath } from "../../shared/theme-assets";
 import { THEME_PRESETS, bubbleOpacityCss, panelOpacityCss, scopeCustomThemeCssForPreview, themePreviewCss, themeWallpaperOpacity, wallpaperOpacityCss } from "./lib/theme-presets";
-import { customCssHasWallpaper, themeAssetsForAppearance, useThemeAssetUrls } from "./lib/theme-runtime";
+import { customCssHasWallpaper } from "./lib/theme-runtime";
 import { useDesktopStore } from "./store";
 
 /**
@@ -331,7 +331,6 @@ const DEFAULT_PANEL_OPACITY = 1;
 
 /** 主题预览（从 App.tsx 平移，仅本页使用）：深浅两栏共用同一份富内容。 */
 function ThemePreview({ appearance }: { appearance: AppearanceSettingsValue }): ReactNode {
-  const themeAssetUrls = useThemeAssetUrls(themeAssetsForAppearance(appearance));
   const previewContent = `**实时主题预览**
 
 Markdown、表格、代码、公式和图表会共用当前主题变量。
@@ -354,7 +353,7 @@ flowchart LR
 \`\`\`
 
 <assistant_html><div><strong>HTML 片段</strong><p>安全清洗后仍保留布局和交互样式。</p></div></assistant_html>`;
-  const previewCss = `${themePreviewCss(appearance.themePreset)}\n${scopeCustomThemeCssForPreview(resolveThemeAssets(appearance.customCss, themeAssetUrls))}\n${wallpaperOpacityCss(appearance.wallpaperOpacity, ".theme-preview-scope[data-theme-custom]")}\n${bubbleOpacityCss(appearance.bubbleOpacity, ".theme-preview-scope[data-theme-custom]")}\n${panelOpacityCss(appearance.panelOpacity, ".theme-preview-scope[data-theme-custom]")}`;
+  const previewCss = `${themePreviewCss(appearance.themePreset)}\n${scopeCustomThemeCssForPreview(resolveThemeAssetUrls(appearance.customCss, activeThemeScope(appearance)))}\n${wallpaperOpacityCss(appearance.wallpaperOpacity, ".theme-preview-scope[data-theme-custom]")}\n${bubbleOpacityCss(appearance.bubbleOpacity, ".theme-preview-scope[data-theme-custom]")}\n${panelOpacityCss(appearance.panelOpacity, ".theme-preview-scope[data-theme-custom]")}`;
   const hasWallpaper = customCssHasWallpaper(appearance.customCss);
   const panes = [
     { id: "dark", label: "深色", effective: "dark" },
@@ -444,14 +443,14 @@ function themeNameFromCss(css: string, fallback: string): string {
 }
 
 async function collectThemeAssets(css: string, cssFile: File, files: File[]): Promise<ThemeAssetMap> {
-  const assetFiles = files.filter((file) => /\.(?:png|jpe?g|webp|gif|woff2?|ttf|otf)$/iu.test(file.name));
+  const assetFiles = files.filter((file) => /\.(?:png|jpe?g|webp|gif|svg|avif|woff2?|ttf|otf)$/iu.test(file.name));
   const assets = await Promise.all(assetFiles.map(async (file) => [themeRelativePath(file).toLowerCase(), await readFileAsDataUrl(file)] as const));
   const cssPath = themeRelativePath(cssFile);
   const cssDirectory = cssPath.includes("/") ? cssPath.slice(0, cssPath.lastIndexOf("/")) : "";
   const result: ThemeAssetMap = {};
   css.replace(CSS_URL_PATTERN, (match, _quote: string, rawReference: string) => {
-    const reference = normalizeThemeAssetReference(rawReference);
-    if (isExternalThemeReference(reference)) return match;
+    const reference = themeAssetRelativePath(rawReference);
+    if (!reference || isExternalThemeReference(reference)) return match;
     const candidates = [
       cssDirectory ? `${cssDirectory}/${reference}` : reference,
       reference

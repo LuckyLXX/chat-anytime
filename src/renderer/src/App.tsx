@@ -45,7 +45,6 @@ import type {
   DivBubbleMode,
   ThinkingLevel,
   DelegationProgress,
-  ThemeAssetMap,
   ToolExecution,
   ResourceCatalog,
   RuntimeCommand,
@@ -74,7 +73,7 @@ import { DiffView } from "./components/DiffView";
 import { BrandMark } from "./components/BrandMark";
 import { clampPreviewSplit, PREVIEW_SPLIT_MAX, PREVIEW_SPLIT_MIN, previewSplitFromKey } from "./lib/preview-split";
 import { groupSessionsByWorkspace, workspaceKey } from "./lib/session-groups";
-import { resolveThemeAssets } from "./lib/theme-assets";
+import { resolveThemeAssetUrls, activeThemeScope } from "../../shared/theme-assets";
 import { bubbleOpacityCss, collectThemeLayers, panelOpacityCss, scopeCustomThemeCss, themePresetCss, wallpaperOpacityCss } from "./lib/theme-presets";
 import { panePermissionRequest, paneQuestionRequest, dropPaneStates, pruneParkedPanels, useDesktopStore } from "./store";
 import { DesignStudio } from "./design/DesignStudio";
@@ -93,7 +92,7 @@ import {
   updateRatio,
   type SplitNode
 } from "./lib/split-layout";
-import { customCssHasWallpaper, themeAssetsForAppearance, useThemeAssetUrls } from "./lib/theme-runtime";
+import { customCssHasWallpaper } from "./lib/theme-runtime";
 import { AppearanceSettings } from "./AppearanceSettings";
 import { HooksSettings } from "./HooksSettings";
 import { selectableCatalogModels } from "./lib/model-list";
@@ -363,7 +362,6 @@ export function App(): ReactNode {
   const question = paneQuestionRequest(questions, paneFocusOrder);
   const settings = useDesktopStore((state) => state.settings);
   const galleryApps = useDesktopStore((state) => state.galleryApps);
-  const themeAssetUrls = useThemeAssetUrls(themeAssetsForAppearance(settings.appearance));
   const [messageActionError, setMessageActionError] = useState<string>();
   const setActionError = useCallback((message?: string): void => {
     setMessageActionError(message);
@@ -793,7 +791,9 @@ export function App(): ReactNode {
       style.id = styleId;
       document.head.appendChild(style);
     }
-    const customCss = resolveThemeAssets(settings.appearance.customCss, themeAssetUrls);
+    // 资产已落磁盘（<agentDir>/pidesktop-themes/<scope>/）：相对 url() 改写成
+    // pidesktop-file://theme/<scope>/<relative> 交给浏览器自己取，不再走 base64。
+    const customCss = resolveThemeAssetUrls(settings.appearance.customCss, activeThemeScope(settings.appearance));
     style.textContent = `${themePresetCss(settings.appearance.themePreset)}\n${scopeCustomThemeCss(customCss)}\n${wallpaperOpacityCss(settings.appearance.wallpaperOpacity, ":root[data-theme-custom]")}\n${bubbleOpacityCss(settings.appearance.bubbleOpacity, ":root[data-theme-custom]")}\n${panelOpacityCss(settings.appearance.panelOpacity, ":root[data-theme-custom]")}`;
     return () => {
       style?.remove();
@@ -801,7 +801,7 @@ export function App(): ReactNode {
       delete root.dataset.themeCustom;
       delete root.dataset.themeWallpaper;
     };
-  }, [settings.appearance.themePreset, settings.appearance.wallpaperOpacity, settings.appearance.bubbleOpacity, settings.appearance.panelOpacity, settings.appearance.customCss, settings.appearance.customCssAssets, settings.appearance.customThemes, themeAssetUrls]);
+  }, [settings.appearance.themePreset, settings.appearance.wallpaperOpacity, settings.appearance.bubbleOpacity, settings.appearance.panelOpacity, settings.appearance.customCss, settings.appearance.customThemes]);
 
   // Project UI state onto the document root so custom themes can react to
   // settings/preview/chat state without observing the DOM. Attribute presence
