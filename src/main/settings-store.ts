@@ -132,6 +132,23 @@ function readJsonFile(path: string): unknown {
 }
 
 /**
+ * 内联资产候选是否真的带东西。
+ * 为什么必须单独判：迁移之后旧版本（看不到主题的那版）任何一次保存都会把
+ * `customThemes: []` 写回 settings.json 且 mtime 变新，而合并规则是「最新写入者
+ * 优先」——空列表会因此压过资产文件，主题在**新版本里也**看起来没了（数据还在
+ * appearance-assets.json 里，但对用户就是「主题消失」）。所以空的内联候选一律
+ * 不当候选；真的想把主题清空，走新版本的写入路径（资产文件会被同步写成空）。
+ */
+function hasAssetPayload(assets: AppearanceAssets | undefined): boolean {
+  if (!assets) return false;
+  const themes = (assets as Record<string, unknown>).customThemes;
+  if (Array.isArray(themes) && themes.length > 0) return true;
+  const cssAssets = (assets as Record<string, unknown>).customCssAssets;
+  if (isPlainRecord(cssAssets) && Object.keys(cssAssets).length > 0) return true;
+  return false;
+}
+
+/**
  * 读 settings（含资产合并）。合并是**浅克隆**：不修改入参对象，也不在解析结果
  * 上做归一化——归一化仍是 `migrateSettings` 的唯一职责。
  */
@@ -141,7 +158,8 @@ export function readSettingsFile(userDataDir: string): SettingsFileRead {
   const assetsFile = readJsonFile(appearanceAssetsPath(userDataDir));
   const assetsTime = mtimeMsOf(appearanceAssetsPath(userDataDir));
   const fileAssets = isPlainRecord(assetsFile) ? pickAssetKeys(assetsFile) : undefined;
-  const inlineAssets = isPlainRecord(base) ? pickAssetKeys(base.appearance) : undefined;
+  const inlineRaw = isPlainRecord(base) ? pickAssetKeys(base.appearance) : undefined;
+  const inlineAssets = hasAssetPayload(inlineRaw) ? inlineRaw : undefined;
 
   let chosen: AppearanceAssets | undefined;
   let assetsSource: AppearanceAssetsSource = "none";

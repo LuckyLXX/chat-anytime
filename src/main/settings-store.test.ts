@@ -235,6 +235,37 @@ describe("settings storage layering", () => {
     expect(existsSync(appearanceAssetsPath(dir))).toBe(true);
   });
 
+  it("较新但为空的 inline 列表不得覆盖资产文件（迁移后旧版本一保存就会造出这个局）", async () => {
+    // 实例：迁移后旧版本（看不到主题）任何一次保存都把 customThemes: [] 写回
+    // settings.json 且 mtime 变新；若按 mtime 让它赢，主题在新版本里也看起来没了。
+    const dir = await tempDir("priority-empty-inline");
+    const emptied: DesktopSettings = {
+      ...themedSettings(["file-theme"]),
+      appearance: { ...defaultAppearance(), customThemes: [] }
+    };
+    writeLegacySettings(dir, emptied);
+    writeFileSync(appearanceAssetsPath(dir), JSON.stringify({ customThemes: [{ ...THEME, id: "file-theme" }], customCssAssets: { ...WALLPAPER } }), "utf8");
+    await utimes(appearanceAssetsPath(dir), new Date(1_600_000_000_000), new Date(1_600_000_000_000));
+    await utimes(settingsPath(dir), new Date(1_600_000_100_000), new Date(1_600_000_100_000));
+
+    const read = readSettingsFile(dir);
+    expect(read.assetsSource).toBe("file");
+    expect((read.raw as any).appearance.customThemes.map((theme: CustomThemeDefinition) => theme.id)).toEqual(["file-theme"]);
+    expect((read.raw as any).appearance.customCssAssets).toEqual(WALLPAPER);
+  });
+
+  it("空的资产文件仍可胜出（用户在新版本里真的清空了主题）", async () => {
+    const dir = await tempDir("priority-empty-file");
+    writeLegacySettings(dir, themedSettings(["inline-theme"]));
+    writeFileSync(appearanceAssetsPath(dir), JSON.stringify({ customThemes: [] }), "utf8");
+    await utimes(settingsPath(dir), new Date(1_600_000_000_000), new Date(1_600_000_000_000));
+    await utimes(appearanceAssetsPath(dir), new Date(1_600_000_100_000), new Date(1_600_000_100_000));
+
+    const read = readSettingsFile(dir);
+    expect(read.assetsSource).toBe("file");
+    expect((read.raw as any).appearance.customThemes).toEqual([]);
+  });
+
   it("uses the assets file when settings.json has no inline copy, whatever the mtimes are", async () => {
     const dir = await tempDir("priority-only-file");
     const settings = themedSettings(["file-theme"]);
