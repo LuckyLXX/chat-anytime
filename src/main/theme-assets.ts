@@ -1,9 +1,17 @@
-import { createReadStream } from "node:fs";
+import { copyFileSync, createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, type Dirent } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { extname, join, resolve } from "node:path";
+import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { Readable } from "node:stream";
-import { themeAssetScopeName } from "../shared/theme-assets.js";
+import type { AppearanceSettings } from "../shared/protocol.js";
+import {
+  THEME_ASSET_CURRENT_SCOPE,
+  activeThemeScope,
+  themeAssetReferences,
+  themeAssetRelativePath,
+  themeAssetScopeName
+} from "../shared/theme-assets.js";
+import type { ThemeImportOutcome } from "../shared/theme-assets.js";
 import { safeRelativePath } from "./workspace-preview.js";
 
 /**
@@ -117,4 +125,346 @@ export async function serveThemeAsset(
     if (code === "ENOENT" || code === "ENOTDIR") return new Response("主题资产不存在或已被删除", { status: 404 });
     throw error;
   }
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null) return false;
+  const prototype = Object.getPrototypeOf(value) as unknown;
+  return prototype === Object.prototype || prototype === null;
+}
+
+// —— 目录操作（全部同步：导入与迁移都在主进程的一次调用里做完，量级是一套主题几十个文件） ——
+
+/** 目录下全部普通文件（相对路径、正斜杠）；有深度与数量上限，防止扫到病态目录。 */
+function listFilesRecursive(root: string): string[] {
+  const found: string[] = [];
+  const walk = (dir: string, depth: number): void => {
+    if (depth > MAX_SCAN_DEPTH || found.length >= MAX_SCAN_FILES) return;
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (found.length >= MAX_SCAN_FILES) return;
+      if (entry.isDirectory()) walk(join(dir, entry.name), depth + 1);
+      else if (entry.isFile()) found.push(relative(root, join(dir, entry.name)).replaceAll("\\", "/"));
+    }
+  };
+  walk(root, 0);
+  return found;
+}
+
+const MAX_SCAN_DEPTH = 8;
+const MAX_SCAN_FILES = 5000;
+
+/** 主题目录下一个层级的子目录名（用于孤儿清理）。 */
+function listThemeScopes(themesDir: string): string[] {
+  try {
+    return readdirSync(themesDir, { withFileTypes: true }).flatMap((entry) => entry.isDirectory() ? [entry.name] : []);
+  } catch {
+    return [];
+  }
+}
+
+/** 删掉某个作用域目录（不存在即无事发生）。 */
+export function clearThemeScope(themesDir: string, scope: string): void {
+  const scopeDir = themeScopeDir(themesDir, scope);
+  if (!scopeDir) return;
+  rmSync(scopeDir, { recursive: true, force: true });
+}
+
+/** 递归复制（覆盖同名），用于跨盘/目标已存在时替代 rename。 */
+function copyDirectoryInto(source: string, target: string): void {
+  mkdirSync(target, { recursive: true });
+  for (const entry of readdirSync(source, { withFileTypes: true })) {
+    const from = join(source, entry.name);
+    const to = join(target, entry.name);
+    if (entry.isDirectory()) copyDirectoryInto(from, to);
+    else if (entry.isFile()) copyFileSync(from, to);
+  }
+}
+
+/**
+ * 把草稿槽（`current/`）的资产归到某个主题目录下——「保存主题」时调用。
+ * 目标目录已存在时改为合并复制（不丢新导入的文件），完成后清掉草稿槽。
+ * 返回是否有目录被处理（没有草稿槽时 false，属正常路径）。
+ */
+export function promoteThemeScope(themesDir: string, themeId: string): boolean {
+  const target = themeScopeDir(themesDir, themeId);
+  const currentDir = themeScopeDir(themesDir, THEME_ASSET_CURRENT_SCOPE);
+  if (!target || !currentDir || !existsSync(currentDir)) return false;
+  if (!existsSync(target)) {
+    try {
+      mkdirSync(dirname(target), { recursive: true });
+      renameSync(currentDir, target);
+      return true;
+    } catch {
+      // 跨盘或目录被占用：落回复制路径
+    }
+  }
+  copyDirectoryInto(currentDir, target);
+  rmSync(currentDir, { recursive: true, force: true });
+  return true;
+}
+
+/**
+ * 主题资产目录与设置的**对账**（每次 settings.save / appearance.save 后跑一次）：
+ *
+ * 1. 新增主题（渲染端刚点「保存主题」）且 CSS 就是当前生效的 → 把 `current/` 归到 `<id>/`；
+ * 2. 当前生效的不是草稿（CSS 为空或命中某条主题）→ 草稿槽已无用，删掉；
+ * 3. 孤儿目录（不属于任何现存主题、也不是 `current`，含「保存主题后取消」留下的目录）→ 删掉。
+ *
+ * 渲染端不做任何文件操作，主进程以**内存里的权威 appearance** 为准做对账——
+ * 渲染端看到的主题列表是它的副本，不能用来决定删谁。
+ */
+export function reconcileThemeAssetDirs(themesDir: string, previous: AppearanceSettings, next: AppearanceSettings): void {
+  const previousIds = new Set(previous.customThemes.map((theme) => theme.id));
+  for (const theme of next.customThemes) {
+    if (previousIds.has(theme.id) || theme.css !== next.customCss) continue;
+    promoteThemeScope(themesDir, theme.id);
+    break;
+  }
+  if (!next.customCss.trim() || activeThemeScope(next) !== THEME_ASSET_CURRENT_SCOPE) {
+    clearThemeScope(themesDir, THEME_ASSET_CURRENT_SCOPE);
+  }
+  const keep = new Set(next.customThemes.flatMap((theme) => {
+    const scope = themeAssetScopeName(theme.id);
+    return scope ? [scope] : [];
+  }));
+  for (const name of listThemeScopes(themesDir)) {
+    if (name !== THEME_ASSET_CURRENT_SCOPE && !keep.has(name)) clearThemeScope(themesDir, name);
+  }
+}
+
+// —— 导入：主进程读盘、按 CSS 引用收集资产、写进草稿槽 ——
+
+/** 从 CSS 里取主题名（`Theme Name:` / `主题:`），取不到用目录名。 */
+function themeNameFromCss(css: string, fallback: string): string {
+  const match = /(?:Theme Name|\u4e3b\u9898)\s*[:\uff1a]\s*([^\r\n*]+)/iu.exec(css);
+  return match?.[1]?.trim() || fallback;
+}
+
+/**
+ * 主题 CSS 的选择规则（与旧渲染端逐字一致）：`theme.css` → `<目录名>.css` → 第一个 CSS。
+ */
+function selectThemeCss(rootName: string, cssFiles: string[]): string | undefined {
+  const byBaseName = (name: string): string | undefined => cssFiles.find((file) => basename(file).toLowerCase() === name);
+  return byBaseName("theme.css") ?? byBaseName(`${rootName.toLowerCase()}.css`) ?? cssFiles[0];
+}
+
+/** CSS 引用 → 源目录里的实际文件（先按相对 CSS 的目录、再按根、最后按唯一同名文件）。 */
+function resolveAssetSource(byLowerPath: Map<string, string>, cssDir: string, reference: string): string | undefined {
+  const candidates = [cssDir ? `${cssDir}/${reference}` : reference, reference];
+  for (const candidate of candidates) {
+    const hit = byLowerPath.get(candidate.toLowerCase());
+    if (hit) return hit;
+  }
+  const baseName = reference.split("/").at(-1)!;
+  const hits = [...byLowerPath.values()].filter((file) => file.toLowerCase().endsWith(`/${reference}`) || basename(file).toLowerCase() === baseName);
+  return hits.length === 1 ? hits[0] : undefined;
+}
+
+function importThemeCss(themesDir: string, root: string, cssRelativePath: string, fallbackName: string, files: string[]): ThemeImportOutcome {
+  const cssPath = join(root, ...cssRelativePath.split("/"));
+  const cssInfo = statSync(cssPath);
+  if (cssInfo.size > THEME_ASSET_MAX_CSS_BYTES) {
+    return { ok: false, message: `主题 CSS 超过 ${Math.round(THEME_ASSET_MAX_CSS_BYTES / 1024)} KB 上限（${Math.round(cssInfo.size / 1024)} KB）` };
+  }
+  const css = readFileSync(cssPath, "utf8");
+  const cssDir = cssRelativePath.includes("/") ? cssRelativePath.slice(0, cssRelativePath.lastIndexOf("/")) : "";
+  const byLowerPath = new Map(files.map((file) => [file.toLowerCase(), file]));
+  const missing: string[] = [];
+  const skipped: string[] = [];
+  const plan: { reference: string; source: string; size: number }[] = [];
+  let total = 0;
+  for (const reference of themeAssetReferences(css)) {
+    const source = resolveAssetSource(byLowerPath, cssDir, reference);
+    if (!source) {
+      missing.push(reference);
+      continue;
+    }
+    if (!THEME_ASSET_EXTENSIONS.has(extname(reference).toLowerCase())) {
+      skipped.push(reference);
+      continue;
+    }
+    const info = statSync(join(root, ...source.split("/")));
+    if (!info.isFile()) {
+      missing.push(reference);
+      continue;
+    }
+    if (info.size > THEME_ASSET_MAX_FILE_BYTES) {
+      return { ok: false, message: `资产 ${reference} 超过单文件 ${Math.round(THEME_ASSET_MAX_FILE_BYTES / 1024 / 1024)} MB 上限` };
+    }
+    total += info.size;
+    if (total > THEME_ASSET_MAX_SCOPE_BYTES) {
+      return { ok: false, message: `主题资产合计超过 ${Math.round(THEME_ASSET_MAX_SCOPE_BYTES / 1024 / 1024)} MB 上限，未写入任何文件` };
+    }
+    plan.push({ reference, source, size: info.size });
+  }
+
+  // 校验全过才动磁盘：草稿槽是「本次导入」的完整快照，先清空再写。
+  clearThemeScope(themesDir, THEME_ASSET_CURRENT_SCOPE);
+  const scopeDir = themeScopeDir(themesDir, THEME_ASSET_CURRENT_SCOPE)!;
+  let assetCount = 0;
+  let bytes = 0;
+  for (const item of plan) {
+    const target = join(scopeDir, ...item.reference.split("/"));
+    mkdirSync(dirname(target), { recursive: true });
+    copyFileSync(join(root, ...item.source.split("/")), target);
+    const info = statSync(target);
+    if (!info.isFile() || info.size !== item.size) return { ok: false, message: `资产 ${item.reference} 落盘校验失败` };
+    assetCount += 1;
+    bytes += info.size;
+  }
+  return { ok: true, name: themeNameFromCss(css, fallbackName), css, assetCount, bytes, missing, skipped };
+}
+
+/** 导入一个主题目录（`theme.css` 等规则见 `selectThemeCss`）。 */
+export function importThemeDirectory(themesDir: string, sourceDir: string): ThemeImportOutcome {
+  try {
+    const root = resolve(sourceDir);
+    if (!statSync(root).isDirectory()) return { ok: false, message: "选择的路径不是目录" };
+    const files = listFilesRecursive(root);
+    const cssFiles = files.filter((file) => file.toLowerCase().endsWith(".css"));
+    const cssRelativePath = selectThemeCss(basename(root), cssFiles);
+    if (!cssRelativePath) return { ok: false, message: "主题目录中没有找到 CSS 文件" };
+    return importThemeCss(themesDir, root, cssRelativePath, basename(root), files);
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : "主题目录导入失败" };
+  }
+}
+
+/** 导入单个 CSS 文件：以它所在目录为根收集资产。 */
+export function importThemeCssFile(themesDir: string, cssFilePath: string): ThemeImportOutcome {
+  try {
+    const cssPath = resolve(cssFilePath);
+    const info = statSync(cssPath);
+    if (!info.isFile() || extname(cssPath).toLowerCase() !== ".css") return { ok: false, message: "选择的文件不是 CSS" };
+    const root = dirname(cssPath);
+    return importThemeCss(themesDir, root, basename(cssPath), basename(cssPath).replace(/\.[^.]*$/u, ""), listFilesRecursive(root));
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : "主题 CSS 导入失败" };
+  }
+}
+
+// —— 一次性迁移：内联 base64 → 磁盘文件 ——
+
+const THEME_ASSET_DATA_URL_PATTERN = /^data:([^;,]+)((?:;[^,]*)?),([\s\S]*)$/u;
+const THEME_ASSET_DATA_MIME_PATTERN = /^(?:image\/|font\/|application\/(?:font-woff|x-font-woff|vnd\.ms-fontobject))/u;
+
+/** data URL → 字节；不是 base64 图片/字体（旧数据从没产生过别的形态）返回 undefined。 */
+function decodeThemeDataUrl(value: string): Buffer | undefined {
+  const match = THEME_ASSET_DATA_URL_PATTERN.exec(value.trim());
+  if (!match) return undefined;
+  if (!THEME_ASSET_DATA_MIME_PATTERN.test(match[1]!.toLowerCase())) return undefined;
+  if (!(match[2] ?? "").includes("base64")) return undefined;
+  try {
+    const bytes = Buffer.from((match[3] ?? "").trim(), "base64");
+    return bytes.length > 0 ? bytes : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** 写内联资产到某个作用域目录；返回是否**全部**写入并逐个校验成功。 */
+function writeInlineAssets(
+  themesDir: string,
+  scope: string,
+  assets: Record<string, unknown>,
+  report: (label: string) => void
+): boolean {
+  const scopeDir = themeScopeDir(themesDir, scope);
+  if (!scopeDir) {
+    for (const key of Object.keys(assets)) report(key);
+    return false;
+  }
+  let allWritten = true;
+  let scopeBytes = 0;
+  for (const [key, value] of Object.entries(assets)) {
+    const relativePath = themeAssetRelativePath(key);
+    const bytes = typeof value === "string" ? decodeThemeDataUrl(value) : undefined;
+    if (!relativePath || !bytes || !THEME_ASSET_EXTENSIONS.has(extname(relativePath).toLowerCase())) {
+      report(key);
+      allWritten = false;
+      continue;
+    }
+    if (bytes.length > THEME_ASSET_MAX_FILE_BYTES || scopeBytes + bytes.length > THEME_ASSET_MAX_SCOPE_BYTES) {
+      report(key);
+      allWritten = false;
+      continue;
+    }
+    try {
+      const target = join(scopeDir, ...relativePath.split("/"));
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, bytes);
+      const info = statSync(target);
+      if (!info.isFile() || info.size !== bytes.length) throw new Error("落盘校验失败");
+      scopeBytes += bytes.length;
+    } catch {
+      report(key);
+      allWritten = false;
+    }
+  }
+  return allWritten;
+}
+
+export interface ThemeAssetMigrationResult {
+  /** 迁移后的 raw（成功剥离的资产字段已去掉；失败/超限的保持内联原样）。 */
+  raw: unknown;
+  migrated: boolean;
+  migratedAssets: number;
+  /** 没能迁成、仍以 base64 留在配置里的资产键（如实上报，不静默丢）。 */
+  keptInline: string[];
+}
+
+/**
+ * 一次性迁移：把 `raw.appearance` 里的内联 base64 资产写进
+ * `<themesDir>/<scope>/<relativePath>`，**先写文件、逐个校验（尺寸逐个断言）、
+ * 全部成功才从 raw 里剥离**。任何一步失败就完全保留原样（数据不丢，下次启动重试），
+ * 不需要备份文件。
+ *
+ * 作用域归属：主题自带 `assets` → 该主题 id；`customCssAssets`（活动资产）→
+ * CSS 等值命中的主题 id，否则 `current`。
+ */
+export function migrateInlineThemeAssets(raw: unknown, themesDir: string): ThemeAssetMigrationResult {
+  const source = isPlainRecord(raw) ? raw : undefined;
+  const appearance = source && isPlainRecord(source.appearance) ? source.appearance : undefined;
+  if (!appearance) return { raw, migrated: false, migratedAssets: 0, keptInline: [] };
+  const rawThemes = Array.isArray(appearance.customThemes) ? appearance.customThemes : [];
+  const cssAssets = isPlainRecord(appearance.customCssAssets) ? appearance.customCssAssets : undefined;
+  const keptInline: string[] = [];
+  let migratedAssets = 0;
+  let migrated = false;
+
+  const nextThemes = rawThemes.map((item, index) => {
+    if (!isPlainRecord(item) || !isPlainRecord(item.assets)) return item;
+    const scope = themeAssetScopeName(typeof item.id === "string" ? item.id : "") ?? `theme-${index + 1}`;
+    const label = typeof item.name === "string" && item.name ? item.name : scope;
+    const allWritten = writeInlineAssets(themesDir, scope, item.assets, (key) => keptInline.push(`${label}/${key}`));
+    if (!allWritten) return item;
+    migratedAssets += Object.keys(item.assets).length;
+    migrated = true;
+    const { assets: _assets, ...rest } = item;
+    return rest;
+  });
+
+  let nextAppearance: Record<string, unknown> = { ...appearance, customThemes: nextThemes };
+  if (cssAssets) {
+    const activeId = rawThemes
+      .filter(isPlainRecord)
+      .find((theme) => theme.css === appearance.customCss)?.id;
+    const scope = typeof activeId === "string" ? themeAssetScopeName(activeId) ?? THEME_ASSET_CURRENT_SCOPE : THEME_ASSET_CURRENT_SCOPE;
+    const allWritten = writeInlineAssets(themesDir, scope, cssAssets, (key) => keptInline.push(`活动资产/${key}`));
+    if (allWritten) {
+      migratedAssets += Object.keys(cssAssets).length;
+      migrated = true;
+      const { customCssAssets: _cssAssets, ...rest } = nextAppearance;
+      nextAppearance = rest;
+    }
+  }
+
+  if (!migrated) return { raw, migrated: false, migratedAssets: 0, keptInline };
+  return { raw: { ...source, appearance: nextAppearance }, migrated: true, migratedAssets, keptInline };
 }

@@ -15,7 +15,7 @@ import { importExternalAttachment, workspaceRelativeAttachment } from "./attachm
 import type { BrowserDownloadPrefs, BrowserPreviewCommand, BrowserPreviewState, DesktopBootstrap, DesktopSettings, GalleryServiceProbe, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot, SshCommand, SshCommandResult, SshEventData, SshRevealEvent, TerminalCommand, TerminalEventData, ThemeAssetMap, WorkspaceDirectoryListing, WorkspaceEntryResult, WorkspaceFilePreview, WorkspaceFileSearchResult, WorkspaceFileStat, WorkspaceFileWriteResult } from "../shared/protocol.js";
 import { PREVIEW_FILE_SCHEME, parseWorkspaceFilePreviewUrl } from "../shared/protocol.js";
 import { isThemeAssetUrl, parseThemeAssetUrl } from "../shared/theme-assets.js";
-import { serveThemeAsset } from "./theme-assets.js";
+import { serveThemeAsset, migrateInlineThemeAssets, reconcileThemeAssetDirs, themeAssetsDirFor, resolveThemeAgentDir } from "./theme-assets.js";
 import { createWorkspaceDirectory, createWorkspaceFile, deleteWorkspaceEntry, listWorkspaceDirectory, previewFileMimeType, readWorkspaceFilePreview, renameWorkspaceEntry, resolveWorkspaceEntry, safeRelativePath, searchWorkspaceFiles, statWorkspaceFile, writeWorkspaceFile } from "./workspace-preview.js";
 import { pruneDisabledModelRefs } from "./model-catalog.js";
 import { BrowserPreviewController } from "./browser-preview.js";
@@ -253,9 +253,21 @@ function loadSettings(): DesktopSettings {
   // 合并回 raw.appearance，内存形状与旧版完全一致（migrateSettings 零改动）。
   const { raw, assetsSource } = readSettingsFile(app.getPath("userData"));
   if (assetsSource === "inline") persistSettings().markInlineAssets();
-  const migrated = migrateSettings(raw);
+  // 一次性迁移（2026-09-26）：内联 base64 资产落成 `<agentDir>/pidesktop-themes/<scope>/` 下的真文件。
+  // 安全性质是「**先写文件、逐个校验、全成功才从配置里剥离**」——任何一步失败就完全保留原样
+  // （数据不丢，下次启动重试），因此不需要备份文件。
+  const themeAssetMigration = migrateInlineThemeAssets(raw, themeAssetsDirFor(resolveThemeAgentDir()));
+  if (themeAssetMigration.keptInline.length > 0) {
+    const sample = themeAssetMigration.keptInline.slice(0, 3).join("、");
+    console.warn(`有 ${themeAssetMigration.keptInline.length} 个主题资产未落盘（超限或写入失败），仍以 base64 保存在配置里：${sample}`);
+  }
+  const migrated = migrateSettings(themeAssetMigration.raw);
   settingsCache = migrated.settings;
   credentialsCache = loadCredentials();
+  if (themeAssetMigration.migrated) {
+    // 两个文件一起写：settings.json 去掉内联资产、appearance-assets.json 只剩余主题定义。
+    persistSettings().writeNow({ small: true, assets: true });
+  }
   if (migrated.legacyApiKey) {
     if (saveCredential("chatanytime-openai-compatible", migrated.legacyApiKey)) {
       persistSettings().writeNow({ small: true, assets: false });
@@ -370,6 +382,16 @@ function updateSettings(command: RuntimeCommand): void {
     case "hooks.settings":
       settings.hooks = command.hooks;
       break;
+  }
+  // 主题资产目录对账（保存主题 = `current/` 归到 `<id>/`；删主题 / 清空 CSS = 清目录；
+  // 保存主题后取消留下的目录 = 孤儿清理）。渲染端不做任何文件操作，这里以内存里的
+  // 权威 appearance 为准；失败只记警告，不阻断设置写入。
+  if (previous.appearance !== settings.appearance) {
+    try {
+      reconcileThemeAssetDirs(themeAssetsDirFor(resolveThemeAgentDir()), previous.appearance, settings.appearance);
+    } catch (error) {
+      console.warn("主题资产目录对账失败：", error);
+    }
   }
   persistSettings().schedule(diffSettings(previous, settings));
 }
