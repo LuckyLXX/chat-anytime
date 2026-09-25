@@ -310,6 +310,16 @@ const MermaidBlock = memo(function MermaidBlock({ code, language }: { code: stri
 const CODE_HIGHLIGHT_MAX_LINES = 800;
 const CODE_HIGHLIGHT_CACHE_LIMIT = 50;
 
+// ③ 流式期间「还在长大」的代码块不做同步高亮。流式期间 code 每帧都在变，
+//    LRU 的 key 含全文 → 每帧必然 miss，于是每个流式帧都要同步重跑一次
+//    hljs.highlight：实测 50 行 5.5ms / 200 行 12.9ms / 400 行 24.2ms，20fps 下
+//    就是半个核卡在主线程上（真实会话里 assistant 文本 p99 才 3.2K 字符，但
+//    ≥2K 字符的回复占了全部字符的 47%，长代码块正是最需要流畅的场景）。
+//    修法：超过阈值的块流式期间先按纯文本转义渲染，等它定稿（不再长大）
+//    再高亮一次；阈值取得远高于 50 行，短块仍保持实时着色。
+const STREAMING_HIGHLIGHT_MAX_LINES = 150;
+const STREAMING_HIGHLIGHT_MAX_CHARS = 6000;
+
 /**
  * 高亮结果 LRU 缓存（`language + code` → HTML）。
  * CodeBlock 自身已 memo，但父级内容变化（编辑器保存后刷新、切 tab 再切回）会让
@@ -321,10 +331,12 @@ function escapeCodeHtml(code: string): string {
   return code.replace(/[&<>"']/gu, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character] ?? character);
 }
 
-function highlightCode(code: string, language: string): string {
+function highlightCode(code: string, language: string, streaming = false): string {
   const lineCount = code.split("\n").length;
   // 无语言 / 语言未知 / 超长：纯文本转义输出（保留 language-unknown 的工具条显示）。
   if (!language || !hljs.getLanguage(language) || lineCount > CODE_HIGHLIGHT_MAX_LINES) return escapeCodeHtml(code);
+  // 流式中的大块：不进 LRU（key 含全文，进了也是纯污染），直接纯文本。
+  if (streaming && (lineCount > STREAMING_HIGHLIGHT_MAX_LINES || code.length > STREAMING_HIGHLIGHT_MAX_CHARS)) return escapeCodeHtml(code);
   const key = `${language}\u0000${code}`;
   const cached = highlightCache.get(key);
   if (cached !== undefined) {
@@ -342,10 +354,10 @@ function highlightCode(code: string, language: string): string {
   return value;
 }
 
-export const CodeBlock = memo(function CodeBlock({ language, code }: { language: string; code: string }): ReactNode {
+export const CodeBlock = memo(function CodeBlock({ language, code, streaming = false }: { language: string; code: string; streaming?: boolean }): ReactNode {
   // Memoize so streaming code blocks only re-highlight when the code string
   // actually changes, not on every parent re-render.
-  const highlighted = useMemo(() => highlightCode(code, language), [code, language]);
+  const highlighted = useMemo(() => highlightCode(code, language, streaming), [code, language, streaming]);
   return (
     <div className="code-block">
       <div className="code-toolbar"><span>{language || "text"}</span><div className="code-actions"><CopyButton text={code} /></div></div>
@@ -612,7 +624,7 @@ const richUrlTransform: UrlTransform = (url, key) => {
   return defaultUrlTransform(url);
 };
 
-function markdownComponents(artifactIndex: { current: number }, artifactPrefix: string, onOpenArtifact: (artifact: Artifact) => void, dark: boolean, htmlBubble = false, onHtmlAction?: (text: string) => void, workspace?: string, options: { markdownPath?: string; headings?: MarkdownHeading[]; headingByLine?: { current?: Map<number, MarkdownHeading> } } = {}): Components {
+function markdownComponents(artifactIndex: { current: number }, artifactPrefix: string, onOpenArtifact: (artifact: Artifact) => void, dark: boolean, htmlBubble = false, onHtmlAction?: (text: string) => void, workspace?: string, options: { markdownPath?: string; headings?: MarkdownHeading[]; headingByLine?: { current?: Map<number, MarkdownHeading> }; liveTail?: boolean } = {}): Components {
   const { markdownPath, headings, headingByLine } = options;
   // 标题 id 按「段内行号 → 全文大纲条目」的映射注入，不用「按出现顺序计数」：
   // markdownComponents 被 useMemo 缓存，闭包里的计数器会跨渲染持续累加，导致
@@ -662,7 +674,7 @@ function markdownComponents(artifactIndex: { current: number }, artifactPrefix: 
       const language = /language-([\w-]+)/u.exec(className ?? "")?.[1]?.toLowerCase() ?? "";
       const code = String(codeChildren).replace(/\n$/u, "");
       if (!className && !code.includes("\n")) return <code>{codeChildren}</code>;
-      return <CodeBlock language={language} code={code} />;
+      return <CodeBlock language={language} code={code} streaming={options.liveTail === true} />;
     },
     a({ href, children: linkChildren }) {
       return <a href={href} target="_blank" rel="noreferrer">{linkChildren}</a>;
@@ -870,7 +882,7 @@ const DynamicHtmlBubble = memo(function DynamicHtmlBubble({ content, closed, str
   );
 });
 
-const MarkdownSurface = memo(function MarkdownSurface({ content, htmlBubble, artifactPrefix, onOpenArtifact, onHtmlAction, workspace, markdownPath, headings }: { content: string; htmlBubble?: boolean; artifactPrefix: string; onOpenArtifact(artifact: Artifact): void; onHtmlAction?: (text: string) => void; workspace?: string; markdownPath?: string; headings?: MarkdownHeading[] }): ReactNode {
+const MarkdownSurface = memo(function MarkdownSurface({ content, htmlBubble, artifactPrefix, onOpenArtifact, onHtmlAction, workspace, markdownPath, headings, liveTail = false }: { content: string; htmlBubble?: boolean; artifactPrefix: string; onOpenArtifact(artifact: Artifact): void; onHtmlAction?: (text: string) => void; workspace?: string; markdownPath?: string; headings?: MarkdownHeading[]; liveTail?: boolean }): ReactNode {
   const dark = useThemeTokens().dark;
   const artifactIndex = useRef(0);
   // 段内行号 → 全文大纲条目。放在 ref 里并每次渲染刷新：components 被 useMemo 缓存，
@@ -879,8 +891,8 @@ const MarkdownSurface = memo(function MarkdownSurface({ content, htmlBubble, art
   // MarkdownSurface 已 memo，函数体只在 content/props 变化时执行，直接算即可。
   headingByLine.current = headings ? alignSegmentHeadings(headings, content) : undefined;
   const components = useMemo(
-    () => markdownComponents(artifactIndex, artifactPrefix, onOpenArtifact, dark, htmlBubble, onHtmlAction, workspace, { markdownPath, headings, headingByLine }),
-    [artifactPrefix, dark, headings, htmlBubble, markdownPath, onHtmlAction, onOpenArtifact, workspace]
+    () => markdownComponents(artifactIndex, artifactPrefix, onOpenArtifact, dark, htmlBubble, onHtmlAction, workspace, { markdownPath, headings, headingByLine, liveTail }),
+    [artifactPrefix, dark, headings, htmlBubble, markdownPath, onHtmlAction, onOpenArtifact, workspace, liveTail]
   );
   const scopeClass = htmlBubble ? htmlBubbleScopeClass(artifactPrefix) : "";
   const scopeSelector = scopeClass ? `.${scopeClass}` : "";
@@ -915,7 +927,7 @@ function compressStreamingBubbleHtml(content: string): string {
   return content.replace(/\n[ \t]*\n+/gu, "\n");
 }
 
-function renderSegment(segment: RichContentSegment, index: number, artifactPrefix: string, streaming: boolean, onOpenArtifact: (artifact: Artifact) => void, onHtmlAction?: (text: string) => void, workspace?: string, markdownPath?: string, headings?: MarkdownHeading[]): ReactNode {
+function renderSegment(segment: RichContentSegment, index: number, artifactPrefix: string, streaming: boolean, onOpenArtifact: (artifact: Artifact) => void, onHtmlAction?: (text: string) => void, workspace?: string, markdownPath?: string, headings?: MarkdownHeading[], liveTail = false): ReactNode {
   if (segment.type === "mermaid") return <MermaidBlock key={`mermaid-${index}`} code={segment.content} language={segment.language} />;
   if (segment.type === "artifact") {
     const artifact: Artifact = { ...segment.artifact, id: `${artifactPrefix}-artifact-${index}` };
@@ -929,11 +941,11 @@ function renderSegment(segment: RichContentSegment, index: number, artifactPrefi
     // streaming-identity fix), and would render half-parsed intermediate HTML.
     // The interactive bubble mounts once the closing tag arrives.
     if (segment.closed === false) {
-      return <MarkdownSurface key={`assistant-html-${index}`} content={compressStreamingBubbleHtml(segment.content)} artifactPrefix={`${artifactPrefix}-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} workspace={workspace} markdownPath={markdownPath} />;
+      return <MarkdownSurface key={`assistant-html-${index}`} content={compressStreamingBubbleHtml(segment.content)} artifactPrefix={`${artifactPrefix}-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} workspace={workspace} markdownPath={markdownPath} liveTail={liveTail} />;
     }
     return <DynamicHtmlBubble key={`assistant-html-${index}`} content={segment.content} closed streaming={streaming} artifactPrefix={`${artifactPrefix}-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} workspace={workspace} markdownPath={markdownPath} />;
   }
-  return <MarkdownSurface key={`${segment.type}-${index}`} content={segment.content} htmlBubble={segment.type === "html"} artifactPrefix={`${artifactPrefix}-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} workspace={workspace} markdownPath={markdownPath} headings={headings} />;
+  return <MarkdownSurface key={`${segment.type}-${index}`} content={segment.content} htmlBubble={segment.type === "html"} artifactPrefix={`${artifactPrefix}-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} workspace={workspace} markdownPath={markdownPath} headings={headings} liveTail={liveTail} />;
 }
 
 /**
@@ -958,7 +970,7 @@ export const RichContent = memo(function RichContent({ children, streaming, onOp
   const segments = useMemo(() => parseRichContent(children, { isStreaming: Boolean(streaming) }), [children, streaming]);
   return (
     <div className={`rich-content${streaming ? " is-streaming" : ""}`}>
-      {segments.map((segment, index) => renderSegment(segment, index, artifactPrefix, Boolean(streaming), onOpenArtifact, onHtmlAction, workspace, markdownPath))}
+      {segments.map((segment, index) => renderSegment(segment, index, artifactPrefix, Boolean(streaming), onOpenArtifact, onHtmlAction, workspace, markdownPath, undefined, Boolean(streaming) && index === segments.length - 1))}
     </div>
   );
 });
