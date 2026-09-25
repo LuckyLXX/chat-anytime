@@ -14,6 +14,8 @@ import { togglePinnedSessionPath } from "./session-scope.js";
 import { importExternalAttachment, workspaceRelativeAttachment } from "./attachments.js";
 import type { BrowserDownloadPrefs, BrowserPreviewCommand, BrowserPreviewState, DesktopBootstrap, DesktopSettings, GalleryServiceProbe, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot, SshCommand, SshCommandResult, SshEventData, SshRevealEvent, TerminalCommand, TerminalEventData, ThemeAssetMap, WorkspaceDirectoryListing, WorkspaceEntryResult, WorkspaceFilePreview, WorkspaceFileSearchResult, WorkspaceFileStat, WorkspaceFileWriteResult } from "../shared/protocol.js";
 import { PREVIEW_FILE_SCHEME, parseWorkspaceFilePreviewUrl } from "../shared/protocol.js";
+import { isThemeAssetUrl, parseThemeAssetUrl } from "../shared/theme-assets.js";
+import { serveThemeAsset } from "./theme-assets.js";
 import { createWorkspaceDirectory, createWorkspaceFile, deleteWorkspaceEntry, listWorkspaceDirectory, previewFileMimeType, readWorkspaceFilePreview, renameWorkspaceEntry, resolveWorkspaceEntry, safeRelativePath, searchWorkspaceFiles, statWorkspaceFile, writeWorkspaceFile } from "./workspace-preview.js";
 import { pruneDisabledModelRefs } from "./model-catalog.js";
 import { BrowserPreviewController } from "./browser-preview.js";
@@ -145,8 +147,16 @@ protocol.registerSchemesAsPrivileged([
   { scheme: PREVIEW_FILE_SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, bypassCSP: true } }
 ]);
 
+/**
+ * 工作区文件与主题资产两条通路共用 `pidesktop-file://`，靠 host 区分：
+ * `theme` = 主题资产（图片 / 字体，落盘在 agentDir），`preview` = 工作区文件。
+ */
 function registerPreviewFileProtocol(): void {
   protocol.handle(PREVIEW_FILE_SCHEME, async (request) => {
+    const themeAsset = parseThemeAssetUrl(request.url);
+    if (themeAsset) return serveThemeAsset(themeAsset);
+    // host 是 theme 但解析不通过 = 穿越/绝对路径/非法编码：明确 403，不落回预览分支。
+    if (isThemeAssetUrl(request.url)) return new Response("主题资产地址非法", { status: 403 });
     const parsed = parseWorkspaceFilePreviewUrl(request.url);
     if (!parsed) return new Response("预览地址无效", { status: 400 });
     try {
