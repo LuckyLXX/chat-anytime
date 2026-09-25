@@ -53,6 +53,7 @@ import type {
   SshHostSummary
 } from "../../shared/protocol";
 import type { ReplyChangedFile } from "./lib/changed-files";
+import { lastCompletedChangedExecutionId, lastReviewExecutionId } from "./lib/execution-select";
 import { ArtifactPreview, type PreviewEditorState, type PreviewTab, type PreviewTarget } from "./components/ArtifactPreview";
 import { ModelSelect } from "./components/ModelSelect";
 import { AgentSettings } from "./AgentSettings";
@@ -310,8 +311,8 @@ function SettingsDialog({ settings, models, providers, resources, workspaceOpen,
 export function App(): ReactNode {
   // 细粒度订阅：流式期间 store 每 50ms 收到一帧新 snapshot，全量解构会让 App
   // 整棵子树（侧栏、标题栏、预览面板）每帧重渲染。这里只订阅真正被消费的
-  // 字段；messages/executions 整体不进入 App（消息流由 ConversationPane 自行
-  // 订阅），App 仅取派生原始值（布尔/数字）或引用稳定的数组。
+  // 字段；messages 整体不进入 App（消息流由 ConversationPane 自行订阅），
+  // executions 也只取两个派生原始值（见 execution-select.ts）。
   const ready = useDesktopStore((state) => state.ready);
   const models = useDesktopStore((state) => state.models);
   const providers = useDesktopStore((state) => state.providers);
@@ -324,8 +325,8 @@ export function App(): ReactNode {
   const automationRun = useDesktopStore((state) => state.automationRun);
   const initialize = useDesktopStore((state) => state.initialize);
   const clearError = useDesktopStore((state) => state.clearError);
-  // snapshot 字段级订阅。sessions/recentWorkspaces/executions 在 store 合并层
-  // 做了身份保留（内容不变则复用旧引用），流式帧不会触发这些选择器。
+  // snapshot 字段级订阅。sessions/recentWorkspaces 在 store 合并层做了身份保留
+  // （内容不变则复用旧引用），流式帧不会触发这些选择器。
   const activeSessionId = useDesktopStore((state) => state.snapshot.sessionId);
   const activeWorkspace = useDesktopStore((state) => state.snapshot.workspace);
   const sessionSummaries = useDesktopStore((state) => state.snapshot.sessions);
@@ -335,7 +336,12 @@ export function App(): ReactNode {
   const gitBranch = useDesktopStore((state) => state.snapshot.gitBranch);
   const runtimeBusy = useDesktopStore((state) => state.snapshot.busy);
   const runtimeStatus = useDesktopStore((state) => state.snapshot.status);
-  const executions = useDesktopStore((state) => state.snapshot.executions);
+  // executions 只以**派生原始值**的形式进入 App（execution-select.ts）：工具
+  // output 逐帧增长时数组每帧都是新引用，订阅整数组会让 App 以 ~20 fps 重建
+  // 侧栏/顶栏/预览壳——而这两个 id 在 output 增长期间不变，选择器因此命中早退。
+  // 需要整数组的少数回调（打开最新变更、编辑器冲突合并）在回调体内现取。
+  const lastReviewId = useDesktopStore((state) => lastReviewExecutionId(state.snapshot.executions));
+  const lastChangedExecutionId = useDesktopStore((state) => lastCompletedChangedExecutionId(state.snapshot.executions));
   // 派生布尔选择器：返回原始值，Object.is 比较，仅状态真正翻转时重渲染。
   // 主题根属性（data-ui-*）反映焦点格（分屏下即激活会话）的状态。
   const isGenerating = useDesktopStore((state) => Boolean(state.snapshot.busy && state.snapshot.turnTiming && state.snapshot.turnTiming.completedAt === undefined));
@@ -1326,10 +1332,15 @@ export function App(): ReactNode {
     openPreviewTarget({ type: "diff", title: path?.split("/").at(-1) ?? `${toolLabel(execution.name)}变更`, path, patch: execution.patch });
   }, []);
 
-  const latestReviewExecution = [...executions].reverse().find((execution) => Boolean(execution.patch));
   const openLatestReview = useCallback((): void => {
-    if (latestReviewExecution) openDiffPreview(latestReviewExecution);
-  }, [latestReviewExecution, openDiffPreview]);
+    const executions = useDesktopStore.getState().snapshot.executions;
+    for (let index = executions.length - 1; index >= 0; index -= 1) {
+      const execution = executions[index];
+      if (!execution?.patch) continue;
+      openDiffPreview(execution);
+      return;
+    }
+  }, [openDiffPreview]);
 
   /** 分屏格子的渲染器：头部信息来自会话列表摘要，交互回调全部绑定本格 sessionId。 */
   const renderSplitLeaf = useCallback((leafSessionId: string): ReactNode => {
@@ -1423,6 +1434,7 @@ export function App(): ReactNode {
   function handleEditorResolveConflict(tabId: string, choice: "keep-local" | "load-remote"): void {
     const tab = previewRef.current?.tabs.find((t) => t.id === tabId);
     const relativePath = tab?.target.type === "file" ? tab.target.file.relativePath : undefined;
+    const executions = useDesktopStore.getState().snapshot.executions;
     const exec = relativePath
       ? [...executions].reverse().find((e) => e.status === "completed" && e.changedFile && e.changedFile.relativePath.toLowerCase() === relativePath.toLowerCase())
       : undefined;
@@ -1437,6 +1449,7 @@ export function App(): ReactNode {
   // 有未保存改动→置冲突提示，等用户在编辑器内选择保留本地或加载 AI 版本。
   useEffect(() => {
     if (!preview) return;
+    const executions = useDesktopStore.getState().snapshot.executions;
     for (const tab of preview.tabs) {
       if (tab.target.type !== "file" || tab.target.file.kind !== "markdown") continue;
       const relativePath = tab.target.file.relativePath.toLowerCase();
@@ -1450,7 +1463,9 @@ export function App(): ReactNode {
         void reloadEditorFromDisk(tab.id, tab.target.file.relativePath);
       }
     }
-  }, [executions, preview]);
+    // 依赖「有新完成的文件改动」这一派生原始值（而不是 executions 数组）：
+    // output 逐帧增长不再重跑 effect，真正新增改动时才跑（preview 变化仍需同步）。
+  }, [lastChangedExecutionId, preview]);
 
   // AI 浏览器自动化与预览面板同步：created 把新标签加进面板并激活；
   // automation-started 展开面板并切到 AI 正在操作的标签（面板未打开时
@@ -1699,7 +1714,7 @@ export function App(): ReactNode {
           {previewVisible && preview && <PreviewDivider split={previewSplit} dragging={previewDragging} onStart={startPreviewResize} onMove={movePreviewResize} onEnd={endPreviewResize} onCancel={cancelPreviewResize} onKeyDown={resizePreviewWithKeyboard} onReset={() => setPreviewSplit(50)} />}
 
           {previewVisible && <ExitWrap exiting={previewPresence.exiting}>{preview && preview.tabs.length > 0 ? (
-            <ArtifactPreview tabs={preview.tabs} activeTabId={preview.activeTabId} browserSuspended={previewDragging || settingsOpen || Boolean(permission) || Boolean(messageActionError) || previewAddMenuOpen || previewPresence.exiting} fullscreen={previewFullscreen} onFullscreenChange={setPreviewFullscreen} onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddTerminal={openTerminalPreview} onAddSsh={openSshPanel} onSshConnect={openSshTerminalHost} onAddFile={() => void openManualFilePreview()} onAddReview={openLatestReview} onAddMenuOpenChange={setPreviewAddMenuOpen} reviewAvailable={Boolean(latestReviewExecution)} workspace={activeWorkspace} activeEditorState={activePreviewTab && ((activePreviewTab.target.type === "file" && activePreviewTab.target.file.kind === "markdown") || activePreviewTab.target.type === "memory") ? getEditorState(activePreviewTab.id) : undefined} onActiveEditorChange={(patch) => { if (activePreviewTab) patchEditorState(activePreviewTab.id, patch); }} onActiveEditorContentChange={handleActiveEditorContentChange} onActiveEditorSaved={handleActiveEditorSaved} onActiveEditorStatusChange={handleActiveEditorStatusChange} onActiveEditorSaveError={(message) => setMessageActionError(`保存 ${activePreviewTab?.target.type === "file" ? activePreviewTab.target.file.name : activePreviewTab?.target.type === "memory" ? "记忆主题" : "Markdown"} 失败：${message}`)} onActiveEditorResolveConflict={(choice) => { if (activePreviewTab) handleEditorResolveConflict(activePreviewTab.id, choice); }} onToggleEditing={() => { if (activePreviewTab) patchEditorState(activePreviewTab.id, { editing: !getEditorState(activePreviewTab.id).editing }); }} onBrowserStateChange={handleBrowserStateChange} onBrowserPickSend={sendPickedElement} onPublishFile={(relativePath, name) => openGalleryDraft({ path: relativePath, title: name, kind: "file" })} />
+            <ArtifactPreview tabs={preview.tabs} activeTabId={preview.activeTabId} browserSuspended={previewDragging || settingsOpen || Boolean(permission) || Boolean(messageActionError) || previewAddMenuOpen || previewPresence.exiting} fullscreen={previewFullscreen} onFullscreenChange={setPreviewFullscreen} onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddTerminal={openTerminalPreview} onAddSsh={openSshPanel} onSshConnect={openSshTerminalHost} onAddFile={() => void openManualFilePreview()} onAddReview={openLatestReview} onAddMenuOpenChange={setPreviewAddMenuOpen} reviewAvailable={Boolean(lastReviewId)} workspace={activeWorkspace} activeEditorState={activePreviewTab && ((activePreviewTab.target.type === "file" && activePreviewTab.target.file.kind === "markdown") || activePreviewTab.target.type === "memory") ? getEditorState(activePreviewTab.id) : undefined} onActiveEditorChange={(patch) => { if (activePreviewTab) patchEditorState(activePreviewTab.id, patch); }} onActiveEditorContentChange={handleActiveEditorContentChange} onActiveEditorSaved={handleActiveEditorSaved} onActiveEditorStatusChange={handleActiveEditorStatusChange} onActiveEditorSaveError={(message) => setMessageActionError(`保存 ${activePreviewTab?.target.type === "file" ? activePreviewTab.target.file.name : activePreviewTab?.target.type === "memory" ? "记忆主题" : "Markdown"} 失败：${message}`)} onActiveEditorResolveConflict={(choice) => { if (activePreviewTab) handleEditorResolveConflict(activePreviewTab.id, choice); }} onToggleEditing={() => { if (activePreviewTab) patchEditorState(activePreviewTab.id, { editing: !getEditorState(activePreviewTab.id).editing }); }} onBrowserStateChange={handleBrowserStateChange} onBrowserPickSend={sendPickedElement} onPublishFile={(relativePath, name) => openGalleryDraft({ path: relativePath, title: name, kind: "file" })} />
           ) : (
             <ArtifactPreview key="empty-state" tabs={[]} activeTabId="" onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddTerminal={openTerminalPreview} onAddSsh={openSshPanel} onSshConnect={openSshTerminalHost} onAddFile={() => void openManualFilePreview()} onBrowserPickSend={sendPickedElement} />
           )}</ExitWrap>}
