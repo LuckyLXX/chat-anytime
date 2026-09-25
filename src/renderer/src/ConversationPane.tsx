@@ -170,7 +170,12 @@ function useElapsedNow(active: boolean): number {
   return now;
 }
 
-function TimingMeta({ timing, now }: { timing: TurnTiming; now: number }): ReactNode {
+export function TimingMeta({ timing }: { timing: TurnTiming }): ReactNode {
+  // 计时下沉（2026-09-25）：时钟挂在本组件，而不是整格 ConversationPane。
+  // 原先 Pane 持有 now，导致流式期间整格每 100ms 重渲染一次（与 50ms 的流式帧
+  // 叠成 ~30 次/秒）；现在只有「还在计时」的这几个叶子组件自己走时钟。
+  // completedAt 已存在时 active=false，时钟自动停摆。
+  const now = useElapsedNow(timing.completedAt === undefined);
   const completedAt = timing.completedAt ?? now;
   return (
     <div className="message-timing" aria-label="回答耗时与总耗时">
@@ -180,14 +185,20 @@ function TimingMeta({ timing, now }: { timing: TurnTiming; now: number }): React
   );
 }
 
-function PendingResponse({ label, timing, now }: { label: string; timing?: TurnTiming; now: number }): ReactNode {
+/** 分屏头部状态行里的「已耗时」──同样自己持钟，不把整格 Pane 卷进 10fps 重渲染。 */
+function ElapsedText({ startedAt, active }: { startedAt: number; active: boolean }): ReactNode {
+  const now = useElapsedNow(active);
+  return <>{formatDuration(startedAt, now)}</>;
+}
+
+function PendingResponse({ label, timing }: { label: string; timing?: TurnTiming }): ReactNode {
   return (
     <article className="message message-assistant pending-response" data-role="assistant">
       <div className="message-avatar pi-avatar"><Bot size={17} /></div>
       <div className="message-body message-bubble pending-response-body">
         <div className="response-progress"><LoaderCircle size={14} className="spinning" /><span>{label}</span></div>
       </div>
-      {timing && <TimingMeta timing={timing} now={now} />}
+      {timing && <TimingMeta timing={timing} />}
     </article>
   );
 }
@@ -387,19 +398,38 @@ function EditChangeSection({ preview, diffs, patch }: { preview: EditCallPreview
   );
 }
 
+/** 思考块溢出测量节流窗口（见 ThinkingBlock 注释）。 */
+const THINKING_MEASURE_INTERVAL_MS = 200;
+
 /**
  * 思考内容块：折叠时限制在固定高度内滚动输出，超出限高才出现展开按钮；
  * 点击展开后展示全文，再点收起恢复限高。流式输出期间文本变化会重新测量。
  */
-function ThinkingBlock({ text, label }: { text: string; label: string }): ReactNode {
+export function ThinkingBlock({ text, label }: { text: string; label: string }): ReactNode {
   const [expanded, setExpanded] = useState(false);
   const [overflowing, setOverflowing] = useState(false);
   const bodyRef = useRef<HTMLParagraphElement | null>(null);
+  const lastMeasuredAtRef = useRef(0);
 
+  // 思考流式期间 text 每帧都在变，而 scrollHeight 是同步布局读取：原先每次
+  // text 变化都量一次 = 每个流式帧强制 reflow 一次。改为「前缘节流 + 尾部补测」：
+  // 窗口内先跳过，但安排一次尾部测量，保证最终状态不会停在中间态。
   useLayoutEffect(() => {
     const el = bodyRef.current;
     if (!el || expanded) return; // 展开时保持按钮状态，避免测量全高后误判为不溢出
-    setOverflowing(el.scrollHeight > el.clientHeight + 1);
+    const measure = (): void => {
+      const node = bodyRef.current;
+      if (!node) return;
+      lastMeasuredAtRef.current = Date.now();
+      setOverflowing(node.scrollHeight > node.clientHeight + 1);
+    };
+    const sinceLast = Date.now() - lastMeasuredAtRef.current;
+    if (sinceLast >= THINKING_MEASURE_INTERVAL_MS) {
+      measure();
+      return;
+    }
+    const timer = window.setTimeout(measure, THINKING_MEASURE_INTERVAL_MS - sinceLast);
+    return () => window.clearTimeout(timer);
   }, [text, expanded]);
 
   return (
@@ -425,12 +455,14 @@ interface ActionTimelineProps {
   onHtmlAction(text: string): void;
   onOpenTranscript?(delegation: DelegationProgress): void;
   timing?: TurnTiming;
-  now: number;
   workspace?: string;
 }
 
-function ActionTimeline({ message, executions, turnActive, showThinking, thinkingLabel, onOpenArtifact, onHtmlAction, timing, now, onOpenTranscript, workspace }: ActionTimelineProps): ReactNode {
+function ActionTimeline({ message, executions, turnActive, showThinking, thinkingLabel, onOpenArtifact, onHtmlAction, timing, onOpenTranscript, workspace }: ActionTimelineProps): ReactNode {
   const segments = actionTimelineSegments(message, showThinking);
+  // 时钟必须在本组件顶层（早期 return 之前）取；active 用与下方 processActive
+  // 同一表达式，只多不少，保证需要计时的分支一定有活时钟。
+  const now = useElapsedNow(turnActive || Boolean(message.streaming));
   const lastActionIndex = segments.reduce((index, segment, currentIndex) => segment.type === "thinking" || segment.type === "tool-call" ? currentIndex : index, -1);
   if (lastActionIndex < 0) return segments[0]?.type === "text" ? <RichContent streaming={message.streaming} artifactPrefix={message.id} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} workspace={workspace}>{segments[0].text}</RichContent> : null;
   const process = segments.slice(0, lastActionIndex + 1);
@@ -471,7 +503,8 @@ function ActionTimeline({ message, executions, turnActive, showThinking, thinkin
   );
 }
 
-function CompactTimingMeta({ timing, now }: { timing: TurnTiming; now: number }): ReactNode {
+function CompactTimingMeta({ timing }: { timing: TurnTiming }): ReactNode {
+  const now = useElapsedNow(timing.completedAt === undefined);
   return (
     <div className="message-timing" aria-label="压缩耗时">
       <span>压缩耗时 {formatDuration(timing.startedAt, timing.completedAt ?? now)}</span>
@@ -533,7 +566,7 @@ function ChangedFilesPanel({ files, workspace, onOpenFile, onOpenDiff, onRollbac
 // Memoized so an unchanged message bubble (stable ChatMessage reference from
 // the store's uuid-based reuse) is skipped during high-frequency streaming
 // updates that only mutate other bubbles.
-const MessageView = memo(function MessageView({ message, executions, workspace, onOpenArtifact, onOpenFile, onOpenDiff, onHtmlAction, onCopy, onEdit, onRegenerate, onShare, onRollback, rollbackStates, showThinking = true, hiddenThinkingLabel, busy = false, turnActive = false, timing, now = Date.now(), turnKey, onOpenTranscript }: { message: ChatMessage; executions: ToolExecution[]; workspace?: string; onOpenArtifact(artifact: Artifact): void; onOpenFile(relativePath: string, workspace?: string): void; onOpenDiff(execution: ToolExecution): void; onHtmlAction(text: string): void; onCopy(message: ChatMessage): void; onEdit(message: ChatMessage): void; onRegenerate(message: ChatMessage): void; onShare(message: ChatMessage, target: HTMLElement): Promise<void>; onRollback?(file: ReplyChangedFile): void; rollbackStates?: ReadonlyMap<string, "restored" | "deleted">; showThinking?: boolean; hiddenThinkingLabel?: string; busy?: boolean; turnActive?: boolean; timing?: TurnTiming; now?: number; turnKey?: string; onOpenTranscript?(delegation: DelegationProgress): void }): ReactNode {
+const MessageView = memo(function MessageView({ message, executions, workspace, onOpenArtifact, onOpenFile, onOpenDiff, onHtmlAction, onCopy, onEdit, onRegenerate, onShare, onRollback, rollbackStates, showThinking = true, hiddenThinkingLabel, busy = false, turnActive = false, timing, turnKey, onOpenTranscript }: { message: ChatMessage; executions: ToolExecution[]; workspace?: string; onOpenArtifact(artifact: Artifact): void; onOpenFile(relativePath: string, workspace?: string): void; onOpenDiff(execution: ToolExecution): void; onHtmlAction(text: string): void; onCopy(message: ChatMessage): void; onEdit(message: ChatMessage): void; onRegenerate(message: ChatMessage): void; onShare(message: ChatMessage, target: HTMLElement): Promise<void>; onRollback?(file: ReplyChangedFile): void; rollbackStates?: ReadonlyMap<string, "restored" | "deleted">; showThinking?: boolean; hiddenThinkingLabel?: string; busy?: boolean; turnActive?: boolean; timing?: TurnTiming; turnKey?: string; onOpenTranscript?(delegation: DelegationProgress): void }): ReactNode {
   const text = messageText(message);
   const shareTargetRef = useRef<HTMLDivElement | null>(null);
   const [sharing, setSharing] = useState(false);
@@ -588,14 +621,14 @@ const MessageView = memo(function MessageView({ message, executions, workspace, 
       <div className="message-avatar pi-avatar"><Bot size={17} /></div>
       <div className="message-body message-bubble">
         <div className="assistant-share-content" ref={shareTargetRef}>
-          <ActionTimeline message={message} executions={executions} turnActive={turnActive} showThinking={showThinking} thinkingLabel={hiddenThinkingLabel} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} timing={timing} now={now} onOpenTranscript={onOpenTranscript} workspace={workspace} />
+          <ActionTimeline message={message} executions={executions} turnActive={turnActive} showThinking={showThinking} thinkingLabel={hiddenThinkingLabel} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} timing={timing} onOpenTranscript={onOpenTranscript} workspace={workspace} />
           {message.error && <p className="inline-error"><AlertCircle size={15} />{message.error}</p>}
           {message.aborted && <p className="inline-abort"><CircleStop size={14} />已停止生成</p>}
         </div>
         {changedFiles.length > 0 && <ChangedFilesPanel files={changedFiles} workspace={workspace} onOpenFile={onOpenFile} onOpenDiff={onOpenDiff} onRollback={onRollback} rollbackStates={rollbackStates} rollbackDisabled={busy} />}
         {!isControlMessage && !message.streaming && !busy && <div className="message-actions"><button type="button" data-control="regenerate" title="重新生成" aria-label="重新生成回复" onClick={() => onRegenerate(message)}><RefreshCw size={13} /></button><button type="button" data-control="copy" title="复制" aria-label="复制 AI 回复" onClick={() => onCopy(message)}><Copy size={13} /></button>{hasShareableContent && <button type="button" data-control="share" title={sharing ? "正在生成图片" : shared ? "已复制图片" : "分享图片"} aria-label={sharing ? "正在生成回复图片" : shared ? "回复图片已复制" : "分享 AI 回复图片"} disabled={sharing} onClick={() => void share()}>{sharing ? <LoaderCircle size={13} className="spinning" /> : shared ? <Check size={13} /> : <Share2 size={13} />}</button>}</div>}
       </div>
-      {timing && (isControlMessage ? <CompactTimingMeta timing={timing} now={now} /> : <TimingMeta timing={timing} now={now} />)}
+      {timing && (isControlMessage ? <CompactTimingMeta timing={timing} /> : <TimingMeta timing={timing} />)}
     </article>
   );
 });
@@ -794,7 +827,6 @@ export const ConversationPane = memo(function ConversationPane({
   const localTurnPending = localTiming !== undefined && (data.turnTiming === undefined || data.turnTiming.startedAt < localTiming.startedAt);
   const activeTurnTiming = localTurnPending ? localTiming : data.turnTiming;
   const isGenerating = localTurnPending || Boolean(data.busy && data.turnTiming && data.turnTiming.completedAt === undefined);
-  const now = useElapsedNow(isGenerating);
   // The avatar'd pending bubble shows from the moment a turn starts (including
   // the local-pending window before the snapshot round-trips) until this
   // turn's assistant reply actually renders; afterwards the plain inline
@@ -1620,8 +1652,6 @@ export const ConversationPane = memo(function ConversationPane({
     if (path) await window.piDesktop.send({ type: "workspace.open", path });
   }
 
-  const headerTiming = isGenerating && activeTurnTiming ? formatDuration(activeTurnTiming.startedAt, now) : undefined;
-
   return (
     <section className={`conversation-pane${compact ? " pane-compact" : ""}`} data-pane="conversation" data-pane-active={focused || undefined} onPointerDownCapture={onFocus ? (event) => {
       // 关闭按钮点击不应先聚焦激活该格：关闭动作与「点击即聚焦」解耦。
@@ -1639,7 +1669,7 @@ export const ConversationPane = memo(function ConversationPane({
                 ? <i className={`session-status-dot ${runStatus}`} title={sessionRunStatusLabels[runStatus]} aria-label={sessionRunStatusLabels[runStatus]!} />
                 : <MessageCircle size={13} className="split-pane-status-icon" />}
             <strong>{title ?? "会话"}</strong>
-            {data.busy && <small className="split-pane-status-text">{data.status}{headerTiming ? ` · ${headerTiming}` : ""}</small>}
+            {data.busy && <small className="split-pane-status-text">{data.status}{isGenerating && activeTurnTiming ? <>{" · "}<ElapsedText startedAt={activeTurnTiming.startedAt} active /></> : ""}</small>}
           </span>
           <span className="split-pane-actions">
             <button type="button" data-control="pane-maximize" title={maximized ? "还原分屏" : "最大化此会话"} aria-label={maximized ? "还原分屏" : "最大化此会话"} disabled={!onToggleMaximize} onClick={onToggleMaximize}>{maximized ? <CodeXml size={13} /> : <Layers size={13} />}</button>
@@ -1661,9 +1691,9 @@ export const ConversationPane = memo(function ConversationPane({
             const timing = showTurnTimingOnLatest && index === latestAssistantMessageIndex && message.role === "assistant" ? data.turnTiming : undefined;
             const turnActive = data.busy && index === latestAssistantMessageIndex && message.role === "assistant";
             const turnKey = turnStartKeys.has(message.uuid ?? message.id) ? (message.uuid ?? message.id) : undefined;
-            return <MessageView key={message.uuid ?? message.id} message={message} executions={executionsForMessages[index] ?? EMPTY_EXECUTIONS} workspace={data.workspace} onOpenArtifact={onOpenArtifact} onOpenFile={onOpenFile} onOpenDiff={onOpenDiff} onHtmlAction={handleHtmlAction} onCopy={copyMessage} onEdit={editMessage} onRegenerate={regenerateMessage} onShare={shareMessage} onRollback={onRollback} rollbackStates={rollbackStates} showThinking={showThinking} busy={data.busy} turnActive={turnActive} timing={timing} now={timing ? now : undefined} turnKey={turnKey} onOpenTranscript={onOpenTranscript} />;
+            return <MessageView key={message.uuid ?? message.id} message={message} executions={executionsForMessages[index] ?? EMPTY_EXECUTIONS} workspace={data.workspace} onOpenArtifact={onOpenArtifact} onOpenFile={onOpenFile} onOpenDiff={onOpenDiff} onHtmlAction={handleHtmlAction} onCopy={copyMessage} onEdit={editMessage} onRegenerate={regenerateMessage} onShare={shareMessage} onRollback={onRollback} rollbackStates={rollbackStates} showThinking={showThinking} busy={data.busy} turnActive={turnActive} timing={timing} turnKey={turnKey} onOpenTranscript={onOpenTranscript} />;
           })}
-          {isGenerating && (assistantBubbleVisible ? <div className="response-progress response-progress-inline"><LoaderCircle size={14} className="spinning" /><span>{workingLabel}</span>{activeTurnTiming && <TimingMeta timing={activeTurnTiming} now={now} />}</div> : <PendingResponse label={workingLabel} timing={activeTurnTiming} now={now} />)}
+          {isGenerating && (assistantBubbleVisible ? <div className="response-progress response-progress-inline"><LoaderCircle size={14} className="spinning" /><span>{workingLabel}</span>{activeTurnTiming && <TimingMeta timing={activeTurnTiming} />}</div> : <PendingResponse label={workingLabel} timing={activeTurnTiming} />)}
         </>}
       </div>
       {turns.length >= 2 && <TurnMinimap turns={turns} activeKey={activeTurnKey} onNavigate={navigateToTurn} />}
