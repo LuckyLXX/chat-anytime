@@ -116,6 +116,7 @@ import { buildAutomationTools, type AutomationCreateInput, type AutomationToolCo
 import { resolveVisionModel } from "./vision.js";
 import { buildResourceCatalog } from "./resource-catalog.js";
 import { agentWorkspaceSessionDir, backfillUnpersistedSessions, isSessionPinned, mergeSessionSummary, pruneVanishedSessions, sameSessionDir, sessionFileMatchesId, sessionListReadyFor, sortSessionSummaries, togglePinnedSessionPath } from "./session-scope.js";
+import { listSessionSummaries, summarizeLiveSession } from "./session-summary-cache.js";
 import { isDesktopConfiguredProvider } from "./model-catalog.js";
 import { defaultTools, ensureDefaultWorkspaceDir, forgetAgentWorkspace, isPositiveInt, mergeProviderModels, recordAgentWorkspace, resolveDefaultWorkspace, resolveInitialWorkspace } from "./settings.js";
 import { buildMultiInvocationPrompt, composeInvocationBody, parseInvocationPrompt, sameInvocations, type InvocationSegment } from "./invocation-prompt.js";
@@ -2607,7 +2608,44 @@ async function refreshBuiltinModelsFallback(providerId: string): Promise<void> {
   }
 }
 
-async function refreshSessions(): Promise<void> {
+let sessionsRefreshInFlight: Promise<void> | undefined;
+let sessionsRefreshQueued = false;
+
+/**
+ * 单飞 + 合并：同一时刻只跑一轮磁盘扫描（缓存未命中时要读 264 MB 目录）。
+ * 进行中再来请求只记一个「还要再跑一轮」标记（防止「进行中的那段是旧数据」
+ * 被反复读取），结束后合并跑最后一轮。防抖在 scheduleSessionsRefresh。
+ */
+function refreshSessions(): Promise<void> {
+  if (sessionsRefreshInFlight) {
+    sessionsRefreshQueued = true;
+    return sessionsRefreshInFlight;
+  }
+  const run = performSessionsRefresh().then(
+    (value) => {
+      finishSessionsRefresh();
+      return value;
+    },
+    (error: unknown) => {
+      finishSessionsRefresh();
+      throw error;
+    }
+  );
+  sessionsRefreshInFlight = run;
+  return run;
+}
+
+function finishSessionsRefresh(): void {
+  sessionsRefreshInFlight = undefined;
+  if (!sessionsRefreshQueued) return;
+  sessionsRefreshQueued = false;
+  // 排队的那一轮没人 await：自带错误兜底与状态推送（重复 emit 是幂等的）。
+  void refreshSessions().then(() => emitState()).catch((error) => {
+    post({ type: "log", level: "warn", message: `刷新会话列表失败：${errorText(error)}` });
+  });
+}
+
+async function performSessionsRefresh(): Promise<void> {
   // Stamp the scope the listing actually runs against: currentAgent can change
   // while the awaits below run (agent switch mid-refresh).
   const listAgentId = currentAgent?.id;
@@ -2619,8 +2657,22 @@ async function refreshSessions(): Promise<void> {
     return;
   }
 
-  const lists = await Promise.all(directories.map((directory) => SessionManager.listAll(directory)));
-  const items = [...new Map(lists.flat().map((item) => [resolve(item.path).toLowerCase(), item])).values()];
+  // 内存里已有的会话是权威且**零 I/O**：当前回合正在写的那个文件连读都不需要
+  // （否则每轮对话都要重读一遍 44 MB 的当前会话）。
+  const liveSummaries = [...liveSessions.values()].flatMap((record) => {
+    const manager = record.session.sessionManager;
+    const path = manager.getSessionFile();
+    if (!path) return [];
+    return [summarizeLiveSession({
+      path,
+      id: manager.getSessionId(),
+      cwd: manager.getCwd() || record.workspace,
+      entries: manager.getEntries(),
+      fallbackTime: record.activatedAt
+    })];
+  });
+  // 会话摘要缓存（mtime+size 命中即不读文件；详见 session-summary-cache.ts）。
+  const items = await listSessionSummaries(directories, { liveSummaries });
   const pinnedPaths = settings?.pinnedSessionPaths ?? [];
   currentSessions = sortSessionSummaries(items.map((item) => {
     // Live sessions carry their execution state (sidebar dot) across refreshes.
@@ -2654,7 +2706,7 @@ async function refreshSessions(): Promise<void> {
     })),
     listAgentId
   );
-  // 注意：这里不需要 pruneVanishedSessions——列表刚由磁盘 listAll 重建，无文件且无 live
+  // 注意：这里不需要 pruneVanishedSessions——列表刚由磁盘 + 摘要缓存重建，无文件且无 live
   // 伪死行根本进不了入参；真正需要清的时刻是「记录被驱逐而列表没重建」（见
   // pruneVanishedSessionRows）。
 }
