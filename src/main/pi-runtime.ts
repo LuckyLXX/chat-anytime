@@ -52,6 +52,7 @@ import type {
   SessionPaneSnapshot,
   SessionRunStatus,
   SessionSummary,
+  PanelSessionLive,
   SkillSummary,
   SpeedStats,
   ThinkingLevel,
@@ -65,6 +66,7 @@ import type {
 import { isDelegationProgress } from "../shared/protocol.js";
 import { THINKING_LEVELS, clampThinkingLevel, supportedThinkingLevels } from "../shared/thinking-levels.js";
 import { toolLabel } from "../shared/locale.js";
+import { PANEL_TODO_LIMIT, summarizeTodos } from "../shared/panel.js";
 import { workspaceRelativeAttachment } from "./attachments.js";
 import { downloadDirFor } from "./browser-downloads.js";
 import { saveBrowserScreenshot } from "./browser-screenshot.js";
@@ -425,6 +427,10 @@ function flushState(): void {
  * for pure streaming accumulation that can safely batch to 20fps.
  */
 function scheduleEmit(immediate: boolean): void {
+  // 面板作品的数据源跟着同一批生命周期走：scheduleEmit 的调用点是这套运行时里
+  // 「忙/闲、工具、状态变了」的唯一收敛处，在入口处顺手刷新一份轻量投影，
+  // 比在每个调用点单独补一行可靠（漏一处就是面板永远不更新）。
+  scheduleLiveEmit(immediate);
   if (immediate) {
     if (pendingFlushTimer) {
       clearTimeout(pendingFlushTimer);
@@ -440,6 +446,85 @@ function scheduleEmit(immediate: boolean): void {
   }
   hasPendingFlush = true;
   pendingFlushTimer = setTimeout(flushState, STREAM_FLUSH_INTERVAL_MS);
+}
+
+// —— 面板作品（kind="panel"）的状态投影 ——
+//
+// 与 `state` / `session.state` 的关键区别是**覆盖范围**：那两个只服务「激活会话」
+// 与「watched 分屏格子」，parked 且无人 watch 的会话连 busy 都不推（见
+// schedulePaneEmit 的提前返回）。而面板要看的恰恰是「后台还有谁在跑」，所以它
+// 独立遍历 liveSessions，自己拼一份小载荷（不含消息正文与工具输出）。
+// main 收到后缓存在内存里，面板窗口通过静态服务的虚拟端点轮询取走。
+
+/** 面板投影的合帧间隔：它只驱动 main 的内存缓存，500ms 远快于人的感知。 */
+const LIVE_FLUSH_INTERVAL_MS = 500;
+let liveFlushTimer: ReturnType<typeof setTimeout> | undefined;
+
+/** 所有 live 会话的执行状态投影（纯读；顺序：忙的在前，其余按开始时间倒序）。 */
+function buildLiveSessions(): PanelSessionLive[] {
+  const now = Date.now();
+  const list: PanelSessionLive[] = [];
+  for (const record of liveSessions.values()) {
+    const sessionId = record.session.sessionId;
+    const summary = currentSessions.find((item) => item.id === sessionId);
+    const todos = record.todoStore.list().slice(0, PANEL_TODO_LIMIT);
+    const executions = [...record.executions.values()];
+    const live: PanelSessionLive = {
+      sessionId,
+      // 标题优先跟侧边栏一致（currentSessions 是同一份命名源），拿不到再退回
+      // 会话文件里的名字，最后才是短 id——面板不应出现空标题。
+      title: summary?.title || record.session.sessionManager.getSessionName() || `会话 ${sessionId.slice(0, 8)}`,
+      workspace: record.workspace,
+      busy: record.busy,
+      status: record.status,
+      currentTools: executions
+        .filter((execution) => execution.status === "running")
+        .map((execution) => ({ id: execution.id, name: execution.name, startedAt: execution.startedAt })),
+      todos,
+      todoSummary: summarizeTodos(todos),
+      updatedAt: now
+    };
+    if (record.runStatus) live.runStatus = record.runStatus;
+    if (record.turnTiming?.startedAt) live.startedAt = record.turnTiming.startedAt;
+    const last = executions
+      .filter((execution) => execution.status !== "running")
+      .sort((left, right) => (right.completedAt ?? 0) - (left.completedAt ?? 0))[0];
+    if (last) {
+      live.lastTool = { name: last.name, status: last.status };
+      if (last.completedAt !== undefined) live.lastTool.completedAt = last.completedAt;
+    }
+    list.push(live);
+  }
+  return list.sort(
+    (left, right) =>
+      Number(right.busy) - Number(left.busy) ||
+      (right.startedAt ?? right.updatedAt) - (left.startedAt ?? left.updatedAt) ||
+      left.sessionId.localeCompare(right.sessionId)
+  );
+}
+
+function flushLive(): void {
+  liveFlushTimer = undefined;
+  post({ type: "sessions.live", sessions: buildLiveSessions() });
+}
+
+/**
+ * 推送 live 会话投影。`true` = 立即（会话出现/消失、todo 变更、生命周期转换），
+ * `false` = 500ms 合帧（流式累积）；已有定时器时立即请求会先取消它再发。
+ */
+function scheduleLiveEmit(immediate: boolean): void {
+  if (liveFlushTimer) {
+    if (!immediate) return;
+    clearTimeout(liveFlushTimer);
+    liveFlushTimer = undefined;
+  }
+  if (immediate) {
+    flushLive();
+    return;
+  }
+  liveFlushTimer = setTimeout(flushLive, LIVE_FLUSH_INTERVAL_MS);
+  // 面板投影是附加信息，绝不能因为一个待发定时器拖住 utility 的事件循环退出。
+  if (typeof liveFlushTimer.unref === "function") liveFlushTimer.unref();
 }
 
 function post(message: RuntimeMessage): void {
@@ -682,6 +767,9 @@ function emitResourceCatalog(): void {
 
 function emitTodos(): void {
   post({ type: "todos", todos });
+  // todo 变化也是一个执行维度的变化：面板投影跟着立刻刷新（per-session todoStore
+  // 的 onChanged 都指到 refreshTodos，所以这里一处就够）。
+  scheduleLiveEmit(true);
 }
 
 /** Reload todos from the store and broadcast to the renderer. */
@@ -1385,6 +1473,8 @@ function disposeRecord(record: SessionRuntimeRecord, options: { keepBrowserTab?:
   renderedSessions.delete(record.session.sessionId);
   pendingWatchSessions.delete(record.session.sessionId);
   hiddenPaneSessions.delete(record.session.sessionId);
+  // 会话从运行时消失必须立即反映到面板（否则面板会挂着一条永远「在跑」的幽灵）。
+  scheduleLiveEmit(true);
   if (record.paneFlushTimer) {
     clearTimeout(record.paneFlushTimer);
     record.paneFlushTimer = undefined;
@@ -1538,6 +1628,10 @@ async function publishGalleryApp(draft: GalleryDraft, workspaceRoot: string | un
   if (draft.description) app.description = draft.description;
   if (draft.kind === "server" && draft.command) app.command = draft.command;
   if (draft.kind === "server" && draft.url) app.url = draft.url;
+  // 面板窗口偏好必须在这里落地：`upsertGalleryApp` 只会原样保留 `app` 上已有的字段，
+  // 漏了这一行则「对话框里填了尺寸/置顶、工具也声明了」全都会静默丢掉，发布出去
+  // 的面板永远以缺省 420×560、不置顶开窗（2026-09-26 评审发现）。
+  if (draft.kind === "panel" && draft.panel) app.panel = draft.panel;
   if (draft.tags && draft.tags.length > 0) app.tags = draft.tags;
 
   const upserted = upsertGalleryApp(galleryApps, app);
@@ -2757,6 +2851,9 @@ async function performSessionsRefresh(): Promise<void> {
   // 注意：这里不需要 pruneVanishedSessions——列表刚由磁盘 + 摘要缓存重建，无文件且无 live
   // 伪死行根本进不了入参；真正需要清的时刻是「记录被驱逐而列表没重建」（见
   // pruneVanishedSessionRows）。
+  // 面板投影里的标题取自这份列表（重命名/新会话都走这里），刷新后主动播一次，
+  // 否则改完标题的面板要等到下一次工具活动才跟上。
+  scheduleLiveEmit(true);
 }
 
 function sessionReadyStatus(hasModel: boolean, usedFallback: boolean): string {
@@ -3294,6 +3391,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   record.unsubscribe = result.session.subscribe((event) => handleSessionEvent(record, event));
   record.status = sessionReadyStatus(Boolean(result.session.model), Boolean(result.modelFallbackMessage));
   liveSessions.set(result.session.sessionId, record);
+  scheduleLiveEmit(true);
   // 启动恢复的分屏格子：watch 先于会话 live 到达（pendingWatchSessions），
   // 记录建立后补注册并立即推送水合帧。该记录随即被 activate，激活期间的
   // 更新走 state 通道，失焦后自然切回 session.state。

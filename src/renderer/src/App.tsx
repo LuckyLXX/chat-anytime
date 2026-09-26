@@ -579,6 +579,25 @@ export function App(): ReactNode {
       // 先探一次服务地址：已经跑着就直接进页面，不重启用户（或上次运行）起的服务。
       const reachable = app.kind === "server" && app.url ? (await window.piDesktop.galleryAwaitService({ url: app.url })).ok : false;
       const plan = galleryRunPlan(app, reachable);
+      if (plan.action === "open-panel") {
+        // 面板作品不跑在内置浏览器里，而是让主进程开一个独立窗口（主界面关掉后
+        // 仍在）。窗口打不开（入口不在工作区/不是网页/静态服务起不来）时主进程
+        // 会给出具体原因，这里原样报给用户。
+        const result = await window.piDesktop.galleryOpenPanel({
+          id: app.id,
+          title: app.title,
+          workspace: app.workspace,
+          filePath: plan.absolutePath,
+          panel: plan.options
+        });
+        if (!result.ok) {
+          setMessageActionError(result.message ?? `打不开「${app.title}」的面板窗口`);
+          return;
+        }
+        // 与网页作品同一条尾巴：窗口真的开出来了才记一次运行。
+        void window.piDesktop.send({ type: "gallery.run", id: app.id }).catch(() => undefined);
+        return;
+      }
       if (plan.action === "open-file") {
         await openGalleryBrowserTab(app, await window.piDesktop.galleryFileUrl(plan.absolutePath, app.workspace));
         return;

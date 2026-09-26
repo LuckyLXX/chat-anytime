@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>会话状态</title>
+<!--
+  会话状态面板（作品类型：面板 / kind=panel）
+
+  数据接口（相对本文档，无需知道端口与 token）：
+    GET  ./__pidesktop_state.json        → PanelStatePayload（只读）
+    POST ./__pidesktop_state.json        → {"action":"show-main"} 唤回主界面
+
+  载荷形状见 src/shared/protocol.ts 的 PanelStatePayload：
+    { generatedAt, activeSessionId?, app:{version,agentName,workspace}, sessions:[SessionSummary], live:[PanelSessionLive] }
+  其中 live 只包含「还活在运行时里」的会话，带 busy / status / currentTools / todos。
+  主界面关掉（退到托盘）之后这个端点照样有数据 —— 面板独立于主界面存活。
+
+  零依赖：不引任何 CDN、不打包，双击改完就能跑。全部用 createElement 构建，
+  不拼 innerHTML（会话标题来自用户与 AI，不能当 HTML 处理）。
+-->
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f7f9;
+    --surface: #ffffff;
+    --surface-soft: #f0f1f4;
+    --border: #e2e4e9;
+    --text: #1c1f24;
+    --muted: #737b88;
+    --accent: #2f6df6;
+    --run: #d99a1b;
+    --ok: #2e9e63;
+    --fail: #cf4a4a;
+    --idle: #a8aeb8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17181c;
+      --surface: #1f2126;
+      --surface-soft: #26282e;
+      --border: #32353c;
+      --text: #e7e9ee;
+      --muted: #9aa2ae;
+      --accent: #6f9dff;
+      --run: #e3b552;
+      --ok: #57c98b;
+      --fail: #ef7676;
+      --idle: #6f7681;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    display: flex; flex-direction: column;
+    background: var(--bg); color: var(--text);
+    font: 400 12.5px/1.5 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    overflow: hidden;
+  }
+  .bar {
+    display: flex; align-items: center; gap: 8px;
+    padding: 9px 12px; border-bottom: 1px solid var(--border); background: var(--surface);
+  }
+  .bar strong { font-size: 12.5px; font-weight: 600; }
+  .bar .spacer { flex: 1 1 auto; }
+  .bar .meta { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--idle); flex: 0 0 auto; }
+  .dot.running { background: var(--run); animation: pulse 1.4s ease-in-out infinite; }
+  .dot.live { background: var(--ok); }
+  .dot.offline { background: var(--fail); }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+  .ghost {
+    margin-left: 2px; padding: 3px 9px; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--surface-soft); color: var(--text); font: inherit; font-size: 11.5px; cursor: pointer;
+  }
+  .ghost:hover { border-color: var(--accent); color: var(--accent); }
+  .banner {
+    margin: 10px 12px 0; padding: 7px 10px; border-radius: 8px;
+    background: color-mix(in srgb, var(--fail) 14%, transparent);
+    color: var(--fail); font-size: 11.5px;
+  }
+  main { flex: 1 1 auto; overflow-y: auto; padding: 10px 12px 14px; display: flex; flex-direction: column; gap: 9px; }
+  .section-title { margin: 3px 0 -2px; color: var(--muted); font-size: 10.5px; letter-spacing: .04em; }
+  .card {
+    border: 1px solid var(--border); border-radius: 10px; background: var(--surface);
+    padding: 9px 10px; display: flex; flex-direction: column; gap: 7px;
+  }
+  .card.busy { border-color: color-mix(in srgb, var(--run) 45%, var(--border)); }
+  .card-head { display: flex; align-items: center; gap: 7px; }
+  .card-title {
+    flex: 1 1 auto; min-width: 0; font-weight: 600; font-size: 12.5px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .time { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .status { color: var(--muted); font-size: 11.5px; display: flex; align-items: center; gap: 6px; }
+  .status .busy-text { color: var(--text); }
+  .tools { display: flex; flex-direction: column; gap: 3px; }
+  .tool {
+    display: flex; align-items: center; gap: 7px; padding: 3px 7px; border-radius: 6px;
+    background: var(--surface-soft); font-size: 11.5px;
+  }
+  .tool .name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, Consolas, monospace; }
+  .bar-track { height: 4px; border-radius: 3px; background: var(--surface-soft); overflow: hidden; }
+  .bar-fill { height: 100%; background: var(--ok); border-radius: 3px; transition: width .3s ease; }
+  .todo-head { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 11px; }
+  .todo-list { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; }
+  .todo-list li { display: flex; align-items: flex-start; gap: 6px; font-size: 11.5px; color: var(--muted); }
+  .todo-list li.current { color: var(--text); }
+  .todo-list .mark { flex: 0 0 auto; width: 12px; text-align: center; }
+  .todo-list li.done .text { text-decoration: line-through; opacity: .65; }
+  .row {
+    display: flex; align-items: center; gap: 7px; padding: 5px 9px; border-radius: 8px;
+    background: var(--surface); border: 1px solid var(--border);
+  }
+  .row .row-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row .row-meta { color: var(--muted); font-size: 11px; }
+  .row.active { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+  .empty { color: var(--muted); font-size: 11.5px; padding: 6px 2px; }
+  footer {
+    display: flex; align-items: center; gap: 8px; padding: 7px 12px;
+    border-top: 1px solid var(--border); background: var(--surface);
+    color: var(--muted); font-size: 10.5px;
+  }
+  footer .spacer { flex: 1 1 auto; }
+  main::-webkit-scrollbar { width: 8px; }
+  main::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+</style>
+</head>
+<body>
+  <header class="bar">
+    <span class="dot" id="conn"></span>
+    <strong>会话状态</strong>
+    <span class="spacer"></span>
+    <span class="meta" id="meta">连接中…</span>
+    <button class="ghost" id="show-main" title="回到 ChatAnyTime 主界面">主界面</button>
+  </header>
+  <div class="banner" id="banner" hidden></div>
+  <main id="root"></main>
+  <footer>
+    <span id="app-info">—</span>
+    <span class="spacer"></span>
+    <span>每 1 秒刷新</span>
+  </footer>
+
+<script>
+(function () {
+  "use strict";
+
+  var ENDPOINT = "./__pidesktop_state.json";
+  var POLL_MS = 1000;
+  var MAX_OTHER_SESSIONS = 8;
+  var MAX_TODO_ROWS = 5;
+
+  var root = document.getElementById("root");
+  var banner = document.getElementById("banner");
+  var meta = document.getElementById("meta");
+  var conn = document.getElementById("conn");
+  var appInfo = document.getElementById("app-info");
+
+  var latest = null;
+  var currentSignature = "";
+  var failures = 0;
+
+  /** 小工具：建元素，顺带 class 与文本（一律走 textContent，不拼 HTML）。 */
+  function el(tag, className, text) {
+    var node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined && text !== null) node.textContent = String(text);
+    return node;
+  }
+
+  function formatDuration(ms) {
+    if (!ms || ms < 0) return "";
+    var total = Math.floor(ms / 1000);
+    var seconds = total % 60;
+    var minutes = Math.floor(total / 60) % 60;
+    var hours = Math.floor(total / 3600);
+    var pad = function (value) { return value < 10 ? "0" + value : String(value); };
+    if (hours > 0) return hours + ":" + pad(minutes) + ":" + pad(seconds);
+    return minutes + ":" + pad(seconds);
+  }
+
+  function statusDotClass(busy, runStatus) {
+    if (busy) return "dot running";
+    if (runStatus === "completed") return "dot live";
+    if (runStatus === "failed") return "dot offline";
+    return "dot";
+  }
+
+  function formatClock(at) {
+    var date = new Date(at);
+    var pad = function (value) { return value < 10 ? "0" + value : String(value); };
+    return pad(date.getHours()) + ":" + pad(date.getMinutes()) + ":" + pad(date.getSeconds());
+  }
+
+  function elapsedSpan(startedAt, suffix) {
+    var span = el("span", "time", formatDuration(Date.now() - startedAt) + (suffix ? " " + suffix : ""));
+    span.dataset.start = String(startedAt);
+    if (suffix) span.dataset.suffix = suffix;
+    return span;
+  }
+
+  function renderToolList(tools) {
+    var wrap = el("div", "tools");
+    for (var i = 0; i < tools.length; i += 1) {
+      var row = el("div", "tool");
+      row.appendChild(el("span", "name", tools[i].name));
+      row.appendChild(elapsedSpan(tools[i].startedAt, "进行中"));
+      wrap.appendChild(row);
+    }
+    return wrap;
+  }
+
+  function renderTodo(live) {
+    var todos = live.todos || [];
+    var summary = live.todoSummary || { total: todos.length, completed: 0, inProgress: 0 };
+    var wrap = el("div", null);
+    wrap.style.display = "flex";
+    wrap.style.flexDirection = "column";
+    wrap.style.gap = "5px";
+
+    var head = el("div", "todo-head");
+    var done = summary.completed || 0;
+    var total = summary.total || 0;
+    head.appendChild(el("span", null, total > 0 ? "任务 " + done + "/" + total : "任务 " + done));
+    if (summary.inProgress > 0) head.appendChild(el("span", null, "· 进行中 " + summary.inProgress));
+    wrap.appendChild(head);
+
+    if (total > 0) {
+      var track = el("div", "bar-track");
+      var fill = el("div", "bar-fill");
+      fill.style.width = Math.round((done / total) * 100) + "%";
+      track.appendChild(fill);
+      wrap.appendChild(track);
+    }
+
+    var list = el("ul", "todo-list");
+    var shown = todos.slice(0, MAX_TODO_ROWS);
+    for (var i = 0; i < shown.length; i += 1) {
+      var todo = shown[i];
+      var item = el("li", todo.status === "in_progress" ? "current" : todo.status === "completed" ? "done" : null);
+      item.appendChild(el("span", "mark", todo.status === "completed" ? "✓" : todo.status === "in_progress" ? "▸" : "·"));
+      item.appendChild(el("span", "text", todo.content));
+      list.appendChild(item);
+    }
+    if (list.childNodes.length > 0) wrap.appendChild(list);
+    if (todos.length > shown.length) wrap.appendChild(el("div", "time", "还有 " + (todos.length - shown.length) + " 项…"));
+    return wrap;
+  }
+
+  function renderLiveCard(live, compact) {
+    var card = el("div", live.busy ? "card busy" : "card");
+
+    var head = el("div", "card-head");
+    head.appendChild(el("span", statusDotClass(live.busy, live.runStatus), null));
+    head.appendChild(el("span", "card-title", live.title));
+    if (live.startedAt) head.appendChild(elapsedSpan(live.startedAt, null));
+    card.appendChild(head);
+
+    var status = el("div", "status");
+    status.appendChild(el("span", "busy-text", live.status || (live.busy ? "运行中" : "空闲")));
+    if (!live.busy && live.lastTool) status.appendChild(el("span", null, "· 上次 " + live.lastTool.name));
+    card.appendChild(status);
+
+    if (compact) return card;
+    if (live.currentTools && live.currentTools.length > 0) card.appendChild(renderToolList(live.currentTools));
+    if ((live.todos && live.todos.length > 0) || (live.todoSummary && live.todoSummary.total > 0)) card.appendChild(renderTodo(live));
+    return card;
+  }
+
+  function renderSessionRow(session, activeSessionId) {
+    var row = el("div", session.id === activeSessionId ? "row active" : "row");
+    row.appendChild(el("span", statusDotClass(session.runStatus === "running", session.runStatus), null));
+    row.appendChild(el("span", "row-title", session.title || session.id));
+    if (session.messageCount !== undefined) row.appendChild(el("span", "row-meta", session.messageCount + " 条"));
+    return row;
+  }
+
+  function render() {
+    var data = latest;
+    var scrollTop = root.scrollTop;
+    root.textContent = "";
+    if (!data) {
+      root.appendChild(el("div", "empty", "等待状态数据…"));
+      return;
+    }
+
+    var live = data.live || [];
+    var sessions = data.sessions || [];
+    var running = [];
+    var idle = [];
+    for (var i = 0; i < live.length; i += 1) (live[i].busy ? running : idle).push(live[i]);
+
+    if (running.length > 0) {
+      root.appendChild(el("div", "section-title", "运行中 · " + running.length));
+      for (var a = 0; a < running.length; a += 1) root.appendChild(renderLiveCard(running[a]));
+    }
+
+    var liveIds = {};
+    for (var b = 0; b < live.length; b += 1) liveIds[live[b].sessionId] = true;
+
+    if (idle.length > 0) {
+      root.appendChild(el("div", "section-title", "已打开的会话 · " + idle.length));
+      // 空闲会话用紧凑卡片：工具与 todo 是「正在做」的信息，空闲时只会噪声。
+      for (var c = 0; c < idle.length; c += 1) root.appendChild(renderLiveCard(idle[c], true));
+    }
+
+    if (running.length === 0 && idle.length === 0) {
+      root.appendChild(el("div", "empty", "当前没有处于运行时的会话（主界面里发一条消息就会出现在这里）。"));
+    }
+
+    var others = [];
+    for (var d = 0; d < sessions.length; d += 1) {
+      if (!liveIds[sessions[d].id]) others.push(sessions[d]);
+      if (others.length >= MAX_OTHER_SESSIONS) break;
+    }
+    if (others.length > 0) {
+      root.appendChild(el("div", "section-title", "最近话题"));
+      for (var e = 0; e < others.length; e += 1) root.appendChild(renderSessionRow(others[e], data.activeSessionId));
+    }
+    root.scrollTop = scrollTop;
+  }
+
+  function setConnected(ok) {
+    conn.className = ok ? "dot live" : "dot offline";
+    if (!ok) {
+      banner.hidden = false;
+      banner.textContent = "状态接口不可用（已重试 " + failures + " 次）。请用作品墙的「运行」打开本面板：直接用浏览器打开这个文件、或在沙箱预览里看时都没有这个接口。";
+    } else {
+      banner.hidden = true;
+    }
+  }
+
+  /** 只随时间变化的那些数字（已耗时）单独刷新，避免每秒重建整棵 DOM。 */
+  function tickElapsed() {
+    var nodes = root.querySelectorAll("[data-start]");
+    var now = Date.now();
+    for (var i = 0; i < nodes.length; i += 1) {
+      var node = nodes[i];
+      var text = formatDuration(now - Number(node.dataset.start));
+      node.textContent = node.dataset.suffix ? text + " " + node.dataset.suffix : text;
+    }
+  }
+
+  /** 渲染签名：只有它变了才整体重绘（重绘会重置滚动位置）。 */
+  function signature(data) {
+    var parts = [data.activeSessionId || ""];
+    var live = data.live || [];
+    for (var i = 0; i < live.length; i += 1) {
+      var item = live[i];
+      var tools = (item.currentTools || []).map(function (tool) { return tool.name; }).join(",");
+      parts.push([item.sessionId, item.busy ? 1 : 0, item.status, tools, item.todos ? item.todos.length : 0, item.todoSummary ? item.todoSummary.completed : 0, item.lastTool ? item.lastTool.name : ""].join("|"));
+    }
+    var sessions = data.sessions || [];
+    parts.push("s:" + sessions.length);
+    for (var s = 0; s < Math.min(sessions.length, MAX_OTHER_SESSIONS + live.length); s += 1) parts.push(sessions[s].id + ":" + (sessions[s].runStatus || ""));
+    return parts.join("\n");
+  }
+
+  function poll() {
+    fetch(ENDPOINT, { cache: "no-store" })
+      .then(function (response) {
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        return response.json();
+      })
+      .then(function (data) {
+        failures = 0;
+        setConnected(true);
+        var next = signature(data);
+        var changed = next !== currentSignature;
+        latest = data;
+        currentSignature = next;
+        meta.textContent = "更新于 " + formatClock(data.generatedAt || Date.now());
+        var app = data.app || {};
+        appInfo.textContent = [app.agentName, app.workspace].filter(Boolean).join(" · ") || "ChatAnyTime";
+        if (changed) render();
+        else tickElapsed();
+      })
+      .catch(function () {
+        failures += 1;
+        setConnected(false);
+      });
+  }
+
+  document.getElementById("show-main").addEventListener("click", function () {
+    fetch(ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "show-main" })
+    }).catch(function () { /* 主界面打不开也不该让面板报错 */ });
+  });
+
+  poll();
+  setInterval(poll, POLL_MS);
+})();
+</script>
+</body>
+</html>

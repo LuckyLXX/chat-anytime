@@ -1091,8 +1091,8 @@ export interface DesignDocSummary {
 // 运行一律走内置浏览器 + 本地静态服务（单文件/多文件/服务型统一心智）；
 // 数据模型与纯函数在 shared/gallery.ts，渲染端与主进程共用同一套判定。
 // 命名同 automation：**下划线工具名**（gallery_publish），命令用点号。
-import type { GalleryApp as GalleryAppModel, GalleryDraft as GalleryDraftModel, GalleryServiceFailure } from "./gallery.js";
-export type { GalleryApp, GalleryDraft, GalleryKind, GalleryRunTarget } from "./gallery.js";
+import type { GalleryApp as GalleryAppModel, GalleryDraft as GalleryDraftModel, GalleryPanelOptions, GalleryServiceFailure } from "./gallery.js";
+export type { GalleryApp, GalleryDraft, GalleryKind, GalleryPanelOptions, GalleryRunTarget } from "./gallery.js";
 
 /**
  * 服务型作品「运行」的探测/等待回执（gallery:await-service）。
@@ -1102,6 +1102,50 @@ export type { GalleryApp, GalleryDraft, GalleryKind, GalleryRunTarget } from "./
  */
 export interface GalleryServiceProbe extends GalleryServiceFailure {
   ok: boolean;
+}
+
+// —— 面板作品的状态端点（kind = "panel"）——
+// 面板 HTML 由 loopback 静态服务托管，相对路径 fetch 一个只读状态 JSON 就有数据
+// （端点名与白名单动作在 shared/panel.ts）。这份投影只包含「用户看得懂的执行状态」：
+// 谁在跑、跑什么工具、todo 到哪一步——不含消息正文与工具输出（面板是概览，不是聊天窗口）。
+
+/** 面板里「正在执行」的工具（executions 中 status === "running" 的那些）。 */
+export interface PanelSessionTool {
+  id: string;
+  name: string;
+  startedAt: number;
+}
+
+/** 一个 live 会话的执行状态投影（utility 侧从 SessionRuntimeRecord 组装）。 */
+export interface PanelSessionLive {
+  sessionId: string;
+  title: string;
+  workspace: string;
+  busy: boolean;
+  /** 人类可读的当前状态文案（record.status，如「正在读取文件」）。 */
+  status: string;
+  runStatus?: SessionRunStatus;
+  /** 本轮开始时间（TurnTiming.startedAt）；空闲会话缺省。 */
+  startedAt?: number;
+  /** 正在执行的工具（可能有多个并行）。 */
+  currentTools: PanelSessionTool[];
+  /** 最近结束的一个工具（让面板在空闲时仍有「刚做了什么」的上下文）。 */
+  lastTool?: { name: string; status: ToolExecution["status"]; completedAt?: number };
+  todos: Todo[];
+  todoSummary: { total: number; completed: number; inProgress: number };
+  updatedAt: number;
+}
+
+/** 面板端点的完整响应体（GET）。 */
+export interface PanelStatePayload {
+  generatedAt: number;
+  /** 当前激活（聚焦）会话；面板据此把「你正在看的那个」标出来。 */
+  activeSessionId?: string;
+  app: { version?: string; agentName?: string; workspace?: string };
+  /** 全部会话（main 已有的会话列表，带 runStatus）；含非 live 的历史话题。 */
+  sessions: SessionSummary[];
+  /** 只有 live 会话才有执行明细。 */
+  live: PanelSessionLive[];
 }
 
 /**
@@ -1909,6 +1953,12 @@ export type RuntimeMessage =
   | { type: "state"; snapshot: RuntimeSnapshot }
   /** 分屏格子（watched 非激活会话）的会话级快照；与 state 的节流节奏一致（50ms 批量、生命周期立即）。 */
   | { type: "session.state"; snapshot: SessionPaneSnapshot }
+  /**
+   * 面板作品的数据源：所有 live 会话的执行状态投影（500ms 合帧，生命周期转换立即）。
+   * 与 state/session.state 的区别：不带消息正文与工具输出，目的是给面板窗口一个
+   * 「谁在跑、跑什么、todo 到哪」的小载荷；main 缓存后由面板轮询 HTTP 端点取走。
+   */
+  | { type: "sessions.live"; sessions: PanelSessionLive[] }
   | { type: "resources"; resources: ResourceCatalog }
   | { type: "todos"; todos: Todo[] }
   | { type: "memory"; memory: MemoryTopic[] }
@@ -2003,6 +2053,11 @@ export interface DesktopApi {
    * 主进程同时盯启动进程，已退出则提前回报 exited（附退出码与输出尾部）。
    */
   galleryAwaitService(input: { url: string; terminalId?: string; timeoutMs?: number }): Promise<GalleryServiceProbe>;
+  /**
+   * 面板型作品「运行」：把入口网页开成独立于主界面的窗口（同作品 id 复用已有窗口）。
+   * 打不开时 ok=false 并附原因（入口不在工作区内 / 不是网页文件 / 静态服务起不来）。
+   */
+  galleryOpenPanel(input: { id: string; title: string; workspace: string; filePath: string; panel?: GalleryPanelOptions }): Promise<{ ok: boolean; message?: string }>;
   /**
    * 主题导入（设置 → 外观的「导入 CSS」/「导入主题目录」）：主进程弹系统选择对话框、
    * 读盘、按 CSS 里的安全相对引用把资产写进 `<agentDir>/pidesktop-themes/current/`，

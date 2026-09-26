@@ -52,7 +52,7 @@ import {
   sniffImageMime
 } from "./browser-save-image.js";
 import { isJsonLikeText, saveBrowserEvalResult } from "./browser-eval-result.js";
-import { BrowserStaticServer, detectLocalFilePath } from "./browser-static-server.js";
+import { BrowserStaticServer, detectLocalFilePath, type StaticServerEndpoint } from "./browser-static-server.js";
 import { needsPageDocument } from "./browser-preview-seed.js";
 import { normalizeBrowserUrl } from "./browser-preview-url.js";
 import type { BrowserPreviewController, DownloadInfo } from "./browser-preview.js";
@@ -1453,6 +1453,17 @@ export class BrowserAutomationController {
    */
   fileUrl(filePath: string, workspace?: string): Promise<string> {
     return this.staticFiles.urlForFile(filePath, workspace);
+  }
+
+  /**
+   * 把面板状态端点接到内置浏览器的静态服务上。
+   *
+   * 目的只有一个：AI 写面板作品时会先在内置浏览器里看效果，没有数据就只能看到
+   * 一个空壳（面板页靠 `fetch("./__pidesktop_state.json")` 取数）。只转发给静态
+   * 服务，不改变自动化/标签页/下载的任何语义。
+   */
+  setPanelStateEndpoint(endpoint: StaticServerEndpoint | undefined): void {
+    this.staticFiles.setEndpoint(endpoint);
   }
 
   dispose(): void {

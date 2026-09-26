@@ -13,6 +13,10 @@ import {
   MAX_GALLERY_APPS,
   normalizeGalleryApp,
   normalizeGalleryEntry,
+  normalizeGalleryPanelOptions,
+  PANEL_DEFAULT_HEIGHT,
+  PANEL_DEFAULT_WIDTH,
+  panelWindowSize,
   removeGalleryApp,
   sortGalleryApps,
   trimGalleryApps,
@@ -292,5 +296,66 @@ describe("composeGalleryDevMessage", () => {
     expect(message).toContain("入口：（工作区根目录）");
     expect(message).toContain("启动命令：npm run dev");
     expect(message).toContain("服务地址：http://localhost:5173");
+  });
+});
+
+describe("面板作品（kind=panel）", () => {
+  const panel = { kind: "panel" as const, entry: "panels/status/index.html" };
+
+  it("normalizeGalleryPanelOptions 夹取尺寸、只收 boolean 置顶，全非法即 undefined", () => {
+    expect(normalizeGalleryPanelOptions({ width: 99999, height: 1 })).toEqual({ width: 1600, height: 200 });
+    expect(normalizeGalleryPanelOptions({ width: 420.6, height: 560.4, alwaysOnTop: true })).toEqual({ width: 421, height: 560, alwaysOnTop: true });
+    expect(normalizeGalleryPanelOptions({ alwaysOnTop: "yes" })).toBeUndefined();
+    expect(normalizeGalleryPanelOptions(null)).toBeUndefined();
+    expect(normalizeGalleryPanelOptions([])).toBeUndefined();
+    expect(normalizeGalleryPanelOptions("420x560")).toBeUndefined();
+  });
+
+  it("panelWindowSize 缺省为 420×560（素材没声明尺寸时的开窗大小）", () => {
+    expect(panelWindowSize()).toEqual({ width: PANEL_DEFAULT_WIDTH, height: PANEL_DEFAULT_HEIGHT });
+    expect(panelWindowSize({ width: 320 })).toEqual({ width: 320, height: PANEL_DEFAULT_HEIGHT });
+    expect(panelWindowSize({ height: 720 })).toEqual({ width: PANEL_DEFAULT_WIDTH, height: 720 });
+  });
+
+  it("读侧归一化：入口必须是具体网页（根目录入口的面板直接丢弃）", () => {
+    const normalized = normalizeGalleryApp({ ...app(panel), panel: { width: 500, alwaysOnTop: true } });
+    expect(normalized?.kind).toBe("panel");
+    expect(normalized?.panel).toEqual({ width: 500, alwaysOnTop: true });
+    expect(normalizeGalleryApp({ ...app(panel), entry: "." })).toBeUndefined();
+  });
+
+  it("panel 字段只属于面板类型（网页/服务型作品不会莫名其妙带上窗口偏好）", () => {
+    expect(normalizeGalleryApp({ ...app({ kind: "file" }), panel: { width: 500 } })?.panel).toBeUndefined();
+    expect(normalizeGalleryApp({ ...app({ kind: "server", entry: "." }), panel: { width: 500 } })?.panel).toBeUndefined();
+  });
+
+  it("galleryRunTarget 面板走自己的通道（不走内置浏览器）", () => {
+    expect(galleryRunTarget(app(panel))).toEqual({ kind: "panel", absolutePath: "D:/ws/panels/status/index.html" });
+  });
+
+  it("galleryRunPlan：面板是第一个分支，不受服务可达性影响，options 已归一化", () => {
+    expect(galleryRunPlan(app(panel), true)).toEqual({
+      action: "open-panel",
+      absolutePath: "D:/ws/panels/status/index.html",
+      options: {}
+    });
+    expect(galleryRunPlan(app({ ...panel, panel: { width: 99999, alwaysOnTop: true } }), false)).toEqual({
+      action: "open-panel",
+      absolutePath: "D:/ws/panels/status/index.html",
+      options: { width: 1600, alwaysOnTop: true }
+    });
+  });
+
+  it("面板不生成缩略图（离屏截图里没有状态端点，截出来是降级态）", () => {
+    expect(galleryThumbEligible(app(panel))).toBe(false);
+  });
+
+  it("继续开发文案带上窗口尺寸、置顶与数据接口（接手改面板的模型不用猜）", () => {
+    const message = composeGalleryDevMessage(app({ ...panel, panel: { width: 320, height: 400, alwaysOnTop: true } }));
+    expect(message).toContain("类型：面板（panel）");
+    expect(message).toContain("窗口：320×400，置顶");
+    expect(message).toContain("__pidesktop_state.json");
+    // 未声明时置顶不能凭空出现
+    expect(composeGalleryDevMessage(app(panel))).toContain("窗口：420×560\n");
   });
 });

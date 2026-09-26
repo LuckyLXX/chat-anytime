@@ -24,6 +24,13 @@ import { BrowserAutomationController } from "./browser-automation.js";
 import { ComputerOverlayController } from "./computer-overlay.js";
 import { DesignSnapshotController } from "./design-snapshot.js";
 import { galleryThumbsDirFor, readGalleryThumb, resolveGalleryAgentDir } from "./gallery-store.js";
+import { normalizeGalleryPanelOptions } from "../shared/gallery.js";
+import { createPanelStateCache } from "./panel-state.js";
+import { panelBoundsPathFor } from "./panel-bounds.js";
+import { PanelWindowController } from "./panel-window.js";
+import { createTrayController, type TrayController } from "./tray.js";
+import type { StaticServerEndpoint } from "./browser-static-server.js";
+import type { PanelAction } from "../shared/panel.js";
 import { clampServiceWait, waitForService } from "./gallery-service.js";
 import { TerminalManager, type PtyProcess, type PtySpawnOptions } from "./terminal-pty.js";
 import { Client as Ssh2Client } from "ssh2";
@@ -63,6 +70,32 @@ let securityWarning: string | undefined;
 let browserPreviewController: BrowserPreviewController | undefined;
 let browserAutomationController: BrowserAutomationController | undefined;
 let computerOverlayController: ComputerOverlayController | undefined;
+// 面板作品（kind="panel"）的窗口管理器：惰性创建（第一个面板作品运行时才建），
+// 自带静态服务与状态端点，因此与主窗口的生命周期无关。
+let panelWindows: PanelWindowController | undefined;
+let trayController: TrayController | undefined;
+/**
+ * 「用户真的要退出」标志：关闭主窗口 = 隐藏到托盘（用户 2026-09-26 决策），
+ * 没有这个短路，app.quit() 会先触发 close 事件被 preventDefault 拦下——
+ * 结果是托盘菜单点退出也退不掉。
+ */
+let quitting = false;
+let hidToTrayNoticeShown = false;
+/**
+ * 面板作品的状态缓存：只喂给面板窗口的 HTTP 端点（不属于渲染端协议）。
+ * 为什么放在 main：执行状态只在 utility 内存里，而面板要在「主窗口已关闭/
+ * 渲染端不在线」时照样能读——main 是唯一同时连着两边的进程。
+ */
+const panelState = createPanelStateCache(() => {
+  const settings = settingsCache;
+  const agent = settings?.agents.find((item) => item.id === settings.currentAgentId);
+  const workspace = settings?.agentWorkspaces?.[settings.currentAgentId];
+  return {
+    version: app.getVersion(),
+    ...(agent?.name ? { agentName: agent.name } : {}),
+    ...(workspace ? { workspace } : {})
+  };
+});
 // 设计导出缩略图（design_export 回执附图）：离屏渲染导出 HTML 并截图，无需真实预览标签页。
 const designSnapshotController = new DesignSnapshotController();
 /**
@@ -449,12 +482,7 @@ function showHookNotification(title: string, body: string, sessionId?: string, v
     return;
   }
   const notification = new Notification({ title, body });
-  notification.on("click", () => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.show();
-      mainWindow.focus();
-    }
-  });
+  notification.on("click", () => showMainWindow());
   notification.show();
 }
 function startRuntime(): void {
@@ -510,6 +538,8 @@ function startRuntime(): void {
       return;
     }
     if (message.type === "state") latestSnapshot = message.snapshot;
+    // 面板作品的数据源：无条件喂（不依赖渲染端是否在看，也不依赖主窗口是否存在）。
+    panelState.ingest(message);
     if (message.type === "catalog") latestCatalog = message;
     if (message.type === "resources") latestResources = message.resources;
     if (message.type === "custom-models") {
@@ -518,7 +548,10 @@ function startRuntime(): void {
       source.providers = source.providers.map((provider) => provider.id === message.providerId ? { ...provider, models: message.models } : provider);
       persistSettings().schedule(diffSettings(previous, source));
     }
-    mainWindow?.webContents.send("runtime:message", message);
+    // 面板推送只服务面板窗口（渲染端零消费），不转发——省掉流式期间每 500ms 一次
+    // 结构化克隆（载荷含最多 40 条会话摘要 + 各 live 会话的 todo）。
+    // main 自己的 ingest 在上一行，不受影响。
+    if (message.type !== "sessions.live") mainWindow?.webContents.send("runtime:message", message);
   });
   runtimeProcess.on("exit", (code) => { runtimeProcess = undefined; mainWindow?.webContents.send("runtime:message", { type: "error", message: `Pi 运行时意外停止（退出代码 ${code}），请重启应用。` } satisfies RuntimeMessage); });
   // Forward Pi runtime stdio only in development: in packaged builds the Pi
@@ -578,7 +611,28 @@ function createWindow(): void {
     // AI 开始操作某个标签页：让预览面板自动展开并激活它（用户可见）。
     if (!nextWindow.isDestroyed()) nextWindow.webContents.send("browser-preview:tabs", { action: "automation-started", tabId });
   });
+  // 内置浏览器的静态服务也挂上面板状态端点：AI 写面板作品时会先在这里看效果，
+  // 没有数据就只能看到一个空壳（见 browser-automation.setPanelStateEndpoint）。
+  browserAutomationController.setPanelStateEndpoint(panelStateEndpoint());
   computerOverlayController ??= new ComputerOverlayController();
+  nextWindow.on("close", (event) => {
+    // 关闭 = 退到后台（用户 2026-09-26 决策）：正在跑的会话、面板窗口、终端、SSH
+    // 全部继续活着；托盘图标（懒建）与面板上的「打开主界面」是回来的路。
+    // quitting 短路是必须的：app.quit() 也要经过 close，拦住就永远退不掉。
+    if (quitting) return;
+    // 「回得去」是隐藏的前提：隐藏后连任务栏按钮都没有了，只能靠托盘或面板回来。
+    // 两者都没有时**不拦这次关闭**——退回旧行为（窗口关掉 = 应用退出），
+    // 比把用户锁在一个看不见、也退不掉的进程里好（且此时没有已打开的面板窗口，
+    // 光是「创建过面板控制器」不算回路）。
+    if (!ensureTray().isActive() && !panelWindows?.hasOpenWindows()) {
+      notifyTrayUnavailable();
+      return;
+    }
+    // 拦下关闭：窗口只隐藏，utility 进程、Pi 会话、面板窗口都继续活着。
+    event.preventDefault();
+    nextWindow.hide();
+    notifyHiddenToTray();
+  });
   nextWindow.on("closed", () => {
     previewController.dispose();
     browserAutomationController?.dispose();
@@ -588,6 +642,79 @@ function createWindow(): void {
   });
   nextWindow.webContents.setWindowOpenHandler(({ url }) => { void import("electron").then(({ shell }) => shell.openExternal(url)); return { action: "deny" }; });
   if (rendererUrl) void nextWindow.loadURL(rendererUrl); else void nextWindow.loadFile(join(__dirname, "../renderer/index.html"));
+}
+
+/**
+ * 回到主界面：有主窗口就前置，没有就重建。
+ *
+ * 三条路都走它（托盘图标/菜单、「面板作品」上的「打开主界面」按钮、桌面通知点击），
+ * 否则早晚会出现「某个入口回不去」的缺口。
+ */
+function showMainWindow(): void {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+    return;
+  }
+  createWindow();
+}
+
+/** 面板端点的白名单动作处理（面板窗口与内置浏览器预览共用）。 */
+function handlePanelAction(action: PanelAction): void {
+  if (action === "show-main") showMainWindow();
+}
+
+/** 面板端点：状态来自 main 的内存缓存，动作只有白名单里的那一个。 */
+function panelStateEndpoint(): StaticServerEndpoint {
+  return {
+    state: () => panelState.snapshot(),
+    action: (action) => {
+      handlePanelAction(action);
+      return true;
+    }
+  };
+}
+
+/** 托盘（懒建）：关闭主窗口后回得去的唯一常驻入口，也是真正的退出入口。 */
+function ensureTray(): TrayController {
+  trayController ??= createTrayController({
+    iconPath: appIconPath,
+    tip: "ChatAnyTime · 仍在后台运行",
+    onOpen: () => showMainWindow(),
+    onQuit: () => app.quit()
+  });
+  trayController.ensure();
+  return trayController;
+}
+
+/**
+ * 首次隐藏到托盘时提示一次。
+ *
+ * 不提示的代价是真实的：「点 X 之后应用还在跑」在这个版本之前是不成立的行为，
+ * 用户会以为关不掉或者已经退了（后者更糟：他会以为会话已经停了）。只报一次
+ * ——天天用的人不需要反复被打扰。
+ */
+function notifyHiddenToTray(): void {
+  if (hidToTrayNoticeShown) return;
+  hidToTrayNoticeShown = true;
+  if (!Notification.isSupported()) return;
+  const notification = new Notification({
+    title: "ChatAnyTime 已退到后台",
+    body: "正在运行的会话与面板不会中断。点任务栏托盘图标（或面板上的「打开主界面」）回到主界面，托盘右键菜单可以退出。"
+  });
+  notification.on("click", () => showMainWindow());
+  notification.show();
+}
+
+/**
+ * 托盘建不起来时的告知：窗口保持打开（没有别的入口了）。
+ *
+ * 场景很罕见（图标取不到）但代价不对称——不提示的话用户会以为点 X 没反应。
+ */
+function notifyTrayUnavailable(): void {
+  if (!Notification.isSupported()) return;
+  new Notification({ title: "无法退到后台", body: "托盘图标创建失败，没有可以回来的入口，所以这次关闭会直接退出应用（正在运行的会话会中断）。" }).show();
 }
 function isTerminalCommand(value: unknown): value is TerminalCommand {
   if (!value || typeof value !== "object") return false;
@@ -789,6 +916,28 @@ function registerIpc(): void {
     const data = readGalleryThumb(galleryThumbsDirFor(resolveGalleryAgentDir()), fileName);
     return data ? `data:image/png;base64,${data.toString("base64")}` : undefined;
   });
+  ipcMain.handle("gallery:open-panel", async (_event, input: { id?: unknown; title?: unknown; workspace?: unknown; filePath?: unknown; panel?: unknown } | undefined): Promise<{ ok: boolean; message?: string }> => {
+    const id = typeof input?.id === "string" ? input.id.trim() : "";
+    const workspace = typeof input?.workspace === "string" ? input.workspace.trim() : "";
+    const filePath = typeof input?.filePath === "string" ? input.filePath.trim() : "";
+    if (!id || !workspace || !filePath) return { ok: false, message: "面板作品信息不完整（缺少 id / 工作区 / 入口）" };
+    // 惰性创建：面板管理器自带一个 loopback 静态服务，不用就不建。
+    panelWindows ??= new PanelWindowController({
+      stateProvider: () => panelState.snapshot(),
+      onAction: handlePanelAction,
+      boundsPath: panelBoundsPathFor(resolveGalleryAgentDir()),
+      openExternal: (url) => {
+        void shell.openExternal(url).catch(() => undefined);
+      }
+    });
+    return panelWindows.open({
+      id,
+      title: typeof input?.title === "string" && input.title.trim() ? input.title.trim() : "面板",
+      workspace,
+      filePath,
+      panel: normalizeGalleryPanelOptions(input?.panel)
+    });
+  });
   ipcMain.handle("terminal:command", (_event, command: TerminalCommand): void => {
     if (!isTerminalCommand(command)) throw new Error("终端命令无效");
     terminalManager.handle(command);
@@ -821,6 +970,6 @@ function registerIpc(): void {
   });
   ipcMain.handle("runtime:send", (_event, command: RuntimeCommand): void => { updateSettings(command); sendToRuntime(command); });
 }
-app.whenReady().then(() => { Menu.setApplicationMenu(null); registerPreviewFileProtocol(); registerIpc(); startRuntime(); createWindow(); app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); }); });
+app.whenReady().then(() => { Menu.setApplicationMenu(null); registerPreviewFileProtocol(); registerIpc(); startRuntime(); createWindow(); app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); else showMainWindow(); }); });
 app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
-app.on("before-quit", () => { settingsPersistence?.flush(); browserAutomationController?.dispose(); computerOverlayController?.dispose(); browserPreviewController?.dispose(); terminalManager.disposeAll(); sshConnectionManager?.disposeAll(); runtimeProcess?.kill(); });
+app.on("before-quit", () => { quitting = true; settingsPersistence?.flush(); browserAutomationController?.dispose(); computerOverlayController?.dispose(); browserPreviewController?.dispose(); panelWindows?.dispose(); trayController?.dispose(); terminalManager.disposeAll(); sshConnectionManager?.disposeAll(); runtimeProcess?.kill(); });

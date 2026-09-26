@@ -2896,6 +2896,11 @@ html[data-ui-motion="off"] .general-jev-toggle .chevron { transition: none; }
 .gallery-publish-dialog h2 { margin: 0; font-size: 14px; }
 .gallery-publish-body { display: grid; gap: 10px; }
 .gallery-publish-body label { display: grid; gap: 5px; color: var(--text-muted); font-size: 10.5px; }
+/* 面板窗口选项：三个字段共用一行（宽/高/置顶），免得对话框被两个数字框撑长。 */
+.gallery-panel-options { display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px; align-items: end; }
+.gallery-panel-ontop { display: flex !important; align-items: center; gap: 6px; padding-bottom: 8px; white-space: nowrap; }
+.gallery-panel-ontop input { min-height: 0; }
+.gallery-panel-options input[type="number"] { min-height: 32px; padding: 0 9px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface-input); color: var(--text); font-size: 11.5px; }
 .gallery-publish-body input, .gallery-publish-body select { min-height: 32px; padding: 0 9px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface-input); color: var(--text); font-size: 11.5px; }
 .gallery-publish-dialog footer { display: flex; justify-content: flex-end; gap: 8px; }
 .gallery-wall-count { color: var(--text-muted); font-size: 11.5px; }

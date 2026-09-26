@@ -1,4 +1,4 @@
-import { FolderOpen, Hammer, LayoutGrid, Play, Plus, Server, Sparkles, Trash2 } from "lucide-react";
+import { AppWindow, FolderOpen, Hammer, LayoutGrid, Play, Plus, Server, Sparkles, Trash2 } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { GALLERY_KIND_LABELS, type GalleryApp } from "../../../shared/gallery";
 
@@ -71,7 +71,7 @@ function GalleryCard({ app, workspace, onRun, onDevelop, onRemove }: { app: Gall
       <button type="button" className="gallery-card-thumb" data-control="gallery-run" title={`运行「${app.title}」`} onClick={() => onRun(app)}>
         {thumb
           ? <img src={thumb} alt="" />
-          : <span className="gallery-card-placeholder">{app.kind === "server" ? <Server size={22} /> : <LayoutGrid size={22} />}</span>}
+          : <span className="gallery-card-placeholder">{app.kind === "server" ? <Server size={22} /> : app.kind === "panel" ? <AppWindow size={22} /> : <LayoutGrid size={22} />}</span>}
         <span className="gallery-card-badge">{GALLERY_KIND_LABELS[app.kind]}</span>
       </button>
       <div className="gallery-card-body">

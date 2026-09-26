@@ -1,0 +1,79 @@
+import { describe, expect, it } from "vitest";
+import { PANEL_STATE_ENDPOINT, isPanelEntryFile, isPanelStatePath, panelDevHint, parsePanelAction, summarizeTodos } from "./panel.js";
+
+describe("parsePanelAction", () => {
+  it("accepts whitelisted actions", () => {
+    expect(parsePanelAction({ action: "show-main" })).toBe("show-main");
+    expect(parsePanelAction({ action: "  show-main  " })).toBe("show-main");
+  });
+
+  it("rejects anything outside the whitelist", () => {
+    expect(parsePanelAction({ action: "abort" })).toBeUndefined();
+    expect(parsePanelAction({ action: "show-main " + "x".repeat(10) })).toBeUndefined();
+    expect(parsePanelAction({ action: "SHOW-MAIN" })).toBeUndefined();
+    expect(parsePanelAction({ action: 7 })).toBeUndefined();
+    expect(parsePanelAction({})).toBeUndefined();
+  });
+
+  it("rejects non-object bodies (数组/字符串/null 都不算动作)", () => {
+    expect(parsePanelAction(undefined)).toBeUndefined();
+    expect(parsePanelAction(null)).toBeUndefined();
+    expect(parsePanelAction("show-main")).toBeUndefined();
+    expect(parsePanelAction(["show-main"])).toBeUndefined();
+  });
+});
+
+describe("isPanelStatePath", () => {
+  it("matches the endpoint at any depth (面板页可以用相对路径取数)", () => {
+    expect(isPanelStatePath(`/${PANEL_STATE_ENDPOINT}`)).toBe(true);
+    expect(isPanelStatePath(`/${PANEL_STATE_ENDPOINT}`.replace(/^\//u, ""))).toBe(true);
+    expect(isPanelStatePath(`/panels/status/${PANEL_STATE_ENDPOINT}`)).toBe(true);
+    expect(isPanelStatePath(`/a/b/c/${PANEL_STATE_ENDPOINT}`)).toBe(true);
+  });
+
+  it("does not hijack lookalike files", () => {
+    expect(isPanelStatePath(`/${PANEL_STATE_ENDPOINT}.bak`)).toBe(false);
+    expect(isPanelStatePath(`/x${PANEL_STATE_ENDPOINT}`)).toBe(false);
+    expect(isPanelStatePath("/index.html")).toBe(false);
+    expect(isPanelStatePath("/")).toBe(false);
+  });
+});
+
+describe("summarizeTodos", () => {
+  it("counts by status", () => {
+    expect(
+      summarizeTodos([
+        { content: "a", status: "completed" },
+        { content: "b", status: "in_progress" },
+        { content: "c", status: "pending" },
+        { content: "d", status: "completed" }
+      ])
+    ).toEqual({ total: 4, completed: 2, inProgress: 1 });
+  });
+
+  it("returns a zeroed summary for an empty list", () => {
+    expect(summarizeTodos([])).toEqual({ total: 0, completed: 0, inProgress: 0 });
+  });
+});
+
+describe("isPanelEntryFile", () => {
+  it("accepts web pages only", () => {
+    expect(isPanelEntryFile("panels/status/index.html")).toBe(true);
+    expect(isPanelEntryFile("D:\\ws\\panel.HTM")).toBe(true);
+    expect(isPanelEntryFile("panel.svg")).toBe(true);
+  });
+
+  it("rejects everything else (面板是网页，不是任意文件)", () => {
+    expect(isPanelEntryFile("panels/status")).toBe(false);
+    expect(isPanelEntryFile("panel.md")).toBe(false);
+    expect(isPanelEntryFile("panel.js")).toBe(false);
+    expect(isPanelEntryFile("panel.html.bak")).toBe(false);
+  });
+});
+
+describe("panelDevHint", () => {
+  it("names the endpoint so 继续开发 的模型不用猜", () => {
+    expect(panelDevHint()).toContain(PANEL_STATE_ENDPOINT);
+    expect(panelDevHint()).toContain("show-main");
+  });
+});

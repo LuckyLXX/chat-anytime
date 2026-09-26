@@ -600,6 +600,10 @@ export function createDemoApi(): DesktopApi {
       // 终端标签 + 一条失败提示，把一个能看的 demo 演成坏掉的）。
       return { ok: true };
     },
+    async galleryOpenPanel(): Promise<{ ok: boolean; message?: string }> {
+      // 演示环境只有一个渲染进程，开不出独立窗口宿主：如实拒绝，不伪造成功。
+      return { ok: false, message: "演示环境不支持面板窗口（需要 Electron 主进程）" };
+    },
     async themeImport(): Promise<ThemeImportOutcome> {
       // 演示环境没有文件系统也没有原生对话框：如实告知，不伪造一个成功的导入
       // （与 galleryThumb / galleryAwaitService 同口径的降级态度）。

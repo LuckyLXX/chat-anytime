@@ -1,6 +1,6 @@
 import { LayoutGrid, X } from "lucide-react";
 import { useState, type FormEvent, type ReactNode } from "react";
-import type { GalleryApp, GalleryDraft, GalleryKind } from "../../../shared/gallery";
+import type { GalleryApp, GalleryDraft, GalleryKind, GalleryPanelOptions } from "../../../shared/gallery";
 import { GalleryWall } from "./GalleryWall";
 
 /**
@@ -49,6 +49,10 @@ export function GalleryPublishDialog({ initial, workspace, onSubmit, onClose }: 
   const [command, setCommand] = useState("");
   const [url, setUrl] = useState("");
   const [description, setDescription] = useState("");
+  // 面板窗口的初始尺寸/置顶。空串 = 用缺省（420×560、不置顶），不强制用户填。
+  const [panelWidth, setPanelWidth] = useState("");
+  const [panelHeight, setPanelHeight] = useState("");
+  const [panelOnTop, setPanelOnTop] = useState(false);
 
   function submit(event: FormEvent): void {
     event.preventDefault();
@@ -57,6 +61,15 @@ export function GalleryPublishDialog({ initial, workspace, onSubmit, onClose }: 
     if (command.trim()) draft.command = command.trim();
     if (url.trim()) draft.url = url.trim();
     if (description.trim()) draft.description = description.trim();
+    if (kind === "panel") {
+      const panel: GalleryPanelOptions = {};
+      const width = Number.parseInt(panelWidth, 10);
+      const height = Number.parseInt(panelHeight, 10);
+      if (Number.isFinite(width) && width > 0) panel.width = width;
+      if (Number.isFinite(height) && height > 0) panel.height = height;
+      if (panelOnTop) panel.alwaysOnTop = true;
+      if (Object.keys(panel).length > 0) draft.panel = panel;
+    }
     onSubmit(draft);
     onClose();
   }
@@ -74,11 +87,19 @@ export function GalleryPublishDialog({ initial, workspace, onSubmit, onClose }: 
             <select value={kind} onChange={(event) => setKind(event.target.value as GalleryKind)}>
               <option value="file">网页（入口文件，单文件 HTML 等）</option>
               <option value="server">服务（项目目录 + 启动命令）</option>
+              <option value="panel">面板（入口网页开成独立小窗口，主界面关了也在）</option>
             </select>
           </label>
-          <label>{kind === "server" ? "项目目录" : "入口文件"}
-            <input value={path} placeholder={workspace ? `工作区相对路径，如 ${kind === "server" ? "apps/demo" : "designs/exports/demo.html"}` : "工作区相对路径"} onChange={(event) => setPath(event.target.value)} />
+          <label>{kind === "server" ? "项目目录" : kind === "panel" ? "入口网页" : "入口文件"}
+            <input value={path} placeholder={workspace ? `工作区相对路径，如 ${kind === "server" ? "apps/demo" : kind === "panel" ? "panels/status/index.html" : "designs/exports/demo.html"}` : "工作区相对路径"} onChange={(event) => setPath(event.target.value)} />
           </label>
+          {kind === "panel" && (
+            <div className="gallery-panel-options">
+              <label>窗口宽（可选）<input type="number" min={240} max={1600} value={panelWidth} placeholder="420" onChange={(event) => setPanelWidth(event.target.value)} /></label>
+              <label>窗口高（可选）<input type="number" min={200} max={1400} value={panelHeight} placeholder="560" onChange={(event) => setPanelHeight(event.target.value)} /></label>
+              <label className="gallery-panel-ontop"><input type="checkbox" checked={panelOnTop} onChange={(event) => setPanelOnTop(event.target.checked)} /> 窗口置顶</label>
+            </div>
+          )}
           {kind === "server" && (
             <>
               <label>启动命令（可选）<input value={command} placeholder="如：npm run dev" onChange={(event) => setCommand(event.target.value)} /></label>

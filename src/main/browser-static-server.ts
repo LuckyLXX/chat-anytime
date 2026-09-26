@@ -10,6 +10,22 @@ import { readFile, realpath, stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { PANEL_ACTION_MAX_BYTES, isPanelStatePath, parsePanelAction, type PanelAction } from "../shared/panel.js";
+
+/**
+ * 虚拟端点（面板作品读状态的地方）。
+ *
+ * 它不是一个真文件，而是被拦在 `stat` 之前的一段处理：请求路径的**最后一段**等于
+ * `__pidesktop_state.json` 就命中。这样面板页面用相对路径 `fetch("./__pidesktop_state.json")`
+ * 即可访问，无论页面位于挂载目录的哪一层——作者不需要知道端口与 token。
+ * 它同样受 `/w/<token>/<挂载号>/` 前缀保护：不经 token 的请求连分支都进不来。
+ */
+export interface StaticServerEndpoint {
+  /** GET 返回的状态（任意可 JSON 序列化的值）。 */
+  state: () => unknown;
+  /** POST 动作处理：返回 true = 已执行并回 { ok: true }。 */
+  action: (action: PanelAction) => boolean;
+}
 
 const MIME_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -62,6 +78,13 @@ export class BrowserStaticServer {
   private readonly rootIndex = new Map<string, number>();
   private startError: string | undefined;
   private starting: Promise<void> | undefined;
+  /** 面板作品的虚拟端点；未注册时该路径回 404（不是抛错）。 */
+  private endpoint: StaticServerEndpoint | undefined;
+
+  /** 注册/摘除虚拟端点（面板窗口与内置浏览器预览共用同一实现）。 */
+  setEndpoint(endpoint: StaticServerEndpoint | undefined): void {
+    this.endpoint = endpoint;
+  }
 
   /**
    * HTTP URL serving `filePath`, mounting `preferredRoot` when the file lives
@@ -77,6 +100,44 @@ export class BrowserStaticServer {
     const rel = relative(root, file).split(sep).join("/");
     const encoded = rel.split("/").map(encodeURIComponent).join("/");
     return `http://127.0.0.1:${this.port}/w/${this.token}/${index}${encoded.startsWith("/") ? encoded : `/${encoded}`}`;
+  }
+
+  /** 虚拟端点：GET 读状态、POST 跑白名单动作，其余方法 405。 */
+  private async handleEndpoint(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const endpoint = this.endpoint;
+    // 没注册端点时按「文件不存在」处理，不泄露这个地址意味着什么。
+    if (!endpoint) {
+      respond(response, 404, "本地预览地址无效");
+      return;
+    }
+    if (request.method === "GET" || request.method === "HEAD") {
+      const body = JSON.stringify(endpoint.state() ?? null);
+      response.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" });
+      response.end(request.method === "HEAD" ? undefined : body);
+      return;
+    }
+    if (request.method !== "POST") {
+      respond(response, 405, "该地址只接受 GET/POST");
+      return;
+    }
+    const raw = await readBody(request, PANEL_ACTION_MAX_BYTES);
+    let parsed: unknown;
+    try {
+      parsed = raw ? JSON.parse(raw) : undefined;
+    } catch {
+      parsed = undefined;
+    }
+    const action = parsePanelAction(parsed);
+    if (!action) {
+      respond(response, 403, "不认识的动作");
+      return;
+    }
+    if (!endpoint.action(action)) {
+      respond(response, 403, "动作未被接受");
+      return;
+    }
+    response.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" });
+    response.end(JSON.stringify({ ok: true, action }));
   }
 
   dispose(): void {
@@ -144,6 +205,10 @@ export class BrowserStaticServer {
         return;
       }
       const rel = decodeURIComponent(match[3] ?? "/");
+      if (isPanelStatePath(rel)) {
+        await this.handleEndpoint(request, response);
+        return;
+      }
       const target = resolve(join(root, rel));
       if (!pathIsWithin(root, target)) {
         respond(response, 403, "路径越出预览目录");
@@ -193,4 +258,17 @@ function respond(response: ServerResponse, status: number, message: string): voi
   if (response.writableEnded) return;
   response.writeHead(status, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" });
   response.end(message);
+}
+
+/** 读请求体，超过 limit 即放弃（返回空串，调用方会当成「没有动作」拒掉）。 */
+async function readBody(request: IncomingMessage, limit: number): Promise<string> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of request) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+    size += buffer.length;
+    if (size > limit) return "";
+    chunks.push(buffer);
+  }
+  return Buffer.concat(chunks).toString("utf8");
 }

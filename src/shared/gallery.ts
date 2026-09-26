@@ -1,6 +1,7 @@
 /**
  * 作品（Gallery）：把用 AI 做出来的成果登记成「可反复运行、可一键继续开发」的
- * 一等公民。作品不一定单文件——可能是一个 html，也可能是一整个目录 + 启动命令。
+ * 一等公民。作品不一定单文件——可能是一个 html，也可能是一整个目录 + 启动命令，
+ * 还可能是一个**面板**（一个脱离主界面独立存活的小窗口，见 kind = "panel"）。
  *
  * 本模块是**纯数据层**：类型 + 归一化 + 增删改 + 运行分流判定。所有 IO（读盘、
  * 缩略图渲染、静态服务、composer 注入）都在调用方；渲染端与主进程共享同一组
@@ -10,11 +11,35 @@
  * - 清单**全局跨工作区**（一个池子，换工作区也在），落 `<agentDir>/pidesktop-gallery/`；
  * - 同一「工作区 + 入口 + 类型」重复发布 = 更新而非新增（否则作品墙会出重复卡片）；
  * - 运行**一律走内置浏览器 + 本地静态服务**（单文件也能跑，且 console/网络/相对
- *   资源全可用）；沙箱 iframe 只跑得了单文件且有 origin 限制，故不作运行通道。
+ *   资源全可用）；沙箱 iframe 只跑得了单文件且有 origin 限制，故不作运行通道；
+ * - panel 是唯一例外：它开的是**独立 BrowserWindow**（主窗口关掉后仍能展示），
+ *   因此它必须是一个网页文件，且由 main 侧的窗口管理器负责（2026-09-26）。
  */
 
-/** 作品类型：file = 入口文件（如导出的单文件 html）；server = 需要起服务的项目目录。 */
-export type GalleryKind = "file" | "server";
+import { panelDevHint } from "./panel.js";
+
+/**
+ * 作品类型：
+ * - file：入口文件（如导出的单文件 html），在主界面内置浏览器里运行；
+ * - server：需要起服务的项目目录 + 启动命令/地址，同样在内置浏览器里打开；
+ * - panel：入口网页被开成独立小窗口（面板），脱离主界面存活，可读会话状态端点。
+ */
+export type GalleryKind = "file" | "server" | "panel";
+
+/** kind=panel 的窗口偏好（缺省值见 PANEL_DEFAULT_*）。 */
+export interface GalleryPanelOptions {
+  width?: number;
+  height?: number;
+  alwaysOnTop?: boolean;
+}
+
+/** 面板窗口缺省尺寸：竖长条，装得下「几个会话 + todo」而不占地。 */
+export const PANEL_DEFAULT_WIDTH = 420;
+export const PANEL_DEFAULT_HEIGHT = 560;
+export const PANEL_MIN_WIDTH = 240;
+export const PANEL_MAX_WIDTH = 1600;
+export const PANEL_MIN_HEIGHT = 200;
+export const PANEL_MAX_HEIGHT = 1400;
 
 export interface GalleryApp {
   id: string;
@@ -29,6 +54,8 @@ export interface GalleryApp {
   command?: string;
   /** kind=server：服务地址。存在时「运行」直接开浏览器，无需起进程。 */
   url?: string;
+  /** kind=panel：独立窗口的尺寸与置顶偏好（非法值在读侧夹取/丢弃）。 */
+  panel?: GalleryPanelOptions;
   /** 缩略图文件名（位于全局 thumbs 目录内，与条目同生共死）。 */
   thumb?: string;
   tags?: string[];
@@ -49,6 +76,8 @@ export interface GalleryDraft {
   entry?: string;
   command?: string;
   url?: string;
+  /** kind=panel：窗口偏好。 */
+  panel?: GalleryPanelOptions;
   description?: string;
   tags?: string[];
   workspace?: string;
@@ -56,13 +85,14 @@ export interface GalleryDraft {
 
 export const GALLERY_KIND_LABELS: Record<GalleryKind, string> = {
   file: "网页",
-  server: "服务"
+  server: "服务",
+  panel: "面板"
 };
 
 /** 清单上限：超出按 updatedAt 淘汰最旧（调用方负责同步清理其缩略图）。 */
 export const MAX_GALLERY_APPS = 200;
 
-const KINDS: readonly GalleryKind[] = ["file", "server"];
+const KINDS: readonly GalleryKind[] = ["file", "server", "panel"];
 
 function randomAppId(): string {
   const crypto = globalThis.crypto;
@@ -78,6 +108,32 @@ function trimmed(value: unknown): string | undefined {
 
 function finite(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+/**
+ * 面板窗口偏好的读侧归一化：非对象返回 undefined；尺寸取整并夹到可用区间
+ * （写了个 0 宽或 99999 高的作品不应当造出一个点不动的窗口）；
+ * 全部字段非法时返回 undefined，调用方自然回退到缺省尺寸。
+ */
+export function normalizeGalleryPanelOptions(value: unknown): GalleryPanelOptions | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const options: GalleryPanelOptions = {};
+  const width = finite(record.width);
+  if (width !== undefined) options.width = clamp(Math.round(width), PANEL_MIN_WIDTH, PANEL_MAX_WIDTH);
+  const height = finite(record.height);
+  if (height !== undefined) options.height = clamp(Math.round(height), PANEL_MIN_HEIGHT, PANEL_MAX_HEIGHT);
+  if (typeof record.alwaysOnTop === "boolean") options.alwaysOnTop = record.alwaysOnTop;
+  return Object.keys(options).length > 0 ? options : undefined;
+}
+
+/** 面板窗口的生效尺寸（作品没声明就用缺省）。 */
+export function panelWindowSize(options?: GalleryPanelOptions): { width: number; height: number } {
+  return { width: options?.width ?? PANEL_DEFAULT_WIDTH, height: options?.height ?? PANEL_DEFAULT_HEIGHT };
 }
 
 /** 工作区相对路径归一化：反斜杠转正斜杠、去掉 `./` 前缀（"." 保留为根）。 */
@@ -99,6 +155,8 @@ export function normalizeGalleryApp(value: unknown): GalleryApp | undefined {
   const entry = trimmed(record.entry);
   const kind = trimmed(record.kind) as GalleryKind | undefined;
   if (!title || !workspace || !entry || !kind || !KINDS.includes(kind)) return undefined;
+  // 面板必须指向一个网页文件：入口为工作区根（"."）的「面板」是配置错误，读侧丢弃。
+  if (kind === "panel" && normalizeGalleryEntry(entry) === ".") return undefined;
   const createdAt = finite(record.createdAt) ?? Date.now();
   const updatedAt = finite(record.updatedAt) ?? createdAt;
   const app: GalleryApp = {
@@ -116,6 +174,10 @@ export function normalizeGalleryApp(value: unknown): GalleryApp | undefined {
   if (kind === "server" && command) app.command = command;
   const url = trimmed(record.url);
   if (kind === "server" && url) app.url = url;
+  if (kind === "panel") {
+    const panel = normalizeGalleryPanelOptions(record.panel);
+    if (panel) app.panel = panel;
+  }
   const thumb = trimmed(record.thumb);
   if (thumb) app.thumb = thumb;
   if (Array.isArray(record.tags)) {
@@ -201,6 +263,8 @@ export function trimGalleryApps(list: readonly GalleryApp[], max = MAX_GALLERY_A
 /** 运行分流结果：唯一判定来源（渲染端与主进程共用）。 */
 export type GalleryRunTarget =
   | { kind: "file"; absolutePath: string }
+  /** 面板：入口网页会被 main 开成独立窗口，不走内置浏览器。 */
+  | { kind: "panel"; absolutePath: string }
   | { kind: "server"; url?: string; directory: string; command?: string };
 
 /** 绝对路径拼装（纯字符串操作；调用方已保证 workspace 是绝对路径）。 */
@@ -213,6 +277,7 @@ export function galleryAbsolutePath(workspace: string, entry: string): string {
 
 export function galleryRunTarget(app: Pick<GalleryApp, "kind" | "workspace" | "entry" | "url" | "command">): GalleryRunTarget {
   const absolutePath = galleryAbsolutePath(app.workspace, app.entry);
+  if (app.kind === "panel") return { kind: "panel", absolutePath };
   if (app.kind === "server") {
     const target: GalleryRunTarget = { kind: "server", directory: absolutePath };
     if (app.url) target.url = app.url;
@@ -243,16 +308,22 @@ export const GALLERY_SERVICE_TAIL_CHARS = 200;
  */
 export type GalleryRunPlan =
   | { action: "open-file"; absolutePath: string }
+  /** 面板：把入口网页开成独立窗口（主界面关掉后仍能显示）；options 已归一化。 */
+  | { action: "open-panel"; absolutePath: string; options: GalleryPanelOptions }
   | { action: "open-browser"; url: string }
   | { action: "start-service"; directory: string; command: string; url?: string }
   /** 服务型但既连不上、又没登记启动命令：只能如实说，不能装作跑起来了。 */
   | { action: "manual" };
 
 export function galleryRunPlan(
-  app: Pick<GalleryApp, "kind" | "workspace" | "entry" | "url" | "command">,
+  app: Pick<GalleryApp, "kind" | "workspace" | "entry" | "url" | "command" | "panel">,
   serviceReachable: boolean
 ): GalleryRunPlan {
   const target = galleryRunTarget(app);
+  // 面板是**第一个分支**：面板没有服务可探，也不应受 serviceReachable 影响。
+  if (target.kind === "panel") {
+    return { action: "open-panel", absolutePath: target.absolutePath, options: normalizeGalleryPanelOptions(app.panel) ?? {} };
+  }
   if (target.kind === "file") return { action: "open-file", absolutePath: target.absolutePath };
   if (target.url && serviceReachable) return { action: "open-browser", url: target.url };
   if (target.command) {
@@ -329,7 +400,13 @@ export function galleryThumbName(at = Date.now()): string {
   return `gallery-${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}-${pad(date.getMilliseconds(), 3)}.png`;
 }
 
-/** 只有可离屏渲染的静态页面才值得生成缩略图（服务型留空，卡片用类型徽标站位）。 */
+/**
+ * 只有可离屏渲染的静态页面才值得生成缩略图。
+ *
+ * 面板**故意不在内**：面板的正文是运行时数据（面板页靠 fetch 状态端点取数），
+ * 而离屏截图窗口里没有那个端点，截出来的会是「接口不可用」的降级态——一张写着
+ * 错误的缩略图比一个干净的类型图标差得多。面板卡片用 AppWindow 图标站位。
+ */
 export function galleryThumbEligible(app: Pick<GalleryApp, "kind" | "entry">): boolean {
   if (app.kind !== "file") return false;
   return /\.(?:html?|svg)$/iu.test(app.entry);
@@ -350,6 +427,11 @@ export function composeGalleryDevMessage(app: GalleryApp): string {
   if (app.description) lines.push(`说明：${app.description}`);
   if (app.command) lines.push(`启动命令：${app.command}`);
   if (app.url) lines.push(`服务地址：${app.url}`);
+  if (app.kind === "panel") {
+    const size = panelWindowSize(app.panel);
+    lines.push(`窗口：${size.width}×${size.height}${app.panel?.alwaysOnTop ? "，置顶" : ""}`);
+    lines.push(panelDevHint());
+  }
   lines.push("", "我要在这个作品上继续开发，请先读入口相关的代码再动手。");
   return lines.join("\n");
 }

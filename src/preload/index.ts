@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { BrowserElementPick, BrowserPreviewCommand, BrowserPreviewState, BrowserTabsEvent, DesktopApi, RuntimeCommand, RuntimeMessage, SshCommand, SshEventData, SshRevealEvent, TerminalCommand, TerminalEventData } from "../shared/protocol.js";
+import type { BrowserElementPick, BrowserPreviewCommand, BrowserPreviewState, BrowserTabsEvent, DesktopApi, GalleryPanelOptions, RuntimeCommand, RuntimeMessage, SshCommand, SshEventData, SshRevealEvent, TerminalCommand, TerminalEventData } from "../shared/protocol.js";
 
 const api: DesktopApi = {
   bootstrap: () => ipcRenderer.invoke("desktop:bootstrap"),
@@ -21,6 +21,7 @@ const api: DesktopApi = {
   galleryFileUrl: (filePath: string, workspace?: string) => ipcRenderer.invoke("gallery:file-url", filePath, workspace),
   galleryThumb: (fileName: string) => ipcRenderer.invoke("gallery:thumb", fileName),
   galleryAwaitService: (input: { url: string; terminalId?: string; timeoutMs?: number }) => ipcRenderer.invoke("gallery:await-service", input),
+  galleryOpenPanel: (input: { id: string; title: string; workspace: string; filePath: string; panel?: GalleryPanelOptions }) => ipcRenderer.invoke("gallery:open-panel", input),
   themeImport: (kind: "dir" | "css") => ipcRenderer.invoke("appearance:theme-import", kind),
   themePromote: (themeId: string) => ipcRenderer.invoke("appearance:theme-promote", themeId),
   browserPreview: (command: BrowserPreviewCommand) => ipcRenderer.invoke("browser-preview:command", command),

@@ -17,7 +17,8 @@ import { GalleryPublishDialog, GalleryWallDialog } from "./GalleryDialogs";
 
 const apps: GalleryApp[] = [
   { id: "g1", title: "收纳整理 App 原型", kind: "file", workspace: "D:/ws", entry: "designs/exports/demo.html", createdAt: 1, updatedAt: 1 },
-  { id: "g2", title: "记账小工具", kind: "server", workspace: "D:/ws", entry: "apps/ledger", command: "npm run dev", url: "http://localhost:5173", createdAt: 1, updatedAt: 2 }
+  { id: "g2", title: "记账小工具", kind: "server", workspace: "D:/ws", entry: "apps/ledger", command: "npm run dev", url: "http://localhost:5173", createdAt: 1, updatedAt: 2 },
+  { id: "g3", title: "会话状态面板", kind: "panel", workspace: "D:/ws", entry: "panels/status/index.html", panel: { width: 420, height: 560, alwaysOnTop: true }, createdAt: 1, updatedAt: 3 }
 ];
 
 function noop(): void {
@@ -65,6 +66,13 @@ describe("GalleryWall theme hooks", () => {
     expect(markup).toContain("另一工作区");
   });
 
+  it("面板作品有独立的类型徽标与图标（不跟网页作品混为一谈）", () => {
+    const markup = renderToStaticMarkup(<GalleryWall apps={[apps[2]!]} workspace="D:/ws" onRun={noop} onDevelop={noop} onPublish={noop} onRemove={noop} />);
+    expect(markup).toContain('data-gallery-id="g3"');
+    expect(markup).toContain(">面板<");
+    expect(markup).toContain("lucide-app-window");
+  });
+
   it("嵌入弹窗时不自带「作品墙」标题（容器头部已有，避免同屏两个同名标题）", () => {
     const embedded = renderToStaticMarkup(<GalleryWall apps={apps} embedded onRun={noop} onDevelop={noop} onPublish={noop} onRemove={noop} />);
     expect(embedded).not.toContain("<h1>作品墙</h1>");
@@ -91,5 +99,16 @@ describe("GalleryDialogs theme hooks", () => {
     expect(markup).toContain('aria-label="登记新作品"');
     expect(markup).toContain("designs/exports/demo.html");
     expect(markup).toContain("demo.html");
+  });
+
+  it("publish dialog offers 面板 as a third type with its window options", () => {
+    const markup = renderToStaticMarkup(<GalleryPublishDialog initial={{ path: "panels/status/index.html", kind: "panel" }} workspace="D:/ws" onSubmit={noop} onClose={noop} />);
+    expect(markup).toContain('<option value="panel"');
+    expect(markup).toContain("gallery-panel-options");
+    // 选面板时入口标签换成「入口网页」，与 kind=file 区分
+    expect(markup).toContain("入口网页");
+    // 网页/服务型的窗口选项不该出现
+    const fileDialog = renderToStaticMarkup(<GalleryPublishDialog workspace="D:/ws" onSubmit={noop} onClose={noop} />);
+    expect(fileDialog).not.toContain("gallery-panel-options");
   });
 });
