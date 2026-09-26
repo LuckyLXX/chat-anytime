@@ -573,6 +573,11 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
    惯性跳变而抖动。只作用于 .timeline 直接子元素 .message（含 pending-response），
    不误伤空态容器与进度行。流式/粘底均不受影响——可视区内的消息照常渲染。 */
 .timeline > .message { content-visibility: auto; contain-intrinsic-size: auto 96px; }
+/* 时间线窗口化的等高占位（T10，见 renderer/src/lib/timeline-window.ts）：只占位不渲染内容，
+   高度由内联样式给出（优先用上次实测值）。刻意保留 `.message` 类与 data-turn-key ——
+   主题选择器、缩略导航锚点、offsetTop 语义都不变；`contain-intrinsic-size: none` 避免
+   与显式高度叠加（.timeline > .message 那条规则给的 96px 兜底对占位没有意义）。 */
+.timeline > .message[data-tombstone="true"] { content-visibility: visible; contain-intrinsic-size: none; }
 /* 缩略导航存在时，消息居中时两侧留出更宽的边距，让左侧缩略列不与气泡重叠。 */
 .timeline.has-turn-minimap > .message { width: min(962px, calc(100% - 116px)); }
 .message { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 12px; width: min(962px, calc(100% - 48px)); max-width: 100%; min-width: 0; margin: 0 auto; padding: 20px 0; overflow: hidden; }

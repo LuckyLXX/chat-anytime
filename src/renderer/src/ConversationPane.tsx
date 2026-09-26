@@ -34,7 +34,7 @@ import {
   History,
   ScrollText
 } from "lucide-react";
-import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentProps, type FormEvent, type ReactNode } from "react";
 import type {
   AccessMode,
   ChatMessage,
@@ -66,6 +66,7 @@ import { changedFilesForMessage, type ReplyChangedFile } from "./lib/changed-fil
 import { createAssistantMessageGrouper } from "./lib/chat-layout";
 import { createMessageExecutionSubsetter, EMPTY_EXECUTIONS } from "./lib/message-executions";
 import { buildTurnSummaries } from "./lib/turn-summary";
+import { TIMELINE_LIVE_MARGIN, TIMELINE_WINDOW_MIN_MESSAGES, createTimelineObserver, estimateMessageHeight, placeholderHeightFor, shouldRenderLive, type TimelineObserver } from "./lib/timeline-window";
 import { buildEditDiffs, delegateArgsSummary, editArgsSummary, languageFromPath, parseDelegateCallArgs, parseEditCallArgs, parseReadCallArgs, parseWriteCallArgs, writeArgsSummary, type DelegateCallPreview, type EditCallPreview, type EditDiffBlock, type WriteCallPreview } from "./lib/tool-call-preview";
 import { DiffView } from "./components/DiffView";
 import { TurnMinimap } from "./components/TurnMinimap";
@@ -566,7 +567,7 @@ function ChangedFilesPanel({ files, workspace, onOpenFile, onOpenDiff, onRollbac
 // Memoized so an unchanged message bubble (stable ChatMessage reference from
 // the store's uuid-based reuse) is skipped during high-frequency streaming
 // updates that only mutate other bubbles.
-const MessageView = memo(function MessageView({ message, executions, workspace, onOpenArtifact, onOpenFile, onOpenDiff, onHtmlAction, onCopy, onEdit, onRegenerate, onShare, onRollback, rollbackStates, showThinking = true, hiddenThinkingLabel, busy = false, turnActive = false, timing, turnKey, onOpenTranscript }: { message: ChatMessage; executions: ToolExecution[]; workspace?: string; onOpenArtifact(artifact: Artifact): void; onOpenFile(relativePath: string, workspace?: string): void; onOpenDiff(execution: ToolExecution): void; onHtmlAction(text: string): void; onCopy(message: ChatMessage): void; onEdit(message: ChatMessage): void; onRegenerate(message: ChatMessage): void; onShare(message: ChatMessage, target: HTMLElement): Promise<void>; onRollback?(file: ReplyChangedFile): void; rollbackStates?: ReadonlyMap<string, "restored" | "deleted">; showThinking?: boolean; hiddenThinkingLabel?: string; busy?: boolean; turnActive?: boolean; timing?: TurnTiming; turnKey?: string; onOpenTranscript?(delegation: DelegationProgress): void }): ReactNode {
+export const MessageView = memo(function MessageView({ message, executions, workspace, onOpenArtifact, onOpenFile, onOpenDiff, onHtmlAction, onCopy, onEdit, onRegenerate, onShare, onRollback, rollbackStates, showThinking = true, hiddenThinkingLabel, busy = false, turnActive = false, timing, turnKey, onOpenTranscript, rootRef }: { message: ChatMessage; executions: ToolExecution[]; workspace?: string; onOpenArtifact(artifact: Artifact): void; onOpenFile(relativePath: string, workspace?: string): void; onOpenDiff(execution: ToolExecution): void; onHtmlAction(text: string): void; onCopy(message: ChatMessage): void; onEdit(message: ChatMessage): void; onRegenerate(message: ChatMessage): void; onShare(message: ChatMessage, target: HTMLElement): Promise<void>; onRollback?(file: ReplyChangedFile): void; rollbackStates?: ReadonlyMap<string, "restored" | "deleted">; showThinking?: boolean; hiddenThinkingLabel?: string; busy?: boolean; turnActive?: boolean; timing?: TurnTiming; turnKey?: string; onOpenTranscript?(delegation: DelegationProgress): void; /** 窗口化需要观察消息根元素（见 lib/timeline-window.ts）。 */ rootRef?: (element: HTMLElement | null) => void }): ReactNode {
   const text = messageText(message);
   const shareTargetRef = useRef<HTMLDivElement | null>(null);
   const [sharing, setSharing] = useState(false);
@@ -592,7 +593,7 @@ const MessageView = memo(function MessageView({ message, executions, workspace, 
   if (message.role === "extension") {
     const images = message.blocks.filter((block): block is Extract<import("../../shared/protocol").MessageBlock, { type: "image" }> => block.type === "image");
     return (
-      <article className="message message-extension" data-role="extension" data-turn-key={turnKey}>
+      <article ref={rootRef} className="message message-extension" data-role="extension" data-turn-key={turnKey}>
         <div className="message-avatar extension-avatar"><Puzzle size={16} /></div>
         <div className="message-body extension-message-callout">
           <strong>{message.extension?.customType || "扩展消息"}</strong>
@@ -609,7 +610,7 @@ const MessageView = memo(function MessageView({ message, executions, workspace, 
     // 复制/编辑仍用原始全文，重新发送后同样回环成 chip。
     const { mentions, body } = extractMentionTokens(text);
     return (
-      <article className="message message-user" data-role="user" data-turn-key={turnKey}>
+      <article ref={rootRef} className="message message-user" data-role="user" data-turn-key={turnKey}>
         <div className="message-avatar user-avatar">我</div>
         <div className="message-body message-bubble">{message.invocations?.map((item) => <div className="message-skill-badge" key={`${item.kind}:${item.name}`}>{item.kind === "skill" ? <Puzzle size={13} /> : <Zap size={13} />}<strong>{item.kind === "skill" ? item.name : `/${item.name}`}</strong></div>)}{mentions.length > 0 && <div className="message-mention-badges">{mentions.map((token) => <span className="message-skill-badge" key={token} title={token}><File size={13} /><strong>{token}</strong></span>)}</div>}{images.length > 0 && <div className="image-message-list">{images.map((block, index) => <ImageMessageBlock key={`${message.id}-image-${index}`} block={block} />)}</div>}{body && <p className="user-text">{body}</p>}{!isControlMessage && <div className="message-actions"><button type="button" data-control="copy" title="复制" aria-label="复制用户消息" onClick={() => onCopy(message)}><Copy size={13} /></button><button type="button" data-control="edit" title="重新编辑" aria-label="重新编辑用户消息" onClick={() => onEdit(message)}><Pencil size={13} /></button></div>}</div>
       </article>
@@ -617,7 +618,7 @@ const MessageView = memo(function MessageView({ message, executions, workspace, 
   }
 
   return (
-    <article className="message message-assistant" data-role="assistant" data-turn-key={turnKey}>
+    <article ref={rootRef} className="message message-assistant" data-role="assistant" data-turn-key={turnKey}>
       <div className="message-avatar pi-avatar"><Bot size={17} /></div>
       <div className="message-body message-bubble">
         <div className="assistant-share-content" ref={shareTargetRef}>
@@ -631,6 +632,34 @@ const MessageView = memo(function MessageView({ message, executions, workspace, 
       {timing && (isControlMessage ? <CompactTimingMeta timing={timing} /> : <TimingMeta timing={timing} />)}
     </article>
   );
+});
+
+/**
+ * 时间线条目：`live=false` 时只留**等高占位**（见 lib/timeline-window.ts 的取舍说明）。
+ * 占位保留 `data-turn-key`（缩略导航的锚点语义不变）与 `.message` 类（主题/CSS 关系不变）。
+ */
+export const TimelineEntry = memo(function TimelineEntry({ live, placeholderHeight, entryKey, entryTurnKey, register, onEntryRendered, ...messageProps }: ComponentProps<typeof MessageView> & {
+  live: boolean;
+  placeholderHeight: number;
+  entryKey: string;
+  entryTurnKey?: string;
+  register: (key: string, element: HTMLElement | null) => void;
+  onEntryRendered: (key: string, element: HTMLElement) => void;
+}): ReactNode {
+  const elementRef = useRef<HTMLElement | null>(null);
+  const rootRef = useCallback((element: HTMLElement | null) => {
+    elementRef.current = element;
+    register(entryKey, element);
+  }, [entryKey, register]);
+  // 展开后（或首次真实渲染后）把实测高度写回缓存，并让调用方决定是否补偿滚动。
+  useLayoutEffect(() => {
+    const element = elementRef.current;
+    if (live && element) onEntryRendered(entryKey, element);
+  }, [entryKey, live, onEntryRendered]);
+  if (!live) {
+    return <div ref={rootRef} className="message message-tombstone" data-role="tombstone" data-tombstone="true" data-turn-key={entryTurnKey} style={{ height: placeholderHeight }} />;
+  }
+  return <MessageView {...messageProps} rootRef={rootRef} />;
 });
 
 export interface ConversationPaneProps {
@@ -785,6 +814,14 @@ export const ConversationPane = memo(function ConversationPane({
   // 新挂载会走 idle 的 smooth 滚动，正是「从顶滚到底部」动画的来源。
   const previousSessionIdRef = useRef<string | undefined>(undefined);
   const previousDraftSessionIdRef = useRef<string | undefined>(sessionId);
+  // 时间线窗口化（T10，见 lib/timeline-window.ts）：只给「±1 屏内 / 尾部若干条 / 跳转目标 /
+  // Ctrl+F 临时展开」的条目渲染真实内容，其余留等高占位——长会话首帧不再解析全部 markdown
+  // （实测 400 条：16,612 节点 / 1,747 ms → 3,472 节点 / 404 ms）。
+  const [windowVisibleKeys, setWindowVisibleKeys] = useState<ReadonlySet<string>>(() => new Set<string>());
+  const [windowExpandAll, setWindowExpandAll] = useState(false);
+  const [windowPinned, setWindowPinned] = useState<{ key: string; nonce: number } | undefined>(undefined);
+  const windowHeightsRef = useRef(new Map<string, number>());
+  const windowObserverRef = useRef<TimelineObserver | undefined>(undefined);
   const [activeTurnKey, setActiveTurnKey] = useState<string | undefined>(undefined);
   const activeTurnKeyRef = useRef<string | undefined>(undefined);
   activeTurnKeyRef.current = activeTurnKey;
@@ -811,6 +848,8 @@ export const ConversationPane = memo(function ConversationPane({
   // 复用旧输出，使历史气泡的 message prop 跨帧稳定（配合 store 的 uuid 复用）。
   const groupMessages = useRef(createAssistantMessageGrouper()).current;
   const displayMessages = useMemo(() => groupMessages(data.messages), [groupMessages, data.messages]);
+  // 短会话完全不启用窗口化（绝大多数会话不受影响）。
+  const windowEnabled = displayMessages.length >= TIMELINE_WINDOW_MIN_MESSAGES;
   // 每消息稳定执行子集：MessageView 只消费「本消息 tool-call id 命中的 execution」
   // （changedFilesForMessage 按 callIds 过滤、ActionTimeline 按 call.id 查 Map），
   // 传全量 data.executions 会让任一 execution 流式变化时所有气泡的 executions prop
@@ -1090,16 +1129,101 @@ export const ConversationPane = memo(function ConversationPane({
   }, [turnStartKeys, data.messages.length]);
 
   // 点击缩略导航 → 平滑滚动到该轮首条消息，并解除粘底（否则会被拉回底部）。
-  const navigateToTurn = useCallback((key: string): void => {
+  // 窗口化：观察器挂在时间线滚动容器上，±1 屏内算「可见」。
+  useLayoutEffect(() => {
+    const timeline = timelineRef.current;
+    if (!timeline || !windowEnabled) {
+      windowObserverRef.current?.disconnect();
+      windowObserverRef.current = undefined;
+      return;
+    }
+    const observer = createTimelineObserver({
+      root: timeline,
+      margin: TIMELINE_LIVE_MARGIN,
+      onChange: (key, visible) => {
+        if (!visible) {
+          // 折叠前量一次真实高度（此刻元素还在，是唯一能拿到真值的机会）。
+          const element = windowObserverRef.current?.elementFor(key);
+          if (element) {
+            const height = Math.round(element.getBoundingClientRect().height);
+            if (height > 0) windowHeightsRef.current.set(key, height);
+          }
+        }
+        setWindowVisibleKeys((previous) => {
+          const had = previous.has(key);
+          if (had === visible) return previous;
+          const next = new Set(previous);
+          if (visible) next.add(key);
+          else next.delete(key);
+          return next;
+        });
+      }
+    });
+    windowObserverRef.current = observer;
+    return () => {
+      observer.disconnect();
+      windowObserverRef.current = undefined;
+    };
+  }, [windowEnabled, ready]);
+
+  // 会话切换：可见集合/实测高度/临时展开都必须复位（否则会拿上个会话的 key 判断）。
+  useEffect(() => {
+    setWindowVisibleKeys((previous) => (previous.size === 0 ? previous : new Set<string>()));
+    setWindowPinned(undefined);
+    setWindowExpandAll(false);
+    windowHeightsRef.current.clear();
+  }, [sessionId]);
+
+  // Ctrl/Cmd+F：**不 preventDefault**，只把全部条目临时展开——浏览器查找栏照常打开，
+  // 用户开始输入时内容已实体化，页内查找不会因为折叠而「找不到」。
+  useEffect(() => {
+    if (!windowEnabled) return;
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") setWindowExpandAll(true);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [windowEnabled]);
+
+  const registerTimelineEntry = useCallback((key: string, element: HTMLElement | null): void => {
+    windowObserverRef.current?.register(key, element);
+  }, []);
+
+  /**
+   * 条目真实渲染后：写回实测高度；若它整体位于视口上方且高度与占位不同，补偿滚动位置
+   * ——展开不改变当前阅读位置（占位用的通常就是上一次实测高度，因此差值为 0）。
+   */
+  const handleEntryRendered = useCallback((key: string, element: HTMLElement): void => {
+    const height = Math.round(element.getBoundingClientRect().height);
+    const previous = windowHeightsRef.current.get(key);
+    if (height > 0) windowHeightsRef.current.set(key, height);
+    if (!previous || Math.abs(previous - height) < 1) return;
+    if (stickToBottomRef.current) return; // 粘底时由粘底逻辑接管
     const timeline = timelineRef.current;
     if (!timeline) return;
-    const anchor = timeline.querySelector<HTMLElement>(`[data-turn-key="${CSS.escape(key)}"]`);
-    if (!anchor) return;
+    if (element.offsetTop + height <= timeline.scrollTop) timeline.scrollTop += height - previous;
+  }, []);
+
+  const navigateToTurn = useCallback((key: string): void => {
     stickToBottomRef.current = false;
+    setActiveTurnKey(key);
+    // 目标可能还在折叠态（占位高度是估算值）：先钉住让它实体化，真正的滚动放到
+    // 实体化之后的 layout effect —— 否则会先滚到估算位置再被真实高度弹一下。
+    setWindowPinned((previous) => ({ key, nonce: (previous?.nonce ?? 0) + 1 }));
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!windowPinned) return;
+    const timeline = timelineRef.current;
+    if (!timeline) return;
+    const anchor = timeline.querySelector<HTMLElement>(`[data-turn-key="${CSS.escape(windowPinned.key)}"]`);
+    if (!anchor) return;
     const target = anchor.offsetTop - timeline.clientHeight * 0.2;
     timeline.scrollTo({ top: Math.max(0, target), behavior: "smooth" });
-    setActiveTurnKey(key);
-  }, []);
+    // 滚完解除钉住（目标已进入 ±1 屏，由观察器接管），避免它长期占用真实渲染。
+    const timer = window.setTimeout(() => setWindowPinned(undefined), 1500);
+    return () => window.clearTimeout(timer);
+  }, [windowPinned]);
 
   // 会话切换：草稿属于会话（存/取互逆）；Skill 选择与编辑态复位（沿用单窗口语义）。
   // 独立 ref：滚动 effect（useLayoutEffect 先执行）也写 previousSessionIdRef，
@@ -1691,7 +1815,42 @@ export const ConversationPane = memo(function ConversationPane({
             const timing = showTurnTimingOnLatest && index === latestAssistantMessageIndex && message.role === "assistant" ? data.turnTiming : undefined;
             const turnActive = data.busy && index === latestAssistantMessageIndex && message.role === "assistant";
             const turnKey = turnStartKeys.has(message.uuid ?? message.id) ? (message.uuid ?? message.id) : undefined;
-            return <MessageView key={message.uuid ?? message.id} message={message} executions={executionsForMessages[index] ?? EMPTY_EXECUTIONS} workspace={data.workspace} onOpenArtifact={onOpenArtifact} onOpenFile={onOpenFile} onOpenDiff={onOpenDiff} onHtmlAction={handleHtmlAction} onCopy={copyMessage} onEdit={editMessage} onRegenerate={regenerateMessage} onShare={shareMessage} onRollback={onRollback} rollbackStates={rollbackStates} showThinking={showThinking} busy={data.busy} turnActive={turnActive} timing={timing} turnKey={turnKey} onOpenTranscript={onOpenTranscript} />;
+            const entryKey = message.uuid ?? message.id;
+            const entryLive = !windowEnabled || shouldRenderLive({
+              index,
+              total: displayMessages.length,
+              visible: windowVisibleKeys.has(entryKey),
+              expandAll: windowExpandAll,
+              pinned: windowPinned?.key === entryKey
+            });
+            return <TimelineEntry
+              key={entryKey}
+              entryKey={entryKey}
+              entryTurnKey={turnKey}
+              live={entryLive}
+              placeholderHeight={placeholderHeightFor(windowHeightsRef.current.get(entryKey), estimateMessageHeight(message))}
+              register={registerTimelineEntry}
+              onEntryRendered={handleEntryRendered}
+              message={message}
+              executions={executionsForMessages[index] ?? EMPTY_EXECUTIONS}
+              workspace={data.workspace}
+              onOpenArtifact={onOpenArtifact}
+              onOpenFile={onOpenFile}
+              onOpenDiff={onOpenDiff}
+              onHtmlAction={handleHtmlAction}
+              onCopy={copyMessage}
+              onEdit={editMessage}
+              onRegenerate={regenerateMessage}
+              onShare={shareMessage}
+              onRollback={onRollback}
+              rollbackStates={rollbackStates}
+              showThinking={showThinking}
+              busy={data.busy}
+              turnActive={turnActive}
+              timing={timing}
+              turnKey={turnKey}
+              onOpenTranscript={onOpenTranscript}
+            />;
           })}
           {isGenerating && (assistantBubbleVisible ? <div className="response-progress response-progress-inline"><LoaderCircle size={14} className="spinning" /><span>{workingLabel}</span>{activeTurnTiming && <TimingMeta timing={activeTurnTiming} />}</div> : <PendingResponse label={workingLabel} timing={activeTurnTiming} />)}
         </>}
