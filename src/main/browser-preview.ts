@@ -142,7 +142,21 @@ function sleep(ms: number): Promise<void> {
 }
 
 interface BrowserTabView {
-  view: WebContentsView;
+  /**
+   * native 视图。**休眠的标签没有视图**（见 hibernateTab）：保留记录与地址，
+   * 关掉 webContents 以回收渲染进程，下次激活时重建。所有访问点都必须容忍缺席。
+   */
+  view?: WebContentsView;
+  /** 已休眠（无视图、地址已保留）。 */
+  hibernated?: boolean;
+  /**
+   * 复活后**待恢复**的地址（AI attach 路径）。有意不在这里直接导航：AI 紧接着的
+   * snapshot 可能落在半加载页面上，所以交给 `ensurePageReady`（页面类操作的前置等待）
+   * 统一 await。
+   */
+  restoreUrl?: string;
+  /** 最近一次活动时间（任何针对该标签的命令或自动化操作都会刷新），休眠策略的 LRU 依据。 */
+  lastActiveAt: number;
   bounds?: Rectangle;
   visible: boolean;
   state: BrowserPreviewState;
@@ -219,8 +233,8 @@ export class BrowserPreviewController {
 
   /** 供浏览器自动化复用标签页的 WebContents；不存在时返回 undefined。 */
   webContentsFor(tabId: string): Electron.WebContents | undefined {
-    const tab = this.tabs.get(tabId);
-    return tab && !tab.view.webContents.isDestroyed() ? tab.view.webContents : undefined;
+    const contents = this.tabs.get(tabId)?.view?.webContents;
+    return contents && !contents.isDestroyed() ? contents : undefined;
   }
 
   /**
@@ -231,11 +245,20 @@ export class BrowserPreviewController {
    */
   async ensurePageReady(tabId: string): Promise<void> {
     const wrapper = this.tabs.get(tabId);
-    if (!wrapper?.seed) return;
-    const seed = wrapper.seed;
-    // 先清再等：与 downloadStarts / dialogWatch 同一纪律，已经付过的不重复付。
-    wrapper.seed = undefined;
-    await Promise.race([seed, sleep(SEED_SETTLE_TIMEOUT_MS + 500)]);
+    if (!wrapper) return;
+    if (wrapper.seed) {
+      const seed = wrapper.seed;
+      // 先清再等：与 downloadStarts / dialogWatch 同一纪律，已经付过的不重复付。
+      wrapper.seed = undefined;
+      await Promise.race([seed, sleep(SEED_SETTLE_TIMEOUT_MS + 500)]);
+    }
+    // 休眠标签被 AI 复活后的地址恢复在这里落地并 await：调用方（页面类操作）本来就
+    // 要等这一关，恢复完它才继续，snapshot 不会读到 about:blank 或半加载页面。
+    const restoreUrl = wrapper.restoreUrl;
+    if (restoreUrl) {
+      wrapper.restoreUrl = undefined;
+      await this.navigateTab(tabId, restoreUrl).catch(() => undefined);
+    }
   }
 
   /**
@@ -257,6 +280,9 @@ export class BrowserPreviewController {
   ensureTab(tabId: string): BrowserTabView {
     const existed = this.tabs.has(tabId);
     const tab = this.getOrCreate(tabId);
+    // AI 显式要这个标签（automation attach）时同样复活：它不能操作一个没有视图的标签。
+    // 恢复导航挂起，由 ensurePageReady 统一 await（否则 snapshot 可能落在半加载页面上）。
+    this.reviveTabIfHibernated(tabId, { navigate: false });
     if (!existed) this.onTabLifecycle?.({ action: "created", tabId, url: "" });
     return tab;
   }
@@ -284,6 +310,7 @@ export class BrowserPreviewController {
 
   async handle(command: BrowserPreviewCommand): Promise<BrowserPreviewState> {
     const tabId = command.tabId ?? DEFAULT_TAB_ID;
+    this.touchTab(tabId);
     /** 无法写进标签页状态（标签页还没建）时随返回值一起给渲染端。 */
     let extra: Partial<BrowserPreviewState> | undefined;
     switch (command.type) {
@@ -296,6 +323,9 @@ export class BrowserPreviewController {
       case "visible":
         this.getOrCreate(tabId).visible = command.visible;
         if (command.visible) this.lastActivatedTabId = tabId;
+        // 用户切回这个标签 = 重新激活：休眠的在这里复活（唯一的「该标签要显示」信号，
+        // 因为预览面板只给当前激活标签挂载 BrowserPreview）。
+        if (command.visible) this.reviveTabIfHibernated(tabId, { navigate: true });
         this.layoutTab(tabId);
         break;
       case "navigate":
@@ -403,7 +433,17 @@ export class BrowserPreviewController {
   }
 
   private createTab(tabId: string): BrowserTabView {
-    const state = emptyBrowserState();
+    const wrapper: BrowserTabView = { visible: true, state: emptyBrowserState(), lastActiveAt: Date.now() };
+    this.tabs.set(tabId, wrapper);
+    this.createViewFor(tabId, wrapper);
+    return wrapper;
+  }
+
+  /**
+   * 建（或重建）native 视图与全部事件接线。休眠标签被激活时走同一条路——视图与监听器
+   * 必须一起重建，否则事件会挂在已销毁的 webContents 上。
+   */
+  private createViewFor(tabId: string, wrapper: BrowserTabView): void {
     const view = new WebContentsView({
       webPreferences: {
         contextIsolation: true,
@@ -419,8 +459,9 @@ export class BrowserPreviewController {
     view.setBackgroundColor("#ffffff");
     this.window.contentView.addChildView(view);
 
-    const wrapper: BrowserTabView = { view, visible: true, state, seeded: true };
-    this.tabs.set(tabId, wrapper);
+    wrapper.view = view;
+    wrapper.hibernated = false;
+    wrapper.seeded = true;
 
     const contents = view.webContents;
     // 预置一个空文档（2026-09-16）：全新的 renderer 没有任何文档时，CDP 的
@@ -485,7 +526,6 @@ export class BrowserPreviewController {
       this.updateState(tabId, { loading: false, error: `页面渲染进程已停止：${details.reason}` });
     });
     this.layoutTab(tabId);
-    return wrapper;
   }
 
   /**
@@ -513,15 +553,15 @@ export class BrowserPreviewController {
   private isSeedPhase(tabId: string): boolean {
     const wrapper = this.tabs.get(tabId);
     if (!wrapper) return false;
-    const contents = wrapper.view.webContents;
-    if (contents.isDestroyed()) return false;
+    const contents = wrapper.view?.webContents;
+    if (!contents || contents.isDestroyed()) return false;
     return isSeedPhase(wrapper.seeded, contents.getURL());
   }
 
   /** 反查某个 WebContents 属于哪个标签页（下载事件按标签页定策略）。 */
   private tabIdFor(contents: Electron.WebContents): string | undefined {
     for (const [tabId, tab] of this.tabs) {
-      if (tab.view.webContents === contents) return tabId;
+      if (tab.view?.webContents === contents) return tabId;
     }
     return undefined;
   }
@@ -763,7 +803,8 @@ export class BrowserPreviewController {
     this.updateState(tabId, { attached: true, url, title: "", loading: true, error: undefined, contentWidth: undefined, contentHeight: undefined });
     // 导航本身可能永不 settle（服务器不结束响应），也可能被上一次导航 abort 掉：
     // 都不该把「浏览器操作超时」或假 ERR_ABORTED 报给模型（见 browser-navigate.ts）。
-    const contents = wrapper.view.webContents;
+    const contents = wrapper.view?.webContents;
+    if (!contents || contents.isDestroyed()) throw new Error("该标签页当前不可用（已休眠或已关闭）");
     let timedOut = false;
     let error: string | undefined;
     try {
@@ -808,7 +849,7 @@ export class BrowserPreviewController {
    */
   private async measureContentSize(tabId: string): Promise<void> {
     const wrapper = this.tabs.get(tabId);
-    const contents = wrapper?.view.webContents;
+    const contents = wrapper?.view?.webContents;
     if (!wrapper || !contents || contents.isDestroyed()) return;
     try {
       const size = await contents.executeJavaScript("(() => { const d = document.documentElement; const b = document.body; return [Math.max(d ? d.scrollWidth : 0, b ? b.scrollWidth : 0), Math.max(d ? d.scrollHeight : 0, b ? b.scrollHeight : 0)]; })()", false);
@@ -852,23 +893,102 @@ export class BrowserPreviewController {
         // 文件仍被占用：交给系统清理
       }
     }
-    const { view } = tab;
-    view.setVisible(false);
-    if (!this.window.isDestroyed()) this.window.contentView.removeChildView(view);
-    if (!view.webContents.isDestroyed()) view.webContents.close();
+    // 休眠标签没有视图（webContents 早已关闭），只清记录。
+    const view = tab.view;
+    if (view) {
+      view.setVisible(false);
+      if (!this.window.isDestroyed()) this.window.contentView.removeChildView(view);
+      if (!view.webContents.isDestroyed()) view.webContents.close();
+    }
     this.publish(emptyBrowserState(), tabId);
     this.onTabLifecycle?.({ action: "closed", tabId });
   }
 
+  /**
+   * 休眠一个标签（T12a，见 tab-hibernation.ts 的动机与取舍）：拆掉 native 视图并关闭
+   * webContents（渲染进程随之回收），**保留标签记录与地址**；下次激活时由
+   * `reviveTabIfHibernated` 重建视图并重新加载该地址。
+   *
+   * 调用方（browser-automation 的闲置清扫）已经筛过「不是当前显示、没被 AI 绑定、
+   * 满足空闲阈值」；这里再守三条不可休眠的硬约束：正在渲染、没有可恢复地址、
+   * 该标签上还有待决策的人工下载（关掉 webContents 会把下载一起带走）。
+   */
+  hibernateTab(tabId: string): boolean {
+    const wrapper = this.tabs.get(tabId);
+    if (!wrapper || wrapper.hibernated || !wrapper.view) return false;
+    if (wrapper.visible && wrapper.bounds) return false;
+    const url = wrapper.state.url;
+    if (!url || url === "about:blank") return false;
+    for (const record of this.pendingManual.values()) {
+      if (record.tabId === tabId) return false;
+    }
+    if (wrapper.measureTimer !== undefined) {
+      clearTimeout(wrapper.measureTimer);
+      wrapper.measureTimer = undefined;
+    }
+    const { view } = wrapper;
+    view.setVisible(false);
+    if (!this.window.isDestroyed()) this.window.contentView.removeChildView(view);
+    if (!view.webContents.isDestroyed()) view.webContents.close();
+    wrapper.view = undefined;
+    wrapper.hibernated = true;
+    wrapper.seed = undefined;
+    // 恢复时渲染端会重新下发 bounds（休眠期间布局可能已变）。
+    wrapper.bounds = undefined;
+    this.publish({ ...wrapper.state, attached: false, loading: false, automating: undefined }, tabId);
+    return true;
+  }
+
+  /** 该标签是否已休眠（诊断/测试用）。 */
+  isHibernated(tabId: string): boolean {
+    return this.tabs.get(tabId)?.hibernated === true;
+  }
+
+  /** 供休眠策略使用的标签快照（`inUse` 由调用方按 AI 绑定情况补齐）。 */
+  tabHibernationCandidates(now = Date.now()): Array<{ tabId: string; automation: boolean; hibernated: boolean; rendered: boolean; restorable: boolean; idleMs: number }> {
+    return [...this.tabs].map(([tabId, wrapper]) => ({
+      tabId,
+      automation: tabId.startsWith("pi-browser-"),
+      hibernated: wrapper.hibernated === true,
+      rendered: this.isTabRendered(tabId),
+      restorable: Boolean(wrapper.state.url) && wrapper.state.url !== "about:blank",
+      idleMs: Math.max(0, now - wrapper.lastActiveAt)
+    }));
+  }
+
+  /** 打活动时间戳（任何针对该标签的命令都算活动）。 */
+  private touchTab(tabId: string): void {
+    const wrapper = this.tabs.get(tabId);
+    if (wrapper) wrapper.lastActiveAt = Date.now();
+  }
+
+  /**
+   * 休眠标签被重新激活时重建视图并回到原地址。返回是否真的重建了。
+   * 视图 + 事件接线必须一起重建（`createViewFor`），否则事件会挂在已销毁的
+   * webContents 上；预置空白文档也一并重做，保证 CDP 文档类命令能吃上（见 createTab）。
+   */
+  private reviveTabIfHibernated(tabId: string, options: { navigate: boolean }): boolean {
+    const wrapper = this.tabs.get(tabId);
+    if (!wrapper?.hibernated) return false;
+    const url = wrapper.state.url;
+    wrapper.hibernated = false;
+    this.createViewFor(tabId, wrapper);
+    if (url && url !== "about:blank") {
+      if (options.navigate) void this.navigateTab(tabId, url).catch(() => undefined);
+      else wrapper.restoreUrl = url;
+    }
+    return true;
+  }
+
   private tryCommand(tabId: string, fn: (contents: Electron.WebContents) => void): void {
     const wrapper = this.tabs.get(tabId);
-    const contents = wrapper?.view.webContents;
-    if (contents) fn(contents);
+    const contents = wrapper?.view?.webContents;
+    if (contents && !contents.isDestroyed()) fn(contents);
   }
 
   private layoutTab(tabId: string): void {
     const wrapper = this.tabs.get(tabId);
-    if (!wrapper) return;
+    if (!wrapper?.view) return; // 休眠标签没有视图可布局
     if (wrapper.bounds) wrapper.view.setBounds(wrapper.bounds);
     wrapper.view.setVisible(wrapper.visible && Boolean(wrapper.bounds));
   }
@@ -876,7 +996,7 @@ export class BrowserPreviewController {
   private refreshState(tabId: string, update: Partial<BrowserPreviewState> = {}): void {
     const wrapper = this.tabs.get(tabId);
     if (!wrapper) return;
-    const contents = wrapper.view.webContents;
+    const contents = wrapper.view?.webContents;
     this.updateState(tabId, {
       attached: Boolean(contents && !contents.isDestroyed()),
       url: contents?.getURL() || wrapper.state.url,

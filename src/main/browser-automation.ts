@@ -40,6 +40,7 @@ import type {
   JevObservePage
 } from "../shared/protocol.js";
 import { downloadDirFor, downloadRelativePath } from "./browser-downloads.js";
+import { TAB_HIBERNATE_IDLE_MS, TAB_HIBERNATE_KEEP_LIVE, planTabHibernation } from "./tab-hibernation.js";
 import {
   classifyImageSource,
   decodeDataUrl,
@@ -1133,7 +1134,10 @@ export class BrowserAutomationController {
     // them (binding replaced by tabs new/switch, or a release deferred because
     // an op was in flight). Each keeps a full renderer process alive while
     // hidden, so unbound + invisible + idle tabs are closed periodically.
-    this.sweepTimer = setInterval(() => this.sweepIdleAutomationTabs(), AUTOMATION_TAB_SWEEP_INTERVAL_MS);
+    this.sweepTimer = setInterval(() => {
+      this.sweepIdleAutomationTabs();
+      this.hibernateIdleTabs();
+    }, AUTOMATION_TAB_SWEEP_INTERVAL_MS);
     this.sweepTimer.unref?.();
   }
 
@@ -1397,6 +1401,24 @@ export class BrowserAutomationController {
       if (now - (this.tabLastActiveAt.get(tabId) ?? now) < AUTOMATION_TAB_IDLE_MS) continue;
       this.closeAutomationTab(tabId);
     }
+  }
+
+  /**
+   * 休眠闲置的用户预览标签（T12a，策略见 tab-hibernation.ts）：每个标签是一个渲染
+   * 进程，隐藏只 `setVisible(false)` 不释放内存（真机实测 7 个 renderer 合计 890MB，
+   * 闲置标签约 157MB）。休眠 = 拆视图 + 关 webContents + 保留记录与地址，激活时重建。
+   *
+   * 为什么放在本类：只有这里知道「哪些标签被 AI 会话绑定或正在执行工具」——那些
+   * 绝不能休眠（会打断正在跑的操作）。返回实际休眠的 tabId 供测试断言。
+   */
+  hibernateIdleTabs(now = Date.now()): string[] {
+    const bound = new Set(this.sessionTabs.values());
+    const candidates = this.preview.tabHibernationCandidates(now).map((info) => ({
+      ...info,
+      inUse: bound.has(info.tabId) || this.busyTabs.has(info.tabId)
+    }));
+    const planned = planTabHibernation(candidates, { idleMs: TAB_HIBERNATE_IDLE_MS, keepLive: TAB_HIBERNATE_KEEP_LIVE });
+    return planned.filter((tabId) => this.preview.hibernateTab(tabId));
   }
 
   private closeAutomationTab(tabId: string): void {

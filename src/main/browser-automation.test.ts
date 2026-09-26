@@ -2081,3 +2081,108 @@ describe("jev primitives", () => {
     expect(needsDownloadStartGrace({ op: "jevObserve" })).toBe(false);
   });
 });
+
+/**
+ * 闲置用户标签的休眠（T12a）：每个预览标签是一个渲染进程，隐藏只 `setVisible(false)`
+ * 不释放内存（真机实测 7 个 renderer 合计 890MB、闲置标签约 157MB）。策略本身在
+ * `tab-hibernation.test.ts`；这里钉「接线」——尤其是「被 AI 会话绑定的标签绝不会被休眠」
+ * 这条只有本类知道的事实。
+ */
+describe("tab hibernation sweep", () => {
+  const now = 1_700_000_000_000;
+  const controllers: BrowserAutomationController[] = [];
+  afterEach(() => {
+    for (const controller of controllers) controller.dispose();
+    controllers.length = 0;
+  });
+  const makeController = (preview: BrowserPreviewController): BrowserAutomationController => {
+    const controller = new BrowserAutomationController(preview);
+    controllers.push(controller);
+    return controller;
+  };
+
+  /** 带休眠能力的假预览：候选表由测试给定，hibernateTab 记录调用并回报成功。 */
+  function makeHibernationPreview(candidates: Array<{ tabId: string; idleMs: number; rendered?: boolean; restorable?: boolean; hibernated?: boolean; automation?: boolean }>): { preview: BrowserPreviewController; hibernated: string[] } {
+    const hibernated: string[] = [];
+    const preview = {
+      tabIds: () => candidates.map((candidate) => candidate.tabId),
+      tabHibernationCandidates: () => candidates.map((candidate) => ({
+        tabId: candidate.tabId,
+        automation: candidate.automation === true,
+        hibernated: candidate.hibernated === true,
+        rendered: candidate.rendered === true,
+        restorable: candidate.restorable !== false,
+        idleMs: candidate.idleMs
+      })),
+      hibernateTab: (tabId: string) => { hibernated.push(tabId); return true; },
+      ensureTab: () => undefined,
+      webContentsFor: () => undefined,
+      snapshot: () => ({ attached: false, url: "", title: "", loading: false, canGoBack: false, canGoForward: false }) as never,
+      setAutomating: () => undefined,
+      handle: async () => ({ attached: false, url: "", title: "", loading: false, canGoBack: false, canGoForward: false }) as never,
+      isTabRendered: () => false,
+      isWindowRenderable: () => true,
+      ensurePageReady: async () => undefined
+    } as unknown as BrowserPreviewController;
+    return { preview, hibernated };
+  }
+
+  const HOUR = 60 * 60 * 1000;
+
+  it("只休眠超过空闲阈值、且存活数超过下限的标签", () => {
+    const { preview, hibernated } = makeHibernationPreview([
+      { tabId: "stale", idleMs: 4 * HOUR },
+      { tabId: "fresh", idleMs: 5 * 60 * 1000 },
+      { tabId: "recent", idleMs: 20 * 60 * 1000 },
+      { tabId: "also-stale", idleMs: 2 * HOUR },
+      { tabId: "newest", idleMs: 1000 }
+    ]);
+    makeController(preview).hibernateIdleTabs(now);
+    // 5 个存活、下限 4 → 只休眠最久未用的那个
+    expect(hibernated).toEqual(["stale"]);
+  });
+
+  it("不多休眠（存活数降到下限就停）", () => {
+    const { preview, hibernated } = makeHibernationPreview([
+      { tabId: "a", idleMs: 9 * HOUR },
+      { tabId: "b", idleMs: 8 * HOUR },
+      { tabId: "c", idleMs: 7 * HOUR },
+      { tabId: "d", idleMs: 6 * HOUR },
+      { tabId: "e", idleMs: 5 * HOUR }
+    ]);
+    makeController(preview).hibernateIdleTabs(now);
+    expect(hibernated).toEqual(["a"]);
+  });
+
+  it("被 AI 会话绑定的标签绝不休眠（会打断正在跑的操作）", async () => {
+    const { preview, hibernated } = makeHibernationPreview([
+      { tabId: "bound", idleMs: 9 * HOUR },
+      { tabId: "b", idleMs: 8 * HOUR },
+      { tabId: "c", idleMs: 7 * HOUR },
+      { tabId: "d", idleMs: 6 * HOUR },
+      { tabId: "e", idleMs: 5 * HOUR }
+    ]);
+    // 让 s1 绑定到 bound 标签：attachTab 会用 foregroundTab()（假件返回第一个 tabId）。
+    const controller = makeController(preview);
+    (preview as unknown as { foregroundTab: () => string }).foregroundTab = () => "bound";
+    await controller.handle("s1", { op: "attach" });
+    expect(controller.hibernateIdleTabs()).not.toContain("bound");
+    expect(hibernated).not.toContain("bound");
+    // 解除绑定后就轮得到它（它是最久未用的）
+    controller.releaseSession("s1");
+    expect(controller.hibernateIdleTabs()).toContain("bound");
+  });
+
+  it("正在显示的标签与没有可恢复地址的标签不休眠", () => {
+    const { preview, hibernated } = makeHibernationPreview([
+      { tabId: "visible", idleMs: 9 * HOUR, rendered: true },
+      { tabId: "blank", idleMs: 8 * HOUR, restorable: false },
+      { tabId: "sleeping", idleMs: 7 * HOUR, hibernated: true },
+      { tabId: "ai-tab", idleMs: 6 * HOUR, automation: true },
+      { tabId: "d", idleMs: 5 * HOUR }
+    ]);
+    const result = makeController(preview).hibernateIdleTabs(now);
+    expect(hibernated).toEqual([]); // 存活 2 个（visible/blank）未达下限
+    expect(result).toEqual([]);
+  });
+});
