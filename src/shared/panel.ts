@@ -82,5 +82,5 @@ export function isPanelEntryFile(filePath: string): boolean {
  * 否则下一次接手改面板的模型只能靠猜。
  */
 export function panelDevHint(): string {
-  return `面板型作品：入口网页会被开成独立小窗口（脱离主界面存活）。数据接口：相对自己 fetch("./${PANEL_STATE_ENDPOINT}") 得到只读状态 JSON；POST 同一地址 {"action":"show-main"} 唤回主界面。`;
+  return `面板型作品：入口网页会被开成独立小窗口（脱离主界面存活）。数据接口：相对自己 fetch("./${PANEL_STATE_ENDPOINT}") 得到只读状态 JSON；POST 同一地址 {"action":"show-main"} 唤回主界面。面板里**可以直接 fetch 外部 http(s) API**（包括没有 CORS 的自建/中转模型服务）：跨域由平台在主进程统一处理，不要自己搭本地代理。`;
 }

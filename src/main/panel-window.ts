@@ -104,6 +104,17 @@ export class PanelWindowController {
     return false;
   }
 
+  /**
+   * 这个 webContents 属于本控制器管理的面板窗口吗？
+   * 跨域放宽（panel-cors）据此把「只给面板」落到实处——别的窗口哪怕发同一个请求也原样放行。
+   */
+  isPanelWebContents(webContentsId: number): boolean {
+    for (const win of this.windows.values()) {
+      if (!win.isDestroyed() && win.webContents.id === webContentsId) return true;
+    }
+    return false;
+  }
+
   /** 关掉某个作品的面板（作品被删除时用；不存在即 no-op）。 */
   close(id: string): void {
     const win = this.windows.get(id);

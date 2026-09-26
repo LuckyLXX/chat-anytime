@@ -27,7 +27,9 @@ const preload = readFileSync(join(here, "../preload/index.ts"), "utf8");
 const app = readFileSync(join(here, "../renderer/src/App.tsx"), "utf8");
 const runtime = readFileSync(join(here, "pi-runtime.ts"), "utf8");
 const panelWindow = readFileSync(join(here, "panel-window.ts"), "utf8");
+const panelCors = readFileSync(join(here, "panel-cors.ts"), "utf8");
 const tray = readFileSync(join(here, "tray.ts"), "utf8");
+const sharedPanel = readFileSync(join(here, "../shared/panel.ts"), "utf8");
 
 describe("面板窗口的主进程接线", () => {
   it("IPC 通道两端同名，且入口路径由主进程复核", () => {
@@ -129,6 +131,41 @@ describe("utility 侧的 sessions.live 推送", () => {
     expect(runtime).toContain('post({ type: "sessions.live", sessions: buildLiveSessions() });');
     expect(runtime).toContain("function buildLiveSessions(): PanelSessionLive[] {");
     expect(runtime).toContain("todoSummary: summarizeTodos(todos)");
+  });
+});
+
+describe("面板窗口的跨域放宽（panel-cors）", () => {
+  it("在第一个面板窗口创建时懒装（不开面板的用户不该付网络回调的代价）", () => {
+    expect(main).toContain("ensurePanelCorsRelaxation();");
+    expect(main).toMatch(/panelWindows \?\?= new PanelWindowController\(\{[\s\S]{0,600}?\}\);\n\s*\/\/[^\n]*\n\s*ensurePanelCorsRelaxation\(\);/u);
+    // 幂等：重复调用不会注册第二遍
+    expect(main).toContain("if (panelCorsInstalled) return;");
+  });
+
+  it("只对面板窗口生效（内置浏览器预览是正常浏览器，不能放宽）", () => {
+    expect(main).toContain("isPanelWebContents: (webContentsId) => panelWindows?.isPanelWebContents(webContentsId) ?? false");
+    expect(panelCors).toMatch(/details\.webContentsId === undefined \|\| !deps\.isPanelWebContents\(details\.webContentsId\)/u);
+    expect(panelWindow).toContain("isPanelWebContents(webContentsId: number): boolean {");
+  });
+
+  it("挂在 defaultSession 的 webRequest 上，只筛 http/https，并清掉失败请求的暂存", () => {
+    expect(panelCors).toContain("session.defaultSession.webRequest");
+    expect(panelCors).toContain('export const PANEL_CORS_URL_FILTER: string[] = ["http://*/*", "https://*/*"]');
+    expect(panelCors).toContain("onBeforeSendHeaders({ urls: PANEL_CORS_URL_FILTER }");
+    expect(panelCors).toContain("onHeadersReceived({ urls: PANEL_CORS_URL_FILTER }");
+    expect(panelCors).toContain("onErrorOccurred({ urls: PANEL_CORS_URL_FILTER }");
+  });
+
+  it("onHeadersReceived 永远回调（漏一次就是请求永久挂起）", () => {
+    expect(panelCors).toContain("const respond = (patch: HeadersReceivedResponse): void => {");
+    // 三个出口：放行 / 改写 / 异常降级——都是 respond(...)
+    const handler = /onHeadersReceived\(\{[\s\S]*?\n  \}\);/u.exec(panelCors)?.[0] ?? "";
+    expect(handler.match(/respond\(/gu)?.length ?? 0).toBeGreaterThanOrEqual(3);
+    expect(handler).toContain("respond({})");
+  });
+
+  it("面板开发规范里写清「不需要自己搭代理」（否则下一个面板还会重复造）", () => {
+    expect(sharedPanel).toContain("跨域由平台在主进程统一处理，不要自己搭本地代理");
   });
 });
 

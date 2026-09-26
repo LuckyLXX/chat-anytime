@@ -28,6 +28,7 @@ import { normalizeGalleryPanelOptions } from "../shared/gallery.js";
 import { createPanelStateCache } from "./panel-state.js";
 import { panelBoundsPathFor } from "./panel-bounds.js";
 import { PanelWindowController } from "./panel-window.js";
+import { installPanelCorsRelaxation } from "./panel-cors.js";
 import { createTrayController, type TrayController } from "./tray.js";
 import type { StaticServerEndpoint } from "./browser-static-server.js";
 import type { PanelAction } from "../shared/panel.js";
@@ -81,6 +82,8 @@ let trayController: TrayController | undefined;
  */
 let quitting = false;
 let hidToTrayNoticeShown = false;
+/** 跨域放宽只在第一个面板窗口创建时装一次（见 ensurePanelCorsRelaxation）。 */
+let panelCorsInstalled = false;
 /**
  * 面板作品的状态缓存：只喂给面板窗口的 HTTP 端点（不属于渲染端协议）。
  * 为什么放在 main：执行状态只在 utility 内存里，而面板要在「主窗口已关闭/
@@ -676,6 +679,19 @@ function panelStateEndpoint(): StaticServerEndpoint {
   };
 }
 
+/**
+ * 装上面板窗口的跨域放宽（幂等，只在第一个面板窗口创建时装）。
+ *
+ * 为什么懒装：webRequest 一旦有监听，**每个** http(s) 请求都要等一次回调（一次 IPC
+ * 往返）。从不使用面板作品的用户不该替别人付这笔网络成本。装在这里也是安全的——
+ * 面板窗口刚建、页面还没开始加载，第一轮请求一定在后面。
+ */
+function ensurePanelCorsRelaxation(): void {
+  if (panelCorsInstalled) return;
+  panelCorsInstalled = true;
+  installPanelCorsRelaxation({ isPanelWebContents: (webContentsId) => panelWindows?.isPanelWebContents(webContentsId) ?? false });
+}
+
 /** 托盘（懒建）：关闭主窗口后回得去的唯一常驻入口，也是真正的退出入口。 */
 function ensureTray(): TrayController {
   trayController ??= createTrayController({
@@ -930,6 +946,8 @@ function registerIpc(): void {
         void shell.openExternal(url).catch(() => undefined);
       }
     });
+    // 面板作品常要直接调外部模型 API（那些服务多半没有 CORS）；放宽只作用于面板窗口。
+    ensurePanelCorsRelaxation();
     return panelWindows.open({
       id,
       title: typeof input?.title === "string" && input.title.trim() ? input.title.trim() : "面板",
