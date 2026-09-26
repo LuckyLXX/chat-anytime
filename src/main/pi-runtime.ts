@@ -116,7 +116,7 @@ import { buildAutomationTools, type AutomationCreateInput, type AutomationToolCo
 import { resolveVisionModel } from "./vision.js";
 import { buildResourceCatalog } from "./resource-catalog.js";
 import { agentWorkspaceSessionDir, backfillUnpersistedSessions, isSessionPinned, mergeSessionSummary, pruneVanishedSessions, sameSessionDir, sessionFileMatchesId, sessionListReadyFor, sortSessionSummaries, togglePinnedSessionPath } from "./session-scope.js";
-import { listSessionSummaries, readSessionHeaderLine, summarizeLiveSession } from "./session-summary-cache.js";
+import { listSessionSummaries, loadSessionIndex, readSessionHeaderLine, saveSessionIndex, summarizeLiveSession, type CachedSessionSummary } from "./session-summary-cache.js";
 import { planSessionOpen } from "./session-open-plan.js";
 import { isDesktopConfiguredProvider } from "./model-catalog.js";
 import { defaultTools, ensureDefaultWorkspaceDir, forgetAgentWorkspace, isPositiveInt, mergeBrowserSettings, mergeProviderModels, recordAgentWorkspace, resolveDefaultWorkspace, resolveInitialWorkspace } from "./settings.js";
@@ -348,6 +348,51 @@ let mcpServers: McpServerSummary[] = [];
 // 用量统计的按文件扫描缓存（utility 生命周期内存态；键 mtimeMs+size，
 // 会话内容不变时零重扫，助手筛选切换只重聚合）。
 const usageStatsCache = createUsageStatsCache();
+// 会话摘要缓存 + 磁盘索引（见 session-summary-cache.ts）：内存缓存处理同一进程内的
+// 重复扫描（热 13 ms），磁盘索引把「重启后第一轮全量重解析」也消掉（冷启动只剩
+// readdir+stat）。索引是纯派生缓存，任何异常都退化为全量扫描，绝不影响列表。
+let sessionSummaryCache: Map<string, CachedSessionSummary> | undefined;
+const SESSION_INDEX_SAVE_INTERVAL_MS = 5000;
+let sessionIndexSaveTimer: ReturnType<typeof setTimeout> | undefined;
+let lastSessionIndexSaveAt = 0;
+
+function sessionIndexPath(): string {
+  return join(getAgentDir(), "pidesktop-session-index.json");
+}
+
+function sessionSummaryCacheFor(): Map<string, CachedSessionSummary> {
+  if (!sessionSummaryCache) sessionSummaryCache = loadSessionIndex(sessionIndexPath());
+  return sessionSummaryCache;
+}
+
+/** 索引落盘：前缘节流（≥5 s 立即写，否则合并到窗口末），多轮刷新只写一次。 */
+function scheduleSessionIndexSave(): void {
+  if (sessionIndexSaveTimer) return;
+  const elapsed = Date.now() - lastSessionIndexSaveAt;
+  if (elapsed >= SESSION_INDEX_SAVE_INTERVAL_MS) {
+    flushSessionIndex();
+    return;
+  }
+  sessionIndexSaveTimer = setTimeout(() => {
+    sessionIndexSaveTimer = undefined;
+    flushSessionIndex();
+  }, SESSION_INDEX_SAVE_INTERVAL_MS - elapsed);
+}
+
+function flushSessionIndex(): void {
+  if (sessionIndexSaveTimer) {
+    clearTimeout(sessionIndexSaveTimer);
+    sessionIndexSaveTimer = undefined;
+  }
+  if (!sessionSummaryCache) return;
+  lastSessionIndexSaveAt = Date.now();
+  try {
+    saveSessionIndex(sessionIndexPath(), sessionSummaryCache);
+  } catch (error) {
+    // 写索引失败不影响任何功能：下次启动退化为全量扫描。
+    post({ type: "log", level: "warn", message: `会话索引写入失败：${errorText(error)}` });
+  }
+}
 // Set when the user explicitly reloads resources or changes MCP config, so the
 // next createSession forces a network sync instead of serving the tool cache.
 let forceMcpRefresh = false;
@@ -2672,8 +2717,10 @@ async function performSessionsRefresh(): Promise<void> {
       fallbackTime: record.activatedAt
     })];
   });
-  // 会话摘要缓存（mtime+size 命中即不读文件；详见 session-summary-cache.ts）。
-  const items = await listSessionSummaries(directories, { liveSummaries });
+  // 会话摘要缓存（mtime+size 命中即不读文件；详见 session-summary-cache.ts）；
+  // 传入磁盘索引加载来的缓存 → 重启后第一轮也命中，不再重解析 264 MB。
+  const items = await listSessionSummaries(directories, { liveSummaries, cache: sessionSummaryCacheFor() });
+  scheduleSessionIndexSave();
   const pinnedPaths = settings?.pinnedSessionPaths ?? [];
   currentSessions = sortSessionSummaries(items.map((item) => {
     // Live sessions carry their execution state (sidebar dot) across refreshes.

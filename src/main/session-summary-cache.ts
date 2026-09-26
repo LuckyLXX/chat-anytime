@@ -1,7 +1,8 @@
-import { closeSync, openSync, readSync } from "node:fs";
+import { closeSync, openSync, readFileSync, readSync } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { SessionManager, type SessionEntry } from "@earendil-works/pi-coding-agent";
+import { writeJsonAtomic } from "./settings-store.js";
 
 /**
  * 会话摘要缓存（2026-09-25 性能 P0）。
@@ -60,11 +61,14 @@ export interface SessionHeaderLine {
   createdAt?: number;
 }
 
-interface CachedSessionSummary {
+/** 单文件缓存项（`mtimeMs + size` 为失效口径；`seenAt` 供磁盘索引做陈旧淘汰）。 */
+export interface CachedSessionSummary {
   mtimeMs: number;
   size: number;
   /** null = 已判定为非会话文件（负缓存：不再重读首行）。 */
   summary: SessionFileSummary | null;
+  /** 最近一次被扫描确认的时间（ms）；磁盘索引按它淘汰陈条目。 */
+  seenAt?: number;
 }
 
 /** 注入点：fs、首行读、会话打开（测试用来计数与造夹具）。 */
@@ -77,6 +81,8 @@ export interface SessionSummaryDeps {
   liveSummaries?: readonly SessionFileSummary[];
   /** 缓存实例（缺省用模块级共享缓存；测试传自己的 Map 以隔离）。 */
   cache?: Map<string, CachedSessionSummary>;
+  /** 时钟（测试注入以便断言 seenAt）。 */
+  now?: () => number;
 }
 
 export interface SessionEntrySource {
@@ -260,6 +266,7 @@ export async function listSessionSummaries(directories: readonly string[], deps:
   const readHeader = deps.readHeader ?? readSessionHeaderLine;
   const openSession = deps.openSession ?? ((path: string) => SessionManager.open(path));
   const cache = deps.cache ?? sharedCache;
+  const now = deps.now ?? Date.now;
   const liveByPath = new Map<string, SessionFileSummary>();
   for (const summary of deps.liveSummaries ?? []) liveByPath.set(cacheKey(summary.path), summary);
 
@@ -293,11 +300,12 @@ export async function listSessionSummaries(directories: readonly string[], deps:
       }
       const cached = cache.get(key);
       if (cached && cached.mtimeMs === info.mtimeMs && cached.size === info.size) {
+        cached.seenAt = now();
         if (cached.summary) summaries.push(cached.summary);
         continue;
       }
       const summary = readSummary(path, info, { readHeader, openSession });
-      cache.set(key, { mtimeMs: info.mtimeMs, size: info.size, summary });
+      cache.set(key, { mtimeMs: info.mtimeMs, size: info.size, summary, seenAt: now() });
       if (summary) summaries.push(summary);
     }
   }
@@ -306,4 +314,149 @@ export async function listSessionSummaries(directories: readonly string[], deps:
     if (scannedScopes.some((scope) => key.startsWith(scope))) cache.delete(key);
   }
   return summaries;
+}
+
+/**
+ * 磁盘索引（2026-09-26 性能 P1）：把上面的内存缓存持久化，消掉「重启后首次全量重解析」。
+ *
+ * 为什么值得做：内存缓存只解决**同一次运行内**的重复扫描（热扫描实测 13 ms），
+ * 但每次应用重启后第一轮刷新仍要把 264 MB / 179 个会话文件全读一遍（实测 1461 ms，
+ * 全助手 439 文件则 5159 ms）——那是纯同步 `JSON.parse`，压在 utility 进程的
+ * 事件循环上，表现为「刚启动那会儿点什么都要等一下」。有了索引之后冷启动这轮
+ * 只剩 `readdir + stat`（十几毫秒）+ 一次 100 KB 级 JSON 读。
+ *
+ * 安全性质（与内存缓存同口径，不新增假设）：
+ * - 失效仍是 `mtimeMs + size`（Pi 是 append-only；`pin`/`rename` 走
+ *   `appendSessionInfo` 会改文件）；索引只是一个**更长寿的缓存**，任何
+ *   「拿不准」的情况（版本不符、解析失败、字段非法、条目过期）一律**当作没有**
+ *   → 退回全量扫描，绝不会因为索引而报错或返回错数据。
+ * - 条目按 `seenAt` 淘汰（默认 30 天，同 checkpoint 口径）+ 总条目上限，
+ *   所以删掉的工作区/助手不会在索引里留垃圾，文件也不会无限增长。
+ */
+
+/** 索引格式版本；不匹配一律丢弃（宁可全量扫一次，也不冒字段错位的风险）。 */
+export const SESSION_INDEX_VERSION = 1;
+/** 超过这么久没被扫描确认的条目直接丢掉。 */
+export const SESSION_INDEX_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+/** 条目总上限（超限丢最旧）。 */
+export const SESSION_INDEX_MAX_ENTRIES = 2000;
+
+interface SerializedSessionSummary {
+  path: string;
+  id: string;
+  cwd: string;
+  name?: string;
+  created: string;
+  modified: string;
+  messageCount: number;
+  firstMessage: string;
+}
+
+interface SerializedSessionEntry {
+  key: string;
+  mtimeMs: number;
+  size: number;
+  seenAt: number;
+  summary: SerializedSessionSummary | null;
+}
+
+function serializeSummary(summary: SessionFileSummary): SerializedSessionSummary {
+  return {
+    path: summary.path,
+    id: summary.id,
+    cwd: summary.cwd,
+    ...(summary.name === undefined ? {} : { name: summary.name }),
+    created: summary.created.toISOString(),
+    modified: summary.modified.toISOString(),
+    messageCount: summary.messageCount,
+    firstMessage: summary.firstMessage
+  };
+}
+
+function reviveSummary(value: unknown): SessionFileSummary | null | undefined {
+  if (value === null) return null;
+  if (!isPlainRecord(value)) return undefined;
+  const { path, id, cwd, name, created, modified, messageCount, firstMessage } = value;
+  if (typeof path !== "string" || typeof id !== "string" || typeof cwd !== "string") return undefined;
+  if (typeof created !== "string" || typeof modified !== "string") return undefined;
+  if (typeof messageCount !== "number" || !Number.isFinite(messageCount)) return undefined;
+  if (typeof firstMessage !== "string") return undefined;
+  const createdDate = new Date(created);
+  const modifiedDate = new Date(modified);
+  if (Number.isNaN(createdDate.getTime()) || Number.isNaN(modifiedDate.getTime())) return undefined;
+  return {
+    path,
+    id,
+    cwd,
+    ...(typeof name === "string" ? { name } : {}),
+    created: createdDate,
+    modified: modifiedDate,
+    messageCount,
+    firstMessage
+  };
+}
+
+/**
+ * 读磁盘索引。**任何异常都退化为空 Map**（调用方随后走全量扫描）：
+ * 索引是纯派生缓存，绝不能因为它坏了而影响会话列表。
+ */
+export function loadSessionIndex(
+  filePath: string,
+  options: { maxAgeMs?: number; maxEntries?: number; now?: number } = {}
+): Map<string, CachedSessionSummary> {
+  const maxAgeMs = options.maxAgeMs ?? SESSION_INDEX_MAX_AGE_MS;
+  const maxEntries = options.maxEntries ?? SESSION_INDEX_MAX_ENTRIES;
+  const now = options.now ?? Date.now();
+  const empty = new Map<string, CachedSessionSummary>();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(filePath, "utf8")) as unknown;
+  } catch {
+    return empty;
+  }
+  if (!isPlainRecord(parsed) || parsed.version !== SESSION_INDEX_VERSION || !Array.isArray(parsed.entries)) return empty;
+  const loaded: Array<{ key: string; entry: CachedSessionSummary }> = [];
+  for (const raw of parsed.entries) {
+    if (!isPlainRecord(raw)) continue;
+    const key = raw.key;
+    const { mtimeMs, size, seenAt } = raw;
+    if (typeof key !== "string" || !key) continue;
+    if (typeof mtimeMs !== "number" || !Number.isFinite(mtimeMs)) continue;
+    if (typeof size !== "number" || !Number.isFinite(size)) continue;
+    if (typeof seenAt !== "number" || !Number.isFinite(seenAt)) continue;
+    if (seenAt < now - maxAgeMs) continue;
+    const summary = reviveSummary(raw.summary);
+    if (summary === undefined) continue;
+    loaded.push({ key, entry: { mtimeMs, size, summary, seenAt } });
+  }
+  // 超上限时丢最旧（按 seenAt 降序保留）。
+  loaded.sort((left, right) => (right.entry.seenAt ?? 0) - (left.entry.seenAt ?? 0));
+  const result = new Map<string, CachedSessionSummary>();
+  for (const { key, entry } of loaded.slice(0, maxEntries)) result.set(key, entry);
+  return result;
+}
+
+/** 落盘磁盘索引（原子写；返回统计供日志/测试断言）。 */
+export function saveSessionIndex(
+  filePath: string,
+  cache: Map<string, CachedSessionSummary>,
+  options: { maxEntries?: number; now?: number } = {}
+): { entries: number; bytes: number } {
+  const maxEntries = options.maxEntries ?? SESSION_INDEX_MAX_ENTRIES;
+  const now = options.now ?? Date.now();
+  const entries: SerializedSessionEntry[] = [];
+  for (const [key, entry] of cache) {
+    if (entry.summary === null && entry.seenAt === undefined) continue;
+    entries.push({
+      key,
+      mtimeMs: entry.mtimeMs,
+      size: entry.size,
+      seenAt: entry.seenAt ?? now,
+      summary: entry.summary ? serializeSummary(entry.summary) : null
+    });
+  }
+  entries.sort((left, right) => right.seenAt - left.seenAt);
+  const payload = { version: SESSION_INDEX_VERSION, entries: entries.slice(0, maxEntries) };
+  writeJsonAtomic(filePath, payload);
+  return { entries: payload.entries.length, bytes: JSON.stringify(payload).length };
 }

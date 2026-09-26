@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { SessionManager, type SessionEntry } from "@earendil-works/pi-coding-agent";
-import { listSessionSummaries, readSessionHeaderLine, summarizeEntries, summarizeLiveSession, type SessionFileSummary } from "./session-summary-cache.js";
+import { listSessionSummaries, loadSessionIndex, readSessionHeaderLine, saveSessionIndex, summarizeEntries, summarizeLiveSession, type SessionFileSummary } from "./session-summary-cache.js";
 
 /**
  * 会话摘要缓存（2026-09-25 性能 P0）的回归网。
@@ -370,5 +370,156 @@ describe("session summary cache: stat metadata is what drives staleness", () => 
     const entry = [...cache.values()][0];
     expect(entry.mtimeMs).toBe(statSync(path).mtimeMs);
     expect(entry.size).toBe(statSync(path).size);
+  });
+});
+
+/**
+ * 磁盘索引（2026-09-26 P1）：把内存摘要缓存持久化，消掉「重启后第一轮全量重解析」。
+ * 实测基线：本机一个助手 179 文件 / 264 MB 冷扫 1461 ms，全助手 439 文件 5159 ms，
+ * 而这轮扫描纯同步 JSON.parse 压在 utility 事件循环上（表现为刚启动时点什么都卡一下）。
+ */
+describe("session summary cache: disk index", () => {
+  function indexCountingDeps(cache: Map<string, any>): { openCalls: () => number; headerCalls: () => number; deps: any } {
+    let opens = 0;
+    let headers = 0;
+    return {
+      openCalls: () => opens,
+      headerCalls: () => headers,
+      deps: {
+        cache,
+        openSession: (path: string) => { opens++; return SessionManager.open(path); },
+        readHeader: (path: string) => { headers++; return readSessionHeaderLine(path); },
+        readdir,
+        stat
+      }
+    };
+  }
+
+  function makeFixture(dir: string): void {
+    writeRealSession(dir, "C:/work/demo", (manager) => {
+      manager.appendMessage({ role: "user", content: "第一个问题" } as never);
+      manager.appendMessage({ role: "assistant", content: "第一个回答" } as never);
+      manager.appendSessionInfo("会话标题");
+    });
+    writeRaw(dir, "tool-audit.jsonl", [{ type: "tool_execution", tool: "read" }]);
+  }
+
+  it("索引往返：日期复原、字段一致，且第二个进程不再重解析任何文件", async () => {
+    const dir = tempDir("index-roundtrip");
+    makeFixture(dir);
+    const indexPath = join(dir, "pidesktop-session-index.json");
+
+    // 第一遍：冷扫（构造索引）
+    const firstCache = new Map<string, any>();
+    const first = await listSessionSummaries([dir], indexCountingDeps(firstCache).deps);
+    expect(first).toHaveLength(1);
+    const saved = saveSessionIndex(indexPath, firstCache, { now: 1_700_000_000_000 });
+    expect(saved.entries).toBe(2); // 真会话 + 非会话文件的负缓存
+
+    // 第二遍：模拟重启（新进程只有磁盘索引）
+    const loaded = loadSessionIndex(indexPath, { now: 1_700_000_000_000 });
+    expect(loaded.size).toBe(2);
+    const second = indexCountingDeps(loaded);
+    const summaries = await listSessionSummaries([dir], second.deps);
+    expect(summaries).toHaveLength(1);
+    // 关键断言：一个文件都没打开，连首行都没读（负缓存也持久化了）
+    expect(second.openCalls()).toBe(0);
+    expect(second.headerCalls()).toBe(0);
+    // 摘要内容与冷扫逐字段一致（日期经 JSON 往返后仍正确）
+    expect(summaries[0]?.id).toBe(first[0]?.id);
+    expect(summaries[0]?.messageCount).toBe(first[0]?.messageCount);
+    expect(summaries[0]?.firstMessage).toBe(first[0]?.firstMessage);
+    expect(summaries[0]?.modified.getTime()).toBe(first[0]?.modified.getTime());
+    expect(summaries[0]?.created.getTime()).toBe(first[0]?.created.getTime());
+    expect(summaries[0]?.name).toBe(first[0]?.name);
+  });
+
+  it("文件变了 → 只有那一个被重解析（索引不掩盖失效）", async () => {
+    const dir = tempDir("index-invalidate");
+    makeFixture(dir);
+    const indexPath = join(dir, "pidesktop-session-index.json");
+    const firstCache = new Map<string, any>();
+    await listSessionSummaries([dir], indexCountingDeps(firstCache).deps);
+    saveSessionIndex(indexPath, firstCache, { now: 1_700_000_000_000 });
+
+    // 追加一条消息（Pi 追加写 → mtime 与 size 同时变）
+    const sessionPath = (await readdir(dir)).map((name) => join(dir, name)).find((path) => path.endsWith(".jsonl") && !path.includes("audit"))!;
+    const manager = SessionManager.open(sessionPath);
+    manager.appendMessage({ role: "assistant", content: "追问后的回答" } as never);
+
+    const loaded = loadSessionIndex(indexPath, { now: 1_700_000_000_000 });
+    const counter = indexCountingDeps(loaded);
+    const summaries = await listSessionSummaries([dir], counter.deps);
+    expect(summaries).toHaveLength(1);
+    expect(counter.openCalls()).toBe(1); // 只重解析变了的那一个
+    expect(summaries[0]?.messageCount).toBe(3);
+  });
+
+  it("版本不符 / 损坏 / 非对象一律退化为空索引（绝不因此报错）", () => {
+    const dir = tempDir("index-broken");
+    const indexPath = join(dir, "index.json");
+    for (const body of ["不是 JSON{{{", "{}", "[]", JSON.stringify({ version: 999, entries: [] }), JSON.stringify({ version: 1, entries: "nope" })]) {
+      writeFileSync(indexPath, body, "utf8");
+      expect(loadSessionIndex(indexPath).size).toBe(0);
+    }
+    expect(loadSessionIndex(join(dir, "根本不存在.json")).size).toBe(0);
+  });
+
+  it("非法条目被逐条剔除，合法条目照常保留", () => {
+    const dir = tempDir("index-invalid-entries");
+    const indexPath = join(dir, "index.json");
+    writeFileSync(indexPath, JSON.stringify({
+      version: 1,
+      entries: [
+        { key: "c:/good.jsonl", mtimeMs: 1, size: 2, seenAt: 1_700_000_000_000, summary: { path: "C:/good.jsonl", id: "g", cwd: "C:/w", created: "2026-01-01T00:00:00.000Z", modified: "2026-01-02T00:00:00.000Z", messageCount: 3, firstMessage: "hi" } },
+        { key: "c:/bad-date.jsonl", mtimeMs: 1, size: 2, seenAt: 1_700_000_000_000, summary: { path: "C:/b.jsonl", id: "b", cwd: "C:/w", created: "not-a-date", modified: "2026-01-02T00:00:00.000Z", messageCount: 1, firstMessage: "x" } },
+        { key: "c:/bad-shape.jsonl", mtimeMs: 1, size: 2, seenAt: 1_700_000_000_000, summary: { path: "C:/c.jsonl" } },
+        { key: "c:/no-seen.jsonl", mtimeMs: 1, size: 2, summary: null }
+      ]
+    }), "utf8");
+    const loaded = loadSessionIndex(indexPath, { now: 1_700_000_000_000 });
+    expect([...loaded.keys()]).toEqual(["c:/good.jsonl"]);
+  });
+
+  it("超过 maxAge 的条目被丢弃（删掉的工作区不会永远留着）", () => {
+    const dir = tempDir("index-expiry");
+    const indexPath = join(dir, "index.json");
+    writeFileSync(indexPath, JSON.stringify({
+      version: 1,
+      entries: [
+        { key: "c:/old.jsonl", mtimeMs: 1, size: 2, seenAt: 1_000, summary: null },
+        { key: "c:/new.jsonl", mtimeMs: 1, size: 2, seenAt: 1_700_000_000_000, summary: null }
+      ]
+    }), "utf8");
+    const loaded = loadSessionIndex(indexPath, { now: 1_700_000_000_000, maxAgeMs: 30 * 24 * 3600 * 1000 });
+    expect([...loaded.keys()]).toEqual(["c:/new.jsonl"]);
+  });
+
+  it("超过条目上限时保留最新的（按 seenAt）", () => {
+    const dir = tempDir("index-cap");
+    const indexPath = join(dir, "index.json");
+    const entries = Array.from({ length: 5 }, (_, index) => ({
+      key: `c:/s${index}.jsonl`, mtimeMs: 1, size: 2, seenAt: 1_700_000_000_000 + index, summary: null
+    }));
+    writeFileSync(indexPath, JSON.stringify({ version: 1, entries }), "utf8");
+    const loaded = loadSessionIndex(indexPath, { now: 1_700_000_000_010, maxEntries: 3 });
+    expect(loaded.size).toBe(3);
+    expect([...loaded.keys()].sort()).toEqual(["c:/s2.jsonl", "c:/s3.jsonl", "c:/s4.jsonl"]);
+  });
+
+  it("扫描命中会刷新 seenAt（陈旧淘汰因此只针对真正没人扫的条目）", async () => {
+    const dir = tempDir("index-seenat");
+    makeFixture(dir);
+    const cache = new Map<string, any>();
+    await listSessionSummaries([dir], { ...indexCountingDeps(cache).deps, now: () => 1_000 });
+    for (const entry of cache.values()) expect(entry.seenAt).toBe(1_000);
+
+    await listSessionSummaries([dir], { ...indexCountingDeps(cache).deps, now: () => 2_000 });
+    for (const entry of cache.values()) expect(entry.seenAt).toBe(2_000);
+
+    const indexPath = join(dir, "index.json");
+    saveSessionIndex(indexPath, cache, { now: 2_000 });
+    const reloaded = loadSessionIndex(indexPath, { now: 2_000 });
+    expect([...reloaded.values()].every((entry) => entry.seenAt === 2_000)).toBe(true);
   });
 });
