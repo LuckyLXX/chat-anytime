@@ -2,6 +2,7 @@ import { useEffect, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import { ExitWrap, useExitPresenceValue } from "./Presence";
+import { useOverlayLayer } from "../lib/overlay-layers";
 
 export interface LightboxImage {
   src: string;
@@ -17,10 +18,15 @@ export interface LightboxImage {
  * paint containment，会让 `position: fixed` 的后代以气泡为包含块——内联渲染时
  * 遮罩与放大图被气泡宽度裁切，只有 portal 到 body 才是真正的全屏层。
  * Escape / 点击遮罩 / 关闭按钮三条关闭路径与 160ms 退场动画都在组件内收口。
+ *
+ * 放大层还要向 `useOverlayLayer` 登记：右侧预览面板里的内置浏览器是原生
+ * `WebContentsView`，永远浮在 DOM 之上，不登记的话放大图会被它盖掉（见
+ * `lib/overlay-layers.ts`）。登记到退场动画结束为止——退场那 160ms 也仍要挡住。
  */
 export function ImageLightbox({ image, onClose }: { image: LightboxImage | undefined; onClose(): void }): ReactNode {
   const presence = useExitPresenceValue(image, 160);
   const open = image !== undefined;
+  useOverlayLayer(presence.rendered);
 
   useEffect(() => {
     if (!open) return;

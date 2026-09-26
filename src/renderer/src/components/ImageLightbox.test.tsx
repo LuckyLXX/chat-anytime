@@ -3,6 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ImageLightbox } from "./ImageLightbox";
+import { overlayLayersOpen } from "../lib/overlay-layers";
 
 (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -54,5 +55,18 @@ describe("ImageLightbox", () => {
     expect(document.body.querySelector(".modal-backdrop")).not.toBeNull();
     act(() => { vi.advanceTimersByTime(160); });
     expect(document.body.querySelector(".modal-backdrop")).toBeNull();
+  });
+
+  it("registers as a full-screen overlay so the native preview view gets out of the way", () => {
+    vi.useFakeTimers();
+    render({ src: "a.png" });
+    // 右侧预览面板的内置浏览器是原生 WebContentsView，浮在所有 DOM 之上：
+    // 放大层不登记就会被它盖住（lib/overlay-layers.ts）。
+    expect(overlayLayersOpen()).toBe(true);
+    render(undefined);
+    // 退场动画那 160ms 里放大图还在屏幕上，仍要挡住原生视图。
+    expect(overlayLayersOpen()).toBe(true);
+    act(() => { vi.advanceTimersByTime(160); });
+    expect(overlayLayersOpen()).toBe(false);
   });
 });

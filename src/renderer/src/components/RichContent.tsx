@@ -19,6 +19,7 @@ import { alignSegmentHeadings, extractMarkdownHeadings, hasMathSyntax, normalize
 import { useStreamingChunks } from "../lib/streaming-split";
 import { resolveMarkdownAssetUrl } from "../lib/workspace-asset";
 import { sanitizeRichHtmlTree } from "../lib/html-sanitize";
+import { useOverlayLayer } from "../lib/overlay-layers";
 import { ImageLightbox } from "./ImageLightbox";
 
 interface RichContentProps {
@@ -225,6 +226,9 @@ const MermaidBlock = memo(function MermaidBlock({ code, language }: { code: stri
   const [svg, setSvg] = useState("");
   const [error, setError] = useState("");
   const [expanded, setExpanded] = useState(false);
+  // 放大弹窗要登记为全屏弹层：右侧预览面板的内置浏览器是原生 WebContentsView，
+  // 浮在所有 DOM 之上，不登记就会被它盖住（见 lib/overlay-layers.ts）。
+  useOverlayLayer(expanded);
 
   useEffect(() => {
     let active = true;

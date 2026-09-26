@@ -15,6 +15,7 @@ vi.mock("mermaid", () => ({
 }));
 
 import { RichContent } from "./RichContent";
+import { overlayLayersOpen } from "../lib/overlay-layers";
 
 /**
  * Mermaid 放大弹窗必须 portal 到 document.body。
@@ -64,5 +65,24 @@ describe("Mermaid 放大弹窗", () => {
     expect(overlay?.querySelector(".diagram-modal")).not.toBeNull();
     // 内容块带 content-visibility:auto 时，约束的就是「不在它的子树内」。
     expect(overlay?.closest(".rich-content")).toBeNull();
+  });
+
+  it("放大期间登记为全屏弹层（否则被右侧预览面板的原生视图盖住）", async () => {
+    await act(async () => {
+      root.render(
+        <RichContent artifactPrefix="message-mermaid" onOpenArtifact={() => undefined}>
+          {"```mermaid\nflowchart LR\n A --> B\n```"}
+        </RichContent>
+      );
+    });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(overlayLayersOpen()).toBe(false);
+
+    await act(async () => { container.querySelector<HTMLButtonElement>(".mermaid-actions button[aria-label='放大图表']")!.click(); });
+    expect(overlayLayersOpen()).toBe(true);
+
+    // 遮罩 mousedown 是组件内唯一的关闭路径，登记必须跟着收。
+    await act(async () => { document.body.querySelector<HTMLElement>(".modal-backdrop")?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true })); });
+    expect(overlayLayersOpen()).toBe(false);
   });
 });
