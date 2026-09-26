@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>会话状态</title>
+<title>会话监控</title>
 <!--
-  会话状态面板（作品类型：面板 / kind=panel）
+  会话监控面板（作品类型：面板 / kind=panel）
 
   数据接口（相对本文档，无需知道端口与 token）：
     GET  ./__pidesktop_state.json        → PanelStatePayload（只读）
@@ -16,128 +16,341 @@
   其中 live 只包含「还活在运行时里」的会话，带 busy / status / currentTools / todos。
   主界面关掉（退到托盘）之后这个端点照样有数据 —— 面板独立于主界面存活。
 
-  零依赖：不引任何 CDN、不打包，双击改完就能跑。全部用 createElement 构建，
-  不拼 innerHTML（会话标题来自用户与 AI，不能当 HTML 处理）。
+  本页只关心一件事：**此刻有谁在跑、跑到哪一步**。因此：
+    · 只渲染 live 里 busy === true 的会话（空闲会话与历史话题一律不显示，需要看话题
+      就回主界面 —— 面板的 420×560 应该全部用于「正在发生的事」）；
+    · 每个正在执行的工具给一个图标（图标本身说明在跑什么），配名称 / 中文说明 / 已耗时；
+    · todo 只给进度条 + 当前进行项，不铺整张清单。
+  载荷里的 sessions / activeSessionId 仍然照旧下发，本页只是不消费它们（改回两栏列表
+  不需要动任何平台代码）。
+
+  视觉：页内渐变光斑底 + backdrop-filter 毛玻璃卡片。面板窗口本身是不透明窗口
+  （transparent 未开，属于平台侧代码），所以玻璃只磨页内背景，不会透出桌面壁纸。
+
+  零依赖：不引任何 CDN、不打包，双击改完就能跑。全部用 createElement / createElementNS
+  构建，不给用户与 AI 来源的文本拼 innerHTML（图标是常量定义，走同一套 NS 构建）。
 -->
 <style>
   :root {
     color-scheme: light dark;
-    --bg: #f6f7f9;
-    --surface: #ffffff;
-    --surface-soft: #f0f1f4;
-    --border: #e2e4e9;
-    --text: #1c1f24;
-    --muted: #737b88;
-    --accent: #2f6df6;
-    --run: #d99a1b;
-    --ok: #2e9e63;
-    --fail: #cf4a4a;
-    --idle: #a8aeb8;
+    /* 文字与线条 */
+    --text: #171b21;
+    --muted: #5b6472;
+    --faint: #8c95a3;
+    --stroke: rgba(18, 26, 44, .10);
+    --stroke-soft: rgba(18, 26, 44, .06);
+    /* 玻璃 */
+    --glass: rgba(255, 255, 255, .62);
+    --glass-soft: rgba(255, 255, 255, .40);
+    --glass-strong: rgba(255, 255, 255, .78);
+    --highlight: rgba(255, 255, 255, .85);
+    --shadow: 0 16px 36px -22px rgba(16, 30, 60, .55);
+    /* 语义色 */
+    --accent: #3b76f0;
+    --accent-soft: rgba(59, 118, 240, .13);
+    --ok: #2fa46a;
+    --run: #d9922a;
+    --fail: #d0504c;
+    --idle: #9aa2ae;
+    --track: rgba(18, 26, 44, .09);
+    /* 背景光斑 */
+    --page-1: #eef2fb;
+    --page-2: #e8edf9;
+    --page-3: #eef0f6;
+    --blob-a: #9dbcff;
+    --blob-b: #c9b4ff;
+    --blob-c: #9fe0d6;
+    --blob-opacity: .55;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #17181c;
-      --surface: #1f2126;
-      --surface-soft: #26282e;
-      --border: #32353c;
-      --text: #e7e9ee;
-      --muted: #9aa2ae;
-      --accent: #6f9dff;
-      --run: #e3b552;
-      --ok: #57c98b;
-      --fail: #ef7676;
-      --idle: #6f7681;
+      --text: #e9ecf2;
+      --muted: #a3abb9;
+      --faint: #7d8796;
+      --stroke: rgba(255, 255, 255, .10);
+      --stroke-soft: rgba(255, 255, 255, .06);
+      --glass: rgba(32, 36, 45, .58);
+      --glass-soft: rgba(32, 36, 45, .38);
+      --glass-strong: rgba(34, 38, 48, .78);
+      --highlight: rgba(255, 255, 255, .09);
+      --shadow: 0 18px 40px -24px rgba(0, 0, 0, .85);
+      --accent: #7ba4ff;
+      --accent-soft: rgba(123, 164, 255, .16);
+      --ok: #58c98d;
+      --run: #e5b45c;
+      --fail: #f0817c;
+      --idle: #6d7684;
+      --track: rgba(255, 255, 255, .10);
+      --page-1: #12141a;
+      --page-2: #161a22;
+      --page-3: #101317;
+      --blob-a: #2c4a8f;
+      --blob-b: #4a3583;
+      --blob-c: #1f5b52;
+      --blob-opacity: .5;
     }
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; }
   body {
+    position: relative;
     display: flex; flex-direction: column;
-    background: var(--bg); color: var(--text);
+    background: linear-gradient(160deg, var(--page-1), var(--page-2) 55%, var(--page-3));
+    color: var(--text);
     font: 400 12.5px/1.5 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
     overflow: hidden;
+    -webkit-font-smoothing: antialiased;
   }
+
+  /* ---------- 背景：慢速漂移的光斑（毛玻璃的「底」） ---------- */
+  .bg { position: fixed; inset: 0; z-index: 0; overflow: hidden; pointer-events: none; }
+  .bg::after {
+    content: ""; position: absolute; inset: -15%;
+    background:
+      radial-gradient(120% 85% at 12% -5%, rgba(255, 255, 255, .55), transparent 62%),
+      radial-gradient(95% 75% at 105% 108%, rgba(255, 255, 255, .32), transparent 58%);
+  }
+  @media (prefers-color-scheme: dark) {
+    .bg::after {
+      background:
+        radial-gradient(120% 85% at 12% -5%, rgba(255, 255, 255, .06), transparent 62%),
+        radial-gradient(95% 75% at 105% 108%, rgba(255, 255, 255, .04), transparent 58%);
+    }
+  }
+  .blob {
+    position: absolute; border-radius: 50%; filter: blur(52px);
+    opacity: var(--blob-opacity); will-change: transform;
+  }
+  .blob-a { width: 300px; height: 300px; left: -80px; top: -90px; background: var(--blob-a); animation: drift-a 26s ease-in-out infinite alternate; }
+  .blob-b { width: 250px; height: 250px; right: -90px; top: 96px; background: var(--blob-b); animation: drift-b 33s ease-in-out infinite alternate; }
+  .blob-c { width: 280px; height: 280px; left: 30px; bottom: -120px; background: var(--blob-c); animation: drift-c 39s ease-in-out infinite alternate; }
+  @keyframes drift-a { from { transform: translate3d(0, 0, 0) scale(1); } to { transform: translate3d(46px, 34px, 0) scale(1.14); } }
+  @keyframes drift-b { from { transform: translate3d(0, 0, 0) scale(1.06); } to { transform: translate3d(-40px, 44px, 0) scale(.94); } }
+  @keyframes drift-c { from { transform: translate3d(0, 0, 0) scale(.98); } to { transform: translate3d(38px, -30px, 0) scale(1.12); } }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
+
+  /* ---------- 玻璃表面的统一配方 ---------- */
+  .glass {
+    background: var(--glass);
+    -webkit-backdrop-filter: blur(20px) saturate(165%);
+    backdrop-filter: blur(20px) saturate(165%);
+    border: 1px solid var(--stroke);
+    box-shadow: var(--shadow), inset 0 1px 0 var(--highlight);
+  }
+
+  /* ---------- 顶栏 ---------- */
   .bar {
+    position: relative; z-index: 2;
     display: flex; align-items: center; gap: 8px;
-    padding: 9px 12px; border-bottom: 1px solid var(--border); background: var(--surface);
+    padding: 9px 12px;
+    border-width: 0 0 1px;
+    border-radius: 0;
   }
-  .bar strong { font-size: 12.5px; font-weight: 600; }
+  .bar strong { font-size: 12.5px; font-weight: 650; letter-spacing: .01em; }
   .bar .spacer { flex: 1 1 auto; }
-  .bar .meta { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .bar .meta {
+    color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums;
+    padding: 2px 7px; border-radius: 99px; background: var(--glass-soft);
+    border: 1px solid var(--stroke-soft);
+  }
+  .pill {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 2px 8px; border-radius: 99px; font-size: 10.5px;
+    background: var(--accent-soft); color: var(--accent); border: 1px solid transparent;
+    font-variant-numeric: tabular-nums;
+  }
+  .pill[hidden] { display: none; }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--idle); flex: 0 0 auto; }
-  .dot.running { background: var(--run); animation: pulse 1.4s ease-in-out infinite; }
-  .dot.live { background: var(--ok); }
-  .dot.offline { background: var(--fail); }
-  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+  .dot.live { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent); }
+  .dot.run { background: var(--run); box-shadow: 0 0 0 3px color-mix(in srgb, var(--run) 22%, transparent); animation: pulse 1.6s ease-in-out infinite; }
+  .dot.offline { background: var(--fail); box-shadow: 0 0 0 3px color-mix(in srgb, var(--fail) 22%, transparent); }
+  .dot.pending { animation: pulse 1.4s ease-in-out infinite; }
   .ghost {
-    margin-left: 2px; padding: 3px 9px; border: 1px solid var(--border); border-radius: 6px;
-    background: var(--surface-soft); color: var(--text); font: inherit; font-size: 11.5px; cursor: pointer;
+    padding: 4px 10px; border-radius: 9px; font: inherit; font-size: 11.5px; cursor: pointer;
+    color: var(--text); background: var(--glass-soft); border: 1px solid var(--stroke);
+    -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
+    transition: color .16s ease, border-color .16s ease, background .16s ease, transform .12s ease;
   }
-  .ghost:hover { border-color: var(--accent); color: var(--accent); }
+  .ghost:hover { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--stroke)); background: var(--glass-strong); }
+  .ghost:active { transform: scale(.97); }
+  .ghost:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent); outline-offset: 1px; }
+
+  /* ---------- 连接失败提示 ---------- */
   .banner {
-    margin: 10px 12px 0; padding: 7px 10px; border-radius: 8px;
-    background: color-mix(in srgb, var(--fail) 14%, transparent);
-    color: var(--fail); font-size: 11.5px;
+    position: relative; z-index: 2;
+    margin: 10px 12px 0; padding: 8px 11px; border-radius: 12px;
+    border-color: color-mix(in srgb, var(--fail) 34%, var(--stroke));
+    background: color-mix(in srgb, var(--fail) 12%, var(--glass));
+    color: color-mix(in srgb, var(--fail) 82%, var(--text));
+    font-size: 11.5px;
   }
-  main { flex: 1 1 auto; overflow-y: auto; padding: 10px 12px 14px; display: flex; flex-direction: column; gap: 9px; }
-  .section-title { margin: 3px 0 -2px; color: var(--muted); font-size: 10.5px; letter-spacing: .04em; }
+  .banner[hidden] { display: none; }
+
+  /* ---------- 主体 ---------- */
+  main {
+    position: relative; z-index: 1;
+    flex: 1 1 auto; min-height: 0; overflow-y: auto;
+    padding: 11px 12px 14px; display: flex; flex-direction: column; gap: 10px;
+  }
+  main::-webkit-scrollbar { width: 8px; }
+  main::-webkit-scrollbar-thumb { background: var(--stroke); border-radius: 99px; }
+  main::-webkit-scrollbar-thumb:hover { background: var(--faint); }
+
   .card {
-    border: 1px solid var(--border); border-radius: 10px; background: var(--surface);
-    padding: 9px 10px; display: flex; flex-direction: column; gap: 7px;
+    position: relative;
+    display: flex; flex-direction: column; gap: 10px;
+    padding: 12px; border-radius: 16px;
   }
-  .card.busy { border-color: color-mix(in srgb, var(--run) 45%, var(--border)); }
+  /* 只有「新出现的会话」才播入场：工具起停会不断改变签名，
+     每次重绘都淡入的话整张卡会持续闪烁。 */
+  .card.enter { animation: card-in .26s cubic-bezier(.22, .8, .3, 1) both; }
+  @keyframes card-in { from { opacity: 0; transform: translateY(6px) scale(.99); } to { opacity: 1; transform: none; } }
+
   .card-head { display: flex; align-items: center; gap: 7px; }
   .card-title {
-    flex: 1 1 auto; min-width: 0; font-weight: 600; font-size: 12.5px;
+    flex: 0 1 auto; min-width: 0; font-size: 13px; font-weight: 620;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
-  .time { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
-  .status { color: var(--muted); font-size: 11.5px; display: flex; align-items: center; gap: 6px; }
-  .status .busy-text { color: var(--text); }
-  .tools { display: flex; flex-direction: column; gap: 3px; }
+  .card-space {
+    flex: 1 1 auto; min-width: 0; text-align: right;
+    color: var(--faint); font-size: 10.5px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl;
+  }
+
+  .status { display: flex; align-items: center; gap: 7px; font-size: 11.5px; color: var(--muted); }
+  .status .beacon {
+    position: relative; width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto;
+    background: var(--run);
+  }
+  .status .beacon::after {
+    content: ""; position: absolute; inset: -4px; border-radius: 50%;
+    border: 1px solid currentColor; color: var(--run); opacity: .45;
+    animation: beacon 1.8s ease-out infinite;
+  }
+  @keyframes beacon { 0% { transform: scale(.6); opacity: .5; } 100% { transform: scale(1.5); opacity: 0; } }
+  .status .beacon.still { background: var(--ok); }
+  .status .beacon.still::after { display: none; }
+  .status .beacon.idle { background: var(--idle); }
+  .status .beacon.idle::after { display: none; }
+  .status .text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* ---------- 正在执行的工具 ---------- */
+  .tools { display: flex; flex-direction: column; gap: 5px; }
   .tool {
-    display: flex; align-items: center; gap: 7px; padding: 3px 7px; border-radius: 6px;
-    background: var(--surface-soft); font-size: 11.5px;
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 8px; border-radius: 11px;
+    background: var(--glass-soft); border: 1px solid var(--stroke-soft);
   }
-  .tool .name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, Consolas, monospace; }
-  .bar-track { height: 4px; border-radius: 3px; background: var(--surface-soft); overflow: hidden; }
-  .bar-fill { height: 100%; background: var(--ok); border-radius: 3px; transition: width .3s ease; }
-  .todo-head { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 11px; }
-  .todo-list { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; }
-  .todo-list li { display: flex; align-items: flex-start; gap: 6px; font-size: 11.5px; color: var(--muted); }
-  .todo-list li.current { color: var(--text); }
-  .todo-list .mark { flex: 0 0 auto; width: 12px; text-align: center; }
-  .todo-list li.done .text { text-decoration: line-through; opacity: .65; }
-  .row {
-    display: flex; align-items: center; gap: 7px; padding: 5px 9px; border-radius: 8px;
-    background: var(--surface); border: 1px solid var(--border);
+  .tool .icon {
+    flex: 0 0 auto; width: 22px; height: 22px; border-radius: 7px;
+    display: grid; place-items: center;
+    background: var(--accent-soft); color: var(--accent);
   }
-  .row .row-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .row .row-meta { color: var(--muted); font-size: 11px; }
-  .row.active { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
-  .empty { color: var(--muted); font-size: 11.5px; padding: 6px 2px; }
+  .tool .icon svg { width: 13px; height: 13px; display: block; }
+  .tool .name {
+    flex: 1 1 auto; min-width: 0;
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 11px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .tool .label {
+    flex: 0 0 auto; max-width: 40%; color: var(--muted); font-size: 10.5px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .tool .time {
+    flex: 0 0 auto; color: var(--muted); font-size: 10.5px;
+    font-variant-numeric: tabular-nums; min-width: 34px; text-align: right;
+  }
+  .spinner {
+    flex: 0 0 auto; width: 11px; height: 11px; border-radius: 50%;
+    background: conic-gradient(from 0deg, transparent 0 30%, var(--run) 78% 100%);
+    -webkit-mask: radial-gradient(circle, transparent 0 3.4px, #000 3.6px);
+    mask: radial-gradient(circle, transparent 0 3.4px, #000 3.6px);
+    animation: spin 1.05s linear infinite;
+  }
+  .more { color: var(--faint); font-size: 10.5px; padding-left: 4px; }
+
+  /* ---------- todo ---------- */
+  .todo { display: flex; flex-direction: column; gap: 6px; }
+  .todo-head {
+    display: flex; align-items: baseline; gap: 8px;
+    color: var(--muted); font-size: 11px;
+  }
+  .todo-head .count { font-variant-numeric: tabular-nums; }
+  .todo-head .spacer { flex: 1 1 auto; }
+  .todo-head .pct { color: var(--faint); font-variant-numeric: tabular-nums; }
+  .bar-track { height: 6px; border-radius: 99px; background: var(--track); overflow: hidden; }
+  .bar-fill {
+    height: 100%; border-radius: 99px;
+    background: linear-gradient(90deg, var(--accent), var(--ok));
+    box-shadow: 0 0 14px -3px color-mix(in srgb, var(--accent) 70%, transparent);
+    transition: width .35s cubic-bezier(.22, .8, .3, 1);
+  }
+  .todo-current { display: flex; flex-direction: column; gap: 3px; }
+  .todo-current .line {
+    display: flex; align-items: flex-start; gap: 6px;
+    font-size: 11.5px; color: var(--text);
+  }
+  .todo-current .line.pending { color: var(--muted); }
+  .todo-current .mark { flex: 0 0 auto; color: var(--accent); font-size: 10px; line-height: 1.7; }
+  .todo-current .line.pending .mark { color: var(--faint); }
+  .todo-current .text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* ---------- 空态 ---------- */
+  .empty {
+    margin: auto; display: flex; flex-direction: column; align-items: center; gap: 9px;
+    padding: 20px 12px; text-align: center;
+    animation: card-in .3s cubic-bezier(.22, .8, .3, 1) both;
+  }
+  .empty .badge {
+    width: 46px; height: 46px; border-radius: 16px;
+    display: grid; place-items: center; color: var(--faint);
+  }
+  .empty .badge svg { width: 20px; height: 20px; }
+  .empty .title { font-size: 12.5px; font-weight: 600; }
+  .empty .hint { font-size: 11px; color: var(--faint); max-width: 240px; }
+
+  /* ---------- 底栏 ---------- */
   footer {
-    display: flex; align-items: center; gap: 8px; padding: 7px 12px;
-    border-top: 1px solid var(--border); background: var(--surface);
-    color: var(--muted); font-size: 10.5px;
+    position: relative; z-index: 2;
+    display: flex; align-items: center; gap: 8px;
+    padding: 7px 12px; border-width: 1px 0 0; border-radius: 0;
+    color: var(--faint); font-size: 10.5px;
   }
   footer .spacer { flex: 1 1 auto; }
-  main::-webkit-scrollbar { width: 8px; }
-  main::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+  footer .app { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  footer .app b { font-weight: 600; color: var(--muted); }
+
+  @media (prefers-reduced-motion: reduce) {
+    .blob { animation: none; }
+    .card, .empty { animation: none; }
+    .status .beacon::after { display: none; }
+    .spinner { animation-duration: 2.6s; }
+    .bar-fill { transition: none; }
+  }
 </style>
 </head>
 <body>
-  <header class="bar">
-    <span class="dot" id="conn"></span>
-    <strong>会话状态</strong>
+  <div class="bg" aria-hidden="true">
+    <span class="blob blob-a"></span>
+    <span class="blob blob-b"></span>
+    <span class="blob blob-c"></span>
+  </div>
+
+  <header class="bar glass">
+    <span class="dot pending" id="conn"></span>
+    <strong>会话监控</strong>
+    <span class="pill" id="count" hidden></span>
     <span class="spacer"></span>
     <span class="meta" id="meta">连接中…</span>
     <button class="ghost" id="show-main" title="回到 ChatAnyTime 主界面">主界面</button>
   </header>
-  <div class="banner" id="banner" hidden></div>
+
+  <div class="banner glass" id="banner" hidden></div>
   <main id="root"></main>
-  <footer>
-    <span id="app-info">—</span>
+
+  <footer class="glass">
+    <span class="app" id="app-info">—</span>
     <span class="spacer"></span>
     <span>每 1 秒刷新</span>
   </footer>
@@ -148,20 +361,25 @@
 
   var ENDPOINT = "./__pidesktop_state.json";
   var POLL_MS = 1000;
-  var MAX_OTHER_SESSIONS = 8;
-  var MAX_TODO_ROWS = 5;
+  var MAX_TOOL_ROWS = 6;          // 一张卡最多铺几行工具，超出的折成「还有 N 个」
+  var MAX_TODO_LINES = 2;         // todo 只显示当前进行项（最多两行）
+  var SVG_NS = "http://www.w3.org/2000/svg";
 
   var root = document.getElementById("root");
   var banner = document.getElementById("banner");
   var meta = document.getElementById("meta");
   var conn = document.getElementById("conn");
+  var count = document.getElementById("count");
   var appInfo = document.getElementById("app-info");
 
   var latest = null;
   var currentSignature = "";
   var failures = 0;
+  /** 已经渲染过的运行中会话：新进来的那一个才播入场动画（见 .card.enter）。 */
+  var seenSessions = {};
 
-  /** 小工具：建元素，顺带 class 与文本（一律走 textContent，不拼 HTML）。 */
+  /* ---------------- 元素构建（一律 textContent，绝不拼 HTML） ---------------- */
+
   function el(tag, className, text) {
     var node = document.createElement(tag);
     if (className) node.className = className;
@@ -169,61 +387,192 @@
     return node;
   }
 
+  /**
+   * 图标：一次运行做什么，靠这个图标说。定义成常量几何形状（描边风格，24 网格），
+   * 用 createElementNS 搭建——即使是自己的常量字符串也不走 innerHTML，
+   * 免得下次有人把变量拼进来。
+   */
+  var ICONS = {
+    terminal: [["path", { d: "M4 17l5-5-5-5" }], ["path", { d: "M11.5 19H20" }]],
+    file: [["path", { d: "M6 3.5h7.5L18 8v12.5H6z" }], ["path", { d: "M13 3.5V8h5" }], ["path", { d: "M9 12.5h6" }], ["path", { d: "M9 16h4" }]],
+    pencil: [["path", { d: "M4 20l4.2-1L19 8.2 15.8 5 5 15.8 4 20z" }], ["path", { d: "M14.2 6.6l3.2 3.2" }]],
+    search: [["circle", { cx: 11, cy: 11, r: 6 }], ["path", { d: "M15.6 15.6L20 20" }]],
+    folder: [["path", { d: "M4 6.5h5l2 2.2h9v9.8H4z" }], ["path", { d: "M4 9.5h16" }]],
+    globe: [["circle", { cx: 12, cy: 12, r: 8 }], ["path", { d: "M4.2 12h15.6" }], ["path", { d: "M12 4c2.6 2.6 2.6 13.4 0 16" }], ["path", { d: "M12 4c-2.6 2.6-2.6 13.4 0 16" }]],
+    monitor: [["path", { d: "M3.5 5h17v10.5h-17z" }], ["path", { d: "M12 15.5V20" }], ["path", { d: "M8.5 20h7" }]],
+    grid: [["path", { d: "M4.5 4.5h6v6h-6z" }], ["path", { d: "M13.5 4.5h6v6h-6z" }], ["path", { d: "M4.5 13.5h6v6h-6z" }], ["path", { d: "M13.5 13.5h6v6h-6z" }]],
+    server: [["path", { d: "M4 5h16v5H4z" }], ["path", { d: "M4 14h16v5H4z" }], ["path", { d: "M8 7.5h.01" }], ["path", { d: "M8 16.5h.01" }]],
+    bookmark: [["path", { d: "M7 4h10v16.5l-5-4-5 4z" }]],
+    clock: [["circle", { cx: 12, cy: 12, r: 8 }], ["path", { d: "M12 7.5V12l3.2 2" }]],
+    sparkle: [["path", { d: "M12 3.5l1.7 4.8L18.5 10l-4.8 1.7L12 16.5l-1.7-4.8L5.5 10l4.8-1.7z" }], ["path", { d: "M18 17l.7 1.8L20.5 19.5l-1.8.7L18 22l-.7-1.8L15.5 19.5l1.8-.7z" }]],
+    check: [["path", { d: "M4.5 5.5h15v13h-15z" }], ["path", { d: "M8.5 12l2.5 2.5 4.5-5" }]],
+    help: [["circle", { cx: 12, cy: 12, r: 8 }], ["path", { d: "M9.6 9.6a2.5 2.5 0 1 1 3.2 2.4c-.7.3-1 .9-1 1.7" }], ["path", { d: "M12 17h.01" }]],
+    users: [["circle", { cx: 9.5, cy: 8.5, r: 3.2 }], ["path", { d: "M3.6 19.5c0-3 2.6-4.8 5.9-4.8s5.9 1.8 5.9 4.8" }], ["path", { d: "M16.5 6.2a3 3 0 0 1 0 5.6" }], ["path", { d: "M18 15.4c1.6.6 2.6 1.9 2.6 3.4" }]],
+    image: [["path", { d: "M4 5h16v14H4z" }], ["circle", { cx: 9, cy: 10, r: 1.6 }], ["path", { d: "M4.6 17.5l4.9-4.6 3.6 3.3 2.6-2.4 4.7 4" }]],
+    map: [["path", { d: "M4 6.5l5-2 6 2 5-2v13l-5 2-6-2-5 2z" }], ["path", { d: "M9 4.5v13" }], ["path", { d: "M15 6.5v13" }]],
+    plug: [["path", { d: "M9 3.5V9" }], ["path", { d: "M15 3.5V9" }], ["path", { d: "M6 9h12v3.2a6 6 0 0 1-12 0z" }], ["path", { d: "M12 18.2V21" }]],
+    cube: [["path", { d: "M12 3.2l8 4.4v9L12 21l-8-4.4v-9z" }], ["path", { d: "M4.2 7.7l7.8 4.3 7.8-4.3" }], ["path", { d: "M12 12v9" }]],
+    moon: [["path", { d: "M20 14.5A8.2 8.2 0 0 1 9.5 4 8.5 8.5 0 1 0 20 14.5z" }]]
+  };
+
+  function svgIcon(key) {
+    var parts = ICONS[key] || ICONS.cube;
+    var svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "1.8");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("focusable", "false");
+    for (var i = 0; i < parts.length; i += 1) {
+      var node = document.createElementNS(SVG_NS, parts[i][0]);
+      var attrs = parts[i][1];
+      for (var name in attrs) {
+        if (Object.prototype.hasOwnProperty.call(attrs, name)) node.setAttribute(name, String(attrs[name]));
+      }
+      svg.appendChild(node);
+    }
+    return svg;
+  }
+
+  /* ---------------- 工具 → 图标 / 中文说明 ---------------- */
+
+  // 顺序即优先级：MCP 与内置能力前缀先判，再落到 shell / 文件类关键词。
+  var ICON_RULES = [
+    [/^mcp__/, "plug"],
+    [/^browser_/, "globe"],
+    [/^computer_/, "monitor"],
+    [/^design_/, "grid"],
+    [/^ssh_/, "server"],
+    [/^memory_/, "bookmark"],
+    [/^automation_/, "clock"],
+    [/^gallery_/, "sparkle"],
+    [/^(bash|powershell|sh|shell|cmd|pwsh)$/, "terminal"],
+    [/^(read|cat|view)$/, "file"],
+    [/^(write|edit|patch|multiedit)$/, "pencil"],
+    [/^(grep|search|rg)$/, "search"],
+    [/^(find|ls|glob|list|dir)$/, "folder"],
+    [/^(todo_write|todowrite)$/, "check"],
+    [/^(ask_question|question)$/, "help"],
+    [/^(delegate_agent|subagent|task)$/, "users"],
+    [/^recognize_images$/, "image"],
+    [/^(enter_plan_mode|exit_plan_mode)$/, "map"],
+    [/^(web_search|web_fetch|fetch|search_web)/, "globe"]
+  ];
+
+  var TOOL_LABELS = {
+    bash: "执行命令", powershell: "执行命令", sh: "执行命令", cmd: "执行命令",
+    read: "读取文件", write: "写入文件", edit: "编辑文件",
+    grep: "搜索内容", find: "查找文件", ls: "列目录",
+    todo_write: "更新任务", ask_question: "向你提问",
+    delegate_agent: "委派子代理", recognize_images: "识别图片",
+    browser_navigate: "打开网页", browser_snapshot: "读取页面", browser_click: "点击页面",
+    browser_type: "填写输入", browser_eval: "执行脚本", browser_screenshot: "页面截图",
+    browser_screenshot_full: "整页截图", browser_wait: "等待页面", browser_get: "读取内容",
+    browser_press: "按键", browser_scroll: "滚动页面", browser_select: "选择下拉",
+    browser_tabs: "切换标签页", browser_upload: "上传文件", browser_save_image: "保存图片",
+    computer_screenshot: "桌面截图", computer_click: "点击桌面", computer_type: "键盘输入",
+    computer_windows: "枚举窗口", computer_press: "按键",
+    enter_plan_mode: "进入计划模式", exit_plan_mode: "提交计划",
+    gallery_publish: "登记作品"
+  };
+
+  function iconForTool(name) {
+    var key = String(name || "").toLowerCase();
+    for (var i = 0; i < ICON_RULES.length; i += 1) {
+      if (ICON_RULES[i][0].test(key)) return ICON_RULES[i][1];
+    }
+    return "cube";
+  }
+
+  function labelForTool(name) {
+    var key = String(name || "");
+    if (TOOL_LABELS[key]) return TOOL_LABELS[key];
+    if (/^mcp__/.test(key)) {
+      // mcp__<server>__<tool>：说明写服务名，比「MCP 工具」有用。
+      var server = key.split("__")[1];
+      return server ? "MCP · " + server : "MCP 工具";
+    }
+    if (/^design_/.test(key)) return "设计画布";
+    if (/^ssh_/.test(key)) return "远程主机";
+    if (/^memory_/.test(key)) return "长期记忆";
+    if (/^automation_/.test(key)) return "定时任务";
+    if (/^browser_/.test(key)) return "内置浏览器";
+    return "";
+  }
+
+  /* ---------------- 格式化 ---------------- */
+
+  function pad(value) { return value < 10 ? "0" + value : String(value); }
+
   function formatDuration(ms) {
-    if (!ms || ms < 0) return "";
+    if (!ms || ms < 0) return "0:00";
     var total = Math.floor(ms / 1000);
     var seconds = total % 60;
     var minutes = Math.floor(total / 60) % 60;
     var hours = Math.floor(total / 3600);
-    var pad = function (value) { return value < 10 ? "0" + value : String(value); };
     if (hours > 0) return hours + ":" + pad(minutes) + ":" + pad(seconds);
     return minutes + ":" + pad(seconds);
   }
 
-  function statusDotClass(busy, runStatus) {
-    if (busy) return "dot running";
-    if (runStatus === "completed") return "dot live";
-    if (runStatus === "failed") return "dot offline";
-    return "dot";
-  }
-
   function formatClock(at) {
     var date = new Date(at);
-    var pad = function (value) { return value < 10 ? "0" + value : String(value); };
     return pad(date.getHours()) + ":" + pad(date.getMinutes()) + ":" + pad(date.getSeconds());
   }
 
-  function elapsedSpan(startedAt, suffix) {
-    var span = el("span", "time", formatDuration(Date.now() - startedAt) + (suffix ? " " + suffix : ""));
+  /** 已耗时的节点带上 data-start，tickElapsed 每秒只改这些文本，不重建 DOM。 */
+  function elapsedSpan(startedAt) {
+    var span = el("span", "time", formatDuration(Date.now() - startedAt));
     span.dataset.start = String(startedAt);
-    if (suffix) span.dataset.suffix = suffix;
     return span;
   }
 
-  function renderToolList(tools) {
+  /* ---------------- 卡片 ---------------- */
+
+  function renderToolRow(tool) {
+    var label = labelForTool(tool.name);
+    var row = el("div", "tool");
+    row.title = label ? tool.name + "（" + label + "）" : tool.name;
+
+    var chip = el("span", "icon");
+    chip.appendChild(svgIcon(iconForTool(tool.name)));
+    row.appendChild(chip);
+
+    row.appendChild(el("span", "name", tool.name));
+    if (label) row.appendChild(el("span", "label", label));
+
+    row.appendChild(el("span", "spinner"));
+    row.appendChild(elapsedSpan(tool.startedAt));
+    return row;
+  }
+
+  function renderTools(tools) {
     var wrap = el("div", "tools");
-    for (var i = 0; i < tools.length; i += 1) {
-      var row = el("div", "tool");
-      row.appendChild(el("span", "name", tools[i].name));
-      row.appendChild(elapsedSpan(tools[i].startedAt, "进行中"));
-      wrap.appendChild(row);
+    var shown = tools.slice(0, MAX_TOOL_ROWS);
+    for (var i = 0; i < shown.length; i += 1) wrap.appendChild(renderToolRow(shown[i]));
+    if (tools.length > shown.length) {
+      wrap.appendChild(el("div", "more", "还有 " + (tools.length - shown.length) + " 个工具在跑…"));
     }
     return wrap;
   }
 
+  /**
+   * todo 只给两件事：进度（几 / 几 + 进度条）与当前进行项。
+   * 整张清单在 420×560 的面板里是噪声，要看全部请回主界面的任务面板。
+   */
   function renderTodo(live) {
     var todos = live.todos || [];
     var summary = live.todoSummary || { total: todos.length, completed: 0, inProgress: 0 };
-    var wrap = el("div", null);
-    wrap.style.display = "flex";
-    wrap.style.flexDirection = "column";
-    wrap.style.gap = "5px";
-
-    var head = el("div", "todo-head");
-    var done = summary.completed || 0;
     var total = summary.total || 0;
-    head.appendChild(el("span", null, total > 0 ? "任务 " + done + "/" + total : "任务 " + done));
-    if (summary.inProgress > 0) head.appendChild(el("span", null, "· 进行中 " + summary.inProgress));
+    var done = summary.completed || 0;
+
+    var wrap = el("div", "todo");
+    var head = el("div", "todo-head");
+    head.appendChild(el("span", "count", total > 0 ? "任务 " + done + " / " + total : "任务 " + done));
+    head.appendChild(el("span", "spacer"));
+    if (total > 0) head.appendChild(el("span", "pct", Math.round((done / total) * 100) + "%"));
     wrap.appendChild(head);
 
     if (total > 0) {
@@ -234,46 +583,77 @@
       wrap.appendChild(track);
     }
 
-    var list = el("ul", "todo-list");
-    var shown = todos.slice(0, MAX_TODO_ROWS);
-    for (var i = 0; i < shown.length; i += 1) {
-      var todo = shown[i];
-      var item = el("li", todo.status === "in_progress" ? "current" : todo.status === "completed" ? "done" : null);
-      item.appendChild(el("span", "mark", todo.status === "completed" ? "✓" : todo.status === "in_progress" ? "▸" : "·"));
-      item.appendChild(el("span", "text", todo.content));
-      list.appendChild(item);
+    var current = [];
+    for (var i = 0; i < todos.length && current.length < MAX_TODO_LINES; i += 1) {
+      if (todos[i].status === "in_progress") current.push({ text: todos[i].content, pending: false });
     }
-    if (list.childNodes.length > 0) wrap.appendChild(list);
-    if (todos.length > shown.length) wrap.appendChild(el("div", "time", "还有 " + (todos.length - shown.length) + " 项…"));
+    if (current.length === 0) {
+      // 没有「进行中」时退一步显示下一项待办：进度条告诉你做到哪，这一行告诉你接下来做什么。
+      for (var j = 0; j < todos.length && current.length < 1; j += 1) {
+        if (todos[j].status === "pending") current.push({ text: todos[j].content, pending: true });
+      }
+    }
+    if (current.length > 0) {
+      var lines = el("div", "todo-current");
+      for (var k = 0; k < current.length; k += 1) {
+        var line = el("div", current[k].pending ? "line pending" : "line");
+        line.appendChild(el("span", "mark", current[k].pending ? "○" : "▸"));
+        line.appendChild(el("span", "text", current[k].text));
+        line.title = current[k].text;
+        lines.appendChild(line);
+      }
+      wrap.appendChild(lines);
+    }
     return wrap;
   }
 
-  function renderLiveCard(live, compact) {
-    var card = el("div", live.busy ? "card busy" : "card");
+  function renderCard(live, entering) {
+    var card = el("div", entering ? "card glass enter" : "card glass");
 
     var head = el("div", "card-head");
-    head.appendChild(el("span", statusDotClass(live.busy, live.runStatus), null));
+    head.appendChild(el("span", "dot run"));
     head.appendChild(el("span", "card-title", live.title));
-    if (live.startedAt) head.appendChild(elapsedSpan(live.startedAt, null));
+    if (live.workspace) {
+      var space = el("span", "card-space", live.workspace);
+      space.title = live.workspace;
+      head.appendChild(space);
+    }
     card.appendChild(head);
 
     var status = el("div", "status");
-    status.appendChild(el("span", "busy-text", live.status || (live.busy ? "运行中" : "空闲")));
-    if (!live.busy && live.lastTool) status.appendChild(el("span", null, "· 上次 " + live.lastTool.name));
+    var tools = live.currentTools || [];
+    var beacon = el("span", tools.length > 0 || live.busy ? "beacon" : "beacon still");
+    if (live.runStatus === "failed") beacon.className = "beacon idle";
+    status.appendChild(beacon);
+    status.appendChild(el("span", "text", live.status || (live.busy ? "运行中" : "空闲")));
     card.appendChild(status);
 
-    if (compact) return card;
-    if (live.currentTools && live.currentTools.length > 0) card.appendChild(renderToolList(live.currentTools));
-    if ((live.todos && live.todos.length > 0) || (live.todoSummary && live.todoSummary.total > 0)) card.appendChild(renderTodo(live));
+    if (tools.length > 0) card.appendChild(renderTools(tools));
+    if ((live.todos && live.todos.length > 0) || (live.todoSummary && live.todoSummary.total > 0)) {
+      card.appendChild(renderTodo(live));
+    }
     return card;
   }
 
-  function renderSessionRow(session, activeSessionId) {
-    var row = el("div", session.id === activeSessionId ? "row active" : "row");
-    row.appendChild(el("span", statusDotClass(session.runStatus === "running", session.runStatus), null));
-    row.appendChild(el("span", "row-title", session.title || session.id));
-    if (session.messageCount !== undefined) row.appendChild(el("span", "row-meta", session.messageCount + " 条"));
-    return row;
+  function renderEmpty() {
+    var wrap = el("div", "empty");
+    var badge = el("div", "badge glass");
+    badge.appendChild(svgIcon("moon"));
+    wrap.appendChild(badge);
+    wrap.appendChild(el("div", "title", "当前没有正在执行的会话"));
+    wrap.appendChild(el("div", "hint", "主界面里发一条消息，它就会实时出现在这里（主界面关掉也不影响）。"));
+    return wrap;
+  }
+
+  /* ---------------- 渲染 ---------------- */
+
+  function busySessions(data) {
+    var live = data.live || [];
+    var busy = [];
+    for (var i = 0; i < live.length; i += 1) {
+      if (live[i].busy) busy.push(live[i]);
+    }
+    return busy;
   }
 
   function render() {
@@ -284,76 +664,72 @@
       root.appendChild(el("div", "empty", "等待状态数据…"));
       return;
     }
-
-    var live = data.live || [];
-    var sessions = data.sessions || [];
-    var running = [];
-    var idle = [];
-    for (var i = 0; i < live.length; i += 1) (live[i].busy ? running : idle).push(live[i]);
-
-    if (running.length > 0) {
-      root.appendChild(el("div", "section-title", "运行中 · " + running.length));
-      for (var a = 0; a < running.length; a += 1) root.appendChild(renderLiveCard(running[a]));
-    }
-
-    var liveIds = {};
-    for (var b = 0; b < live.length; b += 1) liveIds[live[b].sessionId] = true;
-
-    if (idle.length > 0) {
-      root.appendChild(el("div", "section-title", "已打开的会话 · " + idle.length));
-      // 空闲会话用紧凑卡片：工具与 todo 是「正在做」的信息，空闲时只会噪声。
-      for (var c = 0; c < idle.length; c += 1) root.appendChild(renderLiveCard(idle[c], true));
-    }
-
-    if (running.length === 0 && idle.length === 0) {
-      root.appendChild(el("div", "empty", "当前没有处于运行时的会话（主界面里发一条消息就会出现在这里）。"));
-    }
-
-    var others = [];
-    for (var d = 0; d < sessions.length; d += 1) {
-      if (!liveIds[sessions[d].id]) others.push(sessions[d]);
-      if (others.length >= MAX_OTHER_SESSIONS) break;
-    }
-    if (others.length > 0) {
-      root.appendChild(el("div", "section-title", "最近话题"));
-      for (var e = 0; e < others.length; e += 1) root.appendChild(renderSessionRow(others[e], data.activeSessionId));
+    var busy = busySessions(data);
+    if (busy.length === 0) {
+      seenSessions = {};
+      root.appendChild(renderEmpty());
+    } else {
+      var nextSeen = {};
+      for (var i = 0; i < busy.length; i += 1) {
+        var id = busy[i].sessionId;
+        nextSeen[id] = true;
+        root.appendChild(renderCard(busy[i], !seenSessions[id]));
+      }
+      // 只在「正在跑的集合」里记：一个会话转空闲又重新开始跑时会重新播一次。
+      seenSessions = nextSeen;
     }
     root.scrollTop = scrollTop;
   }
 
-  function setConnected(ok) {
-    conn.className = ok ? "dot live" : "dot offline";
-    if (!ok) {
-      banner.hidden = false;
-      banner.textContent = "状态接口不可用（已重试 " + failures + " 次）。请用作品墙的「运行」打开本面板：直接用浏览器打开这个文件、或在沙箱预览里看时都没有这个接口。";
+  function renderCount(data) {
+    var n = data ? busySessions(data).length : 0;
+    if (n > 0) {
+      count.hidden = false;
+      count.textContent = n + " 运行中";
     } else {
-      banner.hidden = true;
+      count.hidden = true;
     }
   }
 
-  /** 只随时间变化的那些数字（已耗时）单独刷新，避免每秒重建整棵 DOM。 */
+  function setConnected(ok) {
+    conn.className = ok ? "dot live" : "dot offline";
+    if (ok) {
+      banner.hidden = true;
+      return;
+    }
+    banner.hidden = false;
+    banner.textContent = "状态接口不可用（已重试 " + failures + " 次）。请用作品墙的「运行」打开本面板：直接在浏览器里打开这个文件、或在沙箱预览里看时都没有这个接口。";
+  }
+
+  /** 只随时间变化的那些数字（工具已耗时）单独刷新。 */
   function tickElapsed() {
     var nodes = root.querySelectorAll("[data-start]");
     var now = Date.now();
     for (var i = 0; i < nodes.length; i += 1) {
       var node = nodes[i];
-      var text = formatDuration(now - Number(node.dataset.start));
-      node.textContent = node.dataset.suffix ? text + " " + node.dataset.suffix : text;
+      node.textContent = formatDuration(now - Number(node.dataset.start));
     }
   }
 
-  /** 渲染签名：只有它变了才整体重绘（重绘会重置滚动位置）。 */
+  /**
+   * 渲染签名：只包含真正影响画面的字段（会话 id / 状态 / 工具名与起始时间 / todo 计数）
+   * ——签名不变就只刷新耗时，整树重绘会重置滚动位置与卡片入场动画。
+   */
   function signature(data) {
-    var parts = [data.activeSessionId || ""];
-    var live = data.live || [];
-    for (var i = 0; i < live.length; i += 1) {
-      var item = live[i];
-      var tools = (item.currentTools || []).map(function (tool) { return tool.name; }).join(",");
-      parts.push([item.sessionId, item.busy ? 1 : 0, item.status, tools, item.todos ? item.todos.length : 0, item.todoSummary ? item.todoSummary.completed : 0, item.lastTool ? item.lastTool.name : ""].join("|"));
+    var parts = [];
+    var busy = busySessions(data);
+    for (var i = 0; i < busy.length; i += 1) {
+      var item = busy[i];
+      var tools = (item.currentTools || []).map(function (tool) {
+        return tool.name + "@" + tool.startedAt;
+      }).join(",");
+      var summary = item.todoSummary || { total: 0, completed: 0, inProgress: 0 };
+      parts.push([
+        item.sessionId, item.title, item.workspace, item.status, tools,
+        summary.total, summary.completed, summary.inProgress,
+        item.todos && item.todos.length > 0 && item.todos[0] ? item.todos[0].content : ""
+      ].join("|"));
     }
-    var sessions = data.sessions || [];
-    parts.push("s:" + sessions.length);
-    for (var s = 0; s < Math.min(sessions.length, MAX_OTHER_SESSIONS + live.length); s += 1) parts.push(sessions[s].id + ":" + (sessions[s].runStatus || ""));
     return parts.join("\n");
   }
 
@@ -370,15 +746,17 @@
         var changed = next !== currentSignature;
         latest = data;
         currentSignature = next;
-        meta.textContent = "更新于 " + formatClock(data.generatedAt || Date.now());
+        meta.textContent = formatClock(data.generatedAt || Date.now());
         var app = data.app || {};
-        appInfo.textContent = [app.agentName, app.workspace].filter(Boolean).join(" · ") || "ChatAnyTime";
+        appInfo.textContent = [app.agentName, app.version ? "v" + app.version : ""].filter(Boolean).join(" · ") || "ChatAnyTime";
+        renderCount(data);
         if (changed) render();
         else tickElapsed();
       })
       .catch(function () {
         failures += 1;
         setConnected(false);
+        if (!latest) render();
       });
   }
 
