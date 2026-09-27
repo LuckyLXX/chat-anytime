@@ -902,7 +902,7 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 .attach-button { width: 29px; height: 29px; color: var(--text-muted); }
 .attach-button:hover { color: var(--text); }
 .access-mode-menu-shell { position: relative; min-width: 0; }
-.access-mode-button { display: inline-flex; align-items: center; gap: 5px; min-height: 29px; max-width: 180px; padding: 0 5px; overflow: hidden; border: 0; border-radius: 6px; color: var(--warning-text); background: transparent; font-size: 11px; cursor: pointer; }
+.access-mode-button { display: inline-flex; align-items: center; gap: 5px; min-height: 29px; max-width: 180px; padding: 0 5px; overflow: hidden; border: 0; border-radius: 6px; color: var(--warning); background: transparent; font-size: 11px; cursor: pointer; }
 .access-mode-button:hover, .access-mode-button[aria-expanded="true"] { background: var(--warning-soft); }
 .access-mode-button span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .access-mode-button.full { color: var(--danger-text); }
@@ -1809,7 +1809,7 @@ html[data-ui-motion="off"] .general-jev-toggle .chevron { transition: none; }
 .terminal-overlay { position: absolute; inset: 0; z-index: 6; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--code-text); background: color-mix(in srgb, var(--code-surface) 78%, transparent); font-size: 13px; }
 .terminal-overlay-detail { font-size: 12px; opacity: 0.65; font-family: var(--mono-font, monospace); }
 .ssh-fingerprint-card { justify-content: center; gap: 10px; max-width: 52ch; margin: 0 auto; padding: 22px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--surface); color: var(--text); text-align: center; }
-.ssh-fingerprint-head { display: flex; align-items: center; justify-content: center; gap: 8px; font-size: 14px; color: var(--warning-text, #b45309); }
+.ssh-fingerprint-head { display: flex; align-items: center; justify-content: center; gap: 8px; font-size: 14px; color: var(--warning, #b45309); }
 .ssh-fingerprint-value { font-family: var(--mono-font, monospace); font-size: 13px; padding: 8px 10px; border-radius: 6px; background: var(--code-surface); color: var(--code-text); word-break: break-all; user-select: text; }
 .ssh-fingerprint-hint { font-size: 12px; line-height: 1.6; opacity: 0.72; }
 .ssh-fingerprint-actions { display: flex; gap: 10px; justify-content: center; margin-top: 4px; }
