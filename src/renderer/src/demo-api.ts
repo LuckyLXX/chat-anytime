@@ -183,7 +183,7 @@ const demoSettings: DesktopSettings = {
   providers: [],
   agents: [demoDefaultAgent, demoSecondaryAgent],
   currentAgentId: "default",
-  appearance: { theme: "system", themePreset: "default", customCss: "", customThemes: [], showThinking: true }
+  appearance: { theme: "system", themePreset: "default", customCss: "", customThemes: [], showThinking: true, showGalleryWall: true }
 };
 
 /** 演示用定时任务（与运行记录 taskId 对齐，详情展开可现查 prompt）。 */

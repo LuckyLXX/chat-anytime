@@ -48,7 +48,7 @@ const settings: DesktopSettings = {
   providers: [],
   agents: [{ id: "default", name: "默认助手", systemPrompt: "", archived: false } as DesktopSettings["agents"][number]],
   currentAgentId: "default",
-  appearance: { theme: "system", themePreset: "default", customCss: "", customThemes: [], showThinking: true },
+  appearance: { theme: "system", themePreset: "default", customCss: "", customThemes: [], showThinking: true, showGalleryWall: true },
   browser: { enabled: true },
   ssh: { enabled: true }
 };

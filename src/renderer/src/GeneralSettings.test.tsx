@@ -47,7 +47,7 @@ const settings: DesktopSettings = {
   providers: [],
   agents: [],
   currentAgentId: "default",
-  appearance: { theme: "system", themePreset: "default", customCss: "", customThemes: [], showThinking: true },
+  appearance: { theme: "system", themePreset: "default", customCss: "", customThemes: [], showThinking: true, showGalleryWall: true },
   browser: { enabled: true },
   ssh: { enabled: false },
   defaultWorkspace: "D:\\Projects\\demo"
@@ -145,8 +145,8 @@ describe("通用页结构契约", () => {
   it("四个能力总闸各是一行开关（图标 + 名称 + 可见说明），且缺省启用语义与运行时一致", () => {
     render();
     const rows = [...container.querySelectorAll(".general-switch-row")];
-    // 4 个能力总闸 + 「展示思考过程」共 5 行
-    expect(rows).toHaveLength(5);
+    // 4 个能力总闸 + 「展示思考过程」+「空态展示作品墙」共 6 行
+    expect(rows).toHaveLength(6);
     const caps = rows.slice(0, 4).map((row) => ({
       control: row.querySelector("[data-control=\"capability-switch\"]")?.getAttribute("data-capability"),
       checked: (row.querySelector("input") as HTMLInputElement).checked,
@@ -156,6 +156,39 @@ describe("通用页结构契约", () => {
     // settings.ssh.enabled === false → 关；其余缺省/显式开。说明文字必须可见。
     expect(caps.map((cap) => cap.checked)).toEqual([true, false, true, true]);
     expect(caps.every((cap) => (cap.hint ?? "").length > 5)).toBe(true);
+  });
+
+  it("「界面」卡的空态作品墙开关：缺省显示为开，关掉后写进 appearance 并随「保存通用设置」提交", async () => {
+    const handlers = render();
+    const card = container.querySelector(".general-card[aria-label=\"界面\"]") as HTMLElement;
+    expect(card).not.toBeNull();
+    const row = [...card.querySelectorAll(".general-switch-row")]
+      .find((item) => (item.textContent ?? "").includes("空态展示作品墙")) as HTMLElement;
+    expect(row, "「界面」卡里找不到空态作品墙开关行").toBeDefined();
+    const input = row.querySelector("input") as HTMLInputElement;
+    // 夹具显式带 true；这一行真正的口径由下一条用例（缺字段）核实。
+    expect(input.checked).toBe(true);
+    expect((row.querySelector("small")?.textContent ?? "").length).toBeGreaterThan(5);
+    await act(async () => { input.click(); });
+    expect(useDesktopStore.getState().settings.appearance.showGalleryWall).toBe(false);
+    await act(async () => {
+      (container.querySelector(".general-settings-footer button[type=\"submit\"]") as HTMLButtonElement).click();
+      await Promise.resolve();
+    });
+    const sent = handlers.sends.find((command) => command.type === "settings.save") as { settings: { appearance: { showGalleryWall: boolean } } } | undefined;
+    // appearance 是整包提交：新字段不需要额外的 Pick/镜像（这正是把它放进
+    // appearance 而不是新增顶层字段的理由），但必须以渲染端当前值为准。
+    expect(sent?.settings.appearance.showGalleryWall).toBe(false);
+  });
+
+  it("老配置里没有这个字段时，开关按「缺省 = 展示」显示为开", () => {
+    const legacy = structuredClone(settings);
+    legacy.appearance.showGalleryWall = undefined as unknown as boolean;
+    render({ settings: legacy });
+    const card = container.querySelector(".general-card[aria-label=\"界面\"]") as HTMLElement;
+    const row = [...card.querySelectorAll(".general-switch-row")]
+      .find((item) => (item.textContent ?? "").includes("空态展示作品墙")) as HTMLElement;
+    expect((row.querySelector("input") as HTMLInputElement).checked).toBe(true);
   });
 });
 

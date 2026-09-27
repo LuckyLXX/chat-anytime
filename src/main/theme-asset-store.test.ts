@@ -47,7 +47,8 @@ function appearanceOf(themes: { id: string; css: string; assets?: boolean }[], c
       css: theme.css,
       ...(theme.assets ? { assets: { "x.png": dataUrl("image/png", PNG_BYTES) } } : {})
     })),
-    showThinking: true
+    showThinking: true,
+    showGalleryWall: true
   };
 }
 

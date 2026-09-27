@@ -19,7 +19,7 @@ const THEME_B: CustomThemeDefinition = { id: "theme-b", name: "海雾", css: "--
 const INLINE_ASSETS: ThemeAssetMap = { "wallpaper.png": "data:image/png;base64,WWWW" };
 
 function appearance(patch: Partial<AppearanceSettings> = {}): AppearanceSettings {
-  return { theme: "system", themePreset: "default", customCss: THEME_A.css, customThemes: [THEME_A, THEME_B], showThinking: true, ...patch };
+  return { theme: "system", themePreset: "default", customCss: THEME_A.css, customThemes: [THEME_A, THEME_B], showThinking: true, showGalleryWall: true, ...patch };
 }
 
 function settings(patch: Partial<DesktopSettings> = {}): DesktopSettings {

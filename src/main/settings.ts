@@ -91,7 +91,8 @@ export function defaultAppearance(): AppearanceSettings {
     customCss: "",
     customThemes: [],
     motion: true,
-    showThinking: true
+    showThinking: true,
+    showGalleryWall: true
   };
 }
 
@@ -548,7 +549,7 @@ export function migrateSettings(raw: unknown): { settings: DesktopSettings; lega
     providers,
     agents: normalizedAgents,
     currentAgentId,
-    appearance: { theme, themePreset, customCss, ...(Object.keys(customCssAssets).length > 0 ? { customCssAssets } : {}), customThemes, ...(wallpaperOpacity ? { wallpaperOpacity } : {}), ...(tune ? { tune } : {}), motion: appearanceSource.motion !== false, showThinking: appearanceSource.showThinking !== false },
+    appearance: { theme, themePreset, customCss, ...(Object.keys(customCssAssets).length > 0 ? { customCssAssets } : {}), customThemes, ...(wallpaperOpacity ? { wallpaperOpacity } : {}), ...(tune ? { tune } : {}), motion: appearanceSource.motion !== false, showThinking: appearanceSource.showThinking !== false, showGalleryWall: appearanceSource.showGalleryWall !== false },
     vision: normalizeVision(source.vision),
     memory: normalizeMemory(source.memory),
     hooks: normalizeHooks(source.hooks),

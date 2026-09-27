@@ -246,6 +246,10 @@ export interface AppearanceSettings {
    *  prefers-reduced-motion 时无论该值如何都会关停。 */
   motion?: boolean;
   showThinking: boolean;
+  /** 空态首页（新话题的空白主区域）是否展示作品墙：缺省/true = 展示（与这个
+   *  开关存在之前的行为一致），false = 退回默认空态「今天想开发什么？」。
+   *  只管空白首页那面墙——顶栏下拉的「打开作品墙」入口不受影响。 */
+  showGalleryWall: boolean;
 }
 
 /**

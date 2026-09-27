@@ -94,6 +94,7 @@ import {
 } from "./lib/split-layout";
 import { customCssHasWallpaper } from "./lib/theme-runtime";
 import { useOverlayLayersOpen } from "./lib/overlay-layers";
+import { showGalleryWallLanding } from "./lib/landing-gallery";
 import { AppearanceSettings } from "./AppearanceSettings";
 import { HooksSettings } from "./HooksSettings";
 import { selectableCatalogModels } from "./lib/model-list";
@@ -680,6 +681,14 @@ export function App(): ReactNode {
       onRemove={(app) => void removeGalleryApp(app)}
     />
   ), [galleryApps, activeWorkspace, runGalleryApp, developGalleryApp, removeGalleryApp, openGalleryDraft]);
+  /**
+   * 空态首页是否注入作品墙（通用设置 →「界面」的开关，缺省展示）。
+   *
+   * 为什么在 App 层判：作品的清单与运行/发布动作都在这里，「空态渲染什么」
+   * 也一直由 App 注入（ConversationPane 只负责「没有注入就退回默认空态」）。
+   * 关掉只影响空白首页那面墙——顶栏下拉的「打开作品墙」入口照旧。
+   */
+  const landingGallery = showGalleryWallLanding(settings.appearance) ? renderGalleryLanding : undefined;
   // 会话激活/创建后拉取设计状态：画布跟随焦点会话（utility 推 design.state + design.docs）。
   const designQuerySessionRef = useRef<string | undefined>(undefined);
   useEffect(() => {
@@ -1701,7 +1710,7 @@ export function App(): ReactNode {
                   onOpenTranscript={setTranscriptTarget}
                   onActionError={setActionError}
                   onRollback={mainPaneRollback}
-                  renderLanding={renderGalleryLanding}
+                  renderLanding={landingGallery}
                 />
               </div>
             </>
@@ -1731,7 +1740,7 @@ export function App(): ReactNode {
               onOpenTranscript={setTranscriptTarget}
               onActionError={setActionError}
               onRollback={mainPaneRollback}
-              renderLanding={renderGalleryLanding}
+              renderLanding={landingGallery}
             />
           )}
 

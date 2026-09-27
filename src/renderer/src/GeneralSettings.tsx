@@ -1,4 +1,4 @@
-import { Bot, ChevronDown, Computer, FolderOpen, Globe, Palette, RotateCcw, Terminal } from "lucide-react";
+import { Bot, ChevronDown, Computer, FolderOpen, Globe, LayoutGrid, Palette, RotateCcw, Terminal } from "lucide-react";
 import { useState, type FormEvent, type ReactNode } from "react";
 import type { AccessMode, DesktopSettings, JevSettings, ModelOption, ProviderOption, ThinkingLevel } from "../../shared/protocol";
 import { THINKING_LEVELS } from "../../shared/thinking-levels";
@@ -346,12 +346,18 @@ export function GeneralSettings({ settings, models, providers, jevKeyConfigured,
         </section>
 
         <section className="general-card" aria-label="界面">
-          <div className="general-card-head"><strong>界面</strong><small>外观主题在「外观」页；这里只管对话过程展示</small></div>
+          <div className="general-card-head"><strong>界面</strong><small>外观主题在「外观」页；这里只管对话过程与空态的展示开关</small></div>
           <div className="general-card-body">
             <label className="general-switch-row">
               <span className="general-switch-icon"><Bot size={13} /></span>
               <span className="general-switch-copy"><strong>展示思考过程</strong><small>在时间线里展开模型的思考段落</small></span>
               <input type="checkbox" className="general-switch" checked={settings.appearance.showThinking} onChange={(event) => patchSettings({ appearance: { ...settings.appearance, showThinking: event.target.checked } })} />
+            </label>
+            <label className="general-switch-row">
+              <span className="general-switch-icon"><LayoutGrid size={13} /></span>
+              <span className="general-switch-copy"><strong>空态展示作品墙</strong><small>新话题的空白首页里显示作品墙；关掉退回「今天想开发什么？」，顶栏「作品」下拉入口不变</small></span>
+              {/* 缺省 = 展示（与运行时 showGalleryWallLanding 同一口径）：老配置里没这个字段，开关必须显示为开。 */}
+              <input type="checkbox" className="general-switch" checked={settings.appearance.showGalleryWall !== false} onChange={(event) => patchSettings({ appearance: { ...settings.appearance, showGalleryWall: event.target.checked } })} />
             </label>
           </div>
         </section>

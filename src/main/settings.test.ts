@@ -310,17 +310,28 @@ describe("desktop settings migration", () => {
       customCss: ".message { outline: 1px solid red; }",
       customThemes: [],
       motion: true,
-      showThinking: false
+      showThinking: false,
+      showGalleryWall: true
     });
   });
 
   it("falls back to safe appearance defaults for unknown theme values", () => {
     const result = migrateSettings({ appearance: { theme: "neon", themePreset: "unknown", customCss: 42 } });
-    expect(result.settings.appearance).toEqual({ theme: "system", themePreset: "default", customCss: "", customThemes: [], motion: true, showThinking: true });
+    expect(result.settings.appearance).toEqual({ theme: "system", themePreset: "default", customCss: "", customThemes: [], motion: true, showThinking: true, showGalleryWall: true });
   });
 
   it("accepts the expanded reference theme presets", () => {
     expect(migrateSettings({ appearance: { themePreset: "ocean" } }).settings.appearance.themePreset).toBe("ocean");
+  });
+
+  it("空态作品墙开关：缺省展示，显式 false 重启后仍然是 false", () => {
+    // migrateSettings 是**唯一**读入口：这里漏一行，字段就是「磁盘上有、内存里没有」，
+    // 下一次任何设置写入会被整个内存副本覆盖掉（不报错、不记日志）。
+    expect(migrateSettings({}).settings.appearance.showGalleryWall).toBe(true);
+    expect(migrateSettings({ appearance: { showGalleryWall: false } }).settings.appearance.showGalleryWall).toBe(false);
+    expect(migrateSettings({ appearance: { showGalleryWall: true } }).settings.appearance.showGalleryWall).toBe(true);
+    // 脏值（手改过配置文件）一律按「展示」处理，不让开关意外关掉作品墙。
+    expect(migrateSettings({ appearance: { showGalleryWall: "false" } }).settings.appearance.showGalleryWall).toBe(true);
   });
 
   it("migrates legacy themeOverrides wallpaper opacity and clamps values", () => {
