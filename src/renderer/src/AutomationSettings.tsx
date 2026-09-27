@@ -269,8 +269,8 @@ export function AutomationSettings({ models, providers, settings, workspaceConfi
                           <p className="automation-row-prompt">{task.prompt}</p>
                         </div>
                         <div className="automation-row-actions">
-                          <button type="button" className={`automation-row-toggle ${task.enabled ? "on" : ""}`} role="switch" aria-checked={task.enabled} title={task.enabled ? "暂停任务" : "启用任务"} aria-label={task.enabled ? "暂停任务" : "启用任务"} onClick={() => send({ type: "automation.toggle", id: task.id, enabled: !task.enabled, agentId: task.agentId })} />
-                          <button type="button" title="运行一次（按任务归属角色在后台执行）" aria-label="运行一次" onClick={() => send({ type: "automation.run", id: task.id, agentId: task.agentId })}><Play size={15} /></button>
+                          <button type="button" className={`automation-row-toggle ${task.enabled ? "on" : ""}`} data-control="automation-toggle" role="switch" aria-checked={task.enabled} title={task.enabled ? "暂停任务" : "启用任务"} aria-label={task.enabled ? "暂停任务" : "启用任务"} onClick={() => send({ type: "automation.toggle", id: task.id, enabled: !task.enabled, agentId: task.agentId })} />
+                          <button type="button" data-control="automation-run" title="运行一次（按任务归属角色在后台执行）" aria-label="运行一次" onClick={() => send({ type: "automation.run", id: task.id, agentId: task.agentId })}><Play size={15} /></button>
                           <button type="button" title="编辑" aria-label="编辑" onClick={() => setForm({ mode: "edit", task })}><Pencil size={15} /></button>
                           <button type="button" title="删除" aria-label="删除" className="danger" onClick={() => { if (window.confirm(`删除定时任务「${task.name}」？`)) send({ type: "automation.delete", id: task.id, agentId: task.agentId }); }}><Trash2 size={15} /></button>
                         </div>

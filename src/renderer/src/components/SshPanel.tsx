@@ -142,7 +142,7 @@ export function SshPanel({ onConnect }: { onConnect(host: SshHostSummary): void 
         <div className="ssh-host-actions">
           <button type="button" className="primary-button" data-control="ssh-host-connect" onClick={() => onConnect(host)}>连接</button>
           <button type="button" className="ghost-button ghost-icon" title="编辑" aria-label={`编辑 ${host.name}`} onClick={() => beginEditHost(host)}><Pencil size={14} /></button>
-          <button type="button" className="ghost-button ghost-icon danger" title="删除" aria-label={`删除 ${host.name}`} onClick={() => void removeHost(host)}><Trash2 size={14} /></button>
+          <button type="button" className="ghost-button ghost-icon danger" data-control="ssh-host-delete" title="删除" aria-label={`删除 ${host.name}`} onClick={() => void removeHost(host)}><Trash2 size={14} /></button>
         </div>
       </li>
     );
