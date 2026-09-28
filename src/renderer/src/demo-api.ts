@@ -1199,6 +1199,7 @@ export function createDemoApi(): DesktopApi {
               actionPreview: preview,
               blocking: draft.action.kind === "block" || (draft.action.kind === "command" && draft.action.blocking === true),
               scope: draft.scope,
+              ...(draft.scope === "project" ? { trust: "trusted" as const } : {}),
               enabled: true
             }
           ];
@@ -1208,6 +1209,12 @@ export function createDemoApi(): DesktopApi {
         case "hooks.toggle": {
           const hook = demoResources.hooks.find((item) => item.name === command.name && item.scope === command.scope);
           if (hook) hook.enabled = command.enabled;
+          emit({ type: "resources", resources: structuredClone(demoResources) });
+          break;
+        }
+        case "hooks.trust": {
+          const hook = demoResources.hooks.find((item) => item.name === command.name && item.scope === command.scope);
+          if (hook?.scope === "project") hook.trust = command.trusted ? "trusted" : "pending";
           emit({ type: "resources", resources: structuredClone(demoResources) });
           break;
         }

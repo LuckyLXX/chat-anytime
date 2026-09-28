@@ -94,6 +94,14 @@ describe("desktop permission queue", () => {
   });
 });
 
+describe("hook notices", () => {
+  it("stores trust-gate notices for the App toast effect", () => {
+    useDesktopStore.getState().handleRuntimeMessage({ type: "hook-notice", kind: "warn", message: "项目钩子待批准" });
+    expect(useDesktopStore.getState().hookNotice).toMatchObject({ kind: "warn", message: "项目钩子待批准" });
+    expect(useDesktopStore.getState().hookNotice?.at).toBeGreaterThan(0);
+  });
+});
+
 describe("split-pane parked data cache", () => {
   beforeEach(() => {
     useDesktopStore.setState({ snapshot: emptySnapshot, paneStates: {}, parkedPanels: {} });

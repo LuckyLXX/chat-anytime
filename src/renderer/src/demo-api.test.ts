@@ -146,4 +146,25 @@ describe("demo session commands", () => {
     expect(apps.some((app) => app.id === target.id)).toBe(false);
     unsubscribe();
   });
+
+  it("models project hook trust approval and revocation in demo mode", async () => {
+    const api = createDemoApi();
+    const name = "demo-hooks-trust-regression";
+    const hook = {
+      name,
+      scope: "project" as const,
+      event: "agent_end" as const,
+      action: { kind: "notify" as const, title: "演示钩子" }
+    };
+
+    await api.send({ type: "hooks.save", hook });
+    expect((await api.bootstrap()).resources?.hooks.find((item) => item.name === name)?.trust).toBe("trusted");
+
+    await api.send({ type: "hooks.trust", name, scope: "project", trusted: false });
+    expect((await api.bootstrap()).resources?.hooks.find((item) => item.name === name)?.trust).toBe("pending");
+
+    await api.send({ type: "hooks.trust", name, scope: "project", trusted: true });
+    expect((await api.bootstrap()).resources?.hooks.find((item) => item.name === name)?.trust).toBe("trusted");
+    await api.send({ type: "hooks.delete", name, scope: "project" });
+  });
 });

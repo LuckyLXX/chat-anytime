@@ -66,7 +66,7 @@
 
 > `subagent-settings` 是设置页「子智能体」tab（2026-09-23 重设计）——同一套 `.resource-page` 骨架，两张卡片（已定义 / 新建·编辑）；整页是 `<form>`，底部动作条 `.subagent-form-actions` 固定在滚动主体之外（表单较长时保存钮仍可见）。
 
-> `hooks-settings` 是设置页「钩子」tab（2026-09-23 重设计）——`.resource-page` 骨架，页头右侧是「启用钩子」总闸（`data-control="hooks-enable"`，`data-control="hooks-add"` 是新建）；正文两张卡片（规则 / 新建·编辑），规则卡里 `.hook-event-legend` 是五档事件的说明表；底部动作条同 `subagent-settings`。
+> `hooks-settings` 是设置页「钩子」tab（2026-09-23 重设计）——`.resource-page` 骨架，页头右侧是「启用钩子」总闸（`data-control="hooks-enable"`，`data-control="hooks-add"` 是新建）；正文两张卡片（规则 / 新建·编辑），规则卡里 `.hook-event-legend` 是事件说明表；项目级规则显示指纹审批状态，`data-control="hooks-trust"` 用于批准或撤销信任；底部动作条同 `subagent-settings`。
 
 > `appearance-settings` 是设置页「外观」tab（2026-09-23 重设计）——两列：左列四张 `.appearance-card`（主题与预设 / 界面微调 / 透明度 / 自定义 CSS）+ 右列 sticky 实时预览（`.appearance-preview`，列宽 `minmax(340px, 46%)`，`.theme-preview-body` 高 460px）+ 固定底栏 `.appearance-page-footer`。弹窗在本页也走 1080px。
 
@@ -119,7 +119,7 @@
 | 技能与工具页：重载资源 / 添加 MCP / 保存 MCP / 添加命令 / 保存命令 | `resource-reload` / `mcp-add` / `mcp-save` / `command-add` / `command-save` |
 | 外观页：导入 CSS / 导入主题目录 / 清空 / 保存当前主题 / 保存外观设置 | `appearance-import-css` / `appearance-import-theme` / `appearance-clear-css` / `appearance-save-theme` / `appearance-save` |
 | 子智能体页：新建 / 保存 | `subagent-add` / `subagent-save` |
-| 钩子页：总闸 / 新建 / 保存 | `hooks-enable` / `hooks-add` / `hooks-save` |
+| 钩子页：总闸 / 新建 / 保存 / 项目规则信任 | `hooks-enable` / `hooks-add` / `hooks-save` / `hooks-trust` |
 | 用量统计页：助手范围筛选 | `usage-agent-filter` |
 | 面板坞开关 + 待办页 tab（会话区右上方 FAB） | `task-panel-toggle`                              |
 | 记忆页 tab（面板坞内）                      | `memory-toggle`                                  |

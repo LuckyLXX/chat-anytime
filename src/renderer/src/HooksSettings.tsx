@@ -1,4 +1,4 @@
-import { Bell, Globe, Pencil, Play, Plus, ShieldAlert, TerminalSquare, Trash2, X, Zap } from "lucide-react";
+import { Bell, Globe, Pencil, Play, Plus, ShieldAlert, ShieldCheck, TerminalSquare, Trash2, X, Zap } from "lucide-react";
 import { useState, type FormEvent, type ReactNode } from "react";
 import type { HookAction, HookEventName, HookRuleDraft, HookSummary, ResourceCatalog, RuntimeCommand } from "../../shared/protocol";
 import { useDesktopStore } from "./store";
@@ -194,10 +194,12 @@ export function HooksSettings({ resources, workspaceOpen }: HooksSettingsProps):
                         <div className="resource-item-copy">
                           <strong>{hook.name}{hook.blocking ? "（拦截型）" : ""}</strong>
                           <small>{hookEventLabels[hook.event]}{hook.matcher ? ` · 匹配 ${hook.matcher}` : ""} · {hookActionLabels[hook.actionKind]} · {hookScopeLabels[hook.scope]}</small>
+                          {hook.scope === "project" && <span className="hook-trust-badge" data-hook-trust={hook.trust ?? "pending"}>{hook.trust === "trusted" ? "已信任" : "待批准"}</span>}
                           <em>{hook.actionPreview}</em>
                           {result && <span className="hook-run-result" data-ok={result.ok || undefined} data-blocked={result.blocked || undefined}>测试（{result.durationMs}ms）：{result.blocked ? `已拦截——${result.detail}` : result.ok ? result.detail : `失败——${result.detail}`}</span>}
                         </div>
                         <label className="resource-toggle"><input type="checkbox" checked={hook.enabled} disabled={controlsBusy} onChange={(changeEvent) => void run({ type: "hooks.toggle", name: hook.name, scope: hook.scope, enabled: changeEvent.target.checked })} /><span>启用</span></label>
+                        {hook.scope === "project" && <button className="secondary-button compact-button hook-trust-action" type="button" data-control="hooks-trust" title={hook.trust === "trusted" ? `撤销 ${hook.name} 的信任` : `批准 ${hook.name} 执行`} aria-label={hook.trust === "trusted" ? `撤销钩子 ${hook.name} 的信任` : `批准钩子 ${hook.name} 执行`} disabled={controlsBusy} onClick={() => void run({ type: "hooks.trust", name: hook.name, scope: "project", trusted: hook.trust !== "trusted" })}>{hook.trust === "trusted" ? <ShieldAlert size={13} /> : <ShieldCheck size={13} />}{hook.trust === "trusted" ? "撤销信任" : "批准执行"}</button>}
                         <button className="icon-button" type="button" title={`测试 ${hook.name}`} aria-label={`测试钩子 ${hook.name}`} disabled={controlsBusy} onClick={() => void run({ type: "hooks.run", name: hook.name, scope: hook.scope, ...(sample.trim() ? { sample: sample.trim() } : {}) })}><Play size={14} /></button>
                         <button className="icon-button" type="button" title={`编辑 ${hook.name}`} aria-label={`编辑钩子 ${hook.name}`} disabled={controlsBusy} onClick={() => openEdit(hook)}><Pencil size={14} /></button>
                         <button className="icon-button resource-remove" type="button" title={`删除 ${hook.name}`} aria-label={`删除钩子 ${hook.name}`} disabled={controlsBusy} onClick={() => void run({ type: "hooks.delete", name: hook.name, scope: hook.scope })}><Trash2 size={14} /></button>

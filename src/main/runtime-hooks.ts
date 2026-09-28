@@ -46,6 +46,8 @@ export interface HooksExtensionDeps {
   sessionId: () => string;
   sessionTitle: () => string;
   post: (message: RuntimeMessage) => void;
+  /** 项目规则只有在当前工作区与规则内容指纹均获批准后才执行。 */
+  trust: (entry: ConfiguredHook) => boolean;
   /** 分屏/激活可见性：通知动作据此携带 visible，主进程在“用户正盯着看”时免打扰。 */
   isSessionRendered?: (sessionId: string | undefined) => boolean;
 }
@@ -279,15 +281,26 @@ function warn(deps: HooksExtensionDeps, message: string): void {
   deps.post({ type: "log", level: "warn", message });
 }
 
-function rulesFor(deps: HooksExtensionDeps, event: HookRule["event"], toolName?: string): ConfiguredHook[] {
+function rulesFor(deps: HooksExtensionDeps, event: HookRule["event"], toolName: string | undefined, warnedPending: Set<string>): ConfiguredHook[] {
   if (!deps.enabled()) return [];
   return deps.rules().filter(({ rule }) => rule.event === event && rule.disabled !== true)
+    .filter((entry) => {
+      if (entry.scope !== "project" || deps.trust(entry)) return true;
+      const key = `${entry.scope}/${entry.name}`;
+      if (!warnedPending.has(key)) {
+        warnedPending.add(key);
+        const message = `项目钩子「${entry.name}」尚未批准，本次未执行；请在 设置 → 钩子 里批准执行`;
+        warn(deps, message);
+        deps.post({ type: "hook-notice", kind: "warn", message });
+      }
+      return false;
+    })
     .filter(({ rule }) => toolName === undefined || toolMatcherMatches(rule.matcher, toolName));
 }
 
-/** 观察型事件：逐条 fire-and-forget，失败只记日志，绝不影响回合。 */
-function fireObservingHooks(deps: HooksExtensionDeps, event: "session_start" | "tool_execution_end" | "agent_end" | "turn_end", context: HookContext, toolName?: string): void {
-  for (const { rule } of rulesFor(deps, event, toolName)) {
+/** 观察型事件：逐条执行，未开启 wait 时发出即不管。 */
+function fireObservingHooks(deps: HooksExtensionDeps, event: "session_start" | "tool_execution_end" | "agent_end" | "turn_end", context: HookContext, toolName: string | undefined, warnedPending: Set<string>): void {
+  for (const { rule } of rulesFor(deps, event, toolName, warnedPending)) {
     void executeHookAction(rule, context, deps).catch((error: unknown) => {
       warn(deps, `钩子「${rule.name}」执行失败：${error instanceof Error ? error.message : String(error)}`);
     });
@@ -298,8 +311,8 @@ function fireObservingHooks(deps: HooksExtensionDeps, event: "session_start" | "
  * 会话启动钩子被顺序 await（环境准备语义：会话打开即就绪），单条命令受自身
  * 超时约束；失败只记日志，不阻断会话创建。
  */
-async function runSessionStartHooks(deps: HooksExtensionDeps): Promise<void> {
-  for (const { rule } of rulesFor(deps, "session_start")) {
+async function runSessionStartHooks(deps: HooksExtensionDeps, warnedPending: Set<string>): Promise<void> {
+  for (const { rule } of rulesFor(deps, "session_start", undefined, warnedPending)) {
     try {
       await executeHookAction(rule, baseContext(deps, "session_start"), deps);
     } catch (error) {
@@ -376,18 +389,19 @@ export function createHooksExtension(deps: HooksExtensionDeps): InlineExtension 
     name: "pidesktop-hooks",
     hidden: true,
     factory(pi: ExtensionAPI) {
+      const warnedPending = new Set<string>();
       const toolStarts = new Map<string, { startedAt: number; args: unknown }>();
       let turnStartedAt: number | undefined;
       let runStartedAt: number | undefined;
 
       pi.on("session_start", () => {
-        void runSessionStartHooks(deps);
+        void runSessionStartHooks(deps, warnedPending);
       });
 
       pi.on("tool_call", async (event) => {
         const toolName = event.toolName;
         const toolInput = event.input;
-        for (const { rule } of rulesFor(deps, "tool_call", toolName)) {
+        for (const { rule } of rulesFor(deps, "tool_call", toolName, warnedPending)) {
           const action: HookAction = rule.action;
           if (action.kind === "block") {
             const verdict = evaluateBlockAction(rule, toolName, toolInput);
@@ -423,7 +437,7 @@ export function createHooksExtension(deps: HooksExtensionDeps): InlineExtension 
           isError: event.isError,
           ...(started ? { durationMs: Date.now() - started.startedAt } : {})
         };
-        fireObservingHooks(deps, "tool_execution_end", context, event.toolName);
+        fireObservingHooks(deps, "tool_execution_end", context, event.toolName, warnedPending);
       });
 
       pi.on("turn_start", (event) => {
@@ -439,7 +453,7 @@ export function createHooksExtension(deps: HooksExtensionDeps): InlineExtension 
           ...(usage ? { usage: { input: usage.input ?? 0, output: usage.output ?? 0, cacheRead: usage.cacheRead ?? 0, cacheWrite: usage.cacheWrite ?? 0, cost: usage.cost?.total ?? 0 } } : {})
         };
         turnStartedAt = undefined;
-        fireObservingHooks(deps, "turn_end", context);
+        fireObservingHooks(deps, "turn_end", context, undefined, warnedPending);
       });
 
       pi.on("agent_start", () => {
@@ -455,7 +469,7 @@ export function createHooksExtension(deps: HooksExtensionDeps): InlineExtension 
           isError
         };
         runStartedAt = undefined;
-        fireObservingHooks(deps, "agent_end", context);
+        fireObservingHooks(deps, "agent_end", context, undefined, warnedPending);
       });
     }
   };

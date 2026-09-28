@@ -7,17 +7,20 @@ interface Harness {
   handlers: Map<string, (event: never) => unknown>;
   posts: RuntimeMessage[];
   setRules: (rules: HookRule[]) => void;
+  setTrusted: (trusted: boolean) => void;
   deps: HooksExtensionDeps;
 }
 
-function createHarness(initialRules: HookRule[], enabled = true): Harness {
+function createHarness(initialRules: HookRule[], enabled = true, scope: "project" | "global" = "global"): Harness {
   const posts: RuntimeMessage[] = [];
   const handlers = new Map<string, (event: never) => unknown>();
   const fakePi = { on: (name: string, handler: (event: never) => unknown) => handlers.set(name, handler) };
   let currentRules = initialRules;
+  let currentTrusted = false;
   const deps: HooksExtensionDeps = {
-    rules: () => currentRules.map((rule) => ({ name: rule.name, rule, scope: "global" as const })),
+    rules: () => currentRules.map((rule) => ({ name: rule.name, rule, scope })),
     enabled: () => enabled,
+    trust: (entry) => entry.scope === "global" || currentTrusted,
     workspace: () => process.cwd(),
     agentName: () => "默认助手",
     sessionId: () => "session-1",
@@ -26,7 +29,7 @@ function createHarness(initialRules: HookRule[], enabled = true): Harness {
   };
   const extension = createHooksExtension(deps) as { factory: (pi: ExtensionAPI) => void };
   extension.factory(fakePi as unknown as ExtensionAPI);
-  return { handlers, posts, deps, setRules: (rules) => { currentRules = rules; } };
+  return { handlers, posts, deps, setRules: (rules) => { currentRules = rules; }, setTrusted: (trusted) => { currentTrusted = trusted; } };
 }
 
 async function callToolCall(harness: Harness, toolName: string, input: Record<string, unknown>): Promise<{ block?: boolean; reason?: string } | undefined> {
@@ -86,6 +89,38 @@ describe("hooks extension tool_call", () => {
   it("allows when a blocking command succeeds and logs nothing blocking", async () => {
     const harness = createHarness([{ name: "守门", event: "tool_call", action: { kind: "command", command: "exit 0", blocking: true } }]);
     expect(await callToolCall(harness, "bash", { command: "npm run build" })).toBeUndefined();
+  });
+});
+
+describe("project hook trust gate", () => {
+  it("does not execute an untrusted project block command", async () => {
+    const harness = createHarness([{ name: "待批准门禁", event: "tool_call", action: { kind: "command", command: "exit 2", blocking: true } }], true, "project");
+    expect(await callToolCall(harness, "bash", { command: "npm test" })).toBeUndefined();
+    expect(harness.posts.filter((message) => message.type === "hook-notice")).toHaveLength(1);
+    expect(harness.posts.filter((message) => message.type === "log" && message.level === "warn")).toHaveLength(1);
+  });
+
+  it("executes a trusted project rule", async () => {
+    const harness = createHarness([{ name: "已批准门禁", event: "tool_call", action: { kind: "command", command: "exit 2", blocking: true } }], true, "project");
+    harness.setTrusted(true);
+    expect(await callToolCall(harness, "bash", { command: "npm test" })).toMatchObject({ block: true });
+    expect(harness.posts.filter((message) => message.type === "hook-notice")).toHaveLength(0);
+  });
+
+  it("warns once per session and stays silent when the master switch is off", async () => {
+    const rule: HookRule = { name: "待批准通知", event: "turn_end", action: { kind: "notify" } };
+    const harness = createHarness([rule], true, "project");
+    const fire = () => harness.handlers.get("turn_end")?.({ message: { usage: {} }, toolResults: [] } as never);
+    fire();
+    fire();
+    await flushAsync();
+    expect(harness.posts.filter((message) => message.type === "hook-notice")).toHaveLength(1);
+    expect(harness.posts.filter((message) => message.type === "hook-notify")).toHaveLength(0);
+
+    const disabled = createHarness([rule], false, "project");
+    disabled.handlers.get("turn_end")?.({ message: { usage: {} }, toolResults: [] } as never);
+    await flushAsync();
+    expect(disabled.posts).toHaveLength(0);
   });
 });
 

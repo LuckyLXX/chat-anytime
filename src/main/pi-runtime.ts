@@ -164,6 +164,7 @@ import { readComputerMode, writeComputerMode } from "./computer-mode-store.js";
 import { checkpointPathFor, readCheckpoints, sweepCheckpoints } from "./checkpoint-store.js";
 import { createCheckpointExtension, rollbackPlan } from "./runtime-checkpoint.js";
 import { hookActionPreview, readConfiguredHooks, removeHookConfig, setHookDisabled, upsertHookConfig, validateHookRule, type ConfiguredHook } from "./hooks-config.js";
+import { applyHookSaveTrust, evaluateHookTrust, pruneTrust, readHookTrust, revokeRule, trustRule, workspaceTrustKey, writeHookTrust, type HookTrustData } from "./hooks-trust.js";
 
 const parentPort = process.parentPort;
 if (!parentPort) throw new Error("Pi 运行时必须作为 Electron 工具进程启动");
@@ -720,15 +721,21 @@ function hooksConfigPaths(): { project: string | undefined; global: string } {
   };
 }
 
+function hooksTrustPath(): string {
+  return join(getAgentDir(), "pidesktop-hook-trust.json");
+}
+
 /**
  * 双作用域合并后的钩子规则缓存。事件 handler 触发时读取（runtime-hooks 的
  * rules getter），因此这里的刷新即“热更新”——规则增删改不需要重建会话。
  */
 let hooksRules: ConfiguredHook[] = [];
+let hookTrustData: HookTrustData = { version: 1, workspaces: {}, writable: true };
 
 function refreshHooksConfig(): void {
   const { project, global } = hooksConfigPaths();
   hooksRules = readConfiguredHooks(project, global);
+  hookTrustData = readHookTrust(hooksTrustPath());
 }
 
 function hookSummaries(): HookSummary[] {
@@ -741,6 +748,7 @@ function hookSummaries(): HookSummary[] {
     actionPreview: hookActionPreview(rule.action),
     blocking: rule.action.kind === "block" || (rule.action.kind === "command" && rule.action.blocking === true),
     scope,
+    ...(scope === "project" ? { trust: evaluateHookTrust({ scope, workspace, rule, data: hookTrustData }) === "trusted" ? "trusted" as const : "pending" as const } : {}),
     enabled: rule.disabled !== true
   }));
 }
@@ -1543,9 +1551,11 @@ function activate(record: SessionRuntimeRecord): void {
     record.runStatus = undefined;
     patchSessionRunStatus(record);
   }
+  const workspaceChanged = workspace !== record.workspace;
   // 焦点跨工作区切换：记入该助手最后工作区（同工作区切换幂等跳过，避免重复 touch 落盘）。
-  if (workspace !== record.workspace) rememberWorkspace(record.workspace);
+  if (workspaceChanged) rememberWorkspace(record.workspace);
   workspace = record.workspace;
+  if (workspaceChanged) refreshHooksConfig();
   thinkingLevel = record.session.thinkingLevel;
   selectedModel = record.session.model ? { provider: record.session.model.provider, id: record.session.model.id } : undefined;
   todoStore = record.todoStore;
@@ -2958,6 +2968,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
         // 通知免打扰：该会话当前是否正被渲染（激活或分屏格子）——可见时主
         // 进程在窗口聚焦的情况下抑制系统通知。
         isSessionRendered: (sessionId) => Boolean(sessionId && (sessionId === activeRuntime?.session.sessionId || renderedSessions.has(sessionId))),
+        trust: (entry) => evaluateHookTrust({ scope: entry.scope, workspace: recordWorkspace, rule: entry.rule, data: hookTrustData }) === "trusted",
         post
       }),
       // Tool executions land in chatanytime-sessions/<agentId>/tool-audit.jsonl
@@ -4896,6 +4907,16 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       // 钩子规则是事件触发时读取的缓存，不重建会话；也无需像 MCP 一样拒绝
       // 运行中的会话——用户可能正想在中途停用某条危险钩子。
       upsertHookConfig(target, rule);
+      if (draft.scope === "project" && workspace) {
+        const key = workspaceTrustKey(workspace);
+        const nextTrust = applyHookSaveTrust(hookTrustData, key, rule);
+        try {
+          if (writeHookTrust(hooksTrustPath(), nextTrust)) hookTrustData = nextTrust;
+          else post({ type: "hook-notice", kind: "warn", message: "项目钩子已保存，但信任库损坏，未覆盖原文件；该规则需在信任库修复后批准" });
+        } catch (error) {
+          post({ type: "hook-notice", kind: "warn", message: `项目钩子已保存，但信任记录写入失败：${errorText(error)}` });
+        }
+      }
       refreshHooksConfig();
       emitResourceCatalog();
       break;
@@ -4912,6 +4933,32 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       const { project, global } = hooksConfigPaths();
       const target = command.scope === "project" ? project : global;
       if (!target || !removeHookConfig(target, command.name)) throw new Error("找不到要删除的钩子");
+      if (command.scope === "project" && workspace) {
+        const key = workspaceTrustKey(workspace);
+        const liveNames = project ? readConfiguredHooks(project, project).map((entry) => entry.name) : [];
+        const nextTrust = pruneTrust(hookTrustData, key, liveNames);
+        try {
+          if (writeHookTrust(hooksTrustPath(), nextTrust)) hookTrustData = nextTrust;
+          else post({ type: "hook-notice", kind: "warn", message: "项目钩子已删除，但损坏的信任库未被覆盖" });
+        } catch (error) {
+          post({ type: "hook-notice", kind: "warn", message: `项目钩子已删除，但信任记录清理失败：${errorText(error)}` });
+        }
+      }
+      refreshHooksConfig();
+      emitResourceCatalog();
+      break;
+    }
+    case "hooks.trust": {
+      if (command.scope !== "project") throw new Error("全局钩子不需要审批");
+      if (!workspace) throw new Error("项目级钩子需要先打开工作区");
+      const entry = hooksRules.find((item) => item.name === command.name && item.scope === "project");
+      if (!entry) throw new Error("找不到要审批的项目级钩子");
+      const key = workspaceTrustKey(workspace);
+      const nextTrust = command.trusted
+        ? trustRule(hookTrustData, key, entry.rule)
+        : revokeRule(hookTrustData, key, command.name);
+      if (!writeHookTrust(hooksTrustPath(), nextTrust)) throw new Error("钩子信任库损坏，未覆盖原文件；请先修复 pidesktop-hook-trust.json");
+      hookTrustData = nextTrust;
       refreshHooksConfig();
       emitResourceCatalog();
       break;
@@ -4924,6 +4971,9 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     case "hooks.run": {
       const entry = hooksRules.find((item) => item.name === command.name && item.scope === command.scope);
       if (!entry) throw new Error("找不到要测试的钩子");
+      if (entry.scope === "project" && evaluateHookTrust({ scope: entry.scope, workspace, rule: entry.rule, data: hookTrustData }) !== "trusted") {
+        throw new Error("项目级钩子尚未批准，测试也不会执行；请先批准执行");
+      }
       const outcome = await runtimeHooks.testHook(entry.rule, command.sample, {
         agentName: () => currentAgent?.name ?? "",
         workspace: () => workspace,

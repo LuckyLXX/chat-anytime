@@ -1475,7 +1475,7 @@ export type HookAction =
   | { kind: "notify"; title?: string; body?: string }
   | { kind: "http"; url: string }
   | { kind: "block"; deny: string[] }
-  | { kind: "command"; command: string; blocking?: boolean };
+  | { kind: "command"; command: string; blocking?: boolean; /** 观察事件默认异步；打开后等待命令结束。 */ wait?: boolean };
 
 /** pidesktop-hooks.json 中的一条钩子规则；name 在单个配置文件内唯一。 */
 export interface HookRule {
@@ -1513,6 +1513,8 @@ export interface HookSummary {
   /** tool_call 事件上的拦截型钩子（block 或 blocking command）。 */
   blocking: boolean;
   scope: "project" | "global";
+  /** 项目钩子当前规则指纹的审批状态；全局规则不需要审批。 */
+  trust?: "trusted" | "pending";
   enabled: boolean;
 }
 
@@ -1908,6 +1910,7 @@ export type RuntimeCommand =
   | { type: "hooks.save"; hook: HookRuleDraft }
   | { type: "hooks.toggle"; name: string; scope: "project" | "global"; enabled: boolean }
   | { type: "hooks.delete"; name: string; scope: "project" | "global" }
+  | { type: "hooks.trust"; name: string; scope: "project" | "global"; trusted: boolean }
   | { type: "hooks.settings"; hooks: HooksSettings }
   /** 用样例上下文试跑一条钩子（面板“测试”按钮）；sample 是给 bash/拦截正则用的样例行。 */
   | { type: "hooks.run"; name: string; scope: "project" | "global"; sample?: string }
@@ -1992,6 +1995,7 @@ export type RuntimeMessage =
     sessionId?: string;
     /** 该会话当前是否正被渲染端展示（激活或分屏 watch）；main 端免打扰判断用。 */
     visible?: boolean }
+  | { type: "hook-notice"; kind: "info" | "warn"; message: string }
   | { type: "hook-run"; name: string; scope: "project" | "global"; ok: boolean; blocked?: boolean; detail: string; durationMs: number }
   /** checkpoint 回滚完成：逐文件结果随推送展示；渲染端据此刷新工作区树。 */
   | { type: "checkpoint-result"; sessionId: string; results: CheckpointRollbackResult[]; message?: string }

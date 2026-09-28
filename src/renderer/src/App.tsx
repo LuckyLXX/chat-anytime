@@ -521,6 +521,14 @@ export function App(): ReactNode {
     setGalleryToast(galleryNotice.message);
     setTreeRefreshSignal((value) => value + 1);
   }, [galleryNotice]);
+  const hookNotice = useDesktopStore((state) => state.hookNotice);
+  const [hookToast, setHookToast] = useState<string>();
+  const lastHookNoticeAtRef = useRef(0);
+  useEffect(() => {
+    if (!hookNotice || hookNotice.at === lastHookNoticeAtRef.current) return;
+    lastHookNoticeAtRef.current = hookNotice.at;
+    setHookToast(hookNotice.message);
+  }, [hookNotice]);
   // —— 分屏支撑：会话草稿（格子 remount 恢复）与 composer 主动写入桥 ——
   const draftsRef = useRef(new Map<string, string>());
   const draftStore = useMemo<PaneDraftStore>(() => ({
@@ -1948,6 +1956,9 @@ export function App(): ReactNode {
       )}
       {galleryToast && (
         <div className="error-toast checkpoint-toast"><LayoutGrid size={18} /><span>{galleryToast}</span><button className="icon-button" type="button" title="关闭提示" aria-label="关闭提示" onClick={() => setGalleryToast(undefined)}><X size={16} /></button></div>
+      )}
+      {hookToast && (
+        <div className="error-toast checkpoint-toast"><AlertCircle size={18} /><span>{hookToast}</span><button className="icon-button" type="button" title="关闭提示" aria-label="关闭提示" onClick={() => setHookToast(undefined)}><X size={16} /></button></div>
       )}
       {automationToast && (
         <div className={`error-toast checkpoint-toast${automationToast.runId ? " with-action" : ""}`}><Zap size={18} /><span>{automationToast.message}</span>{automationToast.runId && <button className="toast-action" type="button" title="打开运行记录" aria-label="查看运行结果" onClick={() => viewAutomationRun(automationToast.runId!)}>查看结果</button>}<button className="icon-button" type="button" title="关闭提示" aria-label="关闭提示" onClick={() => setAutomationToast(undefined)}><X size={16} /></button></div>
