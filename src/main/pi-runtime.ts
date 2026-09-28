@@ -4979,7 +4979,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         workspace: () => workspace,
         post
       });
-      post({ type: "hook-run", name: command.name, scope: command.scope, ok: outcome.ok, ...(outcome.blocked ? { blocked: outcome.blocked } : {}), detail: outcome.detail, durationMs: outcome.durationMs });
+      post({ type: "hook-run", name: command.name, scope: command.scope, event: entry.rule.event, ok: outcome.ok, ...(outcome.blocked ? { blocked: outcome.blocked } : {}), detail: outcome.detail, durationMs: outcome.durationMs, source: "test", at: Date.now() });
       break;
     }
     case "skill.toggle": {

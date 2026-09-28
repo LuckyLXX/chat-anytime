@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { HookRule, RuntimeMessage } from "../shared/protocol.js";
 import { createHooksExtension, runHookCommand, testHook, type HooksExtensionDeps } from "./runtime-hooks.js";
@@ -78,6 +78,7 @@ describe("hooks extension tool_call", () => {
     const harness = createHarness([{ name: "守门", event: "tool_call", action: { kind: "command", command: "exit 2", blocking: true } }]);
     const verdict = await callToolCall(harness, "bash", { command: "npm run build" });
     expect(verdict).toMatchObject({ block: true });
+    expect(harness.posts.find((message) => message.type === "hook-run")).toMatchObject({ type: "hook-run", event: "tool_call", source: "trigger", ok: true, blocked: true });
   });
 
   it("blocks via a blocking command printing a block JSON verdict", async () => {
@@ -104,7 +105,9 @@ describe("project hook trust gate", () => {
     const harness = createHarness([{ name: "已批准门禁", event: "tool_call", action: { kind: "command", command: "exit 2", blocking: true } }], true, "project");
     harness.setTrusted(true);
     expect(await callToolCall(harness, "bash", { command: "npm test" })).toMatchObject({ block: true });
-    expect(harness.posts.filter((message) => message.type === "hook-notice")).toHaveLength(0);
+    const notices = harness.posts.filter((message) => message.type === "hook-notice");
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toMatchObject({ type: "hook-notice", message: expect.stringContaining("已拦截") });
   });
 
   it("warns once per session and stays silent when the master switch is off", async () => {
@@ -171,6 +174,71 @@ describe("hooks extension observing events", () => {
     harness.handlers.get("turn_end")?.({ message: { usage: {} }, toolResults: [] } as never);
     await flushAsync();
     expect(harness.posts).toHaveLength(0);
+  });
+});
+
+describe("hook run observability", () => {
+  it("records trigger outcomes and coalesces recent runs to the latest result", async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = createHarness([{ name: "延迟观察", event: "turn_end", action: { kind: "notify", title: "{durationMs}" } }]);
+      harness.handlers.get("turn_start")?.({ timestamp: Date.now() } as never);
+      await vi.advanceTimersByTimeAsync(15);
+      harness.handlers.get("turn_end")?.({ message: { usage: {} }, toolResults: [] } as never);
+      await vi.advanceTimersByTimeAsync(100);
+
+      harness.handlers.get("turn_start")?.({ timestamp: Date.now() } as never);
+      await vi.advanceTimersByTimeAsync(40);
+      harness.handlers.get("turn_end")?.({ message: { usage: {} }, toolResults: [] } as never);
+      await vi.advanceTimersByTimeAsync(249);
+      expect(harness.posts.filter((message) => message.type === "hook-run")).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(1);
+
+      const results = harness.posts.filter((message) => message.type === "hook-run");
+      expect(results).toHaveLength(1);
+      expect(results[0]).toMatchObject({ type: "hook-run", name: "延迟观察", scope: "global", event: "turn_end", source: "trigger", ok: true, detail: "通知：40", at: expect.any(Number) });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("records awaited session_start actions", async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = createHarness([{ name: "启动检查", event: "session_start", action: { kind: "notify" } }]);
+      harness.handlers.get("session_start")?.({} as never);
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(250);
+      expect(harness.posts.find((message) => message.type === "hook-run")).toMatchObject({ type: "hook-run", event: "session_start", source: "trigger", ok: true });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("records failed observation outcomes with their output", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
+    try {
+      const harness = createHarness([{ name: "HTTP检查", event: "turn_end", action: { kind: "http", url: "https://example.invalid/hook" } }]);
+      harness.handlers.get("turn_end")?.({ message: { usage: {} }, toolResults: [] } as never);
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(250);
+      expect(harness.posts.find((message) => message.type === "hook-run")).toMatchObject({ type: "hook-run", event: "turn_end", source: "trigger", ok: false, detail: expect.stringContaining("offline") });
+    } finally {
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+    }
+  });
+
+  it("records every blocked run immediately but emits one warning per rule", async () => {
+    const harness = createHarness([blockRule]);
+    await callToolCall(harness, "bash", { command: "git push --force" });
+    await callToolCall(harness, "bash", { command: "git push --force" });
+
+    const results = harness.posts.filter((message) => message.type === "hook-run");
+    expect(results).toHaveLength(2);
+    expect(results.every((message) => message.type === "hook-run" && message.blocked && message.source === "trigger")).toBe(true);
+    expect(harness.posts.filter((message) => message.type === "hook-notice")).toHaveLength(1);
   });
 });
 

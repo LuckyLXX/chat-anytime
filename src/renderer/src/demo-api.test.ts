@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { RuntimeMessage } from "../../shared/protocol";
 import { createDemoApi } from "./demo-api";
 
 describe("demo session commands", () => {
@@ -150,6 +151,8 @@ describe("demo session commands", () => {
   it("models project hook trust approval and revocation in demo mode", async () => {
     const api = createDemoApi();
     const name = "demo-hooks-trust-regression";
+    const messages: RuntimeMessage[] = [];
+    const unsubscribe = api.onRuntimeMessage((message) => messages.push(message));
     const hook = {
       name,
       scope: "project" as const,
@@ -159,6 +162,13 @@ describe("demo session commands", () => {
 
     await api.send({ type: "hooks.save", hook });
     expect((await api.bootstrap()).resources?.hooks.find((item) => item.name === name)?.trust).toBe("trusted");
+    await api.send({ type: "hooks.run", name, scope: "project" });
+    expect(messages.find((message) => message.type === "hook-run")).toMatchObject({
+      type: "hook-run",
+      event: "agent_end",
+      source: "test",
+      at: expect.any(Number)
+    });
 
     await api.send({ type: "hooks.trust", name, scope: "project", trusted: false });
     expect((await api.bootstrap()).resources?.hooks.find((item) => item.name === name)?.trust).toBe("pending");
@@ -166,5 +176,6 @@ describe("demo session commands", () => {
     await api.send({ type: "hooks.trust", name, scope: "project", trusted: true });
     expect((await api.bootstrap()).resources?.hooks.find((item) => item.name === name)?.trust).toBe("trusted");
     await api.send({ type: "hooks.delete", name, scope: "project" });
+    unsubscribe();
   });
 });

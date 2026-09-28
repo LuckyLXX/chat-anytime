@@ -20,7 +20,7 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount());
   container.remove();
-  useDesktopStore.setState({ hookNotice: undefined, hookRun: undefined });
+  useDesktopStore.setState({ hookNotice: undefined, hookRuns: {} });
   vi.unstubAllGlobals();
 });
 
@@ -53,6 +53,31 @@ describe("HooksSettings trust controls", () => {
     expect(button.textContent).toContain("批准执行");
     await act(async () => { button.click(); });
     expect(send).toHaveBeenCalledWith({ type: "hooks.trust", name: hook.name, scope: "project", trusted: true });
+  });
+
+  it("shows the latest trigger and expands the recent per-rule history", async () => {
+    vi.stubGlobal("window", { ...globalThis.window, piDesktop: { send: vi.fn(async () => undefined) } });
+    const at = Date.now() - 5_000;
+    useDesktopStore.setState({
+      hookRuns: {
+        "project/项目检查": [
+          { name: hook.name, scope: "project", event: "agent_end", ok: true, detail: "最新触发输出", durationMs: 12, source: "trigger", at },
+          { name: hook.name, scope: "project", event: "agent_end", ok: false, detail: "测试失败输出", durationMs: 24, source: "test", at: at - 1_000 },
+          { name: hook.name, scope: "project", event: "agent_end", ok: true, blocked: true, detail: "旧拦截输出", durationMs: 3, source: "trigger", at: at - 2_000 }
+        ]
+      }
+    });
+    await renderHook(hook);
+
+    expect(container.querySelector(".hook-run-latest")?.textContent).toContain("触发");
+    expect(container.querySelector(".hook-run-latest")?.textContent).toContain("最新触发输出");
+    expect(container.querySelectorAll(".hook-run-entry")).toHaveLength(0);
+    const toggle = container.querySelector('[data-control="hooks-run-log"]') as HTMLButtonElement;
+    await act(async () => { toggle.click(); });
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(container.querySelectorAll(".hook-run-entry")).toHaveLength(3);
+    expect(container.textContent).toContain("测试失败输出");
+    expect(container.textContent).toContain("旧拦截输出");
   });
 
   it("shows the trusted state and offers revocation", async () => {

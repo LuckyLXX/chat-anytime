@@ -33,7 +33,7 @@
 
 类名属于实现细节，可能随版本变化；以下属性是稳定契约，结构化主题请只依赖它们：
 
-**区域钩子 `data-pane`**：`sidebar` `topbar` `workspace` `work-area` `conversation` `timeline` `composer` `task-panel` `memory-panel` `preview` `terminal` `ssh` `question-panel` `settings-dialog` `permission-dialog` `landing` `markdown-outline` `design` `design-toolbar` `design-tools` `design-canvas` `design-layers` `design-inspector` `gallery-menu` `gallery-wall` `agent-settings` `general-settings` `model-settings` `resource-settings` `appearance-settings` `subagent-settings` `hooks-settings` `usage-settings`
+**区域钩子 `data-pane`**：`sidebar` `topbar` `workspace` `work-area` `conversation` `timeline` `composer` `task-panel` `memory-panel` `preview` `terminal` `ssh` `ssh-files` `question-panel` `settings-dialog` `permission-dialog` `landing` `turn-minimap` `markdown-outline` `design` `design-toolbar` `design-tools` `design-canvas` `design-layers` `design-inspector` `gallery-menu` `gallery-wall` `automation-settings` `automation-dialog` `agent-settings` `general-settings` `model-settings` `resource-settings` `appearance-settings` `subagent-settings` `hooks-settings` `usage-settings`
 
 > `design` 是设计模式（Design Studio，顶栏调色板按钮进入）的工作台外壳——顶栏工具栏 + 左侧图层树（`design-layers`）+ 中部无限画布（`design-canvas`）+ 右侧属性检查器（`design-inspector`）。工作台底色走 `--panel-bg-preview`（缺省 `--panel-bg`）与既有表面 token，跟随主题；画布点阵/参考线/选择框用 `--border`/`--accent` 派生，主题可用 `[data-pane="design"]` 后代选择器重设计。 `design-tools` 是画布顶部居中的浮动绘图工具胶囊（选择/画板/矩形/文本），激活按钮带 `aria-pressed="true"`。
 
@@ -119,7 +119,7 @@
 | 技能与工具页：重载资源 / 添加 MCP / 保存 MCP / 添加命令 / 保存命令 | `resource-reload` / `mcp-add` / `mcp-save` / `command-add` / `command-save` |
 | 外观页：导入 CSS / 导入主题目录 / 清空 / 保存当前主题 / 保存外观设置 | `appearance-import-css` / `appearance-import-theme` / `appearance-clear-css` / `appearance-save-theme` / `appearance-save` |
 | 子智能体页：新建 / 保存 | `subagent-add` / `subagent-save` |
-| 钩子页：总闸 / 新建 / 保存 / 项目规则信任 | `hooks-enable` / `hooks-add` / `hooks-save` / `hooks-trust` |
+| 钩子页：总闸 / 新建 / 保存 / 项目规则信任 / 最近运行记录 | `hooks-enable` / `hooks-add` / `hooks-save` / `hooks-trust` / `hooks-run-log` |
 | 用量统计页：助手范围筛选 | `usage-agent-filter` |
 | 面板坞开关 + 待办页 tab（会话区右上方 FAB） | `task-panel-toggle`                              |
 | 记忆页 tab（面板坞内）                      | `memory-toggle`                                  |

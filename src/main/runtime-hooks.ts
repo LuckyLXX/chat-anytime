@@ -264,7 +264,7 @@ export async function executeHookAction(rule: HookRule, context: HookContext, de
     const lines = [result.stdout, result.stderr].map((part) => part.trim()).filter(Boolean);
     const verdict = action.blocking === true && context.event === "tool_call" ? blockingCommandVerdict(result) : { blocked: false };
     return {
-      ok: !result.timedOut && result.exitCode === 0,
+      ok: verdict.blocked || (!result.timedOut && result.exitCode === 0),
       blocked: verdict.blocked || undefined,
       reason: verdict.reason,
       detail: [
@@ -279,6 +279,66 @@ export async function executeHookAction(rule: HookRule, context: HookContext, de
 
 function warn(deps: HooksExtensionDeps, message: string): void {
   deps.post({ type: "log", level: "warn", message });
+}
+
+type HookRunMessage = Extract<RuntimeMessage, { type: "hook-run" }>;
+type HookRunReporter = (entry: ConfiguredHook, outcome: HookActionOutcome) => void;
+const HOOK_RUN_THROTTLE_MS = 250;
+
+function createHookRunReporter(deps: HooksExtensionDeps): HookRunReporter {
+  const timers = new Map<string, ReturnType<typeof setTimeout>>();
+  const pending = new Map<string, HookRunMessage>();
+  const warnedBlocked = new Set<string>();
+
+  function post(entry: ConfiguredHook, outcome: HookActionOutcome): void {
+    const message: HookRunMessage = {
+      type: "hook-run",
+      name: entry.name,
+      scope: entry.scope,
+      event: entry.rule.event,
+      ok: outcome.ok,
+      ...(outcome.blocked ? { blocked: true } : {}),
+      detail: outcome.detail,
+      durationMs: outcome.durationMs,
+      source: "trigger",
+      at: Date.now()
+    };
+    const key = `${entry.scope}/${entry.name}`;
+
+    if (outcome.blocked) {
+      const timer = timers.get(key);
+      if (timer) clearTimeout(timer);
+      timers.delete(key);
+      const queued = pending.get(key);
+      if (queued) {
+        pending.delete(key);
+        deps.post(queued);
+      }
+      deps.post(message);
+      if (!warnedBlocked.has(key)) {
+        warnedBlocked.add(key);
+        const notice = `钩子「${entry.name}」已拦截工具调用${outcome.reason ? `：${outcome.reason}` : ""}`;
+        warn(deps, notice);
+        deps.post({ type: "hook-notice", kind: "warn", message: notice });
+      }
+      return;
+    }
+
+    pending.set(key, message);
+    const previousTimer = timers.get(key);
+    if (previousTimer) clearTimeout(previousTimer);
+    const timer = setTimeout(() => {
+      if (timers.get(key) !== timer) return;
+      timers.delete(key);
+      const latest = pending.get(key);
+      if (!latest) return;
+      pending.delete(key);
+      deps.post(latest);
+    }, HOOK_RUN_THROTTLE_MS);
+    timers.set(key, timer);
+  }
+
+  return post;
 }
 
 function rulesFor(deps: HooksExtensionDeps, event: HookRule["event"], toolName: string | undefined, warnedPending: Set<string>): ConfiguredHook[] {
@@ -299,10 +359,15 @@ function rulesFor(deps: HooksExtensionDeps, event: HookRule["event"], toolName: 
 }
 
 /** 观察型事件：逐条执行，未开启 wait 时发出即不管。 */
-function fireObservingHooks(deps: HooksExtensionDeps, event: "session_start" | "tool_execution_end" | "agent_end" | "turn_end", context: HookContext, toolName: string | undefined, warnedPending: Set<string>): void {
-  for (const { rule } of rulesFor(deps, event, toolName, warnedPending)) {
-    void executeHookAction(rule, context, deps).catch((error: unknown) => {
-      warn(deps, `钩子「${rule.name}」执行失败：${error instanceof Error ? error.message : String(error)}`);
+function fireObservingHooks(deps: HooksExtensionDeps, event: "session_start" | "tool_execution_end" | "agent_end" | "turn_end", context: HookContext, toolName: string | undefined, warnedPending: Set<string>, report: HookRunReporter): void {
+  for (const entry of rulesFor(deps, event, toolName, warnedPending)) {
+    const startedAt = Date.now();
+    void executeHookAction(entry.rule, context, deps).then((outcome) => {
+      report(entry, outcome);
+    }, (error: unknown) => {
+      const detail = `执行失败：${error instanceof Error ? error.message : String(error)}`;
+      warn(deps, `钩子「${entry.name}」${detail}`);
+      report(entry, { ok: false, detail, durationMs: Date.now() - startedAt });
     });
   }
 }
@@ -311,13 +376,17 @@ function fireObservingHooks(deps: HooksExtensionDeps, event: "session_start" | "
  * 会话启动钩子被顺序 await（环境准备语义：会话打开即就绪），单条命令受自身
  * 超时约束；失败只记日志，不阻断会话创建。
  */
-async function runSessionStartHooks(deps: HooksExtensionDeps, warnedPending: Set<string>): Promise<void> {
-  for (const { rule } of rulesFor(deps, "session_start", undefined, warnedPending)) {
+async function runSessionStartHooks(deps: HooksExtensionDeps, warnedPending: Set<string>, report: HookRunReporter): Promise<void> {
+  for (const entry of rulesFor(deps, "session_start", undefined, warnedPending)) {
+    let outcome: HookActionOutcome;
     try {
-      await executeHookAction(rule, baseContext(deps, "session_start"), deps);
+      outcome = await executeHookAction(entry.rule, baseContext(deps, "session_start"), deps);
     } catch (error) {
-      warn(deps, `钩子「${rule.name}」执行失败：${error instanceof Error ? error.message : String(error)}`);
+      const detail = `执行失败：${error instanceof Error ? error.message : String(error)}`;
+      warn(deps, `钩子「${entry.name}」${detail}`);
+      outcome = { ok: false, detail, durationMs: 0 };
     }
+    report(entry, outcome);
   }
 }
 
@@ -390,32 +459,51 @@ export function createHooksExtension(deps: HooksExtensionDeps): InlineExtension 
     hidden: true,
     factory(pi: ExtensionAPI) {
       const warnedPending = new Set<string>();
+      const reportHookRun = createHookRunReporter(deps);
       const toolStarts = new Map<string, { startedAt: number; args: unknown }>();
       let turnStartedAt: number | undefined;
       let runStartedAt: number | undefined;
 
       pi.on("session_start", () => {
-        void runSessionStartHooks(deps, warnedPending);
+        void runSessionStartHooks(deps, warnedPending, reportHookRun);
       });
 
       pi.on("tool_call", async (event) => {
         const toolName = event.toolName;
         const toolInput = event.input;
-        for (const { rule } of rulesFor(deps, "tool_call", toolName, warnedPending)) {
+        for (const entry of rulesFor(deps, "tool_call", toolName, warnedPending)) {
+          const { rule } = entry;
           const action: HookAction = rule.action;
           if (action.kind === "block") {
+            const startedAt = Date.now();
             const verdict = evaluateBlockAction(rule, toolName, toolInput);
-            if (verdict.blocked) return { block: true, reason: verdict.reason };
+            if (verdict.blocked) {
+              reportHookRun(entry, {
+                ok: true,
+                blocked: true,
+                reason: verdict.reason,
+                detail: verdict.reason ?? "命中拦截规则",
+                durationMs: Date.now() - startedAt
+              });
+              return { block: true, reason: verdict.reason };
+            }
             continue;
           }
           if (action.kind === "command" && action.blocking === true) {
             const context: HookContext = { ...baseContext(deps, "tool_call"), toolName, toolInput };
-            const result = await runHookCommand(rule, context);
-            const verdict = blockingCommandVerdict(result);
-            if (verdict.blocked) return { block: true, reason: verdict.reason };
-            if (result.timedOut || (result.exitCode !== 0 && result.exitCode !== 2)) {
+            const startedAt = Date.now();
+            let outcome: HookActionOutcome;
+            try {
+              outcome = await executeHookAction(rule, context, deps);
+            } catch (error) {
+              const detail = `命令启动失败：${error instanceof Error ? error.message : String(error)}`;
+              outcome = { ok: false, detail, durationMs: Date.now() - startedAt };
+            }
+            reportHookRun(entry, outcome);
+            if (outcome.blocked) return { block: true, reason: outcome.reason };
+            if (!outcome.ok) {
               // 非阻断语义的失败（超时/崩溃）默认放行并记日志，避免坏钩子卡死回合。
-              warn(deps, `阻断型钩子「${rule.name}」执行异常（${result.timedOut ? "超时" : `退出码 ${result.exitCode ?? "未知"}`}），已放行`);
+              warn(deps, `阻断型钩子「${rule.name}」执行异常（${outcome.detail.split("\n", 1)[0]}），已放行`);
             }
           }
         }
@@ -437,7 +525,7 @@ export function createHooksExtension(deps: HooksExtensionDeps): InlineExtension 
           isError: event.isError,
           ...(started ? { durationMs: Date.now() - started.startedAt } : {})
         };
-        fireObservingHooks(deps, "tool_execution_end", context, event.toolName, warnedPending);
+        fireObservingHooks(deps, "tool_execution_end", context, event.toolName, warnedPending, reportHookRun);
       });
 
       pi.on("turn_start", (event) => {
@@ -453,7 +541,7 @@ export function createHooksExtension(deps: HooksExtensionDeps): InlineExtension 
           ...(usage ? { usage: { input: usage.input ?? 0, output: usage.output ?? 0, cacheRead: usage.cacheRead ?? 0, cacheWrite: usage.cacheWrite ?? 0, cost: usage.cost?.total ?? 0 } } : {})
         };
         turnStartedAt = undefined;
-        fireObservingHooks(deps, "turn_end", context, undefined, warnedPending);
+        fireObservingHooks(deps, "turn_end", context, undefined, warnedPending, reportHookRun);
       });
 
       pi.on("agent_start", () => {
@@ -469,7 +557,7 @@ export function createHooksExtension(deps: HooksExtensionDeps): InlineExtension 
           isError
         };
         runStartedAt = undefined;
-        fireObservingHooks(deps, "agent_end", context, undefined, warnedPending);
+        fireObservingHooks(deps, "agent_end", context, undefined, warnedPending, reportHookRun);
       });
     }
   };

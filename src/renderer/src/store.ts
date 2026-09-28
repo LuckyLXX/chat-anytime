@@ -10,6 +10,7 @@ import type {
   DesignNode,
   DesktopSettings,
   GalleryApp,
+  HookEventName,
   MemoryTopic,
   ModelOption,
   PermissionRequest,
@@ -35,10 +36,12 @@ export interface HookNotice {
 export interface HookRunResult {
   name: string;
   scope: "project" | "global";
+  event: HookEventName;
   ok: boolean;
   blocked?: boolean;
   detail: string;
   durationMs: number;
+  source: "trigger" | "test";
   at: number;
 }
 
@@ -249,8 +252,8 @@ interface DesktopState {
   modelRefreshProvider?: string;
   permissions: PermissionRequest[];
   questions: QuestionRequest[];
-  /** 最近一次钩子测试结果；面板按 name+scope 匹配展示。 */
-  hookRun?: HookRunResult;
+  /** 每条钩子规则最近 3 次测试/触发结果；键为 `${scope}/${name}`，只保留内存态。 */
+  hookRuns: Record<string, HookRunResult[]>;
   /** 钩子运行治理提示（hook-notice 推送）；App 据此弹 toast。 */
   hookNotice?: HookNotice;
   /** 最近一次 checkpoint 回滚结果；App 监听变化弹 toast 并刷新工作区树。 */
@@ -379,6 +382,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   automationRuns: [],
   permissions: [],
   questions: [],
+  hookRuns: {},
   rollbacks: {},
   transcripts: {},
   transcriptErrors: {},
@@ -548,16 +552,20 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
         set({ hookNotice: { kind: message.kind, message: message.message, at: Date.now() } });
         break;
       case "hook-run":
-        set({
-          hookRun: {
+        set((state) => {
+          const key = `${message.scope}/${message.name}`;
+          const result: HookRunResult = {
             name: message.name,
             scope: message.scope,
+            event: message.event,
             ok: message.ok,
             blocked: message.blocked,
             detail: message.detail,
             durationMs: message.durationMs,
-            at: Date.now()
-          }
+            source: message.source,
+            at: message.at
+          };
+          return { hookRuns: { ...state.hookRuns, [key]: [result, ...(state.hookRuns[key] ?? [])].slice(0, 3) } };
         });
         break;
       case "checkpoint-result":

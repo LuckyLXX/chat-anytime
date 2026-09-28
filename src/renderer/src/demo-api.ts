@@ -1228,9 +1228,11 @@ export function createDemoApi(): DesktopApi {
           demoResources.hooksEnabled = command.hooks.enabled;
           emit({ type: "resources", resources: structuredClone(demoResources) });
           break;
-        case "hooks.run":
-          emit({ type: "hook-run", name: command.name, scope: command.scope, ok: true, detail: "演示环境不会执行钩子动作", durationMs: 0 });
+        case "hooks.run": {
+          const hook = demoResources.hooks.find((item) => item.name === command.name && item.scope === command.scope);
+          emit({ type: "hook-run", name: command.name, scope: command.scope, event: hook?.event ?? "agent_end", ok: true, detail: "演示环境不会执行钩子动作", durationMs: 0, source: "test", at: Date.now() });
           break;
+        }
       }
     },
     onRuntimeMessage(listener) {

@@ -1,7 +1,7 @@
-import { Bell, Globe, Pencil, Play, Plus, ShieldAlert, ShieldCheck, TerminalSquare, Trash2, X, Zap } from "lucide-react";
+import { Bell, ChevronDown, Globe, Pencil, Play, Plus, ShieldAlert, ShieldCheck, TerminalSquare, Trash2, X, Zap } from "lucide-react";
 import { useState, type FormEvent, type ReactNode } from "react";
 import type { HookAction, HookEventName, HookRuleDraft, HookSummary, ResourceCatalog, RuntimeCommand } from "../../shared/protocol";
-import { useDesktopStore } from "./store";
+import { useDesktopStore, type HookRunResult } from "./store";
 
 const hookEventLabels: Record<HookEventName, string> = {
   session_start: "会话启动",
@@ -40,13 +40,38 @@ const hookScopeLabels: Record<"project" | "global", string> = {
 
 const isToolEvent = (event: HookEventName): boolean => event === "tool_call" || event === "tool_execution_end";
 
+function formatRunTime(at: number): string {
+  const seconds = Math.max(0, Math.floor((Date.now() - at) / 1_000));
+  if (seconds < 5) return "刚刚";
+  if (seconds < 60) return `${seconds} 秒前`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} 分钟前`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  return `${Math.floor(hours / 24)} 天前`;
+}
+
+function summarizeRunDetail(detail: string): string {
+  const summary = detail.replace(/\s+/gu, " ").trim() || "无输出";
+  return summary.length > 140 ? `${summary.slice(0, 140)}…` : summary;
+}
+
+function runStatusLabel(result: HookRunResult): string {
+  return result.blocked ? "已拦截" : result.ok ? "成功" : "失败";
+}
+
+function runSourceLabel(result: HookRunResult): string {
+  return result.source === "test" ? "测试" : "触发";
+}
+
 interface HooksSettingsProps {
   resources: ResourceCatalog;
   workspaceOpen: boolean;
 }
 
 export function HooksSettings({ resources, workspaceOpen }: HooksSettingsProps): ReactNode {
-  const hookRun = useDesktopStore((state) => state.hookRun);
+  const hookRuns = useDesktopStore((state) => state.hookRuns);
+  const [expandedRunLog, setExpandedRunLog] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [localError, setLocalError] = useState<string>();
   const [formOpen, setFormOpen] = useState(false);
@@ -145,7 +170,7 @@ export function HooksSettings({ resources, workspaceOpen }: HooksSettingsProps):
   }
 
   const controlsBusy = busy;
-  const runResultFor = (hook: HookSummary) => hookRun && hookRun.name === hook.name && hookRun.scope === hook.scope ? hookRun : undefined;
+  const runResultsFor = (hook: HookSummary): HookRunResult[] => hookRuns[`${hook.scope}/${hook.name}`] ?? [];
 
   return (
     <form className="resource-page" data-pane="hooks-settings" onSubmit={(formEvent) => void saveHook(formEvent)}>
@@ -187,7 +212,9 @@ export function HooksSettings({ resources, workspaceOpen }: HooksSettingsProps):
                 <div className="resource-list">
                   {resources.hooks.map((hook) => {
                     const ActionIcon = hookActionIcons[hook.actionKind];
-                    const result = runResultFor(hook);
+                    const results = runResultsFor(hook);
+                    const result = results[0];
+                    const runKey = `${hook.scope}/${hook.name}`;
                     return (
                       <div className="resource-item" key={`${hook.scope}/${hook.name}`} data-hook-name={hook.name}>
                         <div className="resource-item-icon"><ActionIcon size={14} /></div>
@@ -196,7 +223,27 @@ export function HooksSettings({ resources, workspaceOpen }: HooksSettingsProps):
                           <small>{hookEventLabels[hook.event]}{hook.matcher ? ` · 匹配 ${hook.matcher}` : ""} · {hookActionLabels[hook.actionKind]} · {hookScopeLabels[hook.scope]}</small>
                           {hook.scope === "project" && <span className="hook-trust-badge" data-hook-trust={hook.trust ?? "pending"}>{hook.trust === "trusted" ? "已信任" : "待批准"}</span>}
                           <em>{hook.actionPreview}</em>
-                          {result && <span className="hook-run-result" data-ok={result.ok || undefined} data-blocked={result.blocked || undefined}>测试（{result.durationMs}ms）：{result.blocked ? `已拦截——${result.detail}` : result.ok ? result.detail : `失败——${result.detail}`}</span>}
+                          {result && (
+                            <div className="hook-run-status">
+                              <div className="hook-run-latest" data-ok={result.ok || undefined} data-blocked={result.blocked || undefined}>
+                                <strong>{hookEventLabels[result.event]} · {runSourceLabel(result)} · {runStatusLabel(result)}</strong>
+                                <small>{result.durationMs}ms · {formatRunTime(result.at)}</small>
+                                <span className="hook-run-summary" title={result.detail}>{summarizeRunDetail(result.detail)}</span>
+                              </div>
+                              <button className="icon-button hook-run-log-toggle" type="button" data-control="hooks-run-log" title={`查看 ${hook.name} 最近 3 次运行`} aria-label={`查看钩子 ${hook.name} 最近 3 次运行`} aria-expanded={expandedRunLog === runKey} onClick={() => setExpandedRunLog((current) => current === runKey ? undefined : runKey)}><ChevronDown size={13} /></button>
+                              {expandedRunLog === runKey && (
+                                <div className="hook-run-history">
+                                  {results.map((item, index) => (
+                                    <div className="hook-run-entry" key={`${item.at}-${index}`} data-ok={item.ok || undefined} data-blocked={item.blocked || undefined}>
+                                      <strong>{hookEventLabels[item.event]} · {runSourceLabel(item)} · {runStatusLabel(item)}</strong>
+                                      <time dateTime={new Date(item.at).toISOString()}>{item.durationMs}ms · {formatRunTime(item.at)}</time>
+                                      <span className="hook-run-entry-detail">{item.detail || "无输出"}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          )}
                         </div>
                         <label className="resource-toggle"><input type="checkbox" checked={hook.enabled} disabled={controlsBusy} onChange={(changeEvent) => void run({ type: "hooks.toggle", name: hook.name, scope: hook.scope, enabled: changeEvent.target.checked })} /><span>启用</span></label>
                         {hook.scope === "project" && <button className="secondary-button compact-button hook-trust-action" type="button" data-control="hooks-trust" title={hook.trust === "trusted" ? `撤销 ${hook.name} 的信任` : `批准 ${hook.name} 执行`} aria-label={hook.trust === "trusted" ? `撤销钩子 ${hook.name} 的信任` : `批准钩子 ${hook.name} 执行`} disabled={controlsBusy} onClick={() => void run({ type: "hooks.trust", name: hook.name, scope: "project", trusted: hook.trust !== "trusted" })}>{hook.trust === "trusted" ? <ShieldAlert size={13} /> : <ShieldCheck size={13} />}{hook.trust === "trusted" ? "撤销信任" : "批准执行"}</button>}

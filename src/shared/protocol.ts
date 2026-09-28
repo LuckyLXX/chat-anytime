@@ -1996,7 +1996,7 @@ export type RuntimeMessage =
     /** 该会话当前是否正被渲染端展示（激活或分屏 watch）；main 端免打扰判断用。 */
     visible?: boolean }
   | { type: "hook-notice"; kind: "info" | "warn"; message: string }
-  | { type: "hook-run"; name: string; scope: "project" | "global"; ok: boolean; blocked?: boolean; detail: string; durationMs: number }
+  | { type: "hook-run"; name: string; scope: "project" | "global"; event: HookEventName; ok: boolean; blocked?: boolean; detail: string; durationMs: number; source: "trigger" | "test"; at: number }
   /** checkpoint 回滚完成：逐文件结果随推送展示；渲染端据此刷新工作区树。 */
   | { type: "checkpoint-result"; sessionId: string; results: CheckpointRollbackResult[]; message?: string }
   /** 用量统计结果（响应 usage.stats.request；按需拉取，不进快照）。 */

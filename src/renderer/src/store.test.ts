@@ -102,6 +102,44 @@ describe("hook notices", () => {
   });
 });
 
+describe("hook run history", () => {
+  beforeEach(() => {
+    useDesktopStore.setState({ hookRuns: {} });
+  });
+
+  it("keeps only the three latest results under each scope/name key", () => {
+    const state = useDesktopStore.getState();
+    for (let index = 1; index <= 4; index++) {
+      state.handleRuntimeMessage({
+        type: "hook-run",
+        name: "same-name",
+        scope: "project",
+        event: "agent_end",
+        ok: true,
+        detail: `project-${index}`,
+        durationMs: index,
+        source: index % 2 ? "trigger" : "test",
+        at: index
+      });
+    }
+    state.handleRuntimeMessage({
+      type: "hook-run",
+      name: "same-name",
+      scope: "global",
+      event: "agent_end",
+      ok: false,
+      detail: "global",
+      durationMs: 1,
+      source: "test",
+      at: 5
+    });
+
+    const runs = useDesktopStore.getState().hookRuns;
+    expect(runs["project/same-name"]?.map((run) => run.detail)).toEqual(["project-4", "project-3", "project-2"]);
+    expect(runs["global/same-name"]?.map((run) => run.detail)).toEqual(["global"]);
+  });
+});
+
 describe("split-pane parked data cache", () => {
   beforeEach(() => {
     useDesktopStore.setState({ snapshot: emptySnapshot, paneStates: {}, parkedPanels: {} });
