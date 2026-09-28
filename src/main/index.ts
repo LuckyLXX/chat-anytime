@@ -10,7 +10,7 @@ import { migrateSettings, mergeBrowserSettings, normalizeJev, normalizeVision, r
 import { manualDownloadPrefs } from "./browser-manual-download.js";
 import { mergeSavedAppearance, settingsForRenderer } from "./appearance-assets.js";
 import { createSettingsPersistence, diffSettings, readSettingsFile, settingsPath as settingsFilePath, type SettingsPersistence } from "./settings-store.js";
-import { togglePinnedSessionPath } from "./session-scope.js";
+import { pruneSessionPaths, setArchivedSessionPaths, togglePinnedSessionPath } from "./session-scope.js";
 import { importExternalAttachment, workspaceRelativeAttachment } from "./attachments.js";
 import type { BrowserDownloadPrefs, BrowserPreviewCommand, BrowserPreviewState, DesktopBootstrap, DesktopSettings, GalleryServiceProbe, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot, SshCommand, SshCommandResult, SshEventData, SshRevealEvent, TerminalCommand, TerminalEventData, WorkspaceDirectoryListing, WorkspaceEntryResult, WorkspaceFilePreview, WorkspaceFileSearchResult, WorkspaceFileStat, WorkspaceFileWriteResult } from "../shared/protocol.js";
 import { PREVIEW_FILE_SCHEME, parseWorkspaceFilePreviewUrl } from "../shared/protocol.js";
@@ -343,6 +343,14 @@ function updateSettings(command: RuntimeCommand): void {
     // 置顶集合的重写走路径匹配键（分隔符/大小写归一）——见 session-scope 的
     // togglePinnedSessionPath：字面量比较会让「同一会话的两种写法」重复落盘。
     case "session.pin": settings.pinnedSessionPaths = togglePinnedSessionPath(settings.pinnedSessionPaths, command.path, command.pinned); break;
+    // 归档集合与置顶同构（路径匹配键 + 归一化去重）；批量与单条共用一条命令。
+    case "session.archive": settings.archivedSessionPaths = setArchivedSessionPaths(settings.archivedSessionPaths, command.paths, command.archived); break;
+    // 删除是唯一能精确知道「这条会话没了」的时刻：顺手把归档集合里的死路径清掉，
+    // 否则 settings.json 会随着"归档→删除"的循环无界增长。
+    // 边界：workspace.remove / 删除助手不经这里，可能在集合里留少量死路径（无功能
+    // 影响：refreshSessions 只对真实存在的会话判定归档）。
+    case "session.delete": settings.archivedSessionPaths = pruneSessionPaths(settings.archivedSessionPaths, [command.path]); break;
+    case "session.deleteMany": settings.archivedSessionPaths = pruneSessionPaths(settings.archivedSessionPaths, command.paths); break;
     case "session.new": if (command.workspace) settings.agentWorkspaces = recordAgentWorkspace(settings.agentWorkspaces, settings.currentAgentId, command.workspace); break;
     // 分屏后台格（activate:false）不激活、不改全局镜像——与 utility 端语义对称，不记。
     case "session.open": if (command.workspace && command.activate !== false) settings.agentWorkspaces = recordAgentWorkspace(settings.agentWorkspaces, settings.currentAgentId, command.workspace); break;

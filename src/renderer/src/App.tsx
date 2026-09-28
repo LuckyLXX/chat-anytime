@@ -1,12 +1,17 @@
 import {
   AlertCircle,
+  Archive,
+  ArchiveRestore,
   Bot,
   Check,
+  CheckCircle2,
   ChevronDown,
+  Circle,
   Computer,
   Eye,
   Folder,
   FolderOpen,
+  ListChecks,
   LoaderCircle,
   MessageSquarePlus,
   MessageCircle,
@@ -73,6 +78,7 @@ import { DiffView } from "./components/DiffView";
 import { BrandMark } from "./components/BrandMark";
 import { clampPreviewSplit, PREVIEW_SPLIT_MAX, PREVIEW_SPLIT_MIN, previewSplitFromKey } from "./lib/preview-split";
 import { groupSessionsByWorkspace, workspaceKey } from "./lib/session-groups";
+import { archivedSessionCount, selectSessionPaths, selectedPathsInView, sessionsForView, toggleSessionSelection, type SessionSelection, type SessionView } from "./lib/session-view";
 import { resolveThemeAssetUrls, activeThemeScope } from "../../shared/theme-assets";
 import { bubbleOpacityCss, collectThemeLayers, panelOpacityCss, scopeCustomThemeCss, themePresetCss, wallpaperOpacityCss } from "./lib/theme-presets";
 import { panePermissionRequest, paneQuestionRequest, dropPaneStates, pruneParkedPanels, useDesktopStore } from "./store";
@@ -403,7 +409,12 @@ export function App(): ReactNode {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: ContextMenuItem[] } | null>(null);
   const [renameSession, setRenameSession] = useState<{ path: string; title: string } | null>(null);
   const [renameValue, setRenameValue] = useState("");
-  const [deleteSession, setDeleteSession] = useState<{ path: string; title: string } | null>(null);
+  // 话题视图：全部 / 已归档（软归档只在列表层隐藏，会话文件原地不动）。
+  const [sessionView, setSessionView] = useState<SessionView>("active");
+  // 多选模式：批量归档 / 恢复 / 删除（归档区清理出口）。
+  const [sessionMultiSelect, setSessionMultiSelect] = useState(false);
+  const [selectedSessionPaths, setSelectedSessionPaths] = useState<SessionSelection>({});
+  const [deleteSession, setDeleteSession] = useState<{ paths: string[]; title: string; mode: "single" | "bulk" } | null>(null);
   const [removeWorkspace, setRemoveWorkspace] = useState<{ workspace: string; name: string; count: number } | null>(null);
   // —— checkpoint 回滚：单文件确认对话框目标 + 完成后的 toast ——
   const [rollbackTarget, setRollbackTarget] = useState<{ file: ReplyChangedFile; sessionId: string } | null>(null);
@@ -723,7 +734,11 @@ export function App(): ReactNode {
     } : current);
   }, []);
   const visibleAgents = useMemo(() => settings.agents.filter((agent) => !agent.archived && `${agent.name} ${agent.description}`.toLowerCase().includes(sidebarQuery.trim().toLowerCase())), [settings.agents, sidebarQuery]);
-  const sessionGroups = useMemo(() => groupSessionsByWorkspace(sessionSummaries, sidebarQuery, recentWorkspaces, activeWorkspace), [sessionSummaries, recentWorkspaces, activeWorkspace, sidebarQuery]);
+  const visibleSessions = useMemo(() => sessionsForView(sessionSummaries, sessionView), [sessionSummaries, sessionView]);
+  const sessionGroups = useMemo(() => groupSessionsByWorkspace(visibleSessions, sidebarQuery, recentWorkspaces, activeWorkspace), [visibleSessions, recentWorkspaces, activeWorkspace, sidebarQuery]);
+  const archivedCount = useMemo(() => archivedSessionCount(sessionSummaries), [sessionSummaries]);
+  // 选择集按当前视图过滤：会话被删/刷新后可能残留陈旧键，操作时必须只拿「还在列表里」的那些。
+  const selectedPaths = useMemo(() => selectedPathsInView(selectedSessionPaths, sessionSummaries, sessionView), [selectedSessionPaths, sessionSummaries, sessionView]);
   const themeLayers = useMemo(() => collectThemeLayers(settings.appearance.customCss), [settings.appearance.customCss]);
   const activePreviewTab = preview?.tabs.find((tab) => tab.id === preview.activeTabId);
 
@@ -853,10 +868,14 @@ export function App(): ReactNode {
       ["data-ui-permission-pending", Boolean(permission)],
       ["data-ui-question-pending", Boolean(question)],
       ["data-ui-split-open", paneIds.length > 1],
-      ["data-ui-design-open", designMode]
+      ["data-ui-design-open", designMode],
+      // 多选模式（批量归档 / 恢复 / 删除）——主题可据此收起行内图标、改操作条样式。
+      ["data-ui-session-multiselect", sessionMultiSelect]
     ];
     const valueStates: readonly [string, string | undefined][] = [
-      ["data-ui-sidebar-view", sidebarView],
+      // 归档是话题视图的子模式：取值多一个 archived，主题可用
+      // html[data-ui-sidebar-view="archived"] 单独定制归档屏。
+      ["data-ui-sidebar-view", sidebarView === "topics" && sessionView === "archived" ? "archived" : sidebarView],
       ["data-ui-density", settings.appearance.tune?.density],
       ["data-ui-radius", settings.appearance.tune?.radius],
       // 界面动效总开关：关闭时 styles.css 关停块停用全部过渡/动画，
@@ -875,7 +894,7 @@ export function App(): ReactNode {
       for (const [name] of states) root.removeAttribute(name);
       for (const [name] of valueStates) root.removeAttribute(name);
     };
-  }, [settingsOpen, activeWorkspace, isChatEmpty, isGenerating, previewOpened, previewFullscreen, permission, question, paneIds.length, sidebarView, settings.appearance.tune, settings.appearance.motion, designMode]);
+  }, [settingsOpen, activeWorkspace, isChatEmpty, isGenerating, previewOpened, previewFullscreen, permission, question, paneIds.length, sidebarView, settings.appearance.tune, settings.appearance.motion, designMode, sessionMultiSelect, sessionView]);
 
   async function openWorkspace(): Promise<void> {
     const path = await window.piDesktop.chooseWorkspace();
@@ -901,6 +920,23 @@ export function App(): ReactNode {
     }
   }
 
+  /** 归档 / 取消归档若干会话（批量与单条同一命令；单条时 paths 长度为 1）。 */
+  async function setSessionsArchived(paths: string[], archived: boolean): Promise<void> {
+    if (paths.length === 0) return;
+    try {
+      await window.piDesktop.send({ type: "session.archive", paths, archived });
+    } catch (error) {
+      setMessageActionError(error instanceof Error ? error.message : archived ? "归档会话失败" : "取消归档失败");
+    }
+  }
+
+  /** 多选操作条的「归档 / 恢复」：动作方向由当前视图决定，完成后退出多选。 */
+  async function archiveSelectedSessions(): Promise<void> {
+    await setSessionsArchived(selectedPaths, sessionView !== "archived");
+    setSessionMultiSelect(false);
+    setSelectedSessionPaths({});
+  }
+
   async function openSession(path: string, sessionWorkspace: string, sessionId?: string): Promise<void> {
     try {
       // 分屏中：已在格子里的会话只聚焦；不在的替换焦点格（草稿/焦点随之迁移）。
@@ -911,6 +947,11 @@ export function App(): ReactNode {
         }
         const target = focusedPaneId ?? activeSessionId;
         if (target && sessionId) setSplitState((current) => current.tree ? { tree: replaceLeaf(current.tree, target, { kind: "leaf", sessionId }), focusedPane: sessionId } : current);
+      }
+      // 打开归档会话 = 「我要用回它了」：先取消归档让它回到正常列表，再打开。
+      // 这一条覆盖所有经 openSession 的入口（侧栏行、归档行右键「打开」、分屏打开）。
+      if (sessionSummaries.some((item) => item.path === path && item.archived)) {
+        await window.piDesktop.send({ type: "session.archive", paths: [path], archived: false });
       }
       await window.piDesktop.send({ type: "session.open", path, workspace: sessionWorkspace });
     } catch (error) {
@@ -1546,11 +1587,39 @@ export function App(): ReactNode {
             <button type="button" role="tab" aria-selected={sidebarTab === "topics"} className={sidebarTab === "topics" ? "active" : ""} onClick={() => { setSidebarTab("topics"); setSidebarQuery(""); }}><MessageCircle size={14} />话题<span>{sessionSummaries.length}</span></button>
           </div>
           <label className="sidebar-search"><Search size={14} /><input ref={sidebarSearchRef} value={sidebarQuery} placeholder={sidebarTab === "agents" ? "搜索助手" : "搜索话题"} aria-label={sidebarTab === "agents" ? "搜索助手" : "搜索话题"} onChange={(event) => setSidebarQuery(event.target.value)} /></label>
-          <div className="sidebar-section-label">{sidebarTab === "agents" ? "角色" : "最近话题"}</div>
+          {sidebarTab === "agents" ? (
+            <div className="sidebar-section-label">角色</div>
+          ) : sessionMultiSelect ? (
+            // 多选操作条：替掉 label 那一行（不新增行高，列表不跳）。
+            <div className="session-selection-bar">
+              <span className="session-selection-count" title={`已选 ${selectedPaths.length} 个会话`}>已选 {selectedPaths.length}</span>
+              <div className="session-selection-actions">
+                <button type="button" className="session-selection-action" disabled={selectedPaths.length === 0} title={sessionView === "archived" ? "恢复选中会话" : "归档选中会话"} aria-label={sessionView === "archived" ? "恢复选中会话" : "归档选中会话"} onClick={() => void archiveSelectedSessions()}>
+                  {sessionView === "archived" ? <ArchiveRestore size={13} /> : <Archive size={13} />}
+                </button>
+                <button type="button" className="session-selection-action danger" disabled={selectedPaths.length === 0} title="删除选中会话" aria-label="删除选中会话" onClick={() => setDeleteSession({ paths: selectedPaths, title: `${selectedPaths.length} 个会话`, mode: "bulk" })}>
+                  <Trash2 size={13} />
+                </button>
+                <button type="button" className="session-selection-action" title="全选当前列表" aria-label="全选" onClick={() => setSelectedSessionPaths(selectSessionPaths(sessionGroups.flatMap((group) => group.sessions.map((item) => item.path))))}><ListChecks size={13} /></button>
+                <button type="button" className="session-selection-action" title="退出多选" aria-label="退出多选" onClick={() => { setSessionMultiSelect(false); setSelectedSessionPaths({}); }}><X size={13} /></button>
+              </div>
+            </div>
+          ) : (
+            <div className="sidebar-section-label session-view-bar">
+              <div className="session-view-switch">
+                <button type="button" className={sessionView === "active" ? "active" : ""} aria-pressed={sessionView === "active"} onClick={() => { setSessionView("active"); setSidebarQuery(""); setSelectedSessionPaths({}); }}>全部</button>
+                <button type="button" className={sessionView === "archived" ? "active" : ""} aria-pressed={sessionView === "archived"} title={`已归档 ${archivedCount} 个会话`} onClick={() => { setSessionView("archived"); setSidebarQuery(""); setSelectedSessionPaths({}); }}>已归档{archivedCount > 0 ? <em>{archivedCount}</em> : null}</button>
+              </div>
+              <button type="button" className="session-view-action" title="多选：批量归档 / 恢复 / 删除" aria-label="多选" onClick={() => setSessionMultiSelect(true)}><ListChecks size={13} /></button>
+              {sessionView === "archived" && archivedCount > 0
+                ? <button type="button" className="session-view-action danger" title="清空归档（删除全部已归档会话）" aria-label="清空归档" onClick={() => setDeleteSession({ paths: visibleSessions.map((item) => item.path), title: `全部 ${archivedCount} 个已归档会话`, mode: "bulk" })}><Trash2 size={13} /></button>
+                : null}
+            </div>
+          )}
           {sidebarTab === "agents" ? <nav className="agent-list" aria-label="助手列表">
             {visibleAgents.map((agent) => <button className={agent.id === activeAgentId ? "active" : ""} type="button" key={agent.id} data-row-kind="agent" data-row-active={agent.id === activeAgentId || undefined} onClick={() => { useDesktopStore.setState({ settings: { ...settings, currentAgentId: agent.id } }); void window.piDesktop.send({ type: "agent.select", agentId: agent.id }); }}><span className="agent-list-icon"><Bot size={15} /></span><span><strong>{agent.name}</strong><small>{agent.description || "未填写说明"}</small></span></button>)}
           </nav> : <nav className="session-list" aria-label="话题列表">
-            {sessionGroups.length === 0 ? <div className="session-list-empty">暂无匹配话题</div> : sessionGroups.map((group) => {
+            {sessionGroups.length === 0 ? <div className="session-list-empty">{sessionView === "archived" ? "暂无归档话题" : "暂无匹配话题"}</div> : sessionGroups.map((group) => {
               const collapsed = expandedWorkspaceGroups[group.key] !== true;
               const workspaceName = group.workspace.split(/[\\/]/u).at(-1) || group.workspace;
               return (
@@ -1577,7 +1646,7 @@ export function App(): ReactNode {
                     >
                       <FolderTree size={14} />
                     </button>
-                    <button
+                    {sessionView === "active" ? <button
                       className="session-workspace-new-button"
                       type="button"
                       title={`在 ${workspaceName} 中新建话题`}
@@ -1585,7 +1654,7 @@ export function App(): ReactNode {
                       onClick={() => void createNewSession(group.workspace)}
                     >
                       <SquarePen size={14} />
-                    </button>
+                    </button> : null}
                   </div>
                   {/* 分组子项常驻 DOM（collapsed 只切 class），展开/折叠由
                       styles.css 的 grid-template-rows 过渡驱动（内层 wrapper
@@ -1593,8 +1662,47 @@ export function App(): ReactNode {
                   <div className={`session-workspace-items${collapsed ? " collapsed" : ""}`}>
                     <div className="session-workspace-items-inner">
                     {group.sessions.length === 0
-                      ? <div className="session-workspace-empty">暂无话题，点击右上角新建</div>
-                      : group.sessions.map((item) => <button className={item.id === activeSessionId || (splitTree ? paneIds.includes(item.id) : false) ? "active" : ""} type="button" key={item.path} title={item.title} data-row-kind="session" data-row-active={item.id === activeSessionId || (splitTree ? paneIds.includes(item.id) : false) || undefined} onClick={() => void openSession(item.path, item.workspace, item.id)} onContextMenu={(event) => { event.preventDefault(); const splitDisabled = !activeSessionId || designMode || (splitTree ? countLeaves(splitTree) >= MAX_SPLIT_PANES : false); const inPane = splitTree ? leafIds(splitTree).includes(item.id) : false; setContextMenu({ x: event.clientX, y: event.clientY, items: [{ label: "重命名", onClick: () => { setRenameSession({ path: item.path, title: item.title }); setRenameValue(item.title); } }, { label: item.pinned ? "取消置顶" : "置顶", onClick: () => { void window.piDesktop.send({ type: "session.pin", path: item.path, pinned: !item.pinned }); } }, { label: inPane ? "已分屏，切换到该格" : "分屏", disabled: !inPane && splitDisabled, onClick: () => addSplitPane(item) }, { label: "删除会话", danger: true, onClick: () => setDeleteSession({ path: item.path, title: item.title }) }] }); }}><MessageCircle size={14} /><span><strong>{item.title}</strong><small>{new Date(item.modifiedAt).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}</small></span>{(item.runStatus || item.pinned) && <div className="session-item-meta">{item.runStatus && <i className={`session-status-dot ${item.runStatus}`} title={sessionRunStatusLabels[item.runStatus]} aria-label={sessionRunStatusLabels[item.runStatus]!} />}{item.pinned && <Pin size={11} className="session-pin-indicator" />}</div>}</button>)}
+                      ? <div className="session-workspace-empty">{sessionView === "archived" ? "本工作区暂无归档话题" : "暂无话题，点击右上角新建"}</div>
+                      : group.sessions.map((item) => {
+                        const inPane = splitTree ? leafIds(splitTree).includes(item.id) : false;
+                        const rowActive = item.id === activeSessionId || inPane;
+                        const rowSelected = sessionMultiSelect && Boolean(selectedSessionPaths[item.path]);
+                        return <button
+                          className={`${rowActive ? "active" : ""}${rowSelected ? " selected" : ""}`}
+                          type="button"
+                          key={item.path}
+                          title={sessionMultiSelect ? (rowSelected ? `取消选择：${item.title}` : `选择：${item.title}`) : item.title}
+                          data-row-kind="session"
+                          data-row-active={rowActive || undefined}
+                          onClick={() => {
+                            // 多选模式下行点击 = 切换选中（不打开会话）。
+                            if (sessionMultiSelect) { setSelectedSessionPaths((current) => toggleSessionSelection(current, item.path)); return; }
+                            void openSession(item.path, item.workspace, item.id);
+                          }}
+                          onContextMenu={(event) => {
+                            event.preventDefault();
+                            const splitDisabled = !activeSessionId || designMode || (splitTree ? countLeaves(splitTree) >= MAX_SPLIT_PANES : false);
+                            const items = sessionView === "archived"
+                              ? [
+                                { label: "打开（自动恢复）", onClick: () => void openSession(item.path, item.workspace, item.id) },
+                                { label: "取消归档", onClick: () => void setSessionsArchived([item.path], false) },
+                                { label: "删除会话", danger: true, onClick: () => setDeleteSession({ paths: [item.path], title: item.title, mode: "single" }) }
+                              ]
+                              : [
+                                { label: "重命名", onClick: () => { setRenameSession({ path: item.path, title: item.title }); setRenameValue(item.title); } },
+                                { label: item.pinned ? "取消置顶" : "置顶", onClick: () => { void window.piDesktop.send({ type: "session.pin", path: item.path, pinned: !item.pinned }); } },
+                                { label: "归档", onClick: () => void setSessionsArchived([item.path], true) },
+                                { label: inPane ? "已分屏，切换到该格" : "分屏", disabled: !inPane && splitDisabled, onClick: () => addSplitPane(item) },
+                                { label: "删除会话", danger: true, onClick: () => setDeleteSession({ paths: [item.path], title: item.title, mode: "single" }) }
+                              ];
+                            setContextMenu({ x: event.clientX, y: event.clientY, items });
+                          }}
+                        >
+                          {sessionMultiSelect ? (rowSelected ? <CheckCircle2 size={14} /> : <Circle size={14} />) : <MessageCircle size={14} />}
+                          <span><strong>{item.title}</strong><small>{new Date(item.modifiedAt).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}</small></span>
+                          {(item.runStatus || item.pinned || item.archived) && <div className="session-item-meta">{item.runStatus && <i className={`session-status-dot ${item.runStatus}`} title={sessionRunStatusLabels[item.runStatus]} aria-label={sessionRunStatusLabels[item.runStatus]!} />}{item.pinned && <Pin size={11} className="session-pin-indicator" />}{item.archived && <Archive size={11} className="session-archive-indicator" />}</div>}
+                        </button>;
+                      })}
                     </div>
                   </div>
                 </section>
@@ -1791,12 +1899,19 @@ export function App(): ReactNode {
         </div>
         </ExitWrap>
       ); })()}
-      {deletePresence.rendered && (() => { const deleteSession = deletePresence.value; if (!deleteSession) return null; return (
+      {deletePresence.rendered && (() => { const pending = deletePresence.value; if (!pending) return null; const bulk = pending.mode === "bulk"; return (
         <ExitWrap exiting={deletePresence.exiting}>
         <div className="modal-backdrop permission-backdrop" onClick={() => setDeleteSession(null)}>
           <div className="permission-dialog" role="alertdialog" aria-modal="true" aria-label="删除会话" onClick={(event) => event.stopPropagation()}>
-            <header><div className="risk-icon outside-workspace"><Trash2 size={20} /></div><div><h2>删除会话「{deleteSession.title}」？</h2><p>将永久删除该会话及其关联的任务清单，此操作不可恢复。</p></div></header>
-            <footer><button className="secondary-button" type="button" onClick={() => setDeleteSession(null)}>取消</button><button className="danger-button" type="button" onClick={() => { void window.piDesktop.send({ type: "session.delete", path: deleteSession.path }); setDeleteSession(null); }}>删除</button></footer>
+            <header><div className="risk-icon outside-workspace"><Trash2 size={20} /></div><div><h2>{bulk ? `删除 ${pending.paths.length} 个会话？` : `删除会话「${pending.title}」？`}</h2><p>{bulk ? "将永久删除这些会话及其关联的任务清单、计划与快照，此操作不可恢复。" : "将永久删除该会话及其关联的任务清单，此操作不可恢复。"}</p></div></header>
+            <footer><button className="secondary-button" type="button" onClick={() => setDeleteSession(null)}>取消</button><button className="danger-button" type="button" onClick={() => {
+              // 单条删除保持原命令与文案；批量走 deleteMany，只触发一次列表刷新。
+              const only = pending.paths[0];
+              void (bulk || !only ? window.piDesktop.send({ type: "session.deleteMany", paths: pending.paths }) : window.piDesktop.send({ type: "session.delete", path: only }));
+              setDeleteSession(null);
+              setSelectedSessionPaths({});
+              setSessionMultiSelect(false);
+            }}>删除</button></footer>
           </div>
         </div>
         </ExitWrap>

@@ -308,7 +308,14 @@ export interface DesktopSettings {
   customProviderKeyConfigured?: boolean;
   /** 仅由主进程 bootstrap 填充：TypeSafe 密钥是否已保存（明文永不进 settings.json，也永不跨进程）。 */
   jevKeyConfigured?: boolean;
+  /** 置顶的会话文件路径（用户动作，按归一化匹配键比较；见 session-scope.ts）。 */
   pinnedSessionPaths?: string[];
+  /**
+   * 已归档（软归档）的会话文件路径。与 pinnedSessionPaths 同构：只存路径、
+   * 按 sessionPathKey 归一化比较、设置页不渲染、不进 settings.save 的 Pick
+   * （由独立的 session.archive 命令读写）。
+   */
+  archivedSessionPaths?: string[];
 }
 
 /** checkpoint 回滚总开关，语义与 memory/hooks/browser 相同：缺省视为启用。 */
@@ -1354,6 +1361,12 @@ export interface SessionSummary {
   modifiedAt: number;
   messageCount: number;
   pinned?: boolean;
+  /**
+   * 归档（软归档）：会话仍留在磁盘原处，只是默认不出现在话题列表。
+   * 每轮由 refreshSessions 从 settings.archivedSessionPaths 计算，不落进会话文件
+   * ⇒ 不改变 mtime/size，摘要缓存不受影响。
+   */
+  archived?: boolean;
   /** Present only for live sessions; terminal dots clear once viewed. */
   runStatus?: SessionRunStatus;
 }
@@ -1815,7 +1828,12 @@ export type RuntimeCommand =
   | { type: "session.open"; path: string; workspace?: string; activate?: boolean }
   | { type: "session.rename"; path: string; title: string }
   | { type: "session.pin"; path: string; pinned: boolean }
+  /** 软归档 / 取消归档。paths 长度 1 即单条；批量与单条共用一条命令，避免
+   *  批量场景下逐条 refreshSessions（列表重建是磁盘扫描，代价高）。 */
+  | { type: "session.archive"; paths: string[]; archived: boolean }
   | { type: "session.delete"; path: string }
+  /** 批量硬删（归档区清理出口）。单条删除仍走 session.delete（语义不变）。 */
+  | { type: "session.deleteMany"; paths: string[] }
   | { type: "session.prompt"; text: string; attachments?: PromptAttachment[]; sessionId?: string }
   /**
    * 斜杠调用（Skill / 自定义命令，可多个混搭）：invocations 决定要展开什么，

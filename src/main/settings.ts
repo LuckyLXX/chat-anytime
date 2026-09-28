@@ -8,7 +8,7 @@ import {
   THEME_PRESET_IDS
 } from "../shared/protocol.js";
 import { normalizeThinkingLevelMap } from "../shared/thinking-levels.js";
-import { normalizePinnedSessionPaths } from "./session-scope.js";
+import { normalizeArchivedSessionPaths, normalizePinnedSessionPaths } from "./session-scope.js";
 import type {
   AccessMode,
   AgentProfile,
@@ -538,6 +538,9 @@ export function migrateSettings(raw: unknown): { settings: DesktopSettings; lega
   // 写回文件，于是下一次任何设置写入（session.new/agent.select/workspace.open…）
   // 就把它从磁盘一并抹掉（置顶状态重启即丢，且不可恢复）。
   const pinnedSessionPaths = normalizePinnedSessionPaths(source.pinnedSessionPaths);
+  // 归档集合同款纪律（见下条注释）：漏读一个字段 = 下一次任何设置写入把它从
+  // 磁盘一并抹掉，用户看不到任何报错，只发现“归档的会话又回来了”。
+  const archivedSessionPaths = normalizeArchivedSessionPaths(source.archivedSessionPaths);
   const settings: DesktopSettings = {
     version: 2,
     workspace: typeof source.workspace === "string" ? source.workspace : undefined,
@@ -559,7 +562,8 @@ export function migrateSettings(raw: unknown): { settings: DesktopSettings; lega
     checkpoint: normalizeCheckpoint(source.checkpoint),
     ssh: normalizeSsh(source.ssh),
     jev: normalizeJev(source.jev),
-    ...(pinnedSessionPaths ? { pinnedSessionPaths } : {})
+    ...(pinnedSessionPaths ? { pinnedSessionPaths } : {}),
+    ...(archivedSessionPaths ? { archivedSessionPaths } : {})
   };
   const legacyApiKey = typeof source.customProviderApiKey === "string" ? source.customProviderApiKey : undefined;
   return { settings, legacyApiKey };

@@ -464,6 +464,21 @@ describe("desktop settings migration", () => {
     expect(migrateSettings({ pinnedSessionPaths: "junk" }).settings.pinnedSessionPaths).toBeUndefined();
     expect(migrateSettings({ pinnedSessionPaths: ["", 7, null] }).settings.pinnedSessionPaths).toBeUndefined();
   });
+
+  it("keeps archived session paths across a settings round-trip", () => {
+    // 与 pinnedSessionPaths 完全同款回归网：归档状态只存在 settings 里，读入口
+    // 漏一个字段 = 下一次任何设置写入把它从磁盘一并抹掉（归档的会话「自己回来」）。
+    expect(migrateSettings({}).settings.archivedSessionPaths).toBeUndefined();
+    expect(migrateSettings({ archivedSessionPaths: ["C:/pi/sessions/a.jsonl"] }).settings.archivedSessionPaths).toEqual(["C:/pi/sessions/a.jsonl"]);
+    expect(migrateSettings({ archivedSessionPaths: ["C:/pi/sessions/a.jsonl", "c:\\pi\\sessions\\A.jsonl"] }).settings.archivedSessionPaths)
+      .toEqual(["C:/pi/sessions/a.jsonl"]);
+    expect(migrateSettings({ archivedSessionPaths: "junk" }).settings.archivedSessionPaths).toBeUndefined();
+    expect(migrateSettings({ archivedSessionPaths: ["", 7, null] }).settings.archivedSessionPaths).toBeUndefined();
+    // 两个集合互不干扰（归档不能顺手把置顶读丢，反之亦然）
+    const both = migrateSettings({ pinnedSessionPaths: ["C:/pi/sessions/p.jsonl"], archivedSessionPaths: ["C:/pi/sessions/a.jsonl"] }).settings;
+    expect(both.pinnedSessionPaths).toEqual(["C:/pi/sessions/p.jsonl"]);
+    expect(both.archivedSessionPaths).toEqual(["C:/pi/sessions/a.jsonl"]);
+  });
 });
 
 describe("browser settings: 人工下载偏好（默认目录 / 每次询问）", () => {

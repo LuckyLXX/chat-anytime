@@ -257,6 +257,29 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 .sidebar-search input { min-width: 0; width: 100%; height: 100%; padding: 0; border: 0; outline: 0; color: var(--text); background: transparent; font-size: 11px; }
 .sidebar-search input::placeholder { color: var(--text-muted); }
 .sidebar-section-label { padding: 8px 8px 6px; color: var(--text-muted); font-size: 10px; font-weight: 700; }
+/* —— 话题视图切换（全部 / 已归档）与多选操作条 ——
+   归档是软归档：会话仍在磁盘原处，只是默认不进话题列表（见 lib/session-view.ts）。 */
+/* 分区标题行改由视图切换 pill 承担（“话题”分页已表明这是话题列表）：pill 靠左，动作钮靠右；
+   侧栅只有 ~220px，原“最近话题”文字与两个动作钮同排会把标题截断成“已…”。 */
+.session-view-bar { display: flex; align-items: center; gap: 6px; }
+.session-view-bar > .session-view-switch { margin-right: auto; }
+.session-view-switch { display: inline-flex; align-items: center; gap: 2px; padding: 2px; border: 1px solid var(--border); border-radius: var(--ui-control-radius); background: var(--surface); }
+.session-view-switch button { display: inline-flex; align-items: center; gap: 4px; padding: 2px 6px; border: 0; border-radius: calc(var(--ui-control-radius) - 2px); color: var(--text-muted); background: transparent; font-size: 10px; font-weight: 600; cursor: pointer; }
+.session-view-switch button:hover { color: var(--text); background: var(--surface-sidebar-hover); }
+.session-view-switch button.active { color: var(--accent-text); background: var(--accent-soft); }
+.session-view-switch button em { min-width: 15px; padding: 0 4px; border-radius: 999px; color: inherit; background: var(--surface-sidebar-badge); font-size: 9px; font-style: normal; text-align: center; }
+.session-view-action { display: grid; place-items: center; width: 22px; height: 22px; flex: 0 0 auto; padding: 0; border: 1px solid transparent; border-radius: var(--ui-control-radius); color: var(--text-muted); background: transparent; cursor: pointer; }
+.session-view-action:hover { color: var(--text); border-color: var(--border); background: var(--surface-sidebar-hover); }
+.session-view-action.danger:hover { color: var(--danger-text); border-color: var(--danger-border); background: var(--danger-soft); }
+.session-selection-bar { display: flex; align-items: center; gap: 6px; min-height: 30px; padding: 8px 8px 6px; }
+.session-selection-count { margin-right: auto; color: var(--text); font-size: 11px; font-weight: 650; white-space: nowrap; }
+.session-selection-actions { display: inline-flex; align-items: center; gap: 4px; }
+.session-selection-action { display: grid; place-items: center; width: 22px; height: 22px; padding: 0; border: 1px solid var(--border); border-radius: var(--ui-control-radius); color: var(--text-muted); background: var(--surface); cursor: pointer; }
+.session-selection-action:hover:not(:disabled) { color: var(--text); background: var(--surface-sidebar-hover); }
+.session-selection-action:disabled { opacity: .45; cursor: default; }
+.session-selection-action.danger:hover:not(:disabled) { color: var(--danger-text); border-color: var(--danger-border); background: var(--danger-soft); }
+.session-list button.selected { color: var(--text-sidebar-active); background: var(--accent-soft); }
+.session-archive-indicator { color: var(--text-muted); }
 .workspace-button { display: none; }
 .workspace-button:hover { border-color: var(--accent); }
 .workspace-button span { display: grid; gap: 2px; min-width: 0; }

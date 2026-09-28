@@ -140,7 +140,7 @@ function mergeSessionsPreservingIdentity(previous: RuntimeSnapshot["sessions"], 
     const other = incoming[index];
     return other !== undefined && item.id === other.id && item.path === other.path && item.workspace === other.workspace
       && item.title === other.title && item.modifiedAt === other.modifiedAt && item.messageCount === other.messageCount
-      && item.pinned === other.pinned && item.runStatus === other.runStatus;
+      && item.pinned === other.pinned && item.archived === other.archived && item.runStatus === other.runStatus;
   });
   return equal ? previous : incoming;
 }

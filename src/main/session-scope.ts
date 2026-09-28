@@ -20,10 +20,13 @@ export function sessionPathKey(path: string): string {
 }
 
 /**
- * 规范化置顶路径数组：剔除空项/非字符串、按匹配键去重（保留首次出现顺序）。
+ * 规范化会话路径数组：剔除空项/非字符串、按匹配键去重（保留首次出现顺序）。
  * 读回路径与写入路径共用，保证 settings.json 里不堆积同义重复项。
+ *
+ * 置顶与归档两个集合共用同一套纪律（“少一个入口就静默丢配置”是 settings 的
+ * 历史故障模式），所以归一化只写一份。
  */
-export function normalizePinnedSessionPaths(value: unknown): string[] | undefined {
+function normalizeSessionPathList(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) return undefined;
   const seen = new Set<string>();
   const kept: string[] = [];
@@ -35,6 +38,15 @@ export function normalizePinnedSessionPaths(value: unknown): string[] | undefine
     kept.push(entry);
   }
   return kept.length > 0 ? kept : undefined;
+}
+
+export function normalizePinnedSessionPaths(value: unknown): string[] | undefined {
+  return normalizeSessionPathList(value);
+}
+
+/** 归档集合的规范化：与置顶同一套口径（见 {@link normalizeSessionPathList}）。 */
+export function normalizeArchivedSessionPaths(value: unknown): string[] | undefined {
+  return normalizeSessionPathList(value);
 }
 
 /**
@@ -52,11 +64,65 @@ export function togglePinnedSessionPath(pinnedPaths: readonly string[] | undefin
   return normalizePinnedSessionPaths(list.filter((item) => sessionPathKey(item) !== key));
 }
 
-/** 该会话是否在置顶集合里（大小写/分隔符无关比较，见 {@link sessionPathKey}）。 */
-export function isSessionPinned(pinnedPaths: readonly string[] | undefined, path: string): boolean {
-  if (!pinnedPaths || pinnedPaths.length === 0) return false;
+/** 路径集合的成员判定（大小写/分隔符无关，见 {@link sessionPathKey}）。 */
+function hasSessionPath(paths: readonly string[] | undefined, path: string): boolean {
+  if (!paths || paths.length === 0) return false;
   const key = sessionPathKey(path);
-  return pinnedPaths.some((item) => sessionPathKey(item) === key);
+  return paths.some((item) => sessionPathKey(item) === key);
+}
+
+/** 该会话是否在置顶集合里。 */
+export function isSessionPinned(pinnedPaths: readonly string[] | undefined, path: string): boolean {
+  return hasSessionPath(pinnedPaths, path);
+}
+
+/** 该会话是否在归档集合里（软归档：文件仍在原处，只是默认不进话题列表）。 */
+export function isSessionArchived(archivedPaths: readonly string[] | undefined, path: string): boolean {
+  return hasSessionPath(archivedPaths, path);
+}
+
+/**
+ * 归档 / 取消归档的集合更新（不可变，批量与单条同一口径）。
+ *
+ * 与 {@link togglePinnedSessionPath} 同源纪律：
+ * ① 判据用匹配键，取消时能删掉「写法略有差异」的那条；
+ * ② 重复归档同一会话不会堆积，且保留**首次落盘的那份写法**；
+ * ③ 与本次无关的项保持原顺序。
+ * 与置顶不同的是入参是**多条路径**：批量操作必须一次落盘，不能逐条发命令
+ * （每轮 refreshSessions 都是一次磁盘扫描）。
+ */
+export function setArchivedSessionPaths(existing: readonly string[] | undefined, paths: readonly string[], archived: boolean): string[] | undefined {
+  const list = existing ?? [];
+  const incoming = paths.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+  if (incoming.length === 0) return normalizeArchivedSessionPaths(list);
+  if (archived) {
+    const present = new Set(list.map((item) => sessionPathKey(item)));
+    const added: string[] = [];
+    for (const item of incoming) {
+      const key = sessionPathKey(item);
+      if (present.has(key)) continue;
+      present.add(key);
+      added.push(item);
+    }
+    return normalizeArchivedSessionPaths([...list, ...added]);
+  }
+  const removedKeys = new Set(incoming.map((item) => sessionPathKey(item)));
+  return normalizeArchivedSessionPaths(list.filter((item) => !removedKeys.has(sessionPathKey(item))));
+}
+
+/**
+ * 从路径集合里移除若干条（删除会话后清死路径用）。
+ *
+ * 归档集合不清理就只剩「历史上存在过的路径」——虽然 refreshSessions 只对真实
+ * 存在的会话判定归档、残留无害，但它会让 settings.json 无界增长；删除路径是
+ * 我们唯一能精确知道「这条会话没了」的时刻，顺手清掉。
+ */
+export function pruneSessionPaths(existing: readonly string[] | undefined, removed: readonly string[]): string[] | undefined {
+  const list = existing ?? [];
+  if (list.length === 0) return normalizeSessionPathList(list);
+  const removedKeys = new Set(removed.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => sessionPathKey(item)));
+  if (removedKeys.size === 0) return normalizeSessionPathList(list);
+  return normalizeSessionPathList(list.filter((item) => !removedKeys.has(sessionPathKey(item))));
 }
 
 export function agentWorkspaceSessionDir(agentRoot: string, agentId: string, workspace: string): string {
@@ -103,8 +169,8 @@ export function sameSessionDir(expectedDir: string | undefined, actualDir: strin
  * 存在，点击必然失败。它也不能靠「实例 id」之类的标记清理（重启后无从比对），
  * 唯一可靠的判据是：空话题（messageCount 0）且既没有活记录、文件也不存在。
  *
- * 置顶行保留：置顶是用户显式动作，宁留一行可点失败的置顶，也不静默删除用户
- * 标记过的条目（当前会话没有「取消置顶」以外的清理入口）。
+ * 置顶行与归档行保留：两者都是用户显式动作，宁留一行可点失败的条目，也不静默
+ * 删除用户标记过的内容（归档行另有「取消归档 / 删除」两条清理入口，见侧栏右键菜单）。
  */
 export function pruneVanishedSessions(
   list: SessionSummary[],
@@ -113,7 +179,7 @@ export function pruneVanishedSessions(
 ): SessionSummary[] {
   const live = new Set(liveFiles.filter((path): path is string => Boolean(path)).map((path) => resolve(path).toLowerCase()));
   const kept = list.filter((item) => {
-    if (item.messageCount > 0 || item.pinned) return true;
+    if (item.messageCount > 0 || item.pinned || item.archived) return true;
     if (live.has(resolve(item.path).toLowerCase())) return true;
     return fileExists(item.path);
   });
@@ -200,9 +266,11 @@ export function backfillUnpersistedSessions(
       title: seed.title ?? "新会话",
       modifiedAt: seed.activatedAt,
       messageCount: 0,
-      // 回填行来自 live 记录，本身不知道置顶状态；但重建前列表里的同名条目知道
-      //（`prior`），必须带过来 —— 否则一次全量刷新就会把置顶标记从该行抹掉。
-      ...(prior?.pinned ? { pinned: true } : {})
+      // 回填行来自 live 记录，本身不知道置顶/归档状态；但重建前列表里的同名条目
+      // 知道（`prior`），必须带过来 —— 否则一次全量刷新就会把标记从该行抹掉
+      //（归档一个刚建的空话题后，防抖刷新把它又放回列表就是这条）。
+      ...(prior?.pinned ? { pinned: true } : {}),
+      ...(prior?.archived ? { archived: true } : {})
     };
     const base = prior ?? synthetic;
     next = mergeSessionSummary(next, seed.runStatus ? { ...base, runStatus: seed.runStatus } : base);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentWorkspaceSessionDir, backfillUnpersistedSessions, isSessionPinned, mergeSessionSummary, normalizePinnedSessionPaths, pruneVanishedSessions, resolveNewSessionDefaults, sameSessionDir, sessionFileMatchesId, sessionListReadyFor, sessionPathKey, sortSessionSummaries, togglePinnedSessionPath, workspaceHash, type LiveSessionSeed } from "./session-scope.js";
+import { agentWorkspaceSessionDir, backfillUnpersistedSessions, isSessionArchived, isSessionPinned, mergeSessionSummary, normalizeArchivedSessionPaths, normalizePinnedSessionPaths, pruneSessionPaths, pruneVanishedSessions, resolveNewSessionDefaults, sameSessionDir, sessionFileMatchesId, sessionListReadyFor, sessionPathKey, setArchivedSessionPaths, sortSessionSummaries, togglePinnedSessionPath, workspaceHash, type LiveSessionSeed } from "./session-scope.js";
 
 describe("Agent workspace session scope", () => {
   it("keeps agents and workspaces in separate deterministic directories", () => {
@@ -104,6 +104,54 @@ describe("pinned session paths", () => {
   });
 });
 
+describe("archived session paths", () => {
+  const a = "C:/pi/sessions/a.jsonl";
+  const b = "C:/pi/sessions/b.jsonl";
+
+  it("matches archived paths independently of separators and case", () => {
+    expect(isSessionArchived(["C:/pi/sessions/A.jsonl"], "c:\\pi\\sessions\\a.jsonl")).toBe(true);
+    expect(isSessionArchived(["C:/pi/sessions/A.jsonl"], b)).toBe(false);
+    expect(isSessionArchived(undefined, a)).toBe(false);
+    expect(isSessionArchived([], a)).toBe(false);
+  });
+
+  it("archives a batch at once and never stores synonymous duplicates", () => {
+    expect(setArchivedSessionPaths(undefined, [a], true)).toEqual([a]);
+    // 批量：一次落盘两条（不能逐条发命令——每轮 refreshSessions 都是一次磁盘扫描）
+    expect(setArchivedSessionPaths(undefined, [a, b], true)).toEqual([a, b]);
+    // 重复归档（写法不同 / 组内自带重复）不堆同义项，且保留先落盘的那份写法
+    expect(setArchivedSessionPaths([a], ["c:\\pi\\sessions\\a.jsonl"], true)).toEqual([a]);
+    expect(setArchivedSessionPaths([a], [a, "C:/pi/sessions/A.jsonl", b], true)).toEqual([a, b]);
+  });
+
+  it("unarchives a batch and tolerates entries that are not present", () => {
+    expect(setArchivedSessionPaths([a, b], [a], false)).toEqual([b]);
+    // 取消归档时字面量与落盘写法不同也必须删掉（与置顶同一个历史 bug 面）
+    expect(setArchivedSessionPaths([a, b], ["c:\\pi\\sessions\\a.jsonl"], false)).toEqual([b]);
+    expect(setArchivedSessionPaths([a], [b], false)).toEqual([a]);
+    expect(setArchivedSessionPaths([a], [], false)).toEqual([a]);
+    // 全清后集合变 undefined（settings.json 里不留空数组）
+    expect(setArchivedSessionPaths([a], [a], false)).toBeUndefined();
+  });
+
+  it("normalizes stored values and drops empty or malformed entries", () => {
+    expect(normalizeArchivedSessionPaths(undefined)).toBeUndefined();
+    expect(normalizeArchivedSessionPaths("C:/pi/a.jsonl")).toBeUndefined();
+    expect(normalizeArchivedSessionPaths([])).toBeUndefined();
+    expect(normalizeArchivedSessionPaths(["", "   ", 42, null])).toBeUndefined();
+    expect(normalizeArchivedSessionPaths([a, "c:\\pi\\sessions\\A.jsonl", " ", b])).toEqual([a, b]);
+  });
+
+  it("prunes deleted session paths by match key", () => {
+    expect(pruneSessionPaths([a, b], ["c:\\pi\\sessions\\a.jsonl"])).toEqual([b]);
+    expect(pruneSessionPaths([a, b], [])).toEqual([a, b]);
+    expect(pruneSessionPaths([a], [a])).toBeUndefined();
+    expect(pruneSessionPaths(undefined, [a])).toBeUndefined();
+    // 删除不存在的项：集合原样（不是引用级，但内容一致）
+    expect(pruneSessionPaths([a], [b])).toEqual([a]);
+  });
+});
+
 describe("sortSessionSummaries", () => {
   it("keeps pinned rows above newer unpinned ones", () => {
     const pinned = { id: "p", path: "C:/w/p.jsonl", workspace: "C:/w", title: "置顶", modifiedAt: 10, messageCount: 3, pinned: true };
@@ -145,11 +193,14 @@ describe("pruneVanishedSessions", () => {
     expect(pruneVanishedSessions(list, [], (path) => path === vanished.path)).toBe(list);
   });
 
-  it("never prunes a non-empty topic or a pinned one", () => {
+  it("never prunes a non-empty topic, a pinned one or an archived one", () => {
     const renamed = { ...vanished, messageCount: 2 };
     const pinned = { ...vanished, id: "pinned", pinned: true };
+    // 归档行与置顶行同理：归档是用户显式动作，不能因为「空话题 + 文件不存在」被静默清掉。
+    const archived = { ...vanished, id: "archived", archived: true };
     expect(pruneVanishedSessions([renamed], [], () => false).map((item) => item.id)).toEqual(["ghost"]);
     expect(pruneVanishedSessions([pinned], [], () => false).map((item) => item.id)).toEqual(["pinned"]);
+    expect(pruneVanishedSessions([archived], [], () => false).map((item) => item.id)).toEqual(["archived"]);
   });
 
   it("returns the list reference untouched when nothing is pruned", () => {
@@ -197,6 +248,15 @@ describe("backfillUnpersistedSessions", () => {
     const seed: LiveSessionSeed = { sessionId: "fresh", path: "C:/pi/sessions/fresh.jsonl", workspace: "C:/work", agentId: "coder", activatedAt: 400, runStatus: "running" };
     const backfilled = backfillUnpersistedSessions([onDisk], [prior], [seed], "coder");
     expect(backfilled[0]).toMatchObject({ id: "fresh", pinned: true, runStatus: "running" });
+  });
+
+  it("keeps the archived flag when backfilling a live row from the pre-refresh entry", () => {
+    // 同置顶的根因：归档一个刚建的空话题（文件尚未落盘）后，任何一次防抖刷新
+    // 都会经这里重建那一行——不回填 archived 就等于「归档自己弹回来」。
+    const prior = { id: "fresh", path: "C:/pi/sessions/fresh.jsonl", workspace: "C:/work", title: "新会话", modifiedAt: 300, messageCount: 0, archived: true };
+    const seed: LiveSessionSeed = { sessionId: "fresh", path: "C:/pi/sessions/fresh.jsonl", workspace: "C:/work", agentId: "coder", activatedAt: 400 };
+    const backfilled = backfillUnpersistedSessions([onDisk], [prior], [seed], "coder");
+    expect(backfilled[0]).toMatchObject({ id: "fresh", archived: true });
   });
 
   it("deduplicates against the disk list by path (case-insensitive)", () => {

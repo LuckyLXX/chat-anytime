@@ -117,7 +117,7 @@ import { createAutomationScheduler, type AutomationScheduler } from "./automatio
 import { buildAutomationTools, type AutomationCreateInput, type AutomationToolContext } from "./automation-tools.js";
 import { resolveVisionModel } from "./vision.js";
 import { buildResourceCatalog } from "./resource-catalog.js";
-import { agentWorkspaceSessionDir, backfillUnpersistedSessions, isSessionPinned, mergeSessionSummary, pruneVanishedSessions, sameSessionDir, sessionFileMatchesId, sessionListReadyFor, sortSessionSummaries, togglePinnedSessionPath } from "./session-scope.js";
+import { agentWorkspaceSessionDir, backfillUnpersistedSessions, isSessionArchived, isSessionPinned, mergeSessionSummary, pruneVanishedSessions, sameSessionDir, sessionFileMatchesId, sessionListReadyFor, setArchivedSessionPaths, sortSessionSummaries, togglePinnedSessionPath } from "./session-scope.js";
 import { listSessionSummaries, loadSessionIndex, readSessionHeaderLine, saveSessionIndex, summarizeLiveSession, type CachedSessionSummary } from "./session-summary-cache.js";
 import { planSessionOpen } from "./session-open-plan.js";
 import { isDesktopConfiguredProvider } from "./model-catalog.js";
@@ -2816,6 +2816,7 @@ async function performSessionsRefresh(): Promise<void> {
   const items = await listSessionSummaries(directories, { liveSummaries, cache: sessionSummaryCacheFor() });
   scheduleSessionIndexSave();
   const pinnedPaths = settings?.pinnedSessionPaths ?? [];
+  const archivedPaths = settings?.archivedSessionPaths ?? [];
   currentSessions = sortSessionSummaries(items.map((item) => {
     // Live sessions carry their execution state (sidebar dot) across refreshes.
     const runStatus = liveSessions.get(item.id)?.runStatus;
@@ -2827,6 +2828,9 @@ async function performSessionsRefresh(): Promise<void> {
       modifiedAt: item.modified.getTime(),
       messageCount: item.messageCount,
       pinned: isSessionPinned(pinnedPaths, item.path) || undefined,
+      // 归档与置顶同源：每轮从 settings 的路径集合重算，不动会话文件（不触发
+      // 摘要缓存失效）。
+      archived: isSessionArchived(archivedPaths, item.path) || undefined,
       ...(runStatus ? { runStatus } : {})
     };
   }));
@@ -3666,6 +3670,47 @@ async function readImageFile(root: string, imagePath: string): Promise<ImageCont
   return { type: "image", data: data.toString("base64"), mimeType: sniffed };
 }
 
+/**
+ * 会话删除的公共体（session.delete / session.deleteMany 共用）。
+ *
+ * 路径校验留在调用方（两条命令的 containment 纪律一致），这里只做落地：销毁
+ * live 记录 + 硬删 JSONL + 五个 sidecar，并回答「删掉的是不是当前活动会话」
+ * （调用方据此决定要不要补空白会话）。
+ */
+async function deleteSessionByPath(deleteTarget: string): Promise<{ wasActive: boolean }> {
+  // 会话 id 与 todos 文件名同源（JSONL 文件名），以列表中的 id 为准。
+  const listItem = currentSessions.find((candidate) => resolve(candidate.path).toLowerCase() === deleteTarget.toLowerCase());
+  const sessionId = listItem?.id ?? deleteTarget.slice(deleteTarget.lastIndexOf(sep) + 1).replace(/\.jsonl$/iu, "");
+  // 若目标会话仍在运行（live record），一并销毁——与移除整个工作区的语义一致。
+  const live = [...liveSessions.values()].find((record) => {
+    const liveFile = record.session.sessionManager.getSessionFile();
+    return Boolean(liveFile) && resolve(liveFile!).toLowerCase() === deleteTarget.toLowerCase();
+  });
+  const wasActive = live === activeRuntime;
+  if (live) disposeRecord(live);
+  const deleteRoot = agentSessionRoot();
+  try { await unlink(deleteTarget); } catch { /* 会话文件可能已不存在 */ }
+  if (deleteRoot) {
+    try { await unlink(join(deleteRoot, "todos", `${sessionId}.json`)); } catch { /* 任务文件可能不存在 */ }
+    try { await unlink(join(deleteRoot, "plans", `${sessionId}.json`)); } catch { /* 计划模式状态文件可能不存在 */ }
+    try { await unlink(join(deleteRoot, "design-mode", `${sessionId}.json`)); } catch { /* 设计模式状态文件可能不存在 */ }
+    try { await unlink(join(deleteRoot, "computer-mode", `${sessionId}.json`)); } catch { /* 电脑控制模式状态文件可能不存在 */ }
+    try { await unlink(join(deleteRoot, "checkpoints", `${sessionId}.jsonl`)); } catch { /* 快照文件可能不存在 */ }
+  }
+  return { wasActive };
+}
+
+/** 删除收尾：删掉当前活动会话时补空白会话，然后只刷新一次列表 + 推一次状态。 */
+async function finishSessionDeletion(wasActive: boolean): Promise<void> {
+  // 删除当前在用的会话后立即补一个空白会话，保持「当前话题」可用。
+  if (wasActive && workspace) {
+    const sessionDir = workspaceSessionDir();
+    if (sessionDir) await createSession(SessionManager.create(workspace, sessionDir));
+  }
+  await refreshSessions();
+  emitState();
+}
+
 async function handleCommand(command: RuntimeCommand): Promise<void> {
   switch (command.type) {
     case "initialize":
@@ -3801,33 +3846,45 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       emitState();
       break;
     }
+    case "session.archive": {
+      // 归档是「用户动作」的落盘（同 pin）：只接受当前 Agent 会话根下、以
+      // .jsonl 结尾的路径，不让任意路径进 settings。
+      const archiveRoot = agentSessionRoot();
+      const accepted = archiveRoot
+        ? command.paths.map((path) => resolve(path)).filter((target) => pathIsWithin(archiveRoot, target) && target.toLowerCase().endsWith(".jsonl"))
+        : [];
+      if (accepted.length === 0) throw new Error("没有可归档的会话");
+      if (settings) {
+        settings = { ...settings, archivedSessionPaths: setArchivedSessionPaths(settings.archivedSessionPaths, accepted, command.archived) };
+      }
+      await refreshSessions();
+      emitState();
+      break;
+    }
     case "session.delete": {
       const deleteRoot = agentSessionRoot();
       const deleteTarget = resolve(command.path);
       if (!deleteRoot || !pathIsWithin(deleteRoot, deleteTarget) || !deleteTarget.toLowerCase().endsWith(".jsonl")) throw new Error("只能删除当前 Agent 的会话");
-      // 会话 id 与 todos 文件名同源（JSONL 文件名），以列表中的 id 为准。
-      const listItem = currentSessions.find((candidate) => resolve(candidate.path).toLowerCase() === deleteTarget.toLowerCase());
-      const sessionId = listItem?.id ?? deleteTarget.slice(deleteTarget.lastIndexOf(sep) + 1).replace(/\.jsonl$/iu, "");
-      // 若目标会话仍在运行（live record），一并销毁——与移除整个工作区的语义一致。
-      const live = [...liveSessions.values()].find((record) => {
-        const liveFile = record.session.sessionManager.getSessionFile();
-        return Boolean(liveFile) && resolve(liveFile!).toLowerCase() === deleteTarget.toLowerCase();
-      });
-      const wasActive = live === activeRuntime;
-      if (live) disposeRecord(live);
-      try { await unlink(deleteTarget); } catch { /* 会话文件可能已不存在 */ }
-      try { await unlink(join(deleteRoot, "todos", `${sessionId}.json`)); } catch { /* 任务文件可能不存在 */ }
-      try { await unlink(join(deleteRoot, "plans", `${sessionId}.json`)); } catch { /* 计划模式状态文件可能不存在 */ }
-      try { await unlink(join(deleteRoot, "design-mode", `${sessionId}.json`)); } catch { /* 设计模式状态文件可能不存在 */ }
-      try { await unlink(join(deleteRoot, "computer-mode", `${sessionId}.json`)); } catch { /* 电脑控制模式状态文件可能不存在 */ }
-      try { await unlink(join(deleteRoot, "checkpoints", `${sessionId}.jsonl`)); } catch { /* 快照文件可能不存在 */ }
-      // 删除当前在用的会话后立即补一个空白会话，保持「当前话题」可用。
-      if (wasActive && workspace) {
-        const sessionDir = workspaceSessionDir();
-        if (sessionDir) await createSession(SessionManager.create(workspace, sessionDir));
+      const { wasActive } = await deleteSessionByPath(deleteTarget);
+      await finishSessionDeletion(wasActive);
+      break;
+    }
+    case "session.deleteMany": {
+      // 批量删除（归档区清理出口）：一条命令删多条，期间**不做**列表重建——
+      // 逐条 session.delete 会排出 N 轮磁盘扫描（refreshSessions 是单飞+合并，
+      // 但每轮都是实打实的目录扫描）。非法路径静默跳过（不阻断整批）。
+      const deleteRoot = agentSessionRoot();
+      let anyActiveDeleted = false;
+      let deleted = 0;
+      for (const path of command.paths) {
+        const deleteTarget = resolve(path);
+        if (!deleteRoot || !pathIsWithin(deleteRoot, deleteTarget) || !deleteTarget.toLowerCase().endsWith(".jsonl")) continue;
+        const { wasActive } = await deleteSessionByPath(deleteTarget);
+        anyActiveDeleted = anyActiveDeleted || wasActive;
+        deleted += 1;
       }
-      await refreshSessions();
-      emitState();
+      if (deleted === 0) throw new Error("没有可删除的会话");
+      await finishSessionDeletion(anyActiveDeleted);
       break;
     }
     case "workspace.remove": {
