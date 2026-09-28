@@ -78,6 +78,7 @@ export function buildGalleryTools(ctx: GalleryToolContext): ToolDefinition[] {
         "把一个**已经做完、能运行、值得保留**的成果登记到作品墙（用户能一键运行、一键继续开发）。",
         "kind=file 时 path 指入口文件（如导出的单文件 html）；kind=server 时 path 指项目目录，并给出启动命令 command 或服务地址 url。",
         `kind=panel 时 path 指一个网页文件（.html/.htm/.svg）：它会被开成**独立小窗口**，主界面关掉后仍能展示（用它可以做常驻小工具/监控面板）。面板页可用相对自己 fetch("./__pidesktop_state.json") 读本机会话执行状态（只读），用 panel {width,height,alwaysOnTop} 声明窗口。`,
+        "kind 怎么选（三种形态的运行环境与跨域能力差异——尤其要直连外部模型 API 时）先读 skill gallery-publish。",
         "入口必须位于当前工作区内。同「工作区+类型+入口」重复发布是更新而非新增（改了标题/命令再发一次即可）。",
         "只在成果确实完成时调用——临时脚本、中间产物不要发布，否则作品墙会被噪声塞满。"
       ].join(""),
