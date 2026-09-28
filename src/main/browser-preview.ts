@@ -11,6 +11,9 @@ import { normalizeBrowserUrl } from "./browser-preview-url.js";
 
 const DEFAULT_TAB_ID = "default";
 
+/** 未知标签矩形暂存的条数上限（见 `BrowserPreviewController.pendingBounds`）。 */
+const PENDING_BOUNDS_LIMIT = 64;
+
 /** 自动化操作返回前等待「本次触发的下载」落盘的上限。 */
 export const DOWNLOAD_SETTLE_TIMEOUT_MS = 3_000;
 /** 上述等待的轮询间隔。 */
@@ -200,6 +203,14 @@ export class BrowserPreviewController {
   private readonly pendingManual = new Map<string, PendingManualDownload>();
   /** 人工下载 id 序号（只用于拼 id，不参与任何业务判定）。 */
   private manualDownloadSeq = 0;
+  /**
+   * 渲染端已量出矩形、主进程还没有这条标签时的暂存（见 handle 的 `bounds` 分支）。
+   * 渲染端首帧的顺序是「bounds → visible」，丢掉先到的 bounds 会让新标签永远空白；
+   * 但反过来为它建视图，又会让「关标签 → 渲染端收尾的 visible:false」复活出一个
+   * 没人管理的空 webContents（它还会挤占休眠名额、成为 AI 的绑定目标）。
+   * 因此只存矩形，等渲染端**声明**该标签可见时再连视图一起建出来。
+   */
+  private readonly pendingBounds = new Map<string, Rectangle>();
 
   constructor(
     private readonly window: BrowserWindow,
@@ -314,20 +325,39 @@ export class BrowserPreviewController {
     /** 无法写进标签页状态（标签页还没建）时随返回值一起给渲染端。 */
     let extra: Partial<BrowserPreviewState> | undefined;
     switch (command.type) {
-      case "bounds":
-        this.getOrCreate(tabId).bounds = normalizedBounds(command.bounds);
+      case "bounds": {
+        const existing = this.tabs.get(tabId);
+        if (!existing) {
+          // 未知标签只记矩形、不建视图：视图只能由「渲染端声明它在看这个标签」创建
+          //（见下一分支），否则关标签后的收尾命令会让它复活成一个空 webContents。
+          this.rememberPendingBounds(tabId, command.bounds);
+          break;
+        }
+        existing.bounds = normalizedBounds(command.bounds);
         this.layoutTab(tabId);
         // 面板尺寸变化会改变页面 CSS 视口（zoom 固定时），延迟重测内容宽。
         this.scheduleContentMeasure(tabId, 300);
         break;
-      case "visible":
-        this.getOrCreate(tabId).visible = command.visible;
+      }
+      case "visible": {
+        // 渲染端撤销声明（面板收起、切到别的标签、组件卸载）时只改已有记录：为一个
+        // 主进程不认识的 id 建视图，等于让「关标签 → 渲染端卸载发 visible:false」
+        // 在窗口上留下一个没人管的 webContents。
+        if (!command.visible && !this.tabs.has(tabId)) break;
+        const wrapper = this.getOrCreate(tabId);
+        const pending = this.pendingBounds.get(tabId);
+        if (pending) {
+          this.pendingBounds.delete(tabId);
+          wrapper.bounds = pending;
+        }
+        wrapper.visible = command.visible;
         if (command.visible) this.lastActivatedTabId = tabId;
         // 用户切回这个标签 = 重新激活：休眠的在这里复活（唯一的「该标签要显示」信号，
         // 因为预览面板只给当前激活标签挂载 BrowserPreview）。
         if (command.visible) this.reviveTabIfHibernated(tabId, { navigate: true });
         this.layoutTab(tabId);
         break;
+      }
       case "navigate":
         await this.navigateTab(tabId, command.url);
         break;
@@ -419,10 +449,41 @@ export class BrowserPreviewController {
     return { ...this.snapshot(tabId), ...extra };
   }
 
+  /**
+   * 渲染端整体重载（dev 热更新的整页刷新、用户 Ctrl+R、渲染进程崩溃重建）后调用。
+   *
+   * 为什么必需：视图的上屏状态只有渲染端单方面推进（`visible:false` 是唯一的撤销
+   * 通道），而整页重载时 React 不会跑任何 cleanup，那条 `visible=true` 会永久留着；
+   * 新渲染端又**不认识**这些标签（bootstrap 不带标签清单，协议里也没有 list/hide-all），
+   * 于是原生视图永远浮在窗口最上层、谁也关不掉，只能重启应用（2026-09-28 用户实测）。
+   *
+   * 这里统一把视图从窗口上摘下来，**保留标签记录与地址**：AI 的会话绑定、画廊的
+   * 一次性导航、`lastActivatedTabId` 都还在，渲染端重新声明可见（含 AI 触发的
+   * automation-started）时会走同一条 `visible:true` 通路点亮。
+   */
+  hideAllViews(): void {
+    for (const wrapper of this.tabs.values()) {
+      wrapper.visible = false;
+      wrapper.view?.setVisible(false);
+    }
+  }
+
   dispose(): void {
     for (const tabId of Array.from(this.tabs.keys())) {
       this.disposeTab(tabId);
     }
+  }
+
+  /**
+   * 记下一条未知标签的矩形（见 `pendingBounds` 的注释）。上限是防脏 id 把 map 撑大；
+   * 正常渲染端的标签数是个位数，撑到上限只会退化成「丢掉最旧的暂存值」。
+   */
+  private rememberPendingBounds(tabId: string, bounds: BrowserPreviewBounds): void {
+    if (this.pendingBounds.size >= PENDING_BOUNDS_LIMIT && !this.pendingBounds.has(tabId)) {
+      const oldest = this.pendingBounds.keys().next();
+      if (!oldest.done) this.pendingBounds.delete(oldest.value);
+    }
+    this.pendingBounds.set(tabId, normalizedBounds(bounds));
   }
 
   private getOrCreate(tabId: string): BrowserTabView {
@@ -433,7 +494,11 @@ export class BrowserPreviewController {
   }
 
   private createTab(tabId: string): BrowserTabView {
-    const wrapper: BrowserTabView = { visible: true, state: emptyBrowserState(), lastActiveAt: Date.now() };
+    // 默认**不可见**：视图的上屏判据是 `visible && bounds`，而 bounds 是渲染端首帧
+    // 就会送来的量测值——旧默认 true 让「主进程自己建的标签」只靠一条 bounds 就能
+    // 浮到窗口最上层（2026-09-28 原生视图残留事故的放大器）。渲染端挂载 BrowserPreview
+    // 后必然发一条可见声明，正常路径不会因此少显示任何东西。
+    const wrapper: BrowserTabView = { visible: false, state: emptyBrowserState(), lastActiveAt: Date.now() };
     this.tabs.set(tabId, wrapper);
     this.createViewFor(tabId, wrapper);
     return wrapper;
@@ -932,6 +997,10 @@ export class BrowserPreviewController {
     if (!view.webContents.isDestroyed()) view.webContents.close();
     wrapper.view = undefined;
     wrapper.hibernated = true;
+    // 休眠 = 不再有人声明它可见：不复位这个标志，复活时 `createViewFor` 末尾的
+    // layoutTab 会把视图直接点亮，而渲染端根本没说过「我在看它」（同族缺陷，
+    // 见 createTab 的注释）。
+    wrapper.visible = false;
     wrapper.seed = undefined;
     // 恢复时渲染端会重新下发 bounds（休眠期间布局可能已变）。
     wrapper.bounds = undefined;

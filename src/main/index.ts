@@ -652,6 +652,15 @@ function createWindow(): void {
     if (mainWindow === nextWindow) mainWindow = undefined;
   });
   nextWindow.webContents.setWindowOpenHandler(({ url }) => { void import("electron").then(({ shell }) => shell.openExternal(url)); return { action: "deny" }; });
+  // 主渲染端整体重载（dev 热更新的整页刷新 / Ctrl+R）⇒ 摘掉所有原生预览视图。
+  // 旧渲染端不会跑任何 cleanup，它当初声明的 visible 会永久留着，而新渲染端又不
+  // 认识这些标签（bootstrap 不带标签清单），不在这里兜底就会留下浮在主界面之上、
+  // 谁都关不掉的视图（2026-09-28 用户实测：只能重启应用）。
+  nextWindow.webContents.on("did-start-navigation", (details) => {
+    if (details.isMainFrame && !details.isSameDocument) previewController.hideAllViews();
+  });
+  // 渲染进程崩溃同理：重建后的渲染端同样不会为旧标签发 visible:false。
+  nextWindow.webContents.on("render-process-gone", () => previewController.hideAllViews());
   if (rendererUrl) void nextWindow.loadURL(rendererUrl); else void nextWindow.loadFile(join(__dirname, "../renderer/index.html"));
 }
 
