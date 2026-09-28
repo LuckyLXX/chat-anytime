@@ -178,8 +178,17 @@ export function hookMatchText(toolName: string, toolInput: unknown): string {
   }
 }
 
-function toolMatcherMatches(matcher: string | undefined, toolName: string): boolean {
+/**
+ * 工具名 matcher 语义（2026-09-28 行为变更，借鉴 ZCode）：
+ * 只含字母/数字/下划线/竖线的 matcher（如 `bash|write|edit`）按**精确工具名集合**匹配——
+ * 用户心智就是集合，旧版当正则会跟 `edit_file` 之类意外命中；
+ * 含其它字符的仍按正则（`^ed.*`、`\\.ts$` 这类既有配置行为不变）。
+ */
+const EXACT_MATCHER_PATTERN = /^[A-Za-z0-9_|]+$/u;
+
+export function toolMatcherMatches(matcher: string | undefined, toolName: string): boolean {
   if (!matcher) return true;
+  if (EXACT_MATCHER_PATTERN.test(matcher)) return matcher.split("|").includes(toolName);
   try {
     return new RegExp(matcher, "u").test(toolName);
   } catch {
@@ -466,18 +475,26 @@ function withEffectNotes(outcome: HookActionOutcome, notes: string[]): HookActio
   return notes.length === 0 ? outcome : { ...outcome, detail: `${outcome.detail}\n${notes.join("；")}` };
 }
 
-/** 观察型事件：逐条执行，未开启 wait 时发出即不管。 */
-function fireObservingHooks(deps: HooksExtensionDeps, event: "tool_execution_end" | "tool_result" | "agent_end" | "turn_end", context: HookContext, toolName: string | undefined, warnedPending: Set<string>, report: HookRunReporter, annotate?: HookOutcomeAnnotator): void {
+/** 观察型事件里的规则逐条处理：开了「等待完成」的命令串行 await，其余发出即不管。 */
+async function runObservingHooks(deps: HooksExtensionDeps, event: "tool_execution_end" | "tool_result" | "agent_end" | "turn_end", context: HookContext, toolName: string | undefined, warnedPending: Set<string>, report: HookRunReporter, annotate?: HookOutcomeAnnotator): Promise<void> {
   for (const entry of rulesFor(deps, event, toolName, warnedPending)) {
     const startedAt = Date.now();
-    void executeHookAction(entry.rule, context, deps).then((outcome) => {
+    // .then 里同时给成功与失败处理，因此即使不 await 也不会产生 unhandled rejection。
+    const task = executeHookAction(entry.rule, context, deps).then((outcome) => {
       report(entry, annotate ? annotate(entry, outcome) : outcome);
     }, (error: unknown) => {
       const detail = `执行失败：${error instanceof Error ? error.message : String(error)}`;
       warn(deps, `钩子「${entry.name}」${detail}`);
       report(entry, { ok: false, detail, durationMs: Date.now() - startedAt });
     });
+    if (hookWaits(entry.rule)) await task;
+    else void task;
   }
+}
+
+/** 「等待完成」只对观察型事件的命令有意义（其余事件本来就等结果）。 */
+function hookWaits(rule: HookRule): boolean {
+  return rule.action.kind === "command" && rule.action.wait === true;
 }
 
 /**
@@ -551,12 +568,20 @@ async function runResultHooks(
  * park（切会话/切助手）不触发；退出应用与进程被杀不保证送达。
  */
 export function fireSessionEndHooks(deps: HooksExtensionDeps, reason: string): void {
+  void runSessionEndHooks(deps, reason);
+}
+
+/**
+ * session_end 是 fire-and-forget：调用方（disposeRecord）不等它，因此「等待完成」
+ * 只保证规则之间串行，**不阻塞会话销毁**（销毁后 ctx 过期，注入对话会被如实拒绝）。
+ */
+async function runSessionEndHooks(deps: HooksExtensionDeps, reason: string): Promise<void> {
   const report = createHookRunReporter(deps);
   const warnedPending = new Set<string>();
   const context: HookContext = { ...baseContext(deps, "session_end"), reason };
   for (const entry of rulesFor(deps, "session_end", undefined, warnedPending)) {
     const startedAt = Date.now();
-    void executeHookAction(entry.rule, context, deps).then((outcome) => {
+    const task = executeHookAction(entry.rule, context, deps).then((outcome) => {
       const effects = planHookEffects("session_end", outcome.output);
       const notes: string[] = [];
       if (effects.ignored.length > 0) {
@@ -574,6 +599,8 @@ export function fireSessionEndHooks(deps: HooksExtensionDeps, reason: string): v
       warn(deps, `钩子「${entry.name}」${detail}`);
       report(entry, { ok: false, detail, durationMs: Date.now() - startedAt });
     });
+    if (hookWaits(entry.rule)) await task;
+    else void task;
   }
 }
 
@@ -833,7 +860,7 @@ export function createHooksExtension(deps: HooksExtensionDeps): InlineExtension 
         toolStarts.set(event.toolCallId, { startedAt: Date.now(), args: event.args });
       });
 
-      pi.on("tool_execution_end", (event) => {
+      pi.on("tool_execution_end", async (event) => {
         const started = toolStarts.get(event.toolCallId);
         toolStarts.delete(event.toolCallId);
         const context: HookContext = {
@@ -843,14 +870,14 @@ export function createHooksExtension(deps: HooksExtensionDeps): InlineExtension 
           isError: event.isError,
           ...(started ? { durationMs: Date.now() - started.startedAt } : {})
         };
-        fireObservingHooks(deps, "tool_execution_end", context, event.toolName, warnedPending, reportHookRun, annotateObserved);
+        await runObservingHooks(deps, "tool_execution_end", context, event.toolName, warnedPending, reportHookRun, annotateObserved);
       });
 
       pi.on("turn_start", (event) => {
         turnStartedAt = event.timestamp ?? Date.now();
       });
 
-      pi.on("turn_end", (event) => {
+      pi.on("turn_end", async (event) => {
         const usageMessage = event.message as { usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: { total?: number } } } | undefined;
         const usage = usageMessage?.usage;
         const context: HookContext = {
@@ -859,14 +886,14 @@ export function createHooksExtension(deps: HooksExtensionDeps): InlineExtension 
           ...(usage ? { usage: { input: usage.input ?? 0, output: usage.output ?? 0, cacheRead: usage.cacheRead ?? 0, cacheWrite: usage.cacheWrite ?? 0, cost: usage.cost?.total ?? 0 } } : {})
         };
         turnStartedAt = undefined;
-        fireObservingHooks(deps, "turn_end", context, undefined, warnedPending, reportHookRun, annotateObserved);
+        await runObservingHooks(deps, "turn_end", context, undefined, warnedPending, reportHookRun, annotateObserved);
       });
 
       pi.on("agent_start", () => {
         runStartedAt = Date.now();
       });
 
-      pi.on("agent_end", (event) => {
+      pi.on("agent_end", async (event) => {
         const { usage, isError } = runUsageFromMessages((event as { messages?: unknown }).messages);
         const context: HookContext = {
           ...baseContext(deps, "agent_end"),
@@ -875,7 +902,7 @@ export function createHooksExtension(deps: HooksExtensionDeps): InlineExtension 
           isError
         };
         runStartedAt = undefined;
-        fireObservingHooks(deps, "agent_end", context, undefined, warnedPending, reportHookRun, annotateObserved);
+        await runObservingHooks(deps, "agent_end", context, undefined, warnedPending, reportHookRun, annotateObserved);
       });
     }
   };

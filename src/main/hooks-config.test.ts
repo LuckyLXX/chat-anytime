@@ -127,6 +127,15 @@ describe("hooks config", () => {
     }
   });
 
+  it("allows wait only on observing events", () => {
+    for (const event of ["tool_execution_end", "turn_end", "agent_end", "session_end"] as const) {
+      expect(() => validateHookRule({ name: `等待-${event}`, event, action: { kind: "command", command: "npm test", wait: true } })).not.toThrow();
+    }
+    for (const event of ["tool_call", "user_input", "tool_result", "session_before_compact", "session_start"] as const) {
+      expect(() => validateHookRule({ name: `不该等-${event}`, event, action: { kind: "command", command: "npm test", wait: true } })).toThrow("等待完成");
+    }
+  });
+
   it("previews actions for the panel list", () => {
     expect(hookActionPreview({ kind: "notify" })).toBe("桌面通知");
     expect(hookActionPreview({ kind: "notify", title: "完成啦" })).toBe("完成啦");

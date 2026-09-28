@@ -20,6 +20,8 @@ export const HOOK_TOOL_MATCH_EVENTS: readonly HookEventName[] = ["tool_call", "t
 export const HOOK_BLOCK_ACTION_EVENTS: readonly HookEventName[] = ["tool_call", "user_input"];
 /** 阻断型命令（退出码 2 或 stdout block JSON）可用的事件。 */
 export const HOOK_BLOCKING_COMMAND_EVENTS: readonly HookEventName[] = ["tool_call", "user_input", "session_before_compact"];
+/** 观察型事件：命令默认发出即不管，「等待完成」开关只在这里有意义（其余事件本来就等结果）。 */
+export const HOOK_WAIT_EVENTS: readonly HookEventName[] = ["tool_execution_end", "turn_end", "agent_end", "session_end"];
 export const HOOK_TIMEOUT_MIN_MS = 1_000;
 export const HOOK_TIMEOUT_MAX_MS = 120_000;
 export const HOOK_TIMEOUT_DEFAULT_MS = 10_000;
@@ -66,6 +68,7 @@ function validateAction(action: HookAction, event: HookEventName): void {
     case "command":
       if (typeof action.command !== "string" || !action.command.trim()) throw new Error("钩子命令不能为空");
       if (action.blocking === true && !HOOK_BLOCKING_COMMAND_EVENTS.includes(event)) throw new Error(`只有 ${HOOK_BLOCKING_COMMAND_EVENTS.join(" / ")} 事件上的命令钩子可以设为阻断型`);
+      if (action.wait === true && !HOOK_WAIT_EVENTS.includes(event)) throw new Error(`只有观察型事件（${HOOK_WAIT_EVENTS.join(" / ")}）的命令钩子可以设为「等待完成」`);
       break;
   }
 }

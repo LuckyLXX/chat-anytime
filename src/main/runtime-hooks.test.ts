@@ -490,6 +490,46 @@ describe("hook command output protocol (P4)", () => {
   });
 });
 
+describe("tool matcher semantics (P5)", () => {
+  const fireEnd = (harness: Harness, toolName: string) => harness.handlers.get("tool_execution_end")?.({ toolCallId: "t1", toolName, result: "ok", isError: false } as never);
+  const notified = (harness: Harness) => harness.posts.filter((message) => message.type === "hook-notify").length;
+
+  it("把 write|edit 当精确工具名集合，不再意外命中 edit_file", async () => {
+    const harness = createHarness([{ name: "格式化", event: "tool_execution_end", matcher: "write|edit", action: { kind: "notify" } }]);
+    fireEnd(harness, "edit_file");
+    await flushAsync();
+    expect(notified(harness)).toBe(0);
+
+    fireEnd(harness, "edit");
+    await flushAsync();
+    expect(notified(harness)).toBe(1);
+  });
+
+  it("含正则元字符的 matcher 仍按正则处理", async () => {
+    const harness = createHarness([{ name: "MCP 观察", event: "tool_execution_end", matcher: "^mcp__.*$", action: { kind: "notify" } }]);
+    fireEnd(harness, "mcp__srv__query");
+    await flushAsync();
+    expect(notified(harness)).toBe(1);
+  });
+});
+
+describe("wait toggle on observing events (P5)", () => {
+  it("wait:true 串行等待命令跑完，wait:false 立即返回", async () => {
+    const slow = process.platform === "win32" ? "ping -n 2 127.0.0.1" : "sleep 0.6";
+    const rule = (wait: boolean): HookRule => ({ name: "慢观察", event: "turn_end", action: { kind: "command", command: slow, ...(wait ? { wait: true } : {}) } });
+
+    const waiting = createHarness([rule(true)]);
+    const waitedAt = Date.now();
+    await waiting.handlers.get("turn_end")?.({ message: { usage: {} }, toolResults: [] } as never);
+    expect(Date.now() - waitedAt).toBeGreaterThan(400);
+
+    const lazy = createHarness([rule(false)]);
+    const lazyAt = Date.now();
+    await lazy.handlers.get("turn_end")?.({ message: { usage: {} }, toolResults: [] } as never);
+    expect(Date.now() - lazyAt).toBeLessThan(400);
+  }, 20_000);
+});
+
 describe("runHookCommand", () => {
   it("captures exit code and stdout", async () => {
     const rule: HookRule = { name: "x", event: "tool_call", action: { kind: "command", command: "echo hook-out" } };

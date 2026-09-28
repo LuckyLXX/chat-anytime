@@ -49,15 +49,78 @@ const hookScopeLabels: Record<"project" | "global", string> = {
 const toolMatchEvents: HookEventName[] = ["tool_call", "tool_execution_end", "tool_result"];
 const blockEvents: HookEventName[] = ["tool_call", "user_input"];
 const blockingCommandEvents: HookEventName[] = ["tool_call", "user_input", "session_before_compact"];
+/** 与 main 侧 hooks-config 的 HOOK_WAIT_EVENTS 同口径：只有观察型事件的命令才谈得上「等不等待」。 */
+const waitEvents: HookEventName[] = ["tool_execution_end", "turn_end", "agent_end", "session_end"];
 
 const isToolEvent = (event: HookEventName): boolean => toolMatchEvents.includes(event);
 const allowsBlock = (event: HookEventName): boolean => blockEvents.includes(event);
 const allowsBlockingCommand = (event: HookEventName): boolean => blockingCommandEvents.includes(event);
+const allowsWait = (event: HookEventName): boolean => waitEvents.includes(event);
 
 /** 动作类型按事件过滤：拦截规则只对有阻断语义的事件开放，避免存不进去的死路。 */
 function actionKindsFor(event: HookEventName): HookAction["kind"][] {
   return (Object.keys(hookActionLabels) as HookAction["kind"][]).filter((kind) => kind !== "block" || allowsBlock(event));
 }
+
+interface HookTemplateValues {
+  name: string;
+  event: HookEventName;
+  matcher?: string;
+  actionKind: HookAction["kind"];
+  notifyTitle?: string;
+  httpUrl?: string;
+  denyLines?: string;
+  command?: string;
+  blocking?: boolean;
+  wait?: boolean;
+}
+
+interface HookTemplate {
+  id: string;
+  label: string;
+  hint: string;
+  values: HookTemplateValues;
+}
+
+/** 新建钩子的一键模板：覆盖最常用的六种场景，填完可改再存。 */
+const hookTemplates: HookTemplate[] = [
+  {
+    id: "block-force-push",
+    label: "拦截 git 强推",
+    hint: "工具调用前命中 deny 正则就否决（等结果）",
+    values: { name: "git 强推拦截", event: "tool_call", matcher: "bash|powershell", actionKind: "block", denyLines: "git\\s+push.*--force" }
+  },
+  {
+    id: "format-after-edit",
+    label: "改完即格式化",
+    hint: "工具执行后异步跑格式化，不拖慢回合",
+    values: { name: "改完即格式化", event: "tool_execution_end", matcher: "write|edit", actionKind: "command", command: "npx prettier --write .", wait: false }
+  },
+  {
+    id: "notify-on-finish",
+    label: "跑完通知",
+    hint: "一次完整回复结束时弹系统通知（带累计用量）",
+    values: { name: "跑完通知", event: "agent_end", actionKind: "notify", notifyTitle: "PiDesktop：{sessionTitle}", }
+  },
+  {
+    id: "push-to-phone",
+    label: "Bark / 飞书推送",
+    hint: "把事件 JSON POST 到手机推送服务（地址换成自己的）",
+    values: { name: "手机推送", event: "agent_end", actionKind: "http", httpUrl: "https://api.day.app/your-key/PiDesktop" }
+  },
+  {
+    id: "tool-result-note",
+    label: "工具结果补充说明",
+    hint: "命令回附加文本，注入对话尾部给模型看（不进系统提示词）",
+    values: { name: "结果补充说明", event: "tool_result", actionKind: "command", command: "echo {\"additionalContext\":\"请核对上面的命令输出\"}" }
+  },
+  {
+    id: "notify-before-compact",
+    label: "压缩前通知",
+    hint: "上下文压缩前提醒一下（阻断型命令还能取消压缩）",
+    values: { name: "压缩前通知", event: "session_before_compact", actionKind: "notify", notifyTitle: "PiDesktop：即将压缩上下文", }
+  }
+];
 
 function formatRunTime(at: number): string {
   const seconds = Math.max(0, Math.floor((Date.now() - at) / 1_000));
@@ -106,6 +169,7 @@ export function HooksSettings({ resources, workspaceOpen }: HooksSettingsProps):
   const [denyLines, setDenyLines] = useState("");
   const [command, setCommand] = useState("");
   const [blocking, setBlocking] = useState(false);
+  const [wait, setWait] = useState(false);
   const [timeoutSec, setTimeoutSec] = useState(10);
   const [sample, setSample] = useState("git push --force");
 
@@ -135,7 +199,27 @@ export function HooksSettings({ resources, workspaceOpen }: HooksSettingsProps):
     setDenyLines("");
     setCommand("");
     setBlocking(false);
+    setWait(false);
     setTimeoutSec(10);
+  }
+
+  /** 模板只是预填：冲突字段清掉，剩余全部由用户确认后再存。 */
+  function applyTemplate(template: HookTemplate): void {
+    const v = template.values;
+    setEditingName(undefined);
+    resetForm();
+    setName(v.name);
+    setEvent(v.event);
+    setMatcher(v.matcher ?? "");
+    setActionKind(v.actionKind);
+    setNotifyTitle(v.notifyTitle ?? "");
+    setNotifyBody("");
+    setHttpUrl(v.httpUrl ?? "");
+    setDenyLines(v.denyLines ?? "");
+    setCommand(v.command ?? "");
+    setBlocking(v.blocking ?? false);
+    setWait(v.wait ?? false);
+    setFormOpen(true);
   }
 
   function openCreate(): void {
@@ -157,6 +241,7 @@ export function HooksSettings({ resources, workspaceOpen }: HooksSettingsProps):
     setDenyLines(hook.action.kind === "block" ? hook.action.deny.join("\n") : "");
     setCommand(hook.action.kind === "command" ? hook.action.command : "");
     setBlocking(hook.action.kind === "command" ? hook.action.blocking === true : false);
+    setWait(hook.action.kind === "command" ? hook.action.wait === true : false);
     setFormOpen(true);
   }
 
@@ -172,7 +257,7 @@ export function HooksSettings({ resources, workspaceOpen }: HooksSettingsProps):
     } else if (actionKind === "block") {
       action = { kind: "block", deny: denyLines.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean) };
     } else {
-      action = { kind: "command", command: command.trim(), ...(blocking ? { blocking: true } : {}) };
+      action = { kind: "command", command: command.trim(), ...(blocking ? { blocking: true } : {}), ...(wait ? { wait: true } : {}) };
     }
     const draft: HookRuleDraft = {
       name: name.trim(),
@@ -285,6 +370,19 @@ export function HooksSettings({ resources, workspaceOpen }: HooksSettingsProps):
               <small>{hookEventHints[event]}</small>
             </div>
             <div className="resource-card-body">
+              {editingName === undefined && (
+                <div className="hook-templates" aria-label="钩子模板">
+                  <p className="resource-form-help">从模板开始：点一个预填常见场景，再按需改字段。</p>
+                  <div className="hook-template-grid">
+                    {hookTemplates.map((template) => (
+                      <button className="secondary-button compact-button hook-template-card" type="button" key={template.id} data-control="hooks-template" data-hook-template={template.id} title={template.hint} disabled={controlsBusy} onClick={() => applyTemplate(template)}>
+                        <strong>{template.label}</strong>
+                        <small>{template.hint}</small>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
               <div className="mcp-form-grid">
                 <label>名称<input value={name} placeholder="例如 git防火墙" autoFocus onChange={(changeEvent) => setName(changeEvent.target.value)} /></label>
                 <label>写入范围
@@ -295,7 +393,7 @@ export function HooksSettings({ resources, workspaceOpen }: HooksSettingsProps):
                 </label>
                 <label>触发事件<select value={event} onChange={(changeEvent) => { const next = changeEvent.target.value as HookEventName; setEvent(next); if (!actionKindsFor(next).includes(actionKind)) setActionKind("notify"); }}>{(Object.keys(hookEventLabels) as HookEventName[]).map((item) => <option key={item} value={item}>{hookEventLabels[item]}</option>)}</select></label>
                 <label>动作类型<select value={actionKind} onChange={(changeEvent) => setActionKind(changeEvent.target.value as HookAction["kind"])}>{actionKindsFor(event).map((item) => <option key={item} value={item}>{hookActionLabels[item]}</option>)}</select></label>
-                {isToolEvent(event) && <label className="mcp-form-wide">工具匹配正则（可选）<input value={matcher} placeholder="bash|write|edit（留空匹配全部工具）" onChange={(changeEvent) => setMatcher(changeEvent.target.value)} /></label>}
+                {isToolEvent(event) && <label className="mcp-form-wide">工具匹配（可选）<input value={matcher} placeholder="bash|write|edit（竖线分隔的精确工具名）或 ^ed.* 这类正则" onChange={(changeEvent) => setMatcher(changeEvent.target.value)} /><small>只含字母、数字、下划线或竖线时按「精确工具名集合」匹配（edit 不会命中 edit_file）；含其它字符时按正则。</small></label>}
                 {actionKind === "notify" && <>
                   <label className="mcp-form-wide">通知标题（可选）<input value={notifyTitle} placeholder="PiDesktop：{event}" onChange={(changeEvent) => setNotifyTitle(changeEvent.target.value)} /></label>
                   <label className="mcp-form-wide">通知正文（可选）<input value={notifyBody} placeholder="{sessionTitle} · {toolName}" onChange={(changeEvent) => setNotifyBody(changeEvent.target.value)} /></label>
@@ -306,6 +404,7 @@ export function HooksSettings({ resources, workspaceOpen }: HooksSettingsProps):
                   <label className="mcp-form-wide">命令（shell 语义；stdin 收到事件 JSON 上下文）<textarea value={command} rows={2} placeholder={"npx prettier --write src/"} onChange={(changeEvent) => setCommand(changeEvent.target.value)} /></label>
                   <label>超时（秒）<input type="number" min={1} max={120} value={timeoutSec} onChange={(changeEvent) => setTimeoutSec(Number(changeEvent.target.value))} /></label>
                   {allowsBlockingCommand(event) && <label className="checkbox-setting"><input type="checkbox" checked={blocking} onChange={(changeEvent) => setBlocking(changeEvent.target.checked)} />阻断型（退出码 2 或输出 {"{\"block\":true}"} 时{event === "tool_call" ? "否决工具调用" : event === "user_input" ? "吞掉这次输入" : "取消这次压缩"}）</label>}
+                  {allowsWait(event) && <label className="checkbox-setting"><input type="checkbox" checked={wait} onChange={(changeEvent) => setWait(changeEvent.target.checked)} />等待完成（默认发出即不管；开启后等命令跑完再继续，失败或超时只记日志、不阻断回合）</label>}
                 </>}
               </div>
               <p className="resource-form-help">命令钩子是用户自写配置，直接在本机执行、不经助手权限门；超时或出错按放行处理并记录日志。</p>

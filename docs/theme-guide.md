@@ -119,7 +119,7 @@
 | 技能与工具页：重载资源 / 添加 MCP / 保存 MCP / 添加命令 / 保存命令 | `resource-reload` / `mcp-add` / `mcp-save` / `command-add` / `command-save` |
 | 外观页：导入 CSS / 导入主题目录 / 清空 / 保存当前主题 / 保存外观设置 | `appearance-import-css` / `appearance-import-theme` / `appearance-clear-css` / `appearance-save-theme` / `appearance-save` |
 | 子智能体页：新建 / 保存 | `subagent-add` / `subagent-save` |
-| 钩子页：总闸 / 新建 / 保存 / 项目规则信任 / 最近运行记录 | `hooks-enable` / `hooks-add` / `hooks-save` / `hooks-trust` / `hooks-run-log` |
+| 钩子页：总闸 / 新建 / 保存 / 项目规则信任 / 最近运行记录 / 模板 | `hooks-enable` / `hooks-add` / `hooks-save` / `hooks-trust` / `hooks-run-log` / `hooks-template` |
 | 用量统计页：助手范围筛选 | `usage-agent-filter` |
 | 面板坞开关 + 待办页 tab（会话区右上方 FAB） | `task-panel-toggle`                              |
 | 记忆页 tab（面板坞内）                      | `memory-toggle`                                  |
