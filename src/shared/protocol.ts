@@ -1461,11 +1461,23 @@ export interface McpServerConfigDraft {
 }
 
 /**
- * 钩子监听的会话生命周期事件（Pi 扩展事件名的稳定子集）。
+ * 钩子监听的会话生命周期事件（Pi 扩展事件名的稳定子集 + 一个 app 自造事件）。
  * 注意粒度：agent_end 是一次完整回复（含全部工具调用小轮）结束，只触发一次；
  * turn_end 是每个模型调用小轮结束，一次回复会触发多次。
+ * session_end 不是 Pi 事件：Pi 的 session_shutdown 只在 AgentSessionRuntime 拆除时
+ * 触发，PiDesktop 走的是 session.dispose()，因此该事件由 app 在销毁会话记录前自造
+ * （park 切会话不触发；退出应用与进程被杀不保证送达）。
  */
-export type HookEventName = "session_start" | "tool_call" | "tool_execution_end" | "agent_end" | "turn_end";
+export type HookEventName =
+  | "session_start"
+  | "tool_call"
+  | "tool_execution_end"
+  | "agent_end"
+  | "turn_end"
+  | "user_input"
+  | "tool_result"
+  | "session_before_compact"
+  | "session_end";
 
 /**
  * 钩子动作。notify/http/block 是 app 内置动作（零脚本），command 是用户 shell

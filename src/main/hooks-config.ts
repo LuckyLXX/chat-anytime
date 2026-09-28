@@ -13,7 +13,13 @@ export interface ConfiguredHook {
   scope: "project" | "global";
 }
 
-export const HOOK_EVENTS: readonly HookEventName[] = ["session_start", "tool_call", "tool_execution_end", "agent_end", "turn_end"];
+export const HOOK_EVENTS: readonly HookEventName[] = ["session_start", "tool_call", "tool_execution_end", "agent_end", "turn_end", "user_input", "tool_result", "session_before_compact", "session_end"];
+/** matcher（工具名）可用的事件：只有工具类事件有意义。 */
+export const HOOK_TOOL_MATCH_EVENTS: readonly HookEventName[] = ["tool_call", "tool_execution_end", "tool_result"];
+/** block（deny 正则）可用的事件：正则作用于命令行 / 参数 JSON / 用户输入文本。 */
+export const HOOK_BLOCK_ACTION_EVENTS: readonly HookEventName[] = ["tool_call", "user_input"];
+/** 阻断型命令（退出码 2 或 stdout block JSON）可用的事件。 */
+export const HOOK_BLOCKING_COMMAND_EVENTS: readonly HookEventName[] = ["tool_call", "user_input", "session_before_compact"];
 export const HOOK_TIMEOUT_MIN_MS = 1_000;
 export const HOOK_TIMEOUT_MAX_MS = 120_000;
 export const HOOK_TIMEOUT_DEFAULT_MS = 10_000;
@@ -49,7 +55,7 @@ function validateAction(action: HookAction, event: HookEventName): void {
       break;
     }
     case "block": {
-      if (event !== "tool_call") throw new Error("拦截规则（block）只能挂在 tool_call 事件上");
+      if (!HOOK_BLOCK_ACTION_EVENTS.includes(event)) throw new Error(`拦截规则（block）只能挂在 ${HOOK_BLOCK_ACTION_EVENTS.join(" / ")} 事件上`);
       if (!Array.isArray(action.deny) || action.deny.length === 0) throw new Error("拦截规则至少需要一条 deny 正则");
       action.deny.forEach((pattern, index) => {
         if (typeof pattern !== "string" || !pattern.trim()) throw new Error(`拦截规则第 ${index + 1} 条 deny 不能为空`);
@@ -59,7 +65,7 @@ function validateAction(action: HookAction, event: HookEventName): void {
     }
     case "command":
       if (typeof action.command !== "string" || !action.command.trim()) throw new Error("钩子命令不能为空");
-      if (action.blocking === true && event !== "tool_call") throw new Error("只有 tool_call 事件上的命令钩子可以设为阻断型");
+      if (action.blocking === true && !HOOK_BLOCKING_COMMAND_EVENTS.includes(event)) throw new Error(`只有 ${HOOK_BLOCKING_COMMAND_EVENTS.join(" / ")} 事件上的命令钩子可以设为阻断型`);
       break;
   }
 }
@@ -72,7 +78,7 @@ export function validateHookRule(rule: HookRule): void {
   if (!HOOK_EVENTS.includes(rule.event)) throw new Error(`钩子事件无效：${String(rule.event)}`);
   if (rule.matcher !== undefined) {
     if (typeof rule.matcher !== "string" || !rule.matcher.trim()) throw new Error("工具匹配正则不能为空（留空表示匹配全部工具）");
-    if (rule.event !== "tool_call" && rule.event !== "tool_execution_end") throw new Error("只有工具事件（tool_call / tool_execution_end）可以使用工具匹配正则");
+    if (rule.event !== "tool_call" && rule.event !== "tool_execution_end" && rule.event !== "tool_result") throw new Error("只有工具事件（tool_call / tool_execution_end / tool_result）可以使用工具匹配正则");
     compileRegex(rule.matcher, "工具匹配正则");
   }
   if (rule.timeoutMs !== undefined) {

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { HookRule, RuntimeMessage } from "../shared/protocol.js";
-import { createHooksExtension, runHookCommand, testHook, type HooksExtensionDeps } from "./runtime-hooks.js";
+import { createHooksExtension, fireSessionEndHooks, runHookCommand, testHook, type HooksExtensionDeps } from "./runtime-hooks.js";
 
 interface Harness {
   handlers: Map<string, (event: never) => unknown>;
@@ -242,6 +242,107 @@ describe("hook run observability", () => {
   });
 });
 
+describe("hooks extension new events (P3)", () => {
+  const inputHandler = (harness: Harness) => harness.handlers.get("input") as unknown as (event: { text: string; source: string; streamingBehavior?: string }) => Promise<{ action?: string } | undefined>;
+  const compactHandler = (harness: Harness) => harness.handlers.get("session_before_compact") as unknown as (event: { reason: string; willRetry: boolean }) => Promise<{ cancel?: boolean } | undefined>;
+  const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  /** 桦住 fetch 并捕获钩子推送的上下文 JSON（比断言 mock.calls 的元组类型稳）。 */
+  function stubFetchCapture(): () => Record<string, unknown> {
+    let captured: Record<string, unknown> | undefined;
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: { body: string }) => {
+      captured = JSON.parse(init.body) as Record<string, unknown>;
+      return new Response("{}", { status: 200 });
+    }));
+    return () => captured ?? {};
+  }
+
+  it("swallows user input when a block rule denies it and reports the block", async () => {
+    const harness = createHarness([{ name: "输入拦截", event: "user_input", action: { kind: "block", deny: ["rm\\s+-rf"] } }]);
+    expect(await inputHandler(harness)({ text: "rm -rf /tmp/x", source: "interactive" })).toMatchObject({ action: "handled" });
+    expect(await inputHandler(harness)({ text: "npm test", source: "interactive" })).toBeUndefined();
+
+    const results = harness.posts.filter((message) => message.type === "hook-run");
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({ event: "user_input", source: "trigger", blocked: true, ok: true });
+  });
+
+  it("swallows user input when a blocking command exits with 2", async () => {
+    const harness = createHarness([{ name: "输入门", event: "user_input", action: { kind: "command", command: "exit 2", blocking: true } }]);
+    expect(await inputHandler(harness)({ text: "hi", source: "interactive" })).toMatchObject({ action: "handled" });
+    expect(harness.posts.find((message) => message.type === "hook-run")).toMatchObject({ event: "user_input", blocked: true });
+  });
+
+  it("awaits observing actions on user_input and passes the input text plus source", async () => {
+    const capture = stubFetchCapture();
+    try {
+      const harness = createHarness([{ name: "输入推送", event: "user_input", action: { kind: "http", url: "https://example.test/hook" } }]);
+      expect(await inputHandler(harness)({ text: "/deploy", source: "interactive" })).toBeUndefined();
+      expect(capture()).toMatchObject({ event: "user_input", inputText: "/deploy", source: "interactive" });
+      await wait(320);
+      expect(harness.posts.find((message) => message.type === "hook-run")).toMatchObject({ event: "user_input", source: "trigger", ok: true });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("observes tool_result with the producing tool and honors the matcher", async () => {
+    const harness = createHarness([{ name: "结果观察", event: "tool_result", matcher: "^bash$", action: { kind: "notify", title: "{toolName}" } }]);
+    harness.handlers.get("tool_result")?.({ toolName: "bash", toolCallId: "t1", input: { command: "npm test" }, content: [], isError: false } as never);
+    harness.handlers.get("tool_result")?.({ toolName: "write", toolCallId: "t2", input: { path: "a" }, content: [], isError: false } as never);
+    await wait(320);
+
+    const notified = harness.posts.filter((message) => message.type === "hook-notify");
+    expect(notified).toHaveLength(1);
+    expect(notified[0]).toMatchObject({ title: "bash" });
+    expect(harness.posts.find((message) => message.type === "hook-run")).toMatchObject({ event: "tool_result", source: "trigger", ok: true });
+  });
+
+  it("cancels a compaction when a blocking command exits with 2", async () => {
+    const harness = createHarness([{ name: "压缩门", event: "session_before_compact", action: { kind: "command", command: "exit 2", blocking: true } }]);
+    expect(await compactHandler(harness)({ reason: "threshold", willRetry: false })).toMatchObject({ cancel: true });
+    expect(harness.posts.find((message) => message.type === "hook-run")).toMatchObject({ event: "session_before_compact", blocked: true });
+  });
+
+  it("passes the compaction reason and retry flag to a non-blocking compaction hook", async () => {
+    const capture = stubFetchCapture();
+    try {
+      const harness = createHarness([{ name: "压缩推送", event: "session_before_compact", action: { kind: "http", url: "https://example.test/hook" } }]);
+      expect(await compactHandler(harness)({ reason: "overflow", willRetry: true })).toBeUndefined();
+      expect(capture()).toMatchObject({ event: "session_before_compact", reason: "overflow", willRetry: true });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("fires session_end hooks with the destroy reason", async () => {
+    const capture = stubFetchCapture();
+    try {
+      const harness = createHarness([{ name: "销毁通知", event: "session_end", action: { kind: "http", url: "https://example.test/hook" } }]);
+      fireSessionEndHooks(harness.deps, "dispose");
+      await wait(50);
+      expect(capture()).toMatchObject({ event: "session_end", reason: "dispose", sessionId: "session-1" });
+      await wait(320);
+      expect(harness.posts.find((message) => message.type === "hook-run")).toMatchObject({ event: "session_end", source: "trigger", ok: true });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps session_end silent when the master switch is off or the project rule is unapproved", async () => {
+    const off = createHarness([{ name: "销毁通知", event: "session_end", action: { kind: "notify" } }], false);
+    fireSessionEndHooks(off.deps, "dispose");
+    await wait(50);
+    expect(off.posts).toHaveLength(0);
+
+    const untrusted = createHarness([{ name: "销毁通知", event: "session_end", action: { kind: "notify" } }], true, "project");
+    fireSessionEndHooks(untrusted.deps, "dispose");
+    await wait(50);
+    expect(untrusted.posts.filter((message) => message.type === "hook-notify")).toHaveLength(0);
+    expect(untrusted.posts.filter((message) => message.type === "hook-notice")).toHaveLength(1);
+  });
+});
+
 describe("runHookCommand", () => {
   it("captures exit code and stdout", async () => {
     const rule: HookRule = { name: "x", event: "tool_call", action: { kind: "command", command: "echo hook-out" } };
@@ -274,6 +375,16 @@ describe("testHook", () => {
     const allowed = await testHook(blockRule, "npm test", harness.deps);
     expect(allowed.blocked).toBeUndefined();
     expect(allowed.detail).toContain("放行");
+  });
+
+  it("uses per-event sample contexts for the new events", async () => {
+    const harness = createHarness([]);
+    const blocked = await testHook({ name: "输入拦截", event: "user_input", action: { kind: "block", deny: ["git\\s+push"] } }, "git push --force", harness.deps);
+    expect(blocked.blocked).toBe(true);
+    expect(blocked.detail).toContain("命中");
+
+    const quiet = await testHook({ name: "销毁通知", event: "session_end", action: { kind: "notify" } }, undefined, harness.deps);
+    expect(quiet.ok).toBe(true);
   });
 
   it("really posts a notification for notify rules", async () => {

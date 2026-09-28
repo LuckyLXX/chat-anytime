@@ -738,6 +738,31 @@ function refreshHooksConfig(): void {
   hookTrustData = readHookTrust(hooksTrustPath());
 }
 
+/**
+ * 钩子扩展的依赖装配。会话创建（第三个内联扩展）与 session_end（销毁前）共用，
+ * 区别只在上下文取值：前者跟会话生成器的闭包，后者跟将被销毁的记录。
+ */
+function hooksDepsFor(refs: {
+  workspace: () => string;
+  agentName: () => string;
+  sessionId: () => string;
+  sessionTitle: () => string;
+}): runtimeHooks.HooksExtensionDeps {
+  return {
+    rules: () => hooksRules,
+    enabled: () => settings?.hooks?.enabled !== false,
+    workspace: refs.workspace,
+    agentName: refs.agentName,
+    sessionId: refs.sessionId,
+    sessionTitle: refs.sessionTitle,
+    // 通知免打扰：该会话当前是否正被渲染（激活或分屏格子）——可见时主进程在窗口
+    // 聚焦的情况下抑制系统通知。
+    isSessionRendered: (sessionId) => Boolean(sessionId && (sessionId === activeRuntime?.session.sessionId || renderedSessions.has(sessionId))),
+    trust: (entry) => evaluateHookTrust({ scope: entry.scope, workspace: refs.workspace(), rule: entry.rule, data: hookTrustData }) === "trusted",
+    post
+  };
+}
+
 function hookSummaries(): HookSummary[] {
   return hooksRules.map(({ name, rule, scope }) => ({
     name,
@@ -1469,6 +1494,14 @@ function scheduleSessionsRefresh(): void {
 }
 
 function disposeRecord(record: SessionRuntimeRecord, options: { keepBrowserTab?: boolean } = {}): void {
+  // session_end 钩子（app 自造事件）：必须在 dispose 之前发——命令是独立进程，
+  // 不等它结束（fire-and-forget）；park 不走到这里。总闸与信任门由 rulesFor 过滤。
+  runtimeHooks.fireSessionEndHooks(hooksDepsFor({
+    workspace: () => record.workspace,
+    agentName: () => record.agent.name,
+    sessionId: () => record.session.sessionId,
+    sessionTitle: () => currentSessions.find((item) => item.id === record.session.sessionId)?.title ?? record.session.sessionId
+  }), "dispose");
   record.unsubscribe();
   try {
     record.session.dispose();
@@ -2955,22 +2988,15 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
       // 用户钩子（第三内联扩展）：事件触发时读 hooksRules 缓存，配置增删改
       // 只需 refreshHooksConfig()，无需重建会话。命令是用户自写配置，等同
       // 终端输入，不经 agent 权限门；输出只走 stdin/通知/日志，不进提示词。
-      runtimeHooks.createHooksExtension({
-        rules: () => hooksRules,
-        enabled: () => settings?.hooks?.enabled !== false,
+      runtimeHooks.createHooksExtension(hooksDepsFor({
         workspace: () => recordWorkspace,
         agentName: () => recordAgent.name,
         sessionId: () => sessionHolder.session?.sessionId ?? activeSessionManager.getSessionId(),
         sessionTitle: () => {
           const sessionId = sessionHolder.session?.sessionId ?? activeSessionManager.getSessionId();
           return currentSessions.find((item) => item.id === sessionId)?.title ?? sessionId;
-        },
-        // 通知免打扰：该会话当前是否正被渲染（激活或分屏格子）——可见时主
-        // 进程在窗口聚焦的情况下抑制系统通知。
-        isSessionRendered: (sessionId) => Boolean(sessionId && (sessionId === activeRuntime?.session.sessionId || renderedSessions.has(sessionId))),
-        trust: (entry) => evaluateHookTrust({ scope: entry.scope, workspace: recordWorkspace, rule: entry.rule, data: hookTrustData }) === "trusted",
-        post
-      }),
+        }
+      })),
       // Tool executions land in chatanytime-sessions/<agentId>/tool-audit.jsonl
       // for post-hoc debugging; write failures never affect the turn. The start
       // hook also feeds the per-session todo pace tracker (anti-batching nudge).

@@ -7,6 +7,10 @@ const hookEventLabels: Record<HookEventName, string> = {
   session_start: "会话启动",
   tool_call: "工具调用前",
   tool_execution_end: "工具执行后",
+  tool_result: "工具结果生成后",
+  user_input: "用户输入提交前",
+  session_before_compact: "上下文压缩前",
+  session_end: "会话销毁",
   agent_end: "回复结束（整次）",
   turn_end: "单轮调用结束"
 };
@@ -15,6 +19,10 @@ const hookEventHints: Record<HookEventName, string> = {
   session_start: "会话创建完成时触发；命令会被等待完成（环境准备）",
   tool_call: "工具执行前触发；拦截型钩子可直接否决（命令防火墙）",
   tool_execution_end: "工具执行完成后触发（改完即格式化）",
+  tool_result: "工具结果生成后、进入对话前触发；观察型（命令不等待）",
+  user_input: "用户消息（含排队的补充消息）提交前触发；拦截型钩子可吞掉这次输入",
+  session_before_compact: "手动 /compact、超阈值或溢出恢复导致压缩前触发；阻断型命令可取消这次压缩",
+  session_end: "会话运行时被销毁（重建 / 删除 / 被淘汰）前触发；切换会话（park）不触发，退出应用或进程被杀不保证送达",
   agent_end: "一次完整回复（用户消息 → 全部工具调用轮次 → 最终答案）结束时触发，只通知一次；附累计 token 用量与失败标记——跑完通知/用量统计用这个",
   turn_end: "每个模型调用小轮结束时触发，一次回复会触发多次；大多数场景应选「回复结束」"
 };
@@ -38,7 +46,18 @@ const hookScopeLabels: Record<"project" | "global", string> = {
   global: "全局"
 };
 
-const isToolEvent = (event: HookEventName): boolean => event === "tool_call" || event === "tool_execution_end";
+const toolMatchEvents: HookEventName[] = ["tool_call", "tool_execution_end", "tool_result"];
+const blockEvents: HookEventName[] = ["tool_call", "user_input"];
+const blockingCommandEvents: HookEventName[] = ["tool_call", "user_input", "session_before_compact"];
+
+const isToolEvent = (event: HookEventName): boolean => toolMatchEvents.includes(event);
+const allowsBlock = (event: HookEventName): boolean => blockEvents.includes(event);
+const allowsBlockingCommand = (event: HookEventName): boolean => blockingCommandEvents.includes(event);
+
+/** 动作类型按事件过滤：拦截规则只对有阻断语义的事件开放，避免存不进去的死路。 */
+function actionKindsFor(event: HookEventName): HookAction["kind"][] {
+  return (Object.keys(hookActionLabels) as HookAction["kind"][]).filter((kind) => kind !== "block" || allowsBlock(event));
+}
 
 function formatRunTime(at: number): string {
   const seconds = Math.max(0, Math.floor((Date.now() - at) / 1_000));
@@ -273,8 +292,8 @@ export function HooksSettings({ resources, workspaceOpen }: HooksSettingsProps):
                     <option value="global">用户全局配置</option>
                   </select>
                 </label>
-                <label>触发事件<select value={event} onChange={(changeEvent) => setEvent(changeEvent.target.value as HookEventName)}>{(Object.keys(hookEventLabels) as HookEventName[]).map((item) => <option key={item} value={item}>{hookEventLabels[item]}</option>)}</select></label>
-                <label>动作类型<select value={actionKind} onChange={(changeEvent) => setActionKind(changeEvent.target.value as HookAction["kind"])}>{(Object.keys(hookActionLabels) as HookAction["kind"][]).map((item) => <option key={item} value={item}>{hookActionLabels[item]}</option>)}</select></label>
+                <label>触发事件<select value={event} onChange={(changeEvent) => { const next = changeEvent.target.value as HookEventName; setEvent(next); if (!actionKindsFor(next).includes(actionKind)) setActionKind("notify"); }}>{(Object.keys(hookEventLabels) as HookEventName[]).map((item) => <option key={item} value={item}>{hookEventLabels[item]}</option>)}</select></label>
+                <label>动作类型<select value={actionKind} onChange={(changeEvent) => setActionKind(changeEvent.target.value as HookAction["kind"])}>{actionKindsFor(event).map((item) => <option key={item} value={item}>{hookActionLabels[item]}</option>)}</select></label>
                 {isToolEvent(event) && <label className="mcp-form-wide">工具匹配正则（可选）<input value={matcher} placeholder="bash|write|edit（留空匹配全部工具）" onChange={(changeEvent) => setMatcher(changeEvent.target.value)} /></label>}
                 {actionKind === "notify" && <>
                   <label className="mcp-form-wide">通知标题（可选）<input value={notifyTitle} placeholder="PiDesktop：{event}" onChange={(changeEvent) => setNotifyTitle(changeEvent.target.value)} /></label>
@@ -285,7 +304,7 @@ export function HooksSettings({ resources, workspaceOpen }: HooksSettingsProps):
                 {actionKind === "command" && <>
                   <label className="mcp-form-wide">命令（shell 语义；stdin 收到事件 JSON 上下文）<textarea value={command} rows={2} placeholder={"npx prettier --write src/"} onChange={(changeEvent) => setCommand(changeEvent.target.value)} /></label>
                   <label>超时（秒）<input type="number" min={1} max={120} value={timeoutSec} onChange={(changeEvent) => setTimeoutSec(Number(changeEvent.target.value))} /></label>
-                  {event === "tool_call" && <label className="checkbox-setting"><input type="checkbox" checked={blocking} onChange={(changeEvent) => setBlocking(changeEvent.target.checked)} />阻断型（退出码 2 或输出 {"{\"block\":true}"} 时否决工具调用）</label>}
+                  {allowsBlockingCommand(event) && <label className="checkbox-setting"><input type="checkbox" checked={blocking} onChange={(changeEvent) => setBlocking(changeEvent.target.checked)} />阻断型（退出码 2 或输出 {"{\"block\":true}"} 时{event === "tool_call" ? "否决工具调用" : event === "user_input" ? "吞掉这次输入" : "取消这次压缩"}）</label>}
                 </>}
               </div>
               <p className="resource-form-help">命令钩子是用户自写配置，直接在本机执行、不经助手权限门；超时或出错按放行处理并记录日志。</p>

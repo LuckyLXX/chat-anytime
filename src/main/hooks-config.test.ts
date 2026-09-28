@@ -90,12 +90,41 @@ describe("hooks config", () => {
     expect(() => validateHookRule({ ...notifyRule, event: "message_end" as HookRule["event"] })).toThrow("事件无效");
     expect(() => validateHookRule({ ...blockRule, matcher: "(" })).toThrow("正则");
     expect(() => validateHookRule({ ...blockRule, action: { kind: "block", deny: ["("] } })).toThrow("正则");
-    expect(() => validateHookRule({ name: "x", event: "turn_end", action: { kind: "block", deny: ["a"] } })).toThrow("只能挂在 tool_call");
+    expect(() => validateHookRule({ name: "x", event: "turn_end", action: { kind: "block", deny: ["a"] } })).toThrow("只能挂在 tool_call / user_input");
     expect(() => validateHookRule({ ...notifyRule, action: { kind: "http", url: "ftp://x" } })).toThrow("http/https");
     expect(() => validateHookRule({ ...notifyRule, action: { kind: "command", command: "" } })).toThrow("不能为空");
     expect(() => validateHookRule({ name: "x", event: "tool_call", action: { kind: "command", command: "echo", blocking: true }, timeoutMs: 500 })).toThrow("超时");
     expect(() => validateHookRule({ ...notifyRule, matcher: "(" } as HookRule)).toThrow("工具事件");
     expect(() => validateHookRule({ ...notifyRule, matcher: "bash" } as HookRule)).toThrow("工具事件");
+  });
+
+  it("accepts the four new events with notify actions", () => {
+    for (const event of ["user_input", "tool_result", "session_before_compact", "session_end"] as const) {
+      expect(() => validateHookRule({ name: `新事件-${event}`, event, action: { kind: "notify" } })).not.toThrow();
+    }
+  });
+
+  it("allows the tool matcher on tool_result but not on non-tool events", () => {
+    expect(() => validateHookRule({ name: "结果匹配", event: "tool_result", matcher: "^bash$", action: { kind: "notify" } })).not.toThrow();
+    for (const event of ["user_input", "session_before_compact", "session_end", "agent_end"] as const) {
+      expect(() => validateHookRule({ name: `不该有匹配-${event}`, event, matcher: "bash", action: { kind: "notify" } })).toThrow("工具事件");
+    }
+  });
+
+  it("allows block only on tool_call and user_input", () => {
+    expect(() => validateHookRule({ name: "输入拦截", event: "user_input", action: { kind: "block", deny: ["rm\\s+-rf"] } })).not.toThrow();
+    for (const event of ["tool_execution_end", "tool_result", "session_before_compact", "session_end", "agent_end", "turn_end"] as const) {
+      expect(() => validateHookRule({ name: `不该能拦-${event}`, event, action: { kind: "block", deny: ["x"] } })).toThrow("只能挂在 tool_call / user_input");
+    }
+  });
+
+  it("allows blocking commands on tool_call, user_input and session_before_compact", () => {
+    for (const event of ["tool_call", "user_input", "session_before_compact"] as const) {
+      expect(() => validateHookRule({ name: `阻断-${event}`, event, action: { kind: "command", command: "exit 0", blocking: true } })).not.toThrow();
+    }
+    for (const event of ["tool_execution_end", "tool_result", "session_end", "agent_end", "turn_end", "session_start"] as const) {
+      expect(() => validateHookRule({ name: `不该能阻断-${event}`, event, action: { kind: "command", command: "exit 0", blocking: true } })).toThrow("可以设为阻断型");
+    }
   });
 
   it("previews actions for the panel list", () => {
