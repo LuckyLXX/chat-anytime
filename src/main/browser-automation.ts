@@ -1125,8 +1125,8 @@ export class BrowserAutomationController {
 
   constructor(
     private readonly preview: BrowserPreviewController,
-    /** Fired when a session starts operating on a tab (bind time, and before a screenshot reveals a hidden tab) so the renderer can reveal the preview panel. */
-    private readonly notifyAutomationStarted: (tabId: string) => void = () => undefined,
+    /** Fired when a session starts operating on a tab (bind time, navigate with a hidden panel, and before a screenshot reveals a hidden tab) so the renderer can reveal the preview panel. `force` = unconditionally open/activate (old semantics — bind/switch/screenshot); `when-hidden` = only when the panel is closed or the tab is absent (navigate: a user watching another tab is not yanked back). */
+    private readonly notifyAutomationStarted: (tabId: string, reveal?: "force" | "when-hidden") => void = () => undefined,
     /** Loopback static server backing local-file navigation (file:// → http://127.0.0.1). */
     private readonly staticFiles: BrowserStaticServer = new BrowserStaticServer()
   ) {
@@ -1146,6 +1146,10 @@ export class BrowserAutomationController {
     try {
       const tabId = request.op === "attach" ? this.attachTab(sessionKey) : this.tabFor(sessionKey);
       resolvedTabId = tabId;
+      // navigate 是页面级变化，也是用户最想看到 AI 在干什么的时刻：面板被关掉或
+      // 标签不在面板里（渲染端重载脱节）时借这次操作把面板找回来。when-hidden：
+      // 面板开着且标签已在时不打扰正在看其他标签的用户（attach/switch/截图仍走 force）。
+      if (request.op === "navigate") this.notifyAutomationStarted(tabId, "when-hidden");
       this.tabLastActiveAt.set(tabId, Date.now());
       return await this.withTabLock(tabId, async () => {
         // 下载与弹窗共用的回执窗口：本次操作之前发生的下载已由上一个操作回执
@@ -1496,9 +1500,10 @@ export class BrowserAutomationController {
     const tabId = this.preview.tabIds().length > 0 && this.preview.tabIds().includes(foreground) ? foreground : this.createAutomationTab();
     this.sessionTabs.set(sessionKey, tabId);
     // Reveal the preview panel on bind (first operation / explicit attach /
-    // re-attach after the previous tab was closed) — never on every op, so a
-    // user watching another tab mid-run is not yanked back.
-    this.notifyAutomationStarted(tabId);
+    // re-attach after the previous tab was closed). Ordinary ops do NOT force
+    // a reveal (a user watching another tab mid-run is not yanked back); only
+    // navigate carries a when-hidden reveal so a closed/lost panel reopens.
+    this.notifyAutomationStarted(tabId, "force");
     return tabId;
   }
 
@@ -2186,7 +2191,9 @@ export class BrowserAutomationController {
   private async ensureTabRenderable(tabId: string): Promise<"cdp" | "capturePage"> {
     if (this.preview.isTabRendered(tabId) && this.preview.isWindowRenderable()) return "cdp";
     // 截图是用户想看到结果的时刻：把预览面板切到该标签（渲染端 dedup 激活）。
-    this.notifyAutomationStarted(tabId);
+    // force 是硬依赖：截图要出帧，标签必须真的被渲染（条件式 reveal 在用户注视
+    // 其他标签时会拒绝切换，这里必须无条件激活）。
+    this.notifyAutomationStarted(tabId, "force");
     const budget = this.preview.isWindowRenderable() ? SCREENSHOT_REVEAL_TIMEOUT_MS : SCREENSHOT_LAYOUT_TIMEOUT_MS;
     const laidOut = await awaitCondition(() => this.preview.isTabRendered(tabId), budget, SCREENSHOT_REVEAL_POLL_MS);
     if (laidOut) return this.preview.isWindowRenderable() ? "cdp" : "capturePage";
@@ -2412,7 +2419,7 @@ export class BrowserAutomationController {
         if (!targetTabId) throw new Error("请提供要切换到的 tabId（用 browser_tabs list 查看）");
         if (!this.preview.tabIds().includes(targetTabId)) throw new Error(`标签页不存在：${targetTabId}`);
         this.sessionTabs.set(sessionKey, targetTabId);
-        this.notifyAutomationStarted(targetTabId);
+        this.notifyAutomationStarted(targetTabId, "force");
         const state = this.preview.snapshot(targetTabId);
         return { ok: true, data: { kind: "tabs", tabs: [{ id: targetTabId, url: state.url, title: state.title, active: true }] } };
       }

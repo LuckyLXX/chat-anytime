@@ -2186,3 +2186,54 @@ describe("tab hibernation sweep", () => {
     expect(result).toEqual([]);
   });
 });
+
+/**
+ * automation-started 的 reveal 档位（2026-09-28 用户报告的修复）：
+ * AI 绑定标签后后续 navigate 走已绑定快速路径，此前永远不再发 automation-started
+ * ——面板一旦被关（或渲染端重载丢状态），AI 持续操作浏览器但面板永不自动打开。
+ * 现在 navigate 每次都发 when-hidden 档（渲染端只在面板未开/标签不在时展开），
+ * bind/switch/截图保持 force（截图必须真的出帧）。
+ */
+describe("automation-started reveal levels", () => {
+  const controllers: BrowserAutomationController[] = [];
+  afterEach(() => {
+    for (const controller of controllers) controller.dispose();
+    controllers.length = 0;
+  });
+
+  it("fires when-hidden on every navigate, including the already-bound fast path", async () => {
+    const preview = makeFakePreview(["default"]);
+    const events: Array<{ tabId: string; reveal?: string }> = [];
+    const controller = new BrowserAutomationController(preview, (tabId, reveal) => events.push({ tabId, reveal }));
+    controllers.push(controller);
+    const tabId = (await controller.handle("s1", { op: "tabs", action: "new" })).ok
+      ? ((await controller.handle("s1", { op: "tabs", action: "list" })) as { ok: true; data: { kind: "tabs"; tabs: Array<{ id: string; active: boolean }> } }).data.tabs.find((tab) => tab.active)!.id
+      : "";
+    expect(tabId).toMatch(/^pi-browser-/u);
+    // bind（tabs new 改绑）→ force；随后两次 navigate 全是 when-hidden。
+    events.length = 0;
+    await controller.handle("s1", { op: "navigate", url: "https://example.com/a" });
+    await controller.handle("s1", { op: "navigate", url: "https://example.com/b" });
+    expect(events).toEqual([
+      { tabId, reveal: "when-hidden" },
+      { tabId, reveal: "when-hidden" }
+    ]);
+  });
+
+  it("keeps force on attach/switch (bind semantics) and stays silent on pure queries", async () => {
+    const preview = makeFakePreview(["default"]);
+    const events: Array<{ tabId: string; reveal?: string }> = [];
+    const controller = new BrowserAutomationController(preview, (tabId, reveal) => events.push({ tabId, reveal }));
+    controllers.push(controller);
+    await controller.handle("s1", { op: "attach" });
+    expect(events).toEqual([{ tabId: "default", reveal: "force" }]);
+    events.length = 0;
+    // 纯查询（list / get url）不该弹面板。
+    await controller.handle("s1", { op: "tabs", action: "list" });
+    await controller.handle("s1", { op: "get", what: "url" });
+    expect(events).toEqual([]);
+    // 切换标签 = AI 换了工作标签 → force。
+    await controller.handle("s1", { op: "tabs", action: "switch", tabId: "default" });
+    expect(events).toEqual([{ tabId: "default", reveal: "force" }]);
+  });
+});

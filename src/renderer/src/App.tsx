@@ -104,6 +104,7 @@ import { showGalleryWallLanding } from "./lib/landing-gallery";
 import { AppearanceSettings } from "./AppearanceSettings";
 import { HooksSettings } from "./HooksSettings";
 import { selectableCatalogModels } from "./lib/model-list";
+import { shouldRevealBrowserTab } from "./lib/browser-reveal";
 import { resourceScopeLabels, sessionRunStatusLabels, toolLabel } from "../../shared/locale";
 import { SubagentSettings } from "./SubagentSettings";
 import { UsageSettings } from "./UsageSettings";
@@ -399,6 +400,9 @@ export function App(): ReactNode {
   const [previewAddMenuOpen, setPreviewAddMenuOpen] = useState(false);
   const previewRef = useRef<PreviewState | undefined>(preview);
   previewRef.current = preview;
+  // 事件回调里读最新面板开合状态（与 previewRef 同款模式）。
+  const previewOpenedRef = useRef(previewOpened);
+  previewOpenedRef.current = previewOpened;
   const [previewEditorStates, setPreviewEditorStates] = useState<Record<string, PreviewEditorState>>({});
   const [sidebarView, setSidebarView] = useState<"topics" | "files">("topics");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -1213,6 +1217,24 @@ export function App(): ReactNode {
     if (maximizedPaneId && (!splitTree || !leafIds(splitTree).includes(maximizedPaneId))) setMaximizedPaneId(undefined);
   }, [splitTree, maximizedPaneId]);
 
+  /** 渲染端重载（Ctrl+R/崩溃恢复）后恢复主进程存活的浏览器标签：React 状态全丢
+   *  但主进程标签还在（hideAllViews 只藏视图不关标签）。不自动开面板——用户重载
+   *  前可能故意关了它；AI 下次 navigate 的 when-hidden reveal 会自动展开兕底。 */
+  const browserTabsRestoreDoneRef = useRef(false);
+  useEffect(() => {
+    if (browserTabsRestoreDoneRef.current || !ready) return;
+    browserTabsRestoreDoneRef.current = true;
+    const ids = useDesktopStore.getState().restoredBrowserTabs;
+    if (ids.length === 0) return;
+    setPreview((current) => {
+      const known = current?.tabs ?? [];
+      const missing = ids.filter((id) => !known.some((tab) => tab.id === id));
+      if (missing.length === 0) return current;
+      const tabs = [...known, ...missing.map((id) => ({ id, target: { type: "browser", id } as const }))];
+      return { tabs, activeTabId: current?.activeTabId ?? tabs[0]!.id };
+    });
+  }, [ready]);
+
   function updatePreviewSplitFromPointer(clientX: number, clientY: number): void {
     const bounds = workAreaRef.current?.getBoundingClientRect();
     if (!bounds || bounds.width <= 0 || bounds.height <= 0) return;
@@ -1550,13 +1572,19 @@ export function App(): ReactNode {
   }, [lastChangedExecutionId, preview]);
 
   // AI 浏览器自动化与预览面板同步：created 把新标签加进面板并激活；
-  // automation-started 展开面板并切到 AI 正在操作的标签（面板未打开时
-  // 自动打开，用户能看到 AI 的操作过程）；closed 移除面板标签（native
-  // view 已在主进程销毁）。用户手动开/关标签触发同一事件，openPreviewTarget
-  // 的去重逻辑保证幂等。
+  // automation-started 按 reveal 档位展开面板并切到 AI 正在操作的标签；closed
+  // 移除面板标签（native view 已在主进程销毁）。用户手动开/关标签触发同一事件，
+  // openPreviewTarget 的去重逻辑保证幂等。reveal 语义（见 lib/browser-reveal）：
+  //   - force（bind/switch/截图）：无条件展开+激活；
+  //   - when-hidden（navigate，缺省同档）：仅面板未开或标签不在面板时展开——修复
+  //     「面板被关/渲染端重载后 AI 持续操作浏览器但面板永远不再自动打开」的缺口，
+  //     同时不打扰正在看其他标签的用户（不拉回）。
   useEffect(() => window.piDesktop.onBrowserTabsChanged((event) => {
     if (event.action === "created" || event.action === "automation-started") {
-      openPreviewTarget({ type: "browser", id: event.tabId }, event.tabId);
+      const conditional = event.action === "automation-started" && event.reveal !== "force";
+      if (!conditional || shouldRevealBrowserTab(previewOpenedRef.current, previewRef.current?.tabs.map((tab) => tab.id), event.tabId)) {
+        openPreviewTarget({ type: "browser", id: event.tabId }, event.tabId);
+      }
       return;
     }
     setPreview((current) => {

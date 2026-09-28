@@ -989,7 +989,7 @@ export type BrowserTabsEvent =
   | { action: "created"; tabId: string; url: string }
   | { action: "closed"; tabId: string }
   /** AI 会话开始操作某个标签页：渲染端自动展开预览面板并激活该标签（用户可见）。 */
-  | { action: "automation-started"; tabId: string };
+  | { action: "automation-started"; tabId: string; reveal?: "force" | "when-hidden" };
 
 /**
  * 离屏缩略图（design_export 回执附图，作品墙缩略图共用同一控制器）。utility 请求
@@ -2062,6 +2062,8 @@ export interface DesktopBootstrap {
   runtime?: RuntimeSnapshot;
   catalog?: { models: ModelOption[]; providers: ProviderOption[] };
   resources?: ResourceCatalog;
+  /** 主进程存活的浏览器标签页 id（渲染端重载后 React 状态丢失，靠它恢复面板标签；空/缺省 = 无可恢复）。 */
+  browserTabs?: string[];
 }
 
 export interface DesktopApi {

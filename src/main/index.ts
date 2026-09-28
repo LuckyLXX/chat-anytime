@@ -618,9 +618,11 @@ function createWindow(): void {
   });
   mainWindow = nextWindow;
   browserPreviewController = previewController;
-  browserAutomationController = new BrowserAutomationController(previewController, (tabId) => {
-    // AI 开始操作某个标签页：让预览面板自动展开并激活它（用户可见）。
-    if (!nextWindow.isDestroyed()) nextWindow.webContents.send("browser-preview:tabs", { action: "automation-started", tabId });
+  browserAutomationController = new BrowserAutomationController(previewController, (tabId, reveal) => {
+    // AI 开始操作某个标签页：让预览面板自动展开并激活它（用户可见）。reveal 语义
+    // 见 BrowserAutomationController 构造注释：force 无条件激活；when-hidden 仅在
+    // 面板未开/标签不在面板时展开（不打扰正在看其他标签的用户）。
+    if (!nextWindow.isDestroyed()) nextWindow.webContents.send("browser-preview:tabs", { action: "automation-started", tabId, ...(reveal ? { reveal } : {}) });
   });
   // 内置浏览器的静态服务也挂上面板状态端点：AI 写面板作品时会先在这里看效果，
   // 没有数据就只能看到一个空壳（见 browser-automation.setPanelStateEndpoint）。
@@ -810,9 +812,12 @@ function isSshCommand(value: unknown): value is SshCommand {
 
 function registerIpc(): void {
   ipcMain.handle("desktop:bootstrap", (): DesktopBootstrap => {
+    // 渲染端重载（Ctrl+R/崩溃恢复）后 React 状态全丢，但主进程的浏览器标签还活着
+    // （hideAllViews 只藏视图不关标签）。带上 id 清单让新渲染端恢复面板标签，否则
+    // AI 后续操作走已绑定快速路径不再 reveal，用户就看不到 AI 在操作哪个页面。
     const source = loadSettings();
     const settings: DesktopSettings = settingsForRenderer({ ...source, providers: source.providers.map((provider) => ({ ...provider, keyConfigured: Boolean(credentialsCache[provider.id]) })), jevKeyConfigured: Boolean(credentialsCache[JEV_CREDENTIAL_ID]) });
-    return { platform: process.platform, version: app.getVersion(), securityWarning, settings, runtime: latestSnapshot, catalog: latestCatalog ? { models: latestCatalog.models, providers: latestCatalog.providers } : undefined, resources: latestResources };
+    return { platform: process.platform, version: app.getVersion(), securityWarning, settings, runtime: latestSnapshot, catalog: latestCatalog ? { models: latestCatalog.models, providers: latestCatalog.providers } : undefined, resources: latestResources, browserTabs: browserPreviewController?.tabIds() ?? [] };
   });
   // 主题导入：对话框与全部文件工作都在主进程（渲染端不再用 webkitdirectory + FileReader
   // 读盘、不再把资产变成 base64 过 IPC）。渲染端只拿 CSS 文本与统计。

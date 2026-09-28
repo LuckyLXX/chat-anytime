@@ -208,6 +208,8 @@ interface DesktopState {
   ready: boolean;
   /** 正在运行的版本（来自主进程 bootstrap 的 `app.getVersion()`）：设置弹窗左栏底部常驻展示。 */
   appVersion: string;
+  /** bootstrap 回传的主进程存活浏览器标签 id：渲染端重载后恢复面板标签用（一次性消费，App 里恢复后不再变）。 */
+  restoredBrowserTabs: string[];
   snapshot: RuntimeSnapshot;
   /** 分屏格子（watched 非激活会话）的会话级快照，按 sessionId 键控。 */
   paneStates: Record<string, SessionPaneSnapshot>;
@@ -388,6 +390,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   transcriptErrors: {},
   designDocs: [],
   galleryApps: [],
+  restoredBrowserTabs: [],
   seenDesignRevisions: {},
   usageStatsLoading: false,
   settings: emptySettings,
@@ -416,6 +419,9 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
       // 作品清单必须从 bootstrap 水合一帧：utility 的启动推送早于本订阅（main 先
       // fork runtime 再建窗口），只靠推送则冷启动后作品墙一直空到下一次变更。
       galleryApps: bootstrap.resources?.gallery ?? get().galleryApps,
+      // 主进程存活的浏览器标签：渲染端重载后 React 状态全丢，靠这份清单恢复面板标签
+      //（见 App 的启动恢复 effect；不自动开面板，AI 下次 navigate 的 when-hidden reveal 会兕底）。
+      restoredBrowserTabs: bootstrap.browserTabs ?? [],
       customProvider: bootstrap.settings.providers.find((provider) => provider.id === "chatanytime-openai-compatible"),
       customProviderKeyConfigured: Boolean(bootstrap.settings.providers.find((provider) => provider.id === "chatanytime-openai-compatible")?.keyConfigured),
       jevKeyConfigured: Boolean(bootstrap.settings.jevKeyConfigured),
