@@ -222,6 +222,7 @@ export function HooksSettings({ resources, workspaceOpen }: HooksSettingsProps):
               ))}
             </ul>
             <p className="resource-form-help">命令钩子通过 stdin 收到事件 JSON 上下文，另有 <code>HOOK_EVENT / HOOK_SESSION_ID / HOOK_WORKSPACE / HOOK_TOOL</code> 环境变量；通知文案可用 <code>{"{sessionTitle}"}</code>、<code>{"{toolName}"}</code> 等占位符。</p>
+            <p className="resource-form-help">命令钩子的 stdout 可输出一条 JSON 来控制效果：<code>block</code>/<code>reason</code>（等同退出码 2 的阻断）、<code>additionalContext</code>（注入对话尾部，给模型看）、<code>updatedInput</code>（仅工具调用前，改写工具参数）、<code>userInput</code>（仅用户输入前，改写这次输入）、<code>toolResult</code>（仅工具结果生成后，追加到结果末尾）；非 JSON 输出只当诊断文本，退出码 2 以外的非零退出码按失败放行。</p>
             {resources.hooks.length > 0 && (
               <label className="hook-sample-field"><span>测试样例行</span><input value={sample} placeholder="git push --force" onChange={(changeEvent) => setSample(changeEvent.target.value)} /><small>点行内「测试」时作为模拟输入喂给规则（拦截规则 / 命令钩子）</small></label>
             )}

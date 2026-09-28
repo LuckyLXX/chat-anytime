@@ -83,6 +83,18 @@ const toolLabels: Record<string, string> = {
   gallery_publish: "发布作品"
 };
 
+/**
+ * 扩展消息（role=custom）的 callout 标题。钩子上下文（additionalContext 注入）带上
+ * 规则名，便于用户对照是哪个钩子写进对话的；未知 customType 保持原样。
+ */
+export function extensionCalloutTitle(customType: string | undefined, details: unknown): string {
+  if (customType === "pidesktop-hook-context") {
+    const rule = (details as { rule?: unknown } | undefined)?.rule;
+    return typeof rule === "string" && rule.trim() ? `钩子上下文 · ${rule.trim()}` : "钩子上下文";
+  }
+  return customType || "扩展消息";
+}
+
 export function toolLabel(name: string): string {
   return toolLabels[name] ?? name;
 }

@@ -1,9 +1,11 @@
 // 钩子运行时：第三个 app-owned inline extension（pidesktop-hooks），模式与
 // runtime-permissions.ts（阻断型 tool_call）和 tool-audit.ts（观察型订阅）一致。
 // 事件 handler 在触发时动态读取 rules() 缓存，因此规则增删改只需刷新缓存，
-// 不需要重建会话。缓存纪律：钩子输出绝不进入系统提示词或对话流——上下文只
-// 通过 stdin JSON 与 HOOK_* 环境变量交给命令；通知经 hook-notify 推送由主进程
-// 显示。信任模型：命令是用户自写配置，等同终端输入，不经 agent 权限门。
+// 不需要重建会话。缓存纪律：钩子输出**绝不进入系统提示词或工具 schema**——上下文只
+// 通过 stdin JSON 与 HOOK_* 环境变量交给命令；唯一的例外是命令钩子显式返回
+// additionalContext 时把自由文本注入**对话尾部**（sendMessage，工具结果式补充），
+// 前缀缓存零影响。通知经 hook-notify 推送由主进程显示。信任模型：命令是用户自写
+// 配置，等同终端输入，不经 agent 权限门。
 
 import { spawn } from "node:child_process";
 import type { ExtensionAPI, InlineExtension } from "@earendil-works/pi-coding-agent";
@@ -72,18 +74,95 @@ export interface CommandRunResult {
 
 export interface HookActionOutcome {
   ok: boolean;
-  /** 阻断型评估为拦截（仅 tool_call 语义）。 */
+  /** 阻断型评估为拦截（tool_call / user_input / session_before_compact）。 */
   blocked?: boolean;
   reason?: string;
   /** 面板“测试”展示的输出摘要。 */
   detail: string;
   durationMs: number;
+  /** command 动作 stdout 的 JSON 输出（非 JSON 时缺省）。 */
+  output?: HookJsonOutput;
 }
 
 const OUTPUT_CAP = 8_192;
+/** 注入对话尾部的单条文本上限（超过则截断并在 hook-run 里标注）。 */
+const HOOK_CONTEXT_CAP = 4_096;
 
 function truncateOutput(value: string): string {
   return value.length <= OUTPUT_CAP ? value : `${value.slice(0, OUTPUT_CAP)}…<截断>`;
+}
+
+/**
+ * 命令钩子 stdout 的统一输出协议（全部字段可选，向后兼容既有的 block/reason）。
+ * 非 JSON stdout 只当诊断文本，不算失败；事件不匹配的字段由 planHookEffects 如实报告。
+ */
+export interface HookJsonOutput {
+  block?: boolean;
+  /** 与 block 等价（兼容写法）。 */
+  decision?: string;
+  /** false 等价于 block（兼容写法）。 */
+  continue?: boolean;
+  reason?: string;
+  /** 交给模型的补充说明：注入对话尾部（不进系统提示词、不进工具 schema）。 */
+  additionalContext?: string;
+  /** 仅 tool_call：改写工具入参（原地 merge 进 event.input）。 */
+  updatedInput?: Record<string, unknown>;
+  /** 仅 user_input：改写用户输入。 */
+  userInput?: string;
+  /** 仅 tool_result：追加到工具结果末尾的文本。 */
+  toolResult?: string;
+}
+
+function isJsonRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+/** 解析命令钩子的 stdout JSON；非 JSON（或以非 `{` 开头）一律当作诊断文本。 */
+export function parseHookJsonOutput(stdout: string): HookJsonOutput | undefined {
+  const text = stdout.trim();
+  if (!text.startsWith("{")) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return isJsonRecord(parsed) ? parsed as HookJsonOutput : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** 一条钩子输出在各事件下能生效的效果；不匹配的字段进 ignored，由调用方如实报告。 */
+export interface HookEffects {
+  applied: string[];
+  ignored: string[];
+  updatedInput?: Record<string, unknown>;
+  userInput?: string;
+  toolResult?: string;
+  additionalContext?: string;
+}
+
+export function planHookEffects(event: HookRule["event"], output: HookJsonOutput | undefined): HookEffects {
+  const effects: HookEffects = { applied: [], ignored: [] };
+  if (!output) return effects;
+  const text = (value: unknown): string | undefined => typeof value === "string" && value.trim() ? value : undefined;
+
+  // additionalContext 在任何事件都能注入对话尾部（session_end 例外，没有可用会话）。
+  const additionalContext = text(output.additionalContext);
+  if (additionalContext) effects.additionalContext = additionalContext;
+
+  if (output.updatedInput !== undefined) {
+    if (event === "tool_call" && isJsonRecord(output.updatedInput)) effects.updatedInput = output.updatedInput;
+    else effects.ignored.push("updatedInput");
+  }
+  const userInput = text(output.userInput);
+  if (userInput !== undefined) {
+    if (event === "user_input") effects.userInput = userInput;
+    else effects.ignored.push("userInput");
+  }
+  const toolResult = text(output.toolResult);
+  if (toolResult !== undefined) {
+    if (event === "tool_result") effects.toolResult = toolResult;
+    else effects.ignored.push("toolResult");
+  }
+  return effects;
 }
 
 /** 钩子匹配的目标文本：bash/powershell 用命令行，其余工具用参数 JSON（覆盖 path/file_path 等）。 */
@@ -233,23 +312,20 @@ export function hookMatchTextForEvent(event: HookRule["event"], context: HookCon
   return hookMatchText(context.toolName ?? "", context.toolInput);
 }
 
-/** 阻断型 command 的判定：exit 2，或 stdout 可解析出 {"block":true,"reason"}。 */
+/** 阻断型 command 的判定：退出码 2，或 stdout 输出 block / decision:"block" / continue:false。 */
 function blockingCommandVerdict(result: CommandRunResult): { blocked: boolean; reason?: string } {
   if (result.timedOut) return { blocked: false };
+  const output = parseHookJsonOutput(result.stdout);
+  const stderrLine = (result.stderr.trim().split(/\r?\n/u)[0] ?? "").trim();
   if (result.exitCode === 2) {
-    const reason = (result.stderr.trim() || result.stdout.trim() || "").split(/\r?\n/u)[0];
-    return { blocked: true, reason: reason || "阻断型钩子命令以退出码 2 结束" };
+    const reason = (typeof output?.reason === "string" ? output.reason.trim() : "")
+      || stderrLine
+      || (output ? "" : (result.stdout.trim().split(/\r?\n/u)[0] ?? "").trim())
+      || "阻断型钩子命令以退出码 2 结束";
+    return { blocked: true, reason };
   }
-  const stdoutText = result.stdout.trim();
-  if (stdoutText.startsWith("{")) {
-    try {
-      const parsed = JSON.parse(stdoutText) as { block?: unknown; reason?: unknown };
-      if (parsed.block === true) {
-        return { blocked: true, reason: typeof parsed.reason === "string" && parsed.reason.trim() ? parsed.reason.trim() : "阻断型钩子命令请求拦截" };
-      }
-    } catch {
-      // 非 JSON 输出按退出码语义处理
-    }
+  if (output && (output.block === true || output.decision === "block" || output.continue === false)) {
+    return { blocked: true, reason: typeof output.reason === "string" && output.reason.trim() ? output.reason.trim() : "阻断型钩子命令请求拦截" };
   }
   return { blocked: false };
 }
@@ -283,6 +359,7 @@ export async function executeHookAction(rule: HookRule, context: HookContext, de
     const result = await runHookCommand(rule, context);
     const lines = [result.stdout, result.stderr].map((part) => part.trim()).filter(Boolean);
     const verdict = action.blocking === true && (context.event === "tool_call" || context.event === "user_input" || context.event === "session_before_compact") ? blockingCommandVerdict(result) : { blocked: false };
+    const output = parseHookJsonOutput(result.stdout);
     return {
       ok: verdict.blocked || (!result.timedOut && result.exitCode === 0),
       blocked: verdict.blocked || undefined,
@@ -291,7 +368,8 @@ export async function executeHookAction(rule: HookRule, context: HookContext, de
         result.timedOut ? `命令超时（${hookTimeoutMs(rule) / 1000}s）被终止` : `退出码 ${result.exitCode ?? "未知"}`,
         ...lines
       ].join("\n"),
-      durationMs: result.durationMs
+      durationMs: result.durationMs,
+      ...(output ? { output } : {})
     };
   }
   return { ok: false, detail: "未知动作类型", durationMs: 0 };
@@ -303,6 +381,8 @@ function warn(deps: HooksExtensionDeps, message: string): void {
 
 type HookRunMessage = Extract<RuntimeMessage, { type: "hook-run" }>;
 type HookRunReporter = (entry: ConfiguredHook, outcome: HookActionOutcome) => void;
+/** 上报前的效果应用/注释钩子（各事件注入自己的语义）。 */
+type HookOutcomeAnnotator = (entry: ConfiguredHook, outcome: HookActionOutcome) => HookActionOutcome;
 const HOOK_RUN_THROTTLE_MS = 250;
 
 function createHookRunReporter(deps: HooksExtensionDeps): HookRunReporter {
@@ -378,12 +458,20 @@ function rulesFor(deps: HooksExtensionDeps, event: HookRule["event"], toolName: 
     .filter(({ rule }) => toolName === undefined || toolMatcherMatches(rule.matcher, toolName));
 }
 
+/**
+ * 把效果备注拼进 hook-run 的 detail（面板可见：“已注入对话”/“已改写参数 …”）。
+ * 没有备注时原样返回，不改写既有文案。
+ */
+function withEffectNotes(outcome: HookActionOutcome, notes: string[]): HookActionOutcome {
+  return notes.length === 0 ? outcome : { ...outcome, detail: `${outcome.detail}\n${notes.join("；")}` };
+}
+
 /** 观察型事件：逐条执行，未开启 wait 时发出即不管。 */
-function fireObservingHooks(deps: HooksExtensionDeps, event: "tool_execution_end" | "tool_result" | "agent_end" | "turn_end", context: HookContext, toolName: string | undefined, warnedPending: Set<string>, report: HookRunReporter): void {
+function fireObservingHooks(deps: HooksExtensionDeps, event: "tool_execution_end" | "tool_result" | "agent_end" | "turn_end", context: HookContext, toolName: string | undefined, warnedPending: Set<string>, report: HookRunReporter, annotate?: HookOutcomeAnnotator): void {
   for (const entry of rulesFor(deps, event, toolName, warnedPending)) {
     const startedAt = Date.now();
     void executeHookAction(entry.rule, context, deps).then((outcome) => {
-      report(entry, outcome);
+      report(entry, annotate ? annotate(entry, outcome) : outcome);
     }, (error: unknown) => {
       const detail = `执行失败：${error instanceof Error ? error.message : String(error)}`;
       warn(deps, `钩子「${entry.name}」${detail}`);
@@ -417,13 +505,15 @@ async function runSessionStartHooks(deps: HooksExtensionDeps, warnedPending: Set
  */
 async function runResultHooks(
   deps: HooksExtensionDeps,
-  event: "user_input" | "session_before_compact",
+  event: "user_input" | "session_before_compact" | "tool_result",
   context: HookContext,
+  toolName: string | undefined,
   warnedPending: Set<string>,
   report: HookRunReporter,
-  blockLabel: string
+  blockLabel: string,
+  annotate: HookOutcomeAnnotator
 ): Promise<HookActionOutcome | undefined> {
-  for (const entry of rulesFor(deps, event, undefined, warnedPending)) {
+  for (const entry of rulesFor(deps, event, toolName, warnedPending)) {
     const startedAt = Date.now();
     let outcome: HookActionOutcome;
     if (entry.rule.action.kind === "block") {
@@ -449,8 +539,9 @@ async function runResultHooks(
         warn(deps, `阻断型钩子「${entry.name}」执行异常（${outcome.detail.split("\n", 1)[0]}），已放行`);
       }
     }
-    report(entry, outcome);
-    if (outcome.blocked) return outcome;
+    const annotated = annotate(entry, outcome);
+    report(entry, annotated);
+    if (annotated.blocked) return annotated;
   }
   return undefined;
 }
@@ -466,7 +557,18 @@ export function fireSessionEndHooks(deps: HooksExtensionDeps, reason: string): v
   for (const entry of rulesFor(deps, "session_end", undefined, warnedPending)) {
     const startedAt = Date.now();
     void executeHookAction(entry.rule, context, deps).then((outcome) => {
-      report(entry, outcome);
+      const effects = planHookEffects("session_end", outcome.output);
+      const notes: string[] = [];
+      if (effects.ignored.length > 0) {
+        warn(deps, `钩子「${entry.name}」输出了 ${effects.ignored.join(" / ")}，但 session_end 事件不支持这些字段，已忽略`);
+        notes.push(`${effects.ignored.join(" / ")}：事件不支持，已忽略`);
+      }
+      if (effects.additionalContext) {
+        // 会话已销毁：没有可用会话能把文本注入对话尾部，如实告知而不是静默丢弃。
+        warn(deps, `钩子「${entry.name}」返回了 additionalContext，但会话已销毁，无法注入对话`);
+        notes.push("additionalContext：会话已销毁，无法注入对话");
+      }
+      report(entry, withEffectNotes(outcome, notes));
     }, (error: unknown) => {
       const detail = `执行失败：${error instanceof Error ? error.message : String(error)}`;
       warn(deps, `钩子「${entry.name}」${detail}`);
@@ -501,7 +603,21 @@ export async function testHook(rule: HookRule, sample: string | undefined, deps:
       durationMs: 0
     };
   }
-  return executeHookAction(rule, context, deps);
+  return annotateTestOutcome(await executeHookAction(rule, context, deps));
+}
+
+/** 测试模式不应用效果（没有会话上下文）：把会被应用/忽略的字段如实标在 detail 里。 */
+function annotateTestOutcome(outcome: HookActionOutcome): HookActionOutcome {
+  const output = outcome.output;
+  if (!output) return outcome;
+  const names = [
+    ...(output.updatedInput !== undefined ? ["updatedInput"] : []),
+    ...(typeof output.userInput === "string" && output.userInput.trim() ? ["userInput"] : []),
+    ...(typeof output.toolResult === "string" && output.toolResult.trim() ? ["toolResult"] : []),
+    ...(typeof output.additionalContext === "string" && output.additionalContext.trim() ? ["additionalContext"] : [])
+  ];
+  if (names.length === 0) return outcome;
+  return { ...outcome, detail: `${outcome.detail}\n测试模式：${names.join(" / ")} 只展示、不实际应用` };
 }
 
 /**
@@ -536,7 +652,8 @@ function runUsageFromMessages(messages: unknown): { usage?: HookContext["usage"]
  * 钩子扩展本体。事件接线：
  * - tool_call：block 规则同步评估 + 阻断型命令顺序 await，返回 { block, reason }（与权限门同款语义，两道门叠加生效）；
  * - tool_execution_start/end：记录 args/起始时间，结束时 fire-and-forget（改完即格式化类钩子）；
- * - tool_result：工具结果生成后、进对话前触发（默认 fire-and-forget）；
+ * - tool_result：工具结果生成后、进对话前逐条 await（与 tool_call 同款“等结果”）；
+ *   返回 toolResult 时追加到结果文本尾部；
  * - user_input：用户输入提交前触发（含排队 steer/followUp），逐条 await；命中 block/
  *   阻断型命令时返回 handled——这次输入被吞掉（渲染端的乐观气泡会被下一次快照抹掉，
  *   用户靠 hook-notice 得知）；
@@ -557,6 +674,46 @@ export function createHooksExtension(deps: HooksExtensionDeps): InlineExtension 
       const toolStarts = new Map<string, { startedAt: number; args: unknown }>();
       let turnStartedAt: number | undefined;
       let runStartedAt: number | undefined;
+
+      /**
+       * 把钩子文本注入对话尾部：官方为“不能插在 tool call 与 tool result 之间”而设的
+       * 通道，流式中入队、turn_end 后 flush，模型在同一回合的下一轮就能看到；
+       * 同时落进会话历史、渲染成 callout，且不碰系统提示词与工具 schema（前缀缓存零影响）。
+       * triggerTurn:false 明确“不另起回合”。
+       */
+      function injectHookContext(entry: ConfiguredHook, event: HookRule["event"], text: string): string {
+        const truncated = text.length > HOOK_CONTEXT_CAP;
+        try {
+          pi.sendMessage({
+            customType: "pidesktop-hook-context",
+            content: truncated ? `${text.slice(0, HOOK_CONTEXT_CAP)}…<截断>` : text,
+            display: true,
+            details: { rule: entry.name, event }
+          }, { triggerTurn: false });
+          return truncated ? "已注入对话（已截断）" : "已注入对话";
+        } catch (error) {
+          warn(deps, `钩子「${entry.name}」注入对话失败：${error instanceof Error ? error.message : String(error)}`);
+          return "注入对话失败";
+        }
+      }
+
+      /**
+       * 共用效果：additionalContext 注入对话尾部，事件不支持的字段如实警告（不静默）。
+       * updatedInput / userInput / toolResult 由各事件 handler 自己取用并返回给 Pi。
+       */
+      function sharedEffects(entry: ConfiguredHook, event: HookRule["event"], outcome: HookActionOutcome): { notes: string[]; effects: HookEffects } {
+        const effects = planHookEffects(event, outcome.output);
+        const notes: string[] = [];
+        if (effects.ignored.length > 0) {
+          warn(deps, `钩子「${entry.name}」输出了 ${effects.ignored.join(" / ")}，但 ${event} 事件不支持这些字段，已忽略`);
+          notes.push(`${effects.ignored.join(" / ")}：事件不支持，已忽略`);
+        }
+        if (effects.additionalContext) notes.push(injectHookContext(entry, event, effects.additionalContext));
+        return { notes, effects };
+      }
+
+      /** 观察型事件的上报前处理：只有 additionalContext 能生效，其余字段如实忽略。 */
+      const annotateObserved: HookOutcomeAnnotator = (entry, outcome) => withEffectNotes(outcome, sharedEffects(entry, entry.rule.event, outcome).notes);
 
       pi.on("session_start", () => {
         void runSessionStartHooks(deps, warnedPending, reportHookRun);
@@ -593,7 +750,13 @@ export function createHooksExtension(deps: HooksExtensionDeps): InlineExtension 
               const detail = `命令启动失败：${error instanceof Error ? error.message : String(error)}`;
               outcome = { ok: false, detail, durationMs: Date.now() - startedAt };
             }
-            reportHookRun(entry, outcome);
+            const { notes, effects } = sharedEffects(entry, "tool_call", outcome);
+            // updatedInput 靠“原地改 event.input”生效（Pi 不重新校验改写后的参数）——必须在返回前应用。
+            if (effects.updatedInput && isJsonRecord(toolInput)) {
+              Object.assign(toolInput, effects.updatedInput);
+              notes.push(`已改写参数 ${Object.keys(effects.updatedInput).join("、")}`);
+            }
+            reportHookRun(entry, withEffectNotes(outcome, notes));
             if (outcome.blocked) return { block: true, reason: outcome.reason };
             if (!outcome.ok) {
               // 非阻断语义的失败（超时/崩溃）默认放行并记日志，避免坏钩子卡死回合。
@@ -604,14 +767,32 @@ export function createHooksExtension(deps: HooksExtensionDeps): InlineExtension 
         return undefined;
       });
 
-      pi.on("tool_result", (event) => {
+      /**
+       * tool_result：工具结果生成后、进对话前，逐条顺序 await（与 tool_call 同款的“等结果”语义）。
+       * 追加文本靠回传改写后的 content；details 原样回传（Pi 0.87 实测“漏传 = 保留原 details”，
+       * 显式回传是为了扛住未来语义收紧）。
+       */
+      pi.on("tool_result", async (event) => {
         const context: HookContext = {
           ...baseContext(deps, "tool_result"),
           toolName: event.toolName,
           toolInput: event.input,
           isError: event.isError
         };
-        fireObservingHooks(deps, "tool_result", context, event.toolName, warnedPending, reportHookRun);
+        const appended: string[] = [];
+        await runResultHooks(deps, "tool_result", context, event.toolName, warnedPending, reportHookRun, "工具结果", (entry, outcome) => {
+          const { notes, effects } = sharedEffects(entry, "tool_result", outcome);
+          if (effects.toolResult) {
+            appended.push(effects.toolResult);
+            notes.push("已追加工具结果");
+          }
+          return withEffectNotes(outcome, notes);
+        });
+        if (appended.length === 0) return undefined;
+        return {
+          content: [...event.content, ...appended.map((text) => ({ type: "text" as const, text }))],
+          details: event.details
+        };
       });
 
       pi.on("input", async (event) => {
@@ -621,8 +802,17 @@ export function createHooksExtension(deps: HooksExtensionDeps): InlineExtension 
           source: event.source,
           ...(event.streamingBehavior ? { streamingBehavior: event.streamingBehavior } : {})
         };
-        const blocked = await runResultHooks(deps, "user_input", context, warnedPending, reportHookRun, "用户输入");
-        return blocked ? { action: "handled" as const } : undefined;
+        let transformed: string | undefined;
+        const blocked = await runResultHooks(deps, "user_input", context, undefined, warnedPending, reportHookRun, "用户输入", (entry, outcome) => {
+          const { notes, effects } = sharedEffects(entry, "user_input", outcome);
+          if (effects.userInput) {
+            transformed = effects.userInput;
+            notes.push("已改写用户输入");
+          }
+          return withEffectNotes(outcome, notes);
+        });
+        if (blocked) return { action: "handled" as const };
+        return transformed !== undefined ? { action: "transform" as const, text: transformed } : undefined;
       });
 
       pi.on("session_before_compact", async (event) => {
@@ -631,7 +821,10 @@ export function createHooksExtension(deps: HooksExtensionDeps): InlineExtension 
           reason: event.reason,
           willRetry: event.willRetry
         };
-        const blocked = await runResultHooks(deps, "session_before_compact", context, warnedPending, reportHookRun, "上下文压缩");
+        const blocked = await runResultHooks(deps, "session_before_compact", context, undefined, warnedPending, reportHookRun, "上下文压缩", (entry, outcome) => {
+          const { notes } = sharedEffects(entry, "session_before_compact", outcome);
+          return withEffectNotes(outcome, notes);
+        });
         return blocked ? { cancel: true as const } : undefined;
       });
 
@@ -650,7 +843,7 @@ export function createHooksExtension(deps: HooksExtensionDeps): InlineExtension 
           isError: event.isError,
           ...(started ? { durationMs: Date.now() - started.startedAt } : {})
         };
-        fireObservingHooks(deps, "tool_execution_end", context, event.toolName, warnedPending, reportHookRun);
+        fireObservingHooks(deps, "tool_execution_end", context, event.toolName, warnedPending, reportHookRun, annotateObserved);
       });
 
       pi.on("turn_start", (event) => {
@@ -666,7 +859,7 @@ export function createHooksExtension(deps: HooksExtensionDeps): InlineExtension 
           ...(usage ? { usage: { input: usage.input ?? 0, output: usage.output ?? 0, cacheRead: usage.cacheRead ?? 0, cacheWrite: usage.cacheWrite ?? 0, cost: usage.cost?.total ?? 0 } } : {})
         };
         turnStartedAt = undefined;
-        fireObservingHooks(deps, "turn_end", context, undefined, warnedPending, reportHookRun);
+        fireObservingHooks(deps, "turn_end", context, undefined, warnedPending, reportHookRun, annotateObserved);
       });
 
       pi.on("agent_start", () => {
@@ -682,7 +875,7 @@ export function createHooksExtension(deps: HooksExtensionDeps): InlineExtension 
           isError
         };
         runStartedAt = undefined;
-        fireObservingHooks(deps, "agent_end", context, undefined, warnedPending, reportHookRun);
+        fireObservingHooks(deps, "agent_end", context, undefined, warnedPending, reportHookRun, annotateObserved);
       });
     }
   };

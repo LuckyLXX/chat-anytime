@@ -1,11 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { HookRule, RuntimeMessage } from "../shared/protocol.js";
-import { createHooksExtension, fireSessionEndHooks, runHookCommand, testHook, type HooksExtensionDeps } from "./runtime-hooks.js";
+import { createHooksExtension, fireSessionEndHooks, parseHookJsonOutput, planHookEffects, runHookCommand, testHook, type HooksExtensionDeps } from "./runtime-hooks.js";
 
 interface Harness {
   handlers: Map<string, (event: never) => unknown>;
   posts: RuntimeMessage[];
+  /** pi.sendMessage（注入对话尾部）的调用记录。 */
+  sent: { message: unknown; options: unknown }[];
   setRules: (rules: HookRule[]) => void;
   setTrusted: (trusted: boolean) => void;
   deps: HooksExtensionDeps;
@@ -13,8 +15,9 @@ interface Harness {
 
 function createHarness(initialRules: HookRule[], enabled = true, scope: "project" | "global" = "global"): Harness {
   const posts: RuntimeMessage[] = [];
+  const sent: { message: unknown; options: unknown }[] = [];
   const handlers = new Map<string, (event: never) => unknown>();
-  const fakePi = { on: (name: string, handler: (event: never) => unknown) => handlers.set(name, handler) };
+  const fakePi = { on: (name: string, handler: (event: never) => unknown) => handlers.set(name, handler), sendMessage: (message: unknown, options: unknown) => { sent.push({ message, options }); } };
   let currentRules = initialRules;
   let currentTrusted = false;
   const deps: HooksExtensionDeps = {
@@ -29,7 +32,7 @@ function createHarness(initialRules: HookRule[], enabled = true, scope: "project
   };
   const extension = createHooksExtension(deps) as { factory: (pi: ExtensionAPI) => void };
   extension.factory(fakePi as unknown as ExtensionAPI);
-  return { handlers, posts, deps, setRules: (rules) => { currentRules = rules; }, setTrusted: (trusted) => { currentTrusted = trusted; } };
+  return { handlers, posts, sent, deps, setRules: (rules) => { currentRules = rules; }, setTrusted: (trusted) => { currentTrusted = trusted; } };
 }
 
 async function callToolCall(harness: Harness, toolName: string, input: Record<string, unknown>): Promise<{ block?: boolean; reason?: string } | undefined> {
@@ -340,6 +343,150 @@ describe("hooks extension new events (P3)", () => {
     await wait(50);
     expect(untrusted.posts.filter((message) => message.type === "hook-notify")).toHaveLength(0);
     expect(untrusted.posts.filter((message) => message.type === "hook-notice")).toHaveLength(1);
+  });
+});
+
+describe("parseHookJsonOutput", () => {
+  it("parses the documented fields and tolerates extras", () => {
+    expect(parseHookJsonOutput('{"block":true,"reason":"no"}')).toMatchObject({ block: true, reason: "no" });
+    expect(parseHookJsonOutput('{"updatedInput":{"command":"ls"}}')).toMatchObject({ updatedInput: { command: "ls" } });
+    expect(parseHookJsonOutput(' {"continue":false} ')).toMatchObject({ continue: false });
+  });
+
+  it("treats non-JSON stdout as diagnostics instead of failing", () => {
+    expect(parseHookJsonOutput("all good")).toBeUndefined();
+    expect(parseHookJsonOutput("{ broken")).toBeUndefined();
+    expect(parseHookJsonOutput("[1,2]")).toBeUndefined();
+    expect(parseHookJsonOutput("")) .toBeUndefined();
+  });
+});
+
+describe("planHookEffects", () => {
+  it("maps each field to the events that can use it", () => {
+    const output = { additionalContext: "note", updatedInput: { command: "ls" }, userInput: "rewritten", toolResult: "appended" };
+    const call = planHookEffects("tool_call", output);
+    expect(call.updatedInput).toEqual({ command: "ls" });
+    expect(call.additionalContext).toBe("note");
+    expect(call.ignored).toEqual(["userInput", "toolResult"]);
+
+    const input = planHookEffects("user_input", output);
+    expect(input.userInput).toBe("rewritten");
+    expect(input.ignored).toEqual(["updatedInput", "toolResult"]);
+
+    const result = planHookEffects("tool_result", output);
+    expect(result.toolResult).toBe("appended");
+    expect(result.ignored).toEqual(["updatedInput", "userInput"]);
+
+    const end = planHookEffects("session_end", output);
+    expect(end).toMatchObject({ additionalContext: "note", ignored: ["updatedInput", "userInput", "toolResult"] });
+  });
+
+  it("ignores blank strings and non-object updatedInput", () => {
+    const effects = planHookEffects("tool_call", { additionalContext: "   ", updatedInput: [] as never });
+    expect(effects.additionalContext).toBeUndefined();
+    expect(effects.updatedInput).toBeUndefined();
+    expect(effects.ignored).toEqual(["updatedInput"]);
+    expect(planHookEffects("tool_call", undefined).ignored).toEqual([]);
+  });
+});
+
+describe("hook command output protocol (P4)", () => {
+  const inputHandler = (harness: Harness) => harness.handlers.get("input") as unknown as (event: { text: string; source: string }) => Promise<{ action?: string; text?: string } | undefined>;
+  const resultHandler = (harness: Harness) => harness.handlers.get("tool_result") as unknown as (event: {
+    toolName: string;
+    input: Record<string, unknown>;
+    content: { type: string; text: string }[];
+    details: unknown;
+    isError: boolean;
+  }) => Promise<{ content: { type: string; text: string }[]; details: unknown } | undefined>;
+  const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  const run = (name: string, event: HookRule["event"], command: string, blocking = false): HookRule => ({ name, event, action: { kind: "command", command, ...(blocking ? { blocking: true } : {}) } });
+  // 非阻断结果按每规则 250ms 合并上报，断言前要等过窗口。
+  const lastRun = async (harness: Harness) => {
+    await wait(350);
+    return harness.posts.filter((message) => message.type === "hook-run").at(-1);
+  };
+
+  it("merges updatedInput into the tool arguments before the tool runs", async () => {
+    const harness = createHarness([run("改写参数", "tool_call", 'echo {"updatedInput":{"value":"mutated"}}', true)]);
+    const input: Record<string, unknown> = { value: "original" };
+    await callToolCall(harness, "bash", input);
+    expect(input.value).toBe("mutated");
+    expect(await lastRun(harness)).toMatchObject({ detail: expect.stringContaining("已改写参数 value") });
+  });
+
+  it("appends toolResult text and keeps the original details", async () => {
+    const harness = createHarness([run("补充说明", "tool_result", 'echo {"toolResult":"appended-text"}')]);
+    const patch = await resultHandler(harness)({ toolName: "bash", input: { command: "ls" }, content: [{ type: "text", text: "orig" }], details: { secret: "orig" }, isError: false });
+    expect(patch?.content).toEqual([{ type: "text", text: "orig" }, { type: "text", text: "appended-text" }]);
+    expect(patch?.details).toEqual({ secret: "orig" });
+    expect(await lastRun(harness)).toMatchObject({ detail: expect.stringContaining("已追加工具结果") });
+  });
+
+  it("leaves the tool result untouched when no hook appends anything", async () => {
+    const harness = createHarness([{ name: "别的钩子", event: "turn_end", action: { kind: "notify" } }]);
+    expect(await resultHandler(harness)({ toolName: "bash", input: {}, content: [{ type: "text", text: "orig" }], details: undefined, isError: false })).toBeUndefined();
+  });
+
+  it("transforms the user input when the command returns userInput", async () => {
+    const harness = createHarness([run("改写输入", "user_input", 'echo {"userInput":"rewritten"}')]);
+    expect(await inputHandler(harness)({ text: "original", source: "interactive" })).toEqual({ action: "transform", text: "rewritten" });
+    expect(await lastRun(harness)).toMatchObject({ detail: expect.stringContaining("已改写用户输入") });
+  });
+
+  it("injects additionalContext as a displayed hook-context message", async () => {
+    const harness = createHarness([run("上下文补充", "turn_end", 'echo {"additionalContext":"look-here"}')]);
+    harness.handlers.get("turn_end")?.({ message: { usage: {} }, toolResults: [] } as never);
+    await wait(700);
+    expect(harness.sent).toHaveLength(1);
+    expect(harness.sent[0]?.message).toMatchObject({
+      customType: "pidesktop-hook-context",
+      content: "look-here",
+      display: true,
+      details: { rule: "上下文补充", event: "turn_end" }
+    });
+    expect(harness.sent[0]?.options).toEqual({ triggerTurn: false });
+    expect(await lastRun(harness)).toMatchObject({ detail: expect.stringContaining("已注入对话") });
+  });
+
+  it("warns about fields the event cannot use instead of dropping them silently", async () => {
+    const harness = createHarness([run("越界字段", "tool_call", 'echo {"toolResult":"x"}', true)]);
+    await callToolCall(harness, "bash", { command: "ls" });
+    expect(harness.posts.some((message) => message.type === "log" && message.level === "warn" && message.message.includes("toolResult"))).toBe(true);
+    expect(await lastRun(harness)).toMatchObject({ detail: expect.stringContaining("事件不支持") });
+  });
+
+  it("warns instead of silently dropping additionalContext at session_end", async () => {
+    const harness = createHarness([run("销毁补充", "session_end", 'echo {"additionalContext":"note"}')]);
+    fireSessionEndHooks(harness.deps, "dispose");
+    await wait(700);
+    expect(harness.sent).toHaveLength(0);
+    expect(harness.posts.some((message) => message.type === "log" && message.level === "warn" && message.message.includes("会话已销毁"))).toBe(true);
+    expect(await lastRun(harness)).toMatchObject({ detail: expect.stringContaining("无法注入对话") });
+  });
+
+  it("accepts decision:block and continue:false as blocking verdicts", async () => {
+    const decided = createHarness([run("兼容决策", "tool_call", 'echo {"decision":"block","reason":"policy-hit"}', true)]);
+    expect(await callToolCall(decided, "bash", { command: "ls" })).toMatchObject({ block: true, reason: "policy-hit" });
+
+    const stopped = createHarness([run("兼容继续", "tool_call", 'echo {"continue":false}', true)]);
+    expect(await callToolCall(stopped, "bash", { command: "ls" })).toMatchObject({ block: true });
+  });
+
+  it("prefers the JSON reason when a blocking command exits with 2", async () => {
+    const harness = createHarness([run("有理由", "tool_call", 'echo {"reason":"policy-hit"} && exit 2', true)]);
+    expect(await callToolCall(harness, "bash", { command: "ls" })).toMatchObject({ block: true, reason: "policy-hit" });
+  });
+
+  it("treats non-JSON stdout as diagnostics and other non-zero exits as failures that allow", async () => {
+    const diagnostics = createHarness([run("诊断", "tool_call", "echo just-text", true)]);
+    expect(await callToolCall(diagnostics, "bash", { command: "ls" })).toBeUndefined();
+    expect(await lastRun(diagnostics)).toMatchObject({ ok: true });
+
+    const failing = createHarness([run("崩了", "tool_call", "exit 7", true)]);
+    expect(await callToolCall(failing, "bash", { command: "ls" })).toBeUndefined();
+    expect(await lastRun(failing)).toMatchObject({ ok: false });
+    expect(failing.posts.some((message) => message.type === "log" && message.level === "warn" && message.message.includes("已放行"))).toBe(true);
   });
 });
 

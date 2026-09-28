@@ -53,7 +53,7 @@ import type {
   TurnTiming,
   WorkspaceFileSearchEntry
 } from "../../shared/protocol";
-import { delegationRoleLabels, sessionRunStatusLabels, thinkingLevelLabels, toolLabel } from "../../shared/locale";
+import { delegationRoleLabels, extensionCalloutTitle, sessionRunStatusLabels, thinkingLevelLabels, toolLabel } from "../../shared/locale";
 import { THINKING_LEVELS, thinkingLevelDraftFrom, thinkingLevelMapFromDraft, thinkingLevelMenu, type ThinkingLevelDraft } from "../../shared/thinking-levels";
 import { CodeBlock, RichContent } from "./components/RichContent";
 import { ImageLightbox } from "./components/ImageLightbox";
@@ -596,7 +596,7 @@ export const MessageView = memo(function MessageView({ message, executions, work
       <article ref={rootRef} className="message message-extension" data-role="extension" data-turn-key={turnKey}>
         <div className="message-avatar extension-avatar"><Puzzle size={16} /></div>
         <div className="message-body extension-message-callout">
-          <strong>{message.extension?.customType || "扩展消息"}</strong>
+          <strong>{extensionCalloutTitle(message.extension?.customType, message.extension?.details)}</strong>
           {images.length > 0 && <div className="image-message-list">{images.map((block, index) => <ImageMessageBlock key={`${message.id}-extension-image-${index}`} block={block} />)}</div>}
           {text && <RichContent streaming={false} artifactPrefix={`${message.id}-extension`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} workspace={workspace}>{text}</RichContent>}
         </div>
