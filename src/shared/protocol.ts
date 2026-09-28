@@ -1481,7 +1481,10 @@ export type HookEventName =
 
 /**
  * 钩子动作。notify/http/block 是 app 内置动作（零脚本），command 是用户 shell
- * 逃生舱。block 与 command.blocking 只在 tool_call 事件上有阻断语义。
+ * 逃生舱。阻断语义只在列出的可阻断事件上有（见 hooks-config 的三份白名单）：
+ * block 仅 tool_call / user_input；command.blocking 仅 tool_call / user_input /
+ * session_before_compact；command.wait 仅观察型事件（tool_execution_end /
+ * turn_end / agent_end / session_end）。tool_call 上的非阻断动作按观察语义执行。
  */
 export type HookAction =
   | { kind: "notify"; title?: string; body?: string }
@@ -1493,7 +1496,7 @@ export type HookAction =
 export interface HookRule {
   name: string;
   event: HookEventName;
-  /** 工具名正则（仅 tool_call / tool_execution_end 有意义）；缺省匹配全部工具。 */
+  /** 工具名匹配（仅工具事件有意义：tool_call / tool_execution_end / tool_result）；缺省匹配全部工具。只含字母/数字/下划线/竖线时按精确工具名集合，否则按正则。 */
   matcher?: string;
   /** App-owned 停用标记，语义与 MCP 的 disabled 一致。 */
   disabled?: boolean;

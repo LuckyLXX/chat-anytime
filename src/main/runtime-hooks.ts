@@ -139,7 +139,7 @@ export interface HookEffects {
   additionalContext?: string;
 }
 
-export function planHookEffects(event: HookRule["event"], output: HookJsonOutput | undefined): HookEffects {
+export function planHookEffects(event: HookRule["event"], output: HookJsonOutput | undefined, options: { observing?: boolean } = {}): HookEffects {
   const effects: HookEffects = { applied: [], ignored: [] };
   if (!output) return effects;
   const text = (value: unknown): string | undefined => typeof value === "string" && value.trim() ? value : undefined;
@@ -147,6 +147,14 @@ export function planHookEffects(event: HookRule["event"], output: HookJsonOutput
   // additionalContext 在任何事件都能注入对话尾部（session_end 例外，没有可用会话）。
   const additionalContext = text(output.additionalContext);
   if (additionalContext) effects.additionalContext = additionalContext;
+
+  // 观察语义（发出即不管）拿不到返回值，因此改写的三类字段都来不及生效——如实归入 ignored。
+  if (options.observing) {
+    if (output.updatedInput !== undefined) effects.ignored.push("updatedInput");
+    if (text(output.userInput) !== undefined) effects.ignored.push("userInput");
+    if (text(output.toolResult) !== undefined) effects.ignored.push("toolResult");
+    return effects;
+  }
 
   if (output.updatedInput !== undefined) {
     if (event === "tool_call" && isJsonRecord(output.updatedInput)) effects.updatedInput = output.updatedInput;
@@ -388,6 +396,12 @@ function warn(deps: HooksExtensionDeps, message: string): void {
   deps.post({ type: "log", level: "warn", message });
 }
 
+/** 阻断播报按事件说人话：吞输入、取消压缩与拦截工具调用是三种不同的用户可见结果。 */
+function blockedNotice(event: HookRule["event"], reason: string | undefined): string {
+  const what = event === "user_input" ? "已吞掉这次输入" : event === "session_before_compact" ? "已取消这次压缩" : "已拦截工具调用";
+  return `${what}${reason ? `：${reason}` : ""}`;
+}
+
 type HookRunMessage = Extract<RuntimeMessage, { type: "hook-run" }>;
 type HookRunReporter = (entry: ConfiguredHook, outcome: HookActionOutcome) => void;
 /** 上报前的效果应用/注释钩子（各事件注入自己的语义）。 */
@@ -426,7 +440,7 @@ function createHookRunReporter(deps: HooksExtensionDeps): HookRunReporter {
       deps.post(message);
       if (!warnedBlocked.has(key)) {
         warnedBlocked.add(key);
-        const notice = `钩子「${entry.name}」已拦截工具调用${outcome.reason ? `：${outcome.reason}` : ""}`;
+        const notice = `钩子「${entry.name}」${blockedNotice(entry.rule.event, outcome.reason)}`;
         warn(deps, notice);
         deps.post({ type: "hook-notice", kind: "warn", message: notice });
       }
@@ -475,18 +489,23 @@ function withEffectNotes(outcome: HookActionOutcome, notes: string[]): HookActio
   return notes.length === 0 ? outcome : { ...outcome, detail: `${outcome.detail}\n${notes.join("；")}` };
 }
 
+/** 观察语义的单条执行：成功/失败都上报，失败额外 warn（返回的 promise 供需要串行的调用方 await）。 */
+function runObservingHook(deps: HooksExtensionDeps, entry: ConfiguredHook, context: HookContext, report: HookRunReporter, annotate?: HookOutcomeAnnotator): Promise<void> {
+  const startedAt = Date.now();
+  return executeHookAction(entry.rule, context, deps).then((outcome) => {
+    report(entry, annotate ? annotate(entry, outcome) : outcome);
+  }, (error: unknown) => {
+    const detail = `执行失败：${error instanceof Error ? error.message : String(error)}`;
+    warn(deps, `钩子「${entry.name}」${detail}`);
+    report(entry, { ok: false, detail, durationMs: Date.now() - startedAt });
+  });
+}
+
 /** 观察型事件里的规则逐条处理：开了「等待完成」的命令串行 await，其余发出即不管。 */
 async function runObservingHooks(deps: HooksExtensionDeps, event: "tool_execution_end" | "tool_result" | "agent_end" | "turn_end", context: HookContext, toolName: string | undefined, warnedPending: Set<string>, report: HookRunReporter, annotate?: HookOutcomeAnnotator): Promise<void> {
   for (const entry of rulesFor(deps, event, toolName, warnedPending)) {
-    const startedAt = Date.now();
-    // .then 里同时给成功与失败处理，因此即使不 await 也不会产生 unhandled rejection。
-    const task = executeHookAction(entry.rule, context, deps).then((outcome) => {
-      report(entry, annotate ? annotate(entry, outcome) : outcome);
-    }, (error: unknown) => {
-      const detail = `执行失败：${error instanceof Error ? error.message : String(error)}`;
-      warn(deps, `钩子「${entry.name}」${detail}`);
-      report(entry, { ok: false, detail, durationMs: Date.now() - startedAt });
-    });
+    // runObservingHook 内部同时给成功与失败处理，因此即使不 await 也不会产生 unhandled rejection。
+    const task = runObservingHook(deps, entry, context, report, annotate);
     if (hookWaits(entry.rule)) await task;
     else void task;
   }
@@ -728,8 +747,8 @@ export function createHooksExtension(deps: HooksExtensionDeps): InlineExtension 
        * 共用效果：additionalContext 注入对话尾部，事件不支持的字段如实警告（不静默）。
        * updatedInput / userInput / toolResult 由各事件 handler 自己取用并返回给 Pi。
        */
-      function sharedEffects(entry: ConfiguredHook, event: HookRule["event"], outcome: HookActionOutcome): { notes: string[]; effects: HookEffects } {
-        const effects = planHookEffects(event, outcome.output);
+      function sharedEffects(entry: ConfiguredHook, event: HookRule["event"], outcome: HookActionOutcome, observing = false): { notes: string[]; effects: HookEffects } {
+        const effects = planHookEffects(event, outcome.output, { observing });
         const notes: string[] = [];
         if (effects.ignored.length > 0) {
           warn(deps, `钩子「${entry.name}」输出了 ${effects.ignored.join(" / ")}，但 ${event} 事件不支持这些字段，已忽略`);
@@ -740,11 +759,11 @@ export function createHooksExtension(deps: HooksExtensionDeps): InlineExtension 
       }
 
       /** 观察型事件的上报前处理：只有 additionalContext 能生效，其余字段如实忽略。 */
-      const annotateObserved: HookOutcomeAnnotator = (entry, outcome) => withEffectNotes(outcome, sharedEffects(entry, entry.rule.event, outcome).notes);
+      const annotateObserved: HookOutcomeAnnotator = (entry, outcome) => withEffectNotes(outcome, sharedEffects(entry, entry.rule.event, outcome, true).notes);
 
-      pi.on("session_start", () => {
-        void runSessionStartHooks(deps, warnedPending, reportHookRun);
-      });
+      // 会话启动钩子真等待：Pi 会 await session_start handler，而「环境准备」语义要求
+      // 钩子跑完会话才算就绪（单条仍受自身超时约束；失败只记日志，不阻断会话创建）。
+      pi.on("session_start", () => runSessionStartHooks(deps, warnedPending, reportHookRun));
 
       pi.on("tool_call", async (event) => {
         const toolName = event.toolName;
@@ -789,7 +808,12 @@ export function createHooksExtension(deps: HooksExtensionDeps): InlineExtension 
               // 非阻断语义的失败（超时/崩溃）默认放行并记日志，避免坏钩子卡死回合。
               warn(deps, `阻断型钩子「${rule.name}」执行异常（${outcome.detail.split("\n", 1)[0]}），已放行`);
             }
+            continue;
           }
+          // 其余动作（通知 / HTTP 推送 / 非阻断命令）在 tool_call 上是纯副作用：
+          // 按观察语义执行（发出即不管），与其它观察型事件同口径；改写入参需要等结果，
+          // 因此观察模式下 updatedInput 会被如实标注为“事件不支持”而不是静默丢掉。
+          void runObservingHook(deps, entry, { ...baseContext(deps, "tool_call"), toolName, toolInput }, reportHookRun, annotateObserved);
         }
         return undefined;
       });

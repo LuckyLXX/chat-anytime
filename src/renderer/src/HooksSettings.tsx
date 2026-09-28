@@ -19,7 +19,7 @@ const hookEventHints: Record<HookEventName, string> = {
   session_start: "会话创建完成时触发；命令会被等待完成（环境准备）",
   tool_call: "工具执行前触发；拦截型钩子可直接否决（命令防火墙）",
   tool_execution_end: "工具执行完成后触发（改完即格式化）",
-  tool_result: "工具结果生成后、进入对话前触发；观察型（命令不等待）",
+  tool_result: "工具结果生成后、进入对话前触发；命令会被等待完成（每条最多按自身超时）",
   user_input: "用户消息（含排队的补充消息）提交前触发；拦截型钩子可吞掉这次输入",
   session_before_compact: "手动 /compact、超阈值或溢出恢复导致压缩前触发；阻断型命令可取消这次压缩",
   session_end: "会话运行时被销毁（重建 / 删除 / 被淘汰）前触发；切换会话（park）不触发，退出应用或进程被杀不保证送达",
@@ -307,7 +307,7 @@ export function HooksSettings({ resources, workspaceOpen }: HooksSettingsProps):
               ))}
             </ul>
             <p className="resource-form-help">命令钩子通过 stdin 收到事件 JSON 上下文，另有 <code>HOOK_EVENT / HOOK_SESSION_ID / HOOK_WORKSPACE / HOOK_TOOL</code> 环境变量；通知文案可用 <code>{"{sessionTitle}"}</code>、<code>{"{toolName}"}</code> 等占位符。</p>
-            <p className="resource-form-help">命令钩子的 stdout 可输出一条 JSON 来控制效果：<code>block</code>/<code>reason</code>（等同退出码 2 的阻断）、<code>additionalContext</code>（注入对话尾部，给模型看）、<code>updatedInput</code>（仅工具调用前，改写工具参数）、<code>userInput</code>（仅用户输入前，改写这次输入）、<code>toolResult</code>（仅工具结果生成后，追加到结果末尾）；非 JSON 输出只当诊断文本，退出码 2 以外的非零退出码按失败放行。</p>
+            <p className="resource-form-help">命令钩子的 stdout 可输出一条 JSON 来控制效果：<code>block</code>/<code>reason</code>（等同退出码 2 的阻断）、<code>additionalContext</code>（注入对话尾部，给模型看）、<code>updatedInput</code>（仅工具调用前、且需勾选「阻断型」——非阻断动作来不及回传改写，改写工具参数）、<code>userInput</code>（仅用户输入前，改写这次输入）、<code>toolResult</code>（仅工具结果生成后，追加到结果末尾）；非 JSON 输出只当诊断文本，退出码 2 以外的非零退出码按失败放行。</p>
             {resources.hooks.length > 0 && (
               <label className="hook-sample-field"><span>测试样例行</span><input value={sample} placeholder="git push --force" onChange={(changeEvent) => setSample(changeEvent.target.value)} /><small>点行内「测试」时作为模拟输入喂给规则（拦截规则 / 命令钩子）</small></label>
             )}

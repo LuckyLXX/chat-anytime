@@ -44,6 +44,19 @@ async function flushAsync(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
 
+/**
+ * 等某条 hook-run 上报出现（非阻断结果按 250ms 合并、命令本身也可能慢，
+ * 固定 sleep 在满负载下会假红）——轮询至多 3s。
+ */
+async function waitForHookRun(harness: Harness): Promise<RuntimeMessage | undefined> {
+  for (let attempt = 0; attempt < 60; attempt++) {
+    const found = harness.posts.filter((message) => message.type === "hook-run").at(-1);
+    if (found) return found;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return undefined;
+}
+
 const blockRule: HookRule = { name: "git防火墙", event: "tool_call", matcher: "bash", action: { kind: "block", deny: ["git\\s+push.*--force"] } };
 
 describe("hooks extension tool_call", () => {
@@ -401,11 +414,8 @@ describe("hook command output protocol (P4)", () => {
   }) => Promise<{ content: { type: string; text: string }[]; details: unknown } | undefined>;
   const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
   const run = (name: string, event: HookRule["event"], command: string, blocking = false): HookRule => ({ name, event, action: { kind: "command", command, ...(blocking ? { blocking: true } : {}) } });
-  // 非阻断结果按每规则 250ms 合并上报，断言前要等过窗口。
-  const lastRun = async (harness: Harness) => {
-    await wait(350);
-    return harness.posts.filter((message) => message.type === "hook-run").at(-1);
-  };
+  // 非阻断结果按每规则 250ms 合并上报，断言前要等它出现。
+  const lastRun = async (harness: Harness) => waitForHookRun(harness);
 
   it("merges updatedInput into the tool arguments before the tool runs", async () => {
     const harness = createHarness([run("改写参数", "tool_call", 'echo {"updatedInput":{"value":"mutated"}}', true)]);
@@ -527,6 +537,47 @@ describe("wait toggle on observing events (P5)", () => {
     const lazyAt = Date.now();
     await lazy.handlers.get("turn_end")?.({ message: { usage: {} }, toolResults: [] } as never);
     expect(Date.now() - lazyAt).toBeLessThan(400);
+  }, 20_000);
+});
+
+describe("tool_call non-gate actions (P1 fix)", () => {
+  const notify = (title: string): HookRule => ({ name: "调用前通知", event: "tool_call", action: { kind: "notify", title } });
+  const lastRun = async (harness: Harness) => {
+    await flushAsync();
+    return waitForHookRun(harness);
+  };
+
+  it("按观察语义执行并上报，不再静默跳过", async () => {
+    const harness = createHarness([notify("即将执行")]);
+    expect(await callToolCall(harness, "bash", { command: "ls" })).toBeUndefined();
+    expect(harness.posts.find((message) => message.type === "hook-notify")).toMatchObject({ title: "即将执行" });
+    expect(await lastRun(harness)).toMatchObject({ event: "tool_call", source: "trigger", ok: true });
+  });
+
+  it("非阻断命令改不了入参，如实告知而不是静默丢掉", async () => {
+    const harness = createHarness([{ name: "改写参数", event: "tool_call", action: { kind: "command", command: 'echo {"updatedInput":{"value":"mutated"}}' } }]);
+    const input: Record<string, unknown> = { value: "original" };
+    expect(await callToolCall(harness, "bash", input)).toBeUndefined();
+    expect(input.value).toBe("original");
+    const run = await lastRun(harness);
+    expect(harness.posts.some((message) => message.type === "log" && message.level === "warn" && message.message.includes("updatedInput"))).toBe(true);
+    expect(run).toMatchObject({ detail: expect.stringContaining("事件不支持") });
+  });
+  it("阻断型命令仍会等待并真的改写入参（与观察语义形成对照）", async () => {
+    const harness = createHarness([{ name: "改写参数", event: "tool_call", action: { kind: "command", command: 'echo {"updatedInput":{"value":"mutated"}}', blocking: true } }]);
+    const input: Record<string, unknown> = { value: "original" };
+    await callToolCall(harness, "bash", input);
+    expect(input.value).toBe("mutated");
+  });
+});
+
+describe("session_start waits for hooks (P1 fix)", () => {
+  it("handler 会等钩子跑完才 resolve（环境准备语义）", async () => {
+    const slow = process.platform === "win32" ? "ping -n 2 127.0.0.1" : "sleep 0.6";
+    const harness = createHarness([{ name: "环境准备", event: "session_start", action: { kind: "command", command: slow } }]);
+    const startedAt = Date.now();
+    await harness.handlers.get("session_start")?.({} as never);
+    expect(Date.now() - startedAt).toBeGreaterThan(400);
   }, 20_000);
 });
 
