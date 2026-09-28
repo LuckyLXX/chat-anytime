@@ -20,7 +20,8 @@
     · 「运行中」只渲染 live 里 busy === true 的会话（空闲会话与历史话题一律不显示，
       需要看话题就回主界面）；
     · 每个正在执行的工具给一个图标（图标本身说明在跑什么），配名称 / 中文说明 / 已耗时；
-    · todo 只给进度条 + 当前进行项，不铺整张清单；
+    · todo 直接铺开成任务清单（每项标记「已完成 / 正在进行 / 未开始」），超过
+      8 项先收、按钮展开；面板本身就是滚动容器，不用把清单藏起来；
     · 「刚刚结束」是本页**自己记住**的（一个会话从 busy 变成不 busy 的那一秒），
       保留到面板关闭或点「清空」为止——结束态从载荷的 runStatus 读（已完成 / 失败 /
       已中止），读不到就记中性的「已结束」。这层记忆纯属页面内状态，不落盘、不改平台。
@@ -289,15 +290,34 @@
     box-shadow: 0 0 14px -3px color-mix(in srgb, var(--accent) 70%, transparent);
     transition: width .35s cubic-bezier(.22, .8, .3, 1);
   }
-  .todo-current { display: flex; flex-direction: column; gap: 3px; }
-  .todo-current .line {
-    display: flex; align-items: flex-start; gap: 6px;
-    font-size: 11.5px; color: var(--text);
+  .todo-list { display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 0; list-style: none; }
+  .todo-list li {
+    display: flex; align-items: flex-start; gap: 7px;
+    padding: 5px 8px; border-radius: 10px;
+    background: var(--glass-soft); border: 1px solid var(--stroke-soft);
   }
-  .todo-current .line.pending { color: var(--muted); }
-  .todo-current .mark { flex: 0 0 auto; color: var(--accent); font-size: 10px; line-height: 1.7; }
-  .todo-current .line.pending .mark { color: var(--faint); }
-  .todo-current .text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .todo-list li.current {
+    background: var(--accent-soft);
+    border-color: color-mix(in srgb, var(--accent) 32%, transparent);
+  }
+  .todo-list .mark {
+    flex: 0 0 auto; width: 11px; text-align: center;
+    font-size: 10px; line-height: 1.6; color: var(--faint);
+  }
+  .todo-list li.done .mark { color: var(--ok); }
+  .todo-list li.current .mark { color: var(--accent); }
+  .todo-list .text {
+    flex: 1 1 auto; min-width: 0; font-size: 11.5px;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .todo-list li.done .text {
+    color: var(--muted); text-decoration: line-through;
+    text-decoration-color: color-mix(in srgb, var(--muted) 55%, transparent);
+  }
+  .todo-list .state { flex: 0 0 auto; font-size: 10px; line-height: 1.75; color: var(--faint); }
+  .todo-list li.done .state { color: var(--faint); }
+  .todo-list li.current .state { color: var(--accent); font-weight: 600; }
+  .todo-more { align-self: center; margin-top: 1px; }
 
   /* ---------- 分组标题 ---------- */
   .section-head {
@@ -398,7 +418,7 @@
   var ENDPOINT = "./__pidesktop_state.json";
   var POLL_MS = 1000;
   var MAX_TOOL_ROWS = 6;          // 一张卡最多铺几行工具，超出的折成「还有 N 个」
-  var MAX_TODO_LINES = 2;         // todo 只显示当前进行项（最多两行）
+  var TODO_VISIBLE_LIMIT = 8;     // 任务清单默认铺几项，超出的先收（面板一屏放不下）
   var SVG_NS = "http://www.w3.org/2000/svg";
 
   var root = document.getElementById("root");
@@ -424,6 +444,8 @@
 
   /** 刚打开面板时，多新算「刚刚结束」：更早的不补，免得把几天前的结果重新翻出来。 */
   var FINISHED_SEED_MS = 10 * 60 * 1000;
+  /** 哪些会话的任务清单被展开过（按会话记，重绘不丢）。 */
+  var expandedTodos = {};
 
   /* ---------------- 元素构建（一律 textContent，绝不拼 HTML） ---------------- */
 
@@ -694,8 +716,9 @@
   }
 
   /**
-   * todo 只给两件事：进度（几 / 几 + 进度条）与当前进行项。
-   * 整张清单在 420×560 的面板里是噪声，要看全部请回主界面的任务面板。
+   * 任务清单：进度（几 / 几 + 进度条）+ 完整清单，每项标「已完成 / 正在进行 / 未开始」。
+   * 项数超过 TODO_VISIBLE_LIMIT 先铺前 8 项，其余交给「展开全部」（展开状态按会话记，
+   * 重绘不丢）——面板本身就是滚动容器，所以不必把清单藏起来。
    */
   function renderTodo(live) {
     var todos = live.todos || [];
@@ -718,28 +741,37 @@
       wrap.appendChild(track);
     }
 
-    var current = [];
-    for (var i = 0; i < todos.length && current.length < MAX_TODO_LINES; i += 1) {
-      if (todos[i].status === "in_progress") current.push({ text: todos[i].content, pending: false });
+    var sessionId = live.sessionId;
+    var expanded = expandedTodos[sessionId] === true;
+    var visible = expanded ? todos.length : Math.min(todos.length, TODO_VISIBLE_LIMIT);
+    if (visible > 0) {
+      var list = el("ul", "todo-list");
+      for (var i = 0; i < visible; i += 1) list.appendChild(renderTodoItem(todos[i]));
+      wrap.appendChild(list);
     }
-    if (current.length === 0) {
-      // 没有「进行中」时退一步显示下一项待办：进度条告诉你做到哪，这一行告诉你接下来做什么。
-      for (var j = 0; j < todos.length && current.length < 1; j += 1) {
-        if (todos[j].status === "pending") current.push({ text: todos[j].content, pending: true });
-      }
-    }
-    if (current.length > 0) {
-      var lines = el("div", "todo-current");
-      for (var k = 0; k < current.length; k += 1) {
-        var line = el("div", current[k].pending ? "line pending" : "line");
-        line.appendChild(el("span", "mark", current[k].pending ? "○" : "▸"));
-        line.appendChild(el("span", "text", current[k].text));
-        line.title = current[k].text;
-        lines.appendChild(line);
-      }
-      wrap.appendChild(lines);
+
+    if (todos.length > TODO_VISIBLE_LIMIT) {
+      var toggle = el("button", "ghost small todo-more", expanded ? "收起" : "展开全部 " + todos.length + " 项");
+      toggle.type = "button";
+      toggle.title = expanded ? "只铺前 " + TODO_VISIBLE_LIMIT + " 项" : "铺开整份任务清单";
+      toggle.addEventListener("click", function () {
+        expandedTodos[sessionId] = !expanded;
+        render();
+      });
+      wrap.appendChild(toggle);
     }
     return wrap;
+  }
+
+  function renderTodoItem(todo) {
+    var status = todo.status === "completed" ? "completed" : todo.status === "in_progress" ? "in_progress" : "pending";
+    var item = el("li", status === "in_progress" ? "current" : status === "completed" ? "done" : "pending");
+    item.appendChild(el("span", "mark", status === "completed" ? "✓" : status === "in_progress" ? "▸" : "○"));
+    var text = el("span", "text", todo.content);
+    text.title = todo.content;
+    item.appendChild(text);
+    item.appendChild(el("span", "state", status === "completed" ? "已完成" : status === "in_progress" ? "正在进行" : "未开始"));
+    return item;
   }
 
   function renderCard(live, entering) {
@@ -903,10 +935,17 @@
         return tool.name + "@" + tool.startedAt;
       }).join(",");
       var summary = item.todoSummary || { total: 0, completed: 0, inProgress: 0 };
+      // 清单已经铺开了，所以签名里得带上每项的状态（c/i/p）与内容总长，
+      // 否则 todo_write 改了清单而不动工具时面板不会重绘。
+      var todos = item.todos || [];
+      var todoDigest = todos.map(function (todo) {
+        return String(todo.status || "pending").charAt(0);
+      }).join("") + ":" + todos.reduce(function (sum, todo) {
+        return sum + String(todo.content || "").length;
+      }, 0);
       parts.push([
         item.sessionId, item.title, item.workspace, item.status, tools,
-        summary.total, summary.completed, summary.inProgress,
-        item.todos && item.todos.length > 0 && item.todos[0] ? item.todos[0].content : ""
+        summary.total, summary.completed, summary.inProgress, todoDigest
       ].join("|"));
     }
     for (var f = 0; f < finished.length; f += 1) {
