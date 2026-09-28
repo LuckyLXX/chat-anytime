@@ -11,11 +11,15 @@ import { describe, expect, it } from "vitest";
  * 否则 24MB base64 会从另一条路回来。这些断言是源码级的（与 gallery-run-wiring 同型）。
  */
 
-const main = readFileSync(join(__dirname, "index.ts"), "utf8");
-const preload = readFileSync(join(__dirname, "..", "preload", "index.ts"), "utf8");
-const protocol = readFileSync(join(__dirname, "..", "shared", "protocol.ts"), "utf8");
-const appearance = readFileSync(join(__dirname, "..", "renderer", "src", "AppearanceSettings.tsx"), "utf8");
-const demoApi = readFileSync(join(__dirname, "..", "renderer", "src", "demo-api.ts"), "utf8");
+// 源码行尾在本地工作区（LF）与 CI 检出（CRLF，windows runner 的 core.autocrlf）之间不一致：
+// 读入即归一化，否则跨行断言在 CI 上永远匹配不上（同 browser-preview-visibility-wiring 的做法）。
+const read = (relative: string): string => readFileSync(join(__dirname, relative), "utf8").replace(/\r\n/gu, "\n");
+
+const main = read("index.ts");
+const preload = read("../preload/index.ts");
+const protocol = read("../shared/protocol.ts");
+const appearance = read("../renderer/src/AppearanceSettings.tsx");
+const demoApi = read("../renderer/src/demo-api.ts");
 
 describe("主进程侧", () => {
   it("提供 theme-import / theme-promote 两个 IPC，且已删掉按需取资产的旧通道", () => {

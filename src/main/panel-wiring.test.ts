@@ -22,14 +22,19 @@ import { describe, expect, it } from "vitest";
  */
 
 const here = dirname(fileURLToPath(import.meta.url));
-const main = readFileSync(join(here, "index.ts"), "utf8");
-const preload = readFileSync(join(here, "../preload/index.ts"), "utf8");
-const app = readFileSync(join(here, "../renderer/src/App.tsx"), "utf8");
-const runtime = readFileSync(join(here, "pi-runtime.ts"), "utf8");
-const panelWindow = readFileSync(join(here, "panel-window.ts"), "utf8");
-const panelCors = readFileSync(join(here, "panel-cors.ts"), "utf8");
-const tray = readFileSync(join(here, "tray.ts"), "utf8");
-const sharedPanel = readFileSync(join(here, "../shared/panel.ts"), "utf8");
+
+// 源码行尾在本地工作区（LF）与 CI 检出（CRLF，windows runner 的 core.autocrlf）之间不一致：
+// 读入即归一化，否则跨行断言在 CI 上永远匹配不上（同 browser-preview-visibility-wiring 的做法）。
+const read = (relative: string): string => readFileSync(join(here, relative), "utf8").replace(/\r\n/gu, "\n");
+
+const main = read("index.ts");
+const preload = read("../preload/index.ts");
+const app = read("../renderer/src/App.tsx");
+const runtime = read("pi-runtime.ts");
+const panelWindow = read("panel-window.ts");
+const panelCors = read("panel-cors.ts");
+const tray = read("tray.ts");
+const sharedPanel = read("../shared/panel.ts");
 
 describe("面板窗口的主进程接线", () => {
   it("IPC 通道两端同名，且入口路径由主进程复核", () => {
