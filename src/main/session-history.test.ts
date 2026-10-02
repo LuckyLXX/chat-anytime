@@ -151,20 +151,22 @@ describe("persisted desktop control messages", () => {
 });
 
 /**
- * 侧边栏「未落盘空话题」点击路径依赖的 Pi 文件生命周期事实（2026-09-16 根因修复）。
- * 若上游改为创建即写文件/打开不存在文件时保留文件名里的 id，这两条会失败——那时
+ * 侧边栏「未落盘空话题」点击路径依赖的 Pi 文件生命周期事实（2026-09-16 根因修复；
+ * 2026-10-02 随 Pi 1.0.0 更新：上游 #10000 起文件在**首条 user 消息**即写盘，
+ * 不再等到首条 assistant 回复—— abandoned 空会话仍不留文件）。
+ * 若上游再改为创建即写文件/打开不存在文件时保留文件名里的 id，这两条会失败——那时
  * session.open 的「按 live 记录激活」快路径判据（pathExists）可以照旧成立，但注释与
  * 取舍需要重新核对（见 pi-runtime.ts 的 session.open 分支注释）。
  */
 describe("Pi session file lifecycle facts", () => {
-  it("does not write the session file until the first assistant message", () => {
+  it("does not write the session file until the first user message", () => {
     const dir = mkdtempSync(join(tmpdir(), "pidesktop-session-"));
     try {
       const manager = SessionManager.create("C:/work/demo", dir);
       const file = manager.getSessionFile()!;
       expect(existsSync(file)).toBe(false);
       manager.appendMessage({ role: "user", content: "hi" } as never);
-      expect(existsSync(file)).toBe(false);
+      expect(existsSync(file)).toBe(true);
       manager.appendMessage({ role: "assistant", content: [{ type: "text", text: "ok" }] } as never);
       expect(existsSync(file)).toBe(true);
     } finally {

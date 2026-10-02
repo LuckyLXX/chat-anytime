@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readSync } from "node:fs";
 import { readFile, readdir, realpath, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative as relativePath, resolve, sep } from "node:path";
-import { estimateTokens } from "@earendil-works/pi-agent-core";
+import { estimateTokens } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Api, UserMessage, ImageContent, Model, Context, ModelsSimpleStreamOptions } from "@earendil-works/pi-ai";
 import {

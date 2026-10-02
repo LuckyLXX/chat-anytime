@@ -95,7 +95,7 @@ jobs:
         shell: bash
         run: npm ci --registry=https://registry.npmjs.org/
 
-      # pi 运行时是指定版本（0.87.1）依赖：装错版本不往下走
+      # pi 运行时是指定版本（1.0.0）依赖：装错版本不往下走
       - name: 断言 pi 依赖版本（node_modules）
         run: node .github/scripts/verify-package.cjs --preinstall
 

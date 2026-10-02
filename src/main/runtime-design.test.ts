@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { afterEach, describe, expect, it } from "vitest";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionToolContext } from "@earendil-works/pi-coding-agent";
 import type { DesignDoc } from "../shared/design-schema.js";
 import { buildDesignTools, type DesignToolDeps } from "./runtime-design.js";
 import { designFilePath, writeDesign } from "./design-store.js";
@@ -25,8 +25,8 @@ interface ToolOutput {
   content: { type: string; text?: string; data?: string; mimeType?: string }[];
   details?: Record<string, unknown>;
 }
-const execute = async (tool: { execute: (id: string, params: never, signal: undefined, onUpdate: undefined, ctx: ExtensionContext) => Promise<unknown> }, params: unknown): Promise<ToolOutput> =>
-  (await tool.execute("test-call", params as never, undefined, undefined, undefined as unknown as ExtensionContext)) as ToolOutput;
+const execute = async (tool: { execute: (id: string, params: never, signal: undefined, onUpdate: undefined, ctx: ExtensionToolContext) => Promise<unknown> }, params: unknown): Promise<ToolOutput> =>
+  (await tool.execute("test-call", params as never, undefined, undefined, undefined as unknown as ExtensionToolContext)) as ToolOutput;
 
 /** 内存态 deps + 真实临时工作区（写盘路径走真实 design-store）。 */
 async function harness(options: { enabled?: boolean; renderSnapshot?: DesignToolDeps["renderSnapshot"] } = {}) {

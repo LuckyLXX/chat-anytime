@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionToolContext } from "@earendil-works/pi-coding-agent";
 import type { BrowserAutomationRequest, BrowserAutomationResult, JevObservePage, JevSettings } from "../shared/protocol.js";
 import { estimateToolTokens } from "./context-breakdown.js";
 import { buildActionSpace } from "./jev-action-space.js";
 import { JEV_WAIT_MS, buildJevTools, runJevLoop, type JevStep, type JevToolDeps } from "./runtime-jev.js";
 
-const execute = (tool: { execute: (id: string, params: never, signal: AbortSignal | undefined, onUpdate: undefined, ctx: ExtensionContext) => Promise<unknown> }, params: unknown, signal?: AbortSignal) =>
-  tool.execute("test-call", params as never, signal, undefined, undefined as unknown as ExtensionContext);
+const execute = (tool: { execute: (id: string, params: never, signal: AbortSignal | undefined, onUpdate: undefined, ctx: ExtensionToolContext) => Promise<unknown> }, params: unknown, signal?: AbortSignal) =>
+  tool.execute("test-call", params as never, signal, undefined, undefined as unknown as ExtensionToolContext);
 
 const settings = (overrides: Partial<JevSettings> = {}): JevSettings => ({
   enabled: true,

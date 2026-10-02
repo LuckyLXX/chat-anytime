@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { estimateToolTokens } from "./context-breakdown.js";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionToolContext } from "@earendil-works/pi-coding-agent";
 import type { BrowserAutomationRequest, BrowserAutomationResult } from "../shared/protocol.js";
 import { buildBrowserTools, runWithBusyRetry, type BrowserToolDeps } from "./runtime-browser.js";
 
@@ -11,8 +11,8 @@ function okResult(data: OkResult["data"]): BrowserAutomationResult {
 }
 
 /** Run a tool with the Pi 5-arg execute signature; our closures never read the trailing context args. */
-const execute = (tool: { execute: (id: string, params: never, signal: undefined, onUpdate: undefined, ctx: ExtensionContext) => Promise<unknown> }, params: unknown) =>
-  tool.execute("test-call", params as never, undefined, undefined, undefined as unknown as ExtensionContext);
+const execute = (tool: { execute: (id: string, params: never, signal: undefined, onUpdate: undefined, ctx: ExtensionToolContext) => Promise<unknown> }, params: unknown) =>
+  tool.execute("test-call", params as never, undefined, undefined, undefined as unknown as ExtensionToolContext);
 
 function toolsWith(responses: Record<string, BrowserAutomationResult>, enabled = true, saveScreenshot?: (data: string, mimeType: "image/png" | "image/jpeg") => Promise<string>) {
   const calls: BrowserAutomationRequest[] = [];

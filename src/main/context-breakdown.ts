@@ -1,4 +1,4 @@
-import { estimateTokens } from "@earendil-works/pi-agent-core";
+import { estimateTokens } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ContextUsageBreakdown } from "../shared/protocol.js";
 
