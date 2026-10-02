@@ -4,27 +4,33 @@ import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 /**
- * gallery_publish 的「无条件激活」回归网。
+ * gallery_publish 的「deferred 暴露 + tool_search 按需声明」回归网。
+ *
+ * （实验分支 feat/codemode-toolsearch，2026-10-02 起语义变更：原先的「无条件
+ * 激活」改为偶发动作型工具的 deferred 暴露。）
  *
  * 为什么用源码断言而不是跑运行时：`pi-runtime.ts` 是 utility 进程入口（顶层
- * `process.parentPort` 缺失即抛），单测里无法 import；而 `toolNamesFor` 是
- * 活动工具集的唯一计算处，把 gallery 那一行删掉 / 改成条件分支，会让发布工具
- * 在所有会话里静默消失（模型再也不会发布作品，且没有任何报错）。
+ * `process.parentPort` 缺失即抛），单测里无法 import；而 `toolNamesFor` /
+ * `applyActiveToolNames` 是活动工具集的唯一计算处。本测试钉住三件事：
  *
- * 与 design/computer 的对照是本测试的重点：那两者**应当**是条件激活（前缀成本
- * 纪律），只有 gallery 是无条件——所以这里同时钉住「design 仍是条件分支」，
- * 防止有人顺手把两者统一成同一种写法。
+ * 1. **注册不缺席**：gallery 工具仍进 customTools 注册集——deferred 工具若没
+ *    注册，tool_search 永远搜不到（静默消失，无任何报错）；
+ * 2. **不自动声明**：toolNamesFor 不含 gallery（前缀成本归零交给 deferred）；
+ * 3. **已加载不丢失**：reconcile 全量重算时经 deferredSearchableToolNames 并集
+ *    保留 tool_search 已加载的工具。
  *
- * 同类先例：发布流程里的 asar 字节流内容断言（见 docs/迭代记录 的发版条目）。
+ * 与 design 的对照仍是重点：design 依旧是条件分支激活（它的开关还牵着渲染端
+ * 画布状态），gallery/computer/automation 走 deferred——两套语义并存，防止有人
+ * 把两者统一成同一种写法而弄丢任一侧的保障。
  */
 
 const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "pi-runtime.ts"), "utf8");
+const gallerySource = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "runtime-gallery.ts"), "utf8");
 
 /** 取出 `toolNamesFor` 的函数体（从签名到下一个顶层 `}` 前的闭合花括号）。 */
 function toolNamesForBody(): string {
   const start = source.indexOf("function toolNamesFor(");
   expect(start, "找不到 toolNamesFor（重命名了？此测试需要同步更新）").toBeGreaterThan(-1);
-  // 从签名起点取到函数体的闭合：找签名后的第一个 `{`，再匹配到同缩进层级的 `}`。
   const bodyStart = source.indexOf("{", source.indexOf("): string[] {", start));
   let depth = 0;
   for (let index = bodyStart; index < source.length; index += 1) {
@@ -37,33 +43,47 @@ function toolNamesForBody(): string {
   throw new Error("toolNamesFor 函数体没闭合");
 }
 
-describe("toolNamesFor 的 gallery 激活策略（源码回归网）", () => {
+describe("toolNamesFor 的 gallery deferred 策略（源码回归网）", () => {
   const body = toolNamesForBody();
 
-  it("gallery 工具无条件进入活动集（1 个轻量定义，不设会话开关）", () => {
-    expect(body).toContain("record.galleryTools.map((tool) => tool.name)");
+  it("gallery 工具不进自动声明的活动集（deferred：前缀成本交给 tool_search）", () => {
+    expect(body).not.toContain("record.galleryTools.map");
+    expect(body).not.toContain("record.automationTools.map");
+    expect(body).not.toContain("record.computerTools.map");
   });
 
-  it("gallery 那一行不在任何条件分支里（不是 ...(cond ? … : []) 的形状）", () => {
-    const line = body.split("\n").find((candidate) => candidate.includes("record.galleryTools.map"));
-    expect(line).toBeDefined();
-    expect(line!.trim().startsWith("...(")).toBe(false);
-    expect(line!).not.toContain("shouldActivate");
-  });
-
-  it("对照：design 仍然是条件分支（防止有人把两者统一成无条件）", () => {
-    const line = body.split("\n").find((candidate) => candidate.includes("record.designTools.map"));
-    expect(line).toBeDefined();
-    // 条件三元的两半分别带 `?` / `:` 前缀；无条件展开则是裸 `...record.x`。
-    expect(line!.trim().startsWith("?")).toBe(true);
-    expect(body).toContain("shouldActivateDesignTools");
-  });
-
-  it("gallery 与 design 都在注册集里（注册 ≠ 激活：注册是激活的前提）", () => {
+  it("gallery 仍在注册集里（注册是 deferred 工具可被搜索到的前提）", () => {
     const buildStart = source.indexOf("function buildRecordTools(");
     expect(buildStart).toBeGreaterThan(-1);
     const buildBody = source.slice(buildStart, source.indexOf("\n}", buildStart));
     expect(buildBody).toContain("...record.galleryTools");
-    expect(buildBody).toContain("...record.designTools");
+    expect(buildBody).toContain("...record.computerTools");
+    expect(buildBody).toContain("...record.automationTools");
+  });
+
+  it("gallery_publish 的定义标记了 deferred 暴露", () => {
+    const nameIndex = gallerySource.indexOf('name: "gallery_publish"');
+    expect(nameIndex).toBeGreaterThan(-1);
+    // exposure 行紧随 name 行之后（5 行容差内）
+    const window = gallerySource.slice(nameIndex, nameIndex + 120);
+    expect(window).toContain('exposure: "deferred"');
+  });
+
+  it("reconcile 并集保留已加载的 deferred 工具（deferredSearchableToolNames 覆盖三簇）", () => {
+    const helper = source.indexOf("function deferredSearchableToolNames(");
+    expect(helper).toBeGreaterThan(-1);
+    const helperBody = source.slice(helper, source.indexOf("\n}", helper));
+    expect(helperBody).toContain("record.computerTools");
+    expect(helperBody).toContain("record.automationTools");
+    expect(helperBody).toContain("record.galleryTools");
+    // 三个调用点都不得绕过 applyActiveToolNames 直呼 setActiveToolsByName(toolNamesFor(
+    expect(source).not.toContain("setActiveToolsByName(toolNamesFor");
+  });
+
+  it("对照：design 仍然是条件分支（design 开关还牵着渲染端画布，不随本实验改）", () => {
+    const line = body.split("\n").find((candidate) => candidate.includes("record.designTools.map"));
+    expect(line).toBeDefined();
+    expect(line!.trim().startsWith("?")).toBe(true);
+    expect(body).toContain("shouldActivateDesignTools");
   });
 });

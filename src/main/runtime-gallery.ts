@@ -73,6 +73,7 @@ export function buildGalleryTools(ctx: GalleryToolContext): ToolDefinition[] {
   return [
     defineTool({
       name: "gallery_publish",
+      exposure: "deferred",
       label: "发布作品",
       description: [
         "把一个**已经做完、能运行、值得保留**的成果登记到作品墙（用户能一键运行、一键继续开发）。",

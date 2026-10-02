@@ -7,6 +7,8 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Api, UserMessage, ImageContent, Model, Context, ModelsSimpleStreamOptions } from "@earendil-works/pi-ai";
 import {
   createAgentSession,
+  createCodemodeExtension,
+  createToolSearchExtension,
   DefaultResourceLoader,
   getAgentDir,
   detectSupportedImageMimeTypeFromFile,
@@ -2002,7 +2004,7 @@ function buildRecordTools(record: Pick<SessionRuntimeRecord, "subagentTools" | "
  * capability toggle (下架), not a per-call gate. Browser/SSH families use the
  * same capability-toggle semantics (master switch AND agent-level overlay).
  */
-function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "planTools" | "visionTools" | "browserTools" | "sshTools" | "computerTools" | "automationTools" | "designTools" | "galleryTools" | "jevTools" | "designMode" | "computerMode" | "designGlobalEnabled" | "computerGlobalEnabled" | "jevGlobalEnabled" | "unattended">, includeVision: boolean): string[] {
+function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "planTools" | "visionTools" | "browserTools" | "sshTools" | "computerTools" | "automationTools" | "designTools" | "galleryTools" | "jevTools" | "designMode" | "designGlobalEnabled" | "jevGlobalEnabled" | "unattended">, includeVision: boolean): string[] {
   const builtin = Object.entries(record.agent.tools ?? {}).filter(([, enabled]) => enabled).map(([name]) => name);
   // 浏览器/SSH 整族开关：全局总闸 AND 角色级 overlay（agent.toolOverrides），任一关闭
   // 即整族从活动集摘除（schema 不进请求前缀）；execute 内的 enabled 闭包仅作在途回合
@@ -2025,27 +2027,52 @@ function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "subagentTool
     // settings.save 遍历 liveSessions reconcile，角色开关随 agent.save 重建会话生效。
     ...(browserActive ? record.browserTools.map((tool) => tool.name) : []),
     ...(sshActive ? record.sshTools.map((tool) => tool.name) : []),
-    // 电脑控制工具与 design 同策略：仅在本会话开了电脑控制模式且总闸开着时
-    // 注入（五个定义实测 ≈580 tokens/请求）；无人值守后台会话天然不满足。
-    ...(runtimeComputer.shouldActivateComputerTools({ sessionEnabled: record.computerMode.enabled, globalEnabled: record.computerGlobalEnabled() })
-      ? record.computerTools.map((tool) => tool.name)
-      : []),
-    ...record.automationTools.map((tool) => tool.name),
     // 设计工具仅在设计模式会话里激活（≈1.5K tokens/请求的前缀成本）；总闸
     // settings.design.enabled 关闭时任何会话都不注入。会话内开关不变，因此
     // 前缀缓存整段有效（区别于 browser 的常驻激活策略）。
     ...(runtimeDesign.shouldActivateDesignTools({ sessionEnabled: record.designMode.enabled, globalEnabled: record.designGlobalEnabled() })
       ? record.designTools.map((tool) => tool.name)
       : []),
-    // 作品发布工具只有一个且很轻（≈200 tokens/请求），因此**无条件激活**
-    // （同 automation 策略）——它服务的是「做完就发布」这个随时可能发生的动作，
-    // 做成开关只会让用户/模型多用一次才能找到它。
-    ...record.galleryTools.map((tool) => tool.name),
+    // 实验分支（feat/codemode-toolsearch）：computer_*（5）/ automation_*（5）/
+    // gallery_publish（1）改走「deferred 暴露 + tool_search 按需声明」——它们是
+    // 偶发动作型工具，不再进 toolNamesFor（computer 的会话开关不再门控工具，
+    // 探针假设：搜索发现能否替代开关的成本控制职责）。已加载的 deferred 工具
+    // 由 applyActiveToolNames 在 reconcile 时保留（见 deferredSearchableToolNames）。
     // Jev 工具同样按开关注入（而不是 browser 那种常驻激活）：它的描述与内部指令块
     // 远大于普通工具，而绝大多数部署（内网）根本连不到 TypeSafe——不该替它们付这份
     // 前缀成本。开关 = settings.jev.enabled（缺省关闭），会话内不变则前缀整段有效。
-    ...(record.jevGlobalEnabled() && browserActive ? record.jevTools.map((tool) => tool.name) : [])
+    ...(record.jevGlobalEnabled() && browserActive ? record.jevTools.map((tool) => tool.name) : []),
+    // codemode + tool_search 常驻激活（两者上游均「注册即不激活」，必须显式点名）。
+    // codemode 用缺省 mode:"on"：其它工具保持声明，脚本额外可编排（纯增量）。
+    "codemode",
+    "tool_search"
   ];
+}
+
+/**
+ * 注册为 deferred 暴露的工具名集合（可被 tool_search 按需声明）。reconcile 全量
+ * 重算活动集时，这些名字一旦已被 tool_search 加载，必须保留——否则模型搜索到
+ * 的工具会在下一次 reconcile（模型切换/视觉重算/MCP 热更新）被静默摘除，被迫
+ * 反复搜索（上游 searchAndLoad 是「追加进当前活动集」，与我们的全量重算语义
+ * 相交的责任边界就在这里）。
+ */
+function deferredSearchableToolNames(record: Pick<SessionRuntimeRecord, "computerTools" | "automationTools" | "galleryTools">): Set<string> {
+  return new Set([...record.computerTools, ...record.automationTools, ...record.galleryTools].map((tool) => tool.name));
+}
+
+/**
+ * 统一的活动集落地：toolNamesFor 全量重算 ∪ 会话当前已激活的 deferred 工具。
+ * 三处调用点（reconcileActiveTools / createSession 初始激活 / MCP 热重载）都必须
+ * 走这里，不得绕过它直接把全量重算结果交给 setActiveToolsByName——那会丢掉
+ * tool_search 已加载的工具（回归网钉在 codemode-activation / gallery-activation）。
+ */
+function applyActiveToolNames(record: SessionRuntimeRecord, includeVision: boolean): void {
+  const names = new Set(toolNamesFor(record, includeVision));
+  const searchable = deferredSearchableToolNames(record);
+  for (const active of record.session.getActiveToolNames()) {
+    if (searchable.has(active)) names.add(active);
+  }
+  record.session.setActiveToolsByName([...names]);
 }
 
 /**
@@ -2097,7 +2124,7 @@ function reconcileVisionTool(record: SessionRuntimeRecord | undefined): void {
  */
 function reconcileActiveTools(record: SessionRuntimeRecord): void {
   const includeVision = !hasImageInput(record.session.model);
-  record.session.setActiveToolsByName(toolNamesFor(record, includeVision));
+  applyActiveToolNames(record, includeVision);
   // 活动集变化：上下文三段明细的工具段跟随（缓存键失配自动重算）。
   refreshContextBreakdown(record);
 }
@@ -3023,7 +3050,14 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
       // 请求的消息尾部，其余请求原样放行（保前缀缓存）；叙事不进 transcript。
       runtimePlanTools.createPlanModeExtension({
         state: () => recordBox?.planState
-      })
+      }),
+      // 实验分支（feat/codemode-toolsearch）：codemode（脚本编排工具，QuickJS 沙箱）
+      // + tool_search（deferred 工具按需声明）。两者上游均注册即不激活，激活点在
+      // toolNamesFor 里显式点名。codemode 用缺省 mode:"on"（工具保持声明，脚本
+      // 额外可编排）；脚本内工具调用走同一条 tool pipeline，权限门与审计钩子照常
+      // 生效（parentToolCallId 标记嵌套调用）。
+      createCodemodeExtension(),
+      createToolSearchExtension()
     ],
     systemPromptOverride: (base) => [base, recordAgent.systemPrompt, buildDivModePrompt(recordAgent.divMode), buildSkillsSystemPromptBlock(runtimeSkills.activeSkillsFor(nativeSkills, recordAgent)), buildSubagentPromptBlock(subagentCatalog), memoryPromptBlock].filter(Boolean).join("\n\n")
   });
@@ -3206,8 +3240,9 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   // ljqCtrl.py（工具与 skill 共享同一份实现；skill 保留长尾操作如 UIA/找图）。
   // 权限：click/type/press 走 desktop 风险门（read-only 拒/ask 逐次确认/
   // workspace+ 放行）；enabled 实时读总闸是第二道防线（总闸刚关、活动集尚未
-  // 重算时的在途调用不得落盘）；是否进活动工具集由 shouldActivateComputerTools
-  // 判定（会话级 computerMode + 总闸），注册常驻（注册 ≠ 激活）。
+  // 重算时的在途调用不得落盘）。实验分支：工具改 deferred 暴露（注册常驻但
+  // 不声明，由 tool_search 按需加载；会话级 computerMode 开关不再门控工具），
+  // 总闸关闭时 enabled 闭包仍拦截执行（能力下架语义保留）。
   const computerTools = runtimeComputer.buildComputerTools({
     enabled: () => settings?.computer?.enabled !== false,
     workspace: () => recordWorkspace || undefined,
@@ -3417,7 +3452,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   // subagent delegation, todo, memory, question, vision). customTools are
   // registered but not active unless explicitly enabled here; the vision tool
   // is activated only for text-only conversation models (toolNamesFor).
-  result.session.setActiveToolsByName(toolNamesFor(record, !hasImageInput(result.session.model)));
+  applyActiveToolNames(record, !hasImageInput(result.session.model));
   // 工具活动集在此定型：三段明细的工具段按它缓存，首次重算放在激活之后。
   refreshContextBreakdown(record);
   record.executions = new Map(restoreToolExecutions(result.session.state.messages as unknown as PersistedSessionMessage[], recordWorkspace).map((execution) => [execution.id, execution]));
@@ -3634,7 +3669,7 @@ async function applyMcpToolChanges(): Promise<void> {
     // changes alike, and triggers the registry refresh that re-reads the
     // record's customTools.
     for (const tool of mcpTools) record.extensionApi.registerTool(tool);
-    record.session.setActiveToolsByName(toolNamesFor(record, !hasImageInput(record.session.model)));
+    applyActiveToolNames(record, !hasImageInput(record.session.model));
     // 热更新改变了请求前缀里的工具清单：三段明细的工具段跟随重算。
     refreshContextBreakdown(record);
   } catch (error) {

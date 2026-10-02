@@ -40,3 +40,17 @@ describe("computer 工具前缀成本", () => {
     expect(tokens).toBeLessThan(900);
   });
 });
+
+/**
+ * 实验分支（feat/codemode-toolsearch）：computer 工具改走「deferred 暴露 +
+ * tool_search 按需声明」——不再进自动声明的活动集，前缀成本归零；执行层的
+ * enabled 总闸闭包与 desktop 风险门照旧（能力下架与权限语义不变）。
+ */
+describe("computer 工具的 deferred 暴露", () => {
+  it("五个定义都标记了 exposure: \"deferred\"（不声明给模型，由 tool_search 按需加载）", () => {
+    const tools = buildComputerTools({ workspace: () => "/ws", enabled: () => true, locateScriptDir: () => "/skill-dir" });
+    for (const tool of tools) {
+      expect(tool.exposure, `${tool.name} 应为 deferred`).toBe("deferred");
+    }
+  });
+});

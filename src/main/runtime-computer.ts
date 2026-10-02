@@ -416,6 +416,7 @@ export function buildComputerTools(deps: ComputerToolDeps): ToolDefinition[] {
 
   const windows = defineTool({
     name: "computer_windows",
+    exposure: "deferred",
     label: "枚举桌面窗口",
     description: WINDOWS_TOOL_TEXT,
     parameters: Type.Object({
@@ -437,6 +438,7 @@ export function buildComputerTools(deps: ComputerToolDeps): ToolDefinition[] {
 
   const screenshot = defineTool({
     name: "computer_screenshot",
+    exposure: "deferred",
     label: "窗口截图",
     description: SCREENSHOT_TOOL_TEXT,
     parameters: Type.Object({
@@ -476,6 +478,7 @@ export function buildComputerTools(deps: ComputerToolDeps): ToolDefinition[] {
 
   const click = defineTool({
     name: "computer_click",
+    exposure: "deferred",
     label: "桌面点击",
     description: CLICK_TOOL_TEXT,
     parameters: Type.Object({
@@ -529,6 +532,7 @@ export function buildComputerTools(deps: ComputerToolDeps): ToolDefinition[] {
 
   const type = defineTool({
     name: "computer_type",
+    exposure: "deferred",
     label: "桌面输入文本",
     description: TYPE_TOOL_TEXT,
     parameters: Type.Object({
@@ -544,6 +548,7 @@ export function buildComputerTools(deps: ComputerToolDeps): ToolDefinition[] {
 
   const press = defineTool({
     name: "computer_press",
+    exposure: "deferred",
     label: "桌面按键",
     description: PRESS_TOOL_TEXT,
     parameters: Type.Object({
