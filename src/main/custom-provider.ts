@@ -1,5 +1,102 @@
-import type { CustomProviderModel, ProviderApiMode, ProviderSettings } from "../shared/protocol.js";
+import type { CustomProviderModel, ProviderApiMode, ProviderModelSettings, ProviderSettings } from "../shared/protocol.js";
 import { isPositiveInt } from "./settings.js";
+
+/**
+ * 解析上游模型条目里的 token 数值：数字直接采用；字符串容忍 "128k" / "1m"
+ * 等缩写后缀（部分中转站会序列化成字符串）。护栏 [1_000, 100_000_000]：
+ * 过小是脏值，过大通常是把字节数/字符数写进了字段，都不如回退占位值。
+ */
+export function parseUpstreamTokenCount(value: unknown): number | undefined {
+  let raw: number | undefined;
+  if (typeof value === "number") raw = Number.isFinite(value) ? value : undefined;
+  else if (typeof value === "string") {
+    const match = /^\s*(\d+(?:\.\d+)?)\s*([kKmM])?\s*$/u.exec(value);
+    if (match) {
+      const scale = match[2] ? (match[2].toLowerCase() === "k" ? 1_000 : 1_000_000) : 1;
+      raw = Number(match[1]) * scale;
+    }
+  }
+  if (raw === undefined || !Number.isFinite(raw)) return undefined;
+  const tokens = Math.round(raw);
+  if (tokens < 1_000 || tokens > 100_000_000) return undefined;
+  return tokens;
+}
+
+/**
+ * 从 OpenAI 兼容 /models 条目里尽力提取 PiDesktop 消费的元数据
+ * （上下文窗口 / 最大输出 / 图片输入声明）。
+ *
+ * 标准 OpenAI /v1/models 条目只有 id/object/created/owned_by，但中转站
+ * （new-api 系返回 context_length / max_output_tokens / supports_images，
+ * 2026-10 实测 workbuddy 渠道）与聚合网关（OpenRouter 的 architecture.*，
+ * vLLM 的 max_model_len 等）普遍附带这些声明。此前拉取只取 id/name，声明
+ * 全部丢弃，注册层落到 128000/16384 占位——「上下文参数不会自动获取」的
+ * 根因（2026-10-04 修复）。字段候选按生态常见度取第一个有效值；缺失/无效
+ * 返回 undefined，由调用方回退既有推断逻辑。
+ */
+export function extractUpstreamModelMeta(item: Record<string, unknown>): {
+  contextWindow?: number;
+  maxTokens?: number;
+  imageInput?: boolean;
+} {
+  const readTop = (keys: string[]): unknown => {
+    for (const key of keys) {
+      const value = item[key];
+      if (value !== undefined && value !== null) return value;
+    }
+    return undefined;
+  };
+  const architecture = item.architecture;
+  const arch = architecture && typeof architecture === "object" && !Array.isArray(architecture) ? (architecture as Record<string, unknown>) : undefined;
+  const contextWindow = parseUpstreamTokenCount(
+    readTop(["context_length", "context_window", "contextWindow", "max_context_length", "max_context_tokens", "max_input_tokens", "max_model_len"])
+      ?? arch?.max_input_tokens
+  );
+  let maxTokens = parseUpstreamTokenCount(readTop(["max_output_tokens", "max_completion_tokens"]) ?? arch?.max_output_tokens);
+  // 一致性护栏：输出上限不可能超过上下文窗口，越过说明上游字段口径异常
+  //（如把请求体大小写进了输出字段），丢弃脏值保留上下文。
+  if (maxTokens !== undefined && contextWindow !== undefined && maxTokens > contextWindow) maxTokens = undefined;
+  // 图片输入只采纳明确的 true 声明（supports_images / supports_vision / 输入
+  // 模态数组含 image，顶层或 architecture 下都认）；显式 false 不采纳——部分
+  // 中转站字段默认值恒为 false，误杀视觉模型的代价高于漏报（漏报可手动勾选）。
+  const modalities = Array.isArray(item.input_modalities) ? (item.input_modalities as unknown[]) : Array.isArray(arch?.input_modalities) ? (arch!.input_modalities as unknown[]) : undefined;
+  const imageInput = readTop(["supports_images", "supports_vision"]) === true
+    || (modalities?.some((kind) => typeof kind === "string" && kind.toLowerCase() === "image") ?? false)
+    || undefined;
+  const result: { contextWindow?: number; maxTokens?: number; imageInput?: boolean } = {};
+  if (contextWindow !== undefined) result.contextWindow = contextWindow;
+  if (maxTokens !== undefined) result.maxTokens = maxTokens;
+  if (imageInput) result.imageInput = true;
+  return result;
+}
+
+/**
+ * 把上游 /models 响应条目映射为设置页模型列表（fetchCustomProviderModels 的
+ * 纯函数部分，可单测）：id 必填，name 缺省回退 id，图片输入取上游声明优先、
+ * 无声明回退模型名推断；按 id 去重（重复 id 保留首个——主条目通常在前，
+ * 声明更完整）排序。空列表返回 []（是否报错由调用方定）。
+ */
+export function buildFetchedProviderModels(items: unknown[]): ProviderModelSettings[] {
+  const models = items
+    .map((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return undefined;
+      const record = item as Record<string, unknown>;
+      if (typeof record.id !== "string" || !record.id.trim()) return undefined;
+      const id = record.id.trim();
+      const meta = extractUpstreamModelMeta(record);
+      return {
+        id,
+        name: typeof record.name === "string" && record.name.trim() ? record.name.trim() : id,
+        imageInput: meta.imageInput ?? inferCustomModelImageInput(id),
+        ...(meta.contextWindow !== undefined ? { contextWindow: meta.contextWindow } : {}),
+        ...(meta.maxTokens !== undefined ? { maxTokens: meta.maxTokens } : {})
+      } satisfies ProviderModelSettings;
+    })
+    .filter(Boolean) as ProviderModelSettings[];
+  const deduped = new Map<string, ProviderModelSettings>();
+  for (const model of models) if (!deduped.has(model.id)) deduped.set(model.id, model);
+  return [...deduped.values()].sort((left, right) => left.id.localeCompare(right.id));
+}
 
 export function inferCustomModelImageInput(modelId: string): boolean {
   const value = modelId.trim().toLowerCase();

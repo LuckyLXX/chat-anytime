@@ -75,7 +75,7 @@ import { saveBrowserScreenshot } from "./browser-screenshot.js";
 import { autoCompactionFailureNotice, runManualCompaction } from "./compaction-lifecycle.js";
 import { isAbortErrorMessage, resolveRunOutcomeStatus, type TerminalRunStatus } from "./run-outcome.js";
 import { readGitBranch } from "./git-branch.js";
-import { builtinProviderOverlay, inferCustomModelImageInput, resolveBuiltinOverlayAction, resolveCustomProviderRegistration } from "./custom-provider.js";
+import { builtinProviderOverlay, buildFetchedProviderModels, resolveBuiltinOverlayAction, resolveCustomProviderRegistration } from "./custom-provider.js";
 import { buildDivModePrompt } from "./div-prompt.js";
 import { McpClientManager } from "./mcp-client.js";
 import { readConfiguredMcpServers, removeMcpServerConfig, setMcpServerDisabled, upsertMcpServerConfig } from "./mcp-config.js";
@@ -2636,18 +2636,11 @@ async function fetchCustomProviderModels(baseUrlInput: string, apiKey: string): 
   const payload = await response.json() as { data?: unknown } | unknown[];
   const items = Array.isArray(payload) ? payload : payload.data;
   if (!Array.isArray(items)) throw new Error("拉取模型失败：返回内容不是模型列表");
-  const models = items
-    .map((item) => {
-      if (!item || typeof item !== "object") return undefined;
-      const record = item as { id?: unknown; name?: unknown };
-      if (typeof record.id !== "string" || !record.id.trim()) return undefined;
-      const id = record.id.trim();
-      const lower = id.toLowerCase();
-      return { id, name: typeof record.name === "string" && record.name.trim() ? record.name.trim() : id, imageInput: inferCustomModelImageInput(lower) } satisfies ProviderModelSettings;
-    })
-    .filter(Boolean) as ProviderModelSettings[];
+  // 条目映射（含上游限额/图片输入声明提取，见 buildFetchedProviderModels）
+  // 是纯函数，测试覆盖在 custom-provider.test.ts。
+  const models = buildFetchedProviderModels(items);
   if (!models.length) throw new Error("拉取模型失败：上游没有返回可用模型");
-  return [...new Map(models.map((model) => [model.id, model])).values()].sort((left, right) => left!.id.localeCompare(right!.id));
+  return models;
 }
 
 /** 内置服务商模型列表直连接口（pi.dev 远程目录不可达时的兜底）。 */

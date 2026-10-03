@@ -4,7 +4,7 @@ import { convertMessages } from "@earendil-works/pi-ai/api/openai-completions";
 // 0.86.0 起 provider 入参改用 normalizeContext 产出的 TranscriptContext（系统提示
 // 折进 messages 首条 system 消息）；直接传原始 Context 会报类型错误。
 import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
-import { builtinProviderOverlay, customProviderModelDefinition, inferCustomModelImageInput, resolveBuiltinOverlayAction, resolveCustomProviderRegistration } from "./custom-provider.js";
+import { builtinProviderOverlay, buildFetchedProviderModels, customProviderModelDefinition, extractUpstreamModelMeta, inferCustomModelImageInput, parseUpstreamTokenCount, resolveBuiltinOverlayAction, resolveCustomProviderRegistration } from "./custom-provider.js";
 
 describe("custom OpenAI-compatible models", () => {
   it("keeps thinking levels available when the upstream catalog omits capabilities", () => {
@@ -310,5 +310,82 @@ describe("resolveBuiltinOverlayAction", () => {
     // 条目已删（用户删除服务）等同清空覆盖。
     expect(resolveBuiltinOverlayAction(undefined, baseline, "settings")).toBe("drop");
     expect(resolveBuiltinOverlayAction(undefined, baseline, "pull")).toBeUndefined();
+  });
+});
+
+describe("upstream /models metadata extraction", () => {
+  it("parses token counts from numbers and k/m suffix strings with sanity bounds", () => {
+    expect(parseUpstreamTokenCount(256000)).toBe(256000);
+    expect(parseUpstreamTokenCount("128k")).toBe(128000);
+    expect(parseUpstreamTokenCount("1m")).toBe(1_000_000);
+    expect(parseUpstreamTokenCount(" 1.5m ")).toBe(1_500_000);
+    // 护栏：过小是脏值，过大通常是字节数被写进了 token 字段。
+    expect(parseUpstreamTokenCount(0)).toBeUndefined();
+    expect(parseUpstreamTokenCount(999)).toBeUndefined();
+    expect(parseUpstreamTokenCount(100_000_001)).toBeUndefined();
+    // 非法形状一律丢弃，不影响其它字段提取。
+    expect(parseUpstreamTokenCount("abc")).toBeUndefined();
+    expect(parseUpstreamTokenCount("128kk")).toBeUndefined();
+    expect(parseUpstreamTokenCount(null)).toBeUndefined();
+    expect(parseUpstreamTokenCount(Number.NaN)).toBeUndefined();
+    // 数字与缩写后缀之间允许空白（"128 k" = 128000）。
+    expect(parseUpstreamTokenCount("128 k")).toBe(128000);
+  });
+
+  it("extracts relay-style declarations (workbuddy shape, 2026-10-04 实测)", () => {
+    // 用户渠道真实响应形状（脱 id 之外的完整字段形状）。
+    const meta = extractUpstreamModelMeta({
+      id: "cn:auto",
+      name: "Auto",
+      context_length: 256000,
+      max_allowed_size: 256000,
+      max_output_tokens: 32000,
+      supports_images: true,
+      supports_reasoning: true,
+      reasoning_effort: "high"
+    });
+    expect(meta).toEqual({ contextWindow: 256000, maxTokens: 32000, imageInput: true });
+  });
+
+  it("extracts OpenRouter-style architecture fields and vLLM max_model_len", () => {
+    expect(extractUpstreamModelMeta({
+      id: "a/b",
+      architecture: { input_modalities: ["text", "image"], max_input_tokens: 1_234_567, max_output_tokens: 65536 }
+    })).toEqual({ contextWindow: 1_234_567, maxTokens: 65536, imageInput: true });
+    expect(extractUpstreamModelMeta({ id: "qwen", max_model_len: "262k" })).toEqual({ contextWindow: 262000 });
+    // 顶层 input_modalities（LiteLLM 风格）也认。
+    expect(extractUpstreamModelMeta({ id: "m", input_modalities: ["text"] })).toEqual({});
+    expect(extractUpstreamModelMeta({ id: "m", input_modalities: ["text", "IMAGE"] }).imageInput).toBe(true);
+  });
+
+  it("drops contradictory limits and ignores explicit-false image flags", () => {
+    // 输出上限超过上下文窗口：口径异常，保留上下文丢输出。
+    expect(extractUpstreamModelMeta({ context_length: 128000, max_output_tokens: 512000 }))
+      .toEqual({ contextWindow: 128000 });
+    // 显式 false 不采纳（部分中转站字段默认恒 false，误杀视觉模型代价更高）。
+    expect(extractUpstreamModelMeta({ id: "gpt-4o-mini", supports_images: false })).toEqual({});
+    // 什么都没声明：全部回退 undefined，调用方回退推断。
+    expect(extractUpstreamModelMeta({ object: "model", created: 1 })).toEqual({});
+  });
+
+  it("builds fetched provider models with upstream limits and image inference fallback", () => {
+    const items = [
+      // workbuddy 形状：限额与图片输入全来自上游声明。
+      { id: "cn:balanced-model", name: "均衡", context_length: 300000, max_output_tokens: 48000, supports_images: true, only_reasoning: true },
+      // 无声明的标准 OpenAI 形状：回退名字推断（gpt-4o → 支持图片），限额缺省。
+      { id: "gpt-4o-mini", object: "model", created: 1753600000, owned_by: "openai" },
+      // 坏条目（无 id）与重复 id 都要被清理/去重。
+      { object: "model" },
+      { id: "cn:balanced-model", name: "重复" }
+    ];
+    const models = buildFetchedProviderModels(items);
+    expect(models.map((model) => model.id)).toEqual(["cn:balanced-model", "gpt-4o-mini"]);
+    expect(models[0]).toMatchObject({ name: "均衡", contextWindow: 300000, maxTokens: 48000, imageInput: true });
+    expect(models[1]).toMatchObject({ name: "gpt-4o-mini", imageInput: true });
+    expect(models[1]).not.toHaveProperty("contextWindow");
+    expect(models[1]).not.toHaveProperty("maxTokens");
+    // 上游声明优先于名字推断：id 推不出图片（cn:hy3），但 supports_images: true。
+    const hy3 = buildFetchedProviderModels([{ id: "cn:hy3", name: "Hy3", context_length: 192000, max_output_tokens: 64000, supports_images: true }])[0];
+    expect(hy3).toMatchObject({ contextWindow: 192000, maxTokens: 64000, imageInput: true });
   });
 });
