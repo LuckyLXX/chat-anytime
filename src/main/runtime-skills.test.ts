@@ -44,11 +44,16 @@ describe("bundled skill assets (repo contract)", () => {
     // 这些路径是发行契约：electron-builder 的 extraResources 把 resources/skills
     // 原样发成 <安装目录>/resources/skills，运行时（skill 扫描 + locateLjqCtrlDir）
     // 与文档都按它定位。改名/搬家必须同步改 main 侧与 SKILL.md。
-    for (const slug of ["automation", "chatanytime-config", "computer-use", "gallery-publish", "web-tasks"]) {
+    for (const slug of ["automation", "chatanytime-config", "computer-use", "gallery-publish", "pidesktop-theme-creator", "web-tasks"]) {
       expect(existsSync(join(skillsRoot, slug, "SKILL.md")), `${slug}/SKILL.md 缺失`).toBe(true);
     }
     for (const asset of ["ljqCtrl.py", "uia.py", "ui_detect.py", "test/selfcheck.py"]) {
       expect(existsSync(join(skillsRoot, "computer-use", asset)), `computer-use/${asset} 缺失`).toBe(true);
+    }
+    // 主题创建 skill 的校验器是它的可用性前提（SKILL.md 工作流第 4 步），
+    // 跟 ljqCtrl.py 同理：skill 与它依赖的脚本必须同源同包。
+    for (const asset of ["scripts/check_theme.py", "references/variables.md", "references/recipes.md", "assets/theme-template.css"]) {
+      expect(existsSync(join(skillsRoot, "pidesktop-theme-creator", asset)), `pidesktop-theme-creator/${asset} 缺失`).toBe(true);
     }
     // `test/` 下不是 Skill 资产而是自检脚本，不能带第二个 SKILL.md（否则 skill 扫描会多发现一个）
     expect(existsSync(join(skillsRoot, "computer-use", "test", "SKILL.md"))).toBe(false);
@@ -77,7 +82,7 @@ describe("bundled skill assets (repo contract)", () => {
       .filter((entry) => entry.isDirectory())
       .map((entry) => entry.name)
       .filter((slug) => existsSync(join(skillsRoot, slug, "SKILL.md")));
-    expect(slugs.sort()).toEqual(["automation", "chatanytime-config", "computer-use", "gallery-publish", "web-tasks"]);
+    expect(slugs.sort()).toEqual(["automation", "chatanytime-config", "computer-use", "gallery-publish", "pidesktop-theme-creator", "web-tasks"]);
     for (const slug of slugs) {
       const parsed = parseSkillFrontmatter(readFileSync(join(skillsRoot, slug, "SKILL.md"), "utf8"));
       expect(parsed.name, `${slug} 缺 name`).toBeTruthy();
@@ -88,7 +93,7 @@ describe("bundled skill assets (repo contract)", () => {
   it("discovers the real bundled dir as bundled scope through the source pipeline", async () => {
     const skills = discoverSkills([{ dir: skillsRoot, ...BUNDLED_SKILL_SOURCE }]);
     const bySlug = new Map(skills.map((skill) => [skill.slug, skill]));
-    expect([...bySlug.keys()].sort()).toEqual(["automation", "chatanytime-config", "computer-use", "gallery-publish", "web-tasks"]);
+    expect([...bySlug.keys()].sort()).toEqual(["automation", "chatanytime-config", "computer-use", "gallery-publish", "pidesktop-theme-creator", "web-tasks"]);
     expect(bySlug.get("computer-use")?.scope).toBe("bundled");
     expect(bySlug.get("computer-use")?.source).toBe("随应用分发");
     expect(bySlug.get("automation")?.name).toBe("自动化任务");
@@ -96,6 +101,7 @@ describe("bundled skill assets (repo contract)", () => {
     expect(bySlug.get("computer-use")?.name).toBe("电脑控制");
     expect(bySlug.get("chatanytime-config")?.name).toBe("ChatAnyTime 配置");
     expect(bySlug.get("gallery-publish")?.name).toBe("作品发布");
+    expect(bySlug.get("pidesktop-theme-creator")?.name).toBe("pidesktop-theme-creator");
   });
 
   it("merges empty bundled/global/project dirs without noise", async () => {

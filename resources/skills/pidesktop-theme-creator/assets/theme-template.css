@@ -1,0 +1,221 @@
+/* Theme Name: 我的主题 */
+/* PiDesktop 原生主题起始模板。图片 URL 保持与本文件相对。 */
+/* 结构扩展（可选）：视口装饰层、字体包、区域重设计。
+   取消注释后，资产文件保持与本 CSS 同目录。
+   结构主题请在文件头另加类型标记（标记写法见 SKILL.md『主题类型』），
+   检查器会放宽全量覆盖要求。
+
+@font-face { font-family: "Brand"; src: url(brand.woff2) format("woff2"); }
+
+:root {
+  --pi-layer-backdrop: url(backdrop.webp) center / cover no-repeat;
+  --pi-overlay-trim: url(trim.webp) top / 640px repeat-x;
+}
+:root[data-theme-effective="dark"] { --pi-layer-backdrop: url(backdrop-dark.webp) center / cover no-repeat; }
+[data-pane="composer"] { border-radius: 0; }
+[data-ui-generating] [data-pane="composer"] { box-shadow: 0 0 12px var(--accent); }
+
+分屏：只想打焦点格时叠加 [data-pane-active]
+[data-ui-generating] [data-pane="conversation"][data-pane-active] [data-pane="composer"] {
+  box-shadow: 0 0 12px var(--accent);
+}
+
+侧栏折叠：整栏装饰只在展开态生效（折叠态命中 48px 窄条）
+html:not([data-ui-sidebar-collapsed]) [data-pane="sidebar"] { /* 整栏装饰 */ }
+
+设计模式工作台
+[data-ui-design-open] [data-pane="design-canvas"] { background: var(--panel-bg-preview, var(--panel-bg)); }
+
+界面微调：可让主题尺寸跟随用户密度档位
+[data-pane="sidebar"] [data-row-kind="session"] { border-radius: var(--ui-control-radius, 6px); }
+*/
+
+:root[data-theme-effective="light"] {
+  --chat-bg-image: none;
+  --chat-bg-opacity: 0;
+  --chat-bg-size: cover;
+  --chat-bg-repeat: no-repeat;
+  --chat-bg-position: center;
+
+  --surface: #ffffff;
+  --surface-muted: #f8fafc;
+  --surface-raised: #f1f5f9;
+  --surface-conversation: #ffffff;
+  --surface-sidebar: #f8fafc;
+  --surface-sidebar-tabs: #f1f5f9;
+  --surface-sidebar-hover: #e2e8f0;
+  --surface-sidebar-active: #e0e7ff;
+  --surface-sidebar-badge: #e0e7ff;
+  --surface-input: #ffffff;
+  --surface-footer: #f8fafc;
+  --surface-detail: #f8fafc;
+  --surface-button-hover: #e2e8f0;
+  --preview-surface: #ffffff;
+  --blockquote-surface: #eef2ff;
+  --panel-bg: rgb(255 255 255 / 92%);
+
+  --text: #1e293b;
+  --text-muted: #64748b;
+  --text-sidebar-active: #3730a3;
+  --text-on-accent: #ffffff;
+  --on-accent: #ffffff;
+  --text-on-user-bubble: #ffffff;
+  --avatar-user-text: #ffffff;
+  --avatar-assistant-text: #ffffff;
+  --link: #1d4ed8;
+
+  --border: #e2e8f0;
+  --border-strong: #cbd5e1;
+  --border-message: #e2e8f0;
+  --border-assistant: #e2e8f0;
+  --blockquote-border: #94a3b8;
+  --user-bubble-border: #1d4ed8;
+  --accent-border: #a5b4fc;
+
+  --accent: #4f46e5;
+  --accent-hover: #4338ca;
+  --accent-soft: #eef2ff;
+  --accent-text: #4338ca;
+  --focus-ring: rgb(99 102 241 / 32%);
+  --selection-bg: #c7d2fe;
+  --selection-text: #1e1b4b;
+
+  --success: #059669;
+  --success-soft: #d1fae5;
+  --success-border: #34d399;
+  --completed-border: #34d399;
+  --warning: #d97706;
+  --warning-soft: #fef3c7;
+  --danger: #dc2626;
+  --danger-soft: #fee2e2;
+  --danger-border: #fca5a5;
+  --danger-text: #b42318;
+
+  --blue: #2563eb;
+  --user-bubble: #2563eb;
+  --ai-bubble: #ffffff;
+  --avatar-user: #2563eb;
+  --avatar-assistant: #1e293b;
+  --tool-bubble-bg: #eef2ff;
+  --tool-bubble-border: #e2e8f0;
+
+  --code-surface: #0b1220;
+  --code-text: #e5e7eb;
+  --inline-code-surface: #eef2ff;
+  --inline-code-text: #4338ca;
+  --syntax-keyword: #c026d3;
+  --syntax-string: #047857;
+  --syntax-number: #b45309;
+  --syntax-comment: #64748b;
+  --syntax-title: #2563eb;
+  --syntax-meta: #fb7185;
+  --diff-add-text: #166534;
+  --diff-remove-text: #b42318;
+  --diff-hunk-text: #1d4ed8;
+  --diff-meta-text: #4338ca;
+
+  --user-action-border: rgb(255 255 255 / 42%);
+  --user-action-surface: rgb(255 255 255 / 16%);
+  --overlay: rgb(15 23 42 / 42%);
+  --shadow-sm: 0 1px 2px rgb(15 23 42 / 6%);
+  --shadow-md: 0 5px 18px rgb(15 23 42 / 8%);
+  --shadow-lg: 0 22px 70px rgb(15 23 42 / 18%);
+  --scrollbar-track: #f8fafc;
+  --scrollbar-thumb: rgb(99 102 241 / 38%);
+  --scrollbar-thumb-hover: rgb(99 102 241 / 60%);
+}
+
+:root[data-theme-effective="dark"] {
+  --chat-bg-image: none;
+  --chat-bg-opacity: 0;
+  --chat-bg-size: cover;
+  --chat-bg-repeat: no-repeat;
+  --chat-bg-position: center;
+
+  --surface: #172033;
+  --surface-muted: #0b1220;
+  --surface-raised: #1e293b;
+  --surface-conversation: #172033;
+  --surface-sidebar: #0b1220;
+  --surface-sidebar-tabs: #1e293b;
+  --surface-sidebar-hover: #263449;
+  --surface-sidebar-active: #27345a;
+  --surface-sidebar-badge: #334155;
+  --surface-input: #111827;
+  --surface-footer: #0f172a;
+  --surface-detail: #0f172a;
+  --surface-button-hover: #263449;
+  --preview-surface: #111827;
+  --blockquote-surface: #1e293b;
+  --panel-bg: rgb(23 32 51 / 94%);
+
+  --text: #eef2ff;
+  --text-muted: #a6b1c5;
+  --text-sidebar-active: #c7d2fe;
+  --text-on-accent: #ffffff;
+  --on-accent: #ffffff;
+  --text-on-user-bubble: #ffffff;
+  --avatar-user-text: #ffffff;
+  --avatar-assistant-text: #172033;
+  --link: #93c5fd;
+
+  --border: #334155;
+  --border-strong: #475569;
+  --border-message: #334155;
+  --border-assistant: #334155;
+  --blockquote-border: #64748b;
+  --user-bubble-border: #60a5fa;
+  --accent-border: #6366f1;
+
+  --accent: #4f46e5;
+  --accent-hover: #5b5bd6;
+  --accent-soft: #25254b;
+  --accent-text: #c4b5fd;
+  --focus-ring: rgb(129 140 248 / 38%);
+  --selection-bg: #3730a3;
+  --selection-text: #ffffff;
+
+  --success: #34d399;
+  --success-soft: #123c32;
+  --success-border: #34d399;
+  --completed-border: #34d399;
+  --warning: #fbbf24;
+  --warning-soft: #4a3510;
+  --danger: #fb7185;
+  --danger-soft: #4a1d2b;
+  --danger-border: #fb7185;
+  --danger-text: #fda4af;
+
+  --blue: #93c5fd;
+  --user-bubble: #2563eb;
+  --ai-bubble: #172033;
+  --avatar-user: #2563eb;
+  --avatar-assistant: #eef2ff;
+  --tool-bubble-bg: #25254b;
+  --tool-bubble-border: #334155;
+
+  --code-surface: #0b1220;
+  --code-text: #e5e7eb;
+  --inline-code-surface: #25254b;
+  --inline-code-text: #c4b5fd;
+  --syntax-keyword: #c4b5fd;
+  --syntax-string: #86efac;
+  --syntax-number: #fbbf24;
+  --syntax-comment: #94a3b8;
+  --syntax-title: #93c5fd;
+  --syntax-meta: #fb7185;
+  --diff-add-text: #86efac;
+  --diff-remove-text: #fda4af;
+  --diff-hunk-text: #93c5fd;
+  --diff-meta-text: #c4b5fd;
+
+  --user-action-border: rgb(255 255 255 / 42%);
+  --user-action-surface: rgb(255 255 255 / 16%);
+  --overlay: rgb(0 0 0 / 58%);
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 20%);
+  --shadow-md: 0 8px 24px rgb(0 0 0 / 24%);
+  --shadow-lg: 0 22px 70px rgb(0 0 0 / 45%);
+  --scrollbar-track: #0b1220;
+  --scrollbar-thumb: rgb(129 140 248 / 42%);
+  --scrollbar-thumb-hover: rgb(129 140 248 / 68%);
+}

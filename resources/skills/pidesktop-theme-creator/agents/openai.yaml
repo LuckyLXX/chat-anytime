@@ -1,0 +1,4 @@
+interface:
+  display_name: "PiDesktop 主题创建器"
+  short_description: "创建无障碍的 PiDesktop 主题"
+  default_prompt: "使用 $pidesktop-theme-creator 创建或审查完整的 PiDesktop 主题，并执行对比度检查。"

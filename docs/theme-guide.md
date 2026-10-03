@@ -17,7 +17,7 @@
 
 ## 颜色 Token
 
-主题通过覆盖语义变量换肤（完整清单见 `pidesktop-theme-creator` skill 的 `references/variables.md`）。核心几组：
+主题通过覆盖语义变量换肤（完整清单见随安装包分发的内置 skill `pidesktop-theme-creator` 的 `references/variables.md`）。核心几组：
 
 
 | 用途 | 变量                                                                                          |
@@ -156,7 +156,7 @@
 
 > `popup` 是绝对定位浮层：主题**不得修改其 `position`**（改成 `relative` 会落入网格隐式行并把排布打乱）；给浮层加层级请只改 `z-index`。
 
-**覆盖层级**：① 契约控件（上表，跨版本安全）；② 钩子区域内用元素选择器统改（`[data-pane="sidebar"] button`、`[data-pane="settings-dialog"] select`，同样安全）；③ 区域内类名命中（事实稳定、无契约）。右键菜单、错误提示 toast、重命名小对话框和内嵌编辑器（Markdown 工具栏、Mermaid）在契约之外，只受颜色 token 影响。立体按钮、clip-path 异形容器、霓虹描边、扫描线等创意技法的可复制配方见 `pidesktop-theme-creator` skill 的 `references/recipes.md`。
+**覆盖层级**：① 契约控件（上表，跨版本安全）；② 钩子区域内用元素选择器统改（`[data-pane="sidebar"] button`、`[data-pane="settings-dialog"] select`，同样安全）；③ 区域内类名命中（事实稳定、无契约）。右键菜单、错误提示 toast、重命名小对话框和内嵌编辑器（Markdown 工具栏、Mermaid）在契约之外，只受颜色 token 影响。立体按钮、clip-path 异形容器、霓虹描边、扫描线等创意技法的可复制配方见内置 skill `pidesktop-theme-creator` 的 `references/recipes.md`。
 
 > ⚠️ 不要对钩子区域写 `[data-pane="x"] > * { position: relative; z-index: n }` 这类"全体抬升"规则：会把区域内绝对定位的浮层（附件预览条、错误条、菜单）改为流内元素。只抬 `data-composer-zone` 排布分区与明确的流内子项。
 
