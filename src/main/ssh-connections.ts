@@ -53,7 +53,12 @@ export interface SshConnectOptionsLike {
 
 export interface SshShellStreamLike {
   write(data: string): void;
-  setWindow(cols: number, rows: number, height: number, width: number): void;
+  /**
+   * **ssh2 的口径：rows 在前**（`Channel#setWindow(rows, cols, height, width)`，报文里
+   * 才是 `cols, rows, width, height`）。写成 cols 在前会静默把远端 PTY 的列数设成本地
+   * 行数：初始宽屏正常、面板一拖宽输出就卡在旧列数、右侧留白（2026-10-03 修复的根因）。
+   */
+  setWindow(rows: number, cols: number, height: number, width: number): void;
   end(): void;
   close(): void;
   on(event: string, listener: (...args: never[]) => void): unknown;
@@ -346,7 +351,9 @@ export class SshConnectionManager {
       case "input": this.connections.get(command.terminalId)?.stream?.write(command.data); return { kind: "void" };
       case "resize": {
         const record = this.connections.get(command.terminalId);
-        if (record?.stream) record.stream.setWindow(clampDimension(command.cols, 80), clampDimension(command.rows, 24), 480, 640);
+        // 参数顺序必须是 (rows, cols, height, width)——ssh2 的签名如此，见 SshShellStreamLike 注释。
+        // 像素两项沿用 ssh2 reqPty 的默认值（640×480），只是装饰性信息。
+        if (record?.stream) record.stream.setWindow(clampDimension(command.rows, 24), clampDimension(command.cols, 80), 480, 640);
         return { kind: "void" };
       }
       case "kill": this.kill(command.terminalId); return { kind: "void" };

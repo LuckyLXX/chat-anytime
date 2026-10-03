@@ -27,6 +27,8 @@ type Listener = (...args: never[]) => void;
 class FakeShellStream implements SshShellStreamLike {
   written: string[] = [];
   closed = 0;
+  /** setWindow 的入参记录（顺序本身是被断言的对象，见「按 ssh2 口径下发 resize」）。 */
+  windows: Array<[number, number, number, number]> = [];
   private readonly dataListeners: Listener[] = [];
   private readonly closeListeners: Listener[] = [];
 
@@ -34,7 +36,9 @@ class FakeShellStream implements SshShellStreamLike {
     this.written.push(data);
   }
 
-  setWindow(): void {}
+  setWindow(rows: number, cols: number, height: number, width: number): void {
+    this.windows.push([rows, cols, height, width]);
+  }
 
   end(): void {}
 
@@ -437,6 +441,21 @@ describe("SshConnectionManager.connect (renderer channel)", () => {
     harness.manager.handle({ type: "resize", terminalId: "t1", cols: 120, rows: 40 });
     harness.manager.handle({ type: "kill", terminalId: "t1" });
     expect(harness.clients[0]!.ended).toBeGreaterThan(0);
+  });
+
+  // 2026-10-03 用户报「SSH 终端拖宽后输出不跟随、右侧留白」的根因回归网：ssh2 的
+  // 签名是 (rows, cols, height, width)，写成 cols 在前会让远端 PTY 的列数 = 本地行数
+  // （拖宽面板时远端仍按旧列数排版）。这条用例断言的是**顺序本身**，换回旧顺序即红。
+  it("按 ssh2 口径下发 resize（rows 在前）", async () => {
+    const harness = createHarness();
+    const hosts = harness.manager.handle({ type: "hosts" });
+    const hostId = hosts.kind === "hosts" ? hosts.hosts[0]!.id : "";
+    harness.manager.handle({ type: "connect", terminalId: "t1", hostId, cols: 80, rows: 24, trustFingerprint: true });
+    await sleep(2);
+    harness.clients[0]!.emitReady();
+    await sleep(5);
+    harness.manager.handle({ type: "resize", terminalId: "t1", cols: 132, rows: 37 });
+    expect(harness.clients[0]!.shellStream!.windows).toEqual([[37, 132, 480, 640]]);
   });
 });
 
