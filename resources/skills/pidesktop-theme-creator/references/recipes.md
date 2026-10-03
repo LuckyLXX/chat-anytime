@@ -136,10 +136,10 @@
 
 值得反应的状态：`data-ui-generating`（生成中）、`data-ui-chat-empty`、`data-ui-settings-open`、`data-ui-preview-open`、`data-ui-workspace-open`、`data-ui-permission-pending`、`data-ui-split-open`、`data-ui-design-open`、`data-ui-sidebar-collapsed`。
 
-## 实战配方（来自 maid-atelier 移植，含真实样张）
+## 实战配方（含真实样张）
 
-以下技法全部经 `themes/maid-atelier/` 落地验证（该主题从 dsh-deep-whale 复刻，
-素材与许可说明见其 README）。
+以下技法经一个真实的结构主题（外部皮肤移植，素材与许可说明见当时的主题 README）逐项落地验证。
+该主题已不在仓库 `themes/` 内（只在 git 历史里），配方本身与具体素材无关，可直接套用。
 
 ### 九宫格镂空画框（按钮 / 输入框）
 

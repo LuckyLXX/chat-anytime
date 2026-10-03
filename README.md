@@ -171,16 +171,14 @@ npm run package:installer   # dist\ChatAnyTime Setup <版本>.exe
 
 ## 主题
 
-主题是一份 CSS（可选：同目录图片/字体资产），导入方式为「设置 → 外观 → 导入 CSS / 导入主题目录」。仓库 [`themes/`](themes/) 里备了四套可直接导入的示例主题：
+主题是一份 CSS（可选：同目录图片/字体资产），导入方式为「设置 → 外观 → 导入 CSS / 导入主题目录」。仓库 [`themes/`](themes/) 里备了两套可直接导入的示例主题：
 
 | 主题 | 风格 |
 | --- | --- |
-| [`aurora-voyage`](themes/aurora-voyage) | 极光夜航：明暗双概念装饰层动效 + 玻璃拟态 + 立体按钮 |
-| [`candy-dopamine`](themes/candy-dopamine) | 马卡龙多巴胺乐园：低饱和糖果色 + 双立绘 + 糖果条纹顶栏 |
-| [`maid-atelier`](themes/maid-atelier) | 深海女仆工坊：外部皮肤移植样例（素材 CC BY-NC-SA 4.0，非商用） |
-| [`forest-holiday`](themes/forest-holiday) | 森野假日：等距插画明暗双壁纸（盛夏西瓜池 / 夜森营地）+ 场景感动效 |
+| [`forest-holiday`](themes/forest-holiday) | 森野假日：等距插画明暗双壁纸（盛夏西瓜池 / 夜森营地）+ 纯 CSS 场景感动效 |
+| [`pidesktop-anime-pink-dog-theme`](themes/pidesktop-anime-pink-dog-theme) | 粉发动漫少女与大白犬：春日草地 / 屋顶星夜双壁纸，低透明度铺底 + 粉白配色 |
 
-每套主题目录里的 `README.md` 说明了它的设计取舍与核验结论；主题编写契约与钩子清单见 [`docs/theme-guide.md`](docs/theme-guide.md)，也可以直接让助手用内置的「PiDesktop 主题创建器」技能来写。
+`themes/forest-holiday/README.md` 记录了该主题的设计取舍与核验结论；主题编写契约与钩子清单见 [`docs/theme-guide.md`](docs/theme-guide.md)，也可以直接让助手用内置的「PiDesktop 主题创建器」技能来写。
 
 ## 与 Pi 及原插件的关系
 
