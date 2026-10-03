@@ -62,7 +62,8 @@ import type {
   ToolExecution,
   TurnTiming,
   AutomationTask,
-  AutomationRunRecord
+  AutomationRunRecord,
+  UiThemeContext
 } from "../shared/protocol.js";
 import { isDelegationProgress } from "../shared/protocol.js";
 import { THINKING_LEVELS, clampThinkingLevel, supportedThinkingLevels } from "../shared/thinking-levels.js";
@@ -158,6 +159,7 @@ import * as speedStats from "./speed-stats.js";
 import * as contextBreakdown from "./context-breakdown.js";
 import * as runtimeHooks from "./runtime-hooks.js";
 import * as runtimePlanTools from "./runtime-plan-tools.js";
+import { createUiThemeExtension, normalizeUiThemeContext } from "./runtime-ui-theme.js";
 import * as runtimeShellKill from "./runtime-shell-kill.js";
 import { planHeading, readPlanMode, saveApprovedPlan, writePlanMode } from "./plan-store.js";
 import { readDesignMode, writeDesignMode } from "./design-mode-store.js";
@@ -185,6 +187,12 @@ let recentWorkspaces: RecentWorkspace[] = [];
 let galleryApps: GalleryApp[] = [];
 let selectedModel: { provider: string; id: string } | undefined;
 let settings: DesktopSettings | undefined;
+/**
+ * 渲染端上报的界面主题快照（明暗/壁纸/色板）。utility 侧不知道 OS 深浅也读不到
+ * 计算样式，所以这里只是渲染端事实的内存镜像；经 ui.themeContext 命令更新，只用于
+ * 给 Div 气泡提示词补一行主题信息（见 runtime-ui-theme.ts），不落盘、不进设置。
+ */
+let uiThemeContext: UiThemeContext | undefined;
 /** 随安装包分发的内置 Skill 目录（安装目录 resources/skills），由主进程经 initialize 下发。 */
 let bundledSkillsDir: string | undefined;
 /** 随安装包分发的内置子智能体目录（安装目录 resources/subagents），同由主进程下发；
@@ -3038,6 +3046,13 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
       runtimePlanTools.createPlanModeExtension({
         state: () => recordBox?.planState
       }),
+      // 界面主题注入（第五个内联扩展）：Div 气泡的配色由模型自己写，模型看不到界面——
+      // 每回合把「当前明暗 + 是否壁纸 + 主题色值」追到系统提示词尾部（主题不变时逐字节
+      // 相同 ⇒ 前缀缓存照常命中）；divMode 为 off 时完全不注入。
+      createUiThemeExtension({
+        divMode: () => recordAgent.divMode,
+        context: () => uiThemeContext
+      }),
       // 实验分支（feat/codemode-toolsearch）最终保留：codemode（脚本编排工具，QuickJS
       // 沙箱）。上游注册即不激活，激活点在 toolNamesFor 里显式点名；缺省 mode:"on"
       // （工具保持声明，脚本额外可编排）；脚本内工具调用走同一条 tool pipeline，权限门
@@ -4752,6 +4767,12 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
           }
         } else emitState();
       }
+      break;
+    // 渲染端上报的界面主题快照：只更内存镜像，不落盘、不改任何设置（main 侧 updateSettings
+    // 对该命令无操作、空 diff 不写文件）。整体校验不过时清空——宁可不注入，也不把可疑文本
+    // 拼进系统提示词。
+    case "ui.themeContext":
+      uiThemeContext = normalizeUiThemeContext(command.context);
       break;
     case "settings.save": {
       if (!settings) break;

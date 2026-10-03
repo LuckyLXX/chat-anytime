@@ -1,4 +1,4 @@
-import type { DivBubbleMode } from "../shared/protocol.js";
+import type { DivBubbleMode, UiThemeContext, UiThemePalette } from "../shared/protocol.js";
 
 const htmlFence = "```";
 
@@ -39,9 +39,60 @@ export const DIV_DYNAMIC_MODE_PROMPT = `
 - 可以使用 setTimeout、setInterval、requestAnimationFrame 和 Canvas；动画需要在合理时机停止或复用，避免无休止创建计时器和渲染器。
 - 静态内容不需要为了装饰而添加脚本；脚本失败时，核心信息仍应保持可读。`;
 
+/**
+ * 气泡配色规范（静态字节，两档共用）。
+ *
+ * 2026-10-03 用户报「Div 气泡有时候看不清」：模型不知道界面深浅、也不知道主题色板，
+ * 于是把弱化灰（#999 一类）当正文、浅色底写浅字，在白色卡片上直接糊掉。
+ *
+ * 三层含义：① 卡片自洽（背景与正文成对，对比度硬指标）；② **优先引用主题变量**——
+ * 这些都是公开主题 API（styles.css 的 :root / :root[data-theme="dark"]），变量会随
+ * 明暗与壁纸自动适配，气泡作用域里能继承（html-sanitize 已钉住 `var(--x)` 能过消毒），
+ * 比硬编码色值更抗主题切换；③ 聊天区可能是壁纸图片，透明卡片不可读。
+ */
+export const DIV_COLOR_PROMPT = `
+【气泡配色】
+- 画板自带背景与正文色并成对定义：正文对比度 ≥ 4.5:1、次要文字 ≥ 3:1；#999 一类浅灰不能当正文，浅底上不写浅字、深底上不写深字。
+- 贴合界面主题就直接引用主题变量（随明暗与壁纸自动适配，不需要知道具体色值）：var(--surface) var(--surface-raised) var(--text) var(--text-muted) var(--border) var(--accent) var(--accent-soft) var(--code-surface) var(--code-text)。
+- 卡片底色用不透明或近不透明——聊天区背后可能是壁纸图片；硬编码颜色时写整套配色。`;
+
+/** 调色板键顺序（即提示词里的书写顺序，测试与渲染端共用一份口径）。 */
+export const UI_THEME_PALETTE_ORDER: ReadonlyArray<readonly [keyof UiThemePalette, string]> = [
+  ["surface", "surface"],
+  ["surfaceRaised", "surface-raised"],
+  ["text", "text"],
+  ["textMuted", "text-muted"],
+  ["border", "border"],
+  ["accent", "accent"],
+  ["accentSoft", "accent-soft"]
+];
+
+/**
+ * 「当前界面主题」动态块：每回合在 before_agent_start 追加到系统提示词尾部。
+ *
+ * 字节稳定是接口的一部分——主题不变时两次请求的系统提示词逐字节相同，前缀缓存
+ * 照常命中（路由见 runtime-ui-theme.ts）。divMode 为 off 或上下文缺失/不合法时
+ * 返回 undefined，此时对提示词零影响。
+ */
+export function buildUiThemeContextBlock(divMode: DivBubbleMode, context: UiThemeContext | undefined): string | undefined {
+  if (divMode === "off" || !context) return undefined;
+  const palette = UI_THEME_PALETTE_ORDER
+    .map(([key, label]) => {
+      const value = context.palette?.[key];
+      return typeof value === "string" && value ? `${label} ${value}` : undefined;
+    })
+    .filter((entry): entry is string => entry !== undefined);
+  const parts = [
+    context.mode === "dark" ? "深色模式" : "浅色模式",
+    `聊天区背景：${context.wallpaper ? "壁纸图片" : "纯色面板"}`
+  ];
+  if (palette.length > 0) parts.push(`主题色值：${palette.join("｜")}`);
+  return `【当前界面主题】${parts.join("｜")}`;
+}
+
 /** 按档位构建注入系统提示词的 Div 气泡规范；off 档返回 undefined（不注入）。 */
 export function buildDivModePrompt(mode: DivBubbleMode): string | undefined {
   if (mode === "off") return undefined;
   const policy = mode === "always" ? DIV_MODE_PROMPT : DIV_AUTO_MODE_PROMPT;
-  return `${policy}\n\n${DIV_MEDIA_PROMPT}\n\n${DIV_DYNAMIC_MODE_PROMPT}`;
+  return `${policy}\n\n${DIV_MEDIA_PROMPT}\n\n${DIV_DYNAMIC_MODE_PROMPT}\n\n${DIV_COLOR_PROMPT}`;
 }

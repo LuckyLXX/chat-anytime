@@ -121,6 +121,35 @@ export type CustomProviderModel = ProviderModelSettings;
 /** Div 气泡模式三档：off 不注入提示词；auto 按场景酌情使用；always 所有回复强制气泡。 */
 export type DivBubbleMode = "off" | "auto" | "always";
 
+/**
+ * 界面主题调色板快照（渲染端从计算样式读出的实际值，不是主题声明的原值）。
+ *
+ * 事实来源只有一个：渲染端的 `documentElement`。utility 进程既不知道 OS 深浅、也
+ * 不知道自定义主题改过哪些 token，所以由渲染端算好、经 `ui.themeContext` 命令推给
+ * utility，最终只用于给模型补一句「当前界面是什么主题」（见 div-prompt 的
+ * buildUiThemeContextBlock）。没有任何一处把它当配置读写。
+ */
+export interface UiThemePalette {
+  surface: string;
+  surfaceRaised: string;
+  text: string;
+  textMuted: string;
+  border: string;
+  accent: string;
+  accentSoft: string;
+  codeSurface: string;
+  codeText: string;
+}
+
+/** Div 气泡配色需要的界面事实：明暗模式、聊天区背后是不是壁纸、当前色板。 */
+export interface UiThemeContext {
+  mode: "light" | "dark";
+  /** 聊天区背后是壁纸图片（卡片底色必须近乎不透明，否则文字压在图上）。 */
+  wallpaper: boolean;
+  /** 读不到的 token 直接缺省，不编造（Partial）。 */
+  palette: Partial<UiThemePalette>;
+}
+
 /** 子智能体作用域：bundled=随安装包分发的内置定义（只读，只有执行模型可改）；global=用户级（所有工作区可见）；project=项目级（仅绑定工作区生效）。 */
 export type SubagentScope = "bundled" | "global" | "project";
 
@@ -1884,6 +1913,12 @@ export type RuntimeCommand =
   | { type: "agent.save"; agent: AgentProfile }
   | { type: "agent.archive"; agentId: string; archived: boolean }
   | { type: "settings.save"; settings: Pick<DesktopSettings, "model" | "thinkingLevel" | "accessMode" | "appearance" | "browser" | "computer" | "design" | "ssh" | "jev" | "defaultWorkspace"> }
+  /**
+   * 渲染端上报的界面主题快照（只在模式/壁纸/色板变化时发，JSON 去重）。主进程不
+   * 读它、不落盘（`updateSettings` 的空 diff 分支直接返回），只透传给 utility 的
+   * 内存镜像；utility 用它给 Div 气泡提示词补一行「当前界面主题」。
+   */
+  | { type: "ui.themeContext"; context: UiThemeContext }
   | { type: "model.select"; provider: string; id: string; sessionId?: string }
   | { type: "thinking.select"; level: ThinkingLevel; sessionId?: string }
   | { type: "auth.set"; provider: string; apiKey: string }

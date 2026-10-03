@@ -98,7 +98,7 @@ import {
   updateRatio,
   type SplitNode
 } from "./lib/split-layout";
-import { customCssHasWallpaper } from "./lib/theme-runtime";
+import { customCssHasWallpaper, readUiThemeContext } from "./lib/theme-runtime";
 import { useOverlayLayersOpen } from "./lib/overlay-layers";
 import { showGalleryWallLanding } from "./lib/landing-gallery";
 import { AppearanceSettings } from "./AppearanceSettings";
@@ -862,6 +862,25 @@ export function App(): ReactNode {
       delete root.dataset.themeWallpaper;
     };
   }, [settings.appearance.themePreset, settings.appearance.wallpaperOpacity, settings.appearance.bubbleOpacity, settings.appearance.panelOpacity, settings.appearance.customCss, settings.appearance.customThemes]);
+
+  // 上报界面主题快照给运行时（utility 读不到 DOM、也不知道 OS 深浅）：Div 气泡的配色
+  // 由模型自己写，模型看不到界面，得靠这行事实避免「浅色底写浅字」这类静默失真。
+  // 放在上面两个主题 effect 之后——同一组件内 effect 按声明顺序执行，这里读到的才是
+  // 刚写入的主题 `<style>` 生效后的计算样式。按 JSON 去重（主题不变时零命令）。
+  const uiThemeKeyRef = useRef("");
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const push = (): void => {
+      const context = readUiThemeContext(settings.appearance);
+      const key = JSON.stringify(context);
+      if (key === uiThemeKeyRef.current) return;
+      uiThemeKeyRef.current = key;
+      window.piDesktop.send({ type: "ui.themeContext", context });
+    };
+    push();
+    media.addEventListener("change", push);
+    return () => media.removeEventListener("change", push);
+  }, [settings.appearance.theme, settings.appearance.customCss, settings.appearance.customThemes, settings.appearance.themePreset]);
 
   // Project UI state onto the document root so custom themes can react to
   // settings/preview/chat state without observing the DOM. Attribute presence
