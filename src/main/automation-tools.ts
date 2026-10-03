@@ -71,7 +71,6 @@ export function buildAutomationTools(ctx: AutomationToolContext): ToolDefinition
   return [
     defineTool({
       name: "automation_create",
-      exposure: "deferred",
       label: "创建定时任务",
       description: [
         "创建定时任务：到点（cron，5 字段：分 时 日 月 周，如 \"0 9 * * 1-5\" = 工作日每天 09:00）后让 Agent 用给定提示词在后台跑一次。",
@@ -103,7 +102,6 @@ export function buildAutomationTools(ctx: AutomationToolContext): ToolDefinition
     }),
     defineTool({
       name: "automation_list",
-      exposure: "deferred",
       label: "列出自定义定时任务",
       description: "列出当前 Agent 的全部定时任务（名称/cron/启用状态/近一次运行）。想查具体任务的运行结果，打开对应会话即可。",
       promptSnippet: "automation_list: 列出定时任务",
@@ -119,7 +117,6 @@ export function buildAutomationTools(ctx: AutomationToolContext): ToolDefinition
     }),
     defineTool({
       name: "automation_delete",
-      exposure: "deferred",
       label: "删除定时任务",
       description: "按 id 删除一条定时任务。",
       promptSnippet: "automation_delete: 删除定时任务",
@@ -133,7 +130,6 @@ export function buildAutomationTools(ctx: AutomationToolContext): ToolDefinition
     }),
     defineTool({
       name: "automation_toggle",
-      exposure: "deferred",
       label: "启停定时任务",
       description: "启用/暂停一条定时任务（暂停后不再按 cron 自动触发）。",
       promptSnippet: "automation_toggle: 启停定时任务",
@@ -149,7 +145,6 @@ export function buildAutomationTools(ctx: AutomationToolContext): ToolDefinition
     }),
     defineTool({
       name: "automation_run",
-      exposure: "deferred",
       label: "运行定时任务",
       description: "立即手动运行一条定时任务（不等待 cron），用于验证任务提示词与模型。",
       promptSnippet: "automation_run: 立即运行定时任务",

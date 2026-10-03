@@ -5,10 +5,6 @@ description: 当用户想让你操作桌面上的其他应用窗口（打开/切
 
 # 电脑控制（computer use）
 
-> **工具加载提示**：computer_windows / computer_screenshot / computer_click / computer_type / computer_press
-> 这组工具默认**按需声明**（不在你的工具列表里）——第一次使用前先调 `tool_search`
-> （query 如 "电脑控制 截图 点击 屏幕"）加载，命中后整个会话可直接调用。本 skill 的其余指引照常适用。
-
 > 本目录随应用分发（安装目录 `resources/skills/computer-use/`，仓库源 `resources/skills/`），是**内置资产**：
 > 所有工作区、所有角色都能看到它，随应用升级。要自定义就把整个 `computer-use/` 目录复制到
 > 全局技能目录 `~/.pi/agent/pidesktop-skills/computer-use/`（同名会覆盖内置），或复制到
