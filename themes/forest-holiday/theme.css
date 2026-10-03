@@ -1,0 +1,549 @@
+/* Theme Name: 森野假日 Forest Holiday */
+/*
+ * 森野假日 —— 两张等距视角插画壁纸组成的明暗双模式主题。
+ *
+ *   亮色 = 夏日西瓜池（wallpaper-light.webp）：池水蓝＋叶绿＋西瓜红，
+ *          瓷白玻璃面板浮在明亮插画之上，是盛夏午后的清爽感；
+ *   暗色 = 夜森营地（wallpaper-dark.webp）：松林夜色＋溪流蓝＋篝火橙，
+ *          面板沉入深松绿，强调色改为帐篷与营火的暖橙，底部留一层极淡的
+ *          火光柔光，是夏夜里的暖。
+ *
+ * 内容与取舍：
+ *   · 全量 84 个语义 token 双模式覆盖，面板按 5 个公开面（侧栏/顶栏/输入框/
+ *     对话框/预览）分别给底色，壁纸透出而不压住文字；
+ *   · 轻度结构装饰：输入卡圆润瓷面 + 胶囊形发送/停止按钮 + 生成中呼吸光晕
+ *     （焦点格限定、尊重减少动态偏好）+ 侧栏行圆角对齐 + 壁纸态发丝分隔线；
+ *   · 场景感四件（全部纯 CSS、零新素材）：
+ *     A1 暗色营火会呼吸（firelight 层 7s 明暗 + 微缩放，配静态暗角层）；
+ *     A2 亮色池水会反光（双光带层缓慢横向漂流）；
+ *     A3 气泡长出小角（用户气泡收右下角 + 一条西瓜皮/余烬下缘）；
+ *     A4 状态有戏（生成中溪水光带滑过输入卡底缘、待决策时顶栏琥珀脉搏、
+ *        提问面板光环、分屏失焦格输入卡收敛）；
+ *   · 气泡透明度不写死：只在 token 层给一个较稳的默认（亮 90% / 暗 88%），
+ *     设置里的「气泡透明度」滑块一动就接管（应用以 !important 注入
+ *     `--bubble-alpha`），主题不去锁住这个运行时滑块。
+ *
+ * 纯 CSS，无脚本；图片与本文件同目录，导入时保持相对路径。
+ */
+
+/* ============================================================
+ * 一、暗色 —— 夜森营地
+ * ============================================================ */
+:root[data-theme-effective="dark"] {
+  --chat-bg-image: url("wallpaper-dark.webp");
+  --chat-bg-opacity: 1;
+  --chat-bg-size: cover;
+  --chat-bg-repeat: no-repeat;
+  --chat-bg-position: center;
+
+  /* —— 表面：深松绿夜色 —— */
+  --surface: #0e2129;
+  --surface-muted: #081921;
+  --surface-raised: #16323b;
+  --surface-conversation: #0d2028;
+  --surface-sidebar: #0a1d24;
+  --surface-sidebar-tabs: #0f2830;
+  --surface-sidebar-hover: #17353f;
+  --surface-sidebar-active: #3a2c18;
+  --surface-sidebar-badge: #1c3b45;
+  --surface-input: #102b34;
+  --surface-footer: #0b1f27;
+  --surface-detail: #0b1f27;
+  --surface-button-hover: #1a3a44;
+  --preview-surface: #102b34;
+  --blockquote-surface: #16323b;
+  --panel-bg: rgb(13 31 39 / 90%);
+  /* 气泡默认透明度（同理，滑块优先） */
+  --bubble-alpha: 88%;
+  /* A3 用户气泡下缘：夜里的余烬色 */
+  --fh-rind: rgb(224 138 60 / 92%);
+
+  /* —— 面板分面底色（壁纸透出比例）—— */
+  --panel-bg-sidebar: rgb(9 22 29 / 86%);
+  --panel-bg-topbar: rgb(11 26 33 / 82%);
+  --panel-bg-composer: rgb(16 40 48 / 90%);
+  --panel-bg-dialog: rgb(13 32 40 / 96%);
+  --panel-bg-preview: rgb(11 29 36 / 93%);
+
+  /* —— 文本 —— */
+  --text: #e9f4f0;
+  --text-muted: #9db9b6;
+  --text-sidebar-active: #ffcf95;
+  --text-on-accent: #2b1706;
+  --on-accent: #2b1706;
+  --text-on-user-bubble: #2b1706;
+  --avatar-user-text: #2b1706;
+  --avatar-assistant-text: #d6f2f5;
+  --link: #8fd8f0;
+
+  /* —— 边框 —— */
+  --border: #24444e;
+  --border-strong: #335a66;
+  --border-message: #1e3c46;
+  --border-assistant: #1e3c46;
+  --blockquote-border: #46707c;
+  --user-bubble-border: #ffc078;
+  --accent-border: #6f4c1d;
+
+  /* —— 强调：帐篷与营火的暖橙（配深色墨字）—— */
+  --accent: #ffa757;
+  --accent-hover: #ffbd7d;
+  --accent-soft: #33261b;
+  --accent-text: #ffcf95;
+  --focus-ring: rgb(255 167 87 / 34%);
+  --selection-bg: #2c5f6b;
+  --selection-text: #eef9fb;
+
+  /* —— 状态 —— */
+  --success: #62d5a0;
+  --success-soft: #0e3a2e;
+  --success-border: #62d5a0;
+  --completed-border: #62d5a0;
+  --warning: #ffc46b;
+  --warning-soft: #3f3012;
+  --danger: #ff8a95;
+  --danger-soft: #40181f;
+  --danger-border: #ff8a95;
+  --danger-text: #ffb4bb;
+
+  /* —— 气泡与头像 —— */
+  --blue: #8fd8f0;
+  --user-bubble: #f79a4a;
+  --ai-bubble: #123039;
+  --avatar-user: #f79a4a;
+  --avatar-assistant: #1f5a63;
+  --tool-bubble-bg: #17333c;
+  --tool-bubble-border: #26464f;
+
+  /* —— 代码 —— */
+  --code-surface: #06171c;
+  --code-text: #dcefee;
+  --inline-code-surface: #1b3d45;
+  --inline-code-text: #a9e8c8;
+  --syntax-keyword: #ffd47e;
+  --syntax-string: #8fe3a6;
+  --syntax-number: #ffbf7d;
+  --syntax-comment: #85a5a3;
+  --syntax-title: #8fd8f0;
+  --syntax-meta: #ff9fb4;
+
+  /* —— Diff —— */
+  --diff-add-text: #86e0a4;
+  --diff-remove-text: #ffb0ba;
+  --diff-hunk-text: #ffd9a8;
+  --diff-meta-text: #e2c5a2;
+
+  /* —— 交互与阴影 —— */
+  --user-action-border: rgb(43 23 6 / 30%);
+  --user-action-surface: rgb(43 23 6 / 12%);
+  --overlay: rgb(2 10 13 / 56%);
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 26%);
+  --shadow-md: 0 8px 26px rgb(0 0 0 / 32%);
+  --shadow-lg: 0 22px 70px rgb(0 0 0 / 52%);
+  --scrollbar-track: #081921;
+  --scrollbar-thumb: rgb(255 167 87 / 36%);
+  --scrollbar-thumb-hover: rgb(255 167 87 / 60%);
+
+  /* A1 营火（兼顾清晰度的取值）：大范围暖光只给到 16% 且压低纵向覆盖（它抬黑场=
+     降通透度，面积越小代价越小），动态感交给小面积高对比的余烬核（30%）。 */
+  --pi-overlay-firelight: radial-gradient(86% 46% at 50% 103%, rgb(255 150 60 / 16%), transparent 74%);
+  --pi-overlay-emberlight: radial-gradient(30% 17% at 58% 101%, rgb(255 190 108 / 30%), transparent 76%);
+  --pi-overlay-vignette: radial-gradient(124% 92% at 50% 46%, transparent 64%, rgb(2 10 14 / 16%) 100%);
+}
+
+/* ============================================================
+ * 二、亮色 —— 夏日西瓜池
+ * ============================================================ */
+:root[data-theme-effective="light"] {
+  --chat-bg-image: url("wallpaper-light.webp");
+  --chat-bg-opacity: 1;
+  --chat-bg-size: cover;
+  --chat-bg-repeat: no-repeat;
+  --chat-bg-position: center;
+
+  /* —— 表面：薄荷瓷白 —— */
+  --surface: #f7fdf9;
+  --surface-muted: #eef8f2;
+  --surface-raised: #ffffff;
+  --surface-conversation: #fbfefc;
+  --surface-sidebar: #eef8f2;
+  --surface-sidebar-tabs: #e4f3ea;
+  --surface-sidebar-hover: #e0f2e7;
+  --surface-sidebar-active: #fbd8de;
+  --surface-sidebar-badge: #d9eee2;
+  --surface-input: #ffffff;
+  --surface-footer: #f2faf5;
+  --surface-detail: #f2faf5;
+  --surface-button-hover: #e3f2e9;
+  --preview-surface: #ffffff;
+  --blockquote-surface: #edf8f1;
+  --panel-bg: rgb(249 253 251 / 88%);
+  /* 气泡默认透明度：插画壁纸细节密，底下的正文/元信息用 90% 才稳；
+     用户一动【外观 → 气泡透明度】滑块，应用的 !important 注入值即接管此变量。 */
+  --bubble-alpha: 90%;
+  /* A3 用户气泡下缘：西瓜皮绿 */
+  --fh-rind: rgb(63 154 95 / 88%);
+
+  /* —— 面板分面底色（壁纸透出比例）—— */
+  --panel-bg-sidebar: rgb(238 249 243 / 84%);
+  --panel-bg-topbar: rgb(245 252 248 / 80%);
+  --panel-bg-composer: rgb(255 255 255 / 90%);
+  --panel-bg-dialog: rgb(252 254 253 / 96%);
+  --panel-bg-preview: rgb(252 254 253 / 94%);
+
+  /* —— 文本 —— */
+  --text: #16332c;
+  --text-muted: #4f6b63;
+  --text-sidebar-active: #9c2b3d;
+  --text-on-accent: #ffffff;
+  --on-accent: #ffffff;
+  --text-on-user-bubble: #ffffff;
+  --avatar-user-text: #ffffff;
+  --avatar-assistant-text: #ffffff;
+  --link: #1a6f9e;
+
+  /* —— 边框 —— */
+  --border: #d8e9de;
+  --border-strong: #b9d4c4;
+  --border-message: #e2efe7;
+  --border-assistant: #e2efe7;
+  --blockquote-border: #93bfa4;
+  --user-bubble-border: #b8324a;
+  --accent-border: #f0b3bd;
+
+  /* —— 强调：西瓜红（配白字）—— */
+  --accent: #c93a50;
+  --accent-hover: #ac2c42;
+  --accent-soft: #fbe6e9;
+  --accent-text: #a82a3e;
+  --focus-ring: rgb(201 58 80 / 32%);
+  --selection-bg: #f8ccd4;
+  --selection-text: #4a1119;
+
+  /* —— 状态：这两色会被当正文色压在各自的 soft 底色上（徽标/状态块），
+     因此取比“图标色”更深的调子，保证 5:1 以上 —— */
+  --success: #15734c;
+  --success-soft: #ddf3e6;
+  --success-border: #74c99b;
+  --completed-border: #74c99b;
+  --warning: #8a5a08;
+  --warning-soft: #fcefd6;
+  --danger: #b3252c;
+  --danger-soft: #fbe2e4;
+  --danger-border: #eda8ad;
+  --danger-text: #97202a;
+
+  /* —— 气泡与头像 —— */
+  --blue: #1b7fbe;
+  --user-bubble: #c93a50;
+  --ai-bubble: #ffffff;
+  --avatar-user: #c93a50;
+  --avatar-assistant: #2f7d5a;
+  --tool-bubble-bg: #eaf6ee;
+  --tool-bubble-border: #d8e9de;
+
+  /* —— 代码：深松绿的代码面（亮色下也保持高可读语法色）—— */
+  --code-surface: #12302c;
+  --code-text: #e6f4f0;
+  --inline-code-surface: #e7f5ec;
+  --inline-code-text: #1c6b45;
+  --syntax-keyword: #ffd479;
+  --syntax-string: #96e6a8;
+  --syntax-number: #ffbe7a;
+  --syntax-comment: #8fb3ae;
+  --syntax-title: #8ad3ef;
+  --syntax-meta: #ff9db1;
+
+  /* —— Diff —— */
+  --diff-add-text: #1a6b45;
+  --diff-remove-text: #97202a;
+  --diff-hunk-text: #9c2b3d;
+  --diff-meta-text: #1a6f9e;
+
+  /* —— 交互与阴影 —— */
+  --user-action-border: rgb(255 255 255 / 46%);
+  --user-action-surface: rgb(255 255 255 / 18%);
+  --overlay: rgb(20 40 34 / 40%);
+  --shadow-sm: 0 1px 2px rgb(22 51 44 / 6%);
+  --shadow-md: 0 6px 20px rgb(22 51 44 / 10%);
+  --shadow-lg: 0 22px 70px rgb(22 51 44 / 18%);
+  --scrollbar-track: #eef8f2;
+  --scrollbar-thumb: rgb(47 125 90 / 34%);
+  --scrollbar-thumb-hover: rgb(47 125 90 / 56%);
+
+  /* A2 池面反光（兼顾清晰度的取值）：窄而亮的“光斑”而不是宽而淡的“泛光”——
+     同样看得见移动，但任一瞬间只覆盖一小块，壁纸大部分区域保持原样通透。 */
+  --pi-layer-poolshine:
+    linear-gradient(103deg, transparent 45%, rgb(255 255 255 / 40%) 50%, transparent 55%) 4% 0 / 130% 100% no-repeat,
+    linear-gradient(97deg, transparent 46%, rgb(255 255 255 / 26%) 51%, transparent 57%) 62% 0 / 200% 100% no-repeat;
+  --pi-layer-poolshine-far:
+    linear-gradient(109deg, transparent 46%, rgb(255 255 255 / 30%) 52%, transparent 58%) 28% 0 / 165% 100% no-repeat;
+}
+
+/* ============================================================
+ * 三、两模式共用的柔和尺度
+ * ============================================================ */
+:root {
+  /* 界面微调默认档位：容器 12px / 控件 8px，圆角更圆润但不失分档 */
+  --ui-container-radius: 12px;
+  --ui-control-radius: 8px;
+}
+
+/* 壁纸态下玻璃面与插画之间补一条发丝线，边界更利落 */
+[data-theme-wallpaper="true"] [data-pane="sidebar"] {
+  border-right: 1px solid var(--border);
+}
+[data-theme-wallpaper="true"] [data-pane="topbar"] {
+  border-bottom: 1px solid var(--border);
+}
+
+/* ============================================================
+ * 四、输入卡：圆润瓷面 + 干净焦点
+ * ============================================================ */
+[data-pane="composer"] {
+  border: 1px solid var(--accent-border);
+  border-radius: 16px;
+  box-shadow: var(--shadow-md);
+}
+[data-pane="composer"] textarea {
+  caret-color: var(--accent);
+}
+[data-pane="composer"] textarea::placeholder {
+  color: var(--text-muted);
+}
+
+/* 胶囊形发送 / 停止按钮：同一占位、同一造型，只有图标随状态互换 */
+[data-pane="composer"] [data-control="send"],
+[data-pane="composer"] [data-control="stop"] {
+  border: 1px solid var(--accent-border);
+  border-radius: 999px;
+  background: linear-gradient(180deg, var(--accent-hover), var(--accent) 62%);
+  color: var(--text-on-accent);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 30%), 0 3px 10px rgb(0 0 0 / 16%);
+  transition: transform 0.08s ease, box-shadow 0.18s ease, filter 0.18s ease;
+}
+[data-pane="composer"] [data-control="send"]:hover:not(:disabled),
+[data-pane="composer"] [data-control="stop"]:hover:not(:disabled) {
+  filter: brightness(1.06);
+  transform: translateY(-1px);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 34%), 0 6px 16px rgb(0 0 0 / 20%);
+}
+[data-pane="composer"] [data-control="send"]:active:not(:disabled),
+[data-pane="composer"] [data-control="stop"]:active:not(:disabled) {
+  transform: translateY(1px);
+  box-shadow: inset 0 2px 6px rgb(0 0 0 / 26%);
+}
+[data-pane="composer"] [data-control="send"]:focus-visible,
+[data-pane="composer"] [data-control="stop"]:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--focus-ring), inset 0 1px 0 rgb(255 255 255 / 30%);
+}
+[data-pane="composer"] [data-control="send"]:disabled,
+[data-pane="composer"] [data-control="stop"]:disabled {
+  opacity: 0.5;
+  transform: none;
+  box-shadow: none;
+}
+
+/* 生成中：焦点格输入卡定住一层稳定的暖光（动感交给下面的溪水光带，
+   不做两处同时呼吸，避免整屏都在“抖”） */
+[data-ui-generating] [data-pane="conversation"][data-pane-active] [data-pane="composer"] {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-md), 0 0 16px 1px var(--focus-ring);
+}
+
+/* ============================================================
+ * 五、侧栏行：随主题圆角尺度对齐
+ * ============================================================ */
+[data-pane="sidebar"] [data-row-kind="session"],
+[data-pane="sidebar"] [data-row-kind="workspace"] {
+  border-radius: var(--ui-control-radius, 8px);
+}
+[data-pane="sidebar"] [data-row-kind="session"][data-row-active] {
+  box-shadow: inset 0 0 0 1px var(--accent-border);
+}
+
+/* ============================================================
+ * 六、A3 气泡长出小角
+ * 用户气泡收掉右下角 + 一条“西瓜皮 / 余烬”下缘，助手气泡收掉左上角——
+ * 两类消息靠**形态**就能分，不只靠颜色。不碰伪元素、不动 position
+ * （.message-body 不是定位元素，挂伪元素会锚到别处）。
+ * 选择器刻意带 [data-theme-wallpaper="true"]：应用壁纸态的气泡规则是
+ * (0,3,0) 且用了 background 简写，低特异性的 background-image 会被清掉。
+ * ============================================================ */
+[data-role="user"] .message-body,
+[data-theme-wallpaper="true"] [data-role="user"] .message-body {
+  border-radius: 14px 14px 4px 14px;
+  background-image: linear-gradient(180deg, transparent calc(100% - 3px), var(--fh-rind) calc(100% - 3px));
+}
+[data-role="assistant"] .message-body,
+[data-theme-wallpaper="true"] [data-role="assistant"] .message-body {
+  border-radius: 4px 14px 14px 14px;
+}
+
+/* ============================================================
+ * 七、A4 状态有戏
+ * ============================================================ */
+/* 生成中：一道溪水光斑沿输入卡底缘滑过（.composer 已是绝对定位，伪元素直接可用） */
+[data-ui-generating] [data-pane="conversation"][data-pane-active] [data-pane="composer"]::after {
+  content: "";
+  position: absolute;
+  right: 22px;
+  bottom: 0;
+  left: 22px;
+  height: 2px;
+  background-image: linear-gradient(90deg, transparent, var(--accent) 42%, var(--accent) 58%, transparent);
+  background-repeat: no-repeat;
+  background-size: 26% 100%;
+  pointer-events: none;
+}
+
+/* 待用户决策：顶栏底缘琥珀色脉搏；提问面板给一圈柔和光环 */
+[data-ui-question-pending] [data-pane="question-panel"] {
+  box-shadow: var(--shadow-lg), 0 0 0 1px var(--accent-border);
+}
+
+/* 分屏：失焦格的输入卡收敛成素卡，焦点格保持瓷面 */
+[data-ui-split-open] [data-pane="conversation"]:not([data-pane-active]) [data-pane="composer"] {
+  border-color: var(--border);
+  box-shadow: var(--shadow-sm);
+}
+
+/* A2 层加宽（几何与动效分开写：动效可被用户关掉，几何始终生效） */
+:root[data-theme-effective="light"] [data-theme-layer="poolshine"],
+:root[data-theme-effective="light"] [data-theme-layer="poolshine-far"] {
+  left: -16%;
+  right: -16%;
+}
+
+/* 用户关掉界面动效时，溪水光斑（纯动效装饰）直接隐藏——静态信号由输入卡的暖光与边框承担 */
+html[data-ui-motion="off"][data-ui-generating] [data-pane="conversation"][data-pane-active] [data-pane="composer"]::after {
+  display: none;
+}
+
+/* 注意：应用只在【界面动效】关闭时给一份类名白名单停动画，主题新增的层
+   与控件动画不在名单内，因此需要自己认 data-ui-motion="off"。 */
+@media (prefers-reduced-motion: no-preference) {
+  /* —— A1 营火：大暖光慢呼吸 + 余烬核快闪（两者节奏不同才像火） —— */
+  :root[data-theme-effective="dark"]:not([data-ui-motion="off"]) [data-theme-layer="firelight"] {
+    transform-origin: 50% 100%;
+    animation: fh-firelight 6.8s ease-in-out infinite;
+  }
+  :root[data-theme-effective="dark"]:not([data-ui-motion="off"]) [data-theme-layer="emberlight"] {
+    transform-origin: 58% 100%;
+    animation: fh-emberlight 3.4s ease-in-out infinite;
+  }
+  /* —— A2 池面反光：两层不同速度/方向交叉漂流（用 transform，走合成层） —— */
+  :root[data-theme-effective="light"]:not([data-ui-motion="off"]) [data-theme-layer="poolshine"] {
+    animation: fh-poolshine 15s ease-in-out infinite alternate;
+  }
+  :root[data-theme-effective="light"]:not([data-ui-motion="off"]) [data-theme-layer="poolshine-far"] {
+    animation: fh-poolshine 23s ease-in-out infinite alternate-reverse;
+  }
+  /* —— A4 状态动画（data-ui-* 状态挂在 html 自己身上，不能写成后代） —— */
+  html[data-ui-generating]:not([data-ui-motion="off"]) [data-pane="conversation"][data-pane-active] [data-pane="composer"]::after {
+    animation: fh-stream 3.4s linear infinite;
+  }
+  html[data-ui-generating]:not([data-ui-motion="off"]) [data-pane="conversation"][data-pane-active] [data-pane="composer"] [data-control="stop"] {
+    animation: fh-stop-pulse 1.8s ease-in-out infinite;
+  }
+  html[data-ui-permission-pending]:not([data-ui-motion="off"]) [data-pane="topbar"] {
+    animation: fh-alert 2.6s ease-in-out infinite;
+  }
+}
+
+@keyframes fh-firelight {
+  0%,
+  100% {
+    opacity: 0.42;
+    transform: scale(1);
+  }
+  28% {
+    opacity: 0.86;
+    transform: scale(1.02);
+  }
+  46% {
+    opacity: 0.66;
+    transform: scale(1.008);
+  }
+  64% {
+    opacity: 1;
+    transform: scale(1.045);
+  }
+  80% {
+    opacity: 0.78;
+    transform: scale(1.022);
+  }
+}
+
+/* 余烬核：步伐不规则才像火苗，而不是在“呼吸” */
+@keyframes fh-emberlight {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(1) translateX(0);
+  }
+  12% {
+    opacity: 0.95;
+    transform: scale(1.05) translateX(-0.6%);
+  }
+  26% {
+    opacity: 0.5;
+    transform: scale(0.99) translateX(0.4%);
+  }
+  38% {
+    opacity: 1;
+    transform: scale(1.07) translateX(-0.3%);
+  }
+  54% {
+    opacity: 0.44;
+    transform: scale(1.01) translateX(0.6%);
+  }
+  70% {
+    opacity: 0.86;
+    transform: scale(1.04) translateX(0);
+  }
+  86% {
+    opacity: 0.56;
+    transform: scale(1) translateX(-0.4%);
+  }
+}
+
+@keyframes fh-poolshine {
+  from {
+    transform: translateX(-8%);
+  }
+  to {
+    transform: translateX(8%);
+  }
+}
+
+/* 光班从左侧滑入、从右侧滑出（background-size 26%，故 -26% → 126%） */
+@keyframes fh-stream {
+  from {
+    background-position: -26% 0;
+  }
+  to {
+    background-position: 126% 0;
+  }
+}
+
+@keyframes fh-stop-pulse {
+  0%,
+  100% {
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / 30%), 0 0 0 0 var(--focus-ring);
+  }
+  50% {
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / 30%), 0 0 0 5px var(--focus-ring);
+  }
+}
+
+@keyframes fh-alert {
+  0%,
+  100% {
+    border-bottom-color: var(--border);
+  }
+  50% {
+    border-bottom-color: var(--warning);
+  }
+}
