@@ -2076,6 +2076,18 @@ function applyActiveToolNames(record: SessionRuntimeRecord, includeVision: boole
 }
 
 /**
+ * 工具编排提示块（实验分支）：codemode 的主动使用提示 + deferred 工具的恢复路径教学。
+ * 实测结论：不提示时模型几乎不主动用 codemode，用户明示后才用且效果好——把提示内置到
+ * 系统提示词（会话级常量，符合 dsh 缓存纪律：不随回合变化）。同时兜底「skill 正文点名
+ * 的工具未声明」的错位：不教这句，每个新会话都要烧一轮失败往返才学会搜索。
+ */
+const TOOL_ORCHESTRATION_PROMPT_BLOCK = [
+  "【工具编排】",
+  "① 并行读多个文件、批量统计、或需要在大输出里筛选出结论时，优先用 codemode 写一段脚本一次完成（Promise.allSettled 并行调用工具，return 汇总结果），而不是连续多次独立工具调用；脚本 API 与全局清单见 codemode 工具描述。",
+  "② Skill 正文或对话中提到的工具若不在你当前的工具列表里，先用 tool_search 按用途搜一次（如 query \"automation 定时任务 cron\"），命中后即可直接调用，不要直接调不存在的工具名。"
+].join("");
+
+/**
  * 角色级 mcp:<server> overlay 展开成被禁工具名集合：键为配置原始服务器名，
  * 与 mcpServerToolNames（syncMcpServers 由 bindings 派生）同源匹配。服务器改名/
  * 删除后残留键无工具可匹配，自然无副作用。
@@ -3059,7 +3071,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
       createCodemodeExtension(),
       createToolSearchExtension()
     ],
-    systemPromptOverride: (base) => [base, recordAgent.systemPrompt, buildDivModePrompt(recordAgent.divMode), buildSkillsSystemPromptBlock(runtimeSkills.activeSkillsFor(nativeSkills, recordAgent)), buildSubagentPromptBlock(subagentCatalog), memoryPromptBlock].filter(Boolean).join("\n\n")
+    systemPromptOverride: (base) => [base, recordAgent.systemPrompt, buildDivModePrompt(recordAgent.divMode), buildSkillsSystemPromptBlock(runtimeSkills.activeSkillsFor(nativeSkills, recordAgent)), TOOL_ORCHESTRATION_PROMPT_BLOCK, buildSubagentPromptBlock(subagentCatalog), memoryPromptBlock].filter(Boolean).join("\n\n")
   });
   await resourceLoader.reload();
   syncSkills();

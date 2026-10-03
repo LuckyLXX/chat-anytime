@@ -55,4 +55,22 @@ describe("codemode / tool_search 接线（源码回归网）", () => {
     expect(helper).toContain("getActiveToolNames()");
     expect(source).not.toContain("setActiveToolsByName(toolNamesFor");
   });
+
+  it("系统提示词内置工具编排块（codemode 主动使用 + deferred 恢复路径）并接入 systemPromptOverride", () => {
+    const start = source.indexOf("const TOOL_ORCHESTRATION_PROMPT_BLOCK");
+    expect(start).toBeGreaterThan(-1);
+    const block = source.slice(start, source.indexOf("].join(\"\")", start));
+    expect(block).toContain("codemode");
+    expect(block).toContain("tool_search");
+    const override = source.indexOf("systemPromptOverride:");
+    expect(override).toBeGreaterThan(-1);
+    expect(source.slice(override, override + 400)).toContain("TOOL_ORCHESTRATION_PROMPT_BLOCK");
+  });
+
+  it("两个配套内置 skill 的入口教了 tool_search 恢复路径（实验分支配套改动）", () => {
+    for (const slug of ["automation", "computer-use"]) {
+      const text = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "resources", "skills", slug, "SKILL.md"), "utf8");
+      expect(text, `${slug}/SKILL.md 应提到 tool_search`).toContain("tool_search");
+    }
+  });
 });

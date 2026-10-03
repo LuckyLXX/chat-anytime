@@ -1,9 +1,13 @@
 ---
 name: 自动化任务
-description: 当用户想创建、查看、修改或删除「定时任务 / 自动化任务 / 定时巡检 / 定时报告 / 定时提醒」时使用。指导如何把用户用自然语言描述的定时需求转换成一条自动化定时任务（cron 调度 + 提示词 + 模型 + 权限），并调用 automation_create 等工具落库。到点后 PiDesktop 会在后台让 Agent 用该任务提示词跑一次。
+description: 当用户想创建、查看、修改或删除「定时任务 / 自动化任务 / 定时巡检 / 定时报告 / 定时提醒」时使用。指导如何把用户用自然语言描述的定时需求转换成一条自动化定时任务（cron 调度 + 提示词 + 模型 + 权限），并调用 automation_* 工具落库（这些工具默认未直接声明，第一次使用前先用 tool_search 搜索加载）。到点后 PiDesktop 会在后台让 Agent 用该任务提示词跑一次。
 ---
 
 # 创建与管理自动化定时任务
+
+> **工具加载提示**：automation_create / automation_list / automation_toggle / automation_delete / automation_run
+> 这组工具默认**按需声明**（不在你的工具列表里）——第一次使用前先调 `tool_search`
+> （query 如 "automation 定时任务 cron"）加载，命中后整个会话可直接调用。
 
 > 本目录随应用分发（安装目录 `resources/skills/automation/`），是**内置资产**：所有工作区、所有角色可见，
 > 随应用升级。要自定义就把本目录复制到全局技能目录 `~/.pi/agent/pidesktop-skills/automation/`（同名覆盖内置）
