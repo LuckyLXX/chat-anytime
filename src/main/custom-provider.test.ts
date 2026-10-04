@@ -4,7 +4,7 @@ import { convertMessages } from "@earendil-works/pi-ai/api/openai-completions";
 // 0.86.0 起 provider 入参改用 normalizeContext 产出的 TranscriptContext（系统提示
 // 折进 messages 首条 system 消息）；直接传原始 Context 会报类型错误。
 import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
-import { builtinProviderOverlay, buildFetchedProviderModels, customProviderModelDefinition, extractUpstreamModelMeta, inferCustomModelImageInput, parseUpstreamTokenCount, resolveBuiltinOverlayAction, resolveCustomProviderRegistration } from "./custom-provider.js";
+import { builtinProviderOverlay, buildFetchedProviderModels, customProviderModelDefinition, extractUpstreamModelMeta, extractUpstreamThinkingLevelMap, inferCustomModelImageInput, parseUpstreamTokenCount, resolveBuiltinOverlayAction, resolveCustomProviderRegistration } from "./custom-provider.js";
 
 describe("custom OpenAI-compatible models", () => {
   it("keeps thinking levels available when the upstream catalog omits capabilities", () => {
@@ -371,10 +371,10 @@ describe("upstream /models metadata extraction", () => {
   it("builds fetched provider models with upstream limits and image inference fallback", () => {
     const items = [
       // workbuddy 形状：限额与图片输入全来自上游声明。
-      { id: "cn:balanced-model", name: "均衡", context_length: 300000, max_output_tokens: 48000, supports_images: true, only_reasoning: true },
+      { id: "cn:balanced-model", name: "均衡", context_length: 300000, max_output_tokens: 48000, supports_images: true },
       // 无声明的标准 OpenAI 形状：回退名字推断（gpt-4o → 支持图片），限额缺省。
       { id: "gpt-4o-mini", object: "model", created: 1753600000, owned_by: "openai" },
-      // 坏条目（无 id）与重复 id 都要被清理/去重。
+      // 坏条目（无 id）与重复 id 都要被清理/去重（重复保留首个）。
       { object: "model" },
       { id: "cn:balanced-model", name: "重复" }
     ];
@@ -384,8 +384,65 @@ describe("upstream /models metadata extraction", () => {
     expect(models[1]).toMatchObject({ name: "gpt-4o-mini", imageInput: true });
     expect(models[1]).not.toHaveProperty("contextWindow");
     expect(models[1]).not.toHaveProperty("maxTokens");
-    // 上游声明优先于名字推断：id 推不出图片（cn:hy3），但 supports_images: true。
-    const hy3 = buildFetchedProviderModels([{ id: "cn:hy3", name: "Hy3", context_length: 192000, max_output_tokens: 64000, supports_images: true }])[0];
-    expect(hy3).toMatchObject({ contextWindow: 192000, maxTokens: 64000, imageInput: true });
+    expect(models[1]).not.toHaveProperty("thinkingLevelMap");
+  });
+});
+
+describe("upstream thinking level extraction", () => {
+  const registered = (map: Parameters<typeof customProviderModelDefinition>[0]["thinkingLevelMap"]) => ({
+    ...customProviderModelDefinition({ id: "m", name: "M", ...(map ? { thinkingLevelMap: map } : {}) }),
+    api: "openai-completions" as const,
+    provider: "chatanytime-openai-compatible",
+    baseUrl: "https://api.example.com/v1"
+  }) as Parameters<typeof getSupportedThinkingLevels>[0];
+
+  it("maps same-named supported efforts and unlocks the xhigh tier", () => {
+    // ["high","xhigh"]（实测 cn:glm-5.3 / cn:kimi 系形状）：同名直通，未列出档位显式
+    // null，only_reasoning 禁掉 off——注册后「很高」真的可选（缺省锁死、此前需手动声明）。
+    const map = extractUpstreamThinkingLevelMap({ reasoning_supported_efforts: ["high", "xhigh"], only_reasoning: true });
+    expect(map).toEqual({ off: null, minimal: null, low: null, medium: null, high: "high", xhigh: "xhigh", max: null });
+    expect(getSupportedThinkingLevels(registered(map))).toEqual(["high", "xhigh"]);
+  });
+
+  it("keeps off available when the upstream does not mark only_reasoning", () => {
+    // 实测 cn:deepseek-v4-flash/pro 形状：无 only_reasoning → off 缺省可用。
+    const map = extractUpstreamThinkingLevelMap({ reasoning_supported_efforts: ["low", "high"] });
+    expect(map).toEqual({ minimal: null, low: "low", medium: null, high: "high", xhigh: null, max: null });
+    expect(getSupportedThinkingLevels(registered(map))).toEqual(["off", "low", "high"]);
+  });
+
+  it("expresses non-reasoning and reasoning-only models", () => {
+    // supports_reasoning:false（含 OpenRouter architecture 嵌套）→ 只剩「关闭」。
+    const nonReasoning = { minimal: null, low: null, medium: null, high: null, xhigh: null, max: null };
+    expect(extractUpstreamThinkingLevelMap({ supports_reasoning: false })).toEqual(nonReasoning);
+    expect(extractUpstreamThinkingLevelMap({ architecture: { supports_reasoning: false } })).toEqual(nonReasoning);
+    expect(getSupportedThinkingLevels(registered(extractUpstreamThinkingLevelMap({ supports_reasoning: false })))).toEqual(["off"]);
+    // 仅推理（无列表，实测 cn:auto 等 14 个）：单独禁 off，其余维持缺省。
+    expect(extractUpstreamThinkingLevelMap({ only_reasoning: true })).toEqual({ off: null });
+    expect(getSupportedThinkingLevels(registered({ off: null }))).toEqual(["minimal", "low", "medium", "high"]);
+  });
+
+  it("ignores default-effort fields and unrecognized level names", () => {
+    // reasoning_effort / reasoning_default_effort 是默认档而非支持范围，不禁档。
+    expect(extractUpstreamThinkingLevelMap({ reasoning_effort: "high" })).toBeUndefined();
+    expect(extractUpstreamThinkingLevelMap({ reasoning_default_effort: "max" })).toBeUndefined();
+    // 档名全不在 Pi 七档内：无从映射，放弃声明；无信号同样不声明。
+    expect(extractUpstreamThinkingLevelMap({ reasoning_supported_efforts: ["none", "auto"] })).toBeUndefined();
+    expect(extractUpstreamThinkingLevelMap({})).toBeUndefined();
+  });
+
+  it("lands the declared map through the full fetch mapping", () => {
+    const models = buildFetchedProviderModels([
+      // 实测 cn:hy3 完整形状。
+      { id: "cn:hy3", name: "Hy3", context_length: 192000, max_output_tokens: 64000, supports_images: true, only_reasoning: true, reasoning_supported_efforts: ["low", "high"] },
+      // 实测 cn:glm-4.6 形状：无任何思考字段 → 不带声明。
+      { id: "cn:glm-4.6", name: "glm-4.6" }
+    ]);
+    const glm = models.find((model) => model.id === "cn:glm-4.6");
+    const hy3 = models.find((model) => model.id === "cn:hy3");
+    expect(glm).toBeDefined();
+    expect(hy3).toBeDefined();
+    expect(glm && !("thinkingLevelMap" in glm)).toBe(true);
+    expect(hy3?.thinkingLevelMap).toEqual({ off: null, minimal: null, low: "low", medium: null, high: "high", xhigh: null, max: null });
   });
 });

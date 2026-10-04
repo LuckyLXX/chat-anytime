@@ -1,4 +1,5 @@
-import type { CustomProviderModel, ProviderApiMode, ProviderModelSettings, ProviderSettings } from "../shared/protocol.js";
+import type { CustomProviderModel, ProviderApiMode, ProviderModelSettings, ProviderSettings, ThinkingLevel, ThinkingLevelMap } from "../shared/protocol.js";
+import { THINKING_LEVELS } from "../shared/thinking-levels.js";
 import { isPositiveInt } from "./settings.js";
 
 /**
@@ -71,6 +72,51 @@ export function extractUpstreamModelMeta(item: Record<string, unknown>): {
 }
 
 /**
+ * 从上游 /models 条目提取思考等级支持声明（无明确信号时返回 undefined，保持
+ * Pi 的未声明口径：关闭…高可用、很高/最高需显式声明）。
+ *
+ * 只采纳三类明确信号（2026-10-04 workbuddy 渠道实测 46 模型分布）：
+ *
+ * 1. `reasoning_supported_efforts`（或 `supported_reasoning_efforts`）非空列表，
+ *    且档名落在 Pi 七档内（本渠道 low/medium/high/xhigh/max 完全同名）→
+ *    同名直通（可选 + 发同名值），未列出的档位**显式 `null`**——Pi 语义里
+ *    缺键是「默认可用」，必须显式排除才能表达「只支持这些」。xhigh/max
+ *    正是 PiDesktop 缺省锁死、需要声明才放行的「很高/最高」档。
+ *    off 不在 effort 值域内，能否关推理由 `only_reasoning` 决定。
+ * 2. `supports_reasoning === false`（或 OpenRouter architecture.supports_
+ *    reasoning: false）→ 全部推理档显式 null、off 缺省可用（口径同
+ *    defaultThinkingLevelMapFor 的非推理模型），档位选择器收敛到「关闭」。
+ * 3. 无列表但 `only_reasoning === true` → 单独声明 `off: null`（仅推理、
+ *    不能关闭），其余档位维持缺省口径。
+ *
+ * 刻意不采纳：`reasoning_effort` / `reasoning_default_effort` 是「默认档」
+ * 而非支持范围（本渠道两种命名并存可互证，auto/快速/均衡/极致四个模型只有
+ * 它），据此禁档会误杀；列表档名全部不在 Pi 七档内时同样放弃（无从映射）。
+ */
+export function extractUpstreamThinkingLevelMap(item: Record<string, unknown>): ThinkingLevelMap | undefined {
+  const architecture = item.architecture;
+  const arch = architecture && typeof architecture === "object" && !Array.isArray(architecture) ? (architecture as Record<string, unknown>) : undefined;
+  if (item.supports_reasoning === false || arch?.supports_reasoning === false) {
+    return { minimal: null, low: null, medium: null, high: null, xhigh: null, max: null };
+  }
+  const rawEfforts = item.reasoning_supported_efforts ?? item.supported_reasoning_efforts;
+  if (Array.isArray(rawEfforts)) {
+    const supported = new Set(rawEfforts.filter((level): level is ThinkingLevel =>
+      typeof level === "string" && (THINKING_LEVELS as readonly string[]).includes(level)));
+    if (supported.size > 0) {
+      const map: ThinkingLevelMap = {};
+      for (const level of THINKING_LEVELS) {
+        if (supported.has(level)) map[level] = level;
+        else if (level !== "off" || item.only_reasoning === true) map[level] = null;
+      }
+      return map;
+    }
+  }
+  if (item.only_reasoning === true) return { off: null };
+  return undefined;
+}
+
+/**
  * 把上游 /models 响应条目映射为设置页模型列表（fetchCustomProviderModels 的
  * 纯函数部分，可单测）：id 必填，name 缺省回退 id，图片输入取上游声明优先、
  * 无声明回退模型名推断；按 id 去重（重复 id 保留首个——主条目通常在前，
@@ -84,12 +130,14 @@ export function buildFetchedProviderModels(items: unknown[]): ProviderModelSetti
       if (typeof record.id !== "string" || !record.id.trim()) return undefined;
       const id = record.id.trim();
       const meta = extractUpstreamModelMeta(record);
+      const thinkingLevelMap = extractUpstreamThinkingLevelMap(record);
       return {
         id,
         name: typeof record.name === "string" && record.name.trim() ? record.name.trim() : id,
         imageInput: meta.imageInput ?? inferCustomModelImageInput(id),
         ...(meta.contextWindow !== undefined ? { contextWindow: meta.contextWindow } : {}),
-        ...(meta.maxTokens !== undefined ? { maxTokens: meta.maxTokens } : {})
+        ...(meta.maxTokens !== undefined ? { maxTokens: meta.maxTokens } : {}),
+        ...(thinkingLevelMap ? { thinkingLevelMap } : {})
       } satisfies ProviderModelSettings;
     })
     .filter(Boolean) as ProviderModelSettings[];
