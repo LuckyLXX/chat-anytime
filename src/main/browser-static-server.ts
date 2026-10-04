@@ -23,8 +23,13 @@ import { PANEL_ACTION_MAX_BYTES, isPanelStatePath, parsePanelAction, type PanelA
 export interface StaticServerEndpoint {
   /** GET 返回的状态（任意可 JSON 序列化的值）。 */
   state: () => unknown;
-  /** POST 动作处理：返回 true = 已执行并回 { ok: true }。 */
-  action: (action: PanelAction) => boolean;
+  /**
+   * POST 动作处理：返回 true = 已执行并回 { ok: true }。
+   *
+   * `context.referer` 是发请求页面的 URL（面板页 fetch 相对路径时浏览器会带上）：
+   * close / toggle 这类「作用于发出窗口本身」的动作靠它定位是哪个窗口的页面在说话。
+   */
+  action: (action: PanelAction, context: { referer?: string }) => boolean;
 }
 
 const MIME_TYPES: Record<string, string> = {
@@ -132,7 +137,8 @@ export class BrowserStaticServer {
       respond(response, 403, "不认识的动作");
       return;
     }
-    if (!endpoint.action(action)) {
+    const referer = request.headers.referer;
+    if (!endpoint.action(action, { referer: typeof referer === "string" ? referer : undefined })) {
       respond(response, 403, "动作未被接受");
       return;
     }

@@ -5,6 +5,9 @@ describe("parsePanelAction", () => {
   it("accepts whitelisted actions", () => {
     expect(parsePanelAction({ action: "show-main" })).toBe("show-main");
     expect(parsePanelAction({ action: "  show-main  " })).toBe("show-main");
+    // 窗口级动作：无边框形态（桌宠/抽屉）的页面靠它们关窗与切两态
+    expect(parsePanelAction({ action: "close" })).toBe("close");
+    expect(parsePanelAction({ action: "toggle" })).toBe("toggle");
   });
 
   it("rejects anything outside the whitelist", () => {
@@ -75,5 +78,16 @@ describe("panelDevHint", () => {
   it("names the endpoint so 继续开发 的模型不用猜", () => {
     expect(panelDevHint()).toContain(PANEL_STATE_ENDPOINT);
     expect(panelDevHint()).toContain("show-main");
+  });
+
+  it("写清窗口级动作与桌宠/抽屉的页面契约（否则新形态作品只能靠猜）", () => {
+    const hint = panelDevHint();
+    expect(hint).toContain('"action\":\"close\"');
+    expect(hint).toContain('"action\":\"toggle\"');
+    expect(hint).toContain("-webkit-app-region: drag");
+    expect(hint).toContain('"pet"');
+    expect(hint).toContain('"drawer"');
+    expect(hint).toContain("left/right/top/bottom");
+    expect(hint).toContain("不要自己搭本地代理");
   });
 });

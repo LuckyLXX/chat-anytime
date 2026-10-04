@@ -12,7 +12,7 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { PANEL_MAX_HEIGHT, PANEL_MAX_WIDTH, PANEL_MIN_HEIGHT, PANEL_MIN_WIDTH, panelWindowSize, type GalleryPanelOptions } from "../shared/gallery.js";
+import { PANEL_MAX_HEIGHT, PANEL_MAX_WIDTH, PANEL_MIN_HEIGHT, PANEL_MIN_WIDTH, panelWindowSize, type GalleryPanelEdge, type GalleryPanelOptions } from "../shared/gallery.js";
 import { writeJsonAtomic } from "./settings-store.js";
 
 export interface PanelBounds {
@@ -24,6 +24,52 @@ export interface PanelBounds {
 
 /** 存储表上限：面板作品数量本来就少，超了丢最先进表的那些。 */
 export const MAX_PANEL_BOUNDS = 60;
+
+/**
+ * 贴边抽屉（drawer）的两态几何（纯函数，主进程开窗与 toggle 共用）。
+ *
+ * 抽屉不进坐标记忆表：贴边位置由 edge 唯一决定，收起/展开只取决于点击，
+ * 用户拖不走它（窗口 resizable: false），也没有什么可记的。屏幕变了就按新屏重算。
+ */
+export interface DrawerGeometry {
+  /** 收起态：贴边窄把手（常驻可见，点击展开）。 */
+  collapsed: PanelBounds;
+  /** 展开态：完整面板，贴边对齐、沿边居中。 */
+  expanded: PanelBounds;
+}
+
+/** 窄把手的厚度（贴边方向像素）：握得住又不占屏。 */
+export const DRAWER_HANDLE_THICKNESS = 40;
+
+/** 窄把手沿边长度上限：把手不是全屏长条，超出就收短。 */
+export const DRAWER_HANDLE_SPAN = 200;
+
+export function drawerBounds(edge: GalleryPanelEdge, options: GalleryPanelOptions | undefined, workArea: PanelBounds): DrawerGeometry {
+  const declared = panelWindowSize(options);
+  // 展开尺寸不能大过工作区（夹取后再居中对齐，保证面板完整落在屏内）。
+  const width = Math.min(declared.width, workArea.width);
+  const height = Math.min(declared.height, workArea.height);
+  const centerX = Math.round(workArea.x + (workArea.width - width) / 2);
+  const centerY = Math.round(workArea.y + (workArea.height - height) / 2);
+  const expanded: PanelBounds =
+    edge === "left"
+      ? { x: workArea.x, y: centerY, width, height }
+      : edge === "right"
+        ? { x: workArea.x + workArea.width - width, y: centerY, width, height }
+        : edge === "top"
+          ? { x: centerX, y: workArea.y, width, height }
+          : { x: centerX, y: workArea.y + workArea.height - height, width, height };
+  const span = Math.min(edge === "left" || edge === "right" ? height : width, DRAWER_HANDLE_SPAN);
+  const collapsed: PanelBounds =
+    edge === "left"
+      ? { x: workArea.x, y: Math.round(workArea.y + (workArea.height - span) / 2), width: DRAWER_HANDLE_THICKNESS, height: span }
+      : edge === "right"
+        ? { x: workArea.x + workArea.width - DRAWER_HANDLE_THICKNESS, y: Math.round(workArea.y + (workArea.height - span) / 2), width: DRAWER_HANDLE_THICKNESS, height: span }
+        : edge === "top"
+          ? { x: Math.round(workArea.x + (workArea.width - span) / 2), y: workArea.y, width: span, height: DRAWER_HANDLE_THICKNESS }
+          : { x: Math.round(workArea.x + (workArea.width - span) / 2), y: workArea.y + workArea.height - DRAWER_HANDLE_THICKNESS, width: span, height: DRAWER_HANDLE_THICKNESS };
+  return { collapsed, expanded };
+}
 
 /**
  * 判定「窗口还在屏幕上」的最小重叠：两个轴都要有这么多像素落在某个工作区内，

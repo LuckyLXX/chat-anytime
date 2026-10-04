@@ -14,6 +14,11 @@
  *    `sandbox + contextIsolation + 无 nodeIntegration`，也仍然是「一个普通网页」。
  * 3. **同作品复用同一窗口**。重复点「运行」是把它调到前面，而不是叠出一堆窗口。
  *
+ * 窗口形态（panel.mode，缺省 window）：window = 系统边框窗口；pet = 桌宠（透明
+ * 无边框固定尺寸，形状由页面自绘，页面 POST close 关窗）；drawer = 贴边抽屉
+ * （窄把手 ↔ 完整面板两态，页面 POST toggle 切换，几何由 panel-bounds 的
+ * drawerBounds 纯函数决定，不进坐标记忆）。
+ *
  * 这个类只做编排（BrowserWindow/屏幕/落盘），可测的判定都在纯函数里：
  * `shared/panel.ts`（入口扩展名、端点契约）与 `panel-bounds.ts`（位置尺寸）。
  */
@@ -21,10 +26,10 @@
 import { stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { BrowserWindow, screen } from "electron";
-import type { GalleryPanelOptions } from "../shared/gallery.js";
+import { panelEffectiveAlwaysOnTop, panelMode, type GalleryPanelEdge, type GalleryPanelOptions } from "../shared/gallery.js";
 import { isPanelEntryFile, type PanelAction } from "../shared/panel.js";
 import { BrowserStaticServer, type StaticServerEndpoint } from "./browser-static-server.js";
-import { pickPanelBounds, readPanelBounds, writePanelBounds, type PanelBounds } from "./panel-bounds.js";
+import { drawerBounds, pickPanelBounds, readPanelBounds, writePanelBounds, type PanelBounds } from "./panel-bounds.js";
 
 export interface PanelOpenRequest {
   /** 作品 id：窗口复用与坐标记忆的键。 */
@@ -55,6 +60,8 @@ export const PANEL_BOUNDS_SAVE_DEBOUNCE_MS = 400;
 export class PanelWindowController {
   private readonly staticFiles = new BrowserStaticServer();
   private readonly windows = new Map<string, BrowserWindow>();
+  /** 每个作品的归一化窗口偏好（close/toggle 要按形态/贴边行事）。 */
+  private readonly panelOptions = new Map<string, GalleryPanelOptions>();
   /** 正在创建的窗口（作品 id → 那次 open 的 Promise）：挡住双击「运行」的并发。 */
   private readonly openings = new Map<string, Promise<PanelOpenResult>>();
   private readonly saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -64,7 +71,10 @@ export class PanelWindowController {
     this.bounds = readPanelBounds(deps.boundsPath);
     const endpoint: StaticServerEndpoint = {
       state: () => deps.stateProvider(),
-      action: (action) => {
+      action: (action, context) => {
+        // close / toggle 作用于「发出请求的那个窗口」，由本控制器自己认领；
+        // show-main 唤回主界面，归主进程的回调。
+        if (action === "close" || action === "toggle") return this.handleWindowAction(action, context.referer);
         deps.onAction(action);
         return true;
       }
@@ -77,9 +87,8 @@ export class PanelWindowController {
     const existing = this.windows.get(request.id);
     if (existing && !existing.isDestroyed()) {
       // 重新「运行」= 前置 + 按最新声明同步置顶（改了作品配置不必先关窗）。
-      if (request.panel?.alwaysOnTop !== undefined && existing.isAlwaysOnTop() !== request.panel.alwaysOnTop) {
-        existing.setAlwaysOnTop(request.panel.alwaysOnTop);
-      }
+      const onTop = panelEffectiveAlwaysOnTop(request.panel);
+      if (existing.isAlwaysOnTop() !== onTop) existing.setAlwaysOnTop(onTop);
       if (existing.isMinimized()) existing.restore();
       existing.show();
       existing.focus();
@@ -131,7 +140,53 @@ export class PanelWindowController {
       win.destroy();
     }
     this.windows.clear();
+    this.panelOptions.clear();
     this.staticFiles.dispose();
+  }
+
+  /**
+   * 窗口级动作（close / toggle）：定位发出 POST 的页面属于哪个窗口，作用于它。
+   *
+   * 定位靠 HTTP 请求头里的 Referer（面板页 fetch 相对路径时会带上页面自己的 URL），
+   * 与窗口当前页面的 pathname 精确匹配——同工作区的两个面板作品入口必然不同，
+   * 所以同源不同页足以区分。匹配不上时，恰好只有一个活面板就作用于它（那时
+   * 发请求的只能是它）；多个窗口且分不清时宁可拒绝（403）也不关错窗。
+   */
+  private handleWindowAction(action: "close" | "toggle", referer: string | undefined): boolean {
+    const alive = [...this.windows.entries()].filter(([, win]) => !win.isDestroyed());
+    let id: string | undefined;
+    if (referer) {
+      try {
+        const refererPath = new URL(referer).pathname;
+        id = alive.find(([, win]) => {
+          try {
+            return new URL(win.webContents.getURL()).pathname === refererPath;
+          } catch {
+            return false;
+          }
+        })?.[0];
+      } catch {
+        id = undefined;
+      }
+    }
+    if (!id && alive.length === 1) id = alive[0]![0];
+    if (!id) return false;
+    const win = this.windows.get(id);
+    if (!win || win.isDestroyed()) return false;
+    if (action === "close") {
+      win.close();
+      return true;
+    }
+    // toggle 只属于抽屉：普通窗口与桌宠没有两态，拒绝而不是无声吞掉。
+    const options = this.panelOptions.get(id);
+    if (panelMode(options) !== "drawer") return false;
+    const edge: GalleryPanelEdge = options?.edge ?? "right";
+    const workArea = screen.getDisplayMatching(win.getBounds()).workArea;
+    const geometry = drawerBounds(edge, options, workArea);
+    const current = win.getBounds();
+    const collapsedNow = current.width === geometry.collapsed.width && current.height === geometry.collapsed.height;
+    win.setBounds(collapsedNow ? geometry.expanded : geometry.collapsed, true);
+    return true;
   }
 
   private async createPanelWindow(request: PanelOpenRequest): Promise<PanelOpenResult> {
@@ -145,17 +200,23 @@ export class PanelWindowController {
       return { ok: false, message: `面板作品的本地服务起不来：${error instanceof Error ? error.message : String(error)}` };
     }
 
-    const bounds = pickPanelBounds(
-      this.bounds[request.id],
-      request.panel,
-      screen.getAllDisplays().map((display) => display.workArea)
-    );
+    const mode = panelMode(request.panel);
+    const displays = screen.getAllDisplays().map((display) => display.workArea);
+    // 抽屉的几何由「贴哪条边」唯一决定，不吃坐标记忆（拖不走、不缩放）；
+    // 普通窗口与桌宠沿用记忆（桌宠 resizable: false 拉不了，但拖动位置仍值得记）。
+    const bounds: PanelBounds =
+      mode === "drawer"
+        ? drawerBounds(request.panel?.edge ?? "right", request.panel, displays[0] ?? screen.getPrimaryDisplay().workArea).collapsed
+        : pickPanelBounds(this.bounds[request.id], request.panel, displays);
+    // 桌宠/抽屉是无边框透明窗口：没有标题栏（关闭靠页面 POST close），Windows 下
+    // 透明窗口本就不可缩放； minWidth/minHeight 不设——抽屉收起态只有窄把手厚，
+    // 设了 240/200 的下限会把 setBounds 悄悄抬回去，收起态就永远出不来。
     const win = new BrowserWindow({
       ...bounds,
       title: request.title,
-      alwaysOnTop: request.panel?.alwaysOnTop === true,
-      minWidth: 240,
-      minHeight: 200,
+      alwaysOnTop: panelEffectiveAlwaysOnTop(request.panel),
+      ...(mode !== "window" ? { transparent: true, frame: false, resizable: false, skipTaskbar: true } : {}),
+      ...(mode === "window" ? { minWidth: 240, minHeight: 200 } : {}),
       show: false,
       webPreferences: {
         sandbox: true,
@@ -165,19 +226,25 @@ export class PanelWindowController {
       }
     });
     this.windows.set(request.id, win);
+    this.panelOptions.set(request.id, request.panel ?? {});
     win.webContents.setWindowOpenHandler(({ url: target }) => {
       this.deps.openExternal(target);
       return { action: "deny" };
     });
     const remember = (): void => this.schedulePersist(request.id, win);
-    win.on("resize", remember);
-    win.on("move", remember);
+    if (mode !== "drawer") {
+      win.on("resize", remember);
+      win.on("move", remember);
+    }
     // 位置必须在 close（销毁之前）落盘：closed 时窗口已销毁，getBounds 拿不到了。
-    win.on("close", () => {
-      this.flushPersist(request.id, win);
-    });
+    if (mode !== "drawer") {
+      win.on("close", () => {
+        this.flushPersist(request.id, win);
+      });
+    }
     win.on("closed", () => {
       if (this.windows.get(request.id) === win) this.windows.delete(request.id);
+      this.panelOptions.delete(request.id);
     });
     try {
       await win.loadURL(url);

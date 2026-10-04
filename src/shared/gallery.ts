@@ -31,7 +31,21 @@ export interface GalleryPanelOptions {
   width?: number;
   height?: number;
   alwaysOnTop?: boolean;
+  /** 窗口形态（缺省 window = 系统边框窗口）。pet = 桌宠（透明无边框）；drawer = 贴边抽屉。 */
+  mode?: GalleryPanelMode;
+  /** drawer 专用：贴哪条边（缺省 right）。非 drawer 形态下无意义，归一化时丢弃。 */
+  edge?: GalleryPanelEdge;
 }
+
+/** 面板窗口形态：window（系统边框窗口）/ pet（透明无边框桌宠）/ drawer（贴边抽屉）。 */
+export type GalleryPanelMode = "window" | "pet" | "drawer";
+
+/** 抽屉停靠的屏幕边：left / right / top / bottom。 */
+export type GalleryPanelEdge = "left" | "right" | "top" | "bottom";
+
+export const PANEL_MODES: readonly GalleryPanelMode[] = ["window", "pet", "drawer"];
+export const PANEL_EDGES: readonly GalleryPanelEdge[] = ["left", "right", "top", "bottom"];
+export const GALLERY_PANEL_MODE_LABELS: Record<GalleryPanelMode, string> = { window: "窗口", pet: "桌宠", drawer: "贴边抽屉" };
 
 /** 面板窗口缺省尺寸：竖长条，装得下「几个会话 + todo」而不占地。 */
 export const PANEL_DEFAULT_WIDTH = 420;
@@ -114,6 +128,21 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+/** 面板窗口的生效形态（作品没声明就是 window，向后兼容旧清单）。 */
+export function panelMode(options?: GalleryPanelOptions): GalleryPanelMode {
+  return options?.mode ?? "window";
+}
+
+/**
+ * 面板窗口的生效置顶（纯函数，主进程开窗与复用窗口同步共用）：
+ * 桌宠缺省置顶（不置顶的桌宠会被任何普通窗口瞬间吞没，等于没做）；
+ * 抽屉与普通窗口缺省不置顶（常驻窄条一直压在用户工作之上反而碍事）。
+ */
+export function panelEffectiveAlwaysOnTop(options?: GalleryPanelOptions): boolean {
+  if (panelMode(options) === "pet") return options?.alwaysOnTop ?? true;
+  return options?.alwaysOnTop === true;
+}
+
 /**
  * 面板窗口偏好的读侧归一化：非对象返回 undefined；尺寸取整并夹到可用区间
  * （写了个 0 宽或 99999 高的作品不应当造出一个点不动的窗口）；
@@ -128,6 +157,14 @@ export function normalizeGalleryPanelOptions(value: unknown): GalleryPanelOption
   const height = finite(record.height);
   if (height !== undefined) options.height = clamp(Math.round(height), PANEL_MIN_HEIGHT, PANEL_MAX_HEIGHT);
   if (typeof record.alwaysOnTop === "boolean") options.alwaysOnTop = record.alwaysOnTop;
+  // mode="window" 是缺省值，不落字段（与尺寸缺省不落盘同一风格：没声明就没字段）。
+  if (typeof record.mode === "string" && record.mode !== "window" && (PANEL_MODES as readonly string[]).includes(record.mode)) {
+    options.mode = record.mode as GalleryPanelMode;
+  }
+  // edge 只属于抽屉：别的形态下带了也丢（避免「桌宠贴边」这种语义存进清单）。
+  if (options.mode === "drawer" && typeof record.edge === "string" && (PANEL_EDGES as readonly string[]).includes(record.edge)) {
+    options.edge = record.edge as GalleryPanelEdge;
+  }
   return Object.keys(options).length > 0 ? options : undefined;
 }
 
@@ -429,7 +466,14 @@ export function composeGalleryDevMessage(app: GalleryApp): string {
   if (app.url) lines.push(`服务地址：${app.url}`);
   if (app.kind === "panel") {
     const size = panelWindowSize(app.panel);
-    lines.push(`窗口：${size.width}×${size.height}${app.panel?.alwaysOnTop ? "，置顶" : ""}`);
+    const mode = panelMode(app.panel);
+    const shape =
+      mode === "pet"
+        ? "透明无边框桌宠窗口（固定尺寸，页面自绘形状，CSS -webkit-app-region: drag 拖动）"
+        : mode === "drawer"
+          ? `贴边抽屉（${app.panel?.edge ?? "right"} 缘窄条，点击窄条 POST toggle 展开/收起）`
+          : "系统边框窗口";
+    lines.push(`窗口：${size.width}×${size.height}，${shape}${panelEffectiveAlwaysOnTop(app.panel) ? "，置顶" : ""}`);
     lines.push(panelDevHint());
   }
   lines.push("", "我要在这个作品上继续开发，请先读入口相关的代码再动手。");

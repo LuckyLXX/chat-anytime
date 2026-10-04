@@ -16,6 +16,8 @@ import {
   normalizeGalleryPanelOptions,
   PANEL_DEFAULT_HEIGHT,
   PANEL_DEFAULT_WIDTH,
+  panelEffectiveAlwaysOnTop,
+  panelMode,
   panelWindowSize,
   removeGalleryApp,
   sortGalleryApps,
@@ -311,6 +313,30 @@ describe("面板作品（kind=panel）", () => {
     expect(normalizeGalleryPanelOptions("420x560")).toBeUndefined();
   });
 
+  it("normalizeGalleryPanelOptions：mode 只收合法枚举，edge 只属于抽屉", () => {
+    expect(normalizeGalleryPanelOptions({ mode: "pet", width: 280 })).toEqual({ mode: "pet", width: 280 });
+    expect(normalizeGalleryPanelOptions({ mode: "drawer", edge: "left" })).toEqual({ mode: "drawer", edge: "left" });
+    // 非法形态丢弃（回退普通窗口）；window 是缺省值，不落字段
+    expect(normalizeGalleryPanelOptions({ mode: "widget" })).toBeUndefined();
+    expect(normalizeGalleryPanelOptions({ mode: "window" })).toBeUndefined();
+    // edge 在非抽屉形态下无意义，丢弃（避免「桌宠贴边」这种语义存进清单）
+    expect(normalizeGalleryPanelOptions({ mode: "pet", edge: "right" })).toEqual({ mode: "pet" });
+    expect(normalizeGalleryPanelOptions({ mode: "drawer", edge: "middle" })).toEqual({ mode: "drawer" });
+    // mode 非法时 edge 一并丢弃（没有形态就没有贴边）
+    expect(normalizeGalleryPanelOptions({ edge: "right" })).toBeUndefined();
+  });
+
+  it("panelMode 缺省 window；置顶缺省：桌宠置顶、其余不置顶（可显式改写）", () => {
+    expect(panelMode(undefined)).toBe("window");
+    expect(panelMode({ mode: "pet" })).toBe("pet");
+    expect(panelEffectiveAlwaysOnTop(undefined)).toBe(false);
+    expect(panelEffectiveAlwaysOnTop({ mode: "pet" })).toBe(true);
+    expect(panelEffectiveAlwaysOnTop({ mode: "pet", alwaysOnTop: false })).toBe(false);
+    expect(panelEffectiveAlwaysOnTop({ mode: "drawer" })).toBe(false);
+    expect(panelEffectiveAlwaysOnTop({ mode: "drawer", alwaysOnTop: true })).toBe(true);
+    expect(panelEffectiveAlwaysOnTop({ alwaysOnTop: true })).toBe(true);
+  });
+
   it("panelWindowSize 缺省为 420×560（素材没声明尺寸时的开窗大小）", () => {
     expect(panelWindowSize()).toEqual({ width: PANEL_DEFAULT_WIDTH, height: PANEL_DEFAULT_HEIGHT });
     expect(panelWindowSize({ width: 320 })).toEqual({ width: 320, height: PANEL_DEFAULT_HEIGHT });
@@ -344,6 +370,11 @@ describe("面板作品（kind=panel）", () => {
       absolutePath: "D:/ws/panels/status/index.html",
       options: { width: 1600, alwaysOnTop: true }
     });
+    expect(galleryRunPlan(app({ ...panel, panel: { mode: "drawer", edge: "bottom" } }), false)).toEqual({
+      action: "open-panel",
+      absolutePath: "D:/ws/panels/status/index.html",
+      options: { mode: "drawer", edge: "bottom" }
+    });
   });
 
   it("面板不生成缩略图（离屏截图里没有状态端点，截出来是降级态）", () => {
@@ -353,9 +384,20 @@ describe("面板作品（kind=panel）", () => {
   it("继续开发文案带上窗口尺寸、置顶与数据接口（接手改面板的模型不用猜）", () => {
     const message = composeGalleryDevMessage(app({ ...panel, panel: { width: 320, height: 400, alwaysOnTop: true } }));
     expect(message).toContain("类型：面板（panel）");
-    expect(message).toContain("窗口：320×400，置顶");
+    expect(message).toContain("窗口：320×400，系统边框窗口，置顶");
     expect(message).toContain("__pidesktop_state.json");
     // 未声明时置顶不能凭空出现
-    expect(composeGalleryDevMessage(app(panel))).toContain("窗口：420×560\n");
+    expect(composeGalleryDevMessage(app(panel))).toContain("窗口：420×560，系统边框窗口\n");
+  });
+
+  it("继续开发文案按形态说清窗口形态与动作（桌宠/抽屉的页面契约不同）", () => {
+    const pet = composeGalleryDevMessage(app({ ...panel, panel: { mode: "pet", width: 280, height: 340 } }));
+    expect(pet).toContain("透明无边框桌宠窗口");
+    expect(pet).toContain("窗口：280×340，透明无边框桌宠窗口（固定尺寸，页面自绘形状，CSS -webkit-app-region: drag 拖动），置顶");
+    const drawer = composeGalleryDevMessage(app({ ...panel, panel: { mode: "drawer", edge: "left" } }));
+    expect(drawer).toContain("贴边抽屉（left 缘窄条，点击窄条 POST toggle 展开/收起）");
+    const hint = composeGalleryDevMessage(app(panel));
+    expect(hint).toContain('"action\":\"close\"');
+    expect(hint).toContain('"action\":\"toggle\"');
   });
 });

@@ -2,7 +2,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { MAX_PANEL_BOUNDS, boundsAreReachable, normalizePanelBounds, panelBoundsPathFor, pickPanelBounds, readPanelBounds, writePanelBounds, type PanelBounds } from "./panel-bounds.js";
+import { DRAWER_HANDLE_SPAN, DRAWER_HANDLE_THICKNESS, MAX_PANEL_BOUNDS, boundsAreReachable, drawerBounds, normalizePanelBounds, panelBoundsPathFor, pickPanelBounds, readPanelBounds, writePanelBounds, type PanelBounds } from "./panel-bounds.js";
 
 const primary: PanelBounds = { x: 0, y: 0, width: 1920, height: 1040 };
 const secondary: PanelBounds = { x: 1920, y: 0, width: 1280, height: 1024 };
@@ -90,5 +90,58 @@ describe("readPanelBounds / writePanelBounds", () => {
     expect(read.g0).toBeUndefined();
     expect(read[`g${MAX_PANEL_BOUNDS + 4}`]).toBeDefined();
     expect(panelBoundsPathFor(dir)).toBe(join(dir, "pidesktop-panels.json"));
+  });
+});
+
+/**
+ * 贴边抽屉的两态几何（drawerBounds 纯函数）。
+ *
+ * 契约：收起态是贴边窄把手（厚 DRAWER_HANDLE_THICKNESS、沿边长不超过
+ * DRAWER_HANDLE_SPAN），展开态是贴边对齐、沿边居中的完整面板；两态都必须完整
+ * 落在工作区内（不然抽屉会开到屏幕外，点也点不到）。
+ */
+const DRAWER_AREA: PanelBounds = { x: 0, y: 0, width: 1920, height: 1040 };
+
+describe("drawerBounds", () => {
+  it("右缘：展开贴右、收起是右缘竖把手，两态沿边居中", () => {
+    const { collapsed, expanded } = drawerBounds("right", { width: 320, height: 520 }, DRAWER_AREA);
+    expect(expanded).toEqual({ x: 1920 - 320, y: (1040 - 520) / 2, width: 320, height: 520 });
+    expect(collapsed).toEqual({ x: 1920 - DRAWER_HANDLE_THICKNESS, y: (1040 - DRAWER_HANDLE_SPAN) / 2, width: DRAWER_HANDLE_THICKNESS, height: DRAWER_HANDLE_SPAN });
+  });
+
+  it("左缘：两态都贴左缘（把手在左，面板从左缘展开）", () => {
+    const { collapsed, expanded } = drawerBounds("left", { width: 320, height: 520 }, DRAWER_AREA);
+    expect(expanded.x).toBe(DRAWER_AREA.x);
+    expect(collapsed).toEqual({ x: 0, y: (1040 - DRAWER_HANDLE_SPAN) / 2, width: DRAWER_HANDLE_THICKNESS, height: DRAWER_HANDLE_SPAN });
+  });
+
+  it("顶缘/底缘：横向把手（厚度落在 Y 轴，沿边长度落在 X 轴）", () => {
+    const top = drawerBounds("top", { width: 480, height: 400 }, DRAWER_AREA);
+    expect(top.collapsed).toEqual({ x: (1920 - DRAWER_HANDLE_SPAN) / 2, y: 0, width: DRAWER_HANDLE_SPAN, height: DRAWER_HANDLE_THICKNESS });
+    expect(top.expanded).toEqual({ x: (1920 - 480) / 2, y: 0, width: 480, height: 400 });
+    const bottom = drawerBounds("bottom", { width: 480, height: 400 }, DRAWER_AREA);
+    expect(bottom.collapsed.y).toBe(1040 - DRAWER_HANDLE_THICKNESS);
+    expect(bottom.expanded.y).toBe(1040 - 400);
+  });
+
+  it("声明尺寸大过工作区时夹取（面板完整落在屏内），把手沿边长跟展开尺寸走", () => {
+    const { collapsed, expanded } = drawerBounds("right", { width: 9999, height: 9999 }, DRAWER_AREA);
+    expect(expanded).toEqual({ x: 0, y: 0, width: 1920, height: 1040 });
+    expect(collapsed.height).toBe(DRAWER_HANDLE_SPAN);
+  });
+
+  it("未声明尺寸时用缺省面板尺寸（420×560）", () => {
+    const { expanded } = drawerBounds("right", undefined, DRAWER_AREA);
+    expect(expanded.width).toBe(420);
+    expect(expanded.height).toBe(560);
+  });
+
+  it("工作区带偏移（副屏/任务栏）时贴边与居中都相对工作区而非原点", () => {
+    const area: PanelBounds = { x: 1920, y: 100, width: 1280, height: 720 };
+    const { collapsed, expanded } = drawerBounds("right", { width: 300, height: 400 }, area);
+    expect(expanded.x).toBe(1920 + 1280 - 300);
+    expect(expanded.y).toBe(100 + (720 - 400) / 2);
+    expect(collapsed.x).toBe(1920 + 1280 - DRAWER_HANDLE_THICKNESS);
+    expect(collapsed.y).toBe(100 + (720 - DRAWER_HANDLE_SPAN) / 2);
   });
 });

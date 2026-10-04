@@ -1,6 +1,6 @@
 import { LayoutGrid, X } from "lucide-react";
 import { useState, type FormEvent, type ReactNode } from "react";
-import type { GalleryApp, GalleryDraft, GalleryKind, GalleryPanelOptions } from "../../../shared/gallery";
+import { GALLERY_PANEL_MODE_LABELS, PANEL_MODES, type GalleryApp, type GalleryDraft, type GalleryKind, type GalleryPanelEdge, type GalleryPanelMode, type GalleryPanelOptions } from "../../../shared/gallery";
 import { GalleryWall } from "./GalleryWall";
 import { useOverlayLayer } from "../lib/overlay-layers";
 
@@ -52,7 +52,9 @@ export function GalleryPublishDialog({ initial, workspace, onSubmit, onClose }: 
   const [command, setCommand] = useState("");
   const [url, setUrl] = useState("");
   const [description, setDescription] = useState("");
-  // 面板窗口的初始尺寸/置顶。空串 = 用缺省（420×560、不置顶），不强制用户填。
+  // 面板窗口的形态/贴边/初始尺寸/置顶。空串 = 用缺省（420×560、不置顶），不强制用户填。
+  const [panelMode, setPanelMode] = useState<GalleryPanelMode>("window");
+  const [panelEdge, setPanelEdge] = useState<GalleryPanelEdge>("right");
   const [panelWidth, setPanelWidth] = useState("");
   const [panelHeight, setPanelHeight] = useState("");
   const [panelOnTop, setPanelOnTop] = useState(false);
@@ -72,7 +74,12 @@ export function GalleryPublishDialog({ initial, workspace, onSubmit, onClose }: 
       const height = Number.parseInt(panelHeight, 10);
       if (Number.isFinite(width) && width > 0) panel.width = width;
       if (Number.isFinite(height) && height > 0) panel.height = height;
-      if (panelOnTop) panel.alwaysOnTop = true;
+      // 桌宠/抽屉显式写置顶布尔（生效缺省：桌宠置顶、抽屉不置顶）；普通窗口保持
+      // 旧语义（不勾就不写字段，走平台缺省的不置顶）。
+      if (panelMode !== "window") panel.alwaysOnTop = panelOnTop;
+      else if (panelOnTop) panel.alwaysOnTop = true;
+      if (panelMode !== "window") panel.mode = panelMode;
+      if (panelMode === "drawer") panel.edge = panelEdge;
       if (Object.keys(panel).length > 0) draft.panel = panel;
     }
     onSubmit(draft);
@@ -100,9 +107,29 @@ export function GalleryPublishDialog({ initial, workspace, onSubmit, onClose }: 
           </label>
           {kind === "panel" && (
             <div className="gallery-panel-options">
+              <label>形态
+                <select value={panelMode} onChange={(event) => {
+                  const next = event.target.value as GalleryPanelMode;
+                  setPanelMode(next);
+                  // 桌宠缺省置顶（不置顶的桌宠会被普通窗口吞没），选中即预勾上。
+                  if (next === "pet") setPanelOnTop(true);
+                }}>
+                  {PANEL_MODES.map((mode) => <option key={mode} value={mode}>{GALLERY_PANEL_MODE_LABELS[mode]}（{mode === "window" ? "系统边框窗口" : mode === "pet" ? "透明无边框，页面自绘形状可拖动" : "贴屏幕边缘，窄条点击展开"}）</option>)}
+                </select>
+              </label>
+              {panelMode === "drawer" && (
+                <label>贴边
+                  <select value={panelEdge} onChange={(event) => setPanelEdge(event.target.value as GalleryPanelEdge)}>
+                    <option value="right">右缘</option>
+                    <option value="left">左缘</option>
+                    <option value="top">顶缘</option>
+                    <option value="bottom">底缘</option>
+                  </select>
+                </label>
+              )}
               <label>窗口宽（可选）<input type="number" min={240} max={1600} value={panelWidth} placeholder="420" onChange={(event) => setPanelWidth(event.target.value)} /></label>
               <label>窗口高（可选）<input type="number" min={200} max={1400} value={panelHeight} placeholder="560" onChange={(event) => setPanelHeight(event.target.value)} /></label>
-              <label className="gallery-panel-ontop"><input type="checkbox" checked={panelOnTop} onChange={(event) => setPanelOnTop(event.target.checked)} /> 窗口置顶</label>
+              <label className="gallery-panel-ontop"><input type="checkbox" checked={panelOnTop} onChange={(event) => setPanelOnTop(event.target.checked)} /> 窗口置顶{panelMode === "pet" ? "（桌宠建议置顶）" : ""}</label>
             </div>
           )}
           {kind === "server" && (

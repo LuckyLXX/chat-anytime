@@ -23,7 +23,7 @@ import type { PanelSessionLive, Todo } from "./protocol.js";
 export const PANEL_STATE_ENDPOINT = "__pidesktop_state.json";
 
 /** 端点允许的动作。**只有白名单里的动作能被执行**，其余一律 403。 */
-export const PANEL_ACTIONS = ["show-main"] as const;
+export const PANEL_ACTIONS = ["show-main", "close", "toggle"] as const;
 
 export type PanelAction = (typeof PANEL_ACTIONS)[number];
 
@@ -78,9 +78,13 @@ export function isPanelEntryFile(filePath: string): boolean {
 }
 
 /**
- * 面板页面的开发提示（拼进「继续开发」的注入文本）：把数据接口写清楚，
+ * 面板页面的开发提示（拼进「继续开发」的注入文本）：把数据接口与窗口形态写清楚，
  * 否则下一次接手改面板的模型只能靠猜。
  */
 export function panelDevHint(): string {
-  return `面板型作品：入口网页会被开成独立小窗口（脱离主界面存活）。数据接口：相对自己 fetch("./${PANEL_STATE_ENDPOINT}") 得到只读状态 JSON；POST 同一地址 {"action":"show-main"} 唤回主界面。面板里**可以直接 fetch 外部 http(s) API**（包括没有 CORS 的自建/中转模型服务）：跨域由平台在主进程统一处理，不要自己搭本地代理。`;
+  return [
+    `面板型作品：入口网页会被开成独立小窗口（脱离主界面存活）。数据接口：相对自己 fetch("./${PANEL_STATE_ENDPOINT}") 得到只读状态 JSON；POST 同一地址 {"action":"show-main"} 唤回主界面、{"action":"close"} 关闭本窗口、{"action":"toggle"} 切换贴边抽屉的展开/收起（仅抽屉形态有效）。`,
+    `窗口形态（panel.mode）：缺省 "window"（系统边框窗口）；"pet" 桌宠 = 透明无边框固定尺寸，页面须 body 背景透明自绘形状，拖动用 CSS -webkit-app-region: drag（按钮等交互元素上用 no-drag 免得点不到），页面自带关闭钮 POST close；"drawer" 贴边抽屉 = 停靠 edge（left/right/top/bottom，缺省 right），窗口在窄把手与完整面板两态切换，页面监听 resize 按窗口尺寸自适应渲染两态，点把手 POST toggle。`,
+    `面板里可以直接 fetch 外部 http(s) API（包括没有 CORS 的自建/中转模型服务）：跨域由平台在主进程统一处理，不要自己搭本地代理。`
+  ].join("\n");
 }

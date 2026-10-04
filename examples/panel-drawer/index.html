@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>贴边抽屉示例</title>
+<!--
+  贴边抽屉面板（作品类型：面板 kind=panel / panel.mode="drawer"）
+
+  窗口形态（作品声明 mode:"drawer", edge:"right"）：停靠屏幕右缘，在
+  「窄把手（40px 宽）」与「完整面板（声明的 width×height）」两态之间切换，
+  切换由平台响应 POST {"action":"toggle"} 改窗口尺寸完成。页面要做的：
+    1. 监听 resize，按窗口宽度渲染两态（本页：<=60px 画把手，否则画面板）；
+    2. 把手与「收起」按钮 POST {"action":"toggle"}；
+    3. 自带关闭钮 POST {"action":"close"}；
+    4. 透明窗口：body 背景透明，圆角与背景由页面自己画（窗口是方的）。
+
+  数据接口与普通面板一致：相对自己 fetch("./__pidesktop_state.json")。
+  本页展示「此刻谁在跑」的极简清单。零依赖、createElement 构建、不拼 innerHTML。
+
+  发布（示例）：gallery_publish kind=panel path=examples/panel-drawer/index.html
+  panel={mode:"drawer",edge:"right",width:320,height:520}
+-->
+<style>
+  html, body { height: 100%; margin: 0; background: transparent; overflow: hidden; }
+  body { -webkit-user-select: none; user-select: none; font: 13px/1.5 system-ui, "Microsoft YaHei", sans-serif; }
+  .shell { height: 100%; border-radius: 14px 0 0 14px; background: rgba(18, 38, 31, .92); color: #eaf6ef; overflow: hidden; }
+
+  /* —— 收起态：竖向窄把手（窗口此时只有 40px 宽） —— */
+  .handle {
+    display: none; flex-direction: column; align-items: center; justify-content: center;
+    gap: 10px; height: 100%; cursor: pointer;
+  }
+  .handle .tab {
+    writing-mode: vertical-rl; letter-spacing: .35em; font-size: 12px; color: #bfe0d1;
+    border-radius: 999px; border: 1px solid rgba(234, 246, 239, .22); padding: 10px 5px;
+  }
+  .handle .dot { width: 8px; height: 8px; border-radius: 50%; background: #4f6b63; }
+  .handle .dot.busy { background: #e8a33d; }
+  .handle:hover .tab { color: #ffffff; border-color: #c93a50; }
+
+  /* —— 展开态：完整面板 —— */
+  .panel { display: none; flex-direction: column; height: 100%; }
+  .panel header {
+    display: flex; align-items: center; gap: 8px; padding: 10px 12px;
+    border-bottom: 1px solid rgba(234, 246, 239, .14);
+  }
+  .panel header strong { flex: 1; font-size: 14px; }
+  .panel header button {
+    border: 0; border-radius: 7px; padding: 3px 10px; cursor: pointer;
+    background: rgba(234, 246, 239, .12); color: #eaf6ef; font-size: 12px;
+  }
+  .panel header button:hover { background: #c93a50; }
+  .list { flex: 1; overflow: auto; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+  .item { border-radius: 9px; background: rgba(234, 246, 239, .07); padding: 8px 10px; }
+  .item .row { display: flex; align-items: center; gap: 6px; }
+  .item .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .item .state { font-size: 11px; color: #9fc3b2; }
+  .item.busy .state { color: #e8a33d; }
+  .item .todo { margin: 4px 0 0; font-size: 11px; color: #9fc3b2; }
+  .empty { color: #9fc3b2; text-align: center; margin-top: 24px; }
+
+  /* 两态开关由 body[data-mode] 驱动 */
+  body[data-mode="collapsed"] .handle { display: flex; }
+  body[data-mode="expanded"] .panel { display: flex; }
+</style>
+</head>
+<body>
+  <div class="shell">
+    <div class="handle" id="handle"><span class="dot" id="dot"></span><span class="tab">会话速览</span></div>
+    <div class="panel">
+      <header>
+        <strong>会话速览</strong>
+        <button id="collapse" type="button">收起</button>
+        <button id="close" type="button">关闭</button>
+      </header>
+      <div class="list" id="list"></div>
+    </div>
+  </div>
+<script>
+  "use strict";
+  const list = document.getElementById("list");
+  const dot = document.getElementById("dot");
+  const COLLAPSED_MAX = 60; // 窗口宽 <= 60px 视为收起态（把手厚 40，留了容差）
+
+  function post(action) {
+    fetch("./__pidesktop_state.json", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action }) }).catch(() => undefined);
+  }
+
+  function applyMode() {
+    document.body.dataset.mode = window.innerWidth <= COLLAPSED_MAX ? "collapsed" : "expanded";
+  }
+  window.addEventListener("resize", applyMode);
+  applyMode();
+
+  function text(parent, className, content) {
+    const node = document.createElement(className);
+    node.textContent = content;
+    parent.append(node);
+    return node;
+  }
+
+  function render(state) {
+    const live = state && Array.isArray(state.live) ? state.live : [];
+    const busy = live.filter((session) => session.busy);
+    dot.classList.toggle("busy", busy.length > 0);
+    list.replaceChildren();
+    if (live.length === 0) {
+      text(list, "div", "").className = "empty";
+      list.firstChild.textContent = "（没有活着的会话）";
+      return;
+    }
+    for (const session of live) {
+      const item = document.createElement("div");
+      item.className = "item" + (session.busy ? " busy" : "");
+      const row = document.createElement("div");
+      row.className = "row";
+      text(row, "span", session.title || session.sessionId || "会话").className = "name";
+      text(row, "span", session.busy ? "运行中" : "空闲").className = "state";
+      item.append(row);
+      const todo = session.todoSummary;
+      if (todo && todo.total > 0) {
+        text(item, "div", `任务 ${todo.completed}/${todo.total}${todo.inProgress ? ` · 进行中 ${todo.inProgress}` : ""}`).className = "todo";
+      }
+      list.append(item);
+    }
+  }
+
+  function refresh() {
+    fetch("./__pidesktop_state.json", { cache: "no-store" })
+      .then((response) => (response.ok ? response.json() : null))
+      .then(render)
+      .catch(() => {
+        list.replaceChildren();
+        const empty = text(list, "div", "（读不到会话状态）");
+        empty.className = "empty";
+      });
+  }
+
+  document.getElementById("handle").addEventListener("click", () => post("toggle"));
+  document.getElementById("collapse").addEventListener("click", () => post("toggle"));
+  document.getElementById("close").addEventListener("click", () => post("close"));
+
+  refresh();
+  window.setInterval(refresh, 5000);
+</script>
+</body>
+</html>

@@ -32,7 +32,9 @@ const preload = read("../preload/index.ts");
 const app = read("../renderer/src/App.tsx");
 const runtime = read("pi-runtime.ts");
 const panelWindow = read("panel-window.ts");
+const panelBounds = read("panel-bounds.ts");
 const panelCors = read("panel-cors.ts");
+const staticServer = read("browser-static-server.ts");
 const tray = read("tray.ts");
 const sharedPanel = read("../shared/panel.ts");
 
@@ -94,8 +96,9 @@ describe("关闭到后台（关闭主窗口 ≠ 退出应用）", () => {
 
   it("回到主界面只有一条实现（托盘/面板按钮/通知点击都走它）", () => {
     expect(main).toContain("function showMainWindow(): void {");
-    // 面板动作白名单在 main 侧落地
-    expect(main).toMatch(/if \(action === "show-main"\) showMainWindow\(\);/u);
+    // 面板动作白名单在 main 侧落地：show-main 唤回主界面，窗口级动作（close/toggle）
+    // 不在这里处理（它们属于面板窗口控制器，预览端点拒绝并回 403）。
+    expect(main).toMatch(/if \(action === "show-main"\) \{[\s\S]{0,80}?showMainWindow\(\);[\s\S]{0,80}?return true;[\s\S]{0,80}?\}\s*return false;/u);
     // 三个入口都必须接到它上面（漏一个就是「某个入口回不去」）：通知点击、托盘、面板端点
     expect(main).toContain('notification.on("click", () => showMainWindow());');
     expect(main).toContain("onOpen: () => showMainWindow(),");
@@ -139,6 +142,30 @@ describe("utility 侧的 sessions.live 推送", () => {
   });
 });
 
+describe("面板窗口的窗口级动作（close / toggle）", () => {
+  it("白名单与静态服务：请求 Referer 传给 endpoint（定位哪个窗口在说话）", () => {
+    expect(sharedPanel).toContain('"show-main", "close", "toggle"');
+    expect(staticServer).toContain("action: (action: PanelAction, context: { referer?: string }) => boolean");
+    expect(staticServer).toMatch(/endpoint\.action\(action, \{ referer:[^}]*\}\)/u);
+  });
+
+  it("控制器认领 close/toggle（靠 Referer 匹配窗口），show-main 才转主进程回调", () => {
+    expect(panelWindow).toMatch(/if \(action === "close" \|\| action === "toggle"\) return this\.handleWindowAction/u);
+    expect(panelWindow).toContain("private handleWindowAction(action: \"close\" | \"toggle\", referer: string | undefined): boolean");
+    // 关错窗比不关更糟：多个活窗口且 Referer 分不清时必须拒绝（return false）。
+    expect(panelWindow).toContain("if (!id && alive.length === 1) id = alive[0]![0];");
+    expect(panelWindow).toContain("if (!id) return false;");
+    // toggle 只属于抽屉：普通窗口/桌宠没有两态，拒绝而不是无声吞掉。
+    expect(panelWindow).toContain('if (panelMode(options) !== "drawer") return false;');
+    expect(panelWindow).toMatch(/win\.setBounds\(collapsedNow \? geometry\.expanded : geometry\.collapsed, true\)/u);
+  });
+
+  it("预览端点拒绝窗口级动作（内置浏览器里没有面板窗口可关/可切）", () => {
+    expect(main).toMatch(/function handlePanelAction\(action: PanelAction\): boolean \{[\s\S]{0,200}?\}\s*return false;/u);
+    expect(main).toContain("action: (action) => handlePanelAction(action)");
+  });
+});
+
 describe("面板窗口的跨域放宽（panel-cors）", () => {
   it("在第一个面板窗口创建时懒装（不开面板的用户不该付网络回调的代价）", () => {
     expect(main).toContain("ensurePanelCorsRelaxation();");
@@ -171,6 +198,25 @@ describe("面板窗口的跨域放宽（panel-cors）", () => {
 
   it("面板开发规范里写清「不需要自己搭代理」（否则下一个面板还会重复造）", () => {
     expect(sharedPanel).toContain("跨域由平台在主进程统一处理，不要自己搭本地代理");
+  });
+});
+
+describe("面板窗口形态（window / pet / drawer）", () => {
+  it("非窗口形态开透明无边框不可缩放窗口，不占任务栏（桌宠/抽屉的窗口外形）", () => {
+    expect(panelWindow).toContain('...(mode !== "window" ? { transparent: true, frame: false, resizable: false, skipTaskbar: true } : {})');
+    // 桌宠缺省置顶（不置顶的桌宠会被普通窗口吞没）；生效值单一来源。
+    expect(panelWindow).toContain("alwaysOnTop: panelEffectiveAlwaysOnTop(request.panel)");
+  });
+
+  it("minWidth/minHeight 只给普通窗口：抽屉收起态只有窄把手厚，设了下限收起态就永远出不来", () => {
+    expect(panelWindow).toContain('...(mode === "window" ? { minWidth: 240, minHeight: 200 } : {})');
+  });
+
+  it("抽屉几何来自 drawerBounds 纯函数且不进坐标记忆（贴边位置由 edge 唯一决定）", () => {
+    expect(panelWindow).toMatch(/mode === "drawer"[\s\S]{0,220}?drawerBounds\(request\.panel\?\.edge \?\? "right"/u);
+    expect(panelWindow).toMatch(/if \(mode !== "drawer"\) \{[\s\S]{0,120}?win\.on\("move"/u);
+    expect(panelBounds).toContain("export function drawerBounds(");
+    expect(panelBounds).toContain("export const DRAWER_HANDLE_THICKNESS = 40;");
   });
 });
 

@@ -682,19 +682,25 @@ function showMainWindow(): void {
   createWindow();
 }
 
-/** 面板端点的白名单动作处理（面板窗口与内置浏览器预览共用）。 */
-function handlePanelAction(action: PanelAction): void {
-  if (action === "show-main") showMainWindow();
+/**
+ * 面板端点的白名单动作处理（面板窗口与内置浏览器预览共用）。
+ *
+ * close / toggle 是「作用于发出窗口」的动作，只有面板窗口控制器能认领（靠请求
+ * Referer 定位窗口）；内置浏览器预览里没有窗口可关/可切，返回 false → 403。
+ */
+function handlePanelAction(action: PanelAction): boolean {
+  if (action === "show-main") {
+    showMainWindow();
+    return true;
+  }
+  return false;
 }
 
 /** 面板端点：状态来自 main 的内存缓存，动作只有白名单里的那一个。 */
 function panelStateEndpoint(): StaticServerEndpoint {
   return {
     state: () => panelState.snapshot(),
-    action: (action) => {
-      handlePanelAction(action);
-      return true;
-    }
+    action: (action) => handlePanelAction(action)
   };
 }
 

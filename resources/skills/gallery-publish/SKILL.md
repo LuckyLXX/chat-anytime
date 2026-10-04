@@ -17,6 +17,16 @@ description: 当要做一个网页 / 小工具 / 面板类作品，或要把完�
 | `server` | 内置浏览器（需先起服务） | 完整项目（dev server / 本地服务） | 随主界面 |
 | `panel` | **独立小窗口** | 常驻小工具、监控面板；主界面关了它还在 | 独立存活 |
 
+`kind=panel` 有三种窗口形态（`panel.mode`，缺省 `"window"`）：
+
+| mode | 窗口 | 页面要做的 | 典型作品 |
+| --- | --- | --- | --- |
+| `window` | 系统边框，可缩放 | 普通网页 | 监控面板、常驻小工具 |
+| `pet` | 透明无边框固定尺寸，缺省置顶 | `body` 背景透明自绘形状；CSS `-webkit-app-region: drag` 拖动（按钮上 `no-drag`，否则点不到）；自带关闭钮 POST `{"action":"close"}` | 桌宠、桌面挂件 |
+| `drawer` | 贴屏幕边缘（`panel.edge`：left/right/top/bottom，缺省 right），窄把手 ↔ 完整面板两态切换，不可拖不可缩放 | 监听 `resize` 按窗口尺寸渲染两态（窄时把手、宽时面板）；点把手 POST `{"action":"toggle"}`；自带关闭钮 POST `{"action":"close"}`；透明背景 + 圆角由页面自己画 | 快速启动器、贴边监控条 |
+
+三种形态的数据接口与跨域待遇完全一致（同一静态服务 + 端点）；`width`/`height`/`alwaysOnTop` 通用（桌宠缺省置顶，其余缺省不置顶）。
+
 ## 二、跨域边界（最容易踩的坑）
 
 平台只在**面板窗口（panel）**里放宽跨域：主进程替响应补上整套 `Access-Control-Allow-*`（反映来源），预检 OPTIONS 被服务端拒掉（405 等）也会改写成 200。
@@ -40,10 +50,10 @@ description: 当要做一个网页 / 小工具 / 面板类作品，或要把完�
 
 ## 四、panel 开发要点
 
-面板的数据接口（相对自己 `fetch("./__pidesktop_state.json")` 读会话状态、POST 唤回主界面、`panel {width,height,alwaysOnTop}` 声明窗口）在作品墙「继续开发」按钮的注入文本里有完整契约，**以它为准**，此处不重复。
+面板的数据接口（相对自己 `fetch("./__pidesktop_state.json")` 读会话状态、POST 唤回主界面 / 关窗 / 抽屉切换，`panel {width,height,alwaysOnTop,mode,edge}` 声明窗口）在作品墙「继续开发」按钮的注入文本里有完整契约，**以它为准**，此处不重复。写 pet / drawer 之前先看同仓库 `examples/panel-pet/`、`examples/panel-drawer/` 两个零依赖示例。
 
 ## 五、发布卫生（gallery_publish）
 
 - 只发布**真做完、能运行**的成果；临时脚本、中间产物不发布（作品墙会被噪声塞满）。
 - 入口必须位于当前工作区内；同「工作区 + 类型 + 入口」重复发布是**更新**而非新增（改了标题 / 命令再发一次即可）。
-- 发布后告诉用户在哪看：顶栏「作品」下拉或空会话的作品墙；panel 型说明「运行」会开成独立小窗。
+- 发布后告诉用户在哪看：顶栏「作品」下拉或空会话的作品墙；panel 型说明「运行」会开成独立小窗（桌宠 / 贴边抽屉会以对应形态出现在桌面上）。

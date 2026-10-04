@@ -1,6 +1,6 @@
-import { AppWindow, FolderOpen, Hammer, LayoutGrid, Play, Plus, Server, Sparkles, Trash2 } from "lucide-react";
+import { AppWindow, Cat, FolderOpen, Hammer, LayoutGrid, PanelRight, Play, Plus, Server, Sparkles, Trash2 } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
-import { GALLERY_KIND_LABELS, type GalleryApp } from "../../../shared/gallery";
+import { GALLERY_KIND_LABELS, GALLERY_PANEL_MODE_LABELS, panelMode, type GalleryApp } from "../../../shared/gallery";
 
 /**
  * 作品墙：空会话主区域里的作品卡片网格（landing 的替代内容）。
@@ -71,8 +71,8 @@ function GalleryCard({ app, workspace, onRun, onDevelop, onRemove }: { app: Gall
       <button type="button" className="gallery-card-thumb" data-control="gallery-run" title={`运行「${app.title}」`} onClick={() => onRun(app)}>
         {thumb
           ? <img src={thumb} alt="" />
-          : <span className="gallery-card-placeholder">{app.kind === "server" ? <Server size={22} /> : app.kind === "panel" ? <AppWindow size={22} /> : <LayoutGrid size={22} />}</span>}
-        <span className="gallery-card-badge">{GALLERY_KIND_LABELS[app.kind]}</span>
+          : <span className="gallery-card-placeholder">{app.kind === "server" ? <Server size={22} /> : app.kind === "panel" ? (panelMode(app.panel) === "pet" ? <Cat size={22} /> : panelMode(app.panel) === "drawer" ? <PanelRight size={22} /> : <AppWindow size={22} />) : <LayoutGrid size={22} />}</span>}
+        <span className="gallery-card-badge">{app.kind === "panel" && panelMode(app.panel) !== "window" ? `面板 · ${GALLERY_PANEL_MODE_LABELS[panelMode(app.panel)]}` : GALLERY_KIND_LABELS[app.kind]}</span>
       </button>
       <div className="gallery-card-body">
         <strong className="gallery-card-title" title={app.title}>{app.title}</strong>

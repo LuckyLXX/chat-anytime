@@ -77,7 +77,7 @@ export function buildGalleryTools(ctx: GalleryToolContext): ToolDefinition[] {
       description: [
         "把一个**已经做完、能运行、值得保留**的成果登记到作品墙（用户能一键运行、一键继续开发）。",
         "kind=file 时 path 指入口文件（如导出的单文件 html）；kind=server 时 path 指项目目录，并给出启动命令 command 或服务地址 url。",
-        `kind=panel 时 path 指一个网页文件（.html/.htm/.svg）：它会被开成**独立小窗口**，主界面关掉后仍能展示（用它可以做常驻小工具/监控面板）。面板页可用相对自己 fetch("./__pidesktop_state.json") 读本机会话执行状态（只读），用 panel {width,height,alwaysOnTop} 声明窗口。`,
+        `kind=panel 时 path 指一个网页文件（.html/.htm/.svg）：它会被开成**独立小窗口**，主界面关掉后仍能展示（用它可以做常驻小工具/监控面板）。面板页可用相对自己 fetch("./__pidesktop_state.json") 读本机会话执行状态（只读），POST 同一地址 {"action":"show-main"} 唤回主界面 / {"action":"close"} 关窗 / {"action":"toggle"} 切换抽屉两态。窗口用 panel 声明：mode="window"（缺省，系统边框窗口）| "pet"（桌宠：透明无边框固定尺寸，页面自绘形状并用 CSS -webkit-app-region: drag 拖动，需自带关闭钮 POST close）| "drawer"（贴边抽屉：edge 声明贴哪条边 left/right/top/bottom，缺省 right，窗口在窄把手与完整面板两态切换，页面监听 resize 自适应渲染，点把手 POST toggle）；width/height/alwaysOnTop 三种形态通用（桌宠缺省置顶）。`,
         "kind 怎么选（三种形态的运行环境与跨域能力差异——尤其要直连外部模型 API 时）先读 skill gallery-publish。",
         "入口必须位于当前工作区内。同「工作区+类型+入口」重复发布是更新而非新增（改了标题/命令再发一次即可）。",
         "只在成果确实完成时调用——临时脚本、中间产物不要发布，否则作品墙会被噪声塞满。"
@@ -90,7 +90,7 @@ export function buildGalleryTools(ctx: GalleryToolContext): ToolDefinition[] {
         entry: Type.Optional(Type.String({ description: "入口（缺省 = path）；kind=file/panel 时可指向目录内的某个页面" })),
         command: Type.Optional(Type.String({ description: "kind=server：启动命令（如 npm run dev）；用户会在终端里执行" })),
         url: Type.Optional(Type.String({ description: "kind=server：服务地址（如 http://localhost:5173）；有它就能直接打开" })),
-        panel: Type.Optional(Type.Object({ width: Type.Optional(Type.Number()), height: Type.Optional(Type.Number()), alwaysOnTop: Type.Optional(Type.Boolean()) }, { description: "kind=panel：窗口尺寸与置顶（可选）" })),
+        panel: Type.Optional(Type.Object({ width: Type.Optional(Type.Number()), height: Type.Optional(Type.Number()), alwaysOnTop: Type.Optional(Type.Boolean()), mode: Type.Optional(Type.String({ description: "窗口形态：window（缺省，系统边框窗口）| pet（桌宠，透明无边框固定尺寸）| drawer（贴边抽屉）" })), edge: Type.Optional(Type.String({ description: "drawer 专用：贴哪条边 left/right/top/bottom，缺省 right" })) }, { description: "kind=panel：窗口形态与尺寸（可选）" })),
         description: Type.Optional(Type.String({ description: "一句话说明这个作品是什么" })),
         tags: Type.Optional(Type.Array(Type.String(), { description: "可选标签" }))
       }),
