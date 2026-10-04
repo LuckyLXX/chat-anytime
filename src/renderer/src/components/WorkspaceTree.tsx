@@ -5,6 +5,7 @@ import type { WorkspaceDirectoryEntry } from "../../../shared/protocol";
 import { useDesktopStore } from "../store";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
 import { ExitWrap, useExitPresenceValue } from "./Presence";
+import { useOverlayLayer } from "../lib/overlay-layers";
 
 const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif", "ico"];
 const CODE_EXTENSIONS = ["ts", "tsx", "js", "jsx", "cjs", "mjs", "json", "jsonc", "css", "scss", "less", "html", "htm", "py", "go", "rs", "java", "c", "cpp", "cc", "h", "hpp", "cs", "rb", "php", "sh", "bash", "zsh", "yml", "yaml", "toml", "sql", "xml"];
@@ -110,6 +111,9 @@ function TreeDialogView({ dialog, onClose }: { dialog: TreeDialog; onClose(): vo
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const inputRef = useRef<HTMLInputElement>(null);
+  // 全屏弹层登记：预览面板里的内置浏览器是原生 WebContentsView，永远浮在 DOM 之上。
+  // 本弹窗虽然只在侧栏触发，但遮罩/弹窗落在窗口中央，面板很宽或全屏时会与它重叠。
+  useOverlayLayer(true);
 
   useEffect(() => {
     if (dialog.kind === "prompt") {
@@ -139,7 +143,7 @@ function TreeDialogView({ dialog, onClose }: { dialog: TreeDialog; onClose(): vo
       void run(() => dialog.onSubmit(value));
     };
     return (
-      <div className="modal-backdrop permission-backdrop" onClick={() => { if (!busy) onClose(); }}>
+      <div className="modal-backdrop permission-backdrop in-chat" onClick={() => { if (!busy) onClose(); }}>
         <div className="permission-dialog extension-ui-dialog" role="dialog" aria-modal="true" aria-label={dialog.title} onClick={(event) => event.stopPropagation()}>
           <header><div className="risk-icon"><Pencil size={20} /></div><div><h2>{dialog.title}</h2></div></header>
           <form onSubmit={submit}>
@@ -152,7 +156,7 @@ function TreeDialogView({ dialog, onClose }: { dialog: TreeDialog; onClose(): vo
     );
   }
   return (
-    <div className="modal-backdrop permission-backdrop" onClick={() => { if (!busy) onClose(); }}>
+    <div className="modal-backdrop permission-backdrop in-chat" onClick={() => { if (!busy) onClose(); }}>
       <div className="permission-dialog" role="alertdialog" aria-modal="true" aria-label={dialog.title} onClick={(event) => event.stopPropagation()}>
         <header><div className="risk-icon outside-workspace"><Trash2 size={20} /></div><div><h2>{dialog.title}</h2><p>{dialog.message}</p></div></header>
         {error && <div className="form-error">{error}</div>}

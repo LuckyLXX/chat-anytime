@@ -99,7 +99,8 @@ import {
   type SplitNode
 } from "./lib/split-layout";
 import { customCssHasWallpaper, readUiThemeContext } from "./lib/theme-runtime";
-import { useOverlayLayersOpen } from "./lib/overlay-layers";
+import { useOverlayLayer, useOverlayLayersOpen } from "./lib/overlay-layers";
+import { useChatOverlayRegion } from "./lib/chat-overlay-region";
 import { showGalleryWallLanding } from "./lib/landing-gallery";
 import { AppearanceSettings } from "./AppearanceSettings";
 import { HooksSettings } from "./HooksSettings";
@@ -473,6 +474,9 @@ export function App(): ReactNode {
   // 浏览器视图：它是原生 WebContentsView，浮在所有 DOM 之上，不挂起就会把弹层
   // 盖掉。深层组件内部开的弹层通过 lib/overlay-layers.ts 的计数登记上来。
   const overlayLayerOpen = useOverlayLayersOpen();
+  // 会话级确认框虽然已收进聊天区（in-chat），但预览面板**全屏**时原生视图铺满整个窗口，
+  // 收窄边界也躲不开——所以照旧登记进弹层计数，由 browserSuspended 兜底。
+  useOverlayLayer(renamePresence.rendered || deletePresence.rendered || rollbackPresence.rendered || removeWorkspacePresence.rendered || transcriptPresence.rendered);
   const previewVisible = previewPresence.rendered;
   const [previewSplit, setPreviewSplit] = useState(readStoredPreviewSplit);
   const [previewDragging, setPreviewDragging] = useState(false);
@@ -483,6 +487,10 @@ export function App(): ReactNode {
   }, [previewOpened, preview]);
   const previewDragPointerRef = useRef<number | undefined>(undefined);
   const workAreaRef = useRef<HTMLDivElement>(null);
+  // 会话级确认框（删除话题 / 重命名 / 回滚 / 移除工作区）的遮罩只在会话区居中：
+  // 遮挡者是预览面板里的原生 WebContentsView，让弹窗不与面板重叠即可避开；
+  // 面板全屏时边界收窄也躲不开，仍由 browserSuspended 兜底。
+  useChatOverlayRegion(workAreaRef);
   // —— 设计模式（Design Studio）：画布占主体、AI 对话收窄为侧栏；与分屏/预览互斥 ——
   //
   // 状态源是会话（快照的 designMode）而不是本地开关：设计模式决定 design_* 工具
@@ -1943,7 +1951,7 @@ export function App(): ReactNode {
       {contextMenu && <ContextMenu x={contextMenu.x} y={contextMenu.y} items={contextMenu.items} onClose={() => setContextMenu(null)} />}
       {renamePresence.rendered && (() => { const renameSession = renamePresence.value; if (!renameSession) return null; return (
         <ExitWrap exiting={renamePresence.exiting}>
-        <div className="modal-backdrop permission-backdrop" onClick={() => setRenameSession(null)}>
+        <div className="modal-backdrop permission-backdrop in-chat" onClick={() => setRenameSession(null)}>
           <div className="permission-dialog extension-ui-dialog" role="dialog" aria-modal="true" aria-label="重命名会话" onClick={(event) => event.stopPropagation()}>
             <header><div className="risk-icon command"><Pencil size={20} /></div><div><h2>重命名会话</h2></div></header>
             <form onSubmit={(event) => { event.preventDefault(); const title = renameValue.trim(); if (title) { void window.piDesktop.send({ type: "session.rename", path: renameSession.path, title }); setRenameSession(null); } }}>
@@ -1956,7 +1964,7 @@ export function App(): ReactNode {
       ); })()}
       {deletePresence.rendered && (() => { const pending = deletePresence.value; if (!pending) return null; const bulk = pending.mode === "bulk"; return (
         <ExitWrap exiting={deletePresence.exiting}>
-        <div className="modal-backdrop permission-backdrop" onClick={() => setDeleteSession(null)}>
+        <div className="modal-backdrop permission-backdrop in-chat" onClick={() => setDeleteSession(null)}>
           <div className="permission-dialog" role="alertdialog" aria-modal="true" aria-label="删除会话" onClick={(event) => event.stopPropagation()}>
             <header><div className="risk-icon outside-workspace"><Trash2 size={20} /></div><div><h2>{bulk ? `删除 ${pending.paths.length} 个会话？` : `删除会话「${pending.title}」？`}</h2><p>{bulk ? "将永久删除这些会话及其关联的任务清单、计划与快照，此操作不可恢复。" : "将永久删除该会话及其关联的任务清单，此操作不可恢复。"}</p></div></header>
             <footer><button className="secondary-button" type="button" onClick={() => setDeleteSession(null)}>取消</button><button className="danger-button" type="button" onClick={() => {
@@ -1973,7 +1981,7 @@ export function App(): ReactNode {
       ); })()}
       {rollbackPresence.rendered && (() => { const rollbackTarget = rollbackPresence.value; if (!rollbackTarget) return null; return (
         <ExitWrap exiting={rollbackPresence.exiting}>
-        <div className="modal-backdrop permission-backdrop" onClick={() => setRollbackTarget(null)}>
+        <div className="modal-backdrop permission-backdrop in-chat" onClick={() => setRollbackTarget(null)}>
           <div className="permission-dialog" role="alertdialog" aria-modal="true" aria-label="回滚文件" onClick={(event) => event.stopPropagation()}>
             <header><div className="risk-icon write"><History size={20} /></div><div><h2>回滚文件「{rollbackTarget.file.relativePath.split("/").at(-1)}」？</h2><p>{rollbackTarget.file.relativePath}</p><p>该文件将恢复到本次改动前的状态；若它是本次新建的文件则会被删除，当前内容会被覆盖。</p></div></header>
             <footer>
@@ -2012,7 +2020,7 @@ export function App(): ReactNode {
       )}
       {removeWorkspacePresence.rendered && (() => { const removeWorkspace = removeWorkspacePresence.value; if (!removeWorkspace) return null; return (
         <ExitWrap exiting={removeWorkspacePresence.exiting}>
-        <div className="modal-backdrop permission-backdrop" onClick={() => setRemoveWorkspace(null)}>
+        <div className="modal-backdrop permission-backdrop in-chat" onClick={() => setRemoveWorkspace(null)}>
           <div className="permission-dialog" role="alertdialog" aria-modal="true" aria-label="移除工作区" onClick={(event) => event.stopPropagation()}>
             <header><div className="risk-icon outside-workspace"><Trash2 size={20} /></div><div><h2>移除工作区「{removeWorkspace.name}」？</h2><p>{removeWorkspace.count > 0 ? `将永久删除当前助手在该工作区下的 ${removeWorkspace.count} 个会话，其他助手不受影响，此操作不可恢复。` : "该工作区暂无会话，将从当前助手的话题栏移除，其他助手不受影响。"}</p></div></header>
             <footer><button className="secondary-button" type="button" onClick={() => setRemoveWorkspace(null)}>取消</button><button className="danger-button" type="button" onClick={() => { void window.piDesktop.send({ type: "workspace.remove", workspace: removeWorkspace.workspace }); setRemoveWorkspace(null); }}>移除</button></footer>

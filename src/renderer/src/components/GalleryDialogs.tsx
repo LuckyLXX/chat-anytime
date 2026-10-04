@@ -2,6 +2,7 @@ import { LayoutGrid, X } from "lucide-react";
 import { useState, type FormEvent, type ReactNode } from "react";
 import type { GalleryApp, GalleryDraft, GalleryKind, GalleryPanelOptions } from "../../../shared/gallery";
 import { GalleryWall } from "./GalleryWall";
+import { useOverlayLayer } from "../lib/overlay-layers";
 
 /**
  * 作品墙弹窗 + 「登记新作品」对话框。
@@ -20,6 +21,8 @@ export function GalleryWallDialog({ apps, workspace, onRun, onDevelop, onRemove,
   onPublish(): void;
   onClose(): void;
 }): ReactNode {
+  // 全屏弹层登记：预览面板里的内置浏览器是原生 WebContentsView，永远浮在 DOM 之上。
+  useOverlayLayer(true);
   return (
     <div className="modal-backdrop gallery-wall-backdrop" onClick={onClose}>
       <div className="gallery-wall-dialog" role="dialog" aria-modal="true" aria-label="作品墙" onClick={(event) => event.stopPropagation()}>
@@ -53,6 +56,8 @@ export function GalleryPublishDialog({ initial, workspace, onSubmit, onClose }: 
   const [panelWidth, setPanelWidth] = useState("");
   const [panelHeight, setPanelHeight] = useState("");
   const [panelOnTop, setPanelOnTop] = useState(false);
+  // 全屏弹层登记：预览面板里的内置浏览器是原生 WebContentsView，永远浮在 DOM 之上。
+  useOverlayLayer(true);
 
   function submit(event: FormEvent): void {
     event.preventDefault();

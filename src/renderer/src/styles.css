@@ -1044,6 +1044,13 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 .diff-add { color: var(--diff-add-text); background: var(--success-soft); }.diff-remove { color: var(--diff-remove-text); background: var(--danger-soft); }.diff-hunk { color: var(--diff-hunk-text); background: var(--accent-soft); }.diff-meta { color: var(--diff-meta-text); font-weight: 600; }
 
 .modal-backdrop { position: fixed; z-index: 50; inset: 0; display: grid; place-items: center; padding: 24px; background: var(--overlay); animation: backdrop-in .18s ease; }
+/* 会话级确认框的「聊天区遮罩」（.modal-backdrop.in-chat）：左右边界收进会话区，弹窗在聊天区居中。
+   遮挡者是预览面板里的原生 WebContentsView（永远浮在 DOM 之上），不重叠就盖不到；
+   边界由 lib/chat-overlay-region.ts 量出后写进 --chat-overlay-left/right/width，
+   无会话区（未挂载）或会话区太窄 → 变量缺省 0px/0px/100vw，退回整窗遮罩（同 .modal-backdrop）。 */
+.modal-backdrop.in-chat { left: var(--chat-overlay-left, 0px); right: var(--chat-overlay-right, 0px); }
+/* 聊天区被预览面板挤窄时，弹窗宽度跟着区域走：溢出到面板那一侧会被原生视图盖住。 */
+.modal-backdrop.in-chat > .permission-dialog, .modal-backdrop.in-chat > .extension-ui-dialog { width: min(480px, 100%); }
 .diagram-modal { position: relative; width: min(1100px, 95vw); height: min(780px, 90vh); padding: 42px 26px 24px; overflow: auto; border-radius: 10px; background: var(--surface); box-shadow: var(--shadow-md); }
 .modal-close { position: absolute; top: 8px; right: 8px; border: 1px solid var(--border); }
 .expanded-diagram { display: grid; place-items: center; width: 100%; height: 100%; }.expanded-diagram svg { max-width: 100%; max-height: 100%; }
@@ -2121,7 +2128,7 @@ html[data-ui-motion="off"] .general-jev-toggle .chevron { transition: none; }
 .browser-preview-empty strong { color: var(--text); font-size: 12px; font-weight: 600; }
 .browser-preview-empty.error { color: var(--danger-text); }
 .browser-preview-empty.error strong { color: var(--danger-text); max-width: min(420px, calc(100% - 36px)); text-align: center; }
-.error-toast { position: fixed; z-index: 70; right: 18px; bottom: 18px; display: grid; grid-template-columns: 20px minmax(0, 1fr) 28px; gap: 8px; align-items: center; width: min(430px, calc(100vw - 36px)); padding: 10px 9px 10px 12px; color: var(--danger-text); border: 1px solid var(--danger-border); border-radius: 10px; background: var(--danger-soft); box-shadow: var(--shadow-md); font-size: 11px; animation: toast-in .18s var(--motion-ease); }
+.error-toast { position: fixed; z-index: 70; right: calc(var(--chat-overlay-right, 0px) + 18px); bottom: 18px; display: grid; grid-template-columns: 20px minmax(0, 1fr) 28px; gap: 8px; align-items: center; width: min(430px, calc(100vw - 36px)); max-width: max(200px, calc(var(--chat-overlay-width, 100vw) - 36px)); padding: 10px 9px 10px 12px; color: var(--danger-text); border: 1px solid var(--danger-border); border-radius: 10px; background: var(--danger-soft); box-shadow: var(--shadow-md); font-size: 11px; animation: toast-in .18s var(--motion-ease); }
 .error-toast.extension-notice.info { color: var(--text); border-color: var(--border-strong); background: var(--surface); }.error-toast.extension-notice.warning { color: var(--warning); border-color: var(--warning); background: var(--warning-soft); }
 .app-loading { display: grid; place-items: center; align-content: center; gap: 15px; width: 100%; height: 100%; }
 .spinning { animation: spin .9s linear infinite; }
