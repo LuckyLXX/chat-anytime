@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { BrowserStaticServer, detectLocalFilePath } from "./browser-static-server.js";
+import type { PanelRequest } from "../shared/panel.js";
 
 async function workspace(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "pidesktop-static-"));
@@ -164,11 +165,11 @@ describe("BrowserStaticServer 的面板虚拟端点", () => {
   it("POST 白名单动作被转发；白名单之外一律 403 且不触发处理函数", async () => {
     const root = await workspace();
     const server = new BrowserStaticServer();
-    const seen: string[] = [];
+    const seen: PanelRequest[] = [];
     server.setEndpoint({
       state: () => ({}),
-      action: (action) => {
-        seen.push(action);
+      action: (panelRequest) => {
+        seen.push(panelRequest);
         return true;
       }
     });
@@ -177,13 +178,38 @@ describe("BrowserStaticServer 的面板虚拟端点", () => {
       const ok = await fetch(url, { method: "POST", body: JSON.stringify({ action: "show-main" }) });
       expect(ok.status).toBe(200);
       expect(await ok.json()).toEqual({ ok: true, action: "show-main" });
-      expect(seen).toEqual(["show-main"]);
+      expect(seen).toEqual([{ action: "show-main" }]);
 
       const denied = await fetch(url, { method: "POST", body: JSON.stringify({ action: "abort-session" }) });
       expect(denied.status).toBe(403);
       const broken = await fetch(url, { method: "POST", body: "not json" });
       expect(broken.status).toBe(403);
-      expect(seen).toEqual(["show-main"]);
+      expect(seen).toEqual([{ action: "show-main" }]);
+    } finally {
+      server.dispose();
+    }
+  });
+
+  it("resize 带参数送达端点（尺寸是请求的一部分，不是另一个动作）", async () => {
+    const root = await workspace();
+    const server = new BrowserStaticServer();
+    const seen: PanelRequest[] = [];
+    server.setEndpoint({
+      state: () => ({}),
+      action: (panelRequest) => {
+        seen.push(panelRequest);
+        return true;
+      }
+    });
+    try {
+      const url = endpointUrl(await server.urlForFile(join(root, "index.html"), root));
+      const ok = await fetch(url, { method: "POST", body: JSON.stringify({ action: "resize", width: 376, height: 334 }) });
+      expect(ok.status).toBe(200);
+      expect(await ok.json()).toEqual({ ok: true, action: "resize" });
+      // 缺尺寸的 resize 不落地（免得主进程猜一个尺寸）
+      const missing = await fetch(url, { method: "POST", body: JSON.stringify({ action: "resize", width: 376 }) });
+      expect(missing.status).toBe(403);
+      expect(seen).toEqual([{ action: "resize", width: 376, height: 334 }]);
     } finally {
       server.dispose();
     }

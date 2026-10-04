@@ -27,7 +27,7 @@ import { stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { BrowserWindow, screen } from "electron";
 import { PANEL_MIN_HEIGHT, PANEL_MIN_WIDTH, panelEffectiveAlwaysOnTop, panelMode, panelWindowSize, type GalleryPanelEdge, type GalleryPanelOptions } from "../shared/gallery.js";
-import { isPanelEntryFile, type PanelAction } from "../shared/panel.js";
+import { isPanelEntryFile, type PanelAction, type PanelRequest } from "../shared/panel.js";
 import { BrowserStaticServer, type StaticServerEndpoint } from "./browser-static-server.js";
 import { anchoredPanelBounds, drawerBounds, pickPanelBounds, readPanelBounds, scaledPanelBounds, writePanelBounds, PANEL_SCALE_STEP, type PanelBounds } from "./panel-bounds.js";
 
@@ -46,7 +46,7 @@ export type PanelOpenResult = { ok: true } | { ok: false; message: string };
 export interface PanelWindowDeps {
   /** 面板状态端点的数据源（同步、只读；由 main 的内存缓存提供）。 */
   stateProvider: () => unknown;
-  /** 面板页 POST 上来的白名单动作。 */
+  /** 面板页 POST 上来的白名单动作（窗口级请求由控制器自己认领，不走这里）。 */
   onAction: (action: PanelAction) => void;
   /** 坐标表文件（`<agentDir>/pidesktop-panels.json`）。 */
   boundsPath: string;
@@ -71,11 +71,11 @@ export class PanelWindowController {
     this.bounds = readPanelBounds(deps.boundsPath);
     const endpoint: StaticServerEndpoint = {
       state: () => deps.stateProvider(),
-      action: (action, context) => {
-        // 窗口级动作（close / toggle / grow / shrink / reset-size）作用于「发出请求的
-        // 那个窗口」，由本控制器自己认领；show-main 唤回主界面，归主进程的回调。
-        if (action !== "show-main") return this.handleWindowAction(action, context.referer);
-        deps.onAction(action);
+      action: (panelRequest, context) => {
+        // 窗口级请求（close / toggle / grow / shrink / reset-size / resize）作用于
+        // 「发出请求的那个窗口」，由本控制器自己认领；show-main 归主进程的回调。
+        if (panelRequest.action !== "show-main") return this.handleWindowAction(panelRequest, context.referer);
+        deps.onAction(panelRequest.action);
         return true;
       }
     };
@@ -153,7 +153,7 @@ export class PanelWindowController {
    * 所以同源不同页足以区分。匹配不上时，恰好只有一个活面板就作用于它（那时
    * 发请求的只能是它）；多个窗口且分不清时宁可拒绝（403）也不关错窗。
    */
-  private handleWindowAction(action: Exclude<PanelAction, "show-main">, referer: string | undefined): boolean {
+  private handleWindowAction(request: Exclude<PanelRequest, { action: "show-main" }>, referer: string | undefined): boolean {
     const alive = [...this.windows.entries()].filter(([, win]) => !win.isDestroyed());
     let id: string | undefined;
     if (referer) {
@@ -174,13 +174,13 @@ export class PanelWindowController {
     if (!id) return false;
     const win = this.windows.get(id);
     if (!win || win.isDestroyed()) return false;
-    if (action === "close") {
+    if (request.action === "close") {
       win.close();
       return true;
     }
     const options = this.panelOptions.get(id);
     const mode = panelMode(options);
-    if (action === "toggle") {
+    if (request.action === "toggle") {
       // toggle 只属于抽屉：普通窗口与桌宠没有两态，拒绝而不是无声吞掉。
       if (mode !== "drawer") return false;
       const edge: GalleryPanelEdge = options?.edge ?? "right";
@@ -191,15 +191,18 @@ export class PanelWindowController {
       win.setBounds(collapsedNow ? geometry.expanded : geometry.collapsed, true);
       return true;
     }
-    // grow / shrink / reset-size：只对桌宠有意义——透明窗口不能由用户拖边框缩放，
-    // 尺寸只能由页面发动作、这里 setBounds 定；其它形态拒绝（普通窗口本来就能拖）。
+    // grow / shrink / reset-size / resize：只对桌宠有意义——透明窗口不能由用户拖
+    // 边框缩放，尺寸只能由页面发动作、这里 setBounds 定；其它形态拒绝（普通窗口本来就能拖）。
+    // resize 是「按页面的整数倍档位精确设尺寸」的正路（避免窗口与猫各变各的）。
     if (mode !== "pet") return false;
     const workArea = screen.getDisplayMatching(win.getBounds()).workArea;
     const current = win.getBounds();
     const next =
-      action === "reset-size"
-        ? anchoredPanelBounds(current, panelWindowSize(options), workArea)
-        : scaledPanelBounds(current, action === "grow" ? PANEL_SCALE_STEP : 1 / PANEL_SCALE_STEP, workArea);
+      request.action === "resize"
+        ? anchoredPanelBounds(current, { width: request.width, height: request.height }, workArea)
+        : request.action === "reset-size"
+          ? anchoredPanelBounds(current, panelWindowSize(options), workArea)
+          : scaledPanelBounds(current, request.action === "grow" ? PANEL_SCALE_STEP : 1 / PANEL_SCALE_STEP, workArea);
     // 已到尺寸上下限：幂等返回成功（页面不因“到顶了”收到 403），只是不再变。
     if (next.width === current.width && next.height === current.height) return true;
     // setBounds 会触发 move/resize → 既有的 remember 逻辑把它写进位置尺寸记忆，

@@ -144,14 +144,16 @@ describe("utility 侧的 sessions.live 推送", () => {
 
 describe("面板窗口的窗口级动作（close / toggle）", () => {
   it("白名单与静态服务：请求 Referer 传给 endpoint（定位哪个窗口在说话）", () => {
-    expect(sharedPanel).toContain('"show-main", "close", "toggle"');
-    expect(staticServer).toContain("action: (action: PanelAction, context: { referer?: string }) => boolean");
-    expect(staticServer).toMatch(/endpoint\.action\(action, \{ referer:[^}]*\}\)/u);
+    expect(sharedPanel).toContain('"show-main", "close", "toggle", "grow", "shrink", "reset-size", "resize"');
+    expect(staticServer).toContain("action: (panelRequest: PanelRequest, context: { referer?: string }) => boolean");
+    expect(staticServer).toMatch(/endpoint\.action\(panelRequest, \{ referer:[^}]*\}\)/u);
+    // 端点解析出的是「请求」而不是裸动作名：resize 要带尺寸
+    expect(staticServer).toContain("const panelRequest = parsePanelRequest(parsed);");
   });
 
-  it("控制器认领 close/toggle（靠 Referer 匹配窗口），show-main 才转主进程回调", () => {
-    expect(panelWindow).toMatch(/if \(action !== "show-main"\) return this\.handleWindowAction\(action, context\.referer\);/u);
-    expect(panelWindow).toContain('private handleWindowAction(action: Exclude<PanelAction, "show-main">, referer: string | undefined): boolean');
+  it("控制器认领窗口级请求（靠 Referer 匹配窗口），show-main 才转主进程回调", () => {
+    expect(panelWindow).toMatch(/if \(panelRequest\.action !== "show-main"\) return this\.handleWindowAction\(panelRequest, context\.referer\);/u);
+    expect(panelWindow).toContain('private handleWindowAction(request: Exclude<PanelRequest, { action: "show-main" }>, referer: string | undefined): boolean');
     // 关错窗比不关更糟：多个活窗口且 Referer 分不清时必须拒绝（return false）。
     expect(panelWindow).toContain("if (!id && alive.length === 1) id = alive[0]![0];");
     expect(panelWindow).toContain("if (!id) return false;");
@@ -160,9 +162,9 @@ describe("面板窗口的窗口级动作（close / toggle）", () => {
     expect(panelWindow).toMatch(/win\.setBounds\(collapsedNow \? geometry\.expanded : geometry\.collapsed, true\)/u);
   });
 
-  it("预览端点拒绝窗口级动作（内置浏览器里没有面板窗口可关/可切）", () => {
+  it("预览端点拒绝窗口级请求，但 resize 现在是一条带参数的正路", () => {
     expect(main).toMatch(/function handlePanelAction\(action: PanelAction\): boolean \{[\s\S]{0,200}?\}\s*return false;/u);
-    expect(main).toContain("action: (action) => handlePanelAction(action)");
+    expect(main).toContain('action: (panelRequest) => (panelRequest.action === "show-main" ? handlePanelAction("show-main") : false)');
   });
 });
 
@@ -212,10 +214,11 @@ describe("面板窗口形态（window / pet / drawer）", () => {
     expect(panelWindow).toContain('...(mode === "window" ? { minWidth: PANEL_MIN_WIDTH, minHeight: PANEL_MIN_HEIGHT } : {})');
   });
 
-  it("桌宠缩放：grow/shrink/reset-size 只对 pet 生效，尺寸经底部中心锚点后 setBounds", () => {
+  it("桌宠缩放：grow/shrink/reset-size/resize 只对 pet 生效，尺寸经底部中心锚点后 setBounds", () => {
     expect(panelWindow).toContain('if (mode !== "pet") return false;');
+    expect(panelWindow).toMatch(/anchoredPanelBounds\(current, \{ width: request\.width, height: request\.height \}, workArea\)/u);
     expect(panelWindow).toMatch(/anchoredPanelBounds\(current, panelWindowSize\(options\), workArea\)/u);
-    expect(panelWindow).toMatch(/scaledPanelBounds\(current, action === "grow" \? PANEL_SCALE_STEP : 1 \/ PANEL_SCALE_STEP, workArea\)/u);
+    expect(panelWindow).toMatch(/scaledPanelBounds\(current, request\.action === "grow" \? PANEL_SCALE_STEP : 1 \/ PANEL_SCALE_STEP, workArea\)/u);
     expect(panelWindow).toContain("win.setBounds(next, true);");
     expect(panelBounds).toContain("export function scaledPanelBounds(");
     expect(panelBounds).toContain("export function anchoredPanelBounds(");

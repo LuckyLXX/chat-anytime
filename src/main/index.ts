@@ -700,7 +700,8 @@ function handlePanelAction(action: PanelAction): boolean {
 function panelStateEndpoint(): StaticServerEndpoint {
   return {
     state: () => panelState.snapshot(),
-    action: (action) => handlePanelAction(action)
+    // 内置浏览器预览里没有面板窗口可关/可切/可缩放：只有 show-main 认。
+    action: (panelRequest) => (panelRequest.action === "show-main" ? handlePanelAction("show-main") : false)
   };
 }
 

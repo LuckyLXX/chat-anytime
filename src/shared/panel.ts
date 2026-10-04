@@ -23,9 +23,20 @@ import type { PanelSessionLive, Todo } from "./protocol.js";
 export const PANEL_STATE_ENDPOINT = "__pidesktop_state.json";
 
 /** 端点允许的动作。**只有白名单里的动作能被执行**，其余一律 403。 */
-export const PANEL_ACTIONS = ["show-main", "close", "toggle", "grow", "shrink", "reset-size"] as const;
+export const PANEL_ACTIONS = ["show-main", "close", "toggle", "grow", "shrink", "reset-size", "resize"] as const;
 
 export type PanelAction = (typeof PANEL_ACTIONS)[number];
+
+/**
+ * 端点的请求形状：简单动作只带名字，`resize` 额外带目标尺寸。
+ *
+ * 为什么需要 `resize`（2026-10-05 真机反馈）：宠物精灵只能按**整数倍**缩放
+ * （每个源像素占整数个设备像素，否则像素风会糊），而按比例 grow/shrink 改的是
+ * 窗口、页面再四舍五入到最近档位——于是「窗口先变小、猫还得再缩一次才跟上」，
+ * 中间还夹着一个字号没跟上的拥挤态。现在改成**窗口尺寸跟着猫的档位走**：页面算
+ * 好目标档位对应的窗口尺寸，一次性请求 `resize`，两边同时变。
+ */
+export type PanelRequest = { action: Exclude<PanelAction, "resize"> } | { action: "resize"; width: number; height: number };
 
 /** 请求体体积上限：端点只接受一个短动作，超过即拒绝（避免被当成上传通道）。 */
 export const PANEL_ACTION_MAX_BYTES = 4096;
@@ -34,15 +45,28 @@ export const PANEL_ACTION_MAX_BYTES = 4096;
 export const PANEL_TODO_LIMIT = 50;
 
 /**
- * 解析 POST body 里的动作（纯函数）。非法输入一律 undefined（调用方回 403），
+ * 解析 POST body 里的请求（纯函数）。非法输入一律 undefined（调用方回 403），
  * 不做「猜一个默认动作」这种兜底——一个能被随便猜出动作的写入口不值得存在。
+ * `resize` 必须带合法的正数宽高（缺参数就当非法，不退回某个缺省尺寸）。
  */
-export function parsePanelAction(body: unknown): PanelAction | undefined {
+export function parsePanelRequest(body: unknown): PanelRequest | undefined {
   if (!body || typeof body !== "object" || Array.isArray(body)) return undefined;
-  const action = (body as Record<string, unknown>).action;
-  if (typeof action !== "string") return undefined;
-  const normalized = action.trim();
-  return (PANEL_ACTIONS as readonly string[]).includes(normalized) ? (normalized as PanelAction) : undefined;
+  const record = body as Record<string, unknown>;
+  const raw = record.action;
+  if (typeof raw !== "string") return undefined;
+  const action = raw.trim();
+  if (!(PANEL_ACTIONS as readonly string[]).includes(action)) return undefined;
+  if (action === "resize") {
+    const width = positiveNumber(record.width);
+    const height = positiveNumber(record.height);
+    if (width === undefined || height === undefined) return undefined;
+    return { action: "resize", width, height };
+  }
+  return { action: action as Exclude<PanelAction, "resize"> };
+}
+
+function positiveNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.round(value) : undefined;
 }
 
 /**
@@ -83,7 +107,7 @@ export function isPanelEntryFile(filePath: string): boolean {
  */
 export function panelDevHint(): string {
   return [
-    `面板型作品：入口网页会被开成独立小窗口（脱离主界面存活）。数据接口：相对自己 fetch("./${PANEL_STATE_ENDPOINT}") 得到只读状态 JSON（含 sessions/live/todos：正在跑的会话、状态、当前工具、todo 进度）；POST 同一地址的动作白名单：{"action":"show-main"} 唤回主界面、{"action":"close"} 关闭本窗口、{"action":"toggle"} 切换贴边抽屉两态（仅抽屉）、{"action":"grow"}/{"action":"shrink"}/{"action":"reset-size"} 桌宠窗口放大/缩小/恢复声明尺寸（仅桌宠；主进程按底部中心锚点 setBounds 并记住结果，页面只管发动作后监听 resize 重排）。`,
+    `面板型作品：入口网页会被开成独立小窗口（脱离主界面存活）。数据接口：相对自己 fetch("./${PANEL_STATE_ENDPOINT}") 得到只读状态 JSON（含 sessions/live/todos：正在跑的会话、状态、当前工具、todo 进度）；POST 同一地址的动作白名单：{"action":"show-main"} 唤回主界面、{"action":"close"} 关闭本窗口、{"action":"toggle"} 切换贴边抽屉两态（仅抽屉）、{"action":"grow"}/{"action":"shrink"}/{"action":"reset-size"}/{"action":"resize","width":N,"height":N} 桌宠窗口调大小（仅桌宠：主进程按底部中心锚点 setBounds 并记住结果）。**桌宠建议用 resize 精确设尺寸**：精灵只能按整数倍缩放，按比例 grow/shrink 会出现「窗口先变、猫后跟上」的错位；页面自己算出目标档位对应的窗口尺寸再一次请求 resize，两边同时变。`,
     `窗口形态（panel.mode）：缺省 "window"（系统边框窗口）；"pet" 桌宠 = 透明无边框固定尺寸，页面须 body 背景透明自绘形状，页面自带关闭钮 POST close；"drawer" 贴边抽屉 = 停靠 edge（left/right/top/bottom，缺省 right），窗口在窄把手与完整面板两态切换，页面监听 resize 按窗口尺寸自适应渲染两态，点把手 POST toggle。`,
     `拖动可分两层：整窗拖动区用 CSS -webkit-app-region: drag（该区域**收不到鼠标事件**，右键菜单/点击必须放在 no-drag 元素上）；交互元素上标 no-drag，否则点不到。`,
     `面板里可以直接 fetch 外部 http(s) API（包括没有 CORS 的自建/中转模型服务）：跨域由平台在主进程统一处理，不要自己搭本地代理。`

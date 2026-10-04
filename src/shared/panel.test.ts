@@ -1,31 +1,41 @@
 import { describe, expect, it } from "vitest";
-import { PANEL_STATE_ENDPOINT, isPanelEntryFile, isPanelStatePath, panelDevHint, parsePanelAction, summarizeTodos } from "./panel.js";
+import { PANEL_STATE_ENDPOINT, isPanelEntryFile, isPanelStatePath, panelDevHint, parsePanelRequest, summarizeTodos } from "./panel.js";
 
-describe("parsePanelAction", () => {
+describe("parsePanelRequest", () => {
   it("accepts whitelisted actions", () => {
-    expect(parsePanelAction({ action: "show-main" })).toBe("show-main");
-    expect(parsePanelAction({ action: "  show-main  " })).toBe("show-main");
+    expect(parsePanelRequest({ action: "show-main" })).toEqual({ action: "show-main" });
+    expect(parsePanelRequest({ action: "  show-main  " })).toEqual({ action: "show-main" });
     // 窗口级动作：无边框形态（桌宠/抽屉）的页面靠它们关窗、切两态、调大小
-    expect(parsePanelAction({ action: "close" })).toBe("close");
-    expect(parsePanelAction({ action: "toggle" })).toBe("toggle");
-    expect(parsePanelAction({ action: "grow" })).toBe("grow");
-    expect(parsePanelAction({ action: "shrink" })).toBe("shrink");
-    expect(parsePanelAction({ action: "reset-size" })).toBe("reset-size");
+    expect(parsePanelRequest({ action: "close" })).toEqual({ action: "close" });
+    expect(parsePanelRequest({ action: "toggle" })).toEqual({ action: "toggle" });
+    expect(parsePanelRequest({ action: "grow" })).toEqual({ action: "grow" });
+    expect(parsePanelRequest({ action: "shrink" })).toEqual({ action: "shrink" });
+    expect(parsePanelRequest({ action: "reset-size" })).toEqual({ action: "reset-size" });
+  });
+
+  it("resize 必须带合法的正数尺寸（缺参数就当非法，不退到某个缺省尺寸）", () => {
+    expect(parsePanelRequest({ action: "resize", width: 360.4, height: 320.6 })).toEqual({ action: "resize", width: 360, height: 321 });
+    expect(parsePanelRequest({ action: "resize" })).toBeUndefined();
+    expect(parsePanelRequest({ action: "resize", width: 360 })).toBeUndefined();
+    expect(parsePanelRequest({ action: "resize", width: 0, height: 320 })).toBeUndefined();
+    expect(parsePanelRequest({ action: "resize", width: -100, height: 320 })).toBeUndefined();
+    expect(parsePanelRequest({ action: "resize", width: Number.NaN, height: 320 })).toBeUndefined();
+    expect(parsePanelRequest({ action: "resize", width: "360", height: "320" })).toBeUndefined();
   });
 
   it("rejects anything outside the whitelist", () => {
-    expect(parsePanelAction({ action: "abort" })).toBeUndefined();
-    expect(parsePanelAction({ action: "show-main " + "x".repeat(10) })).toBeUndefined();
-    expect(parsePanelAction({ action: "SHOW-MAIN" })).toBeUndefined();
-    expect(parsePanelAction({ action: 7 })).toBeUndefined();
-    expect(parsePanelAction({})).toBeUndefined();
+    expect(parsePanelRequest({ action: "abort" })).toBeUndefined();
+    expect(parsePanelRequest({ action: "show-main " + "x".repeat(10) })).toBeUndefined();
+    expect(parsePanelRequest({ action: "SHOW-MAIN" })).toBeUndefined();
+    expect(parsePanelRequest({ action: 7 })).toBeUndefined();
+    expect(parsePanelRequest({})).toBeUndefined();
   });
 
   it("rejects non-object bodies (数组/字符串/null 都不算动作)", () => {
-    expect(parsePanelAction(undefined)).toBeUndefined();
-    expect(parsePanelAction(null)).toBeUndefined();
-    expect(parsePanelAction("show-main")).toBeUndefined();
-    expect(parsePanelAction(["show-main"])).toBeUndefined();
+    expect(parsePanelRequest(undefined)).toBeUndefined();
+    expect(parsePanelRequest(null)).toBeUndefined();
+    expect(parsePanelRequest("show-main")).toBeUndefined();
+    expect(parsePanelRequest(["show-main"])).toBeUndefined();
   });
 });
 
@@ -88,6 +98,7 @@ describe("panelDevHint", () => {
     expect(hint).toContain('"action\":\"close\"');
     expect(hint).toContain('"action\":\"toggle\"');
     expect(hint).toContain('"action\":\"grow\"');
+    expect(hint).toContain("resize");
     expect(hint).toContain("-webkit-app-region: drag");
     expect(hint).toContain("no-drag");
     expect(hint).toContain('"pet"');
