@@ -333,6 +333,20 @@ export function galleryRunTarget(app: Pick<GalleryApp, "kind" | "workspace" | "e
  */
 export const GALLERY_SERVICE_WAIT_MS = 30_000;
 
+/**
+ * 启动命令**正常结束**（退出码 0）后，还给服务的宽限窗口（毫秒）。
+ *
+ * 为什么需要这一档（2026-10-04 真机事故，用户的 Python 桌宠）：`pythonw xxx.pyw`、
+ * `start xxx`、`cmd /c start ...` 这类命令是**启动器**——GUI 子系统程序不占控制台，
+ * shell 不等它就返回 0，而真正的服务还要一两秒才开始监听。旧实现对「命令已退出 +
+ * 端口未通」一律判失败，于是一次正常的启动被报成「启动命令已退出（代码 0），
+ * 服务没有起来」。退出码 0 是「命令成功结束」，只有非 0 才是「命令报错退出」。
+ *
+ * 上限不能大：命令已结束还等满 30 秒会让真写错的命令拖很久；10 秒够本机服务
+ * 把端口监听起来，超过就如实报「命令已结束、服务未就绪，稍后再点一次运行」。
+ */
+export const GALLERY_SERVICE_LAUNCHER_GRACE_MS = 10_000;
+
 /** 失败提示里带的输出尾部长度（字符）：完整输出在终端标签里，提示只给个线头。 */
 export const GALLERY_SERVICE_TAIL_CHARS = 200;
 
@@ -389,10 +403,10 @@ export function galleryServiceTerminalId(appId: string, nonce: string): string {
 
 /** 服务起不来的原因（主进程 await-service 回执与本地判定共用同一形状）。 */
 export interface GalleryServiceFailure {
-  reason?: "invalid-url" | "timeout" | "exited";
+  reason?: "invalid-url" | "timeout" | "exited" | "ended";
   /** reason=exited：启动命令的退出码。 */
   exitCode?: number;
-  /** reason=exited：启动命令的输出尾部（主进程已裁剪）。 */
+  /** reason=exited / ended：启动命令的输出尾部（主进程已裁剪）。 */
   tail?: string;
 }
 
@@ -409,7 +423,10 @@ export function compactServiceTail(text: string | undefined, limit = GALLERY_SER
  * 三种原因分开写：
  * - exited：命令自己退出了（写错了/依赖没装/端口被占）——带上退出码与输出尾部，
  *   这是最需要「原因」的一类；
- * - timeout：地址在预算内没就绪，但命令可能还在跑，明确给出「再点一次运行」的出路；
+ * - ended：命令**正常结束（退出码 0）**但服务没在宽限窗口内就绪——典型是
+ *   「命令只是把程序拉起来」（pythonw / start 这类启动器形态），要点明「终端标签
+ *   显示已退出是正常的」，否则用户会以为启动失败；
+ * - timeout：进程还在跑但地址在预算内没就绪，明确给出「再点一次运行」的出路；
  * - invalid-url：登记的服务地址连解析都不行（多是自己手写的地址写错了）。
  */
 export function galleryServiceFailureMessage(
@@ -421,6 +438,11 @@ export function galleryServiceFailureMessage(
     const code = typeof failure.exitCode === "number" ? `（代码 ${failure.exitCode}）` : "";
     const tail = compactServiceTail(failure.tail);
     return `「${app.title}」的启动命令已退出${code}，服务没有起来。${tail ? `输出尾部：${tail}` : "请看终端标签里的输出。"}`;
+  }
+  if (failure.reason === "ended") {
+    const seconds = Math.max(1, Math.round(GALLERY_SERVICE_LAUNCHER_GRACE_MS / 1000));
+    const where = app.url ? `（${app.url} 连不上）` : "";
+    return `「${app.title}」的启动命令已正常结束（代码 0）${where}，但服务在 ${seconds} 秒内没有就绪：如果这条命令只是把程序拉起来（pythonw / start 这类会立刻返回的写法），终端标签显示「已退出」是正常的，稍等一下再点一次「运行」。`;
   }
   if (failure.reason === "invalid-url") {
     return `「${app.title}」登记的服务地址无法解析${app.url ? `（${app.url}）` : ""}：点「继续开发」让 AI 修正后再运行。`;

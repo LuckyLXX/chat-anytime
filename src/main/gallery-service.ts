@@ -1,4 +1,5 @@
 import { connect } from "node:net";
+import { GALLERY_SERVICE_LAUNCHER_GRACE_MS } from "../shared/gallery.js";
 import { normalizeBrowserUrl } from "./browser-preview-url.js";
 
 /**
@@ -106,7 +107,7 @@ export interface ServiceProcessWatch {
 
 export type ServiceWaitResult =
   | { ok: true }
-  | { ok: false; reason: "invalid-url" | "timeout" | "exited"; exitCode?: number; tail?: string };
+  | { ok: false; reason: "invalid-url" | "timeout" | "exited" | "ended"; exitCode?: number; tail?: string };
 
 export interface ServiceWaitInput {
   url: string;
@@ -124,6 +125,12 @@ export interface ServiceWaitInput {
  * 顺序是「先探测、后看退出」：命令把服务 daemon 化后自己退出（exit 0）是合法
  * 形态，先看退出会把它误判成失败；反过来，服务已经监听了端口却退出，说明它确实
  * 起来了，也不该报错。
+ *
+ * 退出码分开对待（2026-10-04 真机事故）：**非 0 = 命令报错退出，立即失败**；
+ * **0 = 命令成功结束**（启动器形态：pythonw / start / cmd /c start 等 GUI 子系统
+ * 程序不占控制台，shell 不等它），服务可能还要一两秒才监听，不能判失败——继续
+ * 等，但只给 `GALLERY_SERVICE_LAUNCHER_GRACE_MS` 的宽限窗口，超了报 `ended`
+ *（而不是干等满 30 秒预算）。
  */
 export async function waitForService(input: ServiceWaitInput): Promise<ServiceWaitResult> {
   const address = parseServiceAddress(input.url);
@@ -133,17 +140,32 @@ export async function waitForService(input: ServiceWaitInput): Promise<ServiceWa
   const sleep = input.sleep ?? ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const interval = input.intervalMs ?? SERVICE_POLL_INTERVAL_MS;
   const deadline = now() + Math.max(0, input.timeoutMs);
+  /** 命令首次以退出码 0 结束的时刻与当时的输出（宽限窗口从这里起算，只记一次）。 */
+  let endedAt: number | undefined;
+  let endedTail: string | undefined;
   for (;;) {
     if (await probe(address)) return { ok: true };
     const watched = input.watch?.();
     if (watched?.exited) {
-      const result: ServiceWaitResult = { ok: false, reason: "exited" };
-      if (watched.exitCode !== undefined) result.exitCode = watched.exitCode;
-      if (watched.tail) result.tail = watched.tail;
+      if (watched.exitCode !== 0) {
+        const result: ServiceWaitResult = { ok: false, reason: "exited" };
+        if (watched.exitCode !== undefined) result.exitCode = watched.exitCode;
+        if (watched.tail) result.tail = watched.tail;
+        return result;
+      }
+      if (endedAt === undefined) {
+        endedAt = now();
+        if (watched.tail) endedTail = watched.tail;
+      }
+    }
+    const limit = endedAt === undefined ? deadline : Math.min(deadline, endedAt + GALLERY_SERVICE_LAUNCHER_GRACE_MS);
+    const remaining = limit - now();
+    if (remaining <= 0) {
+      if (endedAt === undefined) return { ok: false, reason: "timeout" };
+      const result: ServiceWaitResult = { ok: false, reason: "ended" };
+      if (endedTail) result.tail = endedTail;
       return result;
     }
-    const remaining = deadline - now();
-    if (remaining <= 0) return { ok: false, reason: "timeout" };
     await sleep(Math.min(interval, remaining));
   }
 }

@@ -1,5 +1,6 @@
 import { createServer, type Server } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
+import { GALLERY_SERVICE_LAUNCHER_GRACE_MS } from "../shared/gallery.js";
 import {
   clampServiceWait,
   parseServiceAddress,
@@ -172,6 +173,41 @@ describe("waitForService", () => {
       sleep: clock.sleep
     });
     expect(result).toEqual({ ok: true });
+  });
+
+  it("命令正常结束（退出码 0）但服务随后才起来：继续等 —— launcher / start / pythonw 的典型形态", async () => {
+    // 真实事故（2026-10-04，用户的 Python 桌宠）：`pythonw xxx.pyw` 是 GUI 子系统程序，
+    // shell 不等它、立即返回 0，而服务（端口）要再等一两秒才监听到——旧实现对
+    // 「退出 + 端口未通」一律判失败，于是一次正常的启动被报成「启动命令已退出（代码 0）」。
+    const clock = fakeClock();
+    let probes = 0;
+    const result = await waitForService({
+      url: "http://127.0.0.1:8787",
+      timeoutMs: 30_000,
+      probe: async () => ++probes >= 3,
+      watch: () => ({ exited: true, exitCode: 0 }),
+      now: clock.now,
+      sleep: clock.sleep
+    });
+    expect(result).toEqual({ ok: true });
+    expect(probes).toBe(3);
+  });
+
+  it("命令正常结束后服务始终没来：只给宽限窗口就收手，报 ended（不干等满预算）", async () => {
+    const clock = fakeClock();
+    const result = await waitForService({
+      url: "http://127.0.0.1:8787",
+      timeoutMs: 30_000,
+      intervalMs: 500,
+      probe: async () => false,
+      watch: () => ({ exited: true, exitCode: 0, tail: "say: 好家伙" }),
+      now: clock.now,
+      sleep: clock.sleep
+    });
+    expect(result).toEqual({ ok: false, reason: "ended", tail: "say: 好家伙" });
+    // 宽限窗口 = 10 秒：20 轮 × 500ms，远小于 30 秒预算
+    expect(clock.now()).toBeLessThanOrEqual(GALLERY_SERVICE_LAUNCHER_GRACE_MS);
+    expect(clock.sleeps.length).toBe(GALLERY_SERVICE_LAUNCHER_GRACE_MS / 500);
   });
 
   it("地址解析不了时不探测、直接返回 invalid-url", async () => {

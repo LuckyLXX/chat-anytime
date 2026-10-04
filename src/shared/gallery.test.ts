@@ -237,6 +237,16 @@ describe("galleryServiceFailureMessage / compactServiceTail", () => {
     expect(galleryServiceFailureMessage(target, { reason: "exited", exitCode: 0 })).toContain("终端标签");
   });
 
+  it("命令正常结束（代码 0）但服务未就绪：点明终端标签显示已退出是正常的（launcher 形态）", () => {
+    const message = galleryServiceFailureMessage(target, { reason: "ended" });
+    expect(message).toContain("已正常结束（代码 0）");
+    expect(message).toContain("终端标签显示「已退出」是正常的");
+    expect(message).toContain("再点一次「运行」");
+    // toast 是纯文本流式：不能带 Markdown 标记或多行
+    expect(message).not.toContain("**");
+    expect(message).not.toContain("\n");
+  });
+
   it("超时不是终局：明确给出「再点一次运行」的出路", () => {
     const message = galleryServiceFailureMessage(target, { reason: "timeout" }, 30_000);
     expect(message).toContain("30 秒");
