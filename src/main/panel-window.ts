@@ -26,10 +26,10 @@
 import { stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { BrowserWindow, screen } from "electron";
-import { panelEffectiveAlwaysOnTop, panelMode, type GalleryPanelEdge, type GalleryPanelOptions } from "../shared/gallery.js";
+import { PANEL_MIN_HEIGHT, PANEL_MIN_WIDTH, panelEffectiveAlwaysOnTop, panelMode, panelWindowSize, type GalleryPanelEdge, type GalleryPanelOptions } from "../shared/gallery.js";
 import { isPanelEntryFile, type PanelAction } from "../shared/panel.js";
 import { BrowserStaticServer, type StaticServerEndpoint } from "./browser-static-server.js";
-import { drawerBounds, pickPanelBounds, readPanelBounds, writePanelBounds, type PanelBounds } from "./panel-bounds.js";
+import { anchoredPanelBounds, drawerBounds, pickPanelBounds, readPanelBounds, scaledPanelBounds, writePanelBounds, PANEL_SCALE_STEP, type PanelBounds } from "./panel-bounds.js";
 
 export interface PanelOpenRequest {
   /** 作品 id：窗口复用与坐标记忆的键。 */
@@ -72,9 +72,9 @@ export class PanelWindowController {
     const endpoint: StaticServerEndpoint = {
       state: () => deps.stateProvider(),
       action: (action, context) => {
-        // close / toggle 作用于「发出请求的那个窗口」，由本控制器自己认领；
-        // show-main 唤回主界面，归主进程的回调。
-        if (action === "close" || action === "toggle") return this.handleWindowAction(action, context.referer);
+        // 窗口级动作（close / toggle / grow / shrink / reset-size）作用于「发出请求的
+        // 那个窗口」，由本控制器自己认领；show-main 唤回主界面，归主进程的回调。
+        if (action !== "show-main") return this.handleWindowAction(action, context.referer);
         deps.onAction(action);
         return true;
       }
@@ -145,14 +145,15 @@ export class PanelWindowController {
   }
 
   /**
-   * 窗口级动作（close / toggle）：定位发出 POST 的页面属于哪个窗口，作用于它。
+   * 窗口级动作（close / toggle / grow / shrink / reset-size）：定位发出 POST 的页面
+   * 属于哪个窗口，作用于它。
    *
    * 定位靠 HTTP 请求头里的 Referer（面板页 fetch 相对路径时会带上页面自己的 URL），
    * 与窗口当前页面的 pathname 精确匹配——同工作区的两个面板作品入口必然不同，
    * 所以同源不同页足以区分。匹配不上时，恰好只有一个活面板就作用于它（那时
    * 发请求的只能是它）；多个窗口且分不清时宁可拒绝（403）也不关错窗。
    */
-  private handleWindowAction(action: "close" | "toggle", referer: string | undefined): boolean {
+  private handleWindowAction(action: Exclude<PanelAction, "show-main">, referer: string | undefined): boolean {
     const alive = [...this.windows.entries()].filter(([, win]) => !win.isDestroyed());
     let id: string | undefined;
     if (referer) {
@@ -177,15 +178,33 @@ export class PanelWindowController {
       win.close();
       return true;
     }
-    // toggle 只属于抽屉：普通窗口与桌宠没有两态，拒绝而不是无声吞掉。
     const options = this.panelOptions.get(id);
-    if (panelMode(options) !== "drawer") return false;
-    const edge: GalleryPanelEdge = options?.edge ?? "right";
+    const mode = panelMode(options);
+    if (action === "toggle") {
+      // toggle 只属于抽屉：普通窗口与桌宠没有两态，拒绝而不是无声吞掉。
+      if (mode !== "drawer") return false;
+      const edge: GalleryPanelEdge = options?.edge ?? "right";
+      const workArea = screen.getDisplayMatching(win.getBounds()).workArea;
+      const geometry = drawerBounds(edge, options, workArea);
+      const current = win.getBounds();
+      const collapsedNow = current.width === geometry.collapsed.width && current.height === geometry.collapsed.height;
+      win.setBounds(collapsedNow ? geometry.expanded : geometry.collapsed, true);
+      return true;
+    }
+    // grow / shrink / reset-size：只对桌宠有意义——透明窗口不能由用户拖边框缩放，
+    // 尺寸只能由页面发动作、这里 setBounds 定；其它形态拒绝（普通窗口本来就能拖）。
+    if (mode !== "pet") return false;
     const workArea = screen.getDisplayMatching(win.getBounds()).workArea;
-    const geometry = drawerBounds(edge, options, workArea);
     const current = win.getBounds();
-    const collapsedNow = current.width === geometry.collapsed.width && current.height === geometry.collapsed.height;
-    win.setBounds(collapsedNow ? geometry.expanded : geometry.collapsed, true);
+    const next =
+      action === "reset-size"
+        ? anchoredPanelBounds(current, panelWindowSize(options), workArea)
+        : scaledPanelBounds(current, action === "grow" ? PANEL_SCALE_STEP : 1 / PANEL_SCALE_STEP, workArea);
+    // 已到尺寸上下限：幂等返回成功（页面不因“到顶了”收到 403），只是不再变。
+    if (next.width === current.width && next.height === current.height) return true;
+    // setBounds 会触发 move/resize → 既有的 remember 逻辑把它写进位置尺寸记忆，
+    // 所以下一次“运行”还是用户调好的大小。
+    win.setBounds(next, true);
     return true;
   }
 
@@ -209,14 +228,14 @@ export class PanelWindowController {
         ? drawerBounds(request.panel?.edge ?? "right", request.panel, displays[0] ?? screen.getPrimaryDisplay().workArea).collapsed
         : pickPanelBounds(this.bounds[request.id], request.panel, displays);
     // 桌宠/抽屉是无边框透明窗口：没有标题栏（关闭靠页面 POST close），Windows 下
-    // 透明窗口本就不可缩放； minWidth/minHeight 不设——抽屉收起态只有窄把手厚，
-    // 设了 240/200 的下限会把 setBounds 悄悄抬回去，收起态就永远出不来。
+    // 透明窗口本就不可缩放；尺寸下限不设——抽屉收起态只有窄把手厚，设了下限会把
+    // setBounds 悄悄抬回去，收起态就永远出不来。
     const win = new BrowserWindow({
       ...bounds,
       title: request.title,
       alwaysOnTop: panelEffectiveAlwaysOnTop(request.panel),
       ...(mode !== "window" ? { transparent: true, frame: false, resizable: false, skipTaskbar: true } : {}),
-      ...(mode === "window" ? { minWidth: 240, minHeight: 200 } : {}),
+      ...(mode === "window" ? { minWidth: PANEL_MIN_WIDTH, minHeight: PANEL_MIN_HEIGHT } : {}),
       show: false,
       webPreferences: {
         sandbox: true,

@@ -50,9 +50,15 @@ export const GALLERY_PANEL_MODE_LABELS: Record<GalleryPanelMode, string> = { win
 /** 面板窗口缺省尺寸：竖长条，装得下「几个会话 + todo」而不占地。 */
 export const PANEL_DEFAULT_WIDTH = 420;
 export const PANEL_DEFAULT_HEIGHT = 560;
-export const PANEL_MIN_WIDTH = 240;
+/**
+ * 尺寸下限。2026-10-04 从 240×200 放宽到 140×120：桌宠（mode="pet"）要能缩得
+ * 很小（一只小尺寸的猫挂在屏幕角上），而这个下限同时管着三处夹取——作品声明
+ * 归一化、位置尺寸记忆读回、运行时缩放——改这一处即可三处同步。
+ * 普通面板声明到 140 宽也是用户自己的选择，无害。
+ */
+export const PANEL_MIN_WIDTH = 140;
 export const PANEL_MAX_WIDTH = 1600;
-export const PANEL_MIN_HEIGHT = 200;
+export const PANEL_MIN_HEIGHT = 120;
 export const PANEL_MAX_HEIGHT = 1400;
 
 export interface GalleryApp {

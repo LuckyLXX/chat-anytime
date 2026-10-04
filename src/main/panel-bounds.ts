@@ -140,6 +140,33 @@ export function pickPanelBounds(
   };
 }
 
+/** 桌宠缩放的每档比例（滚轮一格 / 菜单一次）。等比缩放，与 dpr 无关的 CSS 像素。 */
+export const PANEL_SCALE_STEP = 1.12;
+
+/**
+ * 把窗口摆到「底部中心不动」的位置上（桌宠缩放/重置尺寸共用）。
+ *
+ * 底部中心锚点是桌宠的直觉：猫变大不会浮到半空，也不会左右乱跳。
+ * 尺寸夹在工作区内（窗口比工作区还大时退化为贴左上，不把窗口送到屏外）。
+ */
+export function anchoredPanelBounds(current: PanelBounds, size: { width: number; height: number }, workArea: PanelBounds): PanelBounds {
+  const width = clampInt(size.width, PANEL_MIN_WIDTH, PANEL_MAX_WIDTH);
+  const height = clampInt(size.height, PANEL_MIN_HEIGHT, PANEL_MAX_HEIGHT);
+  const centerX = current.x + current.width / 2;
+  const bottom = current.y + current.height;
+  const maxX = Math.max(workArea.x, workArea.x + workArea.width - width);
+  const maxY = Math.max(workArea.y, workArea.y + workArea.height - height);
+  const x = Math.min(Math.max(Math.round(centerX - width / 2), workArea.x), maxX);
+  const y = Math.min(Math.max(Math.round(bottom - height), workArea.y), maxY);
+  return { x, y, width, height };
+}
+
+/** 等比缩放一档（factor > 1 放大、< 1 缩小），尺寸夹取后按底部中心锚点落位。 */
+export function scaledPanelBounds(current: PanelBounds, factor: number, workArea: PanelBounds): PanelBounds {
+  const safeFactor = Number.isFinite(factor) && factor > 0 ? factor : 1;
+  return anchoredPanelBounds(current, { width: current.width * safeFactor, height: current.height * safeFactor }, workArea);
+}
+
 /** 读坐标表：任何异常（不存在、坏 JSON、字段非法）都降级为空表。 */
 export function readPanelBounds(filePath: string): Record<string, PanelBounds> {
   let raw: unknown;

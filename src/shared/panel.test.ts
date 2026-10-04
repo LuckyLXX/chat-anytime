@@ -5,9 +5,12 @@ describe("parsePanelAction", () => {
   it("accepts whitelisted actions", () => {
     expect(parsePanelAction({ action: "show-main" })).toBe("show-main");
     expect(parsePanelAction({ action: "  show-main  " })).toBe("show-main");
-    // 窗口级动作：无边框形态（桌宠/抽屉）的页面靠它们关窗与切两态
+    // 窗口级动作：无边框形态（桌宠/抽屉）的页面靠它们关窗、切两态、调大小
     expect(parsePanelAction({ action: "close" })).toBe("close");
     expect(parsePanelAction({ action: "toggle" })).toBe("toggle");
+    expect(parsePanelAction({ action: "grow" })).toBe("grow");
+    expect(parsePanelAction({ action: "shrink" })).toBe("shrink");
+    expect(parsePanelAction({ action: "reset-size" })).toBe("reset-size");
   });
 
   it("rejects anything outside the whitelist", () => {
@@ -84,7 +87,9 @@ describe("panelDevHint", () => {
     const hint = panelDevHint();
     expect(hint).toContain('"action\":\"close\"');
     expect(hint).toContain('"action\":\"toggle\"');
+    expect(hint).toContain('"action\":\"grow\"');
     expect(hint).toContain("-webkit-app-region: drag");
+    expect(hint).toContain("no-drag");
     expect(hint).toContain('"pet"');
     expect(hint).toContain('"drawer"');
     expect(hint).toContain("left/right/top/bottom");

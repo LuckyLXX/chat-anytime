@@ -315,7 +315,7 @@ describe("面板作品（kind=panel）", () => {
   const panel = { kind: "panel" as const, entry: "panels/status/index.html" };
 
   it("normalizeGalleryPanelOptions 夹取尺寸、只收 boolean 置顶，全非法即 undefined", () => {
-    expect(normalizeGalleryPanelOptions({ width: 99999, height: 1 })).toEqual({ width: 1600, height: 200 });
+    expect(normalizeGalleryPanelOptions({ width: 99999, height: 1 })).toEqual({ width: 1600, height: 120 });
     expect(normalizeGalleryPanelOptions({ width: 420.6, height: 560.4, alwaysOnTop: true })).toEqual({ width: 421, height: 560, alwaysOnTop: true });
     expect(normalizeGalleryPanelOptions({ alwaysOnTop: "yes" })).toBeUndefined();
     expect(normalizeGalleryPanelOptions(null)).toBeUndefined();

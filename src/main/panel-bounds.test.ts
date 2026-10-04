@@ -2,7 +2,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { DRAWER_HANDLE_SPAN, DRAWER_HANDLE_THICKNESS, MAX_PANEL_BOUNDS, boundsAreReachable, drawerBounds, normalizePanelBounds, panelBoundsPathFor, pickPanelBounds, readPanelBounds, writePanelBounds, type PanelBounds } from "./panel-bounds.js";
+import { anchoredPanelBounds, DRAWER_HANDLE_SPAN, DRAWER_HANDLE_THICKNESS, MAX_PANEL_BOUNDS, PANEL_SCALE_STEP, boundsAreReachable, drawerBounds, normalizePanelBounds, panelBoundsPathFor, pickPanelBounds, readPanelBounds, scaledPanelBounds, writePanelBounds, type PanelBounds } from "./panel-bounds.js";
 
 const primary: PanelBounds = { x: 0, y: 0, width: 1920, height: 1040 };
 const secondary: PanelBounds = { x: 1920, y: 0, width: 1280, height: 1024 };
@@ -13,7 +13,7 @@ describe("normalizePanelBounds", () => {
   });
 
   it("夹取尺寸（写了 0 宽或 99999 高的作品不应当造出点不动的窗口）", () => {
-    expect(normalizePanelBounds({ x: 0, y: 0, width: 10, height: 99999 })).toEqual({ x: 0, y: 0, width: 240, height: 1400 });
+    expect(normalizePanelBounds({ x: 0, y: 0, width: 10, height: 99999 })).toEqual({ x: 0, y: 0, width: 140, height: 1400 });
   });
 
   it("缺字段/非对象一律丢弃（宁可回到屏幕居中，也不要把窗口放到不知道哪里）", () => {
@@ -101,6 +101,54 @@ describe("readPanelBounds / writePanelBounds", () => {
  * 落在工作区内（不然抽屉会开到屏幕外，点也点不到）。
  */
 const DRAWER_AREA: PanelBounds = { x: 0, y: 0, width: 1920, height: 1040 };
+
+describe("scaledPanelBounds / anchoredPanelBounds（桌宠缩放）", () => {
+  const current: PanelBounds = { x: 800, y: 600, width: 360, height: 320 };
+
+  it("放大：等比放大并按底部中心锚点落位（猫不会浮起来）", () => {
+    const next = scaledPanelBounds(current, PANEL_SCALE_STEP, DRAWER_AREA);
+    expect(next.width).toBe(Math.round(360 * PANEL_SCALE_STEP));
+    expect(next.height).toBe(Math.round(320 * PANEL_SCALE_STEP));
+    // 中心不变（取整误差 ≤ 1px），底边不动
+    expect(Math.abs(next.x + next.width / 2 - (current.x + current.width / 2))).toBeLessThanOrEqual(1);
+    expect(next.y + next.height).toBe(current.y + current.height);
+  });
+
+  it("缩小：同上，且中心与底边保持", () => {
+    const next = scaledPanelBounds(current, 1 / PANEL_SCALE_STEP, DRAWER_AREA);
+    expect(next.width).toBe(Math.round(360 / PANEL_SCALE_STEP));
+    expect(Math.abs(next.x + next.width / 2 - (current.x + current.width / 2))).toBeLessThanOrEqual(1);
+    expect(next.y + next.height).toBe(current.y + current.height);
+  });
+
+  it("夹到尺寸上下限（桌宠能缩到 140×120，也放不到 1600 以上）", () => {
+    const tiny = scaledPanelBounds({ x: 100, y: 100, width: 145, height: 125 }, 0.5, DRAWER_AREA);
+    expect(tiny).toMatchObject({ width: 140, height: 120 });
+    const huge = scaledPanelBounds({ x: 100, y: 100, width: 1500, height: 1300 }, 2, DRAWER_AREA);
+    expect(huge).toMatchObject({ width: 1600, height: 1400 });
+  });
+
+  it("锚点不会把窗口推出工作区（贴边的猫放大后仍在屏内）", () => {
+    const atEdge: PanelBounds = { x: 1919, y: 1039, width: 300, height: 200 };
+    const next = scaledPanelBounds(atEdge, 1.5, DRAWER_AREA);
+    expect(next.x + next.width).toBeLessThanOrEqual(DRAWER_AREA.width);
+    expect(next.y + next.height).toBeLessThanOrEqual(DRAWER_AREA.height);
+    expect(next.x).toBeGreaterThanOrEqual(0);
+    expect(next.y).toBeGreaterThanOrEqual(0);
+  });
+
+  it("非法倍率当 1（不缩放，也不产生 NaN 坐标）", () => {
+    expect(scaledPanelBounds(current, Number.NaN, DRAWER_AREA)).toMatchObject({ width: current.width, height: current.height });
+    expect(scaledPanelBounds(current, 0, DRAWER_AREA)).toMatchObject({ width: current.width, height: current.height });
+  });
+
+  it("anchoredPanelBounds 用于重置尺寸：回到作品声明的尺寸，位置仍按底部中心对齐", () => {
+    const next = anchoredPanelBounds(current, { width: 420, height: 560 }, DRAWER_AREA);
+    expect(next).toMatchObject({ width: 420, height: 560 });
+    expect(Math.abs(next.x + next.width / 2 - (current.x + current.width / 2))).toBeLessThanOrEqual(1);
+    expect(next.y + next.height).toBe(current.y + current.height);
+  });
+});
 
 describe("drawerBounds", () => {
   it("右缘：展开贴右、收起是右缘竖把手，两态沿边居中", () => {

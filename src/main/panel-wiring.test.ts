@@ -150,13 +150,13 @@ describe("面板窗口的窗口级动作（close / toggle）", () => {
   });
 
   it("控制器认领 close/toggle（靠 Referer 匹配窗口），show-main 才转主进程回调", () => {
-    expect(panelWindow).toMatch(/if \(action === "close" \|\| action === "toggle"\) return this\.handleWindowAction/u);
-    expect(panelWindow).toContain("private handleWindowAction(action: \"close\" | \"toggle\", referer: string | undefined): boolean");
+    expect(panelWindow).toMatch(/if \(action !== "show-main"\) return this\.handleWindowAction\(action, context\.referer\);/u);
+    expect(panelWindow).toContain('private handleWindowAction(action: Exclude<PanelAction, "show-main">, referer: string | undefined): boolean');
     // 关错窗比不关更糟：多个活窗口且 Referer 分不清时必须拒绝（return false）。
     expect(panelWindow).toContain("if (!id && alive.length === 1) id = alive[0]![0];");
     expect(panelWindow).toContain("if (!id) return false;");
     // toggle 只属于抽屉：普通窗口/桌宠没有两态，拒绝而不是无声吞掉。
-    expect(panelWindow).toContain('if (panelMode(options) !== "drawer") return false;');
+    expect(panelWindow).toContain('if (mode !== "drawer") return false;');
     expect(panelWindow).toMatch(/win\.setBounds\(collapsedNow \? geometry\.expanded : geometry\.collapsed, true\)/u);
   });
 
@@ -209,7 +209,16 @@ describe("面板窗口形态（window / pet / drawer）", () => {
   });
 
   it("minWidth/minHeight 只给普通窗口：抽屉收起态只有窄把手厚，设了下限收起态就永远出不来", () => {
-    expect(panelWindow).toContain('...(mode === "window" ? { minWidth: 240, minHeight: 200 } : {})');
+    expect(panelWindow).toContain('...(mode === "window" ? { minWidth: PANEL_MIN_WIDTH, minHeight: PANEL_MIN_HEIGHT } : {})');
+  });
+
+  it("桌宠缩放：grow/shrink/reset-size 只对 pet 生效，尺寸经底部中心锚点后 setBounds", () => {
+    expect(panelWindow).toContain('if (mode !== "pet") return false;');
+    expect(panelWindow).toMatch(/anchoredPanelBounds\(current, panelWindowSize\(options\), workArea\)/u);
+    expect(panelWindow).toMatch(/scaledPanelBounds\(current, action === "grow" \? PANEL_SCALE_STEP : 1 \/ PANEL_SCALE_STEP, workArea\)/u);
+    expect(panelWindow).toContain("win.setBounds(next, true);");
+    expect(panelBounds).toContain("export function scaledPanelBounds(");
+    expect(panelBounds).toContain("export function anchoredPanelBounds(");
   });
 
   it("抽屉几何来自 drawerBounds 纯函数且不进坐标记忆（贴边位置由 edge 唯一决定）", () => {

@@ -22,10 +22,10 @@ description: 当要做一个网页 / 小工具 / 面板类作品，或要把完�
 | mode | 窗口 | 页面要做的 | 典型作品 |
 | --- | --- | --- | --- |
 | `window` | 系统边框，可缩放 | 普通网页 | 监控面板、常驻小工具 |
-| `pet` | 透明无边框固定尺寸，缺省置顶 | `body` 背景透明自绘形状；CSS `-webkit-app-region: drag` 拖动（按钮上 `no-drag`，否则点不到）；自带关闭钮 POST `{"action":"close"}` | 桌宠、桌面挂件 |
+| `pet` | 透明无边框，尺寸可在运行期调大调小（缺省置顶） | `body` 背景透明自绘形状；拖窗口用一块 `-webkit-app-region: drag` 的底层（**拖动区收不到鼠标事件**，所以点击 / 右键菜单必须放在 no-drag 元素上）；自带关闭钮 POST `{"action":"close"}`；大小 POST `{"action":"grow"}` / `"shrink"` / `"reset-size"`，再监听 `resize` 重排精灵缩放 | 桌宠、桌面挂件 |
 | `drawer` | 贴屏幕边缘（`panel.edge`：left/right/top/bottom，缺省 right），窄把手 ↔ 完整面板两态切换，不可拖不可缩放 | 监听 `resize` 按窗口尺寸渲染两态（窄时把手、宽时面板）；点把手 POST `{"action":"toggle"}`；自带关闭钮 POST `{"action":"close"}`；透明背景 + 圆角由页面自己画 | 快速启动器、贴边监控条 |
 
-三种形态的数据接口与跨域待遇完全一致（同一静态服务 + 端点）；`width`/`height`/`alwaysOnTop` 通用（桌宠缺省置顶，其余缺省不置顶）。
+三种形态的数据接口与跨域待遇完全一致（同一静态服务 + 端点）；`width`/`height`/`alwaysOnTop` 通用（桌宠缺省置顶，其余缺省不置顶）。桌宠的尺寸在运行期可由页面调（`grow`/`shrink`/`reset-size`）：Windows 透明窗口不能由用户拖边框缩放，所以改尺寸要走这条动作——主进程按**底部中心锚点** `setBounds`（猫变大不会浮起来）并把结果写进位置尺寸记忆，下一次「运行」还是调好的大小。
 
 ## 二、跨域边界（最容易踩的坑）
 
