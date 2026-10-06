@@ -1467,6 +1467,8 @@ export interface McpServerSummary {
   auth?: "none" | "oauth" | "bearer-env";
   bearerTokenEnv?: string;
   env?: Record<string, string>;
+  /** HTTP 传输的额外请求头（标准 `.mcp.json` 的 headers 字段；明文=文件内容）。 */
+  headers?: Record<string, string>;
   status: McpServerStatus;
   /** OAuth 凭据状态（仅 HTTP 且非 bearer-env 的 server 会出现）。 */
   authState?: McpAuthState;
@@ -1487,6 +1489,8 @@ export interface McpServerConfigDraft {
   auth?: "none" | "oauth" | "bearer-env";
   bearerTokenEnv?: string;
   env?: Record<string, string>;
+  /** HTTP 传输的额外请求头（每行 名称=值 的表单输入解析结果）。 */
+  headers?: Record<string, string>;
 }
 
 /**

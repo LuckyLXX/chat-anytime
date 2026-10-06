@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { McpClientManager, type McpToolBinding } from "./mcp-client.js";
 import type { ConfiguredMcpServer } from "./mcp-config.js";
-import { combinedCallSignal, configHash, convertMcpResult, isUnauthorizedError, mcpToolName, toTypeBoxSchema } from "./mcp-client.js";
+import { combinedCallSignal, configHash, convertMcpResult, httpRequestHeaders, isUnauthorizedError, mcpToolName, toTypeBoxSchema } from "./mcp-client.js";
 
 describe("mcp-client helpers", () => {
   it("names tools as mcp__<server>__<tool> with sanitized segments", () => {
@@ -22,6 +22,13 @@ describe("mcp-client helpers", () => {
     const b = configHash({ command: "npx", args: ["x"], env: { B: "2", A: "1" } });
     expect(a).toBe(b);
     expect(configHash({ command: "npx" })).not.toBe(configHash({ command: "node" }));
+  });
+
+  it("hashes http headers including their values, so a rotated token actually reconnects", () => {
+    // 只哈希键名的话「换了个 token」会被判为没变 ⇒ 不重连、也不重新列工具（看起来改了没反应）。
+    expect(configHash({ url: "https://x/mcp", headers: { "X-API-Key": "a" } })).not.toBe(configHash({ url: "https://x/mcp", headers: { "X-API-Key": "b" } }));
+    expect(configHash({ url: "https://x/mcp" })).not.toBe(configHash({ url: "https://x/mcp", headers: { "X-API-Key": "a" } }));
+    expect(configHash({ url: "https://x/mcp", headers: { A: "1", B: "2" } })).toBe(configHash({ url: "https://x/mcp", headers: { B: "2", A: "1" } }));
   });
 
   it("recognizes SDK unauthorized errors so they become needs-auth instead of failed", () => {
@@ -58,6 +65,31 @@ describe("mcp-client helpers", () => {
     const result = convertMcpResult({});
     expect(result.content).toHaveLength(1);
     expect(result.content[0]?.type).toBe("text");
+  });
+});
+
+describe("mcp http request headers", () => {
+  it("passes configured headers through, spelled the way the SDK spells Authorization", () => {
+    // 键名一定要归一到 `Authorization`：SDK 用 `new Headers({ ...authHeaders, ...requestInit.headers })`
+    // 组装，同拼写才覆盖，大小写不同的两个 Authorization 会被合并成 "Bearer a, Bearer b"（实测）。
+    expect(httpRequestHeaders({ url: "https://x/mcp", headers: { "X-API-Key": "k", authorization: "Bearer manual" } }, {})).toEqual({
+      "X-API-Key": "k",
+      Authorization: "Bearer manual"
+    });
+    expect(httpRequestHeaders({ url: "https://x/mcp" }, {})).toEqual({});
+  });
+
+  it("lets the bearer env token override a configured Authorization and keeps the other headers", () => {
+    expect(httpRequestHeaders({ url: "https://x/mcp", bearerTokenEnv: "MCP_TOKEN", headers: { Authorization: "Bearer stale", "X-API-Key": "k" } }, { MCP_TOKEN: "fresh" })).toEqual({
+      "X-API-Key": "k",
+      Authorization: "Bearer fresh"
+    });
+  });
+
+  it("leaves the configured Authorization alone when the named env var is unset or empty", () => {
+    expect(httpRequestHeaders({ url: "https://x/mcp", bearerTokenEnv: "MCP_TOKEN" }, {})).toEqual({});
+    expect(httpRequestHeaders({ url: "https://x/mcp", bearerTokenEnv: "MCP_TOKEN" }, { MCP_TOKEN: "" })).toEqual({});
+    expect(httpRequestHeaders({ url: "https://x/mcp", bearerTokenEnv: "MCP_TOKEN", headers: { Authorization: "Bearer manual" } }, {})).toEqual({ Authorization: "Bearer manual" });
   });
 });
 

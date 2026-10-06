@@ -68,7 +68,7 @@ ChatAnyTime 是一个面向项目开发的桌面 AI 客户端。它以 Pi 的执
 
 ### 能力管理
 
-- **MCP Server**：stdio / HTTP 双传输，OAuth 授权（含凭据持久化与自动刷新），状态与工具数实时显示；新增或替换的工具热生效，无需重建会话
+- **MCP Server**：stdio / HTTP 双传输，HTTP 可配自定义请求头（Authorization / X-API-Key 等，与 Claude Code / Cursor 的 `.mcp.json` 同字段），OAuth 授权（含凭据持久化与自动刷新），状态与工具数实时显示；新增或替换的工具热生效，无需重建会话
 - **技能 Skill**：四档来源，优先级从低到高为 共享目录 `~/.agents/skills` < 随包内置 < 用户全局 `pidesktop-skills/` < 项目 `.pidesktop-skills/`，同名后者覆盖前者；勾选启用后注入系统提示，用 `/skill:<name>` 调用；内置电脑控制、自动化任务、网页任务、作品发布、ChatAnyTime 配置、主题创建器
 - **自定义命令**：项目/全局双作用域的 `md` 模板，`/名字 参数` 直接调用
 - **子智能体**：设置页自定义系统提示、模型与工具集（全局/项目作用域），内置「代码审查 / 项目探索」为只读、可在设置里单独改执行模型

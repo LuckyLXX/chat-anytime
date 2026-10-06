@@ -141,6 +141,13 @@ describe("McpOAuthController", () => {
       expect(controller.supports(server)).toBe(true);
       expect(controller.supports({ name: "local", scope: "global", entry: { command: "npx" } })).toBe(false);
       expect(controller.supports({ name: "bearer", scope: "global", entry: { url: "https://x/mcp", bearerTokenEnv: "TOKEN" } })).toBe(false);
+      // 其他自定义头不影响 OAuth 自动挂载（服务器要 OAuth、同时要一个网关头的场景）。
+      expect(controller.supports({ name: "custom", scope: "global", entry: { url: "https://x/mcp", headers: { "X-API-Key": "k" } } })).toBe(true);
+      // headers 自带 Authorization = 用户自己负责认证，不再自动挂 provider：否则 401 走到授权
+      // 成功之后，我们传进 transport 的 requestInit.headers 反而覆盖 SDK 拿到的 token。
+      expect(controller.supports({ name: "manual", scope: "global", entry: { url: "https://x/mcp", headers: { authorization: "Bearer manual" } } })).toBe(false);
+      // 显式选 OAuth 依然走 OAuth（用户意图优先于推断）。
+      expect(controller.supports({ name: "forced", scope: "global", entry: { url: "https://x/mcp", auth: "oauth", headers: { Authorization: "Bearer stale" } } })).toBe(true);
 
       const provider = controller.providerFor(server)!;
       expect(controller.authStateOf("exa")).toBe("idle");

@@ -19,7 +19,7 @@ import { dirname } from "node:path";
 import { auth, type OAuthClientProvider, type OAuthDiscoveryState } from "@modelcontextprotocol/sdk/client/auth.js";
 import type { OAuthClientInformationMixed, OAuthClientMetadata, OAuthTokens } from "@modelcontextprotocol/sdk/shared/auth.js";
 import type { McpAuthState } from "../shared/protocol.js";
-import type { ConfiguredMcpServer, McpServerConfigEntry } from "./mcp-config.js";
+import { hasAuthorizationHeader, type ConfiguredMcpServer, type McpServerConfigEntry } from "./mcp-config.js";
 
 /** 回调服务器首选端口（被占用时退避到系统随机端口，并把最终端口持久化）。 */
 export const DEFAULT_MCP_CALLBACK_PORT = 1456;
@@ -475,9 +475,18 @@ export class McpOAuthController {
   }
 
   /** 该 server 是否走 OAuth（HTTP 且未使用 Bearer 环境变量；bearer 优先）。 */
+  /**
+   * 该 server 是否走 OAuth（HTTP、未用 Bearer 环境变量，且没有自己写 Authorization 头）。
+   *
+   * 显式 `auth: "oauth"` 永远走 OAuth；否则 headers 里自带 Authorization 就不再自动挂
+   * provider——用户手写凭据的意图优先。不这样做会出现走不出去的闭环：SDK 用
+   * `{...authHeaders, ...requestInit.headers}` 组装请求头，我们传进去的 requestInit.headers
+   * 反而**覆盖**它拿到的 token，于是授权成功后请求仍带用户的旧头、继续 401。
+   */
   supports(server: ConfiguredMcpServer | McpServerConfigEntry): boolean {
     const entry = "entry" in server ? server.entry : server;
-    return Boolean(entry.url) && !entry.command && !entry.bearerTokenEnv;
+    if (!entry.url || entry.command || entry.bearerTokenEnv) return false;
+    return entry.auth === "oauth" || !hasAuthorizationHeader(entry.headers);
   }
 
   /** 启动回调服务器并确定 redirectUrl（幂等；失败后下次调用会重试）。 */

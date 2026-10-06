@@ -18,6 +18,9 @@ export function mcpConfigPathsFor(workspace: string | undefined, agentDir: strin
 }
 
 /** Validate an MCP server draft from the UI and convert it to a config entry. */
+/** RFC 7230 token：header 名允许的字符集（比环境变量名宽，含 `-` `.` `_`）。 */
+const HEADER_NAME_PATTERN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/u;
+
 export function mcpConfigEntry(server: McpServerConfigDraft): McpServerConfigEntry {
   if (server.transport === "stdio") {
     const command = server.command?.trim();
@@ -31,11 +34,32 @@ export function mcpConfigEntry(server: McpServerConfigDraft): McpServerConfigEnt
   const url = server.url?.trim();
   if (!url || !/^https?:\/\//iu.test(url)) throw new Error("HTTP MCP Server 需要填写 http:// 或 https:// 地址");
   if (server.auth === "bearer-env" && !server.bearerTokenEnv?.trim()) throw new Error("Bearer 认证需要填写环境变量名");
+  const headers = normalizeMcpHeaders(server.headers);
   return {
     url,
     ...(server.auth === "oauth" ? { auth: "oauth" as const } : {}),
-    ...(server.auth === "bearer-env" ? { bearerTokenEnv: server.bearerTokenEnv!.trim() } : {})
+    ...(server.auth === "bearer-env" ? { bearerTokenEnv: server.bearerTokenEnv!.trim() } : {}),
+    ...(headers ? { headers } : {})
   };
+}
+
+/**
+ * 校验并归一化设置页的请求头输入（名称按 RFC 7230 token，值不得含换行）。
+ * 空集合返回 undefined，这样条目里不会多出一个空 `headers: {}`。
+ */
+export function normalizeMcpHeaders(headers: Record<string, string> | undefined): Record<string, string> | undefined {
+  const entries = Object.entries(headers ?? {});
+  if (entries.length === 0) return undefined;
+  const normalized: Record<string, string> = {};
+  for (const [rawName, rawValue] of entries) {
+    const name = rawName.trim();
+    if (!HEADER_NAME_PATTERN.test(name)) throw new Error(`请求头名称无效：${rawName}`);
+    if (typeof rawValue !== "string") throw new Error(`请求头 ${name} 的值必须是字符串`);
+    // CRLF 注入：值里的换行会把一个头拆成两个，等于放行任意头。
+    if (/[\r\n]/u.test(rawValue)) throw new Error(`请求头 ${name} 的值不能包含换行`);
+    normalized[name] = rawValue.trim();
+  }
+  return normalized;
 }
 
 /** 一次保存的落地计划：目标文件 + 合并停用态后的条目 + 需要先删的原条目。 */

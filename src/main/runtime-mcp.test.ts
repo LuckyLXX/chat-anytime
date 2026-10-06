@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { readConfiguredMcpServers, upsertMcpServerConfig } from "./mcp-config.js";
-import { planMcpServerSave, serverToolNamesFrom } from "./runtime-mcp.js";
+import { planMcpServerSave, mcpConfigEntry, normalizeMcpHeaders, serverToolNamesFrom } from "./runtime-mcp.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -66,6 +66,30 @@ describe("planMcpServerSave", () => {
     expect(plan.entry).toEqual({ url: "https://edited.example/mcp", disabled: true });
     // 计划是纯函数：不落盘，只描述要写哪里
     expect(readConfiguredMcpServers(configPaths.project, configPaths.global).find((server) => server.name === "shared")?.entry.url).toBe("https://project.example/mcp");
+  });
+});
+
+describe("mcpConfigEntry http headers", () => {
+  it("writes trimmed, validated headers into an http entry (and omits an empty set)", () => {
+    expect(mcpConfigEntry({ name: "gw", scope: "project", transport: "http", url: " https://gw.example/mcp ", auth: "none", headers: { " X-API-Key ": " k ", Authorization: "Bearer manual" } }))
+      .toEqual({ url: "https://gw.example/mcp", headers: { "X-API-Key": "k", Authorization: "Bearer manual" } });
+    expect(mcpConfigEntry({ name: "gw", scope: "project", transport: "http", url: "https://gw.example/mcp", auth: "none", headers: {} })).toEqual({ url: "https://gw.example/mcp" });
+    expect(normalizeMcpHeaders(undefined)).toBeUndefined();
+  });
+
+  it("rejects an illegal header name and a value containing a newline (CRLF injection)", () => {
+    expect(() => mcpConfigEntry({ name: "gw", scope: "project", transport: "http", url: "https://gw.example/mcp", auth: "none", headers: { "X API Key": "k" } })).toThrow("请求头名称无效");
+    // 换行会把一个头拆成两个，等于放行任意头（包括篡改 Authorization）
+    expect(() => mcpConfigEntry({ name: "gw", scope: "project", transport: "http", url: "https://gw.example/mcp", auth: "none", headers: { "X-API-Key": "k\r\nAuthorization: Bearer evil" } })).toThrow("不能包含换行");
+  });
+
+  it("carries headers through the save plan onto disk", async () => {
+    const configPaths = await paths();
+    const plan = planMcpServerSave(configPaths, { name: "gw", scope: "global", transport: "http", url: "https://gw.example/mcp", auth: "none", headers: { "X-API-Key": "secret" } });
+    expect(plan.entry).toEqual({ url: "https://gw.example/mcp", headers: { "X-API-Key": "secret" } });
+
+    upsertMcpServerConfig(configPaths.global, "gw", plan.entry);
+    expect(readConfiguredMcpServers(configPaths.project, configPaths.global).find((server) => server.name === "gw")?.entry.headers).toEqual({ "X-API-Key": "secret" });
   });
 });
 

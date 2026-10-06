@@ -397,7 +397,7 @@ const demoResources: ResourceCatalog = {
   ],
   mcpServers: [
     { name: "docs", scope: "project", transport: "stdio", command: "npx", args: ["-y", "docs-mcp"], env: { DOCS_TOKEN: "demo-token" }, status: "connected", toolCount: 8, resourceCount: 2, disabled: false },
-    { name: "browser", scope: "global", transport: "http", url: "https://mcp.example.com/mcp", auth: "none", status: "disabled", toolCount: 0, disabled: true },
+    { name: "browser", scope: "global", transport: "http", url: "https://mcp.example.com/mcp", auth: "none", headers: { "X-API-Key": "demo-key" }, status: "disabled", toolCount: 0, disabled: true },
     { name: "figma", scope: "global", transport: "http", url: "https://mcp.figma.com/mcp", auth: "oauth", status: "needs-auth", authState: "idle", toolCount: 0, disabled: false }
   ],
   todos: [],
@@ -1129,7 +1129,7 @@ export function createDemoApi(): DesktopApi {
           const original = command.original;
           const config = draft.transport === "stdio"
             ? { scope: draft.scope, transport: "stdio" as const, command: draft.command, args: draft.args, env: draft.env }
-            : { scope: draft.scope, transport: "http" as const, url: draft.url, auth: draft.auth ?? "none", bearerTokenEnv: draft.bearerTokenEnv };
+            : { scope: draft.scope, transport: "http" as const, url: draft.url, auth: draft.auth ?? "none", bearerTokenEnv: draft.bearerTokenEnv, headers: draft.headers };
           const existing = demoResources.mcpServers.find((item) => item.name === draft.name)
             ?? (original ? demoResources.mcpServers.find((item) => item.name === original.name) : undefined);
           if (existing) {

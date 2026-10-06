@@ -10,6 +10,12 @@ export interface McpServerConfigEntry {
   bearerTokenEnv?: string;
   env?: Record<string, string>;
   /**
+   * HTTP 传输的额外请求头（与 Claude Code / Cursor 的 `.mcp.json` 同名字段一致，
+   * 值明文落在配置文件里）。合并规则见 `httpRequestHeaders`：Bearer 环境变量存在时
+   * 其 Authorization 覆盖这里的同名头，其余头原样带上。
+   */
+  headers?: Record<string, string>;
+  /**
    * App-owned extension of the standard `.mcp.json` format. The native MCP
    * client skips disabled servers but still lists them (greyed out) in the
    * capability panel. Standard MCP clients ignore unknown fields, so this stays
@@ -34,6 +40,7 @@ export interface McpServerConfigFields {
   auth?: "none" | "oauth" | "bearer-env";
   bearerTokenEnv?: string;
   env?: Record<string, string>;
+  headers?: Record<string, string>;
 }
 
 type JsonRecord = Record<string, unknown>;
@@ -74,8 +81,18 @@ export function mcpServerConfigFields(server: ConfiguredMcpServer): McpServerCon
     ...(entry.url ? { url: entry.url } : {}),
     ...(transport === "http" ? { auth: entry.bearerTokenEnv ? "bearer-env" as const : entry.auth === "oauth" ? "oauth" as const : "none" as const } : {}),
     ...(entry.bearerTokenEnv ? { bearerTokenEnv: entry.bearerTokenEnv } : {}),
-    ...(entry.env && Object.keys(entry.env).length > 0 ? { env: { ...entry.env } } : {})
+    ...(entry.env && Object.keys(entry.env).length > 0 ? { env: { ...entry.env } } : {}),
+    ...(transport === "http" && entry.headers && Object.keys(entry.headers).length > 0 ? { headers: { ...entry.headers } } : {})
   };
+}
+
+/**
+ * 这一组请求头是否自带 Authorization（名称大小写不敏感）。OAuth 控制器的
+ * `supports()` 用它决定「要不要自动挂 provider」：用户手写了 Authorization 就是
+ * 自己负责认证，不该被 OAuth 流程接管。
+ */
+export function hasAuthorizationHeader(headers: Record<string, string> | undefined): boolean {
+  return Object.keys(headers ?? {}).some((key) => key.toLowerCase() === "authorization");
 }
 
 /** Read one entry for form round-trips; missing/corrupt file or entry yields undefined. */

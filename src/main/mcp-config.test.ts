@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { readConfiguredMcpServers, mcpServerConfigFields, readMcpServerEntry, removeMcpServerConfig, setMcpServerDisabled, upsertMcpServerConfig } from "./mcp-config.js";
+import { readConfiguredMcpServers, mcpServerConfigFields, hasAuthorizationHeader, readMcpServerEntry, removeMcpServerConfig, setMcpServerDisabled, upsertMcpServerConfig } from "./mcp-config.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -64,6 +64,7 @@ describe("mcp config", () => {
     upsertMcpServerConfig(path, "docs", { command: "npx", args: ["-y", "docs-mcp"], env: { DOCS_TOKEN: "secret" } });
     upsertMcpServerConfig(path, "remote", { url: "https://remote.example/mcp", bearerTokenEnv: "MCP_TOKEN" });
     upsertMcpServerConfig(path, "oauth", { url: "https://oauth.example/mcp", auth: "oauth" });
+    upsertMcpServerConfig(path, "gateway", { url: "https://gw.example/mcp", headers: { "X-API-Key": "secret" } });
 
     const servers = readConfiguredMcpServers(path, join(path, "..", "missing.json"));
     const fields = Object.fromEntries(servers.map((server) => [server.name, mcpServerConfigFields(server)]));
@@ -71,9 +72,29 @@ describe("mcp config", () => {
     expect(fields.docs).toEqual({ scope: "project", transport: "stdio", command: "npx", args: ["-y", "docs-mcp"], env: { DOCS_TOKEN: "secret" } });
     expect(fields.remote).toEqual({ scope: "project", transport: "http", url: "https://remote.example/mcp", auth: "bearer-env", bearerTokenEnv: "MCP_TOKEN" });
     expect(fields.oauth).toEqual({ scope: "project", transport: "http", url: "https://oauth.example/mcp", auth: "oauth" });
+    expect(fields.gateway).toEqual({ scope: "project", transport: "http", url: "https://gw.example/mcp", auth: "none", headers: { "X-API-Key": "secret" } });
     // 投影是副本：改它不应回写配置对象
     fields.docs!.env!.DOCS_TOKEN = "changed";
     expect(servers.find((server) => server.name === "docs")!.entry.env).toEqual({ DOCS_TOKEN: "secret" });
+    fields.gateway!.headers!["X-API-Key"] = "changed";
+    expect(servers.find((server) => server.name === "gateway")!.entry.headers).toEqual({ "X-API-Key": "secret" });
+  });
+
+  it("round-trips headers through upsert and drops the field when empty", async () => {
+    const path = await temporaryConfig();
+    upsertMcpServerConfig(path, "gw", { url: "https://gw.example/mcp", headers: { "X-API-Key": "secret" } });
+    expect(readMcpServerEntry(path, "gw")).toEqual({ url: "https://gw.example/mcp", headers: { "X-API-Key": "secret" } });
+    // 空对象不落盘（表单清空请求头后不应留一个空 headers）
+    upsertMcpServerConfig(path, "gw", { url: "https://gw.example/mcp" });
+    expect(JSON.parse(await readFile(path, "utf8")).mcpServers.gw).toEqual({ url: "https://gw.example/mcp" });
+  });
+
+  it("detects a configured Authorization header case-insensitively (OAuth auto-mount decision)", () => {
+    expect(hasAuthorizationHeader({ "X-API-Key": "k" })).toBe(false);
+    expect(hasAuthorizationHeader(undefined)).toBe(false);
+    expect(hasAuthorizationHeader({})).toBe(false);
+    expect(hasAuthorizationHeader({ authorization: "Bearer manual" })).toBe(true);
+    expect(hasAuthorizationHeader({ "AUTHORIZATION": "Basic x" })).toBe(true);
   });
 
   it("reads a single entry tolerantly and treats missing files/entries as absent", async () => {

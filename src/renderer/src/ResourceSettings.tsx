@@ -53,6 +53,7 @@ export function ResourceSettings({ resources }: ResourceSettingsProps): ReactNod
   const [mcpUrl, setMcpUrl] = useState("");
   const [mcpAuth, setMcpAuth] = useState<NonNullable<McpServerConfigDraft["auth"]>>("none");
   const [mcpBearerTokenEnv, setMcpBearerTokenEnv] = useState("");
+  const [mcpHeaders, setMcpHeaders] = useState("");
   const [mcpEnv, setMcpEnv] = useState("");
   const [commandFormOpen, setCommandFormOpen] = useState(false);
   const [editingCommand, setEditingCommand] = useState<string>();
@@ -110,6 +111,7 @@ export function ResourceSettings({ resources }: ResourceSettingsProps): ReactNod
     setMcpUrl("");
     setMcpAuth("none");
     setMcpBearerTokenEnv("");
+    setMcpHeaders("");
     setMcpEnv("");
   }
 
@@ -120,16 +122,19 @@ export function ResourceSettings({ resources }: ResourceSettingsProps): ReactNod
     setMcpTransport(server.transport);
     setMcpCommand(server.command ?? "npx");
     setMcpArgs((server.args ?? []).join("\n"));
-    setMcpEnv(Object.entries(server.env ?? {}).map(([key, value]) => `${key}=${value}`).join("\n"));
+    setMcpEnv(formatKeyValueLines(server.env));
     setMcpUrl(server.url ?? "");
     setMcpAuth(server.auth ?? "none");
     setMcpBearerTokenEnv(server.bearerTokenEnv ?? "");
+    setMcpHeaders(formatKeyValueLines(server.headers));
     setMcpFormOpen(true);
   }
 
   async function addMcpServer(event: FormEvent): Promise<void> {
     event.preventDefault();
     try {
+      // HTTP 请求头在草稿阶段就解析（非法行要在这里报出来，而不是默默丢掉）。
+      const httpHeaders = mcpTransport === "http" ? parseKeyValueLines(mcpHeaders, HEADER_LINES) : undefined;
       const server: McpServerConfigDraft = {
         name: mcpName.trim(),
         scope: mcpScope,
@@ -138,12 +143,13 @@ export function ResourceSettings({ resources }: ResourceSettingsProps): ReactNod
           ? {
               command: mcpCommand.trim(),
               args: mcpArgs.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean),
-              env: parseKeyValueLines(mcpEnv)
+              env: parseKeyValueLines(mcpEnv, ENV_VAR_LINES)
             }
           : {
               url: mcpUrl.trim(),
               auth: mcpAuth,
-              ...(mcpAuth === "bearer-env" ? { bearerTokenEnv: mcpBearerTokenEnv.trim() } : {})
+              ...(mcpAuth === "bearer-env" ? { bearerTokenEnv: mcpBearerTokenEnv.trim() } : {}),
+              ...(httpHeaders ? { headers: httpHeaders } : {})
             })
       };
       const success = await run({ type: "mcp.server.save", server, ...(editingMcp ? { original: editingMcp } : {}) });
@@ -192,10 +198,11 @@ export function ResourceSettings({ resources }: ResourceSettingsProps): ReactNod
                   <label className="mcp-form-wide">服务器地址<input value={mcpUrl} placeholder="https://mcp.example.com/mcp" onChange={(event) => setMcpUrl(event.target.value)} /></label>
                   <label>认证<select value={mcpAuth} onChange={(event) => setMcpAuth(event.target.value as NonNullable<McpServerConfigDraft["auth"]>)}><option value="none">无</option><option value="oauth">OAuth</option><option value="bearer-env">Bearer 环境变量</option></select></label>
                   {mcpAuth === "bearer-env" && <label>Token 环境变量<input value={mcpBearerTokenEnv} placeholder="MCP_TOKEN" onChange={(event) => setMcpBearerTokenEnv(event.target.value)} /></label>}
+                  <label className="mcp-form-wide">请求头（可选，每行 名称=值）<textarea value={mcpHeaders} rows={2} placeholder={"X-API-Key=your-key"} onChange={(event) => setMcpHeaders(event.target.value)} /></label>
                 </>}
               </div>
               <p className="resource-form-help">{editingMcp ? `正在编辑 ${editingMcp.name}：名称即配置键不可改；切换「写入范围」会把该条目迁移到另一个配置文件，停用状态保留。保存后重载工具并重建会话。` : "添加后会写入 MCP 配置并重建会话以加载新工具。stdio 服务通常由 npx 首次启动；敏感值建议用环境变量名，不要直接写入配置。"}</p>
-              {mcpTransport === "http" && <p className="resource-form-help">认证选 OAuth：保存后回到列表点「认证」，会自动打开系统浏览器完成授权，回调后自动重连；凭据保存在本地（刷新令牌长期有效），只有被授权服务器判定失效时才会提示「重新授权」——那时已保存的凭据仍会保留并优先重试。Bearer 环境变量优先于 OAuth。</p>}
+              {mcpTransport === "http" && <p className="resource-form-help">认证选 OAuth：保存后回到列表点「认证」，会自动打开系统浏览器完成授权，回调后自动重连；凭据保存在本地（刷新令牌长期有效），只有被授权服务器判定失效时才会提示「重新授权」——那时已保存的凭据仍会保留并优先重试。Bearer 环境变量优先于 OAuth（它的令牌会覆盖请求头里的 Authorization，其余头保留）。请求头按字面带上；自己写了 Authorization 就不再自动走 OAuth（可以填 X-API-Key 一类网关头）；注意请求头里的值会以明文写入配置文件，敏感值建议用 Bearer 环境变量。</p>}
               <footer className="mcp-form-actions"><button className="secondary-button compact-button" type="button" disabled={controlsBusy} onClick={() => { resetMcpForm(); setMcpFormOpen(false); }}><X size={13} />取消</button><button className="primary-button compact-button" type="submit" data-control="mcp-save" disabled={controlsBusy}>{editingMcp ? <Pencil size={13} /> : <Plus size={13} />}{editingMcp ? "保存修改" : "添加 MCP"}</button></footer>
             </form>}
             {resources.mcpServers.length === 0
@@ -297,15 +304,25 @@ export function ResourceSettings({ resources }: ResourceSettingsProps): ReactNod
   );
 }
 
-/** `KEY=VALUE` 逐行解析（MCP 环境变量输入；非法行直接抛错，由调用方兜住）。 */
-function parseKeyValueLines(value: string): Record<string, string> | undefined {
+/** `KEY=VALUE` 逐行解析的键名规则（环境变量名 / 请求头名）。 */
+const ENV_VAR_LINES = { label: "环境变量", keyPattern: /^[A-Za-z_][A-Za-z0-9_]*$/u };
+/** RFC 7230 token：header 名允许的字符集（比环境变量名宽，含 `-` `.` `_`）。 */
+const HEADER_LINES = { label: "请求头", keyPattern: /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/u };
+
+/** `名称=值` 逐行解析（MCP 环境变量 / 请求头输入；非法行直接抛错，由调用方兜住）。 */
+function parseKeyValueLines(value: string, rules: { label: string; keyPattern: RegExp }): Record<string, string> | undefined {
   const entries = value.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean).map((line) => {
     const separator = line.indexOf("=");
-    if (separator <= 0) throw new Error(`环境变量格式无效：${line}，应为 KEY=VALUE`);
+    if (separator <= 0) throw new Error(`${rules.label}格式无效：${line}，应为 名称=值`);
     const key = line.slice(0, separator).trim();
     const entryValue = line.slice(separator + 1).trim();
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(key)) throw new Error(`环境变量名无效：${key}`);
+    if (!rules.keyPattern.test(key)) throw new Error(`${rules.label}名称无效：${key}`);
     return [key, entryValue] as const;
   });
   return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+}
+
+/** 反向：配置里的键值对 → 表单的多行文本（编辑回填）。 */
+function formatKeyValueLines(entries: Record<string, string> | undefined): string {
+  return Object.entries(entries ?? {}).map(([key, value]) => `${key}=${value}`).join("\n");
 }

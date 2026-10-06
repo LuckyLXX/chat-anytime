@@ -85,7 +85,10 @@ export function configHash(entry: McpServerConfigEntry): string {
     url: entry.url,
     auth: entry.auth,
     bearerTokenEnv: entry.bearerTokenEnv,
-    env: entry.env ? Object.keys(entry.env).sort() : undefined
+    env: entry.env ? Object.keys(entry.env).sort() : undefined,
+    // headers 连值一起进哈希（与 env 只哈希键不同）：轮换 token 就是改这里的值，
+    // 不哈希值的话改完还是走 fast path，既不重连也不重新列工具，看起来「改了没反应」。
+    headers: entry.headers ? Object.entries(entry.headers).sort(([left], [right]) => left.localeCompare(right)) : undefined
   });
 }
 
@@ -110,6 +113,28 @@ export function toTypeBoxSchema(schema: unknown): TSchema {
   return isObjectSchema(schema) ? Type.Unsafe(schema as TSchema) : Type.Object({});
 }
 
+/**
+ * HTTP transport 的请求头：配置文件里的 headers 打底，Bearer 环境变量覆盖
+ * Authorization（保挂既有语义「Bearer 环境变量优先」）。
+ *
+ * 键名规范化不是洁癖：SDK 的 `_commonHeaders()` 按
+ * `new Headers({ ...authHeaders, ...requestInit.headers })` 组装，同拼写才覆盖，
+ * 大小写不同的两个 Authorization 会被 Headers 合并成 "Bearer a, Bearer b"（实测）
+ * 而不是覆盖，所以 authorization 一律写成 SDK 的规范拼写。
+ */
+export function httpRequestHeaders(entry: McpServerConfigEntry, env: Record<string, string | undefined> = process.env): Record<string, string> {
+  const headers: Record<string, string> = {};
+  for (const [key, value] of Object.entries(entry.headers ?? {})) {
+    if (key.toLowerCase() === "authorization") headers.Authorization = value;
+    else headers[key] = value;
+  }
+  if (entry.bearerTokenEnv) {
+    const token = env[entry.bearerTokenEnv];
+    if (token) headers.Authorization = `Bearer ${token}`;
+  }
+  return headers;
+}
+
 function createTransport(entry: McpServerConfigEntry, authProvider?: OAuthClientProvider): StdioClientTransport | StreamableHTTPClientTransport {
   if (entry.command) {
     // process.env values are `string | undefined`; StdioClientTransport
@@ -126,13 +151,10 @@ function createTransport(entry: McpServerConfigEntry, authProvider?: OAuthClient
     });
   }
   if (entry.url) {
-    const headers: Record<string, string> = {};
-    if (entry.bearerTokenEnv) {
-      const token = process.env[entry.bearerTokenEnv];
-      if (token) headers.Authorization = `Bearer ${token}`;
-    }
+    const headers = httpRequestHeaders(entry);
     // Bearer 环境变量优先；否则（auth: oauth 或未知）挂 OAuth provider：
-    // 公开 server 不会触发认证，401 时才走授权流程。
+    // 公开 server 不会触发认证，401 时才走授权流程。headers 里自带 Authorization
+    // 时 supports() 为 false（用户手写凭据就是不进 OAuth 流程），providerFor 自然为 undefined。
     return new StreamableHTTPClientTransport(new URL(entry.url), {
       requestInit: { headers },
       ...(authProvider && !entry.bearerTokenEnv ? { authProvider } : {})
