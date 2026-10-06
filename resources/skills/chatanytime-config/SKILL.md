@@ -51,7 +51,7 @@ Windows 上通常是 `C:\Users\<用户名>\.pi\agent`。下面统一写作 `<age
 4. **文件与目录可能不存在**：新建前先 `ls` 一下目标目录，别假设文件已存在（全局 `pidesktop-skills/` 与全部项目档首次使用时通常都没有；首次添加 MCP / 钩子 / 子智能体也常要新建整个文件）。
 5. **改完必须给生效步骤**（第 7 节），否则用户会以为没生效——这几个配置面**没有文件监听**，不重载就不生效。
 6. **不要动这些数据文件**：会话记录 `chatanytime-sessions/`、长期记忆 `pidesktop-memory/`、作品墙 `pidesktop-gallery/`、自动化任务 `pidesktop-automation/`、MCP 授权凭据 `pidesktop-mcp-auth.json`、模型缓存 `models-store.json`，以及 `%APPDATA%\chat-anytime\` 下的 `settings.json`、`credentials.json`、SSH 主机与指纹文件。它们各有 UI 或专用工具（记忆用 `memory_*` 工具、自动化用 `automation_*` 工具、作品墙用 `gallery_publish`）。
-7. **敏感值不落盘**：MCP 的 token 用 `bearerTokenEnv` 指向环境变量名，不要把 token 明文写进配置（stdio 的 `env` 是明文存盘的，非必要不写）。也不要把密钥写进钩子脚本与本 Skill 产出的文件里。
+7. **敏感值不落盘**：MCP 的 token 用 `bearerTokenEnv` 指向环境变量名（**推荐**），不要把 token 明文写进配置——stdio 的 `env` 与 HTTP 的 `headers` 都是明文存盘的，非必要不写。也不要把密钥写进钩子脚本与本 Skill 产出的文件里。
 
 ---
 
@@ -72,11 +72,12 @@ Windows 上通常是 `C:\Users\<用户名>\.pi\agent`。下面统一写作 `<age
 ### 两种条目
 
 - **本地命令（stdio）**：`command`（必填，如 `npx`）、`args`（数组）、`env`（可选，`KEY=VALUE`，能不带就不带——里头的值是**明文**存盘）。
-- **远程地址（HTTP）**：`url`（必填，必须是 `http://` 或 `https://`）。认证三种：
+- **远程地址（HTTP）**：`url`（必填，必须是 `http://` 或 `https://`）。认证方式三种，可按需组合：
   - 不写认证字段（或 `"auth": "oauth"`）→ 走 **OAuth**：需要授权时该条目上会出现「认证」按钮，点它会打开系统浏览器完成授权（凭据本地保存、长期有效）。
-  - `"bearerTokenEnv": "环境变量名"`：Bearer 认证，token 从该环境变量读（**推荐**，不落盘明文）；它优先于 OAuth。
+  - `"bearerTokenEnv": "环境变量名"`：Bearer 认证，token 从该环境变量读（**推荐**，不落盘明文）；它优先于 OAuth，并覆盖 `headers` 里的 `Authorization`。
+  - `"headers": { "名称": "值" }`：自定义请求头（`X-API-Key`、网关头等），与 Claude Code / Cursor 的 `.mcp.json` 同字段、可直接互抄；**值明文存盘**。假设表里写了 `Authorization` 就不再自动走 OAuth（要强制走就显式写 `"auth": "oauth"`）。
 - `"disabled": true`：停用（仍列在面板上，但不连接、不产生工具）。
-- 条目里可能还会看到 `"type": "stdio"` 之类**其它 MCP 客户端**写的字段——应用会忽略它们但不会报错，**保留原样**（你也别主动删用户的字段）。
+- 条目里可能还会看到 `"type": "stdio"` 之类**其它 MCP 客户端**写的字段——应用会忽略它们但不会报错，**保留原样**（你也别主动删用户的字段）；`headers` 与 `bearerTokenEnv` 不在此列，它们会被真正使用。
 
 ### 示例（可直接照抄后改）
 
@@ -95,6 +96,11 @@ Windows 上通常是 `C:\Users\<用户名>\.pi\agent`。下面统一写作 `<age
       "url": "https://mcp.example.com/internal",
       "bearerTokenEnv": "INTERNAL_MCP_TOKEN",
       "disabled": true
+    },
+    "gateway": {
+      "url": "https://gw.example.com/mcp",
+      // 网关/中转站类认证；值明文存盘，能用 bearerTokenEnv 就别写在这
+      "headers": { "X-API-Key": "<密钥>" }
     }
   }
 }
