@@ -800,6 +800,10 @@ export function App(): ReactNode {
     // 展开；跨会话标签（browser/terminal/file）全部保留。浏览器视图由
     // BrowserPreview 组件在失活时隐藏、激活时恢复，无需销毁——销毁只发生在
     // 用户显式关标签或关闭预览面板时（closePreviewTab/closePreview）。
+    // 终端/SSH 标签同理「关标签才销毁」：切工作区（含跨工作区切换会话连带的全局
+    // 镜像切换）不再回收终端——旧实现在此 kill 无 cwd 的终端标签，用户报
+    // 「切个会话终端全没了」（2026-10-07）；旧终端的 cwd 停在旧目录由用户自见自理
+    // （终端可见 cwd，新开终端总是当前工作区）。
     const keepTabs = preview.tabs.filter((tab) => tab.target.type !== "artifact" && tab.target.type !== "diff");
     if (keepTabs.length > 0) {
       const activeStillThere = keepTabs.some((tab) => tab.id === preview.activeTabId);
@@ -808,27 +812,6 @@ export function App(): ReactNode {
       setPreview(undefined);
     }
   }, [activeSessionId]);
-
-  const previousWorkspaceRef = useRef(activeWorkspace);
-  useEffect(() => {
-    if (previousWorkspaceRef.current === activeWorkspace) return;
-    previousWorkspaceRef.current = activeWorkspace;
-    // Terminals spawn with the old workspace as cwd; retire them all when it
-    // changes instead of leaving shells pointing at a stale directory.
-    // 例外：作品的服务终端（带 cwd，cwd 是那个作品的目录，不随工作区变）——
-    // 用户选定的语义是「关掉标签才停服务」，切工作区不是关标签，且作品清单本身
-    // 就是全局跨工作区的（浏览器标签也确实活下来了）。
-    const terminalTabs = (preview?.tabs ?? []).filter((tab) => tab.target.type === "terminal" && !tab.target.cwd);
-    for (const tab of terminalTabs) void window.piDesktop.terminal({ type: "kill", terminalId: tab.id });
-    if (terminalTabs.length === 0) return;
-    setPreview((current) => {
-      if (!current) return current;
-      const tabs = current.tabs.filter((tab) => tab.target.type !== "terminal");
-      if (tabs.length === 0) return undefined;
-      const activeTabId = tabs.some((tab) => tab.id === current.activeTabId) ? current.activeTabId : tabs[0]!.id;
-      return { tabs, activeTabId };
-    });
-  }, [activeWorkspace, preview]);
 
 
   useEffect(() => {
