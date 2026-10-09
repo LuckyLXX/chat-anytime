@@ -409,7 +409,7 @@ const demoResources: ResourceCatalog = {
   subagents: [
     { id: "code-reviewer", name: "code-reviewer", description: "独立审查已经完成的代码改动，列出有证据的问题与建议。", color: "amber", thinkingLevel: "high", systemPrompt: "你是独立代码审查者。", tools: { read: true, bash: true, powershell: false, edit: false, write: false, grep: true, find: true, ls: true }, scope: "bundled", builtin: true, injectAgentsMd: true },
     { id: "explorer", name: "explorer", description: "深入理解现有项目：跨模块调用链、数据流转与修改影响范围。", color: "blue", systemPrompt: "你是项目探索者。", tools: { read: true, bash: true, powershell: false, edit: false, write: false, grep: true, find: true, ls: true }, scope: "bundled", builtin: true, model: { provider: "anthropic", id: "claude-sonnet-4-6" } },
-    { id: "general-purpose", name: "general-purpose", description: "没有专用子智能体适配、但任务仍可独立完成时使用。", color: "violet", systemPrompt: "你是通用子代理。", tools: "inherit", scope: "bundled", builtin: true },
+    { id: "general-purpose", name: "general-purpose", description: "没有专用子智能体适配、但任务仍可独立完成时使用。", color: "violet", systemPrompt: "你是通用子代理。", tools: "inherit", scope: "bundled", builtin: true, browserTools: true },
     { id: "subagent-demo", name: "my-helper", description: "用户自建示例：按项目约定生成变更日志。", color: "emerald", systemPrompt: "你负责生成变更日志。", tools: "inherit", scope: "global" }
   ],
   hooks: [

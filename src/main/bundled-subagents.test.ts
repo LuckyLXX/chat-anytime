@@ -50,6 +50,16 @@ describe("bundled subagent assets (repo contract)", () => {
     expect(general === "inherit" ? undefined : general.edit).toBe(true);
   });
 
+  it("declares browser capability on the implementer only (实施者能自己验证页面，审查/探索不需要)", () => {
+    // 实施型子代理的典型循环是「改代码 → 打开 localhost 验证 → 再改」；没有
+    // browser_* 它只能盲改（前端任务卡在人工验证）。审查/探索是只读角色，刻意
+    // 保持最小权限。这是升级会改变既有行为的开关，锁死在这里防回退。
+    const byId = new Map(readBundledSubagents(subagentsRoot).map((entry) => [entry.id, entry]));
+    expect(byId.get("general-purpose")!.browserTools, "general-purpose 应声明 browserTools").toBe(true);
+    expect(byId.get("code-reviewer")!.browserTools, "code-reviewer 不应声明 browserTools").toBeUndefined();
+    expect(byId.get("explorer")!.browserTools, "explorer 不应声明 browserTools").toBeUndefined();
+  });
+
   it("declares no execution model by default (user picks it)", () => {
     // 内置定义不应绑定具体模型：不同用户配置的服务商完全不同，写死会让默认安装直接报
     // 「子代理模型不可用」。执行模型由用户在设置页选择（覆盖表持久化）。

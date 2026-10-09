@@ -302,6 +302,7 @@ description: 审查指定文件或目录，输出问题清单
 | `description` | 一句话说明「什么时候委派给它」，主会话靠它决定是否委派 |
 | `systemPrompt` | 必填，≤20000 字符，写给子代理的完整工作说明 |
 | `tools` | `"inherit"` 或**完整的 8 项布尔表**：`read`/`bash`/`powershell`/`edit`/`write`/`grep`/`find`/`ls`（缺项按默认值补，只读型就只开 `read`/`bash`/`grep`/`find`/`ls`） |
+| `browserTools` | 可选，`true` 时子代理可用 `browser_*` 内置浏览器工具族（打开 localhost 验证页面、点击调试、截图）；与主会话共享同一浏览器，受设置里浏览器总闸管控，缺省关闭 |
 | `model` | 可选，`{ "provider": "…", "id": "…" }`；省略即继承主会话模型 |
 | `thinkingLevel` | 可选，`off` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max`；省略即继承主会话当前档位。注意 `off`（关思考）是**显式档位**，与「省略 = 继承」不同。子模型不支持的档位会被自动降级到最近可用档（上游不会报 400）；委派卡片上显示的是**实际生效**的档位 |
 | `color` | 可选，展示色（如 `amber` / `blue` / `violet`） |

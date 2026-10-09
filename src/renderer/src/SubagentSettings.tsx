@@ -46,6 +46,9 @@ export function SubagentSettings({ resources, workspaceOpen, models, providers }
   const [systemPrompt, setSystemPrompt] = useState("");
   const [scope, setScope] = useState<SubagentScope>("global");
   const [injectAgentsMd, setInjectAgentsMd] = useState(false);
+  // 浏览器能力独立于 inherited 开关：它不是 Pi 原生工具，主会话里也是常驻的
+  // customTools 能力族；这里只是决定子代理要不要带上它。
+  const [browserTools, setBrowserTools] = useState(false);
   const [inherited, setInherited] = useState<boolean>(true);
   const [tools, setTools] = useState<Record<BuiltinToolName, boolean>>(() => Object.fromEntries(SUBAGENT_TOOLS.map((tool) => [tool, true])) as Record<BuiltinToolName, boolean>);
 
@@ -75,6 +78,7 @@ export function SubagentSettings({ resources, workspaceOpen, models, providers }
     setSystemPrompt("");
     setScope(workspaceOpen ? "project" : "global");
     setInjectAgentsMd(false);
+    setBrowserTools(false);
     setInherited(true);
     setTools(Object.fromEntries(SUBAGENT_TOOLS.map((tool) => [tool, true])) as Record<BuiltinToolName, boolean>);
   }
@@ -98,6 +102,7 @@ export function SubagentSettings({ resources, workspaceOpen, models, providers }
     setSystemPrompt(subagent.systemPrompt);
     setScope(subagent.scope);
     setInjectAgentsMd(subagent.injectAgentsMd === true);
+    setBrowserTools(subagent.browserTools === true);
     if (subagent.tools === "inherit") {
       setInherited(true);
       setTools(Object.fromEntries(SUBAGENT_TOOLS.map((tool) => [tool, true])) as Record<BuiltinToolName, boolean>);
@@ -129,6 +134,7 @@ export function SubagentSettings({ resources, workspaceOpen, models, providers }
       systemPrompt: systemPrompt.trim() || "完成委派给你的独立子任务。",
       scope,
       ...(injectAgentsMd ? { injectAgentsMd: true } : {}),
+      ...(browserTools ? { browserTools: true } : {}),
       tools: inherited ? "inherit" : tools
     };
     const success = await run({ type: "subagent.save", subagent: definition });
@@ -193,7 +199,7 @@ export function SubagentSettings({ resources, workspaceOpen, models, providers }
                       <div className="resource-item-icon subagent-color" data-color={subagent.color ?? "amber"}><Bot size={14} /></div>
                       <div className="resource-item-copy">
                         <strong>{subagent.name}</strong>
-                        <small>{subagentScopeLabel(subagent.scope)} · {subagent.model ? `${subagent.model.provider}/${subagent.model.id}` : "继承默认模型"} · {subagent.thinkingLevel ? `思考 ${thinkingLevelLabels[subagent.thinkingLevel]}` : "思考继承会话"} · {subagent.tools === "inherit" ? "继承父会话工具" : "自定义工具"}</small>
+                        <small>{subagentScopeLabel(subagent.scope)} · {subagent.model ? `${subagent.model.provider}/${subagent.model.id}` : "继承默认模型"} · {subagent.thinkingLevel ? `思考 ${thinkingLevelLabels[subagent.thinkingLevel]}` : "思考继承会话"} · {subagent.tools === "inherit" ? "继承父会话工具" : "自定义工具"}{subagent.browserTools ? " · 浏览器" : ""}</small>
                         <em>{subagent.description || subagent.systemPrompt}</em>
                       </div>
                       {subagent.scope === "bundled" ? (
@@ -280,8 +286,9 @@ export function SubagentSettings({ resources, workspaceOpen, models, providers }
                     ))}
                   </div>
                 )}
+                <label className="checkbox-setting" data-control="subagent-browser-tools"><input type="checkbox" checked={browserTools} onChange={(changeEvent) => setBrowserTools(changeEvent.target.checked)} />浏览器自动化（browser_*，可在实施中打开内置浏览器验证页面、点击调试与截图；与主会话共享同一浏览器，导航等敏感操作仍走同一道审批）</label>
               </fieldset>
-              <p className="resource-form-help">运行时：子代理与主会话同口径套用用户手动修正的 token 限额；思考等级按「子模型实际支持的档位」自动降级（Pi 口径，与主会话菜单一致，可在委派卡片上看到本次实测档位）；风险工具（bash/edit/write 等）仍走同一审批闸口。子代理空产出（既不返回文本也无工具调用）计为失败并上报原因，不再伪装成成功；新增定义后活动会话会自动重建以刷新可用清单（会话忙时跳过，下次重建生效）。</p>
+              <p className="resource-form-help">运行时：子代理与主会话同口径套用用户手动修正的 token 限额；思考等级按「子模型实际支持的档位」自动降级（Pi 口径，与主会话菜单一致，可在委派卡片上看到本次实测档位）；风险工具（bash/edit/write 等）仍走同一审批闸口；开启浏览器能力后，browser_* 与主会话共享同一内置浏览器实例，浏览器总闸（设置 → 通用）实时生效。子代理空产出（既不返回文本也无工具调用）计为失败并上报原因，不再伪装成成功；新增定义后活动会话会自动重建以刷新可用清单（会话忙时跳过，下次重建生效）。</p>
             </div>
           </section>
         )}

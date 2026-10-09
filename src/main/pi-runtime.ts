@@ -713,6 +713,16 @@ function buildSubagentTools(record: Pick<SessionRuntimeRecord, "workspace" | "ag
     transformModel: (candidate) => applyModelOverrides(candidate),
     parentSessionId: sessionId,
     requestPermission: (toolName, args, toolCallId) => runtimePermissions.requestPermission(record.permissionDeps, toolName, args, toolCallId, "subagent"),
+    // 浏览器能力构建器（定义 browserTools=true 时子代理才能用 browser_*）：与主会话
+    // 同一控制器与串行锁；sessionKey 用父会话 id——权限弹卡、浏览器横幅与下载部
+    // 归属到用户正在看的会话；总闸/工作区/截图目录与父会话完全同源。
+    buildBrowserTools: () => runtimeBrowser.buildBrowserTools({
+      request: (op) => requestBrowserAutomation(sessionId ?? "", op),
+      enabled: () => settings?.browser?.enabled !== false,
+      workspace: () => record.workspace || undefined,
+      resolveUploadFiles: (files) => Promise.resolve(resolveWorkspaceUploadFiles(record.workspace, files)),
+      saveScreenshot: (data, mimeType) => saveBrowserScreenshot(record.workspace, data, mimeType)
+    }),
     isDelegationChild
   };
   return createSubagentTools(ctx);

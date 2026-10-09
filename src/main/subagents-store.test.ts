@@ -63,6 +63,15 @@ describe("normalizeSubagent", () => {
     expect(normalizeSubagent({ id: "a", name: "A", systemPrompt: "x", scope: "bundled" }).scope).toBe("global");
   });
 
+  it("keeps browserTools only when explicitly true (missing/非布尔一律按关闭，不落字段)", () => {
+    // 与 injectAgentsMd 同款纪律：undefined/false/字符串都不开启，且 false 不落字段
+    // ——保持磁盘 JSON 紧凑，也让「字段存在」可靠地等价于「能力开启」。
+    expect(normalizeSubagent({ id: "a", name: "A", systemPrompt: "x", browserTools: true }).browserTools).toBe(true);
+    expect("browserTools" in normalizeSubagent({ id: "a", name: "A", systemPrompt: "x", browserTools: false })).toBe(false);
+    expect("browserTools" in normalizeSubagent({ id: "a", name: "A", systemPrompt: "x" })).toBe(false);
+    expect("browserTools" in normalizeSubagent({ id: "a", name: "A", systemPrompt: "x", browserTools: "yes" })).toBe(false);
+  });
+
   it("keeps inherit as-is", () => {
     const result = normalizeSubagent({ id: "a", name: "A", systemPrompt: "x", tools: "inherit" });
     expect(result.tools).toBe("inherit");

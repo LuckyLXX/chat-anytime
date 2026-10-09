@@ -38,6 +38,8 @@ export function normalizeSubagent(value: unknown): SubagentDefinition {
   const thinkingLevel = normalizeThinkingLevel(value.thinkingLevel);
   const color = typeof value.color === "string" && value.color.trim() ? value.color.trim() : undefined;
   const injectAgentsMd = value.injectAgentsMd === true;
+  // 浏览器能力开关：非布尔/缺省一律按关闭归一化（不落字段，保持 JSON 紧凑）。
+  const browserTools = value.browserTools === true;
   // tools: "inherit" 原样保留；否则归一化到完整的 BuiltinToolName 启停表。
   let tools: SubagentDefinition["tools"];
   if (value.tools === "inherit") {
@@ -60,7 +62,8 @@ export function normalizeSubagent(value: unknown): SubagentDefinition {
     ...(color ? { color } : {}),
     ...(model ? { model } : {}),
     ...(thinkingLevel ? { thinkingLevel } : {}),
-    ...(injectAgentsMd ? { injectAgentsMd: true } : {})
+    ...(injectAgentsMd ? { injectAgentsMd: true } : {}),
+    ...(browserTools ? { browserTools: true } : {})
   };
   return result;
 }

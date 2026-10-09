@@ -54,6 +54,12 @@ export interface SubagentContext {
   parentSessionId?: string;
   /** Route risky tool calls from the child through the same permission broker. */
   requestPermission(toolName: string, args: Record<string, unknown>, toolCallId: string): Promise<PermissionDecision>;
+  /**
+   * 为子代理构建浏览器自动化工具（定义 browserTools=true 时挂载）。由主进程侧
+   * 接线：sessionKey 用父会话 id（权限弹卡与浏览器横幅归父会话），工作区/截图/
+   * 上传目录与父会话同源。缺省（测试/演示）视为浏览器能力不可用。
+   */
+  buildBrowserTools?: () => ToolDefinition[];
   /** True when this context itself is a delegation child (blocks nesting). */
   isDelegationChild: boolean;
 }
@@ -321,6 +327,10 @@ async function runDelegation(ctx: SubagentContext, params: { goal?: unknown; rol
     systemPromptOverride: (base) => [base, childSystemPrompt, ...childInstruction].filter(Boolean).join("\n\n")
   });
   await resourceLoader.reload();
+  // 浏览器能力（定义声明 + 主进程接线都存在时才挂）：与主会话共享同一浏览器实例、
+  // 串行锁与总闸（enabled 闭包每次 execute 实读），导航等 browse 风险操作经
+  // createChildPermissionExtension 走父会话同一道权限门。
+  const childBrowserTools = childBrowserToolsFor(subagentDef, ctx.buildBrowserTools);
   // 思考等级：定义里设了就用自己的（`off` 是显式档位，不是「未设」），否则继承主会话
   // 当前档位。子模型不支持的档位由 createAgentSession 按 Pi 口径自动钳制（读的是
   // 已经过 transformModel 的模型对象，所以用户在设置页声明的思考等级映射同样生效）。
@@ -332,13 +342,16 @@ async function runDelegation(ctx: SubagentContext, params: { goal?: unknown; rol
     thinkingLevel: requestedThinking,
     sessionManager,
     settingsManager,
-    resourceLoader
+    resourceLoader,
+    ...(childBrowserTools.length > 0 ? { customTools: childBrowserTools } : {})
   });
   const enabledBuiltinTools = subagentDef.tools !== "inherit"
     ? Object.entries(subagentDef.tools).filter(([, enabled]) => enabled).map(([name]) => name)
     : Object.entries(ctx.agent.tools ?? {}).filter(([, enabled]) => enabled).map(([name]) => name);
+  // 激活集 = 原生工具 + 浏览器工具名（browser 族与主会话同策略：定义开启即整族
+  // 常驻激活，总闸在 execute 内实时兜底；注册≠激活，两者必须同时成立）。
   await child.bindExtensions({ onError: () => { /* logged via permission broker path */ } });
-  child.setActiveToolsByName(enabledBuiltinTools);
+  child.setActiveToolsByName([...enabledBuiltinTools, ...childBrowserTools.map((tool) => tool.name)]);
 
   try {
     const tracker = new DelegationTracker({
@@ -394,6 +407,17 @@ export function resolveDelegationModelTarget(
 export function resolveSubagentDefinition(catalog: SubagentDefinition[] | undefined, key: string): SubagentDefinition | undefined {
   if (!catalog || !key) return undefined;
   return catalog.find((entry) => entry.id === key) ?? catalog.find((entry) => entry.name === key);
+}
+
+/**
+ * 子代理 customTools 的决策（纯函数，独立单测）：定义声明 browserTools 且主进程
+ * 提供了构建器时返回浏览器工具族，否则空数组（行为与现状完全一致）。
+ */
+export function childBrowserToolsFor(
+  definition: Pick<SubagentDefinition, "browserTools">,
+  builder: (() => ToolDefinition[]) | undefined
+): ToolDefinition[] {
+  return definition.browserTools === true && builder ? builder() : [];
 }
 
 /**

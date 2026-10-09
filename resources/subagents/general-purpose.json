@@ -4,6 +4,7 @@
   "description": "没有专用子智能体适配、但任务仍可独立完成时使用：多文件批量改动、机械式重构或迁移、按模板生成一批产物、跑脚本与验证等。有专用子智能体（如代码审查、项目探索）时不要用它。",
   "color": "violet",
   "injectAgentsMd": true,
+  "browserTools": true,
   "tools": {
     "read": true,
     "bash": true,

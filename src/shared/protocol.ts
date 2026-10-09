@@ -173,6 +173,16 @@ export interface SubagentDefinition {
   systemPrompt: string;
   /** 可用工具集："inherit" = 继承父会话已启用的内置工具；否则按启停数组精确控制。 */
   tools: Record<BuiltinToolName, boolean> | "inherit";
+  /**
+   * 浏览器自动化能力（browser_* 工具族）：开启后子代理可在实施过程中操作
+   * 内置浏览器（打开 localhost 验证页面、点击调试、截图对比）。与主会话共享
+   * 同一浏览器实例与串行锁；导航等 browse 风险操作仍走父会话同一道权限门，
+   * 总闸 settings.browser.enabled 在每次调用内实时生效。缺省关闭。
+   *
+   * 独立于 `tools` 表的原因：tools 的键是 Pi 原生工具名（与 AgentProfile.tools
+   * 同源），而 browser_* 是 customTools 能力，语义与归一化路径都不同。
+   */
+  browserTools?: boolean;
   scope: SubagentScope;
   /** 是否注入工作区 AGENTS.md 作为子代理系统提示的一部分。 */
   injectAgentsMd?: boolean;
