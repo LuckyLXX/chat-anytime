@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { SshAutomationRequest, SshAutomationResult } from "../shared/protocol.js";
-import { buildSshTools, dataFromLiteral } from "./runtime-ssh.js";
+import { buildSshTools, dataFromLiteral, TRANSFER_OUTER_TIMEOUT_MS } from "./runtime-ssh.js";
 
 function createHarness(options: { enabled?: boolean; result?: SshAutomationResult } = {}) {
   const requests: Array<{ request: SshAutomationRequest; timeoutMs: number | undefined }> = [];
@@ -73,14 +73,29 @@ describe("buildSshTools", () => {
     expect(requests).toHaveLength(0);
   });
 
-  it("resolves the upload path and passes the RPC timeout through", async () => {
+  it("resolves the upload path and passes the idle budget through, with a generous outer watchdog", async () => {
     const { tools, requests } = createHarness({
       result: { ok: true, data: { kind: "upload", remotePath: "/root/app.zip", name: "app.zip", bytes: 42 } }
     });
     const tool = toolByName(tools, "ssh_upload");
     const result = await tool.execute("id", { localPath: "dist/app.zip", remoteDir: "/root", timeoutSeconds: 120 }, undefined, undefined, undefined as never);
-    expect(requests).toEqual([{ request: { op: "upload", localPath: "/ws/dist/app.zip", remoteDir: "/root", timeoutMs: 120_000 }, timeoutMs: 120_000 }]);
+    // timeoutMs 进请求（= 主进程的空闲预算）；外层看门狗固定宽于主进程自己的总时长上限，
+    // 不能跟着工具参数缩（否则「进度正常但慢」的大文件会被外层先掐断）。
+    expect(requests).toEqual([{
+      request: { op: "upload", localPath: "/ws/dist/app.zip", remoteDir: "/root", timeoutMs: 120_000 },
+      timeoutMs: TRANSFER_OUTER_TIMEOUT_MS
+    }]);
     expect(JSON.stringify(result)).toContain("/root/app.zip");
+  });
+
+  it("tells the model when an upload was completed by the remote-size check", async () => {
+    // 降级完成（最后一个确认没回来、按远端大小核对为完整）必须进回执，不能被当成正常路径。
+    const { tools } = createHarness({
+      result: { ok: true, data: { kind: "upload", remotePath: "/root/a.txt", name: "a.txt", bytes: 3, note: "已按远端文件大小核对为完整" } }
+    });
+    const tool = toolByName(tools, "ssh_upload");
+    const result = await tool.execute("id", { localPath: "a.txt", remoteDir: "/root" }, undefined, undefined, undefined as never);
+    expect(JSON.stringify(result)).toContain("已按远端文件大小核对为完整");
   });
 
   it("mentions the auto-rename when the remote name changed", async () => {
@@ -98,7 +113,7 @@ describe("buildSshTools", () => {
     });
     const tool = toolByName(tools, "ssh_download");
     const result = await tool.execute("id", { remotePath: "/var/log/app.log" }, undefined, undefined, undefined as never);
-    expect(requests).toEqual([{ request: { op: "download", remotePath: "/var/log/app.log", localDir: "/ws/.pidesktop/downloads" }, timeoutMs: undefined }]);
+    expect(requests).toEqual([{ request: { op: "download", remotePath: "/var/log/app.log", localDir: "/ws/.pidesktop/downloads" }, timeoutMs: TRANSFER_OUTER_TIMEOUT_MS }]);
     expect(JSON.stringify(result)).toContain(".pidesktop/downloads/app.log");
   });
 

@@ -38,6 +38,14 @@ export interface SshToolDeps {
 const DISABLED_TEXT = "AI 的 SSH 远程操作已在设置中停用（settings.ssh.enabled），请在设置中开启后再试。";
 
 /**
+ * 上传/下载的外层看门狗。主进程侧的判据是「空闲超时（默认 60 秒无字节进展）+
+ * 30 分钟总时长上限」，所以外层不能按工具参数算——否则「进度正常但慢」的大文件会先
+ * 被外层掐断，而主进程仍在传（工具报错、文件却还在写，是最糟的组合）。这里只防主进程
+ * 整体挂死，必须宽于主进程自己的上限（与 main/ssh-sftp.ts 的 SFTP_MAX_TIMEOUT_MS 对齐）。
+ */
+export const TRANSFER_OUTER_TIMEOUT_MS = 31 * 60_000;
+
+/**
  * SSH 工具族的激活判据（toolNamesFor 消费）：全局总闸 AND 角色级 overlay。
  * 任一关闭即整族从活动集摘除（8 个 ssh_* 同进同出）；execute 内的 enabled
  * 闭包保留作第二道防线（在途回合/旧会话兑底）。人的 SSH 面板不受影响。
@@ -214,7 +222,7 @@ export function buildSshTools(deps: SshToolDeps): ToolDefinition[] {
         localPath: Type.String({ description: "本地文件的工作区相对路径，例：dist/app.zip" }),
         remoteDir: Type.String({ description: "远端目标目录（绝对路径），例：/var/www" }),
         remoteName: Type.Optional(Type.String({ description: "远端文件名（缺省用本地文件名）" })),
-        timeoutSeconds: Type.Optional(Type.Number({ description: "超时秒数（1–1800，默认 300）" }))
+        timeoutSeconds: Type.Optional(Type.Number({ description: "无数据进展的容忍秒数（1–1800，缺省 60）：不是总时长，链路慢但一直在传不会被判超时" }))
       }),
       execute: async (_id, params) => {
         const localPath = typeof params?.localPath === "string" ? params.localPath.trim() : "";
@@ -230,10 +238,10 @@ export function buildSshTools(deps: SshToolDeps): ToolDefinition[] {
         const result = await run(
           deps,
           { op: "upload", localPath: absolute, remoteDir, ...(remoteName ? { remoteName } : {}), ...(timeoutMs !== undefined ? { timeoutMs } : {}) },
-          timeoutMs
+          TRANSFER_OUTER_TIMEOUT_MS
         );
         if (result.data.kind !== "upload") throw new Error("upload 操作返回了意外结果");
-        const { remotePath, name, bytes } = result.data;
+        const { remotePath, name, bytes, note } = result.data;
         // 期望名 = 显式 remoteName 或本地文件名（取末段），与之一致即未发生防覆盖改名。
         const expectedName = remoteName || localPath.split("/").pop() || "";
         const renamed = Boolean(expectedName) && name !== expectedName;
@@ -242,10 +250,12 @@ export function buildSshTools(deps: SshToolDeps): ToolDefinition[] {
             type: "text" as const,
             text: [
               `已上传 ${name}（${bytes} 字节）到 ${remotePath}。`,
-              renamed ? "远端已存在同名文件，本次自动改名以避免覆盖。" : ""
+              renamed ? "远端已存在同名文件，本次自动改名以避免覆盖。" : "",
+              // 降级完成必须说出来：远端字节数核对一致，但最后一个确认没回来。
+              note ? `注意：${note}` : ""
             ].filter(Boolean).join("\n")
           }],
-          details: { remotePath, name, bytes }
+          details: { remotePath, name, bytes, ...(note ? { note } : {}) }
         };
       }
     }),
@@ -256,7 +266,7 @@ export function buildSshTools(deps: SshToolDeps): ToolDefinition[] {
       promptSnippet: "ssh_download: 从远程主机下载文件到本地",
       parameters: Type.Object({
         remotePath: Type.String({ description: "远端文件绝对路径，例：/var/log/app.log" }),
-        timeoutSeconds: Type.Optional(Type.Number({ description: "超时秒数（1–1800，默认 300）" }))
+        timeoutSeconds: Type.Optional(Type.Number({ description: "无数据进展的容忍秒数（1–1800，缺省 60）：不是总时长，链路慢但一直在传不会被判超时" }))
       }),
       execute: async (_id, params) => {
         const remotePath = typeof params?.remotePath === "string" ? params.remotePath.trim() : "";
@@ -264,7 +274,7 @@ export function buildSshTools(deps: SshToolDeps): ToolDefinition[] {
         const localDir = deps.downloadDir?.();
         if (!localDir) throw new Error("当前会话未确定工作区，无法下载（请让用户先选择工作区）");
         const timeoutMs = typeof params?.timeoutSeconds === "number" ? Math.round(params.timeoutSeconds * 1000) : undefined;
-        const result = await run(deps, { op: "download", remotePath, localDir, ...(timeoutMs !== undefined ? { timeoutMs } : {}) }, timeoutMs);
+        const result = await run(deps, { op: "download", remotePath, localDir, ...(timeoutMs !== undefined ? { timeoutMs } : {}) }, TRANSFER_OUTER_TIMEOUT_MS);
         if (result.data.kind !== "download") throw new Error("download 操作返回了意外结果");
         const { localPath, name, bytes } = result.data;
         // 相对路径交给注入的 workspaceRelativeAttachment 算（不在这里手工拼字符串）。

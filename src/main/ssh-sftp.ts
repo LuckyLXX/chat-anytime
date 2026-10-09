@@ -15,6 +15,10 @@ import type { SshEventData, SshRemoteEntry } from "../shared/protocol.js";
  *   WriteStream）：上传走 OPEN/WRITE/CLOSE 三个原语、8 个 WRITE 同时在途，
  *   既精确按字节计进度、可中断、可清理，又能打满链路。详见 pipeUpload 的注释
  *   —— ssh2 的远端 WriteStream 从不发 finish，是旧实现「每次都超时」的根因。
+ * - **句柄就绪前不读本地流**：FS 读流几乎立刻有数据，而 OPEN 要等一个 RTT；读了却
+ *   无处可写就是静默丢块（远端文件变短却报成功，2026-10-09 修）。
+ * - **超时是空闲口径**：一段时间内没有任何字节被确认才算卡住；到点先 `stat` 远端，
+ *   字节数与预期一致就判成功并保留文件（最后一个确认丢失时不该删掉一份好文件）。
  * - **半成品约定**：下载先写 `<name>.part` 再 rename，失败/取消 unlink；上传失败
  *   尽力 unlink 远端半成品（远端清理失败只并入错误文案，不掩盖原始错误）。
  * - **绝不覆盖**：本地同名递增序号（photo.png → photo-1.png），远端同名同样递增。
@@ -43,9 +47,44 @@ const UPLOAD_CHUNK_BYTES = 64 * 1024;
  */
 const UPLOAD_CONCURRENCY = 8;
 
-/** 传输默认/最大等待（与 ssh_exec 同量级，但传输普遍更久，故单独放宽）。 */
-export const SFTP_DEFAULT_TIMEOUT_MS = 300_000;
+/** 传输默认/最大等待（与 ssh_exec 同量级，但传输普遍更久，故单独放宽）。
+ *
+ * 口径是**空闲超时**（「多久没有字节进展」），不是总时长：旧实现把它当总时长预算，导致
+ * 「进度正常但链路慢」的大文件到点就被判死（连半成品一起删）。默认 60 秒——正常链路
+ * 几毫秒就有一个确认，一分钟没有任何字节被确认就是真卡住了（用户 2026-10-09 报的现象：
+ * 最后一个确认没回来，一直干等到 300 秒才报超时）。 */
+export const SFTP_DEFAULT_TIMEOUT_MS = 60_000;
+/** 空闲预算的可调区间（秒级），也是任何单次传输的**总时长上限**基准。 */
 export const SFTP_MAX_TIMEOUT_MS = 1_800_000;
+/** 空闲/总时长到点后核对远端文件大小的短看门狗：核对本身不能再挂住。 */
+const STALL_VERIFY_TIMEOUT_MS = 15_000;
+
+/** 空闲预算收敛：下限 1 秒（单测要能跑到），上限 SFTP_MAX_TIMEOUT_MS。 */
+function resolveIdleTimeout(timeoutMs?: number): number {
+  return Math.min(SFTP_MAX_TIMEOUT_MS, Math.max(1_000, Math.round(timeoutMs ?? SFTP_DEFAULT_TIMEOUT_MS)));
+}
+
+/**
+ * 传输进度计时器：**空闲超时** + 总时长上限（兜底，防「一直在慢慢爬」无限期占住调用）。
+ *
+ * 每次有字节进展（派出 WRITE / 收到 WRITE 确认）就重置空闲计时器：只要还在动就一直放行，
+ * 真正一动不动超过 idleMs 才算卡住。旧实现只有一个总时长计时器，于是两种误判同时存在：
+ * 正常但慢的传输被总时长判死（并删掉半成品），而真卡死也要干等到总时长才报。
+ */
+function createProgressTimers(options: { idleMs: number; totalMs: number; onIdle(): void; onTotal(): void }): { touch(): void; stop(): void } {
+  let idleTimer = setTimeout(options.onIdle, options.idleMs);
+  const totalTimer = setTimeout(options.onTotal, options.totalMs);
+  return {
+    touch(): void {
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(options.onIdle, options.idleMs);
+    },
+    stop(): void {
+      clearTimeout(idleTimer);
+      clearTimeout(totalTimer);
+    }
+  };
+}
 
 /** SFTP 通道的最小结构视图（index.ts 注入真实实现，测试注入 fake）。 */
 export interface SshSftpLike {
@@ -213,6 +252,8 @@ export interface SftpTransferOutcome {
   bytes: number;
   /** 上传=远端最终路径；下载=本地绝对路径。 */
   path: string;
+  /** 降级完成时的说明（目前只在上传「按远端大小核对」路径出现，供回执如实交代）。 */
+  note?: string;
 }
 
 interface ActiveTransfer {
@@ -282,15 +323,23 @@ export class SshSftpTransferService {
     const remotePath = remoteJoin(dir, finalName);
 
     try {
-      const bytes = await this.pipeUpload(transferId, "upload", finalName, {
+      const result = await this.pipeUpload(transferId, "upload", finalName, {
         localPath: request.localPath,
         total: size,
         timeoutMs: request.timeoutMs,
         remotePath,
         onCleanup: () => this.removeRemote(remotePath)
       });
-      this.publishState(transferId, "upload", finalName, bytes, size, "done");
-      return { name: finalName, bytes, path: remotePath };
+      this.publishState(transferId, "upload", finalName, result.bytes, size, "done");
+      return {
+        name: finalName,
+        bytes: result.bytes,
+        path: remotePath,
+        // 降级完成（最后一个确认未回、已按远端大小核对）必须如实交代，不能当作正常路径。
+        ...(result.recoveredBySizeCheck
+          ? { note: "远端字节数已核对一致，但最后一个传输确认未收到（链路/服务端未回 STATUS）——按成功处理，远端文件保留。" }
+          : {})
+      };
     } finally {
       this.finish();
     }
@@ -404,11 +453,27 @@ export class SshSftpTransferService {
     });
   }
 
-  private remoteSize(remotePath: string): Promise<number | undefined> {
+  /**
+   * 远端文件大小。timeoutMs 给定时加一层短看门狗（核对路径用）：stat 自己也可能挂住，
+   * 而它跑在「已经超时」的分支上，不能再把整个调用拖住。
+   */
+  private remoteSize(remotePath: string, timeoutMs?: number): Promise<number | undefined> {
     return new Promise((resolveSize) => {
-      this.sftp.stat(remotePath, (error, stats) => {
-        resolveSize(error || !stats ? undefined : stats.size);
-      });
+      let settled = false;
+      const finish = (value: number | undefined): void => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        resolveSize(value);
+      };
+      const timer = timeoutMs === undefined ? undefined : setTimeout(() => finish(undefined), timeoutMs);
+      try {
+        this.sftp.stat(remotePath, (error, stats) => {
+          finish(error || !stats ? undefined : stats.size);
+        });
+      } catch {
+        finish(undefined);
+      }
     });
   }
 
@@ -465,16 +530,25 @@ export class SshSftpTransferService {
    * 协议允许的——ssh2 自己的 fastXfer（fastPut）就是这么干的。
    *
    * 完成判据用 **CLOSE 的回调**：服务端确认句柄关闭后数据才算落盘，此时报 done 才不会说谎。
+   *
+   * 另一条硬约束（2026-10-09 修）：**OPEN 回调到达之前不读本地流**。读流几乎立刻
+   * 出数据，而 OPEN 要等一个 RTT；旧实现在这段窗口里照读并把块丢掉，RTT 越大丢得
+   * 越多（真机实测 100ms RTT 下整文件丢光、报「上传成功 0 字节」）。
+   *
+   * 超时口径（2026-10-09 用户报「上传完了就是不结束，像没有结束标识」）：空闲超时 +
+   * **到点先核对远端文件大小**。最后一个确认（WRITE/CLOSE 的 STATUS）没回来时，远端
+   * 文件往往已经完整；旧实现到点就 unlink，把一份好文件删掉。
    */
   private pipeUpload(
     transferId: string,
     direction: "upload",
     name: string,
     options: { localPath: string; total: number; timeoutMs?: number; remotePath: string; onCleanup(): void }
-  ): Promise<number> {
-    return new Promise<number>((resolveDone, rejectDone) => {
+  ): Promise<{ bytes: number; recoveredBySizeCheck: boolean }> {
+    return new Promise<{ bytes: number; recoveredBySizeCheck: boolean }>((resolveDone, rejectDone) => {
       const total = options.total;
-      const timeoutMs = Math.min(SFTP_MAX_TIMEOUT_MS, Math.max(1_000, Math.round(options.timeoutMs ?? SFTP_DEFAULT_TIMEOUT_MS)));
+      const idleMs = resolveIdleTimeout(options.timeoutMs);
+      const totalMs = Math.max(SFTP_MAX_TIMEOUT_MS, idleMs);
 
       // 本地读流按「一块」为单位产出。不用 pipe：我们要的是「在途 WRITE 达配额就停」
       // 的反压语义，交给流自己 pipe 会把数据无节制地灌进内存排队。
@@ -484,13 +558,15 @@ export class SshSftpTransferService {
       let offset = 0;
       let inflight = 0;
       let transferred = 0;
+      /** 已从本地读出的字节数。不变量：收尾时必须 === transferred（见 closeWhenDrained）。 */
+      let consumed = 0;
       let settled = false;
       let cancelled = false;
       let lastPublishedAt = 0;
       let sourceEnded = false;
 
       const teardown = (): void => {
-        clearTimeout(timer);
+        timers.stop();
         source.destroy();
         // 成功路径由 closeWhenDrained 关句柄；失败/取消路径在这里补一刀，避免句柄泄漏。
         if (handle) {
@@ -509,10 +585,37 @@ export class SshSftpTransferService {
         rejectDone(error);
       };
 
-      const timer = setTimeout(() => {
-        cancelled = true;
-        fail(new Error(`传输超时（${Math.round(timeoutMs / 1000)} 秒），已中止并清理未完成的文件`), "error");
-      }, timeoutMs);
+      /**
+       * 空闲/总时长到点：**先核对远端文件大小再决定生死**。
+       *
+       * 用户 2026-10-09 报的现象（小文件，面板与 AI 均复现）：进度走完、远端文件其实完整，
+       * 但「就是不结束，像没有结束标识」——最后一个确认（CLOSE 或 WRITE 的 STATUS）
+       * 没回来。旧实现到点直接 unlink，把一份好文件删掉。现在：远端字节数与预期一致
+       * ⇒ 判成功（保留文件，回执里如实注明降级完成）；不一致 ⇒ 才是真失败，照旧清理。
+       */
+      const resolveStall = (reason: "idle" | "total"): void => {
+        if (settled) return;
+        const label = reason === "idle"
+          ? `传输超时（${Math.round(idleMs / 1000)} 秒内没有任何字节被确认）`
+          : `传输超过总时长上限（${Math.round(totalMs / 1000)} 秒）`;
+        void this.remoteSize(options.remotePath, STALL_VERIFY_TIMEOUT_MS).then((remoteBytes) => {
+          if (settled) return;
+          if (remoteBytes !== undefined && remoteBytes === total) {
+            settled = true;
+            teardown(); // 顺便尽力关掉远端句柄（不等它的确认）
+            resolveDone({ bytes: total, recoveredBySizeCheck: true });
+            return;
+          }
+          fail(new Error(`${label}，已中止并清理未完成的文件`), "error");
+        });
+      };
+
+      const timers = createProgressTimers({
+        idleMs,
+        totalMs,
+        onIdle: () => resolveStall("idle"),
+        onTotal: () => resolveStall("total")
+      });
 
       // 注册真实中断器，供 cancel() 调用；并兑现注册之前收到的取消请求。
       if (this.active && this.active.transferId === transferId) {
@@ -537,6 +640,16 @@ export class SshSftpTransferService {
       /** 所有块写清、本地也读完 → CLOSE，等它的回调才算成功。 */
       const closeWhenDrained = (): void => {
         if (settled || !handle) return;
+        // 收尾不变量：**从本地读出的每一个字节都必须已经派给远端**。
+        // 旧实现让 pump 在 OPEN 回调之前就能读流，读到的块因 handle 未就绪被
+        // `dispatch` 直接 return 丢掉（既不写也不计字节，offset 不前进）——
+        // 真机实测（OpenSSH + 100ms RTT）**整个文件被丢光**却报「上传成功 0 字节」，
+        // 本机回环也会随机丢 1–2 块并把文件静默截短。这里把它变成一声明确的失败
+        // （远端半成品照常清理），任何「读了没写」的路径都不可能再伪装成成功。
+        if (consumed !== transferred) {
+          fail(new Error(`上传中止：本地已读 ${consumed} 字节，只有 ${transferred} 字节写出到远端（远端文件已清理）`), "error");
+          return;
+        }
         const closing = handle;
         handle = undefined;
         this.sftp.close(closing, (error) => {
@@ -546,8 +659,8 @@ export class SshSftpTransferService {
             return;
           }
           settled = true;
-          clearTimeout(timer);
-          resolveDone(transferred);
+          timers.stop();
+          resolveDone({ bytes: transferred, recoveredBySizeCheck: false });
         });
       };
 
@@ -559,6 +672,7 @@ export class SshSftpTransferService {
           return;
         }
         if (settled) return;
+        timers.touch(); // 收到确认＝有进展
         if (sourceEnded && inflight === 0) {
           closeWhenDrained();
           return;
@@ -566,14 +680,17 @@ export class SshSftpTransferService {
         pump();
       };
 
-      /** 派一块：截取当前偏移处的字节，占用一个在途名额。 */
-      const dispatch = (chunk: Buffer): void => {
-        const activeHandle = handle;
-        if (!activeHandle) return;
+      /**
+       * 派一块：截取当前偏移处的字节，占用一个在途名额。
+       * 句柄由调用方**传入**而不是就地读 `handle`——没有句柄就没有写入口，
+       * 那种「读到了却写不了」的状态在 pump 里就被挡住了，这里不存在丢弃分支。
+       */
+      const dispatch = (chunk: Buffer, activeHandle: Buffer): void => {
         const position = offset;
         offset += chunk.length;
         inflight += 1;
         transferred += chunk.length;
+        timers.touch(); // 派出字节＝有进展
         publishProgress();
         this.sftp.write(activeHandle, chunk, 0, chunk.length, position, (error) => {
           onWriteDone(error ?? undefined);
@@ -583,13 +700,20 @@ export class SshSftpTransferService {
       /**
        * 在配额内尽量多派块。用显式 read() 而不是 data 事件：暂停/恢复的时机由我们
        * 自己掌握（在途数达配额就停手），不必和流内部缓冲抢节奏。
+       *
+       * **句柄未就绪时一个字节都不读**：SFTP 的 OPEN 要等一个 RTT，而本地读流
+       * 几乎立刻就有数据（'readable' 先于 open 回调到达）。旧实现照样读，读到的块
+       * 无处可写被丢掉——磁盘越快、RTT 越大丢得越多（实测 RTT 100ms 时整文件丢光）。
+       * 停手后读流只会缓冲到 highWaterMark 就自然反压，不会把文件灌进内存。
        */
       const pump = (): void => {
-        if (settled) return;
+        if (settled || !handle) return;
+        const activeHandle = handle;
         while (!sourceEnded && inflight < UPLOAD_CONCURRENCY) {
           const chunk = source.read() as Buffer | null;
           if (chunk === null) break; // 暂无数据，等 readable 事件再试
-          dispatch(chunk);
+          consumed += chunk.length;
+          dispatch(chunk, activeHandle);
         }
         // 本地读完 + 在途清空：可能是空文件，也可能是最后一块刚好写完。
         if (!settled && sourceEnded && inflight === 0) closeWhenDrained();
@@ -608,8 +732,9 @@ export class SshSftpTransferService {
           return;
         }
         handle = openedHandle;
-        // open 之前可读流可能已经攒好数据甚至读完（事件早于回调到达）：显式补一轮，
-        // 否则空文件与小文件会停在这里等一个永不到来的 readable。
+        timers.touch();
+        // pump 在句柄就绪前不读流，所以 open 之前攒下的数据（以及空文件）都停在
+        // 这里：显式补一轮，否则会等一个永不到来的 readable。
         pump();
       });
     });
@@ -636,7 +761,8 @@ export class SshSftpTransferService {
   ): Promise<number> {
     return new Promise<number>((resolveDone, rejectDone) => {
       const total = options.total ?? 0;
-      const timeoutMs = Math.min(SFTP_MAX_TIMEOUT_MS, Math.max(1_000, Math.round(options.timeoutMs ?? SFTP_DEFAULT_TIMEOUT_MS)));
+      const idleMs = resolveIdleTimeout(options.timeoutMs);
+      const totalMs = Math.max(SFTP_MAX_TIMEOUT_MS, idleMs);
 
       let read: NodeJS.ReadableStream;
       let write: NodeJS.WritableStream;
@@ -646,7 +772,7 @@ export class SshSftpTransferService {
       let lastPublishedAt = 0;
 
       const teardown = (): void => {
-        clearTimeout(timer);
+        timers.stop();
         read?.unpipe?.(write);
         // NodeJS 的流类型声明未暴露 destroy（它在实现上存在：fs 流与 ssh2 流都有）。
         const destroy = (stream: unknown): void => {
@@ -671,14 +797,16 @@ export class SshSftpTransferService {
       const succeed = (): void => {
         if (settled) return;
         settled = true;
-        clearTimeout(timer);
+        timers.stop();
         resolveDone(transferred);
       };
 
-      const timer = setTimeout(() => {
-        cancelled = true;
-        fail(new Error(`传输超时（${Math.round(timeoutMs / 1000)} 秒），已中止并清理未完成的文件`), "error");
-      }, timeoutMs);
+      const timers = createProgressTimers({
+        idleMs,
+        totalMs,
+        onIdle: () => fail(new Error(`传输超时（${Math.round(idleMs / 1000)} 秒内没有任何数据到达），已中止并清理未完成的文件`), "error"),
+        onTotal: () => fail(new Error(`传输超过总时长上限（${Math.round(totalMs / 1000)} 秒），已中止并清理未完成的文件`), "error")
+      });
 
       try {
         read = (options.createLocalRead ?? options.createRemoteRead)!();
@@ -700,6 +828,7 @@ export class SshSftpTransferService {
 
       read.on("data", (chunk: Buffer | string) => {
         if (settled) return;
+        timers.touch(); // 有数据到达＝有进展
         transferred += Buffer.isBuffer(chunk) ? chunk.byteLength : Buffer.byteLength(String(chunk));
         const now = Date.now();
         if (now - lastPublishedAt >= PROGRESS_INTERVAL_MS) {
@@ -710,14 +839,10 @@ export class SshSftpTransferService {
       read.on("error", (error: Error) => fail(error, cancelled ? "cancelled" : "error"));
       write.on("error", (error: Error) => fail(error, cancelled ? "cancelled" : "error"));
 
-      // 本地读 → 远端写（上传）：写流 finish 表示远端收完；远端写流 close 亦兜底。
-      // 远端读 → 本地写（下载）：写流 finish 表示本地落盘完成。
-      // 完成信号只看写流 finish：这是标准 WritableStream 语义（本地上传读流读完后
-      // pipe 会自动 end 远端写流，远端收完发 finish）。**不监听 close 兜底**——ssh2 的
-      //远端 WriteStream 显式设了 `emitClose = false`（lib/protocol/SFTP.js:3846，
-      //注释 "For backwards compat do not emit close on destroy"），根本不会发 close；
-      //为此写一个永不触发的兜底只会误导后人（且若它真的在静默中止时发 close，
-      //兜底就会把失败误报成成功）。写流始终不发 finish 时由超时兜底。
+      // 完成信号：**下载方向**看本地 fs 写流的 finish（标准 WritableStream 语义，可靠）。
+      // 上传不走这里（见 pipeUpload）：ssh2 的远端 WriteStream 永不发 finish，且它的
+      // close 也不发（`emitClose = false`，lib/protocol/SFTP.js:3846）。这里的超时是
+      // 空闲口径（无数据到达才计时），不再用总时长卡正常但慢的下载。
       write.on("finish", () => succeed());
 
       read.pipe(write);

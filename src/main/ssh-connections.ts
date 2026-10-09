@@ -675,7 +675,7 @@ export class SshConnectionManager {
             ...(request.remoteName ? { remoteName: request.remoteName } : {}),
             ...(request.timeoutMs !== undefined ? { timeoutMs: request.timeoutMs } : {})
           });
-          return { ok: true, data: { kind: "upload", remotePath: result.path, name: result.name, bytes: result.bytes } };
+          return { ok: true, data: { kind: "upload", remotePath: result.path, name: result.name, bytes: result.bytes, ...(result.note ? { note: result.note } : {}) } };
         }
         case "download": {
           const record = this.boundRecord(sessionKey);

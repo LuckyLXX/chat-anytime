@@ -1383,8 +1383,9 @@ export type SshAutomationData =
   | { kind: "write"; written: number }
   | { kind: "read"; text: string; totalChars: number }
   | { kind: "close"; closed: boolean }
-  /** 上传完成：远端最终路径（同名冲突时为递增后的名字）+ 字节数。 */
-  | { kind: "upload"; remotePath: string; name: string; bytes: number }
+  /** 上传完成：远端最终路径（同名冲突时为递增后的名字）+ 字节数。
+   *  note：降级完成的说明（远端字节数已核对一致、但最后一个传输确认没收到）。 */
+  | { kind: "upload"; remotePath: string; name: string; bytes: number; note?: string }
   /** 下载完成：本地绝对路径 + 字节数。工作区相对路径由 utility 侧（知道工作区）
    *  用 workspaceRelativeAttachment 计算后写进回执——主进程不掌握工作区，不自造相对路径。 */
   | { kind: "download"; localPath: string; name: string; bytes: number };

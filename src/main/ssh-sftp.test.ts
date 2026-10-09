@@ -143,6 +143,12 @@ class FakeSftp implements SshSftpLike {
   closeError: Error | undefined;
   /** Test seam：open 时报错。 */
   openError: Error | undefined;
+  /** Test seam：OPEN 的确认延迟（模拟真实链路的 RTT，暴露「句柄就绪前读流」的丢块）。 */
+  openDelayMs = 0;
+  /** Test seam：WRITE 永不回调（模拟「确认丢失」，真机就是靠它卡到超时）。 */
+  writeNoResponse = false;
+  /** Test seam：服务端做完了 CLOSE（数据落盘）但 STATUS 没回客户端。 */
+  closeNoResponse = false;
 
   readdir(path: string, callback: (error: Error | undefined, list: SshRemoteStatsEntry[] | undefined) => void): void {
     this.readdirCalls.push(path);
@@ -204,7 +210,8 @@ class FakeSftp implements SshSftpLike {
     this.pending.set(id, []);
     const handle = Buffer.allocUnsafe(4);
     handle.writeUInt32BE(id, 0);
-    callback(undefined, handle);
+    if (this.openDelayMs > 0) setTimeout(() => callback(undefined, handle), this.openDelayMs);
+    else callback(undefined, handle);
   }
 
   write(handle: Buffer, buffer: Buffer, offset: number, length: number, position: number, callback: (error: Error | undefined) => void): void {
@@ -226,6 +233,7 @@ class FakeSftp implements SshSftpLike {
       this.pending.get(id)?.push(slice);
       callback(undefined);
     };
+    if (this.writeNoResponse) return; // 字节已发出，服务端的确认永远不回来
     if (this.writeDelayMs > 0) setTimeout(done, this.writeDelayMs);
     else done();
   }
@@ -244,6 +252,8 @@ class FakeSftp implements SshSftpLike {
     this.closedHandles.add(id);
     this.openHandles.delete(id);
     this.files.set(this.handlePaths.get(id)!, Buffer.concat(this.pending.get(id) ?? []));
+    // 服务端侧真的关完了句柄（数据落盘），只是 STATUS 没回到客户端。
+    if (this.closeNoResponse) return;
     callback(undefined);
   }
 
@@ -443,18 +453,80 @@ describe("SshSftpTransferService", () => {
     expect(sftp.unlinked).toContain("/root/big.bin");
   });
 
-  it("cleans the remote half-file when an upload times out", async () => {
+  it("cleans the remote half-file when no byte is ever confirmed", async () => {
     const { service, sftp, dir, published } = createHarness();
     const localPath = join(dir, "slow.bin");
-    // 传输至少要跑过 1 秒（超时下限）才能触发超时：128 块 × 90ms ÷ 8 并发 ≈ 1.4s。
+    writeFileSync(localPath, Buffer.alloc(4 * 64 * 1024, 2));
+    sftp.dirs.add("/root");
+    sftp.writeNoResponse = true; // 服务端从不确认：字节在途但一动不动
+
+    await expect(service.upload("t1", { localPath, remoteDir: "/root", timeoutMs: 1_000 })).rejects.toThrow("传输超时");
+    expect(transferStates(published).at(-1)).toBe("error");
+    expect(sftp.unlinked).toContain("/root/slow.bin");
+  });
+
+  it("passes a slow-but-progressing upload no matter how long it takes", async () => {
+    // 旧口径是「总时长预算」：每包 90ms 的链路上 8MB 文件会跑到 1.4s 而被 1 秒预算判死。
+    // 新口径是空闲超时——每 11ms 左右就有一个确认，只要还在动就不该被叫停。
+    const { service, sftp, dir, published } = createHarness();
+    const localPath = join(dir, "slow-but-alive.bin");
     writeFileSync(localPath, Buffer.alloc(128 * 64 * 1024, 2));
     sftp.dirs.add("/root");
     sftp.writeDelayMs = 90;
 
-    await expect(service.upload("t1", { localPath, remoteDir: "/root", timeoutMs: 1000 })).rejects.toThrow("传输超时");
+    const outcome = await service.upload("t1", { localPath, remoteDir: "/root", timeoutMs: 1_000 });
+
+    expect(outcome.bytes).toBe(128 * 64 * 1024);
+    expect(sftp.files.get("/root/slow-but-alive.bin")!.length).toBe(128 * 64 * 1024);
+    expect(transferStates(published).at(-1)).toBe("done");
+  }, 20_000);
+
+  it("keeps a complete remote file when the final CLOSE confirmation never arrives", async () => {
+    // 用户 2026-10-09 报的现象：小文件、进度走完、远端文件其实完整，但「就是不结束，
+    // 像没有结束标识」——最后一个确认没回来；旧实现等满超时后把这份好文件 unlink 掉。
+    const { service, sftp, dir, published } = createHarness();
+    const localPath = join(dir, "done.bin");
+    writeFileSync(localPath, "complete-payload");
+    sftp.dirs.add("/root");
+    sftp.closeNoResponse = true;
+
+    const outcome = await service.upload("t1", { localPath, remoteDir: "/root", timeoutMs: 1_000 });
+
+    expect(outcome.bytes).toBe(16);
+    expect(outcome.note).toContain("已核对一致");
+    expect(sftp.files.get("/root/done.bin")!.toString()).toBe("complete-payload");
+    expect(sftp.unlinked).toEqual([]);
+    expect(transferStates(published).at(-1)).toBe("done");
+  }, 20_000);
+
+  it("still fails and cleans up when the stall left a genuinely incomplete file", async () => {
+    const { service, sftp, dir, published } = createHarness();
+    const localPath = join(dir, "partial.bin");
+    writeFileSync(localPath, Buffer.alloc(4 * 64 * 1024, 6));
+    sftp.dirs.add("/root");
+    sftp.writeNoResponse = true;
+
+    await expect(service.upload("t1", { localPath, remoteDir: "/root", timeoutMs: 1_000 })).rejects.toThrow("没有任何字节被确认");
     expect(transferStates(published).at(-1)).toBe("error");
-    expect(sftp.unlinked).toContain("/root/slow.bin");
-  });
+    expect(sftp.unlinked).toContain("/root/partial.bin");
+  }, 20_000);
+
+  it("does not drop local bytes while the remote handle is still opening", async () => {
+    // 回归根因（2026-10-09）：OPEN 要等一个 RTT，本地读流几乎立刻就有数据；旧实现
+    // 在这段窗口里照读，读到的块因句柄未就绪被丢掉，远端文件静默变短却报成功。
+    const { service, sftp, dir } = createHarness();
+    const payload = Buffer.alloc(3 * 64 * 1024 + 1234, 5);
+    const localPath = join(dir, "rr.bin");
+    writeFileSync(localPath, payload);
+    sftp.dirs.add("/root");
+    sftp.openDelayMs = 40; // 句柄确认远晚于本地第一块数据
+
+    const outcome = await service.upload("t1", { localPath, remoteDir: "/root" });
+
+    expect(outcome.bytes).toBe(payload.length);
+    expect(sftp.files.get("/root/rr.bin")!.length).toBe(payload.length);
+    expect(sftp.files.get("/root/rr.bin")!.equals(payload)).toBe(true);
+  }, 20_000);
 
   it("downloads into a .part then renames, leaving no partial file", async () => {
     const { service, sftp, dir } = createHarness();
