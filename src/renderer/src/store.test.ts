@@ -474,6 +474,29 @@ describe("作品清单的水合与推送", () => {
   });
 });
 
+describe("命令级失败的会话归属", () => {
+  /**
+   * `runtime:send` 永不 reject（main 侧 handler 同步返回 void），渲染端只能靠这条
+   * 推送知道「刚才那次发送被拒了」；缺了它，会话格会留下一条假的乐观待回复
+   * （用户 2026-10-09 报告）。
+   */
+  it("带 sessionId 的 error 推送写进 commandError（全局 toast 照旧）", () => {
+    useDesktopStore.setState({ error: undefined, commandError: undefined });
+    useDesktopStore.getState().handleRuntimeMessage({ type: "error", message: "该会话不在运行中（可能已被回收），请重新打开", sessionId: "session-a" });
+
+    expect(useDesktopStore.getState().error).toBe("该会话不在运行中（可能已被回收），请重新打开");
+    expect(useDesktopStore.getState().commandError).toMatchObject({ sessionId: "session-a", message: "该会话不在运行中（可能已被回收），请重新打开" });
+    expect(typeof useDesktopStore.getState().commandError?.at).toBe("number");
+  });
+
+  it("不带 sessionId 的失败保留缺省（会话格一律不消费）", () => {
+    useDesktopStore.setState({ error: undefined, commandError: undefined });
+    useDesktopStore.getState().handleRuntimeMessage({ type: "error", message: "进程级失败" });
+
+    expect(useDesktopStore.getState().commandError?.sessionId).toBeUndefined();
+  });
+});
+
 describe("当前版本的水合", () => {
   it("bootstrap 的 version 被接住（设置弹窗左栏底部的版本标签靠它，dev 版也看得到版本）", async () => {
     const host = globalThis as { piDesktop?: unknown; window?: unknown };

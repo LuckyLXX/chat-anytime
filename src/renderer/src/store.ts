@@ -287,6 +287,12 @@ interface DesktopState {
   /** 子代理完整记录读取失败：childSessionId → 错误文案。 */
   transcriptErrors: Record<string, string>;
   error?: string;
+  /**
+   * 最近一条**命令级失败**（带所属会话）：命令分发 catch 的 error 推送。全局 `error` 只管
+   * 右下角 toast，这里给会话格用——同一格要就地收起乐观待回复并给一条内联提示。
+   * 缺省 sessionId = 无法归属到某一格（进程级失败），会话格一律不消费。
+   */
+  commandError?: { sessionId?: string; message: string; at: number };
   initialize(): Promise<() => void>;
   handleRuntimeMessage(message: RuntimeMessage): void;
   clearError(): void;
@@ -632,7 +638,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
         set({ usageStats: message.stats, usageStatsLoading: false });
         break;
       case "error":
-        set({ error: message.message });
+        set({ error: message.message, commandError: { sessionId: message.sessionId, message: message.message, at: Date.now() } });
         break;
       case "log":
         if (message.level === "warn") console.warn(message.message);

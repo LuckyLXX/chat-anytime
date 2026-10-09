@@ -2098,7 +2098,13 @@ export type RuntimeMessage =
   | { type: "design-snapshot.request"; requestId: string; request: DesignSnapshotRequest }
   /** utility 进程请求显示/隐藏电脑控制悬浮提示条（computer_* 操作期间告知用户「AI 正在操作 XX」）。 */
   | { type: "computer-overlay.request"; kind: "show" | "hide"; text?: string }
-  | { type: "error"; message: string }
+  /**
+   * 失败提示。`sessionId` 只在**命令级失败**（utility 的命令分发 catch，命令本身带着会话）时给出：
+   * `runtime:send` 是「发了就不回」的通道（main 侧 handler 返回 void），渲染端 `await send()`
+   * 对这类失败永不 reject，只能靠这条推送知道「刚才那次发送被拒了」——发起格据此收起乐观
+   * 待回复并就地提示。缺省（进程级/无会话的失败）保持原样：只弹全局 toast。
+   */
+  | { type: "error"; message: string; sessionId?: string }
   /** 子代理完整记录（响应 subagent.transcript）；childSessionId 用于对齐请求。 */
   | { type: "subagent.transcript-result"; childSessionId: string; messages: ChatMessage[] }
   /** 子代理完整记录读取失败（文件不存在等）；弹窗内展示，不走全局 toast。 */

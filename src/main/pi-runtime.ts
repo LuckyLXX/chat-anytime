@@ -20,6 +20,7 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { BackgroundProcessRegistry, bashCommandsFromMessages, isBackgroundCommand } from "./background-processes.js";
+import { commandSessionId } from "./command-error.js";
 import { alignQueueState, imageAttachmentsFrom, promoteQueueMessage, queuedMessageText, queueSnapshotMessages, removeQueueMessage, replayQueueArgs, type PromoteOutcome } from "./queue-images.js";
 import { normalizeMessages, userMessageText } from "./message-normalize.js";
 import { applyModelOverrides as applyStoredModelOverrides, buildCatalogModels, imageInputOverride, isModelEnabled, pickFallbackModel, pruneDisabledModelRefs, resolveRestoredSessionModel } from "./model-catalog.js";
@@ -5286,6 +5287,8 @@ parentPort.on("message", (event: { data: RuntimeCommand }) => {
   commandQueue = commandQueue
     .then(() => handleCommand(event.data))
     .catch((error) => {
-      post({ type: "error", message: errorText(error) });
+      // 带上命令所属会话：渲染端据此收起那一格的乐观待回复并就地提示（见
+      // command-error.ts —— runtime:send 永不 reject，失败只能靠推送告知）。
+      post({ type: "error", message: errorText(error), sessionId: commandSessionId(event.data) });
     });
 });

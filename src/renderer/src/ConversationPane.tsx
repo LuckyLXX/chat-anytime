@@ -65,6 +65,7 @@ import { actionTimelineSegments, actionTimelineStats, formatProcessDuration, typ
 import { changedFilesForMessage, type ReplyChangedFile } from "./lib/changed-files";
 import { createAssistantMessageGrouper } from "./lib/chat-layout";
 import { createMessageExecutionSubsetter, EMPTY_EXECUTIONS } from "./lib/message-executions";
+import { commandErrorTargetsPane, localTurnDeadline, localTurnForPane, type LocalTurn } from "./lib/local-turn";
 import { buildTurnSummaries } from "./lib/turn-summary";
 import { TIMELINE_LIVE_MARGIN, TIMELINE_WINDOW_MIN_MESSAGES, createTimelineObserver, estimateMessageHeight, placeholderHeightFor, shouldRenderLive, type TimelineObserver } from "./lib/timeline-window";
 import { buildEditDiffs, delegateArgsSummary, editArgsSummary, languageFromPath, parseDelegateCallArgs, parseEditCallArgs, parseReadCallArgs, parseWriteCallArgs, writeArgsSummary, type DelegateCallPreview, type EditCallPreview, type EditDiffBlock, type WriteCallPreview } from "./lib/tool-call-preview";
@@ -763,6 +764,8 @@ export const ConversationPane = memo(function ConversationPane({
   const questions = useDesktopStore((state) => state.questions);
   const question = currentQuestionRequest(questions, data.sessionId);
   const showThinking = settings.appearance.showThinking;
+  // 最近一条命令级失败（带所属会话）：本格据此收起乐观待回复并给内联提示。
+  const commandError = useDesktopStore((state) => state.commandError);
 
   const [input, setInput] = useState(() => (sessionId !== undefined ? draftStore?.load(sessionId) ?? "" : ""));
   // 已选斜杠调用（Skill / 自定义命令，可多个混搭）：一次消息可同时挂多个，按选择
@@ -775,7 +778,10 @@ export const ConversationPane = memo(function ConversationPane({
   const [editingMessageTimestamp, setEditingMessageTimestamp] = useState<number>();
   // 本地待回复计时必须绑定发起回合时的会话：跨会话/跨格子同时执行时 busy 恒为
   // true，按 busy 清理的 effect 不会触发；绑定 sessionId 后格子间自动失效。
-  const [localTurn, setLocalTurn] = useState<{ startedAt: number; sessionId: string | undefined }>();
+  const [localTurn, setLocalTurn] = useState<LocalTurn>();
+  // 最近一次「本格发送被运行时拒了」：就地内联提示（发送前已清空输入框，光靠
+  // 右下角 toast 用户很容易错过）。只对本格生效，会切会话自动隐藏。
+  const [sendFailure, setSendFailure] = useState<{ sessionId?: string; message: string; at: number }>();
   const [attachments, setAttachments] = useState<PromptAttachment[]>([]);
   const [attachmentError, setAttachmentError] = useState<string>();
   // composerBridge 跨层合并附件时读取的镜像：api 闭包固定在首次挂载，状态经 ref 同步。
@@ -863,7 +869,10 @@ export const ConversationPane = memo(function ConversationPane({
   const turnStartKeys = useMemo(() => new Set(turns.map((turn) => turn.key)), [turns]);
   const latestAssistantIndex = useMemo(() => [...displayMessages].reverse().findIndex((message) => message.role === "assistant"), [displayMessages]);
   const latestAssistantMessageIndex = latestAssistantIndex < 0 ? -1 : displayMessages.length - 1 - latestAssistantIndex;
-  const localTiming = localTurn !== undefined && localTurn.sessionId === data.sessionId ? { startedAt: localTurn.startedAt } satisfies TurnTiming : undefined;
+  const paneSessionId = data.sessionId ?? sessionId;
+  const localTiming = localTurnForPane(localTurn, paneSessionId);
+  // 本格的发送失败提示（只显示归属本格的）：切会话自然隐藏。
+  const failedSend = sendFailure !== undefined && sendFailure.sessionId === paneSessionId ? sendFailure : undefined;
   const localTurnPending = localTiming !== undefined && (data.turnTiming === undefined || data.turnTiming.startedAt < localTiming.startedAt);
   const activeTurnTiming = localTurnPending ? localTiming : data.turnTiming;
   const isGenerating = localTurnPending || Boolean(data.busy && data.turnTiming && data.turnTiming.completedAt === undefined);
@@ -1109,11 +1118,36 @@ export const ConversationPane = memo(function ConversationPane({
     // 分屏格子（compact）数据更新一律瞬跳到底（auto）：它打开/水合时自带一次大的
     // 平滑滚动，正是“从头滚到尾部”动画的来源；单窗口 idle 则保留 smooth。
     timeline.scrollTo({ top: timeline.scrollHeight, behavior: data.busy || compact ? "auto" : "smooth" });
-  }, [data.messages, data.busy, data.sessionId, sessionId, compact]);
+    // 依赖里带「本格是否挂了发送失败提示」：提示是时间线尾部新增的一行，而收起到它
+    // 的那次错误推送不伴随 messages/busy 变化——不带这个依赖，粘底时新提示会落在
+    // 可视区外（用户看不到自己刚失败的那条）。
+  }, [data.messages, data.busy, data.sessionId, sessionId, compact, failedSend !== undefined]);
 
   useEffect(() => {
     if (!data.busy) setLocalTurn(undefined);
   }, [data.busy]);
+
+  // 命令级失败（发送被运行时拒了）：命令分发 catch 把 sessionId 带回 error 推送。
+  // 本格必须立刻收起乐观待回复 —— 过去本地乐观只有「data.busy 翻转」一条清除路径，
+  // 于是留下一条假的「正在努力输出中」+ 从点击时刻起算、一直跳的耗时读数，
+  // 且要等到该格 busy 翻转（常常是被别的事件带着翻）才消失。
+  useEffect(() => {
+    if (!commandError || !commandErrorTargetsPane(commandError, paneSessionId)) return;
+    setLocalTurn(undefined);
+    setSendFailure({ sessionId: paneSessionId, message: commandError.message, at: commandError.at });
+  }, [commandError, paneSessionId]);
+
+  // 兜底窗口：静默失败（user_input 钩子吞掉输入、命令排在长任务后面）不会带回任何
+  // 错误推送，超窗且没有快照证据就收起本地乐观；若运行时其实接受了，快照里的
+  // busy / turnTiming 会自己把进度行接回来。
+  useEffect(() => {
+    if (!localTurn) return;
+    const startedAt = localTurn.startedAt;
+    const timer = window.setTimeout(() => {
+      setLocalTurn((current) => (current && current.startedAt === startedAt ? undefined : current));
+    }, Math.max(0, localTurnDeadline(localTurn) - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [localTurn]);
 
   // 估算当前可视底部所属的轮次（缩略导航高亮用）。滚动监听写入 ref 避免频繁 setState；
   // turnStartKeys 变化时取一次初始值（粘底即最新轮）。
@@ -1373,6 +1407,7 @@ export const ConversationPane = memo(function ConversationPane({
       return;
     }
     setLocalTurn({ startedAt: Date.now(), sessionId: data.sessionId });
+    setSendFailure(undefined);
     try {
       if (editingMessageTimestamp !== undefined) {
         await window.piDesktop.send({ type: "session.regenerate", text: sendText, timestamp: editingMessageTimestamp, invocations: resolved.length > 0 ? resolved : undefined, attachments, sessionId: data.sessionId });
@@ -1470,6 +1505,7 @@ export const ConversationPane = memo(function ConversationPane({
     const text = previousUser ? messageText(previousUser) : "";
     if (!text && !previousUser?.invocations?.length) return;
     setLocalTurn({ startedAt: Date.now(), sessionId: latestDataRef.current.sessionId });
+    setSendFailure(undefined);
     try {
       await window.piDesktop.send({ type: "session.regenerate", text, timestamp: previousUser?.timestamp, invocations: previousUser?.invocations, sessionId: latestDataRef.current.sessionId });
     } catch (error) {
@@ -1854,6 +1890,15 @@ export const ConversationPane = memo(function ConversationPane({
             />;
           })}
           {isGenerating && (assistantBubbleVisible ? <div className="response-progress response-progress-inline"><LoaderCircle size={14} className="spinning" /><span>{workingLabel}</span>{activeTurnTiming && <TimingMeta timing={activeTurnTiming} />}</div> : <PendingResponse label={workingLabel} timing={activeTurnTiming} />)}
+          {failedSend && (
+            // 发送被拒的内联提示：与待回复行同位（时间线尾部、气泡列宽），一眼能看出
+            // 「这条没发出去」，而不是只在右下角弹一条 toast 了事。
+            <div className="timeline-notice" role="alert">
+              <AlertCircle size={14} />
+              <span>{failedSend.message}</span>
+              <button type="button" title="关闭提示" aria-label="关闭发送失败提示" onClick={() => setSendFailure(undefined)}><X size={13} /></button>
+            </div>
+          )}
         </>}
       </div>
       {turns.length >= 2 && <TurnMinimap turns={turns} activeKey={activeTurnKey} onNavigate={navigateToTurn} />}
