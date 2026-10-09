@@ -290,7 +290,7 @@ description: 审查指定文件或目录，输出问题清单
 
 - `<agentDir>/pidesktop-subagents.json`（全局）、`<工作区>/.pidesktop-subagents.json`（项目）；顶层是数组：`{ "subagents": [ … ] }`。
 - 格式是**纯 JSON（不支持注释）**，与 MCP/钩子不同，写错一个字符整个文件失效。
-- 内置三条（`code-reviewer`、`explorer`、`general-purpose`，随应用分发在安装目录 `resources/subagents/`）**只读**：用户定义按 `id` 或**同名**整体顶掉内置；只改内置的「执行模型」请引导用户在设置页「子智能体」里选。
+- 内置三条（`code-reviewer`、`explorer`、`general-purpose`，随应用分发在安装目录 `resources/subagents/`）**只读**：用户定义按 `id` 或**同名**整体顶掉内置；要改内置的运行参数（**执行模型 / 思考等级**）请引导用户在设置页「子智能体」里点该行的「执行设置」选择。
 - 子代理**不继承**钩子、浏览器、设计模式等扩展能力。
 
 ### 字段
@@ -303,6 +303,7 @@ description: 审查指定文件或目录，输出问题清单
 | `systemPrompt` | 必填，≤20000 字符，写给子代理的完整工作说明 |
 | `tools` | `"inherit"` 或**完整的 8 项布尔表**：`read`/`bash`/`powershell`/`edit`/`write`/`grep`/`find`/`ls`（缺项按默认值补，只读型就只开 `read`/`bash`/`grep`/`find`/`ls`） |
 | `model` | 可选，`{ "provider": "…", "id": "…" }`；省略即继承主会话模型 |
+| `thinkingLevel` | 可选，`off` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max`；省略即继承主会话当前档位。注意 `off`（关思考）是**显式档位**，与「省略 = 继承」不同。子模型不支持的档位会被自动降级到最近可用档（上游不会报 400）；委派卡片上显示的是**实际生效**的档位 |
 | `color` | 可选，展示色（如 `amber` / `blue` / `violet`） |
 | `injectAgentsMd` | 可选，`true` 时把工作区 AGENTS.md 注入子代理系统提示 |
 
@@ -335,7 +336,7 @@ description: 审查指定文件或目录，输出问题清单
 
 ### 生效
 
-改完需要**重载资源**（定义是启动/建会话时读取的）；内置子代理的「执行模型」例外——改完下次委派即生效。
+改完需要**重载资源**（定义是启动/建会话时读取的）；内置子代理的「执行模型 / 思考等级」例外——改完下次委派即生效。
 
 ---
 
