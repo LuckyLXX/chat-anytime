@@ -107,7 +107,7 @@ import * as runtimeGallery from "./runtime-gallery.js";
 import * as runtimeJev from "./runtime-jev.js";
 import { assistantText, createSubagentTools, buildSubagentPromptBlock, type SubagentContext } from "./subagent.js";
 import { withCacheWarmingOff } from "./runtime-settings.js";
-import { readSubagents, saveSubagent, deleteSubagent, saveSubagentModelOverride } from "./subagents-store.js";
+import { readSubagents, saveSubagent, deleteSubagent, saveSubagentModelOverride, saveSubagentThinkingOverride } from "./subagents-store.js";
 import type { SubagentDefinition, SubagentScope, DelegationProgress, SlashInvocation } from "../shared/protocol.js";
 import { buildSkillsSystemPromptBlock, setSkillEnabled, type DiscoveredSkill } from "./skill-catalog.js";
 import * as commandCatalog from "./command-catalog.js";
@@ -5068,8 +5068,15 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       break;
     }
     case "subagent.model": {
-      // 内置定义只读，用户能改的只有「执行模型」：写覆盖表 → 重读目录 → 刷新列表。
+      // 内置定义只读，用户能改的只有「执行模型 / 思考等级」：写覆盖表 → 重读目录 → 刷新列表。
       saveSubagentModelOverride(getAgentDir(), command.id, command.model);
+      refreshSubagents();
+      emitResourceCatalog();
+      break;
+    }
+    case "subagent.thinking": {
+      // 与 subagent.model 同口径：覆盖表在执行时经 subagentCatalog 实读，不必重建会话。
+      saveSubagentThinkingOverride(getAgentDir(), command.id, command.thinkingLevel);
       refreshSubagents();
       emitResourceCatalog();
       break;

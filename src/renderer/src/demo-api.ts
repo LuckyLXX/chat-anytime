@@ -249,6 +249,9 @@ const demoSnapshot: RuntimeSnapshot = {
         { type: "tool-call", id: "tool-read", name: "read", arguments: { path: "package.json" } },
         { type: "tool-call", id: "tool-edit", name: "edit", arguments: { path: "src/runtime.ts" } },
         { type: "tool-call", id: "tool-image", name: "bash", arguments: { command: "python ~/.agents/skills/rolldek-image/rolldek_image.py generate 架构简图 -o demo.png" } },
+        // 委派节点：demo 一直只在 executions 里有 tool-delegate、消息里没有对应的 tool-call
+        // 块，所以「委派卡片」（含本次生效思考等级）在演示环境从未渲染出来过（2026-10-09 补）。
+        { type: "tool-call", id: "tool-delegate", name: "delegate_agent", arguments: { goal: "审查本次改动并整理风险清单", subagent: "code-reviewer" } },
         {
           type: "text",
           text: `第一版包含三个清晰的进程边界：
@@ -363,6 +366,7 @@ flowchart LR
         childSessionFile: "C:/demo-agent/chatanytime-sessions/default/delegations/demo-child-1.jsonl",
         subagentName: "Code Reviewer",
         subagentColor: "amber",
+        thinkingLevel: "high",
         role: "review",
         model: { provider: "anthropic", id: "claude-4-sonnet" },
         steps: [
@@ -403,7 +407,7 @@ const demoResources: ResourceCatalog = {
   todos: [],
   memory: [],
   subagents: [
-    { id: "code-reviewer", name: "code-reviewer", description: "独立审查已经完成的代码改动，列出有证据的问题与建议。", color: "amber", systemPrompt: "你是独立代码审查者。", tools: { read: true, bash: true, powershell: false, edit: false, write: false, grep: true, find: true, ls: true }, scope: "bundled", builtin: true, injectAgentsMd: true },
+    { id: "code-reviewer", name: "code-reviewer", description: "独立审查已经完成的代码改动，列出有证据的问题与建议。", color: "amber", thinkingLevel: "high", systemPrompt: "你是独立代码审查者。", tools: { read: true, bash: true, powershell: false, edit: false, write: false, grep: true, find: true, ls: true }, scope: "bundled", builtin: true, injectAgentsMd: true },
     { id: "explorer", name: "explorer", description: "深入理解现有项目：跨模块调用链、数据流转与修改影响范围。", color: "blue", systemPrompt: "你是项目探索者。", tools: { read: true, bash: true, powershell: false, edit: false, write: false, grep: true, find: true, ls: true }, scope: "bundled", builtin: true, model: { provider: "anthropic", id: "claude-sonnet-4-6" } },
     { id: "general-purpose", name: "general-purpose", description: "没有专用子智能体适配、但任务仍可独立完成时使用。", color: "violet", systemPrompt: "你是通用子代理。", tools: "inherit", scope: "bundled", builtin: true },
     { id: "subagent-demo", name: "my-helper", description: "用户自建示例：按项目约定生成变更日志。", color: "emerald", systemPrompt: "你负责生成变更日志。", tools: "inherit", scope: "global" }
@@ -1088,7 +1092,7 @@ export function createDemoApi(): DesktopApi {
         }
         case "subagent.save": {
           // 与主进程同口径：内置档只读；其余按 scope 落位（演示环境只更新内存镜像）。
-          if (command.subagent.scope === "bundled") throw new Error("内置子智能体不可修改（只能在列表里选择执行模型）");
+          if (command.subagent.scope === "bundled") throw new Error("内置子智能体不可修改（只能在列表里选择执行模型与思考等级）");
           demoResources.subagents = [...demoResources.subagents.filter((item) => item.id !== command.subagent.id), structuredClone(command.subagent)];
           emit({ type: "resources", resources: structuredClone(demoResources) });
           break;
@@ -1104,6 +1108,15 @@ export function createDemoApi(): DesktopApi {
           if (entry) {
             if (command.model) entry.model = { ...command.model };
             else delete entry.model;
+          }
+          emit({ type: "resources", resources: structuredClone(demoResources) });
+          break;
+        }
+        case "subagent.thinking": {
+          const entry = demoResources.subagents.find((item) => item.id === command.id);
+          if (entry) {
+            if (command.thinkingLevel) entry.thinkingLevel = command.thinkingLevel;
+            else delete entry.thinkingLevel;
           }
           emit({ type: "resources", resources: structuredClone(demoResources) });
           break;

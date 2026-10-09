@@ -321,11 +321,15 @@ async function runDelegation(ctx: SubagentContext, params: { goal?: unknown; rol
     systemPromptOverride: (base) => [base, childSystemPrompt, ...childInstruction].filter(Boolean).join("\n\n")
   });
   await resourceLoader.reload();
+  // 思考等级：定义里设了就用自己的（`off` 是显式档位，不是「未设」），否则继承主会话
+  // 当前档位。子模型不支持的档位由 createAgentSession 按 Pi 口径自动钳制（读的是
+  // 已经过 transformModel 的模型对象，所以用户在设置页声明的思考等级映射同样生效）。
+  const requestedThinking = subagentDef.thinkingLevel ?? ctx.thinkingLevel;
   const { session: child } = await createAgentSession({
     cwd: ctx.workspace,
     modelRuntime: ctx.modelRuntime,
     model: resolvedChildModel,
-    thinkingLevel: ctx.thinkingLevel,
+    thinkingLevel: requestedThinking,
     sessionManager,
     settingsManager,
     resourceLoader
@@ -343,7 +347,10 @@ async function runDelegation(ctx: SubagentContext, params: { goal?: unknown; rol
       subagentName: subagentDef.name,
       ...(subagentDef.color ? { subagentColor: subagentDef.color } : {}),
       role,
-      model: modelTarget
+      model: modelTarget,
+      // 取子会话自己的档位（= 钳制后的实际生效值），而不是请求值——面板上要能看出
+      // 「设了最高但子模型只到 high」这类降级。
+      thinkingLevel: child.thinkingLevel
     });
     const result = await runChildToCompletion(child, goal, signal, onUpdate, tracker);
     const progress = tracker.snapshot();

@@ -1094,6 +1094,10 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 .subagent-model-edit { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; }
 /* 两级前缀 + 显式尺寸：压过 .settings-dialog 的通用 select 规则（0,1,1）。 */
 .subagent-model-edit select { width: auto; min-width: 132px; max-width: 210px; height: 26px; margin: 0; padding: 0 6px; font-size: 10.5px; }
+/* 行内是两个下拉 + 一个按钮：思考等级收窄一点，避免把描述挤没。 */
+.subagent-model-edit select.subagent-thinking-select { min-width: 104px; max-width: 132px; }
+/* 窄行里「完成」会被挤断成两行（实测）——按钮不换行。 */
+.subagent-model-edit button { white-space: nowrap; }
 .subagent-color-swatch { width: 20px; height: 20px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0; margin: 0; background-clip: padding-box; transition: transform .15s ease, border-color .15s ease, box-shadow .15s ease; }
 .subagent-color-swatch:hover { transform: scale(1.15); }
 .subagent-color-swatch.selected { border-color: var(--text); box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--text); }
@@ -2690,6 +2694,8 @@ html[data-ui-motion="off"] .general-jev-toggle .chevron { transition: none; }
 .delegation-badge[data-color="violet"] .delegation-dot { background: #7c3aed; }
 .delegation-badge[data-color="slate"] .delegation-dot { background: #64748b; }
 .delegation-role { flex: 0 0 auto; padding: 1px 8px; border-radius: 5px; color: var(--accent-text); background: var(--accent-soft); font-size: 10px; }
+/* 本次委派实际生效的思考等级（写入时取子会话自身档位，已含模型能力钳制）。 */
+.delegation-thinking { flex: 0 0 auto; padding: 1px 7px; border: 1px solid var(--border); border-radius: 5px; color: var(--text-muted); background: var(--surface-muted); font-size: 10px; white-space: nowrap; }
 .delegation-goal { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-size: 11px; }
 .delegation-steps { display: grid; gap: 3px; margin: 0; padding: 0; list-style: none; }
 .delegation-step { display: flex; align-items: center; gap: 7px; min-width: 0; padding: 3px 6px; border-radius: 5px; font-size: 11px; color: var(--text); }
@@ -2731,7 +2737,7 @@ html[data-ui-motion="off"] .general-jev-toggle .chevron { transition: none; }
 .delegation-transcript-thinking[open] summary svg { transform: rotate(180deg); }
 .delegation-transcript-thinking pre { margin: 6px 0 0; padding: 8px 10px; border-radius: 6px; background: var(--surface-muted); color: var(--text); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
 :root[data-ui-radius] .delegation-transcript-dialog { border-radius: var(--ui-container-radius); }
-:root[data-ui-radius] .delegation-badge, :root[data-ui-radius] .delegation-role, :root[data-ui-radius] .delegation-transcript-button, :root[data-ui-radius] .delegation-transcript-tool { border-radius: var(--ui-control-radius); }
+:root[data-ui-radius] .delegation-badge, :root[data-ui-radius] .delegation-role, :root[data-ui-radius] .delegation-thinking, :root[data-ui-radius] .delegation-transcript-button, :root[data-ui-radius] .delegation-transcript-tool { border-radius: var(--ui-control-radius); }
 
 /* —— 自动化任务（设置页 tab + 创建/编辑弹窗）—— */
 /* 固定页头 + 子页签，只有列表区滚动（与其余设置页同一骨架；2026-09-23 收口） */

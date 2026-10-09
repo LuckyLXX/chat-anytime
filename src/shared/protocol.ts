@@ -162,6 +162,14 @@ export interface SubagentDefinition {
   color?: string;
   /** 委派时使用的模型；缺省继承主会话当前模型。 */
   model?: { provider: string; id: string };
+  /**
+   * 子代理的思考等级；缺省继承主会话当前档位。
+   *
+   * `off` 是**显式档位**（子代理不思考、省 token），与「缺省继承」是两回事——
+   * 所以这里用 undefined 表达继承，不能用 off 兼任。子模型不支持所请求档位时
+   * 由 Pi 的 `clampThinkingLevel` 自动降级（与主会话同口径）。
+   */
+  thinkingLevel?: ThinkingLevel;
   systemPrompt: string;
   /** 可用工具集："inherit" = 继承父会话已启用的内置工具；否则按启停数组精确控制。 */
   tools: Record<BuiltinToolName, boolean> | "inherit";
@@ -607,6 +615,11 @@ export interface DelegationProgress {
   subagentColor?: string;
   role: DelegationRole;
   model: { provider: string; id: string };
+  /**
+   * 本次委派**实际生效**的思考等级（子模型能力钳制后的值，取自子会话本身）。
+   * 定义未设档位时为继承来的主会话档位；旧记录无此字段（可选）。
+   */
+  thinkingLevel?: ThinkingLevel;
   steps: DelegationStep[];
 }
 
@@ -1950,6 +1963,8 @@ export type RuntimeCommand =
   | { type: "subagent.delete"; id: string; scope: SubagentScope }
   /** 仅改内置子智能体的执行模型（内置定义本体只读）；model 缺省 = 回到继承默认模型。 */
   | { type: "subagent.model"; id: string; model?: { provider: string; id: string } }
+  /** 仅改内置子智能体的思考等级（内置定义本体只读）；thinkingLevel 缺省 = 回到继承主会话档位。 */
+  | { type: "subagent.thinking"; id: string; thinkingLevel?: ThinkingLevel }
   /** 读取子代理完整记录（JSONL 转 ChatMessage[]，结果经 subagent.transcript-result 推送）。 */
   | { type: "subagent.transcript"; childSessionId: string; path: string }
   | { type: "appearance.save"; appearance: AppearanceSettings }

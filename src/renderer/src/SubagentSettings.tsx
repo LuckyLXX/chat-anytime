@@ -1,7 +1,8 @@
 import { Bot, Pencil, Plus, Trash2, X } from "lucide-react";
 import { useState, type FormEvent, type ReactNode } from "react";
-import type { BuiltinToolName, ModelOption, ProviderOption, ResourceCatalog, RuntimeCommand, SubagentDefinition, SubagentScope } from "../../shared/protocol";
-import { toolLabel } from "../../shared/locale";
+import type { BuiltinToolName, ModelOption, ProviderOption, ResourceCatalog, RuntimeCommand, SubagentDefinition, SubagentScope, ThinkingLevel } from "../../shared/protocol";
+import { toolLabel, thinkingLevelLabels } from "../../shared/locale";
+import { THINKING_LEVELS } from "../../shared/thinking-levels";
 import { selectableCatalogModels } from "./lib/model-list";
 import { ModelSelect } from "./components/ModelSelect";
 import { useDesktopStore } from "./store";
@@ -38,6 +39,8 @@ export function SubagentSettings({ resources, workspaceOpen, models, providers }
   const [color, setColor] = useState("amber");
   const [description, setDescription] = useState("");
   const [model, setModel] = useState("");
+  // 「」= 继承主会话当前思考等级；档位值 = 显式设定（`off` 也是显式档位）。
+  const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel | "">("");
   // 内置条目：只开放「执行模型」选择（定义本体只读），行内内联一个下拉而不是弹表单。
   const [modelEditingId, setModelEditingId] = useState<string>();
   const [systemPrompt, setSystemPrompt] = useState("");
@@ -68,6 +71,7 @@ export function SubagentSettings({ resources, workspaceOpen, models, providers }
     setColor("amber");
     setDescription("");
     setModel("");
+    setThinkingLevel("");
     setSystemPrompt("");
     setScope(workspaceOpen ? "project" : "global");
     setInjectAgentsMd(false);
@@ -90,6 +94,7 @@ export function SubagentSettings({ resources, workspaceOpen, models, providers }
     // 匹配 option 显示空白、且原样保存把失效引用写回定义文件（2026-09-02 审查）。
     const modelValue = subagent.model ? `${subagent.model.provider}/${subagent.model.id}` : "";
     setModel(modelValue && configuredModels.some((item) => `${item.provider}/${item.id}` === modelValue) ? modelValue : "");
+    setThinkingLevel(subagent.thinkingLevel ?? "");
     setSystemPrompt(subagent.systemPrompt);
     setScope(subagent.scope);
     setInjectAgentsMd(subagent.injectAgentsMd === true);
@@ -120,6 +125,7 @@ export function SubagentSettings({ resources, workspaceOpen, models, providers }
       description: description.trim(),
       color,
       ...(modelValue ? { model: { provider: modelValue.slice(0, modelValue.indexOf("/")), id: modelValue.slice(modelValue.indexOf("/") + 1) } } : {}),
+      ...(thinkingLevel ? { thinkingLevel } : {}),
       systemPrompt: systemPrompt.trim() || "完成委派给你的独立子任务。",
       scope,
       ...(injectAgentsMd ? { injectAgentsMd: true } : {}),
@@ -147,6 +153,11 @@ export function SubagentSettings({ resources, workspaceOpen, models, providers }
     if (ok) setModelEditingId(undefined);
   }
 
+  /** 内置定义的思考等级：同样写覆盖表；空串 = 回到继承主会话档位。 */
+  async function saveBundledThinking(id: string, value: string): Promise<void> {
+    await run({ type: "subagent.thinking", id, ...(value ? { thinkingLevel: value as ThinkingLevel } : {}) });
+  }
+
   const controlsBusy = busy;
 
   return (
@@ -154,7 +165,7 @@ export function SubagentSettings({ resources, workspaceOpen, models, providers }
       <header className="resource-page-head">
         <span className="resource-page-title">
           <strong>子智能体</strong>
-          <small>定义可保存、可复用的子智能体：委派时按名称引用；每个子智能体有独立的系统提示词、模型与工具集</small>
+          <small>定义可保存、可复用的子智能体：委派时按名称引用；每个子智能体有独立的系统提示词、模型、思考等级与工具集</small>
         </span>
         <span className="resource-page-actions">
           <button className="secondary-button compact-button" type="button" data-control="subagent-add" disabled={controlsBusy} onClick={openCreate}><Plus size={13} />新建子智能体</button>
@@ -166,12 +177,12 @@ export function SubagentSettings({ resources, workspaceOpen, models, providers }
         <section className="resource-card" aria-label="已定义子智能体">
           <div className="resource-card-head">
             <span className="resource-card-title"><Bot size={14} /><strong>已定义</strong></span>
-            <small>作用域优先级：项目级 &gt; 用户全局 &gt; 内置（同 id 后者覆盖前者）；内置只读，仅可选执行模型</small>
+            <small>作用域优先级：项目级 &gt; 用户全局 &gt; 内置（同 id 后者覆盖前者）；内置只读，仅可选执行模型与思考等级</small>
             <span className="resource-card-actions"><small className="resource-card-count">{resources.subagents.length} 个</small></span>
           </div>
           <div className="resource-card-body">
             <p className="resource-form-help">
-              子智能体与主会话共享同一套白名单工具，但可按需收窄；模型缺省继承当前会话模型。项目级放在 <code>.pidesktop-subagents.json</code>，用户全局在用户目录，内置随应用分发。委派 <code>delegate_agent</code> 时 <code>subagent</code> 参数必填，且只能填这里的名称或 id，未命中会被直接拒绝。
+              子智能体与主会话共享同一套白名单工具，但可按需收窄；模型与思考等级缺省继承当前会话。项目级放在 <code>.pidesktop-subagents.json</code>，用户全局在用户目录，内置随应用分发。委派 <code>delegate_agent</code> 时 <code>subagent</code> 参数必填，且只能填这里的名称或 id，未命中会被直接拒绝。
             </p>
             {resources.subagents.length === 0
               ? <p className="resource-empty">还没有子智能体。点右上「新建子智能体」，定义名称、系统提示词与工具范围后保存。</p>
@@ -182,17 +193,28 @@ export function SubagentSettings({ resources, workspaceOpen, models, providers }
                       <div className="resource-item-icon subagent-color" data-color={subagent.color ?? "amber"}><Bot size={14} /></div>
                       <div className="resource-item-copy">
                         <strong>{subagent.name}</strong>
-                        <small>{subagentScopeLabel(subagent.scope)} · {subagent.model ? `${subagent.model.provider}/${subagent.model.id}` : "继承默认模型"} · {subagent.tools === "inherit" ? "继承父会话工具" : "自定义工具"}</small>
+                        <small>{subagentScopeLabel(subagent.scope)} · {subagent.model ? `${subagent.model.provider}/${subagent.model.id}` : "继承默认模型"} · {subagent.thinkingLevel ? `思考 ${thinkingLevelLabels[subagent.thinkingLevel]}` : "思考继承会话"} · {subagent.tools === "inherit" ? "继承父会话工具" : "自定义工具"}</small>
                         <em>{subagent.description || subagent.systemPrompt}</em>
                       </div>
                       {subagent.scope === "bundled" ? (
                         modelEditingId === subagent.id ? (
                           <div className="subagent-model-edit">
                             <ModelSelect models={configuredModels} providers={providers} value={subagent.model ? `${subagent.model.provider}/${subagent.model.id}` : ""} placeholder="继承当前会话模型" onChange={(value) => void saveBundledModel(subagent.id, value)} />
-                            <button className="secondary-button compact-button" type="button" disabled={controlsBusy} onClick={() => setModelEditingId(undefined)}>取消</button>
+                            <select
+                              className="subagent-thinking-select"
+                              value={subagent.thinkingLevel ?? ""}
+                              title="执行时的思考等级"
+                              aria-label={`${subagent.name} 的思考等级`}
+                              disabled={controlsBusy}
+                              onChange={(changeEvent) => void saveBundledThinking(subagent.id, changeEvent.target.value)}
+                            >
+                              <option value="">思考：继承会话</option>
+                              {THINKING_LEVELS.map((level) => <option key={level} value={level}>思考：{thinkingLevelLabels[level]}</option>)}
+                            </select>
+                            <button className="secondary-button compact-button" type="button" disabled={controlsBusy} onClick={() => setModelEditingId(undefined)}>完成</button>
                           </div>
                         ) : (
-                          <button className="secondary-button compact-button" type="button" disabled={controlsBusy} title={`选择 ${subagent.name} 的执行模型`} onClick={() => setModelEditingId(subagent.id)}><Pencil size={13} />执行模型</button>
+                          <button className="secondary-button compact-button" type="button" disabled={controlsBusy} title={`设置 ${subagent.name} 的执行模型与思考等级`} onClick={() => setModelEditingId(subagent.id)}><Pencil size={13} />执行设置</button>
                         )
                       ) : (
                         <>
@@ -232,6 +254,12 @@ export function SubagentSettings({ resources, workspaceOpen, models, providers }
                   </div>
                 </label>
                 <label>模型<ModelSelect models={configuredModels} providers={providers} value={model} placeholder="继承默认模型" onChange={setModel} /></label>
+                <label>思考等级
+                  <select value={thinkingLevel} onChange={(changeEvent) => setThinkingLevel(changeEvent.target.value as ThinkingLevel | "")}>
+                    <option value="">继承当前会话档位</option>
+                    {THINKING_LEVELS.map((level) => <option key={level} value={level}>{thinkingLevelLabels[level]}</option>)}
+                  </select>
+                </label>
                 <label>作用域
                   <select value={scope} onChange={(changeEvent) => setScope(changeEvent.target.value as SubagentScope)}>
                     <option value="project" disabled={!workspaceOpen}>{workspaceOpen ? "当前项目 .pidesktop-subagents.json" : "当前项目（需先打开工作区）"}</option>
@@ -253,7 +281,7 @@ export function SubagentSettings({ resources, workspaceOpen, models, providers }
                   </div>
                 )}
               </fieldset>
-              <p className="resource-form-help">运行时：子代理与主会话同口径套用用户手动修正的 token 限额；风险工具（bash/edit/write 等）仍走同一审批闸口。子代理空产出（既不返回文本也无工具调用）计为失败并上报原因，不再伪装成成功；新增定义后活动会话会自动重建以刷新可用清单（会话忙时跳过，下次重建生效）。</p>
+              <p className="resource-form-help">运行时：子代理与主会话同口径套用用户手动修正的 token 限额；思考等级按「子模型实际支持的档位」自动降级（Pi 口径，与主会话菜单一致，可在委派卡片上看到本次实测档位）；风险工具（bash/edit/write 等）仍走同一审批闸口。子代理空产出（既不返回文本也无工具调用）计为失败并上报原因，不再伪装成成功；新增定义后活动会话会自动重建以刷新可用清单（会话忙时跳过，下次重建生效）。</p>
             </div>
           </section>
         )}

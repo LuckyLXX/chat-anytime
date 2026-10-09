@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, mkdirSync
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { normalizeSubagent, readBundledSubagents, readSubagentModelOverrides, readSubagents, saveSubagent, saveSubagentModelOverride, subagentModelOverridesPath, deleteSubagent, subagentPathsFor } from "./subagents-store.js";
+import { normalizeSubagent, readBundledSubagents, readSubagentModelOverrides, readSubagentThinkingOverrides, readSubagents, saveSubagent, saveSubagentModelOverride, saveSubagentThinkingOverride, subagentModelOverridesPath, deleteSubagent, subagentPathsFor } from "./subagents-store.js";
 import type { SubagentDefinition } from "../shared/protocol.js";
 
 let agentDir: string;
@@ -71,6 +71,16 @@ describe("normalizeSubagent", () => {
   it("throws on missing name or systemPrompt", () => {
     expect(() => normalizeSubagent({ id: "a", name: "", systemPrompt: "x" })).toThrow();
     expect(() => normalizeSubagent({ id: "a", name: "A", systemPrompt: "" })).toThrow();
+  });
+
+  it("keeps a valid thinking level and drops a bogus one", () => {
+    // off 是**显式档位**，必须原样保留：它表达「这个子代理不思考」，与「未设置
+    // （继承主会话）」是两回事，用假值判断会把它静默吃掉。
+    expect(normalizeSubagent({ id: "a", name: "A", systemPrompt: "x", thinkingLevel: "off" }).thinkingLevel).toBe("off");
+    expect(normalizeSubagent({ id: "a", name: "A", systemPrompt: "x", thinkingLevel: "max" }).thinkingLevel).toBe("max");
+    expect(normalizeSubagent({ id: "a", name: "A", systemPrompt: "x", thinkingLevel: "ultra" }).thinkingLevel).toBeUndefined();
+    expect(normalizeSubagent({ id: "a", name: "A", systemPrompt: "x", thinkingLevel: 3 }).thinkingLevel).toBeUndefined();
+    expect(normalizeSubagent({ id: "a", name: "A", systemPrompt: "x" }).thinkingLevel).toBeUndefined();
   });
 });
 
@@ -152,6 +162,44 @@ describe("bundled (内置) definitions", () => {
     expect(deleteSubagent(workspace, agentDir, "missing", "global")).toBe(false);
   });
 
+  it("applies the user thinking-level override to a bundled definition only", () => {
+    writeBundled("explorer");
+    saveSubagent(workspace, agentDir, { id: "mine", name: "mine", description: "", systemPrompt: "x", tools: "inherit", scope: "global", thinkingLevel: "low" });
+    expect(readSubagents(workspace, agentDir, bundledDir).find((entry) => entry.id === "explorer")?.thinkingLevel).toBeUndefined();
+    saveSubagentThinkingOverride(agentDir, "explorer", "off");
+    saveSubagentThinkingOverride(agentDir, "mine", "max");
+    const merged = readSubagents(workspace, agentDir, bundledDir);
+    // 覆盖表只对内置生效：用户定义的档位来自定义文件自身。
+    expect(merged.find((entry) => entry.id === "explorer")?.thinkingLevel).toBe("off");
+    expect(merged.find((entry) => entry.id === "mine")?.thinkingLevel).toBe("low");
+    expect(readSubagentThinkingOverrides(agentDir)).toEqual({ explorer: "off", mine: "max" });
+    // 清空 = 回到继承，而不是写一条空值进去。
+    saveSubagentThinkingOverride(agentDir, "explorer", undefined);
+    expect(readSubagentThinkingOverrides(agentDir)).toEqual({ mine: "max" });
+    expect(readSubagents(workspace, agentDir, bundledDir).find((entry) => entry.id === "explorer")?.thinkingLevel).toBeUndefined();
+  });
+
+  it("keeps model and thinking overrides in one file without clobbering each other", () => {
+    // 两个旋钮共用 pidesktop-subagent-models.json（models / thinking 两键）：任一写
+    // 都必须先读后写，否则「改档位把模型冲掉」是静默的。
+    writeBundled("explorer");
+    saveSubagentModelOverride(agentDir, "explorer", { provider: "p", id: "m" });
+    saveSubagentThinkingOverride(agentDir, "explorer", "high");
+    expect(readSubagentModelOverrides(agentDir)).toEqual({ explorer: { provider: "p", id: "m" } });
+    expect(readSubagentThinkingOverrides(agentDir)).toEqual({ explorer: "high" });
+    saveSubagentModelOverride(agentDir, "explorer", undefined);
+    expect(readSubagentThinkingOverrides(agentDir)).toEqual({ explorer: "high" });
+    const entry = readSubagents(workspace, agentDir, bundledDir).find((item) => item.id === "explorer")!;
+    expect(entry.model).toBeUndefined();
+    expect(entry.thinkingLevel).toBe("high");
+    expect(entry.systemPrompt).toBe("内置提示词");
+  });
+
+  it("drops an invalid thinking level from a hand-edited override file", () => {
+    writeFileSync(subagentModelOverridesPath(agentDir), JSON.stringify({ thinking: { explorer: "ultra", other: "off" } }), "utf8");
+    expect(readSubagentThinkingOverrides(agentDir)).toEqual({ other: "off" });
+  });
+
   it("keeps a bundled definition untouched when only the model is overridden", () => {
     writeBundled("explorer", { description: "原描述" });
     saveSubagentModelOverride(agentDir, "explorer", { provider: "p", id: "m" });
@@ -185,6 +233,12 @@ describe("read/save/delete", () => {
     expect(entry).toBeDefined();
     expect(entry!.name).toBe("Project");
     expect(entry!.scope).toBe("project");
+  });
+
+  it("stamps a definition thinking level into the file it belongs to", () => {
+    saveSubagent(workspace, agentDir, { id: "t", name: "T", description: "", systemPrompt: "x", tools: "inherit", scope: "global", thinkingLevel: "minimal" });
+    expect(readFileList(subagentPathsFor(workspace, agentDir).global).find((item) => item.id === "t")?.thinkingLevel).toBe("minimal");
+    expect(readSubagents(workspace, agentDir).find((item) => item.id === "t")?.thinkingLevel).toBe("minimal");
   });
 
   it("delete removes from the target scope only", () => {

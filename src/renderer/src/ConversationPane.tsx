@@ -279,7 +279,7 @@ function actionTimelineNodeState(segment: ActionTimelineSegment, execution: Tool
   return execution?.status ?? (streaming ? "running" : "completed");
 }
 
-/** 委派节点：subagent 徽标（带 color 圆点）或 role 标签 + goal 首行。 */
+/** 委派节点：subagent 徽标（带 color 圆点）或 role 标签 + 本次生效思考等级 + goal 首行。 */
 function DelegationSummaryBadge({ delegation, preview }: { delegation: DelegationProgress; preview: DelegateCallPreview | undefined }): ReactNode {
   return (
     <span className="action-timeline-call-delegation-title">
@@ -287,6 +287,7 @@ function DelegationSummaryBadge({ delegation, preview }: { delegation: Delegatio
       {delegation.subagentName
         ? <span className="delegation-badge" data-color={delegation.subagentColor} title={`自定义子智能体：${delegation.subagentName}`}><span className="delegation-dot" /><em>{delegation.subagentName}</em></span>
         : <span className="delegation-role">{delegationRoleLabels[delegation.role] ?? delegation.role}</span>}
+      {delegation.thinkingLevel && <span className="delegation-thinking" title="本次委派实际生效的思考等级（子模型不支持所设档位时自动降级；未设则继承主会话）">思考 {thinkingLevelLabels[delegation.thinkingLevel]}</span>}
       {preview && <span className="delegation-goal" title={preview.goal}>{preview.goal}</span>}
     </span>
   );

@@ -1,7 +1,7 @@
 import { AlertCircle, Bot, ChevronDown, Code2, LoaderCircle, ScrollText, X } from "lucide-react";
 import { useEffect, type ReactNode } from "react";
 import type { ChatMessage, DelegationProgress, DelegationRole, MessageBlock } from "../../../shared/protocol";
-import { delegationRoleLabels, toolLabel } from "../../../shared/locale";
+import { delegationRoleLabels, thinkingLevelLabels, toolLabel } from "../../../shared/locale";
 import { useDesktopStore } from "../store";
 import { RichContent } from "./RichContent";
 import { parseDelegateCallArgs } from "../lib/tool-call-preview";
@@ -37,7 +37,8 @@ export function DelegationTranscript({ delegation, onClose, onOpenArtifact }: {
 
   const titleParts = [
     delegation.subagentName ? `自定义子智能体「${delegation.subagentName}」` : delegationRoleLabels[delegation.role] ?? delegation.role,
-    delegation.model ? `${delegation.model.provider}/${delegation.model.id}` : undefined
+    delegation.model ? `${delegation.model.provider}/${delegation.model.id}` : undefined,
+    delegation.thinkingLevel ? `思考 ${thinkingLevelLabels[delegation.thinkingLevel]}` : undefined
   ].filter(Boolean);
 
   return (

@@ -3,13 +3,15 @@
 // hooks-config.ts / mcp-config.ts 一致（tmp/rename 原子写、坏文件只影响所在作用域）。
 //
 // 内置档（2026-09-15）：随安装包分发在 <安装目录>/subagents（dev 为 resources/subagents），
-// 一文件一定义，**只读**——用户能改的只有「执行模型」，落在 <agentDir>/pidesktop-subagent-models.json
-// 覆盖表里（单独一个文件，与定义本体解耦；同名用户定义仍然整体覆盖内置）。
+// 一文件一定义，**只读**——用户能改的只有两个运行旋钮「执行模型」与「思考等级」，落在
+// <agentDir>/pidesktop-subagent-models.json 覆盖表里（单独一个文件，与定义本体解耦；
+// 同名用户定义仍然整体覆盖内置）。
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { BUILTIN_TOOLS, defaultToolEnabled } from "./settings.js";
-import type { BuiltinToolName, SubagentDefinition, SubagentScope } from "../shared/protocol.js";
+import { normalizeThinkingLevel } from "../shared/thinking-levels.js";
+import type { BuiltinToolName, SubagentDefinition, SubagentScope, ThinkingLevel } from "../shared/protocol.js";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -33,6 +35,7 @@ export function normalizeSubagent(value: unknown): SubagentDefinition {
   // scope：bundled 不来自用户配置（由 readBundledSubagents 强制标定），这里仅区分项目/全局。
   const scope: SubagentScope = value.scope === "project" ? "project" : "global";
   const model = normalizeModel(value.model);
+  const thinkingLevel = normalizeThinkingLevel(value.thinkingLevel);
   const color = typeof value.color === "string" && value.color.trim() ? value.color.trim() : undefined;
   const injectAgentsMd = value.injectAgentsMd === true;
   // tools: "inherit" 原样保留；否则归一化到完整的 BuiltinToolName 启停表。
@@ -56,6 +59,7 @@ export function normalizeSubagent(value: unknown): SubagentDefinition {
     scope,
     ...(color ? { color } : {}),
     ...(model ? { model } : {}),
+    ...(thinkingLevel ? { thinkingLevel } : {}),
     ...(injectAgentsMd ? { injectAgentsMd: true } : {})
   };
   return result;
@@ -110,7 +114,7 @@ export function subagentPathsFor(workspace: string | undefined, agentDir: string
   };
 }
 
-/** 内置子智能体「执行模型」覆盖表路径（用户对内置定义的唯一可写项）。 */
+/** 内置子智能体「执行模型 / 思考等级」覆盖表路径（用户对内置定义的唯一可写项）。 */
 export function subagentModelOverridesPath(agentDir: string): string {
   return joinUnix(agentDir, "pidesktop-subagent-models.json");
 }
@@ -177,6 +181,45 @@ export function saveSubagentModelOverride(agentDir: string, id: string, model: {
   writeConfig(filePath, config);
 }
 
+/**
+ * 读取内置定义的「思考等级」覆盖表（id → 档位）；缺省为空。
+ *
+ * 与模型覆盖共用同一个文件（`thinking` 键）：两者都是「内置定义本体只读、运行参数
+ * 可改」的一部分，分两个文件只会让用户漏看一个。非法档位直接丢弃（= 回到继承）。
+ */
+export function readSubagentThinkingOverrides(agentDir: string): Record<string, ThinkingLevel> {
+  const filePath = subagentModelOverridesPath(agentDir);
+  if (!existsSync(filePath)) return {};
+  try {
+    const config = readConfig(filePath);
+    const thinking = config.thinking;
+    if (!isRecord(thinking)) return {};
+    const result: Record<string, ThinkingLevel> = {};
+    for (const [id, value] of Object.entries(thinking)) {
+      const level = normalizeThinkingLevel(value);
+      if (level) result[id] = level;
+    }
+    return result;
+  } catch (error) {
+    console.warn(`读取内置子智能体思考等级覆盖失败：${error instanceof Error ? error.message : String(error)}`);
+    return {};
+  }
+}
+
+/**
+ * 写入内置子智能体（按 id）的思考等级；level 为空则删掉该条（回到继承主会话档位）。
+ * 与模型覆盖一样只影响内置定义——用户自建的档位写在定义自己身上。
+ */
+export function saveSubagentThinkingOverride(agentDir: string, id: string, thinkingLevel: ThinkingLevel | undefined): void {
+  const filePath = subagentModelOverridesPath(agentDir);
+  const config = existsSync(filePath) ? readConfig(filePath) : {};
+  const thinking = isRecord(config.thinking) ? { ...config.thinking } : {};
+  if (thinkingLevel) thinking[id] = thinkingLevel;
+  else delete thinking[id];
+  config.thinking = thinking;
+  writeConfig(filePath, config);
+}
+
 /** 模型引用的归一化：provider/id 均为非空字符串才有效。 */
 function normalizeModel(value: unknown): { provider: string; id: string } | undefined {
   return isRecord(value) && typeof value.provider === "string" && typeof value.id === "string" && value.provider.trim() && value.id.trim()
@@ -190,7 +233,7 @@ function normalizeModel(value: unknown): { provider: string; id: string } | unde
  * code-reviewer、用户的定义叫 code-reviewer 但 id 不同，清单里就会出现两个同名条目，
  * 按名字解析命中哪个变成不确定（真实场景：用户的存量定义 id 是随机生成、名称却是这
  * 三个名字）。同名覆盖让用户能直接用自己那份替掉内置那份，零额外配置。
- * 内置定义的「执行模型」用用户覆盖表回填（用户在设置页能改的只有模型）。
+ * 内置定义的「执行模型 / 思考等级」用用户覆盖表回填（用户在设置页能改的只有这两项）。
  * 坏文件只影响所在作用域。返回的每个定义带最终生效 scope。
  */
 export function readSubagents(workspace: string | undefined, agentDir: string, bundledDir?: string): SubagentDefinition[] {
@@ -206,8 +249,9 @@ export function readSubagents(workspace: string | undefined, agentDir: string, b
   };
   if (bundled) {
     const overrides = readSubagentModelOverrides(agentDir);
+    const thinkingOverrides = readSubagentThinkingOverrides(agentDir);
     for (const entry of readBundledSubagents(bundled)) {
-      upsert({ ...entry, model: overrides[entry.id] ?? entry.model });
+      upsert({ ...entry, model: overrides[entry.id] ?? entry.model, thinkingLevel: thinkingOverrides[entry.id] ?? entry.thinkingLevel });
     }
   }
   for (const [scope, path] of [["global", global], ["project", project]] as const) {
@@ -225,7 +269,7 @@ export function readSubagents(workspace: string | undefined, agentDir: string, b
 
 /** 内置定义只读：任何试图改写内置档的保存/删除都直接拒绝。 */
 function rejectBundledWrite(scope: SubagentScope): void {
-  if (scope === "bundled") throw new Error("内置子智能体不可修改（只能在列表里选择执行模型）");
+  if (scope === "bundled") throw new Error("内置子智能体不可修改（只能在列表里选择执行模型与思考等级）");
 }
 
 /** 按作用域 upsert；不清除目标文件中无关条目。 */

@@ -38,6 +38,16 @@ function isThinkingLevel(value: string): value is ThinkingLevel {
 }
 
 /**
+ * 把不可信输入收口成一个合法思考等级；非字符串/不认识的档位一律 undefined。
+ *
+ * 用在子智能体定义与内置覆盖表的读写上：坏值必须变成「未设置（继承）」而不是
+ * 原样流进 `createAgentSession`。
+ */
+export function normalizeThinkingLevel(value: unknown): ThinkingLevel | undefined {
+  return typeof value === "string" && isThinkingLevel(value) ? value : undefined;
+}
+
+/**
  * 规范化一份思考等级映射：只保留合法档位键，取值只接受非空字符串或 `null`
  * （空串/数字等非法值丢弃 = 该档位回到未声明状态）。无有效键时返回 undefined。
  */
