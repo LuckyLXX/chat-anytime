@@ -6,11 +6,14 @@
  * 的通信也照样在——这正是「关掉主界面仍能看到谁在跑」的实现方式。
  *
  * 三个刻意的设计：
- * 1. **自带静态服务**。`BrowserAutomationController` 的静态服务随主窗口 dispose，
- *    共用一个实例会让面板在主窗口关闭的那一刻断掉数据（页面还在，fetch 全失败）。
- *    代价只是多一个 loopback 监听。
- * 2. **没有 preload**。面板页靠 `fetch("./__pidesktop_state.json")` 取数（由静态
- *    服务的虚拟端点提供，见 browser-static-server），所以窗口可以是最严的
+ * 1. **承载方式：自定义协议**（2026-10-10 根因修复）。面板页原先由控制器自带的
+ *    loopback 静态服务提供（`http://127.0.0.1:<listen(0) 随机端口>/w/<token>/…`），
+ *    而 localStorage / IndexedDB 按 origin（含端口）隔离 ⇒ 端口每次启动都变，
+ *    作品看着就像「数据丢了」。现在由 `PanelProtocolRoute` 在固定 origin
+ *    `pidesktop-file://w-<作品>` 上服务页面与资产，作品代码零改动就获得跨启动
+ *    持久、按作品隔离的存储。
+ * 2. **没有 preload**。面板页靠 `fetch("./__pidesktop_state.json")` 取数（由协议
+ *    路由的虚拟端点提供，见 panel-protocol.ts），所以窗口可以是最严的
  *    `sandbox + contextIsolation + 无 nodeIntegration`，也仍然是「一个普通网页」。
  * 3. **同作品复用同一窗口**。重复点「运行」是把它调到前面，而不是叠出一堆窗口。
  *
@@ -20,15 +23,17 @@
  * drawerBounds 纯函数决定，不进坐标记忆）。
  *
  * 这个类只做编排（BrowserWindow/屏幕/落盘），可测的判定都在纯函数里：
- * `shared/panel.ts`（入口扩展名、端点契约）与 `panel-bounds.ts`（位置尺寸）。
+ * `shared/panel.ts`（入口扩展名、端点契约）、`panel-bounds.ts`（位置尺寸）、
+ * `shared/protocol.ts`（origin 与 URL）、`panel-protocol.ts`（请求路由）。
  */
 
 import { stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { BrowserWindow, screen } from "electron";
 import { PANEL_MIN_HEIGHT, PANEL_MIN_WIDTH, panelEffectiveAlwaysOnTop, panelMode, panelWindowSize, type GalleryPanelEdge, type GalleryPanelOptions } from "../shared/gallery.js";
-import { isPanelEntryFile, type PanelAction, type PanelRequest } from "../shared/panel.js";
-import { BrowserStaticServer, type StaticServerEndpoint } from "./browser-static-server.js";
+import { panelWorkUrl } from "../shared/protocol.js";
+import { isPanelEntryFile, type PanelRequest } from "../shared/panel.js";
+import type { PanelProtocolRoute } from "./panel-protocol.js";
 import { anchoredPanelBounds, drawerBounds, pickPanelBounds, readPanelBounds, scaledPanelBounds, writePanelBounds, PANEL_SCALE_STEP, type PanelBounds } from "./panel-bounds.js";
 
 export interface PanelOpenRequest {
@@ -44,10 +49,8 @@ export interface PanelOpenRequest {
 export type PanelOpenResult = { ok: true } | { ok: false; message: string };
 
 export interface PanelWindowDeps {
-  /** 面板状态端点的数据源（同步、只读；由 main 的内存缓存提供）。 */
-  stateProvider: () => unknown;
-  /** 面板页 POST 上来的白名单动作（窗口级请求由控制器自己认领，不走这里）。 */
-  onAction: (action: PanelAction) => void;
+  /** 面板协议路由（页面/资产/端点全在它手上，见 panel-protocol.ts）。 */
+  route: PanelProtocolRoute;
   /** 坐标表文件（`<agentDir>/pidesktop-panels.json`）。 */
   boundsPath: string;
   /** 面板页里 window.open / target=_blank 一律交系统浏览器。 */
@@ -58,7 +61,6 @@ export interface PanelWindowDeps {
 export const PANEL_BOUNDS_SAVE_DEBOUNCE_MS = 400;
 
 export class PanelWindowController {
-  private readonly staticFiles = new BrowserStaticServer();
   private readonly windows = new Map<string, BrowserWindow>();
   /** 每个作品的归一化窗口偏好（close/toggle 要按形态/贴边行事）。 */
   private readonly panelOptions = new Map<string, GalleryPanelOptions>();
@@ -69,17 +71,6 @@ export class PanelWindowController {
 
   constructor(private readonly deps: PanelWindowDeps) {
     this.bounds = readPanelBounds(deps.boundsPath);
-    const endpoint: StaticServerEndpoint = {
-      state: () => deps.stateProvider(),
-      action: (panelRequest, context) => {
-        // 窗口级请求（close / toggle / grow / shrink / reset-size / resize）作用于
-        // 「发出请求的那个窗口」，由本控制器自己认领；show-main 归主进程的回调。
-        if (panelRequest.action !== "show-main") return this.handleWindowAction(panelRequest, context.referer);
-        deps.onAction(panelRequest.action);
-        return true;
-      }
-    };
-    this.staticFiles.setEndpoint(endpoint);
   }
 
   /** 打开（或前置）一个面板窗口。 */
@@ -94,7 +85,7 @@ export class PanelWindowController {
       existing.focus();
       return { ok: true };
     }
-    // 首次打开是异步的（校验入口 + 起静态服务）：双击「运行」两次会在建窗之前
+    // 首次打开是异步的（校验入口 + 挂载协议路由）：双击「运行」两次会在建窗之前
     // 就并发进来，没有这个占位就会叠出两个窗口，且后建的那个不受 map 管理。
     const pending = this.openings.get(request.id);
     if (pending) return pending;
@@ -124,10 +115,24 @@ export class PanelWindowController {
     return false;
   }
 
-  /** 关掉某个作品的面板（作品被删除时用；不存在即 no-op）。 */
+  /** 关掉某个作品的面板（作品被删除时用；不存在即 no-op）。挂载由窗口的 closed 处理器摘除。 */
   close(id: string): void {
     const win = this.windows.get(id);
     if (win && !win.isDestroyed()) win.close();
+  }
+
+  /** 重载某个作品的面板页（清空数据后要把页面内存里的旧数据一并丢掉）。 */
+  reload(id: string): void {
+    const win = this.windows.get(id);
+    if (!win || win.isDestroyed()) return;
+    win.webContents.reload();
+  }
+
+  /** 该作品活着的面板页（数据量测优先复用它，省一次窗口创建）。 */
+  contentsFor(id: string): BrowserWindow["webContents"] | undefined {
+    const win = this.windows.get(id);
+    if (!win || win.isDestroyed()) return undefined;
+    return win.webContents;
   }
 
   dispose(): void {
@@ -141,37 +146,18 @@ export class PanelWindowController {
     }
     this.windows.clear();
     this.panelOptions.clear();
-    this.staticFiles.dispose();
   }
 
   /**
-   * 窗口级动作（close / toggle / grow / shrink / reset-size）：定位发出 POST 的页面
-   * 属于哪个窗口，作用于它。
+   * 窗口级动作（close / toggle / grow / shrink / reset-size / resize）：作用于
+   * **发出请求的那个作品**。
    *
-   * 定位靠 HTTP 请求头里的 Referer（面板页 fetch 相对路径时会带上页面自己的 URL），
-   * 与窗口当前页面的 pathname 精确匹配——同工作区的两个面板作品入口必然不同，
-   * 所以同源不同页足以区分。匹配不上时，恰好只有一个活面板就作用于它（那时
-   * 发请求的只能是它）；多个窗口且分不清时宁可拒绝（403）也不关错窗。
+   * 定位靠 host（协议请求的 host 就是作品身份，见 shared/protocol.ts 的 panelWorkHost），
+   * 由 index.ts 的端点回调把 appId 传进来——不再有原先那套「Referer 路径匹配 +
+   * 唯一活窗退化 + 多窗分不清就 403」的判据：自定义协议的请求里 Referer 头根本拿不到
+   * （真机实测），而 host 本身就唯一确定。
    */
-  private handleWindowAction(request: Exclude<PanelRequest, { action: "show-main" }>, referer: string | undefined): boolean {
-    const alive = [...this.windows.entries()].filter(([, win]) => !win.isDestroyed());
-    let id: string | undefined;
-    if (referer) {
-      try {
-        const refererPath = new URL(referer).pathname;
-        id = alive.find(([, win]) => {
-          try {
-            return new URL(win.webContents.getURL()).pathname === refererPath;
-          } catch {
-            return false;
-          }
-        })?.[0];
-      } catch {
-        id = undefined;
-      }
-    }
-    if (!id && alive.length === 1) id = alive[0]![0];
-    if (!id) return false;
+  handleAction(id: string, request: Exclude<PanelRequest, { action: "show-main" }>): boolean {
     const win = this.windows.get(id);
     if (!win || win.isDestroyed()) return false;
     if (request.action === "close") {
@@ -215,12 +201,11 @@ export class PanelWindowController {
     const validation = await validatePanelEntry(request.workspace, request.filePath);
     if (!validation.ok) return validation;
 
-    let url: string;
-    try {
-      url = await this.staticFiles.urlForFile(validation.filePath, request.workspace);
-    } catch (error) {
-      return { ok: false, message: `面板作品的本地服务起不来：${error instanceof Error ? error.message : String(error)}` };
-    }
+    // 先挂载再加载：页面一开就会请求自己的资产与端点，挂载表必须已经就位。
+    // 挂载根 = 工作区（与原先静态服务的口径一致，入口在子目录里时相对/根相对路径都照旧可用）。
+    const host = this.deps.route.mount({ appId: request.id, workspace: request.workspace });
+    const entryRelative = relative(resolve(request.workspace), resolve(validation.filePath));
+    const url = panelWorkUrl(host, entryRelative);
 
     const mode = panelMode(request.panel);
     const displays = screen.getAllDisplays().map((display) => display.workArea);
@@ -267,6 +252,8 @@ export class PanelWindowController {
     win.on("closed", () => {
       if (this.windows.get(request.id) === win) this.windows.delete(request.id);
       this.panelOptions.delete(request.id);
+      // 窗口没了就不再服务它的地址（重开「运行」时会重新挂载）。
+      this.deps.route.unmount(request.id);
     });
     try {
       await win.loadURL(url);
@@ -274,6 +261,7 @@ export class PanelWindowController {
       // 加载失败不留一个空白窗口在 map 里（下次「运行」会把它 show 出来）。
       if (!win.isDestroyed()) win.destroy();
       if (this.windows.get(request.id) === win) this.windows.delete(request.id);
+      this.deps.route.unmount(request.id);
       return { ok: false, message: `面板页面加载失败：${error instanceof Error ? error.message : String(error)}` };
     }
     if (!win.isDestroyed()) win.show();
@@ -303,7 +291,7 @@ export class PanelWindowController {
  * 入口校验：必须是工作区内的**网页文件**且真实存在。
  *
  * 渲染端传来的路径不可全信（作品清单是用户/AI 写的），所以这里独立复核一遍：
- * 越出工作区的入口一律拒——面板窗口的静态服务会挂载整个工作区，放一个工作区外的
+ * 越出工作区的入口一律拒——面板协议路由把整个工作区挂给这个作品，放一个工作区外的
  * 入口进去等于把那个目录也一并挂上。
  */
 export async function validatePanelEntry(workspace: string, filePath: string): Promise<{ ok: true; filePath: string } | { ok: false; message: string }> {

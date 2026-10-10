@@ -73,7 +73,7 @@ import { composePickMessage } from "./lib/browser-pick";
 import { composeGalleryDevMessage, galleryRunPlan, galleryServiceFailureMessage, galleryServiceTerminalId, GALLERY_SERVICE_WAIT_MS, type GalleryApp, type GalleryDraft, type GalleryKind } from "../../shared/gallery";
 import { GalleryMenu } from "./components/GalleryMenu";
 import { GalleryWall } from "./components/GalleryWall";
-import { GalleryPublishDialog, GalleryWallDialog } from "./components/GalleryDialogs";
+import { GalleryDataDialog, GalleryPublishDialog, GalleryWallDialog } from "./components/GalleryDialogs";
 import { DiffView } from "./components/DiffView";
 import { BrandMark } from "./components/BrandMark";
 import { clampPreviewSplit, PREVIEW_SPLIT_MAX, PREVIEW_SPLIT_MIN, previewSplitFromKey } from "./lib/preview-split";
@@ -701,6 +701,8 @@ export function App(): ReactNode {
   }, []);
   /** 作品墙弹窗：有会话历史时空态不再出现，作品墙必须另外可达（顶栏下拉「打开作品墙」）。 */
   const [galleryWallOpen, setGalleryWallOpen] = useState(false);
+  /** 「作品数据…」对话框的目标作品（面板数据在 Chromium profile 内，只能从作品墙看/清）。 */
+  const [galleryDataApp, setGalleryDataApp] = useState<GalleryApp>();
   /** 空态作品墙（landing）：与弹窗共用同一份渲染，只是容器不同。 */
   const renderGalleryLanding = useCallback((): ReactNode => (
     <GalleryWall
@@ -710,6 +712,7 @@ export function App(): ReactNode {
       onDevelop={developGalleryApp}
       onPublish={openGalleryDraft}
       onRemove={(app) => void removeGalleryApp(app)}
+      onData={setGalleryDataApp}
     />
   ), [galleryApps, activeWorkspace, runGalleryApp, developGalleryApp, removeGalleryApp, openGalleryDraft]);
   /**
@@ -1919,10 +1922,12 @@ export function App(): ReactNode {
           onRun={(app) => { setGalleryWallOpen(false); void runGalleryApp(app); }}
           onDevelop={(app) => { setGalleryWallOpen(false); developGalleryApp(app); }}
           onRemove={(app) => void removeGalleryApp(app)}
+          onData={(app) => { setGalleryWallOpen(false); setGalleryDataApp(app); }}
           onPublish={() => { setGalleryWallOpen(false); openGalleryDraft(); }}
           onClose={() => setGalleryWallOpen(false)}
         />
       )}
+      {galleryDataApp && <GalleryDataDialog app={galleryDataApp} onClose={() => setGalleryDataApp(undefined)} />}
       {galleryDraftOpen && (
         <GalleryPublishDialog
           initial={galleryDraftInitial}

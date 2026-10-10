@@ -709,6 +709,86 @@ export function parseWorkspaceFilePreviewUrl(input: string): { workspace: string
   }
 }
 
+/**
+ * 面板作品的稳定 origin（host 段）。
+ *
+ * 为什么需要它（2026-10-10 根因修复）：面板窗口原先由 loopback 静态服务承载
+ * （`http://127.0.0.1:<listen(0) 随机端口>/w/<token>/…`），而 localStorage / IndexedDB
+ * 按 **origin（scheme+host+端口）** 隔离 —— 端口每次启动都变 ⇒ 每次都是全新空存储，
+ * 作品看起来「数据丢了」。改成由平台自定义协议承载后，origin 只由作品 id 决定，
+ * 跨启动永久稳定，且按作品互相隔离。
+ *
+ * 可读优先：app 生成的 id 形如 `g-0b5c16e7f1e9`，本身就是合法 host label，直接用
+ * `w-g-0b5c16e7f1e9`（便于在 DevTools / profile 目录里肉眼对号）；只有被手改成
+ * 非法 host 字符的 id 才退到哈希（永不产出非法 host，也永不与其他作品撞车）。
+ */
+export const PANEL_WORK_HOST_PREFIX = "w-";
+
+/** host 安全的 id：小写字母数字与连字符、不以连字符结尾、总长留出前缀余量（label ≤ 63）。 */
+const HOST_SAFE_APP_ID = /^[a-z0-9][a-z0-9-]{0,40}$/u;
+const PANEL_WORK_HOST = /^w-[a-z0-9][a-z0-9-]{0,40}$/u;
+
+/** 64 位 FNV-1a（纯 JS 同步实现；渲染端也会加载本模块，不能引 node:crypto）。 */
+function fnv1a64Hex(value: string): string {
+  let hash = 0xcbf29ce484222325n;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash ^ BigInt(value.charCodeAt(index))) & 0xffffffffffffffffn;
+    hash = (hash * 0x100000001b3n) & 0xffffffffffffffffn;
+  }
+  return hash.toString(16).padStart(16, "0");
+}
+
+/** 作品 id → 面板 host（同一 id 永远同一 host；不同 id 正常路径下不同 host）。 */
+export function panelWorkHost(appId: string): string {
+  const id = appId.trim();
+  if (HOST_SAFE_APP_ID.test(id) && !id.endsWith("-")) return `${PANEL_WORK_HOST_PREFIX}${id}`;
+  return `${PANEL_WORK_HOST_PREFIX}${fnv1a64Hex(id)}`;
+}
+
+/** 这个 host 是平台给面板作品的（`theme` / `preview` 两条既有通路不在此列）。 */
+export function isPanelWorkHost(host: string): boolean {
+  return PANEL_WORK_HOST.test(host);
+}
+
+/**
+ * 面板入口的协议 URL：`pidesktop-file://<host>/<入口相对工作区的各段>`。
+ *
+ * 与 `workspaceFilePreviewUrl` 的关键区别：**段间保留真实 `/`**（每段各自
+ * encodeURIComponent）。面板是一个网页，`./style.css`、`../shared/lib.js`、
+ * `/assets/x.js` 都要按目录语义解析；把整串路径编码成一段会让相对资源全错位。
+ * 挂载根 = 工作区（与原先静态服务的挂载口径一致），所以根相对路径也照旧可用。
+ */
+export function panelWorkUrl(host: string, relativePath: string): string {
+  const segments = relativePath
+    .replaceAll("\\", "/")
+    .split("/")
+    .filter((part) => part !== "" && part !== ".");
+  return `${PREVIEW_FILE_SCHEME}://${host}/${segments.map((part) => encodeURIComponent(part)).join("/")}`;
+}
+
+/**
+ * 解析面板 URL，返回 host 与工作区相对路径；非法（非本 scheme / 非面板 host /
+ * 含 `..` 或解码后夹带分隔符的段）一律返回 undefined。
+ *
+ * 工作区不在 URL 里：主进程有一张 host → 工作区的挂载表（开面板时注册、关窗时摘除），
+ * 所以这里只负责「路径」这一段。
+ */
+export function parsePanelWorkUrl(input: string): { host: string; relativePath: string } | undefined {
+  try {
+    const url = new URL(input);
+    if (url.protocol !== `${PREVIEW_FILE_SCHEME}:` || !isPanelWorkHost(url.hostname)) return undefined;
+    const segments = url.pathname.split("/").filter((part) => part !== "");
+    if (segments.length === 0) return undefined;
+    const parts = segments.map((segment) => decodeURIComponent(segment));
+    for (const part of parts) {
+      if (part === "" || part === "." || part === ".." || part.includes("/") || part.includes("\\")) return undefined;
+    }
+    return { host: url.hostname, relativePath: parts.join("/") };
+  } catch {
+    return undefined;
+  }
+}
+
 export interface WorkspaceDirectoryEntry {
   name: string;
   relativePath: string;
@@ -1154,7 +1234,7 @@ export interface DesignDocSummary {
 // 运行一律走内置浏览器 + 本地静态服务（单文件/多文件/服务型统一心智）；
 // 数据模型与纯函数在 shared/gallery.ts，渲染端与主进程共用同一套判定。
 // 命名同 automation：**下划线工具名**（gallery_publish），命令用点号。
-import type { GalleryApp as GalleryAppModel, GalleryDraft as GalleryDraftModel, GalleryPanelOptions, GalleryServiceFailure } from "./gallery.js";
+import type { GalleryApp as GalleryAppModel, GalleryDataClearResult, GalleryDataResult, GalleryDraft as GalleryDraftModel, GalleryPanelOptions, GalleryServiceFailure } from "./gallery.js";
 export type { GalleryApp, GalleryDraft, GalleryKind, GalleryPanelOptions, GalleryRunTarget } from "./gallery.js";
 
 /**
@@ -2172,6 +2252,13 @@ export interface DesktopApi {
    * 打不开时 ok=false 并附原因（入口不在工作区内 / 不是网页文件 / 静态服务起不来）。
    */
   galleryOpenPanel(input: { id: string; title: string; workspace: string; filePath: string; panel?: GalleryPanelOptions }): Promise<{ ok: boolean; message?: string }>;
+  /**
+   * 面板作品的数据用量（作品墙卡片的「数据…」）。面板窗口没开着时主进程会开一个
+   * 临时隐藏窗口去量（量完即关）；量不到不是错误，回 ok:false + 原因即可。
+   */
+  galleryDataMeasure(appId: string): Promise<GalleryDataResult>;
+  /** 清空面板作品的数据（按 origin 清，只清这一个作品；它的面板开着会顺带重载）。 */
+  galleryDataClear(appId: string): Promise<GalleryDataClearResult>;
   /**
    * 主题导入（设置 → 外观的「导入 CSS」/「导入主题目录」）：主进程弹系统选择对话框、
    * 读盘、按 CSS 里的安全相对引用把资产写进 `<agentDir>/pidesktop-themes/current/`，

@@ -110,7 +110,7 @@
 | 设计绘图工具（画布浮动工具栏，aria-pressed 标记激活） | `design-tool-select` / `design-tool-frame` / `design-tool-rect` / `design-tool-text` |
 | 图层树锁定开关（行悬停出现，aria-pressed 标记锁定） | `design-layer-lock`                              |
 | 作品下拉开关（顶栏，aria-expanded + 数量角标） | `gallery-toggle`                                 |
-| 作品：运行 / 继续开发 / 打开作品墙 / 登记新作品 / 移除 | `gallery-run` / `gallery-develop` / `gallery-open-wall` / `gallery-publish` / `gallery-remove` |
+| 作品：运行 / 继续开发 / 打开作品墙 / 登记新作品 / 移除 / 面板数据（数据… 与清空） | `gallery-run` / `gallery-develop` / `gallery-open-wall` / `gallery-publish` / `gallery-remove` / `gallery-data` / `gallery-data-clear` |
 | 角色页：新建角色 / 保存角色 | `agent-new` / `agent-save` |
 | 设置弹窗左栏底部：当前版本 | `settings-version` |
 | 通用页：能力总闸 / Jev 测试连接 / Jev 展开 | `capability-switch`（+ `data-capability`） / `jev-test` / `jev-expand` |
@@ -118,7 +118,7 @@
 | 模型行：手动添加 / 思考等级 / 思考等级面板开关 | `model-add` / `model-thinking-levels` / `model-thinking-panel` |
 | 技能与工具页：重载资源 / 添加 MCP / 保存 MCP / 添加命令 / 保存命令 | `resource-reload` / `mcp-add` / `mcp-save` / `command-add` / `command-save` |
 | 外观页：导入 CSS / 导入主题目录 / 清空 / 保存当前主题 / 保存外观设置 | `appearance-import-css` / `appearance-import-theme` / `appearance-clear-css` / `appearance-save-theme` / `appearance-save` |
-| 子智能体页：新建 / 保存 | `subagent-add` / `subagent-save` |
+| 子智能体页：新建 / 保存 / 内置定义允许浏览器自动化 | `subagent-add` / `subagent-save` / `subagent-browser-tools` |
 | 钩子页：总闸 / 新建 / 保存 / 项目规则信任 / 最近运行记录 / 模板 | `hooks-enable` / `hooks-add` / `hooks-save` / `hooks-trust` / `hooks-run-log` / `hooks-template` |
 | 用量统计页：助手范围筛选 | `usage-agent-filter` |
 | 面板坞开关 + 待办页 tab（会话区右上方 FAB） | `task-panel-toggle`                              |

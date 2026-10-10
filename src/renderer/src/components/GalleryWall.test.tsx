@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { GalleryApp } from "../../../shared/gallery";
 import { GalleryMenu } from "./GalleryMenu";
 import { GalleryWall } from "./GalleryWall";
-import { GalleryPublishDialog, GalleryWallDialog } from "./GalleryDialogs";
+import { GalleryDataDialog, GalleryPublishDialog, GalleryWallDialog } from "./GalleryDialogs";
 
 /**
  * 作品墙 / 顶栏下拉的结构钩子契约测试。
@@ -42,18 +42,20 @@ describe("GalleryMenu theme hooks", () => {
 
 describe("GalleryWall theme hooks", () => {
   it("carries the wall container + per-card action hooks", () => {
-    const markup = renderToStaticMarkup(<GalleryWall apps={apps} workspace="D:/ws" onRun={noop} onDevelop={noop} onPublish={noop} onRemove={noop} />);
+    const markup = renderToStaticMarkup(<GalleryWall apps={apps} workspace="D:/ws" onRun={noop} onDevelop={noop} onPublish={noop} onRemove={noop} onData={noop} />);
     expect(markup).toContain('data-pane="gallery-wall"');
-    for (const control of ["gallery-run", "gallery-develop", "gallery-publish", "gallery-remove"]) {
+    for (const control of ["gallery-run", "gallery-develop", "gallery-publish", "gallery-remove", "gallery-data"]) {
       expect(markup).toContain(`data-control="${control}"`);
     }
+    // 数据入口只给面板作品：fixture 里只有 g3 是面板，所以恰好一个
+    expect(markup.match(/data-control="gallery-data"/gu)?.length).toBe(1);
     // 卡片带作品 id，便于主题/调试定位
     expect(markup).toContain('data-gallery-id="g1"');
     expect(markup).toContain('data-gallery-id="g2"');
   });
 
   it("renders the landing empty state (not the grid) when the pool is empty", () => {
-    const markup = renderToStaticMarkup(<GalleryWall apps={[]} onRun={noop} onDevelop={noop} onPublish={noop} onRemove={noop} />);
+    const markup = renderToStaticMarkup(<GalleryWall apps={[]} onRun={noop} onDevelop={noop} onPublish={noop} onRemove={noop} onData={noop} />);
     expect(markup).toContain('data-pane="landing"');
     expect(markup).not.toContain('data-pane="gallery-wall"');
     // 保留原空态语义的引导文案 + 发布入口
@@ -62,19 +64,19 @@ describe("GalleryWall theme hooks", () => {
   });
 
   it("marks workspaces other than the current one", () => {
-    const markup = renderToStaticMarkup(<GalleryWall apps={[apps[0]!]} workspace="D:/other" onRun={noop} onDevelop={noop} onPublish={noop} onRemove={noop} />);
+    const markup = renderToStaticMarkup(<GalleryWall apps={[apps[0]!]} workspace="D:/other" onRun={noop} onDevelop={noop} onPublish={noop} onRemove={noop} onData={noop} />);
     expect(markup).toContain("另一工作区");
   });
 
   it("面板作品有独立的类型徽标与图标（不跟网页作品混为一谈）", () => {
-    const markup = renderToStaticMarkup(<GalleryWall apps={[apps[2]!]} workspace="D:/ws" onRun={noop} onDevelop={noop} onPublish={noop} onRemove={noop} />);
+    const markup = renderToStaticMarkup(<GalleryWall apps={[apps[2]!]} workspace="D:/ws" onRun={noop} onDevelop={noop} onPublish={noop} onRemove={noop} onData={noop} />);
     expect(markup).toContain('data-gallery-id="g3"');
     expect(markup).toContain(">面板<");
     expect(markup).toContain("lucide-app-window");
   });
 
   it("嵌入弹窗时不自带「作品墙」标题（容器头部已有，避免同屏两个同名标题）", () => {
-    const embedded = renderToStaticMarkup(<GalleryWall apps={apps} embedded onRun={noop} onDevelop={noop} onPublish={noop} onRemove={noop} />);
+    const embedded = renderToStaticMarkup(<GalleryWall apps={apps} embedded onRun={noop} onDevelop={noop} onPublish={noop} onRemove={noop} onData={noop} />);
     expect(embedded).not.toContain("<h1>作品墙</h1>");
     expect(embedded).toContain("gallery-wall-embedded");
     expect(embedded).toContain("gallery-wall-count");
@@ -82,14 +84,23 @@ describe("GalleryWall theme hooks", () => {
     expect(embedded).toContain("个作品");
     expect(embedded).toContain('data-control="gallery-publish"');
     // 独立渲染时保留标题
-    const standalone = renderToStaticMarkup(<GalleryWall apps={apps} onRun={noop} onDevelop={noop} onPublish={noop} onRemove={noop} />);
+    const standalone = renderToStaticMarkup(<GalleryWall apps={apps} onRun={noop} onDevelop={noop} onPublish={noop} onRemove={noop} onData={noop} />);
     expect(standalone).toContain("<h1>作品墙</h1>");
   });
 });
 
 describe("GalleryDialogs theme hooks", () => {
+  it("数据对话框带量测说明、清空入口与二次确认语义的钩子", () => {
+    const markup = renderToStaticMarkup(<GalleryDataDialog app={apps[2]!} onClose={noop} />);
+    expect(markup).toContain('data-control="gallery-data-clear"');
+    expect(markup).toContain('aria-label="会话状态面板 的数据"');
+    // 固定 origin 要写在界面上（用户找不到数据在哪，就只会以为又丢了）
+    expect(markup).toContain("pidesktop-file://w-g3");
+    expect(markup).toContain("清空数据");
+  });
+
   it("wall dialog reuses the same GalleryWall hooks", () => {
-    const markup = renderToStaticMarkup(<GalleryWallDialog apps={apps} workspace="D:/ws" onRun={noop} onDevelop={noop} onRemove={noop} onPublish={noop} onClose={noop} />);
+    const markup = renderToStaticMarkup(<GalleryWallDialog apps={apps} workspace="D:/ws" onRun={noop} onDevelop={noop} onRemove={noop} onData={noop} onPublish={noop} onClose={noop} />);
     expect(markup).toContain('data-pane="gallery-wall"');
     expect(markup).toContain('role="dialog"');
   });

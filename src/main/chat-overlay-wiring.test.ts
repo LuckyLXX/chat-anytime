@@ -75,8 +75,8 @@ describe("聊天区遮罩的接线契约", () => {
     // 文件树的弹窗是深层组件：同一计数通路（谁开谁登记）。
     expect(workspaceTree).toContain('from "../lib/overlay-layers"');
     expect(workspaceTree).toContain("useOverlayLayer(true)");
-    // 作品墙 / 登记作品这两个大弹层不参与 in-chat 收窄，只能靠挂起原生视图。
-    expect(galleryDialogs.match(/useOverlayLayer\(true\)/gu)).toHaveLength(2);
+    // 作品墙 / 登记作品 / 作品数据这三个大弹层不参与 in-chat 收窄，只能靠挂起原生视图。
+    expect(galleryDialogs.match(/useOverlayLayer\(true\)/gu)).toHaveLength(3);
   });
 
   it("右下角提示条改挂聊天区右缘（它本来就落在预览面板那一侧）", () => {

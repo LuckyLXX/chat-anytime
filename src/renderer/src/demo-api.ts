@@ -29,6 +29,7 @@ import type {
   SshRevealEvent,
   UsageStats
 } from "../../shared/protocol";
+import type { GalleryDataClearResult, GalleryDataResult } from "../../shared/gallery";
 import type { ThemeImportOutcome } from "../../shared/theme-assets";
 
 const listeners = new Set<(message: RuntimeMessage) => void>();
@@ -607,6 +608,28 @@ export function createDemoApi(): DesktopApi {
     async galleryOpenPanel(): Promise<{ ok: boolean; message?: string }> {
       // 演示环境只有一个渲染进程，开不出独立窗口宿主：如实拒绝，不伪造成功。
       return { ok: false, message: "演示环境不支持面板窗口（需要 Electron 主进程）" };
+    },
+    async galleryDataMeasure(): Promise<GalleryDataResult> {
+      // 演示环境没有真面板 origin：给一份形状合法的样本用量，让对话框可看（不伪造「已持久化」以外的行为）。
+      return {
+        ok: true,
+        usage: {
+          origin: "pidesktop-file://w-gallery-demo-1",
+          localStorageBytes: 2048,
+          keys: [
+            { key: "weave.state", bytes: 1800 },
+            { key: "weave.prefs", bytes: 248 }
+          ],
+          storageBytes: 4096,
+          quotaBytes: 1073741824,
+          persisted: true,
+          databaseNames: ["weave-vault"]
+        }
+      };
+    },
+    async galleryDataClear(): Promise<GalleryDataClearResult> {
+      // 演示环境没有真存储可清：如实回成功（真实路径会连同面板窗口一起重载）。
+      return { ok: true };
     },
     async themeImport(): Promise<ThemeImportOutcome> {
       // 演示环境没有文件系统也没有原生对话框：如实告知，不伪造一个成功的导入

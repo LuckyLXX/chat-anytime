@@ -478,6 +478,33 @@ export function galleryThumbEligible(app: Pick<GalleryApp, "kind" | "entry">): b
 }
 
 /**
+ * 面板作品的数据用量（「作品数据…」对话框的展示物，2026-10-10）。
+ *
+ * 两个数字刻意不合并：`localStorageBytes` 由量测页逐键自己算（localStorage **不在**
+ * `navigator.storage.estimate()` 的统计里），`storageBytes` 是 Chromium 对 IDB /
+ * CacheStorage / ServiceWorker 的估算值与配额。
+ */
+export interface GalleryDataUsage {
+  /** 数据所在的 origin：面板作品是固定值 `pidesktop-file://w-<作品>`（无端口，所以跨启动不丢）。 */
+  origin: string;
+  /** localStorage 合计字节数（UTF-8，键+值逐项求和）。 */
+  localStorageBytes: number;
+  /** 占用最大的若干键（最多 8 个），用于「数据里有什么」的摘要。 */
+  keys: { key: string; bytes: number }[];
+  /** IndexedDB / CacheStorage / ServiceWorker 的估算用量（不含 localStorage）。 */
+  storageBytes?: number;
+  /** 该 origin 的配额上限。 */
+  quotaBytes?: number;
+  /** IndexedDB 库名列表。 */
+  databaseNames?: string[];
+  /** 存储是否已被判定为持久（`navigator.storage.persisted()`）。 */
+  persisted?: boolean;
+}
+
+export type GalleryDataResult = { ok: true; usage: GalleryDataUsage } | { ok: false; message: string };
+export type GalleryDataClearResult = { ok: true } | { ok: false; message: string };
+
+/**
  * 「继续开发」注入文本块：照 lib/browser-pick.ts 的 composePickMessage 形状
  * （首行标签 + 逐字段行），末尾给出下一步，便于模型直接接着干。
  */

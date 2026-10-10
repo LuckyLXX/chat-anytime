@@ -181,7 +181,7 @@ button, input, select, textarea, summary, label {
   .delegation-transcript-dialog, .image-lightbox-content, .content-preview-panel,
   .panel-dock-fab, .error-toast, .settings-content, .agent-list, .session-list,
   .workspace-tree, .empty-workspace, .empty-conversation, .gallery-wall,
-  .gallery-wall-dialog, .gallery-publish-dialog, .panel-dock-pane,
+  .gallery-wall-dialog, .gallery-publish-dialog, .gallery-data-dialog, .panel-dock-pane,
   .sidebar-flyout, .session-workspace-items { animation: none !important; }
   /* 退场动画全在 .is-exiting 子树内，一条通配关停（Presence 同步立即卸载） */
   .ui-presence.is-exiting, .ui-presence.is-exiting * { animation: none !important; }
@@ -204,7 +204,7 @@ html[data-ui-motion="off"] .settings-content, html[data-ui-motion="off"] .agent-
 html[data-ui-motion="off"] .session-list, html[data-ui-motion="off"] .workspace-tree,
 html[data-ui-motion="off"] .empty-workspace, html[data-ui-motion="off"] .empty-conversation,
 html[data-ui-motion="off"] .gallery-wall, html[data-ui-motion="off"] .gallery-wall-dialog,
-html[data-ui-motion="off"] .gallery-publish-dialog,
+html[data-ui-motion="off"] .gallery-publish-dialog, html[data-ui-motion="off"] .gallery-data-dialog,
 html[data-ui-motion="off"] .panel-dock-pane, html[data-ui-motion="off"] .sidebar-flyout,
 html[data-ui-motion="off"] .session-workspace-items { animation: none !important; }
 html[data-ui-motion="off"] .ui-presence.is-exiting, html[data-ui-motion="off"] .ui-presence.is-exiting * { animation: none !important; }
@@ -2963,6 +2963,33 @@ html[data-ui-motion="off"] .general-jev-toggle .chevron { transition: none; }
 .gallery-panel-options input[type="number"] { min-height: 32px; padding: 0 9px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface-input); color: var(--text); font-size: 11.5px; }
 .gallery-publish-body input, .gallery-publish-body select { min-height: 32px; padding: 0 9px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface-input); color: var(--text); font-size: 11.5px; }
 .gallery-publish-dialog footer { display: flex; justify-content: flex-end; gap: 8px; }
+/* 「数据…」是作品卡片上的第三个动作（仅面板作品），样式跟运行/继续开发一致；
+   右侧的移除按钮靠 margin-left:auto 保持在最右（它在本按钮之后）。 */
+.gallery-card-data { color: var(--text-muted); }
+.gallery-card-data:hover { color: var(--text); }
+.gallery-data-dialog { display: grid; gap: 12px; width: min(520px, 94vw); padding: 16px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow-lg); animation: soft-fade .15s ease; }
+.gallery-data-dialog header { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.gallery-data-dialog h2 { margin: 0; font-size: 14px; white-space: nowrap; }
+.gallery-data-dialog .icon-button { margin-left: auto; }
+.gallery-data-title { overflow: hidden; color: var(--text-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.gallery-data-body { display: grid; gap: 10px; }
+.gallery-data-hint { margin: 0; color: var(--text-muted); font-size: 11px; line-height: 1.65; }
+.gallery-data-hint code { padding: 1px 5px; border-radius: 4px; background: var(--code-surface); color: var(--code-text); font-size: 10.5px; }
+.gallery-data-status { display: flex; align-items: center; gap: 7px; margin: 0; color: var(--text-muted); font-size: 11.5px; }
+.gallery-data-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.gallery-data-grid > div { display: grid; gap: 2px; padding: 9px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-raised); }
+.gallery-data-grid span { color: var(--text-muted); font-size: 10.5px; }
+.gallery-data-grid strong { font-size: 14px; font-weight: 660; }
+.gallery-data-grid em { color: var(--text-muted); font-size: 10px; font-style: normal; }
+.gallery-data-keys { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; max-height: 148px; overflow: auto; }
+.gallery-data-keys li { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 5px 9px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-input); font-size: 10.5px; }
+.gallery-data-keys code { overflow: hidden; color: var(--code-text); text-overflow: ellipsis; white-space: nowrap; }
+.gallery-data-keys span { color: var(--text-muted); white-space: nowrap; }
+.gallery-data-db { margin: 0; color: var(--text-muted); font-size: 10.5px; }
+.gallery-data-notice { margin: 0; color: var(--accent); font-size: 11px; }
+.gallery-data-dialog footer { display: flex; align-items: center; gap: 8px; }
+.gallery-data-spacer { flex: 1; }
+.gallery-data-warn { color: var(--danger); font-size: 11px; }
 .gallery-wall-count { color: var(--text-muted); font-size: 11.5px; }
 /* 空态 landing 里的作品墙：原空态是「水平垂直居中」，而作品墙是顶部对齐的
    网格——上边缘要留出与 topbar 的呼吸间距，且**右侧要给 .panel-dock-fab

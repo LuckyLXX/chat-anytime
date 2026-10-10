@@ -1,4 +1,4 @@
-import { AppWindow, Cat, FolderOpen, Hammer, LayoutGrid, PanelRight, Play, Plus, Server, Sparkles, Trash2 } from "lucide-react";
+import { AppWindow, Cat, Database, FolderOpen, Hammer, LayoutGrid, PanelRight, Play, Plus, Server, Sparkles, Trash2 } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { GALLERY_KIND_LABELS, GALLERY_PANEL_MODE_LABELS, panelMode, type GalleryApp } from "../../../shared/gallery";
 
@@ -25,6 +25,8 @@ interface GalleryWallProps {
   onDevelop(app: GalleryApp): void;
   onPublish(): void;
   onRemove(app: GalleryApp): void;
+  /** 「数据…」：面板作品的持久化数据在哪里、占多少、怎么清（仅 panel 显示入口）。 */
+  onData(app: GalleryApp): void;
 }
 
 const thumbCache = new Map<string, string>();
@@ -63,7 +65,7 @@ function useThumb(app: GalleryApp): string | undefined {
   return src;
 }
 
-function GalleryCard({ app, workspace, onRun, onDevelop, onRemove }: { app: GalleryApp } & Omit<GalleryWallProps, "apps" | "onPublish">): ReactNode {
+function GalleryCard({ app, workspace, onRun, onDevelop, onRemove, onData }: { app: GalleryApp } & Omit<GalleryWallProps, "apps" | "onPublish">): ReactNode {
   const thumb = useThumb(app);
   const elsewhere = Boolean(workspace) && workspace!.toLowerCase() !== app.workspace.toLowerCase();
   return (
@@ -85,6 +87,10 @@ function GalleryCard({ app, workspace, onRun, onDevelop, onRemove }: { app: Gall
         <div className="gallery-card-actions">
           <button type="button" className="primary-button" data-control="gallery-run" onClick={() => onRun(app)}><Play size={13} />运行</button>
           <button type="button" data-control="gallery-develop" onClick={() => onDevelop(app)}><Hammer size={13} />继续开发</button>
+          {/* 数据入口只给面板：file / server 作品的存储不在作品自己的 origin 上（每次运行都是另一个端口）。 */}
+          {app.kind === "panel" && (
+            <button type="button" className="gallery-card-data" data-control="gallery-data" title={`「${app.title}」的持久化数据`} onClick={() => onData(app)}><Database size={13} />数据…</button>
+          )}
           <button type="button" className="gallery-card-remove" data-control="gallery-remove" title="从作品墙移除" aria-label={`移除 ${app.title}`} onClick={() => onRemove(app)}><Trash2 size={13} /></button>
         </div>
       </div>
@@ -92,7 +98,7 @@ function GalleryCard({ app, workspace, onRun, onDevelop, onRemove }: { app: Gall
   );
 }
 
-export function GalleryWall({ apps, workspace, embedded = false, onRun, onDevelop, onPublish, onRemove }: GalleryWallProps): ReactNode {
+export function GalleryWall({ apps, workspace, embedded = false, onRun, onDevelop, onPublish, onRemove, onData }: GalleryWallProps): ReactNode {
   if (apps.length === 0) {
     return (
       <div className="empty-conversation gallery-wall-empty" data-pane="landing">
@@ -116,7 +122,7 @@ export function GalleryWall({ apps, workspace, embedded = false, onRun, onDevelo
         <button type="button" className="gallery-wall-publish" data-control="gallery-publish" onClick={onPublish}><Plus size={14} />登记新作品</button>
       </header>
       <div className="gallery-wall-grid">
-        {apps.map((app) => <GalleryCard key={app.id} app={app} workspace={workspace} onRun={onRun} onDevelop={onDevelop} onRemove={onRemove} />)}
+        {apps.map((app) => <GalleryCard key={app.id} app={app} workspace={workspace} onRun={onRun} onDevelop={onDevelop} onRemove={onRemove} onData={onData} />)}
       </div>
     </div>
   );

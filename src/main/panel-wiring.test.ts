@@ -12,11 +12,11 @@ import { describe, expect, it } from "vitest";
  * session-index-wiring.test.ts。
  *
  * 这里钉的都是**静默失效**类风险——不报错、不崩溃，功能就是不出效果：
- *  1. 面板窗口必须自带静态服务：共用 `BrowserAutomationController` 那个实例的话，
- *     主窗口一关它就 dispose，面板在主界面关掉的瞬间断数据（而那正是它存在的场景）。
+ *  1. 面板页必须由 panelProtocolRoute 在固定 origin 上服务（2026-10-10 之前是控制器
+ *     自带的 loopback 静态服务，端口每次启动都变 ⇒ 作品数据看着像「丢了」）。
  *  2. 关闭到后台必须有 `quitting` 短路：没有它，`app.quit()` 先走 close 被拦下，
  *     托盘菜单的「退出」永远退不掉。
- *  3. 面板窗口不能带 preload：数据走 HTTP 端点，带了 preload 等于白白多一个提权面。
+ *  3. 面板窗口不能带 preload：数据走虚拟端点，带了 preload 等于白白多一个提权面。
  *  4. utility 的 sessions.live 必须在会话建立/销毁与生命周期转换处发出：漏一处就是
  *     「面板永远停在旧状态」或「面板挂着一条幽灵会话」。
  */
@@ -37,6 +37,8 @@ const panelCors = read("panel-cors.ts");
 const staticServer = read("browser-static-server.ts");
 const tray = read("tray.ts");
 const sharedPanel = read("../shared/panel.ts");
+const protocolRoute = read("panel-protocol.ts");
+const storage = read("panel-storage.ts");
 
 describe("面板窗口的主进程接线", () => {
   it("IPC 通道两端同名，且入口路径由主进程复核", () => {
@@ -47,11 +49,21 @@ describe("面板窗口的主进程接线", () => {
     expect(panelWindow).toContain("面板作品的入口必须在当前工作区内");
   });
 
-  it("面板自带静态服务与状态端点，不共用随主窗口 dispose 的那个实例", () => {
-    expect(panelWindow).toContain("private readonly staticFiles = new BrowserStaticServer();");
-    expect(panelWindow).toContain("this.staticFiles.setEndpoint(endpoint);");
-    // 反向：面板不能去拿 BrowserAutomationController 的静态服务
-    expect(panelWindow).not.toContain("browserAutomationController");
+  it("面板页由协议路由在固定 origin 上服务（不再用随机端口静态服务）", () => {
+    // 挂载先于加载：页面一开就会请求自己的资产与端点
+    expect(panelWindow).toContain("this.deps.route.mount({ appId: request.id, workspace: request.workspace })");
+    expect(panelWindow).toContain("const url = panelWorkUrl(host, entryRelative);");
+    // 反向：面板不能再碰 loopback 静态服务（它是随机端口 origin 的根源）
+    expect(panelWindow).not.toContain("BrowserStaticServer");
+    expect(panelWindow).not.toContain("urlForFile");
+    // 窗口关闭要摘挂载（否则已关窗口的地址继续可服务）
+    expect(panelWindow).toContain("this.deps.route.unmount(request.id);");
+    // 源上：index.ts 按 host 分流到协议路由，且面板挂载表常驻模块级
+    expect(main).toContain("if (isPanelRequest(request.url)) return panelProtocolRoute.handle(request);");
+    expect(main).toContain("const panelProtocolRoute = new PanelProtocolRoute({");
+    expect(main).toContain("route: panelProtocolRoute,");
+    // 固定 origin 的唯一来源（作品 id），不得在别处手拼字符串
+    expect(storage).toContain("${PREVIEW_FILE_SCHEME}://${panelWorkHost(appId)}");
   });
 
   it("面板窗口无 preload（数据走 HTTP 端点，不需要提权面）", () => {
@@ -143,20 +155,24 @@ describe("utility 侧的 sessions.live 推送", () => {
 });
 
 describe("面板窗口的窗口级动作（close / toggle）", () => {
-  it("白名单与静态服务：请求 Referer 传给 endpoint（定位哪个窗口在说话）", () => {
+  it("白名单与静态服务：请求 Referer 传给 endpoint（内置浏览器预览那条通路不变）", () => {
     expect(sharedPanel).toContain('"show-main", "close", "toggle", "grow", "shrink", "reset-size", "resize"');
     expect(staticServer).toContain("action: (panelRequest: PanelRequest, context: { referer?: string }) => boolean");
     expect(staticServer).toMatch(/endpoint\.action\(panelRequest, \{ referer:[^}]*\}\)/u);
     // 端点解析出的是「请求」而不是裸动作名：resize 要带尺寸
     expect(staticServer).toContain("const panelRequest = parsePanelRequest(parsed);");
+    // 协议路由同样只接受白名单动作（两处共用同一个纯函数，不得各自实现一份）
+    expect(protocolRoute).toContain("const panelRequest = parsePanelRequest(parsed);");
   });
 
-  it("控制器认领窗口级请求（靠 Referer 匹配窗口），show-main 才转主进程回调", () => {
-    expect(panelWindow).toMatch(/if \(panelRequest\.action !== "show-main"\) return this\.handleWindowAction\(panelRequest, context\.referer\);/u);
-    expect(panelWindow).toContain('private handleWindowAction(request: Exclude<PanelRequest, { action: "show-main" }>, referer: string | undefined): boolean');
-    // 关错窗比不关更糟：多个活窗口且 Referer 分不清时必须拒绝（return false）。
-    expect(panelWindow).toContain("if (!id && alive.length === 1) id = alive[0]![0];");
-    expect(panelWindow).toContain("if (!id) return false;");
+  it("控制器按 host 认领窗口级请求（appId 由端点回调传入），show-main 才转主进程回调", () => {
+    expect(panelWindow).toContain('handleAction(id: string, request: Exclude<PanelRequest, { action: "show-main" }>): boolean');
+    // Referer 定位已废除：自定义协议的请求里拿不到它（真机实测），host 才是唯一确定的身份
+    expect(panelWindow).not.toContain("referer");
+    expect(main).toContain('if (panelRequest.action === "show-main") return handlePanelAction("show-main");');
+    expect(main).toContain("return panelWindows?.handleAction(context.appId, panelRequest) ?? false;");
+    // 关错窗比不关更糟：host 对应的窗口不在了就拒绝
+    expect(panelWindow).toMatch(/handleAction\(id: string[\s\S]{0,400}?if \(!win \|\| win\.isDestroyed\(\)\) return false;/u);
     // toggle 只属于抽屉：普通窗口/桌宠没有两态，拒绝而不是无声吞掉。
     expect(panelWindow).toContain('if (mode !== "drawer") return false;');
     expect(panelWindow).toMatch(/win\.setBounds\(collapsedNow \? geometry\.expanded : geometry\.collapsed, true\)/u);
@@ -241,5 +257,44 @@ describe("渲染端的运行分流", () => {
     expect(branch).toContain("if (!result.ok)");
     expect(branch).toContain("gallery.run");
     expect(branch.indexOf("if (!result.ok)")).toBeLessThan(branch.indexOf("gallery.run"));
+  });
+});
+
+describe("作品数据（面板专属）：量测 / 清空 / 删除清理", () => {
+  it("IPC 两端同名（preload 与主进程各一处，名字不同就是静默失效）", () => {
+    expect(preload).toContain('ipcRenderer.invoke("gallery:data-measure", appId)');
+    expect(preload).toContain('ipcRenderer.invoke("gallery:data-clear", appId)');
+    expect(main).toContain('ipcMain.handle("gallery:data-measure"');
+    expect(main).toContain('ipcMain.handle("gallery:data-clear"');
+  });
+
+  it("清空后重载该作品的面板页（页面内存里的旧数据会让用户以为没清掉）", () => {
+    expect(main).toMatch(/if \(result\.ok\) panelWindows\?\.reload\(appId\);/u);
+    expect(panelWindow).toContain("reload(id: string): void {");
+  });
+
+  it("作品从清单消失时关窗并清数据（判定挂在 resources 推送这个唯一汇聚点）", () => {
+    expect(main).toContain("pruneRemovedPanelWorks(latestResources, message.resources);");
+    expect(main).toMatch(/function pruneRemovedPanelWorks[\s\S]{0,700}?panelWindows\?\.close\(app\.id\);[\s\S]{0,400}?clearPanelData\(app\.id, panelDataDeps\(\)\)/u);
+    // 只处理面板作品：file / server 作品的数据不在这些 origin 上
+    expect(main).toContain('if (alive.has(app.id) || app.kind !== "panel") continue;');
+    expect(main).toContain("if (!previous) return;");
+  });
+
+  it("量测复用开着的面板窗口，否则开隐藏窗口；两者都不需要 preload", () => {
+    expect(main).toContain("openWebContents: (appId) => panelWindows?.contentsFor(appId),");
+    expect(storage).toContain("deps.openWebContents?.(appId)");
+    expect(storage).toContain("deps.createMeasureWindow?.(panelMeasureUrl(appId))");
+    expect(panelWindow).toContain("contentsFor(id: string): BrowserWindow[\"webContents\"] | undefined {");
+  });
+
+  it("渲染端的「数据…」入口只给面板作品（file 作品的 origin 每次运行都不同，别让用户误以为能清）", () => {
+    const wall = read("../renderer/src/components/GalleryWall.tsx");
+    expect(wall).toContain('app.kind === "panel" && (');
+    expect(wall).toContain('data-control="gallery-data"');
+    const dialogs = read("../renderer/src/components/GalleryDialogs.tsx");
+    expect(dialogs).toContain('data-control="gallery-data-clear"');
+    expect(dialogs).toContain("window.piDesktop.galleryDataMeasure(app.id)");
+    expect(dialogs).toContain("window.piDesktop.galleryDataClear(app.id)");
   });
 });

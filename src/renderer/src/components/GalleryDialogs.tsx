@@ -1,6 +1,6 @@
-import { LayoutGrid, X } from "lucide-react";
-import { useState, type FormEvent, type ReactNode } from "react";
-import { GALLERY_PANEL_MODE_LABELS, PANEL_MODES, type GalleryApp, type GalleryDraft, type GalleryKind, type GalleryPanelEdge, type GalleryPanelMode, type GalleryPanelOptions } from "../../../shared/gallery";
+import { Database, LayoutGrid, Loader2, RefreshCw, X } from "lucide-react";
+import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { GALLERY_PANEL_MODE_LABELS, PANEL_MODES, type GalleryApp, type GalleryDataUsage, type GalleryDraft, type GalleryKind, type GalleryPanelEdge, type GalleryPanelMode, type GalleryPanelOptions } from "../../../shared/gallery";
 import { GalleryWall } from "./GalleryWall";
 import { useOverlayLayer } from "../lib/overlay-layers";
 
@@ -12,12 +12,13 @@ import { useOverlayLayer } from "../lib/overlay-layers";
  * 顶栏下拉的「打开作品墙」在任何时刻都能打开同一份内容（同一个 GalleryWall）。
  */
 
-export function GalleryWallDialog({ apps, workspace, onRun, onDevelop, onRemove, onPublish, onClose }: {
+export function GalleryWallDialog({ apps, workspace, onRun, onDevelop, onRemove, onData, onPublish, onClose }: {
   apps: GalleryApp[];
   workspace?: string;
   onRun(app: GalleryApp): void;
   onDevelop(app: GalleryApp): void;
   onRemove(app: GalleryApp): void;
+  onData(app: GalleryApp): void;
   onPublish(): void;
   onClose(): void;
 }): ReactNode {
@@ -32,8 +33,132 @@ export function GalleryWallDialog({ apps, workspace, onRun, onDevelop, onRemove,
           <button className="icon-button" type="button" title="关闭" aria-label="关闭作品墙" onClick={onClose}><X size={16} /></button>
         </header>
         <div className="gallery-wall-dialog-body">
-          <GalleryWall apps={apps} workspace={workspace} embedded onRun={onRun} onDevelop={onDevelop} onPublish={onPublish} onRemove={onRemove} />
+          <GalleryWall apps={apps} workspace={workspace} embedded onRun={onRun} onDevelop={onDevelop} onPublish={onPublish} onRemove={onRemove} onData={onData} />
         </div>
+      </div>
+    </div>
+  );
+}
+
+/** 字节数展示：作品数据的量级从 KB 到 GB，统一一位小数就够读。 */
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB"];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value.toFixed(1)} ${units[unit]}`;
+}
+
+/**
+ * 「作品数据」对话框（仅面板作品）：数据在哪、占多少、怎么清。
+ *
+ * 为什么需要它：面板数据落在 Chromium profile 的固定 origin
+ * `pidesktop-file://w-<作品>` 里（自 2026-10-10 面板改由自定义协议承载后），
+ * 用户看不见也摸不到——没有这个面板，他们只能看着作品目录却找不到数据。
+ * 量测由主进程做（复用在开的面板窗口，否则开临时隐藏窗口），量不到就如实说，
+ * 不把「未知」画成一个 0。
+ */
+export function GalleryDataDialog({ app, onClose }: { app: GalleryApp; onClose(): void }): ReactNode {
+  const [usage, setUsage] = useState<GalleryDataUsage>();
+  const [error, setError] = useState<string>();
+  const [loading, setLoading] = useState(true);
+  const [confirming, setConfirming] = useState(false);
+  const [clearing, setClearing] = useState(false);
+  const [notice, setNotice] = useState<string>();
+  const [round, setRound] = useState(0);
+  useOverlayLayer(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(undefined);
+    void window.piDesktop.galleryDataMeasure(app.id)
+      .then((result) => {
+        if (cancelled) return;
+        setLoading(false);
+        if (result.ok) setUsage(result.usage);
+        else setError(result.message);
+      })
+      .catch((reason) => {
+        if (cancelled) return;
+        setLoading(false);
+        setError(reason instanceof Error ? reason.message : "量测失败");
+      });
+    return () => { cancelled = true; };
+  }, [app.id, round]);
+
+  const clear = useCallback((): void => {
+    setClearing(true);
+    setNotice(undefined);
+    void window.piDesktop.galleryDataClear(app.id)
+      .then((result) => {
+        setClearing(false);
+        setConfirming(false);
+        if (!result.ok) {
+          setNotice(result.message);
+          return;
+        }
+        setNotice("已清空。面板窗口（若开着）已重载。");
+        setRound((value) => value + 1);
+      })
+      .catch((reason) => {
+        setClearing(false);
+        setNotice(reason instanceof Error ? reason.message : "清空失败");
+      });
+  }, [app.id]);
+
+  return (
+    <div className="modal-backdrop permission-backdrop" onClick={onClose}>
+      <div className="gallery-data-dialog" role="dialog" aria-modal="true" aria-label={`${app.title} 的数据`} onClick={(event) => event.stopPropagation()}>
+        <header>
+          <Database size={17} />
+          <h2>作品数据</h2>
+          <span className="gallery-data-title" title={app.title}>{app.title}</span>
+          <button className="icon-button" type="button" title="关闭" aria-label="关闭作品数据" onClick={onClose}><X size={16} /></button>
+        </header>
+        <div className="gallery-data-body">
+          <p className="gallery-data-hint">
+            面板作品的数据存在自己的固定 origin 里（<code>{usage?.origin ?? `pidesktop-file://w-${app.id}`}</code>）：
+            没有端口、跨启动不丢、与其他作品互不干扰。它不在工作区目录里，因此只能在这里查看与清理。
+          </p>
+          {loading && <p className="gallery-data-status"><Loader2 size={14} className="spinning" /> 正在量测…</p>}
+          {!loading && error && <p className="gallery-data-status">量测失败：{error}</p>}
+          {!loading && usage && (
+            <>
+              <div className="gallery-data-grid">
+                <div><span>localStorage</span><strong>{formatBytes(usage.localStorageBytes)}</strong><em>{usage.keys.length} 项键值</em></div>
+                <div><span>IndexedDB / 缓存</span><strong>{usage.storageBytes === undefined ? "—" : formatBytes(usage.storageBytes)}</strong><em>Chromium 估算</em></div>
+                <div><span>配额上限</span><strong>{usage.quotaBytes === undefined ? "—" : formatBytes(usage.quotaBytes)}</strong><em>{usage.persisted ? "已持久化" : "由浏览器调度"}</em></div>
+              </div>
+              {usage.keys.length > 0 && (
+                <ul className="gallery-data-keys">
+                  {usage.keys.map((entry) => (
+                    <li key={entry.key}><code title={entry.key}>{entry.key}</code><span>{formatBytes(entry.bytes)}</span></li>
+                  ))}
+                </ul>
+              )}
+              {usage.databaseNames && usage.databaseNames.length > 0 && (
+                <p className="gallery-data-db">IndexedDB 库：{usage.databaseNames.join("、")}</p>
+              )}
+            </>
+          )}
+          {notice && <p className="gallery-data-notice">{notice}</p>}
+        </div>
+        <footer>
+          <button type="button" className="secondary-button" onClick={() => setRound((value) => value + 1)} disabled={loading || clearing}><RefreshCw size={13} />刷新</button>
+          <span className="gallery-data-spacer" />
+          {confirming
+            ? <>
+                <span className="gallery-data-warn">清空后无法恢复，确定？</span>
+                <button type="button" className="secondary-button" onClick={() => setConfirming(false)} disabled={clearing}>取消</button>
+                <button type="button" className="danger-button" data-control="gallery-data-clear" onClick={clear} disabled={clearing}>{clearing ? "清空中…" : "确认清空"}</button>
+              </>
+            : <button type="button" className="danger-button" data-control="gallery-data-clear" onClick={() => setConfirming(true)} disabled={loading || clearing}>清空数据</button>}
+        </footer>
       </div>
     </div>
   );

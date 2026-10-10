@@ -2,7 +2,7 @@ import { createReadStream, existsSync, mkdirSync, readFileSync, writeFileSync } 
 import { readFile, realpath, stat } from "node:fs/promises";
 import { extname, join, resolve } from "node:path";
 import { Readable } from "node:stream";
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, protocol, safeStorage, shell, utilityProcess, type UtilityProcess } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, protocol, safeStorage, session, shell, utilityProcess, type UtilityProcess } from "electron";
 import { spawn } from "node-pty";
 import appIconPath from "./assets/icon.ico?asset";
 import { resolveBundledSkillsDir, resolveBundledSubagentsDir } from "./bundled-skills.js";
@@ -13,7 +13,7 @@ import { createSettingsPersistence, diffSettings, readSettingsFile, settingsPath
 import { pruneSessionPaths, setArchivedSessionPaths, togglePinnedSessionPath } from "./session-scope.js";
 import { importExternalAttachment, workspaceRelativeAttachment } from "./attachments.js";
 import type { BrowserDownloadPrefs, BrowserPreviewCommand, BrowserPreviewState, DesktopBootstrap, DesktopSettings, GalleryServiceProbe, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot, SshCommand, SshCommandResult, SshEventData, SshRevealEvent, TerminalCommand, TerminalEventData, WorkspaceDirectoryListing, WorkspaceEntryResult, WorkspaceFilePreview, WorkspaceFileSearchResult, WorkspaceFileStat, WorkspaceFileWriteResult } from "../shared/protocol.js";
-import { PREVIEW_FILE_SCHEME, parseWorkspaceFilePreviewUrl } from "../shared/protocol.js";
+import { PREVIEW_FILE_SCHEME, isPanelWorkHost, parseWorkspaceFilePreviewUrl } from "../shared/protocol.js";
 import { isThemeAssetUrl, parseThemeAssetUrl } from "../shared/theme-assets.js";
 import type { ThemeImportOutcome } from "../shared/theme-assets.js";
 import { serveThemeAsset, migrateInlineThemeAssets, reconcileThemeAssetDirs, themeAssetsDirFor, resolveThemeAgentDir, importThemeCssFile, importThemeDirectory, promoteThemeScope } from "./theme-assets.js";
@@ -24,10 +24,12 @@ import { BrowserAutomationController } from "./browser-automation.js";
 import { ComputerOverlayController } from "./computer-overlay.js";
 import { DesignSnapshotController } from "./design-snapshot.js";
 import { galleryThumbsDirFor, readGalleryThumb, resolveGalleryAgentDir } from "./gallery-store.js";
-import { normalizeGalleryPanelOptions } from "../shared/gallery.js";
+import { normalizeGalleryPanelOptions, type GalleryDataClearResult, type GalleryDataResult } from "../shared/gallery.js";
 import { createPanelStateCache } from "./panel-state.js";
 import { panelBoundsPathFor } from "./panel-bounds.js";
 import { PanelWindowController } from "./panel-window.js";
+import { PanelProtocolRoute } from "./panel-protocol.js";
+import { clearPanelData, measurePanelData, type PanelDataDeps } from "./panel-storage.js";
 import { installPanelCorsRelaxation } from "./panel-cors.js";
 import { createTrayController, type TrayController } from "./tray.js";
 import type { StaticServerEndpoint } from "./browser-static-server.js";
@@ -71,8 +73,9 @@ let securityWarning: string | undefined;
 let browserPreviewController: BrowserPreviewController | undefined;
 let browserAutomationController: BrowserAutomationController | undefined;
 let computerOverlayController: ComputerOverlayController | undefined;
-// 面板作品（kind="panel"）的窗口管理器：惰性创建（第一个面板作品运行时才建），
-// 自带静态服务与状态端点，因此与主窗口的生命周期无关。
+// 面板作品（kind="panel"）的窗口管理器：惰性创建（第一个面板作品运行时才建）。
+// 页面与端点由 panelProtocolRoute 在固定 origin 上服务（协议处理器全局存在，
+// 不随主窗口 dispose），因此它与主窗口的生命周期无关。
 let panelWindows: PanelWindowController | undefined;
 let trayController: TrayController | undefined;
 /**
@@ -185,11 +188,41 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 /**
- * 工作区文件与主题资产两条通路共用 `pidesktop-file://`，靠 host 区分：
- * `theme` = 主题资产（图片 / 字体，落盘在 agentDir），`preview` = 工作区文件。
+ * 面板作品的协议路由（2026-10-10 根因修复）。
+ *
+ * 为什么它常驻模块级而不是归 PanelWindowController：`protocol.handle` 的处理器是
+ * 全局的（不随任何窗口 dispose），而面板窗口可能全关掉——挂载表空了就回 404，
+ * 处理器本身不需要跟着生灭。窗口级动作由 `panelWindows` 转（它可能还没建 = 没人开过
+ * 面板、也就没有窗口级动作可做，直接拒）。
+ *
+ * `show-main` 归主进程回调（与内置浏览器预览端点同一口径）；其余动作（close /
+ * toggle / grow / shrink / reset-size / resize）作用于 host 对应的那个作品。
+ */
+const panelProtocolRoute = new PanelProtocolRoute({
+  state: () => panelState.snapshot(),
+  action: (panelRequest, context) => {
+    if (panelRequest.action === "show-main") return handlePanelAction("show-main");
+    return panelWindows?.handleAction(context.appId, panelRequest) ?? false;
+  }
+});
+
+/** 渲染端传来的 URL 是不是面板地址（host 形状判定；解析不了就不是）。 */
+function isPanelRequest(rawUrl: string): boolean {
+  try {
+    return isPanelWorkHost(new URL(rawUrl).hostname);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 工作区文件、主题资产、面板作品三条通路共用 `pidesktop-file://`，靠 host 区分：
+ * `theme` = 主题资产（图片 / 字体，落盘在 agentDir），`preview` = 工作区文件，
+ * `w-<作品>` = 面板作品（页面 / 资产 / 状态端点 / 数据量测页）。
  */
 function registerPreviewFileProtocol(): void {
   protocol.handle(PREVIEW_FILE_SCHEME, async (request) => {
+    if (isPanelRequest(request.url)) return panelProtocolRoute.handle(request);
     const themeAsset = parseThemeAssetUrl(request.url);
     if (themeAsset) return serveThemeAsset(themeAsset);
     // host 是 theme 但解析不通过 = 穿越/绝对路径/非法编码：明确 403，不落回预览分支。
@@ -552,7 +585,12 @@ function startRuntime(): void {
     // 面板作品的数据源：无条件喂（不依赖渲染端是否在看，也不依赖主窗口是否存在）。
     panelState.ingest(message);
     if (message.type === "catalog") latestCatalog = message;
-    if (message.type === "resources") latestResources = message.resources;
+    if (message.type === "resources") {
+      // 作品被删除时顺手收拾它的面板：关窗 + 清数据（删除路径在 utility / 渲染端 / AI
+      // 都可能发生，所以判定放在「清单变了」这个唯一汇聚点上，不依赖谁去调了什么）。
+      pruneRemovedPanelWorks(latestResources, message.resources);
+      latestResources = message.resources;
+    }
     if (message.type === "custom-models") {
       const source = loadSettings();
       const previous = { ...source };
@@ -703,6 +741,62 @@ function panelStateEndpoint(): StaticServerEndpoint {
     // 内置浏览器预览里没有面板窗口可关/可切/可缩放：只有 show-main 认。
     action: (panelRequest) => (panelRequest.action === "show-main" ? handlePanelAction("show-main") : false)
   };
+}
+
+/**
+ * 「作品数据」的 main 侧依赖：量测（复用在开的面板页 / 开隐藏窗口）与按 origin 清空。
+ *
+ * 量测窗口刻意用与面板窗口同级的配置（sandbox + contextIsolation + 无 preload）：
+ * 它跑的是平台自带页面，只需 localStorage / storage.estimate，不需要任何额外能力。
+ */
+function panelDataDeps(): PanelDataDeps {
+  return {
+    openWebContents: (appId) => panelWindows?.contentsFor(appId),
+    createMeasureWindow: async (url) => {
+      const win = new BrowserWindow({
+        show: false,
+        width: 480,
+        height: 320,
+        webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, webSecurity: true }
+      });
+      try {
+        await win.loadURL(url);
+      } catch (error) {
+        if (!win.isDestroyed()) win.destroy();
+        console.warn(`[gallery] 数据量测窗口加载失败：${error instanceof Error ? error.message : String(error)}`);
+        return undefined;
+      }
+      return {
+        contents: win.webContents,
+        close: () => {
+          if (!win.isDestroyed()) win.destroy();
+        }
+      };
+    },
+    clearOrigin: async (origin, storages) => {
+      await session.defaultSession.clearStorageData({ origin, storages: [...storages] as Electron.ClearStorageDataOptions["storages"] });
+    }
+  };
+}
+
+/**
+ * 清单里消失的面板作品 → 关掉它的窗口并清掉它的数据。
+ *
+ * 为什么在这里：`resources` 推送是作品集合变化的**唯一汇聚点**（发布/更新/删除都经过它），
+ * 比在删除命令里散落各处可靠（渲染端删除、AI 用 gallery_publish 覆盖、未来的批量清理
+ * 都同一条路）。数据属于作品：作品不在了，它的存储桶就该释放（否则用户永远找不到
+ * 那个占着空间的 origin）。清理失败只 warn，不影响清单本身。
+ */
+function pruneRemovedPanelWorks(previous: ResourceCatalog | undefined, next: ResourceCatalog): void {
+  if (!previous) return;
+  const alive = new Set(next.gallery.map((app) => app.id));
+  for (const app of previous.gallery) {
+    if (alive.has(app.id) || app.kind !== "panel") continue;
+    panelWindows?.close(app.id);
+    void clearPanelData(app.id, panelDataDeps()).then((result) => {
+      if (!result.ok) console.warn(`[gallery] 清理已删除作品「${app.title}」的数据失败：${result.message}`);
+    });
+  }
 }
 
 /**
@@ -966,10 +1060,9 @@ function registerIpc(): void {
     const workspace = typeof input?.workspace === "string" ? input.workspace.trim() : "";
     const filePath = typeof input?.filePath === "string" ? input.filePath.trim() : "";
     if (!id || !workspace || !filePath) return { ok: false, message: "面板作品信息不完整（缺少 id / 工作区 / 入口）" };
-    // 惰性创建：面板管理器自带一个 loopback 静态服务，不用就不建。
+    // 惰性创建：页面与端点都由常驻的协议路由提供，这里只是建/管窗口。
     panelWindows ??= new PanelWindowController({
-      stateProvider: () => panelState.snapshot(),
-      onAction: handlePanelAction,
+      route: panelProtocolRoute,
       boundsPath: panelBoundsPathFor(resolveGalleryAgentDir()),
       openExternal: (url) => {
         void shell.openExternal(url).catch(() => undefined);
@@ -984,6 +1077,22 @@ function registerIpc(): void {
       filePath,
       panel: normalizeGalleryPanelOptions(input?.panel)
     });
+  });
+  // —— 作品数据（面板专属）：用量量测与清空 ——
+  // 面板数据落在固定 origin `pidesktop-file://w-<作品>`（Chromium profile 里），
+  // 用户看不见也摸不到，所以平台必须给出「看用量」与「清掉」两个入口。
+  ipcMain.handle("gallery:data-measure", async (_event, id: unknown): Promise<GalleryDataResult> => {
+    const appId = typeof id === "string" ? id.trim() : "";
+    if (!appId) return { ok: false, message: "作品 id 无效" };
+    return measurePanelData(appId, panelDataDeps());
+  });
+  ipcMain.handle("gallery:data-clear", async (_event, id: unknown): Promise<GalleryDataClearResult> => {
+    const appId = typeof id === "string" ? id.trim() : "";
+    if (!appId) return { ok: false, message: "作品 id 无效" };
+    const result = await clearPanelData(appId, panelDataDeps());
+    // 面板页可能正开着并持有内存里的旧数据：清完必须重载，否则用户看到的是「没清掉」。
+    if (result.ok) panelWindows?.reload(appId);
+    return result;
   });
   ipcMain.handle("terminal:command", (_event, command: TerminalCommand): void => {
     if (!isTerminalCommand(command)) throw new Error("终端命令无效");

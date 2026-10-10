@@ -8,9 +8,10 @@
 import { randomUUID } from "node:crypto";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PANEL_ACTION_MAX_BYTES, isPanelStatePath, parsePanelRequest, type PanelRequest } from "../shared/panel.js";
+import { pathIsWithin, staticMimeType } from "./static-assets.js";
 
 /**
  * 虚拟端点（面板作品读状态的地方）。
@@ -32,32 +33,7 @@ export interface StaticServerEndpoint {
   action: (panelRequest: PanelRequest, context: { referer?: string }) => boolean;
 }
 
-const MIME_TYPES: Record<string, string> = {
-  ".html": "text/html; charset=utf-8",
-  ".htm": "text/html; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
-  ".js": "text/javascript; charset=utf-8",
-  ".mjs": "text/javascript; charset=utf-8",
-  ".json": "application/json; charset=utf-8",
-  ".svg": "image/svg+xml",
-  ".png": "image/png",
-  ".jpg": "image/jpeg",
-  ".jpeg": "image/jpeg",
-  ".gif": "image/gif",
-  ".webp": "image/webp",
-  ".ico": "image/x-icon",
-  ".txt": "text/plain; charset=utf-8",
-  ".md": "text/plain; charset=utf-8",
-  ".xml": "application/xml",
-  ".pdf": "application/pdf",
-  ".woff": "font/woff",
-  ".woff2": "font/woff2",
-  ".ttf": "font/ttf",
-  ".mp4": "video/mp4",
-  ".webm": "video/webm",
-  ".mp3": "audio/mpeg",
-  ".wav": "audio/wav"
-};
+
 
 /** Detect a local file target: file:// URLs and bare Windows absolute paths. */
 export function detectLocalFilePath(value: string): string | undefined {
@@ -83,7 +59,13 @@ export class BrowserStaticServer {
   private readonly rootIndex = new Map<string, number>();
   private startError: string | undefined;
   private starting: Promise<void> | undefined;
-  /** 面板作品的虚拟端点；未注册时该路径回 404（不是抛错）。 */
+/**
+ * 面板作品的虚拟端点；未注册时该路径回 404（不是抛错）。
+ *
+ * 注意：自 2026-10-10 起**面板窗口自己不跑这套静态服务了**（改走自定义协议，见
+ * panel-protocol.ts）——这里保留实例只为内置浏览器预览：AI 写面板作品时要在浏览器里
+ * 当场看到数据（setPanelStateEndpoint），以及 file 型作品 / browser_navigate 的本地文件预览。
+ */
   private endpoint: StaticServerEndpoint | undefined;
 
   /** 注册/摘除虚拟端点（面板窗口与内置浏览器预览共用同一实现）。 */
@@ -238,26 +220,13 @@ export class BrowserStaticServer {
         respond(response, 404, `文件不存在：${rel}`);
         return;
       }
-      const type = MIME_TYPES[extnameLower(real)] ?? "application/octet-stream";
+      const type = staticMimeType(real) ?? "application/octet-stream";
       response.writeHead(200, { "Content-Type": type, "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" });
       response.end(body);
     } catch (error) {
       respond(response, 500, `本地预览失败：${error instanceof Error ? error.message : String(error)}`);
     }
   }
-}
-
-function extnameLower(file: string): string {
-  const index = file.lastIndexOf(".");
-  if (index <= 0) return "";
-  return file.slice(index).toLowerCase();
-}
-
-function pathIsWithin(root: string, target: string): boolean {
-  // `relative` returns an absolute path for targets on another drive (Windows),
-  // so the isAbsolute guard is what keeps cross-drive escapes out.
-  const relation = relative(resolve(root), resolve(target));
-  return relation === "" || (!relation.startsWith("..") && !isAbsolute(relation) && !relation.startsWith(`..${sep}`));
 }
 
 function respond(response: ServerResponse, status: number, message: string): void {

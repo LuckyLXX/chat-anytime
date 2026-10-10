@@ -22,6 +22,17 @@ import type { PanelSessionLive, Todo } from "./protocol.js";
  */
 export const PANEL_STATE_ENDPOINT = "__pidesktop_state.json";
 
+/**
+ * 数据量测页的**文件名**（平台自带、不是作品文件）。
+ *
+ * 「作品数据…」要看用量时，主进程在这个作品自己的 origin 上加载它（面板窗口开着就
+ * 直接用它，否则开一个隐藏窗口），页内量 localStorage 逐键字节数与
+ * `navigator.storage.estimate()`，再把结果交给主进程。之所以要一个**虚拟页**而不是
+ * 作品自己的页面：量测不能依赖作品代码还能跑，作品改坏了也要能看到并清掉数据。
+ * 取名同样带 `__pidesktop_` 前缀（撞名时端点优先，与状态端点同一取舍）。
+ */
+export const PANEL_MEASURE_PAGE = "__pidesktop_measure.html";
+
 /** 端点允许的动作。**只有白名单里的动作能被执行**，其余一律 403。 */
 export const PANEL_ACTIONS = ["show-main", "close", "toggle", "grow", "shrink", "reset-size", "resize"] as const;
 
@@ -77,8 +88,17 @@ function positiveNumber(value: unknown): number | undefined {
  * 不会被误判成端点。
  */
 export function isPanelStatePath(rel: string): boolean {
+  return matchesLastSegment(rel, PANEL_STATE_ENDPOINT);
+}
+
+/** 请求路径是否命中数据量测页（同样只看最后一段）。 */
+export function isPanelMeasurePath(rel: string): boolean {
+  return matchesLastSegment(rel, PANEL_MEASURE_PAGE);
+}
+
+function matchesLastSegment(rel: string, name: string): boolean {
   const normalized = rel.startsWith("/") ? rel : `/${rel}`;
-  return normalized === `/${PANEL_STATE_ENDPOINT}` || normalized.endsWith(`/${PANEL_STATE_ENDPOINT}`);
+  return normalized === `/${name}` || normalized.endsWith(`/${name}`);
 }
 
 /** todo 进度汇总（面板进度条与计数）。 */
@@ -108,6 +128,7 @@ export function isPanelEntryFile(filePath: string): boolean {
 export function panelDevHint(): string {
   return [
     `面板型作品：入口网页会被开成独立小窗口（脱离主界面存活）。数据接口：相对自己 fetch("./${PANEL_STATE_ENDPOINT}") 得到只读状态 JSON（含 sessions/live/todos：正在跑的会话、状态、当前工具、todo 进度）；POST 同一地址的动作白名单：{"action":"show-main"} 唤回主界面、{"action":"close"} 关闭本窗口、{"action":"toggle"} 切换贴边抽屉两态（仅抽屉）、{"action":"grow"}/{"action":"shrink"}/{"action":"reset-size"}/{"action":"resize","width":N,"height":N} 桌宠窗口调大小（仅桌宠：主进程按底部中心锚点 setBounds 并记住结果）。**桌宠建议用 resize 精确设尺寸**：精灵只能按整数倍缩放，按比例 grow/shrink 会出现「窗口先变、猫后跟上」的错位；页面自己算出目标档位对应的窗口尺寸再一次请求 resize，两边同时变。`,
+    `**面板数据的持久化（2026-10-10 起）：直接把数据存 localStorage / IndexedDB 即可。**面板页跑在由作品 id 决定的固定 origin（pidesktop-file://w-<作品>，**没有端口**）上，所以 localStorage / IndexedDB 跨启动保留、按作品互相隔离。不要自建「跨启动保险库」（隐藏 iframe 走自定义协议、node 本地服务、把数据塞进 sessionStorage 那类绕法）——那是旧「随机端口 origin 每次换锁」时代的弥补手段，现在只会多一层会坏的中间层。用户可在作品墙卡片的「数据…」看到用量并清空；作品被删除时平台会一并清掉它的数据。注意：在内置浏览器里预览同一个面板时那是另一个 origin（http + 随机端口），看到的是**另一份开发用存储**，不能当作「面板数据丢了」的证据。`,
     `窗口形态（panel.mode）：缺省 "window"（系统边框窗口）；"pet" 桌宠 = 透明无边框固定尺寸，页面须 body 背景透明自绘形状，页面自带关闭钮 POST close；"drawer" 贴边抽屉 = 停靠 edge（left/right/top/bottom，缺省 right），窗口在窄把手与完整面板两态切换，页面监听 resize 按窗口尺寸自适应渲染两态，点把手 POST toggle。`,
     `拖动可分两层：整窗拖动区用 CSS -webkit-app-region: drag（该区域**收不到鼠标事件**，右键菜单/点击必须放在 no-drag 元素上）；交互元素上标 no-drag，否则点不到。`,
     `面板里可以直接 fetch 外部 http(s) API（包括没有 CORS 的自建/中转模型服务）：跨域由平台在主进程统一处理，不要自己搭本地代理。`
