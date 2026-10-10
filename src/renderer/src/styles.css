@@ -1860,7 +1860,7 @@ html[data-ui-motion="off"] .general-jev-toggle .chevron { transition: none; }
 .ssh-files-toggle:hover { color: var(--text); border-color: var(--border-strong); background: var(--surface-button-hover); }
 .ssh-files-toggle.active { color: var(--accent); border-color: var(--accent); }
 .ssh-files-drawer { flex: 0 0 45%; min-height: 140px; overflow: hidden; border-top: 1px solid var(--border); background: var(--surface); }
-.terminal-xterm { height: 100%; padding: 8px 6px 8px 10px; }
+.terminal-xterm { height: 100%; padding: 10px 6px 8px 12px; }
 .terminal-ended { position: absolute; inset: 0; z-index: 5; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 20px; text-align: center; color: var(--code-text); background: color-mix(in srgb, var(--code-surface) 82%, transparent); }
 .terminal-ended span { max-width: 46ch; font-size: 13px; line-height: 1.5; opacity: 0.78; }
 /* —— SSH：连接中/指纹确认覆盖层 + 主机管理面板 —— */

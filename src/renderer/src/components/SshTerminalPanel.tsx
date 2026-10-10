@@ -23,6 +23,9 @@ type ConnectionState =
  * 不可用；下方分屏只压缩高度不动宽度，xterm 的 FitAddon 由 ResizeObserver 自动
  * 跟随（fit 逻辑一行不动）。开关按钮在操作条里、面板之外，故不会被面板遮住
  * ——初版是覆盖层且开关在面板内，打开后点不回终端（已修，见 ssh-files-layout 测试）。
+ *
+ * 外观：`highlightPrompt` 只在这个（远端）终端开启 —— 服务器 PS1 普遍是无色白字，
+ * 由渲染端在数据进 xterm 前把「用户@主机:路径」着色（见 lib/terminal-prompt.ts）。
  */
 export function SshTerminalPanel({ terminalId, hostId, hostName, workspace }: { terminalId: string; hostId: string; hostName: string; workspace?: string }): ReactNode {
   const [state, setState] = useState<ConnectionState>({ status: "connecting" });
@@ -87,7 +90,7 @@ export function SshTerminalPanel({ terminalId, hostId, hostName, workspace }: { 
 
   return (
     <div className="terminal-pane ssh-terminal-pane" data-pane="terminal">
-      <XtermView key={`${terminalId}-${restartNonce}`} onReady={handleReady} onInput={handleInput} onResize={handleResize} focus />
+      <XtermView key={`${terminalId}-${restartNonce}`} onReady={handleReady} onInput={handleInput} onResize={handleResize} focus highlightPrompt />
       {/* 操作条：固定在终端下方，抽屉开关就在这里（所以永远不会被抽屉盖住）。 */}
       {state.status === "connected" && (
         <div className="ssh-actions-bar">
