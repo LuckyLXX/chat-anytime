@@ -118,6 +118,11 @@ const emptyPaneData: SessionPaneSnapshot = {
   executions: []
 };
 
+/** 切会话后「钉底窗口」的最长时长（ms）：期间内容还在长就继续钉，用户上滚即中止。 */
+const BOTTOM_HOLD_MAX_MS = 5000;
+/** 高度连续这么多帧不变 ⇒ 布局已定，钉底窗口提前收工（正常会话 4 帧内退出）。 */
+const BOTTOM_HOLD_STABLE_FRAMES = 3;
+
 function usePaneData(sessionId: string | undefined): PaneConversationData {
   const selector = useCallback((state: { snapshot: RuntimeSnapshot; paneStates: Record<string, SessionPaneSnapshot>; parkedPanels: Record<string, SessionPaneSnapshot> }): PaneConversationData => {
     if (sessionId === undefined || state.snapshot.sessionId === sessionId) return state.snapshot;
@@ -820,6 +825,9 @@ export const ConversationPane = memo(function ConversationPane({
   // 按「会话切换」处理，直接 auto 瞬跳到底部（无平滑滚动动画）。若初始等于 sessionId，
   // 新挂载会走 idle 的 smooth 滚动，正是「从顶滚到底部」动画的来源。
   const previousSessionIdRef = useRef<string | undefined>(undefined);
+  // 同上的第二把尺：**渲染数据的**会话身份（data.sessionId）。水合/分屏首批数据
+  // 可能晚于 prop 一帧到达，那时内容「空 → 整个会话」地换入，只比 prop 会漏判。
+  const previousRenderedSessionIdRef = useRef<string | undefined>(undefined);
   const previousDraftSessionIdRef = useRef<string | undefined>(sessionId);
   // 时间线窗口化（T10，见 lib/timeline-window.ts）：只给「±1 屏内 / 尾部若干条 / 跳转目标 /
   // Ctrl+F 临时展开」的条目渲染真实内容，其余留等高占位——长会话首帧不再解析全部 markdown
@@ -1090,25 +1098,65 @@ export const ConversationPane = memo(function ConversationPane({
     return () => timeline.removeEventListener("scroll", updateScrollIntent);
   }, []);
 
+  // —— 会话切换后的「钉底窗口」——
+  // 切换那一帧的瞬跳只覆盖当帧布局：此后还会继续有东西抬升视口上方的高度——
+  // 窗口化条目实体化（占位 div → 真实内容，DOM 节点被**替换**）、历史里的图片解码、
+  // md/html 产物测高。Chromium 的滚动锚定对「节点被替换」的成长**不补偿**（真浏览器
+  // 探针实测：40 条占位里实体化 16 条后 gap 0 → 1600px），于是切完会话视口停在滚动条
+  // 中间，用户得手动滚到底。窗口期内每帧重新瞬跳到底部（auto，无动画），用户上滚
+  // （粘底解除）或高度连续几帧不变即收工——前者防止抢用户，后者让正常会话几十毫秒退出。
+  const bottomHoldRef = useRef<{ raf: number; deadline: number; lastHeight: number; stable: number } | undefined>(undefined);
+  const stopBottomHold = useCallback((): void => {
+    const hold = bottomHoldRef.current;
+    if (!hold) return;
+    bottomHoldRef.current = undefined;
+    window.cancelAnimationFrame(hold.raf);
+  }, []);
+  const startBottomHold = useCallback((): void => {
+    stopBottomHold();
+    const hold = { raf: 0, deadline: performance.now() + BOTTOM_HOLD_MAX_MS, lastHeight: -1, stable: 0 };
+    const tick = (): void => {
+      const timeline = timelineRef.current;
+      if (!timeline || !stickToBottomRef.current || performance.now() > hold.deadline) {
+        stopBottomHold();
+        return;
+      }
+      const height = timeline.scrollHeight;
+      if (height - timeline.clientHeight - timeline.scrollTop > 1) timeline.scrollTo({ top: height, behavior: "auto" });
+      if (height === hold.lastHeight) hold.stable += 1;
+      else {
+        hold.lastHeight = height;
+        hold.stable = 0;
+      }
+      if (hold.stable >= BOTTOM_HOLD_STABLE_FRAMES) {
+        stopBottomHold();
+        return;
+      }
+      hold.raf = window.requestAnimationFrame(tick);
+    };
+    bottomHoldRef.current = hold;
+    hold.raf = window.requestAnimationFrame(tick);
+  }, [stopBottomHold]);
+  useEffect(() => stopBottomHold, [stopBottomHold]);
+
   useLayoutEffect(() => {
     const timeline = timelineRef.current;
     if (!timeline) return;
-    const sessionChanged = previousSessionIdRef.current !== sessionId;
+    // 会话身份 = 格子渲染的数据身份，不只是格子拿到的 sessionId：水合/分屏首批
+    // 数据可能晚一帧才到（prop 早就变了、内容还是空的），只比 prop 会把那次
+    // 「空 → 整个会话」的换入当成普通新消息，走 idle 的平滑滚动——正是
+    // 「切会话时从顶滚到底部」动画的来源。
+    const renderedSessionId = data.sessionId;
+    const sessionChanged = previousSessionIdRef.current !== sessionId || previousRenderedSessionIdRef.current !== renderedSessionId;
     previousSessionIdRef.current = sessionId;
+    previousRenderedSessionIdRef.current = renderedSessionId;
     if (sessionChanged) {
       // Session switch: jump straight to the newest content instead of smooth-
-      // scrolling through the swapped-in history. Images/code may still be
-      // measuring, so re-jump on the next frames while still stuck to bottom.
+      // scrolling through the swapped-in history, then keep it pinned while the
+      // layout settles (windowed entries materializing, images decoding).
       stickToBottomRef.current = true;
       timeline.scrollTo({ top: timeline.scrollHeight, behavior: "auto" });
-      requestAnimationFrame(() => {
-        const element = timelineRef.current;
-        if (element && stickToBottomRef.current) element.scrollTo({ top: element.scrollHeight, behavior: "auto" });
-      });
-      requestAnimationFrame(() => requestAnimationFrame(() => {
-        const element = timelineRef.current;
-        if (element && stickToBottomRef.current) element.scrollTo({ top: element.scrollHeight, behavior: "auto" });
-      }));
+      startBottomHold();
       return;
     }
     if (!stickToBottomRef.current) return;
@@ -1116,12 +1164,13 @@ export const ConversationPane = memo(function ConversationPane({
     // scrolling on every frame stacks competing animations and janks. Reserve
     // smooth scrolling for the occasional new message when idle.
     // 分屏格子（compact）数据更新一律瞬跳到底（auto）：它打开/水合时自带一次大的
-    // 平滑滚动，正是“从头滚到尾部”动画的来源；单窗口 idle 则保留 smooth。
-    timeline.scrollTo({ top: timeline.scrollHeight, behavior: data.busy || compact ? "auto" : "smooth" });
+    // 平滑滚动，正是“从头滚到尾部”动画的来源；单窗口 idle 则保留 smooth。钉底
+    // 窗口期内也一律 auto：切换会话的过程中任何平滑滚动都是用户要的那条动画。
+    timeline.scrollTo({ top: timeline.scrollHeight, behavior: data.busy || compact || bottomHoldRef.current ? "auto" : "smooth" });
     // 依赖里带「本格是否挂了发送失败提示」：提示是时间线尾部新增的一行，而收起到它
     // 的那次错误推送不伴随 messages/busy 变化——不带这个依赖，粘底时新提示会落在
     // 可视区外（用户看不到自己刚失败的那条）。
-  }, [data.messages, data.busy, data.sessionId, sessionId, compact, failedSend !== undefined]);
+  }, [data.messages, data.busy, data.sessionId, sessionId, compact, failedSend !== undefined, startBottomHold]);
 
   useEffect(() => {
     if (!data.busy) setLocalTurn(undefined);
@@ -1232,9 +1281,16 @@ export const ConversationPane = memo(function ConversationPane({
     const height = Math.round(element.getBoundingClientRect().height);
     const previous = windowHeightsRef.current.get(key);
     if (height > 0) windowHeightsRef.current.set(key, height);
-    if (!previous || Math.abs(previous - height) < 1) return;
-    if (stickToBottomRef.current) return; // 粘底时由粘底逻辑接管
     const timeline = timelineRef.current;
+    if (stickToBottomRef.current) {
+      // 粘底（含切会话后的实体化）：条目实体化会把占位高度换成真实高度，视口上方
+      // 一变高就会被滚动锚定漏掉（节点被替换时不补偿），必须重新钉到底部，否则
+      // 视口停在滚动条中间。旧的「粘底时由粘底逻辑接管」只等下一次 messages/busy
+      // 变化，中间这段用户看不到最新输出。
+      if (timeline) timeline.scrollTo({ top: timeline.scrollHeight, behavior: "auto" });
+      return;
+    }
+    if (!previous || Math.abs(previous - height) < 1) return;
     if (!timeline) return;
     if (element.offsetTop + height <= timeline.scrollTop) timeline.scrollTop += height - previous;
   }, []);
