@@ -748,8 +748,10 @@ function tokenize(line) {
   let index = 0;
   while (index < line.length) {
     const char = line[index];
-    const prev = line[index - 1] ?? "";
-    if ((char === "/" && line[index + 1] === "/" && prev !== ":") || (char === "#" && !/[\w]/u.test(prev))) {
+    // 注释只认「行首或空白后」的 `//` / `#`：宽泛匹配会把 `_//_`、`http://x`、`a#b` 这类
+    // 正文片段也染成注释色（实测在 markdown 与 URL 上很难看）。
+    const atLineStart = index === 0 || /\s/u.test(line[index - 1] ?? "");
+    if (atLineStart && ((char === "/" && line[index + 1] === "/") || char === "#")) {
       out.push({ type: "comment", text: line.slice(index) });
       break;
     }
@@ -764,7 +766,7 @@ function tokenize(line) {
       index = end;
       continue;
     }
-    if (/[0-9]/u.test(char) && !/[\w$]/u.test(prev)) {
+    if (/[0-9]/u.test(char) && !/[\w$]/u.test(line[index - 1] ?? "")) {
       let cursor = index;
       while (cursor < line.length && /[0-9a-fA-FxX._]/u.test(line[cursor])) cursor += 1;
       out.push({ type: "number", text: line.slice(index, cursor) });
@@ -1062,7 +1064,10 @@ function setView(view) {
   }
   renderList();
   renderDetail();
-  if (state.view === "status" && !state.status) void reloadStatus();
+  // 两个视图的数据各自按需拉：切回历史时若还没加载过（比如上次退出时停在「工作区」）要补拉，
+  // 否则会看到一个空列表（只有点刷新才出来）。
+  if (state.view === "log" && state.repo && state.commits.length === 0 && !state.paging) void loadMore(true);
+  if (state.view === "status" && state.repo && !state.status) void reloadStatus();
 }
 
 // —— 启动 ——
