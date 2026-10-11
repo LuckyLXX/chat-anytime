@@ -3,6 +3,7 @@ import {
   compactServiceTail,
   composeGalleryDevMessage,
   galleryAbsolutePath,
+  galleryEntryDirectory,
   galleryKey,
   galleryRunPlan,
   galleryRunTarget,
@@ -72,13 +73,18 @@ describe("normalizeGalleryApp", () => {
     expect(parsed!.updatedAt).toBe(parsed!.createdAt);
   });
 
-  it("command / url 只对 server 生效（file 作品带它们就是脏数据）", () => {
+  it("command / url 只对「服务型」作品生效（server 与 panel；file 带它们就是脏数据）", () => {
     const file = normalizeGalleryApp({ title: "t", kind: "file", workspace: "D:/ws", entry: "a.html", command: "npm run dev", url: "http://x" });
     expect(file!.command).toBeUndefined();
     expect(file!.url).toBeUndefined();
     const server = normalizeGalleryApp({ title: "t", kind: "server", workspace: "D:/ws", entry: ".", command: "npm run dev", url: "http://x" });
     expect(server!.command).toBe("npm run dev");
     expect(server!.url).toBe("http://x");
+    // 面板同样能声明本地服务（2026-10-11）：面板页没有 preload 也跑不了进程，
+    // 需要本地数据源的面板靠 command + url 在开窗前把服务拉起来。
+    const panel = normalizeGalleryApp({ title: "t", kind: "panel", workspace: "D:/ws", entry: "panels/status/index.html", command: "node bridge.mjs", url: "http://127.0.0.1:8791/api/health" });
+    expect(panel!.command).toBe("node bridge.mjs");
+    expect(panel!.url).toBe("http://127.0.0.1:8791/api/health");
   });
 });
 
@@ -187,6 +193,13 @@ describe("galleryRunTarget（运行分流的唯一判据）", () => {
   it("galleryAbsolutePath 处理根目录与尾部斜杠", () => {
     expect(galleryAbsolutePath("D:/ws/", ".")).toBe("D:/ws");
     expect(galleryAbsolutePath("D:\\ws", "a/b.html")).toBe("D:\\ws/a/b.html");
+  });
+
+  it("galleryEntryDirectory 取入口所在目录（正/反斜杠都算，无分隔符就原样返回）", () => {
+    expect(galleryEntryDirectory("D:/ws/panels/status/index.html")).toBe("D:/ws/panels/status");
+    expect(galleryEntryDirectory("D:\\ws\\panels\\index.html")).toBe("D:\\ws\\panels");
+    // 面板入口不可能落在根上（读侧就拒了 "."），这是不可达的兜底
+    expect(galleryEntryDirectory("index.html")).toBe("index.html");
   });
 });
 
@@ -365,11 +378,17 @@ describe("面板作品（kind=panel）", () => {
     expect(normalizeGalleryApp({ ...app({ kind: "server", entry: "." }), panel: { width: 500 } })?.panel).toBeUndefined();
   });
 
-  it("galleryRunTarget 面板走自己的通道（不走内置浏览器）", () => {
+  it("galleryRunTarget 面板走自己的通道（不走内置浏览器），并带走可选的本地服务", () => {
     expect(galleryRunTarget(app(panel))).toEqual({ kind: "panel", absolutePath: "D:/ws/panels/status/index.html" });
+    expect(galleryRunTarget(app({ ...panel, command: "node bridge.mjs", url: "http://127.0.0.1:8791/api/health" }))).toEqual({
+      kind: "panel",
+      absolutePath: "D:/ws/panels/status/index.html",
+      command: "node bridge.mjs",
+      url: "http://127.0.0.1:8791/api/health"
+    });
   });
 
-  it("galleryRunPlan：面板是第一个分支，不受服务可达性影响，options 已归一化", () => {
+  it("galleryRunPlan：面板没声明本地服务时不受服务可达性影响，options 已归一化", () => {
     expect(galleryRunPlan(app(panel), true)).toEqual({
       action: "open-panel",
       absolutePath: "D:/ws/panels/status/index.html",
@@ -384,6 +403,35 @@ describe("面板作品（kind=panel）", () => {
       action: "open-panel",
       absolutePath: "D:/ws/panels/status/index.html",
       options: { mode: "drawer", edge: "bottom" }
+    });
+  });
+
+  it("galleryRunPlan：面板声明了 command + url 才先起服务；已在跑或声明不全就直开窗", () => {
+    const panels = "D:/ws/panels/status/index.html";
+    const withService = app({ ...panel, command: "node bridge.mjs", url: "http://127.0.0.1:8791/api/health" });
+    // 服务不可达 → 先起服务再开窗；cwd 是入口所在目录（启动命令在作品目录里执行）
+    expect(galleryRunPlan(withService, false)).toEqual({
+      action: "start-panel-service",
+      absolutePath: panels,
+      options: {},
+      directory: "D:/ws/panels/status",
+      command: "node bridge.mjs",
+      url: "http://127.0.0.1:8791/api/health"
+    });
+    // 服务已可达（用户手工起的或上次运行留下的）→ 直接开窗，绝不重启用户正在用的服务
+    expect(galleryRunPlan(withService, true)).toEqual({ action: "open-panel", absolutePath: panels, options: {} });
+    // 只给 command 没给 url：无从探活，宁可直开窗（面板页自己报「连不上」），不盲起服务
+    expect(galleryRunPlan(app({ ...panel, command: "node bridge.mjs" }), false)).toEqual({ action: "open-panel", absolutePath: panels, options: {} });
+    // 只给 url（服务在别处/手工起）：平台无从启动，同样直开窗
+    expect(galleryRunPlan(app({ ...panel, url: "http://127.0.0.1:8791/api/health" }), false)).toEqual({ action: "open-panel", absolutePath: panels, options: {} });
+    // 声明了服务也要带上归一化后的窗口偏好（尺寸/形态不能在这一支里丢）
+    expect(galleryRunPlan(app({ ...panel, panel: { width: 99999 }, command: "node bridge.mjs", url: "http://127.0.0.1:8791/api/health" }), false)).toEqual({
+      action: "start-panel-service",
+      absolutePath: panels,
+      options: { width: 1600 },
+      directory: "D:/ws/panels/status",
+      command: "node bridge.mjs",
+      url: "http://127.0.0.1:8791/api/health"
     });
   });
 

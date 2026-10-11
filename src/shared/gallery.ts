@@ -70,9 +70,19 @@ export interface GalleryApp {
   workspace: string;
   /** 入口：kind=file 时是工作区相对路径；kind=server 时是目录相对路径（"." = 工作区根）。 */
   entry: string;
-  /** kind=server：启动命令（本期不自动执行，用户在终端里回车）。 */
+  /**
+   * 启动命令。
+   * - kind=server：作品的服务启动命令（「运行」时在终端标签里自动执行，不是手工回车）。
+   * - kind=panel：**开窗前要拉起的本地服务**（面板页没有 preload 也跑不了进程，
+   *   需要本地数据源的作品靠它；见 2026-10-11 的 Git 管理器）。
+   */
   command?: string;
-  /** kind=server：服务地址。存在时「运行」直接开浏览器，无需起进程。 */
+  /**
+   * 服务地址。
+   * - kind=server：存在时「运行」直接开浏览器，无需起进程。
+   * - kind=panel：**只用于探活**（`waitForService` 的判据是 TCP connect），不用于打开页面
+   *   —— 面板页自己 fetch 这个地址取数，平台只用它判断「服务起没起来」。
+   */
   url?: string;
   /** kind=panel：独立窗口的尺寸与置顶偏好（非法值在读侧夹取/丢弃）。 */
   panel?: GalleryPanelOptions;
@@ -213,10 +223,12 @@ export function normalizeGalleryApp(value: unknown): GalleryApp | undefined {
   };
   const description = trimmed(record.description);
   if (description) app.description = description;
+  // command / url 只对「服务型」作品有意义：server（服务 + 页面地址）与 panel
+  // （可选本地服务 + 探活地址）。file 型带上它们是脏数据，读侧丢弃。
   const command = trimmed(record.command);
-  if (kind === "server" && command) app.command = command;
+  if ((kind === "server" || kind === "panel") && command) app.command = command;
   const url = trimmed(record.url);
-  if (kind === "server" && url) app.url = url;
+  if ((kind === "server" || kind === "panel") && url) app.url = url;
   if (kind === "panel") {
     const panel = normalizeGalleryPanelOptions(record.panel);
     if (panel) app.panel = panel;
@@ -306,8 +318,8 @@ export function trimGalleryApps(list: readonly GalleryApp[], max = MAX_GALLERY_A
 /** 运行分流结果：唯一判定来源（渲染端与主进程共用）。 */
 export type GalleryRunTarget =
   | { kind: "file"; absolutePath: string }
-  /** 面板：入口网页会被 main 开成独立窗口，不走内置浏览器。 */
-  | { kind: "panel"; absolutePath: string }
+  /** 面板：入口网页会被 main 开成独立窗口，不走内置浏览器；command/url 是它的可选本地服务。 */
+  | { kind: "panel"; absolutePath: string; command?: string; url?: string }
   | { kind: "server"; url?: string; directory: string; command?: string };
 
 /** 绝对路径拼装（纯字符串操作；调用方已保证 workspace 是绝对路径）。 */
@@ -318,9 +330,25 @@ export function galleryAbsolutePath(workspace: string, entry: string): string {
   return `${base}/${relative}`;
 }
 
+/**
+ * 入口文件所在目录（纯字符串操作，不 import `node:path`——本模块是渲染端与主进程
+ * 共享的纯数据层）。面板作品的启动命令要**在作品目录里**执行（作品自带的 bridge
+ * 脚本就放在入口旁边），所以 `start-panel-service` 靠它给出 cwd。
+ * 没有分隔符时原样返回（调用方已保证是绝对路径，这是不可达的兜底）。
+ */
+export function galleryEntryDirectory(absolutePath: string): string {
+  const index = Math.max(absolutePath.lastIndexOf("/"), absolutePath.lastIndexOf("\\"));
+  return index > 0 ? absolutePath.slice(0, index) : absolutePath;
+}
+
 export function galleryRunTarget(app: Pick<GalleryApp, "kind" | "workspace" | "entry" | "url" | "command">): GalleryRunTarget {
   const absolutePath = galleryAbsolutePath(app.workspace, app.entry);
-  if (app.kind === "panel") return { kind: "panel", absolutePath };
+  if (app.kind === "panel") {
+    const target: GalleryRunTarget = { kind: "panel", absolutePath };
+    if (app.command) target.command = app.command;
+    if (app.url) target.url = app.url;
+    return target;
+  }
   if (app.kind === "server") {
     const target: GalleryRunTarget = { kind: "server", directory: absolutePath };
     if (app.url) target.url = app.url;
@@ -367,6 +395,11 @@ export type GalleryRunPlan =
   | { action: "open-file"; absolutePath: string }
   /** 面板：把入口网页开成独立窗口（主界面关掉后仍能显示）；options 已归一化。 */
   | { action: "open-panel"; absolutePath: string; options: GalleryPanelOptions }
+  /**
+   * 面板 + 本地服务（2026-10-11）：先把 `command` 在终端标签里拉起来、探活通过再开窗。
+   * `directory` 是**入口所在目录**（启动命令在那里执行），`url` 是探活地址。
+   */
+  | { action: "start-panel-service"; absolutePath: string; options: GalleryPanelOptions; directory: string; command: string; url: string }
   | { action: "open-browser"; url: string }
   | { action: "start-service"; directory: string; command: string; url?: string }
   /** 服务型但既连不上、又没登记启动命令：只能如实说，不能装作跑起来了。 */
@@ -377,9 +410,23 @@ export function galleryRunPlan(
   serviceReachable: boolean
 ): GalleryRunPlan {
   const target = galleryRunTarget(app);
-  // 面板是**第一个分支**：面板没有服务可探，也不应受 serviceReachable 影响。
+  // 面板：可以带一个**可选的本地服务**（command + url）。三态刻意分开——
+  // 没声明服务、服务已可达（用户手工起的或上次运行留下的）都直接开窗，
+  // 绝不重启用户正在用的服务；只有「声明了服务且此刻不可达」才先起服务再开窗。
+  // 缺 url 时无法探活，宁可直开窗让面板页自己报「连不上」，也不盲起服务。
   if (target.kind === "panel") {
-    return { action: "open-panel", absolutePath: target.absolutePath, options: normalizeGalleryPanelOptions(app.panel) ?? {} };
+    const options = normalizeGalleryPanelOptions(app.panel) ?? {};
+    if (target.command && target.url && !serviceReachable) {
+      return {
+        action: "start-panel-service",
+        absolutePath: target.absolutePath,
+        options,
+        directory: galleryEntryDirectory(target.absolutePath),
+        command: target.command,
+        url: target.url
+      };
+    }
+    return { action: "open-panel", absolutePath: target.absolutePath, options };
   }
   if (target.kind === "file") return { action: "open-file", absolutePath: target.absolutePath };
   if (target.url && serviceReachable) return { action: "open-browser", url: target.url };

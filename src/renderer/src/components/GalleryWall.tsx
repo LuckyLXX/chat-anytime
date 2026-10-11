@@ -84,6 +84,13 @@ function GalleryCard({ app, workspace, onRun, onDevelop, onRemove, onData }: { a
           {compact(app.entry)}
           {elsewhere && <em title={app.workspace}>另一工作区</em>}
         </span>
+        {/* 带本地服务的面板：点运行会先起服务再开窗（2026-10-11）。纯展示标记，
+            刻意不带 data-control——它是说明，不是开关，不该进主题钩子契约。 */}
+        {app.kind === "panel" && app.command && (
+          <span className="gallery-card-service" title={`运行会先执行「${app.command}」拉起本地服务，探活通过再开窗；窗口关闭时服务自动停止`}>
+            <Server size={11} />本地服务
+          </span>
+        )}
         <div className="gallery-card-actions">
           <button type="button" className="primary-button" data-control="gallery-run" onClick={() => onRun(app)}><Play size={13} />运行</button>
           <button type="button" data-control="gallery-develop" onClick={() => onDevelop(app)}><Hammer size={13} />继续开发</button>

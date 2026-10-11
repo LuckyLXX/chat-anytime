@@ -44,6 +44,11 @@ export interface PanelOpenRequest {
   filePath: string;
   workspace: string;
   panel?: GalleryPanelOptions;
+  /**
+   * 平台为这个面板拉起的本地服务对应的终端会话 id（2026-10-11：带 command+url 的面板）。
+   * 窗口关闭时主进程靠它停掉服务；没声明服务的面板不带。
+   */
+  serviceTerminalId?: string;
 }
 
 export type PanelOpenResult = { ok: true } | { ok: false; message: string };
@@ -55,6 +60,13 @@ export interface PanelWindowDeps {
   boundsPath: string;
   /** 面板页里 window.open / target=_blank 一律交系统浏览器。 */
   openExternal: (url: string) => void;
+  /**
+   * 窗口真的关掉了（`closed` 触发时，windows/panelOptions 已清理、协议路由已摘除）。
+   * 装配方用它给「平台为面板起的本地服务」收尾：kill 终端会话 + 通知渲染端收掉标签。
+   * 加载失败走 `destroy()` 不触发 `closed`（见 dispose 的注释），那种情况由渲染端的
+   * 「开窗失败就停服务」兜底。回调抛错不影响窗口清理。
+   */
+  onClosed?: (appId: string, serviceTerminalId?: string) => void;
 }
 
 /** 位置尺寸落盘防抖：拖动窗口会连续触发 move/resize，别每帧写一次盘。 */
@@ -64,6 +76,11 @@ export class PanelWindowController {
   private readonly windows = new Map<string, BrowserWindow>();
   /** 每个作品的归一化窗口偏好（close/toggle 要按形态/贴边行事）。 */
   private readonly panelOptions = new Map<string, GalleryPanelOptions>();
+  /**
+   * 作品 id → 平台为它起的本地服务终端 id（带 command+url 的面板才有）。
+   * 只在建窗时写入，复用已有窗口时不覆盖——服务是同一个，不能被后来的运行改写成别的。
+   */
+  private readonly services = new Map<string, string>();
   /** 正在创建的窗口（作品 id → 那次 open 的 Promise）：挡住双击「运行」的并发。 */
   private readonly openings = new Map<string, Promise<PanelOpenResult>>();
   private readonly saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -234,6 +251,7 @@ export class PanelWindowController {
     });
     this.windows.set(request.id, win);
     this.panelOptions.set(request.id, request.panel ?? {});
+    if (request.serviceTerminalId) this.services.set(request.id, request.serviceTerminalId);
     win.webContents.setWindowOpenHandler(({ url: target }) => {
       this.deps.openExternal(target);
       return { action: "deny" };
@@ -254,6 +272,15 @@ export class PanelWindowController {
       this.panelOptions.delete(request.id);
       // 窗口没了就不再服务它的地址（重开「运行」时会重新挂载）。
       this.deps.route.unmount(request.id);
+      // 平台为这个面板起的本地服务跟着窗口收尾（2026-10-11 用户选定：关窗即停，
+      // 不留后台进程）。失败只影响「多留一个服务进程」，绝不能让窗口清理半途而废。
+      const serviceTerminalId = this.services.get(request.id);
+      this.services.delete(request.id);
+      try {
+        this.deps.onClosed?.(request.id, serviceTerminalId);
+      } catch {
+        /* 关闭回调的失败与窗口本身无关 */
+      }
     });
     try {
       await win.loadURL(url);

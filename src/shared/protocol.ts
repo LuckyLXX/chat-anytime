@@ -2203,7 +2203,14 @@ export type RuntimeMessage =
   /** 作品清单全量替换（发布/删除/更新/记录运行/启动时推送）。 */
   | { type: "gallery.apps"; apps: GalleryAppModel[] }
   /** 发布结果提示（缩略图成功/降级、以及失败原因）；渲染端 toast。 */
-  | { type: "gallery.notice"; kind: "ok" | "warn"; message: string };
+  | { type: "gallery.notice"; kind: "ok" | "warn"; message: string }
+  /**
+   * 面板窗口关闭（2026-10-11）：带本地服务的面板（command + url）窗口一关，主进程
+   * 就 kill 了那个终端会话，并推这条消息让渲染端把对应的服务标签一并收掉
+   * （否则主界面里会留一个「已退出」的孤儿标签）。
+   * `terminalId` 是平台为这个面板起的服务会话；没声明服务的面板不带。
+   */
+  | { type: "gallery.panel-closed"; id: string; terminalId?: string };
 
 export interface DesktopBootstrap {
   platform: string;
@@ -2251,7 +2258,7 @@ export interface DesktopApi {
    * 面板型作品「运行」：把入口网页开成独立于主界面的窗口（同作品 id 复用已有窗口）。
    * 打不开时 ok=false 并附原因（入口不在工作区内 / 不是网页文件 / 静态服务起不来）。
    */
-  galleryOpenPanel(input: { id: string; title: string; workspace: string; filePath: string; panel?: GalleryPanelOptions }): Promise<{ ok: boolean; message?: string }>;
+  galleryOpenPanel(input: { id: string; title: string; workspace: string; filePath: string; panel?: GalleryPanelOptions; serviceTerminalId?: string }): Promise<{ ok: boolean; message?: string }>;
   /**
    * 面板作品的数据用量（作品墙卡片的「数据…」）。面板窗口没开着时主进程会开一个
    * 临时隐藏窗口去量（量完即关）；量不到不是错误，回 ok:false + 原因即可。

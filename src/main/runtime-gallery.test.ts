@@ -20,6 +20,20 @@ describe("validatePublishInput", () => {
     expect(draft.url).toBe("http://localhost:5173");
   });
 
+  it("panel 类型同样保留 command / url（面板的本地服务：开窗前拉起、探活通过再开窗）", () => {
+    const draft = validatePublishInput({
+      path: "works/git-manager/index.html",
+      kind: "panel",
+      title: "Git 管理器",
+      command: "node bridge.mjs",
+      url: "http://127.0.0.1:8791/api/health",
+      panel: { width: 1180, height: 780 }
+    });
+    expect(draft.command).toBe("node bridge.mjs");
+    expect(draft.url).toBe("http://127.0.0.1:8791/api/health");
+    expect(draft.panel).toEqual({ width: 1180, height: 780 });
+  });
+
   it("panel 类型保留归一化后的窗口偏好；非法 panel 丢字段而不是报错", () => {
     const draft = validatePublishInput({ path: "panels/status/index.html", kind: "panel", title: "会话状态", panel: { width: 320, height: 700, alwaysOnTop: true } });
     expect(draft.kind).toBe("panel");
@@ -47,12 +61,18 @@ describe("publishReceipt", () => {
 });
 
 describe("buildGalleryTools 契约", () => {
-  it("工具描述把 panel 的数据接口写清楚（模型据此写面板页）", async () => {
+  it("工具描述把 panel 的数据接口与本地服务写清楚（模型据此写面板页）", async () => {
     const { buildGalleryTools } = await import("./runtime-gallery.js");
     const tools = buildGalleryTools({ publish: async (draft) => ({ app: { id: "g1", title: draft.title, kind: draft.kind, workspace: "D:/ws", entry: draft.path, createdAt: 1, updatedAt: 1 }, thumbNote: "" }), list: () => [] });
     const description = String(tools[0]!.description ?? "");
     expect(description).toContain("panel");
     expect(description).toContain("__pidesktop_state.json");
+    // 面板可带本地服务（2026-10-11）：描述与参数字段都要把这条规则告诉模型
+    expect(description).toContain("本地服务");
+    expect(description).toContain("探活");
+    const parameters = JSON.stringify(tools[0]!.parameters ?? {});
+    expect(parameters).toContain("kind=panel：开窗前要拉起的本地服务命令");
+    expect(parameters).toContain("kind=panel：探活地址");
   });
 
   it("只暴露一个 gallery_publish，且工具名符合 OpenAI 兼容的下划线命名", async () => {

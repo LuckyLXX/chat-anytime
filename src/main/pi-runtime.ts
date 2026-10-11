@@ -1689,8 +1689,11 @@ async function publishGalleryApp(draft: GalleryDraft, workspaceRoot: string | un
     updatedAt: Date.now()
   };
   if (draft.description) app.description = draft.description;
-  if (draft.kind === "server" && draft.command) app.command = draft.command;
-  if (draft.kind === "server" && draft.url) app.url = draft.url;
+  // 服务字段只跟「服务型」作品走：server（服务 + 页面地址）与 panel（可选本地服务 +
+  // 探活地址）。这里漏一行就会静默丢掉工具声明的 command/url（2026-09-26 同类教训：
+  // 面板尺寸就是在这一层丢过）。
+  if ((draft.kind === "server" || draft.kind === "panel") && draft.command) app.command = draft.command;
+  if ((draft.kind === "server" || draft.kind === "panel") && draft.url) app.url = draft.url;
   // 面板窗口偏好必须在这里落地：`upsertGalleryApp` 只会原样保留 `app` 上已有的字段，
   // 漏了这一行则「对话框里填了尺寸/置顶、工具也声明了」全都会静默丢掉，发布出去
   // 的面板永远以缺省 420×560、不置顶开窗（2026-09-26 评审发现）。

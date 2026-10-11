@@ -70,7 +70,7 @@ import { DelegationTranscript } from "./components/DelegationTranscript";
 import { detailTitle } from "./components/QuestionPanel";
 import { compactPath, type Artifact } from "./lib/content";
 import { composePickMessage } from "./lib/browser-pick";
-import { composeGalleryDevMessage, galleryRunPlan, galleryServiceFailureMessage, galleryServiceTerminalId, GALLERY_SERVICE_WAIT_MS, type GalleryApp, type GalleryDraft, type GalleryKind } from "../../shared/gallery";
+import { composeGalleryDevMessage, galleryRunPlan, galleryServiceFailureMessage, galleryServiceTerminalId, GALLERY_SERVICE_WAIT_MS, type GalleryApp, type GalleryDraft, type GalleryKind, type GalleryPanelOptions } from "../../shared/gallery";
 import { GalleryMenu } from "./components/GalleryMenu";
 import { GalleryWall } from "./components/GalleryWall";
 import { GalleryDataDialog, GalleryPublishDialog, GalleryWallDialog } from "./components/GalleryDialogs";
@@ -611,28 +611,81 @@ export function App(): ReactNode {
     void window.piDesktop.send({ type: "gallery.run", id: app.id }).catch(() => undefined);
   }, []);
 
+  /**
+   * 把一个作品的本地服务拉起来并等它就绪（2026-10-11 从 start-service 分支抽出）：
+   * 服务型作品与「带本地服务的面板」共用同一条时序。
+   *
+   * 先回收同一作品上一次的服务标签：它的 PTY 可能已经死了（命令报错退出）也可能
+   * 卡在启动中，而不发 create 就永远等不到服务；关标签 = kill 它的 PTY，所以这次
+   * 运行一定是一个全新的服务进程。终端 id 每次运行都不重样：否则上一次的退出记录
+   * 会被等待方读成这一次的结果（2026-09-23 真机事故，见 galleryServiceTerminalId）。
+   *
+   * 成功时把 terminalId 交回调用方处置：面板开窗失败要立刻停掉它，开窗成功后平台
+   * 还要靠它在面板窗口关闭时收尾。
+   */
+  const ensureGalleryService = useCallback(async (
+    app: GalleryApp,
+    plan: { directory: string; command: string; url?: string }
+  ): Promise<{ ok: true; terminalId: string } | { ok: false; message: string }> => {
+    const previous = previewRef.current?.tabs.find((tab) => tab.target.type === "terminal" && tab.target.galleryId === app.id);
+    if (previous) closePreviewTabRef.current(previous.id);
+    const terminalId = galleryServiceTerminalId(app.id, crypto.randomUUID().slice(0, 8));
+    openTerminalPreviewRef.current({ type: "terminal", galleryId: app.id, cwd: plan.directory, initialCommand: plan.command, title: `${app.title} · 服务` }, terminalId);
+    if (!plan.url) {
+      return { ok: false, message: `已在终端启动「${app.title}」：${plan.command}。该作品未登记服务地址，起好后请再点一次「运行」。` };
+    }
+    const probe = await window.piDesktop.galleryAwaitService({ url: plan.url, terminalId, timeoutMs: GALLERY_SERVICE_WAIT_MS });
+    if (!probe.ok) return { ok: false, message: galleryServiceFailureMessage(app, probe) };
+    return { ok: true, terminalId };
+  }, []);
+
+  /** 开面板窗口（直开窗、先起服务再开窗两条路径共用）。返回窗口是否真的开出来了。 */
+  const openGalleryPanel = useCallback(async (
+    app: GalleryApp,
+    absolutePath: string,
+    options: GalleryPanelOptions,
+    serviceTerminalId?: string
+  ): Promise<boolean> => {
+    // 面板作品不跑在内置浏览器里，而是让主进程开一个独立窗口（主界面关掉后仍在）。
+    // 窗口打不开（入口不在工作区/不是网页/静态服务起不来）时主进程会给出具体原因，
+    // 这里原样报给用户。serviceTerminalId 是平台为这个面板起的本地服务，窗口关闭时
+    // 主进程靠它停掉服务（带本地服务的面板才有）。
+    const result = await window.piDesktop.galleryOpenPanel({
+      id: app.id,
+      title: app.title,
+      workspace: app.workspace,
+      filePath: absolutePath,
+      panel: options,
+      serviceTerminalId
+    });
+    if (!result.ok) {
+      setMessageActionError(result.message ?? `打不开「${app.title}」的面板窗口`);
+      return false;
+    }
+    // 与网页作品同一条尾巴：窗口真的开出来了才记一次运行。
+    void window.piDesktop.send({ type: "gallery.run", id: app.id }).catch(() => undefined);
+    return true;
+  }, []);
+
+  // 平台为面板拉起的本地服务：面板窗口一关，主进程就 kill 那个终端会话并推这条消息，
+  // 这里把残留的终端标签一并收掉（否则会留一个「已退出」的孤儿标签）。主进程那边已经
+  // 让 PTY 死了，closePreviewTab 里的那次 kill 是无害的重复。
+  useEffect(() => {
+    const off = window.piDesktop.onRuntimeMessage((message) => {
+      if (message.type !== "gallery.panel-closed" || !message.terminalId) return;
+      closePreviewTabRef.current(message.terminalId);
+    });
+    return off;
+  }, []);
+
   const runGalleryApp = useCallback(async (app: GalleryApp): Promise<void> => {
     try {
-      // 先探一次服务地址：已经跑着就直接进页面，不重启用户（或上次运行）起的服务。
-      const reachable = app.kind === "server" && app.url ? (await window.piDesktop.galleryAwaitService({ url: app.url })).ok : false;
+      // 先探一次服务地址：已经跑着就直接进页面/开窗，不重启用户（或上次运行）起的服务。
+      // 面板的 url 同样只是探活地址（不用于打开页面），所以两种类型同一条判据。
+      const reachable = app.url ? (await window.piDesktop.galleryAwaitService({ url: app.url })).ok : false;
       const plan = galleryRunPlan(app, reachable);
       if (plan.action === "open-panel") {
-        // 面板作品不跑在内置浏览器里，而是让主进程开一个独立窗口（主界面关掉后
-        // 仍在）。窗口打不开（入口不在工作区/不是网页/静态服务起不来）时主进程
-        // 会给出具体原因，这里原样报给用户。
-        const result = await window.piDesktop.galleryOpenPanel({
-          id: app.id,
-          title: app.title,
-          workspace: app.workspace,
-          filePath: plan.absolutePath,
-          panel: plan.options
-        });
-        if (!result.ok) {
-          setMessageActionError(result.message ?? `打不开「${app.title}」的面板窗口`);
-          return;
-        }
-        // 与网页作品同一条尾巴：窗口真的开出来了才记一次运行。
-        void window.piDesktop.send({ type: "gallery.run", id: app.id }).catch(() => undefined);
+        await openGalleryPanel(app, plan.absolutePath, plan.options);
         return;
       }
       if (plan.action === "open-file") {
@@ -642,26 +695,27 @@ export function App(): ReactNode {
       if (plan.action === "start-service") {
         // 运行 = 开一个终端标签并执行启动命令：启动输出落在用户看得见的地方，
         // 进程与标签同生共死（用户选定：不在后台留隐藏进程）。
-        //
-        // 先回收同一作品上一次的服务标签：它的 PTY 可能已经死了（命令报错退出）
-        // 也可能卡在启动中；而不发 create 就永远等不到服务。关标签 = kill 它的 PTY，
-        // 所以这次运行一定是一个全新的服务进程（地址真的可达时不会走到这里）。
-        const previous = previewRef.current?.tabs.find((tab) => tab.target.type === "terminal" && tab.target.galleryId === app.id);
-        if (previous) closePreviewTabRef.current(previous.id);
-        // 终端 id 每次运行都不重样：否则上一次的退出记录会被等待方读成这一次的结果
-        //（2026-09-23 真机事故，见 galleryServiceTerminalId 注释）。
-        const terminalId = galleryServiceTerminalId(app.id, crypto.randomUUID().slice(0, 8));
-        openTerminalPreviewRef.current({ type: "terminal", galleryId: app.id, cwd: plan.directory, initialCommand: plan.command, title: `${app.title} · 服务` }, terminalId);
-        if (!plan.url) {
-          setMessageActionError(`已在终端启动「${app.title}」：${plan.command}。该作品未登记服务地址，起好后请再点一次「运行」。`);
+        const started = await ensureGalleryService(app, plan);
+        if (!started.ok) {
+          setMessageActionError(started.message);
           return;
         }
-        const probe = await window.piDesktop.galleryAwaitService({ url: plan.url, terminalId, timeoutMs: GALLERY_SERVICE_WAIT_MS });
-        if (!probe.ok) {
-          setMessageActionError(galleryServiceFailureMessage(app, probe));
+        if (plan.url) await openGalleryBrowserTab(app, plan.url);
+        return;
+      }
+      if (plan.action === "start-panel-service") {
+        // 面板 + 本地服务（如 Git 管理器）：面板页没有 preload 也跑不了外部命令，
+        // 数据只能由本地服务提供。所以先在作品目录里把服务拉起来、探活通过再开窗
+        // —— 窗口打开时数据源已经就绪（服务已可达时根本走不到这一支）。
+        const started = await ensureGalleryService(app, plan);
+        if (!started.ok) {
+          setMessageActionError(started.message);
           return;
         }
-        await openGalleryBrowserTab(app, plan.url);
+        if (!(await openGalleryPanel(app, plan.absolutePath, plan.options, started.terminalId))) {
+          // 窗口没开出来，刚起的服务就没有主人了：立刻收掉，不留无人使用的进程。
+          closePreviewTabRef.current(started.terminalId);
+        }
         return;
       }
       if (plan.action === "manual") {
@@ -674,7 +728,7 @@ export function App(): ReactNode {
     } catch (error) {
       setMessageActionError(error instanceof Error ? error.message : "运行作品失败");
     }
-  }, [openGalleryBrowserTab]);
+  }, [openGalleryBrowserTab, ensureGalleryService, openGalleryPanel]);
   const developGalleryApp = useCallback((app: GalleryApp): void => {
     const targetId = focusedPaneId ?? activeSessionId;
     if (!targetId) {

@@ -187,7 +187,7 @@ describe("面板窗口的窗口级动作（close / toggle）", () => {
 describe("面板窗口的跨域放宽（panel-cors）", () => {
   it("在第一个面板窗口创建时懒装（不开面板的用户不该付网络回调的代价）", () => {
     expect(main).toContain("ensurePanelCorsRelaxation();");
-    expect(main).toMatch(/panelWindows \?\?= new PanelWindowController\(\{[\s\S]{0,600}?\}\);\n\s*\/\/[^\n]*\n\s*ensurePanelCorsRelaxation\(\);/u);
+    expect(main).toMatch(/panelWindows \?\?= new PanelWindowController\(\{[\s\S]{0,1800}?\}\);\n\s*\/\/[^\n]*\n\s*ensurePanelCorsRelaxation\(\);/u);
     // 幂等：重复调用不会注册第二遍
     expect(main).toContain("if (panelCorsInstalled) return;");
   });
@@ -253,7 +253,9 @@ describe("渲染端的运行分流", () => {
     expect(app).toContain('if (plan.action === "open-panel") {');
     expect(app).toMatch(/await window\.piDesktop\.galleryOpenPanel\(\{/u);
     // 顺序钉死：失败提示与 return 必须在 gallery.run 之前（打不开就不算跑过）。
-    const branch = app.slice(app.indexOf('plan.action === "open-panel"'), app.indexOf('plan.action === "open-file"'));
+    // 2026-10-11 起这段搬到 openGalleryPanel helper：直开窗与「先起服务再开窗」
+    // 两条路径共用同一份「开出来了才记运行」的尾巴，所以切片从 helper 声明开始。
+    const branch = app.slice(app.indexOf("const openGalleryPanel = useCallback"), app.indexOf("const runGalleryApp = useCallback"));
     expect(branch).toContain("if (!result.ok)");
     expect(branch).toContain("gallery.run");
     expect(branch.indexOf("if (!result.ok)")).toBeLessThan(branch.indexOf("gallery.run"));

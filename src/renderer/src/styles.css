@@ -2930,6 +2930,9 @@ html[data-ui-motion="off"] .general-jev-toggle .chevron { transition: none; }
 .gallery-card-thumb > img { width: 100%; height: 100%; object-fit: cover; object-position: top center; }
 .gallery-card-placeholder { display: grid; place-items: center; width: 100%; height: 100%; color: var(--text-muted); }
 .gallery-card-badge { position: absolute; top: 7px; right: 7px; padding: 1px 6px; border-radius: 5px; background: var(--surface); color: var(--text-muted); font-size: 9.5px; border: 1px solid var(--border); }
+/* 带本地服务的面板标记（纯展示，非按钮）：运行时先起服务再开窗，用户点前就能看见。 */
+.gallery-card-service { display: inline-flex; align-items: center; gap: 4px; width: fit-content; padding: 1px 6px; border-radius: 5px; border: 1px solid var(--border); background: var(--surface-input); color: var(--text-muted); font-size: 9.5px; }
+.gallery-card-service > svg { flex: 0 0 auto; }
 .gallery-card-body { display: grid; gap: 5px; padding: 9px 10px 10px; }
 .gallery-card-title { overflow: hidden; color: var(--text); font-size: 12.5px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
 .gallery-card-desc { margin: 0; color: var(--text-muted); font-size: 10.5px; line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
@@ -2960,6 +2963,8 @@ html[data-ui-motion="off"] .general-jev-toggle .chevron { transition: none; }
 .gallery-panel-options { display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px; align-items: end; }
 .gallery-panel-ontop { display: flex !important; align-items: center; gap: 6px; padding-bottom: 8px; white-space: nowrap; }
 .gallery-panel-ontop input { min-height: 0; }
+/* 面板本地服务的说明行（可选字段：两个都填才自动起服务）。 */
+.gallery-dialog-hint { color: var(--text-muted); font-size: 10px; line-height: 1.5; }
 .gallery-panel-options input[type="number"] { min-height: 32px; padding: 0 9px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface-input); color: var(--text); font-size: 11.5px; }
 .gallery-publish-body input, .gallery-publish-body select { min-height: 32px; padding: 0 9px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface-input); color: var(--text); font-size: 11.5px; }
 .gallery-publish-dialog footer { display: flex; justify-content: flex-end; gap: 8px; }

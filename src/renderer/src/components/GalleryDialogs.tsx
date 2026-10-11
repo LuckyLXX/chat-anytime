@@ -263,6 +263,16 @@ export function GalleryPublishDialog({ initial, workspace, onSubmit, onClose }: 
               <label>服务地址（可选）<input value={url} placeholder="如：http://localhost:5173" onChange={(event) => setUrl(event.target.value)} /></label>
             </>
           )}
+          {/* 面板也能带一个本地服务（2026-10-11）：面板页没有 preload 也跑不了外部命令，
+              需要本地数据源（跑 git / 读数据库 / 访问本机文件）的面板就靠它——点运行时
+              先在作品目录里起这个服务、探活通过再开窗，窗口关闭时服务自动停止。 */}
+          {kind === "panel" && (
+            <>
+              <label>本地服务启动命令（可选）<input value={command} placeholder="如：node bridge.mjs（在入口所在目录执行）" onChange={(event) => setCommand(event.target.value)} /></label>
+              <label>服务探活地址（可选）<input value={url} placeholder="如：http://127.0.0.1:8791/api/health" onChange={(event) => setUrl(event.target.value)} /></label>
+              <span className="gallery-dialog-hint">两个都填才会自动起服务：点「运行」先拉服务、探活通过再开窗，窗口关闭时服务自动停止。</span>
+            </>
+          )}
           <label>说明（可选）<input value={description} placeholder="一句话说明这个作品是什么" onChange={(event) => setDescription(event.target.value)} /></label>
         </div>
         <footer>

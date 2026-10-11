@@ -1055,17 +1055,36 @@ function registerIpc(): void {
     const data = readGalleryThumb(galleryThumbsDirFor(resolveGalleryAgentDir()), fileName);
     return data ? `data:image/png;base64,${data.toString("base64")}` : undefined;
   });
-  ipcMain.handle("gallery:open-panel", async (_event, input: { id?: unknown; title?: unknown; workspace?: unknown; filePath?: unknown; panel?: unknown } | undefined): Promise<{ ok: boolean; message?: string }> => {
+  ipcMain.handle("gallery:open-panel", async (_event, input: { id?: unknown; title?: unknown; workspace?: unknown; filePath?: unknown; panel?: unknown; serviceTerminalId?: unknown } | undefined): Promise<{ ok: boolean; message?: string }> => {
     const id = typeof input?.id === "string" ? input.id.trim() : "";
     const workspace = typeof input?.workspace === "string" ? input.workspace.trim() : "";
     const filePath = typeof input?.filePath === "string" ? input.filePath.trim() : "";
     if (!id || !workspace || !filePath) return { ok: false, message: "面板作品信息不完整（缺少 id / 工作区 / 入口）" };
+    // 平台为这个面板起的本地服务（带 command + url 的面板才传）：记在窗口上，
+    // 窗口关闭时靠它停服务。
+    const serviceTerminalId = typeof input?.serviceTerminalId === "string" && input.serviceTerminalId.trim() ? input.serviceTerminalId.trim() : undefined;
     // 惰性创建：页面与端点都由常驻的协议路由提供，这里只是建/管窗口。
     panelWindows ??= new PanelWindowController({
       route: panelProtocolRoute,
       boundsPath: panelBoundsPathFor(resolveGalleryAgentDir()),
       openExternal: (url) => {
         void shell.openExternal(url).catch(() => undefined);
+      },
+      // 面板窗口一关，平台为它起的本地服务也该停（2026-10-11 用户选定：不在后台
+      // 留隐藏进程）。kill 走终端层，ConPTY 会把进程树一起带走；再推一条消息让
+      // 渲染端把那个服务标签一并收掉，否则主界面会留一个「已退出」的孤儿标签。
+      // 主界面退到托盘时窗口并未销毁，推送照样发得出去。
+      onClosed: (appId, closedTerminalId) => {
+        if (closedTerminalId) {
+          try {
+            terminalManager.handle({ type: "kill", terminalId: closedTerminalId });
+          } catch {
+            /* 会话本来就已退出：无事可做 */
+          }
+        }
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send("runtime:message", { type: "gallery.panel-closed", id: appId, terminalId: closedTerminalId } satisfies RuntimeMessage);
+        }
       }
     });
     // 面板作品常要直接调外部模型 API（那些服务多半没有 CORS）；放宽只作用于面板窗口。
@@ -1075,7 +1094,8 @@ function registerIpc(): void {
       title: typeof input?.title === "string" && input.title.trim() ? input.title.trim() : "面板",
       workspace,
       filePath,
-      panel: normalizeGalleryPanelOptions(input?.panel)
+      panel: normalizeGalleryPanelOptions(input?.panel),
+      serviceTerminalId
     });
   });
   // —— 作品数据（面板专属）：用量量测与清空 ——
