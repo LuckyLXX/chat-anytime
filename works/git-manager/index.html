@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Git 管理器</title>
+<!--
+  Git 管理器 —— 面板作品（kind=panel）。
+
+  数据来源：本目录下的 bridge.mjs（零依赖 Node 服务，由平台在开窗前拉起）。
+    · 面板页跑在 pidesktop-file://w-<作品 id> 上，没有 preload、跑不了外部命令；
+    · 面板窗口有平台级跨域放宽，所以直接 fetch http://127.0.0.1:8791 即可；
+    · 若那条路被拦（见 app.js 的降级提示），bridge 同时把本页 serve 在
+      http://127.0.0.1:8791/ 上，同源零跨域 —— 两种承载方式共用这一份 UI。
+
+  零依赖：不引 CDN、不打包，改完刷新即生效。
+  只读：所有 git 命令都是查询类，这个作品不会修改任何仓库。
+-->
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="6" cy="6" r="2.4" /><circle cx="6" cy="18" r="2.4" /><circle cx="18" cy="12" r="2.4" />
+          <path d="M6 8.4v7.2M8.4 6h4.2a3 3 0 0 1 3 3v.6" />
+        </svg>
+      </span>
+      <span class="brand-text">Git 管理器</span>
+    </div>
+
+    <div class="repo-picker" data-control="repo-picker">
+      <button type="button" class="repo-current" id="repoButton" aria-haspopup="listbox" aria-expanded="false">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4l2 2h9a1.5 1.5 0 0 1 1.5 1.5v8A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5z"/></svg>
+        <span class="repo-name" id="repoName">未选择仓库</span>
+        <span class="repo-branch" id="repoBranch"></span>
+        <svg class="ico chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+      </button>
+      <div class="repo-menu" id="repoMenu" hidden>
+        <div class="repo-menu-head">最近打开的仓库</div>
+        <div class="repo-menu-list" id="repoMenuList"></div>
+        <div class="repo-menu-add">
+          <input id="repoPathInput" type="text" spellcheck="false" placeholder="粘贴仓库路径，如 D:/projects/app" />
+          <button type="button" id="repoPathAdd">打开</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="topbar-gap"></div>
+
+    <label class="search">
+      <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.3-4.3"/></svg>
+      <input id="searchInput" type="search" spellcheck="false" placeholder="搜索提交信息、作者或 SHA" />
+      <kbd>/</kbd>
+    </label>
+
+    <button type="button" class="icon-btn" id="themeBtn" title="切换明暗（跟随系统 → 深色 → 浅色）" aria-label="切换主题">
+      <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6 7 7M17 17l1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4"/><circle cx="12" cy="12" r="3.6"/></svg>
+    </button>
+    <button type="button" class="icon-btn" id="refreshBtn" title="重新读取仓库" aria-label="刷新">
+      <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 5v6h-6"/></svg>
+    </button>
+
+    <div class="bridge" id="bridgeStatus" title="本地 Git Bridge 连接状态">
+      <span class="dot"></span><span class="bridge-text">连接中</span>
+    </div>
+  </header>
+
+  <div class="body">
+    <aside class="sidebar" data-pane="sidebar">
+      <div class="view-switch" role="tablist">
+        <button type="button" class="view-tab is-active" data-view="log" role="tab" aria-selected="true">提交历史</button>
+        <button type="button" class="view-tab" data-view="status" role="tab" aria-selected="false">工作区</button>
+      </div>
+
+      <div class="side-block">
+        <div class="side-head">
+          <h3>分支</h3>
+          <span class="count" id="branchCount">0</span>
+        </div>
+        <div class="side-list" id="branchList"></div>
+        <button type="button" class="side-clear" id="clearRefBtn" hidden>只看当前分支时点这里恢复</button>
+      </div>
+
+      <div class="side-block">
+        <div class="side-head">
+          <h3>标签</h3>
+          <span class="count" id="tagCount">0</span>
+        </div>
+        <div class="side-list" id="tagList"></div>
+      </div>
+
+      <div class="side-block side-block-compact">
+        <div class="side-head"><h3>信息</h3></div>
+        <dl class="meta" id="repoMeta"></dl>
+      </div>
+    </aside>
+
+    <main class="list-pane" data-pane="list">
+      <div class="list-head">
+        <div class="list-title" id="listTitle">提交历史</div>
+        <div class="list-sub" id="listSub"></div>
+        <div class="list-head-gap"></div>
+        <label class="toggle" id="allBranchesToggle">
+          <input type="checkbox" id="allBranches" checked />
+          <span>所有分支</span>
+        </label>
+      </div>
+      <div class="list-scroll" id="listScroll" tabindex="0">
+        <div id="listRows"></div>
+        <div class="list-sentinel" id="listSentinel"></div>
+      </div>
+    </main>
+
+    <section class="detail-pane" data-pane="detail" id="detailPane"></section>
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
