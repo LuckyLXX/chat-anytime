@@ -56,6 +56,18 @@ interface TerminalRecord {
   scrollback: string;
   /** Chunks accumulated since the last flush, sent as one IPC message. */
   pending: string;
+  /**
+   * 这个 PTY 已经被 kill 过（2026-10-11 真机崩溃后的守卫）。
+   *
+   * 为什么必须有：kill 之后记录要等**异步的**退出回调（`handleExit`）才从表里消失，
+   * 而这段时间里应用有两条关服务的路径 —— 渲染端关标签、主进程在面板窗口关闭时停服务
+   * （两者之间隔着 IPC，必然有重叠），再加上界面重排会让 xterm 发 `resize`。
+   * 那些 `resize` / `input` / 第二次 `kill` 都会打到**已经关闭的 ConPTY** 上：
+   * Windows 原生层随之访存已释放的内存（堆损坏 `0xC0000374`，崩在 ntdll、
+   * 进程里加载着 `conpty.node`；node-pty#983 「同一 PTY 二次 kill」是同一个失败模式）。
+   * 这类崩溃是原生层的，`try/catch` 拦不住，也没任何错误可读。
+   */
+  killing: boolean;
   disposeListeners(): void;
 }
 
@@ -154,10 +166,16 @@ export class TerminalManager {
   handle(command: TerminalCommand): void {
     switch (command.type) {
       case "create": this.create(command); break;
-      case "input": this.terminals.get(command.terminalId)?.pty.write(command.data); break;
+      // input / resize 都要跳过已 kill 的终端：记录还在表里时（退出回调是异步的）
+      // 这些调用会直接打到已关闭的 ConPTY 上（堆损坏，见 TerminalRecord.killing）。
+      case "input": {
+        const record = this.terminals.get(command.terminalId);
+        if (record && !record.killing) record.pty.write(command.data);
+        break;
+      }
       case "resize": {
         const record = this.terminals.get(command.terminalId);
-        if (record) record.pty.resize(clampDimension(command.cols, 80), clampDimension(command.rows, 24));
+        if (record && !record.killing) record.pty.resize(clampDimension(command.cols, 80), clampDimension(command.rows, 24));
         break;
       }
       case "kill": this.kill(command.terminalId); break;
@@ -170,7 +188,8 @@ export class TerminalManager {
     if (existing) {
       // Renderer remount (tab switch, panel reopen): keep the live PTY, replay
       // scrollback and adopt the new dimensions instead of spawning a shell.
-      existing.pty.resize(clampDimension(command.cols, 80), clampDimension(command.rows, 24));
+      // 已 kill 的终端不再 resize（句柄已关），只当它不存在。
+      if (!existing.killing) existing.pty.resize(clampDimension(command.cols, 80), clampDimension(command.rows, 24));
       if (existing.scrollback) this.deps.publish(command.terminalId, { type: "data", terminalId: command.terminalId, data: existing.scrollback });
       return false;
     }
@@ -205,6 +224,7 @@ export class TerminalManager {
         pty,
         scrollback: "",
         pending: "",
+        killing: false,
         disposeListeners: () => {
           dataSubscription.dispose();
           exitSubscription.dispose();
@@ -311,7 +331,11 @@ export class TerminalManager {
 
   private kill(terminalId: string): void {
     const record = this.terminals.get(terminalId);
-    if (record) record.pty.kill();
+    if (!record || record.killing) return;
+    // 幂等：同一个 PTY 只能 ClosePseudoConsole 一次（判据放在管理器里，而不是要求
+    // 两条关服务路径互相协调 —— 它们隔着 IPC，协调不了）。
+    record.killing = true;
+    record.pty.kill();
   }
 
   disposeAll(): void {
@@ -320,6 +344,8 @@ export class TerminalManager {
     this.pendingFlush.clear();
     for (const record of this.terminals.values()) {
       record.disposeListeners();
+      if (record.killing) continue;
+      record.killing = true;
       record.pty.kill();
     }
     this.terminals.clear();

@@ -273,13 +273,20 @@ export class PanelWindowController {
       // 窗口没了就不再服务它的地址（重开「运行」时会重新挂载）。
       this.deps.route.unmount(request.id);
       // 平台为这个面板起的本地服务跟着窗口收尾（2026-10-11 用户选定：关窗即停，
-      // 不留后台进程）。失败只影响「多留一个服务进程」，绝不能让窗口清理半途而废。
+      // 不留后台进程）。**推迟到下一个 tick**：`closed` 还在 Electron 销毁窗口的
+      // 同步调用栈里，而回调要做的事包含关一个 ConPTY 句柄，把两件事揺在同一栈上
+      // 没有任何好处（2026-10-11 真机堆损坏 0xC0000374 的现场就在这一带）。
+      const notify = this.deps.onClosed;
       const serviceTerminalId = this.services.get(request.id);
       this.services.delete(request.id);
-      try {
-        this.deps.onClosed?.(request.id, serviceTerminalId);
-      } catch {
-        /* 关闭回调的失败与窗口本身无关 */
+      if (notify) {
+        setImmediate(() => {
+          try {
+            notify(request.id, serviceTerminalId);
+          } catch {
+            /* 关闭回调的失败与窗口本身无关 */
+          }
+        });
       }
     });
     try {

@@ -1071,9 +1071,9 @@ function registerIpc(): void {
         void shell.openExternal(url).catch(() => undefined);
       },
       // 面板窗口一关，平台为它起的本地服务也该停（2026-10-11 用户选定：不在后台
-      // 留隐藏进程）。kill 走终端层，ConPTY 会把进程树一起带走；再推一条消息让
-      // 渲染端把那个服务标签一并收掉，否则主界面会留一个「已退出」的孤儿标签。
-      // 主界面退到托盘时窗口并未销毁，推送照样发得出去。
+      // 留隐藏进程）。kill 走终端层（幂等：渲染端关标签也会 kill 一次，两条路径重叠），
+      // ConPTY 会把进程树一起带走；再推一条消息让渲染端把那个服务标签一并收掉，
+      // 否则主界面会留一个「已退出」的孤儿标签。主界面退到托盘时窗口并未销毁，推送照样发得出去。
       onClosed: (appId, closedTerminalId) => {
         if (closedTerminalId) {
           try {
@@ -1082,8 +1082,12 @@ function registerIpc(): void {
             /* 会话本来就已退出：无事可做 */
           }
         }
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send("runtime:message", { type: "gallery.panel-closed", id: appId, terminalId: closedTerminalId } satisfies RuntimeMessage);
+        try {
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send("runtime:message", { type: "gallery.panel-closed", id: appId, terminalId: closedTerminalId } satisfies RuntimeMessage);
+          }
+        } catch {
+          /* 渲染端已经不在（正在退出）：通知失败不影响服务回收 */
         }
       }
     });

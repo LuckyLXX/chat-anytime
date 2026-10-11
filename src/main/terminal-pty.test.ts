@@ -169,6 +169,26 @@ describe("TerminalManager", () => {
     expect(harness.published.some((event) => event.type === "exit" && event.terminalId === "t2")).toBe(false);
   });
 
+  it("kill 是幂等的：再 kill / 再 resize / 再 input 都不再碰已关闭的 PTY（2026-10-11 真机崩溃的回归网）", () => {
+    const harness = createHarness();
+    harness.manager.handle(createCommand("t1"));
+    harness.manager.handle({ type: "kill", terminalId: "t1" });
+    expect(harness.ptys[0]!.killed).toBe(1);
+
+    // 记录此刻还在表里（退出回调是异步的）—— 渲染端关标签、界面重排的 resize、
+    // 以及主进程在面板窗口 closed 里停服务，全都可能落在这个窗口期内。
+    // Windows 上那些调用打到已关闭的 ConPTY 上是原生层访存已释放内存：堆损坏
+    // 0xC0000374（node-pty#983 同型），try/catch 拦不住、也无错误可读。
+    harness.manager.handle({ type: "kill", terminalId: "t1" });
+    harness.manager.handle({ type: "resize", terminalId: "t1", cols: 120, rows: 40 });
+    harness.manager.handle({ type: "input", terminalId: "t1", data: "echo hi\r" });
+    harness.manager.disposeAll();
+
+    expect(harness.ptys[0]!.killed).toBe(1);
+    expect(harness.ptys[0]!.resizes).toEqual([]);
+    expect(harness.ptys[0]!.written).toEqual([]);
+  });
+
   it("reports spawn failures as error events", () => {
     const published: TerminalEventData[] = [];
     const manager = new TerminalManager({

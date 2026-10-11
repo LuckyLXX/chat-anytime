@@ -61,8 +61,8 @@ describe("面板窗口关闭 → 停掉平台为它起的服务", () => {
     expect(main).toMatch(/^\s*if \(mainWindow && !mainWindow\.isDestroyed\(\)\) \{$/mu);
   });
 
-  it("窗口控制器在 closed 时回调装配方，并带上 serviceTerminalId", () => {
-    expect(panelWindow).toMatch(/this\.services\.get\(request\.id\);\n\s*this\.services\.delete\(request\.id\);\n\s*try \{\n\s*this\.deps\.onClosed\?\.\(request\.id, serviceTerminalId\);/u);
+  it("窗口控制器在 closed 时回调装配方（推到下一个 tick，不留在窗口销毁栈里），并带上 serviceTerminalId", () => {
+    expect(panelWindow).toMatch(/this\.services\.get\(request\.id\);\n\s*this\.services\.delete\(request\.id\);\n\s*if \(notify\) \{\n\s*setImmediate\(\(\) => \{\n\s*try \{\n\s*notify\(request\.id, serviceTerminalId\);/u);
   });
 
   it("服务会话只在建窗时写入（复用已有窗口不能把服务改写掉）", () => {
@@ -71,8 +71,9 @@ describe("面板窗口关闭 → 停掉平台为它起的服务", () => {
     expect(panelWindow.match(/this\.services\.set\(/gu) ?? []).toHaveLength(1);
     expect(panelWindow).toMatch(/^\s*if \(request\.serviceTerminalId\) this\.services\.set\(request\.id, request\.serviceTerminalId\);$/mu);
     expect(panelWindow).toMatch(/^\s*this\.services\.delete\(request\.id\);$/mu);
-    // closed 回调失败不能影响窗口清理：必须包在 try 里
-    expect(panelWindow).toContain("this.deps.onClosed?.(request.id, serviceTerminalId);\n      } catch {");
+    // closed 回调失败不能影响窗口清理：必须包在 try 里，且不在窗口销毁的同步栈里执行
+    expect(panelWindow).toContain("const notify = this.deps.onClosed;");
+    expect(panelWindow).toMatch(/setImmediate\(\(\) => \{\n\s*try \{\n\s*notify\(request\.id, serviceTerminalId\);\n\s*\} catch \{/u);
   });
 
   it("字段三处镜像一致：DesktopApi / preload / ipcMain 入参", () => {
