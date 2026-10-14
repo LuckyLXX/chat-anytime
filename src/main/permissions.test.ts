@@ -56,9 +56,15 @@ describe("desktop tool permissions", () => {
     expect(toolRisk(undefined, "ssh_trust_fingerprint", { host: "prod" })).toBe("ssh");
     expect(toolRisk(undefined, "ssh_host_save", { name: "prod", address: "10.0.0.8", username: "root" })).toBe("ssh");
     expect(toolRisk(undefined, "ssh_host_delete", { host: "prod" })).toBe("ssh");
+    // 批量导入与分组管理同轴：一次改一批配置 / 删分组会让组内主机回落未分组。
+    expect(toolRisk(undefined, "ssh_host_import", { hosts: [{ name: "a", address: "1.2.3.4", username: "root" }] })).toBe("ssh");
+    expect(toolRisk(undefined, "ssh_group_save", { name: "生产环境" })).toBe("ssh");
+    expect(toolRisk(undefined, "ssh_group_delete", { group: "生产环境" })).toBe("ssh");
     expect(permissionAction("read-only", "ssh_host_save", "ssh")).toBe("deny");
     expect(permissionAction("workspace", "ssh_trust_fingerprint", "ssh")).toBe("ask");
+    expect(permissionAction("workspace", "ssh_host_import", "ssh")).toBe("ask");
     expect(permissionAction("full", "ssh_host_delete", "ssh")).toBe("allow");
+    expect(permissionAction("full", "ssh_group_delete", "ssh")).toBe("allow");
     expect(permissionAction("read-only", "ssh_exec", "ssh")).toBe("deny");
     expect(permissionAction("workspace", "ssh_exec", "ssh")).toBe("ask");
     expect(permissionAction("full", "ssh_exec", "ssh")).toBe("allow");

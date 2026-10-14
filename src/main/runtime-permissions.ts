@@ -27,6 +27,9 @@ export function summarizeArgs(toolName: string, args: Record<string, unknown>): 
   if (toolName === "ssh_trust_fingerprint") return `信任主机指纹：${String(args.host ?? "")}${args.fingerprint ? `（${String(args.fingerprint)}）` : ""}`;
   if (toolName === "ssh_host_save") return `保存 SSH 主机：${String(args.name ?? "")}（${String(args.username ?? "")}@${String(args.address ?? "")}）${args.target ? ` — 更新既有主机 ${String(args.target)}` : ""}`;
   if (toolName === "ssh_host_delete") return `删除 SSH 主机：${String(args.host ?? "")}`;
+  if (toolName === "ssh_host_import") return `批量导入 SSH 主机：${Array.isArray(args.hosts) ? args.hosts.length : 0} 条（分组不存在会自动创建）`;
+  if (toolName === "ssh_group_save") return `保存 SSH 分组：${String(args.name ?? "")}${args.target ? ` — 重命名既有分组 ${String(args.target)}` : ""}`;
+  if (toolName === "ssh_group_delete") return `删除 SSH 分组：${String(args.group ?? "")}（组内主机回落未分组）`;
   if (toolName === "design_update") return `更新设计文档（${Array.isArray(args.ops) ? args.ops.length : 0} 项变更）`;
   if (toolName === "design_export") return `导出设计 HTML${args.path ? `到 ${String(args.path)}` : ""}`;
   if (toolName === "gallery_publish") return `发布作品「${String(args.title ?? "")}」：${String(args.path ?? "")}（${String(args.kind ?? "file")}）`;

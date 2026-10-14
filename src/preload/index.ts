@@ -69,6 +69,11 @@ const api: DesktopApi = {
     const handler = (_event: Electron.IpcRendererEvent, event: SshRevealEvent): void => listener(event);
     ipcRenderer.on("ssh:reveal", handler);
     return () => ipcRenderer.removeListener("ssh:reveal", handler);
+  },
+  onSshHostsChanged: (listener: () => void) => {
+    const handler = (): void => listener();
+    ipcRenderer.on("ssh:hosts-changed", handler);
+    return () => ipcRenderer.removeListener("ssh:hosts-changed", handler);
   }
 };
 

@@ -50,6 +50,10 @@ export function SshPanel({ onConnect }: { onConnect(host: SshHostSummary): void 
     void refresh();
   }, [refresh]);
 
+  // AI 在后台改了主机/分组（ssh_host_import / ssh_group_*）：主进程推失效信号，
+  // 面板重新拉一次。面板自己的增删改各自 await refresh()，不走这条，不会重复请求。
+  useEffect(() => window.piDesktop.onSshHostsChanged(() => { void refresh(); }), [refresh]);
+
   const beginCreateHost = (groupId = ""): void => setDraft({ mode: "editing", ...EMPTY_HOST_DRAFT, groupId });
   const beginEditHost = (host: SshHostSummary): void => setDraft({ mode: "editing", source: host, name: host.name, address: host.host, port: String(host.port), username: host.username, password: "", groupId: host.groupId ?? "", saving: false });
 

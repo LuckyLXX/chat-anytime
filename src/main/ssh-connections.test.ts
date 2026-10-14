@@ -7,6 +7,7 @@ import type { SshAutomationRequest, SshAutomationResult, SshCommandResult, SshEv
 import { createSshHostStore, type SshHostCrypto } from "./ssh-host-store.js";
 import { createSshKnownHostsStore } from "./ssh-known-hosts.js";
 import {
+  HOST_IMPORT_LIMIT,
   SshConnectionManager,
   appendScrollback,
   clampDimension,
@@ -185,6 +186,8 @@ interface Harness {
   reveals: SshRevealEvent[];
   clients: FakeClient[];
   knownHostsPath: string;
+  /** AI 改动主机/分组后的失效通知次数（面板刷新链路靠它）。 */
+  hostChanges: number[];
   /** 预置下一台 client 的握手 hostkey（模拟服务器换 key）。 */
   setNextHostKey(key: Buffer): void;
   waitFor<T>(promise: Promise<T>): Promise<T>;
@@ -205,6 +208,7 @@ function createHarness(options: { seedHost?: boolean; autoTrust?: boolean } = {}
   const published: SshEventData[] = [];
   const reveals: SshRevealEvent[] = [];
   const clients: FakeClient[] = [];
+  const hostChanges: number[] = [];
   const crypto: SshHostCrypto = {
     encrypt: (plain) => ({ secret: `enc:${Buffer.from(plain).toString("base64")}`, insecure: false }),
     decrypt: (secret) => (secret.startsWith("enc:") ? Buffer.from(secret.slice(4), "base64").toString("utf8") : ""),
@@ -229,6 +233,7 @@ function createHarness(options: { seedHost?: boolean; autoTrust?: boolean } = {}
     knownHosts,
     // 首连自动信任开关按需注入（缺省关闭）：与设置项同一条判据路径。
     ...(options.autoTrust ? { autoTrustFingerprint: () => true } : {}),
+    notifyHostsChanged: () => { hostChanges.push(Date.now()); },
     publish: (terminalId, event) => published.push(event),
     reveal: (event) => reveals.push(event),
     scheduleFlush: (callback) => {
@@ -236,7 +241,7 @@ function createHarness(options: { seedHost?: boolean; autoTrust?: boolean } = {}
       return () => clearTimeout(timer);
     }
   });
-  return { manager, published, reveals, clients, knownHostsPath, setNextHostKey: (key: Buffer) => { control.nextHostKey = key; }, waitFor: async <T,>(promise: Promise<T>) => promise };
+  return { manager, published, reveals, clients, knownHostsPath, hostChanges, setNextHostKey: (key: Buffer) => { control.nextHostKey = key; }, waitFor: async <T,>(promise: Promise<T>) => promise };
 }
 
 const FINGERPRINT = fingerprintOfHostKey(TEST_HOST_KEY);
@@ -671,17 +676,152 @@ describe("SshConnectionManager.handleAutomation (AI channel)", () => {
     expect(edited.data.host.hasPassword).toBe(true);
   });
 
-  it("resolves host groups by name and rejects unknown ones", async () => {
+  it("creates a missing group on host-save and reuses it case-insensitively", async () => {
     const harness = createHarness({ seedHost: false });
-    const missing = await harness.manager.handleAutomation("session-1", { op: "host-save", draft: { name: "a", host: "1.2.3.4", username: "root", groupName: "不存在" } });
-    expect(missing.ok).toBe(false);
-    if (missing.ok) throw new Error("unexpected");
-    expect(missing.error).toContain("不存在");
-    harness.manager.handle({ type: "group.save", group: { name: "生产环境" } });
-    const created = await harness.manager.handleAutomation("session-1", { op: "host-save", draft: { name: "a", host: "1.2.3.4", username: "root", groupName: "生产环境" } });
+    const created = await harness.manager.handleAutomation("session-1", { op: "host-save", draft: { name: "a", host: "1.2.3.4", username: "root", groupName: "Prod" } });
     expect(created.ok).toBe(true);
     if (!created.ok || created.data.kind !== "host-saved") throw new Error("unexpected");
     expect(created.data.host.groupId).toBeTruthy();
+    const hosts = harness.manager.handle({ type: "hosts" });
+    if (hosts.kind !== "hosts") throw new Error("unexpected");
+    expect(hosts.groups.map((group) => group.name)).toEqual(["Prod"]);
+    // 大小写不同也归到同一个组：不再长出 `prod` / `Prod` 两个近似组。
+    const reused = await harness.manager.handleAutomation("session-1", { op: "host-save", draft: { name: "b", host: "1.2.3.5", username: "root", groupName: "prod" } });
+    if (!reused.ok || reused.data.kind !== "host-saved") throw new Error("unexpected");
+    expect(reused.data.host.groupId).toBe(created.data.host.groupId);
+    const after = harness.manager.handle({ type: "hosts" });
+    if (after.kind !== "hosts") throw new Error("unexpected");
+    expect(after.groups).toHaveLength(1);
+  });
+
+  // ——— 批量导入（2026-10-14）：按名称 upsert + 自动建组 + 逐条失败隔离 ———
+
+  it("imports a batch, creates the missing groups, and is idempotent on re-import", async () => {
+    const harness = createHarness({ seedHost: false });
+    const batch = [
+      { name: "web-1", host: "10.0.0.1", username: "root", groupName: "生产环境" },
+      { name: "web-2", host: "10.0.0.2", username: "deploy", groupName: "生产环境" },
+      { name: "db-1", host: "10.0.0.3", username: "root", groupName: "数据库" }
+    ];
+    const first = await harness.manager.handleAutomation("session-1", { op: "host-import", hosts: batch });
+    expect(first.ok).toBe(true);
+    if (!first.ok || first.data.kind !== "host-imported") throw new Error("unexpected");
+    expect(first.data).toMatchObject({ total: 3, created: 3, updated: 0, groupsCreated: ["生产环境", "数据库"], failed: [] });
+    const after = harness.manager.handle({ type: "hosts" });
+    if (after.kind !== "hosts") throw new Error("unexpected");
+    expect(after.groups.map((group) => group.name)).toEqual(["生产环境", "数据库"]);
+    // 每台主机都真的落在自己的组里（两台同组共享 groupId）。
+    const groupIdOf = (name: string): string | undefined => after.hosts.find((host) => host.name === name)?.groupId;
+    expect(groupIdOf("web-1")).toBeTruthy();
+    expect(groupIdOf("web-1")).toBe(groupIdOf("web-2"));
+    expect(groupIdOf("db-1")).toBeTruthy();
+    expect(groupIdOf("db-1")).not.toBe(groupIdOf("web-1"));
+    expect(harness.hostChanges).toHaveLength(1);
+
+    // 同一批再导一次：全部算更新，主机与分组都不翻倍。
+    const second = await harness.manager.handleAutomation("session-1", { op: "host-import", hosts: batch });
+    if (!second.ok || second.data.kind !== "host-imported") throw new Error("unexpected");
+    expect(second.data).toMatchObject({ total: 3, created: 0, updated: 3, groupsCreated: [], failed: [] });
+    const final = harness.manager.handle({ type: "hosts" });
+    if (final.kind !== "hosts") throw new Error("unexpected");
+    expect(final.hosts).toHaveLength(3);
+    expect(final.groups).toHaveLength(2);
+    expect(harness.hostChanges).toHaveLength(2);
+  });
+
+  it("updates an existing host on import and keeps its stored password", async () => {
+    const harness = createHarness(); // seedHost: prod（带密码）
+    const result = await harness.manager.handleAutomation("session-1", { op: "host-import", hosts: [{ name: "prod", host: "10.0.0.9", username: "ops", port: 2200, groupName: "生产环境" }] });
+    if (!result.ok || result.data.kind !== "host-imported") throw new Error("unexpected");
+    expect(result.data).toMatchObject({ created: 0, updated: 1, groupsCreated: ["生产环境"] });
+    const hosts = harness.manager.handle({ type: "hosts" });
+    if (hosts.kind !== "hosts") throw new Error("unexpected");
+    expect(hosts.hosts).toHaveLength(1);
+    expect(hosts.hosts[0]).toMatchObject({ name: "prod", host: "10.0.0.9", username: "ops", port: 2200, hasPassword: true });
+    expect(hosts.hosts[0]!.groupId).toBeTruthy();
+  });
+
+  it("imports the good rows and reports the bad ones without aborting the batch", async () => {
+    const harness = createHarness({ seedHost: false });
+    const result = await harness.manager.handleAutomation("session-1", {
+      op: "host-import",
+      hosts: [
+        { name: "ok-1", host: "10.0.0.1", username: "root" },
+        { name: "bad-space", host: "10.0.0 2", username: "root" },
+        { name: "", host: "10.0.0.4", username: "root" }
+      ]
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok || result.data.kind !== "host-imported") throw new Error("unexpected");
+    expect(result.data.created).toBe(1);
+    expect(result.data.failed.map((item) => item.index)).toEqual([1, 2]);
+    expect(result.data.failed[0]!.error).toContain("空格");
+    expect(result.data.failed[1]!.name).toBe("#3");
+    const hosts = harness.manager.handle({ type: "hosts" });
+    if (hosts.kind !== "hosts") throw new Error("unexpected");
+    expect(hosts.hosts.map((host) => host.name)).toEqual(["ok-1"]);
+  });
+
+  it("refuses an oversized import without writing anything", async () => {
+    const harness = createHarness({ seedHost: false });
+    const hosts = Array.from({ length: HOST_IMPORT_LIMIT + 1 }, (_, index) => ({ name: `h${index}`, host: "10.0.0.1", username: "root" }));
+    const result = await harness.manager.handleAutomation("session-1", { op: "host-import", hosts });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unexpected");
+    expect(result.error).toContain(String(HOST_IMPORT_LIMIT));
+    const after = harness.manager.handle({ type: "hosts" });
+    if (after.kind !== "hosts") throw new Error("unexpected");
+    expect(after.hosts).toHaveLength(0);
+    expect(harness.hostChanges).toHaveLength(0);
+  });
+
+  it("leaves a host ungrouped without a groupName and preserves its existing group on re-import", async () => {
+    const harness = createHarness({ seedHost: false });
+    const bare = await harness.manager.handleAutomation("session-1", { op: "host-import", hosts: [{ name: "loose", host: "10.0.0.1", username: "root" }] });
+    if (!bare.ok || bare.data.kind !== "host-imported") throw new Error("unexpected");
+    expect(bare.data.groupsCreated).toEqual([]);
+    let hosts = harness.manager.handle({ type: "hosts" });
+    if (hosts.kind !== "hosts") throw new Error("unexpected");
+    expect(hosts.hosts[0]!.groupId).toBeUndefined();
+    // 先手动归组（面板路径），再用不带 groupName 的一行导入——分组必须原样保留。
+    await harness.manager.handleAutomation("session-1", { op: "host-save", target: "loose", draft: { name: "loose", host: "10.0.0.1", username: "root", groupName: "生产环境" } });
+    await harness.manager.handleAutomation("session-1", { op: "host-import", hosts: [{ name: "loose", host: "10.0.0.1", username: "root" }] });
+    hosts = harness.manager.handle({ type: "hosts" });
+    if (hosts.kind !== "hosts") throw new Error("unexpected");
+    expect(hosts.hosts[0]!.groupId).toBeTruthy();
+  });
+
+  it("creates, renames and deletes groups through the AI channel", async () => {
+    const harness = createHarness({ seedHost: false });
+    const created = await harness.manager.handleAutomation("session-1", { op: "group-save", group: { name: "生产环境" } });
+    expect(created.ok).toBe(true);
+    if (!created.ok || created.data.kind !== "group-saved") throw new Error("unexpected");
+    expect(created.data.created).toBe(true);
+    const groupId = created.data.group.id;
+    // store 只做精确重名校验，这一道（不区分大小写）在 manager 里。
+    const duplicate = await harness.manager.handleAutomation("session-1", { op: "group-save", group: { name: "生产环境" } });
+    expect(duplicate.ok).toBe(false);
+    if (duplicate.ok) throw new Error("unexpected");
+    expect(duplicate.error).toContain("同名分组");
+    const renamed = await harness.manager.handleAutomation("session-1", { op: "group-save", group: { name: "prod" }, target: "生产环境" });
+    if (!renamed.ok || renamed.data.kind !== "group-saved") throw new Error("unexpected");
+    expect(renamed.data).toMatchObject({ created: false });
+    expect(renamed.data.group.id).toBe(groupId);
+    expect(renamed.data.group.name).toBe("prod");
+    // 归一台主机后删组：主机回落未分组，主机本身与分组计数都对。
+    await harness.manager.handleAutomation("session-1", { op: "host-save", draft: { name: "a", host: "1.2.3.4", username: "root", groupName: "prod" } });
+    const deleted = await harness.manager.handleAutomation("session-1", { op: "group-delete", group: "prod" });
+    expect(deleted.ok).toBe(true);
+    if (!deleted.ok || deleted.data.kind !== "group-deleted") throw new Error("unexpected");
+    expect(deleted.data).toMatchObject({ groupName: "prod", movedHosts: 1 });
+    const hosts = harness.manager.handle({ type: "hosts" });
+    if (hosts.kind !== "hosts") throw new Error("unexpected");
+    expect(hosts.groups).toHaveLength(0);
+    expect(hosts.hosts[0]!.groupId).toBeUndefined();
+    const missing = await harness.manager.handleAutomation("session-1", { op: "group-delete", group: "prod" });
+    expect(missing.ok).toBe(false);
+    if (missing.ok) throw new Error("unexpected");
+    expect(missing.error).toContain("未找到分组");
   });
 
   it("manages groups through the renderer channel", async () => {

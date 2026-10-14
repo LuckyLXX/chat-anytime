@@ -44,6 +44,8 @@ const browserPreviewListeners = new Set<(state: BrowserPreviewState) => void>();
 const terminalListeners = new Map<string, Set<(event: TerminalEventData) => void>>();
 const sshDataListeners = new Map<string, Set<(event: SshEventData) => void>>();
 const sshRevealListeners = new Set<(event: SshRevealEvent) => void>();
+/** 主机/分组清单失效信号（demo 里没有真实写入源，只为满足 API 形状）。 */
+const sshHostsChangedListeners = new Set<() => void>();
 let browserPreviewState: BrowserPreviewState = { attached: false, url: "", title: "", loading: false, canGoBack: false, canGoForward: false };
 /** 演示环境下的人工下载配置与卡片（真实落盘与系统对话框只在 Electron 里）。 */
 let demoDownloadPrefs: { dir: string; ask: boolean } = { dir: "C:\\Users\\demo\\Downloads", ask: true };
@@ -1312,6 +1314,12 @@ export function createDemoApi(): DesktopApi {
       sshRevealListeners.add(listener);
       return () => {
         sshRevealListeners.delete(listener);
+      };
+    },
+    onSshHostsChanged(listener: () => void) {
+      sshHostsChangedListeners.add(listener);
+      return () => {
+        sshHostsChangedListeners.delete(listener);
       };
     }
   };

@@ -3,7 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { SshHostSummary } from "../../../shared/protocol";
+import type { SshGroupSummary, SshHostSummary } from "../../../shared/protocol";
 import { SshPanel } from "./SshPanel";
 
 /**
@@ -43,11 +43,24 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-async function renderHosts(hosts: SshHostSummary[]): Promise<void> {
+interface RenderHandlers {
+  /** 触发主进程推的「主机清单已变」信号（AI 后台导入时走这条）。 */
+  emitHostsChanged(): Promise<void>;
+  /** ssh 命令的调用记录（验证刷新是否真的重新拉了一次）。 */
+  ssh: ReturnType<typeof vi.fn>;
+}
+
+async function renderHosts(hosts: SshHostSummary[], groups: SshGroupSummary[] = []): Promise<RenderHandlers> {
+  let notifyHostsChanged: (() => void) | undefined;
+  const ssh = vi.fn(async () => ({ kind: "hosts", hosts, groups, connectedHostIds: [] }));
   vi.stubGlobal("window", {
     ...globalThis.window,
     piDesktop: {
-      ssh: vi.fn(async () => ({ kind: "hosts", hosts, groups: [], connectedHostIds: [] }))
+      ssh,
+      onSshHostsChanged: (listener: () => void) => {
+        notifyHostsChanged = listener;
+        return () => { notifyHostsChanged = undefined; };
+      }
     }
   });
   await act(async () => {
@@ -55,6 +68,10 @@ async function renderHosts(hosts: SshHostSummary[]): Promise<void> {
   });
   // 主机清单落地后再刷一帧，避免断言读到加载骨架
   await act(async () => {});
+  return {
+    emitHostsChanged: async () => { await act(async () => { notifyHostsChanged?.(); }); },
+    ssh
+  };
 }
 
 describe("SshPanel theme hooks", () => {
@@ -80,5 +97,15 @@ describe("SshPanel theme hooks", () => {
     const remove = container.querySelector("[data-control=\"ssh-host-delete\"]");
     expect(remove?.getAttribute("aria-label")).toBe(`删除 ${host.name}`);
     expect(remove?.className).toContain("danger");
+  });
+
+  // AI 在后台导入/改分组后，已打开的面板必须自己跟上（否则用户看不到新主机，
+  // 得先切走再切回来）。事件只带「变了」这一个信息，数据仍由面板重新拉。
+  it("re-fetches the host list when the main process reports a change", async () => {
+    const handlers = await renderHosts([host]);
+    expect(handlers.ssh).toHaveBeenCalledTimes(1);
+    await handlers.emitHostsChanged();
+    expect(handlers.ssh).toHaveBeenCalledTimes(2);
+    expect((handlers.ssh.mock.calls[1] as unknown[])[0]).toEqual({ type: "hosts" });
   });
 });

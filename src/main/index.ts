@@ -166,6 +166,10 @@ function ensureSshManager(): SshConnectionManager {
     },
     reveal: (event: SshRevealEvent) => {
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("ssh:reveal", event);
+    },
+    // 主机/分组被 AI 改动后的失效信号（不带数据）：已打开的 SSH 面板据此重新拉 hosts。
+    notifyHostsChanged: () => {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("ssh:hosts-changed");
     }
   });
   return sshConnectionManager;

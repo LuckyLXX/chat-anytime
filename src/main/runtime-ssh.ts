@@ -7,7 +7,8 @@
 // user's xterm tab (the main process reveals the tab via ssh:reveal).
 //
 // Permission model (permissions.ts): ssh_connect / ssh_exec / ssh_write /
-// ssh_close / ssh_trust_fingerprint / ssh_host_save / ssh_host_delete carry risk "ssh"
+// ssh_close / ssh_trust_fingerprint / ssh_host_save / ssh_host_delete /
+// ssh_host_import / ssh_group_save / ssh_group_delete carry risk "ssh"
 // through the permission gate (read-only denies, workspace asks — the dialog
 // offers allow-session —, full allows); ssh_hosts / ssh_read are ungated
 // observation. The master switch
@@ -48,7 +49,7 @@ export const TRANSFER_OUTER_TIMEOUT_MS = 31 * 60_000;
 
 /**
  * SSH 工具族的激活判据（toolNamesFor 消费）：全局总闸 AND 角色级 overlay。
- * 任一关闭即整族从活动集摘除（11 个 ssh_* 同进同出）；execute 内的 enabled
+ * 任一关闭即整族从活动集摘除（14 个 ssh_* 同进同出）；execute 内的 enabled
  * 闭包保留作第二道防线（在途回合/旧会话兑底）。人的 SSH 面板不受影响。
  */
 export function shouldActivateSshTools(input: { globalEnabled: boolean; agentEnabled: boolean }): boolean {
@@ -70,7 +71,7 @@ function formatHosts(data: { hosts: SshHostSummary[]; groups: { id: string; name
   if (data.hosts.length === 0) {
     return [
       "尚未配置任何 SSH 主机。",
-      "两种做法：① 让用户在侧边栏「SSH」面板新建主机（名称/地址/端口/用户名/密码）；② 用 ssh_host_save 建主机基本信息（不带密码，随后仍需用户在面板补录密码）。"
+      "三种做法：① 让用户在侧边栏「SSH」面板新建主机（名称/地址/端口/用户名/密码）；② 用 ssh_host_save 建单台；③ 有一批清单时用 ssh_host_import 批量导入（可自动建分组）。后两者都不带密码，随后仍需用户在面板补录。"
     ].join("\n");
   }
   const groupNameOf = (groupId: string | undefined): string => {
@@ -114,14 +115,14 @@ export function buildSshTools(deps: SshToolDeps): ToolDefinition[] {
     defineTool({
       name: "ssh_host_save",
       label: "SSH 保存主机",
-      description: "新建或编辑一台 SSH 主机配置（名称/地址/端口/用户名/分组）。**本工具不写密码**：保存后需让用户在 SSH 面板为它补录密码，ssh_connect 才能连上（密码不进入 AI 上下文与会话记录）。target 给定时是编辑既有主机（名称或 id），缺省为新建。",
+      description: "新建或编辑一台 SSH 主机配置（名称/地址/端口/用户名/分组）。**本工具不写密码**：保存后需让用户在 SSH 面板为它补录密码，ssh_connect 才能连上（密码不进入 AI 上下文与会话记录）。target 给定时是编辑既有主机（名称或 id），缺省为新建。分组不存在会自动创建；一次要建多台请用 ssh_host_import。",
       promptSnippet: "ssh_host_save: 新建或编辑 SSH 主机",
       parameters: Type.Object({
         name: Type.String({ description: "主机显示名，例：生产服务器" }),
         address: Type.String({ description: "主机地址（IP 或域名）" }),
         username: Type.String({ description: "登录用户名，例：root" }),
         port: Type.Optional(Type.Number({ description: "端口，缺省 22" })),
-        groupName: Type.Optional(Type.String({ description: "分组名称（必须已存在；缺省 = 不分组，编辑时保留原分组）" })),
+        groupName: Type.Optional(Type.String({ description: "分组名称（不存在会自动创建）；缺省 = 不分组，编辑时保留原分组" })),
         target: Type.Optional(Type.String({ description: "要编辑的既有主机（名称或 id）；缺省 = 新建" }))
       }),
       execute: async (_id, params) => {
@@ -162,6 +163,94 @@ export function buildSshTools(deps: SshToolDeps): ToolDefinition[] {
         const result = await run(deps, { op: "host-delete", host });
         if (result.data.kind !== "host-deleted") throw new Error("host-delete 操作返回了意外结果");
         return { content: [{ type: "text" as const, text: `已删除主机 ${result.data.hostName}（配置与已保存的密码一并清除）。` }], details: {} };
+      }
+    }),
+    defineTool({
+      name: "ssh_host_import",
+      label: "SSH 批量导入主机",
+      description: "一次导入一批 SSH 主机（每项 name/address/username/port?/groupName?）：**分组不存在会自动创建**，主机按名称 upsert（同名更新地址/端口/用户名与分组，保留原密码），单条失败不影响其它条目并逐条回报。单次最多 200 台。**不写密码**：导入后需让用户在 SSH 面板补录密码，ssh_connect 才能连上。",
+      promptSnippet: "ssh_host_import: 批量导入主机并自动建组",
+      parameters: Type.Object({
+        hosts: Type.Array(
+          Type.Object({
+            name: Type.String({ description: "主机显示名（同名视为同一台，重复导入会更新它）" }),
+            address: Type.String({ description: "主机地址（IP 或域名）" }),
+            username: Type.String({ description: "登录用户名" }),
+            port: Type.Optional(Type.Number({ description: "端口，缺省 22" })),
+            groupName: Type.Optional(Type.String({ description: "分组名称（不存在会自动创建；大小写不敏感匹配既有分组）；缺省 = 不分组（编辑既有主机时保留原分组）" }))
+          }),
+          { description: "主机清单（最多 200 条；嵌套的分组结构请先展开成扁平数组）" }
+        )
+      }),
+      execute: async (_id, params) => {
+        const raw = Array.isArray(params?.hosts) ? params.hosts : [];
+        if (raw.length === 0) throw new Error("请提供要导入的主机列表（至少一条）");
+        // 只做类型收口，不做「逐条必填」检查：一条缺字段不应该让整批失败，
+        // 那些条目会由主进程判定进 failed 清单。
+        const str = (value: unknown): string => (typeof value === "string" ? value.trim() : "");
+        const hosts = raw.map((entry) => {
+          const record = (entry ?? {}) as Record<string, unknown>;
+          const port = typeof record.port === "number" ? Math.round(record.port) : undefined;
+          const groupName = str(record.groupName);
+          return {
+            name: str(record.name),
+            host: str(record.address),
+            username: str(record.username),
+            ...(port !== undefined ? { port } : {}),
+            ...(groupName ? { groupName } : {})
+          };
+        });
+        const result = await run(deps, { op: "host-import", hosts });
+        if (result.data.kind !== "host-imported") throw new Error("host-import 操作返回了意外结果");
+        const data = result.data;
+        const text = [
+          `导入完成：共 ${data.total} 条，新建 ${data.created} 台、更新 ${data.updated} 台。`,
+          data.groupsCreated.length > 0 ? `新建分组：${data.groupsCreated.join("、")}。` : "",
+          data.failed.length > 0
+            ? `失败 ${data.failed.length} 条（未导入）：\n${data.failed.map((item) => `- #${item.index + 1} ${item.name}：${item.error}`).join("\n")}`
+            : "",
+          data.created > 0 ? "新导入的主机尚未保存密码——请让用户在 SSH 面板为它们补录密码，之后 ssh_connect 才能连上。" : ""
+        ].filter(Boolean).join("\n");
+        return { content: [{ type: "text" as const, text }], details: { ...data } };
+      }
+    }),
+    defineTool({
+      name: "ssh_group_save",
+      label: "SSH 保存分组",
+      description: "新建一个 SSH 分组，或重命名既有分组（target 传既有分组名或 id）。分组只用于在 SSH 面板里归类主机，主机经 ssh_host_save / ssh_host_import 的 groupName 归组。",
+      promptSnippet: "ssh_group_save: 新建或重命名分组",
+      parameters: Type.Object({
+        name: Type.String({ description: "分组名称（与既有分组同名会被拒绝，不区分大小写）" }),
+        target: Type.Optional(Type.String({ description: "要重命名的既有分组（名称或 id）；缺省 = 新建" }))
+      }),
+      execute: async (_id, params) => {
+        const name = typeof params?.name === "string" ? params.name.trim() : "";
+        if (!name) throw new Error("请提供分组名称");
+        const target = typeof params?.target === "string" ? params.target.trim() : "";
+        const result = await run(deps, { op: "group-save", group: { name }, ...(target ? { target } : {}) });
+        if (result.data.kind !== "group-saved") throw new Error("group-save 操作返回了意外结果");
+        const { group, created } = result.data;
+        return {
+          content: [{ type: "text" as const, text: created ? `已新建分组 ${group.name}。` : `已把分组重命名为 ${group.name}。` }],
+          details: { group }
+        };
+      }
+    }),
+    defineTool({
+      name: "ssh_group_delete",
+      label: "SSH 删除分组",
+      description: "删除一个 SSH 分组：组内主机回落到「未分组」，主机与其密码不会被删除（已建立的连接也不受影响）。",
+      promptSnippet: "ssh_group_delete: 删除分组",
+      parameters: Type.Object({
+        group: Type.String({ description: "分组名称（或 id），可先用 ssh_hosts 查看" })
+      }),
+      execute: async (_id, params) => {
+        const group = typeof params?.group === "string" ? params.group.trim() : "";
+        if (!group) throw new Error("请提供要删除的分组名称");
+        const result = await run(deps, { op: "group-delete", group });
+        if (result.data.kind !== "group-deleted") throw new Error("group-delete 操作返回了意外结果");
+        const text = `已删除分组 ${result.data.groupName}${result.data.movedHosts > 0 ? `，组内 ${result.data.movedHosts} 台主机已移入未分组（主机与密码保留）` : ""}。`;
+        return { content: [{ type: "text" as const, text }], details: {} };
       }
     }),
     defineTool({

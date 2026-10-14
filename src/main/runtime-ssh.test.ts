@@ -27,9 +27,9 @@ function toolByName(tools: ReturnType<typeof buildSshTools>, name: string) {
 }
 
 describe("buildSshTools", () => {
-  it("exposes the eleven ssh_* tools with stable names", () => {
+  it("exposes the fourteen ssh_* tools with stable names", () => {
     const { tools } = createHarness();
-    expect(tools.map((tool) => tool.name)).toEqual(["ssh_hosts", "ssh_host_save", "ssh_host_delete", "ssh_connect", "ssh_trust_fingerprint", "ssh_exec", "ssh_write", "ssh_read", "ssh_close", "ssh_upload", "ssh_download"]);
+    expect(tools.map((tool) => tool.name)).toEqual(["ssh_hosts", "ssh_host_save", "ssh_host_delete", "ssh_host_import", "ssh_group_save", "ssh_group_delete", "ssh_connect", "ssh_trust_fingerprint", "ssh_exec", "ssh_write", "ssh_read", "ssh_close", "ssh_upload", "ssh_download"]);
   });
 
   it("honors the live master switch on every tool", async () => {
@@ -38,6 +38,9 @@ describe("buildSshTools", () => {
       ssh_hosts: {},
       ssh_host_save: { name: "prod", address: "10.0.0.8", username: "root" },
       ssh_host_delete: { host: "prod" },
+      ssh_host_import: { hosts: [{ name: "a", address: "1.2.3.4", username: "root" }] },
+      ssh_group_save: { name: "生产环境" },
+      ssh_group_delete: { group: "生产环境" },
       ssh_connect: { host: "prod" },
       ssh_trust_fingerprint: { host: "prod" },
       ssh_exec: { command: "uptime" },
@@ -204,5 +207,73 @@ describe("buildSshTools", () => {
     const result = await toolByName(tools, "ssh_host_delete").execute("id", { host: "prod" }, undefined, undefined, undefined as never);
     expect(requests[0]!.request).toEqual({ op: "host-delete", host: "prod" });
     expect(JSON.stringify(result)).toContain("prod");
+  });
+
+  it("forwards a batch import and renders counts, per-row failures and the password reminder", async () => {
+    const { tools, requests } = createHarness({
+      result: {
+        ok: true,
+        data: { kind: "host-imported", total: 3, created: 2, updated: 1, groupsCreated: ["生产环境"], failed: [{ index: 2, name: "bad host", error: "主机地址不能包含空格" }] }
+      }
+    });
+    const result = await toolByName(tools, "ssh_host_import").execute("id", {
+      hosts: [
+        { name: "web-1", address: "10.0.0.1", username: "root", port: 2222, groupName: "生产环境" },
+        { name: "web-2", address: "10.0.0.2", username: "root" },
+        { name: "bad host", address: "10.0.0 3", username: "root" }
+      ]
+    }, undefined, undefined, undefined as never);
+    // address → host 的字段名映射在工具层完成；空白项被剔掉（无 groupName/port 就不传键）。
+    expect(requests[0]!.request).toEqual({
+      op: "host-import",
+      hosts: [
+        { name: "web-1", host: "10.0.0.1", username: "root", port: 2222, groupName: "生产环境" },
+        { name: "web-2", host: "10.0.0.2", username: "root" },
+        { name: "bad host", host: "10.0.0 3", username: "root" }
+      ]
+    });
+    const text = JSON.stringify(result);
+    expect(text).toContain("新建 2 台");
+    expect(text).toContain("生产环境");
+    expect(text).toContain("主机地址不能包含空格");
+    expect(text).toContain("补录密码");
+  });
+
+  it("does not loudly validate rows in the tool layer (bad rows are reported per-row by the main process)", async () => {
+    const { tools, requests } = createHarness({
+      result: { ok: true, data: { kind: "host-imported", total: 1, created: 0, updated: 0, groupsCreated: [], failed: [{ index: 0, name: "#1", error: "名称不能为空" }] } }
+    });
+    const result = await toolByName(tools, "ssh_host_import").execute("id", { hosts: [{ address: "1.2.3.4", username: "root" }] }, undefined, undefined, undefined as never);
+    expect(requests).toHaveLength(1);
+    expect(JSON.stringify(result)).toContain("名称不能为空");
+  });
+
+  it("rejects an empty import list before any RPC", async () => {
+    const { tools, requests } = createHarness();
+    await expect(toolByName(tools, "ssh_host_import").execute("id", { hosts: [] }, undefined, undefined, undefined as never)).rejects.toThrow("至少一条");
+    expect(requests).toHaveLength(0);
+  });
+
+  it("forwards group save / delete with their receipts", async () => {
+    const saved = createHarness({
+      result: { ok: true, data: { kind: "group-saved", group: { id: "grp-1", name: "生产环境" }, created: true } }
+    });
+    const saveTool = toolByName(saved.tools, "ssh_group_save");
+    const created = await saveTool.execute("id", { name: "生产环境" }, undefined, undefined, undefined as never);
+    expect(saved.requests[0]!.request).toEqual({ op: "group-save", group: { name: "生产环境" } });
+    expect(JSON.stringify(created)).toContain("已新建分组");
+    await saveTool.execute("id", { name: "prod", target: "生产环境" }, undefined, undefined, undefined as never);
+    expect(saved.requests[1]!.request).toEqual({ op: "group-save", group: { name: "prod" }, target: "生产环境" });
+    // 空名不发 RPC。
+    await expect(saveTool.execute("id", { name: "  " }, undefined, undefined, undefined as never)).rejects.toThrow("分组名称");
+    expect(saved.requests).toHaveLength(2);
+
+    const deleted = createHarness({
+      result: { ok: true, data: { kind: "group-deleted", groupName: "生产环境", movedHosts: 3 } }
+    });
+    const text = JSON.stringify(await toolByName(deleted.tools, "ssh_group_delete").execute("id", { group: "生产环境" }, undefined, undefined, undefined as never));
+    expect(deleted.requests[0]!.request).toEqual({ op: "group-delete", group: "生产环境" });
+    expect(text).toContain("3 台主机已移入未分组");
+    await expect(toolByName(deleted.tools, "ssh_group_delete").execute("id", {}, undefined, undefined, undefined as never)).rejects.toThrow("分组名称");
   });
 });

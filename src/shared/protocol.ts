@@ -1452,10 +1452,17 @@ export type SshAutomationRequest =
   // fingerprint 可选：传了就必须与 pending 一致，用于防 AI 手抄出错。
   | { op: "trust-host"; host: string; fingerprint?: string }
   // host-save **不带密码**：新主机建好后密码仍由用户在面板补录（避免明文密码
-  // 进入 AI 会话记录）。groupName 按名称解析，未知分组直接报错；target 给定时是
-  // 「编辑既有主机」（名称或 id，由主进程 findHost 解析），缺省 = 新建。
+  // 进入 AI 会话记录）。groupName 按名称解析，**不存在会自动创建**（2026-10-14
+  // 批量导入落地时放开了原来的「未知分组报错」）；target 给定时是「编辑既有主机」
+  // （名称或 id，由主进程 findHost 解析），缺省 = 新建。
   | { op: "host-save"; draft: { name: string; host: string; username: string; port?: number; groupName?: string }; target?: string }
-  | { op: "host-delete"; host: string };
+  | { op: "host-delete"; host: string }
+  // ——— 批量导入与分组管理（AI，2026-10-14）。导入按主机名 upsert、分组名
+  // 大小写不敏感匹配（命中复用、未命中创建），单条失败不中断整批，单次上限
+  // 由 HOST_IMPORT_LIMIT 把关，仍不带任何密码。
+  | { op: "host-import"; hosts: Array<{ name: string; host: string; username: string; port?: number; groupName?: string }> }
+  | { op: "group-save"; group: { name: string }; target?: string }
+  | { op: "group-delete"; group: string };
 
 export interface SshConnectionInfo {
   terminalId: string;
@@ -1482,7 +1489,11 @@ export type SshAutomationData =
   | { kind: "trust-host"; hostName: string; host: string; fingerprint: string; alreadyTrusted: boolean }
   /** 主机已保存（新建或更新）；host.hasPassword 反映密码是否已存在（本工具从不写密码）。 */
   | { kind: "host-saved"; host: SshHostSummary }
-  | { kind: "host-deleted"; hostName: string };
+  | { kind: "host-deleted"; hostName: string }
+  /** 批量导入结果（逐条）：failed 里的条目**没有落库**，其余全部成功。 */
+  | { kind: "host-imported"; total: number; created: number; updated: number; groupsCreated: string[]; failed: Array<{ index: number; name: string; error: string }> }
+  | { kind: "group-saved"; group: SshGroupSummary; created: boolean }
+  | { kind: "group-deleted"; groupName: string; movedHosts: number };
 
 export type SshAutomationResult =
   | { ok: true; data: SshAutomationData }
@@ -2312,4 +2323,10 @@ export interface DesktopApi {
   onTerminalData(terminalId: string, listener: (event: TerminalEventData) => void): () => void;
   onSshData(terminalId: string, listener: (event: SshEventData) => void): () => void;
   onSshReveal(listener: (event: SshRevealEvent) => void): () => void;
+  /**
+   * 主机/分组清单已变化（AI 侧经 ssh-automation 改动后主进程推的**失效信号**，
+   * 不带数据）：SSH 面板收到后自行重新拉 hosts。面板自己的增删改已有 refresh，
+   * 所以这条只服务于「面板已打开、AI 在后台导入了一批主机」的场景。
+   */
+  onSshHostsChanged(listener: () => void): () => void;
 }

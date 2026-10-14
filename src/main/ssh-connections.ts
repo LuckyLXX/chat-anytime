@@ -7,6 +7,7 @@ import type {
   SshCommandResult,
   SshConnectionInfo,
   SshEventData,
+  SshGroupSummary,
   SshRevealEvent,
   SshHostDraft,
   SshHostSummary
@@ -79,6 +80,12 @@ export interface SshConnectionsDeps {
    * 不受影响：那时仍然拒绝（防中间人）。注入式，故可在测试里自由开关。
    */
   autoTrustFingerprint?: () => boolean;
+  /**
+   * 主机/分组清单已被 AI 改动（失效信号，不带数据）：主进程转发给渲染端，
+   * 已打开的 SSH 面板据此重新拉 hosts。只在 automation 侧变更后调——面板自己的
+   * 增删改本来就会 refresh，再推一次只是多余请求。
+   */
+  notifyHostsChanged?: () => void;
   /** Test seam：异步 flush 调度（缺省 setTimeout）。 */
   scheduleFlush?(callback: () => void): () => void;
 }
@@ -120,6 +127,11 @@ interface ConnectionRecord {
 export const SSH_MAX_CONNECTIONS = 5;
 /** 待确认指纹表的条数上限（超出淘汰最旧的；见 pendingTrust 注释）。 */
 export const PENDING_TRUST_LIMIT = 20;
+/**
+ * 单次批量导入的主机条数上限。hostStore 每条都会原子写盘一次，不设上限等于让
+ * 一次工具调用做无界 IO；超限直接拒绝整批（不部分写入，免得用户以为导完了）。
+ */
+export const HOST_IMPORT_LIMIT = 200;
 const FLUSH_INTERVAL_MS = 10;
 const FLUSH_MAX_CHARS = 64 * 1024;
 const SCROLLBACK_LIMIT_CHARS = 200 * 1024;
@@ -334,6 +346,17 @@ export function createMarkerEchoFilter(): (chunk: string) => string {
 export function hostMatches(summary: SshHostSummary, query: string): boolean {
   const trimmed = query.trim().toLowerCase();
   return summary.id.toLowerCase() === trimmed || summary.name.toLowerCase() === trimmed;
+}
+
+/**
+ * 名称归一键（分组名与主机名共用）：trim + 小写。
+ *
+ * 用户粘进对话里的清单大小写常不统一（`Prod` vs `prod`），精确匹配会在库里
+ * 长出两个近似分组/两台近似主机；导入路径一律用这个键比较。面板的人工操作不受
+ * 影响（仍按输入的原文保存）。
+ */
+export function nameKey(name: string): string {
+  return name.trim().toLocaleLowerCase();
 }
 
 export class SshConnectionManager {
@@ -737,31 +760,102 @@ export class SshConnectionManager {
           const draft = request.draft;
           const error = validateHostDraft({ name: draft.name, host: draft.host, username: draft.username, ...(draft.port !== undefined ? { port: draft.port } : {}) });
           if (error) throw new Error(error);
-          // 分组按名称解析：工具层不暴露内部 id，也不自动建组（避免越权扩张）。
+          // 分组按名称解析（工具层不暴露内部 id）：命中复用，未命中创建。
           const groupName = draft.groupName?.trim();
-          let groupId: string | undefined;
-          if (groupName) {
-            const group = this.deps.hostStore.listGroups().find((item) => item.name === groupName);
-            if (!group) {
-              const available = this.deps.hostStore.listGroups().map((item) => item.name);
-              throw new Error(`分组「${groupName}」不存在${available.length > 0 ? `。可用分组：${available.join("、")}` : "（当前没有任何分组，可在 SSH 面板新建）"}。`);
-            }
-            groupId = group.id;
-          }
+          const groupId = groupName ? this.resolveGroupId(groupName) : undefined;
           // 永远不传密码：新建=无密码（用户后续在面板补录），编辑=保留原密码。
           const existing = request.target?.trim() ? this.findHost(request.target) : undefined;
           const saved = this.deps.hostStore.save({ ...(existing ? { id: existing.id } : {}), name: draft.name, host: draft.host, username: draft.username, ...(draft.port !== undefined ? { port: draft.port } : {}), ...(groupId !== undefined ? { groupId } : {}) }, undefined);
+          this.deps.notifyHostsChanged?.();
           return { ok: true, data: { kind: "host-saved", host: saved } };
         }
         case "host-delete": {
           const stored = this.findHost(request.host);
           if (!this.deps.hostStore.remove(stored.id)) throw new Error(`主机「${stored.name}」不存在或已删除`);
+          this.deps.notifyHostsChanged?.();
           return { ok: true, data: { kind: "host-deleted", hostName: stored.name } };
+        }
+        case "host-import": {
+          const entries = request.hosts;
+          if (!Array.isArray(entries) || entries.length === 0) throw new Error("请提供要导入的主机列表（至少一条）");
+          if (entries.length > HOST_IMPORT_LIMIT) {
+            throw new Error(`一次最多导入 ${HOST_IMPORT_LIMIT} 台主机，本次 ${entries.length} 台，请分批导入。`);
+          }
+          let created = 0;
+          let updated = 0;
+          const groupsCreated: string[] = [];
+          const failed: Array<{ index: number; name: string; error: string }> = [];
+          for (const [index, entry] of entries.entries()) {
+            const name = typeof entry?.name === "string" ? entry.name.trim() : "";
+            try {
+              const error = validateHostDraft({ name: entry?.name ?? "", host: entry?.host ?? "", username: entry?.username ?? "", ...(entry?.port !== undefined ? { port: entry.port } : {}) });
+              if (error) throw new Error(error);
+              const groupName = typeof entry?.groupName === "string" ? entry.groupName.trim() : "";
+              // 不带 groupName = 不动分组（新建则为未分组，编辑则保留原分组）——
+              // 避免一次导入把用户手动归过组的主机全部赶出来。
+              const groupId = groupName ? this.resolveGroupId(groupName, groupsCreated) : undefined;
+              // 按名称 upsert（大小写不敏感）：重复导入幂等，编辑路径不传密码 = 保留原密码。
+              // 库里有多个同名主机时取第一个（导入是批量写入，报错会让整批其余条目白做）。
+              const existing = this.deps.hostStore.list().find((host) => nameKey(host.name) === nameKey(name));
+              this.deps.hostStore.save({ ...(existing ? { id: existing.id } : {}), name, host: entry.host, username: entry.username, ...(entry.port !== undefined ? { port: entry.port } : {}), ...(groupId !== undefined ? { groupId } : {}) }, undefined);
+              if (existing) updated += 1;
+              else created += 1;
+            } catch (error) {
+              // 单条失败不中断整批：一条地址写错不应该让另外 19 条白导。
+              failed.push({ index, name: name || `#${index + 1}`, error: error instanceof Error ? error.message : String(error) });
+            }
+          }
+          this.deps.notifyHostsChanged?.();
+          return { ok: true, data: { kind: "host-imported", total: entries.length, created, updated, groupsCreated, failed } };
+        }
+        case "group-save": {
+          const name = request.group?.name?.trim() ?? "";
+          if (!name) throw new Error("分组名称不能为空");
+          const existing = request.target?.trim() ? this.findGroup(request.target) : undefined;
+          if (!existing) {
+            // store.saveGroup 只做精确重名校验，这里再按归一键拦一道：否则 `Prod` 与
+            // 既有的 `prod` 会同时存在（AI 复制粘贴清单时大小写不一致很常见）。
+            const collision = this.deps.hostStore.listGroups().find((group) => nameKey(group.name) === nameKey(name));
+            if (collision) throw new Error(`已存在同名分组「${collision.name}」（分组名不区分大小写）。`);
+          }
+          const saved = this.deps.hostStore.saveGroup({ ...(existing ? { id: existing.id } : {}), name });
+          this.deps.notifyHostsChanged?.();
+          return { ok: true, data: { kind: "group-saved", group: saved, created: !existing } };
+        }
+        case "group-delete": {
+          const group = this.findGroup(request.group);
+          const movedHosts = this.deps.hostStore.removeGroup(group.id);
+          if (movedHosts < 0) throw new Error(`分组「${group.name}」不存在或已删除`);
+          // 只改配置不动连接：组内主机已建立的 SSH 会话仍然活着（与面板删除同口径）。
+          this.deps.notifyHostsChanged?.();
+          return { ok: true, data: { kind: "group-deleted", groupName: group.name, movedHosts } };
         }
       }
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
+  }
+
+  /**
+   * 把分组名解析成 id：命中（大小写不敏感）复用，未命中创建。
+   * `created` 收集本次新建的名字（批量导入去重用：同名多台主机只建一次）。
+   */
+  private resolveGroupId(groupName: string, created?: string[]): string {
+    const key = nameKey(groupName);
+    const existing = this.deps.hostStore.listGroups().find((group) => nameKey(group.name) === key);
+    if (existing) return existing.id;
+    const saved = this.deps.hostStore.saveGroup({ name: groupName.trim() });
+    created?.push(saved.name);
+    return saved.id;
+  }
+
+  /** 按名称（大小写不敏感）或 id 找分组；未命中报错并列出可用分组。 */
+  private findGroup(query: string): SshGroupSummary {
+    const groups = this.deps.hostStore.listGroups();
+    const trimmed = query.trim().toLowerCase();
+    const found = groups.find((group) => group.id.toLowerCase() === trimmed || nameKey(group.name) === nameKey(query));
+    if (found) return found;
+    throw new Error(`未找到分组「${query}」。${groups.length > 0 ? `可用分组：${groups.map((group) => group.name).join("、")}` : "当前没有任何分组。"}`);
   }
 
   private findHost(query: string): SshHostSummary {
