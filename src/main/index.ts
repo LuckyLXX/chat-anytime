@@ -882,7 +882,7 @@ function isSshCommand(value: unknown): value is SshCommand {
   const command = value as Record<string, unknown>;
   switch (command.type) {
     case "connect":
-      return typeof command.terminalId === "string" && command.terminalId.trim() !== "" && typeof command.hostId === "string" && command.hostId.trim() !== "" && typeof command.cols === "number" && typeof command.rows === "number" && (command.trustFingerprint === undefined || typeof command.trustFingerprint === "boolean");
+      return typeof command.terminalId === "string" && command.terminalId.trim() !== "" && typeof command.hostId === "string" && command.hostId.trim() !== "" && typeof command.cols === "number" && typeof command.rows === "number" && (command.trustFingerprint === undefined || typeof command.trustFingerprint === "boolean") && (command.password === undefined || typeof command.password === "string") && (command.rememberPassword === undefined || typeof command.rememberPassword === "boolean");
     case "input":
       return typeof command.terminalId === "string" && command.terminalId.trim() !== "" && typeof command.data === "string";
     case "resize":

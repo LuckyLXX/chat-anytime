@@ -1,11 +1,14 @@
 import { ChevronDown, FolderTree, LoaderCircle, RotateCw, ShieldAlert, ShieldCheck, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { SshFilesPanel } from "./SshFilesPanel";
+import { SshPasswordCard, type SshPasswordRequest } from "./SshPasswordCard";
 import { XtermView, type XtermApi } from "./XtermView";
 
 type ConnectionState =
   | { status: "connecting"; detail?: string }
   | { status: "confirming"; fingerprint: string }
+  /** 主机没有可用密码（或密码被拒）：卡在终端之上等用户输入。 */
+  | { status: "password"; request: SshPasswordRequest }
   | { status: "connected" }
   | { status: "closed"; detail?: string; error?: string };
 
@@ -16,6 +19,9 @@ type ConnectionState =
  *   连接经 ssh:reveal 自动开 tab 也走这条路径）；
  * - 首次连接（指纹未记录）返回 fingerprint → 显示确认卡，用户「信任并
  *   连接」后带 trustFingerprint 重发（TOFU）；
+ * - 主机没有可用密码（从未保存、或密码认证被拒）→ 主进程推 password-required，
+ *   这里弹密码卡，用户提交后带 password/rememberPassword 重发；密码只在
+ *   渲染端 → 主进程单向传递，不落会话记录；
  * - 断开后「重新连接」同样重发（连接由主进程持有，tab 关闭才 kill）。
  *
  * 文件面板（SshFilesPanel）挂在终端**下方分屏**（竖向 flex，非覆盖层）：预览面板最
@@ -34,7 +40,7 @@ export function SshTerminalPanel({ terminalId, hostId, hostName, workspace }: { 
   const [actionError, setActionError] = useState<string | undefined>(undefined);
   const apiRef = useRef<XtermApi | undefined>(undefined);
 
-  const connect = useCallback((trustFingerprint: boolean): void => {
+  const connect = useCallback((trustFingerprint: boolean, credentials?: { password: string; remember: boolean }): void => {
     setState({ status: "connecting" });
     void window.piDesktop.ssh({
       type: "connect",
@@ -42,7 +48,9 @@ export function SshTerminalPanel({ terminalId, hostId, hostName, workspace }: { 
       hostId,
       cols: Math.max(2, apiRef.current?.terminal.cols ?? 80),
       rows: Math.max(2, apiRef.current?.terminal.rows ?? 24),
-      ...(trustFingerprint ? { trustFingerprint: true } : {})
+      ...(trustFingerprint ? { trustFingerprint: true } : {}),
+      // 密码只在这一条命令里上行（密码卡提交时）；主进程侧不回传任何明文。
+      ...(credentials ? { password: credentials.password, rememberPassword: credentials.remember } : {})
     }).catch((error: unknown) => {
       setState({ status: "closed", error: error instanceof Error ? error.message : String(error) });
     });
@@ -72,6 +80,22 @@ export function SshTerminalPanel({ terminalId, hostId, hostName, workspace }: { 
       // 握手尚未发生），首次连接的确认卡在这里出现。
       if (event.type === "fingerprint") {
         setState({ status: "confirming", fingerprint: event.fingerprint });
+        return;
+      }
+      // 没有可用密码 / 密码认证被拒：弹密码卡（不切到失败页——用户此刻该做的是输密码）。
+      if (event.type === "password-required") {
+        setState({
+          status: "password",
+          request: {
+            hostName: event.hostName,
+            host: event.host,
+            port: event.port,
+            username: event.username,
+            reason: event.reason,
+            credentialInsecure: event.credentialInsecure,
+            ...(event.detail ? { detail: event.detail } : {})
+          }
+        });
         return;
       }
       if (event.type === "status") {
@@ -126,6 +150,18 @@ export function SshTerminalPanel({ terminalId, hostId, hostName, workspace }: { 
           <span>正在连接 {hostName}…</span>
           {state.detail && <span className="terminal-overlay-detail">{state.detail}</span>}
         </div>
+      )}
+      {state.status === "password" && (
+        <SshPasswordCard
+          request={state.request}
+          onSubmit={(password, remember) => connect(false, { password, remember })}
+          onCancel={() => {
+            // 告诉主进程「已取消」：正在等这条输入的那次 AI 连接（若有）必须立刻收摊，
+            // 而不是干等到超时。无 record 的 kill 是幂等的。
+            void window.piDesktop.ssh({ type: "kill", terminalId });
+            setState({ status: "closed", detail: "已取消输入密码" });
+          }}
+        />
       )}
       {state.status === "confirming" && (
         <div className="terminal-overlay ssh-fingerprint-card" data-pane="ssh">

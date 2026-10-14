@@ -38,11 +38,19 @@ export interface SshHostCrypto {
 export interface SshHostStore {
   list(): SshHostSummary[];
   listGroups(): SshGroupSummary[];
+  /** 凭据是否真的加密（safeStorage 可用）；不可用时写入是明文降级，UI 需说实话。 */
+  credentialsSecure(): boolean;
   get(id: string): StoredSshHost | undefined;
   /** 解密密码；主机不存在或从未保存过密码时返回 undefined。 */
   passwordOf(id: string): string | undefined;
   /** 新建（无 id）或更新；password 为 undefined/空 = 保留原密码。 */
   save(draft: SshHostDraft, password?: string): SshHostSummary;
+  /**
+   * 只写密码（连接时用户勾了「记住密码」）：加密落库并返回该主机是否仍存在。
+   * 与 `save` 分开是为了不重写 name/host/port/username/groupId——连接路径只想
+   * 补一个凭据，不该顺带覆盖主机配置（那是编辑表单的职责）。
+   */
+  setPassword(id: string, password: string): boolean;
   remove(id: string): boolean;
   /** 新建（无 id）或重命名分组。 */
   saveGroup(draft: { id?: string; name: string }): SshGroupSummary;
@@ -172,6 +180,9 @@ export function createSshHostStore(deps: { filePath: string; crypto: SshHostCryp
       const insecure = !deps.crypto.isAvailable();
       return hosts().map((item) => toSummary(item, insecure));
     },
+    credentialsSecure(): boolean {
+      return deps.crypto.isAvailable();
+    },
     listGroups(): SshGroupSummary[] {
       return groups().map((group) => ({ id: group.id, name: group.name }));
     },
@@ -183,6 +194,19 @@ export function createSshHostStore(deps: { filePath: string; crypto: SshHostCryp
       if (!stored || !stored.secret) return undefined;
       const plain = deps.crypto.decrypt(stored.secret);
       return plain || undefined;
+    },
+    setPassword(id: string, password: string): boolean {
+      const stored = hosts().find((item) => item.id === id);
+      if (!stored || password.length === 0) return false;
+      const previous = stored.secret;
+      stored.secret = deps.crypto.encrypt(password).secret;
+      try {
+        persist();
+      } catch (error) {
+        stored.secret = previous;
+        throw error;
+      }
+      return true;
     },
     save(draft: SshHostDraft, password?: string): SshHostSummary {
       const port = normalizePort(draft.port);

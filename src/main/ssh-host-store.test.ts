@@ -67,6 +67,23 @@ describe("ssh host store", () => {
     expect(store.passwordOf(saved.id)).toBe("new");
   });
 
+  // 连接路径的「记住密码」：只写密码，不重写主机名/地址/端口/用户名/分组
+  //（那是编辑表单的职责，连接时绝不该顺带覆盖配置）。
+  it("writes only the password through setPassword", () => {
+    const filePath = tempFile("hosts.json");
+    dirs.push(join(filePath, ".."));
+    const store = createSshHostStore({ filePath, crypto: secureCrypto() });
+    const saved = store.save({ name: "a", host: "1.2.3.4", username: "root", port: 2222 }, undefined);
+    expect(saved.hasPassword).toBe(false);
+    expect(store.setPassword(saved.id, "from-prompt")).toBe(true);
+    expect(store.passwordOf(saved.id)).toBe("from-prompt");
+    const after = store.list()[0]!;
+    expect(after).toMatchObject({ id: saved.id, name: "a", host: "1.2.3.4", username: "root", port: 2222, hasPassword: true });
+    // 明文不落盘（加密前缀），且不存在的 id 不会再写文件
+    expect(readFileSync(filePath, "utf8")).not.toContain("from-prompt");
+    expect(store.setPassword("nope", "x")).toBe(false);
+  });
+
   it("flags insecure plaintext fallback through credentialInsecure", () => {
     const store = createSshHostStore({ filePath: tempFile("hosts.json"), crypto: insecureCrypto() });
     const saved = store.save({ name: "a", host: "1.2.3.4", username: "root" }, "plainpw");

@@ -2,7 +2,7 @@ import { mkdtempSync, readdirSync, readFileSync as readFileSyncNode, rmSync } fr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SshAutomationRequest, SshAutomationResult, SshCommandResult, SshEventData, SshRevealEvent } from "../shared/protocol.js";
 import { createSshHostStore, type SshHostCrypto } from "./ssh-host-store.js";
 import { createSshKnownHostsStore } from "./ssh-known-hosts.js";
@@ -372,11 +372,86 @@ describe("ssh-connections pure helpers", () => {
 });
 
 describe("SshConnectionManager.connect (renderer channel)", () => {
-  it("rejects unknown hosts and missing passwords", () => {
+  it("rejects unknown hosts", () => {
     const harness = createHarness();
     expect(() => harness.manager.handle({ type: "connect", terminalId: "t1", hostId: "missing", cols: 80, rows: 24 })).toThrow("主机不存在");
     const badStore = createHarness({ seedHost: false });
     expect(() => badStore.manager.handle({ type: "connect", terminalId: "t1", hostId: "whatever", cols: 80, rows: 24 })).toThrow("主机不存在");
+  });
+
+  // 本轮的入口用例：主机没有密码**不是失败**，而是推事件让界面弹密码卡，用户输入后
+  // 拿同一 terminalId 重发 connect 继续连接（此前是直接抛「请先在 SSH 面板补录密码」）。
+  it("asks the renderer for a password instead of failing, then connects with it", async () => {
+    const harness = createHarness({ seedHost: false });
+    const saved = harness.manager.handle({ type: "host.save", host: { name: "staging", host: "10.0.0.9", username: "deploy", port: 2222 } });
+    const hostId = saved.kind === "host-saved" ? saved.host.id : "";
+    expect(harness.manager.handle({ type: "connect", terminalId: "t1", hostId, cols: 80, rows: 24 })).toEqual({ kind: "connect" });
+    await sleep(2);
+    // 没密码就不该发起握手（白白去撞一次认证失败）
+    expect(harness.clients).toHaveLength(0);
+    const prompts = harness.published.filter((event) => event.type === "password-required");
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toMatchObject({ terminalId: "t1", hostName: "staging", host: "10.0.0.9", port: 2222, username: "deploy", reason: "missing" });
+
+    harness.published.length = 0;
+    harness.manager.handle({ type: "connect", terminalId: "t1", hostId, cols: 80, rows: 24, trustFingerprint: true, password: "s3cret", rememberPassword: true });
+    await sleep(2);
+    harness.clients[0]!.emitReady();
+    await sleep(5);
+    expect(harness.published).toContainEqual({ type: "status", terminalId: "t1", status: "connected" });
+    // 勾了「记住密码」：加密落库（hasPassword 翻转）+ 推主机变更让面板刷新
+    const hosts = harness.manager.handle({ type: "hosts" });
+    expect(hosts.kind === "hosts" ? hosts.hosts[0]!.hasPassword : false).toBe(true);
+    expect(harness.hostChanges.length).toBe(1);
+    // 密码单向：事件与主机摘要里都不能出现明文
+    expect(JSON.stringify([...harness.published, hosts])).not.toContain("s3cret");
+  });
+
+  it("keeps a non-remembered password in memory for this run only", async () => {
+    const harness = createHarness({ seedHost: false });
+    const saved = harness.manager.handle({ type: "host.save", host: { name: "staging", host: "10.0.0.9", username: "deploy" } });
+    const hostId = saved.kind === "host-saved" ? saved.host.id : "";
+    harness.manager.handle({ type: "connect", terminalId: "t1", hostId, cols: 80, rows: 24, trustFingerprint: true, password: "onetrip" });
+    await sleep(2);
+    harness.clients[0]!.emitReady();
+    await sleep(5);
+    const hosts = harness.manager.handle({ type: "hosts" });
+    // 没勾记住 = 不落库（不静默改写用户配置）
+    expect(hosts.kind === "hosts" ? hosts.hosts[0]!.hasPassword : true).toBe(false);
+    expect(harness.hostChanges).toHaveLength(0);
+
+    // 关掉再重连：本次运行内不再追问
+    harness.manager.handle({ type: "kill", terminalId: "t1" });
+    harness.published.length = 0;
+    harness.manager.handle({ type: "connect", terminalId: "t2", hostId, cols: 80, rows: 24 });
+    await sleep(2);
+    expect(harness.published.filter((event) => event.type === "password-required")).toHaveLength(0);
+    expect(harness.clients).toHaveLength(2);
+  });
+
+  // 密码写错时 ssh2 给「All configured authentication methods failed」：这里必须重回
+  // 「要密码」而不是把界面钉在失败页，并且丢掉内存里的错密码（否则下次不勾也会拿它重试）。
+  it("re-asks for the password when authentication is rejected", async () => {
+    const harness = createHarness({ seedHost: false });
+    const saved = harness.manager.handle({ type: "host.save", host: { name: "staging", host: "10.0.0.9", username: "deploy" } });
+    const hostId = saved.kind === "host-saved" ? saved.host.id : "";
+    harness.manager.handle({ type: "connect", terminalId: "t1", hostId, cols: 80, rows: 24, trustFingerprint: true, password: "wrong" });
+    await sleep(2);
+    harness.clients[0]!.emit("error", new Error("All configured authentication methods failed"));
+    await sleep(5);
+    const prompts = harness.published.filter((event) => event.type === "password-required");
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toMatchObject({ terminalId: "t1", reason: "auth-failed", host: "10.0.0.9" });
+    expect((prompts[0] as { detail?: string }).detail).toContain("authentication");
+    expect(harness.published.filter((event) => event.type === "error")).toHaveLength(0);
+    expect(harness.published.some((event) => event.type === "status" && event.status === "closed")).toBe(false);
+
+    harness.published.length = 0;
+    harness.manager.handle({ type: "connect", terminalId: "t2", hostId, cols: 80, rows: 24 });
+    await sleep(2);
+    const again = harness.published.filter((event) => event.type === "password-required");
+    expect(again).toHaveLength(1);
+    expect(again[0]).toMatchObject({ reason: "missing" });
   });
 
   it("pushes the fingerprint as an event for an untrusted first connection (TOFU probe)", async () => {
@@ -508,6 +583,7 @@ describe("SshConnectionManager.handleAutomation (AI channel)", () => {
     expect(result.ok).toBe(true);
     if (!result.ok || result.data.kind !== "connect") throw new Error("unexpected");
     expect(result.data.connection.hostName).toBe("prod");
+    // 只 reveal 一次（等待前那一次）：成功后的二次 reveal 会让用户的面板平白跳一下。
     expect(harness.reveals).toHaveLength(1);
     expect(harness.reveals[0]!.hostName).toBe("prod");
   });
@@ -521,7 +597,8 @@ describe("SshConnectionManager.handleAutomation (AI channel)", () => {
     expect(result.error).toContain("需要确认服务器指纹");
     expect(result.error).toContain(FINGERPRINT);
     expect(result.error).toContain("ssh_trust_fingerprint");
-    expect(harness.reveals).toHaveLength(0);
+    // 终端被 reveal（确认卡也得有地方显示）；AI 仍拿到自带指纹的失败回执，不卡死。
+    expect(harness.reveals).toHaveLength(1);
   });
 
   it("executes a command through the shell stream and parses the exit code", async () => {
@@ -646,24 +723,68 @@ describe("SshConnectionManager.handleAutomation (AI channel)", () => {
     expect(result.error).toContain("没有待确认的指纹记录");
   });
 
-  it("saves a host without a password and deletes it by name", async () => {
+  // AI 路径的核心行为：无密码主机不会立即报错，而是开终端弹密码卡并**等同一次
+  // ssh_connect 请求**等用户输入；用户填完，请求继续完成；取消/超时则如实报错。
+  it("waits on the password card and finishes the same ssh_connect request", async () => {
     const harness = createHarness({ seedHost: false });
     const created = await harness.manager.handleAutomation("session-1", { op: "host-save", draft: { name: "staging", host: "10.0.0.9", username: "deploy", port: 2222 } });
     expect(created.ok).toBe(true);
     if (!created.ok || created.data.kind !== "host-saved") throw new Error("unexpected");
     expect(created.data.host.hasPassword).toBe(false);
-    // 无密码的新主机连不上——这是刻意的：密码只能由用户在面板补录。
-    const connect = await harness.manager.handleAutomation("session-1", { op: "connect", host: "staging" });
-    expect(connect.ok).toBe(false);
-    if (connect.ok) throw new Error("unexpected");
-    expect(connect.error).toContain("未保存密码");
+    const hostId = created.data.host.id;
+
+    const pending = harness.manager.handleAutomation("session-1", { op: "connect", host: "staging" });
+    await sleep(10);
+    const prompts = harness.published.filter((event) => event.type === "password-required");
+    expect(prompts).toHaveLength(1);
+    const terminalId = (prompts[0] as { terminalId: string }).terminalId;
+    // 密码卡必须有地方显示（AI 不 reveal，用户就看不到输入框，这个请求只能等到超时）
+    expect(harness.reveals.map((event) => event.terminalId)).toEqual([terminalId]);
+    // 也没真发起握手
+    expect(harness.clients).toHaveLength(0);
+
+    // 模型或用户界面重复触发：复用同一张卡，不堆 tab
+    const duplicate = harness.manager.handleAutomation("session-1", { op: "connect", host: "staging" });
+    await sleep(10);
+    expect(new Set(harness.published.filter((event) => event.type === "password-required").map((event) => event.terminalId)).size).toBe(1);
+
+    // 用户在卡上提交：同一条请求继续（渲染端的 connect 带密码重发同 id）
+    harness.manager.handle({ type: "connect", terminalId, hostId, cols: 80, rows: 24, trustFingerprint: true, password: "s3cret" });
+    await sleep(2);
+    harness.clients[0]!.emitReady();
+    await sleep(20);
+    const result = await pending;
+    expect(result.ok).toBe(true);
+    if (!result.ok || result.data.kind !== "connect") throw new Error("unexpected");
+    expect(result.data.connection.terminalId).toBe(terminalId);
+    // 重复那次也没报错（同一张卡两个等待者都得到结果，或至少不抛指人的错）
+    await expect(duplicate).resolves.toMatchObject({ ok: true });
+    // 没勾记住密码：不落库
+    const hosts = harness.manager.handle({ type: "hosts" });
+    expect(hosts.kind === "hosts" ? hosts.hosts[0]!.hasPassword : true).toBe(false);
+
     const deleted = await harness.manager.handleAutomation("session-1", { op: "host-delete", host: "staging" });
     expect(deleted.ok).toBe(true);
     if (!deleted.ok || deleted.data.kind !== "host-deleted") throw new Error("unexpected");
     expect(deleted.data.hostName).toBe("staging");
-    const hosts = await harness.manager.handleAutomation("session-1", { op: "hosts" });
-    if (!hosts.ok || hosts.data.kind !== "hosts") throw new Error("unexpected");
-    expect(hosts.data.hosts).toHaveLength(0);
+    const after = await harness.manager.handleAutomation("session-1", { op: "hosts" });
+    if (!after.ok || after.data.kind !== "hosts") throw new Error("unexpected");
+    expect(after.data.hosts).toHaveLength(0);
+  });
+
+  it("ends a waiting ssh_connect when the user cancels the password card", async () => {
+    const harness = createHarness({ seedHost: false });
+    await harness.manager.handleAutomation("session-1", { op: "host-save", draft: { name: "staging", host: "10.0.0.9", username: "deploy" } });
+    const pending = harness.manager.handleAutomation("session-1", { op: "connect", host: "staging" });
+    await sleep(10);
+    const prompt = harness.published.find((event) => event.type === "password-required") as { terminalId: string };
+    // 渲染端的「取消」按钮发 kill：等待中的请求必须立刻结束，而不是干等到超时
+    harness.manager.handle({ type: "kill", terminalId: prompt.terminalId });
+    const result = await pending;
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unexpected");
+    expect(result.error).toContain("连接已取消");
+    expect(harness.published.some((event) => event.type === "status" && event.status === "closed")).toBe(true);
   });
 
   it("edits an existing host by name and keeps its stored password", async () => {
@@ -918,5 +1039,76 @@ describe("ssh-connections SFTP command dispatch", () => {
     expect(harness.clients[0]!.sftpChannel!.ended).toBe(0);
     harness.manager.handle({ type: "kill", terminalId: "t1" });
     expect(harness.clients[0]!.sftpChannel!.ended).toBe(1);
+  });
+});
+
+
+describe("SSH password wait lifecycle", () => {
+  it("replays a rejected stored-password prompt and completes the original AI request", async () => {
+    const h = createHarness({ autoTrust: true });
+    const promise = h.manager.handleAutomation("ai", { op: "connect", host: "prod" });
+    await sleep(2);
+    const terminalId = h.reveals[0]!.terminalId;
+    h.clients[0]!.emit("error", new Error("All configured authentication methods failed"));
+    // 重挂载仍重放询问（不能再次用那个已被拒的落库密码认证）。
+    h.manager.handle({ type: "connect", terminalId, hostId: h.reveals[0]!.hostId, cols: 80, rows: 24 });
+    expect(h.clients).toHaveLength(1);
+    expect(h.published.at(-1)).toMatchObject({ type: "password-required", reason: "auth-failed" });
+    h.manager.handle({ type: "connect", terminalId, hostId: h.reveals[0]!.hostId, cols: 80, rows: 24, password: "corrected", rememberPassword: true });
+    await sleep(2);
+    h.clients[1]!.emitReady();
+    await expect(promise).resolves.toMatchObject({ ok: true });
+    expect(h.hostChanges).toHaveLength(1);
+    h.manager.disposeAll();
+  });
+
+  it("never persists a remembered password rejected by the server", async () => {
+    const h = createHarness({ seedHost: false, autoTrust: true });
+    const result = h.manager.handle({ type: "host.save", host: { name: "a", host: "1.2.3.4", username: "root" } });
+    if (result.kind !== "host-saved") throw new Error("unexpected");
+    h.manager.handle({ type: "connect", terminalId: "t", hostId: result.host.id, cols: 80, rows: 24, password: "wrong", rememberPassword: true });
+    expect(h.hostChanges).toHaveLength(0);
+    await sleep(2);
+    h.clients[0]!.emit("error", new Error("All configured authentication methods failed"));
+    const hosts = h.manager.handle({ type: "hosts" });
+    if (hosts.kind !== "hosts") throw new Error("unexpected");
+    expect(hosts.hosts[0]!.hasPassword).toBe(false);
+    expect(h.hostChanges).toHaveLength(0);
+    h.manager.disposeAll();
+  });
+
+  it("discards temporary credentials when a host's account changes", async () => {
+    const h = createHarness({ seedHost: false, autoTrust: true });
+    const draft = { name: "a", host: "1.2.3.4", username: "root" };
+    const result = h.manager.handle({ type: "host.save", host: draft });
+    if (result.kind !== "host-saved") throw new Error("unexpected");
+    const hostId = result.host.id;
+    h.manager.handle({ type: "connect", terminalId: "t", hostId, cols: 80, rows: 24, password: "temporary" });
+    await sleep(2);
+    h.clients[0]!.emitReady();
+    await sleep(2);
+    h.manager.kill("t");
+    h.manager.handle({ type: "host.save", host: { ...draft, id: hostId, username: "deploy" } });
+    h.manager.handle({ type: "connect", terminalId: "next", hostId, cols: 80, rows: 24 });
+    expect(h.clients).toHaveLength(1);
+    expect(h.published.at(-1)).toMatchObject({ type: "password-required", username: "deploy" });
+    h.manager.disposeAll();
+  });
+
+  it("bounds password waiting below the utility watchdog and removes the pending prompt", async () => {
+    vi.useFakeTimers();
+    const h = createHarness({ seedHost: false });
+    try {
+      h.manager.handle({ type: "host.save", host: { name: "a", host: "1.2.3.4", username: "root" } });
+      const promise = h.manager.handleAutomation("ai", { op: "connect", host: "a" });
+      await vi.advanceTimersByTimeAsync(90_100);
+      const result = await promise;
+      expect(result).toMatchObject({ ok: false, error: expect.stringContaining("等待输入 SSH 密码超时") });
+      expect(vi.getTimerCount()).toBe(0);
+      expect(h.published.at(-1)).toMatchObject({ type: "status", status: "closed" });
+    } finally {
+      h.manager.disposeAll();
+      vi.useRealTimers();
+    }
   });
 });

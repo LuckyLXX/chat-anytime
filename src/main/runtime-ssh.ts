@@ -71,7 +71,7 @@ function formatHosts(data: { hosts: SshHostSummary[]; groups: { id: string; name
   if (data.hosts.length === 0) {
     return [
       "尚未配置任何 SSH 主机。",
-      "三种做法：① 让用户在侧边栏「SSH」面板新建主机（名称/地址/端口/用户名/密码）；② 用 ssh_host_save 建单台；③ 有一批清单时用 ssh_host_import 批量导入（可自动建分组）。后两者都不带密码，随后仍需用户在面板补录。"
+      "三种做法：① 让用户在侧边栏「SSH」面板新建主机（名称/地址/端口/用户名/密码）；② 用 ssh_host_save 建单台；③ 有一批清单时用 ssh_host_import 批量导入（可自动建分组）。后两者都不带密码：首次 ssh_connect 时会打开它的终端并弹出密码输入框，由用户输入（可勾选「记住密码」）。"
     ].join("\n");
   }
   const groupNameOf = (groupId: string | undefined): string => {
@@ -115,7 +115,7 @@ export function buildSshTools(deps: SshToolDeps): ToolDefinition[] {
     defineTool({
       name: "ssh_host_save",
       label: "SSH 保存主机",
-      description: "新建或编辑一台 SSH 主机配置（名称/地址/端口/用户名/分组）。**本工具不写密码**：保存后需让用户在 SSH 面板为它补录密码，ssh_connect 才能连上（密码不进入 AI 上下文与会话记录）。target 给定时是编辑既有主机（名称或 id），缺省为新建。分组不存在会自动创建；一次要建多台请用 ssh_host_import。",
+      description: "新建或编辑一台 SSH 主机配置（名称/地址/端口/用户名/分组）。**本工具不写密码**：新主机不带密码，首次 ssh_connect 时会打开它的终端并弹出密码输入框，由用户输入后即可连上（密码不进入 AI 上下文与会话记录）。target 给定时是编辑既有主机（名称或 id），缺省为新建。分组不存在会自动创建；一次要建多台请用 ssh_host_import。",
       promptSnippet: "ssh_host_save: 新建或编辑 SSH 主机",
       parameters: Type.Object({
         name: Type.String({ description: "主机显示名，例：生产服务器" }),
@@ -144,7 +144,7 @@ export function buildSshTools(deps: SshToolDeps): ToolDefinition[] {
         const saved = result.data.host;
         const lines = [
           `已${target ? "更新" : "新建"}主机 ${saved.name}（${saved.username}@${saved.host}:${saved.port}）。`,
-          saved.hasPassword ? "" : "该主机尚未保存密码——请让用户在 SSH 面板为它补录密码，之后 ssh_connect 才能连上。"
+          saved.hasPassword ? "" : "该主机尚未保存密码——下次 ssh_connect 会在界面上打开它的终端并弹出密码输入框，用户输入后即可连上。"
         ];
         return { content: [{ type: "text" as const, text: lines.filter(Boolean).join("\n") }], details: { host: saved } };
       }
@@ -168,7 +168,7 @@ export function buildSshTools(deps: SshToolDeps): ToolDefinition[] {
     defineTool({
       name: "ssh_host_import",
       label: "SSH 批量导入主机",
-      description: "一次导入一批 SSH 主机（每项 name/address/username/port?/groupName?）：**分组不存在会自动创建**，主机按名称 upsert（同名更新地址/端口/用户名与分组，保留原密码），单条失败不影响其它条目并逐条回报。单次最多 200 台。**不写密码**：导入后需让用户在 SSH 面板补录密码，ssh_connect 才能连上。",
+      description: "一次导入一批 SSH 主机（每项 name/address/username/port?/groupName?）：**分组不存在会自动创建**，主机按名称 upsert（同名更新地址/端口/用户名与分组，保留原密码），单条失败不影响其它条目并逐条回报。单次最多 200 台。**不写密码**：导入的主机不带密码，首次 ssh_connect 时会打开它的终端并弹出密码输入框，由用户输入后即可连上。",
       promptSnippet: "ssh_host_import: 批量导入主机并自动建组",
       parameters: Type.Object({
         hosts: Type.Array(
@@ -209,7 +209,7 @@ export function buildSshTools(deps: SshToolDeps): ToolDefinition[] {
           data.failed.length > 0
             ? `失败 ${data.failed.length} 条（未导入）：\n${data.failed.map((item) => `- #${item.index + 1} ${item.name}：${item.error}`).join("\n")}`
             : "",
-          data.created > 0 ? "新导入的主机尚未保存密码——请让用户在 SSH 面板为它们补录密码，之后 ssh_connect 才能连上。" : ""
+          data.created > 0 ? "新导入的主机尚未保存密码——下次 ssh_connect 会在界面上打开它的终端并弹出密码输入框，用户输入后即可连上。" : ""
         ].filter(Boolean).join("\n");
         return { content: [{ type: "text" as const, text }], details: { ...data } };
       }
@@ -256,7 +256,7 @@ export function buildSshTools(deps: SshToolDeps): ToolDefinition[] {
     defineTool({
       name: "ssh_connect",
       label: "SSH 连接主机",
-      description: "连接一台已配置的 SSH 主机（本会话后续 ssh_exec/ssh_write/ssh_read 都作用于此连接）。已有该主机的活跃连接时直接复用（用户窗口里能看到你的操作）。首次连接一台新主机会因服务器指纹未知而失败，回执里带指纹——用 ssh_trust_fingerprint 信任后重试即可。主机未保存密码时需先让用户在面板补录。",
+      description: "连接一台已配置的 SSH 主机（本会话后续 ssh_exec/ssh_write/ssh_read 都作用于此连接）。已有该主机的活跃连接时直接复用（用户窗口里能看到你的操作）。首次连接一台新主机会因服务器指纹未知而失败，回执里带指纹——用 ssh_trust_fingerprint 信任后重试即可。主机没有可用密码时会**打开它的终端并弹出密码输入框**：用户输入（可勾选记住密码）后这次 ssh_connect 会继续完成连接（最多等用户 90 秒）；用户取消或超时则本次调用报错。",
       promptSnippet: "ssh_connect: 连接 SSH 主机",
       parameters: Type.Object({
         host: Type.String({ description: "主机名称（或留空列出可选主机）" })

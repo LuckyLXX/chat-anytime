@@ -12,7 +12,7 @@ import type {
   SshHostDraft,
   SshHostSummary
 } from "../shared/protocol.js";
-import type { SshHostStore } from "./ssh-host-store.js";
+import type { SshHostStore, StoredSshHost } from "./ssh-host-store.js";
 import { validateHostDraft } from "./ssh-host-store.js";
 import type { SshKnownHostsStore } from "./ssh-known-hosts.js";
 import { knownHostKey } from "./ssh-known-hosts.js";
@@ -82,8 +82,8 @@ export interface SshConnectionsDeps {
   autoTrustFingerprint?: () => boolean;
   /**
    * 主机/分组清单已被 AI 改动（失效信号，不带数据）：主进程转发给渲染端，
-   * 已打开的 SSH 面板据此重新拉 hosts。只在 automation 侧变更后调——面板自己的
-   * 增删改本来就会 refresh，再推一次只是多余请求。
+   * 已打开的 SSH 面板据此重新拉 hosts。AI 配置变更与连接成功后的密码落库均调用；
+   * 面板自身的增删改已经会 refresh，无需重复通知。
    */
   notifyHostsChanged?: () => void;
   /** Test seam：异步 flush 调度（缺省 setTimeout）。 */
@@ -95,6 +95,15 @@ interface PendingExec {
   chunks: string[];
   timer: ReturnType<typeof setTimeout>;
   resolve: (result: { exitCode: number | null; timedOut: boolean }) => void;
+}
+
+/** 密码卡需要展示的主机身份（事件载荷，不含密码）。 */
+interface SshHostIdentity {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  username: string;
 }
 
 interface ConnectionRecord {
@@ -375,6 +384,22 @@ export class SshConnectionManager {
    * 无定时器，按条数上限淘汰（超限删最旧）。
    */
   private readonly pendingTrust = new Map<string, { fingerprint: string; at: number }>();
+  /**
+   * 本次运行有效的临时密码（hostId → 凭据）：密码卡用户不勾「记住密码」时也不落库，
+   * 但留在内存里，重连与开关标签都不再追问。重启即忘（进程内存，不写盘）。
+   * `secret` 是写入时主机凭据的指纹：主机被编辑（换地址/账号/密码）后这条缓存立即失效。
+   */
+  private readonly sessionPasswords = new Map<string, {
+    password: string;
+    /** 用户勾了「记住密码」：先记下，等握手成功再落库。 */
+    remember: boolean;
+    host: string;
+    port: number;
+    username: string;
+    secret: string;
+  }>();
+  /** 等待用户输入的请求（terminalId → 事件）：重挂载/重发 connect 时重放，kill 时清理。 */
+  private readonly pendingPasswords = new Map<string, Extract<SshEventData, { type: "password-required" }>>();
   private execSequence = 0;
   private readonly schedule: (callback: () => void) => () => void;
   private cancelFlush: (() => void) | undefined;
@@ -390,7 +415,10 @@ export class SshConnectionManager {
 
   handle(command: SshCommand): SshCommandResult {
     switch (command.type) {
-      case "connect": return this.connect(command.terminalId, command.hostId, command.cols, command.rows, command.trustFingerprint === true);
+      case "connect": return this.connect(command.terminalId, command.hostId, command.cols, command.rows, command.trustFingerprint === true, {
+        ...(command.password !== undefined ? { password: command.password } : {}),
+        ...(command.rememberPassword === true ? { rememberPassword: true } : {})
+      });
       case "input": this.connections.get(command.terminalId)?.stream?.write(command.data); return { kind: "void" };
       case "resize": {
         const record = this.connections.get(command.terminalId);
@@ -413,6 +441,8 @@ export class SshConnectionManager {
       }
       case "host.delete": {
         if (!this.deps.hostStore.remove(command.hostId)) throw new Error("主机不存在或已删除");
+        // 主机没了，内存里的临时密码与待输入询问也一并作废（凭据不留在进程里等下次误用）。
+        this.forgetHost(command.hostId);
         return { kind: "host-deleted" };
       }
       case "group.save": {
@@ -437,8 +467,22 @@ export class SshConnectionManager {
     return undefined;
   }
 
-  /** 发起连接。返回带 fingerprint = TOFU 待确认（渲染端显示确认卡后带 trustFingerprint 重发）。 */
-  private connect(terminalId: string, hostId: string, cols: number, rows: number, trustFingerprint: boolean): SshCommandResult {
+  /**
+   * 发起连接。返回带 fingerprint = TOFU 待确认（渲染端显示确认卡后带 trustFingerprint 重发）。
+   *
+   * 密码三条来源（优先级从高到低）：本次连接补传的 `password`（密码卡）→ 本次运行
+   * 的临时密码（不勾「记住密码」时也留在内存里，重连不再追问）→ 落库密码。三条都
+   * 没有时**不报错**，而是推 `password-required` 让渲染端弹密码卡：用户输入后拿同一
+   * terminalId 重发带 password 的 connect，连接从这一步继续。
+   */
+  private connect(
+    terminalId: string,
+    hostId: string,
+    cols: number,
+    rows: number,
+    trustFingerprint: boolean,
+    supplied: { password?: string; rememberPassword?: boolean } = {}
+  ): SshCommandResult {
     const existing = this.connections.get(terminalId);
     if (existing && existing.status !== "closed") {
       if (existing.scrollback) this.deps.publish(terminalId, { type: "data", terminalId, data: existing.scrollback });
@@ -447,10 +491,85 @@ export class SshConnectionManager {
     }
     const stored = this.deps.hostStore.get(hostId);
     if (!stored) throw new Error("主机不存在，请先在 SSH 面板保存配置");
-    if (this.connections.size >= SSH_MAX_CONNECTIONS) throw new Error(`SSH 连接数量已达上限（${SSH_MAX_CONNECTIONS}），请先关闭其他连接标签`);
-    const password = this.deps.hostStore.passwordOf(hostId);
-    if (password === undefined) throw new Error("该主机未保存密码，请先在 SSH 面板补录密码");
+    const pending = this.pendingPasswords.get(terminalId);
+    if (!pending && this.connections.size + this.pendingPasswords.size >= SSH_MAX_CONNECTIONS) throw new Error(`SSH 连接数量已达上限（${SSH_MAX_CONNECTIONS}），请先关闭其他连接标签`);
+    if (pending && supplied.password === undefined && pending.hostId === hostId && pending.host === stored.host && pending.port === stored.port && pending.username === stored.username) {
+      // 包括认证被拒的询问：重挂载不能再次拿旧的落库密码发起认证。
+      this.deps.publish(terminalId, pending);
+      return { kind: "connect" };
+    }
+    const password = this.resolvePassword(stored, supplied);
+    if (password === undefined) {
+      this.publishPasswordRequired(terminalId, identityOf(stored), "missing");
+      return { kind: "connect" };
+    }
 
+    this.pendingPasswords.delete(terminalId);
+    this.beginConnection(terminalId, stored, cols, rows, trustFingerprint, password);
+    return { kind: "connect" };
+  }
+
+  /** 该主机当前是否有可用密码（落库的或本次运行的临时密码）。 */
+  private availablePassword(hostId: string): string | undefined {
+    const stored = this.deps.hostStore.get(hostId);
+    if (!stored) return undefined;
+    const cached = this.sessionPasswords.get(hostId);
+    if (cached) {
+      // 主机配置只要动过（地址/端口/用户名/已存密码），旧密码就作废：拿旧凭据去撞认证
+      // 的结果是「报错→要密码→再进密码卡」，用户会以为程序在循环要密码。
+      if (cached.host === stored.host && cached.port === stored.port && cached.username === stored.username && cached.secret === stored.secret) return cached.password;
+      this.sessionPasswords.delete(hostId);
+    }
+    return this.deps.hostStore.passwordOf(hostId);
+  }
+
+  /**
+   * 解析本次连接的密码，并登记临时密码 / 「记住密码」的待落库标记。
+   *
+   * 不勾「记住密码」也把密码留在 `sessionPasswords`：那是**本次运行**的缓存，重连、
+   * 开关标签都不再追问，重启即忘。勾了记住也只**先记标记**，由握手成功后的 ready
+   * 处理器落库——密码写错就落库会把错密码存进用户配置，比不保存更厌。
+   */
+  private resolvePassword(stored: StoredSshHost, supplied: { password?: string; rememberPassword?: boolean }): string | undefined {
+    const given = supplied.password;
+    if (given !== undefined) {
+      if (given.length === 0) return undefined; // 空密码当作「没给」（卡片已禁止提交，兼防手写命令）
+      this.sessionPasswords.set(stored.id, {
+        password: given,
+        remember: supplied.rememberPassword === true,
+        host: stored.host,
+        port: stored.port,
+        username: stored.username,
+        secret: stored.secret
+      });
+      return given;
+    }
+    return this.availablePassword(stored.id);
+  }
+
+  /** 向渲染端要一次密码（界面弹卡片），顺带把状态文案说清——这里不发 error/closed。 */
+  private publishPasswordRequired(terminalId: string, identity: SshHostIdentity, reason: "missing" | "auth-failed", detail?: string): void {
+    const event: Extract<SshEventData, { type: "password-required" }> = {
+      type: "password-required",
+      terminalId,
+      hostId: identity.id,
+      hostName: identity.name,
+      host: identity.host,
+      port: identity.port,
+      username: identity.username,
+      reason,
+      // safeStorage 不可用时密码是明文降级落盘（与面板顶部的 credentialInsecure 警告同源），
+      // 卡片据此把「加密保存」改成实话。
+      credentialInsecure: !this.deps.hostStore.credentialsSecure(),
+      ...(detail ? { detail } : {})
+    };
+    this.pendingPasswords.set(terminalId, event);
+    this.deps.publish(terminalId, event);
+  }
+
+  /** 真正的握手与 shell 开启（密码已定；不含「要密码」那条分支）。 */
+  private beginConnection(terminalId: string, stored: StoredSshHost, cols: number, rows: number, trustFingerprint: boolean, password: string): void {
+    const hostId = stored.id;
     const known = this.deps.knownHosts.get(stored.host, stored.port);
     // 重连同 id（信任后重发 / 重新连接）：清掉旧探测记录，避免陈旧指纹误判。
     this.probedFingerprints.delete(terminalId);
@@ -487,9 +606,21 @@ export class SshConnectionManager {
         this.disposeRecord(terminalId);
         return;
       }
+      const message = error.message || "SSH 连接失败";
+      if (!record.fingerprintMismatch && isAuthFailure(message)) {
+        // 密码认证被拒：丢掉本次运行的临时密码（写错了或已过期），回到「向用户要密码」
+        // 这一步。刻意**不**发 error/status closed——那会把界面钉在失败页，而此刻
+        // 用户该看到的是密码卡（卡上自带失败原因）；记录静默销毁。
+        this.sessionPasswords.delete(record.hostId);
+        this.abortPendingExec(record);
+        const identity = { id: record.hostId, name: record.hostName, host: record.host, port: record.port, username: record.username };
+        this.disposeRecord(terminalId);
+        this.publishPasswordRequired(terminalId, identity, "auth-failed", message);
+        return;
+      }
       const detail = record.fingerprintMismatch
         ? `主机指纹与已记录的不一致（可能是中间人攻击，或服务器重装/换 IP）。记录指纹校验失败：${record.fingerprintMismatch}。若确认服务器已更换，请删除 userData/pidesktop-ssh-known-hosts.json 中 ${stored.host}:${stored.port} 条目后重连。`
-        : error.message || "SSH 连接失败";
+        : message;
       this.failRecord(terminalId, detail);
     }) as unknown as (...args: never[]) => void);
 
@@ -503,10 +634,33 @@ export class SshConnectionManager {
     }) as unknown as (...args: never[]) => void);
 
     on("ready", (() => {
+      if (record.status === "closed") return; // 握手期间已被 kill（用户关标签/取消）
       record.client.shell({ term: "xterm-256color", cols: clampDimension(cols, 80), rows: clampDimension(rows, 24) }, (error, stream) => {
+        if (record.status === "closed") {
+          stream?.close();
+          return;
+        }
         if (error || !stream) {
           this.failRecord(terminalId, error?.message || "无法打开远程 shell（服务器可能禁用了 PTY 分配）");
           return;
+        }
+        // 「记住密码」到这一刻才落库：密码正确性已被服务器验证。落库对象是**当前**
+        // 主机配置（用户在连接期间可能刚改过地址/账号），缓存里的 secret 同步刷新，
+        // 否则刚存的凭据会被自己的指纹校验判为陈旧。写盘失败不让用户误以为已保存。
+        const cached = this.sessionPasswords.get(hostId);
+        const current = this.deps.hostStore.get(hostId);
+        if (cached?.remember && cached.password === password && current && cached.host === current.host && cached.port === current.port && cached.username === current.username && cached.secret === current.secret) {
+          try {
+            this.deps.hostStore.setPassword(hostId, password);
+            cached.secret = current.secret;
+            cached.remember = false;
+            this.deps.notifyHostsChanged?.();
+          } catch {
+            cached.remember = false;
+            stream.close();
+            this.failRecord(terminalId, "保存 SSH 密码失败，请重新连接；下次将仅在本次运行内使用密码");
+            return;
+          }
         }
         record.stream = stream;
         record.status = "connected";
@@ -561,7 +715,6 @@ export class SshConnectionManager {
         return false;
       }
     });
-    return { kind: "connect" };
   }
 
   // ——— SFTP 文件传输（人工渲染端命令） ———
@@ -671,20 +824,24 @@ export class SshConnectionManager {
         case "connect": {
           const stored = this.findHost(request.host);
           const existing = [...this.connections.values()].find((record) => record.hostId === stored.id && record.status !== "closed");
+          // 同一主机已经有一张「等用户输密码」的卡（可能是用户刚刚点开的，也可能是上一次
+          // ssh_connect 留下的）：复用它，不再开第二张卡、不堆 tab。
+          const pending = [...this.pendingPasswords.values()].find((event) => event.hostId === stored.id);
           let terminalId: string;
-          if (existing) {
-            terminalId = existing.terminalId;
+          if (existing || pending) {
+            terminalId = (existing ?? pending!).terminalId;
           } else {
             terminalId = `ssh-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
             this.connect(terminalId, stored.id, 80, 24, false);
-            // 连接是异步的：等就绪 / 失败 / 探测出指纹（TOFU 需人工确认，AI 拒绝）。
-            await this.waitForConnected(terminalId);
           }
+          // reveal 必须在等待**之前**：没有密码时密码卡就是正事（用户不看到它，这个请求
+          // 只能超时）；认证被拒时 record 已被销毁，密码卡也得有活着的标签在听。
+          this.deps.reveal({ terminalId, hostId: stored.id, hostName: stored.name });
+          // 同一个请求等下去：用户输入密码（或取消 / 关标签 / 超时）后这里才返回。
+          await this.waitForConnected(terminalId);
           this.sessionBindings.set(sessionKey, terminalId);
           const record = this.connections.get(terminalId);
           if (!record) throw new Error("连接已失效，请重试 ssh_connect");
-          // AI 绑定的连接对用户可见（tab 激活）：命令回显是需求核心。
-          this.deps.reveal({ terminalId, hostId: record.hostId, hostName: record.hostName });
           return { ok: true, data: { kind: "connect", connection: connectionInfoOf(record) } };
         }
         case "exec": {
@@ -763,7 +920,7 @@ export class SshConnectionManager {
           // 分组按名称解析（工具层不暴露内部 id）：命中复用，未命中创建。
           const groupName = draft.groupName?.trim();
           const groupId = groupName ? this.resolveGroupId(groupName) : undefined;
-          // 永远不传密码：新建=无密码（用户后续在面板补录），编辑=保留原密码。
+          // 永远不传密码：新建=无密码（连接时由用户在密码卡输入），编辑=保留原密码。
           const existing = request.target?.trim() ? this.findHost(request.target) : undefined;
           const saved = this.deps.hostStore.save({ ...(existing ? { id: existing.id } : {}), name: draft.name, host: draft.host, username: draft.username, ...(draft.port !== undefined ? { port: draft.port } : {}), ...(groupId !== undefined ? { groupId } : {}) }, undefined);
           this.deps.notifyHostsChanged?.();
@@ -772,6 +929,7 @@ export class SshConnectionManager {
         case "host-delete": {
           const stored = this.findHost(request.host);
           if (!this.deps.hostStore.remove(stored.id)) throw new Error(`主机「${stored.name}」不存在或已删除`);
+          this.forgetHost(stored.id);
           this.deps.notifyHostsChanged?.();
           return { ok: true, data: { kind: "host-deleted", hostName: stored.name } };
         }
@@ -870,6 +1028,14 @@ export class SshConnectionManager {
     throw new Error(`未找到主机「${query}」。可用主机：${hosts.map((host) => host.name).join("、")}`);
   }
 
+  /** 删除主机时清掉内存凭据 + 结束还在等输入的询问（内存卫生，不是权限边界）。 */
+  private forgetHost(hostId: string): void {
+    this.sessionPasswords.delete(hostId);
+    for (const event of [...this.pendingPasswords.values()]) {
+      if (event.hostId === hostId) this.kill(event.terminalId);
+    }
+  }
+
   private boundRecord(sessionKey: string): ConnectionRecord {
     const terminalId = this.sessionBindings.get(sessionKey);
     if (!terminalId) throw new Error("当前会话尚未建立 SSH 连接，请先调用 ssh_connect。");
@@ -894,21 +1060,30 @@ export class SshConnectionManager {
     }
   }
 
-  /** 等待连接就绪/失败/指纹探测（AI 新建连接用；复用已有连接时不会走到这里）。 */
+  /**
+   * 等待连接就绪 / 失败 / 指纹探测（AI 新建连接用；复用已有连接时不会走到这里）。
+   *
+   * 密码卡也是「等待」的一种：用户还在输入时不看作超时，只是把整体预算放长
+   *（输入 90s、整个调用 110s，都小于 utility 侧的 120s watchdog）。用户取消、关闭
+   * 标签（kill 清掉 pendingPasswords）或超时都会让这次 ssh_connect 如实报错，而不是
+   * 让模型的回合无限挂起。
+   */
   private waitForConnected(terminalId: string, timeoutMs = CONNECT_TIMEOUT_MS + 5_000): Promise<void> {
     return new Promise((resolve, reject) => {
       const record = this.connections.get(terminalId);
-      if (!record) return reject(new Error("连接已失效"));
-      if (record.status === "connected") return resolve();
+      if (!record && !this.pendingPasswords.has(terminalId)) return reject(new Error("连接已取消或失效"));
+      if (record && record.status === "connected") return resolve();
       const cleanup = (): void => {
         clearTimeout(timer);
         clearInterval(poll);
       };
+      const started = Date.now();
+      let passwordSeen = this.pendingPasswords.has(terminalId);
       const timer = setTimeout(() => {
         cleanup();
         this.kill(terminalId);
-        reject(new Error(`SSH 连接超时（${Math.round(timeoutMs / 1000)} 秒），请检查主机地址、端口与防火墙`));
-      }, timeoutMs);
+        reject(new Error("SSH 连接等待超时（含等待用户输入密码），请重新连接"));
+      }, 110_000);
       const poll = setInterval(() => {
         // TOFU 探测优先于「记录消失」判定：探测被拒后 record 已被静默清理。
         const probed = this.probedFingerprints.get(terminalId);
@@ -919,10 +1094,27 @@ export class SshConnectionManager {
           reject(new Error(`首次连接该主机需要确认服务器指纹（指纹 ${probed}）。可调用 ssh_trust_fingerprint（host: 主机名）信任它，然后重新 ssh_connect；也可以让用户在 SSH 面板连接并确认。`));
           return;
         }
+        if (this.pendingPasswords.has(terminalId)) {
+          // 还停在密码卡上：不提「记录不存在」的报错，只在超过输入预算时收摊。
+          passwordSeen = true;
+          if (Date.now() - started > 90_000) {
+            cleanup();
+            this.kill(terminalId);
+            reject(new Error("等待输入 SSH 密码超时，请重新连接或让用户先在面板保存密码"));
+          }
+          return;
+        }
+        // 提交密码前的常规超时仍然生效（没人在输密码时不该干等 110s）。
+        if (!passwordSeen && Date.now() - started > timeoutMs) {
+          cleanup();
+          this.kill(terminalId);
+          reject(new Error(`SSH 连接超时（${Math.round(timeoutMs / 1000)} 秒），请检查主机地址、端口与防火墙`));
+          return;
+        }
         const current = this.connections.get(terminalId);
         if (!current || current.status === "closed") {
           cleanup();
-          reject(new Error("SSH 连接失败或已断开（认证被拒绝或网络不可达）"));
+          reject(new Error("SSH 连接已取消、失败或断开"));
           return;
         }
         if (current.status === "connected") {
@@ -1087,6 +1279,10 @@ export class SshConnectionManager {
   }
 
   kill(terminalId: string): void {
+    // 还在等用户输密码：清掉询问请求（它同时是「等待中」的标记），并告知界面已取消。
+    if (this.pendingPasswords.delete(terminalId)) {
+      this.deps.publish(terminalId, { type: "status", terminalId, status: "closed", detail: "已取消输入密码" });
+    }
     const record = this.connections.get(terminalId);
     if (!record) return;
     record.status = "closed"; // 先置态：后续 error/close 事件据此静默
@@ -1101,7 +1297,23 @@ export class SshConnectionManager {
 
   disposeAll(): void {
     for (const terminalId of [...this.connections.keys()]) this.kill(terminalId);
+    for (const terminalId of [...this.pendingPasswords.keys()]) this.kill(terminalId);
+    this.sessionPasswords.clear();
   }
+}
+
+/** 主机身份（事件载荷用）。 */
+function identityOf(stored: StoredSshHost): SshHostIdentity {
+  return { id: stored.id, name: stored.name, host: stored.host, port: stored.port, username: stored.username };
+}
+
+/**
+ * 密码认证失败的识别（ssh2 在「所有认证方式都试过且失败」时给这条固定文案）。
+ * 刻意只认这些模式：把任意 error 都当认证失败会让「网络不通」也弹出密码框，
+ * 反复让用户白输密码。
+ */
+export function isAuthFailure(message: string): boolean {
+  return /all configured authentication methods failed|no supported authentication methods|authentication failed/i.test(message);
 }
 
 function connectionInfoOf(record: ConnectionRecord): SshConnectionInfo {

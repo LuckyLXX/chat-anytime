@@ -1367,7 +1367,13 @@ export interface SshRemoteEntry {
 }
 
 export type SshCommand =
-  | { type: "connect"; terminalId: string; hostId: string; cols: number; rows: number; trustFingerprint?: boolean }
+  /**
+   * 发起连接。`password`/`rememberPassword` 只在「主机没有可用密码」时由渲染端的
+   * 密码卡补传（用户输入后拿同一 terminalId 重发同一条 connect）：主进程据此继续
+   * 连接，`rememberPassword` 为 true 时经 safeStorage 加密落库。密码方向永远只有
+   * 渲染端 → 主进程这一条，主进程不回传任何明文。
+   */
+  | { type: "connect"; terminalId: string; hostId: string; cols: number; rows: number; trustFingerprint?: boolean; password?: string; rememberPassword?: boolean }
   | { type: "input"; terminalId: string; data: string }
   | { type: "resize"; terminalId: string; cols: number; rows: number }
   | { type: "kill"; terminalId: string }
@@ -1408,6 +1414,15 @@ export type SshEventData =
   | { type: "error"; terminalId: string; message: string }
   /** TOFU 探测：hostVerifier 在异步握手中拿到指纹后推送给渲染端显示确认卡（ssh2 的 connect() 返回时握手尚未发生，指纹不可能随命令返回值带回）。 */
   | { type: "fingerprint"; terminalId: string; fingerprint: string }
+  /**
+   * 主机没有可用密码，需要用户在界面上输入一次：reason "missing" = 从未保存、
+   * 也没有本次运行的临时密码；"auth-failed" = 服务器拒绝了密码认证（密码错、
+   * 或该服务器不接受密码登录），内存里的临时密码已被丢弃。渲染端据此弹密码卡，
+   * 用户提交后用同一 terminalId 重发带 password 的 connect；取消则不发。
+   * 两种来源都会推这条事件：人工面板点「连接」，以及 AI 的 ssh_connect（后者顺带
+   * reveal 出终端标签，所以卡片一定有地方显示）。
+   */
+  | { type: "password-required"; terminalId: string; hostId: string; hostName: string; host: string; port: number; username: string; reason: "missing" | "auth-failed"; /** 勾「记住密码」会以明文降级落盘（safeStorage 不可用）；卡片据此改文案。 */ credentialInsecure?: boolean; detail?: string }
   /**
    * SFTP 传输进度/终态。人工传输由渲染端按 transferId 关联；终态（done /
    * error / cancelled）之后不再有该 transferId 的事件。
@@ -1451,7 +1466,7 @@ export type SshAutomationRequest =
   // 按 hostKey 记 pending，工具只能消费它，不能凭空写库（见 SshConnectionManager）。
   // fingerprint 可选：传了就必须与 pending 一致，用于防 AI 手抄出错。
   | { op: "trust-host"; host: string; fingerprint?: string }
-  // host-save **不带密码**：新主机建好后密码仍由用户在面板补录（避免明文密码
+  // host-save **不带密码**：新主机建好后连接时由用户在密码卡输入（避免明文密码
   // 进入 AI 会话记录）。groupName 按名称解析，**不存在会自动创建**（2026-10-14
   // 批量导入落地时放开了原来的「未知分组报错」）；target 给定时是「编辑既有主机」
   // （名称或 id，由主进程 findHost 解析），缺省 = 新建。

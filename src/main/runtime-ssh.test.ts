@@ -157,8 +157,8 @@ describe("buildSshTools", () => {
       request: { op: "host-save", draft: { name: "staging", host: "10.0.0.9", username: "deploy", port: 2222, groupName: "生产环境" } },
       timeoutMs: undefined
     }]);
-    // 无密码是刻意的：回执必须直接告诉模型「要请用户补录密码」。
-    expect(JSON.stringify(result)).toContain("补录密码");
+    // 无密码是刻意的：回执必须直接告诉模型「密码输入框会自己弹出来，让用户输入」。
+    expect(JSON.stringify(result)).toContain("密码输入框");
   });
 
   it("passes target through when editing a host, and validates required fields first", async () => {
@@ -173,7 +173,7 @@ describe("buildSshTools", () => {
     const result = await tool.execute("id", { name: "prod-2", address: "10.0.0.8", username: "root", target: "prod" }, undefined, undefined, undefined as never);
     expect(requests[0]!.request).toEqual({ op: "host-save", draft: { name: "prod-2", host: "10.0.0.8", username: "root" }, target: "prod" });
     // 已有密码的主机不再重复提醒。
-    expect(JSON.stringify(result)).not.toContain("补录密码");
+    expect(JSON.stringify(result)).not.toContain("密码输入框");
   });
 
   it("forwards fingerprint trust and renders both the first-time and idempotent receipts", async () => {
@@ -236,7 +236,7 @@ describe("buildSshTools", () => {
     expect(text).toContain("新建 2 台");
     expect(text).toContain("生产环境");
     expect(text).toContain("主机地址不能包含空格");
-    expect(text).toContain("补录密码");
+    expect(text).toContain("密码输入框");
   });
 
   it("does not loudly validate rows in the tool layer (bad rows are reported per-row by the main process)", async () => {

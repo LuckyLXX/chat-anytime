@@ -74,7 +74,7 @@
 
 > `automation-settings` 是设置页「自动化任务」tab（双子页：「任务」列表 + 搜索 + 过滤器 / 「运行记录」历史面板，位于 `settings-dialog` 内）；`automation-dialog` 是「创建/编辑定时任务」弹窗。二者都随设置页/弹窗配色走，主题可用 `--panel-bg` 派生背景与 `--border`/`--surface-*` 控制排版。相关控件钩子：`data-control="automation-open"`（侧栏「新建话题」下方的「自动化」入口 + 折叠态窄条图标）、`automation-run`（任务行内的「运行一次」）、`automation-toggle`（任务行的启停开关，`role="switch"` + `aria-checked` 标记两态）、`automation-runs-tab`（子页「运行记录」）；未在控件列枚举的地方（如编辑/删除按钮）用类名 `.automation-*` 命中。
 
-> `ssh` 是预览面板的 SSH 主机管理 tab（`data-pane="ssh"`，与 `terminal` 同层；远程终端 tab 本体也是 `terminal` 区域）。主机列表/表单/指纹确认卡用类名 `.ssh-host-*` / `.ssh-fingerprint-*` 命中，安全存储警告条 `.ssh-insecure-warning`；主机清单按分组折叠展示（`.ssh-group-*` 类名，未分组为固定尾节）。相关控件钩子：`data-control="ssh-open"`（侧栏「新建话题」下方的「SSH」入口 + 折叠态窄条图标）、`ssh-host-create` / `ssh-host-save` / `ssh-host-delete` / `ssh-host-connect`（主机面板动作；`ssh-host-save` 只在编辑表单里出现）、`ssh-trust-fingerprint`（首次连接指纹确认卡）、`ssh-group-create` / `ssh-group-save`（分组新建/保存）；删除分组等未枚举的图标按钮用 `.ssh-host-*` / `.ssh-group-*` 区域内的按钮通用选择器命中。
+> `ssh` 是预览面板的 SSH 主机管理 tab（`data-pane="ssh"`，与 `terminal` 同层；远程终端 tab 本体也是 `terminal` 区域）。主机列表/表单/指纹确认卡用类名 `.ssh-host-*` / `.ssh-fingerprint-*` 命中，安全存储警告条 `.ssh-insecure-warning`；主机清单按分组折叠展示（`.ssh-group-*` 类名，未分组为固定尾节）。相关控件钩子：`data-control="ssh-open"`（侧栏「新建话题」下方的「SSH」入口 + 折叠态窄条图标）、`ssh-host-create` / `ssh-host-save` / `ssh-host-delete` / `ssh-host-connect`（主机面板动作；`ssh-host-save` 只在编辑表单里出现）、`ssh-trust-fingerprint`（首次连接指纹确认卡）、`ssh-password-submit` / `ssh-password-cancel`（主机没有可用密码时弹出的密码输入卡，含「密码被拒后重弹」）、`ssh-group-create` / `ssh-group-save`（分组新建/保存）；删除分组等未枚举的图标按钮用 `.ssh-host-*` / `.ssh-group-*` 区域内的按钮通用选择器命中。
 
 > `ssh-files` 是 SSH 远程终端内的**远端文件面板**（`data-pane="ssh-files"`，位于 `data-pane="terminal"` 区域**内部**的下方分屏，不是独立区域也不是覆盖层）。终端区域此时是竖向 flex：`[终端][操作条][文件面板]` —— 终端只变矮不变窄。面板由操作条里的按钮开关（`.ssh-files-toggle`，未开时显示「远端文件」、已开时显示「收起文件」且带 `.active`）；**开关在操作条里而不在面板内**，故永远不会被面板遮住。面包屑/列表行/传输进度分别用 `.ssh-files-*` / `.ssh-transfer-*` 类名命中。相关控件钩子：`data-control="ssh-files-toggle"`（开关）、`ssh-upload` / `ssh-download`（上传/下载按钮）、`ssh-transfer-cancel`（进行中传输的取消按钮）。**主题注意**：面板高度是 flex 的 `0 0 45%`（含 `min-height: 140px`），主题若要改高矮请改这个 flex 基准值，不要改成 `position: absolute`（会重新变成覆盖层并遮住开关）。传输进度条的宽度由内联 `style.width` 驱动，主题改高度/颜色即可，不要改 `width`。
 
@@ -97,6 +97,7 @@
 | SSH 远程终端（侧栏新建话题下方 + 折叠窄条） | `ssh-open`                                      |
 | SSH 主机面板：新建/保存/删除/连接           | `ssh-host-create` `ssh-host-save` `ssh-host-delete` `ssh-host-connect`（`ssh-host-save` 只在编辑表单里） |
 | SSH 首次连接指纹确认卡的「信任并连接」      | `ssh-trust-fingerprint`                          |
+| SSH 密码输入卡的「连接」/「取消」（无密码或密码被拒时） | `ssh-password-submit` / `ssh-password-cancel` |
 | SSH 远端文件面板：开关 / 上传 / 下载 / 取消传输 | `ssh-files-toggle` `ssh-upload` `ssh-download` `ssh-transfer-cancel` |
 | 设置（侧栏底部）                            | `settings`                                       |
 | 打开工作区（顶栏 + 空态主按钮）             | `workspace-open`                                 |
