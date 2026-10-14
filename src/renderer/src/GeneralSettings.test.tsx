@@ -145,8 +145,8 @@ describe("通用页结构契约", () => {
   it("四个能力总闸各是一行开关（图标 + 名称 + 可见说明），且缺省启用语义与运行时一致", () => {
     render();
     const rows = [...container.querySelectorAll(".general-switch-row")];
-    // 4 个能力总闸 + 「展示思考过程」+「空态展示作品墙」共 6 行
-    expect(rows).toHaveLength(6);
+    // 4 个能力总闸 + SSH 子开关（首连自动信任）+「展示思考过程」+「空态展示作品墙」共 7 行
+    expect(rows).toHaveLength(7);
     const caps = rows.slice(0, 4).map((row) => ({
       control: row.querySelector("[data-control=\"capability-switch\"]")?.getAttribute("data-capability"),
       checked: (row.querySelector("input") as HTMLInputElement).checked,
@@ -156,6 +156,25 @@ describe("通用页结构契约", () => {
     // settings.ssh.enabled === false → 关；其余缺省/显式开。说明文字必须可见。
     expect(caps.map((cap) => cap.checked)).toEqual([true, false, true, true]);
     expect(caps.every((cap) => (cap.hint ?? "").length > 5)).toBe(true);
+  });
+
+  // 首连自动信任子开关：只改一个键。两条用例一起钉住「不抹总闸」与「不被总闸抹」
+  // ——两侧都是「整对象覆盖」会出的事故（toggleCapability 曾经的写法）。
+  it("SSH 子开关「首次连接自动信任指纹」缺省关，打开后写进 settings.ssh 且不动总闸", async () => {
+    render();
+    const input = container.querySelector("[data-control=\"ssh-auto-trust\"]") as HTMLInputElement;
+    expect(input).not.toBeNull();
+    expect(input.checked).toBe(false);
+    expect((input.closest(".general-switch-row")?.querySelector("small")?.textContent ?? "").length).toBeGreaterThan(5);
+    await act(async () => { input.click(); });
+    expect(useDesktopStore.getState().settings.ssh).toEqual({ enabled: false, autoTrustFingerprint: true });
+  });
+
+  it("切换 SSH 总闸不会抹掉子开关", async () => {
+    render({ settings: { ...structuredClone(settings), ssh: { enabled: false, autoTrustFingerprint: true } } });
+    const master = container.querySelector("[data-capability=\"ssh\"]") as HTMLInputElement;
+    await act(async () => { master.click(); });
+    expect(useDesktopStore.getState().settings.ssh).toEqual({ enabled: true, autoTrustFingerprint: true });
   });
 
   it("「界面」卡的空态作品墙开关：缺省显示为开，关掉后写进 appearance 并随「保存通用设置」提交", async () => {

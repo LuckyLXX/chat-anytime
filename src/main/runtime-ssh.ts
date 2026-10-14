@@ -7,9 +7,10 @@
 // user's xterm tab (the main process reveals the tab via ssh:reveal).
 //
 // Permission model (permissions.ts): ssh_connect / ssh_exec / ssh_write /
-// ssh_close carry risk "ssh" through the permission gate (read-only denies,
-// workspace asks — the dialog offers allow-session —, full allows);
-// ssh_hosts / ssh_read are ungated observation. The master switch
+// ssh_close / ssh_trust_fingerprint / ssh_host_save / ssh_host_delete carry risk "ssh"
+// through the permission gate (read-only denies, workspace asks — the dialog
+// offers allow-session —, full allows); ssh_hosts / ssh_read are ungated
+// observation. The master switch
 // settings.ssh.enabled is read live per call (memory-style: tools stay
 // registered either way, no session rebuild). The switch gates AI usage
 // only — a human opening terminals in the SSH panel is never blocked.
@@ -47,7 +48,7 @@ export const TRANSFER_OUTER_TIMEOUT_MS = 31 * 60_000;
 
 /**
  * SSH 工具族的激活判据（toolNamesFor 消费）：全局总闸 AND 角色级 overlay。
- * 任一关闭即整族从活动集摘除（8 个 ssh_* 同进同出）；execute 内的 enabled
+ * 任一关闭即整族从活动集摘除（11 个 ssh_* 同进同出）；execute 内的 enabled
  * 闭包保留作第二道防线（在途回合/旧会话兑底）。人的 SSH 面板不受影响。
  */
 export function shouldActivateSshTools(input: { globalEnabled: boolean; agentEnabled: boolean }): boolean {
@@ -69,7 +70,7 @@ function formatHosts(data: { hosts: SshHostSummary[]; groups: { id: string; name
   if (data.hosts.length === 0) {
     return [
       "尚未配置任何 SSH 主机。",
-      "请让用户在侧边栏「SSH」面板新建主机（名称/地址/端口/用户名/密码），保存后即可 ssh_connect。"
+      "两种做法：① 让用户在侧边栏「SSH」面板新建主机（名称/地址/端口/用户名/密码）；② 用 ssh_host_save 建主机基本信息（不带密码，随后仍需用户在面板补录密码）。"
     ].join("\n");
   }
   const groupNameOf = (groupId: string | undefined): string => {
@@ -111,9 +112,62 @@ export function buildSshTools(deps: SshToolDeps): ToolDefinition[] {
       }
     }),
     defineTool({
+      name: "ssh_host_save",
+      label: "SSH 保存主机",
+      description: "新建或编辑一台 SSH 主机配置（名称/地址/端口/用户名/分组）。**本工具不写密码**：保存后需让用户在 SSH 面板为它补录密码，ssh_connect 才能连上（密码不进入 AI 上下文与会话记录）。target 给定时是编辑既有主机（名称或 id），缺省为新建。",
+      promptSnippet: "ssh_host_save: 新建或编辑 SSH 主机",
+      parameters: Type.Object({
+        name: Type.String({ description: "主机显示名，例：生产服务器" }),
+        address: Type.String({ description: "主机地址（IP 或域名）" }),
+        username: Type.String({ description: "登录用户名，例：root" }),
+        port: Type.Optional(Type.Number({ description: "端口，缺省 22" })),
+        groupName: Type.Optional(Type.String({ description: "分组名称（必须已存在；缺省 = 不分组，编辑时保留原分组）" })),
+        target: Type.Optional(Type.String({ description: "要编辑的既有主机（名称或 id）；缺省 = 新建" }))
+      }),
+      execute: async (_id, params) => {
+        const name = typeof params?.name === "string" ? params.name.trim() : "";
+        const address = typeof params?.address === "string" ? params.address.trim() : "";
+        const username = typeof params?.username === "string" ? params.username.trim() : "";
+        if (!name) throw new Error("请提供主机显示名（name）");
+        if (!address) throw new Error("请提供主机地址（address）");
+        if (!username) throw new Error("请提供登录用户名（username）");
+        const port = typeof params?.port === "number" ? Math.round(params.port) : undefined;
+        const groupName = typeof params?.groupName === "string" ? params.groupName.trim() : "";
+        const target = typeof params?.target === "string" ? params.target.trim() : "";
+        const result = await run(deps, {
+          op: "host-save",
+          draft: { name, host: address, username, ...(port !== undefined ? { port } : {}), ...(groupName ? { groupName } : {}) },
+          ...(target ? { target } : {})
+        });
+        if (result.data.kind !== "host-saved") throw new Error("host-save 操作返回了意外结果");
+        const saved = result.data.host;
+        const lines = [
+          `已${target ? "更新" : "新建"}主机 ${saved.name}（${saved.username}@${saved.host}:${saved.port}）。`,
+          saved.hasPassword ? "" : "该主机尚未保存密码——请让用户在 SSH 面板为它补录密码，之后 ssh_connect 才能连上。"
+        ];
+        return { content: [{ type: "text" as const, text: lines.filter(Boolean).join("\n") }], details: { host: saved } };
+      }
+    }),
+    defineTool({
+      name: "ssh_host_delete",
+      label: "SSH 删除主机",
+      description: "删除一台已配置的 SSH 主机（含其保存的密码）。已建立的连接不会被断开；此操作不可撤销。",
+      promptSnippet: "ssh_host_delete: 删除 SSH 主机",
+      parameters: Type.Object({
+        host: Type.String({ description: "主机名称（或 id），可先用 ssh_hosts 列出" })
+      }),
+      execute: async (_id, params) => {
+        const host = typeof params?.host === "string" ? params.host.trim() : "";
+        if (!host) throw new Error("请提供要删除的主机名称（可先用 ssh_hosts 列出）");
+        const result = await run(deps, { op: "host-delete", host });
+        if (result.data.kind !== "host-deleted") throw new Error("host-delete 操作返回了意外结果");
+        return { content: [{ type: "text" as const, text: `已删除主机 ${result.data.hostName}（配置与已保存的密码一并清除）。` }], details: {} };
+      }
+    }),
+    defineTool({
       name: "ssh_connect",
       label: "SSH 连接主机",
-      description: "连接一台已配置的 SSH 主机（本会话后续 ssh_exec/ssh_write/ssh_read 都作用于此连接）。已有该主机的活跃连接时直接复用（用户窗口里能看到你的操作）。首次连接需用户先在 SSH 面板人工确认过服务器指纹。",
+      description: "连接一台已配置的 SSH 主机（本会话后续 ssh_exec/ssh_write/ssh_read 都作用于此连接）。已有该主机的活跃连接时直接复用（用户窗口里能看到你的操作）。首次连接一台新主机会因服务器指纹未知而失败，回执里带指纹——用 ssh_trust_fingerprint 信任后重试即可。主机未保存密码时需先让用户在面板补录。",
       promptSnippet: "ssh_connect: 连接 SSH 主机",
       parameters: Type.Object({
         host: Type.String({ description: "主机名称（或留空列出可选主机）" })
@@ -132,6 +186,28 @@ export function buildSshTools(deps: SshToolDeps): ToolDefinition[] {
           `已连接 ${conn.hostName}（${conn.username}@${conn.host}），终端标签 ${conn.terminalId} 已在用户界面打开——你执行的命令会实时回显在该窗口。`,
           "常用节奏：ssh_exec 执行命令（输出带退出码）；长任务建议 `nohup ... > /tmp/x.log 2>&1 &` 后用 ssh_read 轮询；交互提示（密码确认/y-n）用 ssh_write 应答。"
         ].join("\n");
+        return { content: [{ type: "text" as const, text }], details: {} };
+      }
+    }),
+    defineTool({
+      name: "ssh_trust_fingerprint",
+      label: "SSH 信任主机指纹",
+      description: "信任一台主机的服务器指纹（TOFU）。首次 ssh_connect 新主机会失败并在回执里给出指纹，确认无误后用本工具记录它，随后 ssh_connect 即可成功。指纹一旦记录，之后服务器指纹发生变化仍会拒绝连接（防中间人）。",
+      promptSnippet: "ssh_trust_fingerprint: 记录服务器指纹",
+      parameters: Type.Object({
+        host: Type.String({ description: "主机名称（或唯一前缀），即 ssh_connect 用的名字" }),
+        fingerprint: Type.Optional(Type.String({ description: "可选：与连接失败时给出的指纹核对，不一致会被拒绝（一般不用传）" }))
+      }),
+      execute: async (_id, params) => {
+        const host = typeof params?.host === "string" ? params.host.trim() : "";
+        if (!host) throw new Error("请提供要信任的主机名称（可先用 ssh_hosts 列出）");
+        const fingerprint = typeof params?.fingerprint === "string" ? params.fingerprint.trim() : "";
+        const result = await run(deps, { op: "trust-host", host, ...(fingerprint ? { fingerprint } : {}) });
+        if (result.data.kind !== "trust-host") throw new Error("trust-host 操作返回了意外结果");
+        const data = result.data;
+        const text = data.alreadyTrusted
+          ? `${data.hostName}（${data.host}）的指纹已在信任列表中（${data.fingerprint}），无需重复信任，可直接 ssh_connect。`
+          : `已信任 ${data.hostName}（${data.host}）的服务器指纹 ${data.fingerprint}。现在可以 ssh_connect 该主机；此后指纹若发生变化将被拒绝连接。`;
         return { content: [{ type: "text" as const, text }], details: {} };
       }
     }),

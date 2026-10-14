@@ -27,16 +27,19 @@ function toolByName(tools: ReturnType<typeof buildSshTools>, name: string) {
 }
 
 describe("buildSshTools", () => {
-  it("exposes the eight ssh_* tools with stable names", () => {
+  it("exposes the eleven ssh_* tools with stable names", () => {
     const { tools } = createHarness();
-    expect(tools.map((tool) => tool.name)).toEqual(["ssh_hosts", "ssh_connect", "ssh_exec", "ssh_write", "ssh_read", "ssh_close", "ssh_upload", "ssh_download"]);
+    expect(tools.map((tool) => tool.name)).toEqual(["ssh_hosts", "ssh_host_save", "ssh_host_delete", "ssh_connect", "ssh_trust_fingerprint", "ssh_exec", "ssh_write", "ssh_read", "ssh_close", "ssh_upload", "ssh_download"]);
   });
 
   it("honors the live master switch on every tool", async () => {
     const { tools } = createHarness({ enabled: false });
     const payloads: Record<string, unknown> = {
       ssh_hosts: {},
+      ssh_host_save: { name: "prod", address: "10.0.0.8", username: "root" },
+      ssh_host_delete: { host: "prod" },
       ssh_connect: { host: "prod" },
+      ssh_trust_fingerprint: { host: "prod" },
       ssh_exec: { command: "uptime" },
       ssh_write: { data: "y" },
       ssh_read: {},
@@ -139,5 +142,67 @@ describe("buildSshTools", () => {
     expect(dataFromLiteral("y\\n")).toBe("y\n");
     expect(dataFromLiteral("a\\rb\\n")).toBe("a\rb\n");
     expect(dataFromLiteral("C:\\\\path")).toBe("C:\\path");
+  });
+
+  it("forwards a host save without a password and tells the model to ask for one", async () => {
+    const { tools, requests } = createHarness({
+      result: { ok: true, data: { kind: "host-saved", host: { id: "ssh-1", name: "staging", host: "10.0.0.9", port: 2222, username: "deploy", hasPassword: false } } }
+    });
+    const tool = toolByName(tools, "ssh_host_save");
+    const result = await tool.execute("id", { name: "staging", address: "10.0.0.9", username: "deploy", port: 2222, groupName: "生产环境" }, undefined, undefined, undefined as never);
+    expect(requests).toEqual([{
+      request: { op: "host-save", draft: { name: "staging", host: "10.0.0.9", username: "deploy", port: 2222, groupName: "生产环境" } },
+      timeoutMs: undefined
+    }]);
+    // 无密码是刻意的：回执必须直接告诉模型「要请用户补录密码」。
+    expect(JSON.stringify(result)).toContain("补录密码");
+  });
+
+  it("passes target through when editing a host, and validates required fields first", async () => {
+    const { tools, requests } = createHarness({
+      result: { ok: true, data: { kind: "host-saved", host: { id: "ssh-1", name: "prod-2", host: "10.0.0.8", port: 22, username: "root", hasPassword: true } } }
+    });
+    const tool = toolByName(tools, "ssh_host_save");
+    await expect(tool.execute("id", { name: "  ", address: "10.0.0.8", username: "root" }, undefined, undefined, undefined as never)).rejects.toThrow("主机显示名");
+    await expect(tool.execute("id", { name: "prod", address: "", username: "root" }, undefined, undefined, undefined as never)).rejects.toThrow("主机地址");
+    await expect(tool.execute("id", { name: "prod", address: "10.0.0.8", username: " " }, undefined, undefined, undefined as never)).rejects.toThrow("登录用户名");
+    expect(requests).toHaveLength(0);
+    const result = await tool.execute("id", { name: "prod-2", address: "10.0.0.8", username: "root", target: "prod" }, undefined, undefined, undefined as never);
+    expect(requests[0]!.request).toEqual({ op: "host-save", draft: { name: "prod-2", host: "10.0.0.8", username: "root" }, target: "prod" });
+    // 已有密码的主机不再重复提醒。
+    expect(JSON.stringify(result)).not.toContain("补录密码");
+  });
+
+  it("forwards fingerprint trust and renders both the first-time and idempotent receipts", async () => {
+    const first = createHarness({
+      result: { ok: true, data: { kind: "trust-host", hostName: "prod", host: "10.0.0.8", fingerprint: "SHA256:abc", alreadyTrusted: false } }
+    });
+    const tool = toolByName(first.tools, "ssh_trust_fingerprint");
+    const result = await tool.execute("id", { host: "prod" }, undefined, undefined, undefined as never);
+    expect(first.requests[0]!.request).toEqual({ op: "trust-host", host: "prod" });
+    expect(JSON.stringify(result)).toContain("SHA256:abc");
+    // 重复信任要能看出「本来就在库里」，否则模型会以为刚写了新指纹。
+    const again = createHarness({
+      result: { ok: true, data: { kind: "trust-host", hostName: "prod", host: "10.0.0.8", fingerprint: "SHA256:abc", alreadyTrusted: true } }
+    });
+    const againResult = await toolByName(again.tools, "ssh_trust_fingerprint").execute("id", { host: "prod", fingerprint: "SHA256:abc" }, undefined, undefined, undefined as never);
+    expect(again.requests[0]!.request).toEqual({ op: "trust-host", host: "prod", fingerprint: "SHA256:abc" });
+    expect(JSON.stringify(againResult)).toContain("已在信任列表");
+  });
+
+  it("rejects an empty host name before any RPC for trust and delete", async () => {
+    const { tools, requests } = createHarness();
+    await expect(toolByName(tools, "ssh_trust_fingerprint").execute("id", { host: "  " }, undefined, undefined, undefined as never)).rejects.toThrow("主机名称");
+    await expect(toolByName(tools, "ssh_host_delete").execute("id", {}, undefined, undefined, undefined as never)).rejects.toThrow("主机名称");
+    expect(requests).toHaveLength(0);
+  });
+
+  it("forwards host deletion and names the removed host in the receipt", async () => {
+    const { tools, requests } = createHarness({
+      result: { ok: true, data: { kind: "host-deleted", hostName: "prod" } }
+    });
+    const result = await toolByName(tools, "ssh_host_delete").execute("id", { host: "prod" }, undefined, undefined, undefined as never);
+    expect(requests[0]!.request).toEqual({ op: "host-delete", host: "prod" });
+    expect(JSON.stringify(result)).toContain("prod");
   });
 });

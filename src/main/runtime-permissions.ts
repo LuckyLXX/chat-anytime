@@ -24,6 +24,9 @@ export function summarizeArgs(toolName: string, args: Record<string, unknown>): 
   // 唯一能让人判断该不该放行的信息。
   if (toolName === "ssh_upload") return `SSH 上传文件：${String(args.localPath ?? "").slice(0, 80)} → ${String(args.remoteDir ?? "").slice(0, 80)}`;
   if (toolName === "ssh_download") return `SSH 下载文件：${String(args.remotePath ?? "").slice(0, 120)} → 本地下载目录`;
+  if (toolName === "ssh_trust_fingerprint") return `信任主机指纹：${String(args.host ?? "")}${args.fingerprint ? `（${String(args.fingerprint)}）` : ""}`;
+  if (toolName === "ssh_host_save") return `保存 SSH 主机：${String(args.name ?? "")}（${String(args.username ?? "")}@${String(args.address ?? "")}）${args.target ? ` — 更新既有主机 ${String(args.target)}` : ""}`;
+  if (toolName === "ssh_host_delete") return `删除 SSH 主机：${String(args.host ?? "")}`;
   if (toolName === "design_update") return `更新设计文档（${Array.isArray(args.ops) ? args.ops.length : 0} 项变更）`;
   if (toolName === "design_export") return `导出设计 HTML${args.path ? `到 ${String(args.path)}` : ""}`;
   if (toolName === "gallery_publish") return `发布作品「${String(args.title ?? "")}」：${String(args.path ?? "")}（${String(args.kind ?? "file")}）`;

@@ -14,6 +14,7 @@ import type {
 import type { SshHostStore } from "./ssh-host-store.js";
 import { validateHostDraft } from "./ssh-host-store.js";
 import type { SshKnownHostsStore } from "./ssh-known-hosts.js";
+import { knownHostKey } from "./ssh-known-hosts.js";
 import { SshSftpTransferService, type SshSftpLike } from "./ssh-sftp.js";
 import { downloadDirFor } from "./browser-downloads.js";
 import { stripAnsi } from "./ansi.js";
@@ -70,6 +71,14 @@ export interface SshConnectionsDeps {
   knownHosts: SshKnownHostsStore;
   publish(terminalId: string, event: SshEventData): void;
   reveal(event: SshRevealEvent): void;
+  /**
+   * 实时读取 settings.ssh.autoTrustFingerprint（缺省 false）。
+   *
+   * 开启时未知指纹**不弹确认卡**，直接记录并放行——人工面板与 AI 的连接共用这一条
+   * 判断（用户明确要求「连面板点连接也不再弹卡」）。指纹已记录但本次不一致的分支
+   * 不受影响：那时仍然拒绝（防中间人）。注入式，故可在测试里自由开关。
+   */
+  autoTrustFingerprint?: () => boolean;
   /** Test seam：异步 flush 调度（缺省 setTimeout）。 */
   scheduleFlush?(callback: () => void): () => void;
 }
@@ -95,7 +104,7 @@ interface ConnectionRecord {
   pending: string;
   /** 探测连接（TOFU 待确认）拿到的指纹；非空时 error/close 事件静默。 */
   probeFingerprint?: string;
-  /** 用户已在确认卡上信任的指纹（连接 ready 后写入指纹库）。 */
+  /** 用户（或 AI）已信任的指纹（连接 ready 后写入指纹库）。 */
   trustedFingerprint?: string;
   /** 指纹与已记录不一致（hostVerifier 已拒绝）：error 事件用明确文案。 */
   fingerprintMismatch?: string;
@@ -109,6 +118,8 @@ interface ConnectionRecord {
 }
 
 export const SSH_MAX_CONNECTIONS = 5;
+/** 待确认指纹表的条数上限（超出淘汰最旧的；见 pendingTrust 注释）。 */
+export const PENDING_TRUST_LIMIT = 20;
 const FLUSH_INTERVAL_MS = 10;
 const FLUSH_MAX_CHARS = 64 * 1024;
 const SCROLLBACK_LIMIT_CHARS = 200 * 1024;
@@ -332,6 +343,15 @@ export class SshConnectionManager {
   private readonly sessionBindings = new Map<string, string>();
   /** 探测记录：terminalId → 指纹（TOFU 拒绝后 record 即被清理，AI 的轮询只能从这里看到探测结果）。 */
   private readonly probedFingerprints = new Map<string, string>();
+  /**
+   * 待确认指纹：hostKey → 本次握手探测到的指纹。
+   *
+   * 与 probedFingerprints 的区别是键与寿命：后者按 terminalId（探测连接被 kill 后就
+   * 没用了），本表按主机留存，供随后的 `trust-host`（AI 的 ssh_trust_fingerprint）消费
+   * ——AI 不需要手抄指纹，也不可能凭空写库：只有真实握手过的指纹才会进这里。
+   * 无定时器，按条数上限淘汰（超限删最旧）。
+   */
+  private readonly pendingTrust = new Map<string, { fingerprint: string; at: number }>();
   private execSequence = 0;
   private readonly schedule: (callback: () => void) => () => void;
   private cancelFlush: (() => void) | undefined;
@@ -496,16 +516,21 @@ export class SshConnectionManager {
         const fingerprint = fingerprintOfHostKey(key);
         if (known === fingerprint) return true;
         if (known === undefined) {
-          if (trustFingerprint) {
+          // 信任来源二选一：本次连接显式带 trustFingerprint（确认卡「信任并连接」），
+          // 或设置里开了首连自动信任（人工与 AI 一视同仁）。两条都走 trustedFingerprint，
+          // 由 ready 处理器统一写库。
+          if (trustFingerprint || this.deps.autoTrustFingerprint?.() === true) {
             record.trustedFingerprint = fingerprint;
             return true;
           }
           // 探测：拒绝握手并**推事件**告知指纹——ssh2 的 hostVerifier 在异步握手中
           // 才被调用，connect() 早已返回，指纹不可能随命令返回值带回（首版 bug：
           // 渲染端永远停在「正在连接」）。渲染端收事件后显示确认卡，用户信任后
-          // 带 trustFingerprint 重发；AI 的轮询从 probedFingerprints 看到。
+          // 带 trustFingerprint 重发；AI 的轮询从 probedFingerprints 看到，随后可调
+          // ssh_trust_fingerprint 信任（对应 pendingTrust 记录）。
           record.probeFingerprint = fingerprint;
           this.probedFingerprints.set(terminalId, fingerprint);
+          this.rememberPendingTrust(knownHostKey(stored.host, stored.port), fingerprint);
           this.deps.publish(terminalId, { type: "fingerprint", terminalId, fingerprint });
           return false;
         }
@@ -688,6 +713,51 @@ export class SshConnectionManager {
           // 只回绝对路径：相对路径由 utility（知道工作区）算，主进程不猜。
           return { ok: true, data: { kind: "download", localPath: result.path, name: result.name, bytes: result.bytes } };
         }
+        case "trust-host": {
+          const stored = this.findHost(request.host);
+          const key = knownHostKey(stored.host, stored.port);
+          const pending = this.pendingTrust.get(key);
+          if (!pending) {
+            const recorded = this.deps.knownHosts.get(stored.host, stored.port);
+            if (recorded) {
+              return { ok: true, data: { kind: "trust-host", hostName: stored.name, host: stored.host, fingerprint: recorded, alreadyTrusted: true } };
+            }
+            throw new Error(`没有待确认的指纹记录。请先 ssh_connect 主机「${stored.name}」（首次连接会失败并给出指纹），再用 ssh_trust_fingerprint 信任它。`);
+          }
+          // 传了指纹就是「核对」语义：不一致坚决不写库（防手抄出错写错指纹）。
+          const claimed = request.fingerprint?.trim();
+          if (claimed && claimed !== pending.fingerprint) {
+            throw new Error(`传入的指纹与本次握手的指纹不一致（实际为 ${pending.fingerprint}）。请改用实际指纹，或省略该参数由服务端记录。`);
+          }
+          this.deps.knownHosts.put(stored.host, stored.port, pending.fingerprint);
+          this.pendingTrust.delete(key);
+          return { ok: true, data: { kind: "trust-host", hostName: stored.name, host: stored.host, fingerprint: pending.fingerprint, alreadyTrusted: false } };
+        }
+        case "host-save": {
+          const draft = request.draft;
+          const error = validateHostDraft({ name: draft.name, host: draft.host, username: draft.username, ...(draft.port !== undefined ? { port: draft.port } : {}) });
+          if (error) throw new Error(error);
+          // 分组按名称解析：工具层不暴露内部 id，也不自动建组（避免越权扩张）。
+          const groupName = draft.groupName?.trim();
+          let groupId: string | undefined;
+          if (groupName) {
+            const group = this.deps.hostStore.listGroups().find((item) => item.name === groupName);
+            if (!group) {
+              const available = this.deps.hostStore.listGroups().map((item) => item.name);
+              throw new Error(`分组「${groupName}」不存在${available.length > 0 ? `。可用分组：${available.join("、")}` : "（当前没有任何分组，可在 SSH 面板新建）"}。`);
+            }
+            groupId = group.id;
+          }
+          // 永远不传密码：新建=无密码（用户后续在面板补录），编辑=保留原密码。
+          const existing = request.target?.trim() ? this.findHost(request.target) : undefined;
+          const saved = this.deps.hostStore.save({ ...(existing ? { id: existing.id } : {}), name: draft.name, host: draft.host, username: draft.username, ...(draft.port !== undefined ? { port: draft.port } : {}), ...(groupId !== undefined ? { groupId } : {}) }, undefined);
+          return { ok: true, data: { kind: "host-saved", host: saved } };
+        }
+        case "host-delete": {
+          const stored = this.findHost(request.host);
+          if (!this.deps.hostStore.remove(stored.id)) throw new Error(`主机「${stored.name}」不存在或已删除`);
+          return { ok: true, data: { kind: "host-deleted", hostName: stored.name } };
+        }
       }
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
@@ -714,6 +784,22 @@ export class SshConnectionManager {
     return record;
   }
 
+  /**
+   * 记下本次握手的指纹（供 ssh_trust_fingerprint 消费）。
+   *
+   * 按条数上限淘汰最旧的一批：这是「最近探测过的主机」的短期备忘，不是历史记录，
+   * 没有定时器也没有写盘；同一主机重连直接覆盖（只留最新一次握手的指纹）。
+   */
+  private rememberPendingTrust(key: string, fingerprint: string): void {
+    this.pendingTrust.delete(key);
+    this.pendingTrust.set(key, { fingerprint, at: Date.now() });
+    while (this.pendingTrust.size > PENDING_TRUST_LIMIT) {
+      const oldest = this.pendingTrust.keys().next();
+      if (oldest.done) break;
+      this.pendingTrust.delete(oldest.value);
+    }
+  }
+
   /** 等待连接就绪/失败/指纹探测（AI 新建连接用；复用已有连接时不会走到这里）。 */
   private waitForConnected(terminalId: string, timeoutMs = CONNECT_TIMEOUT_MS + 5_000): Promise<void> {
     return new Promise((resolve, reject) => {
@@ -736,7 +822,7 @@ export class SshConnectionManager {
           cleanup();
           this.probedFingerprints.delete(terminalId);
           this.kill(terminalId);
-          reject(new Error(`首次连接该主机需要人工确认服务器指纹。请先在侧边栏 SSH 面板连接一次并信任指纹（指纹 ${probed}），之后 AI 即可复用该连接。`));
+          reject(new Error(`首次连接该主机需要确认服务器指纹（指纹 ${probed}）。可调用 ssh_trust_fingerprint（host: 主机名）信任它，然后重新 ssh_connect；也可以让用户在 SSH 面板连接并确认。`));
           return;
         }
         const current = this.connections.get(terminalId);

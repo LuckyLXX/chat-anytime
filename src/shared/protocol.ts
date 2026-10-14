@@ -1446,7 +1446,16 @@ export type SshAutomationRequest =
   // ——— SFTP 文件传输（AI）。localPath / localDir 为**绝对路径**：工作区边界
   // 由 utility 侧（知道 recordWorkspace）先行解析校验，主进程只负责传输。
   | { op: "upload"; localPath: string; remoteDir: string; remoteName?: string; timeoutMs?: number }
-  | { op: "download"; remotePath: string; localDir: string; timeoutMs?: number };
+  | { op: "download"; remotePath: string; localDir: string; timeoutMs?: number }
+  // ——— 指纹与主机配置（AI）。指纹信任只认「本次握手探测到的那份」：主进程
+  // 按 hostKey 记 pending，工具只能消费它，不能凭空写库（见 SshConnectionManager）。
+  // fingerprint 可选：传了就必须与 pending 一致，用于防 AI 手抄出错。
+  | { op: "trust-host"; host: string; fingerprint?: string }
+  // host-save **不带密码**：新主机建好后密码仍由用户在面板补录（避免明文密码
+  // 进入 AI 会话记录）。groupName 按名称解析，未知分组直接报错；target 给定时是
+  // 「编辑既有主机」（名称或 id，由主进程 findHost 解析），缺省 = 新建。
+  | { op: "host-save"; draft: { name: string; host: string; username: string; port?: number; groupName?: string }; target?: string }
+  | { op: "host-delete"; host: string };
 
 export interface SshConnectionInfo {
   terminalId: string;
@@ -1468,7 +1477,12 @@ export type SshAutomationData =
   | { kind: "upload"; remotePath: string; name: string; bytes: number; note?: string }
   /** 下载完成：本地绝对路径 + 字节数。工作区相对路径由 utility 侧（知道工作区）
    *  用 workspaceRelativeAttachment 计算后写进回执——主进程不掌握工作区，不自造相对路径。 */
-  | { kind: "download"; localPath: string; name: string; bytes: number };
+  | { kind: "download"; localPath: string; name: string; bytes: number }
+  /** 指纹已信任：alreadyTrusted=true 表示该主机指纹本来就在库里（幂等调用）。 */
+  | { kind: "trust-host"; hostName: string; host: string; fingerprint: string; alreadyTrusted: boolean }
+  /** 主机已保存（新建或更新）；host.hasPassword 反映密码是否已存在（本工具从不写密码）。 */
+  | { kind: "host-saved"; host: SshHostSummary }
+  | { kind: "host-deleted"; hostName: string };
 
 export type SshAutomationResult =
   | { ok: true; data: SshAutomationData }
@@ -1477,6 +1491,14 @@ export type SshAutomationResult =
 /** SSH 能力总闸（含 AI 工具），语义与 checkpoint/memory 相同：缺省视为启用。 */
 export interface SshSettings {
   enabled?: boolean;
+  /**
+   * 首次连接自动信任服务器指纹（TOFU 免确认卡）：缺省 false。
+   *
+   * 开启后**人工面板与 AI 触发的连接一视同仁**——遇到未记录的指纹直接记录并放行，
+   * 不再显示确认卡。代价是放弃「人工比对指纹」这一步；指纹一旦记录，之后发生变化
+   * 仍然拒绝连接（防中间人）。`normalizeSsh` 是唯一读入口，漏读即「保存后重启即丢」。
+   */
+  autoTrustFingerprint?: boolean;
 }
 
 /**

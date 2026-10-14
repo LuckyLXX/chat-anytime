@@ -1,4 +1,4 @@
-import { Bot, ChevronDown, Computer, FolderOpen, Globe, LayoutGrid, Palette, RotateCcw, Terminal } from "lucide-react";
+import { Bot, ChevronDown, Computer, FolderOpen, Globe, LayoutGrid, Palette, RotateCcw, ShieldCheck, Terminal } from "lucide-react";
 import { useState, type FormEvent, type ReactNode } from "react";
 import type { AccessMode, DesktopSettings, JevSettings, ModelOption, ProviderOption, ThinkingLevel } from "../../shared/protocol";
 import { THINKING_LEVELS } from "../../shared/thinking-levels";
@@ -120,8 +120,20 @@ export function GeneralSettings({ settings, models, providers, jevKeyConfigured,
 
   function toggleCapability(key: CapabilityKey, enabled: boolean): void {
     // 四个总闸形状一致（{ enabled }），Pick<DesktopSettings, CapabilityKey> 即它们；
-    // 断言只是收窄 computed key，运行时无转换。
-    patchSettings({ [key]: { enabled } } as Pick<DesktopSettings, CapabilityKey>);
+    // 断言只是收窄 computed key，运行时无转换。**合并而不是替换**：ssh 上还挂着
+    // autoTrustFingerprint 子开关，整对象覆盖会让「勾一下总闸」把它抹掉。
+    const current = settings[key];
+    patchSettings({ [key]: { ...current, enabled } } as Pick<DesktopSettings, CapabilityKey>);
+  }
+
+  /**
+   * SSH 子开关：首次连接自动信任指纹（缺省 false）。
+   *
+   * 只动这一个键——开启后主机首次连接（人工面板与 AI 一视同仁）直接记录指纹并放行，
+   * 不再弹确认卡；指纹一旦记录，之后变化仍会拒绝连接。
+   */
+  function toggleAutoTrustFingerprint(enabled: boolean): void {
+    patchSettings({ ssh: { ...settings.ssh, autoTrustFingerprint: enabled } });
   }
 
   async function saveJev(): Promise<void> {
@@ -303,6 +315,11 @@ export function GeneralSettings({ settings, models, providers, jevKeyConfigured,
                 <input type="checkbox" className="general-switch" data-control="capability-switch" data-capability={key} checked={capabilityEnabled(key)} onChange={(event) => toggleCapability(key, event.target.checked)} />
               </label>
             ))}
+            <label className="general-switch-row general-subswitch" title="开启后连接新主机会直接记录并信任其指纹（含 AI 触发的连接），不再弹确认卡；指纹记录后若发生变化仍会拒绝连接（防中间人）。">
+              <span className="general-switch-icon"><ShieldCheck size={13} /></span>
+              <span className="general-switch-copy"><strong>首次连接自动信任指纹</strong><small>新主机直接记录指纹、不弹确认卡（含 AI 连接）；指纹变化仍拒绝</small></span>
+              <input type="checkbox" className="general-switch" data-control="ssh-auto-trust" checked={settings.ssh?.autoTrustFingerprint === true} onChange={(event) => toggleAutoTrustFingerprint(event.target.checked)} />
+            </label>
           </div>
         </section>
 

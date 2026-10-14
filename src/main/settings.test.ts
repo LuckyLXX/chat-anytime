@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CUSTOM_PROVIDER_ID, createDefaultAgent, ensureDefaultWorkspaceDir, forgetAgentWorkspace, isPositiveInt, mergeProviderModels, migrateSettings, normalizeAccessMode, normalizeAgent, normalizeAgentWorkspaces, normalizeBrowser, normalizeCheckpoint, normalizeComputer, normalizeCustomThemes, normalizeDivBubbleMode, normalizeInterfaceTuning, normalizeJev, normalizeProvider, normalizeThemeAssets, normalizeVision, normalizeWallpaperOpacity, recordAgentWorkspace, resolveDefaultWorkspace, resolveInitialWorkspace } from "./settings.js";
+import { CUSTOM_PROVIDER_ID, createDefaultAgent, ensureDefaultWorkspaceDir, forgetAgentWorkspace, isPositiveInt, mergeProviderModels, migrateSettings, normalizeAccessMode, normalizeAgent, normalizeAgentWorkspaces, normalizeBrowser, normalizeCheckpoint, normalizeComputer, normalizeCustomThemes, normalizeDivBubbleMode, normalizeInterfaceTuning, normalizeJev, normalizeProvider, normalizeSsh, normalizeThemeAssets, normalizeVision, normalizeWallpaperOpacity, recordAgentWorkspace, resolveDefaultWorkspace, resolveInitialWorkspace } from "./settings.js";
 import { mergeBrowserSettings, withBrowserDownloadPrefs } from "./settings.js";
 
 describe("workspace per-agent memory and default workspace (方案 B)", () => {
@@ -512,5 +512,25 @@ describe("browser settings: 人工下载偏好（默认目录 / 每次询问）"
     expect(withBrowserDownloadPrefs({ enabled: true, downloadDir: "D:\\dl", downloadAsk: true }, { dir: "" }))
       .toEqual({ enabled: true, downloadAsk: true });
     expect(withBrowserDownloadPrefs(undefined, {})).toEqual({ enabled: true });
+  });
+});
+
+describe("normalizeSsh（SSH 总闸 + 首连自动信任）", () => {
+  // normalizeSsh 是这两个字段的**唯一读入口**（migrateSettings 消费）：漏读
+  // autoTrustFingerprint 就是「保存后重启即丢」，而且下一次任意设置写入会把它
+  // 从磁盘一并抹掉——所以两种取值都要钉死。
+  it("keeps both fields and defaults to enabled + no auto-trust", () => {
+    expect(normalizeSsh({ enabled: false, autoTrustFingerprint: true })).toEqual({ enabled: false, autoTrustFingerprint: true });
+    expect(normalizeSsh({})).toEqual({ enabled: true, autoTrustFingerprint: false });
+    expect(normalizeSsh({ autoTrustFingerprint: true })).toEqual({ enabled: true, autoTrustFingerprint: true });
+    // 非布尔真值不当成 true（设置页只可能写布尔，但磁盘可能被人手改坏）。
+    expect(normalizeSsh({ autoTrustFingerprint: "yes" })).toEqual({ enabled: true, autoTrustFingerprint: false });
+    expect(normalizeSsh(undefined)).toBeUndefined();
+    expect(normalizeSsh("junk")).toBeUndefined();
+  });
+
+  it("reads the flag back through migrateSettings", () => {
+    expect(migrateSettings({ ssh: { autoTrustFingerprint: true } }).settings.ssh).toEqual({ enabled: true, autoTrustFingerprint: true });
+    expect(migrateSettings({}).settings.ssh).toBeUndefined();
   });
 });

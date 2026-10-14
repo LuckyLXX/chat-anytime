@@ -317,7 +317,7 @@ export function AgentSettings({
               </label>
               <label className="agent-switch-row">
                 <span className="agent-switch-icon"><Terminal size={13} /></span>
-                <span className="agent-switch-copy"><strong>SSH 远程终端</strong><small>8 个 ssh_* 工具</small></span>
+                <span className="agent-switch-copy"><strong>SSH 远程终端</strong><small>11 个 ssh_* 工具</small></span>
                 <input type="checkbox" className="agent-switch" checked={agentToolEnabled(selectedAgent, "ssh")} onChange={(event) => onUpdateToolOverride("ssh", event.target.checked)} />
               </label>
               {resources.mcpServers.map((server) => (

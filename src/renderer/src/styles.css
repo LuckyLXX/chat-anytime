@@ -1517,6 +1517,10 @@ html[data-ui-motion="off"] .agent-settings .agent-switch, html[data-ui-motion="o
 .general-settings .general-switch:checked::after { transform: translateX(14px); }
 .general-settings .general-switch:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
 html[data-ui-motion="off"] .general-settings .general-switch, html[data-ui-motion="off"] .general-settings .general-switch::after { transition: none; }
+/* SSH 子开关（首次连接自动信任指纹）：缩进挂在 SSH 总闸行下方。选择器必须带
+   .general-settings 前缀：.settings-dialog label 在后段（0,1,1），裸类会被打回默认尺寸。 */
+.general-settings .general-switch-row.general-subswitch { margin-left: 33px; min-height: 32px; padding: 2px 8px; }
+.general-settings .general-switch-row.general-subswitch .general-switch-icon { width: 20px; height: 20px; color: var(--text-muted); background: transparent; border: 1px solid var(--border); }
 
 /* Jev 折叠卡：头部一行 = 展开钜 + 标题 + 状态徽标 + 右侧启用开关；
    收起时不渲染 body（实验性能力不占首屏）。 */

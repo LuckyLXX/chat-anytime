@@ -51,6 +51,14 @@ describe("desktop tool permissions", () => {
     expect(toolRisk(undefined, "ssh_download", { remotePath: "/var/log/app.log" })).toBe("ssh");
     expect(toolRisk(undefined, "ssh_hosts", {})).toBeUndefined();
     expect(toolRisk(undefined, "ssh_read", {})).toBeUndefined();
+    // 指纹信任与主机建管同轴：前者等于接受该主机身份，后两者改主机清单
+    // （删除会一并清掉已存密码），都是有真实副作用、不可回滚的动作。
+    expect(toolRisk(undefined, "ssh_trust_fingerprint", { host: "prod" })).toBe("ssh");
+    expect(toolRisk(undefined, "ssh_host_save", { name: "prod", address: "10.0.0.8", username: "root" })).toBe("ssh");
+    expect(toolRisk(undefined, "ssh_host_delete", { host: "prod" })).toBe("ssh");
+    expect(permissionAction("read-only", "ssh_host_save", "ssh")).toBe("deny");
+    expect(permissionAction("workspace", "ssh_trust_fingerprint", "ssh")).toBe("ask");
+    expect(permissionAction("full", "ssh_host_delete", "ssh")).toBe("allow");
     expect(permissionAction("read-only", "ssh_exec", "ssh")).toBe("deny");
     expect(permissionAction("workspace", "ssh_exec", "ssh")).toBe("ask");
     expect(permissionAction("full", "ssh_exec", "ssh")).toBe("allow");

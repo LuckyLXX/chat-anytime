@@ -199,7 +199,7 @@ afterEach(() => {
   for (const dir of testDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-function createHarness(options: { seedHost?: boolean } = {}): Harness {
+function createHarness(options: { seedHost?: boolean; autoTrust?: boolean } = {}): Harness {
   const dir = mkdtempSync(join(tmpdir(), "pidesktop-ssh-conn-"));
   testDirs.push(dir);
   const published: SshEventData[] = [];
@@ -227,6 +227,8 @@ function createHarness(options: { seedHost?: boolean } = {}): Harness {
     },
     hostStore,
     knownHosts,
+    // 首连自动信任开关按需注入（缺省关闭）：与设置项同一条判据路径。
+    ...(options.autoTrust ? { autoTrustFingerprint: () => true } : {}),
     publish: (terminalId, event) => published.push(event),
     reveal: (event) => reveals.push(event),
     scheduleFlush: (callback) => {
@@ -457,6 +459,28 @@ describe("SshConnectionManager.connect (renderer channel)", () => {
     harness.manager.handle({ type: "resize", terminalId: "t1", cols: 132, rows: 37 });
     expect(harness.clients[0]!.shellStream!.windows).toEqual([[37, 132, 480, 640]]);
   });
+
+  // 首连自动信任（settings.ssh.autoTrustFingerprint）：同一道 hostVerifier 判断，
+  // 人工面板与 AI 一视同仁——不再弹确认卡，但仍然只信任「首次」：指纹变化照拒。
+  it("skips the confirmation card when autoTrustFingerprint is on", async () => {
+    const harness = createHarness({ autoTrust: true });
+    const hosts = harness.manager.handle({ type: "hosts" });
+    const hostId = hosts.kind === "hosts" ? hosts.hosts[0]!.id : "";
+    harness.manager.handle({ type: "connect", terminalId: "t1", hostId, cols: 80, rows: 24 });
+    await sleep(5);
+    expect(harness.published.filter((event) => event.type === "fingerprint")).toHaveLength(0);
+    harness.clients[0]!.emitReady();
+    await sleep(5);
+    expect(harness.published).toContainEqual({ type: "status", terminalId: "t1", status: "connected" });
+    // 指纹已落库：新连接直接通过；但服务器换 key 后仍然拒绝（防中间人不受开关影响）。
+    harness.setNextHostKey(Buffer.from("attacker-key"));
+    harness.manager.handle({ type: "connect", terminalId: "t2", hostId, cols: 80, rows: 24 });
+    await sleep(5);
+    expect(harness.clients[1]!.connectOptions?.hostVerifier?.(TEST_HOST_KEY)).toBe(true);
+    const errors = harness.published.filter((event) => event.type === "error");
+    expect(errors).toHaveLength(1);
+    expect((errors[0] as { message: string }).message).toContain("指纹");
+  });
 });
 
 describe("SshConnectionManager.handleAutomation (AI channel)", () => {
@@ -485,12 +509,13 @@ describe("SshConnectionManager.handleAutomation (AI channel)", () => {
 
   it("refuses first-ever connections that need fingerprint confirmation", async () => {
     const harness = createHarness();
-    const hosts = harness.manager.handle({ type: "hosts" });
-    const hostId = hosts.kind === "hosts" ? hosts.hosts[0]!.id : "";
     const result = await harness.manager.handleAutomation("session-x", { op: "connect", host: "prod" });
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("unexpected");
-    expect(result.error).toContain("人工确认服务器指纹");
+    // 失败回执必须自包含：指纹 + 下一步动作（AI 据此自助信任，不再求人开面板）。
+    expect(result.error).toContain("需要确认服务器指纹");
+    expect(result.error).toContain(FINGERPRINT);
+    expect(result.error).toContain("ssh_trust_fingerprint");
     expect(harness.reveals).toHaveLength(0);
   });
 
@@ -561,6 +586,102 @@ describe("SshConnectionManager.handleAutomation (AI channel)", () => {
     expect(hosts.data.groups).toEqual([]);
     expect(hosts.data.connections).toHaveLength(1);
     expect(hosts.data.connections[0]!.hostName).toBe("prod");
+  });
+
+  it("lets the AI trust a probed fingerprint and connect afterwards", async () => {
+    const harness = createHarness();
+    const failed = await harness.manager.handleAutomation("session-1", { op: "connect", host: "prod" });
+    expect(failed.ok).toBe(false);
+    if (failed.ok) throw new Error("unexpected");
+    expect(failed.error).toContain(FINGERPRINT);
+    // 信任：不传指纹 —— 主进程用本次握手探测到的那份写库（AI 不必手抄密码串）。
+    const trusted = await harness.manager.handleAutomation("session-1", { op: "trust-host", host: "prod" });
+    expect(trusted.ok).toBe(true);
+    if (!trusted.ok || trusted.data.kind !== "trust-host") throw new Error("unexpected");
+    expect(trusted.data.fingerprint).toBe(FINGERPRINT);
+    expect(trusted.data.alreadyTrusted).toBe(false);
+    // 重连（新 terminalId）直接通过，不再走探测。
+    const retry = harness.manager.handleAutomation("session-1", { op: "connect", host: "prod" });
+    await sleep(5);
+    harness.clients.at(-1)!.emitReady();
+    const result = await retry;
+    expect(result.ok).toBe(true);
+    if (!result.ok || result.data.kind !== "connect") throw new Error("unexpected");
+    expect(result.data.connection.hostName).toBe("prod");
+  });
+
+  it("reports the fingerprint as already trusted on a repeat trust call", async () => {
+    const harness = createHarness();
+    await harness.manager.handleAutomation("session-1", { op: "connect", host: "prod" });
+    await harness.manager.handleAutomation("session-1", { op: "trust-host", host: "prod" });
+    const again = await harness.manager.handleAutomation("session-1", { op: "trust-host", host: "prod" });
+    expect(again.ok).toBe(true);
+    if (!again.ok || again.data.kind !== "trust-host") throw new Error("unexpected");
+    expect(again.data.alreadyTrusted).toBe(true);
+    expect(again.data.fingerprint).toBe(FINGERPRINT);
+  });
+
+  it("refuses a trust request whose fingerprint does not match the handshake", async () => {
+    const harness = createHarness();
+    await harness.manager.handleAutomation("session-1", { op: "connect", host: "prod" });
+    const result = await harness.manager.handleAutomation("session-1", { op: "trust-host", host: "prod", fingerprint: "SHA256:wrong" });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unexpected");
+    expect(result.error).toContain("不一致");
+    // 未写库：重连仍会被探测拦下。
+    const retry = await harness.manager.handleAutomation("session-1", { op: "connect", host: "prod" });
+    expect(retry.ok).toBe(false);
+  });
+
+  it("refuses trust when nothing was probed and nothing is recorded", async () => {
+    const harness = createHarness();
+    const result = await harness.manager.handleAutomation("session-1", { op: "trust-host", host: "prod" });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unexpected");
+    expect(result.error).toContain("没有待确认的指纹记录");
+  });
+
+  it("saves a host without a password and deletes it by name", async () => {
+    const harness = createHarness({ seedHost: false });
+    const created = await harness.manager.handleAutomation("session-1", { op: "host-save", draft: { name: "staging", host: "10.0.0.9", username: "deploy", port: 2222 } });
+    expect(created.ok).toBe(true);
+    if (!created.ok || created.data.kind !== "host-saved") throw new Error("unexpected");
+    expect(created.data.host.hasPassword).toBe(false);
+    // 无密码的新主机连不上——这是刻意的：密码只能由用户在面板补录。
+    const connect = await harness.manager.handleAutomation("session-1", { op: "connect", host: "staging" });
+    expect(connect.ok).toBe(false);
+    if (connect.ok) throw new Error("unexpected");
+    expect(connect.error).toContain("未保存密码");
+    const deleted = await harness.manager.handleAutomation("session-1", { op: "host-delete", host: "staging" });
+    expect(deleted.ok).toBe(true);
+    if (!deleted.ok || deleted.data.kind !== "host-deleted") throw new Error("unexpected");
+    expect(deleted.data.hostName).toBe("staging");
+    const hosts = await harness.manager.handleAutomation("session-1", { op: "hosts" });
+    if (!hosts.ok || hosts.data.kind !== "hosts") throw new Error("unexpected");
+    expect(hosts.data.hosts).toHaveLength(0);
+  });
+
+  it("edits an existing host by name and keeps its stored password", async () => {
+    const harness = createHarness();
+    const edited = await harness.manager.handleAutomation("session-1", { op: "host-save", target: "prod", draft: { name: "prod-2", host: "10.0.0.8", username: "root", port: 2222 } });
+    expect(edited.ok).toBe(true);
+    if (!edited.ok || edited.data.kind !== "host-saved") throw new Error("unexpected");
+    expect(edited.data.host.name).toBe("prod-2");
+    // 工具从不写密码：编辑只改名，原密码保留。
+    expect(edited.data.host.hasPassword).toBe(true);
+  });
+
+  it("resolves host groups by name and rejects unknown ones", async () => {
+    const harness = createHarness({ seedHost: false });
+    const missing = await harness.manager.handleAutomation("session-1", { op: "host-save", draft: { name: "a", host: "1.2.3.4", username: "root", groupName: "不存在" } });
+    expect(missing.ok).toBe(false);
+    if (missing.ok) throw new Error("unexpected");
+    expect(missing.error).toContain("不存在");
+    harness.manager.handle({ type: "group.save", group: { name: "生产环境" } });
+    const created = await harness.manager.handleAutomation("session-1", { op: "host-save", draft: { name: "a", host: "1.2.3.4", username: "root", groupName: "生产环境" } });
+    expect(created.ok).toBe(true);
+    if (!created.ok || created.data.kind !== "host-saved") throw new Error("unexpected");
+    expect(created.data.host.groupId).toBeTruthy();
   });
 
   it("manages groups through the renderer channel", async () => {

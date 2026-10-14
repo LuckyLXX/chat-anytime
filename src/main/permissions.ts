@@ -51,7 +51,9 @@ export function toolRisk(
   // 自动放行）；full 放行。ssh_hosts / ssh_read 是只读观察，免门。
   // ssh_upload / ssh_download 同轴：两者都需先有 SSH 会话（用户已授权的能力），
   // 且 ssh_download 是把**不可信的远端字节**落进本地磁盘——与 ssh_exec 同级待确认。
-  if (toolName === "ssh_connect" || toolName === "ssh_exec" || toolName === "ssh_write" || toolName === "ssh_close" || toolName === "ssh_upload" || toolName === "ssh_download") return "ssh";
+  // ssh_trust_fingerprint / ssh_host_save / ssh_host_delete 同轴：前者写入指纹库
+  // （等于接受该主机的身份），后两者改主机清单（含删除已存密码），都是真实副作用。
+  if (toolName === "ssh_connect" || toolName === "ssh_exec" || toolName === "ssh_write" || toolName === "ssh_close" || toolName === "ssh_upload" || toolName === "ssh_download" || toolName === "ssh_trust_fingerprint" || toolName === "ssh_host_save" || toolName === "ssh_host_delete") return "ssh";
   return undefined;
 }
 

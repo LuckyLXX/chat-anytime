@@ -112,10 +112,13 @@ describe("browser/ssh 工具族前缀成本", () => {
     expect(tokens).toBeLessThan(3000);
   });
 
-  it("ssh 整族仍在 ~0.4–0.9K tokens 量级", () => {
+  // 2026-10-14：新增 ssh_trust_fingerprint / ssh_host_save / ssh_host_delete（8 → 11 个），
+  // 整族从 ~0.5K 升到 ~1.0K（实测 968）——上界随之抬到 1.3K；描述仍只写「何时用 +
+  // 关键边界」，教程一律落首次回执（本测试就是防这件事）。
+  it("ssh 整族仍在 ~0.6–1.3K tokens 量级", () => {
     const tools = buildSshTools({ request: async () => ({ ok: true }) as never, enabled: () => true });
     const tokens = estimateToolTokens(tools.map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters })));
-    expect(tokens).toBeGreaterThan(400);
-    expect(tokens).toBeLessThan(900);
+    expect(tokens).toBeGreaterThan(600);
+    expect(tokens).toBeLessThan(1300);
   });
 });

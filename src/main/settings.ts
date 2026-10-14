@@ -368,10 +368,17 @@ export function normalizeCheckpoint(value: unknown): CheckpointSettings | undefi
   return { enabled: (value as Record<string, unknown>).enabled !== false };
 }
 
-/** SSH 能力总闸（含 AI 工具），语义与 checkpoint/memory 相同：缺省视为启用。 */
+/**
+ * SSH 能力总闸（含 AI 工具）与首连指纹策略：缺省 = 启用 + 不自动信任。
+ *
+ * 本函数是这两个字段的**唯一读入口**（migrateSettings 消费）：漏读
+ * autoTrustFingerprint 等于「保存后重启即丢」，而且下一次任何设置写入会把
+ * 它从磁盘一并抹掉（同 pinnedSessionPaths 的纪律）。
+ */
 export function normalizeSsh(value: unknown): SshSettings | undefined {
   if (!value || typeof value !== "object") return undefined;
-  return { enabled: (value as Record<string, unknown>).enabled !== false };
+  const raw = value as Record<string, unknown>;
+  return { enabled: raw.enabled !== false, autoTrustFingerprint: raw.autoTrustFingerprint === true };
 }
 
 /**

@@ -158,6 +158,9 @@ function ensureSshManager(): SshConnectionManager {
     createClient: createSsh2Client,
     hostStore: createSshHostStore({ filePath: join(app.getPath("userData"), "pidesktop-ssh-hosts.json"), crypto: sshCrypto }),
     knownHosts: createSshKnownHostsStore(join(app.getPath("userData"), "pidesktop-ssh-known-hosts.json")),
+    // 首连自动信任：实时读内存设置（与 settings.ssh.enabled 同样的 live 语义，
+    // 设置页保存后立刻生效，不需要重连/重启）。settingsCache 未就绪时视为关闭。
+    autoTrustFingerprint: () => loadSettings().ssh?.autoTrustFingerprint === true,
     publish: (terminalId, event: SshEventData) => {
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(`ssh:data:${terminalId}`, event);
     },
