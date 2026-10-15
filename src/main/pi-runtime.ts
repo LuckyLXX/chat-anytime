@@ -78,9 +78,8 @@ import { isAbortErrorMessage, resolveRunOutcomeStatus, type TerminalRunStatus } 
 import { readGitBranch } from "./git-branch.js";
 import { builtinProviderOverlay, buildFetchedProviderModels, resolveBuiltinOverlayAction, resolveCustomProviderRegistration } from "./custom-provider.js";
 import { buildDivModePrompt } from "./div-prompt.js";
-import { McpClientManager } from "./mcp-client.js";
 import { readConfiguredMcpServers, removeMcpServerConfig, setMcpServerDisabled, upsertMcpServerConfig } from "./mcp-config.js";
-import { McpOAuthController } from "./mcp-oauth.js";
+import { createPiMcpExtensionLayer, createPidesktopMcpBridge, buildMcpUiContext, type McpBridgeControl } from "./mcp-bridge.js";
 import { PermissionBroker } from "./permission-broker.js";
 import { loadRecentWorkspaces, recordRecentWorkspace, writeRecentWorkspaces } from "./recent-workspaces.js";
 import {
@@ -137,7 +136,6 @@ import {
 import { changedWorkspaceFile, changedWorkspaceFiles, collectProducedArtifacts, isArtifactProducingTool } from "./workspace-preview.js";
 import { createToolAudit } from "./tool-audit.js";
 import { collectUsageStats, createUsageStatsCache } from "./usage-stats.js";
-import { diffToolNames } from "./tool-delta.js";
 import * as runtimeTodoTools from "./runtime-todo-tools.js";
 import * as runtimeMemoryTools from "./runtime-memory-tools.js";
 import { createMemoryStore, memoryDirFor, type MemoryStore } from "./memory-store.js";
@@ -228,6 +226,12 @@ function applyStatusToActive(message: string): void {
  * and only surface lifecycle changes (sidebar status dot).
  */
 interface SessionRuntimeRecord {
+  /**
+   * MCP 桥接控制柄（本会话自己的，非全局）：Pi 的 `dispose()` **不触发
+   * session_shutdown**（只有 `reload()` 会），所以 MCP 扩展不会自己关连接；
+   * 销毁会话前必须经这里 unregisterAll，否则 stdio 子进程泄漏。
+   */
+  mcpBridgeControl?: McpBridgeControl;
   session: AgentSession;
   unsubscribe: () => void;
   workspace: string;
@@ -406,9 +410,6 @@ function flushSessionIndex(): void {
     post({ type: "log", level: "warn", message: `会话索引写入失败：${errorText(error)}` });
   }
 }
-// Set when the user explicitly reloads resources or changes MCP config, so the
-// next createSession forces a network sync instead of serving the tool cache.
-let forceMcpRefresh = false;
 // Detached background processes left by bash executions (dev servers etc.),
 // surfaced in the task panel. App-wide: processes outlive session switches.
 const backgroundProcesses = new BackgroundProcessRegistry(() => emitState());
@@ -635,31 +636,30 @@ const questionBroker = new runtimeQuestionTool.QuestionBroker(
   (request) => post({ type: "question", request }),
   (id) => post({ type: "question.dismiss", id })
 );
-// OAuth：回调服务器与凭据库都在 utility 进程；打开浏览器经 main 进程
-// shell.openExternal（open-external 上行消息），授权完成后重连并刷新工具集。
-const mcpOAuth = new McpOAuthController({
-  storePath: () => join(getAgentDir(), "pidesktop-mcp-auth.json"),
-  openExternal: (url) => post({ type: "open-external", url }),
-  onAuthorized: async (serverName) => {
-    forceMcpRefresh = true;
-    if (activeRuntime) await applyMcpToolChanges();
-    else {
-      await syncMcpServers(true);
-      forceMcpRefresh = false;
-    }
-    // applyMcpToolChanges 的热更新路径（只加不减走 registerTool）不推资源目录，
-    // 这里补上——否则授权成功后面板仍显示「等待浏览器授权…」。
-    emitResourceCatalog();
-    post({ type: "log", level: "info", message: `MCP 服务器 ${serverName} 已完成 OAuth 授权` });
-  },
-  // 等待超时/回调失败发生在任何命令之外，同样要重推目录让面板离开等待态。
-  onAuthStateChanged: () => emitResourceCatalog(),
-  log: (message) => post({ type: "log", level: "warn", message })
-});
-const mcpClient = new McpClientManager({ oauth: mcpOAuth });
-let mcpTools: ToolDefinition[] = [];
-/** 服务器→Pi 工具名映射（syncMcpServers 同步刷新）：角色级 mcp:<server> overlay 的过滤依据。 */
-let mcpServerToolNames = new Map<string, string[]>();
+// MCP → Pi 内置扩展迁移（2026-10-15）：连接/OAuth/工具注册全部在 Pi 的
+// createMcpExtension 里，本进程只持有：登录中的服务器集合（authState=pending）、
+// 供状态板解析的 notify 回调、以及**按会话**的桥接控制柄（存在 record 上——
+// 全局单例会在销毁别的会话时误操作活跃会话的注册）。
+// 打开浏览器经 main 进程 shell.openExternal（open-external 上行消息）。
+let mcpAuthPending = new Set<string>();
+/** /mcp 状态板的最近一次解析结果（refreshMcpCatalog 维护，目录合成用）。 */
+let mcpParsedState = new Map<string, runtimeMcp.ParsedMcpServerState>();
+/** 解析状态文本的回调也供日志面呈现（登录结果/启动问题汇报都在 notify 里）。 */
+function handleMcpNotify(message: string, type: "info" | "warning" | "error"): void {
+  post({ type: "log", level: type === "error" ? "warn" : "info", message: `MCP：${message}` });
+  // 登录结果驱动 authPending 集合（面板 authState 的 pending↔落定转换）。
+  const signedIn = /Signed in to MCP server "(.+)"/u.exec(message);
+  if (signedIn?.[1]) {
+    mcpAuthPending.delete(signedIn[1]);
+    void refreshMcpCatalog();
+    return;
+  }
+  const failed = /(?:Sign-in to MCP server "(.+)" failed|Sign-in cancelled)/u.exec(message);
+  if (failed?.[1]) mcpAuthPending.delete(failed[1]);
+  // 「MCP servers need attention」启动汇报：重推目录让 needs-auth 尽早可见。
+  if (/MCP servers need attention/u.test(message)) void refreshMcpCatalog();
+}
+const mcpUiContext = buildMcpUiContext({ onNotify: handleMcpNotify });
 
 function skillPaths(): ReturnType<typeof runtimeSkills.skillPathsFor> {
   return runtimeSkills.skillPathsFor(workspace, getAgentDir(), bundledSkillsDir);
@@ -806,12 +806,45 @@ function refreshSubagents(): void {
   subagentCatalog = readSubagents(workspace, getAgentDir(), bundledSubagentsDir);
 }
 
-/** Connect to all configured MCP servers and refresh tool definitions + catalog status. */
-async function syncMcpServers(refresh = false): Promise<void> {
-  const synced = await runtimeMcp.syncMcpServers(mcpClient, mcpConfigPaths(), refresh);
-  mcpServers = synced.summaries;
-  mcpTools = synced.tools;
-  mcpServerToolNames = synced.serverToolNames;
+/** 读双作用域配置并合成资源目录里的 MCP 摘要（无网络：连接态由 refreshMcpCatalog 异步补齐）。 */
+function rebuildMcpSummariesFromConfig(): void {
+  const { project, global } = mcpConfigPaths();
+  mcpServers = runtimeMcp.buildMcpSummaries({
+    configured: readConfiguredMcpServers(project, global),
+    parsed: mcpParsedState,
+    authPending: mcpAuthPending
+  });
+}
+
+/**
+ * 向活跃会话发一条 `/mcp`（零模型调用、不写会话 JSONL），把 notify 里的状态板
+ * 文本解析成连接态并重推资源目录。连接在会话启动后异步进行，目录刷新在
+ * 启动后分段补推（createSession 里定时），登录/命令后即时补推。
+ */
+async function refreshMcpCatalog(): Promise<void> {
+  const record = activeRuntime;
+  if (!record) {
+    rebuildMcpSummariesFromConfig();
+    emitResourceCatalog();
+    return;
+  }
+  const notifies: string[] = [];
+  const ctx = buildMcpUiContext({ onNotify: (message) => { notifies.push(message); } });
+  try {
+    await record.session.prompt("/mcp", { preflightResult: () => {} });
+  } catch (error) {
+    post({ type: "log", level: "warn", message: `MCP 状态刷新失败：${errorText(error)}` });
+  }
+  // /mcp 无参时 notify 输出状态板文本（多行）：逐段解析，取覆盖服务器最多的
+  // 一次作为最新状态；解析不出服务器名时不更新（面板保持上一次的保守态）。
+  let best: runtimeMcp.ParsedMcpServerState[] | undefined;
+  for (const message of notifies) {
+    const parsed = runtimeMcp.parseMcpStatusText(message);
+    if (!best || parsed.size > best.length) best = [...parsed.values()];
+  }
+  if (best && best.length > 0) mcpParsedState = new Map(best.map((state) => [state.name, state]));
+  rebuildMcpSummariesFromConfig();
+  emitResourceCatalog();
 }
 
 function emitResourceCatalog(): void {
@@ -1514,6 +1547,13 @@ function scheduleSessionsRefresh(): void {
 }
 
 function disposeRecord(record: SessionRuntimeRecord, options: { keepBrowserTab?: boolean } = {}): void {
+  // MCP 连接先显式收回：Pi 的 dispose() 不发 session_shutdown，MCP 扩展不会自己
+  // 关连接（stdio 子进程会活着占住句柄）——这是迁移后必须自己补的一步。
+  try {
+    record.mcpBridgeControl?.unregisterAll();
+  } catch {
+    // 注销失败不阻断销毁（跟随 dispose 的 best-effort 语义）
+  }
   // session_end 钩子（app 自造事件）：必须在 dispose 之前发——命令是独立进程，
   // 不等它结束（fire-and-forget）；park 不走到这里。总闸与信任门由 rulesFor 过滤。
   runtimeHooks.fireSessionEndHooks(hooksDepsFor({
@@ -1583,10 +1623,6 @@ function pruneVanishedSessionRows(): void {
   );
 }
 
-// Workspace whose MCP tool cache was last synced; activation only re-syncs
-// when the active workspace changes (createSession keeps it fresh otherwise).
-let mcpSyncedWorkspace: string | undefined;
-
 /**
  * Make an existing live record the one shown in the renderer. Global mirrors
  * (workspace/model/todos) follow the record; parked sessions keep running
@@ -1621,15 +1657,9 @@ function activate(record: SessionRuntimeRecord): void {
   syncCommands();
   emitResourceCatalog();
   evictParkedSessions();
-  // Re-sync the MCP tool cache when the active workspace changed so later
-  // hot-reload operations target the right servers. Parked sessions keep the
-  // tools captured at their creation.
-  if (mcpSyncedWorkspace !== record.workspace) {
-    mcpSyncedWorkspace = record.workspace;
-    void syncMcpServers().then(() => emitResourceCatalog()).catch((error) => {
-      post({ type: "log", level: "warn", message: `同步 MCP 服务器失败：${errorText(error)}` });
-    });
-  }
+  // 切回 parked 会话：它的 MCP 连接自创建时就在后台维持（Pi 扩展按会话持有），
+  // 这里只需刷新目录状态板，让面板反映它当下的连接态。
+  void refreshMcpCatalog();
   refreshGitBranch();
   // 焦点从格子 A 切到 B：A 变回 parked，此后的更新只走 session.state 通道。
   // 立即推一帧，否则渲染端在 A 的下一个事件到来之前拿不到 paneStates[A]。
@@ -1999,12 +2029,14 @@ function wrapModelRuntimeForVision(runtime: ModelRuntime): ModelRuntime {
 }
 
 /**
- * Rebuild the full registered customTool set for a record (MCP + app-owned).
+ * Rebuild the full registered customTool set for a record (app-owned).
  * customTools arrays are held by reference inside Pi, so hot-path updates
  * rebuild in place (`length = 0` + push) instead of swapping the array.
+ * MCP tools are NOT here: they register through Pi's built-in MCP extension
+ * (mcp-bridge), living in the session tool registry instead.
  */
 function buildRecordTools(record: Pick<SessionRuntimeRecord, "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "planTools" | "visionTools" | "browserTools" | "sshTools" | "computerTools" | "automationTools" | "designTools" | "galleryTools" | "jevTools">): ToolDefinition[] {
-  return [...mcpTools, ...record.subagentTools, ...record.todoTools, ...record.memoryTools, ...record.questionTools, ...record.planTools, ...record.visionTools, ...record.browserTools, ...record.sshTools, ...record.computerTools, ...record.automationTools, ...record.designTools, ...record.galleryTools, ...record.jevTools];
+  return [...record.subagentTools, ...record.todoTools, ...record.memoryTools, ...record.questionTools, ...record.planTools, ...record.visionTools, ...record.browserTools, ...record.sshTools, ...record.computerTools, ...record.automationTools, ...record.designTools, ...record.galleryTools, ...record.jevTools];
 }
 
 /**
@@ -2025,18 +2057,23 @@ function buildRecordTools(record: Pick<SessionRuntimeRecord, "subagentTools" | "
  * capability toggle (下架), not a per-call gate. Browser/SSH families use the
  * same capability-toggle semantics (master switch AND agent-level overlay).
  */
-function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "planTools" | "visionTools" | "browserTools" | "sshTools" | "computerTools" | "automationTools" | "designTools" | "galleryTools" | "jevTools" | "designMode" | "computerMode" | "designGlobalEnabled" | "computerGlobalEnabled" | "jevGlobalEnabled" | "unattended">, includeVision: boolean): string[] {
+function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "session" | "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "planTools" | "visionTools" | "browserTools" | "sshTools" | "computerTools" | "automationTools" | "designTools" | "galleryTools" | "jevTools" | "designMode" | "computerMode" | "designGlobalEnabled" | "computerGlobalEnabled" | "jevGlobalEnabled" | "unattended">, includeVision: boolean): string[] {
   const builtin = Object.entries(record.agent.tools ?? {}).filter(([, enabled]) => enabled).map(([name]) => name);
   // 浏览器/SSH 整族开关：全局总闸 AND 角色级 overlay（agent.toolOverrides），任一关闭
   // 即整族从活动集摘除（schema 不进请求前缀）；execute 内的 enabled 闭包仅作在途回合
   // 兑底。jev 工具叠加 browser 判据：它驱动的就是内置浏览器。
   const browserActive = runtimeBrowser.shouldActivateBrowserTools({ globalEnabled: settings?.browser?.enabled !== false, agentEnabled: record.agent.toolOverrides?.browser !== false });
   const sshActive = runtimeSsh.shouldActivateSshTools({ globalEnabled: settings?.ssh?.enabled !== false, agentEnabled: record.agent.toolOverrides?.ssh !== false });
-  const disabledMcp = disabledMcpToolNamesFor(record);
   return [
     ...builtin,
-    // 角色级 mcp:<server> overlay：被禁服务器的全部工具不进活动集（前缀省下整段 schema）。
-    ...mcpTools.filter((tool) => !disabledMcp.has(tool.name)).map((tool) => tool.name),
+    // MCP 工具以「当前活动集」为源（不是 getActiveTools 的注册表全集）：
+    // 激活/去激活由 Pi 的内置 MCP 扩展自己管（direct 注册即激活；服务器被
+    // unregister 时扩展把它从活动集摘出，但**注册表里仍有条目**——Pi 没有工具
+    // 移除 API）。因此从注册表现读会把已删服务器的僵尸工具重新激活，而读活动集
+    // 则尊重扩展的决策：本函数算出的列表只是把现状固化下来（幂等）。
+    // 角色级 mcp:<server> overlay 不在这里过滤：它在注册期就决定了 exposure
+    // （禁用→hidden，工具根本不进活动集），见 mcp-bridge 的 registerOne。
+    ...record.session.getActiveToolNames().filter((name) => name.startsWith("mcp__")),
     ...record.subagentTools.map((tool) => tool.name),
     ...record.todoTools.map((tool) => tool.name),
     ...record.memoryTools.map((tool) => tool.name),
@@ -2084,22 +2121,6 @@ const TOOL_ORCHESTRATION_PROMPT_BLOCK = [
   "【工具编排】并行读多个文件、批量统计、或需要在大输出里筛选出结论时，优先用 codemode 写一段脚本一次完成（Promise.allSettled 并行调用工具，return 汇总结果），而不是连续多次独立工具调用；脚本 API 与全局清单见 codemode 工具描述。"
 ].join("");
 
-/**
- * 角色级 mcp:<server> overlay 展开成被禁工具名集合：键为配置原始服务器名，
- * 与 mcpServerToolNames（syncMcpServers 由 bindings 派生）同源匹配。服务器改名/
- * 删除后残留键无工具可匹配，自然无副作用。
- */
-function disabledMcpToolNamesFor(record: Pick<SessionRuntimeRecord, "agent">): Set<string> {
-  const overrides = record.agent.toolOverrides;
-  if (!overrides) return new Set<string>();
-  const disabled = new Set<string>();
-  for (const [key, enabled] of Object.entries(overrides)) {
-    if (enabled || !key.startsWith("mcp:")) continue;
-    const names = mcpServerToolNames.get(key.slice("mcp:".length));
-    if (names) for (const name of names) disabled.add(name);
-  }
-  return disabled;
-}
 
 /**
  * Append the model-directed hint to a prompt whose images the conversation
@@ -3009,9 +3030,37 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     noThemes: true,
     noContextFiles: true,
     extensionFactories: [
+      // MCP 桥接扩展（app 自有）：工厂期把双作用域配置逐台 registerMcpServer 注册
+      // （方言翻译在 mcp-bridge/runtime-mcp）；必须排在 builtin-mcp 之前——它的
+      // session_start 要读到这里的注册。控制柄经 onApi 回灌给命令层。
+      createPidesktopMcpBridge({
+        configPaths: () => mcpConfigPaths(),
+        disabledServers: () => {
+          const overrides = recordAgent.toolOverrides;
+          const disabled = new Set<string>();
+          for (const [key, enabled] of Object.entries(overrides ?? {})) {
+            if (!enabled && key.startsWith("mcp:")) disabled.add(key.slice("mcp:".length));
+          }
+          return disabled;
+        },
+        onServersChange: () => {
+          rebuildMcpSummariesFromConfig();
+          emitResourceCatalog();
+        },
+        onNotify: handleMcpNotify,
+        onApi: (control) => {
+          // 按会话持有：每个 record 自己的控制柄（见 SessionRuntimeRecord 注释）
+          if (recordBox) recordBox.mcpBridgeControl = control ?? undefined;
+        }
+      }),
+      // Pi 内置 MCP 扩展：连接/OAuth/工具注册/lazy 重连全在这层（loadConfig 恒空，
+      // 服务器一律经上面的桥接注册，动态增删改 = register/unregister）。
+      createPiMcpExtensionLayer({
+        openExternal: (url) => post({ type: "open-external", url })
+      }),
       runtimePermissions.createPermissionExtension(permissionDeps, (api) => {
         // Rebound on every session creation; the captured API drives the MCP
-        // hot-reload path (registerTool rebuilds Pi's registry on a live session).
+        // (MCP hot reload moved to Pi registerMcpServer — see mcp-bridge.)
         if (recordBox) recordBox.extensionApi = api;
       }),
       // 用户钩子（第三内联扩展）：事件触发时读 hooksRules 缓存，配置增删改
@@ -3077,11 +3126,14 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   // concurrently with session manager setup since neither depends on the other.
   // Steady-state switches are served from the MCP tool cache (no network);
   // only explicit resource reloads / MCP config changes force a roundtrip.
-  const mcpPromise = syncMcpServers(forceMcpRefresh).catch((error) => {
-    post({ type: "log", level: "warn", message: `同步 MCP 服务器失败：${errorText(error)}` });
-  });
-  mcpSyncedWorkspace = recordWorkspace;
-  forceMcpRefresh = false;
+  // MCP：服务器注册在桥接扩展的工厂里随会话装配（零网络），连接在后台异步进行。
+  // 目录状态板在启动后分段补推（连接完成前后各一次），对齐迁移前「面板在会话
+  // 建好后很快可见连接态」的体验。
+  rebuildMcpSummariesFromConfig();
+  const mcpStatusTimer = setTimeout(() => void refreshMcpCatalog(), 2500);
+  const mcpStatusTimer2 = setTimeout(() => void refreshMcpCatalog(), 9000);
+  void mcpStatusTimer;
+  void mcpStatusTimer2;
   // Todos are session-scoped: each session id gets its own store so the task
   // panel follows the opened session. The first session opened after the
   // upgrade inherits the legacy global todo file exactly once.
@@ -3126,7 +3178,6 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   // delaying the state emit; the follow-up emit is generation-guarded.
   const hasSessionList = sessionListReadyFor(currentSessions.length, currentSessionsAgentId, recordAgent.id);
   const sessionsPromise = hasSessionList ? undefined : refreshSessions();
-  await mcpPromise;
   emitResourceCatalog();
   const sessionRecordSeed: Pick<SessionRuntimeRecord, "workspace" | "agent" | "permissionDeps"> = { workspace: recordWorkspace, agent: recordAgent, permissionDeps };
   const subagentTools = buildSubagentTools(sessionRecordSeed, activeSessionManager.getSessionId(), requested ?? selectedModel, false);
@@ -3341,7 +3392,9 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   // Each record owns its customTools array: Pi stores it by reference and
   // re-reads it on every tool-registry refresh, so per-record arrays let parked
   // sessions keep their tool set while the active one hot-swaps MCP tools.
-  const recordCustomTools: ToolDefinition[] = [shellKill.tools[0]!, shellKill.tools[1]!, ...mcpTools, ...subagentTools, ...todoTools, ...memoryTools, ...questionTools, ...planTools, ...visionTools, ...browserTools, ...sshTools, ...computerTools, ...automationTools, ...designTools, ...galleryTools, ...jevTools];
+  // MCP 工具不进 customTools：由 Pi 内置 MCP 扩展注册进会话工具注册表（见
+  // extensionFactories 里的 builtin-mcp 与 pidesktop-mcp 桥接）。
+  const recordCustomTools: ToolDefinition[] = [shellKill.tools[0]!, shellKill.tools[1]!, ...subagentTools, ...todoTools, ...memoryTools, ...questionTools, ...planTools, ...visionTools, ...browserTools, ...sshTools, ...computerTools, ...automationTools, ...designTools, ...galleryTools, ...jevTools];
   const result = await createAgentSession({
     cwd: recordWorkspace,
     modelRuntime,
@@ -3443,7 +3496,13 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   // Activate the app-owned inline extension(s) only. The permission hook lives
   // in the permission extension factory and gates risky tool calls; no
   // third-party extension code is ever loaded.
+  // uiContext + mode:"rpc"：MCP 扩展的 notify（/mcp 状态板、登录结果）与登录中的
+  // input（回环不可达时的粘贴回退）经宿主上下文导出；commands 扩展在非 TUI 模式
+  // 的所有交互都走这两个面（PoC 实证）。bindExtensions 的 uiContext 也让 ctx.hasUI
+  // 为真——否则 /mcp login 会拒绝执行（"requires interactive mode"）。
   await result.session.bindExtensions({
+    uiContext: mcpUiContext,
+    mode: "rpc",
     onError: (error) => {
       post({ type: "log", level: "warn", message: `权限拦截扩展错误：${error.error}` });
     }
@@ -3649,43 +3708,33 @@ async function refreshActiveSessionForSubagents(): Promise<void> {
 }
 
 /**
- * Apply MCP config changes to the live (active) session. Tool additions and
- * same-name replacements take the hot path: the record's stable customTools
- * array is swapped in place and registerTool() makes Pi rebuild the registry
- * and prompt snippets — the message flow and session state stay intact. Any
- * removal (or a missing extension handle) falls back to a full session
- * rebuild. Parked background sessions keep the tools captured at creation.
+ * Apply MCP registration changes to the live (active) session via the bridge
+ * control (`registerMcpServer` replaces, `unregisterMcpServer` closes the
+ * connection and removes the tools). No session rebuild in any direction —
+ * Pi's MCP extension owns the registry updates; we just re-derive the active
+ * set afterwards so the prompt prefix follows the tool list. Parked sessions
+ * keep the servers registered at their creation (re-read on next creation).
  */
-async function applyMcpToolChanges(): Promise<void> {
+async function applyMcpToolChanges(names: string[]): Promise<void> {
   const record = activeRuntime;
   if (!record) throw new Error("请先打开工作区，再管理 MCP Server");
-  const previousNames = mcpTools.map((tool) => tool.name);
-  await syncMcpServers(forceMcpRefresh);
-  forceMcpRefresh = false;
-  const { added, removed } = diffToolNames(previousNames, mcpTools.map((tool) => tool.name));
-  if (added.length === 0 && removed.length === 0) return;
-  if (removed.length > 0 || !record.extensionApi) {
-    await reloadRuntimeResources();
+  if (!record.mcpBridgeControl) {
+    // 会话还没建好（或已被处置）：下一次 createSession 会从配置重读注册。
+    await refreshMcpCatalog();
     return;
   }
+  for (const name of names) {
+    record.mcpBridgeControl.reapply(name);
+  }
+  // 注册集变化会触发 mcp_servers_change → 目录重推；这里再补一次活动集
+  // 重算（hidden↔direct 切换时前缀必须跟上）。
   try {
-    const subagentTools = buildSubagentTools(record, record.session.sessionId, selectedModel, false);
-    record.subagentTools = subagentTools;
-    record.customTools.length = 0;
-    record.customTools.push(...buildRecordTools(record));
-    // Re-registering every MCP tool covers additions and same-name schema
-    // changes alike, and triggers the registry refresh that re-reads the
-    // record's customTools.
-    for (const tool of mcpTools) record.extensionApi.registerTool(tool);
     record.session.setActiveToolsByName(toolNamesFor(record, !hasImageInput(record.session.model)));
-    // 热更新改变了请求前缀里的工具清单：三段明细的工具段跟随重算。
     refreshContextBreakdown(record);
   } catch (error) {
-    // A stale extension handle (session swapped mid-operation) or any registry
-    // hiccup: recover via the rebuild path.
-    post({ type: "log", level: "warn", message: `MCP 工具热更新失败，回退到会话重建：${errorText(error)}` });
-    await reloadRuntimeResources();
+    post({ type: "log", level: "warn", message: `MCP 注册变更后活动集重算失败：${errorText(error)}` });
   }
+  await refreshMcpCatalog();
 }
 
 async function preparePromptPayload(text: string, attachments: PromptAttachment[] = []): Promise<{ text: string; images: ImageContent[] }> {
@@ -4852,7 +4901,6 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     case "appearance.save":
       break;
     case "resources.reload":
-      forceMcpRefresh = true;
       await runResourceOperation("正在重载能力资源", reloadRuntimeResources);
       break;
     case "mcp.server.save": {
@@ -4867,8 +4915,9 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         const plan = runtimeMcp.planMcpServerSave(paths, { ...server, name }, original);
         if (plan.remove) removeMcpServerConfig(plan.remove.path, plan.remove.name);
         upsertMcpServerConfig(plan.targetPath, name, plan.entry);
-        forceMcpRefresh = true;
-        await applyMcpToolChanges();
+        // 改名 = 旧名注销 + 新名注册；同名 = 替换注册（连接/工具随 Pi 侧更新）。
+        const names = [name, ...(plan.remove && plan.remove.name !== name ? [plan.remove.name] : [])];
+        await applyMcpToolChanges(names);
       });
       break;
     }
@@ -4877,44 +4926,30 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       const { project, global } = mcpConfigPaths();
       const target = readConfiguredMcpServers(project, global).find((server) => server.name === command.name);
       if (!target) throw new Error("找不到要认证的 MCP Server");
-      if (!mcpOAuth.supports(target)) throw new Error("仅 HTTP（且未使用 Bearer 环境变量）的 MCP Server 支持 OAuth 认证");
+      if (!runtimeMcp.mcpOauthEligible(target)) throw new Error("仅 HTTP（且未使用 Bearer 环境变量）的 MCP Server 支持 OAuth 认证");
+      const record = activeRuntime;
+      if (!record) throw new Error("请先打开工作区，再管理 MCP Server");
       await runResourceOperation("正在准备 MCP 授权", async () => {
-        // 已开过授权页（等待回调中）→ 重新打开，不重走发现/注册。
-        if (await mcpOAuth.reopenAuthorization(command.name)) return;
-        // 显式选了 OAuth 的 server 不等 401：直接走 SDK 的授权编排（无凭据时
-        // 打开浏览器；已有/刚刷新的 token 则直接重连）。
-        if (target.entry.auth === "oauth") {
-          // 用户主动点「认证」：允许把上一次被判失效、但仍保留着的 refresh_token
-          // 再试一次（成功即免去浏览器往返）。
-          const outcome = await mcpOAuth.authorizeInteractive(target);
-          // 已开授权页等回调：不要再强制重连一次。重连会再走一遍 SDK auth()，把凭据库里的
-          // state/codeVerifier 覆写成新流程的，用户浏览器里那个授权页回来就成了废页。
-          // 授权成功的重连由 onAuthorized 兜底。
-          if (outcome === "pending") return;
-          forceMcpRefresh = true;
-          await syncMcpServers(true);
-          forceMcpRefresh = false;
-          post({ type: "log", level: "info", message: outcome === "authorized" ? `${command.name} 已使用已保存的凭据完成授权` : `${command.name} 已在浏览器中打开授权页` });
-          return;
+        // 走 Pi 的 /mcp login：无凭据→发现/注册/开浏览器（openUrl→open-external）；
+        // 已有可用凭据→直接重连。授权页等待期间 prompt 挂起，回调完成（或 90s
+        // 输入超时）后返回；结果经 notify（handleMcpNotify）重推目录。
+        mcpAuthPending.add(command.name);
+        try {
+          await record.session.prompt(`/mcp login ${command.name}`, { preflightResult: () => {} });
+        } finally {
+          mcpAuthPending.delete(command.name);
         }
-        // 未显式声明的 server：强制重连，401 时由 SDK 触发授权。同样借用用户主动
-        // 意图的闸门，让保留的凭据有机会重试一次。
-        forceMcpRefresh = true;
-        await mcpOAuth.runUserInitiated(command.name, () => syncMcpServers(true));
-        forceMcpRefresh = false;
-        if (!mcpOAuth.hasPending(command.name)) {
-          post({ type: "log", level: "info", message: `${command.name} 未要求 OAuth 认证，已直接连接` });
-        }
+        await refreshMcpCatalog();
       });
       break;
     }
     case "mcp.server.auth.clear": {
       if (!/^[A-Za-z0-9._-]+$/u.test(command.name)) throw new Error("MCP Server 名称无效");
+      const record = activeRuntime;
+      if (!record) throw new Error("请先打开工作区，再管理 MCP Server");
       await runResourceOperation("正在清除 MCP 凭据", async () => {
-        await mcpOAuth.clear(command.name);
-        forceMcpRefresh = true;
-        await syncMcpServers(true);
-        forceMcpRefresh = false;
+        await record.session.prompt(`/mcp logout ${command.name}`, { preflightResult: () => {} });
+        await refreshMcpCatalog();
       });
       break;
     }
@@ -4925,8 +4960,8 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         if (!setMcpServerDisabled(project, command.name, !command.enabled) && !setMcpServerDisabled(global, command.name, !command.enabled)) {
           throw new Error("找不到要切换的 MCP Server");
         }
-        forceMcpRefresh = true;
-        await applyMcpToolChanges();
+        // 停用 = 注销（关连接移工具）；启用 = 重新注册。不再需要会话重建。
+        await applyMcpToolChanges([command.name]);
       });
       break;
     }
@@ -4939,10 +4974,8 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         // 作用域提示可能过期（条目已被迁移到另一个文件）：先按声明的位置删，
         // 找不到再尝试另一个文件，避免「明明看得见却删不掉」。
         if (!removeMcpServerConfig(target, command.name) && !removeMcpServerConfig(other, command.name)) throw new Error("找不到要删除的 MCP Server");
-        forceMcpRefresh = true;
-        // Deletion always removes tools → applyMcpToolChanges falls back to a
-        // session rebuild (Pi has no tool-removal API).
-        await applyMcpToolChanges();
+        // 删除 = 注销：unregisterMcpServer 关连接并移除工具，零会话重建。
+        await applyMcpToolChanges([command.name]);
       });
       break;
     }
@@ -5270,7 +5303,6 @@ let commandQueue = Promise.resolve();
 // unref，进程被 kill 时由操作系统回收，这里的 dispose 只是优雅路径。
 // （Electron 类型只声明了 message 事件，close 需按通用 EventEmitter 挂。）
 (parentPort as unknown as NodeJS.EventEmitter).on("close", () => {
-  void mcpOAuth.dispose();
 });
 parentPort.on("message", (event: { data: RuntimeCommand }) => {
   // Browser RPC results resolve tool executions directly — queueing them

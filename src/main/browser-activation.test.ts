@@ -20,6 +20,7 @@ import { estimateToolTokens } from "./context-breakdown.js";
  */
 
 const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "pi-runtime.ts"), "utf8");
+const bridgeSource = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "mcp-bridge.ts"), "utf8");
 
 function functionBody(signature: string): string {
   const start = source.indexOf(signature);
@@ -69,20 +70,22 @@ describe("toolNamesFor 的整族开关接线（源码回归网）", () => {
     expect(functionBody("function toolNamesFor(")).toContain("...(record.jevGlobalEnabled() && browserActive ? record.jevTools.map((tool) => tool.name) : [])");
   });
 
-  it("MCP 行按角色级 mcp:<server> overlay 过滤（省下整台服务器的 schema）", () => {
+  it("MCP 行以「当前活动集」为源，而非注册表全集（注册表留着已删服务器的僵尸工具）", () => {
     const body = functionBody("function toolNamesFor(");
-    expect(body).toContain("mcpTools.filter((tool) => !disabledMcp.has(tool.name)).map((tool) => tool.name)");
+    expect(body).toContain('record.session.getActiveToolNames().filter((name) => name.startsWith("mcp__"))');
+    // 读注册表会把 unregister 后仍在 registry 的工具重新激活——必须不出现。
+    expect(body).not.toContain("getAllTools()");
+    // 旧的自建 customTools 路径必须消失（MCP 已迁 Pi 内置扩展）。
+    expect(body).not.toContain("mcpTools.filter");
   });
 
-  it("overlay 展开用原始服务器名匹配 mcpServerToolNames，键前缀 mcp:", () => {
-    const body = functionBody("function disabledMcpToolNamesFor(");
-    expect(body).toContain('key.startsWith("mcp:")');
-    expect(body).toContain('mcpServerToolNames.get(key.slice("mcp:".length))');
+  it("角色 overlay 只在注册期决定 exposure（禁用→hidden），不在活动集里重复过滤", () => {
+    expect(bridgeSource).toContain('const exposure = deps.disabledServers().has(server.name) ? "hidden" : "direct"');
+    expect(functionBody("function toolNamesFor(")).not.toContain("disabledMcp");
   });
 
-  it("映射由 syncMcpServers 同步刷新（键名与 buildToolDefinitions 同源去重）", () => {
-    expect(source).toContain("mcpServerToolNames = synced.serverToolNames;");
-    expect(source).toContain("let mcpServerToolNames = new Map<string, string[]>();");
+  it("被禁服务器的工具以 hidden 暴露注册（零前缀成本兑底，见 mcp-bridge）", () => {
+    expect(bridgeSource).toContain('exposure = deps.disabledServers().has(server.name) ? "hidden" : "direct"');
   });
 
   it("注册集仍展开 browser/ssh（注册是激活的前提，摘除只摘活动集）", () => {
