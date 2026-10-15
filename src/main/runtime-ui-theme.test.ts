@@ -35,7 +35,7 @@ function runBeforeAgentStart(divMode: DivBubbleMode, context: UiThemeContext | u
   extension.factory(api);
   const handler = handlers.before_agent_start;
   if (!handler) throw new Error("扩展没有注册 before_agent_start");
-  return handler({ type: "before_agent_start", prompt: "hi", systemPrompt }, {});
+  return handler({ type: "before_agent_start", messageType: "user", prompt: "hi", systemPrompt }, {});
 }
 
 describe("normalizeUiThemeContext", () => {

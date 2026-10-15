@@ -15,10 +15,9 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@earendil-works/pi-agent-core": "1.0.0",
-    "@earendil-works/pi-ai": "1.0.0",
-    "@earendil-works/pi-coding-agent": "1.0.0",
-    "@earendil-works/pi-server": "1.0.0",
+    "@earendil-works/pi-agent-core": "1.2.0",
+    "@earendil-works/pi-ai": "1.2.0",
+    "@earendil-works/pi-coding-agent": "1.2.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "node-pty": "^1.1.0",
     "ssh2": "^1.17.0",
@@ -57,10 +56,10 @@
     "zustand": "5.0.8"
   },
   "overrides": {
-    "@earendil-works/pi-agent-core": "1.0.0",
-    "@earendil-works/pi-ai": "1.0.0",
-    "@earendil-works/pi-coding-agent": "1.0.0",
-    "@earendil-works/pi-tui": "1.0.0"
+    "@earendil-works/pi-agent-core": "1.2.0",
+    "@earendil-works/pi-ai": "1.2.0",
+    "@earendil-works/pi-coding-agent": "1.2.0",
+    "@earendil-works/pi-tui": "1.2.0"
   },
   "build": {
     "appId": "dev.chatanytime.desktop",
@@ -71,9 +70,7 @@
     "npmRebuild": false,
     "files": [
       "out/**/*",
-      "package.json",
-      "!**/node_modules/@esbuild/**",
-      "**/node_modules/@esbuild/win32-x64/**"
+      "package.json"
     ],
     "extraResources": [
       {
