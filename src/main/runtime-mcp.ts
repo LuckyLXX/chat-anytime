@@ -221,9 +221,23 @@ export function piMcpConfigFor(server: ConfiguredMcpServer, exposure: "direct" |
   }
   if (!entry.url) throw new Error(`MCP 服务器 ${server.name} 既没有 command 也没有 url，无法连接`);
   const headers: Record<string, string> = { ...(entry.headers ?? {}) };
+  // Authorization 的大小写变体只能留一个：fetch Headers 会把 "Authorization" 与
+  // "authorization" 合并成 "Bearer a, Bearer b"（旧实现实测踩过），所以覆盖前先按
+  // 大小写不敏感清掉已有键。
+  const dropAuthorization = (): void => {
+    for (const key of Object.keys(headers)) {
+      if (key.toLowerCase() === "authorization") delete headers[key];
+    }
+  };
   if (entry.bearerTokenEnv) {
-    // Bearer 环境变量优先级最高：覆盖同名头（与旧 httpRequestHeaders 的合并规则一致）。
+    // Bearer 环境变量优先级最高：覆盖手写的 Authorization（与旧 httpRequestHeaders 规则一致）。
+    dropAuthorization();
     headers.Authorization = `Bearer \${${entry.bearerTokenEnv}}`;
+  } else if (entry.auth === "oauth") {
+    // 显式声明的 OAuth 压过手写的 Authorization：Pi 以「有没有 Authorization 头」
+    // 决定是否挂 OAuth，留着这个头就会静默走手写凭据（旧实现在 supports() 里
+    // 让 auth:oauth 覆盖该判定，迁移后必须在翻译层补回来）。
+    dropAuthorization();
   }
   return {
     type: "http",

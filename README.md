@@ -69,7 +69,7 @@ ChatAnyTime 是一个面向项目开发的桌面 AI 客户端。它以 Pi 的执
 
 ### 能力管理
 
-- **MCP Server**：stdio / HTTP 双传输，HTTP 可配自定义请求头（Authorization / X-API-Key 等，与 Claude Code / Cursor 的 `.mcp.json` 同字段），OAuth 授权（含凭据持久化与自动刷新），状态与工具数实时显示；新增或替换的工具热生效，无需重建会话
+- **MCP Server**：stdio / HTTP 双传输（基于 Pi 内置 MCP 扩展），HTTP 可配自定义请求头（Authorization / X-API-Key 等，与 Claude Code / Cursor 的 `.mcp.json` 同字段，值支持 `${环境变量}` 引用），OAuth 授权（支持预注册客户端、回调地址、授权范围等高级选项；凭据持久化与自动刷新），每服务器可配超时，状态与工具数实时显示；**新增 / 替换 / 删除 / 启停全部热生效**，无需重建会话
 - **技能 Skill**：四档来源，优先级从低到高为 共享目录 `~/.agents/skills` < 随包内置 < 用户全局 `pidesktop-skills/` < 项目 `.pidesktop-skills/`，同名后者覆盖前者；勾选启用后注入系统提示，用 `/skill:<name>` 调用；内置电脑控制、自动化任务、网页任务、作品发布、ChatAnyTime 配置、主题创建器
 - **自定义命令**：项目/全局双作用域的 `md` 模板，`/名字 参数` 直接调用
 - **子智能体**：设置页自定义系统提示、模型、思考等级与工具集（全局/项目作用域），内置「代码审查 / 项目探索」为只读、内置通用实施者可用内置浏览器验证页面（browser_* 能力可按定义开关）、可在设置里单独改执行模型与思考等级（委派卡片上显示实际生效档位）
@@ -168,7 +168,7 @@ npm run package:installer   # dist\ChatAnyTime Setup <版本>.exe
 | 钩子 Hooks | `pidesktop-hooks.json` | `.pidesktop-hooks.json` |
 | 子智能体 | `pidesktop-subagents.json` | `.pidesktop-subagents.json` |
 
-> 技能与命令正文是热生效的（每次读取取实物），但新增/删除技能与命令、以及 MCP/钩子/子智能体的任何改动，都需要重载资源或重启应用。
+> 技能与命令正文是热生效的（每次读取取实物），但新增/删除技能与命令、以及钩子 / 子智能体的任何改动，都需要重载资源或重启应用。MCP 例外：在设置页里增删改服务器是即时生效的，只有直接改 `mcp.json` 文件才需要重载。
 
 ## 主题
 
@@ -184,15 +184,15 @@ npm run package:installer   # dist\ChatAnyTime Setup <版本>.exe
 ## 与 Pi 及原插件的关系
 
 - Pi `1.0.0` 仅作为 Agent 运行时核心使用：模型、AgentSession、会话持久化、上下文管理、内置工具（read/bash/edit/write/grep/find/ls）
-- 已移除 Pi 的「扩展接入」能力（第三方扩展加载/批准/绑定、`pi-mcp-adapter`、子代理 CLI shim、扩展 UI 桥），只保留应用自有的内联扩展：权限闸口、工具审计、用户钩子、计划模式注入、Checkpoint 快照
-- MCP、Skill、子代理、Todo、记忆均为自研实现：MCP 由内置 `@modelcontextprotocol/sdk` 客户端直连并把每个工具包装成 Pi `customTool`；Skill 通过扫描 `SKILL.md` 目录并注入系统提示；子代理用 `delegate_agent` 创建同进程子会话；Todo 与记忆用本地文件存储
+- 已移除 Pi 的「扩展接入」能力（第三方扩展加载/批准/绑定、`pi-mcp-adapter`、子代理 CLI shim、扩展 UI 桥），只保留应用自有的内联扩展：权限闸口、工具审计、用户钩子、计划模式注入、Checkpoint 快照、MCP 桥接（与 Pi 自带的 MCP 扩展工厂配对）
+- Skill、子代理、Todo、记忆为自研实现：Skill 通过扫描 `SKILL.md` 目录并注入系统提示；子代理用 `delegate_agent` 创建同进程子会话；Todo 与记忆用本地文件存储。**MCP 自 2026-10-15 起改用 Pi 的内置 MCP 扩展**（连接/OAuth/工具注册/lazy 重连全部由它负责，应用只负责配置翻译、注册编排与状态桥接；服务器增删改经 `registerMcpServer`/`unregisterMcpServer` 热生效）
 - 本项目沿用 ChatAnyTime 品牌与核心渲染、交互理念，没有复制原插件运行时或旧代码
 - Pi 原仓库和 ChatAnyTime 原插件仓库均不属于本项目，也不会被本项目构建修改
 
 ## 当前限制
 
 - 暂不支持 Git 工作树管理
-- MCP 新增/替换的工具热生效，但**删除**工具仍需重建会话（Pi 没有工具注销 API）；stdio 类型 MCP 子进程在应用退出时未做优雅关闭，极少数情况下可能残留
+- MCP 服务器子进程在应用退出（utility 进程被终止）时未做优雅关闭，极少数情况下可能残留；会话关闭/切换时会先注销 MCP 服务器并关闭连接（不再泄漏）
 - HTML/SVG Artifact 只提供隔离预览，不提供桌面能力桥接（需要常驻与本地状态的作品请用「面板」形态）
 - 尚未提供自动更新与代码签名，升级需要手动下载安装包
 - 尚无主题/壁纸在应用内的可视化编辑器，结构主题请交给内置的主题创建器技能

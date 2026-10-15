@@ -118,6 +118,22 @@ describe("piMcpConfigFor：方言 → Pi McpServerConfig", () => {
     expect(dflt.timeout).toBe(PI_MCP_CALL_TIMEOUT_SECONDS);
   });
 
+  it("auth:oauth 压过手写的 Authorization 头（Pi 以头的有无决定是否挂 OAuth，不能在翻译层让它静默失效）", () => {
+    const forced = piMcpConfigFor(server("forced", { url: "https://f/mcp", auth: "oauth", headers: { Authorization: "Bearer manual", "X-Other": "1" } }), "direct");
+    if (forced.type !== "http") throw new Error("应为 http 配置");
+    expect(forced.headers).toEqual({ "X-Other": "1" });
+    // 未声明 auth:oauth 时，手写的 Authorization 保留（并因此不走 OAuth）
+    const manual = piMcpConfigFor(server("manual", { url: "https://m/mcp", headers: { Authorization: "Bearer manual" } }), "direct");
+    if (manual.type !== "http") throw new Error("应为 http 配置");
+    expect(manual.headers).toEqual({ Authorization: "Bearer manual" });
+  });
+
+  it("bearerTokenEnv 覆盖任意大小写变体的 Authorization，不留重复键（fetch Headers 会合并成逗号串）", () => {
+    const config = piMcpConfigFor(server("g", { url: "https://g/mcp", bearerTokenEnv: "TOKEN", headers: { authorization: "Bearer manual", "X-A": "1" } }), "direct");
+    if (config.type !== "http") throw new Error("应为 http 配置");
+    expect(config.headers).toEqual({ "X-A": "1", Authorization: "Bearer ${TOKEN}" });
+  });
+
   it("auth:oauth → 无显式 OAuth 配置（Pi 隐式：无 Authorization 头的 HTTP 服务器自动 OAuth）", () => {
     const config = piMcpConfigFor(server("exa", { url: "https://e/mcp", auth: "oauth" }), "direct");
     if (config.type !== "http") throw new Error("应为 http 配置");
