@@ -64,3 +64,58 @@
 
 ---
 2026-10-12 | v1.1.0 | 2026-10-07T22:26:31Z
+
+## 2026-10-15 · v1.2.0（较上次已报告版本 v1.1.0 的增量）
+
+**✨ 新功能**
+
+- Per-key OpenRouter 模型列表：带 OpenRouter key 时只列出该 key 可用的 chat 模型，含该 key 的 context size、max output 与价格，以及 `models.json` 中配置的 guardrails 与 regional endpoints；列表会保存、离线可用。
+- 发布配置 schema：`settings.json`、`models.json`、keybindings、themes 均可用 `$schema` 指向 `https://pi.dev/schemas/*.schema.json`，获得编辑器校验与补全。
+- `PI_CLIPBOARD_OSC52=1`：本地剪贴板写入后再用 OSC 52 发送一次，多路复用器跨机接入、远端 IDE daemon 等无法探测远程会话时也能把复制内容送到远端剪贴板。
+- codemode：工具声明的属性注释上以 `@` 标签展示输入约束（integer、minimum/maximum、length、pattern、default），脚本无需依赖描述重复；codemode 行显示脚本已用时间与完成后的总耗时。
+- `before_agent_start` 现在也作用于 `pi.sendMessage(..., { triggerTurn: true })` 触发的运行。
+- 工具定义新增 `reachesTools`（声明一次调用可能触及哪些工具，MCP 扩展据此等待所需服务器）；工具命名空间新增 `aliases`，供 codemode 的 `describeNamespace()` 与 `searchTools()` 的 `namespace` 选项匹配。
+- `showHardwareCursor` 设置改为只使用终端光标，不再同时绘制 Pi 的反色光标。
+
+**🐛 修复**
+
+- codemode 忽略不在脚本首行的 `// @options:`，导致请求的 `timeout_ms` 不生效；现在脚本运行前直接报错。
+- Mistral 流在请求超时后被中途中断（如长思考期间）；超时现在只作用于等待响应头。
+- git worktree 嵌套在主仓库内时，符号链接的 `AGENTS.md` 导致项目上下文文件完全不加载。
+- 大量 `text()` 调用的 codemode 脚本结束后阻塞进程数秒到数分钟（输出拼接为二次复杂度）。
+- print mode（`-p`）在最终回复被模型输出上限截断时静默退出 0；现在打印部分文本、向 stderr 写警告并以 1 退出。
+- `extensions`、`skills`、`prompts`、`themes` 设置的 `!pattern`、`+path`、`-path` 条目不展开 `~`，如 `!~/skills/pdf` 匹配不到任何东西。
+- 带 resources 的 MCP 服务器在列完所有 resource 前注册不了工具；Pi 连接时不再列举 resources，`/mcp` 与 `pi mcp list` 改为标记该服务器提供 resources。
+- Windows 上前一个锁目录仍在删除时读写 `auth.json` 报 `EPERM`；现在先短暂重试再报错。
+- OpenRouter 路由模型（如 `openrouter/auto`）显示 -$1,000,000/1M tokens 的成本；负占位价格归 0。
+- Anthropic 请求因 strict tool set 被拒（语法体积、工具数或 union 限制）而失败；现在用非 strict 的优先工具重试一次。
+- "The upstream provider returned an error" 未按瞬时 provider 错误重试。
+- 聚焦的全屏浮层挡住转录区的鼠标滚轮滚动。
+- 终端颜色回复碎片把 hex 值泄漏进 prompt 并打开外部编辑器。
+- Herdr 内联图片自 1.1.0 起不渲染。
+- 键位名称含 shift 符号（如 `+`、`ctrl++`）在 Kitty 键盘协议或 modifyOtherKeys 下不匹配。
+- 自定义编辑器中的 compaction 状态指示器使用默认 muted 颜色，未像工作指示器那样跟随编辑器边框或 thinking-level 颜色。
+- MCP OAuth 刷新期间被取消或超时的工具调用，在刷新完成后仍被发送给服务器。
+- MCP OAuth 登录接受带 `iss` 参数但无法校验（未发现授权服务器元数据）的授权响应；现在以 issuer mismatch 失败。
+- Node 24/26 下 `node --watch` 运行时 codemode 报 bridge broken 错误。
+- MCP 服务器返回非对象 structured content（数组、`null` 或原始值，MCP 2026-07-28 允许）时工具调用失败。
+
+**⚠️ 破坏性变更**
+
+- 发布生成的配置 schema 于 `https://pi.dev/schemas/*.schema.json`；theme schema 移到 `https://pi.dev/schemas/theme.schema.json`，且启动时加载的主题现在与后续 reload 走相同 schema 校验。需更新 theme 的 `$schema` 引用、在 `vars` 下定义可复用颜色、移除不支持的元数据。
+- `before_agent_start` 现在也对空闲时由 `pi.sendMessage(..., { triggerTurn: true })` 触发的运行触发；`BeforeAgentStartEvent` 变为按 `messageType` 的 union——`"user"` 事件带 `prompt` 与 `images`，`"custom"` 事件带起始 `message` 且无 `prompt`。只应处理用户提示的 handler 必须检查 `event.messageType === "user"`。
+- 运行启动期间会话即计为忙（含 `before_agent_start` handler 执行中）：`ctx.isIdle()` 为 false，`pi.sendMessage()` 排队进正在启动的运行而非另起一次并报 "Agent is already processing"，`pi.sendUserMessage()` 必须带 `deliverAs`，此时请求的中止会在运行启动后生效。
+- `pi mcp list --json` 对有 resources 的服务器改为报告 `resources: true`，不再输出 `resources` 与 `resourceTemplates` 计数。
+
+**📝 文档与杂项**
+
+- `serializeConversation()`（compaction、分支摘要、bug report）省略 thinking blocks，避免摘要请求比其所摘要的上下文更大而失败。
+- codemode 对 MCP 工具的声明改为写明结果类型（`content`、`structuredContent`、`isError`），不再引用未定义的 `CallToolResult<T>`；codemode 描述不再包含共享 MCP 类型。
+- 移除未发布的实验性 server/client/plugin 栈（`src/experimental`、`src/cli/experimental`）及其仅源码的 `./client`、`./experimental/plugin` 导出；`@earendil-works/pi-client`、`@earendil-works/pi-protocol`、`@earendil-works/pi-server` 包随之删除、不再发布。
+- 移除对 `@earendil-works/chord` 的依赖。
+- `pi mcp login --help` 与 CLI 文档此前把 `--timeout` 写成只限制等待浏览器，实际限制整个登录过程，文档已更正。
+
+**Release**：https://github.com/earendil-works/pi/releases/tag/v1.2.0 ｜ 共 1 个新版本
+
+---
+2026-10-15 | v1.2.0 | 2026-10-12T23:03:53Z
