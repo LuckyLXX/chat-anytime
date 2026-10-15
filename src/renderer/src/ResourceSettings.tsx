@@ -178,7 +178,7 @@ export function ResourceSettings({ resources }: ResourceSettingsProps): ReactNod
         <section className="resource-card" aria-label="MCP Server">
           <div className="resource-card-head">
             <span className="resource-card-title"><Server size={14} /><strong>MCP Server</strong></span>
-            <small>写入 .mcp.json 或用户全局配置；保存后重建会话以加载新工具</small>
+            <small>写入 .mcp.json 或用户全局配置；保存后立即生效（增减服务器无需重建会话）</small>
             <span className="resource-card-actions">
               <small className="resource-card-count">{resources.mcpServers.length} 个</small>
               <button className="secondary-button compact-button" type="button" data-control="mcp-add" disabled={controlsBusy} onClick={() => { if (!mcpFormOpen) resetMcpForm(); setMcpFormOpen((open) => !open); }}><Plus size={13} />{mcpFormOpen ? "收起" : "添加"}</button>
@@ -201,7 +201,7 @@ export function ResourceSettings({ resources }: ResourceSettingsProps): ReactNod
                   <label className="mcp-form-wide">请求头（可选，每行 名称=值）<textarea value={mcpHeaders} rows={2} placeholder={"X-API-Key=your-key"} onChange={(event) => setMcpHeaders(event.target.value)} /></label>
                 </>}
               </div>
-              <p className="resource-form-help">{editingMcp ? `正在编辑 ${editingMcp.name}：名称即配置键不可改；切换「写入范围」会把该条目迁移到另一个配置文件，停用状态保留。保存后重载工具并重建会话。` : "添加后会写入 MCP 配置并重建会话以加载新工具。stdio 服务通常由 npx 首次启动；敏感值建议用环境变量名，不要直接写入配置。"}</p>
+              <p className="resource-form-help">{editingMcp ? `正在编辑 ${editingMcp.name}：名称即配置键不可改；切换「写入范围」会把该条目迁移到另一个配置文件，停用状态保留。保存后立即生效（增减服务器无需重建会话）。` : "添加后会写入 MCP 配置并立即加载。stdio 服务通常由 npx 首次启动；敏感值建议用环境变量名，不要直接写入配置。"}</p>
               {mcpTransport === "http" && <p className="resource-form-help">认证选 OAuth：保存后回到列表点「认证」，会自动打开系统浏览器完成授权，回调后自动重连；凭据保存在本地（刷新令牌长期有效），只有被授权服务器判定失效时才会提示「重新授权」——那时已保存的凭据仍会保留并优先重试。Bearer 环境变量优先于 OAuth（它的令牌会覆盖请求头里的 Authorization，其余头保留）。请求头按字面带上；写了 Authorization 就不再自动走 OAuth；只写 X-API-Key 这类网关头不影响该判定（服务端若答 401 仍会进入「需要认证」并提示走 OAuth，需要彻底避开可用 Bearer 环境变量）。注意请求头里的值会以明文写入配置文件，敏感值建议用 Bearer 环境变量。</p>}
               <footer className="mcp-form-actions"><button className="secondary-button compact-button" type="button" disabled={controlsBusy} onClick={() => { resetMcpForm(); setMcpFormOpen(false); }}><X size={13} />取消</button><button className="primary-button compact-button" type="submit" data-control="mcp-save" disabled={controlsBusy}>{editingMcp ? <Pencil size={13} /> : <Plus size={13} />}{editingMcp ? "保存修改" : "添加 MCP"}</button></footer>
             </form>}
