@@ -40,6 +40,32 @@ const mcpStatusLabels: Record<McpServerStatus, string> = {
   disabled: "已停用"
 };
 
+/**
+ * OAuth 高级选项的表单态（全字符串：输入框友好；提交时转成 McpOAuthAdvanced，
+ * 空字段丢弃、callbackPort 转数字，校验口径以主进程的 normalizeMcpOAuth 为准）。
+ */
+interface McpOauthFormState {
+  clientId: string;
+  clientSecret: string;
+  callbackUrl: string;
+  callbackPort: string;
+  scope: string;
+  clientName: string;
+  clientRegistration: "" | "dcr" | "cimd";
+  authServerMetadataUrl: string;
+}
+
+const EMPTY_MCP_OAUTH: McpOauthFormState = {
+  clientId: "",
+  clientSecret: "",
+  callbackUrl: "",
+  callbackPort: "",
+  scope: "",
+  clientName: "",
+  clientRegistration: "",
+  authServerMetadataUrl: ""
+};
+
 export function ResourceSettings({ resources }: ResourceSettingsProps): ReactNode {
   const [busy, setBusy] = useState(false);
   const [localError, setLocalError] = useState<string>();
@@ -55,6 +81,9 @@ export function ResourceSettings({ resources }: ResourceSettingsProps): ReactNod
   const [mcpBearerTokenEnv, setMcpBearerTokenEnv] = useState("");
   const [mcpHeaders, setMcpHeaders] = useState("");
   const [mcpEnv, setMcpEnv] = useState("");
+  const [mcpTimeout, setMcpTimeout] = useState("");
+  const [mcpOauthOpen, setMcpOauthOpen] = useState(false);
+  const [mcpOauth, setMcpOauth] = useState<McpOauthFormState>(EMPTY_MCP_OAUTH);
   const [commandFormOpen, setCommandFormOpen] = useState(false);
   const [editingCommand, setEditingCommand] = useState<string>();
   const [commandName, setCommandName] = useState("");
@@ -100,6 +129,11 @@ export function ResourceSettings({ resources }: ResourceSettingsProps): ReactNod
     setCommandTemplate("");
   }
 
+  /** OAuth 高级选项的字段更新助手（一个对象态，避免再开 8 个 useState）。 */
+  function setOauthField<K extends keyof McpOauthFormState>(key: K, value: McpOauthFormState[K]): void {
+    setMcpOauth((current) => ({ ...current, [key]: value }));
+  }
+
   /** 新增/编辑共用表单：编辑时记下原位置（名称锁定，写入范围可改＝迁移）。 */
   function resetMcpForm(): void {
     setEditingMcp(undefined);
@@ -113,6 +147,9 @@ export function ResourceSettings({ resources }: ResourceSettingsProps): ReactNod
     setMcpBearerTokenEnv("");
     setMcpHeaders("");
     setMcpEnv("");
+    setMcpTimeout("");
+    setMcpOauth(EMPTY_MCP_OAUTH);
+    setMcpOauthOpen(false);
   }
 
   function editMcpServer(server: McpServerSummary): void {
@@ -127,6 +164,18 @@ export function ResourceSettings({ resources }: ResourceSettingsProps): ReactNod
     setMcpAuth(server.auth ?? "none");
     setMcpBearerTokenEnv(server.bearerTokenEnv ?? "");
     setMcpHeaders(formatKeyValueLines(server.headers));
+    setMcpTimeout(server.timeout === undefined ? "" : String(server.timeout));
+    setMcpOauth({
+      clientId: server.oauth?.clientId ?? "",
+      clientSecret: server.oauth?.clientSecret ?? "",
+      callbackUrl: server.oauth?.callbackUrl ?? "",
+      callbackPort: server.oauth?.callbackPort === undefined ? "" : String(server.oauth.callbackPort),
+      scope: server.oauth?.scope ?? "",
+      clientName: server.oauth?.clientName ?? "",
+      clientRegistration: server.oauth?.clientRegistration ?? "",
+      authServerMetadataUrl: server.oauth?.authServerMetadataUrl ?? ""
+    });
+    setMcpOauthOpen(Boolean(server.oauth));
     setMcpFormOpen(true);
   }
 
@@ -135,10 +184,30 @@ export function ResourceSettings({ resources }: ResourceSettingsProps): ReactNod
     try {
       // HTTP 请求头在草稿阶段就解析（非法行要在这里报出来，而不是默默丢掉）。
       const httpHeaders = mcpTransport === "http" ? parseKeyValueLines(mcpHeaders, HEADER_LINES) : undefined;
+      const rawTimeout = mcpTimeout.trim();
+      const timeout = rawTimeout === "" ? undefined : Number(rawTimeout);
+      // OAuth 高级选项：空字段丢弃；callbackPort 只在填写时转数字（校验在主进程口径）。
+      const oauth: McpServerConfigDraft["oauth"] = mcpTransport === "http" && mcpAuth !== "bearer-env"
+        ? (() => {
+            const port = mcpOauth.callbackPort.trim();
+            const draft = {
+              ...(mcpOauth.clientId.trim() ? { clientId: mcpOauth.clientId.trim() } : {}),
+              ...(mcpOauth.clientSecret.trim() ? { clientSecret: mcpOauth.clientSecret.trim() } : {}),
+              ...(mcpOauth.callbackUrl.trim() ? { callbackUrl: mcpOauth.callbackUrl.trim() } : {}),
+              ...(port ? { callbackPort: Number(port) } : {}),
+              ...(mcpOauth.scope.trim() ? { scope: mcpOauth.scope.trim() } : {}),
+              ...(mcpOauth.clientName.trim() ? { clientName: mcpOauth.clientName.trim() } : {}),
+              ...(mcpOauth.clientRegistration ? { clientRegistration: mcpOauth.clientRegistration } : {}),
+              ...(mcpOauth.authServerMetadataUrl.trim() ? { authServerMetadataUrl: mcpOauth.authServerMetadataUrl.trim() } : {})
+            };
+            return Object.keys(draft).length > 0 ? draft : undefined;
+          })()
+        : undefined;
       const server: McpServerConfigDraft = {
         name: mcpName.trim(),
         scope: mcpScope,
         transport: mcpTransport,
+        ...(timeout !== undefined ? { timeout } : {}),
         ...(mcpTransport === "stdio"
           ? {
               command: mcpCommand.trim(),
@@ -149,7 +218,8 @@ export function ResourceSettings({ resources }: ResourceSettingsProps): ReactNod
               url: mcpUrl.trim(),
               auth: mcpAuth,
               ...(mcpAuth === "bearer-env" ? { bearerTokenEnv: mcpBearerTokenEnv.trim() } : {}),
-              ...(httpHeaders ? { headers: httpHeaders } : {})
+              ...(httpHeaders ? { headers: httpHeaders } : {}),
+              ...(oauth ? { oauth } : {})
             })
       };
       const success = await run({ type: "mcp.server.save", server, ...(editingMcp ? { original: editingMcp } : {}) });
@@ -194,15 +264,30 @@ export function ResourceSettings({ resources }: ResourceSettingsProps): ReactNod
                   <label>启动命令<input value={mcpCommand} placeholder="npx" onChange={(event) => setMcpCommand(event.target.value)} /></label>
                   <label className="mcp-form-wide">参数（每行一个）<textarea value={mcpArgs} rows={3} placeholder={"-y\ncontext7-mcp"} onChange={(event) => setMcpArgs(event.target.value)} /></label>
                   <label className="mcp-form-wide">环境变量（可选，每行 KEY=VALUE）<textarea value={mcpEnv} rows={2} placeholder="API_KEY=xxx" onChange={(event) => setMcpEnv(event.target.value)} /></label>
+                  <label>超时（秒，可选）<input value={mcpTimeout} inputMode="numeric" placeholder="120" onChange={(event) => setMcpTimeout(event.target.value)} /></label>
                 </> : <>
                   <label className="mcp-form-wide">服务器地址<input value={mcpUrl} placeholder="https://mcp.example.com/mcp" onChange={(event) => setMcpUrl(event.target.value)} /></label>
                   <label>认证<select value={mcpAuth} onChange={(event) => setMcpAuth(event.target.value as NonNullable<McpServerConfigDraft["auth"]>)}><option value="none">无</option><option value="oauth">OAuth</option><option value="bearer-env">Bearer 环境变量</option></select></label>
                   {mcpAuth === "bearer-env" && <label>Token 环境变量<input value={mcpBearerTokenEnv} placeholder="MCP_TOKEN" onChange={(event) => setMcpBearerTokenEnv(event.target.value)} /></label>}
                   <label className="mcp-form-wide">请求头（可选，每行 名称=值）<textarea value={mcpHeaders} rows={2} placeholder={"X-API-Key=your-key"} onChange={(event) => setMcpHeaders(event.target.value)} /></label>
+                  <label>超时（秒，可选）<input value={mcpTimeout} inputMode="numeric" placeholder="120" onChange={(event) => setMcpTimeout(event.target.value)} /></label>
+                  {mcpAuth !== "bearer-env" && <div className="mcp-form-wide mcp-oauth-advanced">
+                    <button type="button" className="secondary-button compact-button" onClick={() => setMcpOauthOpen((open) => !open)}>{mcpOauthOpen ? "收起 OAuth 高级选项" : "OAuth 高级选项（预注册客户端等，可选）"}</button>
+                    {mcpOauthOpen && <div className="mcp-oauth-grid">
+                      <label>客户端 ID<input value={mcpOauth.clientId} placeholder="不填则动态注册" onChange={(event) => setOauthField("clientId", event.target.value)} /></label>
+                      <label>客户端密钥<input value={mcpOauth.clientSecret} placeholder="可用 ${ENV} 引用环境变量" onChange={(event) => setOauthField("clientSecret", event.target.value)} /></label>
+                      <label>回调地址<input value={mcpOauth.callbackUrl} placeholder="http://127.0.0.1:1456/callback" onChange={(event) => setOauthField("callbackUrl", event.target.value)} /></label>
+                      <label>回调端口<input value={mcpOauth.callbackPort} inputMode="numeric" placeholder="不填则随机" onChange={(event) => setOauthField("callbackPort", event.target.value)} /></label>
+                      <label>授权范围<input value={mcpOauth.scope} placeholder="空格分隔；缺省用服务端声明的范围" onChange={(event) => setOauthField("scope", event.target.value)} /></label>
+                      <label>客户端注册<select value={mcpOauth.clientRegistration} onChange={(event) => setOauthField("clientRegistration", event.target.value as McpOauthFormState["clientRegistration"])}><option value="">默认（dcr 动态注册）</option><option value="dcr">dcr（动态注册）</option><option value="cimd">cimd（Client ID 文档）</option></select></label>
+                      <label>客户端名<input value={mcpOauth.clientName} placeholder="pi" onChange={(event) => setOauthField("clientName", event.target.value)} /></label>
+                      <label>授权服务器元数据<input value={mcpOauth.authServerMetadataUrl} placeholder="https://…（服务端指向错时用）" onChange={(event) => setOauthField("authServerMetadataUrl", event.target.value)} /></label>
+                    </div>}
+                  </div>}
                 </>}
               </div>
-              <p className="resource-form-help">{editingMcp ? `正在编辑 ${editingMcp.name}：名称即配置键不可改；切换「写入范围」会把该条目迁移到另一个配置文件，停用状态保留。保存后立即生效（增减服务器无需重建会话）。` : "添加后会写入 MCP 配置并立即加载。stdio 服务通常由 npx 首次启动；敏感值建议用环境变量名，不要直接写入配置。"}</p>
-              {mcpTransport === "http" && <p className="resource-form-help">认证选 OAuth：保存后回到列表点「认证」，会自动打开系统浏览器完成授权，回调后自动重连；凭据保存在本地（刷新令牌长期有效），只有被授权服务器判定失效时才会提示「重新授权」——那时已保存的凭据仍会保留并优先重试。Bearer 环境变量优先于 OAuth（它的令牌会覆盖请求头里的 Authorization，其余头保留）。请求头按字面带上；写了 Authorization 就不再自动走 OAuth；只写 X-API-Key 这类网关头不影响该判定（服务端若答 401 仍会进入「需要认证」并提示走 OAuth，需要彻底避开可用 Bearer 环境变量）。注意请求头里的值会以明文写入配置文件，敏感值建议用 Bearer 环境变量。</p>}
+              <p className="resource-form-help">{editingMcp ? `正在编辑 ${editingMcp.name}：名称即配置键不可改；切换「写入范围」会把该条目迁移到另一个配置文件，停用状态保留。保存后立即生效（增减服务器无需重建会话）。` : "添加后会写入 MCP 配置并立即加载。stdio 服务通常由 npx 首次启动；敏感值建议用环境变量名或 ${名称} 引用，不要直接写入配置。"}</p>
+              {mcpTransport === "http" && <p className="resource-form-help">认证选 OAuth：保存后回到列表点「认证」，会自动打开系统浏览器完成授权，回调后自动重连；凭据保存在本地（刷新令牌长期有效），只有被授权服务器判定失效时才会提示「重新授权」——那时已保存的凭据仍会保留并优先重试。Bearer 环境变量优先于 OAuth（它的令牌会覆盖请求头里的 Authorization，其余头保留）。请求头按字面带上；写了 Authorization 就不再自动走 OAuth；只写 X-API-Key 这类网关头不影响该判定（服务端若答 401 仍会进入「需要认证」并提示走 OAuth，需要彻底避开可用 Bearer 环境变量）。不支持动态客户端注册的服务器用「OAuth 高级选项」填预注册的客户端 ID/密钥与回调地址。注意：环境变量值、请求头值与客户端密钥里的 {"${名称}"} 会被替换成该环境变量的值、「!命令」会执行命令并把输出代入（Pi 展开规则）；敏感值建议用 {"${环境变量}"} 或 Bearer 环境变量而不是明文。</p>}
               <footer className="mcp-form-actions"><button className="secondary-button compact-button" type="button" disabled={controlsBusy} onClick={() => { resetMcpForm(); setMcpFormOpen(false); }}><X size={13} />取消</button><button className="primary-button compact-button" type="submit" data-control="mcp-save" disabled={controlsBusy}>{editingMcp ? <Pencil size={13} /> : <Plus size={13} />}{editingMcp ? "保存修改" : "添加 MCP"}</button></footer>
             </form>}
             {resources.mcpServers.length === 0

@@ -80,6 +80,32 @@ describe("mcp config", () => {
     expect(servers.find((server) => server.name === "gateway")!.entry.headers).toEqual({ "X-API-Key": "secret" });
   });
 
+  it("round-trips OAuth advanced options and timeout through upsert + projection", async () => {
+    const path = await temporaryConfig();
+    upsertMcpServerConfig(path, "ent", {
+      url: "https://ent.example/mcp",
+      auth: "oauth",
+      oauth: { clientId: "cid", clientSecret: "${SECRET}", callbackUrl: "http://127.0.0.1:1456/callback", callbackPort: 1456, scope: "read write", clientRegistration: "cimd", authServerMetadataUrl: "https://as.example/.well-known" },
+      timeout: 300
+    });
+    expect(readMcpServerEntry(path, "ent")).toEqual({
+      url: "https://ent.example/mcp",
+      auth: "oauth",
+      oauth: { clientId: "cid", clientSecret: "${SECRET}", callbackUrl: "http://127.0.0.1:1456/callback", callbackPort: 1456, scope: "read write", clientRegistration: "cimd", authServerMetadataUrl: "https://as.example/.well-known" },
+      timeout: 300
+    });
+    // 投影（编辑表单回填）带出高级字段；且是副本
+    const fields = mcpServerConfigFields(readConfiguredMcpServers(path, join(path, "..", "missing.json"))[0]!);
+    expect(fields.oauth).toEqual({ clientId: "cid", clientSecret: "${SECRET}", callbackUrl: "http://127.0.0.1:1456/callback", callbackPort: 1456, scope: "read write", clientRegistration: "cimd", authServerMetadataUrl: "https://as.example/.well-known" });
+    expect(fields.timeout).toBe(300);
+    fields.oauth!.clientId = "changed";
+    expect(readMcpServerEntry(path, "ent")!.oauth!.clientId).toBe("cid");
+    // 未配置 timeout/oauth 的条目不带这两个字段
+    upsertMcpServerConfig(path, "plain", { url: "https://plain.example/mcp" });
+    expect(readMcpServerEntry(path, "plain")).toEqual({ url: "https://plain.example/mcp" });
+    expect(mcpServerConfigFields(readConfiguredMcpServers(path, join(path, "..", "missing.json")).find((s) => s.name === "plain")!).timeout).toBeUndefined();
+  });
+
   it("round-trips headers through upsert and drops the field when empty", async () => {
     const path = await temporaryConfig();
     upsertMcpServerConfig(path, "gw", { url: "https://gw.example/mcp", headers: { "X-API-Key": "secret" } });

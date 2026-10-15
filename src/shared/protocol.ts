@@ -1629,6 +1629,35 @@ export interface McpServerSummary {
   failedAgoSeconds?: number;
   disabled: boolean;
   error?: string;
+  /** OAuth 高级选项（编辑表单回填用，明文=配置文件内容）。 */
+  oauth?: McpOAuthAdvanced;
+  /** 每请求超时（秒）；未配置时为 undefined（运行时按 120 缺省值）。 */
+  timeout?: number;
+}
+
+/**
+ * OAuth 高级选项（预注册客户端等）。字段与 Pi 的 `McpOAuthConfig` 对齐，
+ * 适配层原样透传：不支持动态客户端注册（DCR）的服务器靠 clientId 才能完成授权；
+ * callbackUrl/callbackPort 用于已在授权服务器登记固定回调地址的客户端。
+ * 所有字段可选，留空即不写进配置文件。
+ */
+export interface McpOAuthAdvanced {
+  /** 预注册的客户端 ID；不填则由 pi 动态注册。 */
+  clientId?: string;
+  /** 客户端密钥；支持 `${ENV}` / `!cmd` 引用（同请求头规则，由 Pi 展开）。 */
+  clientSecret?: string;
+  /** 已登记的固定回调地址（http，且必须是 localhost / 127.0.0.1 / [::1]）。 */
+  callbackUrl?: string;
+  /** 回调端口；不写 callbackUrl 时用它，否则随机端口。 */
+  callbackPort?: number;
+  /** 申请的授权范围（空格分隔）；缺省用服务端声明的范围。 */
+  scope?: string;
+  /** 动态注册时的 client_name；缺省 pi。 */
+  clientName?: string;
+  /** 不填 clientId 时的自我标识方式：dcr（默认，动态注册）/ cimd（pi 的 Client ID 文档）。 */
+  clientRegistration?: "dcr" | "cimd";
+  /** 授权服务器元数据地址（RFC 8414 / OIDC discovery）；服务端指向错误时用它。 */
+  authServerMetadataUrl?: string;
 }
 
 export interface McpServerConfigDraft {
@@ -1643,6 +1672,10 @@ export interface McpServerConfigDraft {
   env?: Record<string, string>;
   /** HTTP 传输的额外请求头（每行 名称=值 的表单输入解析结果）。 */
   headers?: Record<string, string>;
+  /** OAuth 高级选项（仅 HTTP 且非 bearer-env 时有意义）。 */
+  oauth?: McpOAuthAdvanced;
+  /** 每请求超时（秒）；缺省 120（迁移前 MCP_CALL_TIMEOUT_MS 的口径）。 */
+  timeout?: number;
 }
 
 /**

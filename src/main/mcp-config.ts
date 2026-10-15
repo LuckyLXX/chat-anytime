@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import stripJsonComments from "strip-json-comments";
+import type { McpOAuthAdvanced } from "../shared/protocol.js";
 
 export interface McpServerConfigEntry {
   command?: string;
@@ -22,6 +23,13 @@ export interface McpServerConfigEntry {
    * interoperable with `.mcp.json` files authored by other tools.
    */
   disabled?: boolean;
+  /**
+   * OAuth 高级选项（字段同 Pi 的 `McpOAuthConfig`，预注册客户端等）。
+   * 非标准字段：其他 MCP 客户端忽略它；仅我们的适配层读。
+   */
+  oauth?: McpOAuthAdvanced;
+  /** 每请求超时（秒）；缺省 120。非标准字段（Pi 读 profile 的 timeout，由适配层写入）。 */
+  timeout?: number;
 }
 
 export interface ConfiguredMcpServer {
@@ -41,6 +49,8 @@ export interface McpServerConfigFields {
   bearerTokenEnv?: string;
   env?: Record<string, string>;
   headers?: Record<string, string>;
+  oauth?: McpOAuthAdvanced;
+  timeout?: number;
 }
 
 type JsonRecord = Record<string, unknown>;
@@ -82,7 +92,9 @@ export function mcpServerConfigFields(server: ConfiguredMcpServer): McpServerCon
     ...(transport === "http" ? { auth: entry.bearerTokenEnv ? "bearer-env" as const : entry.auth === "oauth" ? "oauth" as const : "none" as const } : {}),
     ...(entry.bearerTokenEnv ? { bearerTokenEnv: entry.bearerTokenEnv } : {}),
     ...(entry.env && Object.keys(entry.env).length > 0 ? { env: { ...entry.env } } : {}),
-    ...(transport === "http" && entry.headers && Object.keys(entry.headers).length > 0 ? { headers: { ...entry.headers } } : {})
+    ...(transport === "http" && entry.headers && Object.keys(entry.headers).length > 0 ? { headers: { ...entry.headers } } : {}),
+    ...(entry.oauth && Object.keys(entry.oauth).length > 0 ? { oauth: { ...entry.oauth } } : {}),
+    ...(entry.timeout !== undefined ? { timeout: entry.timeout } : {})
   };
 }
 

@@ -54,6 +54,34 @@ describe("mcpConfigPathsFor / mcpConfigEntry / normalizeMcpHeaders（迁移后�
     expect(() => normalizeMcpHeaders({ "Bad Name": "v" })).toThrow("请求头名称无效");
     expect(() => normalizeMcpHeaders({ "X-A": "a\r\nb" })).toThrow("换行");
   });
+
+  it("OAuth 高级选项校验：空值丢弃、回环回调、https 元数据、端口范围、注册方式枚举", () => {
+    // 空对象 → 不产生 oauth 字段
+    expect(mcpConfigEntry({ name: "x", scope: "global", transport: "http", url: "https://a", oauth: {} }).oauth).toBeUndefined();
+    // 合法值归一化（trim + 丢弃空串）
+    const ok = mcpConfigEntry({
+      name: "x", scope: "global", transport: "http", url: "https://a",
+      oauth: { clientId: " cid ", clientSecret: "", callbackPort: 1456, scope: "a b", clientRegistration: "cimd" }
+    });
+    expect(ok.oauth).toEqual({ clientId: "cid", callbackPort: 1456, scope: "a b", clientRegistration: "cimd" });
+    // 回调地址必须回环 http（允许 localhost / 127.0.0.1 / [::1]）
+    expect(() => mcpConfigEntry({ name: "x", scope: "global", transport: "http", url: "https://a", oauth: { callbackUrl: "https://evil.example/cb" } })).toThrow("localhost");
+    expect(mcpConfigEntry({ name: "x", scope: "global", transport: "http", url: "https://a", oauth: { callbackUrl: "http://127.0.0.1:1456/callback" } }).oauth?.callbackUrl).toBe("http://127.0.0.1:1456/callback");
+    // 端口范围与注册方式
+    expect(() => mcpConfigEntry({ name: "x", scope: "global", transport: "http", url: "https://a", oauth: { callbackPort: 70000 } })).toThrow("65535");
+    expect(() => mcpConfigEntry({ name: "x", scope: "global", transport: "http", url: "https://a", oauth: { clientRegistration: "bad" as never } })).toThrow("dcr");
+    // 元数据地址必须 https（回环除外）
+    expect(() => mcpConfigEntry({ name: "x", scope: "global", transport: "http", url: "https://a", oauth: { authServerMetadataUrl: "http://as.example/.well-known" } })).toThrow("https");
+  });
+
+  it("timeout 校验：1–3600 整数；空值不写入；stdio 与 HTTP 都接受", () => {
+    expect(mcpConfigEntry({ name: "x", scope: "global", transport: "stdio", command: "npx" }).timeout).toBeUndefined();
+    expect(mcpConfigEntry({ name: "x", scope: "global", transport: "stdio", command: "npx", timeout: 300 }).timeout).toBe(300);
+    expect(mcpConfigEntry({ name: "x", scope: "global", transport: "http", url: "https://a", timeout: 30 }).timeout).toBe(30);
+    expect(() => mcpConfigEntry({ name: "x", scope: "global", transport: "http", url: "https://a", timeout: 0 })).toThrow("1–3600");
+    expect(() => mcpConfigEntry({ name: "x", scope: "global", transport: "http", url: "https://a", timeout: 3601 })).toThrow("1–3600");
+    expect(() => mcpConfigEntry({ name: "x", scope: "global", transport: "http", url: "https://a", timeout: 1.5 })).toThrow("1–3600");
+  });
 });
 
 describe("piMcpConfigFor：方言 → Pi McpServerConfig", () => {
@@ -70,6 +98,16 @@ describe("piMcpConfigFor：方言 → Pi McpServerConfig", () => {
     const config = piMcpConfigFor(server("exa", { url: "https://e/mcp", bearerTokenEnv: "EXA_KEY", headers: { Authorization: "manual", "X-Other": "1" } }), "direct");
     if (config.type !== "http") throw new Error("应为 http 配置");
     expect(config.headers).toEqual({ Authorization: "Bearer ${EXA_KEY}", "X-Other": "1" });
+  });
+
+  it("OAuth 高级选项与 timeout 原样透传给 Pi（字段名与 McpOAuthConfig 对齐）", () => {
+    const config = piMcpConfigFor(server("exa", { url: "https://e/mcp", auth: "oauth", timeout: 300, oauth: { clientId: "cid", clientSecret: "${SECRET}", callbackUrl: "http://127.0.0.1:1456/callback", scope: "read" } }), "direct");
+    if (config.type !== "http") throw new Error("应为 http 配置");
+    expect(config.timeout).toBe(300);
+    expect(config.oauth).toEqual({ clientId: "cid", clientSecret: "${SECRET}", callbackUrl: "http://127.0.0.1:1456/callback", scope: "read" });
+    // 未配置 timeout → 旧缺省 120s
+    const dflt = piMcpConfigFor(server("a", { url: "https://a" }), "direct");
+    expect(dflt.timeout).toBe(PI_MCP_CALL_TIMEOUT_SECONDS);
   });
 
   it("auth:oauth → 无显式 OAuth 配置（Pi 隐式：无 Authorization 头的 HTTP 服务器自动 OAuth）", () => {
@@ -165,9 +203,12 @@ describe("buildMcpSummaries：配置投影 + 解析态合成", () => {
   });
 
   it("配置投影字段完整回填（表单明文往返）", () => {
-    const summaries = buildMcpSummaries({ configured, parsed: new Map(), authPending: new Set(), authorized: new Set() });
+    const withAdvanced = [server("ent", { url: "https://ent/mcp", auth: "oauth", timeout: 300, oauth: { clientId: "cid", callbackPort: 1456, scope: "read" } })];
+    const summaries = buildMcpSummaries({ configured: [...configured, ...withAdvanced], parsed: new Map(), authPending: new Set(), authorized: new Set() });
     expect(summaries.find((s) => s.name === "fs")).toMatchObject({ command: "npx", args: ["-y", "s"], scope: "global" });
     expect(summaries.find((s) => s.name === "exa")).toMatchObject({ url: "https://e/mcp", transport: "http" });
+    // OAuth 高级选项与 timeout 随摘要回填（编辑表单预填用）
+    expect(summaries.find((s) => s.name === "ent")).toMatchObject({ timeout: 300, oauth: { clientId: "cid", callbackPort: 1456, scope: "read" } });
   });
 });
 

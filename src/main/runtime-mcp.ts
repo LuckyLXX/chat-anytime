@@ -8,7 +8,7 @@
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import type { McpServerSummary, McpServerConfigDraft } from "../shared/protocol.js";
+import type { McpServerSummary, McpServerConfigDraft, McpOAuthAdvanced } from "../shared/protocol.js";
 import { readConfiguredMcpServers, readMcpServerEntry, hasAuthorizationHeader, type McpServerConfigEntry, type ConfiguredMcpServer } from "./mcp-config.js";
 
 export function mcpConfigPathsFor(workspace: string | undefined, agentDir: string): { project: string; global: string } {
@@ -23,25 +23,97 @@ export function mcpConfigPathsFor(workspace: string | undefined, agentDir: strin
 const HEADER_NAME_PATTERN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/u;
 
 export function mcpConfigEntry(server: McpServerConfigDraft): McpServerConfigEntry {
+  const timeout = normalizeMcpTimeout(server.timeout);
   if (server.transport === "stdio") {
     const command = server.command?.trim();
     if (!command) throw new Error("stdio MCP Server 需要填写启动命令");
     return {
       command,
       ...(server.args && server.args.length > 0 ? { args: server.args } : {}),
-      ...(server.env && Object.keys(server.env).length > 0 ? { env: server.env } : {})
+      ...(server.env && Object.keys(server.env).length > 0 ? { env: server.env } : {}),
+      ...(timeout !== undefined ? { timeout } : {})
     };
   }
   const url = server.url?.trim();
   if (!url || !/^https?:\/\//iu.test(url)) throw new Error("HTTP MCP Server 需要填写 http:// 或 https:// 地址");
   if (server.auth === "bearer-env" && !server.bearerTokenEnv?.trim()) throw new Error("Bearer 认证需要填写环境变量名");
   const headers = normalizeMcpHeaders(server.headers);
+  const oauth = normalizeMcpOAuth(server.oauth);
   return {
     url,
     ...(server.auth === "oauth" ? { auth: "oauth" as const } : {}),
     ...(server.auth === "bearer-env" ? { bearerTokenEnv: server.bearerTokenEnv!.trim() } : {}),
-    ...(headers ? { headers } : {})
+    ...(headers ? { headers } : {}),
+    ...(oauth ? { oauth } : {}),
+    ...(timeout !== undefined ? { timeout } : {})
   };
+}
+
+/**
+ * 校验并归一化 OAuth 高级选项（预注册客户端等）：空值丢弃，非法值报错
+ * ——不做静默丢弃，否则用户以为配置生效但实际走了 DCR。
+ * 与 Pi 的口径对齐：回调地址必须是回环（localhost / 127.0.0.1 / [::1]），
+ * 元数据地址必须 https（回环除外）；端口 1–65535。
+ */
+export function normalizeMcpOAuth(oauth: McpOAuthAdvanced | undefined): McpOAuthAdvanced | undefined {
+  if (!oauth) return undefined;
+  const result: McpOAuthAdvanced = {};
+  const text = (value: unknown, label: string): string | undefined => {
+    if (value === undefined || value === null) return undefined;
+    if (typeof value !== "string") throw new Error(`${label} 必须是字符串`);
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  };
+  const clientId = text(oauth.clientId, "OAuth 客户端 ID");
+  const clientSecret = text(oauth.clientSecret, "OAuth 客户端密钥");
+  const scope = text(oauth.scope, "OAuth 授权范围");
+  const clientName = text(oauth.clientName, "OAuth 客户端名");
+  const callbackUrl = text(oauth.callbackUrl, "OAuth 回调地址");
+  const metadataUrl = text(oauth.authServerMetadataUrl, "授权服务器元数据地址");
+  if (callbackUrl) {
+    let parsed: URL;
+    try {
+      parsed = new URL(callbackUrl);
+    } catch {
+      throw new Error(`OAuth 回调地址无法解析：${callbackUrl}`);
+    }
+    const loopback = parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1" || parsed.hostname === "[::1]" || parsed.hostname === "::1";
+    if (parsed.protocol !== "http:" || !loopback) throw new Error("OAuth 回调地址必须是 http 且指向 localhost / 127.0.0.1 / [::1]");
+    result.callbackUrl = callbackUrl;
+  }
+  if (oauth.callbackPort !== undefined) {
+    const port = typeof oauth.callbackPort === "number" ? oauth.callbackPort : Number(oauth.callbackPort);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("OAuth 回调端口必须是 1–65535 的整数");
+    result.callbackPort = port;
+  }
+  if (oauth.clientRegistration !== undefined) {
+    if (oauth.clientRegistration !== "dcr" && oauth.clientRegistration !== "cimd") throw new Error("OAuth 客户端注册方式只能是 dcr 或 cimd");
+    result.clientRegistration = oauth.clientRegistration;
+  }
+  if (metadataUrl) {
+    let parsed: URL;
+    try {
+      parsed = new URL(metadataUrl);
+    } catch {
+      throw new Error(`授权服务器元数据地址无法解析：${metadataUrl}`);
+    }
+    const loopback = parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1" || parsed.hostname === "[::1]" || parsed.hostname === "::1";
+    if (parsed.protocol !== "https:" && !loopback) throw new Error("授权服务器元数据地址必须是 https（回环除外）");
+    result.authServerMetadataUrl = metadataUrl;
+  }
+  if (clientId) result.clientId = clientId;
+  if (clientSecret) result.clientSecret = clientSecret;
+  if (scope) result.scope = scope;
+  if (clientName) result.clientName = clientName;
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+/** 每请求超时（秒）：1–3600 的正整数；空＝未配置（运行时按 120 缺省）。 */
+export function normalizeMcpTimeout(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  const seconds = typeof value === "number" ? value : Number(String(value).trim());
+  if (!Number.isInteger(seconds) || seconds < 1 || seconds > 3600) throw new Error("MCP 超时必须是 1–3600 秒的整数");
+  return seconds;
 }
 
 /**
@@ -111,7 +183,7 @@ export type PiMcpRegistration = {
   name: string;
   config:
     | { type: "stdio"; command: string; args?: string[]; env?: Record<string, string>; exposure: "direct" | "hidden"; timeout: number }
-    | { type: "http"; url: string; headers?: Record<string, string>; exposure: "direct" | "hidden"; timeout: number };
+    | { type: "http"; url: string; headers?: Record<string, string>; oauth?: McpOAuthAdvanced; exposure: "direct" | "hidden"; timeout: number };
 };
 
 /**
@@ -126,7 +198,7 @@ export type PiMcpRegistration = {
  */
 export function piMcpConfigFor(server: ConfiguredMcpServer, exposure: "direct" | "hidden"): PiMcpRegistration["config"] {
   const entry = server.entry;
-  const timeout = PI_MCP_CALL_TIMEOUT_SECONDS;
+  const timeout = entry.timeout ?? PI_MCP_CALL_TIMEOUT_SECONDS;
   if (entry.command) {
     return {
       type: "stdio",
@@ -147,6 +219,10 @@ export function piMcpConfigFor(server: ConfiguredMcpServer, exposure: "direct" |
     type: "http",
     url: entry.url,
     ...(Object.keys(headers).length > 0 ? { headers } : {}),
+    // OAuth 高级选项（预注册客户端/回调/范围/元数据地址）原样透传：字段名与 Pi
+    // 的 McpOAuthConfig 一致（存盘方言已在 mcpConfigEntry 校验过）；clientSecret
+    // 里的 ${ENV}/!cmd 由 Pi 展开。
+    ...(entry.oauth ? { oauth: { ...entry.oauth } } : {}),
     exposure,
     timeout
   };
@@ -260,6 +336,8 @@ export function buildMcpSummaries(params: {
       ...(entry.bearerTokenEnv ? { bearerTokenEnv: entry.bearerTokenEnv } : {}),
       ...(entry.env && Object.keys(entry.env).length > 0 ? { env: { ...entry.env } } : {}),
       ...(transport === "http" && entry.headers && Object.keys(entry.headers).length > 0 ? { headers: { ...entry.headers } } : {}),
+      ...(entry.oauth ? { oauth: { ...entry.oauth } } : {}),
+      ...(entry.timeout !== undefined ? { timeout: entry.timeout } : {}),
       status: "not-connected",
       toolCount: 0,
       disabled: Boolean(entry.disabled),

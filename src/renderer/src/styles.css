@@ -1134,6 +1134,13 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 .resource-package-help, .resource-extension-help { margin: -2px 0 8px; }
 .mcp-form-actions { display: flex; justify-content: flex-end; gap: 7px; }
 .mcp-form-actions button { min-height: 30px; }
+/* MCP OAuth 高级选项（预注册客户端等）：折叠块 + 两列小网格；
+   与 .mcp-form-grid 同构，label 规则要与 settings-dialog 的同名选择器对齐
+   （历史特异性坑，见下方 .resource-page .mcp-form-grid label 的注释）。 */
+.mcp-oauth-advanced { display: grid; justify-items: start; gap: 8px; }
+.mcp-oauth-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 9px; width: 100%; padding: 9px; border: 1px solid var(--border); border-radius: 8px; }
+.mcp-oauth-grid label { display: grid; gap: 4px; min-width: 0; margin: 0; color: var(--text-muted); font-size: 11px; }
+.mcp-oauth-grid input, .mcp-oauth-grid select { width: 100%; min-width: 0; margin: 0; }
 .resource-remove { width: 27px; height: 27px; flex: 0 0 auto; color: var(--text-muted); }
 .resource-remove:hover { color: var(--danger); background: var(--danger-soft); }
 /* 钩子设置：审批状态与运行结果 */
@@ -1657,6 +1664,7 @@ html[data-ui-motion="off"] .general-jev-toggle .chevron { transition: none; }
 /* 卡片内的表单：清掉 .settings-dialog label / input 的全局副作用 */
 .resource-page .resource-error { margin: 0 !important; }
 .resource-page .mcp-form-grid label { margin: 0; }
+.resource-page .mcp-oauth-grid label { margin: 0; }
 .resource-page .resource-form-help { margin: 0; }
 .resource-page .mcp-form-grid input, .resource-page .mcp-form-grid select { height: 32px; padding: 0 9px; font-size: 12px; font-weight: 400; }
 .resource-page .mcp-form-grid textarea { padding: 8px 10px; font-size: 12px; font-weight: 400; line-height: 1.5; }
