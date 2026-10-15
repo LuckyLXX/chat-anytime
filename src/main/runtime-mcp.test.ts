@@ -12,6 +12,8 @@ import {
   piMcpConfigFor,
   mcpOauthEligible,
   buildMcpSummaries,
+  authorizedMcpServers,
+  mcpCredentialKeysFor,
   planMcpServerSave,
   PI_MCP_CALL_TIMEOUT_SECONDS,
   type ParsedMcpServerState
@@ -129,29 +131,71 @@ describe("buildMcpSummaries：配置投影 + 解析态合成", () => {
   ];
 
   it("未注册/未解析 → not-connected；停用 → disabled 且不参与连接", () => {
-    const summaries = buildMcpSummaries({ configured, parsed: new Map(), authPending: new Set() });
+    const summaries = buildMcpSummaries({ configured, parsed: new Map(), authPending: new Set(), authorized: new Set() });
     expect(summaries.find((s) => s.name === "fs")).toMatchObject({ status: "not-connected", toolCount: 0, transport: "stdio" });
     expect(summaries.find((s) => s.name === "off")).toMatchObject({ status: "disabled", disabled: true });
     expect(summaries.find((s) => s.name === "exa")).toMatchObject({ authState: "idle", auth: "oauth" });
   });
 
-  it("解析态映射：connected/needs-auth/failed + toolCount + authState 联动", () => {
+  it("解析态映射：connected/needs-auth/failed + toolCount；连接成功不等于已授权", () => {
     const parsed = new Map<string, ParsedMcpServerState>([
       ["fs", { name: "fs", state: "connected", toolCount: 7 }],
       ["exa", { name: "exa", state: "needs-auth" }]
     ]);
-    const summaries = buildMcpSummaries({ configured, parsed, authPending: new Set(["exa"]) });
+    const summaries = buildMcpSummaries({ configured, parsed, authPending: new Set(["exa"]), authorized: new Set() });
     expect(summaries.find((s) => s.name === "fs")).toMatchObject({ status: "connected", toolCount: 7 });
     expect(summaries.find((s) => s.name === "exa")).toMatchObject({ status: "needs-auth", authState: "pending" });
     // 非登录中的 needs-auth = 凭据失效
-    const cleared = buildMcpSummaries({ configured, parsed, authPending: new Set() });
+    const cleared = buildMcpSummaries({ configured, parsed, authPending: new Set(), authorized: new Set() });
     expect(cleared.find((s) => s.name === "exa")).toMatchObject({ authState: "failed" });
   });
 
+  it("已连接但凭据文件里没有 tokens → authState 仍为 idle（非 OAuth 服务器不得显示「清除凭据」）", () => {
+    const parsed = new Map<string, ParsedMcpServerState>([
+      ["exa", { name: "exa", state: "connected", toolCount: 3 }]
+    ]);
+    const summaries = buildMcpSummaries({ configured, parsed, authPending: new Set(), authorized: new Set() });
+    expect(summaries.find((s) => s.name === "exa")).toMatchObject({ status: "connected", authState: "idle" });
+  });
+
+  it("凭据文件里存有 tokens → authorized", () => {
+    const parsed = new Map<string, ParsedMcpServerState>([["exa", { name: "exa", state: "connected" }]]);
+    const summaries = buildMcpSummaries({ configured, parsed, authPending: new Set(), authorized: new Set(["exa"]) });
+    expect(summaries.find((s) => s.name === "exa")).toMatchObject({ authState: "authorized" });
+  });
+
   it("配置投影字段完整回填（表单明文往返）", () => {
-    const summaries = buildMcpSummaries({ configured, parsed: new Map(), authPending: new Set() });
+    const summaries = buildMcpSummaries({ configured, parsed: new Map(), authPending: new Set(), authorized: new Set() });
     expect(summaries.find((s) => s.name === "fs")).toMatchObject({ command: "npx", args: ["-y", "s"], scope: "global" });
     expect(summaries.find((s) => s.name === "exa")).toMatchObject({ url: "https://e/mcp", transport: "http" });
+  });
+});
+
+describe("authorizedMcpServers：以 Pi 凭据文件里的 tokens 判定「真的授权过」", () => {
+  const configured = [server("exa", { url: "https://mcp.exa.ai/mcp?tools=web_search_exa%20web_fetch_exa", auth: "oauth" })];
+
+  it("只有 clientInformation（未完成登录的残留）不算授权——用户机 2026-10-15 实测形态", () => {
+    const content = JSON.stringify({
+      "mcp__exa|https://mcp.exa.ai/mcp?tools=web_search_exa%20web_fetch_exa": { serverUrl: "https://mcp.exa.ai/mcp", clientInformation: { client_id: "x" } }
+    });
+    expect(authorizedMcpServers(content, configured).size).toBe(0);
+  });
+
+  it("存有 tokens → 命中（含只有 URL 的旧键）", () => {
+    const url = "https://mcp.exa.ai/mcp?tools=web_search_exa%20web_fetch_exa";
+    const byName = JSON.stringify({ [`mcp__exa|${url}`]: { tokens: { access_token: "a" } } });
+    expect([...authorizedMcpServers(byName, configured)]).toEqual(["exa"]);
+    const legacy = JSON.stringify({ [url]: { tokens: { access_token: "a" } } });
+    expect([...authorizedMcpServers(legacy, configured)]).toEqual(["exa"]);
+  });
+
+  it("服务器名里的连字符按 Pi 的命名空间规则变下划线；文件损坏/缺失一律按未授权处理", () => {
+    const dashed = [server("my-tools", { url: "https://a/mcp", auth: "oauth" })];
+    const content = JSON.stringify({ "mcp__my_tools|https://a/mcp": { tokens: { access_token: "a" } } });
+    expect([...authorizedMcpServers(content, dashed)]).toEqual(["my-tools"]);
+    expect(authorizedMcpServers(undefined, dashed).size).toBe(0);
+    expect(authorizedMcpServers("{ not json", dashed).size).toBe(0);
+    expect(authorizedMcpServers("[]", dashed).size).toBe(0);
   });
 });
 

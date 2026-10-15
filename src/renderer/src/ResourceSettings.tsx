@@ -166,7 +166,7 @@ export function ResourceSettings({ resources }: ResourceSettingsProps): ReactNod
       <header className="resource-page-head">
         <span className="resource-page-title">
           <strong>技能与工具</strong>
-          <small>自研 MCP / Skill / Todo / 子代理能力；Pi 的第三方扩展接入已移除，MCP 由内置客户端直连</small>
+          <small>自研 Skill / Todo / 子代理能力；MCP 由 Pi 的内置扩展负责连接与授权</small>
         </span>
         <span className="resource-page-actions">
           <button className="secondary-button compact-button" type="button" data-control="resource-reload" disabled={controlsBusy} onClick={() => void run({ type: "resources.reload" })}><RefreshCw size={13} className={controlsBusy ? "spinning" : undefined} />重载资源</button>
@@ -202,7 +202,7 @@ export function ResourceSettings({ resources }: ResourceSettingsProps): ReactNod
                 </>}
               </div>
               <p className="resource-form-help">{editingMcp ? `正在编辑 ${editingMcp.name}：名称即配置键不可改；切换「写入范围」会把该条目迁移到另一个配置文件，停用状态保留。保存后重载工具并重建会话。` : "添加后会写入 MCP 配置并重建会话以加载新工具。stdio 服务通常由 npx 首次启动；敏感值建议用环境变量名，不要直接写入配置。"}</p>
-              {mcpTransport === "http" && <p className="resource-form-help">认证选 OAuth：保存后回到列表点「认证」，会自动打开系统浏览器完成授权，回调后自动重连；凭据保存在本地（刷新令牌长期有效），只有被授权服务器判定失效时才会提示「重新授权」——那时已保存的凭据仍会保留并优先重试。Bearer 环境变量优先于 OAuth（它的令牌会覆盖请求头里的 Authorization，其余头保留）。请求头按字面带上；自己写了 Authorization 就不再自动走 OAuth（可以填 X-API-Key 一类网关头）；注意请求头里的值会以明文写入配置文件，敏感值建议用 Bearer 环境变量。</p>}
+              {mcpTransport === "http" && <p className="resource-form-help">认证选 OAuth：保存后回到列表点「认证」，会自动打开系统浏览器完成授权，回调后自动重连；凭据保存在本地（刷新令牌长期有效），只有被授权服务器判定失效时才会提示「重新授权」——那时已保存的凭据仍会保留并优先重试。Bearer 环境变量优先于 OAuth（它的令牌会覆盖请求头里的 Authorization，其余头保留）。请求头按字面带上；写了 Authorization 就不再自动走 OAuth；只写 X-API-Key 这类网关头不影响该判定（服务端若答 401 仍会进入「需要认证」并提示走 OAuth，需要彻底避开可用 Bearer 环境变量）。注意请求头里的值会以明文写入配置文件，敏感值建议用 Bearer 环境变量。</p>}
               <footer className="mcp-form-actions"><button className="secondary-button compact-button" type="button" disabled={controlsBusy} onClick={() => { resetMcpForm(); setMcpFormOpen(false); }}><X size={13} />取消</button><button className="primary-button compact-button" type="submit" data-control="mcp-save" disabled={controlsBusy}>{editingMcp ? <Pencil size={13} /> : <Plus size={13} />}{editingMcp ? "保存修改" : "添加 MCP"}</button></footer>
             </form>}
             {resources.mcpServers.length === 0

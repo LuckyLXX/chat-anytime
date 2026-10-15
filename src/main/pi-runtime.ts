@@ -819,10 +819,14 @@ function refreshSubagents(): void {
 /** 读双作用域配置并合成资源目录里的 MCP 摘要（无网络：连接态由 refreshMcpCatalog 异步补齐）。 */
 function rebuildMcpSummariesFromConfig(): void {
   const { project, global } = mcpConfigPaths();
+  const configured = readConfiguredMcpServers(project, global);
   mcpServers = runtimeMcp.buildMcpSummaries({
-    configured: readConfiguredMcpServers(project, global),
+    configured,
     parsed: mcpParsedState,
-    authPending: mcpAuthPending
+    authPending: mcpAuthPending,
+    // 「已授权」以 Pi 凭据文件里的 tokens 为准（只读、容错）：仅凭连接成功不算授权，
+    // 否则非 OAuth 服务器（只带 X-API-Key 这类头）也会被显示成「清除凭据」。
+    authorized: runtimeMcp.authorizedMcpServers(runtimeMcp.readMcpAuthFile(getAgentDir()), configured)
   });
 }
 

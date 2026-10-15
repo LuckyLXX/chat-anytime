@@ -6,7 +6,8 @@
 // tool registration live in Pi's built-in MCP extension (`createMcpExtension`)
 // driven by `mcp-bridge.ts`; nothing here touches the network.
 
-import { join, resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import type { McpServerSummary, McpServerConfigDraft } from "../shared/protocol.js";
 import { readConfiguredMcpServers, readMcpServerEntry, hasAuthorizationHeader, type McpServerConfigEntry, type ConfiguredMcpServer } from "./mcp-config.js";
 
@@ -241,8 +242,10 @@ export function buildMcpSummaries(params: {
   configured: ConfiguredMcpServer[];
   parsed: Map<string, ParsedMcpServerState>;
   authPending: ReadonlySet<string>;
+  /** 「真的授权过」的服务器名集合（见 authorizedMcpServers）：只有它才让面板显示「清除凭据」。 */
+  authorized: ReadonlySet<string>;
 }): McpServerSummary[] {
-  const { configured, parsed, authPending } = params;
+  const { configured, parsed, authPending, authorized } = params;
   return configured.map((server): McpServerSummary => {
     const entry = server.entry;
     const transport = entry.command ? "stdio" : "http";
@@ -272,13 +275,66 @@ export function buildMcpSummaries(params: {
     if (state.toolCount !== undefined) base.toolCount = state.toolCount;
     if (state.error) base.error = state.error;
     if (base.authState) {
+      // 语义与迁移前一致：authorized = 真存有凭据（不是「连上了」）；pending = 正在登录；
+      // failed = 服务器要求登录（needs-auth）。普通连接失败不赋 auth 态（那是连接问题）。
       if (authPending.has(server.name)) base.authState = "pending";
-      else if (state.state === "connected") base.authState = "authorized";
+      else if (authorized.has(server.name)) base.authState = "authorized";
       else if (state.state === "needs-auth") base.authState = "failed";
-      else if (state.state === "failed" && base.status === "failed") base.authState = "failed";
+      else base.authState = "idle";
     }
     return base;
   });
+}
+
+/**
+ * Pi 的 mcp-auth.json 里某服务器的存储键（与 Pi `storeKeys` 同口径）：
+ * `mcp__<服务器名（连字符→下划线）>|<归一化 URL>`，外加只有 URL 的旧键。
+ */
+export function mcpCredentialKeysFor(serverName: string, url: string): { key?: string; legacyKey?: string } {
+  try {
+    const legacyKey = String(new URL(url));
+    return { key: `mcp__${serverName.replace(/-/gu, "_")}|${legacyKey}`, legacyKey };
+  } catch {
+    return {};
+  }
+}
+
+/** 读取 Pi 凭据文件的原始文本（只读、容错：不存在/不可读都返回 undefined）。 */
+export function readMcpAuthFile(agentDir: string): string | undefined {
+  try {
+    const path = join(agentDir, "mcp-auth.json");
+    return existsSync(path) ? readFileSync(path, "utf8") : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * 「真的授权过」的服务器名集合：`mcp-auth.json` 里该服务器键下**存有 tokens** 才算。
+ * 只看键存在不够——Pi 在 401 后做动态客户端注册会把 `clientInformation` 落盘，
+ * 未完成登录的服务器会留下这种无 tokens 的残留（2026-10-15 用户机上 exa 实测），
+ * 把它当「已授权」会让面板对一台从未 OAuth 过的服务器显示「清除凭据」。
+ * 解析失败（文件损坏/格式漂移）一律当作没有凭据：UI 退化为不显示凭据类按钮，
+ * 不会给错状态。
+ */
+export function authorizedMcpServers(content: string | undefined, configured: readonly ConfiguredMcpServer[]): Set<string> {
+  const authorized = new Set<string>();
+  if (!content) return authorized;
+  let states: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(content);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return authorized;
+    states = parsed as Record<string, unknown>;
+  } catch {
+    return authorized;
+  }
+  for (const server of configured) {
+    if (!server.entry.url) continue;
+    const { key, legacyKey } = mcpCredentialKeysFor(server.name, server.entry.url);
+    const state = (key ? states[key] : undefined) ?? (legacyKey ? states[legacyKey] : undefined);
+    if (state && typeof state === "object" && (state as { tokens?: unknown }).tokens) authorized.add(server.name);
+  }
+  return authorized;
 }
 
 /** 双作用域读取（供会话装配与目录刷新共用）。全局损坏不阻断项目（readConfiguredMcpServers 已容错）。 */
