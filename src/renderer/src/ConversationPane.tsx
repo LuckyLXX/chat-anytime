@@ -68,6 +68,7 @@ import { createMessageExecutionSubsetter, EMPTY_EXECUTIONS } from "./lib/message
 import { commandErrorTargetsPane, localTurnDeadline, localTurnForPane, type LocalTurn } from "./lib/local-turn";
 import { buildTurnSummaries } from "./lib/turn-summary";
 import { TIMELINE_LIVE_MARGIN, TIMELINE_WINDOW_MIN_MESSAGES, createTimelineObserver, estimateMessageHeight, placeholderHeightFor, shouldRenderLive, type TimelineObserver } from "./lib/timeline-window";
+import { followTimelineBottom } from "./lib/timeline-scroll";
 import { buildEditDiffs, delegateArgsSummary, editArgsSummary, languageFromPath, parseDelegateCallArgs, parseEditCallArgs, parseReadCallArgs, parseWriteCallArgs, writeArgsSummary, type DelegateCallPreview, type EditCallPreview, type EditDiffBlock, type WriteCallPreview } from "./lib/tool-call-preview";
 import { DiffView } from "./components/DiffView";
 import { TurnMinimap } from "./components/TurnMinimap";
@@ -1089,14 +1090,8 @@ export const ConversationPane = memo(function ConversationPane({
   useEffect(() => {
     const timeline = timelineRef.current;
     if (!timeline) return;
-    const updateScrollIntent = (): void => {
-      const gap = timeline.scrollHeight - timeline.clientHeight - timeline.scrollTop;
-      stickToBottomRef.current = gap <= 64;
-    };
-    updateScrollIntent();
-    timeline.addEventListener("scroll", updateScrollIntent, { passive: true });
-    return () => timeline.removeEventListener("scroll", updateScrollIntent);
-  }, []);
+    return followTimelineBottom(timeline, stickToBottomRef, focused);
+  }, [focused]);
 
   // —— 会话切换后的「钉底窗口」——
   // 切换那一帧的瞬跳只覆盖当帧布局：此后还会继续有东西抬升视口上方的高度——

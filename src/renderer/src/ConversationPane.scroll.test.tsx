@@ -58,6 +58,7 @@ function snapshot(overrides: Partial<RuntimeSnapshot> = {}): RuntimeSnapshot {
 interface Layout {
   calls: Array<{ top: number; behavior: string }>;
   setHeight(height: number): void;
+  setViewportHeight(height: number): void;
   scrollTop(): number;
   userScrollTo(top: number): void;
 }
@@ -66,11 +67,12 @@ const CLIENT_HEIGHT = 800;
 
 function installLayout(element: HTMLElement): Layout {
   let height = 6000;
+  let clientHeight = CLIENT_HEIGHT;
   let scrollTop = 0;
   const calls: Layout["calls"] = [];
-  const maxTop = (): number => Math.max(0, height - CLIENT_HEIGHT);
+  const maxTop = (): number => Math.max(0, height - clientHeight);
   Object.defineProperty(element, "scrollHeight", { configurable: true, get: () => height });
-  Object.defineProperty(element, "clientHeight", { configurable: true, get: () => CLIENT_HEIGHT });
+  Object.defineProperty(element, "clientHeight", { configurable: true, get: () => clientHeight });
   Object.defineProperty(element, "scrollTop", {
     configurable: true,
     get: () => scrollTop,
@@ -90,6 +92,10 @@ function installLayout(element: HTMLElement): Layout {
     calls,
     setHeight: (next) => {
       height = next;
+      scrollTop = Math.min(scrollTop, maxTop());
+    },
+    setViewportHeight: (next) => {
+      clientHeight = next;
       scrollTop = Math.min(scrollTop, maxTop());
     },
     scrollTop: () => scrollTop,
@@ -130,19 +136,34 @@ class FakeIntersectionObserver {
   }
 }
 
+/** 可驱动 ResizeObserver：模拟流式尾部 / 图片解码在父组件滚动之后才改变高度。 */
+class FakeResizeObserver {
+  static instances: FakeResizeObserver[] = [];
+  readonly elements = new Set<Element>();
+  constructor(private readonly callback: ResizeObserverCallback) {
+    FakeResizeObserver.instances.push(this);
+  }
+  observe(target: Element): void { this.elements.add(target); }
+  unobserve(target: Element): void { this.elements.delete(target); }
+  disconnect(): void { this.elements.clear(); }
+  static fire(target: Element): void {
+    for (const observer of FakeResizeObserver.instances) {
+      if (observer.elements.has(target)) observer.callback([{ target } as ResizeObserverEntry], observer as unknown as ResizeObserver);
+    }
+  }
+}
+
 let container: HTMLDivElement;
+const roots = new Set<ReturnType<typeof createRoot>>();
 
 beforeEach(() => {
   container = document.createElement("div");
   document.body.appendChild(container);
   (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
   FakeIntersectionObserver.instances = [];
+  FakeResizeObserver.instances = [];
   const host = globalThis as unknown as { ResizeObserver?: unknown; IntersectionObserver?: unknown; window: unknown };
-  host.ResizeObserver ??= class {
-    observe(): void {}
-    unobserve(): void {}
-    disconnect(): void {}
-  };
+  host.ResizeObserver = FakeResizeObserver;
   host.IntersectionObserver = FakeIntersectionObserver;
   host.window ??= host;
   (host as { piDesktop?: unknown }).piDesktop = {
@@ -161,6 +182,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  act(() => { for (const root of roots) root.unmount(); });
+  roots.clear();
   container.remove();
   vi.useRealTimers();
 });
@@ -185,6 +208,7 @@ function Pane(): ReactNode {
 
 function render(pane: ReactNode = <Pane />): { root: ReturnType<typeof createRoot>; timeline: HTMLElement; layout: Layout } {
   const root = createRoot(container);
+  roots.add(root);
   act(() => {
     root.render(pane);
   });
@@ -305,8 +329,9 @@ describe("切换会话的滚动契约", () => {
     const { root, timeline, layout } = render();
     switchTo("session-b", conversation("b", 60));
 
-    layout.userScrollTo(0);
     act(() => {
+      timeline.dispatchEvent(new WheelEvent("wheel", { deltaY: -100, bubbles: true }));
+      layout.userScrollTo(0);
       timeline.dispatchEvent(new Event("scroll"));
     });
     const before = layout.calls.length;
@@ -318,4 +343,177 @@ describe("切换会话的滚动契约", () => {
 
     act(() => root.unmount());
   });
+});
+
+describe("持续输出的滚动契约", () => {
+  async function streamingPane() {
+    vi.useFakeTimers();
+    const pane = render();
+    act(() => {
+      useDesktopStore.setState({ snapshot: snapshot({ busy: true }) });
+    });
+    await frames(10); // 首次切换的短暂钉底窗口已经退出
+    return pane;
+  }
+
+  it("布局增长产生的 scroll 不能被当成用户上翻，后续输出仍跟随", async () => {
+    const { root, timeline, layout } = await streamingPane();
+    expect(layout.scrollTop()).toBe(5200);
+    layout.setHeight(7200);
+    act(() => timeline.dispatchEvent(new Event("scroll")));
+    act(() => useDesktopStore.setState({ snapshot: snapshot({ busy: true, messages: [...conversation("a", 60), message("tail", "assistant", "继续输出")] }) }));
+    await frames(2);
+    expect(layout.scrollTop()).toBe(6400);
+    act(() => root.unmount());
+  });
+
+  it("父组件滚动结束后尾部延迟增高，无新快照也要补滚到底", async () => {
+    const { root, timeline, layout } = await streamingPane();
+    layout.setHeight(7600);
+    const tail = timeline.querySelector<HTMLElement>(".message:last-of-type")!;
+    act(() => FakeResizeObserver.fire(tail));
+    await frames(2);
+    expect(layout.scrollTop()).toBe(6800);
+    act(() => root.unmount());
+  });
+
+  it("用户上翻后尺寸变化不抢位置，手动到底后恢复异步跟随", async () => {
+    const { root, timeline, layout } = await streamingPane();
+    act(() => {
+      timeline.dispatchEvent(new WheelEvent("wheel", { deltaY: -300, bubbles: true }));
+      layout.userScrollTo(4000);
+      timeline.dispatchEvent(new Event("scroll"));
+    });
+    const tail = timeline.querySelector<HTMLElement>(".message:last-of-type")!;
+    layout.setHeight(8000);
+    act(() => FakeResizeObserver.fire(tail));
+    await frames(2);
+    expect(layout.scrollTop()).toBe(4000);
+    act(() => {
+      layout.userScrollTo(7200);
+      timeline.dispatchEvent(new Event("scroll"));
+    });
+    layout.setHeight(9000);
+    act(() => FakeResizeObserver.fire(tail));
+    await frames(2);
+    expect(layout.scrollTop()).toBe(8200);
+    act(() => root.unmount());
+  });
+
+  it("浏览器在总高度不变时向上修正位置，也不能解除跟随", async () => {
+    const { root, timeline, layout } = await streamingPane();
+    act(() => timeline.dispatchEvent(new Event("scroll")));
+    layout.userScrollTo(5000); // 模拟滚动锚定的修正，没有用户输入
+    act(() => timeline.dispatchEvent(new Event("scroll")));
+    await frames(2);
+    expect(layout.scrollTop()).toBe(5200);
+    act(() => root.unmount());
+  });
+
+  it("滚轮只上翻 20px 也不被吸回底部，未移动前的待执行补滚会取消", async () => {
+    const { root, timeline, layout } = await streamingPane();
+    act(() => {
+      timeline.dispatchEvent(new Event("scroll"));
+      FakeResizeObserver.fire(timeline); // 先排入一帧补滚
+      timeline.dispatchEvent(new WheelEvent("wheel", { deltaY: -20, bubbles: true }));
+      layout.userScrollTo(5180);
+      timeline.dispatchEvent(new Event("scroll"));
+    });
+    await frames(2);
+    expect(layout.scrollTop()).toBe(5180);
+    layout.setHeight(8000);
+    act(() => FakeResizeObserver.fire(timeline));
+    await frames(2);
+    expect(layout.scrollTop()).toBe(5180);
+    act(() => root.unmount());
+  });
+
+  it.each([false, true])("工具卡片内部上翻不解除时间线跟随（边缘阻止滚动串联：%s）", async (contain) => {
+    const { root, timeline, layout } = await streamingPane();
+    const inner = document.createElement("div");
+    inner.style.overflowY = "auto";
+    if (contain) inner.style.overscrollBehaviorY = "contain";
+    Object.defineProperties(inner, { scrollHeight: { value: 300 }, clientHeight: { value: 100 }, scrollTop: { value: contain ? 0 : 50 } });
+    timeline.querySelector(".message:last-of-type")!.appendChild(inner);
+    act(() => inner.dispatchEvent(new WheelEvent("wheel", { deltaY: -30, bubbles: true })));
+    layout.setHeight(8000);
+    act(() => FakeResizeObserver.fire(timeline));
+    await frames(2);
+    expect(layout.scrollTop()).toBe(7200);
+    act(() => root.unmount());
+  });
+
+  it.each(["scrollbar", "keyboard", "touch"])("%s 上翻期间异步增高不抢回底部", async (input) => {
+    const { root, timeline, layout } = await streamingPane();
+    act(() => {
+      if (input === "scrollbar") {
+        timeline.dispatchEvent(new MouseEvent("pointerdown", { button: 0, clientX: timeline.getBoundingClientRect().right, bubbles: true }));
+      } else if (input === "keyboard") {
+        document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "PageUp", bubbles: true }));
+      } else {
+        for (const [type, y] of [["touchstart", 100], ["touchmove", 200]] as const) {
+          const event = new Event(type, { bubbles: true });
+          Object.defineProperty(event, "touches", { value: [{ clientY: y }] });
+          timeline.dispatchEvent(event);
+        }
+      }
+      layout.userScrollTo(4000);
+      timeline.dispatchEvent(new Event("scroll"));
+    });
+    layout.setHeight(8000);
+    act(() => FakeResizeObserver.fire(timeline));
+    await frames(2);
+    expect(layout.scrollTop()).toBe(4000);
+    act(() => root.unmount());
+  });
+
+  it("输入框和其他面板的方向键不解除时间线跟随", async () => {
+    const { root, timeline, layout } = await streamingPane();
+    const textarea = container.querySelector("textarea")!;
+    const otherPanel = document.createElement("div");
+    document.body.appendChild(otherPanel);
+    act(() => {
+      textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true }));
+      otherPanel.dispatchEvent(new KeyboardEvent("keydown", { key: "PageUp", bubbles: true }));
+    });
+    otherPanel.remove();
+    layout.setHeight(8000);
+    act(() => FakeResizeObserver.fire(timeline));
+    await frames(2);
+    expect(layout.scrollTop()).toBe(7200);
+    act(() => root.unmount());
+  });
+
+  it("直接子节点新增后被观测、移除后停止观测", async () => {
+    const { root, timeline } = await streamingPane();
+    const child = document.createElement("div");
+    timeline.appendChild(child);
+    await frames(2);
+    expect(FakeResizeObserver.instances.some((observer) => observer.elements.has(child))).toBe(true);
+    child.remove();
+    await frames(2);
+    expect(FakeResizeObserver.instances.every((observer) => !observer.elements.has(child))).toBe(true);
+    act(() => root.unmount());
+  });
+
+  it("视口尺寸变化同样补滚，多次变化只滚一帧，卸载清理观察器与待执行帧", async () => {
+    const { root, timeline, layout } = await streamingPane();
+    layout.setViewportHeight(500);
+    layout.calls.length = 0;
+    act(() => {
+      FakeResizeObserver.fire(timeline);
+      FakeResizeObserver.fire(timeline);
+      FakeResizeObserver.fire(timeline);
+    });
+    await frames(2);
+    expect(layout.calls).toEqual([{ top: 6000, behavior: "auto" }]);
+    expect(layout.scrollTop()).toBe(5500);
+    act(() => FakeResizeObserver.fire(timeline));
+    act(() => root.unmount());
+    const count = layout.calls.length;
+    await frames(2);
+    expect(layout.calls).toHaveLength(count);
+    expect(FakeResizeObserver.instances.every((observer) => observer.elements.size === 0)).toBe(true);
+  });
+
 });
