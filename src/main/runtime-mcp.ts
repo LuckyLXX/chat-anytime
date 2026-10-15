@@ -36,13 +36,23 @@ export function mcpConfigEntry(server: McpServerConfigDraft): McpServerConfigEnt
   }
   const url = server.url?.trim();
   if (!url || !/^https?:\/\//iu.test(url)) throw new Error("HTTP MCP Server 需要填写 http:// 或 https:// 地址");
-  if (server.auth === "bearer-env" && !server.bearerTokenEnv?.trim()) throw new Error("Bearer 认证需要填写环境变量名");
+  // Bearer 环境变量：填的是**变量名**不是令牌本身。名字必须符合 Pi 解析器的口径
+  // （[A-Za-z_][A-Za-z0-9_]*）——直接粘令牌会写成 `Bearer ${sk-xxx}`，而 `sk-xxx`
+  // 不是合法变量名 ⇒ Pi 按字面量处理，客户端带着 `${sk-xxx}` 去请求、401 失败且没有任何
+  // 提示（2026-10-15 用户问「这个字段填啥」时发现）。这里硬拦并说清区别。
+  const bearerTokenEnv = server.bearerTokenEnv?.trim();
+  if (bearerTokenEnv) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(bearerTokenEnv)) {
+      throw new Error(`Bearer 环境变量名不合法：${bearerTokenEnv}（只能含字母、数字、下划线且不以数字开头；这里填变量名，不是令牌本身）`);
+    }
+  }
+  if (server.auth === "bearer-env" && !bearerTokenEnv) throw new Error("Bearer 认证需要填写环境变量名");
   const headers = normalizeMcpHeaders(server.headers);
   const oauth = normalizeMcpOAuth(server.oauth);
   return {
     url,
     ...(server.auth === "oauth" ? { auth: "oauth" as const } : {}),
-    ...(server.auth === "bearer-env" ? { bearerTokenEnv: server.bearerTokenEnv!.trim() } : {}),
+    ...(server.auth === "bearer-env" && bearerTokenEnv ? { bearerTokenEnv } : {}),
     ...(headers ? { headers } : {}),
     ...(oauth ? { oauth } : {}),
     ...(timeout !== undefined ? { timeout } : {})

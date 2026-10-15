@@ -55,6 +55,14 @@ describe("mcpConfigPathsFor / mcpConfigEntry / normalizeMcpHeaders（迁移后�
     expect(() => normalizeMcpHeaders({ "X-A": "a\r\nb" })).toThrow("换行");
   });
 
+  it("Bearer 环境变量名不合法时硬拦（填成令牌本身会静默 401）", () => {
+    // 合法名：字母/下划线开头，字母数字下划线
+    expect(mcpConfigEntry({ name: "x", scope: "global", transport: "http", url: "https://a", auth: "bearer-env", bearerTokenEnv: "EXA_TOKEN" }).bearerTokenEnv).toBe("EXA_TOKEN");
+    // 直接粘令牌 → 报错并说清「填变量名」（否则 Bearer ${sk-xxx} 会被当字面量发出去）
+    expect(() => mcpConfigEntry({ name: "x", scope: "global", transport: "http", url: "https://a", auth: "bearer-env", bearerTokenEnv: "sk-abc123" })).toThrow("变量名");
+    expect(() => mcpConfigEntry({ name: "x", scope: "global", transport: "http", url: "https://a", auth: "bearer-env", bearerTokenEnv: "1TOKEN" })).toThrow("变量名");
+  });
+
   it("OAuth 高级选项校验：空值丢弃、回环回调、https 元数据、端口范围、注册方式枚举", () => {
     // 空对象 → 不产生 oauth 字段
     expect(mcpConfigEntry({ name: "x", scope: "global", transport: "http", url: "https://a", oauth: {} }).oauth).toBeUndefined();
