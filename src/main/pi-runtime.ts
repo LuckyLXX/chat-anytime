@@ -644,20 +644,30 @@ const questionBroker = new runtimeQuestionTool.QuestionBroker(
 let mcpAuthPending = new Set<string>();
 /** /mcp 状态板的最近一次解析结果（refreshMcpCatalog 维护，目录合成用）。 */
 let mcpParsedState = new Map<string, runtimeMcp.ParsedMcpServerState>();
-/** 解析状态文本的回调也供日志面呈现（登录结果/启动问题汇报都在 notify 里）。 */
+/** 解析状态文本的回调也供日志面呈现（登录结果/启动问题汇报都在 notify 里）。
+ * **状态板解析必须在这里做**：/mcp 命令的 notify 出的是会话绑定的 uiContext
+ * （mcpUiContext → 本函数），在调用处另造一个 ctx 是收不到消息的。 */
 function handleMcpNotify(message: string, type: "info" | "warning" | "error"): void {
   post({ type: "log", level: type === "error" ? "warn" : "info", message: `MCP：${message}` });
   // 登录结果驱动 authPending 集合（面板 authState 的 pending↔落定转换）。
   const signedIn = /Signed in to MCP server "(.+)"/u.exec(message);
-  if (signedIn?.[1]) {
-    mcpAuthPending.delete(signedIn[1]);
-    void refreshMcpCatalog();
-    return;
-  }
-  const failed = /(?:Sign-in to MCP server "(.+)" failed|Sign-in cancelled)/u.exec(message);
+  if (signedIn?.[1]) mcpAuthPending.delete(signedIn[1]);
+  const failed = /Sign-in to MCP server "(.+)" failed/u.exec(message);
   if (failed?.[1]) mcpAuthPending.delete(failed[1]);
-  // 「MCP servers need attention」启动汇报：重推目录让 needs-auth 尽早可见。
-  if (/MCP servers need attention/u.test(message)) void refreshMcpCatalog();
+  if (/Sign-in cancelled/u.test(message)) mcpAuthPending.clear();
+  // 状态板文本（多行、每行一台服务器）→ 解析连接态并重推目录。
+  const parsed = runtimeMcp.parseMcpStatusText(message);
+  if (parsed.size > 0) {
+    for (const [name, state] of parsed) {
+      const previous = mcpParsedState.get(name);
+      if (!previous || previous.state !== state.state || previous.toolCount !== state.toolCount || previous.error !== state.error) {
+        mcpParsedState.set(name, state);
+      }
+    }
+  }
+  // 登录完成/失败、状态板、启动问题汇报都重推一次目录（幂等，面板拿最新态）。
+  rebuildMcpSummariesFromConfig();
+  emitResourceCatalog();
 }
 const mcpUiContext = buildMcpUiContext({ onNotify: handleMcpNotify });
 
@@ -817,9 +827,9 @@ function rebuildMcpSummariesFromConfig(): void {
 }
 
 /**
- * 向活跃会话发一条 `/mcp`（零模型调用、不写会话 JSONL），把 notify 里的状态板
- * 文本解析成连接态并重推资源目录。连接在会话启动后异步进行，目录刷新在
- * 启动后分段补推（createSession 里定时），登录/命令后即时补推。
+ * 向活跃会话发一条 `/mcp`（零模型调用、不写会话 JSONL）。命令的状态板文本经
+ * 会话绑定的 uiContext → handleMcpNotify 解析并重推目录（这里不自己捕获 notify
+ * —— 调用处另造 ctx 收不到消息，2026-10-15 踩过）。
  */
 async function refreshMcpCatalog(): Promise<void> {
   const record = activeRuntime;
@@ -828,23 +838,14 @@ async function refreshMcpCatalog(): Promise<void> {
     emitResourceCatalog();
     return;
   }
-  const notifies: string[] = [];
-  const ctx = buildMcpUiContext({ onNotify: (message) => { notifies.push(message); } });
   try {
     await record.session.prompt("/mcp", { preflightResult: () => {} });
   } catch (error) {
+    // 会话正忙/已处置时静默降级：面板保留上一次的保守态（配置投影）。
     post({ type: "log", level: "warn", message: `MCP 状态刷新失败：${errorText(error)}` });
+    rebuildMcpSummariesFromConfig();
+    emitResourceCatalog();
   }
-  // /mcp 无参时 notify 输出状态板文本（多行）：逐段解析，取覆盖服务器最多的
-  // 一次作为最新状态；解析不出服务器名时不更新（面板保持上一次的保守态）。
-  let best: runtimeMcp.ParsedMcpServerState[] | undefined;
-  for (const message of notifies) {
-    const parsed = runtimeMcp.parseMcpStatusText(message);
-    if (!best || parsed.size > best.length) best = [...parsed.values()];
-  }
-  if (best && best.length > 0) mcpParsedState = new Map(best.map((state) => [state.name, state]));
-  rebuildMcpSummariesFromConfig();
-  emitResourceCatalog();
 }
 
 function emitResourceCatalog(): void {
