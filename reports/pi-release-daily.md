@@ -119,3 +119,39 @@
 
 ---
 2026-10-15 | v1.2.0 | 2026-10-12T23:03:53Z
+
+## 2026-10-19 · v1.3.0（较上次已报告版本 v1.2.0 的增量）
+
+**✨ 新功能**
+
+- 新增 `sessionShareDestination` 设置，`/share` 上传目标可选 `auto`、`gist`、`radius`。
+- OpenAI GPT-6（API key）在会话中切换 thinking level 不再破坏 prompt cache。
+- 切换模型时丢弃此前模型产生的 thinking blocks，而不再作为纯文本发给新模型，避免新模型把旧推理当成自己的回复。
+- 恢复的会话保留会话中激活的工具，`--tools +name`/`-name` 叠加在它们之上（除非用 `--tools`、`--no-tools`、`--no-builtin-tools` 显式指定）。
+
+**🐛 修复**
+
+- `kimi-coding` 改用官方 Kimi Code 客户端所用的 OpenAI Chat Completions 协议（`https://api.kimi.com/coding/v1`），会话中途新增工具不再使 prompt cache 失效。
+- `--model` 在多 provider 都匹配时按目录顺序选 provider；现在优先有凭据的 provider，否则报出歧义；`--models` / `enabledModels` 为每个 provider 各加一份并警告。
+- codemode：中断或超时不再等待 Bun 上不可中断的内置调用返回；同时在两个会话间把存活 worker 限制为两个，且计入已取消但未退出的 worker。
+- 工具调用参数含非法 `\u` 转义（如 `\usepackage`）时丢字段；最终参数为畸形 JSON 时不再静默只跑已解析字段，而是校验失败并把原始参数回给模型。
+- Anthropic / Bedrock 的错误 tool result 含图片时报 400；图片改在该回合 tool results 之后发送，模型仍能看到。
+- OpenCode Zen / Go 迁到 `opencode.ai/inference` 端点修 Gemini 404；OpenCode Go MiniMax M2.7 改用 Anthropic Messages API。
+- 自动重试未覆盖 `Unable to forward upstream stream` 与 `The service is temporarily unavailable`（后者还导致 compaction 首次即失败）。
+- `openai-codex/gpt-6.1-sol` 上下文窗口 272K → 500K；Claude Haiku 5.5 / Opus 5 补上 `off` thinking level；Xiaomi MiMo 去掉会 400 的 `minimal`，只留 `off` 与 `high`。
+- 扩展的 `ctx.ui.custom({ overlay: true })` 调用 `done()` 时关掉最顶层浮层而非自己的浮层。
+- Nix：provider 切换 API 时构建失败（模型目录 pin 改为按最新发布目录刷新）、包内 Node 抢占 `PATH` 首位导致 bash 工具不用用户的 `node`、安装检查仍期待 chord 与 esbuild。
+
+**⚠️ 破坏性变更**
+
+- `kimi-coding` provider 协议改为 OpenAI Chat Completions；`models.json` 中对它的 base URL 覆盖现在必须带 `/v1`。
+
+**📝 文档与杂项**
+
+- 内部 Pi 依赖固定到确切发布版本，防止全新安装混入不兼容包。
+- `read` 的 line-range 标签在数字字符串或 null 参数下的显示错误（TUI、会话树、HTML 导出）已修。
+
+**Release**：https://github.com/earendil-works/pi/releases/tag/v1.3.0 ｜ 共 1 个新版本
+
+---
+2026-10-19 | v1.3.0 | 2026-10-15T19:17:33Z
