@@ -12,6 +12,7 @@ import type {
   GalleryApp,
   HookEventName,
   MemoryTopic,
+  MemoryTopicSummary,
   ModelOption,
   PermissionRequest,
   ProviderOption,
@@ -229,7 +230,11 @@ interface DesktopState {
   providers: ProviderOption[];
   resources: ResourceCatalog;
   todos: Todo[];
-  memory: MemoryTopic[];
+  memory: MemoryTopicSummary[];
+  /** 记忆正文按需缓存：topic id → 完整主题（响应 memory.read）。 */
+  memoryContents: Record<string, MemoryTopic>;
+  /** 记忆正文读取失败：topic id → 错误文案。 */
+  memoryTopicErrors: Record<string, string>;
   /** 全部角色的自动化定时任务列表（automation 推送/目录下发维护，设置页按角色分组）。 */
   automation: AutomationTask[];
   /** 全角色自动化运行历史（automation-runs 推送全量替换；设置页「运行记录」子页）。 */
@@ -386,6 +391,8 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   resources: emptyResources,
   todos: [],
   memory: [],
+  memoryContents: {},
+  memoryTopicErrors: {},
   automation: [],
   automationRuns: [],
   permissions: [],
@@ -515,7 +522,34 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
         set({ todos: message.todos });
         break;
       case "memory":
-        set({ memory: message.memory });
+        set((state) => {
+          const summaries = new Map(message.memory.map((topic) => [topic.id, topic]));
+          const contents = { ...state.memoryContents };
+          const errors = { ...state.memoryTopicErrors };
+          for (const [id, cached] of Object.entries(contents)) {
+            const summary = summaries.get(id);
+            if (!summary || summary.contentRevision !== cached.contentRevision || summary.contentChars !== cached.contentChars) {
+              delete contents[id];
+            }
+          }
+          for (const id of Object.keys(errors)) if (!summaries.has(id)) delete errors[id];
+          return { memory: message.memory, memoryContents: contents, memoryTopicErrors: errors };
+        });
+        break;
+      case "memory.topic":
+        set((state) => {
+          const memoryTopicErrors = { ...state.memoryTopicErrors };
+          delete memoryTopicErrors[message.topic.id];
+          return {
+            memoryContents: { ...state.memoryContents, [message.topic.id]: message.topic },
+            memoryTopicErrors
+          };
+        });
+        break;
+      case "memory.topic-error":
+        set((state) => ({
+          memoryTopicErrors: { ...state.memoryTopicErrors, [message.topicId ?? ""]: message.message }
+        }));
         break;
       case "catalog":
         set({ models: message.models, providers: message.providers });

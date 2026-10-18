@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from "react";
 import { Brain, ListTodo, NotebookTabs, Terminal, X } from "lucide-react";
-import type { MemoryTopic } from "../../shared/protocol";
+import type { MemoryTopicSummary } from "../../shared/protocol";
 import { ExitWrap, useExitPresence } from "./components/Presence";
 import { useDesktopStore } from "./store";
 import { MIN_RUNNING_AGE_MS, TaskPanelContent } from "./TaskPanel";
@@ -20,7 +20,7 @@ type PanelTab = "tasks" | "memory";
  * 根节点上；data-control="task-panel-toggle" 在 FAB 与待办 tab 上，
  * data-control="memory-toggle" 在记忆 tab 上。
  */
-export function PanelDock({ onOpenMemoryTopic }: { onOpenMemoryTopic(topic: MemoryTopic): void }): ReactNode {
+export function PanelDock({ onOpenMemoryTopic }: { onOpenMemoryTopic(topic: MemoryTopicSummary): void }): ReactNode {
   const todos = useDesktopStore((state) => state.todos);
   const memory = useDesktopStore((state) => state.memory);
   const executions = useDesktopStore((state) => state.snapshot.executions);

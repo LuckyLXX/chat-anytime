@@ -40,7 +40,7 @@ import type {
   ChatMessage,
   DelegationProgress,
   DelegationStep,
-  MemoryTopic,
+  MemoryTopicSummary,
   PromptAttachment,
   QueuedMessage,
   RuntimeCommand,
@@ -697,7 +697,7 @@ export interface ConversationPaneProps {
   onOpenDiff(execution: ToolExecution): void;
   onOpenPlanDetail(detail: string): void;
   /** 记忆面板点击主题：在右侧预览窗口打开该主题的 markdown 正文。 */
-  onOpenMemoryTopic(topic: MemoryTopic): void;
+  onOpenMemoryTopic(topic: MemoryTopicSummary): void;
   /** 查看委派子代理的完整记录（App 层弹只读弹窗）。 */
   onOpenTranscript?(delegation: DelegationProgress): void;
   /** 会话操作失败提示（App 层 toast）。传 undefined 清除。 */

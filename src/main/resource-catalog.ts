@@ -1,4 +1,4 @@
-import type { AutomationRunRecord, AutomationTask, CommandSummary, GalleryApp, HookSummary, McpServerSummary, MemoryTopic, ResourceCatalog, SkillSummary, SubagentDefinition, Todo } from "../shared/protocol.js";
+import type { AutomationRunRecord, AutomationTask, CommandSummary, GalleryApp, HookSummary, McpServerSummary, MemoryTopicSummary, ResourceCatalog, SkillSummary, SubagentDefinition, Todo } from "../shared/protocol.js";
 
 /**
  * The resource catalog is now a thin aggregate over the self-built capability
@@ -12,8 +12,8 @@ export interface ResourceCatalogInput {
   commands?: CommandSummary[];
   mcpServers?: McpServerSummary[];
   todos?: Todo[];
-  /** 激活助手的全量记忆主题（面板治理视图，不经工作区过滤）。 */
-  memory?: MemoryTopic[];
+  /** 激活助手的记忆主题摘要（面板治理视图，不经工作区过滤；正文按需读）。 */
+  memory?: MemoryTopicSummary[];
   /** 双作用域合并后的自定义子智能体定义（项目覆盖全局）。 */
   subagents?: SubagentDefinition[];
   /** 双作用域合并后的钩子规则（项目覆盖全局）。 */

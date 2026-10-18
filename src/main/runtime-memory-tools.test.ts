@@ -50,7 +50,7 @@ describe("memory tools", () => {
     const writeInput: MemorySaveInput = { title: "用户偏好", description: "语言与风格", content: "- 中文回复\n- 简洁" };
 
     const written = await harness.run("memory_write", { topic: "用户偏好", description: "语言与风格", content: "- 中文回复\n- 简洁" });
-    expect(written).toContain("已保存记忆主题「用户偏好」（全局）");
+    expect(written).toContain("已保存记忆主题「用户偏好」（全局");
     expect(written).toContain("- 用户偏好 — 语言与风格");
     expect(written).toContain("当前共 1 个主题");
     expect(harness.changes()).toBe(1);
@@ -133,18 +133,20 @@ describe("memory prompt blocks", () => {
     expect(block).toMatch(/未验证的假设|未执行的计划/);
   });
 
-  it("snapshot block is undefined for an empty library and truncates beyond 40 lines", () => {
+  it("snapshot block is undefined for an empty library and passes a budgeted index through without re-truncating", () => {
     expect(buildMemorySnapshotBlock("")).toBeUndefined();
     expect(buildMemorySnapshotBlock("   \n ")).toBeUndefined();
 
     const normal = buildMemorySnapshotBlock("## 全局\n- 用户偏好 — 语言");
     expect(normal).toContain("【长期记忆索引】");
     expect(normal).toContain("- 用户偏好 — 语言");
+    expect(normal).toContain("memory_search");
 
+    // 预算由 store.snapshotMarkdown 负责；这里不能再按 40 行静默截断——
+    // 否则 store 精心保留的最新主题会被包装层再砍掉。
     const longIndex = ["## 全局", ...Array.from({ length: 50 }, (_, index) => `- 主题${index} — 描述`)].join("\n");
-    const truncated = buildMemorySnapshotBlock(longIndex)!;
-    expect(truncated.split("\n").length).toBeLessThan(longIndex.split("\n").length);
-    expect(truncated).toContain("仅显示前 40 行");
-    expect(truncated).not.toContain("- 主题45 —");
+    const snapshot = buildMemorySnapshotBlock(longIndex)!;
+    expect(snapshot).toContain("- 主题49 — 描述");
+    expect(snapshot).not.toContain("仅显示前 40 行");
   });
 });

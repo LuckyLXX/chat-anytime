@@ -40,7 +40,7 @@ import type {
   HookRule,
   HookSummary,
   McpServerSummary,
-  MemoryTopic,
+  MemoryTopicSummary,
   ModelOption,
   PromptAttachment,
   ProviderModelSettings,
@@ -138,6 +138,7 @@ import { createToolAudit } from "./tool-audit.js";
 import { collectUsageStats, createUsageStatsCache } from "./usage-stats.js";
 import * as runtimeTodoTools from "./runtime-todo-tools.js";
 import * as runtimeMemoryTools from "./runtime-memory-tools.js";
+import { MEMORY_SNAPSHOT_BUDGET_CHARS } from "../shared/memory.js";
 import { createMemoryStore, memoryDirFor, type MemoryStore } from "./memory-store.js";
 import * as runtimeQuestionTool from "./runtime-question-tool.js";
 import * as runtimeSkills from "./runtime-skills.js";
@@ -352,7 +353,7 @@ let todos: Todo[] = [];
 // 长期记忆镜像（面板治理视图，全量、不经工作区过滤）：跟随激活助手，
 // 与 todo 镜像同模式；模型侧走会话创建时的索引快照注入（见 createSession）。
 let memoryStore: MemoryStore | undefined;
-let memoryTopics: MemoryTopic[] = [];
+let memoryTopics: MemoryTopicSummary[] = [];
 let resourceOperationBusy = false;
 let sessionGeneration = 0;
 const customProviderId = "chatanytime-openai-compatible";
@@ -876,7 +877,7 @@ function emitMemory(): void {
 
 /** Reload memory topics from the active store and broadcast to the renderer. */
 function refreshMemory(): void {
-  if (memoryStore) memoryTopics = memoryStore.list();
+  if (memoryStore) memoryTopics = memoryStore.summaries();
   emitMemory();
   emitResourceCatalog();
 }
@@ -1656,7 +1657,7 @@ function activate(record: SessionRuntimeRecord): void {
   todos = record.todoStore.list();
   emitTodos();
   memoryStore = record.memoryStore;
-  memoryTopics = record.memoryStore.list();
+  memoryTopics = record.memoryStore.summaries();
   emitMemory();
   syncSkills();
   syncCommands();
@@ -3025,7 +3026,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   const recordMemoryStore = createMemoryStore(memoryDirFor(getAgentDir(), recordAgent.id), refreshMemory);
   const memoryPromptBlock = settings?.memory?.enabled === false
     ? undefined
-    : [runtimeMemoryTools.buildMemorySystemPromptBlock(), runtimeMemoryTools.buildMemorySnapshotBlock(recordMemoryStore.indexMarkdown(recordWorkspace))].filter(Boolean).join("\n\n");
+    : [runtimeMemoryTools.buildMemorySystemPromptBlock(), runtimeMemoryTools.buildMemorySnapshotBlock(recordMemoryStore.snapshotMarkdown(recordWorkspace, MEMORY_SNAPSHOT_BUDGET_CHARS))].filter(Boolean).join("\n\n");
   const resourceLoader = new DefaultResourceLoader({
     cwd: recordWorkspace,
     agentDir: getAgentDir(),
@@ -5179,6 +5180,21 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     case "memory.delete": {
       if (!memoryStore) throw new Error("当前没有可用的记忆存储，请先打开一个会话");
       if (!memoryStore.remove(command.topic)) throw new Error(`未找到记忆主题「${command.topic}」`);
+      break;
+    }
+    case "memory.read": {
+      if (!memoryStore) {
+        post({ type: "memory.topic-error", ...(command.topicId ? { topicId: command.topicId } : {}), message: "当前没有可用的记忆存储，请先打开一个会话" });
+        break;
+      }
+      // 面板治理视图：允许读取其他工作区绑定的主题（模型侧 memory_read 仍有可见性过滤）。
+      const key = command.topicId?.trim() || command.topic?.trim() || "";
+      const topic = key ? memoryStore.read(key) : undefined;
+      if (topic) {
+        post({ type: "memory.topic", topic });
+      } else {
+        post({ type: "memory.topic-error", ...(command.topicId ? { topicId: command.topicId } : {}), message: `未找到记忆主题「${key}」` });
+      }
       break;
     }
     case "background.kill":

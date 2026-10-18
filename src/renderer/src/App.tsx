@@ -45,7 +45,7 @@ import type {
   AgentProfile,
   BuiltinToolName,
   ModelOption,
-  MemoryTopic,
+  MemoryTopicSummary,
   ProviderOption,
   DivBubbleMode,
   ThinkingLevel,
@@ -1440,7 +1440,7 @@ export function App(): ReactNode {
   }, [openPreviewTarget]);
 
   /** 记忆面板点击主题：右侧预览窗口打开该主题正文（查看/编辑/源码，保存走 memory.update）。 */
-  const openMemoryTopic = useCallback((topic: MemoryTopic): void => {
+  const openMemoryTopic = useCallback((topic: MemoryTopicSummary): void => {
     openPreviewTarget({ type: "memory", topicId: topic.id, title: topic.title });
   }, []);
 

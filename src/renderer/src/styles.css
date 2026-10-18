@@ -1309,6 +1309,15 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 .memory-panel { display: flex; flex: 1; flex-direction: column; min-height: 0; overflow: hidden; }
 .memory-panel-toolbar { display: flex; align-items: center; gap: 6px; padding: 6px 10px 0; }
 .memory-panel-toolbar > small { flex: 1; min-width: 0; overflow: hidden; color: var(--text-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.memory-panel-filter { display: flex; align-items: center; gap: 5px; margin: 6px 10px 0; padding: 4px 7px; border: 1px solid var(--border); border-radius: 6px; color: var(--text-muted); background: var(--surface-muted); }
+.memory-panel-filter:focus-within { border-color: var(--accent); }
+.memory-panel-filter > svg { flex: 0 0 auto; }
+.memory-panel-filter input { flex: 1; min-width: 0; padding: 0; border: 0; outline: 0; color: var(--text); background: transparent; font-size: 10px; font-family: inherit; }
+.memory-panel-filter input::placeholder { color: var(--text-muted); }
+.memory-panel-match { flex: 0 0 auto; color: var(--text-muted); font-size: 9px; }
+.memory-topic-large { flex: 0 0 auto; padding: 1px 5px; border-radius: 999px; color: var(--warning); background: var(--warning-soft); font-size: 9px; }
+.memory-preview-loading { gap: 8px; }
+.memory-preview-loading .ghost-button { display: inline-flex; align-items: center; gap: 5px; margin-top: 4px; }
 .memory-panel-enabled { display: inline-flex; align-items: center; gap: 4px; color: var(--text-muted); font-size: 10px; cursor: pointer; }
 .memory-panel-enabled input { width: 13px; height: 13px; margin: 0; accent-color: var(--accent); cursor: pointer; }
 .memory-panel-notice { margin: 8px 10px 0; padding: 6px 8px; border: 1px solid var(--warning); border-radius: 6px; color: var(--warning); background: var(--warning-soft); font-size: 10px; line-height: 1.5; }

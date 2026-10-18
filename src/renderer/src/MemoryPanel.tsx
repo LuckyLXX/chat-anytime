@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react";
-import { Plus, Trash2 } from "lucide-react";
-import type { MemoryTopic, RuntimeCommand } from "../../shared/protocol";
+import { Plus, Search, Trash2 } from "lucide-react";
+import type { MemoryTopicSummary, RuntimeCommand } from "../../shared/protocol";
+import { MEMORY_TOPIC_WARN_CHARS } from "../../shared/memory";
 import { useDesktopStore } from "./store";
 
 interface TopicDraft {
@@ -12,15 +13,25 @@ interface TopicDraft {
 
 const emptyDraft: TopicDraft = { title: "", description: "", content: "", scoped: false };
 
+/** 面板体积展示：1,234 字 / 12.3k 字（超过 100k 四舍五入到整数 k）。 */
+export function formatMemoryChars(chars: number): string {
+  if (chars >= 1000) {
+    const kilo = chars / 1000;
+    return `${kilo >= 100 ? Math.round(kilo) : kilo.toFixed(1).replace(/\.0$/u, "")}k 字`;
+  }
+  return `${chars} 字`;
+}
+
 /**
  * 记忆页内容（由 PanelDock 的 tab 承载）。与只读的待办页不同，这里是用户的
- * 治理入口：主题列表 + 删除/新建 + 启用总开关；点击主题标题把正文 markdown
- * 打开到右侧预览窗口查看/编辑（编辑器保存走 memory.update，悬浮面板里不再
- * 塞内联编辑器）。面板写走 IPC 直改 store（不经过模型上下文，也不碰会话内
- * 已冻结的索引快照——手改从下一个会话起生效）。模型侧的写入经 memory_write
- * 工具，同样落到这份 store。
+ * 治理入口：主题列表 + 删除/新建 + 启用总开关 + 本地筛选 + 体积提示；点击主题
+ * 标题把正文打开到右侧预览窗口查看/编辑（编辑器保存走 memory.update，悬浮面板
+ * 里不再塞内联编辑器）。
+ *
+ * v3：列表只同步摘要（不携带正文），正文在预览窗口按需拉取；工具栏显示总字数，
+ * 超过 12000 字的主题标「偏大」，提醒拆分或下沉归档。
  */
-export function MemoryPanelContent({ onOpenTopic }: { onOpenTopic(topic: MemoryTopic): void }): ReactNode {
+export function MemoryPanelContent({ onOpenTopic }: { onOpenTopic(topic: MemoryTopicSummary): void }): ReactNode {
   const memory = useDesktopStore((state) => state.memory);
   const workspace = useDesktopStore((state) => state.snapshot.workspace);
   const settings = useDesktopStore((state) => state.settings);
@@ -30,6 +41,7 @@ export function MemoryPanelContent({ onOpenTopic }: { onOpenTopic(topic: MemoryT
   const [confirmDeleteId, setConfirmDeleteId] = useState<string>();
   const [creating, setCreating] = useState(false);
   const [draft, setDraft] = useState<TopicDraft>(emptyDraft);
+  const [filter, setFilter] = useState("");
 
   async function run(command: RuntimeCommand): Promise<boolean> {
     setBusy(true);
@@ -52,7 +64,7 @@ export function MemoryPanelContent({ onOpenTopic }: { onOpenTopic(topic: MemoryT
     void run({ type: "memory.save", memory: { enabled: next } });
   }
 
-  async function removeTopic(topic: MemoryTopic): Promise<void> {
+  async function removeTopic(topic: MemoryTopicSummary): Promise<void> {
     const done = await run({ type: "memory.delete", topic: topic.title });
     if (done) setConfirmDeleteId(undefined);
   }
@@ -65,11 +77,17 @@ export function MemoryPanelContent({ onOpenTopic }: { onOpenTopic(topic: MemoryT
     }
   }
 
-  const globalTopics = memory.filter((topic) => !topic.workspace);
-  const currentTopics = workspace ? memory.filter((topic) => topic.workspace === workspace) : [];
-  const otherTopics = memory.filter((topic) => topic.workspace && topic.workspace !== workspace);
+  const needle = filter.trim().toLowerCase();
+  const matches = (topic: MemoryTopicSummary): boolean => !needle
+    || topic.title.toLowerCase().includes(needle)
+    || topic.description.toLowerCase().includes(needle);
+  const globalTopics = memory.filter((topic) => !topic.workspace && matches(topic));
+  const currentTopics = workspace ? memory.filter((topic) => topic.workspace === workspace && matches(topic)) : [];
+  const otherTopics = memory.filter((topic) => topic.workspace && topic.workspace !== workspace && matches(topic));
+  const matchedCount = globalTopics.length + currentTopics.length + otherTopics.length;
+  const totalChars = memory.reduce((sum, topic) => sum + topic.contentChars, 0);
 
-  const renderTopic = (topic: MemoryTopic, group: "current" | "other"): ReactNode => {
+  const renderTopic = (topic: MemoryTopicSummary, group: "global" | "current" | "other"): ReactNode => {
     const confirming = confirmDeleteId === topic.id;
     return (
       <div className="memory-topic" key={topic.id}>
@@ -79,7 +97,10 @@ export function MemoryPanelContent({ onOpenTopic }: { onOpenTopic(topic: MemoryT
           </button>
           {group === "current" && <span className="memory-topic-scope">本工作区</span>}
           {group === "other" && <span className="memory-topic-scope other" title={topic.workspace}>{workspaceBasename(topic.workspace!)}</span>}
-          <small>{topic.updatedAt}</small>
+          {topic.contentChars > MEMORY_TOPIC_WARN_CHARS && (
+            <span className="memory-topic-large" title="正文偏大，建议拆分或把已解细节下沉到归档主题">偏大</span>
+          )}
+          <small>{formatMemoryChars(topic.contentChars)} · {topic.updatedAt}</small>
           {confirming
             ? <button className="memory-topic-delete confirming" type="button" disabled={busy} title="再次点击确认删除（不可恢复）" onClick={() => void removeTopic(topic)}>确认删除</button>
             : <button className="memory-topic-delete" type="button" disabled={busy} title={`删除 ${topic.title}`} aria-label={`删除记忆主题 ${topic.title}`} onClick={() => setConfirmDeleteId(topic.id)}><Trash2 size={12} /></button>}
@@ -92,11 +113,16 @@ export function MemoryPanelContent({ onOpenTopic }: { onOpenTopic(topic: MemoryT
   return (
     <div className="memory-panel" data-pane="memory-panel">
       <div className="memory-panel-toolbar">
-        <small>{memory.length} 个主题 · {settings.agents.find((agent) => agent.id === settings.currentAgentId)?.name ?? "当前助手"}</small>
+        <small>{memory.length} 个主题 · {formatMemoryChars(totalChars)} · {settings.agents.find((agent) => agent.id === settings.currentAgentId)?.name ?? "当前助手"}</small>
         <label className="memory-panel-enabled" title="停用后不注入索引快照、memory_* 工具拒绝执行；面板编辑仍可用">
           <input type="checkbox" checked={memoryEnabled} onChange={toggleEnabled} />
           <span>启用</span>
         </label>
+      </div>
+      <div className="memory-panel-filter">
+        <Search size={12} />
+        <input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="筛选标题或描述…" aria-label="筛选记忆主题" />
+        {needle && <span className="memory-panel-match">{matchedCount} / {memory.length}</span>}
       </div>
       {!memoryEnabled && <p className="memory-panel-notice">记忆已停用：不注入索引，memory_* 工具将拒绝执行。此处的人工编辑仍会保存，重新启用后生效。</p>}
       {error && <p className="task-panel-error">{error}</p>}
@@ -104,10 +130,13 @@ export function MemoryPanelContent({ onOpenTopic }: { onOpenTopic(topic: MemoryT
         {memory.length === 0 && !creating && (
           <p className="task-panel-empty">暂无记忆主题。对话中说“记住 …”让助手写入，或点下方“新建主题”手动添加。</p>
         )}
+        {memory.length > 0 && matchedCount === 0 && !creating && (
+          <p className="task-panel-empty">没有匹配「{filter.trim()}」的主题。</p>
+        )}
         {globalTopics.length > 0 && (
           <section className="memory-panel-group">
             <h4>全局</h4>
-            {globalTopics.map((topic) => renderTopic(topic, "current"))}
+            {globalTopics.map((topic) => renderTopic(topic, "global"))}
           </section>
         )}
         {currentTopics.length > 0 && (

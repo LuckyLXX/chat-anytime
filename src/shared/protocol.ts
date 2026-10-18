@@ -1841,8 +1841,8 @@ export interface ResourceCatalog {
   commands: CommandSummary[];
   mcpServers: McpServerSummary[];
   todos: Todo[];
-  /** 激活助手的全量记忆主题（面板治理视图，不经工作区过滤）。 */
-  memory: MemoryTopic[];
+  /** 激活助手的记忆主题摘要（面板治理视图，不经工作区过滤；正文按需读）。 */
+  memory: MemoryTopicSummary[];
   /** 三档合并后的子智能体定义（项目 > 用户全局 > 内置；同 id 或同名后者覆盖前者）。 */
   subagents: SubagentDefinition[];
   /** 双作用域合并后的钩子规则（项目覆盖全局）。 */
@@ -1878,10 +1878,11 @@ export interface Todo {
 }
 
 /**
- * 长期记忆主题：`pidesktop-memory/<agentId>/topics/<id>.md` 的协议投影。
- * 正文只在面板编辑时随推送全量下发；模型侧细节按需经 memory_read 取。
+ * 长期记忆主题的摘要投影：列表、资源目录与 `memory` 推送只带这一层，
+ * 不再随每次变更把全部正文（可达数十万字）发给渲染端。
+ * 面板点开某个主题时经 `memory.read` 单独拉取 `MemoryTopic`。
  */
-export interface MemoryTopic {
+export interface MemoryTopicSummary {
   /** 稳定文件名 id（topics/<id>.md 的 stem，不随标题变化）。 */
   id: string;
   title: string;
@@ -1889,10 +1890,23 @@ export interface MemoryTopic {
   description: string;
   /** 绑定的工作区绝对路径；缺省为全局记忆（所有会话可见）。 */
   workspace?: string;
-  content: string;
+  /** 正文的字符数（不含 frontmatter），面板用来显示体积与「偏大」提示。 */
+  contentChars: number;
+  /**
+   * 正文的 FNV-1a 32 位哈希：渲染端用它判断按需拉到的正文是否过期。
+   * 派生字段，不写 frontmatter。
+   */
+  contentRevision: number;
   /** YYYY-MM-DD；时间敏感事实还应在正文内另行标注日期。 */
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * 长期记忆主题的完整投影：摘要 + 正文。只有 `memory.read` 与 store 内部使用。
+ */
+export interface MemoryTopic extends MemoryTopicSummary {
+  content: string;
 }
 
 /**
@@ -2131,6 +2145,8 @@ export type RuntimeCommand =
   | { type: "memory.create"; topic: string; description: string; content: string; workspaceScoped?: boolean }
   | { type: "memory.update"; topic: string; description: string; content: string }
   | { type: "memory.delete"; topic: string }
+  /** 面板按需读取主题正文；结果经 memory.topic / memory.topic-error 推送。 */
+  | { type: "memory.read"; topicId?: string; topic?: string }
   | { type: "subagent.save"; subagent: SubagentDefinition }
   | { type: "subagent.delete"; id: string; scope: SubagentScope }
   /** 仅改内置子智能体的执行模型（内置定义本体只读）；model 缺省 = 回到继承默认模型。 */
@@ -2227,7 +2243,11 @@ export type RuntimeMessage =
   | { type: "sessions.live"; sessions: PanelSessionLive[] }
   | { type: "resources"; resources: ResourceCatalog }
   | { type: "todos"; todos: Todo[] }
-  | { type: "memory"; memory: MemoryTopic[] }
+  | { type: "memory"; memory: MemoryTopicSummary[] }
+  /** 响应 memory.read：完整主题（含正文）。 */
+  | { type: "memory.topic"; topic: MemoryTopic }
+  /** 响应 memory.read 的失败（主题不存在等）。 */
+  | { type: "memory.topic-error"; topicId?: string; message: string }
   | { type: "permission"; request: PermissionRequest }
   | { type: "permission.dismiss"; id: string }
   | { type: "question"; request: QuestionRequest }

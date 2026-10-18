@@ -1161,6 +1161,11 @@ export function createDemoApi(): DesktopApi {
           emit({ type: "subagent.transcript-result", childSessionId: command.childSessionId, messages });
           break;
         }
+        case "memory.read": {
+          // 演示环境没有记忆正文：明确回错误，避免预览窗口一直停在加载态。
+          emit({ type: "memory.topic-error", ...(command.topicId ? { topicId: command.topicId } : {}), message: "演示环境没有可读取的记忆正文。" });
+          break;
+        }
         case "mcp.server.save": {
           // 与主进程同口径：按 original 迁移作用域、保留停用态。
           const draft = command.server;
