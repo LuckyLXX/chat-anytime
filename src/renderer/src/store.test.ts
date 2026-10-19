@@ -404,6 +404,49 @@ describe("session-level collaboration flags", () => {
     state.handleRuntimeMessage({ type: "session.state", snapshot: pane("pane-1", true) });
     expect(useDesktopStore.getState().paneStates["pane-1"]?.designMode).toBe(true);
   });
+
+  it("整帧只有 teamMode 变化时不被早退吐掉（否则顶栏团队开关点了没反应）", () => {
+    const state = useDesktopStore.getState();
+    state.handleRuntimeMessage({ type: "state", snapshot: snap("team-1") });
+    expect(useDesktopStore.getState().snapshot.teamMode).toBeFalsy();
+    state.handleRuntimeMessage({ type: "state", snapshot: { ...snap("team-1"), teamMode: true } });
+    expect(useDesktopStore.getState().snapshot.teamMode).toBe(true);
+    state.handleRuntimeMessage({ type: "state", snapshot: { ...snap("team-1"), teamMode: false } });
+    expect(useDesktopStore.getState().snapshot.teamMode).toBe(false);
+  });
+
+  it("整帧只有团队快照变化时不被早退吐掉（否则 Lead 空闲时状态条冻结）", () => {
+    const team = (status: "running" | "inactive") => ({
+      running: status === "running" ? 1 : 0,
+      members: [{ name: "reviewer", status }]
+    });
+    const state = useDesktopStore.getState();
+    state.handleRuntimeMessage({ type: "state", snapshot: { ...snap("team-2"), team: team("running") } });
+    expect(useDesktopStore.getState().snapshot.team?.running).toBe(1);
+    state.handleRuntimeMessage({ type: "state", snapshot: { ...snap("team-2"), team: team("inactive") } });
+    expect(useDesktopStore.getState().snapshot.team?.running).toBe(0);
+    expect(useDesktopStore.getState().snapshot.team?.members[0]?.status).toBe("inactive");
+  });
+
+  it("分屏格子的团队快照变化（结构化克隆后引用不同）不被引用早退吞掉", () => {
+    function pane(sessionId: string, running: boolean): SessionPaneSnapshot {
+      return {
+        sessionId,
+        thinkingLevel: "medium",
+        busy: false,
+        status: "",
+        queuedMessages: [],
+        messages: [],
+        executions: [],
+        team: { running: running ? 1 : 0, members: [{ name: "reviewer", status: running ? "running" : "inactive" }] }
+      };
+    }
+    const state = useDesktopStore.getState();
+    state.handleRuntimeMessage({ type: "session.state", snapshot: pane("pane-t1", true) });
+    expect(useDesktopStore.getState().paneStates["pane-t1"]?.team?.running).toBe(1);
+    state.handleRuntimeMessage({ type: "session.state", snapshot: pane("pane-t1", false) });
+    expect(useDesktopStore.getState().paneStates["pane-t1"]?.team?.running).toBe(0);
+  });
 });
 
 describe("message identity merge", () => {

@@ -23,10 +23,28 @@ import type {
   RuntimeSnapshot,
   SessionPaneSnapshot,
   SessionSearchHit,
+  TeamSnapshot,
   Todo,
   ToolExecution,
   UsageStats
 } from "../../shared/protocol";
+
+/** 团队快照的内容比较：IPC 结构化克隆后引用必不相等，只能逐成员比较。 */
+export function teamSnapshotEqual(left: TeamSnapshot | undefined, right: TeamSnapshot | undefined): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  if (left.running !== right.running || left.members.length !== right.members.length) return false;
+  return left.members.every((member, index) => {
+    const other = right.members[index];
+    return other !== undefined
+      && member.name === other.name
+      && member.status === other.status
+      && member.description === other.description
+      && member.subagent === other.subagent
+      && member.color === other.color
+      && member.error === other.error;
+  });
+}
 
 export interface HookNotice {
   kind: "info" | "warn";
@@ -486,14 +504,16 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
           // 比较的身份保留合并，否则“无变化早退”永远不命中、订阅方每帧重渲染。
           const mergedSessions = mergeSessionsPreservingIdentity(previous.sessions, incoming.sessions);
           const mergedRecentWorkspaces = mergeRecentWorkspacesPreservingIdentity(previous.recentWorkspaces, incoming.recentWorkspaces);
-          // 会话级布尔标志（计划模式/设计模式）必须入比较：两者都可能整帧只有自己
-          // 变化（其余字段与上帧恒等，如 model/speedStats 同为 undefined 时），漏比
-          // 会让本次切换被早退吐掉——画布/计划横幅不响应。
+          // 会话级布尔标志（计划/电脑/设计/团队模式）与团队快照必须入比较：它们都
+          // 可能整帧只有自己变化（其余字段与上帧恒等，如 model/speedStats 同为
+          // undefined 时），漏比会让本次切换被早退吐掉——画布/计划横幅/团队开关与
+          // 状态条不响应。团队快照必须走内容比较：IPC 后引用必不相等。
           if (!changed && previous.busy === incoming.busy && previous.status === incoming.status &&
               previous.turnTiming === incoming.turnTiming && previous.executions === mergedExecutions &&
               previous.sessions === mergedSessions && previous.recentWorkspaces === mergedRecentWorkspaces &&
               previous.model === incoming.model &&
               previous.planMode === incoming.planMode && previous.computerMode === incoming.computerMode && previous.designMode === incoming.designMode &&
+              previous.teamMode === incoming.teamMode && teamSnapshotEqual(previous.team, incoming.team) &&
               previous.sessionId === incoming.sessionId && previous.sessionFile === incoming.sessionFile &&
               queuedMessagesEqual(previous.queuedMessages, incoming.queuedMessages) &&
               previous.thinkingLevel === incoming.thinkingLevel) {
@@ -531,7 +551,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
                 previous.computerMode === incoming.computerMode &&
                 previous.designMode === incoming.designMode &&
                 previous.teamMode === incoming.teamMode &&
-                previous.team === incoming.team &&
+                teamSnapshotEqual(previous.team, incoming.team) &&
                 previous.contextUsage === incoming.contextUsage) {
               return state;
             }

@@ -70,6 +70,7 @@ class FakeChild implements TeamChildSession {
   custom: { message: { customType: string; content: { type: string; text: string }[]; details?: unknown }; options?: unknown }[] = [];
   disposed = false;
   aborted = false;
+  failSend = false;
   private listeners = new Set<(event: { type: string }) => void>();
 
   constructor(readonly sessionId: string, readonly sessionFile: string) {}
@@ -85,6 +86,7 @@ class FakeChild implements TeamChildSession {
     message: { customType: string; content: { type: "text"; text: string }[]; display: boolean; details?: unknown },
     options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" }
   ): Promise<void> {
+    if (this.failSend) return Promise.reject(new Error("模型不可用"));
     this.custom.push({ message, ...(options === undefined ? {} : { options }) });
     if (options?.triggerTurn) this.isStreaming = true;
     return Promise.resolve();
@@ -225,7 +227,9 @@ describe("membership and messages", () => {
     const h = harness();
     await h.runtime.spawn(leadMembership, { name: "reviewer", description: "x", prompt: "p" });
     const child = h.created[0]!;
-    await h.runtime.send(leadMembership, "reviewer", "看一下 src/a.ts");
+    const firstSend = h.runtime.send(leadMembership, "reviewer", "看一下 src/a.ts");
+    await vi.advanceTimersByTimeAsync(0);
+    await firstSend;
     expect(child.custom[0]!.message).toMatchObject({
       customType: "pidesktop-team-message",
       details: { sender: "lead", target: "reviewer" }
@@ -237,7 +241,9 @@ describe("membership and messages", () => {
     child.settle();
     await vi.advanceTimersByTimeAsync(TEAM_IDLE_DISPOSE_MS + 1);
     expect(child.disposed).toBe(true);
-    await h.runtime.send(leadMembership, "reviewer", "继续");
+    const secondSend = h.runtime.send(leadMembership, "reviewer", "继续");
+    await vi.advanceTimersByTimeAsync(0);
+    await secondSend;
     expect(h.created).toHaveLength(2);
     expect(h.created[1]!.custom[0]!.message.content[0]!.text).toContain("继续");
   });
@@ -288,6 +294,22 @@ describe("wait / interrupt / stopAll", () => {
     const aborted = h.runtime.wait(leadMembership, 10_000, controller.signal);
     controller.abort(new Error("用户停止"));
     await expect(aborted).rejects.toThrow(/用户停止/u);
+  });
+
+  it("does not count the Lead as an active peer for a teammate's wait", async () => {
+    const streaming = fakeLead([], true);
+    const h = harness([], { leadSession: streaming.session });
+    await h.runtime.spawn(leadMembership, { name: "reviewer", description: "x", prompt: "p" });
+    h.created[0]!.settle();
+    const result = await h.runtime.wait({ role: "teammate", name: "reviewer" }, 10_000, new AbortController().signal);
+    expect(result.noProgress?.reason).toBe("no-active-peer");
+  });
+
+  it("reports an immediate delivery failure instead of claiming the message was accepted", async () => {
+    const h = harness();
+    await h.runtime.spawn(leadMembership, { name: "reviewer", description: "x", prompt: "p" });
+    h.created[0]!.failSend = true;
+    await expect(h.runtime.send(leadMembership, "reviewer", "hi")).rejects.toThrow(/模型不可用/u);
   });
 
   it("interrupts a teammate without clearing queued messages, and stopAll aborts every running member", async () => {
@@ -341,6 +363,16 @@ describe("restore and disposal", () => {
     })]);
     expect(h.runtime.list(leadMembership).map((member) => member.target)).toEqual(["lead", "reviewer"]);
     expect(h.runtime.getTask(leadMembership, "task-1")).toMatchObject({ revision: 2, ownerName: "reviewer" });
+  });
+
+  it("restores member runtimes so a restored active member can be messaged (cold resume)", async () => {
+    const first = harness();
+    await first.runtime.spawn(leadMembership, { name: "reviewer", description: "x", prompt: "p" });
+    // 用同一份 Lead 分支重建运行时：成员应为 active 且可寻址，send 走冷恢复。
+    const second = harness(first.lead.entries);
+    await second.runtime.send(leadMembership, "reviewer", "继续");
+    expect(second.created).toHaveLength(1);
+    expect(second.created[0]!.custom[0]!.message.content[0]!.text).toContain("继续");
   });
 
   it("fails a provisioning member whose child session never got a user message", async () => {

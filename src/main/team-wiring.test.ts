@@ -51,8 +51,11 @@ describe("team wiring", () => {
     expect(runtimeSource).toMatch(/\.\.\.\(record\.teamRuntime \? \{ team: record\.teamRuntime\.snapshot\(\) \} : \{\}\)/u);
     expect(runtimeSource).toMatch(/teamMode: pane\?\.teamMode \?\? false,/u);
     expect(runtimeSource).toMatch(/team: pane\?\.team,/u);
-    expect(storeSource).toMatch(/previous\.teamMode === incoming\.teamMode &&/u);
-    expect(storeSource).toMatch(/previous\.team === incoming\.team &&/u);
+    // 激活通道（case "state"）与分屏通道都必须比 teamMode/team；团队快照走内容
+    // 比较（IPC 结构化克隆后引用必不相等），两处各一次。
+    expect(storeSource).toMatch(/teamSnapshotEqual\(previous\.team, incoming\.team\) &&\s+previous\.sessionId === incoming\.sessionId/u);
+    expect(storeSource.match(/teamSnapshotEqual\(previous\.team, incoming\.team\)/gu) ?? []).toHaveLength(2);
+    expect(storeSource).toMatch(/export function teamSnapshotEqual/u);
   });
 
   it("stops members on record disposal, exempts running teams from idle eviction, and cleans files on delete", () => {

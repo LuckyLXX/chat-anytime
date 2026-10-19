@@ -13,7 +13,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import {
   createAgentSession,
@@ -185,6 +185,11 @@ export class TeamRuntime implements TeamService {
         // 日志是派生的：写失败不阻断会话打开，内存态仍可用。
       }
     }
+    // 恢复已有成员的运行时槽位（不重新拉子会话；handle 留空，首次 send 时冷恢复）。
+    // 漏掉这一步会让重启后的 active 成员在 activeMember() 里「运行时不存在」。
+    for (const member of this.state.members) {
+      if (!this.members.has(member.id)) this.members.set(member.id, { record: member, running: false });
+    }
   }
 
   // ── 成员 ────────────────────────────────────────────────────────────────
@@ -196,7 +201,7 @@ export class TeamRuntime implements TeamService {
   ): Promise<TeamMemberView> {
     this.assertNotDisposed();
     this.assertLead(membership);
-    let prepared: { member: TeamMemberRecord; manager: SessionManager } | undefined;
+    let prepared: { member: TeamMemberRecord; manager: SessionManager; prompt: string } | undefined;
     let created: TeamChildCreated | undefined;
     try {
       prepared = await this.mutate(() => this.prepareSpawn(params));
@@ -213,7 +218,7 @@ export class TeamRuntime implements TeamService {
       }
       // 所有权已转交 member.handle；失败路径不要再 dispose 第二次。
       created = undefined;
-      await this.startInitialPrompt(reservation.member.id, params.prompt.trim(), signal);
+      await this.startInitialPrompt(reservation.member.id, reservation.prompt, signal);
       await this.mutate(() => this.settleSpawn(reservation.member.id, "active"));
       return this.viewFor(reservation.member.id);
     } catch (error) {
@@ -265,7 +270,9 @@ export class TeamRuntime implements TeamService {
     }
     const senderLabel = membership.role === "lead" ? " Lead" : `团队成员「${membership.name}」`;
     if (name === "lead") {
-      this.deliverToLead(`来自${senderLabel}：\n${body}`, membership.name);
+      const delivery = this.deliverToLead(`来自${senderLabel}：\n${body}`, membership.name);
+      void delivery.catch(() => undefined);
+      await this.observeImmediate(delivery);
       this.notify();
       return { sent: true };
     }
@@ -276,10 +283,14 @@ export class TeamRuntime implements TeamService {
     this.scheduleIdle(member);
     this.notify();
     // 投递只保证收件箱接收：running 在步骤边界送达，inactive 会启动/恢复一轮。
-    void handle.sendCustomMessage(this.message(`来自${senderLabel}：\n${body}`, membership.name, name), {
+    const delivery = handle.sendCustomMessage(this.message(`来自${senderLabel}：\n${body}`, membership.name, name), {
       deliverAs: "steer",
       triggerTurn: true
-    }).catch((error: unknown) => this.noteRunEnd(member.record.id, error));
+    });
+    void delivery.catch((error: unknown) => this.noteRunEnd(member.record.id, error));
+    // 只等一个宏任务窗口：立即失败（缺模型/鉴权、目标已销毁）如实报错，正常投递
+    // 不被挂到整轮结束（idle 目标会 await 完整 run）。
+    await this.observeImmediate(delivery);
     return { sent: true };
   }
 
@@ -291,8 +302,12 @@ export class TeamRuntime implements TeamService {
     }
     signal.throwIfAborted();
     // 活跃同伴判断与 waiter 注册必须在同一个同步区间内，否则会丢掉唯一的边。
-    const activePeer = this.list(membership).some((member) =>
-      member.target !== membership.name && (member.status === "running" || member.status === "provisioning"));
+    // 只数 teammate：Lead 不是同伴（teammate 等 Lead 没有意义，Lead 等自己更不会发生）。
+    const activePeer = this.state.members.some((member) => {
+      if (member.name === membership.name) return false;
+      const status = this.statusOf(member, this.members.get(member.id));
+      return status === "running" || status === "provisioning";
+    });
     if (!activePeer) {
       return { timedOut: false, noProgress: { reason: "no-active-peer", message: TEAM_NO_ACTIVE_PEER_MESSAGE } };
     }
@@ -468,7 +483,7 @@ export class TeamRuntime implements TeamService {
 
   // ── 内部：创建 / 恢复 ───────────────────────────────────────────────────
 
-  private prepareSpawn(params: { name: string; description: string; prompt: string; subagent?: string }): { member: TeamMemberRecord; manager: SessionManager } {
+  private prepareSpawn(params: { name: string; description: string; prompt: string; subagent?: string }): { member: TeamMemberRecord; manager: SessionManager; prompt: string } {
     this.assertNotDisposed();
     const name = String(params.name ?? "").trim();
     if (!MEMBER_NAME.test(name) || name.length > 64 || name === "lead") {
@@ -481,7 +496,11 @@ export class TeamRuntime implements TeamService {
       throw new Error(`团队成员数已达上限 ${MAX_TEAM_MEMBERS}`);
     }
     const description = requiredText(params.description, "description", 200);
-    requiredText(params.prompt, "prompt", MAX_TEAM_MESSAGE_BYTES);
+    const prompt = requiredText(params.prompt, "prompt", MAX_TEAM_MESSAGE_BYTES);
+    // requiredText 按字符数收口；这里再按 UTF-8 字节收口，与 team_send 同口径。
+    if (Buffer.byteLength(prompt, "utf8") > MAX_TEAM_MESSAGE_BYTES) {
+      throw new Error(`成员首条 prompt 超过 ${MAX_TEAM_MESSAGE_BYTES} 字节上限`);
+    }
     const config = this.configFor(name, params.subagent);
     const id = randomUUID();
     const manager = SessionManager.create(this.options.workspace, this.teamDir, {
@@ -502,7 +521,7 @@ export class TeamRuntime implements TeamService {
     this.replaceMember(member);
     appendTeamMember(this.leadSession, member);
     this.notify();
-    return { member, manager };
+    return { member, manager, prompt };
   }
 
   private settleSpawn(memberId: string, phase: "active" | "failed", error?: string): void {
@@ -832,13 +851,22 @@ export class TeamRuntime implements TeamService {
     if (this.disposed) throw new Error("团队运行时已销毁");
   }
 
-  private deliverToLead(text: string, sender: string): void {
+  private deliverToLead(text: string, sender: string): Promise<void> {
     // Lead 正在跑：在步骤边界投递；Lead 空闲：只入历史、不自动起回合（用户决策：
     // 成员的消息等 Lead 下一次运行再消费，避免后台成员凭空触发付费回合）。
     const streaming = this.leadSession.isStreaming;
-    void this.leadSession.sendCustomMessage(this.message(text, sender, "lead"), streaming
+    return this.leadSession.sendCustomMessage(this.message(text, sender, "lead"), streaming
       ? { deliverAs: "steer", triggerTurn: true }
-      : { triggerTurn: false }).catch(() => undefined);
+      : { triggerTurn: false });
+  }
+
+  /** 只等一个宏任务窗口来暴露「立刻失败」，不等待一整轮 run。 */
+  private async observeImmediate(delivery: Promise<unknown>): Promise<void> {
+    const timer = new Promise<void>((resolve) => {
+      const handle = setTimeout(resolve, 0);
+      handle.unref?.();
+    });
+    await Promise.race([delivery, timer]);
   }
 
   private message(text: string, sender: string, target: string): { customType: string; content: { type: "text"; text: string }[]; display: boolean; details: unknown } {
@@ -863,7 +891,9 @@ export class TeamRuntime implements TeamService {
   private childHasUserMessage(path: string): boolean {
     try {
       if (!existsSync(path)) return false;
-      // 子会话是刚创建的，正常只有几十 KB；上限 8MB 防止被异常文件拖住启动。
+      // 子会话是刚创建的，正常只有几十 KB；异常大文件按「已接受」处理，别让启动
+      // 被一次 8MB+ 的同步读拖住（真到了这个体量也早已不是本次创建的窗口）。
+      if (statSync(path).size > 8 * 1024 * 1024) return true;
       const text = readFileSync(path, "utf8");
       return text.includes('"role":"user"');
     } catch {
