@@ -37,7 +37,7 @@ export const CU_RESULT_MARKER = "__CU__";
  * the model verbatim (they carry the on-screen truth the structured result
  * cannot express).
  */
-const NOTE_PREFIXES = ["[Click check]", "[TIPS]", "[Activate]", "[GrabWindow]"] as const;
+const NOTE_PREFIXES = ["[Click check]", "[TIPS]", "[Activate]", "[GrabWindow]", "[Guard]"] as const;
 
 /** Operation timeout: ljqCtrl's GrabWindow sleeps ~0.4s (activate + settle); everything else is sub-second. */
 const CU_SPAWN_TIMEOUT_MS = 30_000;
@@ -193,7 +193,11 @@ export const OP_WINDOWS = [
   "    if q and q not in r['title'].lower() and q not in r['class'].lower():",
   "        continue",
   "    rect = r['rect']",
-  "    items.append({'hwnd': r['hwnd'], 'title': r['title'], 'class': r['class'], 'w': rect[2] - rect[0], 'h': rect[3] - rect[1], 'foreground': r['hwnd'] == fg})",
+  "    try:",
+  "        cw, ch = ljqCtrl.ClientSize(r['hwnd'])",
+  "    except Exception:",
+  "        cw, ch = 0, 0",
+  "    items.append({'hwnd': r['hwnd'], 'title': r['title'], 'class': r['class'], 'w': rect[2] - rect[0], 'h': rect[3] - rect[1], 'client_w': cw, 'client_h': ch, 'minimized': ljqCtrl.IsMinimized(r['hwnd']), 'foreground': r['hwnd'] == fg})",
   "    if len(items) >= 60:",
   "        break",
   "out({'ok': True, 'windows': items, 'total': len(rows)})"
@@ -201,15 +205,15 @@ export const OP_WINDOWS = [
 
 export const OP_SCREENSHOT = [
   "hwnd = resolve(ARGS['window'])",
-  "img = ljqCtrl.GrabWindow(hwnd)   # activates the window first",
+  "img = ljqCtrl.GrabWindowBest(hwnd)   # 后台优先：不激活窗口、不受遮挡；最小化会先恢复",
   "import io",
   "buf = io.BytesIO()",
   "img.save(buf, format='PNG')",
   "ox, oy = ljqCtrl.ClientOrigin(hwnd)",
   "info = getattr(img, 'info', {}) or {}",
-  "# cu_fg_ok=False 表示截图时前台不是目标窗口：这张图可能压根不是目标窗口的画面，",
-  "# 必须让模型看到（GrabWindow 只截那块屏幕区域，它不知道上面盖着谁）。",
-  "out({'ok': True, 'width': img.size[0], 'height': img.size[1], 'origin': [ox, oy], 'title': ljqCtrl.win32gui.GetWindowText(hwnd), 'fg_ok': bool(info.get('cu_fg_ok', True)), 'fg_title': str(info.get('cu_fg_title') or ''), 'png_b64': base64.b64encode(buf.getvalue()).decode('ascii')})"
+  "mode = str(info.get('cu_mode') or 'foreground')",
+  "# cu_fg_ok=False 只在「前台截图」这一路才有意义：后台帧不受前台/遮挡影响。",
+  "out({'ok': True, 'width': img.size[0], 'height': img.size[1], 'origin': [ox, oy], 'title': ljqCtrl.win32gui.GetWindowText(hwnd), 'mode': mode, 'restored': bool(info.get('cu_restored')), 'fg_ok': bool(info.get('cu_fg_ok', True)), 'fg_title': str(info.get('cu_fg_title') or ''), 'png_b64': base64.b64encode(buf.getvalue()).decode('ascii')})"
 ].join("\n");
 
 export const OP_CLICK = [
@@ -228,25 +232,30 @@ export const OP_CLICK = [
 
 export const OP_TYPE = [
   "hwnd = resolve(ARGS['window']) if ARGS.get('window') is not None else None",
-  "if hwnd:",
-  "    ljqCtrl.Activate(hwnd)",
-  "bak = ljqCtrl.GetClipboardText()",
-  "ljqCtrl.type_text(ARGS['text'])",
-  "import time as _t",
-  "_t.sleep(0.4)",
-  "try:",
-  "    ljqCtrl.SetClipboardText(bak)   # type_text borrows the clipboard; restore the user's content",
-  "except Exception:",
-  "    pass",
-  "out({'ok': True, 'typed': len(ARGS['text'])})"
+  "refused = ljqCtrl.ForegroundGuard(hwnd, '输入') if hwnd else None",
+  "if refused:",
+  "    out(refused)",
+  "else:",
+  "    bak = ljqCtrl.TryGetClipboardText()   # 剪贴板是图片/文件时返回 None，不再炸掉整次输入",
+  "    ljqCtrl.type_text(ARGS['text'])",
+  "    import time as _t",
+  "    _t.sleep(0.4)",
+  "    if bak is not None:",
+  "        try:",
+  "            ljqCtrl.SetClipboardText(bak)   # type_text borrows the clipboard; restore the user's content",
+  "        except Exception:",
+  "            pass",
+  "    out({'ok': True, 'typed': len(ARGS['text']), 'clipboard_restored': bak is not None, 'fg_title': ljqCtrl.Foreground()['title']})"
 ].join("\n");
 
 export const OP_PRESS = [
   "hwnd = resolve(ARGS['window']) if ARGS.get('window') is not None else None",
-  "if hwnd:",
-  "    ljqCtrl.Activate(hwnd)",
-  "ljqCtrl.Press(ARGS['key'])",
-  "out({'ok': True, 'key': ARGS['key']})"
+  "refused = ljqCtrl.ForegroundGuard(hwnd, '发送按键') if hwnd else None",
+  "if refused:",
+  "    out(refused)",
+  "else:",
+  "    ljqCtrl.Press(ARGS['key'])",
+  "    out({'ok': True, 'key': ARGS['key'], 'fg_title': ljqCtrl.Foreground()['title']})"
 ].join("\n");
 
 export interface ComputerOperationOutcome {
@@ -342,15 +351,15 @@ async function runComputerOperation(context: ComputerExecuteContext, operation: 
 
 const WINDOW_PARAM = Type.Union([Type.String(), Type.Number()], { description: "目标窗口：标题子串（大小写不敏感）或 hwnd 数字（来自 computer_windows）" });
 
-const WINDOWS_TOOL_TEXT = "枚举本机可见顶层窗口（标题/类名/句柄/客户区尺寸，标记当前前台窗口）。控制桌面其他应用的第一步：先枚举定位目标窗口，再截图看清内容。query 可按标题/类名过滤。只读操作。";
+const WINDOWS_TOOL_TEXT = "枚举本机可见顶层窗口（标题/类名/句柄/窗口与客户区尺寸/是否最小化，标记当前前台窗口）。控制桌面其他应用的第一步：先枚举定位目标窗口，再截图看清内容。query 可按标题/类名过滤。坐标用**客户区尺寸**（截图就是客户区），不要拿窗口尺寸算比例。只读操作。";
 
-const SCREENSHOT_TOOL_TEXT = "截取目标窗口客户区图像（自动切到前台）。返回图片（支持图片输入的模型直接查看；纯文本模型用 recognize_images 识别保存的文件）。回执带 origin（客户区原点屏幕坐标）：computer_click 的 x/y 就用这张截图的坐标系，不要自行换算。回执同时报告截图时前台是否就是目标窗口（fg_ok=false 说明这张图可能不是目标窗口的画面，不可信）；只读操作。";
+const SCREENSHOT_TOOL_TEXT = "截取目标窗口客户区图像（默认后台渲染截图：不抢焦点、不受其它窗口遮挡；窗口最小化时会先恢复显示）。返回图片（支持图片输入的模型直接查看；纯文本模型用 recognize_images 识别保存的文件）。回执带 origin（客户区原点屏幕坐标）：computer_click 的 x/y 就用这张截图的坐标系，不要自行换算。**截图不会切前台**：后续要键盘输入/按键时把 window 传给 computer_type / computer_press（它们会自己激活并核对前台）。只读操作。";
 
-const CLICK_TOOL_TEXT = "点击目标窗口客户区的指定坐标。x/y 是 computer_screenshot 截图内的坐标（工具自动换算屏幕物理坐标并先激活窗口）。**点击前会先校对坐标上真正躺着哪个窗口：不是目标窗口（且不属于同一进程）就直接拒绝点击**——避免在用户别的窗口里乱点；被拒绝时坐标就是错的，重新截图算一遍。回执带三项验证：① 命中窗口（「点到了别的窗口」比坐标算错更常见）；② 屏幕变化（客户区整体与光标局部）；③ 前台校验（焦点被抢时后续键盘会落到别处）。**「无变化」不等于点歪**（静态区域正常无变化），先看命中与前台两项；命中失败时先重新截图核对，禁止盲目重试。";
+const CLICK_TOOL_TEXT = "点击目标窗口客户区的指定坐标。x/y 是 computer_screenshot 截图内的坐标（工具自动换算屏幕物理坐标并先激活窗口）。**点击前会先校对坐标上真正躺着哪个窗口：不是目标窗口（且不属于同一进程）就直接拒绝点击**——避免在用户别的窗口里乱点；被拒绝时坐标就是错的，重新截图算一遍。回执带三项验证：① 命中窗口（「点到了别的窗口」比坐标算错更常见）；② 界面变化（屏幕轮询；屏幕上看不到变化时会用后台渲染帧复核，回执会说明结论来自哪一路）；③ 前台校验（焦点被抢时后续键盘会落到别处）。**「无变化」不等于点歪**（静态区域正常无变化），先看命中与前台两项；命中失败时先重新截图核对，禁止盲目重试。";
 
-const TYPE_TOOL_TEXT = "向目标窗口输入文本（剪贴板 + ctrl+v；输入框必须已有焦点，必要时先 computer_click 点击输入框）。会临时借用系统剪贴板并自动恢复。";
+const TYPE_TOOL_TEXT = "向目标窗口输入文本（剪贴板 + ctrl+v；输入框必须已有焦点，必要时先 computer_click 点击输入框）。传了 window 时会先切前台并核对：切不过去就**拒绝输入**（否则文本会粘进用户当前窗口）；不传 window 则输入到当前前台焦点。会临时借用系统剪贴板并自动恢复（剪贴板原本是图片/文件时只输入、不恢复）。";
 
-const PRESS_TOOL_TEXT = "向目标窗口发送组合键（如 'ctrl+s'、'alt+tab'、'enter'、'esc'；键名见 computer-use skill）。可选 window 先激活目标窗口。";
+const PRESS_TOOL_TEXT = "向目标窗口发送组合键（如 'ctrl+s'、'alt+tab'、'enter'、'esc'、'win+r'；键名见 computer-use skill）。传了 window 时会先切前台并核对：切不过去就**拒绝发送**（否则 ctrl+w 这类快捷键会作用在用户别的窗口上）。";
 
 interface ClickReportView {
   window: string;
@@ -367,6 +376,7 @@ interface ClickReportView {
   fgTitle?: unknown;
   clientChanged?: boolean;
   clientDiffRatio?: unknown;
+  clientChangeSource?: unknown;
   roiChanged?: boolean;
   verdict?: unknown;
   advice?: unknown;
@@ -398,7 +408,7 @@ export function describeClickReport(report: ClickReportView): string {
   const change = report.clientChanged === undefined
     ? "未测"
     : report.clientChanged
-      ? `有（客户区变化 ${report.clientDiffRatio === undefined ? "?" : String(report.clientDiffRatio)}）`
+      ? `有（客户区变化 ${report.clientDiffRatio === undefined ? "?" : String(report.clientDiffRatio)}${report.clientChangeSource === "printwindow" ? "，后台渲染对比确认" : ""}）`
       : `无（客户区变化 ${report.clientDiffRatio === undefined ? "0" : String(report.clientDiffRatio)}）`;
   const roi = report.roiChanged === undefined ? "未测" : report.roiChanged ? "有" : "无";
   lines.push(`- 变化：客户区 ${change}；光标局部 ${roi}`);
@@ -427,7 +437,11 @@ export function buildComputerTools(deps: ComputerToolDeps): ToolDefinition[] {
       const windowsList = Array.isArray(outcome.data?.windows) ? (outcome.data!.windows as Record<string, unknown>[]) : [];
       const lines = windowsList.map((item) => {
         const fg = item.foreground ? " · 前台" : "";
-        return `hwnd=${String(item.hwnd)} [${String(item.class)}] ${String(item.title).slice(0, 48)} (${String(item.w)}×${String(item.h)})${fg}`;
+        const minimized = item.minimized === true;
+        const size = minimized
+          ? `已最小化 · 窗口 ${String(item.w)}×${String(item.h)}`
+          : `客户区 ${String(item.client_w)}×${String(item.client_h)} · 窗口 ${String(item.w)}×${String(item.h)}`;
+        return `hwnd=${String(item.hwnd)} [${String(item.class)}] ${String(item.title).slice(0, 48)} (${size})${fg}`;
       });
       const total = typeof outcome.data?.total === "number" ? String(outcome.data.total) : "?";
       const hint = "\n下一步：computer_screenshot 截图看清窗口内容（坐标用截图内坐标）。";
@@ -451,6 +465,8 @@ export function buildComputerTools(deps: ComputerToolDeps): ToolDefinition[] {
       const title = String(outcome.data?.title ?? "");
       const fgOk = outcome.data?.fg_ok !== false;
       const fgTitle = String(outcome.data?.fg_title ?? "");
+      const mode = String(outcome.data?.mode ?? "foreground");
+      const restored = outcome.data?.restored === true;
       const pngB64 = typeof outcome.data?.png_b64 === "string" ? (outcome.data!.png_b64 as string) : "";
       let savedPath: string | undefined;
       if (pngB64 && deps.saveScreenshot && deps.workspace()) {
@@ -460,10 +476,14 @@ export function buildComputerTools(deps: ComputerToolDeps): ToolDefinition[] {
           // persistence is an enhancement, never a precondition
         }
       }
+      const how = mode === "background"
+        ? "后台渲染截图，未抢占前台"
+        : "前台截图，已激活窗口";
+      const restoreNote = restored ? "窗口原本最小化，已恢复显示。" : "";
       const fgWarning = fgOk
         ? ""
-        : `⚠️ 截图时前台是「${fgTitle}」不是目标窗口「${title}」——GrabWindow 只截目标客户区那块屏幕区域，前台被抢时拿到的是**别的窗口的画面**。先重新 computer_screenshot 确认，不要基于这张图算坐标。`;
-      const text = `${fgWarning ? `${fgWarning}\n` : ""}已截取窗口「${title}」（${String(width)}×${String(height)}）。点击坐标就用这张截图的坐标系：computer_click { window, x, y }。${savedPath ? `截图已保存到 ${savedPath}；` : ""}当前模型不支持图片输入时可调用 recognize_images 工具${savedPath ? "识别该文件" : "识别截图"}。客户区屏幕原点：(${origin})。`;
+        : `⚠️ 截图时前台是「${fgTitle}」不是目标窗口「${title}」——前台截图只截目标客户区那块屏幕区域，前台被抢时拿到的是**别的窗口的画面**。先重新 computer_screenshot 确认，不要基于这张图算坐标。`;
+      const text = `${fgWarning ? `${fgWarning}\n` : ""}已截取窗口「${title}」（${String(width)}×${String(height)}，${how}）。${restoreNote}点击坐标就用这张截图的坐标系：computer_click { window, x, y }。${savedPath ? `截图已保存到 ${savedPath}；` : ""}当前模型不支持图片输入时可调用 recognize_images 工具${savedPath ? "识别该文件" : "识别截图"}。客户区屏幕原点：(${origin})。`;
       return {
         content: [
           { type: "text" as const, text },
@@ -518,6 +538,7 @@ export function buildComputerTools(deps: ComputerToolDeps): ToolDefinition[] {
           fgTitle: data.fg_title_after,
           clientChanged: data.client_changed as boolean | undefined,
           clientDiffRatio: data.client_diff_ratio,
+          clientChangeSource: data.client_change_source,
           roiChanged: data.roi_changed as boolean | undefined,
           verdict: data.verdict,
           advice: data.advice
@@ -537,8 +558,15 @@ export function buildComputerTools(deps: ComputerToolDeps): ToolDefinition[] {
     }),
     async execute(_id, params) {
       const outcome = await runComputerOperation(context, OP_TYPE, { text: params?.text, window: params?.window });
+      // 切不到前台就不注入键盘（否则文本会粘进用户当前窗口）：这是可修正的状态，不是崩溃
+      if (outcome.data?.verdict === "refused_foreground") {
+        const notes = outcome.notes.length ? `\n\n诊断输出：\n${outcome.notes.join("\n")}` : "";
+        throw new Error(`${String(outcome.error ?? outcome.data?.advice ?? "目标窗口没能切到前台，已拒绝输入")}${notes}`);
+      }
       if (!outcome.ok) throw new Error(outcome.error);
-      return { content: [{ type: "text" as const, text: `已向目标窗口输入 ${String(outcome.data?.typed ?? String(params?.text ?? "").length)} 个字符（剪贴板已恢复）。验证：截图确认文本已进入输入框。` }], details: {} };
+      const target = String(outcome.data?.fg_title ?? "");
+      const restored = outcome.data?.clipboard_restored === false ? "（剪贴板原本不是文本，未恢复）" : "（剪贴板已恢复）";
+      return { content: [{ type: "text" as const, text: `已向${target ? `「${target}」` : "当前前台窗口"}输入 ${String(outcome.data?.typed ?? String(params?.text ?? "").length)} 个字符${restored}。验证：截图确认文本已进入输入框。` }], details: {} };
     }
   });
 
@@ -552,8 +580,14 @@ export function buildComputerTools(deps: ComputerToolDeps): ToolDefinition[] {
     }),
     async execute(_id, params) {
       const outcome = await runComputerOperation(context, OP_PRESS, { key: params?.key, window: params?.window });
+      // 切不到前台就不发按键（否则 ctrl+w / alt+f4 会作用在用户别的窗口上）
+      if (outcome.data?.verdict === "refused_foreground") {
+        const notes = outcome.notes.length ? `\n\n诊断输出：\n${outcome.notes.join("\n")}` : "";
+        throw new Error(`${String(outcome.error ?? outcome.data?.advice ?? "目标窗口没能切到前台，已拒绝发送按键")}${notes}`);
+      }
       if (!outcome.ok) throw new Error(outcome.error);
-      return { content: [{ type: "text" as const, text: `已发送按键 ${String(params?.key)}。验证：截图确认按键效果（弹窗/保存/导航等）。` }], details: {} };
+      const target = String(outcome.data?.fg_title ?? "");
+      return { content: [{ type: "text" as const, text: `已发送按键 ${String(params?.key)}${target ? `（前台「${target}」）` : ""}。验证：截图确认按键效果（弹窗/保存/导航等）。` }], details: {} };
     }
   });
 

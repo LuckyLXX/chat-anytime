@@ -1,4 +1,5 @@
 import { existsSync, mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -6,6 +7,10 @@ import { permissionAction, toolRisk } from "./permissions.js";
 import {
   CU_RESULT_MARKER,
   OP_CLICK,
+  OP_PRESS,
+  OP_SCREENSHOT,
+  OP_TYPE,
+  OP_WINDOWS,
   buildComputerScript,
   buildComputerTools,
   describeComputerSpawnFailure,
@@ -152,13 +157,14 @@ describe("buildComputerTools", () => {
 
   it("computer_windows formats the window list with a next-step hint", async () => {
     const tools = buildComputerTools(makeDeps({ spawnPython: mockSpawn({ ok: true, total: 2, windows: [
-      { hwnd: 11, title: "记事本", class: "Notepad", w: 800, h: 600, foreground: true },
-      { hwnd: 22, title: "微信", class: "Qt", w: 400, h: 700, foreground: false }
+      { hwnd: 11, title: "记事本", class: "Notepad", w: 800, h: 600, client_w: 784, client_h: 561, minimized: false, foreground: true },
+      { hwnd: 22, title: "微信", class: "Qt", w: 400, h: 700, client_w: 400, client_h: 700, minimized: true, foreground: false }
     ] }) }));
     const result = await tools[0]!.execute("id", {} as never, undefined, undefined, undefined as never) as { content: { text: string }[] };
     const text = result.content[0]!.text;
     expect(text).toContain("可见窗口 2 个");
-    expect(text).toContain("hwnd=11 [Notepad] 记事本 (800×600) · 前台");
+    expect(text).toContain("hwnd=11 [Notepad] 记事本 (客户区 784×561 · 窗口 800×600) · 前台");
+    expect(text).toContain("hwnd=22 [Qt] 微信 (已最小化 · 窗口 400×700)");
     expect(text).toContain("computer_screenshot");
   });
 
@@ -171,6 +177,33 @@ describe("buildComputerTools", () => {
     expect(result.content[0]!.text).toContain("computer-1.png");
     expect(result.content[0]!.text).toContain("截图的坐标系");
     expect(saveScreenshot).toHaveBeenCalledWith("aGVsbG8=", "image/png");
+  });
+
+  it("computer_screenshot reports the background path and a minimized restore", async () => {
+    const tools = buildComputerTools(makeDeps({ spawnPython: mockSpawn({
+      ok: true,
+      width: 800,
+      height: 600,
+      origin: [10, 40],
+      title: "记事本",
+      mode: "background",
+      restored: true,
+      fg_ok: true,
+      png_b64: "aGVsbG8="
+    }) }));
+    const result = await tools[1]!.execute("id", { window: "记事本" } as never, undefined, undefined, undefined as never) as { content: { text: string }[] };
+    const text = result.content[0]!.text;
+    expect(text).toContain("后台渲染截图，未抢占前台");
+    expect(text).toContain("窗口原本最小化，已恢复显示");
+    expect(text).not.toContain("⚠️");
+  });
+
+  it("computer_screenshot says when it fell back to a foreground capture", async () => {
+    const tools = buildComputerTools(makeDeps({ spawnPython: mockSpawn({
+      ok: true, width: 10, height: 10, origin: [0, 0], title: "记事本", mode: "foreground", restored: false, fg_ok: true, png_b64: ""
+    }) }));
+    const result = await tools[1]!.execute("id", { window: "记事本" } as never, undefined, undefined, undefined as never) as { content: { text: string }[] };
+    expect(result.content[0]!.text).toContain("前台截图，已激活窗口");
   });
 
   it("computer_click renders the three-signal report (hit / change / foreground)", async () => {
@@ -272,15 +305,79 @@ describe("buildComputerTools", () => {
     expect(result.content[0]!.text).not.toContain("⚠️");
   });
 
-  it("collects Activate/GrabWindow diagnostics as notes, not just Click check", () => {
+  it("collects Activate/GrabWindow/Guard diagnostics as notes, not just Click check", () => {
     const outcome = parseComputerOutput([
       "[Activate] ⚠️ 前台切换未生效：想要 hwnd=11",
       "[GrabWindow] ⚠️ 截图时前台不是目标窗口",
+      "[Guard] refused_foreground | 前台是 hwnd=22（'微信'）",
       `${CU_RESULT_MARKER}${JSON.stringify({ ok: true })}`
     ].join("\n"), "");
-    expect(outcome.notes).toHaveLength(2);
+    expect(outcome.notes).toHaveLength(3);
     expect(outcome.notes[0]).toContain("[Activate]");
     expect(outcome.notes[1]).toContain("[GrabWindow]");
+    expect(outcome.notes[2]).toContain("[Guard]");
+  });
+
+  it("computer_click reports when the change was confirmed through background rendering", async () => {
+    const tools = buildComputerTools(makeDeps({ spawnPython: mockSpawn({
+      ok: true,
+      screen: [410, 640],
+      title: "记事本",
+      hit_ok: true,
+      hit_title: "记事本",
+      in_client: true,
+      client_changed: true,
+      client_diff_ratio: 0.8123,
+      client_change_source: "printwindow",
+      roi_changed: false,
+      fg_ok: true,
+      fg_title_after: "记事本",
+      verdict: "changed",
+      advice: "屏幕像素对比没有发现变化，但后台渲染帧确认界面已经改变。"
+    }) }));
+    const result = await tools[2]!.execute("id", { window: "记事本", x: 400, y: 600 } as never, undefined, undefined, undefined as never) as { content: { text: string }[] };
+    expect(result.content[0]!.text).toContain("后台渲染对比确认");
+  });
+
+  it("computer_type refuses to inject keys when the target cannot reach the foreground", async () => {
+    const tools = buildComputerTools(makeDeps({ spawnPython: mockSpawn({
+      ok: false,
+      refused: true,
+      verdict: "refused_foreground",
+      error: "**未输入**：目标窗口没能切到前台，当前前台是「微信」",
+      advice: "先把目标窗口点一下切到前台再试",
+      fg_title: "微信"
+    }, ["[Guard] refused_foreground | 前台是 hwnd=22（'微信'）"]) }));
+    await expect(
+      tools[3]!.execute("id", { window: "记事本", text: "你好" } as never, undefined, undefined, undefined as never)
+    ).rejects.toThrow(/未输入/);
+  });
+
+  it("computer_press refuses to send keys when the target cannot reach the foreground", async () => {
+    const tools = buildComputerTools(makeDeps({ spawnPython: mockSpawn({
+      ok: false,
+      refused: true,
+      verdict: "refused_foreground",
+      error: "**未发送按键**：目标窗口没能切到前台",
+      fg_title: "微信"
+    }) }));
+    await expect(
+      tools[4]!.execute("id", { window: "记事本", key: "ctrl+w" } as never, undefined, undefined, undefined as never)
+    ).rejects.toThrow(/未发送按键/);
+  });
+
+  it("computer_type names the foreground window and reports an unrestored clipboard", async () => {
+    const tools = buildComputerTools(makeDeps({ spawnPython: mockSpawn({ ok: true, typed: 2, clipboard_restored: false, fg_title: "记事本" }) }));
+    const result = await tools[3]!.execute("id", { text: "你好", window: "记事本" } as never, undefined, undefined, undefined as never) as { content: { text: string }[] };
+    const text = result.content[0]!.text;
+    expect(text).toContain("已向「记事本」输入 2 个字符");
+    expect(text).toContain("剪贴板原本不是文本，未恢复");
+  });
+
+  it("computer_press names where the keys went", async () => {
+    const tools = buildComputerTools(makeDeps({ spawnPython: mockSpawn({ ok: true, key: "ctrl+s", fg_title: "记事本" }) }));
+    const result = await tools[4]!.execute("id", { key: "ctrl+s", window: "记事本" } as never, undefined, undefined, undefined as never) as { content: { text: string }[] };
+    expect(result.content[0]!.text).toContain("已发送按键 ctrl+s（前台「记事本」）");
   });
 
   it("refuses a click whose coordinates sit on another application's window", async () => {
@@ -313,6 +410,44 @@ describe("buildComputerTools", () => {
     const script = buildComputerScript("D:\\skill", OP_CLICK, { window: "记事本", x: 1, y: 2 });
     expect(script).toContain("ljqCtrl.Click(x, y, hwnd=hwnd");
     expect(script).toContain("report['client']");
+  });
+
+  it("routes keyboard ops through ForegroundGuard and backs up the clipboard safely", () => {
+    const typeScript = buildComputerScript("D:\\skill", OP_TYPE, { text: "你好", window: "记事本" });
+    expect(typeScript).toContain("ljqCtrl.ForegroundGuard");
+    expect(typeScript).toContain("ljqCtrl.TryGetClipboardText");
+    expect(typeScript).toContain("out(refused)");
+    // 旧实现直接在顶层备份剪贴板：剪贴板是图片时会抛异常，整次输入作废
+    expect(typeScript).not.toContain("bak = ljqCtrl.GetClipboardText()");
+    const pressScript = buildComputerScript("D:\\skill", OP_PRESS, { key: "ctrl+s", window: "记事本" });
+    expect(pressScript).toContain("ljqCtrl.ForegroundGuard");
+    expect(pressScript).toContain("out(refused)");
+  });
+
+  it("takes screenshots through the background-first entry", () => {
+    const script = buildComputerScript("D:\\skill", OP_SCREENSHOT, { window: "记事本" });
+    expect(script).toContain("ljqCtrl.GrabWindowBest");
+    expect(script).toContain("cu_mode");
+  });
+
+  it("generated operation scripts are valid Python (the transport must not hide a SyntaxError)", () => {
+    const scripts = [
+      buildComputerScript("D:\\skill", OP_WINDOWS, { query: "notepad" }),
+      buildComputerScript("D:\\skill", OP_SCREENSHOT, { window: "记事本" }),
+      buildComputerScript("D:\\skill", OP_CLICK, { window: "记事本", x: 1, y: 2, button: "double" }),
+      buildComputerScript("D:\\skill", OP_TYPE, { text: "你好", window: "记事本" }),
+      buildComputerScript("D:\\skill", OP_PRESS, { key: "ctrl+s", window: "记事本" })
+    ];
+    const probe = spawnSync("python", ["-c", "pass"], { encoding: "utf8" });
+    if (probe.error) return; // 没有 Python 的机器上只跳过这一层（selfcheck 会跑真链路）
+    for (const script of scripts) {
+      const parsed = spawnSync("python", ["-c", "import ast,sys;ast.parse(sys.stdin.read())"], {
+        input: script,
+        encoding: "utf8",
+        env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1" }
+      });
+      expect(parsed.status, parsed.stderr).toBe(0);
+    }
   });
 
   it("fails fast when the script dir is missing", async () => {

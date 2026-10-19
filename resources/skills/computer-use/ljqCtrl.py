@@ -26,6 +26,9 @@ Quick Reference:
 - Foreground() -> {hwnd,title,class}（当前前台窗口）
 - Activate(hwnd, verify=True): 稳定切换前台（先恢复最小化，假 Alt 键骗过前台锁），
   切换后核对 GetForegroundWindow，不一致打印 [Activate] 警告
+- GrabWindowBest(hwnd_or_title) -> PIL Image（**截图默认用它**：后台优先，不激活、
+  不受遮挡；窗口最小化会先恢复；后台帧失败/全黑才回退前台截图；
+  img.info['cu_mode'] = 'background' | 'foreground'，img.info['cu_restored'] 表示是否恢复过）
 - GrabWindow(hwnd_or_title) -> PIL Image（前台客户区截图，自动 Activate；
   img.info['cu_fg_ok'] 报告截图时前台是否就是目标窗口）
 - GrabWindowBg(hwnd_or_title) -> PIL Image（PrintWindow 后台截图，不激活不打扰；
@@ -33,10 +36,14 @@ Quick Reference:
   真的全黑才是该窗口不支持）
 - ClientOrigin(hwnd_or_title) -> (x, y)（客户区原点的屏幕物理坐标）
 - Click(x, y, check=True, double=False, hwnd=None) -> 报告 dict：
-  命中窗口校验 + 客户区变化 + 光标处前台校验；点击自带验证，读 report['verdict']
-  与 report['advice']，**无像素变化不等于点歪**（静态区域正常无变化）
-- Press(cmd): 组合键（如 'ctrl+v'、'alt+tab'、'enter'）
-- SetClipboardText(text) / type_text(text): 剪贴板 + ctrl+v 输入文本
+  命中窗口校验 + 客户区变化（屏幕轮询，遮挡时用后台渲染帧复核；
+  report['client_change_source'] 说明结论来自哪一路）+ 光标处前台校验；
+  读 report['verdict'] 与 report['advice']，**无像素变化不等于点歪**
+- ForegroundGuard(hwnd, action='输入') -> None 或拒绝报告 dict（切不到前台就不注入按键）
+- Press(cmd): 组合键（如 'ctrl+v'、'alt+tab'、'enter'；'win'/'cmd'/'return'/'delete' 有别名）
+- SetClipboardText(text) / TryGetClipboardText() / type_text(text): 剪贴板 + ctrl+v 输入文本
+  （TryGetClipboardText 在剪贴板是图片/文件时返回 None，不抛异常）
+- IsMinimized(hwnd) -> bool
 - ScreenCapAt(x, y, r=100) -> PIL Image（物理坐标周边截图）
 """
 import ctypes
@@ -58,6 +65,13 @@ except ImportError:
     Image = ImageChops = ImageGrab = None  # type: ignore[assignment]
 
 ctypes.windll.user32.SetProcessDPIAware()
+
+# 全屏抓图 / 后台渲染帧的虚拟桌面原点（多屏时副屏可能落在负坐标）：
+# ImageGrab.grab(all_screens=True) 的 (0,0) 是虚拟桌面左上角，不是主屏左上角，
+# 所以「自己按屏幕坐标裁」必须先减掉这个偏移（Pillow 只在传 bbox 时替你换算）。
+def _virtual_origin():
+    return (int(win32api.GetSystemMetrics(win32con.SM_XVIRTUALSCREEN)),
+            int(win32api.GetSystemMetrics(win32con.SM_YVIRTUALSCREEN)))
 
 # PrintWindow 标志位（见 _grab_printwindow：只用 CLIENTONLY 会让 DWM 合成窗口全黑）
 PW_CLIENTONLY = 0x00000001
@@ -111,9 +125,19 @@ def FindWindow(name: str, exact: bool = False, class_name=None, visible_only: bo
     raise RuntimeError(f"window not found: {name!r}")
 
 def Foreground():
-    """当前前台窗口信息。操作后核对它可发现焦点被抢/丢失。"""
-    hwnd = win32gui.GetForegroundWindow()
-    return {"hwnd": int(hwnd), "title": win32gui.GetWindowText(hwnd), "class": win32gui.GetClassName(hwnd)}
+    """当前前台窗口信息。操作后核对它可发现焦点被抢/丢失。
+
+    注意：前台句柄可能是 0 或已失效（桌面切换、窗口刚关），这时读标题/类名会抛
+    pywintypes.error。前台查询是**诊断路径**，它自己不能成为异常源——拿不到就
+    返回空字符串（`ForegroundGuard` 靠 hwnd 比较判断失败，不靠标题）。
+    """
+    hwnd = win32gui.GetForegroundWindow() or 0
+    if not hwnd or not win32gui.IsWindow(hwnd):
+        return {"hwnd": int(hwnd), "title": "", "class": ""}
+    try:
+        return {"hwnd": int(hwnd), "title": win32gui.GetWindowText(hwnd), "class": win32gui.GetClassName(hwnd)}
+    except Exception:
+        return {"hwnd": int(hwnd), "title": "", "class": ""}
 
 # ---------------------------------------------------------------- 前台/坐标
 
@@ -145,6 +169,39 @@ def Activate(hwnd, verify: bool = True):
     return True
 
 activate = Activate
+
+def ForegroundGuard(hwnd, action="输入"):
+    """把目标窗口切到前台并核对；**切不到就返回拒绝报告（不执行任何键鼠注入）**。
+
+    为什么必须拒绝而不是只告警：键盘事件（type_text / Press）走的是「当前前台窗口」，
+    Activate 被 Windows 前台锁拒绝或被其他窗口抢回时，文本会粘进用户正在写的文档，
+    Ctrl+W / Alt+F4 这类快捷键会作用在别的应用上。鼠标点击有 WindowFromPoint 守卫，
+    键盘没有等价兜底，所以在这里补上。返回 None = 已在前台，可以继续。
+    """
+    if isinstance(hwnd, str):
+        hwnd = _resolve_hwnd(hwnd)
+    Activate(hwnd)
+    fg = Foreground()
+    if fg["hwnd"] == hwnd:
+        return None
+    advice = (
+        f"**未{action}**：目标窗口 hwnd={hwnd}（{safe_title(hwnd)!r}）没能切到前台，"
+        f"当前前台是 hwnd={fg['hwnd']}（{fg['title']!r}）——继续输入/按键会落到这个窗口里。"
+        f"先把目标窗口点一下切到前台再试，或重新 computer_windows 核对 hwnd/标题。"
+    )
+    print(f"[Guard] refused_foreground | 未{action}：前台是 hwnd={fg['hwnd']}（{fg['title']!r}），"
+          f"目标 hwnd={hwnd}（{safe_title(hwnd)!r}）")
+    print(f"[Guard] 建议：{advice}")
+    return {
+        "ok": False,
+        "refused": True,
+        "error": advice,
+        "verdict": "refused_foreground",
+        "advice": advice,
+        "title": safe_title(hwnd),
+        "fg_hwnd": int(fg["hwnd"]),
+        "fg_title": fg["title"],
+    }
 
 def safe_title(hwnd) -> str:
     """标题读取不怕失效句柄（枚举结果可能已过去几百毫秒）。"""
@@ -317,6 +374,104 @@ def GrabWindowBg(hwnd_or_name, flags=PW_CLIENTONLY | PW_RENDERFULLCONTENT):
 
 grab_window_bg = GrabWindowBg
 
+# 后台帧「空白」判定：DWM 合成窗口在 flags 用错时会返回全黑帧且 PrintWindow 仍返回 1，
+# 所以不能让返回值当成功判据；这里再看内容有没有灰度层次（真实 UI 至少有一两个灰度值）。
+BG_BLANK_MAX_LEVEL = 2
+
+def _is_blank(img) -> bool:
+    """全黑/近全黑帧（后台截图不受支持或内容尚未渲染）。"""
+    try:
+        return int(img.convert("L").getextrema()[1]) <= BG_BLANK_MAX_LEVEL
+    except Exception:
+        return False
+
+def _crop(img, box):
+    """按 (l, t, r, b) 裁剪，越界自动收进图像内；无效区域返回 None。"""
+    if img is None or box is None:
+        return None
+    left, top, right, bottom = (int(v) for v in box)
+    left, top = max(0, left), max(0, top)
+    right, bottom = min(img.size[0], right), min(img.size[1], bottom)
+    if right <= left or bottom <= top:
+        return None
+    return img.crop((left, top, right, bottom))
+
+def _crop_screen(img, box):
+    """按**屏幕物理坐标**裁剪全屏抓图（自动扣掉多屏虚拟桌面原点）。"""
+    if img is None or box is None:
+        return None
+    vx, vy = _virtual_origin()
+    left, top, right, bottom = box
+    return _crop(img, (left - vx, top - vy, right - vx, bottom - vy))
+
+def _client_rect(hwnd):
+    """客户区屏幕矩形；窗口最小化/尺寸为 0 时返回 None。"""
+    if hwnd is None:
+        return None
+    try:
+        w, h = ClientSize(hwnd)
+        if min(w, h) <= 0:
+            return None
+        left, top = ClientOrigin(hwnd)
+        return (left, top, left + w, top + h)
+    except Exception:
+        return None
+
+def _client_grab_bg(hwnd):
+    """当前后台渲染帧（PrintWindow）。不受遮挡影响，用于变化判定的复核。
+
+    失败 / 全黑 / 最小化时返回 None——调用方据此退回屏幕读数，绝不能把 None 当
+    「没有变化」。
+    """
+    if hwnd is None:
+        return None
+    try:
+        w, h = ClientSize(hwnd)
+        if min(w, h) <= 0:
+            return None
+        image, ok = _grab_printwindow(hwnd, (w, h))
+        if not ok or _is_blank(image):
+            return None
+        return image
+    except Exception:
+        return None
+
+def IsMinimized(hwnd) -> bool:
+    """窗口是否最小化（最小化窗口的客户区尺寸是 0，截图前得先恢复）。"""
+    try:
+        return bool(ctypes.windll.user32.IsIconic(int(hwnd)))
+    except Exception:
+        return False
+
+def GrabWindowBest(hwnd_or_name):
+    """截图首选入口：**后台优先**（不激活、不抢焦点、不受遮挡），必要时回退前台。
+
+    为什么默认后台：前台截图（GrabWindow）截的是「目标客户区那块屏幕区域」，
+    它不知道屏幕上盖着谁——被遮挡时拿到的是遮挡窗口的画面，而且每次都要抢焦点
+    （本机实测 461ms vs 32ms）。PrintWindow 拿的是窗口自己的渲染结果，遮挡无关。
+
+    回退条件：PrintWindow 抛错、返回全黑帧（该窗口不支持后台截图）、或窗口最小化
+    （最小化时客户区尺寸为 0，先 SW_RESTORE；恢复后仍按后台截，尽量不抢焦点）。
+
+    img.info：`cu_mode` = 'background' | 'foreground'，`cu_restored` = 是否从最小化恢复。
+    """
+    hwnd = _resolve_hwnd(hwnd_or_name)
+    restored = False
+    if IsMinimized(hwnd):
+        ctypes.windll.user32.ShowWindow(hwnd, 9)   # SW_RESTORE
+        restored = True
+        time.sleep(0.2)                            # 等窗口真正画出内容
+    try:
+        image = GrabWindowBg(hwnd)
+        if _is_blank(image):
+            raise RuntimeError("background frame is blank")
+        image.info.update({"cu_mode": "background", "cu_restored": restored, "cu_fg_ok": True})
+        return image
+    except Exception:
+        image = GrabWindow(hwnd)
+        image.info.update({"cu_mode": "foreground", "cu_restored": restored})
+        return image
+
 def ScreenCapAt(x, y, r=100):
     """以物理坐标 (x, y) 为中心 ±r 的屏幕截图 → PIL Image。"""
     return _grab_screen((int(x - r), int(y - r), int(x + r), int(y + r)))
@@ -350,6 +505,12 @@ def _pixels_changed(im1, im2) -> bool:
 
 # 客户区变化判定阈值：见 Click docstring（本机连续两帧基噪 ~0.0001，取 10× 余量）。
 CLICK_CHANGE_RATIO = 0.001
+
+# 点击后的等待策略：旧实现固定 sleep 0.5s（每次点击都付），改为轮询——大多数重绘
+# 一两帧就能看到；真的没有视觉回馈的控件仍走满预算（结论不变，只是那一类慢一点）。
+CLICK_SETTLE_MS = 500
+CLICK_POLL_MS = 40
+CLICK_FIRST_DELAY_MS = 60
 
 def _diff_ratio(im1, im2) -> float:
     """0~1：两图逐像素（灰阶）不同像素占比。用来区分「真的重绘」与「截图噪声」。"""
@@ -449,9 +610,13 @@ def Click(x, y=None, check=True, double=False, hwnd=None, guard=True):
             "in_client": in_client,
         }
     if check:
-        before = _client_grab(hwnd) if hwnd is not None else None
+        # 一次全屏抓图，客户区与光标邻域都从这一张裁（旧实现为这两处各抓两次屏幕）。
+        before = _grab_screen()
         fg_before = win32gui.GetForegroundWindow()
-        roi_before = ScreenCapAt(x, y)
+        client_rect = _client_rect(hwnd) if hwnd is not None else None
+        client_before = _crop_screen(before, client_rect) if client_rect else None
+        roi_before = _crop_screen(before, (x - 100, y - 100, x + 100, y + 100))
+        bg_before = _client_grab_bg(hwnd) if hwnd is not None else None
     SetCursorPos((x, y))
     if double:
         MouseDClick()
@@ -460,24 +625,53 @@ def Click(x, y=None, check=True, double=False, hwnd=None, guard=True):
     if not check:
         # 不验证时保持旧行为：仍回一份点击后局部切图（部分历史脚本拿它存图）
         return ScreenCapAt(x, y)
-    time.sleep(0.5)
+    time.sleep(CLICK_FIRST_DELAY_MS / 1000)
 
     fg_after = win32gui.GetForegroundWindow()
     fg_title_after = safe_title(fg_after)
     hit_title = safe_title(hit) if hit else ""
     hit_ok = (hwnd is None) or (hit == hwnd)
-    client_changed = None
-    client_diff_ratio = None
-    roi_changed = None
-    if before is not None:
-        after = _client_grab(hwnd)
-        if after is not None:
-            client_diff_ratio = round(_diff_ratio(before, after), 4)
-            client_changed = client_diff_ratio > CLICK_CHANGE_RATIO
+
+    # 变化探测：先轮询屏幕（便宜，常见情况首帧就有变化），没看到再用后台渲染帧复核。
+    # 屏幕读数会被遮挡影响（实测同一次重绘：被遮住时只测出 1.3%，后台帧 81%），
+    # 所以「无变化」这个结论必须由后台帧确认，否则会把「已生效」误报成「没反应」。
+    screen_ratio = None
+    after = None
+    deadline = time.monotonic() + CLICK_SETTLE_MS / 1000
+    while True:
+        after = _grab_screen()
+        if client_before is not None:
+            after_client = _crop_screen(after, _client_rect(hwnd))
+            if after_client is not None and after_client.size == client_before.size:
+                screen_ratio = _diff_ratio(client_before, after_client)
+                if screen_ratio > CLICK_CHANGE_RATIO:
+                    break
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(CLICK_POLL_MS / 1000)
+
+    roi_after = _crop_screen(after, (x - 100, y - 100, x + 100, y + 100)) if after is not None else None
     try:
-        roi_changed = _pixels_changed(roi_before, ScreenCapAt(x, y))
+        roi_changed = _pixels_changed(roi_before, roi_after) if roi_before is not None and roi_after is not None else None
     except Exception:
         roi_changed = None
+
+    client_changed = None
+    client_diff_ratio = None
+    change_source = None
+    if client_before is not None:
+        if screen_ratio is not None and screen_ratio > CLICK_CHANGE_RATIO:
+            client_changed, client_diff_ratio, change_source = True, screen_ratio, "screen"
+        else:
+            bg_after = _client_grab_bg(hwnd)
+            bg_ratio = None
+            if bg_before is not None and bg_after is not None and bg_after.size == bg_before.size:
+                bg_ratio = _diff_ratio(bg_before, bg_after)
+            if bg_ratio is not None and bg_ratio > CLICK_CHANGE_RATIO:
+                client_changed, client_diff_ratio, change_source = True, bg_ratio, "printwindow"
+            else:
+                client_changed = False
+                client_diff_ratio = screen_ratio
     fg_ok = hwnd is None or fg_after == hwnd
 
     if not hit_ok:
@@ -502,14 +696,18 @@ def Click(x, y=None, check=True, double=False, hwnd=None, guard=True):
                   f"后续键盘输入会落到这个窗口，需要键盘时先 Activate 目标窗口。")
     elif client_changed is False and roi_changed is False:
         verdict = "warn_static"
-        advice = ("点击后像素无变化——这可能**正常**（静态区域/无视觉回馈的控件），"
-                  "也可能点歪。判断依据优先看回执里的命中窗口与前台；需要确认效果就"
-                  "重新截图看界面状态（例如文本是否出现、选中态是否变化），或在目标"
-                  "控件上用 UIA/OCR 重新定位。**不要盲目重复点击。**")
+        advice = ("点击后屏幕与后台渲染对比都没有变化——这可能**正常**（静态区域/无视觉"
+                  "回馈的控件），也可能点歪。判断依据优先看回执里的命中窗口与前台；需要"
+                  "确认效果就重新截图看界面状态（例如文本是否出现、选中态是否变化），或在"
+                  "目标控件上用 UIA/OCR 重新定位。**不要盲目重复点击。**")
     elif client_changed is False:
         verdict = "changed"
         advice = ("光标局部有变化，但目标客户区整体无变化——若预期点完后界面应有变化，"
                   "建议截图确认；否则忽略。")
+    elif change_source == "printwindow":
+        verdict = "changed"
+        advice = ("屏幕像素对比没有发现变化，但后台渲染帧确认界面已经改变（目标窗口可能被"
+                  "遮挡或没有重绘到屏幕上）——看起来生效了；关键动作仍建议重新截图确认。")
     else:
         verdict = "changed"
         advice = "点击落到了目标窗口且界面有重绘，看起来生效了；关键动作仍建议截图确认。"
@@ -525,7 +723,8 @@ def Click(x, y=None, check=True, double=False, hwnd=None, guard=True):
         "hit_ok": bool(hit_ok),
         "in_client": in_client,
         "client_changed": client_changed,
-        "client_diff_ratio": client_diff_ratio,
+        "client_diff_ratio": round(client_diff_ratio, 4) if client_diff_ratio is not None else None,
+        "client_change_source": change_source,
         "roi_changed": roi_changed,
         "fg_before": int(fg_before) if fg_before else 0,
         "fg_after": int(fg_after),
@@ -550,12 +749,31 @@ click = Click
 VK_CODE = {'backspace': 0x08, 'tab': 0x09, 'clear': 0x0C, 'enter': 0x0D, 'shift': 0x10, 'ctrl': 0x11, 'alt': 0x12, 'pause': 0x13, 'caps_lock': 0x14, 'esc': 0x1B, 'escape': 0x1B, 'space': 0x20, 'page_up': 0x21, 'page_down': 0x22, 'end': 0x23, 'home': 0x24, 'left_arrow': 0x25, 'up_arrow': 0x26, 'right_arrow': 0x27, 'down_arrow': 0x28, 'select': 0x29, 'print': 0x2A, 'execute': 0x2B, 'print_screen': 0x2C, 'ins': 0x2D, 'del': 0x2E, 'help': 0x2F, '0': 0x30, '1': 0x31, '2': 0x32, '3': 0x33, '4': 0x34, '5': 0x35, '6': 0x36, '7': 0x37, '8': 0x38, '9': 0x39, 'a': 0x41, 'b': 0x42, 'c': 0x43, 'd': 0x44, 'e': 0x45, 'f': 0x46, 'g': 0x47, 'h': 0x48, 'i': 0x49, 'j': 0x4A, 'k': 0x4B, 'l': 0x4C, 'm': 0x4D, 'n': 0x4E, 'o': 0x4F, 'p': 0x50, 'q': 0x51, 'r': 0x52, 's': 0x53, 't': 0x54, 'u': 0x55, 'v': 0x56, 'w': 0x57, 'x': 0x58, 'y': 0x59, 'z': 0x5A, 'numpad_0': 0x60, 'numpad_1': 0x61, 'numpad_2': 0x62, 'numpad_3': 0x63, 'numpad_4': 0x64, 'numpad_5': 0x65, 'numpad_6': 0x66, 'numpad_7': 0x67, 'numpad_8': 0x68, 'numpad_9': 0x69, 'multiply_key': 0x6A, 'add_key': 0x6B, 'separator_key': 0x6C, 'subtract_key': 0x6D, 'decimal_key': 0x6E, 'divide_key': 0x6F, 'F1': 0x70, 'F2': 0x71, 'F3': 0x72, 'F4': 0x73, 'F5': 0x74, 'F6': 0x75, 'F7': 0x76, 'F8': 0x77, 'F9': 0x78, 'F10': 0x79, 'F11': 0x7A, 'F12': 0x7B, 'num_lock': 0x90, 'scroll_lock': 0x91, 'left_shift': 0xA0, 'right_shift': 0xA1, 'left_control': 0xA2, 'right_control': 0xA3, 'left_menu': 0xA4, 'right_menu': 0xA5, 'browser_back': 0xA6, 'browser_forward': 0xA7, 'browser_refresh': 0xA8, 'browser_stop': 0xA9, 'browser_search': 0xAA, 'browser_favorites': 0xAB, 'browser_start_and_home': 0xAC, 'volume_mute': 0xAD, 'volume_down': 0xAE, 'volume_up': 0xAF, 'next_track': 0xB0, 'previous_track': 0xB1, 'stop_media': 0xB2, 'play/pause_media': 0xB3, 'start_mail': 0xB4, 'select_media': 0xB5, 'start_application_1': 0xB6, 'start_application_2': 0xB7, '+': 0xBB, ',': 0xBC, '-': 0xBD, '.': 0xBE, '/': 0xBF, '`': 0xC0, ';': 0xBA, '[': 0xDB, '\\': 0xDC, ']': 0xDD, "'": 0xDE}
 VK_CODE = {k.lower(): v for k, v in VK_CODE.items()}
 
+# 常见别名：模型会说 'win+r' / 'cmd+c' / 'return' / 'delete'，而 VK 表里只有
+# 'left_menu' / 'enter' / 'del' 这类 Win32 叫法。不给别名的话模型只能拿到
+# `KeyError: 'win'`，既没提示也不知道该改成什么。
+VK_ALIASES = {
+    "win": 0x5B, "windows": 0x5B, "meta": 0x5B, "cmd": 0x5B, "command": 0x5B,
+    "return": 0x0D, "delete": 0x2E, "pageup": 0x21, "pagedown": 0x22,
+    "arrowleft": 0x25, "arrowup": 0x26, "arrowright": 0x27, "arrowdown": 0x28,
+    "control": 0x11, "option": 0x12,
+}
+VK_CODE.update(VK_ALIASES)
+
 def Press(cmd, staytime=0):
     """组合键，如 Press('ctrl+v') / Press('enter') / Press(['ctrl', 'shift', 't'])。"""
     if type(cmd) is list:
         cmds = [str(x).lower() for x in cmd]
     else:
         cmds = cmd.lower().split('+')
+    unknown = [z for z in cmds if z not in VK_CODE]
+    if unknown:
+        raise RuntimeError(
+            "unknown key name: %s（可用：字母/数字、enter、esc、tab、space、backspace、"
+            "delete、方向键 up_arrow/down_arrow/left_arrow/right_arrow、home、end、"
+            "page_up、page_down、F1–F12、ctrl、shift、alt、win；组合键写法如 'ctrl+shift+t'）"
+            % ", ".join(repr(z) for z in unknown)
+        )
     for z in cmds:
         win32api.keybd_event(VK_CODE[z], 0, 0, 0)
         time.sleep(staytime)
@@ -594,6 +812,21 @@ def GetClipboardText():
         return win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT) or ""
     finally:
         win32clipboard.CloseClipboard()
+
+def TryGetClipboardText(default=None):
+    """读剪贴板文本；**剪贴板里是图片/文件等非文本时返回 default，不抛异常**。
+
+    为什么需要它：用户刚截过图或复制过图片时剪贴板里没有 CF_UNICODETEXT，
+    `GetClipboardData` 会直接抛 `TypeError: Specified clipboard format is not available`。
+    `type_text` 的“先备份剪贴板”步骤在这种情况下会把整个输入操作弄失败——
+    备份是增强，不该当先决条件。
+    """
+    try:
+        if not win32clipboard.IsClipboardFormatAvailable(win32con.CF_UNICODETEXT):
+            return default
+        return GetClipboardText()
+    except Exception:
+        return default
 
 def type_text(text):
     """向当前前台焦点输入文本：剪贴板 + ctrl+v（先点击目标输入框）。

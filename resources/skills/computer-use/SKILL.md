@@ -70,12 +70,16 @@ import ljqCtrl
 | `ljqCtrl.RootWindow(hwnd)` / `WindowAt(x, y)` | 顶层窗口句柄 / 屏幕点上真正躺着的顶层窗口（命中校验用） |
 | `ljqCtrl.Foreground()` | 当前前台窗口 `{hwnd,title,class}` |
 | `ljqCtrl.Activate(hwnd, verify=True)` | 切前台（自动恢复最小化）；**switch 失败会打印 `[Activate] ⚠️` 警告**——注意 Windows 会拒绝后台进程的前台请求 |
+| `ljqCtrl.ForegroundGuard(hwnd, action)` | 切前台并核对，**切不到就返回拒绝报告**（`verdict='refused_foreground'`）——键盘类操作前必须过它 |
 | `ljqCtrl.ClientRectScreen(hwnd)` | 客户区屏幕物理矩形 `(l,t,r,b)`，**坐标换算唯一基准** |
+| `ljqCtrl.GrabWindowBest(hwnd)` | **截图首选**：后台优先（不激活、不受遮挡；最小化先恢复，失败回退前台），`img.info['cu_mode']` 报实际路径 |
 | `ljqCtrl.GrabWindow(hwnd)` | 前台客户区截图（自动 Activate）→ PIL Image；**`img.info['cu_fg_ok']` 报告截图时前台是否就是目标窗口**，False 说明这张图可能不是目标窗口的画面 |
 | `ljqCtrl.GrabWindowBg(hwnd)` | 后台截图（PrintWindow，不激活不打扰）→ PIL Image。**DWM 合成窗口（Chromium/Electron/浏览器/UWP）同样能截**（内部用 `PW_CLIENTONLY\|PW_RENDERFULLCONTENT`）；真的全黑才是该窗口不支持 |
 | `ljqCtrl.Click(x, y, hwnd=…)` | 物理坐标点击 → **报告 dict**，看 `verdict` / `advice`（详见第 5 节的验证口径）；**`hwnd=` 必传**：传了才会做「命中窗口」校验与点击前守卫 |
-| `ljqCtrl.Press('ctrl+v')` | 组合键（键名见文件内 VK_CODE 表） |
+| `ljqCtrl.Press('ctrl+v')` | 组合键（键名见文件内 VK_CODE 表；`win`/`cmd`/`return`/`delete` 有别名） |
 | `ljqCtrl.type_text(text)` | 剪贴板+ctrl+v 输入文本（先点击目标输入框） |
+| `ljqCtrl.TryGetClipboardText()` | 读剪贴板文本，**剪贴板是图片/文件时返回 None 而不抛异常**（备份剪贴板一律用它） |
+| `ljqCtrl.IsMinimized(hwnd)` | 窗口是否最小化（最小化窗口客户区尺寸为 0，截图前要恢复） |
 | `ljqCtrl.ScreenCapAt(x, y)` | 物理坐标周边 ±100px 截图（验证点击效果用） |
 
 ## 3. UIA 控件树（uia.py，原生应用首选探测路线）
@@ -121,12 +125,15 @@ CLI：`python ui_detect.py shot.png --json`。**附送 OCR 不要单独再跑**�
 
 ## 5. 标准工作流（每一步都要验证）
 
-1. **探测**：`ListWindows()`（或内置 `computer_windows`）找目标窗口（按 title 子串/class 匹配），核对 hwnd。
-2. **看屏**：`GrabWindow(hwnd)` 截图存 `<工作区>/.pidesktop/cu-shot.png`（固定名覆盖）。
-   **先看前台校验**：`img.info['cu_fg_ok']` 为 False 就说明截到的可能是**别的窗口的画面**，
-   别拿它算坐标（先 Activate 重试）。
+1. **探测**：`ListWindows()`（或内置 `computer_windows`）找目标窗口（按 title 子串/class 匹配），核对 hwnd 与是否最小化。
+2. **看屏**：`GrabWindowBest(hwnd)` 截图存 `<工作区>/.pidesktop/cu-shot.png`（固定名覆盖）。
+   它**默认走后台渲染**（不抢焦点、不受遮挡），窗口最小化会先恢复；`img.info['cu_mode']`
+   是 `background` 还是 `foreground`。前台截图（`GrabWindow`）要先看 `cu_fg_ok`：为 False
+   就说明截到的可能是**别的窗口的画面**，别拿它算坐标（先 Activate 重试）。
    然后看清内容：多模态对话模型直接用 read 工具读该图片；文本模型调用
    `recognize_images` 工具传 `files=[".pidesktop/cu-shot.png"]`。
+   **后台截图不切前台**：后续要键盘输入/按键时，内置工具要带 `window`（它会自己
+   激活并核对前台），脚本里先 `ForegroundGuard(hwnd)` 再用 `type_text`/`Press`。
 3. **算坐标**：截图内坐标 → 屏幕物理坐标 = `ClientRectScreen(hwnd)` 的 `(l,t)` + 截图内坐标。
    注意截图坐标系即物理像素。
 4. **操作**：`Activate(hwnd)` → `Click(x, y, hwnd=hwnd)`（或点击输入框后 `type_text`）。
@@ -134,12 +141,13 @@ CLI：`python ui_detect.py shot.png --json`。**附送 OCR 不要单独再跑**�
    （`verdict='refused_hit'`）——这是好事，说明坐标错了，重新截图算。
 5. **验证**（点击回执三件套，按强→弱读）：   - **命中**（强）：`hit_ok` / `hit_hwnd` / `hit_title`——被拒绝或命中别的窗口，先修坐标。
    - **前台**（强）：`fg_ok` / `fg_title_after`——False 说明焦点在别的窗口，需要键盘时先 Activate。
-   - **变化**（弱）：`client_changed` / `client_diff_ratio`、`roi_changed`。
-     **无变化不等于点歪**（静态区域、无视觉回馈的控件正常无变化）；反过来动画/视频会让
-     「有变化」恒真。要确认效果就重新截图看界面状态，**不要盲目重复点击**。
+   - **变化**（弱）：`client_changed` / `client_diff_ratio` / `client_change_source`、`roi_changed`。
+     结论先由屏幕轮询得出；屏幕上看不到变化时会用**后台渲染帧复核**（`client_change_source='printwindow'`
+     说明目标被遮挡但界面确实变了）。**无变化不等于点歪**（静态区域、无视觉回馈的控件正常无变化）；
+     反过来动画/视频会让「有变化」恒真。要确认效果就重新截图看界面状态，**不要盲目重复点击**。
 6. **发送类动作的验证口径**：点击「发送」/回车提交这类不可逆动作，**回执说「已点击」不算成功**——
    必须看到结果出现在目标位置（消息出现在列表里、弹窗关闭、新窗口出现），
-   或读回文本比对（`ctrl+a` → `ctrl+c` → `GetClipboardText()`）。
+   或读回文本比对（`ctrl+a` → `ctrl+c` → `TryGetClipboardText()`）。
    没有可观测结果就停下来问用户，不要反复重试。
 
 节奏纪律：新界面**先探测后操作**；一轮只做一个决策动作，读实际输出再决定下一步；
@@ -170,7 +178,10 @@ UIA 控件树（原生应用最稳、免坐标）→ 视觉检测 OCR/YOLO（有
    `[Activate] ⚠️`）；而 `GrabWindow` 是按「目标客户区那块屏幕区域」抓图的，
    前台不对时它会拿到**别的窗口的画面**而且不报错——所以它也在 `img.info['cu_fg_ok']` 里标出来。
 6. **输入文本前必须先点击输入框**（拿到焦点），否则 type_text 会粘到别处。
-   type_text 会覆盖用户剪贴板，需要保留就先 `GetClipboardText()` 备份、事后恢复。
+   type_text 会覆盖用户剪贴板，需要保留就先 `TryGetClipboardText()` 备份（剪贴板内容是图片/
+   文件时它返回 None，**不要用 `GetClipboardText()` 做备份**——那种情况它会直接抛异常），事后恢复。
+   **键盘操作要过 `ForegroundGuard`**：目标窗口切不到前台就**拒绝输入/按键**，否则文本会粘进
+   用户正在写的文档、`ctrl+w` 会关掉别人的标签页。内置工具已内置这道守卫。
 7. **严禁 import pyautogui**（污染 win32api 导致逻辑冲突）。临时脚本/截图固定文件名覆盖，用后不留堆积；
    不要再自己造临时 png（`ui_detect` 需要时自己管生自己删）。
 8. **不要控制 PiDesktop/ChatAnyTime 自身的窗口**（截图和操作会与当前会话自相干扰），
@@ -181,7 +192,7 @@ UIA 控件树（原生应用最稳、免坐标）→ 视觉检测 OCR/YOLO（有
     内部已放行同进程窗口，但优先用 UIA 的 Select/Value 模式（不用猜坐标）。
 11. **会话恢复类应用打开即带旧内容**：记事本/浏览器会自动恢复上次标签页，新开的
    窗口未必是空白的——输入前先核对窗口标题与实际内容，别把文本粘进用户的
-   未保存文档；验证输入效果用 Ctrl+A → Ctrl+C → GetClipboardText 读回比对。
+   未保存文档；验证输入效果用 Ctrl+A → Ctrl+C → TryGetClipboardText 读回比对。
 
 ## 7. 常见任务配方（少踩坑的固定序列）
 
@@ -191,7 +202,7 @@ UIA 控件树（原生应用最稳、免坐标）→ 视觉检测 OCR/YOLO（有
 
 1. `computer_screenshot` → 看清输入框位置；能走 UIA 就 `uia.SetTextEl(window, text)`（免坐标、不抢输入法）。
 2. 坐标路线：`computer_click` 点输入框（看回执命中/前台两项）→ `computer_type` 输入 →
-   **读回比对**（Ctrl+A/C 后 `GetClipboardText()`）→ `computer_press` 发送键（Enter / ctrl+enter）。
+   **读回比对**（Ctrl+A/C 后 `TryGetClipboardText()`）→ `computer_press` 发送键（Enter / ctrl+enter）。
 3. **发送后必须验证结果出现在目标位置**（消息气泡/列表项），不能只看「已发送按键」。
 
 **点击列表项/表格行**：先 OCR 或 UIA 拿该项的 bbox/rect（中心点即目标），再点；
@@ -217,15 +228,15 @@ import ljqCtrl
 
 hwnd = ljqCtrl.FindWindow("记事本")          # 1. 探测
 ljqCtrl.Activate(hwnd)                        # 2. 前台（失败会打 [Activate] ⚠️）
-img = ljqCtrl.GrabWindow(hwnd)                # 3. 看屏（存图后 read / recognize_images）
+img = ljqCtrl.GrabWindowBest(hwnd)            # 3. 看屏：后台优先，不抢焦点
 img.save(r"<工作区>/.pidesktop/cu-shot.png")
-assert img.info["cu_fg_ok"], f"前台不是目标窗口：{img.info['cu_fg_title']}"   # 图不可信就别用
+print(img.info["cu_mode"])                    # background / foreground
 print(json.dumps(ljqCtrl.ClientRectScreen(hwnd)))   # 4. 坐标基准（截图核对后填入 x, y）
 # report = ljqCtrl.Click(x, y, hwnd=hwnd)      # 5. 点击输入框：读 report['verdict']/['advice']
 #     → 命中不对/被拒绝就先重新截图，别急着重试
 # ljqCtrl.type_text("你好")                     # 6. 输入
 # ljqCtrl.Press('ctrl+a'); ljqCtrl.Press('ctrl+c')   # 7. 读回比对确认输入真的进去了
-# print(repr(ljqCtrl.GetClipboardText()))
+# print(repr(ljqCtrl.TryGetClipboardText()))
 ```
 
 ## 9. 来源与许可

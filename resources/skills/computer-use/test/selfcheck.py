@@ -41,6 +41,7 @@ RESULTS: list[dict] = []
 BG = "#202020"
 PANEL_IDLE = "#2d2d2d"
 PANEL_HIT = "#27ae60"
+COVER_COLOR = "#c02020"
 BUTTON_TEXT = "selfcheck-button"
 
 
@@ -70,9 +71,16 @@ class Harness:
         self.panel.place(x=30, y=240)
         tk.Label(root, text=self.ocr_text, bg=BG, fg="#e6e6e6").place(x=30, y=180)
         tk.Button(root, text="点我", width=10, height=2, command=self._on_click).place(x=30, y=30)
+        # 遮挡用窗口：默认隐藏，--bg 用例里用 Win32 抬到最上面（不通过 Tk 线程）
+        self.cover = tk.Toplevel(root)
+        self.cover.title("PI-CU-COVER")
+        self.cover.geometry("480x300+200+200")
+        self.cover.configure(bg=COVER_COLOR)
+        self.cover.withdraw()
         root.update()
         self.root = root
         self.hwnd = win32gui.FindWindow(None, "PI-CU-SELFCHECK")
+        self.cover_hwnd = win32gui.FindWindow(None, "PI-CU-COVER")
         return root
 
     def _on_click(self):
@@ -96,7 +104,7 @@ class Harness:
         # 收拾：从面板颜色判断按钮回调是否真的被触发过（Tk 在主线程里才更新界面）
         self.result["clicks"] = len(self.clicks)
         self.result["panel_hit"] = str(self.panel.cget("bg")).lower() == PANEL_HIT
-        for widget in self.root.winfo_children():
+        for widget in list(self.root.winfo_children()) + [self.cover]:
             try:
                 widget.destroy()
             except Exception:
@@ -199,7 +207,9 @@ def check_click() -> None:
         hwnd = h.hwnd
         ox, oy = ljqCtrl.ClientOrigin(hwnd)
         # 按钮：place(x=30, y=30)，约 100×45
+        t0 = time.monotonic()
         r_button = ljqCtrl.Click(ox + 30 + 45, oy + 30 + 22, hwnd=hwnd)
+        button_ms = (time.monotonic() - t0) * 1000
         # 静态区域：右下角空白
         r_static = ljqCtrl.Click(ox + 500, oy + 150, hwnd=hwnd)
         # 坐标点在别的窗口上（拿一个肯定不是本窗口的 hwnd 当"目标"）
@@ -207,7 +217,8 @@ def check_click() -> None:
         # 客户区外的点（标题栏上方）
         r_titlebar = ljqCtrl.Click(ox + 45, oy - 12, hwnd=hwnd, guard=False)
         return {
-            "button": {k: r_button[k] for k in ("verdict", "hit_ok", "client_changed", "client_diff_ratio", "roi_changed", "fg_ok")},
+            "button": {k: r_button[k] for k in ("verdict", "hit_ok", "client_changed", "client_diff_ratio", "client_change_source", "roi_changed", "fg_ok")},
+            "button_ms": round(button_ms),
             "static": {k: r_static[k] for k in ("verdict", "hit_ok", "client_changed", "client_diff_ratio")},
             "refused": {k: r_refused[k] for k in ("ok", "verdict", "hit_ok", "hit_title", "advice")},
             "titlebar": {k: r_titlebar[k] for k in ("verdict", "hit_ok", "in_client")}
@@ -219,7 +230,8 @@ def check_click() -> None:
         return
     b, s, f, t = r["button"], r["static"], r["refused"], r["titlebar"]
     check("click: 点真实按钮 → 命中目标窗口", b["hit_ok"] is True, json.dumps(b, ensure_ascii=False))
-    check("click: 点真实按钮 → 检测到界面变化（changed）", b["verdict"] == "changed" and b["client_changed"] is True, json.dumps(b, ensure_ascii=False))
+    check("click: 点真实按钮 → 检测到界面变化（changed）", b["verdict"] == "changed" and b["client_changed"] is True, json.dumps({**b, "click_ms": r["button_ms"]}, ensure_ascii=False))
+    check("click: 变化结论标明来源（screen / printwindow）", b.get("client_change_source") in ("screen", "printwindow"), json.dumps(b, ensure_ascii=False))
     check("click: 按钮回调真的被触发", r.get("panel_hit") is True and r.get("clicks", 0) >= 1, f"clicks={r.get('clicks')} panel_hit={r.get('panel_hit')}")
     check("click: 点静态区域 → warn_static（无变化≠点歪，不判失败）", s["verdict"] == "warn_static" and s["client_changed"] is False, json.dumps(s, ensure_ascii=False))
     check("click: 坐标上坐着别的窗口 → 拒绝点击（不落到别的窗口里）", f["verdict"] == "refused_hit" and f["ok"] is False, json.dumps(f, ensure_ascii=False))
@@ -249,6 +261,90 @@ def check_screenshot() -> None:
     check("screenshot: cu_fg_ok=True 且标题对得上", r["cu_fg_ok"] is True and r["cu_title"] == "PI-CU-SELFCHECK", json.dumps(r, ensure_ascii=False))
     ok_pixel = all(abs(a - b) <= 6 for a, b in zip(r["panel_pixel"], r["panel_expected"]))
     check("screenshot: 底部面板像素 == 自建窗口的面板颜色（证明拿到的是目标窗口）", ok_pixel, f"got {r['panel_pixel']} expect ~{r['panel_expected']}")
+
+
+def check_bg() -> None:
+    """后台优先截图：被遮挡时拿到的是**目标窗口**的内容，而不是遮挡物的；
+    最小化窗口会先恢复再截。这是「截图不再抢前台」的核心回归。"""
+    def plan(h):
+        hwnd = h.hwnd
+        ox, oy = ljqCtrl.ClientOrigin(hwnd)
+        point = (ox + 280, oy + 120)          # 背景区域（#202020）
+        normal = ljqCtrl.GrabWindowBest(hwnd)
+        # 用自建窗口盖住目标正中（Win32 调用，不经过 Tk 线程）
+        win32gui.SetWindowPos(h.cover_hwnd, -1, 200, 200, 480, 300, 0)   # HWND_TOPMOST
+        win32gui.ShowWindow(h.cover_hwnd, 5)                              # SW_SHOW
+        time.sleep(0.4)
+        hit_cover = ljqCtrl.WindowAt(*point) == h.cover_hwnd
+        covered = ljqCtrl.GrabWindowBest(hwnd)
+        covered_px = covered.convert("RGB").getpixel((280, 120))
+        screen_px = ljqCtrl.ScreenCapAt(point[0], point[1], r=8).convert("RGB").getpixel((8, 8))
+        win32gui.ShowWindow(h.cover_hwnd, 0)                               # SW_HIDE
+        # 最小化：后台截图前必须先恢复（最小化窗口客户区是 0×0）
+        win32gui.ShowWindow(hwnd, 6)                                      # SW_MINIMIZE
+        time.sleep(0.4)
+        minimized = ljqCtrl.IsMinimized(hwnd)
+        restored = ljqCtrl.GrabWindowBest(hwnd)
+        return {
+            "normal_mode": normal.info.get("cu_mode"),
+            "normal_size": list(normal.size),
+            "client_size": list(ljqCtrl.ClientSize(hwnd)),
+            "hit_cover": hit_cover,
+            "covered_mode": covered.info.get("cu_mode"),
+            "covered_px": list(covered_px),
+            "screen_px": list(screen_px),
+            "cover_rgb": [192, 32, 32],
+            "minimized_was_true": minimized,
+            "restored_mode": restored.info.get("cu_mode"),
+            "restored_flag": bool(restored.info.get("cu_restored")),
+            "restored_size": list(restored.size),
+            "still_minimized": ljqCtrl.IsMinimized(hwnd),
+        }
+
+    r = with_harness(plan)
+    if r.get("error"):
+        check("bg: 自检流程异常", False, r["error"])
+        return
+    check("bg: GrabWindowBest 默认走后台渲染（不抢前台）", r["normal_mode"] == "background" and r["normal_size"] == r["client_size"], json.dumps(r, ensure_ascii=False))
+    check("bg: 遮挡窗口真的盖在目标上（对照）", r["hit_cover"] is True, json.dumps(r, ensure_ascii=False))
+    check("bg: 被遮挡时截到的仍是目标窗口的内容（不是遮挡物）", r["covered_mode"] == "background" and r["covered_px"] != r["cover_rgb"], f"bg={r['covered_px']} cover={r['cover_rgb']}")
+    check("bg: 同一时刻屏幕读数拿到的是遮挡物（证明后台截图的价值）", r["screen_px"] == r["cover_rgb"], f"screen={r['screen_px']} cover={r['cover_rgb']}")
+    check("bg: 最小化窗口先恢复再截（尺寸正确、不再最小化）", r["minimized_was_true"] and r["restored_flag"] and r["restored_mode"] == "background" and r["restored_size"] == r["client_size"] and not r["still_minimized"], json.dumps({k: r[k] for k in ("minimized_was_true", "restored_mode", "restored_flag", "restored_size", "still_minimized")}, ensure_ascii=False))
+
+
+def check_guard() -> None:
+    """前台守卫：切不到前台必须**返回拒绝报告**（不抛异常、不再往下注入键盘）。
+
+    拒绝场景依赖前台锁，无法在自建窗口上稳定复现（实测隐藏窗口也能被切成前台），
+    所以这里替换 Activate/Foreground 模拟「切不过去」，只验报告形状与分支。
+    """
+    def plan(h):
+        real_activate, real_foreground = ljqCtrl.Activate, ljqCtrl.Foreground
+        try:
+            ljqCtrl.Activate = lambda _hwnd, verify=True: False
+            ljqCtrl.Foreground = lambda: {"hwnd": 999999, "title": "别的窗口", "class": "Other"}
+            refused = ljqCtrl.ForegroundGuard(h.hwnd, "输入")
+        finally:
+            ljqCtrl.Activate, ljqCtrl.Foreground = real_activate, real_foreground
+        ok_guard = ljqCtrl.ForegroundGuard(h.hwnd, "输入")
+        return {
+            "refused": None if refused is None else {
+                "ok": refused.get("ok"), "verdict": refused.get("verdict"),
+                "has_error": bool(refused.get("error")), "fg_title": refused.get("fg_title"),
+            },
+            "ok_guard": ok_guard,
+            "clipboard_text_ok": isinstance(ljqCtrl.TryGetClipboardText(""), str),
+        }
+
+    r = with_harness(plan)
+    if r.get("error"):
+        check("guard: 自检流程异常", False, r["error"])
+        return
+    refused = r.get("refused") or {}
+    check("guard: 切不到前台 → 返回 refused_foreground 且带 error/advice", refused.get("verdict") == "refused_foreground" and refused.get("ok") is False and refused.get("has_error") is True, json.dumps(refused, ensure_ascii=False))
+    check("guard: 拒绝报告带上实际前台窗口", refused.get("fg_title") == "别的窗口", json.dumps(refused, ensure_ascii=False))
+    check("guard: 切到前台时返回 None（放行）", r.get("ok_guard") is None, repr(r.get("ok_guard")))
+    check("guard: TryGetClipboardText 读取不抛异常", r.get("clipboard_text_ok") is True, "")
 
 
 def check_ocr() -> None:
@@ -307,7 +403,9 @@ def check_uia() -> None:
 
 CHECKS = {
     "printwindow": check_printwindow,
+    "bg": check_bg,
     "click": check_click,
+    "guard": check_guard,
     "screenshot": check_screenshot,
     "ocr": check_ocr,
     "uia": check_uia,
