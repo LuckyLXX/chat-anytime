@@ -8,6 +8,7 @@ import {
   THEME_PRESET_IDS
 } from "../shared/protocol.js";
 import { normalizeThinkingLevelMap } from "../shared/thinking-levels.js";
+import { normalizeShortcuts } from "../shared/shortcuts.js";
 import { normalizeArchivedSessionPaths, normalizePinnedSessionPaths } from "./session-scope.js";
 import type {
   AccessMode,
@@ -484,6 +485,7 @@ export function forgetAgentWorkspace(map: Record<string, string> | undefined, ag
 export function defaultSettings(): DesktopSettings {
   return {
     version: 2,
+    shortcuts: undefined,
     thinkingLevel: "medium",
     accessMode: "ask",
     providers: [],
@@ -559,6 +561,7 @@ export function migrateSettings(raw: unknown): { settings: DesktopSettings; lega
     providers,
     agents: normalizedAgents,
     currentAgentId,
+    shortcuts: normalizeShortcuts(source.shortcuts),
     appearance: { theme, themePreset, customCss, ...(Object.keys(customCssAssets).length > 0 ? { customCssAssets } : {}), customThemes, ...(wallpaperOpacity ? { wallpaperOpacity } : {}), ...(tune ? { tune } : {}), motion: appearanceSource.motion !== false, showThinking: appearanceSource.showThinking !== false, showGalleryWall: appearanceSource.showGalleryWall !== false },
     vision: normalizeVision(source.vision),
     memory: normalizeMemory(source.memory),

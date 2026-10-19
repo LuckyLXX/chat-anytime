@@ -78,6 +78,9 @@ import { GalleryDataDialog, GalleryPublishDialog, GalleryWallDialog } from "./co
 import { DiffView } from "./components/DiffView";
 import { BrandMark } from "./components/BrandMark";
 import { SessionSearchResults } from "./components/SessionSearchResults";
+import { CommandPalette } from "./components/CommandPalette";
+import type { PaletteAction } from "./lib/command-palette";
+import { THINKING_LEVELS } from "../../shared/thinking-levels";
 import { clampPreviewSplit, PREVIEW_SPLIT_MAX, PREVIEW_SPLIT_MIN, previewSplitFromKey } from "./lib/preview-split";
 import { groupSessionsByWorkspace, workspaceKey } from "./lib/session-groups";
 import { archivedSessionCount, selectSessionPaths, selectedPathsInView, sessionsForView, toggleSessionSelection, type SessionSelection, type SessionView } from "./lib/session-view";
@@ -108,7 +111,7 @@ import { AppearanceSettings } from "./AppearanceSettings";
 import { HooksSettings } from "./HooksSettings";
 import { selectableCatalogModels } from "./lib/model-list";
 import { shouldRevealBrowserTab } from "./lib/browser-reveal";
-import { resourceScopeLabels, sessionRunStatusLabels, toolLabel } from "../../shared/locale";
+import { resourceScopeLabels, sessionRunStatusLabels, thinkingLevelLabels, toolLabel } from "../../shared/locale";
 import { SubagentSettings } from "./SubagentSettings";
 import { UsageSettings } from "./UsageSettings";
 import { AutomationSettings } from "./AutomationSettings";
@@ -226,11 +229,13 @@ function PreviewDivider({ split, dragging, onStart, onMove, onEnd, onCancel, onK
     />
   );
 }
-function SettingsDialog({ settings, models, providers, resources, workspaceOpen, initialTab, jevKeyConfigured, onClose, onCreateInSession }: { settings: import("../../shared/protocol").DesktopSettings; jevKeyConfigured: boolean; models: ModelOption[]; providers: ProviderOption[]; resources: ResourceCatalog; workspaceOpen: boolean; initialTab?: string; onClose(): void; onCreateInSession(): void }): ReactNode {
-  const [tab, setTab] = useState<"general" | "models" | "agents" | "subagents" | "appearance" | "resources" | "hooks" | "usage" | "automation">(initialTab === "automation" ? "automation" : "general");
-  // toast 直达/侧栏入口：设置页已打开（初始 tab 已固定）时也能切到「自动化」tab。
+type SettingsTab = "general" | "models" | "agents" | "subagents" | "appearance" | "resources" | "hooks" | "usage" | "automation";
+
+function SettingsDialog({ settings, models, providers, resources, workspaceOpen, initialTab, jevKeyConfigured, onClose, onCreateInSession }: { settings: import("../../shared/protocol").DesktopSettings; jevKeyConfigured: boolean; models: ModelOption[]; providers: ProviderOption[]; resources: ResourceCatalog; workspaceOpen: boolean; initialTab?: SettingsTab; onClose(): void; onCreateInSession(): void }): ReactNode {
+  const [tab, setTab] = useState<SettingsTab>(initialTab ?? "general");
+  // 命令面板/侧栏入口：设置页已打开（初始 tab 已固定）时也能切到指定 tab。
   useEffect(() => {
-    if (initialTab === "automation") setTab("automation");
+    if (initialTab) setTab(initialTab);
   }, [initialTab]);
   const initialSettingsRef = useRef<import("../../shared/protocol").DesktopSettings>(structuredClone(settings));
   const [agentList, setAgentList] = useState<AgentProfile[]>(settings.agents);
@@ -339,6 +344,10 @@ export function App(): ReactNode {
   // snapshot 字段级订阅。sessions/recentWorkspaces 在 store 合并层做了身份保留
   // （内容不变则复用旧引用），流式帧不会触发这些选择器。
   const activeSessionId = useDesktopStore((state) => state.snapshot.sessionId);
+  const activeModel = useDesktopStore((state) => state.snapshot.model);
+  const activeThinking = useDesktopStore((state) => state.snapshot.thinkingLevel);
+  const planMode = useDesktopStore((state) => state.snapshot.planMode === true);
+  const paletteOpenTick = useDesktopStore((state) => state.paletteOpenTick);
   const activeWorkspace = useDesktopStore((state) => state.snapshot.workspace);
   const sessionSummaries = useDesktopStore((state) => state.snapshot.sessions);
   const sessionSearch = useDesktopStore((state) => state.sessionSearch);
@@ -394,6 +403,7 @@ export function App(): ReactNode {
   }, [openRollbackConfirm]);
   const [sidebarTab, setSidebarTab] = useState<"agents" | "topics">("topics");
   const [sidebarQuery, setSidebarQuery] = useState("");
+  const [paletteOpen, setPaletteOpen] = useState(false);
   // 启动时所有工作区分组默认折叠（空表 = 无展开项）；用户展开后保持到退出。
   const [expandedWorkspaceGroups, setExpandedWorkspaceGroups] = useState<Record<string, boolean>>({});
   // 会话全文检索：标题过滤即时生效，内容检索防抖 300ms；不足 2 字不搜（单字命中噪声太大）。
@@ -423,9 +433,25 @@ export function App(): ReactNode {
   useEffect(() => {
     useDesktopStore.setState({ sessionSearch: { query: "", loading: false, hits: [] } });
   }, [activeAgentId]);
+
+  // 全局快捷键（主进程 push）与 Ctrl/Cmd+K：两者都只是「打开」信号。
+  useEffect(() => {
+    if (paletteOpenTick > 0) setPaletteOpen(true);
+  }, [paletteOpenTick]);
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent): void {
+      if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setPaletteOpen((open) => !open);
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settingsInitialTab, setSettingsInitialTab] = useState<"automation" | undefined>(undefined);
-  function openSettingsOn(tab: "automation"): void { setSettingsInitialTab(tab); setSettingsOpen(true); }
+  const [settingsInitialTab, setSettingsInitialTab] = useState<SettingsTab | undefined>(undefined);
+  function openSettingsOn(tab: SettingsTab): void { setSettingsInitialTab(tab); setSettingsOpen(true); }
   const [previewOpened, setPreviewOpened] = useState(false);
   const [preview, setPreview] = useState<PreviewState>();
   const [previewAddMenuOpen, setPreviewAddMenuOpen] = useState(false);
@@ -1871,6 +1897,137 @@ export function App(): ReactNode {
     </>
   );
 
+  // —— 命令面板动作 ——
+  // 在这里集中构造（闭包里拿得到 App 的全部状态与命令），而不是散在每个按钮上。
+  // 动作的 run 自己负责错误提示；面板只负责关闭与执行。
+  function saveAccessMode(mode: AccessMode): void {
+    const next = { ...settings, accessMode: mode };
+    useDesktopStore.setState({ settings: next });
+    void window.piDesktop.send({
+      type: "settings.save",
+      settings: { model: next.model, thinkingLevel: next.thinkingLevel, accessMode: next.accessMode, appearance: next.appearance, browser: next.browser, computer: next.computer, design: next.design, ssh: next.ssh, jev: next.jev, defaultWorkspace: next.defaultWorkspace, shortcuts: next.shortcuts }
+    }).catch((error: unknown) => {
+      useDesktopStore.setState({ settings });
+      setMessageActionError(error instanceof Error ? error.message : "访问模式切换失败");
+    });
+  }
+
+  function saveTheme(theme: "system" | "light" | "dark"): void {
+    const nextAppearance = { ...settings.appearance, theme };
+    useDesktopStore.setState({ settings: { ...settings, appearance: nextAppearance } });
+    void window.piDesktop.send({ type: "appearance.save", appearance: nextAppearance }).catch((error: unknown) => {
+      useDesktopStore.setState({ settings });
+      setMessageActionError(error instanceof Error ? error.message : "主题切换失败");
+    });
+  }
+
+  const paletteTargetSession = focusedPaneId ?? activeSessionId;
+  const runPaletteCommand = (command: RuntimeCommand): void => {
+    void window.piDesktop.send(command).catch((error: unknown) => setMessageActionError(error instanceof Error ? error.message : "操作失败"));
+  };
+  const paletteActions: PaletteAction[] = [];
+
+  paletteActions.push(
+    { id: "session.new", title: "新建话题", group: "会话", keywords: "new chat session", hint: activeWorkspace ? compactPath(activeWorkspace) : "先打开工作区", disabled: !activeWorkspace, run: () => { void createNewSession(); } },
+    { id: "session.search", title: "搜索会话内容", group: "会话", keywords: "search find message 全文", run: () => { setSidebarCollapsed(false); setSidebarView("topics"); setSidebarTab("topics"); setSidebarFlyoutOpen(true); window.setTimeout(() => sidebarSearchRef.current?.focus(), 30); } },
+    { id: "workspace.open", title: "打开工作区…", group: "会话", keywords: "open folder workspace", run: () => { void openWorkspace(); } },
+    { id: "view.files", title: "浏览当前工作区文件", group: "视图", keywords: "files tree 文件树", hint: activeWorkspace ? compactPath(activeWorkspace) : undefined, disabled: !activeWorkspace, run: () => { setSidebarCollapsed(false); setSidebarView("files"); setBrowsingWorkspace(activeWorkspace ?? ""); setTreeRefreshSignal(0); } },
+    { id: "view.gallery", title: "打开作品墙", group: "视图", keywords: "gallery 作品", run: () => setGalleryWallOpen(true) },
+    { id: "view.preview", title: previewOpened ? "关闭预览面板" : "打开预览面板", group: "视图", keywords: "preview 预览", run: () => setPreviewOpened(!previewOpened) },
+    { id: "view.ssh", title: "打开 SSH 远程终端", group: "视图", keywords: "ssh remote terminal", run: () => openSshPanel() },
+    { id: "view.sidebar", title: sidebarCollapsed ? "展开侧边栏" : "折叠侧边栏", group: "视图", keywords: "sidebar 侧栏", run: () => setSidebarCollapsed(!sidebarCollapsed) }
+  );
+
+  for (const model of selectableCatalogModels(models).filter((item) => item.configured && item.enabled !== false)) {
+    const current = activeModel?.provider === model.provider && activeModel.id === model.id;
+    paletteActions.push({
+      id: `model.${model.provider}.${model.id}`,
+      title: `切换模型：${model.name || model.id}`,
+      group: "模型",
+      keywords: `${model.provider} ${model.id} model`,
+      hint: current ? "当前" : model.provider,
+      disabled: !paletteTargetSession || current,
+      run: () => runPaletteCommand({ type: "model.select", provider: model.provider, id: model.id, sessionId: paletteTargetSession })
+    });
+  }
+
+  for (const level of THINKING_LEVELS) {
+    const current = activeThinking === level;
+    paletteActions.push({
+      id: `thinking.${level}`,
+      title: `思考等级：${thinkingLevelLabels[level]}`,
+      group: "思考",
+      keywords: `thinking ${level}`,
+      hint: current ? "当前" : undefined,
+      disabled: !paletteTargetSession || current,
+      run: () => runPaletteCommand({ type: "thinking.select", level, sessionId: paletteTargetSession })
+    });
+  }
+
+  const accessModes: { value: AccessMode; label: string; hint: string }[] = [
+    { value: "read-only", label: "只读", hint: "拒绝写入与命令" },
+    { value: "ask", label: "询问", hint: "每次风险操作确认" },
+    { value: "workspace", label: "工作区", hint: "工作区内自动放行" },
+    { value: "full", label: "完全", hint: "全部自动放行" }
+  ];
+  for (const mode of accessModes) {
+    const current = settings.accessMode === mode.value;
+    paletteActions.push({
+      id: `access.${mode.value}`,
+      title: `访问模式：${mode.label}`,
+      group: "权限",
+      keywords: `access permission ${mode.value}`,
+      hint: current ? "当前" : mode.hint,
+      disabled: current,
+      run: () => saveAccessMode(mode.value)
+    });
+  }
+
+  paletteActions.push(
+    { id: "mode.design", title: designMode ? "退出设计模式" : "进入设计模式", group: "模式", keywords: "design 设计 画布", disabled: !paletteTargetSession, run: () => runPaletteCommand({ type: "session.designMode", enabled: !designMode, sessionId: paletteTargetSession }) },
+    { id: "mode.computer", title: computerMode ? "关闭电脑控制" : "开启电脑控制", group: "模式", keywords: "computer 桌面 控制", disabled: !paletteTargetSession, run: () => runPaletteCommand({ type: "session.computerMode", enabled: !computerMode, sessionId: paletteTargetSession }) },
+    { id: "mode.plan", title: planMode ? "退出计划模式" : "进入计划模式", group: "模式", keywords: "plan 计划", disabled: !paletteTargetSession, run: () => runPaletteCommand({ type: "session.planMode", enabled: !planMode, sessionId: paletteTargetSession }) }
+  );
+
+  const themeOptions: { value: "system" | "light" | "dark"; label: string }[] = [
+    { value: "system", label: "跟随系统" },
+    { value: "light", label: "浅色" },
+    { value: "dark", label: "深色" }
+  ];
+  for (const option of themeOptions) {
+    const current = settings.appearance.theme === option.value;
+    paletteActions.push({
+      id: `theme.${option.value}`,
+      title: `主题：${option.label}`,
+      group: "主题",
+      keywords: `theme appearance ${option.value}`,
+      hint: current ? "当前" : undefined,
+      disabled: current,
+      run: () => saveTheme(option.value)
+    });
+  }
+
+  const settingsTabs: { tab: SettingsTab; label: string }[] = [
+    { tab: "general", label: "通用" },
+    { tab: "models", label: "模型服务" },
+    { tab: "agents", label: "Agent 角色" },
+    { tab: "subagents", label: "子智能体" },
+    { tab: "appearance", label: "外观" },
+    { tab: "resources", label: "技能与工具" },
+    { tab: "hooks", label: "钩子" },
+    { tab: "usage", label: "用量统计" },
+    { tab: "automation", label: "自动化任务" }
+  ];
+  for (const entry of settingsTabs) {
+    paletteActions.push({
+      id: `settings.${entry.tab}`,
+      title: `打开设置：${entry.label}`,
+      group: "设置",
+      keywords: `settings ${entry.tab}`,
+      run: () => openSettingsOn(entry.tab)
+    });
+  }
+
   if (!ready) return <div className="app-loading"><div className="brand-mark">CA</div><LoaderCircle className="spinning" size={22} /></div>;
 
   return (
@@ -2037,6 +2194,7 @@ export function App(): ReactNode {
           onClose={() => { setGalleryDraftOpen(false); setGalleryDraftInitial(undefined); }}
         />
       )}
+      <CommandPalette open={paletteOpen} actions={paletteActions} onClose={() => setPaletteOpen(false)} />
       {contextMenu && <ContextMenu x={contextMenu.x} y={contextMenu.y} items={contextMenu.items} onClose={() => setContextMenu(null)} />}
       {renamePresence.rendered && (() => { const renameSession = renamePresence.value; if (!renameSession) return null; return (
         <ExitWrap exiting={renamePresence.exiting}>

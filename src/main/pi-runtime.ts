@@ -4982,6 +4982,8 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       settings.design = command.settings.design;
       settings.ssh = command.settings.ssh;
       settings.defaultWorkspace = command.settings.defaultWorkspace;
+      // 全局快捷键只有主进程消费；utility 镜像一份只为满足 settings.save 的三处镜像契约。
+      settings.shortcuts = command.settings.shortcuts;
       thinkingLevel = command.settings.thinkingLevel;
       accessMode = command.settings.accessMode;
       selectedModel = command.settings.model;

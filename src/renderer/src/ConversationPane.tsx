@@ -1873,7 +1873,7 @@ export const ConversationPane = memo(function ConversationPane({
     const nextSettings = { ...settings, accessMode: value };
     useDesktopStore.setState({ settings: nextSettings });
     try {
-      await window.piDesktop.send({ type: "settings.save", settings: { model: nextSettings.model, thinkingLevel: nextSettings.thinkingLevel, accessMode: value, appearance: nextSettings.appearance, browser: nextSettings.browser, computer: nextSettings.computer, design: nextSettings.design } });
+      await window.piDesktop.send({ type: "settings.save", settings: { model: nextSettings.model, thinkingLevel: nextSettings.thinkingLevel, accessMode: value, appearance: nextSettings.appearance, browser: nextSettings.browser, computer: nextSettings.computer, design: nextSettings.design, ssh: nextSettings.ssh, jev: nextSettings.jev, defaultWorkspace: nextSettings.defaultWorkspace, shortcuts: nextSettings.shortcuts } });
     } catch (error) {
       useDesktopStore.setState({ settings: previousSettings });
       onActionError(error instanceof Error ? error.message : "访问模式切换失败");

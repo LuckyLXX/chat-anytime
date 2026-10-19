@@ -3,6 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DesktopSettings, ModelOption, ProviderOption } from "../../shared/protocol";
+import { PALETTE_HOTKEY } from "../../shared/shortcuts";
 import { GeneralSettings } from "./GeneralSettings";
 import { useDesktopStore } from "./store";
 
@@ -145,8 +146,9 @@ describe("通用页结构契约", () => {
   it("四个能力总闸各是一行开关（图标 + 名称 + 可见说明），且缺省启用语义与运行时一致", () => {
     render();
     const rows = [...container.querySelectorAll(".general-switch-row")];
-    // 4 个能力总闸 + SSH 子开关（首连自动信任）+「展示思考过程」+「空态展示作品墙」共 7 行
-    expect(rows).toHaveLength(7);
+    // 4 个能力总闸 + SSH 子开关（首连自动信任）+「展示思考过程」+「空态展示作品墙」
+    // +「全局快捷键」共 8 行。
+    expect(rows).toHaveLength(8);
     const caps = rows.slice(0, 4).map((row) => ({
       control: row.querySelector("[data-control=\"capability-switch\"]")?.getAttribute("data-capability"),
       checked: (row.querySelector("input") as HTMLInputElement).checked,
@@ -287,9 +289,29 @@ describe("保存与取消", () => {
     const payload = handlers.sends.find((command) => command.type === "settings.save") as { settings: Record<string, unknown> } | undefined;
     expect(payload).toBeDefined();
     expect(Object.keys(payload!.settings).sort()).toEqual([
-      "accessMode", "appearance", "browser", "computer", "defaultWorkspace", "design", "jev", "model", "ssh", "thinkingLevel"
+      "accessMode", "appearance", "browser", "computer", "defaultWorkspace", "design", "jev", "model", "shortcuts", "ssh", "thinkingLevel"
     ]);
     expect(handlers.saved).toHaveLength(1);
+  });
+
+  it("全局快捷键开关写进 settings.shortcuts，并随「保存通用设置」提交", async () => {
+    const handlers = render();
+    const row = [...container.querySelectorAll(".general-switch-row")]
+      .find((item) => (item.textContent ?? "").includes("全局快捷键")) as HTMLElement;
+    expect(row, "「界面」卡里找不到全局快捷键开关行").toBeDefined();
+    const input = row.querySelector("input") as HTMLInputElement;
+    expect(input.checked).toBe(false);
+    expect(row.querySelector("small")?.textContent).toContain("Ctrl+Shift+Space");
+
+    await act(async () => { input.click(); });
+    expect(useDesktopStore.getState().settings.shortcuts).toEqual({ paletteHotkey: PALETTE_HOTKEY });
+
+    await act(async () => {
+      (container.querySelector(".general-settings-footer button[type=\"submit\"]") as HTMLButtonElement).click();
+      await Promise.resolve();
+    });
+    const payload = handlers.sends.find((command) => command.type === "settings.save") as { settings: { shortcuts?: { paletteHotkey?: string } } } | undefined;
+    expect(payload?.settings.shortcuts).toEqual({ paletteHotkey: PALETTE_HOTKEY });
   });
 
   it("取消回调 onCancel（父级负责回滚基线并关闭弹窗）", () => {

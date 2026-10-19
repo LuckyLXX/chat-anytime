@@ -1,8 +1,9 @@
-import { Bot, ChevronDown, Computer, FolderOpen, Globe, LayoutGrid, Palette, RotateCcw, ShieldCheck, Terminal } from "lucide-react";
+import { Bot, ChevronDown, Computer, FolderOpen, Globe, Keyboard, LayoutGrid, Palette, RotateCcw, ShieldCheck, Terminal } from "lucide-react";
 import { useState, type FormEvent, type ReactNode } from "react";
 import type { AccessMode, DesktopSettings, JevSettings, ModelOption, ProviderOption, ThinkingLevel } from "../../shared/protocol";
 import { THINKING_LEVELS } from "../../shared/thinking-levels";
 import { thinkingLevelLabels } from "../../shared/locale";
+import { PALETTE_HOTKEY, PALETTE_HOTKEY_LABEL } from "../../shared/shortcuts";
 import { ModelSelect } from "./components/ModelSelect";
 import { selectableCatalogModels } from "./lib/model-list";
 import { useDesktopStore } from "./store";
@@ -239,7 +240,7 @@ export function GeneralSettings({ settings, models, providers, jevKeyConfigured,
   function onSubmit(event: FormEvent): void {
     event.preventDefault();
     const nextSettings = structuredClone(settings);
-    void window.piDesktop.send({ type: "settings.save", settings: { model: nextSettings.model, thinkingLevel: nextSettings.thinkingLevel, accessMode: nextSettings.accessMode, appearance: nextSettings.appearance, browser: nextSettings.browser, computer: nextSettings.computer, design: nextSettings.design, ssh: nextSettings.ssh, jev: nextSettings.jev, defaultWorkspace: nextSettings.defaultWorkspace } });
+    void window.piDesktop.send({ type: "settings.save", settings: { model: nextSettings.model, thinkingLevel: nextSettings.thinkingLevel, accessMode: nextSettings.accessMode, appearance: nextSettings.appearance, browser: nextSettings.browser, computer: nextSettings.computer, design: nextSettings.design, ssh: nextSettings.ssh, jev: nextSettings.jev, defaultWorkspace: nextSettings.defaultWorkspace, shortcuts: nextSettings.shortcuts } });
     // 通知父级「已保存」：父级负责 markSettingsSaved（刷新取消回滚基线）并关闭弹窗。
     onSaved(nextSettings);
   }
@@ -375,6 +376,17 @@ export function GeneralSettings({ settings, models, providers, jevKeyConfigured,
               <span className="general-switch-copy"><strong>空态展示作品墙</strong><small>新话题的空白首页里显示作品墙；关掉退回「今天想开发什么？」，顶栏「作品」下拉入口不变</small></span>
               {/* 缺省 = 展示（与运行时 showGalleryWallLanding 同一口径）：老配置里没这个字段，开关必须显示为开。 */}
               <input type="checkbox" className="general-switch" checked={settings.appearance.showGalleryWall !== false} onChange={(event) => patchSettings({ appearance: { ...settings.appearance, showGalleryWall: event.target.checked } })} />
+            </label>
+            <label className="general-switch-row">
+              <span className="general-switch-icon"><Keyboard size={13} /></span>
+              <span className="general-switch-copy"><strong>全局快捷键</strong><small>在任意应用里按 {PALETTE_HOTKEY_LABEL} 呼出命令面板；被其他软件占用时会在保存后提示，关掉即注销</small></span>
+              {/* 固定加速键 + 开关：白名单之外的值一律无效（见 shared/shortcuts.ts）。 */}
+              <input
+                type="checkbox"
+                className="general-switch"
+                checked={settings.shortcuts?.paletteHotkey === PALETTE_HOTKEY}
+                onChange={(event) => patchSettings({ shortcuts: event.target.checked ? { paletteHotkey: PALETTE_HOTKEY } : undefined })}
+              />
             </label>
           </div>
         </section>

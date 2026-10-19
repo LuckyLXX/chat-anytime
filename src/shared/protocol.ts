@@ -327,6 +327,8 @@ export interface HooksSettings {
 
 export interface DesktopSettings {
   version: 2;
+  /** 全局快捷键（v1 只有命令面板的开关；见 shared/shortcuts.ts）。 */
+  shortcuts?: ShortcutsSettings;
   /** 已废弃（保留为迁移期一次性兜底）：旧版全局工作区。启动 initialize 时仅当前活跃助手消费一次（提升进 agentWorkspaces）后冻结，不再写入。 */
   workspace?: string;
   /** 每助手最后使用的工作区（agentId → resolve 后的绝对路径）。刻意不进 AgentProfile（agent.save 整对象覆盖会过期冲掉运行时字段）；与 pinnedSessionPaths 同级，设置页不渲染，渲染端类型零负担。 */
@@ -363,6 +365,11 @@ export interface DesktopSettings {
    * （由独立的 session.archive 命令读写）。
    */
   archivedSessionPaths?: string[];
+}
+
+export interface ShortcutsSettings {
+  /** 全局呼出命令面板的加速键；空/缺省 = 不注册。 */
+  paletteHotkey?: string;
 }
 
 /** checkpoint 回滚总开关，语义与 memory/hooks/browser 相同：缺省视为启用。 */
@@ -2151,7 +2158,7 @@ export type RuntimeCommand =
   | { type: "agent.select"; agentId: string }
   | { type: "agent.save"; agent: AgentProfile }
   | { type: "agent.archive"; agentId: string; archived: boolean }
-  | { type: "settings.save"; settings: Pick<DesktopSettings, "model" | "thinkingLevel" | "accessMode" | "appearance" | "browser" | "computer" | "design" | "ssh" | "jev" | "defaultWorkspace"> }
+  | { type: "settings.save"; settings: Pick<DesktopSettings, "model" | "thinkingLevel" | "accessMode" | "appearance" | "browser" | "computer" | "design" | "ssh" | "jev" | "defaultWorkspace" | "shortcuts"> }
   /**
    * 渲染端上报的界面主题快照（只在模式/壁纸/色板变化时发，JSON 去重）。主进程不
    * 读它、不落盘（`updateSettings` 的空 diff 分支直接返回），只透传给 utility 的
@@ -2279,6 +2286,10 @@ export type RuntimeMessage =
   | { type: "sessions.live"; sessions: PanelSessionLive[] }
   | { type: "resources"; resources: ResourceCatalog }
   | { type: "todos"; todos: Todo[] }
+  /** 全局快捷键呼出命令面板（主进程 push）；渲染端只负责把面板打开。 */
+  | { type: "palette.open" }
+  /** 全局快捷键注册失败（被占用/非法加速键），以 toast 告知用户。 */
+  | { type: "shortcut.error"; accelerator: string; message: string }
   /** 会话全文检索结果（当前实现一次扫完才推送；scanned/total 供 UI 展示扫描体量）。 */
   | { type: "session.search-result"; requestId: string; hits: SessionSearchHit[]; scanned: number; total: number; done: boolean; error?: string }
   | { type: "memory"; memory: MemoryTopicSummary[] }

@@ -129,7 +129,8 @@ describe("diffSettings", () => {
       providers: (settings) => ({ ...settings, providers: [...settings.providers, { id: "p1", name: "P", baseUrl: "https://example.com", models: [] }] }),
       agents: (settings) => ({ ...settings, agents: [...settings.agents, { ...settings.agents[0]!, id: "agent-2" }] }),
       currentAgentId: (settings) => ({ ...settings, currentAgentId: "agent-2" }),
-      appearance: (settings) => ({ ...settings, appearance: { ...settings.appearance, showThinking: false } })
+      appearance: (settings) => ({ ...settings, appearance: { ...settings.appearance, showThinking: false } }),
+      shortcuts: (settings) => ({ ...settings, shortcuts: { paletteHotkey: "CommandOrControl+Shift+Space" } })
     };
     // 新增一个顶层设置字段时这里会红（要求同步补 mutation），而不是等用户发现它不落盘。
     expect(Object.keys(base).sort()).toEqual(Object.keys(mutations).sort());

@@ -2,7 +2,7 @@ import { createReadStream, existsSync, mkdirSync, readFileSync, writeFileSync } 
 import { readFile, realpath, stat } from "node:fs/promises";
 import { extname, join, resolve } from "node:path";
 import { Readable } from "node:stream";
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, protocol, safeStorage, session, shell, utilityProcess, type UtilityProcess } from "electron";
+import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, Menu, Notification, protocol, safeStorage, session, shell, utilityProcess, type UtilityProcess } from "electron";
 import { spawn } from "node-pty";
 import appIconPath from "./assets/icon.ico?asset";
 import { resolveBundledSkillsDir, resolveBundledSubagentsDir } from "./bundled-skills.js";
@@ -403,7 +403,7 @@ function updateSettings(command: RuntimeCommand): void {
     // 镜像必须与 protocol 的 settings.save Pick 逐字段对齐：漏一个字段就是「保存后重启即丢」
     // （ssh 曾因这个 Pick 里有、这里没镜像而中招，2026-09）。jev 同时把用户填的密钥写进
     // credentials.json 的 safeStorage 通道（配置进 settings.json、密钥不进）。
-    case "settings.save": settings.model = command.settings.model; settings.thinkingLevel = command.settings.thinkingLevel; settings.accessMode = command.settings.accessMode; settings.appearance = mergeSavedAppearance(command.settings.appearance, settings.appearance); settings.browser = mergeBrowserSettings(command.settings.browser, settings.browser); settings.jev = normalizeJev(command.settings.jev); settings.computer = command.settings.computer; settings.design = command.settings.design; settings.ssh = command.settings.ssh; settings.defaultWorkspace = command.settings.defaultWorkspace; break;
+    case "settings.save": settings.model = command.settings.model; settings.thinkingLevel = command.settings.thinkingLevel; settings.accessMode = command.settings.accessMode; settings.appearance = mergeSavedAppearance(command.settings.appearance, settings.appearance); settings.browser = mergeBrowserSettings(command.settings.browser, settings.browser); settings.jev = normalizeJev(command.settings.jev); settings.computer = command.settings.computer; settings.design = command.settings.design; settings.ssh = command.settings.ssh; settings.defaultWorkspace = command.settings.defaultWorkspace; settings.shortcuts = command.settings.shortcuts; break;
     // 渲染端手里的主题已没有 assets（见 appearance-assets.ts）：按 id 把主进程存的
     // 那份保留回来，只有携带了 assets 的那条（外观页保存主题）才覆盖。
     case "appearance.save": settings.appearance = mergeSavedAppearance(command.appearance, settings.appearance); break;
@@ -478,6 +478,8 @@ function updateSettings(command: RuntimeCommand): void {
       console.warn("主题资产目录对账失败：", error);
     }
   }
+  // 全局快捷键只在开关/值变化时重注册（applyPaletteHotkey 内部幂等早退）。
+  if (command.type === "settings.save") applyPaletteHotkey();
   persistSettings().schedule(diffSettings(previous, settings));
 }
 
@@ -725,6 +727,61 @@ function showMainWindow(): void {
     return;
   }
   createWindow();
+}
+
+/**
+ * 向渲染端推一条消息；窗口还在加载时等 `did-finish-load` 再发。
+ * 启动瞬间（全局快捷键注册失败）与冷启动回唤都以两种时机到达，直接 send 会丢。
+ */
+function notifyRenderer(message: RuntimeMessage): void {
+  const win = mainWindow;
+  if (!win || win.isDestroyed()) return;
+  const send = (): void => {
+    if (!win.isDestroyed()) win.webContents.send("runtime:message", message);
+  };
+  if (win.webContents.isLoading()) win.webContents.once("did-finish-load", send);
+  else send();
+}
+
+/** 全局快捷键回调：把主窗口拉回来并让渲染端打开命令面板。 */
+function requestPalette(): void {
+  showMainWindow();
+  notifyRenderer({ type: "palette.open" });
+}
+
+/**
+ * 注册/注销命令面板的全局快捷键（settings.shortcuts.paletteHotkey）。
+ * 幂等：值没变时直接返回，因此可以在每次 settings.save 后无条件调用。
+ * 注册失败（被其他应用占用）如实告知，而不是静默当作开启。
+ */
+let paletteHotkeyRegistered: string | undefined;
+function applyPaletteHotkey(): void {
+  const accelerator = loadSettings().shortcuts?.paletteHotkey ?? "";
+  if (paletteHotkeyRegistered === accelerator) return;
+  if (paletteHotkeyRegistered) {
+    try {
+      globalShortcut.unregister(paletteHotkeyRegistered);
+    } catch {
+      // 已失效（例如桌面会话重启）——接着注册新值即可。
+    }
+    paletteHotkeyRegistered = undefined;
+  }
+  if (!accelerator) return;
+  let registered = false;
+  try {
+    registered = globalShortcut.register(accelerator, requestPalette);
+  } catch {
+    registered = false;
+  }
+  if (registered) {
+    paletteHotkeyRegistered = accelerator;
+    return;
+  }
+  notifyRenderer({
+    type: "shortcut.error",
+    accelerator,
+    message: `全局快捷键 ${accelerator} 注册失败（可能被其他软件占用）；可在 设置 → 通用 → 界面 里关闭。`
+  });
 }
 
 /**
@@ -1157,6 +1214,7 @@ function registerIpc(): void {
   });
   ipcMain.handle("runtime:send", (_event, command: RuntimeCommand): void => { updateSettings(command); sendToRuntime(command); });
 }
-app.whenReady().then(() => { Menu.setApplicationMenu(null); registerPreviewFileProtocol(); registerIpc(); startRuntime(); createWindow(); app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); else showMainWindow(); }); });
+app.whenReady().then(() => { Menu.setApplicationMenu(null); registerPreviewFileProtocol(); registerIpc(); startRuntime(); createWindow(); applyPaletteHotkey(); app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); else showMainWindow(); }); });
 app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
 app.on("before-quit", () => { quitting = true; settingsPersistence?.flush(); browserAutomationController?.dispose(); computerOverlayController?.dispose(); browserPreviewController?.dispose(); panelWindows?.dispose(); trayController?.dispose(); terminalManager.disposeAll(); sshConnectionManager?.disposeAll(); runtimeProcess?.kill(); });
+app.on("will-quit", () => { globalShortcut.unregisterAll(); });

@@ -34,6 +34,8 @@ const runtimeSource = read("pi-runtime.ts");
 const appSource = read("../renderer/src/App.tsx");
 /** 「保存通用设置」的提交逻辑在通用页组件里（2026-09-23 从 App.tsx 抽出）。 */
 const generalSettingsSource = read("../renderer/src/GeneralSettings.tsx");
+/** 输入框的访问模式切换也会提交 settings.save（2026-10-19 补 shortcuts 时发现它漏了 4 个键）。 */
+const conversationPaneSource = read("../renderer/src/ConversationPane.tsx");
 
 /** 取出 `settings.save` 命令的 `Pick<DesktopSettings, …>` 键集合。 */
 function pickKeys(): string[] {
@@ -43,18 +45,34 @@ function pickKeys(): string[] {
 }
 
 /**
- * 取出设置页「保存通用设置」的载荷键集合。
+ * 取出渲染端**每一处** settings.save 的载荷键集合。
  * 载荷长这样：`{ type: "settings.save", settings: { model: nextSettings.model, … } }`。
- * 提交逻辑在通用页组件 GeneralSettings.tsx（从 App.tsx 抽出后渲染端源 = 两者拼接）。
+ *
+ * 以前只检查第一处（GeneralSettings）——于是 ConversationPane 的访问模式切换载荷
+ * 漏了 ssh / jev / defaultWorkspace 也全绿，直到 2026-10-19 加 shortcuts 时才发现
+ * （那个载荷每切一次访问模式就把这三项配置静默抹掉）。现在逐处检查。
  */
-function rendererPayloadKeys(): string[] {
-  const source = appSource + generalSettingsSource;
-  const marker = source.indexOf('type: "settings.save"');
-  expect(marker, "渲染端没有提交 settings.save（此测试需要同步更新）").toBeGreaterThan(-1);
-  const open = source.indexOf("settings: {", marker);
-  expect(open, "找不到渲染端 settings.save 的载荷对象字面量").toBeGreaterThan(-1);
-  const body = source.slice(open, source.indexOf("}", open));
-  return [...body.matchAll(/(?:^|[{,\s])([A-Za-z0-9_]+)\s*:/gu)].map((entry) => entry[1]!);
+function rendererPayloads(): { label: string; keys: string[] }[] {
+  const files: { label: string; source: string }[] = [
+    { label: "App.tsx", source: appSource },
+    { label: "GeneralSettings.tsx", source: generalSettingsSource },
+    { label: "ConversationPane.tsx", source: conversationPaneSource }
+  ];
+  const payloads: { label: string; keys: string[] }[] = [];
+  for (const file of files) {
+    let cursor = 0;
+    while (true) {
+      const marker = file.source.indexOf('type: "settings.save"', cursor);
+      if (marker < 0) break;
+      const open = file.source.indexOf("settings: {", marker);
+      if (open < 0) break;
+      const body = file.source.slice(open, file.source.indexOf("}", open));
+      const keys = [...body.matchAll(/(?:^|[{,\s])([A-Za-z0-9_]+)\s*:/gu)].map((entry) => entry[1]!);
+      payloads.push({ label: `${file.label}@${String(marker)}`, keys });
+      cursor = marker + 1;
+    }
+  }
+  return payloads;
 }
 
 /**
@@ -87,12 +105,15 @@ describe("settings.save 的三处镜像契约", () => {
     expect(keys).toContain("jev");
   });
 
-  it("渲染端「保存通用设置」必须传齐 Pick 里的每一个键", () => {
+  it("渲染端每一处 settings.save 都必须传齐 Pick 里的每一个键", () => {
     // 少传一个键 = 主进程按 undefined 覆盖那一项配置。jev 就是这么被抹掉的：
     // 密钥留在 credentials.json，配置从 settings.json 消失，且没有任何提示。
-    const payload = rendererPayloadKeys();
-    const missing = keys.filter((key) => !payload.includes(key));
-    expect(missing, `渲染端 settings.save 载荷缺少：${missing.join(", ")}`).toEqual([]);
+    const payloads = rendererPayloads();
+    expect(payloads.length).toBeGreaterThan(0);
+    for (const payload of payloads) {
+      const missing = keys.filter((key) => !payload.keys.includes(key));
+      expect(missing, `渲染端 ${payload.label} 缺少：${missing.join(", ")}`).toEqual([]);
+    }
   });
 
   it("主进程 updateSettings 必须镜像 Pick 里的每一个键", () => {

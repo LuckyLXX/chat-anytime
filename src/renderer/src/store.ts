@@ -319,6 +319,8 @@ interface DesktopState {
   transcripts: Record<string, ChatMessage[]>;
   /** 子代理完整记录读取失败：childSessionId → 错误文案。 */
   transcriptErrors: Record<string, string>;
+  /** 主进程全局快捷键呼出面板的信号（自增计数；App 消费后打开面板）。 */
+  paletteOpenTick: number;
   error?: string;
   /**
    * 最近一条**命令级失败**（带所属会话）：命令分发 catch 的 error 推送。全局 `error` 只管
@@ -430,6 +432,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   rollbacks: {},
   transcripts: {},
   transcriptErrors: {},
+  paletteOpenTick: 0,
   designDocs: [],
   galleryApps: [],
   restoredBrowserTabs: [],
@@ -718,6 +721,13 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
         break;
       case "error":
         set({ error: message.message, commandError: { sessionId: message.sessionId, message: message.message, at: Date.now() } });
+        break;
+      case "palette.open":
+        set((state) => ({ paletteOpenTick: state.paletteOpenTick + 1 }));
+        break;
+      case "shortcut.error":
+        // 全局快捷键注册失败：用现有 toast 通道告知（不新增弹窗）。
+        set({ error: message.message });
         break;
       case "log":
         if (message.level === "warn") console.warn(message.message);
