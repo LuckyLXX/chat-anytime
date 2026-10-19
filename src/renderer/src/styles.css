@@ -554,7 +554,7 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
   .design-layers { display: none; }
 }
 .design-toggle.active { color: var(--accent); background: var(--accent-soft); }
-.computer-toggle.active { color: var(--accent); background: var(--accent-soft); }
+.computer-toggle.active, .team-toggle.active { color: var(--accent); background: var(--accent-soft); }
 .conversation-pane { position: relative; display: block; min-width: 0; min-height: 0; overflow: hidden; background: var(--surface-conversation); }
 
 /* —— 分屏（Split View）：work-area 会话槽位内的递归二叉分割 ——
@@ -911,6 +911,41 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 .composer.has-plan.has-queue .composer-queue { grid-row: 2; }
 .composer.has-plan.has-queue .composer-input-row { grid-row: 3; }
 .composer.has-plan.has-queue .composer-footer { grid-row: 4; }
+/* 团队状态条：与计划横幅同处输入框上方首行；与计划/排队共存时依次占位。
+   只显示有成员的会话（团队关闭但成员仍在后台时仍显示，供一键全停）。 */
+.composer.has-team { grid-template-rows: auto minmax(32px, 1fr) auto; }
+.composer.has-team .composer-team-strip { grid-row: 1; }
+.composer.has-team .composer-input-row { grid-row: 2; }
+.composer.has-team .composer-footer { grid-row: 3; }
+.composer.has-team.has-queue { grid-template-rows: auto auto minmax(32px, 1fr) auto; }
+.composer.has-team.has-queue .composer-team-strip { grid-row: 1; }
+.composer.has-team.has-queue .composer-queue { grid-row: 2; }
+.composer.has-team.has-queue .composer-input-row { grid-row: 3; }
+.composer.has-team.has-queue .composer-footer { grid-row: 4; }
+.composer.has-team.has-plan { grid-template-rows: auto auto minmax(32px, 1fr) auto; }
+.composer.has-team.has-plan .composer-team-strip { grid-row: 1; }
+.composer.has-team.has-plan .composer-plan-banner { grid-row: 2; }
+.composer.has-team.has-plan .composer-input-row { grid-row: 3; }
+.composer.has-team.has-plan .composer-footer { grid-row: 4; }
+.composer.has-team.has-plan.has-queue { grid-template-rows: auto auto auto minmax(32px, 1fr) auto; }
+.composer.has-team.has-plan.has-queue .composer-team-strip { grid-row: 1; }
+.composer.has-team.has-plan.has-queue .composer-plan-banner { grid-row: 2; }
+.composer.has-team.has-plan.has-queue .composer-queue { grid-row: 3; }
+.composer.has-team.has-plan.has-queue .composer-input-row { grid-row: 4; }
+.composer.has-team.has-plan.has-queue .composer-footer { grid-row: 5; }
+.composer-team-strip { display: flex; align-items: center; gap: 8px; justify-self: start; grid-column: 1; min-width: 0; max-width: 100%; padding: 2px 8px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-raised); color: var(--text-muted); font-size: 11px; line-height: 1.6; }
+.composer-team-title { display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; color: var(--text); font-weight: 650; }
+.composer-team-title > svg { flex: 0 0 auto; color: var(--accent-text); }
+.composer-team-members { display: inline-flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; }
+.composer-team-member { display: inline-flex; align-items: center; gap: 4px; max-width: 132px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); }
+.composer-team-member > i { flex: 0 0 auto; width: 6px; height: 6px; border-radius: 50%; background: var(--text-muted); }
+.composer-team-member.running > i { background: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.composer-team-member.provisioning > i { background: var(--warning); }
+.composer-team-member.failed { color: var(--danger-text); }
+.composer-team-member.failed > i { background: var(--danger); }
+.composer-team-stop { display: inline-flex; align-items: center; gap: 3px; flex: 0 0 auto; height: 19px; padding: 0 7px; border: 1px solid var(--danger-border); border-radius: 999px; color: var(--danger-text); background: transparent; font-size: 10px; font-family: inherit; font-weight: 600; cursor: pointer; }
+.composer-team-stop:hover:not(:disabled) { background: var(--danger-soft); }
+.composer-team-stop:disabled { opacity: .45; cursor: default; }
 .composer-plan-banner { display: inline-flex; align-items: center; gap: 5px; justify-self: start; grid-column: 1; padding: 2px 8px; border: 1px solid var(--accent-border); border-radius: 999px; background: var(--accent-soft); }
 .composer-plan-banner > svg { flex: 0 0 auto; color: var(--accent-text); }
 .composer-plan-banner-title { color: var(--accent-text); font-size: 11px; font-weight: 700; line-height: 1.6; }

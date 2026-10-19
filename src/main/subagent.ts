@@ -178,15 +178,22 @@ export function assistantText(message: unknown): string {
   return content.filter((block): block is { type: "text"; text: string } => block?.type === "text" && typeof block.text === "string").map((block) => block.text).join("\n");
 }
 
-function createChildPermissionExtension(ctx: SubagentContext): InlineExtension {
+/**
+ * 子会话/团队成员的权限扩展：把子会话的工具调用落到父会话同一道权限门上。
+ * 团队复用时传入自己的拒绝文案，避免权限卡把成员说成「子代理」。
+ */
+export function createChildPermissionExtension(
+  requestPermission: SubagentContext["requestPermission"],
+  denyReason = "用户已在 PiDesktop 中拒绝该子代理操作"
+): InlineExtension {
   return {
     name: "chat-anytime-subagent-permissions",
     hidden: true,
     factory(pi) {
       pi.on("tool_call", async (event) => {
         const args = (event.input ?? {}) as Record<string, unknown>;
-        const decision = await ctx.requestPermission(event.toolName, args, event.toolCallId);
-        if (decision === "deny") return { block: true, reason: "用户已在 PiDesktop 中拒绝该子代理操作" };
+        const decision = await requestPermission(event.toolName, args, event.toolCallId);
+        if (decision === "deny") return { block: true, reason: denyReason };
         return undefined;
       });
     }
@@ -323,7 +330,7 @@ async function runDelegation(ctx: SubagentContext, params: { goal?: unknown; rol
     noSkills: true,
     noThemes: true,
     noContextFiles: true,
-    extensionFactories: [createChildPermissionExtension(ctx)],
+    extensionFactories: [createChildPermissionExtension(ctx.requestPermission)],
     systemPromptOverride: (base) => [base, childSystemPrompt, ...childInstruction].filter(Boolean).join("\n\n")
   });
   await resourceLoader.reload();

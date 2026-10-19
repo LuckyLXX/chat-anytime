@@ -98,6 +98,10 @@ export function extensionCalloutTitle(customType: string | undefined, details: u
     const rule = (details as { rule?: unknown } | undefined)?.rule;
     return typeof rule === "string" && rule.trim() ? `钩子上下文 · ${rule.trim()}` : "钩子上下文";
   }
+  if (customType === "pidesktop-team-message") {
+    const sender = (details as { sender?: unknown } | undefined)?.sender;
+    return typeof sender === "string" && sender.trim() ? `团队成员 · ${sender.trim()}` : "团队成员消息";
+  }
   return customType || "扩展消息";
 }
 

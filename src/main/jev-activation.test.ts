@@ -52,7 +52,7 @@ describe("Jev 工具的激活与注册（源码回归网）", () => {
 
   it("注册集包含 jevTools（注册是激活的前提；漏了则开关打开也不可见）", () => {
     expect(functionBody("function buildRecordTools(")).toContain("...record.jevTools");
-    expect(source).toContain("...galleryTools, ...jevTools]");
+    expect(source).toMatch(/\.\.\.galleryTools, \.\.\.jevTools[,)\]]/u);
   });
 
   it("三项总闸翻转都会重算活动集（settings.save 与 jev.save 两条路径）", () => {

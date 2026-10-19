@@ -2002,6 +2002,24 @@ export interface QueuedMessage {
   imageCount?: number;
 }
 
+/** 团队状态条用的成员行（只含 teammate；Lead 伪行只在 team_list 工具结果里出现）。 */
+export interface TeamMemberSummary {
+  name: string;
+  status: "running" | "inactive" | "provisioning" | "failed";
+  description?: string;
+  /** 命中的自定义子智能体定义名（inherit 模式缺省）。 */
+  subagent?: string;
+  color?: string;
+  /** failed 时的原因（渲染端 title 展示）。 */
+  error?: string;
+}
+
+/** 激活会话的团队快照：成员 + 运行计数。没有成员时缺省（渲染端不显示状态条）。 */
+export interface TeamSnapshot {
+  members: TeamMemberSummary[];
+  running: number;
+}
+
 export interface RuntimeSnapshot {
   workspace?: string;
   /** 当前工作区的 git 分支（非 git 项目或缺省为空时不提供）。 */
@@ -2027,6 +2045,10 @@ export interface RuntimeSnapshot {
   computerMode?: boolean;
   /** 激活会话是否处于设计模式（design_* 工具已注入 + 画布工作台打开）。 */
   designMode?: boolean;
+  /** 激活会话是否开了团队模式（team_* 工具已注入）。 */
+  teamMode?: boolean;
+  /** 激活会话的团队成员状态（无成员时缺省）。 */
+  team?: TeamSnapshot;
   messages: ChatMessage[];
   executions: ToolExecution[];
   backgroundProcesses: BackgroundProcess[];
@@ -2058,6 +2080,10 @@ export interface SessionPaneSnapshot {
   computerMode?: boolean;
   /** 该会话是否处于设计模式；分屏格子据此跟随显隐（画布只展激活格）。 */
   designMode?: boolean;
+  /** 该会话是否开了团队模式（team_* 工具注入状态）。 */
+  teamMode?: boolean;
+  /** 该会话的团队成员状态；无成员时缺省。 */
+  team?: TeamSnapshot;
   messages: ChatMessage[];
   executions: ToolExecution[];
 }
@@ -2141,6 +2167,12 @@ export type RuntimeCommand =
    *  关闭时工具一律不注入（本命令仍记录会话意愿，总闸恢复后即可生效）。 */
   | { type: "session.computerMode"; enabled: boolean; sessionId?: string }
   | { type: "session.designMode"; enabled: boolean; sessionId?: string }
+  /** 会话级团队模式开关：决定 team_* 九个工具是否进入本会话的活动工具集（默认关；
+   *  只在 session.new 显式继承）。关掉只撤工具，不停止已创建的成员——成员状态条
+   *  仍显示并提供「全部停止」。 */
+  | { type: "session.teamMode"; enabled: boolean; sessionId?: string }
+  /** 停止本会话团队里所有正在跑的成员（只停当前回合，保留队列与任务归属）。 */
+  | { type: "team.stopAll"; sessionId?: string }
   | { type: "session.abort"; sessionId?: string }
   /** 任务面板按命令停止：只终止一条正在执行的 bash/powershell 调用（杀进程树），
    * 不中止整个会话——工具以错误结果收场供模型继续本轮。executionId 即

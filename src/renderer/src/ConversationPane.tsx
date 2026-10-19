@@ -77,6 +77,7 @@ import { shareElementAsImage } from "./lib/share-image";
 import { selectableCatalogModels } from "./lib/model-list";
 import { currentQuestionRequest, useDesktopStore } from "./store";
 import { PanelDock } from "./PanelDock";
+import { TeamStrip } from "./components/TeamStrip";
 
 const accessModeOptions: readonly { value: AccessMode; label: string }[] = [
   { value: "read-only", label: "只读" },
@@ -92,7 +93,7 @@ const accessModeDescriptions: Record<AccessMode, string> = {
 };
 
 /** 会话级指令（/compact、/plan、/computer）——发送时附加格子 sessionId 定位目标会话。 */
-type SessionTargetCommand = Extract<RuntimeCommand, { type: "session.compact" } | { type: "session.planMode" } | { type: "session.computerMode" }>;
+type SessionTargetCommand = Extract<RuntimeCommand, { type: "session.compact" } | { type: "session.planMode" } | { type: "session.computerMode" } | { type: "session.teamMode" }>;
 
 type SlashCommand = {
   trigger: string;
@@ -919,7 +920,8 @@ export const ConversationPane = memo(function ConversationPane({
       { trigger: "/compact", label: "/compact", description: "压缩当前会话上下文", kind: "command", command: { type: "session.compact" } },
       { trigger: "/new", label: "/new", description: "开启新话题", kind: "new" },
       { trigger: "/plan", label: "/plan", description: data.planMode ? "退出计划模式" : "进入计划模式：先出计划，批准后实施", kind: "command", command: { type: "session.planMode", enabled: !data.planMode } },
-      { trigger: "/computer", label: "/computer", description: data.computerMode ? "关闭电脑控制（撤下 computer_* 工具）" : "开启电脑控制：AI 可操作本机窗口（约 580 tokens/请求）", kind: "command", command: { type: "session.computerMode", enabled: !data.computerMode } }
+      { trigger: "/computer", label: "/computer", description: data.computerMode ? "关闭电脑控制（撤下 computer_* 工具）" : "开启电脑控制：AI 可操作本机窗口（约 580 tokens/请求）", kind: "command", command: { type: "session.computerMode", enabled: !data.computerMode } },
+      { trigger: "/team", label: "/team", description: data.teamMode ? "关闭团队模式（撤下 team_* 工具；已创建的成员继续在后台）" : "开启团队模式：AI 可创建常驻成员、互发消息与共享任务板（约 1.1K tokens/请求）", kind: "command", command: { type: "session.teamMode", enabled: !data.teamMode } }
     ];
     const commands: SlashCommand[] = resources.commands.map((entry) => ({
       trigger: `/${entry.name}`,
@@ -1581,6 +1583,12 @@ export const ConversationPane = memo(function ConversationPane({
     });
   }
 
+  function stopTeam(): void {
+    void window.piDesktop.send({ type: "team.stopAll", ...(data.sessionId === undefined ? {} : { sessionId: data.sessionId }) }).catch((error) => {
+      onActionError(error instanceof Error ? error.message : "停止团队成员失败");
+    });
+  }
+
   function stopGeneration(): void {
     // 先取队列再发中断：主进程 abort 会清空队列，这里把文本回填输入框供编辑
     // 重发；输入框已有草稿时追加在草稿之后，不丢内容。
@@ -2020,13 +2028,14 @@ export const ConversationPane = memo(function ConversationPane({
           </div>
         );
       })()}
-      <form ref={composerRef} className={`composer${data.queuedMessages.length > 0 ? " has-queue" : ""}${data.planMode ? " has-plan" : ""}`} data-pane="composer" onSubmit={submit} onDragOver={(event) => event.preventDefault()} onDrop={handleDrop}>
+      <form ref={composerRef} className={`composer${data.queuedMessages.length > 0 ? " has-queue" : ""}${data.planMode ? " has-plan" : ""}${(data.team?.members.length ?? 0) > 0 ? " has-team" : ""}`} data-pane="composer" onSubmit={submit} onDragOver={(event) => event.preventDefault()} onDrop={handleDrop}>
         {data.planMode && (
           <div className="composer-plan-banner" data-composer-zone="plan" role="status" title="计划模式：先产出计划，审查批准后才实施。退出请使用访问权限下拉或 /plan">
             <ClipboardList size={12} />
             <span className="composer-plan-banner-title">计划模式</span>
           </div>
         )}
+        {(data.team?.members.length ?? 0) > 0 && <TeamStrip snapshot={data.team} onStopAll={stopTeam} />}
         {data.queuedMessages.length > 0 && (
           <div className="composer-queue" role="list" aria-label="排队输入" data-composer-zone="queue">
             <div className="composer-queue-caption"><Clock size={11} /><span>排队输入 {data.queuedMessages.length} 条 · 本轮回复结束后自动发出</span></div>

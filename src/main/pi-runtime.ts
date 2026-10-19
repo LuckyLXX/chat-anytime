@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readSync } from "node:fs";
-import { readFile, readdir, realpath, stat, unlink, writeFile } from "node:fs/promises";
+import { readFile, readdir, realpath, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative as relativePath, resolve, sep } from "node:path";
 import { estimateTokens } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
@@ -106,6 +106,10 @@ import {
 import * as runtimeGallery from "./runtime-gallery.js";
 import * as runtimeJev from "./runtime-jev.js";
 import { assistantText, createSubagentTools, buildSubagentPromptBlock, type SubagentContext } from "./subagent.js";
+import { TeamRuntime } from "./team-runtime.js";
+import { createTeamTools } from "./runtime-team.js";
+import { readTeamMode, writeTeamMode } from "./team-mode-store.js";
+import type { TeamService } from "./team-contract.js";
 import { withCacheWarmingOff } from "./runtime-settings.js";
 import { readSubagents, saveSubagent, deleteSubagent, saveSubagentModelOverride, saveSubagentThinkingOverride } from "./subagents-store.js";
 import type { SubagentDefinition, SubagentScope, DelegationProgress, SlashInvocation } from "../shared/protocol.js";
@@ -269,6 +273,16 @@ interface SessionRuntimeRecord {
    * 与 designMode 同款纪律——冻结在会话维度，前缀缓存整段有效；新会话默认不开。
    */
   computerMode: { enabled: boolean };
+  /**
+   * 团队模式（会话级，磁盘恢复）：决定 team_* 九个工具是否进活动工具集。
+   * 与 computerMode 同款纪律——默认关、只在 session.new 显式继承、关掉只撤工具
+   * 不停止已创建的成员。
+   */
+  teamMode: { enabled: boolean };
+  /** team_* 工具定义（注册常驻，按 teamMode 决定激活；前缀成本只在开启时产生）。 */
+  teamTools: ToolDefinition[];
+  /** 团队运行时（每个 Lead 会话一个；成员子会话、roster、任务板都在这里）。 */
+  teamRuntime?: TeamRuntime;
   /** 按助手划分的长期记忆库（跨会话）；工具闭包读它，提示词快照在创建时冻结。 */
   memoryStore: MemoryStore;
   customTools: ToolDefinition[];
@@ -706,6 +720,34 @@ function syncSkills(): void {
   const scanned = runtimeSkills.scanSkills(skillPaths());
   discoveredSkills = scanned.discovered;
   nativeSkills = scanned.summaries;
+}
+
+/**
+ * 团队工具的惰性服务代理：工具定义在 createAgentSession 之前就要进 customTools，
+ * 而 TeamRuntime 需要 Lead 的 AgentSession 才能构造。运行时在记录装配后回填，
+ * 真正 execute 时必然已就绪；未就绪直接报错，不静默降级。
+ */
+function buildTeamTools(teamRef: { runtime?: TeamRuntime }): ToolDefinition[] {
+  const get = (): TeamRuntime => {
+    if (!teamRef.runtime) throw new Error("团队运行时尚未就绪");
+    return teamRef.runtime;
+  };
+  const service: TeamService = {
+    spawn: (membership, params, signal) => get().spawn(membership, params, signal),
+    send: (membership, target, text, signal) => get().send(membership, target, text, signal),
+    list: (membership) => get().list(membership),
+    wait: (membership, timeoutMs, signal) => get().wait(membership, timeoutMs, signal),
+    interrupt: (membership, target) => get().interrupt(membership, target),
+    createTask: (membership, input) => get().createTask(membership, input),
+    listTasks: (membership, filter) => get().listTasks(membership, filter),
+    getTask: (membership, taskId) => get().getTask(membership, taskId),
+    updateTask: (membership, mutation) => get().updateTask(membership, mutation),
+    snapshot: () => get().snapshot(),
+    hasRunningMembers: () => get().hasRunningMembers(),
+    stopAll: () => get().stopAll(),
+    dispose: () => get().dispose()
+  };
+  return createTeamTools(service, { role: "lead", name: "lead" });
 }
 
 /**
@@ -1260,6 +1302,11 @@ function sessionComputerModePath(agentId: string, sessionId: string): string {
   return join(getAgentDir(), "chatanytime-sessions", agentId, "computer-mode", `${sessionId}.json`);
 }
 
+/** 会话级团队模式状态：`<agentDir>/chatanytime-sessions/<agentId>/team-mode/<sessionId>.json`。 */
+function sessionTeamModePath(agentId: string, sessionId: string): string {
+  return join(getAgentDir(), "chatanytime-sessions", agentId, "team-mode", `${sessionId}.json`);
+}
+
 /**
  * 切换会话的电脑控制模式：更新 record 状态 → 原子写盘（会话级，重开后恢复）→
  * 重算活动工具集（computer_* 注入/移除）→ 广播快照（渲染端据此置亮顶栏按钮）。
@@ -1274,6 +1321,24 @@ function setComputerMode(record: SessionRuntimeRecord, enabled: boolean): void {
     writeComputerMode(sessionComputerModePath(record.agent.id, record.session.sessionId), enabled);
   } catch (error) {
     void post({ type: "log", level: "warn", message: `保存电脑控制模式状态失败：${errorText(error)}` });
+  }
+  reconcileActiveTools(record);
+  if (record === activeRuntime) emitState();
+  else emitPaneStateFor(record);
+}
+
+/**
+ * 切换会话的团队模式：更新 record 状态 → 原子写盘（会话级，重开后恢复）→
+ * 重算活动工具集（team_* 注入/移除）→ 广播快照（渲染端据此置亮顶栏按钮）。
+ * 关掉只撤工具，不停止已创建的成员——成员状态条仍显示并提供「全部停止」。
+ */
+function setTeamMode(record: SessionRuntimeRecord, enabled: boolean): void {
+  if (record.teamMode.enabled === enabled) return;
+  record.teamMode = { enabled };
+  try {
+    writeTeamMode(sessionTeamModePath(record.agent.id, record.session.sessionId), enabled);
+  } catch (error) {
+    void post({ type: "log", level: "warn", message: `保存团队模式状态失败：${errorText(error)}` });
   }
   reconcileActiveTools(record);
   if (record === activeRuntime) emitState();
@@ -1501,6 +1566,8 @@ function paneSnapshotFrom(record: SessionRuntimeRecord): SessionPaneSnapshot {
     planMode: record.planState.enabled,
     computerMode: record.computerMode.enabled,
     designMode: record.designMode.enabled,
+    teamMode: record.teamMode.enabled,
+    ...(record.teamRuntime ? { team: record.teamRuntime.snapshot() } : {}),
     messages,
     executions: [...record.executions.values()].map((execution) => {
       const output = truncateTransferredOutput(execution.output);
@@ -1531,6 +1598,8 @@ function snapshot(): RuntimeSnapshot {
     planMode: pane?.planMode ?? false,
     computerMode: pane?.computerMode ?? false,
     designMode: pane?.designMode ?? false,
+    teamMode: pane?.teamMode ?? false,
+    team: pane?.team,
     messages: pane?.messages ?? [],
     executions: pane?.executions ?? [],
     backgroundProcesses: backgroundProcesses.list(),
@@ -1643,6 +1712,9 @@ function disposeRecord(record: SessionRuntimeRecord, options: { keepBrowserTab?:
     sessionId: () => record.session.sessionId,
     sessionTitle: () => currentSessions.find((item) => item.id === record.session.sessionId)?.title ?? record.session.sessionId
   }), "dispose");
+  // 团队先停：成员子会话不随 Lead 的 dispose 自动结束（Pi 没有父子生命周期绑定），
+  // 必须在轮到 Lead 之前 abort + disconnect，否则后台成员会继续跑并继续付费。
+  record.teamRuntime?.dispose();
   record.unsubscribe();
   try {
     record.session.dispose();
@@ -1681,7 +1753,10 @@ function disposeRecord(record: SessionRuntimeRecord, options: { keepBrowserTab?:
 /** Keep the parked-session set bounded; running and split-rendered sessions are never evicted. */
 function evictParkedSessions(): void {
   const parked = [...liveSessions.values()]
-    .filter((record) => record !== activeRuntime && !record.busy && !renderedSessions.has(record.session.sessionId))
+    .filter((record) => record !== activeRuntime && !record.busy && !renderedSessions.has(record.session.sessionId)
+      // 用户停了 Lead 但成员仍在后台跑：这类记录不能被 idle LRU 杀掉（用户决策：
+      // 成员留在后台，由成员状态条的「全部停止」收尾）。
+      && !record.teamRuntime?.hasRunningMembers())
     .sort((left, right) => right.activatedAt - left.activatedAt);
   for (const record of parked.slice(MAX_PARKED_SESSIONS)) disposeRecord(record);
   pruneVanishedSessionRows();
@@ -2138,7 +2213,7 @@ function buildRecordTools(record: Pick<SessionRuntimeRecord, "subagentTools" | "
  * capability toggle (下架), not a per-call gate. Browser/SSH families use the
  * same capability-toggle semantics (master switch AND agent-level overlay).
  */
-function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "session" | "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "planTools" | "visionTools" | "browserTools" | "sshTools" | "computerTools" | "automationTools" | "designTools" | "galleryTools" | "jevTools" | "designMode" | "computerMode" | "designGlobalEnabled" | "computerGlobalEnabled" | "jevGlobalEnabled" | "unattended">, includeVision: boolean): string[] {
+function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "session" | "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "planTools" | "visionTools" | "browserTools" | "sshTools" | "computerTools" | "automationTools" | "designTools" | "galleryTools" | "jevTools" | "designMode" | "computerMode" | "teamMode" | "teamTools" | "designGlobalEnabled" | "computerGlobalEnabled" | "jevGlobalEnabled" | "unattended">, includeVision: boolean): string[] {
   const builtin = Object.entries(record.agent.tools ?? {}).filter(([, enabled]) => enabled).map(([name]) => name);
   // 浏览器/SSH 整族开关：全局总闸 AND 角色级 overlay（agent.toolOverrides），任一关闭
   // 即整族从活动集摘除（schema 不进请求前缀）；execute 内的 enabled 闭包仅作在途回合
@@ -2172,6 +2247,9 @@ function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "session" | "
       ? record.computerTools.map((tool) => tool.name)
       : []),
     ...record.automationTools.map((tool) => tool.name),
+    // 团队工具只在开了团队模式的会话里激活（9 个 schema 实测 ≈1.1K tokens/请求；
+    // 工具定义注册常驻、激活按会话冻结，关掉时零前缀成本）。
+    ...(record.teamMode.enabled ? record.teamTools.map((tool) => tool.name) : []),
     // 设计工具仅在设计模式会话里激活（≈1.5K tokens/请求的前缀成本）；总闸
     // settings.design.enabled 关闭时任何会话都不注入。会话内开关不变，因此
     // 前缀缓存整段有效（区别于 browser 的常驻激活策略）。
@@ -3051,7 +3129,7 @@ function sessionReadyStatus(hasModel: boolean, usedFallback: boolean): string {
  * - otherwise (explicit sessionManager, or agent.save's config-apply rebuild)
  *   the record is rebuilt over the same history.
  */
-async function createSession(sessionManager?: SessionManager, options: { reactivate?: boolean; skipActivate?: boolean; modelOverride?: { provider: string; id: string }; accessModeOverride?: AccessMode; unattended?: boolean; noGenerationGuard?: boolean; agentOverride?: AgentProfile; inheritDesignMode?: boolean; inheritComputerMode?: boolean } = {}): Promise<void> {
+async function createSession(sessionManager?: SessionManager, options: { reactivate?: boolean; skipActivate?: boolean; modelOverride?: { provider: string; id: string }; accessModeOverride?: AccessMode; unattended?: boolean; noGenerationGuard?: boolean; agentOverride?: AgentProfile; inheritDesignMode?: boolean; inheritComputerMode?: boolean; inheritTeamMode?: boolean } = {}): Promise<void> {
   if (!workspace || !modelRuntime) return;
   // 工作区可能已切换（workspace.open / session.*）：先重读双作用域钩子配置。
   refreshHooksConfig();
@@ -3313,6 +3391,19 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
       void post({ type: "log", level: "warn", message: `继承电脑控制模式状态失败：${errorText(error)}` });
     }
   }
+  // 团队模式：默认关，只在 session.new 显式继承（新话题里想继续用团队时用户已经
+  // 明确开过一次）；工作区/角色切换与无人值守自动化会话都不带过去。
+  const inheritTeamMode = !hasExistingMessages && options.inheritTeamMode === true;
+  const recordTeamMode: { enabled: boolean } = {
+    enabled: inheritTeamMode || readTeamMode(sessionTeamModePath(recordAgent.id, activeSessionManager.getSessionId()))
+  };
+  if (inheritTeamMode) {
+    try {
+      writeTeamMode(sessionTeamModePath(recordAgent.id, activeSessionManager.getSessionId()), true);
+    } catch (error) {
+      void post({ type: "log", level: "warn", message: `继承团队模式状态失败：${errorText(error)}` });
+    }
+  }
   const planTools = runtimePlanTools.buildPlanTools({
     getSessionId: () => recordSessionId,
     getEnabled: () => recordBox?.planState.enabled ?? false,
@@ -3485,7 +3576,11 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   // sessions keep their tool set while the active one hot-swaps MCP tools.
   // MCP 工具不进 customTools：由 Pi 内置 MCP 扩展注册进会话工具注册表（见
   // extensionFactories 里的 builtin-mcp 与 pidesktop-mcp 桥接）。
-  const recordCustomTools: ToolDefinition[] = [shellKill.tools[0]!, shellKill.tools[1]!, ...subagentTools, ...todoTools, ...memoryTools, ...questionTools, ...planTools, ...visionTools, ...browserTools, ...sshTools, ...computerTools, ...automationTools, ...designTools, ...galleryTools, ...jevTools];
+  // 团队工具用惰性 ref：定义要在 createAgentSession 之前进 customTools，而运行时
+  // 需要 Lead 的 AgentSession 才能构造（记录装配后回填）。
+  const teamRef: { runtime?: TeamRuntime } = {};
+  const teamTools = buildTeamTools(teamRef);
+  const recordCustomTools: ToolDefinition[] = [shellKill.tools[0]!, shellKill.tools[1]!, ...subagentTools, ...todoTools, ...memoryTools, ...questionTools, ...planTools, ...visionTools, ...browserTools, ...sshTools, ...computerTools, ...automationTools, ...designTools, ...galleryTools, ...jevTools, ...teamTools];
   const result = await createAgentSession({
     cwd: recordWorkspace,
     modelRuntime,
@@ -3530,6 +3625,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
         planMode: recordPlanState.enabled,
         computerMode: recordComputerMode.enabled,
         designMode: recordDesignMode.enabled,
+        teamMode: recordTeamMode.enabled,
         messages: normalizeMessages(earlySession.state.messages, earlySession.state.streamingMessage),
         executions: []
       }
@@ -3550,6 +3646,8 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     planState: recordPlanState,
     computerMode: recordComputerMode,
     designMode: recordDesignMode,
+    teamMode: recordTeamMode,
+    teamTools,
     memoryStore: recordMemoryStore,
     customTools: recordCustomTools,
     subagentTools,
@@ -3606,6 +3704,32 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     if (sessionsPromise) await sessionsPromise;
     return;
   }
+  // 团队运行时：记录装配完成后再建（需要 Lead 的 AgentSession；工具定义已先注册）。
+  // 构造期会做 provisioning 对账（创建中崩溃的成员转 failed），不触发 onChange。
+  teamRef.runtime = new TeamRuntime({
+    leadSession: result.session,
+    workspace: recordWorkspace,
+    agentDir: getAgentDir(),
+    agent: recordAgent,
+    modelRuntime,
+    getThinkingLevel: () => record.session.thinkingLevel,
+    getSubagentCatalog: () => subagentCatalog,
+    isModelEnabled: (providerId, modelId) => isModelEnabled(providerId, modelId, settings?.providers),
+    transformModel: (candidate) => applyModelOverrides(candidate),
+    requestPermission: (toolName, args, toolCallId) => runtimePermissions.requestPermission(record.permissionDeps, toolName, args, toolCallId, "subagent"),
+    buildBrowserTools: () => runtimeBrowser.buildBrowserTools({
+      request: (op) => requestBrowserAutomation(record.session.sessionId, op),
+      enabled: () => settings?.browser?.enabled !== false,
+      workspace: () => recordWorkspace || undefined,
+      resolveUploadFiles: (files) => Promise.resolve(resolveWorkspaceUploadFiles(recordWorkspace, files)),
+      saveScreenshot: (data, mimeType) => saveBrowserScreenshot(recordWorkspace, data, mimeType)
+    }),
+    onChange: () => {
+      if (record === activeRuntime) emitState();
+      else emitPaneStateFor(record);
+    }
+  });
+  record.teamRuntime = teamRef.runtime;
   // Activate the agent's enabled built-in tools plus every customTool (MCP,
   // subagent delegation, todo, memory, question, vision). customTools are
   // registered but not active unless explicitly enabled here; the vision tool
@@ -3909,8 +4033,14 @@ async function deleteSessionByPath(deleteTarget: string): Promise<{ wasActive: b
   const wasActive = live === activeRuntime;
   if (live) disposeRecord(live);
   const deleteRoot = agentSessionRoot();
+  // 团队子会话按 Lead id 归档在 delegations/teams/<leadId>/；删会话要连带清掉，
+  // 否则成员文件会变成永远没人引用的孤儿。header id 在文件删除前读一次（文件名
+  // 里的时间戳不能直接当 id）。
+  const teamLeadId = listItem?.id ?? readSessionHeaderId(deleteTarget) ?? sessionId;
   try { await unlink(deleteTarget); } catch { /* 会话文件可能已不存在 */ }
   if (deleteRoot) {
+    try { await unlink(join(deleteRoot, "team-mode", `${teamLeadId}.json`)); } catch { /* 团队模式文件可能不存在 */ }
+    try { await rm(join(deleteRoot, "delegations", "teams", teamLeadId), { recursive: true, force: true }); } catch { /* 成员文件可能不存在 */ }
     try { await unlink(join(deleteRoot, "todos", `${sessionId}.json`)); } catch { /* 任务文件可能不存在 */ }
     try { await unlink(join(deleteRoot, "plans", `${sessionId}.json`)); } catch { /* 计划模式状态文件可能不存在 */ }
     try { await unlink(join(deleteRoot, "design-mode", `${sessionId}.json`)); } catch { /* 设计模式状态文件可能不存在 */ }
@@ -3950,7 +4080,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       // keeps running, so a busy turn never blocks starting a new topic.
       // 设计模式下新建话题继承设计模式：用户在连续做设计，新话题不该丢掉画布
       // 与 design_* 工具（继承结果同步落盘，重启后恢复一致）。
-      if (workspace) await createSession(SessionManager.create(workspace, workspaceSessionDir()), { inheritDesignMode: activeRuntime?.designMode.enabled === true, inheritComputerMode: activeRuntime?.computerMode.enabled === true });
+      if (workspace) await createSession(SessionManager.create(workspace, workspaceSessionDir()), { inheritDesignMode: activeRuntime?.designMode.enabled === true, inheritComputerMode: activeRuntime?.computerMode.enabled === true, inheritTeamMode: activeRuntime?.teamMode.enabled === true });
       break;
     case "session.open": {
       const root = agentSessionRoot();
@@ -4155,6 +4285,8 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
           try { await unlink(join(removeRoot, "plans", `${item.id}.json`)); } catch { /* 计划模式状态文件可能不存在 */ }
           try { await unlink(join(removeRoot, "design-mode", `${item.id}.json`)); } catch { /* 设计模式状态文件可能不存在 */ }
           try { await unlink(join(removeRoot, "computer-mode", `${item.id}.json`)); } catch { /* 电脑控制模式状态文件可能不存在 */ }
+          try { await unlink(join(removeRoot, "team-mode", `${item.id}.json`)); } catch { /* 团队模式状态文件可能不存在 */ }
+          try { await rm(join(removeRoot, "delegations", "teams", item.id), { recursive: true, force: true }); } catch { /* 团队成员文件可能不存在 */ }
           try { await unlink(join(removeRoot, "checkpoints", `${item.id}.jsonl`)); } catch { /* 快照文件可能不存在 */ }
         }
       }
@@ -4456,6 +4588,17 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     }
     case "session.computerMode": {
       setComputerMode(resolveTargetRecord(command.sessionId), command.enabled);
+      break;
+    }
+    case "session.teamMode": {
+      setTeamMode(resolveTargetRecord(command.sessionId), command.enabled);
+      break;
+    }
+    case "team.stopAll": {
+      const record = resolveTargetRecord(command.sessionId);
+      record.teamRuntime?.stopAll();
+      if (record === activeRuntime) emitState();
+      else emitPaneStateFor(record);
       break;
     }
     case "checkpoint.rollback": {

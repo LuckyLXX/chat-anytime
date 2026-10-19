@@ -530,6 +530,8 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
                 previous.thinkingLevel === incoming.thinkingLevel && previous.planMode === incoming.planMode &&
                 previous.computerMode === incoming.computerMode &&
                 previous.designMode === incoming.designMode &&
+                previous.teamMode === incoming.teamMode &&
+                previous.team === incoming.team &&
                 previous.contextUsage === incoming.contextUsage) {
               return state;
             }

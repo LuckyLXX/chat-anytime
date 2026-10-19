@@ -562,6 +562,7 @@ export function App(): ReactNode {
   // 绝大多数会话（写代码/查资料/整理文档）不会操作桌面窗口，不该替它付这份钱。
   // 全局总闸（设置页「通用」）关掉即任何会话都不注入。
   const computerMode = useDesktopStore((state) => state.snapshot.computerMode === true);
+  const teamMode = useDesktopStore((state) => state.snapshot.teamMode === true);
   const [designSplit, setDesignSplit] = useState(readStoredDesignSplit);
   const [designDragging, setDesignDragging] = useState(false);
   const designDragPointerRef = useRef<number | undefined>(undefined);
@@ -1986,6 +1987,7 @@ export function App(): ReactNode {
   paletteActions.push(
     { id: "mode.design", title: designMode ? "退出设计模式" : "进入设计模式", group: "模式", keywords: "design 设计 画布", disabled: !paletteTargetSession, run: () => runPaletteCommand({ type: "session.designMode", enabled: !designMode, sessionId: paletteTargetSession }) },
     { id: "mode.computer", title: computerMode ? "关闭电脑控制" : "开启电脑控制", group: "模式", keywords: "computer 桌面 控制", disabled: !paletteTargetSession, run: () => runPaletteCommand({ type: "session.computerMode", enabled: !computerMode, sessionId: paletteTargetSession }) },
+    { id: "mode.team", title: teamMode ? "关闭团队模式" : "开启团队模式", group: "模式", keywords: "team 团队 成员 协作", disabled: !paletteTargetSession, run: () => runPaletteCommand({ type: "session.teamMode", enabled: !teamMode, sessionId: paletteTargetSession }) },
     { id: "mode.plan", title: planMode ? "退出计划模式" : "进入计划模式", group: "模式", keywords: "plan 计划", disabled: !paletteTargetSession, run: () => runPaletteCommand({ type: "session.planMode", enabled: !planMode, sessionId: paletteTargetSession }) }
   );
 
@@ -2073,6 +2075,7 @@ export function App(): ReactNode {
           <div className="runtime-controls">
             <button className="workspace-top-button" data-control="workspace-open" type="button" onClick={() => void openWorkspace()}><FolderOpen size={15} /><span>工作区</span><strong>{compactPath(activeWorkspace)}</strong><ChevronDown size={13} /></button>
             <button className={`icon-button computer-toggle${computerMode ? " active" : ""}`} data-control="computer-toggle" type="button" disabled={!activeSessionId} aria-label={computerMode ? "关闭电脑控制" : "开启电脑控制"} aria-pressed={computerMode} title={!activeSessionId ? "请先创建或打开一个话题" : computerMode ? "关闭电脑控制（本会话将撤下 computer_* 工具）" : "电脑控制（AI 可枚举/截图/点击/输入本机窗口；本会话注入 computer_* 工具，约 580 tokens/请求）"} onClick={() => void window.piDesktop.send({ type: "session.computerMode", enabled: !computerMode }).catch((error) => setMessageActionError(error instanceof Error ? error.message : "电脑控制切换失败"))}><Computer size={18} /></button>
+            <button className={`icon-button team-toggle${teamMode ? " active" : ""}`} data-control="team-toggle" type="button" disabled={!activeSessionId} aria-label={teamMode ? "关闭团队模式" : "开启团队模式"} aria-pressed={teamMode} title={!activeSessionId ? "请先创建或打开一个话题" : teamMode ? "关闭团队模式（本会话将撤下 team_* 工具；已创建的成员继续在后台）" : "团队模式（AI 可创建常驻成员、互发消息与共享任务板；本会话注入 team_* 工具，schema 实测 ≈1.1K tokens/请求）"} onClick={() => void window.piDesktop.send({ type: "session.teamMode", enabled: !teamMode }).catch((error) => setMessageActionError(error instanceof Error ? error.message : "团队模式切换失败"))}><Users size={18} /></button>
             <button className={`icon-button design-toggle${designMode ? " active" : ""}`} data-control="design-toggle" type="button" disabled={!activeSessionId} aria-label={designMode ? "退出设计模式" : "进入设计模式"} aria-pressed={designMode} title={!activeSessionId ? "请先创建或打开一个话题" : designMode ? "退出设计模式（本会话将不再注入设计工具）" : "设计模式（AI 设计工作台；本会话注入 design_* 工具）"} onClick={() => void window.piDesktop.send({ type: "session.designMode", enabled: !designMode }).catch((error) => setMessageActionError(error instanceof Error ? error.message : "设计模式切换失败"))}><Palette size={18} /></button>
             <GalleryMenu apps={galleryApps} onRun={(app) => void runGalleryApp(app)} onDevelop={developGalleryApp} onOpenWall={() => setGalleryWallOpen(true)} onPublish={() => openGalleryDraft()} />
             <button className="icon-button preview-panel-toggle" data-control="preview-toggle" type="button" aria-label={previewOpened ? "关闭预览" : "打开预览"} title={previewOpened ? "关闭预览" : "打开预览"} onClick={() => {              // 顶部按钮始终完全关闭/打开预览面板：即使已有标签页也不会
