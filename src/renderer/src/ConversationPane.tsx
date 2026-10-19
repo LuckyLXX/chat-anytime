@@ -69,6 +69,7 @@ import { commandErrorTargetsPane, localTurnDeadline, localTurnForPane, type Loca
 import { buildTurnSummaries } from "./lib/turn-summary";
 import { TIMELINE_LIVE_MARGIN, TIMELINE_WINDOW_MIN_MESSAGES, createTimelineObserver, estimateMessageHeight, placeholderHeightFor, shouldRenderLive, type TimelineObserver } from "./lib/timeline-window";
 import { followTimelineBottom } from "./lib/timeline-scroll";
+import { findRevealMessage, findRevealTurnKey } from "./lib/reveal";
 import { buildEditDiffs, delegateArgsSummary, editArgsSummary, languageFromPath, parseDelegateCallArgs, parseEditCallArgs, parseReadCallArgs, parseWriteCallArgs, writeArgsSummary, type DelegateCallPreview, type EditCallPreview, type EditDiffBlock, type WriteCallPreview } from "./lib/tool-call-preview";
 import { DiffView } from "./components/DiffView";
 import { TurnMinimap } from "./components/TurnMinimap";
@@ -575,7 +576,7 @@ function ChangedFilesPanel({ files, workspace, onOpenFile, onOpenDiff, onRollbac
 // Memoized so an unchanged message bubble (stable ChatMessage reference from
 // the store's uuid-based reuse) is skipped during high-frequency streaming
 // updates that only mutate other bubbles.
-export const MessageView = memo(function MessageView({ message, executions, workspace, onOpenArtifact, onOpenFile, onOpenDiff, onHtmlAction, onCopy, onEdit, onRegenerate, onShare, onRollback, rollbackStates, showThinking = true, hiddenThinkingLabel, busy = false, turnActive = false, timing, turnKey, onOpenTranscript, rootRef }: { message: ChatMessage; executions: ToolExecution[]; workspace?: string; onOpenArtifact(artifact: Artifact): void; onOpenFile(relativePath: string, workspace?: string): void; onOpenDiff(execution: ToolExecution): void; onHtmlAction(text: string): void; onCopy(message: ChatMessage): void; onEdit(message: ChatMessage): void; onRegenerate(message: ChatMessage): void; onShare(message: ChatMessage, target: HTMLElement): Promise<void>; onRollback?(file: ReplyChangedFile): void; rollbackStates?: ReadonlyMap<string, "restored" | "deleted">; showThinking?: boolean; hiddenThinkingLabel?: string; busy?: boolean; turnActive?: boolean; timing?: TurnTiming; turnKey?: string; onOpenTranscript?(delegation: DelegationProgress): void; /** 窗口化需要观察消息根元素（见 lib/timeline-window.ts）。 */ rootRef?: (element: HTMLElement | null) => void }): ReactNode {
+export const MessageView = memo(function MessageView({ message, executions, workspace, onOpenArtifact, onOpenFile, onOpenDiff, onHtmlAction, onCopy, onEdit, onRegenerate, onShare, onRollback, rollbackStates, showThinking = true, hiddenThinkingLabel, busy = false, turnActive = false, timing, turnKey, revealed = false, onOpenTranscript, rootRef }: { message: ChatMessage; executions: ToolExecution[]; workspace?: string; onOpenArtifact(artifact: Artifact): void; onOpenFile(relativePath: string, workspace?: string): void; onOpenDiff(execution: ToolExecution): void; onHtmlAction(text: string): void; onCopy(message: ChatMessage): void; onEdit(message: ChatMessage): void; onRegenerate(message: ChatMessage): void; onShare(message: ChatMessage, target: HTMLElement): Promise<void>; onRollback?(file: ReplyChangedFile): void; rollbackStates?: ReadonlyMap<string, "restored" | "deleted">; showThinking?: boolean; hiddenThinkingLabel?: string; busy?: boolean; turnActive?: boolean; timing?: TurnTiming; turnKey?: string; revealed?: boolean; onOpenTranscript?(delegation: DelegationProgress): void; /** 窗口化需要观察消息根元素（见 lib/timeline-window.ts）。 */ rootRef?: (element: HTMLElement | null) => void }): ReactNode {
   const text = messageText(message);
   const shareTargetRef = useRef<HTMLDivElement | null>(null);
   const [sharing, setSharing] = useState(false);
@@ -601,7 +602,7 @@ export const MessageView = memo(function MessageView({ message, executions, work
   if (message.role === "extension") {
     const images = message.blocks.filter((block): block is Extract<import("../../shared/protocol").MessageBlock, { type: "image" }> => block.type === "image");
     return (
-      <article ref={rootRef} className="message message-extension" data-role="extension" data-turn-key={turnKey}>
+      <article ref={rootRef} className="message message-extension" data-role="extension" data-turn-key={turnKey} data-revealed={revealed || undefined}>
         <div className="message-avatar extension-avatar"><Puzzle size={16} /></div>
         <div className="message-body extension-message-callout">
           <strong>{extensionCalloutTitle(message.extension?.customType, message.extension?.details)}</strong>
@@ -618,7 +619,7 @@ export const MessageView = memo(function MessageView({ message, executions, work
     // 复制/编辑仍用原始全文，重新发送后同样回环成 chip。
     const { mentions, body } = extractMentionTokens(text);
     return (
-      <article ref={rootRef} className="message message-user" data-role="user" data-turn-key={turnKey}>
+      <article ref={rootRef} className="message message-user" data-role="user" data-turn-key={turnKey} data-revealed={revealed || undefined}>
         <div className="message-avatar user-avatar">我</div>
         <div className="message-body message-bubble">{message.invocations?.map((item) => <div className="message-skill-badge" key={`${item.kind}:${item.name}`}>{item.kind === "skill" ? <Puzzle size={13} /> : <Zap size={13} />}<strong>{item.kind === "skill" ? item.name : `/${item.name}`}</strong></div>)}{mentions.length > 0 && <div className="message-mention-badges">{mentions.map((token) => <span className="message-skill-badge" key={token} title={token}><File size={13} /><strong>{token}</strong></span>)}</div>}{images.length > 0 && <div className="image-message-list">{images.map((block, index) => <ImageMessageBlock key={`${message.id}-image-${index}`} block={block} />)}</div>}{body && <p className="user-text">{body}</p>}{!isControlMessage && <div className="message-actions"><button type="button" data-control="copy" title="复制" aria-label="复制用户消息" onClick={() => onCopy(message)}><Copy size={13} /></button><button type="button" data-control="edit" title="重新编辑" aria-label="重新编辑用户消息" onClick={() => onEdit(message)}><Pencil size={13} /></button></div>}</div>
       </article>
@@ -626,7 +627,7 @@ export const MessageView = memo(function MessageView({ message, executions, work
   }
 
   return (
-    <article ref={rootRef} className="message message-assistant" data-role="assistant" data-turn-key={turnKey}>
+    <article ref={rootRef} className="message message-assistant" data-role="assistant" data-turn-key={turnKey} data-revealed={revealed || undefined}>
       <div className="message-avatar pi-avatar"><Bot size={17} /></div>
       <div className="message-body message-bubble">
         <div className="assistant-share-content" ref={shareTargetRef}>
@@ -836,6 +837,10 @@ export const ConversationPane = memo(function ConversationPane({
   const [windowVisibleKeys, setWindowVisibleKeys] = useState<ReadonlySet<string>>(() => new Set<string>());
   const [windowExpandAll, setWindowExpandAll] = useState(false);
   const [windowPinned, setWindowPinned] = useState<{ key: string; nonce: number } | undefined>(undefined);
+  // 检索跳转：待定位目标来自 store（侧栏点击写入），高亮 2 秒后自动消退。
+  const pendingReveal = useDesktopStore((state) => state.pendingReveal);
+  const [revealedKey, setRevealedKey] = useState<string | undefined>(undefined);
+  const revealHandledRef = useRef(0);
   const windowHeightsRef = useRef(new Map<string, number>());
   const windowObserverRef = useRef<TimelineObserver | undefined>(undefined);
   const [activeTurnKey, setActiveTurnKey] = useState<string | undefined>(undefined);
@@ -1303,13 +1308,56 @@ export const ConversationPane = memo(function ConversationPane({
     const timeline = timelineRef.current;
     if (!timeline) return;
     const anchor = timeline.querySelector<HTMLElement>(`[data-turn-key="${CSS.escape(windowPinned.key)}"]`);
-    if (!anchor) return;
+    // 锚点找不到（消息被压缩/定位失败）也要解除钉住，否则它会一直占着下一轮的
+    // 真实渲染名额，直到用户再次导航。
+    if (!anchor) { setWindowPinned(undefined); return; }
     const target = anchor.offsetTop - timeline.clientHeight * 0.2;
     timeline.scrollTo({ top: Math.max(0, target), behavior: "smooth" });
     // 滚完解除钉住（目标已进入 ±1 屏，由观察器接管），避免它长期占用真实渲染。
     const timer = window.setTimeout(() => setWindowPinned(undefined), 1500);
     return () => window.clearTimeout(timer);
   }, [windowPinned]);
+
+  // 检索跳转：目标消息到达后钉住并高亮。消息按 timestamp+role 匹配（扫描端
+  // 无法复刻渲染端下标，见 lib/reveal.ts）；冷开时消息晚一帧到，本 effect 会
+  // 在 messages 更新后重试。
+  useEffect(() => {
+    if (!pendingReveal || pendingReveal.sessionId !== sessionId) return;
+    // 目标迟迟不出现（压缩/打开失败/没有挂载中的格子）时按 TTL 丢弃：
+    // 否则很久以后再打开该会话会突发滚动到一条用户早已忘记的命中。
+    if (Date.now() - pendingReveal.createdAt > 10_000) {
+      useDesktopStore.setState({ pendingReveal: undefined });
+      return;
+    }
+    if (revealHandledRef.current === pendingReveal.nonce) return;
+    const message = findRevealMessage(data.messages, pendingReveal);
+    if (!message) return;
+    revealHandledRef.current = pendingReveal.nonce;
+    const messageKey = message.uuid ?? message.id;
+    // data-turn-key 只挂在轮首 user 消息上：助手命中的滚动必须用所属轮的锚点，
+    // 否则 pinned 只实体化不滚动（长回复是检索主力，不能默默失效）。
+    const turnKey = findRevealTurnKey(data.messages, message, (item) => turnStartKeys.has(item.uuid ?? item.id)) ?? messageKey;
+    navigateToTurn(turnKey);
+    setRevealedKey(messageKey);
+    useDesktopStore.setState({ pendingReveal: undefined });
+  }, [pendingReveal, data.messages, sessionId, navigateToTurn, turnStartKeys]);
+
+  // 高亮 2 秒后消退：单独一个 effect，避免流式帧反复清掉计时器。
+  useEffect(() => {
+    if (!revealedKey) return;
+    const timer = window.setTimeout(() => setRevealedKey(undefined), 2_000);
+    return () => window.clearTimeout(timer);
+  }, [revealedKey]);
+
+  // 目标迟迟不出现（被压缩/定位失败）：10 秒后放弃，不让待定位状态一直挂着。
+  useEffect(() => {
+    if (!pendingReveal || pendingReveal.sessionId !== sessionId) return;
+    const nonce = pendingReveal.nonce;
+    const timer = window.setTimeout(() => {
+      if (useDesktopStore.getState().pendingReveal?.nonce === nonce) useDesktopStore.setState({ pendingReveal: undefined });
+    }, 10_000);
+    return () => window.clearTimeout(timer);
+  }, [pendingReveal, sessionId]);
 
   // 会话切换：草稿属于会话（存/取互逆）；Skill 选择与编辑态复位（沿用单窗口语义）。
   // 独立 ref：滚动 effect（useLayoutEffect 先执行）也写 previousSessionIdRef，
@@ -1937,6 +1985,7 @@ export const ConversationPane = memo(function ConversationPane({
               turnActive={turnActive}
               timing={timing}
               turnKey={turnKey}
+              revealed={entryKey === revealedKey}
               onOpenTranscript={onOpenTranscript}
             />;
           })}

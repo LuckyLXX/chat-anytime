@@ -138,6 +138,15 @@ import { createToolAudit } from "./tool-audit.js";
 import { collectUsageStats, createUsageStatsCache } from "./usage-stats.js";
 import * as runtimeTodoTools from "./runtime-todo-tools.js";
 import { runVerifyCommand } from "./todo-verify.js";
+import { searchSessionText } from "./session-search.js";
+import {
+  MAX_INDEX_CHARS,
+  loadSessionTextIndex,
+  pruneSessionTextIndex,
+  saveSessionTextIndex,
+  updateSessionTextEntry,
+  type SessionTextIndex
+} from "./session-text-index.js";
 import * as runtimeMemoryTools from "./runtime-memory-tools.js";
 import { MEMORY_SNAPSHOT_BUDGET_CHARS } from "../shared/memory.js";
 import { createMemoryStore, memoryDirFor, type MemoryStore } from "./memory-store.js";
@@ -1205,6 +1214,36 @@ function sessionTodosPath(sessionId: string): string {
   const root = agentSessionRoot();
   if (!root) throw new Error("当前没有可用的 Agent，无法定位任务存储");
   return join(root, "todos", `${sessionId}.json`);
+}
+
+/** 会话正文索引：`<agentDir>/pidesktop-session-text-index.json`（派生数据，可随时删）。 */
+function sessionTextIndexPath(): string {
+  return join(getAgentDir(), "pidesktop-session-text-index.json");
+}
+
+let sessionTextIndex: SessionTextIndex | undefined;
+let sessionTextIndexSaveTimer: ReturnType<typeof setTimeout> | undefined;
+/** 最近一次 session.search 的 requestId：扫描途中被新查询取代时提前退出。 */
+let latestSessionSearchRequest: string | undefined;
+
+/** 索引落盘 5s 节流：搜索是用户动作，几 MB 的全量重写不必每次都做。 */
+function scheduleSessionTextIndexSave(): void {
+  if (sessionTextIndexSaveTimer) return;
+  sessionTextIndexSaveTimer = setTimeout(() => {
+    sessionTextIndexSaveTimer = undefined;
+    if (!sessionTextIndex) return;
+    try {
+      saveSessionTextIndex(sessionTextIndexPath(), sessionTextIndex);
+    } catch (error) {
+      void post({ type: "log", level: "warn", message: `保存会话检索索引失败：${errorText(error)}` });
+    }
+  }, 5_000);
+  sessionTextIndexSaveTimer.unref?.();
+}
+
+/** 让出事件循环：逐文件扫描期间保持 utility 的推送与命令处理可响应。 */
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
 }
 
 function sessionPlansPath(agentId: string, sessionId: string): string {
@@ -4003,6 +4042,34 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       }
       // 此处不再重做存在性校验：上面已挡（live-by-id 命中隐含文件存在，重建分支直走）。
       await createSession(SessionManager.open(target, recordRoot, workspace));
+      break;
+    }
+    case "session.search": {
+      const requestId = command.requestId;
+      latestSessionSearchRequest = requestId;
+      // 只搜当前助手的会话（与侧栏列表同源），元数据直接复用摘要，不重复读盘。
+      const sessions = [...currentSessions];
+      if (!sessionTextIndex) sessionTextIndex = loadSessionTextIndex(sessionTextIndexPath());
+      try {
+        let changed = false;
+        for (const session of sessions) {
+          // 新查询已在路上：旧扫描立刻收手，不抢事件循环也不再回推结果。
+          if (latestSessionSearchRequest !== requestId) return;
+          if (updateSessionTextEntry(sessionTextIndex, session.path)) changed = true;
+          // 每个文件后都让出一次：单个大文件的同步读可能几十到几百毫秒，
+          // 十几个文件连读会把事件循环按住一秒以上；setImmediate 的开销可以忽略。
+          await yieldToEventLoop();
+        }
+        if (latestSessionSearchRequest !== requestId) return;
+        if (changed) {
+          pruneSessionTextIndex(sessionTextIndex, MAX_INDEX_CHARS);
+          scheduleSessionTextIndexSave();
+        }
+        const hits = searchSessionText(sessionTextIndex, sessions, command.query);
+        post({ type: "session.search-result", requestId, hits, scanned: sessions.length, total: sessions.length, done: true });
+      } catch (error) {
+        post({ type: "session.search-result", requestId, hits: [], scanned: 0, total: sessions.length, done: true, error: errorText(error) });
+      }
       break;
     }
     case "session.rename": {

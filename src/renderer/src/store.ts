@@ -22,6 +22,7 @@ import type {
   RuntimeMessage,
   RuntimeSnapshot,
   SessionPaneSnapshot,
+  SessionSearchHit,
   Todo,
   ToolExecution,
   UsageStats
@@ -205,6 +206,29 @@ export function paneQuestionRequest(questions: QuestionRequest[], sessionIds: st
   return undefined;
 }
 
+/** 会话全文检索的状态（侧栏搜索框触发；query 与结果同帧更新）。 */
+export interface SessionSearchState {
+  /** 当前查询的请求 id：结果推送不匹配则丢弃（旧查询晚到）。 */
+  requestId?: string;
+  query: string;
+  loading: boolean;
+  hits: SessionSearchHit[];
+  scanned?: number;
+  total?: number;
+  error?: string;
+}
+
+/** 从检索结果跳到具体消息的一次性目标；消息渲染后消费并清空。 */
+export interface PendingReveal {
+  sessionId: string;
+  timestamp: number;
+  role: "user" | "assistant";
+  /** 同一目标重复点击时强制重新触发（effect 依赖用）。 */
+  nonce: number;
+  /** 挂起时刻：目标迟迟不出现（压缩/打开失败）时按 TTL 丢弃，避免很久后突发滚动。 */
+  createdAt: number;
+}
+
 interface DesktopState {
   ready: boolean;
   /** 正在运行的版本（来自主进程 bootstrap 的 `app.getVersion()`）：设置弹窗左栏底部常驻展示。 */
@@ -230,6 +254,10 @@ interface DesktopState {
   providers: ProviderOption[];
   resources: ResourceCatalog;
   todos: Todo[];
+  /** 会话全文检索状态（侧栏内联结果区）。 */
+  sessionSearch: SessionSearchState;
+  /** 待定位的检索命中（打开会话后由 ConversationPane 消费）。 */
+  pendingReveal?: PendingReveal;
   memory: MemoryTopicSummary[];
   /** 记忆正文按需缓存：topic id → 完整主题（响应 memory.read）。 */
   memoryContents: Record<string, MemoryTopic>;
@@ -390,6 +418,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   providers: [],
   resources: emptyResources,
   todos: [],
+  sessionSearch: { query: "", loading: false, hits: [] },
   memory: [],
   memoryContents: {},
   memoryTopicErrors: {},
@@ -520,6 +549,22 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
         break;
       case "todos":
         set({ todos: message.todos });
+        break;
+      case "session.search-result":
+        set((state) => {
+          // 旧查询的结果晚到：requestId 不匹配就丢弃，避免把新查询的结果覆盖掉。
+          if (state.sessionSearch.requestId && message.requestId !== state.sessionSearch.requestId) return state;
+          return {
+            sessionSearch: {
+              ...state.sessionSearch,
+              loading: false,
+              hits: message.hits,
+              scanned: message.scanned,
+              total: message.total,
+              error: message.error
+            }
+          };
+        });
         break;
       case "memory":
         set((state) => {

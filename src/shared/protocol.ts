@@ -1553,6 +1553,29 @@ export interface SessionSummary {
 }
 
 /**
+ * 会话全文检索的一条命中。
+ *
+ * 身份用 `timestamp + role` 而不是 uuid：扫描端解析 JSONL 时无法复刻渲染端的
+ * 消息下标（会因过滤/压缩重排而变），而时间戳与角色在两侧同源；打开会话后由
+ * 渲染端在该会话的消息里找到第一条同时间戳同角色的消息并钉住滚动。
+ */
+export interface SessionSearchHit {
+  sessionId: string;
+  path: string;
+  title: string;
+  workspace: string;
+  archived?: boolean;
+  /** 会话最后活动时间（排序用）。 */
+  modifiedAt: number;
+  /** 命中消息的时间戳。 */
+  timestamp: number;
+  role: "user" | "assistant";
+  /** 命中位置附近的片段（已压缩空白与换行）。 */
+  snippet: string;
+  score: number;
+}
+
+/**
  * A workspace the user opened recently, tracked independently of sessions so
  * freshly created (still empty) workspaces show up in the sidebar immediately.
  */
@@ -2085,6 +2108,9 @@ export type RuntimeCommand =
   /** activate=false（分屏启动恢复的背景格）：创建 record 但不激活——全局镜像
    * 与 state 通道保持焦点格，格子数据走 session.state（watch 已先行排队）。 */
   | { type: "session.open"; path: string; workspace?: string; activate?: boolean }
+  /** 会话全文检索（只搜当前助手的会话，user/assistant 正文）。结果经
+   *  session.search-result 推送；requestId 用于丢弃过期查询。 */
+  | { type: "session.search"; requestId: string; query: string }
   | { type: "session.rename"; path: string; title: string }
   | { type: "session.pin"; path: string; pinned: boolean }
   /** 软归档 / 取消归档。paths 长度 1 即单条；批量与单条共用一条命令，避免
@@ -2253,6 +2279,8 @@ export type RuntimeMessage =
   | { type: "sessions.live"; sessions: PanelSessionLive[] }
   | { type: "resources"; resources: ResourceCatalog }
   | { type: "todos"; todos: Todo[] }
+  /** 会话全文检索结果（当前实现一次扫完才推送；scanned/total 供 UI 展示扫描体量）。 */
+  | { type: "session.search-result"; requestId: string; hits: SessionSearchHit[]; scanned: number; total: number; done: boolean; error?: string }
   | { type: "memory"; memory: MemoryTopicSummary[] }
   /** 响应 memory.read：完整主题（含正文）。 */
   | { type: "memory.topic"; topic: MemoryTopic }

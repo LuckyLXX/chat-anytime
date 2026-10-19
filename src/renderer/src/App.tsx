@@ -54,6 +54,7 @@ import type {
   ResourceCatalog,
   RuntimeCommand,
   SessionSummary,
+  SessionSearchHit,
   SshHostSummary
 } from "../../shared/protocol";
 import type { ReplyChangedFile } from "./lib/changed-files";
@@ -76,6 +77,7 @@ import { GalleryWall } from "./components/GalleryWall";
 import { GalleryDataDialog, GalleryPublishDialog, GalleryWallDialog } from "./components/GalleryDialogs";
 import { DiffView } from "./components/DiffView";
 import { BrandMark } from "./components/BrandMark";
+import { SessionSearchResults } from "./components/SessionSearchResults";
 import { clampPreviewSplit, PREVIEW_SPLIT_MAX, PREVIEW_SPLIT_MIN, previewSplitFromKey } from "./lib/preview-split";
 import { groupSessionsByWorkspace, workspaceKey } from "./lib/session-groups";
 import { archivedSessionCount, selectSessionPaths, selectedPathsInView, sessionsForView, toggleSessionSelection, type SessionSelection, type SessionView } from "./lib/session-view";
@@ -339,6 +341,7 @@ export function App(): ReactNode {
   const activeSessionId = useDesktopStore((state) => state.snapshot.sessionId);
   const activeWorkspace = useDesktopStore((state) => state.snapshot.workspace);
   const sessionSummaries = useDesktopStore((state) => state.snapshot.sessions);
+  const sessionSearch = useDesktopStore((state) => state.sessionSearch);
   const recentWorkspaces = useDesktopStore((state) => state.snapshot.recentWorkspaces);
   const activeAgentId = useDesktopStore((state) => state.snapshot.agentId);
   const activeAgentName = useDesktopStore((state) => state.snapshot.agentName);
@@ -393,6 +396,33 @@ export function App(): ReactNode {
   const [sidebarQuery, setSidebarQuery] = useState("");
   // 启动时所有工作区分组默认折叠（空表 = 无展开项）；用户展开后保持到退出。
   const [expandedWorkspaceGroups, setExpandedWorkspaceGroups] = useState<Record<string, boolean>>({});
+  // 会话全文检索：标题过滤即时生效，内容检索防抖 300ms；不足 2 字不搜（单字命中噪声太大）。
+  // requestId 与查询同帧写入，晚到的旧结果由 store 丢弃。
+  useEffect(() => {
+    const query = sidebarQuery.trim();
+    if (sidebarTab !== "topics" || query.length < 2) {
+      if (useDesktopStore.getState().sessionSearch.query) {
+        useDesktopStore.setState({ sessionSearch: { query: "", loading: false, hits: [] } });
+      }
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      const requestId = `search-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      useDesktopStore.setState({ sessionSearch: { requestId, query, loading: true, hits: [] } });
+      void window.piDesktop.send({ type: "session.search", requestId, query }).catch((cause: unknown) => {
+        useDesktopStore.setState((state) => state.sessionSearch.requestId === requestId
+          ? { sessionSearch: { ...state.sessionSearch, loading: false, error: cause instanceof Error ? cause.message : "搜索失败" } }
+          : state);
+      });
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [sidebarQuery, sidebarTab]);
+
+  // 切助手（含自动化触发的 agent.select，不经过页签）立即清空检索结果：
+  // 旧助手的命中留在新助手的列表上方会让人误以为搜的是新助手。
+  useEffect(() => {
+    useDesktopStore.setState({ sessionSearch: { query: "", loading: false, hits: [] } });
+  }, [activeAgentId]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsInitialTab, setSettingsInitialTab] = useState<"automation" | undefined>(undefined);
   function openSettingsOn(tab: "automation"): void { setSettingsInitialTab(tab); setSettingsOpen(true); }
@@ -1036,6 +1066,13 @@ export function App(): ReactNode {
     } catch (error) {
       setMessageActionError(error instanceof Error ? error.message : "打开话题失败");
     }
+  }
+
+  /** 点击检索命中：先挂定位目标再打开会话（冷开时目标要等消息到达才消费）。 */
+  function openSearchHit(hit: SessionSearchHit): void {
+    useDesktopStore.setState({ pendingReveal: { sessionId: hit.sessionId, timestamp: hit.timestamp, role: hit.role, nonce: Date.now(), createdAt: Date.now() } });
+    if (hit.sessionId === activeSessionIdRef.current) return;
+    void openSession(hit.path, hit.workspace, hit.sessionId);
   }
 
   // —— 分屏：焦点 / 增删格 / 最大化 ——
@@ -1722,7 +1759,17 @@ export function App(): ReactNode {
           {sidebarTab === "agents" ? <nav className="agent-list" aria-label="助手列表">
             {visibleAgents.map((agent) => <button className={agent.id === activeAgentId ? "active" : ""} type="button" key={agent.id} data-row-kind="agent" data-row-active={agent.id === activeAgentId || undefined} onClick={() => { useDesktopStore.setState({ settings: { ...settings, currentAgentId: agent.id } }); void window.piDesktop.send({ type: "agent.select", agentId: agent.id }); }}><span className="agent-list-icon"><Bot size={15} /></span><span><strong>{agent.name}</strong><small>{agent.description || "未填写说明"}</small></span></button>)}
           </nav> : <nav className="session-list" aria-label="话题列表">
-            {sessionGroups.length === 0 ? <div className="session-list-empty">{sessionView === "archived" ? "暂无归档话题" : "暂无匹配话题"}</div> : sessionGroups.map((group) => {
+            <SessionSearchResults
+              query={sessionSearch.query}
+              hits={sessionSearch.hits}
+              loading={sessionSearch.loading}
+              error={sessionSearch.error}
+              scanned={sessionSearch.scanned}
+              onOpen={openSearchHit}
+            />
+            {sessionGroups.length === 0
+              ? (sessionSearch.loading || sessionSearch.hits.length > 0 ? null : <div className="session-list-empty">{sessionView === "archived" ? "暂无归档话题" : "暂无匹配话题"}</div>)
+              : sessionGroups.map((group) => {
               const collapsed = expandedWorkspaceGroups[group.key] !== true;
               const workspaceName = group.workspace.split(/[\\/]/u).at(-1) || group.workspace;
               return (
