@@ -137,6 +137,7 @@ import { changedWorkspaceFile, changedWorkspaceFiles, collectProducedArtifacts, 
 import { createToolAudit } from "./tool-audit.js";
 import { collectUsageStats, createUsageStatsCache } from "./usage-stats.js";
 import * as runtimeTodoTools from "./runtime-todo-tools.js";
+import { runVerifyCommand } from "./todo-verify.js";
 import * as runtimeMemoryTools from "./runtime-memory-tools.js";
 import { MEMORY_SNAPSHOT_BUDGET_CHARS } from "../shared/memory.js";
 import { createMemoryStore, memoryDirFor, type MemoryStore } from "./memory-store.js";
@@ -1281,9 +1282,44 @@ function setPlanMode(record: SessionRuntimeRecord, enabled: boolean): void {
   else emitPaneStateFor(record);
 }
 
-/** Build the Todo customTools for a session-scoped store + pace tracker. */
-function buildTodoTools(store: TodoStore, pace: runtimeTodoTools.TodoPaceTracker): ToolDefinition[] {
-  return runtimeTodoTools.buildTodoTools({ store, pace });
+/**
+ * Build the Todo customTools for a session-scoped store + pace tracker.
+ *
+ * 验收依赖在会话创建时冻结：run 固定走本会话的工作区与用户配置的 shell
+ * （shellPath / commandPrefix，与内建 bash 同源），shellEnabled 读角色工具
+ * 开关（关闭 bash/powershell 的会话不能从 todo 侧偷偷起 shell），
+ * requestPermission 走与 bash 完全相同的权限轴（ask 模式会弹「执行命令」卡，
+ * workspace/full 自动放行，read-only 直接拒绝），checkBlock 再跑一道用户的
+ * tool_call deny 钩子——三条其它 shell 通路（bash/powershell/钩子命令）都过
+ * 的检查，验收命令不能少。
+ */
+function buildTodoTools(
+  store: TodoStore,
+  pace: runtimeTodoTools.TodoPaceTracker,
+  session: Pick<SessionRuntimeRecord, "workspace" | "agent" | "permissionDeps"> & {
+    shellPath?: string;
+    commandPrefix?: string;
+    checkBlock?: (command: string) => { blocked: boolean; reason?: string };
+  }
+): ToolDefinition[] {
+  return runtimeTodoTools.buildTodoTools({
+    store,
+    pace,
+    verify: {
+      run: (command, signal) => runVerifyCommand(command, {
+        cwd: session.workspace,
+        signal,
+        ...(session.shellPath ? { shellPath: session.shellPath } : {}),
+        ...(session.commandPrefix ? { commandPrefix: session.commandPrefix } : {})
+      }),
+      shellEnabled: () => session.agent.tools?.bash !== false || session.agent.tools?.powershell === true,
+      requestPermission: async (command, toolCallId) => {
+        const decision = await runtimePermissions.requestPermission(session.permissionDeps, "bash", { command }, toolCallId);
+        return decision !== "deny";
+      },
+      ...(session.checkBlock ? { checkBlock: session.checkBlock } : {})
+    }
+  });
 }
 
 function errorText(error: unknown): string {
@@ -3027,6 +3063,18 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   const memoryPromptBlock = settings?.memory?.enabled === false
     ? undefined
     : [runtimeMemoryTools.buildMemorySystemPromptBlock(), runtimeMemoryTools.buildMemorySnapshotBlock(recordMemoryStore.snapshotMarkdown(recordWorkspace, MEMORY_SNAPSHOT_BUDGET_CHARS))].filter(Boolean).join("\n\n");
+  // 钩子依赖在会话创建时建一次：既给 pidesktop-hooks 扩展，也给 todo 的验收命令做
+  // block 规则评估——验收命令由 todo_write 内部执行、不是真的 bash 工具调用，但用户
+  // 配的 deny 规则（`rm -rf` 之类）必须同样生效，否则就多出一条绕开钩子的 shell 通路。
+  const recordHooksDeps = hooksDepsFor({
+    workspace: () => recordWorkspace,
+    agentName: () => recordAgent.name,
+    sessionId: () => sessionHolder.session?.sessionId ?? activeSessionManager.getSessionId(),
+    sessionTitle: () => {
+      const sessionId = sessionHolder.session?.sessionId ?? activeSessionManager.getSessionId();
+      return currentSessions.find((item) => item.id === sessionId)?.title ?? sessionId;
+    }
+  });
   const resourceLoader = new DefaultResourceLoader({
     cwd: recordWorkspace,
     agentDir: getAgentDir(),
@@ -3072,15 +3120,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
       // 用户钩子（第三内联扩展）：事件触发时读 hooksRules 缓存，配置增删改
       // 只需 refreshHooksConfig()，无需重建会话。命令是用户自写配置，等同
       // 终端输入，不经 agent 权限门；输出只走 stdin/通知/日志，不进提示词。
-      runtimeHooks.createHooksExtension(hooksDepsFor({
-        workspace: () => recordWorkspace,
-        agentName: () => recordAgent.name,
-        sessionId: () => sessionHolder.session?.sessionId ?? activeSessionManager.getSessionId(),
-        sessionTitle: () => {
-          const sessionId = sessionHolder.session?.sessionId ?? activeSessionManager.getSessionId();
-          return currentSessions.find((item) => item.id === sessionId)?.title ?? sessionId;
-        }
-      })),
+      runtimeHooks.createHooksExtension(recordHooksDeps),
       // Tool executions land in chatanytime-sessions/<agentId>/tool-audit.jsonl
       // for post-hoc debugging; write failures never affect the turn. The start
       // hook also feeds the per-session todo pace tracker (anti-batching nudge).
@@ -3188,7 +3228,13 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   const sessionRecordSeed: Pick<SessionRuntimeRecord, "workspace" | "agent" | "permissionDeps"> = { workspace: recordWorkspace, agent: recordAgent, permissionDeps };
   const subagentTools = buildSubagentTools(sessionRecordSeed, activeSessionManager.getSessionId(), requested ?? selectedModel, false);
   const recordTodoPace = runtimeTodoTools.createTodoPaceTracker();
-  const todoTools = buildTodoTools(recordTodoStore, recordTodoPace);
+  const todoVerifyContext = {
+    ...sessionRecordSeed,
+    shellPath: settingsManager.getShellPath() ?? undefined,
+    commandPrefix: settingsManager.getShellCommandPrefix() ?? undefined,
+    checkBlock: (command: string) => runtimeHooks.evaluateToolCallBlock(recordHooksDeps, "bash", { command })
+  };
+  const todoTools = buildTodoTools(recordTodoStore, recordTodoPace, todoVerifyContext);
   const memoryTools = runtimeMemoryTools.buildMemoryTools({
     store: recordMemoryStore,
     workspace: recordWorkspace,

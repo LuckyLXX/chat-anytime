@@ -6,6 +6,15 @@ import { useDesktopStore } from "./store";
 
 const statusLabels: Record<TodoStatus, string> = { pending: "待办", in_progress: "进行中", completed: "已完成" };
 
+/** 验收状态三态：通过 / 失败 / 待验收（没跑过，或旧数据没有该字段）。 */
+function verifyState(todo: Todo): "ok" | "failed" | "pending" {
+  if (todo.verifyOk === true) return "ok";
+  if (todo.verifyOk === false) return "failed";
+  return "pending";
+}
+
+const verifyLabels: Record<ReturnType<typeof verifyState>, string> = { ok: "验收通过", failed: "验收失败", pending: "待验收" };
+
 /**
  * 正在执行的工具调用至少运行这么久才显示在面板里（与后台进程的 MIN_AGE 对齐），
  * 避免 `echo` 这类秒回命令在"运行中的终端"里闪进闪出。
@@ -118,6 +127,14 @@ export function TaskPanelContent(): ReactNode {
             <div className="task-panel-copy">
               <strong>{todo.content}</strong>
               <span className={`task-panel-status ${todo.status}`}>{statusLabels[todo.status]}</span>
+              {todo.verify && (
+                <span className="task-panel-verify">
+                  <code title={todo.verify}>{todo.verify}</code>
+                  <span className={`task-panel-verify-state ${verifyState(todo)}`} title={todo.verifiedAt ? `最近验收：${new Date(todo.verifiedAt).toLocaleString()}` : "尚未执行验收命令"}>
+                    {verifyLabels[verifyState(todo)]}
+                  </span>
+                </span>
+              )}
             </div>
           </div>
         ))}

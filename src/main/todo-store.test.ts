@@ -56,6 +56,30 @@ describe("todo store", () => {
     ]);
   });
 
+  it("round-trips verification fields and drops invalid ones on read", async () => {
+    const { promises: fs } = await import("node:fs");
+    const dir = await mkdtemp(join(tmpdir(), "pi-desktop-todos-"));
+    temporaryDirectories.push(dir);
+    const path = join(dir, "todos.json");
+    const store = createTodoStore(path, () => {});
+
+    store.replaceAll([{ content: "跑测试", status: "completed", verify: "npm test", verifiedAt: 1_700_000_000_000, verifyOk: true }]);
+    expect(createTodoStore(path, () => {}).list()).toEqual([
+      { content: "跑测试", status: "completed", verify: "npm test", verifiedAt: 1_700_000_000_000, verifyOk: true }
+    ]);
+
+    await fs.writeFile(path, JSON.stringify({ todos: [
+      { content: "坏字段", status: "pending", verify: 42, verifiedAt: "yesterday", verifyOk: "yes" },
+      { content: "空命令", status: "pending", verify: "   " },
+      { content: "超长命令", status: "pending", verify: "a".repeat(900) }
+    ] }), "utf8");
+
+    const reopened = createTodoStore(path, () => {}).list();
+    expect(reopened[0]).toEqual({ content: "坏字段", status: "pending" });
+    expect(reopened[1]).toEqual({ content: "空命令", status: "pending" });
+    expect(reopened[2]?.verify).toHaveLength(500);
+  });
+
   it("survives a corrupt file by starting empty", async () => {
     const { promises: fs } = await import("node:fs");
     const dir = await mkdtemp(join(tmpdir(), "pi-desktop-todos-"));

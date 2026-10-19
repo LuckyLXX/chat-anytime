@@ -32,7 +32,11 @@ describe("session_end wiring", () => {
 
   it("shares one deps factory between session creation and session_end", () => {
     // 同一个 hooksDepsFor 装配：会话创建的内联扩展与 session_end 走同一套信任门/总闸。
+    // 创建侧在会话作用域里建一次（recordHooksDeps），供 hooks 扩展与 todo 验收命令的
+    // block 规则评估共用——两条路径必须是同一份 deps，否则项目钩子的信任判定会分叉。
     expect(source.split("hooksDepsFor({").length - 1).toBe(2);
-    expect(source).toContain("runtimeHooks.createHooksExtension(hooksDepsFor({");
+    expect(source).toContain("const recordHooksDeps = hooksDepsFor({");
+    expect(source).toContain("runtimeHooks.createHooksExtension(recordHooksDeps)");
+    expect(source).toContain("evaluateToolCallBlock(recordHooksDeps");
   });
 });

@@ -323,6 +323,30 @@ export function evaluateBlockAction(rule: HookRule, toolName: string, toolInput:
   return evaluateBlockText(rule, hookMatchText(toolName, toolInput), toolName);
 }
 
+/**
+ * 用 tool_call 的 block 规则评估一次「等价的工具调用」。
+ *
+ * 验收命令由 todo_write 内部执行，不是一次真的 bash 工具调用，用户配的 deny
+ * 规则（`rm -rf` 之类）理应同样生效——否则「所有能起 shell 的路径都过同一道
+ * 钩子」就有了一个后门。这里复用与扩展完全相同的 matcher / 项目信任 / 规则
+ * 评估，只是不执行命令动作（那是观察/改写轴，验收命令没有可改写的参数）。
+ */
+export function evaluateToolCallBlock(
+  deps: HooksExtensionDeps,
+  toolName: string,
+  toolInput: unknown
+): { blocked: boolean; reason?: string } {
+  if (!deps.enabled()) return { blocked: false };
+  for (const entry of deps.rules()) {
+    if (entry.rule.event !== "tool_call" || entry.rule.disabled === true) continue;
+    if (!toolMatcherMatches(entry.rule.matcher, toolName)) continue;
+    if (entry.scope === "project" && !deps.trust(entry)) continue;
+    const verdict = evaluateBlockAction(entry.rule, toolName, toolInput);
+    if (verdict.blocked) return verdict;
+  }
+  return { blocked: false };
+}
+
 /** 某个事件下 deny 正则的匹配文本：user_input 用输入文本，工具事件用命令行 / 参数 JSON。 */
 export function hookMatchTextForEvent(event: HookRule["event"], context: HookContext): string {
   if (event === "user_input") return context.inputText ?? "";

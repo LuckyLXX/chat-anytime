@@ -1875,6 +1875,16 @@ export type TodoStatus = "pending" | "in_progress" | "completed";
 export interface Todo {
   content: string;
   status: TodoStatus;
+  /**
+   * 验收命令（可选）：条目从非 completed 转为 completed 时由 todo_write 自动执行，
+   * 退出码非 0 / 超时 / 未获授权即退回 in_progress。只由模型在清单里声明，
+   * 用户不直接编辑（单一所有者语义不变）。
+   */
+  verify?: string;
+  /** 最近一次验收完成时间（ms）。仅在 content + verify 未变时保留。 */
+  verifiedAt?: number;
+  /** 最近一次验收是否通过（未执行/被拒绝时不写，保持「待验收」）。 */
+  verifyOk?: boolean;
 }
 
 /**
