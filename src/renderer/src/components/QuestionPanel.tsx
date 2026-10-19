@@ -1,4 +1,4 @@
-import { CircleHelp, Maximize2 } from "lucide-react";
+import { ChevronDown, ChevronUp, CircleHelp, Maximize2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import type { DesktopSettings, QuestionItem, QuestionRequest } from "../../../shared/protocol";
 import { useDesktopStore } from "../store";
@@ -77,6 +77,9 @@ export function singleClickSubmitAnswers(questions: QuestionItem[], drafts: Ques
  * 选项自动标注「（推荐）」——与 ask_question 工具描述的约定一致：模型把最推荐
  * 的选项放在第一位。
  *
+ * 面板浮在输入栏上方、会盖住最新消息，所以右上角带折叠开关：收起后只留一行（步骤
+ * 标签 + 题目 + 页码），要作答时再展开；作答草稿存在组件状态里，折叠不丢答案。
+ *
  * 注：选项是否存在只看 item.options（主进程 normalizeQuestionItem 已保证
  * 「有选项就是选择题」），面板不再依赖模型是否写了 type。
  */
@@ -84,6 +87,8 @@ export function QuestionPanel({ request, onOpenDetail, rootRef }: { request: Que
   const [drafts, setDrafts] = useState<QuestionDraft[]>(() => request.questions.map(() => emptyQuestionDraft()));
   const [current, setCurrent] = useState(0);
   const [submitting, setSubmitting] = useState(false);
+  // 折叠态：只留 header 一行，让用户腾出视野去看被面板挡住的对话内容。
+  const [collapsed, setCollapsed] = useState(false);
   // 移交出口（handoffOption）的两段式状态：展开实施模型选择行；选中模型存
   // 「provider/id」字符串（下拉 value），提交时再拆回引用。
   const [handoffOpen, setHandoffOpen] = useState(false);
@@ -101,6 +106,7 @@ export function QuestionPanel({ request, onOpenDetail, rootRef }: { request: Que
     setDrafts(request.questions.map(() => emptyQuestionDraft()));
     setCurrent(0);
     setSubmitting(false);
+    setCollapsed(false);
     setHandoffOpen(false);
     setHandoffModel("");
   }, [request.id, request.questions]);
@@ -110,8 +116,10 @@ export function QuestionPanel({ request, onOpenDetail, rootRef }: { request: Que
     if (handoffOpen) handoffSelectRef.current?.focus();
   }, [handoffOpen]);
 
-  // 翻页/挂载后聚焦当前题第一个可交互元素（选择题聚焦首选项，文本题聚焦输入框）。
+  // 翻页/挂载/展开后聚焦当前题第一个可交互元素（选择题聚焦首选项，文本题聚焦输入框）。
+  // 折叠时正文未渲染，跳过以免焦点落到已卸载的节点上。
   useEffect(() => {
+    if (collapsed) return;
     const item = request.questions[current];
     if (!item) return;
     if (item.options.length > 0) {
@@ -119,7 +127,7 @@ export function QuestionPanel({ request, onOpenDetail, rootRef }: { request: Que
     } else {
       inputRef.current?.focus();
     }
-  }, [current, request.questions]);
+  }, [current, request.questions, collapsed]);
 
   async function resolve(answers?: string[], model?: { provider: string; id: string }): Promise<void> {
     setSubmitting(true);
@@ -265,16 +273,31 @@ export function QuestionPanel({ request, onOpenDetail, rootRef }: { request: Que
   }
 
   return (
-    <div ref={rootRef} className="question-panel" data-pane="question-panel" role="form" aria-label="AI 提问">
-      <header className="question-panel-header">
+    <div ref={rootRef} className="question-panel" data-pane="question-panel" data-collapsed={collapsed ? "true" : "false"} role="form" aria-label="AI 提问">
+      <header className="question-panel-header" onClick={collapsed ? () => setCollapsed(false) : undefined}>
         <span className="question-step-tag">{isLast ? "最后一步" : "下一步"}</span>
         <h2 className="question-title">{item.text}</h2>
         <div className="question-pager">
           <span>{current + 1} / {request.questions.length}</span>
-          <button type="button" aria-label="上一题" disabled={current === 0 || submitting || handoffOpen} onClick={() => setCurrent((value) => Math.max(0, value - 1))}>◀</button>
-          <button type="button" aria-label="下一题" disabled={isLast || submitting || handoffOpen} onClick={() => setCurrent((value) => Math.min(request.questions.length - 1, value + 1))}>▶</button>
+          {!collapsed && (
+            <>
+              <button type="button" aria-label="上一题" disabled={current === 0 || submitting || handoffOpen} onClick={() => setCurrent((value) => Math.max(0, value - 1))}>◀</button>
+              <button type="button" aria-label="下一题" disabled={isLast || submitting || handoffOpen} onClick={() => setCurrent((value) => Math.min(request.questions.length - 1, value + 1))}>▶</button>
+            </>
+          )}
         </div>
+        <button
+          type="button"
+          className="question-collapse"
+          aria-expanded={!collapsed}
+          aria-label={collapsed ? "展开问题面板" : "收起问题面板"}
+          title={collapsed ? "展开问题面板" : "收起到一行，不遮挡对话"}
+          onClick={(event) => { event.stopPropagation(); setCollapsed((value) => !value); }}
+        >
+          {collapsed ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+        </button>
       </header>
+      {!collapsed && (<>
       {detailPreview && (
         <div className="question-detail" aria-label="问题详情">
           <RichContent artifactPrefix="question-detail" onOpenArtifact={() => undefined}>{detailPreview.preview}</RichContent>
@@ -357,6 +380,7 @@ export function QuestionPanel({ request, onOpenDetail, rootRef }: { request: Que
           </button>
         </div>
       </footer>
+      </>)}
     </div>
   );
 }
