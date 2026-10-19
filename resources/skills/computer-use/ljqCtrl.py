@@ -114,15 +114,39 @@ def ListWindows(visible_only: bool = True):
     win32gui.EnumWindows(each, None)
     return rows
 
-def FindWindow(name: str, exact: bool = False, class_name=None, visible_only: bool = True) -> int:
-    """按标题（默认子串、大小写不敏感）或类名找窗口，返回 hwnd。找不到抛 RuntimeError。"""
+def FindWindowMatches(name: str, class_name=None, visible_only: bool = True, limit: int = 8):
+    """按标题找窗口，返回**候选列表**（不静默选第一个）。
+
+    排序：**精确同名优先**，其次子串匹配；同组内保持 EnumWindows 的 z-order。
+    为什么：标题子串命中多个窗口很常见（"微信" 同时命中主窗口与聊天窗口、同名多开的
+    浏览器），旧实现静默取第一个，工具层和模型都无从发现「可能操作错了窗口」。
+
+    返回 `[{hwnd, title, class, exact}]`，找不到返回空列表。
+    """
     needle = str(name).lower()
+    exact_rows, partial_rows = [], []
     for row in ListWindows(visible_only):
         title = row["title"] or ""
-        ok = (title == name) if exact else (needle in title.lower())
-        if ok and (class_name is None or row["class"] == class_name):
-            return int(row["hwnd"])
-    raise RuntimeError(f"window not found: {name!r}")
+        if class_name is not None and row["class"] != class_name:
+            continue
+        if title == name:
+            exact_rows.append({**row, "exact": True})
+        elif needle and needle in title.lower():
+            partial_rows.append({**row, "exact": False})
+    return (exact_rows + partial_rows)[:limit]
+
+def FindWindow(name: str, exact: bool = False, class_name=None, visible_only: bool = True) -> int:
+    """按标题（默认子串、大小写不敏感；**精确同名优先**）或类名找窗口，返回 hwnd。
+
+    找不到抛 RuntimeError。需要知道是否有多候选请用 `FindWindowMatches`
+    （工具层靠它把「同名多窗口」告诉模型）。
+    """
+    rows = FindWindowMatches(name, class_name=class_name, visible_only=visible_only)
+    if exact:
+        rows = [r for r in rows if r["exact"]]
+    if not rows:
+        raise RuntimeError(f"window not found: {name!r}")
+    return int(rows[0]["hwnd"])
 
 def Foreground():
     """当前前台窗口信息。操作后核对它可发现焦点被抢/丢失。

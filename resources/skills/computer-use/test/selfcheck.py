@@ -8,7 +8,7 @@
 设计纪律（重要）：
 - **只碰自己造的窗口**：全部用例都在自己 new 出来的 Tk 窗口上做，绝不操作第三方应用窗口。
 - **跑完就收拾**：destroy 所有自建窗口，并把前台恢复成运行前的那个窗口。
-- **分档可跑**：--printwindow / --click / --screenshot / --ocr / --uia / --all。
+- **分档可跑**：--printwindow / --bg / --click / --guard / --find / --screenshot / --ocr / --uia / --all。
 - 输出 `[PASS]/[FAIL]` 行 + 末尾 JSON 摘要；有 FAIL 时退出码为 1。
 
 依赖：pywin32 + pillow（基础）；--ocr 需要 rapidocr-onnxruntime；--uia 需要 uiautomation。
@@ -21,10 +21,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
+import subprocess
 import sys
-import threading
+import tempfile
 import time
-import tkinter as tk
 from pathlib import Path
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
@@ -38,12 +39,6 @@ import ljqCtrl  # noqa: E402
 from PIL import Image  # noqa: E402
 
 RESULTS: list[dict] = []
-BG = "#202020"
-PANEL_IDLE = "#2d2d2d"
-PANEL_HIT = "#27ae60"
-COVER_COLOR = "#c02020"
-BUTTON_TEXT = "selfcheck-button"
-
 
 def check(name: str, ok: bool, detail: str = "") -> bool:
     RESULTS.append({"check": name, "ok": bool(ok), "detail": detail})
@@ -52,79 +47,151 @@ def check(name: str, ok: bool, detail: str = "") -> bool:
     return bool(ok)
 
 
-class Harness:
-    """一棵自建 Tk 窗口 + 一个跑在后台线程里的检查流程（Tk 必须占主线程）。"""
+CHILD_SCRIPT = r"""
+import sys
+import tkinter as tk
 
-    def __init__(self, plan):
-        self.plan = plan
-        self.result: dict = {}
-        self.prev_fg = win32gui.GetForegroundWindow()
-        self.clicks: list[float] = []
-        self.ocr_text = "selfcheck确定取消"
+clicks_path = sys.argv[1]
 
-    def build(self) -> tk.Tk:
-        root = tk.Tk()
-        root.title("PI-CU-SELFCHECK")
-        root.geometry("560x360+160+160")
-        root.configure(bg=BG)
-        self.panel = tk.Frame(root, bg=PANEL_IDLE, width=500, height=90)
-        self.panel.place(x=30, y=240)
-        tk.Label(root, text=self.ocr_text, bg=BG, fg="#e6e6e6").place(x=30, y=180)
-        tk.Button(root, text="点我", width=10, height=2, command=self._on_click).place(x=30, y=30)
-        # 遮挡用窗口：默认隐藏，--bg 用例里用 Win32 抬到最上面（不通过 Tk 线程）
-        self.cover = tk.Toplevel(root)
-        self.cover.title("PI-CU-COVER")
-        self.cover.geometry("480x300+200+200")
-        self.cover.configure(bg=COVER_COLOR)
-        self.cover.withdraw()
-        root.update()
-        self.root = root
-        self.hwnd = win32gui.FindWindow(None, "PI-CU-SELFCHECK")
+root = tk.Tk()
+root.title("PI-CU-SELFCHECK")
+root.geometry("560x360+160+160")
+root.configure(bg="#202020")
+panel = tk.Frame(root, bg="#2d2d2d", width=500, height=90)
+panel.place(x=30, y=240)
+tk.Label(root, text="selfcheck确定取消", bg="#202020", fg="#e6e6e6").place(x=30, y=180)
+
+
+def mark():
+    panel.configure(bg="#27ae60")
+    try:
+        with open(clicks_path, "a", encoding="utf-8") as fh:
+            fh.write("click" + chr(10))
+    except Exception:
+        pass
+
+
+tk.Button(root, text="点我", width=10, height=2, command=mark).place(x=30, y=30)
+
+# 遮挡用窗口（--bg）：默认隐藏，父进程用 Win32 ShowWindow/SetWindowPos 抬到最上面
+cover = tk.Toplevel(root)
+cover.title("PI-CU-COVER")
+cover.geometry("480x300+200+200")
+cover.configure(bg="#c02020")
+cover.withdraw()
+
+# 同名干扰窗口（--find）：验证「精确同名优先」，默认隐藏
+extra = tk.Toplevel(root)
+extra.title("PI-CU-SELFCHECK - 2")
+extra.geometry("300x200+800+200")
+extra.withdraw()
+
+root.update()
+import ctypes
+h = int(ctypes.windll.user32.GetAncestor(int(root.winfo_id()), 2) or root.winfo_id())
+print("HWND", h, flush=True)
+root.mainloop()
+"""
+
+
+class WindowChild:
+    """**独立进程**里的被测窗口（父进程不再持有 Tk）。
+
+    为什么必须换进程：Tk 只能在自己的主线程里跑，而检查流程要调用 PrintWindow /
+    ImageGrab 这类同步 Win32 API。把窗口放在子进程后，父进程变成纯同步脚本——
+    既贴近真实场景（目标窗口本来就在别的进程），也避开了「工作者线程 + Tk 主循环 +
+    PrintWindow」三者在同一进程里的死锁（实测 4/5 复现：PrintWindow 已返回、worker 已
+    finish，Tk 主循环却再也不派发定时器）。
+    """
+
+    def __init__(self):
+        self.dir = tempfile.mkdtemp(prefix="cu-selfcheck-")
+        self.clicks_path = os.path.join(self.dir, "clicks.txt")
+        self.proc = subprocess.Popen(
+            [sys.executable, "-X", "utf8", "-c", CHILD_SCRIPT, self.clicks_path],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, encoding="utf-8"
+        )
+        self.hwnd = 0
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            line = self.proc.stdout.readline()
+            if not line:
+                break
+            if line.startswith("HWND "):
+                self.hwnd = int(line.split()[1])
+                break
+        if not self.hwnd:
+            try:
+                self.proc.kill()
+                self.proc.wait(timeout=5)
+            except Exception:
+                pass
+            shutil.rmtree(self.dir, ignore_errors=True)
+            raise RuntimeError("自建窗口进程启动失败（拿不到 HWND）")
         self.cover_hwnd = win32gui.FindWindow(None, "PI-CU-COVER")
-        return root
+        self.extra_hwnd = win32gui.FindWindow(None, "PI-CU-SELFCHECK - 2")
+        # 子进程窗口可能开在用户当前前台窗口后面：点击前的命中守卫会因此拒绝。
+        ljqCtrl.Activate(self.hwnd)
+        time.sleep(0.3)   # 等窗口画出来
 
-    def _on_click(self):
-        self.clicks.append(time.time())
-        self.panel.configure(bg=PANEL_HIT)
+    def click_count(self, wait: float = 1.5) -> int:
+        deadline = time.time() + wait
+        while True:
+            try:
+                with open(self.clicks_path, encoding="utf-8") as fh:
+                    n = sum(1 for line in fh if line.strip())
+            except Exception:
+                n = 0
+            if n or time.time() >= deadline:
+                return n
+            time.sleep(0.05)
 
-    def run_plan(self):
-        """在后台线程跑（Tk 的事件循环在主线程里转）。用 root.after 派发 done 回调。"""
-        time.sleep(0.5)
+    def panel_hit(self, wait: float = 1.5) -> bool:
+        """面板是否已经变成点击后的绿色（GrabWindowBg 是跨进程读取，父进程里安全）。"""
+        deadline = time.time() + wait
+        while True:
+            try:
+                img = ljqCtrl.GrabWindowBg(self.hwnd).convert("RGB")
+                px = img.getpixel((280, 280))
+                if abs(px[0] - 39) + abs(px[1] - 174) + abs(px[2] - 96) < 40:
+                    return True
+            except Exception:
+                pass
+            if time.time() >= deadline:
+                return False
+            time.sleep(0.05)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
         try:
-            self.result = self.plan(self) or {}
-        except Exception as exc:  # 单个用例炸了也要出报告
-            self.result = {"error": repr(exc)}
-        finally:
-            try:
-                self.root.after(0, self._finish)
-            except Exception:
-                pass
-
-    def _finish(self):
-        # 收拾：从面板颜色判断按钮回调是否真的被触发过（Tk 在主线程里才更新界面）
-        self.result["clicks"] = len(self.clicks)
-        self.result["panel_hit"] = str(self.panel.cget("bg")).lower() == PANEL_HIT
-        for widget in list(self.root.winfo_children()) + [self.cover]:
-            try:
-                widget.destroy()
-            except Exception:
-                pass
-        self.root.quit()
+            self.proc.kill()
+            self.proc.wait(timeout=5)
+        except Exception:
+            pass
+        shutil.rmtree(self.dir, ignore_errors=True)
 
 
 def with_harness(plan) -> dict:
-    h = Harness(plan)
-    root = h.build()
-    threading.Thread(target=h.run_plan, daemon=True).start()
-    root.mainloop()
+    prev_fg = win32gui.GetForegroundWindow()
     try:
-        root.destroy()
-    except Exception:
-        pass
-    time.sleep(0.3)
-    if h.prev_fg:
-        ljqCtrl.Activate(h.prev_fg, verify=False)   # 恢复用户原来的前台窗口
-    return h.result
+        h = WindowChild()
+    except Exception as exc:
+        return {"error": repr(exc)}
+    try:
+        try:
+            result = plan(h) or {}
+        except Exception as exc:  # 单个用例炸了也要出报告
+            result = {"error": repr(exc)}
+        result["clicks"] = h.click_count()
+        result["panel_hit"] = h.panel_hit()
+        return result
+    finally:
+        h.__exit__()
+        time.sleep(0.2)
+        if prev_fg:
+            ljqCtrl.Activate(prev_fg, verify=False)   # 恢复用户原来的前台窗口
 
 
 # ---------------------------------------------------------------- 用例
@@ -214,8 +281,11 @@ def check_click() -> None:
         r_static = ljqCtrl.Click(ox + 500, oy + 150, hwnd=hwnd)
         # 坐标点在别的窗口上（拿一个肯定不是本窗口的 hwnd 当"目标"）
         r_refused = ljqCtrl.Click(ox + 45, oy + 62, hwnd=win32gui.FindWindow(None, "Program Manager") or 0)
-        # 客户区外的点（标题栏上方）
-        r_titlebar = ljqCtrl.Click(ox + 45, oy - 12, hwnd=hwnd, guard=False)
+        # 客户区外的点：落在窗口左侧的桌面空白处。
+        # 注意**不要点标题栏**：点 caption 会让目标窗口进入「拖动」模态循环（Windows
+        # 接管鼠标直到下一次按键事件），Tk 主线程的 after 定时器随之停摆——实测
+        # 4 次里挂 2 次，现象是自检卡在 mainloop 不返回。桌面点击没有这个副作用。
+        r_titlebar = ljqCtrl.Click(ox - 60, oy + 100, hwnd=hwnd, guard=False)
         return {
             "button": {k: r_button[k] for k in ("verdict", "hit_ok", "client_changed", "client_diff_ratio", "client_change_source", "roi_changed", "fg_ok")},
             "button_ms": round(button_ms),
@@ -347,6 +417,37 @@ def check_guard() -> None:
     check("guard: TryGetClipboardText 读取不抛异常", r.get("clipboard_text_ok") is True, "")
 
 
+def check_find() -> None:
+    """窗口查找口径：**精确同名优先**，并能把「还有其它候选」报出来。
+
+    旧实现直接取 EnumWindows 第一个子串命中——同名多窗口（多开的浏览器/聊天窗口）
+    时会静默操作到别的窗口；这一组用例把它钉住。
+    """
+    def plan(h):
+        # 干扰窗口隐藏也不影响查找（visible_only=True 会过滤，所以先显出来）
+        win32gui.ShowWindow(h.extra_hwnd, 5)
+        time.sleep(0.3)
+        rows = ljqCtrl.FindWindowMatches("PI-CU-SELFCHECK")
+        picked = ljqCtrl.FindWindow("PI-CU-SELFCHECK")
+        exact_only = ljqCtrl.FindWindow("PI-CU-SELFCHECK", exact=True)
+        win32gui.ShowWindow(h.extra_hwnd, 0)
+        return {
+            "matches": [{"title": r["title"], "exact": r["exact"], "hwnd": r["hwnd"]} for r in rows],
+            "picked": picked,
+            "exact_only": exact_only,
+            "own_hwnd": h.hwnd,
+        }
+
+    r = with_harness(plan)
+    if r.get("error"):
+        check("find: 自检流程异常", False, r["error"])
+        return
+    matches = r["matches"]
+    check("find: 子串命中多个窗口时把所有候选报出来", len(matches) >= 2, json.dumps(matches, ensure_ascii=False))
+    check("find: 精确同名排在其他候选前面", bool(matches) and matches[0]["exact"] is True and matches[0]["hwnd"] == r["own_hwnd"], json.dumps(matches, ensure_ascii=False))
+    check("find: FindWindow 选中精确同名窗口（不再静默取第一个）", r["picked"] == r["own_hwnd"] and r["exact_only"] == r["own_hwnd"], f"picked={r['picked']} own={r['own_hwnd']}")
+
+
 def check_ocr() -> None:
     """ui_detect 的入参兼容：PIL 直传不该报错（旧版 rapidocr 会 LoadImageError），且不留临时文件。"""
     try:
@@ -406,6 +507,7 @@ CHECKS = {
     "bg": check_bg,
     "click": check_click,
     "guard": check_guard,
+    "find": check_find,
     "screenshot": check_screenshot,
     "ocr": check_ocr,
     "uia": check_uia,

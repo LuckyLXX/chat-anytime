@@ -14,7 +14,9 @@ import {
   buildComputerScript,
   buildComputerTools,
   describeComputerSpawnFailure,
+  describeWindowAmbiguity,
   locateLjqCtrlDir,
+  mapScreenshotPoint,
   parseComputerOutput,
   resetComputerPythonDetector,
   type ComputerToolDeps,
@@ -149,6 +151,113 @@ describe("locateLjqCtrlDir", () => {
   });
 });
 
+describe("coordinate mapping and window matching", () => {
+  it("maps screenshot coordinates back through the recorded scale", () => {
+    expect(mapScreenshotPoint(150, 100, 0.5)).toEqual({ x: 300, y: 200 });
+    expect(mapScreenshotPoint(151, 100, 0.5)).toEqual({ x: 302, y: 200 });
+    expect(mapScreenshotPoint(150, 100, 1)).toEqual({ x: 150, y: 100 });
+    expect(mapScreenshotPoint(150, 100, undefined)).toEqual({ x: 150, y: 100 });
+    expect(mapScreenshotPoint(150, 100, 0)).toEqual({ x: 150, y: 100 });
+  });
+
+  it("reports ambiguous title matches instead of silently picking one", () => {
+    const note = describeWindowAmbiguity({
+      title: "记事本",
+      hwnd: 11,
+      window_matches: 2,
+      window_candidates: [{ hwnd: 11, title: "记事本" }, { hwnd: 12, title: "记事本 - 2.txt" }]
+    });
+    expect(note).toContain("匹配到 2 个候选");
+    expect(note).toContain("hwnd=12「记事本 - 2.txt」");
+    expect(describeWindowAmbiguity({ hwnd: 11, window_matches: 1 })).toBe("");
+  });
+
+  it("scales a screenshot on request and keeps the coordinate contract visible", async () => {
+    const tools = buildComputerTools(makeDeps({ spawnPython: mockSpawn({
+      ok: true,
+      width: 280,
+      height: 180,
+      client_width: 560,
+      client_height: 360,
+      scale: 0.5,
+      origin: [10, 40],
+      title: "记事本",
+      mode: "background",
+      fg_ok: true,
+      png_b64: "aGVsbG8="
+    }) }));
+    const result = await tools[1]!.execute("id", { window: "记事本", maxWidth: 280 } as never, undefined, undefined, undefined as never) as { content: { text: string }[] };
+    const text = result.content[0]!.text;
+    expect(text).toContain("已按长边 280 缩放到 280×180（0.5×，客户区 560×360）");
+    expect(text).toContain("仍直接传这张图上的坐标");
+  });
+
+  it("warns when the screenshot is over the request image budget", async () => {
+    const tools = buildComputerTools(makeDeps({ spawnPython: mockSpawn({
+      ok: true, width: 1920, height: 1080, client_width: 1920, client_height: 1080, scale: 1, png_bytes: 2.4 * 1024 * 1024,
+      origin: [0, 0], title: "记事本", mode: "background", fg_ok: true, png_b64: ""
+    }) }));
+    const result = await tools[1]!.execute("id", { window: "记事本" } as never, undefined, undefined, undefined as never) as { content: { text: string }[] };
+    expect(result.content[0]!.text).toContain("超过请求层单图预算");
+    expect(result.content[0]!.text).toContain("maxWidth=1600");
+  });
+
+  it("passes the mapped client coordinates to the click and shows the conversion", async () => {
+    const scripts: string[] = [];
+    const spawn = vi.fn(async (_command: string[], script: string) => {
+      if (script.includes("cu-ok")) return { stdout: "cu-ok\n", stderr: "", code: 0 };
+      scripts.push(script);
+      const payload = script.includes("GrabWindowBest")
+        ? { ok: true, width: 280, height: 180, client_width: 560, client_height: 360, scale: 0.5, origin: [0, 0], title: "记事本", mode: "background", fg_ok: true, png_b64: "" }
+        : { ok: true, screen: [300, 200], title: "记事本", hit_ok: true, client_changed: false, client_diff_ratio: 0, roi_changed: false, fg_ok: true, fg_title_after: "记事本", verdict: "warn_static", advice: "x", client_size: [560, 360] };
+      return { stdout: `${CU_RESULT_MARKER}${JSON.stringify(payload)}\n`, stderr: "", code: 0 };
+    }) as unknown as PythonSpawn;
+    const tools = buildComputerTools(makeDeps({ spawnPython: spawn }));
+    await tools[1]!.execute("id", { window: "记事本", maxWidth: 280 } as never, undefined, undefined, undefined as never);
+    const result = await tools[2]!.execute("id", { window: "记事本", x: 150, y: 100 } as never, undefined, undefined, undefined as never) as { content: { text: string }[] };
+    const clickScript = scripts.find((item) => item.includes("ljqCtrl.Click"))!;
+    const args = JSON.parse(Buffer.from(/b64decode\("([A-Za-z0-9+/=]+)"\)/u.exec(clickScript)![1]!, "base64").toString("utf8"));
+    expect(args).toMatchObject({ x: 300, y: 200 });
+    expect(result.content[0]!.text).toContain("截图坐标 (150, 100) × 0.5 → 客户区 (300, 200)");
+  });
+
+  it("warns when the window was resized after the screenshot", async () => {
+    const spawn = vi.fn(async (_command: string[], script: string) => {
+      if (script.includes("cu-ok")) return { stdout: "cu-ok\n", stderr: "", code: 0 };
+      const payload = script.includes("GrabWindowBest")
+        ? { ok: true, width: 560, height: 360, client_width: 560, client_height: 360, scale: 1, origin: [0, 0], title: "记事本", mode: "background", fg_ok: true, png_b64: "" }
+        : { ok: true, screen: [10, 10], title: "记事本", hit_ok: true, client_changed: false, client_diff_ratio: 0, roi_changed: false, fg_ok: true, fg_title_after: "记事本", verdict: "warn_static", advice: "x", client_size: [400, 300] };
+      return { stdout: `${CU_RESULT_MARKER}${JSON.stringify(payload)}\n`, stderr: "", code: 0 };
+    }) as unknown as PythonSpawn;
+    const tools = buildComputerTools(makeDeps({ spawnPython: spawn }));
+    await tools[1]!.execute("id", { window: "记事本" } as never, undefined, undefined, undefined as never);
+    const result = await tools[2]!.execute("id", { window: "记事本", x: 10, y: 10 } as never, undefined, undefined, undefined as never) as { content: { text: string }[] };
+    expect(result.content[0]!.text).toContain("窗口自上次截图后尺寸变了（560×360 → 400×300）");
+  });
+
+  it("surfaces ambiguous title matches in a click receipt", async () => {
+    const tools = buildComputerTools(makeDeps({ spawnPython: mockSpawn({
+      ok: true,
+      screen: [10, 10],
+      title: "记事本",
+      hwnd: 11,
+      window_matches: 2,
+      window_candidates: [{ hwnd: 11, title: "记事本" }, { hwnd: 12, title: "记事本 - 2.txt" }],
+      hit_ok: true,
+      client_changed: false,
+      client_diff_ratio: 0,
+      roi_changed: false,
+      fg_ok: true,
+      fg_title_after: "记事本",
+      verdict: "warn_static",
+      advice: "x",
+      client_size: [560, 360]
+    }) }));
+    const result = await tools[2]!.execute("id", { window: "记事本", x: 10, y: 10 } as never, undefined, undefined, undefined as never) as { content: { text: string }[] };
+    expect(result.content[0]!.text).toContain("匹配到 2 个候选");
+  });
+});
+
 describe("buildComputerTools", () => {
   it("exposes the five tools with labels", () => {
     const tools = buildComputerTools(makeDeps({ spawnPython: mockSpawn({ ok: true }) }));
@@ -157,14 +266,14 @@ describe("buildComputerTools", () => {
 
   it("computer_windows formats the window list with a next-step hint", async () => {
     const tools = buildComputerTools(makeDeps({ spawnPython: mockSpawn({ ok: true, total: 2, windows: [
-      { hwnd: 11, title: "记事本", class: "Notepad", w: 800, h: 600, client_w: 784, client_h: 561, minimized: false, foreground: true },
-      { hwnd: 22, title: "微信", class: "Qt", w: 400, h: 700, client_w: 400, client_h: 700, minimized: true, foreground: false }
+      { hwnd: 11, title: "记事本", class: "Notepad", w: 800, h: 600, client_w: 784, client_h: 561, minimized: false, pid: 4321, foreground: true },
+      { hwnd: 22, title: "微信", class: "Qt", w: 400, h: 700, client_w: 400, client_h: 700, minimized: true, pid: 8765, foreground: false }
     ] }) }));
     const result = await tools[0]!.execute("id", {} as never, undefined, undefined, undefined as never) as { content: { text: string }[] };
     const text = result.content[0]!.text;
     expect(text).toContain("可见窗口 2 个");
-    expect(text).toContain("hwnd=11 [Notepad] 记事本 (客户区 784×561 · 窗口 800×600) · 前台");
-    expect(text).toContain("hwnd=22 [Qt] 微信 (已最小化 · 窗口 400×700)");
+    expect(text).toContain("hwnd=11 [Notepad] 记事本 (客户区 784×561 · 窗口 800×600) · 前台 · pid 4321");
+    expect(text).toContain("hwnd=22 [Qt] 微信 (已最小化 · 窗口 400×700) · pid 8765");
     expect(text).toContain("computer_screenshot");
   });
 
@@ -416,12 +525,12 @@ describe("buildComputerTools", () => {
     const typeScript = buildComputerScript("D:\\skill", OP_TYPE, { text: "你好", window: "记事本" });
     expect(typeScript).toContain("ljqCtrl.ForegroundGuard");
     expect(typeScript).toContain("ljqCtrl.TryGetClipboardText");
-    expect(typeScript).toContain("out(refused)");
+    expect(typeScript).toContain("out({**refused");
     // 旧实现直接在顶层备份剪贴板：剪贴板是图片时会抛异常，整次输入作废
     expect(typeScript).not.toContain("bak = ljqCtrl.GetClipboardText()");
     const pressScript = buildComputerScript("D:\\skill", OP_PRESS, { key: "ctrl+s", window: "记事本" });
     expect(pressScript).toContain("ljqCtrl.ForegroundGuard");
-    expect(pressScript).toContain("out(refused)");
+    expect(pressScript).toContain("out({**refused");
   });
 
   it("takes screenshots through the background-first entry", () => {

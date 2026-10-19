@@ -167,14 +167,19 @@ export function buildComputerScript(scriptDir: string, operation: string, args: 
     `ARGS = json.loads(base64.b64decode(${JSON.stringify(payload)}))`,
     "def out(p):",
     `    print(${JSON.stringify(CU_RESULT_MARKER)} + json.dumps(p, ensure_ascii=False))`,
-    "def resolve(w):",
+    "def resolve_info(w):",
     "    s = str(w)",
     "    if s.isdigit():",
     "        h = int(s)",
     "        if not ljqCtrl.win32gui.IsWindow(h):",
     "            raise RuntimeError('invalid hwnd: %d' % h)",
-    "        return h",
-    "    return ljqCtrl.FindWindow(s)",
+    "        return h, []",
+    "    m = ljqCtrl.FindWindowMatches(s)",
+    "    if not m:",
+    "        raise RuntimeError('window not found: %r' % s)",
+    "    return m[0]['hwnd'], m",
+    "def matches_payload(m):",
+    "    return {'window_matches': len(m), 'window_candidates': [{'hwnd': x['hwnd'], 'title': x['title']} for x in m[:4]]}",
     "try:",
     operation.split("\n").map((line) => (line ? `    ${line}` : "")).join("\n"),
     "except Exception as e:",
@@ -197,27 +202,39 @@ export const OP_WINDOWS = [
   "        cw, ch = ljqCtrl.ClientSize(r['hwnd'])",
   "    except Exception:",
   "        cw, ch = 0, 0",
-  "    items.append({'hwnd': r['hwnd'], 'title': r['title'], 'class': r['class'], 'w': rect[2] - rect[0], 'h': rect[3] - rect[1], 'client_w': cw, 'client_h': ch, 'minimized': ljqCtrl.IsMinimized(r['hwnd']), 'foreground': r['hwnd'] == fg})",
+  "    items.append({'hwnd': r['hwnd'], 'title': r['title'], 'class': r['class'], 'w': rect[2] - rect[0], 'h': rect[3] - rect[1], 'client_w': cw, 'client_h': ch, 'minimized': ljqCtrl.IsMinimized(r['hwnd']), 'pid': ljqCtrl.WindowPid(r['hwnd']), 'foreground': r['hwnd'] == fg})",
   "    if len(items) >= 60:",
   "        break",
   "out({'ok': True, 'windows': items, 'total': len(rows)})"
 ].join("\n");
 
 export const OP_SCREENSHOT = [
-  "hwnd = resolve(ARGS['window'])",
+  "hwnd, matches = resolve_info(ARGS['window'])",
   "img = ljqCtrl.GrabWindowBest(hwnd)   # 后台优先：不激活窗口、不受遮挡；最小化会先恢复",
+  "client_w, client_h = img.size",
+  "info = getattr(img, 'info', {}) or {}",
+  "mode = str(info.get('cu_mode') or 'foreground')",
+  "restored = bool(info.get('cu_restored'))",
+  "fg_ok = bool(info.get('cu_fg_ok', True))",
+  "fg_title = str(info.get('cu_fg_title') or '')",
+  "# 可选长边缩放：模型传了 maxWidth 才缩，并报出 scale 供工具侧换算点击坐标。",
+  "max_w = int(ARGS.get('maxWidth') or 0)",
+  "scale = 1.0",
+  "if 200 <= max_w < max(img.size):",
+  "    ratio = max_w / float(max(img.size))",
+  "    img = img.resize((max(1, int(round(img.size[0] * ratio))), max(1, int(round(img.size[1] * ratio)))), getattr(ljqCtrl.Image, 'LANCZOS', 1))",
+  "    scale = img.size[0] / float(client_w) if client_w else 1.0",
   "import io",
   "buf = io.BytesIO()",
   "img.save(buf, format='PNG')",
+  "png_bytes = len(buf.getvalue())",
   "ox, oy = ljqCtrl.ClientOrigin(hwnd)",
-  "info = getattr(img, 'info', {}) or {}",
-  "mode = str(info.get('cu_mode') or 'foreground')",
   "# cu_fg_ok=False 只在「前台截图」这一路才有意义：后台帧不受前台/遮挡影响。",
-  "out({'ok': True, 'width': img.size[0], 'height': img.size[1], 'origin': [ox, oy], 'title': ljqCtrl.win32gui.GetWindowText(hwnd), 'mode': mode, 'restored': bool(info.get('cu_restored')), 'fg_ok': bool(info.get('cu_fg_ok', True)), 'fg_title': str(info.get('cu_fg_title') or ''), 'png_b64': base64.b64encode(buf.getvalue()).decode('ascii')})"
+  "out({**{'ok': True, 'hwnd': hwnd, 'width': img.size[0], 'height': img.size[1], 'client_width': client_w, 'client_height': client_h, 'scale': round(scale, 6), 'png_bytes': png_bytes, 'origin': [ox, oy], 'title': ljqCtrl.win32gui.GetWindowText(hwnd), 'mode': mode, 'restored': restored, 'fg_ok': fg_ok, 'fg_title': fg_title, 'png_b64': base64.b64encode(buf.getvalue()).decode('ascii')}, **matches_payload(matches)})"
 ].join("\n");
 
 export const OP_CLICK = [
-  "hwnd = resolve(ARGS['window'])",
+  "hwnd, matches = resolve_info(ARGS['window'])",
   "ljqCtrl.Activate(hwnd)",
   "ox, oy = ljqCtrl.ClientOrigin(hwnd)",
   "x, y = ox + int(ARGS['x']), oy + int(ARGS['y'])",
@@ -226,15 +243,18 @@ export const OP_CLICK = [
   "# hwnd= 是关键：命中校验要拿它比对，否则「点到了别的窗口」永远发现不了。",
   "report = ljqCtrl.Click(x, y, hwnd=hwnd, double=(ARGS.get('button') == 'double'))",
   "report['title'] = title",
+  "report['hwnd'] = hwnd",
   "report['client'] = [int(ARGS['x']), int(ARGS['y'])]",
+  "report['client_size'] = list(ljqCtrl.ClientSize(hwnd))",
+  "report.update(matches_payload(matches))",
   "out(report)"
 ].join("\n");
 
 export const OP_TYPE = [
-  "hwnd = resolve(ARGS['window']) if ARGS.get('window') is not None else None",
+  "hwnd, matches = resolve_info(ARGS['window']) if ARGS.get('window') is not None else (None, [])",
   "refused = ljqCtrl.ForegroundGuard(hwnd, '输入') if hwnd else None",
   "if refused:",
-  "    out(refused)",
+  "    out({**refused, 'hwnd': hwnd, **matches_payload(matches)})",
   "else:",
   "    bak = ljqCtrl.TryGetClipboardText()   # 剪贴板是图片/文件时返回 None，不再炸掉整次输入",
   "    ljqCtrl.type_text(ARGS['text'])",
@@ -245,17 +265,17 @@ export const OP_TYPE = [
   "            ljqCtrl.SetClipboardText(bak)   # type_text borrows the clipboard; restore the user's content",
   "        except Exception:",
   "            pass",
-  "    out({'ok': True, 'typed': len(ARGS['text']), 'clipboard_restored': bak is not None, 'fg_title': ljqCtrl.Foreground()['title']})"
+  "    out({**{'ok': True, 'typed': len(ARGS['text']), 'clipboard_restored': bak is not None, 'hwnd': hwnd, 'fg_title': ljqCtrl.Foreground()['title'], 'title': ljqCtrl.safe_title(hwnd) if hwnd else ljqCtrl.Foreground()['title']}, **matches_payload(matches)})"
 ].join("\n");
 
 export const OP_PRESS = [
-  "hwnd = resolve(ARGS['window']) if ARGS.get('window') is not None else None",
+  "hwnd, matches = resolve_info(ARGS['window']) if ARGS.get('window') is not None else (None, [])",
   "refused = ljqCtrl.ForegroundGuard(hwnd, '发送按键') if hwnd else None",
   "if refused:",
-  "    out(refused)",
+  "    out({**refused, 'hwnd': hwnd, **matches_payload(matches)})",
   "else:",
   "    ljqCtrl.Press(ARGS['key'])",
-  "    out({'ok': True, 'key': ARGS['key'], 'fg_title': ljqCtrl.Foreground()['title']})"
+  "    out({**{'ok': True, 'key': ARGS['key'], 'hwnd': hwnd, 'fg_title': ljqCtrl.Foreground()['title'], 'title': ljqCtrl.safe_title(hwnd) if hwnd else ljqCtrl.Foreground()['title']}, **matches_payload(matches)})"
 ].join("\n");
 
 export interface ComputerOperationOutcome {
@@ -380,6 +400,35 @@ interface ClickReportView {
   roiChanged?: boolean;
   verdict?: unknown;
   advice?: unknown;
+  /** 截图被缩放过时的比例（1/undefined = 未缩放）：第一行要报出换算，坐标错位时才好排查。 */
+  scale?: number;
+  clientX?: unknown;
+  clientY?: unknown;
+}
+
+/** 一张截图的记忆（按窗口记录）：点击时把截图坐标换回客户区坐标，并检测窗口是否变过尺寸。 */
+export interface ScreenshotState {
+  scale: number;
+  clientW: number;
+  clientH: number;
+}
+
+/** 截图坐标 → 客户区坐标。scale 缺失/非法时按 1:1（未缩放截图的行为不变）。 */
+export function mapScreenshotPoint(x: number, y: number, scale: number | undefined): { x: number; y: number } {
+  const safe = typeof scale === "number" && Number.isFinite(scale) && scale > 0 ? scale : 1;
+  return safe === 1 ? { x: Math.round(x), y: Math.round(y) } : { x: Math.round(x / safe), y: Math.round(y / safe) };
+}
+
+/**
+ * 「标题命中多个窗口」的提示：FindWindow 精确同名优先、否则取最上层，但工具层必须
+ * 把「还有别的候选」说出来——否则模型以为操作的是 A，实际动的是 B，无从发现。
+ */
+export function describeWindowAmbiguity(data: Record<string, unknown>): string {
+  const matches = typeof data.window_matches === "number" ? data.window_matches : 0;
+  if (matches <= 1) return "";
+  const candidates = Array.isArray(data.window_candidates) ? (data.window_candidates as Record<string, unknown>[]) : [];
+  const list = candidates.map((item) => `hwnd=${String(item.hwnd)}「${String(item.title)}」`).join("、");
+  return `⚠️ 窗口标题匹配到 ${matches} 个候选（${list}），本次用的是最上层的 hwnd=${String(data.hwnd ?? "?")}；如果不是目标窗口，请把 window 改成 hwnd 再试。`;
 }
 
 function verdictIcon(ok: boolean | undefined): string {
@@ -400,7 +449,10 @@ export function describeClickReport(report: ClickReportView): string {
   const client = `${String(report.x ?? "?")}, ${String(report.y ?? "?")}`;
   const screen = Array.isArray(report.screen) ? (report.screen as number[]).join(", ") : "?";
   const title = String(report.title ?? report.window ?? "");
-  const lines = [`${action}「${title}」客户区 (${client}) → 屏幕 (${screen})。`];
+  const point = typeof report.scale === "number" && report.scale !== 1
+    ? `截图坐标 (${client}) × ${String(report.scale)} → 客户区 (${String(report.clientX ?? "?")}, ${String(report.clientY ?? "?")})`
+    : `客户区 (${client})`;
+  const lines = [`${action}「${title}」${point} → 屏幕 (${screen})。`];
   const hit = report.hitOk === false
     ? `⚠️ 该坐标上的顶层窗口是「${String(report.hitTitle ?? "?")}」，不是目标窗口`
     : `${verdictIcon(true)} 命中目标窗口`;
@@ -423,6 +475,10 @@ export function buildComputerTools(deps: ComputerToolDeps): ToolDefinition[] {
   const spawn = deps.spawnPython ?? defaultSpawnPython;
   const detect = createPythonDetector(spawn);
   const context: ComputerExecuteContext = { deps, spawn, detect };
+  // 每个窗口的上一张截图（缩放比例 + 当时的客户区尺寸）：点击时靠它把截图坐标
+  // 换回客户区坐标，并在窗口变过尺寸时提醒模型。存在会话级闭包里，不跨会话。
+  const screenshotStates = new Map<string, ScreenshotState>();
+  const stateKey = (window: unknown) => String(window ?? "").trim().toLowerCase();
 
   const windows = defineTool({
     name: "computer_windows",
@@ -437,11 +493,12 @@ export function buildComputerTools(deps: ComputerToolDeps): ToolDefinition[] {
       const windowsList = Array.isArray(outcome.data?.windows) ? (outcome.data!.windows as Record<string, unknown>[]) : [];
       const lines = windowsList.map((item) => {
         const fg = item.foreground ? " · 前台" : "";
+        const pid = item.pid === undefined ? "" : ` · pid ${String(item.pid)}`;
         const minimized = item.minimized === true;
         const size = minimized
           ? `已最小化 · 窗口 ${String(item.w)}×${String(item.h)}`
           : `客户区 ${String(item.client_w)}×${String(item.client_h)} · 窗口 ${String(item.w)}×${String(item.h)}`;
-        return `hwnd=${String(item.hwnd)} [${String(item.class)}] ${String(item.title).slice(0, 48)} (${size})${fg}`;
+        return `hwnd=${String(item.hwnd)} [${String(item.class)}] ${String(item.title).slice(0, 48)} (${size})${fg}${pid}`;
       });
       const total = typeof outcome.data?.total === "number" ? String(outcome.data.total) : "?";
       const hint = "\n下一步：computer_screenshot 截图看清窗口内容（坐标用截图内坐标）。";
@@ -454,20 +511,32 @@ export function buildComputerTools(deps: ComputerToolDeps): ToolDefinition[] {
     label: "窗口截图",
     description: SCREENSHOT_TOOL_TEXT,
     parameters: Type.Object({
-      window: WINDOW_PARAM
+      window: WINDOW_PARAM,
+      maxWidth: Type.Optional(Type.Number({
+        minimum: 200,
+        maximum: 4096,
+        description: "可选：把长边缩到这个像素上限（如 1600）以省 token；不传 = 原尺寸 1:1。传了以后点击仍直接用这张图的坐标，工具会按记录的比例换算。"
+      }))
     }),
     async execute(_id, params) {
-      const outcome = await runComputerOperation(context, OP_SCREENSHOT, { window: params?.window });
+      const outcome = await runComputerOperation(context, OP_SCREENSHOT, { window: params?.window, maxWidth: params?.maxWidth });
       if (!outcome.ok) throw new Error(outcome.error);
-      const width = outcome.data?.width;
-      const height = outcome.data?.height;
-      const origin = Array.isArray(outcome.data?.origin) ? (outcome.data!.origin as number[]).join(", ") : "?";
-      const title = String(outcome.data?.title ?? "");
-      const fgOk = outcome.data?.fg_ok !== false;
-      const fgTitle = String(outcome.data?.fg_title ?? "");
-      const mode = String(outcome.data?.mode ?? "foreground");
-      const restored = outcome.data?.restored === true;
-      const pngB64 = typeof outcome.data?.png_b64 === "string" ? (outcome.data!.png_b64 as string) : "";
+      const data = outcome.data ?? {};
+      const width = data.width;
+      const height = data.height;
+      const origin = Array.isArray(data.origin) ? (data.origin as number[]).join(", ") : "?";
+      const title = String(data.title ?? "");
+      const fgOk = data.fg_ok !== false;
+      const fgTitle = String(data.fg_title ?? "");
+      const mode = String(data.mode ?? "foreground");
+      const restored = data.restored === true;
+      const scale = typeof data.scale === "number" ? data.scale : 1;
+      const clientW = typeof data.client_width === "number" ? data.client_width : Number(width);
+      const clientH = typeof data.client_height === "number" ? data.client_height : Number(height);
+      const pngBytes = typeof data.png_bytes === "number" ? data.png_bytes : 0;
+      const pngB64 = typeof data.png_b64 === "string" ? (data.png_b64 as string) : "";
+      // 记下这张图的缩放与客户区尺寸：之后点击该窗口时按它换算坐标。
+      screenshotStates.set(stateKey(params?.window), { scale, clientW, clientH });
       let savedPath: string | undefined;
       if (pngB64 && deps.saveScreenshot && deps.workspace()) {
         try {
@@ -480,16 +549,23 @@ export function buildComputerTools(deps: ComputerToolDeps): ToolDefinition[] {
         ? "后台渲染截图，未抢占前台"
         : "前台截图，已激活窗口";
       const restoreNote = restored ? "窗口原本最小化，已恢复显示。" : "";
+      const scaleNote = scale !== 1
+        ? `这张图已按长边 ${String(params?.maxWidth)} 缩放到 ${String(width)}×${String(height)}（${String(scale)}×，客户区 ${String(clientW)}×${String(clientH)}）：computer_click 仍直接传这张图上的坐标，工具会自动换算。`
+        : "";
+      const oversizeNote = pngBytes > 1.5 * 1024 * 1024
+        ? `⚠️ 这张图 ${String(Math.round(pngBytes / 1024 / 1024 * 10) / 10)} MB，超过请求层单图预算（1.5MB），上游会再压一次——你看到的可能是二次缩放图，点击坐标会偏。请传 maxWidth=1600 重新截图。`
+        : "";
       const fgWarning = fgOk
         ? ""
         : `⚠️ 截图时前台是「${fgTitle}」不是目标窗口「${title}」——前台截图只截目标客户区那块屏幕区域，前台被抢时拿到的是**别的窗口的画面**。先重新 computer_screenshot 确认，不要基于这张图算坐标。`;
-      const text = `${fgWarning ? `${fgWarning}\n` : ""}已截取窗口「${title}」（${String(width)}×${String(height)}，${how}）。${restoreNote}点击坐标就用这张截图的坐标系：computer_click { window, x, y }。${savedPath ? `截图已保存到 ${savedPath}；` : ""}当前模型不支持图片输入时可调用 recognize_images 工具${savedPath ? "识别该文件" : "识别截图"}。客户区屏幕原点：(${origin})。`;
+      const ambiguity = describeWindowAmbiguity(data);
+      const text = `${fgWarning ? `${fgWarning}\n` : ""}${oversizeNote ? `${oversizeNote}\n` : ""}已截取窗口「${title}」（${String(width)}×${String(height)}，${how}）。${restoreNote}${scaleNote}点击坐标就用这张截图的坐标系：computer_click { window, x, y }。${savedPath ? `截图已保存到 ${savedPath}；` : ""}当前模型不支持图片输入时可调用 recognize_images 工具${savedPath ? "识别该文件" : "识别截图"}。客户区屏幕原点：(${origin})。${ambiguity ? `\n${ambiguity}` : ""}`;
       return {
         content: [
           { type: "text" as const, text },
           ...(pngB64 ? [{ type: "image" as const, data: pngB64, mimeType: "image/png" as const }] : [])
         ],
-        details: { width, height, ...(savedPath ? { savedPath } : {}) }
+        details: { width, height, scale, ...(savedPath ? { savedPath } : {}) }
       };
     }
   });
@@ -505,14 +581,20 @@ export function buildComputerTools(deps: ComputerToolDeps): ToolDefinition[] {
       button: Type.Optional(Type.Union([Type.Literal("left"), Type.Literal("double")], { description: "left 单击（默认，带像素变化验证）/ double 双击" }))
     }),
     async execute(_id, params) {
-      const outcome = await runComputerOperation(context, OP_CLICK, { window: params?.window, x: params?.x, y: params?.y, button: params?.button });
+      // 截图可能被缩放过（maxWidth）：模型给的是**截图坐标**，先按记录的比例换回客户区坐标。
+      const state = screenshotStates.get(stateKey(params?.window));
+      const point = mapScreenshotPoint(Number(params?.x ?? 0), Number(params?.y ?? 0), state?.scale);
+      const outcome = await runComputerOperation(context, OP_CLICK, { window: params?.window, x: point.x, y: point.y, button: params?.button });
+      const mappingText = state && state.scale !== 1
+        ? `截图 (${String(params?.x)}, ${String(params?.y)}) × ${String(state.scale)} → 客户区 (${point.x}, ${point.y})`
+        : `客户区 (${point.x}, ${point.y})`;
       // 点击前守卫拦下（坐标上坐的是别的应用的窗口）：这是可修正的模型错误，不是崩溃——
       // 报错文案里已经写了怎么办，模型据此重新截图算坐标即可。
       if (outcome.data?.verdict === "refused_hit") {
         const notes = outcome.notes.length ? `\n\n诊断输出：\n${outcome.notes.join("\n")}` : "";
-        // 坐标要两个坐标系都报：模型给的是客户区坐标，守卫看到的是屏幕坐标，只报后者会让人对不上号。
+        // 坐标要两个坐标系都报：模型给的是截图坐标，守卫看到的是屏幕坐标，只报后者会让人对不上号。
         const screen = Array.isArray(outcome.data?.screen) ? (outcome.data!.screen as number[]).join(", ") : "?";
-        const mapping = `坐标映射：客户区 (${String(params?.x)}, ${String(params?.y)}) → 屏幕 (${screen})。\n`;
+        const mapping = `坐标映射：${mappingText} → 屏幕 (${screen})。\n`;
         throw new Error(`${mapping}${outcome.error ?? "点击已被安全守卫拦下"}${notes}`);
       }
       if (!outcome.ok) throw new Error(outcome.error);
@@ -522,6 +604,12 @@ export function buildComputerTools(deps: ComputerToolDeps): ToolDefinition[] {
       const tail = verdict === "changed"
         ? "\n关键动作建议再用 computer_screenshot 确认效果。"
         : "";
+      // 窗口自上次截图后改过尺寸：截图坐标系已经不是当前坐标系，坐标可能整体偏移。
+      const size = Array.isArray(data.client_size) ? (data.client_size as unknown[]).map(Number) : undefined;
+      const sizeNote = state && size && size.length === 2 && (state.clientW !== size[0] || state.clientH !== size[1])
+        ? `⚠️ 窗口自上次截图后尺寸变了（${state.clientW}×${state.clientH} → ${String(size[0])}×${String(size[1])}）：坐标可能已偏移，建议重新截图再点。`
+        : "";
+      const ambiguity = describeWindowAmbiguity(data);
       const text = `${
         describeClickReport({
           window: params?.window as string,
@@ -541,9 +629,12 @@ export function buildComputerTools(deps: ComputerToolDeps): ToolDefinition[] {
           clientChangeSource: data.client_change_source,
           roiChanged: data.roi_changed as boolean | undefined,
           verdict: data.verdict,
-          advice: data.advice
+          advice: data.advice,
+          scale: state?.scale,
+          clientX: point.x,
+          clientY: point.y
         })
-      }${tail}${notes}`;
+      }${tail}${sizeNote ? `\n${sizeNote}` : ""}${ambiguity ? `\n${ambiguity}` : ""}${notes}`;
       return { content: [{ type: "text" as const, text }], details: {} };
     }
   });
@@ -566,7 +657,9 @@ export function buildComputerTools(deps: ComputerToolDeps): ToolDefinition[] {
       if (!outcome.ok) throw new Error(outcome.error);
       const target = String(outcome.data?.fg_title ?? "");
       const restored = outcome.data?.clipboard_restored === false ? "（剪贴板原本不是文本，未恢复）" : "（剪贴板已恢复）";
-      return { content: [{ type: "text" as const, text: `已向${target ? `「${target}」` : "当前前台窗口"}输入 ${String(outcome.data?.typed ?? String(params?.text ?? "").length)} 个字符${restored}。验证：截图确认文本已进入输入框。` }], details: {} };
+      const ambiguity = describeWindowAmbiguity(outcome.data ?? {});
+      return { content: [{ type: "text" as const, text: `已向${target ? `「${target}」` : "当前前台窗口"}输入 ${String(outcome.data?.typed ?? String(params?.text ?? "").length)} 个字符${restored}。验证：截图确认文本已进入输入框。${ambiguity ? `
+${ambiguity}` : ""}` }], details: {} };
     }
   });
 
@@ -587,7 +680,9 @@ export function buildComputerTools(deps: ComputerToolDeps): ToolDefinition[] {
       }
       if (!outcome.ok) throw new Error(outcome.error);
       const target = String(outcome.data?.fg_title ?? "");
-      return { content: [{ type: "text" as const, text: `已发送按键 ${String(params?.key)}${target ? `（前台「${target}」）` : ""}。验证：截图确认按键效果（弹窗/保存/导航等）。` }], details: {} };
+      const ambiguity = describeWindowAmbiguity(outcome.data ?? {});
+      return { content: [{ type: "text" as const, text: `已发送按键 ${String(params?.key)}${target ? `（前台「${target}」）` : ""}。验证：截图确认按键效果（弹窗/保存/导航等）。${ambiguity ? `
+${ambiguity}` : ""}` }], details: {} };
     }
   });
 

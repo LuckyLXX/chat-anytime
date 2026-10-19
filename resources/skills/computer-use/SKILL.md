@@ -66,7 +66,8 @@ import ljqCtrl
 | API | 说明 |
 |---|---|
 | `ljqCtrl.ListWindows()` | 枚举可见顶层窗口 → `[{hwnd,title,class,rect,visible}]`，**永远第一步**（rect 是含边框窗口矩形，不是客户区） |
-| `ljqCtrl.FindWindow(标题子串)` | 找窗口 → hwnd；找不到抛错 |
+| `ljqCtrl.FindWindow(标题子串)` | 找窗口 → hwnd；**精确同名优先**，找不到抛错 |
+| `ljqCtrl.FindWindowMatches(标题子串)` | 返回全部候选 `[{hwnd,title,class,exact}]`（精确同名排前）——同名多窗口时用它核对，别靠猜 |
 | `ljqCtrl.RootWindow(hwnd)` / `WindowAt(x, y)` | 顶层窗口句柄 / 屏幕点上真正躺着的顶层窗口（命中校验用） |
 | `ljqCtrl.Foreground()` | 当前前台窗口 `{hwnd,title,class}` |
 | `ljqCtrl.Activate(hwnd, verify=True)` | 切前台（自动恢复最小化）；**switch 失败会打印 `[Activate] ⚠️` 警告**——注意 Windows 会拒绝后台进程的前台请求 |
@@ -126,6 +127,8 @@ CLI：`python ui_detect.py shot.png --json`。**附送 OCR 不要单独再跑**�
 ## 5. 标准工作流（每一步都要验证）
 
 1. **探测**：`ListWindows()`（或内置 `computer_windows`）找目标窗口（按 title 子串/class 匹配），核对 hwnd 与是否最小化。
+   **标题子串可能命中多个窗口**（同名多开、主窗口+聊天窗口）：用 `FindWindowMatches` 看候选，
+   或直接用 hwnd 指定——内置工具会在回执里提示「匹配到 N 个候选」，不要忽略。
 2. **看屏**：`GrabWindowBest(hwnd)` 截图存 `<工作区>/.pidesktop/cu-shot.png`（固定名覆盖）。
    它**默认走后台渲染**（不抢焦点、不受遮挡），窗口最小化会先恢复；`img.info['cu_mode']`
    是 `background` 还是 `foreground`。前台截图（`GrabWindow`）要先看 `cu_fg_ok`：为 False
@@ -215,6 +218,10 @@ UIA 控件树（原生应用最稳、免坐标）→ 视觉检测 OCR/YOLO（有
 （ctrl+tab）时先确认前台是目标窗口（看回执 `fg_ok`），否则快捷键会发到别的应用去。
 
 **看不到的窗口**：先试 `GrabWindowBg`（不抢用户焦点）；全黑才改用 `GrabWindow`（会抢前台）。
+
+**大窗口截图省 token**：内置 `computer_screenshot` 传 `maxWidth`（如 1600）会把长边缩下来，
+它同时记住这张图的缩放比例——`computer_click` 仍直接用**这张图上的坐标**，工具负责换算。
+自己写脚本时没有这层换算，缩放后必须手动把截图坐标除以比例再点击；不确定就别缩放。
 
 **纯文本模型**：截图后用 `recognize_images` 读图（或 `ui_detect.py --json` 拿带坐标的元素列表，
 比把整张图丢给视觉模型更省）。
