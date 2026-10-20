@@ -2,16 +2,18 @@ import type { DivBubbleMode, UiThemeContext, UiThemePalette } from "../shared/pr
 
 const htmlFence = "```";
 
-/** always 档：所有正常最终回复强制且只输出一个 Div 气泡。 */
+/** always 档：所有正常最终回复强制且只输出一个 Div 气泡（气泡即整条回答）。 */
 export const DIV_MODE_PROMPT = `
 【Div 气泡模式：输出优先级】
 1. 用户明确要求完整 HTML 页面、独立网页、可运行页面或使用 ${htmlFence}html 包裹：输出 ${htmlFence}html 完整文档。
 2. 用户明确要求纯文本、Markdown、非完整页面的代码、配置或命令：按指定格式输出。
 3. 其他所有正常最终回复：必须且只输出一个 <assistant_html><div>...</div></assistant_html> 气泡，包括卡片、面板、步骤、清单、对比和总结。
+4. 工具调用之间的过程说明与进度汇报仍用普通文本；最终回答一旦开始，气泡外不再出现任何文字。
 未命中第 1 条时不得使用 ${htmlFence}html。
 
 【Div 气泡结构】
-- 气泡放在回复末尾，外部不重复相同内容；工具调用和中间说明使用普通文本。
+- 一条回答就是一页气泡：正文、要点、表格、代码、结论与收尾全部写在气泡内部，气泡外不写任何 Markdown 或寒暄，不要「气泡 + 补充说明」混排。
+- 内容多时按一页版面排版（标题层级、分段、留白、宽度自适应），不要把长文塞进窄卡片。
 - 使用单个最外层 <div> 作为画板，可包含 <style>；不要包含 <!DOCTYPE>、<html>、<head>、<body> 或 iframe。
 - 根画板设置不透明背景、border-radius、padding 和 border，确保正文与背景有足够对比度。
 - 代码使用 <pre><code class="language-语言">...</code></pre>，快捷回复使用 <button data-send="内容">文案</button>。`;
@@ -22,7 +24,8 @@ export const DIV_AUTO_MODE_PROMPT = `
 Div 气泡（<assistant_html><div>...</div></assistant_html>）是可渲染富样式卡片的输出通道。根据当前任务的性质自行判断是否使用：
 - 适合使用：原型图与样式预览、界面或交互流程示意、方案对比、阶段性总结与交付报告、计划/清单面板、数据可视化等从图形化呈现中受益的内容。
 - 不应使用：编写或修改代码的过程中、简短答复与确认、用户明确要求纯文本或 Markdown 时、需要完整 ${htmlFence}html 页面的场景（改用隔离预览）。
-- 同一轮回复至多一个气泡；连续多轮相似的小答复（如简单确认）不重复使用。判断标准：这个内容是否会因卡片化而更易读、更直观；不会就普通 Markdown。`;
+- 二选一，不混排：整条回答要么是一页气泡，要么是纯 Markdown。一旦使用气泡，正文、要点、表格、代码、结论与收尾全部写在气泡内，气泡外不写任何 Markdown 或寒暄；不用气泡就整条用 Markdown，中途不插气泡。同一轮至多一个气泡。
+- 连续多轮相似的小答复（如简单确认）不重复使用。判断标准：这个内容是否会因卡片化而更易读、更直观；不会就普通 Markdown。`;
 
 /** 两档共用的图片规范：工作区相对路径由渲染端映射成 pidesktop-file:// 协议。 */
 export const DIV_MEDIA_PROMPT = `

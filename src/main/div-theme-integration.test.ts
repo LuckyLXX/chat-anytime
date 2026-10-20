@@ -119,6 +119,8 @@ describe("界面主题提示词注入（真实 AgentSession + faux provider）",
       expect(requests[0]).toContain("surface #172033");
       // 静态配色规范也随 Div 提示词一起在（两档共用）
       expect(requests[0]).toContain("对比度 ≥ 4.5:1");
+      // 静态输出契约也在真实请求里（2026-10-20：整条回答即一页气泡，不与 Markdown 混排）
+      expect(requests[0]).toContain("二选一，不混排");
       // 主题块在最后（追加位置稳定）
       expect(requests[0]!.endsWith("accent-soft #25254b")).toBe(true);
       // ② 前缀缓存纪律：主题没变 → 系统提示词逐字节相同
