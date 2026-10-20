@@ -1,5 +1,5 @@
 import { Bot, ChevronDown, Computer, FolderOpen, Globe, Keyboard, LayoutGrid, Palette, RotateCcw, ShieldCheck, Terminal } from "lucide-react";
-import { useState, type FormEvent, type ReactNode } from "react";
+import { Fragment, useState, type FormEvent, type ReactNode } from "react";
 import type { AccessMode, DesktopSettings, JevSettings, ModelOption, ProviderOption, ThinkingLevel } from "../../shared/protocol";
 import { THINKING_LEVELS } from "../../shared/thinking-levels";
 import { thinkingLevelLabels } from "../../shared/locale";
@@ -310,17 +310,23 @@ export function GeneralSettings({ settings, models, providers, jevKeyConfigured,
           <div className="general-card-head"><strong>能力总闸</strong><small>关掉即从活动集摘除该族工具；会话级开关独立于此</small></div>
           <div className="general-card-body">
             {CAPABILITY_SWITCHES.map(({ key, title, hint, icon: Icon }) => (
-              <label className="general-switch-row" key={key} title={`总闸：关掉后${title}工具不再注入任何会话`}>
-                <span className="general-switch-icon"><Icon size={13} /></span>
-                <span className="general-switch-copy"><strong>{title}</strong><small>{hint}</small></span>
-                <input type="checkbox" className="general-switch" data-control="capability-switch" data-capability={key} checked={capabilityEnabled(key)} onChange={(event) => toggleCapability(key, event.target.checked)} />
-              </label>
+              <Fragment key={key}>
+                <label className="general-switch-row" title={`总闸：关掉后${title}工具不再注入任何会话`}>
+                  <span className="general-switch-icon"><Icon size={13} /></span>
+                  <span className="general-switch-copy"><strong>{title}</strong><small>{hint}</small></span>
+                  <input type="checkbox" className="general-switch" data-control="capability-switch" data-capability={key} checked={capabilityEnabled(key)} onChange={(event) => toggleCapability(key, event.target.checked)} />
+                </label>
+                {/* SSH 子开关必须紧跟 SSH 总闸行：挂在列表末尾时会坠在「设计模式」
+                    下面，缩进的卡片看着像没对齐（2026-10-20 用户报的 ui bug）。 */}
+                {key === "ssh" && (
+                  <label className="general-switch-row general-subswitch" title="开启后连接新主机会直接记录并信任其指纹（含 AI 触发的连接），不再弹确认卡；指纹记录后若发生变化仍会拒绝连接（防中间人）。">
+                    <span className="general-switch-icon"><ShieldCheck size={13} /></span>
+                    <span className="general-switch-copy"><strong>首次连接自动信任指纹</strong><small>新主机直接记录指纹、不弹确认卡（含 AI 连接）；指纹变化仍拒绝</small></span>
+                    <input type="checkbox" className="general-switch" data-control="ssh-auto-trust" checked={settings.ssh?.autoTrustFingerprint === true} onChange={(event) => toggleAutoTrustFingerprint(event.target.checked)} />
+                  </label>
+                )}
+              </Fragment>
             ))}
-            <label className="general-switch-row general-subswitch" title="开启后连接新主机会直接记录并信任其指纹（含 AI 触发的连接），不再弹确认卡；指纹记录后若发生变化仍会拒绝连接（防中间人）。">
-              <span className="general-switch-icon"><ShieldCheck size={13} /></span>
-              <span className="general-switch-copy"><strong>首次连接自动信任指纹</strong><small>新主机直接记录指纹、不弹确认卡（含 AI 连接）；指纹变化仍拒绝</small></span>
-              <input type="checkbox" className="general-switch" data-control="ssh-auto-trust" checked={settings.ssh?.autoTrustFingerprint === true} onChange={(event) => toggleAutoTrustFingerprint(event.target.checked)} />
-            </label>
           </div>
         </section>
 

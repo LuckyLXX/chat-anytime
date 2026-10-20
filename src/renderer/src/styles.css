@@ -1604,10 +1604,18 @@ html[data-ui-motion="off"] .agent-settings .agent-switch, html[data-ui-motion="o
 .general-settings .general-switch:checked::after { transform: translateX(14px); }
 .general-settings .general-switch:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
 html[data-ui-motion="off"] .general-settings .general-switch, html[data-ui-motion="off"] .general-settings .general-switch::after { transition: none; }
-/* SSH 子开关（首次连接自动信任指纹）：缩进挂在 SSH 总闸行下方。选择器必须带
-   .general-settings 前缀：.settings-dialog label 在后段（0,1,1），裸类会被打回默认尺寸。 */
-.general-settings .general-switch-row.general-subswitch { margin-left: 33px; min-height: 32px; padding: 2px 8px; }
+/* SSH 子开关（首次连接自动信任指纹）：紧跟在 SSH 总闸行下方，缩进 + 左侧折角线
+   交代从属关系（2026-10-20 修：此前它排在四个总闸之后，坠在「设计模式」下面，
+   缩进挂在无主的位置上，看着就是没对齐）。
+   选择器必须带 .general-settings 前缀：.settings-dialog label 在后段（0,1,1），
+   裸类会被打回默认尺寸。 */
+.general-settings .general-switch-row.general-subswitch { position: relative; margin-left: 33px; min-height: 34px; padding: 2px 8px; }
 .general-settings .general-switch-row.general-subswitch .general-switch-icon { width: 20px; height: 20px; color: var(--text-muted); background: transparent; border: 1px solid var(--border); }
+/* 折角线几何：父行 padding-left 8 + 图标 24/2 = 图标中轴在 20px 处，子行左边界 33px，
+   所以竖线 left = -13px；竖线自上一行底边（card-body 的 9px 间距）落到本行中线，
+   再从那里横着接到子项图标左缘（padding-left 8px）前 4px。改缩进或图标尺寸要同步改这三个数。 */
+.general-settings .general-switch-row.general-subswitch::before { content: ""; position: absolute; left: -13px; top: -9px; bottom: 50%; width: 1px; background: var(--border); }
+.general-settings .general-switch-row.general-subswitch::after { content: ""; position: absolute; left: -13px; top: 50%; width: 17px; height: 1px; background: var(--border); }
 
 /* Jev 折叠卡：头部一行 = 展开钜 + 标题 + 状态徽标 + 右侧启用开关；
    收起时不渲染 body（实验性能力不占首屏）。 */

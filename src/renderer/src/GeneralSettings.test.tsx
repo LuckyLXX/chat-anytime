@@ -146,10 +146,11 @@ describe("通用页结构契约", () => {
   it("四个能力总闸各是一行开关（图标 + 名称 + 可见说明），且缺省启用语义与运行时一致", () => {
     render();
     const rows = [...container.querySelectorAll(".general-switch-row")];
-    // 4 个能力总闸 + SSH 子开关（首连自动信任）+「展示思考过程」+「空态展示作品墙」
+    // 4 个能力总闸（SSH 那行后面紧跟它的子开关）+「展示思考过程」+「空态展示作品墙」
     // +「全局快捷键」共 8 行。
     expect(rows).toHaveLength(8);
-    const caps = rows.slice(0, 4).map((row) => ({
+    const capRows = rows.filter((row) => row.querySelector("[data-control=\"capability-switch\"]"));
+    const caps = capRows.map((row) => ({
       control: row.querySelector("[data-control=\"capability-switch\"]")?.getAttribute("data-capability"),
       checked: (row.querySelector("input") as HTMLInputElement).checked,
       hint: row.querySelector("small")?.textContent
@@ -158,6 +159,20 @@ describe("通用页结构契约", () => {
     // settings.ssh.enabled === false → 关；其余缺省/显式开。说明文字必须可见。
     expect(caps.map((cap) => cap.checked)).toEqual([true, false, true, true]);
     expect(caps.every((cap) => (cap.hint ?? "").length > 5)).toBe(true);
+  });
+
+  // 层级位置也得钉住：子开关曾排在四个总闸之后，坠在「设计模式」下面，缩进无主、
+  // 看着像没对齐（2026-10-20 用户报的 ui bug）。它必须紧跟 SSH 总闸行，左右无其它行插入。
+  it("SSH 子开关紧跟在 SSH 总闸行之后（折角连线才挂得住）", () => {
+    render();
+    const rows = [...container.querySelectorAll(".general-switch-row")];
+    const sshIndex = rows.findIndex((row) => row.querySelector("[data-capability=\"ssh\"]") !== null);
+    expect(sshIndex).toBeGreaterThanOrEqual(0);
+    const next = rows[sshIndex + 1];
+    expect(next?.querySelector("[data-control=\"ssh-auto-trust\"]"), "SSH 行的下一行不是子开关").not.toBeNull();
+    expect(next?.className).toContain("general-subswitch");
+    // 其余行都不带子开关类，避免出现两个缩进行
+    expect(rows.filter((row) => row.className.includes("general-subswitch"))).toHaveLength(1);
   });
 
   // 首连自动信任子开关：只改一个键。两条用例一起钉住「不抹总闸」与「不被总闸抹」
