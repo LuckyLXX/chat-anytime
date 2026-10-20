@@ -24,7 +24,7 @@ export interface HookContext {
   toolName?: string;
   /** 仅工具事件：tool_call 的 input / tool_execution_end 的 args / tool_result 的 input。 */
   toolInput?: unknown;
-  /** 仅 tool_execution_end / tool_result。 */
+  /** 仅 tool_execution_end / tool_result；agent_end 时也用它标记整次回复是否失败。 */
   isError?: boolean;
   /** 仅 user_input：用户提交的文本（也是 deny 正则的匹配对象）。 */
   inputText?: string;
@@ -38,6 +38,12 @@ export interface HookContext {
   willRetry?: boolean;
   /** 工具执行、单轮调用或整次回复的耗时毫秒。 */
   durationMs?: number;
+  /**
+   * 仅 agent_end：整次回复被用户中止（点停止）。中止不是「完成」——
+   * notify 动作在这种情况下不弹桌面通知；http / command 动作照常执行，
+   * 靠这个标记区分「跑完了」与「被打断了」。
+   */
+  aborted?: boolean;
   /** 仅 turn_end / agent_end：该轮或整次回复的 token 用量与成本（模型/中转站未上报时缺省）；agent_end 时 isError 标记该次回复是否失败。 */
   usage?: {
     input: number;
@@ -214,6 +220,31 @@ function baseContext(deps: HooksExtensionDeps, event: string): HookContext {
   };
 }
 
+/**
+ * 耗时的中文可读文案：{duration} 占位符用它。
+ *
+ * 口径（与聊天区「回答耗时」不同的取景——这里是给人读的）：
+ * - < 1 秒：`450 毫秒`
+ * - < 60 秒：`12.3 秒`（一位小数）
+ * - ≥ 60 秒：`1 分 23 秒` / `2 分 05 秒`（秒补零到两位，读起来更像计时器）
+ * - ≥ 1 小时：`1 小时 02 分`
+ *
+ * 纯函数、无 i18n 依赖（钩子文案全是用户自写，这里只提供一个中文默认值，
+ * 用户不写 {duration} 就完全用不到）。
+ */
+export function formatHookDuration(durationMs: number | undefined): string {
+  if (durationMs === undefined || !Number.isFinite(durationMs) || durationMs < 0) return "";
+  const totalSeconds = durationMs / 1000;
+  if (totalSeconds < 1) return `${Math.round(durationMs)} 毫秒`;
+  if (totalSeconds < 60) return `${totalSeconds.toFixed(1)} 秒`;
+  const totalWholeSeconds = Math.round(totalSeconds);
+  const hours = Math.floor(totalWholeSeconds / 3600);
+  const minutes = Math.floor((totalWholeSeconds % 3600) / 60);
+  const seconds = totalWholeSeconds % 60;
+  if (hours > 0) return `${hours} 小时 ${String(minutes).padStart(2, "0")} 分`;
+  return `${minutes} 分 ${String(seconds).padStart(2, "0")} 秒`;
+}
+
 /** notify 标题/正文里的 {sessionId} 等占位符替换。 */
 function fillTemplate(text: string, context: HookContext): string {
   const replacements: Record<string, string> = {
@@ -223,7 +254,14 @@ function fillTemplate(text: string, context: HookContext): string {
     agentName: context.agentName,
     workspace: context.workspace ?? "",
     toolName: context.toolName ?? "",
-    durationMs: context.durationMs !== undefined ? String(context.durationMs) : ""
+    // {durationMs} = 原始毫秒整数（命令/HTTP 钩子按数字取用）；
+    // {duration} = 同一时长的中文可读文案（通知正文用）；
+    // {result} = 结局词（完成 / 失败 / 已中止）——一次只弹一条通知时用它区分结局。
+    durationMs: context.durationMs !== undefined ? String(context.durationMs) : "",
+    duration: formatHookDuration(context.durationMs),
+    aborted: context.aborted ? "true" : "",
+    isError: context.isError ? "true" : "",
+    result: context.aborted ? "已中止" : context.isError ? "失败" : "完成"
   };
   return text.replace(/\{(\w+)\}/gu, (whole, key: string) => key in replacements ? replacements[key] ?? "" : whole);
 }
@@ -375,6 +413,11 @@ function blockingCommandVerdict(result: CommandRunResult): { blocked: boolean; r
 export async function executeHookAction(rule: HookRule, context: HookContext, deps: Pick<HooksExtensionDeps, "post" | "isSessionRendered">): Promise<HookActionOutcome> {
   const action = rule.action;
   if (action.kind === "notify") {
+    // 中止（用户点停止）不弹通知：中止不是「完成」，弹「任务完成」是谎报。
+    // http / command 动作不受影响——它们是数据通路，用户自己判断怎么处理。
+    if (context.aborted === true) {
+      return { ok: true, detail: "已中止，未发送通知", durationMs: 0 };
+    }
     const title = fillTemplate(action.title?.trim() || `PiDesktop：${context.event}`, context);
     const body = fillTemplate(action.body?.trim() || `${context.sessionTitle}${context.toolName ? ` · ${context.toolName}` : ""}`, context);
     // sessionId 让主进程能判断“这条通知是否关于用户正盯着看的会话”，聚焦时免打扰；
@@ -661,6 +704,8 @@ export async function testHook(rule: HookRule, sample: string | undefined, deps:
     ...(rule.event === "user_input" ? { inputText: sample ?? "git push --force", source: "interactive" } : {}),
     ...(rule.event === "session_before_compact" ? { reason: "threshold", willRetry: false } : {}),
     ...(rule.event === "session_end" ? { reason: "dispose" } : {}),
+    // 样例耗时：让 {duration} 占位符在面板「测试」时也能看出格式（不是 0 毫秒）。
+    ...(rule.event === "turn_end" || rule.event === "agent_end" ? { durationMs: 83_000 } : {}),
     ...(rule.event === "turn_end" || rule.event === "agent_end" ? { usage: { input: 1200, output: 340, cacheRead: 9800, cacheWrite: 400, cost: 0.012 } } : {})
   };
   if (rule.action.kind === "block") {
@@ -691,19 +736,39 @@ function annotateTestOutcome(outcome: HookActionOutcome): HookActionOutcome {
 }
 
 /**
- * 整次回复的累计用量：对 agent_end 给到的消息序列求和（每条 assistant 消息
- * 带各自的 usage），并取末条 assistant 的 errorMessage 作为失败标记——与
- * pi-runtime 侧 runStatus 的失败判定同源（run-outcome.ts）：用户中止
- * （stopReason=aborted）不是失败，不置 isError。
+ * 整次回复的累计用量与结局累加器。
+ *
+ * **为什么不再用 agent_end 的 messages 数组求和**：agent_end 是 Pi 的**底层 run**
+ * 边界——自动重试、溢出压缩恢复、排队的后续消息都会在它之后**再来一次** agent_end
+ * （`docs/json.md`：「agent_end closes one low-level agent run. Automatic retry,
+ * overflow recovery, compaction retry, steering, or follow-up work can still
+ * continue.」）。所以每次 agent_end 只带**那一段**的消息：重试场景下累计用量会
+ * 漏掉前几次尝试，而且通知会在重试刚开始时就弹（用户报「整个会话没完全结束就弹
+ * 通知」的真因）。
+ *
+ * 口径改为：用量由 message_end 逐条累加、结局取**末条** assistant 消息；真正触发
+ * 钩子的时机改成 agent_settled（Pi 在那里保证「不会再自动继续」：重试、压缩恢复、
+ * 排队消息全部结束）。
  */
-function runUsageFromMessages(messages: unknown): { usage?: HookContext["usage"]; isError: boolean } {
+export interface RunUsageAccumulator {
+  /** 累加一条 message_end 消息（只认 assistant）。 */
+  add: (message: unknown) => void;
+  /** 快照：累计 usage + 末条 assistant 消息的失败判定。 */
+  snapshot: () => { usage?: HookContext["usage"]; isError: boolean };
+  /** 清空（下一轮整次回复开始时调用）。 */
+  reset: () => void;
+}
+
+export function createRunUsageAccumulator(): RunUsageAccumulator {
   let usage: HookContext["usage"] | undefined;
-  let isError = false;
-  for (const message of Array.isArray(messages) ? messages : []) {
-    const entry = message as { role?: string; stopReason?: string; usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: { total?: number } }; errorMessage?: string };
-    if (entry.role !== "assistant") continue;
-    const next = entry.usage;
-    if (next) {
+  let lastAssistant: { role?: string; stopReason?: string; errorMessage?: string } | undefined;
+  return {
+    add(message: unknown): void {
+      const entry = message as { role?: string; stopReason?: string; errorMessage?: string; usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: { total?: number } } } | undefined;
+      if (!entry || entry.role !== "assistant") return;
+      lastAssistant = { role: entry.role, stopReason: entry.stopReason, errorMessage: entry.errorMessage };
+      const next = entry.usage;
+      if (!next) return;
       usage = {
         input: (usage?.input ?? 0) + (next.input ?? 0),
         output: (usage?.output ?? 0) + (next.output ?? 0),
@@ -711,11 +776,19 @@ function runUsageFromMessages(messages: unknown): { usage?: HookContext["usage"]
         cacheWrite: (usage?.cacheWrite ?? 0) + (next.cacheWrite ?? 0),
         cost: (usage?.cost ?? 0) + (next.cost?.total ?? 0)
       };
+    },
+    snapshot() {
+      // 末条 assistant 消息定结局：重试场景下（前一次失败、后一次成功）不应报失败。
+      // 用户中止（stopReason=aborted）不是失败——与 pi-runtime 的 runStatus 同源
+      // （run-outcome.ts）。
+      const isError = Boolean(lastAssistant?.errorMessage) && !isAbortedOutcome(lastAssistant);
+      return { ...(usage ? { usage } : {}), isError };
+    },
+    reset(): void {
+      usage = undefined;
+      lastAssistant = undefined;
     }
-    // 宽版口径：Pi 把中止报成 error 态时也不算失败（同 run-outcome）。
-    if (entry.errorMessage && !isAbortedOutcome(entry)) isError = true;
-  }
-  return { ...(usage ? { usage } : {}), isError };
+  };
 }
 
 /**
@@ -730,8 +803,11 @@ function runUsageFromMessages(messages: unknown): { usage?: HookContext["usage"]
  * - session_before_compact：上下文压缩前触发，阻断型命令返回 cancel 取消本次压缩；
  * - session_end：app 自造（见 fireSessionEndHooks），不在本工厂接线；
  * - turn_start/turn_end：记录轮次起点，结束时携带该轮 usage 触发钩子（注意：一次回复含多个小轮，会触发多次）；
- * - agent_start/agent_end：整次回复（用户消息 → 全部工具轮次 → 最终答案）起点与终点；
- *   agent_end 只触发一次，携带整次累计 usage、总耗时与失败标记——跑完通知/用量统计应挂这里；
+ * - agent_start/agent_settled：整次回复（用户消息 → 全部工具轮次 → 最终答案）起点与终点；
+ *   钩子的 agent_end 事件挂在 **agent_settled** 上（不是 agent_end——后者只是 Pi 的
+ *   一个底层 run 边界，重试/压缩恢复/排队消息之后还会继续，2026-10-20 用户报
+ *   「整个会话没完全结束就弹通知」）。settle 时携带整次累计 usage、总耗时与结局标记
+ *   ——跑完通知/用量统计应挂这里；
  * - session_start：顺序 await（bindExtensions 会等待，会话打开即完成环境准备）。
  */
 export function createHooksExtension(deps: HooksExtensionDeps): InlineExtension {
@@ -937,17 +1013,55 @@ export function createHooksExtension(deps: HooksExtensionDeps): InlineExtension 
         await runObservingHooks(deps, "turn_end", context, undefined, warnedPending, reportHookRun, annotateObserved);
       });
 
-      pi.on("agent_start", () => {
-        runStartedAt = Date.now();
+      /**
+       * 用量累加器：逐条 message_end 累加 assistant 的 usage，末条 assistant 定结局。
+       * 累加而非「取 agent_end 的 messages」——见 createRunUsageAccumulator 的注释
+       * （agent_end 是底层 run 边界，重试会把它劈成多段）。
+       */
+      const runUsage = createRunUsageAccumulator();
+
+      pi.on("message_end", (event) => {
+        runUsage.add(event.message);
       });
 
-      pi.on("agent_end", async (event) => {
-        const { usage, isError } = runUsageFromMessages((event as { messages?: unknown }).messages);
+      pi.on("agent_start", () => {
+        // **只在整次回复的开头重置**：Pi 的重试 / 压缩恢复 / 排队后续消息都会
+        // 再次发 agent_start（agent.continue() → runAgentLoopContinue → agent_start），
+        // 那时不能重置——否则耗时只算最后一段、累计用量丢掉前面的尝试。
+        // 判据：agent_settled 已经把 runStartedAt 清空 ⇒ 下一个 agent_start 就是新回复。
+        if (runStartedAt !== undefined) return;
+        runStartedAt = Date.now();
+        runUsage.reset();
+      });
+
+      /**
+       * agent_end **不触发** agent_end 钩子——它只是 Pi 的一个底层 run 结束，
+       * 自动重试 / 溢出压缩恢复 / 排队后续消息都会在它之后继续（Pi 1.2.0 官方口径：
+       * 「agent_end closes one low-level agent run. Automatic retry, overflow recovery,
+       * compaction retry, steering, or follow-up work can still continue.」）。
+       * 在这里弹通知 = 重试刚开始就报「任务完成」（2026-10-20 用户报）。
+       *
+       * 真正触发点是 agent_settled：Pi 在那里保证「不会再自动继续」。
+       */
+      pi.on("agent_end", () => {
+        // 故意不触发钩子；只保留计时起点不重置——重试/压缩恢复都发生在同一个
+        // 「整次回复」里，耗时要从第一次 agent_start 算到 settle。
+      });
+
+      /**
+       * agent_settled：整次回复真正结束（重试、压缩恢复、排队消息全部收尾）。
+       * 钩子的 agent_end 事件挂在这里，语义仍是「整次回复结束」——
+       * 用户在面板上选的仍是「回复结束（整次）」，只是底层触发点换成了 settle。
+       */
+      pi.on("agent_settled", async (event) => {
+        const { usage, isError } = runUsage.snapshot();
+        const aborted = event.aborted === true;
         const context: HookContext = {
           ...baseContext(deps, "agent_end"),
           ...(runStartedAt !== undefined ? { durationMs: Date.now() - runStartedAt } : {}),
           ...(usage ? { usage } : {}),
-          isError
+          isError,
+          ...(aborted ? { aborted } : {})
         };
         runStartedAt = undefined;
         await runObservingHooks(deps, "agent_end", context, undefined, warnedPending, reportHookRun, annotateObserved);

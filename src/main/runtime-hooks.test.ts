@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { HookRule, RuntimeMessage } from "../shared/protocol.js";
-import { createHooksExtension, fireSessionEndHooks, parseHookJsonOutput, planHookEffects, runHookCommand, testHook, type HooksExtensionDeps } from "./runtime-hooks.js";
+import { createHooksExtension, fireSessionEndHooks, formatHookDuration, parseHookJsonOutput, planHookEffects, runHookCommand, testHook, type HooksExtensionDeps } from "./runtime-hooks.js";
 
 interface Harness {
   handlers: Map<string, (event: never) => unknown>;
@@ -55,6 +55,16 @@ async function waitForHookRun(harness: Harness): Promise<RuntimeMessage | undefi
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   return undefined;
+}
+
+/** 桦住 fetch 并捕获钩子推送的上下文 JSON（比断言 mock.calls 的元组类型稳）。 */
+function stubFetchCapture(): () => Record<string, unknown> {
+  let captured: Record<string, unknown> | undefined;
+  vi.stubGlobal("fetch", vi.fn(async (_url: string, init: { body: string }) => {
+    captured = JSON.parse(init.body) as Record<string, unknown>;
+    return new Response("{}", { status: 200 });
+  }));
+  return () => captured ?? {};
 }
 
 const blockRule: HookRule = { name: "git防火墙", event: "tool_call", matcher: "bash", action: { kind: "block", deny: ["git\\s+push.*--force"] } };
@@ -160,17 +170,78 @@ describe("hooks extension observing events", () => {
       { name: "整次", event: "agent_end", action: { kind: "notify", title: "run" } }
     ]);
     harness.handlers.get("agent_start")?.({} as never);
+    harness.handlers.get("message_end")?.({ message: { role: "user" } } as never);
+    harness.handlers.get("message_end")?.({ message: { role: "assistant", usage: { input: 10, output: 5, cacheRead: 100, cost: { total: 0.01 } } } } as never);
     harness.handlers.get("turn_end")?.({ message: { role: "assistant", usage: { input: 10, output: 5, cacheRead: 100, cost: { total: 0.01 } } }, toolResults: [] } as never);
     harness.handlers.get("turn_end")?.({ message: { role: "assistant", usage: { input: 20, output: 7, cacheRead: 200, cost: { total: 0.02 } } }, toolResults: [] } as never);
-    harness.handlers.get("agent_end")?.({ messages: [
-      { role: "user" },
-      { role: "assistant", usage: { input: 10, output: 5, cacheRead: 100, cost: { total: 0.01 } } },
-      { role: "assistant", usage: { input: 20, output: 7, cacheRead: 200, cost: { total: 0.02 } } }
-    ] } as never);
+    harness.handlers.get("message_end")?.({ message: { role: "assistant", usage: { input: 20, output: 7, cacheRead: 200, cost: { total: 0.02 } } } } as never);
+    harness.handlers.get("agent_settled")?.({ aborted: false } as never);
     await flushAsync();
     const titles = harness.posts.filter((message) => message.type === "hook-notify").map((message) => message.title);
     expect(titles).toEqual(["turn", "turn", "run"]);
     expect(titles.filter((title) => title === "run")).toHaveLength(1);
+  });
+
+  it("不在 agent_end 触发整次钩子——它是底层 run 边界，重试/压缩恢复后还会继续", async () => {
+    // 2026-10-20 用户报「整个会话没完全结束就弹通知」：Pi 的 agent_end 之后，
+    // 自动重试 / 溢出压缩恢复 / 排队后续消息都会继续跑，此时弹「任务完成」是谎报。
+    const harness = createHarness([{ name: "整次", event: "agent_end", action: { kind: "notify", title: "run" } }]);
+    harness.handlers.get("agent_start")?.({} as never);
+    harness.handlers.get("message_end")?.({ message: { role: "assistant", usage: { input: 10, output: 5 } } } as never);
+    // 第一次底层 run 结束（重试即将开始）——不应该弹。
+    harness.handlers.get("agent_end")?.({ messages: [{ role: "assistant", usage: { input: 10, output: 5 } }] } as never);
+    await flushAsync();
+    expect(harness.posts.filter((message) => message.type === "hook-notify")).toHaveLength(0);
+
+    // 重试成功、整次回复真正收尾后才弹一次。
+    harness.handlers.get("message_end")?.({ message: { role: "assistant", usage: { input: 20, output: 7 } } } as never);
+    harness.handlers.get("agent_settled")?.({ aborted: false } as never);
+    await flushAsync();
+    expect(harness.posts.filter((message) => message.type === "hook-notify")).toHaveLength(1);
+  });
+
+  it("整次回复的用量跨重试累加（不是只算最后一段 run）", async () => {
+    // agent_end 的 messages 只带那一段的消息；累加器逐条 message_end 累计，
+    // 所以「失败一次 + 重试成功」的整次用量是两段之和。
+    const capture = stubFetchCapture();
+    try {
+      const harness = createHarness([{ name: "整次", event: "agent_end", action: { kind: "http", url: "https://example.test/hook" } }]);
+      harness.handlers.get("agent_start")?.({} as never);
+      harness.handlers.get("message_end")?.({ message: { role: "assistant", usage: { input: 10, output: 5, cacheRead: 100, cacheWrite: 0, cost: { total: 0.01 } } } } as never);
+      harness.handlers.get("agent_end")?.({ messages: [{ role: "assistant" }] } as never);
+      harness.handlers.get("message_end")?.({ message: { role: "assistant", usage: { input: 20, output: 7, cacheRead: 200, cacheWrite: 0, cost: { total: 0.02 } } } } as never);
+      harness.handlers.get("agent_settled")?.({ aborted: false } as never);
+      await flushAsync();
+      expect(capture()).toMatchObject({ event: "agent_end", usage: { input: 30, output: 12, cacheRead: 300 } });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("中止的回合不弹通知（中止不是「完成」）", async () => {
+    const harness = createHarness([{ name: "整次", event: "agent_end", action: { kind: "notify", title: "run" } }]);
+    harness.handlers.get("agent_start")?.({} as never);
+    harness.handlers.get("message_end")?.({ message: { role: "assistant", stopReason: "aborted", errorMessage: "Request aborted by user" } } as never);
+    harness.handlers.get("agent_settled")?.({ aborted: true } as never);
+    await flushAsync();
+    expect(harness.posts.filter((message) => message.type === "hook-notify")).toHaveLength(0);
+    // 但 hook-run 依旧上报（面板能看到这次中止），且不计为失败。
+    // 非阻断结果按 250ms 合并上报——用 waitForHookRun 轮询而不是固定 sleep。
+    expect(await waitForHookRun(harness)).toMatchObject({ event: "agent_end", ok: true });
+  });
+
+  it("中止时 http 动作照常推送，并带 aborted 标记", async () => {
+    const capture = stubFetchCapture();
+    try {
+      const harness = createHarness([{ name: "整次", event: "agent_end", action: { kind: "http", url: "https://example.test/hook" } }]);
+      harness.handlers.get("agent_start")?.({} as never);
+      harness.handlers.get("message_end")?.({ message: { role: "assistant", stopReason: "aborted" } } as never);
+      harness.handlers.get("agent_settled")?.({ aborted: true } as never);
+      await flushAsync();
+      expect(capture()).toMatchObject({ event: "agent_end", aborted: true });
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("fires tool_execution_end hooks with the start event's args, honoring matcher", async () => {
@@ -262,16 +333,6 @@ describe("hooks extension new events (P3)", () => {
   const inputHandler = (harness: Harness) => harness.handlers.get("input") as unknown as (event: { text: string; source: string; streamingBehavior?: string }) => Promise<{ action?: string } | undefined>;
   const compactHandler = (harness: Harness) => harness.handlers.get("session_before_compact") as unknown as (event: { reason: string; willRetry: boolean }) => Promise<{ cancel?: boolean } | undefined>;
   const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-  /** 桦住 fetch 并捕获钩子推送的上下文 JSON（比断言 mock.calls 的元组类型稳）。 */
-  function stubFetchCapture(): () => Record<string, unknown> {
-    let captured: Record<string, unknown> | undefined;
-    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: { body: string }) => {
-      captured = JSON.parse(init.body) as Record<string, unknown>;
-      return new Response("{}", { status: 200 });
-    }));
-    return () => captured ?? {};
-  }
 
   it("swallows user input when a block rule denies it and reports the block", async () => {
     const harness = createHarness([{ name: "输入拦截", event: "user_input", action: { kind: "block", deny: ["rm\\s+-rf"] } }]);
@@ -632,5 +693,83 @@ describe("testHook", () => {
     expect(harness.posts).toHaveLength(1);
     // 测试上下文的 sessionId 是虚构的，永远不等于任何真实激活会话——面板测试按钮总能看到真实弹窗。
     expect(harness.posts[0]).toMatchObject({ type: "hook-notify", title: "钩子测试 完成", sessionId: "test-session" });
+  });
+});
+
+describe("duration placeholder formatting", () => {
+  it("把毫秒转成中文可读文案", () => {
+    expect(formatHookDuration(450)).toBe("450 毫秒");
+    expect(formatHookDuration(999)).toBe("999 毫秒");
+    expect(formatHookDuration(1_000)).toBe("1.0 秒");
+    expect(formatHookDuration(12_340)).toBe("12.3 秒");
+    expect(formatHookDuration(59_999)).toBe("60.0 秒");
+    expect(formatHookDuration(83_000)).toBe("1 分 23 秒");
+    expect(formatHookDuration(600_000)).toBe("10 分 00 秒");
+    expect(formatHookDuration(3_723_000)).toBe("1 小时 02 分");
+  });
+
+  it("缺省/非法值返回空串（占位符不留下垃圾）", () => {
+    expect(formatHookDuration(undefined)).toBe("");
+    expect(formatHookDuration(-1)).toBe("");
+    expect(formatHookDuration(Number.NaN)).toBe("");
+  });
+
+  it("通知正文里 {duration} 是可读文案、{durationMs} 仍是原始毫秒", async () => {
+    const harness = createHarness([{ name: "整次", event: "agent_end", action: { kind: "notify", title: "t", body: "{duration} / {durationMs}" } }]);
+    harness.handlers.get("agent_start")?.({} as never);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    harness.handlers.get("message_end")?.({ message: { role: "assistant", usage: { input: 1, output: 1 } } } as never);
+    harness.handlers.get("agent_settled")?.({ aborted: false } as never);
+    await flushAsync();
+    const notify = harness.posts.find((message) => message.type === "hook-notify");
+    expect(notify).toBeDefined();
+    const body = (notify as { body: string }).body;
+    expect(body).toMatch(/^\d+(\.\d+)? (毫秒|秒)|^\d+ 分 \d{2} 秒/);
+    // {durationMs} 仍是纯数字（供命令/HTTP 钩子按数字取用）
+    expect(body.split(" / ")[1]).toMatch(/^\d+$/);
+  });
+});
+
+describe("result / isError / aborted placeholders", () => {
+  const settleWith = async (message: Record<string, unknown>, aborted = false): Promise<Record<string, unknown>> => {
+    const capture = stubFetchCapture();
+    try {
+      const harness = createHarness([{ name: "整次", event: "agent_end", action: { kind: "http", url: "https://example.test/hook" } }]);
+      harness.handlers.get("agent_start")?.({} as never);
+      harness.handlers.get("message_end")?.({ message } as never);
+      harness.handlers.get("agent_settled")?.({ aborted } as never);
+      await flushAsync();
+      return capture();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  };
+
+  it("成功收尾：isError 为 false", async () => {
+    const captured = await settleWith({ role: "assistant", usage: { input: 1, output: 1 } });
+    expect(captured).toMatchObject({ isError: false });
+    // 非中止时不带 aborted 字段（而不是 aborted:false）。
+    expect(captured).not.toHaveProperty("aborted");
+  });
+
+  it("失败收尾：isError 为 true（中止不算失败）", async () => {
+    expect(await settleWith({ role: "assistant", errorMessage: "500 Internal Server Error" })).toMatchObject({ isError: true });
+    expect(await settleWith({ role: "assistant", stopReason: "aborted", errorMessage: "Request aborted by user" })).toMatchObject({ isError: false });
+  });
+
+  it("{result} 占位符给出中文结局词", async () => {
+    const notify = async (message: Record<string, unknown>, aborted = false): Promise<string | undefined> => {
+      const harness = createHarness([{ name: "整次", event: "agent_end", action: { kind: "notify", title: "t", body: "{result}" } }]);
+      harness.handlers.get("agent_start")?.({} as never);
+      harness.handlers.get("message_end")?.({ message } as never);
+      harness.handlers.get("agent_settled")?.({ aborted } as never);
+      await flushAsync();
+      const posted = harness.posts.find((item) => item.type === "hook-notify");
+      return (posted as { body: string } | undefined)?.body;
+    };
+    expect(await notify({ role: "assistant", usage: { input: 1, output: 1 } })).toBe("完成");
+    expect(await notify({ role: "assistant", errorMessage: "500 Internal Server Error" })).toBe("失败");
+    // 中止：通知根本不弹（中止不是「完成」），所以没有正文可言。
+    expect(await notify({ role: "assistant", stopReason: "aborted" }, true)).toBeUndefined();
   });
 });

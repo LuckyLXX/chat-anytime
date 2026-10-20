@@ -246,14 +246,14 @@ description: 审查指定文件或目录，输出问题清单
 | `session_start` | 会话创建完成；命令动作会被**等待完成**（环境准备语义，失败只告警不阻断） |
 | `tool_call` | 工具执行**前**；只有这个事件支持拦截（`block` / `command.blocking`） |
 | `tool_execution_end` | 工具执行完成后（如「改完即格式化」） |
-| `agent_end` | 一次完整回复结束（含全部工具轮次），只触发一次；带累计 token 用量 |
+| `agent_end` | 一次完整回复**彻底结束**（含全部工具轮次、自动重试与压缩恢复），只触发一次；带累计 token 用量。**用户中止的一轮不弹通知**（`notify` 动作被跳过，`http`/`command` 照常执行并带 `aborted` 标记） |
 | `turn_end` | 每个模型调用小轮结束，一次回复会触发多次；大多数场景用 `agent_end` |
 
 ### 四种动作
 
 | kind | 字段 | 说明 |
 | --- | --- | --- |
-| `notify` | `title?` `body?` | 桌面通知。正文支持占位符：`{event}` `{sessionId}` `{sessionTitle}` `{agentName}` `{workspace}` `{toolName}` `{durationMs}` |
+| `notify` | `title?` `body?` | 桌面通知。正文支持占位符：`{event}` `{sessionId}` `{sessionTitle}` `{agentName}` `{workspace}` `{toolName}` `{duration}`（可读耗时，如「1 分 23 秒」）`{durationMs}`（原始毫秒整数）`{result}`（结局词：完成/失败）`{isError}` `{aborted}`（中止时为 true） |
 | `http` | `url`（必填，http/https） | 把上下文 JSON 以 POST 推给该地址（10 秒超时，失败只记日志） |
 | `block` | `deny`（至少一条正则） | **只能挂 `tool_call`**；任一正则命中即否决这次工具调用 |
 | `command` | `command`（必填）、`blocking?` | 用 shell 执行命令（Windows 下即 `cmd`），cwd = 工作区；`blocking: true` **只能挂 `tool_call`** |
@@ -263,7 +263,7 @@ description: 审查指定文件或目录，输出问题清单
 ### 匹配与上下文
 
 - **匹配文本**：`bash` / `powershell` 匹配**命令行原文**；其它工具匹配参数的 JSON 串（含 `path` 等）。
-- **命令动作的输入**：完整上下文 JSON 从 **stdin** 传入（字段同 HookContext：`event`/`sessionId`/`sessionTitle`/`agentName`/`workspace`/`toolName`/`toolInput`/`isError`/`durationMs`/`usage`），同时提供环境变量 `HOOK_EVENT`、`HOOK_SESSION_ID`、`HOOK_SESSION_TITLE`、`HOOK_AGENT`、`HOOK_WORKSPACE`、`HOOK_TOOL`。
+- **命令动作的输入**：完整上下文 JSON 从 **stdin** 传入（字段同 HookContext：`event`/`sessionId`/`sessionTitle`/`agentName`/`workspace`/`toolName`/`toolInput`/`isError`/`durationMs`/`usage`/`aborted`），同时提供环境变量 `HOOK_EVENT`、`HOOK_SESSION_ID`、`HOOK_SESSION_TITLE`、`HOOK_AGENT`、`HOOK_WORKSPACE`、`HOOK_TOOL`。
 - **阻断判定**（`blocking: true`）：退出码 **2**，或 stdout 输出 `{"block":true,"reason":"…"}`。其余情况不阻断。
 - 钩子命令**不走权限门**（用户自己的配置、终端级信任）——所以别写危险命令，也别把用户没要求的删除/推送类动作塞进去。
 
@@ -288,7 +288,7 @@ description: 审查指定文件或目录，输出问题清单
     {
       "name": "跑完通知",
       "event": "agent_end",
-      "action": { "kind": "notify", "title": "ChatAnyTime", "body": "「{sessionTitle}」已完成（{durationMs}ms）" }
+      "action": { "kind": "notify", "title": "ChatAnyTime", "body": "「{sessionTitle}」已完成（{duration}）" }
     },
     {
       "name": "手机推送",

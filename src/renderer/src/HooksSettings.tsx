@@ -23,7 +23,7 @@ const hookEventHints: Record<HookEventName, string> = {
   user_input: "用户消息（含排队的补充消息）提交前触发；拦截型钩子可吞掉这次输入",
   session_before_compact: "手动 /compact、超阈值或溢出恢复导致压缩前触发；阻断型命令可取消这次压缩",
   session_end: "会话运行时被销毁（重建 / 删除 / 被淘汰）前触发；切换会话（park）不触发，退出应用或进程被杀不保证送达",
-  agent_end: "一次完整回复（用户消息 → 全部工具调用轮次 → 最终答案）结束时触发，只通知一次；附累计 token 用量与失败标记——跑完通知/用量统计用这个",
+  agent_end: "一次完整回复（用户消息 → 全部工具调用轮次 → 最终答案）全部结束时触发（含自动重试与压缩恢复），只通知一次；附累计 token 用量与失败标记——跑完通知/用量统计用这个",
   turn_end: "每个模型调用小轮结束时触发，一次回复会触发多次；大多数场景应选「回复结束」"
 };
 
@@ -99,7 +99,7 @@ const hookTemplates: HookTemplate[] = [
   {
     id: "notify-on-finish",
     label: "跑完通知",
-    hint: "一次完整回复结束时弹系统通知（带累计用量）",
+    hint: "一次完整回复彻底结束时弹系统通知（带累计用量与可读耗时）",
     values: { name: "跑完通知", event: "agent_end", actionKind: "notify", notifyTitle: "PiDesktop：{sessionTitle}", }
   },
   {
@@ -397,6 +397,7 @@ export function HooksSettings({ resources, workspaceOpen }: HooksSettingsProps):
                 {actionKind === "notify" && <>
                   <label className="mcp-form-wide">通知标题（可选）<input value={notifyTitle} placeholder="PiDesktop：{event}" onChange={(changeEvent) => setNotifyTitle(changeEvent.target.value)} /></label>
                   <label className="mcp-form-wide">通知正文（可选）<input value={notifyBody} placeholder="{sessionTitle} · {toolName}" onChange={(changeEvent) => setNotifyBody(changeEvent.target.value)} /></label>
+                  <p className="resource-form-help">占位符：{"{event}"} {"{sessionId}"} {"{sessionTitle}"} {"{agentName}"} {"{workspace}"} {"{toolName}"} {"{duration}"}（可读耗时，如「1 分 23 秒」）{"{durationMs}"}（原始毫秒整数）{"{result}"}（结局词：完成/失败）{"{isError}"} {"{aborted}"}（中止时为 true）。用户中止的一轮**不弹通知**。</p>
                 </>}
                 {actionKind === "http" && <label className="mcp-form-wide">推送地址<input value={httpUrl} placeholder="https://api.day.app/your-key/PiDesktop" onChange={(changeEvent) => setHttpUrl(changeEvent.target.value)} /></label>}
                 {actionKind === "block" && <label className="mcp-form-wide">拦截正则（每行一条，命中任一条即否决）<textarea value={denyLines} rows={3} placeholder={"git push.*--force\nrm\\s+-rf"} onChange={(changeEvent) => setDenyLines(changeEvent.target.value)} /></label>}

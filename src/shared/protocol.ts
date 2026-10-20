@@ -1710,7 +1710,10 @@ export interface McpServerConfigDraft {
 
 /**
  * 钩子监听的会话生命周期事件（Pi 扩展事件名的稳定子集 + 一个 app 自造事件）。
- * 注意粒度：agent_end 是一次完整回复（含全部工具调用小轮）结束，只触发一次；
+ * 注意粒度：agent_end 是一次完整回复（含全部工具调用小轮）**彻底结束**，只触发一次；
+ * 它的底层触发点是 Pi 的 `agent_settled`（不是 `agent_end`——后者只是一个底层 run
+ * 边界，自动重试/压缩恢复/排队消息之后还会继续，2026-10-20 用户报「整个会话没完全
+ * 结束就弹通知」）。
  * turn_end 是每个模型调用小轮结束，一次回复会触发多次。
  * session_end 不是 Pi 事件：Pi 的 session_shutdown 只在 AgentSessionRuntime 拆除时
  * 触发，PiDesktop 走的是 session.dispose()，因此该事件由 app 在销毁会话记录前自造
