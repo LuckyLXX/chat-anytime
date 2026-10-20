@@ -2003,6 +2003,44 @@ export interface QueuedMessage {
 }
 
 /** 团队状态条用的成员行（只含 teammate；Lead 伪行只在 team_list 工具结果里出现）。 */
+/** 成员最近一次工具步骤（看板时间线用；只保留最近若干条，不持久化）。 */
+export interface TeamMemberActivityStep {
+  tool: string;
+  detail?: string;
+  status: "running" | "done" | "error" | "aborted";
+  startedAt: number;
+  endedAt?: number;
+  durationMs?: number;
+  /** Pi 的工具调用 id：并行同名工具按它精确收口。 */
+  toolCallId?: string;
+}
+
+/** 成员的实时活动摘要：工具步骤、token/上下文、当前任务由快照派生。 */
+export interface TeamMemberActivity {
+  steps: number;
+  startedAt?: number;
+  lastActiveAt?: number;
+  currentTool?: string;
+  currentDetail?: string;
+  recent: TeamMemberActivityStep[];
+  tokens?: number;
+  cost?: number;
+  contextPercent?: number;
+}
+
+/** 任务板的只读视图（owner 名已解析、ready/writeScopeWarnings 已派生）。 */
+export interface TeamTaskSummary {
+  id: string;
+  revision: number;
+  subject: string;
+  status: "pending" | "in_progress" | "completed";
+  ownerName?: string;
+  blockedBy: string[];
+  writeScopes: string[];
+  ready: boolean;
+  writeScopeWarnings: string[];
+}
+
 export interface TeamMemberSummary {
   name: string;
   status: "running" | "inactive" | "provisioning" | "failed";
@@ -2012,12 +2050,24 @@ export interface TeamMemberSummary {
   color?: string;
   /** failed 时的原因（渲染端 title 展示）。 */
   error?: string;
+  /** 子会话 id（完整记录按此对齐）；冷恢复前也可用。 */
+  sessionId?: string;
+  /** 子会话 JSONL 路径（delegations/teams 下，供完整记录读取）。 */
+  sessionFile?: string;
+  model?: string;
+  thinkingLevel?: ThinkingLevel;
+  /** 当前/最近认领的任务（看板用）。 */
+  taskId?: string;
+  taskSubject?: string;
+  activity?: TeamMemberActivity;
 }
 
-/** 激活会话的团队快照：成员 + 运行计数。没有成员时缺省（渲染端不显示状态条）。 */
+/** 激活会话的团队快照：成员 + 运行计数 + 任务板。没有成员时缺省（渲染端不显示状态条）。 */
 export interface TeamSnapshot {
   members: TeamMemberSummary[];
   running: number;
+  /** 共享任务板的只读视图；旧快照可能没有。 */
+  tasks?: TeamTaskSummary[];
 }
 
 export interface RuntimeSnapshot {
@@ -2173,6 +2223,10 @@ export type RuntimeCommand =
   | { type: "session.teamMode"; enabled: boolean; sessionId?: string }
   /** 停止本会话团队里所有正在跑的成员（只停当前回合，保留队列与任务归属）。 */
   | { type: "team.stopAll"; sessionId?: string }
+  /** 用户以 Lead 身份给成员发消息（走 TeamRuntime.send，running 时步骤边界送达）。 */
+  | { type: "team.send"; target: string; text: string; sessionId?: string }
+  /** 用户以 Lead 身份停止单个成员的当前回合（保留队列与任务归属）。 */
+  | { type: "team.interrupt"; name: string; sessionId?: string }
   | { type: "session.abort"; sessionId?: string }
   /** 任务面板按命令停止：只终止一条正在执行的 bash/powershell 调用（杀进程树），
    * 不中止整个会话——工具以错误结果收场供模型继续本轮。executionId 即
@@ -2229,7 +2283,7 @@ export type RuntimeCommand =
   /** 仅改内置子智能体的思考等级（内置定义本体只读）；thinkingLevel 缺省 = 回到继承主会话档位。 */
   | { type: "subagent.thinking"; id: string; thinkingLevel?: ThinkingLevel }
   /** 读取子代理完整记录（JSONL 转 ChatMessage[]，结果经 subagent.transcript-result 推送）。 */
-  | { type: "subagent.transcript"; childSessionId: string; path: string }
+  | { type: "subagent.transcript"; childSessionId: string; path: string; kind?: "subagent" | "team" }
   | { type: "appearance.save"; appearance: AppearanceSettings }
   /** 保存 MCP Server：original = 编辑前的位置（名称/作用域），用于作用域迁移与保留停用态。 */
   | { type: "mcp.server.save"; server: McpServerConfigDraft; original?: { name: string; scope: "project" | "global" } }

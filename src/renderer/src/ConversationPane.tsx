@@ -34,7 +34,7 @@ import {
   History,
   ScrollText
 } from "lucide-react";
-import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentProps, type FormEvent, type ReactNode } from "react";
+import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentProps, type CSSProperties, type FormEvent, type ReactNode } from "react";
 import type {
   AccessMode,
   ChatMessage,
@@ -78,6 +78,7 @@ import { selectableCatalogModels } from "./lib/model-list";
 import { currentQuestionRequest, useDesktopStore } from "./store";
 import { PanelDock } from "./PanelDock";
 import { TeamStrip } from "./components/TeamStrip";
+import { TeamBoard } from "./components/TeamBoard";
 
 const accessModeOptions: readonly { value: AccessMode; label: string }[] = [
   { value: "read-only", label: "只读" },
@@ -750,6 +751,10 @@ export const ConversationPane = memo(function ConversationPane({
 }: ConversationPaneProps): ReactNode {
   const data = usePaneData(sessionId);
   const settings = useDesktopStore((state) => state.settings);
+  const [teamBoardOpen, setTeamBoardOpen] = useState(false);
+  const [teamBoardMode, setTeamBoardMode] = useState<"dock" | "full">("dock");
+  const [teamBoardWidth, setTeamBoardWidth] = useState(424);
+  const [teamBoardSelected, setTeamBoardSelected] = useState<string>();
   // 本会话已回滚标记（callId → 动作）：产物行内任一调用 id 命中即显示已回滚徽标。
   const rollbacks = useDesktopStore((state) => state.rollbacks);
   const rollbackStates = useMemo(() => {
@@ -1589,6 +1594,26 @@ export const ConversationPane = memo(function ConversationPane({
     });
   }
 
+  async function sendTeamMessage(target: string, text: string): Promise<void> {
+    await window.piDesktop.send({ type: "team.send", target, text, ...(data.sessionId === undefined ? {} : { sessionId: data.sessionId }) });
+  }
+
+  async function stopTeamMember(name: string): Promise<void> {
+    await window.piDesktop.send({ type: "team.interrupt", name, ...(data.sessionId === undefined ? {} : { sessionId: data.sessionId }) });
+  }
+
+  const teamBoardVisible = teamBoardOpen && (data.team?.members.length ?? 0) > 0;
+
+  useEffect(() => {
+    if (!data.team || data.team.members.length === 0) {
+      setTeamBoardOpen(false);
+      return;
+    }
+    if (!data.team.members.some((member) => member.name === teamBoardSelected)) {
+      setTeamBoardSelected(data.team.members.find((member) => member.status === "running")?.name ?? data.team.members[0]?.name);
+    }
+  }, [data.team, teamBoardSelected]);
+
   function stopGeneration(): void {
     // 先取队列再发中断：主进程 abort 会清空队列，这里把文本回填输入框供编辑
     // 重发；输入框已有草稿时追加在草稿之后，不丢内容。
@@ -1921,7 +1946,7 @@ export const ConversationPane = memo(function ConversationPane({
   }
 
   return (
-    <section className={`conversation-pane${compact ? " pane-compact" : ""}`} data-pane="conversation" data-pane-active={focused || undefined} onPointerDownCapture={onFocus ? (event) => {
+    <section className={`conversation-pane${compact ? " pane-compact" : ""}${teamBoardVisible ? " team-board-open" : ""}${teamBoardVisible && teamBoardMode === "full" ? " team-board-full" : ""}`} style={teamBoardVisible ? { "--team-board-width": `${teamBoardWidth}px` } as CSSProperties : undefined} data-pane="conversation" data-pane-active={focused || undefined} onPointerDownCapture={onFocus ? (event) => {
       // 关闭按钮点击不应先聚焦激活该格：关闭动作与「点击即聚焦」解耦。
       // 否则关闭非焦点格会先 focusPane（异步 session.open 激活它）再 removePane，
       // 产生两次激活竞态，用户会感知为「关错格」。最大化按钮仍要聚焦（用户想专注看它）。
@@ -2035,7 +2060,7 @@ export const ConversationPane = memo(function ConversationPane({
             <span className="composer-plan-banner-title">计划模式</span>
           </div>
         )}
-        {(data.team?.members.length ?? 0) > 0 && <TeamStrip snapshot={data.team} onStopAll={stopTeam} />}
+        {(data.team?.members.length ?? 0) > 0 && <TeamStrip snapshot={data.team} onStopAll={stopTeam} onOpenBoard={() => { setTeamBoardMode("dock"); setTeamBoardOpen(true); }} />}
         {data.queuedMessages.length > 0 && (
           <div className="composer-queue" role="list" aria-label="排队输入" data-composer-zone="queue">
             <div className="composer-queue-caption"><Clock size={11} /><span>排队输入 {data.queuedMessages.length} 条 · 本轮回复结束后自动发出</span></div>
@@ -2212,6 +2237,23 @@ export const ConversationPane = memo(function ConversationPane({
           </div>
         </div>
       </form>
+      {teamBoardVisible && data.team && (
+        <TeamBoard
+          snapshot={data.team}
+          mode={teamBoardMode}
+          width={teamBoardWidth}
+          sessionId={data.sessionId}
+          selectedName={teamBoardSelected}
+          onSelect={setTeamBoardSelected}
+          onResize={setTeamBoardWidth}
+          onToggleMode={() => setTeamBoardMode((current) => current === "dock" ? "full" : "dock")}
+          onClose={() => setTeamBoardOpen(false)}
+          onStopAll={stopTeam}
+          onStopMember={stopTeamMember}
+          onSend={sendTeamMessage}
+          onOpenArtifact={onOpenArtifact}
+        />
+      )}
       <ImageLightbox
         image={previewingAttachment?.kind === "image" ? { src: `data:${previewingAttachment.mimeType};base64,${previewingAttachment.data}`, alt: previewingAttachment.name } : undefined}
         onClose={() => setPreviewingAttachment(null)}

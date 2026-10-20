@@ -1,5 +1,5 @@
 import { AlertCircle, Bot, ChevronDown, Code2, LoaderCircle, ScrollText, X } from "lucide-react";
-import { useEffect, type ReactNode } from "react";
+import { memo, useEffect, type ReactNode } from "react";
 import type { ChatMessage, DelegationProgress, DelegationRole, MessageBlock } from "../../../shared/protocol";
 import { delegationRoleLabels, thinkingLevelLabels, toolLabel } from "../../../shared/locale";
 import { useDesktopStore } from "../store";
@@ -12,10 +12,14 @@ import type { Artifact } from "../lib/content";
  * 转成 ChatMessage[]，按 goal 气泡 + assistant 文本/思考 + 工具调用行的时间线展示。
  * 无 composer/无再生成；markdown 走 RichContent 同一渲染管线。
  */
-export function DelegationTranscript({ delegation, onClose, onOpenArtifact }: {
+export function DelegationTranscript({ delegation, onClose, onOpenArtifact, title, subtitle, kind = "subagent" }: {
   delegation: DelegationProgress;
   onClose(): void;
   onOpenArtifact(artifact: Artifact): void;
+  /** 团队看板复用同一套时间线时的标题/副标题与读取范围。 */
+  title?: string;
+  subtitle?: string;
+  kind?: "subagent" | "team";
 }): ReactNode {
   const childSessionId = delegation.childSessionId;
   const transcript = useDesktopStore((state) => state.transcripts[childSessionId]);
@@ -32,8 +36,8 @@ export function DelegationTranscript({ delegation, onClose, onOpenArtifact }: {
       delete transcriptErrors[childSessionId];
       return { transcripts, transcriptErrors };
     });
-    void window.piDesktop.send({ type: "subagent.transcript", childSessionId, path: delegation.childSessionFile });
-  }, [childSessionId, delegation.childSessionFile]);
+    void window.piDesktop.send({ type: "subagent.transcript", childSessionId, path: delegation.childSessionFile, ...(kind === "team" ? { kind: "team" as const } : {}) });
+  }, [childSessionId, delegation.childSessionFile, kind]);
 
   const titleParts = [
     delegation.subagentName ? `自定义子智能体「${delegation.subagentName}」` : delegationRoleLabels[delegation.role] ?? delegation.role,
@@ -47,8 +51,8 @@ export function DelegationTranscript({ delegation, onClose, onOpenArtifact }: {
         <header>
           <div className={`risk-icon ${delegation.subagentColor ? "subagent" : "command"}`}><ScrollText size={20} /></div>
           <div className="delegation-transcript-head-copy">
-            <h2>子代理完整记录</h2>
-            <p>{titleParts.join(" · ")}</p>
+            <h2>{title ?? "子代理完整记录"}</h2>
+            <p>{subtitle ?? titleParts.join(" · ")}</p>
           </div>
           <button className="icon-button" type="button" title="关闭" aria-label="关闭" onClick={onClose}><X size={18} /></button>
         </header>
@@ -59,14 +63,14 @@ export function DelegationTranscript({ delegation, onClose, onOpenArtifact }: {
               ? <div className="delegation-transcript-placeholder"><LoaderCircle size={18} className="spinning" /><span>正在读取子代理记录…</span></div>
               : transcript.length === 0
                 ? <div className="delegation-transcript-placeholder"><span>该子代理会话没有可展示的消息。</span></div>
-                : <Timeline messages={transcript} onOpenArtifact={onOpenArtifact} />}
+                : <TranscriptTimeline messages={transcript} onOpenArtifact={onOpenArtifact} />}
         </div>
       </div>
     </div>
   );
 }
 
-function Timeline({ messages, onOpenArtifact }: { messages: ChatMessage[]; onOpenArtifact(artifact: Artifact): void }): ReactNode {
+export const TranscriptTimeline = memo(function TranscriptTimeline({ messages, onOpenArtifact }: { messages: ChatMessage[]; onOpenArtifact(artifact: Artifact): void }): ReactNode {
   return (
     <div className="delegation-transcript-timeline">
       {messages.map((message) => (
@@ -81,7 +85,7 @@ function Timeline({ messages, onOpenArtifact }: { messages: ChatMessage[]; onOpe
       ))}
     </div>
   );
-}
+});
 
 function TranscriptBlock({ block, artifactPrefix, onOpenArtifact }: { block: MessageBlock; artifactPrefix: string; onOpenArtifact(artifact: Artifact): void }): ReactNode {
   switch (block.type) {

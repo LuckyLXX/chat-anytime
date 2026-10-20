@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import type { AgentSession, AgentSessionEvent, AgentSessionEventListener } from "@earendil-works/pi-coding-agent";
 import type { AgentProfile, ThinkingLevel } from "../shared/protocol.js";
 import type { PersistedSessionEntry } from "./session-history.js";
 import { TEAM_ENTRY_TYPE, TEAM_IDLE_DISPOSE_MS, type TeamMemberRecord, type TeamTaskRecord } from "./team-store.js";
@@ -71,7 +71,9 @@ class FakeChild implements TeamChildSession {
   disposed = false;
   aborted = false;
   failSend = false;
-  private listeners = new Set<(event: { type: string }) => void>();
+  private listeners = new Set<AgentSessionEventListener>();
+  stats: { toolCalls: number; tokens: { total: number }; cost: number } = { toolCalls: 0, tokens: { total: 0 }, cost: 0 };
+  contextUsage: { percent: number | null } | undefined;
 
   constructor(readonly sessionId: string, readonly sessionFile: string) {}
 
@@ -103,13 +105,22 @@ class FakeChild implements TeamChildSession {
     this.disposed = true;
   }
 
-  subscribe(listener: (event: { type: string }) => void): () => void {
+  subscribe(listener: AgentSessionEventListener): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
 
-  emit(type: string): void {
-    for (const listener of [...this.listeners]) listener({ type });
+  getSessionStats(): { toolCalls: number; tokens: { total: number }; cost: number } {
+    return this.stats;
+  }
+
+  getContextUsage(): { percent: number | null } | undefined {
+    return this.contextUsage;
+  }
+
+  emit(event: string | Record<string, unknown>): void {
+    const payload = (typeof event === "string" ? { type: event } : event) as AgentSessionEvent;
+    for (const listener of [...this.listeners]) listener(payload);
   }
 
   settle(): void {
@@ -200,6 +211,57 @@ describe("spawn", () => {
     const phases = h.lead.entries.map((entry) => (entry.data as { member?: { phase?: string } }).member?.phase);
     expect(phases).toEqual(["provisioning", "active"]);
     expect(h.runtime.snapshot()).toMatchObject({ running: 1 });
+  });
+
+  it("does not wake team_wait on member tool activity (avoids paid polling cascades)", async () => {
+    vi.useFakeTimers();
+    const h = harness();
+    await h.runtime.spawn(leadMembership, { name: "reviewer", description: "x", prompt: "p" });
+    const child = h.created[0]!;
+    const wait = h.runtime.wait(leadMembership, 10_000, new AbortController().signal);
+    child.emit({ type: "tool_execution_start", toolCallId: "call-1", toolName: "read", args: { path: "a.ts" } });
+    await vi.advanceTimersByTimeAsync(10_000);
+    await expect(wait).resolves.toMatchObject({ timedOut: true });
+    expect(child.aborted).toBe(false);
+  });
+
+  it("projects live member activity and the shared task board into the snapshot", async () => {
+    const h = harness();
+    await h.runtime.spawn(leadMembership, { name: "reviewer", description: "x", prompt: "p" });
+    const child = h.created[0]!;
+    child.stats = { toolCalls: 3, tokens: { total: 1234 }, cost: 0.02 };
+    child.contextUsage = { percent: 42 };
+    child.emit({ type: "agent_start" });
+    child.emit({ type: "tool_execution_start", toolCallId: "call-1", toolName: "edit", args: { path: "src/a.ts" } });
+    let row = h.runtime.snapshot().members[0]!;
+    expect(row).toMatchObject({
+      sessionId: child.sessionId,
+      activity: { steps: 3, currentTool: "edit", currentDetail: "src/a.ts", tokens: 1234, contextPercent: 42 }
+    });
+    expect(row.activity?.recent.at(-1)).toMatchObject({ tool: "edit", status: "running", detail: "src/a.ts" });
+
+    // 并行同名工具：只按 toolCallId 收口，不能把另一个仍在跑的 edit 也标成 done。
+    child.emit({ type: "tool_execution_start", toolCallId: "call-2", toolName: "edit", args: { path: "src/b.ts" } });
+    child.emit({ type: "tool_execution_end", toolCallId: "call-1", toolName: "edit", result: {}, isError: false, durationMs: 50 });
+    row = h.runtime.snapshot().members[0]!;
+    expect(row.activity?.recent.find((step) => step.toolCallId === "call-1")).toMatchObject({ status: "done" });
+    expect(row.activity?.recent.find((step) => step.toolCallId === "call-2")).toMatchObject({ status: "running" });
+    expect(row.activity?.currentDetail).toBe("src/b.ts");
+    child.emit({ type: "tool_execution_end", toolCallId: "call-2", toolName: "edit", result: {}, isError: false });
+    row = h.runtime.snapshot().members[0]!;
+    expect(row.activity?.recent.find((step) => step.toolCallId === "call-2")).toMatchObject({ status: "done" });
+    expect(row.activity?.currentTool).toBeUndefined();
+
+    // 用户停止 → agent_settled{aborted}：步骤收口为中性 aborted，而不是红色错误。
+    child.emit({ type: "tool_execution_start", toolCallId: "call-3", toolName: "read", args: { path: "src/c.ts" } });
+    child.emit({ type: "agent_settled", aborted: true });
+    expect(h.runtime.snapshot().members[0]?.activity?.recent.at(-1)).toMatchObject({ status: "aborted" });
+
+    const task = await h.runtime.createTask(leadMembership, { subject: "渲染器", description: "实现渲染入口" });
+    await h.runtime.updateTask({ role: "teammate", name: "reviewer" }, { taskId: task.id, expectedRevision: task.revision, action: "claim" });
+    const snapshot = h.runtime.snapshot();
+    expect(snapshot.tasks).toContainEqual(expect.objectContaining({ id: task.id, status: "in_progress", ownerName: "reviewer" }));
+    expect(snapshot.members[0]).toMatchObject({ taskId: task.id, taskSubject: "渲染器" });
   });
 
   it("rejects duplicates, invalid names, role violations and the member limit", async () => {

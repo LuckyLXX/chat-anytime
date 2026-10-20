@@ -428,6 +428,24 @@ describe("session-level collaboration flags", () => {
     expect(useDesktopStore.getState().snapshot.team?.members[0]?.status).toBe("inactive");
   });
 
+  it("团队快照里的活动与任务内容变化不被早退吞掉（看板实时刷新）", () => {
+    const team = (detail: string, taskStatus: "pending" | "in_progress") => ({
+      running: 1,
+      members: [{
+        name: "reviewer",
+        status: "running" as const,
+        activity: { steps: 2, currentTool: "edit", currentDetail: detail, recent: [{ tool: "edit", detail, status: "running" as const, startedAt: 1 }] }
+      }],
+      tasks: [{ id: "task-1", revision: 2, subject: "渲染器", status: taskStatus, ownerName: "reviewer", blockedBy: [], writeScopes: [], ready: false, writeScopeWarnings: [] }]
+    });
+    const state = useDesktopStore.getState();
+    state.handleRuntimeMessage({ type: "state", snapshot: { ...snap("team-3"), team: team("src/a.ts", "pending") } });
+    expect(useDesktopStore.getState().snapshot.team?.members[0]?.activity?.currentDetail).toBe("src/a.ts");
+    state.handleRuntimeMessage({ type: "state", snapshot: { ...snap("team-3"), team: team("src/b.ts", "in_progress") } });
+    expect(useDesktopStore.getState().snapshot.team?.members[0]?.activity?.currentDetail).toBe("src/b.ts");
+    expect(useDesktopStore.getState().snapshot.team?.tasks?.[0]?.status).toBe("in_progress");
+  });
+
   it("分屏格子的团队快照变化（结构化克隆后引用不同）不被引用早退吞掉", () => {
     function pane(sessionId: string, running: boolean): SessionPaneSnapshot {
       return {

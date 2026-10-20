@@ -13,6 +13,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const read = (relative: string): string => readFileSync(join(here, relative), "utf8");
 
 const runtimeSource = read("pi-runtime.ts");
+const teamRuntimeSource = read("team-runtime.ts");
 const protocolSource = read("../shared/protocol.ts");
 const storeSource = read("../renderer/src/store.ts");
 const appSource = read("../renderer/src/App.tsx");
@@ -29,6 +30,10 @@ describe("team wiring", () => {
     expect(protocolSource).toMatch(/teamMode\?: boolean/u);
     expect(protocolSource).toMatch(/\{ type: "session\.teamMode"; enabled: boolean; sessionId\?: string \}/u);
     expect(protocolSource).toMatch(/\{ type: "team\.stopAll"; sessionId\?: string \}/u);
+    expect(protocolSource).toMatch(/\{ type: "team\.send"; target: string; text: string; sessionId\?: string \}/u);
+    expect(protocolSource).toMatch(/\{ type: "team\.interrupt"; name: string; sessionId\?: string \}/u);
+    expect(protocolSource).toMatch(/kind\?: "subagent" \| "team"/u);
+    expect(protocolSource).toMatch(/toolCallId\?: string/u);
   });
 
   it("activates team tools only when the session team mode is on", () => {
@@ -69,6 +74,15 @@ describe("team wiring", () => {
     expect(runtimeSource).toMatch(/case "session\.teamMode": \{\n      setTeamMode\(resolveTargetRecord\(command\.sessionId\), command\.enabled\);/u);
     expect(runtimeSource).toMatch(/case "team\.stopAll": \{/u);
     expect(runtimeSource).toMatch(/record\.teamRuntime\?\.stopAll\(\);/u);
+    expect(runtimeSource).toMatch(/case "team\.send": \{/u);
+    expect(runtimeSource).toMatch(/case "team\.interrupt": \{/u);
+    expect(runtimeSource).toMatch(/command\.kind === "team"/u);
+  });
+
+  it("keeps activity frames separate from team_wait and closes steps by toolCallId", () => {
+    expect(teamRuntimeSource).toMatch(/private notifyActivity\(\): void/u);
+    expect(teamRuntimeSource).toMatch(/event\.toolCallId/u);
+    expect(teamRuntimeSource).toMatch(/notifyActivity\(\);/u);
   });
 
   it("renders the minimal UI and the callout title", () => {
@@ -76,8 +90,14 @@ describe("team wiring", () => {
     expect(appSource).toMatch(/id: "mode\.team"/u);
     expect(paneSource).toMatch(/import \{ TeamStrip \} from "\.\/components\/TeamStrip";/u);
     expect(paneSource).toMatch(/\{ trigger: "\/team"/u);
-    expect(paneSource).toMatch(/<TeamStrip snapshot=\{data\.team\} onStopAll=\{stopTeam\} \/>/u);
+    expect(paneSource).toMatch(/<TeamStrip snapshot=\{data\.team\} onStopAll=\{stopTeam\} onOpenBoard=/u);
+    expect(paneSource).toMatch(/import \{ TeamBoard \} from "\.\/components\/TeamBoard";/u);
+    expect(paneSource).toMatch(/<TeamBoard/u);
     expect(stripSource).toMatch(/data-control="team-stop-all"/u);
+    expect(stripSource).toMatch(/data-control="team-open-board"/u);
+    expect(cssSource).toMatch(/\.team-board \{/u);
+    expect(cssSource).toMatch(/\.team-workbench \{/u);
+    expect(storeSource).toMatch(/memberActivityEqual/u);
     expect(localeSource).toMatch(/pidesktop-team-message/u);
     expect(cssSource).toMatch(/\.composer\.has-team \{/u);
     expect(cssSource).toMatch(/\.composer-team-strip \{/u);

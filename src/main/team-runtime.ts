@@ -21,11 +21,12 @@ import {
   SessionManager,
   SettingsManager,
   type AgentSession,
+  type AgentSessionEventListener,
   type ModelRuntime,
   type ToolDefinition
 } from "@earendil-works/pi-coding-agent";
 import type { Api, Model } from "@earendil-works/pi-ai";
-import type { AgentProfile, PermissionDecision, SubagentDefinition, TeamMemberSummary, TeamSnapshot, ThinkingLevel } from "../shared/protocol.js";
+import type { AgentProfile, PermissionDecision, SubagentDefinition, TeamMemberActivityStep, TeamMemberSummary, TeamSnapshot, TeamTaskSummary, ThinkingLevel } from "../shared/protocol.js";
 import { createChildPermissionExtension, resolveSubagentDefinition } from "./subagent.js";
 import { withCacheWarmingOff } from "./runtime-settings.js";
 import { createTeamTools } from "./runtime-team.js";
@@ -75,7 +76,10 @@ export interface TeamChildSession {
   ): Promise<void>;
   abort(): Promise<void>;
   dispose(): void;
-  subscribe(listener: (event: { type: string }) => void): () => void;
+  subscribe(listener: AgentSessionEventListener): () => void;
+  /** 只读统计；测试 fake 可以缺省。 */
+  getSessionStats?(): { toolCalls: number; tokens: { total: number }; cost: number };
+  getContextUsage?(): { percent: number | null } | undefined;
 }
 
 export interface TeamChildCreated {
@@ -122,6 +126,13 @@ interface MemberRuntime {
   lastError?: string;
   idleTimer?: ReturnType<typeof setTimeout>;
   livePromise?: Promise<void>;
+  /** 本运行时观察到的工具步骤（不持久化；冷恢复后从新事件重新累计）。 */
+  steps: number;
+  startedAt?: number;
+  lastActiveAt?: number;
+  currentTool?: string;
+  currentDetail?: string;
+  recent: TeamMemberActivityStep[];
 }
 
 const MEMBER_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u;
@@ -153,6 +164,50 @@ function enabledTools(agent: AgentProfile): string[] {
   return Object.entries(agent.tools ?? {}).filter(([, enabled]) => enabled).map(([name]) => name);
 }
 
+/** 把正在运行的最近步骤收口；只闭合同名/最后一条，避免乱序事件误关其他步骤。 */
+function closeRunningSteps(member: MemberRuntime, status: "done" | "error" | "aborted", now: number, toolCallId?: string, durationMs?: number): void {
+  for (let index = member.recent.length - 1; index >= 0; index -= 1) {
+    const step = member.recent[index]!;
+    if (step.status !== "running") continue;
+    if (toolCallId !== undefined && step.toolCallId !== toolCallId) continue;
+    member.recent[index] = {
+      ...step,
+      status,
+      endedAt: now,
+      durationMs: durationMs ?? Math.max(0, now - step.startedAt)
+    };
+  }
+  refreshCurrentTool(member);
+}
+
+/** 并行工具调用时，当前工具取最近仍在运行的那一条，而不是简单清空。 */
+function refreshCurrentTool(member: MemberRuntime): void {
+  const running = [...member.recent].reverse().find((step) => step.status === "running");
+  member.currentTool = running?.tool;
+  member.currentDetail = running?.detail;
+}
+
+/** 工具参数的一行摘要（看板时间线用；完整参数在完整记录里）。 */
+function activityDetail(args: unknown): string | undefined {
+  if (!args || typeof args !== "object") return undefined;
+  const record = args as Record<string, unknown>;
+  const pick = (value: unknown): string | undefined => {
+    if (typeof value !== "string") return undefined;
+    const text = value.replace(/\s+/gu, " ").trim();
+    if (!text) return undefined;
+    return text.length > 120 ? `${text.slice(0, 119)}…` : text;
+  };
+  const path = pick(record.path);
+  if (path) return path;
+  const command = pick(record.command);
+  if (command) return command;
+  const pattern = pick(record.pattern) ?? pick(record.query);
+  if (pattern) return pattern;
+  const goal = pick(record.goal);
+  if (goal) return goal;
+  return undefined;
+}
+
 function taskNumber(id: string): number {
   const match = /^task-(\d+)$/u.exec(id);
   return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
@@ -167,6 +222,7 @@ export class TeamRuntime implements TeamService {
   private readonly waiters = new Set<() => void>();
   private queue: Promise<unknown> = Promise.resolve();
   private snapshotCache: TeamSnapshot | undefined;
+  private activityTimer?: ReturnType<typeof setTimeout>;
   private disposed = false;
 
   constructor(private readonly options: TeamRuntimeOptions) {
@@ -188,7 +244,7 @@ export class TeamRuntime implements TeamService {
     // 恢复已有成员的运行时槽位（不重新拉子会话；handle 留空，首次 send 时冷恢复）。
     // 漏掉这一步会让重启后的 active 成员在 activeMember() 里「运行时不存在」。
     for (const member of this.state.members) {
-      if (!this.members.has(member.id)) this.members.set(member.id, { record: member, running: false });
+      if (!this.members.has(member.id)) this.members.set(member.id, { record: member, running: false, steps: 0, recent: [] });
     }
   }
 
@@ -432,23 +488,76 @@ export class TeamRuntime implements TeamService {
     const members: TeamMemberSummary[] = this.state.members.map((record) => {
       const member = this.members.get(record.id);
       const error = record.error ?? member?.lastError;
+      const stats = member?.handle?.getSessionStats?.();
+      const context = member?.handle?.getContextUsage?.();
+      const activity = member ? this.activityFor(member, stats, context) : undefined;
+      const task = this.state.tasks.find((candidate) => candidate.ownerId === record.id && candidate.status === "in_progress")
+        ?? this.state.tasks.find((candidate) => candidate.ownerId === record.id && candidate.status !== "deleted");
       return {
         name: record.name,
         status: this.statusOf(record, member),
         ...(record.description ? { description: record.description } : {}),
         ...(record.config.subagentName ? { subagent: record.config.subagentName } : {}),
         ...(record.config.color ? { color: record.config.color } : {}),
-        ...(error ? { error } : {})
+        ...(error ? { error } : {}),
+        sessionId: record.id,
+        sessionFile: record.sessionFile,
+        model: `${record.config.model.provider}/${record.config.model.id}`,
+        thinkingLevel: record.config.thinkingLevel,
+        ...(task ? { taskId: task.id, taskSubject: task.subject } : {}),
+        ...(activity ? { activity } : {})
       };
     });
-    this.snapshotCache = { members, running: members.filter((member) => member.status === "running").length };
+    const tasks: TeamTaskSummary[] = [];
+    for (const task of this.state.tasks) {
+      if (task.status === "deleted") continue;
+      const view = projectTaskView(this.state, task, this.leadSession.sessionId);
+      tasks.push({
+        id: view.id,
+        revision: view.revision,
+        subject: view.subject,
+        // 上面已过滤 tombstone；类型收窄在视图里丢失，这里显式声明展示态。
+        status: view.status as TeamTaskSummary["status"],
+        ...(view.ownerName === undefined ? {} : { ownerName: view.ownerName }),
+        blockedBy: view.blockedBy,
+        writeScopes: view.writeScopes,
+        ready: view.ready,
+        writeScopeWarnings: view.writeScopeWarnings
+      });
+    }
+    this.snapshotCache = { members, running: members.filter((member) => member.status === "running").length, tasks };
     return this.snapshotCache;
+  }
+
+  /** 成员的实时活动摘要；没有可展示内容时返回 undefined，避免空对象进快照。 */
+  private activityFor(
+    member: MemberRuntime,
+    stats: { toolCalls: number; tokens: { total: number }; cost: number } | undefined,
+    context: { percent: number | null } | undefined
+  ): NonNullable<TeamMemberSummary["activity"]> | undefined {
+    const steps = Math.max(stats?.toolCalls ?? 0, member.steps);
+    const recent = member.recent;
+    if (steps === 0 && recent.length === 0 && !member.startedAt && !member.currentTool) return undefined;
+    return {
+      steps,
+      ...(member.startedAt === undefined ? {} : { startedAt: member.startedAt }),
+      ...(member.lastActiveAt === undefined ? {} : { lastActiveAt: member.lastActiveAt }),
+      ...(member.currentTool === undefined ? {} : { currentTool: member.currentTool }),
+      ...(member.currentDetail === undefined ? {} : { currentDetail: member.currentDetail }),
+      recent: recent.map((step) => ({ ...step })),
+      ...(stats ? { tokens: stats.tokens.total, cost: stats.cost } : {}),
+      ...(context && context.percent !== null ? { contextPercent: context.percent } : {})
+    };
   }
 
   /** 运行时销毁：关准入、唤醒等待者、停止并断开所有成员（不删子会话文件）。 */
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    if (this.activityTimer) {
+      clearTimeout(this.activityTimer);
+      this.activityTimer = undefined;
+    }
     for (const waiter of [...this.waiters]) waiter();
     this.waiters.clear();
     for (const member of this.members.values()) {
@@ -636,13 +745,46 @@ export class TeamRuntime implements TeamService {
       this.replaceMember({ ...member.record, sessionFile: created.sessionFile });
     }
     member.unsubscribe = created.handle.subscribe((event) => {
+      const now = Date.now();
       if (event.type === "agent_settled") {
         member.running = false;
+        closeRunningSteps(member, event.aborted ? "aborted" : "done", now);
         this.notify();
         this.scheduleIdle(member);
         return;
       }
-      if (event.type === "tool_execution_start") this.scheduleIdle(member);
+      if (event.type === "agent_start") {
+        member.running = true;
+        member.startedAt = now;
+        member.lastActiveAt = now;
+        this.notifyActivity();
+        return;
+      }
+      if (event.type === "tool_execution_start") {
+        const detail = activityDetail(event.args);
+        const step: TeamMemberActivityStep = {
+          tool: event.toolName,
+          status: "running",
+          startedAt: now,
+          toolCallId: event.toolCallId,
+          ...(detail ? { detail } : {}),
+        };
+        member.recent = [...member.recent, step].slice(-8);
+        member.steps += 1;
+        member.currentTool = event.toolName;
+        member.currentDetail = detail;
+        member.lastActiveAt = now;
+        this.scheduleIdle(member);
+        this.notifyActivity();
+        return;
+      }
+      if (event.type === "tool_execution_end") {
+        closeRunningSteps(member, event.isError ? "error" : "done", now, event.toolCallId, event.durationMs);
+        member.lastActiveAt = now;
+        this.notifyActivity();
+        return;
+      }
+      if (event.type === "message_end") this.notifyActivity();
     });
     this.scheduleIdle(member);
     return true;
@@ -885,7 +1027,7 @@ export class TeamRuntime implements TeamService {
       : { ...this.state, members: this.state.members.map((member) => member.id === record.id ? record : member) };
     const runtime = this.members.get(record.id);
     if (runtime) runtime.record = record;
-    else this.members.set(record.id, { record, running: false });
+    else this.members.set(record.id, { record, running: false, steps: 0, recent: [] });
   }
 
   private childHasUserMessage(path: string): boolean {
@@ -901,8 +1043,25 @@ export class TeamRuntime implements TeamService {
     }
   }
 
+  /** 活动帧（工具开始/结束、消息完成）只刷新看板，不唤醒 team_wait。 */
+  private notifyActivity(): void {
+    if (this.disposed) return;
+    this.snapshotCache = undefined;
+    if (this.activityTimer) return;
+    const timer = setTimeout(() => {
+      this.activityTimer = undefined;
+      if (!this.disposed) this.options.onChange?.();
+    }, 120);
+    timer.unref?.();
+    this.activityTimer = timer;
+  }
+
   private notify(): void {
     if (this.disposed) return;
+    if (this.activityTimer) {
+      clearTimeout(this.activityTimer);
+      this.activityTimer = undefined;
+    }
     this.snapshotCache = undefined;
     for (const waiter of [...this.waiters]) waiter();
     this.options.onChange?.();

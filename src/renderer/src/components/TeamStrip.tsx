@@ -1,4 +1,4 @@
-import { CircleStop, Users } from "lucide-react";
+import { CircleStop, PanelRight, Users } from "lucide-react";
 import type { ReactNode } from "react";
 import type { TeamSnapshot } from "../../../shared/protocol";
 
@@ -7,7 +7,7 @@ import type { TeamSnapshot } from "../../../shared/protocol";
  * 只在有队友时出现；不提供 roster 管理/任务板（MVP 的非目标）。
  * 放在 composer 的独立 grid 行里，与计划横幅/排队列表共存时由 CSS 依次占位。
  */
-export function TeamStrip({ snapshot, onStopAll }: { snapshot?: TeamSnapshot; onStopAll(): void }): ReactNode {
+export function TeamStrip({ snapshot, onStopAll, onOpenBoard }: { snapshot?: TeamSnapshot; onStopAll(): void; onOpenBoard(): void }): ReactNode {
   if (!snapshot || snapshot.members.length === 0) return null;
   return (
     <div className="composer-team-strip" data-composer-zone="team" role="status" aria-label="团队成员状态">
@@ -28,6 +28,17 @@ export function TeamStrip({ snapshot, onStopAll }: { snapshot?: TeamSnapshot; on
           );
         })}
       </span>
+      <button
+        className="composer-team-open"
+        data-control="team-open-board"
+        type="button"
+        title="打开团队看板：成员实时执行、任务板与完整记录"
+        aria-label="打开团队看板"
+        onClick={onOpenBoard}
+      >
+        <PanelRight size={11} />
+        看板
+      </button>
       <button
         className="composer-team-stop"
         data-control="team-stop-all"

@@ -4601,6 +4601,22 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       else emitPaneStateFor(record);
       break;
     }
+    case "team.send": {
+      const record = resolveTargetRecord(command.sessionId);
+      if (!record.teamRuntime) throw new Error("当前会话没有团队运行时");
+      await record.teamRuntime.send({ role: "lead", name: "lead" }, command.target, command.text);
+      if (record === activeRuntime) emitState();
+      else emitPaneStateFor(record);
+      break;
+    }
+    case "team.interrupt": {
+      const record = resolveTargetRecord(command.sessionId);
+      if (!record.teamRuntime) throw new Error("当前会话没有团队运行时");
+      record.teamRuntime.interrupt({ role: "lead", name: "lead" }, command.name);
+      if (record === activeRuntime) emitState();
+      else emitPaneStateFor(record);
+      break;
+    }
     case "checkpoint.rollback": {
       const record = resolveTargetRecord(command.sessionId);
       const sessionId = record.session.sessionId;
@@ -5401,15 +5417,16 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       const root = agentSessionRoot();
       const delegationsRoot = root ? join(root, "delegations") : undefined;
       const target = resolve(command.path);
+      const teamTranscript = command.kind === "team";
       if (!delegationsRoot || !pathIsWithin(delegationsRoot, target) || !target.toLowerCase().endsWith(".jsonl")) {
-        post({ type: "subagent.transcript-error", childSessionId: command.childSessionId, message: "只能读取当前 Agent 的委派子代理记录。" });
+        post({ type: "subagent.transcript-error", childSessionId: command.childSessionId, message: teamTranscript ? "只能读取当前 Agent 的团队成员记录。" : "只能读取当前 Agent 的委派子代理记录。" });
         break;
       }
       let content: string;
       try {
         content = await readFile(target, "utf8");
       } catch {
-        post({ type: "subagent.transcript-error", childSessionId: command.childSessionId, message: "子代理尚未产生输出，无法查看完整记录。" });
+        post({ type: "subagent.transcript-error", childSessionId: command.childSessionId, message: teamTranscript ? "成员尚未产生输出，无法查看完整记录。" : "子代理尚未产生输出，无法查看完整记录。" });
         break;
       }
       const rows = content.split(/\r?\n/u).filter(Boolean).map((line) => {

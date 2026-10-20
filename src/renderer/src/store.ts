@@ -26,24 +26,86 @@ import type {
   TeamSnapshot,
   Todo,
   ToolExecution,
+  TeamMemberActivity,
+  TeamMemberActivityStep,
+  TeamMemberSummary,
+  TeamTaskSummary,
   UsageStats
 } from "../../shared/protocol";
 
-/** 团队快照的内容比较：IPC 结构化克隆后引用必不相等，只能逐成员比较。 */
+/** 团队快照的内容比较：IPC 结构化克隆后引用必不相等，只能逐字段比较。 */
 export function teamSnapshotEqual(left: TeamSnapshot | undefined, right: TeamSnapshot | undefined): boolean {
   if (left === right) return true;
   if (!left || !right) return false;
   if (left.running !== right.running || left.members.length !== right.members.length) return false;
-  return left.members.every((member, index) => {
-    const other = right.members[index];
-    return other !== undefined
-      && member.name === other.name
-      && member.status === other.status
-      && member.description === other.description
-      && member.subagent === other.subagent
-      && member.color === other.color
-      && member.error === other.error;
-  });
+  if (!left.members.every((member, index) => memberSummaryEqual(member, right.members[index]))) return false;
+  const leftTasks = left.tasks ?? [];
+  const rightTasks = right.tasks ?? [];
+  if (leftTasks.length !== rightTasks.length) return false;
+  return leftTasks.every((task, index) => taskSummaryEqual(task, rightTasks[index]));
+}
+
+function activityStepEqual(left: TeamMemberActivityStep | undefined, right: TeamMemberActivityStep | undefined): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  return left.tool === right.tool
+    && left.detail === right.detail
+    && left.status === right.status
+    && left.startedAt === right.startedAt
+    && left.endedAt === right.endedAt
+    && left.durationMs === right.durationMs
+    && left.toolCallId === right.toolCallId;
+}
+
+function memberActivityEqual(left: TeamMemberActivity | undefined, right: TeamMemberActivity | undefined): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  if (left.steps !== right.steps
+    || left.startedAt !== right.startedAt
+    || left.lastActiveAt !== right.lastActiveAt
+    || left.currentTool !== right.currentTool
+    || left.currentDetail !== right.currentDetail
+    || left.tokens !== right.tokens
+    || left.cost !== right.cost
+    || left.contextPercent !== right.contextPercent
+    || left.recent.length !== right.recent.length) return false;
+  return left.recent.every((step, index) => activityStepEqual(step, right.recent[index]));
+}
+
+function memberSummaryEqual(left: TeamMemberSummary | undefined, right: TeamMemberSummary | undefined): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  return left.name === right.name
+    && left.status === right.status
+    && left.description === right.description
+    && left.subagent === right.subagent
+    && left.color === right.color
+    && left.error === right.error
+    && left.sessionId === right.sessionId
+    && left.sessionFile === right.sessionFile
+    && left.model === right.model
+    && left.thinkingLevel === right.thinkingLevel
+    && left.taskId === right.taskId
+    && left.taskSubject === right.taskSubject
+    && memberActivityEqual(left.activity, right.activity);
+}
+
+function stringArrayEqual(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function taskSummaryEqual(left: TeamTaskSummary | undefined, right: TeamTaskSummary | undefined): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  return left.id === right.id
+    && left.revision === right.revision
+    && left.subject === right.subject
+    && left.status === right.status
+    && left.ownerName === right.ownerName
+    && left.ready === right.ready
+    && stringArrayEqual(left.blockedBy, right.blockedBy)
+    && stringArrayEqual(left.writeScopes, right.writeScopes)
+    && stringArrayEqual(left.writeScopeWarnings, right.writeScopeWarnings);
 }
 
 export interface HookNotice {
