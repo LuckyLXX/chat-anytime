@@ -26,7 +26,7 @@ import {
   type ToolDefinition
 } from "@earendil-works/pi-coding-agent";
 import type { Api, Model } from "@earendil-works/pi-ai";
-import type { AgentProfile, PermissionDecision, SubagentDefinition, TeamMemberActivityStep, TeamMemberSummary, TeamSnapshot, TeamTaskSummary, ThinkingLevel } from "../shared/protocol.js";
+import type { AgentProfile, PermissionDecision, SubagentDefinition, TeamLeadSummary, TeamMemberActivityStep, TeamMemberReport, TeamMemberSummary, TeamMessageSummary, TeamSnapshot, TeamTaskSummary, ThinkingLevel } from "../shared/protocol.js";
 import { createChildPermissionExtension, resolveSubagentDefinition } from "./subagent.js";
 import { withCacheWarmingOff } from "./runtime-settings.js";
 import { createTeamTools } from "./runtime-team.js";
@@ -133,10 +133,43 @@ interface MemberRuntime {
   currentTool?: string;
   currentDetail?: string;
   recent: TeamMemberActivityStep[];
+  /** 最后一条 assistant 文本（「最新回报」，仅本次运行）。 */
+  lastReport?: TeamMemberReport;
 }
 
 const MEMBER_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u;
 const TEAM_MESSAGE_TYPE = "pidesktop-team-message";
+/** 通讯记录只留最近 80 条；单条截 400 字符——快照每帧都会带，不能无限长。 */
+const TEAM_LOG_LIMIT = 80;
+const TEAM_LOG_TEXT_LIMIT = 400;
+/** Lead 统计要遍历整条会话日志，活动期快照约 8 次/秒 ⇒ 最多每秒重算一次。 */
+const LEAD_STATS_TTL_MS = 1_000;
+
+/** 取 assistant 消息里的可读文本（忽略 thinking / tool 块），折叠空白。 */
+function assistantText(message: unknown): string {
+  if (!message || typeof message !== "object") return "";
+  const record = message as { role?: unknown; content?: unknown };
+  if (record.role !== "assistant") return "";
+  const content = record.content;
+  const raw = typeof content === "string"
+    ? content
+    : Array.isArray(content)
+      ? content
+        .map((block) => {
+          if (!block || typeof block !== "object") return "";
+          const item = block as { type?: unknown; text?: unknown };
+          return item.type === "text" && typeof item.text === "string" ? item.text : "";
+        })
+        .filter(Boolean)
+        .join("\n")
+      : "";
+  return raw.replace(/\s+/gu, " ").trim();
+}
+
+function clipTeamText(text: string): string {
+  const compact = text.replace(/\s+/gu, " ").trim();
+  return compact.length > TEAM_LOG_TEXT_LIMIT ? `${compact.slice(0, TEAM_LOG_TEXT_LIMIT - 1)}…` : compact;
+}
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -224,6 +257,13 @@ export class TeamRuntime implements TeamService {
   private snapshotCache: TeamSnapshot | undefined;
   private activityTimer?: ReturnType<typeof setTimeout>;
   private disposed = false;
+  private messages: TeamMessageSummary[] = [];
+  private messageSeq = 0;
+  private leadStatsCache?: {
+    at: number;
+    stats: { toolCalls: number; tokens: { total: number }; cost: number } | undefined;
+    context: { percent: number | null } | undefined;
+  };
 
   constructor(private readonly options: TeamRuntimeOptions) {
     this.leadSession = options.leadSession;
@@ -329,6 +369,7 @@ export class TeamRuntime implements TeamService {
       const delivery = this.deliverToLead(`来自${senderLabel}：\n${body}`, membership.name);
       void delivery.catch(() => undefined);
       await this.observeImmediate(delivery);
+      this.recordMessage(membership.name, "lead", body);
       this.notify();
       return { sent: true };
     }
@@ -347,6 +388,8 @@ export class TeamRuntime implements TeamService {
     // 只等一个宏任务窗口：立即失败（缺模型/鉴权、目标已销毁）如实报错，正常投递
     // 不被挂到整轮结束（idle 目标会 await 完整 run）。
     await this.observeImmediate(delivery);
+    this.recordMessage(membership.name, name, body);
+    this.notify();
     return { sent: true };
   }
 
@@ -505,7 +548,8 @@ export class TeamRuntime implements TeamService {
         model: `${record.config.model.provider}/${record.config.model.id}`,
         thinkingLevel: record.config.thinkingLevel,
         ...(task ? { taskId: task.id, taskSubject: task.subject } : {}),
-        ...(activity ? { activity } : {})
+        ...(activity ? { activity } : {}),
+        ...(member?.lastReport ? { lastReport: { ...member.lastReport } } : {})
       };
     });
     const tasks: TeamTaskSummary[] = [];
@@ -525,8 +569,63 @@ export class TeamRuntime implements TeamService {
         writeScopeWarnings: view.writeScopeWarnings
       });
     }
-    this.snapshotCache = { members, running: members.filter((member) => member.status === "running").length, tasks };
+    this.snapshotCache = {
+      members,
+      running: members.filter((member) => member.status === "running").length,
+      tasks,
+      lead: this.leadSummary(),
+      ...(this.messages.length > 0 ? { messages: [...this.messages] } : {})
+    };
     return this.snapshotCache;
+  }
+
+  /** Lead 的团队级汇总；stats 遍历整条会话日志，1s 内复用上次结果。 */
+  private leadSummary(): TeamLeadSummary {
+    const now = this.now();
+    if (!this.leadStatsCache || now - this.leadStatsCache.at >= LEAD_STATS_TTL_MS) {
+      this.leadStatsCache = { at: now, stats: this.readLeadStats(), context: this.readLeadContext() };
+    }
+    const stats = this.leadStatsCache.stats;
+    const context = this.leadStatsCache.context;
+    const model = this.leadSession.model;
+    return {
+      status: this.leadSession.isStreaming ? "running" : "inactive",
+      ...(model ? { model: `${model.provider}/${model.id}` } : {}),
+      ...(stats ? { tokens: stats.tokens.total, cost: stats.cost, steps: stats.toolCalls } : {}),
+      ...(context && context.percent !== null ? { contextPercent: context.percent } : {})
+    };
+  }
+
+  private readLeadStats(): { toolCalls: number; tokens: { total: number }; cost: number } | undefined {
+    try {
+      return this.leadSession.getSessionStats();
+    } catch {
+      return undefined;
+    }
+  }
+
+  private readLeadContext(): { percent: number | null } | undefined {
+    try {
+      return this.leadSession.getContextUsage();
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** 记录一条团队消息（内存环形缓冲，重启清空）；只有投递被接收后才调用。 */
+  private recordMessage(sender: string, target: string, text: string): void {
+    const body = clipTeamText(text);
+    if (!body) return;
+    this.messageSeq += 1;
+    const kind: TeamMessageSummary["kind"] = target === "lead" ? "report" : sender === "lead" ? "assign" : "direct";
+    this.messages = [...this.messages, {
+      id: `team-msg-${this.messageSeq}`,
+      sender,
+      target,
+      text: body,
+      at: this.now(),
+      kind
+    }].slice(-TEAM_LOG_LIMIT);
   }
 
   /** 成员的实时活动摘要；没有可展示内容时返回 undefined，避免空对象进快照。 */
@@ -784,7 +883,12 @@ export class TeamRuntime implements TeamService {
         this.notifyActivity();
         return;
       }
-      if (event.type === "message_end") this.notifyActivity();
+      if (event.type === "message_end") {
+        const report = assistantText(event.message);
+        if (report) member.lastReport = { text: clipTeamText(report), at: now };
+        this.notifyActivity();
+        return;
+      }
     });
     this.scheduleIdle(member);
     return true;

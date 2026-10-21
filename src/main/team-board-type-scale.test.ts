@@ -44,6 +44,7 @@ describe("团队看板字号契约", () => {
     expect(full, "必须存在 .team-board.full 规则").not.toBeNull();
     expect(full![0]).toContain("--tb-fs-title: 15px");
     expect(full![0]).toContain("--tb-fs-body: 13.5px");
-    expect(block).toMatch(/\.team-board\.full \.team-workbench \{[^}]*clamp\(/);
+    expect(block).toMatch(/\.team-formation-main \{[^}]*grid-template-columns/);
+    expect(block).toContain("@container (max-width: 1180px)");
   });
 });

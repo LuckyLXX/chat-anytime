@@ -446,6 +446,24 @@ describe("session-level collaboration flags", () => {
     expect(useDesktopStore.getState().snapshot.team?.tasks?.[0]?.status).toBe("in_progress");
   });
 
+  it("编队页数据（lead / messages / lastReport）变化不被早退吞掉", () => {
+    const team = (report: string, tokens: number, message: string) => ({
+      running: 1,
+      members: [{ name: "reviewer", status: "running" as const, lastReport: { text: report, at: 1 } }],
+      lead: { model: "p/m", status: "inactive" as const, tokens, cost: 0.1, steps: 3, contextPercent: 20 },
+      messages: [{ id: "m-1", sender: "reviewer", target: "lead", text: message, at: 1, kind: "report" as const }]
+    });
+    const state = useDesktopStore.getState();
+    state.handleRuntimeMessage({ type: "state", snapshot: { ...snap("team-4"), team: team("A 完成", 100, "旧回报") } });
+    expect(useDesktopStore.getState().snapshot.team?.lead?.tokens).toBe(100);
+    expect(useDesktopStore.getState().snapshot.team?.members[0]?.lastReport?.text).toBe("A 完成");
+
+    state.handleRuntimeMessage({ type: "state", snapshot: { ...snap("team-4"), team: team("B 完成", 200, "新回报") } });
+    expect(useDesktopStore.getState().snapshot.team?.lead?.tokens).toBe(200);
+    expect(useDesktopStore.getState().snapshot.team?.members[0]?.lastReport?.text).toBe("B 完成");
+    expect(useDesktopStore.getState().snapshot.team?.messages?.[0]?.text).toBe("新回报");
+  });
+
   it("分屏格子的团队快照变化（结构化克隆后引用不同）不被引用早退吞掉", () => {
     function pane(sessionId: string, running: boolean): SessionPaneSnapshot {
       return {

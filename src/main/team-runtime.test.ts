@@ -40,11 +40,15 @@ interface FakeLead {
   session: AgentSession;
   entries: PersistedSessionEntry[];
   delivered: { message: unknown; options: unknown }[];
+  stats: { toolCalls: number; tokens: { total: number }; cost: number };
+  context: { percent: number | null } | undefined;
 }
 
 function fakeLead(branch: PersistedSessionEntry[] = [], streaming = false): FakeLead {
   const entries = [...branch];
   const delivered: { message: unknown; options: unknown }[] = [];
+  const stats = { toolCalls: 7, tokens: { total: 12_345 }, cost: 0.42 };
+  const context: { percent: number | null } | undefined = { percent: 33 };
   const session = {
     sessionId: LEAD,
     isStreaming: streaming,
@@ -59,9 +63,12 @@ function fakeLead(branch: PersistedSessionEntry[] = [], streaming = false): Fake
     },
     sendCustomMessage: async (message: unknown, options: unknown) => {
       delivered.push({ message, options });
-    }
+    },
+    // 与真实 AgentSession 一致：每次返回新的快照对象，缓存拿到的是值而不是活引用。
+    getSessionStats: () => ({ ...stats, tokens: { ...stats.tokens } }),
+    getContextUsage: () => (context ? { ...context } : undefined)
   };
-  return { session: session as unknown as AgentSession, entries, delivered };
+  return { session: session as unknown as AgentSession, entries, delivered, stats, context };
 }
 
 class FakeChild implements TeamChildSession {
@@ -463,5 +470,69 @@ describe("restore and disposal", () => {
     expect(child.aborted).toBe(true);
     expect(child.disposed).toBe(true);
     await expect(h.runtime.spawn(leadMembership, { name: "x", description: "x", prompt: "p" })).rejects.toThrow(/已销毁/u);
+  });
+});
+
+describe("formation snapshot data", () => {
+  it("records team messages with kinds and keeps only the latest 80", async () => {
+    const h = harness();
+    await h.runtime.spawn(leadMembership, { name: "reviewer", description: "x", prompt: "p" });
+    await h.runtime.spawn(leadMembership, { name: "builder", description: "y", prompt: "q" });
+
+    await h.runtime.send(leadMembership, "reviewer", "先做 A");
+    await h.runtime.send({ role: "teammate", name: "reviewer" }, "lead", "A 完成");
+    await h.runtime.send({ role: "teammate", name: "reviewer" }, "builder", "帮我看下 B");
+
+    const messages = h.runtime.snapshot().messages ?? [];
+    expect(messages.map((message) => message.kind)).toEqual(["assign", "report", "direct"]);
+    expect(messages.map((message) => `${message.sender}->${message.target}`)).toEqual([
+      "lead->reviewer", "reviewer->lead", "reviewer->builder"
+    ]);
+    expect(messages[0]?.text).toBe("先做 A");
+
+    for (let index = 0; index < 80; index += 1) {
+      await h.runtime.send(leadMembership, "reviewer", `消息 ${index}`);
+    }
+    const trimmed = h.runtime.snapshot().messages ?? [];
+    expect(trimmed).toHaveLength(80);
+    expect(trimmed.at(-1)?.text).toBe("消息 79");
+  });
+
+  it("captures the latest assistant text as lastReport and ignores thinking blocks", async () => {
+    const h = harness();
+    await h.runtime.spawn(leadMembership, { name: "reviewer", description: "x", prompt: "p" });
+    const child = h.created[0]!;
+    child.emit({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "thinking", text: "内部推理" },
+          { type: "text", text: "  迁移脚本已跑通，正在补回滚脚本。  " }
+        ]
+      }
+    });
+    expect(h.runtime.snapshot().members[0]?.lastReport).toMatchObject({ text: "迁移脚本已跑通，正在补回滚脚本。" });
+
+    child.emit({ type: "message_end", message: { role: "user", content: [{ type: "text", text: "不该算回报" }] } });
+    expect(h.runtime.snapshot().members[0]?.lastReport?.text).toBe("迁移脚本已跑通，正在补回滚脚本。");
+  });
+
+  it("exposes the lead summary and refreshes it at most once per second", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000_000);
+    const h = harness();
+    await h.runtime.spawn(leadMembership, { name: "reviewer", description: "x", prompt: "p" });
+    const child = h.created[0]!;
+    const first = h.runtime.snapshot().lead;
+    expect(first).toMatchObject({ model: "p/m", status: "inactive", tokens: 12_345, cost: 0.42, steps: 7, contextPercent: 33 });
+
+    h.lead.stats.tokens.total = 99_999;
+    vi.setSystemTime(1_000_500);
+    child.emit({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "进展" }] } });
+    expect(h.runtime.snapshot().lead?.tokens).toBe(12_345);
+    vi.setSystemTime(1_001_001);
+    child.emit({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "进展 2" }] } });
+    expect(h.runtime.snapshot().lead?.tokens).toBe(99_999);
   });
 });

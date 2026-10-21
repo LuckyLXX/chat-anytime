@@ -2005,7 +2005,7 @@ export interface QueuedMessage {
   imageCount?: number;
 }
 
-/** 团队状态条用的成员行（只含 teammate；Lead 伪行只在 team_list 工具结果里出现）。 */
+/** 团队状态条用的成员行（只含 teammate；Lead 由 TeamLeadSummary 单独下发）。 */
 /** 成员最近一次工具步骤（看板时间线用；只保留最近若干条，不持久化）。 */
 export interface TeamMemberActivityStep {
   tool: string;
@@ -2044,6 +2044,33 @@ export interface TeamTaskSummary {
   writeScopeWarnings: string[];
 }
 
+/** 成员最近一次「回报」：子会话最后一条 assistant 文本（截断后进快照，不持久化）。 */
+export interface TeamMemberReport {
+  text: string;
+  at: number;
+}
+
+/** 团队通信记录（内存环形缓冲，重启清空；完整正文仍在会话日志里）。 */
+export interface TeamMessageSummary {
+  id: string;
+  sender: string;
+  target: string;
+  text: string;
+  at: number;
+  /** 发给 lead = 回报；lead 发出 = 指派；成员互发 = 私信。 */
+  kind: "report" | "assign" | "direct";
+}
+
+/** Lead 会话的团队级汇总（全屏编队的图根节点与汇总条用）。 */
+export interface TeamLeadSummary {
+  model?: string;
+  status: "running" | "inactive";
+  tokens?: number;
+  cost?: number;
+  steps?: number;
+  contextPercent?: number;
+}
+
 export interface TeamMemberSummary {
   name: string;
   status: "running" | "inactive" | "provisioning" | "failed";
@@ -2063,14 +2090,20 @@ export interface TeamMemberSummary {
   taskId?: string;
   taskSubject?: string;
   activity?: TeamMemberActivity;
+  /** 最近一次 assistant 文本（卡片「最新回报」用）。 */
+  lastReport?: TeamMemberReport;
 }
 
-/** 激活会话的团队快照：成员 + 运行计数 + 任务板。没有成员时缺省（渲染端不显示状态条）。 */
+/** 激活会话的团队快照：成员 + 运行计数 + 任务板 + 编队页数据。没有成员时缺省（渲染端不显示状态条）。 */
 export interface TeamSnapshot {
   members: TeamMemberSummary[];
   running: number;
   /** 共享任务板的只读视图；旧快照可能没有。 */
   tasks?: TeamTaskSummary[];
+  /** Lead 的团队级汇总；旧快照没有。 */
+  lead?: TeamLeadSummary;
+  /** 最近 80 条团队消息（旧→新，仅本次运行）；旧快照没有。 */
+  messages?: TeamMessageSummary[];
 }
 
 export interface RuntimeSnapshot {

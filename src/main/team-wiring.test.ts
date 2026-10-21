@@ -19,6 +19,8 @@ const storeSource = read("../renderer/src/store.ts");
 const appSource = read("../renderer/src/App.tsx");
 const paneSource = read("../renderer/src/ConversationPane.tsx");
 const stripSource = read("../renderer/src/components/TeamStrip.tsx");
+const boardSource = read("../renderer/src/components/TeamBoard.tsx");
+const formationSource = read("../renderer/src/components/TeamFormation.tsx");
 const localeSource = read("../shared/locale.ts");
 const cssSource = read("../renderer/src/styles.css");
 
@@ -34,6 +36,10 @@ describe("team wiring", () => {
     expect(protocolSource).toMatch(/\{ type: "team\.interrupt"; name: string; sessionId\?: string \}/u);
     expect(protocolSource).toMatch(/kind\?: "subagent" \| "team"/u);
     expect(protocolSource).toMatch(/toolCallId\?: string/u);
+    expect(protocolSource).toMatch(/export interface TeamMessageSummary/u);
+    expect(protocolSource).toMatch(/export interface TeamLeadSummary/u);
+    expect(protocolSource).toMatch(/lastReport\?: TeamMemberReport/u);
+    expect(protocolSource).toMatch(/messages\?: TeamMessageSummary\[\]/u);
   });
 
   it("activates team tools only when the session team mode is on", () => {
@@ -96,7 +102,11 @@ describe("team wiring", () => {
     expect(stripSource).toMatch(/data-control="team-stop-all"/u);
     expect(stripSource).toMatch(/data-control="team-open-board"/u);
     expect(cssSource).toMatch(/\.team-board \{/u);
-    expect(cssSource).toMatch(/\.team-workbench \{/u);
+    expect(cssSource).toMatch(/\.team-formation-main \{/u);
+    expect(cssSource).toMatch(/\.team-rail \{/u);
+    expect(boardSource).toMatch(/import \{ TeamFormation \} from "\.\/TeamFormation";/u);
+    expect(formationSource).toMatch(/<TeamGraph/u);
+    expect(formationSource).toMatch(/TeamMemberDetail/u);
     expect(storeSource).toMatch(/memberActivityEqual/u);
     expect(localeSource).toMatch(/pidesktop-team-message/u);
     expect(cssSource).toMatch(/\.composer\.has-team \{/u);

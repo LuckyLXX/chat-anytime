@@ -26,9 +26,12 @@ import type {
   TeamSnapshot,
   Todo,
   ToolExecution,
+  TeamLeadSummary,
   TeamMemberActivity,
   TeamMemberActivityStep,
+  TeamMemberReport,
   TeamMemberSummary,
+  TeamMessageSummary,
   TeamTaskSummary,
   UsageStats
 } from "../../shared/protocol";
@@ -42,7 +45,40 @@ export function teamSnapshotEqual(left: TeamSnapshot | undefined, right: TeamSna
   const leftTasks = left.tasks ?? [];
   const rightTasks = right.tasks ?? [];
   if (leftTasks.length !== rightTasks.length) return false;
-  return leftTasks.every((task, index) => taskSummaryEqual(task, rightTasks[index]));
+  if (!leftTasks.every((task, index) => taskSummaryEqual(task, rightTasks[index]))) return false;
+  if (!leadSummaryEqual(left.lead, right.lead)) return false;
+  const leftMessages = left.messages ?? [];
+  const rightMessages = right.messages ?? [];
+  if (leftMessages.length !== rightMessages.length) return false;
+  return leftMessages.every((message, index) => messageSummaryEqual(message, rightMessages[index]));
+}
+
+function reportEqual(left: TeamMemberReport | undefined, right: TeamMemberReport | undefined): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  return left.text === right.text && left.at === right.at;
+}
+
+function leadSummaryEqual(left: TeamLeadSummary | undefined, right: TeamLeadSummary | undefined): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  return left.model === right.model
+    && left.status === right.status
+    && left.tokens === right.tokens
+    && left.cost === right.cost
+    && left.steps === right.steps
+    && left.contextPercent === right.contextPercent;
+}
+
+function messageSummaryEqual(left: TeamMessageSummary | undefined, right: TeamMessageSummary | undefined): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  return left.id === right.id
+    && left.sender === right.sender
+    && left.target === right.target
+    && left.text === right.text
+    && left.at === right.at
+    && left.kind === right.kind;
 }
 
 function activityStepEqual(left: TeamMemberActivityStep | undefined, right: TeamMemberActivityStep | undefined): boolean {
@@ -87,7 +123,8 @@ function memberSummaryEqual(left: TeamMemberSummary | undefined, right: TeamMemb
     && left.thinkingLevel === right.thinkingLevel
     && left.taskId === right.taskId
     && left.taskSubject === right.taskSubject
-    && memberActivityEqual(left.activity, right.activity);
+    && memberActivityEqual(left.activity, right.activity)
+    && reportEqual(left.lastReport, right.lastReport);
 }
 
 function stringArrayEqual(left: readonly string[], right: readonly string[]): boolean {

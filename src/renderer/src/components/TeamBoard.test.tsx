@@ -68,12 +68,19 @@ describe("TeamBoard", () => {
     expect(html).toContain("停止成员");
   });
 
-  it("renders the full workbench with the task board and return action", () => {
+  it("renders the full formation with summary, graph, task board, comms and return action", () => {
     const html = markup("full");
-    expect(html).toContain("团队工作台");
+    expect(html).toContain("团队编队");
     expect(html).toContain("任务板");
     expect(html).toContain("渲染器骨架");
     expect(html).toContain("回归测试");
     expect(html).toContain("返回对话");
+    // 编队页四块：汇总条 / Agent 网络 / 成员栏 / 通讯记录。
+    expect(html).toContain("任务进度");
+    expect(html).toContain("Agent 网络");
+    expect(html).toContain('class="team-graph"');
+    expect(html).toContain("team-rail-item");
+    expect(html).toContain("通讯记录");
+    expect(html).toContain("本次运行还没有团队消息");
   });
 });

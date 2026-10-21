@@ -1,30 +1,11 @@
-import {
-  AlertTriangle,
-  ArrowLeft,
-  Check,
-  ChevronRight,
-  CircleStop,
-  Clock,
-  Coins,
-  Cpu,
-  FileText,
-  Layers,
-  LoaderCircle,
-  Maximize2,
-  MessageSquare,
-  Minimize2,
-  ScrollText,
-  Send,
-  Terminal,
-  Users,
-  X
-} from "lucide-react";
+import { ArrowLeft, CircleStop, Clock, Layers, Maximize2, Minimize2, Users, X } from "lucide-react";
 import { useEffect, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
-import type { DelegationProgress, TeamMemberActivity, TeamMemberActivityStep, TeamMemberSummary, TeamSnapshot, TeamTaskSummary } from "../../../shared/protocol";
-import { thinkingLevelLabels, toolLabel } from "../../../shared/locale";
+import type { DelegationProgress, TeamMemberSummary, TeamSnapshot } from "../../../shared/protocol";
 import { useDesktopStore } from "../store";
 import type { Artifact } from "../lib/content";
-import { DelegationTranscript, TranscriptTimeline } from "./DelegationTranscript";
+import { DelegationTranscript } from "./DelegationTranscript";
+import { MemberRow, TasksView, TeamMemberDetail, formatElapsed, formatTokens, statusLabel } from "./TeamBoardParts";
+import { TeamFormation } from "./TeamFormation";
 
 export interface TeamBoardProps {
   snapshot: TeamSnapshot;
@@ -40,6 +21,8 @@ export interface TeamBoardProps {
   onStopMember(name: string): void | Promise<void>;
   onSend(name: string, text: string): Promise<void>;
   onOpenArtifact(artifact: Artifact): void;
+  /** 测试/静态预览用：固定编队页网络图宽度（缺省由容器测量）。 */
+  graphWidth?: number;
 }
 
 const MIN_DOCK_WIDTH = 360;
@@ -48,130 +31,6 @@ const MAX_MESSAGE_BYTES = 65_536;
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
-}
-
-function statusLabel(status: TeamMemberSummary["status"]): string {
-  switch (status) {
-    case "running": return "运行中";
-    case "inactive": return "空闲";
-    case "provisioning": return "创建中";
-    case "failed": return "失败";
-  }
-}
-
-function taskStatusLabel(task: TeamTaskSummary): string {
-  if (task.status === "in_progress") return "进行中";
-  if (task.status === "completed") return "已完成";
-  return task.ready ? "就绪" : "阻塞";
-}
-
-function formatTokens(value: number | undefined): string {
-  if (value === undefined || value <= 0) return "—";
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
-  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
-  return String(value);
-}
-
-function formatDurationMs(value: number | undefined): string {
-  if (value === undefined) return "";
-  if (value < 1_000) return `${Math.max(0, Math.round(value))}ms`;
-  return `${(value / 1_000).toFixed(1)}s`;
-}
-
-function formatElapsed(startedAt: number | undefined, now: number): string {
-  if (startedAt === undefined) return "—";
-  const seconds = Math.max(0, Math.floor((now - startedAt) / 1_000));
-  const minutes = Math.floor(seconds / 60);
-  const rest = seconds % 60;
-  if (minutes >= 60) {
-    const hours = Math.floor(minutes / 60);
-    return `${hours}h ${String(minutes % 60).padStart(2, "0")}m`;
-  }
-  return `${minutes}m ${String(rest).padStart(2, "0")}s`;
-}
-
-function toolIcon(tool: string | undefined): ReactNode {
-  if (!tool) return <MessageSquare size={11} />;
-  if (tool === "bash" || tool === "powershell") return <Terminal size={11} />;
-  if (tool === "read" || tool === "edit" || tool === "write") return <FileText size={11} />;
-  if (tool === "team_task_create" || tool === "team_task_update") return <Layers size={11} />;
-  return <Check size={11} />;
-}
-
-function stepLabel(step: TeamMemberActivityStep): string {
-  return step.detail ? `${toolLabel(step.tool)} ${step.detail}` : toolLabel(step.tool);
-}
-
-function StepsView({ activity, limit }: { activity?: TeamMemberActivity; limit?: number }): ReactNode {
-  const steps = activity?.recent ?? [];
-  if (steps.length === 0) {
-    return <p className="team-board-empty">还没有工具步骤。成员开始执行后，这里会显示实时时间线。</p>;
-  }
-  const visible = typeof limit === "number" ? steps.slice(-limit) : steps;
-  return (
-    <div className="team-steps">
-      {visible.map((step, index) => (
-        <div className={`team-step ${step.status}`} key={`${step.startedAt}-${step.tool}-${index}`}>
-          <span className="team-step-icon">
-            {step.status === "running"
-              ? <LoaderCircle size={11} className="spinning" />
-              : step.status === "error"
-                ? <AlertTriangle size={11} />
-                : step.status === "aborted"
-                  ? <CircleStop size={11} />
-                  : <Check size={11} />}
-          </span>
-          <span className="team-step-copy">
-            <strong>{toolLabel(step.tool)}</strong>
-            {step.detail && <small title={step.detail}>{step.detail}</small>}
-          </span>
-          <span className="team-step-time">{step.status === "running" ? "now" : formatDurationMs(step.durationMs)}</span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function TasksView({ tasks, full = false }: { tasks: TeamTaskSummary[]; full?: boolean }): ReactNode {
-  const groups: Array<{ key: string; label: string; rows: TeamTaskSummary[] }> = [
-    { key: "in_progress", label: "进行中", rows: tasks.filter((task) => task.status === "in_progress") },
-    { key: "pending", label: "待处理", rows: tasks.filter((task) => task.status === "pending") },
-    { key: "completed", label: "已完成", rows: tasks.filter((task) => task.status === "completed") }
-  ];
-  const warnings = [...new Set(tasks.flatMap((task) => task.writeScopeWarnings))];
-  if (tasks.length === 0) {
-    return <p className="team-board-empty">任务板还是空的。让 Lead 用 team_task_create 拆任务后，这里会显示 owner、依赖和写入范围告警。</p>;
-  }
-  return (
-    <div className={`team-tasks-view${full ? " full" : ""}`}>
-      {warnings.length > 0 && (
-        <div className="team-task-warning">
-          <AlertTriangle size={11} />
-          <span>{warnings.join("；")}</span>
-        </div>
-      )}
-      {groups.map((group) => group.rows.length > 0 && (
-        <section className="team-task-group" key={group.key}>
-          <div className="team-task-group-title"><i className={`team-status-dot ${group.key}`} />{group.label}<em>{group.rows.length}</em></div>
-          {group.rows.map((task) => (
-            <article className="team-task-card" data-control="team-task" data-task-id={task.id} key={task.id}>
-              <div className="team-task-top">
-                <span className="team-task-id">{task.id}</span>
-                <strong className="team-task-title" title={task.subject}>{task.subject}</strong>
-                <span className={`team-task-status ${task.status === "pending" ? (task.ready ? "ready" : "blocked") : task.status}`}>{taskStatusLabel(task)}</span>
-              </div>
-              <div className="team-task-meta">
-                {task.ownerName && <span className="team-task-owner"><i className={`team-status-dot ${task.ownerName === "lead" ? "lead" : "running"}`} />{task.ownerName}</span>}
-                {task.blockedBy.length > 0 && <span>依赖 {task.blockedBy.join(" / ")}</span>}
-                {task.status === "pending" && !task.ready && <span className="team-task-blocked">等待依赖</span>}
-              </div>
-              {task.writeScopeWarnings.map((warning) => <p className="team-task-scope-warning" key={warning}>{warning}</p>)}
-            </article>
-          ))}
-        </section>
-      ))}
-    </div>
-  );
 }
 
 function transcriptTarget(member: TeamMemberSummary): DelegationProgress | undefined {
@@ -199,7 +58,8 @@ export function TeamBoard({
   onStopAll,
   onStopMember,
   onSend,
-  onOpenArtifact
+  onOpenArtifact,
+  graphWidth
 }: TeamBoardProps): ReactNode {
   const full = mode === "full";
   const members = snapshot.members;
@@ -295,8 +155,8 @@ export function TeamBoard({
     }
   }
 
-  async function submitSend(event: FormEvent<HTMLFormElement>): Promise<void> {
-    event.preventDefault();
+  async function submitSend(event?: FormEvent<HTMLFormElement>): Promise<void> {
+    event?.preventDefault();
     const text = draft.trim();
     if (!selected || !text || sending || selected.status === "failed") return;
     if (new TextEncoder().encode(text).length > MAX_MESSAGE_BYTES) {
@@ -327,67 +187,6 @@ export function TeamBoard({
     });
   }
 
-  const sendForm = selected && (
-    <form className="team-send-form" onSubmit={(event) => void submitSend(event)}>
-      <input
-        className="team-send-input"
-        data-control="team-board-send"
-        value={draft}
-        onChange={(event) => setDraft(event.target.value)}
-        placeholder={selected.status === "failed" ? "该成员创建失败，无法发消息" : `给 ${selected.name} 发消息…`}
-        disabled={selected.status === "failed" || sending}
-        aria-label={`给 ${selected.name} 发消息`}
-      />
-      <button className="team-send-button" type="submit" data-control="team-board-send-submit" disabled={!draft.trim() || sending || selected.status === "failed"} title="发送（Lead 身份）" aria-label="发送">
-        <Send size={13} />
-      </button>
-    </form>
-  );
-
-  const detail = selected && (
-    <div className={`team-member-detail${full ? " full" : ""}`}>
-      <div className="team-detail-head">
-        <span className={`team-status-dot ${selected.status}`} />
-        <strong>{selected.name}</strong>
-        <span className={`team-status-badge ${selected.status}`}>{statusLabel(selected.status)}</span>
-        <span className="team-detail-meta">
-          {[selected.model, selected.thinkingLevel ? `思考 ${thinkingLevelLabels[selected.thinkingLevel]}` : ""]
-            .filter(Boolean)
-            .join(" · ")}
-        </span>
-      </div>
-      <div className="team-detail-stats">
-        <span><Coins size={10} />{formatTokens(selected.activity?.tokens)} tokens</span>
-        <span><Cpu size={10} />上下文 {selected.activity?.contextPercent === undefined ? "—" : `${Math.round(selected.activity.contextPercent)}%`}</span>
-        <span><Clock size={10} />{selected.activity?.steps ?? 0} 步</span>
-        <span><Clock size={10} />{selected.status === "running" ? formatElapsed(selected.activity?.startedAt, now) : "—"}</span>
-        {selected.taskSubject && <span className="team-detail-task"><Layers size={10} />{selected.taskId ? `${selected.taskId} ` : ""}{selected.taskSubject}</span>}
-      </div>
-      {selected.error && <p className="team-detail-error"><AlertTriangle size={11} />{selected.error}</p>}
-      {full ? (
-        <div className="team-transcript-panel">
-          {transcript && transcript.length > 0
-            ? <TranscriptTimeline messages={transcript} onOpenArtifact={onOpenArtifact} />
-            : transcriptError
-              ? <p className="team-board-empty">{transcriptError}</p>
-              : <StepsView activity={selected.activity} />}
-        </div>
-      ) : (
-        <StepsView activity={selected.activity} limit={5} />
-      )}
-      <div className="team-detail-actions">
-        <button className="team-detail-action" type="button" onClick={() => setTranscriptMember(selected)} disabled={!transcriptTarget(selected)}>
-          <ScrollText size={11} />查看完整记录
-        </button>
-        <button className="team-detail-action danger" type="button" onClick={stopSelected} disabled={selected.status !== "running"}>
-          <CircleStop size={11} />停止成员
-        </button>
-      </div>
-      {actionError && <p className="team-detail-error"><AlertTriangle size={11} />{actionError}</p>}
-      {sendForm}
-    </div>
-  );
-
   return (
     <aside
       className={`team-board ${full ? "full" : "dock"}`}
@@ -399,7 +198,7 @@ export function TeamBoard({
       {!full && <div className="team-board-resize" role="separator" aria-label="调整团队面板宽度" title="拖动调整宽度" onPointerDown={startResize} onPointerMove={moveResize} onPointerUp={endResize} onPointerCancel={endResize} />}
       <header className="team-board-header">
         {full && <button className="team-board-back" type="button" onClick={onToggleMode}><ArrowLeft size={13} />返回对话</button>}
-        <span className="team-board-title"><Users size={14} />{full ? "团队工作台" : "团队"}</span>
+        <span className="team-board-title"><Users size={14} />{full ? "团队编队" : "团队"}</span>
         <span className="team-board-sub">{members.length} 人 · {snapshot.running} 运行中</span>
         <span className="team-board-grow" />
         <span className="team-board-elapsed"><Clock size={11} />{snapshot.running > 0 ? formatElapsed(teamStartedAt, now) : "—"}</span>
@@ -414,38 +213,57 @@ export function TeamBoard({
         </button>
       </header>
 
-      {!full && (
-        <div className="team-board-tabs">
-          <button className={tab === "members" ? "active" : ""} type="button" onClick={() => setTab("members")}><Users size={12} />成员<em>{members.length}</em></button>
-          <button className={tab === "tasks" ? "active" : ""} type="button" onClick={() => setTab("tasks")}><Layers size={12} />任务<em>{tasks.length}</em></button>
-        </div>
-      )}
-
       {full ? (
-        <div className="team-workbench">
-          <aside className="team-workbench-roster">
-            <div className="team-pane-title"><Users size={12} />成员<em>{members.length} · {snapshot.running} 运行中</em></div>
-            <div className="team-member-list">
-              {members.map((member) => <MemberRow key={member.name} member={member} selected={selected?.name === member.name} now={now} onSelect={onSelect} />)}
-            </div>
-          </aside>
-          <section className="team-workbench-focus">
-            {detail ?? <p className="team-board-empty">暂无成员。</p>}
-          </section>
-          <aside className="team-workbench-tasks">
-            <div className="team-pane-title"><Layers size={12} />任务板<em>{tasks.length} 项</em></div>
-            <TasksView tasks={tasks} full />
-          </aside>
-        </div>
-      ) : tab === "members" ? (
-        <div className="team-board-members">
-          <div className="team-member-list">
-            {members.map((member) => <MemberRow key={member.name} member={member} selected={selected?.name === member.name} now={now} onSelect={onSelect} />)}
-          </div>
-          {detail ?? <p className="team-board-empty">暂无成员。</p>}
-        </div>
+        <TeamFormation
+          snapshot={snapshot}
+          selectedName={selected?.name}
+          now={now}
+          transcript={transcript}
+          transcriptError={transcriptError}
+          draft={draft}
+          onDraftChange={setDraft}
+          sending={sending}
+          actionError={actionError}
+          onSubmitSend={() => void submitSend()}
+          onSelect={onSelect}
+          onStop={stopSelected}
+          onOpenTranscript={() => selected && setTranscriptMember(selected)}
+          onOpenArtifact={onOpenArtifact}
+          {...(graphWidth === undefined ? {} : { graphWidth })}
+        />
       ) : (
-        <TasksView tasks={tasks} />
+        <>
+          <div className="team-board-tabs">
+            <button className={tab === "members" ? "active" : ""} type="button" onClick={() => setTab("members")}><Users size={12} />成员<em>{members.length}</em></button>
+            <button className={tab === "tasks" ? "active" : ""} type="button" onClick={() => setTab("tasks")}><Layers size={12} />任务<em>{tasks.length}</em></button>
+          </div>
+          {tab === "members" ? (
+            <div className="team-board-members">
+              <div className="team-member-list">
+                {members.map((member) => <MemberRow key={member.name} member={member} selected={selected?.name === member.name} now={now} onSelect={onSelect} />)}
+              </div>
+              {selected ? (
+                <TeamMemberDetail
+                  member={selected}
+                  mode="dock"
+                  now={now}
+                  transcript={transcript}
+                  transcriptError={transcriptError}
+                  draft={draft}
+                  onDraftChange={setDraft}
+                  sending={sending}
+                  actionError={actionError}
+                  onSubmitSend={() => void submitSend()}
+                  onStop={stopSelected}
+                  onOpenTranscript={() => setTranscriptMember(selected)}
+                  onOpenArtifact={onOpenArtifact}
+                />
+              ) : <p className="team-board-empty">暂无成员。</p>}
+            </div>
+          ) : (
+            <TasksView tasks={tasks} />
+          )}
+        </>
       )}
 
       {transcriptMember && transcriptTarget(transcriptMember) && (
@@ -464,41 +282,5 @@ export function TeamBoard({
         />
       )}
     </aside>
-  );
-}
-
-function MemberRow({ member, selected, now, onSelect }: {
-  member: TeamMemberSummary;
-  selected: boolean;
-  now: number;
-  onSelect(name: string): void;
-}): ReactNode {
-  const activity = member.activity;
-  const current = activity?.currentTool
-    ? `${toolLabel(activity.currentTool)}${activity.currentDetail ? ` ${activity.currentDetail}` : ""}`
-    : member.taskSubject ?? member.description ?? "等待任务";
-  return (
-    <button
-      className={`team-member-row${selected ? " selected" : ""} ${member.status}`}
-      type="button"
-      data-control="team-member-row"
-      data-member={member.name}
-      onClick={() => onSelect(member.name)}
-      title={member.error ?? current}
-    >
-      <span className={`team-status-dot ${member.status}`} />
-      <span className="team-member-copy">
-        <span className="team-member-line">
-          <strong>{member.name}</strong>
-          <span className={`team-status-badge ${member.status}`}>{statusLabel(member.status)}</span>
-          <span className="team-member-time">{member.status === "running" ? formatElapsed(activity?.startedAt, now) : activity ? `${activity.steps} 步` : "—"}</span>
-        </span>
-        <span className="team-member-now">
-          {activity?.currentTool ? toolIcon(activity.currentTool) : <ChevronRight size={11} />}
-          <span title={current}>{current}</span>
-        </span>
-      </span>
-      <ChevronRight className="team-member-chevron" size={12} />
-    </button>
   );
 }
