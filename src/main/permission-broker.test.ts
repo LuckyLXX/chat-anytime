@@ -77,4 +77,35 @@ describe("PermissionBroker", () => {
     expect(dismissed).toEqual([emitted[0]!.id]);
     expect(broker.resolve(emitted[0]!.id, "allow-once")).toBe(false);
   });
+
+  it("cancels pending requests without clearing allow-session grants", async () => {
+    const emitted: PermissionRequest[] = [];
+    const broker = new PermissionBroker((request) => emitted.push(request));
+    const input = {
+      accessMode: "ask" as const,
+      toolName: "bash",
+      summary: "运行测试",
+      args: { command: "npm test" },
+      risk: "command" as const,
+      principal: principal("session-a", "tool-a")
+    };
+
+    const granted = broker.request(input);
+    broker.resolve(emitted[0]!.id, "allow-session");
+    await expect(granted).resolves.toBe("allow-session");
+
+    const pending = broker.request({
+      ...input,
+      toolName: "write",
+      summary: "写入文件",
+      args: { path: "src/a.ts" },
+      risk: "write",
+      principal: principal("session-a", "tool-b")
+    });
+    broker.cancelPending("session-a");
+    await expect(pending).resolves.toBe("deny");
+
+    // 授权保留：同一会话同一风险的工具不再弹确认。
+    await expect(broker.request({ ...input, principal: principal("session-a", "tool-c") })).resolves.toBe("allow-session");
+  });
 });

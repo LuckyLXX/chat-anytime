@@ -69,12 +69,7 @@ export class PermissionBroker {
   }
 
   reset(sessionId?: string): void {
-    for (const [id, pending] of this.pending) {
-      if (sessionId && pending.request.principal.sessionId !== sessionId) continue;
-      this.pending.delete(id);
-      this.dismiss(id);
-      pending.resolve("deny");
-    }
+    this.cancelPending(sessionId);
 
     if (!sessionId) {
       this.sessionGrants.clear();
@@ -84,6 +79,20 @@ export class PermissionBroker {
     const prefix = `${sessionId}:`;
     for (const key of this.sessionGrants) {
       if (key.startsWith(prefix)) this.sessionGrants.delete(key);
+    }
+  }
+
+  /**
+   * 只取消挂起中的确认请求（按会话），保留 allow-session 授权。
+   * 会话中止时用：阻塞在 broker Promise 上的工具必须收场，否则
+   * session.abort() 只停模型流、工具永久挂起，运行永远不 settle。
+   */
+  cancelPending(sessionId?: string): void {
+    for (const [id, pending] of this.pending) {
+      if (sessionId && pending.request.principal.sessionId !== sessionId) continue;
+      this.pending.delete(id);
+      this.dismiss(id);
+      pending.resolve("deny");
     }
   }
 

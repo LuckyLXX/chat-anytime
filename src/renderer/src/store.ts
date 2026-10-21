@@ -302,6 +302,19 @@ export function currentQuestionRequest(questions: QuestionRequest[], sessionId: 
 }
 
 /**
+ * bootstrap 恢复的待决提问与运行期已收到的请求按 id 合并（运行期帧优先）。
+ * 渲染端重载时 `questions` 是空数组，bootstrap 里的镜像把面板补回来；
+ * 若同一请求在 bootstrap 返回前又推送了一次，以更新的运行期对象为准。
+ */
+export function mergeQuestionRequests(restored: QuestionRequest[], current: QuestionRequest[]): QuestionRequest[] {
+  if (restored.length === 0) return current;
+  const byId = new Map<string, QuestionRequest>();
+  for (const request of restored) byId.set(request.id, request);
+  for (const request of current) byId.set(request.id, request);
+  return [...byId.values()];
+}
+
+/**
  * 分屏格子集合应展示的权限请求：焦点格（激活会话）优先，其余按格子顺序取
  * 第一个命中的——多个格子同时待决时一次只弹一个，处理完自动轮到下一个。
  * 单窗口调用方传 [activeSessionId]，行为与 currentPermissionRequest 一致。
@@ -574,6 +587,9 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
       models: bootstrap.catalog?.models ?? [],
       providers: bootstrap.catalog?.providers ?? [],
       resources: bootstrap.resources ?? get().resources,
+      // 待决提问镜像：渲染端重载（Vite HMR/Ctrl+R/崩溃恢复）会清空 questions，
+      // 但 utility 的 QuestionBroker 仍在等答案；不恢复就会面板消失、工具永久挂起。
+      questions: mergeQuestionRequests(bootstrap.questions ?? [], get().questions),
       todos: bootstrap.resources?.todos ?? get().todos,
       memory: bootstrap.resources?.memory ?? get().memory,
       automation: bootstrap.resources?.automation ?? [],

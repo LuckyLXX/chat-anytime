@@ -32,6 +32,7 @@ import { PanelProtocolRoute } from "./panel-protocol.js";
 import { clearPanelData, measurePanelData, type PanelDataDeps } from "./panel-storage.js";
 import { installPanelCorsRelaxation } from "./panel-cors.js";
 import { createTrayController, type TrayController } from "./tray.js";
+import { PendingQuestionMirror } from "./pending-questions.js";
 import type { StaticServerEndpoint } from "./browser-static-server.js";
 import type { PanelAction } from "../shared/panel.js";
 import { clampServiceWait, waitForService } from "./gallery-service.js";
@@ -67,6 +68,8 @@ let runtimeProcess: UtilityProcess | undefined;
 let latestSnapshot: RuntimeSnapshot | undefined;
 let latestCatalog: Extract<RuntimeMessage, { type: "catalog" }> | undefined;
 let latestResources: ResourceCatalog | undefined;
+/** 渲染端重载后恢复待决提问：utility 的 broker 还在等，面板不能丢。 */
+const pendingQuestions = new PendingQuestionMirror();
 let settingsCache: DesktopSettings | undefined;
 let credentialsCache: Record<string, string> = {};
 let securityWarning: string | undefined;
@@ -591,6 +594,10 @@ function startRuntime(): void {
       return;
     }
     if (message.type === "state") latestSnapshot = message.snapshot;
+    // 待决提问镜像：渲染端 HMR/刷新/崩溃恢复后靠 bootstrap 把面板重新浮出来。
+    // 只镜像、不裁决——真正的作答仍由 utility 的 QuestionBroker 处理。
+    if (message.type === "question") pendingQuestions.record(message.request);
+    if (message.type === "question.dismiss") pendingQuestions.dismiss(message.id);
     // 面板作品的数据源：无条件喂（不依赖渲染端是否在看，也不依赖主窗口是否存在）。
     panelState.ingest(message);
     if (message.type === "catalog") latestCatalog = message;
@@ -611,7 +618,11 @@ function startRuntime(): void {
     // main 自己的 ingest 在上一行，不受影响。
     if (message.type !== "sessions.live") mainWindow?.webContents.send("runtime:message", message);
   });
-  runtimeProcess.on("exit", (code) => { runtimeProcess = undefined; mainWindow?.webContents.send("runtime:message", { type: "error", message: `Pi 运行时意外停止（退出代码 ${code}），请重启应用。` } satisfies RuntimeMessage); });
+  runtimeProcess.on("exit", (code) => {
+    runtimeProcess = undefined;
+    pendingQuestions.clear();
+    mainWindow?.webContents.send("runtime:message", { type: "error", message: `Pi 运行时意外停止（退出代码 ${code}），请重启应用。` } satisfies RuntimeMessage);
+  });
   // Forward Pi runtime stdio only in development: in packaged builds the Pi
   // runtime is chatty (per-token/tool logs) and piping it through synchronous
   // console I/O on the main thread slows runtime→renderer message forwarding.
@@ -982,7 +993,7 @@ function registerIpc(): void {
     // AI 后续操作走已绑定快速路径不再 reveal，用户就看不到 AI 在操作哪个页面。
     const source = loadSettings();
     const settings: DesktopSettings = settingsForRenderer({ ...source, providers: source.providers.map((provider) => ({ ...provider, keyConfigured: Boolean(credentialsCache[provider.id]) })), jevKeyConfigured: Boolean(credentialsCache[JEV_CREDENTIAL_ID]) });
-    return { platform: process.platform, version: app.getVersion(), securityWarning, settings, runtime: latestSnapshot, catalog: latestCatalog ? { models: latestCatalog.models, providers: latestCatalog.providers } : undefined, resources: latestResources, browserTabs: browserPreviewController?.tabIds() ?? [] };
+    return { platform: process.platform, version: app.getVersion(), securityWarning, settings, runtime: latestSnapshot, catalog: latestCatalog ? { models: latestCatalog.models, providers: latestCatalog.providers } : undefined, resources: latestResources, browserTabs: browserPreviewController?.tabIds() ?? [], questions: pendingQuestions.list() };
   });
   // 主题导入：对话框与全部文件工作都在主进程（渲染端不再用 webkitdirectory + FileReader
   // 读盘、不再把资产变成 base64 过 IPC）。渲染端只拿 CSS 文本与统计。

@@ -2494,6 +2494,8 @@ export interface DesktopBootstrap {
   resources?: ResourceCatalog;
   /** 主进程存活的浏览器标签页 id（渲染端重载后 React 状态丢失，靠它恢复面板标签；空/缺省 = 无可恢复）。 */
   browserTabs?: string[];
+  /** 渲染端重载后仍需展示的待决提问（主进程镜像；空/缺省 = 没有挂起的面板）。 */
+  questions?: QuestionRequest[];
 }
 
 export interface DesktopApi {

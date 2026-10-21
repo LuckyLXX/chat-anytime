@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { PermissionRequest, QuestionRequest, RuntimeSnapshot, SessionPaneSnapshot, ToolExecution, Todo, UsageStats } from "../../shared/protocol.js";
-import { currentPermissionRequest, currentQuestionRequest, dropPaneStates, pruneParkedPanels, useDesktopStore } from "./store.js";
+import { currentPermissionRequest, currentQuestionRequest, dropPaneStates, mergeQuestionRequests, pruneParkedPanels, useDesktopStore } from "./store.js";
 
 function permission(id: string, sessionId: string): PermissionRequest {
   return {
@@ -279,6 +279,21 @@ describe("session-scoped pending panels", () => {
   it("returns nothing when there is no active session", () => {
     expect(currentPermissionRequest([permission("permission-a", "session-a")], undefined)).toBeUndefined();
     expect(currentQuestionRequest([question("question-a", "session-a")], undefined)).toBeUndefined();
+  });
+
+  it("restores pending questions from bootstrap and lets live frames win by id", () => {
+    const restored = question("question-a", "session-a");
+    const live = question("question-a", "session-a");
+    live.questions = [{ text: "运行期最新问题", type: "text", options: [] }];
+
+    const merged = mergeQuestionRequests([restored, question("question-b", "session-b")], [live]);
+    expect(merged.map((item) => item.id)).toEqual(["question-a", "question-b"]);
+    expect(merged[0]!.questions[0]!.text).toBe("运行期最新问题");
+  });
+
+  it("keeps the live question array reference when bootstrap has nothing to restore", () => {
+    const live = [question("question-a", "session-a")];
+    expect(mergeQuestionRequests([], live)).toBe(live);
   });
 });
 
@@ -599,6 +614,33 @@ describe("当前版本的水合", () => {
       host.piDesktop = original;
       host.window = originalWindow;
       useDesktopStore.setState({ appVersion: "" });
+    }
+  });
+
+  it("bootstrap.questions 把渲染端重载时丢掉的提问面板恢复回来", async () => {
+    const host = globalThis as { piDesktop?: unknown; window?: unknown };
+    const originalWindow = host.window;
+    const original = host.piDesktop;
+    host.window = host;
+    const pending: QuestionRequest = { id: "question-restored", sessionId: "session-a", toolCallId: "tool-1", questions: [{ text: "继续吗？", type: "single", options: ["继续", "停止"] }] };
+    host.piDesktop = {
+      onRuntimeMessage: () => () => {},
+      bootstrap: async () => ({
+        platform: "test",
+        version: "1.3.1",
+        settings: { version: 2, thinkingLevel: "medium", accessMode: "ask", providers: [], agents: [], currentAgentId: "default", appearance: { theme: "system", themePreset: "default", customCss: "", customThemes: [], showThinking: true, showGalleryWall: true } },
+        resources: { skills: [], commands: [], mcpServers: [], todos: [], memory: [], subagents: [], hooks: [], hooksEnabled: true, automation: [], automationRuns: [], gallery: [], diagnostics: [] },
+        questions: [pending]
+      })
+    };
+    try {
+      useDesktopStore.setState({ questions: [] });
+      await useDesktopStore.getState().initialize();
+      expect(useDesktopStore.getState().questions.map((item) => item.id)).toEqual(["question-restored"]);
+    } finally {
+      host.piDesktop = original;
+      host.window = originalWindow;
+      useDesktopStore.setState({ questions: [] });
     }
   });
 });

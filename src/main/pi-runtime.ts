@@ -4534,6 +4534,14 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       record.steeringImages = [];
       record.followUpImages = [];
       void record.session.abort();
+      // 中止必须同步解除挂起中的交互请求：ask_question / exit_plan_mode / 权限确认
+      // 都阻塞在各自 broker 的 Promise 上，而 session.abort() 只停模型流，不会替
+      // 这些工具返回。漏掉这一步，工具会永久挂起 → 运行永远不 settle → 停止按钮
+      // 看起来完全无效（2026-10-21 实测：计划审查面板被 HMR 重载吞掉后，
+      // exit_plan_mode 已挂起 55 分钟，busy 一直为 true）。
+      // 权限侧只取消挂起请求，保留本会话的 allow-session 授权（中止不是撤销授权）。
+      questionBroker.reset(record.session.sessionId);
+      permissionBroker.cancelPending(record.session.sessionId);
       // Make the task panel reflect the abort immediately: mark every running
       // tool execution as aborted so its card disappears without waiting for
       // the SDK's tool_execution_end (which may be delayed or never arrive
