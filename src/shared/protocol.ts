@@ -1784,12 +1784,14 @@ export interface HookSummary {
   enabled: boolean;
 }
 
-/** cron 5 字段调度；timezone 缺省 = 跟随系统（留空）。"0 9 * * 1-5"=工作日每天 09:00。 */
-export interface AutomationSchedule {
-  cron: string;
-  /** IANA 时区名；缺省跟随系统。 */
-  timezone?: string;
-}
+/**
+ * 自动化任务调度规则：cron 周期 / after 相对延时一次性 / at 绝对时间一次性。
+ * 一次性规则保存规范化后的 `scheduledAt`（epoch ms），到期投递后任务转为已完成。
+ */
+export type AutomationSchedule =
+  | { kind: "cron"; cron: string; /** IANA 时区名；缺省跟随系统。 */ timezone?: string }
+  | { kind: "after"; afterSeconds: number; scheduledAt: number }
+  | { kind: "at"; scheduledAt: number };
 
 /** 近一次运行摘要（列表/详情展示）。 */
 export interface AutomationRunInfo {
@@ -1797,11 +1799,13 @@ export interface AutomationRunInfo {
   sessionId: string;
   startedAt: number;
   /**
-   * ok=正常完成；error=真实失败；aborted=运行被中止（用户停止或连接中断）。
+   * ok=正常完成；error=真实失败；aborted=运行被中止（用户停止或连接中断）；
+   * delivered=会话绑定任务已把提醒投递进原会话（只代表消息入队/送达，
+   * 不代表模型执行完成——与参考项目 lastDelivery 同口径）。
    * aborted 与 error 分开：中止不是失败，运行记录页不该给它红色失败态
    * （2026-09-10 会话复盘：ok/err 二态把一次「流被截断」的日报记成了成功）。
    */
-  status: "ok" | "error" | "aborted";
+  status: "ok" | "error" | "aborted" | "delivered";
   /** 结果摘要（最后一段助手文本）。 */
   preview?: string;
   error?: string;
@@ -1829,14 +1833,17 @@ export interface AutomationRunRecord {
   startedAt: number;
   durationMs: number;
   /**
-   * 同 {@link AutomationRunInfo.status}：ok / error / aborted；
+   * 同 {@link AutomationRunInfo.status}：ok / error / aborted / delivered；
    * 外加 **skipped** = 本轮本该运行但被跳过（应用未运行 / 任务被暂停 / 上一轮未结束）。
    * skipped 是中性态，不是失败：它只进运行记录，**绝不写 task.lastRun**
    * （lastRun 语义是「上一次实际运行」，被跳过覆盖会让「上次成功时间」丢失）。
+   * delivered 同样是中性态：它只表示提醒已进入会话，不代表模型执行完成。
    */
-  status: "ok" | "error" | "aborted" | "skipped";
+  status: "ok" | "error" | "aborted" | "skipped" | "delivered";
   /** 跳过原因（仅 skipped）；同时作为界面上的说明文案。 */
   skipReason?: string;
+  /** 运行方式：后台新会话执行 / 投递进原会话。缺省视为 background（旧记录）。 */
+  deliveryMode?: "background" | "session";
   trigger: "cron" | "manual";
   /** 实际使用的模型 id（回退链解析后的结果）。 */
   modelId?: string;
@@ -1854,6 +1861,17 @@ export interface AutomationTask {
   prompt: string;
   /** 归属 Agent（创建时取当前）。 */
   agentId: string;
+  /**
+   * 绑定的目标会话：到点把提示词作为普通用户消息投递进该会话（沿用上下文）。
+   * 缺省 = 后台新会话执行（旧行为）。
+   */
+  sessionId?: string;
+  /** 创建时快照的会话文件路径；冷启动投递定位用，可能因会话删除/未落盘而失效。 */
+  sessionPath?: string;
+  /** 创建时快照的会话标题（列表展示；不随会话改名自动更新）。 */
+  sessionTitle?: string;
+  /** 一次性任务投递成功的时间；存在即表示已完成（同时 enabled=false）。 */
+  completedAt?: number;
   /** 参照「空间」；v1 供展示/DSL，执行用当前工作区。 */
   workspace?: string;
   /** 执行时所用模型；缺省 = 该 Agent 默认模型或全局默认。 */
@@ -2349,6 +2367,8 @@ export type RuntimeCommand =
   | { type: "automation.run"; id: string; agentId?: string }
   /** 运行记录「查看会话」：渲染端只发 runId；主进程负责查记录、跨角色切换、定位会话、激活/恢复。 */
   | { type: "automation.run.open"; runId: string }
+  /** 打开某条任务关联的会话：主进程按 taskId 查任务、跨角色切换、定位会话、激活/恢复。 */
+  | { type: "automation.session.open"; taskId: string }
   | { type: "permission.resolve"; id: string; decision: PermissionDecision }
   | { type: "question.resolve"; id: string; answers?: string[]; /** 移交出口选定的实施模型（handoffOption 流程携带；ask_question 忽略）。 */ model?: { provider: string; id: string } }
   /** 回滚单条回复内指定文件的改动：按（文件 + 调用 id）定位快照，每文件取最早快照恢复；targets 可含多个文件。 */
@@ -2435,8 +2455,8 @@ export type RuntimeMessage =
   | { type: "usage-stats-result"; stats: UsageStats }
   /** 自动化任务列表（store 变化时推送，当前 Agent）。 */
   | { type: "automation"; tasks: AutomationTask[] }
-  /** 自动化任务运行状态（running=开始，ok/error/aborted=终态）；终态携带任务名（toast 文案）与运行记录 id（看结果直达）。 */
-  | { type: "automation-run"; id: string; status: "ok" | "error" | "aborted" | "running"; taskName?: string; runId?: string; message?: string }
+  /** 自动化任务运行状态（running=开始，ok/error/aborted/delivered=终态）；终态携带任务名（toast 文案）与运行记录 id（看结果直达）。 */
+  | { type: "automation-run"; id: string; status: "ok" | "error" | "aborted" | "delivered" | "running"; taskName?: string; runId?: string; message?: string }
   /** 自动化运行历史全量推送（每次运行结束后随终态推送，渲染端全量替换）。 */
   | { type: "automation-runs"; runs: AutomationRunRecord[] }
   /** utility 进程请求用系统默认浏览器打开一个 URL（OAuth 授权页）；main 进程 shell.openExternal。 */  | { type: "open-external"; url: string }

@@ -6,6 +6,7 @@ import {
   Check,
   CheckCircle2,
   ChevronDown,
+  Clock,
   Circle,
   Computer,
   Eye,
@@ -339,6 +340,8 @@ export function App(): ReactNode {
   const error = useDesktopStore((state) => state.error);
   const checkpointResult = useDesktopStore((state) => state.checkpointResult);
   const automationRun = useDesktopStore((state) => state.automationRun);
+  const automation = useDesktopStore((state) => state.automation);
+  const automationOpenSignal = useDesktopStore((state) => state.automationOpenSignal);
   const initialize = useDesktopStore((state) => state.initialize);
   const clearError = useDesktopStore((state) => state.clearError);
   // snapshot 字段级订阅。sessions/recentWorkspaces 在 store 合并层做了身份保留
@@ -350,6 +353,11 @@ export function App(): ReactNode {
   const paletteOpenTick = useDesktopStore((state) => state.paletteOpenTick);
   const activeWorkspace = useDesktopStore((state) => state.snapshot.workspace);
   const sessionSummaries = useDesktopStore((state) => state.snapshot.sessions);
+  /** 有启用中定时任务的会话 id：侧栏行显示时钟标记（参考 dsh 的 schedule mark）。 */
+  const automationSessionIds = useMemo(
+    () => new Set(automation.filter((task) => task.enabled && task.sessionId).map((task) => task.sessionId!)),
+    [automation]
+  );
   const sessionSearch = useDesktopStore((state) => state.sessionSearch);
   const recentWorkspaces = useDesktopStore((state) => state.snapshot.recentWorkspaces);
   const activeAgentId = useDesktopStore((state) => state.snapshot.agentId);
@@ -492,11 +500,19 @@ export function App(): ReactNode {
     // 中止不是失败：单独给一句中性文案，不套「运行失败」。
     const message = automationRun.status === "ok"
       ? (name ? `${name}运行完成` : "定时任务已运行")
-      : automationRun.status === "aborted"
-        ? (name ? `${name}运行已中止` : "定时任务运行已中止")
-        : `${name}运行失败${automationRun.message ? `：${automationRun.message.length > 120 ? `${automationRun.message.slice(0, 120)}…` : automationRun.message}` : ""}`;
+      : automationRun.status === "delivered"
+        ? (name ? `${name}已投递到关联会话` : "定时任务提醒已投递")
+        : automationRun.status === "aborted"
+          ? (name ? `${name}运行已中止` : "定时任务运行已中止")
+          : `${name}运行失败${automationRun.message ? `：${automationRun.message.length > 120 ? `${automationRun.message.slice(0, 120)}…` : automationRun.message}` : ""}`;
     setAutomationToast({ message, runId: automationRun.runId });
   }, [automationRun]);
+  // 聊天里的 automation_create 卡片「打开」：打开设置页自动化 tab（任务列表）。
+  useEffect(() => {
+    if (!automationOpenSignal) return;
+    openSettingsOn("automation");
+    useDesktopStore.setState({ automationOpenSignal: undefined });
+  }, [automationOpenSignal]);
   // 「查看结果」直达：打开设置页自动化 tab，写入信号让 AutomationSettings 切「运行记录」子页并高亮该条。
   function viewAutomationRun(runId: string): void {
     setAutomationToast(undefined);
@@ -1877,7 +1893,7 @@ export function App(): ReactNode {
                         >
                           {sessionMultiSelect ? (rowSelected ? <CheckCircle2 size={14} /> : <Circle size={14} />) : <MessageCircle size={14} />}
                           <span><strong>{item.title}</strong><small>{new Date(item.modifiedAt).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}</small></span>
-                          {(item.runStatus || item.pinned || item.archived) && <div className="session-item-meta">{item.runStatus && <i className={`session-status-dot ${item.runStatus}`} title={sessionRunStatusLabels[item.runStatus]} aria-label={sessionRunStatusLabels[item.runStatus]!} />}{item.pinned && <Pin size={11} className="session-pin-indicator" />}{item.archived && <Archive size={11} className="session-archive-indicator" />}</div>}
+                          {(item.runStatus || item.pinned || item.archived || automationSessionIds.has(item.id)) && <div className="session-item-meta">{item.runStatus && <i className={`session-status-dot ${item.runStatus}`} title={sessionRunStatusLabels[item.runStatus]} aria-label={sessionRunStatusLabels[item.runStatus]!} />}{automationSessionIds.has(item.id) && <span className="session-automation-indicator" title="有定时任务" aria-label="有定时任务"><Clock size={11} /></span>}{item.pinned && <Pin size={11} className="session-pin-indicator" />}{item.archived && <Archive size={11} className="session-archive-indicator" />}</div>}
                         </button>;
                       })}
                     </div>

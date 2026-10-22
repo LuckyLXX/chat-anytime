@@ -77,6 +77,11 @@ describe("normalizeAutomationRun", () => {
     expect(normalizeAutomationRun(record)).toEqual(record);
     expect(normalizeAutomationRun({ ...makeRun(), status: "cancelled" })).toBeUndefined();
   });
+
+  it("accepts delivered and preserves deliveryMode (投递≠执行完成)", () => {
+    const record = makeRun({ status: "delivered", deliveryMode: "session", preview: "已投递" });
+    expect(normalizeAutomationRun(record)).toEqual(record);
+  });
 });
 
 describe("readAutomationRuns", () => {

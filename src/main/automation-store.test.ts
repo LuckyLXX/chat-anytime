@@ -34,7 +34,7 @@ function makeTask(overrides: Partial<AutomationTask> = {}): AutomationTask {
   return {
     id: "task-1",
     name: "每日巡检",
-    schedule: { cron: "0 9 * * 1-5" },
+    schedule: { kind: "cron", cron: "0 9 * * 1-5" },
     prompt: "巡检仓库并汇报",
     agentId: "default",
     accessMode: "full",
@@ -81,16 +81,16 @@ describe("normalizeAutomation", () => {
 
   it("drops an invalid timezone (avoids silent never-fire) but keeps the cron", () => {
     const bad = normalizeAutomation({ name: "x", prompt: "y", schedule: { cron: "0 9 * * *", timezone: "Bad/Zone" } });
-    expect(bad?.schedule.timezone).toBeUndefined();
+    expect(bad?.schedule.kind === "cron" ? bad.schedule.timezone : undefined).toBeUndefined();
     const good = normalizeAutomation({ name: "x", prompt: "y", schedule: { cron: "0 9 * * *", timezone: "Asia/Shanghai" } });
-    expect(good?.schedule.timezone).toBe("Asia/Shanghai");
+    expect(good?.schedule.kind === "cron" ? good.schedule.timezone : undefined).toBe("Asia/Shanghai");
   });
 
   it("trims whitespace and carries a bare timezone when present", () => {
     const task = normalizeAutomation({ name: "  x  ", prompt: "  y  ", schedule: { cron: " 0 9 * * * ", timezone: "Asia/Shanghai" } });
     expect(task?.name).toBe("x");
     expect(task?.prompt).toBe("y");
-    expect(task?.schedule).toEqual({ cron: "0 9 * * *", timezone: "Asia/Shanghai" });
+    expect(task?.schedule).toEqual({ kind: "cron", cron: "0 9 * * *", timezone: "Asia/Shanghai" });
   });
 });
 
@@ -200,5 +200,94 @@ describe("resolveAutomationAgent", () => {
   it("returns undefined for unknown ids and empty lists", () => {
     expect(resolveAutomationAgent([agent("a")], "zzz")).toBeUndefined();
     expect(resolveAutomationAgent([], "a")).toBeUndefined();
+  });
+});
+
+/**
+ * 2026-10-21：一次性调度与会话绑定。
+ * - 旧数据 `{cron}` 补 kind；
+ * - after 缺 scheduledAt 时按 createdAt + afterSeconds 补齐；
+ * - 非法 at/after 丢弃；
+ * - 会话字段 round-trip；
+ * - recordAutomationRun 的 completeOneShot 会把任务置为已完成。
+ */
+describe("normalizeAutomation one-shot + session fields", () => {
+  it("upgrades legacy cron schedules to the discriminated union", () => {
+    const task = normalizeAutomation({ name: "x", prompt: "y", schedule: { cron: "0 9 * * *" } });
+    expect(task?.schedule).toEqual({ kind: "cron", cron: "0 9 * * *" });
+  });
+
+  it("round-trips an after task and fills scheduledAt from createdAt", () => {
+    const task = normalizeAutomation({
+      name: "x",
+      prompt: "y",
+      createdAt: 1_000,
+      schedule: { kind: "after", afterSeconds: 300 }
+    });
+    expect(task?.schedule).toEqual({ kind: "after", afterSeconds: 300, scheduledAt: 301_000 });
+  });
+
+  it("keeps an explicit scheduledAt and session binding", () => {
+    const task = normalizeAutomation({
+      id: "task-2",
+      name: "检查后台任务",
+      prompt: "看看跑完没",
+      schedule: { kind: "at", scheduledAt: 500_000 },
+      sessionId: "sess-1",
+      sessionPath: "C:/agent/chatanytime-sessions/default/abc/x.jsonl",
+      sessionTitle: "分析任务",
+      workspace: "C:/work"
+    });
+    expect(task?.schedule).toEqual({ kind: "at", scheduledAt: 500_000 });
+    expect(task?.sessionId).toBe("sess-1");
+    expect(task?.sessionTitle).toBe("分析任务");
+    expect(task?.sessionPath).toContain("x.jsonl");
+  });
+
+  it("drops invalid one-shot rules and relative session paths", () => {
+    expect(normalizeAutomation({ name: "x", prompt: "y", schedule: { kind: "at" } })).toBeUndefined();
+    expect(normalizeAutomation({ name: "x", prompt: "y", schedule: { kind: "after", afterSeconds: 0 } })).toBeUndefined();
+    const task = normalizeAutomation({
+      name: "x", prompt: "y", schedule: { kind: "at", scheduledAt: 1 }, sessionPath: "relative/x.jsonl"
+    });
+    expect(task?.sessionPath).toBeUndefined();
+  });
+
+  it("keeps delivered as a lastRun status", () => {
+    const task = normalizeAutomation({
+      name: "x", prompt: "y", schedule: { kind: "at", scheduledAt: 1 },
+      lastRun: { sessionId: "s", startedAt: 1, status: "delivered", preview: "已投递" }
+    });
+    expect(task?.lastRun?.status).toBe("delivered");
+  });
+
+  it("forces completed one-shot tasks to disabled", () => {
+    const task = normalizeAutomation({
+      name: "x", prompt: "y", schedule: { kind: "at", scheduledAt: 1 }, enabled: true, completedAt: 2
+    });
+    expect(task?.enabled).toBe(false);
+    expect(task?.completedAt).toBe(2);
+  });
+});
+
+describe("recordAutomationRun completeOneShot", () => {
+  it("marks a one-shot complete and disables it", () => {
+    const file = automationPathFor(agentDir, "default");
+    const task = makeTask({ schedule: { kind: "at", scheduledAt: 9_999 } });
+    upsertAutomation(file, task);
+    const run = { sessionId: "sess-1", startedAt: 2_000, status: "delivered" as const, preview: "已投递" };
+    const updated = recordAutomationRun(file, "task-1", run, { completeOneShot: true, completedAt: 2_100 });
+    expect(updated[0]!.lastRun).toEqual(run);
+    expect(updated[0]!.enabled).toBe(false);
+    expect(updated[0]!.completedAt).toBe(2_100);
+  });
+
+  it("does not disable recurring cron tasks", () => {
+    const file = automationPathFor(agentDir, "default");
+    upsertAutomation(file, makeTask());
+    const run = { sessionId: "sess-1", startedAt: 2_000, status: "ok" as const };
+    const updated = recordAutomationRun(file, "task-1", run, { completeOneShot: true });
+    expect(updated[0]!.enabled).toBe(true);
+    expect(updated[0]!.completedAt).toBeUndefined();
   });
 });

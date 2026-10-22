@@ -120,7 +120,8 @@ import { createTodoStore, migrateLegacyTodoFile, type TodoStore } from "./todo-s
 import { automationPathFor, deleteAutomation, normalizeAutomation, readAllAutomations, recordAutomationRun, resolveAutomationAgent, toggleAutomation, upsertAutomation } from "./automation-store.js";
 import { appendAutomationRun, readAutomationRuns } from "./automation-runs.js";
 import { createAutomationScheduler, type AutomationScheduler } from "./automation-scheduler.js";
-import { buildAutomationTools, type AutomationCreateInput, type AutomationToolContext } from "./automation-tools.js";
+import { buildAutomationTools, type AutomationCreateInput, type AutomationSessionInfo, type AutomationToolContext, type AutomationUpdateInput } from "./automation-tools.js";
+import { buildAutomationReminderText } from "./automation-delivery.js";
 import { resolveVisionModel } from "./vision.js";
 import { buildResourceCatalog } from "./resource-catalog.js";
 import { agentWorkspaceSessionDir, backfillUnpersistedSessions, isSessionArchived, isSessionPinned, mergeSessionSummary, pruneVanishedSessions, sameSessionDir, sessionFileMatchesId, sessionListReadyFor, setArchivedSessionPaths, sortSessionSummaries, togglePinnedSessionPath } from "./session-scope.js";
@@ -979,9 +980,17 @@ function truncatePreview(text: string, max = 200): string {
   return collapsed.length > max ? `${collapsed.slice(0, max)}…` : collapsed;
 }
 
-/** 任务运行完成后把摘要写回 store（若任务仍存在）并让列表/调度器刷新。 */
-function afterAutomationRun(taskId: string, agentId: string, run: AutomationTask["lastRun"]): void {
-  if (run) recordAutomationRun(automationStorePath(agentId), taskId, run);
+/**
+ * 任务运行/投递完成后把摘要写回 store（若任务仍存在）并让列表/调度器刷新。
+ * completeOneShot：一次性任务成功后置为已完成（enabled=false + completedAt）。
+ */
+function afterAutomationRun(
+  taskId: string,
+  agentId: string,
+  run: AutomationTask["lastRun"],
+  options?: { completeOneShot?: boolean; completedAt?: number }
+): void {
+  if (run) recordAutomationRun(automationStorePath(agentId), taskId, run, options);
   refreshAutomation();
   automationScheduler?.refresh();
 }
@@ -1022,8 +1031,17 @@ function recordSkippedRun(task: AutomationTask, reason: string, at: number): voi
   emitAutomationRuns();
 }
 
-/** 后台新建专用会话跑任务提示词（跨角色：按任务自身 agentId 解析角色档案，skipActivate 不抢焦点）。 */
+/** 调度/手动运行入口：有 sessionId 走会话投递，否则维持后台新会话执行。 */
 async function runAutomationTask(task: AutomationTask, trigger: "cron" | "manual"): Promise<void> {
+  if (task.sessionId) {
+    await runSessionBoundAutomationTask(task, trigger);
+    return;
+  }
+  await runBackgroundAutomationTask(task, trigger);
+}
+
+/** 后台新建专用会话跑任务提示词（跨角色：按任务自身 agentId 解析角色档案，skipActivate 不抢焦点）。 */
+async function runBackgroundAutomationTask(task: AutomationTask, trigger: "cron" | "manual"): Promise<void> {
   if (!workspace || !modelRuntime) throw new Error("当前没有可用工作区，无法运行定时任务");
   // 快照本回合的工作区：避免与 agent.select/workspace.open 交错时执行主体与数据落位错位。
   const runWorkspace = workspace;
@@ -1103,6 +1121,7 @@ async function runAutomationTask(task: AutomationTask, trigger: "cron" | "manual
       startedAt,
       durationMs: Date.now() - startedAt,
       status: outcome,
+      deliveryMode: "background",
       trigger,
       ...(modelRef ? { modelId: modelRef.id } : {}),
       ...(preview ? { preview } : {}),
@@ -1110,7 +1129,12 @@ async function runAutomationTask(task: AutomationTask, trigger: "cron" | "manual
     });
     emitAutomationRuns();
     // lastRun 回写（覆盖式，保留不动）与运行历史流并存：afterAutomationRun 内 refreshAutomation 会重读 runs。
-    afterAutomationRun(task.id, runAgent.id, { sessionId, startedAt, status: outcome, ...(preview ? { preview } : {}), ...(runError ? { error: runError } : {}) });
+    afterAutomationRun(
+      task.id,
+      runAgent.id,
+      { sessionId, startedAt, status: outcome, ...(preview ? { preview } : {}), ...(runError ? { error: runError } : {}) },
+      { completeOneShot: trigger === "cron", completedAt: Date.now() }
+    );
     post({ type: "automation-run", id: task.id, status: outcome, taskName: task.name, runId, ...(runError ? { message: runError } : {}) });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -1128,6 +1152,7 @@ async function runAutomationTask(task: AutomationTask, trigger: "cron" | "manual
       startedAt,
       durationMs: Date.now() - startedAt,
       status: outcome,
+      deliveryMode: "background",
       trigger,
       ...(modelRef ? { modelId: modelRef.id } : {}),
       error: message
@@ -1141,6 +1166,152 @@ async function runAutomationTask(task: AutomationTask, trigger: "cron" | "manual
     patchSessionRunStatus(record);
     emitState();
     emitPaneStateFor(record);
+  }
+}
+
+/** 解析自动化任务归属角色（归档/未知返回 undefined）。 */
+function resolveAutomationTaskAgent(task: AutomationTask): AgentProfile {
+  if (task.agentId) {
+    const resolved = resolveAutomationAgent(settings?.agents ?? [], task.agentId);
+    if (!resolved) throw new Error(`定时任务「${task.name}」归属的角色不存在或已归档（${task.agentId}），已跳过`);
+    return resolved;
+  }
+  return currentAgent ?? activeAgent();
+}
+
+/**
+ * 定位任务绑定会话的文件：优先创建时快照的 sessionPath（必须位于该 Agent 的
+ * 会话根内且首行 id 匹配），否则按 agentId 扫描全部工作区会话目录按 id 查找。
+ */
+async function findAutomationSessionFile(task: AutomationTask): Promise<string | undefined> {
+  if (!task.sessionId) return undefined;
+  const root = join(getAgentDir(), "chatanytime-sessions", task.agentId);
+  if (task.sessionPath && pathIsWithin(root, task.sessionPath) && readSessionHeaderId(task.sessionPath) === task.sessionId) {
+    return task.sessionPath;
+  }
+  return findSessionFileById(await agentSessionDirectories(task.agentId), task.sessionId);
+}
+
+/**
+ * 取得会话绑定任务的运行记录：live 命中直接复用；否则从磁盘冷恢复。
+ * 冷恢复走 skipActivate（不抢用户焦点）+ workspaceOverride（按目标会话自己的工作区），
+ * 并校验会话目录归属，避免把别的 Agent/工作区的文件当成本会话打开。
+ */
+async function openAutomationSessionRecord(task: AutomationTask, runAgent: AgentProfile): Promise<SessionRuntimeRecord> {
+  const sessionId = task.sessionId!;
+  const existing = liveSessions.get(sessionId);
+  if (existing) return existing;
+  const target = await findAutomationSessionFile(task);
+  if (!target) {
+    throw new Error(`关联会话不存在或尚未落盘（${sessionId}）；任务仍保留，可在设置中改绑或删除`);
+  }
+  if (readSessionHeaderId(target) !== sessionId) throw new Error("关联会话文件校验失败（首行 id 不匹配）");
+  const discovered = SessionManager.open(target);
+  const cwd = discovered.getCwd();
+  if (!cwd) throw new Error("关联会话缺少工作区信息，无法恢复");
+  const recordWorkspace = resolve(cwd);
+  const recordRoot = agentWorkspaceSessionDir(getAgentDir(), runAgent.id, recordWorkspace);
+  if (!recordRoot || !sameSessionDir(recordRoot, dirname(target))) {
+    throw new Error("关联会话路径与工作区不匹配，拒绝恢复");
+  }
+  await createSession(SessionManager.open(target, recordRoot, recordWorkspace), {
+    skipActivate: true,
+    agentOverride: runAgent,
+    workspaceOverride: recordWorkspace,
+    noGenerationGuard: true
+  });
+  const record = liveSessions.get(sessionId);
+  if (!record) throw new Error("关联会话恢复失败");
+  return record;
+}
+
+/**
+ * 会话绑定任务执行：把提醒作为一条普通用户消息投递回原会话。
+ *
+ * busy/streaming 时用 followUp 排队（不打断当前回合）；空闲时按 session.prompt
+ * 命令同款纪律启动回合。投递成功即记 delivered——它只代表消息进入会话/队列，
+ * 不代表模型执行完成（参考项目 Schedule 的 delivery receipt 口径）。
+ */
+async function runSessionBoundAutomationTask(task: AutomationTask, trigger: "cron" | "manual"): Promise<void> {
+  const sessionId = task.sessionId!;
+  const startedAt = Date.now();
+  post({ type: "automation-run", id: task.id, status: "running", taskName: task.name });
+  let runAgent: AgentProfile | undefined;
+  try {
+    runAgent = resolveAutomationTaskAgent(task);
+    const record = await openAutomationSessionRecord(task, runAgent);
+    if (!record.session.model) throw new Error("关联会话没有可用模型，无法投递提醒");
+    const text = buildAutomationReminderText(task, startedAt);
+    const queued = record.busy || record.session.isStreaming;
+    if (queued) {
+      await record.session.prompt(text, { streamingBehavior: "followUp" });
+    } else {
+      record.busy = true;
+      record.status = `定时任务：${task.name}`;
+      record.abortRequested = false;
+      record.runStatus = "running";
+      patchSessionRunStatus(record);
+      beginTurn(record);
+      emitState();
+      emitPaneStateFor(record);
+      void record.session.prompt(text).catch((error) => {
+        if (!liveSessions.has(record.session.sessionId)) return;
+        completeTurn(record);
+        record.busy = false;
+        record.status = "请求失败";
+        setTerminalRunStatus(record, "failed");
+        post({ type: "error", message: errorText(error) });
+        emitState();
+        emitPaneStateFor(record);
+        scheduleSessionsRefresh();
+      });
+    }
+    const runId = randomUUID();
+    const preview = queued
+      ? "已加入关联会话的消息队列，等待当前回合结束后处理。"
+      : "已投递到关联会话，Agent 已开始处理。";
+    automationRuns = appendAutomationRun(getAgentDir(), {
+      id: runId,
+      taskId: task.id,
+      taskName: task.name,
+      agentId: runAgent.id,
+      agentName: runAgent.name,
+      sessionId,
+      startedAt,
+      durationMs: Date.now() - startedAt,
+      status: "delivered",
+      deliveryMode: "session",
+      trigger,
+      preview
+    });
+    emitAutomationRuns();
+    afterAutomationRun(
+      task.id,
+      runAgent.id,
+      { sessionId, startedAt, status: "delivered", preview },
+      { completeOneShot: trigger === "cron", completedAt: Date.now() }
+    );
+    post({ type: "automation-run", id: task.id, status: "delivered", taskName: task.name, runId, message: preview });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const runId = randomUUID();
+    automationRuns = appendAutomationRun(getAgentDir(), {
+      id: runId,
+      taskId: task.id,
+      taskName: task.name,
+      agentId: runAgent?.id ?? task.agentId,
+      agentName: runAgent?.name ?? task.agentId,
+      sessionId,
+      startedAt,
+      durationMs: Date.now() - startedAt,
+      status: "error",
+      deliveryMode: "session",
+      trigger,
+      error: message
+    });
+    emitAutomationRuns();
+    afterAutomationRun(task.id, runAgent?.id ?? task.agentId, { sessionId, startedAt, status: "error", error: message });
+    post({ type: "automation-run", id: task.id, status: "error", taskName: task.name, runId, message });
   }
 }
 
@@ -1197,16 +1368,24 @@ async function handoffPlanToNewSession(input: {
 }
 
 /** 绑定到某 Agent 的自动化工具上下文（会话内 automation.* 工具用）。 */
-function automationToolContextFor(agentId: string): AutomationToolContext {
+function automationToolContextFor(agentId: string, session: AutomationSessionInfo): AutomationToolContext {
   const storePath = () => automationStorePath(agentId);
+  const sessionBinding = (): Partial<AutomationTask> => ({
+    ...(session.id ? { sessionId: session.id } : {}),
+    ...(session.path ? { sessionPath: session.path } : {}),
+    ...(session.title ? { sessionTitle: session.title } : {}),
+    ...(session.workspace ? { workspace: session.workspace } : {})
+  });
   return {
+    getSession: () => ({ id: session.id, path: session.path, title: session.title, workspace: session.workspace }),
     addTask: (input: AutomationCreateInput) => {
       const raw = {
         name: input.name,
-        schedule: { cron: input.cron, ...(input.timezone ? { timezone: input.timezone } : {}) },
+        schedule: input.schedule,
         prompt: input.prompt,
         agentId,
-        ...(input.workspace ? { workspace: input.workspace } : {}),
+        ...(input.target === "session" ? sessionBinding() : {}),
+        ...(input.target !== "session" && input.workspace ? { workspace: input.workspace } : {}),
         ...(input.model ? { model: input.model } : {}),
         accessMode: input.accessMode ?? "full",
         ...(input.skillName ? { skillName: input.skillName } : {}),
@@ -1218,6 +1397,27 @@ function automationToolContextFor(agentId: string): AutomationToolContext {
       if (!task) throw new Error("任务字段校验失败");
       const tasks = upsertAutomation(storePath(), task);
       afterAutomationChange(agentId);
+      return { task, tasks };
+    },
+    updateTask: (id: string, patch: AutomationUpdateInput) => {
+      const all = readAllAutomations(getAgentDir());
+      const existing = all.find((candidate) => candidate.id === id);
+      if (!existing) return undefined;
+      const raw = {
+        ...existing,
+        ...(patch.name !== undefined ? { name: patch.name } : {}),
+        ...(patch.prompt !== undefined ? { prompt: patch.prompt } : {}),
+        ...(patch.schedule !== undefined ? { schedule: patch.schedule, completedAt: undefined, enabled: true } : {}),
+        ...(patch.model !== undefined ? { model: patch.model } : {}),
+        ...(patch.accessMode !== undefined ? { accessMode: patch.accessMode } : {}),
+        ...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
+        ...(patch.enabled === true ? { completedAt: undefined } : {}),
+        ...(patch.target === "session" ? sessionBinding() : patch.target === "background" ? { sessionId: undefined, sessionPath: undefined, sessionTitle: undefined } : {})
+      };
+      const task = normalizeAutomation(raw);
+      if (!task) throw new Error("任务字段校验失败");
+      const tasks = upsertAutomation(automationStorePath(existing.agentId), task);
+      afterAutomationChange(existing.agentId);
       return { task, tasks };
     },
     listTasks: () => readAllAutomations(getAgentDir()),
@@ -1242,7 +1442,12 @@ function automationToolContextFor(agentId: string): AutomationToolContext {
       if (!task) return { ok: false, message: `未找到任务 ${id}` };
       try {
         await runAutomationTask(task, "manual");
-        return { ok: true, message: `已触发任务 ${id} 运行（结果见侧边栏对应会话）。` };
+        return {
+          ok: true,
+          message: task.sessionId
+            ? `已把任务 ${id} 的提醒投递到关联会话（结果见该会话）。`
+            : `已触发任务 ${id} 运行（结果见侧边栏对应会话）。`
+        };
       } catch (error) {
         return { ok: false, message: error instanceof Error ? error.message : String(error) };
       }
@@ -1251,9 +1456,13 @@ function automationToolContextFor(agentId: string): AutomationToolContext {
   };
 }
 
-/** Session-scoped todo file: `<agentDir>/chatanytime-sessions/<agentId>/todos/<sessionId>.json`. */
-function sessionTodosPath(sessionId: string): string {
-  const root = agentSessionRoot();
+/**
+ * Session-scoped todo file: `<agentDir>/chatanytime-sessions/<agentId>/todos/<sessionId>.json`.
+ * agentId 缺省跟随当前 Agent；跨角色冷恢复会话必须显式传 record.agent.id，
+ * 否则会把一个角色的 todo 写进另一个角色的目录。
+ */
+function sessionTodosPath(sessionId: string, agentId?: string): string {
+  const root = agentId ? join(getAgentDir(), "chatanytime-sessions", agentId) : agentSessionRoot();
   if (!root) throw new Error("当前没有可用的 Agent，无法定位任务存储");
   return join(root, "todos", `${sessionId}.json`);
 }
@@ -1984,9 +2193,8 @@ function resolveWorkspaceUploadFiles(recordWorkspace: string, files: string[]): 
   });
 }
 
-async function sessionDirectories(): Promise<string[]> {
-  const root = agentSessionRoot();
-  if (!root) return [];
+async function agentSessionDirectories(agentId: string): Promise<string[]> {
+  const root = join(getAgentDir(), "chatanytime-sessions", agentId);
   try {
     const entries = await readdir(root, { withFileTypes: true });
     // 排除 delegations 子目录：子会话以 goal 文本为标题混进侧边栏话题列表是噪声
@@ -1995,6 +2203,12 @@ async function sessionDirectories(): Promise<string[]> {
   } catch {
     return [root];
   }
+}
+
+/** 当前 Agent 的会话目录集合（跨角色定位走 agentSessionDirectories(agentId)）。 */
+async function sessionDirectories(): Promise<string[]> {
+  const agentId = currentAgent?.id;
+  return agentId ? agentSessionDirectories(agentId) : [];
 }
 
 /**
@@ -3129,8 +3343,8 @@ function sessionReadyStatus(hasModel: boolean, usedFallback: boolean): string {
  * - otherwise (explicit sessionManager, or agent.save's config-apply rebuild)
  *   the record is rebuilt over the same history.
  */
-async function createSession(sessionManager?: SessionManager, options: { reactivate?: boolean; skipActivate?: boolean; modelOverride?: { provider: string; id: string }; accessModeOverride?: AccessMode; unattended?: boolean; noGenerationGuard?: boolean; agentOverride?: AgentProfile; inheritDesignMode?: boolean; inheritComputerMode?: boolean; inheritTeamMode?: boolean } = {}): Promise<void> {
-  if (!workspace || !modelRuntime) return;
+async function createSession(sessionManager?: SessionManager, options: { reactivate?: boolean; skipActivate?: boolean; modelOverride?: { provider: string; id: string }; accessModeOverride?: AccessMode; unattended?: boolean; noGenerationGuard?: boolean; agentOverride?: AgentProfile; workspaceOverride?: string; inheritDesignMode?: boolean; inheritComputerMode?: boolean; inheritTeamMode?: boolean } = {}): Promise<void> {
+  if (!modelRuntime) return;
   // 工作区可能已切换（workspace.open / session.*）：先重读双作用域钩子配置。
   refreshHooksConfig();
   // 工作区切换会改变项目级子智能体定义，一并重读。
@@ -3146,12 +3360,15 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     hasPendingFlush = false;
   }
 
-  const recordWorkspace = workspace;
   // agentOverride（跨角色自动化会话）：record 全链路按任务归属角色构建——系统提示、
   // 记忆库、技能开关、审计/checkpoint 目录、会话目录全部跟随任务 agent，而非当前激活角色。
   const recordAgent = options.agentOverride ?? currentAgent;
   if (!recordAgent) return;
-  const activeSessionManager = sessionManager ?? SessionManager.continueRecent(recordWorkspace, workspaceSessionDir());
+  // workspaceOverride（会话绑定任务冷恢复）：按目标会话自己的工作区构建，不依赖
+  // 全局 workspace 镜像；缺省仍走当前工作区，普通新建/打开路径行为不变。
+  const recordWorkspace = options.workspaceOverride ? resolve(options.workspaceOverride) : workspace;
+  if (!recordWorkspace) return;
+  const activeSessionManager = sessionManager ?? SessionManager.continueRecent(recordWorkspace, agentWorkspaceSessionDir(getAgentDir(), recordAgent.id, recordWorkspace));
   const existing = liveSessions.get(activeSessionManager.getSessionId());
   if (existing && !sessionManager && options.reactivate) {
     activate(existing);
@@ -3300,7 +3517,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   // Todos are session-scoped: each session id gets its own store so the task
   // panel follows the opened session. The first session opened after the
   // upgrade inherits the legacy global todo file exactly once.
-  const todosPath = sessionTodosPath(activeSessionManager.getSessionId());
+  const todosPath = sessionTodosPath(activeSessionManager.getSessionId(), recordAgent.id);
   migrateLegacyTodoFile(todosPath, join(getAgentDir(), "pidesktop-todos.json"));
   const recordTodoStore = createTodoStore(todosPath, refreshTodos);
   const sessionContext = activeSessionManager.buildSessionContext();
@@ -3476,7 +3693,14 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     relativeDownloadPath: (absolutePath) => workspaceRelativeAttachment(recordWorkspace, absolutePath)
   });
   // 自动化定时任务工具（每会话注册，绑定本记录所属 Agent 的 store）。
-  const automationTools = buildAutomationTools(automationToolContextFor(recordAgent.id));
+  // 会话信息用 getter 延迟读取：创建工具时会话可能尚未落盘（getSessionFile 为空），
+  // 真正调用 automation_create 时再取当前路径/标题即可。
+  const automationTools = buildAutomationTools(automationToolContextFor(recordAgent.id, {
+    id: activeSessionManager.getSessionId(),
+    get path() { return activeSessionManager.getSessionFile(); },
+    get title() { return currentSessions.find((item) => item.id === activeSessionManager.getSessionId())?.title; },
+    workspace: recordWorkspace
+  }));
   // 电脑控制工具：高频「感知→行动」循环结构化（computer_windows/screenshot/
   // click/type/press），执行层 spawn Python 复用 computer-use skill 的
   // ljqCtrl.py（工具与 skill 共享同一份实现；skill 保留长尾操作如 UIA/找图）。
@@ -4756,6 +4980,37 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         await createSession(SessionManager.open(target, recordRoot, recordWorkspace));
       }
       emitState();
+      break;
+    }
+    case "automation.session.open": {
+      const task = readAllAutomations(getAgentDir()).find((candidate) => candidate.id === command.taskId);
+      if (!task) {
+        post({ type: "error", message: "定时任务不存在（可能已被删除）" });
+        break;
+      }
+      if (!task.sessionId) {
+        post({ type: "log", level: "info", message: "该任务没有关联会话（后台任务），运行结果见运行记录中的对应会话。" });
+        break;
+      }
+      try {
+        if (task.agentId !== settings?.currentAgentId) {
+          await handleCommand({ type: "agent.select", agentId: task.agentId });
+        }
+        const live = liveSessions.get(task.sessionId);
+        if (live) {
+          activate(live);
+          emitState();
+          break;
+        }
+        const target = await findAutomationSessionFile(task);
+        if (!target) {
+          post({ type: "error", message: "关联会话不存在或尚未落盘（可能已删除）；任务仍保留，可在设置中改绑或删除。" });
+          break;
+        }
+        await handleCommand({ type: "session.open", path: target });
+      } catch (error) {
+        post({ type: "error", message: `打开关联会话失败：${errorText(error)}` });
+      }
       break;
     }
     case "session.compact": {

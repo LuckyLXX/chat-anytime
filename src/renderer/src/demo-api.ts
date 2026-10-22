@@ -191,9 +191,10 @@ const demoSettings: DesktopSettings = {
 
 /** 演示用定时任务（与运行记录 taskId 对齐，详情展开可现查 prompt）。 */
 const DEMO_AUTOMATION_TASKS: AutomationTask[] = [
-  { id: "demo-task-1", name: "每日新闻日报", schedule: { cron: "0 9 * * *" }, prompt: "每天早上汇总 AI 行业新闻：产品发布、融资与开源动态，输出十条要点。", agentId: "heiyuhe", accessMode: "full", enabled: true, createdAt: Date.now() - 30 * 86_400_000 },
-  { id: "demo-task-2", name: "项目巡检", schedule: { cron: "0 8 * * 1-5" }, prompt: "巡检当前工作区：检查未提交改动、构建状态与遗留 TODO，输出巡检报告。", agentId: "default", accessMode: "full", enabled: true, createdAt: Date.now() - 20 * 86_400_000, lastRun: { sessionId: "demo-automation-1", startedAt: Date.now() - 45 * 60_000, status: "ok", preview: "仓库状态正常：本地零未提交改动，构建通过。" } },
-  { id: "demo-task-3", name: "每小时温度记录", schedule: { cron: "0 * * * *" }, prompt: "每小时记录主要城市温度写入 temperature.log。", agentId: "heiyuhe", accessMode: "full", enabled: false, createdAt: Date.now() - 10 * 86_400_000 }
+  { id: "demo-task-1", name: "每日新闻日报", schedule: { kind: "cron", cron: "0 9 * * *" }, prompt: "每天早上汇总 AI 行业新闻：产品发布、融资与开源动态，输出十条要点。", agentId: "heiyuhe", accessMode: "full", enabled: true, createdAt: Date.now() - 30 * 86_400_000 },
+  { id: "demo-task-2", name: "项目巡检", schedule: { kind: "cron", cron: "0 8 * * 1-5" }, prompt: "巡检当前工作区：检查未提交改动、构建状态与遗留 TODO，输出巡检报告。", agentId: "default", accessMode: "full", enabled: true, createdAt: Date.now() - 20 * 86_400_000, lastRun: { sessionId: "demo-automation-1", startedAt: Date.now() - 45 * 60_000, status: "ok", preview: "仓库状态正常：本地零未提交改动，构建通过。" } },
+  { id: "demo-task-3", name: "每小时温度记录", schedule: { kind: "cron", cron: "0 * * * *" }, prompt: "每小时记录主要城市温度写入 temperature.log。", agentId: "heiyuhe", accessMode: "full", enabled: false, createdAt: Date.now() - 10 * 86_400_000 },
+  { id: "demo-task-4", name: "5 分钟后检查后台任务", schedule: { kind: "after", afterSeconds: 300, scheduledAt: Date.now() + 5 * 60_000 }, prompt: "检查刚才启动的后台分析任务是否完成：查看进程、日志和产物；完成就汇报结果，未完成说明进度与预计时间。", agentId: "default", sessionId: "demo-session-ghidra", sessionTitle: "Ghidra 分析任务", accessMode: "full", enabled: true, createdAt: Date.now() - 60_000 }
 ];
 
 /** 演示用运行历史（倒序：今天两条 + 昨天两条，覆盖成功/失败/跨角色）。 */

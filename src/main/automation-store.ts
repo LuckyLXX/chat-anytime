@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import type { AccessMode, AgentProfile, AutomationTask } from "../shared/protocol.js";
+import { dirname, isAbsolute, join } from "node:path";
+import type { AccessMode, AgentProfile, AutomationSchedule, AutomationTask } from "../shared/protocol.js";
 import { isValidCron } from "./automation-cron.js";
 
 /**
@@ -21,6 +21,9 @@ export function automationPathFor(agentDir: string, agentId: string): string {
  * 归一化一条任务：校验/净化字段。非法即返回 undefined（调用方丢弃）。
  * 缺省 id 用随机 UUID；enabled 缺省 true；accessMode 缺省 "full"（无人值守）。
  * model 必须是 `{provider,id}` 形状；cron 必须合法。
+ *
+ * 兼容 v1 数据：`schedule` 没有 `kind` 时按 cron 处理；一次性任务必须带
+ * `scheduledAt`（after 缺失时用 createdAt + afterSeconds 补齐），非法整条丢弃。
  */
 export function normalizeAutomation(raw: unknown): AutomationTask | undefined {
   if (!raw || typeof raw !== "object") return undefined;
@@ -28,9 +31,41 @@ export function normalizeAutomation(raw: unknown): AutomationTask | undefined {
   if (typeof task.name !== "string" || !task.name.trim()) return undefined;
   if (typeof task.prompt !== "string" || !task.prompt.trim()) return undefined;
 
+  const createdAt = typeof task.createdAt === "number" && Number.isFinite(task.createdAt) ? task.createdAt : Date.now();
   const schedule = task.schedule as Record<string, unknown> | undefined;
-  const cron = typeof schedule?.cron === "string" ? schedule.cron.trim() : "";
-  if (!isValidCron(cron)) return undefined;
+  const rawKind = typeof schedule?.kind === "string" ? schedule.kind : "cron";
+  let normalizedSchedule: AutomationSchedule;
+
+  if (rawKind === "cron") {
+    const cron = typeof schedule?.cron === "string" ? schedule.cron.trim() : "";
+    if (!isValidCron(cron)) return undefined;
+    // 校验时区：非法 IANA 名会让 cronMatches 抛 RangeError 而被调度器跳过（任务静默永不触发）。
+    // 这里用 Intl 试构造校验，非法则回退为跟随系统（留空）。
+    const rawTimezone = typeof schedule?.timezone === "string" && schedule.timezone.trim() ? schedule.timezone.trim() : undefined;
+    let timezone = rawTimezone;
+    if (rawTimezone) {
+      try {
+        new Intl.DateTimeFormat("en-US", { timeZone: rawTimezone });
+      } catch {
+        timezone = undefined;
+      }
+    }
+    normalizedSchedule = { kind: "cron", cron, ...(timezone ? { timezone } : {}) };
+  } else if (rawKind === "after") {
+    const afterSeconds = typeof schedule?.afterSeconds === "number" ? schedule.afterSeconds : Number.NaN;
+    if (!Number.isSafeInteger(afterSeconds) || afterSeconds <= 0) return undefined;
+    const rawScheduledAt = typeof schedule?.scheduledAt === "number" && Number.isFinite(schedule.scheduledAt)
+      ? schedule.scheduledAt
+      : createdAt + afterSeconds * 1_000;
+    if (!Number.isFinite(rawScheduledAt) || rawScheduledAt <= 0) return undefined;
+    normalizedSchedule = { kind: "after", afterSeconds, scheduledAt: Math.round(rawScheduledAt) };
+  } else if (rawKind === "at") {
+    const rawScheduledAt = typeof schedule?.scheduledAt === "number" && Number.isFinite(schedule.scheduledAt) ? schedule.scheduledAt : Number.NaN;
+    if (!Number.isFinite(rawScheduledAt) || rawScheduledAt <= 0) return undefined;
+    normalizedSchedule = { kind: "at", scheduledAt: Math.round(rawScheduledAt) };
+  } else {
+    return undefined;
+  }
 
   const accessMode = ACCESS_MODES.includes(task.accessMode as AccessMode) ? (task.accessMode as AccessMode) : "full";
   const agentId = typeof task.agentId === "string" && task.agentId.trim() ? task.agentId.trim() : "default";
@@ -43,38 +78,37 @@ export function normalizeAutomation(raw: unknown): AutomationTask | undefined {
 
   const id = typeof task.id === "string" && task.id.trim() ? task.id.trim() : randomUUID();
   const workspace = typeof task.workspace === "string" && task.workspace.trim() ? task.workspace.trim() : undefined;
-  // 校验时区：非法 IANA 名会让 cronMatches 抛 RangeError 而被调度器跳过（任务静默永不触发）。
-  // 这里用 Intl 试构造校验，非法则回退为跟随系统（留空）。
-  const rawTimezone = typeof schedule?.timezone === "string" && schedule.timezone.trim() ? schedule.timezone.trim() : undefined;
-  let timezone = rawTimezone;
-  if (rawTimezone) {
-    try {
-      new Intl.DateTimeFormat("en-US", { timeZone: rawTimezone });
-    } catch {
-      timezone = undefined;
-    }
-  }
+  const sessionId = typeof task.sessionId === "string" && task.sessionId.trim() ? task.sessionId.trim() : undefined;
+  const sessionPath = typeof task.sessionPath === "string" && task.sessionPath.trim() && isAbsolute(task.sessionPath.trim()) ? task.sessionPath.trim() : undefined;
+  const sessionTitle = typeof task.sessionTitle === "string" && task.sessionTitle.trim() ? task.sessionTitle.trim() : undefined;
+  const completedAt = typeof task.completedAt === "number" && Number.isFinite(task.completedAt) && task.completedAt > 0 ? task.completedAt : undefined;
+  // 已完成的一次性任务强制停用：即使旧数据里 enabled 仍是 true，也不该重启后再触发一次。
+  const enabled = normalizedSchedule.kind !== "cron" && completedAt ? false : task.enabled !== false;
 
   return {
     id,
     name: task.name.trim(),
-    schedule: { cron, ...(timezone ? { timezone } : {}) },
+    schedule: normalizedSchedule,
     prompt: task.prompt.trim(),
     agentId,
+    ...(sessionId ? { sessionId } : {}),
+    ...(sessionPath ? { sessionPath } : {}),
+    ...(sessionTitle ? { sessionTitle } : {}),
+    ...(completedAt ? { completedAt } : {}),
     ...(workspace ? { workspace } : {}),
     ...(model ? { model } : {}),
     accessMode,
     ...(typeof task.skillName === "string" && task.skillName.trim() ? { skillName: task.skillName.trim() } : {}),
     ...(typeof task.subagentName === "string" && task.subagentName.trim() ? { subagentName: task.subagentName.trim() } : {}),
-    enabled: task.enabled !== false,
-    createdAt: typeof task.createdAt === "number" && Number.isFinite(task.createdAt) ? task.createdAt : Date.now(),
+    enabled,
+    createdAt,
     ...(task.lastRun && typeof task.lastRun === "object"
       ? {
           lastRun: ((): AutomationTask["lastRun"] => {
             const run = task.lastRun as Record<string, unknown>;
             if (typeof run.sessionId !== "string" || !run.sessionId) return undefined;
             const startedAt = typeof run.startedAt === "number" && Number.isFinite(run.startedAt) ? run.startedAt : Date.now();
-            const status = run.status === "error" ? "error" : run.status === "aborted" ? "aborted" : "ok";
+            const status = run.status === "error" ? "error" : run.status === "aborted" ? "aborted" : run.status === "delivered" ? "delivered" : "ok";
             return {
               sessionId: run.sessionId,
               startedAt,
@@ -160,9 +194,29 @@ export function resolveAutomationAgent(agents: readonly AgentProfile[], agentId:
 }
 
 /** 更新某任务的近一次运行信息；返回最新列表。 */
-export function recordAutomationRun(filePath: string, id: string, run: AutomationTask["lastRun"]): AutomationTask[] {
+export interface RecordAutomationRunOptions {
+  /** 一次性任务成功投递/执行后置为完成（enabled=false + completedAt）。 */
+  completeOneShot?: boolean;
+  /** 完成时间；缺省 Date.now()。 */
+  completedAt?: number;
+}
+
+export function recordAutomationRun(
+  filePath: string,
+  id: string,
+  run: AutomationTask["lastRun"],
+  options: RecordAutomationRunOptions = {}
+): AutomationTask[] {
   const tasks = readAutomation(filePath);
-  const next = tasks.map((candidate) => (candidate.id === id ? { ...candidate, lastRun: run } : candidate));
+  const completedAt = options.completedAt ?? Date.now();
+  const next = tasks.map((candidate) => {
+    if (candidate.id !== id) return candidate;
+    return {
+      ...candidate,
+      lastRun: run,
+      ...(options.completeOneShot && candidate.schedule.kind !== "cron" ? { enabled: false, completedAt } : {})
+    };
+  });
   if (next.some((candidate) => candidate.id === id)) writeAutomation(filePath, next);
   return next;
 }

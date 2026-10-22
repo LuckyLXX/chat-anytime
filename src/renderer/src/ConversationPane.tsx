@@ -74,6 +74,8 @@ import { buildEditDiffs, delegateArgsSummary, editArgsSummary, languageFromPath,
 import { DiffView } from "./components/DiffView";
 import { TurnMinimap } from "./components/TurnMinimap";
 import { shareElementAsImage } from "./lib/share-image";
+import { automationTaskIdFromOutput, parseAutomationCreateArgs } from "./lib/automation-call-preview";
+import { formatAutomationSchedule, parseScheduledReminderText } from "../../shared/automation";
 import { selectableCatalogModels } from "./lib/model-list";
 import { currentQuestionRequest, useDesktopStore } from "./store";
 import { PanelDock } from "./PanelDock";
@@ -345,7 +347,42 @@ function ToolCallDetails({ call, execution, streaming, onOpenTranscript }: { cal
   const writeContent = writePreview && writePreview.content.length <= MAX_TOOL_PREVIEW_CHARS ? writePreview.content : undefined;
   const readContent = execution && execution.status === "completed" && readPreview && execution.output && execution.output.length <= MAX_TOOL_PREVIEW_CHARS ? execution.output : undefined;
   const delegation = execution?.delegation;
+  // automation_create 的紧凑任务卡：从调用参数先展示标题/触发方式，结果落盘后
+  // 用输出里的 `#<id>` 反查当前任务列表（任务被删则标「已删除」）。
+  const automationPreview = useMemo(
+    () => (call.name === "automation_create" ? parseAutomationCreateArgs(args) : undefined),
+    [call.name, args]
+  );
+  const automationTaskId = useMemo(
+    () => (automationPreview ? automationTaskIdFromOutput(execution?.output) : undefined),
+    [automationPreview, execution?.output]
+  );
+  const automationTask = useDesktopStore((state) => (automationTaskId ? state.automation.find((task) => task.id === automationTaskId) : undefined));
+  const automationStatus = execution?.status;
+  const automationSchedule = automationTask?.schedule ?? automationPreview?.schedule;
+  const automationTitle = automationTask?.name ?? automationPreview?.name ?? "定时任务";
+  const showAutomationCard = Boolean(automationPreview) && automationStatus !== "error" && automationStatus !== "aborted";
   return (
+    <>
+    {showAutomationCard && (
+      <div className="automation-call-card" data-automation-card="true">
+        <span className="automation-call-icon" aria-hidden="true"><Clock size={14} /></span>
+        <div className="automation-call-main">
+          <strong>{automationTitle}</strong>
+          <span>
+            {automationStatus === "running" || automationStatus === undefined
+              ? "创建中…"
+              : automationSchedule
+                ? formatAutomationSchedule(automationSchedule)
+                : "定时任务"}
+            {automationTaskId && automationStatus === "completed" && !automationTask ? " · 已删除" : ""}
+          </span>
+        </div>
+        {automationStatus === "completed" && automationTaskId && (
+          <button type="button" className="automation-call-open" onClick={() => useDesktopStore.setState({ automationOpenSignal: Date.now() })}>打开</button>
+        )}
+      </div>
+    )}
     <details className="action-timeline-call" open={open} onToggle={(event) => setOpen((event.currentTarget as HTMLDetailsElement).open)}>
       <summary className="action-timeline-call-summary">
         {delegation
@@ -382,6 +419,7 @@ function ToolCallDetails({ call, execution, streaming, onOpenTranscript }: { cal
         )}
       </div>
     </details>
+    </>
   );
 }
 
@@ -620,10 +658,13 @@ export const MessageView = memo(function MessageView({ message, executions, work
     // @文件引用在气泡里渲染为 chip 行（同 skill badge），正文去掉路径尾巴；
     // 复制/编辑仍用原始全文，重新发送后同样回环成 chip。
     const { mentions, body } = extractMentionTokens(text);
+    // 定时任务投递消息：气泡里只展示任务名徽标 + 提示词正文，保留完整原文用于复制/编辑。
+    const scheduled = parseScheduledReminderText(body);
+    const displayBody = scheduled ? scheduled.body : body;
     return (
       <article ref={rootRef} className="message message-user" data-role="user" data-turn-key={turnKey} data-revealed={revealed || undefined}>
         <div className="message-avatar user-avatar">我</div>
-        <div className="message-body message-bubble">{message.invocations?.map((item) => <div className="message-skill-badge" key={`${item.kind}:${item.name}`}>{item.kind === "skill" ? <Puzzle size={13} /> : <Zap size={13} />}<strong>{item.kind === "skill" ? item.name : `/${item.name}`}</strong></div>)}{mentions.length > 0 && <div className="message-mention-badges">{mentions.map((token) => <span className="message-skill-badge" key={token} title={token}><File size={13} /><strong>{token}</strong></span>)}</div>}{images.length > 0 && <div className="image-message-list">{images.map((block, index) => <ImageMessageBlock key={`${message.id}-image-${index}`} block={block} />)}</div>}{body && <p className="user-text">{body}</p>}{!isControlMessage && <div className="message-actions"><button type="button" data-control="copy" title="复制" aria-label="复制用户消息" onClick={() => onCopy(message)}><Copy size={13} /></button><button type="button" data-control="edit" title="重新编辑" aria-label="重新编辑用户消息" onClick={() => onEdit(message)}><Pencil size={13} /></button></div>}</div>
+        <div className="message-body message-bubble">{message.invocations?.map((item) => <div className="message-skill-badge" key={`${item.kind}:${item.name}`}>{item.kind === "skill" ? <Puzzle size={13} /> : <Zap size={13} />}<strong>{item.kind === "skill" ? item.name : `/${item.name}`}</strong></div>)}{mentions.length > 0 && <div className="message-mention-badges">{mentions.map((token) => <span className="message-skill-badge" key={token} title={token}><File size={13} /><strong>{token}</strong></span>)}</div>}{images.length > 0 && <div className="image-message-list">{images.map((block, index) => <ImageMessageBlock key={`${message.id}-image-${index}`} block={block} />)}</div>}{scheduled && <div className="message-skill-badge message-schedule-badge"><Clock size={13} /><strong>定时任务{scheduled.title ? ` · ${scheduled.title}` : ""}</strong></div>}{displayBody && <p className="user-text">{displayBody}</p>}{!isControlMessage && <div className="message-actions"><button type="button" data-control="copy" title="复制" aria-label="复制用户消息" onClick={() => onCopy(message)}><Copy size={13} /></button><button type="button" data-control="edit" title="重新编辑" aria-label="重新编辑用户消息" onClick={() => onEdit(message)}><Pencil size={13} /></button></div>}</div>
       </article>
     );
   }

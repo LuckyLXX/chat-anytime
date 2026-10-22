@@ -1,9 +1,12 @@
-// 设置页「自动化任务」tab：定时任务列表（全部/进行中/已暂停过滤 + 搜索）+ 创建/编辑表单弹窗。
+// 设置页「自动化任务」tab：定时任务列表（全部/进行中/已暂停/已完成过滤 + 搜索）+ 创建/编辑表单弹窗。
 // 数据源 store.automation（automation 推送维护）；增删改走 automation.* 命令。
+//
+// 2026-10-21：支持 cron 周期 + after/at 一次性；任务可绑定会话（到期投递回原对话）。
 
-import { Clock, Folder, ListChecks, MessageSquarePlus, Pencil, Play, Plus, Search, Trash2, X, Zap } from "lucide-react";
+import { CalendarClock, Folder, ListChecks, MessageSquare, MessageSquarePlus, Pencil, Play, Plus, Search, Trash2, X, Zap } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import type { AccessMode, AutomationTask, DesktopSettings, ModelOption, ProviderOption } from "../../shared/protocol";
+import type { AccessMode, AutomationSchedule, AutomationTask, DesktopSettings, ModelOption, ProviderOption } from "../../shared/protocol";
+import { formatAutomationDelay, formatAutomationSchedule } from "../../shared/automation";
 import { buildCron, describeCron, DEFAULT_SCHEDULE_PARTS, pad2, SCHEDULE_PRESETS, WEEKDAY_OPTIONS, type SchedulePreset } from "./lib/automation-schedule";
 import { selectableCatalogModels } from "./lib/model-list";
 import { ModelSelect } from "./components/ModelSelect";
@@ -11,7 +14,15 @@ import { useDesktopStore } from "./store";
 import { ExitWrap, useExitPresenceValue } from "./components/Presence";
 import { AutomationRuns, type AutomationRunsHighlight } from "./AutomationRuns";
 
-type Filter = "all" | "enabled" | "paused";
+type Filter = "all" | "enabled" | "paused" | "completed";
+type TimingKind = "cron" | "after" | "at";
+type DelayUnit = "minute" | "hour";
+
+const TIMING_OPTIONS: { value: TimingKind; label: string }[] = [
+  { value: "cron", label: "周期任务（cron）" },
+  { value: "after", label: "仅一次 · 延时" },
+  { value: "at", label: "仅一次 · 指定时间" }
+];
 
 export interface AutomationSettingsProps {
   models: ModelOption[];
@@ -21,7 +32,7 @@ export interface AutomationSettingsProps {
   workspaceName?: string;
   /** 「去会话中创建」：由宿主先关设置页再新建会话（含分屏落位等完整逻辑）。 */
   onCreateInSession: () => void;
-  /** 运行记录「查看会话/切换角色查看」：由宿主先关设置页再跳转目标会话。 */
+  /** 运行记录「查看会话/切换角色查看」、任务行「打开关联会话」：由宿主先关设置页再跳转目标会话。 */
   onOpenRunSession: () => void;
 }
 
@@ -55,33 +66,65 @@ function agentDefaultModel(settings: DesktopSettings): { provider: string; id: s
   return agent?.defaultModel ?? settings.model;
 }
 
-function scheduleLabel(task: AutomationTask): string {
-  const { cron, timezone } = task.schedule;
-  return `${cron}${timezone ? ` · ${timezone}` : " · 本地"}`;
+function isCompleted(task: AutomationTask): boolean {
+  return task.completedAt !== undefined;
 }
 
 function lastRunTitle(task: AutomationTask): string | undefined {
   const lastRun = task.lastRun;
   if (!lastRun) return undefined;
   const time = new Date(lastRun.startedAt).toLocaleString();
-  const detail = lastRun.status === "ok" ? lastRun.preview : lastRun.error;
+  const detail = lastRun.status === "ok" || lastRun.status === "delivered" ? lastRun.preview : lastRun.error;
   return detail ? `${time}\n${detail}` : time;
 }
 
+function lastRunLabel(task: AutomationTask): string | undefined {
+  if (!task.lastRun) return undefined;
+  return task.lastRun.status === "ok"
+    ? "已运行"
+    : task.lastRun.status === "delivered"
+      ? "已投递"
+      : task.lastRun.status === "aborted"
+        ? "已中止"
+        : "运行失败";
+}
+
+/** 把 epoch ms 转为 `<input type="datetime-local">` 需要的本地时间串。 */
+function toDatetimeLocal(timestamp: number): string {
+  const date = new Date(timestamp);
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}T${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
+}
+
+/** 从任务反推表单的延时数值与单位（优先整小时，其次整分钟）。 */
+function delayParts(seconds: number): { value: number; unit: DelayUnit } {
+  if (seconds >= 3_600 && seconds % 3_600 === 0) return { value: seconds / 3_600, unit: "hour" };
+  return { value: Math.max(1, Math.round(seconds / 60)), unit: "minute" };
+}
+
 function AutomationForm({ initial, models, providers, settings, workspaceName, onSubmit, onCancel }: AutomationFormProps): ReactNode {
+  const sessions = useDesktopStore((state) => state.snapshot.sessions);
+  const activeSessionId = useDesktopStore((state) => state.snapshot.sessionId);
   const [name, setName] = useState(initial?.name ?? "");
-  const initialSchedule = useMemo(() => (initial ? describeCron(initial.schedule.cron) : DEFAULT_SCHEDULE_PARTS), [initial]);
+  const initialCron = initial?.schedule.kind === "cron" ? initial.schedule : undefined;
+  const initialSchedule = useMemo(() => (initialCron ? describeCron(initialCron.cron) : DEFAULT_SCHEDULE_PARTS), [initialCron]);
+  const [timing, setTiming] = useState<TimingKind>(initial?.schedule.kind ?? "cron");
   const [preset, setPreset] = useState<SchedulePreset>(initialSchedule.preset);
   const [minute, setMinute] = useState(initialSchedule.minute);
   const [hour, setHour] = useState(initialSchedule.hour);
   const [weekday, setWeekday] = useState(initialSchedule.weekday);
   const [monthDay, setMonthDay] = useState(initialSchedule.monthDay);
-  const [customCron, setCustomCron] = useState(initial?.schedule.cron ?? "0 9 * * *");
-  const [timezone, setTimezone] = useState(initial?.schedule.timezone ?? "");
+  const [customCron, setCustomCron] = useState(initialCron?.cron ?? "0 9 * * *");
+  const [timezone, setTimezone] = useState(initialCron?.timezone ?? "");
+  const initialDelay = initial?.schedule.kind === "after" ? delayParts(initial.schedule.afterSeconds) : { value: 5, unit: "minute" as DelayUnit };
+  const [delayValue, setDelayValue] = useState(initialDelay.value);
+  const [delayUnit, setDelayUnit] = useState<DelayUnit>(initialDelay.unit);
+  const [atValue, setAtValue] = useState(initial?.schedule.kind === "at" ? toDatetimeLocal(initial.schedule.scheduledAt) : toDatetimeLocal(Date.now() + 3_600_000));
   const [prompt, setPrompt] = useState(initial?.prompt ?? "");
   const [modelValue, setModelValue] = useState(initial?.model ? `${initial.model.provider}/${initial.model.id}` : "");
   const [workspace, setWorkspace] = useState(initial?.workspace ? (initial.workspace === workspaceName ? "current" : "other") : "current");
   const [accessMode, setAccessMode] = useState<AccessMode>(initial?.accessMode ?? "full");
+  const [target, setTarget] = useState<"background" | "session">(initial?.sessionId ? "session" : "background");
+  const [sessionId, setSessionId] = useState(initial?.sessionId ?? "");
   const [error, setError] = useState<string>();
 
   const defaultModel = agentDefaultModel(settings);
@@ -92,22 +135,69 @@ function AutomationForm({ initial, models, providers, settings, workspaceName, o
   const ownerAgentId = initial?.agentId ?? settings.currentAgentId;
   const ownerName = settings.agents.find((item) => item.id === ownerAgentId)?.name ?? ownerAgentId;
 
+  // 会话下拉：当前会话排最前；编辑其他角色/已不在列表的绑定会话时保留旧选项。
+  const sessionChoices = useMemo(() => {
+    const sorted = [...sessions].sort((left, right) => {
+      if (left.id === activeSessionId) return -1;
+      if (right.id === activeSessionId) return 1;
+      return right.modifiedAt - left.modifiedAt;
+    });
+    const choices = sorted.map((session) => ({ id: session.id, title: session.title, modifiedAt: session.modifiedAt }));
+    if (initial?.sessionId && !choices.some((choice) => choice.id === initial.sessionId)) {
+      choices.unshift({ id: initial.sessionId, title: initial.sessionTitle ?? initial.sessionId, modifiedAt: initial.createdAt });
+    }
+    return choices;
+  }, [sessions, activeSessionId, initial]);
+
+  const selectedSession = sessions.find((session) => session.id === sessionId);
+
   function submit(): void {
     if (!name.trim()) { setError("请填写任务名称"); return; }
-    if (!resolvedCron) { setError("请填写 cron 调度表达式"); return; }
-    if (resolvedCron.split(/\s+/u).length !== 5) { setError("cron 需要 5 个字段（分 时 日 月 周），如 0 9 * * 1-5"); return; }
     if (!prompt.trim()) { setError("请填写任务提示词"); return; }
+
+    let schedule: AutomationSchedule;
+    if (timing === "cron") {
+      if (!resolvedCron) { setError("请填写 cron 调度表达式"); return; }
+      if (resolvedCron.split(/\s+/u).length !== 5) { setError("cron 需要 5 个字段（分 时 日 月 周），如 0 9 * * 1-5"); return; }
+      schedule = { kind: "cron", cron: resolvedCron, ...(timezone.trim() ? { timezone: timezone.trim() } : {}) };
+    } else if (timing === "after") {
+      const unitSeconds = delayUnit === "hour" ? 3_600 : 60;
+      const afterSeconds = Math.round(delayValue * unitSeconds);
+      if (!Number.isFinite(afterSeconds) || afterSeconds < 1) { setError("延时必须大于 0"); return; }
+      schedule = { kind: "after", afterSeconds, scheduledAt: Date.now() + afterSeconds * 1_000 };
+    } else {
+      const scheduledAt = new Date(atValue).getTime();
+      if (!Number.isFinite(scheduledAt)) { setError("请选择有效的执行时间"); return; }
+      if (scheduledAt <= Date.now()) { setError("执行时间必须晚于当前时间"); return; }
+      schedule = { kind: "at", scheduledAt };
+    }
+
+    if (target === "session" && !sessionId) { setError("请选择要关联的会话"); return; }
+
     const model = modelValue ? (() => { const slash = modelValue.indexOf("/"); return slash > 0 ? { provider: modelValue.slice(0, slash), id: modelValue.slice(slash + 1) } : undefined; })() : undefined;
+    const keepInitialSession = target === "session" && !selectedSession && initial?.sessionId === sessionId;
+    const sessionFields = target === "session"
+      ? {
+          sessionId,
+          ...(selectedSession?.path || keepInitialSession ? { sessionPath: selectedSession?.path ?? initial?.sessionPath } : {}),
+          ...(selectedSession?.title || keepInitialSession ? { sessionTitle: selectedSession?.title ?? initial?.sessionTitle } : {}),
+          ...(selectedSession?.workspace || keepInitialSession ? { workspace: selectedSession?.workspace ?? initial?.workspace } : {})
+        }
+      : {};
+    // 已完成的一次性任务改期后重新启用；其他任务保留原启停状态。
+    const enabled = initial && isCompleted(initial) ? true : (initial?.enabled ?? true);
+
     onSubmit({
       id: initial?.id ?? "",
       name: name.trim(),
-      schedule: { cron: resolvedCron, ...(timezone.trim() ? { timezone: timezone.trim() } : {}) },
+      schedule,
       prompt: prompt.trim(),
       agentId: ownerAgentId,
-      workspace: workspace === "current" ? workspaceName : undefined,
+      ...sessionFields,
+      ...(target === "background" ? { workspace: workspace === "current" ? workspaceName : undefined } : {}),
       model,
       accessMode,
-      enabled: initial?.enabled ?? true,
+      enabled,
       createdAt: initial?.createdAt ?? Date.now(),
       // 编辑保留近一次运行摘要（否则 normalize 会因缺少该字段而抹掉）。
       ...(initial?.lastRun ? { lastRun: initial.lastRun } : {})
@@ -118,39 +208,64 @@ function AutomationForm({ initial, models, providers, settings, workspaceName, o
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onCancel(); }}>
       <section className="automation-dialog" data-pane="automation-dialog" onMouseDown={(event) => event.stopPropagation()}>
         <header>
-          <div><ListChecks size={18} /><div><h2>{initial ? "编辑定时任务" : "创建定时任务"}</h2><p>到点后让 Agent 在后台用下面的提示词跑一次。</p></div></div>
+          <div><ListChecks size={18} /><div><h2>{initial ? "编辑定时任务" : "创建定时任务"}</h2><p>到点后让 Agent 执行提示词；可绑定会话，把提醒作为消息投递回原对话。</p></div></div>
           <button className="icon-button" type="button" title="关闭" aria-label="关闭" onClick={onCancel}><X size={17} /></button>
         </header>
         <div className="automation-dialog-body">
           <p className="automation-hint">归属角色：<strong className="automation-owner">{ownerName}</strong>{initial ? "（创建后不迁移）" : "——创建后不迁移，仅该角色激活时执行"}</p>
           <div className="automation-field-grid">
             <label>任务名称<input value={name} onChange={(event) => setName(event.target.value)} placeholder="例如: 每日项目巡检" /></label>
-            <label>时区<input value={timezone} onChange={(event) => setTimezone(event.target.value)} placeholder="跟随系统（留空）" /></label>
+            {timing === "cron" && <label>时区<input value={timezone} onChange={(event) => setTimezone(event.target.value)} placeholder="跟随系统（留空）" /></label>}
           </div>
-          <label>调度方式<select value={preset} onChange={(event) => setPreset(event.target.value as SchedulePreset)}>{SCHEDULE_PRESETS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>
-          {preset === "custom" ? (
+          <label>触发方式<select value={timing} onChange={(event) => setTiming(event.target.value as TimingKind)}>{TIMING_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>
+
+          {timing === "cron" ? (
             <>
-              <label>调度表达式（cron）<input value={customCron} onChange={(event) => setCustomCron(event.target.value)} placeholder="0 9 * * 1-5" /></label>
-              <p className="automation-hint">{CRON_HINT}</p>
+              <label>调度方式<select value={preset} onChange={(event) => setPreset(event.target.value as SchedulePreset)}>{SCHEDULE_PRESETS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>
+              {preset === "custom" ? (
+                <>
+                  <label>调度表达式（cron）<input value={customCron} onChange={(event) => setCustomCron(event.target.value)} placeholder="0 9 * * 1-5" /></label>
+                  <p className="automation-hint">{CRON_HINT}</p>
+                </>
+              ) : (
+                <>
+                  <div className="automation-field-grid">
+                    {preset === "hourly" && <label>第几分钟<select value={minute} onChange={(event) => setMinute(Number(event.target.value))}>{numberOptions(0, 59, " 分").map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>}
+                    {preset === "weekly" && <label>周几<select value={weekday} onChange={(event) => setWeekday(Number(event.target.value))}>{WEEKDAY_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>}
+                    {preset === "monthly" && <label>每月几号<select value={monthDay} onChange={(event) => setMonthDay(Number(event.target.value))}>{numberOptions(1, 31, " 日").map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>}
+                    {preset !== "hourly" && <label>执行时间<div className="automation-time-pair"><select value={hour} onChange={(event) => setHour(Number(event.target.value))} aria-label="小时">{numberOptions(0, 23, " 时").map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select><select value={minute} onChange={(event) => setMinute(Number(event.target.value))} aria-label="分钟">{numberOptions(0, 59, " 分").map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></div></label>}
+                  </div>
+                  <p className="automation-hint">等价表达式：<code className="automation-cron-preview">{resolvedCron}</code>{preset === "monthly" && "（部分月份无该日期时当月不触发）"}</p>
+                </>
+              )}
             </>
-          ) : (
+          ) : timing === "after" ? (
             <>
               <div className="automation-field-grid">
-                {preset === "hourly" && <label>第几分钟<select value={minute} onChange={(event) => setMinute(Number(event.target.value))}>{numberOptions(0, 59, " 分").map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>}
-                {preset === "weekly" && <label>周几<select value={weekday} onChange={(event) => setWeekday(Number(event.target.value))}>{WEEKDAY_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>}
-                {preset === "monthly" && <label>每月几号<select value={monthDay} onChange={(event) => setMonthDay(Number(event.target.value))}>{numberOptions(1, 31, " 日").map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>}
-                {preset !== "hourly" && <label>执行时间<div className="automation-time-pair"><select value={hour} onChange={(event) => setHour(Number(event.target.value))} aria-label="小时">{numberOptions(0, 23, " 时").map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select><select value={minute} onChange={(event) => setMinute(Number(event.target.value))} aria-label="分钟">{numberOptions(0, 59, " 分").map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></div></label>}
+                <label>延时<input type="number" min={1} value={delayValue} onChange={(event) => setDelayValue(Number(event.target.value))} /></label>
+                <label>单位<select value={delayUnit} onChange={(event) => setDelayUnit(event.target.value as DelayUnit)}><option value="minute">分钟</option><option value="hour">小时</option></select></label>
               </div>
-              <p className="automation-hint">等价表达式：<code className="automation-cron-preview">{resolvedCron}</code>{preset === "monthly" && "（部分月份无该日期时当月不触发）"}</p>
+              <p className="automation-hint">从保存时刻起算，只触发一次；约 {formatAutomationDelay(Math.max(1, Math.round(delayValue * (delayUnit === "hour" ? 3_600 : 60))))}后。调度器每 60 秒检查一次，实际误差不超过约 1 分钟。</p>
             </>
+          ) : (
+            <label>执行时间<input type="datetime-local" value={atValue} onChange={(event) => setAtValue(event.target.value)} /><span className="automation-hint">只触发一次；必须晚于当前时间。</span></label>
           )}
+
           <label>模型<ModelSelect models={configuredModels} providers={providers} value={modelValue} placeholder={defaultModel ? `继承默认（${defaultModel.id}）` : "请先配置并选择模型"} onChange={setModelValue} /></label>
-          <label>任务提示词<textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={4} placeholder="描述定时任务执行时要让 Agent 做什么。" /></label>
+          <label>任务提示词<textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={4} placeholder="描述定时任务执行时要让 Agent 做什么。绑定会话时可直接写「检查刚才的后台任务」这类依赖上文的指令。" /></label>
           <div className="automation-field-grid">
-            <label>空间<select value={workspace} onChange={(event) => setWorkspace(event.target.value)}><option value="current">{workspaceName ? `当前工作区（${workspaceName}）` : "当前工作区"}</option><option value="none">不选择空间</option><option value="other">其它空间（仅存为元数据）</option></select></label>
-            <label>权限<select value={accessMode} onChange={(event) => setAccessMode(event.target.value as AccessMode)}>{ACCESS_MODES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>
+            <label>执行位置<select value={target} onChange={(event) => setTarget(event.target.value as "background" | "session")}><option value="background">后台新会话（独立执行）</option><option value="session">关联会话（到期投递消息）</option></select></label>
+            {target === "session" ? (
+              <label>关联会话<select value={sessionId} onChange={(event) => setSessionId(event.target.value)}><option value="">请选择会话</option>{sessionChoices.map((choice) => <option key={choice.id} value={choice.id}>{choice.title}{choice.id === activeSessionId ? "（当前）" : ""}</option>)}</select></label>
+            ) : (
+              <label>空间<select value={workspace} onChange={(event) => setWorkspace(event.target.value)}><option value="current">{workspaceName ? `当前工作区（${workspaceName}）` : "当前工作区"}</option><option value="none">不选择空间</option><option value="other">其它空间（仅存为元数据）</option></select></label>
+            )}
           </div>
-          <p className="automation-hint">无人值守下建议「完全访问」：受限权限遇到工具确认会挂起。模型与空间执行时按当前上下文处理。</p>
+          <div className="automation-field-grid">
+            <label>权限<select value={accessMode} onChange={(event) => setAccessMode(event.target.value as AccessMode)}>{ACCESS_MODES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>
+            <label>目标说明<span className="automation-hint">{target === "session" ? "到期把提醒作为普通用户消息投递进所选会话（沿用该会话上下文与权限）。" : "到期新建后台会话独立执行（旧行为，适合巡检/报告）。"}</span></label>
+          </div>
+          <p className="automation-hint">无人值守下建议「完全访问」：受限权限遇到工具确认会挂起。关联会话任务沿用原会话的权限模式。</p>
           {error && <p className="automation-form-error">{error}</p>}
         </div>
         <footer><button type="button" className="secondary-button" onClick={onCancel}>取消</button><button type="button" className="primary-button" onClick={submit}>{initial ? "保存" : "创建"}</button></footer>
@@ -161,6 +276,7 @@ function AutomationForm({ initial, models, providers, settings, workspaceName, o
 
 export function AutomationSettings({ models, providers, settings, workspaceConfigured, workspaceName, onCreateInSession, onOpenRunSession }: AutomationSettingsProps): ReactNode {
   const automation = useDesktopStore((state) => state.automation);
+  const sessions = useDesktopStore((state) => state.snapshot.sessions);
   const runsSignal = useDesktopStore((state) => state.automationRunsSignal);
   // 子页：任务列表（默认）/ 运行记录；toast「查看结果」信号切入运行记录子页并高亮该条。
   const [runsTab, setRunsTab] = useState<"tasks" | "runs">("tasks");
@@ -181,15 +297,17 @@ export function AutomationSettings({ models, providers, settings, workspaceConfi
   const counts = useMemo(() => ({
     all: automation.length,
     enabled: automation.filter((task) => task.enabled).length,
-    paused: automation.length - automation.filter((task) => task.enabled).length
+    paused: automation.filter((task) => !task.enabled && !isCompleted(task)).length,
+    completed: automation.filter((task) => isCompleted(task)).length
   }), [automation]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     return automation.filter((task) => {
       if (filter === "enabled" && !task.enabled) return false;
-      if (filter === "paused" && task.enabled) return false;
-      if (q && !task.name.toLowerCase().includes(q) && !task.schedule.cron.toLowerCase().includes(q)) return false;
+      if (filter === "paused" && (task.enabled || isCompleted(task))) return false;
+      if (filter === "completed" && !isCompleted(task)) return false;
+      if (q && !task.name.toLowerCase().includes(q) && !formatAutomationSchedule(task.schedule).toLowerCase().includes(q)) return false;
       return true;
     });
   }, [automation, filter, query]);
@@ -209,10 +327,14 @@ export function AutomationSettings({ models, providers, settings, workspaceConfi
 
   function send(command: Parameters<typeof window.piDesktop.send>[0]): void { void window.piDesktop.send(command); }
 
+  function sessionTitle(task: AutomationTask): string {
+    return sessions.find((session) => session.id === task.sessionId)?.title ?? task.sessionTitle ?? task.sessionId ?? "关联会话";
+  }
+
   return (
     <div className="automation-settings" data-pane="automation-settings">
       <header className="automation-settings-head">
-        <div><h3><Zap size={15} className="automation-head-icon" />自动化任务</h3><p>按 cron 调度，让 Agent 在后台定时执行提示词。</p></div>
+        <div><h3><Zap size={15} className="automation-head-icon" />自动化任务</h3><p>按 cron 周期或一次性延时调度；可让提醒回到原会话继续处理。</p></div>
         <div className="automation-head-actions">
           <button type="button" className="secondary-button" disabled={!workspaceConfigured} onClick={onCreateInSession}><MessageSquarePlus size={15} />去会话中创建</button>
           <button type="button" className="primary-button" disabled={!workspaceConfigured} onClick={() => setForm({ mode: "create" })}><Plus size={15} />创建定时任务</button>
@@ -232,6 +354,7 @@ export function AutomationSettings({ models, providers, settings, workspaceConfi
           <button type="button" className={filter === "all" ? "active" : ""} onClick={() => setFilter("all")}>全部<span className="automation-filter-count">{counts.all}</span></button>
           <button type="button" className={filter === "enabled" ? "active" : ""} onClick={() => setFilter("enabled")}>进行中<span className="automation-filter-count">{counts.enabled}</span></button>
           <button type="button" className={filter === "paused" ? "active" : ""} onClick={() => setFilter("paused")}>已暂停<span className="automation-filter-count">{counts.paused}</span></button>
+          <button type="button" className={filter === "completed" ? "active" : ""} onClick={() => setFilter("completed")}>已完成<span className="automation-filter-count">{counts.completed}</span></button>
         </div>
         <label className="automation-search"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索任务" /></label>
       </div>
@@ -251,26 +374,45 @@ export function AutomationSettings({ models, providers, settings, workspaceConfi
                 </header>
                 <div className="automation-list">
                   {group.tasks.map((task) => {
+                    const completed = isCompleted(task);
                     return (
                       <div className="automation-row" key={task.id} data-role="automation-task">
                         <span className={`automation-row-dot ${task.enabled ? "on" : "off"}`} aria-hidden="true" />
                         <div className="automation-row-main">
                           <div className="automation-row-title">
                             <strong>{task.name}</strong>
-                            {task.lastRun && <span className={`automation-row-lastrun ${task.lastRun.status}`} title={lastRunTitle(task)}>{task.lastRun.status === "ok" ? "已运行" : task.lastRun.status === "aborted" ? "已中止" : "运行失败"}</span>}
-                            <span className={`automation-row-state ${task.enabled ? "on" : "off"}`}>{task.enabled ? "进行中" : "已暂停"}</span>
+                            {task.lastRun && <span className={`automation-row-lastrun ${task.lastRun.status}`} title={lastRunTitle(task)}>{lastRunLabel(task)}</span>}
+                            <span className={`automation-row-state ${completed ? "done" : task.enabled ? "on" : "off"}`}>{completed ? "已完成" : task.enabled ? "进行中" : "已暂停"}</span>
                           </div>
                           <div className="automation-row-meta">
-                            <span><Clock size={12} />{scheduleLabel(task)}</span>
+                            <span><CalendarClock size={12} />{formatAutomationSchedule(task.schedule)}</span>
                             <span>{ACCESS_MODE_SHORT[task.accessMode]}</span>
                             {task.model && <span>{task.model.id}</span>}
-                            {task.workspace && <span><Folder size={12} />{task.workspace}</span>}
+                            {task.sessionId && (
+                              <button
+                                type="button"
+                                className="automation-session-link"
+                                title={`打开关联会话：${sessionTitle(task)}`}
+                                onClick={() => { send({ type: "automation.session.open", taskId: task.id }); onOpenRunSession(); }}
+                              ><MessageSquare size={12} />{sessionTitle(task)}</button>
+                            )}
+                            {!task.sessionId && task.workspace && <span><Folder size={12} />{task.workspace}</span>}
                           </div>
                           <p className="automation-row-prompt">{task.prompt}</p>
                         </div>
                         <div className="automation-row-actions">
-                          <button type="button" className={`automation-row-toggle ${task.enabled ? "on" : ""}`} data-control="automation-toggle" role="switch" aria-checked={task.enabled} title={task.enabled ? "暂停任务" : "启用任务"} aria-label={task.enabled ? "暂停任务" : "启用任务"} onClick={() => send({ type: "automation.toggle", id: task.id, enabled: !task.enabled, agentId: task.agentId })} />
-                          <button type="button" data-control="automation-run" title="运行一次（按任务归属角色在后台执行）" aria-label="运行一次" onClick={() => send({ type: "automation.run", id: task.id, agentId: task.agentId })}><Play size={15} /></button>
+                          <button
+                            type="button"
+                            className={`automation-row-toggle ${task.enabled ? "on" : ""}`}
+                            data-control="automation-toggle"
+                            role="switch"
+                            aria-checked={task.enabled}
+                            disabled={completed}
+                            title={completed ? "一次性任务已完成；编辑改期可重新启用" : task.enabled ? "暂停任务" : "启用任务"}
+                            aria-label={completed ? "一次性任务已完成" : task.enabled ? "暂停任务" : "启用任务"}
+                            onClick={() => send({ type: "automation.toggle", id: task.id, enabled: !task.enabled, agentId: task.agentId })}
+                          />
+                          <button type="button" data-control="automation-run" title="运行一次" aria-label="运行一次" onClick={() => send({ type: "automation.run", id: task.id, agentId: task.agentId })}><Play size={15} /></button>
                           <button type="button" title="编辑" aria-label="编辑" onClick={() => setForm({ mode: "edit", task })}><Pencil size={15} /></button>
                           <button type="button" title="删除" aria-label="删除" className="danger" onClick={() => { if (window.confirm(`删除定时任务「${task.name}」？`)) send({ type: "automation.delete", id: task.id, agentId: task.agentId }); }}><Trash2 size={15} /></button>
                         </div>

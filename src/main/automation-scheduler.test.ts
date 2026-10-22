@@ -6,7 +6,7 @@ function makeTask(id: string, cron: string, enabled = true): AutomationTask {
   return {
     id,
     name: `任务 ${id}`,
-    schedule: { cron },
+    schedule: { kind: "cron", cron },
     prompt: "跑一次",
     agentId: "default",
     accessMode: "full",
@@ -223,7 +223,7 @@ describe("automation scheduler skip reporting", () => {
     const scheduler = createAutomationScheduler({
       getTasks: () => [
         makeTask("off", "0 9 * * *", false),
-        { ...makeTask("tz", "0 9 * * *"), schedule: { cron: "0 9 * * *", timezone: "Asia/Tokyo" } }
+        { ...makeTask("tz", "0 9 * * *"), schedule: { kind: "cron", cron: "0 9 * * *", timezone: "Asia/Tokyo" } }
       ],
       runTask: async () => {},
       onSkip: (task) => skips.push(task.id),
@@ -231,5 +231,97 @@ describe("automation scheduler skip reporting", () => {
     });
     scheduler.reportMissed(new Date(2026, 8, 15, 23, 0));
     expect(skips).toEqual(["tz"]);
+  });
+});
+
+/**
+ * 一次性任务（after/at）：到点触发一次、跨 tick 不重复、改期重新触发；
+ * 启动时 start() 立即补投已到期任务；reportMissed 不能把一次性任务报成「今日错过」。
+ */
+describe("automation scheduler one-shot", () => {
+  function oneShot(id: string, scheduledAt: number, overrides: Partial<AutomationTask> = {}): AutomationTask {
+    return {
+      id,
+      name: `一次性 ${id}`,
+      schedule: { kind: "at", scheduledAt },
+      prompt: "检查一次",
+      agentId: "default",
+      accessMode: "full",
+      enabled: true,
+      createdAt: 0,
+      ...overrides
+    };
+  }
+
+  it("fires a due one-shot once and never before its scheduledAt", () => {
+    const calls: string[] = [];
+    const target = new Date(2026, 9, 21, 15, 30).getTime();
+    const scheduler = createAutomationScheduler({
+      getTasks: () => [oneShot("a", target)],
+      runTask: async (task) => { calls.push(task.id); }
+    });
+    scheduler.tick(new Date(2026, 9, 21, 15, 29));
+    expect(calls).toEqual([]);
+    scheduler.tick(new Date(2026, 9, 21, 15, 30));
+    expect(calls).toEqual(["a"]);
+    // 下一分钟仍 enabled：不应重复入队（scheduledAt 键防重）。
+    scheduler.tick(new Date(2026, 9, 21, 15, 31));
+    expect(calls).toEqual(["a"]);
+  });
+
+  it("fires again when the task is rescheduled to a new scheduledAt", async () => {
+    const calls: string[] = [];
+    const target = new Date(2026, 9, 21, 15, 30).getTime();
+    let current = oneShot("a", target);
+    const scheduler = createAutomationScheduler({
+      getTasks: () => [current],
+      runTask: async (task) => { calls.push(task.id); }
+    });
+    scheduler.tick(new Date(2026, 9, 21, 15, 30));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(calls).toEqual(["a"]);
+    current = oneShot("a", target + 60_000);
+    scheduler.refresh();
+    scheduler.tick(new Date(2026, 9, 21, 15, 31));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(calls).toEqual(["a", "a"]);
+  });
+
+  it("ignores completed and disabled one-shots", () => {
+    const target = new Date(2026, 9, 21, 15, 30).getTime();
+    const calls: string[] = [];
+    const scheduler = createAutomationScheduler({
+      getTasks: () => [
+        oneShot("done", target, { completedAt: target }),
+        oneShot("off", target, { enabled: false })
+      ],
+      runTask: async (task) => { calls.push(task.id); }
+    });
+    scheduler.tick(new Date(2026, 9, 21, 16, 0));
+    expect(calls).toEqual([]);
+  });
+
+  it("start() immediately catches up an overdue one-shot", async () => {
+    const calls: string[] = [];
+    const scheduler = createAutomationScheduler({
+      getTasks: () => [oneShot("overdue", Date.now() - 60_000)],
+      runTask: async (task) => { calls.push(task.id); }
+    });
+    scheduler.start();
+    scheduler.stop();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(calls).toEqual(["overdue"]);
+  });
+
+  it("never reports a one-shot as a missed cron occurrence", () => {
+    const skips: string[] = [];
+    const scheduler = createAutomationScheduler({
+      getTasks: () => [oneShot("a", Date.now() - 3_600_000)],
+      runTask: async () => {},
+      onSkip: (task) => skips.push(task.id),
+      hasRunSince: () => false
+    });
+    scheduler.reportMissed(new Date());
+    expect(skips).toEqual([]);
   });
 });

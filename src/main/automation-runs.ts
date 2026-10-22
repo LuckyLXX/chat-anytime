@@ -30,7 +30,7 @@ export function normalizeAutomationRun(raw: unknown): AutomationRunRecord | unde
   if (!str(run.id) || !str(run.taskId) || !str(run.taskName) || !str(run.agentId) || !str(run.agentName)) return undefined;
   if (typeof run.startedAt !== "number" || !Number.isFinite(run.startedAt)) return undefined;
   if (typeof run.durationMs !== "number" || !Number.isFinite(run.durationMs)) return undefined;
-  if (run.status !== "ok" && run.status !== "error" && run.status !== "aborted" && run.status !== "skipped") return undefined;
+  if (run.status !== "ok" && run.status !== "error" && run.status !== "aborted" && run.status !== "skipped" && run.status !== "delivered") return undefined;
   // sessionId 对 skipped 放宽（跳过没有会话），普通运行仍必填——放宽时不能过头，
   // 因此测试同时钉住「skipped 无会话通过」与「ok 无会话仍被丢弃」两条。
   if (run.status !== "skipped" && !str(run.sessionId)) return undefined;
@@ -46,6 +46,7 @@ export function normalizeAutomationRun(raw: unknown): AutomationRunRecord | unde
     durationMs: run.durationMs,
     status: run.status,
     trigger: run.trigger,
+    ...(run.deliveryMode === "session" || run.deliveryMode === "background" ? { deliveryMode: run.deliveryMode } : {}),
     ...(str(run.skipReason) ? { skipReason: run.skipReason } : {}),
     ...(str(run.modelId) ? { modelId: run.modelId } : {}),
     ...(str(run.preview) ? { preview: run.preview } : {}),

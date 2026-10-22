@@ -57,7 +57,7 @@ function task(overrides: Partial<AutomationTask> = {}): AutomationTask {
   return {
     id: "task-1",
     name: "每日新闻日报",
-    schedule: { cron: "0 9 * * *" },
+    schedule: { kind: "cron", cron: "0 9 * * *" },
     prompt: "汇总今日新闻",
     agentId: "default",
     accessMode: "full",
@@ -111,5 +111,27 @@ describe("AutomationSettings theme hooks", () => {
     expect(container.querySelector("[data-control=\"automation-toggle\"]")).toBeNull();
     expect(container.querySelector("[data-pane=\"automation-settings\"]")).not.toBeNull();
     expect(container.querySelector("[data-control=\"automation-runs-tab\"]")).not.toBeNull();
+  });
+});
+
+describe("AutomationSettings one-shot + session binding", () => {
+  it("renders a one-shot task with its session chip and completed badge", () => {
+    render([task({
+      schedule: { kind: "after", afterSeconds: 300, scheduledAt: Date.now() + 300_000 },
+      sessionId: "sess-1",
+      sessionTitle: "后台分析任务",
+      completedAt: Date.now(),
+      enabled: false
+    })]);
+    const text = container.textContent ?? "";
+    expect(text).toContain("仅一次");
+    expect(text).toContain("已完成");
+    expect(text).toContain("后台分析任务");
+    expect(container.querySelector(".automation-session-link")).not.toBeNull();
+  });
+
+  it("keeps the session chip absent for background tasks", () => {
+    render([task()]);
+    expect(container.querySelector(".automation-session-link")).toBeNull();
   });
 });

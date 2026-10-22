@@ -63,6 +63,8 @@ function minuteKey(date: Date): string {
 export function createAutomationScheduler(deps: AutomationSchedulerDeps): AutomationScheduler {
   let timer: ReturnType<typeof setInterval> | undefined;
   const lastFiredMinute = new Map<string, string>();
+  /** 已入队的一次性任务（键 taskId:scheduledAt）：防止执行期间跨 tick 重复入队；改期会生成新键。 */
+  const firedOneShots = new Set<string>();
   const queue: AutomationTask[] = [];
   let draining = false;
 
@@ -85,8 +87,19 @@ export function createAutomationScheduler(deps: AutomationSchedulerDeps): Automa
 
   function tick(now: Date = new Date()): void {
     const key = minuteKey(now);
+    const nowMs = now.getTime();
     for (const task of deps.getTasks()) {
-      if (!task.enabled) continue;
+      if (!task.enabled || task.completedAt) continue;
+      // 一次性任务（after/at）：到点即入队，用 scheduledAt 键防重复；不走 cron 的每分钟防重。
+      if (task.schedule.kind !== "cron") {
+        if (task.schedule.scheduledAt > nowMs) continue;
+        const oneShotKey = `${task.id}:${task.schedule.scheduledAt}`;
+        if (firedOneShots.has(oneShotKey)) continue;
+        if (queue.some((candidate) => candidate.id === task.id)) continue;
+        firedOneShots.add(oneShotKey);
+        queue.push(task);
+        continue;
+      }
       if (lastFiredMinute.get(task.id) === key) continue;
       // 同任务已在队列中等待/执行：避免高频 cron（如 `* * * * *`）单次运行跨分钟
       // 时被每分钟重复入队，造成队列无限积压（reviewer P1-3）。
@@ -115,6 +128,8 @@ export function createAutomationScheduler(deps: AutomationSchedulerDeps): Automa
    * 一致；≤1440 次 cronMatches，成本可忽略）。无命中返回 undefined。
    */
   function lastMatchToday(task: AutomationTask, now: Date): number | undefined {
+    if (task.schedule.kind !== "cron") return undefined;
+    const { cron, timezone } = task.schedule;
     const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     let last: number | undefined;
     for (let minute = 0; ; minute++) {
@@ -122,7 +137,7 @@ export function createAutomationScheduler(deps: AutomationSchedulerDeps): Automa
       if (moment.getTime() > now.getTime()) break;
       let hit = false;
       try {
-        hit = cronMatches(task.schedule.cron, moment, task.schedule.timezone);
+        hit = cronMatches(cron, moment, timezone);
       } catch {
         return undefined;
       }
@@ -135,6 +150,8 @@ export function createAutomationScheduler(deps: AutomationSchedulerDeps): Automa
     // 只在启动时调用：每分钟扫描是没必要的开销，且「错过」一旦报告过就不会再变。
     for (const task of deps.getTasks()) {
       if (!task.enabled) continue;
+      // 一次性任务不参与「今日错过」：它们由 start() 的立即 tick 补投。
+      if (task.schedule.kind !== "cron") continue;
       const lastMatch = lastMatchToday(task, now);
       if (lastMatch === undefined) continue;
       // 给正常触发留缓冲：距上一个命中分钟不足 MISSED_GRACE_MS 时不报
@@ -147,6 +164,13 @@ export function createAutomationScheduler(deps: AutomationSchedulerDeps): Automa
 
   function start(): void {
     if (timer) return;
+    // 启动立即补投已到期的一次性任务（参考项目启动补最近一次的口径）；
+    // cron 仍按「命中当前分钟」处理，行为与旧版一致。
+    try {
+      tick();
+    } catch (error) {
+      deps.onError?.(error instanceof Error ? error.message : String(error));
+    }
     timer = setInterval(() => {
       try {
         tick();
