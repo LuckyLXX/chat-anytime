@@ -155,3 +155,58 @@
 
 ---
 2026-10-19 | v1.3.0 | 2026-10-15T19:17:33Z
+
+---
+2026-10-20 | v1.3.0 | 无更新（沿用上次发布时间 2026-10-15T19:17:33Z）
+
+## 2026-10-22 · v1.4.0（较上次已报告版本 v1.3.0 的增量）
+
+**✨ 新功能**
+
+- codemode `models.classify()` 接受 `images`：TypeSafe 的 Jev 与 Cloudflare 的 Clef，适用于 `typesafe`、`cloudflare-workers-ai`、OpenRouter；Workers AI 新增 Clef Omni 与 Jev 1.14。
+- 新增由 `models.json` schema 生成的 Models Configuration 参考文档，覆盖全部 provider、model、model override 与 compatibility 字段。
+- compaction 与分支摘要不再用固定输出上限，改用模型输出上限，长推理不再因 "generation hit the token cap" 失败；`compaction.reserveTokens` 只控制何时开始压缩。
+- codemode 在 worker 全忙时排队等待（最多 60 秒）而非立即失败；`PI_CODEMODE_MAX_WORKERS` 可提高默认 2 个 worker 的上限。
+- 支持 Rex 终端：OSC 8 超链接、truecolor、内联图片。
+- `minimax` / `minimax-cn` 新增 `MiniMax-M3.1-Flash`（thinking 从 low 到 max）。
+- provider 级 `compat` 也作用于 classifier 模型，新增 System One 字段 `imageInput` 与 `sendImageOptInHeader`；扩展的 classifier 模型同样接受 `compat`。
+
+**🐛 修复**
+
+- `pi update` 在 `managed-install.json` 带 UTF-8 BOM（Windows PowerShell 5.1 重写所致）时报 "Managed install marker is missing or invalid"。
+- `mcp.json` 带 BOM 无法解析，导致其中所有 MCP 服务器被跳过、`pi mcp add`/`pi mcp remove` 失败。
+- pi 未走常规终端清理就退出时残留 mouse-tracking、focus-reporting、Kitty keyboard 与 alternate-screen 模式，刷屏 shell 提示符。
+- 交互模式并发扩展对话框（`select`/`confirm`/`input`/`editor` 与内联 `custom()`）：第二个对话框替换第一个且首个 Promise 永不 settle；关闭可见对话框后重新显示上一个。
+- 响应在输出上限被截断后恢复的会话：截断的 tool call 被丢弃但 tool results 保留，导致之后每次请求都被 provider 拒绝。
+- `grep` 遵循 `RIPGREP_CONFIG_PATH`，`--fixed-strings` 等选项会静默把正则搜索变成字面搜索；工具改用 `rg --no-config`。
+- Windows shell 检测拒绝可运行的 Microsoft Store shell 别名；Windows 不装在 `C:\Windows` 时找不到 `PATH` 外的 PowerShell 与旧版 WSL `bash.exe`（现检查 `%ProgramFiles%\PowerShell\7`、`%SystemRoot%\System32\WindowsPowerShell\v1.0`、`%SystemRoot%`）。
+- GitHub Copilot 大请求体（如多图）返回 HTTP 413 `failed to parse request` 时不压缩重试。
+- `openai-codex` 提供对 ChatGPT 账户必然失败的 `gpt-5.5` 与 `gpt-5.3-codex-spark`。
+- 仅含空白的工具输出（如 bash 的裸 `\r\n`）让 OpenAI Completions、OpenAI Responses、Google 请求 400。
+- 自动重试未覆盖更多网关上游失败、Codex CLI 代理转发的 `stream disconnected before completion`、Google Vertex OAuth token 刷新的瞬时失败；也不再因 request id 或字节数里的数字误判重试。
+- OpenAI Responses 模型在移除工具后每次 deferred tool load 都丢 prompt cache。
+- 未闭合的 `$$` 显示数学块吞掉/破坏其后所有 Markdown 表格。
+- Markdown 粗体与斜体在 CJK 标点旁不渲染（HTML 导出显示字面星号）。
+- `@` 文件补全对含 `[`、`(` 等正则元字符的查询返回空结果。
+- `/compact <instructions>` 在压缩切分的回合起始做摘要时忽略指令；切分回合是上次压缩后唯一新内容时指令被完全忽略。
+- 恢复会话与 `/tree` 导航后扩展工具未激活（分支记录工具早于其注册）；现在分支从未增删的扩展工具默认激活，除非注册时 `defaultActive: false`。
+- extensions 通过导入 `@earendil-works/pi-ai/models`（如 `clampThinkingLevel`）加载失败，现已通过扩展加载器别名与虚拟模块暴露该子路径。
+- Cloudflare Workers AI classifier 定价：Clef Flash 每百万输入 token $0.038、Jev $0.042，不再把 Jev 标为免费。
+- Linux 上在 pi 内复制文本后 Ctrl+Z 挂起，再回 shell 粘贴会卡住：负责供剪贴板的后台 `wl-copy`/`xclip`/`xsel` 被连带挂起。
+- `models.schema.json` 缺 provider 与 model 字段描述，编辑器无提示。
+
+**⚠️ 破坏性变更**
+
+- `generateSummary()` 与 `generateSummaryWithUsage()` 忽略 `reserveTokens` 参数；摘要请求改用模型输出上限。
+- 扩展的 `before_provider_headers` handler 不再看到 OpenRouter、NVIDIA NIM、OpenCode 的归因头（返回 `null` 仍可移除）；Cloudflare 请求改发 pi 的详细 `User-Agent`，OpenCode 请求在开启归因时发 `x-opencode-client`。
+- 默认模型调整：GitHub Copilot `gpt-5.4`（已退役）→ `gpt-6.1-sol`；NVIDIA → `nvidia/nemotron-3.5-super-vl-120b-a12b`；Xiaomi 与 Xiaomi Token Plan → `mimo-v2.6-pro`。
+
+**📝 文档与杂项**
+
+- `xai` 的 Grok 4.3 与 4.5 新增 `xhigh` thinking level。
+- Sign in with ChatGPT：ChatGPT Business 工作区用量上限错误不再重试，直接提示用户联系工作区管理员提高上限。
+
+**Release**：https://github.com/earendil-works/pi/releases/tag/v1.4.0 ｜ 共 1 个新版本
+
+---
+2026-10-22 | v1.4.0 | 2026-10-21T22:49:48Z
