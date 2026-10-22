@@ -112,6 +112,23 @@ describe("HooksSettings trust controls", () => {
     expect(checkboxes.some((item) => item.textContent.includes("阻断型"))).toBe(true);
   });
 
+  it("跑完通知模板直接预填可读耗时的正文", async () => {
+    vi.stubGlobal("window", { ...globalThis.window, piDesktop: { send: vi.fn(async () => undefined) } });
+    await renderHook(hook);
+    await act(async () => { (container.querySelector('[data-control="hooks-add"]') as HTMLButtonElement).click(); });
+
+    const template = [...container.querySelectorAll('[data-control="hooks-template"]')]
+      .find((item) => item.getAttribute("data-hook-template") === "notify-on-finish") as HTMLButtonElement;
+    await act(async () => { template.click(); });
+
+    const form = container.querySelector('.hook-form')!;
+    const field = (name: string) => [...form.querySelectorAll('label')].find((label) => label.textContent.trim().startsWith(name));
+    const body = (field("通知正文")?.querySelector('input') as HTMLInputElement).value;
+    // 预填就用可读耗时占位符；{durationMs}（原始毫秒）不该再出现在默认文案里
+    expect(body).toBe("「{sessionTitle}」{result} · 耗时 {duration}");
+    expect((field("通知标题")?.querySelector('input') as HTMLInputElement).value).toBe("PiDesktop：{sessionTitle}");
+  });
+
   it("shows the trusted state and offers revocation", async () => {
     vi.stubGlobal("window", { ...globalThis.window, piDesktop: { send: vi.fn(async () => undefined) } });
     await renderHook({ ...hook, trust: "trusted" });

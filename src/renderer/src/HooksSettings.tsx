@@ -68,6 +68,7 @@ interface HookTemplateValues {
   matcher?: string;
   actionKind: HookAction["kind"];
   notifyTitle?: string;
+  notifyBody?: string;
   httpUrl?: string;
   denyLines?: string;
   command?: string;
@@ -99,8 +100,14 @@ const hookTemplates: HookTemplate[] = [
   {
     id: "notify-on-finish",
     label: "跑完通知",
-    hint: "一次完整回复彻底结束时弹系统通知（带累计用量与可读耗时）",
-    values: { name: "跑完通知", event: "agent_end", actionKind: "notify", notifyTitle: "PiDesktop：{sessionTitle}", }
+    hint: "一次完整回复彻底结束时弹系统通知（正文带结局与可读耗时）",
+    values: {
+      name: "跑完通知",
+      event: "agent_end",
+      actionKind: "notify",
+      notifyTitle: "PiDesktop：{sessionTitle}",
+      notifyBody: "「{sessionTitle}」{result} · 耗时 {duration}"
+    }
   },
   {
     id: "push-to-phone",
@@ -213,7 +220,7 @@ export function HooksSettings({ resources, workspaceOpen }: HooksSettingsProps):
     setMatcher(v.matcher ?? "");
     setActionKind(v.actionKind);
     setNotifyTitle(v.notifyTitle ?? "");
-    setNotifyBody("");
+    setNotifyBody(v.notifyBody ?? "");
     setHttpUrl(v.httpUrl ?? "");
     setDenyLines(v.denyLines ?? "");
     setCommand(v.command ?? "");
@@ -396,7 +403,7 @@ export function HooksSettings({ resources, workspaceOpen }: HooksSettingsProps):
                 {isToolEvent(event) && <label className="mcp-form-wide">工具匹配（可选）<input value={matcher} placeholder="bash|write|edit（竖线分隔的精确工具名）或 ^ed.* 这类正则" onChange={(changeEvent) => setMatcher(changeEvent.target.value)} /><small>只含字母、数字、下划线或竖线时按「精确工具名集合」匹配（edit 不会命中 edit_file）；含其它字符时按正则。</small></label>}
                 {actionKind === "notify" && <>
                   <label className="mcp-form-wide">通知标题（可选）<input value={notifyTitle} placeholder="PiDesktop：{event}" onChange={(changeEvent) => setNotifyTitle(changeEvent.target.value)} /></label>
-                  <label className="mcp-form-wide">通知正文（可选）<input value={notifyBody} placeholder="{sessionTitle} · {toolName}" onChange={(changeEvent) => setNotifyBody(changeEvent.target.value)} /></label>
+                  <label className="mcp-form-wide">通知正文（可选）<input value={notifyBody} placeholder="「{sessionTitle}」{result} · 耗时 {duration}" onChange={(changeEvent) => setNotifyBody(changeEvent.target.value)} /></label>
                   <p className="resource-form-help">占位符：{"{event}"} {"{sessionId}"} {"{sessionTitle}"} {"{agentName}"} {"{workspace}"} {"{toolName}"} {"{duration}"}（可读耗时，如「1 分 23 秒」）{"{durationMs}"}（原始毫秒整数）{"{result}"}（结局词：完成/失败）{"{isError}"} {"{aborted}"}（中止时为 true）。用户中止的一轮**不弹通知**。</p>
                 </>}
                 {actionKind === "http" && <label className="mcp-form-wide">推送地址<input value={httpUrl} placeholder="https://api.day.app/your-key/PiDesktop" onChange={(changeEvent) => setHttpUrl(changeEvent.target.value)} /></label>}

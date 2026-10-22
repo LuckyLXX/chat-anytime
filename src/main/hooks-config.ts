@@ -135,13 +135,61 @@ function rulesFromFile(filePath: string): HookRule[] {
   return readRules(readConfig(filePath));
 }
 
+/**
+ * 旧文案升级：`{durationMs}` 是原始毫秒整数，而早期推荐文案写成了「已完成本轮回复
+ * （{durationMs}ms）」——通知里就成了「83720ms」。现在有 `{duration}`（中文可读，
+ * 「1 分 24 秒」）——读取配置时把**紧跟其后的毫秒单位一起吃掉**换成它；裸
+ * `{durationMs}` 保持不动（命令 / HTTP 钩子要数字）。
+ */
+export function upgradeLegacyDurationText(text: string): string {
+  return text.replace(/\{durationMs\}\s*ms/giu, "{duration}");
+}
+
+/** 只升级 notify 的标题 / 正文（其余动作不碰），顺带回报是否真的改动了。 */
+export function upgradeLegacyHookRule(rule: HookRule): { rule: HookRule; changed: boolean } {
+  const action = rule.action;
+  if (action.kind !== "notify") return { rule, changed: false };
+  const title = action.title === undefined ? undefined : upgradeLegacyDurationText(action.title);
+  const body = action.body === undefined ? undefined : upgradeLegacyDurationText(action.body);
+  if (title === action.title && body === action.body) return { rule, changed: false };
+  return {
+    rule: {
+      ...rule,
+      action: { ...action, ...(title !== undefined ? { title } : {}), ...(body !== undefined ? { body } : {}) }
+    },
+    changed: true
+  };
+}
+
+/**
+ * 读一个作用域的文件并就地升级旧文案：改动过就写回（原子写、保留文件内其它顶层键），
+ * 写不回去（只读 / 权限）也不影响本次读取——内存里已经是可读耗时了。
+ */
+function readAndUpgradeRules(filePath: string): HookRule[] {
+  const rules = rulesFromFile(filePath);
+  let changed = false;
+  const upgraded = rules.map((rule) => {
+    const result = upgradeLegacyHookRule(rule);
+    if (result.changed) changed = true;
+    return result.rule;
+  });
+  if (changed) {
+    try {
+      writeRules(filePath, upgraded);
+    } catch (error) {
+      console.warn(`钩子旧文案升级未能写回（${filePath}）：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return upgraded;
+}
+
 /** 合并项目 + 全局钩子；项目按 name 覆盖全局。坏文件只影响所在作用域。 */
 export function readConfiguredHooks(projectConfigPath: string | undefined, globalConfigPath: string): ConfiguredHook[] {
   const merged = new Map<string, ConfiguredHook>();
   for (const [scope, path] of [["global", globalConfigPath], ["project", projectConfigPath]] as const) {
     if (!path) continue;
     try {
-      for (const rule of rulesFromFile(path)) {
+      for (const rule of readAndUpgradeRules(path)) {
         merged.set(rule.name, { name: rule.name, rule, scope });
       }
     } catch (error) {

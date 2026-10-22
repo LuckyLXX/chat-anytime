@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { HookRule } from "../shared/protocol.js";
-import { hookActionPreview, readConfiguredHooks, removeHookConfig, setHookDisabled, upsertHookConfig, validateHookRule } from "./hooks-config.js";
+import { hookActionPreview, readConfiguredHooks, removeHookConfig, setHookDisabled, upgradeLegacyDurationText, upgradeLegacyHookRule, upsertHookConfig, validateHookRule } from "./hooks-config.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -142,5 +142,49 @@ describe("hooks config", () => {
     expect(hookActionPreview({ kind: "http", url: "https://api.example.com/x" })).toBe("https://api.example.com/x");
     expect(hookActionPreview({ kind: "block", deny: ["a", "b"] })).toBe("拦截 2 条规则");
     expect(hookActionPreview({ kind: "command", command: "npm test" })).toBe("npm test");
+  });
+
+  it("upgrades legacy {durationMs}ms notify text on read and writes it back", async () => {
+    const path = await temporaryConfig();
+    await writeFile(path, JSON.stringify({
+      custom: { x: 1 },
+      hooks: [
+        { name: "跑完通知", event: "agent_end", action: { kind: "notify", title: "PiDesktop：任务完成", body: "「{sessionTitle}」已完成本轮回复（{durationMs}ms）" } },
+        { name: "手机推送", event: "agent_end", action: { kind: "http", url: "https://api.day.app/key/{durationMs}ms" } },
+        { name: "裸毫秒", event: "agent_end", action: { kind: "notify", body: "耗时 {durationMs}" } }
+      ]
+    }, null, 2), "utf8");
+
+    const hooks = readConfiguredHooks(undefined, path);
+    expect(hooks.find((hook) => hook.name === "跑完通知")?.rule.action).toMatchObject({ body: "「{sessionTitle}」已完成本轮回复（{duration}）" });
+    // 裸 {durationMs} 是给命令 / HTTP 钩子的数字，不动；http 动作整体不参与升级
+    expect(hooks.find((hook) => hook.name === "裸毫秒")?.rule.action).toMatchObject({ body: "耗时 {durationMs}" });
+    expect(hooks.find((hook) => hook.name === "手机推送")?.rule.action).toMatchObject({ url: "https://api.day.app/key/{durationMs}ms" });
+
+    // 写回文件：面板与磁盘一致，且保留其它顶层键
+    const persisted = JSON.parse(await readFile(path, "utf8"));
+    expect(persisted.custom).toEqual({ x: 1 });
+    expect(persisted.hooks[0].action.body).toBe("「{sessionTitle}」已完成本轮回复（{duration}）");
+    expect(persisted.hooks[1].action.url).toBe("https://api.day.app/key/{durationMs}ms");
+    expect(persisted.hooks[2].action.body).toBe("耗时 {durationMs}");
+  });
+
+  it("upgrades only once: 第二次读取不再改写文件", async () => {
+    const path = await temporaryConfig();
+    await writeFile(path, JSON.stringify({ hooks: [{ name: "跑完通知", event: "agent_end", action: { kind: "notify", body: "耗时 {durationMs} ms" } }] }), "utf8");
+    readConfiguredHooks(undefined, path);
+    const first = await readFile(path, "utf8");
+    readConfiguredHooks(undefined, path);
+    expect(await readFile(path, "utf8")).toBe(first);
+    expect(first).toContain("耗时 {duration}");
+  });
+
+  it("only eats {durationMs} that carries the ms unit", () => {
+    expect(upgradeLegacyDurationText("（{durationMs}ms）")).toBe("（{duration}）");
+    expect(upgradeLegacyDurationText("{durationMs} MS")).toBe("{duration}");
+    expect(upgradeLegacyDurationText("{durationMs}")).toBe("{durationMs}");
+    expect(upgradeLegacyDurationText("{duration}")).toBe("{duration}");
+    expect(upgradeLegacyHookRule({ name: "n", event: "agent_end", action: { kind: "http", url: "https://x/{durationMs}ms" } }).changed).toBe(false);
+    expect(upgradeLegacyHookRule(notifyRule).changed).toBe(false);
   });
 });
