@@ -10,7 +10,8 @@ import { describe, expect, it } from "vitest";
  */
 
 const here = dirname(fileURLToPath(import.meta.url));
-const read = (relative: string): string => readFileSync(join(here, relative), "utf8");
+const read = (relative: string): string =>
+  readFileSync(join(here, relative), "utf8").replace(/\r\n?/g, "\n");
 
 const runtimeSource = read("pi-runtime.ts");
 const teamRuntimeSource = read("team-runtime.ts");
