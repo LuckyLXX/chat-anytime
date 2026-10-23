@@ -59,6 +59,19 @@ describe("mcp config", () => {
     expect(servers.find((server) => server.name === "shared")).toMatchObject({ scope: "project", entry: { url: "https://project.example/mcp" } });
   });
 
+  it("tolerates a UTF-8 BOM in project and global config (Windows PowerShell 5.1)", async () => {
+    const projectDir = await mkdtemp(join(tmpdir(), "pi-desktop-proj-"));
+    const globalDir = await mkdtemp(join(tmpdir(), "pi-desktop-glob-"));
+    temporaryDirectories.push(projectDir, globalDir);
+    const projectPath = join(projectDir, ".mcp.json");
+    const globalPath = join(globalDir, "mcp.json");
+    await writeFile(projectPath, "\uFEFF" + JSON.stringify({ mcpServers: { local: { url: "https://project.example/mcp" } } }), "utf8");
+    await writeFile(globalPath, "\uFEFF" + JSON.stringify({ mcpServers: { shared: { url: "https://global.example/mcp" } } }), "utf8");
+
+    const servers = readConfiguredMcpServers(projectPath, globalPath);
+    expect(servers.map((server) => `${server.scope}:${server.name}`).sort()).toEqual(["global:shared", "project:local"]);
+  });
+
   it("projects an entry into edit-form fields and round-trips a saved draft", async () => {
     const path = await temporaryConfig();
     upsertMcpServerConfig(path, "docs", { command: "npx", args: ["-y", "docs-mcp"], env: { DOCS_TOKEN: "secret" } });

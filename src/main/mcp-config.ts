@@ -59,7 +59,10 @@ function readConfig(filePath: string): JsonRecord {
   if (!existsSync(filePath)) return {};
   let parsed: unknown;
   try {
-    parsed = JSON.parse(stripJsonComments(readFileSync(filePath, "utf8"), { trailingCommas: true }));
+    // Windows PowerShell 5.1 重写文件会带 UTF-8 BOM，JSON.parse 会直接抛错；
+    // 先剥 BOM 再解析（与 Pi 1.4.0 修 #11191 的口径一致）。
+    const text = readFileSync(filePath, "utf8").replace(/^\uFEFF/, "");
+    parsed = JSON.parse(stripJsonComments(text, { trailingCommas: true }));
   } catch (error) {
     throw new Error(`MCP 配置无法解析：${filePath}，请先修复 JSON 格式。${error instanceof Error ? ` ${error.message}` : ""}`);
   }
