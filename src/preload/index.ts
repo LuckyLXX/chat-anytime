@@ -31,6 +31,11 @@ const api: DesktopApi = {
   terminal: (command: TerminalCommand) => ipcRenderer.invoke("terminal:command", command),
   ssh: (command: SshCommand) => ipcRenderer.invoke("ssh:command", command),
   send: (command: RuntimeCommand) => ipcRenderer.invoke("runtime:send", command),
+  onWindowState: (listener: (state: { focused: boolean; visible: boolean }) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, state: { focused: boolean; visible: boolean }): void => listener(state);
+    ipcRenderer.on("app:window-state", handler);
+    return () => ipcRenderer.removeListener("app:window-state", handler);
+  },
   onRuntimeMessage: (listener: (message: RuntimeMessage) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, message: RuntimeMessage): void => listener(message);
     ipcRenderer.on("runtime:message", handler);

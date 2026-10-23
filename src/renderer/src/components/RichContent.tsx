@@ -13,11 +13,16 @@ import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import type { Schema } from "hast-util-sanitize";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
-import hljs from "highlight.js";
+// 只装常用语言（common 子集 ~37 种）而不是 highlight.js 全量 192 种语法：
+// 全量包约 1MB，直接拖慢首屏解析；缺的 PowerShell 单独注册。
+import hljs from "highlight.js/lib/common";
+import powershell from "highlight.js/lib/languages/powershell";
 import { artifactSandbox, buildArtifactPreviewSource, DYNAMIC_PREVIEW_ACTIONS, isDynamicArtifact, isFullArtifactDocument, type Artifact, type DynamicPreviewAction } from "../lib/content";
 import { alignSegmentHeadings, extractMarkdownHeadings, hasMathSyntax, normalizeMermaidSource, parseRichContent, type MarkdownHeading, type RichContentSegment } from "../lib/content-pipeline";
 import { useStreamingChunks } from "../lib/streaming-split";
 import { resolveMarkdownAssetUrl } from "../lib/workspace-asset";
+
+hljs.registerLanguage("powershell", powershell);
 import { sanitizeRichHtmlTree } from "../lib/html-sanitize";
 import { useOverlayLayer } from "../lib/overlay-layers";
 import { ImageLightbox } from "./ImageLightbox";

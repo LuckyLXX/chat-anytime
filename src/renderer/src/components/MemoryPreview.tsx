@@ -1,9 +1,11 @@
 import { AlertCircle, Brain, LoaderCircle, RefreshCw } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
 import type { MemoryTopic } from "../../../shared/protocol";
 import { useDesktopStore } from "../store";
 import type { Artifact } from "../lib/content";
-import { MarkdownEditor, type EditorSaveStatus } from "./MarkdownEditor";
+import type { EditorSaveStatus } from "./MarkdownEditor";
+
+const MarkdownEditor = lazy(() => import("./MarkdownEditor").then((module) => ({ default: module.MarkdownEditor })));
 import { CodeBlock, RichContent } from "./RichContent";
 import type { PreviewEditorState } from "./ArtifactPreview";
 
@@ -98,6 +100,7 @@ export function MemoryPreviewContent({ topicId, tabId, showSource, editorState, 
   if (editing) {
     return (
       <div className="preview-markdown-editor">
+        <Suspense fallback={<div className="preview-empty-state"><LoaderCircle size={18} className="spinning" /><span>正在载入编辑器…</span></div>}>
         <MarkdownEditor
           key={topic.id}
           tabId={tabId}
@@ -109,6 +112,7 @@ export function MemoryPreviewContent({ topicId, tabId, showSource, editorState, 
           onStatusChange={onEditorStatusChange}
           onSaveError={onSaveError}
         />
+        </Suspense>
       </div>
     );
   }

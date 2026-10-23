@@ -1,20 +1,29 @@
 import { AlertCircle, Brain, Check, ClipboardList, Code2, Eye, File, FileCode2, FileDiff, FileText, Globe2, LayoutGrid, ListTree, LoaderCircle, Maximize2, Minimize2, Pause, Pencil, Play, Plus, Server, Terminal, X } from "lucide-react";
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type SyntheticEvent } from "react";
+import { lazy, memo, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type SyntheticEvent } from "react";
 import type { BrowserElementPick, BrowserPreviewState, WorkspaceFilePreview } from "../../../shared/protocol";
 import { IMAGE_PREVIEW_LIMIT_BYTES, workspaceFilePreviewUrl } from "../../../shared/protocol";
 import { artifactSandbox, buildArtifactPreviewSource, DYNAMIC_PREVIEW_ACTIONS, isDynamicArtifact, PREVIEW_SIZE_MESSAGE, type Artifact, type DynamicPreviewAction } from "../lib/content";
 import { extractMarkdownHeadings } from "../lib/content-pipeline";
 import { layoutDeviceFrame, storedPreviewDevice, storedPreviewFit, storePreviewDevice, storePreviewFit, type PreviewDeviceId } from "../lib/preview-device";
-import { DiffView } from "./DiffView";
 import { MarkdownOutline } from "./MarkdownOutline";
 import { MemoryPreviewContent } from "./MemoryPreview";
-import { MarkdownEditor, type EditorSaveStatus } from "./MarkdownEditor";
+import type { EditorSaveStatus } from "./MarkdownEditor";
 import { CodeBlock, MarkdownPreviewContent } from "./RichContent";
 import { PreviewDeviceMenu } from "./PreviewDeviceMenu";
-import { BrowserPreview } from "./BrowserPreview";
-import { TerminalPanel } from "./TerminalPanel";
-import { SshPanel } from "./SshPanel";
-import { SshTerminalPanel } from "./SshTerminalPanel";
+
+// Vditor 体积大且只在「编辑 markdown」时用到：拆出首包，打开编辑器时再加载。
+const MarkdownEditor = lazy(() => import("./MarkdownEditor").then((module) => ({ default: module.MarkdownEditor })));
+// 预览面板的重型子页按需加载：xterm/浏览器/SSH 只在对应标签第一次打开时进入，
+// 不拖慢应用冷启动与首屏解析（ArtifactPreview 本身在空态也会挂载）。
+const BrowserPreview = lazy(() => import("./BrowserPreview").then((module) => ({ default: module.BrowserPreview })));
+const TerminalPanel = lazy(() => import("./TerminalPanel").then((module) => ({ default: module.TerminalPanel })));
+const SshPanel = lazy(() => import("./SshPanel").then((module) => ({ default: module.SshPanel })));
+const SshTerminalPanel = lazy(() => import("./SshTerminalPanel").then((module) => ({ default: module.SshTerminalPanel })));
+const DiffView = lazy(() => import("./DiffView").then((module) => ({ default: module.DiffView })));
+
+function PreviewPaneFallback({ label }: { label: string }): ReactNode {
+  return <div className="preview-empty-state"><LoaderCircle size={18} className="spinning" /><span>{label}</span></div>;
+}
 
 export type PreviewTarget =
   | { type: "artifact"; artifact: Artifact }
@@ -125,6 +134,7 @@ function FilePreviewContent({ file, tabId, onOpenArtifact, workspace, editorStat
     if (editorState?.editing && !file.truncated) {
       return (
         <div className="preview-markdown-editor">
+          <Suspense fallback={<div className="preview-empty-state"><LoaderCircle size={18} className="spinning" /><span>正在载入编辑器…</span></div>}>
           <MarkdownEditor
             key={file.relativePath}
             tabId={tabId}
@@ -141,6 +151,7 @@ function FilePreviewContent({ file, tabId, onOpenArtifact, workspace, editorStat
             onSaveError={onEditorSaveError}
             onResolveConflict={onResolveConflict}
           />
+          </Suspense>
         </div>
       );
     }
@@ -447,14 +458,14 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, fullscree
             </div>
           </div>
         )}
-        {!showSource && target.type === "browser" && <BrowserPreview suspended={browserSuspended} tabId={activeTabId} onPickSend={onBrowserPickSend} onStateChange={(state) => onBrowserStateChange?.(activeTabId, state)} />}
-        {target.type === "terminal" && <TerminalPanel terminalId={active.id} workspace={workspace} cwd={target.cwd} initialCommand={target.initialCommand} />}
-        {target.type === "ssh" && <SshPanel onConnect={(host) => onSshConnect?.(host)} />}
-        {target.type === "ssh-terminal" && <SshTerminalPanel terminalId={target.terminalId} hostId={target.hostId} hostName={target.hostName} workspace={workspace} />}
+        {!showSource && target.type === "browser" && <Suspense fallback={<PreviewPaneFallback label="正在载入浏览器…" />}><BrowserPreview suspended={browserSuspended} tabId={activeTabId} onPickSend={onBrowserPickSend} onStateChange={(state) => onBrowserStateChange?.(activeTabId, state)} /></Suspense>}
+        {target.type === "terminal" && <Suspense fallback={<PreviewPaneFallback label="正在载入终端…" />}><TerminalPanel terminalId={active.id} workspace={workspace} cwd={target.cwd} initialCommand={target.initialCommand} /></Suspense>}
+        {target.type === "ssh" && <Suspense fallback={<PreviewPaneFallback label="正在载入 SSH…" />}><SshPanel onConnect={(host) => onSshConnect?.(host)} /></Suspense>}
+        {target.type === "ssh-terminal" && <Suspense fallback={<PreviewPaneFallback label="正在载入终端…" />}><SshTerminalPanel terminalId={target.terminalId} hostId={target.hostId} hostName={target.hostName} workspace={workspace} /></Suspense>}
         {!showSource && target.type === "plan" && <MarkdownPreviewBlock content={target.content} identity={`plan-${activeTabId}`} outlineOpen={outlineOpen} artifactPrefix={`plan-${activeTabId}`} onOpenArtifact={onOpenArtifact} workspace={workspace} />}
         {target.type === "memory" && <MemoryPreviewContent key={target.topicId} topicId={target.topicId} tabId={activeTabId} showSource={showSource} editorState={activeEditorState} onEditorChange={onActiveEditorChange} onEditorSaved={onActiveEditorSaved} onEditorStatusChange={onActiveEditorStatusChange} onSaveError={onActiveEditorSaveError} onOpenArtifact={onOpenArtifact} />}
         {!showSource && !artifact && target.type === "file" && <FilePreviewContent file={target.file} tabId={activeTabId} onOpenArtifact={onOpenArtifact} workspace={target.workspace ?? workspace} editorState={activeEditorState} outlineOpen={outlineOpen} onEditorChange={onActiveEditorChange} onEditorContentChange={onActiveEditorContentChange} onEditorSaved={onActiveEditorSaved} onEditorStatusChange={onActiveEditorStatusChange} onEditorSaveError={onActiveEditorSaveError} onResolveConflict={onActiveEditorResolveConflict} />}
-        {target.type === "diff" && <div className="preview-scroll preview-diff"><DiffView patch={target.patch} /></div>}
+        {target.type === "diff" && <div className="preview-scroll preview-diff"><Suspense fallback={<PreviewPaneFallback label="正在载入差异…" />}><DiffView patch={target.patch} /></Suspense></div>}
         {target.type === "loading" && <div className="preview-empty"><LoaderCircle className="spinning" size={26} /><strong>正在读取文件</strong><span>{target.path}</span></div>}
         {target.type === "error" && <div className="preview-empty preview-error"><AlertCircle size={26} /><strong>无法打开预览</strong><span>{target.message}</span></div>}
       </div>

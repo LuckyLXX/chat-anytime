@@ -2125,6 +2125,8 @@ export interface TeamSnapshot {
 }
 
 export interface RuntimeSnapshot {
+  /** 推送序号（utility 单调递增）：renderer/main 用它丢弃重复补丁并检测丢帧。 */
+  revision?: number;
   workspace?: string;
   /** 当前工作区的 git 分支（非 git 项目或缺省为空时不提供）。 */
   gitBranch?: string;
@@ -2167,6 +2169,8 @@ export interface RuntimeSnapshot {
  * 归一）。构建逻辑见 pi-runtime 的 `paneSnapshotFrom`（snapshot() 复用它）。
  */
 export interface SessionPaneSnapshot {
+  /** 该格子的推送序号（utility 单调递增，会话级）。 */
+  revision?: number;
   sessionId?: string;
   sessionFile?: string;
   /** 该会话的工作区（record 捕获值）：格子的发送/@提及/附件据此判断。 */
@@ -2191,6 +2195,55 @@ export interface SessionPaneSnapshot {
   messages: ChatMessage[];
   executions: ToolExecution[];
 }
+
+/**
+ * 高频状态推送的增量补丁（`state.patch` / `session.state.patch`）。
+ *
+ * 为什么需要它：`state` 每帧都带完整消息与执行数组，长会话（实测单文件 45MB、
+ * 可见消息 13.5MB）在 20fps 流式推送下等于每帧结构化克隆十几 MB——utility→main→
+ * renderer 两次深拷贝再加 GC，完全吃掉一两个核。事实上流式期间只有最后一条
+ * 消息在变、最多再加一条执行记录；这里把「变了的字段」按引用差量下发，未变的
+ * 历史消息/图片/工具输出不再重复过 IPC。
+ */
+export interface ChatMessagesPatch {
+  /** 全量替换（压缩、分支切换等无法用尾差量表达的结构变化）。 */
+  reset?: ChatMessage[];
+  /** 尾部追加（新用户消息、流式消息开始）。 */
+  append?: ChatMessage[];
+  /** 保留前 N 条，其余丢弃（再生成截断）。 */
+  truncateTo?: number;
+  /** 从下标 replaceFrom 起替换到结尾（流式消息逐帧增长 / 消息落定）。 */
+  replaceFrom?: number;
+  items?: ChatMessage[];
+}
+
+export interface ToolExecutionsPatch {
+  /** 全量替换（会话打开、批量恢复）。 */
+  reset?: ToolExecution[];
+  /** 新增或内容变化的执行记录（按 id 覆盖）。 */
+  upsert?: ToolExecution[];
+  /** 被移除的执行记录 id。 */
+  remove?: string[];
+}
+
+/** 除 messages/executions 之外的快照字段；只下发发生变化的键。 */
+export type RuntimeSnapshotFieldsPatch = Partial<Omit<RuntimeSnapshot, "messages" | "executions">>;
+export type SessionPaneFieldsPatch = Partial<Omit<SessionPaneSnapshot, "messages" | "executions">>;
+
+export interface RuntimeStatePatch {
+  type: "state.patch";
+  snapshot: RuntimeSnapshotFieldsPatch;
+  messages?: ChatMessagesPatch;
+  executions?: ToolExecutionsPatch;
+}
+
+export interface SessionStatePatch {
+  type: "session.state.patch";
+  snapshot: SessionPaneFieldsPatch;
+  messages?: ChatMessagesPatch;
+  executions?: ToolExecutionsPatch;
+}
+
 
 export interface ExecutionPrincipal {
   kind: "root-agent" | "subagent";
@@ -2295,6 +2348,9 @@ export type RuntimeCommand =
    * （最大化时其余格子）：保留驱逐豁免与圆点语义，只停 session.state 流，
    * 从 hidden 切回可见时主进程补推一帧水合。 */
   | { type: "session.watch"; sessionId: string; watch: boolean; hidden?: boolean }
+  /** 渲染端重载/启动水合后请求一次全量状态（激活会话 + 所有 watched 分屏格）：
+   *  补上订阅建立前错过的增量帧，并重置补丁基线。 */
+  | { type: "state.sync" }
   | { type: "agent.select"; agentId: string }
   | { type: "agent.save"; agent: AgentProfile }
   | { type: "agent.archive"; agentId: string; archived: boolean }
@@ -2418,8 +2474,15 @@ export type RuntimeMessage =
   /** Jev 「测试连接」结果：ok=true 时带实际回答的模型与延迟，ok=false 时带可行动错误。 */
   | { type: "jev-test-result"; ok: boolean; message: string; model?: string; latencyMs?: number }
   | { type: "state"; snapshot: RuntimeSnapshot }
+  /** 渲染端点开一个冷会话：utility 在同步解析 JSONL 之前先发这一帧，让它立刻显示
+   *  「正在打开…」而不是几百毫秒毫无反馈（大会话实测 open 需要 200–300ms）。 */
+  | { type: "session.opening"; path: string; sessionId?: string }
+  /** 高频流式帧的增量补丁：只带变化的字段/消息/执行；首次与本会话切换仍走完整 state。 */
+  | RuntimeStatePatch
   /** 分屏格子（watched 非激活会话）的会话级快照；与 state 的节流节奏一致（50ms 批量、生命周期立即）。 */
   | { type: "session.state"; snapshot: SessionPaneSnapshot }
+  /** 分屏格子的增量补丁（语义同 state.patch）。 */
+  | SessionStatePatch
   /**
    * 面板作品的数据源：所有 live 会话的执行状态投影（500ms 合帧，生命周期转换立即）。
    * 与 state/session.state 的区别：不带消息正文与工具输出，目的是给面板窗口一个
@@ -2577,6 +2640,8 @@ export interface DesktopApi {
   terminal(command: TerminalCommand): Promise<void>;
   ssh(command: SshCommand): Promise<SshCommandResult>;
   send(command: RuntimeCommand): Promise<void>;
+  /** 主窗口可见/聚焦状态（隐藏到托盘、最小化、恢复）；渲染端据此暂停动画与模糊。 */
+  onWindowState(listener: (state: { focused: boolean; visible: boolean }) => void): () => void;
   onRuntimeMessage(listener: (message: RuntimeMessage) => void): () => void;
   onBrowserPreviewState(tabId?: string, listener?: (state: BrowserPreviewState) => void): () => void;
   onBrowserTabsChanged(listener: (event: BrowserTabsEvent) => void): () => void;

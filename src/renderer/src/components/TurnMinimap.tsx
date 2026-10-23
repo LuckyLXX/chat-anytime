@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { memo, useState, type ReactNode } from "react";
 import { Bot, User } from "lucide-react";
 import type { TurnSummary } from "../lib/turn-summary";
 
@@ -41,7 +41,7 @@ function TurnPopCard({ turn }: { turn: TurnSummary }): ReactNode {
  * hover 卡片固定在缩略列容器上垂直居中（不随 hover 的横杠上下跳动），
  * 向右浮出避免遮挡时间线。仅当至少 2 轮时才渲染（单轮无导航价值，由父级判断）。
  */
-export function TurnMinimap({ turns, activeKey, onNavigate }: TurnMinimapProps): ReactNode {
+export const TurnMinimap = memo(function TurnMinimap({ turns, activeKey, onNavigate }: TurnMinimapProps): ReactNode {
   const [hoveredKey, setHoveredKey] = useState<string | undefined>();
   const hovered = hoveredKey === undefined ? undefined : turns.find((turn) => turn.key === hoveredKey);
 
@@ -74,4 +74,4 @@ export function TurnMinimap({ turns, activeKey, onNavigate }: TurnMinimapProps):
       {hovered && <TurnPopCard turn={hovered} />}
     </div>
   );
-}
+});

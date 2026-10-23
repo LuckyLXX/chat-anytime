@@ -90,6 +90,21 @@ function blocksFromMessage(message: AgentMessage, invocation?: InvocationDisplay
 
 let normalizedCache = new WeakMap<AgentMessage, { index: number; message: ChatMessage }>();
 
+/**
+ * visible 序列（过滤掉 toolResult / hidden custom）的缓存：会话热路径每 50ms
+ * 调一次 normalizeMessages，长会话（数千条）每次 filter+map 都是 O(n)。committed
+ * 消息数组只在追加/截断时变化，用「数组引用 + 长度 + 末元素引用」校验即可安全复用；
+ * 流式消息是独立对象，不会污染这份基线。
+ */
+interface VisibleBaseCache {
+  length: number;
+  first: AgentMessage | undefined;
+  last: AgentMessage | undefined;
+  visible: AgentMessage[];
+  normalized: ChatMessage[];
+}
+let visibleBaseCache = new WeakMap<AgentMessage[], VisibleBaseCache>();
+
 // Maps each Pi AgentMessage object to a stable uuid so a message keeps its
 // identity across the partial (streamingMessage) and final (committed into
 // session.state.messages) frames. Pi 每个流式事件都 spread 出新对象、提交时
@@ -97,38 +112,58 @@ let normalizedCache = new WeakMap<AgentMessage, { index: number; message: ChatMe
 // （message-identity.ts）；含自增序号的旧实现会让每帧 uuid 不同，渲染端
 // key 逐帧变化、气泡每帧重挂载闪烁。
 export function normalizeMessages(messages: AgentMessage[], streamingMessage?: AgentMessage): ChatMessage[] {
-  const visible = messages.filter((message) => message.role === "user" || message.role === "assistant" || (message.role === "custom" && (message as unknown as RuntimeCustomMessage).display));
-  if (streamingMessage && streamingMessage.role === "assistant") {
-    const last = visible.at(-1);
-    if (last !== streamingMessage) visible.push(streamingMessage);
+  // streaming 已混进 messages 且对象被原地修改时不能复用基线（内容会变但引用不变）。
+  const streamingInsideMessages = Boolean(streamingMessage && messages.at(-1) === streamingMessage);
+  let base = streamingInsideMessages ? undefined : visibleBaseCache.get(messages);
+  if (base && (base.length !== messages.length || base.first !== messages[0] || base.last !== messages.at(-1))) base = undefined;
+  if (!base) {
+    const visible = messages.filter((message) => message.role === "user" || message.role === "assistant" || (message.role === "custom" && (message as unknown as RuntimeCustomMessage).display));
+    base = { length: messages.length, first: messages[0], last: messages.at(-1), visible, normalized: normalizeVisible(visible) };
+    if (!streamingInsideMessages) visibleBaseCache.set(messages, base);
   }
-  return visible.map((message, index) => {
-    const cached = normalizedCache.get(message);
-    if (cached && cached.index === index) return cached.message;
-    const invocation = message.role === "user" ? parseInvocationPrompt(userMessageText(message)) : undefined;
-    // 用户中止不是失败：剥离各家 SDK 的中止英文原文，只留 aborted 标记给渲染
-    // 端做中性提示（历史会话同样受益——JSONL 里存着 stopReason）。error 与
-    // aborted 互斥。这里用宽版判定：Pi 偶尔把中止落成 stopReason=error + 中止
-    // 原文，只认 stopReason 会让用户主动停止爆红（run-outcome.ts 同口径）。
-    const aborted = isAbortedOutcome(message);
-    const normalized: ChatMessage = {
-      id: `${message.timestamp ?? 0}-${index}-${message.role}`,
-      uuid: messageUuid(message, index),
-      role: message.role === "custom" ? "extension" : message.role as "user" | "assistant",
-      timestamp: message.timestamp ?? Date.now(),
-      blocks: blocksFromMessage(message, invocation),
-      extension: message.role === "custom" ? { customType: (message as unknown as RuntimeCustomMessage).customType, details: cloneProtocolValue((message as unknown as RuntimeCustomMessage).details) } : undefined,
-      invocations: invocation?.invocations,
-      streaming: message === streamingMessage,
-      error: message.role === "assistant" && !aborted ? (message as AssistantMessage).errorMessage : undefined,
-      aborted: aborted || undefined
-    };
-    if (message !== streamingMessage) normalizedCache.set(message, { index, message: normalized });
+  if (!streamingMessage || streamingMessage.role !== "assistant") return base.normalized;
+  const last = base.visible.at(-1);
+  if (last === streamingMessage) {
+    // 极少数路径把流式消息放在 messages 尾部：只重算最后一条，基线保持可复用。
+    const normalized = base.normalized.slice();
+    normalized[normalized.length - 1] = normalizeOne(streamingMessage, normalized.length - 1, true);
     return normalized;
-  });
+  }
+  return [...base.normalized, normalizeOne(streamingMessage, base.normalized.length, true)];
+}
+
+function normalizeOne(message: AgentMessage, index: number, streaming: boolean): ChatMessage {
+  const cached = normalizedCache.get(message);
+  // 流式帧必须拿到 streaming=true 的新对象；同一对象即使被 committed 缓存过也不能复用。
+  if (!streaming && cached && cached.index === index) return cached.message;
+  const invocation = message.role === "user" ? parseInvocationPrompt(userMessageText(message)) : undefined;
+  // 用户中止不是失败：剥离各家 SDK 的中止英文原文，只留 aborted 标记给渲染
+  // 端做中性提示（历史会话同样受益——JSONL 里存着 stopReason）。error 与
+  // aborted 互斥。这里用宽版判定：Pi 偶尔把中止落成 stopReason=error + 中止
+  // 原文，只认 stopReason 会让用户主动停止爆红（run-outcome.ts 同口径）。
+  const aborted = isAbortedOutcome(message);
+  const normalized: ChatMessage = {
+    id: `${message.timestamp ?? 0}-${index}-${message.role}`,
+    uuid: messageUuid(message, index),
+    role: message.role === "custom" ? "extension" : message.role as "user" | "assistant",
+    timestamp: message.timestamp ?? Date.now(),
+    blocks: blocksFromMessage(message, invocation),
+    extension: message.role === "custom" ? { customType: (message as unknown as RuntimeCustomMessage).customType, details: cloneProtocolValue((message as unknown as RuntimeCustomMessage).details) } : undefined,
+    invocations: invocation?.invocations,
+    streaming,
+    error: message.role === "assistant" && !aborted ? (message as AssistantMessage).errorMessage : undefined,
+    aborted: aborted || undefined
+  };
+  if (!streaming) normalizedCache.set(message, { index, message: normalized });
+  return normalized;
+}
+
+function normalizeVisible(visible: AgentMessage[]): ChatMessage[] {
+  return visible.map((message, index) => normalizeOne(message, index, false));
 }
 
 /** 测试用：清空归一化缓存（模块级 WeakMap 单例，换新实例）。 */
 export function resetNormalizeCacheForTest(): void {
   normalizedCache = new WeakMap();
+  visibleBaseCache = new WeakMap();
 }

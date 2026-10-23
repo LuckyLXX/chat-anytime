@@ -1279,6 +1279,9 @@ export function createDemoApi(): DesktopApi {
         }
       }
     },
+    onWindowState(_listener) {
+      return () => undefined;
+    },
     onRuntimeMessage(listener) {
       listeners.add(listener);
       // 作品清单：订阅即补一帧（模拟真实运行时 initialize 的首次推送）。

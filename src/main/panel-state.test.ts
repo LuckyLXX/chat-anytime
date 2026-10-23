@@ -86,3 +86,27 @@ describe("createPanelStateCache", () => {
     expect(cache.snapshot().app.workspace).toBe("D:/other");
   });
 });
+
+describe("panel state incremental patches", () => {
+  it("patches update the session list/active id without clearing live details", () => {
+    const cache = createPanelStateCache(() => scope);
+    cache.ingest(stateMessage([summary("s1"), summary("s2")], "s1"));
+    cache.ingest({ type: "sessions.live", sessions: [live("s1", true)] });
+    cache.ingest({
+      type: "state.patch",
+      snapshot: { sessionId: "s2", sessions: [summary("s2"), summary("s3")] }
+    } as RuntimeMessage);
+    const payload = cache.snapshot();
+    expect(payload.activeSessionId).toBe("s2");
+    expect(payload.sessions.map((item) => item.id)).toEqual(["s2", "s3"]);
+    expect(payload.live.map((item) => item.sessionId)).toEqual(["s1"]);
+  });
+
+  it("a patch without sessions keeps the previous list (only changed fields travel)", () => {
+    const cache = createPanelStateCache(() => scope);
+    cache.ingest(stateMessage([summary("s1")], "s1"));
+    cache.ingest({ type: "state.patch", snapshot: { status: "working" } } as RuntimeMessage);
+    expect(cache.snapshot().sessions.map((item) => item.id)).toEqual(["s1"]);
+    expect(cache.snapshot().activeSessionId).toBe("s1");
+  });
+});

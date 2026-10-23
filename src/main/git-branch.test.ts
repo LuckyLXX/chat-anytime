@@ -1,11 +1,24 @@
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rename, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { parseGitHead, readGitBranch } from "./git-branch.js";
+import { parseGitHead, readGitBranch, watchGitBranch } from "./git-branch.js";
 
 async function tempWorkspace(): Promise<string> {
   return mkdtemp(join(tmpdir(), "pidesktop-git-branch-"));
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitFor(condition: () => boolean, timeoutMs = 4000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (condition()) return;
+    await sleep(25);
+  }
+  throw new Error("等待条件超时");
 }
 
 describe("parseGitHead", () => {
@@ -67,5 +80,56 @@ describe("readGitBranch", () => {
     const workspace = await tempWorkspace();
     await writeFile(join(workspace, ".git"), "not a gitdir line\n", "utf8");
     await expect(readGitBranch(workspace)).resolves.toBeUndefined();
+  });
+});
+
+describe("watchGitBranch", () => {
+  it("git checkout 式 rename 覆盖 HEAD 后触发回调", async () => {
+    const workspace = await tempWorkspace();
+    const gitDir = join(workspace, ".git");
+    await mkdir(gitDir);
+    await writeFile(join(gitDir, "HEAD"), "ref: refs/heads/main\n", "utf8");
+
+    let changes = 0;
+    const handle = await watchGitBranch(workspace, () => {
+      changes++;
+    });
+    expect(handle).toBeDefined();
+    try {
+      // 给 fs.watch 一点挂载余量（部分平台是异步就绪的）。
+      await sleep(100);
+      // git 换分支的真实写法：写 HEAD.lock 再 rename 覆盖 HEAD（inode 被替换）。
+      await writeFile(join(gitDir, "HEAD.lock"), "ref: refs/heads/feature/foo\n", "utf8");
+      await rename(join(gitDir, "HEAD.lock"), join(gitDir, "HEAD"));
+      await waitFor(() => changes > 0);
+      await expect(readGitBranch(workspace)).resolves.toBe("feature/foo");
+    } finally {
+      handle?.close();
+    }
+  });
+
+  it("close 后不再触发回调", async () => {
+    const workspace = await tempWorkspace();
+    const gitDir = join(workspace, ".git");
+    await mkdir(gitDir);
+    await writeFile(join(gitDir, "HEAD"), "ref: refs/heads/main\n", "utf8");
+
+    let changes = 0;
+    const handle = await watchGitBranch(workspace, () => {
+      changes++;
+    });
+    expect(handle).toBeDefined();
+    await sleep(100);
+    handle!.close();
+    await writeFile(join(gitDir, "HEAD"), "ref: refs/heads/other\n", "utf8");
+    await sleep(500);
+    expect(changes).toBe(0);
+  });
+
+  it("非 git 工作区返回 undefined（调用方可在 git init 后重试挂载）", async () => {
+    const workspace = await tempWorkspace();
+    await expect(watchGitBranch(workspace, () => {
+      throw new Error("非 git 工作区不应触发分支回调");
+    })).resolves.toBeUndefined();
   });
 });

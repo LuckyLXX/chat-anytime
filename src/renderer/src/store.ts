@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { applyRuntimeStatePatch, applySessionStatePatch } from "../../shared/snapshot-patch";
 import type {
   AutomationRunRecord,
   AutomationTask,
@@ -388,6 +389,8 @@ interface DesktopState {
   sessionSearch: SessionSearchState;
   /** 待定位的检索命中（打开会话后由 ConversationPane 消费）。 */
   pendingReveal?: PendingReveal;
+  /** 冷会话解析中（utility 在同步读 JSONL 前推送）；侧栏行显示 spinner。 */
+  openingSession?: { path: string; sessionId?: string; at: number };
   memory: MemoryTopicSummary[];
   /** 记忆正文按需缓存：topic id → 完整主题（响应 memory.read）。 */
   memoryContents: Record<string, MemoryTopic>;
@@ -500,6 +503,23 @@ function mergeMessagesPreservingIdentity(previous: RuntimeSnapshot["messages"], 
     return msg;
   });
   return { messages, changed };
+}
+
+function normalizeSessionPath(value: string): string {
+  return value.split(String.fromCharCode(92)).join("/").toLowerCase();
+}
+
+/** 补丁断档（丢帧）时请求一次全量；500ms 节流避免坏帧风暴。 */
+let lastStateSyncRequestAt = 0;
+function requestStateSync(): void {
+  const now = Date.now();
+  if (now - lastStateSyncRequestAt < 500) return;
+  lastStateSyncRequestAt = now;
+  try {
+    void window.piDesktop.send({ type: "state.sync" }).catch(() => undefined);
+  } catch {
+    // 演示环境/测试替身没有 send 时忽略。
+  }
 }
 
 export function handleRuntimeMessage(message: RuntimeMessage): void {
@@ -615,6 +635,8 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
         set((state) => {
           const incoming = message.snapshot;
           const previous = state.snapshot;
+          const openingMatches = state.openingSession && (incoming.sessionFile ? normalizeSessionPath(incoming.sessionFile) === normalizeSessionPath(state.openingSession.path) : false);
+          const opening = openingMatches ? undefined : state.openingSession;
           const { messages: mergedMessages, changed } = mergeMessagesPreservingIdentity(previous.messages, incoming.messages);
           const mergedExecutions = mergeExecutionsPreservingIdentity(previous.executions, incoming.executions);
           // sessions/recentWorkspaces 经结构化克隆每帧都是新引用，必须走内容
@@ -625,15 +647,18 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
           // 可能整帧只有自己变化（其余字段与上帧恒等，如 model/speedStats 同为
           // undefined 时），漏比会让本次切换被早退吐掉——画布/计划横幅/团队开关与
           // 状态条不响应。团队快照必须走内容比较：IPC 后引用必不相等。
+          // gitBranch 同理：切分支只会改变这一个字段，漏比则顶栏徽章永远停在旧分支。
           if (!changed && previous.busy === incoming.busy && previous.status === incoming.status &&
               previous.turnTiming === incoming.turnTiming && previous.executions === mergedExecutions &&
               previous.sessions === mergedSessions && previous.recentWorkspaces === mergedRecentWorkspaces &&
-              previous.model === incoming.model &&
+              previous.model === incoming.model && previous.gitBranch === incoming.gitBranch &&
+              previous.workspace === incoming.workspace &&
               previous.planMode === incoming.planMode && previous.computerMode === incoming.computerMode && previous.designMode === incoming.designMode &&
               previous.teamMode === incoming.teamMode && teamSnapshotEqual(previous.team, incoming.team) &&
               previous.sessionId === incoming.sessionId && previous.sessionFile === incoming.sessionFile &&
               queuedMessagesEqual(previous.queuedMessages, incoming.queuedMessages) &&
-              previous.thinkingLevel === incoming.thinkingLevel) {
+              previous.thinkingLevel === incoming.thinkingLevel &&
+              previous.revision === incoming.revision) {
             // Nothing changed at all — keep the exact same snapshot reference
             // so downstream useMemo/useEffect dependency checks stay no-ops.
             return state;
@@ -645,7 +670,44 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
           const parkedPanels = previous.sessionId && previous.sessionId !== incoming.sessionId
             ? { ...state.parkedPanels, [previous.sessionId]: previous satisfies SessionPaneSnapshot }
             : state.parkedPanels;
-          return { snapshot: { ...incoming, messages: mergedMessages, executions: mergedExecutions, sessions: mergedSessions, recentWorkspaces: mergedRecentWorkspaces }, parkedPanels };
+          return { snapshot: { ...incoming, messages: mergedMessages, executions: mergedExecutions, sessions: mergedSessions, recentWorkspaces: mergedRecentWorkspaces }, parkedPanels, ...(opening !== state.openingSession ? { openingSession: opening } : {}) };
+        });
+        break;
+      case "session.opening":
+        set({ openingSession: { path: message.path, ...(message.sessionId ? { sessionId: message.sessionId } : {}), at: Date.now() } });
+        break;
+      case "state.patch":
+        set((state) => {
+          const revision = message.snapshot.revision;
+          const current = state.snapshot.revision;
+          if (revision !== undefined && current !== undefined) {
+            if (revision <= current) return state;
+            if (revision !== current + 1) {
+              requestStateSync();
+              return state;
+            }
+          }
+          if ((message.snapshot.sessionId ?? undefined) !== (state.snapshot.sessionId ?? undefined)) return state;
+          const merged = applyRuntimeStatePatch(state.snapshot, message);
+          return merged ? { snapshot: merged } : state;
+        });
+        break;
+      case "session.state.patch":
+        set((state) => {
+          const sessionId = message.snapshot.sessionId;
+          if (!sessionId || sessionId === state.snapshot.sessionId) return state;
+          const previous = state.paneStates[sessionId];
+          if (!previous) return state;
+          const revision = message.snapshot.revision;
+          if (revision !== undefined && previous.revision !== undefined) {
+            if (revision <= previous.revision) return state;
+            if (revision !== previous.revision + 1) {
+              requestStateSync();
+              return state;
+            }
+          }
+          const merged = applySessionStatePatch(previous, message);
+          return merged ? { paneStates: { ...state.paneStates, [sessionId]: merged } } : state;
         });
         break;
       case "session.state":
@@ -669,7 +731,8 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
                 previous.designMode === incoming.designMode &&
                 previous.teamMode === incoming.teamMode &&
                 teamSnapshotEqual(previous.team, incoming.team) &&
-                previous.contextUsage === incoming.contextUsage) {
+                previous.contextUsage === incoming.contextUsage &&
+                previous.revision === incoming.revision) {
               return state;
             }
             return { paneStates: { ...state.paneStates, [sessionId]: { ...incoming, messages: mergedMessages, executions: mergedExecutions } } };
@@ -817,10 +880,24 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
         });
         break;
       case "subagent.transcript-result":
-        set((state) => ({ transcripts: { ...state.transcripts, [message.childSessionId]: message.messages } }));
+        set((state) => {
+          const transcripts = { ...state.transcripts, [message.childSessionId]: message.messages };
+          // 看板会 1.5s 轮询一次成员记录；缓存无上限时长时间运行会把所有历史
+          // 子代理完整 transcript 常驻内存。保留最近 16 份，超出按插入序淘汰。
+          const keys = Object.keys(transcripts);
+          for (const key of keys.slice(0, Math.max(0, keys.length - 16))) delete transcripts[key];
+          const transcriptErrors = { ...state.transcriptErrors };
+          delete transcriptErrors[message.childSessionId];
+          return { transcripts, transcriptErrors };
+        });
         break;
       case "subagent.transcript-error":
-        set((state) => ({ transcriptErrors: { ...state.transcriptErrors, [message.childSessionId]: message.message } }));
+        set((state) => {
+          const transcriptErrors = { ...state.transcriptErrors, [message.childSessionId]: message.message };
+          const keys = Object.keys(transcriptErrors);
+          for (const key of keys.slice(0, Math.max(0, keys.length - 32))) delete transcriptErrors[key];
+          return { transcriptErrors };
+        });
         break;
       case "design.state":
         set((state) => {
@@ -859,7 +936,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
         set({ usageStats: message.stats, usageStatsLoading: false });
         break;
       case "error":
-        set({ error: message.message, commandError: { sessionId: message.sessionId, message: message.message, at: Date.now() } });
+        set({ error: message.message, commandError: { sessionId: message.sessionId, message: message.message, at: Date.now() }, openingSession: undefined });
         break;
       case "palette.open":
         set((state) => ({ paletteOpenTick: state.paletteOpenTick + 1 }));

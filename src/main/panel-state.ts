@@ -47,6 +47,12 @@ export function createPanelStateCache(scope: () => PanelStatePayload["app"]): Pa
         activeSessionId = message.snapshot.sessionId;
         return;
       }
+      // 增量帧：只有变化时才携带 sessions / sessionId，未携带就保持缓存。
+      if (message.type === "state.patch") {
+        if (message.snapshot.sessions) sessions = message.snapshot.sessions.slice(0, MAX_PANEL_SESSIONS);
+        if ("sessionId" in message.snapshot) activeSessionId = message.snapshot.sessionId;
+        return;
+      }
       if (message.type === "sessions.live") live = message.sessions;
     },
     snapshot(): PanelStatePayload {

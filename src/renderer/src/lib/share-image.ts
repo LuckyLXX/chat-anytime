@@ -1,4 +1,7 @@
-import html2canvas from "html2canvas-pro";
+// html2canvas 只在用户点「分享为图片」时用一次：动态加载，不占首屏包体。
+async function loadHtml2Canvas(): Promise<typeof import("html2canvas-pro").default> {
+  return (await import("html2canvas-pro")).default;
+}
 
 const shareExcludedSelectors = [".action-timeline", ".message-timing", ".inline-error"].join(",");
 
@@ -164,6 +167,7 @@ export async function shareElementAsImage(root: HTMLElement): Promise<void> {
     }
     await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
     const captureRect = surface.getBoundingClientRect();
+    const html2canvas = await loadHtml2Canvas();
     const canvas = await html2canvas(surface, {
       useCORS: true,
       backgroundColor: null,

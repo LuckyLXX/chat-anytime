@@ -141,7 +141,7 @@ describe("pi-runtime session.open wiring", () => {
   });
 
   it("cold 分支不做探测式 open（必须带 cwdOverride 只 open 一次）", () => {
-    expect(coldBlock).toContain("SessionManager.open(target, recordRoot");
+    expect(coldBlock).toContain("openSessionManagerForReopen(target, recordRoot");
     expect(coldBlock).not.toMatch(/SessionManager\.open\(target\)/u);
   });
 

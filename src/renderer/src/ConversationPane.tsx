@@ -168,6 +168,42 @@ function messageText(message: ChatMessage): string {
     .join("");
 }
 
+/** 流式期间把「缩略导航摘要」降到 2fps：turns 数组每帧重建会带着整列缩略块重渲染。 */
+function useThrottledValue<T>(value: T, intervalMs: number, active: boolean): T {
+  const [shown, setShown] = useState(value);
+  const valueRef = useRef(value);
+  valueRef.current = value;
+  const lastRef = useRef(0);
+  const timerRef = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    if (!active) {
+      if (timerRef.current !== undefined) {
+        window.clearTimeout(timerRef.current);
+        timerRef.current = undefined;
+      }
+      lastRef.current = Date.now();
+      setShown(value);
+      return;
+    }
+    const now = Date.now();
+    if (now - lastRef.current >= intervalMs) {
+      lastRef.current = now;
+      setShown(value);
+      return;
+    }
+    if (timerRef.current !== undefined) return;
+    timerRef.current = window.setTimeout(() => {
+      timerRef.current = undefined;
+      lastRef.current = Date.now();
+      setShown(valueRef.current);
+    }, intervalMs - (now - lastRef.current));
+  }, [value, active, intervalMs]);
+  useEffect(() => () => {
+    if (timerRef.current !== undefined) window.clearTimeout(timerRef.current);
+  }, []);
+  return shown;
+}
+
 function useElapsedNow(active: boolean): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -216,9 +252,20 @@ function PendingResponse({ label, timing }: { label: string; timing?: TurnTiming
   );
 }
 
+// 图片 data URL 是超长字符串：每次渲染重新拼一次等于复制数 MB。块/附件对象在
+// 生命周期内不可变，用 WeakMap 按对象身份缓存，输入框每敲一个字都零拷贝。
+const imageSrcCache = new WeakMap<object, string>();
+function cachedImageSrc(key: object, mimeType: string, data: string): string {
+  const cached = imageSrcCache.get(key);
+  if (cached) return cached;
+  const src = `data:${mimeType};base64,${data}`;
+  imageSrcCache.set(key, src);
+  return src;
+}
+
 function ImageMessageBlock({ block }: { block: Extract<import("../../shared/protocol").MessageBlock, { type: "image" }> }): ReactNode {
   const [expanded, setExpanded] = useState(false);
-  const src = `data:${block.mimeType};base64,${block.data}`;
+  const src = cachedImageSrc(block, block.mimeType, block.data);
   return (
     <>
       <button className="image-message" type="button" aria-label="放大图片" onClick={() => setExpanded(true)}><img src={src} alt="用户上传的图片" /></button>
@@ -265,6 +312,17 @@ function truncateToolOutput(output: string): string {
  * 这些锚点即每轮首条消息的 [data-turn-key]。滚动在锚点下方（或粘底）时返回
  * 最近一个位于视口内的锚点，用于高亮缩略导航的当前轮。无可用锚点返回 undefined。
  */
+/** 消息高度估算按消息对象缓存：窗口化每帧对全部占位调用 estimate（遍历 blocks），
+ *  ChatMessage 不可变，缓存后长会话流式重渲不再重复数文本长度。 */
+const messageHeightEstimateCache = new WeakMap<object, number>();
+function estimateMessageHeightCached(message: ChatMessage): number {
+  const cached = messageHeightEstimateCache.get(message);
+  if (cached !== undefined) return cached;
+  const height = estimateMessageHeight(message);
+  messageHeightEstimateCache.set(message, height);
+  return height;
+}
+
 function nearestVisibleTurnKey(timeline: HTMLElement, turnStartKeys: ReadonlySet<string>): string | undefined {
   const anchors = [...timeline.querySelectorAll<HTMLElement>("[data-turn-key]")];
   if (anchors.length === 0) return undefined;
@@ -927,6 +985,8 @@ export const ConversationPane = memo(function ConversationPane({
   const executionsForMessages = useMemo(() => subsetExecutions(displayMessages, data.executions), [subsetExecutions, displayMessages, data.executions]);
   // 每轮以 user 消息为錨点；turn 首条的 key 用于缩略导航定位（data-turn-key）。
   const turns = useMemo(() => buildTurnSummaries(displayMessages), [displayMessages]);
+  // 缩略导航只展示摘要；流式期间每帧重建整列缩略块是纯浪费，节流到 500ms。
+  const minimapTurns = useThrottledValue(turns, 500, data.busy);
   const turnStartKeys = useMemo(() => new Set(turns.map((turn) => turn.key)), [turns]);
   const latestAssistantIndex = useMemo(() => [...displayMessages].reverse().findIndex((message) => message.role === "assistant"), [displayMessages]);
   const latestAssistantMessageIndex = latestAssistantIndex < 0 ? -1 : displayMessages.length - 1 - latestAssistantIndex;
@@ -2038,7 +2098,7 @@ export const ConversationPane = memo(function ConversationPane({
               entryKey={entryKey}
               entryTurnKey={turnKey}
               live={entryLive}
-              placeholderHeight={placeholderHeightFor(windowHeightsRef.current.get(entryKey), estimateMessageHeight(message))}
+              placeholderHeight={placeholderHeightFor(windowHeightsRef.current.get(entryKey), estimateMessageHeightCached(message))}
               register={registerTimelineEntry}
               onEntryRendered={handleEntryRendered}
               message={message}
@@ -2075,7 +2135,7 @@ export const ConversationPane = memo(function ConversationPane({
           )}
         </>}
       </div>
-      {turns.length >= 2 && <TurnMinimap turns={turns} activeKey={activeTurnKey} onNavigate={navigateToTurn} />}
+      {turns.length >= 2 && <TurnMinimap turns={minimapTurns} activeKey={activeTurnKey} onNavigate={navigateToTurn} />}
       {question && <QuestionPanel request={question} onOpenDetail={onOpenPlanDetail} rootRef={(element) => { questionPanelRef.current = element; }} />}
       {!question && (() => {
         // dsh StatsLine：聊天区与输入框之间的会话性能读数（组间｜组内·，
@@ -2123,7 +2183,7 @@ export const ConversationPane = memo(function ConversationPane({
             ))}
           </div>
         )}
-        {attachments.length > 0 && <div className="attachment-list" data-composer-zone="attachments">{attachments.map((attachment, index) => <span className="attachment-chip" key={`${attachment.name}-${index}`}>{attachment.kind === "image" ? <button type="button" className="attachment-chip-preview" title="点击放大预览" aria-label={`放大预览 ${attachment.name}`} onClick={() => setPreviewingAttachment(attachment)}><img src={`data:${attachment.mimeType};base64,${attachment.data}`} alt="" /></button> : <FileDiff size={12} />}<span>{attachment.name}</span>{attachment.kind === "image" && !modelAcceptsImages && visionFallbackAvailable && <small className="attachment-chip-note" title="当前模型不支持图片，将自动调用视觉模型识别">视觉识别</small>}<button type="button" title="移除附件" aria-label={`移除 ${attachment.name}`} onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={12} /></button></span>)}</div>}
+        {attachments.length > 0 && <div className="attachment-list" data-composer-zone="attachments">{attachments.map((attachment, index) => <span className="attachment-chip" key={`${attachment.name}-${index}`}>{attachment.kind === "image" ? <button type="button" className="attachment-chip-preview" title="点击放大预览" aria-label={`放大预览 ${attachment.name}`} onClick={() => setPreviewingAttachment(attachment)}><img src={cachedImageSrc(attachment, attachment.mimeType, attachment.data)} alt="" /></button> : <FileDiff size={12} />}<span>{attachment.name}</span>{attachment.kind === "image" && !modelAcceptsImages && visionFallbackAvailable && <small className="attachment-chip-note" title="当前模型不支持图片，将自动调用视觉模型识别">视觉识别</small>}<button type="button" title="移除附件" aria-label={`移除 ${attachment.name}`} onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={12} /></button></span>)}</div>}
         {attachmentError && <div className="attachment-error" data-composer-zone="error" role="alert">{attachmentError}<button type="button" title="关闭提示" aria-label="关闭附件提示" onClick={() => setAttachmentError(undefined)}><X size={12} /></button></div>}
         <input ref={fileInputRef} type="file" hidden multiple accept="image/png,image/jpeg,image/webp,image/gif,.txt,.md,.json,.js,.ts,.tsx,.jsx,.py,.go,.rs,.java,.css,.html" onChange={(event) => { void addLocalFiles(event.target.files ?? []); event.currentTarget.value = ""; }} />
         {slashOpen && (
@@ -2296,7 +2356,7 @@ export const ConversationPane = memo(function ConversationPane({
         />
       )}
       <ImageLightbox
-        image={previewingAttachment?.kind === "image" ? { src: `data:${previewingAttachment.mimeType};base64,${previewingAttachment.data}`, alt: previewingAttachment.name } : undefined}
+        image={previewingAttachment?.kind === "image" ? { src: cachedImageSrc(previewingAttachment, previewingAttachment.mimeType, previewingAttachment.data), alt: previewingAttachment.name } : undefined}
         onClose={() => setPreviewingAttachment(null)}
       />
     </section>

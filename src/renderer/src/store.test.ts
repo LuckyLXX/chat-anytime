@@ -498,6 +498,19 @@ describe("session-level collaboration flags", () => {
     state.handleRuntimeMessage({ type: "session.state", snapshot: pane("pane-t1", false) });
     expect(useDesktopStore.getState().paneStates["pane-t1"]?.team?.running).toBe(0);
   });
+
+  it("整帧只有 gitBranch 变化时不被早退吐掉（否则顶栏分支徽章停在旧分支）", () => {
+    const state = useDesktopStore.getState();
+    state.handleRuntimeMessage({ type: "state", snapshot: { ...snap("git-1"), gitBranch: "main" } });
+    expect(useDesktopStore.getState().snapshot.gitBranch).toBe("main");
+
+    state.handleRuntimeMessage({ type: "state", snapshot: { ...snap("git-1"), gitBranch: "feature/foo" } });
+    expect(useDesktopStore.getState().snapshot.gitBranch).toBe("feature/foo");
+
+    // 切到非 git 工作区时徽章必须消失（undefined 与旧值不同也要落帧）。
+    state.handleRuntimeMessage({ type: "state", snapshot: snap("git-1") });
+    expect(useDesktopStore.getState().snapshot.gitBranch).toBeUndefined();
+  });
 });
 
 describe("message identity merge", () => {
@@ -642,5 +655,41 @@ describe("当前版本的水合", () => {
       host.window = originalWindow;
       useDesktopStore.setState({ questions: [] });
     }
+  });
+});
+
+describe("streaming snapshot patches", () => {
+  beforeEach(() => {
+    useDesktopStore.setState({
+      snapshot: {
+        ...snap("session-patch"),
+        revision: 1,
+        messages: [{ id: "m1", uuid: "m1", role: "user", timestamp: 1, blocks: [{ type: "text", text: "问" }] }],
+        executions: []
+      }
+    });
+  });
+
+  it("applies an appended streaming message and advances the revision", () => {
+    useDesktopStore.getState().handleRuntimeMessage({
+      type: "state.patch",
+      snapshot: { sessionId: "session-patch", revision: 2, busy: true, status: "Pi 正在工作" },
+      messages: { append: [{ id: "m2", uuid: "m2", role: "assistant", timestamp: 2, blocks: [{ type: "text", text: "答" }], streaming: true }] }
+    });
+    const state = useDesktopStore.getState().snapshot;
+    expect(state.revision).toBe(2);
+    expect(state.busy).toBe(true);
+    expect(state.messages.map((message) => message.id)).toEqual(["m1", "m2"]);
+  });
+
+  it("drops duplicate frames instead of appending the same message twice", () => {
+    const patch = {
+      type: "state.patch" as const,
+      snapshot: { sessionId: "session-patch", revision: 2 },
+      messages: { append: [{ id: "m2", uuid: "m2", role: "assistant" as const, timestamp: 2, blocks: [] }] }
+    };
+    useDesktopStore.getState().handleRuntimeMessage(patch);
+    useDesktopStore.getState().handleRuntimeMessage(patch);
+    expect(useDesktopStore.getState().snapshot.messages).toHaveLength(2);
   });
 });

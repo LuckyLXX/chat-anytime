@@ -120,6 +120,14 @@ import { GeneralSettings } from "./GeneralSettings";
 import { ResourceSettings } from "./ResourceSettings";
 import { ModelSettings } from "./ModelSettings";
 
+function normalizeSessionPath(value: string): string {
+  return value.split(String.fromCharCode(92)).join("/").toLowerCase();
+}
+
+function sameSessionPath(left: string, right: string): boolean {
+  return normalizeSessionPath(left) === normalizeSessionPath(right);
+}
+
 function previewTargetKey(target: PreviewTarget): string {
   switch (target.type) {
     case "artifact": return target.artifact.id;
@@ -365,6 +373,7 @@ export function App(): ReactNode {
   const gitBranch = useDesktopStore((state) => state.snapshot.gitBranch);
   const runtimeBusy = useDesktopStore((state) => state.snapshot.busy);
   const runtimeStatus = useDesktopStore((state) => state.snapshot.status);
+  const openingSession = useDesktopStore((state) => state.openingSession);
   // executions 只以**派生原始值**的形式进入 App（execution-select.ts）：工具
   // output 逐帧增长时数组每帧都是新引用，订阅整数组会让 App 以 ~20 fps 重建
   // 侧栏/顶栏/预览壳——而这两个 id 在 output 增长期间不变，选择器因此命中早退。
@@ -414,6 +423,9 @@ export function App(): ReactNode {
   const [paletteOpen, setPaletteOpen] = useState(false);
   // 启动时所有工作区分组默认折叠（空表 = 无展开项）；用户展开后保持到退出。
   const [expandedWorkspaceGroups, setExpandedWorkspaceGroups] = useState<Record<string, boolean>>({});
+  // 已展开过的分组保留挂载（折叠动画需要子节点），但**从未展开**的分组不渲染
+  // 会话行：几百条历史会话的按钮/事件处理器不必在启动时全部进 DOM。
+  const [mountedWorkspaceGroups, setMountedWorkspaceGroups] = useState<Record<string, boolean>>({});
   // 会话全文检索：标题过滤即时生效，内容检索防抖 300ms；不足 2 字不搜（单字命中噪声太大）。
   // requestId 与查询同帧写入，晚到的旧结果由 store 丢弃。
   useEffect(() => {
@@ -913,6 +925,24 @@ export function App(): ReactNode {
     document.title = "ChatAnyTime";
   }, []);
 
+  useEffect(() => {
+    const root = document.documentElement;
+    return window.piDesktop.onWindowState?.(({ visible }) => {
+      if (visible) root.removeAttribute("data-ui-window-hidden");
+      else root.setAttribute("data-ui-window-hidden", "");
+    });
+  }, []);
+
+  // 冷会话解析中的 spinner 兜底：失败/超时不能让侧栏一直转。
+  useEffect(() => {
+    if (!openingSession) return;
+    const at = openingSession.at;
+    const timer = window.setTimeout(() => {
+      if (useDesktopStore.getState().openingSession?.at === at) useDesktopStore.setState({ openingSession: undefined });
+    }, 15_000);
+    return () => window.clearTimeout(timer);
+  }, [openingSession]);
+
 
   useEffect(() => {
     try { window.localStorage.setItem("pidesktop.preview-split", String(previewSplit)); } catch { /* storage may be unavailable in browser demo */ }
@@ -1066,7 +1096,10 @@ export function App(): ReactNode {
       await window.piDesktop.send({ type: "session.new", workspace });
       // 分组默认折叠，新建后展开目标工作区，让新话题立即可见。
       const key = workspaceKey(workspace ?? activeWorkspace ?? "");
-      if (key) setExpandedWorkspaceGroups((current) => ({ ...current, [key]: true }));
+      if (key) {
+        setMountedWorkspaceGroups((current) => current[key] ? current : { ...current, [key]: true });
+        setExpandedWorkspaceGroups((current) => ({ ...current, [key]: true }));
+      }
     } catch (error) {
       setMessageActionError(error instanceof Error ? error.message : "新建话题失败");
     }
@@ -1107,6 +1140,7 @@ export function App(): ReactNode {
       }
       await window.piDesktop.send({ type: "session.open", path, workspace: sessionWorkspace });
     } catch (error) {
+      useDesktopStore.setState((state) => state.openingSession && sameSessionPath(state.openingSession.path, path) ? { openingSession: undefined } : state);
       setMessageActionError(error instanceof Error ? error.message : "打开话题失败");
     }
   }
@@ -1504,6 +1538,15 @@ export function App(): ReactNode {
       const activeTabId = current.activeTabId === id ? tabs[Math.min(index, tabs.length - 1)]!.id : current.activeTabId;
       return { tabs, activeTabId };
     });
+    // 编辑器快照与 AI 同步标记按 tab 生命周期回收：关掉的 tab 不应永久占着
+    // 一份 markdown 全文 + 冲突状态（长会话里会不断累积）。
+    setPreviewEditorStates((current) => {
+      if (!(id in current)) return current;
+      const next = { ...current };
+      delete next[id];
+      return next;
+    });
+    delete editorSyncedExecutionsRef.current[id];
   }
 
   const openArtifactPreview = useCallback((artifact: Artifact): void => {
@@ -1823,7 +1866,10 @@ export function App(): ReactNode {
                       type="button"
                       title={group.workspace}
                       aria-expanded={!collapsed}
-                      onClick={() => setExpandedWorkspaceGroups((current) => ({ ...current, [group.key]: collapsed }))}
+                      onClick={() => {
+                        if (collapsed) setMountedWorkspaceGroups((current) => current[group.key] ? current : { ...current, [group.key]: true });
+                        setExpandedWorkspaceGroups((current) => ({ ...current, [group.key]: collapsed }));
+                      }}
                     >
                       <Folder size={15} />
                       <span><strong>{workspaceName}</strong></span>
@@ -1849,14 +1895,16 @@ export function App(): ReactNode {
                       <SquarePen size={14} />
                     </button> : null}
                   </div>
-                  {/* 分组子项常驻 DOM（collapsed 只切 class），展开/折叠由
-                      styles.css 的 grid-template-rows 过渡驱动（内层 wrapper
-                      负责剪裁），hidden 类同时阻断 Tab 焦点。 */}
+                  {/* 从未展开的分组不挂载子项（几百条会话不必进 DOM）；展开过的
+                      分组保留挂载，collapsed 只切 class，展开/折叠由 styles.css 的
+                      grid-template-rows 过渡驱动（内层 wrapper 负责剪裁）。 */}
                   <div className={`session-workspace-items${collapsed ? " collapsed" : ""}`}>
                     <div className="session-workspace-items-inner">
                     {group.sessions.length === 0
                       ? <div className="session-workspace-empty">{sessionView === "archived" ? "本工作区暂无归档话题" : "暂无话题，点击右上角新建"}</div>
-                      : group.sessions.map((item) => {
+                      : !mountedWorkspaceGroups[group.key] && collapsed
+                        ? null
+                        : group.sessions.map((item) => {
                         const inPane = splitTree ? leafIds(splitTree).includes(item.id) : false;
                         const rowActive = item.id === activeSessionId || inPane;
                         const rowSelected = sessionMultiSelect && Boolean(selectedSessionPaths[item.path]);
@@ -1891,7 +1939,7 @@ export function App(): ReactNode {
                             setContextMenu({ x: event.clientX, y: event.clientY, items });
                           }}
                         >
-                          {sessionMultiSelect ? (rowSelected ? <CheckCircle2 size={14} /> : <Circle size={14} />) : <MessageCircle size={14} />}
+                          {openingSession && sameSessionPath(openingSession.path, item.path) ? <LoaderCircle size={14} className="spinning" /> : sessionMultiSelect ? (rowSelected ? <CheckCircle2 size={14} /> : <Circle size={14} />) : <MessageCircle size={14} />}
                           <span><strong>{item.title}</strong><small>{new Date(item.modifiedAt).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}</small></span>
                           {(item.runStatus || item.pinned || item.archived || automationSessionIds.has(item.id)) && <div className="session-item-meta">{item.runStatus && <i className={`session-status-dot ${item.runStatus}`} title={sessionRunStatusLabels[item.runStatus]} aria-label={sessionRunStatusLabels[item.runStatus]!} />}{automationSessionIds.has(item.id) && <span className="session-automation-indicator" title="有定时任务" aria-label="有定时任务"><Clock size={11} /></span>}{item.pinned && <Pin size={11} className="session-pin-indicator" />}{item.archived && <Archive size={11} className="session-archive-indicator" />}</div>}
                         </button>;

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readSync, statSync } from "node:fs";
 import { readFile, readdir, realpath, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative as relativePath, resolve, sep } from "node:path";
 import { estimateTokens } from "@earendil-works/pi-coding-agent";
@@ -21,8 +21,10 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { BackgroundProcessRegistry, bashCommandsFromMessages, isBackgroundCommand } from "./background-processes.js";
 import { commandSessionId } from "./command-error.js";
+import { resolveHookSessionTitle } from "./hooks-session-title.js";
 import { alignQueueState, imageAttachmentsFrom, promoteQueueMessage, queuedMessageText, queueSnapshotMessages, removeQueueMessage, replayQueueArgs, type PromoteOutcome } from "./queue-images.js";
 import { normalizeMessages, userMessageText } from "./message-normalize.js";
+import { diffChatMessages, diffToolExecutions, snapshotToolExecution, toolExecutionPatchEqual } from "../shared/snapshot-patch.js";
 import { applyModelOverrides as applyStoredModelOverrides, buildCatalogModels, imageInputOverride, isModelEnabled, pickFallbackModel, pruneDisabledModelRefs, resolveRestoredSessionModel } from "./model-catalog.js";
 import type {
   AccessMode,
@@ -51,6 +53,8 @@ import type {
   CommandSummary,
   RuntimeMessage,
   RuntimeSnapshot,
+  RuntimeSnapshotFieldsPatch,
+  SessionPaneFieldsPatch,
   SessionPaneSnapshot,
   SessionRunStatus,
   SessionSummary,
@@ -75,7 +79,7 @@ import { downloadDirFor } from "./browser-downloads.js";
 import { saveBrowserScreenshot } from "./browser-screenshot.js";
 import { autoCompactionFailureNotice, runManualCompaction } from "./compaction-lifecycle.js";
 import { isAbortErrorMessage, resolveRunOutcomeStatus, type TerminalRunStatus } from "./run-outcome.js";
-import { readGitBranch } from "./git-branch.js";
+import { readGitBranch, watchGitBranch, type GitBranchWatchHandle } from "./git-branch.js";
 import { builtinProviderOverlay, buildFetchedProviderModels, resolveBuiltinOverlayAction, resolveCustomProviderRegistration } from "./custom-provider.js";
 import { buildDivModePrompt } from "./div-prompt.js";
 import { readConfiguredMcpServers, removeMcpServerConfig, setMcpServerDisabled, upsertMcpServerConfig } from "./mcp-config.js";
@@ -127,6 +131,7 @@ import { buildResourceCatalog } from "./resource-catalog.js";
 import { agentWorkspaceSessionDir, backfillUnpersistedSessions, isSessionArchived, isSessionPinned, mergeSessionSummary, pruneVanishedSessions, sameSessionDir, sessionFileMatchesId, sessionListReadyFor, setArchivedSessionPaths, sortSessionSummaries, togglePinnedSessionPath } from "./session-scope.js";
 import { listSessionSummaries, loadSessionIndex, readSessionHeaderLine, saveSessionIndex, summarizeLiveSession, type CachedSessionSummary } from "./session-summary-cache.js";
 import { planSessionOpen } from "./session-open-plan.js";
+import { SessionManagerCache } from "./session-manager-cache.js";
 import { isDesktopConfiguredProvider } from "./model-catalog.js";
 import { defaultTools, ensureDefaultWorkspaceDir, forgetAgentWorkspace, isPositiveInt, mergeBrowserSettings, mergeProviderModels, recordAgentWorkspace, resolveDefaultWorkspace, resolveInitialWorkspace } from "./settings.js";
 import { buildMultiInvocationPrompt, composeInvocationBody, parseInvocationPrompt, sameInvocations, type InvocationSegment } from "./invocation-prompt.js";
@@ -191,6 +196,17 @@ let modelRuntime: ModelRuntime | undefined;
 let workspace: string | undefined;
 /** 当前工作区的 git 分支；非 git 项目为 undefined，随工作区切换异步刷新。 */
 let gitBranch: string | undefined;
+/** 当前挂着的分支监听；target 变化时重挂，避免为每个工作区留一个常驻 watcher。 */
+let gitBranchWatch: { target: string; handle: GitBranchWatchHandle } | undefined;
+/** 异步挂载期间目标又切走时自增，过期句柄直接关闭丢弃。 */
+let gitBranchWatchToken = 0;
+/** 正在挂载的目标（非 git 目录不缓存空句柄，下一轮轮询会重试，git init 后自动生效）。 */
+let gitBranchWatchPending: { target: string; token: number } | undefined;
+/** fs.watch 漏事件时的兜底轮询间隔（只 stat/read .git/HEAD，代价可忽略）。 */
+const GIT_BRANCH_POLL_MS = 3000;
+let gitBranchPollTimer: ReturnType<typeof setInterval> | undefined;
+/** 读取代次：监听/轮询可能并发触发读盘，只允许最新一次结果落值。 */
+let gitBranchReadSeq = 0;
 let thinkingLevel: ThinkingLevel = "medium";
 let accessMode: AccessMode = "ask";
 let status = "请选择一个项目开始使用";
@@ -346,14 +362,24 @@ interface SessionRuntimeRecord {
   speedLive?: { startedAt: number; firstTokenAt?: number; tokens: number };
   /** 上下文三段明细（稳定边界重算，见 refreshContextBreakdown；快照只读）。 */
   contextBreakdown?: ContextUsageBreakdown;
+  /**
+   * getContextUsage() 的稳定边界缓存：SDK 每次调用都会重建整条 session
+   * projection（3,037 条 entry 实测 2ms），若在每个 50ms 快照里调用，长会话
+   * 光这一项就吃掉 4% 以上的一个核。只在消息落定/压缩/切模型时重算。
+   */
+  contextUsageCache?: ContextUsage;
   /** 工具段估算缓存：活动工具集变化才重算（键 = 活动工具名 join）。 */
   toolTokensCache?: { key: string; tokens: number };
   activatedAt: number;
   /** 分屏格子（watched）流式推送的节流定时器；激活会话不走此通道。 */
   paneFlushTimer?: ReturnType<typeof setTimeout>;
+  /** 该会话分屏通道的推送序号（补丁去重/丢帧检测）。 */
+  paneRevision?: number;
 }
 
 const liveSessions = new Map<string, SessionRuntimeRecord>();
+// 最近销毁会话的 manager 缓存：冷打开时按 mtime/size 校验复用，省掉同步 JSONL 解析。
+const recentSessionManagers = new SessionManagerCache();
 let activeRuntime: SessionRuntimeRecord | undefined;
 // 分屏中正被渲染端展示的会话（session.watch 注册）：parked 也能收到
 // session.state 推送、豁免空闲驱逐、不设侧栏终端圆点。激活会话隐含在内
@@ -366,9 +392,13 @@ const pendingWatchSessions = new Set<string>();
 // （驱逐豁免、无终端圆点），但 schedulePaneEmit 停止推送——避免全量快照流进
 // 没有渲染的格子。切回可见时由 watch handler 补推一帧水合。
 const hiddenPaneSessions = new Set<string>();
-// Idle parked sessions beyond this count are disposed (their history stays on
-// disk and is rebuilt on reopen); running sessions are never evicted.
-const MAX_PARKED_SESSIONS = 4;
+// Idle parked sessions are evicted by count and by retained history size:
+// 6 typical (小) sessions stay warm for instant switching, while large
+// image/tool-heavy sessions are capped so the utility process cannot retain
+// hundreds of MB of base64 screenshots. Running sessions are never evicted.
+const MAX_PARKED_SESSIONS = 6;
+/** Parked 会话文件大小总和上限（磁盘字节 ≈ 运行时消息体积的保守下界）。 */
+const MAX_PARKED_HISTORY_BYTES = 96 * 1024 * 1024;
 
 // Mirrors of the active record's todo state: the read-only task panel follows
 // the session being viewed (no prompt injection — todo_write args are the only
@@ -453,10 +483,164 @@ const PANE_STREAM_FLUSH_INTERVAL_MS = 100;
 let pendingFlushTimer: ReturnType<typeof setTimeout> | undefined;
 let hasPendingFlush = false;
 
+/**
+ * 上一次已推送的快照基线（逐会话）：只保存数组引用/不可变浅拷贝，内存与
+ * snapshot 同量级——用于把下一帧差分成 tail 补丁，而不是每帧重传整段历史。
+ */
+interface EmittedSnapshot<T> {
+  sessionId?: string;
+  snapshot: T;
+  messages: ChatMessage[];
+  executions: ToolExecution[];
+}
+
+let lastActiveEmit: EmittedSnapshot<RuntimeSnapshot> | undefined;
+let activeRevision = 0;
+const lastPaneEmit = new Map<string, EmittedSnapshot<SessionPaneSnapshot>>();
+
+function executionSnapshots(list: readonly ToolExecution[], previous?: readonly ToolExecution[]): ToolExecution[] {
+  if (!previous) return list.map(snapshotToolExecution);
+  const previousById = new Map(previous.map((item) => [item.id, item]));
+  return list.map((item) => {
+    const prior = previousById.get(item.id);
+    return prior && toolExecutionPatchEqual(prior, item) ? prior : snapshotToolExecution(item);
+  });
+}
+
+function makeEmitted<T extends { sessionId?: string; messages: ChatMessage[]; executions: ToolExecution[] }>(
+  next: T,
+  executions: ToolExecution[]
+): EmittedSnapshot<T> {
+  return {
+    sessionId: next.sessionId,
+    messages: next.messages,
+    executions,
+    // 展平一份「执行快照」的标量视图，供下一帧逐字段比较。
+    snapshot: { ...next, messages: next.messages, executions } as T
+  };
+}
+
+function sameQueuedMessages(left: RuntimeSnapshot["queuedMessages"], right: RuntimeSnapshot["queuedMessages"]): boolean {
+  if (left === right) return true;
+  if (left.length !== right.length) return false;
+  return left.every((item, index) => {
+    const other = right[index];
+    return Boolean(other)
+      && item.kind === other!.kind && item.index === other!.index
+      && item.text === other!.text && item.imageCount === other!.imageCount;
+  });
+}
+
+function sameContextUsage(left: ContextUsage | undefined, right: ContextUsage | undefined): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  return left.tokens === right.tokens
+    && left.contextWindow === right.contextWindow
+    && left.percent === right.percent
+    && left.cacheHitRate === right.cacheHitRate
+    && left.breakdown?.system === right.breakdown?.system
+    && left.breakdown?.tools === right.breakdown?.tools
+    && left.breakdown?.messages === right.breakdown?.messages;
+}
+
+function sameSpeedStats(left: SpeedStats | undefined, right: SpeedStats | undefined): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  return left.turns === right.turns && left.steps === right.steps
+    && left.llmMs === right.llmMs && left.toolMs === right.toolMs
+    && left.ttftMs === right.ttftMs && left.ttftSteps === right.ttftSteps
+    && left.decodeTokens === right.decodeTokens && left.decodeMs === right.decodeMs
+    && left.promptTokens === right.promptTokens && left.outputTokens === right.outputTokens
+    && left.live?.startedAt === right.live?.startedAt
+    && left.live?.firstTokenAt === right.live?.firstTokenAt
+    && left.live?.tokens === right.live?.tokens;
+}
+
+function sameBackgroundProcesses(left: RuntimeSnapshot["backgroundProcesses"], right: RuntimeSnapshot["backgroundProcesses"]): boolean {
+  if (left === right) return true;
+  if (left.length !== right.length) return false;
+  return left.every((item, index) => {
+    const other = right[index];
+    return Boolean(other) && item.id === other!.id && item.pid === other!.pid
+      && item.command === other!.command && item.startedAt === other!.startedAt;
+  });
+}
+
+/** 活跃会话的标量字段差量（不含 messages/executions，那两个走专用补丁）。 */
+function activeFieldsPatch(previous: RuntimeSnapshot, next: RuntimeSnapshot): RuntimeSnapshotFieldsPatch {
+  const fields: RuntimeSnapshotFieldsPatch = { sessionId: next.sessionId };
+  if (previous.workspace !== next.workspace) fields.workspace = next.workspace;
+  if (previous.gitBranch !== next.gitBranch) fields.gitBranch = next.gitBranch;
+  if (previous.agentId !== next.agentId) fields.agentId = next.agentId;
+  if (previous.agentName !== next.agentName) fields.agentName = next.agentName;
+  if (previous.sessionFile !== next.sessionFile) fields.sessionFile = next.sessionFile;
+  if (previous.model?.provider !== next.model?.provider || previous.model?.id !== next.model?.id) fields.model = next.model;
+  if (previous.thinkingLevel !== next.thinkingLevel) fields.thinkingLevel = next.thinkingLevel;
+  if (previous.busy !== next.busy) fields.busy = next.busy;
+  if (previous.status !== next.status) fields.status = next.status;
+  if (previous.turnTiming !== next.turnTiming) fields.turnTiming = next.turnTiming;
+  if (!sameQueuedMessages(previous.queuedMessages, next.queuedMessages)) fields.queuedMessages = next.queuedMessages;
+  if (!sameContextUsage(previous.contextUsage, next.contextUsage)) fields.contextUsage = next.contextUsage;
+  if (!sameSpeedStats(previous.speedStats, next.speedStats)) fields.speedStats = next.speedStats;
+  if (previous.planMode !== next.planMode) fields.planMode = next.planMode;
+  if (previous.computerMode !== next.computerMode) fields.computerMode = next.computerMode;
+  if (previous.designMode !== next.designMode) fields.designMode = next.designMode;
+  if (previous.teamMode !== next.teamMode) fields.teamMode = next.teamMode;
+  if (previous.team !== next.team) fields.team = next.team;
+  // 列表/进程数组变化频率低（refreshSessions / 进程发现），只在引用或内容变化时附带。
+  if (previous.sessions !== next.sessions) fields.sessions = next.sessions;
+  if (previous.recentWorkspaces !== next.recentWorkspaces) fields.recentWorkspaces = next.recentWorkspaces;
+  if (!sameBackgroundProcesses(previous.backgroundProcesses, next.backgroundProcesses)) fields.backgroundProcesses = next.backgroundProcesses;
+  return fields;
+}
+
+function paneFieldsPatch(previous: SessionPaneSnapshot, next: SessionPaneSnapshot): SessionPaneFieldsPatch {
+  const fields: SessionPaneFieldsPatch = { sessionId: next.sessionId };
+  if (previous.sessionFile !== next.sessionFile) fields.sessionFile = next.sessionFile;
+  if (previous.workspace !== next.workspace) fields.workspace = next.workspace;
+  if (previous.model?.provider !== next.model?.provider || previous.model?.id !== next.model?.id) fields.model = next.model;
+  if (previous.thinkingLevel !== next.thinkingLevel) fields.thinkingLevel = next.thinkingLevel;
+  if (previous.busy !== next.busy) fields.busy = next.busy;
+  if (previous.status !== next.status) fields.status = next.status;
+  if (previous.turnTiming !== next.turnTiming) fields.turnTiming = next.turnTiming;
+  if (!sameQueuedMessages(previous.queuedMessages, next.queuedMessages)) fields.queuedMessages = next.queuedMessages;
+  if (!sameContextUsage(previous.contextUsage, next.contextUsage)) fields.contextUsage = next.contextUsage;
+  if (!sameSpeedStats(previous.speedStats, next.speedStats)) fields.speedStats = next.speedStats;
+  if (previous.planMode !== next.planMode) fields.planMode = next.planMode;
+  if (previous.computerMode !== next.computerMode) fields.computerMode = next.computerMode;
+  if (previous.designMode !== next.designMode) fields.designMode = next.designMode;
+  if (previous.teamMode !== next.teamMode) fields.teamMode = next.teamMode;
+  if (previous.team !== next.team) fields.team = next.team;
+  return fields;
+}
+
+/** 活跃会话：首帧/会话切换发完整 state，此后所有帧只发增量补丁。 */
+function emitActiveSnapshot(): void {
+  const next = snapshot();
+  const previous = lastActiveEmit;
+  if (!previous || previous.sessionId !== next.sessionId) {
+    const executions = executionSnapshots(next.executions, previous?.executions);
+    next.revision = ++activeRevision;
+    lastActiveEmit = makeEmitted(next, executions);
+    post({ type: "state", snapshot: next });
+    return;
+  }
+  const fields = activeFieldsPatch(previous.snapshot, next);
+  const messages = diffChatMessages(previous.messages, next.messages);
+  const { patch: executions, snapshots } = diffToolExecutions(previous.executions, next.executions);
+  // 没有任何变化就不要占用 revision（否则 renderer 会看到补丁序号断档，误触发
+  // 一次全量 state.sync）。
+  if (!messages && !executions && Object.keys(fields).every((key) => key === "sessionId")) return;
+  next.revision = ++activeRevision;
+  fields.revision = next.revision;
+  lastActiveEmit = makeEmitted(next, snapshots);
+  post({ type: "state.patch", snapshot: fields, messages, executions });
+}
+
 function flushState(): void {
   pendingFlushTimer = undefined;
   hasPendingFlush = false;
-  post({ type: "state", snapshot: snapshot() });
+  emitActiveSnapshot();
 }
 
 /**
@@ -475,7 +659,7 @@ function scheduleEmit(immediate: boolean): void {
       pendingFlushTimer = undefined;
     }
     hasPendingFlush = false;
-    post({ type: "state", snapshot: snapshot() });
+    emitActiveSnapshot();
     return;
   }
   if (pendingFlushTimer) {
@@ -820,6 +1004,20 @@ function refreshHooksConfig(): void {
   const { project, global } = hooksConfigPaths();
   hooksRules = readConfiguredHooks(project, global);
   hookTrustData = readHookTrust(hooksTrustPath());
+}
+
+/**
+ * 钩子上下文里的会话标题（{sessionTitle} 占位符）：侧边栏标题 → 会话文件里的名字
+ * （session_info 的 name）→ 短 id（解析规则与来龙去脉见 hooks-session-title.ts）。
+ * 会话文件里的名字这一档不可省：跨角色 / 后台自动化会话不在当前 Agent 的会话
+ * 目录里，侧边栏查不到，只查侧边栏就会把通知正文写成裸 UUID。
+ */
+function hookSessionTitle(sessionId: string, sessionName: () => string | undefined): string {
+  return resolveHookSessionTitle({
+    sessionId,
+    sidebarTitle: currentSessions.find((item) => item.id === sessionId)?.title,
+    sessionName: sessionName()
+  });
 }
 
 /**
@@ -1214,7 +1412,7 @@ async function openAutomationSessionRecord(task: AutomationTask, runAgent: Agent
   if (!recordRoot || !sameSessionDir(recordRoot, dirname(target))) {
     throw new Error("关联会话路径与工作区不匹配，拒绝恢复");
   }
-  await createSession(SessionManager.open(target, recordRoot, recordWorkspace), {
+  await createSession(openSessionManagerForReopen(target, recordRoot, recordWorkspace, runAgent.id), {
     skipActivate: true,
     agentOverride: runAgent,
     workspaceOverride: recordWorkspace,
@@ -1653,7 +1851,7 @@ function postEmptyDesignState(record: SessionRuntimeRecord): void {
 /** 快照的上下文占用：Pi 官方估算 + record 上的会话累计缓存命中率 + 三段明细。 */
 function snapshotContextUsage(record: SessionRuntimeRecord | undefined): ContextUsage | undefined {
   if (!record) return undefined;
-  const base = record.session.getContextUsage();
+  const base = record.contextUsageCache;
   if (!base) return undefined;
   return { ...base, cacheHitRate: runtimeContextUsage.cacheHitRateFrom(record.cacheUsage), ...(record.contextBreakdown ? { breakdown: record.contextBreakdown } : {}) };
 }
@@ -1688,6 +1886,14 @@ function refreshContextBreakdown(record: SessionRuntimeRecord): void {
     toolTokens: record.toolTokensCache.tokens,
     messages: session.state.messages
   });
+  // 同一稳定边界顺带刷新 contextUsage（见字段注释：SDK 内部要重建 projection）。
+  // SDK 返回 {tokens,contextWindow,percent}；cacheHitRate 由快照按累计账本合并。
+  try {
+    const usage = session.getContextUsage();
+    record.contextUsageCache = usage ? { ...usage, cacheHitRate: null } : undefined;
+  } catch {
+    // 估算失败不影响消息落定/渲染；保留上一帧读数，下一次稳定边界再试。
+  }
 }
 
 function runtimeSkillPrompt(name: string, instructions?: string, record: SessionRuntimeRecord | undefined = activeRuntime): string {
@@ -1752,7 +1958,11 @@ function truncateTransferredOutput(output: string | undefined): string | undefin
 function paneSnapshotFrom(record: SessionRuntimeRecord): SessionPaneSnapshot {
   const session = record.session;
   const sessionMessages = normalizeMessages(session.state.messages, session.state.streamingMessage);
-  const messages = [...sessionMessages, ...(record.controlMessages ?? [])].sort((left, right) => left.timestamp - right.timestamp);
+  // 热路径：绝大多数会话没有 pcontrol 消息，避免每帧 copy + O(n log n) 排序。
+  const controlMessages = record.controlMessages ?? [];
+  const messages = controlMessages.length === 0
+    ? sessionMessages
+    : [...sessionMessages, ...controlMessages].sort((left, right) => left.timestamp - right.timestamp);
   return {
     sessionId: session.sessionId,
     sessionFile: session.sessionManager.getSessionFile(),
@@ -1817,6 +2027,29 @@ function snapshot(): RuntimeSnapshot {
   };
 }
 
+function emitPaneSnapshot(record: SessionRuntimeRecord, forceFull = false): void {
+  const next = paneSnapshotFrom(record);
+  const key = next.sessionId ?? record.session.sessionId;
+  const previous = lastPaneEmit.get(key);
+  if (forceFull || !previous || previous.sessionId !== next.sessionId) {
+    const executions = executionSnapshots(next.executions, previous?.executions);
+    next.revision = (record.paneRevision ?? 0) + 1;
+    record.paneRevision = next.revision;
+    lastPaneEmit.set(key, makeEmitted(next, executions));
+    post({ type: "session.state", snapshot: next });
+    return;
+  }
+  const fields = paneFieldsPatch(previous.snapshot, next);
+  const messages = diffChatMessages(previous.messages, next.messages);
+  const { patch: executions, snapshots } = diffToolExecutions(previous.executions, next.executions);
+  if (!messages && !executions && Object.keys(fields).every((key) => key === "sessionId")) return;
+  next.revision = (record.paneRevision ?? 0) + 1;
+  record.paneRevision = next.revision;
+  fields.revision = next.revision;
+  lastPaneEmit.set(key, makeEmitted(next, snapshots));
+  post({ type: "session.state.patch", snapshot: fields, messages, executions });
+}
+
 /**
  * 推送一个分屏格子（watched 非激活会话）的会话级快照。immediate 生命周期转换
  * 立即 flush，流式 token 批量按 100ms（10fps）合帧（宽于激活会话的 50ms）；
@@ -1830,13 +2063,13 @@ function schedulePaneEmit(record: SessionRuntimeRecord, immediate: boolean): voi
       clearTimeout(record.paneFlushTimer);
       record.paneFlushTimer = undefined;
     }
-    post({ type: "session.state", snapshot: paneSnapshotFrom(record) });
+    emitPaneSnapshot(record);
     return;
   }
   if (record.paneFlushTimer) return;
   record.paneFlushTimer = setTimeout(() => {
     record.paneFlushTimer = undefined;
-    post({ type: "session.state", snapshot: paneSnapshotFrom(record) });
+    emitPaneSnapshot(record);
   }, PANE_STREAM_FLUSH_INTERVAL_MS);
 }
 
@@ -1905,7 +2138,43 @@ function scheduleSessionsRefresh(): void {
   }, 500);
 }
 
-function disposeRecord(record: SessionRuntimeRecord, options: { keepBrowserTab?: boolean } = {}): void {
+function rememberSessionManagerForReopen(record: SessionRuntimeRecord): void {
+  const manager = record.session.sessionManager;
+  const file = manager.getSessionFile();
+  if (!file) return;
+  try {
+    const info = statSync(file);
+    recentSessionManagers.remember({
+      path: file,
+      agentId: record.agent.id,
+      workspace: record.workspace,
+      mtimeMs: info.mtimeMs,
+      size: info.size,
+      manager
+    });
+  } catch {
+    // 文件已删除/不可读：不缓存，后续按正常 open 路径报错或重建。
+  }
+}
+
+/** 冷打开优先复用刚销毁会话的 manager（文件 mtime/size 必须一致）。 */
+function openSessionManagerForReopen(target: string, recordRoot: string | undefined, recordWorkspace: string, agentId = currentAgent?.id ?? "default"): SessionManager {
+  try {
+    const info = statSync(target);
+    const cached = recentSessionManagers.take(target, agentId, recordWorkspace, info);
+    if (cached) return cached;
+  } catch {
+    // 文件不存在/不可读：顺手丢掉陈旧缓存，走原 open 路径让上层给出准确错误。
+    recentSessionManagers.forget(target);
+  }
+  return SessionManager.open(target, recordRoot, recordWorkspace);
+}
+
+function disposeRecord(record: SessionRuntimeRecord, options: { keepBrowserTab?: boolean; cacheForReopen?: boolean } = {}): void {
+  // 趁 manager 还完整时留一份可复用句柄；session.dispose() 不应再被当成可复用来源。
+  // 同 id 替换（createSession 内部 dispose existing）不缓存：新会话马上会用新 manager，
+  // 缓存旧 manager 只会白占一份大会话内存。
+  if (options.cacheForReopen !== false) rememberSessionManagerForReopen(record);
   // MCP 连接先显式收回：Pi 的 dispose() 不发 session_shutdown，MCP 扩展不会自己
   // 关连接（stdio 子进程会活着占住句柄）——这是迁移后必须自己补的一步。
   try {
@@ -1919,7 +2188,7 @@ function disposeRecord(record: SessionRuntimeRecord, options: { keepBrowserTab?:
     workspace: () => record.workspace,
     agentName: () => record.agent.name,
     sessionId: () => record.session.sessionId,
-    sessionTitle: () => currentSessions.find((item) => item.id === record.session.sessionId)?.title ?? record.session.sessionId
+    sessionTitle: () => hookSessionTitle(record.session.sessionId, () => record.session.sessionManager.getSessionName())
   }), "dispose");
   // 团队先停：成员子会话不随 Lead 的 dispose 自动结束（Pi 没有父子生命周期绑定），
   // 必须在轮到 Lead 之前 abort + disconnect，否则后台成员会继续跑并继续付费。
@@ -1936,6 +2205,7 @@ function disposeRecord(record: SessionRuntimeRecord, options: { keepBrowserTab?:
   renderedSessions.delete(record.session.sessionId);
   pendingWatchSessions.delete(record.session.sessionId);
   hiddenPaneSessions.delete(record.session.sessionId);
+  lastPaneEmit.delete(record.session.sessionId);
   // 会话从运行时消失必须立即反映到面板（否则面板会挂着一条永远「在跑」的幽灵）。
   scheduleLiveEmit(true);
   if (record.paneFlushTimer) {
@@ -1945,10 +2215,20 @@ function disposeRecord(record: SessionRuntimeRecord, options: { keepBrowserTab?:
   record.extensionApi = undefined;
   if (activeRuntime === record) {
     activeRuntime = undefined;
+    // 旧实现的 streaming 合帧定时器可能还挂着：不清掉会在记录销毁后推一帧
+    // 空 state，把 renderer 的「正在载入」状态打回空白。
+    if (pendingFlushTimer) {
+      clearTimeout(pendingFlushTimer);
+      pendingFlushTimer = undefined;
+      hasPendingFlush = false;
+    }
     todoStore = undefined;
     todos = [];
     memoryStore = undefined;
     memoryTopics = [];
+    // 丢弃该会话的补丁基线：否则 lastActiveEmit 会一直持有整段消息数组
+    // （含 base64 图片），会话关闭后仍无法被 GC。
+    if (lastActiveEmit?.sessionId === record.session.sessionId) lastActiveEmit = undefined;
     refreshGitBranch();
   }
   // 会话真正消亡时释放其绑定的浏览器自动化标签页（main 侧只关 pi-browser-*
@@ -1960,6 +2240,15 @@ function disposeRecord(record: SessionRuntimeRecord, options: { keepBrowserTab?:
 }
 
 /** Keep the parked-session set bounded; running and split-rendered sessions are never evicted. */
+function parkedHistoryBytes(record: SessionRuntimeRecord): number {
+  try {
+    const file = record.session.sessionManager.getSessionFile();
+    return file ? statSync(file).size : 0;
+  } catch {
+    return 0;
+  }
+}
+
 function evictParkedSessions(): void {
   const parked = [...liveSessions.values()]
     .filter((record) => record !== activeRuntime && !record.busy && !renderedSessions.has(record.session.sessionId)
@@ -1967,7 +2256,17 @@ function evictParkedSessions(): void {
       // 成员留在后台，由成员状态条的「全部停止」收尾）。
       && !record.teamRuntime?.hasRunningMembers())
     .sort((left, right) => right.activatedAt - left.activatedAt);
-  for (const record of parked.slice(MAX_PARKED_SESSIONS)) disposeRecord(record);
+  let kept = 0;
+  let retainedBytes = 0;
+  for (const record of parked) {
+    const bytes = parkedHistoryBytes(record);
+    if (kept >= MAX_PARKED_SESSIONS || retainedBytes + bytes > MAX_PARKED_HISTORY_BYTES) {
+      disposeRecord(record);
+      continue;
+    }
+    kept += 1;
+    retainedBytes += bytes;
+  }
   pruneVanishedSessionRows();
 }
 
@@ -2029,7 +2328,7 @@ function activate(record: SessionRuntimeRecord): void {
   // 焦点从格子 A 切到 B：A 变回 parked，此后的更新只走 session.state 通道。
   // 立即推一帧，否则渲染端在 A 的下一个事件到来之前拿不到 paneStates[A]。
   if (previous && previous !== record && renderedSessions.has(previous.session.sessionId)) {
-    post({ type: "session.state", snapshot: paneSnapshotFrom(previous) });
+    emitPaneSnapshot(previous, true);
   }
 }
 
@@ -2343,6 +2642,12 @@ function applyModelOverrides<T extends Model<Api>>(model: T): T {
  * 请求重发时只压一次。日志只在真实发生裁剪时打（含前后体积与压缩/省略张数），
  * 是这条链路上唯一的可见性来源。
  */
+// 附件入库前先过同一套单图压缩：JSONL 里存的是模型实际会看到的尺寸，避免
+// 一张 13MB 原图永久留在会话 transcript / 每次切会话的快照里。请求侧仍保留
+// budget gate 处理历史图片总量，二者不冲突。
+const promptImageDownsampler = createImageDownsampler();
+/** 只有超大附件才在入库前压缩，避免普通截图发送时多等一轮压缩（实测 2.28MB PNG 约 850ms）。 */
+const INGEST_IMAGE_DOWNSAMPLE_MIN_CHARS = 8 * 1024 * 1024;
 const imageBudgetGate = createImageBudgetGate({
   downsample: createImageDownsampler(),
   warn: (message) => void post({ type: "log", level: "warn", message }),
@@ -2544,6 +2849,8 @@ async function switchSessionModel(record: SessionRuntimeRecord | undefined, mode
   // Token-limit overrides ride along on every model handoff to a session.
   await record.session.setModel(applyModelOverrides(model));
   reconcileVisionTool(record);
+  // 模型切换可能改变 contextWindow 与工具段估算：上下文占用缓存必须跟着重算。
+  refreshContextBreakdown(record);
 }
 
 function emitState(): void {
@@ -2552,25 +2859,84 @@ function emitState(): void {
 }
 
 /**
- * 异步刷新当前工作区的 git 分支。工作区在读取期间切换时丢弃过期结果
- * （分支属于工作区级别，跟随激活会话/全局 workspace，不做常驻监听）。
+ * 分支显示跟随的 workspace（与 snapshot 的 workspace 同源：激活会话优先）。
+ */
+function gitBranchTarget(): string | undefined {
+  return activeRuntime?.workspace ?? workspace;
+}
+
+/**
+ * 让常驻分支监听跟随当前工作区：目标没变复用，变了关旧挂新；无工作区时卸载。
+ * fs.watch 只负责“快”（~150ms 去抖），低频轮询负责兜底与首次进入非 git 目录后
+ * `git init` 的场景（此时目录里还没有 .git 可监听）。
+ */
+function syncGitBranchWatch(): void {
+  const target = gitBranchTarget();
+  if (!target) {
+    if (!gitBranchWatch && !gitBranchWatchPending) return;
+    gitBranchWatchToken++;
+    gitBranchWatchPending = undefined;
+    const previous = gitBranchWatch;
+    gitBranchWatch = undefined;
+    previous?.handle.close();
+    return;
+  }
+  if (gitBranchWatch?.target === target) return;
+  if (gitBranchWatchPending?.target === target) return;
+  const previous = gitBranchWatch;
+  gitBranchWatch = undefined;
+  previous?.handle.close();
+  const token = ++gitBranchWatchToken;
+  gitBranchWatchPending = { target, token };
+  void watchGitBranch(target, () => refreshGitBranch())
+    .then((handle) => {
+      if (token !== gitBranchWatchToken || !handle || gitBranchTarget() !== target) {
+        handle?.close();
+        return;
+      }
+      gitBranchWatch = { target, handle };
+    })
+    .catch(() => {
+      // 挂载失败不影响分支显示：轮询仍会刷新。
+    })
+    .finally(() => {
+      if (gitBranchWatchPending?.token === token) gitBranchWatchPending = undefined;
+    });
+}
+
+/** 启动分支兜底轮询（initialize 调用一次，幂等；定时器不阻止进程退出）。 */
+function startGitBranchPolling(): void {
+  if (gitBranchPollTimer) return;
+  gitBranchPollTimer = setInterval(() => {
+    syncGitBranchWatch();
+    refreshGitBranch();
+  }, GIT_BRANCH_POLL_MS);
+  if (typeof gitBranchPollTimer.unref === "function") gitBranchPollTimer.unref();
+}
+
+/**
+ * 异步刷新当前工作区的 git 分支。工作区在读取期间切换时丢弃过期结果。
+ * 既由生命周期事件（切会话/工作区）驱动，也由 .git/HEAD 监听和兜底轮询驱动。
  */
 function refreshGitBranch(): void {
-  const target = activeRuntime?.workspace ?? workspace;
+  const target = gitBranchTarget();
+  syncGitBranchWatch();
   if (!target) {
     gitBranch = undefined;
     return;
   }
+  const seq = ++gitBranchReadSeq;
+  const current = (): boolean => seq === gitBranchReadSeq && gitBranchTarget() === target;
   void readGitBranch(target)
     .then((branch) => {
-      if ((activeRuntime?.workspace ?? workspace) !== target) return;
+      if (!current()) return;
       if (gitBranch === branch) return;
       gitBranch = branch;
       emitState();
     })
     .catch(() => {
-      // 读取失败按非 git 项目处理；只在工作区仍为当前目标时才落值。
-      if ((activeRuntime?.workspace ?? workspace) !== target) return;
+      // 读取失败按非 git 项目处理；只在工作区仍为当前目标、且本次读取仍最新时落值。
+      if (!current()) return;
       if (gitBranch === undefined) return;
       gitBranch = undefined;
       emitState();
@@ -2687,6 +3053,8 @@ function handleSessionEvent(record: SessionRuntimeRecord, event: AgentSessionEve
         record.speedStats = speedStats.syncSpeedCounters(record.speedStats, record.session.state.messages);
         record.speedStep = undefined;
         record.speedLive = undefined;
+        // regenerate/abort 会截断 transcript：占用估算在这里再对齐一次稳定边界。
+        refreshContextBreakdown(record);
         lifecycle = true;
       }
       break;
@@ -2701,6 +3069,7 @@ function handleSessionEvent(record: SessionRuntimeRecord, event: AgentSessionEve
         record.speedStats = speedStats.syncSpeedCounters(record.speedStats, record.session.state.messages);
         record.speedStep = undefined;
         record.speedLive = undefined;
+        refreshContextBreakdown(record);
         lifecycle = true;
       }
       break;
@@ -3378,7 +3747,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     emitState();
     return;
   }
-  if (existing) disposeRecord(existing, { keepBrowserTab: true });
+  if (existing) disposeRecord(existing, { keepBrowserTab: true, cacheForReopen: false });
 
   const settingsManager = withCacheWarmingOff(SettingsManager.create(recordWorkspace, getAgentDir()));
   // Pi's own discovery is fully disabled: no extensions, no skills, no themes,
@@ -3406,7 +3775,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     sessionId: () => sessionHolder.session?.sessionId ?? activeSessionManager.getSessionId(),
     sessionTitle: () => {
       const sessionId = sessionHolder.session?.sessionId ?? activeSessionManager.getSessionId();
-      return currentSessions.find((item) => item.id === sessionId)?.title ?? sessionId;
+      return hookSessionTitle(sessionId, () => recordBox?.session.sessionManager.getSessionName());
     }
   });
   const resourceLoader = new DefaultResourceLoader({
@@ -4083,6 +4452,8 @@ async function initialize(command: Extract<RuntimeCommand, { type: "initialize" 
   refreshAutomation();
   // checkpoint 快照的全局清扫（mtime 过期/总量超限）：异步不阻塞启动。
   void sweepCheckpoints(getAgentDir(), Date.now(), (message) => void post({ type: "log", level: "warn", message }));
+  // 分支徽章准实时：HEAD 监听 + 低频兜底轮询，随工作区切换重挂。
+  startGitBranchPolling();
   if (workspace) await createSession();
   else {
     refreshTodos();
@@ -4334,6 +4705,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         emitState();
         break;
       }
+      if (command.activate !== false) post({ type: "session.opening", path: target, ...(header?.id ? { sessionId: header.id } : {}) });
       if (plan === "cold") {
         const recordWorkspace = resolve(header!.cwd);
         // sessionRoot 按 record 自己的工作区计算（不经过全局 workspace），且校验必须在
@@ -4345,7 +4717,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         const liveById = liveSessions.get(header!.id);
         if (command.activate === false) {
           if (liveById) break; // 已 live：无需重建，也不激活
-          await createSession(SessionManager.open(target, recordRoot, recordWorkspace), { skipActivate: true });
+          await createSession(openSessionManagerForReopen(target, recordRoot, recordWorkspace), { skipActivate: true });
           break;
         }
         workspace = recordWorkspace;
@@ -4359,7 +4731,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         }
         // 只 open 一次：cwdOverride 跳过 Pi 内部那次头部复读（旧实现先探测再重建，
         // 44 MB 会话白读一次）。
-        await createSession(SessionManager.open(target, recordRoot, workspace));
+        await createSession(openSessionManagerForReopen(target, recordRoot, workspace));
         break;
       }
       const discovered = SessionManager.open(target);
@@ -4381,7 +4753,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       if (command.activate === false) {
         const live = liveSessions.get(discovered.getSessionId());
         if (live) break; // 已 live：无需重建，也不激活
-        await createSession(SessionManager.open(target, recordRoot, recordWorkspace), { skipActivate: true });
+        await createSession(openSessionManagerForReopen(target, recordRoot, recordWorkspace), { skipActivate: true });
         break;
       }
       workspace = recordWorkspace;
@@ -4395,7 +4767,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         break;
       }
       // 此处不再重做存在性校验：上面已挡（live-by-id 命中隐含文件存在，重建分支直走）。
-      await createSession(SessionManager.open(target, recordRoot, workspace));
+      await createSession(openSessionManagerForReopen(target, recordRoot, workspace));
       break;
     }
     case "session.search": {
@@ -4541,11 +4913,23 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       emitState();
       break;
     }
+    case "state.sync": {
+      // 订阅建立前可能错过若干增量帧：以全量重建基线，并让 renderer 用同一份
+      // 全量覆盖本地快照（幂等；只在启动/重载时调用一次）。
+      lastActiveEmit = undefined;
+      emitActiveSnapshot();
+      for (const sessionId of renderedSessions) {
+        const record = liveSessions.get(sessionId);
+        if (record && record !== activeRuntime) emitPaneSnapshot(record, true);
+      }
+      break;
+    }
     case "session.watch": {
       if (!command.watch) {
         renderedSessions.delete(command.sessionId);
         pendingWatchSessions.delete(command.sessionId);
         hiddenPaneSessions.delete(command.sessionId);
+        lastPaneEmit.delete(command.sessionId);
         const watched = liveSessions.get(command.sessionId);
         if (watched?.paneFlushTimer) {
           clearTimeout(watched.paneFlushTimer);
@@ -4565,13 +4949,13 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         break;
       }
       if (hiddenPaneSessions.delete(command.sessionId) && record) {
-        // 从隐藏切回可见：补推一帧，补上隐藏期间错过的更新。
-        post({ type: "session.state", snapshot: paneSnapshotFrom(record) });
+        // 从隐藏切回可见：补推一帧全量，补上隐藏期间错过的更新。
+        emitPaneSnapshot(record, true);
         break;
       }
       if (record) {
         // 立即推一帧全量，格子无需等该会话的下一个事件即可水合。
-        post({ type: "session.state", snapshot: paneSnapshotFrom(record) });
+        emitPaneSnapshot(record, true);
       } else {
         // 会话还没 live（启动恢复逐格打开中）：挂起，createSession 后补挂。
         pendingWatchSessions.add(command.sessionId);
@@ -4977,7 +5361,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       } else {
         workspace = recordWorkspace;
         rememberWorkspace(workspace);
-        await createSession(SessionManager.open(target, recordRoot, recordWorkspace));
+        await createSession(openSessionManagerForReopen(target, recordRoot, recordWorkspace));
       }
       emitState();
       break;

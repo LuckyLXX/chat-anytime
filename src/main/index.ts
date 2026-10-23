@@ -14,6 +14,7 @@ import { pruneSessionPaths, setArchivedSessionPaths, togglePinnedSessionPath } f
 import { importExternalAttachment, workspaceRelativeAttachment } from "./attachments.js";
 import type { BrowserDownloadPrefs, BrowserPreviewCommand, BrowserPreviewState, DesktopBootstrap, DesktopSettings, GalleryServiceProbe, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot, SshCommand, SshCommandResult, SshEventData, SshRevealEvent, TerminalCommand, TerminalEventData, WorkspaceDirectoryListing, WorkspaceEntryResult, WorkspaceFilePreview, WorkspaceFileSearchResult, WorkspaceFileStat, WorkspaceFileWriteResult } from "../shared/protocol.js";
 import { PREVIEW_FILE_SCHEME, isPanelWorkHost, parseWorkspaceFilePreviewUrl } from "../shared/protocol.js";
+import { applyRuntimeStatePatch } from "../shared/snapshot-patch.js";
 import { isThemeAssetUrl, parseThemeAssetUrl } from "../shared/theme-assets.js";
 import type { ThemeImportOutcome } from "../shared/theme-assets.js";
 import { serveThemeAsset, migrateInlineThemeAssets, reconcileThemeAssetDirs, themeAssetsDirFor, resolveThemeAgentDir, importThemeCssFile, importThemeDirectory, promoteThemeScope } from "./theme-assets.js";
@@ -594,6 +595,21 @@ function startRuntime(): void {
       return;
     }
     if (message.type === "state") latestSnapshot = message.snapshot;
+    // 增量帧也合并进 main 的缓存：渲染端重载时 bootstrap 拿到的必须是最新状态，
+    // 否则会退回到最近一次全量帧（可能落后数分钟）。
+    else if (message.type === "state.patch" && latestSnapshot) {
+      const revision = message.snapshot.revision;
+      // 重复帧（重连/重放）直接丢弃：增量补丁重复应用会重复 append 消息。
+      if (revision === undefined || latestSnapshot.revision === undefined || revision > latestSnapshot.revision) {
+        const merged = applyRuntimeStatePatch(latestSnapshot, message);
+        if (merged) latestSnapshot = merged;
+        else {
+          // 补丁基线失配（索引越界）：丢弃缓存并让 utility 推一帧全量，避免 bootstrap 永远停在旧状态。
+          latestSnapshot = undefined;
+          runtimeProcess?.postMessage({ type: "state.sync" } satisfies RuntimeCommand);
+        }
+      }
+    }
     // 待决提问镜像：渲染端 HMR/刷新/崩溃恢复后靠 bootstrap 把面板重新浮出来。
     // 只镜像、不裁决——真正的作答仍由 utility 的 QuestionBroker 处理。
     if (message.type === "question") pendingQuestions.record(message.request);
@@ -675,6 +691,21 @@ function createWindow(): void {
     chooseSavePath: (defaultPath) => chooseDownloadSavePath(nextWindow, defaultPath)
   });
   mainWindow = nextWindow;
+  // 主窗口可见性：隐藏到托盘/最小化时让 renderer 暂停高频动画与 backdrop-filter。
+  const sendWindowState = (): void => {
+    if (nextWindow.isDestroyed()) return;
+    nextWindow.webContents.send("app:window-state", {
+      focused: nextWindow.isFocused(),
+      visible: nextWindow.isVisible() && !nextWindow.isMinimized()
+    });
+  };
+  nextWindow.on("focus", sendWindowState);
+  nextWindow.on("blur", sendWindowState);
+  nextWindow.on("show", sendWindowState);
+  nextWindow.on("hide", sendWindowState);
+  nextWindow.on("minimize", sendWindowState);
+  nextWindow.on("restore", sendWindowState);
+  nextWindow.webContents.on("did-finish-load", sendWindowState);
   browserPreviewController = previewController;
   browserAutomationController = new BrowserAutomationController(previewController, (tabId, reveal) => {
     // AI 开始操作某个标签页：让预览面板自动展开并激活它（用户可见）。reveal 语义
