@@ -714,6 +714,8 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 .action-timeline-call-summary::marker { content: ""; }
 .action-timeline-call-summary > strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .action-timeline-call-summary > span { flex: 0 0 auto; margin-left: 0; white-space: nowrap; }
+/* codemode 脚本内的嵌套调用：在工具卡标题旁标出来源，避免和顶层调用混淆。 */
+.action-timeline-nested-tag { flex: 0 0 auto; padding: 1px 5px; border: 1px solid var(--border-strong); border-radius: 999px; color: var(--text-muted); background: var(--surface-raised); font-size: 9px; font-style: normal; font-weight: 600; line-height: 1.3; white-space: nowrap; }
 .action-timeline-call-chevron { flex: 0 0 auto; color: var(--text-muted); transition: transform .16s ease; }
 .action-timeline-call[open] .action-timeline-call-chevron { transform: rotate(180deg); }
 .action-timeline-call-detail { display: grid; gap: 8px; min-width: 0; margin: 7px 0 3px; }
@@ -1180,6 +1182,9 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 .resource-item-copy strong { overflow-wrap: anywhere; color: var(--text); font-size: 11px; }
 .resource-item-copy small, .resource-item-copy em { overflow-wrap: anywhere; color: var(--text-muted); font-size: 11px; line-height: 1.35; font-style: normal; }
 .resource-item-copy em { color: var(--accent-text); }
+/* MCP 行内暴露切换：直连 / 脚本（codemode）。 */
+.mcp-exposure-toggle select { height: 24px; min-height: 24px; padding: 0 4px; border: 1px solid var(--border-strong); border-radius: 5px; color: var(--text); background: var(--surface); font-size: 10.5px; cursor: pointer; }
+.mcp-exposure-toggle select:disabled { cursor: default; opacity: .55; }
 .resource-empty { margin: 0; padding: 10px; color: var(--text-muted); border: 1px dashed var(--border-strong); font-size: 10px; line-height: 1.45; }
 .mcp-resource-item { min-height: 48px; }
 /* 两级前缀 + 显式尺寸：压过 .settings-dialog 的通用 button 规则与 .secondary-button 基线高度。 */

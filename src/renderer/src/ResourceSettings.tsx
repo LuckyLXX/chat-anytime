@@ -82,6 +82,7 @@ export function ResourceSettings({ resources }: ResourceSettingsProps): ReactNod
   const [mcpHeaders, setMcpHeaders] = useState("");
   const [mcpEnv, setMcpEnv] = useState("");
   const [mcpTimeout, setMcpTimeout] = useState("");
+  const [mcpExposure, setMcpExposure] = useState<NonNullable<McpServerConfigDraft["exposure"]>>("direct");
   const [mcpOauthOpen, setMcpOauthOpen] = useState(false);
   const [mcpOauth, setMcpOauth] = useState<McpOauthFormState>(EMPTY_MCP_OAUTH);
   const [commandFormOpen, setCommandFormOpen] = useState(false);
@@ -148,6 +149,7 @@ export function ResourceSettings({ resources }: ResourceSettingsProps): ReactNod
     setMcpHeaders("");
     setMcpEnv("");
     setMcpTimeout("");
+    setMcpExposure("direct");
     setMcpOauth(EMPTY_MCP_OAUTH);
     setMcpOauthOpen(false);
   }
@@ -165,6 +167,7 @@ export function ResourceSettings({ resources }: ResourceSettingsProps): ReactNod
     setMcpBearerTokenEnv(server.bearerTokenEnv ?? "");
     setMcpHeaders(formatKeyValueLines(server.headers));
     setMcpTimeout(server.timeout === undefined ? "" : String(server.timeout));
+    setMcpExposure(server.exposure ?? "direct");
     setMcpOauth({
       clientId: server.oauth?.clientId ?? "",
       clientSecret: server.oauth?.clientSecret ?? "",
@@ -207,6 +210,7 @@ export function ResourceSettings({ resources }: ResourceSettingsProps): ReactNod
         name: mcpName.trim(),
         scope: mcpScope,
         transport: mcpTransport,
+        exposure: mcpExposure,
         ...(timeout !== undefined ? { timeout } : {}),
         ...(mcpTransport === "stdio"
           ? {
@@ -229,6 +233,29 @@ export function ResourceSettings({ resources }: ResourceSettingsProps): ReactNod
     } catch (error) {
       setLocalError(error instanceof Error ? error.message : "MCP Server 配置无效");
     }
+  }
+
+  /**
+   * 列表内直接切换工具暴露（不用打开编辑表单）：把摘要投影还原成完整草稿再保存。
+   * 表单路径要求用户记得点「保存修改」，这里改完即存——避免「改了没生效」的错觉。
+   */
+  async function saveMcpExposure(server: McpServerSummary, exposure: "direct" | "codemode"): Promise<void> {
+    const draft: McpServerConfigDraft = {
+      name: server.name,
+      scope: server.scope,
+      transport: server.transport,
+      ...(server.command ? { command: server.command } : {}),
+      ...(server.args && server.args.length > 0 ? { args: server.args } : {}),
+      ...(server.url ? { url: server.url } : {}),
+      ...(server.auth ? { auth: server.auth } : {}),
+      ...(server.bearerTokenEnv ? { bearerTokenEnv: server.bearerTokenEnv } : {}),
+      ...(server.env ? { env: server.env } : {}),
+      ...(server.headers ? { headers: server.headers } : {}),
+      ...(server.oauth ? { oauth: server.oauth } : {}),
+      ...(server.timeout !== undefined ? { timeout: server.timeout } : {}),
+      exposure
+    };
+    await run({ type: "mcp.server.save", server: draft, original: { name: server.name, scope: server.scope } });
   }
 
   return (
@@ -260,6 +287,7 @@ export function ResourceSettings({ resources }: ResourceSettingsProps): ReactNod
                 <label>名称{editingMcp ? <input value={mcpName} disabled title="名称即配置键，不支持改名；需要改名请删除后新建" /> : <input value={mcpName} placeholder="例如 context7" onChange={(event) => setMcpName(event.target.value)} />}</label>
                 <label>写入范围<select value={mcpScope} onChange={(event) => setMcpScope(event.target.value as McpServerConfigDraft["scope"])}><option value="project">当前项目 .mcp.json</option><option value="global">用户全局配置</option></select></label>
                 <label>连接方式<select value={mcpTransport} onChange={(event) => setMcpTransport(event.target.value as McpServerConfigDraft["transport"])}><option value="stdio">本地命令（stdio）</option><option value="http">远程地址（HTTP）</option></select></label>
+                <label>工具暴露<select value={mcpExposure} onChange={(event) => setMcpExposure(event.target.value as NonNullable<McpServerConfigDraft["exposure"]>)}><option value="direct">直连（工具声明给模型）</option><option value="codemode">脚本（codemode，不占前缀）</option></select></label>
                 {mcpTransport === "stdio" ? <>
                   <label>启动命令<input value={mcpCommand} placeholder="npx" onChange={(event) => setMcpCommand(event.target.value)} /></label>
                   <label className="mcp-form-wide">参数（每行一个）<textarea value={mcpArgs} rows={3} placeholder={"-y\ncontext7-mcp"} onChange={(event) => setMcpArgs(event.target.value)} /></label>
@@ -287,6 +315,7 @@ export function ResourceSettings({ resources }: ResourceSettingsProps): ReactNod
                 </>}
               </div>
               <p className="resource-form-help">{editingMcp ? `正在编辑 ${editingMcp.name}：名称即配置键不可改；切换「写入范围」会把该条目迁移到另一个配置文件，停用状态保留。保存后立即生效（增减服务器无需重建会话）。` : "添加后会写入 MCP 配置并立即加载。stdio 服务通常由 npx 首次启动；敏感值建议用环境变量名或 ${名称} 引用，不要直接写入配置。"}</p>
+              {mcpExposure === "codemode" && <p className="resource-form-help">脚本模式：该服务器的工具不再声明给模型，改为在 codemode 脚本里用 searchTools() / ALL_TOOLS 发现并调用，工具定义不进每次请求的前缀（省 token）。代价是模型必须先写脚本、调用会合并进同一张脚本卡片；适合低频服务器，搜索类这类每轮都要用的建议保持直连。保存后会在后台重新连接并更新工具：工具变化完成即生效，无需发送消息或新建话题。</p>}
               {mcpTransport === "http" && <p className="resource-form-help">认证选 OAuth：保存后回到列表点「认证」，会自动打开系统浏览器完成授权，回调后自动重连；凭据保存在本地（刷新令牌长期有效），只有被授权服务器判定失效时才会提示「重新授权」——那时已保存的凭据仍会保留并优先重试。Bearer 环境变量优先于 OAuth（它的令牌会覆盖请求头里的 Authorization，其余头保留）；该字段填的是**环境变量名**（如 EXA_TOKEN，不是令牌本身），值在系统环境变量里设置，改完需重启应用生效。请求头按字面带上；写了 Authorization 就不再自动走 OAuth；只写 X-API-Key 这类网关头不影响该判定（服务端若答 401 仍会进入「需要认证」并提示走 OAuth，需要彻底避开可用 Bearer 环境变量）。不支持动态客户端注册的服务器用「OAuth 高级选项」填预注册的客户端 ID/密钥与回调地址。注意：环境变量值、请求头值与客户端密钥里的 {"${名称}"} 会被替换成该环境变量的值、「!命令」会执行命令并把输出代入（Pi 展开规则）；敏感值建议用 {"${环境变量}"} 或 Bearer 环境变量而不是明文。</p>}
               <footer className="mcp-form-actions"><button className="secondary-button compact-button" type="button" disabled={controlsBusy} onClick={() => { resetMcpForm(); setMcpFormOpen(false); }}><X size={13} />取消</button><button className="primary-button compact-button" type="submit" data-control="mcp-save" disabled={controlsBusy}>{editingMcp ? <Pencil size={13} /> : <Plus size={13} />}{editingMcp ? "保存修改" : "添加 MCP"}</button></footer>
             </form>}
@@ -309,6 +338,17 @@ export function ResourceSettings({ resources }: ResourceSettingsProps): ReactNod
                           <small>{resourceScopeLabels[server.scope]} · {server.authState === "pending" ? "等待浏览器授权…" : retryable ? "凭据已保留，待重新授权" : mcpStatusLabels[server.status]} · {server.toolCount} 个工具{server.resourceCount === undefined ? "" : ` · ${server.resourceCount} 个资源`}{server.failedAgoSeconds !== undefined ? ` · ${server.failedAgoSeconds} 秒前失败` : ""}</small>
                           {server.error && <em>{server.error}</em>}
                         </div>
+                        <label className="resource-toggle mcp-exposure-toggle" title="工具暴露：直连 = 工具声明给模型（占前缀）；脚本 = codemode，不声明、不占前缀">
+                          <select
+                            aria-label={`${server.name} 工具暴露`}
+                            value={server.exposure ?? "direct"}
+                            disabled={controlsBusy || server.disabled}
+                            onChange={(event) => void saveMcpExposure(server, event.target.value as "direct" | "codemode")}
+                          >
+                            <option value="direct">直连</option>
+                            <option value="codemode">脚本</option>
+                          </select>
+                        </label>
                         <label className="resource-toggle"><input type="checkbox" checked={!server.disabled} disabled={controlsBusy} onChange={(event) => void run({ type: "mcp.server.toggle", name: server.name, enabled: event.target.checked })} /><span>启用</span></label>
                         {showAuth && <button className="secondary-button compact-button mcp-auth-button" type="button" disabled={controlsBusy} title={server.authState === "pending" ? "重新打开浏览器里的授权页" : retryable ? `先用已保留的凭据重试 ${server.name}；不行会打开浏览器授权页` : `用浏览器完成 ${server.name} 的 OAuth 授权`} onClick={() => void run({ type: "mcp.server.auth", name: server.name })}><KeyRound size={13} />{server.authState === "pending" ? "重新打开授权页" : retryable ? "重新授权" : "认证"}</button>}
                         {authorized && <button className="secondary-button compact-button mcp-auth-button" type="button" disabled={controlsBusy} title={`清除 ${server.name} 已保存的 OAuth 凭据`} onClick={() => void run({ type: "mcp.server.auth.clear", name: server.name })}>清除凭据</button>}

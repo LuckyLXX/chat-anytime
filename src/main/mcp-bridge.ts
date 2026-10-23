@@ -25,7 +25,7 @@
 import { createMcpExtension } from "@earendil-works/pi-coding-agent";
 import type { ExtensionUIContext, InlineExtension, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-import { piMcpConfigFor, readWorkspaceMcpServers } from "./runtime-mcp.js";
+import { piMcpConfigFor, readWorkspaceMcpServers, type PiMcpRegistration } from "./runtime-mcp.js";
 import { readConfiguredMcpServers, type ConfiguredMcpServer } from "./mcp-config.js";
 
 /** 会话启动后等待连接的预算（毫秒）：对齐迁移前的 MCP_OP_TIMEOUT_MS = 15s。 */
@@ -53,6 +53,12 @@ export interface McpBridgeControl {
   reapply: (name: string) => void;
   remove: (name: string) => void;
   /**
+   * 按磁盘上的配置重新对齐注册集（手动改 `.mcp.json` / `mcp.json` 后的热应用）：
+   * 新增的注册、消失/停用的注销、同名但翻译后配置变了的才重注册。
+   * 返回是否真的发生了变更（没变则调用方不必重算活动集/前缀）。
+   */
+  resync: () => boolean;
+  /**
    * 注销本会话注册过的全部服务器。**会话销毁前必须调**：Pi 的 `dispose()` 不
    * 发 session_shutdown（只有 reload 会），MCP 扩展不会自己关连接，stdio 子进程
    * 会活着占住句柄（实测：dispose 后 10s 子进程仍在、临时目录 EBUSY）。
@@ -62,7 +68,7 @@ export interface McpBridgeControl {
 }
 
 /** Pi 内置 MCP 扩展（空 loadConfig + autoEnableCodemode 关死 + 宿主 openUrl）。 */
-export function createPiMcpExtensionLayer(deps: { openExternal: (url: string) => void }): InlineExtension {
+export function createPiMcpExtensionLayer(deps: { openExternal: (url: string) => void; onToolSetChange?: () => void }): InlineExtension {
   const extension = createMcpExtension({
     // loadConfig 必须带 errors: []（PoC 踩坑：缺了 /mcp 状态板抛
     // "configErrors is not iterable"、session_start 的 pending.catch 报错）。
@@ -74,10 +80,55 @@ export function createPiMcpExtensionLayer(deps: { openExternal: (url: string) =>
   // createMcpExtension 返回 ExtensionFactory（函数形态）；InlineExtension 的
   // factory 字段是它的对象等价物。两种形态 Pi 都接受，这里统一成对象形态
   // 便于 extensionFactories 列表混排。
-  if (typeof extension === "function") {
-    return { name: "builtin-mcp", hidden: true, factory: extension };
-  }
-  return { ...extension, name: extension.name ?? "builtin-mcp", hidden: true };
+  const factory = typeof extension === "function" ? extension : extension.factory;
+  const meta = typeof extension === "function" ? { name: "builtin-mcp", hidden: true } : { ...extension, name: extension.name ?? "builtin-mcp", hidden: true };
+  return {
+    ...meta,
+    // 只在这层包装：MCP 扩展注册/激活工具时通过公开 API 通知宿主，由宿主重算
+    // 声明。注册要等连接完成（异步），用固定延时的「猜」会漏掉慢服务器。
+    factory: (pi) => factory(deps.onToolSetChange ? observeToolSetApi(pi, deps.onToolSetChange) : pi)
+  };
+}
+
+/**
+ * 观察一个 ExtensionAPI 的公开工具 API：`registerTool()` / `setActiveTools()`
+ * 先完成原调用，再通知宿主。只读观察，不修改参数与返回值，也不触碰 Pi 的
+ * 私有注册表。用 Proxy 而不是浅拷贝：扩展拿到的其它成员保持原样（方法绑定
+ * 到原对象），避免破坏 `this` 依赖。
+ */
+export function observeToolSetApi(pi: ExtensionAPI, onChange: () => void): ExtensionAPI {
+  const overrides = new Map<PropertyKey, unknown>([
+    ["registerTool", (tool: Parameters<ExtensionAPI["registerTool"]>[0]) => {
+      pi.registerTool(tool);
+      onChange();
+    }],
+    ["setActiveTools", (toolNames: string[]) => {
+      pi.setActiveTools(toolNames);
+      onChange();
+    }]
+  ]);
+  // 绑定后的成员按属性缓存：每次 get 都返回新函数会让「保存引用后比较」的调用方
+  // 看到不同身份（Pi 内部目前不这么做，但稳定的身份是包装层的最低承诺）。
+  // set/deleteProperty 同步清缓存：目标属性被覆写后不得继续返回旧值。
+  const bound = new Map<PropertyKey, unknown>();
+  return new Proxy(pi, {
+    get(target, property) {
+      if (overrides.has(property)) return overrides.get(property);
+      if (bound.has(property)) return bound.get(property);
+      const value = Reflect.get(target, property, target);
+      const resolved = typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+      bound.set(property, resolved);
+      return resolved;
+    },
+    set(target, property, value, receiver) {
+      bound.delete(property);
+      return Reflect.set(target, property, value, receiver);
+    },
+    deleteProperty(target, property) {
+      bound.delete(property);
+      return Reflect.deleteProperty(target, property);
+    }
+  }) as ExtensionAPI;
 }
 
 /**
@@ -87,20 +138,108 @@ export function createPiMcpExtensionLayer(deps: { openExternal: (url: string) =>
  * 注册的服务器在 session_start 时连接」。
  */
 export function createPidesktopMcpBridge(deps: McpBridgeDeps & { onApi?: (control: McpBridgeControl | undefined) => void }): InlineExtension {
-  let api: ExtensionAPI | undefined;
   const registered = new Set<string>();
+  /**
+   * 已注册服务器的翻译后配置指纹（JSON）。resync 用它区分「同名但配置变了」与
+   * 「只是文件被其他工具重写」：只有前者才重注册（重注册 = 断开重连，很贵）。
+   */
+  const fingerprints = new Map<string, string>();
+
+  /** 配置 → 注册载荷（三态 exposure：禁用 > codemode > direct）。 */
+  const registrationFor = (server: ConfiguredMcpServer): PiMcpRegistration["config"] => {
+    const exposure = deps.disabledServers().has(server.name)
+      ? "hidden"
+      : server.entry.exposure === "codemode"
+        ? "codemode"
+        : "direct";
+    return piMcpConfigFor(server, exposure);
+  };
 
   const registerOne = (pi: ExtensionAPI, server: ConfiguredMcpServer): void => {
-    const exposure = deps.disabledServers().has(server.name) ? "hidden" : "direct";
-    pi.registerMcpServer(server.name, piMcpConfigFor(server, exposure) as Parameters<ExtensionAPI["registerMcpServer"]>[1]);
+    const config = registrationFor(server);
+    pi.registerMcpServer(server.name, config as Parameters<ExtensionAPI["registerMcpServer"]>[1]);
     registered.add(server.name);
+    fingerprints.set(server.name, JSON.stringify(config));
   };
+
+  /**
+   * 控制柄：捕获的 `pi`（ExtensionAPI），按会话持有。reapply 用新配置替换注册
+   * （Pi 允许同名替换），remove 注销并关连接。每次工厂执行（会话装配）重建。
+   */
+  const buildControl = (pi: ExtensionAPI): McpBridgeControl => ({
+    reapply: (name: string) => {
+      const { project, global } = deps.configPaths();
+      const target = readWorkspaceMcpServers(project, global).find((server) => server.name === name);
+      if (target && !target.entry.disabled) {
+        registerOne(pi, target);
+      } else {
+        // 配置没了或停用了：注销即可（unregister 关连接并移除工具）
+        pi.unregisterMcpServer(name);
+        registered.delete(name);
+        // 指纹必须一并清掉：disabled 不进翻译后的注册载荷，留着旧指纹会让
+        // 「文件里手动重新启用」被 resync 误判为「配置未变」而永不重连。
+        fingerprints.delete(name);
+      }
+    },
+    remove: (name: string) => {
+      pi.unregisterMcpServer(name);
+      registered.delete(name);
+      fingerprints.delete(name);
+    },
+    resync: () => {
+      let configured: ConfiguredMcpServer[];
+      try {
+        const { project, global } = deps.configPaths();
+        configured = readWorkspaceMcpServers(project, global);
+      } catch {
+        // 改到一半的非法 JSON：保留现状，等下一次文件事件重试。
+        return false;
+      }
+      let changed = false;
+      const keep = new Set<string>();
+      for (const server of configured) {
+        if (server.entry.disabled) continue;
+        keep.add(server.name);
+        const next = JSON.stringify(registrationFor(server));
+        if (fingerprints.get(server.name) === next) continue;
+        try {
+          registerOne(pi, server);
+          changed = true;
+        } catch (error) {
+          deps.onNotify(`MCP 服务器 ${server.name} 重载失败：${error instanceof Error ? error.message : String(error)}`, "error");
+        }
+      }
+      for (const name of [...registered]) {
+        if (keep.has(name)) continue;
+        try {
+          pi.unregisterMcpServer(name);
+        } catch {
+          // 单个失败不阻断其余（热重载路径 best-effort）
+        }
+        registered.delete(name);
+        fingerprints.delete(name);
+        changed = true;
+      }
+      return changed;
+    },
+    unregisterAll: () => {
+      for (const name of [...registered]) {
+        try {
+          pi.unregisterMcpServer(name);
+        } catch {
+          // 单个失败不阻断其余（销毁路径 best-effort）
+        }
+        registered.delete(name);
+        fingerprints.delete(name);
+      }
+    },
+    registeredNames: () => [...registered]
+  });
 
   return {
     name: "pidesktop-mcp",
     hidden: true,
     factory(pi) {
-      api = pi;
       pi.on("mcp_servers_change", () => {
         deps.onServersChange();
       });
@@ -120,36 +259,14 @@ export function createPidesktopMcpBridge(deps: McpBridgeDeps & { onApi?: (contro
           deps.onNotify(`MCP 服务器 ${server.name} 注册失败：${error instanceof Error ? error.message : String(error)}`, "error");
         }
       }
-      deps.onApi?.({
-        reapply: (name: string) => {
-          if (!api) throw new Error("MCP 桥接不可用：当前会话没有活跃的扩展上下文");
-          const { project, global } = deps.configPaths();
-          const target = readWorkspaceMcpServers(project, global).find((server) => server.name === name);
-          if (target && !target.entry.disabled) {
-            registerOne(api, target);
-          } else {
-            // 配置没了或停用了：注销即可（unregister 关连接并移除工具）
-            api.unregisterMcpServer(name);
-            registered.delete(name);
-          }
-        },
-        remove: (name: string) => {
-          if (!api) throw new Error("MCP 桥接不可用：当前会话没有活跃的扩展上下文");
-          api.unregisterMcpServer(name);
-          registered.delete(name);
-        },
-        unregisterAll: () => {
-          if (!api) return;
-          for (const name of [...registered]) {
-            try {
-              api.unregisterMcpServer(name);
-            } catch {
-              // 单个失败不阻断其余（销毁路径 best-effort）
-            }
-            registered.delete(name);
-          }
-        },
-        registeredNames: () => [...registered]
+      const control = buildControl(pi);
+      // 控制柄必须等 record 建立之后再交付：工厂在 resourceLoader.reload() 阶段
+      // 执行，彼时调用方还没有 session record（早期实现就在这一步丢掉了句柄，
+      // 导致后续 save/toggle/delete/resync 全部走空）。session_start 在
+      // bindExtensions() 里触发，此时 record 已就绪；服务器仍按工厂期注册，
+      // 保证 Pi 的 MCP 扩展在同一个 session_start 读到配置。
+      pi.on("session_start", () => {
+        deps.onApi?.(control);
       });
     }
   };

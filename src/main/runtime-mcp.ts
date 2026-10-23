@@ -24,6 +24,8 @@ const HEADER_NAME_PATTERN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/u;
 
 export function mcpConfigEntry(server: McpServerConfigDraft): McpServerConfigEntry {
   const timeout = normalizeMcpTimeout(server.timeout);
+  // `codemode` 才落盘；`direct` 是缺省语义，不写字段（存量 .mcp.json 零差异）。
+  const exposure = server.exposure === "codemode" ? { exposure: "codemode" as const } : {};
   if (server.transport === "stdio") {
     const command = server.command?.trim();
     if (!command) throw new Error("stdio MCP Server 需要填写启动命令");
@@ -31,7 +33,8 @@ export function mcpConfigEntry(server: McpServerConfigDraft): McpServerConfigEnt
       command,
       ...(server.args && server.args.length > 0 ? { args: server.args } : {}),
       ...(server.env && Object.keys(server.env).length > 0 ? { env: server.env } : {}),
-      ...(timeout !== undefined ? { timeout } : {})
+      ...(timeout !== undefined ? { timeout } : {}),
+      ...exposure
     };
   }
   const url = server.url?.trim();
@@ -55,7 +58,8 @@ export function mcpConfigEntry(server: McpServerConfigDraft): McpServerConfigEnt
     ...(server.auth === "bearer-env" && bearerTokenEnv ? { bearerTokenEnv } : {}),
     ...(headers ? { headers } : {}),
     ...(oauth ? { oauth } : {}),
-    ...(timeout !== undefined ? { timeout } : {})
+    ...(timeout !== undefined ? { timeout } : {}),
+    ...exposure
   };
 }
 
@@ -192,9 +196,12 @@ export const PI_MCP_CALL_TIMEOUT_SECONDS = 120;
 export type PiMcpRegistration = {
   name: string;
   config:
-    | { type: "stdio"; command: string; args?: string[]; env?: Record<string, string>; exposure: "direct" | "hidden"; timeout: number }
-    | { type: "http"; url: string; headers?: Record<string, string>; oauth?: McpOAuthAdvanced; exposure: "direct" | "hidden"; timeout: number };
+    | { type: "stdio"; command: string; args?: string[]; env?: Record<string, string>; exposure: PiMcpExposure; timeout: number }
+    | { type: "http"; url: string; headers?: Record<string, string>; oauth?: McpOAuthAdvanced; exposure: PiMcpExposure; timeout: number };
 };
+
+/** 运行时下发给 Pi 的暴露方式：`disabled` 映射为 hidden，配置的 codemode 原样透传。 */
+export type PiMcpExposure = "direct" | "codemode" | "hidden";
 
 /**
  * 把一条配置条目翻译成 Pi 的 `McpServerConfig`。字段方言对照：
@@ -203,10 +210,11 @@ export type PiMcpRegistration = {
  * - `auth: "oauth"` → 无需显式配置：Pi 对「无 Authorization 头的 HTTP 服务器」
  *   自动挂 OAuth provider，401 后进入 needs-auth，登录经 `/mcp login`；
  * - `disabled` 的服务器**不进这里**（不注册即不连接，目录里仍以配置投影显示）；
- * - exposure 一律 `direct`（工具直接声明给模型，与迁移前行为一致）；
- *   角色级 `mcp:<server>` overlay 禁用的服务器由调用方传 `hidden`。
+ * - exposure 缺省 `direct`（工具直接声明给模型，与迁移前行为一致）；配置为
+ *   `codemode` 时原样透传（工具不进前缀，脚本内可达）；角色级 `mcp:<server>`
+ *   overlay 禁用的服务器由调用方传 `hidden`。
  */
-export function piMcpConfigFor(server: ConfiguredMcpServer, exposure: "direct" | "hidden"): PiMcpRegistration["config"] {
+export function piMcpConfigFor(server: ConfiguredMcpServer, exposure: PiMcpExposure): PiMcpRegistration["config"] {
   const entry = server.entry;
   const timeout = entry.timeout ?? PI_MCP_CALL_TIMEOUT_SECONDS;
   if (entry.command) {
@@ -362,6 +370,8 @@ export function buildMcpSummaries(params: {
       ...(transport === "http" && entry.headers && Object.keys(entry.headers).length > 0 ? { headers: { ...entry.headers } } : {}),
       ...(entry.oauth ? { oauth: { ...entry.oauth } } : {}),
       ...(entry.timeout !== undefined ? { timeout: entry.timeout } : {}),
+      // 只有 codemode 是「非缺省」状态；direct 不投影（表单用 ?? "direct" 回填）。
+      ...(entry.exposure === "codemode" ? { exposure: "codemode" as const } : {}),
       status: "not-connected",
       toolCount: 0,
       disabled: Boolean(entry.disabled),

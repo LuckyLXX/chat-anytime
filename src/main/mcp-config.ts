@@ -24,6 +24,16 @@ export interface McpServerConfigEntry {
    */
   disabled?: boolean;
   /**
+   * 工具暴露方式（app-owned extension，与 Pi `McpServerConfig.exposure` 同名）：
+   * - 缺省 / `"direct"`：工具连同完整 schema 声明给模型（与迁移前行为一致）；
+   * - `"codemode"`：不声明、不列进 codemode 描述，只在 codemode 脚本里经
+   *   `searchTools()` / `ALL_TOOLS` 发现并调用——前缀成本归零，且不需要任何
+   *   「激活」动作，因此永远不会改动 tools 数组、不破坏前缀缓存。
+   * `direct` 不落盘（缺省即 direct），保证存量 `.mcp.json` 一个字节不变。
+   * 标准 MCP 客户端忽略未知字段，因此保持互操作。
+   */
+  exposure?: "direct" | "codemode";
+  /**
    * OAuth 高级选项（字段同 Pi 的 `McpOAuthConfig`，预注册客户端等）。
    * 非标准字段：其他 MCP 客户端忽略它；仅我们的适配层读。
    */
@@ -51,6 +61,8 @@ export interface McpServerConfigFields {
   headers?: Record<string, string>;
   oauth?: McpOAuthAdvanced;
   timeout?: number;
+  /** 工具暴露方式：只有 `codemode` 会投影（`direct` 是缺省语义）。 */
+  exposure?: "direct" | "codemode";
 }
 
 type JsonRecord = Record<string, unknown>;
@@ -97,7 +109,8 @@ export function mcpServerConfigFields(server: ConfiguredMcpServer): McpServerCon
     ...(entry.env && Object.keys(entry.env).length > 0 ? { env: { ...entry.env } } : {}),
     ...(transport === "http" && entry.headers && Object.keys(entry.headers).length > 0 ? { headers: { ...entry.headers } } : {}),
     ...(entry.oauth && Object.keys(entry.oauth).length > 0 ? { oauth: { ...entry.oauth } } : {}),
-    ...(entry.timeout !== undefined ? { timeout: entry.timeout } : {})
+    ...(entry.timeout !== undefined ? { timeout: entry.timeout } : {}),
+    ...(entry.exposure === "codemode" ? { exposure: "codemode" as const } : {})
   };
 }
 

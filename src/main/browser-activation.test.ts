@@ -70,22 +70,40 @@ describe("toolNamesFor 的整族开关接线（源码回归网）", () => {
     expect(functionBody("function toolNamesFor(")).toContain("...(record.jevGlobalEnabled() && browserActive ? record.jevTools.map((tool) => tool.name) : [])");
   });
 
-  it("MCP 行以「当前活动集」为源，而非注册表全集（注册表留着已删服务器的僵尸工具）", () => {
+  it("MCP 行以「当前活动集」为源，注册表只用于校验 exposure（僵尸工具不回流）", () => {
     const body = functionBody("function toolNamesFor(");
-    expect(body).toContain('record.session.getActiveToolNames().filter((name) => name.startsWith("mcp__"))');
-    // 读注册表会把 unregister 后仍在 registry 的工具重新激活——必须不出现。
-    expect(body).not.toContain("getAllTools()");
+    // 源：当前活动集
+    expect(body).toContain("record.session.getActiveToolNames()");
+    expect(body).toContain('name.startsWith("mcp__")');
+    // 注册表只用于逐名校验 exposure：仍以 direct/model-only 声明的才保留。
+    // （不能反过来「从 getAllTools 全量取」——那样会把 unregister 后留在注册表里的
+    // 僵尸工具重新激活，也是「切换 exposure 后工具段越切越大」的入口。）
+    expect(body).toContain('tool.exposure === "direct"');
+    expect(body).not.toContain("getAllTools().map");
     // 旧的自建 customTools 路径必须消失（MCP 已迁 Pi 内置扩展）。
     expect(body).not.toContain("mcpTools.filter");
   });
 
-  it("角色 overlay 只在注册期决定 exposure（禁用→hidden），不在活动集里重复过滤", () => {
-    expect(bridgeSource).toContain('const exposure = deps.disabledServers().has(server.name) ? "hidden" : "direct"');
+  it("重新生成：navigateTree 之后必须按 toolNamesFor 归位（否则扩展工具被全量激活）", () => {
+    const anchor = 'await regenerateSession.navigateTree(target.id);';
+    const index = source.indexOf(anchor);
+    expect(index).toBeGreaterThan(-1);
+    // 紧随其后必须归位：上游 _restoreToolsFromTranscript 会把「转录里没提过」的
+    // 扩展工具全部激活，不归位就是每次重新生成都白涨一批工具定义。
+    expect(source.slice(index, index + 600)).toContain("reconcileActiveTools(record)");
+  });
+
+  it("角色 overlay 只在注册期决定 exposure（禁用→hidden，优先于配置的 codemode），不在活动集里重复过滤", () => {
+    // 三态：禁用 > codemode > direct。disabled 必须排在最前，否则「停用」会被配置项绕过。
+    expect(bridgeSource).toContain("deps.disabledServers().has(server.name)");
+    expect(bridgeSource).toContain('? "hidden"');
+    expect(bridgeSource).toContain('server.entry.exposure === "codemode"');
     expect(functionBody("function toolNamesFor(")).not.toContain("disabledMcp");
   });
 
   it("被禁服务器的工具以 hidden 暴露注册（零前缀成本兑底，见 mcp-bridge）", () => {
-    expect(bridgeSource).toContain('exposure = deps.disabledServers().has(server.name) ? "hidden" : "direct"');
+    expect(bridgeSource).toContain("deps.disabledServers().has(server.name)");
+    expect(bridgeSource).toContain('? "hidden"');
   });
 
   it("注册集仍展开 browser/ssh（注册是激活的前提，摘除只摘活动集）", () => {

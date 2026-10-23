@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   createAgentSession,
+  createCodemodeExtension,
   DefaultResourceLoader,
   SettingsManager,
   SessionManager,
@@ -14,7 +15,8 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 
-import { buildMcpUiContext, createPiMcpExtensionLayer, createPidesktopMcpBridge, type McpBridgeControl } from "./mcp-bridge.js";
+import { buildMcpUiContext, createPiMcpExtensionLayer, createPidesktopMcpBridge, observeToolSetApi, type McpBridgeControl } from "./mcp-bridge.js";
+import { estimateToolTokens } from "./context-breakdown.js";
 import { parseMcpStatusText } from "./runtime-mcp.js";
 
 /**
@@ -57,13 +59,19 @@ afterEach(async () => {
 const sdkUrl = (relative: string): string =>
   pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), "../../node_modules/@modelcontextprotocol/sdk/dist/esm", relative)).href;
 const SERVER_SCRIPT = `
-import { writeFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { Server } from ${JSON.stringify(sdkUrl("server/index.js"))};
 import { StdioServerTransport } from ${JSON.stringify(sdkUrl("server/stdio.js"))};
 import { ListToolsRequestSchema, CallToolRequestSchema } from ${JSON.stringify(sdkUrl("types.js"))};
-const server = new Server({ name: "poc", version: "1.0.0" }, { capabilities: { tools: {} } });
+const server = new Server({ name: "poc", version: "1.0.0" }, { capabilities: { tools: {}, ...(process.env.POC_RESOURCES === "1" ? { resources: {} } : {}) } });
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [{ name: "echo", description: "Echo the value back", inputSchema: { type: "object", properties: { value: { type: "string" } }, required: ["value"] } }]
+  tools: [
+    { name: "echo", description: "Echo the value back", inputSchema: { type: "object", properties: { value: { type: "string" } }, required: ["value"] } },
+    // 重连后工具列表变化（可控的「注册延后/工具列表变更」）：marker 存在时多一个工具。
+    ...(existsSync(new URL("./extra.marker", import.meta.url))
+      ? [{ name: "extra", description: "Extra tool offered after reconnect", inputSchema: { type: "object", properties: {} } }]
+      : [])
+  ]
 }));
 server.setRequestHandler(CallToolRequestSchema, async (req) => {
   if (req.params.name !== "echo") return { content: [{ type: "text", text: "unknown tool" }], isError: true };
@@ -80,8 +88,11 @@ interface ProbeSession {
   requests: string[];
   toolCalls: { name: string; input: unknown }[];
   control: McpBridgeControl | undefined;
+  /** Pi MCP 扩展的 registerTool/setActiveTools 引发的宿主通知次数（临时戳）。 */
+  toolSetChanges: number[];
   serverPath: string;
   exitMarker: string;
+  extraMarker: string;
 }
 
 async function makeProbeSession(params: { mcpJson: Record<string, unknown>; disabledServers?: string[] }): Promise<ProbeSession> {
@@ -98,7 +109,13 @@ async function makeProbeSession(params: { mcpJson: Record<string, unknown>; disa
   const notifies: string[] = [];
   const requests: string[] = [];
   const toolCalls: { name: string; input: unknown }[] = [];
+  const toolSetChanges: number[] = [];
   let control: McpBridgeControl | undefined;
+  // 复刻生产初始化顺序：工厂在 resourceLoader.reload() 阶段执行（此时 session
+  // record 尚不存在）；record 在 createAgentSession 返回后、bindExtensions 之前
+  // 建立。控制柄只有在 session_start 交付才能落到 record 上——旧实现在工厂期
+  // 交付，这里会一直是 undefined，后续 resync/remove 全部失效。
+  let recordBox: { control?: McpBridgeControl } | undefined;
 
   const probeExtension = {
     name: "pidesktop-probe",
@@ -126,9 +143,16 @@ async function makeProbeSession(params: { mcpJson: Record<string, unknown>; disa
         disabledServers: () => new Set(params.disabledServers ?? []),
         onServersChange: () => {},
         onNotify: (message) => { notifies.push(message); },
-        onApi: (value) => { control = value ?? undefined; }
+        onApi: (value) => {
+          if (!recordBox) return; // 生产里 recordBox 未建立时旧回调就是被丢弃的
+          recordBox.control = value ?? undefined;
+          control = value ?? undefined;
+        }
       }),
-      createPiMcpExtensionLayer({ openExternal: () => {} }),
+      createPiMcpExtensionLayer({ openExternal: () => {}, onToolSetChange: () => { toolSetChanges.push(Date.now()); } }),
+      // 生产环境始终装载 codemode：测试也必须用真实扩展，否则声明投影（description
+      // 改写）与 codemode 目录成本都是手写模拟，容易假绿。
+      createCodemodeExtension(),
       probeExtension as never
     ]
   });
@@ -144,6 +168,7 @@ async function makeProbeSession(params: { mcpJson: Record<string, unknown>; disa
     model: faux.getModel()
   });
   const session = result.session;
+  recordBox = {};
   await session.bindExtensions({
     mode: "rpc",
     uiContext: buildMcpUiContext({ onNotify: (message) => { notifies.push(message); } }),
@@ -152,12 +177,16 @@ async function makeProbeSession(params: { mcpJson: Record<string, unknown>; disa
   session.agent.streamFunction = faux.provider.streamSimple.bind(faux.provider) as typeof session.agent.streamFunction;
   session.modelRuntime.registerNativeProvider(faux.provider);
   await session.modelRuntime.refresh({ allowNetwork: false });
+  // 对齐生产形态：toolNamesFor 把 codemode 常驻点名进活动集（上游注册即不激活，
+  // defaultActive:false）。不点名时 codemode 的 prepareLoadout 不会参与声明投影，
+  // 测试就会绕过生产环境的描述改写。
+  session.setActiveToolsByName([...session.getActiveToolNames(), "codemode"]);
   faux.setResponses([
     (ctx) => { requests.push("turn1"); void ctx; return fauxAssistantMessage([fauxToolCall("mcp__poc__echo", { value: "from-test" })]); },
     () => { requests.push("turn2"); return fauxAssistantMessage("done"); }
   ]);
 
-  return { session, root, notifies, requests, toolCalls, control, serverPath, exitMarker: join(root, "server-exit.marker") };
+  return { session, root, notifies, requests, toolCalls, control, toolSetChanges, serverPath, exitMarker: join(root, "server-exit.marker"), extraMarker: join(root, "extra.marker") };
 }
 
 async function waitFor(fn: () => boolean, ms: number, label: string): Promise<void> {
@@ -209,6 +238,39 @@ describe("MCP → Pi 内置扩展：真实会话集成（stdio 伪服务器）",
     try {
       await waitFor(() => probe.session.getAllTools().some((tool) => tool.name === "mcp__poc__echo"), 20000, "工具注册");
       expect(probe.session.getActiveToolNames()).not.toContain("mcp__poc__echo");
+    } finally {
+      probe.session.dispose();
+    }
+  });
+
+  it("服务器配置 exposure:codemode → 工具注册但不进活动集（零前缀，不声明给模型）", { timeout: 60000 }, async () => {
+    const probe = await makeProbeSession({
+      mcpJson: { mcpServers: { poc: { command: process.execPath, args: ["./server.mjs"], exposure: "codemode" } } }
+    });
+    try {
+      // 注册表里看得到（脚本内 searchTools()/ALL_TOOLS 可达），但从不自动激活
+      await waitFor(() => probe.session.getAllTools().some((tool) => tool.name === "mcp__poc__echo"), 20000, "工具注册");
+      expect(probe.session.getActiveToolNames()).not.toContain("mcp__poc__echo");
+    } finally {
+      probe.session.dispose();
+    }
+  });
+
+  it("resync：手动改 mcp.json 的 exposure 能热应用（不必重建会话，配置没变不重连）", { timeout: 90000 }, async () => {
+    const probe = await makeProbeSession({
+      mcpJson: { mcpServers: { poc: { command: process.execPath, args: ["./server.mjs"] } } }
+    });
+    try {
+      await waitFor(() => probe.session.getActiveToolNames().includes("mcp__poc__echo"), 20000, "direct 工具激活");
+      const configPath = join(probe.root, "agent", "mcp.json");
+      await writeFile(configPath, JSON.stringify({
+        mcpServers: { poc: { command: process.execPath, args: ["./server.mjs"], exposure: "codemode" } }
+      }, null, 2), "utf8");
+
+      expect(probe.control!.resync()).toBe(true);
+      await waitFor(() => !probe.session.getActiveToolNames().includes("mcp__poc__echo"), 15000, "工具摘出活动集");
+      // 指纹比对：同样的配置再 resync 不应重复注册（重注册 = 断开重连）
+      expect(probe.control!.resync()).toBe(false);
     } finally {
       probe.session.dispose();
     }
@@ -271,6 +333,149 @@ describe("MCP → Pi 内置扩展：真实会话集成（stdio 伪服务器）",
       await probe.session.prompt("/mcp login poc", { preflightResult: () => {} });
       await waitFor(() => probe.notifies.some((message) => /OAuth/u.test(message)), 10000, "login 报错 notify");
       expect(probe.notifies.join("\n")).toMatch(/does not use OAuth|No enabled MCP server uses OAuth/u);
+    } finally {
+      probe.session.dispose();
+    }
+  });
+
+  it("生产初始化顺序：工厂期 record 尚不存在，控制柄经 session_start 交付到 record", { timeout: 60000 }, async () => {
+    const probe = await makeProbeSession({
+      mcpJson: { mcpServers: { poc: { command: process.execPath, args: ["./server.mjs"] } } }
+    });
+    try {
+      // makeProbeSession 的 onApi 只在 recordBox 建立后接收（复刻生产）：旧实现
+      // 在工厂期交付，这里永远是 undefined，因此这是直接回归断言。
+      expect(probe.control).toBeDefined();
+      // 控制柄可用（无变更时 resync 返回 false，不会因为拿不到 api 崩溃）
+      expect(probe.control!.resync()).toBe(false);
+      expect(probe.control!.registeredNames()).toEqual(["poc"]);
+    } finally {
+      probe.session.dispose();
+    }
+  });
+
+  it("direct → codemode → direct：不发送消息即可改变实际声明与工具估算，多次切换稳定", { timeout: 120000 }, async () => {
+    const probe = await makeProbeSession({
+      mcpJson: { mcpServers: { poc: { command: process.execPath, args: ["./server.mjs"] } } }
+    });
+    const declaredNames = () => probe.session.state.tools.map((tool) => tool.name);
+    const toolTokens = () => estimateToolTokens(probe.session.state.tools.map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters })));
+    const writeConfig = async (extra: Record<string, unknown>) => {
+      await writeFile(join(probe.root, "agent", "mcp.json"), JSON.stringify({
+        mcpServers: { poc: { command: process.execPath, args: ["./server.mjs"], ...extra } }
+      }, null, 2), "utf8");
+    };
+    try {
+      await waitFor(() => declaredNames().includes("mcp__poc__echo"), 20000, "direct 声明");
+      const directTokens = toolTokens();
+      expect(directTokens).toBeGreaterThan(0);
+      // codemode 模式下 codemode 工具必须真实在场（准备脚本调用的前提）
+      expect(declaredNames()).toContain("codemode");
+
+      for (let cycle = 0; cycle < 2; cycle++) {
+        // direct → codemode：全量 schema 从声明中移除，工具估算下降；注册表仍保留
+        // （脚本经 searchTools()/ALL_TOOLS 可达），但活动集与声明都不含它。
+        await writeConfig({ exposure: "codemode" });
+        expect(probe.control!.resync()).toBe(true);
+        await waitFor(() => !declaredNames().includes("mcp__poc__echo"), 15000, "codemode 声明移除");
+        expect(probe.session.getActiveToolNames()).not.toContain("mcp__poc__echo");
+        expect(probe.session.getAllTools().some((tool) => tool.name === "mcp__poc__echo")).toBe(true);
+        const codemodeTokens = toolTokens();
+        expect(codemodeTokens).toBeLessThan(directTokens);
+
+        // codemode → direct：完整 schema 回到声明，估算回到同一基线（不单调增长）
+        await writeConfig({});
+        expect(probe.control!.resync()).toBe(true);
+        await waitFor(() => declaredNames().includes("mcp__poc__echo"), 15000, "direct 声明恢复");
+        expect(toolTokens()).toBe(directTokens);
+      }
+
+      // codemode 脚本仍可发现并调用该工具（权限/结果管线不回退）
+      await writeConfig({ exposure: "codemode" });
+      expect(probe.control!.resync()).toBe(true);
+      await waitFor(() => !declaredNames().includes("mcp__poc__echo"), 15000, "脚本模式声明移除");
+      const faux = fauxProvider();
+      probe.session.agent.streamFunction = faux.provider.streamSimple.bind(faux.provider) as typeof probe.session.agent.streamFunction;
+      faux.setResponses([
+        fauxAssistantMessage([fauxToolCall("codemode", { code: "const r = await tools.mcp__poc__echo({ value: \"from-script\" });\nreturn r;" })]),
+        fauxAssistantMessage("done")
+      ]);
+      await probe.session.prompt("go");
+      await waitFor(() => probe.toolCalls.some((call) => call.name === "mcp__poc__echo" && (call.input as { value?: string }).value === "from-script"), 15000, "脚本内调用");
+      const transcript = probe.session.state.messages.map((message) => JSON.stringify((message as { content?: unknown }).content ?? "")).join("\n");
+      expect(transcript).toContain("echo:from-script");
+    } finally {
+      probe.session.dispose();
+    }
+  });
+
+  it("工具事件驱动刷新：重连后新增工具注册即通知宿主（替代固定 6 秒窗口）", { timeout: 90000 }, async () => {
+    const probe = await makeProbeSession({
+      mcpJson: { mcpServers: { poc: { command: process.execPath, args: ["./server.mjs"] } } }
+    });
+    try {
+      await waitFor(() => probe.session.getActiveToolNames().includes("mcp__poc__echo"), 20000, "初始工具激活");
+      const changesBefore = probe.toolSetChanges.length;
+      expect(changesBefore).toBeGreaterThan(0); // 初始连接注册工具也经事件通知
+
+      // 让下一次连接的工具列表变化（marker 在重连时被伪服务器读到），再用配置
+      // 指纹变化触发重注册/重连——这是「注册延后/定义变化」的可控版本。
+      await writeFile(probe.extraMarker, "1", "utf8");
+      await writeFile(join(probe.root, "agent", "mcp.json"), JSON.stringify({
+        mcpServers: { poc: { command: process.execPath, args: ["./server.mjs"], timeout: 300 } }
+      }, null, 2), "utf8");
+      expect(probe.control!.resync()).toBe(true);
+      await waitFor(() => probe.session.state.tools.some((tool) => tool.name === "mcp__poc__extra"), 15000, "新增工具进入声明");
+      // 通知来自真实的 registerTool 调用，而不是「猜一个时间点重算」。
+      expect(probe.toolSetChanges.length).toBeGreaterThan(changesBefore);
+    } finally {
+      probe.session.dispose();
+    }
+  });
+
+  it("Pi 的共享 resource 工具不带 mcp__ 前缀（归位时必须原样保留，不能当僵尸工具删）", { timeout: 60000 }, async () => {
+    // 服务器声明 resources 能力 + direct 暴露：Pi 会注册并激活 list_mcp_resources /
+    // list_mcp_resource_templates / read_mcp_resource。这三个名字不在 app 的
+    // toolNamesFor 管辖范围内（见 pi-runtime 的 PI_MCP_RESOURCE_TOOL_NAMES），
+    // 归位时误删就会把 Pi 的合法活动项摘掉。
+    const probe = await makeProbeSession({
+      mcpJson: { mcpServers: { poc: { command: process.execPath, args: ["./server.mjs"], env: { POC_RESOURCES: "1" } } } }
+    });
+    try {
+      await waitFor(() => probe.session.getActiveToolNames().includes("list_mcp_resources"), 20000, "resource 工具激活");
+      const active = probe.session.getActiveToolNames();
+      for (const name of ["list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"]) {
+        expect(active).toContain(name);
+        expect(name.startsWith("mcp__")).toBe(false);
+      }
+    } finally {
+      probe.session.dispose();
+    }
+  });
+
+  it("reapply 注销后指纹必须清掉：文件里手动重新启用能被 resync 重连", { timeout: 90000 }, async () => {
+    const probe = await makeProbeSession({
+      mcpJson: { mcpServers: { poc: { command: process.execPath, args: ["./server.mjs"] } } }
+    });
+    const configPath = join(probe.root, "agent", "mcp.json");
+    const writeConfig = (entry: Record<string, unknown>) =>
+      writeFile(configPath, JSON.stringify({ mcpServers: { poc: { command: process.execPath, args: ["./server.mjs"], ...entry } } }, null, 2), "utf8");
+    try {
+      await waitFor(() => probe.session.getActiveToolNames().includes("mcp__poc__echo"), 20000, "初始工具激活");
+
+      // 面板「停用」：配置写 disabled 后走 reapply（applyMcpToolChanges 的路径）
+      await writeConfig({ disabled: true });
+      probe.control!.reapply("poc");
+      await waitFor(() => !probe.session.getActiveToolNames().includes("mcp__poc__echo"), 15000, "停用后工具摘出");
+      expect(probe.control!.registeredNames()).toEqual([]);
+
+      // 用户手动改文件重新启用（传输配置不动）：翻译后的注册载荷与停用时逐字节
+      // 相同（disabled 不进载荷），因此旧指纹残留会让 resync 误判「配置未变」。
+      await writeConfig({});
+      expect(probe.control!.resync()).toBe(true);
+      await waitFor(() => probe.session.getActiveToolNames().includes("mcp__poc__echo"), 20000, "重新启用后工具回来");
+      // 同一配置再 resync 不重连（指纹已重建）
+      expect(probe.control!.resync()).toBe(false);
     } finally {
       probe.session.dispose();
     }

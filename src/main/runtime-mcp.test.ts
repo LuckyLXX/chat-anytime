@@ -82,6 +82,15 @@ describe("mcpConfigPathsFor / mcpConfigEntry / normalizeMcpHeaders（迁移后�
     expect(() => mcpConfigEntry({ name: "x", scope: "global", transport: "http", url: "https://a", oauth: { authServerMetadataUrl: "http://as.example/.well-known" } })).toThrow("https");
   });
 
+  it("exposure 方言：codemode 才落盘，direct 缺省不写字段", () => {
+    // 缺省 / 显式 direct 都不产生字段（存量 .mcp.json 零差异）
+    expect(mcpConfigEntry({ name: "x", scope: "global", transport: "stdio", command: "npx" }).exposure).toBeUndefined();
+    expect(mcpConfigEntry({ name: "x", scope: "global", transport: "stdio", command: "npx", exposure: "direct" }).exposure).toBeUndefined();
+    // codemode 原样落盘（stdio / http 两条分支都要带）
+    expect(mcpConfigEntry({ name: "x", scope: "global", transport: "stdio", command: "npx", exposure: "codemode" }).exposure).toBe("codemode");
+    expect(mcpConfigEntry({ name: "x", scope: "global", transport: "http", url: "https://a", exposure: "codemode" }).exposure).toBe("codemode");
+  });
+
   it("timeout 校验：1–3600 整数；空值不写入；stdio 与 HTTP 都接受", () => {
     expect(mcpConfigEntry({ name: "x", scope: "global", transport: "stdio", command: "npx" }).timeout).toBeUndefined();
     expect(mcpConfigEntry({ name: "x", scope: "global", transport: "stdio", command: "npx", timeout: 300 }).timeout).toBe(300);
@@ -100,6 +109,8 @@ describe("piMcpConfigFor：方言 → Pi McpServerConfig", () => {
       exposure: "direct", timeout: PI_MCP_CALL_TIMEOUT_SECONDS
     });
     expect(piMcpConfigFor(server("fs", { command: "npx" }), "hidden").exposure).toBe("hidden");
+    // codemode：工具不进前缀、脚本内可达（无需激活，因此不破前缀缓存）
+    expect(piMcpConfigFor(server("fs", { command: "npx" }), "codemode").exposure).toBe("codemode");
   });
 
   it("bearerTokenEnv → headers.Authorization（Bearer ${NAME}），且覆盖同名手写头", () => {
@@ -197,6 +208,22 @@ describe("buildMcpSummaries：配置投影 + 解析态合成", () => {
     expect(summaries.find((s) => s.name === "fs")).toMatchObject({ status: "not-connected", toolCount: 0, transport: "stdio" });
     expect(summaries.find((s) => s.name === "off")).toMatchObject({ status: "disabled", disabled: true });
     expect(summaries.find((s) => s.name === "exa")).toMatchObject({ authState: "idle", auth: "oauth" });
+  });
+
+  it("exposure 投影：codemode 透出，direct/缺省不产生字段（表单用 ?? \"direct\" 回填）", () => {
+    const summaries = buildMcpSummaries({
+      configured: [
+        server("scripted", { command: "npx", exposure: "codemode" }),
+        server("plain", { command: "npx" }),
+        server("explicit", { command: "npx", exposure: "direct" })
+      ],
+      parsed: new Map(),
+      authPending: new Set(),
+      authorized: new Set()
+    });
+    expect(summaries.find((s) => s.name === "scripted")?.exposure).toBe("codemode");
+    expect(summaries.find((s) => s.name === "plain")?.exposure).toBeUndefined();
+    expect(summaries.find((s) => s.name === "explicit")?.exposure).toBeUndefined();
   });
 
   it("解析态映射：connected/needs-auth/failed + toolCount；连接成功不等于已授权", () => {

@@ -446,6 +446,7 @@ function ToolCallDetails({ call, execution, streaming, onOpenTranscript }: { cal
         {delegation
           ? <DelegationSummaryBadge delegation={delegation} preview={delegatePreview} />
           : <strong>{toolLabel(call.name)}</strong>}
+        {execution?.parentToolCallId && <em className="action-timeline-nested-tag" title="由上一个工具的脚本内调用发起（如 codemode）">脚本内</em>}
         <span>{toolCallStatusLabel(execution, streaming)}{execution?.completedAt ? ` · ${formatDuration(execution.startedAt, execution.completedAt)}` : ""}</span>
         <ChevronDown size={12} className="action-timeline-call-chevron" />
       </summary>

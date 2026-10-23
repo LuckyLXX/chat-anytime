@@ -607,6 +607,11 @@ export interface ToolExecution {
   changedFiles?: { relativePath: string }[];
   /** delegate_agent 的实时/最终委派进度（见 DelegationProgress）；其余工具缺省。 */
   delegation?: DelegationProgress;
+  /**
+   * 本次调用是另一个工具在运行时发起的嵌套调用（如 codemode 脚本里的 tool 调用），
+   * 值为父工具调用的 toolCallId（Pi 的 `parentToolCallId`）。普通调用缺省。
+   */
+  parentToolCallId?: string;
 }
 
 /** 子代理执行中的一步（对应子会话的一次工具调用）。 */
@@ -1663,6 +1668,11 @@ export interface McpServerSummary {
   oauth?: McpOAuthAdvanced;
   /** 每请求超时（秒）；未配置时为 undefined（运行时按 120 缺省值）。 */
   timeout?: number;
+  /**
+   * 工具暴露方式：`codemode` = 工具不进请求前缀，由模型在 codemode 脚本里检索调用；
+   * 缺省（undefined）= `direct`，工具连同完整 schema 声明给模型。
+   */
+  exposure?: "direct" | "codemode";
 }
 
 /**
@@ -1706,6 +1716,11 @@ export interface McpServerConfigDraft {
   oauth?: McpOAuthAdvanced;
   /** 每请求超时（秒）；缺省 120（迁移前 MCP_CALL_TIMEOUT_MS 的口径）。 */
   timeout?: number;
+  /**
+   * 工具暴露方式：缺省 `direct`（工具声明给模型）；`codemode` 则只在脚本内可达，
+   * 不占请求前缀（见 McpServerConfigEntry.exposure）。
+   */
+  exposure?: "direct" | "codemode";
 }
 
 /**

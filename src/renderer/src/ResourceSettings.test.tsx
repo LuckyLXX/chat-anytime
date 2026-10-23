@@ -179,4 +179,67 @@ describe("ResourceSettings 的 MCP 表单载荷", () => {
     // Bearer 模式下「OAuth 高级选项」按钮不出现
     expect([...container.querySelectorAll("button")].some((button) => button.textContent?.includes("OAuth 高级选项"))).toBe(false);
   });
+
+  it("工具暴露：编辑回填 codemode、列表徽标可见；改回直连后载荷也带 direct（落盘时由 mcpConfigEntry 归约）", async () => {
+    const send = vi.fn(async (_command: RuntimeCommand) => undefined);
+    vi.stubGlobal("window", { ...globalThis.window, piDesktop: { send } });
+    await render([
+      serverSummary({ name: "dbx", transport: "stdio", command: "dbx-mcp", args: [], exposure: "codemode" })
+    ]);
+
+    // 行内下拉直接反映当前暴露方式（codemode），不用开表单
+    expect((container.querySelector("[data-mcp-server='dbx'] select") as HTMLSelectElement)?.value).toBe("codemode");
+
+    // 编辑回填：下拉选中 codemode
+    const editButton = container.querySelector('[aria-label="编辑 MCP dbx"]') as HTMLButtonElement;
+    await act(async () => editButton.click());
+    expect(inputByLabel("工具暴露")).toHaveProperty("value", "codemode");
+
+    // 改回直连 → 提交的 draft 带 direct（缺省值，写盘时不会留字段）
+    setValue(inputByLabel("工具暴露") as HTMLSelectElement, "direct");
+    const submit = container.querySelector('[data-control="mcp-save"]') as HTMLButtonElement;
+    await act(async () => submit.click());
+    await act(async () => {});
+
+    const command = send.mock.calls[0]![0] as { type: string; server: McpServerConfigDraft };
+    expect(command.type).toBe("mcp.server.save");
+    expect(command.server.exposure).toBe("direct");
+  });
+
+  it("工具暴露：从直连改成脚本时，mcp.server.save 必须带上 codemode", async () => {
+    const send = vi.fn(async (_command: RuntimeCommand) => undefined);
+    vi.stubGlobal("window", { ...globalThis.window, piDesktop: { send } });
+    await render([serverSummary({ name: "exa" })]);
+
+    const editButton = container.querySelector('[aria-label="编辑 MCP exa"]') as HTMLButtonElement;
+    await act(async () => editButton.click());
+    // 直连是缺省值：回填应是 direct
+    expect(inputByLabel("工具暴露")).toHaveProperty("value", "direct");
+    setValue(inputByLabel("工具暴露") as HTMLSelectElement, "codemode");
+
+    const submit = container.querySelector('[data-control="mcp-save"]') as HTMLButtonElement;
+    await act(async () => submit.click());
+    await act(async () => {});
+
+    const command = send.mock.calls[0]![0] as { type: string; server: McpServerConfigDraft; original: unknown };
+    expect(command.type).toBe("mcp.server.save");
+    expect(command.server.exposure).toBe("codemode");
+    expect(command.original).toEqual({ name: "exa", scope: "global" });
+  });
+
+  it("列表行内切换工具暴露：直接发出 mcp.server.save（不用先开表单再点保存）", async () => {
+    const send = vi.fn(async (_command: RuntimeCommand) => undefined);
+    vi.stubGlobal("window", { ...globalThis.window, piDesktop: { send } });
+    await render([serverSummary({ name: "exa" })]);
+
+    const select = container.querySelector("[data-mcp-server='exa'] select") as HTMLSelectElement;
+    expect(select.value).toBe("direct");
+    setValue(select, "codemode");
+    await act(async () => {});
+
+    const command = send.mock.calls[0]![0] as { type: string; server: McpServerConfigDraft; original: unknown };
+    expect(command.type).toBe("mcp.server.save");
+    expect(command.server).toMatchObject({ name: "exa", scope: "global", transport: "http", exposure: "codemode" });
+    expect(command.original).toEqual({ name: "exa", scope: "global" });
+  });
 });

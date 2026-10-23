@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readSync, statSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readSync, statSync, watch } from "node:fs";
 import { readFile, readdir, realpath, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative as relativePath, resolve, sep } from "node:path";
 import { estimateTokens } from "@earendil-works/pi-coding-agent";
@@ -264,6 +264,8 @@ interface SessionRuntimeRecord {
    * 销毁会话前必须经这里 unregisterAll，否则 stdio 子进程泄漏。
    */
   mcpBridgeControl?: McpBridgeControl;
+  /** 手动改 mcp.json 的热重载监听（dispose 时关闭；重复绑定会先关旧的）。 */
+  mcpConfigWatcher?: () => void;
   session: AgentSession;
   unsubscribe: () => void;
   workspace: string;
@@ -368,8 +370,8 @@ interface SessionRuntimeRecord {
    * 光这一项就吃掉 4% 以上的一个核。只在消息落定/压缩/切模型时重算。
    */
   contextUsageCache?: ContextUsage;
-  /** 工具段估算缓存：活动工具集变化才重算（键 = 活动工具名 join）。 */
-  toolTokensCache?: { key: string; tokens: number };
+  /** 工具段估算缓存：声明内容（名字+描述+schema 指纹）变化才重算，见 cachedToolTokens。 */
+  toolTokensCache?: contextBreakdown.ToolTokensCache;
   activatedAt: number;
   /** 分屏格子（watched）流式推送的节流定时器；激活会话不走此通道。 */
   paneFlushTimer?: ReturnType<typeof setTimeout>;
@@ -977,8 +979,9 @@ function buildSubagentTools(record: Pick<SessionRuntimeRecord, "workspace" | "ag
   return createSubagentTools(ctx);
 }
 
-function mcpConfigPaths(): { project: string; global: string } {
-  return runtimeMcp.mcpConfigPathsFor(workspace, getAgentDir());
+/** 双作用域 MCP 配置文件路径；targetWorkspace 缺省为当前工作区（会话内路径用 record.workspace）。 */
+function mcpConfigPaths(targetWorkspace: string | undefined = workspace): { project: string; global: string } {
+  return runtimeMcp.mcpConfigPathsFor(targetWorkspace, getAgentDir());
 }
 
 /** 钩子配置双作用域：项目 <workspace>/.pidesktop-hooks.json，全局 <agentDir>/pidesktop-hooks.json。 */
@@ -1080,6 +1083,68 @@ function rebuildMcpSummariesFromConfig(): void {
     // 否则非 OAuth 服务器（只带 X-API-Key 这类头）也会被显示成「清除凭据」。
     authorized: runtimeMcp.authorizedMcpServers(runtimeMcp.readMcpAuthFile(getAgentDir()), configured)
   });
+}
+
+/**
+ * 监听双作用域 MCP 配置目录：手动编辑 `.mcp.json` / `mcp.json` 以前必须重建会话
+ * 才生效（没有任何命令触发重读）。这里按文件名过滤 + 400ms 防抖，变更后走桥接的
+ * `resync()` 增量对齐（新增注册 / 删除注销 / 同名但翻译后配置变了才重连，避免无关
+ * 写入把连接全掐一遍），再把活动集与前缀成本重算一遍。
+ * 监听失败（权限/平台差异）不阻断会话，退回「改完重启」的旧行为。
+ */
+function watchMcpConfigFiles(record: SessionRuntimeRecord): void {
+  record.mcpConfigWatcher?.();
+  // 用会话自己的工作区（workspaceOverride 的后台会话/切换工作区后的 parked 会话
+  // 不能去读别的会话的项目配置）。
+  const { project, global } = mcpConfigPaths(record.workspace);
+  const targets = new Map<string, Set<string>>();
+  for (const file of [project, global]) {
+    const dir = dirname(file);
+    if (!existsSync(dir)) continue;
+    const names = targets.get(dir) ?? new Set<string>();
+    names.add(basename(file));
+    targets.set(dir, names);
+  }
+  const cleanups: (() => void)[] = [];
+  let timer: NodeJS.Timeout | undefined;
+  const fire = (): void => {
+    timer = undefined;
+    try {
+      if (!record.mcpBridgeControl?.resync()) return;
+      applyToolSetChange(record);
+      void refreshMcpCatalog();
+    } catch (error) {
+      post({ type: "log", level: "warn", message: `MCP 配置热重载失败：${errorText(error)}` });
+    }
+  };
+  for (const [dir, names] of targets) {
+    try {
+      const watcher = watch(dir, (_event, filename) => {
+        // filename 可能为 null（平台差异）：按命中处理，宁多重载一次也不漏。
+        if (filename && !names.has(String(filename))) return;
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(fire, 400);
+      });
+      watcher.on("error", (error) => {
+        // 被监听目录被删除/重建后 watcher 会哑掉（直到会话重建）：至少留痕，
+        // 不让「改配置不生效」变成无从排查的静默失效。
+        post({ type: "log", level: "warn", message: `MCP 配置监听异常（${dir}）：${errorText(error)}` });
+      });
+      cleanups.push(() => watcher.close());
+    } catch {
+      // 监听失败不影响会话（退回「改配置需重启」的旧行为）。
+    }
+  }
+  record.mcpConfigWatcher = () => {
+    if (timer) clearTimeout(timer);
+    for (const close of cleanups) {
+      try {
+        close();
+      } catch {
+        // 关闭失败不阻断销毁
+      }
+    }
+  };
 }
 
 /**
@@ -1870,17 +1935,22 @@ function snapshotSpeedStats(record: SessionRuntimeRecord | undefined): SpeedStat
 /**
  * 重算上下文三段明细。消息段是 O(transcript) 的估算，只在稳定边界调用
  * （消息完成、压缩、切模型、活动工具集变化），流式期间沿用上一帧——dsh
- * 的环在采样间隙同样不动。工具段按活动集缓存，避免每次 stringify 全部 schema。
+ * 的环在采样间隙同样不动。工具段按**实际声明**的完整内容指纹缓存，避免每次
+ * stringify 全部 schema。
  */
 function refreshContextBreakdown(record: SessionRuntimeRecord): void {
   const session = record.session;
-  const names = session.getActiveToolNames();
-  const key = names.join(",");
-  if (record.toolTokensCache?.key !== key) {
-    const active = new Set(names);
-    const tokens = contextBreakdown.estimateToolTokens(session.getAllTools().filter((tool) => active.has(tool.name)));
-    record.toolTokensCache = { key, tokens };
-  }
+  // 工具段以 Pi 真正下发给模型的声明（session.state.tools）为唯一数据源：
+  // 它已应用 prepareLoadout 的描述投影（codemode 会给可调用工具追加脚本调用
+  // 说明），而注册表定义（getAllTools）是投影前的原始定义——同名工具的 schema/
+  // 描述更新、exposure 或描述投影变化时两者并不同源，按注册表过滤会读到旧成本。
+  // 声明数组本身就是模型看到的清单：不需要再按名字去重或按活动集过滤。
+  const declared: contextBreakdown.ToolSchemaDescriptor[] = session.state.tools.map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    parameters: tool.parameters
+  }));
+  record.toolTokensCache = contextBreakdown.cachedToolTokens(record.toolTokensCache, declared);
   record.contextBreakdown = contextBreakdown.estimateContextBreakdown({
     systemPrompt: session.systemPrompt,
     toolTokens: record.toolTokensCache.tokens,
@@ -1894,6 +1964,38 @@ function refreshContextBreakdown(record: SessionRuntimeRecord): void {
   } catch {
     // 估算失败不影响消息落定/渲染；保留上一帧读数，下一次稳定边界再试。
   }
+}
+
+/**
+ * Pi 内置 MCP 扩展自己维护的共享 resource 工具（服务器有 resources 且 exposure
+ * 为 direct 时由它注册并激活）。名字不带 `mcp__` 前缀，因此不在 app 的
+ * toolNamesFor 的 MCP 分支管辖范围内：所有归位路径（toolNamesFor）必须原样保留，
+ * 否则会把 Pi 的合法活动项误删。
+ */
+const PI_MCP_RESOURCE_TOOL_NAMES = new Set(["list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"]);
+
+/**
+ * MCP 工具落地/定义变化后的统一收口（由 Pi MCP 扩展的 registerTool/setActiveTools
+ * 通知驱动，零模型调用）：
+ * 1. 需要时按现有活动集策略归位（toolNamesFor 以「当前活动集」为源，只保留仍为
+ *    direct/model-only 的 MCP 工具）——不从注册表全量复活已删除/hidden/codemode
+ *    工具，也不误删 Pi 维护的合法活动项（共享 MCP resource 工具）；
+ * 2. 重算上下文明细；
+ * 3. 声明真的变化时向当前/分屏会话推必要帧。
+ */
+function applyToolSetChange(record: SessionRuntimeRecord): void {
+  const before = record.toolTokensCache?.fingerprint;
+  const current = record.session.getActiveToolNames();
+  // 共享 resource 工具的保留已折进 toolNamesFor（所有归位路径共用同一不变量）。
+  const desired = toolNamesFor(record, !hasImageInput(record.session.model));
+  const desiredSet = new Set(desired);
+  const currentSet = new Set(current);
+  const needsReconcile = desiredSet.size !== currentSet.size || [...desiredSet].some((name) => !currentSet.has(name));
+  if (needsReconcile) record.session.setActiveToolsByName(desired);
+  refreshContextBreakdown(record);
+  if (record.toolTokensCache?.fingerprint === before) return;
+  emitPaneStateFor(record);
+  if (record === activeRuntime) emitState();
 }
 
 function runtimeSkillPrompt(name: string, instructions?: string, record: SessionRuntimeRecord | undefined = activeRuntime): string {
@@ -2181,6 +2283,12 @@ function disposeRecord(record: SessionRuntimeRecord, options: { keepBrowserTab?:
     record.mcpBridgeControl?.unregisterAll();
   } catch {
     // 注销失败不阻断销毁（跟随 dispose 的 best-effort 语义）
+  }
+  // MCP 配置监听：不关会一直持有目录句柄（Windows 下影响删除/重命名）。
+  try {
+    record.mcpConfigWatcher?.();
+  } catch {
+    // 同上：best-effort
   }
   // session_end 钩子（app 自造事件）：必须在 dispose 之前发——命令是独立进程，
   // 不等它结束（fire-and-forget）；park 不走到这里。总闸与信任门由 rulesFor 过滤。
@@ -2748,7 +2856,21 @@ function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "session" | "
     // 则尊重扩展的决策：本函数算出的列表只是把现状固化下来（幂等）。
     // 角色级 mcp:<server> overlay 不在这里过滤：它在注册期就决定了 exposure
     // （禁用→hidden，工具根本不进活动集），见 mcp-bridge 的 registerOne。
-    ...record.session.getActiveToolNames().filter((name) => name.startsWith("mcp__")),
+    //
+    // 再叠一道注册表校验（防「越切越大」）：只保留仍以 direct/model-only 声明的
+    // 名字。已注销、已 hidden、或上游改名后留下的**残留活动名**必须丢掉——
+    // 并集语义下它们是唯一能让活动集单调增长的入口，而活动集直接等于每请求前缀。
+    ...record.session.getActiveToolNames()
+      .filter((name) => name.startsWith("mcp__"))
+      .filter((name) => {
+        const tool = record.session.getAllTools().find((entry) => entry.name === name);
+        return tool !== undefined && (tool.exposure === undefined || tool.exposure === "direct" || tool.exposure === "model-only");
+      }),
+    // Pi 内置 MCP 扩展自己维护的共享 resource 工具（服务器有 resources 且 exposure
+    // 为 direct 时由它注册并激活）。名字不带 `mcp__` 前缀，因此不在上面的管辖
+    // 范围内：归位时必须原样保留，否则一切模型/翻一次能力开关就会把它们从声明
+    // 里摘掉，而 Pi 不会自动补回（重注册不重新激活已在活动集里的工具）。
+    ...record.session.getActiveToolNames().filter((name) => PI_MCP_RESOURCE_TOOL_NAMES.has(name)),
     ...record.subagentTools.map((tool) => tool.name),
     ...record.todoTools.map((tool) => tool.name),
     ...record.memoryTools.map((tool) => tool.name),
@@ -3132,9 +3254,12 @@ function handleSessionEvent(record: SessionRuntimeRecord, event: AgentSessionEve
         status: "running",
         startedAt: Date.now(),
         changedFile: changedWorkspaceFile(record.workspace, event.toolName, event.args),
-        changedFiles: changedWorkspaceFiles(record.workspace, event.toolName, event.args)
+        changedFiles: changedWorkspaceFiles(record.workspace, event.toolName, event.args),
+        // codemode 脚本内的嵌套调用：标记父调用，渲染端加「脚本内」标签；
+        // 状态栏不跟随嵌套调用（并行脚本会把它抢成刷屏）。
+        ...(event.parentToolCallId ? { parentToolCallId: event.parentToolCallId } : {})
       });
-      record.status = `正在${toolLabel(event.toolName)}`;
+      if (!event.parentToolCallId) record.status = `正在${toolLabel(event.toolName)}`;
       break;
     case "tool_execution_update": {
       // Partial tool output; high frequency — throttle.
@@ -3757,6 +3882,28 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   // the tool audit logger.
   const sessionHolder: { session: AgentSession | undefined } = { session: undefined };
   let recordBox: SessionRuntimeRecord | undefined;
+  // MCP 工具集变化通知（Pi 内置 MCP 扩展的 registerTool/setActiveTools 公开调用）。
+  // 用微任务合并同一批注册：一个服务器连接完成会连续注册 N 个工具，逐个推帧
+  // 没有意义。消费时校验 record 仍在 liveSessions 且是同一实例——销毁后的晚到
+  // 通知不得复活旧会话、不得推旧帧。record 尚未建立时的通知由创建末尾的首次
+  // 显式 refreshContextBreakdown 兜住（连接本身也是异步的）。
+  let toolSetRefreshScheduled = false;
+  const scheduleToolSetRefresh = (): void => {
+    if (toolSetRefreshScheduled) return;
+    toolSetRefreshScheduled = true;
+    queueMicrotask(() => {
+      toolSetRefreshScheduled = false;
+      const record = recordBox;
+      if (!record || liveSessions.get(record.session.sessionId) !== record) return;
+      try {
+        applyToolSetChange(record);
+      } catch (error) {
+        // 会话已拆除时 setActiveToolsByName 会抛（扩展上下文失效）；其余异常
+        // 同样不阻断会话，但必须留痕——否则工具估算静默冻结无人知晓。
+        post({ type: "log", level: "warn", message: `MCP 工具集变更后重算失败：${errorText(error)}` });
+      }
+    });
+  };
   const permissionDeps = permissionDepsFor(sessionHolder, recordWorkspace, recordAgent, options.accessModeOverride ? () => options.accessModeOverride! : undefined);
   // 长期记忆：按助手划分、跨会话（pidesktop-memory/<agentId>/）。治理块与
   // 索引快照在此一次性冻结、整个会话字节不变（dsh 缓存纪律：系统提示词只含
@@ -3791,7 +3938,9 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
       // （方言翻译在 mcp-bridge/runtime-mcp）；必须排在 builtin-mcp 之前——它的
       // session_start 要读到这里的注册。控制柄经 onApi 回灌给命令层。
       createPidesktopMcpBridge({
-        configPaths: () => mcpConfigPaths(),
+        // 会话自己的项目配置：workspaceOverride 的后台会话/切换工作区后的 parked
+        // 会话不能去读当前全局工作区的 .mcp.json。
+        configPaths: () => mcpConfigPaths(recordWorkspace),
         disabledServers: () => {
           const overrides = recordAgent.toolOverrides;
           const disabled = new Set<string>();
@@ -3803,17 +3952,29 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
         onServersChange: () => {
           rebuildMcpSummariesFromConfig();
           emitResourceCatalog();
+          // 注册/注销本身会触发 Pi 的工具 API 通知；这里再兜一次（例如 unregister
+          // 只改了注册集），由微任务合并，不会每个工具推一帧。
+          scheduleToolSetRefresh();
         },
         onNotify: handleMcpNotify,
         onApi: (control) => {
-          // 按会话持有：每个 record 自己的控制柄（见 SessionRuntimeRecord 注释）
-          if (recordBox) recordBox.mcpBridgeControl = control ?? undefined;
+          // 按会话持有：每个 record 自己的控制柄（见 SessionRuntimeRecord 注释）。
+          // onApi 现在由 session_start 交付（bindExtensions 内触发），recordBox
+          // 此时已建立；工厂期交付会被丢弃是旧实现的根因。
+          if (recordBox) {
+            recordBox.mcpBridgeControl = control ?? undefined;
+            // 控制柄就绪才能接热重载（watchMcpConfigFiles 内部会先关旧监听）。
+            if (control) watchMcpConfigFiles(recordBox);
+            else recordBox.mcpConfigWatcher?.();
+          }
         }
       }),
       // Pi 内置 MCP 扩展：连接/OAuth/工具注册/lazy 重连全在这层（loadConfig 恒空，
-      // 服务器一律经上面的桥接注册，动态增删改 = register/unregister）。
+      // 服务器一律经上面的桥接注册，动态增删改 = register/unregister）。包装层把
+      // 公开的 registerTool/setActiveTools 调用转成宿主通知（替代固定延时猜测）。
       createPiMcpExtensionLayer({
-        openExternal: (url) => post({ type: "open-external", url })
+        openExternal: (url) => post({ type: "open-external", url }),
+        onToolSetChange: scheduleToolSetRefresh
       }),
       runtimePermissions.createPermissionExtension(permissionDeps, (api) => {
         // Rebound on every session creation; the captured API drives the MCP
@@ -4328,8 +4489,8 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   // registered but not active unless explicitly enabled here; the vision tool
   // is activated only for text-only conversation models (toolNamesFor).
   result.session.setActiveToolsByName(toolNamesFor(record, !hasImageInput(result.session.model)));
-  // 工具活动集在此定型：三段明细的工具段按它缓存，首次重算放在激活之后。
-  refreshContextBreakdown(record);
+  // 工具活动集在此定型；三段明细的首次重算放在 record 进入 liveSessions 之后
+  // （applyToolSetChange），与后续的工具事件走同一条路径。
   record.executions = new Map(restoreToolExecutions(result.session.state.messages as unknown as PersistedSessionMessage[], recordWorkspace).map((execution) => [execution.id, execution]));
   backfillRestoredArtifacts(record);
   // Background processes launched by earlier sessions keep running across
@@ -4342,6 +4503,10 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   record.unsubscribe = result.session.subscribe((event) => handleSessionEvent(record, event));
   record.status = sessionReadyStatus(Boolean(result.session.model), Boolean(result.modelFallbackMessage));
   liveSessions.set(result.session.sessionId, record);
+  // 初始化窗口的显式兜底：MCP 连接可能在 record 进入 liveSessions 之前就完成了
+  // 工具注册（那批通知被 liveSessions 校验挡掉，避免给尚未就绪的会话推帧）。
+  // 之后一律由工具事件驱动（applyToolSetChange），不再有任何固定延时猜测。
+  applyToolSetChange(record);
   scheduleLiveEmit(true);
   // 启动恢复的分屏格子：watch 先于会话 live 到达（pendingWatchSessions），
   // 记录建立后补注册并立即推送水合帧。该记录随即被 activate，激活期间的
@@ -4536,11 +4701,10 @@ async function applyMcpToolChanges(names: string[]): Promise<void> {
   for (const name of names) {
     record.mcpBridgeControl.reapply(name);
   }
-  // 注册集变化会触发 mcp_servers_change → 目录重推；这里再补一次活动集
-  // 重算（hidden↔direct 切换时前缀必须跟上）。
+  // 注册集变化会触发 mcp_servers_change → 目录重推；活动集先按现状归位，真正的
+  // 工具摘除/落地由 Pi 重新注册时的工具 API 通知驱动（异步，无需猜延时）。
   try {
-    record.session.setActiveToolsByName(toolNamesFor(record, !hasImageInput(record.session.model)));
-    refreshContextBreakdown(record);
+    applyToolSetChange(record);
   } catch (error) {
     post({ type: "log", level: "warn", message: `MCP 注册变更后活动集重算失败：${errorText(error)}` });
   }
@@ -5116,6 +5280,11 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         }).at(-1);
         if (!target || target.type !== "message") throw new Error("找不到要重新生成的用户消息");
         await regenerateSession.navigateTree(target.id);
+        // navigateTree 内部会调 _restoreToolsFromTranscript：按转录重放工具集时，
+        // 任何「转录里没提过」的扩展工具都会被一次性激活（浏览器/SSH/设计/团队/电脑
+        // 控制的开关全部失效，且每重放一次就可能多一批——实测 tools 55→61→85）。
+        // 这里立即按 toolNamesFor 归位，并重算工具段。
+        reconcileActiveTools(record);
         await regenerateSession.prompt(regeneratedPrompt.text, regeneratedPrompt.images.length ? { images: regeneratedPrompt.images } : undefined);
       })().catch((error) => {
         if (!liveSessions.has(record.session.sessionId)) return;

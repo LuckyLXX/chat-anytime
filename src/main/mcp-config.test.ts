@@ -128,6 +128,18 @@ describe("mcp config", () => {
     expect(JSON.parse(await readFile(path, "utf8")).mcpServers.gw).toEqual({ url: "https://gw.example/mcp" });
   });
 
+  it("round-trips exposure: codemode through upsert + read", async () => {
+    const path = await temporaryConfig();
+    upsertMcpServerConfig(path, "scripted", { command: "npx", exposure: "codemode" });
+    expect(readMcpServerEntry(path, "scripted")).toEqual({ command: "npx", exposure: "codemode" });
+    // 投影（表单回填）必须带出，否则编辑一次就会静默退回 direct
+    const projected = mcpServerConfigFields(readConfiguredMcpServers(path, join(path, "..", "missing.json")).find((server) => server.name === "scripted")!);
+    expect(projected.exposure).toBe("codemode");
+    // 手写 direct 也原样读回（本层不做方言归约；表单缺省用 ?? "direct" 回填）
+    upsertMcpServerConfig(path, "plain", { command: "npx", exposure: "direct" });
+    expect(readMcpServerEntry(path, "plain")).toEqual({ command: "npx", exposure: "direct" });
+  });
+
   it("detects a configured Authorization header case-insensitively (OAuth auto-mount decision)", () => {
     expect(hasAuthorizationHeader({ "X-API-Key": "k" })).toBe(false);
     expect(hasAuthorizationHeader(undefined)).toBe(false);

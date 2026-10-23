@@ -1,6 +1,6 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { describe, expect, it } from "vitest";
-import { estimateContextBreakdown, estimateToolTokens } from "./context-breakdown";
+import { cachedToolTokens, estimateContextBreakdown, estimateToolTokens, toolDeclarationsFingerprint } from "./context-breakdown";
 
 describe("context breakdown estimation", () => {
   it("estimates tools as JSON length / 4 plus a wrapper overhead per tool", () => {
@@ -34,5 +34,32 @@ describe("context breakdown estimation", () => {
     expect(breakdown.system).toBe(0);
     expect(breakdown.tools).toBe(12);
     expect(breakdown.messages).toBe(20 + 10);
+  });
+});
+
+describe("工具声明的指纹与估算缓存", () => {
+  it("同名工具的 parameters 变化会改变指纹（不能只看名字）", () => {
+    const base = { name: "mcp__x__search", description: "Search", parameters: { type: "object", properties: { q: { type: "string" } } } };
+    const wider = { ...base, parameters: { type: "object", properties: { q: { type: "string" }, limit: { type: "number" } } } };
+    expect(toolDeclarationsFingerprint([base])).not.toBe(toolDeclarationsFingerprint([wider]));
+    expect(estimateToolTokens([wider])).toBeGreaterThan(estimateToolTokens([base]));
+  });
+
+  it("等长描述变化同样失效（不能比较描述长度）", () => {
+    const a = { name: "mcp__x__search", description: "Search docs", parameters: { type: "object" } };
+    const b = { name: "mcp__x__search", description: "Search code", parameters: { type: "object" } };
+    expect(a.description.length).toBe(b.description.length);
+    expect(toolDeclarationsFingerprint([a])).not.toBe(toolDeclarationsFingerprint([b]));
+  });
+
+  it("声明内容不变时复用缓存对象；变化后重新估算", () => {
+    const tools = [{ name: "read", description: "Read", parameters: { type: "object" } }];
+    const first = cachedToolTokens(undefined, tools);
+    expect(first.tokens).toBe(estimateToolTokens(tools));
+    // 同一个记录（同一对象引用）不重复估算
+    expect(cachedToolTokens(first, [{ ...tools[0]! }])).toBe(first);
+    const changed = cachedToolTokens(first, [{ ...tools[0]!, description: "Read a file" }]);
+    expect(changed).not.toBe(first);
+    expect(changed.tokens).toBe(estimateToolTokens([{ ...tools[0]!, description: "Read a file" }]));
   });
 });
