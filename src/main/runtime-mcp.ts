@@ -275,7 +275,7 @@ export interface ParsedMcpServerState {
 const STATUS_LINE_PATTERN = /^([\w.-]+): (.+?)(?:, (\d+) tools)? \((direct|codemode|deferred|hidden)\)$/u;
 
 /**
- * 解析 `/mcp` 无参命令经 `uiContext.notify` 输出的状态板文本。格式来自 Pi 1.2.0
+ * 解析 `/mcp` 无参命令经 `uiContext.notify` 输出的状态板文本。格式来自 Pi 1.4.0
  * `extensions/mcp/index.js` 的 `formatStatus`：
  *   `name: state, N tools (exposure)` + 可选 `\n    error…` 缩进续行
  *   `name: needs sign-in, run /mcp login name (exposure)`

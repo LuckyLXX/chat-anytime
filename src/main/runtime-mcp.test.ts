@@ -153,7 +153,7 @@ describe("piMcpConfigFor：方言 → Pi McpServerConfig", () => {
   });
 });
 
-describe("parseMcpStatusText：/mcp 状态板解析（格式对齐 Pi 1.2.0 formatStatus）", () => {
+describe("parseMcpStatusText：/mcp 状态板解析（格式对齐 Pi 1.4.0 formatStatus）", () => {
   it("connected 带工具数；needs-auth；config error 行跳过", () => {
     const text = [
       "poc: connected, 1 tools (direct)",

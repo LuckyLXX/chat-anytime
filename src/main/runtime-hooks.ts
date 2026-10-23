@@ -1036,7 +1036,7 @@ export function createHooksExtension(deps: HooksExtensionDeps): InlineExtension 
 
       /**
        * agent_end **不触发** agent_end 钩子——它只是 Pi 的一个底层 run 结束，
-       * 自动重试 / 溢出压缩恢复 / 排队后续消息都会在它之后继续（Pi 1.2.0 官方口径：
+       * 自动重试 / 溢出压缩恢复 / 排队后续消息都会在它之后继续（Pi 1.4.0 官方口径：
        * 「agent_end closes one low-level agent run. Automatic retry, overflow recovery,
        * compaction retry, steering, or follow-up work can still continue.」）。
        * 在这里弹通知 = 重试刚开始就报「任务完成」（2026-10-20 用户报）。
