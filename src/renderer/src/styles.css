@@ -1091,7 +1091,9 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 .slash-menu-group > small { position: sticky; top: 0; z-index: 1; padding: 3px 8px 2px; background: var(--surface); color: var(--text-muted); font-size: 10px; font-weight: 700; letter-spacing: .06em; }
 .slash-menu-group + .slash-menu-group { margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--border); }
 .composer:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus-ring); }
-.composer textarea { width: 100%; max-height: 140px; resize: none; border: 0; outline: 0; color: var(--text); background: transparent; font-size: 13px; line-height: 1.5; }
+/* 自适应高度（ConversationPane 的 useLayoutEffect 写入 height）：一行起随内容长高，
+   到 max-height 后停止长高、改为内部滚动。min-height 保持 input 行 32px 的基线。 */
+.composer textarea { width: 100%; min-height: 32px; max-height: 240px; overflow-y: auto; resize: none; border: 0; outline: 0; color: var(--text); background: transparent; font-size: 13px; line-height: 1.5; }
 .send-button, .stop-button { display: grid; place-items: center; align-self: end; width: 33px; height: 33px; padding: 0; border: 0; border-radius: 6px; color: var(--on-accent); background: var(--accent); cursor: pointer; }
 .send-button:disabled { opacity: .35; cursor: default; }.stop-button { background: var(--danger); }
 .empty-workspace, .empty-conversation { display: grid; place-items: center; align-content: center; height: 100%; color: var(--text-muted); animation: soft-fade .15s ease; }

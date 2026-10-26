@@ -69,6 +69,7 @@ import { commandErrorTargetsPane, localTurnDeadline, localTurnForPane, type Loca
 import { buildTurnSummaries } from "./lib/turn-summary";
 import { TIMELINE_LIVE_MARGIN, TIMELINE_WINDOW_MIN_MESSAGES, createTimelineObserver, estimateMessageHeight, placeholderHeightFor, shouldRenderLive, type TimelineObserver } from "./lib/timeline-window";
 import { followTimelineBottom } from "./lib/timeline-scroll";
+import { resizeComposerTextarea } from "./lib/composer-input";
 import { findRevealMessage, findRevealTurnKey } from "./lib/reveal";
 import { buildEditDiffs, delegateArgsSummary, editArgsSummary, languageFromPath, parseDelegateCallArgs, parseEditCallArgs, parseReadCallArgs, parseWriteCallArgs, writeArgsSummary, type DelegateCallPreview, type EditCallPreview, type EditDiffBlock, type WriteCallPreview } from "./lib/tool-call-preview";
 import { DiffView } from "./components/DiffView";
@@ -1151,6 +1152,30 @@ export const ConversationPane = memo(function ConversationPane({
   useEffect(() => {
     if (!mention) setMentionResults([]);
   }, [mention]);
+
+  // 输入框随内容增高：换行/折行在绘制前量高，到 CSS 上限后改为内部滚动。
+  useLayoutEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    resizeComposerTextarea(textarea);
+  }, [input, ready]);
+
+  // 宽度变化会改变折行（窗口缩放、侧栏折叠、分屏拖动、chip 增减）：只在宽度
+  // 真变时重算。容差 8px 用来忽略「内部滚动条出现/消失」造成的 ~7px 内容宽度
+  // 变化，否则会形成「改高度 → 滚动条 → ResizeObserver → 再改高度」的自激循环。
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    let width = textarea.getBoundingClientRect().width;
+    const observer = new ResizeObserver((entries) => {
+      const nextWidth = entries[0]?.target.getBoundingClientRect().width ?? textarea.getBoundingClientRect().width;
+      if (Math.abs(nextWidth - width) < 8) return;
+      width = nextWidth;
+      resizeComposerTextarea(textarea);
+    });
+    observer.observe(textarea);
+    return () => observer.disconnect();
+  }, [ready]);
 
   // composer 高度变量写入自己的 parent（每格独立，QuestionPanel 锚定用）。
   useEffect(() => {
