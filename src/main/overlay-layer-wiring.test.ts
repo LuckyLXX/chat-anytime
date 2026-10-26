@@ -13,10 +13,12 @@ import { describe, expect, it } from "vitest";
  * 完整、bug 一模一样。计数语义本身由 `src/renderer/src/lib/overlay-layers.test.tsx`
  * 覆盖。
  *
- * 三处缺一不可：
+ * 覆盖：
  *  1. `ImageLightbox`（气泡图片 / 附件预览）登记；
  *  2. `RichContent` 的 Mermaid 放大弹窗登记；
- *  3. App 读回计数并把它接进发给预览面板的 `browserSuspended`。
+ *  3. `ContextMenu`（整窗透明遮罩）登记；
+ *  4. App 级浮层（顶栏「作品」下拉、命令面板）把开合态接进 `browserSuspended`；
+ *  5. App 读回弹层计数并把它接进发给预览面板的 `browserSuspended`。
  */
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -25,6 +27,8 @@ const read = (relative: string): string => readFileSync(join(here, relative), "u
 
 const imageLightbox = read("../renderer/src/components/ImageLightbox.tsx");
 const richContent = read("../renderer/src/components/RichContent.tsx");
+const contextMenu = read("../renderer/src/components/ContextMenu.tsx");
+const galleryMenu = read("../renderer/src/components/GalleryMenu.tsx");
 const app = read("../renderer/src/App.tsx");
 
 describe("弹层挂起原生浏览器视图的接线契约", () => {
@@ -40,10 +44,29 @@ describe("弹层挂起原生浏览器视图的接线契约", () => {
     expect(richContent).toContain("useOverlayLayer(expanded)");
   });
 
-  it("App 把计数接进 browserSuspended（只 import 不接是最容易犯的假绿）", () => {
+  it("右键菜单的整窗遮罩登记", () => {
+    expect(contextMenu).toContain('from "../lib/overlay-layers"');
+    expect(contextMenu).toContain("useOverlayLayer(true)");
+  });
+
+  it("顶栏作品下拉把开合态抬给 App（面板会伸进预览区）", () => {
+    expect(galleryMenu).toContain("onMenuOpenChange?.(next)");
+    expect(app).toContain("const [galleryMenuOpen, setGalleryMenuOpen] = useState(false)");
+    expect(app).toContain("onMenuOpenChange={setGalleryMenuOpen}");
+  });
+
+  it("App 把计数与 App 级浮层接进 browserSuspended（只 import 不接是最容易犯的假绿）", () => {
     expect(app).toContain('from "./lib/overlay-layers"');
     expect(app).toContain("const overlayLayerOpen = useOverlayLayersOpen()");
-    const flag = app.slice(app.indexOf("browserSuspended={"));
-    expect(flag.slice(0, flag.indexOf("}"))).toContain("overlayLayerOpen");
+    const flag = app.slice(app.indexOf("const browserSuspended ="));
+    const expression = flag.slice(0, flag.indexOf(";"));
+    expect(expression).toContain("overlayLayerOpen");
+    // 命令面板是 fixed 全窗浮层、作品下拉会伸进右侧预览区：原生 WebContentsView
+    // 不认 z-index，只有把这两个开合态并进挂起条件才不会被白色页面切掉。
+    expect(expression).toContain("paletteOpen");
+    expect(expression).toContain("galleryMenuOpen");
+    // 折叠侧栏的飞出面板在窄窗（预览上下堆叠）或全屏预览时也会压在原生视图下面。
+    expect(expression).toContain("flyoutPresence.rendered");
+    expect(app).toContain("browserSuspended={browserSuspended}");
   });
 });

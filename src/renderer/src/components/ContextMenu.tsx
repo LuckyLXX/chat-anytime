@@ -1,4 +1,5 @@
 import { type ReactNode } from "react";
+import { useOverlayLayer } from "../lib/overlay-layers";
 
 export interface ContextMenuItem {
   label: string;
@@ -16,6 +17,9 @@ interface ContextMenuProps {
 }
 
 export function ContextMenu({ x, y, items, onClose }: ContextMenuProps): ReactNode {
+  // 右键菜单的遮罩是整窗透明的（pointer-events 拦全局）：它一旦打开，原生浏览器视图
+  // 也必须让位，否则菜单/“点空白关闭”在预览面板那一侧会被 WebContentsView 吃掉。
+  useOverlayLayer(true);
   return (
     <div className="context-menu-overlay" onClick={onClose} onContextMenu={(event) => { event.preventDefault(); onClose(); }}>
       <div
