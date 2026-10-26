@@ -46,6 +46,90 @@ describe("RichContent preview rendering", () => {
     expect(markup).toContain("<span>ts</span>");
   });
 
+  it("does not nest the code card inside a second <pre>", () => {
+    // 回归（2026-10-23）：块级代码由 code 覆盖渲染成 div.code-block，却还被 react-markdown
+    // 的 <pre> 外壳套着——非法嵌套，气泡里 `.html-bubble pre` 的边框/底色会把代码卡再框一圈。
+    const fence = renderToStaticMarkup(
+      <MarkdownPreviewContent content={"```ts\nconst value = 1;\n```"} artifactPrefix="preview-nest" onOpenArtifact={() => undefined} />
+    );
+    expect(fence).toContain('class="code-block"');
+    expect(fence).not.toContain("<pre><div class=\"code-block\"");
+    const bubble = renderToStaticMarkup(
+      <RichContent artifactPrefix="message-nest" onOpenArtifact={() => undefined} children={'<assistant_html><div><pre><code class="language-js">const a = 1;\nlet b = 2;</code></pre></div></assistant_html>'} />
+    );
+    expect(bubble).toContain("hljs-keyword");
+    expect(bubble).not.toContain("<pre><div class=\"code-block\"");
+  });
+
+  it("reads language labels from the class-name variants models actually write", () => {
+    // 模型的类名不一定是 language-xxx：lang-xxx / 裸类名 / 写在 <pre> 上都认。
+    const variants = [
+      '<pre><code class="language-js">const a = 1;\nlet b = 2;</code></pre>',
+      '<pre><code class="lang-js">const a = 1;\nlet b = 2;</code></pre>',
+      '<pre><code class="js">const a = 1;\nlet b = 2;</code></pre>',
+      '<pre class="language-js"><code>const a = 1;\nlet b = 2;</code></pre>'
+    ];
+    for (const content of variants) {
+      const markup = renderToStaticMarkup(
+        <RichContent artifactPrefix="message-variant" onOpenArtifact={() => undefined} children={`<assistant_html><div>${content}</div></assistant_html>`} />
+      );
+      expect(markup).toContain("hljs-keyword");
+      expect(markup).toContain("<span>js</span>");
+    }
+  });
+
+  it("guesses the language when an unmistakable fence has no label", () => {
+    // 统计：assistant 写的围栏七成没有语言标注（本机会话 928 / 1280）。
+    // 只对「一眼能确定」的形态补标注，其余保持纯文本。
+    const shell = renderToStaticMarkup(
+      <MarkdownPreviewContent content={"```\n$ npm run build\n$ ls -la\n```"} artifactPrefix="preview-guess-shell" onOpenArtifact={() => undefined} />
+    );
+    expect(shell).toContain("<span>bash</span>");
+    const json = renderToStaticMarkup(
+      <MarkdownPreviewContent content={'```\n{\n  "version": "1.10.0"\n}\n```'} artifactPrefix="preview-guess-json" onOpenArtifact={() => undefined} />
+    );
+    expect(json).toContain("<span>json</span>");
+    expect(json).toContain("hljs-attr");
+    const diff = renderToStaticMarkup(
+      <MarkdownPreviewContent content={"```\ndiff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-a\n+b\n```"} artifactPrefix="preview-guess-diff" onOpenArtifact={() => undefined} />
+    );
+    expect(diff).toContain("<span>diff</span>");
+  });
+
+  it("keeps logs and explicitly-plain fences as plain text", () => {
+    const logs = renderToStaticMarkup(
+      <MarkdownPreviewContent content={"```\nTest Files  262 passed (262)\n     Tests  2973 passed (2973)\n  ✓ built in 22.35s\n```"} artifactPrefix="preview-logs" onOpenArtifact={() => undefined} />
+    );
+    expect(logs).toContain("<span>text</span>");
+    expect(logs).not.toContain("hljs");
+    // 作者显式写 ```text 时绝不猜（哪怕内容是 $ 开头的命令）
+    const explicit = renderToStaticMarkup(
+      <MarkdownPreviewContent content={"```text\n$ npm run build\n```"} artifactPrefix="preview-explicit-text" onOpenArtifact={() => undefined} />
+    );
+    expect(explicit).toContain("<span>text</span>");
+    expect(explicit).not.toContain("hljs");
+  });
+
+  it("highlights the extra languages models label but the common subset lacks", () => {
+    const env = renderToStaticMarkup(
+      <MarkdownPreviewContent content={"```env\nAPP_ENV=production\nAPP_PORT=8080\n```"} artifactPrefix="preview-env" onOpenArtifact={() => undefined} />
+    );
+    // 标注显示作者写的 env，高亮走 hljs 的 properties 语法
+    expect(env).toContain("<span>env</span>");
+    expect(env).toContain("hljs-attr");
+  });
+
+  it("keeps model-authored classes on headings and lists inside bubbles", () => {
+    // hast-util-sanitize 默认 schema 给 h2/li/ul/ol/a/code 钉了固定类名，specific
+    // 规则短路 "*"：气泡里 <h2 class="card-title"> 的类名会被静默剥掉。
+    const markup = renderToStaticMarkup(
+      <RichContent artifactPrefix="message-classes" onOpenArtifact={() => undefined} children={'<assistant_html><div><h2 class="card-title">标题</h2><ul class="card-list"><li class="card-item">条目</li></ul></div></assistant_html>'} />
+    );
+    expect(markup).toContain('<h2 class="card-title"');
+    expect(markup).toContain('<ul class="card-list"');
+    expect(markup).toContain('<li class="card-item"');
+  });
+
   it("injects heading ids for the outline and keeps them stable", () => {
     const content = "# 第一章\n\n正文\n\n## 小节\n\n### 第一章\n";
     const markup = renderToStaticMarkup(<MarkdownPreviewContent content={content} artifactPrefix="preview-outline" onOpenArtifact={() => undefined} />);

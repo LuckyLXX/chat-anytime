@@ -13,16 +13,16 @@ import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import type { Schema } from "hast-util-sanitize";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
-// 只装常用语言（common 子集 ~37 种）而不是 highlight.js 全量 192 种语法：
-// 全量包约 1MB，直接拖慢首屏解析；缺的 PowerShell 单独注册。
+// 只装常用语言（common 子集 36 种）+ 模型真在用的少量小语种（dockerfile/http/nginx/
+// properties/dos/powershell，各 ~4KB），而不是 highlight.js 全量 192 种语法：全量包约
+// 1MB，直接拖慢首屏解析。语言标注的解析与补齐在 lib/code-language.ts（含别名、
+// `<pre class="language-x">` 变体与无标注时的高置信度识别）。
 import hljs from "highlight.js/lib/common";
-import powershell from "highlight.js/lib/languages/powershell";
+import { guessCodeLanguage, isPlainTextLabel, languageFromClassName, resolveCodeLanguage } from "../lib/code-language";
 import { artifactSandbox, buildArtifactPreviewSource, DYNAMIC_PREVIEW_ACTIONS, isDynamicArtifact, isFullArtifactDocument, type Artifact, type DynamicPreviewAction } from "../lib/content";
 import { alignSegmentHeadings, extractMarkdownHeadings, hasMathSyntax, normalizeMermaidSource, parseRichContent, type MarkdownHeading, type RichContentSegment } from "../lib/content-pipeline";
 import { useStreamingChunks } from "../lib/streaming-split";
 import { resolveMarkdownAssetUrl } from "../lib/workspace-asset";
-
-hljs.registerLanguage("powershell", powershell);
 import { sanitizeRichHtmlTree } from "../lib/html-sanitize";
 import { useOverlayLayer } from "../lib/overlay-layers";
 import { ImageLightbox } from "./ImageLightbox";
@@ -341,6 +341,15 @@ function escapeCodeHtml(code: string): string {
   return code.replace(/[&<>"']/gu, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character] ?? character);
 }
 
+/** hast 节点 → 纯文本（`<pre class="language-x"><code>` 只在 pre 上写类名时，取文本重渲染用）。 */
+function hastText(node: unknown): string {
+  if (!node || typeof node !== "object") return "";
+  const value = (node as { value?: unknown }).value;
+  if (typeof value === "string") return value;
+  const children = (node as { children?: unknown }).children;
+  return Array.isArray(children) ? children.map((child) => hastText(child)).join("") : "";
+}
+
 function highlightCode(code: string, language: string, streaming = false): string {
   const lineCount = code.split("\n").length;
   // 无语言 / 语言未知 / 超长：纯文本转义输出（保留 language-unknown 的工具条显示）。
@@ -364,13 +373,15 @@ function highlightCode(code: string, language: string, streaming = false): strin
   return value;
 }
 
-export const CodeBlock = memo(function CodeBlock({ language, code, streaming = false }: { language: string; code: string; streaming?: boolean }): ReactNode {
+export const CodeBlock = memo(function CodeBlock({ language, code, streaming = false, label }: { language: string; code: string; streaming?: boolean; label?: string }): ReactNode {
   // Memoize so streaming code blocks only re-highlight when the code string
   // actually changes, not on every parent re-render.
   const highlighted = useMemo(() => highlightCode(code, language, streaming), [code, language, streaming]);
+  // label 与 language 分开：围栏写的是 ```html，高亮走 hljs 的 xml 语法，但工具条
+  // 该显示作者写的 html；而 ```env 同理（高亮用 properties）。二者都缺时才是 text。
   return (
     <div className="code-block">
-      <div className="code-toolbar"><span>{language || "text"}</span><div className="code-actions"><CopyButton text={code} /></div></div>
+      <div className="code-toolbar"><span>{label || language || "text"}</span><div className="code-actions"><CopyButton text={code} /></div></div>
       <pre><code dangerouslySetInnerHTML={{ __html: highlighted }} /></pre>
     </div>
   );
@@ -493,6 +504,18 @@ const svgPaintAndGeometry = [...svgPaintAttributes, ...svgGeometryAttributes];
 const filterPrimitiveTags = ["feBlend", "feColorMatrix", "feComponentTransfer", "feComposite", "feDiffuseLighting", "feDisplacementMap", "feDistantLight", "feDropShadow", "feFlood", "feFuncA", "feFuncB", "feFuncG", "feFuncR", "feGaussianBlur", "feImage", "feMerge", "feMergeNode", "feMorphology", "feOffset", "fePointLight", "feSpecularLighting", "feSpotLight", "feTile", "feTurbulence"];
 const animateTags = ["animate", "animateTransform", "animateMotion", "set"];
 
+/** 气泡/预览里允许的 class 值：只看字符集与长度，不锁具体类名（主题与语法高亮都靠它）。 */
+const safeClassName = /^[a-zA-Z0-9_:/.[\]%-]{1,96}$/u;
+
+/** 属性定义数组（hast-util-sanitize 只导出 Schema，元素类型从这里取）。 */
+type AttributeDefinitions = NonNullable<Schema["attributes"]>[string];
+
+/** 把 hast-sanitize 默认 schema 里「只放行固定类名」的项换成通用类名规则，其余属性保留。 */
+function allowAnyClassName(entries: AttributeDefinitions | null | undefined): AttributeDefinitions {
+  const kept = (entries ?? []).filter((entry) => !(Array.isArray(entry) && entry[0] === "className"));
+  return [...kept, ["className", safeClassName]];
+}
+
 const richSanitizeSchema: Schema = {
   ...defaultSchema,
   // 默认 clobber 防护会把 id 改写成 user-content-*，打断气泡 CSS 的 #id
@@ -575,6 +598,18 @@ const richSanitizeSchema: Schema = {
   },
   attributes: {
     ...defaultSchema.attributes,
+    // hast-util-sanitize 的默认 schema 给 code / a / h2 / li / ol / ul / section
+    // 钉了**各自的固定类名**（code 只放行 /^language-./，h2 只放行 sr-only…），
+    // 而 specific 规则优先于 "*" 并且直接短路（不再回落到 "*"）：于是模型写的
+    // `class="lang-js"`、气泡里的 `<h2 class="title">` 会被静默剥光。统一换成通用
+    // 类名规则，各自其它属性（aria / href / data-footnote-*）保持不动。
+    a: allowAnyClassName(defaultSchema.attributes?.a),
+    code: allowAnyClassName(defaultSchema.attributes?.code),
+    h2: allowAnyClassName(defaultSchema.attributes?.h2),
+    li: allowAnyClassName(defaultSchema.attributes?.li),
+    ol: allowAnyClassName(defaultSchema.attributes?.ol),
+    ul: allowAnyClassName(defaultSchema.attributes?.ul),
+    section: allowAnyClassName(defaultSchema.attributes?.section),
     script: ["type", "dataScriptSource"],
     svg: ["viewBox", "width", "height", "xmlns", "role", "ariaLabel", "preserveAspectRatio", "clipPath", "mask", "filter", ...svgPaintAttributes, ...svgGeometryAttributes.filter((name) => name !== "points" && name !== "d"), ...svgFontAttributes],
     g: svgPaintAndGeometry,
@@ -617,7 +652,7 @@ const richSanitizeSchema: Schema = {
     ...Object.fromEntries(animateTags.map((tag) => [tag, [...svgAnimateAttributes, ...svgPaintAttributes, ...svgGeometryAttributes, "href", "xLinkHref"]])),
     "*": [
       ...(defaultSchema.attributes?.["*"] ?? []),
-      ["className", /^[a-zA-Z0-9_:/.[\]%-]{1,96}$/u],
+      ["className", safeClassName],
       ["style", /^[^<>]{0,5000}$/u],
       // hast 把 data-* 属性存为 camelCase 属性名（data-send → dataSend），
       // 白名单必须用 camel key 才放行；toJsxRuntime 传给组件时转回 dashed。
@@ -681,10 +716,34 @@ function markdownComponents(artifactIndex: { current: number }, artifactPrefix: 
   return {
     code(props) {
       const { className, children: codeChildren } = props;
-      const language = /language-([\w-]+)/u.exec(className ?? "")?.[1]?.toLowerCase() ?? "";
+      const rawLanguage = languageFromClassName(className);
       const code = String(codeChildren).replace(/\n$/u, "");
+      // 无类名且单行 = 行内代码（`code`），保持原样。
       if (!className && !code.includes("\n")) return <code>{codeChildren}</code>;
-      return <CodeBlock language={language} code={code} streaming={options.liveTail === true} />;
+      // 语言标注解析：别名（ts/sh/env/ps1…）、`lang-js` / `class="js"` 变体都认；
+      // 拿不到已知语言时，按高置信度规则补一个（`$ ` 提示符 → bash、JSON → json …）。
+      // 作者明确写了 ```text / ```log 时尊重作者，不猜。
+      const language = resolveCodeLanguage(rawLanguage) || (isPlainTextLabel(rawLanguage) ? "" : guessCodeLanguage(code));
+      return <CodeBlock language={language} code={code} streaming={options.liveTail === true} label={rawLanguage || language} />;
+    },
+    pre(props) {
+      const { children, node } = props;
+      // 块级代码统一在这里渲染成 CodeBlock：
+      // ① 不能再套一层 <pre>——`<pre>` 里放 div 属于非法嵌套，气泡里
+      //    `.html-bubble pre` 的边框/底色还会把代码卡再框一圈（双重边框/内边距）；
+      // ② <pre> 里的 <code> 天然是**块级**代码，哪怕只有一行、哪怕没写类名；
+      //    code 覆盖那层只能靠「有类名或多行」猜测，单行围栏会被当行内代码而丢失块样式。
+      //    这里已经有 hast 节点（passNode 打开）与全文，判得准。
+      const meaningful = (node?.children ?? []).filter((child) => child.type === "element" || (child.type === "text" && String(child.value ?? "").trim() !== ""));
+      const codeElement = meaningful.length === 1 && meaningful[0]?.type === "element" && meaningful[0].tagName === "code" ? meaningful[0] : undefined;
+      if (codeElement) {
+        const source = hastText(codeElement).replace(/\n$/u, "");
+        // 语言标注可能写在 <code> 或 <pre> 上（后者是模型手写 HTML 的常见变体）。
+        const rawLabel = languageFromClassName(codeElement.properties?.className) || languageFromClassName(node?.properties?.className);
+        const language = resolveCodeLanguage(rawLabel) || (isPlainTextLabel(rawLabel) ? "" : guessCodeLanguage(source));
+        return <CodeBlock language={language} code={source} streaming={options.liveTail === true} label={rawLabel || language} />;
+      }
+      return <pre>{children}</pre>;
     },
     a({ href, children: linkChildren }) {
       return <a href={href} target="_blank" rel="noreferrer">{linkChildren}</a>;
@@ -702,7 +761,8 @@ function markdownComponents(artifactIndex: { current: number }, artifactPrefix: 
       return <input type={type} checked={checked} disabled={disabled} readOnly />;
     },
     button(props) {
-      const { children, className, ...buttonProps } = props;
+      // passNode 会给每个组件塞一个 `node`（hast 参数），绝不能透到 DOM 上。
+      const { children, className, node: _node, ...buttonProps } = props;
       const action = explicitHtmlAction(buttonProps as Record<string, unknown>, children, Boolean(htmlBubble));
       const classes = [typeof className === "string" ? className : "", action ? "html-action-button" : ""].filter(Boolean).join(" ");
       return <button {...buttonProps} className={classes || undefined} type="button" onClick={action && onHtmlAction ? () => onHtmlAction(action) : undefined}>{children}</button>;
@@ -846,7 +906,10 @@ function renderAssistantHtml(content: string, components: Components, scopeSelec
     jsxs,
     components,
     ignoreInvalidStyle: true,
-    passKeys: true
+    passKeys: true,
+    // 把 hast 节点一并交给组件：pre 覆盖要分辨「块级代码 vs 纯文本 <pre>」，
+    // 而 children 里只有尚未求值的 <code> 元素，看不到行数/类名。
+    passNode: true
   }) as ReactNode;
 }
 

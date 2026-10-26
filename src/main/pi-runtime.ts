@@ -2921,6 +2921,19 @@ const TOOL_ORCHESTRATION_PROMPT_BLOCK = [
   "【工具编排】并行读多个文件、批量统计、或需要在大输出里筛选出结论时，优先用 codemode 写一段脚本一次完成（Promise.allSettled 并行调用工具，return 汇总结果），而不是连续多次独立工具调用；脚本 API 与全局清单见 codemode 工具描述。"
 ].join("");
 
+/**
+ * 输出格式提示块（静态常量，不随回合变化，符合 dsh 缓存纪律）。
+ *
+ * 2026-10-23 用户报「代码块全是 TEXT，没有语法高亮」：统计本机会话里 assistant 写的
+ * 围栏，无语言标注 928 次、带标注约 350 次——界面只能对**已知语言**着色（无标注/未知
+ * 语言一律按纯文本渲染，见 RichContent 的 highlightCode），所以根因是模型不写标注。
+ * 渲染端已兜底（别名、`lang-x` 变体、`$ ` / JSON / diff / SQL 等高置信度识别），
+ * 但兜底永远比不上明确标注。
+ */
+const OUTPUT_FORMAT_PROMPT_BLOCK = [
+  "【输出格式】所有 ``` 围栏都必须写语言标注：代码写语言 id（ts / tsx / js / css / json / python / sql / bash / powershell / yaml / dockerfile / html / markdown …），命令与终端输出用 bash（Windows 用 powershell），纯日志与测试结果用 text。没有标注的围栏界面只能当纯文本显示、不会着色；Div 气泡内的代码统一写 <pre><code class=\"language-语言\">。"
+].join("");
+
 
 /**
  * Append the model-directed hint to a prompt whose images the conversation
@@ -4027,7 +4040,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
       // 留在分支历史 5569137/2bcfe45，恢复时 cherry-pick 即可）。
       createCodemodeExtension()
     ],
-    systemPromptOverride: (base) => [base, recordAgent.systemPrompt, buildDivModePrompt(recordAgent.divMode), buildSkillsSystemPromptBlock(runtimeSkills.activeSkillsFor(nativeSkills, recordAgent)), TOOL_ORCHESTRATION_PROMPT_BLOCK, buildSubagentPromptBlock(subagentCatalog), memoryPromptBlock].filter(Boolean).join("\n\n")
+    systemPromptOverride: (base) => [base, recordAgent.systemPrompt, buildDivModePrompt(recordAgent.divMode), buildSkillsSystemPromptBlock(runtimeSkills.activeSkillsFor(nativeSkills, recordAgent)), TOOL_ORCHESTRATION_PROMPT_BLOCK, OUTPUT_FORMAT_PROMPT_BLOCK, buildSubagentPromptBlock(subagentCatalog), memoryPromptBlock].filter(Boolean).join("\n\n")
   });
   await resourceLoader.reload();
   syncSkills();
