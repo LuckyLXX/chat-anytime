@@ -608,17 +608,19 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 /* 底部留白 = composer 空间 + 提问面板空间（面板打开时由 ConversationPane 按
    面板实测高度写入，最新气泡被顶到面板上方不被遮挡；面板关闭时为 0px 不生效）。 */
 .timeline { height: 100%; min-height: 0; padding-bottom: calc(var(--composer-space, 122px) + var(--question-panel-space, 0px)); overflow-x: hidden; overflow-y: auto; }
-/* 长对话只渲染可视区内消息（参考 VCPChat 的「墓碑冻结 + 涟漪优先」思路，通用手段）：
-   content-visibility:auto 让滚出可视区的历史消息「跳过渲染」，流式重绘与滚动重算的
-   负担集中在用户正在看的范围；文字/图片测量留给可视区。contain-intrinsic-size:auto
-   记住该条上次实际渲染高度（96px 仅为从未渲染过的兜底），跳过时仍占位，滚动条不因
-   惯性跳变而抖动。只作用于 .timeline 直接子元素 .message（含 pending-response），
-   不误伤空态容器与进度行。流式/粘底均不受影响——可视区内的消息照常渲染。 */
-.timeline > .message { content-visibility: auto; contain-intrinsic-size: auto 96px; }
-/* 时间线窗口化的等高占位（T10，见 renderer/src/lib/timeline-window.ts）：只占位不渲染内容，
-   高度由内联样式给出（优先用上次实测值）。刻意保留 `.message` 类与 data-turn-key ——
-   主题选择器、缩略导航锚点、offsetTop 语义都不变；`contain-intrinsic-size: none` 避免
-   与显式高度叠加（.timeline > .message 那条规则给的 96px 兜底对占位没有意义）。 */
+/* 消息气泡**不使用 content-visibility: auto**（2026-10-23 移除）。
+   曾经的 `.timeline > .message { content-visibility: auto; contain-intrinsic-size: auto 96px }`
+   想跳过滚出可视区的历史消息；但消息是高度不可预测的流式内容，Chromium 会把
+   上一次渲染的高度记成 intrinsic size：流式期间窗口失焦/消息滚出视口后继续增长时，
+   气泡可能停在这个旧高度（内容被 overflow:hidden 裁掉、时间线 scrollHeight 偏短），
+   滚动条到底了却看不到后面的内容，只有切换会话重新挂载才恢复。
+   长会话的渲染范围现在由时间线窗口化（T10，见 renderer/src/lib/timeline-window.ts）
+   负责：只实体化 ±1 屏 + 尾部条目，其余是等高占位，本来就不渲染历史 markdown。
+   因此这里不再需要 content-visibility，也请不要再加回来。 */
+/* 时间线窗口化的等高占位（T10）：只占位不渲染内容，高度由内联样式给出（优先用上次实测值）。
+   刻意保留 `.message` 类与 data-turn-key —— 主题选择器、缩略导航锚点、offsetTop 语义都不变。
+   下面的 content-visibility 只是防御性覆盖（主题/外层若给 .message 加了 cv-auto，占位元素
+   不该被跳过）；气泡层本身已不再使用 content-visibility。 */
 .timeline > .message[data-tombstone="true"] { content-visibility: visible; contain-intrinsic-size: none; }
 /* 缩略导航存在时，消息居中时两侧留出更宽的边距，让左侧缩略列不与气泡重叠。 */
 .timeline.has-turn-minimap > .message { width: min(962px, calc(100% - 116px)); }

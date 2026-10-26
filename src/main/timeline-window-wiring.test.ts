@@ -45,4 +45,15 @@ describe("timeline window wiring contract", () => {
     expect(pane).toContain("data-turn-key={entryTurnKey}");
     expect(styles).toContain('.timeline > .message[data-tombstone="true"]');
   });
+
+  it("消息气泡不使用 content-visibility（流式高变内容会冻在旧 intrinsic height）", () => {
+    // 2026-10-23 用户现场：长回复读到底时内容被裁在旧高度，滚动条已到底，
+    // 切换会话重新挂载才恢复。content-visibility:auto + contain-intrinsic-size:auto
+    // 会把流式期间某次渲染的高度记成后续的 intrinsic size。长会话渲染范围由本文件
+    // 上面的窗口化（T10）负责，气泡层不要再加回来。
+    const css = styles.replace(/\/\*[\s\S]*?\*\//gu, "");
+    const messageRule = css.match(/\.timeline\s*>\s*\.message\s*\{[^}]*\}/u)?.[0] ?? "";
+    expect(messageRule).not.toContain("content-visibility");
+    expect(css).not.toContain(".timeline > .message { content-visibility");
+  });
 });
