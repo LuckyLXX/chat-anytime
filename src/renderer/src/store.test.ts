@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import type { PermissionRequest, QuestionRequest, RuntimeSnapshot, SessionPaneSnapshot, ToolExecution, Todo, UsageStats } from "../../shared/protocol.js";
+import type { PermissionRequest, QuestionRequest, RuntimeSnapshot, SessionPaneSnapshot, SessionSearchHit, ToolExecution, Todo, UsageStats } from "../../shared/protocol.js";
 import { currentPermissionRequest, currentQuestionRequest, dropPaneStates, mergeQuestionRequests, pruneParkedPanels, useDesktopStore } from "./store.js";
 
 function permission(id: string, sessionId: string): PermissionRequest {
@@ -691,5 +691,60 @@ describe("streaming snapshot patches", () => {
     useDesktopStore.getState().handleRuntimeMessage(patch);
     useDesktopStore.getState().handleRuntimeMessage(patch);
     expect(useDesktopStore.getState().snapshot.messages).toHaveLength(2);
+  });
+});
+
+describe("会话检索结果的分流（命令面板 / 侧栏各一份）", () => {
+  function hit(sessionId: string): SessionSearchHit {
+    return {
+      sessionId,
+      path: `/p/${sessionId}.jsonl`,
+      title: sessionId,
+      workspace: "/w",
+      agentId: "default",
+      modifiedAt: 1,
+      timestamp: 2,
+      role: "user",
+      snippet: "片段",
+      score: 1
+    };
+  }
+
+  beforeEach(() => {
+    useDesktopStore.setState({
+      sessionSearch: { requestId: "sidebar-1", query: "侧栏", loading: true, hits: [] },
+      paletteSearch: { requestId: "palette-1", query: "面板", loading: true, hits: [] }
+    });
+  });
+
+  it("把面板查询的结果落进 paletteSearch，侧栏那份不受影响", () => {
+    useDesktopStore.getState().handleRuntimeMessage({
+      type: "session.search-result", requestId: "palette-1", hits: [hit("s1")], scanned: 3, total: 3, done: true
+    });
+    const state = useDesktopStore.getState();
+    expect(state.paletteSearch.loading).toBe(false);
+    expect(state.paletteSearch.hits.map((entry) => entry.sessionId)).toEqual(["s1"]);
+    expect(state.paletteSearch.scanned).toBe(3);
+    expect(state.sessionSearch.loading).toBe(true);
+    expect(state.sessionSearch.hits).toHaveLength(0);
+  });
+
+  it("侧栏查询的结果仍然落进 sessionSearch", () => {
+    useDesktopStore.getState().handleRuntimeMessage({
+      type: "session.search-result", requestId: "sidebar-1", hits: [hit("s2")], scanned: 5, total: 5, done: true
+    });
+    const state = useDesktopStore.getState();
+    expect(state.sessionSearch.loading).toBe(false);
+    expect(state.sessionSearch.hits.map((entry) => entry.sessionId)).toEqual(["s2"]);
+    expect(state.paletteSearch.loading).toBe(true);
+    expect(state.paletteSearch.hits).toHaveLength(0);
+  });
+
+  it("两边都不认领的过期结果被丢弃", () => {
+    const before = useDesktopStore.getState();
+    useDesktopStore.getState().handleRuntimeMessage({
+      type: "session.search-result", requestId: "stale", hits: [hit("s3")], scanned: 1, total: 1, done: true
+    });
+    expect(useDesktopStore.getState()).toBe(before);
   });
 });

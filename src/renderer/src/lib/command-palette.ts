@@ -19,7 +19,16 @@ export interface PaletteAction {
   hint?: string;
   /** 禁用时仍展示，但 Enter / 点击不执行。 */
   disabled?: boolean;
-  run: () => void | Promise<void>;
+  /**
+   * 执行体；与 {@link PaletteAction.enterSearch} 二选一。
+   * 纯模式切换动作（「搜索会话内容」）没有可执行逻辑，因此可以省略。
+   */
+  run?: () => void | Promise<void>;
+  /**
+   * 进入面板内的会话内容检索模式：面板不关闭，输入框文字变成检索词，
+   * 列表换成命中结果（回车打开会话并定位到那条消息）。
+   */
+  enterSearch?: boolean;
 }
 
 export interface PaletteGroup {

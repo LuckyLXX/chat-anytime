@@ -367,6 +367,8 @@ export function App(): ReactNode {
     [automation]
   );
   const sessionSearch = useDesktopStore((state) => state.sessionSearch);
+  /** 命令面板的会话检索结果（与侧栏那份分开，避免两边互相淹没）。 */
+  const paletteSearch = useDesktopStore((state) => state.paletteSearch);
   const recentWorkspaces = useDesktopStore((state) => state.snapshot.recentWorkspaces);
   const activeAgentId = useDesktopStore((state) => state.snapshot.agentId);
   const activeAgentName = useDesktopStore((state) => state.snapshot.agentName);
@@ -421,6 +423,8 @@ export function App(): ReactNode {
   const [sidebarTab, setSidebarTab] = useState<"agents" | "topics">("topics");
   const [sidebarQuery, setSidebarQuery] = useState("");
   const [paletteOpen, setPaletteOpen] = useState(false);
+  // 命令面板检索模式下用户输入的查询（CommandPalette 推上来；离开模式/关面板推空串）。
+  const [paletteSessionQuery, setPaletteSessionQuery] = useState("");
   // 启动时所有工作区分组默认折叠（空表 = 无展开项）；用户展开后保持到退出。
   const [expandedWorkspaceGroups, setExpandedWorkspaceGroups] = useState<Record<string, boolean>>({});
   // 已展开过的分组保留挂载（折叠动画需要子节点），但**从未展开**的分组不渲染
@@ -453,6 +457,32 @@ export function App(): ReactNode {
   useEffect(() => {
     useDesktopStore.setState({ sessionSearch: { query: "", loading: false, hits: [] } });
   }, [activeAgentId]);
+
+  // 命令面板的会话检索：与侧栏同理（300ms 防抖 + ≥2 字 + requestId 防旧结果），
+  // 但状态落在 store 的独立切片 paletteSearch，侧栏那份不受影响。
+  // 查询一变先清空命中并置 loading：面板里看得见上一查的命中比空白更危险——
+  // 用户可能对一条与当前关键字无关的结果按回车。
+  useEffect(() => {
+    const query = paletteSessionQuery.trim();
+    const current = useDesktopStore.getState().paletteSearch;
+    if (query.length < 2) {
+      if (current.query || current.hits.length > 0) useDesktopStore.setState({ paletteSearch: { query: "", loading: false, hits: [] } });
+      return;
+    }
+    if (current.query !== query) useDesktopStore.setState({ paletteSearch: { query, loading: true, hits: [] } });
+    const timer = window.setTimeout(() => {
+      const requestId = `palette-search-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      useDesktopStore.setState((state) => state.paletteSearch.query === query
+        ? { paletteSearch: { ...state.paletteSearch, requestId, loading: true, hits: [] } }
+        : state);
+      void window.piDesktop.send({ type: "session.search", requestId, query }).catch((cause: unknown) => {
+        useDesktopStore.setState((state) => state.paletteSearch.requestId === requestId
+          ? { paletteSearch: { ...state.paletteSearch, loading: false, error: cause instanceof Error ? cause.message : "搜索失败" } }
+          : state);
+      });
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [paletteSessionQuery]);
 
   // 全局快捷键（主进程 push）与 Ctrl/Cmd+K：两者都只是「打开」信号。
   useEffect(() => {
@@ -2002,7 +2032,7 @@ export function App(): ReactNode {
 
   paletteActions.push(
     { id: "session.new", title: "新建话题", group: "会话", keywords: "new chat session", hint: activeWorkspace ? compactPath(activeWorkspace) : "先打开工作区", disabled: !activeWorkspace, run: () => { void createNewSession(); } },
-    { id: "session.search", title: "搜索会话内容", group: "会话", keywords: "search find message 全文", run: () => { setSidebarCollapsed(false); setSidebarView("topics"); setSidebarTab("topics"); setSidebarFlyoutOpen(true); window.setTimeout(() => sidebarSearchRef.current?.focus(), 30); } },
+    { id: "session.search", title: "搜索会话内容", group: "会话", keywords: "search find message 全文", hint: "标题与正文", enterSearch: true },
     { id: "workspace.open", title: "打开工作区…", group: "会话", keywords: "open folder workspace", run: () => { void openWorkspace(); } },
     { id: "view.files", title: "浏览当前工作区文件", group: "视图", keywords: "files tree 文件树", hint: activeWorkspace ? compactPath(activeWorkspace) : undefined, disabled: !activeWorkspace, run: () => { setSidebarCollapsed(false); setSidebarView("files"); setBrowsingWorkspace(activeWorkspace ?? ""); setTreeRefreshSignal(0); } },
     { id: "view.gallery", title: "打开作品墙", group: "视图", keywords: "gallery 作品", run: () => setGalleryWallOpen(true) },
@@ -2269,7 +2299,15 @@ export function App(): ReactNode {
           onClose={() => { setGalleryDraftOpen(false); setGalleryDraftInitial(undefined); }}
         />
       )}
-      <CommandPalette open={paletteOpen} actions={paletteActions} onClose={() => setPaletteOpen(false)} />
+      <CommandPalette
+        open={paletteOpen}
+        actions={paletteActions}
+        onClose={() => setPaletteOpen(false)}
+        sessionSearch={paletteSearch}
+        agents={settings.agents}
+        onSearchQueryChange={setPaletteSessionQuery}
+        onOpenHit={openSearchHit}
+      />
       {contextMenu && <ContextMenu x={contextMenu.x} y={contextMenu.y} items={contextMenu.items} onClose={() => setContextMenu(null)} />}
       {renamePresence.rendered && (() => { const renameSession = renamePresence.value; if (!renameSession) return null; return (
         <ExitWrap exiting={renamePresence.exiting}>

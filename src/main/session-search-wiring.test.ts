@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
  * 会话全文检索的接线契约（2026-10-19）。
  *
  * 模块本身的用例只能证明「索引与检索正确」，证明不了 pi-runtime 真的把命令接上、
- * 真的只搜当前助手的会话、真的在查询变化时收手。这里把四段接线钉死；行尾归一化
+ * 真的在查询变化时收手、结果真的按 requestId 分流到侧栏/命令面板。这里把接线钉死；行尾归一化
  * 是硬要求（CI 的 windows runner 会检出 CRLF，跨行断言否则本地绿、CI 红）。
  */
 const read = (relative: string): string => readFileSync(join(__dirname, relative), "utf8").replace(/\r\n/gu, "\n");
@@ -41,10 +41,16 @@ describe("session search wiring contract", () => {
     expect(runtime).toContain("await yieldToEventLoop();");
   });
 
-  it("渲染端丢弃过期结果，并在侧栏发出防抖查询", () => {
+  it("渲染端按 requestId 把结果分流给侧栏或命令面板，并丢弃无人认领的过期结果", () => {
     expect(store).toContain('case "session.search-result":');
-    expect(store).toContain("message.requestId !== state.sessionSearch.requestId");
-    expect(app).toContain('type: "session.search"');
+    // 两份状态各按自己的 requestId 认领；都不匹配就整帧丢弃（查询被放弃后
+    // 晚到的结果不能写进任何一份，否则侧栏会冒出与搜索框无关的命中）。
+    expect(store).toContain("state.paletteSearch.requestId === message.requestId");
+    expect(store).toContain("state.sessionSearch.requestId === message.requestId");
+    expect(store).toContain("if (!target) return state;");
+    // 侧栏与命令面板各自一条防抖查询：面板那条带 palette-search- 前缀的 requestId。
+    expect(app.split('type: "session.search"').length - 1).toBe(2);
+    expect(app).toContain("palette-search-");
     expect(app).toContain("setTimeout(() => {");
     expect(app).toContain("pendingReveal");
   });

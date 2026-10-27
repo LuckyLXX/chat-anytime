@@ -337,7 +337,7 @@ export function paneQuestionRequest(questions: QuestionRequest[], sessionIds: st
   return undefined;
 }
 
-/** 会话全文检索的状态（侧栏搜索框触发；query 与结果同帧更新）。 */
+/** 会话全文检索的状态（侧栏搜索框与命令面板各一份；query 与结果同帧更新）。 */
 export interface SessionSearchState {
   /** 当前查询的请求 id：结果推送不匹配则丢弃（旧查询晚到）。 */
   requestId?: string;
@@ -387,6 +387,11 @@ interface DesktopState {
   todos: Todo[];
   /** 会话全文检索状态（侧栏内联结果区）。 */
   sessionSearch: SessionSearchState;
+  /**
+   * 命令面板内的会话检索状态（`session.search-result` 按 requestId 分流到这里）：
+   * 与侧栏那份分开，否则面板的查询会把侧栏结果淹没、反之亦反。
+   */
+  paletteSearch: SessionSearchState;
   /** 待定位的检索命中（打开会话后由 ConversationPane 消费）。 */
   pendingReveal?: PendingReveal;
   /** 冷会话解析中（utility 在同步读 JSONL 前推送）；侧栏行显示 spinner。 */
@@ -573,6 +578,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   resources: emptyResources,
   todos: [],
   sessionSearch: { query: "", loading: false, hits: [] },
+  paletteSearch: { query: "", loading: false, hits: [] },
   memory: [],
   memoryContents: {},
   memoryTopicErrors: {},
@@ -757,11 +763,19 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
         break;
       case "session.search-result":
         set((state) => {
-          // 旧查询的结果晚到：requestId 不匹配就丢弃，避免把新查询的结果覆盖掉。
-          if (state.sessionSearch.requestId && message.requestId !== state.sessionSearch.requestId) return state;
+          // 同一份结果可能属于命令面板或侧栏：按 requestId 精确认领（requestId 全局唯一），
+          // 两边都不会被对方的结果覆盖。**两处都不认领就丢弃**：查询被放弃（清空/关面板）
+          // 时切片里已经没有 requestId，晚到的结果不能再写进任何一份——旧实现在这里会
+          // 落到 side-effect 的“没人认领就写 sessionSearch”，让侧栏冒出与搜索框无关的命中。
+          const target = state.paletteSearch.requestId === message.requestId && state.paletteSearch.requestId
+            ? "paletteSearch"
+            : state.sessionSearch.requestId === message.requestId && state.sessionSearch.requestId
+              ? "sessionSearch"
+              : undefined;
+          if (!target) return state;
           return {
-            sessionSearch: {
-              ...state.sessionSearch,
+            [target]: {
+              ...state[target],
               loading: false,
               hits: message.hits,
               scanned: message.scanned,

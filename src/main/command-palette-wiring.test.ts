@@ -36,9 +36,19 @@ describe("command palette wiring contract", () => {
   it("渲染端响应 Ctrl/Cmd+K 与主进程推送", () => {
     expect(app).toContain("event.ctrlKey || event.metaKey");
     expect(app).toContain("paletteOpenTick > 0");
-    expect(app).toContain("<CommandPalette open={paletteOpen}");
+    expect(app).toContain("<CommandPalette");
+    expect(app).toContain("open={paletteOpen}");
     expect(store).toContain('case "palette.open"');
     expect(store).toContain('case "shortcut.error"');
+  });
+
+  it("「搜索会话内容」在面板内进入检索模式，而不是关掉面板去跳侧栏", () => {
+    expect(app).toContain('title: "搜索会话内容"');
+    expect(app).toContain("enterSearch: true");
+    // 面板要拿到检索结果与命中打开回调，否则检索模式只有输入框没有结果。
+    expect(app).toContain("sessionSearch={paletteSearch}");
+    expect(app).toContain("onOpenHit={openSearchHit}");
+    expect(store).toContain("paletteSearch:");
   });
 
   it("设置页的开关写入固定加速键并随保存提交", () => {
