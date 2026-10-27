@@ -179,3 +179,99 @@ describe("demo session commands", () => {
     unsubscribe();
   });
 });
+
+describe("demo workspace-first semantics", () => {
+  it("gives every demo session an agentId and includes two assistants in one workspace", async () => {
+    const runtime = (await createDemoApi().bootstrap()).runtime!;
+    expect(runtime.sessions.every((session) => Boolean(session.agentId))).toBe(true);
+    const demoWorkspaceSessions = runtime.sessions.filter((session) => session.workspace === "D:\\Projects\\chat-anytime-demo");
+    expect(new Set(demoWorkspaceSessions.map((session) => session.agentId))).toEqual(new Set(["default", "heiyuhe"]));
+    // 空工作区来自 recentWorkspaces（没有任何会话），侧栏应能显示它。
+    expect(runtime.recentWorkspaces.some((workspace) => !runtime.sessions.some((session) => session.workspace === workspace.path))).toBe(true);
+  });
+
+  it("workspace.open sets lastWorkspace and opens the workspace's most recent session", async () => {
+    const api = createDemoApi();
+    await api.send({ type: "workspace.open", path: "D:\\Projects\\WorkspaceOpenTest" });
+    const bootstrap = await api.bootstrap();
+    expect(bootstrap.settings.lastWorkspace).toBe("D:\\Projects\\WorkspaceOpenTest");
+    expect(bootstrap.runtime?.workspace).toBe("D:\\Projects\\WorkspaceOpenTest");
+    expect(bootstrap.runtime?.sessionId).toBe("new-demo-session");
+  });
+
+  it("agent.select does not switch workspace, and openSession:false only changes the default assistant", async () => {
+    const api = createDemoApi();
+    await api.send({ type: "workspace.open", path: "D:\\Projects\\AgentSelectTest" });
+    const before = await api.bootstrap();
+    const beforeSessionId = before.runtime?.sessionId;
+
+    await api.send({ type: "agent.select", agentId: "heiyuhe", openSession: false });
+    const passive = await api.bootstrap();
+    expect(passive.settings.currentAgentId).toBe("heiyuhe");
+    expect(passive.runtime?.workspace).toBe("D:\\Projects\\AgentSelectTest");
+    expect(passive.runtime?.sessionId).toBe(beforeSessionId);
+    expect(passive.runtime?.agentId).toBe(before.runtime?.agentId);
+
+    await api.send({ type: "agent.select", agentId: "heiyuhe" });
+    const active = (await api.bootstrap()).runtime!;
+    expect(active.workspace).toBe("D:\\Projects\\AgentSelectTest");
+    expect(active.agentId).toBe("heiyuhe");
+  });
+
+  it("workspace.forget removes only the recent entry, not the sessions", async () => {
+    const api = createDemoApi();
+    await api.send({ type: "workspace.open", path: "D:\\Projects\\chat-anytime-demo" });
+    const before = await api.bootstrap();
+    const sessionCount = before.runtime!.sessions.length;
+
+    await api.send({ type: "workspace.forget", path: "D:\\Projects\\PiDesktop" });
+    const after = await api.bootstrap();
+    expect(after.runtime?.recentWorkspaces.some((workspace) => workspace.path === "D:\\Projects\\PiDesktop")).toBe(false);
+    expect(after.runtime?.sessions.length).toBe(sessionCount);
+  });
+
+  it("session.deleteMany removes the requested paths", async () => {
+    const api = createDemoApi();
+    await api.send({ type: "session.deleteMany", paths: ["older-session.jsonl"] });
+    const runtime = (await api.bootstrap()).runtime!;
+    expect(runtime.sessions.some((session) => session.path === "older-session.jsonl")).toBe(false);
+  });
+
+  it("session.search returns typed hits with the owning agentId", async () => {
+    const api = createDemoApi();
+    const messages: RuntimeMessage[] = [];
+    const unsubscribe = api.onRuntimeMessage((message) => messages.push(message));
+    await api.send({ type: "session.search", requestId: "search-1", query: "梳理项目架构" });
+    const result = messages.find((message) => message.type === "session.search-result" && message.requestId === "search-1");
+    expect(result).toMatchObject({ type: "session.search-result", done: true, scanned: expect.any(Number) });
+    if (result?.type === "session.search-result") {
+      expect(result.hits[0]).toMatchObject({ sessionId: "demo-session", agentId: "default" });
+    }
+    unsubscribe();
+  });
+
+  it("settings.save changing defaultWorkspace does not switch the current workspace", async () => {
+    const api = createDemoApi();
+    await api.send({ type: "workspace.open", path: "D:\\Projects\\PiDesktop" });
+    const before = (await api.bootstrap()).settings;
+    await api.send({
+      type: "settings.save",
+      settings: {
+        model: before.model,
+        thinkingLevel: before.thinkingLevel,
+        accessMode: before.accessMode,
+        appearance: before.appearance,
+        browser: before.browser,
+        computer: before.computer,
+        design: before.design,
+        ssh: before.ssh,
+        jev: before.jev,
+        defaultWorkspace: "D:\\Projects\\另一个默认目录",
+        shortcuts: before.shortcuts
+      }
+    });
+    const after = await api.bootstrap();
+    expect(after.settings.defaultWorkspace).toBe("D:\\Projects\\另一个默认目录");
+    expect(after.runtime?.workspace).toBe("D:\\Projects\\PiDesktop");
+  });
+});

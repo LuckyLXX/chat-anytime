@@ -244,20 +244,58 @@ export function sessionTextIndexChars(index: SessionTextIndex): number {
  * 总字符超出上限时按文件 mtime 淘汰最旧的条目。只影响搜索缓存，不影响会话文件。
  * 返回是否发生了淘汰。
  */
+function textIndexAgentKey(key: string): string {
+  const parts = key.replaceAll("\\", "/").toLowerCase().split("/");
+  const at = parts.lastIndexOf("chatanytime-sessions");
+  return at >= 0 && parts[at + 1] ? parts[at + 1]! : "";
+}
+
+function textIndexEntryChars(entry: SessionTextIndex["files"][string] | undefined): number {
+  return entry ? entry.docs.reduce((sum, doc) => sum + doc.text.length, 0) : 0;
+}
+
+/**
+ * 文本索引预算裁剪（全助手口径）：先按 agent 分区、每区配额 maxChars/分区数，
+ * 再按全局上限兜底。旧实现是单一全局 LRU，一个庞大的助手能把其他工作区的
+ * 文本全部挤掉（下次搜索重新整文件解析）。
+ */
 export function pruneSessionTextIndex(index: SessionTextIndex, maxChars = MAX_INDEX_CHARS): boolean {
   let total = sessionTextIndexChars(index);
   if (total <= maxChars) return false;
-  const keys = Object.keys(index.files).sort((left, right) =>
-    (index.files[left]?.lastUsedAt ?? index.files[left]?.mtimeMs ?? 0) - (index.files[right]?.lastUsedAt ?? index.files[right]?.mtimeMs ?? 0)
-  );
-  let removed = false;
+  const keys = Object.keys(index.files);
+  const byAgent = new Map<string, string[]>();
   for (const key of keys) {
-    if (total <= maxChars) break;
-    const entry = index.files[key];
-    if (!entry) continue;
-    total -= entry.docs.reduce((sum, doc) => sum + doc.text.length, 0);
-    delete index.files[key];
-    removed = true;
+    const agent = textIndexAgentKey(key);
+    const list = byAgent.get(agent) ?? [];
+    list.push(key);
+    byAgent.set(agent, list);
+  }
+  const perAgentBudget = Math.max(1, Math.floor(maxChars / Math.max(1, byAgent.size)));
+  const oldestFirst = (left: string, right: string): number =>
+    (index.files[left]?.lastUsedAt ?? index.files[left]?.mtimeMs ?? 0) - (index.files[right]?.lastUsedAt ?? index.files[right]?.mtimeMs ?? 0);
+  let removed = false;
+  for (const list of byAgent.values()) {
+    let agentTotal = list.reduce((sum, key) => sum + textIndexEntryChars(index.files[key]), 0);
+    if (agentTotal <= perAgentBudget) continue;
+    list.sort(oldestFirst);
+    for (const key of list) {
+      if (agentTotal <= perAgentBudget) break;
+      const chars = textIndexEntryChars(index.files[key]);
+      agentTotal -= chars;
+      total -= chars;
+      delete index.files[key];
+      removed = true;
+    }
+  }
+  if (total > maxChars) {
+    const remaining = Object.keys(index.files).sort(oldestFirst);
+    for (const key of remaining) {
+      if (total <= maxChars) break;
+      const chars = textIndexEntryChars(index.files[key]);
+      total -= chars;
+      delete index.files[key];
+      removed = true;
+    }
   }
   return removed;
 }

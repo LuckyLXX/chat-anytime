@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { CUSTOM_PROVIDER_ID, createDefaultAgent, ensureDefaultWorkspaceDir, forgetAgentWorkspace, isPositiveInt, mergeProviderModels, migrateSettings, normalizeAccessMode, normalizeAgent, normalizeAgentWorkspaces, normalizeBrowser, normalizeCheckpoint, normalizeComputer, normalizeCustomThemes, normalizeDivBubbleMode, normalizeInterfaceTuning, normalizeJev, normalizeProvider, normalizeSsh, normalizeThemeAssets, normalizeVision, normalizeWallpaperOpacity, recordAgentWorkspace, resolveDefaultWorkspace, resolveInitialWorkspace } from "./settings.js";
+import { join, resolve } from "node:path";
+import { CUSTOM_PROVIDER_ID, createDefaultAgent, ensureDefaultWorkspaceDir, forgetAgentWorkspace, isPositiveInt, mergeProviderModels, migrateSettings, normalizeAccessMode, normalizeAgent, normalizeAgentWorkspaces, normalizeBrowser, normalizeCheckpoint, normalizeComputer, normalizeCustomThemes, normalizeDivBubbleMode, normalizeInterfaceTuning, normalizeJev, normalizeProvider, normalizeSsh, normalizeThemeAssets, normalizeVision, normalizeWallpaperOpacity, recordAgentWorkspace, resolveDefaultWorkspace, resolveInitialWorkspace, resolveStartupWorkspace } from "./settings.js";
 import { mergeBrowserSettings, withBrowserDownloadPrefs } from "./settings.js";
 
 describe("workspace per-agent memory and default workspace (方案 B)", () => {
@@ -18,6 +18,12 @@ describe("workspace per-agent memory and default workspace (方案 B)", () => {
     expect(normalizeAgentWorkspaces(undefined)).toBeUndefined();
     expect(normalizeAgentWorkspaces("junk")).toBeUndefined();
     expect(normalizeAgentWorkspaces([])).toBeUndefined();
+  });
+
+  it("reads lastWorkspace and keeps legacy workspace for migration only", () => {
+    expect(migrateSettings({ lastWorkspace: " D:/Projects/last " }).settings.lastWorkspace).toBe("D:/Projects/last");
+    expect(migrateSettings({ lastWorkspace: "   " }).settings.lastWorkspace).toBeUndefined();
+    expect(migrateSettings({ workspace: "D:/Projects/legacy" }).settings.workspace).toBe("D:/Projects/legacy");
   });
 
   it("migrates agentWorkspaces/defaultWorkspace and drops invalid values", () => {
@@ -55,13 +61,21 @@ describe("workspace per-agent memory and default workspace (方案 B)", () => {
     }
   });
 
-  it("resolves the initial workspace by the fallback chain: map hit → legacy → default", () => {
-    const map = { default: "D:\\Projects\\a", heiyuhe: "D:\\Projects\\b" };
-    expect(resolveInitialWorkspace(map, "default", "D:\\Projects\\legacy", "D:\\Projects\\default")).toBe("D:\\Projects\\a");
-    expect(resolveInitialWorkspace(undefined, "coder", "D:\\Projects\\legacy", "D:\\Projects\\default")).toBe("D:\\Projects\\legacy");
-    expect(resolveInitialWorkspace(undefined, "coder", undefined, "D:\\Projects\\default")).toBe("D:\\Projects\\default");
+  it("resolves the startup workspace by existence: lastWorkspace → map → legacy → default", () => {
+    const map = { default: "D:/Projects/a", heiyuhe: "D:/Projects/b" };
+    const existing = new Set(["d:/projects/last", "d:/projects/a", "d:/projects/legacy", "d:/projects/default"]);
+    const isDirectory = (path: string): boolean => existing.has(path.replaceAll("\\", "/").toLowerCase());
+    // lastWorkspace 命中且存在：优先。
+    expect(resolveStartupWorkspace({ lastWorkspace: "D:/Projects/last", agentWorkspaces: map, agentId: "default", legacyWorkspace: "D:/Projects/legacy", defaultWorkspace: "D:/Projects/default" }, isDirectory)).toBe(resolve("D:/Projects/last"));
+    // lastWorkspace 失效时不能跳过仍有效的 agentWorkspaces[currentAgentId]。
+    expect(resolveStartupWorkspace({ lastWorkspace: "D:/Projects/gone", agentWorkspaces: map, agentId: "default", legacyWorkspace: "D:/Projects/legacy", defaultWorkspace: "D:/Projects/default" }, isDirectory)).toBe(resolve("D:/Projects/a"));
+    expect(resolveStartupWorkspace({ lastWorkspace: "D:/Projects/gone", agentId: "coder", legacyWorkspace: "D:/Projects/legacy", defaultWorkspace: "D:/Projects/default" }, isDirectory)).toBe(resolve("D:/Projects/legacy"));
+    // 前三级全部失效：回落默认工作区（允许尚不存在，由调用方 mkdir）。
+    expect(resolveStartupWorkspace({ lastWorkspace: "D:/Projects/gone", agentWorkspaces: map, agentId: "coder", legacyWorkspace: "D:/Projects/gone2", defaultWorkspace: "D:/Projects/default" }, isDirectory)).toBe(resolve("D:/Projects/default"));
     // 默认目录创建失败（undefined）→ landing 极端兜底。
-    expect(resolveInitialWorkspace(undefined, "coder", undefined, undefined)).toBeUndefined();
+    expect(resolveStartupWorkspace({ agentId: "coder" }, () => false)).toBeUndefined();
+    // 兼容旧入口：默认用真实 fs 判断，但语义与新函数一致。
+    expect(resolveInitialWorkspace(undefined, "coder", undefined, "D:/Projects/default")).toBe(resolve("D:/Projects/default"));
   });
 
   it("records a per-agent workspace: overwrite same agent, keep others, resolve to absolute", () => {

@@ -3,7 +3,7 @@ import type { SessionSummary } from "../../../shared/protocol";
 import { archivedSessionCount, selectSessionPaths, selectedPathsInView, sessionsForView, toggleSessionSelection } from "./session-view";
 
 function session(overrides: Partial<SessionSummary> & { path: string }): SessionSummary {
-  return { id: overrides.path, workspace: "C:/work", title: "话题", modifiedAt: 1, messageCount: 1, ...overrides };
+  return { id: overrides.path, workspace: "C:/work", agentId: "default", title: "话题", modifiedAt: 1, messageCount: 1, ...overrides };
 }
 
 const active = session({ path: "C:/pi/sessions/a.jsonl" });

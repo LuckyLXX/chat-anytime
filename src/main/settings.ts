@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { mkdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
   JEV_DEFAULT_BASE_URL,
@@ -446,21 +446,58 @@ export function ensureDefaultWorkspaceDir(agentDir: string, custom?: string): st
   return target;
 }
 
+/** lastWorkspace 规范化：非空 string → trim；否则 undefined。 */
+export function normalizeLastWorkspace(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function defaultIsDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 /**
- * 启动首次工作区解析（兜底链）：agentWorkspaces[agentId] 命中 → legacy（老配置
- * settings.workspace，仅迁移期）→ 默认工作区。命中路径统一 resolve 规范化；
- * defaultWorkspace 可为 undefined（默认目录创建失败时走 landing 极端兜底）。
+ * 启动首次工作区解析（workspace-first 回退链，**按存在性逐项校验**）：
+ * lastWorkspace → agentWorkspaces[currentAgentId]（迁移期）→ legacy settings.workspace
+ * → 默认工作区。前三级只接受真实存在的目录；最后一级（默认工作区）允许不存在，
+ * 由调用方 ensureDefaultWorkspaceDir 幂等创建。这样 lastWorkspace 失效时不会跳过
+ * 仍有效的 agentWorkspaces 条目，也不会把 UI 卡在一个已删除的旧目录上。
  */
+export function resolveStartupWorkspace(
+  input: {
+    lastWorkspace?: string;
+    agentWorkspaces?: Record<string, string>;
+    agentId: string;
+    legacyWorkspace?: string;
+    defaultWorkspace?: string;
+  },
+  isDirectory: (path: string) => boolean = defaultIsDirectory
+): string | undefined {
+  const candidates = [
+    input.lastWorkspace,
+    input.agentWorkspaces?.[input.agentId],
+    input.legacyWorkspace
+  ];
+  for (const candidate of candidates) {
+    const trimmed = typeof candidate === "string" ? candidate.trim() : "";
+    if (!trimmed) continue;
+    const resolved = resolve(trimmed);
+    if (isDirectory(resolved)) return resolved;
+  }
+  return input.defaultWorkspace ? resolve(input.defaultWorkspace) : undefined;
+}
+
+/** @deprecated 兼容旧调用；新代码用 resolveStartupWorkspace（带存在性校验）。 */
 export function resolveInitialWorkspace(
   agentWorkspaces: Record<string, string> | undefined,
   agentId: string,
   legacyWorkspace: string | undefined,
   defaultWorkspace: string | undefined
 ): string | undefined {
-  const mapped = agentWorkspaces?.[agentId];
-  if (mapped) return resolve(mapped);
-  if (legacyWorkspace) return resolve(legacyWorkspace);
-  return defaultWorkspace;
+  return resolveStartupWorkspace({ agentWorkspaces, agentId, legacyWorkspace, defaultWorkspace });
 }
 
 /** 记录某助手最后使用的工作区：resolve 规范化后覆盖写入，其余助手键不动。 */
@@ -485,6 +522,7 @@ export function forgetAgentWorkspace(map: Record<string, string> | undefined, ag
 export function defaultSettings(): DesktopSettings {
   return {
     version: 2,
+    lastWorkspace: undefined,
     shortcuts: undefined,
     thinkingLevel: "medium",
     accessMode: "ask",
@@ -541,6 +579,7 @@ export function migrateSettings(raw: unknown): { settings: DesktopSettings; lega
     : "medium";
   const accessMode = normalizeAccessMode(source.accessMode);
   const agentWorkspaces = normalizeAgentWorkspaces(source.agentWorkspaces);
+  const lastWorkspace = normalizeLastWorkspace(source.lastWorkspace);
   const defaultWorkspace = typeof source.defaultWorkspace === "string" && source.defaultWorkspace.trim() ? source.defaultWorkspace.trim() : undefined;
   // 置顶路径必须原样读回：migrateSettings 是**唯一**的读入口，这里漏掉一个字段
   // 等于该字段「磁盘上有、内存里没有」——而 persistSettings 会把整个内存副本
@@ -554,6 +593,7 @@ export function migrateSettings(raw: unknown): { settings: DesktopSettings; lega
     version: 2,
     workspace: typeof source.workspace === "string" ? source.workspace : undefined,
     ...(agentWorkspaces ? { agentWorkspaces } : {}),
+    ...(lastWorkspace ? { lastWorkspace } : {}),
     ...(defaultWorkspace ? { defaultWorkspace } : {}),
     model: normalizeDefaultModel(source.model),
     thinkingLevel,

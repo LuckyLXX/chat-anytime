@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentWorkspaceSessionDir, backfillUnpersistedSessions, isSessionArchived, isSessionPinned, mergeSessionSummary, normalizeArchivedSessionPaths, normalizePinnedSessionPaths, pruneSessionPaths, pruneVanishedSessions, resolveNewSessionDefaults, sameSessionDir, sessionFileMatchesId, sessionListReadyFor, sessionPathKey, setArchivedSessionPaths, sortSessionSummaries, togglePinnedSessionPath, workspaceHash, type LiveSessionSeed } from "./session-scope.js";
+import { agentWorkspaceSessionDir, backfillUnpersistedSessions, isSessionArchived, isSessionPinned, mergeSessionSummary, normalizeArchivedSessionPaths, normalizePinnedSessionPaths, overlayLiveRunStatus, pruneSessionPaths, pruneVanishedSessions, resolveNewSessionDefaults, sameSessionDir, sessionFileMatchesId, sessionPathKey, setArchivedSessionPaths, sortSessionSummaries, togglePinnedSessionPath, workspaceHash, type LiveSessionSeed } from "./session-scope.js";
 
 describe("Agent workspace session scope", () => {
   it("keeps agents and workspaces in separate deterministic directories", () => {
@@ -34,8 +34,8 @@ describe("Agent workspace session scope", () => {
   });
 
   it("merges a fresh session into the sidebar list without touching existing entries", () => {
-    const known = { id: "old", path: "C:/pi/sessions/old.jsonl", workspace: "C:/work", title: "旧话题", modifiedAt: 100, messageCount: 3 };
-    const incoming = { id: "new", path: "C:/pi/sessions/new.jsonl", workspace: "C:/work", title: "新会话", modifiedAt: 500, messageCount: 0 };
+    const known = { id: "old", path: "C:/pi/sessions/old.jsonl", agentId: "coder", workspace: "C:/work", title: "旧话题", modifiedAt: 100, messageCount: 3 };
+    const incoming = { id: "new", path: "C:/pi/sessions/new.jsonl", agentId: "coder", workspace: "C:/work", title: "新会话", modifiedAt: 500, messageCount: 0 };
     const merged = mergeSessionSummary([known], incoming);
     // New session is prepended (newest first), existing entry unchanged.
     expect(merged.map((item) => item.id)).toEqual(["new", "old"]);
@@ -43,28 +43,19 @@ describe("Agent workspace session scope", () => {
   });
 
   it("merges an upgraded summary over the same path (optionally with open cursor)", () => {
-    const base = { id: "old-id", path: "C:/work/sessions/same.jsonl", workspace: "C:/work", title: "旧标题", modifiedAt: 100, messageCount: 3 };
-    const incoming = { id: "old-id", path: "c:/work/sessions/SAME.jsonl", workspace: "C:/work", title: "新标题", modifiedAt: 200, messageCount: 0 };
+    const base = { id: "old-id", path: "C:/work/sessions/same.jsonl", agentId: "coder", workspace: "C:/work", title: "旧标题", modifiedAt: 100, messageCount: 3 };
+    const incoming = { id: "old-id", path: "c:/work/sessions/SAME.jsonl", agentId: "coder", workspace: "C:/work", title: "新标题", modifiedAt: 200, messageCount: 0 };
     // Path comparison is case-insensitive and absolute; the incoming row wins.
     expect(mergeSessionSummary([base], incoming)).toEqual([incoming]);
   })
 
   it("keeps a mixed list sorted by modifiedAt descending", () => {
-    const a = { id: "a", path: "C:/pi/sessions/a.jsonl", workspace: "C:/work", title: "a", modifiedAt: 30, messageCount: 1 };
-    const b = { id: "b", path: "C:/pi/sessions/b.jsonl", workspace: "C:/work", title: "b", modifiedAt: 60, messageCount: 1 };
-    const c = { id: "c", path: "C:/pi/sessions/c.jsonl", workspace: "C:/work", title: "c", modifiedAt: 10, messageCount: 1 };
+    const a = { id: "a", path: "C:/pi/sessions/a.jsonl", agentId: "coder", workspace: "C:/work", title: "a", modifiedAt: 30, messageCount: 1 };
+    const b = { id: "b", path: "C:/pi/sessions/b.jsonl", agentId: "coder", workspace: "C:/work", title: "b", modifiedAt: 60, messageCount: 1 };
+    const c = { id: "c", path: "C:/pi/sessions/c.jsonl", agentId: "coder", workspace: "C:/work", title: "c", modifiedAt: 10, messageCount: 1 };
     expect(mergeSessionSummary([a, b], c).map((item) => item.id)).toEqual(["b", "a", "c"]);
   });
 
-  it("treats a non-empty session list from another agent as stale after an agent switch", () => {
-    // Same agent, populated list: the cached list stays valid.
-    expect(sessionListReadyFor(3, "coder", "coder")).toBe(true);
-    // The previous agent's list is non-empty but out of scope: must re-list.
-    expect(sessionListReadyFor(3, "default", "coder")).toBe(false);
-    // Empty lists are never ready, even for the same agent.
-    expect(sessionListReadyFor(0, "coder", "coder")).toBe(false);
-    expect(sessionListReadyFor(0, undefined, undefined)).toBe(false);
-  });
 });
 
 describe("pinned session paths", () => {
@@ -154,9 +145,9 @@ describe("archived session paths", () => {
 
 describe("sortSessionSummaries", () => {
   it("keeps pinned rows above newer unpinned ones", () => {
-    const pinned = { id: "p", path: "C:/w/p.jsonl", workspace: "C:/w", title: "置顶", modifiedAt: 10, messageCount: 3, pinned: true };
-    const fresh = { id: "n", path: "C:/w/n.jsonl", workspace: "C:/w", title: "新会话", modifiedAt: 999, messageCount: 0 };
-    const mid = { id: "m", path: "C:/w/m.jsonl", workspace: "C:/w", title: "中间", modifiedAt: 500, messageCount: 1 };
+    const pinned = { id: "p", path: "C:/w/p.jsonl", agentId: "coder", workspace: "C:/w", title: "置顶", modifiedAt: 10, messageCount: 3, pinned: true };
+    const fresh = { id: "n", path: "C:/w/n.jsonl", agentId: "coder", workspace: "C:/w", title: "新会话", modifiedAt: 999, messageCount: 0 };
+    const mid = { id: "m", path: "C:/w/m.jsonl", agentId: "coder", workspace: "C:/w", title: "中间", modifiedAt: 500, messageCount: 1 };
     expect(sortSessionSummaries([mid, fresh, pinned]).map((item) => item.id)).toEqual(["p", "n", "m"]);
     // 不修改入参
     const source = [mid, fresh, pinned];
@@ -175,8 +166,8 @@ describe("sameSessionDir", () => {
 });
 
 describe("pruneVanishedSessions", () => {
-  const vanished = { id: "ghost", path: "C:/pi/sessions/ghost.jsonl", workspace: "C:/work", title: "新会话", modifiedAt: 500, messageCount: 0 };
-  const persisted = { id: "disk", path: "C:/pi/sessions/disk.jsonl", workspace: "C:/work", title: "磁盘话题", modifiedAt: 100, messageCount: 5 };
+  const vanished = { id: "ghost", path: "C:/pi/sessions/ghost.jsonl", agentId: "coder", workspace: "C:/work", title: "新会话", modifiedAt: 500, messageCount: 0 };
+  const persisted = { id: "disk", path: "C:/pi/sessions/disk.jsonl", agentId: "coder", workspace: "C:/work", title: "磁盘话题", modifiedAt: 100, messageCount: 5 };
 
   it("drops an empty topic whose file was never written and whose live record is gone", () => {
     const list = [vanished, persisted];
@@ -210,33 +201,35 @@ describe("pruneVanishedSessions", () => {
 });
 
 describe("backfillUnpersistedSessions", () => {
-  const onDisk = { id: "disk", path: "C:/pi/sessions/disk.jsonl", workspace: "C:/work", title: "磁盘话题", modifiedAt: 100, messageCount: 5 };
+  const onDisk = { id: "disk", path: "C:/pi/sessions/disk.jsonl", agentId: "coder", workspace: "C:/work", title: "磁盘话题", modifiedAt: 100, messageCount: 5 };
 
   it("re-adds live sessions whose file is not on disk yet (fresh 新会话 not wiped by a full refresh)", () => {
     const seed: LiveSessionSeed = { sessionId: "fresh", path: "C:/pi/sessions/fresh.jsonl", workspace: "C:/work", agentId: "coder", activatedAt: 400 };
-    const backfilled = backfillUnpersistedSessions([onDisk], [onDisk], [seed], "coder");
+    const backfilled = backfillUnpersistedSessions([onDisk], [onDisk], [seed]);
     expect(backfilled.map((item) => item.id)).toEqual(["fresh", "disk"]);
-    expect(backfilled[0]).toMatchObject({ id: "fresh", title: "新会话", workspace: "C:/work", messageCount: 0 });
+    expect(backfilled[0]).toMatchObject({ id: "fresh", title: "新会话", agentId: "coder", workspace: "C:/work", messageCount: 0 });
   });
 
   it("returns the list reference untouched when there is nothing to backfill", () => {
     const seed: LiveSessionSeed = { sessionId: "disk", path: "C:/pi/sessions/disk.jsonl", workspace: "C:/work", agentId: "coder", activatedAt: 400 };
     const list = [onDisk];
-    expect(backfillUnpersistedSessions(list, [onDisk], [seed], "coder")).toBe(list);
-    expect(backfillUnpersistedSessions(list, [onDisk], [], "coder")).toBe(list);
+    expect(backfillUnpersistedSessions(list, [onDisk], [seed])).toBe(list);
+    expect(backfillUnpersistedSessions(list, [onDisk], [])).toBe(list);
   });
 
-  it("skips live records of another agent (agent-scoped listing) and records without a file", () => {
+  it("backfills live records of every agent (global listing) and skips records without a file", () => {
     const other: LiveSessionSeed = { sessionId: "other", path: "C:/pi/sessions/other.jsonl", workspace: "C:/work", agentId: "default", activatedAt: 400 };
     const fileless: LiveSessionSeed = { sessionId: "fileless", path: undefined, workspace: "C:/work", agentId: "coder", activatedAt: 400 };
     const list = [onDisk];
-    expect(backfillUnpersistedSessions(list, [onDisk], [other, fileless], "coder")).toBe(list);
+    const merged = backfillUnpersistedSessions(list, [onDisk], [other, fileless]);
+    expect(merged.map((item) => item.id)).toEqual(["other", "disk"]);
+    expect(merged.find((item) => item.id === "other")?.agentId).toBe("default");
   });
 
   it("prefers the pre-refresh entry to preserve renames/pins and overlays the live runStatus", () => {
-    const prior = { id: "fresh", path: "C:/pi/sessions/fresh.jsonl", workspace: "C:/work", title: "用户改过名", modifiedAt: 300, messageCount: 0, pinned: true };
+    const prior = { id: "fresh", path: "C:/pi/sessions/fresh.jsonl", agentId: "coder", workspace: "C:/work", title: "用户改过名", modifiedAt: 300, messageCount: 0, pinned: true };
     const seed: LiveSessionSeed = { sessionId: "fresh", path: "c:/pi/sessions/FRESH.jsonl", workspace: "C:/work", agentId: "coder", activatedAt: 400, title: undefined, runStatus: "running" };
-    const backfilled = backfillUnpersistedSessions([onDisk], [prior], [seed], "coder");
+    const backfilled = backfillUnpersistedSessions([onDisk], [prior], [seed]);
     expect(backfilled.map((item) => item.id)).toEqual(["fresh", "disk"]);
     expect(backfilled[0]).toEqual({ ...prior, runStatus: "running" });
   });
@@ -244,25 +237,69 @@ describe("backfillUnpersistedSessions", () => {
   it("keeps the pinned flag when backfilling a live row from the pre-refresh entry", () => {
     // 全量刷新会用 live seed 合成未落盘的新话题行；置顶标记只能来自重建前的
     // 同名条目，丢了就会出现「置顶一个空话题 → 发消息/刷新后置顶消失」。
-    const prior = { id: "fresh", path: "C:/pi/sessions/fresh.jsonl", workspace: "C:/work", title: "新会话", modifiedAt: 300, messageCount: 0, pinned: true };
+    const prior = { id: "fresh", path: "C:/pi/sessions/fresh.jsonl", agentId: "coder", workspace: "C:/work", title: "新会话", modifiedAt: 300, messageCount: 0, pinned: true };
     const seed: LiveSessionSeed = { sessionId: "fresh", path: "C:/pi/sessions/fresh.jsonl", workspace: "C:/work", agentId: "coder", activatedAt: 400, runStatus: "running" };
-    const backfilled = backfillUnpersistedSessions([onDisk], [prior], [seed], "coder");
+    const backfilled = backfillUnpersistedSessions([onDisk], [prior], [seed]);
     expect(backfilled[0]).toMatchObject({ id: "fresh", pinned: true, runStatus: "running" });
   });
 
   it("keeps the archived flag when backfilling a live row from the pre-refresh entry", () => {
     // 同置顶的根因：归档一个刚建的空话题（文件尚未落盘）后，任何一次防抖刷新
     // 都会经这里重建那一行——不回填 archived 就等于「归档自己弹回来」。
-    const prior = { id: "fresh", path: "C:/pi/sessions/fresh.jsonl", workspace: "C:/work", title: "新会话", modifiedAt: 300, messageCount: 0, archived: true };
+    const prior = { id: "fresh", path: "C:/pi/sessions/fresh.jsonl", agentId: "coder", workspace: "C:/work", title: "新会话", modifiedAt: 300, messageCount: 0, archived: true };
     const seed: LiveSessionSeed = { sessionId: "fresh", path: "C:/pi/sessions/fresh.jsonl", workspace: "C:/work", agentId: "coder", activatedAt: 400 };
-    const backfilled = backfillUnpersistedSessions([onDisk], [prior], [seed], "coder");
+    const backfilled = backfillUnpersistedSessions([onDisk], [prior], [seed]);
     expect(backfilled[0]).toMatchObject({ id: "fresh", archived: true });
   });
 
   it("deduplicates against the disk list by path (case-insensitive)", () => {
     const seed: LiveSessionSeed = { sessionId: "disk", path: "c:/pi/sessions/DISK.jsonl", workspace: "C:/work", agentId: "coder", activatedAt: 400 };
-    const backfilled = backfillUnpersistedSessions([onDisk], [onDisk], [seed], "coder");
+    const backfilled = backfillUnpersistedSessions([onDisk], [onDisk], [seed]);
     expect(backfilled.map((item) => item.id)).toEqual(["disk"]);
+  });
+});
+
+describe("overlayLiveRunStatus", () => {
+  // 磁盘摘要（summarizeAllSessions）不带 runStatus，而回填只处理「未落盘」的行：
+  // 已落盘的会话每经过一次全量刷新（回合开始 / 每条 assistant 消息完成 / 回合结束的
+  // 500ms 防抖、pin、rename、delete）都会把圆点丢掉——运行中的会话在回合开始半秒后
+  // 就不再显示「执行中」，parked 会话的绿/红结果点同样活不过一次刷新
+  // （2026-10-27 用户报「运行中的会话左侧会话栏没有状态标点显示」）。
+  const persisted = { id: "disk", path: "C:/pi/sessions/disk.jsonl", agentId: "coder", workspace: "C:/work", title: "磁盘话题", modifiedAt: 100, messageCount: 5 };
+  const seed = (runStatus?: LiveSessionSeed["runStatus"]): LiveSessionSeed => ({ sessionId: "disk", path: "C:/pi/sessions/disk.jsonl", workspace: "C:/work", agentId: "coder", activatedAt: 400, runStatus });
+
+  it("puts the 执行中 dot back on a session that is already on disk", () => {
+    const live = seed("running");
+    // 回填只管未落盘行——已落盘会话重建后就丢圆点，这正是 bug 的来路。
+    const rebuilt = backfillUnpersistedSessions([persisted], [persisted], [live]);
+    expect(rebuilt[0]?.runStatus).toBeUndefined();
+    expect(overlayLiveRunStatus(rebuilt, [live])[0]?.runStatus).toBe("running");
+  });
+
+  it("keeps parked outcome dots (completed/failed/aborted) across a refresh", () => {
+    for (const status of ["completed", "failed", "aborted"] as const) {
+      const overlaid = overlayLiveRunStatus([persisted], [seed(status)]);
+      expect(overlaid[0]).toEqual({ ...persisted, runStatus: status });
+    }
+  });
+
+  it("clears a stale dot when the live record has already been seen", () => {
+    // 激活会话会清空 runStatus（结果已经看得见了）；刷新不能把它从旧列表里复活。
+    const stale = { ...persisted, runStatus: "completed" as const };
+    const overlaid = overlayLiveRunStatus([stale], [seed(undefined)]);
+    expect(overlaid[0]).toEqual(persisted);
+    expect("runStatus" in (overlaid[0] ?? {})).toBe(false);
+  });
+
+  it("leaves rows without a live record untouched and returns the input reference", () => {
+    const list = [persisted];
+    expect(overlayLiveRunStatus(list, [])).toBe(list);
+    const other: LiveSessionSeed = { sessionId: "other", path: "C:/pi/sessions/other.jsonl", workspace: "C:/work", agentId: "coder", activatedAt: 400, runStatus: "running" };
+    // 历史话题（无 live 记录）不因刷新而多出/丢掉圆点。
+    expect(overlayLiveRunStatus(list, [other])).toBe(list);
+    // 已经是同一状态时同样不产生新引用（否则整列每帧重渲染）。
+    const running = [{ ...persisted, runStatus: "running" as const }];
+    expect(overlayLiveRunStatus(running, [seed("running")])).toBe(running);
   });
 });
 

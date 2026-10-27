@@ -27,6 +27,7 @@ import {
   ShieldAlert,
   ShieldCheck,
   Trash2,
+  UserRound,
   Workflow,
   X,
   Zap,
@@ -122,7 +123,8 @@ const emptyPaneData: SessionPaneSnapshot = {
   status: "",
   queuedMessages: [],
   messages: [],
-  executions: []
+  executions: [],
+  readOnlyReason: undefined
 };
 
 /** 切会话后「钉底窗口」的最长时长（ms）：期间内容还在长就继续钉，用户上滚即中止。 */
@@ -852,6 +854,10 @@ export const ConversationPane = memo(function ConversationPane({
 }: ConversationPaneProps): ReactNode {
   const data = usePaneData(sessionId);
   const settings = useDesktopStore((state) => state.settings);
+  const agentOptions = useMemo(() => settings.agents.filter((agent) => !agent.archived), [settings.agents]);
+  const currentAgentName = data.agentName
+    ?? settings.agents.find((agent) => agent.id === data.agentId)?.name
+    ?? "助手";
   const [teamBoardOpen, setTeamBoardOpen] = useState(false);
   const [teamBoardMode, setTeamBoardMode] = useState<"dock" | "full">("dock");
   const [teamBoardWidth, setTeamBoardWidth] = useState(424);
@@ -904,7 +910,7 @@ export const ConversationPane = memo(function ConversationPane({
   // 输入框附件条里图片缩略图的放大预览（复用 image-lightbox 模式）。
   const [previewingAttachment, setPreviewingAttachment] = useState<PromptAttachment | null>(null);
   const [accessModeMenuOpen, setAccessModeMenuOpen] = useState(false);
-  const [composerMenu, setComposerMenu] = useState<"model" | "thinking">();
+  const [composerMenu, setComposerMenu] = useState<"model" | "thinking" | "agent">();
   // 上下文占用明细卡（点击 chip 展开，dsh ContextMeter 同款三段构成）。
   const [contextUsageOpen, setContextUsageOpen] = useState(false);
   const [slashIndex, setSlashIndex] = useState(0);
@@ -950,6 +956,11 @@ export const ConversationPane = memo(function ConversationPane({
   const revealHandledRef = useRef(0);
   const windowHeightsRef = useRef(new Map<string, number>());
   const windowObserverRef = useRef<TimelineObserver | undefined>(undefined);
+  // 已挂载条目的元素表（key → 元素）。观察器是在**父组件的 layout effect** 里建的，
+  // 而条目的 ref 回调在同一提交里先于它执行——那时 `windowObserverRef.current` 还是
+  // undefined，注册会被静默丢掉，且条目的 ref 是稳定引用、不会重新挂载。所以这里留
+  // 一份元素表，观察器（重）建后补注册一遍（见下方 useLayoutEffect）。
+  const windowElementsRef = useRef(new Map<string, HTMLElement>());
   const [activeTurnKey, setActiveTurnKey] = useState<string | undefined>(undefined);
   const activeTurnKeyRef = useRef<string | undefined>(undefined);
   activeTurnKeyRef.current = activeTurnKey;
@@ -1009,16 +1020,29 @@ export const ConversationPane = memo(function ConversationPane({
   // / PendingResponse 的 caption）展示实时耗时；回合结束后在最新一条回复的气泡
   // 下方展示定格值，不再嵌进气泡内容（用户反馈：气泡内不应出现回答耗时/总耗时）。
   const showTurnTimingOnLatest = Boolean(data.turnTiming && !isGenerating);
-  const canSubmit = Boolean(data.workspace && (input.trim() || attachments.length > 0 || invocations.length > 0 || mentionedFiles.length > 0) && data.model);
+  // 工作区缺失时后端把会话标记为只读：发送按钮、Enter 与 textarea 三处都要拦住
+  // （Enter 走 requestSubmit()，会绕过 disabled 的提交按钮）。
+  const readOnlyReason = data.readOnlyReason?.trim() || undefined;
+  const canSubmit = Boolean(!readOnlyReason && data.workspace && (input.trim() || attachments.length > 0 || invocations.length > 0 || mentionedFiles.length > 0) && data.model);
+  // 只读是“10s 复检”的状态：目录恢复后如果用户正好停在这一格，主动拉一次全量
+  // 快照让后端重新 stat（否则 UI 的旧 readOnlyReason 会一直挡住发送按钮）。
+  useEffect(() => {
+    if (!readOnlyReason) return;
+    const timer = window.setInterval(() => {
+      void window.piDesktop.send({ type: "state.sync" }).catch(() => undefined);
+    }, 2_000);
+    return () => window.clearInterval(timer);
+  }, [readOnlyReason]);
   const workingLabel = `${title ?? "Pi"}正在努力输出中……`;
   let composerPlaceholder = "请先打开一个项目";
-  if (data.workspace) {
+  if (readOnlyReason) composerPlaceholder = "工作区不可用，当前会话只读";
+  else if (data.workspace) {
     const hasCommandPick = invocations.some((item) => item.kind === "command");
     composerPlaceholder = invocations.length > 0
       ? (hasCommandPick ? "输入命令参数（可留空直接发送）" : "输入任务要求")
       : "让 Pi 检查、修改或运行这个项目，@ 可引用文件";
   }
-  if (data.workspace && data.busy) composerPlaceholder = "连续输入以排队后续修改";
+  if (!readOnlyReason && data.workspace && data.busy) composerPlaceholder = "连续输入以排队后续修改";
 
   // —— 斜杠指令 ——
   // Skill 的 trigger 仍是 /skill:<名字>（选中后回填用），但候选框里只展示裸名，
@@ -1378,6 +1402,11 @@ export const ConversationPane = memo(function ConversationPane({
       }
     });
     windowObserverRef.current = observer;
+    // 补注册：本次提交里已挂载条目的 ref 回调早于本 effect，注册打在了 undefined 上；
+    // 不补的话这些条目永远不会被观察 → 除了尾部若干条，整段历史只剩空白占位、
+    // 滚动也唤不回来（2026-10-26 用户报「长会话历史轮次内容丢失，像被删了」）。
+    // 观察器重建（`ready`/`windowEnabled` 变化）走的是同一条补注册路径。
+    for (const [key, element] of windowElementsRef.current) observer.register(key, element);
     return () => {
       observer.disconnect();
       windowObserverRef.current = undefined;
@@ -1404,6 +1433,9 @@ export const ConversationPane = memo(function ConversationPane({
   }, [windowEnabled]);
 
   const registerTimelineEntry = useCallback((key: string, element: HTMLElement | null): void => {
+    // 元素表是权威的「当前挂载了什么」，观察器只是它的消费者（可能还没建/刚被重建）。
+    if (element) windowElementsRef.current.set(key, element);
+    else windowElementsRef.current.delete(key);
     windowObserverRef.current?.register(key, element);
   }, []);
 
@@ -1579,6 +1611,12 @@ export const ConversationPane = memo(function ConversationPane({
 
   async function submit(event: FormEvent): Promise<void> {
     event.preventDefault();
+    // 只读会话的硬拦截：textarea 的 readOnly 与 disabled 的发送按钮都挡不住
+    // Enter 触发的 requestSubmit()（表单提交不检查按钮 disabled）。
+    if (readOnlyReason) {
+      setSendFailure({ sessionId: paneSessionId, message: readOnlyReason, at: Date.now() });
+      return;
+    }
     const text = input.trim();
     if (!text && attachments.length === 0 && invocations.length === 0 && mentionedFiles.length === 0) return;
     // 客户端执行的固定指令：不透传给 Pi（会话层会当噪声），直接发协议命令。
@@ -2009,6 +2047,33 @@ export const ConversationPane = memo(function ConversationPane({
     }
   }
 
+  /** 输入框快捷角色切换：主行切换角色（打开该助手在当前工作区的最近会话），
+   *  行尾 + 直接以该角色新建话题。 */
+  async function switchAgent(agentId: string): Promise<void> {
+    if (agentId === data.agentId) { setComposerMenu(undefined); return; }
+    setComposerMenu(undefined);
+    useDesktopStore.setState({ sessionSearch: { query: "", loading: false, hits: [] } });
+    try {
+      await window.piDesktop.send({ type: "agent.select", agentId });
+    } catch (error) {
+      onActionError(error instanceof Error ? error.message : "切换助手失败");
+    }
+  }
+
+  async function createSessionForAgent(agentId: string): Promise<void> {
+    setComposerMenu(undefined);
+    if (!data.workspace) {
+      onActionError("请先打开工作区，再新建话题");
+      return;
+    }
+    useDesktopStore.setState({ sessionSearch: { query: "", loading: false, hits: [] } });
+    try {
+      await window.piDesktop.send({ type: "session.new", workspace: data.workspace, agentId });
+    } catch (error) {
+      onActionError(error instanceof Error ? error.message : "新建话题失败");
+    }
+  }
+
   async function selectModel(value: string): Promise<void> {
     setComposerMenu(undefined);
     const slash = value.indexOf("/");
@@ -2210,7 +2275,7 @@ export const ConversationPane = memo(function ConversationPane({
           </div>
         )}
         {attachments.length > 0 && <div className="attachment-list" data-composer-zone="attachments">{attachments.map((attachment, index) => <span className="attachment-chip" key={`${attachment.name}-${index}`}>{attachment.kind === "image" ? <button type="button" className="attachment-chip-preview" title="点击放大预览" aria-label={`放大预览 ${attachment.name}`} onClick={() => setPreviewingAttachment(attachment)}><img src={cachedImageSrc(attachment, attachment.mimeType, attachment.data)} alt="" /></button> : <FileDiff size={12} />}<span>{attachment.name}</span>{attachment.kind === "image" && !modelAcceptsImages && visionFallbackAvailable && <small className="attachment-chip-note" title="当前模型不支持图片，将自动调用视觉模型识别">视觉识别</small>}<button type="button" title="移除附件" aria-label={`移除 ${attachment.name}`} onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={12} /></button></span>)}</div>}
-        {attachmentError && <div className="attachment-error" data-composer-zone="error" role="alert">{attachmentError}<button type="button" title="关闭提示" aria-label="关闭附件提示" onClick={() => setAttachmentError(undefined)}><X size={12} /></button></div>}
+        {(readOnlyReason || attachmentError) && <div className="attachment-error" data-composer-zone="error" role="alert">{readOnlyReason && <span title={readOnlyReason}>{readOnlyReason}</span>}{attachmentError && <span>{attachmentError}</span>}{attachmentError && <button type="button" title="关闭提示" aria-label="关闭附件提示" onClick={() => setAttachmentError(undefined)}><X size={12} /></button>}</div>}
         <input ref={fileInputRef} type="file" hidden multiple accept="image/png,image/jpeg,image/webp,image/gif,.txt,.md,.json,.js,.ts,.tsx,.jsx,.py,.go,.rs,.java,.css,.html" onChange={(event) => { void addLocalFiles(event.target.files ?? []); event.currentTarget.value = ""; }} />
         {slashOpen && (
           <div className="slash-menu" role="listbox" aria-label="斜杠指令" data-composer-zone="popup" ref={slashMenuRef}>
@@ -2285,6 +2350,8 @@ export const ConversationPane = memo(function ConversationPane({
             value={input}
             rows={1}
             disabled={!data.workspace}
+            readOnly={Boolean(readOnlyReason)}
+            title={readOnlyReason}
             placeholder={composerPlaceholder}
             onKeyDown={handleComposerKey}
             onPaste={handlePaste}
@@ -2346,6 +2413,23 @@ export const ConversationPane = memo(function ConversationPane({
             )}
           </div>
           <div className="composer-footer-right">
+            <div className="composer-control-menu agent-control">
+              <button className="composer-menu-trigger agent-switch-trigger" data-control="agent-switch" type="button" title={`当前助手：${currentAgentName}（点击切换，或在助手下新建话题）`} aria-label="切换助手" aria-haspopup="menu" aria-expanded={composerMenu === "agent"} onClick={() => { setAccessModeMenuOpen(false); setContextUsageOpen(false); setComposerMenu((current) => current === "agent" ? undefined : "agent"); }}><UserRound size={14} /><span>{currentAgentName}</span><ChevronDown size={13} /></button>
+              {composerMenu === "agent" && <div className="composer-select-menu agent-select-menu" data-composer-zone="popup" role="menu" aria-label="切换助手">
+                <div className="agent-select-head"><strong>切换助手</strong><small>点名字切换；＋ 直接以该角色新建话题</small></div>
+                {agentOptions.map((agent) => {
+                  const current = agent.id === data.agentId;
+                  return <div className={`agent-select-row${current ? " active" : ""}`} key={agent.id}>
+                    <button className="agent-select-main" type="button" role="menuitemradio" aria-checked={current} title={current ? `当前助手：${agent.name}` : `切换到 ${agent.name}（打开其最近会话或新建）`} onClick={() => void switchAgent(agent.id)}>
+                      <span className="agent-select-icon"><UserRound size={14} /></span>
+                      <span className="agent-select-copy"><strong>{agent.name}</strong><small>{agent.description || "未填写说明"}</small></span>
+                      {current && <Check size={13} />}
+                    </button>
+                    <button className="agent-select-new" data-control="agent-new-session" type="button" title={`在 ${agent.name} 下新建话题`} aria-label={`在 ${agent.name} 下新建话题`} disabled={!data.workspace} onClick={() => void createSessionForAgent(agent.id)}><Plus size={14} /></button>
+                  </div>;
+                })}
+              </div>}
+            </div>
             <div className="composer-control-menu">
               <button className="composer-menu-trigger" data-control="model-select" type="button" title="模型快捷切换" aria-label="模型快捷切换" aria-haspopup="menu" aria-expanded={composerMenu === "model"} disabled={data.busy} onClick={() => { setAccessModeMenuOpen(false); setContextUsageOpen(false); setComposerMenu((current) => current === "model" ? undefined : "model"); }}><Bot size={14} /><span>{selectedModelOption?.name ?? data.model?.id ?? "选择模型"}</span><ChevronDown size={13} /></button>
               {composerMenu === "model" && <div className="composer-select-menu model-select-menu" data-composer-zone="popup" ref={modelMenuRef} role="menu" aria-label="模型快捷切换">

@@ -19,7 +19,7 @@ describe("recent workspaces", () => {
     for (let index = 0; index < 30; index += 1) {
       list = recordRecentWorkspace(list, `C:/Projects/Project-${index}`, index);
     }
-    expect(list).toHaveLength(15);
+    expect(list).toHaveLength(30);
     expect(list[0]?.path).toBe(resolve("C:/Projects/Project-29"));
   });
 

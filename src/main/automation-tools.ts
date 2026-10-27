@@ -221,7 +221,7 @@ export function buildAutomationTools(ctx: AutomationToolContext): ToolDefinition
         target: Type.Optional(Type.String({ description: "session（默认，投递回当前会话）| background（后台新会话）" })),
         timezone: Type.Optional(Type.String({ description: "cron 的 IANA 时区名；缺省跟随系统" })),
         model: Type.Optional(Type.Object({ provider: Type.String(), id: Type.String() }, { description: "执行所用模型；缺省用该 Agent 默认模型" })),
-        workspace: Type.Optional(Type.String({ description: "参照「空间」；后台任务供展示，执行用当前工作区" })),
+        workspace: Type.Optional(Type.String({ description: "后台任务执行使用的工作区（完整绝对路径）；缺省用当前会话工作区" })),
         accessMode: Type.Optional(Type.String({ description: "read-only | ask | workspace | full（无人值守建议 full）" })),
         skillName: Type.Optional(Type.String({ description: "可选绑定技能名（v1 仅存，供展示）" })),
         subagentName: Type.Optional(Type.String({ description: "可选绑定子智能体名（v1 仅存，供展示）" }))

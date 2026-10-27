@@ -55,8 +55,8 @@ describe("聊天区遮罩的接线契约", () => {
     expect(styles).toContain(".modal-backdrop.in-chat > .permission-dialog, .modal-backdrop.in-chat > .extension-ui-dialog { width: min(480px, 100%); }");
   });
 
-  it("四个 App 级确认框都带上 in-chat（删除 / 重命名 / 回滚 / 移除工作区）", () => {
-    for (const anchor of ['aria-label="重命名会话"', 'aria-label="删除会话"', 'aria-label="回滚文件"', 'aria-label="移除工作区"']) {
+  it("四个 App 级确认框都带上 in-chat（删除 / 重命名 / 回滚 / 删除工作区会话）", () => {
+    for (const anchor of ['aria-label="重命名会话"', 'aria-label="删除会话"', 'aria-label="回滚文件"', 'aria-label="删除工作区全部会话"']) {
       const at = app.indexOf(anchor);
       expect(at, `App.tsx 里找不到 ${anchor}`).toBeGreaterThan(-1);
       // 向前回看 backdrop 那一行，确认同一个弹层带了 in-chat。
@@ -71,7 +71,7 @@ describe("聊天区遮罩的接线契约", () => {
   });
 
   it("叠了 in-chat 也照旧登记弹层计数：预览面板全屏时靠 browserSuspended 兜底", () => {
-    expect(app).toContain("useOverlayLayer(renamePresence.rendered || deletePresence.rendered || rollbackPresence.rendered || removeWorkspacePresence.rendered || transcriptPresence.rendered)");
+    expect(app).toContain("useOverlayLayer(renamePresence.rendered || deletePresence.rendered || rollbackPresence.rendered || deleteWorkspacePresence.rendered || transcriptPresence.rendered)");
     // 文件树的弹窗是深层组件：同一计数通路（谁开谁登记）。
     expect(workspaceTree).toContain('from "../lib/overlay-layers"');
     expect(workspaceTree).toContain("useOverlayLayer(true)");

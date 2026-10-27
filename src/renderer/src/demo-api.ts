@@ -177,8 +177,7 @@ const demoSecondaryAgent: AgentProfile = {
 const demoSettings: DesktopSettings = {
   version: 2,
   workspace: "D:\\Projects\\chat-anytime-demo",
-  // 每助手工作区记忆：default → chat-anytime-demo；heiyuhe → PiDesktop（切角色各自恢复）。
-  agentWorkspaces: { default: "D:\\Projects\\chat-anytime-demo", heiyuhe: "D:\\Projects\\PiDesktop" },
+  lastWorkspace: "D:\\Projects\\chat-anytime-demo",
   defaultWorkspace: "D:\\Projects\\chat-anytime-demo",
   model: { provider: "anthropic", id: "claude-sonnet-4-6" },
   thinkingLevel: "medium",
@@ -229,13 +228,16 @@ const demoSnapshot: RuntimeSnapshot = {
   backgroundProcesses: [],
   recentWorkspaces: [
     { path: "D:\\Projects\\chat-anytime-demo", openedAt: Date.now() },
-    { path: "D:\\Projects\\PiDesktop", openedAt: Date.now() - 43_200_000 }
+    { path: "D:\\Projects\\PiDesktop", openedAt: Date.now() - 43_200_000 },
+    { path: "D:\\Projects\\空白工作区", openedAt: Date.now() - 86_400_000 }
   ],
   sessions: [
-    { id: "demo-session", path: "demo-session.jsonl", workspace: "D:\\Projects\\chat-anytime-demo", title: "梳理项目架构", modifiedAt: Date.now(), messageCount: 4, runStatus: "completed" },
-    { id: "older-session", path: "older-session.jsonl", workspace: "D:\\Projects\\chat-anytime-demo", title: "检查渲染流程", modifiedAt: Date.now() - 86_400_000, messageCount: 7, runStatus: "failed" },
-    { id: "aborted-session", path: "aborted-session.jsonl", workspace: "D:\\Projects\\PiDesktop", title: "中止的排查任务", modifiedAt: Date.now() - 7_200_000, messageCount: 5, runStatus: "aborted" },
-    { id: "other-session", path: "other-session.jsonl", workspace: "D:\\Projects\\PiDesktop", title: "检查桌面端", modifiedAt: Date.now() - 43_200_000, messageCount: 3 }
+    { id: "demo-session", path: "demo-session.jsonl", workspace: "D:\\Projects\\chat-anytime-demo", agentId: "default", title: "梳理项目架构", modifiedAt: Date.now(), messageCount: 4, runStatus: "completed" },
+    { id: "older-session", path: "older-session.jsonl", workspace: "D:\\Projects\\chat-anytime-demo", agentId: "default", title: "检查渲染流程", modifiedAt: Date.now() - 86_400_000, messageCount: 7, runStatus: "failed" },
+    // 同一工作区的第二个助手：验证跨助手徽标、搜索与分屏（不额外占用工作区分组）。
+    { id: "heiyuhe-session", path: "heiyuhe-session.jsonl", workspace: "D:\\Projects\\chat-anytime-demo", agentId: "heiyuhe", title: "整理发布清单", modifiedAt: Date.now() - 3_600_000, messageCount: 5 },
+    { id: "aborted-session", path: "aborted-session.jsonl", workspace: "D:\\Projects\\PiDesktop", agentId: "default", title: "中止的排查任务", modifiedAt: Date.now() - 7_200_000, messageCount: 5, runStatus: "aborted" },
+    { id: "other-session", path: "other-session.jsonl", workspace: "D:\\Projects\\PiDesktop", agentId: "default", title: "检查桌面端", modifiedAt: Date.now() - 43_200_000, messageCount: 3 }
   ],
   messages: [
     {
@@ -475,8 +477,9 @@ function applyDemoAgentSkillOverrides(): void {
 }
 
 function recordDemoWorkspace(workspaces: RecentWorkspace[], path: string): RecentWorkspace[] {
-  const key = path.replaceAll("\\", "/").toLowerCase();
-  return [{ path, openedAt: Date.now() }, ...workspaces.filter((item) => item.path.replaceAll("\\", "/").toLowerCase() !== key)].slice(0, 15);
+  const key = demoWorkspaceKey(path);
+  const previous = workspaces.find((item) => demoWorkspaceKey(item.path) === key);
+  return [{ path, openedAt: Date.now(), ...(previous?.missing ? { missing: true } : {}) }, ...workspaces.filter((item) => demoWorkspaceKey(item.path) !== key)].slice(0, 30);
 }
 
 /** 演示默认工作区路径：未自定义时回退固定内置目录（浏览器演示没有真实 agentDir）。 */
@@ -490,19 +493,139 @@ function demoDefaultPath(): string {
   return demoSettings.defaultWorkspace ?? DEMO_BUILTIN_DEFAULT;
 }
 
-/** 记录当前助手最后使用的工作区（内存 map，浏览器演示无持久化）。 */
-function demoTouchAgentWorkspace(path: string): void {
-  demoSettings.agentWorkspaces = { ...(demoSettings.agentWorkspaces ?? {}), [demoSettings.currentAgentId]: path };
+function demoAgentName(agentId: string): string {
+  return demoSettings.agents.find((agent) => agent.id === agentId)?.name ?? agentId;
 }
 
-/** 移除当前助手对某工作区的记忆：大小写不敏感匹配才删，其他助手键不动。 */
-function demoForgetAgentWorkspace(path: string): void {
-  const map = demoSettings.agentWorkspaces ?? {};
-  const current = map[demoSettings.currentAgentId];
-  if (!current || demoWorkspaceKey(current) !== demoWorkspaceKey(path)) return;
-  const rest = { ...map };
-  delete rest[demoSettings.currentAgentId];
-  demoSettings.agentWorkspaces = Object.keys(rest).length > 0 ? rest : undefined;
+function demoSessionId(path: string): string {
+  return path.replace(/.*[\\/]/u, "").replace(/\.jsonl$/u, "");
+}
+
+function demoRecentSessionFor(workspace: string, agentId?: string): RuntimeSnapshot["sessions"][number] | undefined {
+  const key = demoWorkspaceKey(workspace);
+  return [...demoSnapshot.sessions]
+    .filter((item) => demoWorkspaceKey(item.workspace) === key && (!agentId || item.agentId === agentId))
+    .sort((left, right) => right.modifiedAt - left.modifiedAt)[0];
+}
+
+/** 打开工作区：跨助手取该工作区最近会话；没有则用当前默认助手新建空白会话。 */
+function demoOpenWorkspace(path: string): void {
+  const workspace = path.trim() || demoDefaultPath();
+  demoSettings.lastWorkspace = workspace;
+  const recent = demoRecentSessionFor(workspace);
+  if (recent) {
+    demoSettings.currentAgentId = recent.agentId;
+    resetDemoContext(2_600);
+    updateSnapshot({
+      workspace,
+      agentId: recent.agentId,
+      agentName: demoAgentName(recent.agentId),
+      sessionId: recent.id,
+      messages: [],
+      executions: [],
+      contextUsage: demoContextUsage(),
+      planMode: false,
+      recentWorkspaces: recordDemoWorkspace(demoSnapshot.recentWorkspaces, workspace)
+    });
+    applyDemoAgentSkillOverrides();
+    emit({ type: "resources", resources: structuredClone(demoResources) });
+    return;
+  }
+  const agent = activeDemoAgent();
+  const summary: RuntimeSnapshot["sessions"][number] = {
+    id: "new-demo-session",
+    path: "new-demo-session.jsonl",
+    workspace,
+    agentId: agent.id,
+    title: "新话题",
+    modifiedAt: Date.now(),
+    messageCount: 0
+  };
+  resetDemoContext(0);
+  updateSnapshot({
+    workspace,
+    agentId: agent.id,
+    agentName: agent.name,
+    sessionId: summary.id,
+    messages: [],
+    executions: [],
+    contextUsage: demoContextUsage(),
+    planMode: false,
+    sessions: [summary, ...demoSnapshot.sessions.filter((item) => item.id !== summary.id)],
+    recentWorkspaces: recordDemoWorkspace(demoSnapshot.recentWorkspaces, workspace)
+  });
+}
+
+/** 在**当前工作区**切到某助手：优先打开该助手最近会话，没有则新建（不改变工作区）。 */
+function demoOpenAgentInCurrentWorkspace(agentId: string): void {
+  const agent = demoSettings.agents.find((item) => item.id === agentId && !item.archived) ?? activeDemoAgent();
+  const workspace = demoSnapshot.workspace ?? demoDefaultPath();
+  const recent = demoRecentSessionFor(workspace, agent.id);
+  demoSettings.currentAgentId = agent.id;
+  if (recent) {
+    resetDemoContext(2_600);
+    updateSnapshot({ workspace, agentId: agent.id, agentName: agent.name, sessionId: recent.id, messages: [], executions: [], contextUsage: demoContextUsage(), planMode: false });
+  } else {
+    const summary: RuntimeSnapshot["sessions"][number] = {
+      id: "new-demo-session",
+      path: "new-demo-session.jsonl",
+      workspace,
+      agentId: agent.id,
+      title: "新话题",
+      modifiedAt: Date.now(),
+      messageCount: 0
+    };
+    resetDemoContext(0);
+    updateSnapshot({ workspace, agentId: agent.id, agentName: agent.name, sessionId: summary.id, messages: [], executions: [], contextUsage: demoContextUsage(), planMode: false, sessions: [summary, ...demoSnapshot.sessions.filter((item) => item.id !== summary.id)] });
+  }
+  applyDemoAgentSkillOverrides();
+  emit({ type: "resources", resources: structuredClone(demoResources) });
+}
+
+/** 演示会话全文检索：标题/工作区 + 当前会话消息正文（不返回归档会话）。 */
+function demoSearchSessions(query: string): import("../../shared/protocol").SessionSearchHit[] {
+  const terms = query.normalize("NFKC").toLowerCase().split(/\s+/u).filter(Boolean);
+  if (terms.length === 0) return [];
+  const hits: import("../../shared/protocol").SessionSearchHit[] = [];
+  for (const session of demoSnapshot.sessions) {
+    const metadata = `${session.title} ${session.workspace}`.toLowerCase();
+    let role: "user" | "assistant" = "user";
+    let timestamp = session.modifiedAt;
+    let snippet = session.title;
+    let score = 50;
+    let matched = terms.every((term) => metadata.includes(term));
+    if (session.id === demoSnapshot.sessionId) {
+      for (const message of demoSnapshot.messages) {
+        const text = message.blocks
+          .filter((block): block is Extract<typeof block, { type: "text" }> => block.type === "text")
+          .map((block) => block.text)
+          .join("\n");
+        if (terms.every((term) => text.toLowerCase().includes(term))) {
+          matched = true;
+          role = message.role === "assistant" ? "assistant" : "user";
+          timestamp = message.timestamp;
+          snippet = text.length > 160 ? `${text.slice(0, 160)}…` : text;
+          score = 100;
+          break;
+        }
+      }
+    }
+    if (!matched) continue;
+    hits.push({
+      sessionId: session.id,
+      path: session.path,
+      title: session.title,
+      workspace: session.workspace,
+      agentId: session.agentId,
+      ...(session.archived ? { archived: true } : {}),
+      modifiedAt: session.modifiedAt,
+      timestamp,
+      role,
+      snippet,
+      score
+    });
+  }
+  return hits.sort((left, right) => right.score - left.score || right.modifiedAt - left.modifiedAt);
 }
 
 /** 演示队列增删后按 kind 重排下标，保持与真实运行时一致的寻址方式。 */
@@ -543,7 +666,7 @@ export function createDemoApi(): DesktopApi {
     },
     async readWorkspaceFile(relativePath: string, _workspace?: string): Promise<import("../../shared/protocol").WorkspaceFilePreview> {
       if (relativePath === "demo.png") {
-        return { relativePath, name: "demo.png", kind: "image", mimeType: "image/png", size: 3775, data: demoPngData, workspace: demoSettings.workspace };
+        return { relativePath, name: "demo.png", kind: "image", mimeType: "image/png", size: 3775, data: demoPngData, workspace: demoSnapshot.workspace };
       }
       if (relativePath === "src/runtime.ts") {
         return { relativePath, name: "runtime.ts", kind: "code", language: "typescript", size: 96, content: "export const runtime = {\n  status: \"ready\",\n  process: \"utility\"\n};\n" };
@@ -552,7 +675,7 @@ export function createDemoApi(): DesktopApi {
         return { relativePath, name: "README.md", kind: "markdown", language: "markdown", size: 70, content: "# Pi Desktop\n\n- Electron 主进程\n- Pi 工具进程\n- React 渲染进程\n" };
       }
       if (relativePath.endsWith(".pdf")) {
-        return { relativePath, name: "spec.pdf", kind: "pdf", size: 2048, workspace: demoSettings.workspace };
+        return { relativePath, name: "spec.pdf", kind: "pdf", size: 2048, workspace: demoSnapshot.workspace };
       }
       throw new Error(`找不到演示文件：${relativePath}`);
     },
@@ -740,18 +863,32 @@ export function createDemoApi(): DesktopApi {
           updateSnapshot({ model: { provider: command.provider, id: command.id } });
           break;
         case "workspace.open":
-          resetDemoContext(0);
-          demoTouchAgentWorkspace(command.path);
-          updateSnapshot({ workspace: command.path, sessionId: undefined, messages: [], executions: [], contextUsage: demoContextUsage(), planMode: false, recentWorkspaces: recordDemoWorkspace(demoSnapshot.recentWorkspaces, command.path) });
+          demoOpenWorkspace(command.path);
           break;
+        case "workspace.forget": {
+          // 仅从最近列表移除，不碰会话；当前工作区被移除时回落到最近一个工作区。
+          const forgotKey = demoWorkspaceKey(command.path);
+          const remaining = demoSnapshot.recentWorkspaces.filter((item) => demoWorkspaceKey(item.path) !== forgotKey);
+          const forgettingActive = demoSnapshot.workspace !== undefined && demoWorkspaceKey(demoSnapshot.workspace) === forgotKey;
+          updateSnapshot({ recentWorkspaces: remaining });
+          if (forgettingActive) {
+            const fallback = remaining[0]?.path ?? demoDefaultPath();
+            demoOpenWorkspace(fallback);
+          }
+          break;
+        }
         case "agent.select": {
-          demoSettings.currentAgentId = command.agentId;
-          // 目标助手的工作区记忆：显式用过 → 各自恢复；从未用过 → 默认工作区。
-          const workspace = demoSettings.agentWorkspaces?.[command.agentId] ?? demoDefaultPath();
-          resetDemoContext(0);
-          updateSnapshot({ workspace, agentId: command.agentId, agentName: activeDemoAgent().name, sessionId: `${command.agentId}-demo-session`, messages: [], contextUsage: demoContextUsage(), planMode: false });
-          applyDemoAgentSkillOverrides();
-          emit({ type: "resources", resources: structuredClone(demoResources) });
+          const selected = demoSettings.agents.find((item) => item.id === command.agentId && !item.archived);
+          if (!selected) throw new Error("Agent 不存在或已归档");
+          demoSettings.currentAgentId = selected.id;
+          // openSession=false：只改默认助手（automation.run.open 的跨角色定位用），
+          // 不切换会话，也不切换工作区。
+          if (command.openSession === false) {
+            applyDemoAgentSkillOverrides();
+            emit({ type: "resources", resources: structuredClone(demoResources) });
+            break;
+          }
+          demoOpenAgentInCurrentWorkspace(selected.id);
           break;
         }
         case "agent.save": {
@@ -777,7 +914,6 @@ export function createDemoApi(): DesktopApi {
           break;
         }
         case "settings.save": {
-          const previousDefault = demoSettings.defaultWorkspace;
           demoSettings.model = command.settings.model;
           demoSettings.thinkingLevel = command.settings.thinkingLevel;
           demoSettings.accessMode = command.settings.accessMode;
@@ -785,15 +921,9 @@ export function createDemoApi(): DesktopApi {
           demoSettings.browser = command.settings.browser;
           demoSettings.computer = command.settings.computer;
           demoSettings.design = command.settings.design;
+          // 改 defaultWorkspace 只更新兜底值，不切换当前工作区。
           demoSettings.defaultWorkspace = command.settings.defaultWorkspace;
           updateSnapshot({ model: command.settings.model, thinkingLevel: command.settings.thinkingLevel });
-          // 更换默认工作区：当前正落在旧默认上 → 即时切到新默认（与真实运行时语义一致）。
-          const oldKey = previousDefault ? demoWorkspaceKey(previousDefault) : undefined;
-          const nextPath = demoDefaultPath();
-          if (demoSnapshot.workspace && oldKey && demoWorkspaceKey(demoSnapshot.workspace) === oldKey && oldKey !== demoWorkspaceKey(nextPath)) {
-            resetDemoContext(0);
-            updateSnapshot({ workspace: nextPath, sessionId: "new-demo-session", messages: [], executions: [], contextUsage: demoContextUsage(), planMode: false, recentWorkspaces: recordDemoWorkspace(demoSnapshot.recentWorkspaces, nextPath) });
-          }
           break;
         }
         case "appearance.save":
@@ -801,16 +931,63 @@ export function createDemoApi(): DesktopApi {
           break;
         case "session.new": {
           const workspace = command.workspace ?? demoSnapshot.workspace ?? demoDefaultPath();
-          if (command.workspace) demoTouchAgentWorkspace(command.workspace);
+          const targetAgent = command.agentId
+            ? demoSettings.agents.find((agent) => agent.id === command.agentId && !agent.archived)
+            : activeDemoAgent();
+          if (!targetAgent) throw new Error("目标助手不存在或已归档");
+          demoSettings.currentAgentId = targetAgent.id;
+          demoSettings.lastWorkspace = workspace;
+          const summary: RuntimeSnapshot["sessions"][number] = {
+            id: "new-demo-session",
+            path: "new-demo-session.jsonl",
+            workspace,
+            agentId: targetAgent.id,
+            title: "新话题",
+            modifiedAt: Date.now(),
+            messageCount: 0
+          };
           resetDemoContext(0);
-          updateSnapshot({ workspace, messages: [], executions: [], sessionId: "new-demo-session", contextUsage: demoContextUsage(), planMode: false, recentWorkspaces: recordDemoWorkspace(demoSnapshot.recentWorkspaces, workspace) });
+          updateSnapshot({
+            workspace,
+            agentId: targetAgent.id,
+            agentName: targetAgent.name,
+            messages: [],
+            executions: [],
+            sessionId: summary.id,
+            contextUsage: demoContextUsage(),
+            planMode: false,
+            sessions: [summary, ...demoSnapshot.sessions.filter((item) => item.id !== summary.id)],
+            recentWorkspaces: recordDemoWorkspace(demoSnapshot.recentWorkspaces, workspace)
+          });
+          applyDemoAgentSkillOverrides();
+          emit({ type: "resources", resources: structuredClone(demoResources) });
           break;
         }
         case "session.open": {
           const workspace = command.workspace ?? demoSnapshot.workspace ?? demoDefaultPath();
-          if (command.workspace) demoTouchAgentWorkspace(command.workspace);
+          const summary = demoSnapshot.sessions.find((item) => item.path === command.path || item.id === demoSessionId(command.path));
+          const targetAgent = command.agentId
+            ? demoSettings.agents.find((agent) => agent.id === command.agentId && !agent.archived)
+            : demoSettings.agents.find((agent) => agent.id === (summary?.agentId ?? demoSnapshot.agentId));
+          if (!targetAgent) throw new Error("会话归属助手不存在或已归档");
+          // activate=false（分屏背景格）：不改变全局镜像，真实运行时由 session.watch 单独供水合。
+          if (command.activate === false) break;
+          demoSettings.currentAgentId = targetAgent.id;
+          demoSettings.lastWorkspace = workspace;
           resetDemoContext(2_600);
-          updateSnapshot({ workspace, sessionId: command.path.replace(/.*[\\/]/u, "").replace(/\.jsonl$/u, ""), messages: [], executions: [], contextUsage: demoContextUsage(), planMode: false, recentWorkspaces: recordDemoWorkspace(demoSnapshot.recentWorkspaces, workspace) });
+          updateSnapshot({
+            workspace,
+            agentId: targetAgent.id,
+            agentName: targetAgent.name,
+            sessionId: summary?.id ?? demoSessionId(command.path),
+            messages: [],
+            executions: [],
+            contextUsage: demoContextUsage(),
+            planMode: false,
+            recentWorkspaces: recordDemoWorkspace(demoSnapshot.recentWorkspaces, workspace)
+          });
+          applyDemoAgentSkillOverrides();
+          emit({ type: "resources", resources: structuredClone(demoResources) });
           break;
         }
         case "session.planMode":
@@ -873,17 +1050,34 @@ export function createDemoApi(): DesktopApi {
         case "session.delete":
           updateSnapshot({ sessions: demoSnapshot.sessions.filter((item) => item.path !== command.path) });
           break;
-        case "workspace.remove": {
-          demoForgetAgentWorkspace(command.workspace);
-          const kept = demoSnapshot.sessions.filter((item) => demoWorkspaceKey(item.workspace) !== demoWorkspaceKey(command.workspace));
-          // 移除的是当前工作区：回落默认工作区并补空白会话（清当前助手会话，不回空态）。
-          const removingActive = demoSnapshot.workspace !== undefined && demoWorkspaceKey(demoSnapshot.workspace) === demoWorkspaceKey(command.workspace);
-          if (removingActive) {
+        case "session.deleteMany": {
+          // 批量硬删：不伪造成功，删掉当前活动会话时补一个空白会话继续可用。
+          const keys = new Set(command.paths.map(demoWorkspaceKey));
+          const activePath = demoSnapshot.sessions.find((item) => item.id === demoSnapshot.sessionId)?.path;
+          const removedActive = activePath !== undefined && keys.has(demoWorkspaceKey(activePath));
+          const remaining = demoSnapshot.sessions.filter((item) => !keys.has(demoWorkspaceKey(item.path)));
+          if (removedActive) {
+            const agent = demoSettings.agents.find((item) => item.id === demoSnapshot.agentId) ?? activeDemoAgent();
+            const workspace = demoSnapshot.workspace ?? demoDefaultPath();
+            const summary: RuntimeSnapshot["sessions"][number] = {
+              id: "new-demo-session",
+              path: "new-demo-session.jsonl",
+              workspace,
+              agentId: agent.id,
+              title: "新话题",
+              modifiedAt: Date.now(),
+              messageCount: 0
+            };
             resetDemoContext(0);
-            updateSnapshot({ workspace: demoDefaultPath(), sessionId: "new-demo-session", messages: [], executions: [], contextUsage: demoContextUsage(), planMode: false, sessions: kept, recentWorkspaces: recordDemoWorkspace(demoSnapshot.recentWorkspaces, demoDefaultPath()) });
+            updateSnapshot({ sessions: [summary, ...remaining], sessionId: summary.id, messages: [], executions: [], contextUsage: demoContextUsage(), planMode: false });
           } else {
-            updateSnapshot({ sessions: kept });
+            updateSnapshot({ sessions: remaining });
           }
+          break;
+        }
+        case "session.search": {
+          const hits = demoSearchSessions(command.query);
+          emit({ type: "session.search-result", requestId: command.requestId, hits, scanned: demoSnapshot.sessions.length, total: demoSnapshot.sessions.length, done: true });
           break;
         }
         case "session.compact": {

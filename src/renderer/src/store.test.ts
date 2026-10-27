@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { PermissionRequest, QuestionRequest, RuntimeSnapshot, SessionPaneSnapshot, SessionSearchHit, ToolExecution, Todo, UsageStats } from "../../shared/protocol.js";
-import { currentPermissionRequest, currentQuestionRequest, dropPaneStates, mergeQuestionRequests, pruneParkedPanels, useDesktopStore } from "./store.js";
+import { currentPermissionRequest, currentQuestionRequest, dropPaneStates, mergeQuestionRequests, mergeRecentWorkspacesPreservingIdentity, mergeSessionsPreservingIdentity, pruneParkedPanels, useDesktopStore } from "./store.js";
 
 function permission(id: string, sessionId: string): PermissionRequest {
   return {
@@ -691,6 +691,80 @@ describe("streaming snapshot patches", () => {
     useDesktopStore.getState().handleRuntimeMessage(patch);
     useDesktopStore.getState().handleRuntimeMessage(patch);
     expect(useDesktopStore.getState().snapshot.messages).toHaveLength(2);
+  });
+});
+
+describe("snapshot identity retention with agent and missing fields", () => {
+  function summary(overrides: Partial<RuntimeSnapshot["sessions"][number]> = {}): RuntimeSnapshot["sessions"][number] {
+    return {
+      id: "session-1",
+      path: "/sessions/session-1.jsonl",
+      workspace: "/w/project",
+      agentId: "default",
+      title: "标题",
+      modifiedAt: 1,
+      messageCount: 1,
+      ...overrides
+    };
+  }
+
+  it("reuses the previous sessions array when all fields (including agentId/workspaceMissing) are unchanged", () => {
+    const previous = [summary()];
+    const incoming = [summary()];
+    expect(mergeSessionsPreservingIdentity(previous, incoming)).toBe(previous);
+  });
+
+  it("replaces sessions when only agentId changes", () => {
+    const previous = [summary()];
+    const incoming = [summary({ agentId: "reviewer" })];
+    expect(mergeSessionsPreservingIdentity(previous, incoming)).toBe(incoming);
+  });
+
+  it("replaces sessions when only workspaceMissing changes", () => {
+    const previous = [summary()];
+    const incoming = [summary({ workspaceMissing: true })];
+    expect(mergeSessionsPreservingIdentity(previous, incoming)).toBe(incoming);
+  });
+
+  it("reuses recent workspaces when missing is unchanged and replaces it when missing flips", () => {
+    const previous = [{ path: "/w/project", openedAt: 1 }];
+    expect(mergeRecentWorkspacesPreservingIdentity(previous, [{ path: "/w/project", openedAt: 1 }])).toBe(previous);
+    const incoming = [{ path: "/w/project", openedAt: 1, missing: true }];
+    expect(mergeRecentWorkspacesPreservingIdentity(previous, incoming)).toBe(incoming);
+  });
+
+  it("does not early-return a state frame that only changes agentId/agentName", () => {
+    useDesktopStore.setState({ snapshot: { ...snap("agent-only") } });
+    const before = useDesktopStore.getState().snapshot;
+    useDesktopStore.getState().handleRuntimeMessage({
+      type: "state",
+      snapshot: { ...snap("agent-only"), agentId: "reviewer", agentName: "审查助手" }
+    });
+    const after = useDesktopStore.getState().snapshot;
+    expect(after).not.toBe(before);
+    expect(after.agentId).toBe("reviewer");
+    expect(after.agentName).toBe("审查助手");
+  });
+
+  it("does not early-return a state frame that only changes readOnlyReason", () => {
+    useDesktopStore.setState({ snapshot: { ...snap("readonly") } });
+    useDesktopStore.getState().handleRuntimeMessage({
+      type: "state",
+      snapshot: { ...snap("readonly"), readOnlyReason: "工作区目录不存在，只能查看历史" }
+    });
+    expect(useDesktopStore.getState().snapshot.readOnlyReason).toBe("工作区目录不存在，只能查看历史");
+  });
+
+  it("does not early-return a pane frame that only changes agentName/readOnlyReason", () => {
+    function pane(overrides: Partial<SessionPaneSnapshot> = {}): SessionPaneSnapshot {
+      return { sessionId: "pane-agent", agentId: "default", agentName: "默认助手", thinkingLevel: "medium", busy: false, status: "", queuedMessages: [], messages: [], executions: [], ...overrides };
+    }
+    useDesktopStore.setState({ snapshot: { ...emptySnapshot, sessionId: "active" }, paneStates: {}, parkedPanels: {} });
+    useDesktopStore.getState().handleRuntimeMessage({ type: "session.state", snapshot: pane() });
+    useDesktopStore.getState().handleRuntimeMessage({ type: "session.state", snapshot: pane({ agentName: "审查助手" }) });
+    expect(useDesktopStore.getState().paneStates["pane-agent"]?.agentName).toBe("审查助手");
+    useDesktopStore.getState().handleRuntimeMessage({ type: "session.state", snapshot: pane({ agentName: "审查助手", readOnlyReason: "只读" }) });
+    expect(useDesktopStore.getState().paneStates["pane-agent"]?.readOnlyReason).toBe("只读");
   });
 });
 

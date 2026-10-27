@@ -27,12 +27,14 @@ export function highlightSnippet(snippet: string, query: string): ReactNode {
   );
 }
 
-export function SessionSearchResults({ query, hits, loading, error, scanned, onOpen }: {
+export function SessionSearchResults({ query, hits, loading, error, scanned, agentNames, onOpen }: {
   query: string;
   hits: readonly SessionSearchHit[];
   loading: boolean;
   error?: string;
   scanned?: number;
+  /** agentId → 显示名（App 用 settings.agents 解析）；缺省时只显示角色，不推断助手名。 */
+  agentNames?: Record<string, string>;
   onOpen(hit: SessionSearchHit): void;
 }): ReactNode {
   if (!query.trim()) return null;
@@ -57,6 +59,7 @@ export function SessionSearchResults({ query, hits, loading, error, scanned, onO
         >
           <span className="session-search-hit-head">
             <strong>{hit.title}</strong>
+            {agentNames ? <span className="session-agent-badge" title={`助手：${agentNames[hit.agentId] ?? "已归档助手"}`}>{agentNames[hit.agentId] ?? "已归档助手"}</span> : null}
             <em>{hit.role === "user" ? "你" : "助手"}</em>
             {hit.archived ? <span className="session-search-hit-archived">已归档</span> : null}
           </span>

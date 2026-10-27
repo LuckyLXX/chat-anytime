@@ -78,6 +78,7 @@ export function normalizeAutomation(raw: unknown): AutomationTask | undefined {
 
   const id = typeof task.id === "string" && task.id.trim() ? task.id.trim() : randomUUID();
   const workspace = typeof task.workspace === "string" && task.workspace.trim() ? task.workspace.trim() : undefined;
+  const workspaceIssue = typeof task.workspaceIssue === "string" && task.workspaceIssue.trim() ? task.workspaceIssue.trim() : undefined;
   const sessionId = typeof task.sessionId === "string" && task.sessionId.trim() ? task.sessionId.trim() : undefined;
   const sessionPath = typeof task.sessionPath === "string" && task.sessionPath.trim() && isAbsolute(task.sessionPath.trim()) ? task.sessionPath.trim() : undefined;
   const sessionTitle = typeof task.sessionTitle === "string" && task.sessionTitle.trim() ? task.sessionTitle.trim() : undefined;
@@ -96,6 +97,7 @@ export function normalizeAutomation(raw: unknown): AutomationTask | undefined {
     ...(sessionTitle ? { sessionTitle } : {}),
     ...(completedAt ? { completedAt } : {}),
     ...(workspace ? { workspace } : {}),
+    ...(workspaceIssue ? { workspaceIssue } : {}),
     ...(model ? { model } : {}),
     accessMode,
     ...(typeof task.skillName === "string" && task.skillName.trim() ? { skillName: task.skillName.trim() } : {}),

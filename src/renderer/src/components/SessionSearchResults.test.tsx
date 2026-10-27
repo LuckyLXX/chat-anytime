@@ -27,6 +27,7 @@ function hit(overrides: Partial<SessionSearchHit> = {}): SessionSearchHit {
     path: "C:/sessions/s1.jsonl",
     title: "部署事故",
     workspace: "C:/work",
+    agentId: "default",
     modifiedAt: Date.now(),
     timestamp: 1_000,
     role: "user",
@@ -56,6 +57,17 @@ describe("SessionSearchResults", () => {
       container.querySelector<HTMLButtonElement>(".session-search-hit")?.click();
     });
     expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ sessionId: "s1", timestamp: 1_000 }));
+  });
+
+  it("shows the resolved assistant name for each hit", async () => {
+    await render({ hits: [hit({ agentId: "reviewer" })], agentNames: { default: "默认助手", reviewer: "审查助手" } });
+    expect(container.textContent).toContain("审查助手");
+    expect(container.querySelector(".session-agent-badge")?.textContent).toBe("审查助手");
+  });
+
+  it("falls back to 已归档助手 when the hit's agent is no longer configured", async () => {
+    await render({ hits: [hit({ agentId: "removed-agent" })], agentNames: { default: "默认助手" } });
+    expect(container.querySelector(".session-agent-badge")?.textContent).toBe("已归档助手");
   });
 
   it("shows loading and empty states", async () => {

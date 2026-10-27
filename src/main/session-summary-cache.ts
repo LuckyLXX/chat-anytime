@@ -338,8 +338,38 @@ export async function listSessionSummaries(directories: readonly string[], deps:
 export const SESSION_INDEX_VERSION = 1;
 /** 超过这么久没被扫描确认的条目直接丢掉。 */
 export const SESSION_INDEX_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
-/** 条目总上限（超限丢最旧）。 */
-export const SESSION_INDEX_MAX_ENTRIES = 2000;
+/** 条目总上限（超限丢最旧）。全助手口径下按 agent 分区后再做全局兜底。 */
+export const SESSION_INDEX_MAX_ENTRIES = 20_000;
+/** 每个助手保留的条目上限：单个助手不能吃掉其他助手的索引预算。 */
+export const SESSION_INDEX_MAX_ENTRIES_PER_AGENT = 2_000;
+
+/** 路径里的 agent 分区键（chatanytime-sessions/<agentId>/…）；识别不了归入空分区。 */
+function sessionIndexAgentKey(key: string): string {
+  const parts = key.replaceAll("\\", "/").toLowerCase().split("/");
+  const index = parts.lastIndexOf("chatanytime-sessions");
+  return index >= 0 && parts[index + 1] ? parts[index + 1]! : "";
+}
+
+/**
+ * 按 agent 分区裁剪：每助手先保留最近 N 条（避免一个庞大的助手把其他助手的
+ * 全部缓存挤掉），再按全局上限兜底。返回按 seenAt 降序的条目。
+ */
+function selectIndexEntries<T extends { key: string; seenAt: number }>(entries: readonly T[], maxEntries: number, maxPerAgent: number): T[] {
+  const byAgent = new Map<string, T[]>();
+  for (const entry of entries) {
+    const agent = sessionIndexAgentKey(entry.key);
+    const list = byAgent.get(agent) ?? [];
+    list.push(entry);
+    byAgent.set(agent, list);
+  }
+  const kept: T[] = [];
+  for (const list of byAgent.values()) {
+    list.sort((left, right) => right.seenAt - left.seenAt);
+    kept.push(...list.slice(0, maxPerAgent));
+  }
+  kept.sort((left, right) => right.seenAt - left.seenAt);
+  return kept.slice(0, maxEntries);
+}
 
 interface SerializedSessionSummary {
   path: string;
@@ -402,10 +432,11 @@ function reviveSummary(value: unknown): SessionFileSummary | null | undefined {
  */
 export function loadSessionIndex(
   filePath: string,
-  options: { maxAgeMs?: number; maxEntries?: number; now?: number } = {}
+  options: { maxAgeMs?: number; maxEntries?: number; maxEntriesPerAgent?: number; now?: number } = {}
 ): Map<string, CachedSessionSummary> {
   const maxAgeMs = options.maxAgeMs ?? SESSION_INDEX_MAX_AGE_MS;
   const maxEntries = options.maxEntries ?? SESSION_INDEX_MAX_ENTRIES;
+  const maxEntriesPerAgent = options.maxEntriesPerAgent ?? SESSION_INDEX_MAX_ENTRIES_PER_AGENT;
   const now = options.now ?? Date.now();
   const empty = new Map<string, CachedSessionSummary>();
   let parsed: unknown;
@@ -429,10 +460,10 @@ export function loadSessionIndex(
     if (summary === undefined) continue;
     loaded.push({ key, entry: { mtimeMs, size, summary, seenAt } });
   }
-  // 超上限时丢最旧（按 seenAt 降序保留）。
-  loaded.sort((left, right) => (right.entry.seenAt ?? 0) - (left.entry.seenAt ?? 0));
+  // 按 agent 分区保留（每助手保底配额），再按全局上限兜底。
+  const selected = selectIndexEntries(loaded.map(({ key, entry }) => ({ key, entry, seenAt: entry.seenAt ?? 0 })), maxEntries, maxEntriesPerAgent);
   const result = new Map<string, CachedSessionSummary>();
-  for (const { key, entry } of loaded.slice(0, maxEntries)) result.set(key, entry);
+  for (const { key, entry } of selected) result.set(key, entry);
   return result;
 }
 
@@ -440,9 +471,10 @@ export function loadSessionIndex(
 export function saveSessionIndex(
   filePath: string,
   cache: Map<string, CachedSessionSummary>,
-  options: { maxEntries?: number; now?: number } = {}
+  options: { maxEntries?: number; maxEntriesPerAgent?: number; now?: number } = {}
 ): { entries: number; bytes: number } {
   const maxEntries = options.maxEntries ?? SESSION_INDEX_MAX_ENTRIES;
+  const maxEntriesPerAgent = options.maxEntriesPerAgent ?? SESSION_INDEX_MAX_ENTRIES_PER_AGENT;
   const now = options.now ?? Date.now();
   const entries: SerializedSessionEntry[] = [];
   for (const [key, entry] of cache) {
@@ -455,8 +487,7 @@ export function saveSessionIndex(
       summary: entry.summary ? serializeSummary(entry.summary) : null
     });
   }
-  entries.sort((left, right) => right.seenAt - left.seenAt);
-  const payload = { version: SESSION_INDEX_VERSION, entries: entries.slice(0, maxEntries) };
+  const payload = { version: SESSION_INDEX_VERSION, entries: selectIndexEntries(entries, maxEntries, maxEntriesPerAgent) };
   writeJsonAtomic(filePath, payload);
   return { entries: payload.entries.length, bytes: JSON.stringify(payload).length };
 }

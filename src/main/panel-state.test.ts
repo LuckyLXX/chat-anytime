@@ -3,7 +3,7 @@ import type { PanelSessionLive, RuntimeMessage, SessionSummary } from "../shared
 import { MAX_PANEL_SESSIONS, createPanelStateCache } from "./panel-state.js";
 
 function summary(id: string, runStatus?: SessionSummary["runStatus"]): SessionSummary {
-  return { id, path: `${id}.jsonl`, workspace: "D:/ws", title: `话题 ${id}`, modifiedAt: 1, messageCount: 3, ...(runStatus ? { runStatus } : {}) };
+  return { id, path: `${id}.jsonl`, workspace: "D:/ws", agentId: "default", title: `话题 ${id}`, modifiedAt: 1, messageCount: 3, ...(runStatus ? { runStatus } : {}) };
 }
 
 function live(sessionId: string, busy: boolean): PanelSessionLive {

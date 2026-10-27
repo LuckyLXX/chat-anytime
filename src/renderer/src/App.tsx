@@ -52,6 +52,7 @@ import type {
   ThinkingLevel,
   DelegationProgress,
   ToolExecution,
+  RecentWorkspace,
   ResourceCatalog,
   RuntimeCommand,
   SessionSummary,
@@ -82,7 +83,7 @@ import { SessionSearchResults } from "./components/SessionSearchResults";
 import { CommandPalette } from "./components/CommandPalette";
 import type { PaletteAction } from "./lib/command-palette";
 import { clampPreviewSplit, PREVIEW_SPLIT_MAX, PREVIEW_SPLIT_MIN, previewSplitFromKey } from "./lib/preview-split";
-import { groupSessionsByWorkspace, workspaceKey } from "./lib/session-groups";
+import { groupSessionsByWorkspace, workspaceDisplayLabel, workspaceKey } from "./lib/session-groups";
 import { archivedSessionCount, selectSessionPaths, selectedPathsInView, sessionsForView, toggleSessionSelection, type SessionSelection, type SessionView } from "./lib/session-view";
 import { resolveThemeAssetUrls, activeThemeScope } from "../../shared/theme-assets";
 import { bubbleOpacityCss, collectThemeLayers, panelOpacityCss, scopeCustomThemeCss, themePresetCss, wallpaperOpacityCss } from "./lib/theme-presets";
@@ -239,7 +240,108 @@ function PreviewDivider({ split, dragging, onStart, onMove, onEnd, onCancel, onK
 }
 type SettingsTab = "general" | "models" | "agents" | "subagents" | "appearance" | "resources" | "hooks" | "usage" | "automation";
 
-function SettingsDialog({ settings, models, providers, resources, workspaceOpen, initialTab, jevKeyConfigured, onClose, onCreateInSession }: { settings: import("../../shared/protocol").DesktopSettings; jevKeyConfigured: boolean; models: ModelOption[]; providers: ProviderOption[]; resources: ResourceCatalog; workspaceOpen: boolean; initialTab?: SettingsTab; onClose(): void; onCreateInSession(): void }): ReactNode {
+interface WorkspaceMenuEntry {
+  path: string;
+  openedAt?: number;
+  missing?: boolean;
+}
+
+/** 顶栏工作区切换菜单：当前 + 全部最近工作区 + 有会话的工作区（按路径去重）。 */
+function WorkspaceMenu({ activeWorkspace, recentWorkspaces, sessions, onOpen, onChoose, onMenuOpenChange }: {
+  activeWorkspace?: string;
+  recentWorkspaces: readonly RecentWorkspace[];
+  sessions: readonly SessionSummary[];
+  onOpen(path: string): void;
+  onChoose(): void;
+  onMenuOpenChange?(open: boolean): void;
+}): ReactNode {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  function toggle(next: boolean): void {
+    setOpen(next);
+    onMenuOpenChange?.(next);
+  }
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOnPointerDown = (event: PointerEvent): void => {
+      if (!rootRef.current?.contains(event.target as Node)) toggle(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") {
+        event.stopPropagation();
+        toggle(false);
+      }
+    };
+    document.addEventListener("pointerdown", closeOnPointerDown);
+    document.addEventListener("keydown", closeOnEscape, true);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnPointerDown);
+      document.removeEventListener("keydown", closeOnEscape, true);
+    };
+    // toggle 每次渲染重建；open 变化才会真正重挂监听，无需进依赖。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  const items = useMemo(() => {
+    const byKey = new Map<string, WorkspaceMenuEntry>();
+    const add = (path: string, openedAt?: number, missing?: boolean): void => {
+      const trimmed = path.trim();
+      if (!trimmed) return;
+      const key = workspaceKey(trimmed);
+      const existing = byKey.get(key);
+      if (existing) {
+        if (openedAt !== undefined && existing.openedAt === undefined) existing.openedAt = openedAt;
+        if (missing) existing.missing = true;
+        return;
+      }
+      byKey.set(key, { path: trimmed, openedAt, missing });
+    };
+    if (activeWorkspace) add(activeWorkspace);
+    for (const recent of recentWorkspaces) add(recent.path, recent.openedAt, recent.missing);
+    for (const session of sessions) add(session.workspace, undefined, session.workspaceMissing);
+    return [...byKey.values()];
+  }, [activeWorkspace, recentWorkspaces, sessions]);
+  const allPaths = items.map((item) => item.path);
+
+  return (
+    <div className="workspace-menu-shell" ref={rootRef}>
+      <button className="workspace-top-button" data-control="workspace-open" type="button" aria-haspopup="menu" aria-expanded={open} onClick={() => toggle(!open)}>
+        <FolderOpen size={15} /><span>工作区</span><strong>{compactPath(activeWorkspace)}</strong><ChevronDown size={13} />
+      </button>
+      {open ? (
+        <div className="workspace-switch-menu" role="menu" aria-label="切换工作区">
+          <div className="workspace-switch-head"><span>切换工作区</span><small>{items.length} 个</small></div>
+          {items.map((item) => {
+            const current = activeWorkspace !== undefined && workspaceKey(item.path) === workspaceKey(activeWorkspace);
+            return (
+              <button
+                className={`workspace-switch-item${current ? " current" : ""}`}
+                type="button"
+                role="menuitem"
+                key={workspaceKey(item.path)}
+                title={item.missing ? `目录不存在：${item.path}` : item.path}
+                disabled={item.missing}
+                onClick={() => { toggle(false); onOpen(item.path); }}
+              >
+                <Folder size={14} />
+                <span><strong>{workspaceDisplayLabel(item.path, allPaths)}</strong><small>{item.path}</small></span>
+                {item.missing ? <span className="session-workspace-missing">目录不存在</span> : current ? <Check size={13} /> : null}
+              </button>
+            );
+          })}
+          <button className="workspace-switch-open-folder" type="button" data-control="workspace-choose" onClick={() => { toggle(false); onChoose(); }}>
+            <FolderOpen size={14} />打开文件夹…
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+
+function SettingsDialog({ settings, models, providers, resources, workspaceOpen, workspacePath, initialTab, jevKeyConfigured, onClose, onCreateInSession }: { settings: import("../../shared/protocol").DesktopSettings; jevKeyConfigured: boolean; models: ModelOption[]; providers: ProviderOption[]; resources: ResourceCatalog; workspaceOpen: boolean; workspacePath?: string; initialTab?: SettingsTab; onClose(): void; onCreateInSession(): void }): ReactNode {
   const [tab, setTab] = useState<SettingsTab>(initialTab ?? "general");
   // 命令面板/侧栏入口：设置页已打开（初始 tab 已固定）时也能切到指定 tab。
   useEffect(() => {
@@ -319,14 +421,15 @@ function SettingsDialog({ settings, models, providers, resources, workspaceOpen,
     const nextAgents = agentList.map((agent) => agent.id === selectedAgent.id ? { ...agent, archived: true } : agent);
     setAgentList(nextAgents);
     setSelectedAgentId("default");
-    markSettingsSaved({ ...settings, agents: nextAgents, currentAgentId: settings.currentAgentId === selectedAgent.id ? "default" : settings.currentAgentId });
+    // 不本地乐观回写 currentAgentId：等 runtime 的 snapshot.agentId 回推（失败时 UI 不能先假装切走）。
+    markSettingsSaved({ ...settings, agents: nextAgents });
   }
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={closeSettings}>
       <section className="settings-dialog settings-center settings-wide" data-pane="settings-dialog" onMouseDown={(event) => event.stopPropagation()}>
         <header><div><Settings size={19} /><div><h2>ChatAnyTime 设置</h2><p>模型服务和 Agent 角色配置保存在本机。</p></div></div><button className="icon-button" type="button" title="关闭设置" aria-label="关闭设置" onClick={closeSettings}><X size={18} /></button></header>
-        <div className="settings-body"><nav className="settings-tabs"><button type="button" className={tab === "general" ? "active" : ""} onClick={() => setTab("general")}>通用</button><button type="button" className={tab === "models" ? "active" : ""} onClick={() => setTab("models")}>模型服务</button><button type="button" className={tab === "agents" ? "active" : ""} onClick={() => setTab("agents")}>Agent 角色</button><button type="button" className={tab === "subagents" ? "active" : ""} onClick={() => setTab("subagents")}>子智能体</button><button type="button" className={tab === "resources" ? "active" : ""} onClick={() => setTab("resources")}>技能与工具</button><button type="button" className={tab === "hooks" ? "active" : ""} onClick={() => setTab("hooks")}>钩子</button><button type="button" className={tab === "appearance" ? "active" : ""} onClick={() => setTab("appearance")}>外观</button><button type="button" className={tab === "usage" ? "active" : ""} onClick={() => setTab("usage")}>用量统计</button><button type="button" className={tab === "automation" ? "active" : ""} onClick={() => setTab("automation")}>自动化任务</button><div className="settings-version" data-control="settings-version" title={appVersion ? `当前运行版本 ${appVersion}` : undefined}>{appVersion ? `版本 ${appVersion}` : ""}</div></nav><div className="settings-content">{tab === "general" ? <GeneralSettings settings={settings} models={models} providers={providers} jevKeyConfigured={jevKeyConfigured} onSaved={(nextSettings) => { markSettingsSaved(nextSettings); onClose(); }} onDraftCommitted={markSettingsSaved} onCancel={closeSettings} /> : tab === "models" ? <ModelSettings settings={settings} models={models} providers={providers} onSaved={(nextSettings) => { markSettingsSaved(nextSettings); onClose(); }} onDraftCommitted={markSettingsSaved} onCancel={closeSettings} /> : tab === "agents" ? <AgentSettings agents={agentList} activeAgentId={activeAgentId} selectedAgentId={selectedAgent?.id ?? ""} models={configuredModels} providers={providers} resources={resources} onSelect={setSelectedAgentId} onCreate={newAgent} onUpdate={updateAgent} onUpdateSkillOverride={updateAgentSkillOverride} onUpdateToolOverride={updateAgentToolOverride} onSave={() => void saveAgent()} onDuplicate={duplicateAgent} onArchive={() => void archiveAgent()} /> : tab === "subagents" ? <SubagentSettings resources={resources} workspaceOpen={workspaceOpen} models={models} providers={providers} /> : tab === "resources" ? <ResourceSettings resources={resources} /> : tab === "hooks" ? <HooksSettings resources={resources} workspaceOpen={workspaceOpen} /> : tab === "usage" ? <UsageSettings /> : tab === "automation" ? <AutomationSettings models={models} providers={providers} settings={settings} workspaceConfigured={workspaceOpen} workspaceName={settings.workspace ? settings.workspace.split(/[\\/]/u).at(-1) : undefined} onCreateInSession={() => { closeSettings(); onCreateInSession(); }} onOpenRunSession={closeSettings} /> : <AppearanceSettings settings={settings} onSaved={(nextSettings) => { markSettingsSaved(nextSettings); onClose(); }} onCancel={closeSettings} />}</div></div>
+        <div className="settings-body"><nav className="settings-tabs"><button type="button" className={tab === "general" ? "active" : ""} onClick={() => setTab("general")}>通用</button><button type="button" className={tab === "models" ? "active" : ""} onClick={() => setTab("models")}>模型服务</button><button type="button" className={tab === "agents" ? "active" : ""} onClick={() => setTab("agents")}>Agent 角色</button><button type="button" className={tab === "subagents" ? "active" : ""} onClick={() => setTab("subagents")}>子智能体</button><button type="button" className={tab === "resources" ? "active" : ""} onClick={() => setTab("resources")}>技能与工具</button><button type="button" className={tab === "hooks" ? "active" : ""} onClick={() => setTab("hooks")}>钩子</button><button type="button" className={tab === "appearance" ? "active" : ""} onClick={() => setTab("appearance")}>外观</button><button type="button" className={tab === "usage" ? "active" : ""} onClick={() => setTab("usage")}>用量统计</button><button type="button" className={tab === "automation" ? "active" : ""} onClick={() => setTab("automation")}>自动化任务</button><div className="settings-version" data-control="settings-version" title={appVersion ? `当前运行版本 ${appVersion}` : undefined}>{appVersion ? `版本 ${appVersion}` : ""}</div></nav><div className="settings-content">{tab === "general" ? <GeneralSettings settings={settings} models={models} providers={providers} jevKeyConfigured={jevKeyConfigured} onSaved={(nextSettings) => { markSettingsSaved(nextSettings); onClose(); }} onDraftCommitted={markSettingsSaved} onCancel={closeSettings} /> : tab === "models" ? <ModelSettings settings={settings} models={models} providers={providers} onSaved={(nextSettings) => { markSettingsSaved(nextSettings); onClose(); }} onDraftCommitted={markSettingsSaved} onCancel={closeSettings} /> : tab === "agents" ? <AgentSettings agents={agentList} activeAgentId={activeAgentId} selectedAgentId={selectedAgent?.id ?? ""} models={configuredModels} providers={providers} resources={resources} onSelect={setSelectedAgentId} onCreate={newAgent} onUpdate={updateAgent} onUpdateSkillOverride={updateAgentSkillOverride} onUpdateToolOverride={updateAgentToolOverride} onSave={() => void saveAgent()} onDuplicate={duplicateAgent} onArchive={() => void archiveAgent()} /> : tab === "subagents" ? <SubagentSettings resources={resources} workspaceOpen={workspaceOpen} models={models} providers={providers} /> : tab === "resources" ? <ResourceSettings resources={resources} /> : tab === "hooks" ? <HooksSettings resources={resources} workspaceOpen={workspaceOpen} /> : tab === "usage" ? <UsageSettings /> : tab === "automation" ? <AutomationSettings {...({ workspacePath, activeAgentId } as { workspacePath?: string; activeAgentId: string })} models={models} providers={providers} settings={settings} workspaceConfigured={workspaceOpen} workspaceName={workspacePath ? workspaceDisplayLabel(workspacePath, []) : undefined} onCreateInSession={() => { closeSettings(); onCreateInSession(); }} onOpenRunSession={closeSettings} /> : <AppearanceSettings settings={settings} onSaved={(nextSettings) => { markSettingsSaved(nextSettings); onClose(); }} onCancel={closeSettings} />}</div></div>
       </section>
     </div>
   );
@@ -450,11 +553,9 @@ export function App(): ReactNode {
     return () => window.clearTimeout(timer);
   }, [sidebarQuery, sidebarTab]);
 
-  // 切助手（含自动化触发的 agent.select，不经过页签）立即清空检索结果：
-  // 旧助手的命中留在新助手的列表上方会让人误以为搜的是新助手。
-  useEffect(() => {
-    useDesktopStore.setState({ sessionSearch: { query: "", loading: false, hits: [] } });
-  }, [activeAgentId]);
+  // 注意：不在 activeAgentId 变化时清空检索结果——跨助手打开会话也会改变
+  // snapshot.agentId，无条件清空会误伤正在进行的搜索。只在用户主动点助手行 /
+  // 命令面板切换助手时清（见对应 onClick）。
 
   // 命令面板的会话检索：与侧栏同理（300ms 防抖 + ≥2 字 + requestId 防旧结果），
   // 但状态落在 store 的独立切片 paletteSearch，侧栏那份不受影响。
@@ -527,7 +628,8 @@ export function App(): ReactNode {
   const [sessionMultiSelect, setSessionMultiSelect] = useState(false);
   const [selectedSessionPaths, setSelectedSessionPaths] = useState<SessionSelection>({});
   const [deleteSession, setDeleteSession] = useState<{ paths: string[]; title: string; mode: "single" | "bulk" } | null>(null);
-  const [removeWorkspace, setRemoveWorkspace] = useState<{ workspace: string; name: string; count: number } | null>(null);
+  const [deleteWorkspace, setDeleteWorkspace] = useState<{ workspace: string; name: string; paths: string[]; runningCount: number } | null>(null);
+  const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   // —— checkpoint 回滚：单文件确认对话框目标 + 完成后的 toast ——
   const [rollbackTarget, setRollbackTarget] = useState<{ file: ReplyChangedFile; sessionId: string } | null>(null);
   const [checkpointToast, setCheckpointToast] = useState<string>();
@@ -580,7 +682,7 @@ export function App(): ReactNode {
   const renamePresence = useExitPresenceValue(renameSession, 160);
   const deletePresence = useExitPresenceValue(deleteSession, 160);
   const rollbackPresence = useExitPresenceValue(rollbackTarget, 160);
-  const removeWorkspacePresence = useExitPresenceValue(removeWorkspace, 160);
+  const deleteWorkspacePresence = useExitPresenceValue(deleteWorkspace, 160);
   const flyoutPresence = useExitPresence(sidebarFlyoutOpen, 160);
   // 预览面板：rendered 驱动 work-area 布局 class/分割条，退场期间布局不塌缩；
   // 退场时挂起 native 浏览器视图（browserSuspended），淡出的始终是 DOM 层。
@@ -591,7 +693,7 @@ export function App(): ReactNode {
   const overlayLayerOpen = useOverlayLayersOpen();
   // 会话级确认框虽然已收进聊天区（in-chat），但预览面板**全屏**时原生视图铺满整个窗口，
   // 收窄边界也躲不开——所以照旧登记进弹层计数，由 browserSuspended 兜底。
-  useOverlayLayer(renamePresence.rendered || deletePresence.rendered || rollbackPresence.rendered || removeWorkspacePresence.rendered || transcriptPresence.rendered);
+  useOverlayLayer(renamePresence.rendered || deletePresence.rendered || rollbackPresence.rendered || deleteWorkspacePresence.rendered || transcriptPresence.rendered);
   const previewVisible = previewPresence.rendered;
   const [previewSplit, setPreviewSplit] = useState(readStoredPreviewSplit);
   const [previewDragging, setPreviewDragging] = useState(false);
@@ -599,7 +701,7 @@ export function App(): ReactNode {
   // 盖到预览面板的 DOM 浮层/拖拽都必须临时挂起它。深层弹层（图片放大、Mermaid、
   // 右键菜单、各类对话框）经 overlayLayerOpen 汇总；顶栏作品下拉、命令面板、
   // 折叠侧边栏的飞出面板是 App 自己持有的浮层，直接在这里列出。
-  const browserSuspended = previewDragging || settingsOpen || Boolean(permission) || Boolean(messageActionError) || previewAddMenuOpen || galleryMenuOpen || paletteOpen || flyoutPresence.rendered || previewPresence.exiting || overlayLayerOpen;
+  const browserSuspended = previewDragging || settingsOpen || Boolean(permission) || Boolean(messageActionError) || previewAddMenuOpen || galleryMenuOpen || workspaceMenuOpen || paletteOpen || flyoutPresence.rendered || previewPresence.exiting || overlayLayerOpen;
   // 预览面板全屏（覆盖整个窗口）：面板关闭或标签清空即退出，不留残留状态。
   const [previewFullscreen, setPreviewFullscreen] = useState(false);
   useEffect(() => {
@@ -607,7 +709,7 @@ export function App(): ReactNode {
   }, [previewOpened, preview]);
   const previewDragPointerRef = useRef<number | undefined>(undefined);
   const workAreaRef = useRef<HTMLDivElement>(null);
-  // 会话级确认框（删除话题 / 重命名 / 回滚 / 移除工作区）的遮罩只在会话区居中：
+  // 会话级确认框（删除话题 / 重命名 / 回滚 / 删除工作区全部会话）的遮罩只在会话区居中：
   // 遮挡者是预览面板里的原生 WebContentsView，让弹窗不与面板重叠即可避开；
   // 面板全屏时边界收窄也躲不开，仍由 browserSuspended 兜底。
   useChatOverlayRegion(workAreaRef);
@@ -932,8 +1034,33 @@ export function App(): ReactNode {
     } : current);
   }, []);
   const visibleAgents = useMemo(() => settings.agents.filter((agent) => !agent.archived && `${agent.name} ${agent.description}`.toLowerCase().includes(sidebarQuery.trim().toLowerCase())), [settings.agents, sidebarQuery]);
+  const agentNames = useMemo<Record<string, string>>(() => Object.fromEntries(settings.agents.map((agent) => [agent.id, agent.archived ? `${agent.name}（已归档）` : agent.name])), [settings.agents]);
+  // tab 计数与顶栏菜单都必须基于**全量**工作区，不能被 sidebarQuery / 归档视图过滤后的
+  // sessionGroups 影响；空工作区来自 recents，当前工作区再做一次兜底。
+  const workspacePaths = useMemo(() => {
+    const paths = new Map<string, string>();
+    const add = (path: string | undefined): void => {
+      const trimmed = path?.trim();
+      if (trimmed) paths.set(workspaceKey(trimmed), trimmed);
+    };
+    for (const recent of recentWorkspaces) add(recent.path);
+    for (const session of sessionSummaries) add(session.workspace);
+    add(activeWorkspace);
+    return [...paths.values()];
+  }, [recentWorkspaces, sessionSummaries, activeWorkspace]);
+  const workspaceCount = workspacePaths.length;
+  const sessionsByWorkspaceKey = useMemo(() => {
+    const map = new Map<string, SessionSummary[]>();
+    for (const session of sessionSummaries) {
+      const key = workspaceKey(session.workspace.trim() || "未知工作区");
+      const list = map.get(key) ?? [];
+      list.push(session);
+      map.set(key, list);
+    }
+    return map;
+  }, [sessionSummaries]);
   const visibleSessions = useMemo(() => sessionsForView(sessionSummaries, sessionView), [sessionSummaries, sessionView]);
-  const sessionGroups = useMemo(() => groupSessionsByWorkspace(visibleSessions, sidebarQuery, recentWorkspaces, activeWorkspace), [visibleSessions, recentWorkspaces, activeWorkspace, sidebarQuery]);
+  const sessionGroups = useMemo(() => groupSessionsByWorkspace(visibleSessions, sidebarQuery, recentWorkspaces, activeWorkspace, agentNames), [visibleSessions, recentWorkspaces, activeWorkspace, sidebarQuery, agentNames]);
   const archivedCount = useMemo(() => archivedSessionCount(sessionSummaries), [sessionSummaries]);
   // 选择集按当前视图过滤：会话被删/刷新后可能残留陈旧键，操作时必须只拿「还在列表里」的那些。
   const selectedPaths = useMemo(() => selectedPathsInView(selectedSessionPaths, sessionSummaries, sessionView), [selectedSessionPaths, sessionSummaries, sessionView]);
@@ -1129,7 +1256,13 @@ export function App(): ReactNode {
         const target = paneSessionId ?? focusedPaneId ?? activeSessionId;
         if (target) pendingPaneReplaceRef.current = target;
       }
-      await window.piDesktop.send({ type: "session.new", workspace });
+      // 新话题沿用当前激活会话的助手；激活会话属于归档助手时不能作为目标，
+      // 回落到未归档默认助手（与运行时 session.new 的守卫一致）。
+      const activeProfile = settings.agents.find((agent) => agent.id === activeAgentId);
+      const targetAgentId = activeProfile && !activeProfile.archived
+        ? activeProfile.id
+        : settings.agents.find((agent) => !agent.archived)?.id ?? settings.currentAgentId;
+      await window.piDesktop.send({ type: "session.new", ...(workspace ? { workspace } : {}), agentId: targetAgentId });
       // 分组默认折叠，新建后展开目标工作区，让新话题立即可见。
       const key = workspaceKey(workspace ?? activeWorkspace ?? "");
       if (key) {
@@ -1158,7 +1291,7 @@ export function App(): ReactNode {
     setSelectedSessionPaths({});
   }
 
-  async function openSession(path: string, sessionWorkspace: string, sessionId?: string): Promise<void> {
+  async function openSession(path: string, sessionWorkspace: string, sessionId?: string, agentId?: string): Promise<void> {
     try {
       // 分屏中：已在格子里的会话只聚焦；不在的替换焦点格（草稿/焦点随之迁移）。
       if (splitTree && sessionId) {
@@ -1174,7 +1307,7 @@ export function App(): ReactNode {
       if (sessionSummaries.some((item) => item.path === path && item.archived)) {
         await window.piDesktop.send({ type: "session.archive", paths: [path], archived: false });
       }
-      await window.piDesktop.send({ type: "session.open", path, workspace: sessionWorkspace });
+      await window.piDesktop.send({ type: "session.open", path, workspace: sessionWorkspace, ...(agentId ? { agentId } : {}) });
     } catch (error) {
       useDesktopStore.setState((state) => state.openingSession && sameSessionPath(state.openingSession.path, path) ? { openingSession: undefined } : state);
       setMessageActionError(error instanceof Error ? error.message : "打开话题失败");
@@ -1185,7 +1318,7 @@ export function App(): ReactNode {
   function openSearchHit(hit: SessionSearchHit): void {
     useDesktopStore.setState({ pendingReveal: { sessionId: hit.sessionId, timestamp: hit.timestamp, role: hit.role, nonce: Date.now(), createdAt: Date.now() } });
     if (hit.sessionId === activeSessionIdRef.current) return;
-    void openSession(hit.path, hit.workspace, hit.sessionId);
+    void openSession(hit.path, hit.workspace, hit.sessionId, hit.agentId);
   }
 
   // —— 分屏：焦点 / 增删格 / 最大化 ——
@@ -1198,7 +1331,7 @@ export function App(): ReactNode {
     if (sessionId === activeSessionId) return;
     const item = sessionSummaries.find((summary) => summary.id === sessionId);
     if (item) {
-      void window.piDesktop.send({ type: "session.open", path: item.path, workspace: item.workspace }).catch((error) => {
+      void window.piDesktop.send({ type: "session.open", path: item.path, workspace: item.workspace, agentId: item.agentId }).catch((error) => {
         setMessageActionError(error instanceof Error ? error.message : "切换分屏失败");
       });
     }
@@ -1215,7 +1348,7 @@ export function App(): ReactNode {
     if (splitTree && countLeaves(splitTree) >= MAX_SPLIT_PANES) return;
     // 自动均衡：不再固定「从焦点格链式分裂」，而是选最接近方形的格子落位、方向自动。
     setSplitState((current) => ({ tree: balancedAddPane(current.tree, activeSessionId, item.id), focusedPane: item.id }));
-    void window.piDesktop.send({ type: "session.open", path: item.path, workspace: item.workspace }).catch((error) => {
+    void window.piDesktop.send({ type: "session.open", path: item.path, workspace: item.workspace, agentId: item.agentId }).catch((error) => {
       setMessageActionError(error instanceof Error ? error.message : "分屏打开会话失败");
     });
   }
@@ -1388,15 +1521,7 @@ export function App(): ReactNode {
       : current);
   }, [activeSessionId, splitTree, paneIds, focusedPaneId]);
 
-  /** 切换助手清空分屏（会话列表按助手划分，旧格子全部失效）。 */
-  const agentIdRef = useRef(activeAgentId);
-  useEffect(() => {
-    if (agentIdRef.current === activeAgentId) return;
-    agentIdRef.current = activeAgentId;
-    setSplitState({ tree: null });
-    setMaximizedPaneId(undefined);
-    draftsRef.current.clear();
-  }, [activeAgentId]);
+  // 跨助手分屏保留：切助手只改变默认助手/激活会话，不再清空分屏与草稿。
 
   /** 启动恢复分屏：会话列表就绪后先打开焦点格（用户注视的画面最先出现，不排
    *  在 N-1 个背景会话构建之后），再逐个以 activate:false 打开背景格（创建
@@ -1412,7 +1537,7 @@ export function App(): ReactNode {
       const focusedItem = sessionSummaries.find((summary) => summary.id === focused);
       if (focusedItem) {
         try {
-          await window.piDesktop.send({ type: "session.open", path: focusedItem.path, workspace: focusedItem.workspace });
+          await window.piDesktop.send({ type: "session.open", path: focusedItem.path, workspace: focusedItem.workspace, agentId: focusedItem.agentId });
         } catch {
           /* 焦点格失败不阻断背景格恢复 */
         }
@@ -1421,7 +1546,7 @@ export function App(): ReactNode {
         const item = sessionSummaries.find((summary) => summary.id === id);
         if (!item) continue;
         try {
-          await window.piDesktop.send({ type: "session.open", path: item.path, workspace: item.workspace, activate: false });
+          await window.piDesktop.send({ type: "session.open", path: item.path, workspace: item.workspace, agentId: item.agentId, activate: false });
         } catch {
           /* 单格失败不阻断其余格子 */
         }
@@ -1846,9 +1971,9 @@ export function App(): ReactNode {
         <>
           <div className="sidebar-tabs" role="tablist" aria-label="侧栏视图">
             <button type="button" role="tab" aria-selected={sidebarTab === "agents"} className={sidebarTab === "agents" ? "active" : ""} onClick={() => { setSidebarTab("agents"); setSidebarQuery(""); }}><Users size={14} />助手<span>{settings.agents.filter((agent) => !agent.archived).length}</span></button>
-            <button type="button" role="tab" aria-selected={sidebarTab === "topics"} className={sidebarTab === "topics" ? "active" : ""} onClick={() => { setSidebarTab("topics"); setSidebarQuery(""); }}><MessageCircle size={14} />话题<span>{sessionSummaries.length}</span></button>
+            <button type="button" role="tab" aria-selected={sidebarTab === "topics"} className={sidebarTab === "topics" ? "active" : ""} onClick={() => { setSidebarTab("topics"); setSidebarQuery(""); }}><Folder size={14} />工作区<span>{workspaceCount}</span></button>
           </div>
-          <label className="sidebar-search"><Search size={14} /><input ref={sidebarSearchRef} value={sidebarQuery} placeholder={sidebarTab === "agents" ? "搜索助手" : "搜索话题"} aria-label={sidebarTab === "agents" ? "搜索助手" : "搜索话题"} onChange={(event) => setSidebarQuery(event.target.value)} /></label>
+          <label className="sidebar-search"><Search size={14} /><input ref={sidebarSearchRef} value={sidebarQuery} placeholder={sidebarTab === "agents" ? "搜索助手" : "搜索工作区或话题"} aria-label={sidebarTab === "agents" ? "搜索助手" : "搜索工作区或话题"} onChange={(event) => setSidebarQuery(event.target.value)} /></label>
           {sidebarTab === "agents" ? (
             <div className="sidebar-section-label">角色</div>
           ) : sessionMultiSelect ? (
@@ -1879,7 +2004,12 @@ export function App(): ReactNode {
             </div>
           )}
           {sidebarTab === "agents" ? <nav className="agent-list" aria-label="助手列表">
-            {visibleAgents.map((agent) => <button className={agent.id === activeAgentId ? "active" : ""} type="button" key={agent.id} data-row-kind="agent" data-row-active={agent.id === activeAgentId || undefined} onClick={() => { useDesktopStore.setState({ settings: { ...settings, currentAgentId: agent.id } }); void window.piDesktop.send({ type: "agent.select", agentId: agent.id }); }}><span className="agent-list-icon"><Bot size={15} /></span><span><strong>{agent.name}</strong><small>{agent.description || "未填写说明"}</small></span></button>)}
+            {visibleAgents.map((agent) => <button className={agent.id === activeAgentId ? "active" : ""} type="button" key={agent.id} data-row-kind="agent" data-row-active={agent.id === activeAgentId || undefined} onClick={() => {
+              // 只发命令、等 snapshot.agentId 回推（不再本地乐观写 currentAgentId）。
+              // 主动切助手时清空检索结果，避免旧助手命中留在新助手上方。
+              if (agent.id !== activeAgentId) useDesktopStore.setState({ sessionSearch: { query: "", loading: false, hits: [] } });
+              void window.piDesktop.send({ type: "agent.select", agentId: agent.id });
+            }}><span className="agent-list-icon"><Bot size={15} /></span><span><strong>{agent.name}</strong><small>{agent.description || "未填写说明"}</small></span></button>)}
           </nav> : <nav className="session-list" aria-label="话题列表">
             <SessionSearchResults
               query={sessionSearch.query}
@@ -1887,16 +2017,24 @@ export function App(): ReactNode {
               loading={sessionSearch.loading}
               error={sessionSearch.error}
               scanned={sessionSearch.scanned}
+              agentNames={agentNames}
               onOpen={openSearchHit}
             />
             {sessionGroups.length === 0
               ? (sessionSearch.loading || sessionSearch.hits.length > 0 ? null : <div className="session-list-empty">{sessionView === "archived" ? "暂无归档话题" : "暂无匹配话题"}</div>)
               : sessionGroups.map((group) => {
               const collapsed = expandedWorkspaceGroups[group.key] !== true;
-              const workspaceName = group.workspace.split(/[\\/]/u).at(-1) || group.workspace;
+              const workspaceName = workspaceDisplayLabel(group.workspace, workspacePaths);
+              const groupMissing = group.missing === true || group.sessions.some((item) => item.workspaceMissing === true);
+              const allGroupSessions = sessionsByWorkspaceKey.get(group.key) ?? [];
+              const groupActive = activeWorkspace !== undefined && workspaceKey(group.workspace) === workspaceKey(activeWorkspace);
               return (
                 <section className="session-workspace-group" key={group.key}>
-                  <div className="session-workspace-heading" data-row-kind="workspace" data-row-expanded={!collapsed || undefined} onContextMenu={(event) => { event.preventDefault(); setContextMenu({ x: event.clientX, y: event.clientY, items: [{ label: "打开文件目录", onClick: () => { setBrowsingWorkspace(group.workspace); setTreeRefreshSignal(0); setSidebarView("files"); } }, { label: "移除工作区", danger: true, onClick: () => setRemoveWorkspace({ workspace: group.workspace, name: workspaceName, count: group.sessions.length }) }] }); }}>
+                  <div className="session-workspace-heading" data-row-kind="workspace" data-row-active={groupActive || undefined} data-row-expanded={!collapsed || undefined} title={group.workspace} onContextMenu={(event) => { event.preventDefault(); setContextMenu({ x: event.clientX, y: event.clientY, items: [
+                    { label: "打开文件目录", onClick: () => { setBrowsingWorkspace(group.workspace); setTreeRefreshSignal(0); setSidebarView("files"); } },
+                    { label: "从列表移除", onClick: () => { void window.piDesktop.send({ type: "workspace.forget", path: group.workspace }).catch((error: unknown) => setMessageActionError(error instanceof Error ? error.message : "移除工作区失败")); } },
+                    ...(allGroupSessions.length > 0 ? [{ label: "删除此工作区全部会话…", danger: true, onClick: () => setDeleteWorkspace({ workspace: group.workspace, name: workspaceName, paths: allGroupSessions.map((item) => item.path), runningCount: allGroupSessions.filter((item) => item.runStatus === "running").length }) }] : [])
+                  ] }); }}>
                     <button
                       className="session-workspace-toggle"
                       type="button"
@@ -1909,6 +2047,7 @@ export function App(): ReactNode {
                     >
                       <Folder size={15} />
                       <span><strong>{workspaceName}</strong></span>
+                      {groupMissing ? <span className="session-workspace-missing" title={`目录不存在：${group.workspace}`}>目录不存在</span> : null}
                       <em>{group.sessions.length}</em>
                       <ChevronDown size={14} className={collapsed ? "collapsed" : ""} />
                     </button>
@@ -1924,8 +2063,9 @@ export function App(): ReactNode {
                     {sessionView === "active" ? <button
                       className="session-workspace-new-button"
                       type="button"
-                      title={`在 ${workspaceName} 中新建话题`}
-                      aria-label={`在 ${workspaceName} 中新建话题`}
+                      title={groupMissing ? `目录不存在，无法在 ${workspaceName} 中新建话题` : `在 ${workspaceName} 中新建话题`}
+                      aria-label={groupMissing ? `目录不存在，无法在 ${workspaceName} 中新建话题` : `在 ${workspaceName} 中新建话题`}
+                      disabled={groupMissing}
                       onClick={() => void createNewSession(group.workspace)}
                     >
                       <SquarePen size={14} />
@@ -1937,31 +2077,32 @@ export function App(): ReactNode {
                   <div className={`session-workspace-items${collapsed ? " collapsed" : ""}`}>
                     <div className="session-workspace-items-inner">
                     {group.sessions.length === 0
-                      ? <div className="session-workspace-empty">{sessionView === "archived" ? "本工作区暂无归档话题" : "暂无话题，点击右上角新建"}</div>
+                      ? <div className="session-workspace-empty">{groupMissing ? "工作区目录不存在" : sessionView === "archived" ? "本工作区暂无归档话题" : "暂无话题，点击右上角新建"}</div>
                       : !mountedWorkspaceGroups[group.key] && collapsed
                         ? null
                         : group.sessions.map((item) => {
                         const inPane = splitTree ? leafIds(splitTree).includes(item.id) : false;
                         const rowActive = item.id === activeSessionId || inPane;
                         const rowSelected = sessionMultiSelect && Boolean(selectedSessionPaths[item.path]);
+                        const agentName = agentNames[item.agentId] ?? "已归档助手";
                         return <button
                           className={`${rowActive ? "active" : ""}${rowSelected ? " selected" : ""}`}
                           type="button"
                           key={item.path}
-                          title={sessionMultiSelect ? (rowSelected ? `取消选择：${item.title}` : `选择：${item.title}`) : item.title}
+                          title={sessionMultiSelect ? (rowSelected ? `取消选择：${item.title}` : `选择：${item.title}`) : `${item.title} · ${agentName}`}
                           data-row-kind="session"
                           data-row-active={rowActive || undefined}
                           onClick={() => {
                             // 多选模式下行点击 = 切换选中（不打开会话）。
                             if (sessionMultiSelect) { setSelectedSessionPaths((current) => toggleSessionSelection(current, item.path)); return; }
-                            void openSession(item.path, item.workspace, item.id);
+                            void openSession(item.path, item.workspace, item.id, item.agentId);
                           }}
                           onContextMenu={(event) => {
                             event.preventDefault();
                             const splitDisabled = !activeSessionId || designMode || (splitTree ? countLeaves(splitTree) >= MAX_SPLIT_PANES : false);
                             const items = sessionView === "archived"
                               ? [
-                                { label: "打开（自动恢复）", onClick: () => void openSession(item.path, item.workspace, item.id) },
+                                { label: "打开（自动恢复）", onClick: () => void openSession(item.path, item.workspace, item.id, item.agentId) },
                                 { label: "取消归档", onClick: () => void setSessionsArchived([item.path], false) },
                                 { label: "删除会话", danger: true, onClick: () => setDeleteSession({ paths: [item.path], title: item.title, mode: "single" }) }
                               ]
@@ -1976,7 +2117,10 @@ export function App(): ReactNode {
                           }}
                         >
                           {openingSession && sameSessionPath(openingSession.path, item.path) ? <LoaderCircle size={14} className="spinning" /> : sessionMultiSelect ? (rowSelected ? <CheckCircle2 size={14} /> : <Circle size={14} />) : <MessageCircle size={14} />}
-                          <span><strong>{item.title}</strong><small>{new Date(item.modifiedAt).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}</small></span>
+                          <span>
+                            <span className="session-item-heading"><strong>{item.title}</strong><span className="session-agent-badge" title={`助手：${agentName}`}>{agentName}</span></span>
+                            <small>{new Date(item.modifiedAt).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}</small>
+                          </span>
                           {(item.runStatus || item.pinned || item.archived || automationSessionIds.has(item.id)) && <div className="session-item-meta">{item.runStatus && <i className={`session-status-dot ${item.runStatus}`} title={sessionRunStatusLabels[item.runStatus]} aria-label={sessionRunStatusLabels[item.runStatus]!} />}{automationSessionIds.has(item.id) && <span className="session-automation-indicator" title="有定时任务" aria-label="有定时任务"><Clock size={11} /></span>}{item.pinned && <Pin size={11} className="session-pin-indicator" />}{item.archived && <Archive size={11} className="session-archive-indicator" />}</div>}
                         </button>;
                       })}
@@ -2038,6 +2182,35 @@ export function App(): ReactNode {
     { id: "view.ssh", title: "打开 SSH 远程终端", group: "视图", keywords: "ssh remote terminal", run: () => openSshPanel() },
     { id: "view.sidebar", title: sidebarCollapsed ? "展开侧边栏" : "折叠侧边栏", group: "视图", keywords: "sidebar 侧栏", run: () => setSidebarCollapsed(!sidebarCollapsed) }
   );
+
+  for (const recent of recentWorkspaces) {
+    const current = activeWorkspace !== undefined && workspaceKey(recent.path) === workspaceKey(activeWorkspace);
+    paletteActions.push({
+      id: `workspace.recent.${workspaceKey(recent.path)}`,
+      title: `切换到最近工作区：${workspaceDisplayLabel(recent.path, workspacePaths)}`,
+      group: "工作区",
+      keywords: `workspace ${recent.path}`,
+      hint: recent.missing ? "目录不存在" : current ? "当前" : compactPath(recent.path),
+      disabled: current || recent.missing === true,
+      run: () => runPaletteCommand({ type: "workspace.open", path: recent.path })
+    });
+  }
+
+  for (const agent of settings.agents.filter((item) => !item.archived)) {
+    const current = agent.id === activeAgentId;
+    paletteActions.push({
+      id: `agent.select.${agent.id}`,
+      title: `切换助手：${agent.name}`,
+      group: "助手",
+      keywords: `agent 助手 ${agent.name}`,
+      hint: current ? "当前" : agent.description || undefined,
+      disabled: current,
+      run: () => {
+        useDesktopStore.setState({ sessionSearch: { query: "", loading: false, hits: [] } });
+        runPaletteCommand({ type: "agent.select", agentId: agent.id });
+      }
+    });
+  }
 
   for (const model of selectableCatalogModels(models).filter((item) => item.configured && item.enabled !== false)) {
     const current = activeModel?.provider === model.provider && activeModel.id === model.id;
@@ -2160,7 +2333,14 @@ export function App(): ReactNode {
         <header className="topbar" data-pane="topbar">
           <div className="project-title"><Folder size={17} /><span><strong>{activeWorkspace?.split(/[\\/]/u).at(-1) ?? "ChatAnyTime"}</strong><small>{activeAgentName} · {activeSessionId ? "当前话题" : "未开始话题"}</small></span>{gitBranch && <span className="git-branch-badge" title={`当前 Git 分支：${gitBranch}`}><GitBranch size={13} />{gitBranch}</span>}</div>
           <div className="runtime-controls">
-            <button className="workspace-top-button" data-control="workspace-open" type="button" onClick={() => void openWorkspace()}><FolderOpen size={15} /><span>工作区</span><strong>{compactPath(activeWorkspace)}</strong><ChevronDown size={13} /></button>
+            <WorkspaceMenu
+              activeWorkspace={activeWorkspace}
+              recentWorkspaces={recentWorkspaces}
+              sessions={sessionSummaries}
+              onOpen={(path) => void window.piDesktop.send({ type: "workspace.open", path }).catch((error: unknown) => setMessageActionError(error instanceof Error ? error.message : "打开工作区失败"))}
+              onChoose={() => void openWorkspace()}
+              onMenuOpenChange={setWorkspaceMenuOpen}
+            />
             <button className={`icon-button computer-toggle${computerMode ? " active" : ""}`} data-control="computer-toggle" type="button" disabled={!activeSessionId} aria-label={computerMode ? "关闭电脑控制" : "开启电脑控制"} aria-pressed={computerMode} title={!activeSessionId ? "请先创建或打开一个话题" : computerMode ? "关闭电脑控制（本会话将撤下 computer_* 工具）" : "电脑控制（AI 可枚举/截图/点击/输入本机窗口；本会话注入 computer_* 工具，约 580 tokens/请求）"} onClick={() => void window.piDesktop.send({ type: "session.computerMode", enabled: !computerMode }).catch((error) => setMessageActionError(error instanceof Error ? error.message : "电脑控制切换失败"))}><Computer size={18} /></button>
             <button className={`icon-button team-toggle${teamMode ? " active" : ""}`} data-control="team-toggle" type="button" disabled={!activeSessionId} aria-label={teamMode ? "关闭团队模式" : "开启团队模式"} aria-pressed={teamMode} title={!activeSessionId ? "请先创建或打开一个话题" : teamMode ? "关闭团队模式（本会话将撤下 team_* 工具；已创建的成员继续在后台）" : "团队模式（AI 可创建常驻成员、互发消息与共享任务板；本会话注入 team_* 工具，schema 实测 ≈1.1K tokens/请求）"} onClick={() => void window.piDesktop.send({ type: "session.teamMode", enabled: !teamMode }).catch((error) => setMessageActionError(error instanceof Error ? error.message : "团队模式切换失败"))}><Users size={18} /></button>
             <button className={`icon-button design-toggle${designMode ? " active" : ""}`} data-control="design-toggle" type="button" disabled={!activeSessionId} aria-label={designMode ? "退出设计模式" : "进入设计模式"} aria-pressed={designMode} title={!activeSessionId ? "请先创建或打开一个话题" : designMode ? "退出设计模式（本会话将不再注入设计工具）" : "设计模式（AI 设计工作台；本会话注入 design_* 工具）"} onClick={() => void window.piDesktop.send({ type: "session.designMode", enabled: !designMode }).catch((error) => setMessageActionError(error instanceof Error ? error.message : "设计模式切换失败"))}><Palette size={18} /></button>
@@ -2260,7 +2440,7 @@ export function App(): ReactNode {
         </div>
       </main>
 
-      {settingsPresence.rendered && <ExitWrap exiting={settingsPresence.exiting}><SettingsDialog settings={settings} models={models} providers={providers} resources={resources} workspaceOpen={Boolean(activeWorkspace)} initialTab={settingsInitialTab} jevKeyConfigured={jevKeyConfigured} onClose={() => { setSettingsOpen(false); setSettingsInitialTab(undefined); }} onCreateInSession={() => void createNewSession()} /></ExitWrap>}
+      {settingsPresence.rendered && <ExitWrap exiting={settingsPresence.exiting}><SettingsDialog settings={settings} models={models} providers={providers} resources={resources} workspaceOpen={Boolean(activeWorkspace)} workspacePath={activeWorkspace} initialTab={settingsInitialTab} jevKeyConfigured={jevKeyConfigured} onClose={() => { setSettingsOpen(false); setSettingsInitialTab(undefined); }} onCreateInSession={() => void createNewSession()} /></ExitWrap>}
       {permissionPresence.rendered && (() => { const permission = permissionPresence.value; return permission ? <ExitWrap exiting={permissionPresence.exiting}><PermissionDialog request={permission} sessionTitle={sessionSummaries.find((item) => item.id === permission.principal.sessionId)?.title} /></ExitWrap> : null; })()}
       {transcriptPresence.rendered && (() => { const transcriptTarget = transcriptPresence.value; return transcriptTarget ? <ExitWrap exiting={transcriptPresence.exiting}><DelegationTranscript delegation={transcriptTarget} onClose={() => setTranscriptTarget(undefined)} onOpenArtifact={openArtifactPreview} /></ExitWrap> : null; })()}
       {galleryWallOpen && (
@@ -2363,12 +2543,16 @@ export function App(): ReactNode {
       {automationToast && (
         <div className={`error-toast checkpoint-toast${automationToast.runId ? " with-action" : ""}`}><Zap size={18} /><span>{automationToast.message}</span>{automationToast.runId && <button className="toast-action" type="button" title="打开运行记录" aria-label="查看运行结果" onClick={() => viewAutomationRun(automationToast.runId!)}>查看结果</button>}<button className="icon-button" type="button" title="关闭提示" aria-label="关闭提示" onClick={() => setAutomationToast(undefined)}><X size={16} /></button></div>
       )}
-      {removeWorkspacePresence.rendered && (() => { const removeWorkspace = removeWorkspacePresence.value; if (!removeWorkspace) return null; return (
-        <ExitWrap exiting={removeWorkspacePresence.exiting}>
-        <div className="modal-backdrop permission-backdrop in-chat" onClick={() => setRemoveWorkspace(null)}>
-          <div className="permission-dialog" role="alertdialog" aria-modal="true" aria-label="移除工作区" onClick={(event) => event.stopPropagation()}>
-            <header><div className="risk-icon outside-workspace"><Trash2 size={20} /></div><div><h2>移除工作区「{removeWorkspace.name}」？</h2><p>{removeWorkspace.count > 0 ? `将永久删除当前助手在该工作区下的 ${removeWorkspace.count} 个会话，其他助手不受影响，此操作不可恢复。` : "该工作区暂无会话，将从当前助手的话题栏移除，其他助手不受影响。"}</p></div></header>
-            <footer><button className="secondary-button" type="button" onClick={() => setRemoveWorkspace(null)}>取消</button><button className="danger-button" type="button" onClick={() => { void window.piDesktop.send({ type: "workspace.remove", workspace: removeWorkspace.workspace }); setRemoveWorkspace(null); }}>移除</button></footer>
+      {deleteWorkspacePresence.rendered && (() => { const pending = deleteWorkspacePresence.value; if (!pending) return null; return (
+        <ExitWrap exiting={deleteWorkspacePresence.exiting}>
+        <div className="modal-backdrop permission-backdrop in-chat" onClick={() => setDeleteWorkspace(null)}>
+          <div className="permission-dialog" role="alertdialog" aria-modal="true" aria-label="删除工作区全部会话" onClick={(event) => event.stopPropagation()}>
+            <header><div className="risk-icon outside-workspace"><Trash2 size={20} /></div><div><h2>删除工作区「{pending.name}」的全部会话？</h2><p>{`将永久删除该工作区下的 ${pending.paths.length} 个会话${pending.runningCount > 0 ? `（其中 ${pending.runningCount} 个正在运行）` : ""}，此操作不可恢复。工作区目录本身不会删除。`}</p><p title={pending.workspace}>{pending.workspace}</p></div></header>
+            <footer><button className="secondary-button" type="button" onClick={() => setDeleteWorkspace(null)}>取消</button><button className="danger-button" type="button" onClick={() => {
+              // 使用全量 sessionSummaries 统计出的完整路径列表；失败由运行时 log toast 呈现，前端不伪装成功。
+              void window.piDesktop.send({ type: "session.deleteMany", paths: pending.paths }).catch((error: unknown) => setMessageActionError(error instanceof Error ? error.message : "删除工作区会话失败"));
+              setDeleteWorkspace(null);
+            }}>删除</button></footer>
           </div>
         </div>
         </ExitWrap>

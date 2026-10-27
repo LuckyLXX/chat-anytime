@@ -10,7 +10,7 @@ import type { RecentWorkspace } from "../shared/protocol.js";
  * topic. Most recent first, capped to keep the sidebar tidy.
  */
 
-const MAX_RECENT_WORKSPACES = 15;
+const MAX_RECENT_WORKSPACES = 30;
 
 interface RecentWorkspacesFile {
   workspaces: RecentWorkspace[];

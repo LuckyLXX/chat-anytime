@@ -34,6 +34,7 @@ export function formatMemoryChars(chars: number): string {
 export function MemoryPanelContent({ onOpenTopic }: { onOpenTopic(topic: MemoryTopicSummary): void }): ReactNode {
   const memory = useDesktopStore((state) => state.memory);
   const workspace = useDesktopStore((state) => state.snapshot.workspace);
+  const activeAgentId = useDesktopStore((state) => state.snapshot.agentId);
   const settings = useDesktopStore((state) => state.settings);
   const memoryEnabled = settings.memory?.enabled !== false;
   const [busy, setBusy] = useState(false);
@@ -113,7 +114,7 @@ export function MemoryPanelContent({ onOpenTopic }: { onOpenTopic(topic: MemoryT
   return (
     <div className="memory-panel" data-pane="memory-panel">
       <div className="memory-panel-toolbar">
-        <small>{memory.length} 个主题 · {formatMemoryChars(totalChars)} · {settings.agents.find((agent) => agent.id === settings.currentAgentId)?.name ?? "当前助手"}</small>
+        <small>{memory.length} 个主题 · {formatMemoryChars(totalChars)} · {settings.agents.find((agent) => agent.id === activeAgentId)?.name ?? "当前助手"}</small>
         <label className="memory-panel-enabled" title="停用后不注入索引快照、memory_* 工具拒绝执行；面板编辑仍可用">
           <input type="checkbox" checked={memoryEnabled} onChange={toggleEnabled} />
           <span>启用</span>

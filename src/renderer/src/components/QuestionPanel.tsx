@@ -97,6 +97,8 @@ export function QuestionPanel({ request, onOpenDetail, rootRef }: { request: Que
   const inputRef = useRef<HTMLInputElement | undefined>(undefined);
   const handoffSelectRef = useRef<HTMLSelectElement | undefined>(undefined);
   const settings = useDesktopStore((state) => state.settings);
+  // 「当前助手」以激活会话快照为准（无会话时才由后端回落默认助手）。
+  const activeAgentId = useDesktopStore((state) => state.snapshot.agentId);
   const models = useDesktopStore((state) => state.models);
   const providers = useDesktopStore((state) => state.providers);
   // 与 composer 模型菜单同口径：只保留已勾选（enabled !== false）且已配置的模型。
@@ -155,7 +157,7 @@ export function QuestionPanel({ request, onOpenDetail, rootRef }: { request: Que
 
   /** 移交出口预选模型：当前 Agent 的默认模型，无则回落全局默认；命中下拉列表才预选。 */
   function presetHandoffModel(): string {
-    const ref = settings.agents.find((item) => item.id === settings.currentAgentId)?.defaultModel ?? settings.model;
+    const ref = settings.agents.find((item) => item.id === activeAgentId)?.defaultModel ?? settings.model;
     if (!ref) return "";
     const found = handoffModels.some((model) => model.provider === ref.provider && model.id === ref.id);
     return found ? `${ref.provider}/${ref.id}` : "";

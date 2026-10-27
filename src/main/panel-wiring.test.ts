@@ -144,7 +144,7 @@ describe("utility 侧的 sessions.live 推送", () => {
     const emitTodos = /function emitTodos\(\): void \{([\s\S]*?)\n\}/u.exec(runtime)?.[1] ?? "";
     expect(emitTodos).toContain("scheduleLiveEmit(true);");
     // 列表刷新（重命名/新话题）后也要播一次，否则面板标题要等到下次工具活动才改
-    expect(runtime).toMatch(/function performSessionsRefresh\(\)[\s\S]*?scheduleLiveEmit\(true\);/u);
+    expect(runtime).toMatch(/function performSessionsRefresh\([^)]*\)[\s\S]*?scheduleLiveEmit\(true\);/u);
   });
 
   it("推送载荷是轻量投影（不含消息正文与工具输出）", () => {

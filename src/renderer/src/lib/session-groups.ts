@@ -6,32 +6,90 @@ export interface SessionWorkspaceGroup {
   sessions: SessionSummary[];
   /** When the workspace was last opened, when known (drives group ordering). */
   openedAt?: number;
+  /** 目录不存在/不是目录（由 RecentWorkspace.missing 透传；有会话的组也可由摘要补充）。 */
+  missing?: boolean;
 }
 
 export function workspaceKey(workspace: string): string {
   return workspace.trim().replaceAll("\\", "/").toLowerCase();
 }
 
+function splitWorkspacePath(path: string): string[] {
+  return path.replaceAll("\\", "/").replace(/\/+$/u, "").split("/").filter(Boolean);
+}
+
 /**
- * Group sessions by workspace, then merge in the ACTIVE workspace when it
- * has no sessions yet (a freshly opened project) so the sidebar reflects it
- * immediately. Recent-workspace history is global across assistants while
- * the session list is agent-scoped, so other session-less workspaces are NOT
- * shown — a brand-new assistant starts with an empty topic list. Groups rank
- * by their latest activity: the most recent session touch, or the last time
- * the workspace was opened for empty groups.
+ * 侧栏工作区分组标题：默认显示目录名（basename）；多个工作区同名时逐级
+ * 追加上级目录，直到能唯一区分（例如两个 `src` → `A/src` / `B/src`）。
+ * 全路径本身重复或已无更多上级时返回完整路径。
  */
-export function groupSessionsByWorkspace(sessions: readonly SessionSummary[], query = "", recentWorkspaces: readonly RecentWorkspace[] = [], activeWorkspace?: string): SessionWorkspaceGroup[] {
+export function workspaceDisplayLabel(path: string, allPaths: readonly string[] = []): string {
+  const segments = splitWorkspacePath(path);
+  if (segments.length === 0) return path;
+  const basename = segments.at(-1)!;
+  const normalizedAll = [...new Map(allPaths
+    .map((item) => splitWorkspacePath(item))
+    .filter((parts) => parts.length > 0)
+    .map((parts) => [parts.join("/").toLowerCase(), parts] as const)).values()];
+  const sameBasename = normalizedAll.filter((parts) => parts.at(-1)?.toLowerCase() === basename.toLowerCase());
+  if (sameBasename.length <= 1) return basename;
+  const separator = path.includes("\\") ? "\\" : "/";
+  for (let depth = 1; depth < segments.length; depth += 1) {
+    const candidate = segments.slice(-(depth + 1));
+    const matches = sameBasename.filter((parts) => parts.slice(-(depth + 1)).join("/").toLowerCase() === candidate.join("/").toLowerCase());
+    if (matches.length <= 1) return candidate.join(separator);
+  }
+  return segments.join(separator);
+}
+
+/**
+ * Group sessions by workspace and merge in every recent workspace that has no
+ * session yet. `recentWorkspaces` is now a global workspace list (not an
+ * assistant-scoped history), so empty projects are part of the sidebar; the
+ * active workspace is still added as a fallback when it has not made it into
+ * recents yet (startup/default-directory case).
+ *
+ * 搜索命中范围：话题标题、工作区路径、以及调用方解析好的助手名（避免把
+ * agentName 塞进每轮 IPC 的 SessionSummary）。
+ */
+export function groupSessionsByWorkspace(
+  sessions: readonly SessionSummary[],
+  query = "",
+  recentWorkspaces: readonly RecentWorkspace[] = [],
+  activeWorkspace?: string,
+  agentNames?: Record<string, string>
+): SessionWorkspaceGroup[] {
   const search = query.trim().toLowerCase();
   const recentByKey = new Map(recentWorkspaces.map((item) => [workspaceKey(item.path), item]));
   const groups = new Map<string, SessionWorkspaceGroup>();
 
+  // 侧栏工作区清单以 recents 为准（workspace-first）：空工作区与有会话的工作区
+  // 一视同仁；"从列表移除"（workspace.forget）只动 recents，因此有会话但已
+  // forget 的工作区会从侧栏消失（搜索/顶栏仍可达）——这是非破坏性移除的关键。
+  // 首次启动 recents 为空/仅测试数据时退回按会话分组，避免整屏空白。
+  const activePath = activeWorkspace?.trim();
+  const activeKey = activePath ? workspaceKey(activePath) : undefined;
+  for (const recent of recentWorkspaces) {
+    const key = workspaceKey(recent.path);
+    groups.set(key, { key, workspace: recent.path, sessions: [], openedAt: recent.openedAt, missing: recent.missing });
+  }
+  if (activeKey && activePath && !groups.has(activeKey)) {
+    // 当前工作区即使尚未进入 recents 也应出现（它是用户此刻正在看的目录）。
+    groups.set(activeKey, { key: activeKey, workspace: activePath, sessions: [], openedAt: Date.now() });
+  }
+  const restrictToKnown = groups.size > 0;
+
   for (const session of sessions) {
     const workspace = session.workspace.trim() || "未知工作区";
-    const haystack = `${session.title} ${workspace}`.toLowerCase();
-    if (search && !haystack.includes(search)) continue;
     const key = workspaceKey(workspace);
-    const group = groups.get(key) ?? { key, workspace, sessions: [], openedAt: recentByKey.get(key)?.openedAt };
+    // 归档视图仍要能找到“已从列表移除”的工作区里的归档会话（否则只能靠搜索）；
+    // 活跃视图不因归档会话把整个工作区重新顶回来。
+    if (restrictToKnown && !groups.has(key) && session.archived !== true) continue;
+    const haystack = `${session.title} ${workspace} ${agentNames?.[session.agentId] ?? ""}`.toLowerCase();
+    if (search && !haystack.includes(search)) continue;
+    const group = groups.get(key) ?? { key, workspace, sessions: [] };
+    if (recentByKey.get(key)?.missing) group.missing = true;
+    if (session.workspaceMissing) group.missing = true;
     group.sessions.push(session);
     groups.set(key, group);
   }
@@ -40,19 +98,12 @@ export function groupSessionsByWorkspace(sessions: readonly SessionSummary[], qu
     group.sessions.sort((left, right) => (Number(right.pinned ?? false) - Number(left.pinned ?? false)) || right.modifiedAt - left.modifiedAt);
   }
 
-  // The ACTIVE workspace without any session (e.g. a just-opened empty
-  // project) still gets a sidebar group so the directory shows up immediately
-  // instead of waiting for the first topic to be created. Other session-less
-  // recent workspaces stay hidden: that history is shared across assistants,
-  // and showing it to an assistant that never used them would surface a pile
-  // of empty groups (the fresh-assistant bug).
-  const activeKey = activeWorkspace?.trim() ? workspaceKey(activeWorkspace) : undefined;
-  for (const recent of recentWorkspaces) {
-    const key = workspaceKey(recent.path);
-    if (groups.has(key)) continue;
-    if (activeKey !== key) continue;
-    if (search && !recent.path.toLowerCase().includes(search)) continue;
-    groups.set(key, { key, workspace: recent.path, sessions: [], openedAt: recent.openedAt });
+  // 搜索时隐藏完全无匹配的空工作区（有会话的组已经按 haystack 过滤过）。
+  for (const [key, group] of [...groups]) {
+    if (!search) continue;
+    if (group.sessions.length > 0) continue;
+    if (group.workspace.toLowerCase().includes(search)) continue;
+    groups.delete(key);
   }
 
   /**

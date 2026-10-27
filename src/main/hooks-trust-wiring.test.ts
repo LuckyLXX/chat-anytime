@@ -25,7 +25,7 @@ describe("project hook trust wiring", () => {
     const branch = commandBranch("hooks.save", "hooks.toggle");
     const apply = branch.indexOf("applyHookSaveTrust(");
     const write = branch.indexOf("writeHookTrust(");
-    const refresh = branch.indexOf("refreshHooksConfig();");
+    const refresh = branch.indexOf("refreshHooksConfig(targetWorkspace);");
     expect(apply).toBeGreaterThanOrEqual(0);
     expect(write).toBeGreaterThan(apply);
     expect(refresh).toBeGreaterThan(write);
@@ -46,7 +46,7 @@ describe("project hook trust wiring", () => {
     const trust = branch.indexOf("trustRule(");
     const revoke = branch.indexOf("revokeRule(");
     const write = branch.indexOf("writeHookTrust(");
-    const refresh = branch.indexOf("refreshHooksConfig();");
+    const refresh = branch.indexOf("refreshHooksConfig(targetWorkspace);");
     expect(trust).toBeGreaterThanOrEqual(0);
     expect(revoke).toBeGreaterThan(trust);
     expect(write).toBeGreaterThan(revoke);
@@ -55,12 +55,12 @@ describe("project hook trust wiring", () => {
 
   it("reloads hook rules after live activation switches workspace", () => {
     const start = source.indexOf("function activate(record: SessionRuntimeRecord): void {");
-    const end = source.indexOf("\nfunction workspaceSessionDir()", start);
+    const end = source.indexOf("\nfunction recentWorkspacesPath()", start);
     expect(start).toBeGreaterThanOrEqual(0);
     expect(end).toBeGreaterThan(start);
     const activation = source.slice(start, end);
     const setWorkspace = activation.indexOf("workspace = record.workspace;");
-    const refresh = activation.indexOf("if (workspaceChanged) refreshHooksConfig();");
+    const refresh = activation.indexOf("refreshHooksConfig();");
     const emitCatalog = activation.indexOf("emitResourceCatalog();");
     expect(refresh).toBeGreaterThan(setWorkspace);
     expect(emitCatalog).toBeGreaterThan(refresh);

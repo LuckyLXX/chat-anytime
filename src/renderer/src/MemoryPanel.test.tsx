@@ -58,11 +58,11 @@ function setPanelState(): void {
   const current = useDesktopStore.getState();
   useDesktopStore.setState({
     memory: topics,
-    snapshot: { ...current.snapshot, workspace: "D:\\项目A" },
+    snapshot: { ...current.snapshot, workspace: "D:\\项目A", agentId: "agent-a", agentName: "测试助手" },
     settings: {
       ...current.settings,
       memory: { enabled: true },
-      currentAgentId: "agent-a",
+      currentAgentId: "someone-else",
       agents: [{ id: "agent-a", name: "测试助手" }]
     } as unknown as DesktopSettings
   });
@@ -83,6 +83,8 @@ describe("MemoryPanel v3", () => {
     expect(markup).toContain("筛选标题或描述");
     expect(container.textContent).toContain("本工作区");
     expect(container.textContent).toContain("全局");
+    expect(container.textContent).toContain("测试助手");
+    expect(container.textContent).not.toContain("当前助手");
     expect(container.textContent).not.toContain("正文内容");
   });
 

@@ -15,6 +15,8 @@ export interface AutomationRunsHighlight {
 
 export interface AutomationRunsProps {
   settings: DesktopSettings;
+  /** 激活会话的助手 id（快照 agentId）；缺省读 store 快照。 */
+  activeAgentId?: string;
   /** toast「查看结果」直达信号：切到本子页后滚动+描边高亮该条（描边 2s 后消隐，展开保留）。 */
   highlight?: AutomationRunsHighlight;
   /** 「查看会话/切换角色查看」：由宿主先关设置页（跳转后的会话不被弹窗遮挡）。 */
@@ -66,10 +68,13 @@ function groupByDay(runs: AutomationRunRecord[]): [string, AutomationRunRecord[]
   return [...groups.entries()];
 }
 
-export function AutomationRuns({ settings, highlight, onOpenSession }: AutomationRunsProps): ReactNode {
+export function AutomationRuns({ settings, activeAgentId, highlight, onOpenSession }: AutomationRunsProps): ReactNode {
   const runs = useDesktopStore((state) => state.automationRuns);
   const automation = useDesktopStore((state) => state.automation);
   const automationRun = useDesktopStore((state) => state.automationRun);
+  // 跨角色判断以激活会话快照为准；旧调用未传 activeAgentId 时直接读 store 快照。
+  const snapshotAgentId = useDesktopStore((state) => state.snapshot.agentId);
+  const currentAgentId = activeAgentId ?? snapshotAgentId;
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [taskFilter, setTaskFilter] = useState<string>("all");
   const [expandedRunId, setExpandedRunId] = useState<string | undefined>(undefined);
@@ -164,7 +169,7 @@ export function AutomationRuns({ settings, highlight, onOpenSession }: Automatio
                 <div className="automation-runs-list">
                   {dayRuns.map((run) => {
                     const expanded = expandedRunId === run.id;
-                    const crossRole = run.agentId !== settings.currentAgentId;
+                    const crossRole = run.agentId !== currentAgentId;
                     const task = automation.find((candidate) => candidate.id === run.taskId);
                     return (
                       <div

@@ -85,7 +85,7 @@ import { buildDivModePrompt } from "./div-prompt.js";
 import { readConfiguredMcpServers, removeMcpServerConfig, setMcpServerDisabled, upsertMcpServerConfig } from "./mcp-config.js";
 import { createPiMcpExtensionLayer, createPidesktopMcpBridge, buildMcpUiContext, type McpBridgeControl } from "./mcp-bridge.js";
 import { PermissionBroker } from "./permission-broker.js";
-import { loadRecentWorkspaces, recordRecentWorkspace, writeRecentWorkspaces } from "./recent-workspaces.js";
+import { loadRecentWorkspaces, recordRecentWorkspace, removeRecentWorkspace, writeRecentWorkspaces } from "./recent-workspaces.js";
 import {
   galleryPathFor,
   galleryThumbsDirFor,
@@ -128,12 +128,14 @@ import { buildAutomationTools, type AutomationCreateInput, type AutomationSessio
 import { buildAutomationReminderText } from "./automation-delivery.js";
 import { resolveVisionModel } from "./vision.js";
 import { buildResourceCatalog } from "./resource-catalog.js";
-import { agentWorkspaceSessionDir, backfillUnpersistedSessions, isSessionArchived, isSessionPinned, mergeSessionSummary, pruneVanishedSessions, sameSessionDir, sessionFileMatchesId, sessionListReadyFor, setArchivedSessionPaths, sortSessionSummaries, togglePinnedSessionPath } from "./session-scope.js";
+import { agentWorkspaceSessionDir, backfillUnpersistedSessions, isSessionArchived, isSessionPinned, mergeSessionSummary, overlayLiveRunStatus, pruneVanishedSessions, sameSessionDir, sessionFileMatchesId, setArchivedSessionPaths, sortSessionSummaries, togglePinnedSessionPath, type LiveSessionSeed } from "./session-scope.js";
+import { listSessionScopes, pickRecentSession, resolveSessionOwner, summarizeAllSessions, type SessionScope, type WorkspaceExistsEntry } from "./session-catalog.js";
+import { createWorkspaceResources } from "./workspace-resources.js";
 import { listSessionSummaries, loadSessionIndex, readSessionHeaderLine, saveSessionIndex, summarizeLiveSession, type CachedSessionSummary } from "./session-summary-cache.js";
 import { planSessionOpen } from "./session-open-plan.js";
 import { SessionManagerCache } from "./session-manager-cache.js";
 import { isDesktopConfiguredProvider } from "./model-catalog.js";
-import { defaultTools, ensureDefaultWorkspaceDir, forgetAgentWorkspace, isPositiveInt, mergeBrowserSettings, mergeProviderModels, recordAgentWorkspace, resolveDefaultWorkspace, resolveInitialWorkspace } from "./settings.js";
+import { createDefaultAgent, defaultTools, ensureDefaultWorkspaceDir, isPositiveInt, mergeBrowserSettings, mergeProviderModels, resolveDefaultWorkspace, resolveStartupWorkspace } from "./settings.js";
 import { buildMultiInvocationPrompt, composeInvocationBody, parseInvocationPrompt, sameInvocations, type InvocationSegment } from "./invocation-prompt.js";
 import {
   PI_DESKTOP_CONTROL_ENTRY_TYPE,
@@ -211,9 +213,15 @@ let thinkingLevel: ThinkingLevel = "medium";
 let accessMode: AccessMode = "ask";
 let status = "请选择一个项目开始使用";
 let currentSessions: SessionSummary[] = [];
-/** `currentSessions` 是按哪个 Agent 的目录拉取的；换过角色的旧列表视为失效。 */
-let currentSessionsAgentId: string | undefined;
+/** 启动索引水合/首轮扫描完成；取代旧的 sessionListReadyFor（跨助手列表不再按助手作用域就绪）。 */
+let sessionsLoaded = false;
 let recentWorkspaces: RecentWorkspace[] = [];
+const workspaceExistsCache = new Map<string, WorkspaceExistsEntry>();
+const workspaceResources = createWorkspaceResources({
+  agentDir: () => getAgentDir(),
+  bundledSkillsDir: () => bundledSkillsDir,
+  bundledSubagentsDir: () => bundledSubagentsDir
+});
 /** 作品清单（全局跨工作区：一份池子，换工作区也在）；初始化时读盘，变更即写盘 + 推送。 */
 let galleryApps: GalleryApp[] = [];
 let selectedModel: { provider: string; id: string } | undefined;
@@ -269,6 +277,8 @@ interface SessionRuntimeRecord {
   session: AgentSession;
   unsubscribe: () => void;
   workspace: string;
+  /** 工作区目录缺失时的只读原因（activate 与写入入口每 10s 重查）。 */
+  readOnlyReason?: string;
   /** Agent profile captured at creation — background sessions never re-read globals. */
   agent: AgentProfile;
   busy: boolean;
@@ -572,6 +582,7 @@ function sameBackgroundProcesses(left: RuntimeSnapshot["backgroundProcesses"], r
 function activeFieldsPatch(previous: RuntimeSnapshot, next: RuntimeSnapshot): RuntimeSnapshotFieldsPatch {
   const fields: RuntimeSnapshotFieldsPatch = { sessionId: next.sessionId };
   if (previous.workspace !== next.workspace) fields.workspace = next.workspace;
+  if (previous.readOnlyReason !== next.readOnlyReason) fields.readOnlyReason = next.readOnlyReason;
   if (previous.gitBranch !== next.gitBranch) fields.gitBranch = next.gitBranch;
   if (previous.agentId !== next.agentId) fields.agentId = next.agentId;
   if (previous.agentName !== next.agentName) fields.agentName = next.agentName;
@@ -600,6 +611,9 @@ function paneFieldsPatch(previous: SessionPaneSnapshot, next: SessionPaneSnapsho
   const fields: SessionPaneFieldsPatch = { sessionId: next.sessionId };
   if (previous.sessionFile !== next.sessionFile) fields.sessionFile = next.sessionFile;
   if (previous.workspace !== next.workspace) fields.workspace = next.workspace;
+  if (previous.agentId !== next.agentId) fields.agentId = next.agentId;
+  if (previous.agentName !== next.agentName) fields.agentName = next.agentName;
+  if (previous.readOnlyReason !== next.readOnlyReason) fields.readOnlyReason = next.readOnlyReason;
   if (previous.model?.provider !== next.model?.provider || previous.model?.id !== next.model?.id) fields.model = next.model;
   if (previous.thinkingLevel !== next.thinkingLevel) fields.thinkingLevel = next.thinkingLevel;
   if (previous.busy !== next.busy) fields.busy = next.busy;
@@ -883,30 +897,30 @@ function handleMcpNotify(message: string, type: "info" | "warning" | "error"): v
 }
 const mcpUiContext = buildMcpUiContext({ onNotify: handleMcpNotify });
 
-function skillPaths(): ReturnType<typeof runtimeSkills.skillPathsFor> {
-  return runtimeSkills.skillPathsFor(workspace, getAgentDir(), bundledSkillsDir);
+function skillPaths(targetWorkspace: string | undefined = workspace): ReturnType<typeof runtimeSkills.skillPathsFor> {
+  return runtimeSkills.skillPathsFor(targetWorkspace, getAgentDir(), bundledSkillsDir);
 }
 
 /** 自定义命令双作用域目录：项目 <workspace>/.pidesktop-commands，全局 <agentDir>/pidesktop-commands。 */
-function commandPaths(): { globalDir: string; projectDir: string } {
+function commandPaths(targetWorkspace: string | undefined = workspace): { globalDir: string; projectDir: string } {
   return {
     globalDir: join(getAgentDir(), "pidesktop-commands"),
-    projectDir: workspace ? resolve(workspace, ".pidesktop-commands") : join(getAgentDir(), "pidesktop-commands")
+    projectDir: targetWorkspace ? resolve(targetWorkspace, ".pidesktop-commands") : join(getAgentDir(), "pidesktop-commands")
   };
 }
 
-/** Scan custom command dirs and refresh the published CommandSummary catalog. */
-function syncCommands(): void {
-  const { globalDir, projectDir } = commandPaths();
-  discoveredCommands = commandCatalog.discoverCommands(globalDir, projectDir);
-  nativeCommands = commandCatalog.toCommandSummaries(discoveredCommands);
+/** Scan custom command dirs and refresh the published CommandSummary catalog（按目标工作区）。 */
+function syncCommands(targetWorkspace: string | undefined = workspace): void {
+  const resources = workspaceResources.load(targetWorkspace);
+  discoveredCommands = resources.discoveredCommands;
+  nativeCommands = resources.commands;
 }
 
-/** Scan skill dirs and refresh the published SkillSummary catalog. */
-function syncSkills(): void {
-  const scanned = runtimeSkills.scanSkills(skillPaths());
-  discoveredSkills = scanned.discovered;
-  nativeSkills = scanned.summaries;
+/** Scan skill dirs and refresh the published SkillSummary catalog（按目标工作区）。 */
+function syncSkills(targetWorkspace: string | undefined = workspace): void {
+  const resources = workspaceResources.load(targetWorkspace);
+  discoveredSkills = resources.discoveredSkills;
+  nativeSkills = resources.skills;
 }
 
 /**
@@ -957,7 +971,7 @@ function buildSubagentTools(record: Pick<SessionRuntimeRecord, "workspace" | "ag
     model: model ?? { provider: "", id: "" },
     // 读器而非快照：refreshSubagents() 会换掉模块级数组引用，旧会话必须总能看到
     // 最新定义（否则设置页新增子智能体后，已打开的会话引用不到）。
-    getSubagentCatalog: () => subagentCatalog,
+    getSubagentCatalog: () => workspaceResources.load(record.workspace).subagents,
     // 运行时与设置页模型下拉同口径：被取消勾选的模型不再用于委派。
     isModelEnabled: (providerId, modelId) => isModelEnabled(providerId, modelId, settings?.providers),
     // 子代理与主会话同口径：目录模型交给子代理前套上 token-limit 覆盖。
@@ -985,9 +999,9 @@ function mcpConfigPaths(targetWorkspace: string | undefined = workspace): { proj
 }
 
 /** 钩子配置双作用域：项目 <workspace>/.pidesktop-hooks.json，全局 <agentDir>/pidesktop-hooks.json。 */
-function hooksConfigPaths(): { project: string | undefined; global: string } {
+function hooksConfigPaths(targetWorkspace: string | undefined = workspace): { project: string | undefined; global: string } {
   return {
-    project: workspace ? join(workspace, ".pidesktop-hooks.json") : undefined,
+    project: targetWorkspace ? join(targetWorkspace, ".pidesktop-hooks.json") : undefined,
     global: join(getAgentDir(), "pidesktop-hooks.json")
   };
 }
@@ -1003,9 +1017,8 @@ function hooksTrustPath(): string {
 let hooksRules: ConfiguredHook[] = [];
 let hookTrustData: HookTrustData = { version: 1, workspaces: {}, writable: true };
 
-function refreshHooksConfig(): void {
-  const { project, global } = hooksConfigPaths();
-  hooksRules = readConfiguredHooks(project, global);
+function refreshHooksConfig(targetWorkspace: string | undefined = workspace): void {
+  hooksRules = workspaceResources.load(targetWorkspace).hooks;
   hookTrustData = readHookTrust(hooksTrustPath());
 }
 
@@ -1034,7 +1047,7 @@ function hooksDepsFor(refs: {
   sessionTitle: () => string;
 }): runtimeHooks.HooksExtensionDeps {
   return {
-    rules: () => hooksRules,
+    rules: () => workspaceResources.load(refs.workspace()).hooks,
     enabled: () => settings?.hooks?.enabled !== false,
     workspace: refs.workspace,
     agentName: refs.agentName,
@@ -1048,8 +1061,8 @@ function hooksDepsFor(refs: {
   };
 }
 
-function hookSummaries(): HookSummary[] {
-  return hooksRules.map(({ name, rule, scope }) => ({
+function hookSummaries(targetWorkspace: string | undefined = workspace): HookSummary[] {
+  return workspaceResources.load(targetWorkspace).hooks.map(({ name, rule, scope }) => ({
     name,
     event: rule.event,
     ...(rule.matcher ? { matcher: rule.matcher } : {}),
@@ -1058,7 +1071,7 @@ function hookSummaries(): HookSummary[] {
     actionPreview: hookActionPreview(rule.action),
     blocking: rule.action.kind === "block" || (rule.action.kind === "command" && rule.action.blocking === true),
     scope,
-    ...(scope === "project" ? { trust: evaluateHookTrust({ scope, workspace, rule, data: hookTrustData }) === "trusted" ? "trusted" as const : "pending" as const } : {}),
+    ...(scope === "project" ? { trust: evaluateHookTrust({ scope, workspace: targetWorkspace, rule, data: hookTrustData }) === "trusted" ? "trusted" as const : "pending" as const } : {}),
     enabled: rule.disabled !== true
   }));
 }
@@ -1067,8 +1080,8 @@ function hookSummaries(): HookSummary[] {
  * 三档：内置（随安装包分发，只读）→ 用户全局 → 项目，同名后者覆盖前者。 */
 let subagentCatalog: SubagentDefinition[] = [];
 
-function refreshSubagents(): void {
-  subagentCatalog = readSubagents(workspace, getAgentDir(), bundledSubagentsDir);
+function refreshSubagents(targetWorkspace: string | undefined = workspace): void {
+  subagentCatalog = workspaceResources.load(targetWorkspace).subagents;
 }
 
 /** 读双作用域配置并合成资源目录里的 MCP 摘要（无网络：连接态由 refreshMcpCatalog 异步补齐）。 */
@@ -1170,7 +1183,7 @@ async function refreshMcpCatalog(): Promise<void> {
 }
 
 function emitResourceCatalog(): void {
-  post({ type: "resources", resources: buildResourceCatalog({ skills: nativeSkills, commands: nativeCommands, mcpServers, todos, memory: memoryTopics, subagents: subagentCatalog, hooks: hookSummaries(), hooksEnabled: settings?.hooks?.enabled !== false, automation: automationTasks, automationRuns, gallery: galleryApps }) });
+  post({ type: "resources", resources: buildResourceCatalog({ skills: nativeSkills, commands: nativeCommands, mcpServers, todos, memory: memoryTopics, subagents: subagentCatalog, hooks: hookSummaries(activeRuntime?.workspace ?? workspace), hooksEnabled: settings?.hooks?.enabled !== false, automation: automationTasks, automationRuns, gallery: galleryApps }) });
 }
 
 function emitTodos(): void {
@@ -1213,9 +1226,61 @@ function emitAutomationRuns(): void {
   post({ type: "automation-runs", runs: automationRuns });
 }
 
+/**
+ * 旧定时任务的工作区迁移（启动/每次刷新做一次，幂等）：
+ * 绝对路径且目录存在 → 保留；basename 在最近工作区里唯一匹配 → 补全；
+ * 会话绑定任务 → 沿用会话 workspace；否则 enabled=false + workspaceIssue，
+ * 绝不静默回落到“当前工作区”。解析结果写回任务文件，避免每轮重复计算。
+ */
+function migrateAutomationWorkspaces(): void {
+  const recent = recentWorkspaces;
+  let changedAny = false;
+  const byAgent = new Map<string, AutomationTask[]>();
+  for (const task of automationTasks) {
+    let next = task;
+    if (task.sessionId) {
+      const sessionWorkspace = currentSessions.find((item) => item.id === task.sessionId)?.workspace;
+      if (sessionWorkspace && task.workspace !== sessionWorkspace) {
+        next = { ...task, workspace: sessionWorkspace, workspaceIssue: undefined };
+      }
+    } else if (task.workspace) {
+      const absolute = resolve(task.workspace);
+      let hasDir = false;
+      try { hasDir = statSync(absolute).isDirectory(); } catch { hasDir = false; }
+      if (hasDir) {
+        if (task.workspaceIssue) next = { ...task, workspace: absolute, workspaceIssue: undefined };
+      } else {
+        const base = basename(task.workspace).toLowerCase();
+        const matches = recent.filter((item) => basename(item.path).toLowerCase() === base);
+        if (matches.length === 1) {
+          next = { ...task, workspace: matches[0]!.path, workspaceIssue: undefined };
+        } else if (!task.workspaceIssue) {
+          next = { ...task, enabled: false, workspaceIssue: `任务工作区不存在：${task.workspace}，请重新选择工作区` };
+        }
+      }
+    } else if (!task.sessionId && !task.workspaceIssue) {
+      // 旧数据没有 workspace（v1 只有展示元数据）：不猜当前工作区，要求用户重选。
+      next = { ...task, enabled: false, workspaceIssue: "任务未绑定工作区，请重新选择工作区" };
+    }
+    if (next !== task) changedAny = true;
+    const list = byAgent.get(next.agentId) ?? [];
+    list.push(next);
+    byAgent.set(next.agentId, list);
+  }
+  if (!changedAny) return;
+  for (const [agentId, tasks] of byAgent) {
+    try {
+      for (const task of tasks) upsertAutomation(automationStorePath(agentId), task);
+    } catch (error) {
+      void post({ type: "log", level: "warn", message: `迁移定时任务工作区失败（${agentId}）：${errorText(error)}` });
+    }
+  }
+}
+
 /** 重读全部角色的自动化任务与运行历史并广播（列表/运行记录 + 目录）；任何角色变化都影响聚合列表。 */
 function refreshAutomation(): void {
   automationTasks = readAllAutomations(getAgentDir());
+  migrateAutomationWorkspaces();
   automationRuns = readAutomationRuns(getAgentDir());
   emitAutomation();
   emitAutomationRuns();
@@ -1305,9 +1370,17 @@ async function runAutomationTask(task: AutomationTask, trigger: "cron" | "manual
 
 /** 后台新建专用会话跑任务提示词（跨角色：按任务自身 agentId 解析角色档案，skipActivate 不抢焦点）。 */
 async function runBackgroundAutomationTask(task: AutomationTask, trigger: "cron" | "manual"): Promise<void> {
-  if (!workspace || !modelRuntime) throw new Error("当前没有可用工作区，无法运行定时任务");
-  // 快照本回合的工作区：避免与 agent.select/workspace.open 交错时执行主体与数据落位错位。
-  const runWorkspace = workspace;
+  if (!modelRuntime) throw new Error("模型运行时不可用，无法运行定时任务");
+  if (task.workspaceIssue) throw new Error(`定时任务「${task.name}」${task.workspaceIssue}`);
+  // 任务自己的 workspace 是执行事实：绝不能用触发时的全局工作区（跨助手任务
+  // 会跑进当前激活助手的项目）。旧任务无 workspace 时在迁移阶段已禁用重选。
+  const runWorkspace = task.workspace && isAbsolute(task.workspace) ? resolve(task.workspace) : undefined;
+  if (!runWorkspace) throw new Error(`定时任务「${task.name}」未绑定有效工作区，请重新选择工作区`);
+  try {
+    if (!statSync(runWorkspace).isDirectory()) throw new Error("不是目录");
+  } catch {
+    throw new Error(`定时任务「${task.name}」的工作区不存在：${runWorkspace}`);
+  }
   // 跨角色调度（2026-09-02）：按任务自身 agentId 解析角色档案，不再要求「归属角色
   // 恰好处于激活状态」；归档/未知角色解析失败即跳过（归档=停用其全部任务）。
   let runAgent: AgentProfile;
@@ -1328,6 +1401,7 @@ async function runBackgroundAutomationTask(task: AutomationTask, trigger: "cron"
   await createSession(manager, {
     skipActivate: true,
     agentOverride: runAgent,
+    workspaceOverride: runWorkspace,
     modelOverride: modelRef,
     accessModeOverride: task.accessMode,
     unattended: true,
@@ -1503,6 +1577,7 @@ async function runSessionBoundAutomationTask(task: AutomationTask, trigger: "cro
   try {
     runAgent = resolveAutomationTaskAgent(task);
     const record = await openAutomationSessionRecord(task, runAgent);
+    assertSessionWritable(record);
     if (!record.session.model) throw new Error("关联会话没有可用模型，无法投递提醒");
     const text = buildAutomationReminderText(task, startedAt);
     const queued = record.busy || record.session.isStreaming;
@@ -1592,25 +1667,27 @@ async function handoffPlanToNewSession(input: {
   model: { provider: string; id: string };
 }): Promise<{ sessionId: string }> {
   const { source, model } = input;
-  if (!modelRuntime || !currentAgent || !workspace) throw new Error("当前没有可用的工作区或 Agent，无法移交");
-  // 快照守卫（自动化同款）：createSession 派生自全局 workspace/currentAgent，
-  // 若规划会话落位与当前不一致，新建会话会错位——分屏内会话同属当前 Agent，
-  // 正常路径必过。
-  if (source.agent.id !== currentAgent.id || resolve(source.workspace) !== resolve(workspace)) {
-    throw new Error("规划会话与当前 Agent/工作区不一致，无法移交");
-  }
+  if (!modelRuntime) throw new Error("模型运行时不可用，无法移交");
+  // 不再用全局 workspace/currentAgent 做守卫：计划批准必须按**规划会话自己**的
+  // Agent + 工作区移交（分屏聚焦别的格/别的助手时也能成功）。
+  const targetWorkspace = resolve(source.workspace);
+  const targetAgent = source.agent;
   // 模型校验（自动化同款口径）：所选模型必须存在且已勾选，绝不静默回落默认模型。
   if (!modelRuntime.getModel(model.provider, model.id) || !isModelEnabled(model.provider, model.id, settings?.providers)) {
     throw new Error(`所选模型不可用（已删除或未勾选）：${model.provider}/${model.id}`);
   }
-  const sessionDir = workspaceSessionDir();
-  if (!sessionDir) throw new Error("无法定位会话目录");
-  const manager = SessionManager.create(workspace, sessionDir);
+  const sessionDir = agentWorkspaceSessionDir(getAgentDir(), targetAgent.id, targetWorkspace);
+  const manager = SessionManager.create(targetWorkspace, sessionDir);
   const sessionId = manager.getSessionId();
   // 默认激活：焦点切到实施会话（用户直接看到实施进展）；有人值守不传
   // unattended/noGenerationGuard——权限门与提问工具照常，与其他前台会话一致。
   // 不继承设计模式：实施计划是编码任务，不需要 8 个设计工具的前缀开销。
-  await createSession(manager, { modelOverride: model, inheritDesignMode: false });
+  await createSession(manager, {
+    modelOverride: model,
+    agentOverride: targetAgent,
+    workspaceOverride: targetWorkspace,
+    inheritDesignMode: false
+  });
   const record = liveSessions.get(sessionId);
   if (!record) throw new Error("实施会话创建失败");
   // 以计划标题命名新会话；对未持久化会话（首条助手消息前 JSONL 未落盘）的
@@ -1648,7 +1725,7 @@ function automationToolContextFor(agentId: string, session: AutomationSessionInf
         prompt: input.prompt,
         agentId,
         ...(input.target === "session" ? sessionBinding() : {}),
-        ...(input.target !== "session" && input.workspace ? { workspace: input.workspace } : {}),
+        ...(input.target !== "session" ? { workspace: input.workspace ?? session.workspace } : {}),
         ...(input.model ? { model: input.model } : {}),
         accessMode: input.accessMode ?? "full",
         ...(input.skillName ? { skillName: input.skillName } : {}),
@@ -1999,12 +2076,14 @@ function applyToolSetChange(record: SessionRuntimeRecord): void {
 }
 
 function runtimeSkillPrompt(name: string, instructions?: string, record: SessionRuntimeRecord | undefined = activeRuntime): string {
-  return runtimeSkills.buildRuntimeSkillPrompt(discoveredSkills, name, instructions, record?.session.getActiveToolNames().includes("read") ?? false);
+  const skills = workspaceResources.load(record?.workspace ?? workspace).discoveredSkills;
+  return runtimeSkills.buildRuntimeSkillPrompt(skills, name, instructions, record?.session.getActiveToolNames().includes("read") ?? false);
 }
 
 /** 自定义命令发送时展开（重读模板文件，热更新无需重载资源）。 */
-function runtimeCommandPrompt(name: string, args?: string): string {
-  return commandCatalog.buildRuntimeCommandPrompt(discoveredCommands, name, args);
+function runtimeCommandPrompt(name: string, args?: string, record: SessionRuntimeRecord | undefined = activeRuntime): string {
+  const commands = workspaceResources.load(record?.workspace ?? workspace).discoveredCommands;
+  return commandCatalog.buildRuntimeCommandPrompt(commands, name, args);
 }
 
 /**
@@ -2016,15 +2095,16 @@ function runtimeInvocationPrompt(invocations: readonly SlashInvocation[], text: 
   const shared = text?.trim() ?? "";
   const single = invocations.length === 1 ? invocations[0] : undefined;
   if (single) {
-    return single.kind === "skill" ? runtimeSkillPrompt(single.name, shared, record) : runtimeCommandPrompt(single.name, shared);
+    return single.kind === "skill" ? runtimeSkillPrompt(single.name, shared, record) : runtimeCommandPrompt(single.name, shared, record);
   }
   const hasReadTool = record?.session.getActiveToolNames().includes("read") ?? false;
+  const resources = workspaceResources.load(record?.workspace ?? workspace);
   const segments: InvocationSegment[] = invocations.map((item) => {
     if (item.kind === "skill") {
-      const resolved = runtimeSkills.buildRuntimeSkillBody(discoveredSkills, item.name, undefined, hasReadTool);
+      const resolved = runtimeSkills.buildRuntimeSkillBody(resources.discoveredSkills, item.name, undefined, hasReadTool);
       return { kind: item.kind, name: resolved.name, body: resolved.body };
     }
-    return { kind: item.kind, name: item.name, body: commandCatalog.expandRuntimeCommand(discoveredCommands, item.name, undefined) };
+    return { kind: item.kind, name: item.name, body: commandCatalog.expandRuntimeCommand(resources.discoveredCommands, item.name, undefined) };
   });
   return buildMultiInvocationPrompt(invocations, shared, composeInvocationBody(segments, shared));
 }
@@ -2058,6 +2138,9 @@ function truncateTransferredOutput(output: string | undefined): string | undefin
 
 /** 会话级字段构建（snapshot 与分屏 session.state 共用）：全部来自该 record。 */
 function paneSnapshotFrom(record: SessionRuntimeRecord): SessionPaneSnapshot {
+  // 每次构建快照顺手复查工作区可用性（readOnlyReasonFor 内部 10s 缓存）：
+  // 目录恢复后无需用户在别处触发动作，下一帧快照即可解除只读。
+  refreshReadOnlyReason(record);
   const session = record.session;
   const sessionMessages = normalizeMessages(session.state.messages, session.state.streamingMessage);
   // 热路径：绝大多数会话没有 pcontrol 消息，避免每帧 copy + O(n log n) 排序。
@@ -2069,6 +2152,9 @@ function paneSnapshotFrom(record: SessionRuntimeRecord): SessionPaneSnapshot {
     sessionId: session.sessionId,
     sessionFile: session.sessionManager.getSessionFile(),
     workspace: record.workspace,
+    agentId: record.agent.id,
+    agentName: record.agent.name,
+    ...(record.readOnlyReason ? { readOnlyReason: record.readOnlyReason } : {}),
     model: session.model ? { provider: session.model.provider, id: session.model.id } : undefined,
     thinkingLevel: session.thinkingLevel,
     busy: record.busy,
@@ -2103,8 +2189,9 @@ function snapshot(): RuntimeSnapshot {
   return {
     workspace: record?.workspace ?? workspace,
     gitBranch,
-    agentId: currentAgent?.id ?? "default",
-    agentName: currentAgent?.name ?? "默认助手",
+    ...(pane?.readOnlyReason ? { readOnlyReason: pane.readOnlyReason } : {}),
+    agentId: pane?.agentId ?? currentAgent?.id ?? "default",
+    agentName: pane?.agentName ?? currentAgent?.name ?? "默认助手",
     sessionId: pane?.sessionId,
     sessionFile: pane?.sessionFile,
     model: pane?.model ?? selectedModel,
@@ -2193,11 +2280,10 @@ function patchSessionRunStatus(record: SessionRuntimeRecord): void {
  * 新会话（新建话题、删除当前会话后自动补的空白会话）创建后立即合并进侧边栏
  * 列表，无需等全量 refreshSessions 的磁盘扫描：左侧第一时间出现该话题，发送
  * 消息时 runStatus "running" 也能经 patchSessionRunStatus 即时打上「执行中」
- * 圆点。列表作用域不是当前 Agent 时跳过（该场景由 sessionListReadyFor=false
- * 触发重拉建表）；已在列表中的会话保持不动，精确信息仍由 refreshSessions 校正。
+ * 圆点。列表现在是跨助手全量，任何 record 都无条件合并；已在列表中的会话
+ * 保持不动，精确信息仍由 refreshSessions 校正。
  */
 function ensureSessionInList(record: SessionRuntimeRecord): void {
-  if (currentSessionsAgentId !== record.agent.id) return;
   const manager = record.session.sessionManager;
   // A freshly created session always carries a file; guard the optional for safety.
   const path = manager.getSessionFile();
@@ -2206,6 +2292,7 @@ function ensureSessionInList(record: SessionRuntimeRecord): void {
     id: manager.getSessionId(),
     path,
     workspace: record.workspace,
+    agentId: record.agent.id,
     title: "新会话",
     modifiedAt: Date.now(),
     messageCount: 0
@@ -2405,6 +2492,11 @@ function activate(record: SessionRuntimeRecord): void {
   const previous = activeRuntime;
   sessionGeneration++;
   activeRuntime = record;
+  // 激活 record 是“当前助手”的唯一权威：跨助手打开会话后顶栏/面板必须立刻跟随。
+  currentAgent = record.agent;
+  // 归档助手不能成为默认助手：打开其历史会话只切换运行中的 currentAgent，
+  // 不写 settings.currentAgentId（新建话题/自动化仍落到未归档助手）。
+  if (settings && !record.agent.archived) settings.currentAgentId = record.agent.id;
   record.activatedAt = Date.now();
   // Entering the session marks its terminal outcome as seen — drop the
   // green/red dot. A running session keeps its yellow dot (live state).
@@ -2413,10 +2505,15 @@ function activate(record: SessionRuntimeRecord): void {
     patchSessionRunStatus(record);
   }
   const workspaceChanged = workspace !== record.workspace;
-  // 焦点跨工作区切换：记入该助手最后工作区（同工作区切换幂等跳过，避免重复 touch 落盘）。
-  if (workspaceChanged) rememberWorkspace(record.workspace);
   workspace = record.workspace;
-  if (workspaceChanged) refreshHooksConfig();
+  if (workspaceChanged) {
+    touchRecentWorkspace(record.workspace);
+    // 工作区切换：当前 UI 目录/项目资源按新工作区重读（已有会话的系统提示各自冻结）。
+    workspaceResources.invalidate(record.workspace);
+    refreshHooksConfig();
+    refreshSubagents();
+  }
+  refreshReadOnlyReason(record);
   thinkingLevel = record.session.thinkingLevel;
   selectedModel = record.session.model ? { provider: record.session.model.provider, id: record.session.model.id } : undefined;
   todoStore = record.todoStore;
@@ -2438,11 +2535,7 @@ function activate(record: SessionRuntimeRecord): void {
   if (previous && previous !== record && renderedSessions.has(previous.session.sessionId)) {
     emitPaneSnapshot(previous, true);
   }
-}
-
-function workspaceSessionDir(): string | undefined {
-  if (!workspace || !currentAgent) return undefined;
-  return agentWorkspaceSessionDir(getAgentDir(), currentAgent.id, workspace);
+  postRuntimeContext();
 }
 
 function recentWorkspacesPath(): string {
@@ -2552,22 +2645,67 @@ function agentDefaultWorkspace(): string | undefined {
   }
 }
 
-/**
- * 把某工作区记为该助手最后使用（内存 agentWorkspaces map + 全局 recents）。
- * 赋值点：workspace.open / session.new / session.open / automation.run.open 直达，
- * activate（分屏聚焦其他工作区格子 = 该助手最后使用的工作区）跨工作区时记入。
- * 主进程 updateSettings 走同一组纯函数持久化（双写对称）；此处只更新 utility 内存镜像。
- */
-function rememberWorkspace(path: string): void {
-  if (!settings) return;
-  settings.agentWorkspaces = recordAgentWorkspace(settings.agentWorkspaces, settings.currentAgentId, path);
-  touchRecentWorkspace(path);
+/** 给最近工作区补目录存在性（渲染端不做 fs 探测；空组靠这个字段显示「目录不存在」）。 */
+function annotateRecentWorkspaces(): void {
+  recentWorkspaces = recentWorkspaces.map((item) => {
+    try {
+      return statSync(item.path).isDirectory() ? { path: item.path, openedAt: item.openedAt } : { ...item, missing: true };
+    } catch {
+      return { ...item, missing: true };
+    }
+  });
 }
 
 /** Record a workspace as recently opened and persist the list. */
 function touchRecentWorkspace(path: string): void {
   recentWorkspaces = recordRecentWorkspace(recentWorkspaces, path);
   writeRecentWorkspaces(recentWorkspacesPath(), recentWorkspaces);
+  annotateRecentWorkspaces();
+}
+
+/** utility → main 的唯一持久化入口：激活成功后上报当前工作区/助手，main 只落盘不转发。 */
+function postRuntimeContext(): void {
+  if (!workspace && !currentAgent) return;
+  post({
+    type: "runtime-context",
+    ...(workspace ? { workspace } : {}),
+    ...(currentAgent ? { agentId: currentAgent.id, agentName: currentAgent.name } : {}),
+    ...(activeRuntime ? { sessionId: activeRuntime.session.sessionId } : {})
+  });
+}
+
+interface ReadOnlyCheckEntry { reason?: string; checkedAt: number; }
+const readOnlyChecks = new Map<string, ReadOnlyCheckEntry>();
+const READ_ONLY_CHECK_TTL_MS = 10_000;
+
+/**
+ * 工作区目录可用性判定（10s 缓存）：目录不存在/不是目录 → 只读原因。
+ * 每次 activate 与写入入口都重查，目录被删/移动后最长 10s 转只读，恢复后同样自动解除。
+ */
+function readOnlyReasonFor(targetWorkspace: string): string | undefined {
+  const key = resolve(targetWorkspace).toLowerCase();
+  const now = Date.now();
+  const cached = readOnlyChecks.get(key);
+  if (cached && now - cached.checkedAt < READ_ONLY_CHECK_TTL_MS) return cached.reason;
+  let reason: string | undefined;
+  try {
+    const info = statSync(targetWorkspace);
+    if (!info.isDirectory()) reason = "工作区路径不是目录，只能查看历史";
+  } catch {
+    reason = "工作区目录不存在，只能查看历史；请重新打开或新建工作区";
+  }
+  readOnlyChecks.set(key, { ...(reason ? { reason } : {}), checkedAt: now });
+  return reason;
+}
+
+function refreshReadOnlyReason(record: SessionRuntimeRecord): void {
+  record.readOnlyReason = readOnlyReasonFor(record.workspace);
+}
+
+/** 写入入口的统一守卫：发送/重生成/压缩/斜杠调用/队列都先过这里。 */
+function assertSessionWritable(record: SessionRuntimeRecord): void {
+  refreshReadOnlyReason(record);
+  if (record.readOnlyReason) throw new Error(record.readOnlyReason);
 }
 
 function agentSessionRoot(): string | undefined {
@@ -2588,6 +2726,24 @@ async function pathExists(path: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * 会话路径归属校验（rename/delete/archive/pin 共用）：会话可能属于任意助手
+ * （含已归档助手），归属优先取摘要/live，其次按助手会话根前缀匹配。
+ * 返回 owner 的 agentId；无法归属直接抛错，绝不按“当前助手”兜底。
+ */
+async function ownerAgentIdForSessionPath(target: string): Promise<string> {
+  const scopes = await listSessionScopes(getAgentDir(), settings?.agents ?? []);
+  const owner = resolveSessionOwner(target, scopes, {
+    summaries: currentSessions,
+    live: [...liveSessions.values()].flatMap((record) => {
+      const path = record.session.sessionManager.getSessionFile();
+      return path ? [{ path, agentId: record.agent.id }] : [];
+    })
+  });
+  if (!owner) throw new Error("会话不属于任何已配置的助手");
+  return owner.agentId;
 }
 
 /** Resolve browser_upload file arguments to absolute paths inside the record workspace. */
@@ -3725,16 +3881,16 @@ let sessionsRefreshInFlight: Promise<void> | undefined;
 let sessionsRefreshQueued = false;
 
 /**
- * 单飞 + 合并：同一时刻只跑一轮磁盘扫描（缓存未命中时要读 264 MB 目录）。
- * 进行中再来请求只记一个「还要再跑一轮」标记（防止「进行中的那段是旧数据」
- * 被反复读取），结束后合并跑最后一轮。防抖在 scheduleSessionsRefresh。
+ * 单飞 + 合并：同一时刻只跑一轮磁盘扫描；进行中再来请求只记一个「还要再跑
+ * 一轮」标记。agentIds 指定时只重建这些助手的条目，其余助手的列表保持原样
+ * （新建会话/回合结束/重命名等日常路径只脏刷新对应 agent）。
  */
-function refreshSessions(): Promise<void> {
+function refreshSessions(agentIds?: readonly string[]): Promise<void> {
   if (sessionsRefreshInFlight) {
     sessionsRefreshQueued = true;
     return sessionsRefreshInFlight;
   }
-  const run = performSessionsRefresh().then(
+  const run = performSessionsRefresh(agentIds).then(
     (value) => {
       finishSessionsRefresh();
       return value;
@@ -3758,20 +3914,64 @@ function finishSessionsRefresh(): void {
   });
 }
 
-async function performSessionsRefresh(): Promise<void> {
-  // Stamp the scope the listing actually runs against: currentAgent can change
-  // while the awaits below run (agent switch mid-refresh).
-  const listAgentId = currentAgent?.id;
+/** 会话路径 → 所属助手 id（chatanytime-sessions/<agentId>/<workspaceHash>/<file>）。 */
+function agentIdFromSessionPath(path: string): string | undefined {
+  const root = join(getAgentDir(), "chatanytime-sessions");
+  const relative = relativePath(root, resolve(path));
+  if (!relative || relative.startsWith("..") || isAbsolute(relative)) return undefined;
+  const segment = relative.split(/[\\/]/u)[0];
+  return segment && segment !== "delegations" ? segment : undefined;
+}
+
+/**
+ * 启动首屏水合：只读持久化索引到内存（不扫盘）。让侧栏在冷启动第一帧就有
+ * 内容，随后后台 refreshSessions() 做一次全量 mtime/size 校验。索引里的路径
+ * 天然带 agentId 目录，跨助手归属可直接解析。
+ */
+function hydrateSessionsFromIndex(): void {
+  const cache = sessionSummaryCacheFor();
+  const pinnedPaths = settings?.pinnedSessionPaths ?? [];
+  const archivedPaths = settings?.archivedSessionPaths ?? [];
+  const items: SessionSummary[] = [];
+  for (const entry of cache.values()) {
+    const summary = entry.summary;
+    if (!summary) continue;
+    const agentId = agentIdFromSessionPath(summary.path);
+    if (!agentId) continue;
+    const runStatus = liveSessions.get(summary.id)?.runStatus;
+    items.push({
+      id: summary.id,
+      path: summary.path,
+      workspace: summary.cwd || "未知工作区",
+      agentId,
+      title: summary.name || summary.firstMessage || "新会话",
+      modifiedAt: summary.modified.getTime(),
+      messageCount: summary.messageCount,
+      pinned: isSessionPinned(pinnedPaths, summary.path) || undefined,
+      archived: isSessionArchived(archivedPaths, summary.path) || undefined,
+      ...(runStatus ? { runStatus } : {})
+    });
+  }
+  if (items.length === 0) return;
+  currentSessions = sortSessionSummaries(items);
+  sessionsLoaded = true;
+}
+
+async function performSessionsRefresh(agentIds?: readonly string[]): Promise<void> {
+  // 最近工作区的目录存在性随列表刷新重查：空目录被删/移动后徽标与新建禁用
+  // 能在一个刷新周期内出现，而不必等重启。
+  annotateRecentWorkspaces();
   const previousSessions = currentSessions;
-  const directories = await sessionDirectories();
-  if (directories.length === 0) {
+  const scopes = await listSessionScopes(getAgentDir(), settings?.agents ?? []);
+  const targetScopes = agentIds && agentIds.length > 0
+    ? scopes.filter((scope) => agentIds.includes(scope.agentId))
+    : scopes;
+  if (targetScopes.length === 0 && scopes.length === 0) {
     currentSessions = [];
-    currentSessionsAgentId = listAgentId;
+    sessionsLoaded = true;
     return;
   }
-
-  // 内存里已有的会话是权威且**零 I/O**：当前回合正在写的那个文件连读都不需要
-  // （否则每轮对话都要重读一遍 44 MB 的当前会话）。
+  // 内存里已有的会话是权威且零 I/O：当前回合正在写的那个文件连读都不需要。
   const liveSummaries = [...liveSessions.values()].flatMap((record) => {
     const manager = record.session.sessionManager;
     const path = manager.getSessionFile();
@@ -3784,52 +3984,37 @@ async function performSessionsRefresh(): Promise<void> {
       fallbackTime: record.activatedAt
     })];
   });
-  // 会话摘要缓存（mtime+size 命中即不读文件；详见 session-summary-cache.ts）；
-  // 传入磁盘索引加载来的缓存 → 重启后第一轮也命中，不再重解析 264 MB。
-  const items = await listSessionSummaries(directories, { liveSummaries, cache: sessionSummaryCacheFor() });
+  const items = await summarizeAllSessions(targetScopes, {
+    cache: sessionSummaryCacheFor(),
+    liveSummaries,
+    pinnedPaths: settings?.pinnedSessionPaths ?? [],
+    archivedPaths: settings?.archivedSessionPaths ?? [],
+    workspaceExistsCache
+  });
   scheduleSessionIndexSave();
-  const pinnedPaths = settings?.pinnedSessionPaths ?? [];
-  const archivedPaths = settings?.archivedSessionPaths ?? [];
-  currentSessions = sortSessionSummaries(items.map((item) => {
-    // Live sessions carry their execution state (sidebar dot) across refreshes.
-    const runStatus = liveSessions.get(item.id)?.runStatus;
-    return {
-      id: item.id,
-      path: item.path,
-      workspace: item.cwd || "未知工作区",
-      title: item.name || item.firstMessage || "新会话",
-      modifiedAt: item.modified.getTime(),
-      messageCount: item.messageCount,
-      pinned: isSessionPinned(pinnedPaths, item.path) || undefined,
-      // 归档与置顶同源：每轮从 settings 的路径集合重算，不动会话文件（不触发
-      // 摘要缓存失效）。
-      archived: isSessionArchived(archivedPaths, item.path) || undefined,
-      ...(runStatus ? { runStatus } : {})
-    };
+  const targetKeys = new Set(targetScopes.map((scope) => scope.agentId));
+  const kept = agentIds && agentIds.length > 0
+    ? currentSessions.filter((item) => !targetKeys.has(item.agentId))
+    : [];
+  currentSessions = sortSessionSummaries([...kept, ...items]);
+  sessionsLoaded = true;
+  const liveSeeds: LiveSessionSeed[] = [...liveSessions.values()].map((record) => ({
+    sessionId: record.session.sessionId,
+    path: record.session.sessionManager.getSessionFile(),
+    workspace: record.workspace,
+    agentId: record.agent.id,
+    activatedAt: record.activatedAt,
+    title: record.session.sessionManager.getSessionName(),
+    runStatus: record.runStatus
   }));
-  currentSessionsAgentId = listAgentId;
   // 会话文件直到首条 assistant 消息才落盘（Pi _persist 的 hasAssistant 门槛），
-  // 新建的空会话只存在于 liveSessions——防抖刷新/后台回合结束触发的全量重建若
-  // 不回填，会把刚建的新话题从侧边栏抹掉（见 backfillUnpersistedSessions）。
-  currentSessions = backfillUnpersistedSessions(
-    currentSessions,
-    previousSessions,
-    [...liveSessions.values()].map((record) => ({
-      sessionId: record.session.sessionId,
-      path: record.session.sessionManager.getSessionFile(),
-      workspace: record.workspace,
-      agentId: record.agent.id,
-      activatedAt: record.activatedAt,
-      title: record.session.sessionManager.getSessionName(),
-      runStatus: record.runStatus
-    })),
-    listAgentId
-  );
-  // 注意：这里不需要 pruneVanishedSessions——列表刚由磁盘 + 摘要缓存重建，无文件且无 live
-  // 伪死行根本进不了入参；真正需要清的时刻是「记录被驱逐而列表没重建」（见
-  // pruneVanishedSessionRows）。
-  // 面板投影里的标题取自这份列表（重命名/新会话都走这里），刷新后主动播一次，
-  // 否则改完标题的面板要等到下一次工具活动才跟上。
+  // 新建的空会话只存在于 liveSessions——全量重建若不回填，会把刚建的新话题
+  // 从侧边栏抹掉。现在列表跨助手，回填不再按 listAgentId 过滤。
+  currentSessions = backfillUnpersistedSessions(currentSessions, previousSessions, liveSeeds);
+  // 磁盘摘要不带 runStatus（纯运行时状态）：已落盘会话的「执行中」/绿红点必须
+  // 由内存记录覆盖回来，否则回合开始/每条 assistant 消息后的防抖刷新会把圆点
+  // 抹掉（回填只管未落盘行，压不住这条）。
+  currentSessions = overlayLiveRunStatus(currentSessions, liveSeeds);
   scheduleLiveEmit(true);
 }
 
@@ -3852,10 +4037,6 @@ function sessionReadyStatus(hasModel: boolean, usedFallback: boolean): string {
  */
 async function createSession(sessionManager?: SessionManager, options: { reactivate?: boolean; skipActivate?: boolean; modelOverride?: { provider: string; id: string }; accessModeOverride?: AccessMode; unattended?: boolean; noGenerationGuard?: boolean; agentOverride?: AgentProfile; workspaceOverride?: string; inheritDesignMode?: boolean; inheritComputerMode?: boolean; inheritTeamMode?: boolean } = {}): Promise<void> {
   if (!modelRuntime) return;
-  // 工作区可能已切换（workspace.open / session.*）：先重读双作用域钩子配置。
-  refreshHooksConfig();
-  // 工作区切换会改变项目级子智能体定义，一并重读。
-  refreshSubagents();
   // noGenerationGuard（后台自动化会话）：不参与全局代际竞争，避免与用户
   // 的新建/切会话管线互相作废（reviewer P1-2）；它捕获自己的 record 上下文。
   const generation = options.noGenerationGuard ? sessionGeneration : ++sessionGeneration;
@@ -3869,12 +4050,15 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
 
   // agentOverride（跨角色自动化会话）：record 全链路按任务归属角色构建——系统提示、
   // 记忆库、技能开关、审计/checkpoint 目录、会话目录全部跟随任务 agent，而非当前激活角色。
-  const recordAgent = options.agentOverride ?? currentAgent;
+  const recordAgent = options.agentOverride ?? (currentAgent?.archived ? activeAgent() : currentAgent);
   if (!recordAgent) return;
   // workspaceOverride（会话绑定任务冷恢复）：按目标会话自己的工作区构建，不依赖
   // 全局 workspace 镜像；缺省仍走当前工作区，普通新建/打开路径行为不变。
   const recordWorkspace = options.workspaceOverride ? resolve(options.workspaceOverride) : workspace;
   if (!recordWorkspace) return;
+  // 本会话自己的项目资源（skills/commands/subagents/hooks）：按 recordWorkspace 读取，
+  // 不读当前激活工作区；agent 维开关在取用处叠加，不进入这份缓存。
+  const resources = workspaceResources.load(recordWorkspace);
   const activeSessionManager = sessionManager ?? SessionManager.continueRecent(recordWorkspace, agentWorkspaceSessionDir(getAgentDir(), recordAgent.id, recordWorkspace));
   const existing = liveSessions.get(activeSessionManager.getSessionId());
   if (existing && !sessionManager && options.reactivate) {
@@ -4040,11 +4224,9 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
       // 留在分支历史 5569137/2bcfe45，恢复时 cherry-pick 即可）。
       createCodemodeExtension()
     ],
-    systemPromptOverride: (base) => [base, recordAgent.systemPrompt, buildDivModePrompt(recordAgent.divMode), buildSkillsSystemPromptBlock(runtimeSkills.activeSkillsFor(nativeSkills, recordAgent)), TOOL_ORCHESTRATION_PROMPT_BLOCK, OUTPUT_FORMAT_PROMPT_BLOCK, buildSubagentPromptBlock(subagentCatalog), memoryPromptBlock].filter(Boolean).join("\n\n")
+    systemPromptOverride: (base) => [base, recordAgent.systemPrompt, buildDivModePrompt(recordAgent.divMode), buildSkillsSystemPromptBlock(runtimeSkills.activeSkillsFor(resources.skillSummaries, recordAgent)), TOOL_ORCHESTRATION_PROMPT_BLOCK, OUTPUT_FORMAT_PROMPT_BLOCK, buildSubagentPromptBlock(resources.subagents), memoryPromptBlock].filter(Boolean).join("\n\n")
   });
   await resourceLoader.reload();
-  syncSkills();
-  syncCommands();
   // Connect to configured MCP servers and rebuild the customTool set. Runs
   // concurrently with session manager setup since neither depends on the other.
   // Steady-state switches are served from the MCP tool cache (no network);
@@ -4099,7 +4281,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   // is slow with many/large sessions. It only needs to be fresh for the sidebar,
   // so on switches with a known list it runs in the background instead of
   // delaying the state emit; the follow-up emit is generation-guarded.
-  const hasSessionList = sessionListReadyFor(currentSessions.length, currentSessionsAgentId, recordAgent.id);
+  const hasSessionList = sessionsLoaded && currentSessions.length > 0;
   const sessionsPromise = hasSessionList ? undefined : refreshSessions();
   emitResourceCatalog();
   const sessionRecordSeed: Pick<SessionRuntimeRecord, "workspace" | "agent" | "permissionDeps"> = { workspace: recordWorkspace, agent: recordAgent, permissionDeps };
@@ -4384,6 +4566,8 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
         sessionId: earlyPaneId,
         sessionFile: activeSessionManager.getSessionFile(),
         workspace: recordWorkspace,
+        agentId: recordAgent.id,
+        agentName: recordAgent.name,
         model: earlySession.model ? { provider: earlySession.model.provider, id: earlySession.model.id } : undefined,
         thinkingLevel: earlySession.thinkingLevel,
         busy: false,
@@ -4402,6 +4586,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     session: result.session,
     unsubscribe: () => undefined,
     workspace: recordWorkspace,
+    readOnlyReason: readOnlyReasonFor(recordWorkspace),
     agent: recordAgent,
     busy: false,
     status: "",
@@ -4480,7 +4665,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     agent: recordAgent,
     modelRuntime,
     getThinkingLevel: () => record.session.thinkingLevel,
-    getSubagentCatalog: () => subagentCatalog,
+    getSubagentCatalog: () => workspaceResources.load(recordWorkspace).subagents,
     isModelEnabled: (providerId, modelId) => isModelEnabled(providerId, modelId, settings?.providers),
     transformModel: (candidate) => applyModelOverrides(candidate),
     requestPermission: (toolName, args, toolCallId) => runtimePermissions.requestPermission(record.permissionDeps, toolName, args, toolCallId, "subagent"),
@@ -4562,33 +4747,42 @@ async function initialize(command: Extract<RuntimeCommand, { type: "initialize" 
   refreshHooksConfig();
   refreshSubagents();
   recentWorkspaces = loadRecentWorkspaces(recentWorkspacesPath());
+  // 一次性迁移：旧配置的 per-agent 工作区/legacy workspace 播种 recents，
+  // 否则升级后首屏只剩新打开过的目录，历史工作区看不到（但仍可按路径找回）。
+  if (recentWorkspaces.length === 0) {
+    const seeds = [
+      ...Object.values(settings.agentWorkspaces ?? {}),
+      ...(settings.workspace ? [settings.workspace] : []),
+      ...(settings.defaultWorkspace ? [settings.defaultWorkspace] : [])
+    ];
+    for (const seed of seeds) {
+      if (typeof seed === "string" && seed.trim()) touchRecentWorkspace(seed.trim());
+    }
+  }
+  annotateRecentWorkspaces();
   // 作品清单：全局一份池子（跨工作区），读盘 + 清掉孤儿缩略图。
   // 读盘 + 顺手修复「缺 id」的历史条目（首版发布路径写过 id:""，见 gallery-store 注释）。
   galleryApps = loadGalleryRepairingIds(galleryFilePath());
   void pruneGalleryThumbs(galleryThumbsPath(), galleryApps);
   emitGallery();
-  // 工作区按助手记忆恢复（2026-09-03 方案 B）：agentWorkspaces[活跃助手] → 老配置
-  // settings.workspace（仅迁移期一次性兜底）→ 默认工作区。settings.workspace 此后
-  // 冻结不再写。默认档仅当真落到默认时才 mkdir（map/legacy 命中不产生副作用），
-  // mkdir 失败回 undefined 保留 landing 极端兜底。
-  const mappedWorkspace = settings.agentWorkspaces?.[settings.currentAgentId];
+  // 启动恢复（workspace-first）：lastWorkspace → agentWorkspaces[currentAgentId]（迁移期）
+  // → legacy settings.workspace → 默认工作区；前三级按目录存在性逐项校验，失效的
+  // lastWorkspace 不会跳过仍有效的旧映射。默认档只有在真正落到它时才 mkdir。
   const legacyWorkspace = settings.workspace ? resolve(settings.workspace) : undefined;
-  workspace = resolveInitialWorkspace(
-    settings.agentWorkspaces,
-    settings.currentAgentId,
-    legacyWorkspace,
-    mappedWorkspace || legacyWorkspace
-      ? resolveDefaultWorkspace(getAgentDir(), settings.defaultWorkspace)
-      : agentDefaultWorkspace()
-  );
-  if (workspace) {
-    // legacy 命中（map 无当前助手条目且老配置存在）时提升进内存 map：本会话内
-    // agent.select 切走再切回仍能恢复老工作区，不必等下次重启落盘。
-    if (legacyWorkspace && !mappedWorkspace) {
-      settings.agentWorkspaces = recordAgentWorkspace(settings.agentWorkspaces, settings.currentAgentId, legacyWorkspace);
-    }
-    touchRecentWorkspace(workspace);
+  const defaultWorkspacePath = resolveDefaultWorkspace(getAgentDir(), settings.defaultWorkspace);
+  const startup = resolveStartupWorkspace({
+    ...(settings.lastWorkspace ? { lastWorkspace: settings.lastWorkspace } : {}),
+    ...(settings.agentWorkspaces ? { agentWorkspaces: settings.agentWorkspaces } : {}),
+    agentId: activeAgent().id,
+    ...(legacyWorkspace ? { legacyWorkspace } : {}),
+    defaultWorkspace: defaultWorkspacePath
+  });
+  if (startup && resolve(startup).toLowerCase() === defaultWorkspacePath.toLowerCase()) {
+    workspace = agentDefaultWorkspace();
+  } else {
+    workspace = startup;
   }
+  if (workspace) touchRecentWorkspace(workspace);
   currentAgent = activeAgent();
   thinkingLevel = settings.thinkingLevel ?? "medium";
   accessMode = settings.accessMode ?? "ask";
@@ -4628,6 +4822,11 @@ async function initialize(command: Extract<RuntimeCommand, { type: "initialize" 
   // 启动错过扫描：一次性的可观测性补位（「昨天没跑」现在能在运行记录里看到原因）。
   automationScheduler.reportMissed();
   refreshAutomation();
+  // 首屏水合：先读持久化索引上屏（不扫盘），再后台全量 mtime/size 校验。
+  hydrateSessionsFromIndex();
+  void refreshSessions().then(() => emitState()).catch((error) => {
+    void post({ type: "log", level: "warn", message: `后台校验会话列表失败：${errorText(error)}` });
+  });
   // checkpoint 快照的全局清扫（mtime 过期/总量超限）：异步不阻塞启动。
   void sweepCheckpoints(getAgentDir(), Date.now(), (message) => void post({ type: "log", level: "warn", message }));
   // 分支徽章准实时：HEAD 监听 + 低频兜底轮询，随工作区切换重挂。
@@ -4667,6 +4866,7 @@ async function runResourceOperation(label: string, operation: () => Promise<void
 async function reloadRuntimeResources(): Promise<void> {
   const record = activeRuntime;
   if (!record) throw new Error("请先打开工作区，再重载资源");
+  workspaceResources.clear();
   // customTools are fixed at AgentSession creation and Pi has no tool-removal
   // API, so removals (server deleted/disabled) still require recreating the
   // session while keeping the same SessionManager (JSONL history preserved).
@@ -4724,9 +4924,12 @@ async function applyMcpToolChanges(names: string[]): Promise<void> {
   await refreshMcpCatalog();
 }
 
-async function preparePromptPayload(text: string, attachments: PromptAttachment[] = []): Promise<{ text: string; images: ImageContent[] }> {
+async function preparePromptPayload(text: string, attachments: PromptAttachment[] = [], targetWorkspace?: string): Promise<{ text: string; images: ImageContent[] }> {
   if (attachments.length > 5) throw new Error("最多同时发送 5 个附件");
-  if (!workspace) throw new Error("请先打开工作区，再发送消息");
+  // 解析根必须是目标会话自己的工作区：跨工作区附件不能拿全局镜像做越界校验
+  // （否则要么误报越界，要么把另一个项目的同名文件静默塞进提示词）。
+  const attachmentRoot = targetWorkspace ?? workspace;
+  if (!attachmentRoot) throw new Error("请先打开工作区，再发送消息");
   const images: ImageContent[] = [];
   const fileRefs: string[] = [];
   let rootReal: string | undefined;
@@ -4739,8 +4942,8 @@ async function preparePromptPayload(text: string, attachments: PromptAttachment[
     }
     const rel = attachment.relativePath || attachment.path;
     if (!rel || isAbsolute(rel) || rel.split(/[\\/]/u).includes("..")) throw new Error(`附件路径无效：${attachment.name}`);
-    const candidateReal = await realpath(resolve(workspace, rel));
-    rootReal ??= await realpath(workspace);
+    const candidateReal = await realpath(resolve(attachmentRoot, rel));
+    rootReal ??= await realpath(attachmentRoot);
     const relativeReal = workspaceRelativeAttachment(rootReal, candidateReal);
     if (!relativeReal || relativeReal === ".." || relativeReal.startsWith(`..${sep}`)) throw new Error(`附件必须位于当前工作区内：${attachment.name}`);
     const info = await stat(candidateReal);
@@ -4793,41 +4996,79 @@ async function readImageFile(root: string, imagePath: string): Promise<ImageCont
  * live 记录 + 硬删 JSONL + 五个 sidecar，并回答「删掉的是不是当前活动会话」
  * （调用方据此决定要不要补空白会话）。
  */
-async function deleteSessionByPath(deleteTarget: string): Promise<{ wasActive: boolean }> {
-  // 会话 id 与 todos 文件名同源（JSONL 文件名），以列表中的 id 为准。
+async function removePathIfExists(target: string, recursive = false): Promise<string | undefined> {
+  try {
+    await stat(target);
+  } catch {
+    // 不存在 = 无需清理，不算失败。
+    return undefined;
+  }
+  try {
+    if (recursive) await rm(target, { recursive: true, force: true });
+    else await unlink(target);
+    return undefined;
+  } catch (error) {
+    return `${target}: ${errorText(error)}`;
+  }
+}
+
+/**
+ * 会话删除的公共体（session.delete / session.deleteMany 共用）。
+ *
+ * 路径校验留在调用方；这里销毁 live 记录 + 硬删 JSONL + 7 类 sidecar，并返回
+ * 真实结果：sidecar 先 stat 再删，失败不再被 `catch {}` 吞掉——批量删除的
+ * 「失败 N」提示必须是真的。
+ */
+async function deleteSessionByPath(deleteTarget: string, agentId?: string): Promise<{ wasActive: boolean; deleted: boolean; error?: string }> {
   const listItem = currentSessions.find((candidate) => resolve(candidate.path).toLowerCase() === deleteTarget.toLowerCase());
   const sessionId = listItem?.id ?? deleteTarget.slice(deleteTarget.lastIndexOf(sep) + 1).replace(/\.jsonl$/iu, "");
-  // 若目标会话仍在运行（live record），一并销毁——与移除整个工作区的语义一致。
   const live = [...liveSessions.values()].find((record) => {
     const liveFile = record.session.sessionManager.getSessionFile();
     return Boolean(liveFile) && resolve(liveFile!).toLowerCase() === deleteTarget.toLowerCase();
   });
   const wasActive = live === activeRuntime;
   if (live) disposeRecord(live);
-  const deleteRoot = agentSessionRoot();
-  // 团队子会话按 Lead id 归档在 delegations/teams/<leadId>/；删会话要连带清掉，
-  // 否则成员文件会变成永远没人引用的孤儿。header id 在文件删除前读一次（文件名
-  // 里的时间戳不能直接当 id）。
+  const ownerAgentId = agentId ?? listItem?.agentId ?? agentIdFromSessionPath(deleteTarget);
+  const deleteRoot = ownerAgentId ? join(getAgentDir(), "chatanytime-sessions", ownerAgentId) : undefined;
   const teamLeadId = listItem?.id ?? readSessionHeaderId(deleteTarget) ?? sessionId;
-  try { await unlink(deleteTarget); } catch { /* 会话文件可能已不存在 */ }
+  const failures: string[] = [];
+  const fileError = await removePathIfExists(deleteTarget);
+  if (fileError) failures.push(fileError);
   if (deleteRoot) {
-    try { await unlink(join(deleteRoot, "team-mode", `${teamLeadId}.json`)); } catch { /* 团队模式文件可能不存在 */ }
-    try { await rm(join(deleteRoot, "delegations", "teams", teamLeadId), { recursive: true, force: true }); } catch { /* 成员文件可能不存在 */ }
-    try { await unlink(join(deleteRoot, "todos", `${sessionId}.json`)); } catch { /* 任务文件可能不存在 */ }
-    try { await unlink(join(deleteRoot, "plans", `${sessionId}.json`)); } catch { /* 计划模式状态文件可能不存在 */ }
-    try { await unlink(join(deleteRoot, "design-mode", `${sessionId}.json`)); } catch { /* 设计模式状态文件可能不存在 */ }
-    try { await unlink(join(deleteRoot, "computer-mode", `${sessionId}.json`)); } catch { /* 电脑控制模式状态文件可能不存在 */ }
-    try { await unlink(join(deleteRoot, "checkpoints", `${sessionId}.jsonl`)); } catch { /* 快照文件可能不存在 */ }
+    // 团队子会话按 Lead id 归档在 delegations/teams/<leadId>/；删会话要连带清掉，
+    // 否则成员文件会变成永远没人引用的孤儿。header id 在文件删除前已读。
+    for (const [path, recursive] of [
+      [join(deleteRoot, "team-mode", `${teamLeadId}.json`), false],
+      [join(deleteRoot, "delegations", "teams", teamLeadId), true],
+      [join(deleteRoot, "todos", `${sessionId}.json`), false],
+      [join(deleteRoot, "plans", `${sessionId}.json`), false],
+      [join(deleteRoot, "design-mode", `${sessionId}.json`), false],
+      [join(deleteRoot, "computer-mode", `${sessionId}.json`), false],
+      [join(deleteRoot, "checkpoints", `${sessionId}.jsonl`), false]
+    ] as const) {
+      const error = await removePathIfExists(path, recursive);
+      if (error) failures.push(error);
+    }
   }
-  return { wasActive };
+  return {
+    wasActive,
+    deleted: !failures.some((failure) => failure === deleteTarget || failure.startsWith(`${deleteTarget}:`)),
+    ...(failures.length > 0 ? { error: failures.join("；") } : {})
+  };
 }
 
 /** 删除收尾：删掉当前活动会话时补空白会话，然后只刷新一次列表 + 推一次状态。 */
 async function finishSessionDeletion(wasActive: boolean): Promise<void> {
   // 删除当前在用的会话后立即补一个空白会话，保持「当前话题」可用。
+  // 当前会话若属于归档助手，新空白会话按未归档默认助手创建（归档助手不能成为默认）。
   if (wasActive && workspace) {
-    const sessionDir = workspaceSessionDir();
-    if (sessionDir) await createSession(SessionManager.create(workspace, sessionDir));
+    const freshAgent = currentAgent?.archived ? activeAgent() : currentAgent;
+    if (freshAgent) {
+      await createSession(SessionManager.create(workspace, agentWorkspaceSessionDir(getAgentDir(), freshAgent.id, workspace)), {
+        agentOverride: freshAgent,
+        workspaceOverride: workspace
+      });
+    }
   }
   await refreshSessions();
   emitState();
@@ -4838,119 +5079,168 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     case "initialize":
       await initialize(command);
       break;
-    case "workspace.open":
-      workspace = resolve(command.path);
-      rememberWorkspace(workspace);
-      await createSession(undefined, { reactivate: true });
-      break;
-    case "session.new":
-      if (command.workspace) {
-        workspace = resolve(command.workspace);
-        rememberWorkspace(workspace);
+    case "workspace.open": {
+      // 工作区是路径身份：打开前必须真实存在且是目录（缺失路径不允许进入，避免
+      // 建出一个永远不可写的会话）。
+      const targetWorkspace = resolve(command.path);
+      let info;
+      try {
+        info = statSync(targetWorkspace);
+      } catch {
+        throw new Error("工作区目录不存在，请重新选择或创建目录");
       }
+      if (!info.isDirectory()) throw new Error("工作区路径不是目录");
+      workspace = targetWorkspace;
+      touchRecentWorkspace(workspace);
+      // 跨助手打开该工作区最近的未归档会话（会话归属以 record.workspace 为准）；
+      // 没有历史会话时用当前助手新建一个空白会话。
+      const recent = pickRecentSession(currentSessions, workspace, {
+        agents: settings?.agents ?? [],
+        excludeArchivedAgents: true
+      });
+      if (recent) {
+        try {
+          await handleCommand({ type: "session.open", path: recent.path, agentId: recent.agentId, workspace });
+          break;
+        } catch (error) {
+          // 列表可能来自索引水合（文件已被删）：失败退回新建，不让工作区打不开。
+          void post({ type: "log", level: "warn", message: `恢复最近会话失败，已新建空白会话：${errorText(error)}` });
+        }
+      }
+      const freshAgent = currentAgent?.archived ? activeAgent() : (currentAgent ?? activeAgent());
+      await createSession(SessionManager.create(workspace, agentWorkspaceSessionDir(getAgentDir(), freshAgent.id, workspace)), {
+        agentOverride: freshAgent,
+        workspaceOverride: workspace
+      });
+      break;
+    }
+    case "workspace.forget": {
+      // 只从最近列表移除，不碰任何会话文件。当前工作区被 forget 时回落到最近
+      // 一个仍存在的工作区，其次默认工作区；绝不因为「非当前」把空目录卡死。
+      const forgotKey = resolve(command.path).toLowerCase();
+      recentWorkspaces = removeRecentWorkspace(recentWorkspaces, command.path);
+      writeRecentWorkspaces(recentWorkspacesPath(), recentWorkspaces);
+      annotateRecentWorkspaces();
+      const forgettingActive = workspace !== undefined && resolve(workspace).toLowerCase() === forgotKey;
+      if (forgettingActive) {
+        const fallback = recentWorkspaces.map((item) => item.path).find((path) => {
+          try { return statSync(path).isDirectory(); } catch { return false; }
+        }) ?? resolveDefaultWorkspace(getAgentDir(), settings?.defaultWorkspace);
+        const ensureFallback = resolve(fallback).toLowerCase() === resolveDefaultWorkspace(getAgentDir(), settings?.defaultWorkspace).toLowerCase()
+          ? agentDefaultWorkspace()
+          : fallback;
+        if (!ensureFallback) throw new Error("没有可用的回落工作区，请先打开一个目录");
+        workspace = ensureFallback;
+        const recent = pickRecentSession(currentSessions, workspace, { agents: settings?.agents ?? [], excludeArchivedAgents: true });
+        let opened = false;
+        if (recent) {
+          try {
+            await handleCommand({ type: "session.open", path: recent.path, agentId: recent.agentId, workspace });
+            opened = true;
+          } catch (error) {
+            void post({ type: "log", level: "warn", message: `恢复最近会话失败，已新建空白会话：${errorText(error)}` });
+          }
+        }
+        if (!opened) {
+          const freshAgent = currentAgent?.archived ? activeAgent() : (currentAgent ?? activeAgent());
+          await createSession(SessionManager.create(workspace, agentWorkspaceSessionDir(getAgentDir(), freshAgent.id, workspace)), {
+            agentOverride: freshAgent,
+            workspaceOverride: workspace
+          });
+        }
+      } else {
+        emitState();
+      }
+      break;
+    }
+    case "session.new": {
+      const targetWorkspace = command.workspace ? resolve(command.workspace) : workspace;
+      if (!targetWorkspace) throw new Error("请先打开工作区，再新建话题");
+      let targetInfo;
+      try {
+        targetInfo = statSync(targetWorkspace);
+      } catch {
+        throw new Error("工作区目录不存在，只能查看历史；请重新打开或新建工作区");
+      }
+      if (!targetInfo.isDirectory()) throw new Error("工作区路径不是目录");
+      const targetAgent = command.agentId
+        ? settings?.agents.find((agent) => agent.id === command.agentId && !agent.archived)
+        : (currentAgent?.archived ? activeAgent() : currentAgent);
+      if (!targetAgent) throw new Error("目标助手不存在或已归档");
+      workspace = targetWorkspace;
+      touchRecentWorkspace(targetWorkspace);
       // Always a fresh session id: the previously active session is parked and
       // keeps running, so a busy turn never blocks starting a new topic.
       // 设计模式下新建话题继承设计模式：用户在连续做设计，新话题不该丢掉画布
       // 与 design_* 工具（继承结果同步落盘，重启后恢复一致）。
-      if (workspace) await createSession(SessionManager.create(workspace, workspaceSessionDir()), { inheritDesignMode: activeRuntime?.designMode.enabled === true, inheritComputerMode: activeRuntime?.computerMode.enabled === true, inheritTeamMode: activeRuntime?.teamMode.enabled === true });
+      await createSession(SessionManager.create(targetWorkspace, agentWorkspaceSessionDir(getAgentDir(), targetAgent.id, targetWorkspace)), {
+        agentOverride: targetAgent,
+        workspaceOverride: targetWorkspace,
+        inheritDesignMode: activeRuntime?.designMode.enabled === true,
+        inheritComputerMode: activeRuntime?.computerMode.enabled === true,
+        inheritTeamMode: activeRuntime?.teamMode.enabled === true
+      });
       break;
+    }
     case "session.open": {
-      const root = agentSessionRoot();
       const target = resolve(command.path);
-      if (!root || !pathIsWithin(root, target) || !target.toLowerCase().endsWith(".jsonl")) throw new Error("只能打开当前 Agent 的会话");
-      // 未落盘的会话（新建话题在首条 assistant 消息前不写文件）只能按 live 记录打开：
-      // SessionManager.open 对不存在的文件会**另生成一个新 sessionId**，cwd 回退到
-      // process.cwd()（utility 进程的 cwd 是安装目录）——随后既查不到 live 记录、
-      // 目录校验也必失败，点侧边栏那条「新会话」就是在这里报「会话路径与工作区不匹配」
-      // 并把安装目录写进助手最后工作区的（2026-09-16 根因）。判据是**文件是否存在**，
-      // 不是目录是否匹配：后者取决于全局 workspace 镜像，而分屏背景格与跨工作区打开
-      // 都要求它与镜像无关。
+      if (!target.toLowerCase().endsWith(".jsonl")) throw new Error("只能打开会话文件");
+      // 1) 已 live：直接激活（不重建，保留运行中的回合）；背景格不激活。
       const fileLive = [...liveSessions.values()].find((candidate) => {
         const liveFile = candidate.session.sessionManager.getSessionFile();
         return Boolean(liveFile) && resolve(liveFile!).toLowerCase() === target.toLowerCase();
       });
-      // 分支决策与理由见 session-open-plan.ts：live 零读盘 / cold 只 open 一次 /
-      // fallback 才是旧的探测路径（两条防御在下面完整保留）。
+      if (fileLive) {
+        if (command.activate === false) break;
+        activate(fileLive);
+        emitState();
+        break;
+      }
       const fileExists = await pathExists(target);
       const header = fileExists ? readSessionHeaderLine(target) : undefined;
-      const plan = planSessionOpen({ target, root, exists: fileExists, liveFileMatches: Boolean(fileLive), header });
-      if (plan === "live") {
-        if (command.activate === false) break; // 分屏已完成前把无效格留着，无需重建
-        // 工作区镜像：不清写助手最后工作区——activate 内部仅在跨工作区时
-        // rememberWorkspace(record.workspace)，与旧的 live 路径同效且不重复写 recents。
-        activate(fileLive!);
-        emitState();
-        break;
-      }
-      if (command.activate !== false) post({ type: "session.opening", path: target, ...(header?.id ? { sessionId: header.id } : {}) });
-      if (plan === "cold") {
-        const recordWorkspace = resolve(header!.cwd);
-        // sessionRoot 按 record 自己的工作区计算（不经过全局 workspace），且校验必须在
-        // 任何全局镜像改写之前：失败路径不允许脏写助手最后工作区。
-        const recordRoot = currentAgent ? agentWorkspaceSessionDir(getAgentDir(), currentAgent.id, recordWorkspace) : undefined;
-        if (!recordRoot || (!sameSessionDir(recordRoot, dirname(target)) && !sameSessionDir(root, dirname(target)))) {
-          throw new Error("会话路径与工作区不匹配");
-        }
-        const liveById = liveSessions.get(header!.id);
-        if (command.activate === false) {
-          if (liveById) break; // 已 live：无需重建，也不激活
-          await createSession(openSessionManagerForReopen(target, recordRoot, recordWorkspace), { skipActivate: true });
-          break;
-        }
-        workspace = recordWorkspace;
-        rememberWorkspace(workspace);
-        // A live record (e.g. a session still running in the background) is
-        // reactivated in place — never rebuilt — so its in-flight turn survives.
-        if (liveById) {
-          activate(liveById);
-          emitState();
-          break;
-        }
-        // 只 open 一次：cwdOverride 跳过 Pi 内部那次头部复读（旧实现先探测再重建，
-        // 44 MB 会话白读一次）。
-        await createSession(openSessionManagerForReopen(target, recordRoot, workspace));
-        break;
-      }
-      const discovered = SessionManager.open(target);
-      const sessionWorkspace = discovered.getCwd();
-      if (!sessionWorkspace) throw new Error("会话缺少工作区信息");
-      const recordWorkspace = resolve(sessionWorkspace);
-      // sessionRoot 按 record 自己的工作区计算（不经过全局 workspace），且校验必须在
-      // 任何全局镜像改写之前：失败路径不允许脏写助手最后工作区。
-      const recordRoot = currentAgent ? agentWorkspaceSessionDir(getAgentDir(), currentAgent.id, recordWorkspace) : undefined;
-      if (!recordRoot || (!sameSessionDir(recordRoot, dirname(target)) && !sameSessionDir(root, dirname(target)))) {
+      // 2) 归属解析：会话可能属于任意助手（含已归档助手）；路径必须在该助手
+      //    的会话根下。优先使用摘要/live，索引水合的行也能命中。
+      const scopes = await listSessionScopes(getAgentDir(), settings?.agents ?? []);
+      const owner = resolveSessionOwner(target, scopes, {
+        summaries: currentSessions,
+        live: [...liveSessions.values()].flatMap((record) => {
+          const path = record.session.sessionManager.getSessionFile();
+          return path ? [{ path, agentId: record.agent.id }] : [];
+        })
+      });
+      if (!owner) throw new Error("会话不属于任何已配置的助手，无法打开");
+      const ownerAgent: AgentProfile = settings?.agents.find((agent) => agent.id === owner.agentId)
+        ?? { ...createDefaultAgent(), id: owner.agentId, name: owner.agentName, archived: true };
+      const summary = currentSessions.find((item) => resolve(item.path).toLowerCase() === target.toLowerCase());
+      const recordWorkspace = resolve(header?.cwd || (summary?.workspace && summary.workspace !== "未知工作区" ? summary.workspace : "") || command.workspace || "");
+      if (!recordWorkspace) throw new Error("会话缺少工作区信息，无法打开");
+      const recordRoot = agentWorkspaceSessionDir(getAgentDir(), owner.agentId, recordWorkspace);
+      const ownerRoot = join(getAgentDir(), "chatanytime-sessions", owner.agentId);
+      if (!sameSessionDir(recordRoot, dirname(target)) && !owner.dirs.some((dir) => sameSessionDir(dir, dirname(target)) || pathIsWithin(dir, target)) && !pathIsWithin(ownerRoot, target)) {
         throw new Error("会话路径与工作区不匹配");
       }
-      // 文件不存在：这行不是「路径不匹配」，而是没有任何工作区信息可依的废行（header 缺失
-      // ⇒ cwd 回退 process.cwd() = 安装目录）。必须挡在镜像改写**之前**——根目录兜底
-      // （sameSessionDir(root, ...)）会让这类行的目录校验通过，否则又会把安装目录写进
-      // 助手最后工作区，再 /new 就在那里建会话（与本次修的 bug 同类）。绝不拿它去建一个
-      // cwd 是安装目录的空会话。
-      if (!(await pathExists(target))) throw new Error("该会话文件不存在（未发过消息的空话题或已被移除）");
+      if (!fileExists) throw new Error("该会话文件不存在（未发过消息的空话题或已被移除）");
       if (command.activate === false) {
-        const live = liveSessions.get(discovered.getSessionId());
-        if (live) break; // 已 live：无需重建，也不激活
-        await createSession(openSessionManagerForReopen(target, recordRoot, recordWorkspace), { skipActivate: true });
+        await createSession(openSessionManagerForReopen(target, recordRoot, recordWorkspace, owner.agentId), {
+          skipActivate: true,
+          agentOverride: ownerAgent,
+          workspaceOverride: recordWorkspace
+        });
         break;
       }
+      post({ type: "session.opening", path: target, ...(header?.id ? { sessionId: header.id } : {}) });
       workspace = recordWorkspace;
-      rememberWorkspace(workspace);
-      // A live record (e.g. a session still running in the background) is
-      // reactivated in place — never rebuilt — so its in-flight turn survives.
-      const live = liveSessions.get(discovered.getSessionId());
-      if (live) {
-        activate(live);
-        emitState();
-        break;
-      }
-      // 此处不再重做存在性校验：上面已挡（live-by-id 命中隐含文件存在，重建分支直走）。
-      await createSession(openSessionManagerForReopen(target, recordRoot, workspace));
+      touchRecentWorkspace(workspace);
+      await createSession(openSessionManagerForReopen(target, recordRoot, recordWorkspace, owner.agentId), {
+        agentOverride: ownerAgent,
+        workspaceOverride: recordWorkspace
+      });
       break;
     }
     case "session.search": {
       const requestId = command.requestId;
       latestSessionSearchRequest = requestId;
-      // 只搜当前助手的会话（与侧栏列表同源），元数据直接复用摘要，不重复读盘。
+      // 搜全部助手的会话（与全局列表同源），元数据直接复用摘要，不重复读盘。
       const sessions = [...currentSessions];
       if (!sessionTextIndex) sessionTextIndex = loadSessionTextIndex(sessionTextIndexPath());
       try {
@@ -4976,17 +5266,22 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       break;
     }
     case "session.rename": {
-      const renameRoot = agentSessionRoot();
       const renameTarget = resolve(command.path);
-      if (!renameRoot || !pathIsWithin(renameRoot, renameTarget) || !renameTarget.toLowerCase().endsWith(".jsonl")) throw new Error("只能重命名当前 Agent 的会话");
-      const activeFile = activeRuntime?.session.sessionManager.getSessionFile();
-      if (activeFile && resolve(activeFile).toLowerCase() === renameTarget.toLowerCase()) activeRuntime?.session.sessionManager.appendSessionInfo(command.title);
+      if (!renameTarget.toLowerCase().endsWith(".jsonl")) throw new Error("只能重命名会话文件");
+      const ownerAgentId = await ownerAgentIdForSessionPath(renameTarget);
+      const liveTarget = [...liveSessions.values()].find((record) => {
+        const file = record.session.sessionManager.getSessionFile();
+        return Boolean(file) && resolve(file!).toLowerCase() === renameTarget.toLowerCase();
+      });
+      if (liveTarget) liveTarget.session.sessionManager.appendSessionInfo(command.title);
       else SessionManager.open(renameTarget).appendSessionInfo(command.title);
-      await refreshSessions();
+      await refreshSessions([ownerAgentId]);
       emitState();
       break;
     }
     case "session.pin": {
+      const pinTarget = resolve(command.path);
+      await ownerAgentIdForSessionPath(pinTarget);
       if (settings) {
         // 集合更新走匹配键（分隔符/大小写归一）：旧实现按字面量 includes 判断，
         // 列表里回来的路径写法与落盘时的写法只要不一致，就会置顶出两条同义记录、
@@ -4998,96 +5293,64 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       break;
     }
     case "session.archive": {
-      // 归档是「用户动作」的落盘（同 pin）：只接受当前 Agent 会话根下、以
-      // .jsonl 结尾的路径，不让任意路径进 settings。
-      const archiveRoot = agentSessionRoot();
-      const accepted = archiveRoot
-        ? command.paths.map((path) => resolve(path)).filter((target) => pathIsWithin(archiveRoot, target) && target.toLowerCase().endsWith(".jsonl"))
-        : [];
+      // 归档是「用户动作」的落盘（同 pin）：接受任意助手会话根下的路径，
+      // 但必须能解析出归属（含已归档助手的会话）。
+      const accepted: string[] = [];
+      const touchedAgents = new Set<string>();
+      for (const path of command.paths) {
+        const target = resolve(path);
+        if (!target.toLowerCase().endsWith(".jsonl")) continue;
+        try {
+          const ownerAgentId = await ownerAgentIdForSessionPath(target);
+          accepted.push(target);
+          touchedAgents.add(ownerAgentId);
+        } catch {
+          // 无法归属的路径不写入归档集合（宁可不操作，也不污染 settings）。
+        }
+      }
       if (accepted.length === 0) throw new Error("没有可归档的会话");
       if (settings) {
         settings = { ...settings, archivedSessionPaths: setArchivedSessionPaths(settings.archivedSessionPaths, accepted, command.archived) };
       }
-      await refreshSessions();
+      await refreshSessions([...touchedAgents]);
       emitState();
       break;
     }
     case "session.delete": {
-      const deleteRoot = agentSessionRoot();
       const deleteTarget = resolve(command.path);
-      if (!deleteRoot || !pathIsWithin(deleteRoot, deleteTarget) || !deleteTarget.toLowerCase().endsWith(".jsonl")) throw new Error("只能删除当前 Agent 的会话");
-      const { wasActive } = await deleteSessionByPath(deleteTarget);
+      if (!deleteTarget.toLowerCase().endsWith(".jsonl")) throw new Error("只能删除会话文件");
+      const ownerAgentId = await ownerAgentIdForSessionPath(deleteTarget);
+      const { wasActive, deleted, error } = await deleteSessionByPath(deleteTarget, ownerAgentId);
+      if (!deleted) throw new Error(`会话删除失败：${error ?? "未知错误"}`);
+      if (error) post({ type: "error", message: `会话已删除，但部分附属数据清理失败：${error}` });
       await finishSessionDeletion(wasActive);
       break;
     }
     case "session.deleteMany": {
-      // 批量删除（归档区清理出口）：一条命令删多条，期间**不做**列表重建——
-      // 逐条 session.delete 会排出 N 轮磁盘扫描（refreshSessions 是单飞+合并，
-      // 但每轮都是实打实的目录扫描）。非法路径静默跳过（不阻断整批）。
-      const deleteRoot = agentSessionRoot();
+      // 批量删除（归档区清理出口）：一条命令删多条，期间**不做**列表重建。
+      // 失败不伪装成功：逐条汇总真实 deleted/error，结束后显式报告失败数。
       let anyActiveDeleted = false;
-      let deleted = 0;
+      let deletedCount = 0;
+      const failures: string[] = [];
       for (const path of command.paths) {
         const deleteTarget = resolve(path);
-        if (!deleteRoot || !pathIsWithin(deleteRoot, deleteTarget) || !deleteTarget.toLowerCase().endsWith(".jsonl")) continue;
-        const { wasActive } = await deleteSessionByPath(deleteTarget);
+        if (!deleteTarget.toLowerCase().endsWith(".jsonl")) { failures.push(`${deleteTarget}：不是会话文件`); continue; }
+        let ownerAgentId: string;
+        try {
+          ownerAgentId = await ownerAgentIdForSessionPath(deleteTarget);
+        } catch (error) {
+          failures.push(`${deleteTarget}：${errorText(error)}`);
+          continue;
+        }
+        const { wasActive, deleted, error } = await deleteSessionByPath(deleteTarget, ownerAgentId);
         anyActiveDeleted = anyActiveDeleted || wasActive;
-        deleted += 1;
+        if (deleted) deletedCount += 1;
+        else failures.push(`${deleteTarget}：${error ?? "未知错误"}`);
+        if (deleted && error) failures.push(`${deleteTarget}（附属数据）：${error}`);
       }
-      if (deleted === 0) throw new Error("没有可删除的会话");
+      if (deletedCount === 0) throw new Error(`没有成功删除任何会话${failures.length ? `（失败 ${failures.length}）` : ""}`);
       await finishSessionDeletion(anyActiveDeleted);
-      break;
-    }
-    case "workspace.remove": {
-      // 助手级移除（2026-09-03 方案 B，e42c139 回退重做）：只删当前助手的会话与
-      // map 键，不动全局 recents——话题栏分组由当前助手会话 + 激活工作区驱动，
-      // 同工作区其他助手的会话/后台运行记录/空分组历史一概不受影响。
-      const removeKey = resolve(command.workspace).toLowerCase();
-      const removeRoot = agentSessionRoot();
-      if (removeRoot) {
-        const removed = currentSessions.filter((item) => resolve(item.workspace).toLowerCase() === removeKey);
-        // 只销毁当前助手在该工作区的活记录（B 助手同工作区的后台会话不随 A 的移除销毁）。
-        for (const record of [...liveSessions.values()]) {
-          if (record.agent.id === currentAgent?.id && resolve(record.workspace).toLowerCase() === removeKey) disposeRecord(record);
-        }
-        for (const item of removed) {
-          if (!pathIsWithin(removeRoot, item.path) || !item.path.toLowerCase().endsWith(".jsonl")) continue;
-          try { await unlink(item.path); } catch { /* 会话文件可能已释放或不存在 */ }
-          // Session-scoped todo file lives next to the session list under todos/.
-          try { await unlink(join(removeRoot, "todos", `${item.id}.json`)); } catch { /* 任务文件可能不存在 */ }
-          try { await unlink(join(removeRoot, "plans", `${item.id}.json`)); } catch { /* 计划模式状态文件可能不存在 */ }
-          try { await unlink(join(removeRoot, "design-mode", `${item.id}.json`)); } catch { /* 设计模式状态文件可能不存在 */ }
-          try { await unlink(join(removeRoot, "computer-mode", `${item.id}.json`)); } catch { /* 电脑控制模式状态文件可能不存在 */ }
-          try { await unlink(join(removeRoot, "team-mode", `${item.id}.json`)); } catch { /* 团队模式状态文件可能不存在 */ }
-          try { await rm(join(removeRoot, "delegations", "teams", item.id), { recursive: true, force: true }); } catch { /* 团队成员文件可能不存在 */ }
-          try { await unlink(join(removeRoot, "checkpoints", `${item.id}.jsonl`)); } catch { /* 快照文件可能不存在 */ }
-        }
-      }
-      // 内存 map：移除当前助手对目标工作区的记忆（键不匹配不动；其他助手键不动）。
-      if (settings) {
-        settings.agentWorkspaces = forgetAgentWorkspace(settings.agentWorkspaces, settings.currentAgentId, command.workspace);
-        // 与主进程对称：legacy settings.workspace 同路径时一并清，防重启 initialize 回潮。
-        if (settings.workspace && resolve(settings.workspace).toLowerCase() === removeKey) settings.workspace = undefined;
-      }
-      // 移除的是运行时工作区：回落默认工作区（目标本身是默认则保持）——不再回
-      // landing；激活会话已被销毁，补一个空白会话保持「直接可聊」。
-      const removingActive = workspace !== undefined && resolve(workspace).toLowerCase() === removeKey;
-      if (removingActive) {
-        const removedIsDefault = resolve(resolveDefaultWorkspace(getAgentDir(), settings?.defaultWorkspace)).toLowerCase() === removeKey;
-        if (!removedIsDefault) {
-          const fallback = agentDefaultWorkspace();
-          if (fallback) {
-            workspace = fallback;
-            touchRecentWorkspace(fallback);
-          }
-        }
-        if (workspace) {
-          const sessionDir = workspaceSessionDir();
-          if (sessionDir) await createSession(SessionManager.create(workspace, sessionDir));
-        }
-      }
-      await refreshSessions();
-      emitState();
+      if (failures.length > 0) post({ type: "error", message: `已删除 ${deletedCount} 个会话，失败 ${failures.length} 个：${failures.slice(0, 3).join("；")}` });
       break;
     }
     case "state.sync": {
@@ -5146,9 +5409,10 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     }
     case "session.prompt": {
       const record = resolveTargetRecord(command.sessionId);
+      assertSessionWritable(record);
       if (!record.session.model) throw new Error("请先配置并选择模型，再发送消息");
+      const prompt = await preparePromptPayload(command.text, command.attachments, record.workspace);
       if (record.busy) throw new Error("当前话题正在执行，请等待完成或停止后再发送");
-      const prompt = await preparePromptPayload(command.text, command.attachments);
       if (prompt.images.length && !hasImageInput(record.session.model)) {
         if (!visionModel) throw new Error("当前模型不支持图片输入，请先切换多模态模型，或在设置的模型服务中启用视觉识别");
         appendVisionHint(prompt);
@@ -5183,11 +5447,12 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     }
     case "session.queue.add": {
       const record = resolveTargetRecord(command.sessionId);
+      assertSessionWritable(record);
       if (!record.session.model) throw new Error("请先配置并选择模型，再发送消息");
       const queueText = command.invocations?.length
         ? runtimeInvocationPrompt(command.invocations, command.text, record)
         : command.text;
-      const prompt = await preparePromptPayload(queueText, command.attachments);
+      const prompt = await preparePromptPayload(queueText, command.attachments, record.workspace);
       // Pi 的队列显示数组按非空文本寻址移除：空串会残留成幽灵队列项，之后任何
       // 整队重建还会把它（含图片）重新入队重复投递。纯图片排队没有正文时补一个
       // 占位文本（与文件附件折叠为路径清单同理，正文只进显示/注入，图仍完整）。
@@ -5223,6 +5488,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     case "session.queue.remove": {
       const record = command.sessionId ? liveSessions.get(command.sessionId) : activeRuntime;
       if (!record) break;
+      if (command.type === "session.queue.sendNow") assertSessionWritable(record);
       const sendNow = command.type === "session.queue.sendNow";
       const state = alignQueueState(record.session.getSteeringMessages(), record.session.getFollowUpMessages(), record);
       // 快照与点击之间队列可能已投递/变动：text 校验失败即拒绝，防止误伤相邻消息。
@@ -5259,13 +5525,14 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     }
     case "session.regenerate": {
       const record = resolveTargetRecord(command.sessionId);
+      assertSessionWritable(record);
       if (!record.session.model) throw new Error("请先配置并选择模型，再重新生成");
       if (record.busy) throw new Error("当前话题正在执行，请等待完成或停止后再重新生成");
       if (!command.text.trim() && !command.invocations?.length) throw new Error("没有可重新生成的用户消息");
       const regeneratedText = command.invocations?.length
         ? runtimeInvocationPrompt(command.invocations, command.text, record)
         : command.text.trim();
-      const regeneratedPrompt = await preparePromptPayload(regeneratedText, command.attachments);
+      const regeneratedPrompt = await preparePromptPayload(regeneratedText, command.attachments, record.workspace);
       if (regeneratedPrompt.images.length && !hasImageInput(record.session.model)) {
         if (!visionModel) throw new Error("当前模型不支持图片输入，请先切换多模态模型，或在设置的模型服务中启用视觉识别");
         appendVisionHint(regeneratedPrompt);
@@ -5417,6 +5684,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     }
     case "checkpoint.rollback": {
       const record = resolveTargetRecord(command.sessionId);
+      assertSessionWritable(record);
       const sessionId = record.session.sessionId;
       // 快照文件按 record.agent.id 算目录（同 plan-store 的教训：parked 会话
       // 切助手后不能用全局 currentAgent，否则写错目录）。
@@ -5452,7 +5720,8 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     }
     case "automation.save": {
       if (!currentAgent) throw new Error("当前没有可用 Agent");
-      const task = normalizeAutomation(command.task);
+      // 用户在表单里重新选了工作区：旧 workspaceIssue 不再成立，先清掉再归一化。
+      const task = normalizeAutomation({ ...command.task, ...(command.task.workspace ? { workspaceIssue: undefined } : {}) });
       if (!task) throw new Error("自动化任务字段校验失败");
       // 按任务自身归属落位（设置页聚合列表可能编辑其他角色的任务）。
       upsertAutomation(automationStorePath(task.agentId), { ...task, agentId: task.agentId });
@@ -5494,57 +5763,21 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         break;
       }
       const runSessionId = run.sessionId;
-      // 跨角色回看：运行会话归属任务的角色。同角色直接打开；跨角色先切换角色再打开
-      // （点击前用户已知晓会发生切换，不做隐式切换）——复用 agent.select 完整管线
-      // （含会话列表重拉），串行 await 后当前角色即任务归属角色。
-      if (run.agentId !== settings?.currentAgentId) {
-        try {
-          await handleCommand({ type: "agent.select", agentId: run.agentId });
-        } catch (error) {
-          post({ type: "error", message: `切换到角色「${run.agentName}」失败：${errorText(error)}` });
-          break;
-        }
-      }
-      // 定位会话：liveSessions 命中（仍在本进程存活）→ 原位激活；未命中 → 按 sessionId
-      // 在该角色的会话目录下扫描 JSONL 文件，走 session.open 相同的恢复逻辑。
+      // 定位会话：live 命中直接激活（不切工作区、不额外建会话）；未命中按
+      // run.agentId 的会话目录扫 JSONL，走 session.open 的跨助手恢复（agentId
+      // 显式传入，避免依赖“当前助手”）。
       const live = liveSessions.get(runSessionId);
       if (live) {
         activate(live);
         emitState();
         break;
       }
-      // 运行记录未存 workspace（历史事件流不快照运行上下文），按 sessionId 扫描任务角色的
-      // 全部工作区会话目录（<agentDir>/chatanytime-sessions/<agentId>/**）。
-      if (!agentSessionRoot()) {
-        post({ type: "error", message: "当前没有可用 Agent，无法打开会话" });
-        break;
-      }
-      const target = await findSessionFileById(await sessionDirectories(), runSessionId);
+      const target = await findSessionFileById(await agentSessionDirectories(run.agentId), runSessionId);
       if (!target) {
         post({ type: "error", message: "该运行的会话不存在（可能未持久化或已删除）" });
         break;
       }
-      const discovered = SessionManager.open(target);
-      const recordWorkspace = resolve(discovered.getCwd() ?? "");
-      if (!recordWorkspace) {
-        post({ type: "error", message: "会话缺少工作区信息，无法打开" });
-        break;
-      }
-      // 校验用 record 自己的工作区目录（不经过全局 workspace 镜像），且在任何全局
-      // 镜像改写之前：失败路径不写脏助手最后工作区（与 session.open 同纪律）。
-      const recordRoot = currentAgent ? agentWorkspaceSessionDir(getAgentDir(), currentAgent.id, recordWorkspace) : undefined;
-      if (!recordRoot || !sameSessionDir(recordRoot, dirname(target))) {
-        post({ type: "error", message: "会话路径与工作区不匹配" });
-        break;
-      }
-      const runRecordLive = liveSessions.get(discovered.getSessionId());
-      if (runRecordLive) {
-        activate(runRecordLive);
-      } else {
-        workspace = recordWorkspace;
-        rememberWorkspace(workspace);
-        await createSession(openSessionManagerForReopen(target, recordRoot, recordWorkspace));
-      }
+      await handleCommand({ type: "session.open", path: target, agentId: run.agentId });
       emitState();
       break;
     }
@@ -5559,9 +5792,6 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         break;
       }
       try {
-        if (task.agentId !== settings?.currentAgentId) {
-          await handleCommand({ type: "agent.select", agentId: task.agentId });
-        }
         const live = liveSessions.get(task.sessionId);
         if (live) {
           activate(live);
@@ -5573,7 +5803,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
           post({ type: "error", message: "关联会话不存在或尚未落盘（可能已删除）；任务仍保留，可在设置中改绑或删除。" });
           break;
         }
-        await handleCommand({ type: "session.open", path: target });
+        await handleCommand({ type: "session.open", path: target, agentId: task.agentId });
       } catch (error) {
         post({ type: "error", message: `打开关联会话失败：${errorText(error)}` });
       }
@@ -5581,6 +5811,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     }
     case "session.compact": {
       const record = resolveTargetRecord(command.sessionId);
+      assertSessionWritable(record);
       if (!record.session.model) throw new Error("请先配置并选择模型，再压缩上下文");
       if (record.busy) throw new Error("当前话题正在执行，请等待完成后再压缩上下文");
       record.busy = true;
@@ -5866,36 +6097,72 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     }
     case "agent.select": {
       if (!settings?.agents.some((agent) => agent.id === command.agentId && !agent.archived)) throw new Error("Agent 不存在或已归档");
-      // A running session is parked, not killed: switching agents while a turn
-      // is executing keeps that turn running in the background.
+      // 工作区优先：切助手不切工作区。openSession=false 只改默认助手
+      // （automation.run.open 的跨角色定位用），不打开/新建任何会话。
       const previousAgentId = settings.currentAgentId;
+      const previousAgent = currentAgent;
       const previousModel = selectedModel;
-      const previousWorkspace = workspace;
-      // 目标助手的工作区记忆：显式使用过 → 恢复各自最后工作区；从未用过 → 默认工作区（开箱直接可聊）。
-      const mappedWorkspace = settings.agentWorkspaces?.[command.agentId]
-        ? resolve(settings.agentWorkspaces[command.agentId]!)
-        : agentDefaultWorkspace();
       settings.currentAgentId = command.agentId;
       currentAgent = activeAgent();
-      workspace = mappedWorkspace;
-      if (workspace) touchRecentWorkspace(workspace);
       selectedModel = currentAgent.defaultModel ?? settings.model;
-      // 自动化任务是 Agent 级：切换后列表与调度器的 getTasks 随之读新 Agent。
       refreshAutomation();
       automationScheduler?.refresh();
+      if (command.openSession === false) {
+        // 只改默认助手：有激活会话时运行时 currentAgent 仍属于激活 record，
+        // 不能因为 automation.run.open 的跨角色定位把当前会话的助手换掉。
+        if (activeRuntime) {
+          currentAgent = activeRuntime.agent;
+          selectedModel = activeRuntime.session.model
+            ? { provider: activeRuntime.session.model.provider, id: activeRuntime.session.model.id }
+            : (currentAgent.defaultModel ?? settings.model);
+        }
+        post({
+          type: "runtime-context",
+          ...(workspace ? { workspace } : {}),
+          agentId: command.agentId,
+          ...(settings.agents.find((agent) => agent.id === command.agentId)?.name
+            ? { agentName: settings.agents.find((agent) => agent.id === command.agentId)!.name }
+            : {}),
+          ...(activeRuntime ? { sessionId: activeRuntime.session.sessionId } : {})
+        });
+        emitState();
+        break;
+      }
+      if (!workspace) {
+        postRuntimeContext();
+        emitState();
+        break;
+      }
       transitionStatus = `正在切换到 ${currentAgent.name}`;
       emitState();
       try {
-        if (workspace) await createSession(undefined, { reactivate: true });
-        else status = "就绪";
+        // 在当前工作区里找该助手最近的未归档会话；没有则新建（不跳回该助手的
+        // “最后工作区”——工作区是用户当前上下文，助手只是会话配置层）。
+        const recent = pickRecentSession(
+          currentSessions.filter((item) => item.agentId === command.agentId),
+          workspace,
+          { agents: settings.agents, excludeArchivedAgents: true }
+        );
+        let opened = false;
+        if (recent) {
+          try {
+            await handleCommand({ type: "session.open", path: recent.path, agentId: command.agentId, workspace });
+            opened = true;
+          } catch (error) {
+            void post({ type: "log", level: "warn", message: `恢复最近会话失败，已新建空白会话：${errorText(error)}` });
+          }
+        }
+        if (!opened) {
+          await createSession(SessionManager.create(workspace, agentWorkspaceSessionDir(getAgentDir(), command.agentId, workspace)), {
+            agentOverride: currentAgent,
+            workspaceOverride: workspace
+          });
+        }
       } catch (error) {
         settings.currentAgentId = previousAgentId;
-        currentAgent = activeAgent();
+        currentAgent = previousAgent;
         selectedModel = previousModel;
-        // 失败回滚：workspace 不许残留目标目录（切角色失败时仍在原工作区可聊）。
-        workspace = previousWorkspace;
         status = "Agent 切换失败";
-        // createSession 可能已按切换目标重拉过会话列表，回滚后需按原角色再刷。
         void refreshSessions().then(() => emitState()).catch((refreshError) => {
           post({ type: "log", level: "warn", message: `刷新会话列表失败：${errorText(refreshError)}` });
         });
@@ -5909,17 +6176,18 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     }
     case "agent.save":
       if (settings) {
-        if (activeRuntime?.busy && settings.currentAgentId === command.agent.id) throw new Error("当前会话正在运行，请等待完成后再保存当前 Agent");
-        const isCurrent = settings.currentAgentId === command.agent.id;
+        if (activeRuntime?.busy && activeRuntime.agent.id === command.agent.id) throw new Error("当前会话正在运行，请等待完成后再保存当前 Agent");
+        const isCurrent = activeRuntime?.agent.id === command.agent.id || (!activeRuntime && settings.currentAgentId === command.agent.id);
         settings.agents = settings.agents.some((item) => item.id === command.agent.id) ? settings.agents.map((item) => item.id === command.agent.id ? command.agent : item) : [...settings.agents, command.agent];
-        currentAgent = activeAgent();
+        if (isCurrent) currentAgent = activeAgent();
         if (isCurrent && workspace) {
-          transitionStatus = `正在应用 ${currentAgent.name} 配置`;
+          transitionStatus = `正在应用 ${command.agent.name} 配置`;
           emitState();
           try {
             // No reactivate here: applying an agent profile must rebuild the
-            // active session even when its session id is already live.
-            await createSession();
+            // active session even when its session id is already live. 用 record
+            // 自己的 workspace/agent 重建，避免把焦点格的配置应用到别的格子。
+            await createSession(undefined, { agentOverride: command.agent, workspaceOverride: activeRuntime?.workspace ?? workspace });
           } catch (error) {
             status = "Agent 配置应用失败";
             emitState();
@@ -5939,8 +6207,6 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       break;
     case "settings.save": {
       if (!settings) break;
-      // 同步默认工作区前先记住旧值：当前正落在旧默认上时下面要即时切到新默认。
-      const previousDefaultPath = resolveDefaultWorkspace(getAgentDir(), settings.defaultWorkspace);
       // 总闸是否真的翻转：只有翻转才需要重算活动集（design_* / computer_* 注入与否）。
       // 无关保存（只改模型/外观等）不碰活动集，避免白做一次前缀重算。
       const designSwitchChanged = (settings.design?.enabled !== false) !== (command.settings.design?.enabled !== false);
@@ -5989,24 +6255,51 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       // 浏览器/SSH 总闸翻转：整族注入与否变化，遍历全部 live 会话（含 parked 后台
       // 会话）重算活动集；无关保存不碰，避免白做前缀重算。放在镜像赋值之后，以最新镜像为准。
       if (browserSwitchChanged || sshSwitchChanged) for (const record of liveSessions.values()) reconcileActiveTools(record);
-      // 更换默认工作区：当前 workspace 恰为旧默认 → 即时切到新默认（新会话继承刚
-      // 保存的模型/思考等级）；否则下次落位（新建/切换/移除回落）自然生效。
-      const nextDefaultPath = resolveDefaultWorkspace(getAgentDir(), settings.defaultWorkspace);
-      const currentKey = workspace ? resolve(workspace).toLowerCase() : undefined;
-      if (currentKey && currentKey === previousDefaultPath.toLowerCase() && currentKey !== nextDefaultPath.toLowerCase()) {
-        workspace = agentDefaultWorkspace();
-        if (workspace) {
-          touchRecentWorkspace(workspace);
-          const sessionDir = workspaceSessionDir();
-          if (sessionDir) await createSession(SessionManager.create(workspace, sessionDir));
-        }
-      }
+      // 改 defaultWorkspace 只更新兜底值，不切换当前工作区（workspace-first 语义）。
       emitState();
       break;
     }
-    case "agent.archive":
-      if (settings && command.agentId !== "default") { settings.agents = settings.agents.map((item) => item.id === command.agentId ? { ...item, archived: command.archived } : item); if (settings.currentAgentId === command.agentId) { settings.currentAgentId = "default"; currentAgent = activeAgent(); } if (workspace) await createSession(undefined, { reactivate: true }); }
+    case "agent.archive": {
+      if (!settings || command.agentId === "default") break;
+      settings.agents = settings.agents.map((item) => item.id === command.agentId ? { ...item, archived: command.archived } : item);
+      // 归档的是当前/激活助手：默认助手在当前工作区打开最近会话或新建；被归档
+      // 助手的旧会话仍显示、可打开、可继续（profile 保留）。
+      const archivingActive = settings.currentAgentId === command.agentId || activeRuntime?.agent.id === command.agentId;
+      if (command.archived && archivingActive) {
+        const fallback = settings.agents.find((agent) => !agent.archived) ?? settings.agents.find((agent) => agent.id === "default");
+        if (!fallback) throw new Error("没有可用的替补助手");
+        settings.currentAgentId = fallback.id;
+        currentAgent = fallback;
+        selectedModel = currentAgent.defaultModel ?? settings.model;
+        refreshAutomation();
+        automationScheduler?.refresh();
+        if (workspace) {
+          const recent = pickRecentSession(
+            currentSessions.filter((item) => item.agentId === fallback.id),
+            workspace,
+            { agents: settings.agents, excludeArchivedAgents: true }
+          );
+          let opened = false;
+          if (recent) {
+            try {
+              await handleCommand({ type: "session.open", path: recent.path, agentId: fallback.id, workspace });
+              opened = true;
+            } catch (error) {
+              void post({ type: "log", level: "warn", message: `恢复最近会话失败，已新建空白会话：${errorText(error)}` });
+            }
+          }
+          if (!opened) {
+            await createSession(SessionManager.create(workspace, agentWorkspaceSessionDir(getAgentDir(), fallback.id, workspace)), {
+              agentOverride: fallback,
+              workspaceOverride: workspace
+            });
+          }
+        }
+      }
+      postRuntimeContext();
+      emitState();
       break;
+    }
     case "appearance.save":
       break;
     case "resources.reload":
@@ -6016,7 +6309,8 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       const server = command.server;
       const name = server.name.trim();
       if (!/^[A-Za-z0-9._-]+$/u.test(name)) throw new Error("MCP Server 名称只能包含字母、数字、点、下划线和短横线");
-      const paths = mcpConfigPaths();
+      const targetWorkspace = command.sessionId ? resolveTargetRecord(command.sessionId).workspace : workspace;
+      const paths = mcpConfigPaths(targetWorkspace);
       const original = command.original;
       await runResourceOperation("正在保存 MCP Server", async () => {
         // 计划里带「原位置删除」：编辑时切换写入范围 = 迁移条目，而不是在两个
@@ -6032,11 +6326,12 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     }
     case "mcp.server.auth": {
       if (!/^[A-Za-z0-9._-]+$/u.test(command.name)) throw new Error("MCP Server 名称无效");
-      const { project, global } = mcpConfigPaths();
+      const targetWorkspace = command.sessionId ? resolveTargetRecord(command.sessionId).workspace : workspace;
+      const { project, global } = mcpConfigPaths(targetWorkspace);
       const target = readConfiguredMcpServers(project, global).find((server) => server.name === command.name);
       if (!target) throw new Error("找不到要认证的 MCP Server");
       if (!runtimeMcp.mcpOauthEligible(target)) throw new Error("仅 HTTP（且未使用 Bearer 环境变量）的 MCP Server 支持 OAuth 认证");
-      const record = activeRuntime;
+      const record = command.sessionId ? resolveTargetRecord(command.sessionId) : activeRuntime;
       if (!record) throw new Error("请先打开工作区，再管理 MCP Server");
       await runResourceOperation("正在准备 MCP 授权", async () => {
         // 走 Pi 的 /mcp login：无凭据→发现/注册/开浏览器（openUrl→open-external）；
@@ -6054,7 +6349,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     }
     case "mcp.server.auth.clear": {
       if (!/^[A-Za-z0-9._-]+$/u.test(command.name)) throw new Error("MCP Server 名称无效");
-      const record = activeRuntime;
+      const record = command.sessionId ? resolveTargetRecord(command.sessionId) : activeRuntime;
       if (!record) throw new Error("请先打开工作区，再管理 MCP Server");
       await runResourceOperation("正在清除 MCP 凭据", async () => {
         await record.session.prompt(`/mcp logout ${command.name}`, { preflightResult: () => {} });
@@ -6065,7 +6360,8 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     case "mcp.server.toggle": {
       if (!/^[A-Za-z0-9._-]+$/u.test(command.name)) throw new Error("MCP Server 名称无效");
       await runResourceOperation(command.enabled ? "正在启用 MCP Server" : "正在停用 MCP Server", async () => {
-        const { project, global } = mcpConfigPaths();
+        const targetWorkspace = command.sessionId ? resolveTargetRecord(command.sessionId).workspace : workspace;
+        const { project, global } = mcpConfigPaths(targetWorkspace);
         if (!setMcpServerDisabled(project, command.name, !command.enabled) && !setMcpServerDisabled(global, command.name, !command.enabled)) {
           throw new Error("找不到要切换的 MCP Server");
         }
@@ -6077,7 +6373,8 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     case "mcp.server.delete": {
       if (!/^[A-Za-z0-9._-]+$/u.test(command.name)) throw new Error("MCP Server 名称无效");
       await runResourceOperation("正在删除 MCP Server", async () => {
-        const { project, global } = mcpConfigPaths();
+        const targetWorkspace = command.sessionId ? resolveTargetRecord(command.sessionId).workspace : workspace;
+        const { project, global } = mcpConfigPaths(targetWorkspace);
         const target = command.scope === "project" ? project : global;
         const other = command.scope === "project" ? global : project;
         // 作用域提示可能过期（条目已被迁移到另一个文件）：先按声明的位置删，
@@ -6092,19 +6389,23 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       // 与 hooks.save 同款轻量模式：只写文件 + 刷目录，不重建会话、不拒绝
       // 运行中的会话（发送时重读文件，下一次发送自然生效）。
       const draft = commandCatalog.validateCommandDraft(command.command);
-      const { globalDir, projectDir } = commandPaths();
-      if (command.command.scope === "project" && !workspace) throw new Error("请先打开工作区，再保存项目级命令");
+      const targetWorkspace = command.sessionId ? resolveTargetRecord(command.sessionId).workspace : workspace;
+      const { globalDir, projectDir } = commandPaths(targetWorkspace);
+      if (command.command.scope === "project" && !targetWorkspace) throw new Error("请先打开工作区，再保存项目级命令");
       commandCatalog.writeCommandFile(command.command.scope === "project" ? projectDir : globalDir, draft.name, draft.description, draft.template);
-      syncCommands();
+      workspaceResources.invalidate(targetWorkspace);
+      syncCommands(targetWorkspace);
       emitResourceCatalog();
       break;
     }
     case "command.delete": {
       if (!COMMAND_NAME_PATTERN.test(command.name)) throw new Error("命令名无效");
-      const { globalDir, projectDir } = commandPaths();
-      if (command.scope === "project" && !workspace) throw new Error("请先打开工作区，再删除项目级命令");
+      const targetWorkspace = command.sessionId ? resolveTargetRecord(command.sessionId).workspace : workspace;
+      const { globalDir, projectDir } = commandPaths(targetWorkspace);
+      if (command.scope === "project" && !targetWorkspace) throw new Error("请先打开工作区，再删除项目级命令");
       if (!commandCatalog.deleteCommandFile(command.scope === "project" ? projectDir : globalDir, command.name)) throw new Error("找不到要删除的命令文件");
-      syncCommands();
+      workspaceResources.invalidate(targetWorkspace);
+      syncCommands(targetWorkspace);
       emitResourceCatalog();
       break;
     }
@@ -6118,14 +6419,15 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         action: draft.action
       };
       validateHookRule(rule);
-      const { project, global } = hooksConfigPaths();
+      const targetWorkspace = command.sessionId ? resolveTargetRecord(command.sessionId).workspace : workspace;
+      const { project, global } = hooksConfigPaths(targetWorkspace);
       const target = draft.scope === "project" ? project : global;
       if (!target) throw new Error("请先打开工作区，再保存项目级钩子");
       // 钩子规则是事件触发时读取的缓存，不重建会话；也无需像 MCP 一样拒绝
       // 运行中的会话——用户可能正想在中途停用某条危险钩子。
       upsertHookConfig(target, rule);
-      if (draft.scope === "project" && workspace) {
-        const key = workspaceTrustKey(workspace);
+      if (draft.scope === "project" && targetWorkspace) {
+        const key = workspaceTrustKey(targetWorkspace);
         const nextTrust = applyHookSaveTrust(hookTrustData, key, rule);
         try {
           if (writeHookTrust(hooksTrustPath(), nextTrust)) hookTrustData = nextTrust;
@@ -6134,24 +6436,28 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
           post({ type: "hook-notice", kind: "warn", message: `项目钩子已保存，但信任记录写入失败：${errorText(error)}` });
         }
       }
-      refreshHooksConfig();
+      workspaceResources.invalidate(targetWorkspace);
+      refreshHooksConfig(targetWorkspace);
       emitResourceCatalog();
       break;
     }
     case "hooks.toggle": {
-      const { project, global } = hooksConfigPaths();
+      const targetWorkspace = command.sessionId ? resolveTargetRecord(command.sessionId).workspace : workspace;
+      const { project, global } = hooksConfigPaths(targetWorkspace);
       const toggled = (project ? setHookDisabled(project, command.name, !command.enabled) : false) || setHookDisabled(global, command.name, !command.enabled);
       if (!toggled) throw new Error("找不到要切换的钩子");
-      refreshHooksConfig();
+      workspaceResources.invalidate(targetWorkspace);
+      refreshHooksConfig(targetWorkspace);
       emitResourceCatalog();
       break;
     }
     case "hooks.delete": {
-      const { project, global } = hooksConfigPaths();
+      const targetWorkspace = command.sessionId ? resolveTargetRecord(command.sessionId).workspace : workspace;
+      const { project, global } = hooksConfigPaths(targetWorkspace);
       const target = command.scope === "project" ? project : global;
       if (!target || !removeHookConfig(target, command.name)) throw new Error("找不到要删除的钩子");
-      if (command.scope === "project" && workspace) {
-        const key = workspaceTrustKey(workspace);
+      if (command.scope === "project" && targetWorkspace) {
+        const key = workspaceTrustKey(targetWorkspace);
         const liveNames = project ? readConfiguredHooks(project, project).map((entry) => entry.name) : [];
         const nextTrust = pruneTrust(hookTrustData, key, liveNames);
         try {
@@ -6161,22 +6467,24 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
           post({ type: "hook-notice", kind: "warn", message: `项目钩子已删除，但信任记录清理失败：${errorText(error)}` });
         }
       }
-      refreshHooksConfig();
+      workspaceResources.invalidate(targetWorkspace);
+      refreshHooksConfig(targetWorkspace);
       emitResourceCatalog();
       break;
     }
     case "hooks.trust": {
       if (command.scope !== "project") throw new Error("全局钩子不需要审批");
-      if (!workspace) throw new Error("项目级钩子需要先打开工作区");
-      const entry = hooksRules.find((item) => item.name === command.name && item.scope === "project");
+      const targetWorkspace = command.sessionId ? resolveTargetRecord(command.sessionId).workspace : workspace;
+      if (!targetWorkspace) throw new Error("项目级钩子需要先打开工作区");
+      const entry = (command.sessionId ? workspaceResources.load(targetWorkspace).hooks : hooksRules).find((item) => item.name === command.name && item.scope === "project");
       if (!entry) throw new Error("找不到要审批的项目级钩子");
-      const key = workspaceTrustKey(workspace);
+      const key = workspaceTrustKey(targetWorkspace);
       const nextTrust = command.trusted
         ? trustRule(hookTrustData, key, entry.rule)
         : revokeRule(hookTrustData, key, command.name);
       if (!writeHookTrust(hooksTrustPath(), nextTrust)) throw new Error("钩子信任库损坏，未覆盖原文件；请先修复 pidesktop-hook-trust.json");
       hookTrustData = nextTrust;
-      refreshHooksConfig();
+      refreshHooksConfig(targetWorkspace);
       emitResourceCatalog();
       break;
     }
@@ -6186,14 +6494,15 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       break;
     }
     case "hooks.run": {
-      const entry = hooksRules.find((item) => item.name === command.name && item.scope === command.scope);
+      const targetWorkspace = command.sessionId ? resolveTargetRecord(command.sessionId).workspace : workspace;
+      const entry = workspaceResources.load(targetWorkspace).hooks.find((item) => item.name === command.name && item.scope === command.scope);
       if (!entry) throw new Error("找不到要测试的钩子");
-      if (entry.scope === "project" && evaluateHookTrust({ scope: entry.scope, workspace, rule: entry.rule, data: hookTrustData }) !== "trusted") {
+      if (entry.scope === "project" && evaluateHookTrust({ scope: entry.scope, workspace: targetWorkspace, rule: entry.rule, data: hookTrustData }) !== "trusted") {
         throw new Error("项目级钩子尚未批准，测试也不会执行；请先批准执行");
       }
       const outcome = await runtimeHooks.testHook(entry.rule, command.sample, {
         agentName: () => currentAgent?.name ?? "",
-        workspace: () => workspace,
+        workspace: () => targetWorkspace,
         post
       });
       post({ type: "hook-run", name: command.name, scope: command.scope, event: entry.rule.event, ok: outcome.ok, ...(outcome.blocked ? { blocked: outcome.blocked } : {}), detail: outcome.detail, durationMs: outcome.durationMs, source: "test", at: Date.now() });
@@ -6210,16 +6519,20 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       // 子智能体定义写入目标作用域文件（项目级用当前工作区）；刷新渲染端列表。
       // 保存后重建活动会话：按名委派靠 execute 实读的定义已即时可用，但系统提示里
       // 的可用清单与会话内新增的参考文本是创建会话时写入的，不重建就看不到改动。
-      saveSubagent(workspace, getAgentDir(), command.subagent);
-      refreshSubagents();
+      const targetWorkspace = command.sessionId ? resolveTargetRecord(command.sessionId).workspace : workspace;
+      saveSubagent(targetWorkspace, getAgentDir(), command.subagent);
+      workspaceResources.invalidate(targetWorkspace);
+      refreshSubagents(targetWorkspace);
       emitResourceCatalog();
       await refreshActiveSessionForSubagents();
       break;
     }
     case "subagent.delete": {
       const scope = command.scope as SubagentScope;
-      if (!deleteSubagent(workspace, getAgentDir(), command.id, scope)) throw new Error("找不到要删除的子智能体");
-      refreshSubagents();
+      const targetWorkspace = command.sessionId ? resolveTargetRecord(command.sessionId).workspace : workspace;
+      if (!deleteSubagent(targetWorkspace, getAgentDir(), command.id, scope)) throw new Error("找不到要删除的子智能体");
+      workspaceResources.invalidate(targetWorkspace);
+      refreshSubagents(targetWorkspace);
       emitResourceCatalog();
       break;
     }
@@ -6266,11 +6579,12 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     }
     case "memory.create": {
       if (!memoryStore) throw new Error("当前没有可用的记忆存储，请先打开一个会话");
+      const targetWorkspace = command.sessionId ? resolveTargetRecord(command.sessionId).workspace : workspace;
       memoryStore.save({
         title: command.topic,
         description: command.description,
         content: command.content,
-        ...(command.workspaceScoped && workspace ? { bindWorkspace: workspace } : {})
+        ...(command.workspaceScoped && targetWorkspace ? { bindWorkspace: targetWorkspace } : {})
       });
       break;
     }
@@ -6320,6 +6634,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     }
     case "design.new": {
       const record = resolveTargetRecord(command.sessionId);
+      assertSessionWritable(record);
       const name = sanitizeDesignName(command.name);
       if (!name) throw new Error("请提供有效的文档名");
       // 同名文档已存在则直接打开（与 design_create 幂等语义一致）。
@@ -6342,6 +6657,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     }
     case "design.edit": {
       const record = resolveTargetRecord(command.sessionId);
+      assertSessionWritable(record);
       const bound = record.designDoc;
       if (!bound) throw new Error("当前会话没有打开的设计文档");
       const applied = applyDesignOps(bound.doc, command.ops);
@@ -6354,6 +6670,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     }
     case "design.save": {
       const record = resolveTargetRecord(command.sessionId);
+      assertSessionWritable(record);
       const bound = record.designDoc;
       if (!bound) throw new Error("当前会话没有打开的设计文档");
       const fileName = writeDesign(record.workspace, bound.doc, bound.fileName);
@@ -6363,6 +6680,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     }
     case "design.export": {
       const record = resolveTargetRecord(command.sessionId);
+      assertSessionWritable(record);
       const bound = record.designDoc;
       if (!bound) throw new Error("当前会话没有打开的设计文档");
       const html = exportDesignHtml(bound.doc);
@@ -6387,8 +6705,9 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     }
     // —— 作品（Gallery）：全局清单命令（与 gallery_publish 工具共用同一实现）——
     case "gallery.publish": {
-      // 实体按钮路径：人操作，不过权限门；工作区缺省用当前会话的，缩略图同工具路径。
-      const record = liveSessions.get(activeRuntime?.session.sessionId ?? "") ?? activeRuntime;
+      // 实体按钮路径：人操作，不过权限门；目标 workspace 取命令携带的会话，
+      // 缺省回落到焦点会话（跨工作区分屏时不能在激活格的项目里发布）。
+      const record = command.sessionId ? resolveTargetRecord(command.sessionId) : (liveSessions.get(activeRuntime?.session.sessionId ?? "") ?? activeRuntime);
       const { app, thumbNote } = await publishGalleryApp(command.draft, record?.workspace ?? workspace);
       if (thumbNote) post({ type: "gallery.notice", kind: "warn", message: `已发布「${app.title}」${thumbNote}` });
       else post({ type: "gallery.notice", kind: "ok", message: `已发布作品「${app.title}」` });

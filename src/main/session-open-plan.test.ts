@@ -120,36 +120,26 @@ describe("pi-runtime session.open wiring", () => {
   const start = runtimeSource.indexOf('case "session.open": {');
   const end = runtimeSource.indexOf('case "session.rename": {', start);
   const branch = runtimeSource.slice(start, end);
-  const liveIndex = branch.indexOf('if (plan === "live")');
-  const coldIndex = branch.indexOf('if (plan === "cold")');
-  const fallbackStart = branch.indexOf("const discovered = SessionManager.open(target);");
-  const liveBlock = branch.slice(liveIndex, coldIndex);
-  const coldBlock = branch.slice(coldIndex, fallbackStart);
-  const fallbackBlock = branch.slice(fallbackStart);
 
-  it("dispatches through planSessionOpen", () => {
+  it("resolves live before touching the disk and validates the owner", () => {
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
-    expect(branch).toContain("planSessionOpen({");
-  });
-
-  it("live 分支零读盘（只 activate，不得出现 SessionManager.open）", () => {
+    const liveIndex = branch.indexOf("const fileLive =");
+    const diskIndex = branch.indexOf("await pathExists(target)");
     expect(liveIndex).toBeGreaterThan(-1);
-    expect(coldIndex).toBeGreaterThan(liveIndex);
-    expect(liveBlock).toContain("activate(");
-    expect(liveBlock).not.toContain("SessionManager.open");
+    expect(diskIndex).toBeGreaterThan(liveIndex);
+    expect(branch).toContain("activate(fileLive)");
+    expect(branch).toContain("resolveSessionOwner(target, scopes");
   });
 
-  it("cold 分支不做探测式 open（必须带 cwdOverride 只 open 一次）", () => {
-    expect(coldBlock).toContain("openSessionManagerForReopen(target, recordRoot");
-    expect(coldBlock).not.toMatch(/SessionManager\.open\(target\)/u);
+  it("cold branch opens once with cwd override (no probe-style SessionManager.open)", () => {
+    expect(branch).toContain("const header = fileExists ? readSessionHeaderLine(target) : undefined;");
+    expect(branch).toContain("openSessionManagerForReopen(target, recordRoot");
+    expect(branch).not.toContain("SessionManager.open(target);");
   });
 
-  it("fallback 分支完整保留旧的探测路径", () => {
-    expect(fallbackStart).toBeGreaterThan(coldIndex);
-    expect(fallbackBlock).toContain("SessionManager.open(target);");
-    // 两条既有防御（2026-09-16 根因）：目录校验 + 文件不存在时拒绝建 cwd=安装目录的空会话。
-    expect(fallbackBlock).toContain("会话路径与工作区不匹配");
-    expect(fallbackBlock).toContain("该会话文件不存在");
+  it("missing files are rejected before creating a cwd=install-dir empty session", () => {
+    expect(branch).toContain("该会话文件不存在");
+    expect(branch).toContain("会话路径与工作区不匹配");
   });
 });

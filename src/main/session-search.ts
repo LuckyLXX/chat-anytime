@@ -64,8 +64,8 @@ function countOccurrences(lower: string, terms: readonly string[], cap: number):
 }
 
 /**
- * 在索引上检索当前助手的会话。返回按分数降序的命中，每条带会话元数据，
- * 点击后可直接 `session.open` + 按 timestamp/role 定位。
+ * 在索引上检索全部助手的会话。返回按分数降序的命中，每条带会话元数据
+ * （含 agentId），点击后可直接 `session.open { path, agentId }` + 按 timestamp/role 定位。
  */
 export function searchSessionText(
   index: SessionTextIndex,
@@ -99,6 +99,7 @@ export function searchSessionText(
         path: session.path,
         title: session.title,
         workspace: session.workspace,
+        agentId: session.agentId,
         ...(session.archived ? { archived: true } : {}),
         modifiedAt: session.modifiedAt,
         timestamp: doc.timestamp,

@@ -129,6 +129,7 @@ describe("diffSettings", () => {
       providers: (settings) => ({ ...settings, providers: [...settings.providers, { id: "p1", name: "P", baseUrl: "https://example.com", models: [] }] }),
       agents: (settings) => ({ ...settings, agents: [...settings.agents, { ...settings.agents[0]!, id: "agent-2" }] }),
       currentAgentId: (settings) => ({ ...settings, currentAgentId: "agent-2" }),
+      lastWorkspace: (settings) => ({ ...settings, lastWorkspace: "D:/Projects/p" }),
       appearance: (settings) => ({ ...settings, appearance: { ...settings.appearance, showThinking: false } }),
       shortcuts: (settings) => ({ ...settings, shortcuts: { paletteHotkey: "CommandOrControl+Shift+Space" } })
     };

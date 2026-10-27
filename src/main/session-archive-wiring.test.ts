@@ -15,6 +15,7 @@ describe("session archive wiring contract", () => {
   const runtimeSource = readFileSync(join(__dirname, "pi-runtime.ts"), "utf8");
   const mainSource = readFileSync(join(__dirname, "index.ts"), "utf8");
   const settingsSource = readFileSync(join(__dirname, "settings.ts"), "utf8");
+  const catalogSource = readFileSync(join(__dirname, "session-catalog.ts"), "utf8");
   const protocolSource = readFileSync(join(__dirname, "..", "shared", "protocol.ts"), "utf8");
   const storeSource = readFileSync(join(__dirname, "..", "renderer", "src", "store.ts"), "utf8");
   const appSource = readFileSync(join(__dirname, "..", "renderer", "src", "App.tsx"), "utf8");
@@ -33,14 +34,14 @@ describe("session archive wiring contract", () => {
 
   describe("utility 进程（pi-runtime.ts）", () => {
     it("列表投影按 archivedSessionPaths 计算 archived（与置顶同一处）", () => {
-      expect(runtimeSource).toContain("const archivedPaths = settings?.archivedSessionPaths ?? [];");
-      expect(runtimeSource).toContain("archived: isSessionArchived(archivedPaths, item.path) || undefined,");
+      expect(catalogSource).toContain("const archivedPaths = options.archivedPaths ?? [];");
+      expect(catalogSource).toContain("archived: isSessionArchived(archivedPaths, item.path) || undefined,");
     });
 
     it("session.archive 更新内存镜像后刷新列表", () => {
       const archiveCase = runtimeSource.slice(runtimeSource.indexOf('case "session.archive": {'), runtimeSource.indexOf('case "session.delete": {'));
       expect(archiveCase).toContain("setArchivedSessionPaths(settings.archivedSessionPaths, accepted, command.archived)");
-      expect(archiveCase).toContain("await refreshSessions();");
+      expect(archiveCase).toContain("await refreshSessions([...touchedAgents]);");
       expect(archiveCase).toContain("emitState();");
     });
 
@@ -52,8 +53,8 @@ describe("session archive wiring contract", () => {
     });
 
     it("批量删除只做一次列表刷新（逐条 refreshSessions 会排出 N 轮磁盘扫描）", () => {
-      const many = runtimeSource.slice(runtimeSource.indexOf('case "session.deleteMany": {'), runtimeSource.indexOf('case "workspace.remove": {'));
-      expect(many).toContain("deleteSessionByPath(deleteTarget)");
+      const many = runtimeSource.slice(runtimeSource.indexOf('case "session.deleteMany": {'), runtimeSource.indexOf('case "state.sync": {'));
+      expect(many).toContain("deleteSessionByPath(deleteTarget, ownerAgentId)");
       expect(many).toContain("await finishSessionDeletion(anyActiveDeleted);");
       expect(many).not.toContain("refreshSessions()");
       expect(many).not.toContain("emitState()");

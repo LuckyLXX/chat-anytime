@@ -6,7 +6,7 @@ import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, Menu, N
 import { spawn } from "node-pty";
 import appIconPath from "./assets/icon.ico?asset";
 import { resolveBundledSkillsDir, resolveBundledSubagentsDir } from "./bundled-skills.js";
-import { migrateSettings, mergeBrowserSettings, normalizeJev, normalizeVision, recordAgentWorkspace, forgetAgentWorkspace, withBrowserDownloadPrefs } from "./settings.js";
+import { migrateSettings, mergeBrowserSettings, normalizeJev, normalizeVision, withBrowserDownloadPrefs } from "./settings.js";
 import { manualDownloadPrefs } from "./browser-manual-download.js";
 import { mergeSavedAppearance, settingsForRenderer } from "./appearance-assets.js";
 import { createSettingsPersistence, diffSettings, readSettingsFile, settingsPath as settingsFilePath, type SettingsPersistence } from "./settings-store.js";
@@ -96,16 +96,11 @@ let panelCorsInstalled = false;
  * 为什么放在 main：执行状态只在 utility 内存里，而面板要在「主窗口已关闭/
  * 渲染端不在线」时照样能读——main 是唯一同时连着两边的进程。
  */
-const panelState = createPanelStateCache(() => {
-  const settings = settingsCache;
-  const agent = settings?.agents.find((item) => item.id === settings.currentAgentId);
-  const workspace = settings?.agentWorkspaces?.[settings.currentAgentId];
-  return {
-    version: app.getVersion(),
-    ...(agent?.name ? { agentName: agent.name } : {}),
-    ...(workspace ? { workspace } : {})
-  };
-});
+const panelState = createPanelStateCache(() => ({
+  version: app.getVersion(),
+  ...(latestSnapshot?.agentName ? { agentName: latestSnapshot.agentName } : {}),
+  ...(latestSnapshot?.workspace ? { workspace: latestSnapshot.workspace } : {})
+}));
 // 设计导出缩略图（design_export 回执附图）：离屏渲染导出 HTML 并截图，无需真实预览标签页。
 const designSnapshotController = new DesignSnapshotController();
 /**
@@ -122,7 +117,7 @@ const terminalManager = new TerminalManager({
   publish: (terminalId, event: TerminalEventData) => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(`terminal:data:${terminalId}`, event);
   },
-  defaultCwd: () => loadSettings().workspace
+  defaultCwd: () => latestSnapshot?.workspace ?? loadSettings().lastWorkspace
 });
 
 // —— SSH：主机库（密码 safeStorage 加密，不可用时明文降级并标记）+ 连接管理 ——
@@ -376,14 +371,9 @@ function updateSettings(command: RuntimeCommand): void {
   // 脏标记口径：switch 之前的浅快照（顶层键引用级，零成本）；详见 settings-store.ts。
   const previous = { ...settings };
   switch (command.type) {
-    // 工作区按助手记忆（agentWorkspaces 双写对称：main 持久化 + utility 内存镜像共用
-    // 同一组纯函数）。settings.workspace 停写、保留为一次性迁移兜底（e42c139 回退教训）。
-    case "workspace.open": settings.agentWorkspaces = recordAgentWorkspace(settings.agentWorkspaces, settings.currentAgentId, command.path); break;
-    case "workspace.remove":
-      settings.agentWorkspaces = forgetAgentWorkspace(settings.agentWorkspaces, settings.currentAgentId, command.workspace);
-      // legacy 兜底与移除目标同路径时一并清除，否则重启 initialize 又把它拉起（回潮）。
-      if (settings.workspace && resolve(settings.workspace).toLowerCase() === resolve(command.workspace).toLowerCase()) settings.workspace = undefined;
-      break;
+    // workspace.open / session.new / session.open / agent.select 不再在命令执行前预写
+    // lastWorkspace/currentAgentId：只有 utility 真正切换成功后才经 runtime-context 落盘，
+    // 失败路径不会出现「UI 显示失败但重启后上下文已经变了」。
     // 置顶集合的重写走路径匹配键（分隔符/大小写归一）——见 session-scope 的
     // togglePinnedSessionPath：字面量比较会让「同一会话的两种写法」重复落盘。
     case "session.pin": settings.pinnedSessionPaths = togglePinnedSessionPath(settings.pinnedSessionPaths, command.path, command.pinned); break;
@@ -391,18 +381,13 @@ function updateSettings(command: RuntimeCommand): void {
     case "session.archive": settings.archivedSessionPaths = setArchivedSessionPaths(settings.archivedSessionPaths, command.paths, command.archived); break;
     // 删除是唯一能精确知道「这条会话没了」的时刻：顺手把归档集合里的死路径清掉，
     // 否则 settings.json 会随着"归档→删除"的循环无界增长。
-    // 边界：workspace.remove / 删除助手不经这里，可能在集合里留少量死路径（无功能
+    // 边界：删除助手/工作区不经过这里，可能在集合里留少量死路径（无功能
     // 影响：refreshSessions 只对真实存在的会话判定归档）。
     case "session.delete": settings.archivedSessionPaths = pruneSessionPaths(settings.archivedSessionPaths, [command.path]); break;
     case "session.deleteMany": settings.archivedSessionPaths = pruneSessionPaths(settings.archivedSessionPaths, command.paths); break;
-    case "session.new": if (command.workspace) settings.agentWorkspaces = recordAgentWorkspace(settings.agentWorkspaces, settings.currentAgentId, command.workspace); break;
-    // 分屏后台格（activate:false）不激活、不改全局镜像——与 utility 端语义对称，不记。
-    case "session.open": if (command.workspace && command.activate !== false) settings.agentWorkspaces = recordAgentWorkspace(settings.agentWorkspaces, settings.currentAgentId, command.workspace); break;
-    case "agent.select": settings.currentAgentId = command.agentId; break;
     case "agent.save": settings.agents = settings.agents.some((item) => item.id === command.agent.id) ? settings.agents.map((item) => item.id === command.agent.id ? command.agent : item) : [...settings.agents, command.agent]; break;
     case "agent.archive":
       settings.agents = settings.agents.map((item) => item.id === command.agentId && item.id !== "default" ? { ...item, archived: command.archived } : item);
-      if (settings.currentAgentId === command.agentId && command.archived) settings.currentAgentId = "default";
       break;
     // 镜像必须与 protocol 的 settings.save Pick 逐字段对齐：漏一个字段就是「保存后重启即丢」
     // （ssh 曾因这个 Pick 里有、这里没镜像而中招，2026-09）。jev 同时把用户填的密钥写进
@@ -545,6 +530,18 @@ function showHookNotification(title: string, body: string, sessionId?: string, v
 function startRuntime(): void {
   runtimeProcess = utilityProcess.fork(runtimeEntry(), [], { serviceName: "Pi 运行时", stdio: "pipe" });
   runtimeProcess.on("message", (message: RuntimeMessage) => {
+    if (message.type === "runtime-context") {
+      // utility 激活成功后的唯一持久化入口：只写上下文，不转发渲染端。
+      const source = loadSettings();
+      const previous = { ...source };
+      const nextWorkspace = typeof message.workspace === "string" && message.workspace.trim() ? message.workspace.trim() : undefined;
+      if (nextWorkspace && source.lastWorkspace !== nextWorkspace) source.lastWorkspace = nextWorkspace;
+      if (message.agentId && source.agents.some((agent) => agent.id === message.agentId && !agent.archived) && source.currentAgentId !== message.agentId) {
+        source.currentAgentId = message.agentId;
+      }
+      persistSettings().schedule(diffSettings(previous, source));
+      return;
+    }
     if (message.type === "hook-notify") {
       showHookNotification(message.title, message.body, message.sessionId, message.visible);
       return;
@@ -1046,7 +1043,7 @@ function registerIpc(): void {
   });
   ipcMain.handle("desktop:choose-workspace", async (): Promise<string | undefined> => { const result = mainWindow ? await dialog.showOpenDialog(mainWindow, { title: "选择项目工作区", properties: ["openDirectory", "createDirectory"] }) : await dialog.showOpenDialog({ title: "选择项目工作区", properties: ["openDirectory", "createDirectory"] }); return result.canceled ? undefined : result.filePaths[0]; });
   ipcMain.handle("desktop:choose-preview-file", async (): Promise<WorkspaceFilePreview | undefined> => {
-    const workspace = loadSettings().workspace;
+    const workspace = latestSnapshot?.workspace ?? loadSettings().lastWorkspace;
     if (!workspace) throw new Error("请先打开工作区，再选择预览文件");
     const result = mainWindow
       ? await dialog.showOpenDialog(mainWindow, { title: "选择预览文件", defaultPath: workspace, properties: ["openFile"], filters: [{ name: "常见代码、Markdown 和资源", extensions: ["md", "markdown", "mdx", "js", "ts", "tsx", "jsx", "json", "css", "html", "htm", "svg", "pdf", "png", "jpg", "jpeg", "gif", "webp", "bmp", "avif", "ico", "*" ] }] })
@@ -1082,13 +1079,13 @@ function registerIpc(): void {
     return png.length > 0 ? { data: png.toString("base64") } : undefined;
   });
   ipcMain.handle("desktop:read-workspace-file", async (_event, relativePath: string, workspace?: string): Promise<WorkspaceFilePreview> => {
-    const resolvedWorkspace = workspace ?? loadSettings().workspace;
+    const resolvedWorkspace = workspace ?? latestSnapshot?.workspace ?? loadSettings().lastWorkspace;
     if (!resolvedWorkspace) throw new Error("请先打开工作区，再预览文件");
     if (typeof relativePath !== "string") throw new Error("预览文件路径无效");
     return readWorkspaceFilePreview(resolvedWorkspace, relativePath);
   });
   ipcMain.handle("desktop:write-workspace-file", async (_event, relativePath: string, content: string, workspace?: string): Promise<WorkspaceFileWriteResult> => {
-    const resolvedWorkspace = workspace ?? loadSettings().workspace;
+    const resolvedWorkspace = workspace ?? latestSnapshot?.workspace ?? loadSettings().lastWorkspace;
     if (!resolvedWorkspace) throw new Error("请先打开工作区，再保存文件");
     if (typeof relativePath !== "string") throw new Error("保存文件路径无效");
     if (typeof content !== "string") throw new Error("文件内容无效");

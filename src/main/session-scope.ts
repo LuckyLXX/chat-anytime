@@ -187,15 +187,6 @@ export function pruneVanishedSessions(
 }
 
 /**
- * 会话列表“已就绪”不只是非空：还必须是按当前 Agent 的目录作用域拉取的。
- * 切换 Agent 后旧列表虽非空，但作用域已变，createSession 必须重拉——
- * 否则话题页会继续显示上一个角色的会话。
- */
-export function sessionListReadyFor(listCount: number, listAgentId: string | undefined, agentId: string | undefined): boolean {
-  return listCount > 0 && listAgentId === agentId;
-}
-
-/**
  * 侧边栏列表的稳定顺序：置顶项在前，同档按 modifiedAt 降序。
  *
  * `mergeSessionSummary` / `backfillUnpersistedSessions` 与 `refreshSessions` 原先
@@ -242,11 +233,45 @@ export interface LiveSessionSeed {
  * 回填优先沿用重建前列表里的同名条目（保留重命名/置顶/圆点），否则按 seed
  * 合成；runStatus 以 live 记录为准覆盖。无回填时原样返回入参引用。
  */
+/**
+ * 全量重建后的运行状态覆盖：把内存里 live 记录的 runStatus 落回列表行。
+ *
+ * 磁盘摘要（`summarizeAllSessions`）**不带 runStatus**——它是纯运行时状态。
+ * 旧实现里只有「未落盘」的回填行会从 live 记录取 runStatus，于是任何一次
+ * 全量刷新（回合开始/每条 assistant 消息完成/回合结束的 500ms 防抖、pin、
+ * rename、delete…）都会把**已落盘**会话的圆点抹掉：运行中的会话在回合刚开始
+ * 半秒后就不再显示「执行中」圆点，parked 会话的绿/红结果点同样活不过一个刷新
+ * （2026-10-27 用户报「运行中的会话左侧会话栏没有状态标点显示」）。
+ *
+ * 语义与 {@link patchSessionRunStatus} 一致：live 记录是该会话唯一的权威，
+ * 有 live 记录时**覆盖**（含 `undefined` —— 会话被激活后「已读」会清空圆点，
+ * 刷新不能把它从旧列表里复活），没有 live 记录的行（历史话题、已驱逐的
+ * parked 会话）原样保留。无变化时返回入参引用，避免无谓的整列重渲染。
+ */
+export function overlayLiveRunStatus(
+  list: SessionSummary[],
+  live: readonly LiveSessionSeed[]
+): SessionSummary[] {
+  if (live.length === 0 || list.length === 0) return list;
+  const statusById = new Map<string, SessionSummary["runStatus"]>();
+  for (const seed of live) statusById.set(seed.sessionId, seed.runStatus);
+  if (statusById.size === 0) return list;
+  let changed = false;
+  const next = list.map((item) => {
+    if (!statusById.has(item.id)) return item;
+    const status = statusById.get(item.id);
+    if (item.runStatus === status) return item;
+    changed = true;
+    const { runStatus: _previous, ...rest } = item;
+    return status ? { ...rest, runStatus: status } : rest;
+  });
+  return changed ? next : list;
+}
+
 export function backfillUnpersistedSessions(
   list: SessionSummary[],
   previous: readonly SessionSummary[],
-  live: readonly LiveSessionSeed[],
-  listAgentId: string | undefined
+  live: readonly LiveSessionSeed[]
 ): SessionSummary[] {
   if (live.length === 0) return list;
   const key = (path: string) => resolve(path).toLowerCase();
@@ -254,7 +279,7 @@ export function backfillUnpersistedSessions(
   const previousByKey = new Map(previous.map((item) => [key(item.path), item]));
   let next = list;
   for (const seed of live) {
-    if (!seed.path || seed.agentId !== listAgentId) continue;
+    if (!seed.path) continue;
     const seedKey = key(seed.path);
     if (listedKeys.has(seedKey)) continue;
     listedKeys.add(seedKey);
@@ -263,6 +288,7 @@ export function backfillUnpersistedSessions(
       id: seed.sessionId,
       path: seed.path,
       workspace: seed.workspace,
+      agentId: seed.agentId,
       title: seed.title ?? "新会话",
       modifiedAt: seed.activatedAt,
       messageCount: 0,

@@ -1062,6 +1062,24 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 .conversation-stats-group.live { color: var(--accent); }
 .conversation-stats-sep { flex: none; width: 1px; height: 10px; background: var(--border); }
 .composer-select-menu { position: absolute; z-index: 20; right: 0; bottom: calc(100% + 8px); display: grid; gap: 2px; padding: 6px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow-lg); }
+/* 输入框快捷角色切换：与模型/思考同级；行内主行切换角色，行尾 + 新建该角色的话题。 */
+.agent-switch-trigger > span { max-width: 116px; }
+.agent-control .composer-select-menu { left: 0; right: auto; }
+.agent-select-menu { width: min(320px, calc(100vw - 48px)); max-height: min(380px, 60vh); overflow-y: auto; overscroll-behavior: contain; }
+.agent-select-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 4px 8px 6px; color: var(--text-muted); }
+.agent-select-head strong { color: var(--text); font-size: 11px; font-weight: 650; }
+.agent-select-head small { font-size: 10px; }
+.agent-select-row { display: flex; align-items: stretch; gap: 2px; min-width: 0; border-radius: 7px; }
+.agent-select-row:hover, .agent-select-row.active { background: var(--surface-raised); }
+.composer-select-menu .agent-select-main { display: flex; flex: 1 1 auto; align-items: center; gap: 8px; min-width: 0; min-height: 40px; padding: 5px 7px; overflow: hidden; text-align: left; border: 0; border-radius: 7px; color: var(--text-muted); background: transparent; cursor: pointer; }
+.composer-select-menu .agent-select-main:hover { color: var(--text); }
+.agent-select-icon { display: grid; flex: 0 0 auto; place-items: center; width: 24px; height: 24px; border-radius: 6px; color: var(--accent-text); background: var(--accent-soft); }
+.agent-select-copy { display: grid; flex: 1 1 auto; gap: 1px; min-width: 0; }
+.agent-select-copy strong { overflow: hidden; color: var(--text); font-size: 11.5px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.agent-select-copy small { overflow: hidden; color: var(--text-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.composer-select-menu .agent-select-new { display: grid; flex: 0 0 auto; place-items: center; width: 30px; margin: 4px 4px 4px 0; padding: 0; border: 1px solid transparent; border-radius: 6px; color: var(--text-muted); background: transparent; cursor: pointer; }
+.composer-select-menu .agent-select-new:hover { color: var(--accent-text); border-color: var(--accent-border); background: var(--accent-soft); }
+.composer-select-menu .agent-select-new:disabled { opacity: .35; cursor: default; }
 .model-select-menu { width: min(280px, calc(100vw - 48px)); max-height: min(400px, 60vh); overflow-y: auto; overscroll-behavior: contain; }
 .model-select-menu .composer-menu-group > small { position: sticky; top: 0; z-index: 1; background: var(--surface); font-weight: 700; }
 .thinking-select-menu { width: 176px; }

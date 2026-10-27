@@ -5,7 +5,7 @@ import { createEmptySessionTextIndex, type SessionTextIndex } from "./session-te
 import { sessionPathKey } from "./session-scope.js";
 
 function session(id: string, title: string, modifiedAt = Date.now()): SessionSummary {
-  return { id, path: `C:/sessions/${id}.jsonl`, workspace: "C:/work", title, modifiedAt, messageCount: 2 };
+  return { id, path: `C:/sessions/${id}.jsonl`, workspace: "C:/work", agentId: "default", title, modifiedAt, messageCount: 2 };
 }
 
 function indexWith(entries: Record<string, { timestamp: number; role: "user" | "assistant"; text: string }[]>): SessionTextIndex {

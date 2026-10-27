@@ -262,12 +262,13 @@ function mergeExecutionsPreservingIdentity(previous: RuntimeSnapshot["executions
  * 新数组引用；直接透传会让订阅它的选择器（侧栏分组、分屏校验）在流式期间每帧
  * 触发。SessionSummary 全部是原始值字段，逐项浅比较即可。
  */
-function mergeSessionsPreservingIdentity(previous: RuntimeSnapshot["sessions"], incoming: RuntimeSnapshot["sessions"]): RuntimeSnapshot["sessions"] {
+export function mergeSessionsPreservingIdentity(previous: RuntimeSnapshot["sessions"], incoming: RuntimeSnapshot["sessions"]): RuntimeSnapshot["sessions"] {
   if (previous === incoming) return previous;
   if (previous.length !== incoming.length) return incoming;
   const equal = previous.every((item, index) => {
     const other = incoming[index];
     return other !== undefined && item.id === other.id && item.path === other.path && item.workspace === other.workspace
+      && item.agentId === other.agentId && item.workspaceMissing === other.workspaceMissing
       && item.title === other.title && item.modifiedAt === other.modifiedAt && item.messageCount === other.messageCount
       && item.pinned === other.pinned && item.archived === other.archived && item.runStatus === other.runStatus;
   });
@@ -275,12 +276,12 @@ function mergeSessionsPreservingIdentity(previous: RuntimeSnapshot["sessions"], 
 }
 
 /** recentWorkspaces 的身份保留：与 sessions 同理，字段全为原始值。 */
-function mergeRecentWorkspacesPreservingIdentity(previous: RuntimeSnapshot["recentWorkspaces"], incoming: RuntimeSnapshot["recentWorkspaces"]): RuntimeSnapshot["recentWorkspaces"] {
+export function mergeRecentWorkspacesPreservingIdentity(previous: RuntimeSnapshot["recentWorkspaces"], incoming: RuntimeSnapshot["recentWorkspaces"]): RuntimeSnapshot["recentWorkspaces"] {
   if (previous === incoming) return previous;
   if (previous.length !== incoming.length) return incoming;
   const equal = previous.every((item, index) => {
     const other = incoming[index];
-    return other !== undefined && item.path === other.path && item.openedAt === other.openedAt;
+    return other !== undefined && item.path === other.path && item.openedAt === other.openedAt && item.missing === other.missing;
   });
   return equal ? previous : incoming;
 }
@@ -487,7 +488,7 @@ const emptySnapshot: RuntimeSnapshot = {
   recentWorkspaces: [],
   queuedMessages: []
 };
-const emptySettings: DesktopSettings = { version: 2, thinkingLevel: "medium", accessMode: "ask", providers: [], agents: [], currentAgentId: "default", appearance: { theme: "system", themePreset: "default", customCss: "", customThemes: [], showThinking: true, showGalleryWall: true } };
+const emptySettings: DesktopSettings = { version: 2, thinkingLevel: "medium", accessMode: "ask", providers: [], agents: [], currentAgentId: "default", lastWorkspace: "", defaultWorkspace: "", appearance: { theme: "system", themePreset: "default", customCss: "", customThemes: [], showThinking: true, showGalleryWall: true } };
 const emptyResources: ResourceCatalog = { skills: [], commands: [], mcpServers: [], todos: [], memory: [], subagents: [], hooks: [], hooksEnabled: true, automation: [], automationRuns: [], gallery: [], diagnostics: [] };
 
 /**
@@ -658,7 +659,8 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
               previous.turnTiming === incoming.turnTiming && previous.executions === mergedExecutions &&
               previous.sessions === mergedSessions && previous.recentWorkspaces === mergedRecentWorkspaces &&
               previous.model === incoming.model && previous.gitBranch === incoming.gitBranch &&
-              previous.workspace === incoming.workspace &&
+              previous.workspace === incoming.workspace && previous.readOnlyReason === incoming.readOnlyReason &&
+              previous.agentId === incoming.agentId && previous.agentName === incoming.agentName &&
               previous.planMode === incoming.planMode && previous.computerMode === incoming.computerMode && previous.designMode === incoming.designMode &&
               previous.teamMode === incoming.teamMode && teamSnapshotEqual(previous.team, incoming.team) &&
               previous.sessionId === incoming.sessionId && previous.sessionFile === incoming.sessionFile &&
@@ -731,6 +733,8 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
             if (!changed && previous.busy === incoming.busy && previous.status === incoming.status &&
                 previous.turnTiming === incoming.turnTiming && previous.executions === mergedExecutions &&
                 previous.model === incoming.model && previous.workspace === incoming.workspace &&
+                previous.agentId === incoming.agentId && previous.agentName === incoming.agentName &&
+                previous.readOnlyReason === incoming.readOnlyReason &&
                 queuedMessagesEqual(previous.queuedMessages, incoming.queuedMessages) &&
                 previous.thinkingLevel === incoming.thinkingLevel && previous.planMode === incoming.planMode &&
                 previous.computerMode === incoming.computerMode &&

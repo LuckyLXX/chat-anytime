@@ -329,11 +329,13 @@ export interface DesktopSettings {
   version: 2;
   /** 全局快捷键（v1 只有命令面板的开关；见 shared/shortcuts.ts）。 */
   shortcuts?: ShortcutsSettings;
-  /** 已废弃（保留为迁移期一次性兜底）：旧版全局工作区。启动 initialize 时仅当前活跃助手消费一次（提升进 agentWorkspaces）后冻结，不再写入。 */
+  /** @deprecated（仅迁移期读取）旧版全局工作区；由 lastWorkspace 取代，不再写入。 */
   workspace?: string;
-  /** 每助手最后使用的工作区（agentId → resolve 后的绝对路径）。刻意不进 AgentProfile（agent.save 整对象覆盖会过期冲掉运行时字段）；与 pinnedSessionPaths 同级，设置页不渲染，渲染端类型零负担。 */
+  /** @deprecated（仅迁移期读取）每助手最后使用的工作区；工作区归属以会话 record.workspace 为准，不再写入/参与 UI。 */
   agentWorkspaces?: Record<string, string>;
-  /** 默认工作区：没有选择过工作区的助手所有会话落位于此；未自定义时使用内置目录 <agentDir>/workspace-default（mkdir 幂等创建）。设置页「通用」tab 可改。 */
+  /** 全局最后工作区：由 runtime-context 在激活成功后持久化；启动恢复优先读它。 */
+  lastWorkspace?: string;
+  /** 默认工作区：最近工作区全部失效时的一次性兜底；未自定义时使用内置目录 <agentDir>/workspace-default（mkdir 幂等创建）。设置页「通用」tab 可改。 */
   defaultWorkspace?: string;
   model?: { provider: string; id: string };
   thinkingLevel: ThinkingLevel;
@@ -1550,6 +1552,10 @@ export interface SessionSummary {
   id: string;
   path: string;
   workspace: string;
+  /** 创建该会话的助手 id（跨助手列表的徽标来源；显示名由渲染端用 settings.agents 解析）。 */
+  agentId: string;
+  /** 仅当会话所属工作区目录不存在/不是目录时提供（列表显示「目录不存在」）。 */
+  workspaceMissing?: boolean;
   title: string;
   modifiedAt: number;
   messageCount: number;
@@ -1576,6 +1582,8 @@ export interface SessionSearchHit {
   path: string;
   title: string;
   workspace: string;
+  /** 会话归属助手（渲染端用 settings.agents 解析显示名）。 */
+  agentId: string;
   archived?: boolean;
   /** 会话最后活动时间（排序用）。 */
   modifiedAt: number;
@@ -1595,6 +1603,8 @@ export interface RecentWorkspace {
   path: string;
   /** Epoch ms of the last time the workspace was opened. */
   openedAt: number;
+  /** 目录不存在/不是目录（空工作区也据此显示徽标并禁用新建）。 */
+  missing?: boolean;
 }
 
 export type ResourceScope = "global" | "project" | "package" | "bundled" | "temporary" | "unknown";
@@ -1887,8 +1897,10 @@ export interface AutomationTask {
   sessionTitle?: string;
   /** 一次性任务投递成功的时间；存在即表示已完成（同时 enabled=false）。 */
   completedAt?: number;
-  /** 参照「空间」；v1 供展示/DSL，执行用当前工作区。 */
+  /** 任务执行使用的工作区（完整绝对路径；缺省/失效时见 workspaceIssue）。 */
   workspace?: string;
+  /** 任务工作区无法解析时的阻塞原因；存在即显示「需重新选择工作区」，执行侧拒绝回落当前工作区。 */
+  workspaceIssue?: string;
   /** 执行时所用模型；缺省 = 该 Agent 默认模型或全局默认。 */
   model?: { provider: string; id: string };
   /** 权限；无人值守下受限模式会触发权限确认而挂起。 */
@@ -2143,6 +2155,8 @@ export interface RuntimeSnapshot {
   /** 推送序号（utility 单调递增）：renderer/main 用它丢弃重复补丁并检测丢帧。 */
   revision?: number;
   workspace?: string;
+  /** 激活会话工作区缺失时的只读原因（存在时所有写入入口与发送均被拒绝）。 */
+  readOnlyReason?: string;
   /** 当前工作区的 git 分支（非 git 项目或缺省为空时不提供）。 */
   gitBranch?: string;
   agentId: string;
@@ -2190,6 +2204,11 @@ export interface SessionPaneSnapshot {
   sessionFile?: string;
   /** 该会话的工作区（record 捕获值）：格子的发送/@提及/附件据此判断。 */
   workspace?: string;
+  /** 该会话的归属助手（跨助手分屏的徽标/资源判断）。 */
+  agentId?: string;
+  agentName?: string;
+  /** 该会话工作区缺失时的只读原因。 */
+  readOnlyReason?: string;
   model?: { provider: string; id: string };
   thinkingLevel: ThinkingLevel;
   busy: boolean;
@@ -2308,12 +2327,14 @@ export type RuntimeCommand =
    * 由主进程解析（utility 进程无 Electron API）；缺省/不存在时该来源不参与扫描。 */
   | { type: "initialize"; settings: DesktopSettings; apiKeys: Record<string, string>; bundledSkillsDir?: string; bundledSubagentsDir?: string }
   | { type: "workspace.open"; path: string }
-  | { type: "workspace.remove"; workspace: string }
-  | { type: "session.new"; workspace?: string }
+  /** 仅从最近工作区列表移除，不碰任何会话；当前工作区被 forget 时回落到最近一个存在的工作区。 */
+  | { type: "workspace.forget"; path: string }
+  /** agentId 缺省 = 当前助手；归档助手不能作为显式目标。 */
+  | { type: "session.new"; workspace?: string; agentId?: string }
   /** activate=false（分屏启动恢复的背景格）：创建 record 但不激活——全局镜像
    * 与 state 通道保持焦点格，格子数据走 session.state（watch 已先行排队）。 */
-  | { type: "session.open"; path: string; workspace?: string; activate?: boolean }
-  /** 会话全文检索（只搜当前助手的会话，user/assistant 正文）。结果经
+  | { type: "session.open"; path: string; workspace?: string; agentId?: string; activate?: boolean }
+  /** 会话全文检索（全助手会话，user/assistant 正文）。结果经
    *  session.search-result 推送；requestId 用于丢弃过期查询。 */
   | { type: "session.search"; requestId: string; query: string }
   | { type: "session.rename"; path: string; title: string }
@@ -2366,7 +2387,8 @@ export type RuntimeCommand =
   /** 渲染端重载/启动水合后请求一次全量状态（激活会话 + 所有 watched 分屏格）：
    *  补上订阅建立前错过的增量帧，并重置补丁基线。 */
   | { type: "state.sync" }
-  | { type: "agent.select"; agentId: string }
+  /** 不切换工作区；openSession=false 只改默认助手（automation.run.open 使用）。 */
+  | { type: "agent.select"; agentId: string; openSession?: boolean }
   | { type: "agent.save"; agent: AgentProfile }
   | { type: "agent.archive"; agentId: string; archived: boolean }
   | { type: "settings.save"; settings: Pick<DesktopSettings, "model" | "thinkingLevel" | "accessMode" | "appearance" | "browser" | "computer" | "design" | "ssh" | "jev" | "defaultWorkspace" | "shortcuts"> }
@@ -2396,13 +2418,13 @@ export type RuntimeCommand =
    */
   | { type: "jev.test"; baseUrl?: string; model?: string; apiKey?: string }
   | { type: "memory.save"; memory: MemorySettings }
-  | { type: "memory.create"; topic: string; description: string; content: string; workspaceScoped?: boolean }
+  | { type: "memory.create"; topic: string; description: string; content: string; workspaceScoped?: boolean; sessionId?: string }
   | { type: "memory.update"; topic: string; description: string; content: string }
   | { type: "memory.delete"; topic: string }
   /** 面板按需读取主题正文；结果经 memory.topic / memory.topic-error 推送。 */
   | { type: "memory.read"; topicId?: string; topic?: string }
-  | { type: "subagent.save"; subagent: SubagentDefinition }
-  | { type: "subagent.delete"; id: string; scope: SubagentScope }
+  | { type: "subagent.save"; subagent: SubagentDefinition; sessionId?: string }
+  | { type: "subagent.delete"; id: string; scope: SubagentScope; sessionId?: string }
   /** 仅改内置子智能体的执行模型（内置定义本体只读）；model 缺省 = 回到继承默认模型。 */
   | { type: "subagent.model"; id: string; model?: { provider: string; id: string } }
   /** 仅改内置子智能体的思考等级（内置定义本体只读）；thinkingLevel 缺省 = 回到继承主会话档位。 */
@@ -2411,23 +2433,23 @@ export type RuntimeCommand =
   | { type: "subagent.transcript"; childSessionId: string; path: string; kind?: "subagent" | "team" }
   | { type: "appearance.save"; appearance: AppearanceSettings }
   /** 保存 MCP Server：original = 编辑前的位置（名称/作用域），用于作用域迁移与保留停用态。 */
-  | { type: "mcp.server.save"; server: McpServerConfigDraft; original?: { name: string; scope: "project" | "global" } }
+  | { type: "mcp.server.save"; server: McpServerConfigDraft; original?: { name: string; scope: "project" | "global" }; sessionId?: string }
   /** 开始/重新打开 OAuth 授权（自动打开系统浏览器，回调落回应用后重连）。 */
-  | { type: "mcp.server.auth"; name: string }
+  | { type: "mcp.server.auth"; name: string; sessionId?: string }
   /** 清除某个 server 已保存的 OAuth 凭据（client 注册信息 + token）。 */
-  | { type: "mcp.server.auth.clear"; name: string }
-  | { type: "mcp.server.toggle"; name: string; enabled: boolean }
-  | { type: "mcp.server.delete"; name: string; scope: "project" | "global" }
-  | { type: "hooks.save"; hook: HookRuleDraft }
-  | { type: "hooks.toggle"; name: string; scope: "project" | "global"; enabled: boolean }
-  | { type: "hooks.delete"; name: string; scope: "project" | "global" }
-  | { type: "hooks.trust"; name: string; scope: "project" | "global"; trusted: boolean }
+  | { type: "mcp.server.auth.clear"; name: string; sessionId?: string }
+  | { type: "mcp.server.toggle"; name: string; enabled: boolean; sessionId?: string }
+  | { type: "mcp.server.delete"; name: string; scope: "project" | "global"; sessionId?: string }
+  | { type: "hooks.save"; hook: HookRuleDraft; sessionId?: string }
+  | { type: "hooks.toggle"; name: string; scope: "project" | "global"; enabled: boolean; sessionId?: string }
+  | { type: "hooks.delete"; name: string; scope: "project" | "global"; sessionId?: string }
+  | { type: "hooks.trust"; name: string; scope: "project" | "global"; trusted: boolean; sessionId?: string }
   | { type: "hooks.settings"; hooks: HooksSettings }
   /** 用样例上下文试跑一条钩子（面板“测试”按钮）；sample 是给 bash/拦截正则用的样例行。 */
-  | { type: "hooks.run"; name: string; scope: "project" | "global"; sample?: string }
+  | { type: "hooks.run"; name: string; scope: "project" | "global"; sample?: string; sessionId?: string }
   /** 自定义斜杠命令管理：写/删命令目录下的 md 模板并刷新目录（不重建会话）。 */
-  | { type: "command.save"; command: CommandDraft }
-  | { type: "command.delete"; name: string; scope: "project" | "global" }
+  | { type: "command.save"; command: CommandDraft; sessionId?: string }
+  | { type: "command.delete"; name: string; scope: "project" | "global"; sessionId?: string }
   | { type: "skill.toggle"; id: string; enabled: boolean }
   | { type: "background.kill"; id: string }
   | { type: "resources.reload" }
@@ -2473,7 +2495,7 @@ export type RuntimeCommand =
   // —— 作品（Gallery）——
   /** 发布/更新作品（实体按钮与工具共用同一形状）：同「工作区+类型+入口」重复发布 = 更新；
    *  成功后推送全量 gallery.apps。人操作，不过 AI 权限门。 */
-  | { type: "gallery.publish"; draft: GalleryDraftModel }
+  | { type: "gallery.publish"; draft: GalleryDraftModel; sessionId?: string }
   | { type: "gallery.remove"; id: string }
   /** 改标题/描述/启动命令/url/排序（patch 的非法字段被忽略）。 */
   | { type: "gallery.update"; id: string; patch: Partial<GalleryAppModel> }
@@ -2489,6 +2511,8 @@ export type RuntimeMessage =
   /** Jev 「测试连接」结果：ok=true 时带实际回答的模型与延迟，ok=false 时带可行动错误。 */
   | { type: "jev-test-result"; ok: boolean; message: string; model?: string; latencyMs?: number }
   | { type: "state"; snapshot: RuntimeSnapshot }
+  /** utility → main 的运行时上下文（激活成功后发送）：main 只持久化 lastWorkspace/currentAgentId，不转发渲染端。 */
+  | { type: "runtime-context"; workspace?: string; agentId?: string; agentName?: string; sessionId?: string }
   /** 渲染端点开一个冷会话：utility 在同步解析 JSONL 之前先发这一帧，让它立刻显示
    *  「正在打开…」而不是几百毫秒毫无反馈（大会话实测 open 需要 200–300ms）。 */
   | { type: "session.opening"; path: string; sessionId?: string }
