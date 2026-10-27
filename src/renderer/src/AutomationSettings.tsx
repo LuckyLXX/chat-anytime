@@ -332,16 +332,16 @@ function AutomationForm({ initial, models, providers, settings, workspacePath, a
               <label>关联会话<select value={sessionId} onChange={(event) => setSessionId(event.target.value)}><option value="">请选择会话</option>{sessionChoices.map((choice) => { const owner = choice.agentId !== ownerAgentId ? settings.agents.find((agent) => agent.id === choice.agentId)?.name ?? choice.agentId : undefined; return <option key={choice.id} value={choice.id}>{choice.title}{choice.id === activeSessionId ? "（当前）" : ""}{owner ? ` · ${owner}` : ""}</option>; })}</select></label>
             ) : (
               <div className="automation-workspace-field">
-                <label htmlFor="automation-workspace-select">空间</label>
-                <div className="automation-workspace-controls">
-                  <select id="automation-workspace-select" data-control="automation-workspace" value={workspace} title={workspace || undefined} onChange={(event) => setWorkspace(event.target.value)}>
-                    {workspace === "" ? <option value="">请选择工作区</option> : null}
-                    {workspaceChoices.map((choice) => (
-                      <option key={workspaceKey(choice.path)} value={choice.path} title={choice.path}>{workspaceOptionLabel(choice, workspaceChoicePaths)}</option>
-                    ))}
-                  </select>
-                  <button type="button" className="secondary-button" data-control="automation-choose-workspace" title="浏览任意文件夹作为任务工作区" onClick={() => void browseWorkspace()}>浏览…</button>
-                </div>
+                {/* select 必须留在 label 里：label 的 11px 字号是下拉与选项的字号来源，
+                    移出 label 后会继承到根字号（16px）——原生下拉会变成刺眼的大字。
+                    「浏览…」放 label 外，避开 label 把点击转发给 select 的默认行为。 */}
+                <label>空间<select data-control="automation-workspace" value={workspace} title={workspace || undefined} onChange={(event) => setWorkspace(event.target.value)}>
+                  {workspace === "" ? <option value="">请选择工作区</option> : null}
+                  {workspaceChoices.map((choice) => (
+                    <option key={workspaceKey(choice.path)} value={choice.path} title={choice.path}>{workspaceOptionLabel(choice, workspaceChoicePaths)}</option>
+                  ))}
+                </select></label>
+                <button type="button" className="secondary-button" data-control="automation-choose-workspace" title="浏览任意文件夹作为任务工作区" onClick={() => void browseWorkspace()}>浏览…</button>
               </div>
             )}
           </div>
