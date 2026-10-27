@@ -151,6 +151,35 @@ export function resolveNewSessionDefaults<TModel>(hasExistingMessages: boolean, 
 }
 
 /**
+ * 「还没跑起来」的空话题判定（切换助手时的核心口径）。
+ *
+ * 新建话题在**首条 user/assistant 消息之前**没有真正的归属：当时绑定的助手只是
+ * 建会话时的默认值，Pi 也还没写会话文件（`_persist` 挂在 hasConversation 上）。
+ * 这段时间里切助手应当**就地换角色**（同一 sessionId 在新助手的会话目录下重建），
+ * 而不是打开该助手的历史会话——否则用户在新建话题里想先选角色，一选就被带去
+ * 别的会话，输入框的助手切换等于废掉。
+ *
+ * 四条判据缺一不可：忙碌中不算（已经跑过至少一轮，消息被清空的极端情况不能当
+ * 空话题）、没有消息、没有排队消息、会话文件不存在（Pi 只在首条 user/assistant
+ * 消息时落盘，文件存在就是「已落定」的硬证据）。
+ */
+export interface UnstartedSessionProbe {
+  busy: boolean;
+  messageCount: number;
+  steeringCount: number;
+  followUpCount: number;
+  sessionFileExists: boolean;
+}
+
+export function isUnstartedSession(probe: UnstartedSessionProbe): boolean {
+  return !probe.busy
+    && probe.messageCount === 0
+    && probe.steeringCount === 0
+    && probe.followUpCount === 0
+    && !probe.sessionFileExists;
+}
+
+/**
  * 会话文件是否落在该会话目录下（绝对路径 + 大小写不敏感；Windows/macOS 文件名
  * 大小写不敏感，Pi 的落盘目录由 cwd 解析而来，两侧写法可能不同）。
  */

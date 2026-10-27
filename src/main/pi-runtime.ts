@@ -128,7 +128,7 @@ import { buildAutomationTools, type AutomationCreateInput, type AutomationSessio
 import { buildAutomationReminderText } from "./automation-delivery.js";
 import { resolveVisionModel } from "./vision.js";
 import { buildResourceCatalog } from "./resource-catalog.js";
-import { agentWorkspaceSessionDir, backfillUnpersistedSessions, isSessionArchived, isSessionPinned, mergeSessionSummary, overlayLiveRunStatus, pruneVanishedSessions, sameSessionDir, sessionFileMatchesId, setArchivedSessionPaths, sortSessionSummaries, togglePinnedSessionPath, type LiveSessionSeed } from "./session-scope.js";
+import { agentWorkspaceSessionDir, backfillUnpersistedSessions, isSessionArchived, isSessionPinned, isUnstartedSession, mergeSessionSummary, overlayLiveRunStatus, pruneVanishedSessions, sameSessionDir, sessionFileMatchesId, setArchivedSessionPaths, sortSessionSummaries, togglePinnedSessionPath, type LiveSessionSeed } from "./session-scope.js";
 import { listSessionScopes, pickRecentSession, resolveSessionOwner, summarizeAllSessions, type SessionScope, type WorkspaceExistsEntry } from "./session-catalog.js";
 import { createWorkspaceResources } from "./workspace-resources.js";
 import { listSessionSummaries, loadSessionIndex, readSessionHeaderLine, saveSessionIndex, summarizeLiveSession, type CachedSessionSummary } from "./session-summary-cache.js";
@@ -2288,12 +2288,13 @@ function ensureSessionInList(record: SessionRuntimeRecord): void {
   // A freshly created session always carries a file; guard the optional for safety.
   const path = manager.getSessionFile();
   if (!path) return;
+  const title = manager.getSessionName() ?? "新会话";
   const incoming: SessionSummary = {
     id: manager.getSessionId(),
     path,
     workspace: record.workspace,
     agentId: record.agent.id,
-    title: "新会话",
+    title,
     modifiedAt: Date.now(),
     messageCount: 0
   };
@@ -4025,6 +4026,30 @@ function sessionReadyStatus(hasModel: boolean, usedFallback: boolean): string {
 }
 
 /**
+ * 激活记录是否还是「未开始」的空话题（口径见 session-scope 的 isUnstartedSession）。
+ * 会话文件存在性读失败时按「已落定」处理：宁可按旧路径打开历史会话，也不把
+ * 一个已经有内容的会话重建掉。
+ */
+function isUnstartedRecord(record: SessionRuntimeRecord): boolean {
+  const sessionFile = record.session.sessionManager.getSessionFile();
+  let sessionFileExists = false;
+  if (sessionFile) {
+    try {
+      sessionFileExists = existsSync(sessionFile);
+    } catch {
+      sessionFileExists = true;
+    }
+  }
+  return isUnstartedSession({
+    busy: record.busy,
+    messageCount: record.session.state.messages.length,
+    steeringCount: record.session.getSteeringMessages().length,
+    followUpCount: record.session.getFollowUpMessages().length,
+    sessionFileExists
+  });
+}
+
+/**
  * Build a session and make it the active one. The previously active session is
  * parked, not disposed: it keeps running in the background and can be
  * reactivated later. When the resolved session is already live:
@@ -4069,6 +4094,12 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     emitState();
     return;
   }
+  // 同 id 重建（空话题换角色、agent.save 应用配置）会复用同一渲染绑定：dispose
+  // 会把会话从 renderedSessions/pendingWatchSessions 里摘掉，而渲染端的 watch
+  // 注册是粘性的（sessionId 未变不会重发），不恢复会让分屏的该格在后台冻结。
+  const rebuildPaneBinding = existing
+    ? { rendered: renderedSessions.has(existing.session.sessionId), pending: pendingWatchSessions.has(existing.session.sessionId) }
+    : undefined;
   if (existing) disposeRecord(existing, { keepBrowserTab: true, cacheForReopen: false });
 
   const settingsManager = withCacheWarmingOff(SettingsManager.create(recordWorkspace, getAgentDir()));
@@ -4706,6 +4737,10 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   // 之后一律由工具事件驱动（applyToolSetChange），不再有任何固定延时猜测。
   applyToolSetChange(record);
   scheduleLiveEmit(true);
+  // 恢复同 id 重建前的格子绑定（见 rebuildPaneBinding）：pending 先恢复，
+  // 让下面的「启动恢复分屏格子」逻辑照常把它转成 rendered。
+  if (rebuildPaneBinding?.pending) pendingWatchSessions.add(result.session.sessionId);
+  if (rebuildPaneBinding?.rendered) renderedSessions.add(result.session.sessionId);
   // 启动恢复的分屏格子：watch 先于会话 live 到达（pendingWatchSessions），
   // 记录建立后补注册并立即推送水合帧。该记录随即被 activate，激活期间的
   // 更新走 state 通道，失焦后自然切回 session.state。
@@ -6131,6 +6166,58 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       if (!workspace) {
         postRuntimeContext();
         emitState();
+        break;
+      }
+      // 空话题（新建后还没「跑起来」）里切助手 = 就地换角色，不是打开该助手的
+      // 最近会话：用户在新建话题里想先选角色，旧实现会把他直接带去另一个会话，
+      // 输入框的助手切换因此等于废掉（2026-10-27 用户报）。用同一个 sessionId
+      // 在新助手的会话目录下重建：渲染端的输入框草稿与分屏绑定都按 sessionId
+      // 存，整个切换对用户只是「同一行换了角色徽标」。模型/思考等级回落到新助手
+      // 的默认（与切到该助手任一会话的语义一致）。
+      // 例外：置顶/归档是用户显式动作、按**路径**落盘，重建会换路径——键失联
+      // 后 prune 又故意保留这类行，会留下点了报错的死行；这种边缘情况宁可走
+      // 旧的「打开最近会话」，也不静默丢用户标记。
+      const unstartedPath = activeRuntime?.session.sessionManager.getSessionFile();
+      const unstartedMarked = Boolean(unstartedPath && (isSessionPinned(settings.pinnedSessionPaths ?? [], unstartedPath) || isSessionArchived(settings.archivedSessionPaths ?? [], unstartedPath)));
+      if (activeRuntime && activeRuntime.agent.id !== command.agentId && !unstartedMarked && isUnstartedRecord(activeRuntime)) {
+        const previousRuntime = activeRuntime;
+        const previousSessionName = previousRuntime.session.sessionManager.getSessionName();
+        transitionStatus = `正在切换到 ${currentAgent.name}`;
+        emitState();
+        try {
+          const nextManager = SessionManager.create(previousRuntime.workspace, agentWorkspaceSessionDir(getAgentDir(), command.agentId, previousRuntime.workspace), { id: previousRuntime.session.sessionId });
+          // 空话题可能被用户改过名（Pi 的 session_info 还在内存里）：名字是用户的，
+          // 换角色不该把它丢掉。
+          if (previousSessionName) nextManager.appendSessionInfo(previousSessionName);
+          // inherit*：换角色不是换话题，设计/电脑控制/团队模式应当跟着走
+          // （session.new 的同一套语义，见 createSession 的注释）。
+          await createSession(nextManager, {
+            agentOverride: currentAgent,
+            workspaceOverride: previousRuntime.workspace,
+            inheritDesignMode: previousRuntime.designMode.enabled,
+            inheritComputerMode: previousRuntime.computerMode.enabled,
+            inheritTeamMode: previousRuntime.teamMode.enabled
+          });
+          // 旧空话题在内存列表里的那一行指向已经不存在的旧路径（ensureSessionInList
+          // 只按路径 upsert，不会把它换掉）；内存级清一次（零 I/O），侧栏不会
+          // 短暂出现两行「新会话」。
+          pruneVanishedSessionRows();
+        } catch (error) {
+          // 同 id 重建可能已经把旧记录销毁了：这里只能恢复默认助手与状态，
+          // 用户重新新建话题即可（与会话被删除后的落点一致）。
+          settings.currentAgentId = previousAgentId;
+          currentAgent = previousAgent;
+          selectedModel = previousModel;
+          status = "Agent 切换失败";
+          void refreshSessions().then(() => emitState()).catch((refreshError) => {
+            post({ type: "log", level: "warn", message: `刷新会话列表失败：${errorText(refreshError)}` });
+          });
+          emitState();
+          throw error;
+        } finally {
+          transitionStatus = undefined;
+          emitState();
+        }
         break;
       }
       transitionStatus = `正在切换到 ${currentAgent.name}`;

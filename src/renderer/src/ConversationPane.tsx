@@ -2420,7 +2420,7 @@ export const ConversationPane = memo(function ConversationPane({
                 {agentOptions.map((agent) => {
                   const current = agent.id === data.agentId;
                   return <div className={`agent-select-row${current ? " active" : ""}`} key={agent.id}>
-                    <button className="agent-select-main" type="button" role="menuitemradio" aria-checked={current} title={current ? `当前助手：${agent.name}` : `切换到 ${agent.name}（打开其最近会话或新建）`} onClick={() => void switchAgent(agent.id)}>
+                    <button className="agent-select-main" type="button" role="menuitemradio" aria-checked={current} title={current ? `当前助手：${agent.name}` : `切换到 ${agent.name}`} onClick={() => void switchAgent(agent.id)}>
                       <span className="agent-select-icon"><UserRound size={14} /></span>
                       <span className="agent-select-copy"><strong>{agent.name}</strong><small>{agent.description || "未填写说明"}</small></span>
                       {current && <Check size={13} />}

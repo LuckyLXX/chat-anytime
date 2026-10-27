@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentWorkspaceSessionDir, backfillUnpersistedSessions, isSessionArchived, isSessionPinned, mergeSessionSummary, normalizeArchivedSessionPaths, normalizePinnedSessionPaths, overlayLiveRunStatus, pruneSessionPaths, pruneVanishedSessions, resolveNewSessionDefaults, sameSessionDir, sessionFileMatchesId, sessionPathKey, setArchivedSessionPaths, sortSessionSummaries, togglePinnedSessionPath, workspaceHash, type LiveSessionSeed } from "./session-scope.js";
+import { agentWorkspaceSessionDir, backfillUnpersistedSessions, isSessionArchived, isSessionPinned, isUnstartedSession, mergeSessionSummary, normalizeArchivedSessionPaths, normalizePinnedSessionPaths, overlayLiveRunStatus, pruneSessionPaths, pruneVanishedSessions, resolveNewSessionDefaults, sameSessionDir, sessionFileMatchesId, sessionPathKey, setArchivedSessionPaths, sortSessionSummaries, togglePinnedSessionPath, workspaceHash, type LiveSessionSeed } from "./session-scope.js";
 
 describe("Agent workspace session scope", () => {
   it("keeps agents and workspaces in separate deterministic directories", () => {
@@ -31,6 +31,18 @@ describe("Agent workspace session scope", () => {
   it("uses Agent defaults for new sessions and leaves history to Pi restoration", () => {
     expect(resolveNewSessionDefaults(false, "agent-model", "global-model", "high", "low")).toEqual({ model: "agent-model", thinkingLevel: "high" });
     expect(resolveNewSessionDefaults(true, "agent-model", "global-model", "high", "low")).toEqual({ model: undefined, thinkingLevel: undefined });
+  });
+
+  it("treats only a never-run topic as unstarted (blank) for agent switching", () => {
+    // 新建话题：无消息、无排队、忙碌否、未落盘 → 可以就地换助手。
+    const blank = { busy: false, messageCount: 0, steeringCount: 0, followUpCount: 0, sessionFileExists: false };
+    expect(isUnstartedSession(blank)).toBe(true);
+    // 任何一项「已经动过」都必须落定：忙碌、有消息、有排队消息、会话文件已生成。
+    expect(isUnstartedSession({ ...blank, busy: true })).toBe(false);
+    expect(isUnstartedSession({ ...blank, messageCount: 1 })).toBe(false);
+    expect(isUnstartedSession({ ...blank, steeringCount: 1 })).toBe(false);
+    expect(isUnstartedSession({ ...blank, followUpCount: 1 })).toBe(false);
+    expect(isUnstartedSession({ ...blank, sessionFileExists: true })).toBe(false);
   });
 
   it("merges a fresh session into the sidebar list without touching existing entries", () => {
