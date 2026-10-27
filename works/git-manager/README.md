@@ -47,7 +47,7 @@ node bridge.mjs            # 默认 8791；端口被占就换：node bridge.mjs 
 | `/api/health` | 存活探针（作品声明的 `url` 就是它） |
 | `/api/repo?path=` | 仓库概要：根目录、当前分支、HEAD、origin |
 | `/api/refs?path=` | 分支 / 远程分支 / 标签 |
-| `/api/log?path=&skip=&limit=&all=` | 提交列表（新→旧，默认全部分支，单页上限 200） |
+| `/api/log?path=&skip=&limit=&all=&ref=` | 提交列表（新→旧，默认全部分支，单页上限 200）；`ref` 存在时只列该引用可达的提交（优先于 `all`） |
 | `/api/commit?path=&sha=` | 单提交详情 + 变更文件（状态、增删行） |
 | `/api/diff?path=&sha=&file=` | 单文件补丁；`mode=worktree\|index\|untracked` 看未提交改动 |
 | `/api/status?path=` | 工作区状态（三类改动 + 领先/落后上游） |

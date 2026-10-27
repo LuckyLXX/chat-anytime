@@ -42,6 +42,9 @@ const dom = {
   repoMenuList: document.getElementById("repoMenuList"),
   repoPathInput: document.getElementById("repoPathInput"),
   repoPathAdd: document.getElementById("repoPathAdd"),
+  repoState: document.getElementById("repoState"),
+  repoStateText: document.getElementById("repoStateText"),
+  repoStateUp: document.getElementById("repoStateUp"),
   searchInput: document.getElementById("searchInput"),
   themeBtn: document.getElementById("themeBtn"),
   refreshBtn: document.getElementById("refreshBtn"),
@@ -51,14 +54,15 @@ const dom = {
   tagList: document.getElementById("tagList"),
   tagCount: document.getElementById("tagCount"),
   repoMeta: document.getElementById("repoMeta"),
-  clearRefBtn: document.getElementById("clearRefBtn"),
-  listTitle: document.getElementById("listTitle"),
+  listHead: document.getElementById("listHead"),
   listSub: document.getElementById("listSub"),
+  filterBox: document.getElementById("filterBox"),
+  filterPill: document.getElementById("filterPill"),
+  filterPillText: document.getElementById("filterPillText"),
+  filterMenu: document.getElementById("filterMenu"),
   listScroll: document.getElementById("listScroll"),
   listRows: document.getElementById("listRows"),
   listSentinel: document.getElementById("listSentinel"),
-  allBranches: document.getElementById("allBranches"),
-  allBranchesToggle: document.getElementById("allBranchesToggle"),
   detailPane: document.getElementById("detailPane"),
   toast: document.getElementById("toast")
 };
@@ -92,12 +96,33 @@ function icon(path, extraClass) {
   return svg;
 }
 
+/** 概览与提交头共用的小标签（一行装下元信息）。 */
+function chipNode(label, options = {}) {
+  const node = el("span", `chip${options.accent ? " is-accent" : ""}`);
+  if (options.icon) node.append(icon(options.icon, "ico"));
+  node.append(el("span", undefined, label));
+  return node;
+}
+
+function chipButton(label, onClick, options = {}) {
+  const node = el("button", `chip${options.accent ? " is-accent" : ""}`);
+  node.type = "button";
+  if (options.title) node.title = options.title;
+  if (options.icon) node.append(icon(options.icon, "ico"));
+  node.append(el("span", undefined, label));
+  node.addEventListener("click", onClick);
+  return node;
+}
+
 const ICONS = {
   branch: "M6 3v12M6 9h6a3 3 0 0 0 3-3V4M6 4v0",
   tag: "M20.6 12.3 12.3 20.6a2 2 0 0 1-2.8 0l-6.1-6.1a2 2 0 0 1-.6-1.4V4.5A1.5 1.5 0 0 1 4.3 3h8.6a2 2 0 0 1 1.4.6l6.3 6.3a2 2 0 0 1 0 2.4zM7.5 7.5h.01",
   clock: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM12 7.5V12l3 2",
   file: "M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8zM14 3v5h5",
-  plug: "M9 3v6M15 3v6M7 9h10v3a5 5 0 0 1-5 5v4"
+  plug: "M9 3v6M15 3v6M7 9h10v3a5 5 0 0 1-5 5v4",
+  up: "M12 19V5M5 12l7-7 7 7",
+  check: "m20 6-11 11L5 12",
+  close: "M6 6l12 12M18 6 6 18"
 };
 
 function clear(node) {
@@ -258,7 +283,29 @@ const state = {
 function renderRepoButton() {
   dom.repoName.textContent = state.repo ? state.repo.name : "未选择仓库";
   dom.repoBranch.textContent = state.repo?.branch && !state.repo.detached ? state.repo.branch : state.repo?.detached ? "分离 HEAD" : "";
-  dom.repoButton.title = state.repo ? state.repo.root : "选择要查看的仓库";}
+  dom.repoButton.title = state.repo ? state.repo.root : "选择要查看的仓库";
+}
+
+/** 顶栏的仓库状态胶囊：工作区改动数 + 领先/落后，点一下进工作区。 */
+function renderRepoState() {
+  if (!state.repo) {
+    dom.repoState.hidden = true;
+    return;
+  }
+  const status = state.status;
+  const total = status ? status.stats.staged + status.stats.unstaged + status.stats.untracked : undefined;
+  dom.repoState.hidden = false;
+  dom.repoState.classList.toggle("is-dirty", Boolean(total));
+  dom.repoState.classList.toggle("is-clean", total === 0);
+  dom.repoStateText.textContent = total === undefined ? "读取状态" : total === 0 ? "工作区干净" : `${total} 处改动`;
+  dom.repoStateUp.hidden = !status?.hasUpstream;
+  dom.repoStateUp.textContent = status?.hasUpstream ? `↑${status.ahead} ↓${status.behind}` : "";
+  dom.repoState.title = total === undefined
+    ? "正在读取工作区状态"
+    : total === 0
+      ? "工作区没有未提交改动，点击查看工作区"
+      : `${total} 处未提交改动，点击查看工作区`;
+}
 
 function renderRepoMenu() {
   clear(dom.repoMenuList);
@@ -284,6 +331,20 @@ function closeRepoMenu() {
   dom.repoButton.setAttribute("aria-expanded", "false");
 }
 
+/** 侧栏点分支 / 标签：把提交范围收窄到这个引用，并确保回到提交视图。 */
+function applyRefFilter(name) {
+  state.ref = name;
+  prefs.ref = name;
+  state.allBranches = false;
+  prefs.allBranches = false;
+  savePrefs();
+  closeFilterMenu();
+  if (state.view !== "log") setView("log", { load: false });
+  renderFilterPill();
+  renderSidebar();
+  void reloadCommits();
+}
+
 function renderSidebar() {
   clear(dom.branchList);
   // 排序：当前分支 → 本地分支 → 远程分支，同组按名字（面板一打开就知道自己在哪）。
@@ -294,28 +355,14 @@ function renderSidebar() {
   });
   dom.branchCount.textContent = String(branches.length);
   for (const branch of branches) {
-    const item = el("button", `ref-item${branch.current ? " is-current" : ""}`);
+    const selected = state.ref === branch.name;
+    const item = el("button", `ref-item${branch.current ? " is-current" : ""}${selected ? " is-selected" : ""}`);
     item.type = "button";
     item.title = `${branch.name} · ${branch.sha.slice(0, 10)}`;
-    const iconNode = icon(ICONS.branch);
-    iconNode.setAttribute("class", "ico");
-    item.append(iconNode);
-    const name = el("span", "ref-name", branch.name);
-    item.append(name);
+    item.append(icon(ICONS.branch, "ico"));
+    item.append(el("span", "ref-name", branch.name));
     if (branch.kind === "remote") item.append(el("span", "badge", "远程"));
-    item.append(el("span", "ref-sha", branch.sha.slice(0, 7)));
-    item.addEventListener("click", () => {
-      state.ref = branch.name;
-      prefs.ref = branch.name;
-      if (branch.kind === "local") {
-        state.allBranches = false;
-        prefs.allBranches = false;
-        dom.allBranches.checked = false;
-      }
-      savePrefs();
-      renderClearRef();
-      void reloadCommits();
-    });
+    item.addEventListener("click", () => applyRefFilter(branch.name));
     dom.branchList.append(item);
   }
 
@@ -323,21 +370,13 @@ function renderSidebar() {
   const tags = state.refs.tags ?? [];
   dom.tagCount.textContent = String(tags.length);
   for (const tag of tags) {
-    const item = el("button", "ref-item");
+    const selected = state.ref === tag.name;
+    const item = el("button", `ref-item${selected ? " is-selected" : ""}`);
     item.type = "button";
     item.title = `${tag.name} · ${tag.sha.slice(0, 10)}`;
-    const iconNode = icon(ICONS.tag);
-    iconNode.setAttribute("class", "ico");
-    item.append(iconNode);
+    item.append(icon(ICONS.tag, "ico"));
     item.append(el("span", "ref-name", tag.name));
-    item.append(el("span", "ref-sha", tag.sha.slice(0, 7)));
-    item.addEventListener("click", () => {
-      state.ref = tag.name;
-      prefs.ref = tag.name;
-      savePrefs();
-      renderClearRef();
-      void reloadCommits();
-    });
+    item.addEventListener("click", () => applyRefFilter(tag.name));
     dom.tagList.append(item);
   }
 
@@ -345,7 +384,6 @@ function renderSidebar() {
   const facts = state.repo
     ? [
         ["路径", state.repo.root],
-        ["分支", state.repo.detached ? "分离 HEAD" : state.repo.branch || "—"],
         ["HEAD", state.repo.head ? state.repo.head.slice(0, 10) : "空仓库"],
         ["远端", state.repo.remote ?? "—"]
       ]
@@ -354,12 +392,6 @@ function renderSidebar() {
     dom.repoMeta.append(el("dt", undefined, key));
     dom.repoMeta.append(el("dd", undefined, value));
   }
-  renderClearRef();
-}
-
-function renderClearRef() {
-  dom.clearRefBtn.hidden = !state.ref;
-  dom.clearRefBtn.textContent = state.ref ? `清除过滤：${state.ref}` : "";
 }
 
 // —— 渲染：提交列表 ——
@@ -452,19 +484,20 @@ function filteredCommits() {
 
 function renderList() {
   clear(dom.listRows);
-  if (state.view === "status") {
+  const statusView = state.view === "status";
+  dom.listHead.classList.toggle("is-status", statusView);
+  renderFilterPill();
+  if (statusView) {
     renderStatusList();
     return;
   }
   const items = filteredCommits();
   const rows = layoutGraph(items.map(({ commit }) => commit));
-  dom.listTitle.textContent = state.query ? `搜索结果（${items.length}）` : "提交历史";
   dom.listSub.textContent = state.commits.length
     ? state.query
       ? `在已加载的 ${state.commits.length} 条里匹配${state.hasMore ? "（更早的提交还没加载）" : ""}`
       : `已加载 ${state.commits.length} 条${state.hasMore ? " · 滚动继续加载" : ""}`
     : "";
-  dom.allBranchesToggle.classList.remove("is-hidden");
 
   if (state.loading && state.commits.length === 0) {
     for (let index = 0; index < 8; index += 1) {
@@ -494,6 +527,63 @@ function renderList() {
   }
 }
 
+// —— 提交范围（过滤 chip） ——
+
+function closeFilterMenu() {
+  dom.filterMenu.hidden = true;
+  dom.filterPill.setAttribute("aria-expanded", "false");
+}
+
+function renderFilterPill() {
+  const statusView = state.view === "status";
+  dom.filterPill.dataset.mode = statusView ? "refresh" : "scope";
+  dom.filterPill.classList.toggle("is-active", !statusView && (!state.allBranches || Boolean(state.ref)));
+  if (statusView) {
+    dom.filterPill.removeAttribute("aria-haspopup");
+    dom.filterPill.removeAttribute("aria-expanded");
+    dom.filterPillText.textContent = "刷新状态";
+    dom.filterPill.title = "重新读取工作区状态";
+    return;
+  }
+  dom.filterPill.setAttribute("aria-haspopup", "listbox");
+  dom.filterPill.setAttribute("aria-expanded", String(!dom.filterMenu.hidden));
+  dom.filterPillText.textContent = state.ref ? `仅 ${state.ref}` : state.allBranches ? "所有分支" : "当前分支";
+  dom.filterPill.title = state.ref ? `提交范围：${state.ref}（点开可清除）` : "选择提交范围";
+}
+
+function renderFilterMenu() {
+  clear(dom.filterMenu);
+  const branch = state.repo?.detached ? undefined : state.repo?.branch;
+  const options = [
+    { key: "all", label: "所有分支", icon: ICONS.branch, active: state.allBranches && !state.ref },
+    ...(branch ? [{ key: "current", label: `仅当前分支 · ${branch}`, icon: ICONS.branch, active: !state.allBranches && !state.ref }] : []),
+    ...(state.ref ? [{ key: "clear", label: `清除筛选 · ${state.ref}`, icon: ICONS.close }] : [])
+  ];
+  dom.filterMenu.append(el("div", "filter-menu-head", "提交范围"));
+  for (const option of options) {
+    const item = el("button", `filter-item${option.active ? " is-active" : ""}`);
+    item.type = "button";
+    item.setAttribute("role", "option");
+    item.setAttribute("aria-selected", String(Boolean(option.active)));
+    item.append(icon(option.icon, "ico"));
+    item.append(el("span", "label", option.label));
+    item.append(icon(ICONS.check, "check"));
+    item.addEventListener("click", () => {
+      closeFilterMenu();
+      state.ref = undefined;
+      state.allBranches = option.key !== "current";
+      prefs.ref = undefined;
+      prefs.allBranches = state.allBranches;
+      savePrefs();
+      renderFilterPill();
+      renderSidebar();
+      if (state.view !== "log") setView("log", { load: false });
+      void reloadCommits();
+    });
+    dom.filterMenu.append(item);
+  }
+}
+
 // —— 渲染：提交详情 ——
 
 function detailPlaceholder(title, body, actions) {
@@ -519,6 +609,103 @@ function detailPlaceholder(title, body, actions) {
 /** 提交正文过长时默认折叠（详情头部不该把变更文件挤到屏幕外）。 */
 const BODY_COLLAPSE_CHARS = 320;
 
+/** 当前分支的上游（refs 里带 upstream 字段，这里只取当前分支）。 */
+function currentUpstream() {
+  return (state.refs.branches ?? []).find((branch) => branch.current)?.upstream;
+}
+
+/** 日志视图的空态：不再是一句占位，而是仓库概览（分支 / HEAD / 改动 / 上游 / 最近提交）。 */
+function renderOverview() {
+  clear(dom.detailPane);
+  const repo = state.repo;
+  if (!repo) {
+    dom.detailPane.append(detailPlaceholder("选一个仓库", "上面的仓库选择器里可以粘贴任意本地仓库路径。"));
+    return;
+  }
+  const status = state.status;
+  const box = el("div", "overview");
+
+  const head = el("div");
+  head.append(el("div", "eyebrow", "仓库概览"));
+  head.append(el("h2", undefined, repo.name || "仓库"));
+  head.append(el("div", "overview-path", repo.root ?? repo.path));
+  box.append(head);
+
+  const chips = el("div", "chips");
+  const branchLabel = repo.empty ? "空仓库" : repo.detached ? "分离 HEAD" : repo.branch || "—";
+  chips.append(chipNode(branchLabel, { icon: ICONS.branch, accent: true }));
+  if (repo.head) chips.append(chipNode(`HEAD ${repo.head.slice(0, 7)}`));
+  const upstream = currentUpstream();
+  if (upstream) chips.append(chipNode(upstream, { icon: ICONS.up }));
+  box.append(chips);
+
+  const grid = el("div", "stat-grid");
+  const stats = status?.stats;
+  const entries = [
+    ["已暂存", stats?.staged],
+    ["未暂存", stats?.unstaged],
+    ["未跟踪", stats?.untracked]
+  ];
+  for (const [label, count] of entries) {
+    const hot = label === "未跟踪" && count > 0;
+    const node = el("button", `stat-card${hot ? " is-hot" : ""}${count === 0 ? " is-zero" : ""}`);
+    node.type = "button";
+    node.title = "查看工作区";
+    node.append(el("span", "n", count === undefined ? "—" : String(count)));
+    node.append(el("span", "k", label));
+    node.addEventListener("click", () => setView("status"));
+    grid.append(node);
+  }
+  box.append(grid);
+
+  const upRow = el("div", "upstream-row");
+  if (!status) {
+    upRow.append(el("span", undefined, "正在读取工作区状态…"));
+  } else if (status.hasUpstream) {
+    if (status.ahead === 0 && status.behind === 0) {
+      upRow.append(el("span", undefined, "与上游同步"));
+      upRow.append(el("span", "spacer"));
+      upRow.append(el("span", "mini", currentUpstream() ?? ""));
+    } else {
+      const ahead = status.ahead > 0;
+      upRow.append(el("span", `arrow${ahead ? "" : " down"}`, ahead ? `↑${status.ahead}` : `↓${status.behind}`));
+      upRow.append(el("span", undefined, ahead ? "领先上游" : "落后上游"));
+      upRow.append(el("span", "spacer"));
+      upRow.append(el("span", "mini", ahead ? `落后 ${status.behind}` : `领先 ${status.ahead}`));
+    }
+  } else {
+    upRow.append(el("span", undefined, "当前分支没有上游"));
+    upRow.append(el("span", "spacer"));
+    upRow.append(el("span", "mini", "只读视图"));
+  }
+  box.append(upRow);
+
+  const hint = el("div", "overview-hint");
+  if (repo.empty) {
+    hint.append(el("b", undefined, "这个仓库还没有提交"));
+    hint.append("：做出第一个提交后，历史会出现在左侧。");
+  } else {
+    hint.append("左侧点任意一条提交，这里会显示");
+    hint.append(el("b", undefined, "作者、时间、变更文件"));
+    hint.append("与逐文件补丁。也可以切到「工作区」查看未提交的改动。");
+  }
+  box.append(hint);
+
+  const recent = state.commits[0];
+  if (recent) {
+    const button = el("button", "recent-row");
+    button.type = "button";
+    button.title = "打开最近一条提交";
+    button.append(el("i", "dot"));
+    button.append(el("span", "recent-time", relTime(recent.epoch)));
+    button.append(el("span", "recent-text", recent.subject || "(无提交信息)"));
+    button.addEventListener("click", () => void selectCommit(recent.sha));
+    box.append(button);
+  }
+
+  dom.detailPane.append(box);
+}
+
 function renderDetail() {
   clear(dom.detailPane);
   if (state.view === "status") {
@@ -530,7 +717,7 @@ function renderDetail() {
     return;
   }
   if (!state.selectedSha) {
-    dom.detailPane.append(detailPlaceholder("选一个提交", "左侧列表里点任意一条提交，这里显示作者、时间、变更文件与补丁。"));
+    renderOverview();
     return;
   }
   if (state.detailLoading) {
@@ -547,14 +734,29 @@ function renderDetail() {
   }
 
   const head = el("div", "detail-head");
-  const subjectRow = el("div", "detail-subject");
-  subjectRow.append(el("h2", undefined, detail.commit.subject || "(无提交信息)"));
-  const copy = el("button", "copy-btn", detail.commit.shortSha);
-  copy.type = "button";
-  copy.title = "复制完整 SHA";
-  copy.addEventListener("click", () => copyText(detail.commit.sha));
-  subjectRow.append(copy);
-  head.append(subjectRow);
+  head.append(el("h2", undefined, detail.commit.subject || "(无提交信息)"));
+  const meta = el("div", "detail-meta");
+  meta.append(chipButton(detail.commit.shortSha, () => copyText(detail.commit.sha), { title: "复制完整 SHA" }));
+  const author = chipNode(detail.commit.author);
+  author.title = `${detail.commit.author} <${detail.commit.email}>`;
+  meta.append(author);
+  const date = new Date(detail.commit.date || detail.commit.epoch * 1000);
+  if (!Number.isNaN(date.getTime())) {
+    meta.append(chipNode(date.toLocaleString(undefined, { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })));
+  }
+  if (detail.commit.parents.length === 0) {
+    meta.append(chipNode("根提交"));
+  } else {
+    for (const parent of detail.commit.parents) {
+      meta.append(chipButton(`父 ${parent.slice(0, 7)}`, () => void selectCommit(parent), { title: parent }));
+    }
+  }
+  for (const ref of detail.commit.refs.slice(0, 4)) {
+    meta.append(chipNode(ref.name, { accent: true }));
+  }
+  if (detail.commit.refs.length > 4) meta.append(chipNode(`+${detail.commit.refs.length - 4}`));
+  head.append(meta);
+
   if (detail.commit.body) {
     const body = el("pre", "detail-body", detail.commit.body);
     if (detail.commit.body.length > BODY_COLLAPSE_CHARS) {
@@ -570,31 +772,6 @@ function renderDetail() {
       head.append(body);
     }
   }
-
-  const facts = el("dl", "detail-facts");
-  const pushFact = (key, value, mono = false) => {
-    facts.append(el("dt", undefined, key));
-    const dd = el("dd", mono ? "mono" : undefined, value);
-    facts.append(dd);
-    return dd;
-  };
-  pushFact("作者", `${detail.commit.author} <${detail.commit.email}>`);
-  pushFact("时间", new Date(detail.commit.date || detail.commit.epoch * 1000).toLocaleString(), true);
-  const parents = el("dd", "mono");
-  if (detail.commit.parents.length === 0) {
-    parents.append(document.createTextNode("（根提交）"));
-  } else {
-    for (const parent of detail.commit.parents) {
-      const link = el("button", "parent-link", parent.slice(0, 10));
-      link.type = "button";
-      link.addEventListener("click", () => void selectCommit(parent));
-      parents.append(link, document.createTextNode(" "));
-    }
-  }
-  facts.append(el("dt", undefined, "父提交"));
-  facts.append(parents);
-  if (detail.commit.refs.length) pushFact("引用", detail.commit.refs.map((ref) => ref.name).join("、"), true);
-  head.append(facts);
   dom.detailPane.append(head);
 
   const sectionHead = el("div", "section-head");
@@ -793,9 +970,11 @@ function tokenize(line) {
 // —— 渲染：工作区状态 ——
 
 function renderStatusList() {
-  dom.listTitle.textContent = "工作区";
-  dom.listSub.textContent = state.status ? (state.status.hasUpstream ? `领先 ${state.status.ahead} · 落后 ${state.status.behind}` : "无上游分支") : "";
-  dom.allBranchesToggle.classList.add("is-hidden");
+  dom.listSub.textContent = state.status
+    ? state.status.hasUpstream
+      ? `领先 ${state.status.ahead} · 落后 ${state.status.behind}`
+      : "无上游分支"
+    : "";
   if (!state.repo) return;
   if (state.statusLoading) {
     for (let index = 0; index < 6; index += 1) {
@@ -862,33 +1041,79 @@ function renderStatusDetail() {
     dom.detailPane.append(detailPlaceholder("选一个仓库", "上面的仓库选择器里可以粘贴任意本地仓库路径。"));
     return;
   }
-  if (!state.status) {
-    dom.detailPane.append(detailPlaceholder("工作区", "左侧点文件可以看它的未提交改动。"));
+  const status = state.status;
+  if (!status) {
+    dom.detailPane.append(detailPlaceholder("工作区", "正在读取工作区状态…"));
     return;
   }
-  const head = el("div", "detail-head");
-  head.append(el("h2", undefined, state.status.detached ? "分离 HEAD" : state.status.branch || "工作区"));
-  const facts = el("dl", "detail-facts");
-  const rows = [
-    ["已暂存", String(state.status.stats.staged)],
-    ["未暂存", String(state.status.stats.unstaged)],
-    ["未跟踪", String(state.status.stats.untracked)],
-    ["相对上游", state.status.hasUpstream ? `领先 ${state.status.ahead} / 落后 ${state.status.behind}` : "无上游分支"]
-  ];
-  for (const [key, value] of rows) {
-    facts.append(el("dt", undefined, key));
-    facts.append(el("dd", "mono", value));
+  if (!state.openFile) {
+    renderStatusOverview(status);
+    return;
   }
-  head.append(facts);
-  dom.detailPane.append(head);
-  if (state.openFile && state.patch !== undefined) {
-    const sectionHead = el("div", "section-head");
-    // openFile 是 `mode:path`（工作区视图）；提交视图里就是 path。标题只取文件名。
-    const name = state.openFile.replace(/^[a-z]+:/u, "").split("/").pop();
-    sectionHead.append(el("h3", "file-title", name));
-    dom.detailPane.append(sectionHead);
-    dom.detailPane.append(diffNode());
+  const sectionHead = el("div", "section-head");
+  // openFile 是 `mode:path`（工作区视图）；提交视图里就是 path。标题只取文件名。
+  const fullPath = state.openFile.replace(/^[a-z]+:/u, "");
+  sectionHead.append(el("h3", "file-title", fullPath.split("/").pop()));
+  sectionHead.append(el("span", "spacer"));
+  sectionHead.append(chipButton("返回概览", () => {
+    state.openFile = undefined;
+    state.patch = undefined;
+    renderStatusDetail();
+  }));
+  dom.detailPane.append(sectionHead);
+  dom.detailPane.append(diffNode());
+}
+
+/** 工作区视图的空态：只回答「现在有什么」，不再重复顶栏已经说过的仓库身份。 */
+function renderStatusOverview(status) {
+  clear(dom.detailPane);
+  const total = status.stats.staged + status.stats.unstaged + status.stats.untracked;
+  const box = el("div", "overview");
+
+  const head = el("div");
+  head.append(el("div", "eyebrow", "工作区概览"));
+  head.append(el("h2", undefined, status.detached ? "分离 HEAD" : status.branch || (state.repo?.empty ? "空仓库" : "工作区")));
+  if (state.repo?.root) head.append(el("div", "overview-path", state.repo.root));
+  box.append(head);
+
+  const chips = el("div", "chips");
+  if (state.repo?.head) chips.append(chipNode(`HEAD ${state.repo.head.slice(0, 7)}`));
+  if (status.hasUpstream) {
+    chips.append(chipNode(`↑ ${status.ahead} · ↓ ${status.behind}`, { icon: ICONS.up, accent: true }));
+    const upstream = currentUpstream();
+    if (upstream) chips.append(chipNode(upstream));
+  } else {
+    chips.append(chipNode("无上游分支"));
   }
+  box.append(chips);
+
+  const grid = el("div", "stat-grid");
+  for (const [label, count] of [["已暂存", status.stats.staged], ["未暂存", status.stats.unstaged], ["未跟踪", status.stats.untracked]]) {
+    const hot = label === "未跟踪" && count > 0;
+    const card = el("div", `stat-card${hot ? " is-hot" : ""}${count === 0 ? " is-zero" : ""}`);
+    card.append(el("span", "n", String(count)));
+    card.append(el("span", "k", label));
+    grid.append(card);
+  }
+  box.append(grid);
+
+  const hint = el("div", "overview-hint");
+  if (total === 0) {
+    hint.append(el("b", undefined, "工作区是干净的"));
+    hint.append("：当前没有已暂存、未暂存或未跟踪的改动。");
+  } else {
+    hint.append("左侧点任意文件，这里会显示");
+    hint.append(el("b", undefined, "逐文件补丁"));
+    hint.append("。未跟踪的目录按目录聚合，展开请用文件管理器。");
+  }
+  box.append(hint);
+
+  const note = el("div", "recent-row is-static");
+  note.append(el("i", "dot"));
+  note.append(el("span", "recent-text", "这个作品是只读的：不做暂存、提交、丢弃改动"));
+  box.append(note);
+
+  dom.detailPane.append(box);
 }
 
 // —— 动作 ——
@@ -906,6 +1131,7 @@ async function reloadCommits() {
   state.selectedSha = undefined;
   state.detail = undefined;
   renderList();
+  renderDetail();
   await loadMore(true);
   setLoading(false);
 }
@@ -925,6 +1151,8 @@ async function loadMore(reset = false) {
     state.commits = reset ? payload.commits : [...state.commits, ...payload.commits];
     state.hasMore = payload.hasMore;
     renderList();
+    // 概览里的「最近提交」跟着首屏数据出现（翻页不再重绘详情，避免滚动位置跳动）。
+    if (!state.selectedSha && reset) renderDetail();
   } catch (error) {
     errors.push(`加载提交失败：${error}`);
     toast(`加载提交失败：${error.message}`, true);
@@ -940,26 +1168,46 @@ async function openRepo(path) {
   try {
     const repo = await api("/api/repo", { path });
     state.repo = repo;
-    rememberRepo(repo);
-    renderRepoButton();
-    renderRepoMenu();
+    state.refs = { branches: [], tags: [] };
+    state.status = undefined;
+    state.commits = [];
+    state.hasMore = false;
+    state.selectedSha = undefined;
+    state.detail = undefined;
+    state.openFile = undefined;
+    state.patch = undefined;
     state.ref = undefined;
     prefs.ref = undefined;
     savePrefs();
+    rememberRepo(repo);
+    renderRepoButton();
+    renderRepoState();
+    renderRepoMenu();
+    renderSidebar();
 
-    const [refs] = await Promise.all([
-      api("/api/refs", { path: repo.root ?? repo.path }),
+    // 引用、工作区状态、首屏提交并行拉：三者互不依赖，打开仓库不再等两轮。
+    const rest = repo.root ?? repo.path;
+    const [refsResult, statusResult] = await Promise.allSettled([
+      api("/api/refs", { path: rest }),
+      api("/api/status", { path: rest }),
       reloadCommits()
     ]);
-    state.refs = refs;
+    if (refsResult.status === "fulfilled") state.refs = refsResult.value;
+    else errors.push(`读取分支失败：${refsResult.reason}`);
+    if (statusResult.status === "fulfilled") state.status = statusResult.value;
+    else errors.push(`读取工作区失败：${statusResult.reason}`);
     renderSidebar();
+    renderRepoState();
+    renderList();
     renderDetail();
-    if (state.view === "status") await reloadStatus();
   } catch (error) {
     errors.push(`打开仓库失败：${error}`);
     toast(`打开仓库失败：${error.message}`, true);
     state.repo = undefined;
+    state.refs = { branches: [], tags: [] };
+    state.status = undefined;
     renderRepoButton();
+    renderRepoState();
     renderSidebar();
     renderList();
     renderDetail();
@@ -977,9 +1225,9 @@ async function reloadStatus() {
   } catch (error) {
     errors.push(`读取工作区失败：${error}`);
     toast(`读取工作区失败：${error.message}`, true);
-    state.status = undefined;
   } finally {
     state.statusLoading = false;
+    renderRepoState();
     renderList();
     renderDetail();
   }
@@ -1049,10 +1297,11 @@ async function toggleWorktreeFile(row, mode) {
   }
 }
 
-function setView(view) {
+function setView(view, options = {}) {
   state.view = view === "status" ? "status" : "log";
   prefs.view = state.view;
   savePrefs();
+  closeFilterMenu();
   // 两个视图各自的展开状态不通用（一个提交里的文件路径在「工作区」里可能不存在）：
   // 切视图时把展开项与补丁一并清掉，否则会把上一个视图的补丁残留到新视图里。
   state.openFile = undefined;
@@ -1065,7 +1314,9 @@ function setView(view) {
   renderList();
   renderDetail();
   // 两个视图的数据各自按需拉：切回历史时若还没加载过（比如上次退出时停在「工作区」）要补拉，
-  // 否则会看到一个空列表（只有点刷新才出来）。
+  // 否则会看到一个空列表（只有点刷新才出来）。ref 变更后由调用方直接 reloadCommits，
+  // 用 { load: false } 跳过这里，避免两路请求互相覆盖。
+  if (options.load === false) return;
   if (state.view === "log" && state.repo && state.commits.length === 0 && !state.paging) void loadMore(true);
   if (state.view === "status" && state.repo && !state.status) void reloadStatus();
 }
@@ -1100,6 +1351,7 @@ function bindEvents() {
   });
   document.addEventListener("click", (event) => {
     if (!dom.repoPicker.contains(event.target)) closeRepoMenu();
+    if (!dom.filterBox.contains(event.target)) closeFilterMenu();
   });
   const submitRepo = () => {
     const value = dom.repoPathInput.value.trim();
@@ -1111,6 +1363,25 @@ function bindEvents() {
   dom.repoPathAdd.addEventListener("click", submitRepo);
   dom.repoPathInput.addEventListener("keydown", (event) => {
     if (event.key === "Enter") submitRepo();
+  });
+
+  dom.repoState.addEventListener("click", () => {
+    if (state.repo) setView("status");
+  });
+
+  dom.filterPill.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (state.view === "status") {
+      void reloadStatus();
+      return;
+    }
+    if (dom.filterMenu.hidden) {
+      renderFilterMenu();
+      dom.filterMenu.hidden = false;
+      dom.filterPill.setAttribute("aria-expanded", "true");
+    } else {
+      closeFilterMenu();
+    }
   });
 
   dom.refreshBtn.addEventListener("click", () => {
@@ -1126,11 +1397,16 @@ function bindEvents() {
         errors.push(String(error));
       }
       if (state.view === "status") {
-        state.status = undefined;
         await reloadStatus();
-      } else {
-        await reloadCommits();
+        return;
       }
+      try {
+        state.status = await api("/api/status", { path: state.repo.root ?? state.repo.path });
+        renderRepoState();
+      } catch (error) {
+        errors.push(String(error));
+      }
+      await reloadCommits();
     })();
   });
 
@@ -1146,35 +1422,16 @@ function bindEvents() {
     renderList();
   });
 
-  dom.allBranches.addEventListener("change", () => {
-    state.allBranches = dom.allBranches.checked;
-    prefs.allBranches = state.allBranches;
-    if (state.allBranches) {
-      state.ref = undefined;
-      prefs.ref = undefined;
-      renderClearRef();
-    }
-    savePrefs();
-    void reloadCommits();
-  });
-
-  dom.clearRefBtn.addEventListener("click", () => {
-    state.ref = undefined;
-    prefs.ref = undefined;
-    state.allBranches = true;
-    prefs.allBranches = true;
-    dom.allBranches.checked = true;
-    savePrefs();
-    renderClearRef();
-    void reloadCommits();
-  });
-
   for (const tab of document.querySelectorAll(".view-tab")) {
     tab.addEventListener("click", () => setView(tab.dataset.view));
   }
 
   document.addEventListener("keydown", (event) => {
     const typing = event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement;
+    if (event.key === "Escape" && !dom.filterMenu.hidden) {
+      closeFilterMenu();
+      return;
+    }
     if (event.key === "/" && !typing) {
       event.preventDefault();
       dom.searchInput.focus();
@@ -1213,10 +1470,10 @@ function bindEvents() {
 
 async function boot() {
   applyTheme();
-  dom.allBranches.checked = state.allBranches;
   setView(state.view);
   bindEvents();
   renderRepoButton();
+  renderRepoState();
   renderRepoMenu();
   renderDetail();
 

@@ -23,7 +23,7 @@
  *   /api/health                     存活探针（作品声明的 url 就是它）
  *   /api/repo?path=                 仓库概要（根、当前分支、HEAD、origin）
  *   /api/refs?path=                 分支 / 远程分支 / 标签
- *   /api/log?path=&skip=&limit=&all= 提交列表（默认全部分支，新→旧）
+ *   /api/log?path=&skip=&limit=&all=&ref= 提交列表（默认全部分支，新→旧；ref 优先）
  *   /api/commit?path=&sha=          单提交详情 + 变更文件（状态 + 增删行）
  *   /api/diff?path=&sha=&file=      单个文件的补丁文本（mode=worktree|index|untracked 看未提交改动）
  *   /api/status?path=               工作区状态（已暂存 / 未暂存 / 未跟踪 + ahead/behind）
@@ -290,14 +290,32 @@ async function apiRefs(repo) {
   return { ok: true, branches, tags };
 }
 
+/**
+ * ref → 提交 SHA。ref 来自查询串（名字可能是分支 / 远程分支 / 标签），不能直接拼进 git 参数：
+ * `--end-of-options` 把它钉在「引用」位置，再只把解析出的 SHA 交给 log —— 即使 ref 以 `-` 开头也变不成选项。
+ */
+async function resolveRefCommit(repo, ref) {
+  const text = typeof ref === "string" ? ref.trim() : "";
+  if (!text || text.length > 1024 || text.includes("\0")) return undefined;
+  const result = await runGit(repo, ["rev-parse", "--verify", "--end-of-options", `${text}^{commit}`]);
+  return result.ok ? result.stdout.trim().split(/\r?\n/u)[0] : undefined;
+}
+
 async function apiLog(repo, query) {
   const limitRaw = Number.parseInt(query.get("limit") ?? "", 10);
   const skipRaw = Number.parseInt(query.get("skip") ?? "", 10);
   const limit = Math.min(Math.max(Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : DEFAULT_LOG_LIMIT, 1), MAX_LOG_LIMIT);
   const skip = Math.max(Number.isFinite(skipRaw) && skipRaw > 0 ? skipRaw : 0, 0);
   const all = query.get("all") !== "0";
+  const ref = (query.get("ref") ?? "").trim();
   const args = ["log", `--max-count=${limit + 1}`, `--skip=${skip}`, "--date=iso-strict", `--pretty=format:${LOG_FORMAT}`];
-  if (all) args.push("--all");
+  if (ref) {
+    const sha = await resolveRefCommit(repo, ref);
+    if (!sha) return { ok: false, error: `找不到引用：${ref}` };
+    args.push(sha);
+  } else if (all) {
+    args.push("--all");
+  }
   const result = await runGit(repo, args);
   if (!result.ok) {
     // 空仓库：`git log` 会以非 0 退出，但这不是错误，而是「还没有提交」

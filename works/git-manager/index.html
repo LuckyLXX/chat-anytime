@@ -48,6 +48,12 @@
       </div>
     </div>
 
+    <button type="button" class="repo-state" id="repoState" hidden title="查看工作区未提交改动">
+      <span class="dot"></span>
+      <span class="repo-state-text" id="repoStateText">读取状态</span>
+      <span class="repo-state-up" id="repoStateUp" hidden></span>
+    </button>
+
     <div class="topbar-gap"></div>
 
     <label class="search">
@@ -70,43 +76,42 @@
 
   <div class="body">
     <aside class="sidebar" data-pane="sidebar">
-      <div class="view-switch" role="tablist">
-        <button type="button" class="view-tab is-active" data-view="log" role="tab" aria-selected="true">提交历史</button>
-        <button type="button" class="view-tab" data-view="status" role="tab" aria-selected="false">工作区</button>
-      </div>
-
-      <div class="side-block">
+      <div class="side-block side-block-branches">
         <div class="side-head">
           <h3>分支</h3>
           <span class="count" id="branchCount">0</span>
         </div>
-        <div class="side-list" id="branchList"></div>
-        <button type="button" class="side-clear" id="clearRefBtn" hidden>只看当前分支时点这里恢复</button>
+        <div class="side-list side-scroll" id="branchList"></div>
       </div>
 
-      <div class="side-block">
+      <div class="side-block side-block-tags">
         <div class="side-head">
           <h3>标签</h3>
           <span class="count" id="tagCount">0</span>
         </div>
-        <div class="side-list" id="tagList"></div>
+        <div class="side-list side-scroll" id="tagList"></div>
       </div>
 
-      <div class="side-block side-block-compact">
-        <div class="side-head"><h3>信息</h3></div>
-        <dl class="meta" id="repoMeta"></dl>
-      </div>
+      <dl class="meta" id="repoMeta"></dl>
     </aside>
 
     <main class="list-pane" data-pane="list">
-      <div class="list-head">
-        <div class="list-title" id="listTitle">提交历史</div>
+      <div class="list-head" id="listHead">
+        <div class="view-switch" role="tablist">
+          <button type="button" class="view-tab is-active" data-view="log" role="tab" aria-selected="true">提交历史</button>
+          <button type="button" class="view-tab" data-view="status" role="tab" aria-selected="false">工作区</button>
+        </div>
         <div class="list-sub" id="listSub"></div>
         <div class="list-head-gap"></div>
-        <label class="toggle" id="allBranchesToggle">
-          <input type="checkbox" id="allBranches" checked />
-          <span>所有分支</span>
-        </label>
+        <div class="filter" id="filterBox">
+          <button type="button" class="filter-pill" id="filterPill" data-mode="scope" aria-haspopup="listbox" aria-expanded="false" title="选择提交范围">
+            <svg class="ico ico-scope" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="7" cy="5" r="2"/><circle cx="7" cy="19" r="2"/><circle cx="17" cy="9" r="2"/><path d="M7 7v10M17 11v-2c0-2-2-2-4-2H9"/></svg>
+            <svg class="ico ico-refresh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 5v6h-6"/></svg>
+            <span id="filterPillText">所有分支</span>
+            <svg class="ico chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+          </button>
+          <div class="filter-menu" id="filterMenu" role="listbox" hidden></div>
+        </div>
       </div>
       <div class="list-scroll" id="listScroll" tabindex="0">
         <div id="listRows"></div>
