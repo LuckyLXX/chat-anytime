@@ -53,7 +53,8 @@ describe("groupPaletteActions", () => {
   it("uses the fixed group order and appends unknown groups last", () => {
     const groups = groupPaletteActions(actions);
     expect(groups.map((group) => group.title)).toEqual(["会话", "模型", "主题", "未来分组"]);
-    expect(PALETTE_GROUP_ORDER.slice(0, 3)).toEqual(["会话", "模型", "思考"]);
+    // 命令面板不再提供思考等级切换（2026-10-27 用户要求）：分组顺序里也没有「思考」。
+    expect(PALETTE_GROUP_ORDER.slice(0, 3)).toEqual(["会话", "模型", "权限"]);
     expect(groups[0]?.actions.map((item) => item.id)).toEqual(["new", "search"]);
   });
 

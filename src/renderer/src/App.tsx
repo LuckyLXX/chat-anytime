@@ -81,7 +81,6 @@ import { BrandMark } from "./components/BrandMark";
 import { SessionSearchResults } from "./components/SessionSearchResults";
 import { CommandPalette } from "./components/CommandPalette";
 import type { PaletteAction } from "./lib/command-palette";
-import { THINKING_LEVELS } from "../../shared/thinking-levels";
 import { clampPreviewSplit, PREVIEW_SPLIT_MAX, PREVIEW_SPLIT_MIN, previewSplitFromKey } from "./lib/preview-split";
 import { groupSessionsByWorkspace, workspaceKey } from "./lib/session-groups";
 import { archivedSessionCount, selectSessionPaths, selectedPathsInView, sessionsForView, toggleSessionSelection, type SessionSelection, type SessionView } from "./lib/session-view";
@@ -112,7 +111,7 @@ import { AppearanceSettings } from "./AppearanceSettings";
 import { HooksSettings } from "./HooksSettings";
 import { selectableCatalogModels } from "./lib/model-list";
 import { shouldRevealBrowserTab } from "./lib/browser-reveal";
-import { resourceScopeLabels, sessionRunStatusLabels, thinkingLevelLabels, toolLabel } from "../../shared/locale";
+import { resourceScopeLabels, sessionRunStatusLabels, toolLabel } from "../../shared/locale";
 import { SubagentSettings } from "./SubagentSettings";
 import { UsageSettings } from "./UsageSettings";
 import { AutomationSettings } from "./AutomationSettings";
@@ -356,7 +355,6 @@ export function App(): ReactNode {
   // （内容不变则复用旧引用），流式帧不会触发这些选择器。
   const activeSessionId = useDesktopStore((state) => state.snapshot.sessionId);
   const activeModel = useDesktopStore((state) => state.snapshot.model);
-  const activeThinking = useDesktopStore((state) => state.snapshot.thinkingLevel);
   const planMode = useDesktopStore((state) => state.snapshot.planMode === true);
   const paletteOpenTick = useDesktopStore((state) => state.paletteOpenTick);
   const activeWorkspace = useDesktopStore((state) => state.snapshot.workspace);
@@ -2051,19 +2049,6 @@ export function App(): ReactNode {
       hint: current ? "当前" : model.provider,
       disabled: !paletteTargetSession || current,
       run: () => runPaletteCommand({ type: "model.select", provider: model.provider, id: model.id, sessionId: paletteTargetSession })
-    });
-  }
-
-  for (const level of THINKING_LEVELS) {
-    const current = activeThinking === level;
-    paletteActions.push({
-      id: `thinking.${level}`,
-      title: `思考等级：${thinkingLevelLabels[level]}`,
-      group: "思考",
-      keywords: `thinking ${level}`,
-      hint: current ? "当前" : undefined,
-      disabled: !paletteTargetSession || current,
-      run: () => runPaletteCommand({ type: "thinking.select", level, sessionId: paletteTargetSession })
     });
   }
 

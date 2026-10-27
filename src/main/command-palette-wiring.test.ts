@@ -15,6 +15,7 @@ describe("command palette wiring contract", () => {
   const index = read("index.ts");
   const runtime = read("pi-runtime.ts");
   const app = read("../renderer/src/App.tsx");
+  const paletteLib = read("../renderer/src/lib/command-palette.ts");
   const store = read("../renderer/src/store.ts");
   const protocol = read("../shared/protocol.ts");
 
@@ -40,6 +41,12 @@ describe("command palette wiring contract", () => {
     expect(app).toContain("open={paletteOpen}");
     expect(store).toContain('case "palette.open"');
     expect(store).toContain('case "shortcut.error"');
+  });
+
+  it("面板不提供思考等级切换（2026-10-27 用户要求「思考等级切换这个去掉」）", () => {
+    expect(app).not.toContain("thinkingLevelLabels");
+    expect(app).not.toContain('type: "thinking.select"');
+    expect(paletteLib).not.toContain('"思考"');
   });
 
   it("「搜索会话内容」在面板内进入检索模式，而不是关掉面板去跳侧栏", () => {

@@ -37,7 +37,7 @@ export interface PaletteGroup {
 }
 
 /** 分组展示顺序：高频操作在前，设置类在后。 */
-export const PALETTE_GROUP_ORDER: readonly string[] = ["会话", "模型", "思考", "权限", "视图", "模式", "主题", "设置", "其他"];
+export const PALETTE_GROUP_ORDER: readonly string[] = ["会话", "模型", "权限", "视图", "模式", "主题", "设置", "其他"];
 
 /** 一次最多展示多少条动作（过滤后）。 */
 export const PALETTE_RESULT_LIMIT = 60;
