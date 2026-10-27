@@ -3199,6 +3199,36 @@ html[data-theme-wallpaper="true"][data-ui-window-hidden] .content-preview-panel 
 .conversation-pane.team-board-full .team-board { left: 0; width: auto; max-width: none; border-left: 0; }
 .composer-team-open { display: inline-flex; align-items: center; gap: 3px; flex: 0 0 auto; height: 19px; margin-left: auto; padding: 0 7px; border: 1px solid var(--accent-border); border-radius: 999px; color: var(--accent-text); background: transparent; font-family: inherit; font-size: 10px; font-weight: 600; cursor: pointer; }
 .composer-team-open:hover { background: var(--accent-soft); }
+/* —— 工作区优先 UI（Phase 4）——
+   会话行里的助手徽标、当前工作区高亮、缺失目录徽标与顶栏工作区切换菜单。
+   全部使用现有主题变量，不写死颜色。 */
+.session-list .session-item-heading { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.session-item-heading strong { flex: 1 1 auto; min-width: 0; }
+.session-list .session-agent-badge, .session-search-results .session-agent-badge { display: inline-flex; flex: 0 0 auto; align-items: center; max-width: 82px; min-width: 0; padding: 1px 5px; overflow: hidden; border: 1px solid var(--border); border-radius: 999px; color: var(--text-muted); background: var(--surface-sidebar-badge); font-size: 9.5px; font-weight: 600; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.session-list button.active .session-agent-badge { color: var(--accent-text); border-color: var(--accent-border); background: var(--accent-soft); }
+.session-workspace-heading[data-row-active] { border-radius: 6px; background: var(--surface-sidebar-active); box-shadow: inset 2px 0 0 var(--accent); }
+.session-workspace-heading[data-row-active] .session-workspace-toggle { color: var(--text-sidebar-active); }
+.session-list .session-workspace-missing, .workspace-switch-item .session-workspace-missing { display: inline-flex; flex: 0 0 auto; align-items: center; padding: 1px 5px; border: 1px solid var(--danger-border); border-radius: 999px; color: var(--danger-text); background: var(--danger-soft); font-size: 9.5px; font-weight: 600; line-height: 1.35; white-space: nowrap; }
+.session-workspace-heading:hover .session-workspace-toggle .session-workspace-missing, .session-workspace-heading:focus-within .session-workspace-toggle .session-workspace-missing { opacity: 1; }
+.session-workspace-toggle > .session-workspace-missing { flex: 0 0 auto; }
+.session-list .session-workspace-new-button:disabled { opacity: .35; pointer-events: none; }
+.session-list .session-search-hit-agent { max-width: 70px; }
+
+.workspace-menu-shell { position: relative; display: flex; min-width: 0; }
+.workspace-switch-menu { position: absolute; z-index: 40; top: calc(100% + 6px); right: 0; display: flex; flex-direction: column; gap: 2px; width: min(320px, calc(100vw - 32px)); max-height: min(460px, 70vh); padding: 6px; overflow-y: auto; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow-lg); }
+.workspace-switch-head { display: flex; align-items: baseline; justify-content: space-between; padding: 4px 8px 6px; color: var(--text-muted); font-size: 10px; letter-spacing: .04em; }
+.workspace-switch-head small { font-size: 10px; }
+.workspace-switch-item { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; gap: 8px; align-items: center; min-width: 0; min-height: 38px; padding: 5px 8px; border: 0; border-radius: 6px; color: var(--text); background: transparent; text-align: left; cursor: pointer; }
+.workspace-switch-item:hover { background: var(--surface-sidebar-hover); }
+.workspace-switch-item.current { color: var(--accent-text); background: var(--accent-soft); }
+.workspace-switch-item > svg { color: var(--text-muted); }
+.workspace-switch-item > span:not(.session-workspace-missing) { display: grid; gap: 2px; min-width: 0; }
+.workspace-switch-item strong, .workspace-switch-item small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-switch-item strong { font-size: 11.5px; font-weight: 650; }
+.workspace-switch-item small { color: var(--text-muted); font-size: 9.5px; }
+.workspace-switch-open-folder { display: flex; align-items: center; gap: 8px; min-height: 32px; margin-top: 3px; padding: 5px 8px; border: 0; border-top: 1px solid var(--border); border-radius: 0 0 6px 6px; color: var(--text-muted); background: transparent; font-size: 11px; text-align: left; cursor: pointer; }
+.workspace-switch-open-folder:hover { color: var(--accent-text); background: var(--surface-sidebar-hover); }
+
 /* 团队看板字号（2026-10-20：用户报「字体很小看不清楚，全屏也一样」）。四档对齐文件头的
    字号层级规范：title 13 / body 12 / label 11 / micro 10（micro 只给纯数字·id·路径这类
    非连续阅读文本，含 CJK 的徽标与 meta 一律 label 档）。控件高度单独两档，避免字号变大后

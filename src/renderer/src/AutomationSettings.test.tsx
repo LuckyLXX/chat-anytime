@@ -3,7 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import type { AutomationTask, DesktopSettings } from "../../shared/protocol";
+import type { AutomationTask, DesktopSettings, SessionSummary } from "../../shared/protocol";
 import { AutomationSettings } from "./AutomationSettings";
 import { useDesktopStore } from "./store";
 
@@ -37,7 +37,7 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount());
   container.remove();
-  useDesktopStore.setState({ automation: [], automationRunsSignal: undefined });
+  useDesktopStore.setState({ automation: [], automationRunsSignal: undefined, snapshot: { ...useDesktopStore.getState().snapshot, sessions: [] } });
 });
 
 const settings: DesktopSettings = {
@@ -67,7 +67,7 @@ function task(overrides: Partial<AutomationTask> = {}): AutomationTask {
   };
 }
 
-function render(tasks: AutomationTask[]): void {
+function render(tasks: AutomationTask[], options: { workspacePath?: string; activeAgentId?: string } = {}): void {
   useDesktopStore.setState({ automation: tasks, automationRunsSignal: undefined });
   act(() => {
     root.render(
@@ -76,11 +76,45 @@ function render(tasks: AutomationTask[]): void {
         providers={[]}
         settings={settings}
         workspaceConfigured
+        workspacePath={options.workspacePath}
+        activeAgentId={options.activeAgentId}
         onCreateInSession={() => {}}
         onOpenRunSession={() => {}}
       />
     );
   });
+}
+
+function click(element: Element): void {
+  act(() => {
+    element.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+}
+
+function selectValue(select: HTMLSelectElement, value: string): void {
+  const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!;
+  act(() => {
+    setter.call(select, value);
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+}
+
+function buttonByText(text: string): HTMLButtonElement {
+  const button = [...document.querySelectorAll("button")].find((candidate) => candidate.textContent?.includes(text));
+  if (!button) throw new Error(`button not found: ${text}`);
+  return button as HTMLButtonElement;
+}
+
+function session(id: string, agentId: string, title: string): SessionSummary {
+  return {
+    id,
+    path: `/sessions/${id}.jsonl`,
+    workspace: "D:\\projects\\A",
+    agentId,
+    title,
+    modifiedAt: 1,
+    messageCount: 1
+  };
 }
 
 describe("AutomationSettings theme hooks", () => {
@@ -133,5 +167,60 @@ describe("AutomationSettings one-shot + session binding", () => {
   it("keeps the session chip absent for background tasks", () => {
     render([task()]);
     expect(container.querySelector(".automation-session-link")).toBeNull();
+  });
+});
+
+describe("AutomationSettings workspace-first", () => {
+  it("marks workspaceIssue tasks and blocks enabling/running them", () => {
+    render([task({ workspaceIssue: "工作区目录不存在", enabled: false })]);
+    expect(container.textContent).toContain("需重新选择工作区");
+    const toggle = container.querySelector<HTMLButtonElement>('[data-control="automation-toggle"]')!;
+    const run = container.querySelector<HTMLButtonElement>('[data-control="automation-run"]')!;
+    expect(toggle.disabled).toBe(true);
+    expect(run.disabled).toBe(true);
+    expect(toggle.title).toContain("需重新选择工作区");
+  });
+
+  it("stores the full workspace path and removes the metadata-only option", () => {
+    render([], { workspacePath: "D:\\projects\\A" });
+    click(buttonByText("创建定时任务"));
+    const spaceLabel = [...container.querySelectorAll("label")].find((label) => label.textContent?.startsWith("空间"))!;
+    const select = spaceLabel.querySelector("select")!;
+    const values = [...select.options].map((option) => option.value);
+    expect(values).toContain("D:\\projects\\A");
+    expect(values).not.toContain("current");
+    expect(values).not.toContain("other");
+    expect(select.value).toBe("D:\\projects\\A");
+    expect(container.textContent).not.toContain("其它空间");
+  });
+
+  it("clears workspaceIssue after the user reselects a workspace and saves", () => {
+    const sent: Array<{ type: string; task?: AutomationTask }> = [];
+    (window as unknown as { piDesktop: { send: (command: unknown) => Promise<void> } }).piDesktop = {
+      send: (command) => { sent.push(command as { type: string; task?: AutomationTask }); return Promise.resolve(); }
+    };
+    render([task({ workspaceIssue: "工作区目录不存在", enabled: false })], { workspacePath: "D:\\projects\\A" });
+    click(container.querySelector<HTMLButtonElement>('button[aria-label="编辑"]')!);
+    const spaceLabel = [...container.querySelectorAll("label")].find((label) => label.textContent?.startsWith("空间"))!;
+    const select = spaceLabel.querySelector("select")!;
+    expect(select.value).toBe("");
+    selectValue(select, "D:\\projects\\A");
+    click(buttonByText("保存"));
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.type).toBe("automation.save");
+    expect(sent[0]!.task?.workspace).toBe("D:\\projects\\A");
+    expect(sent[0]!.task?.workspaceIssue).toBeUndefined();
+  });
+
+  it("filters session choices to the task owner so another agent's session is not bound silently", () => {
+    useDesktopStore.setState({ snapshot: { ...useDesktopStore.getState().snapshot, sessions: [session("sess-a", "agent-a", "A 的会话"), session("sess-b", "agent-b", "B 的会话")] } });
+    render([], { workspacePath: "D:\\projects\\A", activeAgentId: "agent-a" });
+    click(buttonByText("创建定时任务"));
+    const targetLabel = [...container.querySelectorAll("label")].find((label) => label.textContent?.startsWith("执行位置"))!;
+    selectValue(targetLabel.querySelector("select")!, "session");
+    const sessionLabel = [...container.querySelectorAll("label")].find((label) => label.textContent?.startsWith("关联会话"))!;
+    const titles = [...sessionLabel.querySelectorAll("option")].map((option) => option.textContent);
+    expect(titles).toContain("A 的会话");
+    expect(titles).not.toContain("B 的会话");
   });
 });

@@ -29,6 +29,11 @@ export interface AutomationSettingsProps {
   providers: ProviderOption[];
   settings: DesktopSettings;
   workspaceConfigured: boolean;
+  /** 当前工作区完整路径（新调用方传 snapshot.workspace；缺省由组件读快照兜底）。 */
+  workspacePath?: string;
+  /** 激活会话的助手 id（快照 agentId）；缺省读 store 快照以兼容旧调用。 */
+  activeAgentId?: string;
+  /** @deprecated 旧调用方传的工作区 basename；新调用方应传完整的 workspacePath。 */
   workspaceName?: string;
   /** 「去会话中创建」：由宿主先关设置页再新建会话（含分屏落位等完整逻辑）。 */
   onCreateInSession: () => void;
@@ -41,7 +46,9 @@ interface AutomationFormProps {
   models: ModelOption[];
   providers: ProviderOption[];
   settings: DesktopSettings;
+  workspacePath?: string;
   workspaceName?: string;
+  activeAgentId: string;
   onSubmit: (task: AutomationTask) => void;
   onCancel: () => void;
 }
@@ -61,13 +68,20 @@ function numberOptions(from: number, to: number, suffix = ""): { value: number; 
   return Array.from({ length: to - from + 1 }, (_, index) => ({ value: from + index, label: `${pad2(from + index)}${suffix}` }));
 }
 
-function agentDefaultModel(settings: DesktopSettings): { provider: string; id: string } | undefined {
-  const agent = settings.agents.find((item) => item.id === settings.currentAgentId);
+function agentDefaultModel(settings: DesktopSettings, activeAgentId: string): { provider: string; id: string } | undefined {
+  const agent = settings.agents.find((item) => item.id === activeAgentId);
   return agent?.defaultModel ?? settings.model;
 }
 
 function isCompleted(task: AutomationTask): boolean {
   return task.completedAt !== undefined;
+}
+
+/** 工作区展示名：完整路径取最后一段；仅用于文案，任务持久化仍存完整路径。 */
+function workspaceBasename(path: string): string {
+  const normalized = path.replaceAll("\\", "/").replace(/\/+$/u, "");
+  const slash = normalized.lastIndexOf("/");
+  return slash >= 0 ? normalized.slice(slash + 1) : normalized;
 }
 
 function lastRunTitle(task: AutomationTask): string | undefined {
@@ -101,7 +115,7 @@ function delayParts(seconds: number): { value: number; unit: DelayUnit } {
   return { value: Math.max(1, Math.round(seconds / 60)), unit: "minute" };
 }
 
-function AutomationForm({ initial, models, providers, settings, workspaceName, onSubmit, onCancel }: AutomationFormProps): ReactNode {
+function AutomationForm({ initial, models, providers, settings, workspacePath, workspaceName, activeAgentId, onSubmit, onCancel }: AutomationFormProps): ReactNode {
   const sessions = useDesktopStore((state) => state.snapshot.sessions);
   const activeSessionId = useDesktopStore((state) => state.snapshot.sessionId);
   const [name, setName] = useState(initial?.name ?? "");
@@ -121,33 +135,46 @@ function AutomationForm({ initial, models, providers, settings, workspaceName, o
   const [atValue, setAtValue] = useState(initial?.schedule.kind === "at" ? toDatetimeLocal(initial.schedule.scheduledAt) : toDatetimeLocal(Date.now() + 3_600_000));
   const [prompt, setPrompt] = useState(initial?.prompt ?? "");
   const [modelValue, setModelValue] = useState(initial?.model ? `${initial.model.provider}/${initial.model.id}` : "");
-  const [workspace, setWorkspace] = useState(initial?.workspace ? (initial.workspace === workspaceName ? "current" : "other") : "current");
+  // 「空间」存完整路径：新任务默认当前工作区；编辑保留 task.workspace；workspaceIssue
+  // 的任务强制从空值重新选择，避免把不可用的旧路径静默存回去。
+  const [workspace, setWorkspace] = useState(initial?.workspaceIssue ? "" : initial?.workspace ?? workspacePath ?? "");
   const [accessMode, setAccessMode] = useState<AccessMode>(initial?.accessMode ?? "full");
   const [target, setTarget] = useState<"background" | "session">(initial?.sessionId ? "session" : "background");
   const [sessionId, setSessionId] = useState(initial?.sessionId ?? "");
   const [error, setError] = useState<string>();
 
-  const defaultModel = agentDefaultModel(settings);
+  const defaultModel = agentDefaultModel(settings, activeAgentId);
   // 与全局模型选择器同口径：只保留已勾选（enabled !== false）且已配置的模型。
   const configuredModels = useMemo(() => selectableCatalogModels(models).filter((model) => model.configured), [models]);
   const resolvedCron = preset === "custom" ? customCron.trim() : buildCron({ preset, minute, hour, weekday, monthDay });
   // 归属角色：编辑保留原归属，新建默认当前角色；创建后不迁移。
-  const ownerAgentId = initial?.agentId ?? settings.currentAgentId;
+  const ownerAgentId = initial?.agentId ?? activeAgentId;
   const ownerName = settings.agents.find((item) => item.id === ownerAgentId)?.name ?? ownerAgentId;
+  const currentWorkspaceName = workspacePath ? workspaceBasename(workspacePath) : workspaceName;
 
-  // 会话下拉：当前会话排最前；编辑其他角色/已不在列表的绑定会话时保留旧选项。
+  // 会话下拉：只列归属角色自己的会话（跨助手列表上线后不能把别人的会话
+  // 静默绑给当前任务）；当前激活会话排最前；编辑旧任务时保留已不在列表的
+  // 绑定会话，并在选项上标出它的真实归属助手。
   const sessionChoices = useMemo(() => {
-    const sorted = [...sessions].sort((left, right) => {
-      if (left.id === activeSessionId) return -1;
-      if (right.id === activeSessionId) return 1;
-      return right.modifiedAt - left.modifiedAt;
-    });
-    const choices = sorted.map((session) => ({ id: session.id, title: session.title, modifiedAt: session.modifiedAt }));
+    const sorted = sessions
+      .filter((session) => session.agentId === ownerAgentId)
+      .sort((left, right) => {
+        if (left.id === activeSessionId) return -1;
+        if (right.id === activeSessionId) return 1;
+        return right.modifiedAt - left.modifiedAt;
+      });
+    const choices = sorted.map((session) => ({ id: session.id, title: session.title, modifiedAt: session.modifiedAt, agentId: session.agentId }));
     if (initial?.sessionId && !choices.some((choice) => choice.id === initial.sessionId)) {
-      choices.unshift({ id: initial.sessionId, title: initial.sessionTitle ?? initial.sessionId, modifiedAt: initial.createdAt });
+      const initialSession = sessions.find((session) => session.id === initial.sessionId);
+      choices.unshift({
+        id: initial.sessionId,
+        title: initial.sessionTitle ?? initialSession?.title ?? initial.sessionId,
+        modifiedAt: initial.createdAt,
+        agentId: initialSession?.agentId ?? ownerAgentId
+      });
     }
     return choices;
-  }, [sessions, activeSessionId, initial]);
+  }, [sessions, activeSessionId, initial, ownerAgentId]);
 
   const selectedSession = sessions.find((session) => session.id === sessionId);
 
@@ -173,6 +200,7 @@ function AutomationForm({ initial, models, providers, settings, workspaceName, o
     }
 
     if (target === "session" && !sessionId) { setError("请选择要关联的会话"); return; }
+    if (target === "background" && !workspace.trim()) { setError(initial?.workspaceIssue ? "需重新选择工作区" : "请选择后台任务执行的工作区"); return; }
 
     const model = modelValue ? (() => { const slash = modelValue.indexOf("/"); return slash > 0 ? { provider: modelValue.slice(0, slash), id: modelValue.slice(slash + 1) } : undefined; })() : undefined;
     const keepInitialSession = target === "session" && !selectedSession && initial?.sessionId === sessionId;
@@ -194,7 +222,8 @@ function AutomationForm({ initial, models, providers, settings, workspaceName, o
       prompt: prompt.trim(),
       agentId: ownerAgentId,
       ...sessionFields,
-      ...(target === "background" ? { workspace: workspace === "current" ? workspaceName : undefined } : {}),
+      // 空间存完整路径；用户重选后不再带 workspaceIssue（保存即清除）。
+      ...(target === "background" ? { workspace: workspace.trim() || undefined } : {}),
       model,
       accessMode,
       enabled,
@@ -256,11 +285,16 @@ function AutomationForm({ initial, models, providers, settings, workspaceName, o
           <div className="automation-field-grid">
             <label>执行位置<select value={target} onChange={(event) => setTarget(event.target.value as "background" | "session")}><option value="background">后台新会话（独立执行）</option><option value="session">关联会话（到期投递消息）</option></select></label>
             {target === "session" ? (
-              <label>关联会话<select value={sessionId} onChange={(event) => setSessionId(event.target.value)}><option value="">请选择会话</option>{sessionChoices.map((choice) => <option key={choice.id} value={choice.id}>{choice.title}{choice.id === activeSessionId ? "（当前）" : ""}</option>)}</select></label>
+              <label>关联会话<select value={sessionId} onChange={(event) => setSessionId(event.target.value)}><option value="">请选择会话</option>{sessionChoices.map((choice) => { const owner = choice.agentId !== ownerAgentId ? settings.agents.find((agent) => agent.id === choice.agentId)?.name ?? choice.agentId : undefined; return <option key={choice.id} value={choice.id}>{choice.title}{choice.id === activeSessionId ? "（当前）" : ""}{owner ? ` · ${owner}` : ""}</option>; })}</select></label>
             ) : (
-              <label>空间<select value={workspace} onChange={(event) => setWorkspace(event.target.value)}><option value="current">{workspaceName ? `当前工作区（${workspaceName}）` : "当前工作区"}</option><option value="none">不选择空间</option><option value="other">其它空间（仅存为元数据）</option></select></label>
+              <label>空间<select value={workspace} onChange={(event) => setWorkspace(event.target.value)}>
+                {workspace === "" ? <option value="">请选择工作区</option> : null}
+                {workspacePath && <option value={workspacePath}>{currentWorkspaceName ? `当前工作区（${currentWorkspaceName}）` : "当前工作区"}</option>}
+                {initial?.workspace && !initial.workspaceIssue && initial.workspace !== workspacePath && <option value={initial.workspace}>任务原工作区（{workspaceBasename(initial.workspace)}）</option>}
+              </select></label>
             )}
           </div>
+          {target === "background" && initial?.workspaceIssue && <p className="automation-form-error">需重新选择工作区：{initial.workspaceIssue}</p>}
           <div className="automation-field-grid">
             <label>权限<select value={accessMode} onChange={(event) => setAccessMode(event.target.value as AccessMode)}>{ACCESS_MODES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>
             <label>目标说明<span className="automation-hint">{target === "session" ? "到期把提醒作为普通用户消息投递进所选会话（沿用该会话上下文与权限）。" : "到期新建后台会话独立执行（旧行为，适合巡检/报告）。"}</span></label>
@@ -274,9 +308,21 @@ function AutomationForm({ initial, models, providers, settings, workspaceName, o
   );
 }
 
-export function AutomationSettings({ models, providers, settings, workspaceConfigured, workspaceName, onCreateInSession, onOpenRunSession }: AutomationSettingsProps): ReactNode {
+export function AutomationSettings({ models, providers, settings, workspaceConfigured, workspacePath, activeAgentId, workspaceName, onCreateInSession, onOpenRunSession }: AutomationSettingsProps): ReactNode {
   const automation = useDesktopStore((state) => state.automation);
   const sessions = useDesktopStore((state) => state.snapshot.sessions);
+  const snapshotAgentId = useDesktopStore((state) => state.snapshot.agentId);
+  const snapshotWorkspace = useDesktopStore((state) => state.snapshot.workspace);
+  // 当前助手/工作区都以激活会话快照为准；显式 props 优先（App 已传 snapshot 值）。
+  // 归档助手不能新建/接管自动化任务：当前激活会话属于归档助手时回落到未归档助手。
+  const requestedAgentId = activeAgentId ?? snapshotAgentId;
+  const requestedProfile = settings.agents.find((agent) => agent.id === requestedAgentId);
+  const effectiveActiveAgentId = requestedProfile?.archived
+    ? (settings.agents.find((agent) => !agent.archived)?.id ?? requestedAgentId)
+    : requestedAgentId;
+  // 新语义：不接受旧 settings.workspace（已废弃停写）；缺省用焦点会话工作区。
+  const resolvedWorkspacePath = workspacePath ?? snapshotWorkspace;
+  const resolvedWorkspaceName = workspacePath ? workspaceBasename(workspacePath) : workspaceName;
   const runsSignal = useDesktopStore((state) => state.automationRunsSignal);
   // 子页：任务列表（默认）/ 运行记录；toast「查看结果」信号切入运行记录子页并高亮该条。
   const [runsTab, setRunsTab] = useState<"tasks" | "runs">("tasks");
@@ -346,7 +392,7 @@ export function AutomationSettings({ models, providers, settings, workspaceConfi
         <button type="button" className={runsTab === "runs" ? "active" : ""} role="tab" aria-selected={runsTab === "runs"} data-control="automation-runs-tab" onClick={() => setRunsTab("runs")}>运行记录</button>
       </div>
 
-      {runsTab === "runs" ? <AutomationRuns settings={settings} highlight={pendingHighlight} onOpenSession={onOpenRunSession} /> : <>
+      {runsTab === "runs" ? <AutomationRuns settings={settings} activeAgentId={effectiveActiveAgentId} highlight={pendingHighlight} onOpenSession={onOpenRunSession} /> : <>
 
       <div className="automation-settings-body">
       <div className="automation-filter-bar">
@@ -381,6 +427,7 @@ export function AutomationSettings({ models, providers, settings, workspaceConfi
                         <div className="automation-row-main">
                           <div className="automation-row-title">
                             <strong>{task.name}</strong>
+                            {task.workspaceIssue && <span className="automation-row-lastrun error" title={task.workspaceIssue}>需重新选择工作区</span>}
                             {task.lastRun && <span className={`automation-row-lastrun ${task.lastRun.status}`} title={lastRunTitle(task)}>{lastRunLabel(task)}</span>}
                             <span className={`automation-row-state ${completed ? "done" : task.enabled ? "on" : "off"}`}>{completed ? "已完成" : task.enabled ? "进行中" : "已暂停"}</span>
                           </div>
@@ -407,12 +454,12 @@ export function AutomationSettings({ models, providers, settings, workspaceConfi
                             data-control="automation-toggle"
                             role="switch"
                             aria-checked={task.enabled}
-                            disabled={completed}
-                            title={completed ? "一次性任务已完成；编辑改期可重新启用" : task.enabled ? "暂停任务" : "启用任务"}
-                            aria-label={completed ? "一次性任务已完成" : task.enabled ? "暂停任务" : "启用任务"}
+                            disabled={completed || Boolean(task.workspaceIssue)}
+                            title={task.workspaceIssue ? "需重新选择工作区后才能启用" : completed ? "一次性任务已完成；编辑改期可重新启用" : task.enabled ? "暂停任务" : "启用任务"}
+                            aria-label={task.workspaceIssue ? "需重新选择工作区" : completed ? "一次性任务已完成" : task.enabled ? "暂停任务" : "启用任务"}
                             onClick={() => send({ type: "automation.toggle", id: task.id, enabled: !task.enabled, agentId: task.agentId })}
                           />
-                          <button type="button" data-control="automation-run" title="运行一次" aria-label="运行一次" onClick={() => send({ type: "automation.run", id: task.id, agentId: task.agentId })}><Play size={15} /></button>
+                          <button type="button" data-control="automation-run" title={task.workspaceIssue ? "需重新选择工作区" : "运行一次"} aria-label="运行一次" disabled={Boolean(task.workspaceIssue)} onClick={() => send({ type: "automation.run", id: task.id, agentId: task.agentId })}><Play size={15} /></button>
                           <button type="button" title="编辑" aria-label="编辑" onClick={() => setForm({ mode: "edit", task })}><Pencil size={15} /></button>
                           <button type="button" title="删除" aria-label="删除" className="danger" onClick={() => { if (window.confirm(`删除定时任务「${task.name}」？`)) send({ type: "automation.delete", id: task.id, agentId: task.agentId }); }}><Trash2 size={15} /></button>
                         </div>
@@ -432,7 +479,9 @@ export function AutomationSettings({ models, providers, settings, workspaceConfi
           models={models}
           providers={providers}
           settings={settings}
-          workspaceName={workspaceName}
+          workspacePath={resolvedWorkspacePath}
+          workspaceName={resolvedWorkspaceName}
+          activeAgentId={effectiveActiveAgentId}
           onCancel={() => setForm(null)}
           onSubmit={(task) => { send({ type: "automation.save", task }); setForm(null); }}
         />
