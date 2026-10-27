@@ -3,7 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import type { AutomationTask, DesktopSettings, SessionSummary } from "../../shared/protocol";
+import type { AutomationTask, DesktopSettings, RecentWorkspace, SessionSummary } from "../../shared/protocol";
 import { AutomationSettings } from "./AutomationSettings";
 import { useDesktopStore } from "./store";
 
@@ -67,8 +67,8 @@ function task(overrides: Partial<AutomationTask> = {}): AutomationTask {
   };
 }
 
-function render(tasks: AutomationTask[], options: { workspacePath?: string; activeAgentId?: string } = {}): void {
-  useDesktopStore.setState({ automation: tasks, automationRunsSignal: undefined });
+function render(tasks: AutomationTask[], options: { workspacePath?: string; activeAgentId?: string; recentWorkspaces?: RecentWorkspace[] } = {}): void {
+  useDesktopStore.setState({ automation: tasks, automationRunsSignal: undefined, snapshot: { ...useDesktopStore.getState().snapshot, recentWorkspaces: options.recentWorkspaces ?? [] } });
   act(() => {
     root.render(
       <AutomationSettings
@@ -103,6 +103,22 @@ function buttonByText(text: string): HTMLButtonElement {
   const button = [...document.querySelectorAll("button")].find((candidate) => candidate.textContent?.includes(text));
   if (!button) throw new Error(`button not found: ${text}`);
   return button as HTMLButtonElement;
+}
+
+/** 空间下拉的稳定入口：结构钩子比「label 里找 select」耐改（label 已改用 htmlFor 关联）。 */
+function workspaceSelect(): HTMLSelectElement {
+  const select = container.querySelector<HTMLSelectElement>('[data-control="automation-workspace"]');
+  if (!select) throw new Error("workspace select not found");
+  return select;
+}
+
+function setInputValue(element: HTMLInputElement | HTMLTextAreaElement, value: string): void {
+  const proto = element instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+  const setter = Object.getOwnPropertyDescriptor(proto, "value")!.set!;
+  act(() => {
+    setter.call(element, value);
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+  });
 }
 
 function session(id: string, agentId: string, title: string): SessionSummary {
@@ -184,8 +200,7 @@ describe("AutomationSettings workspace-first", () => {
   it("stores the full workspace path and removes the metadata-only option", () => {
     render([], { workspacePath: "D:\\projects\\A" });
     click(buttonByText("创建定时任务"));
-    const spaceLabel = [...container.querySelectorAll("label")].find((label) => label.textContent?.startsWith("空间"))!;
-    const select = spaceLabel.querySelector("select")!;
+    const select = workspaceSelect();
     const values = [...select.options].map((option) => option.value);
     expect(values).toContain("D:\\projects\\A");
     expect(values).not.toContain("current");
@@ -201,8 +216,7 @@ describe("AutomationSettings workspace-first", () => {
     };
     render([task({ workspaceIssue: "工作区目录不存在", enabled: false })], { workspacePath: "D:\\projects\\A" });
     click(container.querySelector<HTMLButtonElement>('button[aria-label="编辑"]')!);
-    const spaceLabel = [...container.querySelectorAll("label")].find((label) => label.textContent?.startsWith("空间"))!;
-    const select = spaceLabel.querySelector("select")!;
+    const select = workspaceSelect();
     expect(select.value).toBe("");
     selectValue(select, "D:\\projects\\A");
     click(buttonByText("保存"));
@@ -222,5 +236,51 @@ describe("AutomationSettings workspace-first", () => {
     const titles = [...sessionLabel.querySelectorAll("option")].map((option) => option.textContent);
     expect(titles).toContain("A 的会话");
     expect(titles).not.toContain("B 的会话");
+  });
+});
+
+// 空间候选（2026-10-26）：用户反馈「只能选当前工作区」。下拉要列出所有已知工作区
+// （最近打开 + 有会话的），并且能用「浏览…」挑一个从未打开过的任意目录。
+describe("AutomationSettings workspace candidates", () => {
+  it("lists current, recent and session workspaces, tagging missing directories", () => {
+    useDesktopStore.setState({ snapshot: { ...useDesktopStore.getState().snapshot, sessions: [session("sess-a", "default", "A 的会话")] } });
+    render([], {
+      workspacePath: "D:\\projects\\A",
+      recentWorkspaces: [
+        { path: "D:\\projects\\B", openedAt: 2 },
+        { path: "E:\\gone", openedAt: 1, missing: true }
+      ]
+    });
+    click(buttonByText("创建定时任务"));
+    const select = workspaceSelect();
+    const options = [...select.options];
+    expect(options.map((option) => option.value)).toEqual(["D:\\projects\\A", "D:\\projects\\B", "E:\\gone"]);
+    expect(select.value).toBe("D:\\projects\\A");
+    expect(options[0]!.textContent).toContain("当前工作区");
+    expect(options.find((option) => option.value === "E:\\gone")!.textContent).toContain("目录不存在");
+  });
+
+  it("browses any folder through the native picker and submits that path", async () => {
+    const sent: Array<{ type: string; task?: AutomationTask }> = [];
+    (window as unknown as { piDesktop: Record<string, unknown> }).piDesktop = {
+      send: (command: unknown) => { sent.push(command as { type: string; task?: AutomationTask }); return Promise.resolve(); },
+      chooseWorkspace: async () => "F:\\brand-new"
+    };
+    render([], { workspacePath: "D:\\projects\\A" });
+    click(buttonByText("创建定时任务"));
+    await act(async () => {
+      click(container.querySelector('[data-control="automation-choose-workspace"]')!);
+      await Promise.resolve();
+    });
+    const select = workspaceSelect();
+    expect(select.value).toBe("F:\\brand-new");
+    expect([...select.options].map((option) => option.value)).toContain("F:\\brand-new");
+
+    setInputValue(container.querySelector<HTMLInputElement>('.automation-dialog input[placeholder^="例如"]')!, "每日巡检");
+    setInputValue(container.querySelector<HTMLTextAreaElement>(".automation-dialog textarea")!, "检查项目状态");
+    click(container.querySelector<HTMLButtonElement>(".automation-dialog > footer .primary-button")!);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.type).toBe("automation.save");
+    expect(sent[0]!.task?.workspace).toBe("F:\\brand-new");
   });
 });

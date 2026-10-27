@@ -9,6 +9,7 @@ import type { AccessMode, AutomationSchedule, AutomationTask, DesktopSettings, M
 import { formatAutomationDelay, formatAutomationSchedule } from "../../shared/automation";
 import { buildCron, describeCron, DEFAULT_SCHEDULE_PARTS, pad2, SCHEDULE_PRESETS, WEEKDAY_OPTIONS, type SchedulePreset } from "./lib/automation-schedule";
 import { selectableCatalogModels } from "./lib/model-list";
+import { workspaceDisplayLabel, workspaceKey } from "./lib/session-groups";
 import { ModelSelect } from "./components/ModelSelect";
 import { useDesktopStore } from "./store";
 import { ExitWrap, useExitPresenceValue } from "./components/Presence";
@@ -33,7 +34,7 @@ export interface AutomationSettingsProps {
   workspacePath?: string;
   /** 激活会话的助手 id（快照 agentId）；缺省读 store 快照以兼容旧调用。 */
   activeAgentId?: string;
-  /** @deprecated 旧调用方传的工作区 basename；新调用方应传完整的 workspacePath。 */
+  /** @deprecated 已不再使用（空间标签统一按完整路径推导），仅为旧调用方保留。 */
   workspaceName?: string;
   /** 「去会话中创建」：由宿主先关设置页再新建会话（含分屏落位等完整逻辑）。 */
   onCreateInSession: () => void;
@@ -47,7 +48,6 @@ interface AutomationFormProps {
   providers: ProviderOption[];
   settings: DesktopSettings;
   workspacePath?: string;
-  workspaceName?: string;
   activeAgentId: string;
   onSubmit: (task: AutomationTask) => void;
   onCancel: () => void;
@@ -77,11 +77,18 @@ function isCompleted(task: AutomationTask): boolean {
   return task.completedAt !== undefined;
 }
 
-/** 工作区展示名：完整路径取最后一段；仅用于文案，任务持久化仍存完整路径。 */
-function workspaceBasename(path: string): string {
-  const normalized = path.replaceAll("\\", "/").replace(/\/+$/u, "");
-  const slash = normalized.lastIndexOf("/");
-  return slash >= 0 ? normalized.slice(slash + 1) : normalized;
+/** 空间下拉候选：路径 + 来源（决定文案）+ 目录是否已失效。 */
+interface WorkspaceChoice {
+  path: string;
+  kind: "current" | "initial" | "recent" | "session" | "picked";
+  missing: boolean;
+}
+
+/** 空间选项文案：只显示目录名（同名时逐级补上级），完整路径放在 title/hint 里。 */
+function workspaceOptionLabel(choice: WorkspaceChoice, allPaths: readonly string[]): string {
+  const name = workspaceDisplayLabel(choice.path, allPaths);
+  const base = choice.kind === "current" ? `当前工作区（${name}）` : choice.kind === "initial" ? `任务原工作区（${name}）` : name;
+  return choice.missing ? `${base} · 目录不存在` : base;
 }
 
 function lastRunTitle(task: AutomationTask): string | undefined {
@@ -115,7 +122,7 @@ function delayParts(seconds: number): { value: number; unit: DelayUnit } {
   return { value: Math.max(1, Math.round(seconds / 60)), unit: "minute" };
 }
 
-function AutomationForm({ initial, models, providers, settings, workspacePath, workspaceName, activeAgentId, onSubmit, onCancel }: AutomationFormProps): ReactNode {
+function AutomationForm({ initial, models, providers, settings, workspacePath, activeAgentId, onSubmit, onCancel }: AutomationFormProps): ReactNode {
   const sessions = useDesktopStore((state) => state.snapshot.sessions);
   const activeSessionId = useDesktopStore((state) => state.snapshot.sessionId);
   const [name, setName] = useState(initial?.name ?? "");
@@ -138,6 +145,7 @@ function AutomationForm({ initial, models, providers, settings, workspacePath, w
   // 「空间」存完整路径：新任务默认当前工作区；编辑保留 task.workspace；workspaceIssue
   // 的任务强制从空值重新选择，避免把不可用的旧路径静默存回去。
   const [workspace, setWorkspace] = useState(initial?.workspaceIssue ? "" : initial?.workspace ?? workspacePath ?? "");
+  const recentWorkspaces = useDesktopStore((state) => state.snapshot.recentWorkspaces);
   const [accessMode, setAccessMode] = useState<AccessMode>(initial?.accessMode ?? "full");
   const [target, setTarget] = useState<"background" | "session">(initial?.sessionId ? "session" : "background");
   const [sessionId, setSessionId] = useState(initial?.sessionId ?? "");
@@ -150,7 +158,6 @@ function AutomationForm({ initial, models, providers, settings, workspacePath, w
   // 归属角色：编辑保留原归属，新建默认当前角色；创建后不迁移。
   const ownerAgentId = initial?.agentId ?? activeAgentId;
   const ownerName = settings.agents.find((item) => item.id === ownerAgentId)?.name ?? ownerAgentId;
-  const currentWorkspaceName = workspacePath ? workspaceBasename(workspacePath) : workspaceName;
 
   // 会话下拉：只列归属角色自己的会话（跨助手列表上线后不能把别人的会话
   // 静默绑给当前任务）；当前激活会话排最前；编辑旧任务时保留已不在列表的
@@ -175,6 +182,43 @@ function AutomationForm({ initial, models, providers, settings, workspacePath, w
     }
     return choices;
   }, [sessions, activeSessionId, initial, ownerAgentId]);
+
+  // 空间候选（2026-10-26）：除当前/任务原工作区外，把最近工作区与有会话的工作区一并列出；
+  // 都不在清单里时用「浏览…」直接调系统目录选择器选任意目录（后台执行只要求目录存在）。
+  const workspaceChoices = useMemo(() => {
+    const byKey = new Map<string, WorkspaceChoice>();
+    const add = (path: string | undefined, kind: WorkspaceChoice["kind"], missing = false): void => {
+      const trimmed = path?.trim();
+      if (!trimmed) return;
+      const key = workspaceKey(trimmed);
+      const existing = byKey.get(key);
+      if (existing) {
+        if (missing) existing.missing = true;
+        return;
+      }
+      byKey.set(key, { path: trimmed, kind, missing });
+    };
+    add(workspacePath, "current");
+    if (!initial?.workspaceIssue) add(initial?.workspace, "initial");
+    for (const recent of recentWorkspaces) add(recent.path, "recent", recent.missing);
+    for (const session of sessions) add(session.workspace, "session", session.workspaceMissing);
+    add(workspace, "picked");
+    return [...byKey.values()];
+  }, [workspacePath, initial?.workspace, initial?.workspaceIssue, recentWorkspaces, sessions, workspace]);
+  const workspaceChoicePaths = workspaceChoices.map((choice) => choice.path);
+  const selectedWorkspace = workspaceChoices.find((choice) => workspaceKey(choice.path) === workspaceKey(workspace));
+
+  async function browseWorkspace(): Promise<void> {
+    try {
+      const path = await window.piDesktop.chooseWorkspace();
+      if (path) {
+        setWorkspace(path);
+        setError(undefined);
+      }
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "选择工作区失败");
+    }
+  }
 
   const selectedSession = sessions.find((session) => session.id === sessionId);
 
@@ -287,13 +331,21 @@ function AutomationForm({ initial, models, providers, settings, workspacePath, w
             {target === "session" ? (
               <label>关联会话<select value={sessionId} onChange={(event) => setSessionId(event.target.value)}><option value="">请选择会话</option>{sessionChoices.map((choice) => { const owner = choice.agentId !== ownerAgentId ? settings.agents.find((agent) => agent.id === choice.agentId)?.name ?? choice.agentId : undefined; return <option key={choice.id} value={choice.id}>{choice.title}{choice.id === activeSessionId ? "（当前）" : ""}{owner ? ` · ${owner}` : ""}</option>; })}</select></label>
             ) : (
-              <label>空间<select value={workspace} onChange={(event) => setWorkspace(event.target.value)}>
-                {workspace === "" ? <option value="">请选择工作区</option> : null}
-                {workspacePath && <option value={workspacePath}>{currentWorkspaceName ? `当前工作区（${currentWorkspaceName}）` : "当前工作区"}</option>}
-                {initial?.workspace && !initial.workspaceIssue && initial.workspace !== workspacePath && <option value={initial.workspace}>任务原工作区（{workspaceBasename(initial.workspace)}）</option>}
-              </select></label>
+              <div className="automation-workspace-field">
+                <label htmlFor="automation-workspace-select">空间</label>
+                <div className="automation-workspace-controls">
+                  <select id="automation-workspace-select" data-control="automation-workspace" value={workspace} title={workspace || undefined} onChange={(event) => setWorkspace(event.target.value)}>
+                    {workspace === "" ? <option value="">请选择工作区</option> : null}
+                    {workspaceChoices.map((choice) => (
+                      <option key={workspaceKey(choice.path)} value={choice.path} title={choice.path}>{workspaceOptionLabel(choice, workspaceChoicePaths)}</option>
+                    ))}
+                  </select>
+                  <button type="button" className="secondary-button" data-control="automation-choose-workspace" title="浏览任意文件夹作为任务工作区" onClick={() => void browseWorkspace()}>浏览…</button>
+                </div>
+              </div>
             )}
           </div>
+          {target === "background" && <p className="automation-hint automation-workspace-path">{selectedWorkspace?.missing ? `目录不存在：${workspace}——任务到点会因工作区失效被暂停，请重新选择或浏览其他文件夹。` : workspace ? `完整路径：${workspace}` : "后台任务需要一个工作区目录；可从列表选，也可「浏览…」挑任意文件夹。"}</p>}
           {target === "background" && initial?.workspaceIssue && <p className="automation-form-error">需重新选择工作区：{initial.workspaceIssue}</p>}
           <div className="automation-field-grid">
             <label>权限<select value={accessMode} onChange={(event) => setAccessMode(event.target.value as AccessMode)}>{ACCESS_MODES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>
@@ -308,7 +360,7 @@ function AutomationForm({ initial, models, providers, settings, workspacePath, w
   );
 }
 
-export function AutomationSettings({ models, providers, settings, workspaceConfigured, workspacePath, activeAgentId, workspaceName, onCreateInSession, onOpenRunSession }: AutomationSettingsProps): ReactNode {
+export function AutomationSettings({ models, providers, settings, workspaceConfigured, workspacePath, activeAgentId, onCreateInSession, onOpenRunSession }: AutomationSettingsProps): ReactNode {
   const automation = useDesktopStore((state) => state.automation);
   const sessions = useDesktopStore((state) => state.snapshot.sessions);
   const snapshotAgentId = useDesktopStore((state) => state.snapshot.agentId);
@@ -322,7 +374,6 @@ export function AutomationSettings({ models, providers, settings, workspaceConfi
     : requestedAgentId;
   // 新语义：不接受旧 settings.workspace（已废弃停写）；缺省用焦点会话工作区。
   const resolvedWorkspacePath = workspacePath ?? snapshotWorkspace;
-  const resolvedWorkspaceName = workspacePath ? workspaceBasename(workspacePath) : workspaceName;
   const runsSignal = useDesktopStore((state) => state.automationRunsSignal);
   // 子页：任务列表（默认）/ 运行记录；toast「查看结果」信号切入运行记录子页并高亮该条。
   const [runsTab, setRunsTab] = useState<"tasks" | "runs">("tasks");
@@ -480,7 +531,6 @@ export function AutomationSettings({ models, providers, settings, workspaceConfi
           providers={providers}
           settings={settings}
           workspacePath={resolvedWorkspacePath}
-          workspaceName={resolvedWorkspaceName}
           activeAgentId={effectiveActiveAgentId}
           onCancel={() => setForm(null)}
           onSubmit={(task) => { send({ type: "automation.save", task }); setForm(null); }}

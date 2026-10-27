@@ -2974,6 +2974,11 @@ html[data-theme-wallpaper="true"][data-ui-window-hidden] .content-preview-panel 
 .automation-dialog-body textarea { min-height: 88px; resize: vertical; }
 .automation-field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
 .automation-hint { margin: 0; color: var(--text-muted); font-size: 9.5px; line-height: 1.45; }
+/* 空间行：目录下拉 + 「浏览…」并排；下拉只显示目录名，完整路径走下方 hint。 */
+.automation-workspace-field { display: grid; gap: 4px; min-width: 0; }
+.automation-workspace-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
+.automation-workspace-controls > button { min-height: 30px; padding: 0 11px; white-space: nowrap; }
+.automation-workspace-path { overflow-wrap: anywhere; }
 .automation-cron-preview { padding: 1px 5px; border-radius: 4px; background: var(--surface-muted); color: var(--text); font-size: 10px; font-variant-numeric: tabular-nums; }
 .automation-time-pair { display: flex; gap: 6px; }
 .automation-time-pair select { flex: 1; min-width: 0; }
