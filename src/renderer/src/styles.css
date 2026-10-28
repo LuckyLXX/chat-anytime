@@ -2721,6 +2721,16 @@ html[data-theme-wallpaper="true"][data-ui-window-hidden] .content-preview-panel 
 [data-theme-wallpaper="true"] .right-panel { border-left-color: transparent; }
 [data-theme-wallpaper="true"] .settings-dialog,
 [data-theme-wallpaper="true"] .permission-dialog { background: color-mix(in srgb, var(--panel-bg-dialog) var(--panel-alpha, 100%), transparent); backdrop-filter: blur(20px) saturate(120%); -webkit-backdrop-filter: blur(20px) saturate(120%); }
+/* Wallpaper mode: the landing placeholder (icon + 「今天想开发什么？」) sits dead centre —
+   exactly where the wallpaper is the point (user report 2026-10-28: 「影响我看壁纸了」).
+   Hide the decorative part only; actionable bits stay (gallery wall empty state keeps its
+   「登记已有作品」 button). The hydration placeholder (正在载入会话…) and the no-workspace
+   prompt (打开一个项目) are status/action feedback, not decoration — they keep rendering. */
+[data-theme-wallpaper="true"] .empty-conversation.landing-empty > .empty-icon,
+[data-theme-wallpaper="true"] .empty-conversation.landing-empty > h1,
+[data-theme-wallpaper="true"] .empty-conversation.gallery-wall-empty > .empty-icon,
+[data-theme-wallpaper="true"] .empty-conversation.gallery-wall-empty > h1,
+[data-theme-wallpaper="true"] .empty-conversation.gallery-wall-empty > .gallery-wall-hint { display: none; }
 
 /* Wallpaper mode: chat bubbles and their inner fills drop to translucent
    blends so the wallpaper stays visible — plain alpha only, no backdrop-filter

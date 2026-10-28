@@ -22,6 +22,7 @@ const read = (relative: string): string => readFileSync(join(here, relative), "u
 const appSource = read("../renderer/src/App.tsx");
 const paneSource = read("../renderer/src/ConversationPane.tsx");
 const generalSource = read("../renderer/src/GeneralSettings.tsx");
+const stylesSource = read("../renderer/src/styles.css");
 
 describe("空态作品墙开关的接线", () => {
   it("判定只此一处，两个渲染点共用同一个值", () => {
@@ -38,7 +39,23 @@ describe("空态作品墙开关的接线", () => {
     // 「关掉 = 退回今天想开发什么？」是用户明确选定的行为，靠的是 renderLanding
     // 可选 + 兜底分支；这里两条都钉住。
     expect(paneSource).toContain("renderLanding?(): ReactNode;");
-    expect(paneSource).toContain("renderLanding ? renderLanding() : <div className=\"empty-conversation\" data-pane=\"landing\"");
+    expect(paneSource).toContain("renderLanding ? renderLanding() : <div className=\"empty-conversation landing-empty\" data-pane=\"landing\"");
+  });
+
+  it("壁纸模式下空态不压在壁纸上：只藏装饰，加载态与服务态照常可见", () => {
+    // 用户要的是「壁纸别被挡住」（2026-10-28）。隐藏挂在 `landing-empty` 上，
+    // 所以必须钉住两件事：① 样式确实按壁纸属性隐藏图标/标题；
+    // ② 同一区块里的载入中空态**没有**这个类（否则「正在载入会话…」会一起消失，
+    // 用户看到的是卡住的空白 — 那是比挡壁纸严重得多的回归）。
+    // 避开跨行断言：CRLF 工作区里拼接的 \n 会失配（仓库 autocrlf）。
+    expect(stylesSource).toContain('[data-theme-wallpaper="true"] .empty-conversation.landing-empty > .empty-icon,');
+    expect(stylesSource).toContain('[data-theme-wallpaper="true"] .empty-conversation.landing-empty > h1,');
+    expect(stylesSource).toContain(
+      '[data-theme-wallpaper="true"] .empty-conversation.gallery-wall-empty > .gallery-wall-hint { display: none; }',
+    );
+    expect(paneSource).toContain('<div className="empty-conversation" data-pane="landing"><div className="empty-icon"><LoaderCircle');
+    // 无工作区的「打开一个项目」带操作按钮，不在隐藏范围。
+    expect(paneSource).toContain('<div className="empty-workspace" data-pane="landing">');
   });
 
   it("设置页开关写回同一字段，并随 appearance 整包提交（不需要新增镜像）", () => {

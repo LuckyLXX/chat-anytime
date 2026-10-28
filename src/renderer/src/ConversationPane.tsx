@@ -2170,7 +2170,9 @@ export const ConversationPane = memo(function ConversationPane({
           <div className="empty-workspace" data-pane="landing"><div className="empty-icon"><FolderOpen size={27} /></div><h1>打开一个项目</h1><button className="primary-button" data-control="workspace-open" type="button" onClick={() => void openWorkspace()}><FolderOpen size={16} />选择文件夹</button></div>
         ) : displayMessages.length === 0 && !isGenerating ? (
           // 空态优先渲染作品墙（App 注入）；无 renderLanding 时保留原空态文案。
-          renderLanding ? renderLanding() : <div className="empty-conversation" data-pane="landing"><div className="empty-icon"><CodeXml size={27} /></div><h1>今天想开发什么？</h1></div>
+          // `landing-empty` 只是给壁纸模式用的钩子（见 styles.css：壁纸下隐藏图标与标题，
+          // 别压在壁纸上）；载入中的空态是另一条分支，故意没有这个类，保持可见。
+          renderLanding ? renderLanding() : <div className="empty-conversation landing-empty" data-pane="landing"><div className="empty-icon"><CodeXml size={27} /></div><h1>今天想开发什么？</h1></div>
         ) : <>
           {displayMessages.map((message, index) => {
             const timing = showTurnTimingOnLatest && index === latestAssistantMessageIndex && message.role === "assistant" ? data.turnTiming : undefined;
