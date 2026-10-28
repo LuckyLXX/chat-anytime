@@ -2,7 +2,7 @@ import { access, mkdir, mkdtemp, symlink, utimes, writeFile } from "node:fs/prom
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { artifactCandidatesFromBashCommand, artifactCandidatesFromOutput, changedWorkspaceFile, changedWorkspaceFiles, collectProducedArtifacts, createWorkspaceDirectory, createWorkspaceFile, deleteWorkspaceEntry, existingWorkspaceFiles, isArtifactProducingTool, listWorkspaceDirectory, previewFileMimeType, readWorkspaceFilePreview, renameWorkspaceEntry, resolveWorkspaceEntry, searchWorkspaceFiles, statWorkspaceFile, writeWorkspaceFile } from "./workspace-preview.js";
+import { artifactCandidatesFromBashCommand, artifactCandidatesFromOutput, changedWorkspaceFile, changedWorkspaceFiles, collectProducedArtifacts, createWorkspaceDirectory, createWorkspaceFile, deleteWorkspaceEntry, existingWorkspaceFiles, isArtifactProducingTool, listWorkspaceDirectory, previewFileMimeType, readWorkspaceFilePreview, renameWorkspaceEntry, resolveWorkspaceEntry, searchWorkspaceFiles, statWorkspaceFile, workspaceDirectoryExists, writeWorkspaceFile } from "./workspace-preview.js";
 import { IMAGE_PREVIEW_LIMIT_BYTES } from "../shared/protocol.js";
 
 const TINY_PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
@@ -450,5 +450,16 @@ describe("workspace entry reveal & stat（文件树右键）", () => {
     await expect(statWorkspaceFile(workspace, "src")).rejects.toThrow("普通文件");
     await expect(statWorkspaceFile(workspace, "../escape.md")).rejects.toThrow("当前工作区");
     await expect(statWorkspaceFile(workspace, "src/gone.ts")).rejects.toThrow("不存在");
+  });
+
+  it("workspaceDirectoryExists：只认真实存在的目录（作品继续开发切工作区前的预检）", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "pidesktop-ws-exists-"));
+    await writeFile(join(workspace, "app.ts"), "export {}", "utf8");
+
+    await expect(workspaceDirectoryExists(workspace)).resolves.toBe(true);
+    // 文件不是工作区；不存在的路径（作品登记后被删除/改名）必须为 false 而不是抛错
+    await expect(workspaceDirectoryExists(join(workspace, "app.ts"))).resolves.toBe(false);
+    await expect(workspaceDirectoryExists(join(workspace, "no-such-dir"))).resolves.toBe(false);
+    await expect(workspaceDirectoryExists("")).resolves.toBe(false);
   });
 });

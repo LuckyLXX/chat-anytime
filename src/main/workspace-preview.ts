@@ -591,6 +591,20 @@ export interface WorkspaceEntryLocation {
   kind: "file" | "directory";
 }
 
+/**
+ * 工作区目录是否真实存在且是目录（作品「继续开发」切工作区前的预检）。
+ *
+ * 为什么不在渲染端直接 `send(session.new)` 再读错误：主进程的报错文本只说了
+ * 「工作区目录不存在」，不带路径，也区分不出是工作区失效还是助手已归档；
+ * 而作品清单是跨工作区的，工作区被删/改名后作品会指向一个不存在的目录，
+ * 这种失效必须能被准确报出来（含完整路径）。任何 IO 异常一律 false。
+ */
+export async function workspaceDirectoryExists(path: string): Promise<boolean> {
+  if (typeof path !== "string" || !path.trim()) return false;
+  const info = await stat(path).catch(() => undefined);
+  return info?.isDirectory() === true;
+}
+
 /** 解析工作区条目（空路径 = 工作区根）为绝对路径并判定形态；不存在时抛错。 */
 export async function resolveWorkspaceEntry(workspace: string, requestedPath?: string): Promise<WorkspaceEntryLocation> {
   if (typeof workspace !== "string" || !workspace.trim()) throw new Error("请指定要操作的工作区");

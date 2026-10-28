@@ -94,7 +94,7 @@ KNOWN_CONTROLS = frozenset({
     "ssh-password-submit", "ssh-password-cancel",
     "ssh-files-toggle", "ssh-upload", "ssh-download", "ssh-transfer-cancel",
     "gallery-toggle", "gallery-publish", "gallery-run", "gallery-develop", "gallery-open-wall", "gallery-remove",
-    "gallery-data", "gallery-data-clear",
+    "gallery-reveal", "gallery-data", "gallery-data-clear",
     "computer-toggle", "design-toggle", "design-send-ai", "design-export", "design-undo", "design-redo",
     "design-tool-select", "design-tool-frame", "design-tool-rect", "design-tool-text", "design-layer-lock",
     "agent-new", "agent-save", "settings-version", "jev-test", "jev-expand", "capability-switch",

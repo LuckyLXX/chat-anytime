@@ -18,7 +18,7 @@ import { applyRuntimeStatePatch } from "../shared/snapshot-patch.js";
 import { isThemeAssetUrl, parseThemeAssetUrl } from "../shared/theme-assets.js";
 import type { ThemeImportOutcome } from "../shared/theme-assets.js";
 import { serveThemeAsset, migrateInlineThemeAssets, reconcileThemeAssetDirs, themeAssetsDirFor, resolveThemeAgentDir, importThemeCssFile, importThemeDirectory, promoteThemeScope } from "./theme-assets.js";
-import { createWorkspaceDirectory, createWorkspaceFile, deleteWorkspaceEntry, listWorkspaceDirectory, previewFileMimeType, readWorkspaceFilePreview, renameWorkspaceEntry, resolveWorkspaceEntry, safeRelativePath, searchWorkspaceFiles, statWorkspaceFile, writeWorkspaceFile } from "./workspace-preview.js";
+import { createWorkspaceDirectory, createWorkspaceFile, deleteWorkspaceEntry, listWorkspaceDirectory, previewFileMimeType, readWorkspaceFilePreview, renameWorkspaceEntry, resolveWorkspaceEntry, safeRelativePath, searchWorkspaceFiles, statWorkspaceFile, workspaceDirectoryExists, writeWorkspaceFile } from "./workspace-preview.js";
 import { pruneDisabledModelRefs } from "./model-catalog.js";
 import { BrowserPreviewController } from "./browser-preview.js";
 import { BrowserAutomationController } from "./browser-automation.js";
@@ -1126,6 +1126,12 @@ function registerIpc(): void {
     const location = await resolveWorkspaceEntry(workspace, relativePath);
     if (location.kind === "file") shell.showItemInFolder(location.absolutePath);
     else await shell.openPath(location.absolutePath);
+  });
+  // 工作区存在性预检：作品清单跨工作区，工作区被删/改名后「继续开发」必须能
+  // 准确报出「已失效」并带上完整路径（而不是笼统的「新建话题失败」）。
+  ipcMain.handle("desktop:workspace-directory-exists", async (_event, path: unknown): Promise<boolean> => {
+    if (typeof path !== "string") return false;
+    return workspaceDirectoryExists(path);
   });
   ipcMain.handle("desktop:stat-workspace-file", async (_event, workspace: string, relativePath: string): Promise<WorkspaceFileStat> => {
     if (typeof workspace !== "string" || !workspace.trim()) throw new Error("请指定要操作的工作区");

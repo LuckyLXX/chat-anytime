@@ -24,6 +24,7 @@ import {
   sortGalleryApps,
   trimGalleryApps,
   upsertGalleryApp,
+  workspaceLabel,
   type GalleryApp
 } from "./gallery.js";
 
@@ -49,6 +50,17 @@ describe("normalizeGalleryEntry", () => {
 
   it("空串与根目录都归一为 .（服务型作品的「工作区根」判据）", () => {
     for (const value of ["", "  ", ".", "./"]) expect(normalizeGalleryEntry(value)).toBe(".");
+  });
+});
+
+describe("workspaceLabel（作品墙卡片上的工作区名）", () => {
+  it("取路径最后一段，Windows 反斜杠与尾斜杠都能处理", () => {
+    expect(workspaceLabel("D:\\Projects\\designs")).toBe("designs");
+    expect(workspaceLabel("D:/Projects/designs/")).toBe("designs");
+    expect(workspaceLabel("/home/li/ws-proj")).toBe("ws-proj");
+    // 盘符根保留盘符（否则名字就是空串了）
+    expect(workspaceLabel("D:\\")).toBe("D:");
+    expect(workspaceLabel("")).toBe("");
   });
 });
 

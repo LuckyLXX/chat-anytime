@@ -73,7 +73,7 @@ import { DelegationTranscript } from "./components/DelegationTranscript";
 import { detailTitle } from "./components/QuestionPanel";
 import { compactPath, type Artifact } from "./lib/content";
 import { composePickMessage } from "./lib/browser-pick";
-import { composeGalleryDevMessage, galleryRunPlan, galleryServiceFailureMessage, galleryServiceTerminalId, GALLERY_SERVICE_WAIT_MS, type GalleryApp, type GalleryDraft, type GalleryKind, type GalleryPanelOptions } from "../../shared/gallery";
+import { composeGalleryDevMessage, galleryRunPlan, galleryServiceFailureMessage, galleryServiceTerminalId, GALLERY_SERVICE_WAIT_MS, workspaceLabel, type GalleryApp, type GalleryDraft, type GalleryKind, type GalleryPanelOptions } from "../../shared/gallery";
 import { GalleryMenu } from "./components/GalleryMenu";
 import { GalleryWall } from "./components/GalleryWall";
 import { GalleryDataDialog, GalleryPublishDialog, GalleryWallDialog } from "./components/GalleryDialogs";
@@ -85,6 +85,7 @@ import type { PaletteAction } from "./lib/command-palette";
 import { clampPreviewSplit, PREVIEW_SPLIT_MAX, PREVIEW_SPLIT_MIN, previewSplitFromKey } from "./lib/preview-split";
 import { workAreaPreviewClasses } from "./lib/preview-layout";
 import { groupSessionsByWorkspace, workspaceDisplayLabel, workspaceKey } from "./lib/session-groups";
+import { pickTopicAgentId } from "./lib/topic-agent";
 import { archivedSessionCount, selectSessionPaths, selectedPathsInView, sessionsForView, toggleSessionSelection, type SessionSelection, type SessionView } from "./lib/session-view";
 import { resolveThemeAssetUrls, activeThemeScope } from "../../shared/theme-assets";
 import { bubbleOpacityCss, collectThemeLayers, panelOpacityCss, scopeCustomThemeCss, themePresetCss, wallpaperOpacityCss } from "./lib/theme-presets";
@@ -182,6 +183,15 @@ function readStoredDesignSplit(): number {
 
 const DESIGN_SPLIT_MIN = 25;
 const DESIGN_SPLIT_MAX = 75;
+/**
+ * 作品「继续开发」跨工作区新建话题后的注入预算。
+ *
+ * 用户切走/新会话迟迟不挂载时不能把旧文本一直挂在待注入队列里（否则若干秒后
+ * 用户在别的会话里打字，文本会突然被追进去）。超时即丢，退回「请手动再点一次」。
+ */
+const GALLERY_DEV_INJECT_TIMEOUT_MS = 10_000;
+/** 新会话的 composer 尚未注册时的重试间隔（一次 snapshot 往返的粒度）。 */
+const GALLERY_DEV_INJECT_RETRY_MS = 60;
 
 function clampDesignSplit(value: number): number {
   return Math.min(DESIGN_SPLIT_MAX, Math.max(DESIGN_SPLIT_MIN, Math.round(value * 10) / 10));
@@ -750,6 +760,18 @@ export function App(): ReactNode {
   // 缩略图降级/失败走 warn 文案。
   const galleryNotice = useDesktopStore((state) => state.galleryNotice);
   const [galleryToast, setGalleryToast] = useState<string>();
+  /**
+   * 「继续开发」跨工作区时的切换提示：切换本身有工作区名变化，但用户是在作品墙
+   * 上点的，不说明一句就不知道话题已经被换掉了（且草稿已写好）。
+   */
+  const [galleryDevToast, setGalleryDevToast] = useState<string>();
+  /**
+   * 跨工作区「继续开发」的待注入文本：`session.new` 之后新会话要等一次 snapshot
+   * 往返才挂载，注入必须等它的 composer 注册完成（见下方 effect）。
+   * sessionId 在新会话出现的第一帧绑定，之后即使用户手动切走也不会写错输入框。
+   */
+  const pendingGalleryInjectRef = useRef<{ key: string; text: string; sessionId?: string; expiresAt: number } | undefined>(undefined);
+  const [galleryInjectTick, setGalleryInjectTick] = useState(0);
   const lastGalleryNoticeAtRef = useRef(0);
   useEffect(() => {
     if (!galleryNotice || galleryNotice.at === lastGalleryNoticeAtRef.current) return;
@@ -953,14 +975,87 @@ export function App(): ReactNode {
       setMessageActionError(error instanceof Error ? error.message : "运行作品失败");
     }
   }, [openGalleryBrowserTab, ensureGalleryService, openGalleryPanel]);
+  /**
+   * 「继续开发」：把作品上下文写进 composer。
+   *
+   * 与作品同工作区 → 直接写当前会话：用户本来就在那棵目录树里，不必换话题。
+   * 跨工作区 → 在作品所在工作区**新建一个干净话题**再注入（2026-10-28 与用户
+   * 对齐）：作品清单全局跨工作区，而会话只看得到自己的 workspace，直接在当前
+   * 会话注入既拿不到那棵目录树、写入也会落到别的工作区。工作区失效（目录被删/
+   * 改名）时明确报出完整路径，绝不静默降级成一次注定失败的注入。
+   */
   const developGalleryApp = useCallback((app: GalleryApp): void => {
+    const text = composeGalleryDevMessage(app);
     const targetId = focusedPaneId ?? activeSessionId;
-    if (!targetId) {
-      setMessageActionError("请先创建或打开一个会话，再继续开发作品");
+    const sameWorkspace = Boolean(activeWorkspace) && workspaceKey(activeWorkspace!) === workspaceKey(app.workspace);
+    if (sameWorkspace && targetId) {
+      composerBridge.current.get(targetId)?.insertText(text);
       return;
     }
-    composerBridge.current.get(targetId)?.insertText(composeGalleryDevMessage(app));
-  }, [focusedPaneId, activeSessionId]);
+    void (async () => {
+      try {
+        if (!(await window.piDesktop.workspaceDirectoryExists(app.workspace))) {
+          setMessageActionError(`「${app.title}」登记的工作区已失效：${app.workspace}\n目录不存在或已被移动。把它移回原位，或在该工作区重新登记这个作品。`);
+          return;
+        }
+        // 待注入先挂上：新会话出现后 effect 把它写进那个会话的输入框（不写当前层）。
+        pendingGalleryInjectRef.current = { key: workspaceKey(app.workspace), text, expiresAt: Date.now() + GALLERY_DEV_INJECT_TIMEOUT_MS };
+        if (splitTree) {
+          // 分屏里 session.new 不会自己占格：指定替换焦点格（与 createNewSession 同口径）。
+          const replace = focusedPaneId ?? activeSessionId;
+          if (replace) pendingPaneReplaceRef.current = replace;
+        }
+        await window.piDesktop.send({ type: "session.new", workspace: app.workspace, agentId: pickTopicAgentId(settings, activeAgentId) });
+        setGalleryDevToast(`已在「${workspaceLabel(app.workspace)}」新建话题，接着改「${app.title}」`);
+      } catch (error) {
+        pendingGalleryInjectRef.current = undefined;
+        setMessageActionError(`「${app.title}」继续开发失败：${error instanceof Error ? error.message : String(error)}（作品工作区：${app.workspace}）`);
+      }
+    })();
+  }, [focusedPaneId, activeSessionId, activeWorkspace, splitTree, settings, activeAgentId]);
+
+  /**
+   * 跨工作区「继续开发」的注入 effect：等新建出来的那个会话挂载完再写入。
+   *
+   * 两道守卫：sessionId 在新会话出现的第一帧绑定（用户随后手动切会话也不会写错
+   * 地方）；超时即丢（新会话迟迟不挂载或用户已走开时，不能把旧文本追进他正在
+   * 写的输入框）。composer 还没注册就下一帧重试——新会话的 Pane 挂载与 effect
+   * 之间隔着一次 snapshot 推送。
+   */
+  useEffect(() => {
+    const pending = pendingGalleryInjectRef.current;
+    if (!pending) return;
+    if (Date.now() > pending.expiresAt) {
+      pendingGalleryInjectRef.current = undefined;
+      return;
+    }
+    if (!activeWorkspace || workspaceKey(activeWorkspace) !== pending.key) return;
+    if (pending.sessionId === undefined) {
+      if (!activeSessionId) return;
+      pending.sessionId = activeSessionId;
+    }
+    if (activeSessionId !== pending.sessionId) return;
+    const api = composerBridge.current.get(pending.sessionId);
+    if (!api) {
+      const timer = window.setTimeout(() => setGalleryInjectTick((value) => value + 1), GALLERY_DEV_INJECT_RETRY_MS);
+      return () => window.clearTimeout(timer);
+    }
+    pendingGalleryInjectRef.current = undefined;
+    api.insertText(pending.text);
+  }, [activeWorkspace, activeSessionId, galleryInjectTick]);
+
+  /** 「打开所在文件夹」：文件作品选中入口文件、目录作品进入目录（与文件树右键同语义）。 */
+  const revealGalleryApp = useCallback(async (app: GalleryApp): Promise<void> => {
+    try {
+      if (!(await window.piDesktop.workspaceDirectoryExists(app.workspace))) {
+        setMessageActionError(`「${app.title}」登记的工作区已失效：${app.workspace}\n目录不存在或已被移动。`);
+        return;
+      }
+      await window.piDesktop.revealInExplorer(app.workspace, app.entry === "." ? undefined : app.entry);
+    } catch (error) {
+      setMessageActionError(`打不开「${app.title}」所在文件夹：${error instanceof Error ? error.message : String(error)}（${app.workspace}）`);
+    }
+  }, []);
   const publishGalleryDraft = useCallback(async (draft: GalleryDraft): Promise<void> => {
     await window.piDesktop.send({ type: "gallery.publish", draft });
   }, []);
@@ -990,9 +1085,10 @@ export function App(): ReactNode {
       onDevelop={developGalleryApp}
       onPublish={openGalleryDraft}
       onRemove={(app) => void removeGalleryApp(app)}
+      onReveal={(app) => void revealGalleryApp(app)}
       onData={setGalleryDataApp}
     />
-  ), [galleryApps, activeWorkspace, runGalleryApp, developGalleryApp, removeGalleryApp, openGalleryDraft]);
+  ), [galleryApps, activeWorkspace, runGalleryApp, developGalleryApp, removeGalleryApp, revealGalleryApp, openGalleryDraft]);
   /**
    * 空态首页是否注入作品墙（通用设置 →「界面」的开关，缺省展示）。
    *
@@ -1258,11 +1354,9 @@ export function App(): ReactNode {
         if (target) pendingPaneReplaceRef.current = target;
       }
       // 新话题沿用当前激活会话的助手；激活会话属于归档助手时不能作为目标，
-      // 回落到未归档默认助手（与运行时 session.new 的守卫一致）。
-      const activeProfile = settings.agents.find((agent) => agent.id === activeAgentId);
-      const targetAgentId = activeProfile && !activeProfile.archived
-        ? activeProfile.id
-        : settings.agents.find((agent) => !agent.archived)?.id ?? settings.currentAgentId;
+      // 回落到未归档默认助手（与运行时 session.new 的守卫一致）。判定与作品
+      // 「继续开发」共用 pickTopicAgentId，防止两处漂移。
+      const targetAgentId = pickTopicAgentId(settings, activeAgentId);
       await window.piDesktop.send({ type: "session.new", ...(workspace ? { workspace } : {}), agentId: targetAgentId });
       // 分组默认折叠，新建后展开目标工作区，让新话题立即可见。
       const key = workspaceKey(workspace ?? activeWorkspace ?? "");
@@ -2451,6 +2545,7 @@ export function App(): ReactNode {
           onRun={(app) => { setGalleryWallOpen(false); void runGalleryApp(app); }}
           onDevelop={(app) => { setGalleryWallOpen(false); developGalleryApp(app); }}
           onRemove={(app) => void removeGalleryApp(app)}
+          onReveal={(app) => void revealGalleryApp(app)}
           onData={(app) => { setGalleryWallOpen(false); setGalleryDataApp(app); }}
           onPublish={() => { setGalleryWallOpen(false); openGalleryDraft(); }}
           onClose={() => setGalleryWallOpen(false)}
@@ -2537,6 +2632,9 @@ export function App(): ReactNode {
       )}
       {galleryToast && (
         <div className="error-toast checkpoint-toast"><LayoutGrid size={18} /><span>{galleryToast}</span><button className="icon-button" type="button" title="关闭提示" aria-label="关闭提示" onClick={() => setGalleryToast(undefined)}><X size={16} /></button></div>
+      )}
+      {galleryDevToast && (
+        <div className="error-toast checkpoint-toast"><FolderOpen size={18} /><span>{galleryDevToast}</span><button className="icon-button" type="button" title="关闭提示" aria-label="关闭提示" onClick={() => setGalleryDevToast(undefined)}><X size={16} /></button></div>
       )}
       {hookToast && (
         <div className="error-toast checkpoint-toast"><AlertCircle size={18} /><span>{hookToast}</span><button className="icon-button" type="button" title="关闭提示" aria-label="关闭提示" onClick={() => setHookToast(undefined)}><X size={16} /></button></div>

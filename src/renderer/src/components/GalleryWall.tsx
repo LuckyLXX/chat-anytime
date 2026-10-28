@@ -1,6 +1,7 @@
-import { AppWindow, Cat, Database, FolderOpen, Hammer, LayoutGrid, PanelRight, Play, Plus, Server, Sparkles, Trash2 } from "lucide-react";
+import { AppWindow, Cat, Database, FolderOpen, FolderSearch, Hammer, LayoutGrid, PanelRight, Play, Plus, Server, Sparkles, Trash2 } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
-import { GALLERY_KIND_LABELS, GALLERY_PANEL_MODE_LABELS, panelMode, type GalleryApp } from "../../../shared/gallery";
+import { GALLERY_KIND_LABELS, GALLERY_PANEL_MODE_LABELS, panelMode, workspaceLabel, type GalleryApp } from "../../../shared/gallery";
+import { workspaceKey } from "../lib/session-groups";
 
 /**
  * 作品墙：空会话主区域里的作品卡片网格（landing 的替代内容）。
@@ -25,6 +26,8 @@ interface GalleryWallProps {
   onDevelop(app: GalleryApp): void;
   onPublish(): void;
   onRemove(app: GalleryApp): void;
+  /** 在系统文件管理器中定位作品入口（文件选中 / 目录进入）。 */
+  onReveal(app: GalleryApp): void;
   /** 「数据…」：面板作品的持久化数据在哪里、占多少、怎么清（仅 panel 显示入口）。 */
   onData(app: GalleryApp): void;
 }
@@ -65,9 +68,11 @@ function useThumb(app: GalleryApp): string | undefined {
   return src;
 }
 
-function GalleryCard({ app, workspace, onRun, onDevelop, onRemove, onData }: { app: GalleryApp } & Omit<GalleryWallProps, "apps" | "onPublish">): ReactNode {
+function GalleryCard({ app, workspace, onRun, onDevelop, onReveal, onRemove, onData }: { app: GalleryApp } & Omit<GalleryWallProps, "apps" | "onPublish">): ReactNode {
   const thumb = useThumb(app);
-  const elsewhere = Boolean(workspace) && workspace!.toLowerCase() !== app.workspace.toLowerCase();
+  // 作品清单全局跨工作区：卡片必须自己说明「它在哪」，否则跨工作区的作品
+  // 只能靠悬停看全路径（2026-10-28 用户「找不到源文件在哪个工作区」）。
+  const elsewhere = Boolean(workspace) && workspaceKey(workspace!) !== workspaceKey(app.workspace);
   return (
     <div className="gallery-card" data-gallery-id={app.id}>
       <button type="button" className="gallery-card-thumb" data-control="gallery-run" title={`运行「${app.title}」`} onClick={() => onRun(app)}>
@@ -81,8 +86,13 @@ function GalleryCard({ app, workspace, onRun, onDevelop, onRemove, onData }: { a
         {app.description && <p className="gallery-card-desc">{app.description}</p>}
         <span className="gallery-card-entry" title={`${app.workspace}/${app.entry}`}>
           <FolderOpen size={11} />
-          {compact(app.entry)}
-          {elsewhere && <em title={app.workspace}>另一工作区</em>}
+          <span
+            className={`gallery-card-workspace${elsewhere ? " is-other" : ""}`}
+            title={elsewhere ? `作品在另一个工作区（当前：${workspace}）：${app.workspace}` : `工作区：${app.workspace}`}
+          >
+            {workspaceLabel(app.workspace)}
+          </span>
+          <span className="gallery-card-path">{compact(app.entry)}</span>
         </span>
         {/* 带本地服务的面板：点运行会先起服务再开窗（2026-10-11）。纯展示标记，
             刻意不带 data-control——它是说明，不是开关，不该进主题钩子契约。 */}
@@ -98,6 +108,7 @@ function GalleryCard({ app, workspace, onRun, onDevelop, onRemove, onData }: { a
           {app.kind === "panel" && (
             <button type="button" className="gallery-card-data" data-control="gallery-data" title={`「${app.title}」的持久化数据`} onClick={() => onData(app)}><Database size={13} />数据…</button>
           )}
+          <button type="button" className="gallery-card-reveal" data-control="gallery-reveal" title={`在资源管理器中打开「${app.title}」所在位置`} aria-label={`打开 ${app.title} 所在文件夹`} onClick={() => onReveal(app)}><FolderSearch size={13} /></button>
           <button type="button" className="gallery-card-remove" data-control="gallery-remove" title="从作品墙移除" aria-label={`移除 ${app.title}`} onClick={() => onRemove(app)}><Trash2 size={13} /></button>
         </div>
       </div>
@@ -105,7 +116,7 @@ function GalleryCard({ app, workspace, onRun, onDevelop, onRemove, onData }: { a
   );
 }
 
-export function GalleryWall({ apps, workspace, embedded = false, onRun, onDevelop, onPublish, onRemove, onData }: GalleryWallProps): ReactNode {
+export function GalleryWall({ apps, workspace, embedded = false, onRun, onDevelop, onPublish, onRemove, onReveal, onData }: GalleryWallProps): ReactNode {
   if (apps.length === 0) {
     return (
       <div className="empty-conversation gallery-wall-empty" data-pane="landing">
@@ -129,7 +140,7 @@ export function GalleryWall({ apps, workspace, embedded = false, onRun, onDevelo
         <button type="button" className="gallery-wall-publish" data-control="gallery-publish" onClick={onPublish}><Plus size={14} />登记新作品</button>
       </header>
       <div className="gallery-wall-grid">
-        {apps.map((app) => <GalleryCard key={app.id} app={app} workspace={workspace} onRun={onRun} onDevelop={onDevelop} onRemove={onRemove} onData={onData} />)}
+        {apps.map((app) => <GalleryCard key={app.id} app={app} workspace={workspace} onRun={onRun} onDevelop={onDevelop} onReveal={onReveal} onRemove={onRemove} onData={onData} />)}
       </div>
     </div>
   );

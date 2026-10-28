@@ -2639,6 +2639,12 @@ export interface DesktopApi {
   renameWorkspaceEntry(workspace: string, relativePath: string, newName: string): Promise<WorkspaceEntryResult>;
   /** 在系统文件管理器中定位工作区条目：文件选中、文件夹进入；空路径打开工作区根目录。 */
   revealInExplorer(workspace: string, relativePath?: string): Promise<void>;
+  /**
+   * 工作区目录是否真实存在且是目录（作品「继续开发」切工作区前的预检）。
+   * 作品清单跨工作区，工作区被删/改名后需要准确的「已失效」判定，而不是把
+   * 其他失败（助手归档、权限）误报成工作区问题。
+   */
+  workspaceDirectoryExists(path: string): Promise<boolean>;
   /** 读取工作区文件的名称/相对路径/体积（文件树「添加到聊天」组装附件用）。 */
   statWorkspaceFile(workspace: string, relativePath: string): Promise<WorkspaceFileStat>;
   /** 作品「运行」：把入口本地文件映射成 loopback 静态服务地址（真实 http origin）。 */

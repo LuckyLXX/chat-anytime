@@ -189,6 +189,20 @@ export function panelWindowSize(options?: GalleryPanelOptions): { width: number;
   return { width: options?.width ?? PANEL_DEFAULT_WIDTH, height: options?.height ?? PANEL_DEFAULT_HEIGHT };
 }
 
+/**
+ * 工作区显示名（作品墙卡片用）：取路径最后一段（`D:\\Projects\\proj` → `proj`）。
+ * 盘符根（`D:\\`）保留盘符，因为「D:/」这个名字没有信息量；空串原样返回。
+ *
+ * 只用于展示，**不能用来比较工作区**——比较走大小写不敏感 + 统一分隔符的
+ * workspaceKey（渲染端 `lib/session-groups.ts`）。
+ */
+export function workspaceLabel(path: string): string {
+  const text = path.trim().replace(/[\\/]+$/u, "");
+  if (!text) return path;
+  const parts = text.split(/[\\/]/u);
+  return parts[parts.length - 1] || text;
+}
+
 /** 工作区相对路径归一化：反斜杠转正斜杠、去掉 `./` 前缀（"." 保留为根）。 */
 export function normalizeGalleryEntry(value: string): string {
   const text = value.trim().replaceAll("\\", "/").replace(/^\.\//u, "");

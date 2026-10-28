@@ -3164,15 +3164,21 @@ html[data-theme-wallpaper="true"][data-ui-window-hidden] .content-preview-panel 
 .gallery-card-body { display: grid; gap: 5px; padding: 9px 10px 10px; }
 .gallery-card-title { overflow: hidden; color: var(--text); font-size: 12.5px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
 .gallery-card-desc { margin: 0; color: var(--text-muted); font-size: 10.5px; line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.gallery-card-entry { display: flex; align-items: center; gap: 4px; min-width: 0; color: var(--text-muted); font-size: 10px; }
+.gallery-card-entry { display: flex; align-items: center; gap: 5px; min-width: 0; color: var(--text-muted); font-size: 10px; }
 .gallery-card-entry > svg { flex: 0 0 auto; }
-.gallery-card-entry em { flex: 0 0 auto; padding: 0 4px; border-radius: 4px; background: var(--accent-soft); color: var(--accent-text); font-size: 9px; font-style: normal; }
-.gallery-card-actions { display: flex; align-items: center; gap: 6px; padding-top: 2px; }
+/* 工作区名：同工作区是中性胶囊，跨工作区换成强调色——作品清单全局跨工作区，
+   卡片必须自己交代「源文件在哪」（2026-10-28 用户报找不到源文件在哪个工作区）。 */
+.gallery-card-workspace { flex: 0 0 auto; max-width: 68%; overflow: hidden; padding: 0 4px; border-radius: 4px; background: var(--surface-muted); color: var(--text-muted); font-size: 9px; font-weight: 600; line-height: 14px; text-overflow: ellipsis; white-space: nowrap; }
+.gallery-card-workspace.is-other { background: var(--accent-soft); color: var(--accent-text); }
+.gallery-card-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gallery-card-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding-top: 2px; }
 .gallery-card-actions > button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 28px; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface-input); color: var(--text); font-size: 10.5px; font-weight: 600; cursor: pointer; }
 .gallery-card-actions > button:hover { background: var(--surface-button-hover); }
 .gallery-card-actions > .primary-button { border-color: transparent; background: var(--accent); color: var(--on-accent); }
 .gallery-card-remove { margin-left: auto; width: 28px; padding: 0 !important; color: var(--text-muted); }
 .gallery-card-remove:hover { color: var(--danger); border-color: var(--danger-border); }
+.gallery-card-reveal { width: 28px; padding: 0 !important; color: var(--text-muted); }
+.gallery-card-reveal:hover { color: var(--text); border-color: var(--border-strong); }
 .gallery-wall-empty { border: 0; background: transparent; }
 .gallery-wall-hint { max-width: 420px; margin-bottom: 16px; color: var(--text-muted); font-size: 11.5px; line-height: 1.65; text-align: center; }
 

@@ -714,6 +714,10 @@ export function createDemoApi(): DesktopApi {
     async revealInExplorer(_workspace: string, _relativePath?: string): Promise<void> {
       // 浏览器演示环境没有系统文件管理器可打开。
     },
+    async workspaceDirectoryExists(_path: string): Promise<boolean> {
+      // 演示工作区是虚拟路径：声称存在，否则「继续开发」在演示里会被判定为失效。
+      return true;
+    },
     async statWorkspaceFile(_workspace: string, relativePath: string): Promise<import("../../shared/protocol").WorkspaceFileStat> {
       return { name: relativePath.split("/").at(-1) ?? relativePath, relativePath, size: 1024 };
     },

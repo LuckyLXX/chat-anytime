@@ -111,7 +111,7 @@
 | 设计绘图工具（画布浮动工具栏，aria-pressed 标记激活） | `design-tool-select` / `design-tool-frame` / `design-tool-rect` / `design-tool-text` |
 | 图层树锁定开关（行悬停出现，aria-pressed 标记锁定） | `design-layer-lock`                              |
 | 作品下拉开关（顶栏，aria-expanded + 数量角标） | `gallery-toggle`                                 |
-| 作品：运行 / 继续开发 / 打开作品墙 / 登记新作品 / 移除 / 面板数据（数据… 与清空） | `gallery-run` / `gallery-develop` / `gallery-open-wall` / `gallery-publish` / `gallery-remove` / `gallery-data` / `gallery-data-clear` |
+| 作品：运行 / 继续开发 / 打开作品墙 / 登记新作品 / 打开所在文件夹 / 移除 / 面板数据（数据… 与清空） | `gallery-run` / `gallery-develop` / `gallery-open-wall` / `gallery-publish` / `gallery-reveal` / `gallery-remove` / `gallery-data` / `gallery-data-clear` |
 | 角色页：新建角色 / 保存角色 | `agent-new` / `agent-save` |
 | 设置弹窗左栏底部：当前版本 | `settings-version` |
 | 通用页：能力总闸 / Jev 测试连接 / Jev 展开 | `capability-switch`（+ `data-capability`） / `jev-test` / `jev-expand` |

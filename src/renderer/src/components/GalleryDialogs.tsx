@@ -12,12 +12,13 @@ import { useOverlayLayer } from "../lib/overlay-layers";
  * 顶栏下拉的「打开作品墙」在任何时刻都能打开同一份内容（同一个 GalleryWall）。
  */
 
-export function GalleryWallDialog({ apps, workspace, onRun, onDevelop, onRemove, onData, onPublish, onClose }: {
+export function GalleryWallDialog({ apps, workspace, onRun, onDevelop, onRemove, onReveal, onData, onPublish, onClose }: {
   apps: GalleryApp[];
   workspace?: string;
   onRun(app: GalleryApp): void;
   onDevelop(app: GalleryApp): void;
   onRemove(app: GalleryApp): void;
+  onReveal(app: GalleryApp): void;
   onData(app: GalleryApp): void;
   onPublish(): void;
   onClose(): void;
@@ -33,7 +34,7 @@ export function GalleryWallDialog({ apps, workspace, onRun, onDevelop, onRemove,
           <button className="icon-button" type="button" title="关闭" aria-label="关闭作品墙" onClick={onClose}><X size={16} /></button>
         </header>
         <div className="gallery-wall-dialog-body">
-          <GalleryWall apps={apps} workspace={workspace} embedded onRun={onRun} onDevelop={onDevelop} onPublish={onPublish} onRemove={onRemove} onData={onData} />
+          <GalleryWall apps={apps} workspace={workspace} embedded onRun={onRun} onDevelop={onDevelop} onPublish={onPublish} onRemove={onRemove} onReveal={onReveal} onData={onData} />
         </div>
       </div>
     </div>

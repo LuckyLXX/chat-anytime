@@ -17,6 +17,7 @@ const api: DesktopApi = {
   deleteWorkspaceEntry: (workspace: string, relativePath: string) => ipcRenderer.invoke("desktop:delete-workspace-entry", workspace, relativePath),
   renameWorkspaceEntry: (workspace: string, relativePath: string, newName: string) => ipcRenderer.invoke("desktop:rename-workspace-entry", workspace, relativePath, newName),
   revealInExplorer: (workspace: string, relativePath?: string) => ipcRenderer.invoke("desktop:reveal-in-explorer", workspace, relativePath),
+  workspaceDirectoryExists: (path: string) => ipcRenderer.invoke("desktop:workspace-directory-exists", path),
   statWorkspaceFile: (workspace: string, relativePath: string) => ipcRenderer.invoke("desktop:stat-workspace-file", workspace, relativePath),
   galleryFileUrl: (filePath: string, workspace?: string) => ipcRenderer.invoke("gallery:file-url", filePath, workspace),
   galleryThumb: (fileName: string) => ipcRenderer.invoke("gallery:thumb", fileName),
