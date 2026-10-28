@@ -91,22 +91,27 @@ import {
   galleryThumbsDirFor,
   loadGalleryRepairingIds,
   persistGallery,
-  pruneGalleryThumbs,
-  writeGalleryThumb
+  pruneGalleryThumbs
 } from "./gallery-store.js";
 import {
   galleryAbsolutePath,
+  galleryCoverNote,
+  galleryPlaceholderCoverHtml,
   galleryRunTarget,
-  galleryThumbEligible,
-  galleryThumbName,
+  gallerySnapshotTarget,
+  GALLERY_COVER_EXTENSIONS,
+  GALLERY_COVER_HEIGHT,
+  GALLERY_COVER_WIDTH,
   normalizeGalleryApp,
   normalizeGalleryEntry,
   removeGalleryApp,
   sortGalleryApps,
   upsertGalleryApp,
   type GalleryApp,
+  type GalleryCoverSource,
   type GalleryDraft
 } from "../shared/gallery.js";
+import { parseServiceAddress, probeService } from "./gallery-service.js";
 import * as runtimeGallery from "./runtime-gallery.js";
 import * as runtimeJev from "./runtime-jev.js";
 import { assistantText, createSubagentTools, buildSubagentPromptBlock, type SubagentContext } from "./subagent.js";
@@ -2558,6 +2563,129 @@ function emitGallery(): void {
   post({ type: "gallery.apps", apps: galleryApps });
 }
 
+/** 封面图片体积上限（显式 cover / 入口图片）：超过就不读，避免把巨大图片丢给离屏缩放。 */
+const GALLERY_COVER_MAX_BYTES = 8 * 1024 * 1024;
+
+function coverExtensionAllowed(filePath: string): boolean {
+  const lower = filePath.toLowerCase();
+  return GALLERY_COVER_EXTENSIONS.some((extension) => lower.endsWith(extension));
+}
+
+/** 封面文件存在、非空、不超限（不抛错：封面缺失不该阻断发布）。 */
+async function coverFileAllowed(filePath: string): Promise<boolean> {
+  try {
+    const info = await stat(filePath);
+    return info.isFile() && info.size > 0 && info.size <= GALLERY_COVER_MAX_BYTES;
+  } catch {
+    return false;
+  }
+}
+
+interface GalleryCoverResult {
+  /** 写进清单的缩略图文件名（thumbs 目录内）；undefined = 没生成。 */
+  thumb?: string;
+  source?: GalleryCoverSource;
+  /** 没生成时的原因（回执用）。 */
+  failure?: string;
+}
+
+/** 作品封面统一的离屏请求字段：16:10、直写全局 thumbs。 */
+function gallerySnapshotRequest(workspace: string): Omit<DesignSnapshotRequest, "htmlPath" | "url" | "imagePath"> {
+  return {
+    contentWidth: GALLERY_COVER_WIDTH,
+    contentHeight: GALLERY_COVER_HEIGHT,
+    workspace,
+    thumbDir: galleryThumbsPath(),
+    thumbPrefix: "gallery",
+    // 作品页/服务页可能有外链资源与慢接口：比 design 导出更宽的预算。
+    loadTimeoutMs: 20_000
+  };
+}
+
+async function snapshotCover(request: DesignSnapshotRequest, source: GalleryCoverSource): Promise<GalleryCoverResult | undefined> {
+  try {
+    const shot = await requestDesignSnapshot(request);
+    if (!shot.ok) return undefined;
+    // design-snapshot 已经写盘：文件名直接取回执里的路径，**不要再自己写一份**
+    // （旧实现用另一个 galleryThumbName() 重写字节，thumbs 里会多一个孤儿文件）。
+    return { thumb: basename(shot.savedPath), source };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * 生成作品封面（唯一实现，发布与启动补齐共用）。
+ *
+ * 优先级（2026-10-28 与用户对齐）：
+ * 1. 发布时显式指定的 cover（工作区内图片）；
+ * 2. 入口本身就是图片 → 直接缩放；
+ * 3. 入口页（file / panel）离屏截图；server 在服务**此刻可达**时截服务页；
+ * 4. 程序化占位封面（保证每个作品都有图）。
+ *
+ * 不自动起服务：发布不应被 dev server 的启动时间/端口占用拖住；服务没跑起来时
+ * 用占位封面，回执提示「服务跑起来后重新发布可更新」。
+ */
+async function generateGalleryCover(app: GalleryApp, cover: string | undefined, root: string): Promise<GalleryCoverResult> {
+  const explicit = cover?.trim();
+  if (explicit) {
+    const absolute = isAbsolute(explicit) ? resolve(explicit) : resolve(root, explicit);
+    if (!pathIsWithin(root, absolute)) return { failure: "封面图片必须位于作品工作区内" };
+    if (!coverExtensionAllowed(absolute)) return { failure: "封面图片格式不支持（png / jpg / webp / gif / svg）" };
+    if (!(await coverFileAllowed(absolute))) return { failure: "封面图片不存在、为空或超过 8MB" };
+    const shot = await snapshotCover({ ...gallerySnapshotRequest(app.workspace), imagePath: absolute }, "custom");
+    return shot ?? { failure: "封面图片读取失败" };
+  }
+
+  const target = gallerySnapshotTarget(app);
+  if (target) {
+    const request = gallerySnapshotRequest(app.workspace);
+    if (target.kind === "image") {
+      const shot = await snapshotCover({ ...request, imagePath: target.path }, "entry");
+      if (shot) return shot;
+    } else if (target.kind === "file") {
+      const shot = await snapshotCover({ ...request, htmlPath: target.path }, "entry");
+      if (shot) return shot;
+    } else {
+      const address = parseServiceAddress(target.url);
+      if (address && (await probeService(address))) {
+        const shot = await snapshotCover({ ...request, url: target.url }, "service");
+        if (shot) return shot;
+      }
+    }
+  }
+
+  // 兜底：程序化占位封面（data: URL，不落临时文件）。
+  const placeholder = await snapshotCover(
+    { ...gallerySnapshotRequest(app.workspace), url: `data:text/html;charset=utf-8,${encodeURIComponent(galleryPlaceholderCoverHtml(app))}` },
+    "generated"
+  );
+  return placeholder ?? { failure: "离屏截图不可用" };
+}
+
+/**
+ * 启动补齐：给清单里没有封面的旧作品生成封面（后台串行，不阻塞启动）。
+ *
+ * 为什么需要：封面上线前登记的作品卡片只有一个类型图标。串行是刻意的：离屏窗口
+ * 是真实的渲染器进程，并发会同时拉起多个；单条失败跳过，不阻断其它作品。
+ */
+async function backfillGalleryCovers(): Promise<void> {
+  const missing = galleryApps.filter((app) => !app.thumb);
+  if (missing.length === 0) return;
+  let changed = false;
+  for (const app of missing) {
+    const cover = await generateGalleryCover(app, undefined, app.workspace);
+    if (!cover.thumb) continue;
+    // 就地补字段，不走 upsertGalleryApp（它会把 updatedAt 推到 now，旧作品会
+    // 因为补一张封面就跳到作品墙最前面）。
+    galleryApps = galleryApps.map((item) => item.id === app.id ? { ...item, thumb: cover.thumb!, coverSource: cover.source } : item);
+    changed = true;
+  }
+  if (!changed) return;
+  galleryApps = persistGallery(galleryFilePath(), galleryApps, galleryThumbsPath());
+  emitGallery();
+}
+
 /**
  * 发布/更新一个作品。draft.path 是工作区相对路径或绝对路径；入口一律归一到
  * 工作区相对路径存清单（相对路径才能跨机器/跨盘符稳定重定位）。
@@ -2565,7 +2693,7 @@ function emitGallery(): void {
  * 缩略图是增益不是必要条件：失败只回一句降级说明，发布本身照常成功
  * （同 design_export 的“截图失败不得让导出失败”）。
  */
-async function publishGalleryApp(draft: GalleryDraft, workspaceRoot: string | undefined): Promise<{ app: GalleryApp; thumbNote: string }> {
+async function publishGalleryApp(draft: GalleryDraft, workspaceRoot: string | undefined): Promise<{ app: GalleryApp; coverNote: string; coverSource?: GalleryCoverSource }> {
   const root = (draft.workspace ?? workspaceRoot ?? "").trim() || workspace;
   if (!root) throw new Error("请先打开一个工作区，再发布作品");
   const absolute = isAbsolute(draft.path) ? resolve(draft.path) : resolve(root, draft.path);
@@ -2599,38 +2727,22 @@ async function publishGalleryApp(draft: GalleryDraft, workspaceRoot: string | un
   const upserted = upsertGalleryApp(galleryApps, app);
   galleryApps = upserted.list;
 
-  let thumbNote = "";
-  if (galleryThumbEligible({ kind: upserted.app.kind, entry: upserted.app.entry })) {
-    const target = galleryAbsolutePath(upserted.app.workspace, upserted.app.entry);
-    const fileName = galleryThumbName();
-    try {
-      const shot = await requestDesignSnapshot({
-        htmlPath: target,
-        contentWidth: upserted.app.kind === "file" ? 1440 : 1440,
-        contentHeight: 900,
-        workspace: upserted.app.workspace,
-        thumbDir: galleryThumbsPath(),
-        thumbPrefix: "gallery",
-        // 作品页可能有外链资源，给比 design 导出更宽的预算。
-        loadTimeoutMs: 20_000
-      });
-      if (shot.ok) {
-        const bytes = Buffer.from(shot.data, "base64");
-        writeGalleryThumb(galleryThumbsPath(), fileName, bytes);
-        const withThumb = upsertGalleryApp(galleryApps, { ...upserted.app, thumb: fileName }).list;
-        galleryApps = withThumb;
-      } else {
-        thumbNote = `（缩略图未生成：${shot.error}）`;
-      }
-    } catch (error) {
-      thumbNote = `（缩略图未生成：${errorText(error)}）`;
-    }
+  // 封面：显式 cover → 入口图/截图 → 占位（失败不阻断发布，沿用旧封面）。
+  const cover = await generateGalleryCover(upserted.app, draft.cover, root);
+  if (cover.thumb) {
+    galleryApps = upsertGalleryApp(galleryApps, { ...upserted.app, thumb: cover.thumb, coverSource: cover.source }).list;
   }
 
   galleryApps = persistGallery(galleryFilePath(), galleryApps, galleryThumbsPath());
   emitGallery();
   const published = galleryApps.find((candidate) => candidate.id === upserted.app.id) ?? upserted.app;
-  return { app: published, thumbNote };
+  // 回执说清封面结果：占位/失败要告诉用户「怎样更新成真实画面」。
+  const coverNote = cover.thumb
+    ? galleryCoverNote(cover.source)
+    : published.thumb
+      ? `封面未更新（沿用上一张）：${cover.failure ?? "未知原因"}`
+      : galleryCoverNote(undefined, cover.failure);
+  return { app: published, coverNote, coverSource: cover.source ?? published.coverSource };
 }
 
 /**
@@ -4800,6 +4912,9 @@ async function initialize(command: Extract<RuntimeCommand, { type: "initialize" 
   galleryApps = loadGalleryRepairingIds(galleryFilePath());
   void pruneGalleryThumbs(galleryThumbsPath(), galleryApps);
   emitGallery();
+  // 存量作品补封面：封面上线前登记的作品只有一个类型图标。延后一点再跑，
+  // 一是避开启动高峰，二是等 main 侧的离屏截图通道就绪（它走 RPC）。
+  setTimeout(() => { void backfillGalleryCovers(); }, 4_000);
   // 启动恢复（workspace-first）：lastWorkspace → agentWorkspaces[currentAgentId]（迁移期）
   // → legacy settings.workspace → 默认工作区；前三级按目录存在性逐项校验，失效的
   // lastWorkspace 不会跳过仍有效的旧映射。默认档只有在真正落到它时才 mkdir。
@@ -6795,8 +6910,9 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       // 实体按钮路径：人操作，不过权限门；目标 workspace 取命令携带的会话，
       // 缺省回落到焦点会话（跨工作区分屏时不能在激活格的项目里发布）。
       const record = command.sessionId ? resolveTargetRecord(command.sessionId) : (liveSessions.get(activeRuntime?.session.sessionId ?? "") ?? activeRuntime);
-      const { app, thumbNote } = await publishGalleryApp(command.draft, record?.workspace ?? workspace);
-      if (thumbNote) post({ type: "gallery.notice", kind: "warn", message: `已发布「${app.title}」${thumbNote}` });
+      const { app, coverNote, coverSource } = await publishGalleryApp(command.draft, record?.workspace ?? workspace);
+      // 封面没拿到真实画面（占位/失败）时如实告知用户怎么更新；正常封面不必扰。
+      if (!coverSource || coverSource === "generated") post({ type: "gallery.notice", kind: "warn", message: `已发布「${app.title}」：${coverNote}` });
       else post({ type: "gallery.notice", kind: "ok", message: `已发布作品「${app.title}」` });
       break;
     }

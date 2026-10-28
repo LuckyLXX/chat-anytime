@@ -121,6 +121,14 @@ describe("GalleryDialogs theme hooks", () => {
     expect(markup).toContain("demo.html");
   });
 
+  it("publish dialog 有封面输入与自动取图提示（每个作品都要有封面）", () => {
+    const markup = renderToStaticMarkup(<GalleryPublishDialog initial={{ path: "a.html", kind: "file" }} workspace="D:/ws" onSubmit={noop} onClose={noop} />);
+    expect(markup).toContain("封面图片（可选）");
+    expect(markup).toContain("留空自动截图");
+    // 没填封面时不渲染预览块（留空 = 主进程自动取图）
+    expect(markup).not.toContain("gallery-cover-field");
+  });
+
   it("publish dialog offers 面板 as a third type with its window options", () => {
     const markup = renderToStaticMarkup(<GalleryPublishDialog initial={{ path: "panels/status/index.html", kind: "panel" }} workspace="D:/ws" onSubmit={noop} onClose={noop} />);
     expect(markup).toContain('<option value="panel"');

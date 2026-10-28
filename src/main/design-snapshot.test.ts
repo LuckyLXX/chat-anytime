@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fitViewport } from "./design-snapshot.js";
+import { fitViewport, resolveDesignSnapshotInput } from "./design-snapshot.js";
 
 describe("fitViewport（设计导出缩略图视口适配）", () => {
   it("内容不超上限时 1:1 视口", () => {
@@ -22,5 +22,24 @@ describe("fitViewport（设计导出缩略图视口适配）", () => {
     const tiny = fitViewport(1, 1);
     expect(tiny.width).toBeGreaterThanOrEqual(320);
     expect(tiny.height).toBeGreaterThanOrEqual(240);
+  });
+});
+
+describe("resolveDesignSnapshotInput（缩略图三输入）", () => {
+  it("url 优先（server 页面 / 占位封面的 data URL）", () => {
+    expect(resolveDesignSnapshotInput({ url: "http://localhost:5173", htmlPath: "C:/ws/a.html" })).toEqual({ kind: "page", url: "http://localhost:5173" });
+  });
+
+  it("htmlPath → file:// URL（design 导出与作品入口的旧路径保持不变）", () => {
+    expect(resolveDesignSnapshotInput({ htmlPath: "C:/ws/a.html" })).toEqual({ kind: "page", url: "file:///C:/ws/a.html" });
+  });
+
+  it("imagePath → 直接图片（显式封面 / 入口图）", () => {
+    expect(resolveDesignSnapshotInput({ imagePath: "C:/ws/cover.png" })).toEqual({ kind: "image", path: "C:/ws/cover.png" });
+  });
+
+  it("三选一全空 → undefined（调用方回 ok:false，而不是把空路径丢给 loadURL）", () => {
+    expect(resolveDesignSnapshotInput({})).toBeUndefined();
+    expect(resolveDesignSnapshotInput({ url: "  ", htmlPath: "", imagePath: " " })).toBeUndefined();
   });
 });

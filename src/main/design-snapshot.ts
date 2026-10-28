@@ -81,6 +81,21 @@ function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promi
   });
 }
 
+/** 缩略图请求的加载目标（纯函数，可单测）：三选一，url > htmlPath > imagePath。 */
+export type DesignSnapshotInput = { kind: "page"; url: string } | { kind: "image"; path: string };
+
+export function resolveDesignSnapshotInput(
+  request: Pick<DesignSnapshotRequest, "htmlPath" | "url" | "imagePath">
+): DesignSnapshotInput | undefined {
+  const url = request.url?.trim();
+  if (url) return { kind: "page", url };
+  const htmlPath = request.htmlPath?.trim();
+  if (htmlPath) return { kind: "page", url: pathToFileURL(htmlPath).href };
+  const imagePath = request.imagePath?.trim();
+  if (imagePath) return { kind: "image", path: imagePath };
+  return undefined;
+}
+
 /**
  * 单飞串行：离屏窗口是真实的渲染器进程，排队避免并发导出时同时拉起多个。
  * handle 永不 reject（内部兜底成 ok:false），调用方无需再 catch。
@@ -98,6 +113,23 @@ export class DesignSnapshotController {
   }
 
   private async capture(request: DesignSnapshotRequest): Promise<DesignSnapshotResult> {
+    const input = resolveDesignSnapshotInput(request);
+    if (!input) return { ok: false, error: "缩略图请求缺少加载目标（htmlPath / url / imagePath 至少一个）" };
+    if (input.kind === "image") return this.captureImage(request, input.path);
+    return this.capturePage(request, input.url);
+  }
+
+  /** 直接读本地图片并缩放（nativeImage 不支持的格式回退到离屏加载）。 */
+  private async captureImage(request: DesignSnapshotRequest, imagePath: string): Promise<DesignSnapshotResult> {
+    const { nativeImage } = await import("electron");
+    const image = nativeImage.createFromPath(imagePath);
+    if (image.isEmpty()) return this.capturePage(request, pathToFileURL(imagePath).href);
+    const sized = image.getSize();
+    const thumbnail = sized.width > THUMBNAIL_MAX_WIDTH ? image.resize({ width: THUMBNAIL_MAX_WIDTH }) : image;
+    return this.persist(request, thumbnail.toPNG(), thumbnail.getSize());
+  }
+
+  private async capturePage(request: DesignSnapshotRequest, targetUrl: string): Promise<DesignSnapshotResult> {
     const { BrowserWindow } = await import("electron");
     const fit = fitViewport(request.contentWidth, request.contentHeight);
     let win: ElectronBrowserWindow;
@@ -129,7 +161,7 @@ export class DesignSnapshotController {
           clearTimeout(timer);
           rejectLoad(new Error(`加载导出页失败（${code} ${description}）`));
         });
-        void contents.loadURL(pathToFileURL(request.htmlPath).href).catch(() => undefined);
+        void contents.loadURL(targetUrl).catch(() => undefined);
       });
       if (fit.zoom !== 1) {
         contents.setZoomFactor(fit.zoom);
@@ -147,13 +179,24 @@ export class DesignSnapshotController {
       const sized = image.getSize();
       const thumbnail = sized.width > THUMBNAIL_MAX_WIDTH ? image.resize({ width: THUMBNAIL_MAX_WIDTH }) : image;
       const png = thumbnail.toPNG();
-      const savedPath = request.thumbDir
-        ? writeGalleryThumbFile(request.thumbDir, request.thumbPrefix ?? "gallery", png)
-        : await saveBrowserScreenshot(request.workspace, png.toString("base64"), "image/png", "design");
-      const out = thumbnail.getSize();
-      return { ok: true, data: png.toString("base64"), width: out.width, height: out.height, mimeType: "image/png", savedPath };
+      return this.persist(request, png, thumbnail.getSize());
     } finally {
       if (!win.isDestroyed()) win.destroy();
     }
+  }
+
+  /** 写盘（thumbDir 直写全局 thumbs，否则落工作区截图目录）。 */
+  private async persist(
+    request: DesignSnapshotRequest,
+    png: Buffer,
+    size: { width: number; height: number }
+  ): Promise<DesignSnapshotResult> {
+    if (!request.thumbDir && !request.workspace) {
+      return { ok: false, error: "缩略图请求缺少落盘位置（thumbDir 或 workspace）" };
+    }
+    const savedPath = request.thumbDir
+      ? writeGalleryThumbFile(request.thumbDir, request.thumbPrefix ?? "gallery", png)
+      : await saveBrowserScreenshot(request.workspace, png.toString("base64"), "image/png", "design");
+    return { ok: true, data: png.toString("base64"), width: size.width, height: size.height, mimeType: "image/png", savedPath };
   }
 }

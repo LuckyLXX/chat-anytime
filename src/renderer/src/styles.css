@@ -3199,6 +3199,11 @@ html[data-theme-wallpaper="true"][data-ui-window-hidden] .content-preview-panel 
 .gallery-panel-ontop input { min-height: 0; }
 /* 面板本地服务的说明行（可选字段：两个都填才自动起服务）。 */
 .gallery-dialog-hint { color: var(--text-muted); font-size: 10px; line-height: 1.5; }
+/* 封面预览：输入框下面一行缩略图 + 说明（读取失败时换成错误文案，不拦发布）。 */
+.gallery-cover-field { display: flex; align-items: center; gap: 10px; min-height: 46px; }
+.gallery-cover-preview { flex: 0 0 auto; width: 74px; height: 46px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-muted); object-fit: cover; }
+.gallery-cover-empty { display: block; }
+.gallery-cover-error { color: var(--danger); font-size: 10px; line-height: 1.5; }
 .gallery-panel-options input[type="number"] { min-height: 32px; padding: 0 9px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface-input); color: var(--text); font-size: 11.5px; }
 .gallery-publish-body input, .gallery-publish-body select { min-height: 32px; padding: 0 9px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface-input); color: var(--text); font-size: 11.5px; }
 .gallery-publish-dialog footer { display: flex; justify-content: flex-end; gap: 8px; }

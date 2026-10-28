@@ -36,9 +36,15 @@ const listeners = new Set<(message: RuntimeMessage) => void>();
 /** 演示用作品清单（内存模拟；真实运行时在 agentDir 落盘）。默认给两个示例，
  *  让作品墙与顶栏下拉在 demo 里一开始就有内容可看。 */
 const demoWorkspace = "D:\\Projects\\chat-anytime-demo";
+/**
+ * 演示环境的封面：真实环境由主进程离屏截图/生成占位图，浏览器演示没有文件系统，
+ * 用一张内置 SVG 让卡片能展示封面效果（否则全是类型图标，看不出改动）。
+ */
+const DEMO_GALLERY_COVER = "demo-gallery-cover.svg";
+const demoGalleryCoverDataUrl = `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="640" height="400"><rect width="640" height="400" fill="#1e2a6b"/><rect x="48" y="56" width="120" height="34" rx="17" fill="#8ea2ff33"/><text x="70" y="79" fill="#c7d2fe" font-size="17" font-family="sans-serif">网页</text><text x="48" y="196" fill="#eef2ff" font-size="44" font-family="sans-serif">作品封面</text><text x="48" y="256" fill="#8ea2ff" font-size="20" font-family="sans-serif">PiDesktop Gallery</text></svg>')}`;
 let demoGalleryApps: GalleryApp[] = [
-  { id: "gallery-demo-1", title: "收纳整理 App 原型", kind: "file", workspace: demoWorkspace, entry: "designs/exports/收纳整理App原型.html", description: "三屏原型：首页 / 分类 / 详情", createdAt: Date.now() - 86_400_000, updatedAt: Date.now() - 3_600_000, lastRunAt: Date.now() - 600_000 },
-  { id: "gallery-demo-2", title: "记账小工具", kind: "server", workspace: demoWorkspace, entry: "apps/ledger", command: "npm run dev", url: "http://localhost:5173", description: "本地记账 + 月度统计", createdAt: Date.now() - 172_800_000, updatedAt: Date.now() - 7_200_000 }
+  { id: "gallery-demo-1", title: "收纳整理 App 原型", kind: "file", workspace: demoWorkspace, entry: "designs/exports/收纳整理App原型.html", description: "三屏原型：首页 / 分类 / 详情", thumb: DEMO_GALLERY_COVER, coverSource: "generated" as const, createdAt: Date.now() - 86_400_000, updatedAt: Date.now() - 3_600_000, lastRunAt: Date.now() - 600_000 },
+  { id: "gallery-demo-2", title: "记账小工具", kind: "server", workspace: demoWorkspace, entry: "apps/ledger", command: "npm run dev", url: "http://localhost:5173", description: "本地记账 + 月度统计", thumb: DEMO_GALLERY_COVER, coverSource: "generated" as const, createdAt: Date.now() - 172_800_000, updatedAt: Date.now() - 7_200_000 }
 ];
 const browserPreviewListeners = new Set<(state: BrowserPreviewState) => void>();
 const terminalListeners = new Map<string, Set<(event: TerminalEventData) => void>>();
@@ -725,9 +731,9 @@ export function createDemoApi(): DesktopApi {
       // 演示环境没有本地静态服务：给一个不可达的 loopback 地址，让浏览器 tab 的地址栏可读。
       return `http://127.0.0.1:0/w/demo/1/${encodeURIComponent(filePath)}`;
     },
-    async galleryThumb(): Promise<string | undefined> {
-      // 演示环境没有缩略图落盘：卡片降级为类型徽标（真实路径是 data URL）。
-      return undefined;
+    async galleryThumb(fileName: string): Promise<string | undefined> {
+      // 演示环境没有缩略图落盘：给一个内置 SVG 封面（真实路径是截取/生成的 PNG）。
+      return fileName === DEMO_GALLERY_COVER ? demoGalleryCoverDataUrl : undefined;
     },
     async galleryAwaitService(): Promise<GalleryServiceProbe> {
       // 演示环境没有真进程也没有真端口：服务型作品按「已经在跑」回报，走
@@ -1013,7 +1019,7 @@ export function createDemoApi(): DesktopApi {
           const existing = demoGalleryApps.find((item) => item.workspace === (draft.workspace ?? demoWorkspace) && item.entry === (draft.entry ?? draft.path));
           const app = existing
             ? { ...existing, title: draft.title, updatedAt: Date.now() }
-            : { id: `gallery-${demoGalleryApps.length + 1}`, title: draft.title, kind: draft.kind, workspace: draft.workspace ?? demoWorkspace, entry: draft.entry ?? draft.path, createdAt: Date.now(), updatedAt: Date.now(), ...(draft.description ? { description: draft.description } : {}), ...(draft.command ? { command: draft.command } : {}), ...(draft.url ? { url: draft.url } : {}) };
+            : { id: `gallery-${demoGalleryApps.length + 1}`, title: draft.title, kind: draft.kind, workspace: draft.workspace ?? demoWorkspace, entry: draft.entry ?? draft.path, thumb: DEMO_GALLERY_COVER, coverSource: draft.cover ? "custom" as const : "generated" as const, createdAt: Date.now(), updatedAt: Date.now(), ...(draft.description ? { description: draft.description } : {}), ...(draft.command ? { command: draft.command } : {}), ...(draft.url ? { url: draft.url } : {}) };
           demoGalleryApps = existing ? demoGalleryApps.map((item) => (item.id === app.id ? app : item)) : [app, ...demoGalleryApps];
           emit({ type: "gallery.apps", apps: demoGalleryApps });
           emit({ type: "gallery.notice", kind: "ok", message: `已发布作品「${app.title}」` });

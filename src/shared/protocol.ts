@@ -1144,8 +1144,12 @@ export type BrowserTabsEvent =
  * RuntimeCommand["design-snapshot.result"] 回传（与浏览器 RPC 同旁路语义）。
  */
 export interface DesignSnapshotRequest {
-  /** 待渲染 HTML 的绝对路径（design 导出产物，或作品入口）。 */
-  htmlPath: string;
+  /** 待渲染 HTML 的绝对路径（design 导出产物，或作品入口）。与 url / imagePath 三选一。 */
+  htmlPath?: string;
+  /** 直接加载的 URL（server 作品页、或占位封面的 data: URL）。与 htmlPath / imagePath 三选一。 */
+  url?: string;
+  /** 直接读取并缩放的本地图片（显式封面 / 入口就是图片）。与 htmlPath / url 三选一。 */
+  imagePath?: string;
   /** 画布 ∪ 顶层内容包围盒（exportBounds）：缩略视口按它适配缩放。 */
   contentWidth: number;
   contentHeight: number;

@@ -9,6 +9,9 @@ import {
   galleryRunTarget,
   galleryServiceFailureMessage,
   galleryServiceTerminalId,
+  galleryCoverNote,
+  galleryPlaceholderCoverHtml,
+  gallerySnapshotTarget,
   galleryThumbEligible,
   galleryThumbName,
   MAX_GALLERY_APPS,
@@ -303,16 +306,85 @@ describe("galleryServiceTerminalId（每次运行都得是新 id）", () => {
 });
 
 describe("galleryThumbEligible / galleryThumbName", () => {
-  it("只有静态页面才值得离屏渲染缩略图", () => {
+  it("网页入口（file 与 panel）可离屏渲染；非网页与 server 不直接截", () => {
     expect(galleryThumbEligible(app())).toBe(true);
     expect(galleryThumbEligible(app({ entry: "index.htm" }))).toBe(true);
     expect(galleryThumbEligible(app({ entry: "logo.svg" }))).toBe(true);
+    expect(galleryThumbEligible(app({ kind: "panel", entry: "panels/status/index.html" }))).toBe(true);
     expect(galleryThumbEligible(app({ entry: "main.js" }))).toBe(false);
     expect(galleryThumbEligible(app({ kind: "server", entry: "." }))).toBe(false);
   });
 
   it("缩略图名带时间戳且以 gallery- 开头（与截图同风格，便于识别归属）", () => {
     expect(galleryThumbName(new Date(2026, 8, 20, 9, 30, 12, 123).getTime())).toBe("gallery-20260920-093012-123.png");
+  });
+});
+
+describe("gallerySnapshotTarget（自动截图来源）", () => {
+  it("file / panel 的网页入口 → 截本地文件；入口是位图 → 直接缩放", () => {
+    expect(gallerySnapshotTarget(app())).toEqual({ kind: "file", path: "D:/ws/designs/exports/demo.html" });
+    expect(gallerySnapshotTarget(app({ kind: "panel", entry: "panels/status/index.html" }))).toEqual({ kind: "file", path: "D:/ws/panels/status/index.html" });
+    expect(gallerySnapshotTarget(app({ entry: "shots/cover.png" }))).toEqual({ kind: "image", path: "D:/ws/shots/cover.png" });
+    // svg 走离屏渲染（保住矢量细节），不当图片处理
+    expect(gallerySnapshotTarget(app({ entry: "logo.svg" }))).toEqual({ kind: "file", path: "D:/ws/logo.svg" });
+  });
+
+  it("server 只给 url（可达性由调用方探活决定）；非网页入口 → undefined", () => {
+    expect(gallerySnapshotTarget(app({ kind: "server", entry: ".", url: "http://localhost:5173" }))).toEqual({ kind: "url", url: "http://localhost:5173" });
+    expect(gallerySnapshotTarget(app({ kind: "server", entry: "." }))).toBeUndefined();
+    expect(gallerySnapshotTarget(app({ entry: "notes.md" }))).toBeUndefined();
+  });
+});
+
+describe("galleryPlaceholderCoverHtml（拿不到画面时的兜底封面）", () => {
+  it("含标题、类型标签、工作区名与入口，且完全自包含", () => {
+    const html = galleryPlaceholderCoverHtml(app({ title: "记账小工具", kind: "server", entry: ".", description: "本地记账" }));
+    expect(html).toContain("记账小工具");
+    expect(html).toContain("服务");
+    expect(html).toContain("ws");
+    expect(html).toContain("工作区根目录");
+    expect(html).toContain("本地记账");
+    expect(html).toContain("1440px");
+    expect(html).toContain("900px");
+    // 无外链（离屏截图不依赖网络与主题）
+    expect(html).not.toContain("http://");
+    expect(html).not.toContain("https://");
+    expect(html).not.toContain("<link");
+    expect(html).not.toContain("<script");
+  });
+
+  it("标题/描述里的 HTML 字符被转义（作品名可能来自用户输入）", () => {
+    const html = galleryPlaceholderCoverHtml(app({ title: '<img src=x onerror="boom">', description: "a & b" }));
+    expect(html).not.toContain("<img src=x");
+    expect(html).toContain("&lt;img");
+    expect(html).toContain("a &amp; b");
+  });
+
+  it("三种类型用不同主色（卡片一眼区分形态）", () => {
+    const gradients = (["file", "server", "panel"] as const).map((kind) =>
+      galleryPlaceholderCoverHtml(app({ kind })).match(/radial-gradient[^;]+/u)?.[0]
+    );
+    expect(gradients.every(Boolean)).toBe(true);
+    expect(new Set(gradients).size).toBe(3);
+  });
+});
+
+describe("galleryCoverNote / coverSource 归一化", () => {
+  it("按来源说清封面是什么；占位封面提示怎么更新", () => {
+    expect(galleryCoverNote("custom")).toContain("自定义封面");
+    expect(galleryCoverNote("entry")).toContain("入口");
+    expect(galleryCoverNote("service")).toContain("服务页截图");
+    expect(galleryCoverNote("generated")).toContain("占位封面");
+    expect(galleryCoverNote("generated")).toContain("重新发布");
+    expect(galleryCoverNote(undefined, "封面图片必须位于作品工作区内")).toContain("封面图片必须位于作品工作区内");
+  });
+
+  it("只在有缩略图时保留白名单来源", () => {
+    const base = { id: "g1", title: "t", kind: "file", workspace: "D:/ws", entry: "a.html", createdAt: 1, updatedAt: 1 };
+    expect(normalizeGalleryApp({ ...base, thumb: "gallery-1.png", coverSource: "generated" })?.coverSource).toBe("generated");
+    expect(normalizeGalleryApp({ ...base, thumb: "gallery-1.png", coverSource: "nope" })?.coverSource).toBeUndefined();
+    // 没有 thumb 时来源无意义，读侧丢掉
+    expect(normalizeGalleryApp({ ...base, coverSource: "custom" })?.coverSource).toBeUndefined();
   });
 });
 
@@ -447,8 +519,8 @@ describe("面板作品（kind=panel）", () => {
     });
   });
 
-  it("面板不生成缩略图（离屏截图里没有状态端点，截出来是降级态）", () => {
-    expect(galleryThumbEligible(app(panel))).toBe(false);
+  it("面板也生成封面（2026-10-28 用户要求每个作品都有封面；离屏截图是页面骨架）", () => {
+    expect(galleryThumbEligible(app(panel))).toBe(true);
   });
 
   it("继续开发文案带上窗口尺寸、置顶与数据接口（接手改面板的模型不用猜）", () => {

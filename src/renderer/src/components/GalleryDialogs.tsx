@@ -178,6 +178,9 @@ export function GalleryPublishDialog({ initial, workspace, onSubmit, onClose }: 
   const [command, setCommand] = useState("");
   const [url, setUrl] = useState("");
   const [description, setDescription] = useState("");
+  // 封面：留空 = 自动（入口截图 / 服务页截图 / 占位）；填了就用工作区里的这张图。
+  const [cover, setCover] = useState("");
+  const [coverPreview, setCoverPreview] = useState<{ data?: string; error?: string } | undefined>(undefined);
   // 面板窗口的形态/贴边/初始尺寸/置顶。空串 = 用缺省（420×560、不置顶），不强制用户填。
   const [panelMode, setPanelMode] = useState<GalleryPanelMode>("window");
   const [panelEdge, setPanelEdge] = useState<GalleryPanelEdge>("right");
@@ -187,6 +190,32 @@ export function GalleryPublishDialog({ initial, workspace, onSubmit, onClose }: 
   // 全屏弹层登记：预览面板里的内置浏览器是原生 WebContentsView，永远浮在 DOM 之上。
   useOverlayLayer(true);
 
+  // 封面预览：输入停 300ms 后读工作区图片（与文件树添加附件同一条只读通道）。
+  // 读失败只提示、不拦提交——发布时主进程还会再校验一次。
+  useEffect(() => {
+    const relativePath = cover.trim();
+    if (!relativePath || !workspace) {
+      setCoverPreview(undefined);
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void window.piDesktop.readWorkspaceFile(relativePath, workspace)
+        .then((file) => {
+          if (cancelled) return;
+          setCoverPreview(file.kind === "image" && file.data ? { data: file.data } : { error: "不是可预览的图片" });
+        })
+        .catch((reason: unknown) => {
+          if (cancelled) return;
+          setCoverPreview({ error: reason instanceof Error ? reason.message : "读不到这张图片" });
+        });
+    }, 300);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [cover, workspace]);
+
   function submit(event: FormEvent): void {
     event.preventDefault();
     if (!title.trim() || !path.trim()) return;
@@ -194,6 +223,7 @@ export function GalleryPublishDialog({ initial, workspace, onSubmit, onClose }: 
     if (command.trim()) draft.command = command.trim();
     if (url.trim()) draft.url = url.trim();
     if (description.trim()) draft.description = description.trim();
+    if (cover.trim()) draft.cover = cover.trim();
     if (kind === "panel") {
       const panel: GalleryPanelOptions = {};
       const width = Number.parseInt(panelWidth, 10);
@@ -273,6 +303,17 @@ export function GalleryPublishDialog({ initial, workspace, onSubmit, onClose }: 
               <label>服务探活地址（可选）<input value={url} placeholder="如：http://127.0.0.1:8791/api/health" onChange={(event) => setUrl(event.target.value)} /></label>
               <span className="gallery-dialog-hint">两个都填才会自动起服务：点「运行」先拉服务、探活通过再开窗，窗口关闭时服务自动停止。</span>
             </>
+          )}
+          <label>封面图片（可选）<input value={cover} placeholder="工作区相对路径，如 outputs/cover.png；留空自动截图/生成占位" onChange={(event) => setCover(event.target.value)} /></label>
+          {cover.trim() && (
+            <div className="gallery-cover-field">
+              {coverPreview?.data
+                ? <img className="gallery-cover-preview" src={coverPreview.data} alt="封面预览" />
+                : <span className="gallery-cover-preview gallery-cover-empty" aria-hidden="true" />}
+              {coverPreview?.error
+                ? <span className="gallery-cover-error">{coverPreview.error}</span>
+                : <span className="gallery-dialog-hint">留空时自动截入口页；server 型在服务跑着时截服务页，仍拿不到画面会生成占位封面。</span>}
+            </div>
           )}
           <label>说明（可选）<input value={description} placeholder="一句话说明这个作品是什么" onChange={(event) => setDescription(event.target.value)} /></label>
         </div>

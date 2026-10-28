@@ -14,6 +14,12 @@ describe("validatePublishInput", () => {
     expect(draft).toEqual({ title: "示例", kind: "file", path: "demo.html", description: "说明", tags: ["a", "b"] });
   });
 
+  it("cover 透传：去空白，空串等于没指定（自动取图）", () => {
+    expect(validatePublishInput({ path: "a.html", kind: "file", title: "t", cover: " outputs/cover.png " }).cover).toBe("outputs/cover.png");
+    expect(validatePublishInput({ path: "a.html", kind: "file", title: "t", cover: "   " }).cover).toBeUndefined();
+    expect(validatePublishInput({ path: "a.html", kind: "file", title: "t", cover: 42 }).cover).toBeUndefined();
+  });
+
   it("server 类型保留 command / url（运行分流的依据）", () => {
     const draft = validatePublishInput({ path: "apps/demo", kind: "server", title: "记账工具", command: "npm run dev", url: "http://localhost:5173" });
     expect(draft.command).toBe("npm run dev");
@@ -53,17 +59,17 @@ describe("publishReceipt", () => {
     expect(text).toContain("继续开发");
   });
 
-  it("根目录入口有可读文案；缩略图降级说明单独附一行", () => {
-    const text = publishReceipt({ id: "g1", title: "服务", kind: "server", workspace: "D:/ws", entry: ".", createdAt: 1, updatedAt: 1 }, 1, "（缩略图未生成：加载超时）");
+  it("根目录入口有可读文案；封面结果说明单独附一行", () => {
+    const text = publishReceipt({ id: "g1", title: "服务", kind: "server", workspace: "D:/ws", entry: ".", createdAt: 1, updatedAt: 1 }, 1, "封面：占位封面（没拿到真实画面；把服务跑起来或给一张 cover 后重新发布可更新）。");
     expect(text).toContain("工作区根目录");
-    expect(text).toContain("缩略图未生成");
+    expect(text).toContain("占位封面");
   });
 });
 
 describe("buildGalleryTools 契约", () => {
   it("工具描述把 panel 的数据接口与本地服务写清楚（模型据此写面板页）", async () => {
     const { buildGalleryTools } = await import("./runtime-gallery.js");
-    const tools = buildGalleryTools({ publish: async (draft) => ({ app: { id: "g1", title: draft.title, kind: draft.kind, workspace: "D:/ws", entry: draft.path, createdAt: 1, updatedAt: 1 }, thumbNote: "" }), list: () => [] });
+    const tools = buildGalleryTools({ publish: async (draft) => ({ app: { id: "g1", title: draft.title, kind: draft.kind, workspace: "D:/ws", entry: draft.path, createdAt: 1, updatedAt: 1 }, coverNote: "" }), list: () => [] });
     const description = String(tools[0]!.description ?? "");
     expect(description).toContain("panel");
     expect(description).toContain("__pidesktop_state.json");
@@ -73,6 +79,10 @@ describe("buildGalleryTools 契约", () => {
     const parameters = JSON.stringify(tools[0]!.parameters ?? {});
     expect(parameters).toContain("kind=panel：开窗前要拉起的本地服务命令");
     expect(parameters).toContain("kind=panel：探活地址");
+    // 每个作品都要有封面：参数与描述都要把自动策略与 cover 告诉模型（2026-10-28）
+    expect(parameters).toContain("封面图片的工作区相对路径");
+    expect(description).toContain("每个作品都要有封面");
+    expect(description).toContain("占位封面");
   });
 
   it("只暴露一个 gallery_publish，且工具名符合 OpenAI 兼容的下划线命名", async () => {
@@ -80,7 +90,7 @@ describe("buildGalleryTools 契约", () => {
     const ctx: GalleryToolContext = {
       publish: async (draft) => {
         calls.push(draft.path);
-        return { app: { id: "g1", title: draft.title, kind: draft.kind, workspace: "D:/ws", entry: draft.path, createdAt: 1, updatedAt: 1 }, thumbNote: "" };
+        return { app: { id: "g1", title: draft.title, kind: draft.kind, workspace: "D:/ws", entry: draft.path, createdAt: 1, updatedAt: 1 }, coverNote: "" };
       },
       list: () => []
     };

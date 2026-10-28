@@ -88,6 +88,8 @@ export interface GalleryApp {
   panel?: GalleryPanelOptions;
   /** 缩略图文件名（位于全局 thumbs 目录内，与条目同生共死）。 */
   thumb?: string;
+  /** 封面的来源（仅在有 thumb 时有意义；读侧白名单归一化，发布回执与调试用）。 */
+  coverSource?: GalleryCoverSource;
   tags?: string[];
   createdAt: number;
   updatedAt: number;
@@ -111,6 +113,11 @@ export interface GalleryDraft {
   description?: string;
   tags?: string[];
   workspace?: string;
+  /**
+   * 封面图片的工作区相对路径（可留空自动取图）。
+   * 优先级：这本字段 → 入口图片 → 入口页/服务页截图 → 程序化占位封面。
+   */
+  cover?: string;
 }
 
 export const GALLERY_KIND_LABELS: Record<GalleryKind, string> = {
@@ -249,6 +256,9 @@ export function normalizeGalleryApp(value: unknown): GalleryApp | undefined {
   }
   const thumb = trimmed(record.thumb);
   if (thumb) app.thumb = thumb;
+  // 封面来源只在真有缩略图时保留：thumb 被换掉/清空后残留的来源会误导读侧。
+  const coverSource = trimmed(record.coverSource) as GalleryCoverSource | undefined;
+  if (thumb && coverSource && GALLERY_COVER_SOURCES.includes(coverSource)) app.coverSource = coverSource;
   if (Array.isArray(record.tags)) {
     const tags = record.tags.map((tag) => trimmed(tag)).filter((tag): tag is string => Boolean(tag));
     if (tags.length > 0) app.tags = tags.slice(0, 8);
@@ -526,15 +536,125 @@ export function galleryThumbName(at = Date.now()): string {
   return `gallery-${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}-${pad(date.getMilliseconds(), 3)}.png`;
 }
 
+/** 封面图的离屏视口与卡片裁切口径：16:10（1440×900），卡片 `object-fit: cover`。 */
+export const GALLERY_COVER_WIDTH = 1440;
+export const GALLERY_COVER_HEIGHT = 900;
+
+/** 显式封面（`cover`）允许的图片扩展名：位图优先 nativeImage，svg 由离屏窗口渲染。 */
+export const GALLERY_COVER_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"] as const;
+
+/** 入口本身就是图片时能直接当封面的扩展名（svg 留走离屏渲染，保护矢量细节）。 */
+const GALLERY_IMAGE_ENTRY_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp", ".gif"] as const;
+
+/** 可离屏渲染为封面的页面入口。 */
+const GALLERY_SNAPSHOT_PAGE = /\.(?:html?|svg)$/iu;
+
 /**
- * 只有可离屏渲染的静态页面才值得生成缩略图。
+ * 封面来源：
+ * - custom：发布时显式指定的 cover；
+ * - entry：入口本身就是图片，直接用它；
+ * - service：服务型作品的页面截图（服务当时可达）；
+ * - generated：程序化占位封面（没拿到真实画面时的兜底）。
+ */
+export type GalleryCoverSource = "custom" | "entry" | "service" | "generated";
+
+export const GALLERY_COVER_SOURCES: readonly GalleryCoverSource[] = ["custom", "entry", "service", "generated"];
+
+function entryExtension(entry: string): string {
+  const last = normalizeGalleryEntry(entry).split("/").pop() ?? "";
+  const index = last.lastIndexOf(".");
+  return index >= 0 ? last.slice(index).toLowerCase() : "";
+}
+
+/** 入口本身就是一张图片（`file` 作品在浏览器里看这张图，封面就是它）。 */
+export function galleryCoverImageEntry(entry: string): boolean {
+  return (GALLERY_IMAGE_ENTRY_EXTENSIONS as readonly string[]).includes(entryExtension(entry));
+}
+
+/** 自动截图的来源（undefined = 这个入口截不了，只能靠显式封面或占位图）。 */
+export type GallerySnapshotTarget =
+  | { kind: "file"; path: string }
+  | { kind: "image"; path: string }
+  /** server：服务页地址（调用方先做一次 TCP 探活，不可达就不截）。 */
+  | { kind: "url"; url: string };
+
+/**
+ * 「这个作品该截哪里」的唯一判据（发布时与启动补齐共用）。
  *
- * 面板**故意不在内**：面板的正文是运行时数据（面板页靠 fetch 状态端点取数），
- * 而离屏截图窗口里没有那个端点，截出来的会是「接口不可用」的降级态——一张写着
- * 错误的缩略图比一个干净的类型图标差得多。面板卡片用 AppWindow 图标站位。
+ * - file / panel：入口页 → 离屏加载文件；入口是位图 → 直接缩放；
+ * - server：只给已登记的 url（是否真能截由调用方探活决定，本函数不碰网络）。
+ */
+export function gallerySnapshotTarget(app: Pick<GalleryApp, "kind" | "workspace" | "entry" | "url">): GallerySnapshotTarget | undefined {
+  const absolutePath = galleryAbsolutePath(app.workspace, app.entry);
+  if (app.kind === "file" || app.kind === "panel") {
+    if (galleryCoverImageEntry(app.entry)) return { kind: "image", path: absolutePath };
+    if (GALLERY_SNAPSHOT_PAGE.test(app.entry)) return { kind: "file", path: absolutePath };
+    return undefined;
+  }
+  return app.url ? { kind: "url", url: app.url } : undefined;
+}
+
+const COVER_PALETTE: Record<GalleryKind, { from: string; to: string; accent: string }> = {
+  file: { from: "#0b1533", to: "#1d2b6b", accent: "#8ea2ff" },
+  server: { from: "#04201f", to: "#0c4740", accent: "#5eead4" },
+  panel: { from: "#241206", to: "#5a2c0a", accent: "#f6c26b" }
+};
+
+function escapeCoverText(value: string): string {
+  const map: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+  return value.replace(/[&<>"']/gu, (char) => map[char] ?? char);
+}
+
+/**
+ * 程序化占位封面（自包含 HTML，由离屏窗口截成 PNG）。
+ *
+ * 为什么用 HTML 而不是在 Node 里画图：主进程已有成熟的离屏截图链路
+ * （design-snapshot），一张带渐变、大标题、类型徐标的封面用 CSS 写三行就有，
+ * 不需要引入 canvas/PNG 编码依赖；而 CSS 能做文本折行与中文字体回退。
+ * 样式全部内联、无外链，截图像不依赖网络与主题。
+ */
+export function galleryPlaceholderCoverHtml(app: Pick<GalleryApp, "title" | "kind" | "workspace" | "entry" | "description">): string {
+  const palette = COVER_PALETTE[app.kind];
+  const title = escapeCoverText(app.title);
+  const workspace = escapeCoverText(workspaceLabel(app.workspace));
+  const entry = escapeCoverText(app.entry === "." ? "工作区根目录" : app.entry);
+  const description = app.description ? escapeCoverText(app.description) : "";
+  const label = GALLERY_KIND_LABELS[app.kind];
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><style>
+html,body{margin:0;width:${GALLERY_COVER_WIDTH}px;height:${GALLERY_COVER_HEIGHT}px;overflow:hidden}
+body{box-sizing:border-box;padding:104px 112px;display:flex;flex-direction:column;justify-content:center;gap:26px;background:radial-gradient(120% 120% at 12% 8%, ${palette.from} 0%, ${palette.to} 62%, #05070f 100%);color:#f4f7ff;font-family:system-ui,"Segoe UI","Microsoft YaHei",sans-serif}
+.badge{display:inline-flex;align-items:center;width:fit-content;padding:10px 18px;border:1px solid ${palette.accent}55;border-radius:999px;background:${palette.accent}14;color:${palette.accent};font-size:22px;font-weight:700;letter-spacing:.08em}
+h1{margin:0;max-width:1180px;font-size:76px;line-height:1.14;font-weight:750;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.meta{margin:0;color:#a9b8d8;font-size:26px;letter-spacing:.02em}
+.desc{margin:0;max-width:1080px;color:#8fa2c4;font-size:24px;line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.brand{margin-top:36px;color:${palette.accent}99;font-size:20px;letter-spacing:.24em}
+</style></head><body>
+<span class="badge">${label}</span>
+<h1>${title}</h1>
+<p class="meta">${workspace} · ${entry}</p>
+${description ? `<p class="desc">${description}</p>` : ""}
+<div class="brand">PiDesktop · 作品墙</div>
+</body></html>`;
+}
+
+/** 封面结果文案（发布回执与 toast 共用；没有封面时也如实说一声）。 */
+export function galleryCoverNote(source: GalleryCoverSource | undefined, failure?: string): string {
+  if (source === "custom") return "封面：自定义封面。";
+  if (source === "entry") return "封面：入口图片。";
+  if (source === "service") return "封面：服务页截图。";
+  if (source === "generated") return "封面：占位封面（没拿到真实画面；把服务跑起来或给一张 cover 后重新发布可更新）。";
+  return failure ? `封面未生成：${failure}` : "封面未生成。";
+}
+
+/**
+ * 具备自动封面资格的类型：`file` / `panel` 的网页入口。
+ *
+ * 面板现在也截图（2026-10-28 用户要求「每个作品都要有封面」）：离屏窗口里没有
+ * 状态端点，截到的是页面骨架/降级态——比一个裸图标好；想要真实画面就用 cover
+ * 指定一张（skill 里有说明）。
  */
 export function galleryThumbEligible(app: Pick<GalleryApp, "kind" | "entry">): boolean {
-  if (app.kind !== "file") return false;
+  if (app.kind !== "file" && app.kind !== "panel") return false;
   return /\.(?:html?|svg)$/iu.test(app.entry);
 }
 
