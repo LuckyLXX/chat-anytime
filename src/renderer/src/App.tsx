@@ -83,6 +83,7 @@ import { SessionSearchResults } from "./components/SessionSearchResults";
 import { CommandPalette } from "./components/CommandPalette";
 import type { PaletteAction } from "./lib/command-palette";
 import { clampPreviewSplit, PREVIEW_SPLIT_MAX, PREVIEW_SPLIT_MIN, previewSplitFromKey } from "./lib/preview-split";
+import { workAreaPreviewClasses } from "./lib/preview-layout";
 import { groupSessionsByWorkspace, workspaceDisplayLabel, workspaceKey } from "./lib/session-groups";
 import { archivedSessionCount, selectSessionPaths, selectedPathsInView, sessionsForView, toggleSessionSelection, type SessionSelection, type SessionView } from "./lib/session-view";
 import { resolveThemeAssetUrls, activeThemeScope } from "../../shared/theme-assets";
@@ -2359,7 +2360,7 @@ export function App(): ReactNode {
           <div
             ref={workAreaRef}
             data-pane="work-area"
-            className={`work-area${designMode ? " design-mode" : previewVisible && preview && preview.tabs.length > 0 ? " with-preview" : previewVisible ? " with-preview-empty" : ""}${designDragging ? " is-design-dragging" : !designMode && previewDragging ? " is-preview-dragging" : ""}`}
+            className={`work-area${designMode ? " design-mode" : ` ${workAreaPreviewClasses({ open: previewOpened, tabs: Boolean(preview && preview.tabs.length > 0) })}`}${designDragging ? " is-design-dragging" : !designMode && previewDragging ? " is-preview-dragging" : ""}`}
             style={designMode ? { "--design-split": `${designSplit}%` } as CSSProperties : previewVisible ? { "--preview-split": `${previewSplit}%` } as CSSProperties : undefined}
           >
           {/* 设计模式：画布工作台占主体 + AI 对话侧栏（ConversationPane 完整复用）；

@@ -140,20 +140,25 @@ button, input, select, textarea, summary, label {
    useExitPresence（components/Presence.tsx）保留退场窗口延迟卸载，退场样式
    挂在下方 .ui-presence.is-exiting 系列选择器上。
    红线：只动 opacity/transform（分组展开除外：grid-template-rows + overflow
-   剪裁）；时长进入 130-220ms、退出 130-180ms；曲线沿用 message-in/menu-pop-in
-   的 cubic-bezier(0.16,1,0.3,1)。
+   剪裁；预览面板开合除外：--preview-open 驱动的栅格轨道 + 固定宽度面板平移，
+   见下方 work-area 一节）；时长进入 130-220ms、退出 130-180ms；曲线沿用
+   message-in/menu-pop-in 的 cubic-bezier(0.16,1,0.3,1)。
    ⚠�退场 animation 时长与调用方 useExitPresence(open, exitMs) 一一对应：
    backdrop-out 140 / dialog-out 160（权限弹窗调用点 exitMs 传 130，动画同为
    dialog-out 但由调用方提前卸载，视觉等效）/ preview-panel-out 180 /
-   dock-out 160 / flyout-out 160 / lightbox 退场 160。改任一侧必须同步另一侧。 */
+   dock-out 160 / flyout-out 160 / lightbox 退场 160。改任一侧必须同步另一侧。
+   预览面板额外两条同长（180ms）的线：.preview-collapsed 的 --preview-open 过渡与
+   preview-panel-in/out——三者同曲线同长，面板位移与聊天区变宽才始终贴合。 */
 :root { --motion-ease: cubic-bezier(0.16, 1, 0.3, 1); }
 @keyframes backdrop-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes backdrop-out { from { opacity: 1; } to { opacity: 0; } }
 @keyframes dialog-in { from { opacity: 0; transform: translateY(10px) scale(.985); } to { opacity: 1; transform: none; } }
 @keyframes dialog-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(6px) scale(.985); } }
 @keyframes soft-fade { from { opacity: 0; } to { opacity: 1; } }
-@keyframes preview-panel-in { from { opacity: 0; transform: translateX(18px); } to { opacity: 1; transform: none; } }
-@keyframes preview-panel-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateX(14px); } }
+/* 预览面板入场：只动 opacity。位移由 --preview-open 驱动（见 work-area 一节），
+   带 transform 的 keyframes 会覆盖它、让面板停在原地。 */
+@keyframes preview-panel-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes preview-panel-out { from { opacity: 1; } to { opacity: 0; } }
 @keyframes dock-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(-8px); } }
 @keyframes fab-in { from { opacity: 0; transform: scale(.92); } to { opacity: 1; transform: none; } }
 @keyframes flyout-in { from { opacity: 0; transform: translateX(-8px); } to { opacity: 1; transform: none; } }
@@ -412,10 +417,35 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 .icon-button { display: grid; place-items: center; width: 31px; height: 31px; padding: 0; border: 0; border-radius: 6px; background: transparent; cursor: pointer; }
 .icon-button:hover { background: var(--surface-button-hover); }
 .panel-toggle { border: 1px solid var(--border); }
-.work-area { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; min-height: 0; overflow: hidden; }
+/* —— 预览面板开合：聊天区宽度平滑过渡（2026-10-28）——
+   用户现场：收起右侧预览面板时，面板先淡出、聊天区要等退场窗口结束才「迟一步」
+   跳宽，滚动条与消息跟着错位跳一下。根因是布局 class 绑在 useExitPresence 的
+   rendered 上（退场 180ms 内不塌缩），到点才整块跳变。
+   做法（与左侧栏 `.desktop-shell` 的 grid-template-columns 过渡同一套思路）：
+   ① `--preview-open`（0..1，注册为 <number> 才能被 transition 插值）驱动两条
+      轨道：聊天区随它变宽、面板列随它变窄/让位；
+   ② 面板本体 `position: absolute; right: 0; width: <目标宽度>`，transform 用同一个
+      属性平移出可视区（被 .work-area 的 overflow 剪掉）——面板宽度全程不变、内部
+      不重排（挤压会让标签/正文逐帧重排），且始终贴着聊天区右缘（无重叠残影）；
+   ③ 收起态只改 `--preview-open`，栅格轨数不变 → 过渡可插值；退场动画结束时卸载
+      面板也不会再跳（轨数与最终布局一致）。
+   ⚠️ 面板的进出场 keyframes 只允许动 opacity：一旦带上 transform，动画会覆盖
+   上面那条由属性驱动的位移，收起时面板就会停在原地被聊天区盖住。 */
+@property --preview-open { syntax: "<number>"; inherits: true; initial-value: 1; }
+.work-area { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; min-height: 0; overflow: hidden; --preview-open: 1; transition: --preview-open .18s ease; }
+/* 收起态：值是 0，但栅格形态（形状 + 轨数）保持不变，见下方 .with-preview* */
+.work-area.preview-collapsed { --preview-open: 0; }
 .work-area.with-panel { grid-template-columns: minmax(0, 1fr) minmax(310px, 28%); }
-.work-area.with-preview { grid-template-columns: minmax(0, var(--preview-split, 50%)) 7px minmax(0, 1fr); }
-.work-area.with-preview-empty { grid-template-columns: minmax(0, 1fr) minmax(320px, 30%); }
+/* 有预览标签：聊天区按 split 占比起算、收起时补足到 100%；分割条列同步收成 0 */
+.work-area.with-preview { grid-template-columns: minmax(0, calc(var(--preview-split, 50%) + (100% - var(--preview-split, 50%)) * (1 - var(--preview-open)))) calc(7px * var(--preview-open)) minmax(0, 1fr); }
+/* 空态面板：聊天区 1fr，第二列 = 面板宽度 × 开合度（收起时 0） */
+.work-area.with-preview-empty { grid-template-columns: minmax(0, 1fr) minmax(0, calc(max(320px, 30%) * var(--preview-open))); }
+/* 面板本体脱离栅格：宽度恒为展开时的目标宽度（百分比按 .work-area 的 padding box 解析，
+   与上面第二列同源），只有 transform 跟着 --preview-open 平移出去。 */
+.work-area.with-preview .content-preview-panel,
+.work-area.with-preview-empty .content-preview-panel { position: absolute; top: 0; right: 0; bottom: 0; transform: translateX(calc((1 - var(--preview-open)) * 100%)); }
+.work-area.with-preview .content-preview-panel { width: calc(100% - var(--preview-split, 50%) - 7px); }
+.work-area.with-preview-empty .content-preview-panel { width: max(320px, 30%); }
 .preview-panel-shell { position: relative; }
 .preview-panel-toggle { border: 1px solid var(--border); }
 .preview-empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; width: 100%; min-height: 100%; padding: 28px 20px; background: var(--surface-muted); }
@@ -602,7 +632,9 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 .conversation-pane.pane-compact .panel-dock-fab,
 .conversation-pane.pane-compact .panel-dock { top: 44px; }
 
-.preview-divider { position: relative; z-index: 3; width: 7px; min-width: 7px; height: 100%; align-self: stretch; touch-action: none; cursor: col-resize; outline: none; background: var(--surface-muted); }
+/* 宽度跟随轨道（展开 7px、收起态收到 0）：固定 7px 会在收起的最后半程溢出轨道、
+   压到面板左缘上。 */
+.preview-divider { position: relative; z-index: 3; width: 100%; min-width: 0; height: 100%; align-self: stretch; touch-action: none; cursor: col-resize; outline: none; background: var(--surface-muted); }
 .preview-divider::before { position: absolute; top: 0; bottom: 0; left: 3px; width: 1px; background: var(--border-strong); content: ""; transition: width .12s ease, left .12s ease, background .12s ease; }
 .preview-divider:hover::before, .preview-divider:focus-visible::before, .preview-divider.dragging::before { left: 2px; width: 3px; background: var(--accent); }
 /* 底部留白 = composer 空间 + 提问面板空间（面板打开时由 ConversationPane 按
@@ -1957,7 +1989,8 @@ html[data-ui-motion="off"] .general-jev-toggle .chevron { transition: none; }
 .ghost-button.danger { color: var(--danger); }
 .ghost-button.danger:hover { color: var(--danger); background: var(--danger-soft); }
 .ghost-icon { width: 34px; min-width: 34px; padding: 0; gap: 0; }
-.content-preview-panel { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; background: var(--surface); animation: preview-panel-in .2s var(--motion-ease); }
+.content-preview-panel { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; background: var(--surface); animation: preview-panel-in .18s ease; }
+/* 位置/宽度/平移由 .work-area.with-preview* 那条规则负责（见该节注释）。 */
 .preview-tabs { display: flex; flex: 0 0 auto; align-items: stretch; min-width: 0; height: 38px; overflow: visible; border-bottom: 1px solid var(--border); background: var(--surface); }
 .preview-tab { display: flex; align-items: stretch; min-width: 0; max-width: 210px; margin: 4px 0 0 6px; border-radius: 6px 6px 0 0; background: var(--surface-muted); transition: background-color .15s ease; }
 .preview-tab.active { background: var(--surface-raised); }
@@ -1977,8 +2010,10 @@ html[data-ui-motion="off"] .general-jev-toggle .chevron { transition: none; }
 .artifact-device-frame { position: relative; }
 .artifact-device-stage.device-mode .artifact-device-frame { box-sizing: border-box; overflow: hidden; border: 1px solid var(--border-strong); border-radius: 8px; box-shadow: var(--shadow-md); background: var(--preview-surface); }
 .artifact-device-stage iframe { display: block; width: 100%; height: 100%; border: 0; background: var(--preview-surface); }
-/* 预览面板全屏：覆盖整个窗口（含侧栏/顶栏）；对话框(50)/toast(70) 层级在其上。 */
-.content-preview-panel.preview-fullscreen { position: fixed; z-index: 46; inset: 0; animation: none; }
+/* 预览面板全屏：覆盖整个窗口（含侧栏/顶栏）；对话框(50)/toast(70) 层级在其上。
+   选择器 specificity 必须压过 .work-area.with-preview* 里的面板宽度/位移，否则全屏
+   面板会被按「右侧一列」定位（320px 宽、贴着右缘）。 */
+.work-area .content-preview-panel.preview-fullscreen { position: fixed; z-index: 46; inset: 0; width: auto; transform: none; animation: none; }
 .terminal-pane { position: relative; height: 100%; background: var(--code-surface); }
 /* SSH 终端：竖向 flex —— [终端][操作条][文件面板(可折叠)]。
    注意：**不能**给文件面板用 position:absolute + inset:0，那会盖住开关按钮
@@ -2732,9 +2767,12 @@ html[data-theme-wallpaper="true"][data-ui-window-hidden] .content-preview-panel 
 .desktop-shell > .theme-layer[data-layer-kind="overlay"] { z-index: 45; }
 
 @media (max-width: 760px) {
-  .work-area.with-preview { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, var(--preview-split, 50%)) 7px minmax(0, 1fr); }
+  /* 竖向堆叠：三行同样由 --preview-open 驱动（行数不变才能插值），面板贴底、
+     按自身高度下滑出可视区（与展开时的第三行同源）。 */
+  .work-area.with-preview { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, calc(var(--preview-split, 50%) + (100% - var(--preview-split, 50%)) * (1 - var(--preview-open)))) calc(7px * var(--preview-open)) minmax(0, 1fr); }
+  .work-area.with-preview .content-preview-panel { top: auto; right: 0; bottom: 0; left: 0; width: auto; height: calc(100% - var(--preview-split, 50%) - 7px); transform: translateY(calc((1 - var(--preview-open)) * 100%)); }
   .work-area.is-preview-dragging { cursor: row-resize; }
-  .preview-divider { width: 100%; min-width: 0; height: 7px; min-height: 7px; cursor: row-resize; }
+  .preview-divider { width: 100%; min-width: 0; height: 100%; min-height: 0; cursor: row-resize; }
   .preview-divider::before { top: 3px; right: 0; bottom: auto; left: 0; width: auto; height: 1px; }
   .preview-divider:hover::before, .preview-divider:focus-visible::before, .preview-divider.dragging::before { top: 2px; left: 0; width: auto; height: 3px; }
   .content-preview-panel { border-top: 0; }
