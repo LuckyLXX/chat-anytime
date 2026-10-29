@@ -326,6 +326,26 @@ function estimateMessageHeightCached(message: ChatMessage): number {
   return height;
 }
 
+/**
+ * 轮次锚点集合的内容签名：只有 key 集合变化才需要重挂滚动监听 / 重扫锚点。
+ *
+ * `turns` 每帧都会因流式文本换引用；直接把它（或由它派生的 Set）放进 effect deps，
+ * 会让「拆监听 → 挂回 → 立刻 querySelectorAll + 全量 offsetTop」每帧跑一次，长会话
+ * 等于每帧一次强制布局。签名取 key 的滚动哈希，内容不变时 effect 不重建。
+ */
+function turnKeySignature(turns: readonly { key: string }[]): string {
+  let hash = 2166136261;
+  for (const turn of turns) {
+    for (let index = 0; index < turn.key.length; index += 1) {
+      hash ^= turn.key.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    hash ^= 0x1f;
+    hash = Math.imul(hash, 16777619);
+  }
+  return `${turns.length}:${hash >>> 0}`;
+}
+
 function nearestVisibleTurnKey(timeline: HTMLElement, turnStartKeys: ReadonlySet<string>): string | undefined {
   const anchors = [...timeline.querySelectorAll<HTMLElement>("[data-turn-key]")];
   if (anchors.length === 0) return undefined;
@@ -1001,8 +1021,14 @@ export const ConversationPane = memo(function ConversationPane({
   // 缩略导航只展示摘要；流式期间每帧重建整列缩略块是纯浪费，节流到 500ms。
   const minimapTurns = useThrottledValue(turns, 500, data.busy);
   const turnStartKeys = useMemo(() => new Set(turns.map((turn) => turn.key)), [turns]);
-  const latestAssistantIndex = useMemo(() => [...displayMessages].reverse().findIndex((message) => message.role === "assistant"), [displayMessages]);
-  const latestAssistantMessageIndex = latestAssistantIndex < 0 ? -1 : displayMessages.length - 1 - latestAssistantIndex;
+  // effect 只认内容签名：流式追加消息但轮次锚点没变时，不重挂监听、不重扫锚点。
+  const turnKeyId = useMemo(() => turnKeySignature(turns), [turns]);
+  const latestAssistantMessageIndex = useMemo(() => {
+    for (let index = displayMessages.length - 1; index >= 0; index -= 1) {
+      if (displayMessages[index]?.role === "assistant") return index;
+    }
+    return -1;
+  }, [displayMessages]);
   const paneSessionId = data.sessionId ?? sessionId;
   const localTiming = localTurnForPane(localTurn, paneSessionId);
   // 本格的发送失败提示（只显示归属本格的）：切会话自然隐藏。
@@ -1358,17 +1384,29 @@ export const ConversationPane = memo(function ConversationPane({
 
   // 估算当前可视底部所属的轮次（缩略导航高亮用）。滚动监听写入 ref 避免频繁 setState；
   // turnStartKeys 变化时取一次初始值（粘底即最新轮）。
+  // 滚动事件经 rAF 合帧：一次滚动会连发几十个事件，每个都全量扫 400 个 offsetTop 是
+  // 纯浪费；合并到每帧一次即可（与流式渲染同频）。
   useEffect(() => {
     const timeline = timelineRef.current;
     if (!timeline) return;
+    let frame = 0;
     const updateActiveTurn = (): void => {
+      frame = 0;
       const key = nearestVisibleTurnKey(timeline, turnStartKeys);
       if (key !== activeTurnKeyRef.current) setActiveTurnKey(key);
     };
+    const scheduleUpdate = (): void => {
+      if (frame !== 0) return;
+      frame = window.requestAnimationFrame(updateActiveTurn);
+    };
+    // 初始定位保持同步：切会话/新增轮次时缩略导航要立刻指向正确轮次。
     updateActiveTurn();
-    timeline.addEventListener("scroll", updateActiveTurn, { passive: true });
-    return () => timeline.removeEventListener("scroll", updateActiveTurn);
-  }, [turnStartKeys, data.messages.length]);
+    timeline.addEventListener("scroll", scheduleUpdate, { passive: true });
+    return () => {
+      if (frame !== 0) window.cancelAnimationFrame(frame);
+      timeline.removeEventListener("scroll", scheduleUpdate);
+    };
+  }, [turnKeyId]);
 
   // 点击缩略导航 → 平滑滚动到该轮首条消息，并解除粘底（否则会被拉回底部）。
   // 窗口化：观察器挂在时间线滚动容器上，±1 屏内算「可见」。

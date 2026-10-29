@@ -309,11 +309,11 @@ export class BackgroundProcessRegistry {
 
   private ensurePolling(): void {
     if (this.pollTimer) return;
-    this.pollTimer = setInterval(() => { void this.poll(); }, POLL_INTERVAL_MS);
+    this.pollTimer = setInterval(() => this.poll(), POLL_INTERVAL_MS);
   }
 
   /** Remove tracked processes that are no longer alive. */
-  private async poll(): Promise<void> {
+  private poll(): void {
     if (this.processes.size === 0) {
       if (this.pollTimer) {
         clearInterval(this.pollTimer);
@@ -321,26 +321,32 @@ export class BackgroundProcessRegistry {
       }
       return;
     }
-    const ids = [...this.processes.keys()];
-    const script = `Get-Process -Id ${ids.join(",")} -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id`;
-    try {
-      const output = await new Promise<string>((resolve, reject) => {
-        execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { timeout: 10_000, windowsHide: true }, (error, stdout) => {
-          if (error) reject(error);
-          else resolve(stdout);
-        });
-      });
-      const alive = new Set(output.split(/\s+/u).map((line) => line.trim()).filter(Boolean).map(Number));
-      let changed = false;
-      for (const pid of ids) {
-        if (!alive.has(pid)) {
-          this.processes.delete(pid);
-          changed = true;
-        }
+    // 存活判断在进程内完成（signal 0 只查存在性）。旧实现每 4 秒 spawn 一个
+    // PowerShell 跑 `Get-Process -Id …`，本机单次墙钟 1.4–1.9s——有后台命令时等于
+    // 常驻一个反复启动的子进程，弱机上直接把交互拖慢。这里 1000 次探测仅 3.6ms。
+    let changed = false;
+    for (const pid of [...this.processes.keys()]) {
+      if (!isProcessAlive(pid)) {
+        this.processes.delete(pid);
+        changed = true;
       }
-      if (changed) this.onChanged();
-    } catch {
-      // Poll failure is transient — keep entries until a later poll succeeds.
     }
+    if (changed) this.onChanged();
+  }
+}
+
+/**
+ * 进程存活探测（Windows / POSIX 同一套）：signal 0 不投递信号，只做存在性检查。
+ *
+ * - 目标已退出 → ESRCH → 视为不存在。
+ * - 目标存在但当前用户无权操作 → EPERM → **仍视为存在**（否则会误删一个活着的条目）。
+ * - 其余错误（含非法 pid）→ 保守视为不存在，下一轮扫描还能重新发现。
+ */
+export function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException | undefined)?.code === "EPERM";
   }
 }

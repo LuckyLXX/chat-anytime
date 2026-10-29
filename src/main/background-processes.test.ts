@@ -1,10 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { describe, expect, it, vi } from "vitest";
 import {
   BackgroundProcessRegistry,
   bashCommandsFromMessages,
   commandFingerprints,
   hasUserDesktopAncestor,
   isBackgroundCommand,
+  isProcessAlive,
   parentCreatedInWindow,
   snapshotIndex,
   wmiDateToMs,
@@ -130,5 +134,61 @@ describe("BackgroundProcessRegistry.kill", () => {
     // seed through a real scan is not feasible here; use kill on a missing id.
     expect(registry.kill("missing")).toBe(false);
     registry.dispose();
+  });
+});
+
+describe("isProcessAlive", () => {
+  it("reports the current process as alive", () => {
+    expect(isProcessAlive(process.pid)).toBe(true);
+  });
+
+  it("reports an exited child as dead", async () => {
+    const child = spawn(process.execPath, ["-e", "0"], { stdio: "ignore" });
+    await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+    expect(child.pid).toBeTypeOf("number");
+    expect(isProcessAlive(child.pid!)).toBe(false);
+  });
+
+  it("treats EPERM as alive (exists but not operable by this user)", () => {
+    // 真实环境里无法稳定制造 EPERM（受保护进程），直接钉错误分支。
+    const spy = vi.spyOn(process, "kill").mockImplementation(() => {
+      const error = new Error("operation not permitted") as NodeJS.ErrnoException;
+      error.code = "EPERM";
+      throw error;
+    });
+    try {
+      expect(isProcessAlive(123456)).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("treats ESRCH / unknown errors as dead", () => {
+    const spy = vi.spyOn(process, "kill").mockImplementation(() => {
+      const error = new Error("no such process") as NodeJS.ErrnoException;
+      error.code = "ESRCH";
+      throw error;
+    });
+    try {
+      expect(isProcessAlive(123456)).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+/**
+ * 接线契约：存活探测必须在进程内完成。旧实现每 4 秒 spawn 一个 PowerShell（本机单次
+ * 墙钟 1.4–1.9s）；纯函数用例证明不了 poll 真的调了它，所以这里对源码做断言。
+ * CRLF 必须先归一化（仓库源码是 CRLF）。
+ */
+describe("liveness poll wiring", () => {
+  it("polls in-process instead of spawning a PowerShell per tick", () => {
+    const source = readFileSync(fileURLToPath(new URL("./background-processes.ts", import.meta.url)), "utf8").replace(/\r\n/g, "\n");
+    const start = source.indexOf("private poll(");
+    expect(start).toBeGreaterThan(-1);
+    const poll = source.slice(start, source.indexOf("\n  }\n}", start) + 4);
+    expect(poll).toContain("isProcessAlive");
+    expect(poll).not.toContain("powershell");
   });
 });

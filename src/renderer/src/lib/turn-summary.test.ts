@@ -131,4 +131,35 @@ describe("buildTurnSummaries", () => {
 
     expect(turns[0]?.key).toBe("uuid-123");
   });
+
+  it("keeps a single ellipsis when several assistant messages are long", () => {
+    const turns = buildTurnSummaries([
+      message("u1", "user", "问"),
+      message("a1", "assistant", "一".repeat(10)),
+      message("a2", "assistant", "二".repeat(10))
+    ], 4);
+
+    expect(turns[0]?.aiText).toBe("一一一一…");
+  });
+
+  it("reuses the per-message preview across frames", () => {
+    // 长会话流式时每帧都会重跑 buildTurnSummaries；历史消息对象是稳定的，
+    // 它们的文本不应该被重新归一化（旧实现每帧扫全库，2.55ms/帧@400条）。
+    let reads = 0;
+    const block = {
+      type: "text" as const,
+      get text() {
+        reads += 1;
+        return "历史回答";
+      }
+    };
+    const assistant: ChatMessage = { id: "a1", uuid: "a1", role: "assistant", timestamp: 1, blocks: [block] };
+
+    buildTurnSummaries([message("u1", "user", "问"), assistant]);
+    expect(reads).toBe(1);
+
+    // 新数组、同一批消息对象：命中 WeakMap，不再读 text。
+    buildTurnSummaries([message("u2", "user", "再问"), assistant]);
+    expect(reads).toBe(1);
+  });
 });
