@@ -243,6 +243,9 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 .sidebar-rail-items { display: flex; flex: 1; flex-direction: column; align-items: center; gap: 6px; padding: 0; }
 .sidebar-rail .rail-icon, .brand-collapse-button { display: grid; place-items: center; width: 32px; height: 32px; flex: 0 0 auto; border: 0; border-radius: 8px; color: var(--text-muted); background: transparent; cursor: pointer; }
 .sidebar-rail .rail-icon:hover, .brand-collapse-button:hover { color: var(--text); background: var(--surface-sidebar-hover); }
+/* 折叠成图标栏时，话题按钮上的运行中角标（分区在飞出面板里，先在这里提示有几个在跑）。 */
+.sidebar-rail .rail-icon { position: relative; }
+.rail-running-badge { position: absolute; top: 3px; right: 3px; min-width: 14px; padding: 0 3px; border-radius: 999px; color: var(--on-accent); background: var(--accent); font-size: 9px; font-weight: 700; line-height: 13px; text-align: center; }
 .sidebar-rail .rail-icon.active { color: var(--accent-text); background: var(--surface-sidebar-active); }
 .sidebar-rail .rail-new-session { display: grid; place-items: center; width: 32px; height: 32px; border: 0; border-radius: 8px; color: var(--on-accent); background: var(--accent); cursor: pointer; }
 .sidebar-rail .rail-new-session:hover { background: var(--accent-hover); }
@@ -310,6 +313,18 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 .session-list strong, .agent-list strong { overflow: hidden; font-size: 12px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
 .session-list small, .agent-list small { overflow: hidden; color: var(--text-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .session-list-empty { display: grid; place-items: center; min-height: 80px; padding: 10px; color: var(--text-muted); font-size: 11px; }
+
+/* —— 侧栏顶部「运行中」分区（跨工作区，2026-10-29）——
+   工作区分组默认折叠，别的工作区里正在跑的会话在分组里根本看不见；这里把它们摊平成
+   一条清单放在所有分组之上。行的第二行用**工作区名**代替日期：用户选的就是「切到哪个
+   工作区的哪个任务」，日期在这里没有信息量。 */
+.session-running-group { display: grid; gap: 2px; padding-bottom: 5px; margin-bottom: 2px; border-bottom: 1px solid var(--border); }
+.session-running-heading { display: flex; align-items: center; gap: 6px; padding: 6px 8px 4px; color: var(--text); font-size: 10px; font-weight: 700; letter-spacing: .04em; }
+.session-running-heading em { min-width: 16px; padding: 1px 5px; border-radius: 999px; color: var(--accent-text); background: var(--accent-soft); font-size: 9.5px; font-style: normal; font-weight: 700; text-align: center; }
+.session-running-items { display: grid; gap: 2px; }
+.session-running-items > button > .session-status-dot { justify-self: center; }
+.session-list .session-running-where { overflow: hidden; color: var(--text-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.session-workspace-running { flex: 0 0 auto; }
 
 /* 会话全文检索结果（侧栏内联，标题过滤之后）。.session-list button/span 的通用规则
    很宽，这里用 .session-list 前缀把布局改回纵向卡片。 */

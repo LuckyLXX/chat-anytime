@@ -87,6 +87,7 @@ import { workAreaPreviewClasses } from "./lib/preview-layout";
 import { groupSessionsByWorkspace, workspaceDisplayLabel, workspaceKey } from "./lib/session-groups";
 import { pickTopicAgentId } from "./lib/topic-agent";
 import { archivedSessionCount, selectSessionPaths, selectedPathsInView, sessionsForView, toggleSessionSelection, type SessionSelection, type SessionView } from "./lib/session-view";
+import { collectRunningSessions, hasRunningSession } from "./lib/running-sessions";
 import { resolveThemeAssetUrls, activeThemeScope } from "../../shared/theme-assets";
 import { bubbleOpacityCss, collectThemeLayers, panelOpacityCss, scopeCustomThemeCss, themePresetCss, wallpaperOpacityCss } from "./lib/theme-presets";
 import { panePermissionRequest, paneQuestionRequest, dropPaneStates, pruneParkedPanels, useDesktopStore } from "./store";
@@ -1157,6 +1158,11 @@ export function App(): ReactNode {
     return map;
   }, [sessionSummaries]);
   const visibleSessions = useMemo(() => sessionsForView(sessionSummaries, sessionView), [sessionSummaries, sessionView]);
+  // 「运行中」分区（跨工作区）：分组默认折叠时，别的工作区里正在跑的会话在列表里
+  // 根本看不见，切过去得先翻分组。这里摊平一份（rail 角标也用它），列表顶部那份
+  // 再按搜索词过滤——两处口径一致，不另算一遍筛选。
+  const runningSessions = useMemo(() => collectRunningSessions(sessionsForView(sessionSummaries, "active")), [sessionSummaries]);
+  const listedRunningSessions = useMemo(() => collectRunningSessions(runningSessions, sidebarQuery, agentNames), [runningSessions, sidebarQuery, agentNames]);
   const sessionGroups = useMemo(() => groupSessionsByWorkspace(visibleSessions, sidebarQuery, recentWorkspaces, activeWorkspace, agentNames), [visibleSessions, recentWorkspaces, activeWorkspace, sidebarQuery, agentNames]);
   const archivedCount = useMemo(() => archivedSessionCount(sessionSummaries), [sessionSummaries]);
   // 选择集按当前视图过滤：会话被删/刷新后可能残留陈旧键，操作时必须只拿「还在列表里」的那些。
@@ -2049,6 +2055,29 @@ export function App(): ReactNode {
     openPreviewTarget({ type: "ssh-terminal", terminalId: event.terminalId, hostId: event.hostId, hostName: event.hostName }, event.terminalId);
   }), []);
 
+  /**
+   * 会话行的右键菜单：工作区分组里的行与顶部「运行中」分区共用同一份，
+   * 免得两处菜单口径漂移（分屏/置顶/归档三个动作都靠当前状态判断）。
+   */
+  function sessionContextItems(item: SessionSummary): ContextMenuItem[] {
+    if (sessionView === "archived") {
+      return [
+        { label: "打开（自动恢复）", onClick: () => void openSession(item.path, item.workspace, item.id, item.agentId) },
+        { label: "取消归档", onClick: () => void setSessionsArchived([item.path], false) },
+        { label: "删除会话", danger: true, onClick: () => setDeleteSession({ paths: [item.path], title: item.title, mode: "single" }) }
+      ];
+    }
+    const inPane = splitTree ? leafIds(splitTree).includes(item.id) : false;
+    const splitDisabled = !activeSessionId || designMode || (splitTree ? countLeaves(splitTree) >= MAX_SPLIT_PANES : false);
+    return [
+      { label: "重命名", onClick: () => { setRenameSession({ path: item.path, title: item.title }); setRenameValue(item.title); } },
+      { label: item.pinned ? "取消置顶" : "置顶", onClick: () => { void window.piDesktop.send({ type: "session.pin", path: item.path, pinned: !item.pinned }); } },
+      { label: "归档", onClick: () => void setSessionsArchived([item.path], true) },
+      { label: inPane ? "已分屏，切换到该格" : "分屏", disabled: !inPane && splitDisabled, onClick: () => addSplitPane(item) },
+      { label: "删除会话", danger: true, onClick: () => setDeleteSession({ paths: [item.path], title: item.title, mode: "single" }) }
+    ];
+  }
+
   const sidebarInner = (
     <>
       {sidebarView === "files" ? (
@@ -2115,6 +2144,52 @@ export function App(): ReactNode {
               agentNames={agentNames}
               onOpen={openSearchHit}
             />
+            {/* 运行中（跨工作区）：分组默认折叠，别的工作区里正在跑的会话在分组里根本
+                看不见，切过去得先翻分组。这里摊平成一条清单放在所有分组之上，点一下就
+                切过去；同一会话在所属分组里照旧保留（两处点的是同一条记录）。 */}
+            {sessionView === "active" && listedRunningSessions.length > 0 ? (
+              <section className="session-running-group" aria-label={`运行中的话题 ${listedRunningSessions.length} 个`}>
+                <div className="session-running-heading">
+                  <i className="session-status-dot running" aria-hidden />
+                  <strong>运行中</strong>
+                  <em>{listedRunningSessions.length}</em>
+                </div>
+                <div className="session-running-items">
+                  {listedRunningSessions.map((item) => {
+                    const inPane = splitTree ? leafIds(splitTree).includes(item.id) : false;
+                    const rowActive = item.id === activeSessionId || inPane;
+                    const rowSelected = sessionMultiSelect && Boolean(selectedSessionPaths[item.path]);
+                    const agentName = agentNames[item.agentId] ?? "已归档助手";
+                    const where = workspaceDisplayLabel(item.workspace, workspacePaths);
+                    return <button
+                      className={`${rowActive ? "active" : ""}${rowSelected ? " selected" : ""}`}
+                      type="button"
+                      key={item.path}
+                      data-row-kind="session"
+                      data-row-active={rowActive || undefined}
+                      title={sessionMultiSelect ? (rowSelected ? `取消选择：${item.title}` : `选择：${item.title}`) : `${item.title} · ${where} · ${agentName}`}
+                      aria-label={`切换到运行中的话题：${item.title}（${where}）`}
+                      onClick={() => {
+                        if (sessionMultiSelect) { setSelectedSessionPaths((current) => toggleSessionSelection(current, item.path)); return; }
+                        void openSession(item.path, item.workspace, item.id, item.agentId);
+                      }}
+                      onContextMenu={(event) => {
+                        event.preventDefault();
+                        setContextMenu({ x: event.clientX, y: event.clientY, items: sessionContextItems(item) });
+                      }}
+                    >
+                      {openingSession && sameSessionPath(openingSession.path, item.path) ? <LoaderCircle size={14} className="spinning" /> : <i className="session-status-dot running" aria-hidden />}
+                      <span>
+                        <span className="session-item-heading"><strong>{item.title}</strong></span>
+                        {/* 第二行只放**工作区**：这是用户要选的那一条信息（助手名在 title 里），
+                            挤上「· 默认助手」会把工作区名截掉一半，那正是这个分区存在的意义。 */}
+                        <small className="session-running-where" title={`${where} · ${agentName}`}>{where}</small>
+                      </span>
+                    </button>;
+                  })}
+                </div>
+              </section>
+            ) : null}
             {sessionGroups.length === 0
               ? (sessionSearch.loading || sessionSearch.hits.length > 0 ? null : <div className="session-list-empty">{sessionView === "archived" ? "暂无归档话题" : "暂无匹配话题"}</div>)
               : sessionGroups.map((group) => {
@@ -2143,6 +2218,7 @@ export function App(): ReactNode {
                       <Folder size={15} />
                       <span><strong>{workspaceName}</strong></span>
                       {groupMissing ? <span className="session-workspace-missing" title={`目录不存在：${group.workspace}`}>目录不存在</span> : null}
+                      {hasRunningSession(group.sessions) ? <i className="session-status-dot running session-workspace-running" title="本工作区有话题正在运行" aria-label="本工作区有话题正在运行" /> : null}
                       <em>{group.sessions.length}</em>
                       <ChevronDown size={14} className={collapsed ? "collapsed" : ""} />
                     </button>
@@ -2194,21 +2270,7 @@ export function App(): ReactNode {
                           }}
                           onContextMenu={(event) => {
                             event.preventDefault();
-                            const splitDisabled = !activeSessionId || designMode || (splitTree ? countLeaves(splitTree) >= MAX_SPLIT_PANES : false);
-                            const items = sessionView === "archived"
-                              ? [
-                                { label: "打开（自动恢复）", onClick: () => void openSession(item.path, item.workspace, item.id, item.agentId) },
-                                { label: "取消归档", onClick: () => void setSessionsArchived([item.path], false) },
-                                { label: "删除会话", danger: true, onClick: () => setDeleteSession({ paths: [item.path], title: item.title, mode: "single" }) }
-                              ]
-                              : [
-                                { label: "重命名", onClick: () => { setRenameSession({ path: item.path, title: item.title }); setRenameValue(item.title); } },
-                                { label: item.pinned ? "取消置顶" : "置顶", onClick: () => { void window.piDesktop.send({ type: "session.pin", path: item.path, pinned: !item.pinned }); } },
-                                { label: "归档", onClick: () => void setSessionsArchived([item.path], true) },
-                                { label: inPane ? "已分屏，切换到该格" : "分屏", disabled: !inPane && splitDisabled, onClick: () => addSplitPane(item) },
-                                { label: "删除会话", danger: true, onClick: () => setDeleteSession({ paths: [item.path], title: item.title, mode: "single" }) }
-                              ];
-                            setContextMenu({ x: event.clientX, y: event.clientY, items });
+                            setContextMenu({ x: event.clientX, y: event.clientY, items: sessionContextItems(item) });
                           }}
                         >
                           {openingSession && sameSessionPath(openingSession.path, item.path) ? <LoaderCircle size={14} className="spinning" /> : sessionMultiSelect ? (rowSelected ? <CheckCircle2 size={14} /> : <Circle size={14} />) : <MessageCircle size={14} />}
@@ -2399,7 +2461,7 @@ export function App(): ReactNode {
             <button type="button" className="rail-new-session" data-control="new-session" title="在当前工作区新建话题" aria-label="在当前工作区新建话题" disabled={!activeWorkspace} onClick={() => void createNewSession()}><Plus size={18} /></button>
             <button type="button" className="rail-icon" data-control="automation-open" title="自动化任务" aria-label="自动化任务" onClick={() => openSettingsOn("automation")}><Zap size={18} /></button>
             <button type="button" className="rail-icon" data-control="ssh-open" title="SSH 远程终端" aria-label="SSH 远程终端" onClick={() => openSshPanel()}><Server size={18} /></button>
-            <button type="button" className="rail-icon" data-control="rail-topics" title="话题列表" aria-label="话题列表" onClick={() => { setSidebarView("topics"); setSidebarTab("topics"); setSidebarFlyoutOpen(true); }}><MessageCircle size={18} /></button>
+            <button type="button" className="rail-icon" data-control="rail-topics" title={runningSessions.length > 0 ? `话题列表（${runningSessions.length} 个运行中）` : "话题列表"} aria-label={runningSessions.length > 0 ? `话题列表，${runningSessions.length} 个运行中` : "话题列表"} onClick={() => { setSidebarView("topics"); setSidebarTab("topics"); setSidebarFlyoutOpen(true); }}><MessageCircle size={18} />{runningSessions.length > 0 ? <span className="rail-running-badge">{runningSessions.length}</span> : null}</button>
             <button type="button" className="rail-icon" data-control="rail-search" title="搜索" aria-label="搜索" onClick={() => { setSidebarView("topics"); setSidebarFlyoutOpen(true); window.setTimeout(() => sidebarSearchRef.current?.focus(), 30); }}><Search size={18} /></button>
             <button type="button" className="rail-icon" data-control="rail-agents" title="助手" aria-label="助手" onClick={() => { setSidebarView("topics"); setSidebarTab("agents"); setSidebarFlyoutOpen(true); }}><Users size={18} /></button>
           </div>
