@@ -66,6 +66,10 @@ describe("Div mode prompt", () => {
     expect(DIV_MEDIA_PROMPT).toContain("mp4/m4v、webm、ogv");
     expect(DIV_MEDIA_PROMPT).toContain("data: 视频/音频会被拒绝");
     expect(DIV_MEDIA_PROMPT).toContain("不要写 autoplay");
+    // 光有格式不够：还得告诉模型「什么时候用」与「别编路径」。
+    expect(DIV_MEDIA_PROMPT).toContain("只在用户要看媒体、或本次确实生成了媒体文件时使用");
+    expect(DIV_MEDIA_PROMPT).toContain("先确认文件存在（ls / find）");
+    expect(DIV_MEDIA_PROMPT).toContain("不要拿视频当装饰");
   });
 
   it("off mode injects nothing", () => {

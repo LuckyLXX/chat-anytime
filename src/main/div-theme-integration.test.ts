@@ -170,4 +170,36 @@ describe("界面主题提示词注入（真实 AgentSession + faux provider）",
       session.dispose();
     }
   });
+
+  it("视频/音频规范随 Div 提示词进了真实请求，off 档一个字都没有", async () => {
+    // 2026-10-29：只断言纯函数拼接不够——模型真正看到的是 systemPromptOverride
+    // 产出的 provider 请求。这里用真实会话确认两档都带播放器规范、off 不注入。
+    const always = await makeSession("always", undefined);
+    try {
+      await always.session.prompt("随便说说");
+      expect(always.requests[0]).toContain("【视频与音频】");
+      expect(always.requests[0]).toContain('<video src="相对路径" controls></video>');
+      expect(always.requests[0]).toContain("先确认文件存在（ls / find）");
+      expect(always.requests[0]).toContain("mp4/m4v、webm、ogv");
+    } finally {
+      always.session.dispose();
+    }
+
+    const auto = await makeSession("auto", undefined);
+    try {
+      await auto.session.prompt("随便说说");
+      expect(auto.requests[0]).toContain("【视频与音频】");
+    } finally {
+      auto.session.dispose();
+    }
+
+    const off = await makeSession("off", undefined);
+    try {
+      await off.session.prompt("随便说说");
+      expect(off.requests[0]).not.toContain("【视频与音频】");
+      expect(off.requests[0]).not.toContain("<video src=");
+    } finally {
+      off.session.dispose();
+    }
+  });
 });
