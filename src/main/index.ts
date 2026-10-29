@@ -1,7 +1,6 @@
-import { createReadStream, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { extname, join, resolve } from "node:path";
-import { Readable } from "node:stream";
 import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, Menu, Notification, protocol, safeStorage, session, shell, utilityProcess, type UtilityProcess } from "electron";
 import { spawn } from "node-pty";
 import appIconPath from "./assets/icon.ico?asset";
@@ -18,7 +17,7 @@ import { applyRuntimeStatePatch } from "../shared/snapshot-patch.js";
 import { isThemeAssetUrl, parseThemeAssetUrl } from "../shared/theme-assets.js";
 import type { ThemeImportOutcome } from "../shared/theme-assets.js";
 import { serveThemeAsset, migrateInlineThemeAssets, reconcileThemeAssetDirs, themeAssetsDirFor, resolveThemeAgentDir, importThemeCssFile, importThemeDirectory, promoteThemeScope } from "./theme-assets.js";
-import { createWorkspaceDirectory, createWorkspaceFile, deleteWorkspaceEntry, listWorkspaceDirectory, previewFileMimeType, readWorkspaceFilePreview, renameWorkspaceEntry, resolveWorkspaceEntry, safeRelativePath, searchWorkspaceFiles, statWorkspaceFile, workspaceDirectoryExists, writeWorkspaceFile } from "./workspace-preview.js";
+import { createWorkspaceDirectory, createWorkspaceFile, deleteWorkspaceEntry, listWorkspaceDirectory, previewFileMimeType, previewFileResponse, readWorkspaceFilePreview, renameWorkspaceEntry, resolveWorkspaceEntry, safeRelativePath, searchWorkspaceFiles, statWorkspaceFile, workspaceDirectoryExists, writeWorkspaceFile } from "./workspace-preview.js";
 import { pruneDisabledModelRefs } from "./model-catalog.js";
 import { BrowserPreviewController } from "./browser-preview.js";
 import { BrowserAutomationController } from "./browser-automation.js";
@@ -245,15 +244,9 @@ function registerPreviewFileProtocol(): void {
       if (!info.isFile()) return new Response("只能预览普通文件", { status: 404 });
       const mimeType = previewFileMimeType(candidate);
       if (!mimeType) return new Response("该文件类型不支持预览", { status: 415 });
-      return new Response(Readable.toWeb(createReadStream(candidate)) as ReadableStream, {
-        headers: {
-          "Content-Type": mimeType,
-          "Content-Length": String(info.size),
-          // 同路径文件可能被重新生成（AI 覆盖写同名图片），禁止直接复用缓存，
-          // 但保留条件请求语义（无 ETag 时 Chromium 仍会发 If-Modified-Since）。
-          "Cache-Control": "no-cache"
-        }
-      });
+      // 200/206 与字节范围都在 previewFileResponse 里决定：媒体栈靠 Range 分段
+      // 拉取（moov 索引、seek），只回整份会让大视频卡到下载完才能播。
+      return previewFileResponse({ filePath: candidate, size: info.size, mimeType, rangeHeader: request.headers.get("range"), method: request.method });
     } catch (error) {
       const code = (error as NodeJS.ErrnoException | undefined)?.code;
       if (code === "ENOENT" || code === "ENOTDIR") return new Response("文件不存在或已被删除", { status: 404 });

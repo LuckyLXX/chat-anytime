@@ -203,21 +203,26 @@ function RichImage({ src, alt, title, workspace, markdownPath }: { src?: string;
   );
 }
 
-function RichVideo({ src, poster, title, children }: { src?: string; poster?: string; title?: string; children?: ReactNode }): ReactNode {
-  if (!src && !children) return null;
+function RichVideo({ src, poster, title, children, workspace, markdownPath }: { src?: string; poster?: string; title?: string; children?: ReactNode; workspace?: string; markdownPath?: string }): ReactNode {
+  // 与 <img> 同一套解析（md 所在目录 → 工作区根 → pidesktop-file://）：气泡里
+  // 写工作区相对路径才是模型与用户都自然的写法。
+  const resolvedSrc = resolveMarkdownAssetUrl(src, { markdownPath, workspace });
+  const resolvedPoster = resolveMarkdownAssetUrl(poster, { markdownPath, workspace });
+  if (!resolvedSrc && !children) return null;
   return (
-    <video className="rich-media-video" controls preload="metadata" poster={poster} title={title}>
-      {src && <source src={src} />}
+    <video className="rich-media-video" controls preload="metadata" poster={resolvedPoster} title={title}>
+      {resolvedSrc && <source src={resolvedSrc} />}
       {children}
     </video>
   );
 }
 
-function RichAudio({ src, title, children }: { src?: string; title?: string; children?: ReactNode }): ReactNode {
-  if (!src && !children) return null;
+function RichAudio({ src, title, children, workspace, markdownPath }: { src?: string; title?: string; children?: ReactNode; workspace?: string; markdownPath?: string }): ReactNode {
+  const resolvedSrc = resolveMarkdownAssetUrl(src, { markdownPath, workspace });
+  if (!resolvedSrc && !children) return null;
   return (
     <audio className="rich-media-audio" controls preload="metadata" title={title}>
-      {src && <source src={src} />}
+      {resolvedSrc && <source src={resolvedSrc} />}
       {children}
     </audio>
   );
@@ -637,8 +642,12 @@ const richSanitizeSchema: Schema = {
     textPath: [...svgPaintAndGeometry, ...svgFontAttributes, "startOffset", "method", "spacing", "side", "href", "xLinkHref"],
     title: ["id"],
     desc: ["id"],
-    video: ["controls", "autoplay", "muted", "loop", "playsInline", "preload", "poster", "width", "height"],
-    audio: ["controls", "autoplay", "muted", "loop", "preload"],
+    video: ["src", "controls", "autoplay", "muted", "loop", "playsInline", "preload", "poster", "width", "height"],
+    audio: ["src", "controls", "autoplay", "muted", "loop", "preload"],
+    // 默认 schema 的 source 只放 srcSet（GFM 的 <picture> 用法），但 <video> /
+    // <audio> 的子 <source> 靠 src 指文件；不放行就只剩一个空 <source/>，
+    // 播放器永远没有源。type 让浏览器按 MIME 选源（一个视频多容器时有用）。
+    source: ["src", "type", "media", "srcSet"],
     canvas: ["width", "height"],
     button: ["type", "disabled", "name", "value", "form", "formAction"],
     progress: ["max", "value"],
@@ -752,10 +761,16 @@ function markdownComponents(artifactIndex: { current: number }, artifactPrefix: 
       return <RichImage src={src} alt={alt} title={title} workspace={workspace} markdownPath={markdownPath} />;
     },
     video({ src, poster, title, children }) {
-      return <RichVideo src={src} poster={poster} title={title}>{children}</RichVideo>;
+      return <RichVideo src={src} poster={poster} title={title} workspace={workspace} markdownPath={markdownPath}>{children}</RichVideo>;
     },
     audio({ src, title, children }) {
-      return <RichAudio src={src} title={title}>{children}</RichAudio>;
+      return <RichAudio src={src} title={title} workspace={workspace} markdownPath={markdownPath}>{children}</RichAudio>;
+    },
+    source({ src, type }) {
+      // <video><source src="outputs/x.mp4"></video> 这种写法也要能播：子 source
+      // 的路径同样做工作区映射（父 RichVideo 只负责自己的 src）。
+      const resolvedSrc = resolveMarkdownAssetUrl(src, { markdownPath, workspace });
+      return resolvedSrc ? <source src={resolvedSrc} type={type} /> : null;
     },
     input({ type, checked, disabled }) {
       return <input type={type} checked={checked} disabled={disabled} readOnly />;

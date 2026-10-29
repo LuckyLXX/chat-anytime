@@ -32,7 +32,13 @@ export const DIV_MEDIA_PROMPT = `
 【图片】
 - 展示工作区里的图片（生成图、截图、素材）用 <img src="相对路径" alt="说明">，路径相对当前工作区，如 outputs/fox.png；不要拼绝对路径或 file:// 前缀。
 - 网络图片写完整 https 地址；不要把图片转成 base64 内联。
-- 给图片配宽度（width 或 max-width）与圆角，并保留标题/说明文字，不要让卡片只剩一张裸图。`;
+- 给图片配宽度（width 或 max-width）与圆角，并保留标题/说明文字，不要让卡片只剩一张裸图。
+
+【视频与音频】
+- 播放工作区里的媒体用 <video src="相对路径" controls></video> / <audio src="相对路径" controls></audio>，路径相对当前工作区，如 outputs/clip.mp4；要封面就加 poster="相对路径"。
+- 支持 Chromium 能解码的格式：mp4/m4v、webm、ogv、mp3、m4a、aac、wav、ogg、flac、opus；mkv、avi、mov 解不了，不要用。文件超过几十 MB 时先提醒用户加载会慢。
+- 网络媒体写完整 https 地址。不要把媒体转成 base64 内联（data: 视频/音频会被拒绝）。
+- 播放器自带 controls，不要写 autoplay（聊天里自动出声会打断用户）；媒体下方留一行说明它是什么。`;
 
 export const DIV_DYNAMIC_MODE_PROMPT = `
 【Div 动态内容】

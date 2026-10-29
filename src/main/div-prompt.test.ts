@@ -58,6 +58,16 @@ describe("Div mode prompt", () => {
     expect(buildDivModePrompt("auto")).toContain(DIV_MEDIA_PROMPT);
   });
 
+  it("teaches workspace-relative video/audio playback instead of base64", () => {
+    expect(DIV_MEDIA_PROMPT).toContain('<video src="相对路径" controls></video>');
+    expect(DIV_MEDIA_PROMPT).toContain('<audio src="相对路径" controls></audio>');
+    expect(DIV_MEDIA_PROMPT).toContain("outputs/clip.mp4");
+    expect(DIV_MEDIA_PROMPT).toContain("poster=\"相对路径\"");
+    expect(DIV_MEDIA_PROMPT).toContain("mp4/m4v、webm、ogv");
+    expect(DIV_MEDIA_PROMPT).toContain("data: 视频/音频会被拒绝");
+    expect(DIV_MEDIA_PROMPT).toContain("不要写 autoplay");
+  });
+
   it("off mode injects nothing", () => {
     expect(buildDivModePrompt("off")).toBeUndefined();
     expect(buildUiThemeContextBlock("off", DARK_WALLPAPER)).toBeUndefined();

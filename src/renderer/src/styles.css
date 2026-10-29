@@ -867,6 +867,10 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 
 .rich-image-button { display: block; max-width: 100%; padding: 0; border: 0; border-radius: 10px; background: transparent; cursor: zoom-in; text-align: left; }
 .rich-image-button img { display: block; max-width: 100%; max-height: 420px; border-radius: 10px; object-fit: contain; }
+/* 视频/音频：气泡里 <video> 之前没有专用样式，按原始尺寸铺开会把版面顶爆；
+   音频宽度收窄，避免进度条拉满整页。 */
+.rich-media-video { display: block; max-width: 100%; max-height: 520px; margin: 10px 0; border-radius: 10px; background: var(--surface-raised); }
+.rich-media-audio { display: block; width: 100%; max-width: 440px; margin: 10px 0; }
 
 .artifact-card { margin: 13px 0; overflow: hidden; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-raised); box-shadow: var(--shadow-sm); }
 .artifact-card-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 11px; }

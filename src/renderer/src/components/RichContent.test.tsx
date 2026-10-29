@@ -376,6 +376,68 @@ describe("RichContent dynamic bubbles", () => {
     expect(markup).toContain('clip-path="url(#clipRound)"');
   });
 
+  it("plays workspace videos and audio through the preview protocol", () => {
+    // 2026-10-24：video/audio 的 src 曾被 sanitize 的标签级白名单剥掉（video 列表
+    // 里忘了写 src），RichVideo 拿不到 src 又无 children 就直接 return null——
+    // 气泡里写了 <video> 什么都不显示，连 https 地址也活不下来。
+    const video = renderToStaticMarkup(
+      <RichContent
+        artifactPrefix="message-video"
+        workspace="D:/ws"
+        onOpenArtifact={() => undefined}
+        children={'<assistant_html><div><video src="outputs/demo.mp4" poster="outputs/poster.png" controls></video></div></assistant_html>'}
+      />
+    );
+    expect(video).toContain('class="rich-media-video"');
+    expect(video).toContain(`src="${workspaceFilePreviewUrl("D:/ws", "outputs/demo.mp4")}"`);
+    expect(video).toContain(`poster="${workspaceFilePreviewUrl("D:/ws", "outputs/poster.png")}"`);
+
+    const remote = renderToStaticMarkup(
+      <RichContent
+        artifactPrefix="message-video-remote"
+        workspace="D:/ws"
+        onOpenArtifact={() => undefined}
+        children={'<assistant_html><div><video src="https://cdn.example.com/demo.mp4" controls></video></div></assistant_html>'}
+      />
+    );
+    expect(remote).toContain('src="https://cdn.example.com/demo.mp4"');
+
+    // <video><source> 变体同样要映射（子 source 的 src 走自己的组件覆盖）
+    const nested = renderToStaticMarkup(
+      <RichContent
+        artifactPrefix="message-video-source"
+        workspace="D:/ws"
+        onOpenArtifact={() => undefined}
+        children={'<assistant_html><div><video controls><source src="outputs/demo.mp4" type="video/mp4"></video></div></assistant_html>'}
+      />
+    );
+    expect(nested).toContain(workspaceFilePreviewUrl("D:/ws", "outputs/demo.mp4"));
+    expect(nested).toContain('type="video/mp4"');
+
+    const audio = renderToStaticMarkup(
+      <RichContent
+        artifactPrefix="message-audio"
+        workspace="D:/ws"
+        onOpenArtifact={() => undefined}
+        children={'<assistant_html><div><audio src="outputs/voice.mp3" controls></audio></div></assistant_html>'}
+      />
+    );
+    expect(audio).toContain('class="rich-media-audio"');
+    expect(audio).toContain(workspaceFilePreviewUrl("D:/ws", "outputs/voice.mp3"));
+
+    // data: 视频仍拒绝：消毒只放行 data:image（base64 视频体积与注入面）
+    const data = renderToStaticMarkup(
+      <RichContent
+        artifactPrefix="message-video-data"
+        workspace="D:/ws"
+        onOpenArtifact={() => undefined}
+        children={'<assistant_html><div><video src="data:video/mp4;base64,AAAA" controls></video></div></assistant_html>'}
+      />
+    );
+    expect(data).not.toContain("data:video");
+    expect(data).not.toContain("rich-media-video");
+  });
+
   it("compresses blank lines while streaming an unclosed bubble", () => {
     // dsh-raw-html v6.38 lesson: a blank line inside the card ends the
     // CommonMark HTML block, so indented follow-up lines would be parsed as

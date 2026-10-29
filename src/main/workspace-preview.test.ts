@@ -2,7 +2,7 @@ import { access, mkdir, mkdtemp, symlink, utimes, writeFile } from "node:fs/prom
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { artifactCandidatesFromBashCommand, artifactCandidatesFromOutput, changedWorkspaceFile, changedWorkspaceFiles, collectProducedArtifacts, createWorkspaceDirectory, createWorkspaceFile, deleteWorkspaceEntry, existingWorkspaceFiles, isArtifactProducingTool, listWorkspaceDirectory, previewFileMimeType, readWorkspaceFilePreview, renameWorkspaceEntry, resolveWorkspaceEntry, searchWorkspaceFiles, statWorkspaceFile, workspaceDirectoryExists, writeWorkspaceFile } from "./workspace-preview.js";
+import { artifactCandidatesFromBashCommand, artifactCandidatesFromOutput, changedWorkspaceFile, changedWorkspaceFiles, collectProducedArtifacts, createWorkspaceDirectory, createWorkspaceFile, deleteWorkspaceEntry, existingWorkspaceFiles, isArtifactProducingTool, listWorkspaceDirectory, parseByteRange, previewFileMimeType, previewFileResponse, readWorkspaceFilePreview, renameWorkspaceEntry, resolveWorkspaceEntry, searchWorkspaceFiles, statWorkspaceFile, workspaceDirectoryExists, writeWorkspaceFile } from "./workspace-preview.js";
 import { IMAGE_PREVIEW_LIMIT_BYTES } from "../shared/protocol.js";
 
 const TINY_PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
@@ -86,6 +86,65 @@ describe("workspace file preview", () => {
     expect(previewFileMimeType("D:/work/icon.svg")).toBeUndefined();
     expect(previewFileMimeType("D:/work/notes.md")).toBeUndefined();
     expect(previewFileMimeType("D:/work/noext")).toBeUndefined();
+  });
+  it("serves Chromium-decodable audio/video for <video> / <audio> playback", () => {
+    expect(previewFileMimeType("D:/work/clip.mp4")).toBe("video/mp4");
+    expect(previewFileMimeType("D:/work/clip.M4V")).toBe("video/mp4");
+    expect(previewFileMimeType("D:/work/clip.webm")).toBe("video/webm");
+    expect(previewFileMimeType("D:/work/clip.ogv")).toBe("video/ogg");
+    expect(previewFileMimeType("D:/work/voice.mp3")).toBe("audio/mpeg");
+    expect(previewFileMimeType("D:/work/voice.m4a")).toBe("audio/mp4");
+    expect(previewFileMimeType("D:/work/voice.wav")).toBe("audio/wav");
+    expect(previewFileMimeType("D:/work/voice.flac")).toBe("audio/flac");
+    // Chromium 解不了的容器继续 415：明确失败好过静默黑屏/永远转圈。
+    expect(previewFileMimeType("D:/work/clip.mkv")).toBeUndefined();
+    expect(previewFileMimeType("D:/work/clip.mov")).toBeUndefined();
+  });
+  it("parses single byte ranges and flags unsatisfiable ones", () => {
+    expect(parseByteRange(undefined, 100)).toBe("ignore");
+    expect(parseByteRange("", 100)).toBe("ignore");
+    expect(parseByteRange("items=0-1", 100)).toBe("ignore");
+    // 多段按 RFC 7233 允许的「忽略 Range 回整份」处理。
+    expect(parseByteRange("bytes=0-1,5-9", 100)).toBe("ignore");
+    expect(parseByteRange("bytes=0-", 100)).toEqual({ start: 0, end: 99 });
+    expect(parseByteRange("bytes=10-19", 100)).toEqual({ start: 10, end: 19 });
+    expect(parseByteRange("bytes=90-200", 100)).toEqual({ start: 90, end: 99 });
+    expect(parseByteRange("bytes=-20", 100)).toEqual({ start: 80, end: 99 });
+    expect(parseByteRange("bytes=-200", 100)).toEqual({ start: 0, end: 99 });
+    expect(parseByteRange("bytes=100-", 100)).toBe("unsatisfiable");
+    expect(parseByteRange("bytes=19-10", 100)).toBe("unsatisfiable");
+    expect(parseByteRange("bytes=-0", 100)).toBe("unsatisfiable");
+    expect(parseByteRange("bytes=0-", 0)).toBe("unsatisfiable");
+  });
+  it("answers 206 partial content so <video> can seek", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pidesktop-range-"));
+    const file = join(dir, "clip.mp4");
+    await writeFile(file, "0123456789", "utf8");
+
+    const full = previewFileResponse({ filePath: file, size: 10, mimeType: "video/mp4" });
+    expect(full.status).toBe(200);
+    expect(full.headers.get("accept-ranges")).toBe("bytes");
+    expect(full.headers.get("content-length")).toBe("10");
+    await expect(full.text()).resolves.toBe("0123456789");
+
+    const partial = previewFileResponse({ filePath: file, size: 10, mimeType: "video/mp4", rangeHeader: "bytes=2-5" });
+    expect(partial.status).toBe(206);
+    expect(partial.headers.get("content-range")).toBe("bytes 2-5/10");
+    expect(partial.headers.get("content-length")).toBe("4");
+    await expect(partial.text()).resolves.toBe("2345");
+
+    const tail = previewFileResponse({ filePath: file, size: 10, mimeType: "video/mp4", rangeHeader: "bytes=7-" });
+    expect(tail.status).toBe(206);
+    await expect(tail.text()).resolves.toBe("789");
+
+    const head = previewFileResponse({ filePath: file, size: 10, mimeType: "video/mp4", method: "HEAD" });
+    expect(head.status).toBe(200);
+    expect(head.headers.get("content-length")).toBe("10");
+    await expect(head.text()).resolves.toBe("");
+
+    const unsatisfiable = previewFileResponse({ filePath: file, size: 10, mimeType: "video/mp4", rangeHeader: "bytes=10-" });
+    expect(unsatisfiable.status).toBe(416);
+    expect(unsatisfiable.headers.get("content-range")).toBe("bytes */10");
   });
   it("classifies Markdown and common code without exposing absolute paths", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "pidesktop-preview-"));

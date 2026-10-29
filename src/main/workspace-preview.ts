@@ -1,5 +1,7 @@
+import { createReadStream } from "node:fs";
 import { lstat, mkdir, open, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { Readable } from "node:stream";
 import type { WorkspaceDirectoryEntry, WorkspaceDirectoryListing, WorkspaceEntryResult, WorkspaceFilePreview, WorkspaceFileSearchEntry, WorkspaceFileSearchResult, WorkspaceFileStat, WorkspaceFileWriteResult } from "../shared/protocol.js";
 import { IMAGE_PREVIEW_LIMIT_BYTES } from "../shared/protocol.js";
 
@@ -21,14 +23,117 @@ const imageMimeTypes: Record<string, string> = {
   ".webp": "image/webp"
 };
 /**
- * pidesktop-file:// 协议可流式读取的扩展名 → Content-Type：PDF 走 Chromium
- * 内置查看器，栅格图片供聊天气泡 <img> 直接引用工作区相对路径。
+ * 音视频：只收 Chromium 能解码的容器/编码，供聊天气泡的 <video> / <audio>
+ * 直接引用工作区相对路径。`.mov` / `.avi` / `.mkv` 等容器 Chromium 不支持，
+ * 收了也只会播不动，不如继续回 415 让调用方看到明确原因。
+ *
+ * `.ogg` 按音频处理（音频容器最常见形态）；同容器的视频版本用 `.ogv`。
  */
-export const previewFileMimeTypes: Record<string, string> = { ".pdf": "application/pdf", ...imageMimeTypes };
+const mediaMimeTypes: Record<string, string> = {
+  ".mp4": "video/mp4",
+  ".m4v": "video/mp4",
+  ".webm": "video/webm",
+  ".ogv": "video/ogg",
+  ".mp3": "audio/mpeg",
+  ".m4a": "audio/mp4",
+  ".aac": "audio/aac",
+  ".wav": "audio/wav",
+  ".ogg": "audio/ogg",
+  ".oga": "audio/ogg",
+  ".flac": "audio/flac",
+  ".opus": "audio/ogg"
+};
+/**
+ * pidesktop-file:// 协议可流式读取的扩展名 → Content-Type：PDF 走 Chromium
+ * 内置查看器，栅格图片供聊天气泡 <img> 直接引用工作区相对路径，音视频供
+ * <video> / <audio> 播放（媒体元素按 Range 分段拉取，见 previewFileResponse）。
+ *
+ * SVG 仍然不收：SVG 可携带脚本，且文本预览/artifact 分支已有专门通路。
+ */
+export const previewFileMimeTypes: Record<string, string> = { ".pdf": "application/pdf", ...imageMimeTypes, ...mediaMimeTypes };
 
 /** 协议可服务的文件类型；未知扩展名返回 undefined（调用方回 415）。 */
 export function previewFileMimeType(filePath: string): string | undefined {
   return previewFileMimeTypes[extname(filePath).toLowerCase()];
+}
+
+/** 单段字节范围（end 含端点）。 */
+export interface ByteRange {
+  start: number;
+  end: number;
+}
+
+/**
+ * 解析 HTTP `Range` 头。
+ *
+ * 只支持单段 `bytes=start-end` / `bytes=start-` / `bytes=-suffix`：Chromium 的
+ * 媒体栈发的就是单段请求，多段（`bytes=0-1,5-9`）按 RFC 7233 允许的「忽略 Range
+ * 回整份」处理——多段响应的 multipart 拼装对本地文件没有收益，只增加出错面。
+ *
+ * 返回 `"ignore"` = 按整份响应；`"unsatisfiable"` = 回 416（客户端要求了文件
+ * 范围之外的内容，或空文件的任意范围）。
+ */
+export function parseByteRange(rangeHeader: string | null | undefined, size: number): ByteRange | "ignore" | "unsatisfiable" {
+  const raw = (rangeHeader ?? "").trim();
+  if (!raw) return "ignore";
+  const match = /^bytes=(\d*)-(\d*)$/iu.exec(raw);
+  if (!match) return "ignore";
+  const [, startText = "", endText = ""] = match;
+  if (!startText && !endText) return "ignore";
+  if (!startText) {
+    const suffixLength = Number(endText);
+    if (!Number.isSafeInteger(suffixLength) || suffixLength <= 0 || size === 0) return "unsatisfiable";
+    return { start: Math.max(0, size - suffixLength), end: size - 1 };
+  }
+  const start = Number(startText);
+  if (!Number.isSafeInteger(start) || start >= size) return "unsatisfiable";
+  if (!endText) return { start, end: size - 1 };
+  const end = Number(endText);
+  if (!Number.isSafeInteger(end) || end < start) return "unsatisfiable";
+  return { start, end: Math.min(end, size - 1) };
+}
+
+export interface PreviewFileResponseOptions {
+  filePath: string;
+  size: number;
+  mimeType: string;
+  rangeHeader?: string | null;
+  method?: string;
+}
+
+/**
+ * 工作区预览文件的 HTTP 响应（200 整份 / 206 分段 / 416 越界）。
+ *
+ * 为什么必须有 Range：`<video>` 的媒体栈不是「下载整份再播」，而是先请求
+ * `bytes=0-` 读 moov 等索引，再按播放位置续段。只回 200 整份时 Chromium 会
+ * 退回「整文件缓冲」模式——大文件要等全部下载完才能播，seek 直接失效，
+ * 部分 mp4（moov 在文件尾）连首帧都出不来。
+ */
+export function previewFileResponse({ filePath, size, mimeType, rangeHeader, method }: PreviewFileResponseOptions): Response {
+  const range = parseByteRange(rangeHeader, size);
+  if (range === "unsatisfiable") {
+    return new Response(null, {
+      status: 416,
+      headers: { "Content-Range": `bytes */${size}`, "Accept-Ranges": "bytes", "Cache-Control": "no-cache" }
+    });
+  }
+  const partial = range === "ignore" ? undefined : range;
+  const start = partial?.start ?? 0;
+  const end = partial?.end ?? Math.max(0, size - 1);
+  const headers: Record<string, string> = {
+    "Content-Type": mimeType,
+    "Content-Length": String(size === 0 ? 0 : end - start + 1),
+    "Accept-Ranges": "bytes",
+    // 同路径文件可能被重新生成（AI 覆盖写同名文件）：禁缓存但保留条件请求语义。
+    "Cache-Control": "no-cache",
+    "X-Content-Type-Options": "nosniff"
+  };
+  if (partial) headers["Content-Range"] = `bytes ${start}-${end}/${size}`;
+  const status = partial ? 206 : 200;
+  // HEAD 不读盘：媒体元素与网络栈常用 HEAD 探测长度/可播性。
+  if (method?.toUpperCase() === "HEAD" || size === 0) return new Response(null, { status, headers });
+  const stream = Readable.toWeb(createReadStream(filePath, { start, end })) as ReadableStream;
+  return new Response(stream, { status, headers });
 }
 
 const codeLanguages: Record<string, string> = {
