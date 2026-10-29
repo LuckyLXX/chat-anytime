@@ -2,7 +2,8 @@ import { AlertCircle, Brain, Check, ClipboardList, Code2, Eye, File, FileCode2, 
 import { lazy, memo, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type SyntheticEvent } from "react";
 import type { BrowserElementPick, BrowserPreviewState, WorkspaceFilePreview } from "../../../shared/protocol";
 import { IMAGE_PREVIEW_LIMIT_BYTES, workspaceFilePreviewUrl } from "../../../shared/protocol";
-import { artifactSandbox, buildArtifactPreviewSource, DYNAMIC_PREVIEW_ACTIONS, isDynamicArtifact, PREVIEW_SIZE_MESSAGE, type Artifact, type DynamicPreviewAction } from "../lib/content";
+import { artifactSandbox, buildArtifactPreviewSource, DYNAMIC_PREVIEW_ACTIONS, isDynamicArtifact, PREVIEW_SIZE_MESSAGE, previewBaseHrefFromFileUrl, type Artifact, type DynamicPreviewAction } from "../lib/content";
+import { galleryAbsolutePath } from "../../../shared/gallery";
 import { extractMarkdownHeadings } from "../lib/content-pipeline";
 import { layoutDeviceFrame, storedPreviewDevice, storedPreviewFit, storePreviewDevice, storePreviewFit, type PreviewDeviceId } from "../lib/preview-device";
 import { MarkdownOutline } from "./MarkdownOutline";
@@ -257,6 +258,18 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, fullscree
   const title = target.type === "artifact" ? target.artifact.title : target.type === "file" ? target.file.name : "";
   const contentSize = contentSizes[activeTabId];
 
+  // 工作区 html/svg 文件预览的「资源目录」：srcDoc 的沙箱 iframe 没有目录上下文
+  // （base 只能是主窗口自己的 file:///…/renderer/index.html），页面里的相对图片/CSS/JS
+  // 会全部 404。这里把文件所在目录映射成主进程的 loopback 静态服务地址，作为
+  // <base href> 注入（见 lib/content 的 previewBaseHrefFromFileUrl）。
+  const assetFile = !showSource && target.type === "file" && artifact && (target.file.kind === "html" || target.file.kind === "svg") && target.file.content !== undefined && !target.file.truncated ? target.file : undefined;
+  const assetRoot = assetFile ? assetFile.workspace ?? workspace : undefined;
+  const assetKey = assetFile && assetRoot ? `${assetRoot}::${assetFile.relativePath}` : undefined;
+  const [assetBases, setAssetBases] = useState<Record<string, string | null>>({});
+  const assetBase = assetKey ? assetBases[assetKey] : null;
+  // 等目录地址就绪再挂 iframe：先无 base 后带 base 会让整页（可能几百张图）白跑一趟。
+  const assetBasePending = assetKey !== undefined && !(assetKey in assetBases);
+
   function changeDeviceMode(id: PreviewDeviceId): void {
     setDeviceModes((prev) => ({ ...prev, [activeTabId]: id }));
     storePreviewDevice(id);
@@ -371,6 +384,26 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, fullscree
     fragmentTimersRef.current = [];
   }, [activeTabId]);
 
+  useEffect(() => {
+    if (!assetKey || !assetFile || !assetRoot) return;
+    if (assetKey in assetBases) return;
+    let cancelled = false;
+    void (async () => {
+      let base: string | null = null;
+      try {
+        const fileUrl = await window.piDesktop.galleryFileUrl(galleryAbsolutePath(assetRoot, assetFile.relativePath), assetRoot);
+        base = previewBaseHrefFromFileUrl(fileUrl) ?? null;
+      } catch {
+        // 静态服务不可用（演示环境等）：退回无 base 的旧行为，不挡住预览。
+        base = null;
+      }
+      if (!cancelled) setAssetBases((prev) => ({ ...prev, [assetKey]: base }));
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [assetKey, assetFile, assetRoot, assetBases]);
+
   function recordContentSize(tabKey: string, width: number, height: number): void {
     setContentSizes((prev) => {
       const cur = prev[tabKey];
@@ -454,7 +487,11 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, fullscree
         {!showSource && artifact && (
           <div className={`artifact-device-stage${deviceActive ? " device-mode" : ""}${deviceActive && !fit ? " device-overflow" : ""}`} ref={stageRef}>
             <div className="artifact-device-frame" style={frameStyle}>
-              <iframe ref={frameRef} title={artifact.title} sandbox={artifactSandbox(artifact)} referrerPolicy="no-referrer" srcDoc={buildArtifactPreviewSource(artifact)} onLoad={handleLoad} />
+              {assetBasePending ? (
+                <div className="preview-empty-state"><LoaderCircle size={18} className="spinning" /><span>正在准备预览资源…</span></div>
+              ) : (
+                <iframe ref={frameRef} title={artifact.title} sandbox={artifactSandbox(artifact)} referrerPolicy="no-referrer" srcDoc={buildArtifactPreviewSource(artifact, assetBase ? { baseHref: assetBase } : undefined)} onLoad={handleLoad} />
+              )}
             </div>
           </div>
         )}

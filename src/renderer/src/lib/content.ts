@@ -214,22 +214,92 @@ export function withDynamicArtifactFlag<T extends { language: string; content: s
   return isDynamicArtifact(artifact) ? { ...artifact, dynamic: true } : artifact;
 }
 
-function injectHeadRuntime(source: string, runtime: string): string {
-  const script = `<script>${runtime}</script>`;
+/** 把一段标签放在 head 里**最靠前**的位置（没有 head 时补一个）。 */
+function injectHeadTag(source: string, tag: string): string {
   if (/<head\b[^>]*>/iu.test(source)) {
-    return source.replace(/<head\b[^>]*>/iu, (match) => `${match}\n${script}`);
+    return source.replace(/<head\b[^>]*>/iu, (match) => `${match}\n${tag}`);
   }
   if (/<html\b[^>]*>/iu.test(source)) {
-    return source.replace(/<html\b[^>]*>/iu, (match) => `${match}\n<head>${script}</head>`);
+    return source.replace(/<html\b[^>]*>/iu, (match) => `${match}\n<head>${tag}</head>`);
   }
   if (/<body\b[^>]*>/iu.test(source)) {
-    return `<!doctype html><html><head>${script}</head>${source}</html>`;
+    return `<!doctype html><html><head>${tag}</head>${source}</html>`;
   }
-  return `${script}\n${source}`;
+  return `${tag}\n${source}`;
+}
+
+function injectHeadRuntime(source: string, runtime: string): string {
+  return injectHeadTag(source, `<script>${runtime}</script>`);
 }
 
 function injectDynamicPreviewRuntime(source: string): string {
   return injectHeadRuntime(source, dynamicPreviewRuntime);
+}
+
+/** 带协议前缀或协议相对的绝对 URL（`http://…`、`pidesktop-file://…`、`data:`、`//cdn…`）。 */
+const ABSOLUTE_URL_PATTERN = /^(?:[a-z][a-z0-9+.-]*:|\/\/)/iu;
+const BASE_TAG_PATTERN = /<base\b[^>]*>/iu;
+const BASE_HREF_PATTERN = /href\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/iu;
+/** 静态服务地址里的「站点根」＝挂载根（`…/w/<token>/<挂载号>/`），比它更靠前的路径会被 token 校验拒掉。 */
+const PREVIEW_MOUNT_ROOT_PATTERN = /^(https?:\/\/[^/]+\/w\/[0-9a-z]+\/\d+\/)/iu;
+
+function escapeAttribute(value: string): string {
+  return value.replace(/&/gu, "&amp;").replace(/"/gu, "&quot;").replace(/</gu, "&lt;").replace(/>/gu, "&gt;");
+}
+
+/** 页面自带的相对 base 解成绝对：站点根引用落到挂载根，其余按目录地址正常解。 */
+function resolveBaseAgainst(current: string, href: string): string {
+  if (current.startsWith("/")) {
+    const root = PREVIEW_MOUNT_ROOT_PATTERN.exec(href)?.[1] ?? href;
+    try {
+      return new URL(current.replace(/^\/+/u, ""), root).toString();
+    } catch {
+      return root;
+    }
+  }
+  try {
+    return new URL(current, href).toString();
+  } catch {
+    return href;
+  }
+}
+
+/**
+ * 给预览文档注入 `<base href>`（工作区文件预览的相对资源就靠它解析）。
+ *
+ * 三条规则：页面自带**绝对** base（CDN / `data:` / 协议相对）→ 尊重它，原样返回；自带
+ * **相对** base（含自己的其他属性如 `target`）→ 只改写它的 href，其余属性保留；没有 base
+ * → 插在 head 最前。字符串 replacement 一律传函数：`$&`/`$'` 在属性值里会被当成替换串。
+ */
+export function injectBaseHref(source: string, href: string): string {
+  const existing = BASE_TAG_PATTERN.exec(source);
+  if (existing) {
+    const tag = existing[0];
+    const hrefMatch = BASE_HREF_PATTERN.exec(tag);
+    const current = (hrefMatch?.[1] ?? hrefMatch?.[2] ?? hrefMatch?.[3] ?? "").trim();
+    if (current && ABSOLUTE_URL_PATTERN.test(current)) return source;
+    const resolved = current ? resolveBaseAgainst(current, href) : href;
+    const next = hrefMatch
+      ? tag.replace(BASE_HREF_PATTERN, () => `href="${escapeAttribute(resolved)}"`)
+      : tag.replace(/^<base\b/iu, (opening) => `${opening} href="${escapeAttribute(resolved)}"`);
+    return source.replace(tag, () => next);
+  }
+  return injectHeadTag(source, `<base href="${escapeAttribute(href)}">`);
+}
+
+/**
+ * 静态服务里的文件地址 → 它所在目录的 base URL（`…/w/<token>/1/dir/page.html` → `…/w/<token>/1/dir/`）。
+ *
+ * 预览面板用沙箱 iframe 的 `srcDoc` 承载页面源码，没有目录上下文——base 只能是主窗口
+ * 自己的 `file:///…/renderer/index.html`，于是页面里 `风格提示词/a.jpg` 这类相对图片/CSS/JS
+ * 全部解析到应用安装目录（404，页面自己会弹「图片读不到」）。换成这份目录地址后，相对资源
+ * 就按真站点解析，而 iframe 的沙箱口径（不给 allow-same-origin）保持不变。
+ */
+export function previewBaseHrefFromFileUrl(fileUrl: string): string | undefined {
+  const trimmed = fileUrl.trim();
+  const index = trimmed.lastIndexOf("/");
+  if (index <= 0) return undefined;
+  return trimmed.slice(0, index + 1);
 }
 
 // 内容尺寸上报：预览面板的「适应窗口」要按真实内容宽缩放（设计导出的多画板
@@ -277,7 +347,7 @@ export function isFullArtifactDocument(artifact: Pick<Artifact, "language" | "co
   return /^<!doctype\s/i.test(content) || /^<html\b/i.test(content) || /^<body\b/i.test(content);
 }
 
-export function buildArtifactPreviewSource(artifact: Pick<Artifact, "language" | "content">): string {
+export function buildArtifactPreviewSource(artifact: Pick<Artifact, "language" | "content">, options: { baseHref?: string } = {}): string {
   let source: string;
   if (artifact.language === "svg") {
     source = `<!doctype html><html><head><meta charset="utf-8"></head><body style="margin:0;display:grid;place-items:center;min-height:100vh;font-family:sans-serif;background:#fff">${artifact.content}</body></html>`;
@@ -287,7 +357,9 @@ export function buildArtifactPreviewSource(artifact: Pick<Artifact, "language" |
     source = `<!doctype html><html><head><meta charset="utf-8"></head><body style="margin:0;padding:20px;font-family:Inter,Segoe UI,Microsoft YaHei,sans-serif">${artifact.content}</body></html>`;
   }
   if (artifact.language !== "svg") source = injectHeadRuntime(source, previewSizeRuntime);
-  return isDynamicArtifact(artifact) ? injectDynamicPreviewRuntime(source) : source;
+  if (isDynamicArtifact(artifact)) source = injectDynamicPreviewRuntime(source);
+  // base 最后注入 → 落在 head 的最前面，先于任何一个相对引用生效。
+  return options.baseHref ? injectBaseHref(source, options.baseHref) : source;
 }
 
 export function artifactSandbox(artifact: Pick<Artifact, "language" | "content">): string {

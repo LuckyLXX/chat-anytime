@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { artifactSandbox, buildArtifactPreviewSource, extractArtifacts, extractMentionTokens, isDynamicArtifact, formatDuration } from "./content";
+import { artifactSandbox, buildArtifactPreviewSource, extractArtifacts, extractMentionTokens, injectBaseHref, isDynamicArtifact, formatDuration, previewBaseHrefFromFileUrl } from "./content";
 
 describe("rich content helpers", () => {
   it("extracts HTML and SVG artifacts without treating ordinary code as an artifact", () => {
@@ -61,5 +61,87 @@ describe("rich content helpers", () => {
     expect(extractArtifacts("```html\n<div><canvas></canvas></div>\n```", "message-2")).toMatchObject([
       { id: "message-2-artifact-0", language: "html", dynamic: true }
     ]);
+  });
+
+  // 侧边栏打开工作区里的 html 时，srcDoc 沙箱 iframe 没有目录上下文：不注入 <base> 的话
+  // 页面里的相对图片/CSS/JS 全部按应用自己的 file:///…/renderer/index.html 解析（404）。
+  describe("<base href> 注入（工作区文件预览的相对资源）", () => {
+    const base = "http://127.0.0.1:41234/w/abcdef0123456789/2/";
+    const page = '<!doctype html><html><head><link rel="stylesheet" href="style.css"></head><body><img src="风格提示词/A-G_代码样片/A1_字雨.jpg"></body></html>';
+
+    it("把目录地址放在 head 最前面，先于任何相对引用", () => {
+      const out = buildArtifactPreviewSource({ language: "html", content: page }, { baseHref: base });
+      expect(out).toContain(`<head>\n<base href="${base}">`);
+      expect(out.indexOf("<base")).toBeLessThan(out.indexOf("style.css"));
+      // 尺寸上报与沙箱口径不变（页面依旧拿不到 allow-same-origin）。
+      expect(out).toContain("pidesktop-preview-size");
+      expect(artifactSandbox({ language: "html", content: page })).toBe("allow-scripts");
+    });
+
+    it("片段预览（我们自己包的文档）也注入", () => {
+      const out = buildArtifactPreviewSource({ language: "html", content: "<img src=\"a.jpg\">" }, { baseHref: base });
+      expect(out).toContain(`<base href="${base}">`);
+      expect(out.indexOf("<base")).toBeLessThan(out.indexOf("a.jpg"));
+    });
+
+    it("没有 head 的完整文档会补一个 head", () => {
+      const out = injectBaseHref("<html><body>x</body></html>", base);
+      expect(out).toBe(`<html>\n<head><base href="${base}"></head><body>x</body></html>`);
+    });
+
+    it("页面自带绝对 base（CDN）时尊重它，不插自己的", () => {
+      const source = '<!doctype html><html><head><base href="https://cdn.example.com/app/"></head><body></body></html>';
+      expect(injectBaseHref(source, base)).toBe(source);
+    });
+
+    it("页面自带相对 base 时按我们的目录地址解成绝对地址", () => {
+      const out = injectBaseHref('<html><head><base href="assets/"></head><body></body></html>', base);
+      expect(out).toContain(`<base href="${base}assets/">`);
+      expect(out).not.toContain('href="assets/"');
+    });
+
+    it("没有 href 的 base 保留其他属性（target 等不能被吃掉）", () => {
+      expect(injectBaseHref('<html><head><base target="_blank"></head><body></body></html>', base)).toBe(
+        `<html><head><base href="${base}" target="_blank"></head><body></body></html>`
+      );
+      expect(injectBaseHref('<html><head><base href="sub/" target="_blank"></head><body></body></html>', base)).toContain(`href="${base}sub/" target="_blank"`);
+    });
+
+    it("站点根 base（/assets/）落到静态服务的挂载根（否则被 token 校验拒掉）", () => {
+      const out = injectBaseHref('<html><head><base href="/assets/"></head><body></body></html>', base);
+      expect(out).toContain(`<base href="http://127.0.0.1:41234/w/abcdef0123456789/2/assets/">`);
+    });
+
+    it("属性值里的 $& / $' 不会被当成字符串替换串", () => {
+      const out = injectBaseHref('<html><head><base href="a$&b/"></head><body></body></html>', base);
+      expect(out).toContain(`<base href="${base}a$&amp;b/">`);
+      expect(out.match(/<base\b/gu)).toHaveLength(1);
+    });
+
+    it("协议相对的绝对 base（//cdn）原样保留", () => {
+      const source = '<html><head><base href="//cdn.example.com/app/"></head><body></body></html>';
+      expect(injectBaseHref(source, base)).toBe(source);
+    });
+
+    it("不传 baseHref 时不注入（聊天里的代码块 artifact 没有磁盘目录）", () => {
+      expect(buildArtifactPreviewSource({ language: "html", content: page })).not.toContain("<base");
+    });
+
+    it("属性值会被转义", () => {
+      expect(injectBaseHref("<html><head></head></html>", 'http://h/d?a=1&b="2"')).toContain('<base href="http://h/d?a=1&amp;b=&quot;2&quot;">');
+    });
+  });
+
+  describe("previewBaseHrefFromFileUrl", () => {
+    it("静态服务文件地址 → 所在目录", () => {
+      expect(previewBaseHrefFromFileUrl("http://127.0.0.1:41234/w/abcdef0123456789/2/%E9%A3%8E%E6%A0%BC%E6%8C%91%E9%80%89.html")).toBe("http://127.0.0.1:41234/w/abcdef0123456789/2/");
+      expect(previewBaseHrefFromFileUrl("http://127.0.0.1:41234/w/abcdef0123456789/2/sub/page.html")).toBe("http://127.0.0.1:41234/w/abcdef0123456789/2/sub/");
+    });
+
+    it("拿不到目录时返回 undefined（非法/空地址）", () => {
+      expect(previewBaseHrefFromFileUrl("")).toBeUndefined();
+      expect(previewBaseHrefFromFileUrl("about:blank")).toBeUndefined();
+      expect(previewBaseHrefFromFileUrl("/page.html")).toBeUndefined();
+    });
   });
 });
