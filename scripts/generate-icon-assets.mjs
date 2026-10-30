@@ -2,7 +2,15 @@
 //   build/icon-master.png  2048 母版（透明圆角）
 //   build/icon.png         512 通用 PNG
 //   build/icon.ico         多尺寸 ICO（256/128/64/48/32/24/16，PNG 压缩条目）
+//   src/main/assets/icon.ico  窗口/任务栏图标（与 build/icon.ico 同内容）
 // 用法：npx electron scripts/generate-icon-assets.mjs <源PNG路径>
+//
+// 源稿是「白底 RGB、无 alpha」的生图稿。旧实现裁切后直接套 22.5% 圆角遮罩，
+// 遮罩角部仍留着源图白底 → 成品图标外面一圈白色（深色壁纸上一眼白边白角，
+// GitHub issue #1 也就是这个现象）。现在多一步 `stripWhiteBackdrop`：从画布
+// 四边做连通扩散求「外部白底掩码」，掩码内 alpha 归零，紧邻掩码的过渡像素按
+// 与背景色的混合比例反算 alpha（unpremultiply），得到「主体色 → 全透明」的抗
+// 锯齿边；主体内部互不连通的白色（CA 字标）不受影响。
 import { app, BrowserWindow } from "electron";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
@@ -20,17 +28,103 @@ async function pageTask(dataUrl) {
   c.width = S;
   c.height = S;
   const ctx = c.getContext("2d", { willReadFrequently: true });
-  ctx.drawImage(img, 0, 0);
+  ctx.drawImage(img, 0, 0, S, S);
   const data = ctx.getImageData(0, 0, S, S).data;
 
-  // 以左上角 (5,5) 采样背景色，扫描主体包围盒
-  const bi = (5 * S + 5) * 4;
-  const br = data[bi], bg = data[bi + 1], bb = data[bi + 2];
+  // ── 外部白底 → 透明（见文件头说明） ──────────────────────────────────
+  const bgColor = (() => {
+    // 四角 8×8 采样的平均值：源稿背景是均匀的近白（实测 (252,250,251)）
+    let r = 0, g = 0, b = 0, n = 0;
+    for (const [ox, oy] of [[0, 0], [S - 8, 0], [0, S - 8], [S - 8, S - 8]]) {
+      for (let y = oy; y < oy + 8; y++) {
+        for (let x = ox; x < ox + 8; x++) {
+          const i = (y * S + x) * 4;
+          r += data[i]; g += data[i + 1]; b += data[i + 2]; n++;
+        }
+      }
+    }
+    return [r / n, g / n, b / n];
+  })();
+  const BG_TOLERANCE = 26;
+  const isBackdrop = (i) =>
+    Math.abs(data[i] - bgColor[0]) <= BG_TOLERANCE &&
+    Math.abs(data[i + 1] - bgColor[1]) <= BG_TOLERANCE &&
+    Math.abs(data[i + 2] - bgColor[2]) <= BG_TOLERANCE;
+
+  // 连通扩散：只有从画布边缘能走到的近背景像素才算「外部背景」
+  const backdrop = new Uint8Array(S * S);
+  const queue = new Int32Array(S * S);
+  let qTail = 0;
+  const seed = (idx) => {
+    if (backdrop[idx] || !isBackdrop(idx * 4)) return;
+    backdrop[idx] = 1;
+    queue[qTail++] = idx;
+  };
+  for (let x = 0; x < S; x++) { seed(x); seed((S - 1) * S + x); }
+  for (let y = 0; y < S; y++) { seed(y * S); seed(y * S + S - 1); }
+  for (let qHead = 0; qHead < qTail; qHead++) {
+    const idx = queue[qHead];
+    const x = idx % S;
+    const y = (idx - x) / S;
+    if (x > 0) seed(idx - 1);
+    if (x < S - 1) seed(idx + 1);
+    if (y > 0) seed(idx - S);
+    if (y < S - 1) seed(idx + S);
+  }
+
+  // 掩码内 = 全透明；紧邻掩码的过渡像素按 (bg - p) / (bg - inside) 反算 alpha，
+  // 颜色换成内侧主体色，避免半透明处保留白色（否则仍是一圈白雾）
+  let strippedPixels = 0;
+  let featherPixels = 0;
+  for (let y = 0; y < S; y++) {
+    for (let x = 0; x < S; x++) {
+      const idx = y * S + x;
+      const i4 = idx * 4;
+      if (backdrop[idx]) { data[i4 + 3] = 0; strippedPixels++; continue; }
+      const touchesBackdrop =
+        (x > 0 && backdrop[idx - 1]) || (x < S - 1 && backdrop[idx + 1]) ||
+        (y > 0 && backdrop[idx - S]) || (y < S - 1 && backdrop[idx + S]);
+      if (!touchesBackdrop) continue;
+      // 向内 2px 邻域里最不白的一个像素视为主体色（圆角处过渡是从背景色到主体色）
+      let inside = -1, insideScore = -1;
+      for (let dy = -2; dy <= 2; dy++) {
+        for (let dx = -2; dx <= 2; dx++) {
+          const nx = x + dx, ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= S || ny >= S) continue;
+          const ni = ny * S + nx;
+          if (backdrop[ni]) continue;
+          const p = ni * 4;
+          const score =
+            Math.abs(data[p] - bgColor[0]) + Math.abs(data[p + 1] - bgColor[1]) + Math.abs(data[p + 2] - bgColor[2]);
+          if (score > insideScore) { insideScore = score; inside = ni; }
+        }
+      }
+      if (inside < 0) { data[i4 + 3] = 0; strippedPixels++; continue; }
+      const b4 = inside * 4;
+      let numerator = 0, denominator = 0;
+      for (let k = 0; k < 3; k++) {
+        const span = bgColor[k] - data[b4 + k];
+        // 跨度太小的通道噪声大，跳过（背景本身近似灰白，主体色至少有一个通道跨度大）
+        if (Math.abs(span) <= 24) continue;
+        numerator += bgColor[k] - data[i4 + k];
+        denominator += span;
+      }
+      const alpha = denominator !== 0 ? Math.max(0, Math.min(1, numerator / denominator)) : 1;
+      data[i4] = data[b4];
+      data[i4 + 1] = data[b4 + 1];
+      data[i4 + 2] = data[b4 + 2];
+      data[i4 + 3] = Math.round(alpha * 255);
+      featherPixels++;
+    }
+  }
+  // 把去底后的像素写回画布（后面裁切与遮罩都从这份画布取，而不是原图）
+  ctx.putImageData(new ImageData(data, S, S), 0, 0);
+
+  // 包围盒改为按 alpha 判定（去底后背景 alpha 已是 0）
   let minX = S, minY = S, maxX = 0, maxY = 0;
   for (let y = 0; y < S; y++) {
     for (let x = 0; x < S; x++) {
-      const i = (y * S + x) * 4;
-      if (data[i + 3] > 10 && Math.abs(data[i] - br) + Math.abs(data[i + 1] - bg) + Math.abs(data[i + 2] - bb) > 60) {
+      if (data[(y * S + x) * 4 + 3] > 10) {
         if (x < minX) minX = x;
         if (x > maxX) maxX = x;
         if (y < minY) minY = y;
@@ -61,7 +155,7 @@ async function pageTask(dataUrl) {
   m.arcTo(0, 0, r, 0, r);
   m.closePath();
   m.clip();
-  m.drawImage(img, sx, sy, side, side, 0, 0, S, S);
+  m.drawImage(c, sx, sy, side, side, 0, 0, S, S);
 
   // 逐级减半降采样，避免一次缩小的锯齿
   function scaleTo(target) {
@@ -89,7 +183,37 @@ async function pageTask(dataUrl) {
 
   const sizes = {};
   for (const t of [512, 256, 128, 64, 48, 32, 24, 16]) sizes[t] = scaleTo(t);
-  return { master: master.toDataURL("image/png"), sizes, bbox: { minX, minY, maxX, maxY, side } };
+  // 产物自检：在 512 帧上统计「贴着透明区的不透明近白像素」——这就是用户看到的白边
+  const out = document.createElement("canvas");
+  out.width = out.height = 512;
+  const octx = out.getContext("2d", { willReadFrequently: true });
+  const png = new Image();
+  png.src = sizes[512];
+  await png.decode();
+  octx.drawImage(png, 0, 0);
+  const px = octx.getImageData(0, 0, 512, 512).data;
+  let whiteEdge = 0;
+  for (let y = 0; y < 512; y++) {
+    for (let x = 0; x < 512; x++) {
+      const i4 = (y * 512 + x) * 4;
+      if (px[i4 + 3] < 200 || px[i4] < 230 || px[i4 + 1] < 230 || px[i4 + 2] < 230) continue;
+      let edge = false;
+      for (let dy = -1; dy <= 1 && !edge; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const nx = x + dx, ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= 512 || ny >= 512) continue;
+          if (px[(ny * 512 + nx) * 4 + 3] === 0) { edge = true; break; }
+        }
+      }
+      if (edge) whiteEdge++;
+    }
+  }
+  return {
+    master: master.toDataURL("image/png"),
+    sizes,
+    bbox: { minX, minY, maxX, maxY, side },
+    backdrop: { color: bgColor.map((v) => Math.round(v)), strippedPixels, featherPixels, whiteEdge },
+  };
 }
 
 function dataUrlToBuffer(u) {
@@ -126,6 +250,10 @@ app.whenReady().then(async () => {
     await win.loadURL("about:blank");
     const result = await win.webContents.executeJavaScript(`(${pageTask.toString()})(${JSON.stringify(dataUrl)})`);
     console.log("[icon] bbox =", JSON.stringify(result.bbox));
+    console.log("[icon] backdrop =", JSON.stringify(result.backdrop));
+    if (result.backdrop && result.backdrop.whiteEdge > 0) {
+      console.error(`[icon] 警告：512 帧仍有 ${result.backdrop.whiteEdge} 个贴边近白像素（白边未清干净）`);
+    }
     await mkdir(path.join(root, "build"), { recursive: true });
     await mkdir(path.join(root, "src/main/assets"), { recursive: true });
     await writeFile(path.join(root, "build/icon-master.png"), dataUrlToBuffer(result.master));
