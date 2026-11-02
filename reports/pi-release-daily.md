@@ -234,3 +234,55 @@
 
 ---
 2026-11-02 | v1.4.0 | 无更新（沿用上次发布时间 2026-10-21T22:49:48Z）
+
+## 2026-11-03 · v1.5.0（较上次已报告版本 v1.4.0 的增量）
+
+**✨ 新功能**
+
+- 扩展包更新后展示 changelog：读取包 `package.json` 的 `pi.changelogPath` 或根目录 `CHANGELOG.md`，下次全新启动时在「Extension Updates」列出比上次所见版本更新的条目，`collapseChangelog` 可压成每包一行。
+- 流式渲染提速：大工具调用按增量解析，代码块与工具行复用上次高亮和已渲染 Markdown，不再每次更新重算。
+- 自定义自更新命令：`PI_SELF_UPDATE_COMMAND`（如 `mise use -g npm:{packageName}@{version}`）或全局 `selfUpdateCommand`，`pi update` 检测到新版时执行，支持 `{packageName}`、`{version}`、`{installSpec}` 占位符。
+- 新增 GPT-6.1 Terra（OpenAI / Azure OpenAI Responses / OpenAI Codex），支持 tool search、会话中切换 thinking level 与 thinking `off`，Codex 上 500K 上下文。
+- `pi.exec()` 新增 `maxBuffer`（限制 stdout+stderr 合并输出）与结果字段 `truncated`。
+- 设备码登录（如 GitHub Copilot）按 Enter 打开验证页并复制代码；可用 `openBrowserOnConfirm: false`、`copyCodeOnConfirm: false` 单独关闭。
+- 扩展渲染上下文与消息/条目渲染选项新增 `keyText()` / `keyHint()`，按用户配置的键位格式化快捷键提示（不再推荐从 `@earendil-works/pi-coding-agent` 导入）。
+- `MarkdownTransformContext` 新增持久化会话条目 `messageId` 与 ISO `timestamp`（渲染已保存条目时可用，实时渲染为 undefined）。
+- inline `ctx.ui.custom()` 新增 `blocked` 选项，审批类对话框可上报「等待用户输入」；overlay 忽略该选项。
+- `Usage.cost.totalFromProvider` 区分 provider 实计费与目录估算；pi-messages provider（如 Radius）消息新增具体 `responseModel`，请求虚拟模型时也有。
+
+**🐛 修复**
+
+- MCP OAuth 默认改用 pi 的 Client ID Metadata Document（服务器支持时），否则动态注册；新设置 `oauth.clientRegistration` 取 `auto`（默认）或 `dcr`，`pi mcp add --oauth-client-registration` 可指定。签名流程同时拒绝非 `http:`/`https:` 的授权端点与 OAuth 元数据 URL（此前恶意服务器可用 `file:` 等协议交给平台 URL 处理器）。
+- 扩展的 `Type`、`Static`、`TSchema` 仍可从 `@earendil-works/pi-ai` 导入（映射到 compat 入口 + 内置 TypeBox），内置工具工厂返回 `TypeBoxAgentTool<typeof schema>`。
+- Windows 路径改为不区分大小写比较：盘符大小写不一致（`c:\Users\me` vs `C:\Users\me`）曾导致 `~/.agents/skills` 被当作 project/user 技能加载两次并报重名、已保存的项目信任被重问、`--continue` 与 `/resume` 看不到自定义会话目录、`pi remove` 匹配不上本地包。
+- 保存的「Do not trust」决定对无需信任资源的项目（如只有 `AGENTS.md` 的目录）不再被自动信任覆盖，`trust.json` 中的决定优先。
+- Apple Terminal 发送 `ESC`+Return 的环境下 `Shift+Enter` 改为插入换行（原先变成排队 follow-up），`Alt+Enter`（无 Shift）仍排队。
+- HTML 导出：数千条目的会话空白页已修；system prompt/tools 与 `/reload` 后的分段更新现在会显示，`pi --export` 也包含 system prompt 与工具。
+- macOS 上中止 bash 命令不再连带执行列表中的下一条（如 `long_step; next_step`），先停进程组再杀。
+- `tool_search` 与 codemode `searchTools()`：中文、日文、泰文等非 ASCII 查询此前搜不到（分词只保留 ASCII），现在按任意文字分词、无空格文本会切词、Unicode 等价文本也能匹配；排序修正为名字命中权重高于描述提及，长 server 说明不再压低该服务器工具的分数。
+- 图片缩放改为先尝试更小编码，避免 JPEG 明显更小时仍发多 MB PNG 导致大请求失败或超时。
+- `pi -e npm:<pkg>` 与 `pi -e git:<repo>@<branch>` 不再停留在首次下载版本，启动与 `/reload` 时会重新拉取；离线或检查失败保留缓存。
+- `pi.exec()`：输出超过字符串上限导致 `RangeError: Invalid string length` 崩溃（现默认封顶 min(256 MiB, 运行时字符串上限) 并 `truncated: true`）、忽略 SIGTERM 时永不返回（5 秒后 SIGKILL）、UTF-8 字符跨 stdout/stderr 块损坏、spawn 失败时 stderr 为空。
+- `pi mcp login -l` / `pi mcp logout -l` 不再报 `Unknown option --local.`；未知选项按原样回报，服务器名拼错时给出建议。
+- WSL 深目录（`\wsl.localhost\...` 超 260 字符）下图片粘贴/复制/打开登录页静默失败，辅助程序改从 `/` 启动；外部编辑器失败也不再静默，会显示 `External editor exited with code 1; prompt unchanged`。
+- 会话写入失败不再把未落盘条目留在内存，避免后续条目指向缺失父节点、恢复会话丢历史与工具。
+- 模型侧：Kimi K3.1 Pro 不再沿用 K2 请求设置；Zhipu/Z.ai 用量上限错误 `1308` 不再当 429 重试；LiteLLM `ContextWindowExceededError` 识别为上下文超限；Gemini 工具 schema 的 `const` 转单值 `enum`；OpenRouter `~anthropic/claude-*-latest` 别名改走 Anthropic Messages API 以保留 thinking；Bedrock Claude strict tools 超限时用非 strict 优先工具重试；GPT-5.4/5.5 从调用过工具的模型切换后不再报 `Missing namespace for function_call`。
+- Markdown：裸 URL 不再吞掉其后的 CJK 标点与文字；深层嵌套引用不再指数级增长导致渲染卡死；超宽显示数学回退为原始 LaTeX；样式词正好在换行宽度结束不再多出前导空格。
+- 安全与杂项：`undici` 升级 8.12.3、Gondolin 扩展示例升级 0.14.0；glob 匹配加固防放大模式 DoS；终端标题含控制字符不再能注入转义序列；`fd`/`rg` 自动下载不再在 ARM32 等无预编译产物的架构上取 x86-64 二进制。
+
+**⚠️ 破坏性变更**
+
+- 工具参数校验改用 `@earendil-works/pi-schema`：TypeBox 中超出 JSON Schema 的能力（`Type.Refine()`、`Type.BigInt()`、`Type.Undefined()`、codecs、`Format.Set()` 格式）不再作用于工具参数；纯 JSON Schema 工具（含 MCP 工具）现在也与 TypeBox 工具一样做类型转换（数值字符串、单值包成数组）；模型看到的校验失败信息改为 pi-schema 风格（`- path: missing`、`- limit: expected number, got string`）。
+
+**📝 文档与杂项**
+
+- 行为变更：默认 OpenAI 模型 `gpt-5.5` → `gpt-6.1-sol`（含 ChatGPT 登录后未选模型的情形）；内置模型目录升级到 models.dev v2，实时模型与纯图像模型不再作为 chat 模型提供。
+- `pi update` 走 pi.dev 安装器时不再给 `npm ci` 传 `--min-release-age=0`（release lockfile 已锁版本，该参数只让安全扫描器阻断更新）。
+- `/model` 与 `/scoped-models` 在名称补充了 ID 未含的词汇时并排显示名称（如重命名的 `models.json` override）。
+- 扩展的 `before_provider_headers` 之外：系统提示进一步收紧；`/tree` 分支摘要遵循 thinking level 与上下文编辑（不再包含失败回复、已隐藏或替换的内容）。
+- 移除 native OS `sandbox/` 扩展示例及其依赖，改用 Gondolin 示例或容器化指南。
+
+**Release**：https://github.com/earendil-works/pi/releases/tag/v1.5.0 ｜ 共 1 个新版本
+
+---
+2026-11-03 | v1.5.0 | 2026-11-02T11:05:31Z
