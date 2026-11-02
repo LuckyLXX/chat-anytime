@@ -51,6 +51,20 @@ describe("流式代码块高亮降级", () => {
     expect(hasHighlight(renderStreaming(151, true))).toBe(false);
   });
 
+  it("流式尾部不装 KaTeX（半个 $$ 不闪错误），定稿后再上公式", () => {
+    // dsh 的双语法：流式臂只装 GFM，定稿臂才装 remarkMath + rehype-katex。
+    const text = "质能方程 $E = mc^2$ 很简洁。";
+    const streaming = renderToStaticMarkup(
+      <RichContent streaming artifactPrefix="probe-math" onOpenArtifact={() => undefined}>{text}</RichContent>
+    );
+    expect(streaming).not.toContain("katex");
+    expect(streaming).toContain("$E = mc^2$");
+    const settled = renderToStaticMarkup(
+      <RichContent artifactPrefix="probe-math" onOpenArtifact={() => undefined}>{text}</RichContent>
+    );
+    expect(settled).toContain("katex");
+  });
+
   it("无语言围栏照旧按纯文本（既有行为不被本次改动影响）", () => {
     const markup = renderToStaticMarkup(
       <RichContent streaming artifactPrefix="probe" onOpenArtifact={() => undefined}>{"```\nconst a = 1;\n```"}</RichContent>

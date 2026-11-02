@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { alignSegmentHeadings, createHeadingSlugger, extractMarkdownHeadings, findStableCutoff, hasMathSyntax, normalizeMermaidSource, normalizeRichContent, parseRichContent } from "./content-pipeline";
+import { alignSegmentHeadings, createHeadingSlugger, extractMarkdownHeadings, findStableCutoff, hasMathSyntax, matchHeadings, normalizeMermaidSource, normalizeRichContent, parseRichContent, parseRichContentLocated } from "./content-pipeline";
 
 describe("hasMathSyntax", () => {
   it("detects real LaTeX in display and inline math", () => {
@@ -322,5 +322,61 @@ describe("rich content pipeline", () => {
   it("normalizes Mermaid aliases and full-width dash arrows", () => {
     expect(normalizeMermaidSource("A —> B", "flowchart")).toBe("flowchart A --> B");
     expect(normalizeMermaidSource("graph LR\nA --> B", "graph")).toBe("graph LR\nA --> B");
+  });
+});
+
+describe("段位置盖章（大文档分块预览的稳定 key）", () => {
+  it("parseRichContentLocated 给每段盖上连续偏移与 1-based 起始行", () => {
+    // 用 mermaid 围栏强制切段（普通围栏会被 mergeMarkdownSegments 并回同一个 markdown 段）
+    const text = "## 第一节\n\n正文一。\n\n```mermaid\nflowchart TD\nA --> B\n```\n\n## 第二节\n\n正文二。\n";
+    const segments = parseRichContentLocated(text);
+    expect(segments.length).toBeGreaterThan(1);
+    expect(segments[0]!.start).toBe(0);
+    for (let index = 1; index < segments.length; index += 1) {
+      expect(segments[index]!.start).toBe(segments[index - 1]!.end);
+      expect(segments[index]!.startLine).toBeGreaterThan(segments[index - 1]!.startLine!);
+    }
+    // markdown 段是原文的逐字切片，起始行必须真的落在对应行首
+    // （mermaid 段会被 normalizeMermaidSource 改写首行，偏移只作 key，不做断言）
+    const lines = text.split("\n");
+    for (const segment of segments) {
+      if (segment.type !== "markdown") continue;
+      const firstLine = segment.content.split("\n")[0]!;
+      if (!firstLine.trim()) continue;
+      expect(lines[(segment.startLine ?? 1) - 1]).toBe(firstLine);
+    }
+  });
+
+  it("parseRichContent 本身不改变既有结构（位置字段只走 located 入口）", () => {
+    const segments = parseRichContent("## 标题\n\n正文\n");
+    expect(Object.prototype.hasOwnProperty.call(segments[0]!, "start")).toBe(false);
+  });
+
+  it("matchHeadings 按顺序切片，同名标题不会锚到文档开头那一个", () => {
+    const document = "# 甲\n\n## 踩坑\n\n正文\n\n# 乙\n\n## 踩坑\n\n正文\n";
+    const global = extractMarkdownHeadings(document);
+    expect(global.map((heading) => heading.line)).toEqual([1, 3, 7, 9]);
+    const first = matchHeadings(global, "# 甲\n\n## 踩坑\n\n正文\n", 0);
+    expect(first.headings.map((heading) => heading.line)).toEqual([1, 3]);
+    // 第二段里的「踩坑」必须对到第 9 行那一个，而不是第 3 行
+    const second = matchHeadings(global, "## 踩坑\n\n正文\n", first.next);
+    expect(second.headings.map((heading) => heading.line)).toEqual([9]);
+    // 切片之后交给 alignSegmentHeadings，块内行号 1 就是第二条「踩坑」
+    expect(alignSegmentHeadings(second.headings, "## 踩坑\n\n正文\n").get(1)?.line).toBe(9);
+  });
+});
+
+describe("围栏密集文档的合并", () => {
+  it("五千段相邻围栏合并成一个 markdown 段（合并逻辑的形态契约）", () => {
+    // 复杂度（旧实现是 O(n²) 字符串复制：1MB/1000+ 围栏 5.5s → 片段数组 + join 0.17s）
+    // 由 src/main/markdown-window-wiring.test.ts 的源码断言钉住；
+    // 这里只钉行为：相邻围栏必须并回同一段，且分隔符不能被吃掉。
+    const block = "```bash\necho hi\n```";
+    const text = Array.from({ length: 5_000 }, () => block).join("\n\n");
+    const segments = parseRichContent(text);
+    expect(segments).toHaveLength(1);
+    const segment = segments[0]!;
+    if (segment.type !== "markdown") throw new Error(`expected markdown segment, got ${segment.type}`);
+    expect(segment.content.startsWith("```bash\necho hi\n```")).toBe(true);
   });
 });

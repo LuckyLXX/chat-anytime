@@ -2192,6 +2192,20 @@ html[data-ui-motion="off"] .general-jev-toggle .chevron { transition: none; }
  * 这里的 `auto`，否则滚动条会长期停在估算值上。
  */
 .preview-markdown .markdown-surface > * { content-visibility: auto; contain-intrinsic-size: auto 300px; }
+/*
+ * 大文档分块预览的块容器（2026-11-02）。
+ *
+ * ⚠️ 必须是「零样式」的块级包装：不要加 padding / border / overflow / contain /
+ * content-visibility——任何一条都会阻断块间外边距折叠，`h2` 的 1.2em 与 `p` 的
+ * .65em 会从「取大 1.2em」变成「相加 1.85em」，标题和段落间距当场翻倍。
+ * 省布局由块内元素的 content-visibility 负责（上一条规则），窗口化负责省解析。
+ */
+.markdown-block { display: block; }
+.markdown-block.is-placeholder { min-height: 40px; }
+/* 首末块的上下外边距抹平，但要限定「整段就是 .rich-content 的首/末子节点」——
+   窗口化段前面可能还有 mermaid/artifact 段，那种情况标题的 1.2em 必须保留。 */
+.rich-content > .markdown-blocks:first-child > .markdown-block:first-child .markdown-surface > :first-child { margin-top: 0; }
+.rich-content > .markdown-blocks:last-child > .markdown-block:last-child .markdown-surface > :last-child { margin-bottom: 0; }
 /* 大纲栏展开时内容区有独立的滚动基准，保持 cv（量测走 offsetTop，不受影响）。 */
 .preview-markdown { padding: 22px 24px 36px; background: var(--surface); }
 
@@ -2250,6 +2264,21 @@ html[data-ui-motion="off"] .general-jev-toggle .chevron { transition: none; }
 .markdown-editor-host .vditor-ir,
 .markdown-editor-host .vditor-reset { background-color: var(--surface); color: var(--text); }
 .markdown-editor-host .vditor-toolbar__item .vditor-tooltipped { color: var(--text-muted); }
+/*
+ * Vditor 正文里的表格 / 分隔线 / kbd 是写死浅色的（#fafbfc / #fff / #dfe2e5 /
+ * #c6cbd1，见 vditor/dist/index.css 的 .vditor-reset table 系列）。它自己的
+ * .vditor--dark 只换 CSS 变量，没覆盖这几条，于是深色模式下表格会是一块浅色板 +
+ * 浅色字。这里按项目 token 覆盖，与 .rich-content 的表格视觉对齐
+ * （表头 var(--surface-raised)、单元格边框 var(--border)）。
+ */
+.markdown-editor-host .vditor-reset table tr { background-color: transparent; border-top: 1px solid var(--border); }
+.markdown-editor-host .vditor-reset table tbody tr:nth-child(2n) { background-color: color-mix(in srgb, var(--surface-raised) 55%, transparent); }
+.markdown-editor-host .vditor-reset table th { background-color: var(--surface-raised); }
+.markdown-editor-host .vditor-reset table td,
+.markdown-editor-host .vditor-reset table th { border: 1px solid var(--border); }
+.markdown-editor-host .vditor-reset hr { background-color: var(--border); }
+.markdown-editor-host .vditor-reset kbd { color: var(--text); background-color: var(--surface-raised); border-color: var(--border); box-shadow: inset 0 -1px 0 var(--border); }
+.markdown-editor-host .vditor-reset blockquote { border-left-color: var(--border-strong); color: var(--text-muted); }
 .preview-code { background: var(--code-surface); }
 .preview-code .code-block { min-height: 100%; margin: 0; border: 0; border-radius: 10px; box-shadow: none; }
 .preview-code .code-block pre { max-height: none; }

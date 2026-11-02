@@ -1,10 +1,10 @@
 import { AlertCircle, Brain, Check, ClipboardList, Code2, Eye, File, FileCode2, FileDiff, FileText, Globe2, LayoutGrid, ListTree, LoaderCircle, Maximize2, Minimize2, Pause, Pencil, Play, Plus, Server, Terminal, X } from "lucide-react";
-import { lazy, memo, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type SyntheticEvent } from "react";
+import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type SyntheticEvent } from "react";
 import type { BrowserElementPick, BrowserPreviewState, WorkspaceFilePreview } from "../../../shared/protocol";
 import { IMAGE_PREVIEW_LIMIT_BYTES, workspaceFilePreviewUrl } from "../../../shared/protocol";
 import { artifactSandbox, buildArtifactPreviewSource, DYNAMIC_PREVIEW_ACTIONS, isDynamicArtifact, PREVIEW_SIZE_MESSAGE, previewBaseHrefFromFileUrl, type Artifact, type DynamicPreviewAction } from "../lib/content";
 import { galleryAbsolutePath } from "../../../shared/gallery";
-import { extractMarkdownHeadings } from "../lib/content-pipeline";
+import { extractMarkdownHeadings, type MarkdownHeading } from "../lib/content-pipeline";
 import { layoutDeviceFrame, storedPreviewDevice, storedPreviewFit, storePreviewDevice, storePreviewFit, type PreviewDeviceId } from "../lib/preview-device";
 import { MarkdownOutline } from "./MarkdownOutline";
 import { MemoryPreviewContent } from "./MemoryPreview";
@@ -78,14 +78,26 @@ const MarkdownPreviewBlock = memo(function MarkdownPreviewBlock({ content, ident
   const contentRef = useRef<HTMLDivElement>(null);
   // 大纲只依赖源文本，与滚动无关；空文档不算大纲，工具条按钮据此隐藏。
   const headings = useMemo(() => extractMarkdownHeadings(content), [content]);
+  // 大文档的分块窗口化下，大纲里的标题可能还没挂载：由 MarkdownBlocks 提供
+  // reveal(heading)，点击先挂载目标块再滚动（两帧后修正估算高度带来的偏差）。
+  const revealRef = useRef<((heading: MarkdownHeading) => void) | null>(null);
+  const registerReveal = useCallback((reveal: (heading: MarkdownHeading) => void): void => {
+    revealRef.current = reveal;
+  }, []);
+  const jump = useCallback((heading: MarkdownHeading): boolean => {
+    const reveal = revealRef.current;
+    if (!reveal) return false;
+    reveal(heading);
+    return true;
+  }, []);
   return (
     <div className={`preview-markdown-shell${outlineOpen ? " has-outline" : ""}`}>
-      {outlineOpen && <MarkdownOutline headings={headings} scrollRef={scrollRef} contentRef={contentRef} measureKey={identity} />}
+      {outlineOpen && <MarkdownOutline headings={headings} scrollRef={scrollRef} contentRef={contentRef} measureKey={identity} onJump={jump} />}
       {/* 滚动容器不加 content-visibility：它在视口内永远“与用户相关”，子内容会全量
           布局（零收益），而非渲染态下反而把内容塌成占位——cv 加在内容块上（styles.css）。 */}
       <div className="preview-scroll preview-markdown" ref={scrollRef}>
         <div ref={contentRef}>
-          <MarkdownPreviewContent content={content} headings={headings} artifactPrefix={artifactPrefix} onOpenArtifact={onOpenArtifact} workspace={workspace} markdownPath={markdownPath} />
+          <MarkdownPreviewContent content={content} headings={headings} artifactPrefix={artifactPrefix} onOpenArtifact={onOpenArtifact} workspace={workspace} markdownPath={markdownPath} onRegisterReveal={registerReveal} />
         </div>
       </div>
     </div>

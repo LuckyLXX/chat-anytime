@@ -2,6 +2,7 @@ import "vditor/dist/index.css";
 import Vditor from "vditor";
 import { AlertCircle, X } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { editorContentSnapshotDelayMs, editorObserverThrottleMs } from "../lib/markdown-editor-policy";
 
 /** 编辑器保存状态，用于预览面板右上角的反馈指示器。 */
 export type EditorSaveStatus = "idle" | "dirty" | "saving" | "saved" | "error";
@@ -62,8 +63,6 @@ function hljsStyle(): string {
 }
 
 const AUTOSAVE_DEBOUNCE_MS = 800;
-/** 观察器兜底的节流间隔：Vditor IR 模式每次按键都会重绘 DOM，无需每次都取全文。 */
-const OBSERVER_THROTTLE_MS = 120;
 
 /**
  * Typora 风格的即时渲染（IR）Markdown 编辑器。基于 Vditor，光标所在块显示源码、其余
@@ -87,6 +86,8 @@ export function MarkdownEditor(props: MarkdownEditorProps): ReactNode {
   const writingRef = useRef(false);
   const composingRef = useRef(false);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** 大文档的乐观快照回写定时器（小文档为 null，直接立即回写）。 */
+  const contentTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastObserverSyncRef = useRef(0);
   // 编辑器当前内容始终走这里：写盘取最新值，写盘期间的新输入不会被丢弃。
   const latestValueRef = useRef(initialContent);
@@ -121,6 +122,31 @@ export function MarkdownEditor(props: MarkdownEditorProps): ReactNode {
     onStatusChangeRef.current?.(tabId, status);
   }
 
+  /**
+   * 内容变化即上报父组件（乐观快照）。小文档立即回写；大文档按策略防抖——
+   * 每次回写都会让 App 重渲染整棵预览树，300KB 文档上这是每键的固定开销。
+   */
+  function publishContent(value: string): void {
+    const delay = editorContentSnapshotDelayMs(value.length);
+    if (delay <= 0) {
+      onContentChangeRef.current?.(tabId, value);
+      return;
+    }
+    if (contentTimerRef.current) clearTimeout(contentTimerRef.current);
+    contentTimerRef.current = setTimeout(() => {
+      contentTimerRef.current = null;
+      if (aliveRef.current) onContentChangeRef.current?.(tabId, latestValueRef.current);
+    }, delay);
+  }
+
+  /** 立刻兑现挂起的快照（写盘成功、切 tab、卸载前都必须调，否则丢最后一次输入）。 */
+  function flushContentSnapshot(): void {
+    if (!contentTimerRef.current) return;
+    clearTimeout(contentTimerRef.current);
+    contentTimerRef.current = null;
+    onContentChangeRef.current?.(tabId, latestValueRef.current);
+  }
+
   function markDirty(): void {
     if (!dirtyRef.current) {
       dirtyRef.current = true;
@@ -151,6 +177,7 @@ export function MarkdownEditor(props: MarkdownEditorProps): ReactNode {
         lastSavedRef.current = value;
         dirtyRef.current = false;
         onDirtyChangeRef.current?.(false);
+        flushContentSnapshot();
         onSavedRef.current?.(tabId, value);
         writingRef.current = false;
         // 写盘期间又有新输入 → 立即补写一次，避免尾部改动被丢弃。仅成功路径
@@ -241,7 +268,7 @@ export function MarkdownEditor(props: MarkdownEditorProps): ReactNode {
         latestValueRef.current = value;
         if (aliveRef.current) setSaveError(undefined);
         markDirty();
-        onContentChangeRef.current?.(tabId, value);
+        publishContent(value);
         scheduleSave();
       }
     });
@@ -258,7 +285,8 @@ export function MarkdownEditor(props: MarkdownEditorProps): ReactNode {
     const observer = new MutationObserver(() => {
       if (!readyRef.current || composingRef.current) return;
       const now = Date.now();
-      if (now - lastObserverSyncRef.current < OBSERVER_THROTTLE_MS) return;
+      // 大文档的 getValue() 是整篇序列化：节流放慢到 500ms（策略见 lib/markdown-editor-policy.ts）。
+      if (now - lastObserverSyncRef.current < editorObserverThrottleMs(latestValueRef.current.length)) return;
       lastObserverSyncRef.current = now;
       let value: string;
       try {
@@ -269,7 +297,7 @@ export function MarkdownEditor(props: MarkdownEditorProps): ReactNode {
       if (value === latestValueRef.current) return;
       latestValueRef.current = value;
       markDirty();
-      onContentChangeRef.current?.(tabId, value);
+      publishContent(value);
       scheduleSave();
     });
     observer.observe(el, { childList: true, subtree: true, characterData: true });
@@ -286,6 +314,7 @@ export function MarkdownEditor(props: MarkdownEditorProps): ReactNode {
         saveTimerRef.current = null;
       }
       syncLatestFromEditor();
+      flushContentSnapshot();
       persist();
       try {
         vditor.destroy();
@@ -350,6 +379,10 @@ export function MarkdownEditor(props: MarkdownEditorProps): ReactNode {
     if (saveTimerRef.current) {
       clearTimeout(saveTimerRef.current);
       saveTimerRef.current = null;
+    }
+    if (contentTimerRef.current) {
+      clearTimeout(contentTimerRef.current);
+      contentTimerRef.current = null;
     }
     latestValueRef.current = remote.content;
     // AI 已把内容写入磁盘，编辑器与磁盘一致，无需再写盘。

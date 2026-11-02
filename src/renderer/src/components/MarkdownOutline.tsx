@@ -32,6 +32,11 @@ interface MarkdownOutlineProps {
   contentRef?: { current: HTMLDivElement | null };
   /** 内容变化时它跟着变（如文件路径），用于重新量测并清空高亮。 */
   measureKey?: unknown;
+  /**
+   * 大文档分块预览的跳转接管（2026-11-02）：返回 true 表示调用方已经处理
+   * （块可能还没挂载，得先挂载再滚），这里就不再查 DOM。小文档不传，行为不变。
+   */
+  onJump?: (heading: MarkdownHeading) => boolean;
 }
 
 /** 按 scrollTop 比例估算当前章节（量测不可信时的兜底）。 */
@@ -46,7 +51,7 @@ function estimateActiveIndex(offsets: number[], scrollTop: number): number {
   return index;
 }
 
-export const MarkdownOutline = memo(function MarkdownOutline({ headings, scrollRef, contentRef, measureKey }: MarkdownOutlineProps): ReactNode {
+export const MarkdownOutline = memo(function MarkdownOutline({ headings, scrollRef, contentRef, measureKey, onJump }: MarkdownOutlineProps): ReactNode {
   const [activeId, setActiveId] = useState<string>();
   /** 各标题在滚动空间里的偏移缓存（与测量时的 scrollTop 无关）。 */
   const offsetsRef = useRef<number[]>([]);
@@ -138,14 +143,15 @@ export const MarkdownOutline = memo(function MarkdownOutline({ headings, scrollR
     setActiveId(undefined);
   }, [measureKey]);
 
-  /** 点击跳转：按 id 找节点并滚到容器顶部（smooth）。 */
-  const scrollToHeading = useCallback((id: string): void => {
+  /** 点击跳转：先给分块预览接管的机会（未挂载的块要先挂载），否则按 id 找节点滚过去。 */
+  const scrollToHeading = useCallback((heading: MarkdownHeading): void => {
+    setActiveId(heading.id);
+    if (onJump?.(heading)) return;
     const root = contentRef?.current ?? scrollRef.current;
-    const target = root?.querySelector<HTMLElement>(`[id="${CSS.escape(id)}"]`);
+    const target = root?.querySelector<HTMLElement>(`[id="${CSS.escape(heading.id)}"]`);
     if (!target) return;
     target.scrollIntoView({ behavior: "smooth", block: "start" });
-    setActiveId(id);
-  }, [contentRef, scrollRef]);
+  }, [contentRef, onJump, scrollRef]);
 
   if (headings.length === 0) {
     return <div className="markdown-outline is-empty"><span>本文档没有标题结构</span></div>;
@@ -162,7 +168,7 @@ export const MarkdownOutline = memo(function MarkdownOutline({ headings, scrollR
             className={`markdown-outline-item${heading.id === activeId ? " active" : ""}`}
             style={{ paddingLeft: `${6 + (heading.depth - 1) * 10}px` }}
             title={heading.text}
-            onClick={() => scrollToHeading(heading.id)}
+            onClick={() => scrollToHeading(heading)}
           >
             {heading.text}
           </button>

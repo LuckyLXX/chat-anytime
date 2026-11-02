@@ -1,13 +1,40 @@
 import { withDynamicArtifactFlag, type Artifact } from "./content";
 
+/**
+ * 段在归一化源文本里的位置。由 parseRichContent 在返回前统一盖章（`stampSegmentOffsets`），
+ * 手工构造的段可以省略；消费方要用时一律 `segment.start ?? 回落值`。
+ *
+ * 用途（2026-11-02）：① React key 走 `start`，块/段在内容局部变化时 reconcile 而不重挂载
+ * （dsh 的教训：块跨越冻结边界时若 key 是序号，整棵子树会 remount）；② 预览按
+ * `startLine` 做块内标题对齐与大纲跳转。artifact 段没有 `content`，用它的源码长度近似
+ * 推进——偏差只影响后续段的 key，不影响渲染。
+ */
+export interface SegmentSourceRange {
+  start?: number;
+  end?: number;
+  /** 1-based 起始行号（归一化文本口径，与 extractMarkdownHeadings 一致）。 */
+  startLine?: number;
+}
+
 export type RichContentSegment =
-  | { type: "markdown"; content: string }
-  | { type: "html"; content: string; source: "assistant-html" | "fragment"; closed?: boolean }
-  | { type: "mermaid"; content: string; language: string }
-  | { type: "artifact"; artifact: Omit<Artifact, "id"> };
+  | ({ type: "markdown"; content: string } & SegmentSourceRange)
+  | ({ type: "html"; content: string; source: "assistant-html" | "fragment"; closed?: boolean } & SegmentSourceRange)
+  | ({ type: "mermaid"; content: string; language: string } & SegmentSourceRange)
+  | ({ type: "artifact"; artifact: Omit<Artifact, "id"> } & SegmentSourceRange);
 
 export interface RichContentParseOptions {
   isStreaming?: boolean;
+  /**
+   * 文档模式（2026-11-02，右侧预览专用）：不做「助手输出」的形态识别——
+   * 不切 `<assistant_html>`、不把片段提升成 HTML/artifact、不把 diff/终端转录包进代码块。
+   *
+   * 起因（实测）：`docs/迭代记录/2026-09.md` 正文里只是**提到** `<assistant_html>`
+   * 这个词，`splitAssistantHtml` 就把后面 142KB 当成一个 HTML 片段（type: "html"），
+   * 于是三分之二的文档不再按 Markdown 渲染、也无法参与大文档分块（窗口化只认 markdown
+   * 段）。文档是 Markdown 文件，不是聊天气泡，形态识别必须关掉；内嵌 HTML 仍由
+   * markdown 管线的 rehypeRaw 正常渲染。
+   */
+  document?: boolean;
 }
 
 const htmlBlockPattern = /^\s*<(?:style|div|section|article|aside|header|footer|nav|main|table|thead|tbody|tfoot|tr|td|th|ul|ol|li|dl|blockquote|figure|figcaption|details|summary|form|fieldset|label|button|img|video|audio|canvas|svg|p)\b/i;
@@ -210,16 +237,22 @@ export function extractMarkdownHeadings(text: string): MarkdownHeading[] {
  *
  * 对齐不上的标题（例如只在段内出现、与全文扫描不一致的异常情况）不入映射，调用方
  * 就不给它注 id——宁缺不锚错。
+ *
+ * **同名标题的消歧走「按顺序切片」**（2026-11-02 大文档分块）：块是段内再切的，
+ * 每块都从第 1 行报行号，用全量大纲从头匹配会让后面块里的「踩坑」「验证」全锚到
+ * 第一章。调用方先用 {@link matchHeadings} 按顺序切出「本段/本块该用的那几条」，
+ * 再把这个切片交给本函数，切片内自然没有歧义。
  */
 export function alignSegmentHeadings(globalHeadings: MarkdownHeading[], segmentContent: string): Map<number, MarkdownHeading> {
   const aligned = new Map<number, MarkdownHeading>();
   if (globalHeadings.length === 0) return aligned;
   // 用一次性 slugger 取层级/文本/行号（id 不取，用全文那份）。
   const local = scanHeadings(segmentContent, createHeadingSlugger());
+  const candidates = globalHeadings;
   let cursor = 0;
   for (const heading of local) {
-    while (cursor < globalHeadings.length) {
-      const candidate = globalHeadings[cursor]!;
+    while (cursor < candidates.length) {
+      const candidate = candidates[cursor]!;
       cursor += 1;
       if (candidate.depth === heading.depth && candidate.text === heading.text) {
         aligned.set(heading.line, candidate);
@@ -228,6 +261,75 @@ export function alignSegmentHeadings(globalHeadings: MarkdownHeading[], segmentC
     }
   }
   return aligned;
+}
+
+/**
+ * 按顺序把一段文本的标题匹配到大纲的 [cursor, …) 区间，返回这段该用的切片与下一个游标。
+ *
+ * 为什么需要它：`parseRichContent` 的段、以及大文档预览的块，行号都从 1 重新开始；
+ * 只按「层级 + 文本」从头匹配时，文档里重复出现的小节名（「踩坑」「验证」「背景」）
+ * 会全部锚到第一处。段与块都按文档顺序渲染/规划，用游标顺序消费即可精确对齐。
+ * 匹配不上的局部队列条目只跳过自己、不消耗全局游标（宁缺不锚错）。
+ */
+export function matchHeadings(globalHeadings: MarkdownHeading[], content: string, cursor = 0): { headings: MarkdownHeading[]; next: number } {
+  const matched: MarkdownHeading[] = [];
+  if (globalHeadings.length === 0) return { headings: matched, next: cursor };
+  const local = scanHeadings(content, createHeadingSlugger());
+  let position = Math.max(0, Math.min(cursor, globalHeadings.length));
+  for (const heading of local) {
+    for (let index = position; index < globalHeadings.length; index += 1) {
+      const candidate = globalHeadings[index]!;
+      if (candidate.depth === heading.depth && candidate.text === heading.text) {
+        matched.push(candidate);
+        position = index + 1;
+        break;
+      }
+    }
+  }
+  return { headings: matched, next: position };
+}
+
+/**
+ * 把一组块按文档顺序分派到大纲条目：每块拿到「它自己那几条」标题切片。
+ * 块是段内再切的，块内行号从 1 重新开始；只有先切片、再让 `alignSegmentHeadings`
+ * 在切片内匹配，同名标题（「踩坑」「验证」）才不会全锚到文档第一处。
+ */
+export function distributeHeadings(headings: MarkdownHeading[], blocks: readonly { text: string; start: number }[]): Map<number, MarkdownHeading[]> {
+  const byBlock = new Map<number, MarkdownHeading[]>();
+  let cursor = 0;
+  for (const block of blocks) {
+    const take = matchHeadings(headings, block.text, cursor);
+    cursor = take.next;
+    byBlock.set(block.start, take.headings);
+  }
+  return byBlock;
+}
+
+/** 文本行数（与 `split("\n")` 同口径）：`"a"` 1 行、`"a\n"` 2 行、`""` 1 行。 */
+function lineCount(text: string): number {
+  let count = 1;
+  for (let index = 0; index < text.length; index += 1) if (text.charCodeAt(index) === 10) count += 1;
+  return count;
+}
+
+/**
+ * 给段盖源码位置（偏移 + 起始行）。纯函数，只由 {@link parseRichContentLocated} 调用。
+ *
+ * **口径是 best-effort**：按段内容长度累加。markdown 段是原文逐字切片，偏移准确；
+ * mermaid 段会被 normalizeMermaidSource 改写首行、artifact 段丢了围栏记号，它们之后
+ * 的段会整体偏移若干字符——只影响 React key 的数值（同一内容仍然稳定），不影响渲染；
+ * 标题对齐**不要**依赖它（见 matchHeadings：按顺序切片，与行号无关）。
+ */
+export function stampSegmentOffsets(segments: RichContentSegment[]): RichContentSegment[] {
+  let offset = 0;
+  let line = 1;
+  return segments.map((segment) => {
+    const content = segment.type === "artifact" ? segment.artifact.content : segment.content;
+    const stamped = { ...segment, start: offset, end: offset + content.length, startLine: line };
+    offset += content.length;
+    line += lineCount(content) - 1;
+    return stamped;
+  });
 }
 
 export function normalizeMermaidSource(code: string, language = "mermaid"): string {
@@ -388,24 +490,51 @@ function mergeTrailingEpilogue(segments: RichContentSegment[], isStreaming = fal
   ];
 }
 
+/** 合并用的换行常量（避免在模板/转义里出错）。 */
+const NEWLINE = "\n";
+
 function mergeMarkdownSegments(segments: RichContentSegment[]): RichContentSegment[] {
   const merged: RichContentSegment[] = [];
+  // 用「片段数组 + 最后 join」而不是往同一个字符串里持续累加：后者在围栏密集的大文档里
+  // 是 O(n²) 的字符串复制（实测 1MB / 1000+ 围栏：5.5s，光合并就吃掉整篇解析时间）。
+  let parts: string[] | null = null;
+  let endsWithNewline = false;
+  const flush = (): void => {
+    if (parts === null) return;
+    const index = merged.length - 1;
+    const last = merged[index];
+    if (last?.type === "markdown") merged[index] = { ...last, content: parts.join("") };
+    parts = null;
+  };
   for (const segment of segments) {
-    const previous = merged.at(-1);
-    if (segment.type === "markdown" && previous?.type === "markdown") {
-      // Adjacent reconstructed fences (e.g. an outer ```TEXT fence that gets
-      // closed by an inner ``` fence) must keep their delimiter lines on
-      // separate lines; concatenating them raw would fuse the trailing
-      // closing fence with the next opening fence into one line like
-      // ``````js, which breaks Markdown parsing downstream.
-      const separator = previous.content.endsWith("\n") || segment.content.startsWith("\n") ? "" : "\n";
-      previous.content += separator + segment.content;
-    } else if (segment.type === "markdown" && !segment.content.trim()) {
-      if (previous?.type === "markdown") previous.content += segment.content;
-    } else {
-      merged.push(segment);
+    if (segment.type === "markdown") {
+      if (!segment.content.trim()) {
+        // 空白段只跟在 markdown 段后面时保留（与原实现一致），否则丢弃。
+        if (parts !== null) {
+          parts.push(segment.content);
+          if (segment.content) endsWithNewline = segment.content.endsWith(NEWLINE);
+        }
+        continue;
+      }
+      if (parts !== null) {
+        // Adjacent reconstructed fences (e.g. an outer ```TEXT fence that gets
+        // closed by an inner ``` fence) must keep their delimiter lines on
+        // separate lines; concatenating them raw would fuse the trailing
+        // closing fence with the next opening fence into one line like
+        // ``````js, which breaks Markdown parsing downstream.
+        parts.push(endsWithNewline || segment.content.startsWith(NEWLINE) ? "" : NEWLINE, segment.content);
+        endsWithNewline = segment.content.endsWith(NEWLINE);
+        continue;
+      }
+      merged.push({ ...segment });
+      parts = [segment.content];
+      endsWithNewline = segment.content.endsWith(NEWLINE);
+      continue;
     }
+    flush();
+    merged.push(segment);
   }
+  flush();
   return merged;
 }
 
@@ -490,10 +619,11 @@ function splitFencedContent(text: string, options: RichContentParseOptions = {})
   let fence: { marker: string; info: string; lines: string[] } | undefined;
 
   function flushMarkdown(): void {
-    if (markdownLines.length) {
-      segments.push(...splitAssistantHtml(markdownLines.join("\n"), options));
-      markdownLines = [];
-    }
+    if (!markdownLines.length) return;
+    const text = markdownLines.join("\n");
+    // 文档模式：整段原文交给 markdown 渲染（不识别 <assistant_html> 等助手输出形态）。
+    segments.push(...(options.document ? [{ type: "markdown", content: text } satisfies RichContentSegment] : splitAssistantHtml(text, options)));
+    markdownLines = [];
   }
 
   function flushFence(closed: boolean): void {
@@ -577,4 +707,13 @@ export function parseRichContent(text: string, options: RichContentParseOptions 
   const stable = splitFencedContent(normalized.slice(0, stableCutoff), { ...options, isStreaming: false });
   const tail = splitFencedContent(normalized.slice(stableCutoff), options);
   return mergeTrailingEpilogue(mergeMarkdownSegments([...stable, ...tail]), false);
+}
+
+/**
+ * 与 `parseRichContent` 相同，但给每个段盖上 `start/end/startLine`（供大文档分块预览
+ * 的稳定 key 与块内标题对齐使用）。分开一个入口而不是直接改 `parseRichContent`：
+ * 聊天/单测都按「纯段」比较结构，多出来的位置字段会让既有断言全部变红。
+ */
+export function parseRichContentLocated(text: string, options: RichContentParseOptions = {}): RichContentSegment[] {
+  return stampSegmentOffsets(parseRichContent(text, options));
 }

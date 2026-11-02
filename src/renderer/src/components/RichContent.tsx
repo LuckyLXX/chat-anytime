@@ -20,7 +20,9 @@ import remarkMath from "remark-math";
 import hljs from "highlight.js/lib/common";
 import { guessCodeLanguage, isPlainTextLabel, languageFromClassName, resolveCodeLanguage } from "../lib/code-language";
 import { artifactSandbox, buildArtifactPreviewSource, DYNAMIC_PREVIEW_ACTIONS, isDynamicArtifact, isFullArtifactDocument, type Artifact, type DynamicPreviewAction } from "../lib/content";
-import { alignSegmentHeadings, extractMarkdownHeadings, hasMathSyntax, normalizeMermaidSource, parseRichContent, type MarkdownHeading, type RichContentSegment } from "../lib/content-pipeline";
+import { alignSegmentHeadings, distributeHeadings, extractMarkdownHeadings, hasMathSyntax, matchHeadings, normalizeMermaidSource, parseRichContent, parseRichContentLocated, type MarkdownHeading, type RichContentSegment } from "../lib/content-pipeline";
+import { PREVIEW_WINDOW_MIN_CHARS, planMarkdownBlocks } from "../lib/markdown-blocks";
+import { MarkdownBlocks } from "./MarkdownBlocks";
 import { useStreamingChunks } from "../lib/streaming-split";
 import { resolveMarkdownAssetUrl } from "../lib/workspace-asset";
 import { sanitizeRichHtmlTree } from "../lib/html-sanitize";
@@ -970,7 +972,7 @@ const DynamicHtmlBubble = memo(function DynamicHtmlBubble({ content, closed, str
   );
 });
 
-const MarkdownSurface = memo(function MarkdownSurface({ content, htmlBubble, artifactPrefix, onOpenArtifact, onHtmlAction, workspace, markdownPath, headings, liveTail = false }: { content: string; htmlBubble?: boolean; artifactPrefix: string; onOpenArtifact(artifact: Artifact): void; onHtmlAction?: (text: string) => void; workspace?: string; markdownPath?: string; headings?: MarkdownHeading[]; liveTail?: boolean }): ReactNode {
+const MarkdownSurface = memo(function MarkdownSurface({ content, htmlBubble, artifactPrefix, onOpenArtifact, onHtmlAction, workspace, markdownPath, headings, liveTail = false, streaming = false }: { content: string; htmlBubble?: boolean; artifactPrefix: string; onOpenArtifact(artifact: Artifact): void; onHtmlAction?: (text: string) => void; workspace?: string; markdownPath?: string; headings?: MarkdownHeading[]; liveTail?: boolean; streaming?: boolean }): ReactNode {
   {
     const g = globalThis as Record<string, unknown>;
     const list = (g.__mdFingerprints as string[]) ?? (g.__mdFingerprints = []);
@@ -992,7 +994,9 @@ const MarkdownSurface = memo(function MarkdownSurface({ content, htmlBubble, art
 
   // KaTeX 按需装配：无数学语法时不装 remarkMath/rehypeKatex（318KB 输入实测
   // 省 ~540ms，同时消除中文文档的 `LaTeX-incompatible input` 警告刷屏）。
-  const math = useMemo(() => hasMathSyntax(content), [content]);
+  // 流式尾部（streaming）强制不装：半个 `$$` 会闪 KaTeX 错误、每帧还要重排公式；
+  // 定稿后（richContent 的 streaming 关掉）再一次性上公式——与 dsh 的双语法一致。
+  const math = useMemo(() => !streaming && hasMathSyntax(content), [content, streaming]);
   // 插件数组必须 memo 化：每次渲染新建数组会让 react-markdown 内部缓存失效、
   // 整篇重新解析。
   const remarkPlugins = useMemo<PluggableList>(() => (math ? [remarkGfm, remarkMath] : [remarkGfm]), [math]);
@@ -1021,10 +1025,13 @@ function compressStreamingBubbleHtml(content: string): string {
 }
 
 function renderSegment(segment: RichContentSegment, index: number, artifactPrefix: string, streaming: boolean, onOpenArtifact: (artifact: Artifact) => void, onHtmlAction?: (text: string) => void, workspace?: string, markdownPath?: string, headings?: MarkdownHeading[], liveTail = false): ReactNode {
-  if (segment.type === "mermaid") return <MermaidBlock key={`mermaid-${index}`} code={segment.content} language={segment.language} />;
+  // key 走源码偏移（段缺偏移时回落序号）：内容局部变化时 React 才会 reconcile 而不是
+  // 整棵子树重挂载（dsh 的教训：块跨越冻结边界时序号 key 会 remount，DOM 全丢）。
+  const segmentKey = segment.start ?? index;
+  if (segment.type === "mermaid") return <MermaidBlock key={`mermaid-${segmentKey}`} code={segment.content} language={segment.language} />;
   if (segment.type === "artifact") {
-    const artifact: Artifact = { ...segment.artifact, id: `${artifactPrefix}-artifact-${index}` };
-    return <ArtifactCard key={`artifact-${index}`} artifact={artifact} onOpenArtifact={onOpenArtifact} />;
+    const artifact: Artifact = { ...segment.artifact, id: `${artifactPrefix}-artifact-${segmentKey}` };
+    return <ArtifactCard key={`artifact-${segmentKey}`} artifact={artifact} onOpenArtifact={onOpenArtifact} />;
   }
   if (segment.type === "html" && segment.source === "assistant-html") {
     // While the assistant_html block is still streaming (no closing tag yet),
@@ -1034,11 +1041,11 @@ function renderSegment(segment: RichContentSegment, index: number, artifactPrefi
     // streaming-identity fix), and would render half-parsed intermediate HTML.
     // The interactive bubble mounts once the closing tag arrives.
     if (segment.closed === false) {
-      return <MarkdownSurface key={`assistant-html-${index}`} content={compressStreamingBubbleHtml(segment.content)} artifactPrefix={`${artifactPrefix}-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} workspace={workspace} markdownPath={markdownPath} liveTail={liveTail} />;
+      return <MarkdownSurface key={`assistant-html-${segmentKey}`} content={compressStreamingBubbleHtml(segment.content)} artifactPrefix={`${artifactPrefix}-${segmentKey}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} workspace={workspace} markdownPath={markdownPath} liveTail={liveTail} streaming={liveTail} />;
     }
-    return <DynamicHtmlBubble key={`assistant-html-${index}`} content={segment.content} closed streaming={streaming} artifactPrefix={`${artifactPrefix}-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} workspace={workspace} markdownPath={markdownPath} />;
+    return <DynamicHtmlBubble key={`assistant-html-${segmentKey}`} content={segment.content} closed streaming={streaming} artifactPrefix={`${artifactPrefix}-${segmentKey}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} workspace={workspace} markdownPath={markdownPath} />;
   }
-  return <MarkdownSurface key={`${segment.type}-${index}`} content={segment.content} htmlBubble={segment.type === "html"} artifactPrefix={`${artifactPrefix}-${index}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} workspace={workspace} markdownPath={markdownPath} headings={headings} liveTail={liveTail} />;
+  return <MarkdownSurface key={`${segment.type}-${segmentKey}`} content={segment.content} htmlBubble={segment.type === "html"} artifactPrefix={`${artifactPrefix}-${segmentKey}`} onOpenArtifact={onOpenArtifact} onHtmlAction={onHtmlAction} workspace={workspace} markdownPath={markdownPath} headings={headings} liveTail={liveTail} streaming={liveTail} />;
 }
 
 /**
@@ -1046,15 +1053,72 @@ function renderSegment(segment: RichContentSegment, index: number, artifactPrefi
  * 各段自己用 `alignSegmentHeadings` 把「段内行号」对到「全文条目」（parseRichContent
  * 可能把正文按围栏/artifact 切成多段），所以每段都能正确注 id，不会因分段而错位。
  */
-export const MarkdownPreviewContent = memo(function MarkdownPreviewContent({ content, headings: providedHeadings, artifactPrefix, onOpenArtifact, workspace, markdownPath }: { content: string; headings?: MarkdownHeading[]; artifactPrefix: string; onOpenArtifact(artifact: Artifact): void; workspace?: string; markdownPath?: string }): ReactNode {
+/**
+ * 大文档预览的窗口化落点（2026-11-02）：一个 markdown 段被切成若干块，只有首屏与
+ * 滚到附近的块会真正解析/渲染（实测 301KB 文档首屏 52–83ms，整篇 1672ms）。
+ */
+const WindowedMarkdownSegment = memo(function WindowedMarkdownSegment({ content, headings, artifactPrefix, onOpenArtifact, workspace, markdownPath, onRegisterReveal }: { content: string; headings: MarkdownHeading[]; artifactPrefix: string; onOpenArtifact(artifact: Artifact): void; workspace?: string; markdownPath?: string; onRegisterReveal?(reveal: (heading: MarkdownHeading) => void): void }): ReactNode {
+  const blocks = useMemo(() => planMarkdownBlocks(content), [content]);
+  const headingsByBlock = useMemo(() => distributeHeadings(headings, blocks), [headings, blocks]);
+  return (
+    <MarkdownBlocks
+      blocks={blocks}
+      headingsByBlock={headingsByBlock}
+      onRegisterReveal={onRegisterReveal}
+      renderBlock={(block, blockHeadings) => (
+        <MarkdownSurface
+          content={block.text}
+          artifactPrefix={`${artifactPrefix}-${block.start}`}
+          onOpenArtifact={onOpenArtifact}
+          workspace={workspace}
+          markdownPath={markdownPath}
+          headings={blockHeadings}
+        />
+      )}
+    />
+  );
+});
+
+export const MarkdownPreviewContent = memo(function MarkdownPreviewContent({ content, headings: providedHeadings, artifactPrefix, onOpenArtifact, workspace, markdownPath, windowed = true, onRegisterReveal }: { content: string; headings?: MarkdownHeading[]; artifactPrefix: string; onOpenArtifact(artifact: Artifact): void; workspace?: string; markdownPath?: string; /** 关掉即退回整篇一次渲染（排查/回滚开关）。 */ windowed?: boolean; onRegisterReveal?(reveal: (heading: MarkdownHeading) => void): void }): ReactNode {
   // 未显式传入时自己算（自包含，单测/其它调用点无需先调纯函数）；
   // 传入时复用（预览块已算过一次，不必重算）。
   const derived = useMemo(() => providedHeadings ?? extractMarkdownHeadings(content), [content, providedHeadings]);
   const headings = providedHeadings ?? derived;
-  const segments = useMemo(() => parseRichContent(content, { isStreaming: false }), [content]);
+  // located 版本给每个段盖上源码偏移：key 用偏移，内容局部变化不整棵重挂载。
+  // 文档模式：预览的是 Markdown 文件，不做聊天气泡的形态识别（见 RichContentParseOptions.document）。
+  const segments = useMemo(() => parseRichContentLocated(content, { isStreaming: false, document: true }), [content]);
+  // 段序即文档序：按游标给每个 markdown 段切出它负责的大纲条目（同名标题不会锚错）。
+  const segmentHeadings = useMemo(() => {
+    const bySegment = new Map<number, MarkdownHeading[]>();
+    let cursor = 0;
+    for (const [index, segment] of segments.entries()) {
+      if (segment.type !== "markdown") continue;
+      const take = matchHeadings(headings, segment.content, cursor);
+      cursor = take.next;
+      bySegment.set(segment.start ?? index, take.headings);
+    }
+    return bySegment;
+  }, [segments, headings]);
   return (
     <div className="rich-content">
-      {segments.map((segment, index) => renderSegment(segment, index, artifactPrefix, false, onOpenArtifact, undefined, workspace, markdownPath, headings))}
+      {segments.map((segment, index) => {
+        const segmentKey = segment.start ?? index;
+        if (windowed && segment.type === "markdown" && segment.content.length >= PREVIEW_WINDOW_MIN_CHARS) {
+          return (
+            <WindowedMarkdownSegment
+              key={`blocks-${segmentKey}`}
+              content={segment.content}
+              headings={segmentHeadings.get(segmentKey) ?? []}
+              artifactPrefix={`${artifactPrefix}-${segmentKey}`}
+              onOpenArtifact={onOpenArtifact}
+              workspace={workspace}
+              markdownPath={markdownPath}
+              onRegisterReveal={onRegisterReveal}
+            />
+          );
+        }
+        return renderSegment(segment, index, artifactPrefix, false, onOpenArtifact, undefined, workspace, markdownPath, headings);
+      })}
     </div>
   );
 });
