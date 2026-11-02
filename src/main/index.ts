@@ -986,6 +986,8 @@ function isSshCommand(value: unknown): value is SshCommand {
     }
     case "host.delete":
       return typeof command.hostId === "string" && command.hostId.trim() !== "";
+    case "host.test":
+      return typeof command.hostId === "string" && command.hostId.trim() !== "";
     case "group.save": {
       const group = command.group;
       return Boolean(group) && typeof group === "object" && typeof (group as Record<string, unknown>).name === "string" && ((group as Record<string, unknown>).id === undefined || typeof (group as Record<string, unknown>).id === "string");

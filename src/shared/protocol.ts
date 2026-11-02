@@ -1356,6 +1356,29 @@ export interface SshHostSummary {
   credentialInsecure?: boolean;
 }
 
+/** 
+ * 主机连接测试结果（面板「测试」按钮）：`ok` 时给出耗时的整数毫秒。
+ *
+ * 语义：
+ * - 该主机**已有连接** → 只测一次 `echo ok` 的往返（`roundTripMs`，打字回显的
+ *   近似值），不重连、不断开用户正在用的终端；
+ * - 没有连接 → 新建一条临时连接，先量建连（TCP + 密钥交换 + 认证，`connectMs`），
+ *   再量同一连接上的一次往返；测完立即断开。
+ * - `needsPassword`：主机没有落库密码、本次运行也没有输入过——测试需要凭据，提示
+ *   用户先在终端连接一次。
+ */
+export interface SshHostTestResult {
+  hostId: string;
+  ok: boolean;
+  /** 建连耗时（ms）；复用已有连接时缺省。 */
+  connectMs?: number;
+  /** 一次 `echo ok` 的往返耗时（ms）——越接近打字回显延迟。 */
+  roundTripMs?: number;
+  error?: string;
+  /** 没有可用密码，无法测试。 */
+  needsPassword?: boolean;
+}
+
 /** 主机保存草稿：id 缺省=新建；密码单独传（留空=保留原密码）。 */
 export interface SshHostDraft {
   id?: string;
@@ -1397,6 +1420,8 @@ export type SshCommand =
   | { type: "kill"; terminalId: string }
   | { type: "host.save"; host: SshHostDraft; password?: string }
   | { type: "host.delete"; hostId: string }
+  /** 连接测试 + 往返测速（见 SshHostTestResult 的语义）。 */
+  | { type: "host.test"; hostId: string }
   | { type: "group.save"; group: { id?: string; name: string } }
   | { type: "group.delete"; groupId: string }
   | { type: "hosts" }
@@ -1418,6 +1443,7 @@ export type SshCommandResult =
   | { kind: "hosts"; hosts: SshHostSummary[]; groups: SshGroupSummary[]; connectedHostIds: string[] }
   | { kind: "host-saved"; host: SshHostSummary }
   | { kind: "host-deleted" }
+  | { kind: "host-tested"; result: SshHostTestResult }
   | { kind: "group-saved"; group: SshGroupSummary }
   | { kind: "group-deleted" }
   /** 连接已异步发起（结果经 SshEventData 事件：fingerprint / status / error）。 */

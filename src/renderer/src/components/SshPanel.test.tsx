@@ -52,7 +52,13 @@ interface RenderHandlers {
 
 async function renderHosts(hosts: SshHostSummary[], groups: SshGroupSummary[] = []): Promise<RenderHandlers> {
   let notifyHostsChanged: (() => void) | undefined;
-  const ssh = vi.fn(async () => ({ kind: "hosts", hosts, groups, connectedHostIds: [] }));
+  const ssh = vi.fn(async (command: { type: string }) => {
+    // 连接测试走异步入口（主进程握手 + 一条 echo 往返），桩一个固定结果。
+    if (command.type === "host.test") {
+      return { kind: "host-tested", result: { hostId: hosts[0]?.id ?? "", ok: true, connectMs: 480, roundTripMs: 142 } };
+    }
+    return { kind: "hosts", hosts, groups, connectedHostIds: [] };
+  });
   vi.stubGlobal("window", {
     ...globalThis.window,
     piDesktop: {
@@ -79,7 +85,7 @@ describe("SshPanel theme hooks", () => {
     await renderHosts([host]);
     expect(container.querySelector("[data-pane=\"ssh\"]")).not.toBeNull();
     // 首屏（列表态）就能看到的钩子
-    for (const control of ["ssh-host-create", "ssh-host-connect", "ssh-host-delete", "ssh-group-create"]) {
+    for (const control of ["ssh-host-create", "ssh-host-connect", "ssh-host-delete", "ssh-host-test", "ssh-group-create"]) {
       expect(container.querySelector(`[data-control="${control}"]`), `${control} 钩子缺失`).not.toBeNull();
     }
   });
@@ -97,6 +103,15 @@ describe("SshPanel theme hooks", () => {
     const remove = container.querySelector("[data-control=\"ssh-host-delete\"]");
     expect(remove?.getAttribute("aria-label")).toBe(`删除 ${host.name}`);
     expect(remove?.className).toContain("danger");
+  });
+
+  it("shows the round-trip latency after testing a host, without touching the terminal", async () => {
+    const handlers = await renderHosts([host]);
+    const test = container.querySelector("[data-control=\"ssh-host-test\"]") as HTMLButtonElement;
+    await act(async () => { test.click(); });
+    // 只在面板上显示数字：host.test 走现有连接的一条 exec 通道，不开终端 tab。
+    expect(handlers.ssh).toHaveBeenCalledWith({ type: "host.test", hostId: host.id });
+    expect(container.textContent).toContain("往返 142ms");
   });
 
   // AI 在后台导入/改分组后，已打开的面板必须自己跟上（否则用户看不到新主机，

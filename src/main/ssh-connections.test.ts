@@ -8,6 +8,8 @@ import { createSshHostStore, type SshHostCrypto } from "./ssh-host-store.js";
 import { createSshKnownHostsStore } from "./ssh-known-hosts.js";
 import {
   HOST_IMPORT_LIMIT,
+  SSH_KEEPALIVE_COUNT_MAX,
+  SSH_KEEPALIVE_INTERVAL_MS,
   SshConnectionManager,
   appendScrollback,
   clampDimension,
@@ -65,6 +67,9 @@ class FakeClient implements SshClientLike {
   ended = 0;
   /** setNoDelay 的入参记录（TCP_NODELAY 回归断言用）。 */
   noDelay: boolean[] = [];
+  /** exec 通道收到的命令（连接测试用）。 */
+  execs: string[] = [];
+  execError: Error | undefined;
   shellStream: FakeShellStream | undefined;
   shellError: Error | undefined;
   sftpError: Error | undefined;
@@ -101,6 +106,28 @@ class FakeClient implements SshClientLike {
 
   setNoDelay(noDelay: boolean): void {
     this.noDelay.push(noDelay);
+  }
+
+  /** 连接测试的 exec 通道：下一微任务回调，再下一微任务以退出码 0 关闭。 */
+  exec(command: string, callback: (error: Error | undefined, stream: never) => void): void {
+    this.execs.push(command);
+    if (this.execError) {
+      queueMicrotask(() => callback(this.execError, undefined as never));
+      return;
+    }
+    const closeListeners: Listener[] = [];
+    const stream = {
+      on(event: string, listener: Listener) {
+        if (event === "close") closeListeners.push(listener);
+        return this;
+      }
+    };
+    queueMicrotask(() => {
+      callback(undefined, stream as never);
+      queueMicrotask(() => {
+        for (const listener of [...closeListeners]) listener(0 as never);
+      });
+    });
   }
 
   on(event: string, listener: Listener): this {
@@ -630,6 +657,74 @@ describe("SshConnectionManager.connect (renderer channel)", () => {
     const { harness } = await connectedHarness();
     // 不设置时真机表现：跨洋 RTT 链路上连续输入被整成「一包一等 RTT」，回显成串迟滞。
     expect(harness.clients[0]!.noDelay).toEqual([true]);
+  });
+
+  it("sets the 15s x 3 keepalive so idle NAT/firewall paths do not silently drop the link", async () => {
+    const { harness } = await connectedHarness();
+    expect(harness.clients[0]!.connectOptions?.keepaliveInterval).toBe(SSH_KEEPALIVE_INTERVAL_MS);
+    expect(harness.clients[0]!.connectOptions?.keepaliveCountMax).toBe(SSH_KEEPALIVE_COUNT_MAX);
+    expect(SSH_KEEPALIVE_INTERVAL_MS).toBe(15_000);
+    expect(SSH_KEEPALIVE_COUNT_MAX).toBe(3);
+  });
+
+  it("tests a live host in place: one exec round trip, no extra connection", async () => {
+    const { harness, stream } = await connectedHarness();
+    stream.emit("prompt$ ");
+    const hostId = (harness.manager.handle({ type: "hosts" }) as { hosts: Array<{ id: string }> }).hosts[0]!.id;
+    const result = await harness.manager.testHost(hostId);
+    expect(result.ok).toBe(true);
+    // 已有连接不重连：同一个 client 上开一条 exec 通道（不打扰用户的 shell）。
+    expect(harness.clients).toHaveLength(1);
+    expect(harness.clients[0]!.execs).toEqual(["echo ok"]);
+    expect(result.roundTripMs).toBeGreaterThanOrEqual(0);
+    expect(result.connectMs).toBeUndefined();
+  });
+
+  it("tests an offline host with a temporary connection and closes it afterwards", async () => {
+    const harness = createHarness({ autoTrust: true });
+    const hostId = (harness.manager.handle({ type: "hosts" }) as { hosts: Array<{ id: string }> }).hosts[0]!.id;
+    const pending = harness.manager.testHost(hostId);
+    await sleep(5);
+    const client = harness.clients[0]!;
+    // 临时连接也必须带同一条连接参数（keepalive / NODELAY 不能只在终端那条路径上生效）。
+    expect(client.connectOptions?.keepaliveInterval).toBe(SSH_KEEPALIVE_INTERVAL_MS);
+    expect(client.noDelay).toEqual([true]);
+    client.emitReady();
+    const result = await pending;
+    expect(result.ok).toBe(true);
+    expect(result.connectMs).toBeGreaterThanOrEqual(0);
+    expect(result.roundTripMs).toBeGreaterThanOrEqual(0);
+    expect(client.execs).toEqual(["echo ok"]);
+    expect(client.ended).toBeGreaterThan(0);
+  });
+
+  it("routes host.test through the async entry (the sync switch must not throw)", async () => {
+    const harness = createHarness({ autoTrust: true });
+    const hostId = (harness.manager.handle({ type: "hosts" }) as { hosts: Array<{ id: string }> }).hosts[0]!.id;
+    const pending = harness.manager.handleAsync({ type: "host.test", hostId }) as Promise<SshCommandResult>;
+    await sleep(5);
+    harness.clients[0]!.emitReady();
+    const result = await pending;
+    expect(result).toMatchObject({ kind: "host-tested", result: { hostId, ok: true } });
+  });
+
+  it("reports a missing password instead of failing mysteriously on the test button", async () => {
+    const harness = createHarness();
+    const saved = harness.manager.handle({ type: "host.save", host: { name: "nopass", host: "10.0.0.9", username: "root" } });
+    const hostId = saved.kind === "host-saved" ? saved.host.id : "";
+    const result = await harness.manager.testHost(hostId);
+    expect(result.ok).toBe(false);
+    expect(result.needsPassword).toBe(true);
+    // 没有凭据就不该偷偷建连。
+    expect(harness.clients).toHaveLength(0);
+  });
+
+  it("refuses to test an untrusted host and says how to trust the fingerprint", async () => {
+    const harness = createHarness();
+    const hostId = (harness.manager.handle({ type: "hosts" }) as { hosts: Array<{ id: string }> }).hosts[0]!.id;
+    const result = await harness.manager.testHost(hostId);
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("指纹");
   });
 
   it("flushes interactive chunks on the low-latency channel instead of the 10ms batch timer", async () => {

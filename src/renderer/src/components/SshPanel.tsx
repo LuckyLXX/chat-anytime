@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronRight, Folder, LoaderCircle, Pencil, Plus, Server, Trash2, TriangleAlert, X } from "lucide-react";
+import { Activity, ChevronDown, ChevronRight, Folder, LoaderCircle, Pencil, Plus, Server, Trash2, TriangleAlert, X } from "lucide-react";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import type { SshGroupSummary, SshHostSummary } from "../../../shared/protocol";
 
@@ -17,6 +17,15 @@ type GroupDraftState =
   | { mode: "idle" }
   | { mode: "editing"; id?: string; name: string; error?: string; saving: boolean };
 
+/**
+ * 一台主机的「测试」结果。`ok` 的 `roundTripMs` 是一次 `echo ok` 的往返（已有连接
+ * 时不重连，直接在当前连接上量），`connectMs` 只在临时新建连接时才有。
+ */
+type HostTestState =
+  | { phase: "testing" }
+  | { phase: "ok"; roundTripMs: number; connectMs?: number }
+  | { phase: "error"; error: string };
+
 const EMPTY_HOST_DRAFT: Omit<Extract<HostDraftState, { mode: "editing" }>, "mode"> = { name: "", address: "", port: "22", username: "root", password: "", groupId: "", saving: false };
 
 /** 未分组的 bucket 键（真实分组用其 id）。 */
@@ -30,6 +39,7 @@ export function SshPanel({ onConnect }: { onConnect(host: SshHostSummary): void 
   const [draft, setDraft] = useState<HostDraftState>({ mode: "idle" });
   const [groupDraft, setGroupDraft] = useState<GroupDraftState>({ mode: "idle" });
   const [listError, setListError] = useState<string | undefined>(undefined);
+  const [tests, setTests] = useState<Record<string, HostTestState>>({});
 
   const refresh = useCallback(async (): Promise<void> => {
     try {
@@ -101,6 +111,33 @@ export function SshPanel({ onConnect }: { onConnect(host: SshHostSummary): void 
     }
   };
 
+  /**
+   * 测试连接并测一次往返。结果只留在面板上（不落盘、不打扰终端）：已连接的主机
+   * 走现有连接的一条 exec 通道，未连接的临时建连后立刻断开。
+   */
+  const testHost = async (host: SshHostSummary): Promise<void> => {
+    setTests((current) => ({ ...current, [host.id]: { phase: "testing" } }));
+    const settle = (state: HostTestState): void => {
+      setTests((current) => ({ ...current, [host.id]: state }));
+    };
+    try {
+      const result = await window.piDesktop.ssh({ type: "host.test", hostId: host.id });
+      // 非 host-tested 只可能来自桩/旧主进程：当作失败呈现，不静默留一个「测速中」。
+      if (result.kind !== "host-tested") {
+        settle({ phase: "error", error: "主进程没有返回测试结果" });
+        return;
+      }
+      const tested = result.result;
+      settle(
+        tested.ok
+          ? { phase: "ok", roundTripMs: tested.roundTripMs ?? 0, ...(tested.connectMs === undefined ? {} : { connectMs: tested.connectMs }) }
+          : { phase: "error", error: tested.error ?? "测试失败" }
+      );
+    } catch (error) {
+      settle({ phase: "error", error: error instanceof Error ? error.message : String(error) });
+    }
+  };
+
   const removeHost = async (host: SshHostSummary): Promise<void> => {
     if (!window.confirm(`删除主机「${host.name}」（${host.username}@${host.host}）？已保存的密码将一并清除。`)) return;
     try {
@@ -136,15 +173,38 @@ export function SshPanel({ onConnect }: { onConnect(host: SshHostSummary): void 
   const groupNameOf = (id: string): string | undefined => groups.find((group) => group.id === id)?.name;
   const renderHostRow = (host: SshHostSummary): ReactNode => {
     const connected = connectedIds.includes(host.id);
+    const test = tests[host.id];
+    const testLabel = test === undefined
+      ? undefined
+      : test.phase === "testing"
+        ? "测速中…"
+        : test.phase === "ok"
+          ? `往返 ${test.roundTripMs}ms`
+          : "测试失败";
     return (
       <li key={host.id} className="ssh-host-row">
         <span className={`ssh-host-dot ${connected ? "connected" : ""}`} title={connected ? "已连接" : "未连接"} />
         <div className="ssh-host-meta">
           <strong>{host.name}</strong>
-          <span>{host.username}@{host.host}:{host.port}{host.hasPassword ? "" : " · 未存密码"}</span>
+          <span title={test?.phase === "ok" && test.connectMs !== undefined ? `建连（TCP + 密钥交换 + 认证）${test.connectMs}ms` : undefined}>
+            {host.username}@{host.host}:{host.port}{host.hasPassword ? "" : " · 未存密码"}
+            {testLabel !== undefined && <span className={`ssh-host-test ${test?.phase ?? ""}`}> · {testLabel}</span>}
+          </span>
+          {test?.phase === "error" && <span className="ssh-host-test-error" title={test.error}>{test.error}</span>}
         </div>
         <div className="ssh-host-actions">
           <button type="button" className="primary-button" data-control="ssh-host-connect" onClick={() => onConnect(host)}>连接</button>
+          <button
+            type="button"
+            className="ghost-button ghost-icon"
+            data-control="ssh-host-test"
+            title="测试连接并测一次往返延迟"
+            aria-label={`测试 ${host.name}`}
+            disabled={test?.phase === "testing"}
+            onClick={() => void testHost(host)}
+          >
+            {test?.phase === "testing" ? <LoaderCircle className="spinning" size={14} /> : <Activity size={14} />}
+          </button>
           <button type="button" className="ghost-button ghost-icon" title="编辑" aria-label={`编辑 ${host.name}`} onClick={() => beginEditHost(host)}><Pencil size={14} /></button>
           <button type="button" className="ghost-button ghost-icon danger" data-control="ssh-host-delete" title="删除" aria-label={`删除 ${host.name}`} onClick={() => void removeHost(host)}><Trash2 size={14} /></button>
         </div>

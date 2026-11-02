@@ -90,7 +90,7 @@ KNOWN_CONTROLS = frozenset({
     "model-select", "thinking-select", "thinking-expand", "context-usage", "browser-pick", "browser-download-toggle",
     "copy", "edit", "regenerate", "share", "pane-maximize", "pane-close",
     "automation-open", "automation-run", "automation-toggle", "automation-runs-tab", "preview-outline-toggle",
-    "ssh-open", "ssh-host-create", "ssh-host-save", "ssh-host-delete", "ssh-host-connect", "ssh-trust-fingerprint", "ssh-group-create", "ssh-group-save",
+    "ssh-open", "ssh-host-create", "ssh-host-save", "ssh-host-delete", "ssh-host-connect", "ssh-host-test", "ssh-trust-fingerprint", "ssh-group-create", "ssh-group-save",
     "ssh-password-submit", "ssh-password-cancel",
     "ssh-files-toggle", "ssh-upload", "ssh-download", "ssh-transfer-cancel",
     "gallery-toggle", "gallery-publish", "gallery-run", "gallery-develop", "gallery-open-wall", "gallery-remove",

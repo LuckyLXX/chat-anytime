@@ -2132,6 +2132,10 @@ html[data-ui-motion="off"] .general-jev-toggle .chevron { transition: none; }
 .ssh-host-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .ssh-host-meta strong { font-size: 13px; }
 .ssh-host-meta span { font-size: 12px; opacity: 0.62; font-family: var(--mono-font, monospace); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ssh-host-test { font-family: inherit; }
+.ssh-host-test.ok { color: var(--success-text, #16a34a); opacity: 1; }
+.ssh-host-test.error { color: var(--danger-text, #dc2626); opacity: 1; }
+.ssh-host-meta .ssh-host-test-error { color: var(--danger-text, #dc2626); opacity: 0.9; }
 .ssh-host-actions { display: flex; gap: 6px; align-items: center; }
 .ssh-host-form { display: flex; flex-direction: column; gap: 10px; padding: 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); max-width: 460px; }
 .ssh-form-title { font-size: 13px; font-weight: 700; }

@@ -10,7 +10,8 @@ import type {
   SshGroupSummary,
   SshRevealEvent,
   SshHostDraft,
-  SshHostSummary
+  SshHostSummary,
+  SshHostTestResult
 } from "../shared/protocol.js";
 import type { SshHostStore, StoredSshHost } from "./ssh-host-store.js";
 import { validateHostDraft } from "./ssh-host-store.js";
@@ -46,6 +47,8 @@ export interface SshClientLike {
   end(): void;
   on(event: string, listener: (...args: never[]) => void): unknown;
   shell(options: { term: string; cols: number; rows: number }, callback: (error: Error | undefined, stream: SshShellStreamLike) => void): void;
+  /** 打开一条 exec 通道（连接测试用：不碰用户的 shell 会话）。 */
+  exec?(command: string, callback: (error: Error | undefined, stream: SshExecStreamLike) => void): void;
   /** 打开 SFTP 通道（首次文件操作时懒开，随连接销毁）。 */
   sftp(callback: (error: Error | undefined, sftp: SshSftpLike) => void): void;
 }
@@ -59,6 +62,19 @@ export interface SshConnectOptionsLike {
   readyTimeout?: number;
   /** 返回 true 放行握手；返回 false 拒绝（TOFU 待确认/指纹不匹配）。 */
   hostVerifier?: (key: Buffer) => boolean;
+  /**
+   * 空闲心跳（ms）。ssh2 每周期发一次 `keepalive@openssh.com` 全局请求，
+   * `keepaliveCountMax` 次无应答就判定链路已死。不设的话，NAT / 企业防火墙
+   * 常把 5–10 分钟没有流量的连接直接剪掉，用户看到的是「终端突然断开」。
+   */
+  keepaliveInterval?: number;
+  keepaliveCountMax?: number;
+}
+
+/** exec 通道的最小结构视图（连接测试只用它的 close）。 */
+export interface SshExecStreamLike {
+  on(event: string, listener: (...args: never[]) => void): unknown;
+  close?(): void;
 }
 
 export interface SshShellStreamLike {
@@ -177,6 +193,14 @@ const SCROLLBACK_LIMIT_CHARS = 200 * 1024;
 const DIMENSION_MIN = 2;
 const DIMENSION_MAX = 500;
 const CONNECT_TIMEOUT_MS = 20_000;
+/**
+ * 空闲心跳：15 秒一次、3 次无应答判死（ssh2 的 keepalive 只在该周期内没有其它
+ * 报文时才发，交互输入期间不会额外产生流量）。依据见 SshConnectOptionsLike。
+ */
+export const SSH_KEEPALIVE_INTERVAL_MS = 15_000;
+export const SSH_KEEPALIVE_COUNT_MAX = 3;
+/** 连接测试的硬上限（建连 + 一条 echo 往返）：超过就按失败返回。 */
+export const SSH_TEST_TIMEOUT_MS = 20_000;
 const EXEC_DEFAULT_TIMEOUT_MS = 60_000;
 const EXEC_MIN_TIMEOUT_MS = 1_000;
 const EXEC_MAX_TIMEOUT_MS = 600_000;
@@ -502,6 +526,10 @@ export class SshConnectionManager {
     if (command.type.startsWith("sftp.")) {
       return this.handleSftp(command as Extract<SshCommand, { type: `sftp.${string}` }>);
     }
+    // 连接测试要等握手/往返，必须异步（同步入口会被 IPC 调用方当成卡死）。
+    if (command.type === "host.test") {
+      return this.testHost(command.hostId).then((result) => ({ kind: "host-tested" as const, result }));
+    }
     return undefined;
   }
 
@@ -720,39 +748,31 @@ export class SshConnectionManager {
       });
     }) as unknown as (...args: never[]) => void);
 
-    record.client.connect({
-      host: stored.host,
-      port: stored.port,
-      username: stored.username,
-      password,
-      tryKeyboard: true,
-      readyTimeout: CONNECT_TIMEOUT_MS,
-      hostVerifier: (key: Buffer) => {
-        const fingerprint = fingerprintOfHostKey(key);
-        if (known === fingerprint) return true;
-        if (known === undefined) {
-          // 信任来源二选一：本次连接显式带 trustFingerprint（确认卡「信任并连接」），
-          // 或设置里开了首连自动信任（人工与 AI 一视同仁）。两条都走 trustedFingerprint，
-          // 由 ready 处理器统一写库。
-          if (trustFingerprint || this.deps.autoTrustFingerprint?.() === true) {
-            record.trustedFingerprint = fingerprint;
-            return true;
-          }
-          // 探测：拒绝握手并**推事件**告知指纹——ssh2 的 hostVerifier 在异步握手中
-          // 才被调用，connect() 早已返回，指纹不可能随命令返回值带回（首版 bug：
-          // 渲染端永远停在「正在连接」）。渲染端收事件后显示确认卡，用户信任后
-          // 带 trustFingerprint 重发；AI 的轮询从 probedFingerprints 看到，随后可调
-          // ssh_trust_fingerprint 信任（对应 pendingTrust 记录）。
-          record.probeFingerprint = fingerprint;
-          this.probedFingerprints.set(terminalId, fingerprint);
-          this.rememberPendingTrust(knownHostKey(stored.host, stored.port), fingerprint);
-          this.deps.publish(terminalId, { type: "fingerprint", terminalId, fingerprint });
-          return false;
+    record.client.connect(this.connectOptions(stored, password, (key: Buffer) => {
+      const fingerprint = fingerprintOfHostKey(key);
+      if (known === fingerprint) return true;
+      if (known === undefined) {
+        // 信任来源二选一：本次连接显式带 trustFingerprint（确认卡「信任并连接」），
+        // 或设置里开了首连自动信任（人工与 AI 一视同仁）。两条都走 trustedFingerprint，
+        // 由 ready 处理器统一写库。
+        if (trustFingerprint || this.deps.autoTrustFingerprint?.() === true) {
+          record.trustedFingerprint = fingerprint;
+          return true;
         }
-        record.fingerprintMismatch = fingerprint; // 拒绝 + error 事件给明确文案
+        // 探测：拒绝握手并**推事件**告知指纹——ssh2 的 hostVerifier 在异步握手中
+        // 才被调用，connect() 早已返回，指纹不可能随命令返回值带回（首版 bug：
+        // 渲染端永远停在「正在连接」）。渲染端收事件后显示确认卡，用户信任后
+        // 带 trustFingerprint 重发；AI 的轮询从 probedFingerprints 看到，随后可调
+        // ssh_trust_fingerprint 信任（对应 pendingTrust 记录）。
+        record.probeFingerprint = fingerprint;
+        this.probedFingerprints.set(terminalId, fingerprint);
+        this.rememberPendingTrust(knownHostKey(stored.host, stored.port), fingerprint);
+        this.deps.publish(terminalId, { type: "fingerprint", terminalId, fingerprint });
         return false;
       }
-    });
+      record.fingerprintMismatch = fingerprint; // 拒绝 + error 事件给明确文案
+      return false;
+    }));
     // TCP_NODELAY：ssh2 从不自己设置（库内没有一处调用它，`Client#setNoDelay`
     // 是留给调用方的公开 API），而不设置时 Nagle 会在「上一个小包还没被 ACK」
     // 期间攒住后续小包 —— 交互输入正是「一次按键一个几字节小包」的形态，在
@@ -760,6 +780,150 @@ export class SshConnectionManager {
     // 停手后还要再等一两秒才收干。所有正经 SSH 客户端都开这一项。
     // socket 在 connect() 内同步创建，所以这一行必须放在 connect() 之后。
     record.client.setNoDelay?.(true);
+  }
+
+  /**
+   * 统一的 ssh2 连接参数（真实连接与连接测试共用）：readyTimeout、keepalive、
+   * 认证方式、指纹校验。密码与指纹判断由调用方给，这里只负责把**通道层面的
+   * 默认值收在一处**——两个入口各写一份就会漂移（keepalive 只在其中一处生效，
+   * 正是那种「看着有、实际没有」的典型）。
+   */
+  private connectOptions(stored: StoredSshHost, password: string, hostVerifier: (key: Buffer) => boolean): SshConnectOptionsLike {
+    return {
+      host: stored.host,
+      port: stored.port,
+      username: stored.username,
+      password,
+      tryKeyboard: true,
+      readyTimeout: CONNECT_TIMEOUT_MS,
+      keepaliveInterval: SSH_KEEPALIVE_INTERVAL_MS,
+      keepaliveCountMax: SSH_KEEPALIVE_COUNT_MAX,
+      hostVerifier
+    };
+  }
+
+  // ——— 连接测试（面板「测试」按钮） ———
+
+  /**
+   * 测试一台主机并给出一到两个延迟数字。
+   *
+   * 已有连接时**不重连**：直接在现有 client 上开一条 exec 通道跑 `echo ok`，
+   * 得到的往返最接近用户打字回显的体感（不打扰正在用的 shell，也不消耗一次
+   * 完整握手）。没有连接时新建一条临时连接：先量建连（TCP + 密钥交换 + 认证），
+   * 再量同一连接上的一次往返，测完立刻断开。
+   *
+   * 失败一律返回结构化结果（不抛）：面板要显示「为什么连不上」，而不是一个
+   * 只存在于控制台的异常。
+   */
+  async testHost(hostId: string): Promise<SshHostTestResult> {
+    const stored = this.deps.hostStore.get(hostId);
+    if (!stored) return { hostId, ok: false, error: "主机不存在或已删除" };
+    const live = [...this.connections.values()].find((record) => record.hostId === hostId && record.status === "connected");
+    if (live) {
+      try {
+        return { hostId, ok: true, roundTripMs: Math.round(await this.execRoundTrip(live.client)) };
+      } catch (error) {
+        return { hostId, ok: false, error: errorMessageOf(error) };
+      }
+    }
+    const password = this.availablePassword(hostId);
+    if (password === undefined) {
+      return { hostId, ok: false, needsPassword: true, error: "该主机还没有可用密码：先在终端连接一次并输入密码，再回来测试" };
+    }
+    const known = this.deps.knownHosts.get(stored.host, stored.port);
+    const client = this.deps.createClient();
+    let unknownFingerprint = false;
+    let fingerprintMismatch = false;
+    return await new Promise<SshHostTestResult>((resolve) => {
+      let settled = false;
+      let connectMs: number | undefined;
+      const started = performance.now();
+      const finish = (result: SshHostTestResult): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try { client.end(); } catch { /* 已断开 */ }
+        resolve(result);
+      };
+      const timer = setTimeout(() => finish({ hostId, ok: false, connectMs: connectMs === undefined ? undefined : Math.round(connectMs), error: `连接测试超时（${Math.round(SSH_TEST_TIMEOUT_MS / 1000)} 秒）` }), SSH_TEST_TIMEOUT_MS);
+      client.on("error", ((error: Error) => {
+        if (settled) return;
+        const message = error.message || "连接失败";
+        const hint = unknownFingerprint
+          ? "首次连接需要确认服务器指纹：先在终端连接一次并信任，或在设置里打开「首次连接自动信任指纹」"
+          : fingerprintMismatch
+            ? "主机指纹与已记录的不一致（可能是中间人攻击，或服务器重装/换 IP），已拒绝测试"
+            : isAuthFailure(message)
+              ? `密码认证被拒绝：${message}`
+              : message;
+        finish({ hostId, ok: false, ...(connectMs === undefined ? {} : { connectMs: Math.round(connectMs) }), error: hint });
+      }) as unknown as (...args: never[]) => void);
+      client.on("keyboard-interactive", ((_name: string, _instructions: string, _lang: string, prompts: Array<{ echo: boolean }>, done: (answers: string[]) => void) => {
+        done(prompts.map(() => password));
+      }) as unknown as (...args: never[]) => void);
+      client.on("ready", (() => {
+        connectMs = performance.now() - started;
+        void this.execRoundTrip(client).then((roundTripMs) => {
+          finish({ hostId, ok: true, connectMs: Math.round(connectMs ?? 0), roundTripMs: Math.round(roundTripMs) });
+        }, (error: unknown) => {
+          finish({ hostId, ok: false, connectMs: Math.round(connectMs ?? 0), error: errorMessageOf(error) });
+        });
+      }) as unknown as (...args: never[]) => void);
+      client.connect(this.connectOptions(stored, password, (key: Buffer) => {
+        const fingerprint = fingerprintOfHostKey(key);
+        if (known === fingerprint) return true;
+        if (known === undefined) {
+          if (this.deps.autoTrustFingerprint?.() === true) {
+            this.deps.knownHosts.put(stored.host, stored.port, fingerprint);
+            return true;
+          }
+          unknownFingerprint = true;
+          return false;
+        }
+        fingerprintMismatch = true;
+        return false;
+      }));
+      client.setNoDelay?.(true);
+    });
+  }
+
+  /** 在一条连接上开 exec 通道跑 `echo ok`，返回从发出到通道关闭的毫秒数。 */
+  private execRoundTrip(client: SshClientLike): Promise<number> {
+    return new Promise((resolve, reject) => {
+      if (!client.exec) {
+        reject(new Error("当前 SSH 客户端不支持 exec 通道，无法测速"));
+        return;
+      }
+      const started = performance.now();
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        reject(new Error("测试命令超时（远端没有应答）"));
+      }, SSH_TEST_TIMEOUT_MS);
+      client.exec("echo ok", (error, stream) => {
+        if (error) {
+          settled = true;
+          clearTimeout(timer);
+          reject(error);
+          return;
+        }
+        stream.on("close", ((code: number | null) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          if (typeof code !== "number") {
+            reject(new Error("测试过程中连接断开了"));
+            return;
+          }
+          if (code !== 0) {
+            reject(new Error(`远端返回退出码 ${code}`));
+            return;
+          }
+          resolve(performance.now() - started);
+        }) as unknown as (...args: never[]) => void);
+      });
+    });
   }
 
   // ——— SFTP 文件传输（人工渲染端命令） ———
@@ -1380,6 +1544,11 @@ function identityOf(stored: StoredSshHost): SshHostIdentity {
  * 刻意只认这些模式：把任意 error 都当认证失败会让「网络不通」也弹出密码框，
  * 反复让用户白输密码。
  */
+/** 把任意抛错整理成面板可显示的一行文字。 */
+function errorMessageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 export function isAuthFailure(message: string): boolean {
   return /all configured authentication methods failed|no supported authentication methods|authentication failed/i.test(message);
 }
