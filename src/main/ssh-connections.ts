@@ -22,12 +22,13 @@ import { stripAnsi } from "./ansi.js";
 
 /**
  * SSH 连接管理：ssh2 Client + shell channel（远端 PTY），与本地 PTY 终端
- * （terminal-pty.ts）同一套通道形状——scrollback 重放、10ms/64KB 批量
- * flush、resize。人工输入与 AI 写入共享同一条 shell 流：AI 的命令经远端
- * 回显实时出现在用户的 xterm 窗口里；命令完成检测用不可打印的 OSC 序列
- * marker（ESC ] 633;pi-ssh;<seq>;<exit> BEL），普通命令输出无法伪造——
- * 命令回显里 printf 参数是字面反斜杠文本，与 printf 输出的真实 ESC 字节
- * 天然可区分。
+ * （terminal-pty.ts）同一套通道形状——scrollback 重放、批量 flush（交互块
+ * 走低延迟通道、大流量 10ms/64KB，见 enqueue）、resize；客户端 socket 显式
+ * 打开 TCP_NODELAY（见 beginConnection）。人工输入与 AI 写入共享同一条
+ * shell 流：AI 的命令经远端回显实时出现在用户的 xterm 窗口里；命令完成
+ * 检测用不可打印的 OSC 序列 marker（ESC ] 633;pi-ssh;<seq>;<exit> BEL），
+ * 普通命令输出无法伪造——命令回显里 printf 参数是字面反斜杠文本，与
+ * printf 输出的真实 ESC 字节天然可区分。
  *
  * 纯逻辑 + 注入 ssh2 工厂/推送/存储依赖（terminal-pty 同模式），可单测。
  */
@@ -35,6 +36,13 @@ import { stripAnsi } from "./ansi.js";
 /** ssh2 Client 的最小结构视图（index.ts 注入真实实现，测试注入 fake）。 */
 export interface SshClientLike {
   connect(options: SshConnectOptionsLike): void;
+  /**
+   * 打开/关闭 TCP_NODELAY。ssh2 **不会**自动设置它（`Client#setNoDelay` 是公开
+   * API，库内部从不调用），不设置就等于让 Nagle 参与交互输入：上一个按键包还没
+   * 被 ACK 时，下一个小包会被攒住，跨洋链路上表现为「连续输入被整成一包一等
+   * RTT、回显成串迟滞」（2026-11-02 实测，见 beginConnection 的注释）。
+   */
+  setNoDelay?(noDelay: boolean): unknown;
   end(): void;
   on(event: string, listener: (...args: never[]) => void): unknown;
   shell(options: { term: string; cols: number; rows: number }, callback: (error: Error | undefined, stream: SshShellStreamLike) => void): void;
@@ -88,6 +96,11 @@ export interface SshConnectionsDeps {
   notifyHostsChanged?: () => void;
   /** Test seam：异步 flush 调度（缺省 setTimeout）。 */
   scheduleFlush?(callback: () => void): () => void;
+  /**
+   * Test seam：**低延迟** flush 调度（缺省 setImmediate）——交互块（打字回显）走这条，
+   * 不等 10ms 批量定时器。
+   */
+  scheduleImmediateFlush?(callback: () => void): () => void;
 }
 
 interface PendingExec {
@@ -143,6 +156,23 @@ export const PENDING_TRUST_LIMIT = 20;
 export const HOST_IMPORT_LIMIT = 200;
 const FLUSH_INTERVAL_MS = 10;
 const FLUSH_MAX_CHARS = 64 * 1024;
+/**
+ * 交互块上限：累计输出不超过它就走「下一轮事件循环立刻发」，不等 10ms 批量。
+ *
+ * 为什么（2026-11-02 实测）：`setTimeout(10)` 在 Windows 上的实际触发间隔是
+ * 定时器粒度 **15.6ms**，而它固定挂在每次按键回显的前面——真实主机（RTT 124ms）
+ * 端到端回显 p50 142ms，其中 15.8ms 是这口批量；换成 setImmediate 后同一探针
+ * 降到 0.6ms。打字回显本来就是 1–3 字节的小块，批量合并对它零收益。
+ * 阈值取 2KB：覆盖普通命令输出（`ls`/`cd`/提示符），又不会把 `cat` 这种
+ * 大流量放进低延迟通道。
+ */
+export const INTERACTIVE_FLUSH_MAX_CHARS = 2 * 1024;
+/**
+ * 低延迟 flush 的最小间隔（节流）：逐行打印的小块输出（构建日志、进度条）不能把
+ * IPC 打成风暴——8ms 内只允许一次立即 flush，其余回落 10ms 批量。
+ * 人打字最快约 10 键/秒（100ms 间隔），永远在闸门之外，不受影响。
+ */
+export const INTERACTIVE_FLUSH_MIN_GAP_MS = 8;
 const SCROLLBACK_LIMIT_CHARS = 200 * 1024;
 const DIMENSION_MIN = 2;
 const DIMENSION_MAX = 500;
@@ -402,12 +432,20 @@ export class SshConnectionManager {
   private readonly pendingPasswords = new Map<string, Extract<SshEventData, { type: "password-required" }>>();
   private execSequence = 0;
   private readonly schedule: (callback: () => void) => () => void;
+  private readonly scheduleImmediate: (callback: () => void) => () => void;
   private cancelFlush: (() => void) | undefined;
+  private cancelImmediate: (() => void) | undefined;
+  /** 上一次 publish 数据的时间（单调时钟）：低延迟 flush 的节流闸门。 */
+  private lastPublishAt = Number.NEGATIVE_INFINITY;
 
   constructor(private readonly deps: SshConnectionsDeps) {
     this.schedule = deps.scheduleFlush ?? ((callback) => {
       const timer = setTimeout(callback, FLUSH_INTERVAL_MS);
       return () => clearTimeout(timer);
+    });
+    this.scheduleImmediate = deps.scheduleImmediateFlush ?? ((callback) => {
+      const handle = setImmediate(callback);
+      return () => clearImmediate(handle);
     });
   }
 
@@ -715,6 +753,13 @@ export class SshConnectionManager {
         return false;
       }
     });
+    // TCP_NODELAY：ssh2 从不自己设置（库内没有一处调用它，`Client#setNoDelay`
+    // 是留给调用方的公开 API），而不设置时 Nagle 会在「上一个小包还没被 ACK」
+    // 期间攒住后续小包 —— 交互输入正是「一次按键一个几字节小包」的形态，在
+    // 100ms 级 RTT 的链路上会被整成「一包一等 RTT」：连续打字时回显成串迟滞、
+    // 停手后还要再等一两秒才收干。所有正经 SSH 客户端都开这一项。
+    // socket 在 connect() 内同步创建，所以这一行必须放在 connect() 之后。
+    record.client.setNoDelay?.(true);
   }
 
   // ——— SFTP 文件传输（人工渲染端命令） ———
@@ -1193,18 +1238,46 @@ export class SshConnectionManager {
       this.pendingFlush.delete(record);
       const data = record.pending + chunk;
       record.pending = "";
+      this.lastPublishAt = performance.now();
       this.deps.publish(terminalId, { type: "data", terminalId, data });
       return;
     }
     record.pending += chunk;
     this.pendingFlush.add(record);
-    if (!this.cancelFlush) this.cancelFlush = this.schedule(() => {
+    // 交互块（打字回显）走低延迟通道：见 INTERACTIVE_FLUSH_MAX_CHARS 的注释。
+    if (record.pending.length <= INTERACTIVE_FLUSH_MAX_CHARS && performance.now() - this.lastPublishAt >= INTERACTIVE_FLUSH_MIN_GAP_MS) {
+      this.scheduleImmediateFlush();
+    } else {
+      this.scheduleTimerFlush();
+    }
+  }
+
+  /** 10ms 批量 flush（大流量走这条）。 */
+  private scheduleTimerFlush(): void {
+    if (this.cancelFlush) return;
+    this.cancelFlush = this.schedule(() => {
       this.cancelFlush = undefined;
       this.flush();
     });
   }
 
+  /** 下一轮事件循环立刻 flush（交互块走这条）；定时器让位，同一批数据不等两次。 */
+  private scheduleImmediateFlush(): void {
+    if (this.cancelImmediate) return;
+    this.cancelFlush?.();
+    this.cancelFlush = undefined;
+    this.cancelImmediate = this.scheduleImmediate(() => {
+      this.cancelImmediate = undefined;
+      this.flush();
+    });
+  }
+
   private flush(): void {
+    this.cancelFlush?.();
+    this.cancelFlush = undefined;
+    this.cancelImmediate?.();
+    this.cancelImmediate = undefined;
+    this.lastPublishAt = performance.now();
     const records = [...this.pendingFlush];
     this.pendingFlush.clear();
     for (const record of records) {
@@ -1213,12 +1286,7 @@ export class SshConnectionManager {
       record.pending = "";
       this.deps.publish(record.terminalId, { type: "data", terminalId: record.terminalId, data });
     }
-    if (this.pendingFlush.size > 0 && !this.cancelFlush) {
-      this.cancelFlush = this.schedule(() => {
-        this.cancelFlush = undefined;
-        this.flush();
-      });
-    }
+    if (this.pendingFlush.size > 0) this.scheduleTimerFlush();
   }
 
   // ——— 生命周期 ———

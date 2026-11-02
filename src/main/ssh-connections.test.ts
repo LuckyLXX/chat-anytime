@@ -63,6 +63,8 @@ class FakeShellStream implements SshShellStreamLike {
 class FakeClient implements SshClientLike {
   connectOptions: SshConnectOptionsLike | undefined;
   ended = 0;
+  /** setNoDelay 的入参记录（TCP_NODELAY 回归断言用）。 */
+  noDelay: boolean[] = [];
   shellStream: FakeShellStream | undefined;
   shellError: Error | undefined;
   sftpError: Error | undefined;
@@ -95,6 +97,10 @@ class FakeClient implements SshClientLike {
 
   end(): void {
     this.ended += 1;
+  }
+
+  setNoDelay(noDelay: boolean): void {
+    this.noDelay.push(noDelay);
   }
 
   on(event: string, listener: Listener): this {
@@ -188,6 +194,10 @@ interface Harness {
   knownHostsPath: string;
   /** AI 改动主机/分组后的失效通知次数（面板刷新链路靠它）。 */
   hostChanges: number[];
+  /** 待触发的 10ms 批量 flush 队列（manualFlush 模式）。 */
+  timerQueue: Array<() => void>;
+  /** 待触发的低延迟 flush 队列（manualFlush 模式）。 */
+  immediateQueue: Array<() => void>;
   /** 预置下一台 client 的握手 hostkey（模拟服务器换 key）。 */
   setNextHostKey(key: Buffer): void;
   waitFor<T>(promise: Promise<T>): Promise<T>;
@@ -202,13 +212,15 @@ afterEach(() => {
   for (const dir of testDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-function createHarness(options: { seedHost?: boolean; autoTrust?: boolean } = {}): Harness {
+function createHarness(options: { seedHost?: boolean; autoTrust?: boolean; manualFlush?: boolean } = {}): Harness {
   const dir = mkdtempSync(join(tmpdir(), "pidesktop-ssh-conn-"));
   testDirs.push(dir);
   const published: SshEventData[] = [];
   const reveals: SshRevealEvent[] = [];
   const clients: FakeClient[] = [];
   const hostChanges: number[] = [];
+  const timerQueue: Array<() => void> = [];
+  const immediateQueue: Array<() => void> = [];
   const crypto: SshHostCrypto = {
     encrypt: (plain) => ({ secret: `enc:${Buffer.from(plain).toString("base64")}`, insecure: false }),
     decrypt: (secret) => (secret.startsWith("enc:") ? Buffer.from(secret.slice(4), "base64").toString("utf8") : ""),
@@ -236,12 +248,43 @@ function createHarness(options: { seedHost?: boolean; autoTrust?: boolean } = {}
     notifyHostsChanged: () => { hostChanges.push(Date.now()); },
     publish: (terminalId, event) => published.push(event),
     reveal: (event) => reveals.push(event),
-    scheduleFlush: (callback) => {
-      const timer = setTimeout(callback, 0);
-      return () => clearTimeout(timer);
-    }
+    // manualFlush：把两条 flush 通道都换成手动队列，用来断言「走的是哪一条」。
+    ...(options.manualFlush
+      ? {
+          scheduleFlush: (callback: () => void) => {
+            timerQueue.push(callback);
+            return () => {
+              const index = timerQueue.indexOf(callback);
+              if (index >= 0) timerQueue.splice(index, 1);
+            };
+          },
+          scheduleImmediateFlush: (callback: () => void) => {
+            immediateQueue.push(callback);
+            return () => {
+              const index = immediateQueue.indexOf(callback);
+              if (index >= 0) immediateQueue.splice(index, 1);
+            };
+          }
+        }
+      : {
+          scheduleFlush: (callback) => {
+            const timer = setTimeout(callback, 0);
+            return () => clearTimeout(timer);
+          }
+        })
   });
-  return { manager, published, reveals, clients, knownHostsPath, hostChanges, setNextHostKey: (key: Buffer) => { control.nextHostKey = key; }, waitFor: async <T,>(promise: Promise<T>) => promise };
+  return {
+    manager,
+    published,
+    reveals,
+    clients,
+    knownHostsPath,
+    hostChanges,
+    timerQueue,
+    immediateQueue,
+    setNextHostKey: (key: Buffer) => { control.nextHostKey = key; },
+    waitFor: async <T,>(promise: Promise<T>) => promise
+  };
 }
 
 const FINGERPRINT = fingerprintOfHostKey(TEST_HOST_KEY);
@@ -560,6 +603,74 @@ describe("SshConnectionManager.connect (renderer channel)", () => {
     const errors = harness.published.filter((event) => event.type === "error");
     expect(errors).toHaveLength(1);
     expect((errors[0] as { message: string }).message).toContain("指纹");
+  });
+
+  // ——— 输入回显延迟（2026-11-02 用户报「手工输入文字卡顿、延迟高」）———
+  // 两个硬事实：
+  // ① ssh2 不会自己开 TCP_NODELAY，不设置就由 Nagle 决定「小包何时发」；
+  // ② `setTimeout(10)` 在 Windows 上的实际触发间隔是定时器粒度 15.6ms，而它固定
+  //    挂在每次按键回显前面。低延迟 flush 通道把交互块（≤2KB）改成 setImmediate。
+
+  async function connectedHarness(options: { manualFlush?: boolean } = {}): Promise<{ harness: Harness; stream: FakeShellStream }> {
+    const harness = createHarness({ manualFlush: options.manualFlush === true });
+    const hosts = harness.manager.handle({ type: "hosts" });
+    const hostId = hosts.kind === "hosts" ? hosts.hosts[0]!.id : "";
+    harness.manager.handle({ type: "connect", terminalId: "t1", hostId, cols: 80, rows: 24, trustFingerprint: true });
+    await sleep(2);
+    harness.clients[0]!.emitReady();
+    await sleep(5);
+    harness.published.length = 0;
+    return { harness, stream: harness.clients[0]!.shellStream! };
+  }
+
+  const dataEvents = (harness: Harness): string[] =>
+    harness.published.filter((event): event is Extract<SshEventData, { type: "data" }> => event.type === "data").map((event) => event.data);
+
+  it("opens TCP_NODELAY when connecting (Nagle would batch keystrokes behind an unacked small packet)", async () => {
+    const { harness } = await connectedHarness();
+    // 不设置时真机表现：跨洋 RTT 链路上连续输入被整成「一包一等 RTT」，回显成串迟滞。
+    expect(harness.clients[0]!.noDelay).toEqual([true]);
+  });
+
+  it("flushes interactive chunks on the low-latency channel instead of the 10ms batch timer", async () => {
+    const { harness, stream } = await connectedHarness({ manualFlush: true });
+    stream.emit("l");
+    // 还没发：两条通道里只有 immediate 在排队（打字回显不该等批量定时器）。
+    expect(dataEvents(harness)).toEqual([]);
+    expect(harness.timerQueue).toHaveLength(0);
+    expect(harness.immediateQueue).toHaveLength(1);
+    harness.immediateQueue.shift()!();
+    expect(dataEvents(harness)).toEqual(["l"]);
+  });
+
+  it("throttles bursts of small chunks: only one low-latency flush per 8ms window", async () => {
+    const { harness, stream } = await connectedHarness({ manualFlush: true });
+    stream.emit("a");
+    harness.immediateQueue.shift()!();
+    harness.published.length = 0;
+    // 同一毫秒内的第二块：立即 flush 已经用掉额度，回落 10ms 批量（防 IPC 风暴）。
+    stream.emit("b");
+    expect(harness.immediateQueue).toHaveLength(0);
+    expect(harness.timerQueue).toHaveLength(1);
+    harness.timerQueue.shift()!();
+    expect(dataEvents(harness)).toEqual(["b"]);
+  });
+
+  it("still merges chunks that arrive in the same tick into one publish", async () => {
+    const { harness, stream } = await connectedHarness({ manualFlush: true });
+    stream.emit("ab");
+    stream.emit("cd");
+    expect(harness.immediateQueue).toHaveLength(1);
+    harness.immediateQueue.shift()!();
+    expect(dataEvents(harness)).toEqual(["abcd"]);
+  });
+
+  it("publishes oversized chunks immediately and never queues them", async () => {
+    const { harness, stream } = await connectedHarness({ manualFlush: true });
+    stream.emit("x".repeat(64 * 1024));
+    expect(dataEvents(harness)).toHaveLength(1);
+    expect(harness.immediateQueue).toHaveLength(0);
+    expect(harness.timerQueue).toHaveLength(0);
   });
 });
 

@@ -13,6 +13,7 @@
 // 断言它们等于渲染端要求的值。把调用点换回旧顺序，本用例转红（已反向验证）。
 // 全程本机回环，无外部依赖。
 import { mkdtempSync, rmSync } from "node:fs";
+import { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client, Server, utils } from "ssh2";
@@ -148,5 +149,88 @@ describe("real ssh2 end-to-end window-change", () => {
       manager.handle({ type: "kill", terminalId: "e2e" });
       server.close();
     }
+  }, 30_000);
+});
+
+// ——— TCP_NODELAY（2026-11-02 输入延迟排查） ———
+//
+// ssh2 的 `Client#setNoDelay` 是留给调用方的公开 API，库内部**一处都不调用**
+// （`grep setNoDelay node_modules/ssh2/lib/client.js` 只有定义），所以「以为库会
+// 自己开」就是 Nagle 一直在场：上一个按键包未被 ACK 时，后续几字节的小包会被攒住，
+// 100ms 级 RTT 的链路上表现为连续输入被整成「一包一等 RTT」。
+//
+// 本用例把「我们调了 client.setNoDelay(true)」变成**真的到了 socket 上**的可执行
+// 契约：patch `net.Socket.prototype.setNoDelay` 记录调用，删掉 beginConnection 里
+// 那一行即转红（已反向验证）。全程本机回环，无外部依赖。
+describe("real ssh2 end-to-end socket options", () => {
+  it("opens TCP_NODELAY on the client socket", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "pi-ssh-nodelay-e2e-"));
+    testDirs.push(tmp);
+    const hostKey = utils.generateKeyPairSync("ed25519").private;
+
+    const server = new Server({ hostKeys: [hostKey] }, (client) => {
+      client.on("authentication", (ctx: AuthContext) => {
+        if (ctx.method === "password" && ctx.username === "u" && ctx.password === "p") ctx.accept();
+        else ctx.reject();
+      });
+      client.on("ready", () => {
+        client.on("session", (accept: () => unknown) => {
+          const session = accept() as {
+            on(event: "pty", listener: (acceptPty: () => void, rejectPty: () => void) => void): void;
+            on(event: "shell", listener: (acceptShell: () => { write(data: string): void }) => void): void;
+          };
+          session.on("pty", (acceptPty) => acceptPty());
+          session.on("shell", (acceptShell) => { acceptShell().write("ready\r\n"); });
+        });
+      });
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as { port: number }).port;
+
+    const crypto: SshHostCrypto = {
+      encrypt: (plain) => ({ secret: `enc:${Buffer.from(plain).toString("base64")}`, insecure: false }),
+      decrypt: (secret) => (secret.startsWith("enc:") ? Buffer.from(secret.slice(4), "base64").toString("utf8") : ""),
+      isAvailable: () => true
+    };
+    const hostStore = createSshHostStore({ filePath: join(tmp, "hosts.json"), crypto });
+    hostStore.save({ name: "loopback", host: "127.0.0.1", username: "u", port }, "p");
+    const knownHosts = createSshKnownHostsStore(join(tmp, "known.json"));
+    const publicKey = (utils.parseKey(hostKey) as { getPublicSSH(): Buffer }).getPublicSSH();
+    knownHosts.put("127.0.0.1", port, fingerprintOfHostKey(publicKey));
+
+    const published: Array<{ type: string; status?: string }> = [];
+    const manager = new SshConnectionManager({
+      createClient: () => new Client() as unknown as SshClientLike,
+      hostStore,
+      knownHosts,
+      publish: (_terminalId, event) => published.push(event as { type: string; status?: string }),
+      reveal: () => {}
+    });
+
+    const calls: boolean[] = [];
+    const original = Socket.prototype.setNoDelay;
+    Socket.prototype.setNoDelay = function patched(this: Socket, enable?: boolean): Socket {
+      calls.push(enable !== false);
+      return original.call(this, enable);
+    };
+
+    try {
+      const hosts = manager.handle({ type: "hosts" });
+      const hostId = hosts.kind === "hosts" ? hosts.hosts[0]!.id : "";
+      expect(hostId).toBeTruthy();
+      manager.handle({ type: "connect", terminalId: "e2e-nodelay", hostId, cols: 80, rows: 24 });
+      const deadline = Date.now() + 5_000;
+      while (Date.now() < deadline && !published.some((event) => event.type === "status" && event.status === "connected")) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      expect(published.some((event) => event.type === "status" && event.status === "connected")).toBe(true);
+    } finally {
+      Socket.prototype.setNoDelay = original;
+      manager.handle({ type: "kill", terminalId: "e2e-nodelay" });
+      server.close();
+    }
+
+    expect(calls).toContain(true);
   }, 30_000);
 });
