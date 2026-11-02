@@ -11,7 +11,7 @@ import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent
 import { Type } from "typebox";
 import type { AccessMode, AutomationSchedule, AutomationTask } from "../shared/protocol.js";
 import { formatAutomationSchedule } from "../shared/automation.js";
-import { isValidCron } from "./automation-cron.js";
+import { isValidCron } from "../shared/automation-cron.js";
 
 const ACCESS_MODES: readonly AccessMode[] = ["read-only", "ask", "workspace", "full"];
 

@@ -19,7 +19,9 @@ describe("session search wiring contract", () => {
 
   it("utility 接上 session.search 并用当前助手的会话列表扫描", () => {
     expect(runtime).toContain('case "session.search":');
-    expect(runtime).toContain("const sessions = [...currentSessions];");
+    // 自动化运行会话默认不进检索；显式打开开关（showAutomation）才纳入。
+    expect(runtime).toContain("command.showAutomation === true");
+    expect(runtime).toContain("currentSessions.filter((session) => !isAutomationSessionSummary(session))");
     expect(runtime).toContain("updateSessionTextEntry(sessionTextIndex, session.path)");
     expect(runtime).toContain("searchSessionText(sessionTextIndex, sessions, command.query)");
     expect(runtime).toContain('post({ type: "session.search-result"');

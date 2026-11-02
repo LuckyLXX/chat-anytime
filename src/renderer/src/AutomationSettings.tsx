@@ -42,7 +42,7 @@ export interface AutomationSettingsProps {
   onOpenRunSession: () => void;
 }
 
-interface AutomationFormProps {
+export interface AutomationFormProps {
   initial: AutomationTask | null;
   models: ModelOption[];
   providers: ProviderOption[];
@@ -122,7 +122,7 @@ function delayParts(seconds: number): { value: number; unit: DelayUnit } {
   return { value: Math.max(1, Math.round(seconds / 60)), unit: "minute" };
 }
 
-function AutomationForm({ initial, models, providers, settings, workspacePath, activeAgentId, onSubmit, onCancel }: AutomationFormProps): ReactNode {
+export function AutomationForm({ initial, models, providers, settings, workspacePath, activeAgentId, onSubmit, onCancel }: AutomationFormProps): ReactNode {
   const sessions = useDesktopStore((state) => state.snapshot.sessions);
   const activeSessionId = useDesktopStore((state) => state.snapshot.sessionId);
   const [name, setName] = useState(initial?.name ?? "");

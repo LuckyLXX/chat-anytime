@@ -27,8 +27,9 @@ describe("sidebar running sessions wiring contract", () => {
 
   it("数据来自 sessionsForView(active) + 搜索词过滤，归档视图不出现", () => {
     expect(app).toContain('import { collectRunningSessions, hasRunningSession } from "./lib/running-sessions"');
-    // 归档会话即使带着 running 也不进这个分区（归档视图里不显示分区）。
-    expect(app).toContain('collectRunningSessions(sessionsForView(sessionSummaries, "active"))');
+    // 归档会话即使带着 running 也不进这个分区（归档视图里不显示分区）；
+    // 自动化运行会话默认同样被 sessionViewOptions 过滤，不占「运行中」分区。
+    expect(app).toContain('collectRunningSessions(sessionsForView(sessionSummaries, "active", sessionViewOptions))');
     expect(app).toContain('collectRunningSessions(runningSessions, sidebarQuery, agentNames)');
     expect(app).toContain('sessionView === "active" && listedRunningSessions.length > 0');
   });

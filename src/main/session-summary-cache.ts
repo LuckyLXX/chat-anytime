@@ -2,6 +2,8 @@ import { closeSync, openSync, readFileSync, readSync } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { SessionManager, type SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { SessionOrigin } from "../shared/protocol.js";
+import { AUTOMATION_SESSION_ORIGIN_CUSTOM_TYPE, normalizeSessionOrigin } from "../shared/session-origin.js";
 import { writeJsonAtomic } from "./settings-store.js";
 
 /**
@@ -44,6 +46,8 @@ export interface SessionFileSummary {
   id: string;
   cwd: string;
   name?: string;
+  /** 自动化后台运行的来源标记（custom entry 投影）；旧会话可能没有。 */
+  origin?: SessionOrigin;
   created: Date;
   modified: Date;
   messageCount: number;
@@ -173,6 +177,7 @@ export function summarizeEntries(
   stats?: { mtime?: Date }
 ): Omit<SessionFileSummary, "path" | "id" | "cwd"> {
   let name: string | undefined;
+  let origin: SessionOrigin | undefined;
   let messageCount = 0;
   let lastActivity: number | undefined;
   let firstMessage = "";
@@ -181,6 +186,12 @@ export function summarizeEntries(
       // 最新一条赢（显式的空名字=清空标题，同样生效）。
       const trimmed = typeof entry.name === "string" ? entry.name.trim() : "";
       name = trimmed || undefined;
+      continue;
+    }
+    if (entry.type === "custom" && entry.customType === AUTOMATION_SESSION_ORIGIN_CUSTOM_TYPE) {
+      // 恶意/损坏的 data 不能让整条摘要失败：能解析就覆盖，不能解析就沿用上一条。
+      const parsed = normalizeSessionOrigin(entry.data);
+      if (parsed) origin = parsed;
       continue;
     }
     if (entry.type !== "message") continue;
@@ -203,6 +214,7 @@ export function summarizeEntries(
       : fallback;
   return {
     ...(name !== undefined ? { name } : {}),
+    ...(origin !== undefined ? { origin } : {}),
     // 与 Pi 的 `new Date(header.timestamp)` 同口径：头部时间戳缺失/非法 → Invalid Date。
     created: new Date(headerTime),
     modified,
@@ -335,7 +347,7 @@ export async function listSessionSummaries(directories: readonly string[], deps:
  */
 
 /** 索引格式版本；不匹配一律丢弃（宁可全量扫一次，也不冒字段错位的风险）。 */
-export const SESSION_INDEX_VERSION = 1;
+export const SESSION_INDEX_VERSION = 2;
 /** 超过这么久没被扫描确认的条目直接丢掉。 */
 export const SESSION_INDEX_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 /** 条目总上限（超限丢最旧）。全助手口径下按 agent 分区后再做全局兜底。 */
@@ -376,6 +388,7 @@ interface SerializedSessionSummary {
   id: string;
   cwd: string;
   name?: string;
+  origin?: SessionOrigin;
   created: string;
   modified: string;
   messageCount: number;
@@ -396,6 +409,7 @@ function serializeSummary(summary: SessionFileSummary): SerializedSessionSummary
     id: summary.id,
     cwd: summary.cwd,
     ...(summary.name === undefined ? {} : { name: summary.name }),
+    ...(summary.origin === undefined ? {} : { origin: summary.origin }),
     created: summary.created.toISOString(),
     modified: summary.modified.toISOString(),
     messageCount: summary.messageCount,
@@ -414,11 +428,13 @@ function reviveSummary(value: unknown): SessionFileSummary | null | undefined {
   const createdDate = new Date(created);
   const modifiedDate = new Date(modified);
   if (Number.isNaN(createdDate.getTime()) || Number.isNaN(modifiedDate.getTime())) return undefined;
+  const origin = normalizeSessionOrigin(value.origin);
   return {
     path,
     id,
     cwd,
     ...(typeof name === "string" ? { name } : {}),
+    ...(origin ? { origin } : {}),
     created: createdDate,
     modified: modifiedDate,
     messageCount,

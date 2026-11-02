@@ -1578,12 +1578,32 @@ export interface SshSettings {
  */
 export type SessionRunStatus = "running" | "completed" | "failed" | "aborted";
 
+/**
+ * 会话来源标记。目前只有自动化后台运行一种：它让「自动化 · 任务名」这类
+ * 会话可以被话题列表默认过滤，而由任务面板的运行记录唯一回看。
+ *
+ * 写入方式：自动化后台会话创建时通过 Pi 的 `appendCustomEntry` 落一条
+ * custom entry（`AUTOMATION_SESSION_ORIGIN_CUSTOM_TYPE`），摘要缓存解析后投影
+ * 到 SessionSummary.origin；不要靠标题前缀作为唯一依据（用户可重命名）。
+ */
+export interface SessionOrigin {
+  kind: "automation";
+  /** 产生该会话的任务 id（「返回任务」与运行记录关联的稳定键）。 */
+  taskId: string;
+  /** 创建时的任务名快照（任务删除后仍可展示）。 */
+  taskName?: string;
+  /** 运行记录 id（可选；记录在运行结束时才生成，故新会话创建时通常没有）。 */
+  runId?: string;
+}
+
 export interface SessionSummary {
   id: string;
   path: string;
   workspace: string;
   /** 创建该会话的助手 id（跨助手列表的徽标来源；显示名由渲染端用 settings.agents 解析）。 */
   agentId: string;
+  /** 会话来源（自动化后台运行）；缺省 = 用户主动创建的普通会话。 */
+  origin?: SessionOrigin;
   /** 仅当会话所属工作区目录不存在/不是目录时提供（列表显示「目录不存在」）。 */
   workspaceMissing?: boolean;
   title: string;
@@ -2366,7 +2386,7 @@ export type RuntimeCommand =
   | { type: "session.open"; path: string; workspace?: string; agentId?: string; activate?: boolean }
   /** 会话全文检索（全助手会话，user/assistant 正文）。结果经
    *  session.search-result 推送；requestId 用于丢弃过期查询。 */
-  | { type: "session.search"; requestId: string; query: string }
+  | { type: "session.search"; requestId: string; query: string; /** 是否把自动化运行会话纳入检索；缺省 false（与话题列表默认隐藏同口径）。 */ showAutomation?: boolean }
   | { type: "session.rename"; path: string; title: string }
   | { type: "session.pin"; path: string; pinned: boolean }
   /** 软归档 / 取消归档。paths 长度 1 即单条；批量与单条共用一条命令，避免
@@ -2488,6 +2508,8 @@ export type RuntimeCommand =
   | { type: "automation.delete"; id: string; agentId?: string }
   | { type: "automation.toggle"; id: string; enabled: boolean; agentId?: string }
   | { type: "automation.run"; id: string; agentId?: string }
+  /** 停止某任务当前正在运行的后台会话（只对后台新会话有效；会话绑定任务 delivered 后不可停止）。 */
+  | { type: "automation.stop"; id: string; agentId?: string }
   /** 运行记录「查看会话」：渲染端只发 runId；主进程负责查记录、跨角色切换、定位会话、激活/恢复。 */
   | { type: "automation.run.open"; runId: string }
   /** 打开某条任务关联的会话：主进程按 taskId 查任务、跨角色切换、定位会话、激活/恢复。 */

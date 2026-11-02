@@ -1,5 +1,5 @@
 import type { AutomationTask } from "../shared/protocol.js";
-import { cronMatches } from "./automation-cron.js";
+import { cronMatches } from "../shared/automation-cron.js";
 
 /**
  * 自动化定时任务调度器（utility 进程内，零 Electron 依赖）。

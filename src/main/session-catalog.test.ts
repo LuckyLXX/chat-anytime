@@ -2,7 +2,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { AgentProfile, SessionSummary } from "../shared/protocol.js";
+import type { AgentProfile, SessionOrigin, SessionSummary } from "../shared/protocol.js";
+import { AUTOMATION_SESSION_ORIGIN_CUSTOM_TYPE } from "../shared/session-origin.js";
 import { listSessionScopes, pickRecentSession, resolveSessionOwner, summarizeAllSessions, type SessionScope, type WorkspaceExistsEntry } from "./session-catalog.js";
 import { sessionPathKey } from "./session-scope.js";
 
@@ -41,6 +42,7 @@ interface SessionFixture {
   timestamp: string;
   name?: string;
   userText?: string;
+  origin?: SessionOrigin;
 }
 
 /** 手写最小合法 Pi 会话文件：真实走 listSessionSummaries 的解析路径。 */
@@ -50,6 +52,16 @@ function writeSession(dir: string, fixture: SessionFixture): string {
   const lines: unknown[] = [
     { type: "session", version: 3, id: fixture.id, timestamp: fixture.timestamp, cwd: fixture.cwd }
   ];
+  if (fixture.origin !== undefined) {
+    lines.push({
+      type: "custom",
+      customType: AUTOMATION_SESSION_ORIGIN_CUSTOM_TYPE,
+      data: fixture.origin,
+      id: `${fixture.id}-origin`,
+      parentId: null,
+      timestamp: fixture.timestamp
+    });
+  }
   if (fixture.userText !== undefined) {
     lines.push({
       type: "message",
@@ -155,6 +167,13 @@ describe("summarizeAllSessions", () => {
       timestamp: "2026-03-01T00:00:00.000Z",
       name: "文件工作区"
     });
+    writeSession(alphaDir, {
+      id: "automation",
+      cwd: liveWorkspace,
+      timestamp: "2026-02-15T00:00:00.000Z",
+      userText: "自动化会话",
+      origin: { kind: "automation", taskId: "task-1", taskName: "每日新闻" }
+    });
 
     const scopes = [makeScope("alpha", [alphaDir]), makeScope("beta", [betaDir], true)];
     const sessions = await summarizeAllSessions(scopes, {
@@ -164,7 +183,7 @@ describe("summarizeAllSessions", () => {
       archivedPaths: [filePath]
     });
 
-    expect(sessions.map((session) => session.id)).toEqual(["pinned", "file", "missing"]);
+    expect(sessions.map((session) => session.id)).toEqual(["pinned", "file", "automation", "missing"]);
     const byId = new Map(sessions.map((session) => [session.id, session]));
 
     const pinned = byId.get("pinned")!;
@@ -173,6 +192,8 @@ describe("summarizeAllSessions", () => {
     expect(pinned.title).toBe("置顶标题");
     expect(pinned.pinned).toBe(true);
     expect(pinned.workspaceMissing).toBeUndefined();
+
+    expect(byId.get("automation")?.origin).toEqual({ kind: "automation", taskId: "task-1", taskName: "每日新闻" });
 
     const missing = byId.get("missing")!;
     expect(missing.agentId).toBe("alpha");
@@ -297,7 +318,16 @@ describe("pickRecentSession", () => {
       modifiedAt: 300,
       agentId: "alpha"
     });
-    const all = [alphaOlder, betaNewest, archivedSession, alphaNewest];
+    const automation = makeSession({
+      id: "automation",
+      path: join(root, "sessions", "automation.jsonl"),
+      workspace,
+      modifiedAt: 900,
+      agentId: "alpha",
+      title: "自动化 · 每日新闻",
+      origin: { kind: "automation", taskId: "task-1", taskName: "每日新闻" }
+    });
+    const all = [alphaOlder, betaNewest, archivedSession, alphaNewest, automation];
     const agents = [makeAgent("alpha", { name: "Alpha" }), makeAgent("beta", { name: "Beta", archived: true })];
 
     // 默认：跳过归档会话和归档助手的会话，取未归档里最新的。
@@ -310,6 +340,8 @@ describe("pickRecentSession", () => {
     ).toBe("beta-newest");
     // 缺 agents 时无法判断助手归档态，视为未归档（不能因此隐藏会话）。
     expect(pickRecentSession(all, workspace)?.id).toBe("beta-newest");
+    // 自动化运行会话即使更新也不进「打开工作区时恢复哪条会话」；显式放开才会选中。
+    expect(pickRecentSession(all, workspace, { includeAutomation: true })?.id).toBe("automation");
     expect(pickRecentSession(all, join(root, "Other"), { agents })).toBeUndefined();
   });
 });

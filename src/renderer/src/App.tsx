@@ -80,10 +80,13 @@ import { GalleryDataDialog, GalleryPublishDialog, GalleryWallDialog } from "./co
 import { DiffView } from "./components/DiffView";
 import { BrandMark } from "./components/BrandMark";
 import { SessionSearchResults } from "./components/SessionSearchResults";
+import { AutomationPanel, type AutomationPanelTab } from "./AutomationPanel";
+import type { AutomationRunsHighlight } from "./AutomationRuns";
 import { CommandPalette } from "./components/CommandPalette";
 import type { PaletteAction } from "./lib/command-palette";
 import { clampPreviewSplit, PREVIEW_SPLIT_MAX, PREVIEW_SPLIT_MIN, previewSplitFromKey } from "./lib/preview-split";
 import { workAreaPreviewClasses } from "./lib/preview-layout";
+import { isAutomationSessionSummary } from "../../shared/session-origin";
 import { groupSessionsByWorkspace, workspaceDisplayLabel, workspaceKey } from "./lib/session-groups";
 import { pickTopicAgentId } from "./lib/topic-agent";
 import { archivedSessionCount, selectSessionPaths, selectedPathsInView, sessionsForView, toggleSessionSelection, type SessionSelection, type SessionView } from "./lib/session-view";
@@ -534,6 +537,10 @@ export function App(): ReactNode {
     openRollbackConfirm(file, activeSessionIdRef.current);
   }, [openRollbackConfirm]);
   const [sidebarTab, setSidebarTab] = useState<"agents" | "topics">("topics");
+  // 自动化运行会话默认不进话题列表；开关状态存 localStorage（用户偏好）。
+  const [showAutomationSessions, setShowAutomationSessions] = useState<boolean>(() => {
+    try { return window.localStorage.getItem("pidesktop.show-automation-sessions") === "1"; } catch { return false; }
+  });
   const [sidebarQuery, setSidebarQuery] = useState("");
   const [paletteOpen, setPaletteOpen] = useState(false);
   // 命令面板检索模式下用户输入的查询（CommandPalette 推上来；离开模式/关面板推空串）。
@@ -556,14 +563,14 @@ export function App(): ReactNode {
     const timer = window.setTimeout(() => {
       const requestId = `search-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       useDesktopStore.setState({ sessionSearch: { requestId, query, loading: true, hits: [] } });
-      void window.piDesktop.send({ type: "session.search", requestId, query }).catch((cause: unknown) => {
+      void window.piDesktop.send({ type: "session.search", requestId, query, showAutomation: showAutomationSessions }).catch((cause: unknown) => {
         useDesktopStore.setState((state) => state.sessionSearch.requestId === requestId
           ? { sessionSearch: { ...state.sessionSearch, loading: false, error: cause instanceof Error ? cause.message : "搜索失败" } }
           : state);
       });
     }, 300);
     return () => window.clearTimeout(timer);
-  }, [sidebarQuery, sidebarTab]);
+  }, [sidebarQuery, sidebarTab, showAutomationSessions]);
 
   // 注意：不在 activeAgentId 变化时清空检索结果——跨助手打开会话也会改变
   // snapshot.agentId，无条件清空会误伤正在进行的搜索。只在用户主动点助手行 /
@@ -586,14 +593,14 @@ export function App(): ReactNode {
       useDesktopStore.setState((state) => state.paletteSearch.query === query
         ? { paletteSearch: { ...state.paletteSearch, requestId, loading: true, hits: [] } }
         : state);
-      void window.piDesktop.send({ type: "session.search", requestId, query }).catch((cause: unknown) => {
+      void window.piDesktop.send({ type: "session.search", requestId, query, showAutomation: showAutomationSessions }).catch((cause: unknown) => {
         useDesktopStore.setState((state) => state.paletteSearch.requestId === requestId
           ? { paletteSearch: { ...state.paletteSearch, loading: false, error: cause instanceof Error ? cause.message : "搜索失败" } }
           : state);
       });
     }, 300);
     return () => window.clearTimeout(timer);
-  }, [paletteSessionQuery]);
+  }, [paletteSessionQuery, showAutomationSessions]);
 
   // 全局快捷键（主进程 push）与 Ctrl/Cmd+K：两者都只是「打开」信号。
   useEffect(() => {
@@ -613,7 +620,19 @@ export function App(): ReactNode {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsInitialTab, setSettingsInitialTab] = useState<SettingsTab | undefined>(undefined);
   function openSettingsOn(tab: SettingsTab): void { setSettingsInitialTab(tab); setSettingsOpen(true); }
+  function toggleAutomationSessions(): void {
+    setShowAutomationSessions((current) => {
+      const next = !current;
+      try { window.localStorage.setItem("pidesktop.show-automation-sessions", next ? "1" : "0"); } catch { /* 本地偏好存不下不影响功能 */ }
+      return next;
+    });
+    setSelectedSessionPaths({});
+  }
   const [previewOpened, setPreviewOpened] = useState(false);
+  // 自动化面板：B 默认形态（右侧 dock）；与预览面板互斥，P0 固定 386px。
+  const [automationPanelOpen, setAutomationPanelOpen] = useState(false);
+  const [automationPanelTab, setAutomationPanelTab] = useState<AutomationPanelTab>("tasks");
+  const [automationPanelHighlight, setAutomationPanelHighlight] = useState<AutomationRunsHighlight>();
   const [preview, setPreview] = useState<PreviewState>();
   const [previewAddMenuOpen, setPreviewAddMenuOpen] = useState(false);
   // 顶栏「作品」下拉的展开态：它的面板从顶栏向下伸进右侧预览区，而内置浏览器是
@@ -624,6 +643,17 @@ export function App(): ReactNode {
   // 事件回调里读最新面板开合状态（与 previewRef 同款模式）。
   const previewOpenedRef = useRef(previewOpened);
   previewOpenedRef.current = previewOpened;
+  function openAutomationPanel(tab: AutomationPanelTab = "tasks", highlight?: AutomationRunsHighlight): void {
+    setAutomationPanelTab(tab);
+    setAutomationPanelHighlight(highlight);
+    setAutomationPanelOpen(true);
+    setSettingsOpen(false);
+    setPreviewOpened(false);
+    setPreviewAddMenuOpen(false);
+  }
+  function closeAutomationPanel(): void {
+    setAutomationPanelOpen(false);
+  }
   const [previewEditorStates, setPreviewEditorStates] = useState<Record<string, PreviewEditorState>>({});
   const [sidebarView, setSidebarView] = useState<"topics" | "files">("topics");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -664,17 +694,16 @@ export function App(): ReactNode {
           : `${name}运行失败${automationRun.message ? `：${automationRun.message.length > 120 ? `${automationRun.message.slice(0, 120)}…` : automationRun.message}` : ""}`;
     setAutomationToast({ message, runId: automationRun.runId });
   }, [automationRun]);
-  // 聊天里的 automation_create 卡片「打开」：打开设置页自动化 tab（任务列表）。
+  // 聊天里的 automation_create 卡片「打开」：打开右侧自动化面板（任务列表）。
   useEffect(() => {
     if (!automationOpenSignal) return;
-    openSettingsOn("automation");
+    openAutomationPanel("tasks");
     useDesktopStore.setState({ automationOpenSignal: undefined });
   }, [automationOpenSignal]);
   // 「查看结果」直达：打开设置页自动化 tab，写入信号让 AutomationSettings 切「运行记录」子页并高亮该条。
   function viewAutomationRun(runId: string): void {
     setAutomationToast(undefined);
-    openSettingsOn("automation");
-    useDesktopStore.setState({ automationRunsSignal: { runId, at: Date.now() } });
+    openAutomationPanel("runs", { runId, at: Date.now() });
   }
   // —— 子代理完整记录（只读弹窗目标）；App 层开关，DelegationTranscript 挂在这里 ——
   const [transcriptTarget, setTranscriptTarget] = useState<DelegationProgress>();
@@ -689,6 +718,7 @@ export function App(): ReactNode {
   // —— 界面动效：模态/面板的退出动画窗口（useExitPresence 延迟卸载 + styles.css
   // 退场动画；时长与 styles.css「界面动效基建」注释的对照表一致）——
   const settingsPresence = useExitPresence(settingsOpen, 160);
+  const automationPanelPresence = useExitPresence(automationPanelOpen, 180);
   const permissionPresence = useExitPresenceValue(permission, 130);
   const transcriptPresence = useExitPresenceValue(transcriptTarget, 160);
   const renamePresence = useExitPresenceValue(renameSession, 160);
@@ -1142,10 +1172,15 @@ export function App(): ReactNode {
       if (trimmed) paths.set(workspaceKey(trimmed), trimmed);
     };
     for (const recent of recentWorkspaces) add(recent.path);
-    for (const session of sessionSummaries) add(session.workspace);
+    // 隐藏的自动化运行会话不应把只跑过自动化的工作区顶进计数/分组；
+    // 用户打开开关后它们照常参与。
+    for (const session of sessionSummaries) {
+      if (!showAutomationSessions && isAutomationSessionSummary(session)) continue;
+      add(session.workspace);
+    }
     add(activeWorkspace);
     return [...paths.values()];
-  }, [recentWorkspaces, sessionSummaries, activeWorkspace]);
+  }, [recentWorkspaces, sessionSummaries, activeWorkspace, showAutomationSessions]);
   const workspaceCount = workspacePaths.length;
   const sessionsByWorkspaceKey = useMemo(() => {
     const map = new Map<string, SessionSummary[]>();
@@ -1157,16 +1192,18 @@ export function App(): ReactNode {
     }
     return map;
   }, [sessionSummaries]);
-  const visibleSessions = useMemo(() => sessionsForView(sessionSummaries, sessionView), [sessionSummaries, sessionView]);
+  const sessionViewOptions = useMemo(() => ({ showAutomation: showAutomationSessions }), [showAutomationSessions]);
+  const visibleSessions = useMemo(() => sessionsForView(sessionSummaries, sessionView, sessionViewOptions), [sessionSummaries, sessionView, sessionViewOptions]);
   // 「运行中」分区（跨工作区）：分组默认折叠时，别的工作区里正在跑的会话在列表里
   // 根本看不见，切过去得先翻分组。这里摊平一份（rail 角标也用它），列表顶部那份
   // 再按搜索词过滤——两处口径一致，不另算一遍筛选。
-  const runningSessions = useMemo(() => collectRunningSessions(sessionsForView(sessionSummaries, "active")), [sessionSummaries]);
+  const runningSessions = useMemo(() => collectRunningSessions(sessionsForView(sessionSummaries, "active", sessionViewOptions)), [sessionSummaries, sessionViewOptions]);
   const listedRunningSessions = useMemo(() => collectRunningSessions(runningSessions, sidebarQuery, agentNames), [runningSessions, sidebarQuery, agentNames]);
   const sessionGroups = useMemo(() => groupSessionsByWorkspace(visibleSessions, sidebarQuery, recentWorkspaces, activeWorkspace, agentNames), [visibleSessions, recentWorkspaces, activeWorkspace, sidebarQuery, agentNames]);
-  const archivedCount = useMemo(() => archivedSessionCount(sessionSummaries), [sessionSummaries]);
+  const archivedCount = useMemo(() => archivedSessionCount(sessionSummaries, sessionViewOptions), [sessionSummaries, sessionViewOptions]);
+  const automationSessionCount = useMemo(() => sessionSummaries.filter(isAutomationSessionSummary).length, [sessionSummaries]);
   // 选择集按当前视图过滤：会话被删/刷新后可能残留陈旧键，操作时必须只拿「还在列表里」的那些。
-  const selectedPaths = useMemo(() => selectedPathsInView(selectedSessionPaths, sessionSummaries, sessionView), [selectedSessionPaths, sessionSummaries, sessionView]);
+  const selectedPaths = useMemo(() => selectedPathsInView(selectedSessionPaths, sessionSummaries, sessionView, sessionViewOptions), [selectedSessionPaths, sessionSummaries, sessionView, sessionViewOptions]);
   const themeLayers = useMemo(() => collectThemeLayers(settings.appearance.customCss), [settings.appearance.customCss]);
   const activePreviewTab = preview?.tabs.find((tab) => tab.id === preview.activeTabId);
 
@@ -1761,6 +1798,7 @@ export function App(): ReactNode {
   // 稳定身份——下游 openArtifactPreview/openFilePreview/openPlanPreview 等
   // memo 化回调全部依赖它，不稳定会级联击穿 ConversationPane 的 memo。
   const openPreviewTarget = useCallback((target: PreviewTarget, id: string = previewTargetKey(target)): void => {
+    setAutomationPanelOpen(false);
     setPreviewOpened(true);
     setPreview((current) => {
       if (current?.tabs.some((tab) => tab.id === id)) return { ...current, activeTabId: id };
@@ -2278,7 +2316,7 @@ export function App(): ReactNode {
                             <span className="session-item-heading"><strong>{item.title}</strong><span className="session-agent-badge" title={`助手：${agentName}`}>{agentName}</span></span>
                             <small>{new Date(item.modifiedAt).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}</small>
                           </span>
-                          {(item.runStatus || item.pinned || item.archived || automationSessionIds.has(item.id)) && <div className="session-item-meta">{item.runStatus && <i className={`session-status-dot ${item.runStatus}`} title={sessionRunStatusLabels[item.runStatus]} aria-label={sessionRunStatusLabels[item.runStatus]!} />}{automationSessionIds.has(item.id) && <span className="session-automation-indicator" title="有定时任务" aria-label="有定时任务"><Clock size={11} /></span>}{item.pinned && <Pin size={11} className="session-pin-indicator" />}{item.archived && <Archive size={11} className="session-archive-indicator" />}</div>}
+                          {(() => { const automationOrigin = isAutomationSessionSummary(item); if (!(item.runStatus || item.pinned || item.archived || automationSessionIds.has(item.id) || automationOrigin)) return null; return <div className="session-item-meta">{item.runStatus && <i className={`session-status-dot ${item.runStatus}`} title={sessionRunStatusLabels[item.runStatus]} aria-label={sessionRunStatusLabels[item.runStatus]!} />}{automationOrigin && <span className="session-automation-origin" title="自动化运行会话" aria-label="自动化运行会话"><Zap size={11} /></span>}{automationSessionIds.has(item.id) && <span className="session-automation-indicator" title="有定时任务" aria-label="有定时任务"><Clock size={11} /></span>}{item.pinned && <Pin size={11} className="session-pin-indicator" />}{item.archived && <Archive size={11} className="session-archive-indicator" />}</div>; })()}
                         </button>;
                       })}
                     </div>
@@ -2289,8 +2327,23 @@ export function App(): ReactNode {
           </nav>}
         </>
       )}
+      {automationSessionCount > 0 && (
+        <button
+          className={`session-automation-bucket${showAutomationSessions ? " active" : ""}`}
+          data-control="automation-sessions-toggle"
+          type="button"
+          aria-pressed={showAutomationSessions}
+          title={showAutomationSessions ? "隐藏自动化运行产生的会话" : "显示自动化运行产生的会话（默认隐藏）"}
+          onClick={toggleAutomationSessions}
+        >
+          <Zap size={13} />
+          <span>自动化会话</span>
+          <em>{automationSessionCount}</em>
+          <small>{showAutomationSessions ? "已显示" : "已隐藏"}</small>
+        </button>
+      )}
       <button className="new-session-button" data-control="new-session" type="button" disabled={!activeWorkspace} onClick={() => void createNewSession()}><MessageSquarePlus size={16} />新建话题</button>
-      <button className="automation-nav-button" data-control="automation-open" type="button" title="自动化任务" aria-label="自动化任务" onClick={() => openSettingsOn("automation")}><Zap size={15} /><span>自动化</span></button>
+      <button className={`automation-nav-button${automationPanelOpen ? " active" : ""}`} data-control="automation-open" type="button" title="自动化任务" aria-label="自动化任务" aria-pressed={automationPanelOpen} onClick={() => automationPanelOpen ? closeAutomationPanel() : openAutomationPanel()}><Zap size={15} /><span>自动化</span></button>
       <button className="automation-nav-button" data-control="ssh-open" type="button" title="SSH 远程终端" aria-label="SSH 远程终端" onClick={() => openSshPanel()}><Server size={15} /><span>SSH</span></button>
       <div className="sidebar-footer">
         <button type="button" data-control="settings" onClick={() => setSettingsOpen(true)}><Settings size={16} />设置</button>
@@ -2459,7 +2512,7 @@ export function App(): ReactNode {
           <button type="button" className="rail-brand" data-control="sidebar-expand" title="展开侧边栏" aria-label="展开侧边栏" onClick={() => { if (sidebarFlyoutOpen) { setSidebarFlyoutOpen(false); } else { setSidebarCollapsed(false); } }}><span className="rail-brand-mark"><BrandMark size={20} /></span><PanelLeftOpen className="rail-brand-expand" size={18} /></button>
           <div className="sidebar-rail-items">
             <button type="button" className="rail-new-session" data-control="new-session" title="在当前工作区新建话题" aria-label="在当前工作区新建话题" disabled={!activeWorkspace} onClick={() => void createNewSession()}><Plus size={18} /></button>
-            <button type="button" className="rail-icon" data-control="automation-open" title="自动化任务" aria-label="自动化任务" onClick={() => openSettingsOn("automation")}><Zap size={18} /></button>
+            <button type="button" className={`rail-icon${automationPanelOpen ? " active" : ""}`} data-control="automation-open" title="自动化任务" aria-label="自动化任务" onClick={() => automationPanelOpen ? closeAutomationPanel() : openAutomationPanel()}><Zap size={18} /></button>
             <button type="button" className="rail-icon" data-control="ssh-open" title="SSH 远程终端" aria-label="SSH 远程终端" onClick={() => openSshPanel()}><Server size={18} /></button>
             <button type="button" className="rail-icon" data-control="rail-topics" title={runningSessions.length > 0 ? `话题列表（${runningSessions.length} 个运行中）` : "话题列表"} aria-label={runningSessions.length > 0 ? `话题列表，${runningSessions.length} 个运行中` : "话题列表"} onClick={() => { setSidebarView("topics"); setSidebarTab("topics"); setSidebarFlyoutOpen(true); }}><MessageCircle size={18} />{runningSessions.length > 0 ? <span className="rail-running-badge">{runningSessions.length}</span> : null}</button>
             <button type="button" className="rail-icon" data-control="rail-search" title="搜索" aria-label="搜索" onClick={() => { setSidebarView("topics"); setSidebarFlyoutOpen(true); window.setTimeout(() => sidebarSearchRef.current?.focus(), 30); }}><Search size={18} /></button>
@@ -2507,6 +2560,7 @@ export function App(): ReactNode {
               if (previewOpened) {
                 setPreviewOpened(false);
               } else {
+                setAutomationPanelOpen(false);
                 setPreviewOpened(true);
               }
             }}>{previewOpened ? <PanelRightClose size={18} /> : <Eye size={18} />}</button>
@@ -2516,8 +2570,13 @@ export function App(): ReactNode {
           <div
             ref={workAreaRef}
             data-pane="work-area"
-            className={`work-area${designMode ? " design-mode" : ` ${workAreaPreviewClasses({ open: previewOpened, tabs: Boolean(preview && preview.tabs.length > 0) })}`}${designDragging ? " is-design-dragging" : !designMode && previewDragging ? " is-preview-dragging" : ""}`}
-            style={designMode ? { "--design-split": `${designSplit}%` } as CSSProperties : previewVisible ? { "--preview-split": `${previewSplit}%` } as CSSProperties : undefined}
+            className={`work-area${designMode ? " design-mode" : ` ${workAreaPreviewClasses({ open: previewOpened, tabs: Boolean(preview && preview.tabs.length > 0) })}`}${automationPanelPresence.rendered ? " automation-panel-open" : ""}${designDragging ? " is-design-dragging" : !designMode && previewDragging ? " is-preview-dragging" : ""}`}
+            style={designMode
+              ? { "--design-split": `${designSplit}%` } as CSSProperties
+              : {
+                  ...(previewVisible ? { "--preview-split": `${previewSplit}%` } : {}),
+                  ...(automationPanelPresence.rendered ? { "--automation-panel-width": "386px" } : {})
+                } as CSSProperties}
           >
           {/* 设计模式：画布工作台占主体 + AI 对话侧栏（ConversationPane 完整复用）；
               分屏树保留但不渲染，退出设计模式即恢复；预览面板不挂载（互斥）。 */}
@@ -2594,6 +2653,23 @@ export function App(): ReactNode {
             <ArtifactPreview key="empty-state" tabs={[]} activeTabId="" onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddTerminal={openTerminalPreview} onAddSsh={openSshPanel} onSshConnect={openSshTerminalHost} onAddFile={() => void openManualFilePreview()} onBrowserPickSend={sendPickedElement} />
           )}</ExitWrap>}
           </>)}
+          {automationPanelPresence.rendered && (
+            <ExitWrap exiting={automationPanelPresence.exiting}>
+              <AutomationPanel
+                models={models}
+                providers={providers}
+                settings={settings}
+                workspacePath={activeWorkspace}
+                activeAgentId={activeAgentId}
+                tab={automationPanelTab}
+                onTabChange={setAutomationPanelTab}
+                highlight={automationPanelHighlight}
+                onClose={closeAutomationPanel}
+                onManageAll={() => { closeAutomationPanel(); openSettingsOn("automation"); }}
+                onOpenSession={closeAutomationPanel}
+              />
+            </ExitWrap>
+          )}
         </div>
       </main>
 

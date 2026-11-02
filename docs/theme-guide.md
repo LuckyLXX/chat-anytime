@@ -33,7 +33,7 @@
 
 类名属于实现细节，可能随版本变化；以下属性是稳定契约，结构化主题请只依赖它们：
 
-**区域钩子 `data-pane`**：`sidebar` `topbar` `workspace` `work-area` `conversation` `timeline` `composer` `task-panel` `memory-panel` `preview` `terminal` `ssh` `ssh-files` `question-panel` `settings-dialog` `permission-dialog` `landing` `turn-minimap` `markdown-outline` `design` `design-toolbar` `design-tools` `design-canvas` `design-layers` `design-inspector` `gallery-menu` `gallery-wall` `automation-settings` `automation-dialog` `agent-settings` `general-settings` `model-settings` `resource-settings` `appearance-settings` `subagent-settings` `hooks-settings` `usage-settings`
+**区域钩子 `data-pane`**：`sidebar` `topbar` `workspace` `work-area` `conversation` `timeline` `composer` `task-panel` `memory-panel` `preview` `terminal` `ssh` `ssh-files` `question-panel` `settings-dialog` `permission-dialog` `landing` `turn-minimap` `markdown-outline` `design` `design-toolbar` `design-tools` `design-canvas` `design-layers` `design-inspector` `gallery-menu` `gallery-wall` `automation-settings` `automation-dialog` `automation-panel` `agent-settings` `general-settings` `model-settings` `resource-settings` `appearance-settings` `subagent-settings` `hooks-settings` `usage-settings`
 
 > `design` 是设计模式（Design Studio，顶栏调色板按钮进入）的工作台外壳——顶栏工具栏 + 左侧图层树（`design-layers`）+ 中部无限画布（`design-canvas`）+ 右侧属性检查器（`design-inspector`）。工作台底色走 `--panel-bg-preview`（缺省 `--panel-bg`）与既有表面 token，跟随主题；画布点阵/参考线/选择框用 `--border`/`--accent` 派生，主题可用 `[data-pane="design"]` 后代选择器重设计。 `design-tools` 是画布顶部居中的浮动绘图工具胶囊（选择/画板/矩形/文本），激活按钮带 `aria-pressed="true"`。
 
@@ -72,7 +72,7 @@
 
 > `usage-settings` 是设置页「用量统计」tab（2026-09-23 重设计）——纯只读页：顶部固定条（标题 + 范围筛选 `data-control="usage-agent-filter"` + 刷新）+ 可滚动正文（三张总览卡 `.usage-summary-card` + 四张 `.usage-card`：活跃热力 / 按天 / 按模型 / 最近会话）；**没有操作条**。
 
-> `automation-settings` 是设置页「自动化任务」tab（双子页：「任务」列表 + 搜索 + 过滤器 / 「运行记录」历史面板，位于 `settings-dialog` 内）；`automation-dialog` 是「创建/编辑定时任务」弹窗。二者都随设置页/弹窗配色走，主题可用 `--panel-bg` 派生背景与 `--border`/`--surface-*` 控制排版。相关控件钩子：`data-control="automation-open"`（侧栏「新建话题」下方的「自动化」入口 + 折叠态窄条图标）、`automation-run`（任务行内的「运行一次」）、`automation-toggle`（任务行的启停开关，`role="switch"` + `aria-checked` 标记两态）、`automation-runs-tab`（子页「运行记录」）；未在控件列枚举的地方（如编辑/删除按钮）用类名 `.automation-*` 命中。
+> `automation-settings` 是设置页「自动化任务」tab（双子页：「任务」列表 + 搜索 + 过滤器 / 「运行记录」历史面板，位于 `settings-dialog` 内）；`automation-dialog` 是「创建/编辑定时任务」弹窗。二者都随设置页/弹窗配色走，主题可用 `--panel-bg` 派生背景与 `--border`/`--surface-*` 控制排版。相关控件钩子：`data-control="automation-open"`（侧栏「新建话题」下方的「自动化」入口 + 折叠态窄条图标；2026-11-02 起打开右侧 `automation-panel`，设置页 tab 作为完整管理入口保留）、`automation-run`（任务行/面板卡内的「运行一次」）、`automation-toggle`（启停开关，`role="switch"` + `aria-checked` 标记两态）、`automation-runs-tab`（设置页子页「运行记录」）、`automation-stop`（面板中运行中任务的「停止本次」，只中止本次后台运行）、`automation-panel-close`（关闭面板）、`automation-panel-manage`（面板底部「管理全部」，打开设置页自动化 tab）、`automation-sessions-toggle`（侧栏底部「自动化会话 N」收纳开关，默认隐藏运行会话）。未在控件列枚举的地方（如编辑/删除按钮）用类名 `.automation-*` 命中。`automation-panel` 是 work-area 内右侧绝对定位 dock，宽度 `--automation-panel-width`（缺省 386px），打开时单窗口 `.timeline` / `.composer` 会让出宽度；与预览面板互斥。
 
 > `ssh` 是预览面板的 SSH 主机管理 tab（`data-pane="ssh"`，与 `terminal` 同层；远程终端 tab 本体也是 `terminal` 区域）。主机列表/表单/指纹确认卡用类名 `.ssh-host-*` / `.ssh-fingerprint-*` 命中，安全存储警告条 `.ssh-insecure-warning`；主机清单按分组折叠展示（`.ssh-group-*` 类名，未分组为固定尾节）。相关控件钩子：`data-control="ssh-open"`（侧栏「新建话题」下方的「SSH」入口 + 折叠态窄条图标）、`ssh-host-create` / `ssh-host-save` / `ssh-host-delete` / `ssh-host-connect`（主机面板动作；`ssh-host-save` 只在编辑表单里出现）、`ssh-host-test`（主机行「测试」：连一次并显示往返延迟，成功/失败都写在行内）、`ssh-trust-fingerprint`（首次连接指纹确认卡）、`ssh-password-submit` / `ssh-password-cancel`（主机没有可用密码时弹出的密码输入卡，含「密码被拒后重弹」）、`ssh-group-create` / `ssh-group-save`（分组新建/保存）；删除分组等未枚举的图标按钮用 `.ssh-host-*` / `.ssh-group-*` 区域内的按钮通用选择器命中。
 
@@ -92,6 +92,7 @@
 | ------------------------------------------- | ------------------------------------------------ |
 | 新建话题（侧栏）                            | `new-session`                                    |
 | 自动化任务（侧栏新建话题下方 + 折叠窄条）   | `automation-open`                               |
+| 自动化右侧面板：关闭 / 管理全部 / 停止本次 / 自动化会话开关 | `automation-panel-close` / `automation-panel-manage` / `automation-stop` / `automation-sessions-toggle` |
 | 自动化任务行：运行一次 / 启停开关（`role="switch"` + `aria-checked`） | `automation-run` / `automation-toggle` |
 | 自动化任务「运行记录」子页 tab（设置页内）   | `automation-runs-tab`                           |
 | SSH 远程终端（侧栏新建话题下方 + 折叠窄条） | `ssh-open`                                      |

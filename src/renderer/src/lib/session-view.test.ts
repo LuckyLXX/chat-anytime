@@ -9,6 +9,8 @@ function session(overrides: Partial<SessionSummary> & { path: string }): Session
 const active = session({ path: "C:/pi/sessions/a.jsonl" });
 const archived = session({ path: "C:/pi/sessions/b.jsonl", archived: true });
 const alsoArchived = session({ path: "C:/pi/sessions/c.jsonl", archived: true });
+const automation = session({ path: "C:/pi/sessions/d.jsonl", origin: { kind: "automation", taskId: "task-1", taskName: "日报" } });
+const legacyAutomation = session({ path: "C:/pi/sessions/e.jsonl", title: "自动化 · 旧日报" });
 const all = [active, archived, alsoArchived];
 
 describe("session view projection", () => {
@@ -17,10 +19,19 @@ describe("session view projection", () => {
     expect(sessionsForView(all, "archived").map((item) => item.path)).toEqual([archived.path, alsoArchived.path]);
   });
 
+  it("hides automation sessions by default and reveals them with the toggle", () => {
+    expect(sessionsForView([...all, automation, legacyAutomation], "active").map((item) => item.path))
+      .toEqual([active.path]);
+    expect(sessionsForView([...all, automation, legacyAutomation], "active", { showAutomation: true }).map((item) => item.path))
+      .toEqual([active.path, automation.path, legacyAutomation.path]);
+  });
+
   it("counts only archived sessions", () => {
     expect(archivedSessionCount(all)).toBe(2);
     expect(archivedSessionCount([active])).toBe(0);
     expect(archivedSessionCount([])).toBe(0);
+    expect(archivedSessionCount([{ ...automation, archived: true }], { showAutomation: false })).toBe(0);
+    expect(archivedSessionCount([{ ...automation, archived: true }], { showAutomation: true })).toBe(1);
   });
 });
 
@@ -49,5 +60,9 @@ describe("session selection", () => {
     expect(selectedPathsInView(selected, all, "archived")).toEqual([archived.path]);
     expect(selectedPathsInView(selected, [archived], "active")).toEqual([]);
     expect(selectedPathsInView({}, all, "archived")).toEqual([]);
+    const withAutomation = selectSessionPaths([active.path, automation.path]);
+    expect(selectedPathsInView(withAutomation, [active, automation], "active")).toEqual([active.path]);
+    expect(selectedPathsInView(withAutomation, [active, automation], "active", { showAutomation: true }))
+      .toEqual([active.path, automation.path]);
   });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatAutomationDelay, formatAutomationSchedule, isOneShotSchedule, parseScheduledReminderText } from "./automation.js";
+import { formatAutomationDelay, formatAutomationNextRun, formatAutomationSchedule, isOneShotSchedule, nextAutomationRun, parseScheduledReminderText } from "./automation.js";
 import type { AutomationSchedule } from "./protocol.js";
 
 const CRON: AutomationSchedule = { kind: "cron", cron: "0 9 * * 1-5" };
@@ -63,5 +63,44 @@ describe("parseScheduledReminderText", () => {
   it("keeps a body-only reminder and ignores ordinary user text", () => {
     expect(parseScheduledReminderText("[定时任务提醒]\n\n继续执行")).toEqual({ body: "继续执行" });
     expect(parseScheduledReminderText("普通用户消息")).toBeUndefined();
+  });
+});
+
+describe("nextAutomationRun", () => {
+  it("picks today's next cron minute, otherwise the next day", () => {
+    const before = new Date(2026, 10, 2, 8, 30).getTime();
+    const today = nextAutomationRun({ kind: "cron", cron: "0 9 * * *" }, before);
+    expect(today).toBe(new Date(2026, 10, 2, 9, 0).getTime());
+
+    const after = new Date(2026, 10, 2, 10, 0).getTime();
+    const tomorrow = nextAutomationRun({ kind: "cron", cron: "0 9 * * *" }, after);
+    expect(tomorrow).toBe(new Date(2026, 10, 3, 9, 0).getTime());
+  });
+
+  it("supports step, weekly, and monthly schedules", () => {
+    const now = new Date(2026, 10, 2, 10, 7).getTime();
+    expect(nextAutomationRun({ kind: "cron", cron: "*/15 * * * *" }, now)).toBe(new Date(2026, 10, 2, 10, 15).getTime());
+    expect(nextAutomationRun({ kind: "cron", cron: "0 9 * * 1" }, now)).toBe(new Date(2026, 10, 9, 9, 0).getTime());
+    expect(nextAutomationRun({ kind: "cron", cron: "0 9 1 * *" }, now)).toBe(new Date(2026, 11, 1, 9, 0).getTime());
+  });
+
+  it("returns one-shot targets only while they are in the future", () => {
+    const now = 1_700_000_000_000;
+    expect(nextAutomationRun({ kind: "after", afterSeconds: 300, scheduledAt: now + 300_000 }, now)).toBe(now + 300_000);
+    expect(nextAutomationRun({ kind: "at", scheduledAt: now - 1 }, now)).toBeUndefined();
+  });
+
+  it("leaves IANA-timezone cron for P1 and reports 按计划 instead of a wrong instant", () => {
+    expect(nextAutomationRun({ kind: "cron", cron: "0 9 * * *", timezone: "Asia/Shanghai" })).toBeUndefined();
+  });
+});
+
+describe("formatAutomationNextRun", () => {
+  it("renders today / tomorrow / weekday / date labels with relative distance", () => {
+    const now = new Date(2026, 10, 2, 8, 0).getTime();
+    expect(formatAutomationNextRun(new Date(2026, 10, 2, 9, 0).getTime(), now)).toBe("今天 09:00 · 1 小时后");
+    expect(formatAutomationNextRun(new Date(2026, 10, 3, 9, 0).getTime(), now)).toBe("明天 09:00 · 1 天后");
+    expect(formatAutomationNextRun(new Date(2026, 10, 5, 9, 0).getTime(), now)).toBe("周四 09:00 · 3 天后");
+    expect(formatAutomationNextRun(undefined, now)).toBeUndefined();
   });
 });

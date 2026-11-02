@@ -21,6 +21,8 @@ export interface AutomationRunsProps {
   highlight?: AutomationRunsHighlight;
   /** 「查看会话/切换角色查看」：由宿主先关设置页（跳转后的会话不被弹窗遮挡）。 */
   onOpenSession: () => void;
+  /** 右侧自动化面板的紧凑形态：只保留 全部/成功/失败，隐藏任务筛选与计数。 */
+  compact?: boolean;
 }
 
 type StatusFilter = "all" | "ok" | "error" | "aborted" | "skipped" | "delivered";
@@ -68,7 +70,7 @@ function groupByDay(runs: AutomationRunRecord[]): [string, AutomationRunRecord[]
   return [...groups.entries()];
 }
 
-export function AutomationRuns({ settings, activeAgentId, highlight, onOpenSession }: AutomationRunsProps): ReactNode {
+export function AutomationRuns({ settings, activeAgentId, highlight, onOpenSession, compact = false }: AutomationRunsProps): ReactNode {
   const runs = useDesktopStore((state) => state.automationRuns);
   const automation = useDesktopStore((state) => state.automation);
   const automationRun = useDesktopStore((state) => state.automationRun);
@@ -128,24 +130,24 @@ export function AutomationRuns({ settings, activeAgentId, highlight, onOpenSessi
   }
 
   return (
-    <div className="automation-runs" ref={panelRef}>
+    <div className={`automation-runs${compact ? " compact" : ""}`} ref={panelRef}>
       <div className="automation-runs-toolbar">
         <div className="automation-filter-tabs" role="tablist" aria-label="运行状态筛选">
           <button type="button" className={statusFilter === "all" ? "active" : ""} role="tab" aria-selected={statusFilter === "all"} onClick={() => setStatusFilter("all")}>全部</button>
           <button type="button" className={statusFilter === "ok" ? "active" : ""} role="tab" aria-selected={statusFilter === "ok"} onClick={() => setStatusFilter("ok")}>成功</button>
           <button type="button" className={statusFilter === "error" ? "active" : ""} role="tab" aria-selected={statusFilter === "error"} onClick={() => setStatusFilter("error")}>失败</button>
-          <button type="button" className={statusFilter === "aborted" ? "active" : ""} role="tab" aria-selected={statusFilter === "aborted"} onClick={() => setStatusFilter("aborted")}>已中止</button>
+          {!compact && <><button type="button" className={statusFilter === "aborted" ? "active" : ""} role="tab" aria-selected={statusFilter === "aborted"} onClick={() => setStatusFilter("aborted")}>已中止</button>
           <button type="button" className={statusFilter === "skipped" ? "active" : ""} role="tab" aria-selected={statusFilter === "skipped"} onClick={() => setStatusFilter("skipped")}>已跳过</button>
-          <button type="button" className={statusFilter === "delivered" ? "active" : ""} role="tab" aria-selected={statusFilter === "delivered"} onClick={() => setStatusFilter("delivered")}>已投递</button>
+          <button type="button" className={statusFilter === "delivered" ? "active" : ""} role="tab" aria-selected={statusFilter === "delivered"} onClick={() => setStatusFilter("delivered")}>已投递</button></>}
         </div>
-        <label className="automation-runs-task-filter" aria-label="任务筛选"><span>任务</span>
+        {!compact && <label className="automation-runs-task-filter" aria-label="任务筛选"><span>任务</span>
           <select value={taskFilter} onChange={(event) => setTaskFilter(event.target.value)}>
             <option value="all">全部任务</option>
             {taskOptions.map((task) => <option key={task.id} value={task.id}>{task.name}{task.agentName !== task.agentId ? ` · ${task.agentName}` : ""}</option>)}
           </select>
           <ChevronDown size={12} className="automation-runs-task-chevron" aria-hidden="true" />
-        </label>
-        <span className="automation-runs-count">共 {filteredCount} 条 · 保留最近 200 条</span>
+        </label>}
+        {!compact && <span className="automation-runs-count">共 {filteredCount} 条 · 保留最近 200 条</span>}
       </div>
 
       {runningNow && (

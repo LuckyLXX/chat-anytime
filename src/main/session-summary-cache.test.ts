@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { SessionManager, type SessionEntry } from "@earendil-works/pi-coding-agent";
-import { listSessionSummaries, loadSessionIndex, readSessionHeaderLine, saveSessionIndex, summarizeEntries, summarizeLiveSession, type SessionFileSummary } from "./session-summary-cache.js";
+import { AUTOMATION_SESSION_ORIGIN_CUSTOM_TYPE } from "../shared/session-origin.js";
+import { listSessionSummaries, loadSessionIndex, readSessionHeaderLine, saveSessionIndex, SESSION_INDEX_VERSION, summarizeEntries, summarizeLiveSession, type CachedSessionSummary, type SessionFileSummary } from "./session-summary-cache.js";
 
 /**
  * 会话摘要缓存（2026-09-25 性能 P0）的回归网。
@@ -71,6 +72,47 @@ function compareWithPi(dirs: string[], summaries: SessionFileSummary[], piSessio
     });
   }
 }
+
+describe("session summary cache: automation origin", () => {
+  it("projects the custom origin entry and survives the disk index", async () => {
+    const dir = tempDir("origin");
+    writeRealSession(dir, "C:/work/demo", (manager) => {
+      manager.appendCustomEntry(AUTOMATION_SESSION_ORIGIN_CUSTOM_TYPE, {
+        kind: "automation",
+        taskId: "task-1",
+        taskName: "每日新闻日报",
+        runId: "run-1"
+      });
+      manager.appendMessage({ role: "user", content: "跑日报" } as never);
+      manager.appendMessage({ role: "assistant", content: "完成" } as never);
+    });
+
+    const first = await listSessionSummaries([dir]);
+    expect(first).toHaveLength(1);
+    expect(first[0]?.origin).toEqual({ kind: "automation", taskId: "task-1", taskName: "每日新闻日报", runId: "run-1" });
+
+    // 索引往返：origin 必须跟着摘要一起持久化，否则重启后自动化会话会重回话题列表。
+    const cache = new Map<string, CachedSessionSummary>();
+    const indexed = await listSessionSummaries([dir], { cache });
+    saveSessionIndex(join(dir, "index.json"), cache, { now: 1_700_000_000_000 });
+    const reloaded = loadSessionIndex(join(dir, "index.json"), { now: 1_700_000_000_000 });
+    const second = await listSessionSummaries([dir], { cache: reloaded });
+    expect(second[0]?.origin?.taskId).toBe("task-1");
+    expect(second[0]?.messageCount).toBe(indexed[0]?.messageCount);
+  });
+
+  it("ignores malformed origin entries instead of failing the whole session", async () => {
+    const dir = tempDir("origin-bad");
+    writeRealSession(dir, "C:/work/demo", (manager) => {
+      manager.appendCustomEntry(AUTOMATION_SESSION_ORIGIN_CUSTOM_TYPE, { kind: "automation", taskId: "" });
+      manager.appendMessage({ role: "user", content: "普通会话" } as never);
+      manager.appendMessage({ role: "assistant", content: "好" } as never);
+    });
+    const summaries = await listSessionSummaries([dir]);
+    expect(summaries[0]?.origin).toBeUndefined();
+    expect(summaries[0]?.messageCount).toBe(2);
+  });
+});
 
 describe("session summary cache: parity with Pi SessionManager.listAll", () => {
   it("matches Pi field by field across real and hand-written session shapes", async () => {
@@ -469,7 +511,7 @@ describe("session summary cache: disk index", () => {
     const dir = tempDir("index-invalid-entries");
     const indexPath = join(dir, "index.json");
     writeFileSync(indexPath, JSON.stringify({
-      version: 1,
+      version: SESSION_INDEX_VERSION,
       entries: [
         { key: "c:/good.jsonl", mtimeMs: 1, size: 2, seenAt: 1_700_000_000_000, summary: { path: "C:/good.jsonl", id: "g", cwd: "C:/w", created: "2026-01-01T00:00:00.000Z", modified: "2026-01-02T00:00:00.000Z", messageCount: 3, firstMessage: "hi" } },
         { key: "c:/bad-date.jsonl", mtimeMs: 1, size: 2, seenAt: 1_700_000_000_000, summary: { path: "C:/b.jsonl", id: "b", cwd: "C:/w", created: "not-a-date", modified: "2026-01-02T00:00:00.000Z", messageCount: 1, firstMessage: "x" } },
@@ -485,7 +527,7 @@ describe("session summary cache: disk index", () => {
     const dir = tempDir("index-expiry");
     const indexPath = join(dir, "index.json");
     writeFileSync(indexPath, JSON.stringify({
-      version: 1,
+      version: SESSION_INDEX_VERSION,
       entries: [
         { key: "c:/old.jsonl", mtimeMs: 1, size: 2, seenAt: 1_000, summary: null },
         { key: "c:/new.jsonl", mtimeMs: 1, size: 2, seenAt: 1_700_000_000_000, summary: null }
@@ -501,7 +543,7 @@ describe("session summary cache: disk index", () => {
     const entries = Array.from({ length: 5 }, (_, index) => ({
       key: `c:/s${index}.jsonl`, mtimeMs: 1, size: 2, seenAt: 1_700_000_000_000 + index, summary: null
     }));
-    writeFileSync(indexPath, JSON.stringify({ version: 1, entries }), "utf8");
+    writeFileSync(indexPath, JSON.stringify({ version: SESSION_INDEX_VERSION, entries }), "utf8");
     const loaded = loadSessionIndex(indexPath, { now: 1_700_000_000_010, maxEntries: 3 });
     expect(loaded.size).toBe(3);
     expect([...loaded.keys()].sort()).toEqual(["c:/s2.jsonl", "c:/s3.jsonl", "c:/s4.jsonl"]);

@@ -2,6 +2,7 @@ import { readdir, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import type { AgentProfile, SessionSummary } from "../shared/protocol.js";
 import { listSessionSummaries, type CachedSessionSummary, type SessionFileSummary } from "./session-summary-cache.js";
+import { isAutomationSessionSummary } from "../shared/session-origin.js";
 import { isSessionArchived, isSessionPinned, sessionPathKey, sortSessionSummaries } from "./session-scope.js";
 
 /**
@@ -247,6 +248,7 @@ export async function summarizeAllSessions(
         modifiedAt: item.modified.getTime(),
         messageCount: item.messageCount,
         agentId: scope.agentId,
+        ...(item.origin ? { origin: item.origin } : {}),
         pinned: isSessionPinned(pinnedPaths, item.path) || undefined,
         archived: isSessionArchived(archivedPaths, item.path) || undefined,
         ...(missing ? { workspaceMissing: true } : {})
@@ -304,10 +306,13 @@ export function pickRecentSession(
     includeArchived?: boolean;
     excludeArchivedAgents?: boolean;
     agents?: readonly AgentProfile[];
+    /** 是否允许选中自动化运行会话；缺省 false（避免打开工作区时直接进后台日报）。 */
+    includeAutomation?: boolean;
   } = {}
 ): SessionSummary | undefined {
   const workspaceKey = sessionPathKey(workspace);
   const includeArchived = options.includeArchived === true;
+  const includeAutomation = options.includeAutomation === true;
   const excludeArchivedAgents = options.excludeArchivedAgents !== false;
   const agentById = new Map<string, AgentProfile>();
   for (const agent of options.agents ?? []) {
@@ -319,6 +324,7 @@ export function pickRecentSession(
   for (const session of sessions) {
     if (sessionPathKey(session.workspace) !== workspaceKey) continue;
     if (!includeArchived && session.archived) continue;
+    if (!includeAutomation && isAutomationSessionSummary(session)) continue;
     if (excludeArchivedAgents) {
       const agent = agentById.get(session.agentId.toLowerCase());
       if (agent?.archived === true) continue;

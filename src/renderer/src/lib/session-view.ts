@@ -1,4 +1,5 @@
 import type { SessionSummary } from "../../../shared/protocol";
+import { isAutomationSessionSummary } from "../../../shared/session-origin";
 
 /**
  * 话题侧栏的两个视图：全部（未归档）与已归档。
@@ -10,14 +11,28 @@ import type { SessionSummary } from "../../../shared/protocol";
  */
 export type SessionView = "active" | "archived";
 
-/** 当前视图下的会话（`archived` 缺省视为未归档）。 */
-export function sessionsForView(sessions: readonly SessionSummary[], view: SessionView): SessionSummary[] {
-  return sessions.filter((session) => (view === "archived" ? session.archived === true : session.archived !== true));
+/** 话题列表的过滤选项：自动化运行会话默认隐藏，可在侧栏开关里临时显示。 */
+export interface SessionViewOptions {
+  showAutomation?: boolean;
 }
 
-export function archivedSessionCount(sessions: readonly SessionSummary[]): number {
+function visibleInView(session: SessionSummary, view: SessionView, options: SessionViewOptions): boolean {
+  if (view === "archived" ? session.archived !== true : session.archived === true) return false;
+  if (options.showAutomation !== true && isAutomationSessionSummary(session)) return false;
+  return true;
+}
+
+/** 当前视图下的会话（`archived` 缺省视为未归档；自动化会话默认隐藏）。 */
+export function sessionsForView(sessions: readonly SessionSummary[], view: SessionView, options: SessionViewOptions = {}): SessionSummary[] {
+  return sessions.filter((session) => visibleInView(session, view, options));
+}
+
+/** 归档计数与列表同口径：隐藏的自动化会话不计入「已归档 N」。 */
+export function archivedSessionCount(sessions: readonly SessionSummary[], options: SessionViewOptions = {}): number {
   let count = 0;
-  for (const session of sessions) if (session.archived) count += 1;
+  for (const session of sessions) {
+    if (session.archived && (options.showAutomation === true || !isAutomationSessionSummary(session))) count += 1;
+  }
   return count;
 }
 
@@ -47,8 +62,13 @@ export function selectSessionPaths(paths: readonly string[]): SessionSelection {
  * 或跑到另一个视图（取消归档后它离开归档屏）。操作前一律以此函数收口，
  * 避免把陈旧路径发进删除 / 归档命令。
  */
-export function selectedPathsInView(selected: SessionSelection, sessions: readonly SessionSummary[], view: SessionView): string[] {
-  return sessionsForView(sessions, view)
+export function selectedPathsInView(
+  selected: SessionSelection,
+  sessions: readonly SessionSummary[],
+  view: SessionView,
+  options: SessionViewOptions = {}
+): string[] {
+  return sessionsForView(sessions, view, options)
     .filter((session) => selected[session.path] === true)
     .map((session) => session.path);
 }

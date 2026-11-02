@@ -250,6 +250,8 @@ export interface LiveSessionSeed {
   agentId: string;
   activatedAt: number;
   title?: string;
+  /** 会话来源（自动化后台运行）；缺省 = 普通会话。 */
+  origin?: SessionSummary["origin"];
   runStatus?: SessionSummary["runStatus"];
 }
 
@@ -321,11 +323,13 @@ export function backfillUnpersistedSessions(
       title: seed.title ?? "新会话",
       modifiedAt: seed.activatedAt,
       messageCount: 0,
+      ...(seed.origin ? { origin: seed.origin } : {}),
       // 回填行来自 live 记录，本身不知道置顶/归档状态；但重建前列表里的同名条目
       // 知道（`prior`），必须带过来 —— 否则一次全量刷新就会把标记从该行抹掉
       //（归档一个刚建的空话题后，防抖刷新把它又放回列表就是这条）。
       ...(prior?.pinned ? { pinned: true } : {}),
-      ...(prior?.archived ? { archived: true } : {})
+      ...(prior?.archived ? { archived: true } : {}),
+      ...(prior?.origin ? { origin: prior.origin } : {})
     };
     const base = prior ?? synthetic;
     next = mergeSessionSummary(next, seed.runStatus ? { ...base, runStatus: seed.runStatus } : base);

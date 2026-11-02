@@ -300,6 +300,7 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 .new-session-button:disabled { opacity: .45; cursor: default; }
 .automation-nav-button { display: flex; align-items: center; justify-content: center; gap: 7px; width: 100%; height: 32px; margin-top: 8px; border: 1px solid var(--border-strong); border-radius: 6px; color: var(--text); background: var(--surface); font-size: 12px; font-weight: 600; cursor: pointer; }
 .automation-nav-button:hover { color: var(--accent-text); border-color: var(--accent); background: var(--surface-button-hover); }
+.automation-nav-button.active { color: var(--accent-text); border-color: var(--accent); background: var(--accent-soft); }
 .sidebar-view-toggle { display: flex; align-items: center; justify-content: center; gap: 6px; height: 36px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 6px; color: var(--text-muted); background: var(--surface); font-size: 12px; font-weight: 600; cursor: pointer; }
 .sidebar-view-toggle:hover { background: var(--surface-button-hover); }
 .sidebar-view-toggle.active { color: var(--accent-text); border-color: var(--accent); background: var(--accent-soft); }
@@ -3208,6 +3209,175 @@ html[data-theme-wallpaper="true"][data-ui-window-hidden] .content-preview-panel 
 .automation-runs-detail-actions { display: flex; justify-content: flex-end; }
 .automation-runs-detail-actions .secondary-button { min-height: 27px; padding: 4px 11px; font-size: 10.5px; }
 :root[data-ui-radius] .automation-runs-row, :root[data-ui-radius] .automation-sub-tabs, :root[data-ui-radius] .automation-runs-task-filter, :root[data-ui-radius] .automation-runs-prompt { border-radius: var(--ui-control-radius); }
+
+/* ── 自动化任务：右侧面板（方案 B，2026-11-02）────────────────────────────
+   主题钩子：data-pane="automation-panel"；关闭/管理/停止等 data-control 见
+   docs/theme-guide.md。面板是 work-area 内的绝对定位 dock，与预览面板互斥；
+   单窗口会话的 timeline/composer 让出面板宽度（分屏视图里面板覆盖，不挤压）。 */
+.work-area.automation-panel-open > .conversation-pane .timeline {
+  margin-right: min(var(--automation-panel-width, 386px), calc(100% - 260px));
+}
+.work-area.automation-panel-open > .conversation-pane .composer {
+  left: calc((100% - min(var(--automation-panel-width, 386px), calc(100% - 260px))) / 2);
+  width: min(962px, calc(100% - min(var(--automation-panel-width, 386px), calc(100% - 260px)) - 48px));
+}
+.work-area.automation-panel-open > .conversation-pane .question-panel {
+  left: calc((100% - min(var(--automation-panel-width, 386px), calc(100% - 260px))) / 2);
+  width: min(720px, calc(100% - min(var(--automation-panel-width, 386px), calc(100% - 260px)) - 48px));
+}
+.work-area.automation-panel-open > .conversation-pane .panel-dock,
+.work-area.automation-panel-open > .conversation-pane .panel-dock-fab { display: none; }
+
+.automation-panel {
+  position: absolute;
+  z-index: 36;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  width: min(var(--automation-panel-width, 386px), calc(100% - 260px));
+  min-width: 0;
+  border-left: 1px solid var(--border-strong);
+  background: var(--surface);
+  box-shadow: -18px 0 42px rgba(0, 0, 0, .22);
+  animation: automation-panel-in .18s var(--motion-ease);
+}
+@keyframes automation-panel-in { from { opacity: 0; transform: translateX(18px); } to { opacity: 1; transform: none; } }
+@keyframes automation-panel-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateX(14px); } }
+.ui-presence.is-exiting > .automation-panel { animation: automation-panel-out .18s var(--motion-ease) both; }
+@media (prefers-reduced-motion: reduce) { .automation-panel, .ui-presence.is-exiting > .automation-panel { animation: none !important; } }
+html[data-ui-motion="off"] .automation-panel, html[data-ui-motion="off"] .ui-presence.is-exiting > .automation-panel { animation: none !important; }
+
+.automation-panel-head { display: flex; flex: 0 0 auto; align-items: center; gap: 5px; height: 50px; padding: 0 9px 0 12px; border-bottom: 1px solid var(--border); }
+.automation-panel-title { display: inline-flex; align-items: center; gap: 6px; min-width: 0; flex: 1; }
+.automation-panel-title > svg { color: var(--accent-text); flex: 0 0 auto; }
+.automation-panel-title strong { color: var(--text); font-size: 13px; font-weight: 700; }
+.automation-panel-title small { overflow: hidden; color: var(--text-muted); font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }
+.automation-panel-icon { display: grid; place-items: center; flex: 0 0 auto; width: 27px; height: 27px; border: 1px solid transparent; border-radius: 6px; color: var(--text-muted); background: transparent; cursor: pointer; }
+.automation-panel-icon:hover { color: var(--text); border-color: var(--border); background: var(--surface-raised); }
+.automation-panel-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; flex: 0 0 auto; margin: 10px 12px 0; overflow: hidden; border: 1px solid var(--border); border-radius: 7px; background: var(--border); }
+.automation-panel-stat { display: grid; gap: 1px; min-width: 0; padding: 7px 8px; background: var(--surface-raised); }
+.automation-panel-stat span { color: var(--text-muted); font-size: 10px; white-space: nowrap; }
+.automation-panel-stat b { overflow: hidden; color: var(--text); font-size: 11.5px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.automation-panel-stat b em { margin-left: 1px; color: var(--text-muted); font-size: 9px; font-style: normal; font-weight: 400; }
+.automation-panel-stat b.good { color: var(--success); }
+.automation-panel-stat b.accent { color: var(--accent-text); }
+.automation-panel-tabs { display: flex; flex: 0 0 auto; gap: 3px; margin: 9px 12px 0; padding-bottom: 7px; border-bottom: 1px solid var(--border); }
+.automation-panel-tabs button { display: inline-flex; align-items: center; gap: 4px; height: 25px; padding: 0 8px; border: 0; border-radius: 5px; color: var(--text-muted); background: transparent; font-size: 11px; font-weight: 600; cursor: pointer; }
+.automation-panel-tabs button:hover { color: var(--text); background: var(--surface-raised); }
+.automation-panel-tabs button.active { color: var(--accent-text); background: var(--accent-soft); }
+.automation-panel-tabs button em { display: inline-grid; place-items: center; min-width: 15px; height: 14px; padding: 0 4px; border-radius: 999px; background: var(--surface-raised); color: var(--text-muted); font-size: 9px; font-style: normal; font-variant-numeric: tabular-nums; }
+.automation-panel-body { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; padding: 8px 12px 10px; overflow-y: auto; }
+.automation-panel-filter { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; margin-bottom: 8px; }
+.automation-panel-search { display: inline-flex; align-items: center; gap: 5px; min-width: 0; flex: 1; height: 27px; padding: 0 8px; border: 1px solid var(--border); border-radius: 6px; color: var(--text-muted); background: var(--surface-input); }
+.automation-panel-search:focus-within { border-color: var(--accent); }
+.automation-panel-search input { min-width: 0; flex: 1; width: auto; height: auto; margin: 0; padding: 0; border: 0; background: transparent; color: var(--text); font-size: 11px; }
+.automation-panel-search input::placeholder { color: var(--text-muted); }
+.automation-panel-filter-tabs { display: inline-flex; flex: 0 0 auto; gap: 1px; padding: 2px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-muted); }
+.automation-panel-filter-tabs button { height: 21px; padding: 0 6px; border: 0; border-radius: 4px; color: var(--text-muted); background: transparent; font-size: 10px; cursor: pointer; }
+.automation-panel-filter-tabs button.active { color: var(--text); background: var(--surface-raised); }
+.automation-panel-list { display: grid; gap: 7px; }
+.automation-panel-list-empty { padding: 24px 8px; color: var(--text-muted); font-size: 11px; text-align: center; }
+.automation-panel-task { display: grid; gap: 0; padding: 9px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-raised); }
+.automation-panel-task.running { border-color: var(--accent-border, var(--accent)); background: linear-gradient(135deg, var(--accent-soft), var(--surface-raised) 72%); }
+.automation-panel-task.issue { border-color: var(--danger-border); }
+.automation-panel-task.completed { opacity: .82; }
+.automation-panel-task-head { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.automation-panel-dot { flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; background: var(--text-muted); }
+.automation-panel-dot.running { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); animation: team-pulse 1.8s ease-in-out infinite; }
+.automation-panel-dot.scheduled { background: var(--success); }
+.automation-panel-dot.paused { background: var(--text-muted); opacity: .55; }
+.automation-panel-dot.completed { background: var(--accent-text); opacity: .6; }
+.automation-panel-dot.issue { background: var(--danger); }
+.automation-panel-task-title { display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1; }
+.automation-panel-task-title strong { overflow: hidden; color: var(--text); font-size: 12px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.automation-panel-state { flex: 0 0 auto; padding: 1px 6px; border-radius: 999px; font-size: 9px; font-weight: 600; white-space: nowrap; }
+.automation-panel-state.running { color: var(--accent-text); background: var(--accent-soft); }
+.automation-panel-state.scheduled { color: var(--success); background: var(--success-soft); }
+.automation-panel-state.paused { color: var(--text-muted); background: var(--surface-muted); }
+.automation-panel-state.completed { color: var(--accent-text); background: var(--accent-soft); }
+.automation-panel-state.issue { color: var(--danger); background: var(--danger-soft); }
+.automation-panel-last-badge { flex: 0 0 auto; color: var(--text-muted); font-size: 9px; }
+.automation-panel-last-badge.ok { color: var(--success); }
+.automation-panel-last-badge.error { color: var(--danger); }
+.automation-panel-last-badge.aborted { color: var(--text-muted); }
+.automation-panel-last-badge.delivered { color: var(--accent-text); }
+.automation-panel-task-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 9px; margin-top: 5px; color: var(--text-muted); font-size: 10.5px; }
+.automation-panel-task-meta > span { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
+.automation-panel-task-meta svg { flex: 0 0 auto; opacity: .8; }
+.automation-panel-next { color: var(--accent-text); }
+.automation-panel-issue { color: var(--danger); }
+.automation-panel-task-context { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 4px; color: var(--text-muted); font-size: 10px; }
+.automation-panel-task-context > span { display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.automation-panel-task-context svg { flex: 0 0 auto; opacity: .75; }
+.automation-panel-prompt { display: -webkit-box; overflow: hidden; margin: 6px 0 0; color: var(--text-muted); font-size: 10.5px; line-height: 1.5; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.automation-panel-last { display: grid; gap: 1px; margin-top: 6px; padding: 5px 7px; border-radius: 5px; background: var(--surface-muted); color: var(--text-muted); font-size: 10px; line-height: 1.45; }
+.automation-panel-last span:first-child { color: var(--text); font-weight: 500; }
+.automation-panel-last span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.automation-panel-last.ok span:first-child { color: var(--success); }
+.automation-panel-last.error span:first-child { color: var(--danger); }
+.automation-panel-last.aborted span:first-child { color: var(--text-muted); }
+.automation-panel-last.delivered span:first-child { color: var(--accent-text); }
+.automation-panel-task-actions { display: flex; align-items: center; gap: 3px; margin-top: 8px; padding-top: 7px; border-top: 1px solid var(--border-soft); }
+.automation-panel-grow { flex: 1; }
+.automation-panel-action { display: inline-flex; align-items: center; gap: 3px; min-height: 26px; padding: 0 7px; border: 1px solid var(--border); border-radius: 6px; color: var(--text-muted); background: var(--surface-input); font-size: 10px; cursor: pointer; white-space: nowrap; }
+.automation-panel-action:hover:not(:disabled) { color: var(--text); border-color: var(--border-strong); background: var(--surface-button-hover); }
+.automation-panel-action.primary { border-color: var(--accent-border, var(--accent)); color: var(--accent-text); background: var(--accent-soft); font-weight: 600; }
+.automation-panel-action.danger { color: var(--danger); }
+.automation-panel-action.danger:hover:not(:disabled) { border-color: var(--danger-border); background: var(--danger-soft); }
+.automation-panel-action:disabled { opacity: .38; cursor: not-allowed; }
+.automation-panel-running-time { margin-left: 2px; color: var(--text-muted); font-size: 9px; font-variant-numeric: tabular-nums; }
+.automation-panel-toggle { position: relative; flex: 0 0 auto; width: 30px; height: 17px; margin: 0 2px; padding: 0; border: 0; border-radius: 999px; background: var(--surface-input); box-shadow: inset 0 0 0 1px var(--border); cursor: pointer; }
+.automation-panel-toggle::after { position: absolute; top: 2px; left: 2px; width: 13px; height: 13px; border-radius: 50%; background: var(--text-muted); content: ""; transition: transform .15s ease, background .15s ease; }
+.automation-panel-toggle.on { background: var(--success); box-shadow: none; }
+.automation-panel-toggle.on::after { transform: translateX(13px); background: #fff; }
+.automation-panel-toggle:disabled { opacity: .38; cursor: not-allowed; }
+.automation-panel-empty { display: grid; place-items: center; align-content: center; gap: 7px; flex: 1; padding: 28px 16px; color: var(--text-muted); text-align: center; }
+.automation-panel-empty > svg { color: var(--accent-text); opacity: .75; }
+.automation-panel-empty strong { color: var(--text); font-size: 12px; }
+.automation-panel-empty p { max-width: 280px; margin: 0; font-size: 10.5px; line-height: 1.6; }
+.automation-panel-empty-action { display: inline-flex; align-items: center; gap: 4px; min-height: 28px; margin-top: 4px; padding: 0 10px; border: 1px solid var(--accent-border, var(--accent)); border-radius: 6px; color: var(--accent-text); background: var(--accent-soft); font-size: 10.5px; font-weight: 600; cursor: pointer; }
+.automation-panel-error { display: flex; flex: 0 0 auto; align-items: center; gap: 5px; margin: 0 12px 6px; padding: 6px 8px; border: 1px solid var(--danger-border); border-radius: 6px; color: var(--danger-text); background: var(--danger-soft); font-size: 10px; }
+.automation-panel-error span { min-width: 0; flex: 1; }
+.automation-panel-error .automation-panel-icon { width: 20px; height: 20px; color: var(--danger-text); }
+.automation-panel-foot { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 6px; min-height: 38px; padding: 7px 12px; border-top: 1px solid var(--border); background: var(--surface-raised); }
+.automation-panel-foot > span { display: inline-flex; align-items: center; gap: 4px; color: var(--text-muted); font-size: 9.5px; }
+.automation-panel-foot > span svg { color: var(--success); }
+.automation-panel-foot > button { display: inline-flex; align-items: center; gap: 3px; min-height: 24px; padding: 0 6px; border: 0; border-radius: 5px; color: var(--accent-text); background: transparent; font-size: 10px; cursor: pointer; }
+.automation-panel-foot > button:hover { background: var(--accent-soft); }
+
+/* 面板内嵌运行记录：正文只保留「时间 + 任务 + 状态」，筛选精简为 全部/成功/失败。 */
+.automation-panel-body .automation-runs { display: block; padding: 0; overflow: visible; }
+.automation-panel-body .automation-runs-toolbar { margin: 0 0 7px; }
+.automation-panel-body .automation-runs-row { padding: 7px 8px; }
+.automation-panel-body .automation-runs-row-line { gap: 6px; }
+.automation-panel-body .automation-runs-row-line strong { font-size: 11px; }
+.automation-panel-body .automation-runs-agent,
+.automation-panel-body .automation-runs-trigger { display: none; }
+.automation-panel-body .automation-runs-time { font-size: 9.5px; }
+.automation-panel-body .automation-runs-duration { font-size: 9.5px; }
+.automation-panel-body .automation-runs-summary { margin-left: 22px; font-size: 9.5px; }
+.automation-panel-body .automation-runs-detail { margin-left: 22px; }
+.automation-panel-body .automation-runs-running-since { font-size: 9.5px; }
+.automation-panel-body .automation-runs-groups { gap: 10px; }
+.automation-panel-body .automation-runs-group-head strong { font-size: 11px; }
+
+/* 侧栏「自动化会话」收纳开关（默认隐藏，用户可临时显示）。 */
+.session-automation-bucket { display: flex; align-items: center; gap: 6px; width: 100%; min-height: 29px; margin-top: 6px; padding: 0 8px; border: 1px dashed var(--border-strong); border-radius: 6px; color: var(--text-muted); background: transparent; font-size: 10.5px; cursor: pointer; }
+.session-automation-bucket:hover { color: var(--text); border-color: var(--accent); background: var(--surface-sidebar-hover); }
+.session-automation-bucket.active { color: var(--accent-text); border-style: solid; border-color: var(--accent-border, var(--accent)); background: var(--accent-soft); }
+.session-automation-bucket > svg { flex: 0 0 auto; }
+.session-automation-bucket em { display: inline-grid; place-items: center; min-width: 15px; height: 14px; padding: 0 4px; border-radius: 999px; background: var(--surface-sidebar-badge); font-size: 9px; font-style: normal; font-variant-numeric: tabular-nums; }
+.session-automation-bucket small { margin-left: auto; color: var(--text-muted); font-size: 9px; }
+.session-automation-origin { display: grid; place-items: center; color: var(--accent-text); opacity: .8; flex: 0 0 auto; }
+
+/* 自动化面板按钮/容器跟随界面圆角 token；开关保持胶囊形。 */
+:root[data-ui-radius] .automation-panel-search,
+:root[data-ui-radius] .automation-panel-task,
+:root[data-ui-radius] .automation-panel-action,
+:root[data-ui-radius] .automation-panel-empty-action,
+:root[data-ui-radius] .session-automation-bucket { border-radius: var(--ui-control-radius); }
 
 /* 自动化运行完成 toast 的「查看结果」按钮（checkpoint-toast 基础 + 扩展列）。 */
 .error-toast.checkpoint-toast.with-action { grid-template-columns: 20px minmax(0, 1fr) auto 28px; }

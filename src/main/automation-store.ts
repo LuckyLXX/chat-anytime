@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import type { AccessMode, AgentProfile, AutomationSchedule, AutomationTask } from "../shared/protocol.js";
-import { isValidCron } from "./automation-cron.js";
+import { isValidCron } from "../shared/automation-cron.js";
 
 /**
  * 自动化定时任务持久化：按 Agent 划分，原子写（tmp+rename，同 todo/plan 风格）

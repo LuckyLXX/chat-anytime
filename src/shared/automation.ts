@@ -1,4 +1,5 @@
 import type { AutomationSchedule } from "./protocol.js";
+import { parseCron } from "./automation-cron.js";
 
 /**
  * 自动化任务调度/提醒的纯展示与解析工具。
@@ -83,4 +84,80 @@ export function parseScheduledReminderText(text: string): ParsedScheduledReminde
   while (index < lines.length && (lines[index] ?? "").trim() !== "") index += 1;
   const body = lines.slice(index).join("\n").trim();
   return { ...(header ? { title: header } : {}), body };
+}
+
+/** 星期短名（周日 … 周六），用于「下次触发」的相对日期。 */
+const WEEKDAY_SHORT = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"] as const;
+
+/**
+ * 计算下一次触发时间（epoch ms）。
+ *
+ * P0 只精确支持**本地时区**：带 IANA `timezone` 的 cron 返回 undefined，界面显示
+ * 「按计划」，避免在渲染端做昂贵且易错的时区反算（P1 再补）。
+ *
+ * cron 按「日 → 时 → 分」推进而不是逐分钟扫描：每天先做一次 月/日/星期 的集合
+ * 判断，命中后再取当天最近的 时/分，年度任务也只需 366 次日判断。
+ */
+export function nextAutomationRun(schedule: AutomationSchedule, now = Date.now()): number | undefined {
+  if (schedule.kind !== "cron") {
+    return schedule.scheduledAt > now ? schedule.scheduledAt : undefined;
+  }
+  if (schedule.timezone) return undefined;
+  let cron;
+  try {
+    cron = parseCron(schedule.cron);
+  } catch {
+    return undefined;
+  }
+  const start = new Date(now);
+  start.setSeconds(0, 0);
+  start.setMinutes(start.getMinutes() + 1);
+  const from = start.getTime();
+  const hours = [...cron.hour].sort((a, b) => a - b);
+  const minutes = [...cron.minute].sort((a, b) => a - b);
+  for (let dayOffset = 0; dayOffset <= 366; dayOffset += 1) {
+    const day = new Date(start.getFullYear(), start.getMonth(), start.getDate() + dayOffset);
+    if (!cron.month.has(day.getMonth() + 1)) continue;
+    // 与调度器同一口径：日与星期是纯 AND（不是 Vixie 的 OR）。
+    if (!cron.day.has(day.getDate()) || !cron.dayOfWeek.has(day.getDay())) continue;
+    for (const hour of hours) {
+      for (const minute of minutes) {
+        const candidate = new Date(day.getFullYear(), day.getMonth(), day.getDate(), hour, minute).getTime();
+        if (candidate >= from) return candidate;
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * 「下次触发」的一行展示：今天/明天/周几/日期 + 相对时间。
+ * 传入非法值返回 undefined，调用方自行决定占位文案。
+ */
+export function formatAutomationNextRun(nextAt: number | undefined, now = Date.now()): string | undefined {
+  if (nextAt === undefined || !Number.isFinite(nextAt)) return undefined;
+  const date = new Date(nextAt);
+  if (Number.isNaN(date.getTime())) return undefined;
+  const pad = (value: number): string => String(value).padStart(2, "0");
+  const time = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  const startOfToday = new Date(now);
+  startOfToday.setHours(0, 0, 0, 0);
+  const startOfThatDay = new Date(nextAt);
+  startOfThatDay.setHours(0, 0, 0, 0);
+  const dayDiff = Math.round((startOfThatDay.getTime() - startOfToday.getTime()) / 86_400_000);
+  const dayLabel = dayDiff === 0
+    ? `今天 ${time}`
+    : dayDiff === 1
+      ? `明天 ${time}`
+      : dayDiff > 1 && dayDiff < 7
+        ? `${WEEKDAY_SHORT[date.getDay()]} ${time}`
+        : `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${time}`;
+  const diff = nextAt - now;
+  if (diff <= 0) return `${dayLabel} · 已到期`;
+  const relative = diff < 3_600_000
+    ? `${Math.max(1, Math.ceil(diff / 60_000))} 分钟后`
+    : diff < 86_400_000
+      ? `${Math.floor(diff / 3_600_000)} 小时后`
+      : `${dayDiff} 天后`;
+  return `${dayLabel} · ${relative}`;
 }

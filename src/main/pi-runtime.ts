@@ -58,6 +58,7 @@ import type {
   SessionPaneSnapshot,
   SessionRunStatus,
   SessionSummary,
+  SessionOrigin,
   PanelSessionLive,
   SkillSummary,
   SpeedStats,
@@ -137,6 +138,7 @@ import { agentWorkspaceSessionDir, backfillUnpersistedSessions, isSessionArchive
 import { listSessionScopes, pickRecentSession, resolveSessionOwner, summarizeAllSessions, type SessionScope, type WorkspaceExistsEntry } from "./session-catalog.js";
 import { createWorkspaceResources } from "./workspace-resources.js";
 import { listSessionSummaries, loadSessionIndex, readSessionHeaderLine, saveSessionIndex, summarizeLiveSession, type CachedSessionSummary } from "./session-summary-cache.js";
+import { AUTOMATION_SESSION_ORIGIN_CUSTOM_TYPE, isAutomationSessionSummary } from "../shared/session-origin.js";
 import { planSessionOpen } from "./session-open-plan.js";
 import { SessionManagerCache } from "./session-manager-cache.js";
 import { isDesktopConfiguredProvider } from "./model-catalog.js";
@@ -247,6 +249,8 @@ let bundledSubagentsDir: string | undefined;
 let automationTasks: AutomationTask[] = [];
 /** 全角色自动化运行历史（设置页「运行记录」子页 + 目录下发）；runs.jsonl 事件流。 */
 let automationRuns: AutomationRunRecord[] = [];
+/** 当前正在执行的后台自动化任务 → 会话 id（停止按钮按 taskId 定位本次运行）。 */
+const automationRunSessions = new Map<string, string>();
 /** 自动化调度器（每分 tick，串行执行）；initialize 创建、utility 进程结束随进程清理。 */
 let automationScheduler: AutomationScheduler | undefined;
 let apiKeys: Record<string, string> = {};
@@ -283,6 +287,8 @@ interface SessionRuntimeRecord {
   session: AgentSession;
   unsubscribe: () => void;
   workspace: string;
+  /** 会话来源（自动化后台运行）；缺省 = 用户主动创建。 */
+  origin?: SessionOrigin;
   /** 工作区目录缺失时的只读原因（activate 与写入入口每 10s 重查）。 */
   readOnlyReason?: string;
   /** Agent profile captured at creation — background sessions never re-read globals. */
@@ -1412,6 +1418,7 @@ async function runBackgroundAutomationTask(task: AutomationTask, trigger: "cron"
     accessModeOverride: task.accessMode,
     unattended: true,
     noGenerationGuard: true,
+    sessionOrigin: { kind: "automation", taskId: task.id, taskName: task.name },
     // 无人值守后台会话不继承设计模式：每次触发都是全新会话，没有界面能开关，
     // 默认不给 design_*（省下约 1.5K tokens/次的前缀成本，已与用户对齐）。
     inheritDesignMode: false
@@ -1419,6 +1426,7 @@ async function runBackgroundAutomationTask(task: AutomationTask, trigger: "cron"
   const record = liveSessions.get(sessionId);
   if (!record) throw new Error("自动化会话创建失败");
   if (!record.session.model) throw new Error("无法为任务解析模型，请检查该任务的模型配置");
+  automationRunSessions.set(task.id, sessionId);
   // 运行会话在话题列表中可辨认（查看会话后的体验闭环）：为会话命名；对未持久化
   // 会话（首条助手消息前 JSONL 未落盘）的 appendSessionInfo 行为可能受限，失败只记日志不阻塞。
   try {
@@ -1504,6 +1512,7 @@ async function runBackgroundAutomationTask(task: AutomationTask, trigger: "cron"
     afterAutomationRun(task.id, runAgent.id, { sessionId, startedAt, status: outcome, error: message });
     post({ type: "automation-run", id: task.id, status: outcome, taskName: task.name, runId, message });
   } finally {
+    if (automationRunSessions.get(task.id) === sessionId) automationRunSessions.delete(task.id);
     record.busy = false;
     record.runStatus = outcome === "ok" ? "completed" : outcome === "aborted" ? "aborted" : "failed";
     patchSessionRunStatus(record);
@@ -2302,7 +2311,8 @@ function ensureSessionInList(record: SessionRuntimeRecord): void {
     agentId: record.agent.id,
     title,
     modifiedAt: Date.now(),
-    messageCount: 0
+    messageCount: 0,
+    ...(record.origin ? { origin: record.origin } : {})
   };
   const alreadyListed = currentSessions.some((item) => resolve(item.path).toLowerCase() === resolve(incoming.path).toLowerCase());
   if (!alreadyListed) currentSessions = mergeSessionSummary(currentSessions, incoming);
@@ -4061,6 +4071,7 @@ function hydrateSessionsFromIndex(): void {
       title: summary.name || summary.firstMessage || "新会话",
       modifiedAt: summary.modified.getTime(),
       messageCount: summary.messageCount,
+      ...(summary.origin ? { origin: summary.origin } : {}),
       pinned: isSessionPinned(pinnedPaths, summary.path) || undefined,
       archived: isSessionArchived(archivedPaths, summary.path) || undefined,
       ...(runStatus ? { runStatus } : {})
@@ -4119,6 +4130,7 @@ async function performSessionsRefresh(agentIds?: readonly string[]): Promise<voi
     agentId: record.agent.id,
     activatedAt: record.activatedAt,
     title: record.session.sessionManager.getSessionName(),
+    ...(record.origin ? { origin: record.origin } : {}),
     runStatus: record.runStatus
   }));
   // 会话文件直到首条 assistant 消息才落盘（Pi _persist 的 hasAssistant 门槛），
@@ -4173,7 +4185,7 @@ function isUnstartedRecord(record: SessionRuntimeRecord): boolean {
  * - otherwise (explicit sessionManager, or agent.save's config-apply rebuild)
  *   the record is rebuilt over the same history.
  */
-async function createSession(sessionManager?: SessionManager, options: { reactivate?: boolean; skipActivate?: boolean; modelOverride?: { provider: string; id: string }; accessModeOverride?: AccessMode; unattended?: boolean; noGenerationGuard?: boolean; agentOverride?: AgentProfile; workspaceOverride?: string; inheritDesignMode?: boolean; inheritComputerMode?: boolean; inheritTeamMode?: boolean } = {}): Promise<void> {
+async function createSession(sessionManager?: SessionManager, options: { reactivate?: boolean; skipActivate?: boolean; modelOverride?: { provider: string; id: string }; accessModeOverride?: AccessMode; unattended?: boolean; noGenerationGuard?: boolean; agentOverride?: AgentProfile; workspaceOverride?: string; inheritDesignMode?: boolean; inheritComputerMode?: boolean; inheritTeamMode?: boolean; sessionOrigin?: SessionOrigin } = {}): Promise<void> {
   if (!modelRuntime) return;
   // noGenerationGuard（后台自动化会话）：不参与全局代际竞争，避免与用户
   // 的新建/切会话管线互相作废（reviewer P1-2）；它捕获自己的 record 上下文。
@@ -4206,6 +4218,15 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     });
     emitState();
     return;
+  }
+  // 自动化后台会话：把来源写进会话文件的 custom entry（Pi 保证不参与 LLM 上下文）。
+  // 首次落盘会随 fileEntries 一起写入；写失败只记 warn，不影响任务运行。
+  if (options.sessionOrigin && !existing) {
+    try {
+      activeSessionManager.appendCustomEntry(AUTOMATION_SESSION_ORIGIN_CUSTOM_TYPE, options.sessionOrigin);
+    } catch (error) {
+      void post({ type: "log", level: "warn", message: `写入自动化会话来源失败：${errorText(error)}` });
+    }
   }
   // 同 id 重建（空话题换角色、agent.save 应用配置）会复用同一渲染绑定：dispose
   // 会把会话从 renderedSessions/pendingWatchSessions 里摘掉，而渲染端的 watch
@@ -4739,6 +4760,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     session: result.session,
     unsubscribe: () => undefined,
     workspace: recordWorkspace,
+    ...(options.sessionOrigin ? { origin: options.sessionOrigin } : {}),
     readOnlyReason: readOnlyReasonFor(recordWorkspace),
     agent: recordAgent,
     busy: false,
@@ -5401,7 +5423,9 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       const requestId = command.requestId;
       latestSessionSearchRequest = requestId;
       // 搜全部助手的会话（与全局列表同源），元数据直接复用摘要，不重复读盘。
-      const sessions = [...currentSessions];
+      const sessions = command.showAutomation === true
+        ? [...currentSessions]
+        : currentSessions.filter((session) => !isAutomationSessionSummary(session));
       if (!sessionTextIndex) sessionTextIndex = loadSessionTextIndex(sessionTextIndexPath());
       try {
         let changed = false;
@@ -5908,6 +5932,21 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       void runAutomationTask(runTask, "manual").catch((error: unknown) => {
         post({ type: "automation-run", id: command.id, status: "error", taskName: runTask.name, message: error instanceof Error ? error.message : String(error) });
       });
+      break;
+    }
+    case "automation.stop": {
+      const runSessionId = automationRunSessions.get(command.id);
+      if (!runSessionId) {
+        post({ type: "log", level: "info", message: "该任务当前没有运行中的后台会话（可能已结束、仍在队列中，或是会话投递任务）。" });
+        break;
+      }
+      if (!liveSessions.has(runSessionId)) {
+        automationRunSessions.delete(command.id);
+        post({ type: "log", level: "info", message: "该任务的后台会话已结束，无需停止。" });
+        break;
+      }
+      // 复用 session.abort 的完整中止语义（队列清空、挂起交互取消、工具执行封口）。
+      await handleCommand({ type: "session.abort", sessionId: runSessionId });
       break;
     }
     case "automation.run.open": {
