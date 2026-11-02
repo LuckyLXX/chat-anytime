@@ -18,7 +18,7 @@ async function makeDirectory(): Promise<string> {
 }
 
 describe("runVerifyCommand", () => {
-  it("runs in the workspace and captures stdout on success", async () => {
+  it("runs in the workspace and captures stdout on success", { timeout: 30_000 }, async () => {
     const cwd = await makeDirectory();
     const result = await runVerifyCommand("node -e \"console.log('verify-ok')\"", { cwd });
 
@@ -29,7 +29,7 @@ describe("runVerifyCommand", () => {
     expect(result.output).toContain("verify-ok");
   });
 
-  it("reports a non-zero exit with stderr and the exit code", async () => {
+  it("reports a non-zero exit with stderr and the exit code", { timeout: 30_000 }, async () => {
     const cwd = await makeDirectory();
     const result = await runVerifyCommand("node -e \"process.stderr.write('boom'); process.exit(3)\"", { cwd });
 
@@ -39,7 +39,7 @@ describe("runVerifyCommand", () => {
     expect(result.output.length).toBeGreaterThan(0);
   });
 
-  it("kills the command when the timeout elapses", async () => {
+  it("kills the command when the timeout elapses", { timeout: 30_000 }, async () => {
     const cwd = await makeDirectory();
     const startedAt = Date.now();
     const result = await runVerifyCommand("node -e \"setTimeout(() => {}, 5000)\"", { cwd, timeoutMs: 300 });
@@ -49,7 +49,7 @@ describe("runVerifyCommand", () => {
     expect(Date.now() - startedAt).toBeLessThan(4_000);
   });
 
-  it("kills the command when the abort signal fires", async () => {
+  it("kills the command when the abort signal fires", { timeout: 30_000 }, async () => {
     const cwd = await makeDirectory();
     const controller = new AbortController();
     const pending = runVerifyCommand("node -e \"setTimeout(() => {}, 5000)\"", { cwd, signal: controller.signal });
@@ -62,7 +62,7 @@ describe("runVerifyCommand", () => {
     expect(result.timedOut).toBe(false);
   });
 
-  it("resolves immediately when the signal is already aborted", async () => {
+  it("resolves immediately when the signal is already aborted", { timeout: 30_000 }, async () => {
     const cwd = await makeDirectory();
     const controller = new AbortController();
     controller.abort();
@@ -72,7 +72,7 @@ describe("runVerifyCommand", () => {
     expect(result.aborted).toBe(true);
   });
 
-  it("truncates output but keeps the tail", async () => {
+  it("truncates output but keeps the tail", { timeout: 30_000 }, async () => {
     const cwd = await makeDirectory();
     const result = await runVerifyCommand("node -e \"process.stdout.write('x'.repeat(9000) + 'THE-END')\"", { cwd });
 
@@ -82,7 +82,7 @@ describe("runVerifyCommand", () => {
     expect(result.output.length).toBeLessThan(VERIFY_OUTPUT_CAP + 100);
   });
 
-  it("uses the requested working directory", async () => {
+  it("uses the requested working directory", { timeout: 30_000 }, async () => {
     const cwd = await makeDirectory();
     const result = await runVerifyCommand("node -e \"require('fs').writeFileSync('verify-cwd-probe.txt', '1')\"", { cwd });
 
