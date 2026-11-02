@@ -64,6 +64,18 @@ describe("SSH files panel layout contract", () => {
     expect(ruleBody(".ssh-files-error")).not.toContain("position: absolute");
   });
 
+  it("分栏拖拽条也是真实 flex 项，夹在开关与面板之间", () => {
+    const splitter = ruleBody(".ssh-files-splitter");
+    expect(splitter).toContain("flex:");
+    expect(splitter).not.toContain("position: absolute");
+    // 组件结构：拖拽条在开关之后、面板之前（三者同级）
+    const toggle = terminalSource.indexOf('data-control="ssh-files-toggle"');
+    const splitterIndex = terminalSource.indexOf("ssh-files-splitter${");
+    const drawer = terminalSource.indexOf('className="ssh-files-drawer"');
+    expect(splitterIndex).toBeGreaterThan(toggle);
+    expect(drawer).toBeGreaterThan(splitterIndex);
+  });
+
   it("面板根节点声明 data-pane=ssh-files（主题区域钩子）", () => {
     expect(panelSource).toContain('data-pane="ssh-files"');
   });

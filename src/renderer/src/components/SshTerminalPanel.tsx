@@ -1,5 +1,5 @@
 import { ChevronDown, FolderTree, LoaderCircle, RotateCw, ShieldAlert, ShieldCheck, X } from "lucide-react";
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { SshFilesPanel } from "./SshFilesPanel";
 import { SshPasswordCard, type SshPasswordRequest } from "./SshPasswordCard";
 import { XtermView, type XtermApi } from "./XtermView";
@@ -32,13 +32,90 @@ type ConnectionState =
  *
  * 外观：`highlightPrompt` 只在这个（远端）终端开启 —— 服务器 PS1 普遍是无色白字，
  * 由渲染端在数据进 xterm 前把「用户@主机:路径」着色（见 lib/terminal-prompt.ts）。
+ *
+ * 分栏高度：拖动分隔条（`.ssh-files-splitter`）按**容器高度百分比**改文件面板的
+ * flex-basis，比例存 localStorage（下次打开沿用），双击/回车复位 45%。百分比而非
+ * 像素：终端面板会随窗口和工作区布局伸缩，像素值在矮窗口里会直接把 xterm 挤成 0。
  */
+
+const SPLIT_STORAGE_KEY = "pidesktop.sshFilesSplitPct";
+const SPLIT_DEFAULT_PCT = 45;
+const SPLIT_MIN_PCT = 20;
+const SPLIT_MAX_PCT = 80;
+
+function clampSplit(pct: number): number {
+  return Math.min(SPLIT_MAX_PCT, Math.max(SPLIT_MIN_PCT, Math.round(pct)));
+}
+
+function readSplitPct(): number {
+  try {
+    const raw = window.localStorage?.getItem(SPLIT_STORAGE_KEY);
+    const value = raw ? Number.parseFloat(raw) : Number.NaN;
+    return Number.isFinite(value) ? clampSplit(value) : SPLIT_DEFAULT_PCT;
+  } catch {
+    return SPLIT_DEFAULT_PCT;
+  }
+}
+
+function writeSplitPct(pct: number): void {
+  try {
+    window.localStorage?.setItem(SPLIT_STORAGE_KEY, String(pct));
+  } catch {
+    // localStorage 不可用（隐私模式/受限环境）：只影响记忆，不影响拖拽。
+  }
+}
+
 export function SshTerminalPanel({ terminalId, hostId, hostName, workspace }: { terminalId: string; hostId: string; hostName: string; workspace?: string }): ReactNode {
   const [state, setState] = useState<ConnectionState>({ status: "connecting" });
   const [restartNonce, setRestartNonce] = useState(0);
   const [filesOpen, setFilesOpen] = useState(false);
   const [actionError, setActionError] = useState<string | undefined>(undefined);
+  const [splitPct, setSplitPct] = useState<number>(() => readSplitPct());
+  const [dragging, setDragging] = useState(false);
   const apiRef = useRef<XtermApi | undefined>(undefined);
+  const paneRef = useRef<HTMLDivElement | undefined>(undefined);
+  const draggingRef = useRef(false);
+
+  const applySplit = useCallback((pct: number): void => {
+    setSplitPct(clampSplit(pct));
+  }, []);
+
+  const persistSplit = useCallback((pct: number): void => {
+    const clamped = clampSplit(pct);
+    setSplitPct(clamped);
+    writeSplitPct(clamped);
+  }, []);
+
+  const onSplitterPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>): void => {
+    draggingRef.current = true;
+    setDragging(true);
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // happy-dom 等环境没有 pointer capture：拖拽仍可用，只是不能超出元素范围。
+    }
+  }, []);
+
+  const onSplitterPointerMove = useCallback((event: ReactPointerEvent<HTMLDivElement>): void => {
+    if (!draggingRef.current) return;
+    const rect = paneRef.current?.getBoundingClientRect();
+    if (!rect || rect.height <= 0) return;
+    applySplit(((rect.bottom - event.clientY) / rect.height) * 100);
+  }, [applySplit]);
+
+  const onSplitterPointerUp = useCallback((): void => {
+    if (!draggingRef.current) return;
+    draggingRef.current = false;
+    setDragging(false);
+    persistSplit(splitPct);
+  }, [persistSplit, splitPct]);
+
+  const onSplitterKeyDown = useCallback((event: ReactKeyboardEvent<HTMLDivElement>): void => {
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+    event.preventDefault();
+    // ArrowUp = 把分隔条往上推 = 文件面板变高。
+    persistSplit(splitPct + (event.key === "ArrowUp" ? 4 : -4));
+  }, [persistSplit, splitPct]);
 
   const connect = useCallback((trustFingerprint: boolean, credentials?: { password: string; remember: boolean }): void => {
     setState({ status: "connecting" });
@@ -113,7 +190,7 @@ export function SshTerminalPanel({ terminalId, hostId, hostName, workspace }: { 
   }, [terminalId]);
 
   return (
-    <div className="terminal-pane ssh-terminal-pane" data-pane="terminal">
+    <div className="terminal-pane ssh-terminal-pane" data-pane="terminal" ref={(element) => { paneRef.current = element ?? undefined; }}>
       <XtermView key={`${terminalId}-${restartNonce}`} onReady={handleReady} onInput={handleInput} onResize={handleResize} focus highlightPrompt />
       {/* 操作条：固定在终端下方，抽屉开关就在这里（所以永远不会被抽屉盖住）。 */}
       {state.status === "connected" && (
@@ -131,10 +208,29 @@ export function SshTerminalPanel({ terminalId, hostId, hostName, workspace }: { 
           </button>
         </div>
       )}
-      {/* 文件面板：**下方分屏**（flex 同级），不是覆盖层——终端只变矮不变窄，
-          xterm 的 FitAddon 由 ResizeObserver 自动跟随。 */}
+      {/* 分栏分隔条 + 文件面板：都是**下方分屏**（flex 同级），不是覆盖层——
+          终端只变矮不变窄，xterm 的 FitAddon 由 ResizeObserver 自动跟随。 */}
       {filesOpen && state.status === "connected" && (
-        <div className="ssh-files-drawer">
+        <div
+          className={`ssh-files-splitter${dragging ? " dragging" : ""}`}
+          role="separator"
+          aria-orientation="horizontal"
+          aria-label="调整文件面板高度"
+          aria-valuenow={splitPct}
+          aria-valuemin={SPLIT_MIN_PCT}
+          aria-valuemax={SPLIT_MAX_PCT}
+          tabIndex={0}
+          title="拖动调整高度（双击复位）"
+          onPointerDown={onSplitterPointerDown}
+          onPointerMove={onSplitterPointerMove}
+          onPointerUp={onSplitterPointerUp}
+          onPointerCancel={onSplitterPointerUp}
+          onDoubleClick={() => persistSplit(SPLIT_DEFAULT_PCT)}
+          onKeyDown={onSplitterKeyDown}
+        />
+      )}
+      {filesOpen && state.status === "connected" && (
+        <div className="ssh-files-drawer" style={{ flexBasis: `${splitPct}%` }}>
           <SshFilesPanel terminalId={terminalId} workspace={workspace} onError={setActionError} />
         </div>
       )}
