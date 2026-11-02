@@ -106,3 +106,20 @@ export function buildDivModePrompt(mode: DivBubbleMode): string | undefined {
   const policy = mode === "always" ? DIV_MODE_PROMPT : DIV_AUTO_MODE_PROMPT;
   return `${policy}\n\n${DIV_MEDIA_PROMPT}\n\n${DIV_DYNAMIC_MODE_PROMPT}\n\n${DIV_COLOR_PROMPT}`;
 }
+
+/**
+ * always 档每回合往系统提示词尾部重申的一行（2026-11-02）。
+ *
+ * 为什么需要它：静态规范只在会话创建时进提示词一次，位置在角色设定之后、技能/工具/
+ * 记忆块之前——一次大改造跑完几十轮工具调用后，它离生成点已经两三万 token，模型回落到
+ * 「写报告」的 Markdown 习惯。实测（真实会话日志，always 档最终回复）：气泡 4 次 / 纯
+ * Markdown 3 次，失败的正是最长的两个任务。所以每回合在**系统提示词最末尾**补这一行
+ * （`before_agent_start` 投影，与 runtime-ui-theme.ts 同形）：文本逐字节稳定 ⇒ 前缀缓存
+ * 照常命中；auto/off 档返回 undefined ⇒ 零 token、零行为变化（auto 档本来就是让模型
+ * 自己判断，加提醒会把它变成 always）。
+ */
+export const DIV_MODE_REMINDER = `【本轮输出格式·Div 气泡始终开启】最终回复必须是一页 <assistant_html><div>…</div></assistant_html> 气泡：正文、要点、表格、代码与结论全部写在气泡内，气泡外不出现任何 Markdown 或寒暄；仅当用户明确要求完整 HTML 页面或指定格式时例外。`;
+
+export function buildDivModeReminder(mode: DivBubbleMode): string | undefined {
+  return mode === "always" ? DIV_MODE_REMINDER : undefined;
+}

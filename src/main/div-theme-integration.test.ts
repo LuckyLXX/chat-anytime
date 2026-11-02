@@ -7,6 +7,7 @@ import { fauxAssistantMessage, fauxProvider, type TranscriptContext } from "@ear
 
 import type { DivBubbleMode, UiThemeContext } from "../shared/protocol.js";
 import { buildDivModePrompt } from "./div-prompt.js";
+import { createDivModeExtension } from "./runtime-div-mode.js";
 import { createUiThemeExtension } from "./runtime-ui-theme.js";
 
 /**
@@ -78,8 +79,13 @@ async function makeSession(divMode: DivBubbleMode, context: UiThemeContext | und
     noSkills: true,
     noThemes: true,
     noContextFiles: true,
-    extensionFactories: [createUiThemeExtension({ divMode: () => divMode, context: () => holder.context })],
-    // 生产形态同款：Div 气泡规范走系统提示词覆盖，主题那一行动态块走扩展。
+    // 生产形态同款、同次序：主题块先追加，气泡合规重申排在它之后（尾部次序由
+    // 下面的「末尾是气泡重申」用例钦住）。
+    extensionFactories: [
+      createUiThemeExtension({ divMode: () => divMode, context: () => holder.context }),
+      createDivModeExtension({ divMode: () => divMode })
+    ],
+    // 生产形态同款：Div 气泡静态规范走系统提示词覆盖，动态两块（主题行、气泡重申）走扩展。
     systemPromptOverride: (base) => [base, buildDivModePrompt(divMode)].filter(Boolean).join("\n\n")
   });
   await resourceLoader.reload();
@@ -166,6 +172,41 @@ describe("界面主题提示词注入（真实 AgentSession + faux provider）",
       await session.prompt("随便说说");
       expect(requests[0]).toContain("【气泡配色】");
       expect(requests[0]).not.toContain("【当前界面主题】");
+      // 主题块缺席不影响气泡重申（两者是两条独立的路）
+      expect(requests[0]!.endsWith("仅当用户明确要求完整 HTML 页面或指定格式时例外。")).toBe(true);
+    } finally {
+      session.dispose();
+    }
+  });
+
+  it("always 档每回合把气泡重申追到系统提示词最末尾，两回合逐字节相同（2026-11-02）", async () => {
+    // 起因：静态规范被技能/工具/记忆块挤到中段，长任务里模型漂移回 Markdown。这条钦住
+    // 三件事：① 重申真的进了 provider 请求；② 它是**最后一段**（主题块在它之前）；
+    // ③ 两回合逐字节相同 ⇒ 前缀缓存不被破坏。
+    const { session, requests } = await makeSession("always", DARK_CONTEXT);
+    try {
+      await session.prompt("第一问");
+      await session.prompt("第二问");
+      const first = requests[0]!;
+      const tail = "【本轮输出格式·Div 气泡始终开启】";
+      expect(first).toContain(tail);
+      expect(first.endsWith("仅当用户明确要求完整 HTML 页面或指定格式时例外。")).toBe(true);
+      // 次序：主题块在重申之前（重申才是最后一行）
+      expect(first.indexOf("【当前界面主题】")).toBeGreaterThan(-1);
+      expect(first.indexOf("【当前界面主题】")).toBeLessThan(first.indexOf(tail));
+      expect(requests[1]).toBe(requests[0]);
+    } finally {
+      session.dispose();
+    }
+  });
+
+  it("auto 档不加每回合重申（否则 auto 就退化成 always）", async () => {
+    const { session, requests } = await makeSession("auto", DARK_CONTEXT);
+    try {
+      await session.prompt("随便说说");
+      expect(requests[0]).not.toContain("【本轮输出格式·Div 气泡始终开启】");
+      // auto 档的静态规范照旧（按场景使用）
+      expect(requests[0]).toContain("按场景使用");
     } finally {
       session.dispose();
     }

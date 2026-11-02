@@ -187,6 +187,7 @@ import * as contextBreakdown from "./context-breakdown.js";
 import * as runtimeHooks from "./runtime-hooks.js";
 import * as runtimePlanTools from "./runtime-plan-tools.js";
 import { createUiThemeExtension, normalizeUiThemeContext } from "./runtime-ui-theme.js";
+import { createDivModeExtension } from "./runtime-div-mode.js";
 import * as runtimeShellKill from "./runtime-shell-kill.js";
 import { planHeading, readPlanMode, saveApprovedPlan, writePlanMode } from "./plan-store.js";
 import { readDesignMode, writeDesignMode } from "./design-mode-store.js";
@@ -4359,6 +4360,13 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
         divMode: () => recordAgent.divMode,
         context: () => uiThemeContext
       }),
+      // Div 气泡合规重申（第六个内联扩展）：always 档每回合在系统提示词最末尾补一行
+      // 「最终回复必须是一页气泡」。静态规范在 systemPromptOverride 里被技能/工具/
+      // 记忆块挤到中段，长任务里会漂移（2026-11-02 用户报「开了还是都用 markdown」）。
+      // 排在上一个扩展之后 ⇒ 尾部次序是「主题块 → 本轮输出格式那一行」。
+      createDivModeExtension({
+        divMode: () => recordAgent.divMode
+      }),
       // 实验分支（feat/codemode-toolsearch）最终保留：codemode（脚本编排工具，QuickJS
       // 沙箱）。上游注册即不激活，激活点在 toolNamesFor 里显式点名；缺省 mode:"on"
       // （工具保持声明，脚本额外可编排）；脚本内工具调用走同一条 tool pipeline，权限门
@@ -4367,7 +4375,9 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
       // 留在分支历史 5569137/2bcfe45，恢复时 cherry-pick 即可）。
       createCodemodeExtension()
     ],
-    systemPromptOverride: (base) => [base, recordAgent.systemPrompt, buildDivModePrompt(recordAgent.divMode), buildSkillsSystemPromptBlock(runtimeSkills.activeSkillsFor(resources.skillSummaries, recordAgent)), TOOL_ORCHESTRATION_PROMPT_BLOCK, OUTPUT_FORMAT_PROMPT_BLOCK, buildSubagentPromptBlock(resources.subagents), memoryPromptBlock].filter(Boolean).join("\n\n")
+    // 拼接次序有意义：Div 气泡规范排在最后（离生成点最近、零额外 token 的位置修正，
+    // 配合 createDivModeExtension 的每回合尾部重申），其余块沿用原次序。
+    systemPromptOverride: (base) => [base, recordAgent.systemPrompt, buildSkillsSystemPromptBlock(runtimeSkills.activeSkillsFor(resources.skillSummaries, recordAgent)), TOOL_ORCHESTRATION_PROMPT_BLOCK, OUTPUT_FORMAT_PROMPT_BLOCK, buildSubagentPromptBlock(resources.subagents), memoryPromptBlock, buildDivModePrompt(recordAgent.divMode)].filter(Boolean).join("\n\n")
   });
   await resourceLoader.reload();
   // Connect to configured MCP servers and rebuild the customTool set. Runs
