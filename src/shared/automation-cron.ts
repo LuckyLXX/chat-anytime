@@ -24,6 +24,11 @@ export interface ZonedDateParts {
   dayOfWeek: number;
 }
 
+/** 带年份的墙钟字段：nextAutomationRun 跨时区算下一次触发时需要年份。 */
+export interface ZonedDateTimeParts extends ZonedDateParts {
+  year: number;
+}
+
 const WEEKDAY_INDEX: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
 
 function parseField(field: string, min: number, max: number, normalizeDow: boolean): Set<number> {
@@ -99,10 +104,14 @@ export function isValidCron(expr: string): boolean {
   }
 }
 
-/** 把 date（或其时区换算）拆成 cron 比对所需的墙钟字段。 */
-export function zonedDateParts(date: Date, timeZone?: string): ZonedDateParts {
+/**
+ * 把 date（或其时区换算）拆成 cron 比对所需的墙钟字段。
+ * 带年份的版本单独导出（ZonedDateTimeParts）：cron 匹配不需要年份，但
+ * nextAutomationRun 跨时区反算 epoch 时需要。
+ */
+export function zonedDateTimeParts(date: Date, timeZone?: string): ZonedDateTimeParts {
   if (!timeZone) {
-    return { minute: date.getMinutes(), hour: date.getHours(), day: date.getDate(), month: date.getMonth() + 1, dayOfWeek: date.getDay() };
+    return { year: date.getFullYear(), minute: date.getMinutes(), hour: date.getHours(), day: date.getDate(), month: date.getMonth() + 1, dayOfWeek: date.getDay() };
   }
   const formatter = new Intl.DateTimeFormat("en-US", {
     timeZone,
@@ -121,12 +130,18 @@ export function zonedDateParts(date: Date, timeZone?: string): ZonedDateParts {
   const dayOfWeekName = valueOf("weekday") ?? "";
   const dayOfWeekIndex = WEEKDAY_INDEX[dayOfWeekName];
   return {
+    year: Number(valueOf("year") ?? 0),
     minute: Number(valueOf("minute") ?? 0),
     hour,
     day: Number(valueOf("day") ?? 0),
     month: Number(valueOf("month") ?? 0),
     dayOfWeek: dayOfWeekIndex === undefined ? -1 : dayOfWeekIndex
   };
+}
+
+export function zonedDateParts(date: Date, timeZone?: string): ZonedDateParts {
+  const { year: _year, ...parts } = zonedDateTimeParts(date, timeZone);
+  return parts;
 }
 
 /** date 在（可选的）时区下是否命中 cron 表达式。 */

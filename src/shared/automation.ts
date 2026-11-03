@@ -1,5 +1,5 @@
 import type { AutomationSchedule } from "./protocol.js";
-import { parseCron } from "./automation-cron.js";
+import { parseCron, zonedDateTimeParts } from "./automation-cron.js";
 
 /**
  * 自动化任务调度/提醒的纯展示与解析工具。
@@ -92,8 +92,8 @@ const WEEKDAY_SHORT = ["周日", "周一", "周二", "周三", "周四", "周五
 /**
  * 计算下一次触发时间（epoch ms）。
  *
- * P0 只精确支持**本地时区**：带 IANA `timezone` 的 cron 返回 undefined，界面显示
- * 「按计划」，避免在渲染端做昂贵且易错的时区反算（P1 再补）。
+ * 支持本地时区与 IANA `timezone`：后者用 `zonedDateTimeParts` 把墙钟时间反算成
+ * epoch（两次偏移校正，含 DST；DST 空档时间跳过）。
  *
  * cron 按「日 → 时 → 分」推进而不是逐分钟扫描：每天先做一次 月/日/星期 的集合
  * 判断，命中后再取当天最近的 时/分，年度任务也只需 366 次日判断。
@@ -102,24 +102,51 @@ export function nextAutomationRun(schedule: AutomationSchedule, now = Date.now()
   if (schedule.kind !== "cron") {
     return schedule.scheduledAt > now ? schedule.scheduledAt : undefined;
   }
-  if (schedule.timezone) return undefined;
   let cron;
   try {
     cron = parseCron(schedule.cron);
   } catch {
     return undefined;
   }
+  const hours = [...cron.hour].sort((a, b) => a - b);
+  const minutes = [...cron.minute].sort((a, b) => a - b);
+  const matchesDay = (year: number, month: number, day: number, dayOfWeek: number): boolean => {
+    // 与调度器同一口径：日与星期是纯 AND（不是 Vixie 的 OR）。
+    return cron.month.has(month) && cron.day.has(day) && cron.dayOfWeek.has(dayOfWeek);
+  };
+
+  if (schedule.timezone) {
+    let startParts;
+    try {
+      startParts = zonedDateTimeParts(new Date(now), schedule.timezone);
+    } catch {
+      return undefined;
+    }
+    // 以目标时区的「今天」为起点逐日推进（用 UTC 日期只做日历运算，不参与时区换算）。
+    const startDay = Date.UTC(startParts.year, startParts.month - 1, startParts.day);
+    for (let dayOffset = 0; dayOffset <= 366; dayOffset += 1) {
+      const day = new Date(startDay + dayOffset * 86_400_000);
+      const year = day.getUTCFullYear();
+      const month = day.getUTCMonth() + 1;
+      const date = day.getUTCDate();
+      if (!matchesDay(year, month, date, day.getUTCDay())) continue;
+      for (const hour of hours) {
+        for (const minute of minutes) {
+          const candidate = zonedWallTimeToEpoch(year, month, date, hour, minute, schedule.timezone);
+          if (candidate !== undefined && candidate >= now) return candidate;
+        }
+      }
+    }
+    return undefined;
+  }
+
   const start = new Date(now);
   start.setSeconds(0, 0);
   start.setMinutes(start.getMinutes() + 1);
   const from = start.getTime();
-  const hours = [...cron.hour].sort((a, b) => a - b);
-  const minutes = [...cron.minute].sort((a, b) => a - b);
   for (let dayOffset = 0; dayOffset <= 366; dayOffset += 1) {
     const day = new Date(start.getFullYear(), start.getMonth(), start.getDate() + dayOffset);
-    if (!cron.month.has(day.getMonth() + 1)) continue;
-    // 与调度器同一口径：日与星期是纯 AND（不是 Vixie 的 OR）。
-    if (!cron.day.has(day.getDate()) || !cron.dayOfWeek.has(day.getDay())) continue;
+    if (!matchesDay(day.getFullYear(), day.getMonth() + 1, day.getDate(), day.getDay())) continue;
     for (const hour of hours) {
       for (const minute of minutes) {
         const candidate = new Date(day.getFullYear(), day.getMonth(), day.getDate(), hour, minute).getTime();
@@ -128,6 +155,36 @@ export function nextAutomationRun(schedule: AutomationSchedule, now = Date.now()
     }
   }
   return undefined;
+}
+
+/**
+ * 时区墙钟时间 → epoch：用「实际时区偏移」迭代校正（两次足够，含 DST）。
+ * 目标落在 DST 不存在的空档时返回 undefined（跳过该候选，交给下一分钟/下一天）。
+ */
+function zonedWallTimeToEpoch(year: number, month: number, day: number, hour: number, minute: number, timeZone: string): number | undefined {
+  const target = Date.UTC(year, month - 1, day, hour, minute);
+  let guess = target;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    let parts;
+    try {
+      parts = zonedDateTimeParts(new Date(guess), timeZone);
+    } catch {
+      return undefined;
+    }
+    const actual = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute);
+    const delta = actual - target;
+    if (delta === 0) break;
+    guess -= delta;
+  }
+  let parts;
+  try {
+    parts = zonedDateTimeParts(new Date(guess), timeZone);
+  } catch {
+    return undefined;
+  }
+  return parts.year === year && parts.month === month && parts.day === day && parts.hour === hour && parts.minute === minute
+    ? guess
+    : undefined;
 }
 
 /**

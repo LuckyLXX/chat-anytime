@@ -90,8 +90,18 @@ describe("nextAutomationRun", () => {
     expect(nextAutomationRun({ kind: "at", scheduledAt: now - 1 }, now)).toBeUndefined();
   });
 
-  it("leaves IANA-timezone cron for P1 and reports 按计划 instead of a wrong instant", () => {
-    expect(nextAutomationRun({ kind: "cron", cron: "0 9 * * *", timezone: "Asia/Shanghai" })).toBeUndefined();
+  it("converts IANA-timezone cron to the exact epoch (including DST-aware offsets)", () => {
+    const shanghaiNow = Date.parse("2026-11-02T00:30:00.000Z"); // 08:30 Asia/Shanghai
+    expect(nextAutomationRun({ kind: "cron", cron: "0 9 * * *", timezone: "Asia/Shanghai" }, shanghaiNow))
+      .toBe(Date.parse("2026-11-02T01:00:00.000Z"));
+
+    const newYorkSummer = Date.parse("2026-07-01T12:00:00.000Z"); // 08:00 EDT
+    expect(nextAutomationRun({ kind: "cron", cron: "0 9 * * *", timezone: "America/New_York" }, newYorkSummer))
+      .toBe(Date.parse("2026-07-01T13:00:00.000Z"));
+
+    const newYorkWinter = Date.parse("2026-12-01T13:00:00.000Z"); // 08:00 EST
+    expect(nextAutomationRun({ kind: "cron", cron: "0 9 * * *", timezone: "America/New_York" }, newYorkWinter))
+      .toBe(Date.parse("2026-12-01T14:00:00.000Z"));
   });
 });
 
