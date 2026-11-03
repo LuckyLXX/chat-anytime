@@ -118,6 +118,7 @@ import { showGalleryWallLanding } from "./lib/landing-gallery";
 import { AppearanceSettings } from "./AppearanceSettings";
 import { HooksSettings } from "./HooksSettings";
 import { selectableCatalogModels } from "./lib/model-list";
+import { automationRunToastMessage } from "./lib/automation-task-view";
 import { shouldRevealBrowserTab } from "./lib/browser-reveal";
 import { resourceScopeLabels, sessionRunStatusLabels, toolLabel } from "../../shared/locale";
 import { SubagentSettings } from "./SubagentSettings";
@@ -690,23 +691,16 @@ export function App(): ReactNode {
   // —— checkpoint 回滚：单文件确认对话框目标 + 完成后的 toast ——
   const [rollbackTarget, setRollbackTarget] = useState<{ file: ReplyChangedFile; sessionId: string } | null>(null);
   const [checkpointToast, setCheckpointToast] = useState<string>();
-  // —— 自动化任务运行结束 toast（带任务名 + 查看结果直达）——
+  // —— 自动化运行异常 toast（失败/中止才弹；成功与投递静默，结果在运行记录里）——
   const [automationToast, setAutomationToast] = useState<{ message: string; runId?: string }>();
   const lastAutomationRunAtRef = useRef(0);
   useEffect(() => {
     if (!automationRun || automationRun.at === lastAutomationRunAtRef.current) return;
     lastAutomationRunAtRef.current = automationRun.at;
-    // 运行中不弹 toast（运行记录面板顶部有运行中条目）；终态才提示。
-    if (automationRun.status === "running") return;
-    const name = automationRun.taskName ? `「${automationRun.taskName}」` : "";
-    // 中止不是失败：单独给一句中性文案，不套「运行失败」。
-    const message = automationRun.status === "ok"
-      ? (name ? `${name}运行完成` : "定时任务已运行")
-      : automationRun.status === "delivered"
-        ? (name ? `${name}已投递到关联会话` : "定时任务提醒已投递")
-        : automationRun.status === "aborted"
-          ? (name ? `${name}运行已中止` : "定时任务运行已中止")
-          : `${name}运行失败${automationRun.message ? `：${automationRun.message.length > 120 ? `${automationRun.message.slice(0, 120)}…` : automationRun.message}` : ""}`;
+    // 运行中不弹 toast（运行记录面板顶部有运行中条目）；成功/投递也静默
+    // （2026-11-03 用户要求「自动化结果不弹窗」），文案口径见 automationRunToastMessage。
+    const message = automationRunToastMessage(automationRun);
+    if (!message) return;
     setAutomationToast({ message, runId: automationRun.runId });
   }, [automationRun]);
   // 聊天里的 automation_create 卡片「打开」：打开右侧自动化面板（任务列表）。

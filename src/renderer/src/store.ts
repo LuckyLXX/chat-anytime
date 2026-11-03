@@ -173,12 +173,12 @@ export interface CheckpointResultInfo {
   at: number;
 }
 
-/** 最近一次自动化任务运行结果（automation-run 推送）；App 据此 toast。running=开始（置顶运行中条目），ok/error/aborted/delivered=终态。 */
+/** 最近一次自动化任务运行结果（automation-run 推送）；App 据此给**失败/中止**弹 toast（成功与投递静默）。running=开始（置顶运行中条目），ok/error/aborted/delivered=终态。 */
 export interface AutomationRunInfo {
   id: string;
   status: "ok" | "error" | "aborted" | "delivered" | "running";
   taskName?: string;
-  /** 终态推送携带的运行记录 id（toast「查看结果」直达寻址）。 */
+  /** 终态推送携带的运行记录 id（失败/中止 toast 的「查看结果」直达寻址）。 */
   runId?: string;
   message?: string;
   at: number;
@@ -406,7 +406,7 @@ interface DesktopState {
   automation: AutomationTask[];
   /** 全角色自动化运行历史（automation-runs 推送全量替换；设置页「运行记录」子页）。 */
   automationRuns: AutomationRunRecord[];
-  /** 最近一次自动化任务运行结果；App 监听变化弹 toast。 */
+  /** 最近一次自动化任务运行结果；App 监听变化，仅在失败/中止时弹 toast。 */
   automationRun?: AutomationRunInfo;
   /** toast「查看结果」直达信号：AutomationSettings 监听后切「运行记录」子页并高亮该条。 */
   automationRunsSignal?: { runId: string; at: number };

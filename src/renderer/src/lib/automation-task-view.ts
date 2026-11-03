@@ -69,6 +69,32 @@ export function formatElapsed(ms: number): string {
   return `${minutes}m${pad2(seconds % 60)}s`;
 }
 
+/**
+ * 一次自动化运行终态该不该弹应用内提示条（2026-11-03 用户要求「自动化结果不弹窗」）。
+ *
+ * 成功（ok）与投递（delivered）静默：结果本来就在运行记录里，定时任务一天跑几次、
+ * 每次弹一条「运行完成 + 查看结果」只是打扰；只有失败（error）与中止（aborted）
+ * 这类异常才提示，免得问题被淹没。运行中（running）由运行记录面板顶部的条目承载。
+ *
+ * 返回 undefined = 不弹；返回字符串 = 提示文案（调用方决定是否可跳转运行记录）。
+ */
+export const AUTOMATION_TOAST_ERROR_MAX = 120;
+
+export function automationRunToastMessage(run: {
+  status: "ok" | "error" | "aborted" | "delivered" | "running";
+  taskName?: string;
+  message?: string;
+}): string | undefined {
+  if (run.status === "running" || run.status === "ok" || run.status === "delivered") return undefined;
+  const name = run.taskName ? `「${run.taskName}」` : "";
+  if (run.status === "aborted") return name ? `${name}运行已中止` : "定时任务运行已中止";
+  // 中止不是失败：单独一句中性文案，不套「运行失败」。
+  const detail = run.message
+    ? `：${run.message.length > AUTOMATION_TOAST_ERROR_MAX ? `${run.message.slice(0, AUTOMATION_TOAST_ERROR_MAX)}…` : run.message}`
+    : "";
+  return `${name}运行失败${detail}`;
+}
+
 /** 工作区路径的末级目录（展示用）；元信息缺失时 undefined。 */
 export function workspaceDisplayName(path: string | undefined): string | undefined {
   const trimmed = path?.trim();

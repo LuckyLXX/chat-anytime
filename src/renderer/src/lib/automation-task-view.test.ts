@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AutomationTask } from "../../../shared/protocol.js";
-import { automationTaskState, automationTaskStateRank, formatElapsed, formatShortTime, workspaceDisplayName } from "./automation-task-view.js";
+import { AUTOMATION_TOAST_ERROR_MAX, automationRunToastMessage, automationTaskState, automationTaskStateRank, formatElapsed, formatShortTime, workspaceDisplayName } from "./automation-task-view.js";
 
 function task(overrides: Partial<AutomationTask> = {}): AutomationTask {
   return {
@@ -34,5 +34,18 @@ describe("automation task view", () => {
     expect(formatElapsed(92_000)).toBe("1m32s");
     expect(workspaceDisplayName("D:/Projects/PiDesktop")).toBe("PiDesktop");
     expect(workspaceDisplayName(undefined)).toBeUndefined();
+  });
+
+  // 2026-11-03 用户要求「自动化结果不弹窗」：成功与投递静默，结果只在运行记录里看。
+  it("only surfaces failures and aborts as a toast", () => {
+    expect(automationRunToastMessage({ status: "ok", taskName: "日报" })).toBeUndefined();
+    expect(automationRunToastMessage({ status: "delivered", taskName: "日报" })).toBeUndefined();
+    expect(automationRunToastMessage({ status: "running", taskName: "日报" })).toBeUndefined();
+    expect(automationRunToastMessage({ status: "aborted", taskName: "日报" })).toBe("「日报」运行已中止");
+    expect(automationRunToastMessage({ status: "aborted" })).toBe("定时任务运行已中止");
+    expect(automationRunToastMessage({ status: "error", taskName: "日报", message: "工作区不存在" })).toBe("「日报」运行失败：工作区不存在");
+    expect(automationRunToastMessage({ status: "error" })).toBe("运行失败");
+    const long = "失".repeat(AUTOMATION_TOAST_ERROR_MAX + 10);
+    expect(automationRunToastMessage({ status: "error", taskName: "日报", message: long })).toBe(`「日报」运行失败：${"失".repeat(AUTOMATION_TOAST_ERROR_MAX)}…`);
   });
 });

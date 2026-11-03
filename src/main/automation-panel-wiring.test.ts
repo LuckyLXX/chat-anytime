@@ -70,6 +70,14 @@ describe("automation panel wiring contract", () => {
     expect(catalog).toContain("includeAutomation");
   });
 
+  it("keeps successful automation runs silent (only failures/aborts toast)", () => {
+    // 2026-11-03 用户要求「自动化结果不弹窗」：成功/投递不再弹「运行完成」，
+    // 判定口径抽到纯函数（lib/automation-task-view.ts）并单独单测。
+    expect(app).toContain("automationRunToastMessage(automationRun)");
+    expect(app).not.toContain("运行完成");
+    expect(app).not.toContain("已投递到关联会话");
+  });
+
   it("keeps the five theme mirrors in sync", () => {
     const mirrors = [
       "../../AGENTS.md",
