@@ -1,13 +1,14 @@
 // 右侧「自动化」面板（P0）：任务状态 / 下次触发 / 最近结果 / 运行记录 + 快捷控制。
 // 数据源全部来自 store 的 automation / automationRuns / automationRun 推送；控制走
 // 现有 automation.* 命令（停止为 2026-11-02 新增的 automation.stop）。
-// 设计稿：outputs/automation-panel-designs.html（方案 B）；P1 的「查看全部」全页
-// 尚未落地，onManageAll 暂时打开设置页的自动化 tab。
+// 设计稿：outputs/automation-panel-designs.html（方案 B）；「管理全部」由 App 打开
+// P1 的 AutomationCenter 管理页。
 
 import { AlertCircle, Bot, CalendarClock, Check, ChevronRight, Clock, Folder, MessageSquare, Pencil, Play, Plus, Search, Settings2, Square, Trash2, X, Zap } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import type { AutomationTask, DesktopSettings, ModelOption, ProviderOption } from "../../shared/protocol";
 import { formatAutomationNextRun, formatAutomationSchedule, nextAutomationRun } from "../../shared/automation";
+import { AUTOMATION_LAST_RUN_LABEL, AUTOMATION_STATE_LABEL, automationTaskState, automationTaskStateRank, formatElapsed, formatShortTime, workspaceDisplayName, type AutomationTaskState } from "./lib/automation-task-view";
 import { AutomationForm } from "./AutomationSettings";
 import { AutomationRuns, type AutomationRunsHighlight } from "./AutomationRuns";
 import { ExitWrap, useExitPresenceValue } from "./components/Presence";
@@ -30,70 +31,7 @@ export interface AutomationPanelProps {
   onOpenSession(): void;
 }
 
-type TaskState = "running" | "scheduled" | "paused" | "completed" | "issue";
 type TaskFilter = "all" | "running" | "paused";
-
-const STATE_LABEL: Record<TaskState, string> = {
-  running: "运行中",
-  scheduled: "已排定",
-  paused: "已暂停",
-  completed: "已完成",
-  issue: "需修复"
-};
-
-const LAST_RUN_LABEL: Record<NonNullable<AutomationTask["lastRun"]>["status"], string> = {
-  ok: "成功",
-  error: "失败",
-  aborted: "已中止",
-  delivered: "已投递"
-};
-
-function pad2(value: number): string {
-  return String(value).padStart(2, "0");
-}
-
-function clock(ts: number): string {
-  const date = new Date(ts);
-  return `${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
-}
-
-/** 任务/运行历史里的短时间：今天/昨天等按本地日历分档，避免跨时区看错。 */
-function shortTime(ts: number, now: number): string {
-  const date = new Date(ts);
-  const startOfToday = new Date(now);
-  startOfToday.setHours(0, 0, 0, 0);
-  const startOfThatDay = new Date(ts);
-  startOfThatDay.setHours(0, 0, 0, 0);
-  const diffDays = Math.round((startOfToday.getTime() - startOfThatDay.getTime()) / 86_400_000);
-  if (diffDays === 0) return `今天 ${clock(ts)}`;
-  if (diffDays === 1) return `昨天 ${clock(ts)}`;
-  return `${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ${clock(ts)}`;
-}
-
-function elapsed(ms: number): string {
-  const seconds = Math.max(0, Math.floor(ms / 1_000));
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  return `${minutes}m${pad2(seconds % 60)}s`;
-}
-
-function taskState(task: AutomationTask, runningTaskId: string | undefined): TaskState {
-  if (task.workspaceIssue) return "issue";
-  if (runningTaskId === task.id) return "running";
-  if (task.completedAt) return "completed";
-  if (!task.enabled) return "paused";
-  return "scheduled";
-}
-
-function taskStateRank(state: TaskState): number {
-  return state === "running" ? 0 : state === "scheduled" ? 1 : state === "paused" ? 2 : state === "completed" ? 3 : 4;
-}
-
-function workspaceName(path: string | undefined): string | undefined {
-  const trimmed = path?.trim();
-  if (!trimmed) return undefined;
-  return trimmed.split(/[\\/]/u).at(-1) || trimmed;
-}
 
 /**
  * 任务卡的动作区。运行中显示「停止本次」；workspaceIssue 禁用运行/启停；
@@ -111,7 +49,7 @@ function TaskActions({
   onOpenSession
 }: {
   task: AutomationTask;
-  state: TaskState;
+  state: AutomationTaskState;
   runningSince?: number;
   now: number;
   onRun(): void;
@@ -130,7 +68,7 @@ function TaskActions({
         ) : (
           <button type="button" className="automation-panel-action danger" data-control="automation-stop" title="停止本次运行（只中止本次，不暂停任务）" onClick={onRun}>
             <Square size={11} />停止本次
-            {runningSince !== undefined && <span className="automation-panel-running-time">{elapsed(now - runningSince)}</span>}
+            {runningSince !== undefined && <span className="automation-panel-running-time">{formatElapsed(now - runningSince)}</span>}
           </button>
         )
       ) : (
@@ -219,7 +157,7 @@ export function AutomationPanel({
     const keyword = query.trim().toLowerCase();
     return automation
       .filter((task) => {
-        const state = taskState(task, runningTaskId);
+        const state = automationTaskState(task, runningTaskId);
         if (filter === "running" && state !== "running") return false;
         if (filter === "paused" && state !== "paused" && state !== "issue") return false;
         if (!keyword) return true;
@@ -228,7 +166,7 @@ export function AutomationPanel({
           || formatAutomationSchedule(task.schedule).toLowerCase().includes(keyword);
       })
       .sort((left, right) => {
-        const rank = taskStateRank(taskState(left, runningTaskId)) - taskStateRank(taskState(right, runningTaskId));
+        const rank = automationTaskStateRank(automationTaskState(left, runningTaskId)) - automationTaskStateRank(automationTaskState(right, runningTaskId));
         return rank !== 0 ? rank : right.createdAt - left.createdAt;
       });
   }, [automation, filter, query, runningTaskId]);
@@ -301,7 +239,7 @@ export function AutomationPanel({
               {filtered.length === 0
                 ? <div className="automation-panel-list-empty">没有匹配的任务</div>
                 : filtered.map((task) => {
-                  const state = taskState(task, runningTaskId);
+                  const state = automationTaskState(task, runningTaskId);
                   const lastRun = task.lastRun;
                   const next = task.enabled && !task.completedAt && !task.workspaceIssue ? nextAutomationRun(task.schedule, now) : undefined;
                   return (
@@ -310,9 +248,9 @@ export function AutomationPanel({
                         <span className={`automation-panel-dot ${state}`} aria-hidden="true" />
                         <div className="automation-panel-task-title">
                           <strong title={task.name}>{task.name}</strong>
-                          <span className={`automation-panel-state ${state}`}>{STATE_LABEL[state]}</span>
+                          <span className={`automation-panel-state ${state}`}>{AUTOMATION_STATE_LABEL[state]}</span>
                         </div>
-                        {lastRun && <span className={`automation-panel-last-badge ${lastRun.status}`}>{LAST_RUN_LABEL[lastRun.status]}</span>}
+                        {lastRun && <span className={`automation-panel-last-badge ${lastRun.status}`}>{AUTOMATION_LAST_RUN_LABEL[lastRun.status]}</span>}
                       </div>
                       <div className="automation-panel-task-meta">
                         <span><CalendarClock size={11} />{formatAutomationSchedule(task.schedule, now)}</span>
@@ -321,13 +259,13 @@ export function AutomationPanel({
                       </div>
                       <div className="automation-panel-task-context">
                         <span><Bot size={11} />{agentNames.get(task.agentId) ?? task.agentId}</span>
-                        {task.workspace && <span><Folder size={11} />{workspaceName(task.workspace)}</span>}
+                        {task.workspace && <span><Folder size={11} />{workspaceDisplayName(task.workspace)}</span>}
                         {task.sessionId && <span><MessageSquare size={11} />关联会话</span>}
                       </div>
                       {task.prompt && <p className="automation-panel-prompt" title={task.prompt}>{task.prompt}</p>}
                       {lastRun && (
                         <div className={`automation-panel-last ${lastRun.status}`}>
-                          <span>{shortTime(lastRun.startedAt, now)} · {LAST_RUN_LABEL[lastRun.status]}</span>
+                          <span>{formatShortTime(lastRun.startedAt, now)} · {AUTOMATION_LAST_RUN_LABEL[lastRun.status]}</span>
                           <span>{lastRun.status === "error" ? (lastRun.error ?? "运行失败") : (lastRun.preview ?? "无文本输出")}</span>
                         </div>
                       )}

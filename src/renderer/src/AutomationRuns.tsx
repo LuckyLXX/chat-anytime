@@ -23,6 +23,8 @@ export interface AutomationRunsProps {
   onOpenSession: () => void;
   /** 右侧自动化面板的紧凑形态：只保留 全部/成功/失败，隐藏任务筛选与计数。 */
   compact?: boolean;
+  /** 宿主选中的任务：进入运行记录时默认把任务筛选切到它（管理页用）。 */
+  initialTaskFilter?: string;
 }
 
 type StatusFilter = "all" | "ok" | "error" | "aborted" | "skipped" | "delivered";
@@ -70,7 +72,7 @@ function groupByDay(runs: AutomationRunRecord[]): [string, AutomationRunRecord[]
   return [...groups.entries()];
 }
 
-export function AutomationRuns({ settings, activeAgentId, highlight, onOpenSession, compact = false }: AutomationRunsProps): ReactNode {
+export function AutomationRuns({ settings, activeAgentId, highlight, onOpenSession, compact = false, initialTaskFilter }: AutomationRunsProps): ReactNode {
   const runs = useDesktopStore((state) => state.automationRuns);
   const automation = useDesktopStore((state) => state.automation);
   const automationRun = useDesktopStore((state) => state.automationRun);
@@ -78,7 +80,7 @@ export function AutomationRuns({ settings, activeAgentId, highlight, onOpenSessi
   const snapshotAgentId = useDesktopStore((state) => state.snapshot.agentId);
   const currentAgentId = activeAgentId ?? snapshotAgentId;
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
-  const [taskFilter, setTaskFilter] = useState<string>("all");
+  const [taskFilter, setTaskFilter] = useState<string>(initialTaskFilter ?? "all");
   const [expandedRunId, setExpandedRunId] = useState<string | undefined>(undefined);
   const [highlightRunId, setHighlightRunId] = useState<string | undefined>(undefined);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -103,13 +105,19 @@ export function AutomationRuns({ settings, activeAgentId, highlight, onOpenSessi
     // eslint-disable-next-line react-hooks/exhaustive-deps -- highlight 仅用于读取，at 唯一驱动
   }, [highlightAt]);
 
+  // 管理页切换任务时把筛选跟过去；用户在记录里再手动改就是用户自己的选择。
+  useEffect(() => {
+    if (initialTaskFilter) setTaskFilter(initialTaskFilter);
+  }, [initialTaskFilter]);
+
   const taskOptions = useMemo(() => {
     // 任务筛选数据源 = 当前全角色任务；运行记录里已删除任务的行不受筛选影响。
     return automation
-      .filter((task) => runs.some((run) => run.taskId === task.id))
+      // 当前选中任务即使还没有运行记录也要出现在下拉里，否则 value 落空会看起来「筛选到了不存在的任务」。
+      .filter((task) => task.id === initialTaskFilter || runs.some((run) => run.taskId === task.id))
       .sort((a, b) => a.name.localeCompare(b.name, "zh-CN"))
       .map((task) => ({ id: task.id, name: task.name, agentId: task.agentId, agentName: settings.agents.find((agent) => agent.id === task.agentId)?.name ?? task.agentId }));
-  }, [automation, runs, settings.agents]);
+  }, [automation, runs, settings.agents, initialTaskFilter]);
 
   const filtered = useMemo(() => {
     return runs.filter((run) => {

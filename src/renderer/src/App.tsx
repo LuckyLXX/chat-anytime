@@ -81,6 +81,7 @@ import { DiffView } from "./components/DiffView";
 import { BrandMark } from "./components/BrandMark";
 import { SessionSearchResults } from "./components/SessionSearchResults";
 import { AutomationPanel, type AutomationPanelTab } from "./AutomationPanel";
+import { AutomationCenter } from "./AutomationCenter";
 import type { AutomationRunsHighlight } from "./AutomationRuns";
 import { CommandPalette } from "./components/CommandPalette";
 import type { PaletteAction } from "./lib/command-palette";
@@ -633,6 +634,8 @@ export function App(): ReactNode {
   const [automationPanelOpen, setAutomationPanelOpen] = useState(false);
   const [automationPanelTab, setAutomationPanelTab] = useState<AutomationPanelTab>("tasks");
   const [automationPanelHighlight, setAutomationPanelHighlight] = useState<AutomationRunsHighlight>();
+  const [automationCenterOpen, setAutomationCenterOpen] = useState(false);
+  const [automationCenterTaskId, setAutomationCenterTaskId] = useState<string | undefined>(undefined);
   const [preview, setPreview] = useState<PreviewState>();
   const [previewAddMenuOpen, setPreviewAddMenuOpen] = useState(false);
   // 顶栏「作品」下拉的展开态：它的面板从顶栏向下伸进右侧预览区，而内置浏览器是
@@ -647,12 +650,24 @@ export function App(): ReactNode {
     setAutomationPanelTab(tab);
     setAutomationPanelHighlight(highlight);
     setAutomationPanelOpen(true);
+    setAutomationCenterOpen(false);
     setSettingsOpen(false);
     setPreviewOpened(false);
     setPreviewAddMenuOpen(false);
   }
   function closeAutomationPanel(): void {
     setAutomationPanelOpen(false);
+  }
+  function openAutomationCenter(taskId?: string): void {
+    setAutomationCenterTaskId(taskId);
+    setAutomationCenterOpen(true);
+    setAutomationPanelOpen(false);
+    setSettingsOpen(false);
+    setPreviewOpened(false);
+    setPreviewAddMenuOpen(false);
+  }
+  function closeAutomationCenter(): void {
+    setAutomationCenterOpen(false);
   }
   const [previewEditorStates, setPreviewEditorStates] = useState<Record<string, PreviewEditorState>>({});
   const [sidebarView, setSidebarView] = useState<"topics" | "files">("topics");
@@ -719,6 +734,7 @@ export function App(): ReactNode {
   // 退场动画；时长与 styles.css「界面动效基建」注释的对照表一致）——
   const settingsPresence = useExitPresence(settingsOpen, 160);
   const automationPanelPresence = useExitPresence(automationPanelOpen, 180);
+  const automationCenterPresence = useExitPresence(automationCenterOpen, 180);
   const permissionPresence = useExitPresenceValue(permission, 130);
   const transcriptPresence = useExitPresenceValue(transcriptTarget, 160);
   const renamePresence = useExitPresenceValue(renameSession, 160);
@@ -1391,6 +1407,7 @@ export function App(): ReactNode {
    * 要等主进程激活后才知道，先记 pending，activeSessionId 变化时落位。
    */
   async function createNewSession(workspace?: string, paneSessionId?: string): Promise<void> {
+    setAutomationCenterOpen(false);
     try {
       if (splitTree) {
         const target = paneSessionId ?? focusedPaneId ?? activeSessionId;
@@ -1430,6 +1447,7 @@ export function App(): ReactNode {
   }
 
   async function openSession(path: string, sessionWorkspace: string, sessionId?: string, agentId?: string): Promise<void> {
+    setAutomationCenterOpen(false);
     try {
       // 分屏中：已在格子里的会话只聚焦；不在的替换焦点格（草稿/焦点随之迁移）。
       if (splitTree && sessionId) {
@@ -1799,6 +1817,7 @@ export function App(): ReactNode {
   // memo 化回调全部依赖它，不稳定会级联击穿 ConversationPane 的 memo。
   const openPreviewTarget = useCallback((target: PreviewTarget, id: string = previewTargetKey(target)): void => {
     setAutomationPanelOpen(false);
+    setAutomationCenterOpen(false);
     setPreviewOpened(true);
     setPreview((current) => {
       if (current?.tabs.some((tab) => tab.id === id)) return { ...current, activeTabId: id };
@@ -2343,7 +2362,7 @@ export function App(): ReactNode {
         </button>
       )}
       <button className="new-session-button" data-control="new-session" type="button" disabled={!activeWorkspace} onClick={() => void createNewSession()}><MessageSquarePlus size={16} />新建话题</button>
-      <button className={`automation-nav-button${automationPanelOpen ? " active" : ""}`} data-control="automation-open" type="button" title="自动化任务" aria-label="自动化任务" aria-pressed={automationPanelOpen} onClick={() => automationPanelOpen ? closeAutomationPanel() : openAutomationPanel()}><Zap size={15} /><span>自动化</span></button>
+      <button className={`automation-nav-button${automationPanelOpen || automationCenterOpen ? " active" : ""}`} data-control="automation-open" type="button" title="自动化任务" aria-label="自动化任务" aria-pressed={automationPanelOpen || automationCenterOpen} onClick={() => automationPanelOpen ? closeAutomationPanel() : automationCenterOpen ? closeAutomationCenter() : openAutomationPanel()}><Zap size={15} /><span>自动化</span></button>
       <button className="automation-nav-button" data-control="ssh-open" type="button" title="SSH 远程终端" aria-label="SSH 远程终端" onClick={() => openSshPanel()}><Server size={15} /><span>SSH</span></button>
       <div className="sidebar-footer">
         <button type="button" data-control="settings" onClick={() => setSettingsOpen(true)}><Settings size={16} />设置</button>
@@ -2512,7 +2531,7 @@ export function App(): ReactNode {
           <button type="button" className="rail-brand" data-control="sidebar-expand" title="展开侧边栏" aria-label="展开侧边栏" onClick={() => { if (sidebarFlyoutOpen) { setSidebarFlyoutOpen(false); } else { setSidebarCollapsed(false); } }}><span className="rail-brand-mark"><BrandMark size={20} /></span><PanelLeftOpen className="rail-brand-expand" size={18} /></button>
           <div className="sidebar-rail-items">
             <button type="button" className="rail-new-session" data-control="new-session" title="在当前工作区新建话题" aria-label="在当前工作区新建话题" disabled={!activeWorkspace} onClick={() => void createNewSession()}><Plus size={18} /></button>
-            <button type="button" className={`rail-icon${automationPanelOpen ? " active" : ""}`} data-control="automation-open" title="自动化任务" aria-label="自动化任务" onClick={() => automationPanelOpen ? closeAutomationPanel() : openAutomationPanel()}><Zap size={18} /></button>
+            <button type="button" className={`rail-icon${automationPanelOpen || automationCenterOpen ? " active" : ""}`} data-control="automation-open" title="自动化任务" aria-label="自动化任务" onClick={() => automationPanelOpen ? closeAutomationPanel() : automationCenterOpen ? closeAutomationCenter() : openAutomationPanel()}><Zap size={18} /></button>
             <button type="button" className="rail-icon" data-control="ssh-open" title="SSH 远程终端" aria-label="SSH 远程终端" onClick={() => openSshPanel()}><Server size={18} /></button>
             <button type="button" className="rail-icon" data-control="rail-topics" title={runningSessions.length > 0 ? `话题列表（${runningSessions.length} 个运行中）` : "话题列表"} aria-label={runningSessions.length > 0 ? `话题列表，${runningSessions.length} 个运行中` : "话题列表"} onClick={() => { setSidebarView("topics"); setSidebarTab("topics"); setSidebarFlyoutOpen(true); }}><MessageCircle size={18} />{runningSessions.length > 0 ? <span className="rail-running-badge">{runningSessions.length}</span> : null}</button>
             <button type="button" className="rail-icon" data-control="rail-search" title="搜索" aria-label="搜索" onClick={() => { setSidebarView("topics"); setSidebarFlyoutOpen(true); window.setTimeout(() => sidebarSearchRef.current?.focus(), 30); }}><Search size={18} /></button>
@@ -2561,6 +2580,7 @@ export function App(): ReactNode {
                 setPreviewOpened(false);
               } else {
                 setAutomationPanelOpen(false);
+                setAutomationCenterOpen(false);
                 setPreviewOpened(true);
               }
             }}>{previewOpened ? <PanelRightClose size={18} /> : <Eye size={18} />}</button>
@@ -2570,7 +2590,7 @@ export function App(): ReactNode {
           <div
             ref={workAreaRef}
             data-pane="work-area"
-            className={`work-area${designMode ? " design-mode" : ` ${workAreaPreviewClasses({ open: previewOpened, tabs: Boolean(preview && preview.tabs.length > 0) })}`}${automationPanelPresence.rendered ? " automation-panel-open" : ""}${designDragging ? " is-design-dragging" : !designMode && previewDragging ? " is-preview-dragging" : ""}`}
+            className={`work-area${designMode ? " design-mode" : ` ${workAreaPreviewClasses({ open: previewOpened, tabs: Boolean(preview && preview.tabs.length > 0) })}`}${automationPanelPresence.rendered ? " automation-panel-open" : ""}${automationCenterPresence.rendered ? " automation-center-open" : ""}${designDragging ? " is-design-dragging" : !designMode && previewDragging ? " is-preview-dragging" : ""}`}
             style={designMode
               ? { "--design-split": `${designSplit}%` } as CSSProperties
               : {
@@ -2665,8 +2685,22 @@ export function App(): ReactNode {
                 onTabChange={setAutomationPanelTab}
                 highlight={automationPanelHighlight}
                 onClose={closeAutomationPanel}
-                onManageAll={() => { closeAutomationPanel(); openSettingsOn("automation"); }}
+                onManageAll={() => openAutomationCenter()}
                 onOpenSession={closeAutomationPanel}
+              />
+            </ExitWrap>
+          )}
+          {automationCenterPresence.rendered && (
+            <ExitWrap exiting={automationCenterPresence.exiting}>
+              <AutomationCenter
+                models={models}
+                providers={providers}
+                settings={settings}
+                workspacePath={activeWorkspace}
+                activeAgentId={activeAgentId}
+                initialTaskId={automationCenterTaskId}
+                onClose={closeAutomationCenter}
+                onOpenSession={closeAutomationCenter}
               />
             </ExitWrap>
           )}

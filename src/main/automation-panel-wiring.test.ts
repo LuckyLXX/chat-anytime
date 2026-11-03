@@ -14,6 +14,7 @@ const read = (relative: string): string => readFileSync(join(__dirname, relative
 describe("automation panel wiring contract", () => {
   const app = read("../renderer/src/App.tsx");
   const panel = read("../renderer/src/AutomationPanel.tsx");
+  const center = read("../renderer/src/AutomationCenter.tsx");
   const runtime = read("pi-runtime.ts");
   const catalog = read("session-catalog.ts");
   const protocol = read("../shared/protocol.ts");
@@ -24,6 +25,8 @@ describe("automation panel wiring contract", () => {
     expect(app).toContain("automation-panel-open");
     expect(app).toContain('data-control="automation-open"');
     expect(app).toContain("openAutomationPanel()");
+    expect(app).toContain("import { AutomationCenter }");
+    expect(app).toContain("openAutomationCenter()");
     expect(app).toContain('data-control="automation-sessions-toggle"');
     expect(app).toContain("showAutomationSessions");
     expect(styles).toContain(".automation-panel {");
@@ -39,6 +42,10 @@ describe("automation panel wiring contract", () => {
     expect(panel).toContain('data-control="automation-panel-manage"');
     expect(panel).toContain("<AutomationRuns");
     expect(panel).toContain("compact");
+    expect(center).toContain('data-pane="automation-center"');
+    expect(center).toContain('data-control="automation-center-back"');
+    expect(center).toContain("<AutomationRuns");
+    expect(center).toContain("initialTaskFilter={selectedTask.id}");
   });
 
   it("background runs write the persistent origin marker into the Pi session", () => {
@@ -71,6 +78,10 @@ describe("automation panel wiring contract", () => {
       "../../resources/skills/pidesktop-theme-creator/references/variables.md",
       "../../resources/skills/pidesktop-theme-creator/scripts/check_theme.py"
     ];
-    for (const mirror of mirrors) expect(read(mirror)).toContain("automation-panel");
+    for (const mirror of mirrors) {
+      const body = read(mirror);
+      expect(body).toContain("automation-panel");
+      expect(body).toContain("automation-center");
+    }
   });
 });
