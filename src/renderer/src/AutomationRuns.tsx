@@ -3,7 +3,7 @@
 // automation-run running 推送合成置顶。「查看会话」只发 runId，主进程负责
 // 跨角色切换/定位/激活恢复（automation.run.open）。
 
-import { CheckCircle2, CheckCheck, ChevronDown, ChevronRight, CircleSlash, CircleStop, Clock, Loader2, MessageSquare, XCircle } from "lucide-react";
+import { CheckCircle2, CheckCheck, ChevronDown, CircleSlash, CircleStop, Clock, Loader2, MessageSquare, XCircle } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { AutomationRunRecord, DesktopSettings } from "../../shared/protocol";
 import { useDesktopStore } from "./store";
@@ -81,17 +81,15 @@ export function AutomationRuns({ settings, activeAgentId, highlight, onOpenSessi
   const currentAgentId = activeAgentId ?? snapshotAgentId;
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [taskFilter, setTaskFilter] = useState<string>(initialTaskFilter ?? "all");
-  const [expandedRunId, setExpandedRunId] = useState<string | undefined>(undefined);
   const [highlightRunId, setHighlightRunId] = useState<string | undefined>(undefined);
   const panelRef = useRef<HTMLDivElement>(null);
 
-  // 直达信号：滚动到该行并描边高亮（2s 后描边消隐，展开保留）。
+  // 直达信号：滚动到该行并描边高亮（2s 后描边消隐）。
   // at 是每次点击的唯一时间戳：同 runId 再次点击（新 at）也能重新触发；
   // 仅依赖 at——highlight 对象每次渲染都是新引用，不能作为依赖。
   const highlightAt = highlight?.at;
   useEffect(() => {
     if (!highlight) return;
-    setExpandedRunId(highlight.runId);
     setHighlightRunId(highlight.runId);
     const frame = requestAnimationFrame(() => {
       const element = panelRef.current?.querySelector<HTMLElement>(`[data-run-id="${CSS.escape(highlight.runId)}"]`);
@@ -133,8 +131,19 @@ export function AutomationRuns({ settings, activeAgentId, highlight, onOpenSessi
 
   function send(command: Parameters<typeof window.piDesktop.send>[0]): void { void window.piDesktop.send(command); }
 
-  function toggleExpand(runId: string): void {
-    setExpandedRunId((current) => (current === runId ? undefined : runId));
+  /** 运行记录是导航入口而不是详情容器：有会话的运行直接打开，跳过记录没有可看的会话。 */
+  function openRun(run: AutomationRunRecord): void {
+    if (run.status === "skipped" || !run.sessionId) return;
+    send({ type: "automation.run.open", runId: run.id });
+    onOpenSession();
+  }
+
+  /** 行内只保留「状态 + 用时」，不再展示提示词/结果摘要。 */
+  function outcomeText(run: AutomationRunRecord): string {
+    if (run.status === "skipped") return "未运行";
+    if (run.status === "delivered") return "已投递";
+    const status = run.status === "ok" ? "成功" : run.status === "aborted" ? "已中止" : "失败";
+    return `${status} · 用时 ${formatDuration(run.durationMs)}`;
   }
 
   return (
@@ -170,7 +179,7 @@ export function AutomationRuns({ settings, activeAgentId, highlight, onOpenSessi
         ? <div className="automation-empty">
             <Clock size={22} />
             <strong>{runningNow ? "没有匹配的运行记录" : "还没有运行记录"}</strong>
-            <p>{runningNow ? "换个筛选条件试试。" : "任务下一次触发后会出现在这里——每次运行（定时或手动）都会保留任务名、结果摘要与用时。"}</p>
+            <p>{runningNow ? "换个筛选条件试试。" : "任务下一次触发后会出现在这里——保留任务名、时间与结果状态。"}</p>
           </div>
         : <div className="automation-runs-groups">
             {groups.map(([label, dayRuns]) => (
@@ -178,62 +187,29 @@ export function AutomationRuns({ settings, activeAgentId, highlight, onOpenSessi
                 <header className="automation-runs-group-head"><strong>{label}</strong><span>{dayRuns.length} 条</span></header>
                 <div className="automation-runs-list">
                   {dayRuns.map((run) => {
-                    const expanded = expandedRunId === run.id;
+                    const canOpen = run.status !== "skipped" && Boolean(run.sessionId);
                     const crossRole = run.agentId !== currentAgentId;
-                    const task = automation.find((candidate) => candidate.id === run.taskId);
                     return (
                       <div
-                        className={`automation-runs-row ${run.status}${expanded ? " expanded" : ""}${highlightRunId === run.id ? " highlight" : ""}`}
+                        className={`automation-runs-row ${run.status}${canOpen ? " clickable" : " static"}${highlightRunId === run.id ? " highlight" : ""}`}
                         key={run.id}
                         data-run-id={run.id}
-                        role="button"
-                        tabIndex={0}
-                        aria-expanded={expanded}
-                        onClick={() => toggleExpand(run.id)}
-                        onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); toggleExpand(run.id); } }}
+                        role={canOpen ? "button" : undefined}
+                        tabIndex={canOpen ? 0 : undefined}
+                        title={canOpen
+                          ? (crossRole ? "打开会话（将切换到该运行所属角色）" : "打开该运行的会话")
+                          : run.status === "skipped" ? (run.skipReason ?? "本轮未运行") : undefined}
+                        onClick={canOpen ? () => openRun(run) : undefined}
+                        onKeyDown={canOpen ? (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openRun(run); } } : undefined}
                       >
                         <div className="automation-runs-row-line">
                           {/* skipped 用中性图标（CircleSlash），delivered 用 CheckCheck：跳过/投递都不是失败 */}
                           <span className={`automation-runs-status ${run.status}`} aria-hidden="true">{run.status === "ok" ? <CheckCircle2 size={14} /> : run.status === "aborted" ? <CircleStop size={14} /> : run.status === "skipped" ? <CircleSlash size={14} /> : run.status === "delivered" ? <CheckCheck size={14} /> : <XCircle size={14} />}</span>
                           <strong>{run.taskName}</strong>
-                          <span className="automation-runs-agent">{run.agentName}</span>
                           <span className="automation-runs-time">{formatTime(run.startedAt)}</span>
-                          <span className="automation-runs-duration">{run.status === "skipped" ? "未运行" : run.status === "delivered" ? "已投递" : `用时 ${formatDuration(run.durationMs)}`}</span>
-                          <span className={`automation-runs-trigger ${run.trigger}`}>{run.trigger === "cron" ? "定时" : "手动"}</span>
-                          <ChevronRight size={14} className="automation-runs-chevron" />
+                          <span className={`automation-runs-duration ${run.status}`}>{outcomeText(run)}</span>
+                          {canOpen && <MessageSquare size={13} className="automation-runs-open-icon" aria-hidden="true" />}
                         </div>
-                        {/* 失败优先可见：error 与 preview 折叠态都行内截断展示；中止是中性态，不套 error 样式 */}
-                        {!expanded && run.status === "error" && run.error && <p className="automation-runs-summary error"><span className="automation-runs-summary-label">错误：</span>{run.error}</p>}
-                        {!expanded && run.status === "aborted" && run.error && <p className="automation-runs-summary aborted"><span className="automation-runs-summary-label">中止：</span>{run.error}</p>}
-                        {!expanded && run.status === "skipped" && <p className="automation-runs-summary skipped"><span className="automation-runs-summary-label">未运行：</span>{run.skipReason ?? "本轮已跳过"}</p>}
-                        {!expanded && run.status === "delivered" && run.preview && <p className="automation-runs-summary delivered"><span className="automation-runs-summary-label">已投递：</span>{run.preview}</p>}
-                        {!expanded && run.status === "ok" && run.preview && <p className="automation-runs-summary">{run.preview}</p>}
-                        {expanded && (
-                          <div className="automation-runs-detail">
-                            <div className="automation-runs-detail-block">
-                              <strong>{run.status === "ok" ? "结果" : run.status === "aborted" ? "中止详情" : run.status === "skipped" ? "跳过原因" : run.status === "delivered" ? "投递结果" : "错误详情"}</strong>
-                              <p>{run.status === "ok" ? (run.preview || "运行成功（无文本输出）") : run.status === "aborted" ? (run.error || "运行已中止（无详情）") : run.status === "skipped" ? (run.skipReason || "本轮本该运行但被跳过") : run.status === "delivered" ? (run.preview || "提醒已投递到关联会话") : (run.error || "运行失败（无错误详情）")}</p>
-                            </div>
-                            {task && <div className="automation-runs-detail-block"><strong>任务提示词</strong><p className="automation-runs-prompt">{task.prompt}</p></div>}
-                            <div className="automation-runs-detail-meta">
-                              {run.modelId && <span>模型：{run.modelId}</span>}
-                              {run.sessionId && <span>会话：{run.sessionId}</span>}
-                              <span>触发：{run.trigger === "cron" ? "定时" : "手动"}</span>
-                              {run.deliveryMode === "session" && <span>投递：关联会话</span>}
-                            </div>
-                            {/* skipped 没有会话：整个动作区隐藏（不是禁用按钮——没有可看的对象） */}
-                            {run.status !== "skipped" && run.sessionId && (
-                              <div className="automation-runs-detail-actions">
-                                <button
-                                  type="button"
-                                  className="secondary-button"
-                                  title={crossRole ? "该运行属于其他角色：将切换到该角色（当前会话会被保留）后打开" : "打开该运行的会话"}
-                                  onClick={(event) => { event.stopPropagation(); send({ type: "automation.run.open", runId: run.id }); onOpenSession(); }}
-                                ><MessageSquare size={14} />{crossRole ? "切换角色查看" : "查看会话"}</button>
-                              </div>
-                            )}
-                          </div>
-                        )}
                       </div>
                     );
                   })}

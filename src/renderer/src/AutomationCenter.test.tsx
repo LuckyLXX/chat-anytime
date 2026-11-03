@@ -107,7 +107,7 @@ describe("AutomationCenter", () => {
     expect(container.textContent).toContain("自动化中心");
     expect(container.textContent).toContain("每日新闻日报");
     expect(container.textContent).toContain("项目巡检");
-    expect(container.textContent).toContain("8 条要闻已生成");
+    expect(container.textContent).toContain("成功 · 用时 12s");
     expect(container.textContent).toContain("近 7 天运行");
     expect(container.textContent).toContain("任务参数");
     expect(container.querySelector('[data-control="automation-run"]')).not.toBeNull();
@@ -120,7 +120,6 @@ describe("AutomationCenter", () => {
     if (!second) throw new Error("second task not found");
     act(() => second.click());
     expect(container.textContent).toContain("巡检工作区");
-    expect(container.textContent).not.toContain("8 条要闻已生成");
   });
 
   it("sends run/toggle commands and closes from the back button", () => {
