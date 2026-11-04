@@ -3755,6 +3755,72 @@ html[data-ui-motion="off"] .automation-center, html[data-ui-motion="off"] .ui-pr
    非连续阅读文本，含 CJK 的徽标与 meta 一律 label 档）。控件高度单独两档，避免字号变大后
    按钮被文字顶开。`.team-board.full` 整体再上一档——全屏是「看清更多」的阅读态，不是简单
    换布局。 */
+/* ============================================================
+   Skill 商店（设置页「Skill 商店」tab，2026-11-04）。
+   骨架复用 .resource-page / .resource-card；这里只补商店特有的浏览条、
+   卡片网格与详情抽屉。卡片是 <button>（整卡可点开详情），所以要把浏览器
+   默认按钮样式彻底清掉，否则会出现系统灰底与内居中文本。
+   详情抽屉是 .resource-page 内的绝对定位右侧面板（settings-body 的滚动
+   区域之外），不拦截页面其余区域的点击交互。
+   ============================================================ */
+.skill-store-page { position: relative; }
+.skill-store-scope { display: inline-flex; align-items: center; gap: 6px; color: var(--text-muted); font-size: 10.5px; }
+.skill-store-page .skill-store-scope select { height: 26px; padding: 0 6px; font-size: 11px; }
+
+.skill-store-notice { display: flex; align-items: flex-start; gap: 7px; margin: 0 !important; padding: 8px 11px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-muted); color: var(--text-muted); font-size: 11px; line-height: 1.5; }
+.skill-store-notice svg { flex: 0 0 auto; margin-top: 2px; color: var(--warning); }
+.skill-store-notice strong { color: var(--text); font-weight: 700; }
+
+.skill-store-browse { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; }
+.skill-store-browse label { display: grid; gap: 3px; margin: 0; color: var(--text-muted); font-size: 10.5px; }
+.skill-store-browse select { height: 30px; padding: 0 8px; font-size: 11.5px; }
+.skill-store-search { position: relative; display: inline-flex; flex: 1 1 220px; align-items: center; gap: 6px; height: 30px; padding: 0 9px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface-raised); color: var(--text-muted); }
+.skill-store-search input { flex: 1 1 auto; min-width: 0; height: 100%; margin: 0; padding: 0; border: 0; background: transparent; color: var(--text); font-size: 12px; }
+.skill-store-search input:focus { outline: none; }
+
+.skill-store-pager { display: flex; align-items: center; gap: 9px; color: var(--text-muted); font-size: 10.5px; }
+.skill-store-error { margin: 0 !important; }
+.skill-store-result { margin: 0 !important; padding: 8px 11px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-raised); color: var(--text-muted); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.skill-store-result.ok { border-color: var(--success); color: var(--text); }
+.skill-store-result.error { border-color: var(--danger); color: var(--danger); }
+.skill-store-result em { color: var(--text-muted); font-style: normal; }
+
+.skill-store-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(268px, 1fr)); gap: 8px; }
+.skill-store-card { display: flex; align-items: flex-start; gap: 9px; min-width: 0; padding: 9px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-raised); color: inherit; text-align: left; cursor: pointer; transition: border-color .15s ease, background .15s ease; }
+.skill-store-card:hover { border-color: var(--accent); background: var(--surface); }
+.skill-store-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.skill-store-card-icon { display: grid; flex: 0 0 auto; place-items: center; width: 30px; height: 30px; overflow: hidden; border-radius: 7px; background: var(--accent-soft); color: var(--accent-text); font-size: 13px; font-weight: 700; }
+.skill-store-card-icon img { width: 100%; height: 100%; object-fit: cover; }
+.skill-store-card-icon-fallback { display: grid; place-items: center; width: 100%; height: 100%; }
+.skill-store-card-main { display: grid; flex: 1 1 auto; gap: 3px; min-width: 0; }
+.skill-store-card-title { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+.skill-store-card-title strong { overflow-wrap: anywhere; color: var(--text); font-size: 11.5px; font-weight: 700; }
+.skill-store-card-desc { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow-wrap: anywhere; color: var(--text-muted); font-size: 10.5px; line-height: 1.4; }
+.skill-store-card-meta { overflow: hidden; color: var(--text-muted); font-size: 9.5px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
+.skill-store-badge { flex: 0 0 auto; padding: 0 5px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-muted); color: var(--text-muted); font-size: 9px; font-style: normal; line-height: 15px; }
+.skill-store-badge.update { border-color: var(--accent); color: var(--accent-text); }
+.skill-store-badge.risk { border-color: var(--warning); color: var(--warning); }
+
+.skill-store-detail { position: absolute; top: 0; right: 0; bottom: 0; display: flex; flex-direction: column; width: min(420px, 62%); border-left: 1px solid var(--border); background: var(--surface); box-shadow: -10px 0 26px rgb(0 0 0 / 22%); }
+.skill-store-detail-head { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+.skill-store-detail-head strong { flex: 1 1 auto; overflow-wrap: anywhere; color: var(--text); font-size: 12.5px; }
+.skill-store-detail-body { display: flex; flex: 1 1 auto; flex-direction: column; gap: 10px; min-height: 0; padding: 11px 12px 16px; overflow-y: auto; }
+.skill-store-detail-summary { margin: 0; color: var(--text-muted); font-size: 11px; line-height: 1.55; }
+.skill-store-facts { display: grid; grid-template-columns: 62px minmax(0, 1fr); gap: 4px 9px; margin: 0; color: var(--text-muted); font-size: 10.5px; line-height: 1.45; }
+.skill-store-facts dt { color: var(--text-muted); }
+.skill-store-facts dd { margin: 0; overflow-wrap: anywhere; color: var(--text); }
+.skill-store-versions, .skill-store-files, .skill-store-readme { border: 1px solid var(--border); border-radius: 8px; background: var(--surface-raised); font-size: 10.5px; }
+.skill-store-versions > summary, .skill-store-files > summary, .skill-store-readme > summary { padding: 7px 10px; color: var(--text); cursor: pointer; }
+.skill-store-versions ul, .skill-store-files ul { display: grid; gap: 3px; max-height: 200px; margin: 0; padding: 0 10px 9px; overflow-y: auto; list-style: none; color: var(--text-muted); }
+.skill-store-files li { display: flex; gap: 8px; justify-content: space-between; overflow-wrap: anywhere; }
+.skill-store-files code { color: var(--text); font-size: 10px; }
+.skill-store-readme pre { max-height: 320px; margin: 0; padding: 0 10px 10px; overflow: auto; color: var(--text); font-family: var(--font-mono, ui-monospace, monospace); font-size: 10px; line-height: 1.5; white-space: pre-wrap; }
+.skill-store-detail-actions, .skill-store-confirm-actions { display: flex; align-items: center; gap: 8px; }
+.skill-store-confirm { display: grid; gap: 7px; padding: 10px; border: 1px solid var(--accent); border-radius: 8px; background: var(--accent-soft); }
+.skill-store-confirm p { margin: 0; color: var(--text); font-size: 11.5px; }
+.skill-store-confirm ul { display: grid; gap: 3px; margin: 0; padding-left: 16px; color: var(--text-muted); font-size: 10.5px; line-height: 1.45; }
+.skill-store-uninstall { color: var(--danger); }
+
 .team-board { position: absolute; z-index: 36; top: 0; right: 0; bottom: 0; display: flex; flex-direction: column; width: min(var(--team-board-width, 424px), calc(100% - 260px)); min-width: 0; border-left: 1px solid var(--border-strong); background: var(--surface); box-shadow: -18px 0 42px rgba(0, 0, 0, .22); animation: team-board-in .18s var(--motion-ease); --tb-fs-title: 13px; --tb-fs-body: 12px; --tb-fs-label: 11px; --tb-fs-micro: 10px; --tb-ctl-h: 28px; --tb-icon-btn: 26px; }
 @keyframes team-board-in { from { transform: translateX(18px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
 .team-board.full { left: 0; width: auto; max-width: none; border-left: 0; box-shadow: none; animation: none; --tb-fs-title: 15px; --tb-fs-body: 13.5px; --tb-fs-label: 12px; --tb-fs-micro: 11px; --tb-ctl-h: 31px; --tb-icon-btn: 28px; }

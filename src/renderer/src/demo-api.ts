@@ -30,6 +30,7 @@ import type {
   UsageStats
 } from "../../shared/protocol";
 import type { GalleryDataClearResult, GalleryDataResult } from "../../shared/gallery";
+import type { SkillStoreResult } from "../../shared/skill-store";
 import type { ThemeImportOutcome } from "../../shared/theme-assets";
 
 const listeners = new Set<(message: RuntimeMessage) => void>();
@@ -1244,6 +1245,21 @@ export function createDemoApi(): DesktopApi {
         case "resources.reload":
           emit({ type: "resources", resources: structuredClone(demoResources) });
           break;
+        // Skill 商店：浏览器演示环境没有文件系统可写，也没有 Node 侧的网络代理。
+        // 如实回「演示环境不支持」，**绝不伪造安装成功**（与 themeImport 同口径）。
+        case "skill-store.list":
+        case "skill-store.top":
+        case "skill-store.categories":
+        case "skill-store.detail":
+        case "skill-store.install":
+        case "skill-store.uninstall": {
+          const kind = command.type === "skill-store.install" ? "install" : command.type === "skill-store.uninstall" ? "uninstall" : command.type === "skill-store.detail" ? "detail" : command.type === "skill-store.top" ? "top" : command.type === "skill-store.categories" ? "categories" : "list";
+          emit({
+            type: "skill-store-result",
+            result: { kind, requestId: command.requestId, ok: false, error: "演示环境不支持 Skill 商店（需要真实文件系统与本地网络）；请在桌面应用里使用。" } as SkillStoreResult
+          });
+          break;
+        }
         case "command.save": {
           const draft = command.command;
           const name = draft.name.trim() || "未命名";

@@ -123,7 +123,10 @@ import type { TeamService } from "./team-contract.js";
 import { withCacheWarmingOff } from "./runtime-settings.js";
 import { readSubagents, saveSubagent, deleteSubagent, saveSubagentModelOverride, saveSubagentThinkingOverride } from "./subagents-store.js";
 import type { SubagentDefinition, SubagentScope, DelegationProgress, SlashInvocation } from "../shared/protocol.js";
+import type { SkillStoreResult } from "../shared/skill-store.js";
 import { buildSkillsSystemPromptBlock, setSkillEnabled, type DiscoveredSkill } from "./skill-catalog.js";
+import * as skillStoreClient from "./skill-store-client.js";
+import { installSkillFromStore, listInstallRecords, storeScopeRoot, uninstall as uninstallStoreSkill } from "./skill-store-install.js";
 import * as commandCatalog from "./command-catalog.js";
 import { COMMAND_NAME_PATTERN, type DiscoveredCommand } from "./command-catalog.js";
 import { createTodoStore, migrateLegacyTodoFile, type TodoStore } from "./todo-store.js";
@@ -5078,6 +5081,157 @@ async function refreshActiveSessionForSubagents(): Promise<void> {
 }
 
 /**
+ * Skill 商店安装/卸载后的活动会话刷新：系统提示里的可用 Skill 清单是会话创建时写入的
+ * （buildSkillsSystemPromptBlock 在 systemPromptOverride 里冻结），不重建就不被模型看见。
+ * 与 refreshActiveSessionForSubagents 同款纪律：空闲时重建（保留聊天历史），忙碌时
+ * **不打断**，只发 warn 提示下次重建生效；失败不阻断安装结果。返回是否真的重建了。
+ */
+async function refreshActiveSessionForSkills(): Promise<boolean> {
+  const record = activeRuntime;
+  if (!record || !record.extensionApi) return false;
+  if (record.busy || record.session.isStreaming) {
+    void post({ type: "log", level: "warn", message: "Skill 商店：当前会话正在运行，新技能将在下次重建会话后对模型可见（清单已即时更新）。" });
+    return false;
+  }
+  try {
+    await createSession(record.session.sessionManager);
+    return true;
+  } catch (error) {
+    void post({ type: "log", level: "warn", message: `Skill 商店：刷新会话失败（新技能将在下次重建会话后生效）：${errorText(error)}` });
+    return false;
+  }
+}
+
+// —— Skill 商店（SkillHub Open API）命令分发 ——
+// 全部 fire-and-forget（同 usage.stats.request 形态）：安装要逐文件下载+校验，
+// 不能占住串行命令队列；结果统一以 {type:"skill-store-result"} 推送回渲染端，
+// 错误在结果里内联（不走全局 error toast）。requestId 由渲染端生成并原样带回。
+
+/** SKILL.md 预览的截断上限（解码后字节；原文本身受 /file 的 1MB 硬限）。 */
+const SKILL_STORE_README_PREVIEW_MAX_BYTES = 64 * 1024;
+
+/** 查询结果的短 TTL 缓存 + 在途合并（降低共享 API 压力）；安装请求不缓存。 */
+const SKILL_STORE_CACHE_TTL_MS = 30_000;
+const skillStoreQueryCache = new Map<string, { at: number; payload: unknown }>();
+const skillStoreInFlight = new Map<string, Promise<unknown>>();
+
+async function withSkillStoreCache<T>(key: string, producer: () => Promise<T>): Promise<T> {
+  const cached = skillStoreQueryCache.get(key);
+  if (cached && Date.now() - cached.at < SKILL_STORE_CACHE_TTL_MS) return cached.payload as T;
+  const inFlight = skillStoreInFlight.get(key);
+  if (inFlight) return inFlight as Promise<T>;
+  const promise = producer()
+    .then((payload) => {
+      skillStoreQueryCache.set(key, { at: Date.now(), payload });
+      return payload;
+    })
+    .finally(() => {
+      skillStoreInFlight.delete(key);
+    });
+  skillStoreInFlight.set(key, promise);
+  return promise;
+}
+
+/** 账本快照（渲染端「已安装 / 有更新」徽标用；不带 files 明细，减小推送体积）。 */
+function skillStoreInstalls(): { slug: string; scope: "global" | "project"; version: string; installedAt: number; installDir: string }[] {
+  return listInstallRecords(getAgentDir()).map((record) => ({ slug: record.slug, scope: record.scope, version: record.version, installedAt: record.installedAt, installDir: record.installDir }));
+}
+
+function runSkillStoreCommand(command: Extract<RuntimeCommand, { type: `skill-store.${string}` }>): void {
+  void (async () => {
+    const { requestId } = command;
+    try {
+      switch (command.type) {
+        case "skill-store.list": {
+          const { skills, total } = await withSkillStoreCache(`list:${JSON.stringify(command.query)}`, () => skillStoreClient.storeListSkills(command.query));
+          post({ type: "skill-store-result", result: { kind: "list", requestId, ok: true, query: command.query, total, skills, installs: skillStoreInstalls() } });
+          break;
+        }
+        case "skill-store.top": {
+          const skills = await withSkillStoreCache("top", () => skillStoreClient.storeTopSkills());
+          post({ type: "skill-store-result", result: { kind: "top", requestId, ok: true, skills } });
+          break;
+        }
+        case "skill-store.categories": {
+          const categories = await withSkillStoreCache("categories", () => skillStoreClient.storeCategories());
+          post({ type: "skill-store-result", result: { kind: "categories", requestId, ok: true, categories } });
+          break;
+        }
+        case "skill-store.detail": {
+          // 详情/版本/文件清单并发拉；SKILL.md 预览尽力而为（失败不阻断详情）。
+          const detailKey = `detail:${command.slug}:${command.version ?? ""}`;
+          const { detail, versions, files, totalBytes, readme } = await withSkillStoreCache(detailKey, async () => {
+            const [detail, versions, filesInfo] = await Promise.all([
+              skillStoreClient.storeSkillDetail(command.slug),
+              skillStoreClient.storeSkillVersions(command.slug),
+              skillStoreClient.storeSkillFiles(command.slug, command.version)
+            ]);
+            let readme: string | undefined;
+            try {
+              const bytes = await skillStoreClient.storeSkillFileBytes(command.slug, command.version ?? filesInfo.version, "SKILL.md");
+              if (bytes.byteLength <= SKILL_STORE_README_PREVIEW_MAX_BYTES) readme = new TextDecoder().decode(bytes);
+            } catch {
+              // 预览失败不阻断详情（网络抖动/清单缺 SKILL.md 时面板仍可安装决策）。
+            }
+            return {
+              detail,
+              versions,
+              files: filesInfo.files,
+              totalBytes: filesInfo.files.reduce((sum, file) => sum + file.size, 0),
+              // SKILL.md 拉不到时用详情自带的 overviewMd 兜底（实测字段），避免预览一直空着。
+              ...(readme !== undefined ? { readme } : detail.overviewMd ? { readme: detail.overviewMd } : {})
+            };
+          });
+          post({ type: "skill-store-result", result: { kind: "detail", requestId, ok: true, detail, versions, files, totalBytes, ...(readme !== undefined ? { readme } : {}), installs: skillStoreInstalls() } });
+          break;
+        }
+        case "skill-store.install": {
+          if (command.scope === "project" && !workspace) throw new Error("请先打开工作区，再安装到当前项目");
+          // 详情只用来取 canonicalName（异源冲突判定）与缺省版本；清单以 /files 为准。
+          const detail = await skillStoreClient.storeSkillDetail(command.slug).catch(() => undefined);
+          const { files, version: filesVersion } = await skillStoreClient.storeSkillFiles(command.slug, command.version);
+          const version = command.version?.trim() || filesVersion || detail?.latestVersion?.version || "latest";
+          const targetWorkspace = workspace;
+          const outcome = await installSkillFromStore({
+            slug: command.slug,
+            version,
+            scope: command.scope,
+            agentDir: getAgentDir(),
+            workspace: targetWorkspace,
+            ...(detail?.canonicalName ? { canonicalName: detail.canonicalName } : {}),
+            confirmReplace: command.confirmReplace === true,
+            files
+          });
+          // 装完刷新链（顺序有讲究）：先失效缓存（emitResourceCatalog 的 20+ 调用点
+          // 都不重扫，不失效就永远推旧清单），再重扫 + 重推目录，最后空闲重建会话。
+          if (command.scope === "global") workspaceResources.invalidate();
+          else workspaceResources.invalidate(targetWorkspace);
+          syncSkills(targetWorkspace);
+          emitResourceCatalog();
+          const sessionRefreshDeferred = !(await refreshActiveSessionForSkills());
+          post({ type: "skill-store-result", result: { kind: "install", requestId, ok: true, outcome: { ...outcome, ...(sessionRefreshDeferred ? { sessionRefreshDeferred: true } : {}) }, installs: skillStoreInstalls() } });
+          break;
+        }
+        case "skill-store.uninstall": {
+          if (command.scope === "project" && !workspace) throw new Error("请先打开工作区，再卸载项目内安装的技能");
+          const targetWorkspace = workspace;
+          const outcome = uninstallStoreSkill({ slug: command.slug, scope: command.scope, targetRoot: storeScopeRoot(command.scope, getAgentDir(), targetWorkspace), metadataDir: getAgentDir() });
+          if (command.scope === "global") workspaceResources.invalidate();
+          else workspaceResources.invalidate(targetWorkspace);
+          syncSkills(targetWorkspace);
+          emitResourceCatalog();
+          const sessionRefreshDeferred = !(await refreshActiveSessionForSkills());
+          post({ type: "skill-store-result", result: { kind: "uninstall", requestId, ok: true, outcome: { ...outcome, ...(sessionRefreshDeferred ? { sessionRefreshDeferred: true } : {}) }, installs: skillStoreInstalls() } });
+          break;
+        }
+      }
+    } catch (error) {
+      post({ type: "skill-store-result", result: { kind: command.type === "skill-store.install" ? "install" : command.type === "skill-store.uninstall" ? "uninstall" : command.type === "skill-store.detail" ? "detail" : command.type === "skill-store.top" ? "top" : command.type === "skill-store.categories" ? "categories" : "list", requestId, ok: false, error: errorText(error) } as SkillStoreResult });
+    }
+  })();
+}
+
+/**
  * Apply MCP registration changes to the live (active) session via the bridge
  * control (`registerMcpServer` replaces, `unregisterMcpServer` closes the
  * connection and removes the tools). No session rebuild in any direction —
@@ -6766,6 +6920,16 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       });
       break;
     }
+    // —— Skill 商店：浏览/安装全部 fire-and-forget（不占串行命令队列），
+    // 结果以 skill-store-result 推送回渲染端（错误内联，不走全局 toast）。 ——
+    case "skill-store.list":
+    case "skill-store.top":
+    case "skill-store.categories":
+    case "skill-store.detail":
+    case "skill-store.install":
+    case "skill-store.uninstall":
+      runSkillStoreCommand(command);
+      break;
     case "subagent.save": {
       // 子智能体定义写入目标作用域文件（项目级用当前工作区）；刷新渲染端列表。
       // 保存后重建活动会话：按名委派靠 execute 实读的定义已即时可用，但系统提示里

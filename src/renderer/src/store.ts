@@ -24,6 +24,14 @@ import type {
   RuntimeSnapshot,
   SessionPaneSnapshot,
   SessionSearchHit,
+  SkillStoreCategory,
+  SkillStoreDetail,
+  SkillStoreFile,
+  SkillStoreInstallSummary,
+  SkillStoreQuery,
+  SkillStoreResult,
+  SkillStoreSkill,
+  SkillStoreVersion,
   TeamSnapshot,
   Todo,
   ToolExecution,
@@ -361,6 +369,93 @@ export interface PendingReveal {
   createdAt: number;
 }
 
+/**
+ * Skill 商店面板的状态机（skill-store-result 推送按 requestId 认领，旧结果丢弃）。
+ * 与 sessionSearch 同款纪律：查询发起时把 requestId 存入状态，推送不匹配则整包丢弃
+ * （列表/详情/安装并发时状态不串台）。
+ */
+export interface SkillStoreState {
+  /** 当前列表查询的请求 id：推送不匹配则丢弃（旧查询晚到）。 */
+  listRequestId?: string;
+  listQuery?: SkillStoreQuery;
+  listLoading: boolean;
+  listSkills: SkillStoreSkill[];
+  listTotal: number;
+  listError?: string;
+  topSkills: SkillStoreSkill[];
+  topLoading: boolean;
+  topError?: string;
+  categories: SkillStoreCategory[];
+  categoriesLoading: boolean;
+  detailRequestId?: string;
+  detailLoading: boolean;
+  detail?: SkillStoreDetail;
+  detailVersions: SkillStoreVersion[];
+  detailFiles: SkillStoreFile[];
+  detailTotalBytes: number;
+  detailReadme?: string;
+  detailError?: string;
+  /** 正在安装（卸载共用 busy）：requestId → slug。 */
+  installing?: { requestId: string; slug: string };
+  /** 安装账本快照（list/detail/install/uninstall 结果顺带更新；「已安装 / 有更新」徒标用）。 */
+  installs: SkillStoreInstallSummary[];
+  /** 最近一次安装/卸载的终态反馈（面板内联展示；at 供 effect 触发）。 */
+  lastInstall?: { ok: boolean; kind: "install" | "uninstall"; slug: string; message: string; scope?: string; installDir?: string; at: number };
+}
+
+/**
+ * skill-store-result → skillStore 状态（纯函数，单测可直接调）。
+ * requestId 不匹配的**列表/详情**结果整包丢弃（并发查询时旧结果不串台）；
+ * 安装/卸载结果带 installing 的 requestId 匹配才清 busy（失败分支不清，保留正在安装的 slug）。
+ */
+export function applySkillStoreResult(state: SkillStoreState, result: SkillStoreResult): { skillStore: SkillStoreState } | Record<string, never> {
+  switch (result.kind) {
+    case "list":
+      if (result.requestId !== state.listRequestId) return {};
+      return {
+        skillStore: result.ok
+          ? { ...state, listLoading: false, listSkills: result.skills, listTotal: result.total, listError: undefined, installs: result.installs }
+          : { ...state, listLoading: false, listError: result.error }
+      };
+    case "top":
+      return { skillStore: result.ok ? { ...state, topLoading: false, topSkills: result.skills, topError: undefined } : { ...state, topLoading: false, topError: result.error } };
+    case "categories":
+      return { skillStore: result.ok ? { ...state, categoriesLoading: false, categories: result.categories } : { ...state, categoriesLoading: false } };
+    case "detail":
+      if (result.requestId !== state.detailRequestId) return {};
+      return {
+        skillStore: result.ok
+          ? { ...state, detailLoading: false, detail: result.detail, detailVersions: result.versions, detailFiles: result.files, detailTotalBytes: result.totalBytes, detailReadme: result.readme, detailError: undefined, installs: result.installs }
+          : { ...state, detailLoading: false, detailError: result.error }
+      };
+    case "install":
+    case "uninstall": {
+      const pendingSlug = state.installing?.requestId === result.requestId ? state.installing.slug : undefined;
+      if (result.ok) {
+        const scopeLabel = result.outcome.scope === "project" ? "当前项目" : "用户全局";
+        const message = result.kind === "install"
+          ? `已安装到${scopeLabel} · ${result.outcome.fileCount} 个文件 · 清单已更新${result.outcome.sessionRefreshDeferred ? "；当前对话正在回复，新技能将在下次重建会话后可用" : ""}`
+          : `已卸载（${result.outcome.removedFiles} 个文件）· 清单已更新${result.outcome.sessionRefreshDeferred ? "；当前对话正在回复，下次重建会话后移除" : ""}`;
+        return {
+          skillStore: {
+            ...state,
+            installing: undefined,
+            installs: result.installs,
+            lastInstall: { ok: true, kind: result.kind, slug: result.outcome.slug, message, scope: result.outcome.scope, installDir: result.outcome.installDir, at: Date.now() }
+          }
+        };
+      }
+      return {
+        skillStore: {
+          ...state,
+          installing: undefined,
+          lastInstall: { ok: false, kind: result.kind, slug: pendingSlug ?? "", message: result.error, at: Date.now() }
+        }
+      };
+    }
+  }
+}
+
 interface DesktopState {
   ready: boolean;
   /** 正在运行的版本（来自主进程 bootstrap 的 `app.getVersion()`）：设置弹窗左栏底部常驻展示。 */
@@ -440,6 +535,8 @@ interface DesktopState {
   designDocs: DesignDocSummary[];
   /** 作品清单（gallery.apps 推送全量替换）；全局跨工作区，启动时由 initialize 推一次。 */
   galleryApps: GalleryApp[];
+  /** Skill 商店面板状态（skill-store-result 推送按 requestId 认领）。 */
+  skillStore: SkillStoreState;
   /** 每文档已见推送 revision：≤ 该值的重复/乱序推送直接跳过（防回环重渲）。 */
   seenDesignRevisions: Record<string, number>;
   /** 最近一次设计导出结果；App 监听变化弹 toast。 */
@@ -594,6 +691,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   paletteOpenTick: 0,
   designDocs: [],
   galleryApps: [],
+  skillStore: { listLoading: false, listSkills: [], listTotal: 0, topSkills: [], topLoading: false, categories: [], categoriesLoading: false, detailLoading: false, detailVersions: [], detailFiles: [], detailTotalBytes: 0, installs: [] },
   restoredBrowserTabs: [],
   seenDesignRevisions: {},
   usageStatsLoading: false,
@@ -946,6 +1044,9 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
         break;
       case "gallery.notice":
         set({ galleryNotice: { kind: message.kind, message: message.message, at: Date.now() } });
+        break;
+      case "skill-store-result":
+        set((state) => applySkillStoreResult(state.skillStore, message.result));
         break;
       case "design.exported":
         set({ designExported: { relativePath: message.relativePath, at: Date.now() } });

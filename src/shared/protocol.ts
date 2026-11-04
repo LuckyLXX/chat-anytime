@@ -11,6 +11,8 @@ export type ThinkingLevelMap = Partial<Record<ThinkingLevel, string | null>>;
 
 import type { DesignCanvasInfo, DesignNode, DesignOp } from "./design-schema.js";
 import type { ThemeImportOutcome } from "./theme-assets.js";
+import type { SkillStoreQuery, SkillStoreResult, SkillStoreScope } from "./skill-store.js";
+export type { SkillStoreCategory, SkillStoreCommand, SkillStoreDetail, SkillStoreFile, SkillStoreInstallOutcome, SkillStoreInstallSummary, SkillStoreQuery, SkillStoreResult, SkillStoreScope, SkillStoreSkill, SkillStoreSort, SkillStoreUninstallOutcome, SkillStoreVersion } from "./skill-store.js";
 export type { DesignCanvasInfo, DesignDoc, DesignLayout, DesignNode, DesignNodeDraft, DesignOp, DesignNodeType } from "./design-schema.js";
 export { applyDesignOps, cloneNodeWithNewIds, countNodes, createDesignDoc, findNode, makeNodeId, normalizeDesignDoc, sanitizeDesignName, summarizeNode } from "./design-schema.js";
 
@@ -2501,6 +2503,17 @@ export type RuntimeCommand =
   | { type: "command.save"; command: CommandDraft; sessionId?: string }
   | { type: "command.delete"; name: string; scope: "project" | "global"; sessionId?: string }
   | { type: "skill.toggle"; id: string; enabled: boolean }
+  // —— Skill 商店（SkillHub Open API）：浏览/搜索/详情/安装/卸载。结果**不走命令返回**
+  // （runtime:send 永不 reject），全部以 {type:"skill-store-result", requestId, …} 推送回
+  // 渲染端；requestId 由渲染端生成并原样带回，避免列表/详情/安装并发时状态串台。 ——
+  | { type: "skill-store.list"; requestId: string; query: SkillStoreQuery }
+  | { type: "skill-store.top"; requestId: string }
+  | { type: "skill-store.categories"; requestId: string }
+  | { type: "skill-store.detail"; requestId: string; slug: string; version?: string }
+  /** 安装到指定作用域；目标目录已存在同源安装时需 confirmReplace=true（旧目录先备份）。 */
+  | { type: "skill-store.install"; requestId: string; slug: string; scope: SkillStoreScope; version?: string; confirmReplace?: boolean }
+  /** 只能卸载本商店账本记录在案的目录（不误删手工放置的同名 skill）。 */
+  | { type: "skill-store.uninstall"; requestId: string; slug: string; scope: SkillStoreScope }
   | { type: "background.kill"; id: string }
   | { type: "resources.reload" }
   /** 自动化定时任务：保存（创建/编辑整任务）、删除、开关、手动运行一次。 */
@@ -2581,6 +2594,8 @@ export type RuntimeMessage =
    */
   | { type: "sessions.live"; sessions: PanelSessionLive[] }
   | { type: "resources"; resources: ResourceCatalog }
+  /** Skill 商店结果（响应 skill-store.* 命令；requestId 与请求原样带回，见 shared/skill-store.ts）。 */
+  | { type: "skill-store-result"; result: SkillStoreResult }
   | { type: "todos"; todos: Todo[] }
   /** 全局快捷键呼出命令面板（主进程 push）；渲染端只负责把面板打开。 */
   | { type: "palette.open" }
