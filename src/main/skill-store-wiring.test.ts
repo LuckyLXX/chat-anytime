@@ -146,6 +146,18 @@ describe("渲染端接线", () => {
     expect(styles).toContain(".skill-store-detail");
   });
 
+  it("搜索框是 label，但浏览条的分组规则必须排除它（否则图标与输入框被 grid 拆成两行）", () => {
+    // 2026-11-04 用户截图：放大镜在上一行、placeholder 在下一行、框被撑高。
+    // 根因是 `.skill-store-browse label { display: grid }`(0,1,1) 压过 `.skill-store-search`(0,1,0)。
+    expect(component).toContain('className="skill-store-search"');
+    expect(styles).toContain(".skill-store-browse > label:not(.skill-store-search)");
+    expect(styles).not.toContain(".skill-store-browse label {");
+    // 搜索框自身与内部 input 走 (0,2,x)，不再被设置弹窗的 label/input 规则打回
+    expect(styles).toContain(".skill-store-browse .skill-store-search {");
+    expect(styles).toContain(".skill-store-browse .skill-store-search input {");
+    expect(styles).toContain(".skill-store-browse .skill-store-search input { flex: 1 1 auto; width: auto;");
+  });
+
   it("主题契约五处镜像都收进了 skill-store", () => {
     const mirrors = [
       "../../AGENTS.md",
