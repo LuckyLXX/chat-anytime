@@ -16,7 +16,8 @@ export const DIV_MODE_PROMPT = `
 - 内容多时按一页版面排版（标题层级、分段、留白、宽度自适应），不要把长文塞进窄卡片。
 - 使用单个最外层 <div> 作为画板，可包含 <style>；不要包含 <!DOCTYPE>、<html>、<head>、<body> 或 iframe。
 - 根画板设置不透明背景、border-radius、padding 和 border，确保正文与背景有足够对比度。
-- 代码使用 <pre><code class="language-语言">...</code></pre>，快捷回复使用 <button data-send="内容">文案</button>。`;
+- 代码使用 <pre><code class="language-语言">...</code></pre>，快捷回复使用 <button data-send="内容">文案</button>。
+- 气泡内绝不出现 ${htmlFence} 围栏：引用代码示例也一律 <pre><code>（围栏会破坏气泡渲染）。`;
 
 /** auto 档：按场景酌情使用——适合可视化的内容才上气泡，编码过程与简短答复保持普通文本。 */
 export const DIV_AUTO_MODE_PROMPT = `
@@ -25,7 +26,8 @@ Div 气泡（<assistant_html><div>...</div></assistant_html>）是可渲染富�
 - 适合使用：原型图与样式预览、界面或交互流程示意、方案对比、阶段性总结与交付报告、计划/清单面板、数据可视化等从图形化呈现中受益的内容。
 - 不应使用：编写或修改代码的过程中、简短答复与确认、用户明确要求纯文本或 Markdown 时、需要完整 ${htmlFence}html 页面的场景（改用隔离预览）。
 - 二选一，不混排：整条回答要么是一页气泡，要么是纯 Markdown。一旦使用气泡，正文、要点、表格、代码、结论与收尾全部写在气泡内，气泡外不写任何 Markdown 或寒暄；不用气泡就整条用 Markdown，中途不插气泡。同一轮至多一个气泡。
-- 连续多轮相似的小答复（如简单确认）不重复使用。判断标准：这个内容是否会因卡片化而更易读、更直观；不会就普通 Markdown。`;
+- 连续多轮相似的小答复（如简单确认）不重复使用。判断标准：这个内容是否会因卡片化而更易读、更直观；不会就普通 Markdown。
+- 用气泡时，正文引用代码一律 <pre><code>，不要在气泡里出现 ${htmlFence} 围栏（会破坏渲染）。`;
 
 /** 两档共用的图片规范：工作区相对路径由渲染端映射成 pidesktop-file:// 协议。 */
 export const DIV_MEDIA_PROMPT = `

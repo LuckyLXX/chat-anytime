@@ -24,6 +24,8 @@ describe("Div mode prompt", () => {
     expect(DIV_MODE_PROMPT).toContain("一条回答就是一页气泡");
     expect(DIV_MODE_PROMPT).toContain("气泡外不写任何 Markdown");
     expect(DIV_MODE_PROMPT).toContain("最终回答一旦开始，气泡外不再出现任何文字");
+    // 气泡内禁围栏（2026-11-04 真实事故：模型在气泡里引用带 ``` 的示例，渲染端曾把气泡斩断）
+    expect(DIV_MODE_PROMPT).toContain("气泡内绝不出现 ``` 围栏");
   });
 
   it("documents PiDesktop's controlled chat-bubble boundary for dynamic content", () => {
@@ -44,6 +46,7 @@ describe("Div mode prompt", () => {
     expect(DIV_AUTO_MODE_PROMPT).toContain("二选一，不混排");
     expect(DIV_AUTO_MODE_PROMPT).toContain("要么是一页气泡，要么是纯 Markdown");
     expect(DIV_AUTO_MODE_PROMPT).toContain("气泡外不写任何 Markdown");
+    expect(DIV_AUTO_MODE_PROMPT).toContain("不要在气泡里出现 ``` 围栏");
     const prompt = buildDivModePrompt("auto");
     expect(prompt).toContain(DIV_AUTO_MODE_PROMPT);
     expect(prompt).toContain(DIV_DYNAMIC_MODE_PROMPT);
@@ -106,8 +109,10 @@ describe("Div mode prompt", () => {
 
   it("keeps both prompt blocks inside their token budget", () => {
     // 系统提示词的每一句都要付费：各块的长度钉住，后续改动不会静默膨胀。
-    expect(DIV_MODE_PROMPT.length).toBeLessThanOrEqual(700);
-    expect(DIV_AUTO_MODE_PROMPT.length).toBeLessThanOrEqual(500);
+    // 2026-11-04 事故后两档各买了一行「气泡内禁 ``` 围栏」，预算 700→720 / 500→520；
+    // 再往上胀必须先删旧句子（渲染端已兼容气泡内围栏，这行是降噪声的软约束）。
+    expect(DIV_MODE_PROMPT.length).toBeLessThanOrEqual(720);
+    expect(DIV_AUTO_MODE_PROMPT.length).toBeLessThanOrEqual(520);
     expect(DIV_COLOR_PROMPT.length).toBeLessThanOrEqual(320);
     expect(buildUiThemeContextBlock("always", DARK_WALLPAPER)!.length).toBeLessThanOrEqual(200);
     // 键顺序与渲染端上报表是同一份口径（写入顺序即提示词顺序）

@@ -159,6 +159,67 @@ describe("rich content pipeline", () => {
     expect(segments.map((segment) => segment.type)).toEqual(["html", "markdown"]);
   });
 
+  it("气泡内的 ``` 围栏不再把气泡拦腰斩断（2026-11-04 真实会话事故）", () => {
+    // 复刻真实事故形态：模型在气泡 HTML 里引用一段带 ```ts 围栏的对话示例，
+    // 旧行为是围栏扫描先切、气泡被斩成两段，后半段（含 </code></pre>、<p style>）
+    // 整段按 Markdown 泄漏，用户侧表现为「输出格式不对 / 为啥在 md 里写 html」。
+    const text = [
+      '<assistant_html><div style="padding:16px">',
+      "<h3>示例对话</h3>",
+      "- [user] 把 auth.ts 里的 token 刷新改成单飞",
+      "- [other] ```ts",
+      "export async function refresh(){ /* ... */ }",
+      "```",
+      "本地备份不在这次请求里。",
+      "<p>结论：见上。</p>",
+      "</div></assistant_html>"
+    ].join("\n");
+    const segments = parseRichContent(text);
+    expect(segments).toEqual([{
+      type: "html",
+      content: expect.stringContaining("```ts"),
+      source: "assistant-html"
+    }]);
+    expect(segments[0]).toMatchObject({ type: "html", content: expect.stringContaining("</div>") });
+  });
+
+  it("流式中的气泡内围栏同样保持单一渐进气泡段", () => {
+    const partial = "<assistant_html><div>\n<p>示例</p>\n```ts\nconst a = 1\n";
+    const segments = parseRichContent(partial, { isStreaming: true });
+    expect(segments).toEqual([{
+      type: "html",
+      content: expect.stringContaining("```ts"),
+      source: "assistant-html",
+      closed: false
+    }]);
+  });
+
+  it("气泡外的围栏照常切分，多个气泡互不干扰", () => {
+    const text = "<assistant_html><div>甲 ``` 内围栏</div></assistant_html>\n\n```js\nconst x = 1\n```\n\n<assistant_html><div>乙</div></assistant_html>";
+    expect(parseRichContent(text).map((segment) => segment.type)).toEqual(["html", "markdown", "html"]);
+  });
+
+  it("围栏里的 <assistant_html> 保持字面，不当气泡起点", () => {
+    const text = "说明\n```md\n<assistant_html><div>假气泡</div></assistant_html>\n```\n结尾";
+    const segments = parseRichContent(text);
+    expect(segments.some((segment) => segment.type === "html")).toBe(false);
+    expect(segments.some((segment) => segment.type === "markdown" && segment.content.includes("假气泡"))).toBe(true);
+  });
+
+  it("行中提及 <assistant_html> 不开气泡区间，后续围栏照常切分", () => {
+    const text = "正文提到 <assistant_html> 标签。\n\n```js\nconst x = 1\n```\n";
+    const segments = parseRichContent(text);
+    expect(segments.some((segment) => segment.type === "markdown" && segment.content.includes("```js"))).toBe(true);
+    expect(segments.some((segment) => segment.type === "html" && segment.content.includes("const x = 1"))).toBe(false);
+  });
+
+  it("文档模式：单独成行的 <assistant_html> 也不吞掉后续围栏切分（2026-09-11 口径回归）", () => {
+    const text = "正文\n\n<assistant_html>\n\n```js\nconst x = 1\n```\n";
+    const segments = parseRichContent(text, { document: true });
+    expect(segments.every((segment) => segment.type === "markdown")).toBe(true);
+    expect(segments.some((segment) => segment.type === "markdown" && segment.content.includes("```js"))).toBe(true);
+  });
+
   it("preserves a CSS-led HTML fragment as a styled HTML segment", () => {
     const segments = parseRichContent("<style>.card { color: red; }</style>\n<div class=\"card\">内容</div>");
     expect(segments).toEqual([{

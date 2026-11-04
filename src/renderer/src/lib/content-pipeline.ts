@@ -379,6 +379,75 @@ function findInlineBlockEnd(raw: string, startIndex: number): number {
 }
 
 /**
+ * 围栏区间（含开闭行）。行首识别口径与 `splitFencedContent` 完全一致（最多 3 空格缩进、
+ * ```` ``` ````/`~~~` 都认）；未闭合的围栏吃到文本末尾（流式中间态下其余行都算围栏内容）。
+ */
+function computeFenceSpans(raw: string): Array<readonly [number, number]> {
+  const spans: Array<readonly [number, number]> = [];
+  let index = 0;
+  while (index < raw.length) {
+    const lineEnd = raw.indexOf("\n", index);
+    const next = lineEnd < 0 ? raw.length : lineEnd + 1;
+    const atLineStart = index === 0 || raw[index - 1] === "\n";
+    if (atLineStart) {
+      const line = raw.slice(index, lineEnd < 0 ? raw.length : lineEnd);
+      const opening = isFenceLine(line);
+      if (opening) {
+        const fenceEnd = findMatchingFenceEnd(raw, index, opening.marker);
+        const end = fenceEnd < 0 ? raw.length : fenceEnd;
+        spans.push([index, end]);
+        index = end;
+        continue;
+      }
+    }
+    index = next;
+  }
+  return spans;
+}
+
+function offsetInsideSpans(spans: ReadonlyArray<readonly [number, number]>, offset: number): boolean {
+  return spans.some(([start, end]) => offset >= start && offset < end);
+}
+
+/**
+ * 计算 `<assistant_html>` 气泡区间（含开闭标签；闭合缺失时延伸到文本末尾），
+ * 给围栏切分提供「气泡内不开围栏」的判据。
+ *
+ * 2026-11-04 真实会话事故（用户报「输出格式不对 / 为啥在 md 里写 html」）：
+ * 模型完全按规范输出了 `<assistant_html>…</div></assistant_html>`，但气泡 HTML 里
+ * 引用代码示例时写了 ```` ``` ```` 围栏；`splitFencedContent` 的行级围栏扫描不认识
+ * 「围栏在气泡内」，把气泡拦腰斩断——前半渲染成半张卡片，后半（含 `</code></pre>`、
+ * `<p style>` 等原始标签）整段按 Markdown 泄漏。模型重试三次都栽在同一处后弃用气泡
+ * 改纯 Markdown。两条口径与既有行为对齐：
+ * - 围栏优先：围栏内部的 `<assistant_html>` 保持字面、不开区间（flushFence 本来就不
+ *   递归识别气泡；文档/回复里「提到」这个标签不能被误当气泡起点）；
+ * - 行首才开区间：行中间提及（如行内代码 `` `<assistant_html>` ``）不开区间，交给
+ *   逐块 `splitAssistantHtml` 按既有口径处理（吞到下一个围栏），后续围栏照常切分。
+ */
+function computeAssistantHtmlSpans(raw: string): Array<readonly [number, number]> {
+  const fenceSpans = computeFenceSpans(raw);
+  const lower = raw.toLowerCase();
+  const openTag = "<assistant_html>";
+  const closeTag = "</assistant_html>";
+  const spans: Array<readonly [number, number]> = [];
+  let cursor = 0;
+  for (;;) {
+    const start = lower.indexOf(openTag, cursor);
+    if (start < 0) break;
+    const atLineStart = start === 0 || raw[start - 1] === "\n";
+    if (!atLineStart || offsetInsideSpans(fenceSpans, start)) {
+      cursor = start + openTag.length;
+      continue;
+    }
+    const closeIndex = lower.indexOf(closeTag, start + openTag.length);
+    const end = closeIndex < 0 ? raw.length : closeIndex + closeTag.length;
+    spans.push([start, end]);
+    cursor = end;
+  }
+  return spans;
+}
+
+/**
  * Return the end of the last complete structural block in a streamed reply.
  * Plain text is intentionally left in the tail so the caller can keep it
  * cheap to update while completed fences and HTML bubbles keep their DOM.
@@ -614,6 +683,12 @@ function splitAssistantHtml(text: string, options: RichContentParseOptions): Ric
 
 function splitFencedContent(text: string, options: RichContentParseOptions = {}): RichContentSegment[] {
   const lines = text.replace(/\r\n?/gu, "\n").split("\n");
+  // 气泡区间优先于围栏切分（2026-11-04 事故，见 computeAssistantHtmlSpans 注释）：
+  // 行首落在气泡区间内的围栏行只是气泡内容的一部分。文档模式不渲染气泡（下方
+  // flushMarkdown 的 document 分支），区间判定没有意义，还会把「正文里提到
+  // `<assistant_html>`」之后的围栏错误吞掉（2026-09-11 docs/迭代记录 口径）。
+  const bubbleSpans = options.document ? [] : computeAssistantHtmlSpans(lines.join("\n"));
+  const insideBubbleSpan = (offset: number): boolean => offsetInsideSpans(bubbleSpans, offset);
   const segments: RichContentSegment[] = [];
   let markdownLines: string[] = [];
   let fence: { marker: string; info: string; lines: string[] } | undefined;
@@ -645,9 +720,12 @@ function splitFencedContent(text: string, options: RichContentParseOptions = {})
     fence = undefined;
   }
 
+  let lineOffset = 0;
   for (const line of lines) {
+    const lineStart = lineOffset;
+    lineOffset += line.length + 1;
     if (!fence) {
-      const opening = isFenceLine(line);
+      const opening = insideBubbleSpan(lineStart) ? undefined : isFenceLine(line);
       if (opening) {
         flushMarkdown();
         fence = { marker: opening.marker, info: opening.info, lines: [] };
