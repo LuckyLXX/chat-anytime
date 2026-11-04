@@ -180,7 +180,7 @@ button, input, select, textarea, summary, label {
   *, *::before, *::after { transition: none !important; }
   /* 装饰性/反馈性动画全部关停；保留 .spinning 加载指示（语义必要） */
   .message, .message[data-revealed] .message-body, .panel-dock, .question-panel, .context-menu, .preview-open-menu,
-  .access-mode-menu, .composer-select-menu, .slash-menu, .turn-thumb-pop,
+  .access-mode-menu, .composer-select-menu, .model-menu-panel, .slash-menu, .turn-thumb-pop,
   .context-usage-popover,
   .modal-backdrop, .settings-dialog, .permission-dialog, .automation-dialog,
   .delegation-transcript-dialog, .image-lightbox-content, .content-preview-panel,
@@ -200,7 +200,7 @@ html[data-ui-motion="off"] .panel-dock,
 html[data-ui-motion="off"] .question-panel, html[data-ui-motion="off"] .context-menu,
 html[data-ui-motion="off"] .preview-open-menu, html[data-ui-motion="off"] .access-mode-menu,
 html[data-ui-motion="off"] .context-usage-popover,
-html[data-ui-motion="off"] .composer-select-menu, html[data-ui-motion="off"] .slash-menu,
+html[data-ui-motion="off"] .composer-select-menu, html[data-ui-motion="off"] .model-menu-panel, html[data-ui-motion="off"] .slash-menu,
 html[data-ui-motion="off"] .turn-thumb-pop, html[data-ui-motion="off"] .modal-backdrop,
 html[data-ui-motion="off"] .settings-dialog, html[data-ui-motion="off"] .permission-dialog,
 html[data-ui-motion="off"] .automation-dialog, html[data-ui-motion="off"] .delegation-transcript-dialog,
@@ -1132,8 +1132,40 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 .composer-select-menu .agent-select-new { display: grid; flex: 0 0 auto; place-items: center; width: 30px; margin: 4px 4px 4px 0; padding: 0; border: 1px solid transparent; border-radius: 6px; color: var(--text-muted); background: transparent; cursor: pointer; }
 .composer-select-menu .agent-select-new:hover { color: var(--accent-text); border-color: var(--accent-border); background: var(--accent-soft); }
 .composer-select-menu .agent-select-new:disabled { opacity: .35; cursor: default; }
-.model-select-menu { width: min(280px, calc(100vw - 48px)); max-height: min(400px, 60vh); overflow-y: auto; overscroll-behavior: contain; }
-.model-select-menu .composer-menu-group > small { position: sticky; top: 0; z-index: 1; background: var(--surface); font-weight: 700; }
+/* 模型快捷切换：两段式（供应商 → 模型）级联菜单。外层只放供应商列表（自己滚动），
+   二级面板绝对定位在它侧边、不参与外层滚动——所以外层必须 overflow: visible，
+   写成 `overflow-y: auto` 会把二级面板整块裁掉（旧的平铺列表才需要外层滚动）。 */
+.model-select-menu { width: min(232px, calc(100vw - 48px)); padding: 5px; overflow: visible; }
+.model-menu-providers, .model-menu-models { display: grid; gap: 2px; overflow-y: auto; overscroll-behavior: contain; }
+.model-menu-providers { max-height: min(392px, 56vh); }
+.model-menu-models { max-height: min(352px, 50vh); }
+.model-menu-empty { margin: 0; padding: 6px 8px; color: var(--text-muted); font-size: 10px; line-height: 1.5; }
+.composer-select-menu button.model-menu-provider { min-height: 34px; padding: 3px 6px; gap: 6px; }
+.composer-select-menu button.model-menu-provider:hover, .composer-select-menu button.model-menu-provider.open { color: var(--text); background: var(--surface-raised); }
+.composer-select-menu button.model-menu-provider.active strong { color: var(--accent-text); }
+.model-menu-provider-copy { display: grid; flex: 1 1 auto; gap: 1px; min-width: 0; }
+.model-menu-provider-copy strong { overflow: hidden; color: var(--text); font-size: 11.5px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.model-menu-provider-copy small { overflow: hidden; color: var(--text-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.model-menu-chevron { flex: none; color: var(--text-muted); transition: transform .12s ease; }
+.model-menu-chevron.flip { transform: rotate(180deg); }
+/* 二级面板：默认向右展开；`.flip` 是左侧（右侧放不下时由 modelMenuPlacement 判定）。
+   单列档 `.inline`（分屏窄格两侧都不够）就地替换供应商列，不再是浮动面板。 */
+.model-menu-panel { position: absolute; z-index: 1; bottom: 5px; left: calc(100% + 4px); display: flex; flex-direction: column; gap: 4px; width: min(300px, calc(100vw - 48px)); padding: 6px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow-lg); animation: model-menu-in .14s cubic-bezier(0.16, 1, 0.3, 1); }
+.model-menu-panel.flip { right: calc(100% + 4px); left: auto; animation-name: model-menu-in-flip; }
+.model-menu-panel.inline { position: static; width: 100%; padding: 0; border: 0; border-radius: 0; box-shadow: none; animation: none; }
+.model-menu-compact .model-menu-providers { display: none; }
+.model-menu-head { display: flex; align-items: center; gap: 4px; }
+.model-menu-title { flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--text); font-size: 11.5px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.model-menu-head small { flex: none; color: var(--text-muted); font-size: 10px; }
+.composer-select-menu button.model-menu-back { display: grid; flex: none; place-items: center; justify-content: center; width: 22px; min-height: 22px; padding: 0; border-radius: 6px; color: var(--text-muted); }
+.composer-select-menu button.model-menu-back:hover { color: var(--text); background: var(--surface-raised); }
+.model-menu-search { display: flex; align-items: center; gap: 5px; padding: 0 6px; border: 1px solid var(--border); border-radius: 6px; color: var(--text-muted); background: var(--surface-input); }
+.model-menu-search:focus-within { border-color: var(--accent); box-shadow: 0 0 0 2px var(--focus-ring); }
+.model-menu-search input { flex: 1 1 auto; min-width: 0; height: 24px; padding: 0; border: 0; outline: 0; color: var(--text); background: transparent; font-size: 11px; }
+.model-menu-search input::placeholder { color: var(--text-muted); }
+.composer-select-menu button.model-menu-model { min-height: 30px; padding: 0 8px; font-size: 11px; }
+@keyframes model-menu-in { from { opacity: 0; transform: translateX(-4px); } to { opacity: 1; transform: none; } }
+@keyframes model-menu-in-flip { from { opacity: 0; transform: translateX(4px); } to { opacity: 1; transform: none; } }
 .thinking-select-menu { width: 176px; }
 .composer-menu-group { display: grid; gap: 2px; }
 .composer-menu-group + .composer-menu-group { margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--border); }

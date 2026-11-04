@@ -151,7 +151,7 @@
 [data-pane="composer"] textarea { font-family: "Brand", monospace; caret-color: var(--accent); }
 ```
 
-`send` / `stop` 占据同一位置、按生成状态互换；重设计时建议两个一起写，避免状态切换时跳变。模型/思考菜单、斜杠指令面板都是 `composer` 区域的子元素，用 `[data-pane="composer"]` 后代选择器即可命中。生成中回车排队的消息显示在 `composer` 区域顶部的待发送列表（条目带 `data-queue-kind="steering|followUp"`，`steering` 为“立即发送”升级后的优先形态）。
+`send` / `stop` 占据同一位置、按生成状态互换；重设计时建议两个一起写，避免状态切换时跳变。模型/思考菜单、斜杠指令面板都是 `composer` 区域的子元素，用 `[data-pane="composer"]` 后代选择器即可命中。**模型快捷切换是两段式级联菜单**（2026-11-04）：一级 `.model-select-menu` / `.model-menu-providers` 只列供应商（`.model-menu-provider`，当前供应商带 `.active`），二级 `.model-menu-panel` 列该供应商的模型（`.model-menu-search` 搜索框 / `.model-menu-models` / `.model-menu-model`，当前模型带 `.active`）；面板默认在右侧，放不下时带 `.flip` 翻到左侧，分屏窄格两侧都放不下时带 `.inline` 就地替换供应商列（外层同时带 `.model-menu-compact`、供应商列隐藏）。**改这两个容器时必须保留 `.model-select-menu` 的 `overflow: visible`**，否则绝对定位的二级面板会被整块裁掉。生成中回车排队的消息显示在 `composer` 区域顶部的待发送列表（条目带 `data-queue-kind="steering|followUp"`，`steering` 为“立即发送”升级后的优先形态）。
 
 **行级钩子（侧栏列表内部）**：`data-row-kind`（`workspace` 工作区分组头 / `session` 会话行 / `agent` 助手行）+ 布尔 `data-row-active`（选中行）+ 布尔 `data-row-expanded`（工作区分组展开）。主题可精确重设计行、牌匾、折叠与展开态。
 

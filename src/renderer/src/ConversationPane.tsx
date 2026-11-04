@@ -58,6 +58,7 @@ import { delegationRoleLabels, extensionCalloutTitle, sessionRunStatusLabels, th
 import { THINKING_LEVELS, thinkingLevelDraftFrom, thinkingLevelMapFromDraft, thinkingLevelMenu, type ThinkingLevelDraft } from "../../shared/thinking-levels";
 import { CodeBlock, RichContent } from "./components/RichContent";
 import { ImageLightbox } from "./components/ImageLightbox";
+import { ModelMenu } from "./components/ModelMenu";
 import { QuestionPanel } from "./components/QuestionPanel";
 import { compactPath, extractMentionTokens, formatDuration, type Artifact } from "./lib/content";
 import { contextUsageCacheLabel, contextUsagePercentLabel, contextUsageTone, contextUsageTooltip, formatTokenCount } from "./lib/context-usage";
@@ -946,7 +947,6 @@ export const ConversationPane = memo(function ConversationPane({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const accessModeMenuRef = useRef<HTMLDivElement>(null);
   const contextUsageRef = useRef<HTMLDivElement>(null);
-  const modelMenuRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLFormElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const slashMenuRef = useRef<HTMLDivElement>(null);
@@ -1640,12 +1640,6 @@ export const ConversationPane = memo(function ConversationPane({
       document.removeEventListener("keydown", closeOnEscape);
     };
   }, [accessModeMenuOpen, composerMenu, contextUsageOpen]);
-
-  useEffect(() => {
-    if (composerMenu !== "model") return;
-    const active = modelMenuRef.current?.querySelector<HTMLButtonElement>("button.active");
-    active?.scrollIntoView({ block: "nearest" });
-  }, [composerMenu]);
 
   async function submit(event: FormEvent): Promise<void> {
     event.preventDefault();
@@ -2472,9 +2466,7 @@ export const ConversationPane = memo(function ConversationPane({
             </div>
             <div className="composer-control-menu">
               <button className="composer-menu-trigger" data-control="model-select" type="button" title="模型快捷切换" aria-label="模型快捷切换" aria-haspopup="menu" aria-expanded={composerMenu === "model"} disabled={data.busy} onClick={() => { setAccessModeMenuOpen(false); setContextUsageOpen(false); setComposerMenu((current) => current === "model" ? undefined : "model"); }}><Bot size={14} /><span>{selectedModelOption?.name ?? data.model?.id ?? "选择模型"}</span><ChevronDown size={13} /></button>
-              {composerMenu === "model" && <div className="composer-select-menu model-select-menu" data-composer-zone="popup" ref={modelMenuRef} role="menu" aria-label="模型快捷切换">
-                {Array.from(new Set(availableModels.map((model) => model.provider))).map((providerId) => <div className="composer-menu-group" key={providerId}><small>{providers.find((provider) => provider.id === providerId)?.name ?? providerId}</small>{availableModels.filter((model) => model.provider === providerId).map((model) => { const value = `${model.provider}/${model.id}`; return <button className={value === selectedModel ? "active" : ""} type="button" role="menuitemradio" aria-checked={value === selectedModel} key={value} onClick={() => void selectModel(value)}><span>{model.name}</span>{value === selectedModel && <Check size={13} />}</button>; })}</div>)}
-              </div>}
+              {composerMenu === "model" && <ModelMenu models={availableModels} providers={providers} value={selectedModel} onSelect={(value) => void selectModel(value)} onClose={() => setComposerMenu(undefined)} />}
             </div>
             <div className="composer-control-menu thinking-control">
               <button className="composer-menu-trigger" data-control="thinking-select" type="button" title="思考级别" aria-label="思考级别" aria-haspopup="menu" aria-expanded={composerMenu === "thinking"} disabled={data.busy} onClick={() => { setAccessModeMenuOpen(false); setContextUsageOpen(false); setComposerMenu((current) => current === "thinking" ? undefined : "thinking"); }}><span>思考</span><strong>{thinkingLevelLabels[data.thinkingLevel]}</strong><ChevronDown size={13} /></button>
