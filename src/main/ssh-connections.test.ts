@@ -108,24 +108,41 @@ class FakeClient implements SshClientLike {
     this.noDelay.push(noDelay);
   }
 
-  /** 连接测试的 exec 通道：下一微任务回调，再下一微任务以退出码 0 关闭。 */
+  /**
+   * 连接测试的 exec 通道。
+   *
+   * **形状照真机 ssh2，不照「理想化的假通道」**：`Channel` 是 Node 的 Readable，关闭走
+   * `_shutdownChannel` 的 `channel.once('end', doClose)`，而 'end' 只在可读端被读过之后
+   * 才触发。所以这里只有在调用方挂了 `data` 监听（排水）时才 emit('data') → emit('close')；
+   * 不排水就什么都不发（真机表现：等到测试超时）。初版 fake 是「下一微任务直接 emit('close')」
+   * ，恰好把「没排水就永远等不到 close」这个致命前提绕开了（2026-11-02 用户报障的根因），
+   * 真实网络层的回归网见 ssh-host-test-e2e.test.ts。
+   */
   exec(command: string, callback: (error: Error | undefined, stream: never) => void): void {
     this.execs.push(command);
     if (this.execError) {
       queueMicrotask(() => callback(this.execError, undefined as never));
       return;
     }
-    const closeListeners: Listener[] = [];
+    const listeners = new Map<string, Listener[]>();
     const stream = {
       on(event: string, listener: Listener) {
-        if (event === "close") closeListeners.push(listener);
+        const list = listeners.get(event) ?? [];
+        list.push(listener);
+        listeners.set(event, list);
         return this;
       }
+    };
+    const emit = (event: string, argument: never): void => {
+      for (const listener of [...(listeners.get(event) ?? [])]) listener(argument);
     };
     queueMicrotask(() => {
       callback(undefined, stream as never);
       queueMicrotask(() => {
-        for (const listener of [...closeListeners]) listener(0 as never);
+        // 没有被消费 → 真实 ssh2 永远不会走到 close（测试会落到 20s 超时，这正是真机症状）。
+        if ((listeners.get("data") ?? []).length === 0) return;
+        emit("data", "ok\n" as never);
+        emit("close", 0 as never);
       });
     });
   }

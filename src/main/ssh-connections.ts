@@ -71,7 +71,7 @@ export interface SshConnectOptionsLike {
   keepaliveCountMax?: number;
 }
 
-/** exec 通道的最小结构视图（连接测试只用它的 close）。 */
+/** exec 通道的最小结构视图（连接测试用它的 data 与 close）。 */
 export interface SshExecStreamLike {
   on(event: string, listener: (...args: never[]) => void): unknown;
   close?(): void;
@@ -199,8 +199,15 @@ const CONNECT_TIMEOUT_MS = 20_000;
  */
 export const SSH_KEEPALIVE_INTERVAL_MS = 15_000;
 export const SSH_KEEPALIVE_COUNT_MAX = 3;
-/** 连接测试的硬上限（建连 + 一条 echo 往返）：超过就按失败返回。 */
+/** 一条 echo 往返的硬上限：测试通道开了却没有应答（远端卡死/链路黑洞）。 */
 export const SSH_TEST_TIMEOUT_MS = 20_000;
+/**
+ * 面板「测试」的**总预算**（临时建连 + 一次往返），只做泄漏兜底。
+ *
+ * 必须**大于** readyTimeout(CONNECT_TIMEOUT_MS)：两者相等时谁先触发是掷硬币，而我们的
+ * 笼统文案会盖掉 ssh2 判定的真原因（「Timed out while waiting for handshake」）。
+ */
+export const SSH_TEST_BUDGET_MS = CONNECT_TIMEOUT_MS + 10_000;
 const EXEC_DEFAULT_TIMEOUT_MS = 60_000;
 const EXEC_MIN_TIMEOUT_MS = 1_000;
 const EXEC_MAX_TIMEOUT_MS = 600_000;
@@ -845,7 +852,7 @@ export class SshConnectionManager {
         try { client.end(); } catch { /* 已断开 */ }
         resolve(result);
       };
-      const timer = setTimeout(() => finish({ hostId, ok: false, connectMs: connectMs === undefined ? undefined : Math.round(connectMs), error: `连接测试超时（${Math.round(SSH_TEST_TIMEOUT_MS / 1000)} 秒）` }), SSH_TEST_TIMEOUT_MS);
+      const timer = setTimeout(() => finish({ hostId, ok: false, connectMs: connectMs === undefined ? undefined : Math.round(connectMs), error: `连接测试超时（${Math.round(SSH_TEST_BUDGET_MS / 1000)} 秒内没有完成握手或认证，主机可能不可达，或端口被防火墙丢包）` }), SSH_TEST_BUDGET_MS);
       client.on("error", ((error: Error) => {
         if (settled) return;
         const message = error.message || "连接失败";
@@ -887,7 +894,17 @@ export class SshConnectionManager {
     });
   }
 
-  /** 在一条连接上开 exec 通道跑 `echo ok`，返回从发出到通道关闭的毫秒数。 */
+  /**
+   * 在一条连接上开 exec 通道跑 `echo ok`，返回从发出到通道关闭的毫秒数。
+   *
+   * **exec 通道必须排水（消费可读端），否则永远等不到 close**：ssh2 的 Channel 是
+   * Node 的 Readable，通道关闭走 `_shutdownChannel` 里的 `channel.once('end', doClose)`
+   * （node_modules/ssh2/lib/utils.js），而 'end' 只在可读端被读过之后才会触发。初版只挂
+   * 了 'close' 监听、不读 stream，于是每条通路都在 20s 后落到「测试命令超时（远端没有
+   * 应答）」——用户看到的是「主机明明连得上，测速却基本都超时」（2026-11-04 用户报障）。
+   * 单测的 fake 直接 emit('close')，把这个前提整个绕开了，故另有真实 ssh2 的 e2e
+   * （ssh-host-test-e2e.test.ts）钉住它。
+   */
   private execRoundTrip(client: SshClientLike): Promise<number> {
     return new Promise((resolve, reject) => {
       if (!client.exec) {
@@ -908,6 +925,9 @@ export class SshConnectionManager {
           reject(error);
           return;
         }
+        // 排水：仅仅消费掉输出即可（不解析内容），目的是让 'end' 触发、进而让 ssh2
+        // 发出 'close'。删掉这一行，任何真实主机上的测试都会退化成 20s 超时。
+        stream.on("data", () => {});
         stream.on("close", ((code: number | null) => {
           if (settled) return;
           settled = true;
