@@ -6999,15 +6999,29 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         title: command.topic,
         description: command.description,
         content: command.content,
+        ...(command.layer ? { layer: command.layer } : {}),
+        ...(command.summary !== undefined ? { summary: command.summary } : {}),
+        ...(command.triggers ? { triggers: command.triggers } : {}),
         ...(command.workspaceScoped && targetWorkspace ? { bindWorkspace: targetWorkspace } : {})
       });
       break;
     }
     case "memory.update": {
       if (!memoryStore) throw new Error("当前没有可用的记忆存储，请先打开一个会话");
-      if (!memoryStore.read(command.topic)) throw new Error(`未找到记忆主题「${command.topic}」`);
-      // 不传 bindWorkspace：面板编辑保留既有工作区绑定（store upsert 语义）。
-      memoryStore.save({ title: command.topic, description: command.description, content: command.content });
+      // 不传 bindWorkspace：面板编辑保留既有工作区绑定。
+      memoryStore.update(command.topic, {
+        ...(command.description !== undefined ? { description: command.description } : {}),
+        ...(command.content !== undefined ? { content: command.content } : {}),
+        ...(command.layer !== undefined ? { layer: command.layer } : {}),
+        ...(command.summary !== undefined ? { summary: command.summary } : {}),
+        ...(command.triggers !== undefined ? { triggers: command.triggers } : {})
+      });
+      break;
+    }
+    case "memory.indexPreview": {
+      // 记忆中心的「模型实际看到的索引」：与会话注入走同一个 snapshotMarkdown。
+      const markdown = memoryStore ? memoryStore.snapshotMarkdown(workspace, MEMORY_SNAPSHOT_BUDGET_CHARS) : "";
+      post({ type: "memory.index-preview", markdown, characters: markdown.length, budget: MEMORY_SNAPSHOT_BUDGET_CHARS });
       break;
     }
     case "memory.delete": {

@@ -80,12 +80,16 @@ describe("MemoryPanel v3", () => {
     expect(container.textContent).toContain("500 字");
     expect(container.textContent).toContain("18k 字");
     expect(container.textContent).toContain("偏大");
-    expect(markup).toContain("筛选标题或描述");
-    expect(container.textContent).toContain("本工作区");
+    expect(markup).toContain("筛选标题、描述或要点");
+    expect(container.textContent).toContain("项目A");
     expect(container.textContent).toContain("全局");
     expect(container.textContent).toContain("测试助手");
     expect(container.textContent).not.toContain("当前助手");
     expect(container.textContent).not.toContain("正文内容");
+    expect(markup).toContain("data-memory-card");
+    expect(markup).toContain('data-layer="standard"');
+    expect(container.textContent).toContain("全部 3");
+    expect(container.textContent).toContain("标准 3");
   });
 
   it("formats small and large sizes", () => {

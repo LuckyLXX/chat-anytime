@@ -825,6 +825,8 @@ export interface ConversationPaneProps {
   onOpenPlanDetail(detail: string): void;
   /** 记忆面板点击主题：在右侧预览窗口打开该主题的 markdown 正文。 */
   onOpenMemoryTopic(topic: MemoryTopicSummary): void;
+  /** 打开记忆中心（卡片墙 + 索引预览）；缺省时面板不显示入口。 */
+  onOpenMemoryCenter?(): void;
   /** 查看委派子代理的完整记录（App 层弹只读弹窗）。 */
   onOpenTranscript?(delegation: DelegationProgress): void;
   /** 会话操作失败提示（App 层 toast）。传 undefined 清除。 */
@@ -868,6 +870,7 @@ export const ConversationPane = memo(function ConversationPane({
   onOpenDiff,
   onOpenPlanDetail,
   onOpenMemoryTopic,
+  onOpenMemoryCenter,
   onOpenTranscript,
   onActionError,
   onRollback,
@@ -2194,7 +2197,7 @@ export const ConversationPane = memo(function ConversationPane({
           </span>
         </header>
       )}
-      {showDock && <PanelDock onOpenMemoryTopic={onOpenMemoryTopic} />}
+      {showDock && <PanelDock onOpenMemoryTopic={onOpenMemoryTopic} onOpenMemoryCenter={onOpenMemoryCenter} />}
       <div className={`timeline${turns.length >= 2 ? " has-turn-minimap" : ""}`} data-pane="timeline" ref={timelineRef}>
         {awaitingHydration ? (
           <div className="empty-conversation" data-pane="landing"><div className="empty-icon"><LoaderCircle size={22} className="spinning" /></div><h1>正在载入会话{title ? `「${title}」` : ""}…</h1></div>

@@ -20,7 +20,7 @@ type PanelTab = "tasks" | "memory";
  * 根节点上；data-control="task-panel-toggle" 在 FAB 与待办 tab 上，
  * data-control="memory-toggle" 在记忆 tab 上。
  */
-export function PanelDock({ onOpenMemoryTopic }: { onOpenMemoryTopic(topic: MemoryTopicSummary): void }): ReactNode {
+export function PanelDock({ onOpenMemoryTopic, onOpenMemoryCenter }: { onOpenMemoryTopic(topic: MemoryTopicSummary): void; onOpenMemoryCenter?: () => void }): ReactNode {
   const todos = useDesktopStore((state) => state.todos);
   const memory = useDesktopStore((state) => state.memory);
   const executions = useDesktopStore((state) => state.snapshot.executions);
@@ -66,7 +66,7 @@ export function PanelDock({ onOpenMemoryTopic }: { onOpenMemoryTopic(topic: Memo
           <TaskPanelContent />
         </div>
         <div className="panel-dock-pane" hidden={tab !== "memory"}>
-          <MemoryPanelContent onOpenTopic={onOpenMemoryTopic} />
+          <MemoryPanelContent onOpenTopic={onOpenMemoryTopic} onOpenCenter={onOpenMemoryCenter} />
         </div>
       </div>
     </div>

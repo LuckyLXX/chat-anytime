@@ -1,4 +1,4 @@
-import { MEMORY_OUTLINE_MAX_SECTIONS, MEMORY_SECTION_CHUNK_CHARS } from "../shared/memory.js";
+import { MEMORY_OUTLINE_MAX_SECTIONS, MEMORY_OUTLINE_PREVIEW_CHARS, MEMORY_SECTION_CHUNK_CHARS } from "../shared/memory.js";
 
 /**
  * 记忆主题的分节模型（纯函数，无文件 IO）。
@@ -102,7 +102,7 @@ function collapsePreview(text: string): string {
     .replace(/^[-*>#\s]+/u, "")
     .replace(/\s+/gu, " ")
     .trim()
-    .slice(0, 80);
+    .slice(0, MEMORY_OUTLINE_PREVIEW_CHARS);
 }
 
 function chunkRanges(content: string, start: number, end: number, maxChars: number): Array<{ start: number; end: number }> {
@@ -298,4 +298,47 @@ export function appendToMemoryContent(content: string, section: string | undefin
   }
 
   return { content: `${content.replace(/[ \t\r\n]+$/u, "")}\n\n${block}\n`, label: "末尾", created: false };
+}
+
+/** 按字符（code point）截断并加省略号；用于预算化的读取/索引。 */
+export function truncateMemoryText(text: string, maxChars: number): string {
+  const characters = Array.from(text);
+  if (characters.length <= maxChars) return text;
+  if (maxChars <= 1) return "…";
+  return `${characters.slice(0, maxChars - 1).join("")}…`;
+}
+
+/**
+ * 要点层的兜底派生（主题没有维护 summary 时使用）。
+ *
+ * 取正文里前几条「像结论」的行：跳过标题、分隔线、代码围栏与过短行，
+ * 每条取首个句子（≤40 字），用 ` · ` 连接并受 maxChars 约束。它不追求
+ * 语义摘要（那是模型维护 summary 的活），只保证默认读取有「事实」可看，
+ * 而不是只有目录。
+ */
+export function deriveMemoryDigest(content: string, maxChars: number): string {
+  const picked: string[] = [];
+  let used = 0;
+  let fence = false;
+  for (const rawLine of content.split(/\r?\n/u)) {
+    const line = rawLine.trim();
+    if (/^(`{3,}|~{3,})/u.test(line)) {
+      fence = !fence;
+      continue;
+    }
+    if (fence || !line || line.startsWith("#") || line.startsWith("---") || line.startsWith("|")) continue;
+    const cleaned = line
+      .replace(/^[-*>+\d.、)\s]+/u, "")
+      .replace(/\*\*|__/gu, "")
+      .replace(/\s+/gu, " ")
+      .trim();
+    if (cleaned.length < 4) continue;
+    const sentence = (cleaned.match(/^[^。！？!?]{4,40}[。！？!?]?/u)?.[0] ?? cleaned).trim();
+    const cost = sentence.length + (picked.length > 0 ? 3 : 0);
+    if (used + cost > maxChars) break;
+    picked.push(sentence);
+    used += cost;
+    if (picked.length >= 6) break;
+  }
+  return picked.join(" · ");
 }
