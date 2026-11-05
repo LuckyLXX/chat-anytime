@@ -34,13 +34,45 @@ describe("command palette wiring contract", () => {
     expect(protocol).toMatch(/settings\.save[^\n]*"shortcuts"/u);
   });
 
-  it("渲染端响应 Ctrl/Cmd+K 与主进程推送", () => {
-    expect(app).toContain("event.ctrlKey || event.metaKey");
+  it("渲染端用纯函数判定窗口内快捷键，并分发到真实命令", () => {
+    // 新增的直接快捷键（2026-11-05）：Ctrl+N / Ctrl+Shift+B / Ctrl+, 与 Ctrl+K 同一入口。
+    expect(app).toContain("matchAppShortcut(event)");
+    expect(app).toContain("shortcutActionsRef.current.newSession()");
+    expect(app).toContain("shortcutActionsRef.current.browser()");
+    expect(app).toContain("setPaletteOpen((open) => !open)");
+    // 有对话框/全屏预览时直接动作不触发（否则会在背后开话题、盖掉权限卡）。
+    expect(app).toContain("shortcutBlockedRef.current");
+    expect(app).toContain("settingsOpenRef.current");
     expect(app).toContain("paletteOpenTick > 0");
     expect(app).toContain("<CommandPalette");
     expect(app).toContain("open={paletteOpen}");
     expect(store).toContain('case "palette.open"');
     expect(store).toContain('case "shortcut.error"');
+    // 匹配规则本身在 lib 里可单测（Shift 是硬条件、AltGr 不误触）。
+    const shortcutsLib = read("../renderer/src/lib/keyboard-shortcuts.ts");
+    expect(shortcutsLib).toContain("export function matchAppShortcut");
+    expect(shortcutsLib).toContain('key === "k"');
+  });
+
+  it("默认视图只列真入口：模型动作整组移除、低频动作收进 searchOnly", () => {
+    expect(app).toContain('title: "打开浏览器"');
+    expect(app).toContain('title: "打开终端"');
+    expect(app).toContain('title: "打开文件…"');
+    expect(app).toContain('title: "打开 SSH 远程终端"');
+    expect(app).toContain('id: "session.stop"');
+    expect(app).toContain("openBrowserTab()");
+    expect(app).toContain("findReusablePreviewTab");
+    // 顶栏预览按钮在空面板时直接开浏览器（「打开预览 → 点浏览器」两步并一步）。
+    expect(app).toContain("previewHasTabs");
+    expect(app).toContain("previewToggleLabel");
+    // 聊天框里一步就能切换的模型不再进面板（用户 2026-11-05 反馈的直接诉求）。
+    expect(app).not.toContain("切换模型：");
+    expect(app).not.toContain('type: "model.select"');
+    // 低频/重复入口收进搜索：输入关键词仍找得到，不占默认列表。
+    expect(app).toContain("searchOnly: true");
+    expect(app).toContain('title: `切换助手：${agent.name}`');
+    expect(app).toContain('title: `访问模式：${mode.label}`');
+    expect(app).toContain('title: `打开设置：${entry.label}`');
   });
 
   it("面板不提供思考等级切换（2026-10-27 用户要求「思考等级切换这个去掉」）", () => {
@@ -62,5 +94,8 @@ describe("command palette wiring contract", () => {
     const general = read("../renderer/src/GeneralSettings.tsx");
     expect(general).toContain("PALETTE_HOTKEY");
     expect(general).toContain("shortcuts: nextSettings.shortcuts");
+    // 窗口内快捷键在设置页有一份可发现的清单，文案与面板徽章同源。
+    expect(general).toContain("APP_SHORTCUT_LABELS");
+    expect(general).toContain("WINDOW_SHORTCUT_ROWS");
   });
 });

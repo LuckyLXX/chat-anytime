@@ -113,8 +113,8 @@ describe("CommandPalette", () => {
     const actions = makeActions();
     await render(actions);
 
-    // 0 → 1（模型）→ 跳过错禁的 2 → 3（深色）
-    press("ArrowDown");
+    // 分组顺序是「会话 → 权限 → 主题 → 未登记分组」，所以 flat = [新建, 只读(禁用), 深色, 模型]。
+    // 第一次 ↓ 从 0 出发必须跳过禁用的「只读」落到「深色」。
     press("ArrowDown");
     press("Enter");
     expect((actions[3]!.run as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
@@ -153,6 +153,25 @@ describe("CommandPalette", () => {
 
     await render([]);
     expect(container.textContent).toContain("没有匹配的动作");
+  });
+
+  it("renders the shortcut badge and hides searchOnly actions until typing", async () => {
+    const actions: PaletteAction[] = [
+      { id: "browser", title: "打开浏览器", group: "打开", shortcut: "Ctrl+Shift+B", hint: "新建标签", run: vi.fn() },
+      { id: "theme", title: "主题：深色", group: "主题", searchOnly: true, run: vi.fn() }
+    ];
+    await render(actions);
+
+    // 行尾徽章就是真实生效的按键（见 lib/keyboard-shortcuts.ts），不是装饰。
+    expect(container.querySelector(".command-palette-item-shortcut")?.textContent).toBe("Ctrl+Shift+B");
+    expect(container.textContent).toContain("新建标签");
+    expect(container.textContent).not.toContain("主题：深色");
+    // 默认视图给一句可发现性提示：输入才能搜到收纳起来的动作。
+    expect(container.textContent).toContain("输入关键词可搜到全部动作");
+
+    type("深色");
+    expect(container.textContent).toContain("主题：深色");
+    expect(container.textContent).not.toContain("输入关键词可搜到全部动作");
   });
 
   // —— 两段式会话检索（2026-10-27 用户报：输入历史对话内容只得到「没有匹配的动作」） ——
@@ -228,7 +247,7 @@ describe("CommandPalette", () => {
     press("Escape");
     expect(onClose).not.toHaveBeenCalled();
     expect(input().value).toBe("");
-    expect(input().placeholder).toContain("输入动作名");
+    expect(input().placeholder).toContain("搜索动作");
     expect(container.textContent).toContain("新建话题");
     expect(onSearchQueryChange).toHaveBeenLastCalledWith("");
 

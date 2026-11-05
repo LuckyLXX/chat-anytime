@@ -28,8 +28,10 @@ function PreviewPaneFallback({ label }: { label: string }): ReactNode {
 
 export type PreviewTarget =
   | { type: "artifact"; artifact: Artifact }
-  /** galleryId：该浏览器标签属于哪个作品（「运行」重开时据此找旧标签；关闭时清理）。 */
-  | { type: "browser"; id?: string; title?: string; loading?: boolean; galleryId?: string }
+  /** galleryId：该浏览器标签属于哪个作品（「运行」重开时据此找旧标签；关闭时清理）。
+   *  focusAddress：一次性聚焦地址栏的令牌（命令面板/快捷键新建浏览器标签时带上，
+   *  面板挂上后就能直接输网址；同一令牌只消费一次，切标签回来不再抢焦点）。 */
+  | { type: "browser"; id?: string; title?: string; loading?: boolean; galleryId?: string; focusAddress?: number }
   /** cwd/initialCommand：服务型作品「运行」在那个作品目录里直接跑启动命令（title 用作标签名）。
    *  galleryId：该终端属于哪个作品（「运行」重开时据此回收旧的服务标签）。 */
   | { type: "terminal"; cwd?: string; initialCommand?: string; title?: string; galleryId?: string }
@@ -507,7 +509,7 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, fullscree
             </div>
           </div>
         )}
-        {!showSource && target.type === "browser" && <Suspense fallback={<PreviewPaneFallback label="正在载入浏览器…" />}><BrowserPreview suspended={browserSuspended} tabId={activeTabId} onPickSend={onBrowserPickSend} onStateChange={(state) => onBrowserStateChange?.(activeTabId, state)} /></Suspense>}
+        {!showSource && target.type === "browser" && <Suspense fallback={<PreviewPaneFallback label="正在载入浏览器…" />}><BrowserPreview suspended={browserSuspended} tabId={activeTabId} focusAddress={target.focusAddress} onPickSend={onBrowserPickSend} onStateChange={(state) => onBrowserStateChange?.(activeTabId, state)} /></Suspense>}
         {target.type === "terminal" && <Suspense fallback={<PreviewPaneFallback label="正在载入终端…" />}><TerminalPanel terminalId={active.id} workspace={workspace} cwd={target.cwd} initialCommand={target.initialCommand} /></Suspense>}
         {target.type === "ssh" && <Suspense fallback={<PreviewPaneFallback label="正在载入 SSH…" />}><SshPanel onConnect={(host) => onSshConnect?.(host)} /></Suspense>}
         {target.type === "ssh-terminal" && <Suspense fallback={<PreviewPaneFallback label="正在载入终端…" />}><SshTerminalPanel terminalId={target.terminalId} hostId={target.hostId} hostName={target.hostName} workspace={workspace} /></Suspense>}

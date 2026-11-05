@@ -47,14 +47,26 @@ describe("filterPaletteActions", () => {
     expect(filterPaletteActions(actions, "ＧＰＴ").map((item) => item.id)).toEqual(["model-b"]);
     expect(filterPaletteActions(actions, "CLAUDE").map((item) => item.id)).toEqual(["model-a"]);
   });
+
+  it("hides searchOnly actions in the default view but still matches them once typing", () => {
+    const list = [
+      action({ id: "browser", title: "打开浏览器", group: "打开" }),
+      action({ id: "theme", title: "主题：深色", group: "主题", searchOnly: true })
+    ];
+    expect(filterPaletteActions(list, "").map((item) => item.id)).toEqual(["browser"]);
+    expect(filterPaletteActions(list, "   ").map((item) => item.id)).toEqual(["browser"]);
+    expect(filterPaletteActions(list, "深色").map((item) => item.id)).toEqual(["theme"]);
+    expect(filterPaletteActions(list, "主题").map((item) => item.id)).toEqual(["theme"]);
+  });
 });
 
 describe("groupPaletteActions", () => {
   it("uses the fixed group order and appends unknown groups last", () => {
     const groups = groupPaletteActions(actions);
-    expect(groups.map((group) => group.title)).toEqual(["会话", "模型", "主题", "未来分组"]);
+    expect(groups.map((group) => group.title)).toEqual(["会话", "主题", "模型", "未来分组"]);
     // 命令面板不再提供思考等级切换（2026-10-27 用户要求）：分组顺序里也没有「思考」。
-    expect(PALETTE_GROUP_ORDER.slice(0, 3)).toEqual(["会话", "模型", "权限"]);
+    // 2026-11-05 重做后默认列表以「真入口」优先：会话 → 打开 → 视图。
+    expect(PALETTE_GROUP_ORDER.slice(0, 3)).toEqual(["会话", "打开", "视图"]);
     expect(groups[0]?.actions.map((item) => item.id)).toEqual(["new", "search"]);
   });
 
