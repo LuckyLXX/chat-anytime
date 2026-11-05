@@ -39,8 +39,10 @@ interface ViewportRect {
   height: number;
 }
 
-export function BrowserPreview({ suspended = false, tabId = "default", onPickSend, onStateChange }: { suspended?: boolean; tabId?: string; onPickSend?: (pick: BrowserElementPick, note: string) => void; onStateChange?: (state: BrowserPreviewState) => void }): ReactNode {
+export function BrowserPreview({ suspended = false, tabId = "default", focusAddress, onPickSend, onStateChange }: { suspended?: boolean; tabId?: string; /** 一次性聚焦地址栏的令牌（「打开浏览器」命令/快捷键新建标签时传入）；同一令牌只消费一次。 */ focusAddress?: number; onPickSend?: (pick: BrowserElementPick, note: string) => void; onStateChange?: (state: BrowserPreviewState) => void }): ReactNode {
   const viewportRef = useRef<HTMLDivElement>(null);
+  const addressInputRef = useRef<HTMLInputElement>(null);
+  const handledFocusTokenRef = useRef<number | undefined>(undefined);
   const addressFocusedRef = useRef(false);
   const lastZoomRef = useRef(1);
   const [address, setAddress] = useState(() => storedBrowserAddress(tabId));
@@ -125,6 +127,21 @@ export function BrowserPreview({ suspended = false, tabId = "default", onPickSen
     // 打开时读回真值：配置由主进程持有（设置页保存不会覆盖它）。
     if (open) void send({ type: "download-prefs" });
   }
+
+  // 一次性聚焦地址栏（面板「打开浏览器」：按完快捷键就能直接输网址）。
+  // 同一令牌只消费一次，所以切走标签再回来不会反复抢焦点；延一拍是因为预览面板
+  // 正在展开，隐藏态下 focus() 会在面板可见前被浏览器丢掉。
+  // 消费标记必须在定时器里写：StrictMode 会把 effect 跑两遍，提前写标记会让
+  // 第一遍的 cleanup 清掉定时器、第二遍直接早退，结果永远聚焦不上（dev 实测）。
+  useEffect(() => {
+    if (!focusAddress || handledFocusTokenRef.current === focusAddress) return;
+    const timer = window.setTimeout(() => {
+      handledFocusTokenRef.current = focusAddress;
+      addressInputRef.current?.focus();
+      addressInputRef.current?.select();
+    }, 80);
+    return () => window.clearTimeout(timer);
+  }, [focusAddress, tabId]);
 
   useEffect(() => window.piDesktop.onBrowserPreviewState(tabId, (next) => {
     setState(next);
@@ -351,7 +368,7 @@ export function BrowserPreview({ suspended = false, tabId = "default", onPickSen
         <button type="button" title="前进" aria-label="前进" disabled={!state.canGoForward} onClick={() => void send({ type: "forward" })}><ArrowRight size={15} /></button>
         <button type="button" title={state.loading ? "停止加载" : "刷新"} aria-label={state.loading ? "停止加载" : "刷新"} disabled={!state.attached} onClick={() => void send({ type: state.loading ? "stop" : "reload" })}>{state.loading ? <X size={15} /> : <RefreshCw size={15} />}</button>
         <PreviewDeviceMenu device={device} fit={fit} scalePercent={(layout?.scale ?? 1) * 100} onDeviceChange={changeDevice} onFitChange={changeFit} onMenuOpenChange={setDeviceMenuOpen} />
-        <label className="browser-address"><Globe2 size={14} /><input value={address} aria-label="浏览器地址" placeholder="输入网址，或用 browser_navigate 让 AI 打开页面" spellCheck={false} onFocus={() => { addressFocusedRef.current = true; }} onBlur={() => { addressFocusedRef.current = false; }} onChange={(event) => setAddress(event.target.value)} /></label>
+        <label className="browser-address"><Globe2 size={14} /><input ref={addressInputRef} value={address} aria-label="浏览器地址" placeholder="输入网址，或用 browser_navigate 让 AI 打开页面" spellCheck={false} onFocus={() => { addressFocusedRef.current = true; }} onBlur={() => { addressFocusedRef.current = false; }} onChange={(event) => setAddress(event.target.value)} /></label>
         <BrowserBookmarksMenu currentUrl={state.url} currentTitle={state.title} onNavigate={(url) => void navigateTo(url)} onMenuOpenChange={setBookmarksMenuOpen} />
         <BrowserDownloadMenu prefs={state.downloadPrefs} onSetPrefs={setDownloadPrefs} onMenuOpenChange={toggleDownloadMenu} />
         <button type="button" className={pickMode ? "active" : ""} data-control="browser-pick" title={pickMode ? "取消元素选择" : "选择页面元素（可发送到聊天框）"} aria-label={pickMode ? "取消元素选择" : "选择页面元素"} aria-pressed={pickMode} disabled={!state.attached} onClick={togglePickMode}><Crosshair size={15} /></button>

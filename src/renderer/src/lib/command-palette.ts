@@ -5,7 +5,14 @@
  * 怎么排、怎么分组」，因此可以脱离 React 单测。过滤是 NFKC + 小写子串 +
  * 多词 AND；排序按标题精确/前缀/包含、关键词命中依次加权，同分保持原顺序
  * （动作表的顺序本身就是一份人工优先级）。
+ *
+ * 「真入口」口径（2026-11-05 重做）：默认视图只放**没有更短路径**的动作
+ * （打开浏览器/终端/文件/SSH、新建话题、搜索会话、作品墙、自动化、设置）；
+ * 模型切换这类在聊天框里一步就能做完的动作不再进面板，助手/主题/访问模式/
+ * 模式开关/侧栏与预览开合/最近工作区/设置各 tab 这类低频或重复入口用
+ * `searchOnly` 收进搜索结果——输入关键词仍然找得到，不占默认列表。
  */
+import type { ComponentType } from "react";
 
 export interface PaletteAction {
   id: string;
@@ -15,8 +22,17 @@ export interface PaletteAction {
   group: string;
   /** 额外搜索词（英文/同义词），不展示。 */
   keywords?: string;
-  /** 右侧提示（当前值、快捷键、目标会话等）。 */
+  /** 右侧提示（当前值、目标会话、数量等）。 */
   hint?: string;
+  /** 右侧快捷键徽章（展示用；真正的按键分发在 lib/keyboard-shortcuts.ts）。 */
+  shortcut?: string;
+  /** 行首图标（lucide 组件）；渲染层只负责画，不参与过滤。 */
+  icon?: ComponentType<{ size?: number | string; strokeWidth?: number }>;
+  /**
+   * 默认视图（未输入查询）隐藏，输入关键词时才参与匹配。
+   * 用于「有常驻控件 / 低频 / 只是重复入口」的动作，避免默认列表被噪声填满。
+   */
+  searchOnly?: boolean;
   /** 禁用时仍展示，但 Enter / 点击不执行。 */
   disabled?: boolean;
   /**
@@ -36,8 +52,8 @@ export interface PaletteGroup {
   actions: PaletteAction[];
 }
 
-/** 分组展示顺序：高频操作在前，设置类在后。 */
-export const PALETTE_GROUP_ORDER: readonly string[] = ["会话", "模型", "权限", "视图", "模式", "主题", "设置", "其他"];
+/** 分组展示顺序：真入口在前（会话 → 打开 → 视图），搜索项与设置类在后。 */
+export const PALETTE_GROUP_ORDER: readonly string[] = ["会话", "打开", "视图", "工作区", "设置", "助手", "权限", "模式", "主题", "其他"];
 
 /** 一次最多展示多少条动作（过滤后）。 */
 export const PALETTE_RESULT_LIMIT = 60;
@@ -52,7 +68,9 @@ export function filterPaletteActions(
   limit = PALETTE_RESULT_LIMIT
 ): PaletteAction[] {
   const normalized = normalizePaletteQuery(query);
-  if (!normalized) return actions.slice(0, limit);
+  // 空查询 = 默认视图：只列真入口。searchOnly 的动作仍在动作表里，
+  // 输入关键词后照常参与匹配（这正是「不删功能、只降噪」的落点）。
+  if (!normalized) return actions.filter((action) => action.searchOnly !== true).slice(0, limit);
   const terms = normalized.split(/\s+/u).filter(Boolean);
   const scored: { action: PaletteAction; score: number; index: number }[] = [];
 

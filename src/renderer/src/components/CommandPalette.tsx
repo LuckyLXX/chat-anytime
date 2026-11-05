@@ -17,6 +17,9 @@ import { highlightSnippet } from "./SessionSearchResults";
  * 检索结果同样由 App 从 store 传入（`sessionSearch`），面板只负责展示与键盘导航；
  * 过滤/分组在 lib/command-palette.ts 里可单测。打开时重置查询、选中项与模式；
  * 禁用动作可见但不可执行（保留「为什么不可用」的上下文）。
+ *
+ * 2026-11-05 重做：默认列表只留真入口（App 用 `searchOnly` 把低频动作收进搜索），
+ * 行首加图标、行尾加快捷键徽章——面板里看到的键位就是窗口内真实生效的键位。
  */
 
 /** 会话检索的最短查询长度：与侧栏检索（App 内的防抖 effect）保持同一口径。 */
@@ -124,6 +127,17 @@ export function CommandPalette({ open, actions, onClose, sessionSearch, agents, 
     panelRef.current?.querySelector<HTMLElement>(selector)?.scrollIntoView({ block: "nearest" });
   }, [activeIndex, hitIndex, mode, open]);
 
+  // 动作表长度变化（例如「停止当前生成」随回合结束消失）时收敛选中项：
+  // 悬空索引会让 Enter 落到别的动作上，或干脆什么都不执行。
+  useEffect(() => {
+    setActiveIndex((current) => {
+      const list = flatRef.current;
+      if (current < list.length && !list[current]?.disabled) return current;
+      const firstEnabled = list.findIndex((action) => !action.disabled);
+      return firstEnabled >= 0 ? firstEnabled : 0;
+    });
+  }, [flat.length]);
+
   if (!open) return null;
 
   function enterSearchMode(): void {
@@ -209,7 +223,7 @@ export function CommandPalette({ open, actions, onClose, sessionSearch, agents, 
             onChange={(event) => setQuery(event.target.value)}
             placeholder={mode === "sessions"
               ? "搜索会话内容：标题与正文，至少 2 个字"
-              : "输入动作名，例如「新建」「模型」「浅色」"}
+              : "搜索动作或输入关键词（浏览器 / 终端 / 技能 / 只读…）"}
             aria-label={mode === "sessions" ? "搜索会话内容" : "搜索命令"}
             spellCheck={false}
             onKeyDown={onKeyDown}
@@ -257,6 +271,7 @@ export function CommandPalette({ open, actions, onClose, sessionSearch, agents, 
                 <div className="command-palette-group-title">{group.title}</div>
                 {group.actions.map((action) => {
                   const index = flat.indexOf(action);
+                  const Icon = action.icon;
                   return (
                     <button
                       key={action.id}
@@ -269,8 +284,12 @@ export function CommandPalette({ open, actions, onClose, sessionSearch, agents, 
                       onMouseMove={() => { if (!action.disabled) setActiveIndex(index); }}
                       onClick={() => run(action)}
                     >
+                      <span className="command-palette-item-icon" aria-hidden="true">
+                        {Icon ? <Icon size={15} strokeWidth={1.8} /> : <span className="command-palette-item-dot" />}
+                      </span>
                       <span className="command-palette-item-title">{action.title}</span>
                       {action.hint ? <span className="command-palette-item-hint">{action.hint}</span> : null}
+                      {action.shortcut ? <kbd className="command-palette-item-shortcut">{action.shortcut}</kbd> : null}
                     </button>
                   );
                 })}
@@ -284,6 +303,9 @@ export function CommandPalette({ open, actions, onClose, sessionSearch, agents, 
           {mode === "sessions"
             ? <><span>Enter 打开会话</span><span>Esc 返回命令</span></>
             : <><span>Enter 执行</span><span>Esc 关闭</span></>}
+          {mode === "commands" && !trimmed
+            ? <span className="command-palette-footer-hint">输入关键词可搜到全部动作（含助手、模式与设置项）</span>
+            : null}
         </div>
       </div>
     </div>

@@ -1,9 +1,10 @@
-import { Bot, ChevronDown, Computer, FolderOpen, Globe, Keyboard, LayoutGrid, Palette, RotateCcw, ShieldCheck, Terminal } from "lucide-react";
+import { Bot, ChevronDown, Computer, FolderOpen, Globe, Keyboard, LayoutGrid, Palette, Plus, RotateCcw, Search, Settings, ShieldCheck, Terminal } from "lucide-react";
 import { Fragment, useState, type FormEvent, type ReactNode } from "react";
 import type { AccessMode, DesktopSettings, JevSettings, ModelOption, ProviderOption, ThinkingLevel } from "../../shared/protocol";
 import { THINKING_LEVELS } from "../../shared/thinking-levels";
 import { thinkingLevelLabels } from "../../shared/locale";
 import { PALETTE_HOTKEY, PALETTE_HOTKEY_LABEL } from "../../shared/shortcuts";
+import { APP_SHORTCUT_LABELS, type AppShortcutCommand } from "./lib/keyboard-shortcuts";
 import { ModelSelect } from "./components/ModelSelect";
 import { selectableCatalogModels } from "./lib/model-list";
 import { useDesktopStore } from "./store";
@@ -16,9 +17,10 @@ import { useDesktopStore } from "./store";
  * 语义；能力总闸是裸复选框、说明全藏在 title；Jev 区块占近一屏喧宾夺主。
  *
  * 本轮按角色页（AgentSettings.tsx）已验证的分区卡片体系重排：
- * ① 六张分区卡片：对话与权限 / 视觉识别（图片兜底）/ 默认工作区 / 能力总闸 /
- *    Jev 快速决策 / 界面（视觉识别 2026-09-23 从「模型服务」页迁来——它是全局项，
- *    原先挂在每个服务商的滚动内容里）；
+ * ① 七张分区卡片：对话与权限 / 视觉识别（图片兜底）/ 默认工作区 / 能力总闸 /
+ *    Jev 快速决策 / 界面 / 快捷键（视觉识别 2026-09-23 从「模型服务」页迁来——它是全局项，
+ *    原先挂在每个服务商的滚动内容里；快捷键卡 2026-11-05 新增，列出窗口内直接动作
+ *    与全局呼出开关）；
  * ② 能力总闸改整行开关（图标 + 名称 + 一行可见说明 + 右侧开关），
  *    与角色页 agent-switch-row 同构；
  * ③ Jev 折叠成一张卡片，默认收起——头部一行显示标题 + 状态徽标 + 启用开关，
@@ -56,6 +58,20 @@ const CAPABILITY_SWITCHES: Array<{
   { key: "ssh", title: "SSH 远程操作", hint: "ssh_* 工具；只管 AI，不拦你自己在 SSH 面板建立的连接", icon: Terminal },
   { key: "computer", title: "电脑控制", hint: "computer_* 桌面窗口工具；还须在会话顶栏开启才注入", icon: Computer },
   { key: "design", title: "设计模式", hint: "design_* 工具仅在开了设计模式的会话里注入", icon: Palette }
+];
+
+/**
+ * 窗口内快捷键一览（2026-11-05）。
+ *
+ * 文案与命令面板行尾的徽章同源（`APP_SHORTCUT_LABELS`），所以只维护一份；
+ * 命中逻辑在 `lib/keyboard-shortcuts.ts` 的 `matchAppShortcut` 里，可单测。
+ * 这些键只在 PiDesktop 窗口内生效，不占其他软件的组合键。
+ */
+const WINDOW_SHORTCUT_ROWS: Array<{ command: AppShortcutCommand; title: string; hint: string; icon: typeof Keyboard }> = [
+  { command: "palette", title: "命令面板", hint: "打开或关闭命令面板", icon: Search },
+  { command: "new-session", title: "新建话题", hint: "在当前工作区新建话题（分屏时替换焦点格）", icon: Plus },
+  { command: "browser", title: "打开浏览器", hint: "已有浏览器标签就切过去，没有才新建并聚焦地址栏", icon: Globe },
+  { command: "settings", title: "打开设置", hint: "再按一次收起设置", icon: Settings }
 ];
 
 interface GeneralSettingsProps {
@@ -383,6 +399,22 @@ export function GeneralSettings({ settings, models, providers, jevKeyConfigured,
               {/* 缺省 = 展示（与运行时 showGalleryWallLanding 同一口径）：老配置里没这个字段，开关必须显示为开。 */}
               <input type="checkbox" className="general-switch" checked={settings.appearance.showGalleryWall !== false} onChange={(event) => patchSettings({ appearance: { ...settings.appearance, showGalleryWall: event.target.checked } })} />
             </label>
+          </div>
+        </section>
+
+        <section className="general-card" aria-label="快捷键">
+          <div className="general-card-head"><strong>快捷键</strong><small>窗口内直接生效，命令面板里也显示同一组按键</small></div>
+          <div className="general-card-body">
+            {WINDOW_SHORTCUT_ROWS.map((row) => {
+              const Icon = row.icon;
+              return (
+                <div className="general-shortcut-row" key={row.command}>
+                  <span className="general-switch-icon"><Icon size={13} /></span>
+                  <span className="general-switch-copy"><strong>{row.title}</strong><small>{row.hint}</small></span>
+                  <kbd className="general-shortcut-key">{APP_SHORTCUT_LABELS[row.command]}</kbd>
+                </div>
+              );
+            })}
             <label className="general-switch-row">
               <span className="general-switch-icon"><Keyboard size={13} /></span>
               <span className="general-switch-copy"><strong>全局快捷键</strong><small>在任意应用里按 {PALETTE_HOTKEY_LABEL} 呼出命令面板；被其他软件占用时会在保存后提示，关掉即注销</small></span>

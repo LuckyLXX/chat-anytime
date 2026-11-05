@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DesktopSettings, ModelOption, ProviderOption } from "../../shared/protocol";
 import { PALETTE_HOTKEY } from "../../shared/shortcuts";
+import { APP_SHORTCUT_LABELS } from "./lib/keyboard-shortcuts";
 import { GeneralSettings } from "./GeneralSettings";
 import { useDesktopStore } from "./store";
 
@@ -102,14 +103,15 @@ function render(overrides: { settings?: DesktopSettings; jevKeyConfigured?: bool
 }
 
 describe("通用页结构契约", () => {
-  it("带 data-pane=general-settings 钩子与六张分区卡片", () => {
+  it("带 data-pane=general-settings 钩子与七张分区卡片", () => {
     render();
     const form = container.querySelector("[data-pane=\"general-settings\"]");
     expect(form).not.toBeNull();
     // 视觉识别卡是 2026-09-23 从「模型服务」页迁来的全局项（原先挂在每个服务商的
-    // 滚动内容里），位置固定在「对话与权限」之后。
+    // 滚动内容里），位置固定在「对话与权限」之后；快捷键卡是 2026-11-05 新增，
+    // 窗口内直接动作与全局呼出开关都收在它里面。
     expect([...container.querySelectorAll(".general-card")].map((card) => card.getAttribute("aria-label"))).toEqual([
-      "对话与权限", "视觉识别（图片兜底）", "默认工作区", "能力总闸", "Jev 快速决策", "界面"
+      "对话与权限", "视觉识别（图片兜底）", "默认工作区", "能力总闸", "Jev 快速决策", "界面", "快捷键"
     ]);
   });
 
@@ -313,7 +315,7 @@ describe("保存与取消", () => {
     const handlers = render();
     const row = [...container.querySelectorAll(".general-switch-row")]
       .find((item) => (item.textContent ?? "").includes("全局快捷键")) as HTMLElement;
-    expect(row, "「界面」卡里找不到全局快捷键开关行").toBeDefined();
+    expect(row, "「快捷键」卡里找不到全局快捷键开关行").toBeDefined();
     const input = row.querySelector("input") as HTMLInputElement;
     expect(input.checked).toBe(false);
     expect(row.querySelector("small")?.textContent).toContain("Ctrl+Shift+Space");
@@ -327,6 +329,16 @@ describe("保存与取消", () => {
     });
     const payload = handlers.sends.find((command) => command.type === "settings.save") as { settings: { shortcuts?: { paletteHotkey?: string } } } | undefined;
     expect(payload?.settings.shortcuts).toEqual({ paletteHotkey: PALETTE_HOTKEY });
+  });
+
+  it("「快捷键」卡列出四个窗口内动作，键位与命令面板徽章同源", () => {
+    render();
+    const card = container.querySelector(".general-card[aria-label=\"快捷键\"]") as HTMLElement;
+    expect(card).not.toBeNull();
+    const keys = [...card.querySelectorAll(".general-shortcut-key")].map((node) => node.textContent);
+    expect(keys).toEqual([APP_SHORTCUT_LABELS.palette, APP_SHORTCUT_LABELS["new-session"], APP_SHORTCUT_LABELS.browser, APP_SHORTCUT_LABELS.settings]);
+    expect(card.textContent).toContain("新建话题");
+    expect(card.textContent).toContain("打开浏览器");
   });
 
   it("取消回调 onCancel（父级负责回滚基线并关闭弹窗）", () => {

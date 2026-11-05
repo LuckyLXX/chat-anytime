@@ -6,12 +6,15 @@ import {
   Check,
   CheckCircle2,
   ChevronDown,
-  Clock,
   Circle,
+  CircleStop,
+  Clock,
   Computer,
   Eye,
+  FileText,
   Folder,
   FolderOpen,
+  Globe2,
   ListChecks,
   LoaderCircle,
   MessageSquarePlus,
@@ -21,6 +24,7 @@ import {
   Search,
   Server,
   SquarePen,
+  SquareTerminal,
   Zap,
   Users,
   PanelLeftClose,
@@ -85,6 +89,7 @@ import { AutomationCenter } from "./AutomationCenter";
 import type { AutomationRunsHighlight } from "./AutomationRuns";
 import { CommandPalette } from "./components/CommandPalette";
 import type { PaletteAction } from "./lib/command-palette";
+import { APP_SHORTCUT_LABELS, matchAppShortcut } from "./lib/keyboard-shortcuts";
 import { clampPreviewSplit, PREVIEW_SPLIT_MAX, PREVIEW_SPLIT_MIN, previewSplitFromKey } from "./lib/preview-split";
 import { workAreaPreviewClasses } from "./lib/preview-layout";
 import { isAutomationSessionSummary } from "../../shared/session-origin";
@@ -475,7 +480,6 @@ export function App(): ReactNode {
   // snapshot 字段级订阅。sessions/recentWorkspaces 在 store 合并层做了身份保留
   // （内容不变则复用旧引用），流式帧不会触发这些选择器。
   const activeSessionId = useDesktopStore((state) => state.snapshot.sessionId);
-  const activeModel = useDesktopStore((state) => state.snapshot.model);
   const planMode = useDesktopStore((state) => state.snapshot.planMode === true);
   const paletteOpenTick = useDesktopStore((state) => state.paletteOpenTick);
   const activeWorkspace = useDesktopStore((state) => state.snapshot.workspace);
@@ -605,21 +609,12 @@ export function App(): ReactNode {
     return () => window.clearTimeout(timer);
   }, [paletteSessionQuery, showAutomationSessions]);
 
-  // 全局快捷键（主进程 push）与 Ctrl/Cmd+K：两者都只是「打开」信号。
+  // 全局快捷键（主进程 push）与窗口内 Ctrl/Cmd+K：两者都只是「打开」信号。
+  // 其余窗口内快捷键（Ctrl+N / Ctrl+Shift+B / Ctrl+,）统一在下面的「命令与快捷键」
+  // 段里分发——那里能拿到全部弹层状态，用来做「有对话框时不误触」的守卫。
   useEffect(() => {
     if (paletteOpenTick > 0) setPaletteOpen(true);
   }, [paletteOpenTick]);
-
-  useEffect(() => {
-    function onKeyDown(event: KeyboardEvent): void {
-      if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "k") {
-        event.preventDefault();
-        setPaletteOpen((open) => !open);
-      }
-    }
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsInitialTab, setSettingsInitialTab] = useState<SettingsTab | undefined>(undefined);
   function openSettingsOn(tab: SettingsTab): void { setSettingsInitialTab(tab); setSettingsOpen(true); }
@@ -1871,6 +1866,54 @@ export function App(): ReactNode {
     openPreviewTarget({ type: "browser", id: `browser-${crypto.randomUUID()}` });
   }
 
+  /** 切到某个已有的预览标签（不新建、不重建 native 视图；面板收起时一并拉开）。 */
+  function revealPreviewTab(id: string): void {
+    setAutomationPanelOpen(false);
+    setAutomationCenterOpen(false);
+    setPreviewOpened(true);
+    setPreview((current) => (current ? { ...current, activeTabId: id } : current));
+  }
+
+  /**
+   * 找一个可复用的预览标签：优先当前激活的那个，否则最后一个。
+   * 终端只认用户自己的（作品启动命令开的标签带 galleryId，那是服务窗口，不是命令行）。
+   */
+  function findReusablePreviewTab(kind: "browser" | "terminal"): string | undefined {
+    const tabs = previewRef.current?.tabs ?? [];
+    const activeId = previewRef.current?.activeTabId;
+    let fallback: string | undefined;
+    for (const tab of tabs) {
+      if (kind === "browser" && tab.target.type !== "browser") continue;
+      if (kind === "terminal" && (tab.target.type !== "terminal" || tab.target.galleryId)) continue;
+      if (tab.id === activeId) return tab.id;
+      fallback = tab.id;
+    }
+    return fallback;
+  }
+
+  /**
+   * 「打开浏览器」命令 / Ctrl+Shift+B：已有浏览器标签就切过去，没有才新建。
+   * 新建的标签带一次性 focusAddress 令牌，面板挂上后聚焦地址栏——按完就能直接输网址。
+   */
+  function openBrowserTab(): void {
+    const existing = findReusablePreviewTab("browser");
+    if (existing) {
+      revealPreviewTab(existing);
+      return;
+    }
+    openPreviewTarget({ type: "browser", id: `browser-${crypto.randomUUID()}`, focusAddress: Date.now() });
+  }
+
+  /** 「打开终端」：同浏览器——已有本地终端就切过去，不抢先挤出一堆 PTY。 */
+  function openTerminalTab(): void {
+    const existing = findReusablePreviewTab("terminal");
+    if (existing) {
+      revealPreviewTab(existing);
+      return;
+    }
+    openTerminalPreview();
+  }
+
   /** 打开计划全文预览（内存 markdown，不落盘），供审查面板「查看完整」跳转。 */
   const openPlanPreview = useCallback((detail: string): void => {
     openPreviewTarget({ type: "plan", title: detailTitle(detail), content: detail });
@@ -2356,7 +2399,7 @@ export function App(): ReactNode {
           <small>{showAutomationSessions ? "已显示" : "已隐藏"}</small>
         </button>
       )}
-      <button className="new-session-button" data-control="new-session" type="button" disabled={!activeWorkspace} onClick={() => void createNewSession()}><MessageSquarePlus size={16} />新建话题</button>
+      <button className="new-session-button" data-control="new-session" type="button" title={`在当前工作区新建话题（${APP_SHORTCUT_LABELS["new-session"]}）`} disabled={!activeWorkspace} onClick={() => void createNewSession()}><MessageSquarePlus size={16} />新建话题</button>
       <button className={`automation-nav-button${automationPanelOpen || automationCenterOpen ? " active" : ""}`} data-control="automation-open" type="button" title="自动化任务" aria-label="自动化任务" aria-pressed={automationPanelOpen || automationCenterOpen} onClick={() => automationPanelOpen ? closeAutomationPanel() : automationCenterOpen ? closeAutomationCenter() : openAutomationPanel()}><Zap size={15} /><span>自动化</span></button>
       <button className="automation-nav-button" data-control="ssh-open" type="button" title="SSH 远程终端" aria-label="SSH 远程终端" onClick={() => openSshPanel()}><Server size={15} /><span>SSH</span></button>
       <div className="sidebar-footer">
@@ -2390,23 +2433,82 @@ export function App(): ReactNode {
     });
   }
 
+  // —— 窗口内快捷键：Ctrl+K 面板 / Ctrl+N 新建话题 / Ctrl+Shift+B 浏览器 / Ctrl+, 设置 ——
+  // 监听只挂一次（否则流式帧每帧重绑），动作与弹层守卫用 ref 在渲染期刷新。
+  // 有对话框/全屏预览时直接动作一律不触发：用户在权限卡、提问面板或作品墙里按 Ctrl+N，
+  // 不该在背后开一个话题。设置是开关语义，戴着设置窗再按 Ctrl+, 应该把它收起。
+  const shortcutBlockedRef = useRef(false);
+  shortcutBlockedRef.current = Boolean(permission) || Boolean(question) || galleryWallOpen || Boolean(galleryDraftOpen) || Boolean(galleryDataApp) || previewFullscreen || renamePresence.rendered || deletePresence.rendered || rollbackPresence.rendered || deleteWorkspacePresence.rendered || transcriptPresence.rendered;
+  const settingsOpenRef = useRef(false);
+  settingsOpenRef.current = settingsOpen;
+  const shortcutActionsRef = useRef({ newSession: (): void => undefined, browser: (): void => undefined });
+  shortcutActionsRef.current = {
+    newSession: () => {
+      if (!activeWorkspace) { setMessageActionError("先打开一个工作区，再新建话题"); return; }
+      void createNewSession();
+    },
+    browser: () => openBrowserTab()
+  };
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent): void {
+      const command = matchAppShortcut(event);
+      if (!command || event.repeat || shortcutBlockedRef.current) return;
+      if (command === "settings") {
+        event.preventDefault();
+        setPaletteOpen(false);
+        if (settingsOpenRef.current) { setSettingsOpen(false); setSettingsInitialTab(undefined); }
+        else { setSettingsInitialTab(undefined); setSettingsOpen(true); }
+        return;
+      }
+      if (command === "palette") {
+        event.preventDefault();
+        setPaletteOpen((open) => !open);
+        return;
+      }
+      if (settingsOpenRef.current) return;
+      event.preventDefault();
+      setPaletteOpen(false);
+      if (command === "new-session") shortcutActionsRef.current.newSession();
+      else if (command === "browser") shortcutActionsRef.current.browser();
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
   const paletteTargetSession = focusedPaneId ?? activeSessionId;
   const runPaletteCommand = (command: RuntimeCommand): void => {
     void window.piDesktop.send(command).catch((error: unknown) => setMessageActionError(error instanceof Error ? error.message : "操作失败"));
   };
+  const browserTabCount = (preview?.tabs ?? []).filter((tab) => tab.target.type === "browser").length;
+  const terminalTabCount = (preview?.tabs ?? []).filter((tab) => tab.target.type === "terminal" && !tab.target.galleryId).length;
+  const previewHasTabs = (preview?.tabs.length ?? 0) > 0;
+  const previewToggleLabel = previewOpened ? "关闭预览" : previewHasTabs ? "打开预览" : "打开浏览器";
+  const enabledAutomationCount = automation.filter((task) => task.enabled).length;
   const paletteActions: PaletteAction[] = [];
 
+  // —— 默认视图：只放「没有更短路径」的真入口（搜索/新建/打开浏览器·终端·文件·SSH/作品墙/自动化/设置）——
+  // 模型切换不再进面板（聊天框里一步就能换）；其余低频或与常驻控件重复的动作标 searchOnly。
   paletteActions.push(
-    { id: "session.new", title: "新建话题", group: "会话", keywords: "new chat session", hint: activeWorkspace ? compactPath(activeWorkspace) : "先打开工作区", disabled: !activeWorkspace, run: () => { void createNewSession(); } },
-    { id: "session.search", title: "搜索会话内容", group: "会话", keywords: "search find message 全文", hint: "标题与正文", enterSearch: true },
-    { id: "workspace.open", title: "打开工作区…", group: "会话", keywords: "open folder workspace", run: () => { void openWorkspace(); } },
-    { id: "view.files", title: "浏览当前工作区文件", group: "视图", keywords: "files tree 文件树", hint: activeWorkspace ? compactPath(activeWorkspace) : undefined, disabled: !activeWorkspace, run: () => { setSidebarCollapsed(false); setSidebarView("files"); setBrowsingWorkspace(activeWorkspace ?? ""); setTreeRefreshSignal(0); } },
-    { id: "view.gallery", title: "打开作品墙", group: "视图", keywords: "gallery 作品", run: () => setGalleryWallOpen(true) },
-    { id: "view.preview", title: previewOpened ? "关闭预览面板" : "打开预览面板", group: "视图", keywords: "preview 预览", run: () => setPreviewOpened(!previewOpened) },
-    { id: "view.ssh", title: "打开 SSH 远程终端", group: "视图", keywords: "ssh remote terminal", run: () => openSshPanel() },
-    { id: "view.sidebar", title: sidebarCollapsed ? "展开侧边栏" : "折叠侧边栏", group: "视图", keywords: "sidebar 侧栏", run: () => setSidebarCollapsed(!sidebarCollapsed) }
+    { id: "session.new", title: "新建话题", group: "会话", keywords: "new chat session 新建会话", hint: activeWorkspace ? compactPath(activeWorkspace) : "先打开工作区", shortcut: APP_SHORTCUT_LABELS["new-session"], icon: MessageSquarePlus, disabled: !activeWorkspace, run: () => { void createNewSession(); } },
+    { id: "session.search", title: "搜索会话内容", group: "会话", keywords: "search find message 全文 聊天记录", hint: "标题与正文", icon: Search, enterSearch: true },
+    { id: "view.browser", title: "打开浏览器", group: "打开", keywords: "browser web 网页 内置浏览器", hint: browserTabCount > 0 ? "切换到已打开的标签" : "新建标签", shortcut: APP_SHORTCUT_LABELS.browser, icon: Globe2, run: () => openBrowserTab() },
+    { id: "view.terminal", title: "打开终端", group: "打开", keywords: "terminal shell 终端 命令行", hint: terminalTabCount > 0 ? "切换到已打开的终端" : "新建本机终端", icon: SquareTerminal, run: () => openTerminalTab() },
+    { id: "view.file", title: "打开文件…", group: "打开", keywords: "open file 文件 打开文件", hint: "从磁盘选择", icon: FileText, disabled: !activeWorkspace, run: () => { void openManualFilePreview(); } },
+    { id: "workspace.open", title: "打开工作区…", group: "打开", keywords: "open folder workspace 文件夹", icon: FolderOpen, run: () => { void openWorkspace(); } },
+    { id: "view.ssh", title: "打开 SSH 远程终端", group: "打开", keywords: "ssh remote terminal 远程 服务器", icon: Server, run: () => openSshPanel() },
+    { id: "view.files", title: "浏览工作区文件", group: "视图", keywords: "files tree 文件树 侧边栏", hint: activeWorkspace ? compactPath(activeWorkspace) : undefined, icon: FolderTree, disabled: !activeWorkspace, run: () => { setSidebarCollapsed(false); setSidebarView("files"); setBrowsingWorkspace(activeWorkspace ?? ""); setTreeRefreshSignal(0); } },
+    { id: "view.gallery", title: "打开作品墙", group: "视图", keywords: "gallery 作品 应用", hint: galleryApps.length > 0 ? `${String(galleryApps.length)} 个作品` : undefined, icon: LayoutGrid, run: () => setGalleryWallOpen(true) },
+    { id: "view.automation", title: "打开自动化任务", group: "视图", keywords: "automation schedule 定时 任务", hint: enabledAutomationCount > 0 ? `${String(enabledAutomationCount)} 个启用` : "定时任务", icon: Zap, run: () => openAutomationPanel() },
+    { id: "settings.open", title: "打开设置", group: "设置", keywords: "settings preference 偏好 配置", shortcut: APP_SHORTCUT_LABELS.settings, icon: Settings, run: () => { setSettingsInitialTab(undefined); setSettingsOpen(true); } }
   );
 
+  if (isGenerating) {
+    paletteActions.push(
+      { id: "session.stop", title: "停止当前生成", group: "会话", keywords: "stop abort 停止 中止 取消", hint: "立即中止本回合", icon: CircleStop, disabled: !paletteTargetSession, run: () => runPaletteCommand({ type: "session.abort", sessionId: paletteTargetSession }) }
+    );
+  }
+
+  // —— 搜索才出现的动作：有常驻控件或低频，但不删功能 ——
   for (const recent of recentWorkspaces) {
     const current = activeWorkspace !== undefined && workspaceKey(recent.path) === workspaceKey(activeWorkspace);
     paletteActions.push({
@@ -2415,6 +2517,7 @@ export function App(): ReactNode {
       group: "工作区",
       keywords: `workspace ${recent.path}`,
       hint: recent.missing ? "目录不存在" : current ? "当前" : compactPath(recent.path),
+      searchOnly: true,
       disabled: current || recent.missing === true,
       run: () => runPaletteCommand({ type: "workspace.open", path: recent.path })
     });
@@ -2428,24 +2531,12 @@ export function App(): ReactNode {
       group: "助手",
       keywords: `agent 助手 ${agent.name}`,
       hint: current ? "当前" : agent.description || undefined,
+      searchOnly: true,
       disabled: current,
       run: () => {
         useDesktopStore.setState({ sessionSearch: { query: "", loading: false, hits: [] } });
         runPaletteCommand({ type: "agent.select", agentId: agent.id });
       }
-    });
-  }
-
-  for (const model of selectableCatalogModels(models).filter((item) => item.configured && item.enabled !== false)) {
-    const current = activeModel?.provider === model.provider && activeModel.id === model.id;
-    paletteActions.push({
-      id: `model.${model.provider}.${model.id}`,
-      title: `切换模型：${model.name || model.id}`,
-      group: "模型",
-      keywords: `${model.provider} ${model.id} model`,
-      hint: current ? "当前" : model.provider,
-      disabled: !paletteTargetSession || current,
-      run: () => runPaletteCommand({ type: "model.select", provider: model.provider, id: model.id, sessionId: paletteTargetSession })
     });
   }
 
@@ -2463,16 +2554,19 @@ export function App(): ReactNode {
       group: "权限",
       keywords: `access permission ${mode.value}`,
       hint: current ? "当前" : mode.hint,
+      searchOnly: true,
       disabled: current,
       run: () => saveAccessMode(mode.value)
     });
   }
 
   paletteActions.push(
-    { id: "mode.design", title: designMode ? "退出设计模式" : "进入设计模式", group: "模式", keywords: "design 设计 画布", disabled: !paletteTargetSession, run: () => runPaletteCommand({ type: "session.designMode", enabled: !designMode, sessionId: paletteTargetSession }) },
-    { id: "mode.computer", title: computerMode ? "关闭电脑控制" : "开启电脑控制", group: "模式", keywords: "computer 桌面 控制", disabled: !paletteTargetSession, run: () => runPaletteCommand({ type: "session.computerMode", enabled: !computerMode, sessionId: paletteTargetSession }) },
-    { id: "mode.team", title: teamMode ? "关闭团队模式" : "开启团队模式", group: "模式", keywords: "team 团队 成员 协作", disabled: !paletteTargetSession, run: () => runPaletteCommand({ type: "session.teamMode", enabled: !teamMode, sessionId: paletteTargetSession }) },
-    { id: "mode.plan", title: planMode ? "退出计划模式" : "进入计划模式", group: "模式", keywords: "plan 计划", disabled: !paletteTargetSession, run: () => runPaletteCommand({ type: "session.planMode", enabled: !planMode, sessionId: paletteTargetSession }) }
+    { id: "mode.design", title: designMode ? "退出设计模式" : "进入设计模式", group: "模式", keywords: "design 设计 画布", searchOnly: true, disabled: !paletteTargetSession, run: () => runPaletteCommand({ type: "session.designMode", enabled: !designMode, sessionId: paletteTargetSession }) },
+    { id: "mode.computer", title: computerMode ? "关闭电脑控制" : "开启电脑控制", group: "模式", keywords: "computer 桌面 控制", searchOnly: true, disabled: !paletteTargetSession, run: () => runPaletteCommand({ type: "session.computerMode", enabled: !computerMode, sessionId: paletteTargetSession }) },
+    { id: "mode.team", title: teamMode ? "关闭团队模式" : "开启团队模式", group: "模式", keywords: "team 团队 成员 协作", searchOnly: true, disabled: !paletteTargetSession, run: () => runPaletteCommand({ type: "session.teamMode", enabled: !teamMode, sessionId: paletteTargetSession }) },
+    { id: "mode.plan", title: planMode ? "退出计划模式" : "进入计划模式", group: "模式", keywords: "plan 计划", searchOnly: true, disabled: !paletteTargetSession, run: () => runPaletteCommand({ type: "session.planMode", enabled: !planMode, sessionId: paletteTargetSession }) },
+    { id: "view.preview", title: previewOpened ? "关闭预览面板" : "打开预览面板", group: "视图", keywords: "preview 预览 侧栏", searchOnly: true, run: () => setPreviewOpened(!previewOpened) },
+    { id: "view.sidebar", title: sidebarCollapsed ? "展开侧边栏" : "折叠侧边栏", group: "视图", keywords: "sidebar 侧栏", searchOnly: true, run: () => setSidebarCollapsed(!sidebarCollapsed) }
   );
 
   const themeOptions: { value: "system" | "light" | "dark"; label: string }[] = [
@@ -2488,6 +2582,7 @@ export function App(): ReactNode {
       group: "主题",
       keywords: `theme appearance ${option.value}`,
       hint: current ? "当前" : undefined,
+      searchOnly: true,
       disabled: current,
       run: () => saveTheme(option.value)
     });
@@ -2511,6 +2606,7 @@ export function App(): ReactNode {
       title: `打开设置：${entry.label}`,
       group: "设置",
       keywords: `settings ${entry.tab}`,
+      searchOnly: true,
       run: () => openSettingsOn(entry.tab)
     });
   }
@@ -2526,7 +2622,7 @@ export function App(): ReactNode {
         <div className="sidebar-rail" data-pane="sidebar" data-ui-sidebar-collapsed>
           <button type="button" className="rail-brand" data-control="sidebar-expand" title="展开侧边栏" aria-label="展开侧边栏" onClick={() => { if (sidebarFlyoutOpen) { setSidebarFlyoutOpen(false); } else { setSidebarCollapsed(false); } }}><span className="rail-brand-mark"><BrandMark size={20} /></span><PanelLeftOpen className="rail-brand-expand" size={18} /></button>
           <div className="sidebar-rail-items">
-            <button type="button" className="rail-new-session" data-control="new-session" title="在当前工作区新建话题" aria-label="在当前工作区新建话题" disabled={!activeWorkspace} onClick={() => void createNewSession()}><Plus size={18} /></button>
+            <button type="button" className="rail-new-session" data-control="new-session" title={`在当前工作区新建话题（${APP_SHORTCUT_LABELS["new-session"]}）`} aria-label="在当前工作区新建话题" disabled={!activeWorkspace} onClick={() => void createNewSession()}><Plus size={18} /></button>
             <button type="button" className={`rail-icon${automationPanelOpen || automationCenterOpen ? " active" : ""}`} data-control="automation-open" title="自动化任务" aria-label="自动化任务" onClick={() => automationPanelOpen ? closeAutomationPanel() : automationCenterOpen ? closeAutomationCenter() : openAutomationPanel()}><Zap size={18} /></button>
             <button type="button" className="rail-icon" data-control="ssh-open" title="SSH 远程终端" aria-label="SSH 远程终端" onClick={() => openSshPanel()}><Server size={18} /></button>
             <button type="button" className="rail-icon" data-control="rail-topics" title={runningSessions.length > 0 ? `话题列表（${runningSessions.length} 个运行中）` : "话题列表"} aria-label={runningSessions.length > 0 ? `话题列表，${runningSessions.length} 个运行中` : "话题列表"} onClick={() => { setSidebarView("topics"); setSidebarTab("topics"); setSidebarFlyoutOpen(true); }}><MessageCircle size={18} />{runningSessions.length > 0 ? <span className="rail-running-badge">{runningSessions.length}</span> : null}</button>
@@ -2570,15 +2666,21 @@ export function App(): ReactNode {
             <button className={`icon-button team-toggle${teamMode ? " active" : ""}`} data-control="team-toggle" type="button" disabled={!activeSessionId} aria-label={teamMode ? "关闭团队模式" : "开启团队模式"} aria-pressed={teamMode} title={!activeSessionId ? "请先创建或打开一个话题" : teamMode ? "关闭团队模式（本会话将撤下 team_* 工具；已创建的成员继续在后台）" : "团队模式（AI 可创建常驻成员、互发消息与共享任务板；本会话注入 team_* 工具，schema 实测 ≈1.1K tokens/请求）"} onClick={() => void window.piDesktop.send({ type: "session.teamMode", enabled: !teamMode }).catch((error) => setMessageActionError(error instanceof Error ? error.message : "团队模式切换失败"))}><Users size={18} /></button>
             <button className={`icon-button design-toggle${designMode ? " active" : ""}`} data-control="design-toggle" type="button" disabled={!activeSessionId} aria-label={designMode ? "退出设计模式" : "进入设计模式"} aria-pressed={designMode} title={!activeSessionId ? "请先创建或打开一个话题" : designMode ? "退出设计模式（本会话将不再注入设计工具）" : "设计模式（AI 设计工作台；本会话注入 design_* 工具）"} onClick={() => void window.piDesktop.send({ type: "session.designMode", enabled: !designMode }).catch((error) => setMessageActionError(error instanceof Error ? error.message : "设计模式切换失败"))}><Palette size={18} /></button>
             <GalleryMenu apps={galleryApps} onRun={(app) => void runGalleryApp(app)} onDevelop={developGalleryApp} onOpenWall={() => setGalleryWallOpen(true)} onPublish={() => openGalleryDraft()} onMenuOpenChange={setGalleryMenuOpen} />
-            <button className="icon-button preview-panel-toggle" data-control="preview-toggle" type="button" aria-label={previewOpened ? "关闭预览" : "打开预览"} title={previewOpened ? "关闭预览" : "打开预览"} onClick={() => {              // 顶部按钮始终完全关闭/打开预览面板：即使已有标签页也不会
+            <button className="icon-button preview-panel-toggle" data-control="preview-toggle" type="button" aria-label={previewToggleLabel} title={previewToggleLabel} onClick={() => {              // 顶部按钮始终完全关闭/打开预览面板：即使已有标签页也不会
               // 折叠成残留一列栏+展开按钮的中间态。
               if (previewOpened) {
                 setPreviewOpened(false);
-              } else {
-                setAutomationPanelOpen(false);
-                setAutomationCenterOpen(false);
-                setPreviewOpened(true);
+                return;
               }
+              // 空面板时「浏览器」是绝大多数情况的下一步：直接开一个浏览器标签，
+              // 把「打开预览 → 点浏览器」两步并成一步（2026-11-05 用户要求）。
+              if (!previewHasTabs) {
+                openBrowserTab();
+                return;
+              }
+              setAutomationPanelOpen(false);
+              setAutomationCenterOpen(false);
+              setPreviewOpened(true);
             }}>{previewOpened ? <PanelRightClose size={18} /> : <Eye size={18} />}</button>
           </div>
         </header>
