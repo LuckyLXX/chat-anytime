@@ -172,6 +172,7 @@ import {
 import * as runtimeMemoryTools from "./runtime-memory-tools.js";
 import { MEMORY_SNAPSHOT_BUDGET_CHARS } from "../shared/memory.js";
 import { createMemoryStore, memoryDirFor, type MemoryStore } from "./memory-store.js";
+import { analyzeMemoryHealth } from "../shared/memory-health.js";
 import * as runtimeQuestionTool from "./runtime-question-tool.js";
 import * as runtimeSkills from "./runtime-skills.js";
 import * as runtimeVision from "./runtime-vision.js";
@@ -7022,6 +7023,13 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       // 记忆中心的「模型实际看到的索引」：与会话注入走同一个 snapshotMarkdown。
       const markdown = memoryStore ? memoryStore.snapshotMarkdown(workspace, MEMORY_SNAPSHOT_BUDGET_CHARS) : "";
       post({ type: "memory.index-preview", markdown, characters: markdown.length, budget: MEMORY_SNAPSHOT_BUDGET_CHARS });
+      break;
+    }
+    case "memory.health": {
+      // 健康检查只看摘要（不读正文），索引占用与会话注入同一函数。
+      const summaries = memoryStore ? memoryStore.summaries() : [];
+      const indexChars = memoryStore ? memoryStore.snapshotMarkdown(workspace, MEMORY_SNAPSHOT_BUDGET_CHARS).length : 0;
+      post({ type: "memory.health", health: analyzeMemoryHealth(summaries, { indexChars, indexBudget: MEMORY_SNAPSHOT_BUDGET_CHARS }) });
       break;
     }
     case "memory.delete": {

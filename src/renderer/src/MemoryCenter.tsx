@@ -1,12 +1,13 @@
-import { Archive, ArchiveRestore, Brain, Check, FileText, LoaderCircle, RefreshCw, Save, Search, Trash2, X } from "lucide-react";
+import { Activity, Archive, ArchiveRestore, Brain, Check, FileText, LoaderCircle, RefreshCw, Save, Search, Trash2, X } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import type { MemoryLayer, MemoryTopicSummary } from "../../shared/protocol";
+import type { MemoryHealthIssue, MemoryLayer, MemoryTopicSummary } from "../../shared/protocol";
 import { MemoryCard } from "./components/MemoryCard";
+import { MemoryHealthPane } from "./components/MemoryHealthPane";
 import { MEMORY_LAYER_LABEL, compareMemoryTopics, formatMemoryChars, memoryLayerOf, parseMemoryTriggers } from "./lib/memory-format";
 import { useDesktopStore } from "./store";
 
 type SortMode = "updated" | "size" | "title";
-type DetailTab = "topic" | "index";
+type DetailTab = "topic" | "index" | "health";
 
 interface MemoryDraft {
   layer: MemoryLayer;
@@ -33,6 +34,7 @@ export function MemoryCenter({ onClose, onOpenTopic }: { onClose(): void; onOpen
   const memory = useDesktopStore((state) => state.memory);
   const contents = useDesktopStore((state) => state.memoryContents);
   const indexPreview = useDesktopStore((state) => state.memoryIndexPreview);
+  const health = useDesktopStore((state) => state.memoryHealth);
   const memoryEnabled = useDesktopStore((state) => state.settings.memory?.enabled !== false);
 
   const [query, setQuery] = useState("");
@@ -53,8 +55,13 @@ export function MemoryCenter({ onClose, onOpenTopic }: { onClose(): void; onOpen
     void window.piDesktop.send({ type: "memory.indexPreview" });
   }
 
+  function requestHealth(): void {
+    void window.piDesktop.send({ type: "memory.health" });
+  }
+
   useEffect(() => {
     requestIndex();
+    requestHealth();
   }, []);
 
   // 选中主题时按需拉正文（面板同款 memory.read；中心只用它的 summary 字段）。
@@ -122,6 +129,7 @@ export function MemoryCenter({ onClose, onOpenTopic }: { onClose(): void; onOpen
     if (done) {
       setSaved(true);
       requestIndex();
+      requestHealth();
     }
   }
 
@@ -132,6 +140,7 @@ export function MemoryCenter({ onClose, onOpenTopic }: { onClose(): void; onOpen
     if (done) {
       setDraft({ ...draft, layer: next });
       requestIndex();
+      requestHealth();
     }
   }
 
@@ -142,6 +151,7 @@ export function MemoryCenter({ onClose, onOpenTopic }: { onClose(): void; onOpen
       setSelectedId(undefined);
       setConfirmDelete(false);
       requestIndex();
+      requestHealth();
     }
   }
 
@@ -208,9 +218,12 @@ export function MemoryCenter({ onClose, onOpenTopic }: { onClose(): void; onOpen
           <div className="memory-center-detail-tabs" role="tablist" aria-label="记忆中心视图">
             <button type="button" role="tab" aria-selected={detailTab === "topic"} className={detailTab === "topic" ? "active" : ""} onClick={() => setDetailTab("topic")}><FileText size={13} />主题详情</button>
             <button type="button" role="tab" aria-selected={detailTab === "index"} className={detailTab === "index" ? "active" : ""} onClick={() => { setDetailTab("index"); requestIndex(); }}><Brain size={13} />模型索引</button>
+            <button type="button" role="tab" aria-selected={detailTab === "health"} className={detailTab === "health" ? "active" : ""} onClick={() => { setDetailTab("health"); requestHealth(); }}><Activity size={13} />健康</button>
           </div>
 
-          {detailTab === "index" ? (
+          {detailTab === "health" ? (
+            <MemoryHealthPane health={health} onRefresh={requestHealth} onSelect={(topic) => { setSelectedId(topic.id); setDetailTab("topic"); }} onArchive={(topic) => void send({ type: "memory.update", topic: topic.title, layer: "archive" }).then(() => { requestIndex(); requestHealth(); })} />
+          ) : detailTab === "index" ? (
             <div className="memory-center-index">
               <p className="memory-center-index-note">
                 这是<b>新会话</b>会注入的索引（与会话注入走同一函数）。当前会话的索引在创建时已冻结，改记忆不会影响它；超预算时会按层压缩描述并写脚注。
