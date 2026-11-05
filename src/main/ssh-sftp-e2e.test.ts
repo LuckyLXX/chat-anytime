@@ -12,10 +12,11 @@ import { mkdtempSync, openSync, writeSync, closeSync, readSync, statSync, rmSync
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, basename } from "node:path";
-import { Server, Client, utils } from "ssh2";
+import { Server, Client } from "ssh2";
 import { describe, expect, it } from "vitest";
 
 import { SshSftpTransferService, type SftpTransferOutcome } from "./ssh-sftp.js";
+import { makeTestHostKey } from "./ssh-test-host-key.js";
 
 // ssh2 的 sftp 子模块在 ESM 互操作下取不到，直接写字面量（与 SFTP.js 一致）。
 const OPEN_MODE = { READ: 1, WRITE: 2 } as const;
@@ -60,7 +61,7 @@ async function startServer(options: ServerOptions = {}): Promise<{ port: number;
   const tmp = mkdtempSync(join(tmpdir(), "pi-e2e-"));
   const remoteRoot = join(tmp, "remote");
   mkdirSync(remoteRoot, { recursive: true });
-  const hostKey = utils.generateKeyPairSync("ed25519").private;
+  const { private: hostKey } = makeTestHostKey();
 
   const server = new Server({ hostKeys: [hostKey] }, (client) => {
     client.on("authentication", (ctx: AuthContext) => {

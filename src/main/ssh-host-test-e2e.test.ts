@@ -13,12 +13,13 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Client, Server, utils } from "ssh2";
+import { Client, Server } from "ssh2";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { SshConnectionManager, fingerprintOfHostKey, type SshClientLike } from "./ssh-connections.js";
 import { createSshHostStore, type SshHostCrypto } from "./ssh-host-store.js";
 import { createSshKnownHostsStore } from "./ssh-known-hosts.js";
+import { makeTestHostKey } from "./ssh-test-host-key.js";
 
 interface AuthContext {
   method: string;
@@ -56,8 +57,7 @@ interface EchoServer {
 }
 
 async function startEchoServer(): Promise<EchoServer> {
-  const hostKey = utils.generateKeyPairSync("ed25519").private;
-  const publicKey = (utils.parseKey(hostKey) as { getPublicSSH(): Buffer }).getPublicSSH();
+  const { private: hostKey, public: publicKey } = makeTestHostKey();
   const execs: string[] = [];
   const server = new Server({ hostKeys: [hostKey] }, (client) => {
     client.on("authentication", (ctx: AuthContext) => {

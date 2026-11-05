@@ -16,12 +16,13 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Client, Server, utils } from "ssh2";
+import { Client, Server } from "ssh2";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { SshConnectionManager, fingerprintOfHostKey, type SshClientLike } from "./ssh-connections.js";
 import { createSshHostStore, type SshHostCrypto } from "./ssh-host-store.js";
 import { createSshKnownHostsStore } from "./ssh-known-hosts.js";
+import { makeTestHostKey } from "./ssh-test-host-key.js";
 
 /** 服务端 pty-req 解析结果（term 在 ssh2 里随报文一起给出）。 */
 interface ServerPtyInfo {
@@ -53,7 +54,7 @@ describe("real ssh2 end-to-end window-change", () => {
   it("远端 PTY 收到的 cols/rows 等于面板要求的尺寸（拖宽跟随）", async () => {
     const tmp = mkdtempSync(join(tmpdir(), "pi-ssh-window-e2e-"));
     testDirs.push(tmp);
-    const hostKey = utils.generateKeyPairSync("ed25519").private;
+    const { private: hostKey, public: publicKey } = makeTestHostKey();
 
     const ptyRequests: ServerPtyInfo[] = [];
     const windowChanges: ServerWindowChangeInfo[] = [];
@@ -102,7 +103,6 @@ describe("real ssh2 end-to-end window-change", () => {
     // 探测连接的握手失败会在 ssh2 服务端抛未捕获的 KEY_EXCHANGE_FAILED（探测通道
     // 已由 ssh-connections.test.ts 覆盖，这里只要 resize 通路）。
     const knownHosts = createSshKnownHostsStore(join(tmp, "known.json"));
-    const publicKey = (utils.parseKey(hostKey) as { getPublicSSH(): Buffer }).getPublicSSH();
     knownHosts.put("127.0.0.1", port, fingerprintOfHostKey(publicKey));
 
     const published: Array<{ type: string; status?: string }> = [];
@@ -166,7 +166,7 @@ describe("real ssh2 end-to-end socket options", () => {
   it("opens TCP_NODELAY on the client socket", async () => {
     const tmp = mkdtempSync(join(tmpdir(), "pi-ssh-nodelay-e2e-"));
     testDirs.push(tmp);
-    const hostKey = utils.generateKeyPairSync("ed25519").private;
+    const { private: hostKey, public: publicKey } = makeTestHostKey();
 
     const server = new Server({ hostKeys: [hostKey] }, (client) => {
       client.on("authentication", (ctx: AuthContext) => {
@@ -196,7 +196,6 @@ describe("real ssh2 end-to-end socket options", () => {
     const hostStore = createSshHostStore({ filePath: join(tmp, "hosts.json"), crypto });
     hostStore.save({ name: "loopback", host: "127.0.0.1", username: "u", port }, "p");
     const knownHosts = createSshKnownHostsStore(join(tmp, "known.json"));
-    const publicKey = (utils.parseKey(hostKey) as { getPublicSSH(): Buffer }).getPublicSSH();
     knownHosts.put("127.0.0.1", port, fingerprintOfHostKey(publicKey));
 
     const published: Array<{ type: string; status?: string }> = [];
