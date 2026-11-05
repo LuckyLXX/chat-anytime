@@ -74,7 +74,7 @@ KNOWN_PANES = frozenset({
     "landing", "turn-minimap", "markdown-outline",
     "design", "design-toolbar", "design-tools", "design-canvas", "design-layers", "design-inspector",
     "gallery-menu", "gallery-wall",
-    "automation-settings", "automation-dialog", "automation-panel", "automation-center",
+    "automation-settings", "automation-dialog", "automation-panel", "automation-center", "memory-center",
     "agent-settings", "general-settings",
     "model-settings",
     "resource-settings",
@@ -87,6 +87,8 @@ KNOWN_PANES = frozenset({
 KNOWN_ROLES = frozenset({"user", "assistant", "extension"})
 KNOWN_CONTROLS = frozenset({
     "new-session", "settings", "workspace-open", "preview-toggle", "task-panel-toggle", "memory-toggle",
+    "memory-layer-filter", "memory-center-open", "memory-center-open-nav", "memory-center-close",
+    "memory-center-refresh", "memory-center-save", "memory-center-archive", "memory-center-delete",
     "send", "stop", "attach", "queue-edit", "queue-send-now", "queue-remove", "access-mode", "plan-toggle",
     "model-select", "thinking-select", "thinking-expand", "context-usage", "browser-pick", "browser-download-toggle",
     "copy", "edit", "regenerate", "share", "pane-maximize", "pane-close",

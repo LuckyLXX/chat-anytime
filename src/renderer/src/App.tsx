@@ -86,6 +86,7 @@ import { BrandMark } from "./components/BrandMark";
 import { SessionSearchResults } from "./components/SessionSearchResults";
 import { AutomationPanel, type AutomationPanelTab } from "./AutomationPanel";
 import { AutomationCenter } from "./AutomationCenter";
+import { MemoryCenter } from "./MemoryCenter";
 import type { AutomationRunsHighlight } from "./AutomationRuns";
 import { CommandPalette } from "./components/CommandPalette";
 import type { PaletteAction } from "./lib/command-palette";
@@ -633,6 +634,7 @@ export function App(): ReactNode {
   const [automationPanelHighlight, setAutomationPanelHighlight] = useState<AutomationRunsHighlight>();
   const [automationCenterOpen, setAutomationCenterOpen] = useState(false);
   const [automationCenterTaskId, setAutomationCenterTaskId] = useState<string | undefined>(undefined);
+  const [memoryCenterOpen, setMemoryCenterOpen] = useState(false);
   const [preview, setPreview] = useState<PreviewState>();
   const [previewAddMenuOpen, setPreviewAddMenuOpen] = useState(false);
   // 顶栏「作品」下拉的展开态：它的面板从顶栏向下伸进右侧预览区，而内置浏览器是
@@ -648,6 +650,7 @@ export function App(): ReactNode {
     setAutomationPanelHighlight(highlight);
     setAutomationPanelOpen(true);
     setAutomationCenterOpen(false);
+    setMemoryCenterOpen(false);
     setSettingsOpen(false);
     setPreviewOpened(false);
     setPreviewAddMenuOpen(false);
@@ -659,12 +662,25 @@ export function App(): ReactNode {
     setAutomationCenterTaskId(taskId);
     setAutomationCenterOpen(true);
     setAutomationPanelOpen(false);
+    setMemoryCenterOpen(false);
     setSettingsOpen(false);
     setPreviewOpened(false);
     setPreviewAddMenuOpen(false);
   }
   function closeAutomationCenter(): void {
     setAutomationCenterOpen(false);
+  }
+  /** 记忆中心：全幅卡片墙，与自动化中心/预览/设置互斥。 */
+  function openMemoryCenter(): void {
+    setMemoryCenterOpen(true);
+    setAutomationPanelOpen(false);
+    setAutomationCenterOpen(false);
+    setSettingsOpen(false);
+    setPreviewOpened(false);
+    setPreviewAddMenuOpen(false);
+  }
+  function closeMemoryCenter(): void {
+    setMemoryCenterOpen(false);
   }
   const [previewEditorStates, setPreviewEditorStates] = useState<Record<string, PreviewEditorState>>({});
   const [sidebarView, setSidebarView] = useState<"topics" | "files">("topics");
@@ -725,6 +741,7 @@ export function App(): ReactNode {
   const settingsPresence = useExitPresence(settingsOpen, 160);
   const automationPanelPresence = useExitPresence(automationPanelOpen, 180);
   const automationCenterPresence = useExitPresence(automationCenterOpen, 180);
+  const memoryCenterPresence = useExitPresence(memoryCenterOpen, 160);
   const permissionPresence = useExitPresenceValue(permission, 130);
   const transcriptPresence = useExitPresenceValue(transcriptTarget, 160);
   const renamePresence = useExitPresenceValue(renameSession, 160);
@@ -2018,6 +2035,7 @@ export function App(): ReactNode {
           onOpenDiff={openDiffPreview}
           onOpenPlanDetail={openPlanPreview}
           onOpenMemoryTopic={openMemoryTopic}
+          onOpenMemoryCenter={openMemoryCenter}
           onOpenTranscript={setTranscriptTarget}
           onActionError={setActionError}
           onRollback={onRollback}
@@ -2401,6 +2419,7 @@ export function App(): ReactNode {
       )}
       <button className="new-session-button" data-control="new-session" type="button" title={`在当前工作区新建话题（${APP_SHORTCUT_LABELS["new-session"]}）`} disabled={!activeWorkspace} onClick={() => void createNewSession()}><MessageSquarePlus size={16} />新建话题</button>
       <button className={`automation-nav-button${automationPanelOpen || automationCenterOpen ? " active" : ""}`} data-control="automation-open" type="button" title="自动化任务" aria-label="自动化任务" aria-pressed={automationPanelOpen || automationCenterOpen} onClick={() => automationPanelOpen ? closeAutomationPanel() : automationCenterOpen ? closeAutomationCenter() : openAutomationPanel()}><Zap size={15} /><span>自动化</span></button>
+      <button className={`automation-nav-button${memoryCenterOpen ? " active" : ""}`} data-control="memory-center-open-nav" type="button" title="记忆中心" aria-label="记忆中心" aria-pressed={memoryCenterOpen} onClick={() => memoryCenterOpen ? closeMemoryCenter() : openMemoryCenter()}><Brain size={15} /><span>记忆</span></button>
       <button className="automation-nav-button" data-control="ssh-open" type="button" title="SSH 远程终端" aria-label="SSH 远程终端" onClick={() => openSshPanel()}><Server size={15} /><span>SSH</span></button>
       <div className="sidebar-footer">
         <button type="button" data-control="settings" onClick={() => setSettingsOpen(true)}><Settings size={16} />设置</button>
@@ -2499,6 +2518,7 @@ export function App(): ReactNode {
     { id: "view.files", title: "浏览工作区文件", group: "视图", keywords: "files tree 文件树 侧边栏", hint: activeWorkspace ? compactPath(activeWorkspace) : undefined, icon: FolderTree, disabled: !activeWorkspace, run: () => { setSidebarCollapsed(false); setSidebarView("files"); setBrowsingWorkspace(activeWorkspace ?? ""); setTreeRefreshSignal(0); } },
     { id: "view.gallery", title: "打开作品墙", group: "视图", keywords: "gallery 作品 应用", hint: galleryApps.length > 0 ? `${String(galleryApps.length)} 个作品` : undefined, icon: LayoutGrid, run: () => setGalleryWallOpen(true) },
     { id: "view.automation", title: "打开自动化任务", group: "视图", keywords: "automation schedule 定时 任务", hint: enabledAutomationCount > 0 ? `${String(enabledAutomationCount)} 个启用` : "定时任务", icon: Zap, run: () => openAutomationPanel() },
+    { id: "view.memory", title: "打开记忆中心", group: "视图", keywords: "memory 记忆 卡片 索引 长期记忆", hint: "卡片墙 + 模型索引", icon: Brain, run: () => openMemoryCenter() },
     { id: "settings.open", title: "打开设置", group: "设置", keywords: "settings preference 偏好 配置", shortcut: APP_SHORTCUT_LABELS.settings, icon: Settings, run: () => { setSettingsInitialTab(undefined); setSettingsOpen(true); } }
   );
 
@@ -2688,7 +2708,7 @@ export function App(): ReactNode {
           <div
             ref={workAreaRef}
             data-pane="work-area"
-            className={`work-area${designMode ? " design-mode" : ` ${workAreaPreviewClasses({ open: previewOpened, tabs: Boolean(preview && preview.tabs.length > 0) })}`}${automationPanelPresence.rendered ? " automation-panel-open" : ""}${automationCenterPresence.rendered ? " automation-center-open" : ""}${designDragging ? " is-design-dragging" : !designMode && previewDragging ? " is-preview-dragging" : ""}`}
+            className={`work-area${designMode ? " design-mode" : ` ${workAreaPreviewClasses({ open: previewOpened, tabs: Boolean(preview && preview.tabs.length > 0) })}`}${automationPanelPresence.rendered ? " automation-panel-open" : ""}${automationCenterPresence.rendered ? " automation-center-open" : ""}${memoryCenterPresence.rendered ? " memory-center-open" : ""}${designDragging ? " is-design-dragging" : !designMode && previewDragging ? " is-preview-dragging" : ""}`}
             style={designMode
               ? { "--design-split": `${designSplit}%` } as CSSProperties
               : {
@@ -2726,6 +2746,7 @@ export function App(): ReactNode {
                   onOpenDiff={openDiffPreview}
                   onOpenPlanDetail={openPlanPreview}
                   onOpenMemoryTopic={openMemoryTopic}
+                  onOpenMemoryCenter={openMemoryCenter}
                   onOpenTranscript={setTranscriptTarget}
                   onActionError={setActionError}
                   onRollback={mainPaneRollback}
@@ -2799,6 +2820,14 @@ export function App(): ReactNode {
                 initialTaskId={automationCenterTaskId}
                 onClose={closeAutomationCenter}
                 onOpenSession={closeAutomationCenter}
+              />
+            </ExitWrap>
+          )}
+          {memoryCenterPresence.rendered && (
+            <ExitWrap exiting={memoryCenterPresence.exiting}>
+              <MemoryCenter
+                onClose={closeMemoryCenter}
+                onOpenTopic={(topic) => { closeMemoryCenter(); openMemoryTopic(topic); }}
               />
             </ExitWrap>
           )}

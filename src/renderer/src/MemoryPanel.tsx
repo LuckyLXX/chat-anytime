@@ -1,37 +1,29 @@
-import { useState, type ReactNode } from "react";
-import { Plus, Search, Trash2 } from "lucide-react";
-import type { MemoryTopicSummary, RuntimeCommand } from "../../shared/protocol";
-import { MEMORY_TOPIC_WARN_CHARS } from "../../shared/memory";
+import { LayoutGrid, Plus, Search } from "lucide-react";
+import { useMemo, useState, type ReactNode } from "react";
+import type { MemoryLayer, MemoryTopicSummary } from "../../shared/protocol";
+import { MEMORY_LAYER_LABEL, compareMemoryTopics, formatMemoryChars, memoryLayerOf } from "./lib/memory-format";
+import { MemoryCard } from "./components/MemoryCard";
 import { useDesktopStore } from "./store";
+
+export { formatMemoryChars } from "./lib/memory-format";
 
 interface TopicDraft {
   title: string;
   description: string;
+  summary: string;
   content: string;
+  layer: MemoryLayer;
   scoped: boolean;
 }
 
-const emptyDraft: TopicDraft = { title: "", description: "", content: "", scoped: false };
-
-/** 面板体积展示：1,234 字 / 12.3k 字（超过 100k 四舍五入到整数 k）。 */
-export function formatMemoryChars(chars: number): string {
-  if (chars >= 1000) {
-    const kilo = chars / 1000;
-    return `${kilo >= 100 ? Math.round(kilo) : kilo.toFixed(1).replace(/\.0$/u, "")}k 字`;
-  }
-  return `${chars} 字`;
-}
+const emptyDraft: TopicDraft = { title: "", description: "", summary: "", content: "", layer: "standard", scoped: false };
 
 /**
- * 记忆页内容（由 PanelDock 的 tab 承载）。与只读的待办页不同，这里是用户的
- * 治理入口：主题列表 + 删除/新建 + 启用总开关 + 本地筛选 + 体积提示；点击主题
- * 标题把正文打开到右侧预览窗口查看/编辑（编辑器保存走 memory.update，悬浮面板
- * 里不再塞内联编辑器）。
- *
- * v3：列表只同步摘要（不携带正文），正文在预览窗口按需拉取；工具栏显示总字数，
- * 超过 12000 字的主题标「偏大」，提醒拆分或下沉归档。
+ * 记忆页内容（由 PanelDock 的 tab 承载）。卡片列表是「记忆中心」的紧凑版：
+ * 按层标注、可筛选、可直接归档/恢复/删除；正文仍在右侧预览窗口查看与编辑。
+ * 窄面板里不做内联正文编辑，复用同一张 MemoryCard 保证两处口径一致。
  */
-export function MemoryPanelContent({ onOpenTopic }: { onOpenTopic(topic: MemoryTopicSummary): void }): ReactNode {
+export function MemoryPanelContent({ onOpenTopic, onOpenCenter }: { onOpenTopic(topic: MemoryTopicSummary): void; onOpenCenter?: () => void }): ReactNode {
   const memory = useDesktopStore((state) => state.memory);
   const workspace = useDesktopStore((state) => state.snapshot.workspace);
   const activeAgentId = useDesktopStore((state) => state.snapshot.agentId);
@@ -43,8 +35,9 @@ export function MemoryPanelContent({ onOpenTopic }: { onOpenTopic(topic: MemoryT
   const [creating, setCreating] = useState(false);
   const [draft, setDraft] = useState<TopicDraft>(emptyDraft);
   const [filter, setFilter] = useState("");
+  const [layer, setLayer] = useState<"all" | MemoryLayer>("all");
 
-  async function run(command: RuntimeCommand): Promise<boolean> {
+  async function run(command: Parameters<typeof window.piDesktop.send>[0]): Promise<boolean> {
     setBusy(true);
     setError(undefined);
     try {
@@ -70,8 +63,21 @@ export function MemoryPanelContent({ onOpenTopic }: { onOpenTopic(topic: MemoryT
     if (done) setConfirmDeleteId(undefined);
   }
 
+  function toggleArchive(topic: MemoryTopicSummary): void {
+    const current = memoryLayerOf(topic);
+    void run({ type: "memory.update", topic: topic.title, layer: current === "archive" ? "standard" : "archive" });
+  }
+
   async function createTopic(): Promise<void> {
-    const done = await run({ type: "memory.create", topic: draft.title, description: draft.description, content: draft.content, workspaceScoped: draft.scoped || undefined });
+    const done = await run({
+      type: "memory.create",
+      topic: draft.title,
+      description: draft.description,
+      content: draft.content,
+      layer: draft.layer,
+      ...(draft.summary.trim() ? { summary: draft.summary } : {}),
+      ...(draft.scoped && workspace ? { workspaceScoped: true } : {})
+    });
     if (done) {
       setCreating(false);
       setDraft(emptyDraft);
@@ -79,37 +85,18 @@ export function MemoryPanelContent({ onOpenTopic }: { onOpenTopic(topic: MemoryT
   }
 
   const needle = filter.trim().toLowerCase();
-  const matches = (topic: MemoryTopicSummary): boolean => !needle
-    || topic.title.toLowerCase().includes(needle)
-    || topic.description.toLowerCase().includes(needle);
-  const globalTopics = memory.filter((topic) => !topic.workspace && matches(topic));
-  const currentTopics = workspace ? memory.filter((topic) => topic.workspace === workspace && matches(topic)) : [];
-  const otherTopics = memory.filter((topic) => topic.workspace && topic.workspace !== workspace && matches(topic));
-  const matchedCount = globalTopics.length + currentTopics.length + otherTopics.length;
-  const totalChars = memory.reduce((sum, topic) => sum + topic.contentChars, 0);
+  const topics = useMemo(() => {
+    const matched = memory.filter((topic) => (layer === "all" || memoryLayerOf(topic) === layer)
+      && (!needle || topic.title.toLowerCase().includes(needle) || topic.description.toLowerCase().includes(needle) || (topic.summaryPreview ?? "").toLowerCase().includes(needle)));
+    return [...matched].sort(compareMemoryTopics);
+  }, [memory, layer, needle]);
 
-  const renderTopic = (topic: MemoryTopicSummary, group: "global" | "current" | "other"): ReactNode => {
-    const confirming = confirmDeleteId === topic.id;
-    return (
-      <div className="memory-topic" key={topic.id}>
-        <div className="memory-topic-head">
-          <button className="memory-topic-title" type="button" title="在预览窗口打开（可查看与编辑）" onClick={() => onOpenTopic(topic)}>
-            <strong>{topic.title}</strong>
-          </button>
-          {group === "current" && <span className="memory-topic-scope">本工作区</span>}
-          {group === "other" && <span className="memory-topic-scope other" title={topic.workspace}>{workspaceBasename(topic.workspace!)}</span>}
-          {topic.contentChars > MEMORY_TOPIC_WARN_CHARS && (
-            <span className="memory-topic-large" title="正文偏大，建议拆分或把已解细节下沉到归档主题">偏大</span>
-          )}
-          <small>{formatMemoryChars(topic.contentChars)} · {topic.updatedAt}</small>
-          {confirming
-            ? <button className="memory-topic-delete confirming" type="button" disabled={busy} title="再次点击确认删除（不可恢复）" onClick={() => void removeTopic(topic)}>确认删除</button>
-            : <button className="memory-topic-delete" type="button" disabled={busy} title={`删除 ${topic.title}`} aria-label={`删除记忆主题 ${topic.title}`} onClick={() => setConfirmDeleteId(topic.id)}><Trash2 size={12} /></button>}
-        </div>
-        {!confirming && <p className="memory-topic-description">{topic.description}</p>}
-      </div>
-    );
-  };
+  const counts = useMemo(() => {
+    const result: Record<MemoryLayer, number> = { core: 0, standard: 0, archive: 0 };
+    for (const topic of memory) result[memoryLayerOf(topic)] += 1;
+    return result;
+  }, [memory]);
+  const totalChars = useMemo(() => memory.reduce((sum, topic) => sum + topic.contentChars, 0), [memory]);
 
   return (
     <div className="memory-panel" data-pane="memory-panel">
@@ -122,8 +109,16 @@ export function MemoryPanelContent({ onOpenTopic }: { onOpenTopic(topic: MemoryT
       </div>
       <div className="memory-panel-filter">
         <Search size={12} />
-        <input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="筛选标题或描述…" aria-label="筛选记忆主题" />
-        {needle && <span className="memory-panel-match">{matchedCount} / {memory.length}</span>}
+        <input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="筛选标题、描述或要点…" aria-label="筛选记忆主题" />
+        {needle && <span className="memory-panel-match">{topics.length} / {memory.length}</span>}
+      </div>
+      <div className="memory-panel-layers" role="group" aria-label="按层筛选">
+        <button type="button" className={layer === "all" ? "active" : ""} data-control="memory-layer-filter" onClick={() => setLayer("all")}>全部 {memory.length}</button>
+        {(["core", "standard", "archive"] as MemoryLayer[]).map((item) => (
+          <button key={item} type="button" className={layer === item ? "active" : ""} data-control="memory-layer-filter" title={`${MEMORY_LAYER_LABEL[item]}层`} onClick={() => setLayer(item)}>
+            {MEMORY_LAYER_LABEL[item]} {counts[item]}
+          </button>
+        ))}
       </div>
       {!memoryEnabled && <p className="memory-panel-notice">记忆已停用：不注入索引，memory_* 工具将拒绝执行。此处的人工编辑仍会保存，重新启用后生效。</p>}
       {error && <p className="task-panel-error">{error}</p>}
@@ -131,53 +126,65 @@ export function MemoryPanelContent({ onOpenTopic }: { onOpenTopic(topic: MemoryT
         {memory.length === 0 && !creating && (
           <p className="task-panel-empty">暂无记忆主题。对话中说“记住 …”让助手写入，或点下方“新建主题”手动添加。</p>
         )}
-        {memory.length > 0 && matchedCount === 0 && !creating && (
-          <p className="task-panel-empty">没有匹配「{filter.trim()}」的主题。</p>
+        {memory.length > 0 && topics.length === 0 && !creating && (
+          <p className="task-panel-empty">没有匹配当前筛选的主题。</p>
         )}
-        {globalTopics.length > 0 && (
-          <section className="memory-panel-group">
-            <h4>全局</h4>
-            {globalTopics.map((topic) => renderTopic(topic, "global"))}
-          </section>
-        )}
-        {currentTopics.length > 0 && (
-          <section className="memory-panel-group">
-            <h4>当前工作区</h4>
-            {currentTopics.map((topic) => renderTopic(topic, "current"))}
-          </section>
-        )}
-        {otherTopics.length > 0 && (
-          <section className="memory-panel-group">
-            <h4>其他工作区</h4>
-            {otherTopics.map((topic) => renderTopic(topic, "other"))}
-          </section>
-        )}
+        {topics.map((topic) => (
+          <MemoryCard
+            key={topic.id}
+            topic={topic}
+            onOpen={onOpenTopic}
+            onToggleArchive={toggleArchive}
+            onDelete={(item) => setConfirmDeleteId(confirmDeleteId === item.id ? undefined : item.id)}
+          />
+        ))}
+        {confirmDeleteId && (() => {
+          const target = memory.find((topic) => topic.id === confirmDeleteId);
+          if (!target) return null;
+          return (
+            <div className="memory-panel-confirm" role="alert">
+              <span>删除「{target.title}」？不可恢复。</span>
+              <button type="button" className="danger" disabled={busy} onClick={() => void removeTopic(target)}>确认删除</button>
+              <button type="button" disabled={busy} onClick={() => setConfirmDeleteId(undefined)}>取消</button>
+            </div>
+          );
+        })()}
         {creating && (
-          <section className="memory-panel-group creating">
+          <section className="memory-topic-editor creating">
             <h4>新建主题</h4>
-            <div className="memory-topic-editor">
-              <label>
-                <span>标题</span>
-                <input value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="如：用户偏好 / 项目名 协作约定" />
+            <label>
+              <span>标题</span>
+              <input value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="如：用户偏好 / 项目名 协作约定" />
+            </label>
+            <label>
+              <span>索引描述</span>
+              <input value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} placeholder="一句话索引行（≤45 字）" />
+            </label>
+            <label>
+              <span>分层</span>
+              <select value={draft.layer} onChange={(event) => setDraft({ ...draft, layer: event.target.value as MemoryLayer })}>
+                <option value="core">核心（每会话在场，带要点）</option>
+                <option value="standard">标准（按需查）</option>
+                <option value="archive">归档（不进索引，可检索）</option>
+              </select>
+            </label>
+            <label>
+              <span>要点（可选，3–8 行）</span>
+              <textarea value={draft.summary} rows={2} onChange={(event) => setDraft({ ...draft, summary: event.target.value })} placeholder="一行一条结论；core 主题会进索引" />
+            </label>
+            <label>
+              <span>正文</span>
+              <textarea value={draft.content} rows={5} onChange={(event) => setDraft({ ...draft, content: event.target.value })} placeholder="markdown 正文" />
+            </label>
+            {workspace && (
+              <label className="memory-panel-check">
+                <input type="checkbox" checked={draft.scoped} onChange={(event) => setDraft({ ...draft, scoped: event.target.checked })} />
+                <span>仅绑定当前工作区</span>
               </label>
-              <label>
-                <span>索引描述</span>
-                <input value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} placeholder="一句话索引行" />
-              </label>
-              <label>
-                <span>正文</span>
-                <textarea value={draft.content} rows={6} onChange={(event) => setDraft({ ...draft, content: event.target.value })} placeholder="markdown 正文" />
-              </label>
-              {workspace && (
-                <label className="memory-panel-check">
-                  <input type="checkbox" checked={draft.scoped} onChange={(event) => setDraft({ ...draft, scoped: event.target.checked })} />
-                  <span>仅绑定当前工作区（{workspaceBasename(workspace)}）</span>
-                </label>
-              )}
-              <div className="memory-topic-editor-actions">
-                <button className="memory-panel-primary" type="button" disabled={busy || !draft.title.trim() || !draft.description.trim() || !draft.content.trim()} onClick={() => void createTopic()}>保存</button>
-                <button type="button" disabled={busy} onClick={() => { setCreating(false); setDraft(emptyDraft); }}>取消</button>
-              </div>
+            )}
+            <div className="memory-topic-editor-actions">
+              <button className="memory-panel-primary" type="button" disabled={busy || !draft.title.trim() || !draft.description.trim() || !draft.content.trim()} onClick={() => void createTopic()}>保存</button>
+              <button type="button" disabled={busy} onClick={() => { setCreating(false); setDraft(emptyDraft); }}>取消</button>
             </div>
           </section>
         )}
@@ -187,13 +194,13 @@ export function MemoryPanelContent({ onOpenTopic }: { onOpenTopic(topic: MemoryT
           <Plus size={12} />
           <span>新建主题</span>
         </button>
+        {onOpenCenter && (
+          <button className="memory-panel-center" type="button" data-control="memory-center-open" title="打开记忆中心（卡片墙 + 索引预览）" onClick={onOpenCenter}>
+            <LayoutGrid size={12} />
+            <span>记忆中心</span>
+          </button>
+        )}
       </footer>
     </div>
   );
-}
-
-function workspaceBasename(path: string): string {
-  const normalized = path.replaceAll("\\", "/").replace(/\/+$/u, "");
-  const slash = normalized.lastIndexOf("/");
-  return slash >= 0 ? normalized.slice(slash + 1) : normalized;
 }

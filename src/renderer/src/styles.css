@@ -1537,6 +1537,99 @@ html[data-ui-motion="off"] .session-status-dot.running { animation: none !import
 .memory-panel-new { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border: 1px dashed var(--border-strong); border-radius: 6px; color: var(--text-muted); background: transparent; font-size: 10px; cursor: pointer; }
 .memory-panel-new:hover { border-color: var(--accent); color: var(--accent-text); }
 
+/* —— 记忆卡片与记忆中心（v4，2026-11-05）——
+   卡片是面板与中心共用的最小单元：标题 + 层徽标 + 要点预览 + 元信息；
+   中心是宽页（卡片墙 + 详情 + 模型索引），面板是窄条（同一张卡片单列）。 */
+.memory-panel-layers { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 10px 0; }
+.memory-panel-layers button { padding: 2px 7px; border: 1px solid var(--border); border-radius: 999px; color: var(--text-muted); background: transparent; font-size: 9.5px; cursor: pointer; }
+.memory-panel-layers button:hover { border-color: var(--border-strong); color: var(--text); }
+.memory-panel-layers button.active { border-color: var(--accent); color: var(--accent-text); background: var(--accent-soft); }
+.memory-panel-footer { justify-content: space-between; gap: 6px; }
+.memory-panel-center { display: inline-flex; align-items: center; gap: 4px; padding: 3px 9px; border: 1px solid var(--border-strong); border-radius: 6px; color: var(--text); background: var(--surface); font-size: 10px; cursor: pointer; }
+.memory-panel-center:hover { border-color: var(--accent); color: var(--accent-text); }
+.memory-panel-confirm { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 7px 9px; border: 1px solid var(--danger); border-radius: 6px; color: var(--danger); background: var(--danger-soft); font-size: 10px; }
+.memory-panel-confirm span { flex: 1 1 120px; }
+.memory-panel-confirm button { padding: 2px 8px; border: 1px solid var(--border-strong); border-radius: 5px; color: var(--text); background: var(--surface); font-size: 10px; cursor: pointer; }
+.memory-panel-confirm button.danger { border-color: var(--danger); color: var(--danger); }
+
+.memory-card { position: relative; display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-muted); overflow: hidden; }
+.memory-card:hover { border-color: var(--border-strong); }
+.memory-card.active { border-color: var(--accent); box-shadow: inset 2px 0 0 var(--accent); }
+.memory-card.archived { opacity: .82; }
+.memory-card-main { display: flex; flex-direction: column; gap: 4px; width: 100%; padding: 9px 10px 8px; border: 0; color: var(--text); background: transparent; text-align: left; cursor: pointer; }
+.memory-card-head { display: flex; align-items: center; gap: 5px; min-width: 0; padding-right: 44px; }
+.memory-card-head strong { flex: 1; min-width: 0; font-size: 11.5px; font-weight: 650; overflow-wrap: anywhere; }
+.memory-layer-chip { flex: 0 0 auto; padding: 1px 5px; border: 1px solid var(--border); border-radius: 999px; color: var(--text-muted); font-size: 9px; }
+.memory-layer-chip.core { border-color: var(--accent); color: var(--accent-text); background: var(--accent-soft); }
+.memory-layer-chip.archive { border-style: dashed; background: var(--surface-raised); }
+.memory-card-large { flex: 0 0 auto; padding: 1px 5px; border-radius: 999px; color: var(--warning); background: var(--warning-soft); font-size: 9px; }
+.memory-card-text { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; color: var(--text-muted); font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
+.memory-card-meta { display: flex; flex-wrap: wrap; gap: 6px; color: var(--text-muted); font-size: 9.5px; }
+.memory-card-meta .scope { color: var(--accent-text); }
+.memory-card-summary-mark { padding: 0 4px; border-radius: 4px; background: var(--surface-raised); }
+.memory-card-actions { position: absolute; top: 6px; right: 6px; display: flex; gap: 2px; opacity: 0; transition: opacity .12s ease; }
+.memory-card:hover .memory-card-actions, .memory-card:focus-within .memory-card-actions { opacity: 1; }
+.memory-card-actions button { display: grid; place-items: center; width: 20px; height: 20px; border: 0; border-radius: 4px; color: var(--text-muted); background: var(--surface); cursor: pointer; }
+.memory-card-actions button:hover { color: var(--accent-text); background: var(--surface-button-hover); }
+.memory-card-actions button.danger:hover { color: var(--danger); background: var(--danger-soft); }
+
+.work-area.memory-center-open .conversation-pane .panel-dock,
+.work-area.memory-center-open .conversation-pane .panel-dock-fab { display: none; }
+.memory-center { position: absolute; z-index: 37; inset: 0; display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--surface); animation: automation-center-in .18s var(--motion-ease); }
+.ui-presence.is-exiting > .memory-center { animation: automation-center-out .18s var(--motion-ease) both; }
+@media (prefers-reduced-motion: reduce) { .memory-center, .ui-presence.is-exiting > .memory-center { animation: none !important; } }
+html[data-ui-motion="off"] .memory-center, html[data-ui-motion="off"] .ui-presence.is-exiting > .memory-center { animation: none !important; }
+.memory-center-head { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--border); }
+.memory-center-heading { display: flex; align-items: center; gap: 9px; flex: 1; min-width: 0; }
+.memory-center-icon { display: grid; place-items: center; width: 30px; height: 30px; border: 1px solid var(--border); border-radius: 8px; color: var(--accent-text); background: var(--accent-soft); }
+.memory-center-heading h2 { margin: 0; font-size: 14px; }
+.memory-center-heading p { margin: 2px 0 0; color: var(--text-muted); font-size: 10.5px; }
+.memory-center-head-actions { display: flex; align-items: center; gap: 6px; }
+.memory-center-head-actions button { display: grid; place-items: center; width: 26px; height: 26px; border: 1px solid var(--border); border-radius: 6px; color: var(--text-muted); background: var(--surface-muted); cursor: pointer; }
+.memory-center-head-actions button:hover { border-color: var(--border-strong); color: var(--text); }
+.memory-center-disabled { padding: 2px 8px; border: 1px solid var(--warning); border-radius: 999px; color: var(--warning); background: var(--warning-soft); font-size: 10px; }
+.memory-center-body { display: grid; grid-template-columns: minmax(0, 1fr) 320px; flex: 1; min-height: 0; }
+.memory-center-list { display: flex; flex-direction: column; gap: 10px; min-height: 0; padding: 12px 14px; }
+.memory-center-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.memory-center-search { display: flex; flex: 1 1 200px; align-items: center; gap: 6px; min-height: 30px; padding: 0 8px; border: 1px solid var(--border); border-radius: 6px; color: var(--text-muted); background: var(--surface-input); }
+.memory-center-search input { width: 100%; min-width: 0; height: 26px; padding: 0; border: 0; outline: 0; color: var(--text); background: transparent; font: inherit; font-size: 11px; }
+.memory-center-tabs { display: flex; gap: 3px; padding: 2px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface-muted); }
+.memory-center-tabs button { padding: 3px 9px; border: 0; border-radius: 5px; color: var(--text-muted); background: transparent; font-size: 10.5px; cursor: pointer; }
+.memory-center-tabs button.active { color: var(--accent-text); background: var(--accent-soft); }
+.memory-center-sort { height: 30px; padding: 0 6px; border: 1px solid var(--border); border-radius: 6px; color: var(--text); background: var(--surface-input); font: inherit; font-size: 10.5px; }
+.memory-center-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); align-content: start; gap: 10px; min-height: 0; overflow-y: auto; padding-bottom: 16px; }
+.memory-center-empty { margin: 18px 4px; color: var(--text-muted); font-size: 11px; }
+.memory-center-detail { display: flex; flex-direction: column; min-height: 0; border-left: 1px solid var(--border); background: var(--surface-muted); }
+.memory-center-detail-tabs { display: flex; gap: 4px; padding: 10px 12px 0; }
+.memory-center-detail-tabs button { display: inline-flex; align-items: center; gap: 4px; padding: 4px 9px; border: 1px solid transparent; border-radius: 6px; color: var(--text-muted); background: transparent; font-size: 10.5px; cursor: pointer; }
+.memory-center-detail-tabs button.active { border-color: var(--border); color: var(--text); background: var(--surface); }
+.memory-center-meta { display: flex; flex: 1; flex-direction: column; gap: 9px; min-height: 0; overflow-y: auto; padding: 12px; }
+.memory-center-detail-title { display: flex; align-items: center; gap: 6px; }
+.memory-center-detail-title h3 { flex: 1; min-width: 0; margin: 0; font-size: 12.5px; overflow-wrap: anywhere; }
+.memory-center-detail-stats { margin: -4px 0 0; color: var(--text-muted); font-size: 10px; overflow-wrap: anywhere; }
+.memory-center-field { display: flex; flex-direction: column; gap: 3px; }
+.memory-center-field > span { color: var(--text-muted); font-size: 10.5px; }
+.memory-center-field input, .memory-center-field textarea, .memory-center-field select { padding: 5px 7px; border: 1px solid var(--border-strong); border-radius: 6px; color: var(--text); background: var(--surface); font: inherit; font-size: 11px; }
+.memory-center-field textarea { resize: vertical; line-height: 1.55; }
+.memory-center-field input:focus, .memory-center-field textarea:focus, .memory-center-field select:focus { border-color: var(--accent); outline: none; }
+.memory-center-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
+.memory-center-actions button { display: inline-flex; align-items: center; gap: 4px; padding: 4px 9px; border: 1px solid var(--border-strong); border-radius: 6px; color: var(--text); background: var(--surface); font-size: 10.5px; cursor: pointer; }
+.memory-center-actions button:hover { border-color: var(--accent); }
+.memory-center-actions button:disabled { opacity: .5; cursor: default; }
+.memory-center-actions button.primary { border-color: var(--accent); color: var(--accent-text); background: var(--accent-soft); }
+.memory-center-actions button.danger { color: var(--danger); border-color: var(--danger); }
+.memory-center-actions button.danger.ghost { background: transparent; }
+.memory-center-error { margin: 0; color: var(--danger); font-size: 10.5px; }
+.memory-center-saved { display: flex; align-items: center; gap: 4px; margin: 0; color: var(--accent-text); font-size: 10.5px; }
+.memory-center-loading { display: flex; align-items: center; gap: 5px; margin: 0; color: var(--text-muted); font-size: 10.5px; }
+.memory-center-index { display: flex; flex: 1; flex-direction: column; gap: 8px; min-height: 0; padding: 12px; }
+.memory-center-index-note { margin: 0; color: var(--text-muted); font-size: 10.5px; line-height: 1.55; }
+.memory-center-index-meta { display: flex; align-items: center; justify-content: space-between; gap: 6px; color: var(--text-muted); font-size: 10.5px; }
+.memory-center-index-meta button { display: inline-flex; align-items: center; gap: 3px; padding: 3px 8px; border: 1px solid var(--border); border-radius: 5px; color: var(--text); background: var(--surface); font-size: 10px; cursor: pointer; }
+.memory-center-index-pre { flex: 1; min-height: 0; margin: 0; overflow: auto; padding: 10px; border: 1px solid var(--border); border-radius: 7px; color: var(--text); background: var(--code-surface); font-family: var(--font-mono, monospace); font-size: 10.5px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 1080px) { .memory-center-body { grid-template-columns: minmax(0, 1fr) 280px; } }
+@media (max-width: 900px) { .memory-center-body { grid-template-columns: minmax(0, 1fr); } .memory-center-detail { display: none; } }
+
 .task-panel-section-title { display: flex; align-items: center; gap: 6px; color: var(--warning); font-size: 10px; font-weight: 650; }
 .task-panel-section-title em { min-width: 17px; padding: 1px 5px; border-radius: 999px; color: var(--warning); background: var(--warning-soft); font-size: 10px; font-style: normal; text-align: center; }
 .task-panel-running-item { display: flex; align-items: center; min-width: 0; padding: 6px 8px; border: 1px solid var(--warning); border-radius: 6px; background: var(--warning-soft); }

@@ -4,12 +4,25 @@ import { basename, dirname, join, resolve } from "node:path";
 import { platform } from "node:process";
 import type { MemoryTopic, MemoryTopicSummary } from "../shared/protocol.js";
 import {
+  MEMORY_LAYERS,
+  MEMORY_RECENCY_HALF_LIFE_DAYS,
+  MEMORY_RECENCY_IMMUNE_DAYS,
+  MEMORY_RECENCY_MIN,
   MEMORY_SEARCH_LIMIT,
   MEMORY_SEARCH_LIMIT_MAX,
+  MEMORY_SEARCH_SNIPPET_AFTER,
+  MEMORY_SEARCH_SNIPPET_BEFORE,
+  MEMORY_SNAPSHOT_CORE_CHARS,
   MEMORY_SNAPSHOT_DESC_COMPACT,
-  MEMORY_SNAPSHOT_DESC_MAX
+  MEMORY_SNAPSHOT_DESC_MAX,
+  MEMORY_SUMMARY_MAX_CHARS,
+  MEMORY_SUMMARY_PREVIEW_CHARS,
+  MEMORY_TOPIC_INDEX_DEGRADE_CHARS,
+  MEMORY_TRIGGER_MAX_CHARS,
+  MEMORY_TRIGGER_MAX_COUNT,
+  type MemoryLayer
 } from "../shared/memory.js";
-import { appendToMemoryContent, splitMemorySections, type MemorySection } from "./memory-sections.js";
+import { appendToMemoryContent, deriveMemoryDigest, splitMemorySections, truncateMemoryText, type MemorySection } from "./memory-sections.js";
 
 /**
  * Markdown-backed 长期记忆库（原子 tmp+rename 写）。布局：
@@ -35,8 +48,6 @@ const LOCK_RETRY_MS = 25;
 const SEARCH_K1 = 1.2;
 const SEARCH_B = 0.75;
 const SEARCH_MAX_SECTIONS_PER_TOPIC = 2;
-const SNIPPET_BEFORE = 70;
-const SNIPPET_AFTER = 150;
 const SNAPSHOT_FOOTER_RESERVE = 100;
 
 const sleepBuffer = new Int32Array(new SharedArrayBuffer(4));
@@ -45,7 +56,24 @@ export interface MemorySaveInput {
   title: string;
   description: string;
   content: string;
+  /** 分层：core 常驻要点 / standard 按需 / archive 不进索引。缺省保留既有值，新主题 standard。 */
+  layer?: MemoryLayer;
+  /** 要点层（多行会压成 ` · ` 连接的单行）；缺省保留既有值。 */
+  summary?: string;
+  /** 反直觉触发词（≤3 个，每个 ≤12 字）。 */
+  triggers?: string[];
   /** 绑定到该工作区路径（对已有主题即改绑）；缺省保留既有绑定，新主题为全局。 */
+  bindWorkspace?: string;
+}
+
+/** 面板/命令的部分更新：未传的字段保持原值。 */
+export interface MemoryUpdateInput {
+  title?: string;
+  description?: string;
+  content?: string;
+  layer?: MemoryLayer;
+  summary?: string;
+  triggers?: string[];
   bindWorkspace?: string;
 }
 
@@ -86,8 +114,10 @@ export interface MemoryStore {
   summaries(): MemoryTopicSummary[];
   /** 按 title（不区分大小写）或文件名 id 定位主题。 */
   read(topic: string): MemoryTopic | undefined;
-  /** 按 title upsert：命中则整主题替换（保留 id/createdAt/既有工作区绑定）。 */
+  /** 按标题 upsert：命中则整主题替换（保留 id/createdAt/既有工作区绑定）。 */
   save(input: MemorySaveInput): MemoryTopic;
+  /** 部分更新（面板改层/要点/触发词，不需要重写正文）。 */
+  update(topic: string, patch: MemoryUpdateInput): MemoryTopic;
   /** 按节/文末追加，不覆盖既有正文；未命中且非纯数字时新建节。 */
   append(input: MemoryAppendInput): MemoryAppendOutcome;
   remove(topic: string): boolean;
@@ -144,6 +174,43 @@ function slugify(title: string): string {
     .slice(0, 50);
 }
 
+/** 层值容错：任何不认识的取值都退回 standard（老文件零迁移）。 */
+function normalizeLayer(value: string | undefined): MemoryLayer {
+  const needle = (value ?? "").trim().toLowerCase() as MemoryLayer;
+  return MEMORY_LAYERS.includes(needle) ? needle : "standard";
+}
+
+/** 要点层：多行压成 ` · ` 连接的单行，受 MEMORY_SUMMARY_MAX_CHARS 约束。 */
+function normalizeSummaryText(value: string | undefined): string {
+  const lines = (value ?? "")
+    .split(/\r?\n/u)
+    .map((line) => line.replace(/^\s*[-*·•]\s*/u, "").trim())
+    .filter(Boolean);
+  return truncateMemoryText(lines.join(" · "), MEMORY_SUMMARY_MAX_CHARS);
+}
+
+/** 触发词：去重、截长、限个数；不接受空白项。 */
+function normalizeTriggers(value: readonly string[] | undefined): string[] {
+  const result: string[] = [];
+  for (const item of value ?? []) {
+    const cleaned = singleLine(String(item)).slice(0, MEMORY_TRIGGER_MAX_CHARS);
+    if (!cleaned || result.includes(cleaned)) continue;
+    result.push(cleaned);
+    if (result.length >= MEMORY_TRIGGER_MAX_COUNT) break;
+  }
+  return result;
+}
+
+/** 新近度：30 天半衰、下限 0.5；7 天内更新的主题免疫（不罚刚写的）。 */
+function recencyFactor(updatedAt: string, now = Date.now()): number {
+  const timestamp = Date.parse(`${updatedAt}T00:00:00Z`);
+  if (!Number.isFinite(timestamp)) return 1;
+  const days = Math.max(0, (now - timestamp) / 86_400_000);
+  if (days <= MEMORY_RECENCY_IMMUNE_DAYS) return 1;
+  const factor = 0.5 ** ((days - MEMORY_RECENCY_IMMUNE_DAYS) / MEMORY_RECENCY_HALF_LIFE_DAYS);
+  return Math.max(MEMORY_RECENCY_MIN, factor);
+}
+
 function normalizeWorkspacePath(path: string): string {
   const resolved = resolve(path);
   return platform === "win32" ? resolved.toLowerCase() : resolved;
@@ -163,9 +230,16 @@ function parseFrontmatter(content: string): Record<string, string> {
     if (!line || line.startsWith("#")) continue;
     const separator = line.indexOf(":");
     if (separator <= 0) continue;
-    const key = line.slice(0, separator).trim().toLowerCase();
+    // 保留原大小写并额外落一份小写别名：序列化写的是 camelCase
+    // （createdAt/updatedAt），历史/手写文件可能是全小写；两边都要能读到。
+    // （v4 修复：此前一律小写，导致 parseTopicFile 读 meta.createdAt 永远
+    //  undefined，重启后所有主题日期被重置成今天。）
+    const key = line.slice(0, separator).trim();
     const value = line.slice(separator + 1).trim().replace(/^["']|["']$/gu, "");
-    if (key && value) result[key] = value;
+    if (key && value) {
+      result[key] = value;
+      result[key.toLowerCase()] = value;
+    }
   }
   return result;
 }
@@ -186,11 +260,17 @@ function parseTopicFile(raw: string, id: string): MemoryTopic | undefined {
   if (!title || !description) return undefined;
   const body = raw.replace(FRONTMATTER_PATTERN, "");
   const content = body.replace(/^\r?\n+/u, "").trimEnd();
+  const layer = normalizeLayer(meta.layer);
+  const summary = normalizeSummaryText(meta.summary);
+  const triggers = normalizeTriggers(meta.triggers?.split(/[,，;；|]/u));
   return {
     id,
     title,
     description,
     ...(meta.workspace?.trim() ? { workspace: meta.workspace.trim() } : {}),
+    layer,
+    ...(triggers.length > 0 ? { triggers } : {}),
+    ...(summary ? { summary } : {}),
     content,
     contentChars: content.length,
     contentRevision: hashContent(content),
@@ -204,6 +284,9 @@ function serializeTopic(topic: MemoryTopic): string {
     "---",
     `title: ${topic.title}`,
     `description: ${topic.description}`,
+    ...(topic.layer && topic.layer !== "standard" ? [`layer: ${topic.layer}`] : []),
+    ...(topic.summary ? [`summary: ${topic.summary}`] : []),
+    ...(topic.triggers?.length ? [`triggers: ${topic.triggers.join(", ")}`] : []),
     ...(topic.workspace ? [`workspace: ${topic.workspace}`] : []),
     `createdAt: ${topic.createdAt}`,
     `updatedAt: ${topic.updatedAt}`,
@@ -214,11 +297,17 @@ function serializeTopic(topic: MemoryTopic): string {
 }
 
 function summaryOf(topic: MemoryTopic): MemoryTopicSummary {
+  const summaryText = (topic.summary ?? "").trim();
+  const previewSource = summaryText || deriveMemoryDigest(topic.content, MEMORY_SUMMARY_PREVIEW_CHARS);
   return {
     id: topic.id,
     title: topic.title,
     description: topic.description,
     ...(topic.workspace ? { workspace: topic.workspace } : {}),
+    layer: topic.layer ?? "standard",
+    ...(topic.triggers?.length ? { triggers: topic.triggers } : {}),
+    summaryChars: summaryText.length,
+    ...(previewSource ? { summaryPreview: truncateMemoryText(previewSource, MEMORY_SUMMARY_PREVIEW_CHARS) } : {}),
     contentChars: topic.contentChars,
     contentRevision: topic.contentRevision,
     createdAt: topic.createdAt,
@@ -231,7 +320,8 @@ function compareTopics(left: MemoryTopic, right: MemoryTopic): number {
 }
 
 function indexLine(topic: MemoryTopic): string {
-  return `- ${topic.title} — ${topic.description}`;
+  const mark = topic.layer === "core" ? "[核心] " : topic.layer === "archive" ? "[归档] " : "";
+  return `- ${mark}${topic.title} — ${truncateDescription(topic.description, 80)}（${topic.contentChars} 字）`;
 }
 
 function sortTopics(topics: readonly MemoryTopic[]): MemoryTopic[] {
@@ -314,8 +404,8 @@ function snippetAround(text: string, query: string, tokens: readonly string[]): 
     }
   }
   if (at < 0) at = 0;
-  const start = Math.max(0, at - SNIPPET_BEFORE);
-  const end = Math.min(text.length, at + SNIPPET_AFTER);
+  const start = Math.max(0, at - MEMORY_SEARCH_SNIPPET_BEFORE);
+  const end = Math.min(text.length, at + MEMORY_SEARCH_SNIPPET_AFTER);
   const body = text.slice(start, end).replace(/\s+/gu, " ").trim();
   return `${start > 0 ? "…" : ""}${body}${end < text.length ? "…" : ""}`;
 }
@@ -417,50 +507,87 @@ export function createMemoryStore(dir: string, onChanged: () => void): MemorySto
 
   function snapshotMarkdownFrom(topics: readonly MemoryTopic[], maxChars: number): string {
     if (topics.length === 0) return "";
+    const visible = sortTopics(topics);
+    const core = visible.filter((topic) => topic.layer === "core");
+    const archive = visible.filter((topic) => topic.layer === "archive");
+    const standard = visible.filter((topic) => topic.layer !== "core" && topic.layer !== "archive");
     const lines: string[] = [];
+    const limit = maxChars - SNAPSHOT_FOOTER_RESERVE;
     let used = 0;
     let omitted = 0;
     let compacted = false;
-    const visibleTopics = sortTopics(topics);
 
-    for (const group of groupTopics(visibleTopics)) {
-      const heading = group.header ? `## 工作区：${group.header}` : "## 全局";
-      let headingAdded = false;
-      for (const topic of group.topics) {
-        const candidates = [
-          { text: `- ${topic.title} — ${truncateDescription(topic.description, MEMORY_SNAPSHOT_DESC_MAX)}`, compact: false },
-          { text: `- ${topic.title} — ${truncateDescription(topic.description, MEMORY_SNAPSHOT_DESC_COMPACT)}`, compact: true },
-          { text: `- ${topic.title}`, compact: true }
-        ];
-        let chosen: { text: string; compact: boolean } | undefined;
-        for (const candidate of candidates) {
-          const cost = candidate.text.length + (headingAdded ? 0 : heading.length + 1) + (lines.length > 0 ? 1 : 0);
-          if (used + cost <= maxChars - SNAPSHOT_FOOTER_RESERVE) {
-            chosen = candidate;
+    const push = (text: string): boolean => {
+      const cost = text.length + (lines.length > 0 ? 1 : 0);
+      if (used + cost > limit) return false;
+      lines.push(text);
+      used += cost;
+      return true;
+    };
+
+    // 核心层优先：高频繁主题永远在场，预算再紧也至少保留一行标题。
+    if (core.length > 0) {
+      push("[核心 · 每会话在场]");
+      for (const topic of core) {
+        const source = (topic.summary ?? "").trim() || deriveMemoryDigest(topic.content, MEMORY_SNAPSHOT_CORE_CHARS);
+        let placed = false;
+        for (const cap of [MEMORY_SNAPSHOT_CORE_CHARS, 80, 40]) {
+          const body = truncateMemoryText(source, cap);
+          const text = body ? `- ${topic.title} — ${body}` : `- ${topic.title}`;
+          if (push(text)) {
+            placed = true;
+            if (cap < MEMORY_SNAPSHOT_CORE_CHARS) compacted = true;
             break;
           }
         }
-        if (!chosen) {
-          omitted += 1;
-          continue;
+        if (!placed) {
+          compacted = true;
+          push(`- ${topic.title}`);
         }
-        if (!headingAdded) {
-          lines.push(heading);
-          used += heading.length + 1;
-          headingAdded = true;
-        }
-        lines.push(chosen.text);
-        used += chosen.text.length + 1;
-        if (chosen.compact || topic.description.length > MEMORY_SNAPSHOT_DESC_MAX) compacted = true;
       }
-      if (headingAdded) lines.push("");
     }
+
+    // 标准层：触发器优先，其次 24/12 字描述；超大主题只留标题。
+    if (standard.length > 0) {
+      push("[项目知识]");
+      for (const topic of standard) {
+        const hint = topic.triggers?.length ? `（${topic.triggers.join("/")}）` : "";
+        const candidates = new Set<string>();
+        if (topic.contentChars > MEMORY_TOPIC_INDEX_DEGRADE_CHARS) {
+          candidates.add(`- ${topic.title}${hint}`);
+        } else if (hint) {
+          candidates.add(`- ${topic.title}${hint}`);
+        } else {
+          candidates.add(`- ${topic.title} — ${truncateDescription(topic.description, MEMORY_SNAPSHOT_DESC_MAX)}`);
+          candidates.add(`- ${topic.title} — ${truncateDescription(topic.description, MEMORY_SNAPSHOT_DESC_COMPACT)}`);
+          candidates.add(`- ${topic.title}`);
+        }
+        let placed = false;
+        let index = 0;
+        for (const text of candidates) {
+          if (push(text)) {
+            placed = true;
+            if (index > 0) compacted = true;
+            break;
+          }
+          index += 1;
+        }
+        if (!placed) {
+          omitted += 1;
+          compacted = true;
+        }
+      }
+    }
+
+    // 归档层不进索引：只留一行计数，靠 memory_search / memory_list 到达。
+    if (archive.length > 0) push(`[归档] ${archive.length} 个：memory_search 可检索（不占常驻索引）`);
 
     if (lines.length === 0) {
       return `（共 ${topics.length} 个主题；用 memory_search 检索，memory_list 可看全量）`;
     }
     if (omitted > 0) {
-      lines.push(`（共 ${topics.length} 个主题；另有 ${omitted} 个未列出，用 memory_search 检索，memory_list 可看全量）`);
+      // 脚注不参与预算：它是「被省略了多少」的唯一出口，宁可超几个字也不能被吞。
+      lines.push(`（另有 ${omitted} 个标准主题未列出，用 memory_search 检索）`);
     } else if (compacted) {
       lines.push("（索引超预算，部分描述已压缩）");
     }
@@ -531,7 +658,11 @@ export function createMemoryStore(dir: string, onChanged: () => void): MemorySto
   function buildSearchDocs(topics: readonly MemoryTopic[]): SearchDoc[] {
     const docs: SearchDoc[] = [];
     for (const topic of topics) {
-      const summaryText = `${topic.title}\n${topic.description}`;
+      // 标题/描述/触发词/要点全部进主题级文档：触发词是「反直觉词」，
+      // 它让「B站评论」能命中「黑鱼河的口味」这种标题看不出语义的主题。
+      const summaryText = [topic.title, topic.description, ...(topic.triggers ?? []), topic.summary ?? ""]
+        .filter(Boolean)
+        .join("\n");
       const summaryLower = summaryText.normalize("NFKC").toLowerCase();
       docs.push({
         topic,
@@ -561,6 +692,43 @@ export function createMemoryStore(dir: string, onChanged: () => void): MemorySto
     return topic.title.toLowerCase() === needle || topic.id.toLowerCase() === needle;
   }
 
+  /** 写入主题（假定已持锁）；save / update 共用同一条落盘路径。 */
+  function saveLocked(input: MemorySaveInput): MemoryTopic {
+    const title = singleLine(input.title);
+    const description = singleLine(input.description);
+    const content = input.content.trim();
+    if (!title) throw new Error("记忆主题标题不能为空");
+    if (!description) throw new Error("记忆主题描述不能为空（一句话索引行）");
+    if (!content) throw new Error("记忆主题正文不能为空");
+
+    const topics = loadAll();
+    const existing = findTopic(topics, title);
+    const id = existing?.id ?? uniqueSlug(topics, slugify(title) || `topic-${Date.now()}`);
+    const workspace = input.bindWorkspace ?? existing?.workspace;
+    const layer = input.layer !== undefined ? normalizeLayer(input.layer) : existing?.layer ?? "standard";
+    const summary = input.summary !== undefined ? normalizeSummaryText(input.summary) : existing?.summary;
+    const triggers = input.triggers !== undefined ? normalizeTriggers(input.triggers) : existing?.triggers;
+    const nextTopic: MemoryTopic = {
+      id,
+      title,
+      description,
+      content,
+      layer,
+      ...(summary ? { summary } : {}),
+      ...(triggers && triggers.length > 0 ? { triggers } : {}),
+      ...(workspace ? { workspace } : {}),
+      createdAt: existing?.createdAt ?? today(),
+      updatedAt: today(),
+      contentChars: content.length,
+      contentRevision: hashContent(content)
+    };
+    const filePath = join(topicsDir, `${id}.md`);
+    writeFileAtomic(filePath, serializeTopic(nextTopic));
+    rememberWritten(filePath, nextTopic);
+    commit(existing ? topics.map((topic) => (topic.id === id ? nextTopic : topic)) : [...topics, nextTopic]);
+    return nextTopic;
+  }
+
   return {
     list(): MemoryTopic[] {
       return loadAll();
@@ -572,48 +740,22 @@ export function createMemoryStore(dir: string, onChanged: () => void): MemorySto
       return findTopic(loadAll(), topic);
     },
     save(input: MemorySaveInput): MemoryTopic {
-      const title = singleLine(input.title);
-      const description = singleLine(input.description);
-      const content = input.content.trim();
-      if (!title) throw new Error("记忆主题标题不能为空");
-      if (!description) throw new Error("记忆主题描述不能为空（一句话索引行）");
-      if (!content) throw new Error("记忆主题正文不能为空");
-
+      return withStoreLock(() => saveLocked(input));
+    },
+    update(topic: string, patch: MemoryUpdateInput): MemoryTopic {
       return withStoreLock(() => {
         const topics = loadAll();
-        const existing = findTopic(topics, title);
-        const id = existing?.id ?? uniqueSlug(topics, slugify(title) || `topic-${Date.now()}`);
-        const workspace = input.bindWorkspace ?? existing?.workspace;
-        const nextTopic: MemoryTopic = existing
-          ? {
-              ...existing,
-              title,
-              description,
-              content,
-              updatedAt: today(),
-              contentChars: content.length,
-              contentRevision: hashContent(content),
-              ...(workspace ? { workspace } : {})
-            }
-          : {
-              id,
-              title,
-              description,
-              content,
-              createdAt: today(),
-              updatedAt: today(),
-              contentChars: content.length,
-              contentRevision: hashContent(content),
-              ...(workspace ? { workspace } : {})
-            };
-        const filePath = join(topicsDir, `${id}.md`);
-        writeFileAtomic(filePath, serializeTopic(nextTopic));
-        rememberWritten(filePath, nextTopic);
-        const nextTopics = existing
-          ? topics.map((topic) => (topic.id === id ? nextTopic : topic))
-          : [...topics, nextTopic];
-        commit(nextTopics);
-        return nextTopic;
+        const existing = findTopic(topics, topic);
+        if (!existing) throw new Error(`未找到记忆主题「${topic}」；先用 memory_list 确认标题`);
+        return saveLocked({
+          title: patch.title ?? existing.title,
+          description: patch.description ?? existing.description,
+          content: patch.content ?? existing.content,
+          layer: patch.layer ?? existing.layer,
+          summary: patch.summary !== undefined ? patch.summary : existing.summary,
+          triggers: patch.triggers !== undefined ? patch.triggers : existing.triggers,
+          ...(patch.bindWorkspace !== undefined ? { bindWorkspace: patch.bindWorkspace } : {})
+        });
       });
     },
     append(input: MemoryAppendInput): MemoryAppendOutcome {
@@ -697,15 +839,17 @@ export function createMemoryStore(dir: string, onChanged: () => void): MemorySto
       }
       const totalIdf = queryTokens.reduce((sum, token) => sum + (idfByToken.get(token) ?? 0), 0) || 1;
 
-      const topicSignals = new Map<string, { titleHits: number; descriptionHits: number; summaryMatched: number; summaryMatchedIdf: number; phrase: boolean }>();
+      const topicSignals = new Map<string, { titleHits: number; descriptionHits: number; triggerHits: number; summaryMatched: number; summaryMatchedIdf: number; phrase: boolean }>();
       for (const topic of visibleTopics) {
         if (options.topic && !topicFilterMatches(topic, options.topic)) continue;
         const titleLower = topic.title.normalize("NFKC").toLowerCase();
         const descriptionLower = topic.description.normalize("NFKC").toLowerCase();
-        const summaryHaystack = `${titleLower} ${descriptionLower}`;
+        const triggerLower = (topic.triggers ?? []).join(" ").normalize("NFKC").toLowerCase();
+        const summaryHaystack = [titleLower, descriptionLower, triggerLower, (topic.summary ?? "").normalize("NFKC").toLowerCase()].join(" ");
         topicSignals.set(topic.id, {
           titleHits: queryTokens.filter((token) => titleLower.includes(token)).length,
           descriptionHits: queryTokens.filter((token) => descriptionLower.includes(token)).length,
+          triggerHits: triggerLower ? queryTokens.filter((token) => triggerLower.includes(token)).length : 0,
           summaryMatched: queryTokens.filter((token) => summaryHaystack.includes(token)).length,
           summaryMatchedIdf: queryTokens.filter((token) => summaryHaystack.includes(token)).reduce((sum, token) => sum + (idfByToken.get(token) ?? 0), 0),
           phrase: summaryHaystack.includes(queryLower)
@@ -733,9 +877,11 @@ export function createMemoryStore(dir: string, onChanged: () => void): MemorySto
         }
         if (bm25 === 0 || matched < minimumMatched || matchedIdf / totalIdf < 0.5) continue;
         const signal = topicSignals.get(doc.topic.id);
-        const boost = (signal?.titleHits ?? 0) * 3 + (signal?.descriptionHits ?? 0) * 2 + (signal?.phrase ? 1.5 : 0);
+        const boost = (signal?.titleHits ?? 0) * 3 + (signal?.descriptionHits ?? 0) * 2 + (signal?.triggerHits ?? 0) * 3 + (signal?.phrase ? 1.5 : 0);
         const coverage = 0.6 + 0.4 * (matched / queryTokens.length);
-        const score = (bm25 + boost) * coverage;
+        // 命中节标题（H2/H3）时加权：召回粒度更接近「真正要读的那一节」。
+        const headingHit = queryTokens.some((token) => doc.section!.heading.normalize("NFKC").toLowerCase().includes(token));
+        const score = (bm25 + boost) * coverage * (headingHit ? 1.5 : 1) * recencyFactor(doc.topic.updatedAt);
         const list = sectionHits.get(doc.topic.id) ?? [];
         list.push({ doc, score });
         sectionHits.set(doc.topic.id, list);
@@ -749,10 +895,11 @@ export function createMemoryStore(dir: string, onChanged: () => void): MemorySto
       for (const [topicId, signal] of topicSignals) {
         if (sectionHits.has(topicId)) continue;
         if (signal.summaryMatched < 1 || signal.summaryMatchedIdf / totalIdf < 0.5) continue;
-        const score = signal.titleHits * 3 + signal.descriptionHits * 2 + (signal.phrase ? 1.5 : 0);
-        if (score <= 0) continue;
         const doc = summaryDocs.get(topicId);
-        if (doc) hits.push({ doc, score });
+        if (!doc) continue;
+        const score = (signal.titleHits * 3 + signal.descriptionHits * 2 + signal.triggerHits * 3 + (signal.phrase ? 1.5 : 0)) * recencyFactor(doc.topic.updatedAt);
+        if (score <= 0) continue;
+        hits.push({ doc, score });
       }
 
       hits.sort((left, right) => right.score - left.score

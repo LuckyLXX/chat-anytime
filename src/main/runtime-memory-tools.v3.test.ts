@@ -116,7 +116,7 @@ describe("memory tools v3", () => {
     const block = buildMemorySystemPromptBlock();
     expect(block).toContain("memory_append");
     expect(block).toContain('section="*"');
-    expect(block).toContain("6000");
+    expect(block).toContain("12000");
     expect(block).toContain("不需要先读全文");
     expect(buildMemorySnapshotBlock("## 全局\n- 主题 — 描述")).toContain("memory_search");
   });

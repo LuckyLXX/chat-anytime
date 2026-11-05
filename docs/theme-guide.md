@@ -33,7 +33,7 @@
 
 类名属于实现细节，可能随版本变化；以下属性是稳定契约，结构化主题请只依赖它们：
 
-**区域钩子 `data-pane`**：`sidebar` `topbar` `workspace` `work-area` `conversation` `timeline` `composer` `task-panel` `memory-panel` `preview` `terminal` `ssh` `ssh-files` `question-panel` `settings-dialog` `permission-dialog` `landing` `turn-minimap` `markdown-outline` `design` `design-toolbar` `design-tools` `design-canvas` `design-layers` `design-inspector` `gallery-menu` `gallery-wall` `automation-settings` `automation-dialog` `automation-panel` `automation-center` `agent-settings` `general-settings` `model-settings` `resource-settings` `skill-store` `appearance-settings` `subagent-settings` `hooks-settings` `usage-settings`
+**区域钩子 `data-pane`**：`sidebar` `topbar` `workspace` `work-area` `conversation` `timeline` `composer` `task-panel` `memory-panel` `preview` `terminal` `ssh` `ssh-files` `question-panel` `settings-dialog` `permission-dialog` `landing` `turn-minimap` `markdown-outline` `design` `design-toolbar` `design-tools` `design-canvas` `design-layers` `design-inspector` `gallery-menu` `gallery-wall` `automation-settings` `automation-dialog` `automation-panel` `automation-center` `memory-center` `agent-settings` `general-settings` `model-settings` `resource-settings` `skill-store` `appearance-settings` `subagent-settings` `hooks-settings` `usage-settings`
 
 > `design` 是设计模式（Design Studio，顶栏调色板按钮进入）的工作台外壳——顶栏工具栏 + 左侧图层树（`design-layers`）+ 中部无限画布（`design-canvas`）+ 右侧属性检查器（`design-inspector`）。工作台底色走 `--panel-bg-preview`（缺省 `--panel-bg`）与既有表面 token，跟随主题；画布点阵/参考线/选择框用 `--border`/`--accent` 派生，主题可用 `[data-pane="design"]` 后代选择器重设计。 `design-tools` 是画布顶部居中的浮动绘图工具胶囊（选择/画板/矩形/文本），激活按钮带 `aria-pressed="true"`。
 
@@ -47,7 +47,8 @@
 
 > `terminal` 是预览面板内的嵌入式终端区域（xterm.js 宿主）。终端底色与正文色由 `--code-surface` / `--code-text` 驱动，**选区背景改由 `--accent` 派生、滚动条滑块由 `--code-text` 派生**（2026-10-10 起，不再走 `--selection-bg`）；ANSI 16 色板是内置的暗/亮两套（按 `--code-surface` 的实际亮度自动选，与页面的明暗模式无关——内置主题的 `--code-surface` 恒为深色），暂未开放 token；远端彩色输出（含 SSH 终端由渲染端着色的 `用户@主机:路径` 提示符）在任何底色下都由 xterm 的 `minimumContrastRatio 4.5` 保证可读。`[data-pane="terminal"]` 钩子可用于边框、内边距等容器装饰。
 > `question-panel` 是 AI 提问（ask_question 工具）时从输入栏上方向上展开的应答面板，位于 `conversation` 区域内、`composer` 正上方。面板分页式逐题作答（右上角页码/箭头切换，草稿跨页保留），底部「忽略」取消提问、「继续」手动推进或提交；选择题第一个选项自动标注「（推荐）」——与工具描述约定一致（模型把最推荐的选项放第一位），单选点选/回车/空格即选中并自动进入下一题（末题自动提交，重选直接换项），多选保持勾选多个、由「继续」或输入框回车推进；面板内快捷键：Tab/上下键移动选择（单选上下键移动时同步改选但不跳页）、回车或空格确认（单选确认即跳页）。
-> `memory-panel` 是会话区右上方面板坞的记忆页（待办页 `task-panel` 居前，两者合并为一个浮动面板坞，头部 tab 切换，关闭态为单个 FAB）。
+> `memory-panel` 是会话区右上方面板坞的记忆页（待办页 `task-panel` 居前，两者合并为一个浮动面板坞，头部 tab 切换，关闭态为单个 FAB）。记忆页现在是**卡片列表**：每张卡带层徽标（核心 / 标准 / 归档）、两行要点/描述、字数/日期/作用域，悬停出现归档/删除按钮；筛选行上方有 全部/核心/标准/归档 分档按钮（`data-control="memory-layer-filter"`）。
+> `memory-center` 是记忆中心（work-area 覆盖页，侧栏「记忆」入口 `data-control="memory-center-open-nav"` 或面板底部「记忆中心」`data-control="memory-center-open"` 打开）：左侧卡片网格 + 搜索/分档/排序，右侧详情（改分层、索引描述、要点、触发词，`data-control="memory-center-save"`；归档 `memory-center-archive`；两步删除 `memory-center-delete`；打开正文 `memory-center-open`），右栏另一个 tab 是「模型索引」——直接展示新会话会注入的索引快照与 2,000 字预算占用。标题栏 `memory-center-close` / `memory-center-refresh`。卡片类名 `.memory-card`（`data-memory-card` / `data-layer` / `data-topic-id`），层徽标 `.memory-layer-chip`。
 > `turn-minimap` 是会话时间线左缘（聊天气泡左侧空位）的「轮次缩略导航」——每个缩略块对应一轮对话（一次用户提问 + 对应 AI 回复），hover 放大成浮出卡片展示该轮摘要、点击滚动到该轮。`.turn-minimap` 窄条用 `var(--panel-bg)` 派生背景，`.turn-thumb` 缩略块、`.turn-thumb.active` 当前轮、`.turn-thumb-pop` 悬停放大的浮出卡片均可用 `[data-pane="turn-minimap"]` 后代选择器重设计。默认背景色走 `--surface`/`--accent-soft`，主题可覆盖。
 
 > `markdown-outline` 是右侧预览面板的**文档大纲栏**（markdown 预览工具条的「大纲」按钮展开）——按标题层级缩进列出 h1–h6，点击平滑滚动到对应标题，滚动时高亮当前章节。`.markdown-outline` 是栏体（宽度 200px、`border-right`）、`.markdown-outline-title` 是「大纲」小标题、`.markdown-outline-list` 是可滚动列表、`.markdown-outline-item` 是条目（按层级设 `padding-left`）、`.markdown-outline-item.active` 是当前章节（默认走 `--accent-soft`/`--accent-text`）、`.markdown-outline.is-empty` 是无标题空态。窄面板（≤760px）下大纲栏改为在内容上方横排。相关控件钩子：`data-control="preview-outline-toggle"`（预览工具条的大纲开关，`aria-pressed` 标记展开态）。
@@ -128,6 +129,8 @@
 | 用量统计页：助手范围筛选 | `usage-agent-filter` |
 | 面板坞开关 + 待办页 tab（会话区右上方 FAB） | `task-panel-toggle`                              |
 | 记忆页 tab（面板坞内）                      | `memory-toggle`                                  |
+| 记忆页/中心：分档筛选 / 打开中心 / 侧栏入口 | `memory-layer-filter` / `memory-center-open` / `memory-center-open-nav` |
+| 记忆中心：关闭 / 刷新索引 / 保存元信息 / 归档 / 删除 | `memory-center-close` / `memory-center-refresh` / `memory-center-save` / `memory-center-archive` / `memory-center-delete` |
 | 发送                                        | `send`                                           |
 | 停止（生成中与发送互换显示）                | `stop`                                           |
 | 添加附件                                    | `attach`                                         |

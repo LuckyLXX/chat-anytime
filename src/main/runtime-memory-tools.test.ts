@@ -50,7 +50,7 @@ describe("memory tools", () => {
     const writeInput: MemorySaveInput = { title: "用户偏好", description: "语言与风格", content: "- 中文回复\n- 简洁" };
 
     const written = await harness.run("memory_write", { topic: "用户偏好", description: "语言与风格", content: "- 中文回复\n- 简洁" });
-    expect(written).toContain("已保存记忆主题「用户偏好」（全局");
+    expect(written).toContain("已保存记忆主题「用户偏好」（标准，全局");
     expect(written).toContain("- 用户偏好 — 语言与风格");
     expect(written).toContain("当前共 1 个主题");
     expect(harness.changes()).toBe(1);
@@ -60,7 +60,7 @@ describe("memory tools", () => {
     expect(read).toContain("- 中文回复");
 
     const list = await harness.run("memory_list", {});
-    expect(list).toContain("用户偏好 — 语言与风格（全局");
+    expect(list).toContain("[标准] 用户偏好 — 语言与风格（全局");
 
     const search = await harness.run("memory_search", { query: "中文" });
     expect(search).toContain("用户偏好");

@@ -10,6 +10,8 @@ export type AccessMode = "read-only" | "ask" | "workspace" | "full";
 export type ThinkingLevelMap = Partial<Record<ThinkingLevel, string | null>>;
 
 import type { DesignCanvasInfo, DesignNode, DesignOp } from "./design-schema.js";
+import type { MemoryLayer } from "./memory.js";
+export type { MemoryLayer } from "./memory.js";
 import type { ThemeImportOutcome } from "./theme-assets.js";
 import type { SkillStoreQuery, SkillStoreResult, SkillStoreScope } from "./skill-store.js";
 export type { SkillStoreCategory, SkillStoreCommand, SkillStoreDetail, SkillStoreFile, SkillStoreInstallOutcome, SkillStoreInstallSummary, SkillStoreQuery, SkillStoreResult, SkillStoreScope, SkillStoreSkill, SkillStoreSort, SkillStoreUninstallOutcome, SkillStoreVersion } from "./skill-store.js";
@@ -2030,6 +2032,14 @@ export interface MemoryTopicSummary {
   description: string;
   /** 绑定的工作区绝对路径；缺省为全局记忆（所有会话可见）。 */
   workspace?: string;
+  /** 分层（v4）：核心（常驻要点）/ 标准（按需查）/ 归档（不进索引，可检索）。缺省按 standard。 */
+  layer?: MemoryLayer;
+  /** 反直觉触发词（2–12 字，≤3 个）：进索引与检索加权。 */
+  triggers?: string[];
+  /** 要点层的字符数（0 = 未维护，读取时由正文派生）。 */
+  summaryChars?: number;
+  /** 卡片/列表展示用的要点预览（≤80 字）。 */
+  summaryPreview?: string;
   /** 正文的字符数（不含 frontmatter），面板用来显示体积与「偏大」提示。 */
   contentChars: number;
   /**
@@ -2047,6 +2057,8 @@ export interface MemoryTopicSummary {
  */
 export interface MemoryTopic extends MemoryTopicSummary {
   content: string;
+  /** 要点层（3–8 行一句话要点，单行存储）；缺省时读取由正文派生。 */
+  summary?: string;
 }
 
 /**
@@ -2470,11 +2482,14 @@ export type RuntimeCommand =
    */
   | { type: "jev.test"; baseUrl?: string; model?: string; apiKey?: string }
   | { type: "memory.save"; memory: MemorySettings }
-  | { type: "memory.create"; topic: string; description: string; content: string; workspaceScoped?: boolean; sessionId?: string }
-  | { type: "memory.update"; topic: string; description: string; content: string }
+  | { type: "memory.create"; topic: string; description: string; content: string; layer?: MemoryLayer; summary?: string; triggers?: string[]; workspaceScoped?: boolean; sessionId?: string }
+  /** 面板更新：正文/描述至少传一个；layer/summary/triggers 可单独改（缺省保留既有值）。 */
+  | { type: "memory.update"; topic: string; description?: string; content?: string; layer?: MemoryLayer; summary?: string; triggers?: string[] }
   | { type: "memory.delete"; topic: string }
   /** 面板按需读取主题正文；结果经 memory.topic / memory.topic-error 推送。 */
   | { type: "memory.read"; topicId?: string; topic?: string }
+  /** 记忆中心预览「模型实际看到的索引快照」（结果经 memory.index-preview 推送）。 */
+  | { type: "memory.indexPreview" }
   | { type: "subagent.save"; subagent: SubagentDefinition; sessionId?: string }
   | { type: "subagent.delete"; id: string; scope: SubagentScope; sessionId?: string }
   /** 仅改内置子智能体的执行模型（内置定义本体只读）；model 缺省 = 回到继承默认模型。 */
@@ -2608,6 +2623,8 @@ export type RuntimeMessage =
   | { type: "memory.topic"; topic: MemoryTopic }
   /** 响应 memory.read 的失败（主题不存在等）。 */
   | { type: "memory.topic-error"; topicId?: string; message: string }
+  /** 响应 memory.indexPreview：当前工作区可见主题的预算索引（与会话注入同一函数）。 */
+  | { type: "memory.index-preview"; markdown: string; characters: number; budget: number }
   | { type: "permission"; request: PermissionRequest }
   | { type: "permission.dismiss"; id: string }
   | { type: "question"; request: QuestionRequest }

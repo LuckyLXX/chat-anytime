@@ -497,6 +497,8 @@ interface DesktopState {
   memoryContents: Record<string, MemoryTopic>;
   /** 记忆正文读取失败：topic id → 错误文案。 */
   memoryTopicErrors: Record<string, string>;
+  /** 记忆中心「模型实际看到的索引快照」（响应 memory.indexPreview；只在中心打开时刷新）。 */
+  memoryIndexPreview?: { markdown: string; characters: number; budget: number; at: number };
   /** 全部角色的自动化定时任务列表（automation 推送/目录下发维护，设置页按角色分组）。 */
   automation: AutomationTask[];
   /** 全角色自动化运行历史（automation-runs 推送全量替换；设置页「运行记录」子页）。 */
@@ -680,6 +682,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   memory: [],
   memoryContents: {},
   memoryTopicErrors: {},
+  memoryIndexPreview: undefined,
   automation: [],
   automationRuns: [],
   permissions: [],
@@ -916,6 +919,16 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
         set((state) => ({
           memoryTopicErrors: { ...state.memoryTopicErrors, [message.topicId ?? ""]: message.message }
         }));
+        break;
+      case "memory.index-preview":
+        set({
+          memoryIndexPreview: {
+            markdown: message.markdown,
+            characters: message.characters,
+            budget: message.budget,
+            at: Date.now()
+          }
+        });
         break;
       case "catalog":
         set({ models: message.models, providers: message.providers });
