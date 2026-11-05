@@ -12,6 +12,7 @@ import type {
   DesktopSettings,
   GalleryApp,
   HookEventName,
+  MemoryHealth,
   MemoryTopic,
   MemoryTopicSummary,
   ModelOption,
@@ -499,6 +500,8 @@ interface DesktopState {
   memoryTopicErrors: Record<string, string>;
   /** 记忆中心「模型实际看到的索引快照」（响应 memory.indexPreview；只在中心打开时刷新）。 */
   memoryIndexPreview?: { markdown: string; characters: number; budget: number; at: number };
+  /** 记忆中心「健康」页结果（响应 memory.health）。 */
+  memoryHealth?: MemoryHealth;
   /** 全部角色的自动化定时任务列表（automation 推送/目录下发维护，设置页按角色分组）。 */
   automation: AutomationTask[];
   /** 全角色自动化运行历史（automation-runs 推送全量替换；设置页「运行记录」子页）。 */
@@ -683,6 +686,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   memoryContents: {},
   memoryTopicErrors: {},
   memoryIndexPreview: undefined,
+  memoryHealth: undefined,
   automation: [],
   automationRuns: [],
   permissions: [],
@@ -919,6 +923,9 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
         set((state) => ({
           memoryTopicErrors: { ...state.memoryTopicErrors, [message.topicId ?? ""]: message.message }
         }));
+        break;
+      case "memory.health":
+        set({ memoryHealth: message.health });
         break;
       case "memory.index-preview":
         set({

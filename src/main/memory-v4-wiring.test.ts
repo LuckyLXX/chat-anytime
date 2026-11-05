@@ -37,11 +37,16 @@ describe("memory v4 wiring", () => {
     expect(read("src/main/pi-runtime.ts")).toContain('case "memory.indexPreview":');
     expect(read("src/main/pi-runtime.ts")).toContain("memoryStore.snapshotMarkdown(workspace, MEMORY_SNAPSHOT_BUDGET_CHARS)");
     expect(read("src/main/pi-runtime.ts")).toContain("memoryStore.update(command.topic, {");
+    expect(read("src/main/pi-runtime.ts")).toContain('case "memory.health":');
+    expect(read("src/main/pi-runtime.ts")).toContain("analyzeMemoryHealth(summaries");
   });
 
   it("keeps the memory center store state wired to the runtime message", () => {
     const store = read("src/renderer/src/store.ts");
     expect(store).toContain('case "memory.index-preview":');
     expect(store).toContain("memoryIndexPreview:");
+    expect(store).toContain('case "memory.health":');
+    expect(read("src/renderer/src/MemoryCenter.tsx")).toContain("MemoryHealthPane");
+    expect(read("src/renderer/src/MemoryCenter.tsx")).toContain('setDetailTab("health")');
   });
 });

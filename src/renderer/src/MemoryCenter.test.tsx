@@ -57,6 +57,18 @@ beforeEach(() => {
     memoryContents: { core: coreFull },
     memoryTopicErrors: {},
     memoryIndexPreview: { markdown: "[核心 · 每会话在场]\n- 用户偏好 — 中文回复", characters: 28, budget: 2000, at: 1 },
+    memoryHealth: {
+      topics: 3,
+      chars: 30_500,
+      layers: { core: 1, standard: 1, archive: 1 },
+      indexChars: 28,
+      indexBudget: 2000,
+      issues: [
+        { kind: "large", severity: "warn", topicId: "standard", title: "PiDesktop 踩坑记录", message: "正文 26,000 字，超过 8,000 字提醒线。", suggestion: "拆成子主题或下沉归档。" }
+      ],
+      duplicates: [],
+      checkedAt: 1
+    },
     settings: { ...useDesktopStore.getState().settings, memory: { enabled: true } }
   });
 });
@@ -64,7 +76,7 @@ beforeEach(() => {
 afterEach(async () => {
   await act(async () => root.unmount());
   container.remove();
-  useDesktopStore.setState({ memory: [], memoryContents: {}, memoryTopicErrors: {}, memoryIndexPreview: undefined });
+  useDesktopStore.setState({ memory: [], memoryContents: {}, memoryTopicErrors: {}, memoryIndexPreview: undefined, memoryHealth: undefined });
 });
 
 async function render(): Promise<{ onClose: ReturnType<typeof vi.fn>; onOpenTopic: ReturnType<typeof vi.fn> }> {
@@ -85,6 +97,7 @@ describe("MemoryCenter", () => {
     expect(container.textContent).toContain("索引 28/2,000 字");
     expect(container.querySelectorAll("[data-memory-card]")).toHaveLength(3);
     expect(send).toHaveBeenCalledWith({ type: "memory.indexPreview" });
+    expect(send).toHaveBeenCalledWith({ type: "memory.health" });
   });
 
   it("filters by layer and search", async () => {
@@ -137,6 +150,15 @@ describe("MemoryCenter", () => {
     await act(async () => tabs[1]!.click());
     expect(container.textContent).toContain("新会话");
     expect(container.textContent).toContain("[核心 · 每会话在场]");
+
+    const healthTabs = Array.from(container.querySelectorAll(".memory-center-detail-tabs button")) as HTMLButtonElement[];
+    await act(async () => healthTabs[2]!.click());
+    expect(container.textContent).toContain("1 条建议（警告 1）");
+    expect(container.textContent).toContain("PiDesktop 踩坑记录");
+    expect(container.textContent).toContain("拆成子主题或下沉归档");
+    const archive = Array.from(container.querySelectorAll(".memory-health-actions button")).find((button) => button.textContent?.includes("归档")) as HTMLButtonElement;
+    await act(async () => archive.click());
+    expect(send).toHaveBeenCalledWith({ type: "memory.update", topic: "PiDesktop 踩坑记录", layer: "archive" });
   });
 
   it("archives a topic and requires a second click to delete", async () => {

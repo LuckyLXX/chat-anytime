@@ -12,6 +12,8 @@ export type ThinkingLevelMap = Partial<Record<ThinkingLevel, string | null>>;
 import type { DesignCanvasInfo, DesignNode, DesignOp } from "./design-schema.js";
 import type { MemoryLayer } from "./memory.js";
 export type { MemoryLayer } from "./memory.js";
+import type { MemoryHealth } from "./memory-health.js";
+export type { MemoryDuplicateGroup, MemoryHealth, MemoryHealthIssue, MemoryHealthIssueKind } from "./memory-health.js";
 import type { ThemeImportOutcome } from "./theme-assets.js";
 import type { SkillStoreQuery, SkillStoreResult, SkillStoreScope } from "./skill-store.js";
 export type { SkillStoreCategory, SkillStoreCommand, SkillStoreDetail, SkillStoreFile, SkillStoreInstallOutcome, SkillStoreInstallSummary, SkillStoreQuery, SkillStoreResult, SkillStoreScope, SkillStoreSkill, SkillStoreSort, SkillStoreUninstallOutcome, SkillStoreVersion } from "./skill-store.js";
@@ -2490,6 +2492,8 @@ export type RuntimeCommand =
   | { type: "memory.read"; topicId?: string; topic?: string }
   /** 记忆中心预览「模型实际看到的索引快照」（结果经 memory.index-preview 推送）。 */
   | { type: "memory.indexPreview" }
+  /** 记忆中心「健康」页：过大的主题、无要点的核心、陈旧、重复与索引压力。 */
+  | { type: "memory.health" }
   | { type: "subagent.save"; subagent: SubagentDefinition; sessionId?: string }
   | { type: "subagent.delete"; id: string; scope: SubagentScope; sessionId?: string }
   /** 仅改内置子智能体的执行模型（内置定义本体只读）；model 缺省 = 回到继承默认模型。 */
@@ -2625,6 +2629,8 @@ export type RuntimeMessage =
   | { type: "memory.topic-error"; topicId?: string; message: string }
   /** 响应 memory.indexPreview：当前工作区可见主题的预算索引（与会话注入同一函数）。 */
   | { type: "memory.index-preview"; markdown: string; characters: number; budget: number }
+  /** 响应 memory.health：记忆库健康检查结果。 */
+  | { type: "memory.health"; health: MemoryHealth }
   | { type: "permission"; request: PermissionRequest }
   | { type: "permission.dismiss"; id: string }
   | { type: "question"; request: QuestionRequest }
