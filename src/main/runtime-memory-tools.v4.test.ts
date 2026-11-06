@@ -131,6 +131,18 @@ describe("memory tools v4", () => {
     expect(topic.triggers).toHaveLength(3);
   });
 
+  it("switches layer without rewriting the body", async () => {
+    const harness = await makeHarness();
+    await harness.run("memory_write", { topic: "分层主题", description: "d", content: "## 节 正文保持不变", layer: "core" });
+    const moved = await harness.run("memory_layer", { topic: "分层主题", layer: "archive" });
+    expect(moved).toContain("归档层");
+    const topic = harness.store.read("分层主题")!;
+    expect(topic.layer).toBe("archive");
+    expect(topic.content).toBe("## 节 正文保持不变");
+    await expect(harness.run("memory_layer", { topic: "分层主题", layer: "nope" })).rejects.toThrow(/layer/);
+    await expect(harness.run("memory_layer", { topic: "不存在", layer: "archive" })).rejects.toThrow(/未找到/);
+  });
+
   it("marks archived topics on read and keeps them searchable", async () => {
     const harness = await makeHarness();
     await harness.run("memory_write", { topic: "历史结论", description: "已解", content: "## 结论\n\n当时选了方案 B。", layer: "archive" });
