@@ -62,9 +62,10 @@ describe("command palette wiring contract", () => {
     expect(app).toContain('id: "session.stop"');
     expect(app).toContain("openBrowserTab()");
     expect(app).toContain("findReusablePreviewTab");
-    // 顶栏预览按钮在空面板时直接开浏览器（「打开预览 → 点浏览器」两步并一步）。
-    expect(app).toContain("previewHasTabs");
-    expect(app).toContain("previewToggleLabel");
+    // 预览面板的顶栏按钮只管开合：不要顺手改成「空面板直接开浏览器」——
+    // 快捷开浏览器的是 Ctrl+Shift+B 与面板里的「打开浏览器」（2026-11-05 用户纠正）。
+    expect(app).not.toContain("previewHasTabs");
+    expect(app).not.toContain("previewToggleLabel");
     // 聊天框里一步就能切换的模型不再进面板（用户 2026-11-05 反馈的直接诉求）。
     expect(app).not.toContain("切换模型：");
     expect(app).not.toContain('type: "model.select"');
