@@ -40,7 +40,7 @@ export type PreviewTarget =
   | { type: "file"; file: WorkspaceFilePreview; workspace?: string }
   | { type: "diff"; title: string; path?: string; patch: string }
   | { type: "plan"; title: string; content: string }
-  | { type: "memory"; topicId: string; title: string }
+  | { type: "memory"; topicId: string; title: string; /** 主题所属助手（缺省 = 当前会话的助手）。 */ agentId?: string }
   | { type: "loading"; title: string; path: string }
   | { type: "error"; title: string; path: string; message: string };
 
@@ -514,7 +514,7 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, fullscree
         {target.type === "ssh" && <Suspense fallback={<PreviewPaneFallback label="正在载入 SSH…" />}><SshPanel onConnect={(host) => onSshConnect?.(host)} /></Suspense>}
         {target.type === "ssh-terminal" && <Suspense fallback={<PreviewPaneFallback label="正在载入终端…" />}><SshTerminalPanel terminalId={target.terminalId} hostId={target.hostId} hostName={target.hostName} workspace={workspace} /></Suspense>}
         {!showSource && target.type === "plan" && <MarkdownPreviewBlock content={target.content} identity={`plan-${activeTabId}`} outlineOpen={outlineOpen} artifactPrefix={`plan-${activeTabId}`} onOpenArtifact={onOpenArtifact} workspace={workspace} />}
-        {target.type === "memory" && <MemoryPreviewContent key={target.topicId} topicId={target.topicId} tabId={activeTabId} showSource={showSource} editorState={activeEditorState} onEditorChange={onActiveEditorChange} onEditorSaved={onActiveEditorSaved} onEditorStatusChange={onActiveEditorStatusChange} onSaveError={onActiveEditorSaveError} onOpenArtifact={onOpenArtifact} />}
+        {target.type === "memory" && <MemoryPreviewContent key={`${target.agentId ?? ""}:${target.topicId}`} topicId={target.topicId} agentId={target.agentId} tabId={activeTabId} showSource={showSource} editorState={activeEditorState} onEditorChange={onActiveEditorChange} onEditorSaved={onActiveEditorSaved} onEditorStatusChange={onActiveEditorStatusChange} onSaveError={onActiveEditorSaveError} onOpenArtifact={onOpenArtifact} />}
         {!showSource && !artifact && target.type === "file" && <FilePreviewContent file={target.file} tabId={activeTabId} onOpenArtifact={onOpenArtifact} workspace={target.workspace ?? workspace} editorState={activeEditorState} outlineOpen={outlineOpen} onEditorChange={onActiveEditorChange} onEditorContentChange={onActiveEditorContentChange} onEditorSaved={onActiveEditorSaved} onEditorStatusChange={onActiveEditorStatusChange} onEditorSaveError={onActiveEditorSaveError} onResolveConflict={onActiveEditorResolveConflict} />}
         {target.type === "diff" && <div className="preview-scroll preview-diff"><Suspense fallback={<PreviewPaneFallback label="正在载入差异…" />}><DiffView patch={target.patch} /></Suspense></div>}
         {target.type === "loading" && <div className="preview-empty"><LoaderCircle className="spinning" size={26} /><strong>正在读取文件</strong><span>{target.path}</span></div>}

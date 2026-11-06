@@ -20,8 +20,16 @@ describe("memory panel card layout", () => {
     expect(ruleBody(".memory-panel-list")).toContain("overflow-y: auto");
   });
 
-  it("uses a grid for the memory center so cards keep their intrinsic height", () => {
-    expect(ruleBody(".memory-center-grid")).toContain("grid-template-columns");
+  it("keeps the memory center detail column non-shrinking and scrollable", () => {
     expect(css).toContain(".memory-center-meta > * { flex: 0 0 auto; }");
+    expect(ruleBody(".memory-center-meta")).toContain("overflow-y: auto");
+  });
+
+  it("lays the graph out as a single scrolling column (connector positions are CSS, not measured)", () => {
+    const graph = ruleBody(".mg");
+    expect(graph).toContain("overflow-y: auto");
+    expect(graph).toContain("flex-direction: column");
+    expect(ruleBody(".mg-lane-nodes")).toContain("flex-direction: column");
+    expect(ruleBody(".mg-node-body")).toContain("grid-template-columns");
   });
 });

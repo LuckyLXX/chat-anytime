@@ -20,7 +20,9 @@ import {
   MEMORY_TOPIC_INDEX_DEGRADE_CHARS,
   MEMORY_TRIGGER_MAX_CHARS,
   MEMORY_TRIGGER_MAX_COUNT,
-  type MemoryLayer
+  type MemoryLayer,
+  type MemorySnapshot,
+  type MemorySnapshotEntry
 } from "../shared/memory.js";
 import { appendToMemoryContent, deriveMemoryDigest, splitMemorySections, truncateMemoryText, type MemorySection } from "./memory-sections.js";
 
@@ -125,6 +127,11 @@ export interface MemoryStore {
   indexMarkdown(workspace?: string): string;
   /** 会话注入用的预算索引：超出 maxChars 时压缩描述/省略主题并写脚注。 */
   snapshotMarkdown(workspace: string | undefined, maxChars: number): string;
+  /**
+   * 同一份注入索引的结构化版本：逐条给出「有没有进索引 / 占多少字 /
+   * 被压缩还是被省略」。记忆中心图谱用它画连线与预算，不再解析文本。
+   */
+  snapshotDetailed(workspace: string | undefined, maxChars: number): MemorySnapshot;
   /** 本地词法检索（中文 bigram + BM25 风格排序）；workspace 过滤口径同 indexMarkdown。 */
   search(query: string, workspace?: string, options?: MemorySearchOptions): MemorySearchHit[];
 }
@@ -341,6 +348,27 @@ function groupTopics(topics: readonly MemoryTopic[]): Array<{ header: string; to
     .map(([, group]) => group);
 }
 
+/**
+ * 该批主题的「主工作区」：绑定主题最多的那个工作区（平票取先出现的，
+ * 即 sortTopics 之后更新更近的）。记忆总览用它决定每个助手的索引口径——
+ * 用户通常就在这个工作区里和该助手开会话，索引快照因此对得上。
+ */
+export function primaryMemoryWorkspace(topics: readonly Pick<MemoryTopicSummary, "workspace">[]): string | undefined {
+  const counts = new Map<string, { path: string; count: number }>();
+  for (const topic of topics) {
+    if (!topic.workspace) continue;
+    const key = normalizeWorkspacePath(topic.workspace);
+    const entry = counts.get(key) ?? { path: topic.workspace, count: 0 };
+    entry.count += 1;
+    counts.set(key, entry);
+  }
+  let best: { path: string; count: number } | undefined;
+  for (const entry of counts.values()) {
+    if (!best || entry.count > best.count) best = entry;
+  }
+  return best?.path;
+}
+
 /** 与指定工作区相关的主题：全局恒可见，工作区主题仅在本工作区会话注入。 */
 export function memoryTopicVisibleIn(topic: Pick<MemoryTopicSummary, "workspace">, workspace: string | undefined): boolean {
   return !topic.workspace || (workspace !== undefined && sameWorkspace(topic.workspace, workspace));
@@ -505,8 +533,13 @@ export function createMemoryStore(dir: string, onChanged: () => void): MemorySto
     return [INDEX_HEADER, ...groups].join("\n\n");
   }
 
-  function snapshotMarkdownFrom(topics: readonly MemoryTopic[], maxChars: number): string {
-    if (topics.length === 0) return "";
+  /**
+   * 会话注入索引的唯一实现：文本与逐条状态同源生成（markdown 就是 lines 的拼接），
+   * 所以记忆中心的连线、预算与模型真正看到的快照不可能漂移。
+   */
+  function snapshotFrom(topics: readonly MemoryTopic[], maxChars: number): MemorySnapshot {
+    const entries: MemorySnapshotEntry[] = [];
+    if (topics.length === 0) return { markdown: "", characters: 0, budget: maxChars, entries, omitted: 0, compacted: false };
     const visible = sortTopics(topics);
     const core = visible.filter((topic) => topic.layer === "core");
     const archive = visible.filter((topic) => topic.layer === "archive");
@@ -517,12 +550,13 @@ export function createMemoryStore(dir: string, onChanged: () => void): MemorySto
     let omitted = 0;
     let compacted = false;
 
-    const push = (text: string): boolean => {
+    /** 尝试放一行；成功返回该行占用的字符数（含前置换行），失败返回 0。 */
+    const push = (text: string): number => {
       const cost = text.length + (lines.length > 0 ? 1 : 0);
-      if (used + cost > limit) return false;
+      if (used + cost > limit) return 0;
       lines.push(text);
       used += cost;
-      return true;
+      return cost;
     };
 
     // 核心层优先：高频繁主题永远在场，预算再紧也至少保留一行标题。
@@ -530,20 +564,23 @@ export function createMemoryStore(dir: string, onChanged: () => void): MemorySto
       push("[核心 · 每会话在场]");
       for (const topic of core) {
         const source = (topic.summary ?? "").trim() || deriveMemoryDigest(topic.content, MEMORY_SNAPSHOT_CORE_CHARS);
-        let placed = false;
+        let placedChars = 0;
+        let wasCompacted = false;
         for (const cap of [MEMORY_SNAPSHOT_CORE_CHARS, 80, 40]) {
           const body = truncateMemoryText(source, cap);
           const text = body ? `- ${topic.title} — ${body}` : `- ${topic.title}`;
-          if (push(text)) {
-            placed = true;
-            if (cap < MEMORY_SNAPSHOT_CORE_CHARS) compacted = true;
+          placedChars = push(text);
+          if (placedChars > 0) {
+            wasCompacted = cap < MEMORY_SNAPSHOT_CORE_CHARS;
             break;
           }
         }
-        if (!placed) {
-          compacted = true;
-          push(`- ${topic.title}`);
+        if (placedChars === 0) {
+          wasCompacted = true;
+          placedChars = push(`- ${topic.title}`);
         }
+        if (wasCompacted) compacted = true;
+        entries.push({ topicId: topic.id, title: topic.title, layer: topic.layer ?? "standard", placed: placedChars > 0, chars: placedChars, compacted: wasCompacted, omitted: false });
       }
     }
 
@@ -562,28 +599,34 @@ export function createMemoryStore(dir: string, onChanged: () => void): MemorySto
           candidates.add(`- ${topic.title} — ${truncateDescription(topic.description, MEMORY_SNAPSHOT_DESC_COMPACT)}`);
           candidates.add(`- ${topic.title}`);
         }
-        let placed = false;
+        let placedChars = 0;
         let index = 0;
         for (const text of candidates) {
-          if (push(text)) {
-            placed = true;
-            if (index > 0) compacted = true;
-            break;
-          }
+          placedChars = push(text);
+          if (placedChars > 0) break;
           index += 1;
         }
+        const placed = placedChars > 0;
+        const wasCompacted = placed ? index > 0 : true;
         if (!placed) {
           omitted += 1;
           compacted = true;
+        } else if (wasCompacted) {
+          compacted = true;
         }
+        entries.push({ topicId: topic.id, title: topic.title, layer: topic.layer ?? "standard", placed, chars: placedChars, compacted: wasCompacted, omitted: !placed });
       }
     }
 
     // 归档层不进索引：只留一行计数，靠 memory_search / memory_list 到达。
     if (archive.length > 0) push(`[归档] ${archive.length} 个：memory_search 可检索（不占常驻索引）`);
+    for (const topic of archive) {
+      entries.push({ topicId: topic.id, title: topic.title, layer: topic.layer ?? "standard", placed: false, chars: 0, compacted: false, omitted: false });
+    }
 
     if (lines.length === 0) {
-      return `（共 ${topics.length} 个主题；用 memory_search 检索，memory_list 可看全量）`;
+      const fallback = `（共 ${topics.length} 个主题；用 memory_search 检索，memory_list 可看全量）`;
+      return { markdown: fallback, characters: fallback.length, budget: maxChars, entries, omitted, compacted };
     }
     if (omitted > 0) {
       // 脚注不参与预算：它是「被省略了多少」的唯一出口，宁可超几个字也不能被吞。
@@ -591,7 +634,12 @@ export function createMemoryStore(dir: string, onChanged: () => void): MemorySto
     } else if (compacted) {
       lines.push("（索引超预算，部分描述已压缩）");
     }
-    return lines.join("\n").trim();
+    const markdown = lines.join("\n").trim();
+    return { markdown, characters: markdown.length, budget: maxChars, entries, omitted, compacted };
+  }
+
+  function snapshotMarkdownFrom(topics: readonly MemoryTopic[], maxChars: number): string {
+    return snapshotFrom(topics, maxChars).markdown;
   }
 
   function commit(topics: readonly MemoryTopic[]): void {
@@ -802,6 +850,9 @@ export function createMemoryStore(dir: string, onChanged: () => void): MemorySto
     },
     snapshotMarkdown(workspace: string | undefined, maxChars: number): string {
       return snapshotMarkdownFrom(loadAll().filter((topic) => visibleIn(topic, workspace)), maxChars);
+    },
+    snapshotDetailed(workspace: string | undefined, maxChars: number): MemorySnapshot {
+      return snapshotFrom(loadAll().filter((topic) => visibleIn(topic, workspace)), maxChars);
     },
     search(query: string, workspace?: string, options: MemorySearchOptions = {}): MemorySearchHit[] {
       const needle = query.trim();

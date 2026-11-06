@@ -1936,9 +1936,12 @@ export function App(): ReactNode {
     openPreviewTarget({ type: "plan", title: detailTitle(detail), content: detail });
   }, [openPreviewTarget]);
 
-  /** 记忆面板点击主题：右侧预览窗口打开该主题正文（查看/编辑/源码，保存走 memory.update）。 */
-  const openMemoryTopic = useCallback((topic: MemoryTopicSummary): void => {
-    openPreviewTarget({ type: "memory", topicId: topic.id, title: topic.title });
+  /**
+   * 记忆面板/记忆中心点击主题：预览窗口打开正文（查看/编辑/源码，保存走 memory.update）。
+   * agentId 只在跨助手浏览时给出（记忆按助手分库，缺省 = 当前会话的助手）。
+   */
+  const openMemoryTopic = useCallback((topic: MemoryTopicSummary, agentId?: string): void => {
+    openPreviewTarget({ type: "memory", topicId: topic.id, title: topic.title, ...(agentId ? { agentId } : {}) });
   }, []);
 
   function openTerminalPreview(): void {
@@ -2821,7 +2824,7 @@ export function App(): ReactNode {
             <ExitWrap exiting={memoryCenterPresence.exiting}>
               <MemoryCenter
                 onClose={closeMemoryCenter}
-                onOpenTopic={(topic) => { closeMemoryCenter(); openMemoryTopic(topic); }}
+                onOpenTopic={(topic, agentId) => { closeMemoryCenter(); openMemoryTopic(topic, agentId); }}
               />
             </ExitWrap>
           )}

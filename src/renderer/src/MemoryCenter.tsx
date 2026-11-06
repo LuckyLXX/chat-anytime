@@ -1,12 +1,11 @@
 import { Activity, Archive, ArchiveRestore, Brain, Check, FileText, LoaderCircle, RefreshCw, Save, Search, Trash2, X } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import type { MemoryHealthIssue, MemoryLayer, MemoryTopicSummary } from "../../shared/protocol";
-import { MemoryCard } from "./components/MemoryCard";
+import type { MemoryLayer, MemoryOverviewAgent, MemoryTopicSummary } from "../../shared/protocol";
+import { MemoryGraph, type MemoryGraphSelection } from "./components/MemoryGraph";
 import { MemoryHealthPane } from "./components/MemoryHealthPane";
-import { MEMORY_LAYER_LABEL, compareMemoryTopics, formatMemoryChars, memoryLayerOf, parseMemoryTriggers } from "./lib/memory-format";
+import { MEMORY_LAYER_LABEL, formatMemoryChars, memoryCacheKey, memoryLayerOf, memoryScopeLabel, parseMemoryTriggers, type MemoryLayerFilter } from "./lib/memory-format";
 import { useDesktopStore } from "./store";
 
-type SortMode = "updated" | "size" | "title";
 type DetailTab = "topic" | "index" | "health";
 
 interface MemoryDraft {
@@ -16,31 +15,30 @@ interface MemoryDraft {
   triggers: string;
 }
 
-function sortTopics(topics: MemoryTopicSummary[], mode: SortMode): MemoryTopicSummary[] {
-  const sorted = [...topics].sort(compareMemoryTopics);
-  if (mode === "size") return sorted.sort((left, right) => right.contentChars - left.contentChars);
-  if (mode === "title") return sorted.sort((left, right) => left.title.localeCompare(right.title, "zh"));
-  return sorted;
-}
-
 /**
- * 记忆中心：卡片墙 + 详情编辑 + 「模型实际看到的索引」预览。
+ * 记忆中心：分层图谱 + 详情编辑 + 「模型实际看到的索引」预览。
  *
- * 与面板的分工：面板是窄条（快速筛选/归档），中心是宽页（看全貌、改分层与要点、
- * 核对索引预算）。卡片与面板共用 `MemoryCard`，正文仍在右侧预览窗口打开，
- * 这里不重复实现 markdown 编辑器。
+ * v5（2026-11-06，用户反馈「没有区分用户、平铺无法整理」）：
+ * - 按助手分区块（记忆本来就按助手分目录存放），区块顶部是它会话里真正注入的
+ *   索引节点，下面三层泳道，进索引的主题从主干接线到节点；
+ * - 归属（全局 / 工作区）标在节点上，可筛选；
+ * - 索引快照来自主进程的结构化投影（逐条占多少字、压缩还是省略），不解析文本；
+ * - 详情里的编辑/归档/删除都带 agentId，跨助手浏览时不会写错库。
+ *
+ * 与面板的分工不变：面板是窄条（快速筛选/归档），中心是宽页（看全貌、整理）。
  */
-export function MemoryCenter({ onClose, onOpenTopic }: { onClose(): void; onOpenTopic(topic: MemoryTopicSummary): void }): ReactNode {
+export function MemoryCenter({ onClose, onOpenTopic }: { onClose(): void; onOpenTopic(topic: MemoryTopicSummary, agentId?: string): void }): ReactNode {
   const memory = useDesktopStore((state) => state.memory);
   const contents = useDesktopStore((state) => state.memoryContents);
-  const indexPreview = useDesktopStore((state) => state.memoryIndexPreview);
-  const health = useDesktopStore((state) => state.memoryHealth);
+  const overview = useDesktopStore((state) => state.memoryOverview);
+  const snapshotAgentId = useDesktopStore((state) => state.snapshot.agentId);
   const memoryEnabled = useDesktopStore((state) => state.settings.memory?.enabled !== false);
 
   const [query, setQuery] = useState("");
-  const [layer, setLayer] = useState<"all" | MemoryLayer>("all");
-  const [sort, setSort] = useState<SortMode>("updated");
-  const [selectedId, setSelectedId] = useState<string | undefined>(undefined);
+  const [layer, setLayer] = useState<MemoryLayerFilter>("all");
+  const [agentFilter, setAgentFilter] = useState<string>("all");
+  const [scopeFilter, setScopeFilter] = useState<string>("all");
+  const [selected, setSelected] = useState<MemoryGraphSelection>();
   const [detailTab, setDetailTab] = useState<DetailTab>("topic");
   const [draft, setDraft] = useState<MemoryDraft>();
   const [busy, setBusy] = useState(false);
@@ -48,59 +46,87 @@ export function MemoryCenter({ onClose, onOpenTopic }: { onClose(): void; onOpen
   const [saved, setSaved] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
-  const selected = memory.find((topic) => topic.id === selectedId);
-  const selectedContent = selected ? contents[selected.id] : undefined;
+  const agents = overview?.agents ?? [];
+  const currentAgent = useMemo(() => agents.find((agent) => agent.agentId === snapshotAgentId), [agents, snapshotAgentId]);
 
-  function requestIndex(): void {
-    void window.piDesktop.send({ type: "memory.indexPreview" });
-  }
+  /** 焦点助手：选中项 > 助手筛选 > 当前会话助手 > 第一个有记忆的助手。 */
+  const focusAgent: MemoryOverviewAgent | undefined = useMemo(() => {
+    if (selected) return agents.find((agent) => agent.agentId === selected.agentId) ?? agents[0];
+    if (agentFilter !== "all") return agents.find((agent) => agent.agentId === agentFilter) ?? agents[0];
+    return currentAgent ?? agents[0];
+  }, [agents, selected, agentFilter, currentAgent]);
 
-  function requestHealth(): void {
-    void window.piDesktop.send({ type: "memory.health" });
+  const selectedTopic = useMemo(() => {
+    if (!selected) return undefined;
+    const owner = agents.find((agent) => agent.agentId === selected.agentId);
+    return owner?.topics.find((topic) => topic.id === selected.topicId);
+  }, [agents, selected]);
+  const selectedAgentId = selected?.agentId;
+  const selectedContent = selected ? contents[memoryCacheKey(selected.agentId, selected.topicId)] : undefined;
+
+  function requestOverview(): void {
+    void window.piDesktop.send({ type: "memory.overview" });
   }
 
   useEffect(() => {
-    requestIndex();
-    requestHealth();
+    requestOverview();
   }, []);
 
-  // 选中主题时按需拉正文（面板同款 memory.read；中心只用它的 summary 字段）。
+  // 选中主题时按需拉正文（跨助手也带 agentId；中心只用它的 summary 字段）。
   useEffect(() => {
-    if (!selected) {
+    if (!selectedTopic || !selectedAgentId) {
       setDraft(undefined);
       setConfirmDelete(false);
       return;
     }
-    if (!selectedContent || selectedContent.contentRevision !== selected.contentRevision) {
-      void window.piDesktop.send({ type: "memory.read", topicId: selected.id });
+    if (!selectedContent || selectedContent.contentRevision !== selectedTopic.contentRevision) {
+      void window.piDesktop.send({ type: "memory.read", topicId: selectedTopic.id, agentId: selectedAgentId });
     }
-  }, [selected?.id, selected?.contentRevision, selectedContent?.contentRevision]);
+  }, [selectedTopic?.id, selectedTopic?.contentRevision, selectedContent?.contentRevision, selectedAgentId]);
 
   // 草稿只在「换了主题 / 正文版本变了」时重置，避免后台推送把正在编辑的要点冲掉。
   useEffect(() => {
-    if (!selected) return;
+    if (!selectedTopic) return;
     setDraft({
-      layer: memoryLayerOf(selected),
-      description: selected.description,
+      layer: memoryLayerOf(selectedTopic),
+      description: selectedTopic.description,
       summary: selectedContent?.summary ?? "",
-      triggers: (selected.triggers ?? []).join(", ")
+      triggers: (selectedTopic.triggers ?? []).join(", ")
     });
     setSaved(false);
-  }, [selected?.id, selected?.contentRevision, selectedContent?.contentRevision]);
+  }, [selectedTopic?.id, selectedTopic?.contentRevision, selectedContent?.contentRevision]);
 
-  const counts = useMemo(() => {
+  const totals = useMemo(() => {
     const result: Record<MemoryLayer, number> = { core: 0, standard: 0, archive: 0 };
-    for (const topic of memory) result[memoryLayerOf(topic)] += 1;
-    return result;
-  }, [memory]);
-  const totalChars = useMemo(() => memory.reduce((sum, topic) => sum + topic.contentChars, 0), [memory]);
+    let chars = 0;
+    let topics = 0;
+    for (const agent of agents) {
+      for (const topic of agent.topics) {
+        result[memoryLayerOf(topic)] += 1;
+        chars += topic.contentChars;
+        topics += 1;
+      }
+    }
+    return { ...result, chars, topics };
+  }, [agents]);
 
-  const topics = useMemo(() => {
-    const needle = query.trim().toLowerCase();
-    const matched = memory.filter((topic) => (layer === "all" || memoryLayerOf(topic) === layer)
-      && (!needle || topic.title.toLowerCase().includes(needle) || topic.description.toLowerCase().includes(needle) || (topic.summaryPreview ?? "").toLowerCase().includes(needle)));
-    return sortTopics(matched, sort);
-  }, [memory, layer, query, sort]);
+  /** 归属筛选的选项：全部 / 全局 / 每个出现过的工作区。 */
+  const scopes = useMemo(() => {
+    const set = new Map<string, string>();
+    for (const agent of agents) {
+      for (const topic of agent.topics) {
+        if (topic.workspace && !set.has(topic.workspace)) set.set(topic.workspace, memoryScopeLabel(topic.workspace));
+      }
+    }
+    return [...set.entries()].map(([path, label]) => ({ path, label }));
+  }, [agents]);
+  /** 同一工作区可能出现重名末段，重名时退回完整路径。 */
+  const scopeLabel = (path: string): string => {
+    const sameName = scopes.filter((scope) => scope.label === memoryScopeLabel(path));
+    return sameName.length > 1 ? path : memoryScopeLabel(path);
+  };
+
+  const showAgentChips = agents.length > 1 && agentFilter === "all";
 
   async function send(command: Parameters<typeof window.piDesktop.send>[0]): Promise<boolean> {
     setBusy(true);
@@ -117,43 +143,43 @@ export function MemoryCenter({ onClose, onOpenTopic }: { onClose(): void; onOpen
   }
 
   async function saveMeta(): Promise<void> {
-    if (!selected || !draft) return;
+    if (!selectedTopic || !draft || !selectedAgentId) return;
     const done = await send({
       type: "memory.update",
-      topic: selected.title,
+      topic: selectedTopic.title,
       description: draft.description,
       layer: draft.layer,
       summary: draft.summary,
-      triggers: parseMemoryTriggers(draft.triggers)
+      triggers: parseMemoryTriggers(draft.triggers),
+      agentId: selectedAgentId
     });
     if (done) {
       setSaved(true);
-      requestIndex();
-      requestHealth();
+      requestOverview();
     }
   }
 
   async function toggleArchive(): Promise<void> {
-    if (!selected || !draft) return;
+    if (!selectedTopic || !draft || !selectedAgentId) return;
     const next: MemoryLayer = draft.layer === "archive" ? "standard" : "archive";
-    const done = await send({ type: "memory.update", topic: selected.title, layer: next });
+    const done = await send({ type: "memory.update", topic: selectedTopic.title, layer: next, agentId: selectedAgentId });
     if (done) {
       setDraft({ ...draft, layer: next });
-      requestIndex();
-      requestHealth();
+      requestOverview();
     }
   }
 
   async function removeSelected(): Promise<void> {
-    if (!selected) return;
-    const done = await send({ type: "memory.delete", topic: selected.title });
+    if (!selectedTopic || !selectedAgentId) return;
+    const done = await send({ type: "memory.delete", topic: selectedTopic.title, agentId: selectedAgentId });
     if (done) {
-      setSelectedId(undefined);
+      setSelected(undefined);
       setConfirmDelete(false);
-      requestIndex();
-      requestHealth();
+      requestOverview();
     }
   }
+
+  const focusIndex = focusAgent?.index;
 
   return (
     <div className="memory-center" data-pane="memory-center">
@@ -163,14 +189,14 @@ export function MemoryCenter({ onClose, onOpenTopic }: { onClose(): void; onOpen
           <div>
             <h2>记忆中心</h2>
             <p>
-              {memory.length} 个主题 · 总 {formatMemoryChars(totalChars)} · 核心 {counts.core} / 标准 {counts.standard} / 归档 {counts.archive}
-              {indexPreview ? ` · 索引 ${indexPreview.characters.toLocaleString("en-US")}/${indexPreview.budget.toLocaleString("en-US")} 字` : ""}
+              {agents.length} 个助手 · {totals.topics} 个主题 · 核心 {totals.core} / 标准 {totals.standard} / 归档 {totals.archive} · 总 {formatMemoryChars(totals.chars)}
+              {focusAgent && focusIndex ? ` · ${focusAgent.agentName} 索引 ${focusIndex.characters.toLocaleString("en-US")}/${focusIndex.budget.toLocaleString("en-US")} 字` : ""}
             </p>
           </div>
         </div>
         <div className="memory-center-head-actions">
           {!memoryEnabled && <span className="memory-center-disabled">记忆已停用</span>}
-          <button type="button" data-control="memory-center-refresh" title="刷新索引预览" onClick={requestIndex}><RefreshCw size={14} /></button>
+          <button type="button" data-control="memory-center-refresh" title="刷新各助手记忆库" onClick={requestOverview}><RefreshCw size={14} /></button>
           <button type="button" data-control="memory-center-close" title="关闭记忆中心" aria-label="关闭记忆中心" onClick={onClose}><X size={15} /></button>
         </div>
       </header>
@@ -182,69 +208,88 @@ export function MemoryCenter({ onClose, onOpenTopic }: { onClose(): void; onOpen
               <Search size={13} />
               <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="筛选标题、描述或要点…" aria-label="筛选记忆" />
             </label>
+            <select className="memory-center-select" value={agentFilter} onChange={(event) => { setAgentFilter(event.target.value); setSelected(undefined); }} aria-label="按助手筛选">
+              <option value="all">全部助手（{agents.length}）</option>
+              {agents.map((agent) => (
+                <option key={agent.agentId} value={agent.agentId}>{agent.agentName}（{agent.topics.length}）{agent.agentId === snapshotAgentId ? " · 当前" : ""}</option>
+              ))}
+            </select>
+            <select className="memory-center-select" value={scopeFilter} onChange={(event) => setScopeFilter(event.target.value)} aria-label="按归属筛选">
+              <option value="all">全部归属</option>
+              <option value="">全局</option>
+              {scopes.map((scope) => <option key={scope.path} value={scope.path}>{scopeLabel(scope.path)}</option>)}
+            </select>
             <div className="memory-center-tabs" role="group" aria-label="按层筛选">
               <button type="button" className={layer === "all" ? "active" : ""} onClick={() => setLayer("all")}>全部</button>
               {(["core", "standard", "archive"] as MemoryLayer[]).map((item) => (
                 <button key={item} type="button" className={layer === item ? "active" : ""} onClick={() => setLayer(item)}>{MEMORY_LAYER_LABEL[item]}</button>
               ))}
             </div>
-            <select className="memory-center-sort" value={sort} onChange={(event) => setSort(event.target.value as SortMode)} aria-label="排序">
-              <option value="updated">按更新</option>
-              <option value="size">按字数</option>
-              <option value="title">按名称</option>
-            </select>
           </div>
 
-          {topics.length === 0 ? (
-            <p className="memory-center-empty">{memory.length === 0 ? "还没有记忆主题。对话里说「记住 …」让助手写入。" : "没有匹配当前筛选的主题。"}</p>
-          ) : (
-            <div className="memory-center-grid">
-              {topics.map((topic) => (
-                <MemoryCard
-                  key={topic.id}
-                  topic={topic}
-                  active={topic.id === selectedId}
-                  onSelect={(item) => { setSelectedId(item.id); setDetailTab("topic"); }}
-                  onOpen={onOpenTopic}
-                  onToggleArchive={(item) => void send({ type: "memory.update", topic: item.title, layer: memoryLayerOf(item) === "archive" ? "standard" : "archive" }).then(requestIndex)}
-                  onDelete={(item) => { setSelectedId(item.id); setConfirmDelete(true); }}
-                />
-              ))}
-            </div>
-          )}
+          <MemoryGraph
+            overview={overview}
+            currentAgentId={snapshotAgentId}
+            agentFilter={agentFilter}
+            layerFilter={layer}
+            scopeFilter={scopeFilter}
+            query={query}
+            selected={selected}
+            onSelect={(agentId, topic) => { setSelected({ agentId, topicId: topic.id }); setDetailTab("topic"); }}
+          />
         </section>
 
         <aside className="memory-center-detail">
           <div className="memory-center-detail-tabs" role="tablist" aria-label="记忆中心视图">
             <button type="button" role="tab" aria-selected={detailTab === "topic"} className={detailTab === "topic" ? "active" : ""} onClick={() => setDetailTab("topic")}><FileText size={13} />主题详情</button>
-            <button type="button" role="tab" aria-selected={detailTab === "index"} className={detailTab === "index" ? "active" : ""} onClick={() => { setDetailTab("index"); requestIndex(); }}><Brain size={13} />模型索引</button>
-            <button type="button" role="tab" aria-selected={detailTab === "health"} className={detailTab === "health" ? "active" : ""} onClick={() => { setDetailTab("health"); requestHealth(); }}><Activity size={13} />健康</button>
+            <button type="button" role="tab" aria-selected={detailTab === "index"} className={detailTab === "index" ? "active" : ""} onClick={() => { setDetailTab("index"); requestOverview(); }}><Brain size={13} />模型索引</button>
+            <button type="button" role="tab" aria-selected={detailTab === "health"} className={detailTab === "health" ? "active" : ""} onClick={() => { setDetailTab("health"); requestOverview(); }}><Activity size={13} />健康</button>
           </div>
 
           {detailTab === "health" ? (
-            <MemoryHealthPane health={health} onRefresh={requestHealth} onSelect={(topic) => { setSelectedId(topic.id); setDetailTab("topic"); }} onArchive={(topic) => void send({ type: "memory.update", topic: topic.title, layer: "archive" }).then(() => { requestIndex(); requestHealth(); })} />
+            <MemoryHealthPane
+              health={focusAgent?.health}
+              topics={focusAgent?.topics ?? memory}
+              onRefresh={requestOverview}
+              onSelect={(topic) => { if (focusAgent) setSelected({ agentId: focusAgent.agentId, topicId: topic.id }); setDetailTab("topic"); }}
+              onArchive={(topic) => void send({ type: "memory.update", topic: topic.title, layer: "archive", ...(focusAgent ? { agentId: focusAgent.agentId } : {}) }).then(requestOverview)}
+            />
           ) : detailTab === "index" ? (
             <div className="memory-center-index">
               <p className="memory-center-index-note">
-                这是<b>新会话</b>会注入的索引（与会话注入走同一函数）。当前会话的索引在创建时已冻结，改记忆不会影响它；超预算时会按层压缩描述并写脚注。
+                {focusAgent
+                  ? `这是「${focusAgent.agentName}」在新会话里会注入的索引（与会话注入走同一函数，按${focusAgent.workspace ? `「${scopeLabel(focusAgent.workspace)}」` : "全局"}口径计算）。当前会话的索引在创建时已冻结，改记忆不会影响它；超预算时会按层压缩描述并写脚注。`
+                  : "还没有可展示的记忆库。"}
               </p>
               <div className="memory-center-index-meta">
-                <span>{indexPreview ? `${indexPreview.characters.toLocaleString("en-US")} / ${indexPreview.budget.toLocaleString("en-US")} 字` : "尚未加载"}</span>
-                <button type="button" onClick={requestIndex} disabled={busy}><RefreshCw size={12} />刷新</button>
+                <span>{focusIndex ? `${focusIndex.characters.toLocaleString("en-US")} / ${focusIndex.budget.toLocaleString("en-US")} 字` : "尚未加载"}</span>
+                <button type="button" onClick={requestOverview} disabled={busy}><RefreshCw size={12} />刷新</button>
               </div>
-              <pre className="memory-center-index-pre">{indexPreview?.markdown || "（暂无可见主题）"}</pre>
+              <pre className="memory-center-index-pre">{focusIndex?.markdown || "（暂无可见主题）"}</pre>
             </div>
-          ) : !selected || !draft ? (
-            <p className="memory-center-empty">左侧选一张卡片查看详情；正文在预览窗口打开。</p>
+          ) : !selectedTopic || !draft || !selectedAgentId ? (
+            <p className="memory-center-empty">左侧点一个节点查看详情；节点左侧的连线表示它在模型索引里占了一行。</p>
           ) : (
             <div className="memory-center-meta">
               <div className="memory-center-detail-title">
-                <h3>{selected.title}</h3>
-                <span className={`memory-layer-chip ${memoryLayerOf(selected)}`}>{MEMORY_LAYER_LABEL[memoryLayerOf(selected)]}</span>
+                <h3>{selectedTopic.title}</h3>
+                <span className={`memory-layer-chip ${memoryLayerOf(selectedTopic)}`}>{MEMORY_LAYER_LABEL[memoryLayerOf(selectedTopic)]}</span>
               </div>
               <p className="memory-center-detail-stats">
-                {formatMemoryChars(selected.contentChars)} · {selected.updatedAt} · {selected.workspace ? selected.workspace : "全局"}
+                {formatMemoryChars(selectedTopic.contentChars)} · {selectedTopic.updatedAt} · {memoryScopeLabel(selectedTopic.workspace)}
+                {focusAgent ? ` · ${focusAgent.agentName}` : ""}
               </p>
+              {focusIndex && (() => {
+                const entry = focusIndex.entries.find((item) => item.topicId === selectedTopic.id);
+                if (!entry) return null;
+                return (
+                  <p className="memory-center-detail-index">
+                    {entry.placed
+                      ? `模型索引：占 ${entry.chars} 字${entry.compacted ? "（描述/要点被压缩）" : ""}`
+                      : memoryLayerOf(selectedTopic) === "archive" ? "模型索引：不进常驻索引（可检索）" : "模型索引：被预算省略（靠 memory_search 到达）"}
+                  </p>
+                );
+              })()}
 
               <label className="memory-center-field">
                 <span>分层</span>
@@ -272,7 +317,7 @@ export function MemoryCenter({ onClose, onOpenTopic }: { onClose(): void; onOpen
 
               <div className="memory-center-actions">
                 <button type="button" className="primary" data-control="memory-center-save" disabled={busy} onClick={() => void saveMeta()}><Save size={13} />保存元信息</button>
-                <button type="button" data-control="memory-center-open" onClick={() => onOpenTopic(selected)}><FileText size={13} />打开正文</button>
+                <button type="button" data-control="memory-center-open" onClick={() => onOpenTopic(selectedTopic, selectedAgentId)}><FileText size={13} />打开正文</button>
                 <button type="button" data-control="memory-center-archive" disabled={busy} onClick={() => void toggleArchive()}>
                   {draft.layer === "archive" ? <ArchiveRestore size={13} /> : <Archive size={13} />}
                   {draft.layer === "archive" ? "恢复" : "归档"}

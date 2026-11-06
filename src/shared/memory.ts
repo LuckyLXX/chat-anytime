@@ -71,6 +71,36 @@ export const MEMORY_OUTLINE_MAX_SECTIONS = 40;
 export const MEMORY_DEDUPE_MAX_ENTRIES = 40;
 export const MEMORY_DEDUPE_TTL_MS = 20 * 60 * 1000;
 
+/**
+ * 会话注入索引的结构化投影（`memory.overview` 与记忆中心图谱使用）。
+ *
+ * markdown 与会话注入走同一函数（snapshotMarkdown），entries 只是把「每一行
+ * 属于哪个主题、占多少字、有没有被压缩/省略」显式化，避免 UI 再解析文本。
+ */
+export interface MemorySnapshotEntry {
+  topicId: string;
+  title: string;
+  layer: MemoryLayer;
+  /** 是否在索引里拥有一行；false = 没进索引（归档、或标准层被预算省略）。 */
+  placed: boolean;
+  /** 该行占用的字符数（含行前换行，与预算口径一致）；未放置为 0。 */
+  chars: number;
+  /** 是否被压缩（要点/描述被截短，或只剩标题）。 */
+  compacted: boolean;
+  /** 是否因预算被省略（只有标准层可能）。 */
+  omitted: boolean;
+}
+
+export interface MemorySnapshot {
+  markdown: string;
+  /** markdown 字符数（含脚注，脚注不占预算）。 */
+  characters: number;
+  budget: number;
+  entries: MemorySnapshotEntry[];
+  omitted: number;
+  compacted: boolean;
+}
+
 /** 检索排序的新近度：30 天半衰、下限 0.5；7 天内更新的主题免疫。 */
 export const MEMORY_RECENCY_HALF_LIFE_DAYS = 30;
 export const MEMORY_RECENCY_MIN = 0.5;

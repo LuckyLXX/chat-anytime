@@ -1382,6 +1382,11 @@ export function createDemoApi(): DesktopApi {
           emit({ type: "subagent.transcript-result", childSessionId: command.childSessionId, messages });
           break;
         }
+        case "memory.overview": {
+          // 演示环境没有真实的按助手记忆库：回空总览（记忆中心显示空态，而不是一直加载）。
+          emit({ type: "memory.overview", overview: { agents: [], at: Date.now() } });
+          break;
+        }
         case "memory.read": {
           // 演示环境没有记忆正文：明确回错误，避免预览窗口一直停在加载态。
           emit({ type: "memory.topic-error", ...(command.topicId ? { topicId: command.topicId } : {}), message: "演示环境没有可读取的记忆正文。" });

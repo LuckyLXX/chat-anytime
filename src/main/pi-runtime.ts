@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readSync, statSync, watch } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readSync, statSync, watch } from "node:fs";
 import { readFile, readdir, realpath, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative as relativePath, resolve, sep } from "node:path";
 import { estimateTokens } from "@earendil-works/pi-coding-agent";
@@ -42,6 +42,8 @@ import type {
   HookRule,
   HookSummary,
   McpServerSummary,
+  MemoryOverview,
+  MemoryOverviewAgent,
   MemoryTopicSummary,
   ModelOption,
   PromptAttachment,
@@ -171,7 +173,7 @@ import {
 } from "./session-text-index.js";
 import * as runtimeMemoryTools from "./runtime-memory-tools.js";
 import { MEMORY_SNAPSHOT_BUDGET_CHARS } from "../shared/memory.js";
-import { createMemoryStore, memoryDirFor, type MemoryStore } from "./memory-store.js";
+import { createMemoryStore, memoryDirExists, memoryDirFor, primaryMemoryWorkspace, type MemoryStore } from "./memory-store.js";
 import { analyzeMemoryHealth } from "../shared/memory-health.js";
 import * as runtimeQuestionTool from "./runtime-question-tool.js";
 import * as runtimeSkills from "./runtime-skills.js";
@@ -1225,6 +1227,89 @@ function refreshMemory(): void {
   if (memoryStore) memoryTopics = memoryStore.summaries();
   emitMemory();
   emitResourceCatalog();
+}
+
+/**
+ * 按助手解析记忆库：缺省 = 当前会话的助手（活跃 record 的 store）。
+ * 记忆按助手分目录（pidesktop-memory/<agentId>/），所以面板查看/整理其他
+ * 助手的记忆时必须显式带上 agentId，否则会写错库。其他助手的 store 按
+ * mtime 缓存读取，失效的目录（没有记忆）视为不存在。
+ */
+const otherMemoryStores = new Map<string, MemoryStore>();
+
+function currentAgentId(): string | undefined {
+  return activeRuntime?.agent.id;
+}
+
+function resolveMemoryStore(agentId: string | undefined): { store: MemoryStore; agentId: string } | undefined {
+  const target = agentId?.trim();
+  if (!target) {
+    const current = currentAgentId();
+    return memoryStore && current ? { store: memoryStore, agentId: current } : undefined;
+  }
+  if (target === currentAgentId() && memoryStore) return { store: memoryStore, agentId: target };
+  const cached = otherMemoryStores.get(target);
+  if (cached) return { store: cached, agentId: target };
+  const dir = memoryDirFor(getAgentDir(), target);
+  if (!memoryDirExists(dir)) return undefined;
+  const store = createMemoryStore(dir, () => {
+    // 非活跃助手的写操作不影响当前会话的注入快照（索引在会话创建时冻结），
+    // 记忆中心下一次 memory.overview 会按 mtime 读到新数据。
+  });
+  otherMemoryStores.set(target, store);
+  return { store, agentId: target };
+}
+
+/** 面板命令的 store 解析：缺省当前助手；带 agentId 时按该助手的记忆库。 */
+function memoryStoreOrThrow(agentId: string | undefined): { store: MemoryStore; agentId: string } {
+  const resolved = resolveMemoryStore(agentId);
+  if (!resolved) {
+    const target = agentId?.trim();
+    throw new Error(target ? `未找到助手「${target}」的记忆库` : "当前没有可用的记忆存储，请先打开一个会话");
+  }
+  return resolved;
+}
+
+/**
+ * 记忆总览：目录里每个有主题的助手各一份（主题 + 索引快照 + 健康）。
+ * 索引口径 = 该助手记忆里主题最多的那个工作区（primaryMemoryWorkspace），
+ * 与「用户在这个助手的主工作区里开会话」看到的一致；没有工作区绑定则按全局。
+ */
+function buildMemoryOverview(): MemoryOverview {
+  const base = join(getAgentDir(), "pidesktop-memory");
+  const agentIds = new Set<string>();
+  try {
+    for (const entry of readdirSync(base, { withFileTypes: true })) {
+      if (entry.isDirectory() && !entry.name.startsWith(".")) agentIds.add(entry.name);
+    }
+  } catch {
+    // 目录不存在 = 还没有任何记忆库，返回空总览（不报错）。
+  }
+  const nameOf = new Map((settings?.agents ?? []).map((agent) => [agent.id, agent.name]));
+  const current = currentAgentId();
+  const rows: MemoryOverviewAgent[] = [];
+  for (const agentId of agentIds) {
+    const resolved = resolveMemoryStore(agentId);
+    if (!resolved) continue;
+    const topics = resolved.store.summaries();
+    if (topics.length === 0) continue;
+    const workspace = primaryMemoryWorkspace(topics);
+    const index = resolved.store.snapshotDetailed(workspace, MEMORY_SNAPSHOT_BUDGET_CHARS);
+    rows.push({
+      agentId,
+      agentName: nameOf.get(agentId) ?? agentId,
+      topics,
+      ...(workspace ? { workspace } : {}),
+      index,
+      health: analyzeMemoryHealth(topics, { indexChars: index.characters, indexBudget: MEMORY_SNAPSHOT_BUDGET_CHARS })
+    });
+  }
+  rows.sort((left, right) => {
+    if (left.agentId === current) return -1;
+    if (right.agentId === current) return 1;
+    return right.topics.length - left.topics.length || left.agentName.localeCompare(right.agentName, "zh");
+  });
+  return { agents: rows, at: Date.now() };
 }
 
 /** 某 Agent 的自动化任务文件路径。 */
@@ -6994,9 +7079,9 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       break;
     }
     case "memory.create": {
-      if (!memoryStore) throw new Error("当前没有可用的记忆存储，请先打开一个会话");
+      const resolved = memoryStoreOrThrow(command.agentId);
       const targetWorkspace = command.sessionId ? resolveTargetRecord(command.sessionId).workspace : workspace;
-      memoryStore.save({
+      resolved.store.save({
         title: command.topic,
         description: command.description,
         content: command.content,
@@ -7008,9 +7093,9 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       break;
     }
     case "memory.update": {
-      if (!memoryStore) throw new Error("当前没有可用的记忆存储，请先打开一个会话");
+      const resolved = memoryStoreOrThrow(command.agentId);
       // 不传 bindWorkspace：面板编辑保留既有工作区绑定。
-      memoryStore.update(command.topic, {
+      resolved.store.update(command.topic, {
         ...(command.description !== undefined ? { description: command.description } : {}),
         ...(command.content !== undefined ? { content: command.content } : {}),
         ...(command.layer !== undefined ? { layer: command.layer } : {}),
@@ -7033,22 +7118,28 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       break;
     }
     case "memory.delete": {
-      if (!memoryStore) throw new Error("当前没有可用的记忆存储，请先打开一个会话");
-      if (!memoryStore.remove(command.topic)) throw new Error(`未找到记忆主题「${command.topic}」`);
+      const resolved = memoryStoreOrThrow(command.agentId);
+      if (!resolved.store.remove(command.topic)) throw new Error(`未找到记忆主题「${command.topic}」`);
+      break;
+    }
+    case "memory.overview": {
+      // 记忆中心图谱：所有助手的主题 + 索引快照 + 健康（索引口径见 buildMemoryOverview）。
+      post({ type: "memory.overview", overview: buildMemoryOverview() });
       break;
     }
     case "memory.read": {
-      if (!memoryStore) {
-        post({ type: "memory.topic-error", ...(command.topicId ? { topicId: command.topicId } : {}), message: "当前没有可用的记忆存储，请先打开一个会话" });
+      const resolved = resolveMemoryStore(command.agentId);
+      if (!resolved) {
+        post({ type: "memory.topic-error", ...(command.topicId ? { topicId: command.topicId } : {}), ...(command.agentId ? { agentId: command.agentId } : {}), message: "当前没有可用的记忆存储，请先打开一个会话" });
         break;
       }
       // 面板治理视图：允许读取其他工作区绑定的主题（模型侧 memory_read 仍有可见性过滤）。
       const key = command.topicId?.trim() || command.topic?.trim() || "";
-      const topic = key ? memoryStore.read(key) : undefined;
+      const topic = key ? resolved.store.read(key) : undefined;
       if (topic) {
-        post({ type: "memory.topic", topic });
+        post({ type: "memory.topic", topic, agentId: resolved.agentId });
       } else {
-        post({ type: "memory.topic-error", ...(command.topicId ? { topicId: command.topicId } : {}), message: `未找到记忆主题「${key}」` });
+        post({ type: "memory.topic-error", ...(command.topicId ? { topicId: command.topicId } : {}), agentId: resolved.agentId, message: `未找到记忆主题「${key}」` });
       }
       break;
     }

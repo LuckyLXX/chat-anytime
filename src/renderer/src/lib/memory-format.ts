@@ -51,3 +51,20 @@ export function parseMemoryTriggers(value: string): string[] {
     .map((item) => item.trim())
     .filter(Boolean);
 }
+
+/** 记忆正文缓存键：跨助手时 topicId 可能重名，必须带 agentId（空串 = 未知/当前）。 */
+export function memoryCacheKey(agentId: string | undefined, topicId: string): string {
+  return `${agentId ?? ""}::${topicId}`;
+}
+
+/** 归属标签：全局记忆 / 工作区名（取路径末段，Windows 与 POSIX 都吃）。 */
+export function memoryScopeName(workspace: string | undefined): string {
+  if (!workspace) return "全局";
+  const normalized = workspace.replaceAll("\\", "/").replace(/\/+$/u, "");
+  const slash = normalized.lastIndexOf("/");
+  return slash >= 0 ? normalized.slice(slash + 1) : normalized;
+}
+
+export function memoryScopeLabel(workspace: string | undefined): string {
+  return workspace ? memoryScopeName(workspace) : "全局";
+}
