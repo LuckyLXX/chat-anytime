@@ -41,6 +41,7 @@ import { Client as Ssh2Client } from "ssh2";
 import { createSshHostStore, type SshHostCrypto } from "./ssh-host-store.js";
 import { createSshKnownHostsStore } from "./ssh-known-hosts.js";
 import { SshConnectionManager, type SshClientLike } from "./ssh-connections.js";
+import { installSingleInstanceGuard } from "./single-instance.js";
 
 /**
  * 关闭 Chromium 的「原生窗口遮挡检测」（Windows）：不关它，浏览器自动化截图会在
@@ -59,6 +60,28 @@ import { SshConnectionManager, type SshClientLike } from "./ssh-connections.js";
  *
  * 合并而非覆盖：将来别处若也追加 disable-features，这里把已有值接在前面。
  */
+
+/**
+ * 单实例守卫（2026-11-07，用户报「双击安装后的 exe 图标会再起一个 ChatAnyTime」）。
+ *
+ * 必须在这里、`app.whenReady()` 之前安装：
+ *  - `requestSingleInstanceLock()` 越早请求越好，第二个进程才能尽早带着锁失败退出；
+ *  - `second-instance` 必须在 ready 之前就注册好，否则启动早期到达的「又点了一次图标」
+ *    会丢（那一次双击就变成什么都不发生）。
+ *
+ * 只有安装版启用：锁按 userData 互斥，而 dev 与安装版共用同一数据目录，启用后会挡住
+ * 「npm run dev 与安装版并行」的日常流程（用户 2026-11-07 明确选择仅安装版）。
+ * 详见 single-instance.ts 顶部的实测事实与理由。
+ */
+const singleInstance = installSingleInstanceGuard({
+  isPackaged: app.isPackaged,
+  requestLock: () => app.requestSingleInstanceLock(),
+  exit: (code) => app.exit(code),
+  isReady: () => app.isReady(),
+  onSecondInstance: (listener) => { app.on("second-instance", () => listener()); },
+  activate: () => showMainWindow()
+});
+
 const disabledFeatures = ["CalculateNativeWinOcclusion"];
 const existingDisabledFeatures = app.commandLine.getSwitchValue("disable-features").split(",").filter(Boolean);
 app.commandLine.appendSwitch("disable-features", [...new Set([...existingDisabledFeatures, ...disabledFeatures])].join(","));
@@ -1254,7 +1277,21 @@ function registerIpc(): void {
   });
   ipcMain.handle("runtime:send", (_event, command: RuntimeCommand): void => { updateSettings(command); sendToRuntime(command); });
 }
-app.whenReady().then(() => { Menu.setApplicationMenu(null); registerPreviewFileProtocol(); registerIpc(); startRuntime(); createWindow(); applyPaletteHotkey(); app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); else showMainWindow(); }); });
+app.whenReady().then(() => {
+  // 次实例（已有实例持锁）：守卫已经 `app.exit(0)` 终止了进程，这一行是纵深防御——
+  // 任何平台上都不允许第二个 runtime / 窗口 / 托盘被建起来（实测 app.quit() 之后
+  // whenReady 仍会 resolve，见 single-instance.ts）。
+  if (!singleInstance.primary) return;
+  Menu.setApplicationMenu(null);
+  registerPreviewFileProtocol();
+  registerIpc();
+  startRuntime();
+  createWindow();
+  applyPaletteHotkey();
+  // 启动期间（ready 之前）到达的「又点了一次图标」：窗口现在已经建好，补一次前置。
+  singleInstance.flushPendingActivation();
+  app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); else showMainWindow(); });
+});
 app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
 app.on("before-quit", () => { quitting = true; settingsPersistence?.flush(); browserAutomationController?.dispose(); computerOverlayController?.dispose(); browserPreviewController?.dispose(); panelWindows?.dispose(); trayController?.dispose(); terminalManager.disposeAll(); sshConnectionManager?.disposeAll(); runtimeProcess?.kill(); });
 app.on("will-quit", () => { globalShortcut.unregisterAll(); });
