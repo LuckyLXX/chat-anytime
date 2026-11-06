@@ -97,7 +97,8 @@ describe("memory tools", () => {
       ["memory_read", { topic: "t" }],
       ["memory_list", {}],
       ["memory_search", { query: "t" }],
-      ["memory_delete", { topic: "t" }]
+      ["memory_delete", { topic: "t" }],
+      ["memory_layer", { topic: "t", layer: "archive" }]
     ] as const) {
       expect(await harness.run(name, params)).toContain("已停用");
     }

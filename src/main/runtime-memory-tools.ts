@@ -58,7 +58,7 @@ export function buildMemorySystemPromptBlock(): string {
     "怎么改：整主题替换用 memory_write（改前先 memory_read 读全文，不得丢失既有要点）；追加/下沉用 memory_append 按节追加，不需要先读全文。",
     "确认边界：普通写入直接做、完成后一句话告知；删除主题或大段改写先向用户说明并取得确认。",
     "索引预算：主题总数超过约 15 个时，主动把相近主题合并重写为一个。",
-    "维护：定期自检——core 必须有点要；正文 >8000 拆分、>12000 下沉归档；90 天未更新的项目知识考虑归档；标题相近的主题合并重写。"
+    "维护：定期自检——core 必须有点要；正文 >8000 拆分、>12000 下沉归档；90 天未更新的项目知识考虑归档（用 memory_layer 改层，不必重写正文）；标题相近的主题合并重写。"
   ].join("\n");
 }
 
@@ -445,6 +445,29 @@ export function buildMemoryTools({ store, workspace, enabled }: MemoryToolContex
           "读命中节：memory_read(topic=\"…\", section=\"…\")；索引没列出的主题也能搜到。"
         ].filter(Boolean).join("\n");
         return { content: [{ type: "text" as const, text }], details: { skipped: false, count: shown } };
+      }
+    }),
+    defineTool({
+      name: "memory_layer",
+      label: "调整记忆分层",
+      description: "只改主题的分层（core / standard / archive），不重写正文：core 进索引并带要点，standard 按需查，archive 不进索引但仍可检索。整理记忆时用它替代整篇重写。",
+      promptSnippet: "memory_layer: 调整主题分层（不重写正文）",
+      parameters: Type.Object({
+        topic: Type.String({ description: "主题标题" }),
+        layer: Type.String({ description: "core / standard / archive" })
+      }),
+      execute: async (_id, params): Promise<{ content: { type: "text"; text: string }[]; details: { skipped: boolean; topic: string; layer: MemoryLayer } }> => {
+        if (disabled()) return { content: [{ type: "text" as const, text: DISABLED_REPLY }], details: { skipped: true, topic: "", layer: "standard" } };
+        const name = String(params?.topic ?? "");
+        const target = String(params?.layer ?? "").trim().toLowerCase() as MemoryLayer;
+        if (!MEMORY_LAYERS.includes(target)) throw new Error("layer 只能是 core / standard / archive");
+        const topic = readVisible(name);
+        if (!topic) throw new Error(`未找到记忆主题「${name}」；先用 memory_list 确认标题`);
+        const updated = store.update(topic.title, { layer: target });
+        return {
+          content: [{ type: "text" as const, text: `已把「${updated.title}」调整为${layerLabel(updated.layer)}层（正文 ${chars(updated.contentChars)} 字未改写）。` }],
+          details: { skipped: false, topic: updated.title, layer: (updated.layer ?? "standard") as MemoryLayer }
+        };
       }
     }),
     defineTool({
