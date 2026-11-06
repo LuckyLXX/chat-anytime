@@ -2500,8 +2500,6 @@ export function App(): ReactNode {
   };
   const browserTabCount = (preview?.tabs ?? []).filter((tab) => tab.target.type === "browser").length;
   const terminalTabCount = (preview?.tabs ?? []).filter((tab) => tab.target.type === "terminal" && !tab.target.galleryId).length;
-  const previewHasTabs = (preview?.tabs.length ?? 0) > 0;
-  const previewToggleLabel = previewOpened ? "关闭预览" : previewHasTabs ? "打开预览" : "打开浏览器";
   const enabledAutomationCount = automation.filter((task) => task.enabled).length;
   const paletteActions: PaletteAction[] = [];
 
@@ -2686,21 +2684,17 @@ export function App(): ReactNode {
             <button className={`icon-button team-toggle${teamMode ? " active" : ""}`} data-control="team-toggle" type="button" disabled={!activeSessionId} aria-label={teamMode ? "关闭团队模式" : "开启团队模式"} aria-pressed={teamMode} title={!activeSessionId ? "请先创建或打开一个话题" : teamMode ? "关闭团队模式（本会话将撤下 team_* 工具；已创建的成员继续在后台）" : "团队模式（AI 可创建常驻成员、互发消息与共享任务板；本会话注入 team_* 工具，schema 实测 ≈1.1K tokens/请求）"} onClick={() => void window.piDesktop.send({ type: "session.teamMode", enabled: !teamMode }).catch((error) => setMessageActionError(error instanceof Error ? error.message : "团队模式切换失败"))}><Users size={18} /></button>
             <button className={`icon-button design-toggle${designMode ? " active" : ""}`} data-control="design-toggle" type="button" disabled={!activeSessionId} aria-label={designMode ? "退出设计模式" : "进入设计模式"} aria-pressed={designMode} title={!activeSessionId ? "请先创建或打开一个话题" : designMode ? "退出设计模式（本会话将不再注入设计工具）" : "设计模式（AI 设计工作台；本会话注入 design_* 工具）"} onClick={() => void window.piDesktop.send({ type: "session.designMode", enabled: !designMode }).catch((error) => setMessageActionError(error instanceof Error ? error.message : "设计模式切换失败"))}><Palette size={18} /></button>
             <GalleryMenu apps={galleryApps} onRun={(app) => void runGalleryApp(app)} onDevelop={developGalleryApp} onOpenWall={() => setGalleryWallOpen(true)} onPublish={() => openGalleryDraft()} onMenuOpenChange={setGalleryMenuOpen} />
-            <button className="icon-button preview-panel-toggle" data-control="preview-toggle" type="button" aria-label={previewToggleLabel} title={previewToggleLabel} onClick={() => {              // 顶部按钮始终完全关闭/打开预览面板：即使已有标签页也不会
+            <button className="icon-button preview-panel-toggle" data-control="preview-toggle" type="button" aria-label={previewOpened ? "关闭预览" : "打开预览"} title={previewOpened ? "关闭预览" : "打开预览"} onClick={() => {              // 顶部按钮始终完全关闭/打开预览面板：即使已有标签页也不会
               // 折叠成残留一列栏+展开按钮的中间态。
+              // 注意：这个按钮只负责面板开合，不要在这里直接开浏览器标签——
+              // 快捷打开浏览器的是 Ctrl+Shift+B 与命令面板的「打开浏览器」（2026-11-05 用户纠正）。
               if (previewOpened) {
                 setPreviewOpened(false);
-                return;
+              } else {
+                setAutomationPanelOpen(false);
+                setAutomationCenterOpen(false);
+                setPreviewOpened(true);
               }
-              // 空面板时「浏览器」是绝大多数情况的下一步：直接开一个浏览器标签，
-              // 把「打开预览 → 点浏览器」两步并成一步（2026-11-05 用户要求）。
-              if (!previewHasTabs) {
-                openBrowserTab();
-                return;
-              }
-              setAutomationPanelOpen(false);
-              setAutomationCenterOpen(false);
-              setPreviewOpened(true);
             }}>{previewOpened ? <PanelRightClose size={18} /> : <Eye size={18} />}</button>
           </div>
         </header>
