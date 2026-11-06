@@ -1,6 +1,7 @@
 import { AlertCircle, Brain, LoaderCircle, RefreshCw } from "lucide-react";
 import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
 import type { MemoryTopic } from "../../../shared/protocol";
+import { memoryCacheKey } from "../lib/memory-format";
 import { useDesktopStore } from "../store";
 import type { Artifact } from "../lib/content";
 import type { EditorSaveStatus } from "./MarkdownEditor";
@@ -11,6 +12,8 @@ import type { PreviewEditorState } from "./ArtifactPreview";
 
 interface MemoryPreviewContentProps {
   topicId: string;
+  /** 主题所属助手（跨助手浏览时给出；缺省 = 当前会话的助手）。 */
+  agentId?: string;
   /** 所属预览 tab 的 id（透传给编辑器，避免异步完成后写错 tab）。 */
   tabId: string;
   showSource: boolean;
@@ -35,10 +38,15 @@ interface MemoryPreviewContentProps {
  * 编辑期间后台 revision 变化不覆盖编辑器（保存仍是后写胜出，与面板删除/新建
  * 的治理语义一致）；主题被删除时给出空态提示。
  */
-export function MemoryPreviewContent({ topicId, tabId, showSource, editorState, onEditorChange, onEditorSaved, onEditorStatusChange, onSaveError, onOpenArtifact }: MemoryPreviewContentProps): ReactNode {
-  const summary = useDesktopStore((state) => state.memory.find((item) => item.id === topicId));
-  const cached = useDesktopStore((state) => state.memoryContents[topicId]);
-  const error = useDesktopStore((state) => state.memoryTopicErrors[topicId]);
+export function MemoryPreviewContent({ topicId, agentId, tabId, showSource, editorState, onEditorChange, onEditorSaved, onEditorStatusChange, onSaveError, onOpenArtifact }: MemoryPreviewContentProps): ReactNode {
+  const snapshotAgentId = useDesktopStore((state) => state.snapshot.agentId);
+  const summary = useDesktopStore((state) => {
+    if (!agentId || agentId === state.snapshot.agentId) return state.memory.find((item) => item.id === topicId);
+    return state.memoryOverview?.agents.find((agent) => agent.agentId === agentId)?.topics.find((item) => item.id === topicId);
+  });
+  const effectiveAgentId = agentId ?? snapshotAgentId;
+  const cached = useDesktopStore((state) => state.memoryContents[memoryCacheKey(effectiveAgentId, topicId)]);
+  const error = useDesktopStore((state) => state.memoryTopicErrors[memoryCacheKey(effectiveAgentId, topicId)]);
   const editing = editorState?.editing === true;
   const lastTopic = useRef<MemoryTopic | undefined>(cached);
   if (cached) lastTopic.current = cached;
@@ -52,8 +60,8 @@ export function MemoryPreviewContent({ topicId, tabId, showSource, editorState, 
     if (editing && lastTopic.current?.id === topicId) return;
     if (requestedRevision.current === summary.contentRevision) return;
     requestedRevision.current = summary.contentRevision;
-    void window.piDesktop.send({ type: "memory.read", topicId });
-  }, [summary?.id, summary?.contentRevision, cached?.contentRevision, editing, topicId, retry]);
+    void window.piDesktop.send({ type: "memory.read", topicId, ...(agentId ? { agentId } : {}) });
+  }, [summary?.id, summary?.contentRevision, cached?.contentRevision, editing, topicId, retry, agentId, effectiveAgentId]);
 
   if (!summary) {
     return (
@@ -106,7 +114,7 @@ export function MemoryPreviewContent({ topicId, tabId, showSource, editorState, 
           tabId={tabId}
           relativePath={`pidesktop-memory/${topic.id}.md`}
           initialContent={topic.content}
-          persistContent={(content) => window.piDesktop.send({ type: "memory.update", topic: summary.title, description: summary.description, content })}
+          persistContent={(content) => window.piDesktop.send({ type: "memory.update", topic: summary.title, description: summary.description, content, ...(agentId ? { agentId } : {}) })}
           onDirtyChange={(dirty) => onEditorChange?.({ dirty })}
           onSaved={onEditorSaved}
           onStatusChange={onEditorStatusChange}

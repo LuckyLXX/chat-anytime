@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { memoryCacheKey } from "./lib/memory-format";
 import { applyRuntimeStatePatch, applySessionStatePatch } from "../../shared/snapshot-patch";
 import type {
   AutomationRunRecord,
@@ -13,6 +14,7 @@ import type {
   GalleryApp,
   HookEventName,
   MemoryHealth,
+  MemoryOverview,
   MemoryTopic,
   MemoryTopicSummary,
   ModelOption,
@@ -494,14 +496,19 @@ interface DesktopState {
   /** 冷会话解析中（utility 在同步读 JSONL 前推送）；侧栏行显示 spinner。 */
   openingSession?: { path: string; sessionId?: string; at: number };
   memory: MemoryTopicSummary[];
-  /** 记忆正文按需缓存：topic id → 完整主题（响应 memory.read）。 */
+  /**
+   * 记忆正文按需缓存：`<agentId>::<topicId>` → 完整主题（响应 memory.read）。
+   * 记忆按助手分库，跨助手时 topicId 可能重名，所以键必须带 agentId。
+   */
   memoryContents: Record<string, MemoryTopic>;
-  /** 记忆正文读取失败：topic id → 错误文案。 */
+  /** 记忆正文读取失败：`<agentId>::<topicId>` → 错误文案。 */
   memoryTopicErrors: Record<string, string>;
   /** 记忆中心「模型实际看到的索引快照」（响应 memory.indexPreview；只在中心打开时刷新）。 */
   memoryIndexPreview?: { markdown: string; characters: number; budget: number; at: number };
   /** 记忆中心「健康」页结果（响应 memory.health）。 */
   memoryHealth?: MemoryHealth;
+  /** 记忆中心图谱：所有助手的主题 + 索引快照 + 健康（响应 memory.overview）。 */
+  memoryOverview?: MemoryOverview;
   /** 全部角色的自动化定时任务列表（automation 推送/目录下发维护，设置页按角色分组）。 */
   automation: AutomationTask[];
   /** 全角色自动化运行历史（automation-runs 推送全量替换；设置页「运行记录」子页）。 */
@@ -687,6 +694,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   memoryTopicErrors: {},
   memoryIndexPreview: undefined,
   memoryHealth: undefined,
+  memoryOverview: undefined,
   automation: [],
   automationRuns: [],
   permissions: [],
@@ -896,33 +904,42 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
         break;
       case "memory":
         set((state) => {
+          const agentId = state.snapshot.agentId ?? "";
+          const prefix = `${agentId}::`;
           const summaries = new Map(message.memory.map((topic) => [topic.id, topic]));
           const contents = { ...state.memoryContents };
           const errors = { ...state.memoryTopicErrors };
-          for (const [id, cached] of Object.entries(contents)) {
-            const summary = summaries.get(id);
+          for (const [key, cached] of Object.entries(contents)) {
+            if (!key.startsWith(prefix)) continue;
+            const summary = summaries.get(key.slice(prefix.length));
             if (!summary || summary.contentRevision !== cached.contentRevision || summary.contentChars !== cached.contentChars) {
-              delete contents[id];
+              delete contents[key];
             }
           }
-          for (const id of Object.keys(errors)) if (!summaries.has(id)) delete errors[id];
+          for (const key of Object.keys(errors)) {
+            if (key.startsWith(prefix) && !summaries.has(key.slice(prefix.length))) delete errors[key];
+          }
           return { memory: message.memory, memoryContents: contents, memoryTopicErrors: errors };
         });
         break;
       case "memory.topic":
         set((state) => {
+          const key = memoryCacheKey(message.agentId ?? state.snapshot.agentId, message.topic.id);
           const memoryTopicErrors = { ...state.memoryTopicErrors };
-          delete memoryTopicErrors[message.topic.id];
+          delete memoryTopicErrors[key];
           return {
-            memoryContents: { ...state.memoryContents, [message.topic.id]: message.topic },
+            memoryContents: { ...state.memoryContents, [key]: message.topic },
             memoryTopicErrors
           };
         });
         break;
       case "memory.topic-error":
         set((state) => ({
-          memoryTopicErrors: { ...state.memoryTopicErrors, [message.topicId ?? ""]: message.message }
+          memoryTopicErrors: { ...state.memoryTopicErrors, [memoryCacheKey(message.agentId ?? state.snapshot.agentId, message.topicId ?? "")]: message.message }
         }));
+        break;
+      case "memory.overview":
+        set({ memoryOverview: message.overview });
         break;
       case "memory.health":
         set({ memoryHealth: message.health });

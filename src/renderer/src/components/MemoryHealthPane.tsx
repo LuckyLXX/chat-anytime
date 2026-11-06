@@ -21,13 +21,16 @@ const KIND_LABEL: Record<string, string> = {
  * 九十天没更新的项目知识、标题重叠的重复主题、接近预算的索引、过短的空壳。
  * 每条建议都带下一步动作（查看 / 归档），真正的合并与删除仍由人确认。
  */
-export function MemoryHealthPane({ health, onRefresh, onSelect, onArchive }: {
+export function MemoryHealthPane({ health, topics, onRefresh, onSelect, onArchive }: {
   health: MemoryHealth | undefined;
+  /** 这批 health 对应的主题（跨助手时由调用方给；缺省 = 当前助手）。 */
+  topics?: MemoryTopicSummary[];
   onRefresh(): void;
   onSelect(topic: MemoryTopicSummary): void;
   onArchive(topic: MemoryTopicSummary): void;
 }): ReactNode {
-  const memory = useDesktopStore((state) => state.memory);
+  const currentMemory = useDesktopStore((state) => state.memory);
+  const memory = topics ?? currentMemory;
   if (!health) {
     return (
       <div className="memory-center-health">

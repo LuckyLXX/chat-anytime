@@ -10,8 +10,8 @@ export type AccessMode = "read-only" | "ask" | "workspace" | "full";
 export type ThinkingLevelMap = Partial<Record<ThinkingLevel, string | null>>;
 
 import type { DesignCanvasInfo, DesignNode, DesignOp } from "./design-schema.js";
-import type { MemoryLayer } from "./memory.js";
-export type { MemoryLayer } from "./memory.js";
+import type { MemoryLayer, MemorySnapshot } from "./memory.js";
+export type { MemoryLayer, MemorySnapshot, MemorySnapshotEntry } from "./memory.js";
 import type { MemoryHealth } from "./memory-health.js";
 export type { MemoryDuplicateGroup, MemoryHealth, MemoryHealthIssue, MemoryHealthIssueKind } from "./memory-health.js";
 import type { ThemeImportOutcome } from "./theme-assets.js";
@@ -2064,6 +2064,33 @@ export interface MemoryTopic extends MemoryTopicSummary {
 }
 
 /**
+ * 「记忆总览」里的单个助手：记忆按助手分目录存放，总览把每个助手的
+ * 主题、索引快照与健康检查一次给全，记忆中心因此能在一个页面里区分
+ * 助手与归属（全局 / 工作区），而不是只看当前助手。
+ */
+export interface MemoryOverviewAgent {
+  agentId: string;
+  agentName: string;
+  /** 该助手全部主题（含其他工作区绑定的，面板按归属筛选）。 */
+  topics: MemoryTopicSummary[];
+  /**
+   * 索引快照的计算口径：该助手记忆里最主要的工作区（主题数最多者）。
+   * 缺省 = 全部主题都是全局记忆，按全局口径计算。
+   */
+  workspace?: string;
+  /** 与会话注入同一函数的预算索引（含逐条放置状态，见 MemorySnapshot）。 */
+  index: MemorySnapshot;
+  /** 与记忆中心「健康」tab 同口径的健康检查。 */
+  health: MemoryHealth;
+}
+
+export interface MemoryOverview {
+  agents: MemoryOverviewAgent[];
+  /** 构建时刻（epoch ms）。 */
+  at: number;
+}
+
+/**
  * A background process left running by a bash tool execution (e.g. a dev
  * server started with `nohup ... &` / `( ... & )`). Tracked by the utility
  * process so the task panel can show and kill it.
@@ -2484,16 +2511,18 @@ export type RuntimeCommand =
    */
   | { type: "jev.test"; baseUrl?: string; model?: string; apiKey?: string }
   | { type: "memory.save"; memory: MemorySettings }
-  | { type: "memory.create"; topic: string; description: string; content: string; layer?: MemoryLayer; summary?: string; triggers?: string[]; workspaceScoped?: boolean; sessionId?: string }
+  | { type: "memory.create"; topic: string; description: string; content: string; layer?: MemoryLayer; summary?: string; triggers?: string[]; workspaceScoped?: boolean; sessionId?: string; /** 目标助手（缺省 = 当前会话的助手）。 */ agentId?: string }
   /** 面板更新：正文/描述至少传一个；layer/summary/triggers 可单独改（缺省保留既有值）。 */
-  | { type: "memory.update"; topic: string; description?: string; content?: string; layer?: MemoryLayer; summary?: string; triggers?: string[] }
-  | { type: "memory.delete"; topic: string }
+  | { type: "memory.update"; topic: string; description?: string; content?: string; layer?: MemoryLayer; summary?: string; triggers?: string[]; agentId?: string }
+  | { type: "memory.delete"; topic: string; agentId?: string }
   /** 面板按需读取主题正文；结果经 memory.topic / memory.topic-error 推送。 */
-  | { type: "memory.read"; topicId?: string; topic?: string }
+  | { type: "memory.read"; topicId?: string; topic?: string; agentId?: string }
   /** 记忆中心预览「模型实际看到的索引快照」（结果经 memory.index-preview 推送）。 */
   | { type: "memory.indexPreview" }
   /** 记忆中心「健康」页：过大的主题、无要点的核心、陈旧、重复与索引压力。 */
   | { type: "memory.health" }
+  /** 记忆中心图谱：所有助手的主题 + 索引快照 + 健康（结果经 memory.overview 推送）。 */
+  | { type: "memory.overview" }
   | { type: "subagent.save"; subagent: SubagentDefinition; sessionId?: string }
   | { type: "subagent.delete"; id: string; scope: SubagentScope; sessionId?: string }
   /** 仅改内置子智能体的执行模型（内置定义本体只读）；model 缺省 = 回到继承默认模型。 */
@@ -2623,14 +2652,16 @@ export type RuntimeMessage =
   /** 会话全文检索结果（当前实现一次扫完才推送；scanned/total 供 UI 展示扫描体量）。 */
   | { type: "session.search-result"; requestId: string; hits: SessionSearchHit[]; scanned: number; total: number; done: boolean; error?: string }
   | { type: "memory"; memory: MemoryTopicSummary[] }
-  /** 响应 memory.read：完整主题（含正文）。 */
-  | { type: "memory.topic"; topic: MemoryTopic }
+  /** 响应 memory.read：完整主题（含正文）；agentId = 该主题所属助手（缺省时 UI 按当前助手处理）。 */
+  | { type: "memory.topic"; topic: MemoryTopic; agentId?: string }
   /** 响应 memory.read 的失败（主题不存在等）。 */
-  | { type: "memory.topic-error"; topicId?: string; message: string }
+  | { type: "memory.topic-error"; topicId?: string; agentId?: string; message: string }
   /** 响应 memory.indexPreview：当前工作区可见主题的预算索引（与会话注入同一函数）。 */
   | { type: "memory.index-preview"; markdown: string; characters: number; budget: number }
   /** 响应 memory.health：记忆库健康检查结果。 */
   | { type: "memory.health"; health: MemoryHealth }
+  /** 响应 memory.overview：所有助手的主题、索引快照与健康。 */
+  | { type: "memory.overview"; overview: MemoryOverview }
   | { type: "permission"; request: PermissionRequest }
   | { type: "permission.dismiss"; id: string }
   | { type: "question"; request: QuestionRequest }

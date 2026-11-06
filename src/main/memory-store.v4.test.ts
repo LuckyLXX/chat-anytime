@@ -105,6 +105,44 @@ describe("memory store v4", () => {
     expect(snapshot.split("\n").find((line) => line.startsWith("- 巨无霸"))!.length).toBeLessThan(30);
   });
 
+  it("exposes the injected index as structured entries (placed / chars / compacted / omitted)", async () => {
+    const { store } = await makeStore();
+    store.save({ title: "用户偏好", description: "语言", content: "## 偏好\n\n- 中文回复", layer: "core", summary: "中文回复 · 先给结论" });
+    store.save({ title: "踩坑记录", description: "回归与坑", content: "正文" });
+    store.save({ title: "有触发词", description: "d", content: "正文", triggers: ["B站"] });
+    store.save({ title: "归档结论", description: "d", content: "正文", layer: "archive" });
+
+    const snapshot = store.snapshotDetailed(undefined, 2000);
+    // 文本与结构化投影同源：markdown 必须与 snapshotMarkdown 逐字节一致。
+    expect(snapshot.markdown).toBe(store.snapshotMarkdown(undefined, 2000));
+    expect(snapshot.characters).toBe(snapshot.markdown.length);
+    const entries = new Map(snapshot.entries.map((entry) => [entry.title, entry]));
+    expect(entries.get("用户偏好")).toMatchObject({ layer: "core", placed: true, omitted: false });
+    expect(entries.get("用户偏好")!.chars).toBeGreaterThan(0);
+    expect(entries.get("踩坑记录")).toMatchObject({ layer: "standard", placed: true, compacted: false });
+    expect(entries.get("有触发词")).toMatchObject({ placed: true });
+    expect(entries.get("归档结论")).toMatchObject({ layer: "archive", placed: false, omitted: false });
+    const sum = snapshot.entries.reduce((total, entry) => total + entry.chars, 0);
+    expect(sum).toBeGreaterThan(0);
+    expect(sum).toBeLessThan(snapshot.characters);
+  });
+
+  it("marks standard topics omitted when the budget is tight and core topics compacted", async () => {
+    const { store } = await makeStore();
+    for (let index = 0; index < 12; index += 1) {
+      store.save({ title: `主题${index}`, description: "描述".repeat(8), content: "正文" });
+    }
+    store.save({ title: "核心", description: "d", content: "正文", layer: "core", summary: "要点".repeat(100) });
+
+    const snapshot = store.snapshotDetailed(undefined, 200);
+    expect(snapshot.compacted).toBe(true);
+    expect(snapshot.omitted).toBeGreaterThan(0);
+    const omitted = snapshot.entries.filter((entry) => entry.omitted);
+    expect(omitted.length).toBeGreaterThan(0);
+    expect(omitted.every((entry) => entry.layer === "standard" && !entry.placed && entry.chars === 0)).toBe(true);
+    expect(snapshot.entries.find((entry) => entry.title === "核心")).toMatchObject({ placed: true, compacted: true });
+  });
+
   it("updates meta fields without rewriting the body", async () => {
     const { store } = await makeStore();
     store.save({ title: "主题", description: "d", content: "## 节\n\n正文" });

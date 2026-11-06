@@ -16,7 +16,7 @@ describe("memory v4 wiring", () => {
     expect(app).toContain("const memoryCenterPresence = useExitPresence(memoryCenterOpen, 160);");
     expect(app).toContain("<MemoryCenter");
     expect(app).toContain("onClose={closeMemoryCenter}");
-    expect(app).toContain("onOpenTopic={(topic) => { closeMemoryCenter(); openMemoryTopic(topic); }}");
+    expect(app).toContain("onOpenTopic={(topic, agentId) => { closeMemoryCenter(); openMemoryTopic(topic, agentId); }}");
     expect(app).toContain("onOpenMemoryCenter={openMemoryCenter}");
     expect(app).toContain("memory-center-open-nav");
     expect(app).toContain('id: "view.memory"');
@@ -36,7 +36,7 @@ describe("memory v4 wiring", () => {
   it("serves the index preview from pi-runtime with the same snapshot function", () => {
     expect(read("src/main/pi-runtime.ts")).toContain('case "memory.indexPreview":');
     expect(read("src/main/pi-runtime.ts")).toContain("memoryStore.snapshotMarkdown(workspace, MEMORY_SNAPSHOT_BUDGET_CHARS)");
-    expect(read("src/main/pi-runtime.ts")).toContain("memoryStore.update(command.topic, {");
+    expect(read("src/main/pi-runtime.ts")).toContain("resolved.store.update(command.topic, {");
     expect(read("src/main/pi-runtime.ts")).toContain('case "memory.health":');
     expect(read("src/main/pi-runtime.ts")).toContain("analyzeMemoryHealth(summaries");
   });
