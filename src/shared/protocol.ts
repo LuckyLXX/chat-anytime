@@ -2052,7 +2052,17 @@ export interface MemoryTopicSummary {
   /** YYYY-MM-DD；时间敏感事实还应在正文内另行标注日期。 */
   createdAt: string;
   updatedAt: string;
+  /**
+   * 所在的库（2026-11-09，GitHub issue #2 配套）：`project` = 工作区项目库
+   * （`<workspace>/.pidesktop/memory/`，跟项目走）；`agent` = 助手库
+   * （`<agentDir>/pidesktop-memory/<agentId>/`，跟人走）。
+   * 由 pi-runtime 附加（store 本身不知道自己在哪个库）；缺省按 agent 处理。
+   */
+  library?: MemoryLibrary;
 }
+
+/** 记忆主题所在的库（双库模型，见 MemoryTopicSummary.library）。 */
+export type MemoryLibrary = "project" | "agent";
 
 /**
  * 长期记忆主题的完整投影：摘要 + 正文。只有 `memory.read` 与 store 内部使用。
@@ -2082,6 +2092,12 @@ export interface MemoryOverviewAgent {
   index: MemorySnapshot;
   /** 与记忆中心「健康」tab 同口径的健康检查。 */
   health: MemoryHealth;
+  /**
+   * 这一行的库归属（2026-11-09，issue #2 配套）：`project` = 工作区项目库
+   * （agentId 为虚拟 id `project:<路径>`，面板读取时传 library:"project"）；
+   * 缺省 = 助手库。
+   */
+  library?: MemoryLibrary;
 }
 
 export interface MemoryOverview {
@@ -2513,10 +2529,10 @@ export type RuntimeCommand =
   | { type: "memory.save"; memory: MemorySettings }
   | { type: "memory.create"; topic: string; description: string; content: string; layer?: MemoryLayer; summary?: string; triggers?: string[]; workspaceScoped?: boolean; sessionId?: string; /** 目标助手（缺省 = 当前会话的助手）。 */ agentId?: string }
   /** 面板更新：正文/描述至少传一个；layer/summary/triggers 可单独改（缺省保留既有值）。 */
-  | { type: "memory.update"; topic: string; description?: string; content?: string; layer?: MemoryLayer; summary?: string; triggers?: string[]; agentId?: string }
-  | { type: "memory.delete"; topic: string; agentId?: string }
+  | { type: "memory.update"; topic: string; description?: string; content?: string; layer?: MemoryLayer; summary?: string; triggers?: string[]; agentId?: string; /** 目标库（双库模型）；缺省按标题定位，同名时项目库优先。 */ library?: MemoryLibrary }
+  | { type: "memory.delete"; topic: string; agentId?: string; /** 目标库（双库模型）；缺省按标题定位。 */ library?: MemoryLibrary }
   /** 面板按需读取主题正文；结果经 memory.topic / memory.topic-error 推送。 */
-  | { type: "memory.read"; topicId?: string; topic?: string; agentId?: string }
+  | { type: "memory.read"; topicId?: string; topic?: string; agentId?: string; /** 目标库（双库模型）；缺省按标题定位，同名时项目库优先。 */ library?: MemoryLibrary }
   /** 记忆中心预览「模型实际看到的索引快照」（结果经 memory.index-preview 推送）。 */
   | { type: "memory.indexPreview" }
   /** 记忆中心「健康」页：过大的主题、无要点的核心、陈旧、重复与索引压力。 */
@@ -2655,7 +2671,7 @@ export type RuntimeMessage =
   /** 响应 memory.read：完整主题（含正文）；agentId = 该主题所属助手（缺省时 UI 按当前助手处理）。 */
   | { type: "memory.topic"; topic: MemoryTopic; agentId?: string }
   /** 响应 memory.read 的失败（主题不存在等）。 */
-  | { type: "memory.topic-error"; topicId?: string; agentId?: string; message: string }
+  | { type: "memory.topic-error"; topicId?: string; agentId?: string; /** 目标库（双库模型）。 */ library?: MemoryLibrary; message: string }
   /** 响应 memory.indexPreview：当前工作区可见主题的预算索引（与会话注入同一函数）。 */
   | { type: "memory.index-preview"; markdown: string; characters: number; budget: number }
   /** 响应 memory.health：记忆库健康检查结果。 */

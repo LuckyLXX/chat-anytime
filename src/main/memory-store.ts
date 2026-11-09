@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, join, resolve } from "node:path";
 import { platform } from "node:process";
@@ -979,7 +979,151 @@ export function memoryDirFor(agentDir: string, agentId: string): string {
   return join(agentDir, "pidesktop-memory", agentId);
 }
 
+/**
+ * 工作区项目记忆库目录（2026-11-09，GitHub issue #2 配套）：
+ * `<workspace>/.pidesktop/memory/`。项目知识归项目——任意被派到该工作区的助手
+ * 都能接续，不锁在某个助手的目录里。布局与助手库完全同构（topics/ + MEMORY.md），
+ * createMemoryStore 直接可用。该子目录沿用 `.pidesktop/` 既有惯例（screenshots/
+ * downloads/hooks/skills），仓库侧被 .gitignore 的 `.pidesktop/` 整体覆盖。
+ */
+export function workspaceMemoryDirFor(workspace: string): string {
+  return join(resolve(workspace), ".pidesktop", "memory");
+}
+
 /** 未启用记忆时目录是否存在（保留给诊断/清理用，普通流程不需要）。 */
 export function memoryDirExists(dir: string): boolean {
   return existsSync(join(dir, "topics")) || existsSync(join(dir, "MEMORY.md"));
 }
+
+/** 迁移结果（migrateWorkspaceBoundTopics）：驱动日志与测试断言。 */
+export interface MemoryMigrationOutcome {
+  /** 扫描过的助手库目录数（含空库）。 */
+  agentDirs: number;
+  /** 搬走的主题数（绑定工作区且目标目录存在）。 */
+  movedTopics: number;
+  /** 目标工作区目录已不存在的主题数：保留原地不动，只计入报告。 */
+  skippedMissingWorkspace: number;
+  /** 目标工作区库内同名标题冲突：保留原地不动（不覆盖用户已写的主题）。 */
+  skippedTitleConflict: number;
+  /** 搬入的目标工作区（去重后的绝对路径）。 */
+  targetWorkspaces: string[];
+}
+
+/**
+ * 存量迁移（一次性，2026-11-09，GitHub issue #2 配套）：把助手库里 **已绑定工作区**
+ * 的主题搬进对应工作区自己的项目库。旧模型里 workspace 只是个可见性标签，物理
+ * 文件锁在助手目录；总控分发场景下被派到同一工作区的其他助手读不到它们。
+ *
+ * 纪律（与 v4 迁移的备份惯例一致）：
+ * - 先整库备份 `<agentDir>/pidesktop-memory-backup-<ts>-workspace-split/`（rename 同
+ *   卷原子操作）；备份失败直接放弃本次迁移，下次启动重试。
+ * - 搬迁按「文件搬家 + 目标 store.save」走：源文件 copy 到备份后从助手库 remove，
+ *   目标库用既有 saveLocked 落盘（frontmatter 原样保留，含 workspace 字段——工作区库
+ *   内该字段继续有效：它同时也是面板归属筛选的标签）。
+ * - 目标工作区目录不存在（用户删了项目）→ 主题原地保留，绝不丢数据。
+ * - 目标库已有同名标题 → 原地保留（不覆盖用户数据），只计入 conflict。
+ * - 幂等：没有可搬主题时零写入；单主题失败不中断整批（计入日志，下次重试该条）。
+ */
+export function migrateWorkspaceBoundTopics(
+  agentDir: string,
+  options: { readdirSync?: (dir: string) => DirentLike[]; now?: () => number } = {}
+): MemoryMigrationOutcome {
+  const base = join(agentDir, "pidesktop-memory");
+  const listDirs = options.readdirSync ?? ((dir: string) => readdirSync(dir, { withFileTypes: true }) as unknown as DirentLike[]);
+  const outcome: MemoryMigrationOutcome = { agentDirs: 0, movedTopics: 0, skippedMissingWorkspace: 0, skippedTitleConflict: 0, targetWorkspaces: [] };
+
+  let agentIds: string[];
+  try {
+    agentIds = listDirs(base).filter((entry) => entry.isDirectory() && !entry.name.startsWith(".")).map((entry) => entry.name);
+  } catch {
+    return outcome; // 没有任何记忆库：无事可做。
+  }
+  outcome.agentDirs = agentIds.length;
+
+  // 第一遍：只读扫描，确认真的存在可搬主题（否则零写入，保持幂等）。
+  interface PendingMove { agentId: string; topic: MemoryTopic; targetDir: string; }
+  const pending: PendingMove[] = [];
+  const targets = new Set<string>();
+  for (const agentId of agentIds) {
+    const sourceDir = memoryDirFor(agentDir, agentId);
+    if (!memoryDirExists(sourceDir)) continue;
+    const store = createMemoryStore(sourceDir, () => {});
+    for (const topic of store.list()) {
+      if (!topic.workspace?.trim()) continue;
+      const targetWorkspace = resolve(topic.workspace);
+      try {
+        if (!statSync(targetWorkspace).isDirectory()) { outcome.skippedMissingWorkspace += 1; continue; }
+      } catch {
+        outcome.skippedMissingWorkspace += 1;
+        continue;
+      }
+      const targetDir = workspaceMemoryDirFor(targetWorkspace);
+      if (existsSync(join(targetDir, "topics"))) {
+        const targetStore = createMemoryStore(targetDir, () => {});
+        if (targetStore.read(topic.title)) { outcome.skippedTitleConflict += 1; continue; }
+      }
+      pending.push({ agentId, topic, targetDir });
+      targets.add(normalizeWorkspacePath(targetWorkspace));
+    }
+  }
+  if (pending.length === 0) return outcome;
+
+  // 备份：把整个 pidesktop-memory rename 到带时间戳的备份目录（同卷原子）。
+  const stamp = new Date((options.now ?? Date.now)()).toISOString().replace(/[:.]/gu, "-");
+  const backupDir = join(agentDir, `pidesktop-memory-backup-${stamp}-workspace-split`);
+  try {
+    mkdirSync(dirname(backupDir), { recursive: true });
+    renameSync(base, backupDir);
+  } catch {
+    return outcome; // 备份失败（并发写/权限）：放弃本次，下次启动重试。
+  }
+  outcome.targetWorkspaces = [...targets];
+
+  // 第二遍：从备份里的源库搬（在库锁内读源 + 目标落盘 + 源库删除）。
+  for (const move of pending) {
+    const sourceDir = join(backupDir, move.agentId);
+    const targetDir = move.targetDir;
+    try {
+      const sourceStore = createMemoryStore(sourceDir, () => {});
+      const targetStore = createMemoryStore(targetDir, () => {});
+      const fresh = sourceStore.read(move.topic.title);
+      if (!fresh) continue; // 并发删除：跳过（不失败）。
+      targetStore.save({
+        title: fresh.title,
+        description: fresh.description,
+        content: fresh.content,
+        layer: fresh.layer,
+        ...(fresh.summary ? { summary: fresh.summary } : {}),
+        ...(fresh.triggers?.length ? { triggers: fresh.triggers } : {}),
+        bindWorkspace: fresh.workspace
+      });
+      if (sourceStore.remove(fresh.title)) outcome.movedTopics += 1;
+    } catch (error) {
+      console.warn(`[memory] 迁移工作区主题失败（${move.agentId}/${move.topic.title}）：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  // 收尾：把备份目录搬回原名（源库中已搬走的主题在备份里被删掉了；
+  // 备份目录本体保留一份副本——不，rename 回去意味着备份不再存在。
+  // 折衷：复制回原位（保留备份不动），失败则 rename 回（至少原位恢复）。
+  try {
+    copyTree(backupDir, base);
+  } catch {
+    try { renameSync(backupDir, base); } catch { /* 原位缺失且 rename 失败：下次启动重建索引（数据都在备份里） */ }
+  }
+  return outcome;
+}
+
+/** 目录树复制（迁移收尾用）：文件级 copy，目标已存在则跳过（不覆盖新写入）。 */
+function copyTree(source: string, target: string): void {
+  mkdirSync(target, { recursive: true });
+  for (const entry of readdirSync(source, { withFileTypes: true })) {
+    const from = join(source, entry.name);
+    const to = join(target, entry.name);
+    if (entry.isDirectory()) copyTree(from, to);
+    else if (!existsSync(to)) copyFileSync(from, to);
+  }
+}
+
+/** readdir Dirent 的最小形状（测试可注入假目录列表）。 */
+interface DirentLike { name: string; isDirectory(): boolean; }

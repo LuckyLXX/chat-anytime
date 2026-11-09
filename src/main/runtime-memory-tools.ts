@@ -77,9 +77,37 @@ export function buildMemorySnapshotBlock(indexMarkdown: string): string | undefi
   ].join("\n");
 }
 
+/**
+ * 双库快照拼接（2026-11-09，GitHub issue #2 配套）：项目段在前、助手段在后，
+ * 两段各自用各自的预算（项目 1,400 / 助手 600，总预算不变 2,000）。
+ * 空段跳过；两段都空返回 undefined（与会话历史同前缀纪律一致）。文案里写明两段
+ * 的归属差异，避免模型把项目库主题误当成本助手私有知识写进助手库。
+ */
+export function buildDualMemorySnapshotBlock(projectMarkdown: string, agentMarkdown: string): string | undefined {
+  const project = projectMarkdown.trim();
+  const agent = agentMarkdown.trim();
+  if (!project && !agent) return undefined;
+  const lines: string[] = ["【长期记忆索引（项目库 + 助手库）】"];
+  if (project) {
+    lines.push("【本项目记忆（工作区项目库，任意助手共享）】", project);
+  }
+  if (agent) {
+    lines.push("【助手记忆（用户偏好/协作纪律，跟人走）】", agent);
+  }
+  lines.push("归档不列条目，可检索；正文用 memory_read 读取；索引没列出的主题用 memory_search 检索。新主题按内容归库：项目知识缺省写项目库，用户偏好用 agent_scoped=true 写助手库。");
+  return lines.join("\n");
+}
+
 export interface MemoryToolContext {
+  /** 助手库（用户偏好/协作纪律）：跨会话跟人走。 */
   store: MemoryStore;
-  /** 会话工作区：工作区绑定主题的写入、读取与检索都以此过滤。 */
+  /**
+   * 工作区项目库（2026-11-09，GitHub issue #2 配套）：`<workspace>/.pidesktop/memory/`。
+   * 项目知识归项目——任意被派到该工作区的助手都能接续。缺省 = 该工作区还没建库
+   * （工具首次写入时按需创建）。
+   */
+  workspaceStore?: MemoryStore;
+  /** 会话工作区：项目库定位与归属展示。 */
   workspace: string | undefined;
   /** 总开关（settings.memory?.enabled !== false），调用时实时判断，停用无需重建会话。 */
   enabled: () => boolean;
@@ -89,6 +117,10 @@ const DISABLED_REPLY = "长期记忆功能当前已停用，本次操作未执�
 
 function scopeLabel(topic: MemoryTopicSummary): string {
   return topic.workspace ? `绑定工作区 ${topic.workspace}` : "全局";
+}
+
+function originLabel(topic: MemoryTopicSummary): string {
+  return topic.workspace ? "项目库" : "助手库";
 }
 
 function chars(value: number): string {
@@ -114,14 +146,30 @@ function largeTopicNote(topic: MemoryTopicSummary): string {
 }
 
 /** Build the memory customTools (write/append/read/list/search/delete). */
-export function buildMemoryTools({ store, workspace, enabled }: MemoryToolContext): ToolDefinition[] {
+export function buildMemoryTools({ store, workspaceStore, workspace, enabled }: MemoryToolContext): ToolDefinition[] {
   const disabled = () => !enabled();
-  /** 模型侧读取按工作区隔离：其他工作区绑定的主题视为不存在。 */
-  const readVisible = (name: string): MemoryTopic | undefined => {
-    const topic = store.read(name);
-    return topic && memoryTopicVisibleIn(topic, workspace) ? topic : undefined;
+  /**
+   * 双库读取（2026-11-09，GitHub issue #2 配套）：项目库在前（项目知识优先），
+   * 助手库在后；同名标题项目库优先。旧单库语义完全保留：workspaceStore 未传时
+   * 全部退化到 store（现有测试零改动）。
+   * 可见性规则不变：库内仍按 workspace 标签过滤——项目库的主题绑定的就是本工作区
+   * （迁移保留 frontmatter），助手库里绑定了其他工作区的主题依旧不可见。
+   */
+  const libraries = (): MemoryStore[] => (workspaceStore ? [workspaceStore, store] : [store]);
+  /** 按标题找主题（先项目库后助手库，可见性过滤）。 */
+  const readVisible2 = (name: string): { topic: MemoryTopic; store: MemoryStore } | undefined => {
+    for (const library of libraries()) {
+      const topic = library.read(name);
+      if (topic && memoryTopicVisibleIn(topic, workspace)) return { topic, store: library };
+    }
+    return undefined;
   };
-  const visibleSummaries = (): MemoryTopicSummary[] => store.summaries().filter((topic) => memoryTopicVisibleIn(topic, workspace));
+  const findVisible = readVisible2;
+  /** 模型侧读取按工作区隔离：其他工作区绑定的主题视为不存在。 */
+  const readVisible = (name: string): MemoryTopic | undefined => findVisible(name)?.topic;
+  const visibleSummaries = (): MemoryTopicSummary[] => libraries().flatMap((library) =>
+    library.summaries().filter((topic) => memoryTopicVisibleIn(topic, workspace))
+  );
 
   // 会话内已读表：只用来把「重复读同一节」压成一行提示，不承担正确性
   // （压缩/编辑后内容可能已不在上下文，所以有 TTL、revision 校验与 refresh）。
@@ -157,6 +205,7 @@ export function buildMemoryTools({ store, workspace, enabled }: MemoryToolContex
       label: "写入记忆",
       description: [
         "写入或更新一条长期记忆主题（按标题定位，整主题替换：topic+description+content 一起发送，没有部分更新）。",
+        "归库：项目知识/踩坑/架构事实缺省写入当前工作区的项目库（谁被派到都能读）；用户偏好/协作纪律/跨项目的个人口径用 agent_scoped=true 写助手库（跟人走，不跟项目走）。既有主题按标题在两库定位，重写落在原库。",
         "整主题替换会消耗与正文等量的 token：只用于纠正/合并；新增内容或下沉归档请用 memory_append 按节追加。",
         "改写既有主题前必须先 memory_read 读出全文（大主题用 section=\"*\"），替换时不得丢失既有要点。",
         "分层：layer=core 只放每会话都该在场的偏好/纪律/会变状态（索引里会带要点）；standard 放项目知识；archive 放已解历史（不进索引、仍可检索）。",
@@ -170,12 +219,19 @@ export function buildMemoryTools({ store, workspace, enabled }: MemoryToolContex
         layer: Type.Optional(Type.String({ description: "core / standard / archive；缺省保留既有层，新主题 standard" })),
         summary: Type.Optional(Type.String({ description: "要点层：3–8 行结论，≤400 字（多行会压成一行）" })),
         triggers: Type.Optional(Type.Array(Type.String(), { description: `反直觉触发词（≤${MEMORY_TRIGGER_MAX_COUNT} 个，每个 ≤${MEMORY_TRIGGER_MAX_CHARS} 字）` })),
-        workspace_scoped: Type.Optional(Type.Boolean({ description: "true 时绑定到当前工作区（仅本工作区会话可见）；缺省为全局记忆" }))
+        agent_scoped: Type.Optional(Type.Boolean({ description: "true 时写入助手库（用户偏好/协作纪律，跟人走）；缺省写入当前工作区项目库（项目知识，跟项目走）" }))
       }),
       execute: async (_id, params): Promise<{ content: { type: "text"; text: string }[]; details: { skipped: boolean; topic: string; workspace: string | null } }> => {
         if (disabled()) return { content: [{ type: "text" as const, text: DISABLED_REPLY }], details: { skipped: true, topic: "", workspace: null } };
-        const bind = params?.workspace_scoped === true;
-        if (bind && !workspace) throw new Error("当前会话未打开工作区，无法保存工作区绑定记忆");
+        const toAgentLibrary = params?.agent_scoped === true;
+        // 目标库：新主题缺省归项目库（项目知识跟项目走，总控分发可接续）；
+        // 显式 agent_scoped 走助手库。没打开工作区时只能落助手库。
+        // 既有主题：按标题在两库定位，重写落在它所在的库（升级不改变既有归属）。
+        const existing = findVisible(String(params?.topic ?? ""));
+        let targetStore: MemoryStore;
+        if (existing) targetStore = existing.store;
+        else if (toAgentLibrary || !workspaceStore) targetStore = store;
+        else targetStore = workspaceStore;
         const layer = params?.layer === undefined ? undefined : String(params.layer).trim().toLowerCase() as MemoryLayer;
         if (layer !== undefined && !MEMORY_LAYERS.includes(layer)) throw new Error("layer 只能是 core / standard / archive");
         const summary = params?.summary === undefined ? undefined : String(params.summary);
@@ -183,17 +239,20 @@ export function buildMemoryTools({ store, workspace, enabled }: MemoryToolContex
           ? `\n（summary ${chars(summary.length)} 字超过 ${MEMORY_SUMMARY_MAX_CHARS} 字上限，已截断）`
           : "";
         const triggers = Array.isArray(params?.triggers) ? params.triggers.map((item) => String(item)) : undefined;
-        const topic = store.save({
+        const topic = targetStore.save({
           title: String(params?.topic ?? ""),
           description: String(params?.description ?? ""),
           content: String(params?.content ?? ""),
           ...(layer ? { layer } : {}),
           ...(summary !== undefined ? { summary } : {}),
           ...(triggers ? { triggers } : {}),
-          ...(bind && workspace ? { bindWorkspace: workspace } : {})
+          // 归库即归属：项目库的主题绑定本工作区（面板归属筛选与旧可见性语义都对齐），
+          // 助手库的新主题不绑定（跟人走的偏好对所有工作区可见）。既有主题 saveLocked
+          // 缺省保留原绑定，这里只在「项目库且未绑定」时补绑。
+          ...(targetStore === workspaceStore && !existing?.topic.workspace && workspace ? { bindWorkspace: workspace } : {})
         });
         const text = [
-          `已保存记忆主题「${topic.title}」（${layerLabel(topic.layer)}，${scopeLabel(topic)}，正文 ${chars(topic.contentChars)} 字 / ${sectionCount(topic)} 节）；当前共 ${store.list().length} 个主题：`,
+          `已保存记忆主题「${topic.title}」（${layerLabel(topic.layer)}，${originLabel(topic)}，${scopeLabel(topic)}，正文 ${chars(topic.contentChars)} 字 / ${sectionCount(topic)} 节）；当前共 ${store.list().length + (workspaceStore ? workspaceStore.list().length : 0)} 个主题：`,
           `- ${topic.title} — ${topic.description}`,
           topic.summary ? `要点：${truncateMemoryText(topic.summary, MEMORY_SNAPSHOT_CORE_CHARS)}` : "要点：未维护（读取时由正文自动提取）",
           summaryNote,
@@ -221,10 +280,10 @@ export function buildMemoryTools({ store, workspace, enabled }: MemoryToolContex
       }),
       execute: async (_id, params): Promise<{ content: { type: "text"; text: string }[]; details: { skipped: boolean; topic: string; workspace: string | null; section: string; created: boolean; chars: number } }> => {
         if (disabled()) return { content: [{ type: "text" as const, text: DISABLED_REPLY }], details: { skipped: true, topic: "", workspace: null, section: "", created: false, chars: 0 } };
-        const topic = readVisible(String(params?.topic ?? ""));
-        if (!topic) throw new Error(`未找到记忆主题「${params?.topic}」；先用 memory_list 查看可用主题`);
-        const outcome = store.append({
-          topic: topic.title,
+        const found = findVisible(String(params?.topic ?? ""));
+        if (!found) throw new Error(`未找到记忆主题「${params?.topic}」；先用 memory_list 查看可用主题`);
+        const outcome = found.store.append({
+          topic: found.topic.title,
           section: params?.section === undefined ? undefined : String(params.section),
           content: String(params?.content ?? "")
         });
@@ -386,7 +445,7 @@ export function buildMemoryTools({ store, workspace, enabled }: MemoryToolContex
         const range = offset + topics.length >= all.length ? "" : `，显示 ${offset + 1}–${offset + topics.length}`;
         const lines = topics.map((topic) => {
           const layer = (topic.layer ?? "standard") as MemoryLayer;
-          return `- [${layerLabel(layer)}] ${topic.title} — ${topic.description}（${scopeLabel(topic)}，更新于 ${topic.updatedAt}，${chars(topic.contentChars)} 字）`;
+          return `- [${layerLabel(layer)}] ${topic.title} — ${topic.description}（${originLabel(topic)}，${scopeLabel(topic)}，更新于 ${topic.updatedAt}，${chars(topic.contentChars)} 字）`;
         });
         const footer = offset + topics.length < all.length
           ? `\n（还有 ${all.length - offset - topics.length} 个，用 offset=${offset + topics.length} 继续；或 memory_search 检索）`
@@ -409,7 +468,10 @@ export function buildMemoryTools({ store, workspace, enabled }: MemoryToolContex
         if (disabled()) return { content: [{ type: "text" as const, text: DISABLED_REPLY }], details: { skipped: true, count: 0 } };
         const query = String(params?.query ?? "");
         const limit = Math.max(1, Math.min(MEMORY_SEARCH_LIMIT_MAX, Math.round(params?.limit ?? MEMORY_SEARCH_LIMIT)));
-        const hits: MemorySearchHit[] = store.search(query, workspace, { limit, ...(params?.topic ? { topic: String(params.topic) } : {}) });
+        // 双库检索：各库独立出结果，按库优先级拼接后载 limit（项目库在前，同名主题项目库优先到达）。
+        const hits: MemorySearchHit[] = libraries().flatMap((library) =>
+          library.search(query, workspace, { limit, ...(params?.topic ? { topic: String(params.topic) } : {}) })
+        ).slice(0, limit);
         if (hits.length === 0) {
           return {
             content: [{ type: "text" as const, text: `未检索到与「${query}」相关的记忆。可换更短的关键词（中文二字词、英文单词）再试，或用 memory_list 看全部主题。` }],
@@ -461,9 +523,9 @@ export function buildMemoryTools({ store, workspace, enabled }: MemoryToolContex
         const name = String(params?.topic ?? "");
         const target = String(params?.layer ?? "").trim().toLowerCase() as MemoryLayer;
         if (!MEMORY_LAYERS.includes(target)) throw new Error("layer 只能是 core / standard / archive");
-        const topic = readVisible(name);
-        if (!topic) throw new Error(`未找到记忆主题「${name}」；先用 memory_list 确认标题`);
-        const updated = store.update(topic.title, { layer: target });
+        const found = readVisible2(name);
+        if (!found) throw new Error(`未找到记忆主题「${name}」；先用 memory_list 确认标题`);
+        const updated = found.store.update(found.topic.title, { layer: target });
         return {
           content: [{ type: "text" as const, text: `已把「${updated.title}」调整为${layerLabel(updated.layer)}层（正文 ${chars(updated.contentChars)} 字未改写）。` }],
           details: { skipped: false, topic: updated.title, layer: (updated.layer ?? "standard") as MemoryLayer }
@@ -481,10 +543,11 @@ export function buildMemoryTools({ store, workspace, enabled }: MemoryToolContex
       execute: async (_id, params): Promise<{ content: { type: "text"; text: string }[]; details: { skipped: boolean; topic: string; removed: boolean } }> => {
         if (disabled()) return { content: [{ type: "text" as const, text: DISABLED_REPLY }], details: { skipped: true, topic: "", removed: false } };
         const name = String(params?.topic ?? "");
-        if (!readVisible(name)) throw new Error(`未找到记忆主题「${name}」；先用 memory_list 确认标题`);
-        store.remove(name);
+        const found = readVisible2(name);
+        if (!found) throw new Error(`未找到记忆主题「${name}」；先用 memory_list 确认标题`);
+        found.store.remove(name);
         return {
-          content: [{ type: "text" as const, text: `已删除记忆主题「${name}」，当前共 ${store.list().length} 个主题。` }],
+          content: [{ type: "text" as const, text: `已删除记忆主题「${name}」（${originLabel(found.topic)}），当前共 ${libraries().reduce((sum, library) => sum + library.list().length, 0)} 个主题。` }],
           details: { skipped: false, topic: name, removed: true }
         };
       }
