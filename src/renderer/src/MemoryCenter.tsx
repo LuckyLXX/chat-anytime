@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import type { MemoryLayer, MemoryOverviewAgent, MemoryTopicSummary } from "../../shared/protocol";
 import { MemoryGraph, type MemoryGraphSelection } from "./components/MemoryGraph";
 import { MemoryHealthPane } from "./components/MemoryHealthPane";
-import { MEMORY_LAYER_LABEL, formatMemoryChars, memoryCacheKey, memoryLayerOf, memoryScopeLabel, parseMemoryTriggers, type MemoryLayerFilter } from "./lib/memory-format";
+import { MEMORY_LAYER_LABEL, formatMemoryChars, memoryCacheKey, memoryLayerOf, memoryRequestTarget, memoryScopeLabel, parseMemoryTriggers, type MemoryLayerFilter } from "./lib/memory-format";
 import { useDesktopStore } from "./store";
 
 type DetailTab = "topic" | "index" | "health";
@@ -80,7 +80,7 @@ export function MemoryCenter({ onClose, onOpenTopic }: { onClose(): void; onOpen
       return;
     }
     if (!selectedContent || selectedContent.contentRevision !== selectedTopic.contentRevision) {
-      void window.piDesktop.send({ type: "memory.read", topicId: selectedTopic.id, agentId: selectedAgentId });
+      void window.piDesktop.send({ type: "memory.read", topicId: selectedTopic.id, ...memoryRequestTarget(selectedAgentId) });
     }
   }, [selectedTopic?.id, selectedTopic?.contentRevision, selectedContent?.contentRevision, selectedAgentId]);
 
@@ -151,7 +151,7 @@ export function MemoryCenter({ onClose, onOpenTopic }: { onClose(): void; onOpen
       layer: draft.layer,
       summary: draft.summary,
       triggers: parseMemoryTriggers(draft.triggers),
-      agentId: selectedAgentId
+      ...memoryRequestTarget(selectedAgentId)
     });
     if (done) {
       setSaved(true);
@@ -162,7 +162,7 @@ export function MemoryCenter({ onClose, onOpenTopic }: { onClose(): void; onOpen
   async function toggleArchive(): Promise<void> {
     if (!selectedTopic || !draft || !selectedAgentId) return;
     const next: MemoryLayer = draft.layer === "archive" ? "standard" : "archive";
-    const done = await send({ type: "memory.update", topic: selectedTopic.title, layer: next, agentId: selectedAgentId });
+    const done = await send({ type: "memory.update", topic: selectedTopic.title, layer: next, ...memoryRequestTarget(selectedAgentId) });
     if (done) {
       setDraft({ ...draft, layer: next });
       requestOverview();
@@ -171,7 +171,7 @@ export function MemoryCenter({ onClose, onOpenTopic }: { onClose(): void; onOpen
 
   async function removeSelected(): Promise<void> {
     if (!selectedTopic || !selectedAgentId) return;
-    const done = await send({ type: "memory.delete", topic: selectedTopic.title, agentId: selectedAgentId });
+    const done = await send({ type: "memory.delete", topic: selectedTopic.title, ...memoryRequestTarget(selectedAgentId) });
     if (done) {
       setSelected(undefined);
       setConfirmDelete(false);
@@ -252,7 +252,7 @@ export function MemoryCenter({ onClose, onOpenTopic }: { onClose(): void; onOpen
               topics={focusAgent?.topics ?? memory}
               onRefresh={requestOverview}
               onSelect={(topic) => { if (focusAgent) setSelected({ agentId: focusAgent.agentId, topicId: topic.id }); setDetailTab("topic"); }}
-              onArchive={(topic) => void send({ type: "memory.update", topic: topic.title, layer: "archive", ...(focusAgent ? { agentId: focusAgent.agentId } : {}) }).then(requestOverview)}
+              onArchive={(topic) => void send({ type: "memory.update", topic: topic.title, layer: "archive", ...memoryRequestTarget(focusAgent?.agentId) }).then(requestOverview)}
             />
           ) : detailTab === "index" ? (
             <div className="memory-center-index">

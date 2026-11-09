@@ -44,6 +44,7 @@ import type {
   McpServerSummary,
   MemoryOverview,
   MemoryOverviewAgent,
+  MemoryLibrary,
   MemoryTopicSummary,
   ModelOption,
   PromptAttachment,
@@ -172,8 +173,8 @@ import {
   type SessionTextIndex
 } from "./session-text-index.js";
 import * as runtimeMemoryTools from "./runtime-memory-tools.js";
-import { MEMORY_SNAPSHOT_BUDGET_CHARS } from "../shared/memory.js";
-import { createMemoryStore, memoryDirExists, memoryDirFor, primaryMemoryWorkspace, type MemoryStore } from "./memory-store.js";
+import { MEMORY_SNAPSHOT_AGENT_CHARS, MEMORY_SNAPSHOT_BUDGET_CHARS, MEMORY_SNAPSHOT_PROJECT_CHARS } from "../shared/memory.js";
+import { createMemoryStore, memoryDirExists, memoryDirFor, migrateWorkspaceBoundTopics, primaryMemoryWorkspace, workspaceMemoryDirFor, type MemoryMigrationOutcome, type MemoryStore } from "./memory-store.js";
 import { analyzeMemoryHealth } from "../shared/memory-health.js";
 import * as runtimeQuestionTool from "./runtime-question-tool.js";
 import * as runtimeSkills from "./runtime-skills.js";
@@ -332,6 +333,8 @@ interface SessionRuntimeRecord {
   teamRuntime?: TeamRuntime;
   /** 按助手划分的长期记忆库（跨会话）；工具闭包读它，提示词快照在创建时冻结。 */
   memoryStore: MemoryStore;
+  /** 本会话工作区的项目记忆库（issue #2）：`<workspace>/.pidesktop/memory/`，跟项目走。 */
+  workspaceMemoryStore: MemoryStore;
   customTools: ToolDefinition[];
   subagentTools: ToolDefinition[];
   todoTools: ToolDefinition[];
@@ -1222,11 +1225,38 @@ function emitMemory(): void {
   post({ type: "memory", memory: memoryTopics });
 }
 
-/** Reload memory topics from the active store and broadcast to the renderer. */
+/** Reload memory topics from the active stores and broadcast to the renderer. */
 function refreshMemory(): void {
-  if (memoryStore) memoryTopics = memoryStore.summaries();
+  if (activeRuntime) {
+    // 双库镜像（issue #2）：面板/资源目录同时看到助手库与当前工作区项目库的主题；
+    // 「当前」跟随激活会话（parked 会话的记忆推送不变——它有自己的 pane 通道）。
+    memoryTopics = recordMemorySummaries(activeRuntime);
+  } else if (memoryStore) {
+    memoryTopics = memoryStore.summaries();
+  }
   emitMemory();
   emitResourceCatalog();
+}
+
+/** 激活会话的双库摘要：助手库 + 该会话工作区项目库（去重：同名标题项目库优先）。 */
+function recordMemorySummaries(record: SessionRuntimeRecord): MemoryTopicSummary[] {
+  const agentTopics = record.memoryStore.summaries().map((topic) => ({ ...topic, library: "agent" as const }));
+  if (!record.workspaceMemoryStore) return agentTopics;
+  const projectTopics = record.workspaceMemoryStore.summaries().map((topic) => ({ ...topic, library: "project" as const }));
+  const agentNames = new Set(projectTopics.map((topic) => topic.title.toLowerCase()));
+  return [...projectTopics, ...agentTopics.filter((topic) => !agentNames.has(topic.title.toLowerCase()))];
+}
+
+/**
+ * 激活会话的「模型实际看到的索引」文本（双库口径，issue #2）：
+ * 项目段优先 1,400 字、助手段 600 字（见 shared/memory 的常量注释）。
+ * 无激活会话时退回旧单库口径（面板仍能预览当前助手的记忆）。
+ */
+function activeMemoryIndexMarkdown(): string {
+  if (!activeRuntime) return memoryStore ? memoryStore.snapshotMarkdown(workspace, MEMORY_SNAPSHOT_BUDGET_CHARS) : "";
+  const project = activeRuntime.workspaceMemoryStore.snapshotMarkdown(activeRuntime.workspace, MEMORY_SNAPSHOT_PROJECT_CHARS);
+  const agent = activeRuntime.memoryStore.snapshotMarkdown(activeRuntime.workspace, MEMORY_SNAPSHOT_AGENT_CHARS);
+  return [project, agent].filter((part) => part.trim()).join("\n\n");
 }
 
 /**
@@ -1236,9 +1266,76 @@ function refreshMemory(): void {
  * mtime 缓存读取，失效的目录（没有记忆）视为不存在。
  */
 const otherMemoryStores = new Map<string, MemoryStore>();
+/** 工作区项目库缓存（issue #2）：key = 规范化工作区路径，与 record 内的实例互不影响。 */
+const workspaceMemoryStores = new Map<string, MemoryStore>();
+/** 记忆总览里项目库行的虚拟 id 前缀（`project:<工作区绝对路径>`）。 */
+const PROJECT_ROW_PREFIX = "project:";
 
 function currentAgentId(): string | undefined {
   return activeRuntime?.agent.id;
+}
+
+/**
+ * 面板侧的工作区项目库解析（按当前工作区镜像；缓存复用，不重复读盘）。
+ */
+function workspaceMemoryStoreFor(workspacePath: string | undefined): MemoryStore | undefined {
+  const target = workspacePath?.trim();
+  if (!target) return undefined;
+  const key = resolve(target).toLowerCase();
+  const cached = workspaceMemoryStores.get(key);
+  if (cached) return cached;
+  const store = createMemoryStore(workspaceMemoryDirFor(target), refreshMemory);
+  workspaceMemoryStores.set(key, store);
+  return store;
+}
+
+/**
+ * 面板命令里的项目库定位：`library:"project"` 时从虚拟 row id（`project:<路径>`）
+ * 还原目标工作区——记忆中心会同时展示多个工作区的项目库，不能用「当前工作区」猜。
+ * 没有虚拟 id 时退回当前工作区镜像。
+ */
+function projectMemoryStoreFromCommand(command: { library?: MemoryLibrary; agentId?: string }): MemoryStore | undefined {
+  if (command.library !== "project") return undefined;
+  const explicit = command.agentId?.startsWith(PROJECT_ROW_PREFIX) ? command.agentId.slice(PROJECT_ROW_PREFIX.length) : undefined;
+  return workspaceMemoryStoreFor(explicit ?? activeRuntime?.workspace ?? workspace);
+}
+
+/**
+ * 面板命令（read/update/delete）的主题定位：先助手库、再当前工作区项目库。
+ * 双库下同名标题可能同时存在——与模型侧一致，项目库优先（issue #2），
+ * 但用户明确指定 agentId 时先看该助手库（面板按归属筛选时不会误伤项目库）。
+ */
+function locateMemoryTopic(topic: string, agentId: string | undefined): { store: MemoryStore; agentId: string; workspaceScoped: boolean } | undefined {
+  const resolved = resolveMemoryStore(agentId);
+  const wanted = topic.trim();
+  const project = workspaceMemoryStoreFor(activeRuntime?.workspace ?? workspace);
+  const inProject = project && wanted ? project.read(wanted) : undefined;
+  const inAgent = resolved && wanted ? resolved.store.read(wanted) : undefined;
+  // 项目库优先：双库同名时与模型侧（findVisible）同口径。
+  if (inProject && project) return { store: project, agentId: resolved?.agentId ?? currentAgentId() ?? "", workspaceScoped: true };
+  if (inAgent && resolved) return { store: resolved.store, agentId: resolved.agentId, workspaceScoped: false };
+  return undefined;
+}
+
+/**
+ * 面板命令的主题定位：带 library 时只在指定库找（同名双库时不会误伤），
+ * 未带时退回 locateMemoryTopic 的「项目库优先」。
+ */
+function locateMemoryTopicForCommand(topic: string, agentId: string | undefined, library: MemoryLibrary | undefined): { store: MemoryStore; agentId: string; workspaceScoped: boolean } | undefined {
+  const wanted = topic.trim();
+  if (!wanted) return undefined;
+  if (library === "project") {
+    const project = projectMemoryStoreFromCommand({ library, ...(agentId ? { agentId } : {}) });
+    if (!project) return undefined;
+    const topicRecord = project.read(wanted);
+    return topicRecord ? { store: project, agentId: agentId?.trim() ?? currentAgentId() ?? "", workspaceScoped: true } : undefined;
+  }
+  if (library === "agent") {
+    const resolved = resolveMemoryStore(agentId);
+    const topicRecord = resolved ? resolved.store.read(wanted) : undefined;
+    return resolved && topicRecord ? { store: resolved.store, agentId: resolved.agentId, workspaceScoped: false } : undefined;
+  }
+  return locateMemoryTopic(topic, agentId);
 }
 
 function resolveMemoryStore(agentId: string | undefined): { store: MemoryStore; agentId: string } | undefined {
@@ -1309,7 +1406,34 @@ function buildMemoryOverview(): MemoryOverview {
     if (right.agentId === current) return 1;
     return right.topics.length - left.topics.length || left.agentName.localeCompare(right.agentName, "zh");
   });
-  return { agents: rows, at: Date.now() };
+  // 项目库行（2026-11-09，issue #2 配套）：工作区项目库也是治理对象，否则用户在
+  // 记忆中心根本看不到项目记忆。行 id 用虚拟前缀 `project:`，前端读正文时据此传
+  // library:"project"（而非一个不存在的助手 id）。只列「出现过的工作区 + 最近工作区」
+  // 里真的有主题的库，避免拖动盘扫描。
+  const projectRows: MemoryOverviewAgent[] = [];
+  const seenWorkspaces = new Set<string>(recentWorkspaces.map((item) => resolve(item.path).toLowerCase()));
+  for (const session of currentSessions) {
+    if (session.workspace) seenWorkspaces.add(resolve(session.workspace).toLowerCase());
+  }
+  for (const workspacePath of seenWorkspaces) {
+    const store = workspaceMemoryStoreFor(workspacePath);
+    if (!store || !memoryDirExists(workspaceMemoryDirFor(workspacePath))) continue;
+    const topics = store.summaries().map((topic) => ({ ...topic, library: "project" as const }));
+    if (topics.length === 0) continue;
+    const index = store.snapshotDetailed(workspacePath, MEMORY_SNAPSHOT_PROJECT_CHARS);
+    const label = basename(workspacePath) || workspacePath;
+    projectRows.push({
+      agentId: `${PROJECT_ROW_PREFIX}${workspacePath}`,
+      agentName: `项目库 · ${label}`,
+      topics,
+      workspace: workspacePath,
+      index,
+      health: analyzeMemoryHealth(topics, { indexChars: index.characters, indexBudget: MEMORY_SNAPSHOT_PROJECT_CHARS }),
+      library: "project"
+    });
+  }
+  projectRows.sort((left, right) => right.topics.length - left.topics.length || left.agentName.localeCompare(right.agentName, "zh"));
+  return { agents: [...rows, ...projectRows], at: Date.now() };
 }
 
 /** 某 Agent 的自动化任务文件路径。 */
@@ -2626,7 +2750,7 @@ function activate(record: SessionRuntimeRecord): void {
   todos = record.todoStore.list();
   emitTodos();
   memoryStore = record.memoryStore;
-  memoryTopics = record.memoryStore.summaries();
+  memoryTopics = recordMemorySummaries(record);
   emitMemory();
   syncSkills();
   syncCommands();
@@ -4356,14 +4480,21 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     });
   };
   const permissionDeps = permissionDepsFor(sessionHolder, recordWorkspace, recordAgent, options.accessModeOverride ? () => options.accessModeOverride! : undefined);
-  // 长期记忆：按助手划分、跨会话（pidesktop-memory/<agentId>/）。治理块与
-  // 索引快照在此一次性冻结、整个会话字节不变（dsh 缓存纪律：系统提示词只含
-  // 会话级常量，后续记忆变化全部经 memory_* 工具调用出现在对话尾部）。
-  // enabled 开关从下一个会话起改变注入；工具 execute 则按实时开关判断。
+  // 长期记忆（双库，2026-11-09 GitHub issue #2 配套）：助手库（用户偏好/协作纪律，跟人走）
+  // + 工作区项目库（<workspace>/.pidesktop/memory/，跟项目走——任意被派到该工作区
+  // 的助手都能接续，总控分发场景的前提）。治理块与索引快照在此一次性冻结、整个
+  // 会话字节不变（dsh 缓存纪律：系统提示词只含会话级常量，后续记忆变化全部经
+  // memory_* 工具调用出现在对话尾部）。enabled 开关从下一个会话起改变注入；
+  // 工具 execute 则按实时开关判断。项目库按 recordWorkspace 解析：跨工作区自动化/
+  // 总控派发的子会话带 workspaceOverride，天然拿到目标工作区的项目记忆（#2 核心诉求）。
   const recordMemoryStore = createMemoryStore(memoryDirFor(getAgentDir(), recordAgent.id), refreshMemory);
+  const recordWorkspaceMemoryStore = createMemoryStore(workspaceMemoryDirFor(recordWorkspace), refreshMemory);
   const memoryPromptBlock = settings?.memory?.enabled === false
     ? undefined
-    : [runtimeMemoryTools.buildMemorySystemPromptBlock(), runtimeMemoryTools.buildMemorySnapshotBlock(recordMemoryStore.snapshotMarkdown(recordWorkspace, MEMORY_SNAPSHOT_BUDGET_CHARS))].filter(Boolean).join("\n\n");
+    : [runtimeMemoryTools.buildMemorySystemPromptBlock(), runtimeMemoryTools.buildDualMemorySnapshotBlock(
+        recordWorkspaceMemoryStore.snapshotMarkdown(recordWorkspace, MEMORY_SNAPSHOT_PROJECT_CHARS),
+        recordMemoryStore.snapshotMarkdown(recordWorkspace, MEMORY_SNAPSHOT_AGENT_CHARS)
+      )].filter(Boolean).join("\n\n");
   // 钩子依赖在会话创建时建一次：既给 pidesktop-hooks 扩展，也给 todo 的验收命令做
   // block 规则评估——验收命令由 todo_write 内部执行、不是真的 bash 工具调用，但用户
   // 配的 deny 规则（`rm -rf` 之类）必须同样生效，否则就多出一条绕开钩子的 shell 通路。
@@ -4559,6 +4690,8 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   const todoTools = buildTodoTools(recordTodoStore, recordTodoPace, todoVerifyContext);
   const memoryTools = runtimeMemoryTools.buildMemoryTools({
     store: recordMemoryStore,
+    // 项目库（issue #2）：缺省写入目标，工具按标题定位既有主题的归属库。
+    workspaceStore: recordWorkspaceMemoryStore,
     workspace: recordWorkspace,
     enabled: () => settings?.memory?.enabled !== false
   });
@@ -4865,6 +4998,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     teamMode: recordTeamMode,
     teamTools,
     memoryStore: recordMemoryStore,
+    workspaceMemoryStore: recordWorkspaceMemoryStore,
     customTools: recordCustomTools,
     subagentTools,
     todoTools,
@@ -5028,6 +5162,22 @@ async function initialize(command: Extract<RuntimeCommand, { type: "initialize" 
     }
   }
   annotateRecentWorkspaces();
+  // 一次性迁移（2026-11-09，GitHub issue #2 配套）：助手库里「已绑定工作区」的主题搬进
+  // 对应工作区自己的项目库（`<workspace>/.pidesktop/memory/`）。旧模型里 workspace 只是
+  // 一个可见性标签，文件锁在助手目录；双库后项目知识归项目，任意被派到该工作区的助手
+  // 都能接续。函数内自带备份 + 幂等（无可搬主题时零写入）+ 目录不存在/标题冲突则原地不动。
+  try {
+    const outcome: MemoryMigrationOutcome = migrateWorkspaceBoundTopics(getAgentDir());
+    if (outcome.movedTopics > 0 || outcome.skippedMissingWorkspace > 0 || outcome.skippedTitleConflict > 0) {
+      void post({
+        type: "log",
+        level: "info",
+        message: `记忆库按工作区拆分：搬走 ${outcome.movedTopics} 个主题（${outcome.targetWorkspaces.length} 个工作区）；工作区已不存在保留 ${outcome.skippedMissingWorkspace} 个、标题冲突保留 ${outcome.skippedTitleConflict} 个`
+      });
+    }
+  } catch (error) {
+    void post({ type: "log", level: "warn", message: `记忆库按工作区拆分失败（下次启动重试）：${errorText(error)}` });
+  }
   // 作品清单：全局一份池子（跨工作区），读盘 + 清掉孤儿缩略图。
   // 读盘 + 顺手修复「缺 id」的历史条目（首版发布路径写过 id:""，见 gallery-store 注释）。
   galleryApps = loadGalleryRepairingIds(galleryFilePath());
@@ -7079,21 +7229,26 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       break;
     }
     case "memory.create": {
-      const resolved = memoryStoreOrThrow(command.agentId);
+      // 双库创建（issue #2）：workspaceScoped=true 写项目库（跟项目走）；否则写助手库
+      // （跟人走）。没打开工作区时强制落助手库（不静默丢数据）。
       const targetWorkspace = command.sessionId ? resolveTargetRecord(command.sessionId).workspace : workspace;
-      resolved.store.save({
+      const project = command.workspaceScoped && targetWorkspace ? workspaceMemoryStoreFor(targetWorkspace) : undefined;
+      const targetStore = project ?? memoryStoreOrThrow(command.agentId).store;
+      targetStore.save({
         title: command.topic,
         description: command.description,
         content: command.content,
         ...(command.layer ? { layer: command.layer } : {}),
         ...(command.summary !== undefined ? { summary: command.summary } : {}),
         ...(command.triggers ? { triggers: command.triggers } : {}),
-        ...(command.workspaceScoped && targetWorkspace ? { bindWorkspace: targetWorkspace } : {})
+        ...(project && targetWorkspace ? { bindWorkspace: targetWorkspace } : {})
       });
       break;
     }
     case "memory.update": {
-      const resolved = memoryStoreOrThrow(command.agentId);
+      // 双库定位：优先用面板给的 library，否则按标题在助手势库 + 当前工作区项目库找。
+      const target = locateMemoryTopicForCommand(command.topic, command.agentId, command.library);
+      const resolved = target ?? memoryStoreOrThrow(command.agentId);
       // 不传 bindWorkspace：面板编辑保留既有工作区绑定。
       resolved.store.update(command.topic, {
         ...(command.description !== undefined ? { description: command.description } : {}),
@@ -7105,21 +7260,22 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       break;
     }
     case "memory.indexPreview": {
-      // 记忆中心的「模型实际看到的索引」：与会话注入走同一个 snapshotMarkdown。
-      const markdown = memoryStore ? memoryStore.snapshotMarkdown(workspace, MEMORY_SNAPSHOT_BUDGET_CHARS) : "";
+      // 记忆中心的「模型实际看到的索引」：与会话注入走同一个 snapshotMarkdown，
+      // 但按双库口径拼接（issue #2：项目段 + 助手段），预览才不会骗人。
+      const markdown = activeMemoryIndexMarkdown();
       post({ type: "memory.index-preview", markdown, characters: markdown.length, budget: MEMORY_SNAPSHOT_BUDGET_CHARS });
       break;
     }
     case "memory.health": {
-      // 健康检查只看摘要（不读正文），索引占用与会话注入同一函数。
-      const summaries = memoryStore ? memoryStore.summaries() : [];
-      const indexChars = memoryStore ? memoryStore.snapshotMarkdown(workspace, MEMORY_SNAPSHOT_BUDGET_CHARS).length : 0;
+      // 健康检查只看摘要（不读正文），索引占用与会话注入同一函数（双库拼接口径）。
+      const summaries = activeRuntime ? recordMemorySummaries(activeRuntime) : (memoryStore ? memoryStore.summaries() : []);
+      const indexChars = activeMemoryIndexMarkdown().length;
       post({ type: "memory.health", health: analyzeMemoryHealth(summaries, { indexChars, indexBudget: MEMORY_SNAPSHOT_BUDGET_CHARS }) });
       break;
     }
     case "memory.delete": {
-      const resolved = memoryStoreOrThrow(command.agentId);
-      if (!resolved.store.remove(command.topic)) throw new Error(`未找到记忆主题「${command.topic}」`);
+      const target = locateMemoryTopicForCommand(command.topic, command.agentId, command.library) ?? memoryStoreOrThrow(command.agentId);
+      if (!target.store.remove(command.topic)) throw new Error(`未找到记忆主题「${command.topic}」`);
       break;
     }
     case "memory.overview": {
@@ -7128,18 +7284,23 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       break;
     }
     case "memory.read": {
-      const resolved = resolveMemoryStore(command.agentId);
-      if (!resolved) {
-        post({ type: "memory.topic-error", ...(command.topicId ? { topicId: command.topicId } : {}), ...(command.agentId ? { agentId: command.agentId } : {}), message: "当前没有可用的记忆存储，请先打开一个会话" });
+      // 双库读取（issue #2）：面板带 library 时直指该库；否则先助手库再当前工作区项目库
+      // （项目库优先与模型侧同口径）。仍允许读其他工作区绑定的主题（模型侧 memory_read
+      // 仍有可见性过滤）。
+      const key = command.topicId?.trim() || command.topic?.trim() || "";
+      const project = projectMemoryStoreFromCommand(command);
+      const resolved = command.library === "project" ? undefined : resolveMemoryStore(command.agentId);
+      if (!project && !resolved) {
+        post({ type: "memory.topic-error", ...(command.topicId ? { topicId: command.topicId } : {}), ...(command.agentId ? { agentId: command.agentId } : {}), ...(command.library ? { library: command.library } : {}), message: "当前没有可用的记忆存储，请先打开一个会话" });
         break;
       }
-      // 面板治理视图：允许读取其他工作区绑定的主题（模型侧 memory_read 仍有可见性过滤）。
-      const key = command.topicId?.trim() || command.topic?.trim() || "";
-      const topic = key ? resolved.store.read(key) : undefined;
-      if (topic) {
-        post({ type: "memory.topic", topic, agentId: resolved.agentId });
+      const topicRecord = key ? (project?.read(key) ?? resolved?.store.read(key)) : undefined;
+      if (topicRecord) {
+        const library: MemoryLibrary = project ? "project" : "agent";
+        // 回复里的 library 与请求同源，渲染端的缓存键才能与发请求时用的一致。
+        post({ type: "memory.topic", topic: { ...topicRecord, library }, ...(resolved ? { agentId: resolved.agentId } : command.agentId ? { agentId: command.agentId } : {}) });
       } else {
-        post({ type: "memory.topic-error", ...(command.topicId ? { topicId: command.topicId } : {}), agentId: resolved.agentId, message: `未找到记忆主题「${key}」` });
+        post({ type: "memory.topic-error", ...(command.topicId ? { topicId: command.topicId } : {}), ...(command.agentId ? { agentId: command.agentId } : {}), ...(command.library ? { library: command.library } : {}), message: `未找到记忆主题「${key}」` });
       }
       break;
     }

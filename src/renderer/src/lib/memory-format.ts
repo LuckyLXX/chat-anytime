@@ -57,6 +57,21 @@ export function memoryCacheKey(agentId: string | undefined, topicId: string): st
   return `${agentId ?? ""}::${topicId}`;
 }
 
+/**
+ * 记忆总览里项目库行的虚拟 id 前缀（`project:<工作区绝对路径>`，2026-11-09 issue #2 配套）。
+ * 项目库不是助手，读/改正文时必须把行列识别成 `library:"project"` + 工作区路径，
+ * 否则会被当成一个不存在的助手 id。
+ */
+export const MEMORY_PROJECT_ROW_PREFIX = "project:";
+
+/** 面板命令的库参数：项目库行 → { library: "project", agentId: 虚拟 id }；否则只带 agentId。 */
+export function memoryRequestTarget(agentId: string | undefined): { agentId?: string; library?: "project" } {
+  const trimmed = agentId?.trim();
+  if (!trimmed) return {};
+  if (trimmed.startsWith(MEMORY_PROJECT_ROW_PREFIX)) return { agentId: trimmed, library: "project" };
+  return { agentId: trimmed };
+}
+
 /** 归属标签：全局记忆 / 工作区名（取路径末段，Windows 与 POSIX 都吃）。 */
 export function memoryScopeName(workspace: string | undefined): string {
   if (!workspace) return "全局";

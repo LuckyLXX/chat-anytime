@@ -40,10 +40,14 @@ describe("memory overview wiring", () => {
     expect(protocol).toContain('| { type: "memory.overview"; overview: MemoryOverview }');
     expect(protocol).toContain("export interface MemoryOverviewAgent");
     expect(protocol).toContain("export interface MemoryOverview {");
-    expect(protocol).toContain('| { type: "memory.update"; topic: string; description?: string; content?: string; layer?: MemoryLayer; summary?: string; triggers?: string[]; agentId?: string }');
-    expect(protocol).toContain('| { type: "memory.delete"; topic: string; agentId?: string }');
-    expect(protocol).toContain('| { type: "memory.read"; topicId?: string; topic?: string; agentId?: string }');
+    // 双库模型（2026-11-09 issue #2）给 read/update/delete 加了可选 library 参数，
+    // 协议行前缀随之变化；这里只钉「参数存在」，不钉整行的字面形态。
+    expect(protocol).toContain('| { type: "memory.update"; topic: string;');
+    expect(protocol).toContain('| { type: "memory.delete"; topic: string;');
+    expect(protocol).toContain('| { type: "memory.read"; topicId?: string;');
     expect(protocol).toContain('| { type: "memory.topic"; topic: MemoryTopic; agentId?: string }');
+    expect(protocol).toContain("export type MemoryLibrary");
+    expect(protocol).toContain('library?: MemoryLibrary');
   });
 
   it("builds the overview in pi-runtime from each agent's memory directory", () => {
@@ -61,12 +65,15 @@ describe("memory overview wiring", () => {
     const runtime = read("src/main/pi-runtime.ts");
     expect(runtime).toContain("function resolveMemoryStore(agentId: string | undefined)");
     expect(runtime).toContain("function memoryStoreOrThrow(agentId: string | undefined)");
-    expect(runtime).toContain("const resolved = memoryStoreOrThrow(command.agentId);");
-    expect(runtime).toContain("resolved.store.save({");
+    expect(runtime).toContain("function workspaceMemoryStoreFor(workspacePath: string | undefined)");
+    // 双库定位：面板写/删命令先按 library 与标题定位库，定位失败才退回「当前助手的库」。
+    expect(runtime).toContain("function locateMemoryTopicForCommand(topic: string, agentId: string | undefined, library: MemoryLibrary | undefined)");
+    expect(runtime).toContain("function projectMemoryStoreFromCommand(command: { library?: MemoryLibrary; agentId?: string })");
+    expect(runtime).toContain("targetStore.save({");
     expect(runtime).toContain("resolved.store.update(command.topic, {");
-    expect(runtime).toContain("resolved.store.remove(command.topic)");
-    expect(runtime).toContain("const resolved = resolveMemoryStore(command.agentId);");
-    expect(runtime).toContain("post({ type: \"memory.topic\", topic, agentId: resolved.agentId });");
+    expect(runtime).toContain("target.store.remove(command.topic)");
+    expect(runtime).toContain("projectMemoryStoreFromCommand(command)");
+    expect(runtime).toContain('post({ type: "memory.topic", topic: { ...topicRecord, library }');
   });
 
   it("keeps the renderer store keyed by agent and wired to the overview push", () => {
@@ -86,8 +93,13 @@ describe("memory overview wiring", () => {
     expect(tabs).toContain('| { type: "memory"; topicId: string; title: string; /** 主题所属助手（缺省 = 当前会话的助手）。 */ agentId?: string }');
     expect(tabs).toContain("key={`${target.agentId ?? \"\"}:${target.topicId}`}");
     const preview = read("src/renderer/src/components/MemoryPreview.tsx");
-    expect(preview).toContain('void window.piDesktop.send({ type: "memory.read", topicId, ...(agentId ? { agentId } : {}) });');
-    expect(preview).toContain("persistContent={(content) => window.piDesktop.send({ type: \"memory.update\", topic: summary.title, description: summary.description, content, ...(agentId ? { agentId } : {}) })}");
+    // 项目库行（虚拟 id `project:<路径>`）读正文时必须改道 library:"project"。
+    expect(preview).toContain('void window.piDesktop.send({ type: "memory.read", topicId, ...memoryRequestTarget(agentId) });');
+    expect(preview).toContain("persistContent={(content) => window.piDesktop.send({ type: \"memory.update\", topic: summary.title, description: summary.description, content, ...memoryRequestTarget(agentId) })}");
+    const format = read("src/renderer/src/lib/memory-format.ts");
+    expect(format).toContain("export const MEMORY_PROJECT_ROW_PREFIX");
+    expect(format).toContain("export function memoryRequestTarget(agentId: string | undefined)");
+    expect(read("src/renderer/src/MemoryCenter.tsx")).toContain("...memoryRequestTarget(selectedAgentId)");
   });
 
   it("renders the graph instead of the flat card wall", () => {

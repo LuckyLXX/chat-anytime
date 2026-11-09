@@ -1,7 +1,7 @@
 import { AlertCircle, Brain, LoaderCircle, RefreshCw } from "lucide-react";
 import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
 import type { MemoryTopic } from "../../../shared/protocol";
-import { memoryCacheKey } from "../lib/memory-format";
+import { memoryCacheKey, memoryRequestTarget } from "../lib/memory-format";
 import { useDesktopStore } from "../store";
 import type { Artifact } from "../lib/content";
 import type { EditorSaveStatus } from "./MarkdownEditor";
@@ -60,7 +60,7 @@ export function MemoryPreviewContent({ topicId, agentId, tabId, showSource, edit
     if (editing && lastTopic.current?.id === topicId) return;
     if (requestedRevision.current === summary.contentRevision) return;
     requestedRevision.current = summary.contentRevision;
-    void window.piDesktop.send({ type: "memory.read", topicId, ...(agentId ? { agentId } : {}) });
+    void window.piDesktop.send({ type: "memory.read", topicId, ...memoryRequestTarget(agentId) });
   }, [summary?.id, summary?.contentRevision, cached?.contentRevision, editing, topicId, retry, agentId, effectiveAgentId]);
 
   if (!summary) {
@@ -114,7 +114,7 @@ export function MemoryPreviewContent({ topicId, agentId, tabId, showSource, edit
           tabId={tabId}
           relativePath={`pidesktop-memory/${topic.id}.md`}
           initialContent={topic.content}
-          persistContent={(content) => window.piDesktop.send({ type: "memory.update", topic: summary.title, description: summary.description, content, ...(agentId ? { agentId } : {}) })}
+          persistContent={(content) => window.piDesktop.send({ type: "memory.update", topic: summary.title, description: summary.description, content, ...memoryRequestTarget(agentId) })}
           onDirtyChange={(dirty) => onEditorChange?.({ dirty })}
           onSaved={onEditorSaved}
           onStatusChange={onEditorStatusChange}

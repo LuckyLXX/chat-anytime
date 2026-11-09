@@ -17,6 +17,14 @@ export const MEMORY_LAYERS: readonly MemoryLayer[] = ["core", "standard", "archi
 
 /** 会话创建时注入的索引快照总预算（字符）。 */
 export const MEMORY_SNAPSHOT_BUDGET_CHARS = 2000;
+/**
+ * 双库快照（2026-11-09，GitHub issue #2 配套）：项目库段与助手库段各占的预算。
+ * 总预算不变（2,000），项目段 1,400 优先——项目知识是双库改造的主目标；
+ * 助手段 600 放用户偏好/纪律的索引行（core 层通常一二十字/行，够用）。
+ * 单库形态（无项目库）仍用总预算 2,000，行为与旧版完全一致。
+ */
+export const MEMORY_SNAPSHOT_PROJECT_CHARS = 1400;
+export const MEMORY_SNAPSHOT_AGENT_CHARS = 600;
 /** 标准主题在索引里的描述上限（core 用要点、archive 不进索引）。 */
 export const MEMORY_SNAPSHOT_DESC_MAX = 24;
 export const MEMORY_SNAPSHOT_DESC_COMPACT = 12;
