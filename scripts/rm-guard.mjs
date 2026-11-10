@@ -1,6 +1,10 @@
-#!/usr/bin/env node
 /**
  * 危险删除守卫 —— PiDesktop 钩子命令（event=tool_call / blocking=true）。
+ *
+ * **故意不写 `#!/usr/bin/env node`**（2026-11-10 踩坑）：钩子与测试都用 `node <脚本>` 调用，
+ * 不需要 shebang；而 GitHub Actions 的 Windows runner 检出 CRLF 后，Vite/vitest 的 shebang
+ * 剥离会把这一行搬到 import 语句之后，生成 `#!/usr/bin/env node` 夹在文件中间 ⇒ `SyntaxError:
+ * Invalid or unexpected token`（本地 LF 全绿、CI 全红）。`rm-guard.test.ts` 有断言钉住这一点。
  *
  * 定位：只拦「不可挽回的一击」，不做安全沙箱。
  *   · 拦：递归删除的目标是根路径（工作区根 / 工作区父级 / 盘符根 / 家目录 / `.` `..` `*` `~`）、

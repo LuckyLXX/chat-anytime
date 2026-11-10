@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,6 +21,17 @@ const execFileAsync = promisify(execFile);
 const scriptPath = join(dirname(fileURLToPath(import.meta.url)), "../../scripts/rm-guard.mjs");
 /** 用临时目录当工作区：断言只依赖相对关系，不依赖本机真实路径。 */
 const workspace = join(tmpdir(), "rm-guard-workspace");
+
+describe("rm guard · 脚本自身", () => {
+  it("首行不能是 shebang（CRLF 检出下会被 Vite 搬到文件中间）", () => {
+    // 2026-11-10 CI 全红：GitHub Actions 的 Windows runner 用 CRLF 检出，Vite/vitest 的
+    // shebang 剥离把 `#!/usr/bin/env node` 移到了 import 语句之后，于是运行时
+    // `SyntaxError: Invalid or unexpected token`（本地 LF 全绿，难以在本地复现）。
+    // 钩子与测试一律用 `node <脚本>` 调用，不需要 shebang —— 别再加回来。
+    const source = readFileSync(scriptPath, "utf8");
+    expect(source.startsWith("#!")).toBe(false);
+  });
+});
 
 describe("rm guard · 拦", () => {
   it.each([
