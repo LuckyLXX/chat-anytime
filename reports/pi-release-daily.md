@@ -298,3 +298,57 @@
 
 ---
 2026-11-10 | v1.5.0 | 无更新（沿用上次发布时间 2026-11-02T11:05:31Z）
+
+
+## 2026-11-11 · v1.5.1 → v1.5.2（较上次已报告版本 v1.5.0 的增量）
+
+### v1.5.1（2026-11-09T23:47:44Z）
+
+**✨ 新功能**
+
+- 命令行登录/登出：`pi auth login <provider>` / `pi auth logout <provider>` 无需进入会话即可登录，支持 `--api-key` 与 `--no-browser`（设备码/复制码）；登录 Radius 同时配置其 MCP server。
+- 空闲 prompt 缓存保温：`cacheWarming` 默认从 `"streaming"` 改为 `"idle"`，两次 agent 运行之间可保温最多 30 分钟（预计回本时）；连续保温合并为一行 `Cache warmed: $<total>`，回旧行为设 `"streaming"`。
+- Anthropic message threads：只发新增消息由服务端续接会话，上下文变化（压缩、工具表变更）时回退全量请求；网关可设 `compat.supportsMessageThreads` 开关。
+- Mermaid 渲染增强：支持饼图、作者自定义样式、可点击标签（支持的终端），并在展开的分支/压缩摘要里也渲染。
+- GitHub Copilot 接入 Microsoft-Decision-1 分类器，可用 codemode `models.classify()`。
+- `pi update --extensions` 逐包报告 npm 版本或 git commit 变化，区分未变/跳过/有警告三种情况。
+
+**⚠️ 破坏性变更**
+
+- 自定义 `GrepOperations.readFile` 不再为 context 行调用（字段保留为可选并弃用，既有集成交付仍可编译）；grep 的上下文行改由 ripgrep 提供，不再自行读取匹配文件。远程系统搜索请覆写 grep 的 `execute()`。
+- OpenAI 兼容模型在工具全部禁用时不再发送 `"tools": []`（改为省略该字段），修复 vLLM 0.20+（含其前置 LiteLLM）的 400 `tools must not be an empty array`；若代理在历史含工具调用时必须收到 `tools`，在 `models.json` 为该模型设 `compat.requiresToolsWithToolHistory: true`。
+
+**📝 变更与默认值**
+
+- `anthropic` 默认模型改为 Claude Opus 5.5；多 provider 默认模型升级同价或更低价（`amazon-bedrock` Opus 5.5、`azure` GPT-6.1 Sol、`google`/`google-vertex` Gemini 4 Argon、GLM 5.3、`minimax` MiniMax-M3、Qwen3.8 Max、Kimi K3.1 Pro，moonshot/huggingface/opencode/openrouter 等换 Kimi K2.7 Code）。
+- `/login`、`/logout` 列表与 `/login <provider>` 补全把 Radius、OpenRouter 置顶（`✦` 标记，选中行按品牌色高亮）；`/login` 里 OpenAI Codex 恢复显示原名。
+- 新增 `qwen-token-plan-individual-cn` provider（`QWEN_TOKEN_PLAN_CN_API_KEY`）、Claude Fable 5.2（$8/$40，1M 上下文）、GLM 5.3 白名单、`compat.promptCacheKeyMode`、`compat.requiresNonNullAssistantContent`、Dart/Nix/Groovy/Gradle 语法高亮、`pi.registerMarkdownTransformer()` 的 `{ messageTypes }` 选项。
+
+**🐛 修复（要点）**
+
+- 工具链：grep 的 `glob` 改为相对 `path` 匹配（此前从启动目录算，`./src/*.ts` 这类前缀不再匹配不到，symlink 亦正确）；grep 设 `context` 时不再整文件读入内存、并修 UTF-16 与孤立 CR；read 工具改为流式读取只保留展示行（大文件不再 OOM，`ReadOperations` 新增可选 `createReadStream`）；find 在 Windows 支持 `src\**\*.ts` 等反斜杠模式且跨 fd 版本一致，`limit: 0` 归一为 1；edit 不再改写未改动行的行尾（混合 CRLF/LF、孤立 CR），diff 只覆盖改动附近且在写入前计算。
+- 终端与输入：bash 超时错误补上真实退出码与退出时间；macOS arm64 反复读图后 abort（缩放 worker 未回收，每图约 +15ms）；Ctrl+P 可切到作用域内唯一模型；Ctrl+V 在 Windows/WSL 粘贴剪贴板图片与文本（与 Alt+V 同为默认）；Windows PowerShell 5.1 下 powershell 工具 stderr 重定向不再误报 exit 1；`install.ps1` 在 5.1 下不再因 npm/Node 警告 `NativeCommandError` 中止，非法 `managed-install.json` 改为报告而非中断；Backspace 删粘贴标记不再破坏后续 `[paste #2]` 标记；切换编辑器/打开自定义 UI/恢复排队消息不再把大段粘贴文本换成标记。
+- MCP 与 OAuth：token 刷新失败不再破坏进行中的登录或替换 PKCE verifier，回调端口变化时用已存 client 刷新；`pi mcp list` 对 `auth.provider` 服务器（如 Radius）不再误报需登录；`/mcp` 浏览器登录成功后不再卡在「Connecting…」（关停时关闭残留连接）；stdio 子进程断开/退出后不再残留、大消息不再反复拷贝拖慢、SSE 仅 CR 行尾可解析、超大响应与超 8KiB 错误体按上限取消；退出时等待进行中的 token 刷新落盘（修 `invalid_grant`）；symlink 到同一 `auth.json` 的并发刷新共享锁。
+- 会话与扩展：`/reload` 与会话切换清理所有扩展 overlay（含隐藏的）；`/tree` 后恢复会话不再沿用旧 thinking level；RPC 模式下扩展 `ctx.shutdown()` 立即生效、退出清理不被 stdin EOF 与信号打断；扩展经 symlink 路径加载能解析依赖；`ctx.ui.custom()` overlay 的 `blocked` 生效；扩展选择框不再超出终端高度（滚动显示至多 10 项）；`pi config` 不再忽略 `keybindings.json`；changelog 不再因预发布版本后缀每次启动重复弹出。
+- 模型与协议：OpenRouter 上下文溢出 400（输出上限改留 15% 估输入、满窗最多 32768）；Anthropic 非 strict schema 保留根 `$defs`/`definitions`（MCP 工具参数不再错）；Azure GPT-6 系列上下文窗口修正为 1,050,000 并保留长上下文计价（>272K）；Claude Sonnet 5 不再发不支持的 `temperature`；Bedrock/Anthropic strict 超限后同 `sessionId` 直接发非 strict；`Type.BigInt()`/`Type.Undefined()` 参数可转换；OpenAI Responses 改用文档化的 `session-id` 亲和头；OpenCode Go Claude 5.5 系列改用 per-message effort 与 `thinking.block_binding: drop_block`。
+- 渲染与杂项：Markdown 不再把 HTML 注释 `<!-- -->` 显示为正文；截断不再切半 emoji（grep 行、codemode 输出、MCP 摘要）；codemode `NaN`/`Infinity` 不再打印为 `null`；`tool_search`/`searchTools()` 能搜到 `$ref`/`$defs` 后的属性名，schema 中畸形百分号转义不再让所有脚本 `URI malformed`；`ctrl+o` 可展开/折叠工作中的 `!`/`!!` 输出，丢弃早期输出时仍显示截断提示与完整输出链接；`pi update --models` 遇登录过期不再整体失败。
+
+### v1.5.2（2026-11-10T12:25:43Z）
+
+**✨ 新功能**
+
+- 会话原目录被移动或删除时可 fork 到当前目录（相当于 `--fork`，生成新 ID），之后恢复不再追问。
+
+**📝 变更**
+
+- 工作目录不存在时交互模式改为 `Continue` / `Fork` / `Cancel` 三选（原先只能继续），覆盖启动 `--session`/`--resume`、`/resume`、`/import` 与扩展 `ctx.switchSession()`。
+
+**🐛 修复**
+
+- `/import` 工作目录已不存在的会话，不再在会话目录留下副本，继续时也不再留下同 ID 的第二份（`s.jsonl` 与 `s-1.jsonl`）。
+- Anthropic OAuth 请求不再上报过时的 Claude Code 版本。
+
+**Release**：https://github.com/earendil-works/pi/releases/tag/v1.5.2 ｜ 共 2 个新版本
+
+---
+2026-11-11 | v1.5.2 | 2026-11-10T12:25:43Z
