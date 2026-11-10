@@ -15,8 +15,8 @@ export type { MemoryLayer, MemorySnapshot, MemorySnapshotEntry } from "./memory.
 import type { MemoryHealth } from "./memory-health.js";
 export type { MemoryDuplicateGroup, MemoryHealth, MemoryHealthIssue, MemoryHealthIssueKind } from "./memory-health.js";
 import type { ThemeImportOutcome } from "./theme-assets.js";
-import type { SkillStoreQuery, SkillStoreResult, SkillStoreScope } from "./skill-store.js";
-export type { SkillStoreCategory, SkillStoreCommand, SkillStoreDetail, SkillStoreFile, SkillStoreInstallOutcome, SkillStoreInstallSummary, SkillStoreQuery, SkillStoreResult, SkillStoreScope, SkillStoreSkill, SkillStoreSort, SkillStoreUninstallOutcome, SkillStoreVersion } from "./skill-store.js";
+import type { SkillStoreIntranetSettings, SkillStoreQuery, SkillStoreResult, SkillStoreScope, SkillStoreSource } from "./skill-store.js";
+export type { SkillStoreCategory, SkillStoreCommand, SkillStoreDetail, SkillStoreFile, SkillStoreInstallOutcome, SkillStoreInstallSummary, SkillStoreIntranetSettings, SkillStoreQuery, SkillStoreResult, SkillStoreScope, SkillStoreSkill, SkillStoreSort, SkillStoreSource, SkillStoreUninstallOutcome, SkillStoreVersion } from "./skill-store.js";
 export type { DesignCanvasInfo, DesignDoc, DesignLayout, DesignNode, DesignNodeDraft, DesignOp, DesignNodeType } from "./design-schema.js";
 export { applyDesignOps, cloneNodeWithNewIds, countNodes, createDesignDoc, findNode, makeNodeId, normalizeDesignDoc, sanitizeDesignName, summarizeNode } from "./design-schema.js";
 
@@ -357,6 +357,12 @@ export interface DesktopSettings {
   browser?: BrowserSettings;
   /** Jev 快速决策通路（实验性，缺省关闭）。 */
   jev?: JevSettings;
+  /**
+   * 内网 Skill 商店（LanSkills）连接配置：`{baseUrl, name?}`，缺省 = 未配置。
+   * 由独立的 `skill-store.source.save/clear` 命令维护（不进 settings.save 的 Pick）；
+   * `baseUrl` 由主进程在转发 `skill-store.*` 时注入 utility（utility 无 Electron API）。
+   */
+  intranetStore?: SkillStoreIntranetSettings;
   computer?: ComputerSettings;
   design?: DesignSettings;
   checkpoint?: CheckpointSettings;
@@ -2570,14 +2576,21 @@ export type RuntimeCommand =
   // —— Skill 商店（SkillHub Open API）：浏览/搜索/详情/安装/卸载。结果**不走命令返回**
   // （runtime:send 永不 reject），全部以 {type:"skill-store-result", requestId, …} 推送回
   // 渲染端；requestId 由渲染端生成并原样带回，避免列表/详情/安装并发时状态串台。 ——
-  | { type: "skill-store.list"; requestId: string; query: SkillStoreQuery }
-  | { type: "skill-store.top"; requestId: string }
-  | { type: "skill-store.categories"; requestId: string }
-  | { type: "skill-store.detail"; requestId: string; slug: string; version?: string }
-  /** 安装到指定作用域；目标目录已存在同源安装时需 confirmReplace=true（旧目录先备份）。 */
-  | { type: "skill-store.install"; requestId: string; slug: string; scope: SkillStoreScope; version?: string; confirmReplace?: boolean }
-  /** 只能卸载本商店账本记录在案的目录（不误删手工放置的同名 skill）。 */
-  | { type: "skill-store.uninstall"; requestId: string; slug: string; scope: SkillStoreScope }
+  // `source` 判别公开 SkillHub / 自建内网商店；`baseUrl` 由主进程在转发前注入
+  // （utility 没有 Electron API，读不到 settings），渲染端不要自己填。
+  | { type: "skill-store.list"; requestId: string; source: SkillStoreSource; baseUrl?: string; query: SkillStoreQuery }
+  | { type: "skill-store.top"; requestId: string; source: SkillStoreSource; baseUrl?: string }
+  | { type: "skill-store.categories"; requestId: string; source: SkillStoreSource; baseUrl?: string }
+  | { type: "skill-store.detail"; requestId: string; source: SkillStoreSource; baseUrl?: string; slug: string; version?: string }
+  /** 安装到指定作用域；目标目录已存在同源安装时需 confirmReplace=true（旧目录先备份）；异源同名目录拒绝覆盖。 */
+  | { type: "skill-store.install"; requestId: string; source: SkillStoreSource; baseUrl?: string; slug: string; scope: SkillStoreScope; version?: string; confirmReplace?: boolean }
+  /** 只能卸载本商店账本记录在案的目录（不误删手工放置的同名 skill；异源安装拒绝卸载）。 */
+  | { type: "skill-store.uninstall"; requestId: string; source: SkillStoreSource; baseUrl?: string; slug: string; scope: SkillStoreScope }
+  /** 内网商店地址保存/清除（主进程处理：落 settings.json + 回推结果，不转发 utility）。 */
+  | { type: "skill-store.source.save"; requestId: string; baseUrl: string; name?: string }
+  | { type: "skill-store.source.clear"; requestId: string }
+  /** 内网商店连接测试（主进程补 baseUrl 后转发 utility，走 GET /api/v1/ping）。 */
+  | { type: "skill-store.source.test"; requestId: string; baseUrl?: string }
   | { type: "background.kill"; id: string }
   | { type: "resources.reload" }
   /** 自动化定时任务：保存（创建/编辑整任务）、删除、开关、手动运行一次。 */

@@ -1,10 +1,12 @@
 /**
- * Skill 商店（SkillHub Open API）的共享协议层。
+ * Skill 商店的共享协议层（两个来源共用）。
  *
- * 三方共用：渲染端（设置页组件 + store 状态）、utility（skill-store-client 的
- * 归一化输出 + skill-store-install 的安装计划）、测试。字段口径来自官方
- * https://skillhub.cn 的 Open API 文档与 2026-11-04 实测（/api/skills、
- * /api/v1/skills/{slug}、/versions、/files、/file、/api/v1/categories）。
+ * - **public**：SkillHub Open API（`https://api.skillhub.cn`，外网）。
+ * - **intranet**：自建 LanSkills 商店（内网，见 `skill-store-intranet-client.ts`）。
+ *
+ * 三方共用：渲染端（设置页组件 + store 状态）、utility（客户端的归一化输出 +
+ * skill-store-install 的安装计划）、测试。字段口径来自官方 Open API 文档与
+ * 2026-11-04 实测；内网商店的契约见对方仓库 `docs/API.md`。
  *
  * 只依赖文档字段；实测响应里的 namespace/publisher/securityReports 等**未文档化
  * 字段仅作容错展示**（canonicalName 参与冲突判定，见 install 模块）。
@@ -13,11 +15,22 @@
 /** 商店 API 基地址（公开接口，无需鉴权）。 */
 export const SKILL_STORE_BASE_URL = "https://api.skillhub.cn";
 
+/** 两个来源：公开 SkillHub / 自建内网商店。结果与命令都带这个判别，渲染端按它路由状态。 */
+export type SkillStoreSource = "public" | "intranet";
+
+/** 内网商店（LanSkills）连接配置；存 settings.json，不进密钥。缺省 = 未配置。 */
+export interface SkillStoreIntranetSettings {
+  /** 服务根地址，允许路径前缀，例如 http://skills.corp.local:8080 或 http://corp.local/store */
+  baseUrl: string;
+  /** 显示名，缺省「内网 Skill 商店」 */
+  name?: string;
+}
+
 /** 安装作用域：用户全局 `<agentDir>/pidesktop-skills/` 或项目 `<workspace>/.pidesktop-skills/`。 */
 export type SkillStoreScope = "global" | "project";
 
-/** 列表/搜索的排序键（/api/skills 的 sortBy）。 */
-export type SkillStoreSort = "updated_at" | "downloads" | "stars" | "installs" | "score";
+/** 列表/搜索的排序键（/api/skills 的 sortBy；`name` 只对内网商店有意义）。 */
+export type SkillStoreSort = "updated_at" | "downloads" | "stars" | "installs" | "score" | "name";
 
 /** 渲染端发起的浏览查询（列表 + 筛选 + 分页）。 */
 export interface SkillStoreQuery {
@@ -104,6 +117,8 @@ export interface SkillStoreInstallOutcome {
   fileCount: number;
   /** 落盘总字节数。 */
   totalBytes: number;
+  /** 来源（账本归属；跨源同名目录会被拒绝覆盖）。 */
+  sourceId: SkillStoreSource;
   /** 覆盖旧安装时给出（已备份为 <slug>.bak-<时间戳>）。 */
   replaced?: boolean;
   /** 会话忙碌时未重建：新技能下次重建会话后对模型可见。 */
@@ -116,6 +131,7 @@ export interface SkillStoreUninstallOutcome {
   scope: SkillStoreScope;
   installDir: string;
   removedFiles: number;
+  sourceId: SkillStoreSource;
   /** 会话忙碌时未重建：清单已更新，但模型侧的要下次重建会话后消失。 */
   sessionRefreshDeferred?: boolean;
 }
@@ -128,29 +144,43 @@ export interface SkillStoreInstallSummary {
   installedAt: number;
   /** 安装目录绝对路径（定位/诊断用）。 */
   installDir: string;
+  /** 来源（徽标只统计同源安装；缺省视为 public，兼容旧账本）。 */
+  sourceId: SkillStoreSource;
 }
 
-/** utility → 渲染端的结果推送（RuntimeMessage "skill-store-result" 的 data）。
- *  列表/详情/安装/卸载都顺带一份账本快照：渲染端不需要额外请求就能算出安装态。 */
+/**
+ * utility → 渲染端的结果推送（RuntimeMessage "skill-store-result" 的 data）。
+ * 列表/详情/安装/卸载都顺带一份账本快照：渲染端不需要额外请求就能算出安装态。
+ * `source` 决定渲染端路由到哪个状态切片（public → skillStore，intranet → intranetStore）。
+ */
 export type SkillStoreResult =
-  | { kind: "list"; requestId: string; ok: true; query: SkillStoreQuery; total: number; skills: SkillStoreSkill[]; installs: SkillStoreInstallSummary[] }
-  | { kind: "list"; requestId: string; ok: false; error: string }
-  | { kind: "top"; requestId: string; ok: true; skills: SkillStoreSkill[] }
-  | { kind: "top"; requestId: string; ok: false; error: string }
-  | { kind: "categories"; requestId: string; ok: true; categories: SkillStoreCategory[] }
-  | { kind: "categories"; requestId: string; ok: false; error: string }
-  | { kind: "detail"; requestId: string; ok: true; detail: SkillStoreDetail; versions: SkillStoreVersion[]; files: SkillStoreFile[]; totalBytes: number; readme?: string; installs: SkillStoreInstallSummary[] }
-  | { kind: "detail"; requestId: string; ok: false; error: string }
-  | { kind: "install"; requestId: string; ok: true; outcome: SkillStoreInstallOutcome; installs: SkillStoreInstallSummary[] }
-  | { kind: "install"; requestId: string; ok: false; error: string }
-  | { kind: "uninstall"; requestId: string; ok: true; outcome: SkillStoreUninstallOutcome; installs: SkillStoreInstallSummary[] }
-  | { kind: "uninstall"; requestId: string; ok: false; error: string };
+  | { kind: "list"; source: SkillStoreSource; requestId: string; ok: true; query: SkillStoreQuery; total: number; skills: SkillStoreSkill[]; installs: SkillStoreInstallSummary[] }
+  | { kind: "list"; source: SkillStoreSource; requestId: string; ok: false; error: string }
+  | { kind: "top"; source: SkillStoreSource; requestId: string; ok: true; skills: SkillStoreSkill[] }
+  | { kind: "top"; source: SkillStoreSource; requestId: string; ok: false; error: string }
+  | { kind: "categories"; source: SkillStoreSource; requestId: string; ok: true; categories: SkillStoreCategory[] }
+  | { kind: "categories"; source: SkillStoreSource; requestId: string; ok: false; error: string }
+  | { kind: "detail"; source: SkillStoreSource; requestId: string; ok: true; detail: SkillStoreDetail; versions: SkillStoreVersion[]; files: SkillStoreFile[]; totalBytes: number; readme?: string; installs: SkillStoreInstallSummary[] }
+  | { kind: "detail"; source: SkillStoreSource; requestId: string; ok: false; error: string }
+  | { kind: "install"; source: SkillStoreSource; requestId: string; ok: true; outcome: SkillStoreInstallOutcome; installs: SkillStoreInstallSummary[] }
+  | { kind: "install"; source: SkillStoreSource; requestId: string; ok: false; error: string }
+  | { kind: "uninstall"; source: SkillStoreSource; requestId: string; ok: true; outcome: SkillStoreUninstallOutcome; installs: SkillStoreInstallSummary[] }
+  | { kind: "uninstall"; source: SkillStoreSource; requestId: string; ok: false; error: string }
+  /** 内网商店配置的保存/清除结果（主进程直接产生，不经 utility）。 */
+  | { kind: "source"; requestId: string; ok: true; config?: SkillStoreIntranetSettings }
+  | { kind: "source"; requestId: string; ok: false; error: string }
+  /** 内网商店连接测试（GET /api/v1/ping）。 */
+  | { kind: "source-test"; requestId: string; ok: true; message: string; latencyMs: number; version?: string; skillCount?: number }
+  | { kind: "source-test"; requestId: string; ok: false; error: string };
 
 /** utility 内部的命令形状（RuntimeCommand 联合成员，此处仅供客户端函数复用参数形状）。 */
 export type SkillStoreCommand =
-  | { type: "skill-store.list"; requestId: string; query: SkillStoreQuery }
-  | { type: "skill-store.top"; requestId: string }
-  | { type: "skill-store.categories"; requestId: string }
-  | { type: "skill-store.detail"; requestId: string; slug: string; version?: string }
-  | { type: "skill-store.install"; requestId: string; slug: string; scope: SkillStoreScope; version?: string; confirmReplace?: boolean }
-  | { type: "skill-store.uninstall"; requestId: string; slug: string; scope: SkillStoreScope };
+  | { type: "skill-store.list"; requestId: string; source: SkillStoreSource; baseUrl?: string; query: SkillStoreQuery }
+  | { type: "skill-store.top"; requestId: string; source: SkillStoreSource; baseUrl?: string }
+  | { type: "skill-store.categories"; requestId: string; source: SkillStoreSource; baseUrl?: string }
+  | { type: "skill-store.detail"; requestId: string; source: SkillStoreSource; baseUrl?: string; slug: string; version?: string }
+  | { type: "skill-store.install"; requestId: string; source: SkillStoreSource; baseUrl?: string; slug: string; scope: SkillStoreScope; version?: string; confirmReplace?: boolean }
+  | { type: "skill-store.uninstall"; requestId: string; source: SkillStoreSource; baseUrl?: string; slug: string; scope: SkillStoreScope }
+  | { type: "skill-store.source.save"; requestId: string; baseUrl: string; name?: string }
+  | { type: "skill-store.source.clear"; requestId: string }
+  | { type: "skill-store.source.test"; requestId: string; baseUrl?: string };

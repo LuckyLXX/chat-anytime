@@ -31,6 +31,7 @@ import type {
   SkillStoreDetail,
   SkillStoreFile,
   SkillStoreInstallSummary,
+  SkillStoreIntranetSettings,
   SkillStoreQuery,
   SkillStoreResult,
   SkillStoreSkill,
@@ -407,12 +408,30 @@ export interface SkillStoreState {
 }
 
 /**
+ * 内网商店连接状态（设置页「内网 Skill 商店」头部）。
+ * 配置本身存 settings.json；这里放渲染端可见的那一份 + 保存/测速的瞬时状态。
+ */
+export interface IntranetStoreConnectionState {
+  config?: SkillStoreIntranetSettings;
+  /** 保存地址 / 测试连接进行中。 */
+  saving: boolean;
+  /** 最近一次连接测试结果（面板内联展示）。 */
+  test?: { requestId: string; ok: boolean; message: string; latencyMs?: number; at: number };
+  /** 保存失败的原因（地址非法等）。 */
+  error?: string;
+}
+
+/**
  * skill-store-result → skillStore 状态（纯函数，单测可直接调）。
  * requestId 不匹配的**列表/详情**结果整包丢弃（并发查询时旧结果不串台）；
  * 安装/卸载结果带 installing 的 requestId 匹配才清 busy（失败分支不清，保留正在安装的 slug）。
  */
 export function applySkillStoreResult(state: SkillStoreState, result: SkillStoreResult): { skillStore: SkillStoreState } | Record<string, never> {
   switch (result.kind) {
+    // 连接配置类结果不属于浏览切片（由 applySkillStoreMessage 处理）。
+    case "source":
+    case "source-test":
+      return {};
     case "list":
       if (result.requestId !== state.listRequestId) return {};
       return {
@@ -457,6 +476,49 @@ export function applySkillStoreResult(state: SkillStoreState, result: SkillStore
       };
     }
   }
+}
+
+/**
+ * skill-store-result 的**总入口**：连接配置类结果写 intranetSource；浏览/安装类按
+ * `result.source` 路由到对应切片（public → skillStore，intranet → intranetStore）。
+ * 两个切片共用同一套状态机与 requestId 认领规则。
+ */
+export function applySkillStoreMessage(
+  state: Pick<DesktopState, "skillStore" | "intranetStore" | "intranetSource">,
+  result: SkillStoreResult
+): Partial<Pick<DesktopState, "skillStore" | "intranetStore" | "intranetSource">> {
+  if (result.kind === "source") {
+    if (!result.ok) {
+      return { intranetSource: { ...state.intranetSource, saving: false, error: result.error } };
+    }
+    return {
+      intranetSource: {
+        ...state.intranetSource,
+        saving: false,
+        error: undefined,
+        ...(result.config ? { config: result.config } : { config: undefined })
+      }
+    };
+  }
+  if (result.kind === "source-test") {
+    return {
+      intranetSource: {
+        ...state.intranetSource,
+        saving: false,
+        test: {
+          requestId: result.requestId,
+          ok: result.ok,
+          message: result.ok ? result.message : result.error,
+          ...(result.ok ? { latencyMs: result.latencyMs } : {}),
+          at: Date.now()
+        }
+      }
+    };
+  }
+  const intranet = result.source === "intranet";
+  const next = applySkillStoreResult(intranet ? state.intranetStore : state.skillStore, result);
+  if (!("skillStore" in next)) return {};
+  return intranet ? { intranetStore: next.skillStore } : { skillStore: next.skillStore };
 }
 
 interface DesktopState {
@@ -547,8 +609,12 @@ interface DesktopState {
   designDocs: DesignDocSummary[];
   /** 作品清单（gallery.apps 推送全量替换）；全局跨工作区，启动时由 initialize 推一次。 */
   galleryApps: GalleryApp[];
-  /** Skill 商店面板状态（skill-store-result 推送按 requestId 认领）。 */
+  /** Skill 商店（公开 SkillHub）面板状态（skill-store-result 推送按 requestId 认领）。 */
   skillStore: SkillStoreState;
+  /** 内网 Skill 商店（LanSkills）面板状态：与 skillStore 同构，结果按 source 路由。 */
+  intranetStore: SkillStoreState;
+  /** 内网商店连接配置与测试状态。 */
+  intranetSource: IntranetStoreConnectionState;
   /** 每文档已见推送 revision：≤ 该值的重复/乱序推送直接跳过（防回环重渲）。 */
   seenDesignRevisions: Record<string, number>;
   /** 最近一次设计导出结果；App 监听变化弹 toast。 */
@@ -707,6 +773,8 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   designDocs: [],
   galleryApps: [],
   skillStore: { listLoading: false, listSkills: [], listTotal: 0, topSkills: [], topLoading: false, categories: [], categoriesLoading: false, detailLoading: false, detailVersions: [], detailFiles: [], detailTotalBytes: 0, installs: [] },
+  intranetStore: { listLoading: false, listSkills: [], listTotal: 0, topSkills: [], topLoading: false, categories: [], categoriesLoading: false, detailLoading: false, detailVersions: [], detailFiles: [], detailTotalBytes: 0, installs: [] },
+  intranetSource: { saving: false },
   restoredBrowserTabs: [],
   seenDesignRevisions: {},
   usageStatsLoading: false,
@@ -745,6 +813,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
       customProvider: bootstrap.settings.providers.find((provider) => provider.id === "chatanytime-openai-compatible"),
       customProviderKeyConfigured: Boolean(bootstrap.settings.providers.find((provider) => provider.id === "chatanytime-openai-compatible")?.keyConfigured),
       jevKeyConfigured: Boolean(bootstrap.settings.jevKeyConfigured),
+      intranetSource: { saving: false, ...(bootstrap.settings.intranetStore ? { config: bootstrap.settings.intranetStore } : {}) },
       customModels: bootstrap.settings.providers.find((provider) => provider.id === "chatanytime-openai-compatible")?.models ?? []
     });
     return unsubscribe;
@@ -1083,7 +1152,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
         set({ galleryNotice: { kind: message.kind, message: message.message, at: Date.now() } });
         break;
       case "skill-store-result":
-        set((state) => applySkillStoreResult(state.skillStore, message.result));
+        set((state) => applySkillStoreMessage(state, message.result));
         break;
       case "design.exported":
         set({ designExported: { relativePath: message.relativePath, at: Date.now() } });

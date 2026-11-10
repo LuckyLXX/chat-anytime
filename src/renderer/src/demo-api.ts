@@ -1256,10 +1256,24 @@ export function createDemoApi(): DesktopApi {
           const kind = command.type === "skill-store.install" ? "install" : command.type === "skill-store.uninstall" ? "uninstall" : command.type === "skill-store.detail" ? "detail" : command.type === "skill-store.top" ? "top" : command.type === "skill-store.categories" ? "categories" : "list";
           emit({
             type: "skill-store-result",
-            result: { kind, requestId: command.requestId, ok: false, error: "演示环境不支持 Skill 商店（需要真实文件系统与本地网络）；请在桌面应用里使用。" } as SkillStoreResult
+            result: { kind, source: command.source, requestId: command.requestId, ok: false, error: "演示环境不支持 Skill 商店（需要真实文件系统与本地网络）；请在桌面应用里使用。" } as SkillStoreResult
           });
           break;
         }
+        // 内网商店的地址配置在主进程、浏览也在桌面端：演示环境只能如实说「不支持」。
+        case "skill-store.source.save":
+        case "skill-store.source.clear":
+          emit({
+            type: "skill-store-result",
+            result: { kind: "source", requestId: command.requestId, ok: false, error: "演示环境不支持内网 Skill 商店（需要真实网络与文件系统）；请在桌面应用里使用。" } as SkillStoreResult
+          });
+          break;
+        case "skill-store.source.test":
+          emit({
+            type: "skill-store-result",
+            result: { kind: "source-test", requestId: command.requestId, ok: false, error: "演示环境不会发起真实的内网商店请求；请在桌面应用里测试连接。" } as SkillStoreResult
+          });
+          break;
         case "command.save": {
           const draft = command.command;
           const name = draft.name.trim() || "未命名";

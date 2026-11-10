@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { CUSTOM_PROVIDER_ID, createDefaultAgent, ensureDefaultWorkspaceDir, forgetAgentWorkspace, isPositiveInt, mergeProviderModels, migrateSettings, normalizeAccessMode, normalizeAgent, normalizeAgentWorkspaces, normalizeBrowser, normalizeCheckpoint, normalizeComputer, normalizeCustomThemes, normalizeDivBubbleMode, normalizeInterfaceTuning, normalizeJev, normalizeProvider, normalizeSsh, normalizeThemeAssets, normalizeVision, normalizeWallpaperOpacity, recordAgentWorkspace, resolveDefaultWorkspace, resolveInitialWorkspace, resolveStartupWorkspace } from "./settings.js";
+import { CUSTOM_PROVIDER_ID, createDefaultAgent, ensureDefaultWorkspaceDir, forgetAgentWorkspace, isPositiveInt, mergeProviderModels, migrateSettings, normalizeAccessMode, normalizeAgent, normalizeAgentWorkspaces, normalizeBrowser, normalizeCheckpoint, normalizeComputer, normalizeCustomThemes, normalizeDivBubbleMode, normalizeInterfaceTuning, normalizeIntranetStore, normalizeJev, normalizeProvider, normalizeSsh, normalizeThemeAssets, normalizeVision, normalizeWallpaperOpacity, recordAgentWorkspace, resolveDefaultWorkspace, resolveInitialWorkspace, resolveStartupWorkspace } from "./settings.js";
 import { mergeBrowserSettings, withBrowserDownloadPrefs } from "./settings.js";
 
 describe("workspace per-agent memory and default workspace (方案 B)", () => {
@@ -546,5 +546,29 @@ describe("normalizeSsh（SSH 总闸 + 首连自动信任）", () => {
   it("reads the flag back through migrateSettings", () => {
     expect(migrateSettings({ ssh: { autoTrustFingerprint: true } }).settings.ssh).toEqual({ enabled: true, autoTrustFingerprint: true });
     expect(migrateSettings({}).settings.ssh).toBeUndefined();
+  });
+});
+
+
+describe("内网 Skill 商店配置（settings.intranetStore）", () => {
+  it("normalizeIntranetStore 只接受 http/https 绝对地址，去尾斜杠、截断名称", () => {
+    expect(normalizeIntranetStore({ baseUrl: " http://skills.corp.local:8080/// " })).toEqual({ baseUrl: "http://skills.corp.local:8080" });
+    expect(normalizeIntranetStore({ baseUrl: "https://corp.local/store", name: "平台组技能库" })).toEqual({ baseUrl: "https://corp.local/store", name: "平台组技能库" });
+    expect(normalizeIntranetStore({ baseUrl: "http://corp.local", name: "x".repeat(200) })?.name).toHaveLength(60);
+  });
+
+  it("非法/空值一律丢弃（坏字段不拖垮整条记录）", () => {
+    expect(normalizeIntranetStore(undefined)).toBeUndefined();
+    expect(normalizeIntranetStore({})).toBeUndefined();
+    expect(normalizeIntranetStore({ baseUrl: "" })).toBeUndefined();
+    expect(normalizeIntranetStore({ baseUrl: "skills.corp.local:8080" })).toBeUndefined();
+    expect(normalizeIntranetStore({ baseUrl: "ftp://corp.local" })).toBeUndefined();
+    expect(normalizeIntranetStore({ baseUrl: "http://" })).toBeUndefined();
+  });
+
+  it("migrateSettings 必须读回 intranetStore（漏读会被下一次设置写入抹掉）", () => {
+    const migrated = migrateSettings({ intranetStore: { baseUrl: "http://corp.local/store/" } });
+    expect(migrated.settings.intranetStore).toEqual({ baseUrl: "http://corp.local/store" });
+    expect(migrateSettings({}).settings.intranetStore).toBeUndefined();
   });
 });

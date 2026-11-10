@@ -127,8 +127,10 @@ import { withCacheWarmingOff } from "./runtime-settings.js";
 import { readSubagents, saveSubagent, deleteSubagent, saveSubagentModelOverride, saveSubagentThinkingOverride } from "./subagents-store.js";
 import type { SubagentDefinition, SubagentScope, DelegationProgress, SlashInvocation } from "../shared/protocol.js";
 import type { SkillStoreResult } from "../shared/skill-store.js";
+import { SKILL_STORE_BASE_URL } from "../shared/skill-store.js";
 import { buildSkillsSystemPromptBlock, setSkillEnabled, type DiscoveredSkill } from "./skill-catalog.js";
 import * as skillStoreClient from "./skill-store-client.js";
+import * as intranetSkillStoreClient from "./skill-store-intranet-client.js";
 import { installSkillFromStore, listInstallRecords, storeScopeRoot, uninstall as uninstallStoreSkill } from "./skill-store-install.js";
 import * as commandCatalog from "./command-catalog.js";
 import { COMMAND_NAME_PATTERN, type DiscoveredCommand } from "./command-catalog.js";
@@ -5369,34 +5371,113 @@ async function withSkillStoreCache<T>(key: string, producer: () => Promise<T>): 
 }
 
 /** 账本快照（渲染端「已安装 / 有更新」徽标用；不带 files 明细，减小推送体积）。 */
-function skillStoreInstalls(): { slug: string; scope: "global" | "project"; version: string; installedAt: number; installDir: string }[] {
-  return listInstallRecords(getAgentDir()).map((record) => ({ slug: record.slug, scope: record.scope, version: record.version, installedAt: record.installedAt, installDir: record.installDir }));
+function skillStoreInstalls(): { slug: string; scope: "global" | "project"; version: string; installedAt: number; installDir: string; sourceId: "public" | "intranet" }[] {
+  return listInstallRecords(getAgentDir()).map((record) => ({
+    slug: record.slug,
+    scope: record.scope,
+    version: record.version,
+    installedAt: record.installedAt,
+    installDir: record.installDir,
+    // 旧账本没有 sourceId：那些记录都是公开商店装的。
+    sourceId: record.sourceId ?? "public"
+  }));
+}
+
+/** 一次安装/卸载后刷新技能清单并尽量重建空闲会话（忙碌则只提示）。 */
+async function refreshSkillsAfterStoreChange(scope: "global" | "project", workspace: string | undefined): Promise<boolean> {
+  // 顺序有讲究：先失效缓存（emitResourceCatalog 的 20+ 调用点都不重扫，不失效就永远推旧清单），
+  // 再重扫 + 重推目录，最后空闲重建会话。
+  if (scope === "global") workspaceResources.invalidate();
+  else workspaceResources.invalidate(workspace);
+  syncSkills(workspace);
+  emitResourceCatalog();
+  return refreshActiveSessionForSkills();
+}
+
+function skillStoreResultKind(command: Extract<RuntimeCommand, { type: `skill-store.${string}` }>): SkillStoreResult["kind"] {
+  switch (command.type) {
+    case "skill-store.install":
+      return "install";
+    case "skill-store.uninstall":
+      return "uninstall";
+    case "skill-store.detail":
+      return "detail";
+    case "skill-store.top":
+      return "top";
+    case "skill-store.categories":
+      return "categories";
+    case "skill-store.source.test":
+      return "source-test";
+    default:
+      return "list";
+  }
 }
 
 function runSkillStoreCommand(command: Extract<RuntimeCommand, { type: `skill-store.${string}` }>): void {
   void (async () => {
     const { requestId } = command;
+    // 地址配置命令由主进程处理（不转发到 utility）；防御性忽略，避免进入下面的存在性判断。
+    if (command.type === "skill-store.source.save" || command.type === "skill-store.source.clear") return;
     try {
+      // 内网商店连接测试：主进程已把 baseUrl 注入（未配置时为空 → 明确报错）。
+      if (command.type === "skill-store.source.test") {
+        const baseUrl = command.baseUrl?.trim();
+        if (!baseUrl) throw new Error("请先在设置 → 内网 Skill 商店里填写服务地址");
+        const startedAt = Date.now();
+        const ping = await intranetSkillStoreClient.intranetPing(baseUrl);
+        post({
+          type: "skill-store-result",
+          result: {
+            kind: "source-test",
+            requestId,
+            ok: true,
+            message: `已连接 ${ping.name}${ping.version ? ` v${ping.version}` : ""} · ${ping.skillCount} 个技能`,
+            latencyMs: Date.now() - startedAt,
+            ...(ping.version ? { version: ping.version } : {}),
+            skillCount: ping.skillCount
+          }
+        });
+        return;
+      }
+
+      const source = command.source;
+      const intranet = source === "intranet";
+      const baseUrl = intranet ? (command.baseUrl?.trim() || "") : SKILL_STORE_BASE_URL;
+      const requireBase = (): string => {
+        if (!baseUrl) throw new Error("请先在设置 → 内网 Skill 商店里填写服务地址");
+        return baseUrl;
+      };
+      const cacheKey = (key: string): string => `${source}:${key}`;
+
       switch (command.type) {
         case "skill-store.list": {
-          const { skills, total } = await withSkillStoreCache(`list:${JSON.stringify(command.query)}`, () => skillStoreClient.storeListSkills(command.query));
-          post({ type: "skill-store-result", result: { kind: "list", requestId, ok: true, query: command.query, total, skills, installs: skillStoreInstalls() } });
+          const { skills, total } = intranet
+            ? await withSkillStoreCache(cacheKey(`list:${JSON.stringify(command.query)}`), () => intranetSkillStoreClient.intranetList(requireBase(), command.query))
+            : await withSkillStoreCache(cacheKey(`list:${JSON.stringify(command.query)}`), () => skillStoreClient.storeListSkills(command.query));
+          post({ type: "skill-store-result", result: { kind: "list", source, requestId, ok: true, query: command.query, total, skills, installs: skillStoreInstalls() } });
           break;
         }
         case "skill-store.top": {
-          const skills = await withSkillStoreCache("top", () => skillStoreClient.storeTopSkills());
-          post({ type: "skill-store-result", result: { kind: "top", requestId, ok: true, skills } });
+          // 内网商店没有「下载量/评分」维度：用最近更新的前 20 个兜底（UI 隐藏了入口）。
+          const skills = intranet
+            ? (await withSkillStoreCache(cacheKey("top"), () => intranetSkillStoreClient.intranetList(requireBase(), { sortBy: "updated_at", order: "desc", page: 1, pageSize: 20 }))).skills
+            : await withSkillStoreCache(cacheKey("top"), () => skillStoreClient.storeTopSkills());
+          post({ type: "skill-store-result", result: { kind: "top", source, requestId, ok: true, skills } });
           break;
         }
         case "skill-store.categories": {
-          const categories = await withSkillStoreCache("categories", () => skillStoreClient.storeCategories());
-          post({ type: "skill-store-result", result: { kind: "categories", requestId, ok: true, categories } });
+          const categories = intranet
+            ? await withSkillStoreCache(cacheKey("categories"), () => intranetSkillStoreClient.intranetCategories(requireBase()))
+            : await withSkillStoreCache(cacheKey("categories"), () => skillStoreClient.storeCategories());
+          post({ type: "skill-store-result", result: { kind: "categories", source, requestId, ok: true, categories } });
           break;
         }
         case "skill-store.detail": {
-          // 详情/版本/文件清单并发拉；SKILL.md 预览尽力而为（失败不阻断详情）。
-          const detailKey = `detail:${command.slug}:${command.version ?? ""}`;
+          const detailKey = cacheKey(`detail:${command.slug}:${command.version ?? ""}`);
           const { detail, versions, files, totalBytes, readme } = await withSkillStoreCache(detailKey, async () => {
+            if (intranet) {
+              return intranetSkillStoreClient.intranetDetail(requireBase(), command.slug, command.version);
+            }
             const [detail, versions, filesInfo] = await Promise.all([
               skillStoreClient.storeSkillDetail(command.slug),
               skillStoreClient.storeSkillVersions(command.slug),
@@ -5418,51 +5499,61 @@ function runSkillStoreCommand(command: Extract<RuntimeCommand, { type: `skill-st
               ...(readme !== undefined ? { readme } : detail.overviewMd ? { readme: detail.overviewMd } : {})
             };
           });
-          post({ type: "skill-store-result", result: { kind: "detail", requestId, ok: true, detail, versions, files, totalBytes, ...(readme !== undefined ? { readme } : {}), installs: skillStoreInstalls() } });
+          post({ type: "skill-store-result", result: { kind: "detail", source, requestId, ok: true, detail, versions, files, totalBytes, ...(readme !== undefined ? { readme } : {}), installs: skillStoreInstalls() } });
           break;
         }
         case "skill-store.install": {
-          if (command.scope === "project" && !workspace) throw new Error("请先打开工作区，再安装到当前项目");
-          // 详情只用来取 canonicalName（异源冲突判定）与缺省版本；清单以 /files 为准。
-          const detail = await skillStoreClient.storeSkillDetail(command.slug).catch(() => undefined);
-          const { files, version: filesVersion } = await skillStoreClient.storeSkillFiles(command.slug, command.version);
-          const version = command.version?.trim() || filesVersion || detail?.latestVersion?.version || "latest";
           const targetWorkspace = workspace;
+          if (command.scope === "project" && !targetWorkspace) throw new Error("请先打开工作区，再安装到当前项目");
+          // 详情只用来取 canonicalName（异源冲突判定）与缺省版本；清单以 files 为准。
+          const detail = intranet
+            ? await intranetSkillStoreClient.intranetDetail(requireBase(), command.slug, undefined).then((result) => result.detail).catch(() => undefined)
+            : await skillStoreClient.storeSkillDetail(command.slug).catch(() => undefined);
+          const filesInfo = intranet
+            ? await intranetSkillStoreClient.intranetFiles(requireBase(), command.slug, command.version)
+            : await skillStoreClient.storeSkillFiles(command.slug, command.version);
+          const version = command.version?.trim() || filesInfo.version || detail?.latestVersion?.version || "latest";
           const outcome = await installSkillFromStore({
             slug: command.slug,
             version,
             scope: command.scope,
+            sourceId: source,
+            ...(intranet ? { sourceUrl: baseUrl } : {}),
             agentDir: getAgentDir(),
             workspace: targetWorkspace,
             ...(detail?.canonicalName ? { canonicalName: detail.canonicalName } : {}),
             confirmReplace: command.confirmReplace === true,
-            files
+            files: filesInfo.files,
+            ...(intranet ? { fetchBytes: (slug: string, fileVersion: string | undefined, path: string) => intranetSkillStoreClient.intranetFileBytes(baseUrl, slug, fileVersion, path) } : {})
           });
-          // 装完刷新链（顺序有讲究）：先失效缓存（emitResourceCatalog 的 20+ 调用点
-          // 都不重扫，不失效就永远推旧清单），再重扫 + 重推目录，最后空闲重建会话。
-          if (command.scope === "global") workspaceResources.invalidate();
-          else workspaceResources.invalidate(targetWorkspace);
-          syncSkills(targetWorkspace);
-          emitResourceCatalog();
-          const sessionRefreshDeferred = !(await refreshActiveSessionForSkills());
-          post({ type: "skill-store-result", result: { kind: "install", requestId, ok: true, outcome: { ...outcome, ...(sessionRefreshDeferred ? { sessionRefreshDeferred: true } : {}) }, installs: skillStoreInstalls() } });
+          const sessionRefreshDeferred = !(await refreshSkillsAfterStoreChange(command.scope, targetWorkspace));
+          post({ type: "skill-store-result", result: { kind: "install", source, requestId, ok: true, outcome: { ...outcome, ...(sessionRefreshDeferred ? { sessionRefreshDeferred: true } : {}) }, installs: skillStoreInstalls() } });
           break;
         }
         case "skill-store.uninstall": {
-          if (command.scope === "project" && !workspace) throw new Error("请先打开工作区，再卸载项目内安装的技能");
           const targetWorkspace = workspace;
-          const outcome = uninstallStoreSkill({ slug: command.slug, scope: command.scope, targetRoot: storeScopeRoot(command.scope, getAgentDir(), targetWorkspace), metadataDir: getAgentDir() });
-          if (command.scope === "global") workspaceResources.invalidate();
-          else workspaceResources.invalidate(targetWorkspace);
-          syncSkills(targetWorkspace);
-          emitResourceCatalog();
-          const sessionRefreshDeferred = !(await refreshActiveSessionForSkills());
-          post({ type: "skill-store-result", result: { kind: "uninstall", requestId, ok: true, outcome: { ...outcome, ...(sessionRefreshDeferred ? { sessionRefreshDeferred: true } : {}) }, installs: skillStoreInstalls() } });
+          if (command.scope === "project" && !targetWorkspace) throw new Error("请先打开工作区，再卸载项目内安装的技能");
+          const outcome = uninstallStoreSkill({
+            slug: command.slug,
+            scope: command.scope,
+            sourceId: source,
+            targetRoot: storeScopeRoot(command.scope, getAgentDir(), targetWorkspace),
+            metadataDir: getAgentDir()
+          });
+          const sessionRefreshDeferred = !(await refreshSkillsAfterStoreChange(command.scope, targetWorkspace));
+          post({ type: "skill-store-result", result: { kind: "uninstall", source, requestId, ok: true, outcome: { ...outcome, ...(sessionRefreshDeferred ? { sessionRefreshDeferred: true } : {}) }, installs: skillStoreInstalls() } });
           break;
         }
       }
     } catch (error) {
-      post({ type: "skill-store-result", result: { kind: command.type === "skill-store.install" ? "install" : command.type === "skill-store.uninstall" ? "uninstall" : command.type === "skill-store.detail" ? "detail" : command.type === "skill-store.top" ? "top" : command.type === "skill-store.categories" ? "categories" : "list", requestId, ok: false, error: errorText(error) } as SkillStoreResult });
+      const kind = skillStoreResultKind(command);
+      const source = command.type === "skill-store.source.test" ? undefined : command.source;
+      post({
+        type: "skill-store-result",
+        result: (source
+          ? { kind, source, requestId, ok: false, error: errorText(error) }
+          : { kind, requestId, ok: false, error: errorText(error) }) as SkillStoreResult
+      });
     }
   })();
 }

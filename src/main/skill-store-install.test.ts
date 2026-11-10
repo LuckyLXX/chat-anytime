@@ -370,3 +370,47 @@ describe("备份目录命名", () => {
     expect(backupDirName("demo", 1234567)).toBe("demo.bak-1234567");
   });
 });
+
+describe("来源归属（sourceId：公开商店 / 内网商店）", () => {
+  const files = [file("SKILL.md", 3)];
+  const contents = new Map([["SKILL.md", text("hi!")]]);
+
+  it("账本记录来源；同源覆盖需确认，异源同名目录直接拒绝", () => {
+    const plan = planInstall({ slug: "demo", version: "1.0.0", scope: "global", files, targetRoot, metadataDir: agentDir });
+    expect(plan.sourceId).toBe("public");
+    commitInstall({ plan, contents, metadataDir: agentDir, sourceUrl: "https://api.skillhub.cn" });
+    const record = findInstallRecord(agentDir, "global", plan.installDir);
+    expect(record?.sourceId).toBe("public");
+    expect(record?.sourceUrl).toBe("https://api.skillhub.cn");
+
+    // 同源：没有 confirmReplace 时报「已安装」
+    expect(() => planInstall({ slug: "demo", version: "1.0.1", scope: "global", sourceId: "public", files, targetRoot, metadataDir: agentDir })).toThrow(/已安装/);
+
+    // 异源：无论是否 confirmReplace 都拒绝，并说明是哪个源装的
+    expect(() => planInstall({ slug: "demo", version: "1.0.1", scope: "global", sourceId: "intranet", files, targetRoot, metadataDir: agentDir, confirmReplace: true })).toThrow(/已由「公开 SkillHub」安装/);
+  });
+
+  it("旧账本没有 sourceId 时视为 public", () => {
+    const plan = planInstall({ slug: "legacy", version: "1.0.0", scope: "global", files, targetRoot, metadataDir: agentDir });
+    commitInstall({ plan, contents, metadataDir: agentDir });
+    // 模拟旧版账本：手工抹掉 sourceId
+    const metadata = readStoreMetadata(agentDir);
+    const key = installRecordKey("global", plan.installDir);
+    delete metadata.installs[key]!.sourceId;
+    writeStoreMetadata(agentDir, metadata);
+
+    expect(() => planInstall({ slug: "legacy", version: "1.0.1", scope: "global", sourceId: "intranet", files, targetRoot, metadataDir: agentDir })).toThrow(/已由「公开 SkillHub」安装/);
+    expect(() => planInstall({ slug: "legacy", version: "1.0.1", scope: "global", sourceId: "public", files, targetRoot, metadataDir: agentDir })).toThrow(/已安装/);
+  });
+
+  it("uninstall 只允许从安装它的那个来源卸载", () => {
+    const plan = planInstall({ slug: "inner", version: "1.0.0", scope: "global", sourceId: "intranet", files, targetRoot, metadataDir: agentDir });
+    commitInstall({ plan, contents, metadataDir: agentDir, sourceUrl: "http://skills.corp.local:8080" });
+    expect(() => uninstall({ slug: "inner", scope: "global", sourceId: "public", targetRoot, metadataDir: agentDir })).toThrow(/由「内网 Skill 商店」安装/);
+
+    const outcome = uninstall({ slug: "inner", scope: "global", sourceId: "intranet", targetRoot, metadataDir: agentDir });
+    expect(outcome.sourceId).toBe("intranet");
+    expect(outcome.removedFiles).toBe(1);
+    expect(findInstallRecord(agentDir, "global", plan.installDir)).toBeUndefined();
+  });
+});

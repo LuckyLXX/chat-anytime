@@ -17,7 +17,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import type { SkillStoreFile, SkillStoreInstallOutcome, SkillStoreScope, SkillStoreUninstallOutcome } from "../shared/skill-store.js";
+import type { SkillStoreFile, SkillStoreInstallOutcome, SkillStoreScope, SkillStoreSource, SkillStoreUninstallOutcome } from "../shared/skill-store.js";
 import { storeSkillFileBytes } from "./skill-store-client.js";
 
 /** `/file` 接口的单文件硬限（超出返回 413）。含大文件的技能首版明确拒绝。 */
@@ -77,6 +77,8 @@ export interface SkillStoreInstallPlan {
   slug: string;
   version: string;
   scope: SkillStoreScope;
+  /** 来源（public / intranet）；账本按来源归属，异源同名目录拒绝覆盖。缺省 public。 */
+  sourceId: SkillStoreSource;
   targetRoot: string;
   /** 安装目录（绝对路径）。 */
   installDir: string;
@@ -97,6 +99,10 @@ export class SkillStorePlanError extends Error {
 /** 元数据里的一条安装记录。 */
 export interface StoreInstallRecord {
   slug: string;
+  /** 来源（public / intranet）；缺省（旧账本）视为 public。 */
+  sourceId?: SkillStoreSource;
+  /** 来源地址（内网商店的服务地址；诊断与「同名目录已由哪个源安装」文案用）。 */
+  sourceUrl?: string;
   /** 来源规范名（`@owner/slug`，未文档化字段容错读取；冲突判定用）。 */
   canonicalName?: string;
   version: string;
@@ -143,6 +149,8 @@ function normalizeInstallRecord(value: unknown): StoreInstallRecord | undefined 
     scope: raw.scope,
     installDir: raw.installDir,
     files,
+    ...(raw.sourceId === "public" || raw.sourceId === "intranet" ? { sourceId: raw.sourceId } : {}),
+    ...(typeof raw.sourceUrl === "string" ? { sourceUrl: raw.sourceUrl } : {}),
     ...(typeof raw.canonicalName === "string" ? { canonicalName: raw.canonicalName } : {})
   };
 }
@@ -217,6 +225,7 @@ export function planInstall(options: {
   slug: string;
   version: string;
   scope: SkillStoreScope;
+  sourceId?: SkillStoreSource;
   files: readonly SkillStoreFile[];
   targetRoot: string;
   canonicalName?: string;
@@ -258,6 +267,7 @@ export function planInstall(options: {
   if (!isAbsolute(targetRoot) || /^[a-zA-Z]:\\?$/u.test(targetRoot)) {
     throw new SkillStorePlanError(`安装目标根目录不安全：${options.targetRoot}`, "root");
   }
+  const sourceId: SkillStoreSource = options.sourceId ?? "public";
   const installDir = join(targetRoot, slug);
 
   // 冲突判定：同名目录已存在时——
@@ -265,6 +275,15 @@ export function planInstall(options: {
   //  2. 同源/无记录但未确认 → 要求显式 confirmReplace（commit 阶段会先备份旧目录）。
   if (existsSync(installDir)) {
     const existingRecord = findInstallRecord(options.metadataDir, options.scope, installDir);
+    // 异源冲突优先判定：公开商店与内网商店可能有同名技能，静默覆盖会让人分不清装的是哪个源。
+    const existingSource: SkillStoreSource = existingRecord?.sourceId ?? "public";
+    if (existingRecord && existingSource !== sourceId) {
+      const labels: Record<SkillStoreSource, string> = { public: "公开 SkillHub", intranet: "内网 Skill 商店" };
+      throw new SkillStorePlanError(
+        `目录 ${slug} 已由「${labels[existingSource]}」安装${existingRecord.sourceUrl ? `（${existingRecord.sourceUrl}）` : ""}；本次来自「${labels[sourceId]}」的安装被拒绝。请先在对应商店里卸载它，或手动删除该目录。`,
+        "conflict"
+      );
+    }
     if (existingRecord?.canonicalName && options.canonicalName && existingRecord.canonicalName !== options.canonicalName) {
       throw new SkillStorePlanError(`目录 ${slug} 已被另一个来源的安装占用（${existingRecord.canonicalName}），本次安装（${options.canonicalName}）被拒绝。请先卸载它或手动删除该目录。`, "conflict");
     }
@@ -277,6 +296,7 @@ export function planInstall(options: {
     slug,
     version: options.version,
     scope: options.scope,
+    sourceId,
     targetRoot,
     installDir,
     files,
@@ -360,7 +380,7 @@ function countFilesRecursive(root: string): number {
  *   旧安装 rename 备份 → 临时目录 rename 为正式目录 → 写元数据（最后一步）。
  * 中间任何一步抛错：清掉临时目录后原样上抛（旧安装未被动过 = 零残留）。
  */
-export function commitInstall(options: { plan: SkillStoreInstallPlan; contents: Map<string, Uint8Array>; metadataDir: string; canonicalName?: string; now?: () => number }): SkillStoreInstallOutcome {
+export function commitInstall(options: { plan: SkillStoreInstallPlan; contents: Map<string, Uint8Array>; metadataDir: string; canonicalName?: string; sourceUrl?: string; now?: () => number }): SkillStoreInstallOutcome {
   const { plan, contents } = options;
   const now = options.now ?? (() => Date.now());
   if (!plan.existing && existsSync(plan.installDir)) {
@@ -392,6 +412,8 @@ export function commitInstall(options: { plan: SkillStoreInstallPlan; contents: 
     renameSync(tempDir, plan.installDir);
     recordInstall(options.metadataDir, {
       slug: plan.slug,
+      sourceId: plan.sourceId,
+      ...(options.sourceUrl ? { sourceUrl: options.sourceUrl } : {}),
       ...(options.canonicalName ? { canonicalName: options.canonicalName } : {}),
       version: plan.version,
       installedAt: now(),
@@ -409,6 +431,7 @@ export function commitInstall(options: { plan: SkillStoreInstallPlan; contents: 
     return {
       slug: plan.slug,
       scope: plan.scope,
+      sourceId: plan.sourceId,
       targetRoot: plan.targetRoot,
       installDir: plan.installDir,
       version: plan.version,
@@ -428,20 +451,29 @@ export function commitInstall(options: { plan: SkillStoreInstallPlan; contents: 
  * - realpath 后不在目标根内 → 拒绝（防符号链接把删除指到根外）；
  * - 删除成功后清账本；目录已不在 = 幂等成功并清账本。
  */
-export function uninstall(options: { slug: string; scope: SkillStoreScope; targetRoot: string; metadataDir: string }): SkillStoreUninstallOutcome {
+export function uninstall(options: { slug: string; scope: SkillStoreScope; sourceId?: SkillStoreSource; targetRoot: string; metadataDir: string }): SkillStoreUninstallOutcome {
   const slug = validateSlugDirName(options.slug);
   if (!slug) throw new SkillStorePlanError(`技能标识不安全：${options.slug}`, "path");
   const targetRoot = resolve(options.targetRoot);
   const installDir = join(targetRoot, slug);
   // 幂等前置：目录已不存在 = 已卸载（无论账本是否有记录），只清账本即可。
+  const sourceId: SkillStoreSource = options.sourceId ?? "public";
   if (!existsSync(installDir)) {
     removeInstallRecord(options.metadataDir, options.scope, installDir);
-    return { slug, scope: options.scope, installDir, removedFiles: 0 };
+    return { slug, scope: options.scope, sourceId, installDir, removedFiles: 0 };
   }
   // 目录还在但账本无记录：可能是手工放置的同名 skill，绝不误删。
   const record = findInstallRecord(options.metadataDir, options.scope, installDir);
   if (!record) {
     throw new SkillStorePlanError(`没有找到 ${slug} 的商店安装记录（该目录可能是手工放置的，或账本缺失）；为避免误删，请手动确认后删除目录 ${installDir}`, "conflict");
+  }
+  const recordSource: SkillStoreSource = record.sourceId ?? "public";
+  if (recordSource !== sourceId) {
+    const labels: Record<SkillStoreSource, string> = { public: "公开 SkillHub", intranet: "内网 Skill 商店" };
+    throw new SkillStorePlanError(
+      `目录 ${slug} 由「${labels[recordSource]}」安装，不能从「${labels[sourceId]}」卸载；请在对应商店里操作。`,
+      "conflict"
+    );
   }
   // realpath 纵深防御：安装目录的真实位置必须仍在目标根之内。
   let realDir = installDir;
@@ -461,7 +493,7 @@ export function uninstall(options: { slug: string; scope: SkillStoreScope; targe
   const removedFiles = countFilesRecursive(installDir);
   removeDirTree(installDir);
   removeInstallRecord(options.metadataDir, options.scope, installDir);
-  return { slug, scope: options.scope, installDir, removedFiles };
+  return { slug, scope: options.scope, sourceId, installDir, removedFiles };
 }
 
 /** 目标根目录解析（安装命令入口用）：global = `<agentDir>/pidesktop-skills`，project = `<workspace>/.pidesktop-skills`。 */
@@ -478,6 +510,8 @@ export async function installSkillFromStore(options: {
   slug: string;
   version: string;
   scope: SkillStoreScope;
+  sourceId?: SkillStoreSource;
+  sourceUrl?: string;
   agentDir: string;
   workspace: string | undefined;
   canonicalName?: string;
@@ -490,6 +524,7 @@ export async function installSkillFromStore(options: {
     slug: options.slug,
     version: options.version,
     scope: options.scope,
+    sourceId: options.sourceId ?? "public",
     files: options.files,
     targetRoot,
     metadataDir: options.agentDir,
@@ -497,5 +532,11 @@ export async function installSkillFromStore(options: {
     ...(options.confirmReplace !== undefined ? { confirmReplace: options.confirmReplace } : {})
   });
   const contents = await downloadAndVerify({ plan, ...(options.fetchBytes ? { fetchBytes: options.fetchBytes } : {}) });
-  return commitInstall({ plan, contents, metadataDir: options.agentDir, ...(options.canonicalName ? { canonicalName: options.canonicalName } : {}) });
+  return commitInstall({
+    plan,
+    contents,
+    metadataDir: options.agentDir,
+    ...(options.canonicalName ? { canonicalName: options.canonicalName } : {}),
+    ...(options.sourceUrl ? { sourceUrl: options.sourceUrl } : {})
+  });
 }

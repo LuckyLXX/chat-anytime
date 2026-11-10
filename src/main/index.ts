@@ -5,7 +5,7 @@ import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, Menu, N
 import { spawn } from "node-pty";
 import appIconPath from "./assets/icon.ico?asset";
 import { resolveBundledSkillsDir, resolveBundledSubagentsDir } from "./bundled-skills.js";
-import { migrateSettings, mergeBrowserSettings, normalizeJev, normalizeVision, withBrowserDownloadPrefs } from "./settings.js";
+import { migrateSettings, mergeBrowserSettings, normalizeIntranetStore, normalizeJev, normalizeVision, withBrowserDownloadPrefs } from "./settings.js";
 import { manualDownloadPrefs } from "./browser-manual-download.js";
 import { mergeSavedAppearance, settingsForRenderer } from "./appearance-assets.js";
 import { createSettingsPersistence, diffSettings, readSettingsFile, settingsPath as settingsFilePath, type SettingsPersistence } from "./settings-store.js";
@@ -520,6 +520,61 @@ async function chooseDownloadSavePath(owner: BrowserWindow, defaultPath: string)
 }
 function runtimeEntry(): string { return join(__dirname, "pi-runtime.js"); }
 function sendToRuntime(command: RuntimeCommand): void { if (!runtimeProcess) throw new Error("Pi 运行时当前不可用"); runtimeProcess.postMessage(command); }
+
+/** 主进程 → 渲染端的 runtime 消息（与其它推送同一条通道）。 */
+function pushRuntimeMessage(message: RuntimeMessage): void {
+  mainWindow?.webContents.send("runtime:message", message);
+}
+
+/**
+ * 内网 Skill 商店的地址配置由**主进程独占**：
+ * - 配置落 `settings.intranetStore`（normalizeIntranetStore 是唯一读入口，migrateSettings 负责读回）；
+ * - 这两条命令主进程直接处理、不转发 utility（utility 没有这个分支，转发只会静默丢弃）；
+ * - 浏览类命令在转发前注入 `baseUrl`（见 enrichSkillStoreCommand）——utility 没有 Electron API，
+ *   读不到 settings。先例：jev.test 由这里补 apiKey。
+ */
+function handleIntranetStoreCommand(command: RuntimeCommand): boolean {
+  if (command.type !== "skill-store.source.save" && command.type !== "skill-store.source.clear") return false;
+  const settings = loadSettings();
+  const previous = { ...settings };
+  if (command.type === "skill-store.source.save") {
+    const config = normalizeIntranetStore({ baseUrl: command.baseUrl, ...(command.name ? { name: command.name } : {}) });
+    if (!config) {
+      pushRuntimeMessage({
+        type: "skill-store-result",
+        result: { kind: "source", requestId: command.requestId, ok: false, error: "内网商店地址不合法：必须是 http:// 或 https:// 开头的绝对地址（可带路径前缀，不要带查询参数）" }
+      });
+      return true;
+    }
+    settings.intranetStore = config;
+    pushRuntimeMessage({ type: "skill-store-result", result: { kind: "source", requestId: command.requestId, ok: true, config } });
+  } else {
+    delete settings.intranetStore;
+    pushRuntimeMessage({ type: "skill-store-result", result: { kind: "source", requestId: command.requestId, ok: true } });
+  }
+  persistSettings().schedule(diffSettings(previous, settings));
+  return true;
+}
+
+/**
+ * 转发前给内网商店命令补 `baseUrl`：utility 只认命令里带的地址，不读 settings。
+ * 未配置时注入 undefined，由 utility 回一条中文错误（面板内联展示，不静默失败）。
+ */
+function enrichSkillStoreCommand(command: RuntimeCommand): RuntimeCommand {
+  switch (command.type) {
+    case "skill-store.list":
+    case "skill-store.top":
+    case "skill-store.categories":
+    case "skill-store.detail":
+    case "skill-store.install":
+    case "skill-store.uninstall":
+      return command.source === "intranet" ? { ...command, baseUrl: loadSettings().intranetStore?.baseUrl } : command;
+    case "skill-store.source.test":
+      return { ...command, baseUrl: command.baseUrl?.trim() || loadSettings().intranetStore?.baseUrl };
+    default:
+      return command;
+  }
+}
 
 // 桌面通知是主进程专属能力（utility 进程没有 Electron API），钩子的 notify
 // 动作经 hook-notify 推送到达这里；该消息不转发渲染器。聊天软件同款免打扰
@@ -1275,7 +1330,12 @@ function registerIpc(): void {
     const manager = ensureSshManager();
     return manager.handleAsync(command) ?? manager.handle(command);
   });
-  ipcMain.handle("runtime:send", (_event, command: RuntimeCommand): void => { updateSettings(command); sendToRuntime(command); });
+  ipcMain.handle("runtime:send", (_event, command: RuntimeCommand): void => {
+    // 内网商店地址配置只由主进程落盘/回推，不进流程队列，也不转发 utility。
+    if (handleIntranetStoreCommand(command)) return;
+    updateSettings(command);
+    sendToRuntime(enrichSkillStoreCommand(command));
+  });
 }
 app.whenReady().then(() => {
   // 次实例（已有实例持锁）：守卫已经 `app.exit(0)` 终止了进程，这一行是纵深防御——

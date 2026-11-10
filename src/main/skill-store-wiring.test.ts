@@ -22,6 +22,8 @@ const install = read("skill-store-install.ts");
 const store = read("../renderer/src/store.ts");
 const app = read("../renderer/src/App.tsx");
 const component = read("../renderer/src/SkillStoreSettings.tsx");
+/** 浏览/详情/安装 UI 已抽到共用组件（公开商店与内网商店共用，避免两份实现漂移）。 */
+const browser = read("../renderer/src/components/SkillStoreBrowser.tsx");
 const demoApi = read("../renderer/src/demo-api.ts");
 const styles = read("../renderer/src/styles.css");
 
@@ -53,9 +55,10 @@ describe("utility 接线（pi-runtime）", () => {
 
   it("安装后走完整刷新链：invalidate → syncSkills → emitResourceCatalog → 空闲重建会话", () => {
     expect(runtime).toContain("workspaceResources.invalidate();");
-    expect(runtime).toContain("workspaceResources.invalidate(targetWorkspace);");
-    expect(runtime).toContain("syncSkills(targetWorkspace);");
-    expect(runtime).toContain("const sessionRefreshDeferred = !(await refreshActiveSessionForSkills());");
+    expect(runtime).toContain("workspaceResources.invalidate(workspace);");
+    expect(runtime).toContain("syncSkills(workspace);");
+    expect(runtime).toContain("async function refreshSkillsAfterStoreChange(");
+    expect(runtime).toContain("const sessionRefreshDeferred = !(await refreshSkillsAfterStoreChange(");
     // 忙碌不打断（与 refreshActiveSessionForSubagents 同款纪律）
     expect(runtime).toContain("async function refreshActiveSessionForSkills()");
     expect(runtime).toContain("if (record.busy || record.session.isStreaming) {");
@@ -72,7 +75,7 @@ describe("utility 接线（pi-runtime）", () => {
   it("查询有短 TTL 缓存与在途合并，安装不缓存", () => {
     expect(runtime).toContain("SKILL_STORE_CACHE_TTL_MS = 30_000");
     expect(runtime).toContain("skillStoreInFlight");
-    expect(runtime).toContain('withSkillStoreCache(`list:');
+    expect(runtime).toContain("cacheKey(`list:");
     expect(runtime).not.toContain('withSkillStoreCache("install');
   });
 });
@@ -117,18 +120,21 @@ describe("渲染端接线", () => {
   });
 
   it("App.tsx 四处注册齐全（联合类型 / nav / 内容分支 / 命令面板）", () => {
-    expect(app).toContain('type SettingsTab = "general" | "models" | "agents" | "subagents" | "appearance" | "resources" | "skill-store" | "hooks" | "usage" | "automation"');
+    expect(app).toContain('type SettingsTab = "general" | "models" | "agents" | "subagents" | "appearance" | "resources" | "skill-store" | "intranet-store" | "hooks" | "usage" | "automation"');
     expect(app).toContain('onClick={() => setTab("skill-store")}>Skill 商店</button>');
     expect(app).toContain('tab === "skill-store" ? <SkillStoreSettings />');
     expect(app).toContain('{ tab: "skill-store", label: "Skill 商店" }');
   });
 
-  it("组件发命令带 requestId，安装前必须二次确认", () => {
-    expect(component).toContain('type: "skill-store.list", requestId, query');
-    expect(component).toContain('type: "skill-store.detail", requestId, slug: skill.slug');
-    expect(component).toContain('type: "skill-store.install", requestId, slug: skill.slug, scope');
-    expect(component).toContain('data-control="skill-store-confirm-install"');
-    expect(component).toContain("crypto.randomUUID()");
+  it("共享组件发命令带 requestId + source，安装前必须二次确认", () => {
+    expect(browser).toContain('type: "skill-store.list", requestId, source, query');
+    expect(browser).toContain('type: "skill-store.detail", requestId, source, slug: skill.slug');
+    expect(browser).toContain('type: "skill-store.install", requestId, source, slug: skill.slug, scope');
+    expect(browser).toContain('type: "skill-store.uninstall", requestId, source, slug: detailInstall.slug');
+    expect(browser).toContain('data-control="skill-store-confirm-install"');
+    expect(browser).toContain("crypto.randomUUID()");
+    // 公开 tab 必须显式声明来源（结果按 source 路由到 skillStore 切片）
+    expect(component).toContain('source="public"');
   });
 
   it("演示环境如实降级、不伪造安装成功", () => {
@@ -139,8 +145,10 @@ describe("渲染端接线", () => {
 
   it("主题钩子：pane + 12 个 control 与样式类名一致", () => {
     expect(component).toContain('data-pane="skill-store"');
-    for (const control of ["skill-store-refresh", "skill-store-scope", "skill-store-search", "skill-store-category", "skill-store-sort", "skill-store-top", "skill-store-page", "skill-store-open", "skill-store-install", "skill-store-confirm-install", "skill-store-uninstall", "skill-store-close-detail"]) {
-      expect(component).toContain(`data-control="${control}"`);
+    expect(component).toContain('data-control="skill-store-refresh"');
+    expect(component).toContain('data-control="skill-store-scope"');
+    for (const control of ["skill-store-search", "skill-store-category", "skill-store-sort", "skill-store-top", "skill-store-page", "skill-store-open", "skill-store-install", "skill-store-confirm-install", "skill-store-uninstall", "skill-store-close-detail"]) {
+      expect(browser).toContain(`data-control="${control}"`);
     }
     expect(styles).toContain(".skill-store-grid");
     expect(styles).toContain(".skill-store-detail");
@@ -149,7 +157,7 @@ describe("渲染端接线", () => {
   it("搜索框是 label，但浏览条的分组规则必须排除它（否则图标与输入框被 grid 拆成两行）", () => {
     // 2026-11-04 用户截图：放大镜在上一行、placeholder 在下一行、框被撑高。
     // 根因是 `.skill-store-browse label { display: grid }`(0,1,1) 压过 `.skill-store-search`(0,1,0)。
-    expect(component).toContain('className="skill-store-search"');
+    expect(browser).toContain('className="skill-store-search"');
     expect(styles).toContain(".skill-store-browse > label:not(.skill-store-search)");
     expect(styles).not.toContain(".skill-store-browse label {");
     // 搜索框自身与内部 input 走 (0,2,x)，不再被设置弹窗的 label/input 规则打回
@@ -172,7 +180,7 @@ describe("渲染端接线", () => {
     }
     // 计数也要跟着走（pane 39→40→41、control 104→116→124）
     const skillDoc = read("../../resources/skills/pidesktop-theme-creator/SKILL.md");
-    expect(skillDoc).toContain("主要区域（41）");
-    expect(skillDoc).toContain("关键控件（124）");
+    expect(skillDoc).toContain("主要区域（42）");
+    expect(skillDoc).toContain("关键控件（129）");
   });
 });

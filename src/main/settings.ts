@@ -27,6 +27,7 @@ import type {
   InterfaceTuning,
   JevSettings,
   MemorySettings,
+  SkillStoreIntranetSettings,
   SshSettings,
   ProviderModelSettings,
   ProviderSettings,
@@ -413,6 +414,31 @@ export function normalizeJev(value: unknown): JevSettings | undefined {
   };
 }
 
+/**
+ * 内网 Skill 商店配置规范化（`settings.intranetStore`）。
+ * 只接受 http/https 的绝对地址（允许路径前缀，例如 http://corp.local/store）；
+ * 去掉尾部斜杠。非法/空值返回 undefined —— 坏字段丢弃，绝不因为一个坏地址丢掉整条记录。
+ * 这个函数是**唯一读入口**：漏在 migrateSettings 里读回，下一次任意设置写入就会把它从磁盘抹掉
+ * （pinnedSessionPaths / ssh / jev 都踩过同一个坑）。
+ */
+export function normalizeIntranetStore(value: unknown): SkillStoreIntranetSettings | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const raw = value as Record<string, unknown>;
+  const baseUrlRaw = typeof raw.baseUrl === "string" ? raw.baseUrl.trim() : "";
+  if (!baseUrlRaw) return undefined;
+  const baseUrl = baseUrlRaw.replace(/\/+$/, "");
+  if (!/^https?:\/\//i.test(baseUrl)) return undefined;
+  try {
+    const parsed = new URL(baseUrl);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return undefined;
+    if (!parsed.hostname) return undefined;
+  } catch {
+    return undefined;
+  }
+  const name = typeof raw.name === "string" && raw.name.trim() ? raw.name.trim().slice(0, 60) : undefined;
+  return { baseUrl, ...(name ? { name } : {}) };
+}
+
 // —— 每助手工作区记忆 + 默认工作区（2026-09-03 方案 B）——
 
 /**
@@ -612,6 +638,7 @@ export function migrateSettings(raw: unknown): { settings: DesktopSettings; lega
     checkpoint: normalizeCheckpoint(source.checkpoint),
     ssh: normalizeSsh(source.ssh),
     jev: normalizeJev(source.jev),
+    intranetStore: normalizeIntranetStore(source.intranetStore),
     ...(pinnedSessionPaths ? { pinnedSessionPaths } : {}),
     ...(archivedSessionPaths ? { archivedSessionPaths } : {})
   };

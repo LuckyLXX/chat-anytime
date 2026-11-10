@@ -4066,6 +4066,23 @@ html[data-ui-motion="off"] .automation-center, html[data-ui-motion="off"] .ui-pr
 .skill-store-confirm ul { display: grid; gap: 3px; margin: 0; padding-left: 16px; color: var(--text-muted); font-size: 10.5px; line-height: 1.45; }
 .skill-store-uninstall { color: var(--danger); }
 
+/* 内网 Skill 商店（LanSkills）：地址配置卡 + 状态条；浏览区复用 .skill-store-* 骨架 */
+.intranet-store-form { display: grid; gap: 10px; max-width: 560px; }
+.intranet-store-form label { display: grid; gap: 4px; margin: 0; color: var(--text-muted); font-size: 10.5px; font-weight: 400; }
+.intranet-store-form input { width: 100%; height: 30px; font-size: 12px; }
+.intranet-store-form-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.intranet-store-clear { color: var(--danger); }
+.intranet-store-help { margin-top: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-raised); font-size: 10.5px; }
+.intranet-store-help > summary { padding: 8px 10px; color: var(--text); cursor: pointer; }
+.intranet-store-help > div { display: grid; gap: 6px; padding: 0 10px 10px; color: var(--text-muted); }
+.intranet-store-help p { margin: 0; }
+.intranet-store-help pre { margin: 0; padding: 8px 10px; overflow: auto; border-radius: 6px; background: var(--surface-muted); color: var(--text); font-family: var(--font-mono, ui-monospace, monospace); font-size: 10px; line-height: 1.5; }
+.intranet-store-status { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.intranet-store-status > span:first-child { display: inline-flex; align-items: center; gap: 4px; }
+.intranet-store-status .skill-store-result { margin: 0 !important; padding: 4px 9px; }
+.intranet-store-status .skill-store-result.ok { color: var(--success); }
+.intranet-store-status .skill-store-result.error { color: var(--danger); }
+
 .team-board { position: absolute; z-index: 36; top: 0; right: 0; bottom: 0; display: flex; flex-direction: column; width: min(var(--team-board-width, 424px), calc(100% - 260px)); min-width: 0; border-left: 1px solid var(--border-strong); background: var(--surface); box-shadow: -18px 0 42px rgba(0, 0, 0, .22); animation: team-board-in .18s var(--motion-ease); --tb-fs-title: 13px; --tb-fs-body: 12px; --tb-fs-label: 11px; --tb-fs-micro: 10px; --tb-ctl-h: 28px; --tb-icon-btn: 26px; }
 @keyframes team-board-in { from { transform: translateX(18px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
 .team-board.full { left: 0; width: auto; max-width: none; border-left: 0; box-shadow: none; animation: none; --tb-fs-title: 15px; --tb-fs-body: 13.5px; --tb-fs-label: 12px; --tb-fs-micro: 11px; --tb-ctl-h: 31px; --tb-icon-btn: 28px; }
