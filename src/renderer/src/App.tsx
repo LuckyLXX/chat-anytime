@@ -120,6 +120,7 @@ import {
 import { customCssHasWallpaper, readUiThemeContext } from "./lib/theme-runtime";
 import { useOverlayLayer, useOverlayLayersOpen } from "./lib/overlay-layers";
 import { useChatOverlayRegion } from "./lib/chat-overlay-region";
+import { isSoftwareRenderer, readWebglRenderer, resolveBlurEnabled } from "./lib/graphics-tier";
 import { showGalleryWallLanding } from "./lib/landing-gallery";
 import { AppearanceSettings } from "./AppearanceSettings";
 import { HooksSettings } from "./HooksSettings";
@@ -618,6 +619,10 @@ export function App(): ReactNode {
     if (paletteOpenTick > 0) setPaletteOpen(true);
   }, [paletteOpenTick]);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // 图形档位只探测一次（惰性初始化）：软件渲染与否在进程生命周期内不变，而每次 App
+  // 重渲染都建一个 WebGL 上下文是没必要的开销。诊断钩子见 lib/graphics-tier.ts。
+  const [softwareRendering] = useState(() => isSoftwareRenderer(readWebglRenderer()));
+  const blurEnabled = resolveBlurEnabled(settings.appearance.blur, softwareRendering);
   const [settingsInitialTab, setSettingsInitialTab] = useState<SettingsTab | undefined>(undefined);
   function openSettingsOn(tab: SettingsTab): void { setSettingsInitialTab(tab); setSettingsOpen(true); }
   function toggleAutomationSessions(): void {
@@ -1389,7 +1394,12 @@ export function App(): ReactNode {
       ["data-ui-radius", settings.appearance.tune?.radius],
       // 界面动效总开关：关闭时 styles.css 关停块停用全部过渡/动画，
       // Presence 同步立即卸载（不保留退场窗口）。
-      ["data-ui-motion", settings.appearance.motion === false ? "off" : undefined]
+      ["data-ui-motion", settings.appearance.motion === false ? "off" : undefined],
+      // 毛玻璃降级：软件渲染（虚拟机 / RDP / WARP / SwiftShader）下 backdrop-filter
+      // 每帧重算整屏模糊，实测把带壁纸主题的设置页滚动从 12fps 拉到 57fps。
+      // auto 由检测决定，on/off 是用户强制；data-ui-render 只声明事实，供主题/诊断读。
+      ["data-ui-blur", blurEnabled ? undefined : "off"],
+      ["data-ui-render", softwareRendering ? "software" : undefined]
     ];
     for (const [name, active] of states) {
       if (active) root.setAttribute(name, "");
@@ -1403,7 +1413,7 @@ export function App(): ReactNode {
       for (const [name] of states) root.removeAttribute(name);
       for (const [name] of valueStates) root.removeAttribute(name);
     };
-  }, [settingsOpen, activeWorkspace, isChatEmpty, isGenerating, previewOpened, previewFullscreen, permission, question, paneIds.length, sidebarView, settings.appearance.tune, settings.appearance.motion, designMode, sessionMultiSelect, sessionView]);
+  }, [settingsOpen, activeWorkspace, isChatEmpty, isGenerating, previewOpened, previewFullscreen, permission, question, paneIds.length, sidebarView, settings.appearance.tune, settings.appearance.motion, blurEnabled, softwareRendering, designMode, sessionMultiSelect, sessionView]);
 
   async function openWorkspace(): Promise<void> {
     const path = await window.piDesktop.chooseWorkspace();

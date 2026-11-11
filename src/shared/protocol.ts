@@ -282,6 +282,17 @@ export interface InterfaceTuning {
   radius?: "square" | "small" | "medium" | "round";
 }
 
+/**
+ * 毛玻璃（`backdrop-filter`）档位。缺省 = `auto`：检测到软件渲染（虚拟机 / RDP /
+ * Microsoft Basic Render Driver / SwiftShader / llvmpipe）时自动关闭，其余情况开启；
+ * `on` / `off` 为用户强制。
+ *
+ * 为什么需要它（2026-11-11 实测定量）：无硬件加速时 `backdrop-filter` 每帧都要
+ * 重算整屏模糊——带壁纸主题下设置页滚动 60fps → **12fps**、打开设置页 460ms → 640ms；
+ * 关掉后回到 52~57fps。用户的 8C16G 2.6GHz 内网虚拟机正属此类。
+ */
+export type AppearanceBlurMode = "auto" | "on" | "off";
+
 export interface AppearanceSettings {
   theme: "system" | "light" | "dark";
   themePreset: ThemePresetId;
@@ -298,6 +309,9 @@ export interface AppearanceSettings {
    *  html[data-ui-motion="off"] 关停块）；缺省/true = 开启。系统
    *  prefers-reduced-motion 时无论该值如何都会关停。 */
   motion?: boolean;
+  /** 毛玻璃档位：缺省 `auto`（软件渲染时自动关闭，见 AppearanceBlurMode）。
+   *  关闭后 styles.css 的 `html[data-ui-blur="off"]` 块停用全站 backdrop-filter。 */
+  blur?: AppearanceBlurMode;
   showThinking: boolean;
   /** 空态首页（新话题的空白主区域）是否展示作品墙：缺省/true = 展示（与这个
    *  开关存在之前的行为一致），false = 退回默认空态「今天想开发什么？」。

@@ -216,6 +216,26 @@ html[data-ui-motion="off"] .session-workspace-items { animation: none !important
 html[data-ui-motion="off"] .ui-presence.is-exiting, html[data-ui-motion="off"] .ui-presence.is-exiting * { animation: none !important; }
 html[data-ui-motion="off"] .session-status-dot.running { animation: none !important; }
 
+/* 毛玻璃降级（2026-11-11，用户报「内网 8C16G 2.6GHz 虚拟机打开设置页特别卡、滚动也卡」）。
+   实测定量（生产构建、1424×881、--disable-gpu 模拟虚拟机软件渲染）：带壁纸主题的设置页
+   滚动 11~13fps、首次打开设置页 642ms；把 backdrop-filter 全部关掉后 38~57fps / 460ms；
+   同一台机器有硬件 GPU 时 63fps。LoAF 采样里 styleAndLayout 只占 13ms/9402ms——成本全在
+   合成与光栅。逐项 A/B 也排除了别的嫌疑：去掉 background-attachment: fixed 无变化、
+   隐藏壁纸图层无变化、只禁主题 filter 无变化，弹窗自身 blur 占一半、弹窗背后
+   sidebar/topbar/composer 的 blur 占另一半。
+
+   为什么必须通配 + !important：壁纸模式的既有规则是
+   `[data-theme-wallpaper="true"] .settings-dialog { backdrop-filter: blur(20px) }`，而用户/
+   第三方主题也会在自己的选择器里写死 backdrop-filter；降级必须能压过它们，否则漏一处就
+   继续按帧重算模糊。这条规则匹配成本实测可忽（样式重算只在 DOM 变动时发生，滚动不触发）。
+   data-ui-blur 由 App 按 appearance.blur（auto/on/off）+ WebGL renderer 检测挂到 <html>。 */
+html[data-ui-blur="off"] *,
+html[data-ui-blur="off"] *::before,
+html[data-ui-blur="off"] *::after {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
 @supports (scrollbar-color: auto) {
   * { scrollbar-width: thin; scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track); }
 }

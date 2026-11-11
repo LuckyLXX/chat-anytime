@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { CUSTOM_PROVIDER_ID, createDefaultAgent, ensureDefaultWorkspaceDir, forgetAgentWorkspace, isPositiveInt, mergeProviderModels, migrateSettings, normalizeAccessMode, normalizeAgent, normalizeAgentWorkspaces, normalizeBrowser, normalizeCheckpoint, normalizeComputer, normalizeCustomThemes, normalizeDivBubbleMode, normalizeInterfaceTuning, normalizeIntranetStore, normalizeJev, normalizeProvider, normalizeSsh, normalizeThemeAssets, normalizeVision, normalizeWallpaperOpacity, recordAgentWorkspace, resolveDefaultWorkspace, resolveInitialWorkspace, resolveStartupWorkspace } from "./settings.js";
+import { CUSTOM_PROVIDER_ID, createDefaultAgent, ensureDefaultWorkspaceDir, forgetAgentWorkspace, isPositiveInt, mergeProviderModels, migrateSettings, normalizeAccessMode, normalizeAgent, normalizeAgentWorkspaces, normalizeAppearanceBlur, normalizeBrowser, normalizeCheckpoint, normalizeComputer, normalizeCustomThemes, normalizeDivBubbleMode, normalizeInterfaceTuning, normalizeIntranetStore, normalizeJev, normalizeProvider, normalizeSsh, normalizeThemeAssets, normalizeVision, normalizeWallpaperOpacity, recordAgentWorkspace, resolveDefaultWorkspace, resolveInitialWorkspace, resolveStartupWorkspace } from "./settings.js";
 import { mergeBrowserSettings, withBrowserDownloadPrefs } from "./settings.js";
 
 describe("workspace per-agent memory and default workspace (方案 B)", () => {
@@ -120,6 +120,16 @@ describe("desktop settings migration", () => {
     expect(normalizeInterfaceTuning({ density: "relaxed", radius: "blob" })).toEqual({ density: "relaxed" });
     expect(normalizeInterfaceTuning(undefined)).toBeUndefined();
     expect(migrateSettings({ appearance: { theme: "system" } }).settings.appearance.tune).toBeUndefined();
+  });
+
+  it("keeps the three-state blur preference and drops unknown values", () => {
+    // 毛玻璃档位（2026-11-11）：migrateSettings 是唯一读入口，漏读 = 下一次任何设置写入把它抹掉。
+    expect(migrateSettings({ appearance: { theme: "dark", blur: "off" } }).settings.appearance.blur).toBe("off");
+    expect(migrateSettings({ appearance: { theme: "dark", blur: "auto" } }).settings.appearance.blur).toBe("auto");
+    expect(migrateSettings({ appearance: { theme: "dark", blur: "blurry" } }).settings.appearance.blur).toBeUndefined();
+    // 缺省不写字段（磁盘上保持干净，语义仍是 auto）。
+    expect("blur" in migrateSettings({ appearance: { theme: "system" } }).settings.appearance).toBe(false);
+    expect(normalizeAppearanceBlur("on")).toBe("on");
   });
 
   it("keeps custom agent prompts empty and always provides the default assistant", () => {

@@ -1,6 +1,7 @@
 import { Download, RotateCcw, Save, Trash2 } from "lucide-react";
 import { useState, type FormEvent, type ReactNode } from "react";
 import type {
+  AppearanceBlurMode,
   AppearanceSettings as AppearanceSettingsValue,
   CustomThemeDefinition,
   DesktopSettings,
@@ -256,7 +257,9 @@ export function AppearanceSettings({ settings, onSaved, onCancel }: AppearanceSe
                 <div className="appearance-field-row">
                   <label className="appearance-field"><span>界面密度</span><select value={settings.appearance.tune?.density ?? ""} onChange={(event) => updateTune({ density: event.target.value as InterfaceTuning["density"] | "" })}><option value="">跟随主题</option><option value="compact">紧凑</option><option value="comfortable">舒适</option><option value="relaxed">宽松</option></select></label>
                   <label className="appearance-field"><span>圆角</span><select value={settings.appearance.tune?.radius ?? ""} onChange={(event) => updateTune({ radius: event.target.value as InterfaceTuning["radius"] | "" })}><option value="">跟随主题</option><option value="square">方角</option><option value="small">小圆</option><option value="medium">中圆</option><option value="round">圆润</option></select></label>
+                  <label className="appearance-field"><span>模糊特效</span><select data-control="appearance-blur" value={settings.appearance.blur ?? "auto"} onChange={(event) => updateAppearance({ blur: event.target.value as AppearanceBlurMode })}><option value="auto">自动（无 GPU 加速时关闭）</option><option value="on">始终开启</option><option value="off">始终关闭</option></select></label>
                 </div>
+                <p className="appearance-hint">模糊特效即面板背后的毛玻璃（backdrop-filter）。虚拟机、远程桌面等没有硬件加速的环境下它会让滚动明显掉帧（实测设置页 60fps → 12fps），「自动」会在检测到软件渲染时关闭。</p>
                 <label className="checkbox-setting appearance-motion-switch"><input type="checkbox" checked={settings.appearance.motion !== false} onChange={(event) => setAppearanceMotion(event.target.checked)} />界面动效（关闭后过渡与弹出动画全部停用；系统「减弱动态效果」开启时也会自动停用）</label>
               </div>
             </section>

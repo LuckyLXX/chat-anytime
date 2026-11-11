@@ -13,6 +13,7 @@ import { normalizeArchivedSessionPaths, normalizePinnedSessionPaths } from "./se
 import type {
   AccessMode,
   AgentProfile,
+  AppearanceBlurMode,
   AppearanceSettings,
   BrowserSettings,
   BuiltinToolName,
@@ -72,6 +73,15 @@ export function createDefaultAgent(): AgentProfile {
 
 const DENSITY_OPTIONS: readonly InterfaceTuning["density"][] = ["compact", "comfortable", "relaxed"];
 const RADIUS_OPTIONS: readonly InterfaceTuning["radius"][] = ["square", "small", "medium", "round"];
+const BLUR_MODES: readonly AppearanceBlurMode[] = ["auto", "on", "off"];
+
+/**
+ * 校验毛玻璃档位：只接受三态枚举，其余（含缺失/旧配置里的脏值）一律丢弃。
+ * 缺省（undefined）= auto 语义，磁盘上就不写这个字段。
+ */
+export function normalizeAppearanceBlur(value: unknown): AppearanceBlurMode | undefined {
+  return BLUR_MODES.includes(value as AppearanceBlurMode) ? value as AppearanceBlurMode : undefined;
+}
 
 /**
  * 校验运行时界面微调（密度/圆角）：只保留合法枚举值，非法/缺失丢弃。
@@ -600,6 +610,9 @@ export function migrateSettings(raw: unknown): { settings: DesktopSettings; lega
   const wallpaperOpacity = normalizeWallpaperOpacity(appearanceSource.wallpaperOpacity)
     ?? normalizeWallpaperOpacity(appearanceSource.themeOverrides);
   const tune = normalizeInterfaceTuning(appearanceSource.tune);
+  // 毛玻璃档位必须原样读回：migrateSettings 是唯一读入口，漏读一个字段 = 下一次
+  // 任何设置写入（persistSettings 整包写回）就把它从磁盘抹掉（同 pinnedSessionPaths 纪律）。
+  const blur = normalizeAppearanceBlur(appearanceSource.blur);
   const thinkingLevel = ["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(String(source.thinkingLevel))
     ? source.thinkingLevel as ThinkingLevel
     : "medium";
@@ -628,7 +641,7 @@ export function migrateSettings(raw: unknown): { settings: DesktopSettings; lega
     agents: normalizedAgents,
     currentAgentId,
     shortcuts: normalizeShortcuts(source.shortcuts),
-    appearance: { theme, themePreset, customCss, ...(Object.keys(customCssAssets).length > 0 ? { customCssAssets } : {}), customThemes, ...(wallpaperOpacity ? { wallpaperOpacity } : {}), ...(tune ? { tune } : {}), motion: appearanceSource.motion !== false, showThinking: appearanceSource.showThinking !== false, showGalleryWall: appearanceSource.showGalleryWall !== false },
+    appearance: { theme, themePreset, customCss, ...(Object.keys(customCssAssets).length > 0 ? { customCssAssets } : {}), customThemes, ...(wallpaperOpacity ? { wallpaperOpacity } : {}), ...(tune ? { tune } : {}), ...(blur ? { blur } : {}), motion: appearanceSource.motion !== false, showThinking: appearanceSource.showThinking !== false, showGalleryWall: appearanceSource.showGalleryWall !== false },
     vision: normalizeVision(source.vision),
     memory: normalizeMemory(source.memory),
     hooks: normalizeHooks(source.hooks),
