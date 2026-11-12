@@ -47,6 +47,11 @@ export interface PermissionGateDeps {
   accessMode: () => AccessMode;
   session: () => AgentSession | undefined;
   agent: () => AgentProfile | undefined;
+  /**
+   * 本次确认的自动拒绝超时（毫秒）。只有 IM 会话会返回数值（缺省 10 分钟）：
+   * 手机端没人及时点按钮时，工具不能永久挂住整个回合。普通前台会话不设超时。
+   */
+  permissionTimeoutMs?: () => number | undefined;
 }
 
 export function requestPermission(deps: PermissionGateDeps, toolName: string, args: Record<string, unknown>, toolCallId: string, principalKind: "root-agent" | "subagent" = "root-agent"): Promise<PermissionDecision> {
@@ -65,7 +70,8 @@ export function requestPermission(deps: PermissionGateDeps, toolName: string, ar
       ...(principalKind === "subagent" ? { parentSessionId: sessionId } : {}),
       agentId: deps.agent()?.id,
       toolCallId
-    }
+    },
+    ...(deps.permissionTimeoutMs ? { timeoutMs: deps.permissionTimeoutMs() } : {})
   });
 }
 

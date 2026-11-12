@@ -345,6 +345,65 @@ export interface HooksSettings {
   enabled: boolean;
 }
 
+/**
+ * 单条 IM 通道配置（2026-11-12 飞书长连接 P1）。
+ *
+ * 明文 appSecret **不在这里**：它只进 `<userData>/credentials.json`（safeStorage），
+ * settings.json 只留 `appSecretConfigured` 标记。字段级净化在 `shared/im.ts` 的
+ * `normalizeImChannel`（主进程 normalizeIm 与渲染端草稿校验共用同一份口径）。
+ */
+export interface ImChannelConfig {
+  /** 通道实例 id（`feishu`；多账号时可再开一条）。 */
+  id: string;
+  /** P1 唯一取值。 */
+  kind: "feishu";
+  enabled: boolean;
+  label?: string;
+  appId: string;
+  /** 只读回标记：密钥是否已保存（明文永不进 settings.json / 渲染端）。 */
+  appSecretConfigured?: boolean;
+  /** 开放平台域名，缺省 open.feishu.cn（Lark 用 open.larksuite.com）。 */
+  domain?: string;
+  /** 飞书 open_id（ou_…）白名单；空列表 = 不服务任何消息。 */
+  allowFrom: string[];
+  /** IM 会话的默认权限：缺省 workspace（写工作区自动放行，bash/ssh/浏览器逐次确认）。 */
+  accessMode: AccessMode;
+  /** 缺省用 defaultWorkspace / lastWorkspace。 */
+  workspace?: string;
+  /** 缺省用 currentAgentId。 */
+  agentId?: string;
+  /** 审批超时（毫秒），缺省 600000；超时自动拒绝。 */
+  approvalTimeoutMs?: number;
+  /** 缺省 true：收到消息先回一条「已收到」。 */
+  ack?: boolean;
+}
+
+/** IM 通道总配置（`settings.im`）；总闸缺省关闭，未配置的安装不建任何连接。 */
+export interface ImSettings {
+  enabled: boolean;
+  channels: ImChannelConfig[];
+}
+
+/** IM 通道连接状态机（主进程 → 渲染端徽标）。 */
+export type ImConnectionState = "disabled" | "connecting" | "connected" | "error";
+
+export interface ImChannelStatus {
+  channelId: string;
+  state: ImConnectionState;
+  /** 连接成功时读到的机器人名（测试连接同样返回）。 */
+  botName?: string;
+  /** error 状态的人话原因（含平台 code/message）。 */
+  message?: string;
+  /** 最近一次状态变化时间戳。 */
+  updatedAt: number;
+}
+
+/** 全部通道的当前状态（bootstrap 与 im.status 推送共用）。 */
+export interface ImStatus {
+  enabled: boolean;
+  channels: ImChannelStatus[];
+}
+
 export interface DesktopSettings {
   version: 2;
   /** 全局快捷键（v1 只有命令面板的开关；见 shared/shortcuts.ts）。 */
@@ -377,6 +436,12 @@ export interface DesktopSettings {
    * `baseUrl` 由主进程在转发 `skill-store.*` 时注入 utility（utility 无 Electron API）。
    */
   intranetStore?: SkillStoreIntranetSettings;
+  /**
+   * IM 通道（2026-11-12 飞书长连接 P1）：总开关 + 各通道配置。
+   * 缺省不落这个字段（未配置 = 不建连接）；`normalizeIm`（src/main/settings.ts）
+   * 是唯一读入口，`migrateSettings` 必须读回，否则下次任意设置写入会把它抹掉。
+   */
+  im?: ImSettings;
   computer?: ComputerSettings;
   design?: DesignSettings;
   checkpoint?: CheckpointSettings;
@@ -1605,22 +1670,34 @@ export interface SshSettings {
 export type SessionRunStatus = "running" | "completed" | "failed" | "aborted";
 
 /**
- * 会话来源标记。目前只有自动化后台运行一种：它让「自动化 · 任务名」这类
- * 会话可以被话题列表默认过滤，而由任务面板的运行记录唯一回看。
+ * 会话来源标记。两种：自动化后台运行（列表默认隐藏，由任务面板回看）与
+ * IM 通道会话（列表**可见**，标题写 `飞书 · xxxxxxxx`，用户可自行改名）。
  *
- * 写入方式：自动化后台会话创建时通过 Pi 的 `appendCustomEntry` 落一条
- * custom entry（`AUTOMATION_SESSION_ORIGIN_CUSTOM_TYPE`），摘要缓存解析后投影
- * 到 SessionSummary.origin；不要靠标题前缀作为唯一依据（用户可重命名）。
+ * 写入方式：会话创建时通过 Pi 的 `appendCustomEntry` 落一条 custom entry
+ * （`SESSION_ORIGIN_CUSTOM_TYPE`），摘要缓存解析后投影到 SessionSummary.origin；
+ * 不要靠标题前缀作为唯一依据（用户可重命名）。
  */
-export interface SessionOrigin {
-  kind: "automation";
-  /** 产生该会话的任务 id（「返回任务」与运行记录关联的稳定键）。 */
-  taskId: string;
-  /** 创建时的任务名快照（任务删除后仍可展示）。 */
-  taskName?: string;
-  /** 运行记录 id（可选；记录在运行结束时才生成，故新会话创建时通常没有）。 */
-  runId?: string;
-}
+export type SessionOrigin =
+  | {
+    kind: "automation";
+    /** 产生该会话的任务 id（「返回任务」与运行记录关联的稳定键）。 */
+    taskId: string;
+    /** 创建时的任务名快照（任务删除后仍可展示）。 */
+    taskName?: string;
+    /** 运行记录 id（可选；记录在运行结束时才生成，故新会话创建时通常没有）。 */
+    runId?: string;
+  }
+  | {
+    kind: "im";
+    /** 通道实例 id（ImChannelConfig.id）。 */
+    channelId: string;
+    /** 稳定会话键 `feishu:<channelId>:p2p:<open_id>`（绑定表的主键）。 */
+    sessionKey: string;
+    /** 对端 open_id。 */
+    peerId: string;
+    /** 展示名（平台没给显示名时缺省）。 */
+    displayName?: string;
+  };
 
 export interface SessionSummary {
   id: string;
@@ -2619,6 +2696,36 @@ export type RuntimeCommand =
   /** 打开某条任务关联的会话：主进程按 taskId 查任务、跨角色切换、定位会话、激活/恢复。 */
   | { type: "automation.session.open"; taskId: string }
   | { type: "permission.resolve"; id: string; decision: PermissionDecision }
+  /**
+   * —— IM 通道（2026-11-12 飞书长连接 P1）——
+   * 会话侧命令（main → utility）：网关只管路由与绑定，真正开/复用会话、投递
+   * 提示词、中止回合都在 utility（会话文件、工具、权限、模型全在那儿）。
+   * 结果经 `im.session.ready` / `im.turn` / `im.delta` 回推，**不转发渲染端**。
+   */
+  | {
+    type: "im.session.ensure";
+    requestId: string;
+    /** 稳定会话键 `feishu:<channelId>:p2p:<open_id>`（写进 origin，供绑定与展示）。 */
+    sessionKey: string;
+    /** 新会话的标题（`飞书 · <open_id 前 8 位>`）。 */
+    title: string;
+    /** 已绑定的会话文件路径；文件不存在/打不开时自动新建（created=true）。 */
+    sessionPath?: string;
+    workspace?: string;
+    agentId?: string;
+    accessMode: AccessMode;
+    approvalTimeoutMs?: number;
+  }
+  | { type: "im.prompt"; sessionId: string; text: string }
+  | { type: "im.abort"; sessionId: string }
+  /** IM 通道设置（主进程独占：密钥落 credentials.json、配置落 settings.im；不转发 utility）。 */
+  /** enabled = 总开关（设置页一次保存同时提交总闸与通道卡）；缺省保持现值。 */
+  | { type: "im.channel.save"; requestId: string; channel: ImChannelConfig; appSecret?: string; enabled?: boolean }
+  | { type: "im.channel.delete"; requestId: string; channelId: string }
+  /** 测试连接：取 token + bot info（草稿值缺省回落到已保存配置）。 */
+  | { type: "im.channel.test"; requestId: string; channelId: string; appId?: string; appSecret?: string; domain?: string }
+  /** 请求当前通道状态（结果经 im.status 推送）。 */
+  | { type: "im.status" }
   | { type: "question.resolve"; id: string; answers?: string[]; /** 移交出口选定的实施模型（handoffOption 流程携带；ask_question 忽略）。 */ model?: { provider: string; id: string } }
   /** 回滚单条回复内指定文件的改动：按（文件 + 调用 id）定位快照，每文件取最早快照恢复；targets 可含多个文件。 */
   | { type: "checkpoint.rollback"; sessionId?: string; targets: CheckpointRollbackTarget[] }
@@ -2705,6 +2812,17 @@ export type RuntimeMessage =
   | { type: "memory.health"; health: MemoryHealth }
   /** 响应 memory.overview：所有助手的主题、索引快照与健康。 */
   | { type: "memory.overview"; overview: MemoryOverview }
+  /** IM 通道状态变化（主进程推送；bootstrap 也带一份当前快照）。 */
+  | { type: "im.status"; status: ImStatus }
+  /** IM 「测试连接」结果（响应 im.channel.test；requestId 原样带回）。 */
+  | { type: "im.test-result"; requestId: string; ok: boolean; message: string; botName?: string; latencyMs?: number }
+  /**
+   * IM 会话内部事件（utility → main，由 im-gateway 消费，**不转发渲染端**）：
+   * 会话就绪、回合阶段、流式增量（700ms 合并的当前 assistant 全量文本）。
+   */
+  | { type: "im.session.ready"; requestId: string; sessionKey: string; sessionId?: string; sessionPath?: string; created: boolean; error?: string; model?: string }
+  | { type: "im.turn"; sessionId: string; phase: "start" | "queued" | "end"; status?: "ok" | "error" | "aborted"; text?: string; error?: string }
+  | { type: "im.delta"; sessionId: string; text: string }
   | { type: "permission"; request: PermissionRequest }
   | { type: "permission.dismiss"; id: string }
   | { type: "question"; request: QuestionRequest }
@@ -2782,6 +2900,8 @@ export interface DesktopBootstrap {
   browserTabs?: string[];
   /** 渲染端重载后仍需展示的待决提问（主进程镜像；空/缺省 = 没有挂起的面板）。 */
   questions?: QuestionRequest[];
+  /** IM 通道当前状态（主进程网关快照；缺省 = 没有网关或未初始化）。 */
+  imStatus?: ImStatus;
 }
 
 export interface DesktopApi {

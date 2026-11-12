@@ -9,6 +9,7 @@ import {
 } from "../shared/protocol.js";
 import { normalizeThinkingLevelMap } from "../shared/thinking-levels.js";
 import { normalizeShortcuts } from "../shared/shortcuts.js";
+import { parseImSettings } from "../shared/im.js";
 import { normalizeArchivedSessionPaths, normalizePinnedSessionPaths } from "./session-scope.js";
 import type {
   AccessMode,
@@ -28,6 +29,7 @@ import type {
   InterfaceTuning,
   JevSettings,
   MemorySettings,
+  ImSettings,
   SkillStoreIntranetSettings,
   SshSettings,
   ProviderModelSettings,
@@ -425,6 +427,17 @@ export function normalizeJev(value: unknown): JevSettings | undefined {
 }
 
 /**
+ * IM 通道配置净化（`settings.im`）。字段级规则全在 `shared/im.ts`
+ * （渲染端草稿校验共用同一份），这里只做「唯一读入口」的转发。
+ *
+ * 漏在 migrateSettings 里读回 = 下一次任意设置写入就把它从磁盘抹掉
+ * （pinnedSessionPaths / ssh / jev / intranetStore 都踩过同一个坑）。
+ */
+export function normalizeIm(value: unknown): ImSettings | undefined {
+  return parseImSettings(value);
+}
+
+/**
  * 内网 Skill 商店配置规范化（`settings.intranetStore`）。
  * 只接受 http/https 的绝对地址（允许路径前缀，例如 http://corp.local/store）；
  * 去掉尾部斜杠。非法/空值返回 undefined —— 坏字段丢弃，绝不因为一个坏地址丢掉整条记录。
@@ -652,6 +665,7 @@ export function migrateSettings(raw: unknown): { settings: DesktopSettings; lega
     ssh: normalizeSsh(source.ssh),
     jev: normalizeJev(source.jev),
     intranetStore: normalizeIntranetStore(source.intranetStore),
+    im: normalizeIm(source.im),
     ...(pinnedSessionPaths ? { pinnedSessionPaths } : {}),
     ...(archivedSessionPaths ? { archivedSessionPaths } : {})
   };

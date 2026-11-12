@@ -75,6 +75,7 @@ import type {
   UiThemeContext
 } from "../shared/protocol.js";
 import { isDelegationProgress } from "../shared/protocol.js";
+import { parseImSessionKey } from "../shared/im.js";
 import { THINKING_LEVELS, clampThinkingLevel, supportedThinkingLevels } from "../shared/thinking-levels.js";
 import { toolLabel } from "../shared/locale.js";
 import { PANEL_TODO_LIMIT, summarizeTodos } from "../shared/panel.js";
@@ -82,7 +83,7 @@ import { workspaceRelativeAttachment } from "./attachments.js";
 import { downloadDirFor } from "./browser-downloads.js";
 import { saveBrowserScreenshot } from "./browser-screenshot.js";
 import { autoCompactionFailureNotice, runManualCompaction } from "./compaction-lifecycle.js";
-import { isAbortErrorMessage, resolveRunOutcomeStatus, type TerminalRunStatus } from "./run-outcome.js";
+import { isAbortErrorMessage, resolveRunOutcomeStatus, type OutcomeMessageLike, type TerminalRunStatus } from "./run-outcome.js";
 import { readGitBranch, watchGitBranch, type GitBranchWatchHandle } from "./git-branch.js";
 import { builtinProviderOverlay, buildFetchedProviderModels, resolveBuiltinOverlayAction, resolveCustomProviderRegistration } from "./custom-provider.js";
 import { buildDivModePrompt } from "./div-prompt.js";
@@ -296,8 +297,21 @@ interface SessionRuntimeRecord {
   session: AgentSession;
   unsubscribe: () => void;
   workspace: string;
-  /** 会话来源（自动化后台运行）；缺省 = 用户主动创建。 */
+  /** 会话来源（自动化后台运行 / IM 通道）；缺省 = 用户主动创建。 */
   origin?: SessionOrigin;
+  /**
+   * IM 通道会话标记（存在即「本条会话的回合要同步到飞书」）。
+   * approvalTimeoutMs 用于权限确认自动拒绝（缺省 10 分钟）；其余字段是回合内的
+   * 瞬态记账（turnOpen/ended 防 agent_end 与 agent_settled 重复收尾，deltaTimer
+   * 做 700ms 合并）。
+   */
+  im?: {
+    approvalTimeoutMs?: number;
+    turnOpen?: boolean;
+    ended?: boolean;
+    deltaText?: string;
+    deltaTimer?: ReturnType<typeof setTimeout>;
+  };
   /** 工作区目录缺失时的只读原因（activate 与写入入口每 10s 重查）。 */
   readOnlyReason?: string;
   /** Agent profile captured at creation — background sessions never re-read globals. */
@@ -413,6 +427,12 @@ interface SessionRuntimeRecord {
 }
 
 const liveSessions = new Map<string, SessionRuntimeRecord>();
+/**
+ * IM 通道的提示词队列（按 sessionId）：回合进行中到达的消息先排队（上限 3 条），
+ * 在 agent_settled 后排空。放运行时而不是网关：只有这里知道回合真的结束了
+ * （网关侧的 busy 是异步镜像，连发两条会撞上 `session.prompt` 的忙拒绝）。
+ */
+const imPromptQueues = new Map<string, string[]>();
 // 最近销毁会话的 manager 缓存：冷打开时按 mtime/size 校验复用，省掉同步 JSONL 解析。
 const recentSessionManagers = new SessionManagerCache();
 let activeRuntime: SessionRuntimeRecord | undefined;
@@ -432,6 +452,13 @@ const hiddenPaneSessions = new Set<string>();
 // image/tool-heavy sessions are capped so the utility process cannot retain
 // hundreds of MB of base64 screenshots. Running sessions are never evicted.
 const MAX_PARKED_SESSIONS = 6;
+/**
+ * IM 通道（2026-11-12，飞书长连接 P1）：流式增量合并间隔与每会话排队上限。
+ * 卡片更新在网关侧另有 ≥1.5s / 20 次的节流，这里只决定 IPC 频率（700ms 一帧
+ * 足够让人看到「在动」，又不会把主进程/卡片 API 打满）。
+ */
+const IM_DELTA_INTERVAL_MS = 700;
+const IM_MAX_QUEUED_PROMPTS = 3;
 /** Parked 会话文件大小总和上限（磁盘字节 ≈ 运行时消息体积的保守下界）。 */
 const MAX_PARKED_HISTORY_BYTES = 96 * 1024 * 1024;
 
@@ -3591,7 +3618,7 @@ function completeTurn(record: SessionRuntimeRecord): void {
 // Permission gate wiring: one deps object per session record so background
 // sessions gate tool calls against their own workspace/agent/session, never
 // against whatever is currently active.
-function permissionDepsFor(holder: { session: AgentSession | undefined }, recordWorkspace: string, recordAgent: AgentProfile, accessModeOverride?: () => AccessMode): runtimePermissions.PermissionGateDeps {
+function permissionDepsFor(holder: { session: AgentSession | undefined }, recordWorkspace: string, recordAgent: AgentProfile, accessModeOverride?: () => AccessMode, permissionTimeoutMs?: () => number | undefined): runtimePermissions.PermissionGateDeps {
   return {
     broker: permissionBroker,
     workspace: () => recordWorkspace,
@@ -3599,7 +3626,8 @@ function permissionDepsFor(holder: { session: AgentSession | undefined }, record
     // 普通会话沿用全局 accessMode。
     accessMode: () => accessModeOverride?.() ?? accessMode,
     session: () => holder.session,
-    agent: () => recordAgent
+    agent: () => recordAgent,
+    ...(permissionTimeoutMs ? { permissionTimeoutMs } : {})
   };
 }
 
@@ -3647,6 +3675,126 @@ function resolveRunOutcome(record: SessionRuntimeRecord, messages: readonly Agen
   setTerminalRunStatus(record, outcome);
 }
 
+// —— IM 通道 sink（2026-11-12，飞书长连接 P1）——
+// 只有被 IM 绑定的会话（record.im 存在）才推 im.* 事件；主进程网关消费，**不转发
+// 渲染端**。文本口径与桌面端一致（assistantText 只取 text 块）。
+
+/**
+ * 回合收尾：发 im.turn(phase=end)。
+ *
+ * 从 agent_end 与 agent_settled 两处触发（后者兜住「中止时没有 agent_end」的情况），
+ * `im.ended` 保证一轮只发一次。abortRequested 必须在 resolveRunOutcome 清掉它
+ * **之前**读——所以 agent_end 分支在 completeTurn 之前就调用本函数。
+ */
+function imTurnEnd(record: SessionRuntimeRecord, messages: readonly OutcomeMessageLike[]): void {
+  const im = record.im;
+  if (!im || im.ended) return;
+  im.ended = true;
+  im.turnOpen = false;
+  if (im.deltaTimer) {
+    clearTimeout(im.deltaTimer);
+    im.deltaTimer = undefined;
+  }
+  const lastAssistant = [...messages].reverse().find((message) => message.role === "assistant");
+  const outcome = resolveRunOutcomeStatus(record.abortRequested, messages);
+  const text = lastAssistant ? assistantText(lastAssistant) : "";
+  const error = outcome === "failed"
+    ? (lastAssistant?.errorMessage?.trim() || "模型返回了错误（详情见桌面端会话）")
+    : undefined;
+  post({
+    type: "im.turn",
+    sessionId: record.session.sessionId,
+    phase: "end",
+    status: outcome === "aborted" ? "aborted" : outcome === "failed" ? "error" : "ok",
+    ...(text ? { text } : {}),
+    ...(error ? { error } : {})
+  });
+}
+
+/** 回合进行中的状态：起点 / 流式增量（700ms 合并）/ 兜底收尾与队列排空。 */
+function handleImSessionEvent(record: SessionRuntimeRecord, event: AgentSessionEvent): void {
+  const im = record.im;
+  if (!im) return;
+  switch (event.type) {
+    case "agent_start":
+      im.turnOpen = true;
+      im.ended = false;
+      im.deltaText = undefined;
+      post({ type: "im.turn", sessionId: record.session.sessionId, phase: "start" });
+      break;
+    case "message_update":
+      if (!im.turnOpen || event.message.role !== "assistant") break;
+      im.deltaText = assistantText(event.message);
+      if (im.deltaTimer) break;
+      im.deltaTimer = setTimeout(() => {
+        im.deltaTimer = undefined;
+        const current = record.im;
+        if (!current || !current.turnOpen || !current.deltaText) return;
+        if (!liveSessions.has(record.session.sessionId)) return;
+        post({ type: "im.delta", sessionId: record.session.sessionId, text: current.deltaText });
+      }, IM_DELTA_INTERVAL_MS);
+      (im.deltaTimer as unknown as { unref?: () => void }).unref?.();
+      break;
+    case "agent_settled":
+      // 中止（用户点停止、工具 kill）可能没有 agent_end：在这里兜底收尾。
+      if (im.turnOpen) imTurnEnd(record, record.session.state.messages);
+      drainImPromptQueue(record);
+      break;
+    default:
+      break;
+  }
+}
+
+/** 回合结束后排空 IM 队列（一次一条）。 */
+function drainImPromptQueue(record: SessionRuntimeRecord): void {
+  const sessionId = record.session.sessionId;
+  const queue = imPromptQueues.get(sessionId);
+  if (!queue || queue.length === 0) return;
+  if (record.busy || record.session.isStreaming) return;
+  const next = queue.shift();
+  if (queue.length === 0) imPromptQueues.delete(sessionId);
+  if (next) startImTurn(record, next);
+}
+
+/**
+ * 启动一个 IM 回合。与 session.prompt 命令同款纪律（todo 回合清空、打点、状态
+ * 推送、失败兜底），但目标可以是 parked 会话（用户没在看它，也要能干活）。
+ */
+function startImTurn(record: SessionRuntimeRecord, text: string): void {
+  if (!liveSessions.has(record.session.sessionId)) return;
+  if (!record.session.model) {
+    post({ type: "im.turn", sessionId: record.session.sessionId, phase: "end", status: "error", error: "还没有可用模型，请先在桌面端配置并选择模型" });
+    return;
+  }
+  record.busy = true;
+  record.status = "IM 正在处理";
+  record.abortRequested = false;
+  record.runStatus = "running";
+  patchSessionRunStatus(record);
+  beginTurn(record);
+  if (record.todoStore.list().length > 0) record.todoStore.replaceAll([]);
+  if (record === activeRuntime) emitState();
+  emitPaneStateFor(record);
+  void record.session.prompt(text).catch((error) => {
+    if (!liveSessions.has(record.session.sessionId)) return;
+    completeTurn(record);
+    record.busy = false;
+    record.status = "请求失败";
+    setTerminalRunStatus(record, "failed");
+    post({ type: "error", message: errorText(error) });
+    const im = record.im;
+    if (im && !im.ended) {
+      // prompt 在 agent_start 之前就抛（模型/网络）：不会有 agent_end 来收尾。
+      im.ended = true;
+      im.turnOpen = false;
+      post({ type: "im.turn", sessionId: record.session.sessionId, phase: "end", status: "error", error: errorText(error) });
+    }
+    emitState();
+    emitPaneStateFor(record);
+    scheduleSessionsRefresh();
+  });
+}
+
 function handleSessionEvent(record: SessionRuntimeRecord, event: AgentSessionEvent): void {
   // Pure streaming accumulation can safely batch at 20fps; everything that
   // changes busy/status/executions must flush immediately so the UI never
@@ -3673,6 +3821,8 @@ function handleSessionEvent(record: SessionRuntimeRecord, event: AgentSessionEve
         record.busy = true;
         record.status = "正在重试";
       } else {
+        // IM 收尾必须在 resolveRunOutcome 清掉 abortRequested 之前读结局。
+        imTurnEnd(record, event.messages);
         completeTurn(record);
         record.busy = false;
         record.status = "就绪";
@@ -3858,6 +4008,7 @@ function handleSessionEvent(record: SessionRuntimeRecord, event: AgentSessionEve
       // Unknown event types also flush immediately to be safe.
       break;
   }
+  handleImSessionEvent(record, event);
   if (record !== activeRuntime) {
     // Parked session: lifecycle changes drive the sidebar dot + list freshness;
     // streaming content is dropped unless the session is rendered in a split
@@ -4400,7 +4551,7 @@ function isUnstartedRecord(record: SessionRuntimeRecord): boolean {
  * - otherwise (explicit sessionManager, or agent.save's config-apply rebuild)
  *   the record is rebuilt over the same history.
  */
-async function createSession(sessionManager?: SessionManager, options: { reactivate?: boolean; skipActivate?: boolean; modelOverride?: { provider: string; id: string }; accessModeOverride?: AccessMode; unattended?: boolean; noGenerationGuard?: boolean; agentOverride?: AgentProfile; workspaceOverride?: string; inheritDesignMode?: boolean; inheritComputerMode?: boolean; inheritTeamMode?: boolean; sessionOrigin?: SessionOrigin } = {}): Promise<void> {
+async function createSession(sessionManager?: SessionManager, options: { reactivate?: boolean; skipActivate?: boolean; modelOverride?: { provider: string; id: string }; accessModeOverride?: AccessMode; unattended?: boolean; noGenerationGuard?: boolean; agentOverride?: AgentProfile; workspaceOverride?: string; inheritDesignMode?: boolean; inheritComputerMode?: boolean; inheritTeamMode?: boolean; sessionOrigin?: SessionOrigin; im?: { approvalTimeoutMs?: number } } = {}): Promise<void> {
   if (!modelRuntime) return;
   // noGenerationGuard（后台自动化会话）：不参与全局代际竞争，避免与用户
   // 的新建/切会话管线互相作废（reviewer P1-2）；它捕获自己的 record 上下文。
@@ -4440,7 +4591,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     try {
       activeSessionManager.appendCustomEntry(AUTOMATION_SESSION_ORIGIN_CUSTOM_TYPE, options.sessionOrigin);
     } catch (error) {
-      void post({ type: "log", level: "warn", message: `写入自动化会话来源失败：${errorText(error)}` });
+      void post({ type: "log", level: "warn", message: `写入会话来源失败：${errorText(error)}` });
     }
   }
   // 同 id 重建（空话题换角色、agent.save 应用配置）会复用同一渲染绑定：dispose
@@ -4481,7 +4632,15 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
       }
     });
   };
-  const permissionDeps = permissionDepsFor(sessionHolder, recordWorkspace, recordAgent, options.accessModeOverride ? () => options.accessModeOverride! : undefined);
+  // 权限确认超时（IM 会话）：读 recordBox 而不是构造时快照——会话可能在创建后
+  // 才被 IM 绑定（用户在桌面打开同一会话），快照会让后来挂上的超时永远不生效。
+  const permissionDeps = permissionDepsFor(
+    sessionHolder,
+    recordWorkspace,
+    recordAgent,
+    options.accessModeOverride ? () => options.accessModeOverride! : undefined,
+    () => recordBox?.im?.approvalTimeoutMs
+  );
   // 长期记忆（双库，2026-11-09 GitHub issue #2 配套）：助手库（用户偏好/协作纪律，跟人走）
   // + 工作区项目库（<workspace>/.pidesktop/memory/，跟项目走——任意被派到该工作区
   // 的助手都能接续，总控分发场景的前提）。治理块与索引快照在此一次性冻结、整个
@@ -4985,6 +5144,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     unsubscribe: () => undefined,
     workspace: recordWorkspace,
     ...(options.sessionOrigin ? { origin: options.sessionOrigin } : {}),
+    ...(options.im ? { im: { ...options.im } } : {}),
     readOnlyReason: readOnlyReasonFor(recordWorkspace),
     agent: recordAgent,
     busy: false,
@@ -5735,6 +5895,108 @@ async function finishSessionDeletion(wasActive: boolean): Promise<void> {
   }
   await refreshSessions();
   emitState();
+}
+
+/**
+ * IM 会话准备（`im.session.ensure`）：有 sessionPath 且文件在 → 按路径冷恢复并复用；
+ * 否则新建（首条消息自动建会话，之后按绑定路径复用）。
+ *
+ * 纪律：**永不 throw**。命令级异常只会变成一条全局 error toast，而网关会一直等
+ * `im.session.ready` —— 失败必须走 ready.error 回报。
+ */
+async function ensureImSession(command: Extract<RuntimeCommand, { type: "im.session.ensure" }>): Promise<void> {
+  const { requestId, sessionKey } = command;
+  const ready = (payload: { sessionId?: string; sessionPath?: string; created: boolean; error?: string; model?: string }): void => {
+    post({ type: "im.session.ready", requestId, sessionKey, ...payload });
+  };
+  const imState = command.approvalTimeoutMs !== undefined ? { approvalTimeoutMs: command.approvalTimeoutMs } : {};
+  const modelOf = (record: SessionRuntimeRecord): { model?: string } => record.session.model
+    ? { model: `${record.session.model.provider}/${record.session.model.id}` }
+    : {};
+  try {
+    const target = command.sessionPath ? resolve(command.sessionPath) : undefined;
+    if (target) {
+      // 1) 已是 live：直接把 im 标记挂上（会话可能在桌面端被打开过）。
+      const live = [...liveSessions.values()].find((record) => {
+        const file = record.session.sessionManager.getSessionFile();
+        return Boolean(file) && resolve(file!).toLowerCase() === target.toLowerCase();
+      });
+      if (live) {
+        live.im = { ...live.im, ...imState };
+        ready({ sessionId: live.session.sessionId, sessionPath: target, created: false, ...modelOf(live) });
+        return;
+      }
+      // 2) 文件在磁盘上：按归属冷恢复（skipActivate + unattended）。
+      if (await pathExists(target)) {
+        const header = readSessionHeaderLine(target);
+        const headerCwd = header?.cwd?.trim() ? resolve(header.cwd) : undefined;
+        const fallbackWorkspace = command.workspace && isAbsolute(command.workspace) ? resolve(command.workspace) : undefined;
+        const recordWorkspace = headerCwd ?? fallbackWorkspace;
+        const requestedAgentId = (command.agentId ?? "").trim() || currentAgent?.id || "default";
+        const agent = resolveAutomationAgent(settings?.agents ?? [], requestedAgentId) ?? currentAgent ?? activeAgent();
+        if (header?.id && recordWorkspace) {
+          const recordRoot = agentWorkspaceSessionDir(getAgentDir(), agent.id, recordWorkspace);
+          const agentRoot = join(getAgentDir(), "chatanytime-sessions", agent.id);
+          const owned = sameSessionDir(recordRoot, dirname(target)) || pathIsWithin(agentRoot, target);
+          if (owned) {
+            const manager = openSessionManagerForReopen(target, recordRoot, recordWorkspace, agent.id);
+            await createSession(manager, {
+              skipActivate: true,
+              unattended: true,
+              agentOverride: agent,
+              workspaceOverride: recordWorkspace,
+              accessModeOverride: command.accessMode,
+              noGenerationGuard: true,
+              im: imState
+            });
+            const record = liveSessions.get(manager.getSessionId());
+            if (record) {
+              ready({ sessionId: record.session.sessionId, sessionPath: target, created: false, ...modelOf(record) });
+              return;
+            }
+            void post({ type: "log", level: "warn", message: `IM 会话冷恢复失败，改为新建：${target}` });
+          } else {
+            void post({ type: "log", level: "warn", message: `IM 绑定的会话不属于该助手/工作区，改为新建：${target}` });
+          }
+        }
+      }
+    }
+    // 3) 新建会话（工作区取配置值，缺省跟随当前工作区）。
+    const requestedWorkspace = command.workspace?.trim() ? (isAbsolute(command.workspace.trim()) ? resolve(command.workspace.trim()) : undefined) : workspace;
+    if (!requestedWorkspace) throw new Error("还没有打开工作区，无法创建 IM 会话（请先在桌面端打开一个工作区）");
+    try {
+      if (!statSync(requestedWorkspace).isDirectory()) throw new Error("不是目录");
+    } catch {
+      throw new Error(`IM 会话的工作区不存在：${requestedWorkspace}`);
+    }
+    const requestedAgentId = (command.agentId ?? "").trim() || currentAgent?.id || "default";
+    const agent = resolveAutomationAgent(settings?.agents ?? [], requestedAgentId) ?? currentAgent ?? activeAgent();
+    const parsedKey = parseImSessionKey(sessionKey);
+    if (!parsedKey) throw new Error(`会话键形状不合法：${sessionKey}`);
+    const manager = SessionManager.create(requestedWorkspace, agentWorkspaceSessionDir(getAgentDir(), agent.id, requestedWorkspace));
+    const newSessionId = manager.getSessionId();
+    await createSession(manager, {
+      skipActivate: true,
+      unattended: true,
+      agentOverride: agent,
+      workspaceOverride: requestedWorkspace,
+      accessModeOverride: command.accessMode,
+      noGenerationGuard: true,
+      sessionOrigin: { kind: "im", channelId: parsedKey.channelId, sessionKey, peerId: parsedKey.peerId },
+      im: imState
+    });
+    const record = liveSessions.get(newSessionId);
+    if (!record) throw new Error("IM 会话创建失败（模型运行时可能尚未初始化）");
+    // 命名失败不阻塞：未持久化会话（首条助手消息前 JSONL 未落盘）的命名行为可能受限。
+    try {
+      manager.appendSessionInfo(command.title);
+    } catch (error) {
+      void post({ type: "log", level: "warn", message: `为 IM 会话命名「${command.title}」失败：${errorText(error)}` });
+    }
+    ready({ sessionId: newSessionId, sessionPath: manager.getSessionFile(), created: true, ...modelOf(record) });
+  } catch (error) {
+    ready({ created: false, error: errorText(error) });
+  }
 }
 
 async function handleCommand(command: RuntimeCommand): Promise<void> {
@@ -7398,6 +7660,38 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     case "background.kill":
       if (!backgroundProcesses.kill(command.id)) throw new Error("找不到该后台进程");
       break;
+    // —— IM 通道（2026-11-12，飞书长连接 P1）——
+    // 会话准备 / 投递 / 中止都在 utility：会话文件、工具、权限、模型全在这儿。
+    case "im.session.ensure":
+      await ensureImSession(command);
+      break;
+    case "im.prompt": {
+      const record = liveSessions.get(command.sessionId);
+      if (!record) {
+        post({ type: "im.turn", sessionId: command.sessionId, phase: "end", status: "error", error: "会话已关闭（可能已被回收），请发送 /new 重新开始" });
+        break;
+      }
+      if (!record.im) record.im = {};
+      if (record.busy || record.session.isStreaming) {
+        const queue = imPromptQueues.get(command.sessionId) ?? [];
+        if (queue.length >= IM_MAX_QUEUED_PROMPTS) {
+          post({ type: "im.turn", sessionId: command.sessionId, phase: "end", status: "error", error: `上一条还在处理（本会话最多排队 ${IM_MAX_QUEUED_PROMPTS} 条）` });
+          break;
+        }
+        queue.push(command.text);
+        imPromptQueues.set(command.sessionId, queue);
+        post({ type: "im.turn", sessionId: command.sessionId, phase: "queued" });
+        break;
+      }
+      startImTurn(record, command.text);
+      break;
+    }
+    case "im.abort": {
+      // 中止即放弃排队消息（与 session.abort 同口径）。
+      imPromptQueues.delete(command.sessionId);
+      await handleCommand({ type: "session.abort", sessionId: command.sessionId });
+      break;
+    }
     case "permission.resolve": {
       permissionBroker.resolve(command.id, command.decision);
       break;

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ExecutionPrincipal, PermissionRequest } from "../shared/protocol.js";
 import { PermissionBroker } from "./permission-broker.js";
 
@@ -107,5 +107,58 @@ describe("PermissionBroker", () => {
 
     // 授权保留：同一会话同一风险的工具不再弹确认。
     await expect(broker.request({ ...input, principal: principal("session-a", "tool-c") })).resolves.toBe("allow-session");
+  });
+});
+
+describe("PermissionBroker timeout (IM 会话)", () => {
+  it("auto-denies through the same resolve path and emits dismiss exactly once", async () => {
+    vi.useFakeTimers();
+    try {
+      const emitted: PermissionRequest[] = [];
+      const dismissed: string[] = [];
+      const broker = new PermissionBroker((request) => emitted.push(request), (id) => dismissed.push(id));
+      const pending = broker.request({
+        accessMode: "ask",
+        toolName: "bash",
+        summary: "运行测试",
+        args: { command: "npm test" },
+        risk: "command",
+        principal: principal("session-im", "tool-a"),
+        timeoutMs: 1_000
+      });
+      expect(emitted).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await expect(pending).resolves.toBe("deny");
+      expect(dismissed).toEqual([emitted[0]!.id]);
+      // 超时之后再点按钮（或桌面端点拒绝）：同一条幂等路径，不重复结算。
+      expect(broker.resolve(emitted[0]!.id, "allow-once")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not fire the timer after a normal resolve (no leaked dismiss)", async () => {
+    vi.useFakeTimers();
+    try {
+      const emitted: PermissionRequest[] = [];
+      const dismissed: string[] = [];
+      const broker = new PermissionBroker((request) => emitted.push(request), (id) => dismissed.push(id));
+      const pending = broker.request({
+        accessMode: "ask",
+        toolName: "bash",
+        summary: "运行测试",
+        args: { command: "npm test" },
+        risk: "command",
+        principal: principal("session-im", "tool-b"),
+        timeoutMs: 1_000
+      });
+      broker.resolve(emitted[0]!.id, "allow-once");
+      await expect(pending).resolves.toBe("allow-once");
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(dismissed).toEqual([emitted[0]!.id]);
+      expect(emitted).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

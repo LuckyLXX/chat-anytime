@@ -13,11 +13,20 @@ export interface PermissionBrokerRequest {
   args: Record<string, unknown>;
   risk: PermissionRequest["risk"];
   principal: ExecutionPrincipal;
+  /**
+   * 自动拒绝的超时（毫秒；IM 会话缺省 10 分钟）。
+   *
+   * 为什么放在 broker：无人值守的 IM 会话里没人盯着桌面弹窗，一个挂起的
+   * Promise 会让整个回合永不 settle（工具永久占用、后续消息全部排队）。
+   * 超时 → `deny`，与用户自己点「拒绝」同一条路径（幂等：先到先得）。
+   */
+  timeoutMs?: number;
 }
 
 interface PendingPermission {
   request: PermissionRequest;
   resolve: (decision: PermissionDecision) => void;
+  timer?: ReturnType<typeof setTimeout>;
 }
 
 export class PermissionBroker {
@@ -50,7 +59,16 @@ export class PermissionBroker {
     this.emit(request);
 
     return new Promise((resolve) => {
-      this.pending.set(id, { request, resolve });
+      const pending: PendingPermission = { request, resolve };
+      const timeoutMs = input.timeoutMs;
+      if (typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0) {
+        pending.timer = setTimeout(() => {
+          // 走同一条 resolve 路径：清 pending、emit dismiss、终结 Promise，幂等。
+          this.resolve(id, "deny");
+        }, timeoutMs);
+        (pending.timer as unknown as { unref?: () => void }).unref?.();
+      }
+      this.pending.set(id, pending);
     });
   }
 
@@ -59,6 +77,7 @@ export class PermissionBroker {
     if (!pending) return false;
 
     this.pending.delete(id);
+    if (pending.timer) clearTimeout(pending.timer);
     this.dismiss(id);
     if (decision === "allow-session") {
       const { principal, toolName, risk } = pending.request;
@@ -91,6 +110,7 @@ export class PermissionBroker {
     for (const [id, pending] of this.pending) {
       if (sessionId && pending.request.principal.sessionId !== sessionId) continue;
       this.pending.delete(id);
+      if (pending.timer) clearTimeout(pending.timer);
       this.dismiss(id);
       pending.resolve("deny");
     }

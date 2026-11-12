@@ -42,6 +42,9 @@ import { createSshHostStore, type SshHostCrypto } from "./ssh-host-store.js";
 import { createSshKnownHostsStore } from "./ssh-known-hosts.js";
 import { SshConnectionManager, type SshClientLike } from "./ssh-connections.js";
 import { installSingleInstanceGuard } from "./single-instance.js";
+import { ImGateway } from "./im-gateway.js";
+import { normalizeImChannel } from "../shared/im.js";
+import type { ImChannelConfig } from "../shared/protocol.js";
 
 /**
  * 关闭 Chromium 的「原生窗口遮挡检测」（Windows）：不关它，浏览器自动化截图会在
@@ -88,6 +91,11 @@ app.commandLine.appendSwitch("disable-features", [...new Set([...existingDisable
 
 let mainWindow: BrowserWindow | undefined;
 let runtimeProcess: UtilityProcess | undefined;
+/**
+ * IM 通道网关（2026-11-12 飞书长连接 P1）：连接、白名单、会话绑定、审批卡全在主进程。
+ * 懒创建（bootstrap / 设置页测试连接也要用），`startImGateway()` 才真正建连。
+ */
+let imGateway: ImGateway | undefined;
 let latestSnapshot: RuntimeSnapshot | undefined;
 let latestCatalog: Extract<RuntimeMessage, { type: "catalog" }> | undefined;
 let latestResources: ResourceCatalog | undefined;
@@ -521,6 +529,127 @@ async function chooseDownloadSavePath(owner: BrowserWindow, defaultPath: string)
 function runtimeEntry(): string { return join(__dirname, "pi-runtime.js"); }
 function sendToRuntime(command: RuntimeCommand): void { if (!runtimeProcess) throw new Error("Pi 运行时当前不可用"); runtimeProcess.postMessage(command); }
 
+/**
+ * IM 通道密钥在 credentials.json 里的键：`im.feishu.<channelId>`。
+ * 明文只进 safeStorage 通道，settings.json 只留 `appSecretConfigured`。
+ */
+const IM_CREDENTIAL_PREFIX = "im.feishu.";
+function imCredentialKey(channelId: string): string { return `${IM_CREDENTIAL_PREFIX}${channelId}`; }
+function imSecret(channelId: string): string | undefined {
+  const cached = credentialsCache[imCredentialKey(channelId)];
+  if (cached) return cached;
+  // 缓存未命中（例如刚启动就测试连接）：读一次解密文件，不把 IM 密钥塞回全局缓存。
+  return loadCredentials()[imCredentialKey(channelId)];
+}
+/**
+ * 下发给 utility 的密钥表：**剥掉 IM 通道密钥**。
+ * utility 只要模型服务商的 key；通道密钥多一个进程知道就多一份暴露面，且它永远用不到。
+ */
+function runtimeApiKeys(): Record<string, string> {
+  return Object.fromEntries(Object.entries(credentialsCache).filter(([key]) => !key.startsWith(IM_CREDENTIAL_PREFIX)));
+}
+
+function createImGateway(): ImGateway {
+  return new ImGateway({
+    userDataDir: app.getPath("userData"),
+    getSettings: () => loadSettings(),
+    getSecret: (channelId) => imSecret(channelId),
+    sendCommand: (command) => sendToRuntime(command),
+    push: (message) => pushRuntimeMessage(message),
+    log: (level, message) => {
+      console.log(`[im] ${message}`);
+      if (level === "warn") pushRuntimeMessage({ type: "log", level: "warn", message: `IM 通道：${message}` });
+    }
+  });
+}
+function ensureImGateway(): ImGateway {
+  if (!imGateway) imGateway = createImGateway();
+  return imGateway;
+}
+/** 启动（或按最新设置重启）全部通道连接。 */
+function startImGateway(): void {
+  try {
+    if (!imGateway) imGateway = createImGateway();
+    imGateway.start();
+  } catch (error) {
+    console.warn(`IM 通道启动失败：${String(error)}`);
+  }
+}
+/** bootstrap 用：当前通道状态快照（网关未创建时返回空表）。 */
+function imGatewayStatus() {
+  return imGateway?.status() ?? { enabled: false, channels: [] };
+}
+
+/**
+ * IM 通道设置由**主进程独占**（照 intranet 的先例）：
+ * - 配置落 `settings.im`（normalizeIm 是唯一读入口，migrateSettings 负责读回）；
+ * - 明文 secret 落 `credentials.json`（safeStorage），settings.json 只留标记；
+ * - 这几条命令不转发 utility（utility 没有这个分支，转发只会静默丢弃），
+ *   处理完回推 `im.status` / `im.test-result`。
+ */
+function handleImCommand(command: RuntimeCommand): boolean {
+  switch (command.type) {
+    case "im.channel.save": {
+      const settings = loadSettings();
+      const previous = { ...settings };
+      const incoming = normalizeImChannel(command.channel);
+      if (!incoming) {
+        pushRuntimeMessage({ type: "error", message: "IM 通道保存失败：通道 id 或类型不合法（id 只能用字母/数字/下划线/短横线）" });
+        return true;
+      }
+      const secret = command.appSecret?.trim();
+      let secretConfigured = Boolean(imSecret(incoming.id));
+      if (secret) {
+        if (saveCredential(imCredentialKey(incoming.id), secret)) {
+          secretConfigured = true;
+        } else {
+          pushRuntimeMessage({ type: "error", message: "系统加密存储不可用，App Secret 未保存（重启后需要重新填写）" });
+          secretConfigured = false;
+        }
+      }
+      const channel: ImChannelConfig = { ...incoming, ...(secretConfigured ? { appSecretConfigured: true } : {}) };
+      const channels = settings.im?.channels ?? [];
+      const nextChannels = channels.some((item) => item.id === channel.id)
+        ? channels.map((item) => (item.id === channel.id ? channel : item))
+        : [...channels, channel];
+      settings.im = { enabled: command.enabled ?? settings.im?.enabled === true, channels: nextChannels };
+      persistSettings().schedule(diffSettings(previous, settings));
+      // 保存即应用：连接参数变了就重建（旧 socket 先关）。
+      startImGateway();
+      pushRuntimeMessage({ type: "im.status", status: imGatewayStatus() });
+      return true;
+    }
+    case "im.channel.delete": {
+      const settings = loadSettings();
+      const previous = { ...settings };
+      const channels = (settings.im?.channels ?? []).filter((item) => item.id !== command.channelId);
+      if (channels.length === 0) delete settings.im;
+      else settings.im = { enabled: settings.im?.enabled === true, channels };
+      deleteCredential(imCredentialKey(command.channelId));
+      persistSettings().schedule(diffSettings(previous, settings));
+      startImGateway();
+      pushRuntimeMessage({ type: "im.status", status: imGatewayStatus() });
+      return true;
+    }
+    case "im.channel.test": {
+      void ensureImGateway().testChannel({
+        requestId: command.requestId,
+        channelId: command.channelId,
+        ...(command.appId !== undefined ? { appId: command.appId } : {}),
+        ...(command.appSecret !== undefined ? { appSecret: command.appSecret } : {}),
+        ...(command.domain !== undefined ? { domain: command.domain } : {})
+      });
+      return true;
+    }
+    case "im.status": {
+      pushRuntimeMessage({ type: "im.status", status: imGatewayStatus() });
+      return true;
+    }
+    default:
+      return false;
+  }
+}
+
 /** 主进程 → 渲染端的 runtime 消息（与其它推送同一条通道）。 */
 function pushRuntimeMessage(message: RuntimeMessage): void {
   mainWindow?.webContents.send("runtime:message", message);
@@ -601,6 +730,10 @@ function showHookNotification(title: string, body: string, sessionId?: string, v
 function startRuntime(): void {
   runtimeProcess = utilityProcess.fork(runtimeEntry(), [], { serviceName: "Pi 运行时", stdio: "pipe" });
   runtimeProcess.on("message", (message: RuntimeMessage) => {
+    // IM 通道先消费：im.session.ready / im.turn / im.delta 是**内部协议**，不转发
+    // 渲染端；permission / permission.dismiss 仍继续走下面（桌面与手机双通道，
+    // 先到先得，broker 幂等）。
+    if (imGateway?.handleRuntimeMessage(message)) return;
     if (message.type === "runtime-context") {
       // utility 激活成功后的唯一持久化入口：只写上下文，不转发渲染端。
       const source = loadSettings();
@@ -727,7 +860,7 @@ function startRuntime(): void {
   // 主题资产不过 IPC（2026-09-26）：资产已落成磁盘文件（<agentDir>/pidesktop-themes/），
   // 渲染端按作用域拼 pidesktop-file://theme URL 直接读盘，完全不消费 base64；
   // 只剩「超限/写盘失败」的迁移残留会被投影剥掉。utility 侧压根不读 appearance。
-  sendToRuntime({ type: "initialize", settings: settingsForRenderer(settings), apiKeys: credentialsCache, bundledSkillsDir, bundledSubagentsDir });
+  sendToRuntime({ type: "initialize", settings: settingsForRenderer(settings), apiKeys: runtimeApiKeys(), bundledSkillsDir, bundledSubagentsDir });
 }
 function createWindow(): void {
   const rendererUrl = process.env.ELECTRON_RENDERER_URL;
@@ -1094,7 +1227,7 @@ function registerIpc(): void {
     // AI 后续操作走已绑定快速路径不再 reveal，用户就看不到 AI 在操作哪个页面。
     const source = loadSettings();
     const settings: DesktopSettings = settingsForRenderer({ ...source, providers: source.providers.map((provider) => ({ ...provider, keyConfigured: Boolean(credentialsCache[provider.id]) })), jevKeyConfigured: Boolean(credentialsCache[JEV_CREDENTIAL_ID]) });
-    return { platform: process.platform, version: app.getVersion(), securityWarning, settings, runtime: latestSnapshot, catalog: latestCatalog ? { models: latestCatalog.models, providers: latestCatalog.providers } : undefined, resources: latestResources, browserTabs: browserPreviewController?.tabIds() ?? [], questions: pendingQuestions.list() };
+    return { platform: process.platform, version: app.getVersion(), securityWarning, settings, runtime: latestSnapshot, catalog: latestCatalog ? { models: latestCatalog.models, providers: latestCatalog.providers } : undefined, resources: latestResources, browserTabs: browserPreviewController?.tabIds() ?? [], questions: pendingQuestions.list(), imStatus: imGatewayStatus() };
   });
   // 主题导入：对话框与全部文件工作都在主进程（渲染端不再用 webkitdirectory + FileReader
   // 读盘、不再把资产变成 base64 过 IPC）。渲染端只拿 CSS 文本与统计。
@@ -1331,6 +1464,8 @@ function registerIpc(): void {
     return manager.handleAsync(command) ?? manager.handle(command);
   });
   ipcMain.handle("runtime:send", (_event, command: RuntimeCommand): void => {
+    // IM 通道设置（含 App Secret）只由主进程落盘/回推，不进流程队列，也不转发 utility。
+    if (handleImCommand(command)) return;
     // 内网商店地址配置只由主进程落盘/回推，不进流程队列，也不转发 utility。
     if (handleIntranetStoreCommand(command)) return;
     updateSettings(command);
@@ -1347,11 +1482,13 @@ app.whenReady().then(() => {
   registerIpc();
   startRuntime();
   createWindow();
+  // 通道在窗口建好之后再起：连接状态推送要有渲染端可收（bootstrap 也有同一份快照兜底）。
+  startImGateway();
   applyPaletteHotkey();
   // 启动期间（ready 之前）到达的「又点了一次图标」：窗口现在已经建好，补一次前置。
   singleInstance.flushPendingActivation();
   app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); else showMainWindow(); });
 });
 app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
-app.on("before-quit", () => { quitting = true; settingsPersistence?.flush(); browserAutomationController?.dispose(); computerOverlayController?.dispose(); browserPreviewController?.dispose(); panelWindows?.dispose(); trayController?.dispose(); terminalManager.disposeAll(); sshConnectionManager?.disposeAll(); runtimeProcess?.kill(); });
+app.on("before-quit", () => { quitting = true; settingsPersistence?.flush(); imGateway?.dispose(); browserAutomationController?.dispose(); computerOverlayController?.dispose(); browserPreviewController?.dispose(); panelWindows?.dispose(); trayController?.dispose(); terminalManager.disposeAll(); sshConnectionManager?.disposeAll(); runtimeProcess?.kill(); });
 app.on("will-quit", () => { globalShortcut.unregisterAll(); });

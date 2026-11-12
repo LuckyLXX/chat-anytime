@@ -97,7 +97,8 @@ describe("session summary cache: automation origin", () => {
     saveSessionIndex(join(dir, "index.json"), cache, { now: 1_700_000_000_000 });
     const reloaded = loadSessionIndex(join(dir, "index.json"), { now: 1_700_000_000_000 });
     const second = await listSessionSummaries([dir], { cache: reloaded });
-    expect(second[0]?.origin?.taskId).toBe("task-1");
+    const reloadedOrigin = second[0]?.origin;
+    expect(reloadedOrigin?.kind === "automation" ? reloadedOrigin.taskId : undefined).toBe("task-1");
     expect(second[0]?.messageCount).toBe(indexed[0]?.messageCount);
   });
 
