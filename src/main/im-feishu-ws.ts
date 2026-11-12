@@ -284,10 +284,14 @@ export class ImWsClient {
     this.connectInFlight = false;
   }
 
-  private applyClientConfig(config: ImWsClientConfig | undefined): void {
-    if (!config) return;
-    this.pingIntervalMs = positiveSeconds(config.pingInterval, IM_WS_DEFAULT_PING_INTERVAL_SEC) * 1000;
+  /** 落地握手/pong 里的 ClientConfig；返回心跳间隔是否变化（变了才重排心跳）。 */
+  private applyClientConfig(config: ImWsClientConfig | undefined): boolean {
+    if (!config) return false;
+    const nextPing = positiveSeconds(config.pingInterval, IM_WS_DEFAULT_PING_INTERVAL_SEC) * 1000;
+    const changed = nextPing !== this.pingIntervalMs;
+    this.pingIntervalMs = nextPing;
     this.reconnectNonceMs = Math.max(0, positiveSeconds(config.reconnectNonce, IM_WS_DEFAULT_RECONNECT_NONCE_SEC)) * 1000;
+    return changed;
   }
 
   private startPingLoop(): void {
@@ -389,9 +393,10 @@ export class ImWsClient {
         reconnectInterval: typeof raw.ReconnectInterval === "number" ? raw.ReconnectInterval : undefined,
         reconnectCount: typeof raw.ReconnectCount === "number" ? raw.ReconnectCount : undefined
       };
-      this.applyClientConfig(config);
-      // 间隔变了就按新节奏重排心跳（官方 SDK 同口径）。
-      if (this.socket) this.startPingLoop();
+      // 间隔真的变了才重排心跳：平台可能每秒推一帧 pong，每次都重排会让 ping 永远
+      // 发不出去（定时器不停被重置）。
+      const pingChanged = this.applyClientConfig(config);
+      if (pingChanged && this.socket) this.startPingLoop();
     } catch {
       this.log("warn", "pong 帧的 payload 不是合法 JSON，沿用现有心跳间隔");
     }

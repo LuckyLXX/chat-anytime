@@ -195,7 +195,7 @@ describe("connection lifecycle", () => {
     sockets[0]!.emit("open");
     expect(statuses).toEqual(["connecting", "connected"]);
     const ping = sockets[0]!.frames()[0]!;
-    expect(ping).toMatchObject({ method: 0, service: 42, seqId: 0, logId: 0 });
+    expect(ping).toMatchObject({ method: 0, service: 42, seqId: 0n, logId: 0n });
     expect(headerValue(ping, "type")).toBe("ping");
     client.dispose();
   });
@@ -301,7 +301,7 @@ describe("event frames", () => {
     const frame = eventFrame({ headers: [{ key: "message_id", value: "om_1" }], payload: JSON.stringify({ schema: "2.0", event: { message: { message_id: "om_1" } } }) });
     sockets[0]!.emit("message", encodeFrame(frame));
     const received = sockets[0]!.frameAt(-1);
-    expect(received?.seqId).toBe(frame.seqId);
+    expect(received?.seqId).toBe(1n);
     expect(received?.method).toBe(1);
     expect(headerValue(received!, "biz_rt")).toBe("0");
     expect(JSON.parse(payloadText(received!))).toEqual({ code: 200 });

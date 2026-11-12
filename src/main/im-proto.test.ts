@@ -39,8 +39,8 @@ const encoder = new TextEncoder();
 
 function sampleFrame(): PbFrame {
   return {
-    seqId: 3,
-    logId: 987654321,
+    seqId: 3n,
+    logId: 987654321n,
     service: 12,
     method: 1,
     headers: [
@@ -58,8 +58,8 @@ describe("encodeFrame", () => {
     const Frame = frameType();
     const frame = sampleFrame();
     const golden = Frame.encode(Frame.fromObject({
-      SeqID: frame.seqId,
-      LogID: frame.logId,
+      SeqID: Number(frame.seqId),
+      LogID: Number(frame.logId),
       service: frame.service,
       method: frame.method,
       headers: frame.headers,
@@ -68,11 +68,17 @@ describe("encodeFrame", () => {
     expect(Buffer.from(encodeFrame(frame)).toString("hex")).toBe(Buffer.from(golden).toString("hex"));
   });
 
-  it("skips zero-valued scalars (proto3-style omission, matching the official SDK)", () => {
-    const bytes = encodeFrame({ seqId: 0, logId: 0, service: 0, method: 0, headers: [{ key: "type", value: "ping" }], payload: new Uint8Array(0) });
-    // 只有 headers 字段（field 5, wire 2 = tag 0x2a），没有 seqId/logId/service/method/payload。
-    expect(bytes[0]).toBe(0x2a);
-    expect(decodeFrame(bytes)).toEqual({ seqId: 0, logId: 0, service: 0, method: 0, headers: [{ key: "type", value: "ping" }], payload: new Uint8Array(0) });
+  it("always emits the proto2 required scalars, even when zero (a ping frame must be valid)", () => {
+    // 官方 pbbp2.proto 是 proto2：SeqID/LogID/service/method 都是 required。按 proto3
+    // 习惯省略 0 会让心跳帧整帧非法（实测：服务端从不回 pong、事件也永不投递）。
+    const Frame = frameType();
+    const frame: PbFrame = { seqId: 0, logId: 0, service: 42, method: 0, headers: [{ key: "type", value: "ping" }], payload: new Uint8Array(0) };
+    const golden = Frame.encode(Frame.fromObject({ SeqID: 0, LogID: 0, service: 42, method: 0, headers: frame.headers })).finish();
+    const bytes = encodeFrame(frame);
+    expect(Buffer.from(bytes).toString("hex")).toBe(Buffer.from(golden).toString("hex"));
+    // 形状固定：08 00（SeqID）+ 10 00（LogID）+ 18 2a（service=42）+ 20 00（method=0）+ headers
+    expect(Buffer.from(bytes).toString("hex").startsWith("08001000182a2000")).toBe(true);
+    expect(decodeFrame(bytes)).toEqual({ ...frame, seqId: 0n, logId: 0n });
   });
 });
 
@@ -88,16 +94,44 @@ describe("decodeFrame", () => {
       payload: encoder.encode('{"schema":"2.0"}')
     })).finish();
     const decoded = decodeFrame(new Uint8Array(golden));
-    expect(decoded).toMatchObject({ seqId: 7, logId: 42, service: 9, method: 1 });
+    expect(decoded).toMatchObject({ seqId: 7n, logId: 42n, service: 9, method: 1 });
+    expect(decoded?.seqId).toBe(7n);
+    expect(decoded?.logId).toBe(42n);
     expect(decoded?.headers).toEqual([{ key: "type", value: "card" }, { key: "message_id", value: "om_1" }]);
     expect(payloadText(decoded!)).toBe('{"schema":"2.0"}');
   });
 
   it("round-trips through our own encoder (JSON payloads with non-ASCII text)", () => {
-    const frame: PbFrame = { seqId: 1, logId: 2, service: 3, method: 1, headers: [{ key: "type", value: "event" }], payload: encoder.encode('{"text":"你好，飞书"}') };
+    const frame: PbFrame = { seqId: 1n, logId: 2n, service: 3, method: 1, headers: [{ key: "type", value: "event" }], payload: encoder.encode('{"text":"你好，飞书"}') };
     const decoded = decodeFrame(encodeFrame(frame));
     expect(decoded).toEqual(frame);
     expect(payloadText(decoded!)).toBe('{"text":"你好，飞书"}');
+  });
+
+  it("decodes frames whose uint64 LogID exceeds 2^53 (regression: every server frame was rejected)", () => {
+    // 2026-11-12 真机抓包：我们发 ping 后服务端回的 pong，LogID ≈ 1.79e18（9 字节 varint），
+    // 超出 Number.MAX_SAFE_INTEGER。旧实现遇到这种 varint 直接返回 undefined ⇒ 心跳收不到
+    // pong（看门狗每 270s 重连一次）、**所有事件帧也被丢弃**，用户侧表现为「发消息完全没反应」。
+    // 用 protobufjs 以十进制字符串精确构造同样的 uint64（不依赖抓包长度）。
+    const Frame = frameType();
+    const bigLogId = "111300000000000012"; // 任意 > 2^53 的 uint64
+    const golden = Frame.encode(Frame.fromObject({
+      SeqID: 0,
+      LogID: bigLogId,
+      service: 33554678,
+      method: 0,
+      headers: [{ key: "code", value: "0" }, { key: "type", value: "pong" }],
+      payload: encoder.encode('{"PingInterval":90,"ReconnectNonce":25}')
+    })).finish();
+    const decoded = decodeFrame(new Uint8Array(golden));
+    expect(decoded).toBeDefined();
+    expect(decoded!.logId).toBe(BigInt(bigLogId));
+    expect(decoded!.method).toBe(0);
+    expect(decoded!.service).toBe(33554678);
+    expect(headerValue(decoded!, "type")).toBe("pong");
+    expect(payloadText(decoded!)).toBe('{"PingInterval":90,"ReconnectNonce":25}');
+    // ACK 必须原样回显：重新编码后与原始字节逐字节相同（LogID 精度不能丢）。
+    expect(Buffer.from(encodeFrame(decoded!)).toString("hex")).toBe(Buffer.from(golden).toString("hex"));
   });
 
   it("skips unknown fields instead of failing (platform may add fields)", () => {
