@@ -24,6 +24,7 @@ const settings = read("settings.ts");
 const store = read("../renderer/src/store.ts");
 const app = read("../renderer/src/App.tsx");
 const component = read("../renderer/src/ImChannelSettings.tsx");
+const customComponent = read("../renderer/src/ImCustomChannelSettings.tsx");
 const demoApi = read("../renderer/src/demo-api.ts");
 const styles = read("../renderer/src/styles.css");
 const agents = read("../../AGENTS.md");
@@ -70,9 +71,10 @@ describe("主进程接线", () => {
   it("im.* 设置命令由主进程独占（不转发 utility），且密钥走 safeStorage", () => {
     expect(index).toContain("function handleImCommand(command: RuntimeCommand): boolean");
     expect(index).toContain("if (handleImCommand(command)) return;");
-    expect(index).toContain('const IM_CREDENTIAL_PREFIX = "im.feishu.";');
-    expect(index).toContain("saveCredential(imCredentialKey(incoming.id), secret)");
-    expect(index).toContain("deleteCredential(imCredentialKey(command.channelId))");
+    // 密钥键按 kind 分键：官方通道 im.feishu.<id>、自定义通道 im.custom.<id>。
+    expect(index).toContain('const IM_CREDENTIAL_PREFIX = "im.";');
+    expect(index).toContain("saveCredential(imCredentialKey(incoming.kind, incoming.id), secret)");
+    expect(index).toContain("deleteCredential(imCredentialKey(kind, command.channelId))");
     // 下发 utility 的密钥表剥掉 IM 密钥（多一个进程知道就多一份暴露面）。
     expect(index).toContain("apiKeys: runtimeApiKeys()");
     expect(index).toContain("!key.startsWith(IM_CREDENTIAL_PREFIX)");
@@ -151,6 +153,53 @@ describe("出站整形（手机端不显示 HTML）", () => {
   });
 });
 
+describe("自定义通道（接内网工作软件）", () => {
+  it("协议与净化层把 custom 当作一等通道（不是硬编码补丁）", () => {
+    expect(protocol).toContain('export type ImChannelKind = "feishu" | "custom";');
+    expect(protocol).toContain("export type ImCustomHost = \"127.0.0.1\" | \"0.0.0.0\";");
+    expect(protocol).toContain("endpoint?: string;");
+    const shared = read("../shared/im.ts");
+    expect(shared).toContain('export const IM_CHANNEL_KINDS = ["feishu", "custom"] as const;');
+    expect(shared).toContain("export const IM_CUSTOM_DEFAULT_HOST = \"127.0.0.1\";");
+  });
+
+  it("网关按 kind 造适配器：入站出口唯一（deliverInbound），会话键与去重键都带 kind", () => {
+    expect(gatewaySource).toContain('import { createCustomChannelTransport } from "./im-custom-channel.js";');
+    expect(gatewaySource).toContain("private createTransport(config: ImChannelConfig, secret: string)");
+    expect(gatewaySource).toContain("private deliverInbound(channelId: string, message: ImInboundMessage): void");
+    expect(gatewaySource).toContain("onMessage: (message) => this.deliverInbound(config.id, message)");
+    expect(gatewaySource).toContain("const channelKey = `\${channel.config.kind}:\${channelId}`;");
+    expect(gatewaySource).toContain("imSessionKey({ kind: config.kind, channelId: config.id, peerId: message.openId })");
+    // 官方通道只认 App ID + Secret；自定义通道只认 Token（不拿 App ID 去拦它）。
+    expect(gatewaySource).toContain('if (channel.kind === "feishu" && !channel.appId.trim())');
+    expect(gatewaySource).toContain('channel.kind === "feishu" ? "未保存 App Secret" : "未设置接入 Token"');
+  });
+
+  it("传输入：三条路由、Token 必填 fail-closed、回复两头都有（回调 + 轮询）", () => {
+    const custom = read("im-custom-channel.ts");
+    expect(custom).toContain('export const IM_CUSTOM_MESSAGES_PATH = "/v1/messages";');
+    expect(custom).toContain('export const IM_CUSTOM_REPLIES_PATH = "/v1/replies";');
+    expect(custom).toContain('export const IM_CUSTOM_HEALTH_PATH = "/v1/health";');
+    expect(custom).toContain("if (!token) {");
+    expect(custom).toContain("timingSafeEqual(a, b)");
+    expect(custom).toContain("deliverCallback(");
+    expect(custom).toContain("outbox.push({ peerId: chatId, text, at: now() })");
+    // 卡片一律「不支持」⇒ 网关自动降级成纯文本（审批码 / 答案）。
+    expect(custom).toContain('sendCard: async () => ({ ok: false, message: "自定义通道不支持卡片，请改用纯文本" })');
+  });
+
+  it("对接说明与示例脚本在位（用户要照抄的那份规则）", () => {
+    const doc = read("../../docs/im-channel-protocol.md");
+    for (const route of ["POST /v1/messages", "GET /v1/replies", "GET /v1/health"]) {
+      expect(doc).toContain(route);
+    }
+    expect(doc).toContain("replyUrl");
+    expect(doc).toContain("peerId");
+    const example = read("../../docs/im-channel-bridge-example.mjs");
+    expect(example).toContain("/v1/messages");
+  });
+});
+
 describe("权限超时", () => {
   it("broker 支持 timeoutMs：超时走同一条 resolve(deny)，并清理定时器", () => {
     expect(broker).toContain("timeoutMs?: number;");
@@ -174,6 +223,13 @@ describe("渲染端接线", () => {
       expect(component).toContain(`data-control="${control}"`);
     }
     expect(component).toContain('data-pane="im-channel-settings"');
+    // 自定义通道同一 tab 里的第二张卡（官方通道 = 飞书，自定义 = 本机 HTTP）。
+    expect(component).toContain("<ImCustomChannelSettings masterEnabled={masterEnabled} />");
+    for (const control of ["im-custom-add", "im-custom-enabled", "im-custom-save", "im-custom-delete"]) {
+      expect(customComponent).toContain(`data-control="${control}"`);
+    }
+    expect(customComponent).toContain('kind: "custom"');
+    expect(customComponent).toContain('type: "im.channel.delete"');
   });
 
   it("store 消费 im.status / im.test-result / im.save-result，bootstrap 带 imStatus", () => {
@@ -196,7 +252,7 @@ describe("渲染端接线", () => {
   });
 
   it("演示环境如实降级（不伪造连接成功）", () => {
-    expect(demoApi).toContain("演示环境不会发起真实飞书连接");
+    expect(demoApi).toContain("演示环境不会发起真实通道连接");
   });
 
   it("「发了消息没反应」可诊断：帧/事件/过滤/出站错误四层都推给面板", () => {
@@ -228,9 +284,9 @@ describe("主题契约五处镜像", () => {
       expect(themeCheck).toContain(`"${control}"`);
     }
     expect(themeSkill).toContain("主要区域（43）");
-    expect(themeSkill).toContain("关键控件（138）");
+    expect(themeSkill).toContain("关键控件（142）");
     expect(themeVariables).toContain("`data-pane`（43）");
-    expect(themeVariables).toContain("`data-control`（138）");
+    expect(themeVariables).toContain("`data-control`（142）");
     expect(themeCheck).toContain('"im-channel-settings"');
     expect(themeCheck).toContain('"im-channel-enable"');
   });

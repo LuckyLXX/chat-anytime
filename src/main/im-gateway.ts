@@ -12,6 +12,7 @@ import type {
   AccessMode,
   DesktopSettings,
   ImChannelConfig,
+  ImChannelKind,
   ImChannelStatus,
   ImStatus,
   PermissionDecision,
@@ -30,6 +31,7 @@ import {
   type ImInboundMessage
 } from "./im-feishu-channel.js";
 import { ImWsClient, type ImWsCardAck, type ImWsHandshakeConfig, type ImWsState, type ImWsStatusDetail } from "./im-feishu-ws.js";
+import { createCustomChannelTransport } from "./im-custom-channel.js";
 import { toImMarkdown } from "./im-outbound.js";
 import { imStorePath, ImStore } from "./im-store.js";
 
@@ -80,14 +82,16 @@ export interface ImWsLike {
   start(): Promise<void>;
   dispose(): void;
   connected?(): boolean;
+  /** 自定义通道实际监听的地址（飞书缺省）；状态里会带上。 */
+  endpoint?(): string | undefined;
 }
 
 export interface ImGatewayDeps {
   /** userData 目录（`pidesktop-im.json` 落在这里）。 */
   userDataDir: string;
   getSettings: () => DesktopSettings | undefined;
-  /** 取通道密钥（credentials.json 解密后的明文；缺省表示未保存）。 */
-  getSecret: (channelId: string) => string | undefined;
+  /** 取通道密钥（credentials.json 解密后的明文；缺省表示未保存）。带 kind 才能区分 `im.feishu.<id>` 与 `im.custom.<id>`。 */
+  getSecret: (channel: { id: string; kind: ImChannelKind }) => string | undefined;
   /** main → utility（im.session.ensure / im.prompt / im.abort / permission.resolve）。 */
   sendCommand: (command: RuntimeCommand) => void;
   /** main → 渲染端推送（im.status / im.test-result）。 */
@@ -217,27 +221,26 @@ export class ImGateway {
       return;
     }
     for (const channel of im.channels) {
-      const secret = this.deps.getSecret(channel.id)?.trim() ?? "";
+      const secret = this.deps.getSecret({ id: channel.id, kind: channel.kind })?.trim() ?? "";
       const base = { channelId: channel.id, updatedAt: this.now() } as const;
       if (!channel.enabled) {
         this.channels.set(channel.id, { config: channel, secret, api: this.apiFor(channel, secret), ws: this.noopWs(), status: { ...base, state: "disabled", message: "该通道未启用" } });
         continue;
       }
-      if (!channel.appId.trim()) {
+      if (channel.kind === "feishu" && !channel.appId.trim()) {
         this.channels.set(channel.id, { config: channel, secret, api: this.apiFor(channel, secret), ws: this.noopWs(), status: { ...base, state: "disabled", message: "未填写 App ID" } });
         continue;
       }
       if (!secret) {
-        this.channels.set(channel.id, { config: channel, secret: "", api: this.apiFor(channel, ""), ws: this.noopWs(), status: { ...base, state: "disabled", message: "未保存 App Secret" } });
+        this.channels.set(channel.id, { config: channel, secret: "", api: this.apiFor(channel, ""), ws: this.noopWs(), status: { ...base, state: "disabled", message: channel.kind === "feishu" ? "未保存 App Secret" : "未设置接入 Token" } });
         continue;
       }
       if (channel.allowFrom.length === 0) {
-        this.log("warn", `通道「${channel.id}」白名单为空：任何私聊消息都不会被服务（请在设置页填写 open_id）`);
+        this.log("warn", `通道「${channel.id}」白名单为空：任何消息都不会被服务（请在设置页填写白名单）`);
       }
-      const api = this.apiFor(channel, secret);
-      const ws = this.createWs(channel, secret);
-      this.channels.set(channel.id, { config: channel, secret, api, ws, status: { ...base, state: "connecting" } });
-      void ws.start().catch((error) => {
+      const transport = this.createTransport(channel, secret);
+      this.channels.set(channel.id, { config: channel, secret, api: transport.api, ws: transport.ws, status: { ...base, state: "connecting" } });
+      void transport.ws.start().catch((error) => {
         this.setChannelStatus(channel.id, "error", `连接失败：${errorText(error)}`);
       });
     }
@@ -319,10 +322,29 @@ export class ImGateway {
    */
   async testChannel(input: { requestId: string; channelId: string; appId?: string; appSecret?: string; domain?: string }): Promise<void> {
     const channel = this.deps.getSettings()?.im?.channels.find((candidate) => candidate.id === input.channelId);
+    const base = { requestId: input.requestId } as const;
+    // 自定义通道的「测试」= 服务在本机跑起来没有（它不需要任何外部平台）。
+    if (channel?.kind === "custom") {
+      const token = (input.appSecret?.trim() || this.deps.getSecret({ id: channel.id, kind: "custom" }) || "").trim();
+      if (!token) {
+        this.deps.push({ type: "im.test-result", ...base, ok: false, message: "请先填写并保存接入 Token" });
+        return;
+      }
+      const runtime = this.channels.get(channel.id);
+      const endpoint = runtime?.ws.endpoint?.();
+      const connected = runtime?.ws.connected?.() === true && Boolean(endpoint);
+      this.deps.push({
+        type: "im.test-result",
+        ...base,
+        ok: connected,
+        ...(endpoint ? { botName: endpoint } : {}),
+        message: connected ? `服务已监听 ${endpoint}` : "Token 已保存，但服务没在运行（通道未启用，或端口被占用启动失败）"
+      });
+      return;
+    }
     const appId = (input.appId ?? channel?.appId ?? "").trim();
     const domain = (input.domain ?? channel?.domain)?.trim() || undefined;
-    const secret = (input.appSecret?.trim() || this.deps.getSecret(input.channelId) || "").trim();
-    const base = { requestId: input.requestId } as const;
+    const secret = (input.appSecret?.trim() || this.deps.getSecret({ id: input.channelId, kind: "feishu" }) || "").trim();
     if (!appId) {
       this.deps.push({ type: "im.test-result", ...base, ok: false, message: "请先填写 App ID" });
       return;
@@ -569,17 +591,19 @@ export class ImGateway {
     const channel = this.channels.get(channelId);
     // 通道被停用/删除后，旧 socket 的残留事件不能继续执行指令。
     if (!channel || this.disposed || !channel.config.enabled) return;
-    const channelKey = `feishu:${channelId}`;
+    const channelKey = `${channel.config.kind}:${channelId}`;
     if (this.store.hasSeen(channelKey, message.messageId)) return;
     this.store.markSeen(channelKey, message.messageId);
 
     if (channel.config.allowFrom.length === 0) {
-      await this.notifyUnauthorized(channel, message, "未配置授权名单，机器人不会执行任何指令。请把下面这行 open_id 填进设置 → 消息通道的白名单：");
-      this.log("warn", `收到消息但白名单为空（open_id=${message.openId}）`);
+      const idLabel = channel.config.kind === "feishu" ? "open_id" : "peerId";
+      await this.notifyUnauthorized(channel, message, `未配置授权名单，机器人不会执行任何指令。请把下面这行 ${idLabel} 填进设置 → 消息通道的白名单：`);
+      this.log("warn", `收到消息但白名单为空（${idLabel}=${message.openId}）`);
       return;
     }
     if (!channel.config.allowFrom.includes(message.openId)) {
-      await this.notifyUnauthorized(channel, message, "你不在授权名单里，机器人不会执行任何指令。请把下面这行 open_id 交给管理员加入白名单：");
+      const idLabel = channel.config.kind === "feishu" ? "open_id" : "peerId";
+      await this.notifyUnauthorized(channel, message, `你不在授权名单里，机器人不会执行任何指令。请把下面这行 ${idLabel} 交给管理员加入白名单：`);
       this.log("warn", `拒绝未授权 open_id=${message.openId}（通道 ${channelId}）`);
       return;
     }
@@ -785,8 +809,9 @@ export class ImGateway {
     const last = this.unauthorizedNotices.get(message.openId) ?? 0;
     if (this.now() - last < IM_UNAUTHORIZED_NOTICE_INTERVAL_MS) return;
     this.unauthorizedNotices.set(message.openId, this.now());
+    const label = channel.config.kind === "feishu" ? "open_id" : "peerId";
     try {
-      const result = await channel.api.sendText(message.chatId, `${prefix}\nopen_id: ${message.openId}`);
+      const result = await channel.api.sendText(message.chatId, `${prefix}\n${label}: ${message.openId}`);
       if (!result.ok) {
         this.log("warn", `发送授权提示失败：${result.message}`);
         this.noteError(channel.config.id, result.message);
@@ -802,7 +827,7 @@ export class ImGateway {
   private ensureSequence = 0;
 
   private conversationFor(config: ImChannelConfig, message: ImInboundMessage): ImConversation {
-    const key = imSessionKey({ channelId: config.id, peerId: message.openId });
+    const key = imSessionKey({ kind: config.kind, channelId: config.id, peerId: message.openId });
     const existing = this.conversations.get(key);
     if (existing) {
       existing.chatId = message.chatId;
@@ -906,6 +931,32 @@ export class ImGateway {
     this.deps.push({ type: "im.status", status: this.status() });
   }
 
+  /**
+   * 通道适配器工厂：官方通道（飞书）走长连接 + 开放平台 API，自定义通道走本机 HTTP。
+   * 两者对网关只暴露同一套 `ImApiLike` + `ImWsLike`——这就是「加平台不改网关」的那一层。
+   */
+  private createTransport(config: ImChannelConfig, secret: string): { api: ImApiLike; ws: ImWsLike } {
+    if (config.kind === "custom") {
+      const transport = createCustomChannelTransport({
+        config,
+        token: secret,
+        onMessage: (message) => this.deliverInbound(config.id, message),
+        onIgnored: (reason) => this.noteIgnored(config.id, reason),
+        onStatus: (state, message) => {
+          if (state === "stopped") {
+            this.log("info", `通道 ${config.id} 已停止`);
+            return;
+          }
+          this.applyWsStatus(config.id, state, state === "error" ? { message: message ?? "自定义通道未启动" } : undefined);
+        },
+        onLog: (level, message) => this.log(level, `[${config.id}] ${message}`),
+        now: this.now
+      });
+      return { api: transport.api, ws: transport.ws };
+    }
+    return { api: this.apiFor(config, secret), ws: this.createWs(config, secret) };
+  }
+
   private apiFor(config: ImChannelConfig, secret: string): ImApiLike {
     return this.deps.createApi?.(config, secret) ?? new ImFeishuApi({
       appId: config.appId,
@@ -923,8 +974,7 @@ export class ImGateway {
           this.noteIgnored(config.id, normalized.reason);
           return;
         }
-        this.noteEvent(config.id, `${normalized.message.chatType} · ${normalized.message.openId.slice(0, 10)} · ${normalized.message.text.slice(0, 40)}`);
-        void this.handleInbound(config.id, normalized.message);
+        this.deliverInbound(config.id, normalized.message);
       },
       onCardAction: (body) => this.handleCardAction(config.id, body),
       onStatus: (state, detail) => this.applyWsStatus(config.id, state, detail),
@@ -943,13 +993,30 @@ export class ImGateway {
     });
   }
 
+  /**
+   * 归一化事件进入网关的唯一入口（飞书事件与自定义通道共用）：先记诊断，再走
+   * 去重 → 白名单 → 指令 → 会话绑定。两条传输路径的差异只到调用本函数为止。
+   */
+  private deliverInbound(channelId: string, message: ImInboundMessage): void {
+    this.noteEvent(channelId, `${message.chatType} · ${message.openId.slice(0, 24)} · ${message.text.slice(0, 40)}`);
+    void this.handleInbound(channelId, message);
+  }
+
   private applyWsStatus(channelId: string, state: ImWsState, detail?: ImWsStatusDetail): void {
     if (this.disposed) return;
     if (state === "connected") {
       this.setChannelStatus(channelId, "connected");
       const channel = this.channels.get(channelId);
+      if (!channel) return;
+      // 自定义通道：把实际监听地址（含随机端口）写回状态，设置页要显示它给脚本用。
+      const endpoint = channel.ws.endpoint?.();
+      if (endpoint || channel.status.endpoint) {
+        channel.status = { ...channel.status, state: "connected", updatedAt: this.now(), ...(endpoint ? { endpoint } : {}) };
+        if (!endpoint) delete channel.status.endpoint;
+        this.emitStatus();
+      }
       // 连上后读一次机器人名（面板徽标用）；失败不影响连接本身。
-      if (channel && !channel.status.botName) {
+      if (!channel.status.botName && channel.config.kind === "feishu") {
         void channel.api.botInfo().then((bot) => {
           if (bot.ok) this.setChannelStatus(channelId, "connected", undefined, bot.data.name);
         }).catch(() => undefined);

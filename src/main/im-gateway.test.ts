@@ -617,3 +617,76 @@ describe("testChannel", () => {
     expect(result?.type === "im.test-result" && result.message).toContain("App Secret");
   });
 });
+
+describe("自定义通道（脚本接入的本地 HTTP 端点）", () => {
+  /** HTTP 服务器要真的跑完一次事件循环，光 await setTimeout(0) 不够稳定。 */
+  const waitFor = async (check: () => Promise<boolean> | boolean, timeoutMs = 2_000): Promise<void> => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (await check()) return;
+      await new Promise((resolve) => { setTimeout(resolve, 10); });
+    }
+    throw new Error("等待超时");
+  };
+
+  it("POST 一条消息走同一条网关链路（白名单/绑定/模型），答案从 /v1/replies 取回", async () => {
+    const harness = await createHarness({
+      channel: { id: "hook", kind: "custom", appId: "", host: "127.0.0.1", port: 0, allowFrom: ["ou_owner"] }
+    });
+    harness.gateway.start();
+    await flush();
+    const status = harness.gateway.status().channels.find((item) => item.channelId === "hook");
+    expect(status?.state).toBe("connected");
+    expect(status?.endpoint).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/v1$/u);
+    const base = status!.endpoint!;
+
+    // Token 不对：401，而且绝不能有会话被建出来。
+    const denied = await fetch(`${base}/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer wrong" },
+      body: JSON.stringify({ peerId: "ou_owner", text: "hi" })
+    });
+    expect(denied.status).toBe(401);
+
+    const accepted = await fetch(`${base}/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer app-secret" },
+      body: JSON.stringify({ peerId: "ou_owner", text: "帮我看看今天发了什么版", messageId: "custom-1" })
+    });
+    expect(accepted.status).toBe(202);
+    await waitFor(() => harness.commands.some((command) => command.type === "im.session.ensure"));
+    const ensure = [...harness.commands].reverse().find((command) => command.type === "im.session.ensure");
+    expect(ensure?.type === "im.session.ensure" && ensure.sessionKey).toBe("custom:hook:p2p:ou_owner");
+
+    ready(harness);
+    await flush();
+    expect(harness.commands.at(-1)).toMatchObject({ type: "im.prompt", sessionId: "sess-1" });
+    harness.gateway.handleRuntimeMessage({ type: "im.turn", sessionId: "sess-1", phase: "start" });
+    harness.gateway.handleRuntimeMessage({ type: "im.turn", sessionId: "sess-1", phase: "end", status: "ok", text: "今天发了 1.15.1，只含毛玻璃修复。" });
+
+    await waitFor(async () => {
+      const response = await fetch(`${base}/replies?since=0&token=app-secret`);
+      const body = await response.json() as { items?: { text: string }[] };
+      return (body.items ?? []).some((item) => item.text.includes("1.15.1"));
+    });
+  });
+
+  it("同一个 messageId 重投不会跑第二次（平台重投是常态）", async () => {
+    const harness = await createHarness({
+      channel: { id: "hook", kind: "custom", appId: "", host: "127.0.0.1", port: 0, allowFrom: ["ou_owner"] }
+    });
+    harness.gateway.start();
+    await flush();
+    const base = harness.gateway.status().channels.find((item) => item.channelId === "hook")!.endpoint!;
+    for (let index = 0; index < 2; index += 1) {
+      await fetch(`${base}/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: "Bearer app-secret" },
+        body: JSON.stringify({ peerId: "ou_owner", text: "重投测试", messageId: "dup-1" })
+      });
+    }
+    await flush(20);
+    const ensures = harness.commands.filter((command) => command.type === "im.session.ensure");
+    expect(ensures).toHaveLength(1);
+  });
+});

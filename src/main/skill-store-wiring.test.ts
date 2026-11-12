@@ -178,9 +178,9 @@ describe("渲染端接线", () => {
       const body = read(mirror);
       expect(body).toContain("skill-store");
     }
-    // 计数也要跟着走（pane 39→40→41→42→43、control 104→116→124→129→138）
+    // 计数也要跟着走（pane 39→40→41→42→43、control 104→116→124→129→138→142）
     const skillDoc = read("../../resources/skills/pidesktop-theme-creator/SKILL.md");
     expect(skillDoc).toContain("主要区域（43）");
-    expect(skillDoc).toContain("关键控件（138）");
+    expect(skillDoc).toContain("关键控件（142）");
   });
 });

@@ -104,7 +104,7 @@ KNOWN_CONTROLS = frozenset({
     "skill-store-top", "skill-store-page", "skill-store-open", "skill-store-install", "skill-store-confirm-install",
     "skill-store-uninstall", "skill-store-close-detail",
     "intranet-store-url", "intranet-store-save", "intranet-store-test", "intranet-store-change", "intranet-store-refresh",
-    "im-channel-enable", "im-feishu-enabled", "im-feishu-appid", "im-feishu-secret", "im-feishu-allowfrom", "im-feishu-access", "im-feishu-workspace", "im-feishu-save", "im-feishu-test",
+    "im-channel-enable", "im-feishu-enabled", "im-feishu-appid", "im-feishu-secret", "im-feishu-allowfrom", "im-feishu-access", "im-feishu-workspace", "im-feishu-save", "im-feishu-test", "im-custom-add", "im-custom-enabled", "im-custom-save", "im-custom-delete",
     "computer-toggle", "design-toggle", "design-send-ai", "design-export", "design-undo", "design-redo",
     "design-tool-select", "design-tool-frame", "design-tool-rect", "design-tool-text", "design-layer-lock",
     "agent-new", "agent-save", "settings-version", "jev-test", "jev-expand", "capability-switch",

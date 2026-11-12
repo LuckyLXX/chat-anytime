@@ -2,6 +2,7 @@ import { ChevronDown, MessageSquare, PlugZap, Save, ShieldCheck, Wifi, WifiOff }
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { AccessMode, ImChannelConfig } from "../../shared/protocol";
 import { normalizeImAllowFrom } from "../../shared/im";
+import { ImCustomChannelSettings } from "./ImCustomChannelSettings";
 import { useDesktopStore } from "./store";
 
 /**
@@ -16,6 +17,9 @@ import { useDesktopStore } from "./store";
  *
  * 主题钩子：`data-pane="im-channel-settings"`；控件 `im-channel-enable`、
  * `im-feishu-enabled|-appid|-secret|-allowfrom|-access|-workspace|-save|-test`。
+ *
+ * 两类通道同一个 tab：**官方通道**（飞书长连接，本卡片）与**自定义通道**
+ * （本机 HTTP，见 `ImCustomChannelSettings`，2026-11-12 增加）。
  */
 
 const FEISHU_CHANNEL_ID = "feishu";
@@ -215,7 +219,7 @@ export function ImChannelSettings(): ReactNode {
       <header className="resource-page-head">
         <span className="resource-page-title">
           <strong>消息通道</strong>
-          <small>在飞书私聊里给 PiDesktop 派活：消息进对应话题，答案和审批卡片回到手机。应用没运行时通道离线。</small>
+          <small>飞书是官方通道（长连接）；内网工作软件用下面的自定义通道（本机 HTTP，脚本接入）。应用没运行时通道离线。</small>
         </span>
         <label className="im-channel-master">
           <input
@@ -234,7 +238,7 @@ export function ImChannelSettings(): ReactNode {
           <div className="resource-card-head">
             <span className="resource-card-title">
               <MessageSquare size={14} />
-              <strong>飞书（长连接）</strong>
+              <strong>官方通道 · 飞书（长连接）</strong>
             </span>
             <span className={`im-channel-badge im-channel-badge-${badge.tone}`}>
               {badge.tone === "ok" ? <Wifi size={12} /> : <WifiOff size={12} />}
@@ -396,6 +400,7 @@ export function ImChannelSettings(): ReactNode {
             </details>
           </div>
         </section>
+        <ImCustomChannelSettings masterEnabled={masterEnabled} />
         <section className="resource-card im-channel-card im-channel-safety">
           <div className="resource-card-head">
             <span className="resource-card-title">

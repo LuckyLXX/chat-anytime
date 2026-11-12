@@ -23,7 +23,13 @@ describe("session key", () => {
   it("builds and parses the stable conversation key", () => {
     const key = imSessionKey({ channelId: "feishu", peerId: "ou_abc" });
     expect(key).toBe("feishu:feishu:p2p:ou_abc");
-    expect(parseImSessionKey(key)).toEqual({ channelId: "feishu", peerId: "ou_abc" });
+    expect(parseImSessionKey(key)).toEqual({ kind: "feishu", channelId: "feishu", peerId: "ou_abc" });
+  });
+
+  it("自定义通道同样进同一个键空间（kind 区分，老绑定不变）", () => {
+    const key = imSessionKey({ kind: "custom", channelId: "dingtalk", peerId: "zhangsan" });
+    expect(key).toBe("custom:dingtalk:p2p:zhangsan");
+    expect(parseImSessionKey(key)).toEqual({ kind: "custom", channelId: "dingtalk", peerId: "zhangsan" });
   });
 
   it("rejects keys of the wrong shape", () => {
@@ -35,6 +41,25 @@ describe("session key", () => {
 });
 
 describe("normalizeImChannel", () => {
+  it("自定义通道：默认只本机、端口 0（随机）、无 appId，并接受白名单/权限", () => {
+    expect(normalizeImChannel({ id: "dingtalk", kind: "custom", enabled: true, allowFrom: ["zhangsan"], accessMode: "ask" })).toEqual({
+      id: "dingtalk",
+      kind: "custom",
+      enabled: true,
+      appId: "",
+      host: "127.0.0.1",
+      port: 0,
+      allowFrom: ["zhangsan"],
+      accessMode: "ask"
+    });
+  });
+
+  it("自定义通道：监听地址只认两个取值，端口越界就回落随机", () => {
+    expect(normalizeImChannel({ id: "a", kind: "custom", host: "0.0.0.0", port: 8787 })).toMatchObject({ host: "0.0.0.0", port: 8787 });
+    expect(normalizeImChannel({ id: "b", kind: "custom", host: "192.168.1.5", port: 70000 })).toMatchObject({ host: "127.0.0.1", port: 0 });
+    expect(normalizeImChannel({ id: "c", kind: "custom", port: "9123" })).toMatchObject({ host: "127.0.0.1", port: 9123 });
+  });
+
   it("applies safe defaults (enabled off, workspace access, no allowlist)", () => {
     expect(normalizeImChannel({ id: "feishu", kind: "feishu", appId: "cli_1" })).toEqual({
       id: "feishu",

@@ -11,7 +11,7 @@ import { mergeSavedAppearance, settingsForRenderer } from "./appearance-assets.j
 import { createSettingsPersistence, diffSettings, readSettingsFile, settingsPath as settingsFilePath, type SettingsPersistence } from "./settings-store.js";
 import { pruneSessionPaths, setArchivedSessionPaths, togglePinnedSessionPath } from "./session-scope.js";
 import { importExternalAttachment, workspaceRelativeAttachment } from "./attachments.js";
-import type { BrowserDownloadPrefs, BrowserPreviewCommand, BrowserPreviewState, DesktopBootstrap, DesktopSettings, GalleryServiceProbe, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot, SshCommand, SshCommandResult, SshEventData, SshRevealEvent, TerminalCommand, TerminalEventData, WorkspaceDirectoryListing, WorkspaceEntryResult, WorkspaceFilePreview, WorkspaceFileSearchResult, WorkspaceFileStat, WorkspaceFileWriteResult } from "../shared/protocol.js";
+import type { BrowserDownloadPrefs, BrowserPreviewCommand, BrowserPreviewState, DesktopBootstrap, DesktopSettings, GalleryServiceProbe, ImChannelKind, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot, SshCommand, SshCommandResult, SshEventData, SshRevealEvent, TerminalCommand, TerminalEventData, WorkspaceDirectoryListing, WorkspaceEntryResult, WorkspaceFilePreview, WorkspaceFileSearchResult, WorkspaceFileStat, WorkspaceFileWriteResult } from "../shared/protocol.js";
 import { PREVIEW_FILE_SCHEME, isPanelWorkHost, parseWorkspaceFilePreviewUrl } from "../shared/protocol.js";
 import { applyRuntimeStatePatch } from "../shared/snapshot-patch.js";
 import { isThemeAssetUrl, parseThemeAssetUrl } from "../shared/theme-assets.js";
@@ -530,16 +530,18 @@ function runtimeEntry(): string { return join(__dirname, "pi-runtime.js"); }
 function sendToRuntime(command: RuntimeCommand): void { if (!runtimeProcess) throw new Error("Pi 运行时当前不可用"); runtimeProcess.postMessage(command); }
 
 /**
- * IM 通道密钥在 credentials.json 里的键：`im.feishu.<channelId>`。
+ * IM 通道密钥在 credentials.json 里的键：`im.<kind>.<channelId>`
+ * （飞书 = `im.feishu.<id>` 的 App Secret，自定义通道 = `im.custom.<id>` 的接入 Token）。
  * 明文只进 safeStorage 通道，settings.json 只留 `appSecretConfigured`。
  */
-const IM_CREDENTIAL_PREFIX = "im.feishu.";
-function imCredentialKey(channelId: string): string { return `${IM_CREDENTIAL_PREFIX}${channelId}`; }
-function imSecret(channelId: string): string | undefined {
-  const cached = credentialsCache[imCredentialKey(channelId)];
+const IM_CREDENTIAL_PREFIX = "im.";
+function imCredentialKey(kind: ImChannelKind, channelId: string): string { return `${IM_CREDENTIAL_PREFIX}${kind}.${channelId}`; }
+function imSecret(kind: ImChannelKind, channelId: string): string | undefined {
+  const key = imCredentialKey(kind, channelId);
+  const cached = credentialsCache[key];
   if (cached) return cached;
   // 缓存未命中（例如刚启动就测试连接）：读一次解密文件，不把 IM 密钥塞回全局缓存。
-  return loadCredentials()[imCredentialKey(channelId)];
+  return loadCredentials()[key];
 }
 /**
  * 下发给 utility 的密钥表：**剥掉 IM 通道密钥**。
@@ -553,7 +555,7 @@ function createImGateway(): ImGateway {
   return new ImGateway({
     userDataDir: app.getPath("userData"),
     getSettings: () => loadSettings(),
-    getSecret: (channelId) => imSecret(channelId),
+    getSecret: (channel) => imSecret(channel.kind, channel.id),
     sendCommand: (command) => sendToRuntime(command),
     push: (message) => pushRuntimeMessage(message),
     log: (level, message) => {
@@ -599,15 +601,17 @@ function handleImCommand(command: RuntimeCommand): boolean {
         return true;
       }
       const secret = command.appSecret?.trim();
-      let secretConfigured = Boolean(imSecret(incoming.id));
+      let secretConfigured = Boolean(imSecret(incoming.kind, incoming.id));
       let secretError: string | undefined;
       if (secret) {
-        if (saveCredential(imCredentialKey(incoming.id), secret)) {
+        if (saveCredential(imCredentialKey(incoming.kind, incoming.id), secret)) {
           secretConfigured = true;
         } else {
           // 配置照样落盘（用户不必重填其它字段），但结果是失败的：密钥没存进去。
           secretConfigured = false;
-          secretError = "系统加密存储不可用，App Secret 未保存（重启后需要重新填写）";
+          secretError = incoming.kind === "feishu"
+            ? "系统加密存储不可用，App Secret 未保存（重启后需要重新填写）"
+            : "系统加密存储不可用，接入 Token 未保存（重启后需要重新填写）";
         }
       }
       const channel: ImChannelConfig = { ...incoming, ...(secretConfigured ? { appSecretConfigured: true } : {}) };
@@ -635,10 +639,14 @@ function handleImCommand(command: RuntimeCommand): boolean {
     case "im.channel.delete": {
       const settings = loadSettings();
       const previous = { ...settings };
+      const removed = (settings.im?.channels ?? []).find((item) => item.id === command.channelId);
       const channels = (settings.im?.channels ?? []).filter((item) => item.id !== command.channelId);
       if (channels.length === 0) delete settings.im;
       else settings.im = { enabled: settings.im?.enabled === true, channels };
-      deleteCredential(imCredentialKey(command.channelId));
+      // 按被删通道的真实 kind 清密钥（两种 kind 的键不同，猜错就会留下一片不属于任何通道的密钥）。
+      for (const kind of removed ? [removed.kind] : ["feishu", "custom"] as const) {
+        deleteCredential(imCredentialKey(kind, command.channelId));
+      }
       persistSettings().schedule(diffSettings(previous, settings));
       startImGateway();
       pushRuntimeMessage({ type: "im.status", status: imGatewayStatus() });

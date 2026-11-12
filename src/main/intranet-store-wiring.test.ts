@@ -129,7 +129,7 @@ describe("渲染端接线", () => {
     expect(demoApi).toContain("演示环境不会发起真实的内网商店请求");
   });
 
-  it("样式块与主题契约五处镜像同步（pane 43 / control 138）", () => {
+  it("样式块与主题契约五处镜像同步（pane 43 / control 142）", () => {
     expect(styles).toContain(".intranet-store-form");
     expect(styles).toContain(".intranet-store-help");
 
@@ -145,7 +145,7 @@ describe("渲染端接线", () => {
     }
     const skillDoc = read("../../resources/skills/pidesktop-theme-creator/SKILL.md");
     expect(skillDoc).toContain("主要区域（43）");
-    expect(skillDoc).toContain("关键控件（138）");
+    expect(skillDoc).toContain("关键控件（142）");
     const checkTheme = read("../../resources/skills/pidesktop-theme-creator/scripts/check_theme.py");
     expect(checkTheme).toContain('"intranet-store-url"');
   });

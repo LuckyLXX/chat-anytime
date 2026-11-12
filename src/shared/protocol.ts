@@ -346,25 +346,41 @@ export interface HooksSettings {
 }
 
 /**
- * 单条 IM 通道配置（2026-11-12 飞书长连接 P1）。
+ * 单条 IM 通道配置（2026-11-12 飞书长连接 P1；同日增加自定义通道）。
  *
- * 明文 appSecret **不在这里**：它只进 `<userData>/credentials.json`（safeStorage），
- * settings.json 只留 `appSecretConfigured` 标记。字段级净化在 `shared/im.ts` 的
- * `normalizeImChannel`（主进程 normalizeIm 与渲染端草稿校验共用同一份口径）。
+ * 两种 kind：
+ * - `feishu`：官方通道，长连接对接飞书开放平台；
+ * - `custom`：自定义通道，本机起一个小 HTTP 服务，任何脚本按
+ *   `docs/im-channel-protocol.md` 的规则把消息投进来、再把答案取走。
+ *
+ * 明文密钥 **不在这里**：飞书的 App Secret / 自定义通道的接入 Token 只进
+ * `<userData>/credentials.json`（safeStorage），settings.json 只留
+ * `appSecretConfigured` 标记。字段级净化在 `shared/im.ts` 的 `normalizeImChannel`
+ * （主进程 normalizeIm 与渲染端草稿校验共用同一份口径）。
  */
+export type ImChannelKind = "feishu" | "custom";
+
+/** 自定义通道能监听的地址。只本机是安全默认；0.0.0.0 需要用户显式选择。 */
+export type ImCustomHost = "127.0.0.1" | "0.0.0.0";
+
 export interface ImChannelConfig {
-  /** 通道实例 id（`feishu`；多账号时可再开一条）。 */
+  /** 通道实例 id（官方通道是 `feishu`；自定义通道用户自己起名，如 `dingtalk`）。 */
   id: string;
-  /** P1 唯一取值。 */
-  kind: "feishu";
+  /** `feishu` = 官方通道（飞书长连接）；`custom` = 自定义通道（本机 HTTP）。 */
+  kind: ImChannelKind;
   enabled: boolean;
   label?: string;
+  /** 飞书：App ID（自定义通道留空）。 */
   appId: string;
-  /** 只读回标记：密钥是否已保存（明文永不进 settings.json / 渲染端）。 */
+  /** 密钥是否已保存：飞书是 App Secret，自定义通道是接入 Token（同一存储通道）。 */
   appSecretConfigured?: boolean;
-  /** 开放平台域名，缺省 open.feishu.cn（Lark 用 open.larksuite.com）。 */
+  /** 飞书：开放平台域名，缺省 open.feishu.cn（Lark 用 open.larksuite.com）。 */
   domain?: string;
-  /** 飞书 open_id（ou_…）白名单；空列表 = 不服务任何消息。 */
+  /** 自定义通道：监听地址，缺省 127.0.0.1（只本机）。 */
+  host?: ImCustomHost;
+  /** 自定义通道：监听端口；缺省或 0 = 每次启动随机（实际端口看通道状态里的 endpoint）。 */
+  port?: number;
+  /** 白名单：飞书是 open_id（ou_…），自定义通道是脚本给的 peerId；空列表 = 不服务任何消息。 */
   allowFrom: string[];
   /** IM 会话的默认权限：缺省 workspace（写工作区自动放行，bash/ssh/浏览器逐次确认）。 */
   accessMode: AccessMode;
@@ -390,8 +406,10 @@ export type ImConnectionState = "disabled" | "connecting" | "connected" | "error
 export interface ImChannelStatus {
   channelId: string;
   state: ImConnectionState;
-  /** 连接成功时读到的机器人名（测试连接同样返回）。 */
+  /** 连接成功时读到的机器人名（测试连接同样返回）；自定义通道留空。 */
   botName?: string;
+  /** 自定义通道实际监听的地址（含随机端口时尤其重要）；飞书缺省。 */
+  endpoint?: string;
   /** error 状态的人话原因（含平台 code/message）。 */
   message?: string;
   /** 最近一次状态变化时间戳。 */

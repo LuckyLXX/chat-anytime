@@ -1,4 +1,4 @@
-import type { AccessMode, ImChannelConfig, ImSettings } from "./protocol.js";
+import type { AccessMode, ImChannelConfig, ImChannelKind, ImCustomHost, ImSettings } from "./protocol.js";
 
 /**
  * IM 通道的共享纯逻辑（2026-11-12，飞书长连接 P1）。
@@ -8,8 +8,15 @@ import type { AccessMode, ImChannelConfig, ImSettings } from "./protocol.js";
  * 漂移会变成线上静默失效。协议层的形状在 protocol.ts，这里只放判定与格式化。
  */
 
-/** P1 唯一通道类型。新平台（Slack/Telegram）在这一层加取值，不另起一套。 */
-export const IM_CHANNEL_KINDS = ["feishu"] as const;
+/** 通道类型（共享判定：主进程、渲染端、脚本文档都以这两个取值为准）。新增平台在这一层加，不另起一套。 */
+export const IM_CHANNEL_KINDS = ["feishu", "custom"] as const;
+
+/** 自定义通道的监听地址候选：只本机是安全默认，0.0.0.0 需要用户显式选择。 */
+export const IM_CUSTOM_HOSTS = ["127.0.0.1", "0.0.0.0"] as const;
+export const IM_CUSTOM_DEFAULT_HOST = "127.0.0.1";
+/** 端口 0 = 随机（状态里回报实际端口）；设置页缺省给一个固定端口方便脚本写死。 */
+export const IM_CUSTOM_DEFAULT_PORT = 0;
+export const IM_CUSTOM_MAX_PORT = 65_535;
 
 /** 缺省开放平台域名（Lark 国际版用 open.larksuite.com，可在通道配置里覆盖）。 */
 export const IM_DEFAULT_DOMAIN = "open.feishu.cn";
@@ -63,18 +70,13 @@ export function normalizeImChannel(value: unknown): ImChannelConfig | undefined 
   const raw = value as Record<string, unknown>;
   const id = trimmed(raw.id);
   if (!id || !CHANNEL_ID_RE.test(id)) return undefined;
-  const kind = raw.kind;
-  if (kind !== "feishu") return undefined;
+  const kind: ImChannelKind | undefined = raw.kind === "feishu" || raw.kind === "custom" ? raw.kind : undefined;
+  if (!kind) return undefined;
 
   const allowFrom = normalizeImAllowFrom(raw.allowFrom);
   const accessMode: AccessMode = raw.accessMode === "read-only" || raw.accessMode === "workspace" || raw.accessMode === "full" || raw.accessMode === "ask"
     ? raw.accessMode
     : "workspace";
-  const domainRaw = trimmed(raw.domain);
-  // 域名只接受主机名（允许自带 https:// 前缀与尾部斜杠，统一剥掉）。
-  const domain = domainRaw
-    ? domainRaw.replace(/^https?:\/\//i, "").replace(/\/+$/, "").slice(0, 120)
-    : undefined;
   const timeoutRaw = typeof raw.approvalTimeoutMs === "number" && Number.isFinite(raw.approvalTimeoutMs)
     ? Math.round(raw.approvalTimeoutMs)
     : typeof raw.approvalTimeoutMs === "string" && raw.approvalTimeoutMs.trim()
@@ -83,22 +85,50 @@ export function normalizeImChannel(value: unknown): ImChannelConfig | undefined 
   const approvalTimeoutMs = Number.isFinite(timeoutRaw)
     ? Math.min(IM_MAX_APPROVAL_TIMEOUT_MS, Math.max(IM_MIN_APPROVAL_TIMEOUT_MS, timeoutRaw))
     : undefined;
-
-  return {
-    id,
-    kind: "feishu",
+  // 两种 kind 共用的字段：字段级回落而不是整条丢弃。
+  const shared = {
     enabled: raw.enabled === true,
     ...(trimmed(raw.label) ? { label: trimmed(raw.label)!.slice(0, 60) } : {}),
-    appId: trimmed(raw.appId)?.slice(0, 120) ?? "",
     ...(raw.appSecretConfigured === true ? { appSecretConfigured: true } : {}),
-    ...(domain ? { domain } : {}),
     allowFrom,
     accessMode,
     ...(trimmed(raw.workspace) ? { workspace: trimmed(raw.workspace)! } : {}),
     ...(trimmed(raw.agentId) ? { agentId: trimmed(raw.agentId)! } : {}),
     ...(approvalTimeoutMs !== undefined ? { approvalTimeoutMs } : {}),
-    // 回执缺省开启：只有显式 false 才落盘，settings.json 保持干净。
+    // 回执缺省开启：只有显式 false 才落盘，settings.json 保持干净（自定义通道面板缺省关）。
     ...(raw.ack === false ? { ack: false } : {})
+  };
+
+  if (kind === "custom") {
+    // 监听地址只接受两个取值：缺省/非法值一律按「只本机」——安全默认不能靠用户选对。
+    const host: ImCustomHost = raw.host === "0.0.0.0" ? "0.0.0.0" : IM_CUSTOM_DEFAULT_HOST;
+    const portRaw = typeof raw.port === "number" && Number.isFinite(raw.port)
+      ? Math.round(raw.port)
+      : typeof raw.port === "string" && raw.port.trim()
+        ? Math.round(Number(raw.port))
+        : Number.NaN;
+    const port = Number.isFinite(portRaw) && portRaw >= 0 && portRaw <= IM_CUSTOM_MAX_PORT ? portRaw : IM_CUSTOM_DEFAULT_PORT;
+    return {
+      id,
+      kind,
+      appId: "",
+      host,
+      ...(port !== undefined ? { port } : {}),
+      ...shared
+    };
+  }
+
+  const domainRaw = trimmed(raw.domain);
+  // 域名只接受主机名（允许自带 https:// 前缀与尾部斜杠，统一剥掉）。
+  const domain = domainRaw
+    ? domainRaw.replace(/^https?:\/\//i, "").replace(/\/+$/, "").slice(0, 120)
+    : undefined;
+  return {
+    id,
+    kind,
+    appId: trimmed(raw.appId)?.slice(0, 120) ?? "",
+    ...(domain ? { domain } : {}),
+    ...shared
   };
 }
 
@@ -124,17 +154,18 @@ export function parseImSettings(value: unknown): ImSettings | undefined {
 }
 
 /** 会话键：`feishu:<channelId>:p2p:<open_id>`。绑定与去重都以它为主键。 */
-export function imSessionKey(input: { channelId: string; peerId: string }): string {
-  return `feishu:${input.channelId}:p2p:${input.peerId}`;
+export function imSessionKey(input: { kind?: ImChannelKind; channelId: string; peerId: string }): string {
+  return `${input.kind ?? "feishu"}:${input.channelId}:p2p:${input.peerId}`;
 }
 
 /** 反向解析会话键；形状不符返回 undefined（坏绑定不参与路由）。 */
-export function parseImSessionKey(key: string): { channelId: string; peerId: string } | undefined {
+export function parseImSessionKey(key: string): { kind: ImChannelKind; channelId: string; peerId: string } | undefined {
   const parts = key.split(":");
-  if (parts.length !== 4 || parts[0] !== "feishu" || parts[2] !== "p2p") return undefined;
-  const [, channelId, , peerId] = parts;
+  if (parts.length !== 4 || parts[2] !== "p2p") return undefined;
+  const [kind, channelId, , peerId] = parts;
+  if (!kind || !(IM_CHANNEL_KINDS as readonly string[]).includes(kind)) return undefined;
   if (!channelId || !peerId) return undefined;
-  return { channelId, peerId };
+  return { kind: kind as ImChannelKind, channelId, peerId };
 }
 
 /** 审批卡正文里的回退指令（卡片按钮点不动时让用户手打这一行）。 */
