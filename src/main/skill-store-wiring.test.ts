@@ -120,7 +120,7 @@ describe("渲染端接线", () => {
   });
 
   it("App.tsx 四处注册齐全（联合类型 / nav / 内容分支 / 命令面板）", () => {
-    expect(app).toContain('type SettingsTab = "general" | "models" | "agents" | "subagents" | "appearance" | "resources" | "skill-store" | "intranet-store" | "hooks" | "usage" | "automation"');
+    expect(app).toContain('type SettingsTab = "general" | "models" | "agents" | "subagents" | "appearance" | "resources" | "skill-store" | "intranet-store" | "im" | "hooks" | "usage" | "automation"');
     expect(app).toContain('onClick={() => setTab("skill-store")}>Skill 商店</button>');
     expect(app).toContain('tab === "skill-store" ? <SkillStoreSettings />');
     expect(app).toContain('{ tab: "skill-store", label: "Skill 商店" }');
@@ -178,9 +178,9 @@ describe("渲染端接线", () => {
       const body = read(mirror);
       expect(body).toContain("skill-store");
     }
-    // 计数也要跟着走（pane 39→40→41、control 104→116→124）
+    // 计数也要跟着走（pane 39→40→41→42→43、control 104→116→124→129→138）
     const skillDoc = read("../../resources/skills/pidesktop-theme-creator/SKILL.md");
-    expect(skillDoc).toContain("主要区域（42）");
-    expect(skillDoc).toContain("关键控件（129）");
+    expect(skillDoc).toContain("主要区域（43）");
+    expect(skillDoc).toContain("关键控件（138）");
   });
 });

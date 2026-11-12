@@ -1396,6 +1396,23 @@ export function createDemoApi(): DesktopApi {
           emit({ type: "subagent.transcript-result", childSessionId: command.childSessionId, messages });
           break;
         }
+        // IM 通道：连接、密钥存储与长连接都在主进程（演示环境没有 Electron API），
+        // 如实降级 —— 不伪造「已连接」，也不假装保存成功。
+        case "im.channel.save":
+        case "im.channel.delete":
+          emit({ type: "log", level: "warn", message: "演示环境不会保存飞书通道配置（需要系统加密存储与长连接）；请在桌面应用里使用。" });
+          break;
+        case "im.channel.test":
+          emit({ type: "im.test-result", requestId: command.requestId, ok: false, message: "演示环境不会发起真实飞书连接；请在桌面应用里测试。" });
+          break;
+        case "im.status":
+          emit({ type: "im.status", status: { enabled: false, channels: [] } });
+          break;
+        case "im.session.ensure":
+        case "im.prompt":
+        case "im.abort":
+          // 内部协议（utility → main）：演示环境没有运行时，安静忽略。
+          break;
         case "memory.overview": {
           // 演示环境没有真实的按助手记忆库：回空总览（记忆中心显示空态，而不是一直加载）。
           emit({ type: "memory.overview", overview: { agents: [], at: Date.now() } });

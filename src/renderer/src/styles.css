@@ -4103,6 +4103,41 @@ html[data-ui-motion="off"] .automation-center, html[data-ui-motion="off"] .ui-pr
 .intranet-store-status .skill-store-result.ok { color: var(--success); }
 .intranet-store-status .skill-store-result.error { color: var(--danger); }
 
+/* —— 设置页「消息通道」（IM 通道 P1，2026-11-12）——
+   注意：本块必须留在 `.team-board {` 之前（team-board-type-scale.test.ts 从该行切到文件尾）。 */
+.im-channel-page .resource-page-title small { max-width: 72ch; }
+.im-channel-master { display: inline-flex; align-items: center; gap: 6px; margin: 0; color: var(--text); font-size: 11.5px; font-weight: 500; white-space: nowrap; }
+.im-channel-master input { width: 14px; height: 14px; margin: 0; }
+.im-channel-card .resource-card-body { display: flex; flex-direction: column; gap: 10px; padding: 11px 12px 13px; }
+.im-channel-badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-muted); color: var(--text-muted); font-size: 10.5px; font-weight: 500; }
+.im-channel-badge-ok { border-color: var(--success-border); background: var(--success-soft); color: var(--success-text); }
+.im-channel-badge-busy { border-color: var(--border); color: var(--accent); }
+.im-channel-badge-error { border-color: var(--danger-border); background: var(--danger-soft); color: var(--danger-text); }
+.im-channel-badge-off { border-color: var(--border); color: var(--text-muted); }
+.im-channel-switch { display: flex; align-items: flex-start; gap: 7px; margin: 0; color: var(--text); font-size: 11.5px; font-weight: 400; line-height: 1.45; }
+.im-channel-switch input { width: 14px; height: 14px; margin: 1px 0 0; flex: 0 0 auto; }
+.im-channel-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px 14px; }
+.im-channel-grid > label { display: grid; gap: 4px; margin: 0; color: var(--text-muted); font-size: 10.5px; font-weight: 400; }
+.im-channel-grid > label > span { line-height: 1.4; }
+.im-channel-grid input,
+.im-channel-grid select,
+.im-channel-grid textarea { width: 100%; height: 30px; margin: 0; font-size: 12px; }
+.im-channel-grid textarea { height: auto; min-height: 62px; resize: vertical; font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; line-height: 1.5; }
+.im-channel-grid .im-channel-wide { grid-column: 1 / -1; }
+.im-channel-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.im-channel-saved { color: var(--success-text); font-size: 10.5px; }
+.im-channel-test { display: inline-flex; align-items: center; gap: 4px; margin: 0; padding: 5px 9px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface-muted); color: var(--text-muted); font-size: 11px; }
+.im-channel-test-ok { border-color: var(--success-border); background: var(--success-soft); color: var(--success-text); }
+.im-channel-test-error { border-color: var(--danger-border); background: var(--danger-soft); color: var(--danger-text); }
+.im-channel-status-error { margin: 0; color: var(--danger-text); font-size: 11px; line-height: 1.5; }
+.im-channel-help { border: 1px solid var(--border); border-radius: 8px; background: var(--surface-raised); font-size: 11px; }
+.im-channel-help > summary { display: flex; align-items: center; gap: 5px; padding: 7px 10px; color: var(--text); cursor: pointer; font-weight: 500; }
+.im-channel-help ol { display: grid; gap: 5px; margin: 0; padding: 0 12px 10px 26px; color: var(--text-muted); line-height: 1.55; }
+.im-channel-help code { padding: 0 4px; border-radius: 4px; background: var(--surface-muted); color: var(--text); font-family: var(--font-mono, ui-monospace, monospace); font-size: 10.5px; }
+.im-channel-help a { color: var(--accent); }
+.im-channel-safety ul { display: grid; gap: 5px; margin: 0; padding-left: 16px; color: var(--text-muted); font-size: 11px; line-height: 1.55; }
+.im-channel-safety code { padding: 0 4px; border-radius: 4px; background: var(--surface-muted); color: var(--text); font-family: var(--font-mono, ui-monospace, monospace); font-size: 10.5px; }
+
 .team-board { position: absolute; z-index: 36; top: 0; right: 0; bottom: 0; display: flex; flex-direction: column; width: min(var(--team-board-width, 424px), calc(100% - 260px)); min-width: 0; border-left: 1px solid var(--border-strong); background: var(--surface); box-shadow: -18px 0 42px rgba(0, 0, 0, .22); animation: team-board-in .18s var(--motion-ease); --tb-fs-title: 13px; --tb-fs-body: 12px; --tb-fs-label: 11px; --tb-fs-micro: 10px; --tb-ctl-h: 28px; --tb-icon-btn: 26px; }
 @keyframes team-board-in { from { transform: translateX(18px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
 .team-board.full { left: 0; width: auto; max-width: none; border-left: 0; box-shadow: none; animation: none; --tb-fs-title: 15px; --tb-fs-body: 13.5px; --tb-fs-label: 12px; --tb-fs-micro: 11px; --tb-ctl-h: 31px; --tb-icon-btn: 28px; }

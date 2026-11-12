@@ -13,6 +13,7 @@ import type {
   DesktopSettings,
   GalleryApp,
   HookEventName,
+  ImStatus,
   MemoryHealth,
   MemoryOverview,
   MemoryTopic,
@@ -615,6 +616,10 @@ interface DesktopState {
   intranetStore: SkillStoreState;
   /** 内网商店连接配置与测试状态。 */
   intranetSource: IntranetStoreConnectionState;
+  /** IM 通道当前状态（主进程网关快照；bootstrap 与 im.status 推送同源）。 */
+  imStatus?: ImStatus;
+  /** IM「测试连接」的最近一次结果（im.test-result 推送）。 */
+  imTest?: { requestId: string; ok: boolean; message: string; botName?: string; latencyMs?: number; at: number };
   /** 每文档已见推送 revision：≤ 该值的重复/乱序推送直接跳过（防回环重渲）。 */
   seenDesignRevisions: Record<string, number>;
   /** 最近一次设计导出结果；App 监听变化弹 toast。 */
@@ -775,6 +780,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   skillStore: { listLoading: false, listSkills: [], listTotal: 0, topSkills: [], topLoading: false, categories: [], categoriesLoading: false, detailLoading: false, detailVersions: [], detailFiles: [], detailTotalBytes: 0, installs: [] },
   intranetStore: { listLoading: false, listSkills: [], listTotal: 0, topSkills: [], topLoading: false, categories: [], categoriesLoading: false, detailLoading: false, detailVersions: [], detailFiles: [], detailTotalBytes: 0, installs: [] },
   intranetSource: { saving: false },
+  imStatus: undefined,
   restoredBrowserTabs: [],
   seenDesignRevisions: {},
   usageStatsLoading: false,
@@ -814,6 +820,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
       customProviderKeyConfigured: Boolean(bootstrap.settings.providers.find((provider) => provider.id === "chatanytime-openai-compatible")?.keyConfigured),
       jevKeyConfigured: Boolean(bootstrap.settings.jevKeyConfigured),
       intranetSource: { saving: false, ...(bootstrap.settings.intranetStore ? { config: bootstrap.settings.intranetStore } : {}) },
+      imStatus: bootstrap.imStatus ?? get().imStatus,
       customModels: bootstrap.settings.providers.find((provider) => provider.id === "chatanytime-openai-compatible")?.models ?? []
     });
     return unsubscribe;
@@ -1153,6 +1160,21 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
         break;
       case "skill-store-result":
         set((state) => applySkillStoreMessage(state, message.result));
+        break;
+      case "im.status":
+        set({ imStatus: message.status });
+        break;
+      case "im.test-result":
+        set({
+          imTest: {
+            requestId: message.requestId,
+            ok: message.ok,
+            message: message.message,
+            ...(message.botName ? { botName: message.botName } : {}),
+            ...(typeof message.latencyMs === "number" ? { latencyMs: message.latencyMs } : {}),
+            at: Date.now()
+          }
+        });
         break;
       case "design.exported":
         set({ designExported: { relativePath: message.relativePath, at: Date.now() } });

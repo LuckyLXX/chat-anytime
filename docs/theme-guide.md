@@ -33,7 +33,7 @@
 
 类名属于实现细节，可能随版本变化；以下属性是稳定契约，结构化主题请只依赖它们：
 
-**区域钩子 `data-pane`**：`sidebar` `topbar` `workspace` `work-area` `conversation` `timeline` `composer` `task-panel` `memory-panel` `preview` `terminal` `ssh` `ssh-files` `question-panel` `settings-dialog` `permission-dialog` `landing` `turn-minimap` `markdown-outline` `design` `design-toolbar` `design-tools` `design-canvas` `design-layers` `design-inspector` `gallery-menu` `gallery-wall` `automation-settings` `automation-dialog` `automation-panel` `automation-center` `memory-center` `agent-settings` `general-settings` `model-settings` `resource-settings` `skill-store` `intranet-skill-store` `appearance-settings` `subagent-settings` `hooks-settings` `usage-settings`
+**区域钩子 `data-pane`**：`sidebar` `topbar` `workspace` `work-area` `conversation` `timeline` `composer` `task-panel` `memory-panel` `preview` `terminal` `ssh` `ssh-files` `question-panel` `settings-dialog` `permission-dialog` `landing` `turn-minimap` `markdown-outline` `design` `design-toolbar` `design-tools` `design-canvas` `design-layers` `design-inspector` `gallery-menu` `gallery-wall` `automation-settings` `automation-dialog` `automation-panel` `automation-center` `memory-center` `agent-settings` `general-settings` `model-settings` `resource-settings` `skill-store` `intranet-skill-store` `im-channel-settings` `appearance-settings` `subagent-settings` `hooks-settings` `usage-settings`
 
 > `design` 是设计模式（Design Studio，顶栏调色板按钮进入）的工作台外壳——顶栏工具栏 + 左侧图层树（`design-layers`）+ 中部无限画布（`design-canvas`）+ 右侧属性检查器（`design-inspector`）。工作台底色走 `--panel-bg-preview`（缺省 `--panel-bg`）与既有表面 token，跟随主题；画布点阵/参考线/选择框用 `--border`/`--accent` 派生，主题可用 `[data-pane="design"]` 后代选择器重设计。 `design-tools` 是画布顶部居中的浮动绘图工具胶囊（选择/画板/矩形/文本），激活按钮带 `aria-pressed="true"`。
 
@@ -69,6 +69,8 @@
 > `resource-settings` 是设置页「技能与工具」tab（2026-09-23 重设计）——`.resource-page` 骨架（顶部固定条 `.resource-page-head` + 可滚动正文 `.resource-page-body`），正文三张 `.resource-card`（MCP Server / Skill / 自定义命令）。**本页即改即发**（没有整页保存语义，因此没有底栏）。
 
 > `subagent-settings` 是设置页「子智能体」tab（2026-09-23 重设计）——同一套 `.resource-page` 骨架，两张卡片（已定义 / 新建·编辑）；整页是 `<form>`，底部动作条 `.subagent-form-actions` 固定在滚动主体之外（表单较长时保存钮仍可见）。
+
+> `im-channel-settings` 是设置页「消息通道」tab（2026-11-12，飞书长连接 IM 通道 P1）——`.resource-page` 骨架：页头右侧是总闸开关（`data-control="im-channel-enable"`），正文两张 `.im-channel-card`（飞书通道卡 + 安全边界卡）。通道卡里是启用开关（`im-feishu-enabled`）、App ID / App Secret（`im-feishu-appid` / `im-feishu-secret`，后者是 password 输入、保存后即清空）、权限下拉（`im-feishu-access`）、工作区（`im-feishu-workspace`）、审批超时分钟数、白名单多行文本（`im-feishu-allowfrom`，逗号/换行分隔）、回执开关，底部动作条是保存（`im-feishu-save`）与测试连接（`im-feishu-test`）；右上角状态徽标 `.im-channel-badge`（`-ok` / `-busy` / `-error` / `-off` 四态，已连接时带机器人名），测试结果行 `.im-channel-test`（`-ok` / `-error`），连接错误原文 `.im-channel-status-error`。`.im-channel-help` 是可折叠的后台配置步骤（含「事件订阅与回调都选长连接」这一步）。**主题注意**：本页的 label / input / textarea 规则都带 `.im-channel-*` 前缀（(0,2,x)），因为 `.settings-dialog label/input` 的 (0,1,1) 会把它们打回 38px 高输入框与 15px 18px 外边距。
 
 > `hooks-settings` 是设置页「钩子」tab（2026-09-23 重设计）——`.resource-page` 骨架，页头右侧是「启用钩子」总闸（`data-control="hooks-enable"`，`data-control="hooks-add"` 是新建）；正文两张卡片（规则 / 新建·编辑），规则卡里 `.hook-event-legend` 是事件说明表；项目级规则显示指纹审批状态，`data-control="hooks-trust"` 用于批准或撤销信任；每条规则行内显示最近一次运行（来源/耗时/摘要，`.hook-run-status`）与 `data-control="hooks-run-log"` 展开的最近 3 次记录；新建卡顶部是模板区 `.hook-templates`（`data-control="hooks-template"`）；底部动作条同 `subagent-settings`。
 
