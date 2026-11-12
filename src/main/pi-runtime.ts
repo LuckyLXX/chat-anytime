@@ -39,6 +39,7 @@ import type {
   DesktopSettings,
   DesignSnapshotRequest,
   DesignSnapshotResult,
+  DivBubbleMode,
   HookRule,
   HookSummary,
   McpServerSummary,
@@ -4668,6 +4669,12 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
       return hookSessionTitle(sessionId, () => recordBox?.session.sessionManager.getSessionName());
     }
   });
+  // IM 会话（飞书等）不注入 Div 气泡：飞书卡片正文是受限 markdown，不渲染 HTML——
+  // 模型照着气泡规范写一页 <assistant_html><div>…，手机端看到的就是满屏标签与 CSS
+  // 全文。桌面端同绑的会话（先在桌面创建、后被 IM 绑上，系统提示词里早 Bake 了规范）
+  // 由 im-gateway 的 toImMarkdown 兜底压平。读 recordBox 而不是构造时快照：会话可能
+  // 在创建之后才被 IM 绑定（与上面的 approvalTimeoutMs 同一姿势）。
+  const divModeForSession = (): DivBubbleMode => (recordBox?.im || options.im ? "off" : recordAgent.divMode);
   const resourceLoader = new DefaultResourceLoader({
     cwd: recordWorkspace,
     agentDir: getAgentDir(),
@@ -4759,7 +4766,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
       // 每回合把「当前明暗 + 是否壁纸 + 主题色值」追到系统提示词尾部（主题不变时逐字节
       // 相同 ⇒ 前缀缓存照常命中）；divMode 为 off 时完全不注入。
       createUiThemeExtension({
-        divMode: () => recordAgent.divMode,
+        divMode: divModeForSession,
         context: () => uiThemeContext
       }),
       // Div 气泡合规重申（第六个内联扩展）：always 档每回合在系统提示词最末尾补一行
@@ -4767,7 +4774,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
       // 记忆块挤到中段，长任务里会漂移（2026-11-02 用户报「开了还是都用 markdown」）。
       // 排在上一个扩展之后 ⇒ 尾部次序是「主题块 → 本轮输出格式那一行」。
       createDivModeExtension({
-        divMode: () => recordAgent.divMode
+        divMode: divModeForSession
       }),
       // 实验分支（feat/codemode-toolsearch）最终保留：codemode（脚本编排工具，QuickJS
       // 沙箱）。上游注册即不激活，激活点在 toolNamesFor 里显式点名；缺省 mode:"on"
@@ -4779,7 +4786,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     ],
     // 拼接次序有意义：Div 气泡规范排在最后（离生成点最近、零额外 token 的位置修正，
     // 配合 createDivModeExtension 的每回合尾部重申），其余块沿用原次序。
-    systemPromptOverride: (base) => [base, recordAgent.systemPrompt, buildSkillsSystemPromptBlock(runtimeSkills.activeSkillsFor(resources.skillSummaries, recordAgent)), TOOL_ORCHESTRATION_PROMPT_BLOCK, OUTPUT_FORMAT_PROMPT_BLOCK, buildSubagentPromptBlock(resources.subagents), memoryPromptBlock, buildDivModePrompt(recordAgent.divMode)].filter(Boolean).join("\n\n")
+    systemPromptOverride: (base) => [base, recordAgent.systemPrompt, buildSkillsSystemPromptBlock(runtimeSkills.activeSkillsFor(resources.skillSummaries, recordAgent)), TOOL_ORCHESTRATION_PROMPT_BLOCK, OUTPUT_FORMAT_PROMPT_BLOCK, buildSubagentPromptBlock(resources.subagents), memoryPromptBlock, buildDivModePrompt(divModeForSession())].filter(Boolean).join("\n\n")
   });
   await resourceLoader.reload();
   // Connect to configured MCP servers and rebuild the customTool set. Runs

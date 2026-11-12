@@ -30,6 +30,7 @@ import {
   type ImInboundMessage
 } from "./im-feishu-channel.js";
 import { ImWsClient, type ImWsCardAck, type ImWsHandshakeConfig, type ImWsState, type ImWsStatusDetail } from "./im-feishu-ws.js";
+import { toImMarkdown } from "./im-outbound.js";
 import { imStorePath, ImStore } from "./im-store.js";
 
 /**
@@ -430,7 +431,8 @@ export class ImGateway {
     if (message.phase !== "end") return;
     conversation.busy = false;
     conversation.queued = 0;
-    const text = (message.text ?? "").trim() || (conversation.lastDelta ?? "").trim();
+    // 出站前压平 Div 气泡：飞书卡片是受限 markdown，不渲染 HTML（见 im-outbound.ts）。
+    const text = toImMarkdown((message.text ?? "").trim() || (conversation.lastDelta ?? "").trim());
     if (message.status === "aborted") {
       await this.finishConversation(conversation, channel, "已停止当前回复。", "neutral");
       return;
@@ -453,13 +455,13 @@ export class ImGateway {
     const channel = this.channels.get(conversation.channelId);
     const card = conversation.statusCard;
     if (!channel || !card) return;
-    conversation.lastDelta = message.text;
+    conversation.lastDelta = toImMarkdown(message.text);
     if (card.patches >= IM_PROGRESS_MAX_PATCHES) return;
     if (this.now() - card.lastPatchAt < IM_PROGRESS_MIN_INTERVAL_MS) return;
     // 先记账再发请求：并发 delta 不会把节流打穿。
     card.patches += 1;
     card.lastPatchAt = this.now();
-    const chunk = answerChunks(message.text)[0] ?? message.text;
+    const chunk = answerChunks(conversation.lastDelta)[0] ?? conversation.lastDelta;
     void channel.api.patchCard(card.messageId, buildImAnswerCard(chunk, { title: "PiDesktop · 处理中", template: "blue" }), card.sentAt)
       .then((result) => {
         if (!result.ok) this.log("info", `进度卡片更新失败（${result.message}），最终答案会改发新卡片`);

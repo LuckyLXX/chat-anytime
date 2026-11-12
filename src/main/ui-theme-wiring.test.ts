@@ -34,12 +34,12 @@ describe("utility 侧", () => {
     expect(runtime).toContain("uiThemeContext = normalizeUiThemeContext(command.context);");
   });
 
-  it("内联扩展按本会话的 divMode 与最新快照注入", () => {
+  it("内联扩展按本会话的 divMode 与最新快照注入（IM 会话见 divModeForSession）", () => {
     expect(runtime).toContain("createUiThemeExtension({");
-    expect(runtime).toContain("divMode: () => recordAgent.divMode");
+    expect(runtime).toContain("divMode: divModeForSession");
     expect(runtime).toContain("context: () => uiThemeContext");
     // Div 气泡规范本身仍走会话创建时的系统提示词覆盖（两处职责不同，不要合并）
-    expect(runtime).toContain("buildDivModePrompt(recordAgent.divMode)");
+    expect(runtime).toContain("buildDivModePrompt(divModeForSession())");
   });
 });
 

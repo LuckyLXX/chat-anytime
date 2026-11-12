@@ -419,8 +419,30 @@ describe("inbound routing", () => {
     expect(harness.texts.at(-1)).toContain("兜底文本");
   });
 
-  it("splits a very long answer across several cards", async () => {
+  it("flattens a Div bubble before it hits the card (Feishu renders no HTML)", async () => {
     const harness = await createHarness();
+    harness.gateway.start();
+    harness.handlers().onEvent(feishuEvent());
+    await flush();
+    ready(harness);
+    await flush();
+    harness.gateway.handleRuntimeMessage({ type: "im.turn", sessionId: "sess-1", phase: "start" });
+    harness.gateway.handleRuntimeMessage({
+      type: "im.turn",
+      sessionId: "sess-1",
+      phase: "end",
+      status: "ok",
+      text: "<assistant_html>\n<div>\n<style>.a{color:red}</style>\n<h2>已配好</h2>\n<p>通道通了</p>\n</div>\n</assistant_html>"
+    });
+    await flush();
+    const sent = JSON.stringify(harness.patches.at(-1)?.card);
+    expect(sent).not.toContain("assistant_html");
+    expect(sent).not.toContain("color:red");
+    expect(sent).toContain("已配好");
+    expect(sent).toContain("通道通了");
+  });
+
+  it("splits a very long answer across several cards", async () => {    const harness = await createHarness();
     harness.gateway.start();
     harness.handlers().onEvent(feishuEvent());
     await flush();

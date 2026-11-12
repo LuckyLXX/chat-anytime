@@ -18,9 +18,10 @@ const read = (relative: string): string => readFileSync(join(__dirname, relative
 const runtime = read("pi-runtime.ts");
 
 describe("Compliance reminder wiring", () => {
-  it("内联扩展按本会话的 divMode 注入", () => {
+  it("内联扩展按本会话的 divMode 注入（IM 会话压成 off：飞书卡片不渲染 HTML）", () => {
     expect(runtime).toContain("createDivModeExtension({");
-    expect(runtime).toContain("divMode: () => recordAgent.divMode");
+    expect(runtime).toContain("divMode: divModeForSession");
+    expect(runtime).toContain("const divModeForSession = (): DivBubbleMode => (recordBox?.im || options.im ? \"off\" : recordAgent.divMode);");
   });
 
   it("排在主题块之后（最终尾部是重申那一行）", () => {
@@ -32,7 +33,7 @@ describe("Compliance reminder wiring", () => {
 
   it("静态 Div 规范排在系统提示词覆盖的最后一段", () => {
     const override = runtime.slice(runtime.indexOf("systemPromptOverride: (base) =>"), runtime.indexOf("await resourceLoader.reload();"));
-    const div = override.indexOf("buildDivModePrompt(recordAgent.divMode)");
+    const div = override.indexOf("buildDivModePrompt(divModeForSession())");
     expect(div).toBeGreaterThan(-1);
     // 所有其它块都在它之前：记忆块（原来的最后一段）也必须在它之前
     for (const block of ["buildSkillsSystemPromptBlock(", "TOOL_ORCHESTRATION_PROMPT_BLOCK", "OUTPUT_FORMAT_PROMPT_BLOCK", "buildSubagentPromptBlock(", "memoryPromptBlock"]) {

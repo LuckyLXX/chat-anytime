@@ -16,6 +16,7 @@ const read = (relative: string): string => readFileSync(join(__dirname, relative
 
 const protocol = read("../shared/protocol.ts");
 const runtime = read("pi-runtime.ts");
+const gatewaySource = read("im-gateway.ts");
 const index = read("index.ts");
 const broker = read("permission-broker.ts");
 const permissions = read("runtime-permissions.ts");
@@ -125,6 +126,28 @@ describe("运行时接线（pi-runtime）", () => {
     expect(runtime).toContain("drainImPromptQueue(record);");
     expect(runtime).toContain('post({ type: "im.turn", sessionId: command.sessionId, phase: "queued" });');
     expect(runtime).toContain("imPromptQueues.delete(command.sessionId);");
+  });
+});
+
+describe("出站整形（手机端不显示 HTML）", () => {
+  it("IM 会话不注入 Div 气泡：档位被压成 off（创建时与后绑都要盖）", () => {
+    // 构造时快照不够：会话可能先在桌面创建、之后才被 IM 绑上，所以读 recordBox。
+    expect(runtime).toContain("const divModeForSession = (): DivBubbleMode => (recordBox?.im || options.im ? \"off\" : recordAgent.divMode);");
+    expect(runtime).toContain("divMode: divModeForSession");
+    expect(runtime).toContain("buildDivModePrompt(divModeForSession())");
+    // 反回退：任何一处还按 recordAgent.divMode 注入就等于 IM 会话又收到气泡规范。
+    expect(runtime).not.toContain("divMode: () => recordAgent.divMode");
+    expect(runtime).not.toContain("buildDivModePrompt(recordAgent.divMode)");
+  });
+
+  it("答案与进度卡片都先过 toImMarkdown（会话在桌面端创建也不会漏出标签）", () => {
+    expect(gatewaySource).toContain('import { toImMarkdown } from "./im-outbound.js";');
+    expect(gatewaySource).toContain("const text = toImMarkdown((message.text ?? \"\").trim() || (conversation.lastDelta ?? \"\").trim());");
+    expect(gatewaySource).toContain("conversation.lastDelta = toImMarkdown(message.text);");
+    const outbound = read("im-outbound.ts");
+    // 只在含气泡标记时动手：普通 markdown 必须逐字节不变。
+    expect(outbound).toContain("const DIV_BUBBLE_MARK = /<assistant_html[\\s>]/iu;");
+    expect(outbound).toContain("if (!DIV_BUBBLE_MARK.test(text)) return text;");
   });
 });
 
