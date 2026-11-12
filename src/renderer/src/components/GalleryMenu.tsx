@@ -23,6 +23,11 @@ interface GalleryMenuProps {
   onOpenWall(): void;
   /** 登记新作品（打开轻量对话框）。 */
   onPublish(): void;
+  /**
+   * 正在后台跑的服务数（2026-11-12）：服务不再占标签页，顶栏这个下拉是它唯一的常驻
+   * 入口——不在这里露一个数，用户就不能从主界面知道「有东西在跑」。
+   */
+  runningServices?: number;
   onMenuOpenChange?(open: boolean): void;
 }
 
@@ -36,7 +41,7 @@ function recentLabel(app: GalleryApp): string {
   return `${GALLERY_KIND_LABELS[app.kind]} · ${Math.floor(hours / 24)} 天前`;
 }
 
-export function GalleryMenu({ apps, onRun, onDevelop, onOpenWall, onPublish, onMenuOpenChange }: GalleryMenuProps): ReactNode {
+export function GalleryMenu({ apps, onRun, onDevelop, onOpenWall, onPublish, runningServices = 0, onMenuOpenChange }: GalleryMenuProps): ReactNode {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
@@ -77,17 +82,24 @@ export function GalleryMenu({ apps, onRun, onDevelop, onOpenWall, onPublish, onM
         aria-haspopup="menu"
         aria-expanded={open}
         aria-label="作品"
-        title={apps.length > 0 ? `作品（${apps.length}）` : "作品：AI 做出来的成果都在这里，可运行、可继续开发"}
+        title={[
+          apps.length > 0 ? `作品（${apps.length}）` : "作品：AI 做出来的成果都在这里，可运行、可继续开发",
+          runningServices > 0 ? `${runningServices} 个服务在后台运行` : ""
+        ].filter(Boolean).join(" · ")}
         onClick={() => toggle(!open)}
       >
         <LayoutGrid size={18} />
         {apps.length > 0 && <span className="gallery-toggle-count">{apps.length}</span>}
+        {runningServices > 0 && <span className="gallery-toggle-dot" aria-hidden="true" />}
       </button>
       {open && (
         <div className="gallery-pop" role="menu" aria-label="作品">
           <div className="gallery-pop-head">
             <span>作品</span>
-            <small>{apps.length > 0 ? `${apps.length} 个` : "还没有"}</small>
+            <small>
+              {apps.length > 0 ? `${apps.length} 个` : "还没有"}
+              {runningServices > 0 ? ` · ${runningServices} 个服务在跑` : ""}
+            </small>
           </div>
           {apps.length === 0 ? (
             <div className="gallery-pop-empty">
@@ -111,7 +123,7 @@ export function GalleryMenu({ apps, onRun, onDevelop, onOpenWall, onPublish, onM
           )}
           <div className="gallery-pop-actions">
             <button type="button" data-control="gallery-open-wall" onClick={() => { toggle(false); onOpenWall(); }}>
-              <LayoutGrid size={13} />打开作品墙
+              <LayoutGrid size={13} />打开作品墙{runningServices > 0 ? `（${runningServices} 个服务在跑）` : ""}
             </button>
             <button type="button" data-control="gallery-publish" onClick={() => { toggle(false); onPublish(); }}>
               <Plus size={13} />登记新作品

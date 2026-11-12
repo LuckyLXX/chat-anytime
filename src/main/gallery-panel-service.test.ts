@@ -4,18 +4,20 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 /**
- * 「面板作品 + 本地服务」的接线契约（2026-10-11，Git 管理器带出）。
+ * 「面板作品 + 本地服务」的接线契约（2026-10-11 起，2026-11-12 改写）。
  *
  * 为什么是源码断言型：这条链路横跨渲染端 App.tsx、shared/protocol.ts、preload、
  * main/index.ts 与 main/panel-window.ts 五处，而 App.tsx 与 PanelWindowController
  * 都难以在单测里装配（同先例见 gallery-run-wiring.test.ts 的说明）。
  *
- * 钉住的都是**静默失效**类风险——不报错、不崩溃，只是功能不出效果：
- *  1. 面板的服务必须「探活通过再开窗」（先开窗则页面首次请求必然失败）；
- *  2. 服务会话 id 必须从渲染端交到主进程，否则窗口关闭时无从 kill，服务变成
- *     没人回收的后台进程（用户明确选了「关窗即停」）；
- *  3. kill 之后必须推 `gallery.panel-closed`，否则主界面会留一个「已退出」的孤儿标签；
- *  4. 字段三处镜像（DesktopApi / preload / ipcMain 入参）任何一处拼错都只在运行时炸。
+ * 2026-11-12 的关键变化：面板的本地服务不再占用终端会话（`serviceTerminalId` 整套
+ * 字段都删了），而是和普通服务型作品一样走主进程的后台进程管理器，用
+ * **ownerPanelId** 表达「这个服务属于哪个面板」。窗口关闭时主进程按 owner 停掉它，
+ * 看板随之刷新——所以这里钉的是：
+ *  1. 面板的服务必须先起（后台）、探活通过再开窗；
+ *  2. 开窗失败要立刻停掉刚起的服务（不留没有主人的进程）；
+ *  3. 窗口关闭按 owner 停服务，不再有「关终端会话 + 推孤儿标签消息」那套；
+ *  4. 旧字段彻底消失（留着它就是两套并行语义，下次谁读到都会猜错）。
  *
  * 读入即归一化行尾：CI（core.autocrlf=true）检出 CRLF，硬编码 `\n` 的跨行断言会假红。
  */
@@ -29,57 +31,47 @@ const panelWindow = read("panel-window.ts");
 const protocol = read("../shared/protocol.ts");
 
 describe("面板作品的本地服务：运行链路", () => {
-  it("start-panel-service 先起服务再开窗，并把服务会话交给主进程", () => {
+  it("start-panel-service 先起服务再开窗，并把服务归属交给主进程", () => {
     expect(app).toContain('plan.action === "start-panel-service"');
-    expect(app).toMatch(/if \(!\(await openGalleryPanel\(app, plan\.absolutePath, plan\.options, started\.terminalId\)\)\)/u);
+    expect(app).toMatch(/ownerPanelId: app\.id/u);
+    expect(app).toMatch(/if \(!\(await openGalleryPanel\(app, plan\.absolutePath, plan\.options\)\)\) \{/u);
   });
 
   it("开窗失败就收掉刚起的服务（不留没有主人的后台进程）", () => {
-    expect(app).toMatch(/^\s*closePreviewTabRef\.current\(started\.terminalId\);$/mu);
+    expect(app).toMatch(/^\s*if \(started\.service\) void window\.piDesktop\.galleryServiceStop\(started\.service\.id\);$/mu);
   });
 
-  it("两条开窗路径共用 openGalleryPanel，且服务地址的探测不再写死 server", () => {
-    // 面板的 url 同样是探活地址，所以起点探测的判据从 kind==="server" 放开成「有 url」
-    expect(app).toContain("const reachable = app.url ? (await window.piDesktop.galleryAwaitService({ url: app.url })).ok : false;");
-    expect(app).not.toContain('app.kind === "server" && app.url ?');
-    // 直开窗与「先起服务再开窗」共用同一个 helper（否则两处会各自漂）
+  it("两条开窗路径共用 openGalleryPanel", () => {
     expect(app.match(/await openGalleryPanel\(/gu) ?? []).toHaveLength(2);
   });
 
-  it("渲染端订阅 gallery.panel-closed，把残留的服务标签收掉", () => {
-    expect(app).toMatch(/^\s*if \(message\.type !== "gallery\.panel-closed" \|\| !message\.terminalId\) return;$/mu);
-    expect(app).toMatch(/^\s*closePreviewTabRef\.current\(message\.terminalId\);$/mu);
+  it("旧的 serviceTerminalId / gallery.panel-closed 语义彻底消失（避免两套并行语义）", () => {
+    expect(protocol).not.toContain("serviceTerminalId");
+    expect(preload).not.toContain("serviceTerminalId");
+    expect(main).not.toContain("serviceTerminalId");
+    expect(panelWindow).not.toContain("serviceTerminalId");
+    expect(protocol).not.toContain("gallery.panel-closed");
+    expect(app).not.toContain("gallery.panel-closed");
   });
 });
 
 describe("面板窗口关闭 → 停掉平台为它起的服务", () => {
-  it("主进程 kill 服务会话并推 gallery.panel-closed 给渲染端", () => {
-    // 一律用行首锚定的多行正则：toContain 连「被注释掉的那一行」也算命中，那样反向验证会假绿。
-    expect(main).toMatch(/^\s*terminalManager\.handle\(\{ type: "kill", terminalId: closedTerminalId \}\);$/mu);
-    expect(main).toMatch(/^\s*mainWindow\.webContents\.send\("runtime:message", \{ type: "gallery\.panel-closed", id: appId, terminalId: closedTerminalId \} satisfies RuntimeMessage\);$/mu);
-    // 主界面退到托盘时窗口未销毁，推送照样发得出去；已销毁则不发（否则 send 抛错）
-    expect(main).toMatch(/^\s*if \(mainWindow && !mainWindow\.isDestroyed\(\)\) \{$/mu);
+  it("主进程按 owner 停服务并刷新看板（不再 kill 终端会话）", () => {
+    expect(main).toMatch(/^\s*galleryServices\?\.stopByOwner\(appId\);$/mu);
+    expect(main).toMatch(/^\s*pushGalleryServices\(\);$/mu);
+    expect(main).not.toContain('terminalManager.handle({ type: "kill", terminalId: closedTerminalId');
   });
 
-  it("窗口控制器在 closed 时回调装配方（推到下一个 tick，不留在窗口销毁栈里），并带上 serviceTerminalId", () => {
-    expect(panelWindow).toMatch(/this\.services\.get\(request\.id\);\n\s*this\.services\.delete\(request\.id\);\n\s*if \(notify\) \{\n\s*setImmediate\(\(\) => \{\n\s*try \{\n\s*notify\(request\.id, serviceTerminalId\);/u);
+  it("窗口控制器的 closed 回调只带作品 id（ownerPanelId 已经表达了归属）", () => {
+    expect(panelWindow).toContain("onClosed?: (appId: string) => void;");
+    expect(panelWindow).toMatch(/^\s*notify\(request\.id\);$/mu);
+    // 推迟到下一个 tick：closed 还在 Electron 销毁窗口的同步栈里
+    expect(panelWindow).toContain("setImmediate(() => {");
   });
 
-  it("服务会话只在建窗时写入（复用已有窗口不能把服务改写掉）", () => {
-    // 复用分支（open 命中已有窗口）里没有写入点：同一个窗口的服务会话是同一个，
-    // 后来的「运行」只前置窗口、不重启服务，服务会话必须保持原值。
-    expect(panelWindow.match(/this\.services\.set\(/gu) ?? []).toHaveLength(1);
-    expect(panelWindow).toMatch(/^\s*if \(request\.serviceTerminalId\) this\.services\.set\(request\.id, request\.serviceTerminalId\);$/mu);
-    expect(panelWindow).toMatch(/^\s*this\.services\.delete\(request\.id\);$/mu);
-    // closed 回调失败不能影响窗口清理：必须包在 try 里，且不在窗口销毁的同步栈里执行
-    expect(panelWindow).toContain("const notify = this.deps.onClosed;");
-    expect(panelWindow).toMatch(/setImmediate\(\(\) => \{\n\s*try \{\n\s*notify\(request\.id, serviceTerminalId\);\n\s*\} catch \{/u);
-  });
-
-  it("字段三处镜像一致：DesktopApi / preload / ipcMain 入参", () => {
-    expect(protocol).toContain("serviceTerminalId?: string }): Promise<{ ok: boolean; message?: string }>;");
-    expect(preload).toContain('serviceTerminalId?: string }) => ipcRenderer.invoke("gallery:open-panel", input)');
-    expect(main).toContain("serviceTerminalId?: unknown");
-    expect(main).toContain("serviceTerminalId\n    });");
+  it("面板入参三处镜像一致：DesktopApi / preload / ipcMain（没有服务会话字段）", () => {
+    expect(protocol).toContain("galleryOpenPanel(input: { id: string; title: string; workspace: string; filePath: string; panel?: GalleryPanelOptions }): Promise<{ ok: boolean; message?: string }>;");
+    expect(preload).toContain('galleryOpenPanel: (input: { id: string; title: string; workspace: string; filePath: string; panel?: GalleryPanelOptions }) => ipcRenderer.invoke("gallery:open-panel", input)');
+    expect(main).toContain('ipcMain.handle("gallery:open-panel"');
   });
 });

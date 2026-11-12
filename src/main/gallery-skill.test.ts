@@ -51,6 +51,14 @@ describe("内置 skill gallery-publish", () => {
     expect(skill).toContain("不等于");
   });
 
+  it("服务型作品的后台进程事实在场（2026-11-12：进程不再占标签页）", () => {
+    // 这条事实是发布决策的一部分：启动命令必须能非交互长期运行，纯后台服务要标 runMode
+    expect(skill).toContain("后台进程");
+    expect(skill).toContain("运行中的服务");
+    expect(skill).toContain('runMode: "background"');
+    expect(skill).toContain("非交互地长期运行");
+  });
+
   it("gallery_publish 工具描述的指针与 skill 目录名一致", () => {
     expect(runtimeGallery).toContain("先读 skill gallery-publish");
   });

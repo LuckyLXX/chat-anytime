@@ -33,7 +33,7 @@
 
 类名属于实现细节，可能随版本变化；以下属性是稳定契约，结构化主题请只依赖它们：
 
-**区域钩子 `data-pane`**：`sidebar` `topbar` `workspace` `work-area` `conversation` `timeline` `composer` `task-panel` `memory-panel` `preview` `terminal` `ssh` `ssh-files` `question-panel` `settings-dialog` `permission-dialog` `landing` `turn-minimap` `markdown-outline` `design` `design-toolbar` `design-tools` `design-canvas` `design-layers` `design-inspector` `gallery-menu` `gallery-wall` `automation-settings` `automation-dialog` `automation-panel` `automation-center` `memory-center` `agent-settings` `general-settings` `model-settings` `resource-settings` `skill-store` `intranet-skill-store` `im-channel-settings` `appearance-settings` `subagent-settings` `hooks-settings` `usage-settings`
+**区域钩子 `data-pane`**：`sidebar` `topbar` `workspace` `work-area` `conversation` `timeline` `composer` `task-panel` `memory-panel` `preview` `terminal` `ssh` `ssh-files` `question-panel` `settings-dialog` `permission-dialog` `landing` `turn-minimap` `markdown-outline` `design` `design-toolbar` `design-tools` `design-canvas` `design-layers` `design-inspector` `gallery-menu` `gallery-wall` `gallery-services` `automation-settings` `automation-dialog` `automation-panel` `automation-center` `memory-center` `agent-settings` `general-settings` `model-settings` `resource-settings` `skill-store` `intranet-skill-store` `im-channel-settings` `appearance-settings` `subagent-settings` `hooks-settings` `usage-settings`
 
 > `design` 是设计模式（Design Studio，顶栏调色板按钮进入）的工作台外壳——顶栏工具栏 + 左侧图层树（`design-layers`）+ 中部无限画布（`design-canvas`）+ 右侧属性检查器（`design-inspector`）。工作台底色走 `--panel-bg-preview`（缺省 `--panel-bg`）与既有表面 token，跟随主题；画布点阵/参考线/选择框用 `--border`/`--accent` 派生，主题可用 `[data-pane="design"]` 后代选择器重设计。 `design-tools` 是画布顶部居中的浮动绘图工具胶囊（选择/画板/矩形/文本），激活按钮带 `aria-pressed="true"`。
 
@@ -123,6 +123,7 @@
 | 图层树锁定开关（行悬停出现，aria-pressed 标记锁定） | `design-layer-lock`                              |
 | 作品下拉开关（顶栏，aria-expanded + 数量角标） | `gallery-toggle`                                 |
 | 作品：运行 / 继续开发 / 打开作品墙 / 登记新作品 / 打开所在文件夹 / 移除 / 面板数据（数据… 与清空） | `gallery-run` / `gallery-develop` / `gallery-open-wall` / `gallery-publish` / `gallery-reveal` / `gallery-remove` / `gallery-data` / `gallery-data-clear` |
+| 作品墙「运行中的服务」看板：打开页面 / 日志 / 重启 / 停止（已结束的记录为「重起 / 移出」） | `gallery-service-open` / `gallery-service-log` / `gallery-service-restart` / `gallery-service-stop` |
 | 角色页：新建角色 / 保存角色 | `agent-new` / `agent-save` |
 | 设置弹窗左栏底部：当前版本 | `settings-version` |
 | 通用页：能力总闸 / Jev 测试连接 / Jev 展开 | `capability-switch`（+ `data-capability`） / `jev-test` / `jev-expand` |

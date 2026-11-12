@@ -11,7 +11,7 @@
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { GalleryApp, GalleryDraft, GalleryKind } from "../shared/protocol.js";
-import { GALLERY_KIND_LABELS, normalizeGalleryPanelOptions, type GalleryCoverSource, type GalleryPanelOptions } from "../shared/gallery.js";
+import { GALLERY_KIND_LABELS, normalizeGalleryPanelOptions, type GalleryCoverSource, type GalleryPanelOptions, type GalleryRunMode } from "../shared/gallery.js";
 
 export interface GalleryToolContext {
   /**
@@ -49,6 +49,10 @@ export function validatePublishInput(raw: unknown): GalleryDraft {
   if (entry) draft.entry = entry;
   if (command) draft.command = command;
   if (url) draft.url = url;
+  // runMode 只对服务型作品有意义：page（缺省，就绪后打开页面）/ background（纯后台服务）。
+  // 非法值当没写（与 panel 的窗口偏好同一态度：作品能发布比参数完美重要）。
+  const runMode = typeof input.runMode === "string" ? input.runMode.trim() : "";
+  if (kind === "server" && (runMode === "page" || runMode === "background")) draft.runMode = runMode as GalleryRunMode;
   if (description) draft.description = description;
   if (cover) draft.cover = cover;
   if (tags && tags.length > 0) draft.tags = tags;
@@ -79,8 +83,10 @@ export function buildGalleryTools(ctx: GalleryToolContext): ToolDefinition[] {
       description: [
         "把一个**已经做完、能运行、值得保留**的成果登记到作品墙（用户能一键运行、一键继续开发）。",
         "kind=file 时 path 指入口文件（如导出的单文件 html）；kind=server 时 path 指项目目录，并给出启动命令 command 或服务地址 url。",
+        "**服务（kind=server）的进程一律是后台进程**：点「运行」由平台在后台 spawn 启动命令（**不占终端标签**，关掉页面也不会停），就绪判定与输出都进作品墙顶部的「运行中的服务」看板（可看日志、停止、重启）。所以 command 必须能**非交互**地长期运行：不要写需要人工回车/选择的分支，不要依赖 TTY。",
+        "服务型还有 runMode 两种：page（缺省）= 就绪后顺带打开页面（前端 dev server 这类有界面要看的）；background = 纯后台服务（反代 / API / 桥 / 给别的程序提供数据的进程），只起进程、不打开任何页面。分不清时问自己：这个地址打开会是给人看的页面吗？不是就 background。",
         `kind=panel 时 path 指一个网页文件（.html/.htm/.svg）：它会被开成**独立小窗口**，主界面关掉后仍能展示（用它可以做常驻小工具/监控面板）。面板页可用相对自己 fetch("./__pidesktop_state.json") 读本机会话执行状态（只读），POST 同一地址 {"action":"show-main"} 唤回主界面 / {"action":"close"} 关窗 / {"action":"toggle"} 切换抽屉两态。窗口用 panel 声明：mode="window"（缺省，系统边框窗口）| "pet"（桌宠：透明无边框固定尺寸，页面自绘形状并用 CSS -webkit-app-region: drag 拖动，需自带关闭钮 POST close）| "drawer"（贴边抽屉：edge 声明贴哪条边 left/right/top/bottom，缺省 right，窗口在窄把手与完整面板两态切换，页面监听 resize 自适应渲染，点把手 POST toggle）；width/height/alwaysOnTop 三种形态通用（桌宠缺省置顶）。`,
-        `kind=panel 也可以带一个**本地服务**：同时声明 command（启动命令）与 url（探活地址，如 http://127.0.0.1:8791/api/health）时，点「运行」会先在终端标签里执行 command、探活通过后才开面板窗口（服务已在跑就直接开窗不重启；面板窗口关闭时平台自动停掉它起的服务）。面板页没有 preload 也跑不了外部命令，需要本地数据源（读数据库/跑 git/访问本机文件）的面板就是这么接的。`,
+        `kind=panel 也可以带一个**本地服务**：同时声明 command（启动命令）与 url（探活地址，如 http://127.0.0.1:8791/api/health）时，点「运行」会先在**后台**起 command、探活通过后才开面板窗口（服务已在跑就直接开窗不重启；面板窗口关闭时平台自动停掉它起的服务）。面板页没有 preload 也跑不了外部命令，需要本地数据源（读数据库/跑 git/访问本机文件）的面板就是这么接的。`,
         "kind 怎么选（三种形态的运行环境与跨域能力差异——尤其要直连外部模型 API 时）先读 skill gallery-publish。",
         "**每个作品都要有封面**（作品墙卡片头图）：不指定 cover 时自动截入口页；server 型在服务此刻可达时截服务页；入口本身是图片就直接用；仍拿不到画面则生成占位封面（渐变底 + 作品名，卡片不会裸图标）。想要好看的封面就用 cover 指定工作区里的一张图片（png/jpg/webp/gif/svg，建议 16:10、≥1024 宽）。",
         "入口必须位于当前工作区内。同「工作区+类型+入口」重复发布是更新而非新增（改了标题/命令再发一次即可）。",
@@ -93,7 +99,8 @@ export function buildGalleryTools(ctx: GalleryToolContext): ToolDefinition[] {
         path: Type.String({ description: "入口文件或项目目录的工作区相对路径" }),
         entry: Type.Optional(Type.String({ description: "入口（缺省 = path）；kind=file/panel 时可指向目录内的某个页面" })),
         command: Type.Optional(Type.String({ description: "kind=server：启动命令（如 npm run dev）；kind=panel：开窗前要拉起的本地服务命令（如 node bridge.mjs，在入口所在目录执行）——需要 url 才能探活" })),
-        url: Type.Optional(Type.String({ description: "kind=server：服务地址（如 http://localhost:5173），有它就能直接打开；kind=panel：探活地址（如 http://127.0.0.1:8791/api/health）" })),
+        url: Type.Optional(Type.String({ description: "kind=server：服务地址（如 http://localhost:5173），有它就能直接打开、也用于探活；kind=panel：探活地址（如 http://127.0.0.1:8791/api/health）" })),
+        runMode: Type.Optional(Type.String({ description: "kind=server：page（缺省，就绪后打开页面）/ background（纯后台服务：反代 / API / 给别的程序用，只起进程不打开页面）" })),
         panel: Type.Optional(Type.Object({ width: Type.Optional(Type.Number()), height: Type.Optional(Type.Number()), alwaysOnTop: Type.Optional(Type.Boolean()), mode: Type.Optional(Type.String({ description: "窗口形态：window（缺省，系统边框窗口）| pet（桌宠，透明无边框固定尺寸）| drawer（贴边抽屉）" })), edge: Type.Optional(Type.String({ description: "drawer 专用：贴哪条边 left/right/top/bottom，缺省 right" })) }, { description: "kind=panel：窗口形态与尺寸（可选）" })),
         cover: Type.Optional(Type.String({ description: "封面图片的工作区相对路径（png/jpg/webp/gif/svg，建议 16:10）；不填则自动截图，拿不到画面时生成占位封面" })),
         description: Type.Optional(Type.String({ description: "一句话说明这个作品是什么" })),

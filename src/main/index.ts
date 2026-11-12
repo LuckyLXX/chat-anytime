@@ -24,7 +24,8 @@ import { BrowserAutomationController } from "./browser-automation.js";
 import { ComputerOverlayController } from "./computer-overlay.js";
 import { DesignSnapshotController } from "./design-snapshot.js";
 import { galleryThumbsDirFor, readGalleryThumb, resolveGalleryAgentDir } from "./gallery-store.js";
-import { normalizeGalleryPanelOptions, type GalleryDataClearResult, type GalleryDataResult } from "../shared/gallery.js";
+import { createShellLauncher, GalleryServiceRunner, killProcessTree } from "./gallery-service-runner.js";
+import { normalizeGalleryPanelOptions, type GalleryDataClearResult, type GalleryDataResult, type GalleryServiceRecord, type GalleryServiceStartRequest, type GalleryServiceStartResult } from "../shared/gallery.js";
 import { createPanelStateCache } from "./panel-state.js";
 import { panelBoundsPathFor } from "./panel-bounds.js";
 import { PanelWindowController } from "./panel-window.js";
@@ -111,6 +112,15 @@ let computerOverlayController: ComputerOverlayController | undefined;
 // 页面与端点由 panelProtocolRoute 在固定 origin 上服务（协议处理器全局存在，
 // 不随主窗口 dispose），因此它与主窗口的生命周期无关。
 let panelWindows: PanelWindowController | undefined;
+/**
+ * 服务型作品的后台进程管理器（2026-11-12）。惰性创建：只有真的点过「运行」才起服务。
+ *
+ * 为什么宿主是 **main** 而不是 utility：进程必须比渲染端活得久（关掉页面/主窗口到托盘
+ * 都不该停服务），又必须随应用退出被杀掉（用户 2026-11-12 选定不留孤儿）；
+ * main 同时满足这两条，也天然掌着推送给渲染端的那条通道。
+ */
+let galleryServices: GalleryServiceRunner | undefined;
+let galleryServicesTimer: ReturnType<typeof setTimeout> | undefined;
 let trayController: TrayController | undefined;
 /**
  * 「用户真的要退出」标志：关闭主窗口 = 隐藏到托盘（用户 2026-09-26 决策），
@@ -1241,6 +1251,57 @@ function isSshCommand(value: unknown): value is SshCommand {
   }
 }
 
+/**
+ * 取（必要时创建）后台服务管理器。
+ *
+ * 变更通知在这里合并成帧：一个话痨 dev server 的 stdout 一秒钟能来几十块，逐块推
+ * 等于每秒几十次结构化克隆。250ms 的尾随合并足够「启动 → 就绪 → 崩溃」的观感，
+ * 列表本身很小（日志已截到 4KB/条）。
+ */
+function ensureGalleryServices(): GalleryServiceRunner {
+  galleryServices ??= new GalleryServiceRunner({
+    launch: createShellLauncher(),
+    killTree: (pid) => killProcessTree(pid),
+    onChange: () => {
+      if (galleryServicesTimer) return;
+      galleryServicesTimer = setTimeout(() => {
+        galleryServicesTimer = undefined;
+        pushGalleryServices();
+      }, 250);
+    }
+  });
+  return galleryServices;
+}
+
+function pushGalleryServices(): void {
+  const services: GalleryServiceRecord[] = galleryServices?.list() ?? [];
+  try {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("runtime:message", { type: "gallery.services", services } satisfies RuntimeMessage);
+    }
+  } catch {
+    // 渲染端正在销毁（退出/重载）：下一次 bootstrap 会把清单再给一次。
+  }
+}
+
+/** 后台服务入参的归一化：字段全部来自渲染端，坏值一律在这里挡掉（IPC 边界）。 */
+function normalizeServiceRequest(input: unknown): GalleryServiceStartRequest | undefined {
+  if (!input || typeof input !== "object") return undefined;
+  const record = input as Record<string, unknown>;
+  const text = (value: unknown): string => (typeof value === "string" ? value.trim() : "");
+  const appId = text(record.appId);
+  const title = text(record.title);
+  const command = text(record.command);
+  const cwd = text(record.cwd);
+  if (!appId || !command || !cwd) return undefined;
+  const request: GalleryServiceStartRequest = { appId, title: title || "作品服务", command, cwd };
+  const url = text(record.url);
+  if (url) request.url = url;
+  const ownerPanelId = text(record.ownerPanelId);
+  if (ownerPanelId) request.ownerPanelId = ownerPanelId;
+  return request;
+}
+
 function registerIpc(): void {
   ipcMain.handle("desktop:bootstrap", (): DesktopBootstrap => {
     // 渲染端重载（Ctrl+R/崩溃恢复）后 React 状态全丢，但主进程的浏览器标签还活着
@@ -1248,7 +1309,9 @@ function registerIpc(): void {
     // AI 后续操作走已绑定快速路径不再 reveal，用户就看不到 AI 在操作哪个页面。
     const source = loadSettings();
     const settings: DesktopSettings = settingsForRenderer({ ...source, providers: source.providers.map((provider) => ({ ...provider, keyConfigured: Boolean(credentialsCache[provider.id]) })), jevKeyConfigured: Boolean(credentialsCache[JEV_CREDENTIAL_ID]) });
-    return { platform: process.platform, version: app.getVersion(), securityWarning, settings, runtime: latestSnapshot, catalog: latestCatalog ? { models: latestCatalog.models, providers: latestCatalog.providers } : undefined, resources: latestResources, browserTabs: browserPreviewController?.tabIds() ?? [], questions: pendingQuestions.list(), imStatus: imGatewayStatus() };
+    // 后台服务在主进程里跑，渲染端重载不打断它们 —— 看板必须靠这一帧恢复，否则
+    // 「刷新页面 = 服务从看板上消失，而进程还在」。
+    return { platform: process.platform, version: app.getVersion(), securityWarning, settings, runtime: latestSnapshot, catalog: latestCatalog ? { models: latestCatalog.models, providers: latestCatalog.providers } : undefined, resources: latestResources, browserTabs: browserPreviewController?.tabIds() ?? [], questions: pendingQuestions.list(), imStatus: imGatewayStatus(), galleryServices: galleryServices?.list() ?? [] };
   });
   // 主题导入：对话框与全部文件工作都在主进程（渲染端不再用 webkitdirectory + FileReader
   // 读盘、不再把资产变成 base64 过 IPC）。渲染端只拿 CSS 文本与统计。
@@ -1391,14 +1454,11 @@ function registerIpc(): void {
     const data = readGalleryThumb(galleryThumbsDirFor(resolveGalleryAgentDir()), fileName);
     return data ? `data:image/png;base64,${data.toString("base64")}` : undefined;
   });
-  ipcMain.handle("gallery:open-panel", async (_event, input: { id?: unknown; title?: unknown; workspace?: unknown; filePath?: unknown; panel?: unknown; serviceTerminalId?: unknown } | undefined): Promise<{ ok: boolean; message?: string }> => {
+  ipcMain.handle("gallery:open-panel", async (_event, input: { id?: unknown; title?: unknown; workspace?: unknown; filePath?: unknown; panel?: unknown } | undefined): Promise<{ ok: boolean; message?: string }> => {
     const id = typeof input?.id === "string" ? input.id.trim() : "";
     const workspace = typeof input?.workspace === "string" ? input.workspace.trim() : "";
     const filePath = typeof input?.filePath === "string" ? input.filePath.trim() : "";
     if (!id || !workspace || !filePath) return { ok: false, message: "面板作品信息不完整（缺少 id / 工作区 / 入口）" };
-    // 平台为这个面板起的本地服务（带 command + url 的面板才传）：记在窗口上，
-    // 窗口关闭时靠它停服务。
-    const serviceTerminalId = typeof input?.serviceTerminalId === "string" && input.serviceTerminalId.trim() ? input.serviceTerminalId.trim() : undefined;
     // 惰性创建：页面与端点都由常驻的协议路由提供，这里只是建/管窗口。
     panelWindows ??= new PanelWindowController({
       route: panelProtocolRoute,
@@ -1406,25 +1466,16 @@ function registerIpc(): void {
       openExternal: (url) => {
         void shell.openExternal(url).catch(() => undefined);
       },
-      // 面板窗口一关，平台为它起的本地服务也该停（2026-10-11 用户选定：不在后台
-      // 留隐藏进程）。kill 走终端层（幂等：渲染端关标签也会 kill 一次，两条路径重叠），
-      // ConPTY 会把进程树一起带走；再推一条消息让渲染端把那个服务标签一并收掉，
-      // 否则主界面会留一个「已退出」的孤儿标签。主界面退到托盘时窗口并未销毁，推送照样发得出去。
-      onClosed: (appId, closedTerminalId) => {
-        if (closedTerminalId) {
-          try {
-            terminalManager.handle({ type: "kill", terminalId: closedTerminalId });
-          } catch {
-            /* 会话本来就已退出：无事可做 */
-          }
-        }
+      // 面板窗口一关，平台为它起的本地服务也跟着停（2026-10-11 用户选定：不在后台
+      // 留没人用的进程）。2026-11-12 起服务是后台进程（不再是终端会话），认领关系由
+      // 服务记录自己的 ownerPanelId 表达——这里只按作品 id 停掉它，看板随之刷新。
+      onClosed: (appId) => {
         try {
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send("runtime:message", { type: "gallery.panel-closed", id: appId, terminalId: closedTerminalId } satisfies RuntimeMessage);
-          }
+          galleryServices?.stopByOwner(appId);
         } catch {
-          /* 渲染端已经不在（正在退出）：通知失败不影响服务回收 */
+          /* 服务本来就已结束：无事可做 */
         }
+        pushGalleryServices();
       }
     });
     // 面板作品常要直接调外部模型 API（那些服务多半没有 CORS）；放宽只作用于面板窗口。
@@ -1434,8 +1485,7 @@ function registerIpc(): void {
       title: typeof input?.title === "string" && input.title.trim() ? input.title.trim() : "面板",
       workspace,
       filePath,
-      panel: normalizeGalleryPanelOptions(input?.panel),
-      serviceTerminalId
+      panel: normalizeGalleryPanelOptions(input?.panel)
     });
   });
   // —— 作品数据（面板专属）：用量量测与清空 ——
@@ -1458,24 +1508,30 @@ function registerIpc(): void {
     if (!isTerminalCommand(command)) throw new Error("终端命令无效");
     terminalManager.handle(command);
   });
-  // 服务型作品「运行」：先探测地址，连不上就等启动命令把服务跑起来。
-  // 带 terminalId 时同时盯进程状态：命令立刻报错退出就立即回报（附退出码与输出
-  // 尾部），不让用户干等满超时——「命令写错了」与「服务还在启动」必须分得开。
-  ipcMain.handle("gallery:await-service", async (_event, input: { url?: unknown; terminalId?: unknown; timeoutMs?: unknown } | undefined): Promise<GalleryServiceProbe> => {
+  // —— 服务型作品的后台进程（2026-11-12）——
+  // 「运行」不再开终端标签，而是让主进程把启动命令 spawn 成后台进程；就绪判定在这里
+  // 一次性等完（不等渲染端轮询），状态与日志尾部推向作品墙的「运行中的服务」看板。
+  ipcMain.handle("gallery:service-start", async (_event, input: unknown): Promise<GalleryServiceStartResult> => {
+    const request = normalizeServiceRequest(input);
+    if (!request) return { ok: false, message: "后台服务信息不完整（缺少作品 id / 启动命令 / 目录）" };
+    return ensureGalleryServices().start(request);
+  });
+  ipcMain.handle("gallery:service-stop", (_event, id: unknown): boolean => {
+    const serviceId = typeof id === "string" ? id.trim() : "";
+    if (!serviceId) return false;
+    return ensureGalleryServices().stop(serviceId);
+  });
+  ipcMain.handle("gallery:service-restart", async (_event, id: unknown): Promise<GalleryServiceStartResult> => {
+    const serviceId = typeof id === "string" ? id.trim() : "";
+    if (!serviceId) return { ok: false, message: "服务 id 无效" };
+    return ensureGalleryServices().restart(serviceId);
+  });
+  // 探活：现在只剩「此刻可达吗」（服务型作品运行前的一次探测；面板开窗前的判断）。
+  // 等就绪由 gallery:service-start 内部完成——它同时盯着进程退出，无需渲染端轮询。
+  ipcMain.handle("gallery:await-service", async (_event, input: { url?: unknown; timeoutMs?: unknown } | undefined): Promise<GalleryServiceProbe> => {
     const url = typeof input?.url === "string" ? input.url : "";
     if (!url.trim()) return { ok: false, reason: "invalid-url" };
-    const terminalId = typeof input?.terminalId === "string" && input.terminalId.trim() ? input.terminalId : undefined;
-    return waitForService({
-      url,
-      timeoutMs: clampServiceWait(input?.timeoutMs),
-      watch: terminalId ? () => {
-        const status = terminalManager.status(terminalId);
-        // exitCode 有值才算「本次的启动命令已经退出」；未创建与还活着都返回 undefined
-        //（开标签与等待是两个 IPC，后者先到是常态——绝不能把「还没创建」当失败）。
-        // 每次「运行」都用新的终端 id，所以这里不会读到上一次尝试的残留记录。
-        return status.exitCode === undefined ? undefined : { exited: true, exitCode: status.exitCode, tail: status.tail };
-      } : undefined
-    });
+    return waitForService({ url, timeoutMs: clampServiceWait(input?.timeoutMs) });
   });
   ipcMain.handle("ssh:command", (_event, command: SshCommand): SshCommandResult | Promise<SshCommandResult> => {
     if (!isSshCommand(command)) throw new Error("SSH 命令无效");
@@ -1511,5 +1567,23 @@ app.whenReady().then(() => {
   app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); else showMainWindow(); });
 });
 app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
-app.on("before-quit", () => { quitting = true; settingsPersistence?.flush(); imGateway?.dispose(); browserAutomationController?.dispose(); computerOverlayController?.dispose(); browserPreviewController?.dispose(); panelWindows?.dispose(); trayController?.dispose(); terminalManager.disposeAll(); sshConnectionManager?.disposeAll(); runtimeProcess?.kill(); });
+app.on("before-quit", () => {
+  quitting = true;
+  settingsPersistence?.flush();
+  imGateway?.dispose();
+  browserAutomationController?.dispose();
+  computerOverlayController?.dispose();
+  browserPreviewController?.dispose();
+  panelWindows?.dispose();
+  // 后台服务随应用退出全部停掉（用户 2026-11-12 选定：不留孤儿进程；下次启动是干净状态）。
+  if (galleryServicesTimer) {
+    clearTimeout(galleryServicesTimer);
+    galleryServicesTimer = undefined;
+  }
+  galleryServices?.disposeAll();
+  trayController?.dispose();
+  terminalManager.disposeAll();
+  sshConnectionManager?.disposeAll();
+  runtimeProcess?.kill();
+});
 app.on("will-quit", () => { globalShortcut.unregisterAll(); });

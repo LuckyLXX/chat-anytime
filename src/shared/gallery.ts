@@ -26,6 +26,31 @@ import { panelDevHint } from "./panel.js";
  */
 export type GalleryKind = "file" | "server" | "panel";
 
+/**
+ * 服务型作品「进程起来之后去哪」（2026-11-12，用户提出「服务型作品不该在标签页里跑」）：
+ *
+ * - `page`（缺省）：有页面要看。进程**照样在后台**起（宿主是主进程，不是终端标签），
+ *   就绪后打开内置浏览器标签页——关掉标签页不再连带杀掉服务。
+ * - `background`：纯后台服务（反代 / API / 给别的程序用的进程）。只起进程，"运行"
+ *   不打开任何页面，在作品墙的「运行中的服务」看板上管理。
+ *
+ * 两种形态的**进程位置完全相同**（都是后台进程，随应用退出而停），差别只在要不要
+ * 顺手开一个页面。
+ */
+export type GalleryRunMode = "page" | "background";
+
+export const GALLERY_RUN_MODES: readonly GalleryRunMode[] = ["page", "background"];
+
+export const GALLERY_RUN_MODE_LABELS: Record<GalleryRunMode, string> = {
+  page: "后台进程 + 打开页面",
+  background: "纯后台进程（不打开页面）"
+};
+
+/** 作品的生效运行方式（缺省 page，向后兼容旧清单）。 */
+export function galleryRunMode(app: Pick<GalleryApp, "runMode">): GalleryRunMode {
+  return app.runMode === "background" ? "background" : "page";
+}
+
 /** kind=panel 的窗口偏好（缺省值见 PANEL_DEFAULT_*）。 */
 export interface GalleryPanelOptions {
   width?: number;
@@ -84,6 +109,11 @@ export interface GalleryApp {
    *   —— 面板页自己 fetch 这个地址取数，平台只用它判断「服务起没起来」。
    */
   url?: string;
+  /**
+   * kind=server：进程起来之后要不要打开页面（缺省 page）。
+   * 只对服务型作品有意义——网页/面板作品的页面由 kind 自己决定怎么开。
+   */
+  runMode?: GalleryRunMode;
   /** kind=panel：独立窗口的尺寸与置顶偏好（非法值在读侧夹取/丢弃）。 */
   panel?: GalleryPanelOptions;
   /** 缩略图文件名（位于全局 thumbs 目录内，与条目同生共死）。 */
@@ -108,6 +138,8 @@ export interface GalleryDraft {
   entry?: string;
   command?: string;
   url?: string;
+  /** kind=server：page（缺省，就绪后打开页面）/ background（纯后台服务，不打开页面）。 */
+  runMode?: GalleryRunMode;
   /** kind=panel：窗口偏好。 */
   panel?: GalleryPanelOptions;
   description?: string;
@@ -250,6 +282,8 @@ export function normalizeGalleryApp(value: unknown): GalleryApp | undefined {
   if ((kind === "server" || kind === "panel") && command) app.command = command;
   const url = trimmed(record.url);
   if ((kind === "server" || kind === "panel") && url) app.url = url;
+  // runMode 只属于服务型作品；缺省 page 不落字段（与 panel.mode 同一风格：没声明就没字段）。
+  if (kind === "server" && record.runMode === "background") app.runMode = "background";
   if (kind === "panel") {
     const panel = normalizeGalleryPanelOptions(record.panel);
     if (panel) app.panel = panel;
@@ -345,7 +379,6 @@ export type GalleryRunTarget =
   /** 面板：入口网页会被 main 开成独立窗口，不走内置浏览器；command/url 是它的可选本地服务。 */
   | { kind: "panel"; absolutePath: string; command?: string; url?: string }
   | { kind: "server"; url?: string; directory: string; command?: string };
-
 /** 绝对路径拼装（纯字符串操作；调用方已保证 workspace 是绝对路径）。 */
 export function galleryAbsolutePath(workspace: string, entry: string): string {
   const base = workspace.replace(/[\\/]+$/u, "");
@@ -420,17 +453,24 @@ export type GalleryRunPlan =
   /** 面板：把入口网页开成独立窗口（主界面关掉后仍能显示）；options 已归一化。 */
   | { action: "open-panel"; absolutePath: string; options: GalleryPanelOptions }
   /**
-   * 面板 + 本地服务（2026-10-11）：先把 `command` 在终端标签里拉起来、探活通过再开窗。
-   * `directory` 是**入口所在目录**（启动命令在那里执行），`url` 是探活地址。
+   * 面板 + 本地服务（2026-10-11）：先把 `command` 拉起来（**后台进程**，2026-11-12 起
+   * 不再占终端标签）、探活通过再开窗。`directory` 是**入口所在目录**（启动命令在那里执行），
+   * `url` 是探活地址。
    */
   | { action: "start-panel-service"; absolutePath: string; options: GalleryPanelOptions; directory: string; command: string; url: string }
   | { action: "open-browser"; url: string }
-  | { action: "start-service"; directory: string; command: string; url?: string }
+  /**
+   * 服务型作品：把启动命令交给**后台进程**执行（不再开终端标签）。
+   * `openPage` = 就绪后是否顺带打开内置浏览器标签页（纯后台服务为 false）。
+   */
+  | { action: "start-service"; directory: string; command: string; url?: string; openPage: boolean }
+  /** 纯后台服务且此刻已可达（可能是用户手工起的、也可能是上一次留下的）：没有页面可开。 */
+  | { action: "service-up"; url?: string }
   /** 服务型但既连不上、又没登记启动命令：只能如实说，不能装作跑起来了。 */
   | { action: "manual" };
 
 export function galleryRunPlan(
-  app: Pick<GalleryApp, "kind" | "workspace" | "entry" | "url" | "command" | "panel">,
+  app: Pick<GalleryApp, "kind" | "workspace" | "entry" | "url" | "command" | "panel" | "runMode">,
   serviceReachable: boolean
 ): GalleryRunPlan {
   const target = galleryRunTarget(app);
@@ -453,29 +493,122 @@ export function galleryRunPlan(
     return { action: "open-panel", absolutePath: target.absolutePath, options };
   }
   if (target.kind === "file") return { action: "open-file", absolutePath: target.absolutePath };
+  // 纯后台服务（反代 / API / 给别的程序用）：没有页面可开，只要进程在。
+  if (galleryRunMode(app) === "background") {
+    if (serviceReachable) {
+      const plan: GalleryRunPlan = { action: "service-up" };
+      if (target.url) plan.url = target.url;
+      return plan;
+    }
+    if (target.command) {
+      const plan: GalleryRunPlan = { action: "start-service", directory: target.directory, command: target.command, openPage: false };
+      if (target.url) plan.url = target.url;
+      return plan;
+    }
+    return { action: "manual" };
+  }
   if (target.url && serviceReachable) return { action: "open-browser", url: target.url };
   if (target.command) {
-    return target.url
-      ? { action: "start-service", directory: target.directory, command: target.command, url: target.url }
-      : { action: "start-service", directory: target.directory, command: target.command };
+    const plan: GalleryRunPlan = { action: "start-service", directory: target.directory, command: target.command, openPage: Boolean(target.url) };
+    if (target.url) plan.url = target.url;
+    return plan;
   }
   return { action: "manual" };
 }
 
 /**
- * 服务型作品的「服务终端」标签 id：同一个作品**每次运行都不一样**。
+ * 服务型作品的进程宿主：**主进程的后台进程**（2026-11-12 起的唯一形态）。
  *
- * 第一版用固定 id（`terminal-gallery-<appId>`），用户第一次真机使用就撞上了：终端 id
- * 是主进程记住「这个进程为啥退出」的键，固定 id 意味着上次尝试的退出记录（用户关掉
- * 服务标签、强杀进程都会留下）还在表里——而「开标签」与「等就绪」是两个 IPC，
- * 等待方常常在新 PTY 建好之前就读到旧记录，于是直接弹「启动命令已退出（代码
- * -1073741510）」，可终端里服务其实正在正常启动（2026-09-23 实测）。
- * 每次新 id 同时修掉另一个坑：旧标签的 PTY 已经死了时，重复用同一个 id 不会再发
- * create，服务永远起不起来；现在「运行」先回收旧标签再开新标签，一定是一个全新的
- * 服务进程（地址真的可达时根本不会走到这条分支，见 galleryRunPlan）。
+ * 历史：以前是「在预览面板里开一个终端标签跑命令，进程与标签同生共死」。用户真机使用时
+ * 暴露了两个问题：① 那些「给别的服务用」的反代 / API 进程根本不需要看终端，却占了主界面
+ * 一个标签；② 一关标签（或关浏览器页面）服务就没了，用户没法边聊边用。现在进程由
+ * `main/gallery-service-runner.ts` 持有（不占任何标签），作品墙顶部的「运行中的服务」看板
+ * 是它的可见/可停入口。
+ *
+ * 这个字段只是「就绪后要不要顺手开页面」，见 GalleryRunMode 的说明。
  */
-export function galleryServiceTerminalId(appId: string, nonce: string): string {
-  return `terminal-gallery-${appId}-${nonce}`;
+
+/** 后台服务的生命周期状态。 */
+export type GalleryServiceStatus = "starting" | "running" | "stopped" | "failed";
+
+export const GALLERY_SERVICE_STATUS_LABELS: Record<GalleryServiceStatus, string> = {
+  starting: "启动中",
+  running: "运行中",
+  stopped: "已停止",
+  failed: "启动失败"
+};
+
+/**
+ * 一个后台服务（作品墙看板的数据形状，main → 渲染端整表推送）。
+ *
+ * 刻意带上 title / command / url 而不仅是 appId：作品被删掉之后，看板上那个还在跑的
+ * 进程仍然要能被认出来、能被停掉（它不会因为清单里没这张卡就自己消失）。
+ */
+export interface GalleryServiceRecord {
+  id: string;
+  appId: string;
+  title: string;
+  command: string;
+  /** 命令执行目录（绝对路径）。 */
+  cwd: string;
+  /** 探活地址（没有 url 的服务不探活，spawn 后直接算就绪）。 */
+  url?: string;
+  /** 面板作品的本地服务：面板窗口关掉时自动停（网关侧 stopByOwner）。 */
+  ownerPanelId?: string;
+  pid?: number;
+  status: GalleryServiceStatus;
+  /** 探活是否通过（无 url 的服务视为 true）。 */
+  ready: boolean;
+  startedAt: number;
+  endedAt?: number;
+  exitCode?: number;
+  /** 一句话说明（超时 / spawn 失败 / 用户停止等）。 */
+  note?: string;
+  /** 输出尾部（ANSI 已剥，长度≤ GALLERY_SERVICE_LOG_TAIL_CHARS）。 */
+  log?: string;
+}
+
+/** 推送/展示的输出尾部上限（完整环形缓冲在 runner 内，更大）。 */
+export const GALLERY_SERVICE_LOG_TAIL_CHARS = 4_000;
+
+/** 看板只记这么多个**已结束**的服务（活着的永远不淘汰）。 */
+export const MAX_GALLERY_SERVICE_RECORDS = 24;
+
+/**
+ * 起一个后台服务的请求（渲染端 → 主进程，`gallery:service-start`）。
+ *
+ * 带上 title / command / cwd / url 而不是只带 appId：主进程不持有作品清单（它在
+ * utility 进程里），也正因为如此，清单里的作品被删掉之后看板上那个仍在跑的进程
+ * 依旧能显示自己的名字与命令。
+ */
+export interface GalleryServiceStartRequest {
+  appId: string;
+  title: string;
+  command: string;
+  /** 命令执行目录（绝对路径）。 */
+  cwd: string;
+  /** 探活地址；没有它就不探活，spawn 成功即算就绪。 */
+  url?: string;
+  /** 面板作品的本地服务：面板窗口关掉时按它自动停。 */
+  ownerPanelId?: string;
+}
+
+/** `gallery:service-start` 的回执。 */
+export type GalleryServiceStartResult =
+  | {
+    ok: true;
+    /** 平台拉起的（或复用的）服务；`external` 时没有记录（那是别人起的进程）。 */
+    record?: GalleryServiceRecord;
+    /** true = 复用同一个作品的同一个活进程（没有额外 spawn）。 */
+    reused: boolean;
+    /** true = 地址已可达但不是平台起的，没碰它。 */
+    external: boolean;
+  }
+  | { ok: false; message: string; failure?: GalleryServiceFailure; record?: GalleryServiceRecord };
+
+/** 服务是否还活着（启动中 / 运行中）——看板与卡片角标的唯一判据。 */
+export function galleryServiceLive(service: Pick<GalleryServiceRecord, "status">): boolean {
+  return service.status === "starting" || service.status === "running";
 }
 
 /** 服务起不来的原因（主进程 await-service 回执与本地判定共用同一形状）。 */
@@ -501,10 +634,13 @@ export function compactServiceTail(text: string | undefined, limit = GALLERY_SER
  * - exited：命令自己退出了（写错了/依赖没装/端口被占）——带上退出码与输出尾部，
  *   这是最需要「原因」的一类；
  * - ended：命令**正常结束（退出码 0）**但服务没在宽限窗口内就绪——典型是
- *   「命令只是把程序拉起来」（pythonw / start 这类启动器形态），要点明「终端标签
- *   显示已退出是正常的」，否则用户会以为启动失败；
+ *   「命令只是把程序拉起来」（pythonw / start 这类启动器形态），要点明「进程结束
+ *   是正常的」，否则用户会以为启动失败；
  * - timeout：进程还在跑但地址在预算内没就绪，明确给出「再点一次运行」的出路；
  * - invalid-url：登记的服务地址连解析都不行（多是自己手写的地址写错了）。
+ *
+ * 2026-11-12 起服务进程不再占用终端标签，所以输出指向作品墙看板的日志，而不再是
+ * 「终端标签」——文案与事实必须同步，否则用户会去找一个不存在的标签。
  */
 export function galleryServiceFailureMessage(
   app: Pick<GalleryApp, "title" | "url">,
@@ -514,19 +650,19 @@ export function galleryServiceFailureMessage(
   if (failure.reason === "exited") {
     const code = typeof failure.exitCode === "number" ? `（代码 ${failure.exitCode}）` : "";
     const tail = compactServiceTail(failure.tail);
-    return `「${app.title}」的启动命令已退出${code}，服务没有起来。${tail ? `输出尾部：${tail}` : "请看终端标签里的输出。"}`;
+    return `「${app.title}」的启动命令已退出${code}，服务没有起来。${tail ? `输出尾部：${tail}` : "完整输出见作品墙「运行中的服务」里的日志。"}`;
   }
   if (failure.reason === "ended") {
     const seconds = Math.max(1, Math.round(GALLERY_SERVICE_LAUNCHER_GRACE_MS / 1000));
     const where = app.url ? `（${app.url} 连不上）` : "";
-    return `「${app.title}」的启动命令已正常结束（代码 0）${where}，但服务在 ${seconds} 秒内没有就绪：如果这条命令只是把程序拉起来（pythonw / start 这类会立刻返回的写法），终端标签显示「已退出」是正常的，稍等一下再点一次「运行」。`;
+    return `「${app.title}」的启动命令已正常结束（代码 0）${where}，但服务在 ${seconds} 秒内没有就绪：如果这条命令只是把程序拉起来（pythonw / start 这类会立刻返回的写法），进程结束是正常的，稍等一下再点一次「运行」。`;
   }
   if (failure.reason === "invalid-url") {
     return `「${app.title}」登记的服务地址无法解析${app.url ? `（${app.url}）` : ""}：点「继续开发」让 AI 修正后再运行。`;
   }
   const seconds = Math.max(1, Math.round(waitMs / 1000));
   const where = app.url ? `（${app.url} 连不上）` : "";
-  return `「${app.title}」的服务在 ${seconds} 秒内没有就绪${where}：可能还在启动，稍后再点一次「运行」；输出见终端标签。`;
+  return `「${app.title}」的服务在 ${seconds} 秒内没有就绪${where}：进程已转到后台继续跑，稍后在看板上看日志，或再点一次「运行」。`;
 }
 
 /** 缩略图文件名（全局 thumbs 目录内）：`gallery-<yyyyMMdd-HHmmss-mmm>.png`，与截图同风格。 */
@@ -700,6 +836,12 @@ export function composeGalleryDevMessage(app: GalleryApp): string {
   if (app.description) lines.push(`说明：${app.description}`);
   if (app.command) lines.push(`启动命令：${app.command}`);
   if (app.url) lines.push(`服务地址：${app.url}`);
+  if (app.kind === "server") {
+    // 服务进程的宿主是主进程后台进程（2026-11-12），继续开发的人需要知道这件事：
+    // 启动命令里不能再假设「有人看着 stdout」，也不能依赖交互输入。
+    lines.push(`运行方式：${GALLERY_RUN_MODE_LABELS[galleryRunMode(app)]}——启动命令由平台作为**后台进程**执行（不在终端标签里），输出会被收进作品墙顶部「运行中的服务」看板，应用退出时统一停掉。`);
+    if (app.runMode === "background") lines.push("这个作品是纯后台服务（给别的程序用）：点「运行」只起进程、不打开页面。");
+  }
   if (app.kind === "panel") {
     const size = panelWindowSize(app.panel);
     const mode = panelMode(app.panel);

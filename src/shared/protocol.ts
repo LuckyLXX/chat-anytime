@@ -1374,14 +1374,14 @@ export interface DesignDocSummary {
 // 运行一律走内置浏览器 + 本地静态服务（单文件/多文件/服务型统一心智）；
 // 数据模型与纯函数在 shared/gallery.ts，渲染端与主进程共用同一套判定。
 // 命名同 automation：**下划线工具名**（gallery_publish），命令用点号。
-import type { GalleryApp as GalleryAppModel, GalleryDataClearResult, GalleryDataResult, GalleryDraft as GalleryDraftModel, GalleryPanelOptions, GalleryServiceFailure } from "./gallery.js";
-export type { GalleryApp, GalleryDraft, GalleryKind, GalleryPanelOptions, GalleryRunTarget } from "./gallery.js";
+import type { GalleryApp as GalleryAppModel, GalleryDataClearResult, GalleryDataResult, GalleryDraft as GalleryDraftModel, GalleryPanelOptions, GalleryServiceFailure, GalleryServiceRecord, GalleryServiceStartRequest, GalleryServiceStartResult } from "./gallery.js";
+export type { GalleryApp, GalleryDraft, GalleryKind, GalleryPanelOptions, GalleryRunMode, GalleryRunTarget, GalleryServiceRecord, GalleryServiceStartRequest, GalleryServiceStartResult, GalleryServiceStatus } from "./gallery.js";
 
 /**
  * 服务型作品「运行」的探测/等待回执（gallery:await-service）。
  *
- * `timeoutMs: 0` = 单次探测（「服务现在跑着吗」）；带 terminalId 时主进程会同时
- * 盯启动进程的状态，已退出就立刻回报 exited（附退出码与输出尾部），不必干等满超时。
+ * `timeoutMs: 0` = 单次探测（「服务现在跑着吗」）。等「服务就绪」本身现在由主进程的
+ * 后台进程管理器负责（gallery:service-start 一次性等到结果），这条通道只剩探活。
  */
 export interface GalleryServiceProbe extends GalleryServiceFailure {
   ok: boolean;
@@ -2918,12 +2918,13 @@ export type RuntimeMessage =
   /** 发布结果提示（缩略图成功/降级、以及失败原因）；渲染端 toast。 */
   | { type: "gallery.notice"; kind: "ok" | "warn"; message: string }
   /**
-   * 面板窗口关闭（2026-10-11）：带本地服务的面板（command + url）窗口一关，主进程
-   * 就 kill 了那个终端会话，并推这条消息让渲染端把对应的服务标签一并收掉
-   * （否则主界面里会留一个「已退出」的孤儿标签）。
-   * `terminalId` 是平台为这个面板起的服务会话；没声明服务的面板不带。
+   * 后台服务看板的全量快照（启动 / 就绪 / 退出 / 日志 / 停止后推送，主进程侧节流）。
+   *
+   * 2026-11-12 起服务型作品的进程归主进程的后台进程管理器（不再占终端标签），
+   * 这条推送就是作品墙「运行中的服务」看板的数据源——面板关窗停服务也是同一张表
+   * 的变化（旧版那条「面板已关闭」的孤儿标签消息随之删除）。
    */
-  | { type: "gallery.panel-closed"; id: string; terminalId?: string };
+  | { type: "gallery.services"; services: GalleryServiceRecord[] };
 
 export interface DesktopBootstrap {
   platform: string;
@@ -2939,6 +2940,11 @@ export interface DesktopBootstrap {
   questions?: QuestionRequest[];
   /** IM 通道当前状态（主进程网关快照；缺省 = 没有网关或未初始化）。 */
   imStatus?: ImStatus;
+  /**
+   * 正在跑的后台服务（渲染端重载后看板要能立即恢复：进程在主进程里，不随页面刷新）。
+   * 缺省/空 = 没有服务在跑。
+   */
+  galleryServices?: GalleryServiceRecord[];
 }
 
 export interface DesktopApi {
@@ -2973,15 +2979,26 @@ export interface DesktopApi {
   /** 作品缩略图（data URL）：存在全局 agentDir，不在工作区内，故走专用只读通道；缺失返回 undefined。 */
   galleryThumb(fileName: string): Promise<string | undefined>;
   /**
-   * 服务型作品「运行」的探测/等待：timeoutMs 缺省 0 = 只探一次；带 terminalId 时
-   * 主进程同时盯启动进程，已退出则提前回报 exited（附退出码与输出尾部）。
+   * 服务型作品「运行」的探测：timeoutMs 缺省 0 = 只探一次（「此刻可达吗」）。
+   * 等「服务就绪」由 galleryServiceStart 一次性完成。
    */
-  galleryAwaitService(input: { url: string; terminalId?: string; timeoutMs?: number }): Promise<GalleryServiceProbe>;
+  galleryAwaitService(input: { url: string; timeoutMs?: number }): Promise<GalleryServiceProbe>;
+  /**
+   * 起一个后台服务（服务型作品与面板的本地服务共用）：命令由主进程 spawn，不占终端标签。
+   * 同作品同命令已在跑则复用；登记了 url 且已可达则不动它（external）。
+   */
+  galleryServiceStart(input: GalleryServiceStartRequest): Promise<GalleryServiceStartResult>;
+  /** 停掉一个后台服务（结束整棵进程树）；已结束的记录会被移出看板。 */
+  galleryServiceStop(id: string): Promise<boolean>;
+  /** 重启一个后台服务（先停、等退出、再用同一份登记起新的）。 */
+  galleryServiceRestart(id: string): Promise<GalleryServiceStartResult>;
   /**
    * 面板型作品「运行」：把入口网页开成独立于主界面的窗口（同作品 id 复用已有窗口）。
    * 打不开时 ok=false 并附原因（入口不在工作区内 / 不是网页文件 / 静态服务起不来）。
+   * 面板的本地服务不走这里——它由 galleryServiceStart 起（ownerPanelId = 作品 id），
+   * 面板窗口关闭时主进程按 owner 自动停。
    */
-  galleryOpenPanel(input: { id: string; title: string; workspace: string; filePath: string; panel?: GalleryPanelOptions; serviceTerminalId?: string }): Promise<{ ok: boolean; message?: string }>;
+  galleryOpenPanel(input: { id: string; title: string; workspace: string; filePath: string; panel?: GalleryPanelOptions }): Promise<{ ok: boolean; message?: string }>;
   /**
    * 面板作品的数据用量（作品墙卡片的「数据…」）。面板窗口没开着时主进程会开一个
    * 临时隐藏窗口去量（量完即关）；量不到不是错误，回 ok:false + 原因即可。

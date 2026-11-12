@@ -2972,6 +2972,10 @@ async function publishGalleryApp(draft: GalleryDraft, workspaceRoot: string | un
   // 面板尺寸就是在这一层丢过）。
   if ((draft.kind === "server" || draft.kind === "panel") && draft.command) app.command = draft.command;
   if ((draft.kind === "server" || draft.kind === "panel") && draft.url) app.url = draft.url;
+  // 运行方式只属于服务型作品：page（缺省，就绪后打开页面）/ background（纯后台服务）。
+  // 漏了这一行，工具/对话框里声明的 runMode 会被静默丢掉，纯后台的反代作品每次
+  // 「运行」都会多弹一个没人看的页面（panel 尺寸就是在同一层丢过的老教训）。
+  if (draft.kind === "server" && draft.runMode === "background") app.runMode = "background";
   // 面板窗口偏好必须在这里落地：`upsertGalleryApp` 只会原样保留 `app` 上已有的字段，
   // 漏了这一行则「对话框里填了尺寸/置顶、工具也声明了」全都会静默丢掉，发布出去
   // 的面板永远以缺省 420×560、不置顶开窗（2026-09-26 评审发现）。

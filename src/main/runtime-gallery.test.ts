@@ -40,6 +40,13 @@ describe("validatePublishInput", () => {
     expect(draft.panel).toEqual({ width: 1180, height: 780 });
   });
 
+  it("server 类型保留 runMode（page 缺省不写；非法值当没写；别的类型带它就是脏数据）", () => {
+    expect(validatePublishInput({ path: "apps/proxy", kind: "server", title: "反代", command: "node proxy.js", runMode: "background" }).runMode).toBe("background");
+    expect(validatePublishInput({ path: "apps/web", kind: "server", title: "网页", command: "npm run dev", runMode: "page" }).runMode).toBe("page");
+    expect(validatePublishInput({ path: "apps/web", kind: "server", title: "网页", runMode: "bogus" }).runMode).toBeUndefined();
+    expect(validatePublishInput({ path: "a.html", kind: "file", title: "t", runMode: "background" }).runMode).toBeUndefined();
+  });
+
   it("panel 类型保留归一化后的窗口偏好；非法 panel 丢字段而不是报错", () => {
     const draft = validatePublishInput({ path: "panels/status/index.html", kind: "panel", title: "会话状态", panel: { width: 320, height: 700, alwaysOnTop: true } });
     expect(draft.kind).toBe("panel");

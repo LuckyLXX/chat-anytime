@@ -12,6 +12,7 @@ import type {
   DesignNode,
   DesktopSettings,
   GalleryApp,
+  GalleryServiceRecord,
   HookEventName,
   ImStatus,
   MemoryHealth,
@@ -610,6 +611,13 @@ interface DesktopState {
   designDocs: DesignDocSummary[];
   /** 作品清单（gallery.apps 推送全量替换）；全局跨工作区，启动时由 initialize 推一次。 */
   galleryApps: GalleryApp[];
+  /**
+   * 后台服务看板（gallery.services 推送全量替换 + bootstrap 水合一帧）。
+   *
+   * 服务进程在主进程里跑，不随渲染端重载消失——所以重载后必须靠 bootstrap 补一帧，
+   * 否则「刷新页面 → 看板空了但进程还在」。
+   */
+  galleryServices: GalleryServiceRecord[];
   /** Skill 商店（公开 SkillHub）面板状态（skill-store-result 推送按 requestId 认领）。 */
   skillStore: SkillStoreState;
   /** 内网 Skill 商店（LanSkills）面板状态：与 skillStore 同构，结果按 source 路由。 */
@@ -782,6 +790,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   paletteOpenTick: 0,
   designDocs: [],
   galleryApps: [],
+  galleryServices: [],
   skillStore: { listLoading: false, listSkills: [], listTotal: 0, topSkills: [], topLoading: false, categories: [], categoriesLoading: false, detailLoading: false, detailVersions: [], detailFiles: [], detailTotalBytes: 0, installs: [] },
   intranetStore: { listLoading: false, listSkills: [], listTotal: 0, topSkills: [], topLoading: false, categories: [], categoriesLoading: false, detailLoading: false, detailVersions: [], detailFiles: [], detailTotalBytes: 0, installs: [] },
   intranetSource: { saving: false },
@@ -818,6 +827,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
       // 作品清单必须从 bootstrap 水合一帧：utility 的启动推送早于本订阅（main 先
       // fork runtime 再建窗口），只靠推送则冷启动后作品墙一直空到下一次变更。
       galleryApps: bootstrap.resources?.gallery ?? get().galleryApps,
+      galleryServices: bootstrap.galleryServices ?? get().galleryServices,
       // 主进程存活的浏览器标签：渲染端重载后 React 状态全丢，靠这份清单恢复面板标签
       //（见 App 的启动恢复 effect；不自动开面板，AI 下次 navigate 的 when-hidden reveal 会兕底）。
       restoredBrowserTabs: bootstrap.browserTabs ?? [],
@@ -1162,6 +1172,10 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
         break;
       case "gallery.notice":
         set({ galleryNotice: { kind: message.kind, message: message.message, at: Date.now() } });
+        break;
+      case "gallery.services":
+        // 全量替换（主进程侧已节流）；看板只做投影，不缓存任何进程状态。
+        set({ galleryServices: message.services });
         break;
       case "skill-store-result":
         set((state) => applySkillStoreMessage(state, message.result));

@@ -1,6 +1,6 @@
 import { Database, LayoutGrid, Loader2, RefreshCw, X } from "lucide-react";
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { GALLERY_PANEL_MODE_LABELS, PANEL_MODES, type GalleryApp, type GalleryDataUsage, type GalleryDraft, type GalleryKind, type GalleryPanelEdge, type GalleryPanelMode, type GalleryPanelOptions } from "../../../shared/gallery";
+import { GALLERY_PANEL_MODE_LABELS, PANEL_MODES, type GalleryApp, type GalleryDataUsage, type GalleryDraft, type GalleryKind, type GalleryPanelEdge, type GalleryPanelMode, type GalleryPanelOptions, type GalleryServiceRecord } from "../../../shared/gallery";
 import { GalleryWall } from "./GalleryWall";
 import { useOverlayLayer } from "../lib/overlay-layers";
 
@@ -12,15 +12,20 @@ import { useOverlayLayer } from "../lib/overlay-layers";
  * 顶栏下拉的「打开作品墙」在任何时刻都能打开同一份内容（同一个 GalleryWall）。
  */
 
-export function GalleryWallDialog({ apps, workspace, onRun, onDevelop, onRemove, onReveal, onData, onPublish, onClose }: {
+export function GalleryWallDialog({ apps, workspace, services, onRun, onDevelop, onRemove, onReveal, onData, onPublish, onOpenServicePage, onStopService, onRestartService, onClose }: {
   apps: GalleryApp[];
   workspace?: string;
+  /** 后台服务看板（与空态作品墙共用同一个 GalleryWall）。 */
+  services: GalleryServiceRecord[];
   onRun(app: GalleryApp): void;
   onDevelop(app: GalleryApp): void;
   onRemove(app: GalleryApp): void;
   onReveal(app: GalleryApp): void;
   onData(app: GalleryApp): void;
   onPublish(): void;
+  onOpenServicePage(service: GalleryServiceRecord): void;
+  onStopService(service: GalleryServiceRecord): void;
+  onRestartService(service: GalleryServiceRecord): void;
   onClose(): void;
 }): ReactNode {
   // 全屏弹层登记：预览面板里的内置浏览器是原生 WebContentsView，永远浮在 DOM 之上。
@@ -34,7 +39,21 @@ export function GalleryWallDialog({ apps, workspace, onRun, onDevelop, onRemove,
           <button className="icon-button" type="button" title="关闭" aria-label="关闭作品墙" onClick={onClose}><X size={16} /></button>
         </header>
         <div className="gallery-wall-dialog-body">
-          <GalleryWall apps={apps} workspace={workspace} embedded onRun={onRun} onDevelop={onDevelop} onPublish={onPublish} onRemove={onRemove} onReveal={onReveal} onData={onData} />
+          <GalleryWall
+            apps={apps}
+            workspace={workspace}
+            embedded
+            services={services}
+            onRun={onRun}
+            onDevelop={onDevelop}
+            onPublish={onPublish}
+            onRemove={onRemove}
+            onReveal={onReveal}
+            onData={onData}
+            onOpenServicePage={onOpenServicePage}
+            onStopService={onStopService}
+            onRestartService={onRestartService}
+          />
         </div>
       </div>
     </div>
@@ -177,6 +196,8 @@ export function GalleryPublishDialog({ initial, workspace, onSubmit, onClose }: 
   const [path, setPath] = useState(initial?.path ?? "");
   const [command, setCommand] = useState("");
   const [url, setUrl] = useState("");
+  // 纯后台服务（runMode="background"）：反代 / API / 给别的程序用的进程——没有页面可开。
+  const [backgroundOnly, setBackgroundOnly] = useState(false);
   const [description, setDescription] = useState("");
   // 封面：留空 = 自动（入口截图 / 服务页截图 / 占位）；填了就用工作区里的这张图。
   const [cover, setCover] = useState("");
@@ -222,6 +243,7 @@ export function GalleryPublishDialog({ initial, workspace, onSubmit, onClose }: 
     const draft: GalleryDraft = { title: title.trim(), kind, path: path.trim() };
     if (command.trim()) draft.command = command.trim();
     if (url.trim()) draft.url = url.trim();
+    if (kind === "server" && backgroundOnly) draft.runMode = "background";
     if (description.trim()) draft.description = description.trim();
     if (cover.trim()) draft.cover = cover.trim();
     if (kind === "panel") {
@@ -290,8 +312,14 @@ export function GalleryPublishDialog({ initial, workspace, onSubmit, onClose }: 
           )}
           {kind === "server" && (
             <>
-              <label>启动命令（可选）<input value={command} placeholder="如：npm run dev" onChange={(event) => setCommand(event.target.value)} /></label>
+              <label>启动命令（可选）<input value={command} placeholder="如：npm run dev（在后台进程里执行，需能非交互长期运行）" onChange={(event) => setCommand(event.target.value)} /></label>
               <label>服务地址（可选）<input value={url} placeholder="如：http://localhost:5173" onChange={(event) => setUrl(event.target.value)} /></label>
+              <label className="gallery-panel-ontop">
+                <input type="checkbox" checked={backgroundOnly} onChange={(event) => setBackgroundOnly(event.target.checked)} /> 纯后台服务（不打开页面）
+              </label>
+              <span className="gallery-dialog-hint">
+                服务的进程总是跑在后台（不占标签页，关掉页面也不会停）；作品墙顶部的「运行中的服务」可以看日志、停止、重启。反代 / API / 给别的程序用的服务勾上「纯后台」，运行时就只起进程、不弹页面。
+              </span>
             </>
           )}
           {/* 面板也能带一个本地服务（2026-10-11）：面板页没有 preload 也跑不了外部命令，

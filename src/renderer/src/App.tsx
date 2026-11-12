@@ -77,7 +77,7 @@ import { DelegationTranscript } from "./components/DelegationTranscript";
 import { detailTitle } from "./components/QuestionPanel";
 import { compactPath, type Artifact } from "./lib/content";
 import { composePickMessage } from "./lib/browser-pick";
-import { composeGalleryDevMessage, galleryRunPlan, galleryServiceFailureMessage, galleryServiceTerminalId, GALLERY_SERVICE_WAIT_MS, workspaceLabel, type GalleryApp, type GalleryDraft, type GalleryKind, type GalleryPanelOptions } from "../../shared/gallery";
+import { composeGalleryDevMessage, galleryRunPlan, galleryServiceLive, workspaceLabel, type GalleryApp, type GalleryDraft, type GalleryKind, type GalleryPanelOptions, type GalleryServiceRecord } from "../../shared/gallery";
 import { GalleryMenu } from "./components/GalleryMenu";
 import { GalleryWall } from "./components/GalleryWall";
 import { GalleryDataDialog, GalleryPublishDialog, GalleryWallDialog } from "./components/GalleryDialogs";
@@ -530,6 +530,8 @@ export function App(): ReactNode {
   const question = paneQuestionRequest(questions, paneFocusOrder);
   const settings = useDesktopStore((state) => state.settings);
   const galleryApps = useDesktopStore((state) => state.galleryApps);
+  // 后台服务看板的数据（主进程推送；进程不随页面/主窗口关闭而停）。
+  const galleryServices = useDesktopStore((state) => state.galleryServices);
   const [messageActionError, setMessageActionError] = useState<string>();
   const setActionError = useCallback((message?: string): void => {
     setMessageActionError(message);
@@ -891,20 +893,17 @@ export function App(): ReactNode {
   // 全可用）；绝不用沙箱 iframe——它永不同时给 allow-scripts 与 allow-same-origin，
   // 窗口内的作品会静默丢 localStorage / 相对路径 fetch。
   //
-  // 服务型作品是例外的一半：地址连不上时不再只能「开个连不上的页」，而是开一个
-  // 终端标签在那个作品目录里跑启动命令，等地址真的可访问再打开浏览器（2026-09-23
-  // 与用户对齐：进程与标签同生共死、已可达不重启）。
+  // **服务型作品的进程一律是主进程的后台进程**（2026-11-12 用户提出「服务不该占标签页，
+  // 而我可能会关掉页面」后改的）：点「运行」不再开终端标签，而是让主进程 spawn 启动命令，
+  // 就绪判定也在主进程里完成；进程活到用户在看板上点停止、或应用退出为止。两种服务形态的
+  // 差别只在「就绪后要不要顺手开页面」（GalleryRunMode：page / background）。
   //
   // 标签页打开走 openPreviewTarget（定义在本块之后，且需要稳定身份给 memo 用），
   // 所以用 ref 间接引用：runGalleryApp 只在事件回调里运行，那时 ref 必已就位。
   const openPreviewTargetRef = useRef<(target: PreviewTarget, id?: string) => void>(() => {});
-  /** 打开指定标签（服务型作品的终端标签用它，要带 cwd/initialCommand），同样后定义。 */
-  const openTerminalPreviewRef = useRef<(target: PreviewTarget, id: string) => void>(() => {});
-  /** 关掉标签（服务型作品运行前先回收同一作品的旧服务标签），同样后定义。 */
-  const closePreviewTabRef = useRef<(id: string) => void>(() => {});
 
-  /** 开浏览器标签并记一次运行（网页作品与服务型作品共用这条尾巴）。 */
-  const openGalleryBrowserTab = useCallback(async (app: GalleryApp, url: string): Promise<void> => {
+  /** 开浏览器标签并记一次运行（网页作品、服务型作品与看板的「打开页面」共用这条尾巴）。 */
+  const openGalleryBrowserTab = useCallback(async (app: Pick<GalleryApp, "id" | "title">, url: string): Promise<void> => {
     // 每次「运行」都重开标签页：旧标签可能已被用户改过地址或处于错误页，
     // 重开才能保证「运行」= 进到作品的初始页。
     const existing = previewRef.current?.tabs.find((tab) => tab.target.type === "browser" && tab.target.galleryId === app.id);
@@ -915,55 +914,50 @@ export function App(): ReactNode {
     await window.piDesktop.browserPreview({ type: "tab-meta", tabId, initialUrl: url, galleryId: app.id });
     openPreviewTargetRef.current({ type: "browser", id: tabId, title: app.title, galleryId: app.id }, tabId);
     // 记录一次运行（lastRunAt + 重排）只是成功路径的事：打不开页面就不算跑过。
+    // 作品已被删除时这条命令会失败——那是无害的（没有卡片可刷新）。
     void window.piDesktop.send({ type: "gallery.run", id: app.id }).catch(() => undefined);
   }, []);
 
   /**
-   * 把一个作品的本地服务拉起来并等它就绪（2026-10-11 从 start-service 分支抽出）：
-   * 服务型作品与「带本地服务的面板」共用同一条时序。
+   * 把一个作品的启动命令交给主进程的后台进程管理器，并等它就绪。
    *
-   * 先回收同一作品上一次的服务标签：它的 PTY 可能已经死了（命令报错退出）也可能
-   * 卡在启动中，而不发 create 就永远等不到服务；关标签 = kill 它的 PTY，所以这次
-   * 运行一定是一个全新的服务进程。终端 id 每次运行都不重样：否则上一次的退出记录
-   * 会被等待方读成这一次的结果（2026-09-23 真机事故，见 galleryServiceTerminalId）。
-   *
-   * 成功时把 terminalId 交回调用方处置：面板开窗失败要立刻停掉它，开窗成功后平台
-   * 还要靠它在面板窗口关闭时收尾。
+   * 服务型作品与「带本地服务的面板」共用同一条时序（2026-11-12 起两者都不再开终端标签）：
+   * 主进程 spawn → 探活 → 返回记录或可读的失败原因。就绪预算、进程退出判定、日志尾部
+   * 都在主进程那一侧（`gallery-service-runner.ts`），渲染端只管开场与收尾。
    */
-  const ensureGalleryService = useCallback(async (
+  const startGalleryService = useCallback(async (
     app: GalleryApp,
-    plan: { directory: string; command: string; url?: string }
-  ): Promise<{ ok: true; terminalId: string } | { ok: false; message: string }> => {
-    const previous = previewRef.current?.tabs.find((tab) => tab.target.type === "terminal" && tab.target.galleryId === app.id);
-    if (previous) closePreviewTabRef.current(previous.id);
-    const terminalId = galleryServiceTerminalId(app.id, crypto.randomUUID().slice(0, 8));
-    openTerminalPreviewRef.current({ type: "terminal", galleryId: app.id, cwd: plan.directory, initialCommand: plan.command, title: `${app.title} · 服务` }, terminalId);
-    if (!plan.url) {
-      return { ok: false, message: `已在终端启动「${app.title}」：${plan.command}。该作品未登记服务地址，起好后请再点一次「运行」。` };
-    }
-    const probe = await window.piDesktop.galleryAwaitService({ url: plan.url, terminalId, timeoutMs: GALLERY_SERVICE_WAIT_MS });
-    if (!probe.ok) return { ok: false, message: galleryServiceFailureMessage(app, probe) };
-    return { ok: true, terminalId };
+    plan: { directory: string; command: string; url?: string; ownerPanelId?: string }
+  ): Promise<{ ok: true; service?: GalleryServiceRecord } | { ok: false; message: string }> => {
+    const request = {
+      appId: app.id,
+      title: app.title,
+      command: plan.command,
+      cwd: plan.directory,
+      ...(plan.url ? { url: plan.url } : {}),
+      ...(plan.ownerPanelId ? { ownerPanelId: plan.ownerPanelId } : {})
+    };
+    const result = await window.piDesktop.galleryServiceStart(request);
+    if (!result.ok) return { ok: false, message: result.message };
+    return { ok: true, ...(result.record ? { service: result.record } : {}) };
   }, []);
 
   /** 开面板窗口（直开窗、先起服务再开窗两条路径共用）。返回窗口是否真的开出来了。 */
   const openGalleryPanel = useCallback(async (
     app: GalleryApp,
     absolutePath: string,
-    options: GalleryPanelOptions,
-    serviceTerminalId?: string
+    options: GalleryPanelOptions
   ): Promise<boolean> => {
     // 面板作品不跑在内置浏览器里，而是让主进程开一个独立窗口（主界面关掉后仍在）。
     // 窗口打不开（入口不在工作区/不是网页/静态服务起不来）时主进程会给出具体原因，
-    // 这里原样报给用户。serviceTerminalId 是平台为这个面板起的本地服务，窗口关闭时
-    // 主进程靠它停掉服务（带本地服务的面板才有）。
+    // 这里原样报给用户。平台为面板起的本地服务按 ownerPanelId 归属，窗口关闭时主进程
+    // 自己会停掉它（不需要渲染端传会话 id）。
     const result = await window.piDesktop.galleryOpenPanel({
       id: app.id,
       title: app.title,
       workspace: app.workspace,
       filePath: absolutePath,
-      panel: options,
-      serviceTerminalId
+      panel: options
     });
     if (!result.ok) {
       setMessageActionError(result.message ?? `打不开「${app.title}」的面板窗口`);
@@ -974,15 +968,30 @@ export function App(): ReactNode {
     return true;
   }, []);
 
-  // 平台为面板拉起的本地服务：面板窗口一关，主进程就 kill 那个终端会话并推这条消息，
-  // 这里把残留的终端标签一并收掉（否则会留一个「已退出」的孤儿标签）。主进程那边已经
-  // 让 PTY 死了，closePreviewTab 里的那次 kill 是无害的重复。
-  useEffect(() => {
-    const off = window.piDesktop.onRuntimeMessage((message) => {
-      if (message.type !== "gallery.panel-closed" || !message.terminalId) return;
-      closePreviewTabRef.current(message.terminalId);
-    });
-    return off;
+  // —— 作品墙「运行中的服务」看板的动作 ——
+  // 看板是这些后台进程唯一的可见入口：打开页面 / 停止 / 重启都从这里走。
+  // 进程的增删本身由主进程推 gallery.services 全量刷新，这里不维护本地镜像。
+  const openGalleryServicePage = useCallback((service: GalleryServiceRecord): void => {
+    if (!service.url) return;
+    const app = galleryApps.find((item) => item.id === service.appId);
+    void openGalleryBrowserTab(app ?? { id: service.appId, title: service.title }, service.url);
+  }, [galleryApps, openGalleryBrowserTab]);
+
+  const stopGalleryService = useCallback(async (service: GalleryServiceRecord): Promise<void> => {
+    try {
+      await window.piDesktop.galleryServiceStop(service.id);
+    } catch (error) {
+      setMessageActionError(`停止「${service.title}」失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }, []);
+
+  const restartGalleryService = useCallback(async (service: GalleryServiceRecord): Promise<void> => {
+    try {
+      const result = await window.piDesktop.galleryServiceRestart(service.id);
+      if (!result.ok) setMessageActionError(result.message);
+    } catch (error) {
+      setMessageActionError(`重启「${service.title}」失败：${error instanceof Error ? error.message : String(error)}`);
+    }
   }, []);
 
   const runGalleryApp = useCallback(async (app: GalleryApp): Promise<void> => {
@@ -999,30 +1008,54 @@ export function App(): ReactNode {
         await openGalleryBrowserTab(app, await window.piDesktop.galleryFileUrl(plan.absolutePath, app.workspace));
         return;
       }
-      if (plan.action === "start-service") {
-        // 运行 = 开一个终端标签并执行启动命令：启动输出落在用户看得见的地方，
-        // 进程与标签同生共死（用户选定：不在后台留隐藏进程）。
-        const started = await ensureGalleryService(app, plan);
-        if (!started.ok) {
-          setMessageActionError(started.message);
-          return;
-        }
-        if (plan.url) await openGalleryBrowserTab(app, plan.url);
-        return;
-      }
       if (plan.action === "start-panel-service") {
         // 面板 + 本地服务（如 Git 管理器）：面板页没有 preload 也跑不了外部命令，
-        // 数据只能由本地服务提供。所以先在作品目录里把服务拉起来、探活通过再开窗
-        // —— 窗口打开时数据源已经就绪（服务已可达时根本走不到这一支）。
-        const started = await ensureGalleryService(app, plan);
+        // 数据只能由本地服务提供。先把服务起在后台、就绪再开窗——窗口打开时数据源
+        // 已经就绪（服务已可达时根本走不到这一支）。
+        const started = await startGalleryService(app, {
+          directory: plan.directory,
+          command: plan.command,
+          url: plan.url,
+          ownerPanelId: app.id
+        });
         if (!started.ok) {
           setMessageActionError(started.message);
           return;
         }
-        if (!(await openGalleryPanel(app, plan.absolutePath, plan.options, started.terminalId))) {
+        if (!(await openGalleryPanel(app, plan.absolutePath, plan.options))) {
           // 窗口没开出来，刚起的服务就没有主人了：立刻收掉，不留无人使用的进程。
-          closePreviewTabRef.current(started.terminalId);
+          if (started.service) void window.piDesktop.galleryServiceStop(started.service.id);
         }
+        return;
+      }
+      if (plan.action === "open-browser") {
+        await openGalleryBrowserTab(app, plan.url);
+        return;
+      }
+      if (plan.action === "service-up") {
+        // 纯后台服务且地址已可达：没有页面可开，如实告诉用户它在跑、去哪管。
+        setGalleryToast(`「${app.title}」的服务已在运行${plan.url ? `（${plan.url}）` : ""}：它是纯后台服务，没有页面可打开；日志与停止在作品墙的「运行中的服务」里。`);
+        return;
+      }
+      if (plan.action === "start-service") {
+        // 运行 = 让主进程在后台起进程：不占标签页，关掉页面也不会停。
+        const started = await startGalleryService(app, {
+          directory: plan.directory,
+          command: plan.command,
+          ...(plan.url ? { url: plan.url } : {})
+        });
+        if (!started.ok) {
+          setMessageActionError(started.message);
+          return;
+        }
+        if (plan.openPage && app.url) {
+          // 打开页面会顺手记一次运行（lastRunAt + 重排）。
+          await openGalleryBrowserTab(app, app.url);
+          return;
+        }
+        // 没有页面可开（纯后台服务 / 没登记地址）：记一次运行并指明去哪里看它。
+        void window.piDesktop.send({ type: "gallery.run", id: app.id }).catch(() => undefined);
+        setGalleryToast(`「${app.title}」已在后台运行：作品墙顶部的「运行中的服务」可以看日志、停止或重启。`);
         return;
       }
       if (plan.action === "manual") {
@@ -1031,11 +1064,11 @@ export function App(): ReactNode {
           : "该作品是服务型，但还没登记启动命令或服务地址；先在作品上点「继续开发」让 AI 补全。");
         return;
       }
-      await openGalleryBrowserTab(app, plan.url);
     } catch (error) {
       setMessageActionError(error instanceof Error ? error.message : "运行作品失败");
     }
-  }, [openGalleryBrowserTab, ensureGalleryService, openGalleryPanel]);
+  }, [openGalleryBrowserTab, startGalleryService, openGalleryPanel]);
+
   /**
    * 「继续开发」：把作品上下文写进 composer。
    *
@@ -1142,14 +1175,18 @@ export function App(): ReactNode {
     <GalleryWall
       apps={galleryApps}
       workspace={activeWorkspace}
+      services={galleryServices}
       onRun={(app) => void runGalleryApp(app)}
       onDevelop={developGalleryApp}
       onPublish={openGalleryDraft}
       onRemove={(app) => void removeGalleryApp(app)}
       onReveal={(app) => void revealGalleryApp(app)}
       onData={setGalleryDataApp}
+      onOpenServicePage={openGalleryServicePage}
+      onStopService={(service) => void stopGalleryService(service)}
+      onRestartService={(service) => void restartGalleryService(service)}
     />
-  ), [galleryApps, activeWorkspace, runGalleryApp, developGalleryApp, removeGalleryApp, revealGalleryApp, openGalleryDraft]);
+  ), [galleryApps, galleryServices, activeWorkspace, runGalleryApp, developGalleryApp, removeGalleryApp, revealGalleryApp, openGalleryDraft, openGalleryServicePage, stopGalleryService, restartGalleryService]);
   /**
    * 空态首页是否注入作品墙（通用设置 →「界面」的开关，缺省展示）。
    *
@@ -1960,14 +1997,10 @@ export function App(): ReactNode {
     openPreviewTarget({ type: "terminal" }, `terminal-${crypto.randomUUID()}`);
   }
 
-  // 把后定义的两个入口回填给 runGalleryApp（作品运行的分流与开标签都靠它们）；
+  // 把后定义的 openPreviewTarget 回填给 runGalleryApp（作品开标签靠它）；
   // 在每次提交后同步一次，事件回调触发时必为最新实现。
-  // 终端那条直接指向 openPreviewTarget：服务型作品要带 cwd/initialCommand，
-  // 不能指向 openTerminalPreview（它只开一个普通终端）。
   useEffect(() => {
     openPreviewTargetRef.current = openPreviewTarget;
-    openTerminalPreviewRef.current = openPreviewTarget;
-    closePreviewTabRef.current = closePreviewTab;
   });
 
   /** 侧边栏 SSH 入口：打开主机管理 tab（固定 id 复用同一 tab，不叠加）。 */
@@ -2699,7 +2732,7 @@ export function App(): ReactNode {
             <button className={`icon-button computer-toggle${computerMode ? " active" : ""}`} data-control="computer-toggle" type="button" disabled={!activeSessionId} aria-label={computerMode ? "关闭电脑控制" : "开启电脑控制"} aria-pressed={computerMode} title={!activeSessionId ? "请先创建或打开一个话题" : computerMode ? "关闭电脑控制（本会话将撤下 computer_* 工具）" : "电脑控制（AI 可枚举/截图/点击/输入本机窗口；本会话注入 computer_* 工具，约 580 tokens/请求）"} onClick={() => void window.piDesktop.send({ type: "session.computerMode", enabled: !computerMode }).catch((error) => setMessageActionError(error instanceof Error ? error.message : "电脑控制切换失败"))}><Computer size={18} /></button>
             <button className={`icon-button team-toggle${teamMode ? " active" : ""}`} data-control="team-toggle" type="button" disabled={!activeSessionId} aria-label={teamMode ? "关闭团队模式" : "开启团队模式"} aria-pressed={teamMode} title={!activeSessionId ? "请先创建或打开一个话题" : teamMode ? "关闭团队模式（本会话将撤下 team_* 工具；已创建的成员继续在后台）" : "团队模式（AI 可创建常驻成员、互发消息与共享任务板；本会话注入 team_* 工具，schema 实测 ≈1.1K tokens/请求）"} onClick={() => void window.piDesktop.send({ type: "session.teamMode", enabled: !teamMode }).catch((error) => setMessageActionError(error instanceof Error ? error.message : "团队模式切换失败"))}><Users size={18} /></button>
             <button className={`icon-button design-toggle${designMode ? " active" : ""}`} data-control="design-toggle" type="button" disabled={!activeSessionId} aria-label={designMode ? "退出设计模式" : "进入设计模式"} aria-pressed={designMode} title={!activeSessionId ? "请先创建或打开一个话题" : designMode ? "退出设计模式（本会话将不再注入设计工具）" : "设计模式（AI 设计工作台；本会话注入 design_* 工具）"} onClick={() => void window.piDesktop.send({ type: "session.designMode", enabled: !designMode }).catch((error) => setMessageActionError(error instanceof Error ? error.message : "设计模式切换失败"))}><Palette size={18} /></button>
-            <GalleryMenu apps={galleryApps} onRun={(app) => void runGalleryApp(app)} onDevelop={developGalleryApp} onOpenWall={() => setGalleryWallOpen(true)} onPublish={() => openGalleryDraft()} onMenuOpenChange={setGalleryMenuOpen} />
+            <GalleryMenu apps={galleryApps} runningServices={galleryServices.filter(galleryServiceLive).length} onRun={(app) => void runGalleryApp(app)} onDevelop={developGalleryApp} onOpenWall={() => setGalleryWallOpen(true)} onPublish={() => openGalleryDraft()} onMenuOpenChange={setGalleryMenuOpen} />
             <button className="icon-button preview-panel-toggle" data-control="preview-toggle" type="button" aria-label={previewOpened ? "关闭预览" : "打开预览"} title={previewOpened ? "关闭预览" : "打开预览"} onClick={() => {              // 顶部按钮始终完全关闭/打开预览面板：即使已有标签页也不会
               // 折叠成残留一列栏+展开按钮的中间态。
               // 注意：这个按钮只负责面板开合，不要在这里直接开浏览器标签——
@@ -2851,12 +2884,16 @@ export function App(): ReactNode {
         <GalleryWallDialog
           apps={galleryApps}
           workspace={activeWorkspace}
+          services={galleryServices}
           onRun={(app) => { setGalleryWallOpen(false); void runGalleryApp(app); }}
           onDevelop={(app) => { setGalleryWallOpen(false); developGalleryApp(app); }}
           onRemove={(app) => void removeGalleryApp(app)}
           onReveal={(app) => void revealGalleryApp(app)}
           onData={(app) => { setGalleryWallOpen(false); setGalleryDataApp(app); }}
           onPublish={() => { setGalleryWallOpen(false); openGalleryDraft(); }}
+          onOpenServicePage={openGalleryServicePage}
+          onStopService={(service) => void stopGalleryService(service)}
+          onRestartService={(service) => void restartGalleryService(service)}
           onClose={() => setGalleryWallOpen(false)}
         />
       )}

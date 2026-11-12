@@ -8,7 +8,8 @@ import {
   galleryRunPlan,
   galleryRunTarget,
   galleryServiceFailureMessage,
-  galleryServiceTerminalId,
+  galleryServiceLive,
+  galleryRunMode,
   galleryCoverNote,
   galleryPlaceholderCoverHtml,
   gallerySnapshotTarget,
@@ -86,6 +87,17 @@ describe("normalizeGalleryApp", () => {
     expect(parsed!.entry).toBe("a/b.html");
     expect(typeof parsed!.createdAt).toBe("number");
     expect(parsed!.updatedAt).toBe(parsed!.createdAt);
+  });
+
+  it("runMode 只属于服务型作品，且只有 background 落字段（缺省 page 不写）", () => {
+    const server = normalizeGalleryApp({ title: "t", kind: "server", workspace: "D:/ws", entry: ".", runMode: "background" });
+    expect(server!.runMode).toBe("background");
+    // 显式 page 与非法值都不落字段（读侧归一化：没声明就没字段）
+    expect(normalizeGalleryApp({ title: "t", kind: "server", workspace: "D:/ws", entry: ".", runMode: "page" })!.runMode).toBeUndefined();
+    expect(normalizeGalleryApp({ title: "t", kind: "server", workspace: "D:/ws", entry: ".", runMode: "bogus" })!.runMode).toBeUndefined();
+    // 网页 / 面板带 runMode 是脏数据
+    expect(normalizeGalleryApp({ title: "t", kind: "file", workspace: "D:/ws", entry: "a.html", runMode: "background" })!.runMode).toBeUndefined();
+    expect(normalizeGalleryApp({ title: "t", kind: "panel", workspace: "D:/ws", entry: "p/index.html", runMode: "background" })!.runMode).toBeUndefined();
   });
 
   it("command / url 只对「服务型」作品生效（server 与 panel；file 带它们就是脏数据）", () => {
@@ -230,18 +242,41 @@ describe("galleryRunPlan（「先探测再决定」的唯一判据）", () => {
     expect(galleryRunPlan(app(server), true)).toEqual({ action: "open-browser", url: "http://localhost:5173" });
   });
 
-  it("server 不可达且有启动命令 → 先起服务（带上地址，起好再开浏览器）", () => {
+  it("server 不可达且有启动命令 → 后台起进程（就绪后顺带开页面）", () => {
     expect(galleryRunPlan(app(server), false)).toEqual({
       action: "start-service",
       directory: "D:/ws/apps/ledger",
       command: "npm run dev",
-      url: "http://localhost:5173"
+      url: "http://localhost:5173",
+      openPage: true
     });
   });
 
-  it("server 只有命令没有地址 → 起服务但不等待（起好由用户再点运行）", () => {
+  it("server 只有命令没有地址 → 起进程但没页面可开", () => {
     expect(galleryRunPlan(app({ kind: "server", entry: ".", command: "node server.js" }), false))
-      .toEqual({ action: "start-service", directory: "D:/ws", command: "node server.js" });
+      .toEqual({ action: "start-service", directory: "D:/ws", command: "node server.js", openPage: false });
+  });
+
+  it("纯后台服务（runMode=background）：可达时不开页面，不可达时只起进程", () => {
+    const proxy = app({ ...server, runMode: "background" });
+    // 已可达（用户手工起的/上次留下的）：什么都不用做，更不开页面
+    expect(galleryRunPlan(proxy, true)).toEqual({ action: "service-up", url: "http://localhost:5173" });
+    expect(galleryRunPlan(app({ ...server, command: "node proxy.js", url: undefined, runMode: "background" }), true)).toEqual({ action: "service-up" });
+    // 不可达：起后台进程，openPage=false（这就是「反代不该弹页面」的判据）
+    expect(galleryRunPlan(proxy, false)).toEqual({
+      action: "start-service",
+      directory: "D:/ws/apps/ledger",
+      command: "npm run dev",
+      url: "http://localhost:5173",
+      openPage: false
+    });
+    // 纯后台但没登记命令：没得可起，如实报
+    expect(galleryRunPlan(app({ kind: "server", entry: ".", url: "http://localhost:5173", runMode: "background" }), false)).toEqual({ action: "manual" });
+  });
+
+  it("runMode 缺省是 page（旧清单不受影响）", () => {
+    expect(galleryRunMode(app({ kind: "server", entry: "." }))).toBe("page");
+    expect(galleryRunMode(app({ kind: "server", entry: ".", runMode: "background" }))).toBe("background");
   });
 
   it("server 既不可达又没命令 → manual（绝不假装跑起来了）", () => {
@@ -261,25 +296,28 @@ describe("galleryServiceFailureMessage / compactServiceTail", () => {
     expect(message).not.toContain("\n");
   });
 
-  it("命令退出但没抓到输出尾部时改指终端标签，不留空占位", () => {
-    expect(galleryServiceFailureMessage(target, { reason: "exited", exitCode: 0 })).toContain("终端标签");
+  it("命令退出但没抓到输出尾部时指向看板日志，不留空占位（2026-11-12 起服务不再占终端标签）", () => {
+    expect(galleryServiceFailureMessage(target, { reason: "exited", exitCode: 0 })).toContain("运行中的服务");
+    expect(galleryServiceFailureMessage(target, { reason: "exited", exitCode: 0 })).not.toContain("终端标签");
   });
 
-  it("命令正常结束（代码 0）但服务未就绪：点明终端标签显示已退出是正常的（launcher 形态）", () => {
+  it("命令正常结束（代码 0）但服务未就绪：点明进程结束是正常的（launcher 形态）", () => {
     const message = galleryServiceFailureMessage(target, { reason: "ended" });
     expect(message).toContain("已正常结束（代码 0）");
-    expect(message).toContain("终端标签显示「已退出」是正常的");
+    expect(message).toContain("进程结束是正常的");
     expect(message).toContain("再点一次「运行」");
     // toast 是纯文本流式：不能带 Markdown 标记或多行
     expect(message).not.toContain("**");
     expect(message).not.toContain("\n");
   });
 
-  it("超时不是终局：明确给出「再点一次运行」的出路", () => {
+  it("超时不是终局：进程留在后台，明确给出「再点一次运行」的出路", () => {
     const message = galleryServiceFailureMessage(target, { reason: "timeout" }, 30_000);
     expect(message).toContain("30 秒");
     expect(message).toContain("再点一次「运行」");
     expect(message).toContain("http://localhost:8787");
+    // 进程没有因此消失：这句话要交代清楚，否则用户会以为被平台丢掉了
+    expect(message).toContain("转到后台");
   });
 
   it("地址无法解析：指回继续开发修正", () => {
@@ -294,14 +332,13 @@ describe("galleryServiceFailureMessage / compactServiceTail", () => {
   });
 });
 
-describe("galleryServiceTerminalId（每次运行都得是新 id）", () => {
-  it("同一作品每次运行得到不同的终端 id（否则会读到上一次的退出记录）", () => {
-    const first = galleryServiceTerminalId("g1", "aaaa1111");
-    const second = galleryServiceTerminalId("g1", "bbbb2222");
-    expect(first).toBe("terminal-gallery-g1-aaaa1111");
-    expect(second).not.toBe(first);
-    // 不再是不带 nonce 的固定 id（回到固定 id = 回到真机那个事故）
-    expect(first).not.toBe("terminal-gallery-g1");
+describe("galleryServiceLive（看板/角标的唯一判据）", () => {
+  it("启动中与运行中算活着；已停止/失败算死", () => {
+    const base = { id: "s1", appId: "g1", title: "反代", command: "node proxy.js", cwd: "D:/ws", startedAt: 1, ready: false };
+    expect(galleryServiceLive({ ...base, status: "starting" })).toBe(true);
+    expect(galleryServiceLive({ ...base, status: "running" })).toBe(true);
+    expect(galleryServiceLive({ ...base, status: "stopped" })).toBe(false);
+    expect(galleryServiceLive({ ...base, status: "failed" })).toBe(false);
   });
 });
 
@@ -405,6 +442,16 @@ describe("composeGalleryDevMessage", () => {
     expect(message).toContain("入口：（工作区根目录）");
     expect(message).toContain("启动命令：npm run dev");
     expect(message).toContain("服务地址：http://localhost:5173");
+    // 2026-11-12：进程在后台跑，继续开发的人不能假设有终端可看/可交互
+    expect(message).toContain("后台进程");
+    expect(message).toContain("运行中的服务");
+    expect(message).toContain("后台进程 + 打开页面");
+  });
+
+  it("纯后台服务在注入文本里点明「不打开页面」", () => {
+    const message = composeGalleryDevMessage(app({ kind: "server", entry: ".", command: "node proxy.js", url: "http://127.0.0.1:8787", runMode: "background" }));
+    expect(message).toContain("纯后台进程（不打开页面）");
+    expect(message).toContain("只起进程、不打开页面");
   });
 });
 

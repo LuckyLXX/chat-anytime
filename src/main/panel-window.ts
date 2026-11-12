@@ -44,11 +44,6 @@ export interface PanelOpenRequest {
   filePath: string;
   workspace: string;
   panel?: GalleryPanelOptions;
-  /**
-   * 平台为这个面板拉起的本地服务对应的终端会话 id（2026-10-11：带 command+url 的面板）。
-   * 窗口关闭时主进程靠它停掉服务；没声明服务的面板不带。
-   */
-  serviceTerminalId?: string;
 }
 
 export type PanelOpenResult = { ok: true } | { ok: false; message: string };
@@ -62,11 +57,12 @@ export interface PanelWindowDeps {
   openExternal: (url: string) => void;
   /**
    * 窗口真的关掉了（`closed` 触发时，windows/panelOptions 已清理、协议路由已摘除）。
-   * 装配方用它给「平台为面板起的本地服务」收尾：kill 终端会话 + 通知渲染端收掉标签。
+   * 装配方用它给「平台为面板起的本地服务」收尾：按 ownerPanelId 停掉后台进程
+   *（2026-11-12 起服务不再走终端会话，所以这里只需要作品 id）。
    * 加载失败走 `destroy()` 不触发 `closed`（见 dispose 的注释），那种情况由渲染端的
    * 「开窗失败就停服务」兜底。回调抛错不影响窗口清理。
    */
-  onClosed?: (appId: string, serviceTerminalId?: string) => void;
+  onClosed?: (appId: string) => void;
 }
 
 /** 位置尺寸落盘防抖：拖动窗口会连续触发 move/resize，别每帧写一次盘。 */
@@ -76,11 +72,6 @@ export class PanelWindowController {
   private readonly windows = new Map<string, BrowserWindow>();
   /** 每个作品的归一化窗口偏好（close/toggle 要按形态/贴边行事）。 */
   private readonly panelOptions = new Map<string, GalleryPanelOptions>();
-  /**
-   * 作品 id → 平台为它起的本地服务终端 id（带 command+url 的面板才有）。
-   * 只在建窗时写入，复用已有窗口时不覆盖——服务是同一个，不能被后来的运行改写成别的。
-   */
-  private readonly services = new Map<string, string>();
   /** 正在创建的窗口（作品 id → 那次 open 的 Promise）：挡住双击「运行」的并发。 */
   private readonly openings = new Map<string, Promise<PanelOpenResult>>();
   private readonly saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -251,7 +242,6 @@ export class PanelWindowController {
     });
     this.windows.set(request.id, win);
     this.panelOptions.set(request.id, request.panel ?? {});
-    if (request.serviceTerminalId) this.services.set(request.id, request.serviceTerminalId);
     win.webContents.setWindowOpenHandler(({ url: target }) => {
       this.deps.openExternal(target);
       return { action: "deny" };
@@ -274,15 +264,13 @@ export class PanelWindowController {
       this.deps.route.unmount(request.id);
       // 平台为这个面板起的本地服务跟着窗口收尾（2026-10-11 用户选定：关窗即停，
       // 不留后台进程）。**推迟到下一个 tick**：`closed` 还在 Electron 销毁窗口的
-      // 同步调用栈里，而回调要做的事包含关一个 ConPTY 句柄，把两件事揺在同一栈上
+      // 同步调用栈里，而回调要做的事包含结束一整棵进程树，把两件事揺在同一栈上
       // 没有任何好处（2026-10-11 真机堆损坏 0xC0000374 的现场就在这一带）。
       const notify = this.deps.onClosed;
-      const serviceTerminalId = this.services.get(request.id);
-      this.services.delete(request.id);
       if (notify) {
         setImmediate(() => {
           try {
-            notify(request.id, serviceTerminalId);
+            notify(request.id);
           } catch {
             /* 关闭回调的失败与窗口本身无关 */
           }

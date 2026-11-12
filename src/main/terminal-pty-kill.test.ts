@@ -10,10 +10,11 @@ import { TerminalManager, type PtyProcess, type PtySpawnOptions } from "./termin
  * 也没有错误可读，只有一份 minidump：异常码 `0xC0000374`、崩在 ntdll、进程里加载着
  * `conpty.node`）。
  *
- * 为什么应用里会出现第二次 kill：面板作品的服务终端由**主进程**在窗口 `closed` 时 kill
- * 一次（平台为面板起的本地服务），渲染端随后收到 `gallery.panel-closed` 去关那个标签、
- * 又发一次 `terminal({type:"kill"})`；而 `terminals` 表里的记录要等**异步的**退出回调
+ * 为什么应用里会出现第二次 kill：**同一终端有两条关闭路径**——用户关标签走渲染端的
+ * `terminal({type:"kill"})`，而主进程侧的收尾（退出、或同一会话被别处回收）也会 kill
+ * 一次；两条路径隔着 IPC，必然重叠。而 `terminals` 表里的记录要等**异步的**退出回调
  * （`handleExit`）才删除，中间的窗口期足够让第二条 kill 打到同一个 ConPTY 上。
+ *（2026-11-12 起作品服务不再走 PTY，但这条幂等约束对用户终端照旧成立。）
  *
  * 这个用例的断言就是「跑得完」：旧实现在第二个 `handle({type:"kill"})` 处整个 vitest
  * worker 直接死掉，拿不到任何失败信息。
