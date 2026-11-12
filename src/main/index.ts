@@ -594,17 +594,20 @@ function handleImCommand(command: RuntimeCommand): boolean {
       const previous = { ...settings };
       const incoming = normalizeImChannel(command.channel);
       if (!incoming) {
-        pushRuntimeMessage({ type: "error", message: "IM 通道保存失败：通道 id 或类型不合法（id 只能用字母/数字/下划线/短横线）" });
+        const error = "通道 id 或类型不合法（id 只能用字母/数字/下划线/短横线）";
+        pushRuntimeMessage({ type: "im.save-result", requestId: command.requestId, ok: false, error });
         return true;
       }
       const secret = command.appSecret?.trim();
       let secretConfigured = Boolean(imSecret(incoming.id));
+      let secretError: string | undefined;
       if (secret) {
         if (saveCredential(imCredentialKey(incoming.id), secret)) {
           secretConfigured = true;
         } else {
-          pushRuntimeMessage({ type: "error", message: "系统加密存储不可用，App Secret 未保存（重启后需要重新填写）" });
+          // 配置照样落盘（用户不必重填其它字段），但结果是失败的：密钥没存进去。
           secretConfigured = false;
+          secretError = "系统加密存储不可用，App Secret 未保存（重启后需要重新填写）";
         }
       }
       const channel: ImChannelConfig = { ...incoming, ...(secretConfigured ? { appSecretConfigured: true } : {}) };
@@ -617,6 +620,16 @@ function handleImCommand(command: RuntimeCommand): boolean {
       // 保存即应用：连接参数变了就重建（旧 socket 先关）。
       startImGateway();
       pushRuntimeMessage({ type: "im.status", status: imGatewayStatus() });
+      // 回执带**落盘后的权威配置**（含 appSecretConfigured）：面板据此显示「已保存」
+      // 并回填密钥状态，不再靠本地计时器假装成功。
+      pushRuntimeMessage({
+        type: "im.save-result",
+        requestId: command.requestId,
+        ok: secretError === undefined,
+        channel,
+        enabled: settings.im.enabled,
+        ...(secretError ? { error: secretError } : {})
+      });
       return true;
     }
     case "im.channel.delete": {

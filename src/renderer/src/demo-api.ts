@@ -1399,6 +1399,10 @@ export function createDemoApi(): DesktopApi {
         // IM 通道：连接、密钥存储与长连接都在主进程（演示环境没有 Electron API），
         // 如实降级 —— 不伪造「已连接」，也不假装保存成功。
         case "im.channel.save":
+          // 演示环境没有主进程的安全存储与长连接：如实回一条失败回执（面板会内联显示），
+          // 不再假装「已保存」。
+          emit({ type: "im.save-result", requestId: command.requestId, ok: false, error: "演示环境不会保存飞书通道配置（需要系统加密存储与长连接）；请在桌面应用里使用。" });
+          break;
         case "im.channel.delete":
           emit({ type: "log", level: "warn", message: "演示环境不会保存飞书通道配置（需要系统加密存储与长连接）；请在桌面应用里使用。" });
           break;

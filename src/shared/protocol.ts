@@ -2817,6 +2817,12 @@ export type RuntimeMessage =
   /** IM 「测试连接」结果（响应 im.channel.test；requestId 原样带回）。 */
   | { type: "im.test-result"; requestId: string; ok: boolean; message: string; botName?: string; latencyMs?: number }
   /**
+   * IM 保存结果（响应 im.channel.save）：**主进程落盘后的权威配置**。
+   * 面板只在收到这条（且 requestId 对得上）之后才显示「已保存」——本地计时器
+   * 伪造确认会让「主进程没接上/密钥没存进去」看起来像成功。
+   */
+  | { type: "im.save-result"; requestId: string; ok: boolean; channel?: ImChannelConfig; enabled?: boolean; error?: string }
+  /**
    * IM 会话内部事件（utility → main，由 im-gateway 消费，**不转发渲染端**）：
    * 会话就绪、回合阶段、流式增量（700ms 合并的当前 assistant 全量文本）。
    */

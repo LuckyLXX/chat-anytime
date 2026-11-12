@@ -4126,6 +4126,8 @@ html[data-ui-motion="off"] .automation-center, html[data-ui-motion="off"] .ui-pr
 .im-channel-grid .im-channel-wide { grid-column: 1 / -1; }
 .im-channel-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .im-channel-saved { color: var(--success-text); font-size: 10.5px; }
+.im-channel-save-error { margin: 0; padding: 6px 9px; border: 1px solid var(--danger-border); border-radius: 7px; background: var(--danger-soft); color: var(--danger-text); font-size: 11px; line-height: 1.5; }
+.im-channel-warning { margin: 0; padding: 6px 9px; border: 1px solid var(--warning-border); border-radius: 7px; background: var(--warning-soft); color: var(--warning-text); font-size: 11px; line-height: 1.5; }
 .im-channel-test { display: inline-flex; align-items: center; gap: 4px; margin: 0; padding: 5px 9px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface-muted); color: var(--text-muted); font-size: 11px; }
 .im-channel-test-ok { border-color: var(--success-border); background: var(--success-soft); color: var(--success-text); }
 .im-channel-test-error { border-color: var(--danger-border); background: var(--danger-soft); color: var(--danger-text); }

@@ -84,6 +84,22 @@ function input(control: string): HTMLInputElement {
   return element as HTMLInputElement;
 }
 
+/** 模拟主进程回执（im.save-result）：面板只认这条来显示「已保存」。 */
+function ackSave(result: { ok: boolean; channel?: ImChannelConfig; enabled?: boolean; error?: string } = { ok: true }): void {
+  const save = [...sent].reverse().find((command) => command.type === "im.channel.save");
+  if (!save || save.type !== "im.channel.save") throw new Error("还没有发出 im.channel.save");
+  act(() => {
+    useDesktopStore.getState().handleRuntimeMessage({
+      type: "im.save-result",
+      requestId: save.requestId,
+      ok: result.ok,
+      ...(result.channel ? { channel: result.channel } : {}),
+      ...(result.enabled !== undefined ? { enabled: result.enabled } : {}),
+      ...(result.error ? { error: result.error } : {})
+    });
+  });
+}
+
 function change(element: HTMLElement, value: string): void {
   act(() => {
     const descriptor = Object.getOwnPropertyDescriptor(element instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype, "value");
@@ -127,6 +143,33 @@ describe("ImChannelSettings", () => {
     expect(save.channel.kind).toBe("feishu");
     // 保存后输入框清空（明文不在渲染端驻留）。
     expect(input("im-feishu-secret").value).toBe("");
+
+    // 回执之前不能出现「已保存」（旧实现靠 300ms 计时器假装成功）。
+    expect(container.querySelector(".im-channel-saved")).toBeNull();
+    ackSave({ ok: true, channel: { ...save.channel, appSecretConfigured: true }, enabled: true });
+    expect(container.querySelector(".im-channel-saved")).toBeTruthy();
+    // 认证状态由回执里的权威配置回填：密钥输入框的占位提示恢复「已保存」。
+    expect((container.querySelector('[data-control="im-feishu-secret"]') as HTMLInputElement).placeholder).toContain("已保存");
+    expect(container.querySelector(".im-channel-save-error")).toBeNull();
+  });
+
+  it("shows the main process error instead of claiming success", () => {
+    render();
+    act(() => input("im-feishu-save").click());
+    ackSave({ ok: false, error: "系统加密存储不可用，App Secret 未保存（重启后需要重新填写）" });
+    expect(container.querySelector(".im-channel-saved")).toBeNull();
+    expect(container.querySelector(".im-channel-save-error")?.textContent).toContain("App Secret 未保存");
+  });
+
+  it("asks for the current status on mount (badge may be stale after a renderer reload)", () => {
+    render();
+    expect(sent.some((command) => command.type === "im.status")).toBe(true);
+  });
+
+  it("warns when the saved allowlist is empty (the bot would refuse every message)", () => {
+    seed({ im: { enabled: true, channels: [{ ...FEISHU, allowFrom: [] }] } });
+    render();
+    expect(container.querySelector(".im-channel-warning")?.textContent).toContain("白名单还空着");
   });
 
   it("sends the master switch state with the save", () => {
@@ -135,6 +178,7 @@ describe("ImChannelSettings", () => {
     act(() => input("im-feishu-save").click());
     const save = sent.find((command) => command.type === "im.channel.save");
     expect(save?.type === "im.channel.save" && save.enabled).toBe(false);
+    ackSave({ ok: true, channel: FEISHU, enabled: false });
   });
 
   it("tests the connection with the draft App ID (not the stale saved one)", () => {

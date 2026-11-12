@@ -620,6 +620,11 @@ interface DesktopState {
   imStatus?: ImStatus;
   /** IM「测试连接」的最近一次结果（im.test-result 推送）。 */
   imTest?: { requestId: string; ok: boolean; message: string; botName?: string; latencyMs?: number; at: number };
+  /**
+   * IM 保存结果（im.save-result 推送）：面板只认这条来显示「已保存」。
+   * 载荷里的 channel 是主进程落盘后的权威配置，同步写回 settings.im。
+   */
+  imSave?: { requestId: string; ok: boolean; message: string; at: number };
   /** 每文档已见推送 revision：≤ 该值的重复/乱序推送直接跳过（防回环重渲）。 */
   seenDesignRevisions: Record<string, number>;
   /** 最近一次设计导出结果；App 监听变化弹 toast。 */
@@ -1164,6 +1169,23 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
       case "im.status":
         set({ imStatus: message.status });
         break;
+      case "im.save-result": {
+        const channel = message.channel;
+        const messageText = message.ok ? "已保存" : (message.error ?? "保存失败");
+        set((state) => ({
+          imSave: { requestId: message.requestId, ok: message.ok, message: messageText, at: Date.now() },
+          settings: channel
+            ? {
+                ...state.settings,
+                im: {
+                  enabled: message.enabled === true,
+                  channels: [...(state.settings.im?.channels ?? []).filter((item) => item.id !== channel.id), channel]
+                }
+              }
+            : state.settings
+        }));
+        break;
+      }
       case "im.test-result":
         set({
           imTest: {

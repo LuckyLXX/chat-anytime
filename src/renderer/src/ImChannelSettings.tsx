@@ -1,5 +1,5 @@
 import { ChevronDown, MessageSquare, PlugZap, Save, ShieldCheck, Wifi, WifiOff } from "lucide-react";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { AccessMode, ImChannelConfig } from "../../shared/protocol";
 import { normalizeImAllowFrom } from "../../shared/im";
 import { useDesktopStore } from "./store";
@@ -74,6 +74,7 @@ export function ImChannelSettings(): ReactNode {
   const settings = useDesktopStore((state) => state.settings);
   const imStatus = useDesktopStore((state) => state.imStatus);
   const imTest = useDesktopStore((state) => state.imTest);
+  const imSave = useDesktopStore((state) => state.imSave);
   const currentWorkspace = useDesktopStore((state) => state.snapshot.workspace);
   const savedChannel = settings.im?.channels.find((channel) => channel.id === FEISHU_CHANNEL_ID);
   const [masterEnabled, setMasterEnabled] = useState(settings.im?.enabled === true);
@@ -83,6 +84,10 @@ export function ImChannelSettings(): ReactNode {
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [savedAt, setSavedAt] = useState<number | undefined>(undefined);
+  const [saveError, setSaveError] = useState<string | undefined>(undefined);
+  /** 本次保存的 requestId + 兜底计时器（主进程不回应时不能让按钮永远转圈）。 */
+  const pendingSaveRef = useRef<string | undefined>(undefined);
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   // 保存成功后（设置对象/状态变了）重新对齐一次草稿：主进程是唯一事实源。
   useEffect(() => {
@@ -95,6 +100,37 @@ export function ImChannelSettings(): ReactNode {
   useEffect(() => {
     if (imTest) setTesting(false);
   }, [imTest?.at]);
+
+  // 挂载时主动要一次当前状态：连接可能在渲染端订阅之前就完成了，只靠推送会让
+  // 徽标一直停在 bootstrap 那一刻的「连接中」（或干脆停在「未连接」）。
+  useEffect(() => {
+    void window.piDesktop.send({ type: "im.status" });
+  }, []);
+
+  // 保存回执：只有主进程的 im.save-result（且 requestId 对得上）才算成功。
+  useEffect(() => {
+    if (!imSave) return;
+    const pending = pendingSaveRef.current;
+    if (pending !== imSave.requestId) return;
+    pendingSaveRef.current = undefined;
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = undefined;
+    }
+    setSaving(false);
+    if (imSave.ok) {
+      setSaveError(undefined);
+      setSavedAt(imSave.at);
+    } else {
+      setSavedAt(undefined);
+      setSaveError(imSave.message);
+    }
+  }, [imSave?.requestId, imSave?.at]);
+
+  // 卸载时清掉兜底计时器（别在已卸载的组件上 setState）。
+  useEffect(() => () => {
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+  }, []);
 
   const channelStatus = useMemo(
     () => imStatus?.channels.find((item) => item.channelId === FEISHU_CHANNEL_ID),
@@ -109,6 +145,10 @@ export function ImChannelSettings(): ReactNode {
   function save(): void {
     const minutes = Number(draft.approvalMinutes);
     const approvalTimeoutMs = Number.isFinite(minutes) && minutes > 0 ? Math.round(minutes * 60_000) : undefined;
+    const pendingSecret = secret.trim();
+    // 「密钥已保存」在本轮的表态必须包含**刚输入的**那份：否则回执到达前面板会
+    // 先把「已保存」标记抹掉（就是「保存了却显示没保存」的原始症状）。
+    const nextSecretConfigured = secretConfigured || Boolean(pendingSecret) || savedChannel?.appSecretConfigured === true;
     const channel: ImChannelConfig = {
       id: FEISHU_CHANNEL_ID,
       kind: "feishu",
@@ -119,38 +159,34 @@ export function ImChannelSettings(): ReactNode {
       ...(draft.workspace.trim() ? { workspace: draft.workspace.trim() } : {}),
       ...(approvalTimeoutMs !== undefined ? { approvalTimeoutMs } : {}),
       ...(draft.ack ? {} : { ack: false }),
-      ...(secretConfigured ? { appSecretConfigured: true } : {})
+      ...(nextSecretConfigured ? { appSecretConfigured: true } : {})
     };
+    const requestId = newRequestId();
+    pendingSaveRef.current = requestId;
     setSaving(true);
     setSavedAt(undefined);
-    // 本地镜像一份（主进程落盘的就是这份形状）：否则切走再切回本 tab 时组件重挂载
-    // 会从 bootstrap 的旧 settings 读回保存前的配置，看起来像「没保存」。
-    useDesktopStore.setState((state) => ({
-      settings: {
-        ...state.settings,
-        im: {
-          enabled: masterEnabled,
-          channels: [...(state.settings.im?.channels ?? []).filter((item) => item.id !== FEISHU_CHANNEL_ID), channel]
-        }
-      }
-    }));
+    setSaveError(undefined);
     void window.piDesktop.send({
       type: "im.channel.save",
-      requestId: newRequestId(),
+      requestId,
       channel,
       enabled: masterEnabled,
       // 明文只在这一次 IPC 里出现，主进程写 safeStorage 后即丢弃。
-      ...(secret.trim() ? { appSecret: secret.trim() } : {})
+      ...(pendingSecret ? { appSecret: pendingSecret } : {})
     });
-    if (secret.trim()) {
+    if (pendingSecret) {
       setSecret("");
       setSecretConfigured(true);
     }
-    // 主进程不回执「已保存」，只在状态推送里体现；这里给一个即时的本地反馈。
-    setTimeout(() => {
+    // 主进程不回应时如实报错（例如跑的还是旧主进程），不要假装保存成功。
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(() => {
+      saveTimerRef.current = undefined;
+      if (pendingSaveRef.current !== requestId) return;
+      pendingSaveRef.current = undefined;
       setSaving(false);
-      setSavedAt(Date.now());
-    }, 300);
+      setSaveError("主进程没有回应保存请求（可能仍在加载新版本，请重启应用后重试）");
+    }, 5_000);
   }
 
   function test(): void {
@@ -297,6 +333,12 @@ export function ImChannelSettings(): ReactNode {
               )}
               {savedAt && <span className="im-channel-saved">已保存（连接会按新配置重建）</span>}
             </div>
+            {saveError && <p className="im-channel-save-error">{saveError}</p>}
+            {(savedChannel?.allowFrom.length ?? 0) === 0 && savedChannel?.enabled && (
+              <p className="im-channel-warning">
+                白名单还空着：机器人不会执行任何指令。先给机器人发一条消息，把它回复的 open_id 填进上面的白名单再保存。
+              </p>
+            )}
             {imTest && (
               <p className={`im-channel-test im-channel-test-${imTest.ok ? "ok" : "error"}`}>
                 {imTest.ok ? "✓" : "✕"} {imTest.message}

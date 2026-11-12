@@ -153,10 +153,23 @@ describe("渲染端接线", () => {
     expect(component).toContain('data-pane="im-channel-settings"');
   });
 
-  it("store 消费 im.status / im.test-result，bootstrap 带 imStatus", () => {
+  it("store 消费 im.status / im.test-result / im.save-result，bootstrap 带 imStatus", () => {
     expect(store).toContain('case "im.status":');
     expect(store).toContain('case "im.test-result":');
+    expect(store).toContain('case "im.save-result":');
     expect(store).toContain("bootstrap.imStatus");
+  });
+
+  it("保存回执来自主进程（面板不靠本地计时器假装成功）", () => {
+    expect(protocol).toContain('type: "im.save-result"');
+    // 主进程：回执必须带落盘后的权威 channel（含 appSecretConfigured）与总闸状态。
+    expect(index).toContain('type: "im.save-result"');
+    expect(index).toContain("channel,");
+    expect(index).toContain("ok: secretError === undefined");
+    // 渲染端：只认 requestId 对得上的回执，且有 5s 兜底。
+    expect(component).toContain("pendingSaveRef");
+    expect(component).toContain("imSave.requestId");
+    expect(component).toContain("主进程没有回应保存请求");
   });
 
   it("演示环境如实降级（不伪造连接成功）", () => {
