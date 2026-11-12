@@ -56,6 +56,16 @@ function draftFromChannel(channel: ImChannelConfig | undefined): DraftState {
   };
 }
 
+/** 诊断用的相对时间（「刚刚 / 3 分钟前 / 从未」）。 */
+function relativeTime(at: number | undefined, now: number = Date.now()): string {
+  if (at === undefined) return "从未";
+  const seconds = Math.max(0, Math.round((now - at) / 1000));
+  if (seconds < 10) return "刚刚";
+  if (seconds < 60) return `${seconds} 秒前`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)} 分钟前`;
+  return `${Math.round(seconds / 3600)} 小时前`;
+}
+
 function newRequestId(): string {
   return typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `im-${Date.now()}`;
 }
@@ -347,6 +357,27 @@ export function ImChannelSettings(): ReactNode {
             )}
             {channelStatus?.state === "error" && channelStatus.message && (
               <p className="im-channel-status-error">{channelStatus.message}</p>
+            )}
+            {channelStatus && (
+              <div className="im-channel-diag">
+                <div className="im-channel-diag-row">
+                  <span>最近入站帧</span>
+                  <b>{relativeTime(channelStatus.lastFrameAt)}</b>
+                  <span>最近消息事件</span>
+                  <b>{relativeTime(channelStatus.lastEventAt)}</b>
+                </div>
+                {channelStatus.lastEventSummary && <div className="im-channel-diag-line">收到：{channelStatus.lastEventSummary}</div>}
+                {channelStatus.lastIgnored && <div className="im-channel-diag-line">已过滤：{channelStatus.lastIgnored}</div>}
+                {channelStatus.lastError && <div className="im-channel-diag-line im-channel-diag-error">发送失败：{channelStatus.lastError}</div>}
+                {channelStatus.state === "connected" && channelStatus.lastEventAt === undefined && (
+                  <div className="im-channel-diag-hint">
+                    连接是好的，但还<strong>从未收到任何消息事件</strong>。按顺序核对：① 开放平台「事件与回调 → 事件配置」订阅方式选<strong>长连接</strong>并添加 <code>im.message.receive_v1</code>；② 「权限管理」开通 <code>im:message</code> 与 <code>im:message:send_as_bot</code>；③ 「版本管理与发布」创建版本并发布（改完配置要发新版本才生效）。
+                  </div>
+                )}
+                {channelStatus.state === "connected" && channelStatus.lastFrameAt === undefined && (
+                  <div className="im-channel-diag-hint">连上了但连心跳都没收到，链路可能刚建立：等 1–2 分钟或重启应用再看。</div>
+                )}
+              </div>
             )}
             <details className="im-channel-help">
               <summary>

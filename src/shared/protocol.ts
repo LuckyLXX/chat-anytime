@@ -396,6 +396,19 @@ export interface ImChannelStatus {
   message?: string;
   /** 最近一次状态变化时间戳。 */
   updatedAt: number;
+  /**
+   * 通道诊断（「发了消息没反应」时唯一的判断依据）：
+   * - lastFrameAt：最近一次解出任何入站帧（含心跳 pong）⇒ 链路与订阅通到哪一步；
+   * - lastEventAt / lastEventSummary：最近一次真正的消息事件（含被白名单拒绝的）；
+   * - lastIgnored：最近一次被过滤的原因（群聊/非文本/别的机器人…）；
+   * - lastError：最近一次出站失败（发送 API 的 code/message）。
+   * 全为缺省 + connected ⇒ 连接是好的，但平台没有投递事件（多半是事件订阅/权限）。
+   */
+  lastFrameAt?: number;
+  lastEventAt?: number;
+  lastEventSummary?: string;
+  lastIgnored?: string;
+  lastError?: string;
 }
 
 /** 全部通道的当前状态（bootstrap 与 im.status 推送共用）。 */

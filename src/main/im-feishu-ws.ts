@@ -82,6 +82,8 @@ export interface ImWsClientOptions extends ImWsClientDeps {
   onCardAction?: (body: unknown) => Promise<ImWsCardAck | undefined>;
   onStatus?: (state: ImWsState, detail?: ImWsStatusDetail) => void;
   onLog?: (level: "info" | "warn", message: string) => void;
+  /** 每解出一帧就回调一次（含心跳 pong）：网关用它区分「链路通」与「有事件」。 */
+  onInbound?: () => void;
 }
 
 /** 官方缺省值（握手没给 ClientConfig 时使用）。 */
@@ -346,6 +348,7 @@ export class ImWsClient {
     }
     const receivedAt = this.now();
     this.lastInboundAt = receivedAt;
+    this.options.onInbound?.();
     const type = headerValue(frame, "type") ?? "";
     if (frame.method === 0) {
       this.handleControlFrame(frame, type);

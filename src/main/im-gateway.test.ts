@@ -39,6 +39,7 @@ interface HarnessOptions {
   secret?: string | null;
   cardSendFails?: boolean;
   patchFails?: boolean;
+  textSendFails?: boolean;
 }
 
 interface SentCard {
@@ -76,6 +77,7 @@ async function createHarness(options: HarnessOptions = {}) {
     tenantToken: async () => ({ ok: true, data: "token" }),
     botInfo: async () => ({ ok: true, data: { name: "值班机器人" } }),
     sendText: async (_chatId, text): Promise<ImApiResult<{ messageId: string }>> => {
+      if (options.textSendFails) return { ok: false, code: 230013, message: "Bot 未开启接收消息权限（im:message:send_as_bot）" };
       texts.push(text);
       order.push("text");
       return { ok: true, data: { messageId: `om_t${++sequence}` } };
@@ -430,6 +432,50 @@ describe("inbound routing", () => {
     // 第一段 patch 回执卡，其余按切片发新卡。
     expect(harness.patches.length).toBeGreaterThanOrEqual(1);
     expect(harness.cards.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe("通道诊断（「发了消息没反应」的可观测性）", () => {
+  it("records inbound frames, message events and pushes them with im.status", async () => {
+    const harness = await createHarness();
+    harness.gateway.start();
+    harness.handlers().onStatus("connected");
+    harness.handlers().onInbound();
+    harness.handlers().onEvent(feishuEvent());
+    await flush();
+    harness.clock.advance(1_000);
+    await flush();
+    const status = harness.pushes.filter((message) => message.type === "im.status").at(-1);
+    expect(status?.type === "im.status" && status.status.channels[0]?.state).toBe("connected");
+    const channel = status?.type === "im.status" ? status.status.channels[0] : undefined;
+    expect(channel?.lastFrameAt).toBeGreaterThan(0);
+    expect(channel?.lastEventAt).toBeGreaterThan(0);
+    expect(channel?.lastEventSummary).toContain("ou_owner");
+  });
+
+  it("records the ignore reason (a dropped event must not be invisible)", async () => {
+    const harness = await createHarness();
+    harness.gateway.start();
+    harness.handlers().onEvent(feishuEvent({ chatType: "group" }));
+    await flush();
+    harness.clock.advance(1_000);
+    await flush();
+    const status = harness.pushes.filter((message) => message.type === "im.status").at(-1);
+    const channel = status?.type === "im.status" ? status.status.channels[0] : undefined;
+    expect(channel?.lastIgnored).toContain("私聊");
+    expect(channel?.lastEventAt).toBeGreaterThan(0);
+  });
+
+  it("records outbound failures (missing send permission is visible in the panel)", async () => {
+    const harness = await createHarness({ channel: { allowFrom: [] }, textSendFails: true });
+    harness.gateway.start();
+    harness.handlers().onEvent(feishuEvent({ openId: "ou_stranger" }));
+    await flush();
+    harness.clock.advance(1_000);
+    await flush();
+    const status = harness.pushes.filter((message) => message.type === "im.status").at(-1);
+    const channel = status?.type === "im.status" ? status.status.channels[0] : undefined;
+    expect(channel?.lastError).toContain("send_as_bot");
   });
 });
 

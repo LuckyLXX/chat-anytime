@@ -176,6 +176,18 @@ describe("渲染端接线", () => {
     expect(demoApi).toContain("演示环境不会发起真实飞书连接");
   });
 
+  it("「发了消息没反应」可诊断：帧/事件/过滤/出站错误四层都推给面板", () => {
+    for (const field of ["lastFrameAt", "lastEventAt", "lastEventSummary", "lastIgnored", "lastError"]) {
+      expect(protocol).toContain(`${field}?:`);
+    }
+    expect(read("im-feishu-ws.ts")).toContain("onInbound?.()");
+    expect(read("im-gateway.ts")).toContain("onInbound: () => this.noteFrame(config.id)");
+    expect(read("im-gateway.ts")).toContain("this.noteIgnored(config.id, normalized.reason)");
+    expect(read("im-gateway.ts")).toContain("this.noteError(conversation.channelId, result.message)");
+    expect(component).toContain("im-channel-diag");
+    expect(component).toContain("从未收到任何消息事件");
+  });
+
   it("样式块带 .im-channel-* 前缀", () => {
     expect(styles).toContain(".im-channel-page");
     expect(styles).toContain(".im-channel-card");

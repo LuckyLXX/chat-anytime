@@ -71,6 +71,8 @@ export interface ImWsHandlers {
   onCardAction: (body: unknown) => Promise<ImWsCardAck | undefined>;
   onStatus: (state: ImWsState, detail?: ImWsStatusDetail) => void;
   onLog: (level: "info" | "warn", message: string) => void;
+  /** 每解出一帧回调一次（诊断用：区分「链路通」与「有事件」）。 */
+  onInbound: () => void;
 }
 
 export interface ImWsLike {
@@ -143,6 +145,19 @@ interface ChannelRuntime {
   status: ImChannelStatus;
 }
 
+/**
+ * 通道诊断（「发了消息没反应」时唯一的判断依据，随 im.status 一起推给面板）：
+ * 帧到了没有 → 事件到了没有 → 被什么过滤了 → 出站报了什么错。四层分开记，
+ * 才能真正分清「平台没投递」与「我们没处理」。
+ */
+interface ChannelDiag {
+  lastFrameAt?: number;
+  lastEventAt?: number;
+  lastEventSummary?: string;
+  lastIgnored?: string;
+  lastError?: string;
+}
+
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -153,6 +168,8 @@ export class ImGateway {
   private readonly approvals = new Map<string, ImApprovalState>();
   private readonly sessionIndex = new Map<string, string>();
   private readonly unauthorizedNotices = new Map<string, number>();
+  private readonly diagnostics = new Map<string, ChannelDiag>();
+  private diagEmitTimer: number | undefined;
   private readonly store: ImStore;
   private readonly now: () => number;
   private readonly schedule: (fn: () => void, ms: number) => number;
@@ -248,8 +265,51 @@ export class ImGateway {
     const settings = this.deps.getSettings();
     return {
       enabled: settings?.im?.enabled === true,
-      channels: [...this.channels.values()].map((channel) => channel.status)
+      channels: [...this.channels.values()].map((channel) => ({ ...channel.status, ...this.diagnostics.get(channel.config.id) }))
     };
+  }
+
+  // —— 通道诊断 ——
+
+  private diag(channelId: string): ChannelDiag {
+    const existing = this.diagnostics.get(channelId);
+    if (existing) return existing;
+    const created: ChannelDiag = {};
+    this.diagnostics.set(channelId, created);
+    return created;
+  }
+
+  /** 诊断变化合并 1s 再推（心跳 pong 每 90s 一帧，但别让每帧都走一次 IPC）。 */
+  private scheduleDiagEmit(): void {
+    if (this.diagEmitTimer !== undefined) return;
+    this.diagEmitTimer = this.schedule(() => {
+      this.diagEmitTimer = undefined;
+      this.emitStatus();
+    }, 1_000);
+  }
+
+  private noteFrame(channelId: string): void {
+    this.diag(channelId).lastFrameAt = this.now();
+    this.scheduleDiagEmit();
+  }
+
+  private noteEvent(channelId: string, summary: string): void {
+    const diag = this.diag(channelId);
+    diag.lastEventAt = this.now();
+    diag.lastEventSummary = summary;
+    this.scheduleDiagEmit();
+  }
+
+  private noteIgnored(channelId: string, reason: string): void {
+    const diag = this.diag(channelId);
+    diag.lastIgnored = reason;
+    diag.lastEventAt = this.now();
+    this.scheduleDiagEmit();
+  }
+
+  private noteError(channelId: string, message: string): void {
+    this.diag(channelId).lastError = message;
+    this.scheduleDiagEmit();
   }
 
   /**
@@ -697,6 +757,7 @@ export class ImGateway {
       const result = await channel.api.sendCard(conversation.chatId, card);
       if (result.ok) return true;
       this.log("warn", `发送卡片失败：${result.message}`);
+      this.noteError(conversation.channelId, result.message);
       return false;
     } catch (error) {
       this.log("warn", `发送卡片异常：${errorText(error)}`);
@@ -709,7 +770,10 @@ export class ImGateway {
     if (!channel) return;
     try {
       const result = await channel.api.sendText(conversation.chatId, text);
-      if (!result.ok) this.log("warn", `发送文本失败：${result.message}`);
+      if (!result.ok) {
+        this.log("warn", `发送文本失败：${result.message}`);
+        this.noteError(conversation.channelId, result.message);
+      }
     } catch (error) {
       this.log("warn", `发送文本异常：${errorText(error)}`);
     }
@@ -721,7 +785,10 @@ export class ImGateway {
     this.unauthorizedNotices.set(message.openId, this.now());
     try {
       const result = await channel.api.sendText(message.chatId, `${prefix}\nopen_id: ${message.openId}`);
-      if (!result.ok) this.log("warn", `发送授权提示失败：${result.message}`);
+      if (!result.ok) {
+        this.log("warn", `发送授权提示失败：${result.message}`);
+        this.noteError(channel.config.id, result.message);
+      }
     } catch (error) {
       this.log("warn", `发送授权提示异常：${errorText(error)}`);
     }
@@ -851,13 +918,16 @@ export class ImGateway {
         const normalized = normalizeFeishuEvent(body);
         if (normalized.kind === "ignore") {
           this.log("info", `忽略飞书事件：${normalized.reason}`);
+          this.noteIgnored(config.id, normalized.reason);
           return;
         }
+        this.noteEvent(config.id, `${normalized.message.chatType} · ${normalized.message.openId.slice(0, 10)} · ${normalized.message.text.slice(0, 40)}`);
         void this.handleInbound(config.id, normalized.message);
       },
       onCardAction: (body) => this.handleCardAction(config.id, body),
       onStatus: (state, detail) => this.applyWsStatus(config.id, state, detail),
-      onLog: (level, message) => this.log(level, `[${config.id}] ${message}`)
+      onLog: (level, message) => this.log(level, `[${config.id}] ${message}`),
+      onInbound: () => this.noteFrame(config.id)
     };
     if (this.deps.createWs) return this.deps.createWs(config, secret, handlers);
     const handshakeConfig: ImWsHandshakeConfig = { appId: config.appId, appSecret: secret, ...(config.domain ? { domain: config.domain } : {}) };
@@ -866,7 +936,8 @@ export class ImGateway {
       onEvent: handlers.onEvent,
       onCardAction: handlers.onCardAction,
       onStatus: handlers.onStatus,
-      onLog: handlers.onLog
+      onLog: handlers.onLog,
+      onInbound: handlers.onInbound
     });
   }
 

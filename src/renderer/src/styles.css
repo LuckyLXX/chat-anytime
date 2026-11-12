@@ -4132,6 +4132,14 @@ html[data-ui-motion="off"] .automation-center, html[data-ui-motion="off"] .ui-pr
 .im-channel-test-ok { border-color: var(--success-border); background: var(--success-soft); color: var(--success-text); }
 .im-channel-test-error { border-color: var(--danger-border); background: var(--danger-soft); color: var(--danger-text); }
 .im-channel-status-error { margin: 0; color: var(--danger-text); font-size: 11px; line-height: 1.5; }
+.im-channel-diag { display: grid; gap: 5px; padding: 8px 10px; border: 1px dashed var(--border); border-radius: 8px; background: var(--surface-muted); font-size: 11px; color: var(--text-muted); }
+.im-channel-diag-row { display: grid; grid-template-columns: repeat(4, auto); justify-content: start; gap: 4px 8px; align-items: baseline; }
+.im-channel-diag-row > span { color: var(--text-muted); }
+.im-channel-diag-row > b { color: var(--text); font-weight: 600; margin-right: 8px; }
+.im-channel-diag-line { color: var(--text); overflow-wrap: anywhere; }
+.im-channel-diag-error { color: var(--danger-text); }
+.im-channel-diag-hint { color: var(--text); line-height: 1.6; }
+.im-channel-diag-hint code { padding: 0 4px; border-radius: 4px; background: var(--surface-raised); font-family: var(--font-mono, ui-monospace, monospace); font-size: 10px; }
 .im-channel-help { border: 1px solid var(--border); border-radius: 8px; background: var(--surface-raised); font-size: 11px; }
 .im-channel-help > summary { display: flex; align-items: center; gap: 5px; padding: 7px 10px; color: var(--text); cursor: pointer; font-weight: 500; }
 .im-channel-help ol { display: grid; gap: 5px; margin: 0; padding: 0 12px 10px 26px; color: var(--text-muted); line-height: 1.55; }

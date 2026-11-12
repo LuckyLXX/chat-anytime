@@ -219,6 +219,59 @@ describe("ImChannelSettings", () => {
     expect(container.querySelector(".im-channel-badge")?.textContent).toContain("未启用");
   });
 
+  it("renders the channel diagnostics and explains a connected-but-silent channel", () => {
+    const now = Date.now();
+    seed({
+      im: { enabled: true, channels: [FEISHU] },
+      imStatus: {
+        enabled: true,
+        channels: [{
+          channelId: "feishu",
+          state: "connected",
+          botName: "值班机器人",
+          updatedAt: now,
+          lastFrameAt: now - 5_000
+        }]
+      }
+    });
+    render();
+    const diag = container.querySelector(".im-channel-diag");
+    expect(diag?.textContent).toContain("最近入站帧");
+    expect(diag?.textContent).toContain("最近消息事件");
+    expect(diag?.textContent).toContain("从未");
+    // 「连上了但从没收到事件」必须给出可执行的下一步（事件订阅/权限/发版）。
+    expect(diag?.textContent).toContain("从未收到任何消息事件");
+    expect(diag?.textContent).toContain("im.message.receive_v1");
+    expect(diag?.textContent).toContain("长连接");
+  });
+
+  it("shows the last event, the last ignore reason and the last send error", () => {
+    const now = Date.now();
+    seed({
+      im: { enabled: true, channels: [FEISHU] },
+      imStatus: {
+        enabled: true,
+        channels: [{
+          channelId: "feishu",
+          state: "connected",
+          updatedAt: now,
+          lastFrameAt: now - 1_000,
+          lastEventAt: now - 30_000,
+          lastEventSummary: "p2p · ou_owner · 帮我跑测试",
+          lastIgnored: "本批只处理私聊（收到 chat_type=group）",
+          lastError: "Bot 未开启接收消息权限（im:message:send_as_bot）"
+        }]
+      }
+    });
+    render();
+    const diag = container.querySelector(".im-channel-diag")?.textContent ?? "";
+    expect(diag).toContain("帮我跑测试");
+    expect(diag).toContain("本批只处理私聊");
+    expect(diag).toContain("send_as_bot");
+    // 有事件时不再显示「从未收到」的排查提示。
+    expect(diag).not.toContain("从未收到任何消息事件");
+  });
+
   it("starts from an empty draft when nothing is configured", () => {
     seed({ im: undefined });
     render();

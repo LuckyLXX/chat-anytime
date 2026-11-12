@@ -97,6 +97,7 @@ function harness(options: { handshake?: Partial<ImWsHandshakeResult>; onCardActi
   const clock = createClock();
   const events: unknown[] = [];
   const statuses: string[] = [];
+  let inbound = 0;
   const logs: string[] = [];
   let handshakes = 0;
   let random = 0;
@@ -119,6 +120,7 @@ function harness(options: { handshake?: Partial<ImWsHandshakeResult>; onCardActi
     ...(options.onCardAction ? { onCardAction: options.onCardAction } : {}),
     onStatus: (state) => statuses.push(state),
     onLog: (_level, message) => logs.push(message),
+    onInbound: () => { inbound += 1; },
     now: () => clock.now(),
     random: () => random,
     schedule: clock.schedule,
@@ -131,6 +133,7 @@ function harness(options: { handshake?: Partial<ImWsHandshakeResult>; onCardActi
     events,
     statuses,
     logs,
+    inbound: () => inbound,
     handshakes: () => handshakes,
     setRandom: (value: number) => { random = value; }
   };
@@ -262,6 +265,17 @@ describe("connection lifecycle", () => {
     clock.advance(1_000);
     await flush();
     expect(sockets.length).toBe(2);
+    client.dispose();
+  });
+
+  it("reports every decoded frame via onInbound (diagnostics: link alive vs events)", async () => {
+    const { client, sockets, inbound } = harness();
+    await client.start();
+    sockets[0]!.emit("open");
+    const before = inbound();
+    sockets[0]!.emit("message", encodeFrame({ seqId: 0, logId: 0, service: 42, method: 0, headers: [{ key: "type", value: "pong" }], payload: new TextEncoder().encode("{}") }));
+    sockets[0]!.emit("message", encodeFrame(eventFrame({ headers: [{ key: "message_id", value: "om_1" }], payload: "{}" })));
+    expect(inbound()).toBe(before + 2);
     client.dispose();
   });
 
