@@ -92,6 +92,7 @@ import { readConfiguredMcpServers, removeMcpServerConfig, setMcpServerDisabled, 
 import { createPiMcpExtensionLayer, createPidesktopMcpBridge, buildMcpUiContext, type McpBridgeControl } from "./mcp-bridge.js";
 import { PermissionBroker } from "./permission-broker.js";
 import { loadRecentWorkspaces, recordRecentWorkspace, removeRecentWorkspace, writeRecentWorkspaces } from "./recent-workspaces.js";
+import { applyRecentCompletions, loadRecentCompletions, recentCompletionsPath, recordRecentCompletion, saveRecentCompletions, type RecentCompletion } from "./recent-completions.js";
 import {
   galleryPathFor,
   galleryThumbsDirFor,
@@ -436,6 +437,15 @@ const liveSessions = new Map<string, SessionRuntimeRecord>();
 const imPromptQueues = new Map<string, string[]>();
 // 最近销毁会话的 manager 缓存：冷打开时按 mtime/size 校验复用，省掉同步 JSONL 解析。
 const recentSessionManagers = new SessionManagerCache();
+/**
+ * 侧栏「已完成」分区的持久化记录（见 recent-completions.ts）：内存镜像 + 立即落盘。
+ * 与 runStatus 互不依赖——记录发生在每个回合的终态出口（setTerminalRunStatus），
+ * 包括用户正看着的会话（它不留圆点，但确实结束了一轮，切走后要在顶部找回来）。
+ *
+ * 不做防抖：一个回合只结算一次（频率以秒计），而 utility 进程退出是直接 kill
+ * （`before-quit` → `runtimeProcess.kill()`），防抖窗口内退出就会丢最后一条。
+ */
+let recentCompletions: RecentCompletion[] = [];
 let activeRuntime: SessionRuntimeRecord | undefined;
 // 分屏中正被渲染端展示的会话（session.watch 注册）：parked 也能收到
 // session.state 推送、豁免空闲驱逐、不设侧栏终端圆点。激活会话隐含在内
@@ -2568,6 +2578,9 @@ function ensureSessionInList(record: SessionRuntimeRecord): void {
  * session's outcome is already visible in the conversation, so it gets none.
  */
 function setTerminalRunStatus(record: SessionRuntimeRecord, outcome: TerminalRunStatus): void {
+  // 「已完成」记录与圆点解耦：可见会话不留圆点（结果就在眼前），但它确实结束了一轮，
+  // 切走后用户还要靠侧栏顶部的分区把它找回来（2026-11-13）。
+  rememberSessionCompletion(record, outcome);
   // 分屏中被 watch 的会话与激活会话同待遇：结果直接可见，不设终端圆点。
   const visible = record === activeRuntime || renderedSessions.has(record.session.sessionId);
   record.runStatus = visible ? undefined : outcome;
@@ -2800,6 +2813,35 @@ function activate(record: SessionRuntimeRecord): void {
 
 function recentWorkspacesPath(): string {
   return join(getAgentDir(), "pidesktop-recent-workspaces.json");
+}
+
+// —— 侧栏「已完成」分区：最近回合结束的会话记录（见 recent-completions.ts）——
+
+function recentCompletionsFilePath(): string {
+  return recentCompletionsPath(getAgentDir());
+}
+
+/**
+ * 记一次回合结束并把它贴到侧栏列表上。
+ *
+ * 终态出口只有一个（setTerminalRunStatus：正常结束/中止/失败、prompt 直接抛、
+ * IM / 自动化回合的兜底都汇到那里），记录点就放在那一处；不放在 activate 的
+ * 「清圆点」路径上——那会让用户点开就再也找不回来。
+ *
+ * 会话文件可能还没落盘（首个 assistant 消息前的空会话不会有终态，防御性跳过）。
+ */
+function rememberSessionCompletion(record: SessionRuntimeRecord, outcome: TerminalRunStatus): void {
+  const path = record.session.sessionManager.getSessionFile();
+  if (!path) return;
+  recentCompletions = recordRecentCompletion(recentCompletions, { path, outcome });
+  // 列表里没有这条也无所谓（apply 只贴列表里存在的会话）；下一次 emitState 会带上字段。
+  currentSessions = applyRecentCompletions(currentSessions, recentCompletions);
+  try {
+    saveRecentCompletions(recentCompletionsFilePath(), recentCompletions);
+  } catch (error) {
+    // 写失败不影响会话本身：丢的只是顶部「已完成」那几条快捷入口。
+    void post({ type: "log", level: "warn", message: `「已完成」记录写入失败：${errorText(error)}` });
+  }
 }
 
 // —— 作品（Gallery）：清单在全局 agentDir，跨工作区共用一份池子 ——
@@ -4450,6 +4492,9 @@ function hydrateSessionsFromIndex(): void {
   }
   if (items.length === 0) return;
   currentSessions = sortSessionSummaries(items);
+  // 「已完成」标记是持久化记录，不是磁盘摘要的一部分：首帧就必须贴上，
+  // 否则要等第一次全量刷新完成后顶部才出现分区（2026-11-13）。
+  currentSessions = applyRecentCompletions(currentSessions, recentCompletions);
   sessionsLoaded = true;
 }
 
@@ -4512,6 +4557,8 @@ async function performSessionsRefresh(agentIds?: readonly string[]): Promise<voi
   // 由内存记录覆盖回来，否则回合开始/每条 assistant 消息后的防抖刷新会把圆点
   // 抹掉（回填只管未落盘行，压不住这条）。
   currentSessions = overlayLiveRunStatus(currentSessions, liveSeeds);
+  // 全量重扫会重建每一条摘要（completedAt/completedOutcome 不是磁盘字段）：重新贴上。
+  currentSessions = applyRecentCompletions(currentSessions, recentCompletions);
   scheduleLiveEmit(true);
 }
 
@@ -5417,6 +5464,8 @@ async function initialize(command: Extract<RuntimeCommand, { type: "initialize" 
   automationScheduler.reportMissed();
   refreshAutomation();
   // 首屏水合：先读持久化索引上屏（不扫盘），再后台全量 mtime/size 校验。
+  // 「已完成」记录（跨重启保留）必须在 hydrate 之前读入，hydrate 才能贴上字段。
+  recentCompletions = loadRecentCompletions(recentCompletionsFilePath());
   hydrateSessionsFromIndex();
   void refreshSessions().then(() => emitState()).catch((error) => {
     void post({ type: "log", level: "warn", message: `后台校验会话列表失败：${errorText(error)}` });

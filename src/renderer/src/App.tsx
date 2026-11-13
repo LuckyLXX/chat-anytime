@@ -98,6 +98,7 @@ import { groupSessionsByWorkspace, workspaceDisplayLabel, workspaceKey } from ".
 import { pickTopicAgentId } from "./lib/topic-agent";
 import { archivedSessionCount, selectSessionPaths, selectedPathsInView, sessionsForView, toggleSessionSelection, type SessionSelection, type SessionView } from "./lib/session-view";
 import { collectRunningSessions, hasRunningSession } from "./lib/running-sessions";
+import { collectRecentCompletedSessions } from "./lib/recent-completions";
 import { resolveThemeAssetUrls, activeThemeScope } from "../../shared/theme-assets";
 import { bubbleOpacityCss, collectThemeLayers, panelOpacityCss, scopeCustomThemeCss, themePresetCss, wallpaperOpacityCss } from "./lib/theme-presets";
 import { panePermissionRequest, paneQuestionRequest, dropPaneStates, pruneParkedPanels, useDesktopStore } from "./store";
@@ -1266,6 +1267,18 @@ export function App(): ReactNode {
   // 再按搜索词过滤——两处口径一致，不另算一遍筛选。
   const runningSessions = useMemo(() => collectRunningSessions(sessionsForView(sessionSummaries, "active", sessionViewOptions)), [sessionSummaries, sessionViewOptions]);
   const listedRunningSessions = useMemo(() => collectRunningSessions(runningSessions, sidebarQuery, agentNames), [runningSessions, sidebarQuery, agentNames]);
+  // 「已完成」分区（跨工作区，2026-11-13）：最近 5 个回合已结束的会话。与「运行中」
+  // 同一套两段式计算（先摊平、列表那份再按搜索词过滤）。已在眼前的会话（激活会话 +
+  // 分屏格子）不重复占位：分区只负责把「别处刚做完的」找回来，切走后它会自动回来。
+  const onScreenSessionIds = useMemo(() => new Set<string>([...(activeSessionId ? [activeSessionId] : []), ...paneIds]), [activeSessionId, paneIds]);
+  const recentCompletedSessions = useMemo(
+    () => collectRecentCompletedSessions(sessionsForView(sessionSummaries, "active", sessionViewOptions), { excludeSessionIds: onScreenSessionIds }),
+    [sessionSummaries, sessionViewOptions, onScreenSessionIds]
+  );
+  const listedRecentCompletedSessions = useMemo(
+    () => collectRecentCompletedSessions(recentCompletedSessions, { query: sidebarQuery, agentNames, excludeSessionIds: onScreenSessionIds }),
+    [recentCompletedSessions, sidebarQuery, agentNames, onScreenSessionIds]
+  );
   const sessionGroups = useMemo(() => groupSessionsByWorkspace(visibleSessions, sidebarQuery, recentWorkspaces, activeWorkspace, agentNames), [visibleSessions, recentWorkspaces, activeWorkspace, sidebarQuery, agentNames]);
   const archivedCount = useMemo(() => archivedSessionCount(sessionSummaries, sessionViewOptions), [sessionSummaries, sessionViewOptions]);
   const automationSessionCount = useMemo(() => sessionSummaries.filter(isAutomationSessionSummary).length, [sessionSummaries]);
@@ -2344,6 +2357,54 @@ export function App(): ReactNode {
                         <span className="session-item-heading"><strong>{item.title}</strong></span>
                         {/* 第二行只放**工作区**：这是用户要选的那一条信息（助手名在 title 里），
                             挤上「· 默认助手」会把工作区名截掉一半，那正是这个分区存在的意义。 */}
+                        <small className="session-running-where" title={`${where} · ${agentName}`}>{where}</small>
+                      </span>
+                    </button>;
+                  })}
+                </div>
+              </section>
+            ) : null}
+            {/* 「已完成」分区（跨工作区，2026-11-13）：回合已结束后**保留**在顶部，不必
+                切回原工作区翻分组才找得到。默认展开（无折叠状态）；激活会话与分屏格子
+                已在眼前，由数据层排除（见 collectRecentCompletedSessions）。 */}
+            {sessionView === "active" && listedRecentCompletedSessions.length > 0 ? (
+              <section className="session-recent-group" aria-label={`已完成的话题 ${listedRecentCompletedSessions.length} 个`}>
+                <div className="session-recent-heading">
+                  <CheckCircle2 size={11} className="session-recent-icon" aria-hidden />
+                  <strong>已完成</strong>
+                  <em>{listedRecentCompletedSessions.length}</em>
+                </div>
+                <div className="session-recent-items">
+                  {listedRecentCompletedSessions.map((item) => {
+                    const rowSelected = sessionMultiSelect && Boolean(selectedSessionPaths[item.path]);
+                    const agentName = agentNames[item.agentId] ?? "已归档助手";
+                    const where = workspaceDisplayLabel(item.workspace, workspacePaths);
+                    // 结局影响状态点颜色（成功绿 / 失败红 / 中止灰）；记录缺失时按成功渲染。
+                    const outcome = item.completedOutcome ?? "completed";
+                    const outcomeLabel = sessionRunStatusLabels[outcome];
+                    const completedLabel = item.completedAt
+                      ? new Date(item.completedAt).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })
+                      : "";
+                    return <button
+                      className={rowSelected ? "selected" : ""}
+                      type="button"
+                      key={item.path}
+                      data-row-kind="session"
+                      title={sessionMultiSelect ? (rowSelected ? `取消选择：${item.title}` : `选择：${item.title}`) : `${item.title} · ${where} · ${agentName}${completedLabel ? ` · 完成于 ${completedLabel}` : ""}`}
+                      aria-label={`切换到已完成的话题：${item.title}（${where}，${outcomeLabel}）`}
+                      onClick={() => {
+                        if (sessionMultiSelect) { setSelectedSessionPaths((current) => toggleSessionSelection(current, item.path)); return; }
+                        void openSession(item.path, item.workspace, item.id, item.agentId);
+                      }}
+                      onContextMenu={(event) => {
+                        event.preventDefault();
+                        setContextMenu({ x: event.clientX, y: event.clientY, items: sessionContextItems(item) });
+                      }}
+                    >
+                      <i className={`session-status-dot ${outcome}`} title={outcomeLabel} aria-hidden />
+                      <span>
+                        <span className="session-item-heading"><strong>{item.title}</strong></span>
+                        {/* 与「运行中」同口径：第二行只放工作区（助手名与完成时间在 title 里）。 */}
                         <small className="session-running-where" title={`${where} · ${agentName}`}>{where}</small>
                       </span>
                     </button>;

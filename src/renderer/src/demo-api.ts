@@ -261,11 +261,14 @@ const demoSnapshot: RuntimeSnapshot = {
   ],
   sessions: [
     { id: "demo-session", path: "demo-session.jsonl", workspace: "D:\\Projects\\chat-anytime-demo", agentId: "default", title: "梳理项目架构", modifiedAt: Date.now(), messageCount: 4, runStatus: "completed" },
-    { id: "older-session", path: "older-session.jsonl", workspace: "D:\\Projects\\chat-anytime-demo", agentId: "default", title: "检查渲染流程", modifiedAt: Date.now() - 86_400_000, messageCount: 7, runStatus: "failed" },
+    // 「已完成」分区（2026-11-13）：带 completedAt 的会话会出现在侧栏顶部（跨工作区），
+    // 激活会话自己除外。三条结局各一个，用来核对绿/红/灰状态点。
+    { id: "older-session", path: "older-session.jsonl", workspace: "D:\\Projects\\chat-anytime-demo", agentId: "default", title: "检查渲染流程", modifiedAt: Date.now() - 86_400_000, messageCount: 7, runStatus: "failed", completedAt: Date.now() - 86_400_000, completedOutcome: "failed" },
     // 同一工作区的第二个助手：验证跨助手徽标、搜索与分屏（不额外占用工作区分组）。
-    { id: "heiyuhe-session", path: "heiyuhe-session.jsonl", workspace: "D:\\Projects\\chat-anytime-demo", agentId: "heiyuhe", title: "整理发布清单", modifiedAt: Date.now() - 3_600_000, messageCount: 5 },
-    { id: "aborted-session", path: "aborted-session.jsonl", workspace: "D:\\Projects\\PiDesktop", agentId: "default", title: "中止的排查任务", modifiedAt: Date.now() - 7_200_000, messageCount: 5, runStatus: "aborted" },
-    { id: "other-session", path: "other-session.jsonl", workspace: "D:\\Projects\\PiDesktop", agentId: "default", title: "检查桌面端", modifiedAt: Date.now() - 43_200_000, messageCount: 3 }
+    // 它此刻正在跑：演示「运行中」分区，同时也验证 running 不会重复进「已完成」。
+    { id: "heiyuhe-session", path: "heiyuhe-session.jsonl", workspace: "D:\\Projects\\chat-anytime-demo", agentId: "heiyuhe", title: "整理发布清单", modifiedAt: Date.now() - 3_600_000, messageCount: 5, runStatus: "running" },
+    { id: "aborted-session", path: "aborted-session.jsonl", workspace: "D:\\Projects\\PiDesktop", agentId: "default", title: "中止的排查任务", modifiedAt: Date.now() - 1_800_000, messageCount: 5, runStatus: "aborted", completedAt: Date.now() - 1_800_000, completedOutcome: "aborted" },
+    { id: "other-session", path: "other-session.jsonl", workspace: "D:\\Projects\\PiDesktop", agentId: "default", title: "检查桌面端", modifiedAt: Date.now() - 7_200_000, messageCount: 3, completedAt: Date.now() - 7_200_000, completedOutcome: "completed" }
   ],
   messages: [
     {

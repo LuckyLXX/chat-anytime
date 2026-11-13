@@ -766,6 +766,27 @@ describe("snapshot identity retention with agent and missing fields", () => {
     useDesktopStore.getState().handleRuntimeMessage({ type: "session.state", snapshot: pane({ agentName: "审查助手", readOnlyReason: "只读" }) });
     expect(useDesktopStore.getState().paneStates["pane-agent"]?.readOnlyReason).toBe("只读");
   });
+
+  it("replaces sessions when only the completion stamp changes", () => {
+    const previous = [summary()];
+    const incoming = [summary({ completedAt: 900, completedOutcome: "failed" })];
+    expect(mergeSessionsPreservingIdentity(previous, incoming)).toBe(incoming);
+  });
+
+  it("does not early-return a state frame that only changes the completion stamp", () => {
+    // 「已完成」分区（2026-11-13）：parked 会话回合结束时可能只有这两个字段变化，
+    // 比较漏掉它们 ⇒ 整帧被早退吐掉，侧栏顶部永远看不到刚跑完的那一条。
+    useDesktopStore.setState({ snapshot: { ...snap("recent"), sessions: [summary()] } });
+    const before = useDesktopStore.getState().snapshot;
+    useDesktopStore.getState().handleRuntimeMessage({
+      type: "state",
+      snapshot: { ...snap("recent"), sessions: [summary({ completedAt: 900, completedOutcome: "completed" })] }
+    });
+    const after = useDesktopStore.getState().snapshot;
+    expect(after).not.toBe(before);
+    expect(after.sessions[0]?.completedAt).toBe(900);
+    expect(after.sessions[0]?.completedOutcome).toBe("completed");
+  });
 });
 
 describe("会话检索结果的分流（命令面板 / 侧栏各一份）", () => {

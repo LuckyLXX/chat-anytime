@@ -35,9 +35,9 @@ describe("sidebar running sessions wiring contract", () => {
   });
 
   it("点一行走的是同一条 openSession 路径，右键菜单与分组行共用一份", () => {
-    // 分组行 + 运行中分区行 + 归档右键「打开（自动恢复）」都经 openSession。
+    // 分组行 + 运行中分区行 + 已完成分区行（2026-11-13）+ 归档右键「打开（自动恢复）」都经 openSession。
     expect(app.match(/openSession\(item\.path, item\.workspace, item\.id, item\.agentId\)/gu)?.length).toBeGreaterThanOrEqual(2);
-    expect(app.match(/items: sessionContextItems\(item\)/gu)?.length).toBe(2);
+    expect(app.match(/items: sessionContextItems\(item\)/gu)?.length).toBe(3);
     expect(app).toContain("function sessionContextItems(item: SessionSummary): ContextMenuItem[]");
   });
 

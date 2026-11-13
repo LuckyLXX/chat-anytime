@@ -284,7 +284,10 @@ export function mergeSessionsPreservingIdentity(previous: RuntimeSnapshot["sessi
     return other !== undefined && item.id === other.id && item.path === other.path && item.workspace === other.workspace
       && item.agentId === other.agentId && item.workspaceMissing === other.workspaceMissing
       && item.title === other.title && item.modifiedAt === other.modifiedAt && item.messageCount === other.messageCount
-      && item.pinned === other.pinned && item.archived === other.archived && item.runStatus === other.runStatus;
+      && item.pinned === other.pinned && item.archived === other.archived && item.runStatus === other.runStatus
+      // 「已完成」标记（2026-11-13）：parked 会话回合结束时只有这两个字段变化，
+      // 漏比就会被早退吞掉——切走后顶部「已完成」分区不刷新。
+      && item.completedAt === other.completedAt && item.completedOutcome === other.completedOutcome;
   });
   return equal ? previous : incoming;
 }

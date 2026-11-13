@@ -346,6 +346,15 @@ html[data-ui-blur="off"] *::after {
 .session-running-items > button > .session-status-dot { justify-self: center; }
 .session-list .session-running-where { overflow: hidden; color: var(--text-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .session-workspace-running { flex: 0 0 auto; }
+/* 「已完成」分区（2026-11-13）：与「运行中」同构，内容是最近 5 个回合已结束的会话
+   （跨工作区、默认展开）。状态点按结局着色：绿/红/灰见 .session-status-dot.*；
+   计数徽章用中性色（红色只属于「运行中」那种需要关注的实时状态）。 */
+.session-recent-group { display: grid; gap: 2px; padding-bottom: 5px; margin-bottom: 2px; border-bottom: 1px solid var(--border); }
+.session-recent-heading { display: flex; align-items: center; gap: 6px; padding: 6px 8px 4px; color: var(--text); font-size: 10px; font-weight: 700; letter-spacing: .04em; }
+.session-recent-icon { color: var(--success); }
+.session-recent-heading em { min-width: 16px; padding: 1px 5px; border-radius: 999px; color: var(--text-muted); background: var(--surface-muted); font-size: 9.5px; font-style: normal; font-weight: 700; text-align: center; }
+.session-recent-items { display: grid; gap: 2px; }
+.session-recent-items > button > .session-status-dot { justify-self: center; }
 
 /* 会话全文检索结果（侧栏内联，标题过滤之后）。.session-list button/span 的通用规则
    很宽，这里用 .session-list 前缀把布局改回纵向卡片。 */

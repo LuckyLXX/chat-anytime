@@ -1701,6 +1701,12 @@ export interface SshSettings {
 export type SessionRunStatus = "running" | "completed" | "failed" | "aborted";
 
 /**
+ * 回合终态（runStatus 去掉 running）：一个回合必然以三者之一结束。
+ * 侧栏「已完成」分区按它给状态点着色（成功绿 / 失败红 / 中止灰）。
+ */
+export type SessionTerminalStatus = Exclude<SessionRunStatus, "running">;
+
+/**
  * 会话来源标记。两种：自动化后台运行（列表默认隐藏，由任务面板回看）与
  * IM 通道会话（列表**可见**，标题写 `飞书 · xxxxxxxx`，用户可自行改名）。
  *
@@ -1752,6 +1758,17 @@ export interface SessionSummary {
   archived?: boolean;
   /** Present only for live sessions; terminal dots clear once viewed. */
   runStatus?: SessionRunStatus;
+  /**
+   * 最近一次回合**结束**的时刻（ms；成功/失败/中止都记）。
+   *
+   * 与 runStatus 的分工：runStatus 是纯运行时状态（磁盘摘要不带它 ⇒ 重启即丢，
+   * activate 还会把终态清成 undefined「看过即已读」）；completedAt 由主进程
+   * 持久化在 `<agentDir>/pidesktop-recent-completions.json`，跨重启保留、点开不
+   * 清空。侧栏顶部「已完成」分区据此跨工作区找回刚做完的会话（2026-11-13）。
+   */
+  completedAt?: number;
+  /** 上述回合的结局；无 completedAt 时缺省。 */
+  completedOutcome?: SessionTerminalStatus;
 }
 
 /**
