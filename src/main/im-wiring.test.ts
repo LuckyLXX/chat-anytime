@@ -235,11 +235,27 @@ describe("渲染端接线", () => {
     expect(customComponent).toContain('type: "im.channel.delete"');
   });
 
-  it("store 消费 im.status / im.test-result / im.save-result，bootstrap 带 imStatus", () => {
+  it("store 消费 im.status / im.test-result / im.save-result / im.settings，bootstrap 带 imStatus", () => {
     expect(store).toContain('case "im.status":');
     expect(store).toContain('case "im.test-result":');
     expect(store).toContain('case "im.save-result":');
+    expect(store).toContain('case "im.settings":');
     expect(store).toContain("bootstrap.imStatus");
+  });
+
+  it("IM 配置的权威快照在保存与删除后各推一次（删掉最后一条时 im 缺省）", () => {
+    expect(protocol).toContain('type: "im.settings"');
+    expect(protocol).toContain("im?: ImSettings }");
+    // 保存 + 删除两条路径都要推：删除没有保存回执，否则列表里那行删不掉。
+    expect((index.match(/type: "im\.settings"/gu) ?? []).length).toBe(2);
+    expect(index).toContain("settings.im ? { im: settings.im } : {}");
+  });
+
+  it("设置弹窗关闭时不回滚主进程已落盘的 IM 配置（否则保存成功后重进就没了）", () => {
+    expect(app).toContain("settingsAfterDialogClose(initialSettingsRef.current");
+    const rollback = read("../renderer/src/lib/settings-rollback.ts");
+    expect(rollback).toContain("restored.im = structuredClone(live.im)");
+    expect(rollback).toContain("delete restored.im");
   });
 
   it("保存回执来自主进程（面板不靠本地计时器假装成功）", () => {

@@ -347,11 +347,18 @@ export function createCustomChannelTransport(options: CustomChannelTransportOpti
             if (!res.headersSent) sendJson(res, 500, { ok: false, error: "服务内部错误" });
           });
         });
-        created.on("error", (error) => {
+        created.on("error", (error: NodeJS.ErrnoException) => {
           server = undefined;
           listening = false;
-          options.onStatus("error", `监听 ${host}:${desiredPort || "随机"} 失败：${error.message}`);
-          reject(error);
+          // EADDRINUSE 是可自解释的常见误配：内网脚本常把「通道监听端口」与「回调端口」
+          // 写成同一个（协议文档示例的回调服务就是 8799），原样抛 code 会让人以为是 bug。
+          const detail = error.code === "EADDRINUSE"
+            ? `端口 ${desiredPort} 已被其他程序占用（通道监听端口要和脚本自己的回调端口分开），换一个端口保存即可`
+            : error.message;
+          options.onStatus("error", `监听 ${host}:${desiredPort || "随机"} 失败：${detail}`);
+          // 网关在 start() 的 catch 里会用 error.message 覆盖状态（「连接失败：…」），
+          // 所以把友好文案一并放进 reject 的错误里，否则面板上只剩裸 code。
+          reject(error.code === "EADDRINUSE" ? Object.assign(new Error(detail), { code: error.code }) : error);
         });
         created.listen({ host, port: desiredPort }, () => {
           server = created;

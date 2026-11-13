@@ -633,6 +633,10 @@ function handleImCommand(command: RuntimeCommand): boolean {
       persistSettings().schedule(diffSettings(previous, settings));
       // 保存即应用：连接参数变了就重建（旧 socket 先关）。
       startImGateway();
+      // 配置的权威快照单独一帧：设置弹窗关闭时会把 store 回滚到打开时的草稿基线
+      // （`initialSettingsRef`），IM 通道不是在弹窗里草稿保存的，必须让渲染端能追到
+      // 主进程刚落盘的这份，否则「保存成功、退出设置重进就没了」（2026-11-13）。
+      pushRuntimeMessage({ type: "im.settings", ...(settings.im ? { im: settings.im } : {}) });
       pushRuntimeMessage({ type: "im.status", status: imGatewayStatus() });
       // 回执带**落盘后的权威配置**（含 appSecretConfigured）：面板据此显示「已保存」
       // 并回填密钥状态，不再靠本地计时器假装成功。
@@ -659,6 +663,8 @@ function handleImCommand(command: RuntimeCommand): boolean {
       }
       persistSettings().schedule(diffSettings(previous, settings));
       startImGateway();
+      // 删除没有保存回执：同样推权威快照，否则列表会一直留着已删通道（点删除像没反应）。
+      pushRuntimeMessage({ type: "im.settings", ...(settings.im ? { im: settings.im } : {}) });
       pushRuntimeMessage({ type: "im.status", status: imGatewayStatus() });
       return true;
     }

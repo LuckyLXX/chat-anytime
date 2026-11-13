@@ -843,3 +843,38 @@ describe("会话检索结果的分流（命令面板 / 侧栏各一份）", () =
     expect(useDesktopStore.getState()).toBe(before);
   });
 });
+
+describe("IM 通道权威配置推送（im.settings）", () => {
+  /** 主进程独占 settings.im；保存/删除后推一帧权威快照，渲染端整体替换。 */
+  const customChannel = {
+    id: "custom-ab12cd",
+    kind: "custom" as const,
+    enabled: true,
+    label: "内网工单",
+    appId: "",
+    host: "127.0.0.1" as const,
+    port: 8799,
+    allowFrom: ["zhangsan"],
+    accessMode: "workspace" as const
+  };
+
+  beforeEach(() => {
+    useDesktopStore.setState({
+      settings: {
+        ...useDesktopStore.getState().settings,
+        im: { enabled: true, channels: [{ ...customChannel, id: "feishu-other" } as never] }
+      }
+    });
+  });
+
+  it("整体替换 settings.im：保存后的通道列表与总开关以主进程为准", () => {
+    useDesktopStore.getState().handleRuntimeMessage({ type: "im.settings", im: { enabled: true, channels: [customChannel] } });
+    expect(useDesktopStore.getState().settings.im).toEqual({ enabled: true, channels: [customChannel] });
+  });
+
+  it("缺省 im（删掉最后一条通道）时把 settings.im 清掉，列表不留已删通道", () => {
+    useDesktopStore.getState().handleRuntimeMessage({ type: "im.settings" });
+    expect(useDesktopStore.getState().settings.im).toBeUndefined();
+    expect("im" in useDesktopStore.getState().settings).toBe(false);
+  });
+});

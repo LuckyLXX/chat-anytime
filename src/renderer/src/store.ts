@@ -1186,6 +1186,16 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
       case "im.status":
         set({ imStatus: message.status });
         break;
+      case "im.settings":
+        // 主进程独占的 IM 配置（保存/删除后的权威快照）：整体替换，不做增量合并。
+        // 关键作用是让弹窗关闭时的回滚基线能追上磁盘真值（见 settingsAfterDialogClose）。
+        set((state) => {
+          const next = { ...state.settings };
+          if (message.im) next.im = message.im;
+          else delete next.im;
+          return { settings: next };
+        });
+        break;
       case "im.save-result": {
         const channel = message.channel;
         const messageText = message.ok ? "已保存" : (message.error ?? "保存失败");

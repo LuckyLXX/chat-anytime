@@ -136,6 +136,19 @@ describe("ImCustomChannelSettings", () => {
     expect(remove?.type === "im.channel.delete" && remove.channelId).toBe(CUSTOM.id);
   });
 
+  it("删除后主进程推回 im.settings：列表那一行立刻消失（不是等下次启动）", () => {
+    seed({ channels: [CUSTOM] });
+    render();
+    act(() => (container.querySelector('[data-control="im-custom-delete"]') as HTMLButtonElement).click());
+    expect(sent.find((command) => command.type === "im.channel.delete")).toBeTruthy();
+    // 主进程删完之后推权威快照（磁盘上已经没有这条通道）。
+    act(() => {
+      useDesktopStore.getState().handleRuntimeMessage({ type: "im.settings", im: { enabled: true, channels: [] } });
+    });
+    expect(container.querySelector(".im-custom-row")).toBeNull();
+    expect(container.textContent).toContain("还没有自定义通道");
+  });
+
   it("总开关关着时明确提示「保存也不会监听」", () => {
     render(false);
     expect(container.textContent).toContain("总开关没开");

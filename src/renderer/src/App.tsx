@@ -123,6 +123,7 @@ import { useOverlayLayer, useOverlayLayersOpen } from "./lib/overlay-layers";
 import { useChatOverlayRegion } from "./lib/chat-overlay-region";
 import { isSoftwareRenderer, readWebglRenderer, resolveBlurEnabled } from "./lib/graphics-tier";
 import { showGalleryWallLanding } from "./lib/landing-gallery";
+import { settingsAfterDialogClose } from "./lib/settings-rollback";
 import { AppearanceSettings } from "./AppearanceSettings";
 import { HooksSettings } from "./HooksSettings";
 import { selectableCatalogModels } from "./lib/model-list";
@@ -386,7 +387,11 @@ function SettingsDialog({ settings, models, providers, resources, workspaceOpen,
   const appVersion = useDesktopStore((state) => state.appVersion);
   const selectedAgent = agentList.find((agent) => agent.id === selectedAgentId) ?? agentList[0];
   const configuredModels = selectableCatalogModels(models).filter((model) => model.configured);
-  function closeSettings(): void { useDesktopStore.setState({ settings: structuredClone(initialSettingsRef.current) }); onClose(); }
+  function closeSettings(): void {
+    // 回滚弹窗草稿，但主进程已落盘的 IM 通道配置取 live 值（否则「保存成功、重进就没了」）。
+    useDesktopStore.setState({ settings: settingsAfterDialogClose(initialSettingsRef.current, useDesktopStore.getState().settings) });
+    onClose();
+  }
   function markSettingsSaved(nextSettings: import("../../shared/protocol").DesktopSettings): void {
     const saved = structuredClone(nextSettings);
     initialSettingsRef.current = saved;

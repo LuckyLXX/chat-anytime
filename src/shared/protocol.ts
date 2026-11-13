@@ -2862,6 +2862,14 @@ export type RuntimeMessage =
   | { type: "memory.overview"; overview: MemoryOverview }
   /** IM 通道状态变化（主进程推送；bootstrap 也带一份当前快照）。 */
   | { type: "im.status"; status: ImStatus }
+  /**
+   * IM 通道配置的**权威快照**（主进程独占 settings.im）：保存、删除之后推送，渲染端整体替换。
+   *
+   * 为什么不能只靠 `im.save-result`：删除没有回执；而且设置弹窗关闭时会回滚到打开时的
+   * 快照，主进程已经落盘的配置必须能单独追上（见 `settingsAfterDialogClose`）。
+   * 缺省 `im` = 一条通道都不剩（总闸关闭时 settings.im 被删除）。
+   */
+  | { type: "im.settings"; im?: ImSettings }
   /** IM 「测试连接」结果（响应 im.channel.test；requestId 原样带回）。 */
   | { type: "im.test-result"; requestId: string; ok: boolean; message: string; botName?: string; latencyMs?: number }
   /**

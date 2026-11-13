@@ -1,3 +1,4 @@
+import { createServer } from "node:http";
 import { describe, expect, it } from "vitest";
 import type { ImChannelConfig } from "../shared/protocol.js";
 import {
@@ -147,6 +148,31 @@ describe("自定义通道服务", () => {
     expect(statuses).toContain("error");
     expect(transport.ws.connected()).toBe(false);
     expect(transport.ws.endpoint()).toBeUndefined();
+  });
+
+  it("端口被占用时把原因说清楚（通道监听端口 ≠ 脚本回调端口）", async () => {
+    const blocker = createServer((_request, response) => response.end("busy"));
+    await new Promise<void>((resolve) => blocker.listen(0, "127.0.0.1", () => resolve()));
+    const address = blocker.address();
+    const port = typeof address === "object" && address ? address.port : 0;
+    const statuses: { state: string; message?: string }[] = [];
+    const transport = createCustomChannelTransport({
+      config: channelConfig({ port }),
+      token: "token-123",
+      onMessage: () => undefined,
+      onStatus: (state, message) => statuses.push({ state, ...(message ? { message } : {}) })
+    });
+    try {
+      // 网关会用 reject 的错误文案覆盖状态（「连接失败：…」），所以 reject 也要带同一句人话。
+      await expect(transport.ws.start()).rejects.toThrow("已被其他程序占用");
+      const failure = statuses.find((item) => item.state === "error");
+      expect(failure?.message).toContain("已被其他程序占用");
+      expect(failure?.message).toContain("回调端口");
+      expect(transport.ws.connected()).toBe(false);
+    } finally {
+      transport.ws.dispose();
+      await new Promise<void>((resolve) => blocker.close(() => resolve()));
+    }
   });
 
   it("Token 不对一律 401，对了才把消息交给网关", async () => {
