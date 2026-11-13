@@ -226,9 +226,13 @@ describe("渲染端接线", () => {
       expect(component).toContain(`data-control="${control}"`);
     }
     expect(component).toContain('data-pane="im-channel-settings"');
-    // 自定义通道同一 tab 里的第二张卡（官方通道 = 飞书，自定义 = 本机 HTTP）。
-    expect(component).toContain("<ImCustomChannelSettings masterEnabled={masterEnabled} />");
-    for (const control of ["im-custom-add", "im-custom-enabled", "im-custom-save", "im-custom-delete"]) {
+    // 两段式（2026-11-13）：左栏是通道列表（飞书 + 自定义），右栏是选中通道的详情面板；
+    // 「添加自定义通道」在左栏底部，表单/删除在详情组件里。
+    expect(component).toContain("<ImCustomChannelSettings");
+    expect(component).toContain("channelId={customDetailId}");
+    expect(component).toContain('className="im-channel-layout"');
+    expect(component).toContain('data-control="im-custom-add"');
+    for (const control of ["im-custom-enabled", "im-custom-save", "im-custom-delete"]) {
       expect(customComponent).toContain(`data-control="${control}"`);
     }
     expect(customComponent).toContain('kind: "custom"');

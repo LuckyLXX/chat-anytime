@@ -4151,6 +4151,43 @@ html[data-ui-motion="off"] .automation-center, html[data-ui-motion="off"] .ui-pr
 /* —— 设置页「消息通道」（IM 通道 P1，2026-11-12）——
    注意：本块必须留在 `.team-board {` 之前（team-board-type-scale.test.ts 从该行切到文件尾）。 */
 .im-channel-page .resource-page-title small { max-width: 72ch; }
+/* 两段式（2026-11-13）：左栏通道列表（飞书 + 自定义通道 + 新建）+ 右栏详情/编辑器，
+   与「Agent 角色」页同构。height/min-height 沿 .resource-page 链传下来，滚动下移到
+   .im-channel-rail-list / .im-channel-detail-body 各自承担（页头与详情操作条固定）。 */
+.im-channel-layout { display: grid; grid-template-columns: 236px minmax(0, 1fr); flex: 1 1 auto; min-height: 0; }
+.im-channel-rail { display: flex; flex-direction: column; gap: 7px; min-height: 0; min-width: 0; padding: 11px 10px; border-right: 1px solid var(--border); background: var(--surface-muted); }
+.im-channel-rail-head { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; padding: 0 4px 2px; color: var(--text-muted); font-size: 10.5px; font-weight: 700; }
+.im-channel-rail-head > span { display: inline-grid; place-items: center; min-width: 17px; height: 15px; padding: 0 4px; border-radius: 99px; background: var(--surface-raised); color: var(--text-muted); font-size: 10px; }
+.im-channel-rail-list { display: flex; flex: 1 1 auto; flex-direction: column; gap: 3px; min-height: 0; overflow-y: auto; }
+.im-channel-rail-item { display: grid; grid-template-columns: 24px minmax(0, 1fr); align-items: center; gap: 8px; min-height: 44px; padding: 5px 7px; border: 1px solid transparent; border-radius: 6px; color: var(--text); background: transparent; text-align: left; cursor: pointer; }
+.im-channel-rail-item:hover { background: var(--surface-raised); }
+.im-channel-rail-item.active { border-color: var(--accent); background: var(--surface); box-shadow: inset 2px 0 0 var(--accent); }
+.im-channel-rail-icon { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 6px; color: var(--accent-text); background: var(--accent-soft); }
+.im-channel-rail-icon-ok { color: var(--success-text); background: var(--success-soft); }
+.im-channel-rail-icon-error { color: var(--danger-text); background: var(--danger-soft); }
+.im-channel-rail-copy { display: grid; gap: 1px; min-width: 0; }
+.im-channel-rail-copy strong { display: flex; align-items: center; gap: 5px; min-width: 0; font-size: 12px; font-weight: 650; }
+.im-channel-rail-name { overflow: hidden; min-width: 0; text-overflow: ellipsis; white-space: nowrap; }
+.im-channel-rail-copy small { overflow: hidden; color: var(--text-muted); font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }
+.im-channel-rail-dot { flex: 0 0 auto; width: 6px; height: 6px; border-radius: 999px; background: var(--text-muted); }
+.im-channel-rail-dot-ok { background: var(--success); }
+.im-channel-rail-dot-busy { background: var(--accent); }
+.im-channel-rail-dot-error { background: var(--danger); }
+.im-channel-rail-new { display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; min-height: 32px; padding: 0 12px; color: var(--text-muted); border: 1px dashed var(--border-strong); border-radius: 6px; background: transparent; font-size: 11px; font-weight: 650; cursor: pointer; }
+.im-channel-rail-new:hover { color: var(--accent-text); border-color: var(--accent); background: var(--surface-button-hover); }
+.im-channel-detail { display: block; min-width: 0; min-height: 0; }
+@media (max-width: 900px) { .im-channel-layout { grid-template-columns: 200px minmax(0, 1fr); } }
+.im-channel-detail-pane { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.im-channel-detail-pane[hidden] { display: none; }
+.im-channel-detail-bar { display: flex; flex: 0 0 auto; align-items: center; gap: 9px; padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--surface); }
+.im-channel-detail-title { display: grid; flex: 1 1 auto; gap: 1px; min-width: 0; }
+.im-channel-detail-title strong { overflow: hidden; color: var(--text); font-size: 13px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.im-channel-detail-title small { overflow: hidden; color: var(--text-muted); font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }
+.im-channel-detail-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; }
+.im-channel-detail-body { display: flex; flex: 1 1 auto; flex-direction: column; gap: 10px; min-height: 0; padding: 13px 16px 18px; overflow-y: auto; }
+.im-channel-detail-empty { display: flex; flex: 1 1 auto; flex-direction: column; align-items: center; justify-content: center; gap: 6px; padding: 32px 20px; color: var(--text-muted); text-align: center; }
+.im-channel-detail-empty strong { color: var(--text); font-size: 12.5px; }
+.im-channel-detail-empty small { max-width: 44ch; font-size: 11px; line-height: 1.6; }
 .im-channel-master { display: inline-flex; align-items: center; gap: 6px; margin: 0; color: var(--text); font-size: 11.5px; font-weight: 500; white-space: nowrap; }
 .im-channel-master input { width: 14px; height: 14px; margin: 0; }
 .im-channel-card .resource-card-body { display: flex; flex-direction: column; gap: 10px; padding: 11px 12px 13px; }
@@ -4197,13 +4234,7 @@ html[data-ui-motion="off"] .automation-center, html[data-ui-motion="off"] .ui-pr
 /* 自定义通道（本机 HTTP，脚本接入；2026-11-12）：与飞书卡片同一 tab，配色全走主题 token。 */
 .im-custom-hint { margin: 0; color: var(--text-muted); font-size: 11px; line-height: 1.6; }
 .im-custom-hint code, .im-custom-protocol code { padding: 0 4px; border-radius: 4px; background: var(--surface-muted); color: var(--text); font-family: var(--font-mono, ui-monospace, monospace); font-size: 10.5px; }
-.im-custom-empty { margin: 0; padding: 9px 10px; border: 1px dashed var(--border); border-radius: 8px; color: var(--text-muted); font-size: 11px; }
-.im-custom-row { display: grid; gap: 6px; padding: 9px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-raised); }
-.im-custom-row-main { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: var(--text); font-size: 12px; }
-.im-custom-row-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .im-custom-endpoint { padding: 1px 6px; border-radius: 5px; background: var(--surface-muted); color: var(--text-muted); font-family: var(--font-mono, ui-monospace, monospace); font-size: 10.5px; }
-.im-channel-warning-inline { color: var(--warning-text); font-size: 10.5px; }
-.im-custom-form { display: grid; gap: 10px; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-raised); }
 .im-custom-token-row { display: flex; align-items: center; gap: 6px; }
 .im-custom-token-row input { flex: 1; min-width: 0; }
 .im-custom-id { color: var(--text-muted); font-size: 10.5px; }
