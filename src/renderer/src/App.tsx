@@ -41,6 +41,7 @@ import {
   Pin,
   History,
   Brain,
+  Layers,
   X
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
@@ -87,6 +88,7 @@ import { SessionSearchResults } from "./components/SessionSearchResults";
 import { AutomationPanel, type AutomationPanelTab } from "./AutomationPanel";
 import { AutomationCenter } from "./AutomationCenter";
 import { MemoryCenter } from "./MemoryCenter";
+import { ContextCenter } from "./ContextCenter";
 import type { AutomationRunsHighlight } from "./AutomationRuns";
 import { CommandPalette } from "./components/CommandPalette";
 import type { PaletteAction } from "./lib/command-palette";
@@ -650,6 +652,7 @@ export function App(): ReactNode {
   const [automationCenterOpen, setAutomationCenterOpen] = useState(false);
   const [automationCenterTaskId, setAutomationCenterTaskId] = useState<string | undefined>(undefined);
   const [memoryCenterOpen, setMemoryCenterOpen] = useState(false);
+  const [contextCenterOpen, setContextCenterOpen] = useState(false);
   const [preview, setPreview] = useState<PreviewState>();
   const [previewAddMenuOpen, setPreviewAddMenuOpen] = useState(false);
   // 顶栏「作品」下拉的展开态：它的面板从顶栏向下伸进右侧预览区，而内置浏览器是
@@ -666,6 +669,7 @@ export function App(): ReactNode {
     setAutomationPanelOpen(true);
     setAutomationCenterOpen(false);
     setMemoryCenterOpen(false);
+    setContextCenterOpen(false);
     setSettingsOpen(false);
     setPreviewOpened(false);
     setPreviewAddMenuOpen(false);
@@ -678,6 +682,7 @@ export function App(): ReactNode {
     setAutomationCenterOpen(true);
     setAutomationPanelOpen(false);
     setMemoryCenterOpen(false);
+    setContextCenterOpen(false);
     setSettingsOpen(false);
     setPreviewOpened(false);
     setPreviewAddMenuOpen(false);
@@ -690,12 +695,26 @@ export function App(): ReactNode {
     setMemoryCenterOpen(true);
     setAutomationPanelOpen(false);
     setAutomationCenterOpen(false);
+    setContextCenterOpen(false);
     setSettingsOpen(false);
     setPreviewOpened(false);
     setPreviewAddMenuOpen(false);
   }
   function closeMemoryCenter(): void {
     setMemoryCenterOpen(false);
+  }
+  /** 上下文中心：只读的会话成分页，与记忆/自动化/预览互斥（都占 work-area 覆盖层）。 */
+  function openContextCenter(): void {
+    setContextCenterOpen(true);
+    setMemoryCenterOpen(false);
+    setAutomationPanelOpen(false);
+    setAutomationCenterOpen(false);
+    setSettingsOpen(false);
+    setPreviewOpened(false);
+    setPreviewAddMenuOpen(false);
+  }
+  function closeContextCenter(): void {
+    setContextCenterOpen(false);
   }
   const [previewEditorStates, setPreviewEditorStates] = useState<Record<string, PreviewEditorState>>({});
   const [sidebarView, setSidebarView] = useState<"topics" | "files">("topics");
@@ -757,6 +776,7 @@ export function App(): ReactNode {
   const automationPanelPresence = useExitPresence(automationPanelOpen, 180);
   const automationCenterPresence = useExitPresence(automationCenterOpen, 180);
   const memoryCenterPresence = useExitPresence(memoryCenterOpen, 160);
+  const contextCenterPresence = useExitPresence(contextCenterOpen, 160);
   const permissionPresence = useExitPresenceValue(permission, 130);
   const transcriptPresence = useExitPresenceValue(transcriptTarget, 160);
   const renamePresence = useExitPresenceValue(renameSession, 160);
@@ -2102,13 +2122,14 @@ export function App(): ReactNode {
           onOpenPlanDetail={openPlanPreview}
           onOpenMemoryTopic={openMemoryTopic}
           onOpenMemoryCenter={openMemoryCenter}
+          onOpenContextCenter={openContextCenter}
           onOpenTranscript={setTranscriptTarget}
           onActionError={setActionError}
           onRollback={onRollback}
         />
       </div>
     );
-  }, [sessionSummaries, focusedPaneId, maximizedPaneId, openArtifactPreview, openFilePreview, openDiffPreview, openPlanPreview, openMemoryTopic, registerComposerApi, draftStore, setActionError, getPaneCallbacks]);
+  }, [sessionSummaries, focusedPaneId, maximizedPaneId, openArtifactPreview, openFilePreview, openDiffPreview, openPlanPreview, openMemoryTopic, openContextCenter, registerComposerApi, draftStore, setActionError, getPaneCallbacks]);
 
   /** 分隔条拖动：按 split 节点路径更新比例（夹取在 SplitDivider 内完成）。 */
   const handleSplitRatioChange = useCallback((path: readonly number[], ratio: number): void => {
@@ -2534,6 +2555,7 @@ export function App(): ReactNode {
       <button className="new-session-button" data-control="new-session" type="button" title={`在当前工作区新建话题（${APP_SHORTCUT_LABELS["new-session"]}）`} disabled={!activeWorkspace} onClick={() => void createNewSession()}><MessageSquarePlus size={16} />新建话题</button>
       <button className={`automation-nav-button${automationPanelOpen || automationCenterOpen ? " active" : ""}`} data-control="automation-open" type="button" title="自动化任务" aria-label="自动化任务" aria-pressed={automationPanelOpen || automationCenterOpen} onClick={() => automationPanelOpen ? closeAutomationPanel() : automationCenterOpen ? closeAutomationCenter() : openAutomationPanel()}><Zap size={15} /><span>自动化</span></button>
       <button className={`automation-nav-button${memoryCenterOpen ? " active" : ""}`} data-control="memory-center-open-nav" type="button" title="记忆中心" aria-label="记忆中心" aria-pressed={memoryCenterOpen} onClick={() => memoryCenterOpen ? closeMemoryCenter() : openMemoryCenter()}><Brain size={15} /><span>记忆</span></button>
+      <button className={`automation-nav-button${contextCenterOpen ? " active" : ""}`} data-control="context-center-open-nav" type="button" title="上下文中心（查看系统提示词、工具声明与会话成分）" aria-label="上下文中心" aria-pressed={contextCenterOpen} onClick={() => contextCenterOpen ? closeContextCenter() : openContextCenter()}><Layers size={15} /><span>上下文</span></button>
       <button className="automation-nav-button" data-control="ssh-open" type="button" title="SSH 远程终端" aria-label="SSH 远程终端" onClick={() => openSshPanel()}><Server size={15} /><span>SSH</span></button>
       <div className="sidebar-footer">
         <button type="button" data-control="settings" onClick={() => setSettingsOpen(true)}><Settings size={16} />设置</button>
@@ -2631,6 +2653,7 @@ export function App(): ReactNode {
     { id: "view.gallery", title: "打开作品墙", group: "视图", keywords: "gallery 作品 应用", hint: galleryApps.length > 0 ? `${String(galleryApps.length)} 个作品` : undefined, icon: LayoutGrid, run: () => setGalleryWallOpen(true) },
     { id: "view.automation", title: "打开自动化任务", group: "视图", keywords: "automation schedule 定时 任务", hint: enabledAutomationCount > 0 ? `${String(enabledAutomationCount)} 个启用` : "定时任务", icon: Zap, run: () => openAutomationPanel() },
     { id: "view.memory", title: "打开记忆中心", group: "视图", keywords: "memory 记忆 卡片 索引 长期记忆", hint: "卡片墙 + 模型索引", icon: Brain, run: () => openMemoryCenter() },
+    { id: "view.context", title: "查看会话上下文", group: "视图", keywords: "context 上下文 提示词 工具 schema token 成分 系统提示词", hint: "系统提示词与工具声明", searchOnly: true, icon: Layers, run: () => openContextCenter() },
     { id: "settings.open", title: "打开设置", group: "设置", keywords: "settings preference 偏好 配置", shortcut: APP_SHORTCUT_LABELS.settings, icon: Settings, run: () => { setSettingsInitialTab(undefined); setSettingsOpen(true); } }
   );
 
@@ -2757,6 +2780,7 @@ export function App(): ReactNode {
           <div className="sidebar-rail-items">
             <button type="button" className="rail-new-session" data-control="new-session" title={`在当前工作区新建话题（${APP_SHORTCUT_LABELS["new-session"]}）`} aria-label="在当前工作区新建话题" disabled={!activeWorkspace} onClick={() => void createNewSession()}><Plus size={18} /></button>
             <button type="button" className={`rail-icon${automationPanelOpen || automationCenterOpen ? " active" : ""}`} data-control="automation-open" title="自动化任务" aria-label="自动化任务" onClick={() => automationPanelOpen ? closeAutomationPanel() : automationCenterOpen ? closeAutomationCenter() : openAutomationPanel()}><Zap size={18} /></button>
+            <button type="button" className={`rail-icon${contextCenterOpen ? " active" : ""}`} data-control="context-center-open-nav" title="上下文中心" aria-label="上下文中心" onClick={() => contextCenterOpen ? closeContextCenter() : openContextCenter()}><Layers size={18} /></button>
             <button type="button" className="rail-icon" data-control="ssh-open" title="SSH 远程终端" aria-label="SSH 远程终端" onClick={() => openSshPanel()}><Server size={18} /></button>
             <button type="button" className="rail-icon" data-control="rail-topics" title={runningSessions.length > 0 ? `话题列表（${runningSessions.length} 个运行中）` : "话题列表"} aria-label={runningSessions.length > 0 ? `话题列表，${runningSessions.length} 个运行中` : "话题列表"} onClick={() => { setSidebarView("topics"); setSidebarTab("topics"); setSidebarFlyoutOpen(true); }}><MessageCircle size={18} />{runningSessions.length > 0 ? <span className="rail-running-badge">{runningSessions.length}</span> : null}</button>
             <button type="button" className="rail-icon" data-control="rail-search" title="搜索" aria-label="搜索" onClick={() => { setSidebarView("topics"); setSidebarFlyoutOpen(true); window.setTimeout(() => sidebarSearchRef.current?.focus(), 30); }}><Search size={18} /></button>
@@ -2817,7 +2841,7 @@ export function App(): ReactNode {
           <div
             ref={workAreaRef}
             data-pane="work-area"
-            className={`work-area${designMode ? " design-mode" : ` ${workAreaPreviewClasses({ open: previewOpened, tabs: Boolean(preview && preview.tabs.length > 0) })}`}${automationPanelPresence.rendered ? " automation-panel-open" : ""}${automationCenterPresence.rendered ? " automation-center-open" : ""}${memoryCenterPresence.rendered ? " memory-center-open" : ""}${designDragging ? " is-design-dragging" : !designMode && previewDragging ? " is-preview-dragging" : ""}`}
+            className={`work-area${designMode ? " design-mode" : ` ${workAreaPreviewClasses({ open: previewOpened, tabs: Boolean(preview && preview.tabs.length > 0) })}`}${automationPanelPresence.rendered ? " automation-panel-open" : ""}${automationCenterPresence.rendered ? " automation-center-open" : ""}${memoryCenterPresence.rendered ? " memory-center-open" : ""}${contextCenterPresence.rendered ? " context-center-open" : ""}${designDragging ? " is-design-dragging" : !designMode && previewDragging ? " is-preview-dragging" : ""}`}
             style={designMode
               ? { "--design-split": `${designSplit}%` } as CSSProperties
               : {
@@ -2856,6 +2880,7 @@ export function App(): ReactNode {
                   onOpenPlanDetail={openPlanPreview}
                   onOpenMemoryTopic={openMemoryTopic}
                   onOpenMemoryCenter={openMemoryCenter}
+                  onOpenContextCenter={openContextCenter}
                   onOpenTranscript={setTranscriptTarget}
                   onActionError={setActionError}
                   onRollback={mainPaneRollback}
@@ -2938,6 +2963,11 @@ export function App(): ReactNode {
                 onClose={closeMemoryCenter}
                 onOpenTopic={(topic, agentId) => { closeMemoryCenter(); openMemoryTopic(topic, agentId); }}
               />
+            </ExitWrap>
+          )}
+          {contextCenterPresence.rendered && (
+            <ExitWrap exiting={contextCenterPresence.exiting}>
+              <ContextCenter onClose={closeContextCenter} />
             </ExitWrap>
           )}
         </div>

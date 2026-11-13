@@ -88,7 +88,7 @@ import { autoCompactionFailureNotice, runManualCompaction } from "./compaction-l
 import { isAbortErrorMessage, resolveRunOutcomeStatus, type OutcomeMessageLike, type TerminalRunStatus } from "./run-outcome.js";
 import { readGitBranch, watchGitBranch, type GitBranchWatchHandle } from "./git-branch.js";
 import { builtinProviderOverlay, buildFetchedProviderModels, resolveBuiltinOverlayAction, resolveCustomProviderRegistration } from "./custom-provider.js";
-import { buildDivModePrompt } from "./div-prompt.js";
+import { buildDivModePrompt, buildDivModeReminder, buildUiThemeContextBlock } from "./div-prompt.js";
 import { readConfiguredMcpServers, removeMcpServerConfig, setMcpServerDisabled, upsertMcpServerConfig } from "./mcp-config.js";
 import { createPiMcpExtensionLayer, createPidesktopMcpBridge, buildMcpUiContext, type McpBridgeControl } from "./mcp-bridge.js";
 import { PermissionBroker } from "./permission-broker.js";
@@ -199,6 +199,7 @@ import { createImageDownsampler } from "./image-downsample.js";
 import { budgetedStreamSimple, createImageBudgetGate } from "./budgeted-stream.js";
 import * as speedStats from "./speed-stats.js";
 import * as contextBreakdown from "./context-breakdown.js";
+import * as contextInspection from "./context-inspection.js";
 import * as runtimeHooks from "./runtime-hooks.js";
 import * as runtimePlanTools from "./runtime-plan-tools.js";
 import { createUiThemeExtension, normalizeUiThemeContext } from "./runtime-ui-theme.js";
@@ -6065,6 +6066,92 @@ async function ensureImSession(command: Extract<RuntimeCommand, { type: "im.sess
   }
 }
 
+/** 访问模式的中文标签（与输入框里的菜单同口径）。 */
+const ACCESS_MODE_LABELS: Record<string, string> = {
+  "read-only": "只读",
+  ask: "每次询问",
+  workspace: "工作区访问",
+  full: "完全访问"
+};
+
+/** Div 气泡档位的中文标签。 */
+const DIV_MODE_LABELS: Record<string, string> = { off: "关", always: "全部回合", auto: "按场景" };
+
+/**
+ * 上下文中心的「当前配置块」：只用于标记定位与「本会话未注入」对照。
+ *
+ * 会话实况里冻结的文本由 context-inspection 从转录的 system sections 切出来；
+ * 这里的重算文本只在某块当前开启、但本会话创建时没注入时给页面一个对照，绝不
+ * 冒充成模型看到的内容（页面用 present=false 标注）。
+ */
+function currentPromptBlocks(record: SessionRuntimeRecord): contextInspection.ContextInspectionSource["currentBlocks"] {
+  const loaded = workspaceResources.load(record.workspace);
+  const memoryBlock = settings?.memory?.enabled === false
+    ? ""
+    : [runtimeMemoryTools.buildMemorySystemPromptBlock(), runtimeMemoryTools.buildDualMemorySnapshotBlock(
+        record.workspaceMemoryStore.snapshotMarkdown(record.workspace, MEMORY_SNAPSHOT_PROJECT_CHARS),
+        record.memoryStore.snapshotMarkdown(record.workspace, MEMORY_SNAPSHOT_AGENT_CHARS)
+      )].filter(Boolean).join("\n\n");
+  return {
+    skills: buildSkillsSystemPromptBlock(runtimeSkills.activeSkillsFor(loaded.skillSummaries, record.agent)) ?? "",
+    orchestration: TOOL_ORCHESTRATION_PROMPT_BLOCK,
+    output: OUTPUT_FORMAT_PROMPT_BLOCK,
+    subagents: buildSubagentPromptBlock(loaded.subagents) ?? "",
+    memory: memoryBlock,
+    div: buildDivModePrompt(record.im ? "off" : record.agent.divMode) ?? ""
+  };
+}
+
+/** 每回合尾部注入：与扩展里调用的是同一组构建器，文案不会漂。 */
+function currentTurnInjections(record: SessionRuntimeRecord): { label: string; origin: string; text?: string }[] {
+  const divMode = record.im ? "off" : record.agent.divMode;
+  const theme = buildUiThemeContextBlock(divMode, uiThemeContext);
+  const reminder = buildDivModeReminder(divMode);
+  return [
+    { label: "界面主题（一行）", origin: "runtime-ui-theme · before_agent_start", ...(theme ? { text: theme } : {}) },
+    { label: "Div 气泡合规重申", origin: "runtime-div-mode · always 档", ...(reminder ? { text: reminder } : {}) }
+  ];
+}
+
+/** 运行参数行：只用能确定的事实，不猜 Pi 的内部状态。 */
+function contextRuntimeRows(
+  record: SessionRuntimeRecord,
+  frozenSkills: number,
+  currentSkills: number
+): { label: string; value: string; note?: string; frozen?: boolean }[] {
+  const session = record.session;
+  const model = session.model;
+  const divMode = record.im ? "off" : record.agent.divMode;
+  const enabledHooks = hookSummaries(record.workspace).filter((hook) => hook.enabled).length;
+  const cacheHitRate = runtimeContextUsage.cacheHitRateFrom(record.cacheUsage);
+  return [
+    { label: "模型", value: model?.id ?? "—", ...(model ? { note: model.provider } : {}) },
+    { label: "思考等级", value: session.thinkingLevel },
+    { label: "上下文窗口", value: model?.contextWindow ? model.contextWindow.toLocaleString("en-US") : "—" },
+    { label: "最大输出", value: model?.maxTokens ? model.maxTokens.toLocaleString("en-US") : "—" },
+    { label: "访问模式", value: ACCESS_MODE_LABELS[settings?.accessMode ?? ""] ?? "—" },
+    { label: "计划模式", value: record.planState.enabled ? "开" : "关" },
+    {
+      label: "Div 气泡",
+      value: record.im ? "关（IM 会话）" : DIV_MODE_LABELS[divMode] ?? divMode,
+      note: "静态规范按创建时档位冻结"
+    },
+    { label: "团队模式", value: record.teamMode.enabled ? "开" : "关" },
+    { label: "电脑控制", value: record.computerMode.enabled ? "开" : "关" },
+    { label: "设计模式", value: record.designMode.enabled ? "开" : "关" },
+    { label: "记忆注入", value: settings?.memory?.enabled === false ? "关" : "开（项目库 + 助手库）", frozen: true },
+    {
+      label: "技能注入",
+      value: `${frozenSkills} 个`,
+      ...(currentSkills !== frozenSkills ? { note: `当前配置 ${currentSkills} 个` } : {}),
+      frozen: true
+    },
+    { label: "钩子", value: settings?.hooks?.enabled === false ? "停用" : `启用 · ${enabledHooks} 条` },
+    { label: "可中止 Shell", value: "是" },
+    { label: "缓存命中", value: cacheHitRate == null ? "—" : `${Math.round(cacheHitRate * 10) / 10}%` }
+  ];
+}
+
 async function handleCommand(command: RuntimeCommand): Promise<void> {
   switch (command.type) {
     case "initialize":
@@ -6255,6 +6342,65 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         post({ type: "session.search-result", requestId, hits, scanned: sessions.length, total: sessions.length, done: true });
       } catch (error) {
         post({ type: "session.search-result", requestId, hits: [], scanned: 0, total: sessions.length, done: true, error: errorText(error) });
+      }
+      break;
+    }
+    case "session.inspect": {
+      const requestId = command.requestId;
+      let record: SessionRuntimeRecord;
+      try {
+        record = resolveTargetRecord(command.sessionId);
+      } catch (error) {
+        post({ type: "session.inspect-result", requestId, ...(command.sessionId ? { sessionId: command.sessionId } : {}), error: errorText(error) });
+        break;
+      }
+      const session = record.session;
+      try {
+        // 冻结的技能个数从真实 preamble 里数：当前配置可能已经变了，页面要能对照。
+        const folded = contextInspection.foldSystemPromptSections(session.state.messages);
+        const frozenSkills = (folded.preamble.match(/^- \/skill:/gmu) ?? []).length;
+        const loaded = workspaceResources.load(record.workspace);
+        const currentSkills = runtimeSkills.activeSkillsFor(loaded.skillSummaries, record.agent).length;
+        const model = session.model;
+        let usage: { tokens: number | null; contextWindow: number; percent: number | null; cacheHitRate: number | null } | undefined;
+        try {
+          const official = session.getContextUsage();
+          usage = official ? { ...official, cacheHitRate: runtimeContextUsage.cacheHitRateFrom(record.cacheUsage) } : undefined;
+        } catch {
+          usage = undefined;
+        }
+        const inspection = contextInspection.buildContextInspection({
+          at: Date.now(),
+          sessionId: session.sessionId,
+          agent: { id: record.agent.id, name: record.agent.name, systemPrompt: record.agent.systemPrompt, divMode: record.agent.divMode },
+          ...(model
+            ? {
+                model: {
+                  provider: model.provider,
+                  id: model.id,
+                  ...(model.contextWindow ? { contextWindow: model.contextWindow } : {}),
+                  ...(model.maxTokens ? { maxTokens: model.maxTokens } : {})
+                }
+              }
+            : {}),
+          thinkingLevel: session.thinkingLevel,
+          ...(usage ? { usage } : {}),
+          systemPrompt: session.systemPrompt,
+          messages: session.state.messages,
+          declaredTools: session.state.tools.map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters })),
+          registryTools: session.getAllTools().map((tool) => ({
+            name: tool.name,
+            exposure: tool.exposure,
+            ...(tool.sourceInfo ? { sourceInfo: { path: tool.sourceInfo.path } } : {}),
+            ...(tool.promptGuidelines ? { promptGuidelines: tool.promptGuidelines } : {})
+          })),
+          currentBlocks: currentPromptBlocks(record),
+          turnInjections: currentTurnInjections(record),
+          runtime: contextRuntimeRows(record, frozenSkills, currentSkills)
+        });
+        post({ type: "session.inspect-result", requestId, sessionId: session.sessionId, inspection });
+      } catch (error) {
+        post({ type: "session.inspect-result", requestId, sessionId: session.sessionId, error: errorText(error) });
       }
       break;
     }

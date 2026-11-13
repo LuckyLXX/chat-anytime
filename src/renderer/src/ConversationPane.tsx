@@ -827,6 +827,8 @@ export interface ConversationPaneProps {
   onOpenMemoryTopic(topic: MemoryTopicSummary): void;
   /** 打开记忆中心（卡片墙 + 索引预览）；缺省时面板不显示入口。 */
   onOpenMemoryCenter?(): void;
+  /** 打开上下文中心（会话成分页）；缺省时上下文弹层不显示「查看全部成分」入口。 */
+  onOpenContextCenter?(): void;
   /** 查看委派子代理的完整记录（App 层弹只读弹窗）。 */
   onOpenTranscript?(delegation: DelegationProgress): void;
   /** 会话操作失败提示（App 层 toast）。传 undefined 清除。 */
@@ -871,6 +873,7 @@ export const ConversationPane = memo(function ConversationPane({
   onOpenPlanDetail,
   onOpenMemoryTopic,
   onOpenMemoryCenter,
+  onOpenContextCenter,
   onOpenTranscript,
   onActionError,
   onRollback,
@@ -2443,6 +2446,18 @@ export const ConversationPane = memo(function ConversationPane({
                       {usage.tokens == null && <div className="context-usage-popover-note">压缩后暂无法估算，下一条回复后更新</div>}
                       {usage.cacheHitRate != null && <div className="context-usage-popover-note">会话累计缓存命中 {Math.round(usage.cacheHitRate * 10) / 10}%（越接近 100% 越省钱）</div>}
                       {breakdown && <div className="context-usage-popover-note">明细为本地估算（≈4 字符/token），加总不必等于实际占用</div>}
+                      {onOpenContextCenter && (
+                        <button
+                          className="context-usage-popover-open"
+                          data-control="context-center-open"
+                          type="button"
+                          onClick={() => { setContextUsageOpen(false); onOpenContextCenter(); }}
+                        >
+                          <Layers size={13} />
+                          <span>查看全部成分</span>
+                          <small>提示词与工具</small>
+                        </button>
+                      )}
                     </div>
                   );
                 })()}

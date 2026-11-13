@@ -6,6 +6,7 @@ import type {
   AutomationTask,
   ChatMessage,
   CheckpointRollbackResult,
+  ContextInspection,
   CustomProviderModel,
   DesignCanvasInfo,
   DesignDocSummary,
@@ -367,6 +368,18 @@ export interface SessionSearchState {
   error?: string;
 }
 
+/** 上下文中心的按需快照状态（session.inspect-result 按 requestId 认领）。 */
+export interface ContextInspectionState {
+  requestId: string;
+  /** 正在请求的会话；切会话时页面用它判断旧数据是否还属于当前会话。 */
+  sessionId?: string;
+  loading: boolean;
+  data?: ContextInspection;
+  error?: string;
+  /** 数据时间戳（inspection.at），页面头部展示「更新于」。 */
+  at?: number;
+}
+
 /** 从检索结果跳到具体消息的一次性目标；消息渲染后消费并清空。 */
 export interface PendingReveal {
   sessionId: string;
@@ -560,6 +573,12 @@ interface DesktopState {
   paletteSearch: SessionSearchState;
   /** 待定位的检索命中（打开会话后由 ConversationPane 消费）。 */
   pendingReveal?: PendingReveal;
+  /**
+   * 上下文中心的按需快照（session.inspect-result）。requestId 用于丢弃过期结果：
+   * 页面连点刷新/切会话时，晚到的旧帧不能覆盖新帧。关闭页面不清空——再打开先用
+   * 旧数据渲染再由新一轮请求接管，避免每次开页都闪空白。
+   */
+  contextInspection?: ContextInspectionState;
   /** 冷会话解析中（utility 在同步读 JSONL 前推送）；侧栏行显示 spinner。 */
   openingSession?: { path: string; sessionId?: string; at: number };
   memory: MemoryTopicSummary[];
@@ -971,6 +990,22 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
         break;
       case "todos":
         set({ todos: message.todos });
+        break;
+      case "session.inspect-result":
+        set((state) => {
+          const current = state.contextInspection;
+          // requestId 对不上 = 过期请求（切了会话/连点刷新），整帧丢弃。
+          if (!current || !current.requestId || current.requestId !== message.requestId) return state;
+          return {
+            contextInspection: {
+              ...current,
+              loading: false,
+              ...(message.inspection ? { data: message.inspection, at: message.inspection.at } : {}),
+              ...(message.sessionId ? { sessionId: message.sessionId } : {}),
+              error: message.error
+            }
+          };
+        });
         break;
       case "session.search-result":
         set((state) => {

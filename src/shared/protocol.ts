@@ -647,6 +647,96 @@ export interface ContextUsageBreakdown {
   messages: number;
 }
 
+/**
+ * 上下文中心（会话成分页）的按需快照。
+ *
+ * 与 `ContextUsage` 的分工：占用总量与三段明细仍在快照里（输入框徽标），这份数据
+ * 只回答「这些字是什么、从哪来」——系统提示词原文与分段、活动工具声明、消息构成、
+ * 运行参数。它**不进 50ms 状态帧**：体积随提示词与工具 schema 增长（几十 KB），
+ * 只由 `session.inspect` 命令按需拉取。
+ *
+ * 时间口径：提示词与工具是「会话创建时冻结」的（Pi 的 systemPrompt / 声明集），
+ * 资源清单是「当前配置」，UI 必须把两者分开标注，不能把设置页的现状冒充成模型
+ * 真正看到的内容。
+ */
+export interface ContextInspection {
+  at: number;
+  sessionId: string;
+  agentId: string;
+  agentName: string;
+  model?: { provider: string; id: string; contextWindow?: number; maxTokens?: number };
+  thinkingLevel: ThinkingLevel;
+  usage?: ContextUsage;
+  prompt: {
+    /** `session.systemPrompt` 原文（模型实际拼接的样子）。 */
+    text: string;
+    /** 应用按固定顺序拼接的块（preamble 内部）。present=false = 当前配置有、本会话没注入。 */
+    blocks: ContextPromptBlock[];
+    /** preamble 里没被任何块覆盖的前导文本（自定义基础提示词 / 未适配的段）；通常为空。 */
+    leading?: { chars: number; text: string };
+    /** 折叠后的 XML 分段（cwd / mcp_servers / 未来的自定义分段）。 */
+    sections: ContextPromptSection[];
+    /** 运行中追加的 system 消息（工具集变化等）；通常为空。 */
+    extraSystemMessages: { chars: number; preview: string }[];
+    /** 每回合由 before_agent_start 追加的尾部注入；只在下一回合请求里生效。 */
+    turnInjections: ContextTurnInjection[];
+  };
+  tools: {
+    /** 真正声明给模型的活动工具（session.state.tools，已应用 prepareLoadout 投影）。 */
+    declared: ContextToolDeclaration[];
+    /** 已注册但未声明（codemode / deferred 曝光）：不占前缀，只在脚本里可调。 */
+    undeclared: { name: string; exposure: string; source: string }[];
+  };
+  messages: {
+    total: number;
+    byRole: { role: "user" | "assistant" | "toolResult" | "system"; count: number; tokens: number }[];
+    /** 单条估算最大的前 5 条（谁在吃上下文）。 */
+    top: { role: string; tokens: number; preview: string }[];
+    images: number;
+  };
+  runtime: { label: string; value: string; note?: string; frozen?: boolean }[];
+}
+
+/** 系统提示词 preamble 里的一个应用注入块（按构建器标记切出的真实冻结文本）。 */
+export interface ContextPromptBlock {
+  id: string;
+  label: string;
+  origin: string;
+  /** 本会话冻结的 preamble 里找到该块；false = 当前配置有、会话里没注入。 */
+  present: boolean;
+  chars: number;
+  text: string;
+}
+
+/** 折叠后的系统提示词 XML 分段。 */
+export interface ContextPromptSection {
+  name: string;
+  origin: string;
+  chars: number;
+  text: string;
+}
+
+/** 下一回合会追加到系统提示词尾部的注入（不进转录）。 */
+export interface ContextTurnInjection {
+  label: string;
+  origin: string;
+  active: boolean;
+  chars: number;
+  text?: string;
+}
+
+/** 活动工具声明。parameters 是下发给模型的 JSON 文本（超长时已截断）。 */
+export interface ContextToolDeclaration {
+  name: string;
+  description: string;
+  parameters: string;
+  /** 本地估算（声明 JSON / 4 + 4）。 */
+  tokens: number;
+  exposure: "direct" | "codemode" | "deferred" | "unknown";
+  source: "builtin" | "app" | "mcp" | "other";
+  guideline?: string;
+}
+
 // ─── 用量统计（usage.stats.request → usage-stats-result）───
 
 /** 聚合后的单项用量小计；四类维度（总览/按天/按模型/按会话）共用。 */
@@ -2591,6 +2681,9 @@ export type RuntimeCommand =
   /** 会话全文检索（全助手会话，user/assistant 正文）。结果经
    *  session.search-result 推送；requestId 用于丢弃过期查询。 */
   | { type: "session.search"; requestId: string; query: string; /** 是否把自动化运行会话纳入检索；缺省 false（与话题列表默认隐藏同口径）。 */ showAutomation?: boolean }
+  /** 上下文中心（会话成分页）的按需拉取；结果经 session.inspect-result 推送。
+   *  requestId 丢弃过期结果（切会话/连点刷新时），sessionId 缺省 = 激活会话。 */
+  | { type: "session.inspect"; requestId: string; sessionId?: string }
   | { type: "session.rename"; path: string; title: string }
   | { type: "session.pin"; path: string; pinned: boolean }
   /** 软归档 / 取消归档。paths 长度 1 即单条；批量与单条共用一条命令，避免
@@ -2849,6 +2942,8 @@ export type RuntimeMessage =
   | { type: "shortcut.error"; accelerator: string; message: string }
   /** 会话全文检索结果（当前实现一次扫完才推送；scanned/total 供 UI 展示扫描体量）。 */
   | { type: "session.search-result"; requestId: string; hits: SessionSearchHit[]; scanned: number; total: number; done: boolean; error?: string }
+  /** 响应 session.inspect：会话成分快照；会话不在运行中时回 error（UI 显示重新打开提示）。 */
+  | { type: "session.inspect-result"; requestId: string; sessionId?: string; inspection?: ContextInspection; error?: string }
   | { type: "memory"; memory: MemoryTopicSummary[] }
   /** 响应 memory.read：完整主题（含正文）；agentId = 该主题所属助手（缺省时 UI 按当前助手处理）。 */
   | { type: "memory.topic"; topic: MemoryTopic; agentId?: string }
