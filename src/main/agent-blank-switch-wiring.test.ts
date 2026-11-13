@@ -57,7 +57,9 @@ describe("blank-topic agent switch wiring", () => {
     expect(helperStart).toBeGreaterThan(-1);
     const helper = runtime.slice(helperStart, helperEnd);
     expect(helper).toContain("isUnstartedSession({");
-    expect(helper).toContain("busy: record.busy");
+    // 「忙」走 runActive（2026-11-13）：只要 Pi 还在收尾（isStreaming），就不能把
+    // 这个话题当空的去重建。
+    expect(helper).toContain("busy: runActive(record)");
     expect(helper).toContain("messageCount: record.session.state.messages.length");
     expect(helper).toContain("steeringCount: record.session.getSteeringMessages().length");
     expect(helper).toContain("followUpCount: record.session.getFollowUpMessages().length");

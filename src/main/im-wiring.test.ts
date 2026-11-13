@@ -111,12 +111,15 @@ describe("运行时接线（pi-runtime）", () => {
     expect(runtime).toContain("accessModeOverride: command.accessMode");
   });
 
-  it("sink 只在 IM 会话上推事件，并在 agent_end 之前读结局", () => {
+  it("sink 只在 IM 会话上推事件，并在任何清掉 abortRequested 的结算之前读结局", () => {
     expect(runtime).toContain("function handleImSessionEvent(");
     expect(runtime).toContain("function imTurnEnd(");
     expect(runtime).toContain("handleImSessionEvent(record, event);");
     const endIdx = runtime.indexOf("imTurnEnd(record, event.messages);");
-    const resolveIdx = runtime.indexOf("resolveRunOutcome(record, event.messages);", endIdx);
+    // 回合结算自 2026-11-13 起落在 agent_settled（agent_end 只是底层 run 边界），
+    // IM 收尾仍在 agent_end：顺序不变——先读 abortRequested，再由 settle 的
+    // resolveRunOutcome 清掉它。
+    const resolveIdx = runtime.indexOf("resolveRunOutcome(record, record.session.state.messages);", endIdx);
     expect(endIdx).toBeGreaterThan(0);
     expect(resolveIdx).toBeGreaterThan(endIdx);
     expect(runtime).toContain('type: "im.delta"');

@@ -24,6 +24,7 @@ import { commandSessionId } from "./command-error.js";
 import { resolveHookSessionTitle } from "./hooks-session-title.js";
 import { alignQueueState, imageAttachmentsFrom, promoteQueueMessage, queuedMessageText, queueSnapshotMessages, removeQueueMessage, replayQueueArgs, type PromoteOutcome } from "./queue-images.js";
 import { normalizeMessages, userMessageText } from "./message-normalize.js";
+import { runActive } from "./run-state.js";
 import { diffChatMessages, diffToolExecutions, snapshotToolExecution, toolExecutionPatchEqual } from "../shared/snapshot-patch.js";
 import { applyModelOverrides as applyStoredModelOverrides, buildCatalogModels, imageInputOverride, isModelEnabled, pickFallbackModel, pruneDisabledModelRefs, resolveRestoredSessionModel } from "./model-catalog.js";
 import type {
@@ -774,7 +775,7 @@ function buildLiveSessions(): PanelSessionLive[] {
       // 会话文件里的名字，最后才是短 id——面板不应出现空标题。
       title: summary?.title || record.session.sessionManager.getSessionName() || `会话 ${sessionId.slice(0, 8)}`,
       workspace: record.workspace,
-      busy: record.busy,
+      busy: runActive(record),
       status: record.status,
       currentTools: executions
         .filter((execution) => execution.status === "running")
@@ -1848,7 +1849,7 @@ async function runSessionBoundAutomationTask(task: AutomationTask, trigger: "cro
     assertSessionWritable(record);
     if (!record.session.model) throw new Error("关联会话没有可用模型，无法投递提醒");
     const text = buildAutomationReminderText(task, startedAt);
-    const queued = record.busy || record.session.isStreaming;
+    const queued = runActive(record);
     if (queued) {
       await record.session.prompt(text, { streamingBehavior: "followUp" });
     } else {
@@ -2425,7 +2426,7 @@ function paneSnapshotFrom(record: SessionRuntimeRecord): SessionPaneSnapshot {
     ...(record.readOnlyReason ? { readOnlyReason: record.readOnlyReason } : {}),
     model: session.model ? { provider: session.model.provider, id: session.model.id } : undefined,
     thinkingLevel: session.thinkingLevel,
-    busy: record.busy,
+    busy: runActive(record),
     status: record.status,
     turnTiming: record.turnTiming,
     // 待发送队列实时读取 Pi 会话的 steering/followUp 状态（图片镜像随之按
@@ -2464,7 +2465,7 @@ function snapshot(): RuntimeSnapshot {
     sessionFile: pane?.sessionFile,
     model: pane?.model ?? selectedModel,
     thinkingLevel: pane?.thinkingLevel ?? thinkingLevel,
-    busy: (record?.busy ?? false) || transitionStatus !== undefined,
+    busy: (record ? runActive(record) : false) || transitionStatus !== undefined,
     status: transitionStatus ?? record?.status ?? status,
     turnTiming: pane?.turnTiming,
     queuedMessages: pane?.queuedMessages ?? [],
@@ -2719,7 +2720,7 @@ function parkedHistoryBytes(record: SessionRuntimeRecord): number {
 
 function evictParkedSessions(): void {
   const parked = [...liveSessions.values()]
-    .filter((record) => record !== activeRuntime && !record.busy && !renderedSessions.has(record.session.sessionId)
+    .filter((record) => record !== activeRuntime && !runActive(record) && !renderedSessions.has(record.session.sessionId)
       // 用户停了 Lead 但成员仍在后台跑：这类记录不能被 idle LRU 杀掉（用户决策：
       // 成员留在后台，由成员状态条的「全部停止」收尾）。
       && !record.teamRuntime?.hasRunningMembers())
@@ -3797,7 +3798,7 @@ function drainImPromptQueue(record: SessionRuntimeRecord): void {
   const sessionId = record.session.sessionId;
   const queue = imPromptQueues.get(sessionId);
   if (!queue || queue.length === 0) return;
-  if (record.busy || record.session.isStreaming) return;
+  if (runActive(record)) return;
   const next = queue.shift();
   if (queue.length === 0) imPromptQueues.delete(sessionId);
   if (next) startImTurn(record, next);
@@ -3870,10 +3871,12 @@ function handleSessionEvent(record: SessionRuntimeRecord, event: AgentSessionEve
       } else {
         // IM 收尾必须在 resolveRunOutcome 清掉 abortRequested 之前读结局。
         imTurnEnd(record, event.messages);
-        completeTurn(record);
-        record.busy = false;
-        record.status = "就绪";
-        resolveRunOutcome(record, event.messages);
+        // **这里不收回合、不落「就绪」**：`agent_end` 只是 Pi 的底层 run 边界，
+        // 自动重试 / 阈值与溢出压缩恢复 / 排队的 followUp / agent_before_settle
+        // 之后 Pi 还会继续（官方 docs/json.md）。会话级终点是 `agent_settled`
+        // ——回合定稿、busy、状态文案、结局圆点一律在那里落（2026-11-13 内网
+        // 用户报：收尾窗口里输入框已显示完成、回车被 session.prompt 以英文
+        // "Agent is already processing…" 拒收，还把正在跑的回合标成失败）。
         // Idempotent backstop: regenerate/navigateTree truncates the transcript,
         // so re-derive the counters from what actually remains.
         record.cacheUsage = runtimeContextUsage.scanCacheUsage(record.session.state.messages);
@@ -3888,17 +3891,20 @@ function handleSessionEvent(record: SessionRuntimeRecord, event: AgentSessionEve
     case "agent_settled":
       record.busy = false;
       record.status = "就绪";
-      // Settlement without a preceding agent_end (e.g. an aborted run) still
-      // needs the dot resolved; late settlements after agent_end are no-ops.
-      if (record.runStatus === "running") {
-        resolveRunOutcome(record, record.session.state.messages);
-        record.cacheUsage = runtimeContextUsage.scanCacheUsage(record.session.state.messages);
-        record.speedStats = speedStats.syncSpeedCounters(record.speedStats, record.session.state.messages);
-        record.speedStep = undefined;
-        record.speedLive = undefined;
-        refreshContextBreakdown(record);
-        lifecycle = true;
-      }
+      // 回合在这里才定稿（含中止时没有 agent_end 的情况）；重试 / 压缩恢复 /
+      // 排队 continue 期间气泡保持「正在处理」，不会假完成。
+      completeTurn(record);
+      // 结局圆点与「已完成」记录的唯一出口：settle 之后 Pi 不会再自动继续
+      // （agent_end 之后还会，所以它不再是出口）。不按 runStatus 设门槛——
+      // 切进会话时清掉圆点并不代表这一轮没结束，completedAt 仍要记上。
+      resolveRunOutcome(record, record.session.state.messages);
+      record.cacheUsage = runtimeContextUsage.scanCacheUsage(record.session.state.messages);
+      record.speedStats = speedStats.syncSpeedCounters(record.speedStats, record.session.state.messages);
+      record.speedStep = undefined;
+      record.speedLive = undefined;
+      refreshContextBreakdown(record);
+      // busy/状态变了就是生命周期帧，必须立即刷（几十毫秒的收尾窗口也要如实推送）。
+      lifecycle = true;
       break;
     case "turn_start":
       // 一次模型调用周期开始（步起点 ≈ 请求发出）：开新打点，覆盖残留的旧步。
@@ -4584,7 +4590,7 @@ function isUnstartedRecord(record: SessionRuntimeRecord): boolean {
     }
   }
   return isUnstartedSession({
-    busy: record.busy,
+    busy: runActive(record),
     messageCount: record.session.state.messages.length,
     steeringCount: record.session.getSteeringMessages().length,
     followUpCount: record.session.getFollowUpMessages().length,
@@ -5487,7 +5493,7 @@ async function runResourceOperation(label: string, operation: () => Promise<void
   if (!record) throw new Error("请先打开工作区，再管理能力");
   // Only the active session is rebuilt by resource operations; parked sessions
   // are never touched, so their busy state is irrelevant here.
-  if (record.busy || resourceOperationBusy) throw new Error("当前会话正在运行，请等待完成后再管理能力");
+  if (runActive(record) || resourceOperationBusy) throw new Error("当前会话正在运行，请等待完成后再管理能力");
   resourceOperationBusy = true;
   // The rebuild disposes the active record midway, so the busy overlay rides on
   // transitionStatus instead of the record (which is replaced before the end).
@@ -5525,7 +5531,7 @@ async function reloadRuntimeResources(): Promise<void> {
 async function refreshActiveSessionForSubagents(): Promise<void> {
   const record = activeRuntime;
   if (!record || !record.extensionApi) return;
-  if (record.busy || record.session.isStreaming) {
+  if (runActive(record)) {
     // 与 skill.toggle 同款纪律：不打断进行中的回合；渲染端的 log 通道只转 warn，
     // 所以这里用 warn 级别（info 会被静默丢掉）。
     void post({ type: "log", level: "warn", message: "子智能体已保存；当前会话正在运行，新定义将在下次重建会话后出现在可用清单里。" });
@@ -5547,7 +5553,7 @@ async function refreshActiveSessionForSubagents(): Promise<void> {
 async function refreshActiveSessionForSkills(): Promise<boolean> {
   const record = activeRuntime;
   if (!record || !record.extensionApi) return false;
-  if (record.busy || record.session.isStreaming) {
+  if (runActive(record)) {
     void post({ type: "log", level: "warn", message: "Skill 商店：当前会话正在运行，新技能将在下次重建会话后对模型可见（清单已即时更新）。" });
     return false;
   }
@@ -6399,7 +6405,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       assertSessionWritable(record);
       if (!record.session.model) throw new Error("请先配置并选择模型，再发送消息");
       const prompt = await preparePromptPayload(command.text, command.attachments, record.workspace);
-      if (record.busy) throw new Error("当前话题正在执行，请等待完成或停止后再发送");
+      if (runActive(record)) throw new Error(record.busy ? "当前话题正在执行，请等待完成或停止后再发送" : "上一回合仍在收尾（自动重试 / 压缩上下文），请稍候再发送");
       if (prompt.images.length && !hasImageInput(record.session.model)) {
         if (!visionModel) throw new Error("当前模型不支持图片输入，请先切换多模态模型，或在设置的模型服务中启用视觉识别");
         appendVisionHint(prompt);
@@ -6450,7 +6456,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         if (!visionModel) throw new Error("当前模型不支持图片输入，请先切换多模态模型，或在设置的模型服务中启用视觉识别");
         appendVisionHint(prompt);
       }
-      if (record.busy || record.session.isStreaming) {
+      if (runActive(record)) {
         // followUp 语义：本轮回复自然结束后，该消息（含图片）作为下一轮 user
         // 消息注入。Pi 队列本体完整保存带图消息；record.followUpImages 镜像与
         // Pi 的文本数组 index 对齐，供快照展示与整队重建时图片重放。
@@ -6480,7 +6486,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       const state = alignQueueState(record.session.getSteeringMessages(), record.session.getFollowUpMessages(), record);
       // 快照与点击之间队列可能已投递/变动：text 校验失败即拒绝，防止误伤相邻消息。
       const outcome: PromoteOutcome = sendNow
-        ? promoteQueueMessage(state, command.kind, command.index, command.text, record.busy || record.session.isStreaming)
+        ? promoteQueueMessage(state, command.kind, command.index, command.text, runActive(record))
         : { state: removeQueueMessage(state, command.kind, command.index, command.text), target: undefined };
       // 图片镜像跟随新队列（Pi 队列由 clearQueue + 重放重建；无图项为空数组）。
       record.steeringImages = outcome.state.steeringImages;
@@ -6495,7 +6501,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
           await record.session[item.kind === "steering" ? "steer" : "followUp"](item.text);
         }
       }
-      if (sendNow && !(record.busy || record.session.isStreaming) && outcome.target) {
+      if (sendNow && !runActive(record) && outcome.target) {
         // 回合已结束（如失败收尾后队列仍在）：立即发送退化为直接开新回合，
         // 目标带图时还原为附件载荷走完整发送管线（hint 剥一次让管线重新
         // 追加，避免与排队时已拼入的提示重复）。
@@ -6514,7 +6520,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       const record = resolveTargetRecord(command.sessionId);
       assertSessionWritable(record);
       if (!record.session.model) throw new Error("请先配置并选择模型，再重新生成");
-      if (record.busy) throw new Error("当前话题正在执行，请等待完成或停止后再重新生成");
+      if (runActive(record)) throw new Error(record.busy ? "当前话题正在执行，请等待完成或停止后再重新生成" : "上一回合仍在收尾（自动重试 / 压缩上下文），请稍候再重新生成");
       if (!command.text.trim() && !command.invocations?.length) throw new Error("没有可重新生成的用户消息");
       const regeneratedText = command.invocations?.length
         ? runtimeInvocationPrompt(command.invocations, command.text, record)
@@ -6815,7 +6821,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       const record = resolveTargetRecord(command.sessionId);
       assertSessionWritable(record);
       if (!record.session.model) throw new Error("请先配置并选择模型，再压缩上下文");
-      if (record.busy) throw new Error("当前话题正在执行，请等待完成后再压缩上下文");
+      if (runActive(record)) throw new Error(record.busy ? "当前话题正在执行，请等待完成后再压缩上下文" : "上一回合仍在收尾（自动重试 / 压缩上下文），请稍候再压缩");
       record.busy = true;
       record.status = "Pi 正在压缩上下文";
       record.runStatus = "running";
@@ -6946,7 +6952,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       for (const record of liveSessions.values()) {
         const current = record.session.model;
         if (!current || current.provider !== command.provider.id) continue;
-        if (record.busy) {
+        if (runActive(record)) {
           // 运行中的会话不中途换模型（与既有取舍一致），但被取消勾选至少要有感知：
           // 提示用户本轮结束后手动切换（2026-09-02 审查）。
           if (record === activeRuntime && !enabledIds.has(current.id)) {
@@ -7732,7 +7738,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         break;
       }
       if (!record.im) record.im = {};
-      if (record.busy || record.session.isStreaming) {
+      if (runActive(record)) {
         const queue = imPromptQueues.get(command.sessionId) ?? [];
         if (queue.length >= IM_MAX_QUEUED_PROMPTS) {
           post({ type: "im.turn", sessionId: command.sessionId, phase: "end", status: "error", error: `上一条还在处理（本会话最多排队 ${IM_MAX_QUEUED_PROMPTS} 条）` });

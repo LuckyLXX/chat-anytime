@@ -61,7 +61,8 @@ describe("utility 接线（pi-runtime）", () => {
     expect(runtime).toContain("const sessionRefreshDeferred = !(await refreshSkillsAfterStoreChange(");
     // 忙碌不打断（与 refreshActiveSessionForSubagents 同款纪律）
     expect(runtime).toContain("async function refreshActiveSessionForSkills()");
-    expect(runtime).toContain("if (record.busy || record.session.isStreaming) {");
+    // 「忙」的唯一口径是 runActive（record.busy || session.isStreaming，2026-11-13）
+    expect(runtime).toContain("if (runActive(record)) {");
     // 严禁复用 reloadRuntimeResources 的忙碌拒绝路径
     expect(runtime).not.toContain("Skill 商店" + "runResourceOperation");
   });
