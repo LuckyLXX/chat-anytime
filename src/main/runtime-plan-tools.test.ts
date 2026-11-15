@@ -101,7 +101,9 @@ describe("plan review question", () => {
     expect(question.options).toEqual([PLAN_APPROVE_OPTION, PLAN_HANDOFF_OPTION, PLAN_KEEP_OPTION, PLAN_REVISE_OPTION]);
     expect(question.detail).toBe(plan);
     expect(question.handoffOption).toBe(PLAN_HANDOFF_OPTION);
+    expect(question.feedbackOption).toBe(PLAN_REVISE_OPTION);
     expect(question.text).toContain("保留计划文档");
+    expect(question.text).toContain("意见输入框");
   });
 
   it("parses answers: only the exact approve option consents", () => {

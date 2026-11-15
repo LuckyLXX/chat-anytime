@@ -93,9 +93,13 @@ export function QuestionPanel({ request, onOpenDetail, rootRef }: { request: Que
   // 「provider/id」字符串（下拉 value），提交时再拆回引用。
   const [handoffOpen, setHandoffOpen] = useState(false);
   const [handoffModel, setHandoffModel] = useState("");
+  // 意见出口（feedbackOption）的两段式状态：点选「不批准」展开修改意见输入行，
+  // 文本与底部自定义输入共用 draft.custom；确认后以文本（留空回落选项原文）提交。
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
   const optionRefs = useRef<(HTMLButtonElement | undefined)[]>([]);
   const inputRef = useRef<HTMLInputElement | undefined>(undefined);
   const handoffSelectRef = useRef<HTMLSelectElement | undefined>(undefined);
+  const feedbackInputRef = useRef<HTMLInputElement | undefined>(undefined);
   const settings = useDesktopStore((state) => state.settings);
   // 「当前助手」以激活会话快照为准（无会话时才由后端回落默认助手）。
   const activeAgentId = useDesktopStore((state) => state.snapshot.agentId);
@@ -111,12 +115,17 @@ export function QuestionPanel({ request, onOpenDetail, rootRef }: { request: Que
     setCollapsed(false);
     setHandoffOpen(false);
     setHandoffModel("");
+    setFeedbackOpen(false);
   }, [request.id, request.questions]);
 
-  // 选择行展开时聚焦模型下拉（键盘路径：Enter 确认移交、Esc 返回）。
+  // 选择行/意见行展开时聚焦各自的输入控件（键盘路径：Enter 确认、Esc 返回）。
   useEffect(() => {
     if (handoffOpen) handoffSelectRef.current?.focus();
   }, [handoffOpen]);
+
+  useEffect(() => {
+    if (feedbackOpen) feedbackInputRef.current?.focus();
+  }, [feedbackOpen]);
 
   // 翻页/挂载/展开后聚焦当前题第一个可交互元素（选择题聚焦首选项，文本题聚焦输入框）。
   // 折叠时正文未渲染，跳过以免焦点落到已卸载的节点上。
@@ -203,13 +212,58 @@ export function QuestionPanel({ request, onOpenDetail, rootRef }: { request: Que
     }
   }
 
-  /** 选项切换：单选任意点选（含回车/空格）都选中并立即推进（点选即走，重选直接换项）；多选切换勾选、由「继续」或输入框回车推进。移交选项（单选）走两段式：不立即提交。 */
+  /** 展开意见输入行：清空移交态（两者互斥），保留已输入的草稿文本。 */
+  function openFeedback(): void {
+    setHandoffOpen(false);
+    setHandoffModel("");
+    setFeedbackOpen(true);
+  }
+
+  /** 返回：收起输入行并清空选中与文本，避免残留文本被误当作别选项的答案提交。 */
+  function cancelFeedback(): void {
+    setFeedbackOpen(false);
+    patchDraft(current, { selected: [], custom: "" });
+  }
+
+  /** 确认意见：当前题答案 = 输入文本（留空回落为选项原文），其余题沿用各自草稿。 */
+  function confirmFeedback(option: string): void {
+    if (submitting) return;
+    const index = current;
+    if (index === request.questions.length - 1) {
+      const answer = singleSelectionAnswer(drafts[index]?.custom ?? "", option);
+      void resolve(request.questions.map((question, i) => i === index ? answer : serializeAnswer(question, drafts[i] ?? emptyQuestionDraft())));
+      return;
+    }
+    setFeedbackOpen(false);
+    setCurrent(index + 1);
+  }
+
+  /** 意见行键盘：输入框内 Enter 提交（同自定义输入）、Esc 返回（按钮的 Enter 交给原生激活）。 */
+  function handleFeedbackKey(event: KeyboardEvent<HTMLDivElement>, option: string): void {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      cancelFeedback();
+      return;
+    }
+    if (event.key === "Enter" && !event.nativeEvent.isComposing && event.target === feedbackInputRef.current) {
+      event.preventDefault();
+      confirmFeedback(option);
+    }
+  }
+
+  /** 选项切换：单选任意点选（含回车/空格）都选中并立即推进（点选即走，重选直接换项）；多选切换勾选、由「继续」或输入框回车推进。移交与意见选项（单选）走两段式：不立即提交。 */
   function toggleOption(item: QuestionItem, index: number, option: string): void {
     const currentDraft = drafts[index] ?? emptyQuestionDraft();
     const single = item.type === "single";
     if (single && option === item.handoffOption) {
       patchDraft(index, { selected: [option], custom: "" });
       openHandoff();
+      return;
+    }
+    if (single && option === item.feedbackOption) {
+      patchDraft(index, { selected: [option] });
+      openFeedback();
       return;
     }
     const nextSelected = single
@@ -219,6 +273,7 @@ export function QuestionPanel({ request, onOpenDetail, rootRef }: { request: Que
         : [...currentDraft.selected, option];
     setDrafts((currentDrafts) => currentDrafts.map((draft, i) => i === index ? { ...draft, selected: nextSelected } : draft));
     setHandoffOpen(false);
+    setFeedbackOpen(false);
     if (single) {
       if (index === request.questions.length - 1) {
         // 单选点选即提交：当前题答案必须基于本次点击（setDrafts 异步，闭包里的
@@ -283,8 +338,8 @@ export function QuestionPanel({ request, onOpenDetail, rootRef }: { request: Que
           <span>{current + 1} / {request.questions.length}</span>
           {!collapsed && (
             <>
-              <button type="button" aria-label="上一题" disabled={current === 0 || submitting || handoffOpen} onClick={() => setCurrent((value) => Math.max(0, value - 1))}>◀</button>
-              <button type="button" aria-label="下一题" disabled={isLast || submitting || handoffOpen} onClick={() => setCurrent((value) => Math.min(request.questions.length - 1, value + 1))}>▶</button>
+              <button type="button" aria-label="上一题" disabled={current === 0 || submitting || handoffOpen || feedbackOpen} onClick={() => setCurrent((value) => Math.max(0, value - 1))}>◀</button>
+              <button type="button" aria-label="下一题" disabled={isLast || submitting || handoffOpen || feedbackOpen} onClick={() => setCurrent((value) => Math.min(request.questions.length - 1, value + 1))}>▶</button>
             </>
           )}
         </div>
@@ -326,7 +381,7 @@ export function QuestionPanel({ request, onOpenDetail, rootRef }: { request: Que
                   className={`question-option${active ? " active" : ""}`}
                   role={item.type === "single" ? "radio" : "checkbox"}
                   aria-checked={active}
-                  disabled={submitting || handoffOpen}
+                  disabled={submitting || handoffOpen || feedbackOpen}
                   onClick={() => toggleOption(item, current, option)}
                   onKeyDown={(event) => handleOptionKey(event, item, optionIndex)}
                 >
@@ -362,6 +417,28 @@ export function QuestionPanel({ request, onOpenDetail, rootRef }: { request: Que
           </div>
         </div>
       )}
+      {feedbackOpen && item.feedbackOption && (
+        <div className="question-feedback-row" onKeyDown={(event) => handleFeedbackKey(event, item.feedbackOption!)}>
+          <span className="question-feedback-label">修改意见</span>
+          <input
+            ref={(element) => { feedbackInputRef.current = element ?? undefined; }}
+            className="question-feedback-input"
+            aria-label="修改意见"
+            value={drafts[current]?.custom ?? ""}
+            disabled={submitting}
+            placeholder="写下需要调整的地方（可留空）"
+            onChange={(event) => patchDraft(current, { custom: event.target.value })}
+          />
+          <p className="question-feedback-hint">提交后会据此完善计划并重新提交审查，不会开始实施</p>
+          <div className="question-feedback-actions">
+            <button className="secondary-button" type="button" disabled={submitting} onClick={cancelFeedback}>返回</button>
+            <button className="primary-button" type="button" disabled={submitting} onClick={() => confirmFeedback(item.feedbackOption!)}>
+              {submitting ? "提交中…" : "提交意见"}
+            </button>
+          </div>
+        </div>
+      )}
+      {!feedbackOpen && (
       <div className="question-custom-row">
         <span className="question-custom-index">{item.options.length + 1}</span>
         <input
@@ -373,11 +450,12 @@ export function QuestionPanel({ request, onOpenDetail, rootRef }: { request: Que
           onKeyDown={(event) => handleInputKey(event, current)}
         />
       </div>
+      )}
       <footer className="question-panel-footer">
-        <span className="question-hint"><CircleHelp size={12} /> {item.options.length > 0 ? "使用 Tab / 上下键选择，回车或空格选中" : "回车提交"}</span>
+        <span className="question-hint"><CircleHelp size={12} /> {feedbackOpen ? "回车提交修改意见，Esc 返回" : item.options.length > 0 ? "使用 Tab / 上下键选择，回车或空格选中" : "回车提交"}</span>
         <div className="question-footer-actions">
           <button className="secondary-button" type="button" disabled={submitting} onClick={() => void resolve()}>忽略</button>
-          <button className="primary-button" type="button" disabled={!answered || submitting || handoffOpen} onClick={continueToNext}>
+          <button className="primary-button" type="button" disabled={!answered || submitting || handoffOpen || feedbackOpen} onClick={continueToNext}>
             {submitting ? "提交中…" : "继续"}
           </button>
         </div>

@@ -155,11 +155,12 @@ export interface PlanToolDeps {
 /** 审查问题：四选项单选批准/移交/保留文档/继续完善，计划全文作为 detail 展示，自定义输入即反馈。 */
 export function planReviewQuestion(plan: string): QuestionItem {
   return {
-    text: "请审查这份计划：批准后我将退出计划模式并严格按计划开始实施。（点选项即提交；「移交新会话实施」会先让你选择实施模型；「保留计划文档」只留档、不实施；如需修改，请在输入框中写下意见。）",
+    text: "请审查这份计划：批准后我将退出计划模式并严格按计划开始实施。（「移交新会话实施」会先让你选择实施模型；「保留计划文档」只留档、不实施；「不批准」会展开意见输入框，写下修改意见后提交。）",
     type: "single",
     options: [PLAN_APPROVE_OPTION, PLAN_HANDOFF_OPTION, PLAN_KEEP_OPTION, PLAN_REVISE_OPTION],
     detail: plan,
-    handoffOption: PLAN_HANDOFF_OPTION
+    handoffOption: PLAN_HANDOFF_OPTION,
+    feedbackOption: PLAN_REVISE_OPTION
   };
 }
 

@@ -978,6 +978,14 @@ html[data-ui-blur="off"] *::after {
 .question-handoff-hint { margin: 0; color: var(--text-muted); font-size: 11px; line-height: 1.5; }
 .question-handoff-actions { display: flex; justify-content: flex-end; gap: 8px; }
 @keyframes question-handoff-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+/* 意见出口（feedbackOption）的修改意见行：与移交行同为两段式第二段。 */
+.question-feedback-row { display: grid; gap: 7px; padding: 10px 12px; border: 1px solid var(--accent-border); border-radius: 8px; background: var(--surface-muted); animation: question-handoff-in .18s cubic-bezier(0.16, 1, 0.3, 1); }
+.question-feedback-label { color: var(--accent-text); font-size: 12px; font-weight: 650; line-height: 1.5; }
+.question-feedback-input { width: 100%; min-height: 32px; padding: 0 8px; border: 1px solid var(--border-strong); border-radius: 6px; outline: none; color: var(--text); font-size: 13px; font-family: inherit; background: var(--surface-input); transition: border-color .12s ease, box-shadow .12s ease; }
+.question-feedback-input:focus-visible { border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus-ring); }
+.question-feedback-input::placeholder { color: var(--text-muted); }
+.question-feedback-hint { margin: 0; color: var(--text-muted); font-size: 11px; line-height: 1.5; }
+.question-feedback-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .question-panel-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .question-hint { display: flex; align-items: center; gap: 5px; color: var(--text-muted); font-size: 11px; }
 .question-hint svg { flex: 0 0 auto; color: var(--accent); }

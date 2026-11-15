@@ -2655,6 +2655,12 @@ export interface QuestionItem {
    * ask_question 永不设置该字段。
    */
   handoffOption?: string;
+  /**
+   * 意见出口（计划审查专用）：值为 options 中某一选项的原文。渲染端点选该选项时
+   * 不立即提交，而是展开一个修改意见输入行；确认后以输入文本作为答案提交，留空
+   * 则回落为该选项原文。ask_question 永不设置该字段。
+   */
+  feedbackOption?: string;
 }
 
 /** ask_question 工具发给渲染端的提问请求；answers 缺省即视为用户取消。 */
