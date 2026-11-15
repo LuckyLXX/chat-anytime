@@ -34,7 +34,7 @@ export const PLAN_MODE_GUIDANCE_FULL = [
   "1. 先探索研究，再动手规划：阅读代码与文档理解现状，必要时向用户提问澄清需求与方案取舍；这一阶段只做只读操作，不要修改任何文件、不要执行有副作用的命令。",
   "2. 产出计划：把实施方案写成一份完整的 Markdown 计划文档，至少包含：背景与目标、现状勘察结论（关键文件、模块与行为）、实施步骤（每步说明涉及的文件与改动）、验证方式、风险与假设。计划要决策完备且**自包含**——必须假设它会被交给一个没有任何本会话上下文的新会话、仅凭这份文档实施：所有结论、决策与理由都要写进文档，不要用「如前所述」「上面提到的」指代会话内讨论。用户将据此批准。",
   "3. 通过 exit_plan_mode 提交计划，等待用户在审查面板批准；批准之前绝对不要开始实施。",
-  "4. 批准后计划模式自动退出，再严格按计划逐步实施；若审查被拒，工具会带回用户的修改意见，据此完善后重新提交。",
+  "4. 批准后计划模式自动退出，再严格按计划逐步实施；若审查被拒，工具会带回用户的修改意见，据此完善后重新提交；用户也可能选择「保留计划文档，暂不实施」——此时只留档、退出计划模式，按工具返回的说明简短收尾，不要实施。",
   "5. 简单任务不要进入计划模式；用户可随时手动关闭计划模式。"
 ].join("\n");
 
@@ -46,6 +46,8 @@ export const PLAN_MODE_GUIDANCE_REMINDER =
 export const PLAN_APPROVE_OPTION = "批准计划，开始实施";
 /** 移交出口：选中后在面板内先选实施模型，批准时新建前台会话以该模型按计划实施。 */
 export const PLAN_HANDOFF_OPTION = "批准计划，移交新会话实施";
+/** 保留出口：只把计划文档留档到 docs/plans/，退出计划模式但不实施（单步提交，无二级面板）。 */
+export const PLAN_KEEP_OPTION = "保留计划文档，暂不实施";
 export const PLAN_REVISE_OPTION = "不批准，继续完善计划";
 
 /** 当前状态应注入的叙事文本；无待注入时返回 undefined。 */
@@ -150,12 +152,12 @@ export interface PlanToolDeps {
   handoff: (input: { plan: string; planPath?: string; title: string; model: { provider: string; id: string } }) => Promise<{ sessionId: string }>;
 }
 
-/** 审查问题：三选项单选批准/移交/继续完善，计划全文作为 detail 展示，自定义输入即反馈。 */
+/** 审查问题：四选项单选批准/移交/保留文档/继续完善，计划全文作为 detail 展示，自定义输入即反馈。 */
 export function planReviewQuestion(plan: string): QuestionItem {
   return {
-    text: "请审查这份计划：批准后我将退出计划模式并严格按计划开始实施。（点选项即提交；「移交新会话实施」会先让你选择实施模型；如需修改，请在输入框中写下意见。）",
+    text: "请审查这份计划：批准后我将退出计划模式并严格按计划开始实施。（点选项即提交；「移交新会话实施」会先让你选择实施模型；「保留计划文档」只留档、不实施；如需修改，请在输入框中写下意见。）",
     type: "single",
-    options: [PLAN_APPROVE_OPTION, PLAN_HANDOFF_OPTION, PLAN_REVISE_OPTION],
+    options: [PLAN_APPROVE_OPTION, PLAN_HANDOFF_OPTION, PLAN_KEEP_OPTION, PLAN_REVISE_OPTION],
     detail: plan,
     handoffOption: PLAN_HANDOFF_OPTION
   };
@@ -164,14 +166,16 @@ export function planReviewQuestion(plan: string): QuestionItem {
 export type PlanReviewOutcome =
   | { status: "approved" }
   | { status: "approved-handoff"; model?: { provider: string; id: string } }
+  | { status: "kept" }
   | { status: "rejected"; feedback: string }
   | { status: "cancelled" };
 
 /**
  * 判定审查结果：只有恰好选中「批准」选项才算批准；批准移交须精确匹配移交选项
  * 且 model 形状完整，model 缺失/不完整仍返回 approved-handoff（由 execute 按
- * 「模型无效」降级处理）；其他任何作答（含自定义反馈文本）都是拒绝并携带反馈；
- * answers 缺省/空视为用户忽略（保持计划模式）。
+ * 「模型无效」降级处理）；保留出口精确匹配保留选项（只留档不实施）；其他任何
+ * 作答（含自定义反馈文本）都是拒绝并携带反馈；answers 缺省/空视为用户忽略
+ * （保持计划模式）。
  */
 export function parsePlanReview(answers: string[] | undefined, model?: { provider: string; id: string }): PlanReviewOutcome {
   if (!answers || answers.length === 0) return { status: "cancelled" };
@@ -180,6 +184,7 @@ export function parsePlanReview(answers: string[] | undefined, model?: { provide
   if (answer === PLAN_HANDOFF_OPTION) {
     return model && model.provider && model.id ? { status: "approved-handoff", model } : { status: "approved-handoff" };
   }
+  if (answer === PLAN_KEEP_OPTION) return { status: "kept" };
   return { status: "rejected", feedback: answer === PLAN_REVISE_OPTION ? "" : answer };
 }
 
@@ -238,8 +243,8 @@ export function buildPlanTools(deps: PlanToolDeps): ToolDefinition[] {
       name: "exit_plan_mode",
       label: "提交计划并退出计划模式",
       description: [
-        "提交计划供用户审查（仅计划模式可用）。把完整计划作为 markdown 写入 plan 参数，用户会在审查面板中看到计划全文并选择批准或提出修改意见。",
-        "这是本次回复中应调用的最后一个工具调用：批准后本会话退出计划模式，按计划开始实施；被拒时返回用户的修改意见，据此完善计划后重新提交。",
+        "提交计划供用户审查（仅计划模式可用）。把完整计划作为 markdown 写入 plan 参数，用户会在审查面板中看到计划全文并选择批准、移交新会话、保留计划文档或提出修改意见。",
+        "这是本次回复中应调用的最后一个工具调用：批准后本会话退出计划模式，按计划开始实施；被拒时返回用户的修改意见，据此完善计划后重新提交；用户选择「保留计划文档，暂不实施」时计划只留档、本会话退出计划模式但不实施。",
         "计划必须自包含——实施可能由一个全新会话仅凭这份文档完成：所有结论、决策与理由写进文档，不要用「如前所述」指代会话内讨论。",
         "不在计划模式时调用会被拒绝。"
       ].join(""),
@@ -282,6 +287,17 @@ export function buildPlanTools(deps: PlanToolDeps): ToolDefinition[] {
             content: [{ type: "text" as const, text: `计划已批准，本会话已退出计划模式。${archive}请严格按照计划从第一步开始实施，全部完成后总结结果。` }],
             details: { status: "approved", saved: "path" in saved ? saved.path : undefined }
           };
+        }
+        if (verdict.status === "kept") {
+          deps.setEnabled(false);
+          const saved = deps.savePlan(plan);
+          if ("path" in saved) {
+            return {
+              content: [{ type: "text" as const, text: `计划文档已保留并留档至 ${saved.path}，本会话已退出计划模式。本次不实施计划：请用一两句话告知用户计划已保存、需要实施时可在新会话中按该文档开始，然后结束本轮，不要开始实施。` }],
+              details: { status: "kept", saved: saved.path }
+            };
+          }
+          return errorResult(`计划文档保留失败（${saved.error}），本会话已退出计划模式。请不要开始实施；请如实告知用户计划未能落盘，可要求重新提交计划或手动保存。`);
         }
         if (verdict.status === "approved-handoff") {
           // 顺序关键：先校验模型（不完整/缺失 → 计划模式保持开启，未做任何状态变更），

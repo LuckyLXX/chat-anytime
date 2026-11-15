@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   PLAN_APPROVE_OPTION,
   PLAN_HANDOFF_OPTION,
+  PLAN_KEEP_OPTION,
   PLAN_MODE_GUIDANCE_FULL,
   PLAN_MODE_GUIDANCE_REMINDER,
   PLAN_REVISE_OPTION,
@@ -97,9 +98,10 @@ describe("plan review question", () => {
     const plan = "# 计划\n\n## 步骤";
     const question = planReviewQuestion(plan);
     expect(question.type).toBe("single");
-    expect(question.options).toEqual([PLAN_APPROVE_OPTION, PLAN_HANDOFF_OPTION, PLAN_REVISE_OPTION]);
+    expect(question.options).toEqual([PLAN_APPROVE_OPTION, PLAN_HANDOFF_OPTION, PLAN_KEEP_OPTION, PLAN_REVISE_OPTION]);
     expect(question.detail).toBe(plan);
     expect(question.handoffOption).toBe(PLAN_HANDOFF_OPTION);
+    expect(question.text).toContain("保留计划文档");
   });
 
   it("parses answers: only the exact approve option consents", () => {
@@ -118,6 +120,12 @@ describe("plan review question", () => {
     expect(parsePlanReview([`${PLAN_HANDOFF_OPTION} 备注`], model)).toEqual({ status: "rejected", feedback: `${PLAN_HANDOFF_OPTION} 备注` });
     // model 不完整（provider/id 空）→ 仍按 approved-handoff 但无 model，由 execute 降级。
     expect(parsePlanReview([PLAN_HANDOFF_OPTION], { provider: "", id: "x" })).toEqual({ status: "approved-handoff" });
+  });
+
+  it("matches the keep option exactly (archive without implementation)", () => {
+    expect(parsePlanReview([PLAN_KEEP_OPTION])).toEqual({ status: "kept" });
+    expect(parsePlanReview([`  ${PLAN_KEEP_OPTION}  `])).toEqual({ status: "kept" });
+    expect(parsePlanReview([`${PLAN_KEEP_OPTION} 并通知我`])).toEqual({ status: "rejected", feedback: `${PLAN_KEEP_OPTION} 并通知我` });
   });
 });
 
@@ -219,6 +227,7 @@ describe("plan mode tools", () => {
     saved: string[];
     handoffs: Array<{ plan: string; planPath?: string; title: string; model: { provider: string; id: string } }>;
     failHandoff: Error | undefined;
+    failSave: Error | undefined;
     setOutcome: (outcome: QuestionOutcome) => void;
   }
 
@@ -226,6 +235,7 @@ describe("plan mode tools", () => {
     let enabled = false;
     let outcome: QuestionOutcome = { status: "cancelled" };
     let failHandoff: Error | undefined;
+    let failSave: Error | undefined;
     const calls: string[] = [];
     const saved: string[] = [];
     const handoffs: Array<{ plan: string; planPath?: string; title: string; model: { provider: string; id: string } }> = [];
@@ -238,7 +248,10 @@ describe("plan mode tools", () => {
       setEnabled: (value) => { enabled = value; calls.push(`set:${value}`); },
       broker,
       workspace: () => "/workspace",
-      savePlan: (plan) => { saved.push(plan); return { path: "docs/plans/计划.md" }; },
+      savePlan: (plan) => {
+        saved.push(plan);
+        return failSave ? { error: failSave.message } : { path: "docs/plans/计划.md" };
+      },
       handoff: async (input) => {
         handoffs.push(input);
         if (failHandoff) throw failHandoff;
@@ -253,6 +266,8 @@ describe("plan mode tools", () => {
       get handoffs() { return handoffs; },
       get failHandoff() { return failHandoff; },
       set failHandoff(error) { failHandoff = error; },
+      get failSave() { return failSave; },
+      set failSave(error) { failSave = error; },
       setOutcome(next) { outcome = next; }
     };
   }
@@ -320,6 +335,38 @@ describe("plan mode tools", () => {
     expect(fake.saved).toEqual(["# 实施计划\n\n步骤"]);
     expect(resultText(result)).toContain("已退出计划模式");
     expect(resultText(result)).toContain("docs/plans/计划.md");
+    expect(fake.handoffs).toEqual([]);
+  });
+
+  it("keep option exits the mode, archives the plan and forbids implementation", async () => {
+    const fake = makeDeps();
+    fake.deps.setEnabled(true);
+    fake.setOutcome({ status: "answered", answers: [PLAN_KEEP_OPTION] });
+    const tools = buildPlanTools(fake.deps);
+    const result = await runTool(tools[1], "1", { plan: "# 保留档计划\n\n步骤" });
+    expect(result.isError).toBeUndefined();
+    expect(result.details?.status).toBe("kept");
+    expect(fake.enabled).toBe(false);
+    expect(fake.calls).toEqual(["set:true", "set:false"]);
+    expect(fake.saved).toEqual(["# 保留档计划\n\n步骤"]);
+    expect(resultText(result)).toContain("docs/plans/计划.md");
+    expect(resultText(result)).toContain("不要开始实施");
+    expect(fake.handoffs).toEqual([]);
+  });
+
+  it("keep option with a failed archive still exits the mode and reports honestly", async () => {
+    const fake = makeDeps();
+    fake.deps.setEnabled(true);
+    fake.setOutcome({ status: "answered", answers: [PLAN_KEEP_OPTION] });
+    fake.failSave = new Error("EACCES: permission denied");
+    const tools = buildPlanTools(fake.deps);
+    const result = await runTool(tools[1], "1", { plan: "# 计划" });
+    expect(result.isError).toBe(true);
+    expect(fake.enabled).toBe(false);
+    expect(fake.saved).toEqual(["# 计划"]);
+    expect(resultText(result)).toContain("保留失败");
+    expect(resultText(result)).toContain("EACCES: permission denied");
+    expect(resultText(result)).toContain("不要开始实施");
     expect(fake.handoffs).toEqual([]);
   });
 
