@@ -30,6 +30,8 @@ const preload = read(join(here, "../preload/index.ts"));
 const main = read(join(here, "index.ts"));
 const protocol = read(join(here, "../shared/protocol.ts"));
 const wall = read(join(here, "../renderer/src/components/GalleryWall.tsx"));
+const runtime = read(join(here, "pi-runtime.ts"));
+const development = read(join(here, "../renderer/src/lib/gallery-develop.ts"));
 
 /** 取出 `developGalleryApp` 的 useCallback 体（到依赖数组收尾）。 */
 function developBody(): string {
@@ -49,39 +51,53 @@ describe("作品继续开发的跨工作区接线", () => {
     expect(body).not.toContain("activeWorkspace === app.workspace");
   });
 
-  it("同工作区且已有会话时写当前输入框；跨工作区分支不碰当前 composer", () => {
-    expect(body).toContain("if (sameWorkspace && targetId) {");
-    expect(body).toContain("composerBridge.current.get(targetId)?.insertText(text);");
-    // 跨工作区分支里不能再出现「往当前焦点格写」的调用（那正是要修掉的旧行为）
-    const crossRegion = body.slice(body.indexOf("void (async () => {"));
-    expect(crossRegion).not.toContain("composerBridge.current.get(targetId)");
+  it("同工作区绑定现有会话并等待输入框，跨工作区不复用旧会话", () => {
+    expect(body).toContain("let sessionId = sameWorkspace ? targetId : undefined;");
+    expect(body).toContain("await insertGalleryDevelopmentText({");
+    expect(body).toContain("getComposer: (target) => composerBridge.current.get(target)");
+    expect(body).toContain("const needsNewSession = !sessionId;");
   });
 
   it("工作区失效先预检、再 session.new：报错带完整路径，绝不静默降级", () => {
     const checkAt = body.indexOf("workspaceDirectoryExists(app.workspace)");
-    const newAt = body.indexOf('type: "session.new"');
+    const newAt = body.indexOf("await requestGallerySession({");
     expect(checkAt, "预检调用不见了：失效工作区会被报成笼统的「新建话题失败」").toBeGreaterThan(-1);
     expect(newAt).toBeGreaterThan(checkAt);
-    expect(body).toContain("登记的工作区已失效：${app.workspace}");
+    expect(body).toContain("throw new Error(`登记的工作区已失效：${app.workspace}");
     // 预检失败必须在 return 里，不能继续走 session.new
-    expect(body).toMatch(/if \(!\(await window\.piDesktop\.workspaceDirectoryExists\(app\.workspace\)\)\) \{[\s\S]*?return;[\s\S]*?\}/u);
+    expect(body).toMatch(/if \(!\(await window\.piDesktop\.workspaceDirectoryExists\(app\.workspace\)\)\) \{[\s\S]*?throw new Error/u);
   });
 
   it("跨工作区新建干净话题（用户选定），工作区来自作品登记", () => {
-    expect(body).toContain('await window.piDesktop.send({ type: "session.new", workspace: app.workspace, agentId: pickTopicAgentId(settings, activeAgentId) });');
+    expect(body).toContain("await requestGallerySession({");
+    expect(body).toContain("workspace: app.workspace,");
+    expect(body).toContain("agentId: pickTopicAgentId(settings, activeAgentId),");
     // 不是 session.open / workspace.open——那会恢复历史会话，不是「干净话题」
     expect(body).not.toContain('type: "session.open"');
     expect(body).not.toContain('type: "workspace.open"');
   });
 
-  it("待注入绑定新会话 id、composer 未注册时重试、超时丢弃", () => {
-    expect(body).toContain("pendingGalleryInjectRef.current = { key: workspaceKey(app.workspace), text, expiresAt: Date.now() + GALLERY_DEV_INJECT_TIMEOUT_MS };");
-    // 失败路径要清掉待注入，否则下一次切会话会突然被写入一段旧文本
+  it("待注入使用独立操作 id，等到确认的新会话和输入框，超时或取消后清理", () => {
+    expect(body).toContain("requestId: id,");
+    expect(body).toContain("previous?.controller.abort();");
+    expect(body).toContain("pendingGalleryInjectRef.current?.id === id");
+    expect(body).toContain("sessionId = await requestGallerySession({");
+    expect(body).toContain("await insertGalleryDevelopmentText({");
+    expect(body).toContain("snapshot.sessionId === target");
     expect(body).toContain("pendingGalleryInjectRef.current = undefined;");
-    expect(app).toContain("if (Date.now() > pending.expiresAt) {");
-    expect(app).toContain("if (activeSessionId !== pending.sessionId) return;");
-    expect(app).toContain("const api = composerBridge.current.get(pending.sessionId);");
-    expect(app).toContain("setTimeout(() => setGalleryInjectTick((value) => value + 1), GALLERY_DEV_INJECT_RETRY_MS)");
+  });
+
+  it("新话题回执由 utility 在真实创建后发出并按请求标识关联", () => {
+    expect(protocol).toContain('type: "session.new-result"; requestId: string; ok: true; sessionId: string');
+    expect(protocol).toContain('type: "session.new-result"; requestId: string; ok: false; error: string');
+    expect(runtime).toContain('post({ type: "session.new-result", requestId: command.requestId, ok: true, sessionId: newSessionId });');
+    expect(runtime).toContain('post({ type: "session.new-result", requestId: event.data.requestId, ok: false, error: errorText(error) });');
+    expect(development).toContain('message.type !== "session.new-result" || message.requestId !== options.requestId');
+    expect(development).toContain('type: "session.cancel-new", requestId: options.requestId');
+    expect(runtime).toContain('if (event.data.type === "session.cancel-new") {');
+    expect(runtime).toContain('sessionNewClaims.cancel(event.data.requestId);');
+    expect(runtime).toContain('isCancelled: () => claim.cancelled');
+    expect(runtime).toContain('sessionNewClaims.finish(requestId, claim);');
   });
 
   it("「打开所在文件夹」走 revealInExplorer：文件选中、工作区根直接进入", () => {

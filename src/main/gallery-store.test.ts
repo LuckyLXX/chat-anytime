@@ -1,9 +1,10 @@
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { MAX_GALLERY_APPS, type GalleryApp } from "../shared/gallery.js";
 import {
+  assertGalleryPathInside,
   galleryPathFor,
   loadGalleryRepairingIds,
   galleryThumbsDirFor,
@@ -12,6 +13,7 @@ import {
   persistGallery,
   pruneGalleryThumbs,
   readGalleryThumb,
+  realPathInsideWorkspace,
   removeGalleryThumb,
   writeGallery,
   writeGalleryThumb
@@ -180,5 +182,50 @@ describe("loadGalleryRepairingIds（修历史坏条目的空 id）", () => {
     expect(loadGalleryRepairingIds(file)).toEqual([]);
     expect(readFileSync(file, "utf8")).toBe("{ 坏 json");
     expect(loadGalleryRepairingIds(galleryPathFor(tempDir()))).toEqual([]);
+  });
+});
+
+describe("发布前的真实路径边界（软链接 / 目录联接）", () => {
+  it("工作区内的路径放行；工作区外一律拒绝（词法就出界，不碰文件系统）", async () => {
+    const root = tempDir();
+    writeFileSync(join(root, "index.html"), "<html></html>", "utf8");
+    expect(await realPathInsideWorkspace(root, "index.html")).toBe(true);
+    expect(await realPathInsideWorkspace(root, ".")).toBe(true);
+    expect(await realPathInsideWorkspace(root, "../outside.html")).toBe(false);
+    expect(await realPathInsideWorkspace(root, join(tempDir(), "outside.html"))).toBe(false);
+    await expect(assertGalleryPathInside(root, "../outside.html", "作品路径")).rejects.toThrow(/必须位于当前工作区内/u);
+  });
+
+  it("链接指向工作区外时拒绝；`link/../x` 这种「先跳出再回跳」也拒绝", async () => {
+    const root = tempDir();
+    const outside = tempDir();
+    writeFileSync(join(root, "inside.html"), "<html></html>", "utf8");
+    writeFileSync(join(outside, "inside.html"), "<html></html>", "utf8");
+    const link = join(root, "link");
+    let linked = true;
+    try {
+      // Windows 用目录联接（普通账号可建）；POSIX 用目录符号链接。
+      if (process.platform === "win32") symlinkSync(outside, link, "junction");
+      else symlinkSync(outside, link, "dir");
+    } catch {
+      // 平台不允许建链接（例如未开开发者模式的 Windows 普通账号）：跳过链接断言。
+      linked = false;
+    }
+    if (!linked) return;
+    // 1) 链接本身把落点指到工作区外
+    expect(await realPathInsideWorkspace(root, "link")).toBe(false);
+    // 2) 词法折叠会把 link/../inside.html 算成 root/inside.html（看似区内），
+    //    真实落点是工作区外的 inside.html —— 必须按越界拒绝。
+    expect(await realPathInsideWorkspace(root, "link/../inside.html")).toBe(false);
+    await expect(assertGalleryPathInside(root, "link/../inside.html", "作品路径")).rejects.toThrow(/链接指向工作区外/u);
+    // 3) 链接里面的真实文件同样出界
+    expect(await realPathInsideWorkspace(root, "link/inside.html")).toBe(false);
+    await expect(assertGalleryPathInside(root, "link/inside.html", "封面图片")).rejects.toThrow(/链接指向工作区外/u);
+  });
+
+  it("工作区根取不到真实路径时 fail-closed（undefined → 断言拒绝，绝不当合法）", async () => {
+    const missingRoot = join(tempDir(), "gone");
+    expect(await realPathInsideWorkspace(missingRoot, "index.html")).toBeUndefined();
+    await expect(assertGalleryPathInside(missingRoot, "index.html", "作品路径")).rejects.toThrow(/无法确认/u);
   });
 });

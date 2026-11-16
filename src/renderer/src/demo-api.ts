@@ -29,6 +29,7 @@ import type {
   SshRevealEvent,
   UsageStats
 } from "../../shared/protocol";
+import { resolveGalleryPublish, upsertGalleryApp } from "../../shared/gallery";
 import type { GalleryDataClearResult, GalleryDataResult, GalleryServiceRecord, GalleryServiceStartRequest, GalleryServiceStartResult } from "../../shared/gallery";
 import type { SkillStoreResult } from "../../shared/skill-store";
 import type { ThemeImportOutcome } from "../../shared/theme-assets";
@@ -1008,11 +1009,17 @@ export function createDemoApi(): DesktopApi {
           const targetAgent = command.agentId
             ? demoSettings.agents.find((agent) => agent.id === command.agentId && !agent.archived)
             : activeDemoAgent();
-          if (!targetAgent) throw new Error("目标助手不存在或已归档");
+          if (!targetAgent) {
+            if (command.requestId) {
+              emit({ type: "session.new-result", requestId: command.requestId, ok: false, error: "目标助手不存在或已归档" });
+              break;
+            }
+            throw new Error("目标助手不存在或已归档");
+          }
           demoSettings.currentAgentId = targetAgent.id;
           demoSettings.lastWorkspace = workspace;
           const summary: RuntimeSnapshot["sessions"][number] = {
-            id: "new-demo-session",
+            id: command.requestId ? `new-demo-session-${command.requestId}` : "new-demo-session",
             path: "new-demo-session.jsonl",
             workspace,
             agentId: targetAgent.id,
@@ -1035,8 +1042,12 @@ export function createDemoApi(): DesktopApi {
           });
           applyDemoAgentSkillOverrides();
           emit({ type: "resources", resources: structuredClone(demoResources) });
+          if (command.requestId) emit({ type: "session.new-result", requestId: command.requestId, ok: true, sessionId: summary.id });
           break;
         }
+        case "session.cancel-new":
+          // 演示环境同步创建话题，收到取消时不删除已经创建的会话。
+          break;
         case "session.open": {
           const workspace = command.workspace ?? demoSnapshot.workspace ?? demoDefaultPath();
           const summary = demoSnapshot.sessions.find((item) => item.path === command.path || item.id === demoSessionId(command.path));
@@ -1080,13 +1091,13 @@ export function createDemoApi(): DesktopApi {
         // —— 作品（Gallery）：演示端在内存里模拟清单与推送（不落盘）。——
         case "gallery.publish": {
           const draft = command.draft;
-          const existing = demoGalleryApps.find((item) => item.workspace === (draft.workspace ?? demoWorkspace) && item.entry === (draft.entry ?? draft.path));
-          const app = existing
-            ? { ...existing, title: draft.title, updatedAt: Date.now() }
-            : { id: `gallery-${demoGalleryApps.length + 1}`, title: draft.title, kind: draft.kind, workspace: draft.workspace ?? demoWorkspace, entry: draft.entry ?? draft.path, thumb: DEMO_GALLERY_COVER, coverSource: draft.cover ? "custom" as const : "generated" as const, createdAt: Date.now(), updatedAt: Date.now(), ...(draft.description ? { description: draft.description } : {}), ...(draft.command ? { command: draft.command } : {}), ...(draft.url ? { url: draft.url } : {}), ...(draft.runMode === "background" ? { runMode: "background" as const } : {}) };
-          demoGalleryApps = existing ? demoGalleryApps.map((item) => (item.id === app.id ? app : item)) : [app, ...demoGalleryApps];
+          // 演示端也按同一套 path/entry 与 appId 身份规则登记；不伪造文件系统校验。
+          const resolution = resolveGalleryPublish({ apps: demoGalleryApps, draft, workspace: demoSnapshot.workspace ?? demoWorkspace });
+          const entry = { ...resolution.app, thumb: DEMO_GALLERY_COVER, coverSource: draft.cover ? "custom" as const : (resolution.target?.coverSource ?? "generated" as const) };
+          const { app, list } = upsertGalleryApp(demoGalleryApps, entry);
+          demoGalleryApps = list;
           emit({ type: "gallery.apps", apps: demoGalleryApps });
-          emit({ type: "gallery.notice", kind: "ok", message: `已发布作品「${app.title}」` });
+          emit({ type: "gallery.notice", kind: "ok", message: `${resolution.created ? "已发布新作品" : "已更新作品"}「${app.title}」` });
           break;
         }
         case "gallery.remove": {

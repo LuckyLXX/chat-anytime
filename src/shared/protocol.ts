@@ -2681,7 +2681,9 @@ export type RuntimeCommand =
   /** 仅从最近工作区列表移除，不碰任何会话；当前工作区被 forget 时回落到最近一个存在的工作区。 */
   | { type: "workspace.forget"; path: string }
   /** agentId 缺省 = 当前助手；归档助手不能作为显式目标。 */
-  | { type: "session.new"; workspace?: string; agentId?: string }
+  | { type: "session.new"; workspace?: string; agentId?: string; /** 可选的请求标识，用于等待创建结果。 */ requestId?: string }
+  /** 取消尚未完成的带 requestId 的 session.new；不删除已创建的会话。 */
+  | { type: "session.cancel-new"; requestId: string }
   /** activate=false（分屏启动恢复的背景格）：创建 record 但不激活——全局镜像
    * 与 state 通道保持焦点格，格子数据走 session.state（watch 已先行排队）。 */
   | { type: "session.open"; path: string; workspace?: string; agentId?: string; activate?: boolean }
@@ -2927,6 +2929,9 @@ export type RuntimeMessage =
   /** 渲染端点开一个冷会话：utility 在同步解析 JSONL 之前先发这一帧，让它立刻显示
    *  「正在打开…」而不是几百毫秒毫无反馈（大会话实测 open 需要 200–300ms）。 */
   | { type: "session.opening"; path: string; sessionId?: string }
+  /** 仅对带 requestId 的 session.new 回应；sessionId 是实际创建成功的会话。 */
+  | { type: "session.new-result"; requestId: string; ok: true; sessionId: string }
+  | { type: "session.new-result"; requestId: string; ok: false; error: string }
   /** 高频流式帧的增量补丁：只带变化的字段/消息/执行；首次与本会话切换仍走完整 state。 */
   | RuntimeStatePatch
   /** 分屏格子（watched 非激活会话）的会话级快照；与 state 的节流节奏一致（50ms 批量、生命周期立即）。 */
@@ -3121,11 +3126,18 @@ export interface DesktopApi {
   galleryServiceRestart(id: string): Promise<GalleryServiceStartResult>;
   /**
    * 面板型作品「运行」：把入口网页开成独立于主界面的窗口（同作品 id 复用已有窗口）。
-   * 打不开时 ok=false 并附原因（入口不在工作区内 / 不是网页文件 / 静态服务起不来）。
+   * 打不开时 ok=false 并附原因（入口不在工作区内 / 不是网页文件 / 页面加载失败）。
+   *
+   * `reload: true` = 「运行」的完整语义：已有窗口也要**重新加载当前入口**（作品墙的运行
+   * 路径传 true；继续开发之后不 reload 就会让人对着旧页面以为没生效）。缺省 false 只
+   * 前置窗口——panel 页面内部的 show-main / toggle 不经过这条 IPC，永远不 reload。
+   * 重载保持窗口几何、置顶与固定 origin（`pidesktop-file://w-<作品>`），只换入口路径，
+   * 所以 localStorage / IndexedDB 不丢。
+   *
    * 面板的本地服务不走这里——它由 galleryServiceStart 起（ownerPanelId = 作品 id），
-   * 面板窗口关闭时主进程按 owner 自动停。
+   * 面板窗口关闭（或这次运行没能开出窗口）时主进程按 owner 自动停，外部服务不受影响。
    */
-  galleryOpenPanel(input: { id: string; title: string; workspace: string; filePath: string; panel?: GalleryPanelOptions }): Promise<{ ok: boolean; message?: string }>;
+  galleryOpenPanel(input: { id: string; title: string; workspace: string; filePath: string; panel?: GalleryPanelOptions; reload?: boolean; runToken?: number }): Promise<{ ok: boolean; message?: string; stale?: boolean }>;
   /**
    * 面板作品的数据用量（作品墙卡片的「数据…」）。面板窗口没开着时主进程会开一个
    * 临时隐藏窗口去量（量完即关）；量不到不是错误，回 ok:false + 原因即可。

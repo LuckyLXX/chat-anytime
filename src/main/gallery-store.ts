@@ -1,7 +1,8 @@
 import { mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { realpath } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
-import { normalizeGalleryApp, trimGalleryApps, type GalleryApp } from "../shared/gallery.js";
+import { dirname, isAbsolute, join, relative as relativePath, resolve, sep } from "node:path";
+import { galleryEntryFromAbsolute, normalizeGalleryApp, normalizeGalleryEntry, trimGalleryApps, type GalleryApp } from "../shared/gallery.js";
 
 /**
  * 作品清单的持久化：`<agentDir>/pidesktop-gallery/gallery.json`（原子 tmp+rename），
@@ -150,4 +151,69 @@ export function pruneGalleryThumbs(thumbsDir: string, apps: readonly GalleryApp[
 /** 目录内的纯文件名（拒绝路径分隔符与 `..`）。 */
 export function isSafeThumbName(name: string): boolean {
   return Boolean(name) && !name.includes("/") && !name.includes("\\") && name !== "." && name !== "..";
+}
+
+/** 词法边界：target 是否落在 root 之内（大小写口径同 shared 的入口换算）。 */
+function lexicalWithin(root: string, target: string): boolean {
+  const relation = relativePath(resolve(root), resolve(target));
+  if (!relation) return true;
+  return relation !== ".." && !relation.startsWith(`..${sep}`) && !isAbsolute(relation);
+}
+
+/**
+ * 真实路径越界检查（2026-11-16）：词法判定（`path.relative` / resolve）只能防
+ * `../` 这类写法，防不住软链接 / 目录联接（junction）——工作区里的一个链接可以
+ * 把落点指到外面去，而 `link/../x` 在 OS 上是「先跳出再回跳」，词法折叠却会算成
+ * 工作区内的 `x`。
+ *
+ * 所以这里**逐段**用 realpath 落盘：每一段都解析成真实路径，`..` 作用在真实目录上
+ * （与 OS 一致）。返回：
+ * - true：真实落点仍在工作区内（不存在的尾部按词法拼，再与真实根比较）；
+ * - false：真实落点跑到工作区外；
+ * - undefined：工作区根取不到真实路径（调用方必须 fail-closed，不能当合法）。
+ */
+export async function realPathInsideWorkspace(root: string, rawPath: string): Promise<boolean | undefined> {
+  let realRoot: string;
+  try {
+    realRoot = await realpath(root);
+  } catch {
+    return undefined;
+  }
+  const relative = isAbsolute(rawPath)
+    ? galleryEntryFromAbsolute(root, rawPath)
+    : normalizeGalleryEntry(rawPath);
+  if (relative === undefined) return false;
+  let current = realRoot;
+  let missing = false;
+  for (const segment of relative.split("/")) {
+    if (!segment || segment === ".") continue;
+    if (segment === "..") {
+      current = dirname(current);
+    } else if (missing) {
+      current = join(current, segment);
+    } else {
+      const next = join(current, segment);
+      try {
+        current = await realpath(next);
+      } catch {
+        // 不存在的尾部：剩下的段已经无法再是链接，按词法拼到底（最后的归属判定仍走真实根）。
+        missing = true;
+        current = next;
+      }
+    }
+    if (galleryEntryFromAbsolute(realRoot, current) === undefined) return false;
+  }
+  return galleryEntryFromAbsolute(realRoot, current) !== undefined;
+}
+
+/**
+ * 发布前的路径边界断言（词法 + 真实路径，fail-closed）：越界直接报错，调用方
+ * 据此中止发布（不产生任何条目变化）。`what` 进错误文案（「作品路径」 /「封面图片」）。
+ */
+export async function assertGalleryPathInside(root: string, rawPath: string, what: string): Promise<void> {
+  const absolute = isAbsolute(rawPath) ? resolve(rawPath) : resolve(root, rawPath);
+  if (!lexicalWithin(root, absolute)) throw new Error(`${what}必须位于当前工作区内：${rawPath}`);
+  const real = await realPathInsideWorkspace(root, rawPath);
+  if (real === undefined) throw new Error(`无法确认${what}的真实路径（${rawPath}）：为免发布到工作区外，已中止`);
+  if (!real) throw new Error(`${what}通过链接指向工作区外（${rawPath}）：为免发布到工作区外，已中止`);
 }

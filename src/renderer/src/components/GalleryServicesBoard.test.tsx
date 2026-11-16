@@ -75,4 +75,21 @@ describe("GalleryServicesBoard 渲染", () => {
     expect(markup).toContain(">重起</button>");
     expect(markup).toContain("退出码 1");
   });
+
+  it("看板说明写清所有权：关页面不停 / 关面板时异步停平台为该面板启动的 / 外部服务不受影响", () => {
+    const markup = renderToStaticMarkup(<GalleryServicesBoard services={[service()]} onOpenPage={() => {}} onStop={() => {}} onRestart={() => {}} />);
+    expect(markup).toContain("关掉页面不会停");
+    expect(markup).toContain("面板作品关窗时，平台会异步停掉它为这个面板启动的服务");
+    expect(markup).toContain("外部服务平台不接管");
+  });
+
+  it("行内标出「面板托管」，停止按钮的悬停说明区分托管服务与平台自主服务", () => {
+    const owned = renderToStaticMarkup(<GalleryServicesBoard services={[service({ ownerPanelId: "g1" })]} onOpenPage={() => {}} onStop={() => {}} onRestart={() => {}} />);
+    expect(owned).toContain("面板托管");
+    expect(owned).toContain("面板关窗时也会异步停止");
+    // 平台自主启动的服务：停止只针对这棵进程树，不会动同地址的外部服务
+    const own = renderToStaticMarkup(<GalleryServicesBoard services={[service()]} onOpenPage={() => {}} onStop={() => {}} onRestart={() => {}} />);
+    expect(own).not.toContain("面板托管");
+    expect(own).toContain("不会动同地址的外部服务");
+  });
 });

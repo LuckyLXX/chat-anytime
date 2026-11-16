@@ -19,7 +19,7 @@ import { probeService, type ServiceAddress } from "./gallery-service.js";
  */
 
 /** 假进程句柄：可手动制造输出与退出；监听器注册前的输出/退出会补发（同真实流）。 */
-function fakeHandle(pid = 4242) {
+function fakeHandle(pid?: number) {
   const dataListeners: ((chunk: string) => void)[] = [];
   const exitListeners: ((info: { exitCode?: number | null; error?: string }) => void)[] = [];
   const earlyData: string[] = [];
@@ -74,7 +74,14 @@ interface Harness {
 function harness(options: {
   probe?: (address: ServiceAddress) => Promise<boolean>;
   launchError?: string;
+  /** 异步 spawn 失败：句柄从来没有 pid，且在下一个宏任务发 error（Node 的 ENOENT 就是这个形态）。 */
+  spawnError?: string;
+  /** 句柄没有 pid，但也不报错（启动器没交出进程号）。 */
+  noPid?: boolean;
+  /** 固定 pid（例如 `process.pid`：验证「停止没生效」时需要一个真的还活着的 pid）。 */
+  pid?: number;
   waitMs?: number;
+  stopGraceMs?: number;
   logBufferChars?: number;
   /** 进程一被拉起就做点什么（例如立刻写一行输出再退出）。 */
   onLaunch?: (handle: ReturnType<typeof fakeHandle>) => void;
@@ -87,9 +94,13 @@ function harness(options: {
   const launcher: GalleryServiceLauncher = (command, cwd) => {
     if (options.launchError) throw new Error(options.launchError);
     launched.push({ command, cwd });
-    const handle = fakeHandle(9_000 + handles.length);
+    const handle = fakeHandle(options.noPid || options.spawnError ? undefined : (options.pid ?? 9_000 + handles.length));
     handles.push(handle);
     options.onLaunch?.(handle);
+    if (options.spawnError) {
+      const message = options.spawnError;
+      setImmediate(() => handle.exit(null, message));
+    }
     return handle;
   };
   const runner = new GalleryServiceRunner({
@@ -104,9 +115,15 @@ function harness(options: {
       changes.count += 1;
     },
     waitMs: options.waitMs ?? 3_000,
+    ...(options.stopGraceMs ? { stopGraceMs: options.stopGraceMs } : {}),
     ...(options.logBufferChars ? { logBufferChars: options.logBufferChars } : {})
   });
   return { runner, handles, launched, killed, changes, clock };
+}
+
+/** 让出若干微任务：把「排队 → spawn → 进入探活」这几步走到位，不用数 microtask 层数。 */
+async function flush(turns = 12): Promise<void> {
+  for (let index = 0; index < turns; index += 1) await Promise.resolve();
 }
 
 const baseInput = { appId: "g1", title: "反代", command: "node proxy.mjs", cwd: "D:/ws/proxy" };
@@ -217,7 +234,7 @@ describe("GalleryServiceRunner：退出、停止与清理", () => {
     expect(record?.note).toContain("1");
   });
 
-  it("退出码 0 视为正常结束（启动器形态），不算失败", async () => {
+  it("服务就绪后退出码 0 视为正常结束，不算启动失败", async () => {
     const h = harness();
     await h.runner.start(baseInput);
     h.handles[0]?.exit(0);
@@ -258,6 +275,28 @@ describe("GalleryServiceRunner：退出、停止与清理", () => {
     expect(h.runner.list()).toEqual([]);
   });
 
+  it("探活地址解析不了：spawn 前就 fail-closed（不留「运行中」的无主进程）", async () => {
+    const h = harness();
+    const result = await h.runner.start({ ...baseInput, url: "ftp://example.com:21" });
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.message).toContain("无法解析");
+    expect(!result.ok && result.failure?.reason).toBe("invalid-url");
+    // 关键：根本没有执行启动命令，也没在看板上留下记录
+    expect(h.launched).toEqual([]);
+    expect(h.runner.list()).toEqual([]);
+  });
+
+  it("换命令 + 坏地址：先校验地址，不会把已在跑的服务停掉再失败", async () => {
+    const h = harness();
+    const first = await h.runner.start(baseInput);
+    expect(first.ok).toBe(true);
+    const bad = await h.runner.start({ ...baseInput, command: "node proxy2.mjs", url: "ftp://example.com:21" });
+    expect(bad.ok).toBe(false);
+    expect(h.killed).toEqual([]); // 旧进程没被误杀
+    expect(h.launched).toHaveLength(1);
+    expect(h.runner.list().filter((record) => record.status === "running")).toHaveLength(1);
+  });
+
   it("spawn 抛错：记录标失败并给出原因（不静默）", async () => {
     const h = harness({ launchError: "spawn cmd.exe ENOENT" });
     const result = await h.runner.start(baseInput);
@@ -291,6 +330,409 @@ describe("GalleryServiceRunner：退出、停止与清理", () => {
     const log = h.runner.list()[0]?.log ?? "";
     expect(log.length).toBeLessThanOrEqual(40);
     expect(log.endsWith("0123456789")).toBe(true);
+  });
+});
+
+/**
+ * 并发与竞态（2026-11-16 计划 4.4）。
+ *
+ * 这一组全是「不报错、不崩溃，但结果错」的时序：双击运行叠两个进程、停止中的记录被复用、
+ * 旧进程没走就起新的、关窗的迟到回调误杀重开的面板。假件（launch / killTree / probe / 时钟）
+ * 让这些时序变成确定性的序列，不靠真计时碰运气。
+ */
+describe("GalleryServiceRunner：并发（同 appId 串行 + 同请求合流）", () => {
+  it("同参数并发两次 start 合流：只 spawn 一次，两边拿到同一份回执", async () => {
+    const h = harness();
+    const first = h.runner.start(baseInput);
+    const second = h.runner.start(baseInput);
+    const [a, b] = await Promise.all([first, second]);
+    expect(h.launched).toHaveLength(1);
+    expect(a.ok && b.ok).toBe(true);
+    expect(a.ok && b.ok && a.record?.id === b.record?.id).toBe(true);
+    expect(a).toBe(b);
+  });
+
+  it("不同命令并发：排队执行（先停旧再起新），不会同时在跑两个", async () => {
+    const h = harness();
+    const first = h.runner.start(baseInput);
+    const second = h.runner.start({ ...baseInput, command: "node proxy2.mjs" });
+    await flush();
+    // 第一支已经起好（无 url → 立即就绪）；第二支停在「等旧进程真的退出」
+    expect(h.launched).toHaveLength(1);
+    expect(h.killed).toEqual([9_000]);
+    h.handles[0]?.exit(null);
+    const [a, b] = await Promise.all([first, second]);
+    expect(a.ok && b.ok).toBe(true);
+    expect(h.launched.map((entry) => entry.command)).toEqual(["node proxy.mjs", "node proxy2.mjs"]);
+    expect(h.runner.list().filter((record) => record.status === "running")).toHaveLength(1);
+  });
+
+  it("不同 appId 各起各的（队列按作品隔离，不互相阻塞）", async () => {
+    const h = harness();
+    const [a, b] = await Promise.all([
+      h.runner.start({ ...baseInput, appId: "g1" }),
+      h.runner.start({ ...baseInput, appId: "g2" })
+    ]);
+    expect(a.ok && b.ok).toBe(true);
+    expect(h.launched).toHaveLength(2);
+    expect(h.runner.list().filter((record) => record.status === "running").map((record) => record.appId).sort()).toEqual(["g1", "g2"]);
+  });
+});
+
+describe("GalleryServiceRunner：停止态闸门（不许复用、不许叠进程）", () => {
+  it("停止中的记录不许复用：再点运行返回「正在停止，请稍后再运行」，且不再 spawn", async () => {
+    const h = harness();
+    const started = await h.runner.start(baseInput);
+    const id = started.ok ? started.record!.id : "";
+    expect(h.runner.stop(id)).toBe(true);
+    // 退出事件还没到：记录仍算活着，但已经在停止态
+    const again = await h.runner.start(baseInput);
+    expect(again.ok).toBe(false);
+    expect(!again.ok && again.message).toContain("正在停止，请稍后再运行");
+    expect(h.launched).toHaveLength(1);
+    expect(h.killed).toEqual([9_000]);
+  });
+
+  it("重复点停止是幂等的：进程树只回收一次", async () => {
+    const h = harness();
+    const started = await h.runner.start(baseInput);
+    const id = started.ok ? started.record!.id : "";
+    expect(h.runner.stop(id)).toBe(true);
+    expect(h.runner.stop(id)).toBe(true);
+    expect(h.killed).toEqual([9_000]);
+  });
+
+  it("启动等待期间点停止：在途 start 明确说「已取消」，不报成探活超时", async () => {
+    const gates: ((ok: boolean) => void)[] = [];
+    const h = harness({ probe: () => new Promise<boolean>((resolve) => gates.push(resolve)) });
+    const pending = h.runner.start({ ...baseInput, url: "http://127.0.0.1:8787" });
+    await flush();
+    gates.shift()?.(false); // 外部服务探活：不可达 → 真的去 spawn
+    await flush();
+    const id = h.runner.list()[0]?.id ?? "";
+    expect(id).not.toBe("");
+    expect(h.runner.stop(id)).toBe(true);
+    h.handles[0]?.exit(null);
+    gates.shift()?.(false); // 就绪轮询里的那一次探活
+    const result = await pending;
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.message).toContain("已取消");
+    expect(h.runner.list()[0]).toMatchObject({ status: "stopped" });
+  });
+
+  it("restart：旧进程在宽限内没退出就不起新进程，并明确说「可能仍在运行」", async () => {
+    // 用一个**真的活着**的 pid（本进程）：停止兜底定时器才会判「kill 没生效」
+    const h = harness({ pid: process.pid, stopGraceMs: 30 });
+    const started = await h.runner.start(baseInput);
+    const result = await h.runner.restart(started.ok ? started.record!.id : "");
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.message).toContain("可能仍在运行");
+    expect(h.launched).toHaveLength(1);
+    const record = h.runner.list()[0];
+    // 旧记录仍然算活着，并且如实告知「停止没生效」（不能默默当成已停）
+    expect(record?.status).toBe("running");
+    expect(record?.note).toContain("停止命令没有生效");
+  });
+});
+
+describe("GalleryServiceRunner：面板关窗（owner）停止不误杀新服务", () => {
+  const panelInput = { ...baseInput, appId: "panel-a", ownerPanelId: "panel-a" };
+
+  it("关窗快照：关窗后才被重新认领的服务不杀（迟到一拍的回调不能误杀重开的面板）", async () => {
+    const h = harness();
+    const first = await h.runner.start(panelInput);
+    const ticket = h.runner.ownerStopTicket("panel-a"); // 关窗当拍抓的快照
+    // 用户重开面板并再次运行：同一个记录被重新认领（复用同一活进程）
+    const again = await h.runner.start(panelInput);
+    expect(first.ok && again.ok && again.reused).toBe(true);
+    expect(h.runner.stopByOwner("panel-a", ticket)).toBe(0);
+    expect(h.killed).toEqual([]);
+    expect(h.runner.list().filter((record) => record.status === "running")).toHaveLength(1);
+  });
+
+  it("关窗时服务还在启动中也照停（不能因为「在途」就留孤儿）", async () => {
+    const gates: ((ok: boolean) => void)[] = [];
+    const h = harness({ probe: () => new Promise<boolean>((resolve) => gates.push(resolve)) });
+    const pending = h.runner.start({ ...panelInput, url: "http://127.0.0.1:8787" });
+    await flush();
+    gates.shift()?.(false); // 外部不可达 → 真的去 spawn
+    await flush(); // 现在停在「等就绪」上（记录 status = starting）
+    const ticket = h.runner.ownerStopTicket("panel-a");
+    expect([...ticket.claims.keys()]).toHaveLength(1);
+    expect(h.runner.stopByOwner("panel-a", ticket)).toBe(1);
+    expect(h.killed).toEqual([9_000]);
+    h.handles[0]?.exit(null);
+    gates.shift()?.(false); // 放行探活
+    const result = await pending;
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.message).toContain("已取消");
+    expect(h.runner.list()[0]).toMatchObject({ status: "stopped" });
+  });
+
+  it("start 还卡在探活（记录还没登记）时关窗：probe 恢复后绝不 spawn（不留孤儿）", async () => {
+    const gates: ((ok: boolean) => void)[] = [];
+    const h = harness({ probe: () => new Promise<boolean>((resolve) => gates.push(resolve)) });
+    const pending = h.runner.start({ ...panelInput, url: "http://127.0.0.1:8787" });
+    await flush();
+    expect(h.runner.list()).toEqual([]); // 还卡在探活里，entries 里根本没有这个作品
+    const ticket = h.runner.ownerStopTicket("panel-a");
+    expect(ticket.pending).toHaveLength(1);
+    expect(h.runner.stopByOwner("panel-a", ticket)).toBe(0); // 没有记录可停
+    gates.shift()?.(false); // 探活恢复：不可达 —— 旧实现会在这里照样 spawn 出孤儿
+    const result = await pending;
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.message).toContain("已取消");
+    expect(h.launched).toEqual([]);
+    expect(h.killed).toEqual([]);
+  });
+
+  it("不给快照时也会挂在途 start（面板关了，服务不能凭空起）", async () => {
+    const gates: ((ok: boolean) => void)[] = [];
+    const h = harness({ probe: () => new Promise<boolean>((resolve) => gates.push(resolve)) });
+    const pending = h.runner.start({ ...panelInput, url: "http://127.0.0.1:8787" });
+    await flush();
+    expect(h.runner.stopByOwner("panel-a")).toBe(0);
+    gates.shift()?.(true); // 即使探活说「已可达」，也只算外部服务、不再接着走
+    const result = await pending;
+    expect(result.ok).toBe(false);
+    expect(h.launched).toEqual([]);
+  });
+
+  it("prepareOwnerStop 当拍取消在途认领：微任务里恢复探活也不 spawn（早于延时的精确停）", async () => {
+    const gates: ((ok: boolean) => void)[] = [];
+    const h = harness({ probe: () => new Promise<boolean>((resolve) => gates.push(resolve)) });
+    const pending = h.runner.start({ ...panelInput, url: "http://127.0.0.1:8787" });
+    await flush();
+    expect(h.runner.list()).toEqual([]); // 卡在探活里，entries 为空
+    // 关窗当拍：抓快照 + 就地取消在途认领（纯数据，不 kill）
+    const ticket = h.runner.prepareOwnerStop("panel-a");
+    expect(ticket.pending).toHaveLength(1);
+    // 探活在**同一个微任务批**里恢复（早于 setImmediate 里的 stopByOwner）：
+    // 只把取消留给延时回调时，这里就会 spawn 出一个不在快照里的孤儿
+    gates.shift()?.(false);
+    await Promise.resolve();
+    expect(h.launched).toEqual([]);
+    const result = await pending;
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.message).toContain("已取消");
+    // 延时拍里的精确停止照常执行（没有记录 → 0），也不会事后多出进程
+    expect(h.runner.stopByOwner("panel-a", ticket)).toBe(0);
+    expect(h.launched).toEqual([]);
+    expect(h.killed).toEqual([]);
+  });
+
+  it("prepareOwnerStop 之后延时精确停：快照里的记录照停，且不重复 kill", async () => {
+    const gates: ((ok: boolean) => void)[] = [];
+    const h = harness({ probe: () => new Promise<boolean>((resolve) => gates.push(resolve)) });
+    const first = await h.runner.start(panelInput); // 已登记的记录（无 url ⇒ 立即就绪）
+    // 换命令的第二次运行：它先停旧、再等退出，而新的外部探活还没开始（在途认领已登记）
+    const second = h.runner.start({ ...panelInput, command: "node proxy2.mjs", url: "http://127.0.0.1:8787" });
+    await flush();
+    const ticket = h.runner.prepareOwnerStop("panel-a");
+    expect(ticket.claims.size).toBe(1); // 旧记录在快照里
+    expect(ticket.pending).toHaveLength(1); // 第二支还在途
+    h.handles[0]?.exit(null); // 旧进程退出：第二支本该接着探活 + spawn
+    const secondResult = await second;
+    expect(secondResult.ok).toBe(false);
+    expect(!secondResult.ok && secondResult.message).toContain("已取消");
+    expect(h.launched).toHaveLength(1); // 只有第一支真的起过
+    // 延时拍里的精确停：旧记录已在退出中，不重复 kill
+    expect(h.runner.stopByOwner("panel-a", ticket)).toBe(0);
+    expect(h.killed).toEqual([9_000]);
+    expect((first.ok && first.record?.id) || "").not.toBe("");
+  });
+
+  it("关窗快照只取消旧的那次在途 start：重开后新起的照常起来", async () => {
+    const gates: ((ok: boolean) => void)[] = [];
+    const h = harness({ probe: () => new Promise<boolean>((resolve) => gates.push(resolve)) });
+    // 旧一轮：卡在探活里（还没有记录）
+    const stale = h.runner.start({ ...panelInput, command: "node old.mjs", url: "http://127.0.0.1:8787" });
+    await flush();
+    const ticket = h.runner.ownerStopTicket("panel-a"); // 关窗当拍：旧的这次在快照里
+    expect(ticket.pending).toHaveLength(1);
+    // 重开面板后的新一次运行（不同命令 ⇒ 不合流；无 url ⇒ 不用探活）
+    const fresh = h.runner.start({ ...panelInput, command: "node new.mjs" });
+    await flush();
+    expect(h.runner.stopByOwner("panel-a", ticket)).toBe(0);
+    gates.shift()?.(false); // 旧的那次探活恢复 → 必须取消，不 spawn
+    const staleResult = await stale;
+    expect(staleResult.ok).toBe(false);
+    expect(!staleResult.ok && staleResult.message).toContain("已取消");
+    expect((await fresh).ok).toBe(true);
+    expect(h.launched.map((entry) => entry.command)).toEqual(["node new.mjs"]);
+    expect(h.runner.list().filter((record) => record.status === "running")).toHaveLength(1);
+  });
+
+  it("关窗快照只认同一条记录：重开后另起的记录不受影响", async () => {
+    const h = harness();
+    await h.runner.start(panelInput);
+    const ticket = h.runner.ownerStopTicket("panel-a");
+    // 关窗回调还没到，旧服务自己崩了；面板重开又起了一个新记录
+    h.handles[0]?.exit(1);
+    const second = await h.runner.start({ ...panelInput, command: "node proxy2.mjs" });
+    expect(second.ok).toBe(true);
+    expect(h.runner.stopByOwner("panel-a", ticket)).toBe(0);
+    expect(h.runner.list().filter((record) => record.status === "running")).toHaveLength(1);
+  });
+
+  it("同一份关窗快照被执行两次：第二次无事可做（幂等）", async () => {
+    const h = harness();
+    await h.runner.start(panelInput);
+    const ticket = h.runner.ownerStopTicket("panel-a");
+    expect(h.runner.stopByOwner("panel-a", ticket)).toBe(1);
+    h.handles[0]?.exit(null);
+    expect(h.runner.stopByOwner("panel-a", ticket)).toBe(0);
+    expect(h.killed).toEqual([9_000]);
+  });
+
+  it("不给快照时维持旧语义：停掉这个面板认领的活服务", async () => {
+    const h = harness();
+    await h.runner.start(panelInput);
+    expect(h.runner.stopByOwner("panel-a")).toBe(1);
+    expect(h.killed).toEqual([9_000]);
+  });
+
+  it("外部已可达的服务不建记录，也不进 stopByOwner 的停止链路", async () => {
+    const h = harness({ probe: async () => true });
+    const result = await h.runner.start({ ...panelInput, url: "http://127.0.0.1:8787" });
+    expect(result.ok && result.external).toBe(true);
+    expect(h.runner.list()).toEqual([]);
+    expect(h.runner.ownerStopTicket("panel-a").claims.size).toBe(0);
+    expect(h.runner.stopByOwner("panel-a")).toBe(0);
+    expect(h.killed).toEqual([]);
+  });
+
+  it("复用记录时同步 url / 面板归属并推一帧（看板不能显示旧值）", async () => {
+    const h = harness();
+    await h.runner.start(baseInput);
+    const before = h.changes.count;
+    const again = await h.runner.start({ ...baseInput, url: "http://127.0.0.1:8787", ownerPanelId: "p1" });
+    expect(again.ok && again.reused).toBe(true);
+    const record = h.runner.list()[0];
+    expect(record?.url).toBe("http://127.0.0.1:8787");
+    expect(record?.ownerPanelId).toBe("p1");
+    expect(h.changes.count).toBeGreaterThan(before);
+  });
+});
+
+describe("GalleryServiceRunner：就绪前退出与一次性结算", () => {
+  it("就绪前以 0 退出：判启动失败，端口随后可达也不能改回「运行中」", async () => {
+    let probes = 0;
+    const h = harness({
+      // 第 1 次是「地址已可达吗」（否 ⇒ 真的 spawn），第 2 次是就绪轮询（此刻进程已经死了）
+      probe: async () => {
+        probes += 1;
+        return probes > 1;
+      },
+      onLaunch: (handle) => {
+        handle.data("detached\n");
+        queueMicrotask(() => handle.exit(0));
+      }
+    });
+    const result = await h.runner.start({ ...baseInput, url: "http://127.0.0.1:8787" });
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.message).toContain("不能建立可回收的服务所有权");
+    const record = h.runner.list()[0];
+    expect(record).toMatchObject({ status: "failed", ready: false, exitCode: 0 });
+    expect(record?.log).toContain("detached"); // 日志必须留着（看板上要能回答「为啥没起来」）
+  });
+
+  it("error + exit 双事件只结算一次（后到的不能改写终态）", async () => {
+    const h = harness();
+    await h.runner.start(baseInput);
+    h.handles[0]?.exit(null, "spawn cmd.exe ENOENT");
+    expect(h.runner.list()[0]).toMatchObject({ status: "failed" });
+    expect(h.runner.list()[0]?.note).toContain("ENOENT");
+    h.handles[0]?.exit(0);
+    const record = h.runner.list()[0];
+    expect(record?.status).toBe("failed");
+    expect(record?.note).toContain("ENOENT");
+    expect(record?.exitCode).toBeUndefined();
+  });
+
+  it("无 URL + 句柄没有 pid：先等异步 spawn error，绝不先回「已运行」", async () => {
+    const h = harness({ spawnError: "spawn cmd.exe ENOENT" });
+    const result = await h.runner.start(baseInput);
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.message).toContain("ENOENT");
+    expect(h.runner.list()[0]).toMatchObject({ status: "failed", ready: false });
+  });
+
+  it("无 URL + 句柄没有 pid 也不报错：明确失败（拿不到可回收的进程身份）", async () => {
+    const h = harness({ noPid: true });
+    const result = await h.runner.start(baseInput);
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.message).toContain("没有返回进程号");
+    expect(h.runner.list()[0]).toMatchObject({ status: "failed", ready: false });
+  });
+});
+
+describe("GalleryServiceRunner：应用退出（disposeAll）", () => {
+  it("disposeAll 之后不再启动新服务", async () => {
+    const h = harness();
+    h.runner.disposeAll();
+    const result = await h.runner.start(baseInput);
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.message).toContain("应用正在退出");
+    expect(h.launched).toEqual([]);
+  });
+
+  it("disposeAll 之后外部服务探活成功也不能回「已复用」", async () => {
+    const gates: ((ok: boolean) => void)[] = [];
+    const h = harness({ probe: () => new Promise<boolean>((resolve) => gates.push(resolve)) });
+    const pending = h.runner.start({ ...baseInput, url: "http://127.0.0.1:8787" });
+    await flush();
+    h.runner.disposeAll();
+    gates.shift()?.(true); // 探活「成功」：仍然要以「应用正在退出」取消
+    const result = await pending;
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.message).toContain("应用正在退出");
+    expect(h.launched).toEqual([]);
+  });
+
+  it("disposeAll 让在途 start 在 spawn 前取消（不凭空多一个进程）", async () => {
+    const gates: ((ok: boolean) => void)[] = [];
+    const h = harness({ probe: () => new Promise<boolean>((resolve) => gates.push(resolve)) });
+    const pending = h.runner.start({ ...baseInput, url: "http://127.0.0.1:8787" });
+    await flush();
+    h.runner.disposeAll();
+    gates.shift()?.(false);
+    const result = await pending;
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.message).toContain("应用正在退出");
+    expect(h.launched).toEqual([]);
+  });
+
+  it("disposeAll 让在途 restart 立刻放行（不等满宽限、也不起新进程）", async () => {
+    // 宽限开到 60s：只有 dispose 能放行；同时钉住「注入的宽限真的生效」——
+    // 旧实现用 Math.min(5s, 注入值) 时这里会白等 5 秒。
+    const h = harness({ pid: process.pid, stopGraceMs: 60_000 });
+    const started = await h.runner.start(baseInput);
+    const startedAt = Date.now();
+    const pending = h.runner.restart(started.ok ? started.record!.id : "");
+    await flush();
+    h.runner.disposeAll();
+    const result = await pending;
+    expect(result.ok).toBe(false);
+    expect(h.launched).toHaveLength(1);
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+  });
+
+  it("disposeAll 把没有 pid 的活记录也收掉（走 handle.kill 兜底）", async () => {
+    let probes = 0;
+    const h = harness({
+      noPid: true,
+      probe: async () => {
+        probes += 1;
+        return probes > 1;
+      }
+    });
+    const started = await h.runner.start({ ...baseInput, url: "http://127.0.0.1:8787" });
+    expect(started.ok).toBe(true);
+    h.runner.disposeAll();
+    expect(h.killed).toEqual([]); // 没有 pid 就没法走进程树回收
+    expect(h.handles[0]?.killCalls).toBe(1); // 单进程兜底
+    expect(h.runner.list()).toEqual([]);
   });
 });
 

@@ -44,7 +44,7 @@ describe("服务型作品运行：后台进程（不再有终端标签）", () =
   it("就绪后是否开页面由 plan.openPage 决定（纯后台服务不弹页面）", () => {
     expect(app).toMatch(/if \(plan\.openPage && app\.url\) \{/u);
     // 没有页面可开时要记一次运行并指向看板（否则用户点完运行看不到任何反馈）
-    expect(app).toContain("作品墙顶部的「运行中的服务」可以看日志、停止或重启");
+    expect(app).toContain("可在作品墙「运行中的服务」查看日志、停止或重启");
   });
 
   it("三条通道名两端一致（拼错只会在运行时抛「No handler registered」）", () => {
@@ -99,7 +99,9 @@ describe("后台服务生命周期", () => {
 describe("后台服务管理器（runner）自身的硬约束", () => {
   it("同作品同命令复用、命令变了先停旧再起新（避免同端口叠两个进程）", () => {
     expect(runner).toContain("const same = existing.record.command === command && existing.record.cwd === cwd;");
-    expect(runner).toContain("this.stop(existing.record.id);\n      await this.awaitExit(existing, GALLERY_SERVICE_STOP_GRACE_MS);");
+    // 宽限预算走注入值（deps.stopGraceMs，生产缺省 = GALLERY_SERVICE_STOP_GRACE_MS），
+    // 否则单测注入的假宽限根本不起作用（2026-11-16 计划 4.4）。
+    expect(runner).toContain("this.stop(existing.record.id);\n      await this.awaitExit(existing, this.stopGraceMs);");
   });
 
   it("地址已可达时不碰别人的进程（external）", () => {

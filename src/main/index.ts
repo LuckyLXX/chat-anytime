@@ -1290,6 +1290,35 @@ function pushGalleryServices(): void {
   }
 }
 
+/**
+ * 面板「运行」失败后收掉平台为它起的本地服务（2026-11-16 计划 4.3⑤）。
+ *
+ * 两个约束：
+ * 1. **只认 owner**：`stopByOwner` 只停 `ownerPanelId === 这个作品` 的记录；地址已可达
+ *    而平台压根没登记的外部服务（`external`）不在停止链路里——「不得停止外部服务」。
+ * 2. **窗口还在就不动它**：reload 因入口校验失败而放弃时，旧页面仍在显示、服务仍有
+ *    主人，提前停掉只会让眼前这个页面断数据源。
+ */
+function releasePanelOwnerServices(appId: string): void {
+  if (!appId) return;
+  // 窗口还在（reload 因入口校验失败而放弃，旧页面仍在）→ 服务仍有主人，不提前停。
+  // 注意这条判据只用于「运行失败」这个同步点，不用于关窗收尾：关窗收尾按代际判断
+  //（见 panel-window 的 closed 处理器），所以「关窗时还在启动中的服务」不会被跳过——
+  // `stopByOwner` 本身就包含 status=starting 的记录。
+  if (panelWindows?.isOpen(appId)) return;
+  const runner = galleryServices;
+  if (!runner) return;
+  try {
+    // 只认 owner：外部已可达、平台压根没登记的服务不在停止链路里。
+    const stopped = runner.stopByOwner(appId);
+    if (stopped > 0) console.info(`[gallery] 面板「${appId}」没能打开，已停止 ${stopped} 个平台托管的本地服务`);
+  } catch (error) {
+    console.warn(`[gallery] 面板「${appId}」的本地服务收尾失败：${error instanceof Error ? error.message : String(error)}`);
+  }
+  // 看板必须跟着刷新，否则用户看到的是「服务还在跑」而进程其实已经收了。
+  pushGalleryServices();
+}
+
 /** 后台服务入参的归一化：字段全部来自渲染端，坏值一律在这里挡掉（IPC 边界）。 */
 function normalizeServiceRequest(input: unknown): GalleryServiceStartRequest | undefined {
   if (!input || typeof input !== "object") return undefined;
@@ -1460,7 +1489,7 @@ function registerIpc(): void {
     const data = readGalleryThumb(galleryThumbsDirFor(resolveGalleryAgentDir()), fileName);
     return data ? `data:image/png;base64,${data.toString("base64")}` : undefined;
   });
-  ipcMain.handle("gallery:open-panel", async (_event, input: { id?: unknown; title?: unknown; workspace?: unknown; filePath?: unknown; panel?: unknown } | undefined): Promise<{ ok: boolean; message?: string }> => {
+  ipcMain.handle("gallery:open-panel", async (_event, input: { id?: unknown; title?: unknown; workspace?: unknown; filePath?: unknown; panel?: unknown; reload?: unknown; runToken?: unknown } | undefined): Promise<{ ok: boolean; message?: string; stale?: boolean }> => {
     const id = typeof input?.id === "string" ? input.id.trim() : "";
     const workspace = typeof input?.workspace === "string" ? input.workspace.trim() : "";
     const filePath = typeof input?.filePath === "string" ? input.filePath.trim() : "";
@@ -1473,26 +1502,60 @@ function registerIpc(): void {
         void shell.openExternal(url).catch(() => undefined);
       },
       // 面板窗口一关，平台为它起的本地服务也跟着停（2026-10-11 用户选定：不在后台
-      // 留没人用的进程）。2026-11-12 起服务是后台进程（不再是终端会话），认领关系由
-      // 服务记录自己的 ownerPanelId 表达——这里只按作品 id 停掉它，看板随之刷新。
-      onClosed: (appId) => {
-        try {
-          galleryServices?.stopByOwner(appId);
-        } catch {
-          /* 服务本来就已结束：无事可做 */
-        }
-        pushGalleryServices();
+      // 留没人用的进程）。分两段（2026-11-16 计划 4.3⑥ / 4.4）：
+      // ① **关窗当拍同步**抓快照并取消在途认领（`prepareOwnerStop` 只改内存，不杀进程）；
+      // ② 下一个 tick 再按快照停（`closed` 还在 Electron 销毁窗口的同步栈里，而收尾
+      //    要结束一整棵进程树）。
+      // 为什么不「关窗就整拍跳过」：快照记的是「那一刻的记录 id + 认领序号 + 在途 start
+      // 的认领 id」，关窗后重开产生的新记录 / 被重新认领过的老记录天然不在里面（不会
+      // 误杀新服务），而关窗时在途的那次认领会一起被取消（跳过整拍会让它探活回来后
+      // spawn 出一个没有主人的进程）。外部已可达的服务从来没登记记录，也永远不会进
+      // 这条链路。
+      prepareClosed: (appId) => {
+        const runner = galleryServices;
+        const ticket = runner?.prepareOwnerStop(appId);
+        return () => {
+          try {
+            const stopped = runner?.stopByOwner(appId, ticket) ?? 0;
+            if (stopped > 0) console.info(`[gallery] 面板「${appId}」关闭，已停止 ${stopped} 个平台托管的本地服务`);
+          } catch (error) {
+            // 收尾失败要留一条痕迹，别让「看板还挂着服务」无从追。
+            console.warn(`[gallery] 面板「${appId}」关闭后的服务收尾失败：${error instanceof Error ? error.message : String(error)}`);
+          }
+          // 看板必须跟着刷新（不刷就是「窗口关了，服务还挂在看板上」）。
+          pushGalleryServices();
+        };
       }
     });
     // 面板作品常要直接调外部模型 API（那些服务多半没有 CORS）；放宽只作用于面板窗口。
     ensurePanelCorsRelaxation();
-    return panelWindows.open({
-      id,
-      title: typeof input?.title === "string" && input.title.trim() ? input.title.trim() : "面板",
-      workspace,
-      filePath,
-      panel: normalizeGalleryPanelOptions(input?.panel)
-    });
+    // 作品墙的「运行」带 reload：已有窗口也要加载当前入口（继续开发后必须看到最新代码）。
+    // 非 true 一律当 false（fail-closed：内部调用/旧客户端沿用「只前置」的语义）。
+    const reload = input?.reload === true;
+    try {
+      const result = await panelWindows.open({
+        id,
+        title: typeof input?.title === "string" && input.title.trim() ? input.title.trim() : "面板",
+        workspace,
+        filePath,
+        panel: normalizeGalleryPanelOptions(input?.panel),
+        reload,
+        ...(typeof input?.runToken === "number" ? { runToken: input.runToken } : {})
+      });
+      // 开不出来（入口不在工作区/不是网页/页面加载失败）时，平台为这个面板起的本地
+      // 服务就没有主人了：立刻收掉，不留无人使用的后台进程。
+      // 例外：窗口是在加载期间被用户关掉的（closedDuringOpen）——那条路径已经走完关窗
+      // 收尾（prepareClosed 的快照会停掉服务），这里再收一遍就是双杀。
+      if (!result.ok && !result.closedDuringOpen && !result.stale) releasePanelOwnerServices(id);
+      return result;
+    } catch (error) {
+      // IPC 抛异常过去是「渲染端连原因都拿不到，刚起的服务也没人收」：这里兜住，
+      // 回一句可读的原因，并同样把 owner 服务收掉。
+      const reason = error instanceof Error ? error.message : String(error);
+      console.warn(`[gallery] 打开面板「${id}」失败：${reason}`);
+      releasePanelOwnerServices(id);
+      return { ok: false, message: `打开面板窗口失败：${reason}` };
+    }
   });
   // —— 作品数据（面板专属）：用量量测与清空 ——
   // 面板数据落在固定 origin `pidesktop-file://w-<作品>`（Chromium profile 里），
@@ -1520,7 +1583,18 @@ function registerIpc(): void {
   ipcMain.handle("gallery:service-start", async (_event, input: unknown): Promise<GalleryServiceStartResult> => {
     const request = normalizeServiceRequest(input);
     if (!request) return { ok: false, message: "后台服务信息不完整（缺少作品 id / 启动命令 / 目录）" };
-    return ensureGalleryServices().start(request);
+    // 为某个面板起 owner 服务 = 这个作品又开了一轮运行（「先起服务再开窗」的第一步，
+    // 比 open-panel 先到）。必须在这里就推进面板代际：否则上一次关窗那一拍的延迟收尾
+    // 会把刚起（或刚被复用接手）的服务当成孤儿收掉——面板打开了，数据源却已经停了。
+    const generation = request.ownerPanelId ? panelWindows?.noteRunStarted(request.ownerPanelId) : undefined;
+    const result = await ensureGalleryServices().start(request);
+    // 等就绪期间用户关掉了面板（关闭也推进代际）：这一轮已经作废，不能再把用户刚关掉的
+    // 窗口重新打开——回一个可读的取消，渲染端就不会继续走开窗那一步。平台为这一轮起的
+    // 托管记录交给关窗收尾（或下一轮运行）处理，这里不去动，免得误杀新一轮的服务。
+    if (generation !== undefined && request.ownerPanelId && panelWindows && !panelWindows.isRunCurrent(request.ownerPanelId, generation)) {
+      return { ok: false, message: "面板已经关闭，这次运行不再继续" };
+    }
+    return result.ok && generation !== undefined ? { ...result, panelRunToken: generation } : result;
   });
   ipcMain.handle("gallery:service-stop", (_event, id: unknown): boolean => {
     const serviceId = typeof id === "string" ? id.trim() : "";

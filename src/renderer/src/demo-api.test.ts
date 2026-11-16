@@ -15,6 +15,35 @@ describe("demo session commands", () => {
     expect(bootstrap.runtime?.messages).toEqual([]);
   });
 
+  it("仅在新话题实际创建后回传对应的请求 id 与会话 id", async () => {
+    const api = createDemoApi();
+    const messages: RuntimeMessage[] = [];
+    const unsubscribe = api.onRuntimeMessage((message) => messages.push(message));
+    await api.send({ type: "session.new", workspace: "D:\\Projects\\receipt-test", requestId: "gallery-op" });
+    expect(messages).toContainEqual({ type: "session.new-result", requestId: "gallery-op", ok: true, sessionId: "new-demo-session-gallery-op" });
+    await api.send({ type: "session.new", agentId: "missing-agent", requestId: "failed-op" });
+    expect(messages).toContainEqual({ type: "session.new-result", requestId: "failed-op", ok: false, error: "目标助手不存在或已归档" });
+    unsubscribe();
+  });
+
+  it("演示发布使用最终入口与 appId 更新同一作品", async () => {
+    const api = createDemoApi();
+    await api.send({ type: "session.new", workspace: "D:\\Projects\\gallery-demo" });
+    const messages: RuntimeMessage[] = [];
+    const unsubscribe = api.onRuntimeMessage((message) => messages.push(message));
+    await api.send({ type: "gallery.publish", draft: { title: "面板", kind: "panel", path: "panels/status", entry: "index.html" } });
+    const first = messages.filter((message) => message.type === "gallery.apps").at(-1);
+    if (first?.type !== "gallery.apps") throw new Error("没有作品清单");
+    const original = first.apps.find((app) => app.title === "面板")!;
+    expect(original.entry).toBe("panels/status/index.html");
+    await api.send({ type: "gallery.publish", draft: { appId: original.id, title: "面板更新", kind: "panel", path: "panels/status/index.html" } });
+    const last = messages.filter((message) => message.type === "gallery.apps").at(-1);
+    if (last?.type !== "gallery.apps") throw new Error("没有作品清单");
+    expect(last.apps.find((app) => app.id === original.id)).toMatchObject({ title: "面板更新", entry: original.entry, createdAt: original.createdAt });
+    expect(last.apps.filter((app) => app.id === original.id)).toHaveLength(1);
+    unsubscribe();
+  });
+
   it("keeps Skill enablement isolated between Agents", async () => {
     const api = createDemoApi();
     const bootstrap = await api.bootstrap();

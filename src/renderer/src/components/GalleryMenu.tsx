@@ -31,6 +31,11 @@ interface GalleryMenuProps {
   onMenuOpenChange?(open: boolean): void;
 }
 
+/** 「运行」的悬停说明：与作品墙同一口径——panel 会重新加载入口页，不再复现「改完代码还是旧页面」。 */
+function runTitle(app: GalleryApp): string {
+  return app.kind === "panel" ? `运行「${app.title}」（窗口已开着会重新加载最新页面）` : `运行「${app.title}」`;
+}
+
 function recentLabel(app: GalleryApp): string {
   if (!app.lastRunAt) return GALLERY_KIND_LABELS[app.kind];
   const minutes = Math.floor((Date.now() - app.lastRunAt) / 60_000);
@@ -110,11 +115,11 @@ export function GalleryMenu({ apps, onRun, onDevelop, onOpenWall, onPublish, run
             <div className="gallery-pop-list">
               {top.map((app) => (
                 <div className="gallery-pop-row" key={app.id} role="menuitem" data-gallery-id={app.id}>
-                  <button type="button" className="gallery-pop-main" data-control="gallery-run" title={`运行「${app.title}」`} onClick={() => { toggle(false); onRun(app); }}>
+                  <button type="button" className="gallery-pop-main" data-control="gallery-run" title={runTitle(app)} onClick={() => { toggle(false); onRun(app); }}>
                     <strong>{app.title}</strong>
                     <span className="gallery-pop-meta">{recentLabel(app)}</span>
                   </button>
-                  <button type="button" className="gallery-pop-develop" data-control="gallery-develop" title={`继续开发「${app.title}」`} aria-label={`继续开发 ${app.title}`} onClick={() => { toggle(false); onDevelop(app); }}>
+                  <button type="button" className="gallery-pop-develop" data-control="gallery-develop" title={`继续开发「${app.title}」（改完用同一作品重新发布，才会更新这张卡）`} aria-label={`继续开发 ${app.title}`} onClick={() => { toggle(false); onDevelop(app); }}>
                     <Hammer size={12} />
                   </button>
                 </div>

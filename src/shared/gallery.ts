@@ -97,7 +97,7 @@ export interface GalleryApp {
   entry: string;
   /**
    * 启动命令。
-   * - kind=server：作品的服务启动命令（「运行」时在终端标签里自动执行，不是手工回车）。
+   * - kind=server：作品的前台长期运行命令（平台在后台进程中托管）。
    * - kind=panel：**开窗前要拉起的本地服务**（面板页没有 preload 也跑不了进程，
    *   需要本地数据源的作品靠它；见 2026-10-11 的 Git 管理器）。
    */
@@ -130,11 +130,27 @@ export interface GalleryApp {
 
 /** 发布请求（AI 工具与实体按钮共用同一形状）。 */
 export interface GalleryDraft {
+  /**
+   * 既有作品的 id（「继续开发」后重新发布时带上）：存在且属于当前工作区时
+   * **优先更新这一条目**，而不是按「工作区 + 类型 + 入口」另找/新建（2026-11-16）。
+   *
+   * panel 作品的 id 决定固定 origin（`pidesktop-file://w-<id>`），换 id 等于换一份
+   * localStorage / IndexedDB——所以同一个面板的后续发布必须沿用同一 id。
+   * 类型（kind）与工作区不许跟着 id 一起变：那是另一个作品，宁可报错。
+   */
+  appId?: string;
   title: string;
   kind: GalleryKind;
-  /** 发布源路径：kind=file 时是文件（相对工作区或绝对）；kind=server 时是目录。 */
+  /**
+   * 发布源路径：kind=file/panel 时是入口文件，或「目录 + entry」里的那个目录
+   *（相对工作区或绝对）；kind=server 时必须是项目目录。
+   */
   path: string;
-  /** 入口（缺省 = path）；仅 kind=file 有意义。 */
+  /**
+   * 目录内的最终入口：最终入口 = `resolve(path, entry)`（只在 path 是目录时有意义）。
+   * - file / panel 可选：不给时 path 本身就是最终入口；
+   * - server 禁止（服务没有「入口页」）。
+   */
   entry?: string;
   command?: string;
   url?: string;
@@ -250,6 +266,137 @@ export function normalizeGalleryEntry(value: string): string {
 }
 
 /**
+ * 工作区身份键（工作区比较的唯一纯函数判据）：分隔符与尾斜杠归一；
+ * Windows（盘符 / UNC）不区分大小写，POSIX **区分**（`/home/ws` 与 `/home/WS` 是两个目录）。
+ */
+export function galleryWorkspaceKey(workspace: string): string {
+  const text = normalizeAbsoluteForCompare(workspace);
+  return caseInsensitiveGalleryPath(text) ? text.toLowerCase() : text;
+}
+
+/** 绝对路径判据（Windows 盘符 / UNC / POSIX 根）：纯字符串，不碰 node:path。 */
+export function isAbsoluteGalleryPath(value: string): boolean {
+  const text = value.trim();
+  return /^[a-zA-Z]:/u.test(text) || /^[\\/]/u.test(text);
+}
+
+/** 大小写是否不敏感：Windows 盘符路径与 UNC 不敏感，POSIX 路径敏感。 */
+function caseInsensitiveGalleryPath(value: string): boolean {
+  return /^[a-zA-Z]:/u.test(value) || value.startsWith("//");
+}
+
+/**
+ * 比较用的绝对路径归一化：反斜杠转正斜杠、折叠重复分隔符、去尾斜杠。
+ *
+ * 两个边界（2026-11-16）：POSIX 根 `/` 去尾斜杠会变成空串（丢了根，所有比较都失效），
+ * 所以单独保留；Windows 盘符根 `D:/` 去尾斜杠得到 `D:`，正好能和 `D:/ws` 前缀匹配。
+ */
+function normalizeAbsoluteForCompare(value: string): string {
+  const text = value.trim().replaceAll("\\", "/").replace(/(?<!^)\/{2,}/gu, "/");
+  if (/^\/+$/u.test(text)) return "/";
+  return text.replace(/\/+$/u, "");
+}
+
+/**
+ * 绝对路径 → 工作区相对入口（分隔符归一；Windows 不区分大小写，POSIX 区分；
+ * 保留原大小写）。不在 root 之下返回 undefined（调用方据此拒绝越界发布）。
+ *
+ * 这里只做**词法**判定；真正的越界（软链接 / 目录联接）由 node 侧 realpath 再复核。
+ */
+export function galleryEntryFromAbsolute(root: string, target: string): string | undefined {
+  const rootText = normalizeAbsoluteForCompare(root);
+  const targetText = normalizeAbsoluteForCompare(target);
+  if (!rootText || !targetText) return undefined;
+  const fold = caseInsensitiveGalleryPath(rootText) ? (value: string): string => value.toLowerCase() : (value: string): string => value;
+  const rootKey = fold(rootText);
+  const targetKey = fold(targetText);
+  if (targetKey === rootKey) return ".";
+  const rootIsPosixRoot = rootKey === "/";
+  if (!targetKey.startsWith(rootIsPosixRoot ? "/" : `${rootKey}/`)) return undefined;
+  return normalizeGalleryEntry(targetText.slice(rootIsPosixRoot ? 1 : rootText.length + 1));
+}
+
+/** 相对路径段折叠：丢掉空段与 "."，用 ".." 回退；回退越过起点返回 undefined（= 越界）。 */
+function foldGallerySegments(segments: readonly string[]): string[] | undefined {
+  const stack: string[] = [];
+  for (const segment of segments) {
+    if (!segment || segment === ".") continue;
+    if (segment === "..") {
+      if (stack.length === 0) return undefined;
+      stack.pop();
+      continue;
+    }
+    stack.push(segment);
+  }
+  return stack;
+}
+
+/**
+ * 工作区相对路径的规范折叠：`a/../b.html` → `b.html`（缺了这一步，同一个文件会
+ * 因两种写法变成两张作品卡）；越界（".." 跳过起点）返回 undefined。
+ */
+export function foldGalleryEntry(value: string): string | undefined {
+  const segments = foldGallerySegments(value.replaceAll("\\", "/").split("/"));
+  if (!segments) return undefined;
+  return segments.length > 0 ? segments.join("/") : ".";
+}
+
+function foldOrThrow(value: string, message: string): string {
+  const folded = foldGalleryEntry(value);
+  if (folded === undefined) throw new Error(message);
+  return folded;
+}
+
+/** 看起来已经是一个网页文件（给「path 已经指向文件却又给了 entry」这条错配一个明确的错）。 */
+const GALLERY_PAGE_FILE = /\.(?:html?|xhtml|svg)$/iu;
+
+/** 作品入口的最终解析结果：工作区相对入口 + 绝对路径。 */
+export interface GalleryEntryResolution {
+  /** 最终入口：工作区相对路径（分隔符已归一为 /；"." = 工作区根，只有 server 可能）。 */
+  entry: string;
+  /** 最终入口的绝对路径（root 是绝对路径时）。 */
+  absolutePath: string;
+}
+
+/**
+ * 作品入口的**唯一**解析口径（渲染端 / utility / 主进程共用，别再各自拼一套）：
+ *
+ * - `file` / `panel`：没有 `entry` 时 `path` 就是最终入口；有 `entry` 时最终入口 =
+ *   `resolve(path, entry)`（`path` 应是目录，`entry` 应是其中的相对路径）。
+ * - `server`：`path` 必须是项目目录；`entry` 不适用（传了直接报错）。
+ * - 路径一律折叠成工作区相对路径（`a/../b.html` → `b.html`），清单里只存**最终**入口，
+ *   不存二义性的两段路径；越界（跳出工作区 / 跳出 path 目录）直接报错，绝不静默
+ *   发布一个指向外面的入口。
+ */
+export function resolveGalleryEntry(input: { root: string; path: string; entry?: string; kind: GalleryKind }): GalleryEntryResolution {
+  const root = input.root.trim();
+  if (!root) throw new Error("请先打开一个工作区，再发布作品");
+  const rawPath = input.path?.trim() ?? "";
+  if (!rawPath) throw new Error("path 不能为空（要发布的入口文件或项目目录）");
+  const rawEntry = input.entry?.trim() ?? "";
+  if (input.kind === "server" && rawEntry) {
+    throw new Error("kind=server 的 path 必须是项目目录，不支持 entry（服务没有「入口页」）：把 path 写成项目目录，启动命令写在 command");
+  }
+  // path：绝对路径先换算成工作区相对路径，再统一折叠（两种写法必须得到同一个入口）。
+  const relativePath = isAbsoluteGalleryPath(rawPath) ? galleryEntryFromAbsolute(root, rawPath) : rawPath;
+  if (relativePath === undefined) throw new Error("作品入口必须位于当前工作区内");
+  const base = foldOrThrow(relativePath, "作品入口必须位于当前工作区内");
+  let entry = base;
+  if (rawEntry) {
+    if (isAbsoluteGalleryPath(rawEntry)) throw new Error("entry 必须是相对于 path 的相对路径（要直接指定工作区相对入口就把值写进 path）");
+    const nested = foldOrThrow(rawEntry, "entry 不能跳出 path 目录");
+    if (base !== "." && GALLERY_PAGE_FILE.test(base)) {
+      throw new Error(`path 已经指向文件（${base}）：要发布目录里的某个页面就把 path 写成那个目录；或用 path 直接指向入口文件（不要同时给 entry）`);
+    }
+    const segments = foldGallerySegments([...base.split("/"), ...nested.split("/")]);
+    if (!segments) throw new Error("entry 不能跳出工作区");
+    entry = segments.length > 0 ? segments.join("/") : ".";
+  }
+  if (input.kind === "panel" && entry === ".") throw new Error("面板作品的入口必须是具体网页文件（收到工作区根目录）：把 path 指向那个 html");
+  return { entry, absolutePath: galleryAbsolutePath(root, entry) };
+}
+
+/**
  * 读侧归一化：非法项一律丢弃（与 automation-store 同口径——宁可少一条坏数据，
  * 也不要让作品墙渲染出点不动的卡片）。
  */
@@ -304,9 +451,10 @@ export function normalizeGalleryApp(value: unknown): GalleryApp | undefined {
   return app;
 }
 
-/** 同一入口的判等键：工作区 + 类型 + 入口（大小写不敏感，Windows 盘符/路径大小写会漂）。 */
+/** 同一入口的判等键：工作区 + 类型 + 入口（大小写不敏感，Windows 盘符/路径大小写会漂）。
+ * 入口一律是**最终**相对入口（见 resolveGalleryEntry）：两段式 path+entry 不会各自成键。 */
 export function galleryKey(app: Pick<GalleryApp, "workspace" | "kind" | "entry">): string {
-  return `${app.workspace.toLowerCase()}|${app.kind}|${normalizeGalleryEntry(app.entry).toLowerCase()}`;
+  return `${galleryWorkspaceKey(app.workspace)}|${app.kind}|${normalizeGalleryEntry(app.entry).toLowerCase()}`;
 }
 
 /**
@@ -379,12 +527,16 @@ export type GalleryRunTarget =
   /** 面板：入口网页会被 main 开成独立窗口，不走内置浏览器；command/url 是它的可选本地服务。 */
   | { kind: "panel"; absolutePath: string; command?: string; url?: string }
   | { kind: "server"; url?: string; directory: string; command?: string };
-/** 绝对路径拼装（纯字符串操作；调用方已保证 workspace 是绝对路径）。 */
+/**
+ * 绝对路径拼装（纯字符串操作；调用方已保证 workspace 是绝对路径）。
+ * POSIX 根（`/`）要特别照顾：去尾斜杠会得到空串，拼出来就丢了根（`/a.html` 变相对路径）。
+ */
 export function galleryAbsolutePath(workspace: string, entry: string): string {
-  const base = workspace.replace(/[\\/]+$/u, "");
+  const trimmed = workspace.trim();
+  const base = /^[\\/]+$/u.test(trimmed) ? "/" : trimmed.replace(/[\\/]+$/u, "");
   const relative = normalizeGalleryEntry(entry);
   if (relative === ".") return base;
-  return `${base}/${relative}`;
+  return `${base.endsWith("/") ? base : `${base}/`}${relative}`;
 }
 
 /**
@@ -416,6 +568,192 @@ export function galleryRunTarget(app: Pick<GalleryApp, "kind" | "workspace" | "e
 }
 
 /**
+ * panel 本地服务的字段成对规则（2026-11-16）：填 `command` 必须填 `url`，填 `url`
+ * 必须填 `command`。只给其一时平台既不能探活也不能启动——旧实现会「面板直接开窗、
+ * 服务从来没起」，用户只看到页面报连不上，却找不到任何报错。
+ * 返回 undefined = 合法（成对齐全，或两个都没填 = 不依赖平台托管的本地服务）。
+ */
+export function galleryPanelServicePairError(command: string | undefined, url: string | undefined): string | undefined {
+  const hasCommand = Boolean(command?.trim());
+  const hasUrl = Boolean(url?.trim());
+  if (hasCommand === hasUrl) return undefined;
+  if (hasCommand) {
+    return "panel 的本地服务字段必须成对：给了 command 也要给 url（url 只用于探活，如 http://127.0.0.1:8791/api/health）——否则平台无法确认服务起没起；两个都不填表示面板不依赖平台托管的本地服务";
+  }
+  return "panel 的本地服务字段必须成对：给了 url 也要给 command（启动命令，如 node bridge.mjs，在入口所在目录执行）——否则平台不知道该怎么把服务拉起来；两个都不填表示面板不依赖平台托管的本地服务";
+}
+
+/**
+ * 「谁拥有这个作品的本地服务」的唯一判据（发布回执 / 运行分流 / 文案共用）。
+ *
+ * **只看配置，不看此刻是否可达**（2026-11-16 与 Lead 对齐）：发布回执只能陈述
+ * 配置事实，「已由平台启动」是运行时才知道的事；地址是否已经有人跑着，由运行时
+ * 的探活/服务看板判定。
+ *
+ * - `none`：没配本地服务（面板直接开窗，由页面自己连数据源）；
+ * - `platform`：配齐了 command + url → 由平台统一托管（运行时启动、关窗时停）；
+ * - `external`：只配了地址、没有启动命令（只对 server 合法）→ 那是外部服务，平台不接管；
+ * - `misconfigured`：panel 的字段不成对 → 平台既起不来也不知道该探什么。
+ */
+export type GalleryServiceOwnership = "none" | "platform" | "external" | "misconfigured";
+
+export function galleryServiceOwnership(app: Pick<GalleryApp, "kind" | "command" | "url">): GalleryServiceOwnership {
+  if (app.kind !== "panel" && app.kind !== "server") return "none";
+  const hasCommand = Boolean(app.command?.trim());
+  const hasUrl = Boolean(app.url?.trim());
+  if (app.kind === "panel") {
+    if (hasCommand && hasUrl) return "platform";
+    if (!hasCommand && !hasUrl) return "none";
+    // 只给一半：无论此刻可达与否都是配置错误（成对规则），不能当外部服务放行。
+    return "misconfigured";
+  }
+  // server：有启动命令就是平台托管的后台进程（地址可达时「运行」会复用它而不重启）；
+  // 只有地址没有命令 → 那是外部服务。
+  if (hasCommand) return "platform";
+  return hasUrl ? "external" : "none";
+}
+
+/**
+ * 运行时的「面板本地服务配置不完整」提示（运行分流与回执共用，2026-11-16）：
+ * 不允许再「静默直开窗」——那只会让用户看到一个永远取不到数据的页面。
+ */
+export function galleryPanelServiceRunError(app: Pick<GalleryApp, "title" | "command" | "url">): string {
+  if (app.command?.trim()) {
+    return `「${app.title}」的本地服务配置不完整：有启动命令但没有探活地址（url），平台无法确认服务是否就绪，所以不会替你启动它。点「继续开发」补上 url 再重新发布。`;
+  }
+  const url = app.url?.trim();
+  return `「${app.title}」的本地服务配置不完整：只登记了地址${url ? ` ${url}` : ""}，没有启动命令，平台无从拉起它（面板的本地服务必须 command + url 成对，或两个都不填、由面板页自己连）。点「继续开发」补上 command 再重新发布。`;
+}
+
+/**
+ * 本地服务的一句话状态（发布回执、toast、继续开发文本共用，2026-11-16）。
+ *
+ * 刻意只陈述**配置**，不断言「已启动」（那是运行时事实）：用户需要知道的是
+ * 关窗后这个服务会不会被停——只有「平台托管」会被停。
+ *
+ * 空串 = 这个类型/配置不必多说一句（server 的托管说明在 runMode 文案里）。
+ */
+export function galleryServiceNote(app: Pick<GalleryApp, "kind" | "command" | "url">): string {
+  if (app.kind !== "panel") return "";
+  const ownership = galleryServiceOwnership(app);
+  if (ownership === "misconfigured") {
+    const missing = app.command?.trim() ? "有 command 缺 url" : "有 url 缺 command";
+    return `本地服务：配置不完整（${missing}）——平台不会托管它（面板的本地服务必须 command + url 成对，或两个都不填、由面板页自己连），面板里的请求可能全部失败。`;
+  }
+  if (ownership === "none") return "本地服务：未配置（面板直接打开，由面板页自己连数据源；平台不启动任何进程）。";
+  return "本地服务：已配置（command + url）——运行时探活：地址已可达就复用外部服务（平台不接管也不停它），否则由平台在后台启动，关窗时只停平台实际启动的那个进程。";
+}
+
+/** 发布解析结果（纯函数产出；调用方只负责 fs 校验、封面与落盘）。 */
+export interface GalleryPublishResolution {
+  /** 待写入的条目（更新时已带既有 id / createdAt；新建时 id 为空串，由 upsertGalleryApp 生成）。 */
+  app: GalleryApp;
+  /** true = 新增一张卡片；false = 更新既有条目。 */
+  created: boolean;
+  /** 命中的既有条目（更新时；调用方据此保留 thumb 等读侧字段）。 */
+  target?: GalleryApp;
+  /** 最终入口（工作区相对入口 + 绝对路径）。 */
+  entry: GalleryEntryResolution;
+  /** panel / server 的本地服务归属。 */
+  service: GalleryServiceOwnership;
+}
+
+/**
+ * 发布 / 更新的统一解析（2026-11-16）：把「草稿 → 条目 + 更新目标」这段判定收在
+ * shared，utility 只补 fs 校验与封面。
+ *
+ * 身份优先级：`draft.appId` > 「工作区 + 类型 + 最终入口」（旧清单兼容）。
+ * - appId 命中但工作区 / 类型不同 → 直接报错（绝不跨工作区、跨形态覆盖别人的作品）；
+ * - appId 未命中（作品已被删）→ 报错而不是静默新建（否则用户以为改的是老作品）；
+ * - 最终入口已被另一个作品占用 → 报错（否则两张卡会争同一个 id / 同一个 panel origin）；
+ * - panel 的 command / url 是**权威字段**：本次没给等于「不要平台托管的本地服务」
+ *   （否则成对语义无法表达「把服务去掉」）；其余可选字段（说明 / tags / 面板尺寸 /
+ *   server 的 command）本次没给就沿用旧值。
+ */
+export function resolveGalleryPublish(input: {
+  apps: readonly GalleryApp[];
+  draft: GalleryDraft;
+  /** 权威工作区（调用会话的工作区绝对路径）：draft.workspace 只能与它一致。 */
+  workspace: string;
+}): GalleryPublishResolution {
+  const root = input.workspace.trim();
+  if (!root) throw new Error("请先打开一个工作区，再发布作品");
+  // 草稿里的 workspace 只是回显：它**不能**改变校验根（否则填一个别的目录就能绕开越界检查）。
+  const declared = input.draft.workspace?.trim() ?? "";
+  if (declared && galleryWorkspaceKey(declared) !== galleryWorkspaceKey(root)) {
+    throw new Error(`作品必须发布到当前会话的工作区（${root}）：草稿里写的是 ${declared}`);
+  }
+  const title = input.draft.title.trim();
+  if (!title) throw new Error("title 不能为空（作品墙上展示的名字）");
+  const kind = input.draft.kind;
+  if (!KINDS.includes(kind)) throw new Error(`kind 必须是 file / server / panel（收到 ${JSON.stringify(kind)}）`);
+  const command = kind === "panel" || kind === "server" ? input.draft.command?.trim() || undefined : undefined;
+  const url = kind === "panel" || kind === "server" ? input.draft.url?.trim() || undefined : undefined;
+  if (kind === "panel") {
+    // 发布阶段二次 fail-closed：实体对话框 / 旧客户端都能绕过工具层校验，这里再拒一次。
+    const pairError = galleryPanelServicePairError(command, url);
+    if (pairError) throw new Error(pairError);
+  }
+  const entry = resolveGalleryEntry({ root, path: input.draft.path, entry: input.draft.entry, kind });
+  const key = galleryKey({ workspace: root, kind, entry: entry.entry });
+  const appId = input.draft.appId?.trim() ?? "";
+  let target: GalleryApp | undefined;
+  if (appId) {
+    target = input.apps.find((item) => item.id === appId);
+    if (!target) throw new Error(`找不到作品 ${appId}（可能已被删除）：要新建作品就去掉 appId，或先确认作品墙里的作品 ID`);
+    if (galleryWorkspaceKey(target.workspace) !== galleryWorkspaceKey(root)) {
+      throw new Error(`作品 ${appId} 属于另一个工作区（${target.workspace}），不能在这里更新`);
+    }
+    if (target.kind !== kind) {
+      throw new Error(`作品 ${appId} 的类型是 ${GALLERY_KIND_LABELS[target.kind]}（${target.kind}），不能改成 ${GALLERY_KIND_LABELS[kind]}（${kind}）：换形态请新建一个作品`);
+    }
+    const clash = input.apps.find((item) => item.id !== target!.id && galleryKey(item) === key);
+    if (clash) {
+      throw new Error(`入口 ${entry.entry} 已经被另一个作品「${clash.title}」（${clash.id}）占用：同「工作区+类型+入口」只能有一个作品，请确认要更新哪一个`);
+    }
+  } else {
+    target = input.apps.find((item) => galleryKey(item) === key);
+  }
+  const now = Date.now();
+  const app: GalleryApp = {
+    id: target?.id ?? "",
+    title,
+    kind,
+    workspace: root,
+    entry: entry.entry,
+    createdAt: target?.createdAt ?? now,
+    updatedAt: now
+  };
+  const description = input.draft.description?.trim();
+  if (description) app.description = description;
+  if (input.draft.tags && input.draft.tags.length > 0) app.tags = input.draft.tags;
+  if (kind === "panel") {
+    if (command && url) {
+      app.command = command;
+      app.url = url;
+    } else {
+      // 成对语义要求「省略 = 不要平台托管的本地服务」。upsertGalleryApp 是
+      // `{ ...existing, ...draft }` 合并，缺键会沿用旧命令——所以这里显式置空。
+      app.command = undefined;
+      app.url = undefined;
+    }
+    // 面板尺寸/形态是显示偏好：本次没给就沿用旧值（丢了会跳回缺省尺寸）。
+    const panel = normalizeGalleryPanelOptions(input.draft.panel) ?? target?.panel;
+    if (panel) app.panel = panel;
+  }
+  if (kind === "server") {
+    // server 不强制成对：只给命令（无地址）也是合法登记；省略则沿用旧值。
+    const nextCommand = command ?? target?.command;
+    const nextUrl = url ?? target?.url;
+    if (nextCommand) app.command = nextCommand;
+    if (nextUrl) app.url = nextUrl;
+    const runMode = input.draft.runMode === "background" ? "background" : input.draft.runMode === "page" ? "page" : target?.runMode;
+    if (runMode === "background") app.runMode = "background";
+  }
+  return { app, created: !target, ...(target ? { target } : {}), entry, service: galleryServiceOwnership(app) };
+}
+
+/**
  * 服务型作品等「地址可访问」的预算（毫秒，渲染端传给主进程）。
  *
  * 30 秒的取舍（2026-09-23 与用户对齐）：本机 dev server 通常 1–5 秒起来，
@@ -425,20 +763,20 @@ export function galleryRunTarget(app: Pick<GalleryApp, "kind" | "workspace" | "e
 export const GALLERY_SERVICE_WAIT_MS = 30_000;
 
 /**
- * 启动命令**正常结束**（退出码 0）后，还给服务的宽限窗口（毫秒）。
+ * 启动命令**在服务就绪前就结束**后，还给端口的宽限窗口（毫秒）。
  *
- * 为什么需要这一档（2026-10-04 真机事故，用户的 Python 桌宠）：`pythonw xxx.pyw`、
- * `start xxx`、`cmd /c start ...` 这类命令是**启动器**——GUI 子系统程序不占控制台，
- * shell 不等它就返回 0，而真正的服务还要一两秒才开始监听。旧实现对「命令已退出 +
- * 端口未通」一律判失败，于是一次正常的启动被报成「启动命令已退出（代码 0），
- * 服务没有起来」。退出码 0 是「命令成功结束」，只有非 0 才是「命令报错退出」。
+ * 2026-11-16 起语义变了（旧行为曾是「启动器也算正常成功路径」）：平台只托管
+ * **前台、非交互、长期运行**的服务命令——命令自己结束就意味着平台再也没法回收
+ * 那个进程（`pythonw` / `start` / `cmd /c start` 这类脱离进程树的启动器都属于
+ * 这一类），所以「就绪前退出」一律按启动失败处理。宽限窗口只用来识别那种
+ * 「命令刚结束、端口随后就通」的写法，**不再**把它当成可回收的成功服务。
  *
  * 上限不能大：命令已结束还等满 30 秒会让真写错的命令拖很久；10 秒够本机服务
- * 把端口监听起来，超过就如实报「命令已结束、服务未就绪，稍后再点一次运行」。
+ * 把端口监听起来。
  */
 export const GALLERY_SERVICE_LAUNCHER_GRACE_MS = 10_000;
 
-/** 失败提示里带的输出尾部长度（字符）：完整输出在终端标签里，提示只给个线头。 */
+/** 失败提示里带的输出尾部长度（字符）：完整尾部在作品墙的服务看板里。 */
 export const GALLERY_SERVICE_TAIL_CHARS = 200;
 
 /**
@@ -466,21 +804,26 @@ export type GalleryRunPlan =
   | { action: "start-service"; directory: string; command: string; url?: string; openPage: boolean }
   /** 纯后台服务且此刻已可达（可能是用户手工起的、也可能是上一次留下的）：没有页面可开。 */
   | { action: "service-up"; url?: string }
-  /** 服务型但既连不上、又没登记启动命令：只能如实说，不能装作跑起来了。 */
-  | { action: "manual" };
+  /**
+   * 服务型但平台难以为力：只能如实说，不能装作跑起来了。
+   * `message` 是具体原因（如面板本地服务字段不成对）；渲染端有它就优先显示。
+   */
+  | { action: "manual"; message?: string };
 
 export function galleryRunPlan(
-  app: Pick<GalleryApp, "kind" | "workspace" | "entry" | "url" | "command" | "panel" | "runMode">,
+  app: Pick<GalleryApp, "title" | "kind" | "workspace" | "entry" | "url" | "command" | "panel" | "runMode">,
   serviceReachable: boolean
 ): GalleryRunPlan {
   const target = galleryRunTarget(app);
-  // 面板：可以带一个**可选的本地服务**（command + url）。三态刻意分开——
-  // 没声明服务、服务已可达（用户手工起的或上次运行留下的）都直接开窗，
-  // 绝不重启用户正在用的服务；只有「声明了服务且此刻不可达」才先起服务再开窗。
-  // 缺 url 时无法探活，宁可直开窗让面板页自己报「连不上」，也不盲起服务。
+  // 面板：可以带一个**可选的本地服务**（command + url）。四种情况刻意分开（2026-11-16）：
+  // 没声明服务 / 服务已可达（用户手工起的或上次运行留下的，视为外部服务）都直接开窗，
+  // 绝不重启用户正在用的服务；声明了服务且不可达才先起服务再开窗；字段不成对则明确
+  // 报错——旧实现会直接开窗，用户只会看到一个永远取不到数据的页面。
   if (target.kind === "panel") {
     const options = normalizeGalleryPanelOptions(app.panel) ?? {};
-    if (target.command && target.url && !serviceReachable) {
+    const ownership = galleryServiceOwnership({ kind: "panel", command: target.command, url: target.url });
+    if (ownership === "misconfigured") return { action: "manual", message: galleryPanelServiceRunError(app) };
+    if (ownership === "platform" && !serviceReachable && target.command && target.url) {
       return {
         action: "start-panel-service",
         absolutePath: target.absolutePath,
@@ -603,6 +946,8 @@ export type GalleryServiceStartResult =
     reused: boolean;
     /** true = 地址已可达但不是平台起的，没碰它。 */
     external: boolean;
+    /** 面板本轮运行代际；开窗时验证，防止关窗后旧请求重新打开。 */
+    panelRunToken?: number;
   }
   | { ok: false; message: string; failure?: GalleryServiceFailure; record?: GalleryServiceRecord };
 
@@ -630,12 +975,12 @@ export function compactServiceTail(text: string | undefined, limit = GALLERY_SER
 /**
  * 服务启动失败的用户提示（唯一来源）。
  *
- * 三种原因分开写：
+ * 四种原因分开写：
  * - exited：命令自己退出了（写错了/依赖没装/端口被占）——带上退出码与输出尾部，
  *   这是最需要「原因」的一类；
- * - ended：命令**正常结束（退出码 0）**但服务没在宽限窗口内就绪——典型是
- *   「命令只是把程序拉起来」（pythonw / start 这类启动器形态），要点明「进程结束
- *   是正常的」，否则用户会以为启动失败；
+ * - ended：命令在服务就绪前就结束了（典型是 `pythonw` / `start` / `cmd /c start`
+ *   这类把服务脱离进程树的启动器）。2026-11-16 起这是**启动失败**：平台只托管
+ *   前台长期运行的服务命令，命令一结束就无法建立可回收的服务所有权；
  * - timeout：进程还在跑但地址在预算内没就绪，明确给出「再点一次运行」的出路；
  * - invalid-url：登记的服务地址连解析都不行（多是自己手写的地址写错了）。
  *
@@ -655,7 +1000,10 @@ export function galleryServiceFailureMessage(
   if (failure.reason === "ended") {
     const seconds = Math.max(1, Math.round(GALLERY_SERVICE_LAUNCHER_GRACE_MS / 1000));
     const where = app.url ? `（${app.url} 连不上）` : "";
-    return `「${app.title}」的启动命令已正常结束（代码 0）${where}，但服务在 ${seconds} 秒内没有就绪：如果这条命令只是把程序拉起来（pythonw / start 这类会立刻返回的写法），进程结束是正常的，稍等一下再点一次「运行」。`;
+    // 2026-11-16：退出码 0 **不再是**可回收的成功路径。平台只托管前台、非交互、
+    // 长期运行的服务命令——命令自己结束时，平台再也拿不到那个进程，关窗回收与
+    // 应用退出回收都会漏（pythonw / start / cmd /c start 这类启动器就是典型）。
+    return `「${app.title}」的启动命令在服务就绪前就结束了${where}，服务在 ${seconds} 秒内没有起来。平台只托管前台、非交互、长期运行的命令；命令一结束就无法建立可回收的服务所有权（pythonw / start / cmd /c start 这类把服务脱离进程树的启动器不算）。改成前台运行的命令（如 node server.mjs）后重新发布。`;
   }
   if (failure.reason === "invalid-url") {
     return `「${app.title}」登记的服务地址无法解析${app.url ? `（${app.url}）` : ""}：点「继续开发」让 AI 修正后再运行。`;
@@ -824,13 +1172,19 @@ export type GalleryDataClearResult = { ok: true } | { ok: false; message: string
 /**
  * 「继续开发」注入文本块：照 lib/browser-pick.ts 的 composePickMessage 形状
  * （首行标签 + 逐字段行），末尾给出下一步，便于模型直接接着干。
+ *
+ * 2026-11-16 整改：光把作品信息塞进输入框不算闭环。稳定身份（作品 ID）+ 固定
+ * origin 说明 + 「改完用同一 appId 重新发布」的操作协议必须写进来，否则模型
+ * 改完就停手，用户运行的还是旧页面（panel 还会因换 id 而丢数据）。
  */
 export function composeGalleryDevMessage(app: GalleryApp): string {
+  const entryLabel = app.entry === "." ? "（工作区根目录）" : app.entry;
   const lines = [
     "【作品】",
+    `作品 ID：${app.id}`,
     `标题：${app.title}`,
     `类型：${GALLERY_KIND_LABELS[app.kind]}（${app.kind}）`,
-    `入口：${app.entry === "." ? "（工作区根目录）" : app.entry}`,
+    `入口：${entryLabel}`,
     `工作区：${app.workspace}`
   ];
   if (app.description) lines.push(`说明：${app.description}`);
@@ -852,8 +1206,32 @@ export function composeGalleryDevMessage(app: GalleryApp): string {
           ? `贴边抽屉（${app.panel?.edge ?? "right"} 缘窄条，点击窄条 POST toggle 展开/收起）`
           : "系统边框窗口";
     lines.push(`窗口：${size.width}×${size.height}，${shape}${panelEffectiveAlwaysOnTop(app.panel) ? "，置顶" : ""}`);
+    // 固定 origin 是 panel 的数据契约（2026-10-10）：继续开发的人要知道「换 id 等于换数据」。
+    lines.push(`数据 origin：pidesktop-file://w-${app.id}（固定：由作品 ID 决定，localStorage / IndexedDB 按作品隔离且跨启动保留；更换作品 ID 会使原数据不可见）`);
+    // 服务归属说清楚（平台托管 / 外部复用 / 没有本地服务）——本次整改的核心之一。
+    lines.push(galleryServiceNote(app));
     lines.push(panelDevHint());
   }
-  lines.push("", "我要在这个作品上继续开发，请先读入口相关的代码再动手。");
+  // 示例使用合法 JSON，模型可以直接复用；引号、路径和命令由 JSON.stringify 转义。
+  const republishExample: Record<string, string> = { appId: app.id, title: app.title, kind: app.kind, path: app.entry };
+  if (app.kind === "panel" && galleryServiceOwnership(app) === "platform") {
+    republishExample.command = app.command!;
+    republishExample.url = app.url!;
+  }
+  if (app.kind === "panel" && galleryServiceOwnership(app) === "none") {
+    lines.push("这个面板不启用平台托管的本地服务，重新发布时 command / url 都不要带。");
+  } else if (app.kind === "panel" && galleryServiceOwnership(app) === "misconfigured") {
+    lines.push("现有面板服务配置不完整；重新发布前补齐 command 和 url，或将两项都移除。");
+  }
+  lines.push(
+    "",
+    "我要在这个作品上继续开发，请先读入口相关的代码再动手。",
+    "改完请重新发布，确保作品墙登记信息、封面和运行配置与最终成果一致。",
+    `1. 先读代码：入口（${entryLabel}）与它依赖的文件（含启动命令指向的脚本）读清楚，不要凭推测改。`,
+    "2. 改完自己验证：真的跑一遍（页面 / 接口 / console），确认结果对了再往下走。",
+    `3. 保持同一作品身份：除非用户明确要新做一个作品，不要改 kind（${app.kind}）与最终入口（${app.entry}）${app.kind === "panel" ? "；面板数据 origin 由作品 ID 决定，换 id 会使旧数据不可见" : ""}。`,
+    `4. 完成后用同一 appId 重新发布：gallery_publish(${JSON.stringify(republishExample)})。`,
+    "5. 回执必须显示这是「更新」（作品 ID 与入口都和上面一致）；确认之后才能告诉用户改完了。"
+  );
   return lines.join("\n");
 }

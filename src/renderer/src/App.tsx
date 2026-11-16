@@ -79,6 +79,7 @@ import { detailTitle } from "./components/QuestionPanel";
 import { compactPath, type Artifact } from "./lib/content";
 import { composePickMessage } from "./lib/browser-pick";
 import { composeGalleryDevMessage, galleryRunPlan, galleryServiceLive, workspaceLabel, type GalleryApp, type GalleryDraft, type GalleryKind, type GalleryPanelOptions, type GalleryServiceRecord } from "../../shared/gallery";
+import { insertGalleryDevelopmentText, requestGallerySession } from "./lib/gallery-develop";
 import { GalleryMenu } from "./components/GalleryMenu";
 import { GalleryWall } from "./components/GalleryWall";
 import { GalleryDataDialog, GalleryPublishDialog, GalleryWallDialog } from "./components/GalleryDialogs";
@@ -854,13 +855,9 @@ export function App(): ReactNode {
    * 上点的，不说明一句就不知道话题已经被换掉了（且草稿已写好）。
    */
   const [galleryDevToast, setGalleryDevToast] = useState<string>();
-  /**
-   * 跨工作区「继续开发」的待注入文本：`session.new` 之后新会话要等一次 snapshot
-   * 往返才挂载，注入必须等它的 composer 注册完成（见下方 effect）。
-   * sessionId 在新会话出现的第一帧绑定，之后即使用户手动切走也不会写错输入框。
-   */
-  const pendingGalleryInjectRef = useRef<{ key: string; text: string; sessionId?: string; expiresAt: number } | undefined>(undefined);
-  const [galleryInjectTick, setGalleryInjectTick] = useState(0);
+  /** 每次继续开发拥有独立 id 与取消句柄；新操作取消旧等待，避免旧回执写进新话题。 */
+  const pendingGalleryInjectRef = useRef<{ id: string; controller: AbortController; replace?: string } | undefined>(undefined);
+  useEffect(() => () => pendingGalleryInjectRef.current?.controller.abort(), []);
   const lastGalleryNoticeAtRef = useRef(0);
   useEffect(() => {
     if (!galleryNotice || galleryNotice.at === lastGalleryNoticeAtRef.current) return;
@@ -927,6 +924,8 @@ export function App(): ReactNode {
   // 标签页打开走 openPreviewTarget（定义在本块之后，且需要稳定身份给 memo 用），
   // 所以用 ref 间接引用：runGalleryApp 只在事件回调里运行，那时 ref 必已就位。
   const openPreviewTargetRef = useRef<(target: PreviewTarget, id?: string) => void>(() => {});
+  // 连点运行不能跨越探活/开窗时序，避免重复打开或让旧关闭事件干扰新服务。
+  const galleryRunsRef = useRef(new Set<string>());
 
   /** 开浏览器标签并记一次运行（网页作品、服务型作品与看板的「打开页面」共用这条尾巴）。 */
   const openGalleryBrowserTab = useCallback(async (app: Pick<GalleryApp, "id" | "title">, url: string): Promise<void> => {
@@ -954,7 +953,7 @@ export function App(): ReactNode {
   const startGalleryService = useCallback(async (
     app: GalleryApp,
     plan: { directory: string; command: string; url?: string; ownerPanelId?: string }
-  ): Promise<{ ok: true; service?: GalleryServiceRecord } | { ok: false; message: string }> => {
+  ): Promise<{ ok: true; service?: GalleryServiceRecord; external: boolean; reused: boolean; panelRunToken?: number } | { ok: false; message: string }> => {
     const request = {
       appId: app.id,
       title: app.title,
@@ -965,33 +964,43 @@ export function App(): ReactNode {
     };
     const result = await window.piDesktop.galleryServiceStart(request);
     if (!result.ok) return { ok: false, message: result.message };
-    return { ok: true, ...(result.record ? { service: result.record } : {}) };
+    return { ok: true, external: result.external, reused: result.reused, ...(result.record ? { service: result.record } : {}), ...(result.panelRunToken !== undefined ? { panelRunToken: result.panelRunToken } : {}) };
   }, []);
 
   /** 开面板窗口（直开窗、先起服务再开窗两条路径共用）。返回窗口是否真的开出来了。 */
   const openGalleryPanel = useCallback(async (
     app: GalleryApp,
     absolutePath: string,
-    options: GalleryPanelOptions
+    options: GalleryPanelOptions,
+    runToken?: number
   ): Promise<boolean> => {
     // 面板作品不跑在内置浏览器里，而是让主进程开一个独立窗口（主界面关掉后仍在）。
     // 窗口打不开（入口不在工作区/不是网页/静态服务起不来）时主进程会给出具体原因，
     // 这里原样报给用户。平台为面板起的本地服务按 ownerPanelId 归属，窗口关闭时主进程
     // 自己会停掉它（不需要渲染端传会话 id）。
-    const result = await window.piDesktop.galleryOpenPanel({
-      id: app.id,
-      title: app.title,
-      workspace: app.workspace,
-      filePath: absolutePath,
-      panel: options
-    });
-    if (!result.ok) {
-      setMessageActionError(result.message ?? `打不开「${app.title}」的面板窗口`);
+    try {
+      const result = await window.piDesktop.galleryOpenPanel({
+        id: app.id,
+        title: app.title,
+        workspace: app.workspace,
+        filePath: absolutePath,
+        panel: options,
+        reload: true,
+        ...(runToken !== undefined ? { runToken } : {})
+      });
+      if (!result.ok) {
+        if (result.stale) return false;
+        setMessageActionError(result.message ?? `打不开「${app.title}」的面板窗口`);
+        return false;
+      }
+      // 与网页作品同一条尾巴：窗口真的开出来了才记一次运行。
+      void window.piDesktop.send({ type: "gallery.run", id: app.id }).catch(() => undefined);
+      return true;
+    } catch (error) {
+      // IPC 失败时无法判断旧窗口是否仍在；服务所有权由主进程统一收尾。
+      setMessageActionError(`打不开「${app.title}」的面板窗口：${error instanceof Error ? error.message : String(error)}`);
       return false;
     }
-    // 与网页作品同一条尾巴：窗口真的开出来了才记一次运行。
-    void window.piDesktop.send({ type: "gallery.run", id: app.id }).catch(() => undefined);
-    return true;
   }, []);
 
   // —— 作品墙「运行中的服务」看板的动作 ——
@@ -1005,7 +1014,9 @@ export function App(): ReactNode {
 
   const stopGalleryService = useCallback(async (service: GalleryServiceRecord): Promise<void> => {
     try {
-      await window.piDesktop.galleryServiceStop(service.id);
+      if (!(await window.piDesktop.galleryServiceStop(service.id))) {
+        setMessageActionError(`「${service.title}」的服务已不存在或无法停止，请刷新作品墙后重试。`);
+      }
     } catch (error) {
       setMessageActionError(`停止「${service.title}」失败：${error instanceof Error ? error.message : String(error)}`);
     }
@@ -1021,13 +1032,19 @@ export function App(): ReactNode {
   }, []);
 
   const runGalleryApp = useCallback(async (app: GalleryApp): Promise<void> => {
+    if (galleryRunsRef.current.has(app.id)) {
+      setGalleryToast(`「${app.title}」正在启动或打开，请稍候。`);
+      return;
+    }
+    galleryRunsRef.current.add(app.id);
     try {
-      // 先探一次服务地址：已经跑着就直接进页面/开窗，不重启用户（或上次运行）起的服务。
-      // 面板的 url 同样只是探活地址（不用于打开页面），所以两种类型同一条判据。
-      const reachable = app.url ? (await window.piDesktop.galleryAwaitService({ url: app.url })).ok : false;
+      // 带命令的服务一律交主进程协调复用与外部探活；渲染端抢先探活会绕过停止闸门。
+      const reachable = app.url && !app.command ? (await window.piDesktop.galleryAwaitService({ url: app.url })).ok : false;
       const plan = galleryRunPlan(app, reachable);
       if (plan.action === "open-panel") {
-        await openGalleryPanel(app, plan.absolutePath, plan.options);
+        if (await openGalleryPanel(app, plan.absolutePath, plan.options)) {
+          setGalleryToast(`「${app.title}」面板已打开或重新加载当前页面；没有配置平台托管的本地服务。`);
+        }
         return;
       }
       if (plan.action === "open-file") {
@@ -1048,19 +1065,23 @@ export function App(): ReactNode {
           setMessageActionError(started.message);
           return;
         }
-        if (!(await openGalleryPanel(app, plan.absolutePath, plan.options))) {
-          // 窗口没开出来，刚起的服务就没有主人了：立刻收掉，不留无人使用的进程。
-          if (started.service) void window.piDesktop.galleryServiceStop(started.service.id);
+        if (await openGalleryPanel(app, plan.absolutePath, plan.options, started.panelRunToken)) {
+          const ownership = started.external
+            ? "地址已可达，复用外部服务；平台不会在关窗时停止它。"
+            : "服务已由平台托管，关闭面板后会异步停止。";
+          setGalleryToast(`「${app.title}」面板已打开或重新加载当前页面。${ownership}`);
         }
         return;
       }
       if (plan.action === "open-browser") {
         await openGalleryBrowserTab(app, plan.url);
+        setGalleryToast(`「${app.title}」地址已可达，复用外部服务；平台不会停止它。`);
         return;
       }
       if (plan.action === "service-up") {
-        // 纯后台服务且地址已可达：没有页面可开，如实告诉用户它在跑、去哪管。
-        setGalleryToast(`「${app.title}」的服务已在运行${plan.url ? `（${plan.url}）` : ""}：它是纯后台服务，没有页面可打开；日志与停止在作品墙的「运行中的服务」里。`);
+        // 没有命令且地址已可达：这是外部服务，不出现在平台进程看板，也不会被平台停止。
+        void window.piDesktop.send({ type: "gallery.run", id: app.id }).catch(() => undefined);
+        setGalleryToast(`「${app.title}」的地址已可达${plan.url ? `（${plan.url}）` : ""}，复用外部服务；平台不会停止它。`);
         return;
       }
       if (plan.action === "start-service") {
@@ -1077,21 +1098,26 @@ export function App(): ReactNode {
         if (plan.openPage && app.url) {
           // 打开页面会顺手记一次运行（lastRunAt + 重排）。
           await openGalleryBrowserTab(app, app.url);
+          if (started.external) setGalleryToast(`「${app.title}」地址已可达，复用外部服务；平台不会停止它。`);
           return;
         }
-        // 没有页面可开（纯后台服务 / 没登记地址）：记一次运行并指明去哪里看它。
+        // 没有页面可开（纯后台服务 / 没登记地址）：区分平台托管与外部服务。
         void window.piDesktop.send({ type: "gallery.run", id: app.id }).catch(() => undefined);
-        setGalleryToast(`「${app.title}」已在后台运行：作品墙顶部的「运行中的服务」可以看日志、停止或重启。`);
+        setGalleryToast(started.external
+          ? `「${app.title}」地址已可达，复用外部服务；平台不会停止它。`
+          : `「${app.title}」的服务已由平台托管：可在作品墙「运行中的服务」查看日志、停止或重启。`);
         return;
       }
       if (plan.action === "manual") {
-        setMessageActionError(app.url
+        setMessageActionError(plan.message ?? (app.url
           ? `「${app.title}」的服务没在运行（${app.url} 连不上），作品里也没登记启动命令：点「继续开发」让 AI 补上，或自己起好服务再点运行。`
-          : "该作品是服务型，但还没登记启动命令或服务地址；先在作品上点「继续开发」让 AI 补全。");
+          : "该作品是服务型，但还没登记启动命令或服务地址；先在作品上点「继续开发」让 AI 补全。"));
         return;
       }
     } catch (error) {
       setMessageActionError(error instanceof Error ? error.message : "运行作品失败");
+    } finally {
+      galleryRunsRef.current.delete(app.id);
     }
   }, [openGalleryBrowserTab, startGalleryService, openGalleryPanel]);
 
@@ -1108,61 +1134,66 @@ export function App(): ReactNode {
     const text = composeGalleryDevMessage(app);
     const targetId = focusedPaneId ?? activeSessionId;
     const sameWorkspace = Boolean(activeWorkspace) && workspaceKey(activeWorkspace!) === workspaceKey(app.workspace);
-    if (sameWorkspace && targetId) {
-      composerBridge.current.get(targetId)?.insertText(text);
-      return;
-    }
+    const previous = pendingGalleryInjectRef.current;
+    previous?.controller.abort();
+    if (previous?.replace && pendingPaneReplaceRef.current === previous.replace) pendingPaneReplaceRef.current = undefined;
+    const id = crypto.randomUUID();
+    const controller = new AbortController();
+    pendingGalleryInjectRef.current = { id, controller };
     void (async () => {
+      let replace: string | undefined;
       try {
-        if (!(await window.piDesktop.workspaceDirectoryExists(app.workspace))) {
-          setMessageActionError(`「${app.title}」登记的工作区已失效：${app.workspace}\n目录不存在或已被移动。把它移回原位，或在该工作区重新登记这个作品。`);
-          return;
+        let sessionId = sameWorkspace ? targetId : undefined;
+        const needsNewSession = !sessionId;
+        if (needsNewSession) {
+          if (!(await window.piDesktop.workspaceDirectoryExists(app.workspace))) {
+            throw new Error(`登记的工作区已失效：${app.workspace}\n目录不存在或已被移动。把它移回原位，或在该工作区重新登记这个作品。`);
+          }
+          if (controller.signal.aborted) return;
+          if (splitTree) {
+            replace = focusedPaneId ?? activeSessionId;
+            if (replace) {
+              pendingPaneReplaceRef.current = replace;
+              if (pendingGalleryInjectRef.current?.id === id) pendingGalleryInjectRef.current.replace = replace;
+            }
+          }
+          sessionId = await requestGallerySession({
+            workspace: app.workspace,
+            agentId: pickTopicAgentId(settings, activeAgentId),
+            requestId: id,
+            signal: controller.signal,
+            timeoutMs: GALLERY_DEV_INJECT_TIMEOUT_MS,
+            send: (command) => window.piDesktop.send(command),
+            subscribe: (listener) => window.piDesktop.onRuntimeMessage(listener)
+          });
         }
-        // 待注入先挂上：新会话出现后 effect 把它写进那个会话的输入框（不写当前层）。
-        pendingGalleryInjectRef.current = { key: workspaceKey(app.workspace), text, expiresAt: Date.now() + GALLERY_DEV_INJECT_TIMEOUT_MS };
-        if (splitTree) {
-          // 分屏里 session.new 不会自己占格：指定替换焦点格（与 createNewSession 同口径）。
-          const replace = focusedPaneId ?? activeSessionId;
-          if (replace) pendingPaneReplaceRef.current = replace;
-        }
-        await window.piDesktop.send({ type: "session.new", workspace: app.workspace, agentId: pickTopicAgentId(settings, activeAgentId) });
-        setGalleryDevToast(`已在「${workspaceLabel(app.workspace)}」新建话题，接着改「${app.title}」`);
+        if (!sessionId || controller.signal.aborted) return;
+        await insertGalleryDevelopmentText({
+          sessionId,
+          text,
+          signal: controller.signal,
+          timeoutMs: GALLERY_DEV_INJECT_TIMEOUT_MS,
+          retryMs: GALLERY_DEV_INJECT_RETRY_MS,
+          getComposer: (target) => composerBridge.current.get(target),
+          // 新会话必须确实激活在作品工作区；用户切走时不能把文字写到别处。
+          ...(needsNewSession ? { isReady: (target: string) => {
+            const snapshot = useDesktopStore.getState().snapshot;
+            return snapshot.sessionId === target && Boolean(snapshot.workspace) && workspaceKey(snapshot.workspace!) === workspaceKey(app.workspace);
+          } } : {})
+        });
+        if (needsNewSession) setGalleryDevToast(`已在「${workspaceLabel(app.workspace)}」新建话题，接着改「${app.title}」`);
       } catch (error) {
-        pendingGalleryInjectRef.current = undefined;
+        if (controller.signal.aborted) return;
+        if (replace && pendingPaneReplaceRef.current === replace) pendingPaneReplaceRef.current = undefined;
         setMessageActionError(`「${app.title}」继续开发失败：${error instanceof Error ? error.message : String(error)}（作品工作区：${app.workspace}）`);
+      } finally {
+        if (pendingGalleryInjectRef.current?.id === id) {
+          if (replace && pendingPaneReplaceRef.current === replace) pendingPaneReplaceRef.current = undefined;
+          pendingGalleryInjectRef.current = undefined;
+        }
       }
     })();
   }, [focusedPaneId, activeSessionId, activeWorkspace, splitTree, settings, activeAgentId]);
-
-  /**
-   * 跨工作区「继续开发」的注入 effect：等新建出来的那个会话挂载完再写入。
-   *
-   * 两道守卫：sessionId 在新会话出现的第一帧绑定（用户随后手动切会话也不会写错
-   * 地方）；超时即丢（新会话迟迟不挂载或用户已走开时，不能把旧文本追进他正在
-   * 写的输入框）。composer 还没注册就下一帧重试——新会话的 Pane 挂载与 effect
-   * 之间隔着一次 snapshot 推送。
-   */
-  useEffect(() => {
-    const pending = pendingGalleryInjectRef.current;
-    if (!pending) return;
-    if (Date.now() > pending.expiresAt) {
-      pendingGalleryInjectRef.current = undefined;
-      return;
-    }
-    if (!activeWorkspace || workspaceKey(activeWorkspace) !== pending.key) return;
-    if (pending.sessionId === undefined) {
-      if (!activeSessionId) return;
-      pending.sessionId = activeSessionId;
-    }
-    if (activeSessionId !== pending.sessionId) return;
-    const api = composerBridge.current.get(pending.sessionId);
-    if (!api) {
-      const timer = window.setTimeout(() => setGalleryInjectTick((value) => value + 1), GALLERY_DEV_INJECT_RETRY_MS);
-      return () => window.clearTimeout(timer);
-    }
-    pendingGalleryInjectRef.current = undefined;
-    api.insertText(pending.text);
-  }, [activeWorkspace, activeSessionId, galleryInjectTick]);
 
   /** 「打开所在文件夹」：文件作品选中入口文件、目录作品进入目录（与文件树右键同语义）。 */
   const revealGalleryApp = useCallback(async (app: GalleryApp): Promise<void> => {

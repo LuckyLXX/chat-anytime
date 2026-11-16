@@ -62,4 +62,44 @@ describe("内置 skill gallery-publish", () => {
   it("gallery_publish 工具描述的指针与 skill 目录名一致", () => {
     expect(runtimeGallery).toContain("先读 skill gallery-publish");
   });
+
+  it("path / entry 的最终入口规则在场（2026-11-16 统一术语：清单只存最终入口）", () => {
+    // path 是边界，也是发布源；entry 只在 path 是目录时用，最终入口只有一条
+    expect(skill).toContain("最终入口 = `path/entry`");
+    expect(skill).toContain("必须是项目目录，`entry` 不适用");
+    expect(skill).toContain("旧写法（只传 `path`），行为不变");
+  });
+
+  it("面板本地服务必须成对，且 url 是探活地址而非页面地址", () => {
+    expect(skill).toContain("`command` 与 `url` 必须成对");
+    // 成对只代表「平台可以托管」：能真托管要看运行时探活（可能命中外部服务）
+    expect(skill).toContain("成对只意味着「平台**可以**托管」");
+    expect(skill).toContain("运行被阻止");
+    // 探活地址的语义不能糊成「面板地址」：它不会被当作页面打开
+    expect(skill).toContain("不是面板页面地址");
+    expect(skill).toContain("不会被当作页面打开");
+  });
+
+  it("服务所有权与关窗语义（异步停平台为该面板启动的、外部服务不受影响）", () => {
+    expect(skill).toContain("异步");
+    expect(skill).toContain("外部服务");
+    // 启动器型命令不再是成功路径（2026-11-16：平台靠进程树认定所有权）
+    expect(skill).toContain("pythonw");
+    expect(skill).toContain("不能建立可回收的服务所有权");
+  });
+
+  it("继续开发要闭合到回发布（同一 appId / 同一最终入口）", () => {
+    expect(skill).toContain("优先用注入文本里给出的作品 id（`appId`）");
+    expect(skill).toContain("重新发布");
+    // panel 的 origin 由作品 id 决定：换 id 才会让本地存储分裂
+    expect(skill).toContain("数据分裂");
+  });
+
+  it("安全边界与发布前自检清单在场（受信任本地代码 / 最终入口 / 服务所有权 / reload / 封面）", () => {
+    expect(skill).toContain("受信任的本地代码");
+    expect(skill).toContain("最终入口对");
+    expect(skill).toContain("服务所有权对");
+    expect(skill).toContain("页面是新代码");
+    expect(skill).toContain("封面不是占位");
+  });
 });

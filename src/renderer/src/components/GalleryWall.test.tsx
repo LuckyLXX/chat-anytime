@@ -93,6 +93,47 @@ describe("GalleryWall theme hooks", () => {
     expect(markup).toContain("lucide-app-window");
   });
 
+  it("卡片把入口说成「最终入口」（path/entry 两段只存最终那一条）", () => {
+    const markup = renderToStaticMarkup(<GalleryWall apps={[apps[2]!]} workspace="D:/ws" onRun={noop} onDevelop={noop} onPublish={noop} onRemove={noop} onReveal={noop} onData={noop} {...wallChrome} />);
+    expect(markup).toContain("最终入口（工作区相对）");
+  });
+
+  it("面板的「运行」说明带着 reload 语义（窗口已开着也会重新加载最新页面）", () => {
+    const markup = renderToStaticMarkup(<GalleryWall apps={[apps[2]!]} workspace="D:/ws" onRun={noop} onDevelop={noop} onPublish={noop} onRemove={noop} onReveal={noop} onData={noop} {...wallChrome} />);
+    expect(markup).toContain("窗口已开着会重新加载最新页面");
+    // 网页作品没有窗口可 reload，不应出现这句话
+    const fileMarkup = renderToStaticMarkup(<GalleryWall apps={[apps[0]!]} workspace="D:/ws" onRun={noop} onDevelop={noop} onPublish={noop} onRemove={noop} onReveal={noop} onData={noop} {...wallChrome} />);
+    expect(fileMarkup).not.toContain("窗口已开着会重新加载最新页面");
+  });
+
+  it("带本地服务的面板：成对配置只说「已配置」（运行时先探活，只有平台启动的服务关窗才停）", () => {
+    const paired: GalleryApp = { ...apps[2]!, id: "g4", command: "node bridge.mjs", url: "http://127.0.0.1:8791/api/health" };
+    const markup = renderToStaticMarkup(<GalleryWall apps={[paired]} workspace="D:/ws" onRun={noop} onDevelop={noop} onPublish={noop} onRemove={noop} onReveal={noop} onData={noop} {...wallChrome} />);
+    expect(markup).toContain("本地服务 · 已配置");
+    // 不能把「配了命令」说成「平台在托管」：探活可能命中外部服务
+    expect(markup).not.toContain("平台托管");
+    expect(markup).toContain("运行时会先探活");
+    expect(markup).toContain("平台不启动、不接管，关窗也不会停");
+    expect(markup).toContain("关闭面板时只停止平台实际启动的那个进程");
+  });
+
+  it("缺一项的旧记录标配置不完整（运行会被阻止，不写「地址可达就开窗」）", () => {
+    const noUrl: GalleryApp = { ...apps[2]!, id: "g5", command: "node bridge.mjs" };
+    const noUrlMarkup = renderToStaticMarkup(<GalleryWall apps={[noUrl]} workspace="D:/ws" onRun={noop} onDevelop={noop} onPublish={noop} onRemove={noop} onReveal={noop} onData={noop} {...wallChrome} />);
+    expect(noUrlMarkup).toContain("本地服务缺探活地址");
+    expect(noUrlMarkup).toContain("运行会被阻止");
+    // 与「运行」时弹出的原因同一句话（shared 的 galleryPanelServiceRunError）
+    expect(noUrlMarkup).toContain("本地服务配置不完整");
+    expect(noUrlMarkup).toContain("不会替你启动它");
+    expect(noUrlMarkup).not.toContain("已可达就复用");
+    // 只有 url 的旧面板同样是配置不完整（平台没法替它起服务）
+    const noCommand: GalleryApp = { ...apps[2]!, id: "g6", url: "http://127.0.0.1:8791/api/health" };
+    const noCommandMarkup = renderToStaticMarkup(<GalleryWall apps={[noCommand]} workspace="D:/ws" onRun={noop} onDevelop={noop} onPublish={noop} onRemove={noop} onReveal={noop} onData={noop} {...wallChrome} />);
+    expect(noCommandMarkup).toContain("本地服务缺启动命令");
+    expect(noCommandMarkup).toContain("运行会被阻止");
+    expect(noCommandMarkup).toContain("平台无从拉起它");
+  });
+
   it("嵌入弹窗时不自带「作品墙」标题（容器头部已有，避免同屏两个同名标题）", () => {
     const embedded = renderToStaticMarkup(<GalleryWall apps={apps} embedded onRun={noop} onDevelop={noop} onPublish={noop} onRemove={noop} onReveal={noop} onData={noop} {...wallChrome} />);
     expect(embedded).not.toContain("<h1>作品墙</h1>");

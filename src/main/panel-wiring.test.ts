@@ -52,7 +52,10 @@ describe("面板窗口的主进程接线", () => {
   it("面板页由协议路由在固定 origin 上服务（不再用随机端口静态服务）", () => {
     // 挂载先于加载：页面一开就会请求自己的资产与端点
     expect(panelWindow).toContain("this.deps.route.mount({ appId: request.id, workspace: request.workspace })");
-    expect(panelWindow).toContain("const url = panelWorkUrl(host, entryRelative);");
+    // 地址只由 mock host（= 作品 id）+ 入口相对路径拼出来（2026-11-16 起首次开窗与
+    // 已有窗口的 reload 共用同一个 builder，不会一边 reload 一边拼出别的 origin）
+    expect(panelWindow).toContain("url: panelWorkUrl(host, entryRelative)");
+    expect(panelWindow.match(/panelWorkUrl\(/gu) ?? []).toHaveLength(1);
     // 反向：面板不能再碰 loopback 静态服务（它是随机端口 origin 的根源）
     expect(panelWindow).not.toContain("BrowserStaticServer");
     expect(panelWindow).not.toContain("urlForFile");
@@ -116,10 +119,26 @@ describe("关闭到后台（关闭主窗口 ≠ 退出应用）", () => {
     expect(main).toContain("onOpen: () => showMainWindow(),");
   });
 
-  it("publish→persist 不在中途丢掉 panel（对话框/工具声明的窗口偏好必须落盘）", () => {
-    // 发布入口有两个（AI 工具与实体对话框）但都汇到 publishGalleryApp；它只往
-    // `app` 上拷自己认识的字段，漏一行就是「填了尺寸、存下来没有」的静默失效。
-    expect(runtime).toMatch(/if \(draft\.kind === "panel" && draft\.panel\) app\.panel = draft\.panel;/u);
+  it("publish 不丢掉 panel 的窗口偏好（走 resolveGalleryPublish 的真实行为，而不是源码行）", async () => {
+    // 发布入口有两个（AI 工具与实体对话框）但都汇到 publishGalleryApp → resolveGalleryPublish。
+    // 这里直接验行为：对话框/工具声明的尺寸、形态、置顶必须原样出现在要落盘的条目上。
+    const { resolveGalleryPublish } = await import("../shared/gallery.js");
+    const draft = {
+      title: "会话状态",
+      kind: "panel" as const,
+      path: "panels/status",
+      entry: "index.html",
+      panel: { width: 320, height: 400, mode: "drawer" as const, edge: "left" as const, alwaysOnTop: true },
+      command: "node bridge.mjs",
+      url: "http://127.0.0.1:8791/api/health"
+    };
+    const result = resolveGalleryPublish({ apps: [], draft, workspace: "D:/ws" });
+    expect(result.app.panel).toEqual({ width: 320, height: 400, mode: "drawer", edge: "left", alwaysOnTop: true });
+    // 服务字段也不能在中途丢（同一类静默失效）
+    expect(result.app.command).toBe("node bridge.mjs");
+    expect(result.app.url).toBe("http://127.0.0.1:8791/api/health");
+    // 接线：utility 的发布实现必须走这个共享解析（自己再拷一遍字段就是旧 bug 的温床）
+    expect(runtime).toContain("resolveGalleryPublish({ apps: galleryApps, draft, workspace: root })");
   });
 
   it("sessions.live 不转发给渲染端（那边零消费，只白付一次结构化克隆）", () => {

@@ -21,6 +21,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { BackgroundProcessRegistry, bashCommandsFromMessages, isBackgroundCommand } from "./background-processes.js";
 import { commandSessionId } from "./command-error.js";
+import { SessionNewClaims, sessionNewResolution } from "./session-new-claims.js";
 import { resolveHookSessionTitle } from "./hooks-session-title.js";
 import { alignQueueState, imageAttachmentsFrom, promoteQueueMessage, queuedMessageText, queueSnapshotMessages, removeQueueMessage, replayQueueArgs, type PromoteOutcome } from "./queue-images.js";
 import { normalizeMessages, userMessageText } from "./message-normalize.js";
@@ -80,7 +81,7 @@ import { isDelegationProgress } from "../shared/protocol.js";
 import { parseImSessionKey } from "../shared/im.js";
 import { THINKING_LEVELS, clampThinkingLevel, supportedThinkingLevels } from "../shared/thinking-levels.js";
 import { toolLabel } from "../shared/locale.js";
-import { PANEL_TODO_LIMIT, summarizeTodos } from "../shared/panel.js";
+import { PANEL_TODO_LIMIT, isPanelEntryFile, summarizeTodos } from "../shared/panel.js";
 import { workspaceRelativeAttachment } from "./attachments.js";
 import { downloadDirFor } from "./browser-downloads.js";
 import { saveBrowserScreenshot } from "./browser-screenshot.js";
@@ -95,24 +96,28 @@ import { PermissionBroker } from "./permission-broker.js";
 import { loadRecentWorkspaces, recordRecentWorkspace, removeRecentWorkspace, writeRecentWorkspaces } from "./recent-workspaces.js";
 import { applyRecentCompletions, loadRecentCompletions, recentCompletionsPath, recordRecentCompletion, saveRecentCompletions, type RecentCompletion } from "./recent-completions.js";
 import {
+  assertGalleryPathInside,
   galleryPathFor,
   galleryThumbsDirFor,
   loadGalleryRepairingIds,
   persistGallery,
-  pruneGalleryThumbs
+  pruneGalleryThumbs,
+  realPathInsideWorkspace
 } from "./gallery-store.js";
 import {
   galleryAbsolutePath,
   galleryCoverNote,
+  galleryPanelServicePairError,
   galleryPlaceholderCoverHtml,
   galleryRunTarget,
+  galleryServiceNote,
   gallerySnapshotTarget,
   GALLERY_COVER_EXTENSIONS,
   GALLERY_COVER_HEIGHT,
   GALLERY_COVER_WIDTH,
   normalizeGalleryApp,
-  normalizeGalleryEntry,
   removeGalleryApp,
+  resolveGalleryPublish,
   sortGalleryApps,
   upsertGalleryApp,
   type GalleryApp,
@@ -486,6 +491,8 @@ let memoryStore: MemoryStore | undefined;
 let memoryTopics: MemoryTopicSummary[] = [];
 let resourceOperationBusy = false;
 let sessionGeneration = 0;
+/** 带 requestId 的新话题可由后续操作取消，取消通知绕过串行命令队列。 */
+const sessionNewClaims = new SessionNewClaims();
 const customProviderId = "chatanytime-openai-compatible";
 const imageMimeTypes = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 let nativeSkills: SkillSummary[] = [];
@@ -2929,6 +2936,8 @@ async function generateGalleryCover(app: GalleryApp, cover: string | undefined, 
   if (explicit) {
     const absolute = isAbsolute(explicit) ? resolve(explicit) : resolve(root, explicit);
     if (!pathIsWithin(root, absolute)) return { failure: "封面图片必须位于作品工作区内" };
+    // 软链接 / 目录联接能把封面指向工作区外：真实路径再复核一次（同一口径）。
+    if ((await realPathInsideWorkspace(root, absolute)) === false) return { failure: "封面图片通过链接指向工作区外" };
     if (!coverExtensionAllowed(absolute)) return { failure: "封面图片格式不支持（png / jpg / webp / gif / svg）" };
     if (!(await coverFileAllowed(absolute))) return { failure: "封面图片不存在、为空或超过 8MB" };
     const shot = await snapshotCover({ ...gallerySnapshotRequest(app.workspace), imagePath: absolute }, "custom");
@@ -2985,48 +2994,53 @@ async function backfillGalleryCovers(): Promise<void> {
 }
 
 /**
- * 发布/更新一个作品。draft.path 是工作区相对路径或绝对路径；入口一律归一到
- * 工作区相对路径存清单（相对路径才能跨机器/跨盘符稳定重定位）。
+ * 发布/更新一个作品（唯一实现，工具与实体对话框共用）。
+ *
+ * 2026-11-16 契约：入口解析（path + entry）、appId 更新、面板本地服务成对规则、
+ * 工作区归属全部收在 shared 的 `resolveGalleryPublish`（纯函数、可单测）；这里只
+ * 补三件 IO 事实：最终入口真的存在且类型正确、封面截图、落盘与推送。
  *
  * 缩略图是增益不是必要条件：失败只回一句降级说明，发布本身照常成功
  * （同 design_export 的“截图失败不得让导出失败”）。
  */
-async function publishGalleryApp(draft: GalleryDraft, workspaceRoot: string | undefined): Promise<{ app: GalleryApp; coverNote: string; coverSource?: GalleryCoverSource }> {
-  const root = (draft.workspace ?? workspaceRoot ?? "").trim() || workspace;
+async function publishGalleryApp(draft: GalleryDraft, workspaceRoot: string | undefined): Promise<runtimeGallery.GalleryPublishOutcome> {
+  // 权威工作区 = 调用会话的工作区（命令带 sessionId，工具拿 recordWorkspace）。
+  // draft.workspace 只是回显：它**不能**改变校验根，否则填一个别的目录就能绕开越界检查
+  //（resolveGalleryPublish 会把它与权威工作区比对，不一致就拒）。
+  const root = (workspaceRoot ?? "").trim() || workspace;
   if (!root) throw new Error("请先打开一个工作区，再发布作品");
-  const absolute = isAbsolute(draft.path) ? resolve(draft.path) : resolve(root, draft.path);
-  // 入口必须落在工作区内：越界路径既不可运行（静态服务只服务工作区），
-  // 也会把清单变成指向外部目录的跳板。
-  const within = pathIsWithin(root, absolute);
-  if (!within) throw new Error("作品入口必须位于当前工作区内");
-  const entry = normalizeGalleryEntry(isAbsolute(draft.path) ? (relativePath(root, absolute) || ".") : draft.path);
+  const resolution = resolveGalleryPublish({ apps: galleryApps, draft, workspace: root });
+  const entryPath = resolution.entry.absolutePath;
 
-  const app: GalleryApp = {
-    id: "",
-    title: draft.title,
-    kind: draft.kind,
-    workspace: resolve(root),
-    entry,
-    createdAt: Date.now(),
-    updatedAt: Date.now()
-  };
-  if (draft.description) app.description = draft.description;
-  // 服务字段只跟「服务型」作品走：server（服务 + 页面地址）与 panel（可选本地服务 +
-  // 探活地址）。这里漏一行就会静默丢掉工具声明的 command/url（2026-09-26 同类教训：
-  // 面板尺寸就是在这一层丢过）。
-  if ((draft.kind === "server" || draft.kind === "panel") && draft.command) app.command = draft.command;
-  if ((draft.kind === "server" || draft.kind === "panel") && draft.url) app.url = draft.url;
-  // 运行方式只属于服务型作品：page（缺省，就绪后打开页面）/ background（纯后台服务）。
-  // 漏了这一行，工具/对话框里声明的 runMode 会被静默丢掉，纯后台的反代作品每次
-  // 「运行」都会多弹一个没人看的页面（panel 尺寸就是在同一层丢过的老教训）。
-  if (draft.kind === "server" && draft.runMode === "background") app.runMode = "background";
-  // 面板窗口偏好必须在这里落地：`upsertGalleryApp` 只会原样保留 `app` 上已有的字段，
-  // 漏了这一行则「对话框里填了尺寸/置顶、工具也声明了」全都会静默丢掉，发布出去
-  // 的面板永远以缺省 420×560、不置顶开窗（2026-09-26 评审发现）。
-  if (draft.kind === "panel" && draft.panel) app.panel = draft.panel;
-  if (draft.tags && draft.tags.length > 0) app.tags = draft.tags;
+  // ——— 发布前校验（全部在 upsert / 写盘之前）：任何一条不过都不产生条目变化 ———
+  // 1) 词法 + 真实路径越界（软链接 / 目录联接；`link/../x` 这种也要能拦下来）。
+  //    路径校验拿**用户原样写的 path**（已折叠的最终入口会丢掉 `..` 的信息）。
+  await assertGalleryPathInside(root, draft.path, "作品路径");
+  if (draft.entry) await assertGalleryPathInside(root, `${draft.path}/${draft.entry}`, "最终入口");
+  await assertGalleryPathInside(root, entryPath, "最终入口");
+  // 2) 显式封面：越界直接拒发布（封面缺不漏不该阻断发布，但**越界**是另一回事）。
+  if (draft.cover?.trim()) await assertGalleryPathInside(root, draft.cover, "封面图片");
+  // 3) 最终入口必须真的存在且类型正确：面板指向目录、服务指向文件都是配置错误，
+  //    发布时就报错（否则用户点「运行」才看到一个打不开的窗口/404）。
+  const entryStat = await stat(entryPath).catch(() => undefined);
+  if (!entryStat) throw new Error(`入口不存在：${resolution.entry.entry}（工作区 ${root}）：先确认文件真的写出来了再发布`);
+  if (draft.kind === "server") {
+    if (!entryStat.isDirectory()) throw new Error(`kind=server 的 path 必须是项目目录：${resolution.entry.entry} 是个文件`);
+  } else if (!entryStat.isFile()) {
+    throw new Error(`kind=${draft.kind} 的最终入口必须是文件（${resolution.entry.entry} 是个目录）：要发布目录里的页面就再传 entry`);
+  }
+  // 4) 面板只能是网页（.html/.htm/.svg，口径与 panel-window 一致）：入口不是网页时
+  //    发布就拒，而不是等用户点「运行」才看到开窗失败。file 保持既有宽容度（图片等）。
+  if (draft.kind === "panel" && !isPanelEntryFile(resolution.entry.entry)) {
+    throw new Error(`面板作品的入口必须是网页文件（.html / .htm / .svg）：${resolution.entry.entry} 不是`);
+  }
 
-  const upserted = upsertGalleryApp(galleryApps, app);
+  // 本地服务：回执只陈述**配置**（平台托管 / 未配 / 不成对），不断言已启动。
+  const serviceNote = draft.kind === "panel"
+    ? galleryServiceNote({ kind: "panel", command: resolution.app.command, url: resolution.app.url })
+    : "";
+
+  const upserted = upsertGalleryApp(galleryApps, resolution.app);
   galleryApps = upserted.list;
 
   // 封面：显式 cover → 入口图/截图 → 占位（失败不阻断发布，沿用旧封面）。
@@ -3044,7 +3058,7 @@ async function publishGalleryApp(draft: GalleryDraft, workspaceRoot: string | un
     : published.thumb
       ? `封面未更新（沿用上一张）：${cover.failure ?? "未知原因"}`
       : galleryCoverNote(undefined, cover.failure);
-  return { app: published, coverNote, coverSource: cover.source ?? published.coverSource };
+  return { app: published, coverNote, coverSource: cover.source ?? published.coverSource, created: resolution.created, serviceNote };
 }
 
 /**
@@ -4610,8 +4624,8 @@ function isUnstartedRecord(record: SessionRuntimeRecord): boolean {
  * - otherwise (explicit sessionManager, or agent.save's config-apply rebuild)
  *   the record is rebuilt over the same history.
  */
-async function createSession(sessionManager?: SessionManager, options: { reactivate?: boolean; skipActivate?: boolean; modelOverride?: { provider: string; id: string }; accessModeOverride?: AccessMode; unattended?: boolean; noGenerationGuard?: boolean; agentOverride?: AgentProfile; workspaceOverride?: string; inheritDesignMode?: boolean; inheritComputerMode?: boolean; inheritTeamMode?: boolean; sessionOrigin?: SessionOrigin; im?: { approvalTimeoutMs?: number } } = {}): Promise<void> {
-  if (!modelRuntime) return;
+async function createSession(sessionManager?: SessionManager, options: { reactivate?: boolean; skipActivate?: boolean; modelOverride?: { provider: string; id: string }; accessModeOverride?: AccessMode; unattended?: boolean; noGenerationGuard?: boolean; agentOverride?: AgentProfile; workspaceOverride?: string; inheritDesignMode?: boolean; inheritComputerMode?: boolean; inheritTeamMode?: boolean; sessionOrigin?: SessionOrigin; im?: { approvalTimeoutMs?: number }; isCancelled?: () => boolean } = {}): Promise<void> {
+  if (!modelRuntime || options.isCancelled?.()) return;
   // noGenerationGuard（后台自动化会话）：不参与全局代际竞争，避免与用户
   // 的新建/切会话管线互相作废（reviewer P1-2）；它捕获自己的 record 上下文。
   const generation = options.noGenerationGuard ? sessionGeneration : ++sessionGeneration;
@@ -5162,7 +5176,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     resourceLoader,
     customTools: recordCustomTools
   });
-  if (!options.noGenerationGuard && generation !== sessionGeneration) {
+  if ((!options.noGenerationGuard && generation !== sessionGeneration) || options.isCancelled?.()) {
     result.session.dispose();
     if (sessionsPromise) await sessionsPromise;
     return;
@@ -5276,7 +5290,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   // Re-check after the awaits: a session switch that started mid-creation must
   // win, so a superseded pipeline drops its freshly built session instead of
   // stealing the active slot back.
-  if (!options.noGenerationGuard && generation !== sessionGeneration) {
+  if ((!options.noGenerationGuard && generation !== sessionGeneration) || options.isCancelled?.()) {
     result.session.dispose();
     if (sessionsPromise) await sessionsPromise;
     return;
@@ -6232,6 +6246,8 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       break;
     }
     case "session.new": {
+      const claim = command.requestId ? sessionNewClaims.get(command.requestId) : undefined;
+      if (claim?.cancelled) throw new Error("新话题创建已取消");
       const targetWorkspace = command.workspace ? resolve(command.workspace) : workspace;
       if (!targetWorkspace) throw new Error("请先打开工作区，再新建话题");
       let targetInfo;
@@ -6245,19 +6261,36 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         ? settings?.agents.find((agent) => agent.id === command.agentId && !agent.archived)
         : (currentAgent?.archived ? activeAgent() : currentAgent);
       if (!targetAgent) throw new Error("目标助手不存在或已归档");
+      const previousWorkspace = workspace;
+      const previousActive = activeRuntime;
       workspace = targetWorkspace;
       touchRecentWorkspace(targetWorkspace);
       // Always a fresh session id: the previously active session is parked and
       // keeps running, so a busy turn never blocks starting a new topic.
       // 设计模式下新建话题继承设计模式：用户在连续做设计，新话题不该丢掉画布
       // 与 design_* 工具（继承结果同步落盘，重启后恢复一致）。
-      await createSession(SessionManager.create(targetWorkspace, agentWorkspaceSessionDir(getAgentDir(), targetAgent.id, targetWorkspace)), {
+      const manager = SessionManager.create(targetWorkspace, agentWorkspaceSessionDir(getAgentDir(), targetAgent.id, targetWorkspace));
+      const newSessionId = manager.getSessionId();
+      await createSession(manager, {
         agentOverride: targetAgent,
         workspaceOverride: targetWorkspace,
         inheritDesignMode: activeRuntime?.designMode.enabled === true,
         inheritComputerMode: activeRuntime?.computerMode.enabled === true,
-        inheritTeamMode: activeRuntime?.teamMode.enabled === true
+        inheritTeamMode: activeRuntime?.teamMode.enabled === true,
+        ...(claim ? { isCancelled: () => claim.cancelled } : {})
       });
+      const resolution = sessionNewResolution(liveSessions.has(newSessionId) && activeRuntime?.session.sessionId === newSessionId, claim?.cancelled === true);
+      if (resolution === "cancelled") {
+        if (activeRuntime === previousActive && workspace === targetWorkspace) workspace = previousWorkspace;
+        throw new Error("新话题创建已取消");
+      }
+      if (command.requestId) {
+        // 创建已完成后的取消不回滚现有话题；只有实际激活成功才返回成功回执。
+        if (resolution !== "created") {
+          throw new Error("新话题未能创建或已被其他操作取代");
+        }
+        post({ type: "session.new-result", requestId: command.requestId, ok: true, sessionId: newSessionId });
+      }
       break;
     }
     case "session.open": {
@@ -7994,10 +8027,14 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       // 实体按钮路径：人操作，不过权限门；目标 workspace 取命令携带的会话，
       // 缺省回落到焦点会话（跨工作区分屏时不能在激活格的项目里发布）。
       const record = command.sessionId ? resolveTargetRecord(command.sessionId) : (liveSessions.get(activeRuntime?.session.sessionId ?? "") ?? activeRuntime);
-      const { app, coverNote, coverSource } = await publishGalleryApp(command.draft, record?.workspace ?? workspace);
+      const { app, coverNote, coverSource, created, serviceNote } = await publishGalleryApp(command.draft, record?.workspace ?? workspace);
+      // 头部要分「新建」与「更新」（用户靠它判断自己改到的是不是原作品）；
+      // 面板还要说清本地服务归谁托管（平台托管 / 外部复用 / 未配）。
+      const headline = runtimeGallery.publishHeadline(app, created);
+      const extra = [serviceNote, coverNote].filter((line) => Boolean(line)).join("；");
       // 封面没拿到真实画面（占位/失败）时如实告知用户怎么更新；正常封面不必扰。
-      if (!coverSource || coverSource === "generated") post({ type: "gallery.notice", kind: "warn", message: `已发布「${app.title}」：${coverNote}` });
-      else post({ type: "gallery.notice", kind: "ok", message: `已发布作品「${app.title}」` });
+      if (!coverSource || coverSource === "generated") post({ type: "gallery.notice", kind: "warn", message: extra ? `${headline}：${extra}` : headline });
+      else post({ type: "gallery.notice", kind: "ok", message: extra ? `${headline}：${extra}` : headline });
       break;
     }
     case "gallery.remove": {
@@ -8013,6 +8050,12 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       // patch 走同一套读侧归一化：非法字段被丢掉，绝不会把坏数据写进文件。
       const merged = normalizeGalleryApp({ ...app, ...command.patch, id: app.id, kind: app.kind, workspace: app.workspace, createdAt: app.createdAt, updatedAt: Date.now() });
       if (!merged) throw new Error("作品字段校验失败");
+      // panel 的本地服务成对规则在「编辑登记信息」这条路上也要守：否则改一个字段
+      // 就能造出「只给 command 」的面板，而它运行时只能直接开窗、服务永远起不来。
+      if (merged.kind === "panel") {
+        const pairError = galleryPanelServicePairError(merged.command, merged.url);
+        if (pairError) throw new Error(pairError);
+      }
       galleryApps = persistGallery(galleryFilePath(), upsertGalleryApp(galleryApps, merged).list, galleryThumbsPath());
       emitGallery();
       break;
@@ -8050,11 +8093,25 @@ parentPort.on("message", (event: { data: RuntimeCommand }) => {
     resolveDesignSnapshot(event.data.requestId, event.data.result);
     return;
   }
+  // 取消不能排在新建命令后面，否则它总会等到创建完成才生效。
+  if (event.data.type === "session.cancel-new") {
+    sessionNewClaims.cancel(event.data.requestId);
+    return;
+  }
+  const requestId = event.data.type === "session.new" ? event.data.requestId : undefined;
+  const claim = requestId ? sessionNewClaims.register(requestId) : undefined;
   commandQueue = commandQueue
     .then(() => handleCommand(event.data))
     .catch((error) => {
+      if (event.data.type === "session.new" && event.data.requestId) {
+        post({ type: "session.new-result", requestId: event.data.requestId, ok: false, error: errorText(error) });
+        return;
+      }
       // 带上命令所属会话：渲染端据此收起那一格的乐观待回复并就地提示（见
       // command-error.ts —— runtime:send 永不 reject，失败只能靠推送告知）。
       post({ type: "error", message: errorText(error), sessionId: commandSessionId(event.data) });
+    })
+    .finally(() => {
+      if (requestId && claim) sessionNewClaims.finish(requestId, claim);
     });
 });

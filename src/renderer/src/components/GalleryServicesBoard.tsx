@@ -67,6 +67,9 @@ function ServiceRow({ service, now, expanded, onToggleLog, onOpenPage, onStop, o
           <strong title={service.title}>{service.title}</strong>
           <span className="gallery-service-meta">
             {serviceStatusText(service)}
+            {/* 归属说在前面：面板托管 = 关窗时平台会停它；没有这个标记的是平台自行启动的独立服务。
+                外部服务根本不会出现在看板上（平台没接管，不建记录），所以这里只区分两种有记录的。 */}
+            {service.ownerPanelId ? " · 面板托管" : ""}
             {live && service.pid ? ` · PID ${service.pid}` : ""}
             {` · ${formatServiceUptime(service.startedAt, now, live ? undefined : service.endedAt)}`}
             {service.exitCode !== undefined && !live ? ` · 退出码 ${service.exitCode}` : ""}
@@ -83,7 +86,18 @@ function ServiceRow({ service, now, expanded, onToggleLog, onOpenPage, onStop, o
             <TerminalSquare size={11} />日志
           </button>
           <button type="button" data-control="gallery-service-restart" title={live ? "停掉再起" : "重新启动"} onClick={onRestart}><RotateCw size={11} />{live ? "重启" : "重起"}</button>
-          <button type="button" data-control="gallery-service-stop" title={live ? "结束整棵进程树" : "从看板移出这条记录"} onClick={onStop}><Square size={10} />{live ? "停止" : "移出"}</button>
+          <button
+            type="button"
+            data-control="gallery-service-stop"
+            title={live
+              ? (service.ownerPanelId
+                  ? "结束整棵进程树（平台为此面板启动的服务；面板关窗时也会异步停止）"
+                  : "结束整棵进程树（只停平台启动的这个进程，不会动同地址的外部服务）")
+              : "从看板移出这条记录"}
+            onClick={onStop}
+          >
+            <Square size={10} />{live ? "停止" : "移出"}
+          </button>
         </div>
       </div>
       {service.note && !expanded && <p className="gallery-service-note">{service.note}</p>}
@@ -122,7 +136,9 @@ export function GalleryServicesBoard({ services, onOpenPage, onStop, onRestart }
           {live.length > 0 ? `${live.length} 个在后台` : "没有在跑的"}
           {dead.length > 0 ? ` · ${dead.length} 个已结束` : ""}
         </span>
-        <small className="gallery-services-hint">后台进程：关掉页面不会停，应用退出时全部停止。</small>
+        {/* 一句话写清三种所有权事实（2026-11-16）：关页面不停 / 关面板只停平台为它启动的那个 / 外部服务不接管也不受影响。
+            刻意写成单个字符串——JSX 多行文本会在换行处插入空格，读起来会多出莫名其妙的分隔。 */}
+        <small className="gallery-services-hint">{"后台进程：关掉页面不会停；面板作品关窗时，平台会异步停掉它为这个面板启动的服务；地址已可达的外部服务平台不接管、也不受影响；应用退出时全部停止。"}</small>
       </header>
       <ul className="gallery-services-list">
         {services.map((service) => (

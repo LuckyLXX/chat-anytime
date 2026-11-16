@@ -2,19 +2,26 @@ import { describe, expect, it } from "vitest";
 import {
   compactServiceTail,
   composeGalleryDevMessage,
+  foldGalleryEntry,
   galleryAbsolutePath,
   galleryEntryDirectory,
+  galleryEntryFromAbsolute,
   galleryKey,
+  galleryPanelServicePairError,
   galleryRunPlan,
   galleryRunTarget,
   galleryServiceFailureMessage,
   galleryServiceLive,
+  galleryServiceNote,
+  galleryServiceOwnership,
   galleryRunMode,
   galleryCoverNote,
   galleryPlaceholderCoverHtml,
   gallerySnapshotTarget,
   galleryThumbEligible,
   galleryThumbName,
+  galleryWorkspaceKey,
+  isAbsoluteGalleryPath,
   MAX_GALLERY_APPS,
   normalizeGalleryApp,
   normalizeGalleryEntry,
@@ -25,6 +32,8 @@ import {
   panelMode,
   panelWindowSize,
   removeGalleryApp,
+  resolveGalleryEntry,
+  resolveGalleryPublish,
   sortGalleryApps,
   trimGalleryApps,
   upsertGalleryApp,
@@ -301,11 +310,15 @@ describe("galleryServiceFailureMessage / compactServiceTail", () => {
     expect(galleryServiceFailureMessage(target, { reason: "exited", exitCode: 0 })).not.toContain("终端标签");
   });
 
-  it("命令正常结束（代码 0）但服务未就绪：点明进程结束是正常的（launcher 形态）", () => {
+  it("命令正常结束（代码 0）但服务未就绪：按启动失败报（平台拿不回进程，无法建立可回收所有权）", () => {
+    // 2026-11-16 契约变了：pythonw / start 这类启动器不再算正常成功路径
     const message = galleryServiceFailureMessage(target, { reason: "ended" });
-    expect(message).toContain("已正常结束（代码 0）");
-    expect(message).toContain("进程结束是正常的");
-    expect(message).toContain("再点一次「运行」");
+    expect(message).toContain("服务就绪前就结束了");
+    expect(message).toContain("可回收的服务所有权");
+    expect(message).toContain("前台");
+    expect(message).toContain("pythonw");
+    // 不再是「进程结束是正常的，稍等再点一次运行」这种安慰式文案
+    expect(message).not.toContain("进程结束是正常的");
     // toast 是纯文本流式：不能带 Markdown 标记或多行
     expect(message).not.toContain("**");
     expect(message).not.toContain("\n");
@@ -537,7 +550,7 @@ describe("面板作品（kind=panel）", () => {
     });
   });
 
-  it("galleryRunPlan：面板声明了 command + url 才先起服务；已在跑或声明不全就直开窗", () => {
+  it("galleryRunPlan：面板声明了 command + url 才先起服务；已在跑就直开窗", () => {
     const panels = "D:/ws/panels/status/index.html";
     const withService = app({ ...panel, command: "node bridge.mjs", url: "http://127.0.0.1:8791/api/health" });
     // 服务不可达 → 先起服务再开窗；cwd 是入口所在目录（启动命令在作品目录里执行）
@@ -551,10 +564,6 @@ describe("面板作品（kind=panel）", () => {
     });
     // 服务已可达（用户手工起的或上次运行留下的）→ 直接开窗，绝不重启用户正在用的服务
     expect(galleryRunPlan(withService, true)).toEqual({ action: "open-panel", absolutePath: panels, options: {} });
-    // 只给 command 没给 url：无从探活，宁可直开窗（面板页自己报「连不上」），不盲起服务
-    expect(galleryRunPlan(app({ ...panel, command: "node bridge.mjs" }), false)).toEqual({ action: "open-panel", absolutePath: panels, options: {} });
-    // 只给 url（服务在别处/手工起）：平台无从启动，同样直开窗
-    expect(galleryRunPlan(app({ ...panel, url: "http://127.0.0.1:8791/api/health" }), false)).toEqual({ action: "open-panel", absolutePath: panels, options: {} });
     // 声明了服务也要带上归一化后的窗口偏好（尺寸/形态不能在这一支里丢）
     expect(galleryRunPlan(app({ ...panel, panel: { width: 99999 }, command: "node bridge.mjs", url: "http://127.0.0.1:8791/api/health" }), false)).toEqual({
       action: "start-panel-service",
@@ -564,6 +573,28 @@ describe("面板作品（kind=panel）", () => {
       command: "node bridge.mjs",
       url: "http://127.0.0.1:8791/api/health"
     });
+  });
+
+  it("galleryRunPlan：面板本地服务字段不成对 → manual + 具体原因（不再静默直开窗）", () => {
+    const panels = "D:/ws/panels/status/index.html";
+    // 只给 command：平台无法探活，也无从确认服务是否就绪
+    for (const reachable of [false, true]) {
+      const plan = galleryRunPlan(app({ ...panel, command: "node bridge.mjs" }), reachable);
+      expect(plan.action).toBe("manual");
+      expect(plan.action === "manual" ? plan.message : "").toContain("没有探活地址");
+    }
+    // 只给 url：无论此刻是否可达都是配置错误（成对规则），不能当外部服务放行
+    for (const reachable of [false, true]) {
+      const plan = galleryRunPlan(app({ ...panel, url: "http://127.0.0.1:8791/api/health" }), reachable);
+      expect(plan.action).toBe("manual");
+      const message = plan.action === "manual" ? plan.message : "";
+      expect(message).toContain("没有启动命令");
+      expect(message).toContain("http://127.0.0.1:8791/api/health");
+    }
+    // 反面：不成对时绝不能返回 open-panel（否则用户看到一个永远取不到数据的窗）
+    expect(galleryRunPlan(app({ ...panel, command: "node bridge.mjs" }), false).action).not.toBe("open-panel");
+    // 两个都不填 = 不依赖平台托管的本地服务 → 直开窗
+    expect(galleryRunPlan(app(panel), false)).toEqual({ action: "open-panel", absolutePath: panels, options: {} });
   });
 
   it("面板也生成封面（2026-10-28 用户要求每个作品都有封面；离屏截图是页面骨架）", () => {
@@ -588,5 +619,289 @@ describe("面板作品（kind=panel）", () => {
     const hint = composeGalleryDevMessage(app(panel));
     expect(hint).toContain('"action\":\"close\"');
     expect(hint).toContain('"action\":\"toggle\"');
+  });
+});
+
+describe("resolveGalleryEntry（path + entry 的唯一解析口径）", () => {
+  const root = "D:/ws";
+
+  it("file/panel 只给 path：path 就是最终入口", () => {
+    expect(resolveGalleryEntry({ root, path: "designs/demo.html", kind: "file" }))
+      .toEqual({ entry: "designs/demo.html", absolutePath: "D:/ws/designs/demo.html" });
+    expect(resolveGalleryEntry({ root, path: "panels/status/index.html", kind: "panel" }).entry).toBe("panels/status/index.html");
+  });
+
+  it("目录 + entry：最终入口 = path/entry（清单里只存最终入口，不存二义性的两段路径）", () => {
+    expect(resolveGalleryEntry({ root, path: "panels/status", entry: "index.html", kind: "panel" }))
+      .toEqual({ entry: "panels/status/index.html", absolutePath: "D:/ws/panels/status/index.html" });
+    expect(resolveGalleryEntry({ root, path: "designs", entry: "exports/demo.html", kind: "file" }).entry).toBe("designs/exports/demo.html");
+    // "./index.html" 这类写法同样归一
+    expect(resolveGalleryEntry({ root, path: "panels/status", entry: "./index.html", kind: "panel" }).entry).toBe("panels/status/index.html");
+    // path 是工作区根时 entry 直接从根开始
+    expect(resolveGalleryEntry({ root, path: ".", entry: "index.html", kind: "file" }).entry).toBe("index.html");
+  });
+
+  it("绝对路径与相对路径得到同一个最终入口（两种写法不能出两张卡）", () => {
+    const relative = resolveGalleryEntry({ root, path: "panels/status", entry: "index.html", kind: "panel" });
+    expect(resolveGalleryEntry({ root, path: "D:/ws/panels/status", entry: "index.html", kind: "panel" })).toEqual(relative);
+    expect(resolveGalleryEntry({ root, path: "D:\\ws\\designs\\demo.html", kind: "file" }))
+      .toEqual(resolveGalleryEntry({ root, path: "designs/demo.html", kind: "file" }));
+    // 大小写不同的盘符路径也是同一个入口（Windows 不区分）
+    expect(resolveGalleryEntry({ root, path: "d:/WS/designs/demo.html", kind: "file" }).entry).toBe("designs/demo.html");
+  });
+
+  it("`a/../b.html` 折叠成 `b.html`（否则同一个文件会因两种写法变成两张卡）", () => {
+    expect(resolveGalleryEntry({ root, path: "designs/../demo.html", kind: "file" }).entry).toBe("demo.html");
+    expect(resolveGalleryEntry({ root, path: "designs/./x/../../demo.html", kind: "file" }).entry).toBe("demo.html");
+  });
+
+  it("越界一律拒绝：工作区外 / entry 跳出目录 / entry 用绝对路径", () => {
+    expect(() => resolveGalleryEntry({ root, path: "../outside.html", kind: "file" })).toThrow(/工作区内/u);
+    expect(() => resolveGalleryEntry({ root, path: "D:/other/demo.html", kind: "file" })).toThrow(/工作区内/u);
+    expect(() => resolveGalleryEntry({ root, path: "panels", entry: "../x.html", kind: "panel" })).toThrow(/不能跳出/u);
+    expect(() => resolveGalleryEntry({ root, path: "panels", entry: "D:/other/index.html", kind: "panel" })).toThrow(/相对路径/u);
+  });
+
+  it("server 禁止 entry；path 为根目录时入口是 \".\"", () => {
+    expect(() => resolveGalleryEntry({ root, path: "apps/api", entry: "index.html", kind: "server" })).toThrow(/不支持 entry/u);
+    expect(resolveGalleryEntry({ root, path: ".", kind: "server" })).toEqual({ entry: ".", absolutePath: "D:/ws" });
+    expect(resolveGalleryEntry({ root, path: "apps/api", kind: "server" }).entry).toBe("apps/api");
+  });
+
+  it("面板入口不能是工作区根；path 已经是文件时再给 entry 得到明确的错", () => {
+    expect(() => resolveGalleryEntry({ root, path: ".", kind: "panel" })).toThrow(/网页文件/u);
+    expect(() => resolveGalleryEntry({ root, path: "panels/status/index.html", entry: "index.html", kind: "panel" })).toThrow(/已经指向文件/u);
+  });
+
+  it("POSIX 根与 Windows 盘符根：绝对路径换算不丢根", () => {
+    expect(galleryEntryFromAbsolute("/", "/a/b.html")).toBe("a/b.html");
+    expect(galleryEntryFromAbsolute("/", "/")).toBe(".");
+    expect(galleryEntryFromAbsolute("D:/", "D:/ws/a.html")).toBe("ws/a.html");
+    expect(galleryEntryFromAbsolute("D:\\ws\\", "D:/ws/")).toBe(".");
+    expect(galleryAbsolutePath("/", "a.html")).toBe("/a.html");
+    expect(galleryAbsolutePath("/", ".")).toBe("/");
+    expect(galleryAbsolutePath("D:\\ws", "a/b.html")).toBe("D:\\ws/a/b.html");
+    // POSIX 根下也算得出最终入口
+    expect(resolveGalleryEntry({ root: "/", path: "/srv/app/index.html", kind: "file" }).entry).toBe("srv/app/index.html");
+  });
+
+  it("POSIX 大小写敏感、Windows 不敏感（/home/ws 与 /home/WS 是两个目录）", () => {
+    expect(galleryEntryFromAbsolute("/home/ws", "/home/ws/a.html")).toBe("a.html");
+    expect(galleryEntryFromAbsolute("/home/ws", "/home/WS/a.html")).toBeUndefined();
+    // 前缀相同但不同目录（ws 与 ws2）不能被当成子路径
+    expect(galleryEntryFromAbsolute("/home/ws", "/home/ws2/a.html")).toBeUndefined();
+    expect(galleryEntryFromAbsolute("D:/ws", "d:/WS/a.html")).toBe("a.html");
+    expect(galleryWorkspaceKey("/home/ws")).not.toBe(galleryWorkspaceKey("/home/WS"));
+    expect(galleryWorkspaceKey("D:\\ws\\")).toBe(galleryWorkspaceKey("d:/WS"));
+  });
+
+  it("isAbsoluteGalleryPath / foldGalleryEntry 的边界", () => {
+    expect(isAbsoluteGalleryPath("C:/x")).toBe(true);
+    expect(isAbsoluteGalleryPath("/x")).toBe(true);
+    expect(isAbsoluteGalleryPath("a/b")).toBe(false);
+    expect(foldGalleryEntry("a/./b/../c.html")).toBe("a/c.html");
+    expect(foldGalleryEntry("..")).toBeUndefined();
+    expect(foldGalleryEntry("")).toBe(".");
+  });
+});
+
+describe("面板本地服务的成对规则与所有权", () => {
+  it("command / url 成对：两个都填或两个都不填才算合法", () => {
+    expect(galleryPanelServicePairError(undefined, undefined)).toBeUndefined();
+    expect(galleryPanelServicePairError("node b.mjs", "http://127.0.0.1:1/x")).toBeUndefined();
+    expect(galleryPanelServicePairError("node b.mjs", "  ")).toContain("成对");
+    expect(galleryPanelServicePairError("   ", "http://127.0.0.1:1/x")).toContain("成对");
+  });
+
+  it("所有权只看配置（运行时是否可达不影响判定）", () => {
+    expect(galleryServiceOwnership({ kind: "panel" })).toBe("none");
+    expect(galleryServiceOwnership({ kind: "panel", command: "node b.mjs", url: "http://127.0.0.1:1/x" })).toBe("platform");
+    expect(galleryServiceOwnership({ kind: "panel", command: "node b.mjs" })).toBe("misconfigured");
+    expect(galleryServiceOwnership({ kind: "panel", url: "http://127.0.0.1:1/x" })).toBe("misconfigured");
+    expect(galleryServiceOwnership({ kind: "server", command: "node api.js" })).toBe("platform");
+    expect(galleryServiceOwnership({ kind: "server", url: "http://x" })).toBe("external");
+    expect(galleryServiceOwnership({ kind: "file", command: "node x" })).toBe("none");
+  });
+
+  it("回执文案只陈述配置，不断言「已启动」", () => {
+    expect(galleryServiceNote({ kind: "panel" })).toContain("未配置");
+    const managed = galleryServiceNote({ kind: "panel", command: "node b.mjs", url: "http://127.0.0.1:1/x" });
+    expect(managed).toContain("已配置（command + url）");
+    expect(managed).toContain("复用外部服务");
+    expect(managed).toContain("只停平台实际启动的那个进程");
+    expect(managed).not.toContain("已启动");
+    expect(galleryServiceNote({ kind: "panel", command: "node b.mjs" })).toContain("配置不完整");
+    expect(galleryServiceNote({ kind: "server", command: "node api.js" })).toBe("");
+  });
+});
+
+describe("resolveGalleryPublish（发布/更新的唯一判定）", () => {
+  const workspace = "D:/ws";
+
+  it("新建：created=true，id 留给 upsert 生成，入口是最终相对入口", () => {
+    const result = resolveGalleryPublish({ apps: [], draft: { title: "新作品", kind: "file", path: "designs/demo.html" }, workspace });
+    expect(result.created).toBe(true);
+    expect(result.app.id).toBe("");
+    expect(result.app.entry).toBe("designs/demo.html");
+    expect(result.app.workspace).toBe(workspace);
+    expect(result.target).toBeUndefined();
+    const published = upsertGalleryApp([], result.app, 2000);
+    expect(published.app.id).toMatch(/^g-/u);
+  });
+
+  it("同「工作区+类型+最终入口」重复发布 = 更新（id / createdAt / thumb 都不变）", () => {
+    const existing = app({ id: "g-old", entry: "designs/demo.html", thumb: "gallery-1.png", coverSource: "custom", createdAt: 1000 });
+    const result = resolveGalleryPublish({ apps: [existing], draft: { title: "改了标题", kind: "file", path: "designs/demo.html" }, workspace });
+    expect(result.created).toBe(false);
+    expect(result.app.id).toBe("g-old");
+    expect(result.app.createdAt).toBe(1000);
+    const merged = upsertGalleryApp([existing], result.app, 3000).app;
+    expect(merged.id).toBe("g-old");
+    expect(merged.createdAt).toBe(1000);
+    expect(merged.thumb).toBe("gallery-1.png");
+    expect(merged.title).toBe("改了标题");
+  });
+
+  it("目录 + entry 与直接给文件命中同一条（不出重复卡）", () => {
+    const list = [app({ id: "g-panel", kind: "panel", entry: "panels/status/index.html" })];
+    const viaEntry = resolveGalleryPublish({ apps: list, draft: { title: "状态", kind: "panel", path: "panels/status", entry: "index.html" }, workspace });
+    expect(viaEntry.created).toBe(false);
+    expect(viaEntry.app.id).toBe("g-panel");
+    expect(viaEntry.entry.entry).toBe("panels/status/index.html");
+  });
+
+  it("`a/../b` 与 `b` 是同一入口（折叠后命中同一条，不新增卡）", () => {
+    const first = resolveGalleryPublish({ apps: [], draft: { title: "t", kind: "file", path: "designs/../demo.html" }, workspace });
+    const published = upsertGalleryApp([], first.app, 1000);
+    const second = resolveGalleryPublish({ apps: published.list, draft: { title: "t2", kind: "file", path: "demo.html" }, workspace });
+    expect(second.created).toBe(false);
+    expect(second.app.id).toBe(published.app.id);
+  });
+
+  it("appId 优先：列表里其它项先命中入口键也不能改变更新目标", () => {
+    const other = app({ id: "g-other", entry: "other.html" });
+    const target = app({ id: "g-target", entry: "target.html", createdAt: 555 });
+    // 目标项放在列表**后面**：upsertGalleryApp 的 find(id || key) 会先看到 g-other
+    const list = [other, target];
+    const result = resolveGalleryPublish({ apps: list, draft: { appId: "g-target", title: "改过", kind: "file", path: "target.html" }, workspace });
+    expect(result.created).toBe(false);
+    expect(result.app.id).toBe("g-target");
+    expect(result.app.createdAt).toBe(555);
+    const merged = upsertGalleryApp(list, result.app, 2000);
+    expect(merged.app.id).toBe("g-target");
+    expect(merged.list).toHaveLength(2);
+    expect(merged.list.find((item) => item.id === "g-other")?.entry).toBe("other.html");
+  });
+
+  it("入口已经属于另一个作品时拒绝（不制造重复键，也不覆盖另一身份）", () => {
+    const occupied = app({ id: "g-occupied", entry: "shared.html" });
+    const target = app({ id: "g-target", entry: "target.html" });
+    expect(() => resolveGalleryPublish({ apps: [occupied, target], draft: { appId: "g-target", title: "t", kind: "file", path: "shared.html" }, workspace }))
+      .toThrow(/已经被另一个作品/u);
+  });
+
+  it("appId 不存在 / 跨工作区 / 跨类型一律报错（不静默新建、不跨区覆盖）", () => {
+    const target = app({ id: "g-target", entry: "target.html" });
+    expect(() => resolveGalleryPublish({ apps: [target], draft: { appId: "g-missing", title: "t", kind: "file", path: "target.html" }, workspace }))
+      .toThrow(/找不到作品/u);
+    expect(() => resolveGalleryPublish({ apps: [app({ id: "g-x", workspace: "D:/other" })], draft: { appId: "g-x", title: "t", kind: "file", path: "a.html" }, workspace }))
+      .toThrow(/另一个工作区/u);
+    expect(() => resolveGalleryPublish({ apps: [target], draft: { appId: "g-target", title: "t", kind: "server", path: "target.html" }, workspace }))
+      .toThrow(/类型/u);
+  });
+
+  it("draft.workspace 不能改变校验根（填别的目录就是越界）", () => {
+    expect(() => resolveGalleryPublish({ apps: [], draft: { title: "t", kind: "file", path: "a.html", workspace: "D:/other" }, workspace }))
+      .toThrow(/当前会话的工作区/u);
+    // 大小写 / 分隔符等价的写法不算越界（Windows 不敏感）
+    expect(resolveGalleryPublish({ apps: [], draft: { title: "t", kind: "file", path: "a.html", workspace: "d:/WS/" }, workspace }).entry.entry).toBe("a.html");
+  });
+
+  it("panel 的 command/url 不成对：发布阶段直接报错（对话框 / 旧客户端也绕不过）", () => {
+    expect(() => resolveGalleryPublish({ apps: [], draft: { title: "t", kind: "panel", path: "p/index.html", command: "node b.mjs" }, workspace })).toThrow(/成对/u);
+    expect(() => resolveGalleryPublish({ apps: [], draft: { title: "t", kind: "panel", path: "p/index.html", url: "http://127.0.0.1:1/x" }, workspace })).toThrow(/成对/u);
+  });
+
+  it("panel 的 command/url 是权威字段：重新发布时省略 = 不要平台托管的本地服务", () => {
+    const list = [app({ id: "g-p", kind: "panel", entry: "p/index.html", command: "node b.mjs", url: "http://127.0.0.1:8791/x" })];
+    const cleared = resolveGalleryPublish({ apps: list, draft: { appId: "g-p", title: "t", kind: "panel", path: "p/index.html" }, workspace });
+    expect(cleared.service).toBe("none");
+    const merged = upsertGalleryApp(list, cleared.app, 2000).app;
+    expect(merged.command).toBeUndefined();
+    expect(merged.url).toBeUndefined();
+    const withService = resolveGalleryPublish({ apps: list, draft: { appId: "g-p", title: "t", kind: "panel", path: "p/index.html", command: "node b.mjs", url: "http://127.0.0.1:8791/x" }, workspace });
+    expect(withService.service).toBe("platform");
+    expect(withService.app.command).toBe("node b.mjs");
+  });
+
+  it("panel 尺寸本次没给就沿用旧值（显示偏好不该被重发布清掉）", () => {
+    const list = [app({ id: "g-p", kind: "panel", entry: "p/index.html", panel: { width: 500, mode: "drawer" } })];
+    const kept = resolveGalleryPublish({ apps: list, draft: { appId: "g-p", title: "t", kind: "panel", path: "p/index.html" }, workspace });
+    expect(kept.app.panel).toEqual({ width: 500, mode: "drawer" });
+    const replaced = resolveGalleryPublish({ apps: list, draft: { appId: "g-p", title: "t", kind: "panel", path: "p/index.html", panel: { width: 300 } }, workspace });
+    expect(replaced.app.panel).toEqual({ width: 300 });
+  });
+
+  it("server 省略 command/url 沿用旧值；runMode 可显式回落 page", () => {
+    const list = [app({ id: "g-s", kind: "server", entry: "apps/api", command: "node api.js", url: "http://127.0.0.1:9000", runMode: "background" })];
+    const kept = resolveGalleryPublish({ apps: list, draft: { appId: "g-s", title: "t", kind: "server", path: "apps/api" }, workspace });
+    expect(kept.app.command).toBe("node api.js");
+    expect(kept.app.url).toBe("http://127.0.0.1:9000");
+    expect(kept.app.runMode).toBe("background");
+    const toPage = resolveGalleryPublish({ apps: list, draft: { appId: "g-s", title: "t", kind: "server", path: "apps/api", runMode: "page" }, workspace });
+    expect(toPage.app.runMode).toBeUndefined();
+  });
+
+  it("file 作品不会带上 command / url / runMode（脏字段不落盘）", () => {
+    const result = resolveGalleryPublish({ apps: [], draft: { title: "t", kind: "file", path: "a.html", command: "npm run dev", url: "http://x", runMode: "background" }, workspace });
+    expect(result.app.command).toBeUndefined();
+    expect(result.app.url).toBeUndefined();
+    expect(result.app.runMode).toBeUndefined();
+    expect(result.service).toBe("none");
+  });
+});
+
+describe("继续开发：稳定身份与回发布协议（2026-11-16）", () => {
+  it("注入文本带作品 ID、最终入口、固定 origin 与「用同一 appId 重新发布」的协议", () => {
+    const message = composeGalleryDevMessage(app({
+      id: "g-panel",
+      kind: "panel",
+      entry: "panels/status/index.html",
+      command: "node bridge.mjs",
+      url: "http://127.0.0.1:8791/api/health"
+    }));
+    expect(message).toContain("作品 ID：g-panel");
+    expect(message).toContain("入口：panels/status/index.html");
+    expect(message).toContain("数据 origin：pidesktop-file://w-g-panel");
+    expect(message).toContain("本地服务：已配置（command + url）");
+    const example = /gallery_publish\((\{[^\n]+\})\)/u.exec(message)?.[1];
+    expect(example).toBeDefined();
+    expect(JSON.parse(example!)).toMatchObject({
+      appId: "g-panel", kind: "panel", path: "panels/status/index.html",
+      command: "node bridge.mjs", url: "http://127.0.0.1:8791/api/health"
+    });
+    expect(message).toContain("不要改 kind（panel）与最终入口");
+    expect(message).toContain("「更新」");
+  });
+
+  it("回发布示例正确转义引号与反斜杠，可解析为完整参数", () => {
+    const message = composeGalleryDevMessage(app({ id: 'id"1', title: '含"引号"', entry: 'panels/一号/index.html' }));
+    const example = /gallery_publish\((\{[^\n]+\})\)/u.exec(message)?.[1];
+    expect(JSON.parse(example!)).toMatchObject({ appId: 'id"1', title: '含"引号"', path: "panels/一号/index.html" });
+  });
+
+  it("没有本地服务的 panel：明确要求不要把 command/url 带上", () => {
+    const message = composeGalleryDevMessage(app({ kind: "panel", entry: "panels/status/index.html" }));
+    expect(message).toContain("本地服务：未配置");
+    expect(message).toContain("command / url 都不要带");
+  });
+
+  it("服务型：保留后台进程说明，回发布协议用最终入口", () => {
+    const message = composeGalleryDevMessage(app({ kind: "server", entry: ".", command: "node api.js", runMode: "background" }));
+    expect(message).toContain("作品 ID：g1");
+    const example = /gallery_publish\((\{[^\n]+\})\)/u.exec(message)?.[1];
+    expect(example).toBeDefined();
+    expect(JSON.parse(example!)).toMatchObject({ kind: "server", path: "." });
+    expect(message).toContain("后台进程");
   });
 });

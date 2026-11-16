@@ -1,6 +1,6 @@
 import { AppWindow, Cat, Database, FolderOpen, FolderSearch, Hammer, LayoutGrid, PanelRight, Play, Plus, Server, Sparkles, Trash2 } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
-import { GALLERY_KIND_LABELS, GALLERY_PANEL_MODE_LABELS, galleryServiceLive, panelMode, workspaceLabel, type GalleryApp, type GalleryServiceRecord } from "../../../shared/gallery";
+import { GALLERY_KIND_LABELS, GALLERY_PANEL_MODE_LABELS, galleryPanelServiceRunError, galleryServiceLive, galleryServiceOwnership, panelMode, workspaceLabel, type GalleryApp, type GalleryServiceRecord } from "../../../shared/gallery";
 import { GalleryServiceBadge, GalleryServicesBoard } from "./GalleryServicesBoard";
 import { workspaceKey } from "../lib/session-groups";
 
@@ -78,14 +78,52 @@ function useThumb(app: GalleryApp): string | undefined {
   return src;
 }
 
+/**
+ * 面板本地服务的卡片标记（2026-11-16）。
+ *
+ * 口径要点：`command` + `url` 成对只说明「平台**可以**托管」——运行时**先探活**：
+ * 地址已可达就是外部服务（可能是用户手工起的/上次留下的），平台不接管、关窗也不停；
+ * 只有平台自己 spawn 的那个才随面板关窗停止。所以标记写「已配置」，不写「平台托管」。
+ * 缺一项是**配置错误**：平台不猜你想怎么跑，运行会被阻止，必须重新发布补齐。
+ *
+ * 状态判定复用 shared 的 galleryServiceOwnership（唯一事实源，与运行分流同一套判据），
+ * 缺项错误复用 galleryPanelServiceRunError（与「运行」时弹出的原因同一句话）——卡片、
+ * 看板、发布回执、继续开发文本必须用同一组状态词（计划 4.6.7），否则「已运行」会同时
+ * 表示 spawn 成功、端口就绪与外部复用三种不同的事实。
+ */
+function panelServiceTag(app: GalleryApp): { label: string; title: string } | undefined {
+  if (app.kind !== "panel") return undefined;
+  const ownership = galleryServiceOwnership(app);
+  if (ownership === "none") return undefined;
+  if (ownership === "misconfigured") {
+    return {
+      label: app.command?.trim() ? "本地服务缺探活地址" : "本地服务缺启动命令",
+      title: `运行会被阻止：${galleryPanelServiceRunError(app)}`
+    };
+  }
+  const command = app.command?.trim();
+  const url = app.url?.trim();
+  return {
+    label: "本地服务 · 已配置",
+    title: `本地服务已配置（command + url）：运行时会先探活 ${url}——已可达就复用它（外部服务：平台不启动、不接管，关窗也不会停）；不可达才在入口所在目录执行「${command}」由平台起服务，探活通过再开窗；关闭面板时只停止平台实际启动的那个进程。`
+  };
+}
+
 function GalleryCard({ app, workspace, runningServices, onRun, onDevelop, onReveal, onRemove, onData }: { app: GalleryApp; runningServices: number } & Omit<GalleryWallProps, "apps" | "onPublish" | "services" | "onOpenServicePage" | "onStopService" | "onRestartService">): ReactNode {
   const thumb = useThumb(app);
   // 作品清单全局跨工作区：卡片必须自己说明「它在哪」，否则跨工作区的作品
   // 只能靠悬停看全路径（2026-10-28 用户「找不到源文件在哪个工作区」）。
   const elsewhere = Boolean(workspace) && workspaceKey(workspace!) !== workspaceKey(app.workspace);
+  /** 本地服务标记：成对 = 已配置（运行时先探活）；缺一项 = 配置不完整（运行会被拦住）。 */
+  const serviceTag = panelServiceTag(app);
+  // 「运行」语义（2026-11-16）：panel 会 reload 到最新入口页（窗口已开着也重载后前置），
+  // server 则先确保后台服务就绪——两种事实不同，标题里分开说，不共用「已运行」这个词。
+  const runTitle = app.kind === "panel"
+    ? `运行「${app.title}」（窗口已开着会重新加载最新页面）`
+    : `运行「${app.title}」`;
   return (
     <div className="gallery-card" data-gallery-id={app.id}>
-      <button type="button" className="gallery-card-thumb" data-control="gallery-run" title={`运行「${app.title}」`} onClick={() => onRun(app)}>
+      <button type="button" className="gallery-card-thumb" data-control="gallery-run" title={runTitle} onClick={() => onRun(app)}>
         {thumb
           ? <img src={thumb} alt="" />
           : <span className="gallery-card-placeholder">{app.kind === "server" ? <Server size={22} /> : app.kind === "panel" ? (panelMode(app.panel) === "pet" ? <Cat size={22} /> : panelMode(app.panel) === "drawer" ? <PanelRight size={22} /> : <AppWindow size={22} />) : <LayoutGrid size={22} />}</span>}
@@ -94,7 +132,7 @@ function GalleryCard({ app, workspace, runningServices, onRun, onDevelop, onReve
       <div className="gallery-card-body">
         <strong className="gallery-card-title" title={app.title}>{app.title}</strong>
         {app.description && <p className="gallery-card-desc">{app.description}</p>}
-        <span className="gallery-card-entry" title={`${app.workspace}/${app.entry}`}>
+        <span className="gallery-card-entry" title={`最终入口（工作区相对）：${app.entry} ｜ 完整路径：${app.workspace}/${app.entry}`}>
           <FolderOpen size={11} />
           <span
             className={`gallery-card-workspace${elsewhere ? " is-other" : ""}`}
@@ -107,15 +145,15 @@ function GalleryCard({ app, workspace, runningServices, onRun, onDevelop, onReve
         {/* 这个作品此刻有没有服务在后台跑（2026-11-12）：运行中的服务不再占标签页，
             卡片是用户执行「运行」的地方，所以它必须能回答「我点过之后现在什么状态」。 */}
         <GalleryServiceBadge count={runningServices} />
-        {/* 带本地服务的面板：点运行会先起服务再开窗（2026-10-11）。纯展示标记，
-            刻意不带 data-control——它是说明，不是开关，不该进主题钩子契约。 */}
-        {app.kind === "panel" && app.command && (
-          <span className="gallery-card-service" title={`运行会先执行「${app.command}」拉起本地服务，探活通过再开窗；窗口关闭时服务自动停止`}>
-            <Server size={11} />本地服务
+        {/* 带本地服务的面板（2026-10-11）：纯展示标记，刻意不带 data-control——
+            它是说明，不是开关，不该进主题钩子契约。文案口径见 panelServiceTag。 */}
+        {serviceTag && (
+          <span className="gallery-card-service" title={serviceTag.title}>
+            <Server size={11} />{serviceTag.label}
           </span>
         )}
         <div className="gallery-card-actions">
-          <button type="button" className="primary-button" data-control="gallery-run" onClick={() => onRun(app)}><Play size={13} />运行</button>
+          <button type="button" className="primary-button" data-control="gallery-run" title={runTitle} onClick={() => onRun(app)}><Play size={13} />{app.kind === "panel" ? "运行 / 重新加载" : "运行"}</button>
           <button type="button" data-control="gallery-develop" onClick={() => onDevelop(app)}><Hammer size={13} />继续开发</button>
           {/* 数据入口只给面板：file / server 作品的存储不在作品自己的 origin 上（每次运行都是另一个端口）。 */}
           {app.kind === "panel" && (

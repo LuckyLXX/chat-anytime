@@ -1,6 +1,6 @@
 import { Database, LayoutGrid, Loader2, RefreshCw, X } from "lucide-react";
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { GALLERY_PANEL_MODE_LABELS, PANEL_MODES, type GalleryApp, type GalleryDataUsage, type GalleryDraft, type GalleryKind, type GalleryPanelEdge, type GalleryPanelMode, type GalleryPanelOptions, type GalleryServiceRecord } from "../../../shared/gallery";
+import { GALLERY_PANEL_MODE_LABELS, PANEL_MODES, galleryPanelServicePairError, type GalleryApp, type GalleryDataUsage, type GalleryDraft, type GalleryKind, type GalleryPanelEdge, type GalleryPanelMode, type GalleryPanelOptions, type GalleryServiceRecord } from "../../../shared/gallery";
 import { GalleryWall } from "./GalleryWall";
 import { useOverlayLayer } from "../lib/overlay-layers";
 
@@ -194,6 +194,9 @@ export function GalleryPublishDialog({ initial, workspace, onSubmit, onClose }: 
   const [title, setTitle] = useState(initial?.title ?? "");
   const [kind, setKind] = useState<GalleryKind>(initial?.kind ?? "file");
   const [path, setPath] = useState(initial?.path ?? "");
+  // 入口（entry）：只有 path 填的是**目录**时才需要——最终入口 = path/entry；
+  // path 本身就是入口文件时留空。术语与工具参数、skill 一致（2026-11-16 整改）。
+  const [entry, setEntry] = useState("");
   const [command, setCommand] = useState("");
   const [url, setUrl] = useState("");
   // 纯后台服务（runMode="background"）：反代 / API / 给别的程序用的进程——没有页面可开。
@@ -237,12 +240,31 @@ export function GalleryPublishDialog({ initial, workspace, onSubmit, onClose }: 
     };
   }, [cover, workspace]);
 
+  /**
+   * 面板本地服务的成对校验（2026-11-16 整改）。
+   *
+   * 之前这里是两个「可选」输入框 + 一句「两个都填才会自动起服务」：只填一个时
+   * 配置**静默失效**（只有 command 不会执行、只有 url 不会被托管），用户看不出
+   * 任何异常。平台靠 command 起进程、靠 url 探活，缺一个就无法判断服务起没起来，
+   * 所以这里把它当成真错误：可见报错 + 挡住提交。
+   *
+   * 文案用 shared 的 galleryPanelServicePairError：工具（gallery_publish 校验）
+   * 与登记对话框必须说同一句话，否则模型转述的原因和用户看到的对不上。
+   */
+  const panelServicePairError = kind === "panel" ? galleryPanelServicePairError(command, url) : undefined;
+  const blocked = !title.trim() || !path.trim() || Boolean(panelServicePairError);
+
   function submit(event: FormEvent): void {
     event.preventDefault();
-    if (!title.trim() || !path.trim()) return;
+    // 校验同按住禁用按钮：键盘回车提交也走这里，不能只靠按钮 disabled。
+    if (blocked) return;
     const draft: GalleryDraft = { title: title.trim(), kind, path: path.trim() };
-    if (command.trim()) draft.command = command.trim();
-    if (url.trim()) draft.url = url.trim();
+    // server 不接受 entry（path 必须是项目目录）：只有 file / panel 才带上。
+    if (kind !== "server" && entry.trim()) draft.entry = entry.trim();
+    // command / url 只属于 server 与 panel；从别的类型切过来时残留的输入不带出去
+    // （file 型带上它们是脏数据，面板两项已被上面的成对校验保证一致）。
+    if (kind !== "file" && command.trim()) draft.command = command.trim();
+    if (kind !== "file" && url.trim()) draft.url = url.trim();
     if (kind === "server" && backgroundOnly) draft.runMode = "background";
     if (description.trim()) draft.description = description.trim();
     if (cover.trim()) draft.cover = cover.trim();
@@ -280,9 +302,17 @@ export function GalleryPublishDialog({ initial, workspace, onSubmit, onClose }: 
               <option value="panel">面板（入口网页开成独立小窗口，主界面关了也在）</option>
             </select>
           </label>
-          <label>{kind === "server" ? "项目目录" : kind === "panel" ? "入口网页" : "入口文件"}
-            <input value={path} placeholder={workspace ? `工作区相对路径，如 ${kind === "server" ? "apps/demo" : kind === "panel" ? "panels/status/index.html" : "designs/exports/demo.html"}` : "工作区相对路径"} onChange={(event) => setPath(event.target.value)} />
+          <label>{kind === "server" ? "项目目录（path）" : kind === "panel" ? "入口网页（path）" : "入口文件（path）"}
+            <input value={path} placeholder={workspace ? `工作区相对路径，如 ${kind === "server" ? "apps/demo" : kind === "panel" ? "panels/status/index.html" : "designs/exports/demo.html"}；填目录时在下面补入口` : "工作区相对路径"} onChange={(event) => setPath(event.target.value)} />
           </label>
+          {/* 入口文件（entry）与 path 的关系（2026-11-16 统一术语）：path 填目录时
+              在这里补目录内的入口文件，最终入口 = path/entry；path 本身就是入口文件
+              时留空。清单只保存最终入口这一条，没有两段式二义。server 不用 entry。 */}
+          {kind !== "server" && (
+            <label>入口（entry，可选）
+              <input value={entry} placeholder="如：index.html（上面填的是目录时才填，最终入口 = path/entry）" onChange={(event) => setEntry(event.target.value)} />
+            </label>
+          )}
           {kind === "panel" && (
             <div className="gallery-panel-options">
               <label>形态
@@ -312,24 +342,36 @@ export function GalleryPublishDialog({ initial, workspace, onSubmit, onClose }: 
           )}
           {kind === "server" && (
             <>
-              <label>启动命令（可选）<input value={command} placeholder="如：npm run dev（在后台进程里执行，需能非交互长期运行）" onChange={(event) => setCommand(event.target.value)} /></label>
+              <label>启动命令（可选）<input value={command} placeholder="如：npm run dev（后台进程里前台长期运行，不用 start / pythonw 这类启动器）" onChange={(event) => setCommand(event.target.value)} /></label>
               <label>服务地址（可选）<input value={url} placeholder="如：http://localhost:5173" onChange={(event) => setUrl(event.target.value)} /></label>
               <label className="gallery-panel-ontop">
                 <input type="checkbox" checked={backgroundOnly} onChange={(event) => setBackgroundOnly(event.target.checked)} /> 纯后台服务（不打开页面）
               </label>
               <span className="gallery-dialog-hint">
-                服务的进程总是跑在后台（不占标签页，关掉页面也不会停）；作品墙顶部的「运行中的服务」可以看日志、停止、重启。反代 / API / 给别的程序用的服务勾上「纯后台」，运行时就只起进程、不弹页面。
+                服务的进程总是跑在后台（不占标签页，关掉页面也不会停）；作品墙顶部的「运行中的服务」可以看日志、停止、重启。
+                命令必须自己就是长期运行的那个服务进程：<code>start</code> / <code>pythonw</code> / <code>cmd /c start</code> 这类把服务甩到别的进程树的启动器会让平台提前失去所有权，就绪前退出直接算启动失败。
+                地址此刻已经可达时不另起进程、也不接管。反代 / API / 给别的程序用的服务勾上「纯后台」，运行时就只起进程、不弹页面。
               </span>
             </>
           )}
           {/* 面板也能带一个本地服务（2026-10-11）：面板页没有 preload 也跑不了外部命令，
-              需要本地数据源（跑 git / 读数据库 / 访问本机文件）的面板就靠它——点运行时
-              先在作品目录里起这个服务、探活通过再开窗，窗口关闭时服务自动停止。 */}
+              需要本地数据源（跑 git / 读数据库 / 访问本机文件）的面板就靠它。
+              两个字段自 2026-11-16 起是**成对**关系：只填一项时当场报错并挡住提交，
+              因为平台靠 command 起进程、靠 url 探活，缺一个就不能判断服务是否起来。 */}
           {kind === "panel" && (
             <>
-              <label>本地服务启动命令（可选）<input value={command} placeholder="如：node bridge.mjs（在入口所在目录执行）" onChange={(event) => setCommand(event.target.value)} /></label>
-              <label>服务探活地址（可选）<input value={url} placeholder="如：http://127.0.0.1:8791/api/health" onChange={(event) => setUrl(event.target.value)} /></label>
-              <span className="gallery-dialog-hint">两个都填才会自动起服务：点「运行」先拉服务、探活通过再开窗，窗口关闭时服务自动停止。</span>
+              <span className="gallery-dialog-hint">本地服务（可选，下面两项成对填写；都不填 = 面板不依赖平台托管的服务）</span>
+              <label>① 启动命令<input value={command} placeholder="如：node bridge.mjs（前台长期运行，在入口所在目录执行）" onChange={(event) => setCommand(event.target.value)} /></label>
+              <label>② 探活地址（不是面板页面地址）<input value={url} placeholder="如：http://127.0.0.1:8791/api/health（平台只连它判断就绪）" onChange={(event) => setUrl(event.target.value)} /></label>
+              {/* 报错复用现成的红字样式（.gallery-cover-error），不新增 CSS/主题钩子；
+                  role="alert" 让读屏软件在字段变化时把这句话念出来。 */}
+              {panelServicePairError
+                ? <p className="gallery-cover-error" role="alert">{panelServicePairError}</p>
+                : <span className="gallery-dialog-hint">
+                    {command.trim() && url.trim()
+                      ? "点「运行」会先探活：地址已可达就复用它（外部服务，平台不启动、关窗也不会停它）；不可达才在入口所在目录起这个服务、探活通过再开窗。关闭面板时只停止平台自己启动的这个服务；探活地址只用于连端口判断就绪，不会被当作页面打开。"
+                      : "面板直接打开入口网页；需要本地数据源（跑 git / 读数据库 / 访问本机文件）时把上面两项都填上。"}
+                  </span>}
             </>
           )}
           <label>封面图片（可选）<input value={cover} placeholder="工作区相对路径，如 outputs/cover.png；留空自动截图/生成占位" onChange={(event) => setCover(event.target.value)} /></label>
@@ -347,7 +389,7 @@ export function GalleryPublishDialog({ initial, workspace, onSubmit, onClose }: 
         </div>
         <footer>
           <button className="secondary-button" type="button" onClick={onClose}>取消</button>
-          <button className="primary-button" type="submit" disabled={!title.trim() || !path.trim()}>发布</button>
+          <button className="primary-button" type="submit" disabled={blocked}>发布</button>
         </footer>
       </form>
     </div>
