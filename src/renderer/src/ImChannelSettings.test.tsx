@@ -44,9 +44,10 @@ let container: HTMLDivElement;
 let root: Root;
 let sent: RuntimeCommand[];
 
-function seed(overrides: { im?: DesktopSettings["im"]; imStatus?: unknown; imTest?: unknown } = {}): void {
+function seed(overrides: { im?: DesktopSettings["im"]; imStatus?: unknown; imTest?: unknown; agents?: DesktopSettings["agents"] } = {}): void {
   const settings: DesktopSettings = {
     ...baseSettings(),
+    agents: overrides.agents ?? [],
     ...(overrides.im !== undefined ? { im: overrides.im } : {})
   };
   useDesktopStore.setState({
@@ -179,6 +180,32 @@ describe("ImChannelSettings", () => {
     const save = sent.find((command) => command.type === "im.channel.save");
     expect(save?.type === "im.channel.save" && save.enabled).toBe(false);
     ackSave({ ok: true, channel: FEISHU, enabled: false });
+  });
+
+  it("回复助手：只列未归档助手，选中的 agentId 随保存落盘（已保存的必须原样带回去）", () => {
+    const agents = [
+      { id: "default", name: "默认助手" },
+      { id: "amber", name: "专治疑难杂症" },
+      { id: "old", name: "已归档助手", archived: true }
+    ] as unknown as DesktopSettings["agents"];
+    seed({ im: { enabled: true, channels: [{ ...FEISHU, agentId: "amber" }] }, agents });
+    render();
+    const agent = container.querySelector('[data-control="im-feishu-agent"]') as HTMLSelectElement;
+    expect(agent.value).toBe("amber");
+    expect([...agent.options].map((option) => option.textContent)).toEqual(["跟随当前助手（缺省）", "默认助手", "专治疑难杂症"]);
+
+    act(() => input("im-feishu-save").click());
+    const kept = sent.find((command) => command.type === "im.channel.save");
+    expect(kept?.type === "im.channel.save" && kept.channel.agentId).toBe("amber");
+    ackSave({ ok: true, channel: { ...FEISHU, agentId: "amber" }, enabled: true });
+
+    act(() => {
+      agent.value = "default";
+      agent.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    act(() => input("im-feishu-save").click());
+    const changed = [...sent].reverse().find((command) => command.type === "im.channel.save");
+    expect(changed?.type === "im.channel.save" && changed.channel.agentId).toBe("default");
   });
 
   it("tests the connection with the draft App ID (not the stale saved one)", () => {

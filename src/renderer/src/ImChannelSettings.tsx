@@ -42,6 +42,7 @@ interface DraftState {
   appId: string;
   allowFrom: string;
   accessMode: AccessMode;
+  agentId: string;
   workspace: string;
   approvalMinutes: string;
   ack: boolean;
@@ -53,6 +54,7 @@ function draftFromChannel(channel: ImChannelConfig | undefined): DraftState {
     appId: channel?.appId ?? "",
     allowFrom: (channel?.allowFrom ?? []).join("\n"),
     accessMode: channel?.accessMode ?? "workspace",
+    agentId: channel?.agentId ?? "",
     workspace: channel?.workspace ?? "",
     approvalMinutes: String(Math.round((channel?.approvalTimeoutMs ?? DEFAULT_APPROVAL_MINUTES * 60_000) / 60_000)),
     ack: channel?.ack !== false
@@ -128,6 +130,8 @@ function FeishuChannelDetail({ masterEnabled }: { masterEnabled: boolean }): Rea
   const imSave = useDesktopStore((state) => state.imSave);
   const currentWorkspace = useDesktopStore((state) => state.snapshot.workspace);
   const savedChannel = settings.im?.channels.find((channel) => channel.id === FEISHU_CHANNEL_ID);
+  /** 回复助手选项：与「新建话题」同口径（只列未归档的助手）。 */
+  const agentOptions = (settings.agents ?? []).filter((agent) => !agent.archived);
   const [draft, setDraft] = useState<DraftState>(() => draftFromChannel(savedChannel));
   const [secret, setSecret] = useState("");
   const [secretConfigured, setSecretConfigured] = useState(savedChannel?.appSecretConfigured === true);
@@ -199,6 +203,7 @@ function FeishuChannelDetail({ masterEnabled }: { masterEnabled: boolean }): Rea
       appId: draft.appId.trim(),
       allowFrom: parseAllowFromInput(draft.allowFrom),
       accessMode: draft.accessMode,
+      ...(draft.agentId.trim() ? { agentId: draft.agentId.trim() } : {}),
       ...(draft.workspace.trim() ? { workspace: draft.workspace.trim() } : {}),
       ...(approvalTimeoutMs !== undefined ? { approvalTimeoutMs } : {}),
       ...(draft.ack ? {} : { ack: false }),
@@ -307,6 +312,19 @@ function FeishuChannelDetail({ masterEnabled }: { masterEnabled: boolean }): Rea
             >
               {ACCESS_MODE_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>回复助手（换助手后，下一条新消息会开新话题，旧话题保留）</span>
+            <select
+              data-control="im-feishu-agent"
+              value={draft.agentId}
+              onChange={(event) => patchDraft({ agentId: event.target.value })}
+            >
+              <option value="">跟随当前助手（缺省）</option>
+              {agentOptions.map((agent) => (
+                <option key={agent.id} value={agent.id}>{agent.name}</option>
               ))}
             </select>
           </label>

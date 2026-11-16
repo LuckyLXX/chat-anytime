@@ -40,6 +40,7 @@ interface Draft {
   port: string;
   allowFrom: string;
   accessMode: AccessMode;
+  agentId: string;
   workspace: string;
   approvalMinutes: string;
 }
@@ -53,6 +54,7 @@ function draftFromChannel(channel: ImChannelConfig | undefined, id: string): Dra
     port: String(channel?.port ?? IM_CUSTOM_DEFAULT_PORT),
     allowFrom: (channel?.allowFrom ?? []).join("\n"),
     accessMode: channel?.accessMode ?? "workspace",
+    agentId: channel?.agentId ?? "",
     workspace: channel?.workspace ?? "",
     approvalMinutes: String(Math.round((channel?.approvalTimeoutMs ?? DEFAULT_APPROVAL_MINUTES * 60_000) / 60_000))
   };
@@ -98,6 +100,7 @@ interface Props {
 }
 
 export function ImCustomChannelSettings({ channelId, channel, initialToken, masterEnabled, onDeleted, onCancelCreate }: Props): ReactNode {
+  const settings = useDesktopStore((state) => state.settings);
   const imStatus = useDesktopStore((state) => state.imStatus);
   const imSave = useDesktopStore((state) => state.imSave);
   const imTest = useDesktopStore((state) => state.imTest);
@@ -110,6 +113,8 @@ export function ImCustomChannelSettings({ channelId, channel, initialToken, mast
   const [testing, setTesting] = useState(false);
   const [savedAt, setSavedAt] = useState<number | undefined>(undefined);
   const [saveError, setSaveError] = useState<string | undefined>(undefined);
+  /** 回复助手选项：与「新建话题」同口径——只列未归档的助手。 */
+  const agentOptions = (settings.agents ?? []).filter((agent) => !agent.archived);
   const pendingSaveRef = useRef<string | undefined>(undefined);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
@@ -183,6 +188,7 @@ export function ImCustomChannelSettings({ channelId, channel, initialToken, mast
       port: Number.isFinite(portNumber) && portNumber >= 0 ? Math.round(portNumber) : IM_CUSTOM_DEFAULT_PORT,
       allowFrom: parseAllowFromInput(draft.allowFrom),
       accessMode: draft.accessMode,
+      ...(draft.agentId.trim() ? { agentId: draft.agentId.trim() } : {}),
       ...(draft.workspace.trim() ? { workspace: draft.workspace.trim() } : {}),
       ...(approvalTimeoutMs !== undefined ? { approvalTimeoutMs } : {}),
       ack: false,
@@ -271,7 +277,7 @@ export function ImCustomChannelSettings({ channelId, channel, initialToken, mast
 
         <div className="im-channel-grid">
           <label>
-            <span>名称</span>
+            <span>名称（会话标题的前缀；改名只影响之后新建的话题）</span>
             <input
               type="text"
               data-control="im-custom-label"
@@ -328,6 +334,19 @@ export function ImCustomChannelSettings({ channelId, channel, initialToken, mast
             >
               {ACCESS_MODE_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>回复助手（换助手后，下一条新消息会开新话题，旧话题保留）</span>
+            <select
+              data-control="im-custom-agent"
+              value={draft.agentId}
+              onChange={(event) => patch({ agentId: event.target.value })}
+            >
+              <option value="">跟随当前助手（缺省）</option>
+              {agentOptions.map((agent) => (
+                <option key={agent.id} value={agent.id}>{agent.name}</option>
               ))}
             </select>
           </label>

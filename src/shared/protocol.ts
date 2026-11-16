@@ -386,7 +386,7 @@ export interface ImChannelConfig {
   accessMode: AccessMode;
   /** 缺省用 defaultWorkspace / lastWorkspace。 */
   workspace?: string;
-  /** 缺省用 currentAgentId。 */
+  /** 缺省用 currentAgentId。两个通道详情面板都有下拉（`im-feishu-agent` / `im-custom-agent`），保存时必须原样回传，否则会被清掉。 */
   agentId?: string;
   /** 审批超时（毫秒），缺省 600000；超时自动拒绝。 */
   approvalTimeoutMs?: number;

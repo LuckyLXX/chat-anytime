@@ -47,17 +47,26 @@ const OTHER: ImChannelConfig = {
   ...CUSTOM,
   id: "custom-ef34gh",
   label: "另一个通道",
-  port: 8788
+  port: 8788,
+  agentId: "amber"
 };
+
+/** 助手选项来源（与「新建话题」同口径：只列未归档的）。 */
+const AGENTS = [
+  { id: "default", name: "默认助手" },
+  { id: "amber", name: "专治疑难杂症" },
+  { id: "old", name: "已归档助手", archived: true }
+] as unknown as DesktopSettings["agents"];
 
 let container: HTMLDivElement;
 let root: Root;
 let sent: RuntimeCommand[];
 let nav: { deleted: string[]; canceled: string[] };
 
-function seed(overrides: { channels?: ImChannelConfig[]; enabled?: boolean; imStatus?: unknown; imTest?: unknown } = {}): void {
+function seed(overrides: { channels?: ImChannelConfig[]; enabled?: boolean; imStatus?: unknown; imTest?: unknown; agents?: DesktopSettings["agents"] } = {}): void {
   const settings: DesktopSettings = {
     ...baseSettings(),
+    agents: overrides.agents ?? [],
     im: { enabled: overrides.enabled ?? true, channels: overrides.channels ?? [CUSTOM] }
   };
   useDesktopStore.setState({
@@ -116,6 +125,16 @@ function input(control: string): HTMLInputElement {
   const element = container.querySelector(`[data-control="${control}"]`);
   if (!element) throw new Error(`找不到控件 ${control}`);
   return element as HTMLInputElement;
+}
+
+/** 下拉选择：React 的 select onChange 直接走 change 事件（不做 value tracker 比较）。 */
+function select(control: string, value: string): void {
+  const element = container.querySelector(`[data-control="${control}"]`) as HTMLSelectElement | null;
+  if (!element) throw new Error(`找不到控件 ${control}`);
+  act(() => {
+    element.value = value;
+    element.dispatchEvent(new Event("change", { bubbles: true }));
+  });
 }
 
 /** 模拟主进程回执（im.save-result，requestId 取自刚才那条保存命令）。 */
@@ -198,6 +217,34 @@ describe("ImCustomChannelSettings", () => {
     render({ channelId: OTHER.id, channel: OTHER });
     expect(input("im-custom-label").value).toBe("另一个通道");
     expect(input("im-custom-port").value).toBe("8788");
+  });
+
+  it("回复助手：只列未归档助手，选中后保存载荷带 agentId（不选则不带）", () => {
+    seed({ channels: [CUSTOM], agents: AGENTS });
+    render();
+    const agent = container.querySelector('[data-control="im-custom-agent"]') as HTMLSelectElement;
+    expect(agent.value).toBe("");
+    expect([...agent.options].map((option) => option.textContent)).toEqual(["跟随当前助手（缺省）", "默认助手", "专治疑难杂症"]);
+
+    act(() => (container.querySelector('[data-control="im-custom-save"]') as HTMLButtonElement).click());
+    const plain = [...sent].reverse().find((command) => command.type === "im.channel.save");
+    expect(plain?.type === "im.channel.save" && "agentId" in plain.channel).toBe(false);
+    // 保存按钮在回执到达前是 disabled：先 ack，否则第二次点击点不动。
+    ackSave({ ok: true });
+
+    select("im-custom-agent", "amber");
+    act(() => (container.querySelector('[data-control="im-custom-save"]') as HTMLButtonElement).click());
+    const save = [...sent].reverse().find((command) => command.type === "im.channel.save");
+    expect(save?.type === "im.channel.save" && save.channel.agentId).toBe("amber");
+  });
+
+  it("已保存通道的 agentId 会回填，且保存时必须原样带回去（否则会被静默清掉）", () => {
+    seed({ channels: [OTHER], agents: AGENTS });
+    render({ channelId: OTHER.id, channel: OTHER });
+    expect(((container.querySelector('[data-control="im-custom-agent"]') as HTMLSelectElement).value)).toBe("amber");
+    act(() => (container.querySelector('[data-control="im-custom-save"]') as HTMLButtonElement).click());
+    const save = [...sent].reverse().find((command) => command.type === "im.channel.save");
+    expect(save?.type === "im.channel.save" && save.channel.agentId).toBe("amber");
   });
 
   it("总开关关着时明确提示「保存也不会监听」", () => {
