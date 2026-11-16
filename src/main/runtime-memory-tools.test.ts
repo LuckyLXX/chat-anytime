@@ -200,6 +200,19 @@ describe("memory prompt blocks", () => {
     expect(block).toContain("无行动不记忆");
   });
 
+  it("governance block names the write/no-write criteria (code is the source of truth; decisions carry their rejected options)", () => {
+    // 2026-11-16 用户口径：记忆只留关键实测点与「方案为啥舍弃」这类关键决策点，
+    // 代码复述与改动流水不进记忆。这四条是写入口径的骨架，删掉就会退回到「什么都记」。
+    const block = buildMemorySystemPromptBlock();
+    expect(block).toContain("代码是最终事实源");
+    expect(block).toContain("关键决策点");
+    expect(block).toContain("被否决");
+    expect(block).toContain("写前查重");
+    expect(block).toContain("改动流水");
+    expect(block).toContain("AGENTS.md");
+    expect(block).toContain("关键实测点");
+  });
+
   it("governance block requires an action-verified source for new memories", () => {
     const block = buildMemorySystemPromptBlock();
     // 来源要求：必须来自成功工具调用或用户陈述（用户说「记住 X」也是合法来源）。
