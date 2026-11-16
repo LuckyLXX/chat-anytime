@@ -247,6 +247,63 @@ describe("ImCustomChannelSettings", () => {
     expect(save?.type === "im.channel.save" && save.channel.agentId).toBe("amber");
   });
 
+  it("Token：点「生成」直接给明文，显示/隐藏可切换（只是本地文本框类型）", () => {
+    render();
+    const token = input("im-custom-token");
+    expect(token.type).toBe("password");
+    const reveal = container.querySelector('[data-control="im-custom-token-reveal"]') as HTMLButtonElement;
+    // 没有 Token 时显示/复制都不可点（避免对着空串操作）。
+    expect(reveal.disabled).toBe(true);
+
+    act(() => [...container.querySelectorAll("button")].find((item) => item.textContent?.trim() === "生成")!.click());
+    expect(input("im-custom-token").value.length).toBeGreaterThanOrEqual(32);
+    expect(input("im-custom-token").type).toBe("text");
+
+    act(() => (container.querySelector('[data-control="im-custom-token-reveal"]') as HTMLButtonElement).click());
+    expect(input("im-custom-token").type).toBe("password");
+    act(() => (container.querySelector('[data-control="im-custom-token-reveal"]') as HTMLButtonElement).click());
+    expect(input("im-custom-token").type).toBe("text");
+  });
+
+  it("Token：「复制」把刚生成的明文写进剪贴板，并给一次已复制反馈", async () => {
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    render();
+    act(() => [...container.querySelectorAll("button")].find((item) => item.textContent?.trim() === "生成")!.click());
+    const generated = input("im-custom-token").value;
+    await act(async () => {
+      (container.querySelector('[data-control="im-custom-token-copy"]') as HTMLButtonElement).click();
+      await Promise.resolve();
+    });
+    expect(writeText).toHaveBeenCalledWith(generated);
+    expect(container.querySelector('[data-control="im-custom-token-copy"]')?.textContent).toContain("已复制");
+  });
+
+  it("Token：复制失败不静默（提示手动选中复制）", async () => {
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText: async () => { throw new Error("denied"); } },
+      configurable: true
+    });
+    render();
+    act(() => [...container.querySelectorAll("button")].find((item) => item.textContent?.trim() === "生成")!.click());
+    await act(async () => {
+      (container.querySelector('[data-control="im-custom-token-copy"]') as HTMLButtonElement).click();
+      await Promise.resolve();
+    });
+    expect(container.querySelector(".im-custom-token-note")?.textContent).toContain("复制失败");
+  });
+
+  it("Token：保存之后不可再查看——明文清空并提示「只能在保存前拿到」", () => {
+    render({ channelId: "custom-new2", channel: undefined, initialToken: "generated-token-abcdef" });
+    act(() => (container.querySelector('[data-control="im-custom-save"]') as HTMLButtonElement).click());
+    const save = [...sent].reverse().find((command) => command.type === "im.channel.save");
+    if (save?.type !== "im.channel.save") throw new Error("没有发出保存命令");
+    ackSave({ ok: true, channel: { ...save.channel, appSecretConfigured: true } });
+    expect(input("im-custom-token").value).toBe("");
+    expect(input("im-custom-token").type).toBe("password");
+    expect(container.textContent).toContain("之后无法再查看明文");
+  });
+
   it("总开关关着时明确提示「保存也不会监听」", () => {
     render({ masterEnabled: false });
     expect(container.textContent).toContain("总开关没开");

@@ -1,4 +1,4 @@
-import { ChevronDown, PlugZap, Save, Trash2, Wifi, WifiOff } from "lucide-react";
+import { ChevronDown, Copy, Eye, EyeOff, PlugZap, Save, Trash2, Wifi, WifiOff } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { AccessMode, ImChannelConfig, ImCustomHost } from "../../shared/protocol";
 import { IM_CUSTOM_DEFAULT_PORT, normalizeImAllowFrom } from "../../shared/im";
@@ -109,6 +109,14 @@ export function ImCustomChannelSettings({ channelId, channel, initialToken, mast
   const [draft, setDraft] = useState<Draft | null>(channelId ? draftFromChannel(channel, channelId) : null);
   const [token, setToken] = useState(initialToken ?? "");
   const [tokenConfigured, setTokenConfigured] = useState(channel?.appSecretConfigured === true);
+  /** Token 明文只在**保存前**存在于渲染端：显示/隐藏只是本地的文本框类型切换。 */
+  const [tokenVisible, setTokenVisible] = useState(false);
+  const [tokenFeedback, setTokenFeedback] = useState<"copied" | "failed" | undefined>(undefined);
+  /** 保存成功后的一次性提示（“此后看不到明文”）。只在本次真的提交了新 Token 时出现。 */
+  const [tokenSavedNotice, setTokenSavedNotice] = useState<string | undefined>(undefined);
+  /** 本次保存是不是带了新 Token（决定回执后要不要提醒“抄下来”）。 */
+  const sentTokenRef = useRef(false);
+  const feedbackTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [savedAt, setSavedAt] = useState<number | undefined>(undefined);
@@ -127,6 +135,9 @@ export function ImCustomChannelSettings({ channelId, channel, initialToken, mast
       setDraft(null);
       setToken("");
       setTokenConfigured(false);
+      setTokenVisible(false);
+      setTokenFeedback(undefined);
+      setTokenSavedNotice(undefined);
       setSavedAt(undefined);
       setSaveError(undefined);
       return;
@@ -134,6 +145,9 @@ export function ImCustomChannelSettings({ channelId, channel, initialToken, mast
     setDraft(draftFromChannel(channel, channelId));
     setToken(initialToken ?? "");
     setTokenConfigured(channel?.appSecretConfigured === true);
+    setTokenVisible(false);
+    setTokenFeedback(undefined);
+    setTokenSavedNotice(undefined);
     setSavedAt(undefined);
     setSaveError(undefined);
   }, [channelId]);
@@ -152,7 +166,13 @@ export function ImCustomChannelSettings({ channelId, channel, initialToken, mast
       setSaveError(undefined);
       setSavedAt(imSave.at);
       setToken("");
+      setTokenVisible(false);
       setTokenConfigured(true);
+      // 明文不驻留：回执一到就清空，并提醒「只有刚才那一刻能看到」。
+      setTokenSavedNotice(sentTokenRef.current
+        ? "Token 已写入系统加密存储，之后无法再查看明文。若还没抄进脚本，点「生成」换一个新的再复制。"
+        : undefined);
+      sentTokenRef.current = false;
       // 不关表单：两段式布局里详情常驻，左栏列表由 im.settings 快照刷新。
     } else {
       setSaveError(imSave.message);
@@ -165,7 +185,35 @@ export function ImCustomChannelSettings({ channelId, channel, initialToken, mast
 
   useEffect(() => () => {
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
   }, []);
+
+  /** 生成即显示：用户点「生成」就是为了拿到这串，默认打码等于让他再踩一次坑。 */
+  function generateToken(): void {
+    setToken(newToken());
+    setTokenVisible(true);
+    setTokenFeedback(undefined);
+    setTokenSavedNotice(undefined);
+  }
+
+  /** 复制到剪贴板：成功/失败都给一次短反馈，不留静默失败。 */
+  async function copyToken(): Promise<void> {
+    const value = token.trim();
+    if (!value) return;
+    let ok = false;
+    try {
+      await navigator.clipboard.writeText(value);
+      ok = true;
+    } catch {
+      ok = false;
+    }
+    setTokenFeedback(ok ? "copied" : "failed");
+    if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
+    feedbackTimerRef.current = setTimeout(() => {
+      feedbackTimerRef.current = undefined;
+      setTokenFeedback(undefined);
+    }, 2_000);
+  }
 
   function patch(patchValue: Partial<Draft>): void {
     setDraft((current) => (current ? { ...current, ...patchValue } : current));
@@ -177,6 +225,7 @@ export function ImCustomChannelSettings({ channelId, channel, initialToken, mast
     const approvalTimeoutMs = Number.isFinite(minutes) && minutes > 0 ? Math.round(minutes * 60_000) : undefined;
     const portNumber = Number(draft.port);
     const pendingToken = token.trim();
+    sentTokenRef.current = Boolean(pendingToken);
     const nextTokenConfigured = tokenConfigured || Boolean(pendingToken) || channel?.appSecretConfigured === true;
     const nextChannel: ImChannelConfig = {
       id: draft.id,
@@ -290,17 +339,48 @@ export function ImCustomChannelSettings({ channelId, channel, initialToken, mast
             <span>接入 Token{tokenConfigured ? "（已保存）" : ""}</span>
             <span className="im-custom-token-row">
               <input
-                type="password"
+                type={tokenVisible ? "text" : "password"}
                 data-control="im-custom-token"
-                placeholder={tokenConfigured ? "已保存，留空表示不修改" : "脚本请求时要带的令牌"}
+                placeholder={tokenConfigured ? "已保存，留空表示不修改（明文不可再查看）" : "脚本请求时要带的令牌"}
                 value={token}
                 onChange={(event) => setToken(event.target.value)}
                 autoComplete="new-password"
               />
-              <button className="secondary-button compact-button" type="button" onClick={() => setToken(newToken())}>
+              <button className="secondary-button compact-button" type="button" data-control="im-custom-token-generate" onClick={generateToken}>
                 生成
               </button>
+              <button
+                className="secondary-button compact-button"
+                type="button"
+                data-control="im-custom-token-reveal"
+                aria-pressed={tokenVisible}
+                aria-label={tokenVisible ? "隐藏 Token" : "显示 Token"}
+                title={tokenVisible ? "隐藏" : "显示明文（只在本机、只到保存前）"}
+                disabled={!token}
+                onClick={() => setTokenVisible((current) => !current)}
+              >
+                {tokenVisible ? <EyeOff size={13} /> : <Eye size={13} />}
+              </button>
+              <button
+                className="secondary-button compact-button"
+                type="button"
+                data-control="im-custom-token-copy"
+                aria-label="复制 Token"
+                title="复制到剪贴板"
+                disabled={!token}
+                onClick={() => void copyToken()}
+              >
+                <Copy size={13} />
+                {tokenFeedback === "copied" ? "已复制" : "复制"}
+              </button>
             </span>
+            {tokenFeedback === "failed" && (
+              <small className="im-custom-token-note">复制失败（系统剪贴板不可用）：点左侧眼睛图标显示明文后手动选中复制。</small>
+            )}
+            {tokenSavedNotice && <small className="im-custom-token-note">{tokenSavedNotice}</small>}
+            {!token && tokenConfigured && !tokenSavedNotice && (
+              <small className="im-custom-token-note">明文只存在系统加密存储里，界面上无法再查看；要换新的请点「生成」。</small>
+            )}
           </label>
           <label>
             <span>监听地址</span>
