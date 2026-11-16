@@ -55,7 +55,7 @@ Token 不对统一 `401`，并带 `WWW-Authenticate: Bearer`。Token 与飞书 A
 
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
-| `peerId` | ✅ | 发送人标识（账号/工号/openId 都行，≤120 字）。**一个 peerId 对应一条 PiDesktop 话题** |
+| `peerId` | ✅ | 发送人标识（账号/工号/openId 都行，≤120 字）。**一个 peerId 对应一条 PiDesktop 话题**，话题标题是 `<通道名> · <peerId>`；通道改名只影响之后新建的话题（旧话题可在列表里手动改名，或发 `/new`） |
 | `text` | ✅ | 消息文本（≤20,000 字符，超出截断）。支持 `/status`、`/stop`、`/new`、`/help`、`/allow <码>`、`/deny <码>` 指令 |
 | `messageId` | 可选 | 上游消息 id。**同一条消息重投（同 id）只处理一次**；不传则每次生成新的 |
 | `replyUrl` | 可选 | 答案回调地址（`http(s)://`）。不传就只能轮询 |

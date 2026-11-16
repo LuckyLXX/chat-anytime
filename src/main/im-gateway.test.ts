@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { DesktopSettings, ImChannelConfig, RuntimeCommand, RuntimeMessage } from "../shared/protocol";
 import { defaultSettings } from "./settings";
-import { ImGateway, type ImApiLike, type ImWsHandlers } from "./im-gateway";
+import { ImGateway, imSessionTitle, IM_SESSION_TITLE_MAX, type ImApiLike, type ImWsHandlers } from "./im-gateway";
 import type { ImApiResult } from "./im-feishu-api";
 import type { ImWsCardAck } from "./im-feishu-ws";
 import { ImStore } from "./im-store";
@@ -688,5 +688,43 @@ describe("自定义通道（脚本接入的本地 HTTP 端点）", () => {
     await flush(20);
     const ensures = harness.commands.filter((command) => command.type === "im.session.ensure");
     expect(ensures).toHaveLength(1);
+  });
+});
+
+describe("会话标题按通道名生成", () => {
+  const base = (patch: Partial<ImChannelConfig>): ImChannelConfig => ({
+    id: "hook",
+    kind: "custom",
+    enabled: true,
+    appId: "",
+    allowFrom: ["zhangsan"],
+    accessMode: "workspace",
+    ...patch
+  });
+
+  it("自定义通道用「label · 完整 peerId」（peerId 是脚本给的账号，不截断）", () => {
+    expect(imSessionTitle(base({ label: "内网工单" }), "zhangsan")).toBe("内网工单 · zhangsan");
+  });
+
+  it("飞书用「label · open_id 前 8 位」；label 为空时回落中文名", () => {
+    const feishu = base({ id: "feishu", kind: "feishu", appId: "cli_1", allowFrom: ["ou_owner"] });
+    expect(imSessionTitle({ ...feishu, label: "值班机器人" }, "ou_0123456789")).toBe("值班机器人 · ou_01234");
+    expect(imSessionTitle(feishu, "ou_0123456789")).toBe("飞书 · ou_01234");
+    expect(imSessionTitle(base({}), "zhangsan")).toBe("自定义通道 · zhangsan");
+  });
+
+  it("超长标题按上限截断（peerId 上限 120 字，不能把侧栏撑爆）", () => {
+    const title = imSessionTitle(base({ label: "内网工单" }), "p".repeat(120));
+    expect(title.length).toBe(IM_SESSION_TITLE_MAX);
+    expect(title.startsWith("内网工单 · p")).toBe(true);
+  });
+
+  it("新会话请求带的是通道名，而不是写死的「飞书」", async () => {
+    const harness = await createHarness({ channel: { label: "值班机器人" } });
+    harness.gateway.start();
+    harness.handlers().onEvent(feishuEvent());
+    await flush();
+    const ensure = harness.commands.find((command) => command.type === "im.session.ensure");
+    expect(ensure?.type === "im.session.ensure" && ensure.title).toBe("值班机器人 · ou_owner");
   });
 });

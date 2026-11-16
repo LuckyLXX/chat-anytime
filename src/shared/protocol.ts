@@ -1798,7 +1798,8 @@ export type SessionTerminalStatus = Exclude<SessionRunStatus, "running">;
 
 /**
  * 会话来源标记。两种：自动化后台运行（列表默认隐藏，由任务面板回看）与
- * IM 通道会话（列表**可见**，标题写 `飞书 · xxxxxxxx`，用户可自行改名）。
+ * IM 通道会话（列表**可见**，标题写 `<通道名> · <对方标识>`——自定义通道用 label，
+ * 飞书用「飞书」；用户可自行改名，通道改名也只影响之后新建的话题）。
  *
  * 写入方式：会话创建时通过 Pi 的 `appendCustomEntry` 落一条 custom entry
  * （`SESSION_ORIGIN_CUSTOM_TYPE`），摘要缓存解析后投影到 SessionSummary.origin；
@@ -2854,7 +2855,7 @@ export type RuntimeCommand =
     requestId: string;
     /** 稳定会话键 `feishu:<channelId>:p2p:<open_id>`（写进 origin，供绑定与展示）。 */
     sessionKey: string;
-    /** 新会话的标题（`飞书 · <open_id 前 8 位>`）。 */
+    /** 新会话的标题（`<通道名> · <对方标识>`：飞书取 open_id 前 8 位，自定义通道用完整 peerId）。 */
     title: string;
     /** 已绑定的会话文件路径；文件不存在/打不开时自动新建（created=true）。 */
     sessionPath?: string;

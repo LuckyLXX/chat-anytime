@@ -60,6 +60,23 @@ export const IM_MAX_QUEUED_MESSAGES = 3;
 export const IM_ENSURE_TIMEOUT_MS = 120_000;
 /** 单张卡片正文的字节预算：飞书上限 30KB，扣掉 JSON 包装（宽屏/标题/markdown 标签）的余量。 */
 export const IM_CARD_TEXT_BYTES = 28 * 1024;
+/** 会话标题上限：label（≤60）+ 分隔 + peerId（≤120）可能很长，标题只服务列表可读性，截断即可。 */
+export const IM_SESSION_TITLE_MAX = 80;
+
+/**
+ * IM 会话标题：`<通道名> · <对方标识>`。
+ *
+ * - 通道名取配置里的 `label`（自定义通道由用户自己起名，如「内网工单」），缺省回落 kind 的中文名；
+ * - 飞书的 openId 是平台长串（`ou_…`，前 8 位足够区分）⇒ 截断；自定义通道的 peerId 由脚本给出、
+ *   通常是账号/工号 ⇒ 原样保留（截断会把「zhangsan」切成半截）。
+ *
+ * 注意：标题只在**新建**会话时生效，通道改名不会重写已有话题（用户可自行改名或发 `/new`）。
+ */
+export function imSessionTitle(config: ImChannelConfig, openId: string): string {
+  const label = config.label?.trim() || (config.kind === "feishu" ? "飞书" : "自定义通道");
+  const peer = config.kind === "feishu" ? openId.slice(0, 8) : openId;
+  return `${label} · ${peer}`.slice(0, IM_SESSION_TITLE_MAX);
+}
 
 export interface ImApiLike {
   tenantToken(): Promise<ImApiResult<string>>;
@@ -695,7 +712,7 @@ export class ImGateway {
       type: "im.session.ensure",
       requestId,
       sessionKey: conversation.key,
-      title: `飞书 · ${conversation.openId.slice(0, 8)}`,
+      title: imSessionTitle(config, conversation.openId),
       ...(conversation.sessionPath ? { sessionPath: conversation.sessionPath } : {}),
       ...(config.workspace ? { workspace: config.workspace } : {}),
       ...(config.agentId ? { agentId: config.agentId } : {}),
