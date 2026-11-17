@@ -78,6 +78,22 @@ export function imSessionTitle(config: ImChannelConfig, openId: string): string 
   return `${label} · ${peer}`.slice(0, IM_SESSION_TITLE_MAX);
 }
 
+/**
+ * 入站放行判定（白名单 / 放行所有人）。
+ *
+ * 安全默认是 deny-first：白名单为空 = 不服务任何消息；非空则必须命中。
+ * `allowAny`（只有自定义通道有）是用户显式吞下的例外：鉴权已经在上游脚本里做了，
+ * 这里不再按 peerId 限制——但去重 / 指令 / 会话绑定照旧，且**每个 peerId 仍是一条
+ * 独立话题**（会话键 `custom:<channelId>:p2p:<peerId>`，绑定落盘长期不变）。
+ */
+export type ImAllowDecision = "allow" | "empty-allowlist" | "not-listed";
+
+export function decideInboundAllow(config: Pick<ImChannelConfig, "kind" | "allowFrom" | "allowAny">, openId: string): ImAllowDecision {
+  if (config.kind === "custom" && config.allowAny === true) return "allow";
+  if (config.allowFrom.length === 0) return "empty-allowlist";
+  return config.allowFrom.includes(openId) ? "allow" : "not-listed";
+}
+
 export interface ImApiLike {
   tenantToken(): Promise<ImApiResult<string>>;
   botInfo(): Promise<ImApiResult<{ name: string; openId?: string }>>;
@@ -252,8 +268,13 @@ export class ImGateway {
         this.channels.set(channel.id, { config: channel, secret: "", api: this.apiFor(channel, ""), ws: this.noopWs(), status: { ...base, state: "disabled", message: channel.kind === "feishu" ? "未保存 App Secret" : "未设置接入 Token" } });
         continue;
       }
-      if (channel.allowFrom.length === 0) {
-        this.log("warn", `通道「${channel.id}」白名单为空：任何消息都不会被服务（请在设置页填写白名单）`);
+      if (channel.allowFrom.length === 0 && channel.kind === "custom" && channel.allowAny === true) {
+        this.log("info", `通道「${channel.id}」已放行所有 peerId（鉴权由上游脚本负责，每个 peerId 一条独立话题）`);
+        if (channel.host === "0.0.0.0") {
+          this.log("warn", `通道「${channel.id}」监听 0.0.0.0 且放行所有人：内网任意机器都能驱动 AI（消耗 token、读写工作区），建议监听地址改回 127.0.0.1`);
+        }
+      } else if (channel.allowFrom.length === 0 && channel.allowAny !== true) {
+        this.log("warn", `通道「${channel.id}」白名单为空：任何消息都不会被服务（请在设置页填写白名单，或对自定义通道勾选「放行所有 peerId」）`);
       }
       const transport = this.createTransport(channel, secret);
       this.channels.set(channel.id, { config: channel, secret, api: transport.api, ws: transport.ws, status: { ...base, state: "connecting" } });
@@ -612,16 +633,16 @@ export class ImGateway {
     if (this.store.hasSeen(channelKey, message.messageId)) return;
     this.store.markSeen(channelKey, message.messageId);
 
-    if (channel.config.allowFrom.length === 0) {
+    const decision = decideInboundAllow(channel.config, message.openId);
+    if (decision !== "allow") {
       const idLabel = channel.config.kind === "feishu" ? "open_id" : "peerId";
-      await this.notifyUnauthorized(channel, message, `未配置授权名单，机器人不会执行任何指令。请把下面这行 ${idLabel} 填进设置 → 消息通道的白名单：`);
-      this.log("warn", `收到消息但白名单为空（${idLabel}=${message.openId}）`);
-      return;
-    }
-    if (!channel.config.allowFrom.includes(message.openId)) {
-      const idLabel = channel.config.kind === "feishu" ? "open_id" : "peerId";
-      await this.notifyUnauthorized(channel, message, `你不在授权名单里，机器人不会执行任何指令。请把下面这行 ${idLabel} 交给管理员加入白名单：`);
-      this.log("warn", `拒绝未授权 open_id=${message.openId}（通道 ${channelId}）`);
+      const prefix = decision === "empty-allowlist"
+        ? `未配置授权名单，机器人不会执行任何指令。请把下面这行 ${idLabel} 填进设置 → 消息通道的白名单：`
+        : `你不在授权名单里，机器人不会执行任何指令。请把下面这行 ${idLabel} 交给管理员加入白名单：`;
+      await this.notifyUnauthorized(channel, message, prefix);
+      this.log("warn", decision === "empty-allowlist"
+        ? `收到消息但白名单为空（${idLabel}=${message.openId}）`
+        : `拒绝未授权 ${idLabel}=${message.openId}（通道 ${channelId}）`);
       return;
     }
 
@@ -733,8 +754,7 @@ export class ImGateway {
     const action = parseImCardAction(body);
     if (!action) return undefined;
     const channel = this.channels.get(channelId);
-    const allowFrom = channel?.config.allowFrom ?? [];
-    if (action.openId && allowFrom.length > 0 && !allowFrom.includes(action.openId)) {
+    if (action.openId && channel && decideInboundAllow(channel.config, action.openId) !== "allow") {
       return { toast: { type: "error", content: "你不在授权名单里" } };
     }
     const approval = this.approvals.get(action.code);

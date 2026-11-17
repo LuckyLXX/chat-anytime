@@ -301,15 +301,15 @@ describe("主题契约五处镜像", () => {
     for (const source of [agents, themeGuide, themeSkill, themeVariables]) {
       expect(source).toContain("im-channel-settings");
     }
-    for (const control of ["im-channel-enable", "im-feishu-enabled", "im-feishu-appid", "im-feishu-secret", "im-feishu-allowfrom", "im-feishu-access", "im-feishu-workspace", "im-feishu-save", "im-feishu-test", "im-feishu-agent", "im-custom-agent", "im-custom-token-generate", "im-custom-token-reveal", "im-custom-token-copy"]) {
+    for (const control of ["im-channel-enable", "im-feishu-enabled", "im-feishu-appid", "im-feishu-secret", "im-feishu-allowfrom", "im-feishu-access", "im-feishu-workspace", "im-feishu-save", "im-feishu-test", "im-feishu-agent", "im-custom-agent", "im-custom-token-generate", "im-custom-token-reveal", "im-custom-token-copy", "im-custom-allow-any"]) {
       expect(themeSkill).toContain(control);
       expect(themeVariables).toContain(control);
       expect(themeCheck).toContain(`"${control}"`);
     }
     expect(themeSkill).toContain("主要区域（44）");
-    expect(themeSkill).toContain("关键控件（152）");
+    expect(themeSkill).toContain("关键控件（153）");
     expect(themeVariables).toContain("`data-pane`（44）");
-    expect(themeVariables).toContain("`data-control`（152）");
+    expect(themeVariables).toContain("`data-control`（153）");
     expect(themeCheck).toContain('"im-channel-settings"');
     expect(themeCheck).toContain('"im-channel-enable"');
   });

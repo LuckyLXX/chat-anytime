@@ -380,6 +380,12 @@ export interface ImChannelConfig {
   host?: ImCustomHost;
   /** 自定义通道：监听端口；缺省或 0 = 每次启动随机（实际端口看通道状态里的 endpoint）。 */
   port?: number;
+  /**
+   * 自定义通道：true = **不校验白名单**，接受任意 peerId（鉴权由上游脚本负责）。
+   * 缺省 false，只对 `kind:"custom"` 生效——飞书是公网平台，open_id 仍受控
+   * （`normalizeImChannel` 在飞书分支直接丢弃该字段）。
+   */
+  allowAny?: boolean;
   /** 白名单：飞书是 open_id（ou_…），自定义通道是脚本给的 peerId；空列表 = 不服务任何消息。 */
   allowFrom: string[];
   /** IM 会话的默认权限：缺省 workspace（写工作区自动放行，bash/ssh/浏览器逐次确认）。 */

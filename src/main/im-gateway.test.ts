@@ -689,6 +689,65 @@ describe("自定义通道（脚本接入的本地 HTTP 端点）", () => {
     const ensures = harness.commands.filter((command) => command.type === "im.session.ensure");
     expect(ensures).toHaveLength(1);
   });
+
+  // 2026-11-17：内网脚本已经做了鉴权，通道侧允许「放行所有 peerId」。
+  // 一人一会话本来就是既有行为（会话键带 peerId、绑定落盘），这里钉住的是**放行**本身。
+  const customHarness = async (patch: Partial<ImChannelConfig>) => {
+    const harness = await createHarness({
+      channel: { id: "hook", kind: "custom", appId: "", host: "127.0.0.1", port: 0, allowFrom: ["ou_owner"], ...patch }
+    });
+    harness.gateway.start();
+    await flush();
+    const base = harness.gateway.status().channels.find((item) => item.channelId === "hook")!.endpoint!;
+    const post = (peerId: string, messageId: string) => fetch(`${base}/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer app-secret" },
+      body: JSON.stringify({ peerId, text: "帮我看看", messageId })
+    });
+    return { harness, post, base };
+  };
+  const ensuresOf = (harness: Awaited<ReturnType<typeof createHarness>>) =>
+    harness.commands.filter((command) => command.type === "im.session.ensure");
+  /** 自定义通道的出站都进 outbox：拒绝提示从 /v1/replies 读回来（不走 fake api）。 */
+  const repliesOf = async (base: string): Promise<string[]> => {
+    const response = await fetch(`${base}/replies?since=0&token=app-secret`);
+    const body = await response.json() as { items?: { text: string }[] };
+    return (body.items ?? []).map((item) => item.text);
+  };
+
+  it("放行所有 peerId：白名单空也受理，且每个 peer 各自一条独立会话", async () => {
+    const { harness, post, base } = await customHarness({ allowFrom: [], allowAny: true });
+    expect((await post("zhangsan", "m-1")).status).toBe(202);
+    await waitFor(() => ensuresOf(harness).length === 1);
+    expect((await post("lisi", "m-2")).status).toBe(202);
+    await waitFor(() => ensuresOf(harness).length === 2);
+    const keys = ensuresOf(harness).map((command) => (command as { sessionKey: string }).sessionKey);
+    expect(new Set(keys)).toEqual(new Set(["custom:hook:p2p:zhangsan", "custom:hook:p2p:lisi"]));
+    expect((await repliesOf(base)).some((text) => text.includes("授权名单"))).toBe(false);
+  });
+
+  it("放行所有 peerId：开关优先于白名单（名单里有别人也照样受理）", async () => {
+    const { harness, post, base } = await customHarness({ allowFrom: ["someone-else"], allowAny: true });
+    expect((await post("zhangsan", "m-3")).status).toBe(202);
+    await waitFor(() => ensuresOf(harness).length === 1);
+    expect((await repliesOf(base)).some((text) => text.includes("授权名单"))).toBe(false);
+  });
+
+  it("allowAny 缺省时白名单空仍拒绝（安全默认不能破）", async () => {
+    const { harness, post, base } = await customHarness({ allowFrom: [] });
+    expect((await post("zhangsan", "m-4")).status).toBe(202);
+    await waitFor(async () => (await repliesOf(base)).some((text) => text.includes("未配置授权名单")));
+    expect(ensuresOf(harness)).toHaveLength(0);
+  });
+
+  it("飞书通道即使配置了 allowAny 也仍按白名单拒绝（公网平台不受这个开关影响）", async () => {
+    const harness = await createHarness({ channel: { allowFrom: ["ou_someone_else"], allowAny: true } });
+    harness.gateway.start();
+    harness.handlers().onEvent(feishuEvent());
+    await flush(20);
+    expect(harness.commands.filter((command) => command.type === "im.session.ensure")).toHaveLength(0);
+    expect(harness.texts.some((text) => text.includes("你不在授权名单里"))).toBe(true);
+  });
 });
 
 describe("会话标题按通道名生成", () => {

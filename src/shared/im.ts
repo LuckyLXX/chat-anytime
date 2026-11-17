@@ -114,6 +114,9 @@ export function normalizeImChannel(value: unknown): ImChannelConfig | undefined 
       appId: "",
       host,
       ...(port !== undefined ? { port } : {}),
+      // 放行所有人只属于自定义通道（鉴权在上游脚本）；飞书分支不展开这个字段，
+      // 即使配置文件里硬写也会被净化掉。
+      ...(raw.allowAny === true ? { allowAny: true } : {}),
       ...shared
     };
   }

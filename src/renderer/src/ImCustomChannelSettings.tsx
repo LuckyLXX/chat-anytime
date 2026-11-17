@@ -39,6 +39,8 @@ interface Draft {
   host: ImCustomHost;
   port: string;
   allowFrom: string;
+  /** 放行所有 peerId（鉴权交给上游脚本）：勾选后白名单不生效。 */
+  allowAny: boolean;
   accessMode: AccessMode;
   agentId: string;
   workspace: string;
@@ -53,6 +55,7 @@ function draftFromChannel(channel: ImChannelConfig | undefined, id: string): Dra
     host: channel?.host ?? "127.0.0.1",
     port: String(channel?.port ?? IM_CUSTOM_DEFAULT_PORT),
     allowFrom: (channel?.allowFrom ?? []).join("\n"),
+    allowAny: channel?.allowAny === true,
     accessMode: channel?.accessMode ?? "workspace",
     agentId: channel?.agentId ?? "",
     workspace: channel?.workspace ?? "",
@@ -236,6 +239,7 @@ export function ImCustomChannelSettings({ channelId, channel, initialToken, mast
       host: draft.host,
       port: Number.isFinite(portNumber) && portNumber >= 0 ? Math.round(portNumber) : IM_CUSTOM_DEFAULT_PORT,
       allowFrom: parseAllowFromInput(draft.allowFrom),
+      ...(draft.allowAny ? { allowAny: true } : {}),
       accessMode: draft.accessMode,
       ...(draft.agentId.trim() ? { agentId: draft.agentId.trim() } : {}),
       ...(draft.workspace.trim() ? { workspace: draft.workspace.trim() } : {}),
@@ -322,6 +326,7 @@ export function ImCustomChannelSettings({ channelId, channel, initialToken, mast
         <p className="im-custom-hint">
           给内网工作软件用：本机起一个 HTTP 端点，脚本把消息 <code>POST</code> 进来，答案按 <code>replyUrl</code> 回调或从 <code>/v1/replies</code> 轮询取。
           只监听本机（可选 0.0.0.0），必须带 Token。<strong>应用没运行 = 端点不存在。</strong>
+          白名单默认空 = 不服务任何人；鉴权在上游脚本里做过就勾选下方「放行所有 peerId」。
         </p>
 
         <div className="im-channel-grid">
@@ -452,16 +457,32 @@ export function ImCustomChannelSettings({ channelId, channel, initialToken, mast
             />
           </label>
           <label className="im-channel-wide">
-            <span>白名单（每行一个 peerId，空 = 不服务任何人）</span>
+            <span>{draft.allowAny ? "白名单（已放行所有人，此名单不生效）" : "白名单（每行一个 peerId，空 = 不服务任何人）"}</span>
             <textarea
               data-control="im-custom-allowfrom"
               rows={2}
-              placeholder={"zhangsan\n脚本里的 peerId，通常用发送人账号/工号"}
+              disabled={draft.allowAny}
+              placeholder={draft.allowAny ? "已放行所有 peerId，无需填写" : "zhangsan\n脚本里的 peerId，通常用发送人账号/工号"}
               value={draft.allowFrom}
               onChange={(event) => patch({ allowFrom: event.target.value })}
             />
           </label>
         </div>
+        <label className="im-channel-switch">
+          <input
+            type="checkbox"
+            data-control="im-custom-allow-any"
+            checked={draft.allowAny}
+            onChange={(event) => patch({ allowAny: event.target.checked })}
+          />
+          <span>
+            放行所有 peerId（鉴权交给上游脚本）——勾选后不再校验白名单。
+            <strong>每个 peerId 自动一条独立话题</strong>（一人一会话，绑定落盘、长期不变），不会挤进同一个会话。
+          </span>
+        </label>
+        {draft.allowAny && draft.host === "0.0.0.0" && (
+          <p className="im-channel-warning">监听 0.0.0.0 + 放行所有人：内网任意机器都能驱动 AI（消耗 token、读写工作区）。建议把监听地址改回 127.0.0.1，只让本机脚本连。</p>
+        )}
         <label className="im-channel-switch">
           <input
             type="checkbox"

@@ -60,6 +60,18 @@ describe("normalizeImChannel", () => {
     expect(normalizeImChannel({ id: "c", kind: "custom", port: "9123" })).toMatchObject({ host: "127.0.0.1", port: 9123 });
   });
 
+  it("自定义通道：allowAny 只有显式 true 才落盘（缺省不写该字段）", () => {
+    expect(normalizeImChannel({ id: "a", kind: "custom", allowAny: true })).toMatchObject({ allowAny: true });
+    expect(normalizeImChannel({ id: "b", kind: "custom", allowAny: false })?.allowAny).toBeUndefined();
+    expect(normalizeImChannel({ id: "c", kind: "custom" })?.allowAny).toBeUndefined();
+    // 字符串 "true" 不算（来自手工编辑 settings.json 的常见错形）。
+    expect(normalizeImChannel({ id: "d", kind: "custom", allowAny: "true" })?.allowAny).toBeUndefined();
+  });
+
+  it("飞书通道丢弃 allowAny（公网平台不能靠一个开关放开所有人）", () => {
+    expect(normalizeImChannel({ id: "feishu", kind: "feishu", appId: "cli_1", allowAny: true })?.allowAny).toBeUndefined();
+  });
+
   it("applies safe defaults (enabled off, workspace access, no allowlist)", () => {
     expect(normalizeImChannel({ id: "feishu", kind: "feishu", appId: "cli_1" })).toEqual({
       id: "feishu",

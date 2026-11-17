@@ -304,6 +304,36 @@ describe("ImCustomChannelSettings", () => {
     expect(container.textContent).toContain("之后无法再查看明文");
   });
 
+  it("放行所有 peerId：勾选后白名单禁用、保存载荷带 allowAny；取消勾选不带该字段", () => {
+    render();
+    expect(input("im-custom-allow-any").checked).toBe(false);
+    expect((container.querySelector('[data-control="im-custom-allowfrom"]') as HTMLTextAreaElement).disabled).toBe(false);
+
+    act(() => input("im-custom-allow-any").click());
+    expect((container.querySelector('[data-control="im-custom-allowfrom"]') as HTMLTextAreaElement).disabled).toBe(true);
+    expect(container.textContent).toContain("已放行所有人");
+    act(() => (container.querySelector('[data-control="im-custom-save"]') as HTMLButtonElement).click());
+    const save = [...sent].reverse().find((command) => command.type === "im.channel.save");
+    expect(save?.type === "im.channel.save" && save.channel.allowAny).toBe(true);
+    ackSave({ ok: true });
+
+    act(() => input("im-custom-allow-any").click());
+    act(() => (container.querySelector('[data-control="im-custom-save"]') as HTMLButtonElement).click());
+    const second = [...sent].reverse().find((command) => command.type === "im.channel.save");
+    expect(second?.type === "im.channel.save" && "allowAny" in second.channel).toBe(false);
+  });
+
+  it("已保存的 allowAny 会回填（否则每次保存都会把这个开关关掉）", () => {
+    const channel = { ...CUSTOM, allowAny: true, allowFrom: [] };
+    seed({ channels: [channel] });
+    render({ channelId: channel.id, channel });
+    expect(input("im-custom-allow-any").checked).toBe(true);
+    expect((container.querySelector('[data-control="im-custom-allowfrom"]') as HTMLTextAreaElement).disabled).toBe(true);
+    act(() => (container.querySelector('[data-control="im-custom-save"]') as HTMLButtonElement).click());
+    const save = [...sent].reverse().find((command) => command.type === "im.channel.save");
+    expect(save?.type === "im.channel.save" && save.channel.allowAny).toBe(true);
+  });
+
   it("总开关关着时明确提示「保存也不会监听」", () => {
     render({ masterEnabled: false });
     expect(container.textContent).toContain("总开关没开");
