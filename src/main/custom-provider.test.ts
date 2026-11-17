@@ -71,7 +71,10 @@ describe("custom OpenAI-compatible models", () => {
       cacheControlFormat: undefined,
       sendSessionAffinityHeaders: false,
       sessionAffinityFormat: "openai",
-      supportsLongCacheRetention: false
+      supportsLongCacheRetention: false,
+      // pi-ai 1.5 新增（缺省 false；此处显式写出以满足 Resolved…Compat 的必填形状）。
+      requiresNonNullAssistantContent: false,
+      requiresToolsWithToolHistory: false
     });
     expect(messages[0]).toMatchObject({ role: "system", content: "你是开发助手" });
   });

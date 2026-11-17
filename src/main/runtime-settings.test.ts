@@ -9,8 +9,9 @@ import { SettingsManager } from "@earendil-works/pi-coding-agent";
 import { withCacheWarmingOff } from "./runtime-settings.js";
 
 // Pi 0.86.0 起 cacheWarming 缺省 "streaming"（长工具运行期间发真实请求保温缓存，
-// 花真实 token）。PiDesktop 无人值守的自动化任务不该背这份隐性开销，且从未提供
-// 保温配置 UI——升级到 0.87.x 时把应用侧会话一律读作 "off"（见 runtime-settings.ts）。
+// 花真实 token）；1.5.1 起缺省改为 "idle"（只在划算时保温）。两种缺省都花用户的钱，
+// 而 PiDesktop 无人值守的自动化任务不该背这份隐性开销、也从未提供保温配置 UI
+// ——应用侧会话一律读作 "off"（见 runtime-settings.ts）。
 // 注意：Pi 的 SettingsManager 写盘是异步队列（writeQueue），断言文件内容前必须
 // await flush()——这是探针实测（同步读时目录还是空的）。
 // 回归网断言：
@@ -61,18 +62,19 @@ describe("withCacheWarmingOff (real SettingsManager)", () => {
 
   it("reads cache warming as off regardless of the stored value", async () => {
     const { agentDir, proj } = await makeAgentRoot();
-    // 底层（未包装）manager：上游缺省 "streaming"，再写成 "idle" 证明文件里确有非 off 值。
+    // 底层（未包装）manager：1.5.1 起上游缺省 "idle"（此前是 "streaming"）；
+    // 再写成 "streaming" 证明文件里确有非 off、也非缺省的值。
     const bare = SettingsManager.create(proj, agentDir);
-    expect(bare.getCacheWarmingMode()).toBe("streaming");
-    bare.setCacheWarmingMode("idle");
+    expect(bare.getCacheWarmingMode()).toBe("idle");
+    bare.setCacheWarmingMode("streaming");
     await bare.flush();
-    expect(await readGlobalSettings(agentDir)).toMatchObject({ cacheWarming: "idle" });
+    expect(await readGlobalSettings(agentDir)).toMatchObject({ cacheWarming: "streaming" });
 
     // 同一目录上包一层新 manager：读侧恒 off，且不回写覆盖文件里的值。
     const wrapped = withCacheWarmingOff(SettingsManager.create(proj, agentDir));
     expect(wrapped.getCacheWarmingMode()).toBe("off");
     await wrapped.flush();
-    expect(await readGlobalSettings(agentDir)).toMatchObject({ cacheWarming: "idle" });
+    expect(await readGlobalSettings(agentDir)).toMatchObject({ cacheWarming: "streaming" });
   });
 
   it("keeps wrapped managers from writing a cacheWarming field of their own", async () => {

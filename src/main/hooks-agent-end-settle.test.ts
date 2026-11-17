@@ -186,9 +186,11 @@ describe("跑完通知触发时机（真实 AgentSession）", () => {
       ]);
       await harness.session.prompt("go");
       expect(harness.faux.state.callCount).toBe(2);
-      const usage = harness.captured?.usage as { input?: number; output?: number } | undefined;
-      // 两次尝试的 usage 都在（第一次失败那次的 input 也是有值的）。
-      expect(usage?.input).toBeGreaterThan(0);
+      const usage = harness.captured?.usage as { input?: number; output?: number; cacheWrite?: number } | undefined;
+      // 两次尝试的用量都在。pi-ai 1.5 的 faux provider 把 prompt token 全记进
+      // cacheWrite、input 恒为 0（1.4 是 input = promptTokens - cacheRead），
+      // 所以用 cacheWrite 判断「第一次失败那次也累加了」。
+      expect(usage?.cacheWrite).toBeGreaterThan(0);
       // 失败那次 output=2 + 成功那次 output=3 = 5。
       expect(usage?.output).toBe(5);
       expect(harness.captured?.event).toBe("agent_end");
