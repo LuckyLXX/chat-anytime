@@ -27,7 +27,7 @@ import { alignQueueState, imageAttachmentsFrom, promoteQueueMessage, queuedMessa
 import { normalizeMessages, userMessageText } from "./message-normalize.js";
 import { runActive } from "./run-state.js";
 import { diffChatMessages, diffToolExecutions, snapshotToolExecution, toolExecutionPatchEqual } from "../shared/snapshot-patch.js";
-import { applyModelOverrides as applyStoredModelOverrides, buildCatalogModels, imageInputOverride, isModelEnabled, pickFallbackModel, pruneDisabledModelRefs, resolveRestoredSessionModel } from "./model-catalog.js";
+import { applyModelOverrides as applyStoredModelOverrides, buildCatalogModels, imageInputOverride, isModelEnabled, pickFallbackModel, pickNewSessionModel, pruneDisabledModelRefs, resolveRestoredSessionModel } from "./model-catalog.js";
 import type {
   AccessMode,
   AgentProfile,
@@ -3250,10 +3250,6 @@ function activeAgent(): AgentProfile {
   return list.find((agent) => agent.id === settings?.currentAgentId && !agent.archived) ?? list.find((agent) => agent.id === "default") ?? list[0] ?? { id: "default", name: "默认助手", description: "", systemPrompt: "", divMode: "off", defaultThinkingLevel: "medium", tools: defaultTools() };
 }
 
-function defaultModel(): { provider: string; id: string } | undefined {
-  return currentAgent?.defaultModel ?? settings?.model;
-}
-
 /**
  * 应用侧默认（助手 defaultModel → 全局 settings.model）之后的第三来源：Pi 自己
  * 持久化的默认模型（agentDir settings.json）。我们每次 switchSessionModel 都会
@@ -4894,8 +4890,9 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     Boolean(persistedModel && modelRuntime.hasConfiguredAuth(persistedModel.provider)),
     settings?.providers
   );
-  // modelOverride（自动化后台会话用）优先于默认模型；正常新建/恢复仍走 defaultModel。
-  const requested = hasExistingMessages ? undefined : (options.modelOverride ?? defaultModel());
+  // modelOverride（自动化后台会话用）优先；其余按**会话归属角色**的 defaultModel 回落全局 settings.model
+  // （不读全局 currentAgent：IM 通道的 agentId 等跨角色会话会拿错默认模型）。
+  const requested = hasExistingMessages ? undefined : pickNewSessionModel(recordAgent.defaultModel, settings?.model, options.modelOverride);
   // 新会话且应用侧无默认（助手未设、全局 settings.model 未设）时，Pi 会走
   // findInitialModel 的 settings-default 分支——用它自己持久化的默认模型裸取
   // 注册表（我们每次 switchSessionModel 都会写进去），同样绕过覆盖。这里镜像

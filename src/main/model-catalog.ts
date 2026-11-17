@@ -71,6 +71,27 @@ export function resolveRestoredSessionModel<T extends ModelOverrideTarget>(regis
   return applyModelOverrides(registryModel, providers);
 }
 
+/** 模型引用（provider + id，与 `AgentProfile.defaultModel` / `settings.model` 同形）。 */
+export interface ModelRef {
+  provider: string;
+  id: string;
+}
+
+/**
+ * 新会话的模型来源优先级：显式 override（自动化任务）→ **会话归属角色**的 defaultModel → 全局 `settings.model`。
+ *
+ * 为什么必须传角色默认而不是读“当前激活角色”（2026-11-17 用户报障）：`createSession` 的
+ * recordAgent 可能是别的角色（IM 通道的 `agentId`、跨角色派发、自动化），旧实现读全局
+ * `currentAgent` ⇒ 通道指定了角色 A，新话题却用桌面当前角色 B 的默认模型（或全局默认）。
+ */
+export function pickNewSessionModel(
+  agentDefault: ModelRef | undefined,
+  globalDefault: ModelRef | undefined,
+  override?: ModelRef
+): ModelRef | undefined {
+  return override ?? agentDefault ?? globalDefault;
+}
+
 /**
  * 把设置里的用户修正（token 限额、图片输入标记）覆盖到目录 Model 上；命中
  * 任何覆盖时返回浅克隆，绝不改动共享的运行时对象。图片输入标记必须落到

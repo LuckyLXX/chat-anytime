@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyModelOverrides, buildCatalogModels, imageInputOverride, isDesktopConfiguredProvider, isModelEnabled, pickFallbackModel, pruneDisabledModelRefs, resolveRestoredSessionModel } from "./model-catalog.js";
+import { applyModelOverrides, buildCatalogModels, imageInputOverride, isDesktopConfiguredProvider, isModelEnabled, pickFallbackModel, pickNewSessionModel, pruneDisabledModelRefs, resolveRestoredSessionModel } from "./model-catalog.js";
 import type { ProviderSettings } from "../shared/protocol.js";
 
 describe("desktop model catalog visibility", () => {
@@ -323,5 +323,27 @@ describe("resolveRestoredSessionModel", () => {
   it("keeps Pi's fallback by returning undefined when the model is missing or unauthenticated", () => {
     expect(resolveRestoredSessionModel(undefined, true, providers)).toBeUndefined();
     expect(resolveRestoredSessionModel(registryModel, false, providers)).toBeUndefined();
+  });
+});
+
+describe("pickNewSessionModel", () => {
+  // 回归（2026-11-17，用户报「通道对接过来的角色没用角色配置页的默认模型」）：
+  // 旧实现读全局 currentAgent.defaultModel，IM 通道指定了角色 A 而桌面激活的是
+  // 角色 B 时，新话题拿的是 B 的默认（或全局 settings.model）。
+  const agentModel = { provider: "anthropic", id: "claude-a" };
+  const globalModel = { provider: "zai-coding-cn", id: "glm-5.3" };
+
+  it("按会话归属角色的 defaultModel 取（高于全局默认）", () => {
+    expect(pickNewSessionModel(agentModel, globalModel)).toEqual(agentModel);
+  });
+
+  it("角色没设默认 → 回落全局 settings.model", () => {
+    expect(pickNewSessionModel(undefined, globalModel)).toEqual(globalModel);
+    expect(pickNewSessionModel(undefined, undefined)).toBeUndefined();
+  });
+
+  it("显式 override（自动化任务）最高优先", () => {
+    const override = { provider: "openai", id: "gpt-5" };
+    expect(pickNewSessionModel(agentModel, globalModel, override)).toEqual(override);
   });
 });
