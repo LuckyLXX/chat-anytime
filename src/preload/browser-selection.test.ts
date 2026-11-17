@@ -2,6 +2,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { captureBrowserSelection, resolveBrowserSelectionReply, setBrowserSelectionAutomation, setBrowserSelectionPickMode } from "./browser-selection-ui.js";
 
+const highlightMocks = vi.hoisted(() => ({ keep: vi.fn(), release: vi.fn() }));
+vi.mock("../shared/selection-highlight.js", () => ({ keepPreviewSelectionHighlighted: highlightMocks.keep }));
+
 let shadow: ShadowRoot;
 const send = vi.fn();
 
@@ -16,6 +19,9 @@ beforeEach(() => {
   const original = Element.prototype.attachShadow;
   vi.spyOn(Element.prototype, "attachShadow").mockImplementation(function (this: Element, init) { shadow = original.call(this, init); return shadow; });
   send.mockReset();
+  highlightMocks.keep.mockReset();
+  highlightMocks.release.mockReset();
+  highlightMocks.keep.mockReturnValue(highlightMocks.release);
 });
 afterEach(() => {
   document.body.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
@@ -41,7 +47,9 @@ describe("网页选区就地浮层", () => {
     const target = select();
     captureBrowserSelection(document, eventFor(target), send);
     expect(shadow.querySelector("button")?.textContent).toBe("AI优化");
+    expect(highlightMocks.keep).not.toHaveBeenCalled();
     shadow.querySelector("button")!.click();
+    expect(highlightMocks.keep).toHaveBeenCalledWith(document, expect.any(Range), false);
     const input = shadow.querySelector("input")!;
     input.value = "更简洁";
     shadow.querySelector("form")!.dispatchEvent(new Event("submit", { cancelable: true }));
@@ -54,8 +62,19 @@ describe("网页选区就地浮层", () => {
     resolveBrowserSelectionReply({ requestId, ok: false, error: "会话不可用" });
     expect(input.disabled).toBe(false);
     expect(input.value).toBe("更简洁");
+    expect(highlightMocks.release).not.toHaveBeenCalled();
     expect(shadow.querySelector('[role="alert"]')?.textContent).toContain("会话不可用");
     resolveBrowserSelectionReply({ requestId, ok: true });
+    expect(highlightMocks.release).toHaveBeenCalledOnce();
+    expect(document.querySelector("[data-pi-selection]")).toBeNull();
+  });
+
+  it("页面离开时清理已保存高亮", () => {
+    captureBrowserSelection(document, eventFor(select()), send);
+    shadow.querySelector("button")!.click();
+    expect(highlightMocks.keep).toHaveBeenCalledOnce();
+    window.dispatchEvent(new Event("pagehide"));
+    expect(highlightMocks.release).toHaveBeenCalledOnce();
     expect(document.querySelector("[data-pi-selection]")).toBeNull();
   });
 

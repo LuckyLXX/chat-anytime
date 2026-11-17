@@ -4,6 +4,9 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PreviewSelectionPopover } from "./PreviewSelectionPopover";
 
+const highlightMocks = vi.hoisted(() => ({ keep: vi.fn(), release: vi.fn() }));
+vi.mock("../../../shared/selection-highlight", () => ({ keepPreviewSelectionHighlighted: highlightMocks.keep }));
+
 (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
 let container: HTMLDivElement;
 let root: Root;
@@ -22,6 +25,9 @@ beforeEach(() => {
   root = createRoot(container);
   send.mockReset();
   send.mockResolvedValue(undefined);
+  highlightMocks.keep.mockReset();
+  highlightMocks.release.mockReset();
+  highlightMocks.keep.mockReturnValue(highlightMocks.release);
   act(() => root.render(<Harness />));
   vi.spyOn(container.firstElementChild!, "getBoundingClientRect").mockReturnValue({ left: 100, top: 50, right: 500, bottom: 450, width: 400, height: 400 } as DOMRect);
 });
@@ -58,6 +64,18 @@ describe("预览选区浮层", () => {
     expect(document.activeElement).toBe(input);
     expect(document.querySelector(".modal-backdrop")).toBeNull();
   });
+  it("点击按钮后高亮随输入保持，取消时清理", () => {
+    selectText();
+    expect(highlightMocks.keep).not.toHaveBeenCalled();
+    const input = openInput();
+    expect(highlightMocks.keep).toHaveBeenCalledWith(document, expect.any(Range), true);
+    window.getSelection()!.removeAllRanges();
+    type(input, "修改要求");
+    expect(highlightMocks.release).not.toHaveBeenCalled();
+    act(() => input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })));
+    expect(highlightMocks.release).toHaveBeenCalledOnce();
+  });
+
   it("输入提交后发送选区快照，不依赖输入时仍有选区", async () => {
     selectText();
     const input = openInput();
@@ -65,6 +83,7 @@ describe("预览选区浮层", () => {
     type(input, "更简洁");
     await act(async () => { input.closest("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })); });
     expect(send).toHaveBeenCalledWith({ source: "文档.md", text: "选择的内容" }, "更简洁");
+    expect(highlightMocks.release).toHaveBeenCalledOnce();
     expect(document.querySelector(".preview-selection-popover")).toBeNull();
   });
   it("输入法确认 Enter 不提交，点击外部关闭浮层", () => {
@@ -86,6 +105,7 @@ describe("预览选区浮层", () => {
     type(input, "修改");
     await act(async () => { input.closest("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })); });
     expect(input.value).toBe("修改");
+    expect(highlightMocks.release).not.toHaveBeenCalled();
     expect(document.querySelector('[role="alert"]')?.textContent).toContain("会话不可用");
     const close = vi.fn();
     window.addEventListener("keydown", close);

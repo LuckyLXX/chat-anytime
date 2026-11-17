@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type RefObject, type Reac
 import { createPortal } from "react-dom";
 import { MAX_PREVIEW_FEEDBACK_LENGTH } from "../../../shared/preview-selection";
 import { positionSelectionPopover, type SelectionRect } from "../../../shared/selection-popover";
+import { keepPreviewSelectionHighlighted } from "../../../shared/selection-highlight";
 import { readPreviewDomSelection, type PreviewSelection } from "../lib/preview-selection";
 
 interface PendingSelection { selection: PreviewSelection; range: Range; anchor: SelectionRect }
@@ -71,6 +72,11 @@ export function PreviewSelectionPopover({ rootRef, source, enabled, onSubmit }: 
     setFeedback("");
     setError(undefined);
   }, [source, enabled]);
+
+  useLayoutEffect(() => {
+    if (!enabled || !editing || !pending) return;
+    return keepPreviewSelectionHighlighted(document, pending.range, true);
+  }, [enabled, editing, pending]);
 
   useLayoutEffect(() => {
     if (!pending) return;

@@ -1,6 +1,7 @@
 /// <reference lib="dom" />
 import { MAX_PREVIEW_FEEDBACK_LENGTH, MAX_PREVIEW_SOURCE_LENGTH, normalizePreviewSelection, truncatePreviewText } from "../shared/preview-selection.js";
 import { positionSelectionPopover, type SelectionRect } from "../shared/selection-popover.js";
+import { keepPreviewSelectionHighlighted } from "../shared/selection-highlight.js";
 
 export interface BrowserSelectionSubmission { requestId: string; url: string; text: string; note: string }
 interface ActiveSelection {
@@ -14,6 +15,7 @@ interface ActiveSelection {
   error?: HTMLSpanElement;
   requestId?: string;
   timer?: number;
+  releaseHighlight?: () => void;
   dispose(): void;
 }
 
@@ -27,6 +29,7 @@ function style(element: HTMLElement, properties: Partial<CSSStyleDeclaration>): 
 function closeSelection(): void {
   if (!active) return;
   if (active.timer !== undefined) active.doc.defaultView?.clearTimeout(active.timer);
+  active.releaseHighlight?.();
   active.dispose();
   active.host.remove();
   active = undefined;
@@ -112,6 +115,7 @@ function showSelection(doc: Document, text: string, range: Range, anchor: Select
       if (event.key === "Enter" && (event.isComposing || event.keyCode === 229)) event.preventDefault();
       event.stopPropagation();
     });
+    item.releaseHighlight = keepPreviewSelectionHighlighted(doc, item.range, false);
     reposition(item);
     input.focus();
   });
@@ -127,15 +131,18 @@ function showSelection(doc: Document, text: string, range: Range, anchor: Select
     if (!active?.input?.disabled) closeSelection();
   };
   const onReposition = (): void => { if (active?.host === host) reposition(active); };
+  const onPageHide = (): void => { if (active?.host === host) closeSelection(); };
   doc.addEventListener("pointerdown", onOutside, true);
   win.addEventListener("keydown", onEscape, true);
   win.addEventListener("scroll", onReposition, true);
   win.addEventListener("resize", onReposition);
+  win.addEventListener("pagehide", onPageHide);
   active = { doc, host, range, anchor, text, send, dispose: () => {
     doc.removeEventListener("pointerdown", onOutside, true);
     win.removeEventListener("keydown", onEscape, true);
     win.removeEventListener("scroll", onReposition, true);
     win.removeEventListener("resize", onReposition);
+    win.removeEventListener("pagehide", onPageHide);
   } };
   reposition(active);
 }
