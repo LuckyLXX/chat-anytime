@@ -20,6 +20,26 @@ function entryIcon(name: string): ReactNode {
 
 type EntryKind = "file" | "directory" | "root";
 
+/**
+ * 新建成功后的「定位」信息：`dir` 需要自动展开（右键的是折叠目录时，
+ * 不展开就完全看不到新建结果——用户会以为没生效），`path` 是新建条目的
+ * 相对路径，用于一次性高亮与滚动到可见。
+ */
+type CreatedEntry = { dir: string; path: string };
+
+/** 新建条目高亮时长（与 styles.css 的 workspace-row-created 动画时长一致）。 */
+const CREATED_HIGHLIGHT_MS = 1600;
+
+/** 父目录相对路径（根 = 空串）。 */
+function parentDirectory(relativePath: string): string {
+  return relativePath.includes("/") ? relativePath.slice(0, relativePath.lastIndexOf("/")) : "";
+}
+
+/** ref 回调：把新建行滚进可视区（只动最近的滚动容器 `.workspace-tree`）。 */
+function scrollRowIntoView(element: HTMLButtonElement | null): void {
+  element?.scrollIntoView({ block: "nearest", inline: "nearest" });
+}
+
 // 展示用绝对路径：跟随工作区根路径自身的分隔符风格（根路径来自主进程真实路径）。
 function joinWorkspacePath(workspace: string, relativePath: string): string {
   const base = workspace.replace(/[\\/]+$/u, "");
@@ -34,15 +54,18 @@ interface DirectoryRowProps {
   name: string;
   depth: number;
   reloadToken: number;
+  created?: CreatedEntry;
   onOpenFile(relativePath: string): void;
   onContextMenu(relativePath: string, name: string, kind: EntryKind, x: number, y: number): void;
 }
 
-function DirectoryRow({ workspace, relativePath, name, depth, reloadToken, onOpenFile, onContextMenu }: DirectoryRowProps): ReactNode {
+function DirectoryRow({ workspace, relativePath, name, depth, reloadToken, created, onOpenFile, onContextMenu }: DirectoryRowProps): ReactNode {
   const [expanded, setExpanded] = useState(false);
   const [entries, setEntries] = useState<WorkspaceDirectoryEntry[]>();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string>();
+  const expandedByCreateRef = useRef<CreatedEntry>(undefined);
+  const highlighted = created?.path === relativePath;
 
   const load = useCallback(async (withSpinner: boolean): Promise<void> => {
     if (withSpinner) setLoading(true);
@@ -67,10 +90,20 @@ function DirectoryRow({ workspace, relativePath, name, depth, reloadToken, onOpe
     if (expanded && reloadToken > 0) void load(false);
   }, [expanded, reloadToken, load]);
 
+  // 新建发生在自己身上时自动展开：右键折叠目录创建完，不展开就等于什么都没发生。
+  // 用 ref 记住已处理的那次新建（`created` 对象每次新建都是新的，同一对象不重复展开，
+  // 用户手动收起后也不会被反复拉开）。
+  useEffect(() => {
+    if (!created || created === expandedByCreateRef.current) return;
+    expandedByCreateRef.current = created;
+    if (created.dir === relativePath) setExpanded(true);
+  }, [created, relativePath]);
+
   return (
     <div>
       <button
-        className={`workspace-tree-row${expanded ? " expanded" : ""}`}
+        className={`workspace-tree-row${expanded ? " expanded" : ""}${highlighted ? " just-created" : ""}`}
+        ref={highlighted ? scrollRowIntoView : undefined}
         type="button"
         style={{ paddingLeft: 6 + depth * 13 }}
         onClick={() => setExpanded((current) => !current)}
@@ -91,8 +124,8 @@ function DirectoryRow({ workspace, relativePath, name, depth, reloadToken, onOpe
               : entries.length === 0
                 ? <div className="workspace-tree-status">空目录</div>
                 : entries.map((entry) => entry.kind === "directory"
-                  ? <DirectoryRow key={entry.relativePath} workspace={workspace} relativePath={entry.relativePath} name={entry.name} depth={depth + 1} reloadToken={reloadToken} onOpenFile={onOpenFile} onContextMenu={onContextMenu} />
-                  : <button key={entry.relativePath} className="workspace-tree-row file" type="button" title={entry.relativePath} style={{ paddingLeft: 6 + (depth + 1) * 13 + 13 }} onClick={() => onOpenFile(entry.relativePath)} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); onContextMenu(entry.relativePath, entry.name, "file", event.clientX, event.clientY); }}>
+                  ? <DirectoryRow key={entry.relativePath} workspace={workspace} relativePath={entry.relativePath} name={entry.name} depth={depth + 1} reloadToken={reloadToken} created={created} onOpenFile={onOpenFile} onContextMenu={onContextMenu} />
+                  : <button key={entry.relativePath} className={`workspace-tree-row file${created?.path === entry.relativePath ? " just-created" : ""}`} ref={created?.path === entry.relativePath ? scrollRowIntoView : undefined} type="button" title={entry.relativePath} style={{ paddingLeft: 6 + (depth + 1) * 13 + 13 }} onClick={() => onOpenFile(entry.relativePath)} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); onContextMenu(entry.relativePath, entry.name, "file", event.clientX, event.clientY); }}>
                     {entryIcon(entry.name)}
                     <span>{entry.name}</span>
                   </button>)}
@@ -176,10 +209,28 @@ export function WorkspaceTree({ workspace, onOpenFile, onAddToChat, onError, onP
   const [reloadToken, setReloadToken] = useState(0);
   const [menu, setMenu] = useState<{ x: number; y: number; items: ContextMenuItem[] } | null>(null);
   const [dialog, setDialog] = useState<TreeDialog | null>(null);
+  // 新建成功后的定位（展开目标目录 + 高亮新条目），1.6s 后清掉高亮。
+  const [createdEntry, setCreatedEntry] = useState<CreatedEntry>();
+  const createdTimerRef = useRef<number | undefined>(undefined);
   // 重命名/新建确认弹窗的关闭退场（styles.css permission-dialog 退场 160ms）。
   const dialogPresence = useExitPresenceValue(dialog, 160);
 
   const refresh = useCallback((): void => setReloadToken((token) => token + 1), []);
+
+  /**
+   * 新建成功：刷新目录树，并把结果「指出来」——把所在目录展开、把新条目滚进
+   * 可视区并高亮一小会儿。只刷新不定位时，右键折叠目录创建完屏幕上毫无变化
+   *（用户 2026-11-17 报「右键新建文件夹好像没生效」），或新条目排在长列表
+   * 可视区之外，同样看起来像失败。
+   */
+  const revealCreated = useCallback((relativePath: string): void => {
+    setCreatedEntry({ dir: parentDirectory(relativePath), path: relativePath });
+    refresh();
+    window.clearTimeout(createdTimerRef.current);
+    createdTimerRef.current = window.setTimeout(() => setCreatedEntry(undefined), CREATED_HIGHLIGHT_MS);
+  }, [refresh]);
+
+  useEffect(() => () => window.clearTimeout(createdTimerRef.current), []);
 
   const load = useCallback(async (withSpinner: boolean): Promise<void> => {
     if (withSpinner) setLoading(true);
@@ -230,7 +281,11 @@ export function WorkspaceTree({ workspace, onOpenFile, onAddToChat, onError, onP
   }, [lastChangedExecutionKey, refresh]);
 
   const openRowMenu = useCallback((relativePath: string, name: string, kind: EntryKind, x: number, y: number): void => {
-    const prefix = relativePath ? `${relativePath}/` : "";
+    // 新建落点：目录行 = 该目录内；根 = 工作区根；文件行 = 该文件的同级目录
+    // （资源管理器/VS Code 同口径）——不在文件路径下硬建，那只会得到一条
+    // 「ENOTDIR: not a directory」的原始报错。
+    const createBase = kind === "file" ? parentDirectory(relativePath) : relativePath;
+    const prefix = createBase ? `${createBase}/` : "";
     const copyText = (text: string): void => {
       navigator.clipboard.writeText(text).catch((error) => onError(error instanceof Error ? error.message : "复制失败"));
     };
@@ -256,14 +311,14 @@ export function WorkspaceTree({ workspace, onOpenFile, onAddToChat, onError, onP
         label: "新建文件",
         onClick: () => setDialog({
           kind: "prompt", title: "新建文件", label: "文件名", placeholder: "如 notes.md", initial: "", submitLabel: "创建",
-          onSubmit: async (fileName) => { await window.piDesktop.createWorkspaceFile(workspace, `${prefix}${fileName}`); refresh(); }
+          onSubmit: async (fileName) => { const result = await window.piDesktop.createWorkspaceFile(workspace, `${prefix}${fileName}`); revealCreated(result.relativePath); }
         })
       },
       {
         label: "新建文件夹",
         onClick: () => setDialog({
           kind: "prompt", title: "新建文件夹", label: "文件夹名称", placeholder: "如 src", initial: "", submitLabel: "创建",
-          onSubmit: async (folderName) => { await window.piDesktop.createWorkspaceDirectory(workspace, `${prefix}${folderName}`); refresh(); }
+          onSubmit: async (folderName) => { const result = await window.piDesktop.createWorkspaceDirectory(workspace, `${prefix}${folderName}`); revealCreated(result.relativePath); }
         })
       },
       { label: "刷新", onClick: refresh },
@@ -288,7 +343,7 @@ export function WorkspaceTree({ workspace, onOpenFile, onAddToChat, onError, onP
       ] : [])
     ];
     setMenu({ x, y, items });
-  }, [onAddToChat, onError, onOpenFile, onPublish, refresh, workspace]);
+  }, [onAddToChat, onError, onOpenFile, onPublish, refresh, revealCreated, workspace]);
 
   const openBackgroundMenu = useCallback((x: number, y: number): void => {
     openRowMenu("", "", "root", x, y);
@@ -304,8 +359,8 @@ export function WorkspaceTree({ workspace, onOpenFile, onAddToChat, onError, onP
             : !entries || entries.length === 0
               ? <div className="workspace-tree-status">工作区为空</div>
               : entries.map((entry) => entry.kind === "directory"
-                ? <DirectoryRow key={entry.relativePath} workspace={workspace} relativePath={entry.relativePath} name={entry.name} depth={0} reloadToken={reloadToken} onOpenFile={onOpenFile} onContextMenu={openRowMenu} />
-                : <button key={entry.relativePath} className="workspace-tree-row file" type="button" title={entry.relativePath} style={{ paddingLeft: 19 }} onClick={() => onOpenFile(entry.relativePath)} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); openRowMenu(entry.relativePath, entry.name, "file", event.clientX, event.clientY); }}>
+                ? <DirectoryRow key={entry.relativePath} workspace={workspace} relativePath={entry.relativePath} name={entry.name} depth={0} reloadToken={reloadToken} created={createdEntry} onOpenFile={onOpenFile} onContextMenu={openRowMenu} />
+                : <button key={entry.relativePath} className={`workspace-tree-row file${createdEntry?.path === entry.relativePath ? " just-created" : ""}`} ref={createdEntry?.path === entry.relativePath ? scrollRowIntoView : undefined} type="button" title={entry.relativePath} style={{ paddingLeft: 19 }} onClick={() => onOpenFile(entry.relativePath)} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); openRowMenu(entry.relativePath, entry.name, "file", event.clientX, event.clientY); }}>
                   {entryIcon(entry.name)}
                   <span>{entry.name}</span>
                 </button>)}

@@ -187,7 +187,7 @@ button, input, select, textarea, summary, label {
   .panel-dock-fab, .error-toast, .settings-content, .agent-list, .session-list,
   .workspace-tree, .empty-workspace, .empty-conversation, .gallery-wall,
   .gallery-wall-dialog, .gallery-publish-dialog, .gallery-data-dialog, .panel-dock-pane,
-  .sidebar-flyout, .session-workspace-items { animation: none !important; }
+  .sidebar-flyout, .session-workspace-items, .workspace-tree-row.just-created { animation: none !important; }
   /* 退场动画全在 .is-exiting 子树内，一条通配关停（Presence 同步立即卸载） */
   .ui-presence.is-exiting, .ui-presence.is-exiting * { animation: none !important; }
   .session-status-dot.running { animation: none !important; }
@@ -212,7 +212,7 @@ html[data-ui-motion="off"] .empty-workspace, html[data-ui-motion="off"] .empty-c
 html[data-ui-motion="off"] .gallery-wall, html[data-ui-motion="off"] .gallery-wall-dialog,
 html[data-ui-motion="off"] .gallery-publish-dialog, html[data-ui-motion="off"] .gallery-data-dialog,
 html[data-ui-motion="off"] .panel-dock-pane, html[data-ui-motion="off"] .sidebar-flyout,
-html[data-ui-motion="off"] .session-workspace-items { animation: none !important; }
+html[data-ui-motion="off"] .session-workspace-items, html[data-ui-motion="off"] .workspace-tree-row.just-created { animation: none !important; }
 html[data-ui-motion="off"] .ui-presence.is-exiting, html[data-ui-motion="off"] .ui-presence.is-exiting * { animation: none !important; }
 html[data-ui-motion="off"] .session-status-dot.running { animation: none !important; }
 
@@ -391,6 +391,14 @@ html[data-ui-blur="off"] *::after {
 .workspace-tree-row.file { color: var(--text-muted); }
 .workspace-tree-row.file:hover { color: var(--text); }
 .workspace-tree-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 新建成功的一次性定位高亮（1.6s，与 WorkspaceTree 的 CREATED_HIGHLIGHT_MS 一致）：
+   右键新建的是折叠目录或长列表时，新行刚被展开/滚进来，需要一处明确的「建好了、在这里」。
+   基础规则先给背景（动效关停时靠它兜底），动画再把它淡掉。 */
+.workspace-tree-row.just-created { background: var(--accent-soft); color: var(--text); box-shadow: inset 2px 0 0 var(--accent); animation: workspace-row-created 1.6s ease-out both; }
+@keyframes workspace-row-created {
+  from { background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent); }
+  to { background: transparent; box-shadow: inset 2px 0 0 transparent; }
+}
 .workspace-tree-status { display: flex; align-items: center; gap: 7px; padding: 8px 10px; color: var(--text-muted); font-size: 11px; }
 .workspace-tree-status.error { color: var(--danger-text); }
 .session-pin-indicator { display: grid; place-items: center; color: var(--accent-text); }
