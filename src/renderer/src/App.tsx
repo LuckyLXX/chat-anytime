@@ -67,7 +67,6 @@ import type {
 import type { ReplyChangedFile } from "./lib/changed-files";
 import { lastCompletedChangedExecutionId, lastReviewExecutionId } from "./lib/execution-select";
 import { ArtifactPreview, type PreviewEditorState, type PreviewTab, type PreviewTarget } from "./components/ArtifactPreview";
-import { PreviewSelectionDialog } from "./components/PreviewSelectionDialog";
 import { ModelSelect } from "./components/ModelSelect";
 import { AgentSettings } from "./AgentSettings";
 import type { EditorSaveStatus } from "./components/MarkdownEditor";
@@ -80,6 +79,7 @@ import { detailTitle } from "./components/QuestionPanel";
 import { compactPath, type Artifact } from "./lib/content";
 import { composePickMessage } from "./lib/browser-pick";
 import { composePreviewSelectionMessage, type PreviewSelection } from "./lib/preview-selection";
+import { sendPreviewSelectionToSession } from "./lib/preview-selection-send";
 import { composeGalleryDevMessage, galleryRunPlan, galleryServiceLive, workspaceLabel, type GalleryApp, type GalleryDraft, type GalleryKind, type GalleryPanelOptions, type GalleryServiceRecord } from "../../shared/gallery";
 import { insertGalleryDevelopmentText, requestGallerySession } from "./lib/gallery-develop";
 import { GalleryMenu } from "./components/GalleryMenu";
@@ -765,7 +765,6 @@ export function App(): ReactNode {
   }
   // —— 子代理完整记录（只读弹窗目标）；App 层开关，DelegationTranscript 挂在这里 ——
   const [transcriptTarget, setTranscriptTarget] = useState<DelegationProgress>();
-  const [previewSelection, setPreviewSelection] = useState<PreviewSelection>();
   const lastCheckpointAtRef = useRef(0);
   useEffect(() => {
     if (!checkpointResult || checkpointResult.at === lastCheckpointAtRef.current) return;
@@ -783,7 +782,6 @@ export function App(): ReactNode {
   const contextCenterPresence = useExitPresence(contextCenterOpen, 160);
   const permissionPresence = useExitPresenceValue(permission, 130);
   const transcriptPresence = useExitPresenceValue(transcriptTarget, 160);
-  const selectionPresence = useExitPresenceValue(previewSelection, 160);
   const renamePresence = useExitPresenceValue(renameSession, 160);
   const deletePresence = useExitPresenceValue(deleteSession, 160);
   const rollbackPresence = useExitPresenceValue(rollbackTarget, 160);
@@ -799,7 +797,6 @@ export function App(): ReactNode {
   // 会话级确认框虽然已收进聊天区（in-chat），但预览面板**全屏**时原生视图铺满整个窗口，
   // 收窄边界也躲不开——所以照旧登记进弹层计数，由 browserSuspended 兜底。
   useOverlayLayer(renamePresence.rendered || deletePresence.rendered || rollbackPresence.rendered || deleteWorkspacePresence.rendered || transcriptPresence.rendered);
-  useOverlayLayer(selectionPresence.rendered);
   const previewVisible = previewPresence.rendered;
   const [previewSplit, setPreviewSplit] = useState(readStoredPreviewSplit);
   const [previewDragging, setPreviewDragging] = useState(false);
@@ -906,18 +903,13 @@ export function App(): ReactNode {
     if (!targetId) return;
     composerBridge.current.get(targetId)?.insertText(block);
   }, [focusedPaneId, activeSessionId]);
-  // 选区和修改意见写入当前焦点格，不直接发送；找不到输入框时保留弹窗与意见。
-  const sendPreviewSelection = useCallback((selection: PreviewSelection, feedback: string): void => {
+  // 独立发送选区消息，不动现有草稿、附件和编辑态；utility 按实际忙闲处理。
+  const sendPreviewSelection = useCallback(async (selection: PreviewSelection, feedback: string): Promise<void> => {
     const message = composePreviewSelectionMessage(selection, feedback);
-    if (!message) return;
+    if (!message) throw new Error("请选择文本并填写修改意见");
     const targetId = focusedPaneId ?? activeSessionId;
-    const composer = targetId ? composerBridge.current.get(targetId) : undefined;
-    if (!composer) {
-      setMessageActionError("请先创建或打开一个会话，再发送选中内容");
-      return;
-    }
-    composer.insertText(message);
-    setPreviewSelection(undefined);
+    if (!targetId) throw new Error("请先创建或打开一个会话");
+    await sendPreviewSelectionToSession(window.piDesktop, targetId, message);
   }, [focusedPaneId, activeSessionId]);
   // 设计画布「发给 AI」：选中节点摘要写入焦点格输入框（browser-pick 同模式）。
   const sendDesignSelection = useCallback((text: string): void => {
@@ -2970,9 +2962,9 @@ export function App(): ReactNode {
           {previewVisible && preview && <PreviewDivider split={previewSplit} dragging={previewDragging} onStart={startPreviewResize} onMove={movePreviewResize} onEnd={endPreviewResize} onCancel={cancelPreviewResize} onKeyDown={resizePreviewWithKeyboard} onReset={() => setPreviewSplit(50)} />}
 
           {previewVisible && <ExitWrap exiting={previewPresence.exiting}>{preview && preview.tabs.length > 0 ? (
-            <ArtifactPreview tabs={preview.tabs} activeTabId={preview.activeTabId} browserSuspended={browserSuspended} fullscreen={previewFullscreen} onFullscreenChange={setPreviewFullscreen} onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddTerminal={openTerminalPreview} onAddSsh={openSshPanel} onSshConnect={openSshTerminalHost} onAddFile={() => void openManualFilePreview()} onAddReview={openLatestReview} onAddMenuOpenChange={setPreviewAddMenuOpen} reviewAvailable={Boolean(lastReviewId)} workspace={activeWorkspace} activeEditorState={activePreviewTab && ((activePreviewTab.target.type === "file" && activePreviewTab.target.file.kind === "markdown") || activePreviewTab.target.type === "memory") ? getEditorState(activePreviewTab.id) : undefined} onActiveEditorChange={(patch) => { if (activePreviewTab) patchEditorState(activePreviewTab.id, patch); }} onActiveEditorContentChange={handleActiveEditorContentChange} onActiveEditorSaved={handleActiveEditorSaved} onActiveEditorStatusChange={handleActiveEditorStatusChange} onActiveEditorSaveError={(message) => setMessageActionError(`保存 ${activePreviewTab?.target.type === "file" ? activePreviewTab.target.file.name : activePreviewTab?.target.type === "memory" ? "记忆主题" : "Markdown"} 失败：${message}`)} onActiveEditorResolveConflict={(choice) => { if (activePreviewTab) handleEditorResolveConflict(activePreviewTab.id, choice); }} onToggleEditing={() => { if (activePreviewTab) patchEditorState(activePreviewTab.id, { editing: !getEditorState(activePreviewTab.id).editing }); }} onBrowserStateChange={handleBrowserStateChange} onBrowserPickSend={sendPickedElement} onSelectionRequest={setPreviewSelection} onPublishFile={(relativePath, name) => openGalleryDraft({ path: relativePath, title: name, kind: "file" })} />
+            <ArtifactPreview tabs={preview.tabs} activeTabId={preview.activeTabId} browserSuspended={browserSuspended} fullscreen={previewFullscreen} onFullscreenChange={setPreviewFullscreen} onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddTerminal={openTerminalPreview} onAddSsh={openSshPanel} onSshConnect={openSshTerminalHost} onAddFile={() => void openManualFilePreview()} onAddReview={openLatestReview} onAddMenuOpenChange={setPreviewAddMenuOpen} reviewAvailable={Boolean(lastReviewId)} workspace={activeWorkspace} activeEditorState={activePreviewTab && ((activePreviewTab.target.type === "file" && activePreviewTab.target.file.kind === "markdown") || activePreviewTab.target.type === "memory") ? getEditorState(activePreviewTab.id) : undefined} onActiveEditorChange={(patch) => { if (activePreviewTab) patchEditorState(activePreviewTab.id, patch); }} onActiveEditorContentChange={handleActiveEditorContentChange} onActiveEditorSaved={handleActiveEditorSaved} onActiveEditorStatusChange={handleActiveEditorStatusChange} onActiveEditorSaveError={(message) => setMessageActionError(`保存 ${activePreviewTab?.target.type === "file" ? activePreviewTab.target.file.name : activePreviewTab?.target.type === "memory" ? "记忆主题" : "Markdown"} 失败：${message}`)} onActiveEditorResolveConflict={(choice) => { if (activePreviewTab) handleEditorResolveConflict(activePreviewTab.id, choice); }} onToggleEditing={() => { if (activePreviewTab) patchEditorState(activePreviewTab.id, { editing: !getEditorState(activePreviewTab.id).editing }); }} onBrowserStateChange={handleBrowserStateChange} onBrowserPickSend={sendPickedElement} onSelectionSubmit={sendPreviewSelection} onPublishFile={(relativePath, name) => openGalleryDraft({ path: relativePath, title: name, kind: "file" })} />
           ) : (
-            <ArtifactPreview key="empty-state" tabs={[]} activeTabId="" onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddTerminal={openTerminalPreview} onAddSsh={openSshPanel} onSshConnect={openSshTerminalHost} onAddFile={() => void openManualFilePreview()} onBrowserPickSend={sendPickedElement} onSelectionRequest={setPreviewSelection} />
+            <ArtifactPreview key="empty-state" tabs={[]} activeTabId="" onSelectTab={selectPreviewTab} onCloseTab={closePreviewTab} onOpenArtifact={openArtifactPreview} onAddBrowser={openBrowserPreview} onAddTerminal={openTerminalPreview} onAddSsh={openSshPanel} onSshConnect={openSshTerminalHost} onAddFile={() => void openManualFilePreview()} onBrowserPickSend={sendPickedElement} onSelectionSubmit={sendPreviewSelection} />
           )}</ExitWrap>}
           </>)}
           {automationPanelPresence.rendered && (
@@ -3025,7 +3017,6 @@ export function App(): ReactNode {
       {settingsPresence.rendered && <ExitWrap exiting={settingsPresence.exiting}><SettingsDialog settings={settings} models={models} providers={providers} resources={resources} workspaceOpen={Boolean(activeWorkspace)} workspacePath={activeWorkspace} initialTab={settingsInitialTab} jevKeyConfigured={jevKeyConfigured} onClose={() => { setSettingsOpen(false); setSettingsInitialTab(undefined); }} onCreateInSession={() => void createNewSession()} /></ExitWrap>}
       {permissionPresence.rendered && (() => { const permission = permissionPresence.value; return permission ? <ExitWrap exiting={permissionPresence.exiting}><PermissionDialog request={permission} sessionTitle={sessionSummaries.find((item) => item.id === permission.principal.sessionId)?.title} /></ExitWrap> : null; })()}
       {transcriptPresence.rendered && (() => { const transcriptTarget = transcriptPresence.value; return transcriptTarget ? <ExitWrap exiting={transcriptPresence.exiting}><DelegationTranscript delegation={transcriptTarget} onClose={() => setTranscriptTarget(undefined)} onOpenArtifact={openArtifactPreview} /></ExitWrap> : null; })()}
-      {selectionPresence.rendered && (() => { const selection = selectionPresence.value; return selection ? <ExitWrap exiting={selectionPresence.exiting}><PreviewSelectionDialog selection={selection} onCancel={() => setPreviewSelection(undefined)} onSubmit={(feedback) => sendPreviewSelection(selection, feedback)} /></ExitWrap> : null; })()}
       {galleryWallOpen && (
         <GalleryWallDialog
           apps={galleryApps}

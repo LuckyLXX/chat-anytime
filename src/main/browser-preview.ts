@@ -231,7 +231,7 @@ export class BrowserPreviewController {
     private readonly onDownload?: (info: DownloadInfo) => void,
     /** 人工下载的配置与对话框钩子；缺省时人工策略退化回 cancel（只报告、不落盘）。 */
     private readonly manualDownloads?: ManualDownloadHooks,
-    /** 页面右键选区（主进程补上可信的 tabId 后转发）。 */
+    /** 页面选区提交（主进程补上可信的 tabId 后转发）。 */
     private readonly onTextSelection?: (selection: BrowserTextSelection) => void
   ) {}
 
@@ -313,6 +313,7 @@ export class BrowserPreviewController {
     if (!automating && tab.state.automating) this.automationEndedAt.set(tabId, Date.now());
     if (tab.state.automating === automating) return;
     this.updateState(tabId, { automating });
+    this.tryCommand(tabId, (contents) => contents.send("browser-preview:selection-automation", Boolean(automating)));
   }
 
   /** Whether a pick-result is too close to an AI input dispatch to be trusted as a human pick. */
@@ -383,6 +384,11 @@ export class BrowserPreviewController {
       case "pick-mode":
         this.tryCommand(tabId, (contents) => {
           if (!contents.isDestroyed()) contents.send("browser-preview:pick-mode", command.enabled);
+        });
+        break;
+      case "selection-reply":
+        this.tryCommand(tabId, (contents) => {
+          if (/^[\w-]{1,100}$/.test(command.requestId)) contents.send("browser-preview:selection-reply", { requestId: command.requestId, ok: command.ok === true, error: typeof command.error === "string" ? command.error.slice(0, 240) : undefined });
         });
         break;
       case "tab-meta": {
@@ -546,16 +552,24 @@ export class BrowserPreviewController {
     // 就返回，did-stop-loading 可能稍后才到——那一条晚到的事件会在真实导航开始后
     // 被当成真实事件，把加载中指示器提前抹掉。
     wrapper.seed = this.seedBlankDocument(contents);
+    contents.on("dom-ready", () => {
+      if (!contents.isDestroyed()) contents.send("browser-preview:selection-automation", Boolean(this.tabs.get(tabId)?.state.automating));
+    });
     contents.on("ipc-message", (_event, channel, payload) => {
       if (channel !== "browser-preview:pick-result" && channel !== "browser-preview:selection-result") return;
-      // CDP 合成输入在 Electron 里同样是 isTrusted（页面侧无法区分），AI 正在
-      // 操作该标签页及刚结束时的手选事件都不当作用户操作。
-      if (this.tabs.get(tabId)?.state.automating || this.isRecentAutomationPick(tabId)) return;
+      // CDP 合成输入也被 Chromium 标记为 trusted，仍由主进程作最终抑制。
+      const blocked = Boolean(this.tabs.get(tabId)?.state.automating) || this.isRecentAutomationPick(tabId);
       if (channel === "browser-preview:selection-result") {
         const selection = parseBrowserTextSelection(payload, contents.getURL() || "");
-        if (selection) this.onTextSelection?.({ tabId, ...selection });
+        if (!selection) return;
+        if (blocked) {
+          contents.send("browser-preview:selection-reply", { requestId: selection.requestId, ok: false, error: "浏览器正在自动操作，请稍后重试" });
+        } else {
+          this.onTextSelection?.({ tabId, ...selection });
+        }
         return;
       }
+      if (blocked) return;
       const message = parseElementPickMessage(payload, contents.getURL() || "");
       if (message) this.onPickResult?.({ tabId, ...message });
     });

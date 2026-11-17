@@ -1,14 +1,15 @@
 import type { BrowserElementPick } from "../shared/protocol.js";
-import { MAX_PREVIEW_SOURCE_LENGTH, normalizePreviewSelection } from "../shared/preview-selection.js";
+import { MAX_PREVIEW_FEEDBACK_LENGTH, MAX_PREVIEW_SOURCE_LENGTH, normalizePreviewSelection, truncatePreviewText } from "../shared/preview-selection.js";
 
-/** 对网页 preload 的右键选区进行主进程校验；不信任跨 IPC 的形状与长度。 */
-export function parseBrowserTextSelection(payload: unknown, fallbackUrl: string): { url: string; text: string } | undefined {
+/** 对网页 preload 的选区提交进行主进程校验；不信任跨 IPC 的形状与长度。 */
+export function parseBrowserTextSelection(payload: unknown, fallbackUrl: string): { url: string; text: string; note: string; requestId: string } | undefined {
   if (!payload || typeof payload !== "object") return undefined;
-  const { url, text: rawText } = payload as { url?: unknown; text?: unknown };
+  const { url, text: rawText, note: rawNote, requestId } = payload as { url?: unknown; text?: unknown; note?: unknown; requestId?: unknown };
   const text = normalizePreviewSelection(rawText);
-  if (!text) return undefined;
+  const note = typeof rawNote === "string" ? truncatePreviewText(rawNote.trim(), MAX_PREVIEW_FEEDBACK_LENGTH) : "";
+  if (!text || !note || typeof requestId !== "string" || !/^[\w-]{1,100}$/.test(requestId)) return undefined;
   const source = typeof url === "string" && url.trim() ? url : fallbackUrl;
-  return { url: source.slice(0, MAX_PREVIEW_SOURCE_LENGTH), text };
+  return { url: truncatePreviewText(source, MAX_PREVIEW_SOURCE_LENGTH), text, note, requestId };
 }
 
 /**

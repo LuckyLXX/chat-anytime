@@ -667,6 +667,31 @@ function reindexDemoQueue(queue: import("../../shared/protocol").QueuedMessage[]
   return queue.map((item) => ({ ...item, index: counters[item.kind]++ }));
 }
 
+function sendDemoPrompt(text: string): void {
+  const activeId = demoSnapshot.sessionId;
+  const promptTimestamp = Date.now();
+  updateSnapshot({
+    busy: true,
+    status: "Pi 正在工作",
+    messages: [...demoSnapshot.messages, { id: `user-${promptTimestamp}`, role: "user", timestamp: promptTimestamp, blocks: [{ type: "text", text }] }],
+    sessions: demoSnapshot.sessions.map((item) => item.id === activeId ? { ...item, runStatus: "running" as const } : item)
+  });
+  setTimeout(() => {
+    const replyText = `已收到：${text}`;
+    growDemoContext(text, replyText);
+    const next = demoSnapshot.queuedMessages.find((item) => item.kind === "followUp");
+    updateSnapshot({
+      busy: false,
+      status: "就绪",
+      contextUsage: demoContextUsage(),
+      messages: [...demoSnapshot.messages, { id: `demo-reply-${Date.now()}`, role: "assistant", timestamp: Date.now(), blocks: [{ type: "text", text: replyText }] }],
+      sessions: demoSnapshot.sessions.map((item) => item.id === activeId ? { ...item, runStatus: "completed" as const } : item),
+      ...(next ? { queuedMessages: reindexDemoQueue(demoSnapshot.queuedMessages.filter((item) => item !== next)) } : {})
+    });
+    if (next) sendDemoPrompt(next.text);
+  }, 80);
+}
+
 export function createDemoApi(): DesktopApi {
   return {
     async bootstrap(): Promise<DesktopBootstrap> {
@@ -1185,25 +1210,7 @@ export function createDemoApi(): DesktopApi {
           break;
         }
         case "session.prompt": {
-          const activeId = demoSnapshot.sessionId;
-          const promptTimestamp = Date.now();
-          updateSnapshot({
-            busy: true,
-            status: "Pi 正在工作",
-            messages: [...demoSnapshot.messages, { id: `user-${promptTimestamp}`, role: "user", timestamp: promptTimestamp, blocks: [{ type: "text", text: command.text }] }],
-            sessions: demoSnapshot.sessions.map((item) => item.id === activeId ? { ...item, runStatus: "running" as const } : item)
-          });
-          setTimeout(() => {
-            const replyText = `已收到：${command.text}`;
-            growDemoContext(command.text, replyText);
-            updateSnapshot({
-              busy: false,
-              status: "就绪",
-              contextUsage: demoContextUsage(),
-              messages: [...demoSnapshot.messages, { id: `demo-reply-${Date.now()}`, role: "assistant", timestamp: Date.now(), blocks: [{ type: "text", text: replyText }] }],
-              sessions: demoSnapshot.sessions.map((item) => item.id === activeId ? { ...item, runStatus: "completed" as const } : item)
-            });
-          }, 80);
+          sendDemoPrompt(command.text);
           break;
         }
         case "session.invoke": {
@@ -1247,9 +1254,14 @@ export function createDemoApi(): DesktopApi {
           const text = command.invocations?.length
             ? `${command.invocations.map((item) => item.kind === "skill" ? `【Skill：${item.name}】` : `【命令：/${item.name}】`).join("")}${command.text}`
             : command.text;
-          const followUpCount = demoSnapshot.queuedMessages.filter((item) => item.kind === "followUp").length;
-          const imageCount = (command.attachments ?? []).filter((item) => item.kind === "image").length;
-          updateSnapshot({ queuedMessages: [...demoSnapshot.queuedMessages, { kind: "followUp", index: followUpCount, text, ...(imageCount > 0 ? { imageCount } : {}) }] });
+          if (command.requestId && !demoSnapshot.busy) {
+            sendDemoPrompt(text);
+          } else {
+            const followUpCount = demoSnapshot.queuedMessages.filter((item) => item.kind === "followUp").length;
+            const imageCount = (command.attachments ?? []).filter((item) => item.kind === "image").length;
+            updateSnapshot({ queuedMessages: [...demoSnapshot.queuedMessages, { kind: "followUp", index: followUpCount, text, ...(imageCount > 0 ? { imageCount } : {}) }] });
+          }
+          if (command.requestId) emit({ type: "session.queue-result", requestId: command.requestId, sessionId: command.sessionId, ok: true });
           break;
         }
         case "session.queue.sendNow": {

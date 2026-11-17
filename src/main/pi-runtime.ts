@@ -22,6 +22,7 @@ import {
 import { BackgroundProcessRegistry, bashCommandsFromMessages, isBackgroundCommand } from "./background-processes.js";
 import { syncBundledTools, TOOL_DEPLOY_MANIFEST } from "./bundled-tools.js";
 import { commandSessionId } from "./command-error.js";
+import { dispatchWithQueueReceipt } from "./queue-receipt.js";
 import { SessionNewClaims, sessionNewResolution } from "./session-new-claims.js";
 import { resolveHookSessionTitle } from "./hooks-session-title.js";
 import { alignQueueState, imageAttachmentsFrom, promoteQueueMessage, queuedMessageText, queueSnapshotMessages, removeQueueMessage, replayQueueArgs, type PromoteOutcome } from "./queue-images.js";
@@ -8134,7 +8135,7 @@ parentPort.on("message", (event: { data: RuntimeCommand }) => {
   const requestId = event.data.type === "session.new" ? event.data.requestId : undefined;
   const claim = requestId ? sessionNewClaims.register(requestId) : undefined;
   commandQueue = commandQueue
-    .then(() => handleCommand(event.data))
+    .then(() => dispatchWithQueueReceipt(event.data, handleCommand, post, errorText))
     .catch((error) => {
       if (event.data.type === "session.new" && event.data.requestId) {
         post({ type: "session.new-result", requestId: event.data.requestId, ok: false, error: errorText(error) });

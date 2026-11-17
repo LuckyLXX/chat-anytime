@@ -17,7 +17,7 @@ afterEach(() => {
   document.body.replaceChildren();
 });
 
-describe("DOM 预览右键选区", () => {
+describe("DOM 预览文本选区", () => {
   it("只读取当前预览文本区的有效选区", () => {
     document.body.innerHTML = '<div id="root"><div class="preview-scroll"><p>  第一行</p><p>第二行</p></div></div>';
     const root = document.querySelector<HTMLElement>("#root")!;

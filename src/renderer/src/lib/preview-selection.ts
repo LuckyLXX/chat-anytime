@@ -23,12 +23,9 @@ export interface PreviewSelection {
   /** 文件相对路径、网页 URL 或预览标题。 */
   source: string;
   text: string;
-  /** DOM 预览中右键的视口坐标；网页坐标不跨原生视图换算。 */
-  clientX?: number;
-  clientY?: number;
 }
 
-/** 选区与意见一起写入现有聊天草稿，不直接发送消息。 */
+/** 把选区和意见组成一条独立聊天消息。 */
 export function composePreviewSelectionMessage(selection: PreviewSelection, feedback: string): string | undefined {
   const text = normalizePreviewSelection(selection.text);
   const note = truncatePreviewText(feedback.trim(), MAX_PREVIEW_FEEDBACK_LENGTH);

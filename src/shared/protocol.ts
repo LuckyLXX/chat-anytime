@@ -1138,6 +1138,8 @@ export type BrowserPreviewCommand =
   | { type: "zoom"; tabId?: string; factor: number }
   /** 手动元素选择模式：开启后用户点击页面元素会被捕获并推送给渲染端。 */
   | { type: "pick-mode"; tabId?: string; enabled: boolean }
+  /** 页面就地选区输入的发送结果；只回已存在的标签页。 */
+  | { type: "selection-reply"; tabId: string; requestId: string; ok: boolean; error?: string }
   /**
    * 标签页元信息（作品「运行」用）：initialUrl 是「首次显示自动导航」目标，
    * 渲染端只消费一次（sessionStorage 标记），因此切标签/折叠面板回来不会
@@ -1160,6 +1162,8 @@ export interface BrowserTextSelection {
   tabId: string;
   url: string;
   text: string;
+  note: string;
+  requestId: string;
 }
 
 /**
@@ -2746,7 +2750,7 @@ export type RuntimeCommand =
    * 不中止整个会话——工具以错误结果收场供模型继续本轮。executionId 即
    * ToolExecution.id（Pi toolCallId）。 */
   | { type: "session.killExecution"; sessionId?: string; executionId: string }
-  | { type: "session.queue.add"; text: string; invocations?: SlashInvocation[]; attachments?: PromptAttachment[]; sessionId?: string }
+  | { type: "session.queue.add"; text: string; invocations?: SlashInvocation[]; attachments?: PromptAttachment[]; sessionId?: string; /** 可选：需要等待 utility 接收结果的调用方使用。 */ requestId?: string }
   | { type: "session.queue.sendNow"; kind: QueuedMessage["kind"]; index: number; text: string; sessionId?: string }
   | { type: "session.queue.remove"; kind: QueuedMessage["kind"]; index: number; text: string; sessionId?: string }
   /** 分屏：渲染端注册/注销某会话为“正在渲染”（watched）。watched 会话豁免空闲
@@ -2947,6 +2951,9 @@ export type RuntimeMessage =
   /** 仅对带 requestId 的 session.new 回应；sessionId 是实际创建成功的会话。 */
   | { type: "session.new-result"; requestId: string; ok: true; sessionId: string }
   | { type: "session.new-result"; requestId: string; ok: false; error: string }
+  /** 仅回带 requestId 的队列提交；成功代表已接收/排队，不代表模型回合成功。 */
+  | { type: "session.queue-result"; requestId: string; sessionId?: string; ok: true }
+  | { type: "session.queue-result"; requestId: string; sessionId?: string; ok: false; error: string }
   /** 高频流式帧的增量补丁：只带变化的字段/消息/执行；首次与本会话切换仍走完整 state。 */
   | RuntimeStatePatch
   /** 分屏格子（watched 非激活会话）的会话级快照；与 state 的节流节奏一致（50ms 批量、生命周期立即）。 */

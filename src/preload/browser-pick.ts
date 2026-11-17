@@ -23,7 +23,7 @@
 
 /// <reference lib="dom" />
 import { ipcRenderer } from "electron";
-import { MAX_PREVIEW_SOURCE_LENGTH, normalizePreviewSelection } from "../shared/preview-selection.js";
+import { installBrowserSelectionUI, resolveBrowserSelectionReply, setBrowserSelectionAutomation, setBrowserSelectionPickMode } from "./browser-selection-ui.js";
 
 const PICK_MODE_CHANNEL = "browser-preview:pick-mode";
 const PICK_RESULT_CHANNEL = "browser-preview:pick-result";
@@ -288,23 +288,6 @@ function handleClick(event: Event): void {
   showPickCard(doc, mouse.clientX, mouse.clientY, { url: doc.URL || location.href, element: describeElement(el) });
 }
 
-/** 右键时同步读取本 document 的选区（同源 iframe 各有独立选区与 URL）。 */
-export function handleTextSelectionContextMenu(doc: Document, event: MouseEvent): void {
-  if (!event.isTrusted) return;
-  // 输入区可能保留着页面先前的选区；不能因此抢走编辑控件的右键菜单。
-  const editable = event.composedPath().some((node) => {
-    const element = node as Element;
-    if (element.nodeType !== 1 || typeof element.matches !== "function") return false;
-    return element.matches("input, textarea, select, button, [contenteditable]:not([contenteditable='false'])") || (element as HTMLElement).isContentEditable;
-  });
-  if (editable) return;
-  const text = normalizePreviewSelection(doc.getSelection()?.toString());
-  if (!text) return;
-  event.preventDefault();
-  event.stopImmediatePropagation();
-  ipcRenderer.send(SELECTION_RESULT_CHANNEL, { url: (doc.URL || "").slice(0, MAX_PREVIEW_SOURCE_LENGTH), text });
-}
-
 /** Attach listeners to a same-origin iframe document (each navigation = new Document). */
 function attachIframe(frame: HTMLIFrameElement): void {
   if (frame.dataset.piPickAttached) return;
@@ -337,7 +320,7 @@ function installPickDocument(doc: Document): void {
   const win = doc.defaultView ?? window;
   win.addEventListener("mouseover", handleHover, true);
   win.addEventListener("click", handleClick, true);
-  win.addEventListener("contextmenu", (event) => handleTextSelectionContextMenu(doc, event as MouseEvent), true);
+  installBrowserSelectionUI(doc, (selection) => ipcRenderer.send(SELECTION_RESULT_CHANNEL, selection));
   for (const frame of Array.from(doc.querySelectorAll("iframe"))) attachIframe(frame);
   const observer = new MutationObserver((mutations) => {
     for (const mutation of mutations) {
@@ -353,9 +336,13 @@ function installPickDocument(doc: Document): void {
 
 ipcRenderer.on(PICK_MODE_CHANNEL, (_event, enabled: unknown) => {
   pickActive = enabled === true;
+  setBrowserSelectionPickMode(pickActive);
   clearHover();
   removePickCard();
 });
+
+ipcRenderer.on("browser-preview:selection-automation", (_event, enabled: unknown) => setBrowserSelectionAutomation(enabled === true));
+ipcRenderer.on("browser-preview:selection-reply", (_event, reply: unknown) => resolveBrowserSelectionReply(reply));
 
 // Install immediately at preload time — the document object already exists,
 // the observer picks up everything inserted afterwards.

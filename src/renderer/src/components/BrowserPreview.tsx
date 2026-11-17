@@ -39,7 +39,7 @@ interface ViewportRect {
   height: number;
 }
 
-export function BrowserPreview({ suspended = false, tabId = "default", focusAddress, onPickSend, onTextSelection, onStateChange }: { suspended?: boolean; tabId?: string; /** 一次性聚焦地址栏的令牌（「打开浏览器」命令/快捷键新建标签时传入）；同一令牌只消费一次。 */ focusAddress?: number; onPickSend?: (pick: BrowserElementPick, note: string) => void; onTextSelection?: (selection: BrowserTextSelection) => void; onStateChange?: (state: BrowserPreviewState) => void }): ReactNode {
+export function BrowserPreview({ suspended = false, tabId = "default", focusAddress, onPickSend, onTextSelection, onStateChange }: { suspended?: boolean; tabId?: string; /** 一次性聚焦地址栏的令牌（「打开浏览器」命令/快捷键新建标签时传入）；同一令牌只消费一次。 */ focusAddress?: number; onPickSend?: (pick: BrowserElementPick, note: string) => void; onTextSelection?: (selection: BrowserTextSelection) => Promise<void>; onStateChange?: (state: BrowserPreviewState) => void }): ReactNode {
   const viewportRef = useRef<HTMLDivElement>(null);
   const addressInputRef = useRef<HTMLInputElement>(null);
   const handledFocusTokenRef = useRef<number | undefined>(undefined);
@@ -158,7 +158,17 @@ export function BrowserPreview({ suspended = false, tabId = "default", focusAddr
   }), [tabId, onPickSend]);
 
   useEffect(() => window.piDesktop.onBrowserTextSelected((selection) => {
-    if (selection.tabId === tabId) onTextSelection?.(selection);
+    if (selection.tabId !== tabId) return;
+    void (async () => {
+      let error: string | undefined;
+      try {
+        if (!onTextSelection) throw new Error("当前没有可用的聊天会话");
+        await onTextSelection(selection);
+      } catch (reason) {
+        error = reason instanceof Error && reason.message.trim() ? reason.message : "发送失败，请重试";
+      }
+      await window.piDesktop.browserPreview({ type: "selection-reply", tabId, requestId: selection.requestId, ok: !error, ...(error ? { error } : {}) });
+    })().catch(() => { /* 标签页可能已关闭，页面侧会按超时提示。 */ });
   }), [tabId, onTextSelection]);
 
   // Browser→browser tab switches reuse this component instance (only tabId
