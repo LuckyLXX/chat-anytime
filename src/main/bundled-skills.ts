@@ -34,3 +34,12 @@ export function resolveBundledSkillsDir(appPath: string, isPackaged: boolean, ex
 export function resolveBundledSubagentsDir(appPath: string, isPackaged: boolean, exists: (path: string) => boolean = existsSync): string | undefined {
   return resolveBundledDir(appPath, isPackaged, "subagents", exists);
 }
+
+/**
+ * 内置查找工具目录（打包 `<安装目录>/tools`，dev `<repo>/resources/tools`）：里面是随包分发的
+ * fd / rg 可执行文件。与 skills/subagents 不同，它们不能「直接读」——Pi 只认 `<agentDir>/bin`
+ * 与系统 PATH，所以由 utility 进程启动时同步过去（见 bundled-tools.ts）。
+ */
+export function resolveBundledToolsDir(appPath: string, isPackaged: boolean, exists: (path: string) => boolean = existsSync): string | undefined {
+  return resolveBundledDir(appPath, isPackaged, "tools", exists);
+}

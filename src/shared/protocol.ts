@@ -2681,8 +2681,10 @@ export interface QuestionRequest {
 export type RuntimeCommand =
   /** bundledSkillsDir / bundledSubagentsDir：随安装包分发的内置资产目录（
    * <安装目录>/skills 与 <安装目录>/subagents，dev 下为仓库 resources/ 下同名目录），
-   * 由主进程解析（utility 进程无 Electron API）；缺省/不存在时该来源不参与扫描。 */
-  | { type: "initialize"; settings: DesktopSettings; apiKeys: Record<string, string>; bundledSkillsDir?: string; bundledSubagentsDir?: string }
+   * 由主进程解析（utility 进程无 Electron API）；缺省/不存在时该来源不参与扫描。
+   * bundledToolsDir：内置 fd / rg 二进制目录（<安装目录>/tools），utility 侧同步到
+   * <agentDir>/bin 供 Pi 的 find / grep 使用——内网机器下载不到它们。 */
+  | { type: "initialize"; settings: DesktopSettings; apiKeys: Record<string, string>; bundledSkillsDir?: string; bundledSubagentsDir?: string; bundledToolsDir?: string }
   | { type: "workspace.open"; path: string }
   /** 仅从最近工作区列表移除，不碰任何会话；当前工作区被 forget 时回落到最近一个存在的工作区。 */
   | { type: "workspace.forget"; path: string }

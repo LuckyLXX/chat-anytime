@@ -20,6 +20,7 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { BackgroundProcessRegistry, bashCommandsFromMessages, isBackgroundCommand } from "./background-processes.js";
+import { syncBundledTools, TOOL_DEPLOY_MANIFEST } from "./bundled-tools.js";
 import { commandSessionId } from "./command-error.js";
 import { SessionNewClaims, sessionNewResolution } from "./session-new-claims.js";
 import { resolveHookSessionTitle } from "./hooks-session-title.js";
@@ -264,6 +265,9 @@ let bundledSkillsDir: string | undefined;
 /** 随安装包分发的内置子智能体目录（安装目录 resources/subagents），同由主进程下发；
  * 缺省时该档不参与合并（用户目录里的定义照常生效）。 */
 let bundledSubagentsDir: string | undefined;
+/** 随安装包分发的内置查找工具目录（安装目录 tools，内含 fd / rg 二进制）：Pi 的 find / grep
+ * 只认 `<agentDir>/bin` 与系统 PATH，所以启动时同步过去；内网机器下载不到这两个工具。 */
+let bundledToolsDir: string | undefined;
 /** 当前 Agent 的自动化定时任务（设置页列表 + 目录下发）；随 Agent 切换重读。 */
 let automationTasks: AutomationTask[] = [];
 /** 全角色自动化运行历史（设置页「运行记录」子页 + 目录下发）；runs.jsonl 事件流。 */
@@ -5379,11 +5383,43 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   emitState();
 }
 
+/**
+ * 把随包内置的 fd / rg 同步到 `<agentDir>/bin`（Pi 的 find / grep 只认这个目录与系统 PATH）。
+ * 失败不致命：Pi 自己还会回退系统 PATH / 联网下载；日志留一条便于排查内网部署问题。
+ * 幂等 + 不覆盖用户版本，规则见 bundled-tools.ts。
+ */
+function syncBundledToolsToAgentDir(): void {
+  if (!bundledToolsDir) return;
+  const agentDir = getAgentDir();
+  const targetDir = join(agentDir, "bin");
+  try {
+    const outcome = syncBundledTools({ bundledDir: bundledToolsDir, targetDir, manifestPath: join(agentDir, TOOL_DEPLOY_MANIFEST) });
+    const acted = outcome.copied.length > 0 || outcome.updated.length > 0 || outcome.failed.length > 0;
+    if (!acted) return;
+    const parts: string[] = [];
+    if (outcome.copied.length > 0) parts.push(`落地 ${outcome.copied.join(" / ")}`);
+    if (outcome.updated.length > 0) parts.push(`更新 ${outcome.updated.join(" / ")}`);
+    if (outcome.kept.length > 0) parts.push(`保留用户自带 ${outcome.kept.join(" / ")}`);
+    if (outcome.failed.length > 0) parts.push(`失败 ${outcome.failed.map((item) => `${item.name}（${item.error}）`).join(" / ")}`);
+    void post({
+      type: "log",
+      level: outcome.failed.length > 0 ? "warn" : "info",
+      message: `内置查找工具同步到 ${targetDir}：${parts.join("；")}`
+    });
+  } catch (error) {
+    void post({ type: "log", level: "warn", message: `内置查找工具同步失败（find/grep 将回退系统 PATH 或联网下载）：${errorText(error)}` });
+  }
+}
+
 async function initialize(command: Extract<RuntimeCommand, { type: "initialize" }>): Promise<void> {
   settings = command.settings;
   apiKeys = command.apiKeys;
   bundledSkillsDir = command.bundledSkillsDir;
   bundledSubagentsDir = command.bundledSubagentsDir;
+  bundledToolsDir = command.bundledToolsDir;
+  // 内置 fd / rg 落到 <agentDir>/bin：随包分发、启动即落地，不依赖外网（内网安装时 Pi
+  // 自己下载不到，只会每轮卡超时）。同步规则保守：不覆盖用户自己放的版本，详见 bundled-tools.ts。
+  syncBundledToolsToAgentDir();
   refreshHooksConfig();
   refreshSubagents();
   recentWorkspaces = loadRecentWorkspaces(recentWorkspacesPath());

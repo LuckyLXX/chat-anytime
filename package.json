@@ -86,6 +86,10 @@
       {
         "from": "resources/subagents",
         "to": "subagents"
+      },
+      {
+        "from": "resources/tools",
+        "to": "tools"
       }
     ],
     "asarUnpack": [

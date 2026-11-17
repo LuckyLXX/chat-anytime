@@ -1,6 +1,6 @@
 import { join, resolve, sep } from "node:path";
 import { describe, expect, it } from "vitest";
-import { resolveBundledSkillsDir, resolveBundledSubagentsDir } from "./bundled-skills.js";
+import { resolveBundledSkillsDir, resolveBundledSubagentsDir, resolveBundledToolsDir } from "./bundled-skills.js";
 
 describe("resolveBundledSkillsDir", () => {
   it("maps the packaged asar path to <resources>/skills", () => {
@@ -35,5 +35,15 @@ describe("resolveBundledSkillsDir", () => {
     expect(resolveBundledSubagentsDir(join("D:", "code", "PiDesktop"), false, () => false)).toBeUndefined();
     // 两个内置目录必须解析到不同子目录（不能因为共用实现而把 subagents 指向 skills）
     expect(packaged).not.toBe(resolveBundledSkillsDir(join("C:", "Program Files", "ChatAnyTime", "resources", "app.asar"), true, () => true));
+  });
+
+  it("resolves the bundled tools dir with the same layout rules", () => {
+    const packaged = resolveBundledToolsDir(join("C:", "Program Files", "ChatAnyTime", "resources", "app.asar"), true, () => true);
+    expect(packaged).toBe(resolve(join("C:", "Program Files", "ChatAnyTime", "resources", "tools")));
+    expect(resolveBundledToolsDir(join("D:", "code", "PiDesktop"), false, () => true)).toBe(resolve(join("D:", "code", "PiDesktop", "resources", "tools")));
+    expect(resolveBundledToolsDir(join("D:", "code", "PiDesktop"), false, () => false)).toBeUndefined();
+    // 三个内置目录互不重叠
+    expect(packaged).not.toBe(resolveBundledSkillsDir(join("C:", "Program Files", "ChatAnyTime", "resources", "app.asar"), true, () => true));
+    expect(packaged).not.toBe(resolveBundledSubagentsDir(join("C:", "Program Files", "ChatAnyTime", "resources", "app.asar"), true, () => true));
   });
 });

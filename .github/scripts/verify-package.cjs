@@ -324,6 +324,22 @@ check('内置 skill / subagent 资产齐备', () => {
   return `skills ${REQUIRED_SKILLS.length} 个关键文件 + subagents ${REQUIRED_SUBAGENTS.length} 份`
 })
 
+const REQUIRED_TOOLS = ['fd.exe', 'rg.exe']
+
+// 随包内置的 fd / rg：Pi 的 find / grep 只认 <agentDir>/bin 与系统 PATH，内网机器下载不到，
+// 所以这两个二进制必须在包里（主进程 → utility 启动时同步到用户目录，见 bundled-tools.ts）。
+check('内置查找工具（fd / rg）齐备', () => {
+  const toolsDir = path.join(UNPACKED, 'resources', 'tools')
+  assert(fs.existsSync(toolsDir), `缺少 ${toolsDir}`)
+  const missing = REQUIRED_TOOLS.filter((name) => {
+    const file = path.join(toolsDir, name)
+    return !fs.existsSync(file) || fs.statSync(file).size < 1024 * 1024
+  })
+  assert(missing.length === 0, `缺少或体积异常（应 >1MB）：${missing.join(', ')}`)
+  const total = REQUIRED_TOOLS.reduce((sum, name) => sum + fs.statSync(path.join(toolsDir, name)).size, 0)
+  return `${REQUIRED_TOOLS.length} 个二进制，共 ${(total / 1024 / 1024).toFixed(1)}MB`
+})
+
 check('资产里没有 __pycache__ / .pyc 残留', () => {
   const offenders = []
   for (const sub of ['skills', 'subagents']) {

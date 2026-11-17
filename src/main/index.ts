@@ -4,7 +4,7 @@ import { extname, join, resolve } from "node:path";
 import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, Menu, Notification, protocol, safeStorage, session, shell, utilityProcess, type UtilityProcess } from "electron";
 import { spawn } from "node-pty";
 import appIconPath from "./assets/icon.ico?asset";
-import { resolveBundledSkillsDir, resolveBundledSubagentsDir } from "./bundled-skills.js";
+import { resolveBundledSkillsDir, resolveBundledSubagentsDir, resolveBundledToolsDir } from "./bundled-skills.js";
 import { migrateSettings, mergeBrowserSettings, normalizeIntranetStore, normalizeJev, normalizeVision, withBrowserDownloadPrefs } from "./settings.js";
 import { manualDownloadPrefs } from "./browser-manual-download.js";
 import { mergeSavedAppearance, settingsForRenderer } from "./appearance-assets.js";
@@ -894,10 +894,15 @@ function startRuntime(): void {
   // 同 skills 口径，直接读取、不复制到用户目录；用户自建的同名定义会盖掉它。
   const bundledSubagentsDir = resolveBundledSubagentsDir(app.getAppPath(), app.isPackaged);
   if (!bundledSubagentsDir) console.warn("未找到内置子智能体目录（resources/subagents），本次不注入内置来源");
+  // 内置查找工具目录（<安装目录>/tools，dev 下是仓库 resources/tools）：fd / rg 二进制。
+  // 这里只负责解析路径，真正落盘由 utility 进程做——它才有 Pi 的 getAgentDir()，
+  // 而 Pi 只认 <agentDir>/bin（内网机器下载不到这两个工具，只能靠随包内置）。
+  const bundledToolsDir = resolveBundledToolsDir(app.getAppPath(), app.isPackaged);
+  if (!bundledToolsDir) console.warn("未找到内置查找工具目录（resources/tools），find/grep 将回退到系统 PATH 或联网下载");
   // 主题资产不过 IPC（2026-09-26）：资产已落成磁盘文件（<agentDir>/pidesktop-themes/），
   // 渲染端按作用域拼 pidesktop-file://theme URL 直接读盘，完全不消费 base64；
   // 只剩「超限/写盘失败」的迁移残留会被投影剥掉。utility 侧压根不读 appearance。
-  sendToRuntime({ type: "initialize", settings: settingsForRenderer(settings), apiKeys: runtimeApiKeys(), bundledSkillsDir, bundledSubagentsDir });
+  sendToRuntime({ type: "initialize", settings: settingsForRenderer(settings), apiKeys: runtimeApiKeys(), bundledSkillsDir, bundledSubagentsDir, bundledToolsDir });
 }
 function createWindow(): void {
   const rendererUrl = process.env.ELECTRON_RENDERER_URL;
