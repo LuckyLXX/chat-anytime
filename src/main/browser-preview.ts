@@ -1,12 +1,12 @@
 import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { shell, WebContentsView, type BrowserWindow, type Rectangle, type Session } from "electron";
-import type { BrowserDownloadNotice, BrowserDownloadPrefs, BrowserElementPick, BrowserPendingDownload, BrowserPreviewBounds, BrowserPreviewCommand, BrowserPreviewState, BrowserTabsEvent } from "../shared/protocol.js";
+import type { BrowserDownloadNotice, BrowserDownloadPrefs, BrowserElementPick, BrowserTextSelection, BrowserPendingDownload, BrowserPreviewBounds, BrowserPreviewCommand, BrowserPreviewState, BrowserTabsEvent } from "../shared/protocol.js";
 import { MAX_TAB_DOWNLOADS, sanitizeDownloadName } from "./browser-downloads.js";
 import { moveDownloadedFile, uniqueDownloadName } from "./browser-manual-download.js";
 import { NAVIGATE_BUDGET_MS, resolveNavigateOutcome, withNavigationBudget } from "./browser-navigate.js";
 import { isSeedPhase } from "./browser-preview-seed.js";
-import { parseElementPickMessage } from "./browser-preview-pick.js";
+import { parseBrowserTextSelection, parseElementPickMessage } from "./browser-preview-pick.js";
 import { normalizeBrowserUrl } from "./browser-preview-url.js";
 
 const DEFAULT_TAB_ID = "default";
@@ -230,7 +230,9 @@ export class BrowserPreviewController {
     /** 下载事件回调（saved 表示是否真的落盘）。自动化控制器据此给模型回执。 */
     private readonly onDownload?: (info: DownloadInfo) => void,
     /** 人工下载的配置与对话框钩子；缺省时人工策略退化回 cancel（只报告、不落盘）。 */
-    private readonly manualDownloads?: ManualDownloadHooks
+    private readonly manualDownloads?: ManualDownloadHooks,
+    /** 页面右键选区（主进程补上可信的 tabId 后转发）。 */
+    private readonly onTextSelection?: (selection: BrowserTextSelection) => void
   ) {}
 
   snapshot(tabId: string): BrowserPreviewState {
@@ -545,13 +547,17 @@ export class BrowserPreviewController {
     // 被当成真实事件，把加载中指示器提前抹掉。
     wrapper.seed = this.seedBlankDocument(contents);
     contents.on("ipc-message", (_event, channel, payload) => {
-      if (channel !== "browser-preview:pick-result") return;
+      if (channel !== "browser-preview:pick-result" && channel !== "browser-preview:selection-result") return;
       // CDP 合成输入在 Electron 里同样是 isTrusted（页面侧无法区分），AI 正在
-      // 操作该标签页时的 pick-result 一律视为 AI 点击，不当作用户手选。
+      // 操作该标签页及刚结束时的手选事件都不当作用户操作。
       if (this.tabs.get(tabId)?.state.automating || this.isRecentAutomationPick(tabId)) return;
+      if (channel === "browser-preview:selection-result") {
+        const selection = parseBrowserTextSelection(payload, contents.getURL() || "");
+        if (selection) this.onTextSelection?.({ tabId, ...selection });
+        return;
+      }
       const message = parseElementPickMessage(payload, contents.getURL() || "");
-      if (!message) return;
-      this.onPickResult?.({ tabId, ...message });
+      if (message) this.onPickResult?.({ tabId, ...message });
     });
     contents.session.setPermissionCheckHandler(() => false);
     contents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));

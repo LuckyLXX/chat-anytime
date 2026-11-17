@@ -1,6 +1,6 @@
 import { AlertCircle, ArrowLeft, ArrowRight, Crosshair, Download, ExternalLink, Globe2, Info, LoaderCircle, RefreshCw, X } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
-import type { BrowserElementPick, BrowserPreviewBounds, BrowserPreviewCommand, BrowserPreviewState } from "../../../shared/protocol";
+import type { BrowserElementPick, BrowserTextSelection, BrowserPreviewBounds, BrowserPreviewCommand, BrowserPreviewState } from "../../../shared/protocol";
 import { layoutDeviceFrame, storedPreviewDevice, storedPreviewFit, storePreviewDevice, storePreviewFit, type PreviewDeviceId } from "../lib/preview-device";
 import { saveBrowserAddress, storedBrowserAddress } from "../lib/browser-address";
 import { BrowserBookmarksMenu } from "./BrowserBookmarksMenu";
@@ -39,7 +39,7 @@ interface ViewportRect {
   height: number;
 }
 
-export function BrowserPreview({ suspended = false, tabId = "default", focusAddress, onPickSend, onStateChange }: { suspended?: boolean; tabId?: string; /** 一次性聚焦地址栏的令牌（「打开浏览器」命令/快捷键新建标签时传入）；同一令牌只消费一次。 */ focusAddress?: number; onPickSend?: (pick: BrowserElementPick, note: string) => void; onStateChange?: (state: BrowserPreviewState) => void }): ReactNode {
+export function BrowserPreview({ suspended = false, tabId = "default", focusAddress, onPickSend, onTextSelection, onStateChange }: { suspended?: boolean; tabId?: string; /** 一次性聚焦地址栏的令牌（「打开浏览器」命令/快捷键新建标签时传入）；同一令牌只消费一次。 */ focusAddress?: number; onPickSend?: (pick: BrowserElementPick, note: string) => void; onTextSelection?: (selection: BrowserTextSelection) => void; onStateChange?: (state: BrowserPreviewState) => void }): ReactNode {
   const viewportRef = useRef<HTMLDivElement>(null);
   const addressInputRef = useRef<HTMLInputElement>(null);
   const handledFocusTokenRef = useRef<number | undefined>(undefined);
@@ -156,6 +156,10 @@ export function BrowserPreview({ suspended = false, tabId = "default", focusAddr
     setPickMode(false);
     onPickSend?.(next, next.note ?? "");
   }), [tabId, onPickSend]);
+
+  useEffect(() => window.piDesktop.onBrowserTextSelected((selection) => {
+    if (selection.tabId === tabId) onTextSelection?.(selection);
+  }), [tabId, onTextSelection]);
 
   // Browser→browser tab switches reuse this component instance (only tabId
   // changes): reset the stale address/state of the previous tab until the

@@ -1,5 +1,5 @@
 import { AlertCircle, Brain, Check, ClipboardList, Code2, Eye, File, FileCode2, FileDiff, FileText, Globe2, LayoutGrid, ListTree, LoaderCircle, Maximize2, Minimize2, Pause, Pencil, Play, Plus, Server, Terminal, X } from "lucide-react";
-import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type SyntheticEvent } from "react";
+import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent, type ReactNode, type SyntheticEvent } from "react";
 import type { BrowserElementPick, BrowserPreviewState, WorkspaceFilePreview } from "../../../shared/protocol";
 import { IMAGE_PREVIEW_LIMIT_BYTES, workspaceFilePreviewUrl } from "../../../shared/protocol";
 import { artifactSandbox, buildArtifactPreviewSource, DYNAMIC_PREVIEW_ACTIONS, isDynamicArtifact, PREVIEW_SIZE_MESSAGE, previewBaseHrefFromFileUrl, type Artifact, type DynamicPreviewAction } from "../lib/content";
@@ -7,6 +7,7 @@ import { galleryAbsolutePath } from "../../../shared/gallery";
 import { extractMarkdownHeadings, type MarkdownHeading } from "../lib/content-pipeline";
 import { layoutDeviceFrame, storedPreviewDevice, storedPreviewFit, storePreviewDevice, storePreviewFit, type PreviewDeviceId } from "../lib/preview-device";
 import { MarkdownOutline } from "./MarkdownOutline";
+import { readPreviewDomSelection, type PreviewSelection } from "../lib/preview-selection";
 import { MemoryPreviewContent } from "./MemoryPreview";
 import type { EditorSaveStatus } from "./MarkdownEditor";
 import { CodeBlock, MarkdownPreviewContent } from "./RichContent";
@@ -204,7 +205,7 @@ function FilePreviewContent({ file, tabId, onOpenArtifact, workspace, editorStat
   return <div className="preview-empty"><FileText size={28} /><strong>此文件无法预览</strong><span>{file.size.toLocaleString("zh-CN")} bytes</span></div>;
 }
 
-export function ArtifactPreview({ tabs, activeTabId, browserSuspended, fullscreen, onFullscreenChange, onSelectTab, onCloseTab, onOpenArtifact, onAddBrowser, onAddTerminal, onAddSsh, onAddFile, onAddReview, onAddMenuOpenChange, reviewAvailable, workspace, activeEditorState, onActiveEditorChange, onActiveEditorContentChange, onActiveEditorSaved, onActiveEditorStatusChange, onActiveEditorSaveError, onActiveEditorResolveConflict, onToggleEditing, onBrowserStateChange, onBrowserPickSend, onSshConnect, onPublishFile }: { tabs: PreviewTab[]; activeTabId: string; browserSuspended?: boolean; fullscreen?: boolean; onFullscreenChange?(next: boolean): void; onSelectTab(id: string): void; onCloseTab(id: string): void; onOpenArtifact(artifact: Artifact): void; onAddBrowser?(): void; onAddTerminal?(): void; onAddSsh?(): void; onAddFile?(): void; onAddReview?(): void; onAddMenuOpenChange?(open: boolean): void; reviewAvailable?: boolean; workspace?: string; activeEditorState?: PreviewEditorState; onActiveEditorChange?(patch: Partial<PreviewEditorState>): void; onActiveEditorContentChange?(tabId: string, content: string): void; onActiveEditorSaved?(tabId: string, content: string): void; onActiveEditorStatusChange?(tabId: string, status: EditorSaveStatus): void; onActiveEditorSaveError?(message: string): void; onActiveEditorResolveConflict?(choice: "keep-local" | "load-remote"): void; onToggleEditing?(): void; onBrowserStateChange?(tabId: string, state: BrowserPreviewState): void; onBrowserPickSend?(pick: BrowserElementPick, note: string): void; onSshConnect?(host: import("../../../shared/protocol").SshHostSummary): void; /** 「发布为作品」：当前打开的工作区 html/svg 文件（预览面板里的实体按钮）。 */ onPublishFile?(relativePath: string, name: string): void }): ReactNode {
+export function ArtifactPreview({ tabs, activeTabId, browserSuspended, fullscreen, onFullscreenChange, onSelectTab, onCloseTab, onOpenArtifact, onAddBrowser, onAddTerminal, onAddSsh, onAddFile, onAddReview, onAddMenuOpenChange, reviewAvailable, workspace, activeEditorState, onActiveEditorChange, onActiveEditorContentChange, onActiveEditorSaved, onActiveEditorStatusChange, onActiveEditorSaveError, onActiveEditorResolveConflict, onToggleEditing, onBrowserStateChange, onBrowserPickSend, onSelectionRequest, onSshConnect, onPublishFile }: { tabs: PreviewTab[]; activeTabId: string; browserSuspended?: boolean; fullscreen?: boolean; onFullscreenChange?(next: boolean): void; onSelectTab(id: string): void; onCloseTab(id: string): void; onOpenArtifact(artifact: Artifact): void; onAddBrowser?(): void; onAddTerminal?(): void; onAddSsh?(): void; onAddFile?(): void; onAddReview?(): void; onAddMenuOpenChange?(open: boolean): void; reviewAvailable?: boolean; workspace?: string; activeEditorState?: PreviewEditorState; onActiveEditorChange?(patch: Partial<PreviewEditorState>): void; onActiveEditorContentChange?(tabId: string, content: string): void; onActiveEditorSaved?(tabId: string, content: string): void; onActiveEditorStatusChange?(tabId: string, status: EditorSaveStatus): void; onActiveEditorSaveError?(message: string): void; onActiveEditorResolveConflict?(choice: "keep-local" | "load-remote"): void; onToggleEditing?(): void; onBrowserStateChange?(tabId: string, state: BrowserPreviewState): void; onBrowserPickSend?(pick: BrowserElementPick, note: string): void; onSelectionRequest?(selection: PreviewSelection): void; onSshConnect?(host: import("../../../shared/protocol").SshHostSummary): void; /** 「发布为作品」：当前打开的工作区 html/svg 文件（预览面板里的实体按钮）。 */ onPublishFile?(relativePath: string, name: string): void }): ReactNode {
   const active = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0];
   if (!active) {
     return (
@@ -448,6 +449,21 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, fullscree
     measureFragmentSize(event.currentTarget, activeTabId, 3);
   }
 
+  function handleSelectionContextMenu(event: ReactMouseEvent<HTMLDivElement>): void {
+    if (!onSelectionRequest) return;
+    const supported = (target.type === "artifact" && showSource)
+      || (target.type === "file" && ["markdown", "code", "text", "html", "svg"].includes(target.file.kind))
+      || target.type === "diff" || target.type === "plan" || target.type === "memory";
+    if (!supported) return;
+    // 必须在右键事件的同步阶段读取；弹窗取得焦点后 selection 可能塌陷。
+    const text = readPreviewDomSelection(event.currentTarget, event.target, window.getSelection());
+    if (!text) return;
+    const metadata = targetMetadata(target);
+    event.preventDefault();
+    event.stopPropagation();
+    onSelectionRequest({ source: metadata.path ?? metadata.title, text, clientX: event.clientX, clientY: event.clientY });
+  }
+
   return (
     <aside className={`content-preview-panel${fullscreen ? " preview-fullscreen" : ""}`} data-pane="preview" aria-label={`${targetMetadata(target).title}预览`}>
       <div className="preview-tabs" role="tablist" aria-label="预览标签">
@@ -494,7 +510,7 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, fullscree
           <button className="icon-button" type="button" title="关闭预览" aria-label="关闭预览" onClick={() => onCloseTab(activeTabId)}><X size={16} /></button>
         </div>
       </div>
-      <div className="content-preview-body">
+      <div className="content-preview-body" onContextMenu={handleSelectionContextMenu}>
         {showSource && artifact && <div className="preview-scroll preview-code"><CodeBlock language={artifact.language} code={artifact.content} /></div>}
         {showSource && !artifact && target.type === "file" && target.file.content !== undefined && <div className="preview-scroll preview-code"><CodeBlock language={target.file.kind === "markdown" ? "markdown" : target.file.language ?? "text"} code={target.file.content} /></div>}
         {showSource && target.type === "plan" && <div className="preview-scroll preview-code"><CodeBlock language="markdown" code={target.content} /></div>}
@@ -509,7 +525,7 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, fullscree
             </div>
           </div>
         )}
-        {!showSource && target.type === "browser" && <Suspense fallback={<PreviewPaneFallback label="正在载入浏览器…" />}><BrowserPreview suspended={browserSuspended} tabId={activeTabId} focusAddress={target.focusAddress} onPickSend={onBrowserPickSend} onStateChange={(state) => onBrowserStateChange?.(activeTabId, state)} /></Suspense>}
+        {!showSource && target.type === "browser" && <Suspense fallback={<PreviewPaneFallback label="正在载入浏览器…" />}><BrowserPreview suspended={browserSuspended} tabId={activeTabId} focusAddress={target.focusAddress} onPickSend={onBrowserPickSend} onTextSelection={(selection) => onSelectionRequest?.({ source: selection.url, text: selection.text })} onStateChange={(state) => onBrowserStateChange?.(activeTabId, state)} /></Suspense>}
         {target.type === "terminal" && <Suspense fallback={<PreviewPaneFallback label="正在载入终端…" />}><TerminalPanel terminalId={active.id} workspace={workspace} cwd={target.cwd} initialCommand={target.initialCommand} /></Suspense>}
         {target.type === "ssh" && <Suspense fallback={<PreviewPaneFallback label="正在载入 SSH…" />}><SshPanel onConnect={(host) => onSshConnect?.(host)} /></Suspense>}
         {target.type === "ssh-terminal" && <Suspense fallback={<PreviewPaneFallback label="正在载入终端…" />}><SshTerminalPanel terminalId={target.terminalId} hostId={target.hostId} hostName={target.hostName} workspace={workspace} /></Suspense>}

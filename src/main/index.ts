@@ -932,6 +932,8 @@ function createWindow(): void {
     setPrefs: (patch) => updateBrowserDownloadPrefs(patch),
     chooseDirectory: () => chooseDownloadDirectory(nextWindow),
     chooseSavePath: (defaultPath) => chooseDownloadSavePath(nextWindow, defaultPath)
+  }, (selection) => {
+    if (!nextWindow.isDestroyed()) nextWindow.webContents.send("browser-preview:selection", selection);
   });
   mainWindow = nextWindow;
   // 主窗口可见性：隐藏到托盘/最小化时让 renderer 暂停高频动画与 backdrop-filter。

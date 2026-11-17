@@ -1,6 +1,7 @@
 import type {
   AgentProfile,
   BrowserElementPick,
+  BrowserTextSelection,
   BrowserPendingDownload,
   BrowserPreviewCommand,
   BrowserPreviewState,
@@ -1633,6 +1634,9 @@ export function createDemoApi(): DesktopApi {
     },
     onBrowserElementPicked(_listener: (pick: BrowserElementPick) => void) {
       // 浏览器演示环境没有原生页面可点选。
+      return () => {};
+    },
+    onBrowserTextSelected(_listener: (selection: BrowserTextSelection) => void) {
       return () => {};
     },
     onTerminalData(terminalId: string, listener: (event: TerminalEventData) => void) {

@@ -1,4 +1,15 @@
 import type { BrowserElementPick } from "../shared/protocol.js";
+import { MAX_PREVIEW_SOURCE_LENGTH, normalizePreviewSelection } from "../shared/preview-selection.js";
+
+/** 对网页 preload 的右键选区进行主进程校验；不信任跨 IPC 的形状与长度。 */
+export function parseBrowserTextSelection(payload: unknown, fallbackUrl: string): { url: string; text: string } | undefined {
+  if (!payload || typeof payload !== "object") return undefined;
+  const { url, text: rawText } = payload as { url?: unknown; text?: unknown };
+  const text = normalizePreviewSelection(rawText);
+  if (!text) return undefined;
+  const source = typeof url === "string" && url.trim() ? url : fallbackUrl;
+  return { url: source.slice(0, MAX_PREVIEW_SOURCE_LENGTH), text };
+}
 
 /**
  * 页面 preload（browser-pick.cjs）经 ipcRenderer.send 发来的手选结果解析。

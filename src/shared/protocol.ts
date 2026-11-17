@@ -1155,6 +1155,13 @@ export type BrowserPreviewCommand =
   /** 人工下载的决策：保存（默认目录）/ 另存为（弹系统保存窗口）/ 取消。 */
   | { type: "download-decision"; tabId?: string; id: string; action: "save" | "save-as" | "cancel" };
 
+/** 预览网页中用户右键选择的文本；tabId 由主进程补充。 */
+export interface BrowserTextSelection {
+  tabId: string;
+  url: string;
+  text: string;
+}
+
 /**
  * 手动元素选择结果：用户在预览浏览器点击元素后，页面 preload 在点击位置
  * 就地弹出的迷你输入卡上确认（可带备注文本），随元素一起经 main 进程转发
@@ -3176,6 +3183,7 @@ export interface DesktopApi {
   onBrowserPreviewState(tabId?: string, listener?: (state: BrowserPreviewState) => void): () => void;
   onBrowserTabsChanged(listener: (event: BrowserTabsEvent) => void): () => void;
   onBrowserElementPicked(listener: (pick: BrowserElementPick) => void): () => void;
+  onBrowserTextSelected(listener: (selection: BrowserTextSelection) => void): () => void;
   onTerminalData(terminalId: string, listener: (event: TerminalEventData) => void): () => void;
   onSshData(terminalId: string, listener: (event: SshEventData) => void): () => void;
   onSshReveal(listener: (event: SshRevealEvent) => void): () => void;

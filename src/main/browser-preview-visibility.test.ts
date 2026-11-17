@@ -78,12 +78,12 @@ const { BrowserPreviewController } = await import("./browser-preview.js");
 
 const RECT = { x: 100, y: 60, width: 480, height: 720 };
 
-function makeController(): InstanceType<typeof BrowserPreviewController> {
+function makeController(onTextSelection?: (selection: import("../shared/protocol.js").BrowserTextSelection) => void): InstanceType<typeof BrowserPreviewController> {
   const window = {
     isDestroyed: () => false,
     contentView: { addChildView: hoisted.addChildView, removeChildView: hoisted.removeChildView }
   };
-  return new BrowserPreviewController(window as never, vi.fn());
+  return new BrowserPreviewController(window as never, vi.fn(), undefined, undefined, undefined, undefined, undefined, onTextSelection);
 }
 
 /** 模拟一次真实导航（休眠要求标签有可恢复地址）。 */
@@ -99,6 +99,27 @@ beforeEach(() => {
 });
 
 describe("preview tab visibility contract", () => {
+  it("网页选区经主进程补充 tabId，自动化期间及刚结束时丢弃", async () => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
+    const onTextSelection = vi.fn();
+    const controller = makeController(onTextSelection);
+    await controller.handle({ type: "visible", tabId: "selection-tab", visible: true });
+    const contents = hoisted.views[0]!.webContents;
+    contents.url = "https://fallback.example";
+    contents.emit("ipc-message", {}, "browser-preview:selection-result", { text: "  正文\n" });
+    expect(onTextSelection).toHaveBeenCalledWith({ tabId: "selection-tab", url: "https://fallback.example", text: "  正文\n" });
+    contents.emit("ipc-message", {}, "browser-preview:selection-result", { text: "  " });
+    controller.setAutomating("selection-tab", "正在点击");
+    contents.emit("ipc-message", {}, "browser-preview:selection-result", { text: "AI 选区" });
+    controller.setAutomating("selection-tab", undefined);
+    contents.emit("ipc-message", {}, "browser-preview:selection-result", { text: "刚结束" });
+    expect(onTextSelection).toHaveBeenCalledTimes(1);
+    now.mockReturnValue(1_251);
+    contents.emit("ipc-message", {}, "browser-preview:selection-result", { text: "用户选区", url: "https://example.com" });
+    expect(onTextSelection).toHaveBeenCalledTimes(2);
+    controller.dispose();
+    now.mockRestore();
+  });
   it("未知标签的 bounds 不建视图、不上屏（首帧 bounds 先于 visible 到达）", async () => {
     const controller = makeController();
     await controller.handle({ type: "bounds", tabId: "t1", bounds: RECT });

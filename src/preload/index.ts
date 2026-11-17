@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { BrowserElementPick, BrowserPreviewCommand, BrowserPreviewState, BrowserTabsEvent, DesktopApi, GalleryPanelOptions, GalleryServiceStartRequest, RuntimeCommand, RuntimeMessage, SshCommand, SshEventData, SshRevealEvent, TerminalCommand, TerminalEventData } from "../shared/protocol.js";
+import type { BrowserElementPick, BrowserTextSelection, BrowserPreviewCommand, BrowserPreviewState, BrowserTabsEvent, DesktopApi, GalleryPanelOptions, GalleryServiceStartRequest, RuntimeCommand, RuntimeMessage, SshCommand, SshEventData, SshRevealEvent, TerminalCommand, TerminalEventData } from "../shared/protocol.js";
 
 const api: DesktopApi = {
   bootstrap: () => ipcRenderer.invoke("desktop:bootstrap"),
@@ -61,6 +61,11 @@ const api: DesktopApi = {
     const handler = (_event: Electron.IpcRendererEvent, pick: BrowserElementPick): void => listener(pick);
     ipcRenderer.on("browser-preview:pick", handler);
     return () => ipcRenderer.removeListener("browser-preview:pick", handler);
+  },
+  onBrowserTextSelected: (listener: (selection: BrowserTextSelection) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, selection: BrowserTextSelection): void => listener(selection);
+    ipcRenderer.on("browser-preview:selection", handler);
+    return () => ipcRenderer.removeListener("browser-preview:selection", handler);
   },
   onTerminalData: (terminalId: string, listener: (event: TerminalEventData) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, event: TerminalEventData): void => listener(event);
