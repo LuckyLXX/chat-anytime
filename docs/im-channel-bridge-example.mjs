@@ -15,6 +15,10 @@
  *
  * 真实场景里把 `readIncomingFromWorkSoftware()` 换成你的监听逻辑
  * （WebSocket / 长轮询 / SDK 回调都行），把 `pushAnswerBack()` 换成你的发送 API。
+ *
+ * 关于 peerId（会话身份）：同一个 peerId 长期复用同一条 PiDesktop 话题，换人就自动开新话题。
+ * 所以真实场景要传**真实发送人的账号/工号**（本示例用 PIPEER 模拟）；所有人共用一个固定值
+ * 会全部挤进同一个会话。通道侧白名单可以勾「放行所有 peerId」把鉴权交给这个脚本。
  */
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
