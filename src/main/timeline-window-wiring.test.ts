@@ -21,13 +21,14 @@ describe("timeline window wiring contract", () => {
 
   it("折叠决策、占位高度、观察器三处接线都在", () => {
     expect(pane).toContain("shouldRenderLive({");
-    expect(pane).toContain("placeholderHeightFor(windowHeightsRef.current.get(entryKey)");
+    expect(pane).toContain("const cacheKey = timelineEntryCacheKey(sessionId, entryKey);");
+    expect(pane).toContain("placeholderHeightFor(windowHeightsRef.current.get(cacheKey)");
     expect(pane).toContain("createTimelineObserver({");
     expect(pane).toContain("margin: TIMELINE_LIVE_MARGIN");
   });
 
   it("折叠前会量真实高度（唯一能拿到真值的机会）", () => {
-    expect(pane).toContain("windowHeightsRef.current.set(key, height)");
+    expect(pane).toContain("windowHeightsRef.current.set(cacheKey, height)");
   });
 
   it("Ctrl/Cmd+F 临时全部展开（页内查找不受折叠影响）且不 preventDefault", () => {
@@ -36,8 +37,10 @@ describe("timeline window wiring contract", () => {
     expect(block.slice(0, 400)).not.toContain("preventDefault");
   });
 
-  it("会话切换复位可见集合与实测高度", () => {
-    expect(pane).toContain("windowHeightsRef.current.clear()");
+  it("会话切换按 sessionId 前缀复用高度缓存并清理旧元素映射", () => {
+    expect(pane).toContain('timelineEntryCacheKey(sessionId, "")');
+    expect(pane).toContain("windowElementsRef.current.delete(key)");
+    expect(pane).not.toContain("windowHeightsRef.current.clear()");
   });
 
   it("占位保留 .message 类与 data-turn-key，并有对应 CSS", () => {

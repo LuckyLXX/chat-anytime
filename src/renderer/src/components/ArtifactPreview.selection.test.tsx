@@ -15,6 +15,7 @@ vi.mock("./MarkdownOutline", () => ({ MarkdownOutline: () => null }));
 let container: HTMLDivElement;
 let root: Root;
 const onSelectionSubmit = vi.fn(async () => undefined);
+const onCloseTab = vi.fn();
 
 beforeEach(() => {
   Object.defineProperty(Range.prototype, "getClientRects", { configurable: true, value: () => [{ left: 120, top: 160, right: 200, bottom: 180, width: 80, height: 20 }] });
@@ -23,9 +24,10 @@ beforeEach(() => {
   document.body.appendChild(container);
   root = createRoot(container);
   onSelectionSubmit.mockClear();
+  onCloseTab.mockClear();
   act(() => root.render(<ArtifactPreview
     tabs={[{ id: "p1", target: { type: "plan", title: "计划 A", content: "要修改的内容" } }]}
-    activeTabId="p1" onSelectTab={vi.fn()} onCloseTab={vi.fn()} onOpenArtifact={vi.fn()}
+    activeTabId="p1" onSelectTab={vi.fn()} onCloseTab={onCloseTab} onOpenArtifact={vi.fn()}
     onSelectionSubmit={onSelectionSubmit}
   />));
   vi.spyOn(container.querySelector(".content-preview-body")!, "getBoundingClientRect").mockReturnValue({ left: 100, top: 50, right: 500, bottom: 450, width: 400, height: 400 } as DOMRect);
@@ -52,6 +54,14 @@ describe("预览内容选区", () => {
     act(() => { setter.call(input, "修改"); input.dispatchEvent(new Event("input", { bubbles: true })); });
     await act(async () => { input.closest("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })); });
     expect(onSelectionSubmit).toHaveBeenCalledWith({ source: "计划 A", text: "要修改的内容" }, "修改");
+  });
+
+  it("输入框里的 Escape 不关闭预览标签", () => {
+    const composer = document.createElement("textarea");
+    composer.className = "composer";
+    container.appendChild(composer);
+    composer.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(onCloseTab).not.toHaveBeenCalled();
   });
 
   it("普通右键不被拦截", () => {

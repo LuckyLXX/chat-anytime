@@ -390,6 +390,15 @@ function loadSettings(): DesktopSettings {
   return settingsCache;
 }
 
+function rendererSettings(): DesktopSettings {
+  const source = loadSettings();
+  return settingsForRenderer({
+    ...source,
+    providers: source.providers.map((provider) => ({ ...provider, keyConfigured: Boolean(credentialsCache[provider.id]) })),
+    jevKeyConfigured: Boolean(credentialsCache[JEV_CREDENTIAL_ID])
+  });
+}
+
 /**
  * settings 写入纪律（2026-09-25 性能 P0）：脏标记 + 300 ms debounce + 原子写 + 存储分层。
  * 调度器本体在 settings-store.ts（可单测）；这里只提供当前内存引用与数据目录。
@@ -504,6 +513,9 @@ function updateSettings(command: RuntimeCommand): void {
   // 全局快捷键只在开关/值变化时重注册（applyPaletteHotkey 内部幂等早退）。
   if (command.type === "settings.save") applyPaletteHotkey();
   persistSettings().schedule(diffSettings(previous, settings));
+  if (command.type === "settings.save") {
+    mainWindow?.webContents.send("runtime:message", { type: "settings", settings: rendererSettings() } satisfies RuntimeMessage);
+  }
 }
 
 /**

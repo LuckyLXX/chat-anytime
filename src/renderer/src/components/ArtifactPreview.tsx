@@ -311,7 +311,11 @@ export function ArtifactPreview({ tabs, activeTabId, browserSuspended, fullscree
 
   useEffect(() => {
     function close(event: KeyboardEvent): void {
-      if (event.key !== "Escape") return;
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      const target = event.target instanceof Element ? event.target : undefined;
+      // Escape 属于输入控件/编辑器/侧栏时优先交给当前焦点上下文，不能因为
+      // 预览存在就全局关闭标签页。
+      if (target?.closest("input, textarea, [contenteditable=\"true\"], [contenteditable=\"plaintext-only\"], .composer, .sidebar, .sidebar-rail, .settings-dialog")) return;
       // 全屏时 Esc 只退全屏，不误关标签页。
       if (fullscreen) {
         event.stopPropagation();

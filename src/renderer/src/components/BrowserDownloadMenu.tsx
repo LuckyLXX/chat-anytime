@@ -6,8 +6,8 @@ import type { BrowserDownloadPrefs } from "../../../shared/protocol";
  * 浏览器预览的下载设置菜单：显示/更改默认保存位置 + 「每次下载都询问保存位置」开关。
  *
  * 骨架与 BrowserBookmarksMenu 一致（rootRef + open state + 外部 pointerdown /
- * Escape 关闭 + onMenuOpenChange），浏览器预览借该回调在面板打开时临时隐藏
- * native WebContentsView——它悬浮在所有 DOM 之上，会盖住下拉项。
+ * Escape 关闭 + onMenuOpenChange），浏览器预览通过收窄 native WebContentsView 的 bounds
+ * 让出菜单区域，页面仍保持可渲染。
  * 配置的读写由主进程负责（浏览器面板只是入口），因此这里只上报意图。
  */
 export function BrowserDownloadMenu({ prefs, onSetPrefs, onMenuOpenChange }: {

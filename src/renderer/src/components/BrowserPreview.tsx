@@ -54,6 +54,7 @@ export function BrowserPreview({ suspended = false, tabId = "default", focusAddr
   const [device, setDevice] = useState<PreviewDeviceId>(() => storedPreviewDevice());
   const [fit, setFit] = useState(() => storedPreviewFit());
   const [viewportRect, setViewportRect] = useState<ViewportRect>();
+  const [viewportReady, setViewportReady] = useState(false);
   const [deviceMenuOpen, setDeviceMenuOpen] = useState(false);
   const [bookmarksMenuOpen, setBookmarksMenuOpen] = useState(false);
   const [downloadMenuOpen, setDownloadMenuOpen] = useState(false);
@@ -212,15 +213,14 @@ export function BrowserPreview({ suspended = false, tabId = "default", focusAddr
   }, [tabId]);
 
   useEffect(() => {
-    void send({ type: "visible", visible: !suspended && !deviceMenuOpen && !bookmarksMenuOpen && !downloadMenuOpen });
+    void send({ type: "visible", visible: !suspended && viewportReady });
     // 面板挂起（切到其他标签/面板收起）时退出选择模式，避免用户回来时误点；
-    // pick-mode off 同时会让页面内已打开的就地输入卡关闭。设备/书签/下载菜单张开时
-    // 也临时隐藏 native 视图——它悬浮在所有 DOM 之上，会盖住下拉项。
+    // pick-mode off 同时会让页面内已打开的就地输入卡关闭。
     if (suspended) {
       setPickMode(false);
       void window.piDesktop.browserPreview({ type: "pick-mode", enabled: false, tabId });
     }
-  }, [suspended, tabId, deviceMenuOpen, bookmarksMenuOpen, downloadMenuOpen]);
+  }, [suspended, tabId, viewportReady]);
 
   // 决策卡片的倒计时：只在有卡片时跑（每秒重渲一次，无卡片时零成本）。
   useEffect(() => {
@@ -260,8 +260,14 @@ export function BrowserPreview({ suspended = false, tabId = "default", focusAddr
     let retryTimer = 0;
     let retries = 0;
     let cancelled = false;
+    setViewportReady(false);
     const commit = (bounds: DOMRect): boolean => {
-      if (bounds.width <= 0 || bounds.height <= 0) return false;
+      if (bounds.width <= 0 || bounds.height <= 0) {
+        setViewportReady(false);
+        void send({ type: "visible", visible: false });
+        return false;
+      }
+      setViewportReady(true);
       setViewportRect((prev) => prev && prev.left === bounds.left && prev.top === bounds.top && prev.width === bounds.width && prev.height === bounds.height ? prev : { left: bounds.left, top: bounds.top, width: bounds.width, height: bounds.height });
       return true;
     };
@@ -295,6 +301,22 @@ export function BrowserPreview({ suspended = false, tabId = "default", focusAddr
     () => (viewportRect ? layoutDeviceFrame(viewportRect, device, { fit, clampWidth: true, contentWidth: state.contentWidth }) : undefined),
     [viewportRect, device, fit, state.contentWidth]
   );
+  // 原生 WebContentsView 位于所有 DOM 之上。下拉菜单打开时不再把页面完全隐藏，
+  // 而是从页面顶部让出一段菜单空间，页面仍保持可渲染，browser_screenshot 不会因
+  // 工具栏菜单打开而等待到超时。
+  const menuOcclusionTop = Math.max(
+    deviceMenuOpen ? 244 : 0,
+    bookmarksMenuOpen ? 360 : 0,
+    downloadMenuOpen ? 280 : 0
+  );
+  const nativeLayout = useMemo(() => {
+    if (!layout || !viewportRect) return undefined;
+    return {
+      ...layout,
+      offsetY: menuOcclusionTop,
+      frameHeight: Math.max(1, layout.frameHeight - menuOcclusionTop)
+    };
+  }, [layout, viewportRect, menuOcclusionTop]);
 
   // zoom 换新视图时从 1 重新起步（先于下方 effects 执行），老标签的缩放值不串台。
   useLayoutEffect(() => {
@@ -305,20 +327,20 @@ export function BrowserPreview({ suspended = false, tabId = "default", focusAddr
   // 缩放系数（适应窗口按实测内容宽把超宽页面整体缩小）。量测推送驱动的
   // 重算带 0.2% 死带，配合主进程 1px 量测死带，收敛不振荡。
   useLayoutEffect(() => {
-    if (!layout || !viewportRect) return;
+    if (!nativeLayout || !viewportRect) return;
     const bounds: BrowserPreviewBounds = {
-      x: viewportRect.left + layout.offsetX,
-      y: viewportRect.top,
-      width: layout.frameWidth,
-      height: layout.frameHeight
+      x: viewportRect.left + nativeLayout.offsetX,
+      y: viewportRect.top + nativeLayout.offsetY,
+      width: nativeLayout.frameWidth,
+      height: nativeLayout.frameHeight
     };
     void send({ type: "bounds", bounds });
-    if (Math.abs(layout.scale - lastZoomRef.current) > 0.002) {
-      lastZoomRef.current = layout.scale;
-      void send({ type: "zoom", factor: layout.scale });
+    if (Math.abs(nativeLayout.scale - lastZoomRef.current) > 0.002) {
+      lastZoomRef.current = nativeLayout.scale;
+      void send({ type: "zoom", factor: nativeLayout.scale });
     }
-    // layout/viewportRect 均由 useMemo/量测节流保证值不变时引用稳定。
-  }, [layout, viewportRect, tabId]);
+    // layout/viewportRect/menu state 均由 useMemo/量测节流保证值不变时引用稳定。
+  }, [nativeLayout, viewportRect, tabId]);
 
   const error = localError ?? state.error;
   const pendingDownloads = state.pendingDownloads ?? [];
@@ -398,7 +420,7 @@ export function BrowserPreview({ suspended = false, tabId = "default", focusAddr
       <div className={`browser-preview-viewport${showDeviceFrame ? " letterboxed" : ""}`} ref={viewportRef}>
           {suspended && state.attached && !error && <div className="browser-preview-empty"><LoaderCircle className="spinning" size={24} /><strong>浏览器预览已临时暂停</strong></div>}
         {!state.attached && <div className={`browser-preview-empty${error ? " error" : ""}`}>{state.loading ? <LoaderCircle className="spinning" size={24} /> : <Globe2 size={28} />}<strong>{error ?? "新标签页"}</strong></div>}
-        {showDeviceFrame && layout && <div className="browser-device-frame" style={{ left: layout.offsetX, width: layout.frameWidth, height: layout.frameHeight }} aria-hidden="true" />}
+        {showDeviceFrame && nativeLayout && <div className="browser-device-frame" style={{ left: nativeLayout.offsetX, top: nativeLayout.offsetY, width: nativeLayout.frameWidth, height: nativeLayout.frameHeight }} aria-hidden="true" />}
       </div>
     </div>
   );

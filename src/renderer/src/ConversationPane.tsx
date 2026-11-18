@@ -133,6 +133,10 @@ const BOTTOM_HOLD_MAX_MS = 5000;
 /** 高度连续这么多帧不变 ⇒ 布局已定，钉底窗口提前收工（正常会话 4 帧内退出）。 */
 const BOTTOM_HOLD_STABLE_FRAMES = 3;
 
+function timelineEntryCacheKey(sessionId: string | undefined, entryKey: string): string {
+  return `${sessionId ?? ""}::${entryKey}`;
+}
+
 function usePaneData(sessionId: string | undefined): PaneConversationData {
   const selector = useCallback((state: { snapshot: RuntimeSnapshot; paneStates: Record<string, SessionPaneSnapshot>; parkedPanels: Record<string, SessionPaneSnapshot> }): PaneConversationData => {
     if (sessionId === undefined || state.snapshot.sessionId === sessionId) return state.snapshot;
@@ -959,6 +963,18 @@ export const ConversationPane = memo(function ConversationPane({
   const mentionMenuRef = useRef<HTMLDivElement>(null);
   const questionPanelRef = useRef<HTMLDivElement | null>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
+  const bottomScrollFrameRef = useRef<number | undefined>(undefined);
+  const requestBottomScroll = useCallback((): void => {
+    if (bottomScrollFrameRef.current !== undefined) return;
+    bottomScrollFrameRef.current = window.requestAnimationFrame(() => {
+      bottomScrollFrameRef.current = undefined;
+      const timeline = timelineRef.current;
+      if (timeline && stickToBottomRef.current) timeline.scrollTo({ top: timeline.scrollHeight, behavior: "auto" });
+    });
+  }, []);
+  useEffect(() => () => {
+    if (bottomScrollFrameRef.current !== undefined) window.cancelAnimationFrame(bottomScrollFrameRef.current);
+  }, []);
   // 默认粘底：单窗口切会话、分屏格子打开都直接位于底部（最新消息），保持与
   // 单窗口一致；用户上滚历史时 stickToBottom 置假、停止跟随，滚到底即恢复。
   const stickToBottomRef = useRef(true);
@@ -980,6 +996,7 @@ export const ConversationPane = memo(function ConversationPane({
   const pendingReveal = useDesktopStore((state) => state.pendingReveal);
   const [revealedKey, setRevealedKey] = useState<string | undefined>(undefined);
   const revealHandledRef = useRef(0);
+  // 键由原 uuid 改为 sessionId::uuid，避免切换会话时拿错高度缓存
   const windowHeightsRef = useRef(new Map<string, number>());
   const windowObserverRef = useRef<TimelineObserver | undefined>(undefined);
   // 已挂载条目的元素表（key → 元素）。观察器是在**父组件的 layout effect** 里建的，
@@ -1427,20 +1444,21 @@ export const ConversationPane = memo(function ConversationPane({
       root: timeline,
       margin: TIMELINE_LIVE_MARGIN,
       onChange: (key, visible) => {
+        const cacheKey = key;
         if (!visible) {
           // 折叠前量一次真实高度（此刻元素还在，是唯一能拿到真值的机会）。
-          const element = windowObserverRef.current?.elementFor(key);
+          const element = windowObserverRef.current?.elementFor(cacheKey);
           if (element) {
             const height = Math.round(element.getBoundingClientRect().height);
-            if (height > 0) windowHeightsRef.current.set(key, height);
+            if (height > 0) windowHeightsRef.current.set(cacheKey, height);
           }
         }
         setWindowVisibleKeys((previous) => {
-          const had = previous.has(key);
+          const had = previous.has(cacheKey);
           if (had === visible) return previous;
           const next = new Set(previous);
-          if (visible) next.add(key);
-          else next.delete(key);
+          if (visible) next.add(cacheKey);
+          else next.delete(cacheKey);
           return next;
         });
       }
@@ -1449,20 +1467,29 @@ export const ConversationPane = memo(function ConversationPane({
     // 补注册：本次提交里已挂载条目的 ref 回调早于本 effect，注册打在了 undefined 上；
     // 不补的话这些条目永远不会被观察 → 除了尾部若干条，整段历史只剩空白占位、
     // 滚动也唤不回来（2026-10-26 用户报「长会话历史轮次内容丢失，像被删了」）。
-    // 观察器重建（`ready`/`windowEnabled` 变化）走的是同一条补注册路径。
-    for (const [key, element] of windowElementsRef.current) observer.register(key, element);
+    // 观察器重建（`ready`/`windowEnabled`/会话切换）走的是同一条补注册路径。
+    const prefix = timelineEntryCacheKey(sessionId, "");
+    for (const [key, element] of windowElementsRef.current) {
+      if (key.startsWith(prefix)) observer.register(key, element);
+    }
     return () => {
       observer.disconnect();
       windowObserverRef.current = undefined;
     };
-  }, [windowEnabled, ready]);
+  }, [windowEnabled, ready, sessionId]);
 
-  // 会话切换：可见集合/实测高度/临时展开都必须复位（否则会拿上个会话的 key 判断）。
+  // 会话切换：可见集合只保留当前会话，实测高度按 sessionId::uuid 留存，切回时直接复用。
   useEffect(() => {
-    setWindowVisibleKeys((previous) => (previous.size === 0 ? previous : new Set<string>()));
+    const prefix = timelineEntryCacheKey(sessionId, "");
+    setWindowVisibleKeys((previous) => {
+      const current = [...previous].filter((key) => key.startsWith(prefix));
+      return current.length === previous.size ? previous : new Set(current);
+    });
     setWindowPinned(undefined);
     setWindowExpandAll(false);
-    windowHeightsRef.current.clear();
+    for (const key of windowElementsRef.current.keys()) {
+      if (!key.startsWith(prefix)) windowElementsRef.current.delete(key);
+    }
   }, [sessionId]);
 
   // Ctrl/Cmd+F：**不 preventDefault**，只把全部条目临时展开——浏览器查找栏照常打开，
@@ -1478,32 +1505,35 @@ export const ConversationPane = memo(function ConversationPane({
 
   const registerTimelineEntry = useCallback((key: string, element: HTMLElement | null): void => {
     // 元素表是权威的「当前挂载了什么」，观察器只是它的消费者（可能还没建/刚被重建）。
-    if (element) windowElementsRef.current.set(key, element);
-    else windowElementsRef.current.delete(key);
-    windowObserverRef.current?.register(key, element);
-  }, []);
+    // 缓存 key 加上 sessionId 确保唯一性
+    const fullKey = timelineEntryCacheKey(sessionId, key);
+    if (element) windowElementsRef.current.set(fullKey, element);
+    else windowElementsRef.current.delete(fullKey);
+    windowObserverRef.current?.register(fullKey, element);
+  }, [sessionId]);
 
   /**
    * 条目真实渲染后：写回实测高度；若它整体位于视口上方且高度与占位不同，补偿滚动位置
    * ——展开不改变当前阅读位置（占位用的通常就是上一次实测高度，因此差值为 0）。
    */
   const handleEntryRendered = useCallback((key: string, element: HTMLElement): void => {
+    const fullKey = timelineEntryCacheKey(sessionId, key);
     const height = Math.round(element.getBoundingClientRect().height);
-    const previous = windowHeightsRef.current.get(key);
-    if (height > 0) windowHeightsRef.current.set(key, height);
+    const previous = windowHeightsRef.current.get(fullKey);
+    if (height > 0) windowHeightsRef.current.set(fullKey, height);
     const timeline = timelineRef.current;
     if (stickToBottomRef.current) {
       // 粘底（含切会话后的实体化）：条目实体化会把占位高度换成真实高度，视口上方
       // 一变高就会被滚动锚定漏掉（节点被替换时不补偿），必须重新钉到底部，否则
       // 视口停在滚动条中间。旧的「粘底时由粘底逻辑接管」只等下一次 messages/busy
       // 变化，中间这段用户看不到最新输出。
-      if (timeline) timeline.scrollTo({ top: timeline.scrollHeight, behavior: "auto" });
+      if (timeline) requestBottomScroll();
       return;
     }
     if (!previous || Math.abs(previous - height) < 1) return;
     if (!timeline) return;
     if (element.offsetTop + height <= timeline.scrollTop) timeline.scrollTop += height - previous;
-  }, []);
+  }, [sessionId, requestBottomScroll]);
 
   const navigateToTurn = useCallback((key: string): void => {
     stickToBottomRef.current = false;
@@ -2217,10 +2247,11 @@ export const ConversationPane = memo(function ConversationPane({
             const turnActive = data.busy && index === latestAssistantMessageIndex && message.role === "assistant";
             const turnKey = turnStartKeys.has(message.uuid ?? message.id) ? (message.uuid ?? message.id) : undefined;
             const entryKey = message.uuid ?? message.id;
+            const cacheKey = timelineEntryCacheKey(sessionId, entryKey);
             const entryLive = !windowEnabled || shouldRenderLive({
               index,
               total: displayMessages.length,
-              visible: windowVisibleKeys.has(entryKey),
+              visible: windowVisibleKeys.has(cacheKey),
               expandAll: windowExpandAll,
               pinned: windowPinned?.key === entryKey
             });
@@ -2229,7 +2260,7 @@ export const ConversationPane = memo(function ConversationPane({
               entryKey={entryKey}
               entryTurnKey={turnKey}
               live={entryLive}
-              placeholderHeight={placeholderHeightFor(windowHeightsRef.current.get(entryKey), estimateMessageHeightCached(message))}
+              placeholderHeight={placeholderHeightFor(windowHeightsRef.current.get(cacheKey), estimateMessageHeightCached(message))}
               register={registerTimelineEntry}
               onEntryRendered={handleEntryRendered}
               message={message}

@@ -907,6 +907,9 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
           return { snapshot: { ...incoming, messages: mergedMessages, executions: mergedExecutions, sessions: mergedSessions, recentWorkspaces: mergedRecentWorkspaces }, parkedPanels, ...(opening !== state.openingSession ? { openingSession: opening } : {}) };
         });
         break;
+      case "settings":
+        set({ settings: message.settings });
+        break;
       case "session.opening":
         set({ openingSession: { path: message.path, ...(message.sessionId ? { sessionId: message.sessionId } : {}), at: Date.now() } });
         break;

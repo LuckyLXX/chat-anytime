@@ -5,8 +5,8 @@ import { addBrowserBookmark, bookmarkGlyph, bookmarkHost, removeBrowserBookmark,
 /**
  * 浏览器预览书签菜单：首项为「收藏/取消收藏当前页」，其下为书签列表（点击导航、
  * hover 显现删除）。骨架与 PreviewDeviceMenu 一致（rootRef + open state + 外部
- * pointerdown / Escape 关闭 + onMenuOpenChange），浏览器预览借该回调在面板打开时
- * 临时隐藏 native WebContentsView——它悬浮在所有 DOM 之上，会盖住下拉项。
+ * pointerdown / Escape 关闭 + onMenuOpenChange），浏览器预览通过收窄 native WebContentsView 的 bounds
+ * 让出菜单区域，页面仍保持可渲染。
  */
 export function BrowserBookmarksMenu({ currentUrl, currentTitle, onNavigate, onMenuOpenChange }: {
   currentUrl: string;

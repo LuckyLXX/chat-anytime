@@ -305,6 +305,7 @@ describe("切换会话的滚动契约", () => {
     act(() => {
       FakeIntersectionObserver.latest().fireVisible(true);
     });
+    await frames(1);
 
     expect(layout.calls.length).toBeGreaterThan(before);
     expect(layout.calls.at(-1)).toEqual({ top: 7000, behavior: "auto" });

@@ -658,6 +658,14 @@ describe("当前版本的水合", () => {
   });
 });
 
+describe("authoritative settings", () => {
+  it("accepts authoritative settings pushed by the main process", () => {
+    const incoming = { ...useDesktopStore.getState().settings, accessMode: "full" as const };
+    useDesktopStore.getState().handleRuntimeMessage({ type: "settings", settings: incoming });
+    expect(useDesktopStore.getState().settings.accessMode).toBe("full");
+  });
+});
+
 describe("streaming snapshot patches", () => {
   beforeEach(() => {
     useDesktopStore.setState({

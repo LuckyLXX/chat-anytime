@@ -8132,6 +8132,14 @@ parentPort.on("message", (event: { data: RuntimeCommand }) => {
     sessionNewClaims.cancel(event.data.requestId);
     return;
   }
+  // 停止会话 / 杀单条 shell 执行同样不能排在 session.open / settings 等串行队列后面，
+  // 否则切话题建会话期间点击「停止」会等前一条命令全部跑完才生效（内部全同步操作）。
+  if (event.data.type === "session.abort" || event.data.type === "session.killExecution") {
+    void dispatchWithQueueReceipt(event.data, handleCommand, post, errorText).catch((error) => {
+      post({ type: "error", message: errorText(error), sessionId: commandSessionId(event.data) });
+    });
+    return;
+  }
   const requestId = event.data.type === "session.new" ? event.data.requestId : undefined;
   const claim = requestId ? sessionNewClaims.register(requestId) : undefined;
   commandQueue = commandQueue

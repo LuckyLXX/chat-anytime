@@ -2943,6 +2943,8 @@ export type RuntimeMessage =
   /** Jev 「测试连接」结果：ok=true 时带实际回答的模型与延迟，ok=false 时带可行动错误。 */
   | { type: "jev-test-result"; ok: boolean; message: string; model?: string; latencyMs?: number }
   | { type: "state"; snapshot: RuntimeSnapshot }
+  /** 主进程设置写入后的权威回推，避免设置弹窗持有旧草稿覆盖 live settings。 */
+  | { type: "settings"; settings: DesktopSettings }
   /** utility → main 的运行时上下文（激活成功后发送）：main 只持久化 lastWorkspace/currentAgentId，不转发渲染端。 */
   | { type: "runtime-context"; workspace?: string; agentId?: string; agentName?: string; sessionId?: string }
   /** 渲染端点开一个冷会话：utility 在同步解析 JSONL 之前先发这一帧，让它立刻显示

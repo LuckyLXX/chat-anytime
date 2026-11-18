@@ -187,7 +187,9 @@ button, input, select, textarea, summary, label {
   .panel-dock-fab, .error-toast, .settings-content, .agent-list, .session-list,
   .workspace-tree, .empty-workspace, .empty-conversation, .gallery-wall,
   .gallery-wall-dialog, .gallery-publish-dialog, .gallery-data-dialog, .panel-dock-pane,
-  .sidebar-flyout, .session-workspace-items, .workspace-tree-row.just-created { animation: none !important; }
+  .sidebar-flyout, .session-workspace-items, .workspace-tree-row.just-created,
+  .editor-save-status, .question-handoff-row, .question-feedback-row,
+  .automation-groups, .automation-empty, .automation-runs { animation: none !important; }
   /* 退场动画全在 .is-exiting 子树内，一条通配关停（Presence 同步立即卸载） */
   .ui-presence.is-exiting, .ui-presence.is-exiting * { animation: none !important; }
   .session-status-dot.running { animation: none !important; }
@@ -212,7 +214,10 @@ html[data-ui-motion="off"] .empty-workspace, html[data-ui-motion="off"] .empty-c
 html[data-ui-motion="off"] .gallery-wall, html[data-ui-motion="off"] .gallery-wall-dialog,
 html[data-ui-motion="off"] .gallery-publish-dialog, html[data-ui-motion="off"] .gallery-data-dialog,
 html[data-ui-motion="off"] .panel-dock-pane, html[data-ui-motion="off"] .sidebar-flyout,
-html[data-ui-motion="off"] .session-workspace-items, html[data-ui-motion="off"] .workspace-tree-row.just-created { animation: none !important; }
+html[data-ui-motion="off"] .session-workspace-items, html[data-ui-motion="off"] .workspace-tree-row.just-created,
+html[data-ui-motion="off"] .editor-save-status, html[data-ui-motion="off"] .question-handoff-row,
+html[data-ui-motion="off"] .question-feedback-row, html[data-ui-motion="off"] .automation-groups,
+html[data-ui-motion="off"] .automation-empty, html[data-ui-motion="off"] .automation-runs { animation: none !important; }
 html[data-ui-motion="off"] .ui-presence.is-exiting, html[data-ui-motion="off"] .ui-presence.is-exiting * { animation: none !important; }
 html[data-ui-motion="off"] .session-status-dot.running { animation: none !important; }
 
@@ -252,7 +257,7 @@ html[data-ui-blur="off"] *::after {
 .desktop-shell > * { position: relative; z-index: 1; }
 .sidebar { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; padding: 14px 10px 10px; border-right: 1px solid var(--border); background: var(--surface-sidebar); transition: width .18s ease; }
 /* 折叠态窄条 + hover 浮层 */
-.sidebar-rail { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; padding: 10px 0; border-right: 1px solid var(--border); background-color: var(--surface-sidebar); background-image: none; width: var(--layout-sidebar-collapsed-width); }
+.sidebar-rail { position: relative; z-index: 2; display: flex; flex-direction: column; min-width: 0; min-height: 0; padding: 10px 0; border-right: 1px solid var(--border); background-color: var(--surface-sidebar); background-image: none; width: var(--layout-sidebar-collapsed-width); }
 /* 折叠态顶部品牌/展开按钮：默认显示项目名 CA，hover 变展开图标 */
 .sidebar-rail .rail-brand { display: grid; place-items: center; width: 32px; height: 32px; flex: 0 0 auto; margin: 0 auto 8px; border: 1px solid var(--border-strong); border-radius: 50%; color: var(--text); background: var(--surface); cursor: pointer; }
 .sidebar-rail .rail-brand-mark { font-size: 11px; font-weight: 800; line-height: 1; }
@@ -941,7 +946,7 @@ html[data-ui-blur="off"] *::after {
 .artifact-source pre { max-height: 270px; margin: 0; overflow: auto; padding: 11px; border-top: 1px solid var(--border); color: var(--code-text); background: var(--code-surface); font: 11px/1.55 "Cascadia Code", Consolas, monospace; white-space: pre-wrap; }
 
 .composer { position: absolute; z-index: 10; right: auto; bottom: 0; left: 50%; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(32px, 1fr) auto; gap: 5px; width: min(962px, calc(100% - 48px)); min-height: 82px; margin: 0 auto 15px; padding: 10px; transform: translateX(-50%); border: 1px solid var(--border-strong); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow-md); }
-.question-panel { position: absolute; z-index: 9; bottom: calc(var(--composer-height, 82px) + 21px); left: 50%; display: flex; flex-direction: column; gap: 12px; width: min(720px, calc(100% - 48px)); max-height: min(60vh, 480px); margin: 0; padding: 14px 16px; overflow-y: auto; transform: translateX(-50%); border: 1px solid var(--accent-border); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow-lg); animation: question-panel-in .22s cubic-bezier(0.16, 1, 0.3, 1); }
+.question-panel { position: absolute; z-index: 9; bottom: calc(var(--composer-height, 82px) + 21px); left: 50%; display: flex; flex-direction: column; gap: 12px; width: min(720px, calc(100% - 48px)); max-height: min(60vh, 480px, max(120px, calc(100% - var(--composer-height, 82px) - 42px))); margin: 0; padding: 14px 16px; overflow-y: auto; transform: translateX(-50%); border: 1px solid var(--accent-border); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow-lg); animation: question-panel-in .22s cubic-bezier(0.16, 1, 0.3, 1); }
 .question-panel-header { display: flex; align-items: center; gap: 10px; }
 .question-step-tag { flex: 0 0 auto; padding: 2px 10px; border: 1px solid var(--border-strong); border-radius: 999px; color: var(--text-muted); background: var(--surface-input); font-size: 11px; line-height: 1.6; }
 .question-title { flex: 1 1 auto; min-width: 0; margin: 0; font-size: 14px; font-weight: 650; line-height: 1.4; color: var(--text); }
@@ -1486,7 +1491,7 @@ html[data-ui-blur="off"] *::after {
 .task-panel-badge { display: grid; place-items: center; min-width: 17px; height: 17px; padding: 0 4px; border-radius: 999px; color: var(--on-accent); background: var(--accent); font-size: 10px; font-weight: 700; }
 .task-panel-badge.neutral { background: var(--surface-raised); color: var(--text-muted); box-shadow: inset 0 0 0 1px var(--border-strong); }
 .task-panel-fab-running { flex: 0 0 auto; color: var(--warning); }
-.panel-dock { position: absolute; top: 14px; right: 14px; z-index: 41; display: flex; flex-direction: column; width: 340px; max-width: calc(100% - 28px); max-height: min(70vh, 560px); overflow: hidden; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow-lg); animation: dock-slide-in .22s cubic-bezier(0.16, 1, 0.3, 1); }
+.panel-dock { position: absolute; top: 14px; right: 14px; z-index: 41; display: flex; flex-direction: column; width: 340px; max-width: calc(100% - 28px); max-height: min(70vh, 560px, calc(100% - 28px)); overflow: hidden; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow-lg); animation: dock-slide-in .22s cubic-bezier(0.16, 1, 0.3, 1); }
 @keyframes dock-slide-in { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: none; } }
 .panel-dock-tabs { display: flex; align-items: center; gap: 2px; padding: 6px 6px 6px 8px; border-bottom: 1px solid var(--border); }
 .panel-dock-tab { display: inline-flex; align-items: center; gap: 5px; padding: 5px 10px; border: 0; border-radius: 6px; color: var(--text-muted); background: transparent; font-size: 11px; font-weight: 650; cursor: pointer; }
@@ -2692,7 +2697,7 @@ html[data-ui-motion="off"] .general-jev-toggle .chevron { transition: none; }
  * 大纲栏宽度固定 200px（对标 dock-markdown 的 outline rail），窄面板下由下方
  * 媒体查询隐藏，不抢正文宽度。
  */
-.preview-markdown-shell { display: flex; width: 100%; height: 100%; min-height: 0; background: var(--surface); }
+.preview-markdown-shell { display: flex; width: 100%; height: 100%; min-height: 0; container-type: inline-size; background: var(--surface); }
 .preview-markdown-shell > .preview-scroll { flex: 1 1 0; min-width: 0; }
 .markdown-outline { display: flex; flex-direction: column; flex: 0 0 200px; width: 200px; min-height: 0; overflow: hidden; border-right: 1px solid var(--border); background: var(--surface-muted); }
 .markdown-outline-title { flex: 0 0 auto; padding: 10px 10px 6px; color: var(--text-muted); font-size: 11px; font-weight: 600; }
@@ -2702,6 +2707,10 @@ html[data-ui-motion="off"] .general-jev-toggle .chevron { transition: none; }
 .markdown-outline-item.active { color: var(--accent-text); background: var(--accent-soft); }
 .markdown-outline.is-empty { justify-content: flex-start; padding: 10px; color: var(--text-muted); font-size: 12px; }
 /* 窄面板（分屏/小窗）下大纲栏退化为悬浮在上方的一行，避免正文过窄。 */
+@container (max-width: 420px) {
+  .preview-markdown-shell.has-outline { flex-direction: column; }
+  .preview-markdown-shell > .markdown-outline { flex: 0 0 auto; width: 100%; max-height: 132px; border-right: 0; border-bottom: 1px solid var(--border); }
+}
 @media (max-width: 760px) {
   .preview-markdown-shell.has-outline { flex-direction: column; }
   .preview-markdown-shell > .markdown-outline { flex: 0 0 auto; width: 100%; max-height: 132px; border-right: 0; border-bottom: 1px solid var(--border); }
@@ -2760,7 +2769,7 @@ html[data-ui-motion="off"] .general-jev-toggle .chevron { transition: none; }
 .preview-code { background: var(--code-surface); }
 .preview-code .code-block { min-height: 100%; margin: 0; border: 0; border-radius: 10px; box-shadow: none; }
 .preview-code .code-block pre { max-height: none; }
-.preview-plain-text { min-width: max-content; min-height: 100%; margin: 0; padding: 18px; color: var(--code-text); background: var(--code-surface); font: 11px/1.6 "Cascadia Code", Consolas, monospace; white-space: pre-wrap; }
+.preview-plain-text { min-width: 0; min-height: 100%; margin: 0; padding: 18px; color: var(--code-text); background: var(--code-surface); font: 11px/1.6 "Cascadia Code", Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 .preview-image { display: grid; place-items: center; width: 100%; height: 100%; overflow: auto; padding: 20px; background: var(--surface-detail); }
 .preview-image img { display: block; max-width: 100%; max-height: 100%; object-fit: contain; }
 .preview-pdf { width: 100%; height: 100%; background: var(--surface-muted); }
@@ -2772,11 +2781,14 @@ html[data-ui-motion="off"] .general-jev-toggle .chevron { transition: none; }
 .preview-empty.preview-error { color: var(--danger-text); }
 .content-preview-footer { display: flex; align-items: center; gap: 5px; flex: 0 0 auto; min-height: 29px; min-width: 0; padding: 0 12px; color: var(--text-muted); border-top: 1px solid var(--border); font-size: 10px; }
 .content-preview-footer em { margin-left: auto; color: var(--warning); font-style: normal; }
-.browser-preview { display: grid; grid-template-rows: 43px minmax(0, 1fr); width: 100%; height: 100%; min-width: 0; min-height: 0; background: var(--surface-muted); }
+.browser-preview { display: grid; grid-template-rows: 43px minmax(0, 1fr); width: 100%; height: 100%; min-width: 0; min-height: 0; container-type: inline-size; background: var(--surface-muted); }
+/* 横幅/错误条都是显式 grid 行，不能落入隐式行，否则 viewport 会被挤成 0 高。 */
+.browser-preview:has(.browser-preview-banners):not(:has(.browser-preview-error)) { grid-template-rows: auto 43px minmax(0, 1fr); }
+.browser-preview:not(:has(.browser-preview-banners)):has(.browser-preview-error) { grid-template-rows: 43px auto minmax(0, 1fr); }
+.browser-preview:has(.browser-preview-banners):has(.browser-preview-error) { grid-template-rows: auto 43px auto minmax(0, 1fr); }
 /* 横幅容器：所有横幅（AI 操作中 / 选择元素 / 下载提示 / 下载决策）都在里面，
    grid 只需认容器是否有内容，不必随横幅组合变行数。 */
 .browser-preview-banners { display: block; min-width: 0; }
-.browser-preview:has(.browser-preview-banners) { grid-template-rows: auto 43px minmax(0, 1fr); }
 .browser-automating-banner { display: flex; align-items: center; gap: 7px; min-width: 0; padding: 5px 10px; color: var(--warning); background: color-mix(in srgb, var(--warning) 10%, var(--surface)); border-bottom: 1px solid var(--border); font-size: 11px; }
 .browser-automating-banner span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .browser-pick-hint { display: flex; align-items: center; gap: 7px; min-width: 0; padding: 5px 10px; color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--surface)); border-bottom: 1px solid var(--border); font-size: 11px; }
@@ -2784,6 +2796,17 @@ html[data-ui-motion="off"] .general-jev-toggle .chevron { transition: none; }
 .browser-preview-toolbar > button { display: grid; place-items: center; width: 29px; height: 29px; padding: 0; border: 0; border-radius: 6px; color: var(--text-muted); background: transparent; cursor: pointer; }
 .browser-preview-toolbar > button:hover { color: var(--text); background: var(--surface-button-hover); }
 .browser-preview-toolbar > button:disabled { opacity: .4; cursor: default; }
+@container (max-width: 360px) {
+  .browser-preview-toolbar { grid-template-columns: 29px 29px 29px auto minmax(80px, 1fr) 29px; }
+  .browser-preview-toolbar .browser-bookmarks-menu,
+  .browser-preview-toolbar .browser-download-menu,
+  .browser-preview-toolbar > button:last-child { display: none; }
+}
+@container (max-width: 290px) {
+  .browser-preview-toolbar { grid-template-columns: 29px 29px 29px minmax(80px, 1fr); }
+  .browser-preview-toolbar .preview-device-menu,
+  .browser-preview-toolbar [data-control="browser-pick"] { display: none; }
+}
 .browser-preview-toolbar > button.active { color: var(--on-accent); background: var(--accent); }
 .browser-address { display: flex; align-items: center; gap: 7px; min-width: 0; height: 29px; padding: 0 9px; border: 1px solid var(--border); border-radius: 6px; color: var(--text-muted); background: var(--surface-input); }
 .browser-address:focus-within { border-color: var(--accent); box-shadow: 0 0 0 2px var(--focus-ring); }
@@ -2884,7 +2907,7 @@ html[data-ui-motion="off"] .general-jev-toggle .chevron { transition: none; }
 @keyframes spin { to { transform: rotate(360deg); } } @keyframes blink { 50% { opacity: 0; } }
 
 @media (max-width: 1120px) {
-  .desktop-shell { grid-template-columns: 220px minmax(0, 1fr); }
+  .desktop-shell { --layout-sidebar-width: 220px; grid-template-columns: var(--layout-sidebar-width) minmax(0, 1fr); }
   .work-area.with-panel { grid-template-columns: minmax(0, 1fr) 310px; }
   .runtime-controls label:first-child { max-width: 190px; }
   .workspace-top-button { grid-template-columns: 16px auto 13px; }.workspace-top-button strong { display: none; }
@@ -3695,7 +3718,7 @@ html[data-theme-wallpaper="true"][data-ui-window-hidden] .content-preview-panel 
 /* ── 自动化任务：右侧面板（方案 B，2026-11-02）────────────────────────────
    主题钩子：data-pane="automation-panel"；关闭/管理/停止等 data-control 见
    docs/theme-guide.md。面板是 work-area 内的绝对定位 dock，与预览面板互斥；
-   单窗口会话的 timeline/composer 让出面板宽度（分屏视图里面板覆盖，不挤压）。 */
+   单窗口会话的 timeline/composer 让出面板宽度（分屏时同步收窄会话树，避免面板压住输入区）。 */
 .work-area.automation-panel-open > .conversation-pane .timeline {
   margin-right: min(var(--automation-panel-width, 386px), calc(100% - 260px));
 }
@@ -3709,6 +3732,12 @@ html[data-theme-wallpaper="true"][data-ui-window-hidden] .content-preview-panel 
 }
 .work-area.automation-panel-open > .conversation-pane .panel-dock,
 .work-area.automation-panel-open > .conversation-pane .panel-dock-fab { display: none; }
+
+.work-area.automation-panel-open > .split-view {
+  margin-right: min(var(--automation-panel-width, 386px), calc(100% - 260px));
+}
+.work-area.automation-panel-open > .split-view .panel-dock,
+.work-area.automation-panel-open > .split-view .panel-dock-fab { display: none; }
 
 .automation-panel {
   position: absolute;
