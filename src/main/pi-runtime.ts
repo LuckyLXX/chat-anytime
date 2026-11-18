@@ -159,6 +159,7 @@ import { loadSessionIndex, readSessionHeaderLine, saveSessionIndex, seedSessionS
 import { AUTOMATION_SESSION_ORIGIN_CUSTOM_TYPE, isAutomationSessionSummary } from "../shared/session-origin.js";
 import { planSessionOpen } from "./session-open-plan.js";
 import { SessionManagerCache } from "./session-manager-cache.js";
+import { SessionOpenCoordinator, sessionOpenPathKey, type SessionOpenIntentTicket } from "./session-open-coordinator.js";
 import { isDesktopConfiguredProvider } from "./model-catalog.js";
 import { createDefaultAgent, defaultTools, ensureDefaultWorkspaceDir, isPositiveInt, mergeBrowserSettings, mergeProviderModels, resolveDefaultWorkspace, resolveStartupWorkspace } from "./settings.js";
 import { buildMultiInvocationPrompt, composeInvocationBody, parseInvocationPrompt, sameInvocations, type InvocationSegment } from "./invocation-prompt.js";
@@ -448,6 +449,56 @@ const liveSessions = new Map<string, SessionRuntimeRecord>();
 const imPromptQueues = new Map<string, string[]>();
 // 最近销毁会话的 manager 缓存：冷打开时按 mtime/size 校验复用，省掉同步 JSONL 解析。
 const recentSessionManagers = new SessionManagerCache();
+/**
+ * 前台会话打开的请求合并（2026-11-18 P0 冷开优化）：只存序号、批次与取代标记，
+ * 不保存消息正文、不进 desktop protocol（见 session-open-coordinator.ts）。
+ */
+const sessionOpenCoordinator = new SessionOpenCoordinator();
+/**
+ * 命令对象 → 打开票根。用 WeakMap 而不是协议字段：
+ * - 内部递归的 `handleCommand({type:"session.open"})`（启动恢复、切助手、工作区
+ *   回落）天然没有票根 → 永远按原顺序完整执行；
+ * - 不新增 requestId、不改 desktop protocol。
+ */
+const sessionOpenTickets = new WeakMap<RuntimeCommand, SessionOpenIntentTicket>();
+/**
+ * 已经发出 `session.opening`、还没被目标状态帧收尾的路径（2026-11-18 审查 P2）。
+ *
+ * 为什么需要：一次冷开在阶段边界被更晚的打开取代时，渲染端那一行的 spinner
+ * 只能等 15s 兜底；而接管它的新目标若命中 live 快路径就根本不发 opening。这里
+ * 记住「还有一条提示悬着」，让下一个前台目标（含 live 快路径）把它接过去，
+ * 由匹配目标的状态帧收尾——不新增协议消息。
+ */
+let pendingOpeningHintPath: string | undefined;
+
+/**
+ * 消息入口：登记一次前台打开意图（2026-11-18 P0）。
+ *
+ * 这里只做**零 I/O** 的身份解析（live 记录 → 侧栏摘要 → 身份不明）：消息入口每
+ * 多一次同步读，切会话就多卡一次。解析不出身份时协调器按「可能受分屏保护」
+ * 保守处理——宁可多解析一次，也不把用户还要看的格子跳过。
+ */
+function registerSessionOpenIntent(command: Extract<RuntimeCommand, { type: "session.open" }>): SessionOpenIntentTicket {
+  const pathKey = sessionOpenPathKey(resolve(command.path));
+  // activate:false（分屏背景格 / 指定不激活）不参与前台淘汰，并充当批次屏障。
+  const supersedable = command.activate !== false;
+  const sessionId = supersedable ? sessionIdForOpenPath(pathKey) : undefined;
+  const ticket = sessionOpenCoordinator.register({
+    pathKey,
+    ...(sessionId ? { sessionId } : {}),
+    supersedable
+  });
+  sessionOpenTickets.set(command, ticket);
+  return ticket;
+}
+
+function sessionIdForOpenPath(pathKey: string): string | undefined {
+  for (const record of liveSessions.values()) {
+    const file = record.session.sessionManager.getSessionFile();
+    if (file && sessionOpenPathKey(file) === pathKey) return record.session.sessionId;
+  }
+  return currentSessions.find((item) => sessionOpenPathKey(item.path) === pathKey)?.id;
+}
 /**
  * 侧栏「已完成」分区的持久化记录（见 recent-completions.ts）：内存镜像 + 立即落盘。
  * 与 runStatus 互不依赖——记录发生在每个回合的终态出口（setTerminalRunStatus），
@@ -1694,7 +1745,8 @@ async function openAutomationSessionRecord(task: AutomationTask, runAgent: Agent
   if (!recordRoot || !sameSessionDir(recordRoot, dirname(target))) {
     throw new Error("关联会话路径与工作区不匹配，拒绝恢复");
   }
-  await createSession(openSessionManagerForReopen(target, recordRoot, recordWorkspace, runAgent.id, header), {
+  const acquisition = acquireSessionManagerForReopen(target, recordRoot, recordWorkspace, runAgent.id, header);
+  await createSession(acquisition.manager, {
     skipActivate: true,
     agentOverride: runAgent,
     workspaceOverride: recordWorkspace,
@@ -2572,35 +2624,88 @@ function rememberSessionSummaryFromManager(
   }
 }
 
+/** manager 获取阶段的结果：manager + 取用当时的文件签名（供中断时回缓存）。 */
+interface SessionManagerAcquisition {
+  manager: SessionManager;
+  /** 文件签名；不可 stat 时缺失（此时不作为回缓存依据）。 */
+  signature?: { mtimeMs: number; size: number };
+  /** 来自有界缓存：本次没有发生整文件解析。 */
+  reused: boolean;
+}
+
 /**
  * 冷打开优先复用刚销毁会话的 manager（文件 mtime/size 必须一致）。
+ *
+ * 单独立成一个阶段（`session.open` 的第二段）：它内部是**同步整文件解析**，
+ * 调用方拿到结果后要能先让出一次事件循环、检查用户是否已经切走，再决定要不要
+ * 进入后面的装配。
  *
  * 拿到 manager 后立即把「这次解析」的成果种进摘要缓存：同一份 entries 可以同时
  * 服务列表刷新，否则一次切换会在紧随的 refreshSessions 里再整读一遍。
  */
-function openSessionManagerForReopen(
+function acquireSessionManagerForReopen(
   target: string,
   recordRoot: string | undefined,
   recordWorkspace: string,
   agentId = currentAgent?.id ?? "default",
   header?: SessionHeaderLine
-): SessionManager {
+): SessionManagerAcquisition {
   let info: ReturnType<typeof statSync>;
   try {
     info = statSync(target);
   } catch {
     // 文件不存在/不可读：顺手丢掉陈旧缓存，走原 open 路径让上层给出准确错误。
     recentSessionManagers.forget(target);
-    return SessionManager.open(target, recordRoot, recordWorkspace);
+    return { manager: SessionManager.open(target, recordRoot, recordWorkspace), reused: false };
   }
+  const signature = { mtimeMs: info.mtimeMs, size: info.size };
+  const stat = { mtimeMs: info.mtimeMs, size: info.size, mtime: info.mtime };
   const cached = recentSessionManagers.take(target, agentId, recordWorkspace, info);
   if (cached) {
-    rememberSessionSummaryFromManager(target, cached, info, header);
-    return cached;
+    rememberSessionSummaryFromManager(target, cached, stat, header);
+    return { manager: cached, signature, reused: true };
   }
   const manager = SessionManager.open(target, recordRoot, recordWorkspace);
-  rememberSessionSummaryFromManager(target, manager, info, header);
-  return manager;
+  rememberSessionSummaryFromManager(target, manager, stat, header);
+  return { manager, signature, reused: false };
+}
+
+/**
+ * 打开在阶段边界被取代：还没交给 SDK 的 manager 尽量回到有界缓存。
+ *
+ * 只有能证明「没人持有 + 文件签名与取用当时一致」才回缓存；否则只是丢引用
+ * （下次重解析，绝不复用可能已经过期的历史）。
+ */
+function releaseUnusedSessionManager(
+  acquisition: SessionManagerAcquisition,
+  target: string,
+  recordWorkspace: string,
+  agentId: string
+): void {
+  const { manager, signature } = acquisition;
+  if (!signature) return;
+  // 同 id 已有 live 记录：那份 manager 才是权威，别把这份塞回缓存。
+  if (liveSessions.has(manager.getSessionId())) return;
+  const file = manager.getSessionFile();
+  if (file && resolve(file).toLowerCase() !== resolve(target).toLowerCase()) return;
+  let info: ReturnType<typeof statSync>;
+  try {
+    info = statSync(target);
+  } catch {
+    return;
+  }
+  if (info.mtimeMs !== signature.mtimeMs || info.size !== signature.size) return;
+  recentSessionManagers.remember({
+    path: target,
+    agentId,
+    workspace: recordWorkspace,
+    mtimeMs: info.mtimeMs,
+    size: info.size,
+    manager,
+    // 这是用户刚刚想打开的会话，按「用户使用」优先级留一格。
+    origin: "release",
+    usedAt: Date.now()
+  });
 }
 
 function disposeRecord(record: SessionRuntimeRecord, options: { keepBrowserTab?: boolean; cacheForReopen?: boolean } = {}): void {
@@ -4599,11 +4704,53 @@ function isUnstartedRecord(record: SessionRuntimeRecord): boolean {
  * - otherwise (explicit sessionManager, or agent.save's config-apply rebuild)
  *   the record is rebuilt over the same history.
  */
-async function createSession(sessionManager?: SessionManager, options: { reactivate?: boolean; skipActivate?: boolean; modelOverride?: { provider: string; id: string }; accessModeOverride?: AccessMode; unattended?: boolean; noGenerationGuard?: boolean; agentOverride?: AgentProfile; workspaceOverride?: string; inheritDesignMode?: boolean; inheritComputerMode?: boolean; inheritTeamMode?: boolean; sessionOrigin?: SessionOrigin; im?: { approvalTimeoutMs?: number }; isCancelled?: () => boolean } = {}): Promise<void> {
+async function createSession(sessionManager?: SessionManager, options: { reactivate?: boolean; skipActivate?: boolean; modelOverride?: { provider: string; id: string }; accessModeOverride?: AccessMode; unattended?: boolean; noGenerationGuard?: boolean; agentOverride?: AgentProfile; workspaceOverride?: string; inheritDesignMode?: boolean; inheritComputerMode?: boolean; inheritTeamMode?: boolean; sessionOrigin?: SessionOrigin; im?: { approvalTimeoutMs?: number }; isCancelled?: () => boolean; onAbandoned?: (stage: "prepared" | "built") => void } = {}): Promise<void> {
   if (!modelRuntime || options.isCancelled?.()) return;
   // noGenerationGuard（后台自动化会话）：不参与全局代际竞争，避免与用户
   // 的新建/切会话管线互相作废（reviewer P1-2）；它捕获自己的 record 上下文。
   const generation = options.noGenerationGuard ? sessionGeneration : ++sessionGeneration;
+  // 可中断的前台冷开（2026-11-18 P0 第二批）：新增的**让出点**只对带
+  // `isCancelled` 的调用启用，后台/自动化会话的调度语义保持原样。
+  const cancellation = options.isCancelled;
+  const isAbandoned = (): boolean => (!options.noGenerationGuard && generation !== sessionGeneration) || cancellation?.() === true;
+  /**
+   * 阶段边界检查：已作废就返回 true；可取消路径先让出一次事件循环，让连续
+   * 点击产生的新意图（以及真正的取消）有机会在下一个昂贵段之前到达。
+   */
+  const abandonCheckpoint = async (): Promise<boolean> => {
+    if (isAbandoned()) return true;
+    if (!cancellation) return false;
+    await yieldToEventLoop();
+    return isAbandoned();
+  };
+  // 未提交会话的资源回收（后进先出）。**不走 disposeRecord**：这时 record 还没
+  // 进 liveSessions，那条路会发出不该发生的生命周期事件（session_end 钩子、
+  // 侧栏帧），甚至误删同 id 的有效记录。
+  const teardown: Array<() => void> = [];
+  let sdkSessionCreated = false;
+  const discardUncommitted = (session?: AgentSession): void => {
+    for (const step of teardown.splice(0).reverse()) {
+      try {
+        step();
+      } catch {
+        // 回收是 best-effort：它自己的异常不能反过来影响管线。
+      }
+    }
+    try {
+      session?.dispose();
+    } catch {
+      // 同上。
+    }
+    // 通知调用方按阶段善后（`prepared` = 还没进 SDK，manager 可以安全回缓存）。
+    try {
+      options.onAbandoned?.(sdkSessionCreated ? "built" : "prepared");
+    } catch {
+      // 善后回调的异常不能反过来影响管线。
+    }
+  };
+  // 首屏列表刷新可能在本函数里启动（见下方 sessionsPromise）；提前声明，让
+  // 早期的阶段检查点也能在有返回前把它 await 掉，避免浮空 promise。
+  let sessionsPromise: Promise<void> | undefined;
   // Drop any pending throttled emit so a stale streaming flush from the
   // previous session cannot fire against the freshly reset state below.
   if (pendingFlushTimer) {
@@ -4835,7 +4982,19 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     // 配合 createDivModeExtension 的每回合尾部重申），其余块沿用原次序。
     systemPromptOverride: (base) => [base, recordAgent.systemPrompt, buildSkillsSystemPromptBlock(runtimeSkills.activeSkillsFor(resources.skillSummaries, recordAgent)), TOOL_ORCHESTRATION_PROMPT_BLOCK, OUTPUT_FORMAT_PROMPT_BLOCK, buildSubagentPromptBlock(resources.subagents), memoryPromptBlock, buildDivModePrompt(divModeForSession())].filter(Boolean).join("\n\n")
   });
+  // 资源装配前的让出点（仅可取消路径）：新意图能在进入后续昂贵段之前被看见。
+  if (await abandonCheckpoint()) {
+    discardUncommitted();
+    if (sessionsPromise) await sessionsPromise;
+    return;
+  }
   await resourceLoader.reload();
+  // 装配完成、构造 SDK 会话前再检查一次：已被取代的请求不再做整套装配。
+  if (await abandonCheckpoint()) {
+    discardUncommitted();
+    if (sessionsPromise) await sessionsPromise;
+    return;
+  }
   // Connect to configured MCP servers and rebuild the customTool set. Runs
   // concurrently with session manager setup since neither depends on the other.
   // Steady-state switches are served from the MCP tool cache (no network);
@@ -4892,7 +5051,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   // so on switches with a known list it runs in the background instead of
   // delaying the state emit; the follow-up emit is generation-guarded.
   const hasSessionList = sessionsLoaded && currentSessions.length > 0;
-  const sessionsPromise = hasSessionList ? undefined : refreshSessions();
+  sessionsPromise = hasSessionList ? undefined : refreshSessions();
   emitResourceCatalog();
   const sessionRecordSeed: Pick<SessionRuntimeRecord, "workspace" | "agent" | "permissionDeps"> = { workspace: recordWorkspace, agent: recordAgent, permissionDeps };
   const subagentTools = buildSubagentTools(sessionRecordSeed, activeSessionManager.getSessionId(), requested ?? selectedModel, false);
@@ -5142,6 +5301,12 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   const teamRef: { runtime?: TeamRuntime } = {};
   const teamTools = buildTeamTools(teamRef);
   const recordCustomTools: ToolDefinition[] = [shellKill.tools[0]!, shellKill.tools[1]!, ...subagentTools, ...todoTools, ...memoryTools, ...questionTools, ...planTools, ...visionTools, ...browserTools, ...sshTools, ...computerTools, ...automationTools, ...designTools, ...galleryTools, ...jevTools, ...teamTools];
+  // 工具装配的最后一个同步段之后、进入 SDK 之前：过期请求在这里停下。
+  if (await abandonCheckpoint()) {
+    discardUncommitted();
+    if (sessionsPromise) await sessionsPromise;
+    return;
+  }
   const result = await createAgentSession({
     cwd: recordWorkspace,
     modelRuntime,
@@ -5152,8 +5317,10 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     resourceLoader,
     customTools: recordCustomTools
   });
-  if ((!options.noGenerationGuard && generation !== sessionGeneration) || options.isCancelled?.()) {
-    result.session.dispose();
+  sdkSessionCreated = true;
+  if (await abandonCheckpoint()) {
+    // 还没绑定扩展：这一阶段没有 MCP 控制柄/监听器可收，直接释放 SDK 会话。
+    discardUncommitted(result.session);
     if (sessionsPromise) await sessionsPromise;
     return;
   }
@@ -5249,6 +5416,22 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   recordBox = record;
   sessionHolder.session = result.session;
   recordSessionId = result.session.sessionId;
+  // 未提交时按阶段回收：MCP 注销 → 配置监听 → 团队运行时 → 订阅 → 会话本身
+  // （顺序与 disposeRecord 一致，dispose 仍最后）。
+  teardown.push(() => {
+    record.mcpBridgeControl?.unregisterAll();
+    record.mcpConfigWatcher?.();
+    record.teamRuntime?.dispose();
+    record.unsubscribe();
+    if (record.paneFlushTimer) {
+      clearTimeout(record.paneFlushTimer);
+      record.paneFlushTimer = undefined;
+    }
+  });
+  teardown.push(() => {
+    clearTimeout(mcpStatusTimer);
+    clearTimeout(mcpStatusTimer2);
+  });
   // Activate the app-owned inline extension(s) only. The permission hook lives
   // in the permission extension factory and gates risky tool calls; no
   // third-party extension code is ever loaded.
@@ -5265,9 +5448,10 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   });
   // Re-check after the awaits: a session switch that started mid-creation must
   // win, so a superseded pipeline drops its freshly built session instead of
-  // stealing the active slot back.
-  if ((!options.noGenerationGuard && generation !== sessionGeneration) || options.isCancelled?.()) {
-    result.session.dispose();
+  // stealing the active slot back. 这一阶段已经拿到扩展（MCP 控制柄/配置监听/
+  // 定时器）：按阶段回收，MCP 注销仍先于 session.dispose。
+  if (await abandonCheckpoint()) {
+    discardUncommitted(result.session);
     if (sessionsPromise) await sessionsPromise;
     return;
   }
@@ -6033,7 +6217,7 @@ async function ensureImSession(command: Extract<RuntimeCommand, { type: "im.sess
           const agentRoot = join(getAgentDir(), "chatanytime-sessions", agent.id);
           const owned = sameSessionDir(recordRoot, dirname(target)) || pathIsWithin(agentRoot, target);
           if (owned) {
-            const manager = openSessionManagerForReopen(target, recordRoot, recordWorkspace, agent.id);
+            const manager = acquireSessionManagerForReopen(target, recordRoot, recordWorkspace, agent.id).manager;
             await createSession(manager, {
               skipActivate: true,
               unattended: true,
@@ -6309,6 +6493,11 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     case "session.open": {
       const target = resolve(command.path);
       if (!target.toLowerCase().endsWith(".jsonl")) throw new Error("只能打开会话文件");
+      // 0) 请求合并：票根只在消息入口登记（见 parentPort.on("message")）。已过期
+      //    且未开始的请求直接跳过——用户已经切走，新目标会接管 opening 提示，
+      //    这里既不解析也不报错。内部递归的 session.open 没有票根，顺序不变。
+      const ticket = sessionOpenTickets.get(command);
+      if (ticket && !sessionOpenCoordinator.begin(ticket.seq)) break;
       // 1) 已 live：直接激活（不重建，保留运行中的回合）；背景格不激活。
       const fileLive = [...liveSessions.values()].find((candidate) => {
         const liveFile = candidate.session.sessionManager.getSessionFile();
@@ -6316,6 +6505,12 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       });
       if (fileLive) {
         if (command.activate === false) break;
+        // 接管上一次冷开遗留的 opening 提示（见 pendingOpeningHintPath）：本目标
+        // 的状态帧才是它的收尾依据，否则那一行会一直转到 15s 兜底。同目标不必重发。
+        if (pendingOpeningHintPath) {
+          if (pendingOpeningHintPath !== target.toLowerCase()) post({ type: "session.opening", path: target });
+          pendingOpeningHintPath = undefined;
+        }
         activate(fileLive);
         emitState();
         break;
@@ -6345,7 +6540,9 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       }
       if (!fileExists) throw new Error("该会话文件不存在（未发过消息的空话题或已被移除）");
       if (command.activate === false) {
-        await createSession(openSessionManagerForReopen(target, recordRoot, recordWorkspace, owner.agentId, header), {
+        // 分屏背景格 / 指定不激活：不参与前台淘汰，也不碰全局镜像（原语义）。
+        const acquisition = acquireSessionManagerForReopen(target, recordRoot, recordWorkspace, owner.agentId, header);
+        await createSession(acquisition.manager, {
           skipActivate: true,
           agentOverride: ownerAgent,
           workspaceOverride: recordWorkspace
@@ -6353,12 +6550,37 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
         break;
       }
       post({ type: "session.opening", path: target, ...(header?.id ? { sessionId: header.id } : {}) });
-      workspace = recordWorkspace;
-      touchRecentWorkspace(workspace);
-      await createSession(openSessionManagerForReopen(target, recordRoot, recordWorkspace, owner.agentId, header), {
+      pendingOpeningHintPath = target.toLowerCase();
+      // 2) 进入昂贵同步解析前的让出点：连续点击的新意图有机会在这里被看见。
+      //    只对**前台可取消**打开启用（内部递归恢复没有票根，保持原调度语义）。
+      if (ticket) {
+        await yieldToEventLoop();
+        if (ticket.isSuperseded()) break;
+      }
+      // 3) manager 获取（缓存未命中时是一次同步整文件解析）。
+      const acquisition = acquireSessionManagerForReopen(target, recordRoot, recordWorkspace, owner.agentId, header);
+      // 4) 解析后再次让出并检查：过期请求不再做后面的整套装配（缓存/释放都
+      //    只碰这一份 manager，不触碰任何现有会话）。
+      if (ticket) {
+        await yieldToEventLoop();
+        if (ticket.isSuperseded()) {
+          // 提示不在这里清：它要留给接管的新目标（见 pendingOpeningHintPath）。
+          releaseUnusedSessionManager(acquisition, target, recordWorkspace, owner.agentId);
+          break;
+        }
+      }
+      // 准备阶段不再预写全局 workspace：record 的上下文全部走显式 override，
+      // 成功提交时由 activate(record) 统一更新（被取代/失败不留痕）。
+      await createSession(acquisition.manager, {
         agentOverride: ownerAgent,
-        workspaceOverride: recordWorkspace
+        workspaceOverride: recordWorkspace,
+        ...(ticket ? { isCancelled: () => ticket.isSuperseded() } : {}),
+        // 装配中途被取代（还没进 SDK）：manager 没被任何会话用过，回缓存等下一次。
+        onAbandoned: (stage) => {
+          if (stage === "prepared") releaseUnusedSessionManager(acquisition, target, recordWorkspace, owner.agentId);
+        }
       });
+      pendingOpeningHintPath = undefined;
       break;
     }
     case "session.search": {
@@ -8133,11 +8355,25 @@ parentPort.on("message", (event: { data: RuntimeCommand }) => {
     });
     return;
   }
+  // 前台会话打开的请求合并（2026-11-18 P0）：意图必须在**入队之前**登记，
+  // 正在等待/执行的旧恢复才能在阶段边界发现「用户已经切走」。其余入队命令
+  // 一律关闭当前连续批次（屏障：open A → prompt → open B 里 B 不能越过 A）。
+  // watch 同时登记/解除分屏保护，供协调器判断哪些打开不得跳过。
+  const openTicket = event.data.type === "session.open" ? registerSessionOpenIntent(event.data) : undefined;
+  if (!openTicket) {
+    if (event.data.type === "session.watch") {
+      if (event.data.watch) sessionOpenCoordinator.protectSession(event.data.sessionId);
+      else sessionOpenCoordinator.unprotectSession(event.data.sessionId);
+    }
+    sessionOpenCoordinator.barrier();
+  }
   const requestId = event.data.type === "session.new" ? event.data.requestId : undefined;
   const claim = requestId ? sessionNewClaims.register(requestId) : undefined;
   commandQueue = commandQueue
     .then(() => dispatchWithQueueReceipt(event.data, handleCommand, post, errorText))
     .catch((error) => {
+      // 被更晚的前台打开取代属于正常流程：不弹「打开失败」，新目标接管 opening 提示。
+      if (openTicket?.isSuperseded()) return;
       if (event.data.type === "session.new" && event.data.requestId) {
         post({ type: "session.new-result", requestId: event.data.requestId, ok: false, error: errorText(error) });
         return;
@@ -8148,5 +8384,7 @@ parentPort.on("message", (event: { data: RuntimeCommand }) => {
     })
     .finally(() => {
       if (requestId && claim) sessionNewClaims.finish(requestId, claim);
+      // 票根必须释放（成功/失败/跳过都走这里），否则登记表会无界增长。
+      if (openTicket) sessionOpenCoordinator.finish(openTicket.seq);
     });
 });

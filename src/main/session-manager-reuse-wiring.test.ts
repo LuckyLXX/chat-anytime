@@ -24,15 +24,15 @@ describe("session manager reuse wiring (batch 1)", () => {
     return runtime.slice(start, end);
   }
 
-  it("openSessionManagerForReopen hands the already-read header through", () => {
+  it("acquireSessionManagerForReopen hands the already-read header through", () => {
     const branch = sliceFrom('case "session.open": {', 'case "session.rename": {');
     // 两处冷路径（activate:false 与前台）都带 header：有界首行读只做一次，
     // 而且种子摘要要用同一份 header 的原始 cwd / timestamp。
-    expect(branch.match(/openSessionManagerForReopen\(target, recordRoot, recordWorkspace, owner\.agentId, header\)/gu)).toHaveLength(2);
+    expect(branch.match(/acquireSessionManagerForReopen\(target, recordRoot, recordWorkspace, owner\.agentId, header\)/gu)).toHaveLength(2);
   });
 
   it("acquires the manager through the cache and seeds the summary with that same parse", () => {
-    const fn = sliceFrom("function openSessionManagerForReopen(", "function disposeRecord(");
+    const fn = sliceFrom("function acquireSessionManagerForReopen(", "function releaseUnusedSessionManager(");
     expect(fn).toContain("recentSessionManagers.take(target, agentId, recordWorkspace, info)");
     // 冷路径只 open 一次，并在返回前把这次解析种进摘要缓存。
     expect(fn.match(/SessionManager\.open\(target, recordRoot, recordWorkspace\)/gu)).toHaveLength(2);
@@ -47,7 +47,7 @@ describe("session manager reuse wiring (batch 1)", () => {
     expect(fn).toContain("const header = readSessionHeaderLine(target)");
     expect(fn).toContain("resolve(header.cwd)");
     expect(fn).not.toContain("SessionManager.open(target)");
-    expect(fn).toContain("openSessionManagerForReopen(target, recordRoot, recordWorkspace, runAgent.id, header)");
+    expect(fn).toContain("acquireSessionManagerForReopen(target, recordRoot, recordWorkspace, runAgent.id, header)");
     // 身份与工作区校验保留（对应过真实故障）。
     expect(fn).toContain("关联会话路径与工作区不匹配");
   });

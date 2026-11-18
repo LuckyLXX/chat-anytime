@@ -134,7 +134,7 @@ describe("pi-runtime session.open wiring", () => {
 
   it("cold branch opens once with cwd override (no probe-style SessionManager.open)", () => {
     expect(branch).toContain("const header = fileExists ? readSessionHeaderLine(target) : undefined;");
-    expect(branch).toContain("openSessionManagerForReopen(target, recordRoot");
+    expect(branch).toContain("acquireSessionManagerForReopen(target, recordRoot");
     expect(branch).not.toContain("SessionManager.open(target);");
   });
 

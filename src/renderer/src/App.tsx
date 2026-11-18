@@ -1581,6 +1581,23 @@ export function App(): ReactNode {
     setSelectedSessionPaths({});
   }
 
+  /**
+   * 分屏入口的保护登记（2026-11-18 P0 会话冷开优化）。
+   *
+   * 分屏格子的恢复必须排在主进程的「请求合并」之先：新格先发出 session.watch，
+   * 主进程才知道这一格不能被后来的一次普通点击淘汰（否则快速点击会把正在加载
+   * 的格子当成无用请求跳过，格子永久空白）。已登记的格子不重发——重复 watch
+   * 会让主进程补推一帧全量水合，白白多一份快照。
+   */
+  function protectSplitPane(sessionId: string): void {
+    const registered = watchedPaneIdsRef.current;
+    if (registered.has(sessionId)) return;
+    registered.add(sessionId);
+    void window.piDesktop.send({ type: "session.watch", sessionId, watch: true }).catch(() => {
+      registered.delete(sessionId);
+    });
+  }
+
   async function openSession(path: string, sessionWorkspace: string, sessionId?: string, agentId?: string): Promise<void> {
     setAutomationCenterOpen(false);
     try {
@@ -1591,7 +1608,12 @@ export function App(): ReactNode {
           return;
         }
         const target = focusedPaneId ?? activeSessionId;
-        if (target && sessionId) setSplitState((current) => current.tree ? { tree: replaceLeaf(current.tree, target, { kind: "leaf", sessionId }), focusedPane: sessionId } : current);
+        if (target && sessionId) {
+          // 新格要先受保护再打开（见 protectSplitPane）：这次打开若被后来的点击
+          // 淘汰，格子就没有会话可显示了。
+          protectSplitPane(sessionId);
+          setSplitState((current) => current.tree ? { tree: replaceLeaf(current.tree, target, { kind: "leaf", sessionId }), focusedPane: sessionId } : current);
+        }
       }
       // 打开归档会话 = 「我要用回它了」：先取消归档让它回到正常列表，再打开。
       // 这一条覆盖所有经 openSession 的入口（侧栏行、归档行右键「打开」、分屏打开）。
@@ -1638,6 +1660,8 @@ export function App(): ReactNode {
     }
     if (splitTree && countLeaves(splitTree) >= MAX_SPLIT_PANES) return;
     // 自动均衡：不再固定「从焦点格链式分裂」，而是选最接近方形的格子落位、方向自动。
+    // watch 必须先于 open 到达主进程（见 protectSplitPane）。
+    protectSplitPane(item.id);
     setSplitState((current) => ({ tree: balancedAddPane(current.tree, activeSessionId, item.id), focusedPane: item.id }));
     void window.piDesktop.send({ type: "session.open", path: item.path, workspace: item.workspace, agentId: item.agentId }).catch((error) => {
       setMessageActionError(error instanceof Error ? error.message : "分屏打开会话失败");
@@ -1824,6 +1848,8 @@ export function App(): ReactNode {
     splitRestoreDoneRef.current = true;
     const focused = focusedPaneId && paneIds.includes(focusedPaneId) ? focusedPaneId : paneIds[0];
     const background = paneIds.filter((id) => id !== focused);
+    // 焦点格同样是分屏格子：先登记保护再打开，避免它被紧接着的一次点击淘汰。
+    if (focused) protectSplitPane(focused);
     void (async () => {
       const focusedItem = sessionSummaries.find((summary) => summary.id === focused);
       if (focusedItem) {
