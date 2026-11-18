@@ -35,8 +35,14 @@ describe("会话切换增量恢复协议的接线", () => {
   it("utility 用 keyed 发帧器（不再回退成单一 lastActiveEmit 基线）", () => {
     expect(runtime).toContain("createActiveEmitter()");
     expect(runtime).toContain("activeEmit.plan(snapshot())");
-    expect(runtime).toContain("activeEmit.drop(record.session.sessionId)");
     expect(runtime).not.toContain("lastActiveEmit");
+    // 基线释放必须对**所有**会话生效（active 与 parked 一视同仁）：被 LRU 驱逐或删除的
+    // 后台会话不能被基线钉住，也不能在重建后被旧基线凑合。
+    const dropIdx = runtime.indexOf("activeEmit.drop(record.session.sessionId)");
+    const activeOnlyIdx = runtime.indexOf("if (activeRuntime === record) {");
+    expect(dropIdx).toBeGreaterThanOrEqual(0);
+    expect(activeOnlyIdx).toBeGreaterThanOrEqual(0);
+    expect(dropIdx).toBeLessThan(activeOnlyIdx);
     // 发帧决策里三种帧都要能出现，且 resume 只认目标基线 revision。
     expect(emit).toContain('type: "state.resume.patch"');
     expect(emit).toContain("baseRevision: previous.revision");
@@ -58,6 +64,11 @@ describe("会话切换增量恢复协议的接线", () => {
     // 旧写法（把补丁直接套到 latestSnapshot / 失败即清空并拉 state.sync）不得回流。
     expect(mainIndex).not.toContain("applyRuntimeStatePatch(latestSnapshot");
     expect(mainIndex).not.toContain('latestSnapshot = undefined;\n          runtimeProcess?.postMessage({ type: "state.sync"');
+    // 恢复帧不只有 response 关系可认（渲染端直接发的 state.recover 自带 requestId），
+    // 因此缓存要无条件刷新目标会话基线；而断档必须转成定向恢复而不是硬套差量。
+    const baselines = read("snapshot-baselines.ts");
+    expect(baselines).toContain("remember(snapshot)");
+    expect(baselines).toContain("revision !== baseline.revision + 1");
   });
 
   it("面板作品跟得上 active 切换（resume / recovery 帧都要更新 activeSessionId）", () => {

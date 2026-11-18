@@ -731,6 +731,23 @@ function normalizeSessionPath(value: string): string {
   return value.split(String.fromCharCode(92)).join("/").toLowerCase();
 }
 
+/**
+ * 冷打开会话的 spinner（`openingSession`）何时收尾：该会话的 active 帧到达就算到了。
+ *
+ * 两条匹配依据：「路径相同」（全量 `state` 总带 sessionFile）与「会话 id 相同」
+ * （`state.resume.patch` / `state.recovery` 的差量不带 sessionFile，但一定带 sessionId）。
+ * 漏了后一条，侧栏 spinner 就只能等 App 的 15s 兑底才消失。
+ */
+function openingSessionAfterFrame(
+  opening: DesktopState["openingSession"],
+  frame: { sessionId?: string; sessionFile?: string }
+): DesktopState["openingSession"] {
+  if (!opening) return undefined;
+  if (frame.sessionFile && normalizeSessionPath(frame.sessionFile) === normalizeSessionPath(opening.path)) return undefined;
+  if (opening.sessionId && frame.sessionId === opening.sessionId) return undefined;
+  return opening;
+}
+
 /** 补丁断档（丢帧）时请求一次全量；500ms 节流避免坏帧风暴。 */
 let lastStateSyncRequestAt = 0;
 function requestStateSync(): void {
@@ -940,8 +957,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
         const state = get();
         const incoming = message.snapshot;
         const previous = state.snapshot;
-        const openingMatches = state.openingSession && (incoming.sessionFile ? normalizeSessionPath(incoming.sessionFile) === normalizeSessionPath(state.openingSession.path) : false);
-        const opening = openingMatches ? undefined : state.openingSession;
+        const opening = openingSessionAfterFrame(state.openingSession, incoming);
         const { messages: mergedMessages, changed } = mergeMessagesPreservingIdentity(previous.messages, incoming.messages);
         const mergedExecutions = mergeExecutionsPreservingIdentity(previous.executions, incoming.executions);
         // sessions/recentWorkspaces 经结构化克隆每帧都是新引用，必须走内容
@@ -969,7 +985,8 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
             previous.sessionId === incoming.sessionId && previous.sessionFile === incoming.sessionFile &&
             queuedMessagesEqual(previous.queuedMessages, incoming.queuedMessages) &&
             previous.thinkingLevel === incoming.thinkingLevel &&
-            previous.revision === incoming.revision) {
+            previous.revision === incoming.revision &&
+            opening === state.openingSession) {
           // Nothing changed at all — keep the exact same snapshot reference
           // so downstream useMemo/useEffect dependency checks stay no-ops.
           return;
@@ -1040,7 +1057,8 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
         const parkedPanels = previous.sessionId && previous.sessionId !== merged.sessionId
           ? { ...state.parkedPanels, [previous.sessionId]: previous satisfies SessionPaneSnapshot }
           : state.parkedPanels;
-        set({ snapshot: merged, parkedPanels });
+        const opening = openingSessionAfterFrame(state.openingSession, merged);
+        set({ snapshot: merged, parkedPanels, ...(opening !== state.openingSession ? { openingSession: opening } : {}) });
         break;
       }
       case "state.recovery": {
@@ -1062,12 +1080,23 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
         const mergedExecutions = sameSession
           ? mergeExecutionsPreservingIdentity(previous.executions, incoming.executions)
           : incoming.executions;
-        const snapshot: RuntimeSnapshot = { ...incoming, messages: mergedMessages, executions: mergedExecutions };
+        // sessions / recentWorkspaces 与 active 会话无关（同一份全局列表），走内容比较的
+        // 身份保留合并：否则每次恢复都白刷一遍侧栏与「最近工作区」。
+        const mergedSessions = mergeSessionsPreservingIdentity(previous.sessions, incoming.sessions);
+        const mergedRecentWorkspaces = mergeRecentWorkspacesPreservingIdentity(previous.recentWorkspaces, incoming.recentWorkspaces);
+        const snapshot: RuntimeSnapshot = {
+          ...incoming,
+          messages: mergedMessages,
+          executions: mergedExecutions,
+          sessions: mergedSessions,
+          recentWorkspaces: mergedRecentWorkspaces
+        };
         rememberActiveBaseline(snapshot);
         const parkedPanels = previous.sessionId && previous.sessionId !== snapshot.sessionId
           ? { ...state.parkedPanels, [previous.sessionId]: previous satisfies SessionPaneSnapshot }
           : state.parkedPanels;
-        set({ snapshot, parkedPanels });
+        const opening = openingSessionAfterFrame(state.openingSession, snapshot);
+        set({ snapshot, parkedPanels, ...(opening !== state.openingSession ? { openingSession: opening } : {}) });
         break;
       }
       case "session.state.patch":

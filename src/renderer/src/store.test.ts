@@ -1119,6 +1119,53 @@ describe("active 通道的会话切换增量恢复", () => {
     }
   });
 
+  it("resume 帧收尾冷打开的 spinner（差量不带 sessionFile，按 sessionId 认）", () => {
+    const spy = installSendSpy();
+    try {
+      seedActiveState("a", 1);
+      seedActiveState("b", 2);
+      useDesktopStore.setState({ openingSession: { path: "/p/a.jsonl", sessionId: "a", at: Date.now() } });
+      useDesktopStore.getState().handleRuntimeMessage({
+        type: "state.resume.patch",
+        sessionId: "a",
+        baseRevision: 1,
+        snapshot: { sessionId: "a", revision: 6 }
+      });
+      expect(useDesktopStore.getState().snapshot.sessionId).toBe("a");
+      // 不能等 App 的 15s 兜底：会话已经到了，spinner 必须立刻收。
+      expect(useDesktopStore.getState().openingSession).toBeUndefined();
+    } finally {
+      spy.restore();
+    }
+  });
+
+  it("state.recovery 也收尾 spinner，并复用 sessions/recentWorkspaces 引用（不白刷侧栏）", () => {
+    const spy = installSendSpy();
+    try {
+      const sessions = [{ id: "s1", path: "/p/s1.jsonl", workspace: "/w", agentId: "default", title: "话题", modifiedAt: 1, messageCount: 1 }];
+      const workspaces = [{ path: "/w", openedAt: 1 }];
+      seedActiveState("a", 1, { messages: [msg("a1")], sessions, recentWorkspaces: workspaces });
+      // 断档 → 请求恢复
+      useDesktopStore.getState().handleRuntimeMessage({ type: "state.patch", snapshot: { sessionId: "a", revision: 8 } });
+      const requestId = (spy.sent[0] as Extract<RuntimeCommand, { type: "state.recover" }>).requestId;
+      useDesktopStore.setState({ openingSession: { path: "/p/a.jsonl", sessionId: "a", at: Date.now() } });
+      useDesktopStore.getState().handleRuntimeMessage({
+        type: "state.recovery",
+        requestId,
+        sessionId: "a",
+        // IPC 克隆后两张列表都是新数组、内容相同。
+        snapshot: { ...snap("a"), revision: 9, messages: [msg("a1")], sessions: [...sessions], recentWorkspaces: [...workspaces] }
+      });
+      const snapshot = useDesktopStore.getState().snapshot;
+      expect(snapshot.revision).toBe(9);
+      expect(snapshot.sessions).toBe(sessions);
+      expect(snapshot.recentWorkspaces).toBe(workspaces);
+      expect(useDesktopStore.getState().openingSession).toBeUndefined();
+    } finally {
+      spy.restore();
+    }
+  });
+
   it("bootstrap 的 active 快照成为基线：重载后当前会话的切回帧仍可增量应用", async () => {
     const host = globalThis as { piDesktop?: unknown; window?: unknown };
     const originalWindow = host.window;

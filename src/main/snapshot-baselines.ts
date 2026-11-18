@@ -53,7 +53,11 @@ export function createMainSnapshotCache(options: { nextRequestId: () => string }
   function remember(snapshot: RuntimeSnapshot): void {
     if (!snapshot.sessionId) return;
     baselines.set({ sessionId: snapshot.sessionId, revision: snapshot.revision, snapshot });
-    pending = undefined;
+  }
+
+  /** 清理已不再需要的在途请求（同一目标已有答案时）。 */
+  function settle(sessionId: string): void {
+    if (pending?.sessionId === sessionId) pending = undefined;
   }
 
   function requestRecovery(sessionId: string): MainSnapshotIngest {
@@ -70,15 +74,26 @@ export function createMainSnapshotCache(options: { nextRequestId: () => string }
         case "state": {
           current = message.snapshot;
           remember(message.snapshot);
+          pending = undefined;
           return { latest: message.snapshot };
         }
         case "state.recovery": {
-          // 只认自己发出的那一次（过期响应不覆盖后来激活的会话）。
-          if (!pending || pending.requestId !== message.requestId || pending.sessionId !== message.sessionId) return {};
-          if (message.snapshot.sessionId !== message.sessionId) return {};
-          current = message.snapshot;
-          remember(message.snapshot);
-          return { latest: message.snapshot };
+          const snapshot = message.snapshot;
+          if (snapshot.sessionId !== message.sessionId) return {};
+          // 恢复帧可能是回应 main 自己的请求，也可能是回应**渲染端直接发出的**
+          // state.recover（它自带 requestId，main 认不出来）。两者都是目标会话的全量
+          // 快照：基线无条件换成这一份（不换的话后续 state.patch 会套在旧基线上，
+          // 消息差量算错）。当前快照能不能换分两种：
+          //  - 自己请求的：主动要过该会话的快照，utility 只会为**当前 active** 回帧 ⇒ 权威；
+          //  - 别人请求的：只在目标本就是当前 active 时跟上，过期帧不得覆盖后来激活的会话。
+          const owned = Boolean(pending && pending.requestId === message.requestId && pending.sessionId === message.sessionId);
+          remember(snapshot);
+          settle(message.sessionId);
+          if (owned || current?.sessionId === message.sessionId) {
+            current = snapshot;
+            return { latest: snapshot };
+          }
+          return {};
         }
         case "state.patch": {
           const sessionId = message.snapshot.sessionId ?? current?.sessionId;
@@ -86,12 +101,18 @@ export function createMainSnapshotCache(options: { nextRequestId: () => string }
           const baseline = baselines.get(sessionId);
           if (!baseline) return requestRecovery(sessionId);
           const revision = message.snapshot.revision;
-          // 重复/重放帧（≤ 基线 revision）直接丢弃：增量补丁重复应用会重复 append。
-          if (revision !== undefined && baseline.revision !== undefined && revision <= baseline.revision) return {};
+          if (revision !== undefined && baseline.revision !== undefined) {
+            // 重复/重放帧（≤ 基线 revision）直接丢弃：增量补丁重复应用会重复 append。
+            if (revision <= baseline.revision) return {};
+            // 断档 = main 的基线落后于 utility（典型原因：渲染端自己发起的恢复帧
+            // 没被认领、或中间漏帧）。此时套用差量会把消息算错，只请求定向恢复。
+            if (revision !== baseline.revision + 1) return requestRecovery(sessionId);
+          }
           const merged = applyRuntimeStatePatch(baseline.snapshot, message);
           if (!merged) return requestRecovery(sessionId);
           current = merged;
           remember(merged);
+          settle(sessionId);
           return { latest: merged };
         }
         case "state.resume.patch": {
@@ -99,11 +120,14 @@ export function createMainSnapshotCache(options: { nextRequestId: () => string }
           const baseline = baselines.get(sessionId);
           if (!baseline) return requestRecovery(sessionId);
           const revision = message.snapshot.revision;
+          // 切回帧的新 revision **合法跳号**（中间夹着别的会话用掉的全局序号），
+          // 所以这里只去重、不做连号判定；基线是否匹配由 baseRevision 校验。
           if (revision !== undefined && baseline.revision !== undefined && revision <= baseline.revision) return {};
           const merged = applyResumeStatePatch(baseline.snapshot, message);
           if (!merged) return requestRecovery(sessionId);
           current = merged;
           remember(merged);
+          settle(sessionId);
           return { latest: merged };
         }
         default:

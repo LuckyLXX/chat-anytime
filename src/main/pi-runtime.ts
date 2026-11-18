@@ -2548,6 +2548,10 @@ function disposeRecord(record: SessionRuntimeRecord, options: { keepBrowserTab?:
   pendingWatchSessions.delete(record.session.sessionId);
   hiddenPaneSessions.delete(record.session.sessionId);
   lastPaneEmit.delete(record.session.sessionId);
+  // 丢弃该会话的 active 基线（active 与 parked 一视同仁）：基线会持着整段消息数组
+  // （含 base64 图片），被 LRU 驱逐/删除的后台会话也不能被它钉住；而且切回一个已销毁/
+  // 重建的会话时绝不能拿旧基线凑合（必须走全量）。
+  activeEmit.drop(record.session.sessionId);
   // 会话从运行时消失必须立即反映到面板（否则面板会挂着一条永远「在跑」的幽灵）。
   scheduleLiveEmit(true);
   if (record.paneFlushTimer) {
@@ -2568,9 +2572,6 @@ function disposeRecord(record: SessionRuntimeRecord, options: { keepBrowserTab?:
     todos = [];
     memoryStore = undefined;
     memoryTopics = [];
-    // 丢弃该会话的 active 基线：否则基线会继续持有整段消息数组（含 base64 图片），
-    // 而且切回一个已销毁/重建的会话时绝不能拿旧基线凑合（必须走全量）。
-    activeEmit.drop(record.session.sessionId);
     refreshGitBranch();
   }
   // 会话真正消亡时释放其绑定的浏览器自动化标签页（main 侧只关 pi-browser-*

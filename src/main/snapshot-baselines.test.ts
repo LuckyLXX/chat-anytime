@@ -133,6 +133,51 @@ describe("createMainSnapshotCache", () => {
     expect(main.latest()?.sessionId).toBe("c");
   });
 
+
+  it("渲染端自己发起的恢复也要被认领（否则 main 的基线落后，后续差量算错）", () => {
+    const main = cache();
+    main.ingest(state(snapshot("a", 1, { messages: [message("m1")] })));
+    // 模拟 utility 回应**渲染端**的 state.recover：requestId 是渲染端生成的。
+    const rendererRecovery = main.ingest({
+      type: "state.recovery",
+      requestId: "renderer-own-request",
+      sessionId: "a",
+      snapshot: snapshot("a", 7, { messages: [message("m1"), message("m2")], status: "A 恢复" })
+    });
+    expect(rendererRecovery.latest?.status).toBe("A 恢复");
+    expect(main.latest()?.messages.map((item) => item.id)).toEqual(["m1", "m2"]);
+    // 基线也换成恢复帧：下一帧补丁可从 rev 7 接上。
+    const next = main.ingest({ type: "state.patch", snapshot: { sessionId: "a", revision: 8, busy: true } });
+    expect(next.latest?.busy).toBe(true);
+  });
+
+  it("恢复帧的目标不是当前 active 时只刷新该会话基线，绝不覆盖当前快照", () => {
+    const main = cache();
+    main.ingest(state(snapshot("b", 1)));
+    const stale = main.ingest({
+      type: "state.recovery",
+      requestId: "renderer-own-request",
+      sessionId: "a",
+      snapshot: snapshot("a", 9)
+    });
+    expect(stale.latest).toBeUndefined();
+    expect(main.latest()?.sessionId).toBe("b");
+  });
+
+  it("补丁序号断档（main 基线落后）只请求定向恢复，不套用旧差量", () => {
+    const main = cache();
+    main.ingest(state(snapshot("a", 1, { messages: [message("m1")] })));
+    const gap = main.ingest({
+      type: "state.patch",
+      snapshot: { sessionId: "a", revision: 6, status: "跳号了" },
+      messages: { append: [message("m2")] }
+    });
+    expect(gap.recover).toEqual({ type: "state.recover", sessionId: "a", requestId: "req-1" });
+    // 旧基线保持自洽（宁可不变，也不留下一份真假混合的快照）。
+    expect(main.latest()?.messages.map((item) => item.id)).toEqual(["m1"]);
+    expect(main.latest()?.status).not.toBe("跳号了");
+  });
+
   it("非 active 通道的消息一律忽略（面板/资源等推送不影响快照缓存）", () => {
     const main = cache();
     main.ingest(state(snapshot("a", 1)));
