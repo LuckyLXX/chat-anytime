@@ -45,4 +45,15 @@ describe("codemode 接线（源码回归网）", () => {
     expect(override).toBeGreaterThan(-1);
     expect(source.slice(override, override + 400)).toContain("TOOL_ORCHESTRATION_PROMPT_BLOCK");
   });
+
+  it("编排提示块声明「脚本只做确定性编排」（脚本内不委派 / 不提问）", () => {
+    const start = source.indexOf("const TOOL_ORCHESTRATION_PROMPT_BLOCK");
+    expect(start).toBeGreaterThan(-1);
+    const block = source.slice(start, source.indexOf('].join("")', start));
+    // 上游脚本可调集 = 已注册且 codemode/deferred + 当前激活的 direct，delegate_agent /
+    // team_* / ask_question 都在里面，没有「声明给模型但脚本不可调」的档位，先走提示层。
+    expect(block).toContain("delegate_agent");
+    expect(block).toContain("team_*");
+    expect(block).toContain("ask_question");
+  });
 });

@@ -3363,9 +3363,19 @@ function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "session" | "
  * 几乎不主动用 codemode，用户明示后才用且效果好——把提示内置到系统提示词（会话
  * 级常量，符合 dsh 缓存纪律：不随回合变化）。tool_search 撤回后恢复路径那半句
  * 一并移除（完整版留在分支历史 2bcfe45）。
+ *
+ * 第二句是「脚本只做确定性编排」的软约束：Pi 的脚本可调集是「已注册且
+ * exposure 为 codemode/deferred + 当前激活的 direct」再减掉 codemode 自己
+ * （`getCodemodeCallableTools`），delegate_agent / team_* / ask_question 都是
+ * active direct，所以脚本里天然可调。那三条会另开 LLM 会话或要用户交互，与
+ * codemode「不花 LLM 轮次、把大输出挡在上下文外」的定位冲突，且脚本内并发
+ * 委派没有任何并发上限。上游没有「声明给模型但脚本不可调」的档位，硬禁只能
+ * 在 tool_call 钩子里按 parentToolCallId 拦（用户 2026-11-17 决定先走提示层，
+ * 不砍能力）。
  */
 const TOOL_ORCHESTRATION_PROMPT_BLOCK = [
-  "【工具编排】并行读多个文件、批量统计、或需要在大输出里筛选出结论时，优先用 codemode 写一段脚本一次完成（Promise.allSettled 并行调用工具，return 汇总结果），而不是连续多次独立工具调用；脚本 API 与全局清单见 codemode 工具描述。"
+  "【工具编排】并行读多个文件、批量统计、或需要在大输出里筛选出结论时，优先用 codemode 写一段脚本一次完成（Promise.allSettled 并行调用工具，return 汇总结果），而不是连续多次独立工具调用；脚本 API 与全局清单见 codemode 工具描述。",
+  "脚本只做确定性编排：不要在脚本里调用 delegate_agent、team_*、ask_question（会另开会话或要用户交互），需要委派或提问就直接发工具调用。"
 ].join("");
 
 /**
@@ -3857,9 +3867,13 @@ function handleSessionEvent(record: SessionRuntimeRecord, event: AgentSessionEve
         const delegation = delegationFromToolResult(event.partialResult);
         if (delegation) {
           current.delegation = delegation;
-          // 状态栏同步最后一步（事件本就经 50ms 节流推送）。
-          const lastStep = delegation.steps.at(-1);
-          record.status = lastStep ? `子代理·${lastStep.label}` : "子代理·正在启动";
+          // 状态栏同步最后一步（事件本就经 50ms 节流推送）。脚本内的嵌套委派只写
+          // 卡片、不抢状态栏：与 tool_execution_start 同一约定（脚本卡片才是用户
+          // 在等的调用，嵌套进度跟着卡片渲染）。
+          if (!event.parentToolCallId) {
+            const lastStep = delegation.steps.at(-1);
+            record.status = lastStep ? `子代理·${lastStep.label}` : "子代理·正在启动";
+          }
         }
       }
       immediate = false;
