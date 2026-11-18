@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { SessionManager, type SessionEntry } from "@earendil-works/pi-coding-agent";
 import { AUTOMATION_SESSION_ORIGIN_CUSTOM_TYPE } from "../shared/session-origin.js";
-import { listSessionSummaries, loadSessionIndex, readSessionHeaderLine, saveSessionIndex, SESSION_INDEX_VERSION, summarizeEntries, summarizeLiveSession, type CachedSessionSummary, type SessionFileSummary } from "./session-summary-cache.js";
+import { listSessionSummaries, loadSessionIndex, readSessionHeaderLine, saveSessionIndex, seedSessionSummary, SESSION_INDEX_VERSION, summarizeEntries, summarizeLiveSession, type CachedSessionSummary, type SessionFileSummary } from "./session-summary-cache.js";
 
 /**
  * 会话摘要缓存（2026-09-25 性能 P0）的回归网。
@@ -564,5 +564,113 @@ describe("session summary cache: disk index", () => {
     saveSessionIndex(indexPath, cache, { now: 2_000 });
     const reloaded = loadSessionIndex(indexPath, { now: 2_000 });
     expect([...reloaded.values()].every((entry) => entry.seenAt === 2_000)).toBe(true);
+  });
+});
+
+/**
+ * 「扫描发生的解析可以复用」（2026-11-18 P0 冷开优化）。
+ *
+ * 列表刷新为了摘要本来就要整读正文；把那份 manager 交出去，下一次打开就零解析。
+ * 但准入方必须能分辨「真的解析了」与「缓存/索引命中」——否则会把索引命中也当成
+ * 一次解析，凭空造出正文读。
+ */
+describe("session summary cache: parsed-manager handoff", () => {
+  it("hands out the manager exactly when a body parse happened", async () => {
+    const dir = tempDir("handoff");
+    writeRealSession(dir, "C:/work/demo", (manager) => {
+      manager.appendMessage({ role: "user", content: "你好" } as never);
+      manager.appendMessage({ role: "assistant", content: "在" } as never);
+    });
+    const cache = new Map<string, any>();
+    const handed: Array<{ path: string; id: string; mtimeMs: number; size: number; sessionId: string }> = [];
+    let opens = 0;
+    const deps = {
+      cache,
+      openSession: (path: string) => { opens++; return SessionManager.open(path); },
+      onManagerParsed: (input: any) => handed.push({
+        path: input.path,
+        id: input.header.id,
+        mtimeMs: input.mtimeMs,
+        size: input.size,
+        sessionId: input.manager.getSessionId()
+      })
+    };
+    await listSessionSummaries([dir], deps);
+    expect(opens).toBe(1);
+    expect(handed).toHaveLength(1);
+    expect(handed[0]).toMatchObject({ id: handed[0]!.sessionId });
+    expect(handed[0]!.mtimeMs).toBeGreaterThan(0);
+    expect(handed[0]!.size).toBeGreaterThan(0);
+
+    // 第二轮 mtime/size 未变 → 缓存命中，绝不再交出 manager（否则等于宣称又解析了一次）。
+    await listSessionSummaries([dir], deps);
+    expect(opens).toBe(1);
+    expect(handed).toHaveLength(1);
+  });
+
+  it("does not hand out a manager when a live summary covered the file", async () => {
+    const dir = tempDir("handoff-live");
+    const path = writeRealSession(dir, "C:/work/demo", (manager) => {
+      manager.appendMessage({ role: "user", content: "磁盘标题" } as never);
+      manager.appendMessage({ role: "assistant", content: "ok" } as never);
+    });
+    const live = summarizeLiveSession({ path, id: "live", cwd: "C:/work/demo", entries: [] });
+    let handed = 0;
+    await listSessionSummaries([dir], { liveSummaries: [live], onManagerParsed: () => { handed++; } });
+    expect(handed).toBe(0);
+  });
+
+  it("a throwing handoff callback cannot break the session list", async () => {
+    const dir = tempDir("handoff-throw");
+    writeRealSession(dir, "C:/work/demo", (manager) => {
+      manager.appendMessage({ role: "user", content: "hi" } as never);
+      manager.appendMessage({ role: "assistant", content: "ok" } as never);
+    });
+    const summaries = await listSessionSummaries([dir], {
+      cache: new Map(),
+      onManagerParsed: () => { throw new Error("cache admission exploded"); }
+    });
+    expect(summaries).toHaveLength(1);
+  });
+
+  it("a seeded summary makes the next scan parse nothing (and keeps cwd/created semantics)", async () => {
+    const dir = tempDir("seed");
+    const path = writeRealSession(dir, "C:/work/demo", (manager) => {
+      manager.appendMessage({ role: "user", content: "第一个问题" } as never);
+      manager.appendMessage({ role: "assistant", content: "第一个回答" } as never);
+    });
+    const info = statSync(path);
+    // 冷开路径：自己 open 一次（必须付），然后把这份解析种进摘要缓存。
+    const manager = SessionManager.open(path);
+    const header = readSessionHeaderLine(path)!;
+    const cache = new Map<string, any>();
+    const seeded = seedSessionSummary(cache, { path, header, mtimeMs: info.mtimeMs, size: info.size, mtime: info.mtime, manager });
+    expect(seeded?.cwd).toBe(header.cwd);
+    expect(seeded?.created.getTime()).toBe(Date.parse(header.timestamp!));
+
+    // 紧随其后的列表刷新：0 次正文解析，且字段与种入值逐项一致。
+    let opens = 0;
+    const summaries = await listSessionSummaries([dir], {
+      cache,
+      openSession: (target: string) => { opens++; return SessionManager.open(target); }
+    });
+    expect(opens).toBe(0);
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]).toEqual(seeded);
+  });
+
+  it("refuses to seed a summary when the header and the manager disagree", () => {
+    const dir = tempDir("seed-mismatch");
+    const path = writeRealSession(dir, "C:/work/demo", (manager) => {
+      manager.appendMessage({ role: "user", content: "hi" } as never);
+      manager.appendMessage({ role: "assistant", content: "ok" } as never);
+    });
+    const info = statSync(path);
+    const manager = SessionManager.open(path);
+    const cache = new Map<string, any>();
+    const header = readSessionHeaderLine(path)!;
+    expect(seedSessionSummary(cache, { path, header: { ...header, id: "other" }, mtimeMs: info.mtimeMs, size: info.size, manager })).toBeUndefined();
+    expect(seedSessionSummary(cache, { path, header, mtimeMs: Number.NaN, size: info.size, manager })).toBeUndefined();
+    expect(cache.size).toBe(0);
   });
 });

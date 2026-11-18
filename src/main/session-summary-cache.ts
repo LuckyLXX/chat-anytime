@@ -75,6 +75,15 @@ export interface CachedSessionSummary {
   seenAt?: number;
 }
 
+/** 摘要扫描实际解析出的 manager（同一轮的 header 与文件签名一并交出）。 */
+export interface ParsedSessionManager {
+  path: string;
+  header: SessionHeaderLine;
+  mtimeMs: number;
+  size: number;
+  manager: SessionEntrySource;
+}
+
 /** 注入点：fs、首行读、会话打开（测试用来计数与造夹具）。 */
 export interface SessionSummaryDeps {
   readdir?: (directory: string) => Promise<string[]>;
@@ -87,6 +96,13 @@ export interface SessionSummaryDeps {
   cache?: Map<string, CachedSessionSummary>;
   /** 时钟（测试注入以便断言 seenAt）。 */
   now?: () => number;
+  /**
+   * 摘要扫描真的读了正文（内存摘要未被 live 覆盖、mtime/size 未命中）时，
+   * 把刚解析出的 manager 连同 header 与文件签名交出去——调用方据此做
+   * 「扫描产生的 manager 复用」准入（见 session-manager-cache.ts）。
+   * 磁盘索引命中时不会触发（那是本函数存在的意义：不多读一次正文）。
+   */
+  onManagerParsed?: (input: ParsedSessionManager) => void;
 }
 
 export interface SessionEntrySource {
@@ -245,14 +261,15 @@ export function summarizeLiveSession(input: {
 
 function readSummary(
   path: string,
-  info: { mtime: Date },
-  deps: Required<Pick<SessionSummaryDeps, "readHeader" | "openSession">>
+  info: { mtimeMs: number; size: number; mtime: Date },
+  deps: Required<Pick<SessionSummaryDeps, "readHeader" | "openSession">> & Pick<SessionSummaryDeps, "onManagerParsed">
 ): SessionFileSummary | null {
   const header = deps.readHeader(path);
   if (!header) return null;
   const manager = deps.openSession(path);
   const entries = manager.getEntries();
-  return {
+  // 摘要先算完再交 manager 出去：准入失败也不影响本轮列表结果。
+  const summary: SessionFileSummary = {
     path,
     id: manager.getSessionId(),
     // cwd 取头部原值（与 Pi `buildSessionInfo` 同源）：`SessionManager.getCwd()` 会
@@ -261,6 +278,54 @@ function readSummary(
     cwd: header.cwd,
     ...summarizeEntries(entries, { timestamp: header.timestamp }, { mtime: info.mtime })
   };
+  try {
+    deps.onManagerParsed?.({ path, header, mtimeMs: info.mtimeMs, size: info.size, manager });
+  } catch {
+    // 准入逻辑是纯缓存增益：它抛错不能影响列表（摘要已经算好）。
+  }
+  return summary;
+}
+
+/**
+ * 用一份已经解析好的 entries 更新摘要缓存（普通冷开复用解析结果的入口）。
+ *
+ * 为什么需要：冷开必须整文件解析一次，紧接着的列表刷新若又按 mtime/size 未命中
+ * 再解析一次同一个文件，等于一次切换付两遍。冷开方在拿到 manager 后调这里，
+ * 刷新就能直接命中（`mtimeMs + size` 与解析时的 stat 一致时）。
+ *
+ * 口径与 `readSummary` 完全一致：`cwd` 保留头部原始字符串、`created` 取头部时间戳。
+ * 拒绝的情况（返回 undefined，调用方无须处理）：
+ * - 头部 id 与 manager 的 session id 不一致（拿错文件/文件被替换）；
+ * - 签名为非法值（-1 / NaN）。
+ */
+export function seedSessionSummary(
+  cache: Map<string, CachedSessionSummary>,
+  input: {
+    path: string;
+    header: SessionHeaderLine;
+    mtimeMs: number;
+    size: number;
+    mtime?: Date;
+    manager: SessionEntrySource;
+    seenAt?: number;
+  }
+): SessionFileSummary | undefined {
+  if (!input.path || !input.header.id || !input.header.cwd) return undefined;
+  if (!Number.isFinite(input.mtimeMs) || !Number.isFinite(input.size) || input.size <= 0) return undefined;
+  if (input.manager.getSessionId() !== input.header.id) return undefined;
+  const summary: SessionFileSummary = {
+    path: input.path,
+    id: input.header.id,
+    cwd: input.header.cwd,
+    ...summarizeEntries(input.manager.getEntries(), { timestamp: input.header.timestamp }, { mtime: input.mtime ?? new Date(input.mtimeMs) })
+  };
+  cache.set(cacheKey(input.path), {
+    mtimeMs: input.mtimeMs,
+    size: input.size,
+    summary,
+    seenAt: input.seenAt ?? Date.now()
+  });
+  return summary;
 }
 
 /**
@@ -277,6 +342,7 @@ export async function listSessionSummaries(directories: readonly string[], deps:
   const statImpl = deps.stat ?? stat;
   const readHeader = deps.readHeader ?? readSessionHeaderLine;
   const openSession = deps.openSession ?? ((path: string) => SessionManager.open(path));
+  const onManagerParsed = deps.onManagerParsed;
   const cache = deps.cache ?? sharedCache;
   const now = deps.now ?? Date.now;
   const liveByPath = new Map<string, SessionFileSummary>();
@@ -316,7 +382,7 @@ export async function listSessionSummaries(directories: readonly string[], deps:
         if (cached.summary) summaries.push(cached.summary);
         continue;
       }
-      const summary = readSummary(path, info, { readHeader, openSession });
+      const summary = readSummary(path, info, { readHeader, openSession, ...(onManagerParsed ? { onManagerParsed } : {}) });
       cache.set(key, { mtimeMs: info.mtimeMs, size: info.size, summary, seenAt: now() });
       if (summary) summaries.push(summary);
     }

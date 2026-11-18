@@ -1,7 +1,7 @@
 import { readdir, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import type { AgentProfile, SessionSummary } from "../shared/protocol.js";
-import { listSessionSummaries, type CachedSessionSummary, type SessionFileSummary } from "./session-summary-cache.js";
+import { listSessionSummaries, type CachedSessionSummary, type ParsedSessionManager, type SessionEntrySource, type SessionFileSummary, type SessionHeaderLine } from "./session-summary-cache.js";
 import { isAutomationSessionSummary } from "../shared/session-origin.js";
 import { isSessionArchived, isSessionPinned, sessionPathKey, sortSessionSummaries } from "./session-scope.js";
 
@@ -40,6 +40,19 @@ export interface SummarizeOptions {
   /** 工作区存在性结果的有效期；默认 10 秒。 */
   workspaceExistsTtlMs?: number;
   isDirectory?: (path: string) => Promise<boolean> | boolean;
+  /**
+   * 本轮真的解析了某个会话正文时，把 manager 连同 header 与文件签名交出去
+   * （调用方用它做「扫描产生的 manager 复用」准入）。这里只补齐所属 agent；
+   * 工作区由调用方按 `header.cwd` 解析——与 `session.open` 的口径一致。
+   */
+  onManagerParsed?: (input: {
+    path: string;
+    agentId: string;
+    header: SessionHeaderLine;
+    mtimeMs: number;
+    size: number;
+    manager: SessionEntrySource;
+  }) => void;
 }
 
 /** 与 session-summary-cache 的“未知工作区”展示口径保持一致。 */
@@ -232,9 +245,13 @@ export async function summarizeAllSessions(
     // 旧版会话可能直接落在助手根目录（历史上 SessionManager.listAll 扫过 root）；
     // 根目录里的大量 sidecar 由 listSessionSummaries 的首行校验自然过滤。
     const scanDirs = [...new Set([dirname(scope.dirs[0]!), ...scope.dirs])];
+    const onManagerParsed = options.onManagerParsed;
     const items = await listSessionSummaries(scanDirs, {
       ...(options.cache ? { cache: options.cache } : {}),
-      ...(options.liveSummaries ? { liveSummaries: options.liveSummaries } : {})
+      ...(options.liveSummaries ? { liveSummaries: options.liveSummaries } : {}),
+      ...(onManagerParsed
+        ? { onManagerParsed: (parsed: ParsedSessionManager) => onManagerParsed({ ...parsed, agentId: scope.agentId }) }
+        : {})
     });
     for (const item of items) {
       // cwd 为空的会话没有可探测的工作区；按缺失处理，UI 至少不会把它归到某个

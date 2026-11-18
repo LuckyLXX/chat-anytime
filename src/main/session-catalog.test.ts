@@ -209,6 +209,44 @@ describe("summarizeAllSessions", () => {
     expect(missingPath).not.toBe(filePath);
   });
 
+  it("forwards parsed managers with the owning agent (scan→open reuse)", async () => {
+    const root = tempDir("parsed-handoff");
+    const alphaDir = join(root, "chatanytime-sessions", "alpha", "ws");
+    const betaDir = join(root, "chatanytime-sessions", "beta", "ws");
+    const alphaPath = writeSession(alphaDir, { id: "a", cwd: join(root, "ws-a"), timestamp: "2026-05-01T00:00:00.000Z" });
+    const betaPath = writeSession(betaDir, { id: "b", cwd: join(root, "ws-b"), timestamp: "2026-05-02T00:00:00.000Z" });
+    const handed: Array<{ path: string; agentId: string; headerId: string; managerId: string; size: number }> = [];
+    await summarizeAllSessions([makeScope("alpha", [alphaDir]), makeScope("beta", [betaDir])], {
+      cache: new Map(),
+      onManagerParsed: (input) => handed.push({
+        path: input.path,
+        agentId: input.agentId,
+        headerId: input.header.id,
+        managerId: input.manager.getSessionId(),
+        size: input.size
+      })
+    });
+    const byPath = new Map(handed.map((item) => [sessionPathKey(item.path), item]));
+    // 所属 agent 由 catalog 按 scope 补齐：管理器缓存的准入要靠它做身份校验。
+    expect(byPath.get(sessionPathKey(alphaPath))).toMatchObject({ agentId: "alpha", headerId: "a", managerId: "a" });
+    expect(byPath.get(sessionPathKey(betaPath))).toMatchObject({ agentId: "beta", headerId: "b", managerId: "b" });
+    expect(byPath.get(sessionPathKey(betaPath))!.size).toBeGreaterThan(0);
+  });
+
+  it("stops handing out managers once every file is served from the summary cache", async () => {
+    const root = tempDir("parsed-handoff-hit");
+    const dir = join(root, "chatanytime-sessions", "alpha", "ws");
+    writeSession(dir, { id: "a", cwd: join(root, "ws-a"), timestamp: "2026-05-01T00:00:00.000Z" });
+    const cache = new Map<string, any>();
+    let handed = 0;
+    const scope = makeScope("alpha", [dir]);
+    await summarizeAllSessions([scope], { cache, onManagerParsed: () => { handed++; } });
+    expect(handed).toBe(1);
+    // 第二轮 mtime/size 未变 → 摘要缓存命中；不得再宣称解析过（否则会凭空多读正文）。
+    await summarizeAllSessions([scope], { cache, onManagerParsed: () => { handed++; } });
+    expect(handed).toBe(1);
+  });
+
   it("probes each unique workspace once until the TTL expires", async () => {
     const root = tempDir("ttl");
     const workspace = join(root, "workspace");

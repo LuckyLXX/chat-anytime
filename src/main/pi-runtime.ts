@@ -155,7 +155,7 @@ import { buildResourceCatalog } from "./resource-catalog.js";
 import { agentWorkspaceSessionDir, backfillUnpersistedSessions, isSessionArchived, isSessionPinned, isUnstartedSession, mergeSessionSummary, overlayLiveRunStatus, pruneVanishedSessions, sameSessionDir, sessionFileMatchesId, setArchivedSessionPaths, sortSessionSummaries, togglePinnedSessionPath, type LiveSessionSeed } from "./session-scope.js";
 import { listSessionScopes, pickRecentSession, resolveSessionOwner, summarizeAllSessions, type SessionScope, type WorkspaceExistsEntry } from "./session-catalog.js";
 import { createWorkspaceResources } from "./workspace-resources.js";
-import { listSessionSummaries, loadSessionIndex, readSessionHeaderLine, saveSessionIndex, summarizeLiveSession, type CachedSessionSummary } from "./session-summary-cache.js";
+import { loadSessionIndex, readSessionHeaderLine, saveSessionIndex, seedSessionSummary, summarizeLiveSession, type CachedSessionSummary, type SessionEntrySource, type SessionHeaderLine } from "./session-summary-cache.js";
 import { AUTOMATION_SESSION_ORIGIN_CUSTOM_TYPE, isAutomationSessionSummary } from "../shared/session-origin.js";
 import { planSessionOpen } from "./session-open-plan.js";
 import { SessionManagerCache } from "./session-manager-cache.js";
@@ -1685,15 +1685,16 @@ async function openAutomationSessionRecord(task: AutomationTask, runAgent: Agent
     throw new Error(`关联会话不存在或尚未落盘（${sessionId}）；任务仍保留，可在设置中改绑或删除`);
   }
   if (readSessionHeaderId(target) !== sessionId) throw new Error("关联会话文件校验失败（首行 id 不匹配）");
-  const discovered = SessionManager.open(target);
-  const cwd = discovered.getCwd();
-  if (!cwd) throw new Error("关联会话缺少工作区信息，无法恢复");
-  const recordWorkspace = resolve(cwd);
+  // 只读头部拿 cwd（有界读，不再为此整文件 open 一次）；正式恢复走统一的
+  // 缓存入口，缓存命中时整文件解析次数为 0，未命中至多 1 次。
+  const header = readSessionHeaderLine(target);
+  if (!header?.cwd) throw new Error("关联会话缺少工作区信息，无法恢复");
+  const recordWorkspace = resolve(header.cwd);
   const recordRoot = agentWorkspaceSessionDir(getAgentDir(), runAgent.id, recordWorkspace);
   if (!recordRoot || !sameSessionDir(recordRoot, dirname(target))) {
     throw new Error("关联会话路径与工作区不匹配，拒绝恢复");
   }
-  await createSession(openSessionManagerForReopen(target, recordRoot, recordWorkspace, runAgent.id), {
+  await createSession(openSessionManagerForReopen(target, recordRoot, recordWorkspace, runAgent.id, header), {
     skipActivate: true,
     agentOverride: runAgent,
     workspaceOverride: recordWorkspace,
@@ -2486,24 +2487,120 @@ function rememberSessionManagerForReopen(record: SessionRuntimeRecord): void {
       workspace: record.workspace,
       mtimeMs: info.mtimeMs,
       size: info.size,
-      manager
+      manager,
+      // 用户使用顺序 = 该记录最后一次被激活的时间：批量驱逐时循环顺序是
+      // 「激活时间降序」，拿入缓存顺序当 LRU 键会把最旧会话误判成最新。
+      origin: "release",
+      usedAt: record.activatedAt
     });
   } catch {
     // 文件已删除/不可读：不缓存，后续按正常 open 路径报错或重建。
   }
 }
 
-/** 冷打开优先复用刚销毁会话的 manager（文件 mtime/size 必须一致）。 */
-function openSessionManagerForReopen(target: string, recordRoot: string | undefined, recordWorkspace: string, agentId = currentAgent?.id ?? "default"): SessionManager {
+/**
+ * 摘要冷扫描产生的 manager 准入（2026-11-18 P0 冷开优化）。
+ *
+ * 列表刷新为了算摘要本来就把正文整读了一遍；那份 manager 直接进缓存，下一次
+ * 打开同一会话就零解析。但扫描是**机会性**的：只有能证明「无主 + 签名稳定」
+ * 才准入，而且只花 release 条目之外的剩余额度（见 session-manager-cache.ts）。
+ */
+function rememberScannedSessionManager(input: {
+  path: string;
+  agentId: string;
+  header: SessionHeaderLine;
+  mtimeMs: number;
+  size: number;
+  /** 摘要扫描注入的是结构化最小接口（便于测试注入假 manager）；真实调用方给的是 SessionManager。 */
+  manager: SessionEntrySource;
+}): void {
+  // 1) 现场复验签名：解析期间文件可能被追加（正在跑的会话），旧签名对应的是旧内容。
+  let info: ReturnType<typeof statSync>;
   try {
-    const info = statSync(target);
-    const cached = recentSessionManagers.take(target, agentId, recordWorkspace, info);
-    if (cached) return cached;
+    info = statSync(input.path);
+  } catch {
+    return;
+  }
+  if (info.mtimeMs !== input.mtimeMs || info.size !== input.size) return;
+  // 2) 身份必须自洽：头部与 manager 不是同一会话时绝不入缓存。
+  if (!input.header.id || input.header.id !== input.manager.getSessionId()) return;
+  // 3) 已有 live 记录：那份 manager 才是权威，别在同一路径上再压一份历史。
+  const key = resolve(input.path).toLowerCase();
+  for (const record of liveSessions.values()) {
+    const file = record.session.sessionManager.getSessionFile();
+    if (file && resolve(file).toLowerCase() === key) return;
+  }
+  // 4) 归属不明（缺 cwd 的老会话/损坏文件）不入缓存：take 的身份校验也无从匹配。
+  const headerCwd = input.header.cwd.trim();
+  if (!headerCwd) return;
+  recentSessionManagers.remember({
+    path: input.path,
+    agentId: input.agentId,
+    workspace: resolve(headerCwd),
+    mtimeMs: info.mtimeMs,
+    size: info.size,
+    // 真实调用链上这里一定是 SessionManager（摘要扫描的 openSession 就是它的 open）。
+    manager: input.manager as SessionManager,
+    origin: "scan"
+  });
+}
+
+/**
+ * 冷开解析出的 manager 顺手喂给摘要缓存：紧随其后的列表刷新（首次启动时
+ * createSession 内部就会触发一次）因此不必再整读同一个文件。摘要缓存是纯增益，
+ * 任何失败都忽略。
+ */
+function rememberSessionSummaryFromManager(
+  target: string,
+  manager: SessionManager,
+  info: { mtimeMs: number; size: number; mtime: Date },
+  provided?: SessionHeaderLine
+): void {
+  try {
+    const header = provided ?? readSessionHeaderLine(target);
+    if (!header) return;
+    seedSessionSummary(sessionSummaryCacheFor(), {
+      path: target,
+      header,
+      mtimeMs: info.mtimeMs,
+      size: info.size,
+      mtime: info.mtime,
+      manager
+    });
+  } catch {
+    // 摘要缓存不影响打开的成败。
+  }
+}
+
+/**
+ * 冷打开优先复用刚销毁会话的 manager（文件 mtime/size 必须一致）。
+ *
+ * 拿到 manager 后立即把「这次解析」的成果种进摘要缓存：同一份 entries 可以同时
+ * 服务列表刷新，否则一次切换会在紧随的 refreshSessions 里再整读一遍。
+ */
+function openSessionManagerForReopen(
+  target: string,
+  recordRoot: string | undefined,
+  recordWorkspace: string,
+  agentId = currentAgent?.id ?? "default",
+  header?: SessionHeaderLine
+): SessionManager {
+  let info: ReturnType<typeof statSync>;
+  try {
+    info = statSync(target);
   } catch {
     // 文件不存在/不可读：顺手丢掉陈旧缓存，走原 open 路径让上层给出准确错误。
     recentSessionManagers.forget(target);
+    return SessionManager.open(target, recordRoot, recordWorkspace);
   }
-  return SessionManager.open(target, recordRoot, recordWorkspace);
+  const cached = recentSessionManagers.take(target, agentId, recordWorkspace, info);
+  if (cached) {
+    rememberSessionSummaryFromManager(target, cached, info, header);
+    return cached;
+  }
+  const manager = SessionManager.open(target, recordRoot, recordWorkspace);
+  rememberSessionSummaryFromManager(target, manager, info, header);
+  return manager;
 }
 
 function disposeRecord(record: SessionRuntimeRecord, options: { keepBrowserTab?: boolean; cacheForReopen?: boolean } = {}): void {
@@ -4427,7 +4524,9 @@ async function performSessionsRefresh(agentIds?: readonly string[]): Promise<voi
     liveSummaries,
     pinnedPaths: settings?.pinnedSessionPaths ?? [],
     archivedPaths: settings?.archivedSessionPaths ?? [],
-    workspaceExistsCache
+    workspaceExistsCache,
+    // 扫描真的读了正文时把 manager 交出来：下一次打开同一会话零解析。
+    onManagerParsed: rememberScannedSessionManager
   });
   scheduleSessionIndexSave();
   const targetKeys = new Set(targetScopes.map((scope) => scope.agentId));
@@ -5840,7 +5939,12 @@ async function deleteSessionByPath(deleteTarget: string, agentId?: string): Prom
     return Boolean(liveFile) && resolve(liveFile!).toLowerCase() === deleteTarget.toLowerCase();
   });
   const wasActive = live === activeRuntime;
-  if (live) disposeRecord(live);
+  if (live) {
+    // 删除意味着文件即将消失：不要把它全部历史顺手塞进复用缓存（删文件前的
+    // 一次销毁不是「用户还会切回来」）。
+    disposeRecord(live, { cacheForReopen: false });
+  }
+  recentSessionManagers.forget(deleteTarget);
   const ownerAgentId = agentId ?? listItem?.agentId ?? agentIdFromSessionPath(deleteTarget);
   const deleteRoot = ownerAgentId ? join(getAgentDir(), "chatanytime-sessions", ownerAgentId) : undefined;
   const teamLeadId = listItem?.id ?? readSessionHeaderId(deleteTarget) ?? sessionId;
@@ -6241,7 +6345,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       }
       if (!fileExists) throw new Error("该会话文件不存在（未发过消息的空话题或已被移除）");
       if (command.activate === false) {
-        await createSession(openSessionManagerForReopen(target, recordRoot, recordWorkspace, owner.agentId), {
+        await createSession(openSessionManagerForReopen(target, recordRoot, recordWorkspace, owner.agentId, header), {
           skipActivate: true,
           agentOverride: ownerAgent,
           workspaceOverride: recordWorkspace
@@ -6251,7 +6355,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       post({ type: "session.opening", path: target, ...(header?.id ? { sessionId: header.id } : {}) });
       workspace = recordWorkspace;
       touchRecentWorkspace(workspace);
-      await createSession(openSessionManagerForReopen(target, recordRoot, recordWorkspace, owner.agentId), {
+      await createSession(openSessionManagerForReopen(target, recordRoot, recordWorkspace, owner.agentId, header), {
         agentOverride: ownerAgent,
         workspaceOverride: recordWorkspace
       });
