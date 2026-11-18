@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
-import type { ChatMessage, RuntimeSnapshot, ToolExecution } from "./protocol";
+import type { ChatMessage, RuntimeResumePatch, RuntimeSnapshot, ToolExecution } from "./protocol";
 import {
   applyChatMessagesPatch,
+  applyResumeStatePatch,
   applyRuntimeStatePatch,
   applyToolExecutionsPatch,
   diffChatMessages,
@@ -110,7 +111,6 @@ describe("applyRuntimeStatePatch", () => {
     const first = message("a");
     const previous = snapshot([first, message("b")], [execution("e")]);
     const merged = applyRuntimeStatePatch(previous, {
-      type: "state.patch",
       snapshot: { revision: 2, status: "正在工作" },
       messages: { append: [message("c")] },
       executions: { upsert: [{ ...execution("e"), status: "completed" }] }
@@ -119,5 +119,57 @@ describe("applyRuntimeStatePatch", () => {
     expect(merged?.messages.map((item) => item.id)).toEqual(["a", "b", "c"]);
     expect(merged?.messages[0]).toBe(first);
     expect(merged?.executions[0]?.status).toBe("completed");
+  });
+});
+
+function resumeFrame(overrides: Partial<RuntimeResumePatch> = {}): RuntimeResumePatch {
+  return {
+    type: "state.resume.patch",
+    sessionId: "session-a",
+    baseRevision: 3,
+    snapshot: { sessionId: "session-a", revision: 11 },
+    ...overrides
+  };
+}
+
+describe("applyResumeStatePatch", () => {
+  function baseline(revision = 3): RuntimeSnapshot {
+    return { ...snapshot([message("a"), message("b")], [execution("e")]), sessionId: "session-a", revision };
+  }
+
+  it("applies a resume patch onto the target session's own baseline even when the global revision jumped", () => {
+    const merged = applyResumeStatePatch(baseline(), resumeFrame({
+      snapshot: { sessionId: "session-a", revision: 11, status: "正在工作" },
+      messages: { append: [message("c")] }
+    }));
+    expect(merged?.sessionId).toBe("session-a");
+    // 新 revision 来自跨会话的全局序号：允许 > baseRevision + 1。
+    expect(merged?.revision).toBe(11);
+    expect(merged?.status).toBe("正在工作");
+    expect(merged?.messages.map((item) => item.id)).toEqual(["a", "b", "c"]);
+  });
+
+  it("refuses a mismatched baseRevision instead of patching the wrong generation", () => {
+    expect(applyResumeStatePatch(baseline(), resumeFrame({ baseRevision: 2 }))).toBeUndefined();
+    expect(applyResumeStatePatch({ ...baseline(), revision: undefined }, resumeFrame())).toBeUndefined();
+  });
+
+  it("refuses a frame addressed to another session", () => {
+    expect(applyResumeStatePatch(baseline(), resumeFrame())?.sessionId).toBe("session-a");
+    expect(applyResumeStatePatch(baseline(), resumeFrame({ sessionId: "session-b" }))).toBeUndefined();
+    // 基线缺 sessionId（未激活态）同样拒绝。
+    expect(applyResumeStatePatch({ ...baseline(), sessionId: undefined }, resumeFrame())).toBeUndefined();
+  });
+
+  it("rejects a frame whose snapshot points at another session (defensive)", () => {
+    expect(applyResumeStatePatch(baseline(), resumeFrame({ snapshot: { sessionId: "session-b", revision: 11 } }))).toBeUndefined();
+  });
+
+  it("fails atomically when the message patch index is out of range", () => {
+    const before = baseline();
+    const merged = applyResumeStatePatch(before, resumeFrame({ messages: { replaceFrom: 9, items: [message("x")] } }));
+    expect(merged).toBeUndefined();
+    // 基线本身绝不被就地修改（无部分应用）。
+    expect(before.messages.map((item) => item.id)).toEqual(["a", "b"]);
   });
 });

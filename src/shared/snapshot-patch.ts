@@ -12,6 +12,7 @@
 import type {
   ChatMessage,
   ChatMessagesPatch,
+  RuntimeResumePatch,
   RuntimeSnapshot,
   RuntimeStatePatch,
   SessionPaneSnapshot,
@@ -19,6 +20,12 @@ import type {
   ToolExecution,
   ToolExecutionsPatch
 } from "./protocol.js";
+
+/**
+ * 增量帧的应用载荷：`state.patch` 与 `state.resume.patch` 共用同一套合并逻辑，
+ * 差别只在「底座怎么挑、基线由谁校验」（见 `applyResumeStatePatch`）。
+ */
+export type RuntimePatchPayload = Pick<RuntimeStatePatch, "snapshot" | "messages" | "executions">;
 
 /** 应用消息补丁；索引非法（乱序/丢帧）时返回 undefined，由调用方丢弃该帧或等全量。 */
 export function applyChatMessagesPatch(previous: readonly ChatMessage[], patch: ChatMessagesPatch): ChatMessage[] | undefined {
@@ -58,12 +65,31 @@ export function applyToolExecutionsPatch(previous: readonly ToolExecution[], pat
 }
 
 /** 把 `state.patch` 合并进当前激活快照。 */
-export function applyRuntimeStatePatch(previous: RuntimeSnapshot, patch: RuntimeStatePatch): RuntimeSnapshot | undefined {
+export function applyRuntimeStatePatch(previous: RuntimeSnapshot, patch: RuntimePatchPayload): RuntimeSnapshot | undefined {
   const messages = patch.messages ? applyChatMessagesPatch(previous.messages, patch.messages) : previous.messages;
   if (!messages) return undefined;
   const executions = patch.executions ? applyToolExecutionsPatch(previous.executions, patch.executions) : previous.executions;
   if (!executions) return undefined;
   return { ...previous, ...patch.snapshot, messages, executions };
+}
+
+/**
+ * 把 `state.resume.patch`（切回旧会话的定向增量帧）合并进**目标会话自己的**基线。
+ *
+ * 校验是精确且原子的：
+ * - `previous.sessionId` 必须等于帧目标 `sessionId`（不能把 A 的差量套到 B 的头上）；
+ * - `previous.revision` 必须精确等于 `baseRevision`（新 revision 允许大于
+ *   `baseRevision + 1`：中间夹着别的会话用掉的全局序号是合法的）；
+ * - 帧内若另带 `snapshot.sessionId`，必须与目标一致（防御写入错误）。
+ *
+ * 任一条件不满足、或消息/执行差量索引非法（丢帧、乱序），一律返回 undefined——
+ * 调用方必须走定向全量恢复（`state.recover`），绝不在这里凑合应用一半。
+ */
+export function applyResumeStatePatch(previous: RuntimeSnapshot, frame: RuntimeResumePatch): RuntimeSnapshot | undefined {
+  if (!previous.sessionId || previous.sessionId !== frame.sessionId) return undefined;
+  if (frame.snapshot.sessionId !== undefined && frame.snapshot.sessionId !== frame.sessionId) return undefined;
+  if (previous.revision === undefined || previous.revision !== frame.baseRevision) return undefined;
+  return applyRuntimeStatePatch(previous, frame);
 }
 
 /** 把 `session.state.patch` 合并进分屏格子快照。 */

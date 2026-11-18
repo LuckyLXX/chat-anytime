@@ -84,7 +84,10 @@ describe("主进程接线", () => {
     expect(index).toContain("if (imGateway?.handleRuntimeMessage(message)) return;");
     // 网关必须排在 state 缓存/转发逻辑之前。
     const gatewayIdx = index.indexOf("imGateway?.handleRuntimeMessage(message)");
-    const stateIdx = index.indexOf('if (message.type === "state") latestSnapshot = message.snapshot;');
+    // active 快照缓存（state / state.patch / resume / recovery 的统一入口）就是「state 处理」的锚点：
+    // 会话切换增量恢复协议（2026-11-18）把原来的 `latestSnapshot = message.snapshot` 换成了 keyed 缓存。
+    const stateIdx = index.indexOf("snapshotBaselines.ingest(message)");
+    expect(stateIdx).toBeGreaterThan(0);
     expect(gatewayIdx).toBeGreaterThan(0);
     expect(gatewayIdx).toBeLessThan(stateIdx);
   });

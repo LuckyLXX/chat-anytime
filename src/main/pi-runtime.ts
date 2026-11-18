@@ -28,7 +28,8 @@ import { resolveHookSessionTitle } from "./hooks-session-title.js";
 import { alignQueueState, imageAttachmentsFrom, promoteQueueMessage, queuedMessageText, queueSnapshotMessages, removeQueueMessage, replayQueueArgs, type PromoteOutcome } from "./queue-images.js";
 import { normalizeMessages, userMessageText } from "./message-normalize.js";
 import { runActive } from "./run-state.js";
-import { diffChatMessages, diffToolExecutions, snapshotToolExecution, toolExecutionPatchEqual } from "../shared/snapshot-patch.js";
+import { diffChatMessages, diffToolExecutions } from "../shared/snapshot-patch.js";
+import { createActiveEmitter, executionSnapshots, makeEmitted, paneFieldsPatch, type ActiveEmitter, type EmittedSnapshot } from "./snapshot-emit.js";
 import { applyModelOverrides as applyStoredModelOverrides, buildCatalogModels, imageInputOverride, isModelEnabled, pickFallbackModel, pickNewSessionModel, pruneDisabledModelRefs, resolveRestoredSessionModel } from "./model-catalog.js";
 import type {
   AccessMode,
@@ -61,8 +62,6 @@ import type {
   CommandSummary,
   RuntimeMessage,
   RuntimeSnapshot,
-  RuntimeSnapshotFieldsPatch,
-  SessionPaneFieldsPatch,
   SessionPaneSnapshot,
   SessionRunStatus,
   SessionSummary,
@@ -571,161 +570,22 @@ let pendingFlushTimer: ReturnType<typeof setTimeout> | undefined;
 let hasPendingFlush = false;
 
 /**
- * 上一次已推送的快照基线（逐会话）：只保存数组引用/不可变浅拷贝，内存与
- * snapshot 同量级——用于把下一帧差分成 tail 补丁，而不是每帧重传整段历史。
+ * 上一次已推送的分屏格子基线（逐会话，见 `snapshot-emit.ts`）：只保存数组引用/不可变
+ * 浅拷贝，内存与 snapshot 同量级——用于把下一帧差分成 tail 补丁，而不是每帧重传整段历史。
  */
-interface EmittedSnapshot<T> {
-  sessionId?: string;
-  snapshot: T;
-  messages: ChatMessage[];
-  executions: ToolExecution[];
-}
-
-let lastActiveEmit: EmittedSnapshot<RuntimeSnapshot> | undefined;
-let activeRevision = 0;
 const lastPaneEmit = new Map<string, EmittedSnapshot<SessionPaneSnapshot>>();
+/**
+ * 激活会话的按会话基线（A→B→A 的 `state.resume.patch` 底座）：实现在 `snapshot-emit.ts`
+ * （纯逻辑、可单测），这里只负责把决策出来的帧 post 出去。
+ *
+ * `revision` 是**跨会话共享**的全局发帧序号，仍然只有这一个递增源。
+ */
+const activeEmit: ActiveEmitter = createActiveEmitter();
 
-function executionSnapshots(list: readonly ToolExecution[], previous?: readonly ToolExecution[]): ToolExecution[] {
-  if (!previous) return list.map(snapshotToolExecution);
-  const previousById = new Map(previous.map((item) => [item.id, item]));
-  return list.map((item) => {
-    const prior = previousById.get(item.id);
-    return prior && toolExecutionPatchEqual(prior, item) ? prior : snapshotToolExecution(item);
-  });
-}
-
-function makeEmitted<T extends { sessionId?: string; messages: ChatMessage[]; executions: ToolExecution[] }>(
-  next: T,
-  executions: ToolExecution[]
-): EmittedSnapshot<T> {
-  return {
-    sessionId: next.sessionId,
-    messages: next.messages,
-    executions,
-    // 展平一份「执行快照」的标量视图，供下一帧逐字段比较。
-    snapshot: { ...next, messages: next.messages, executions } as T
-  };
-}
-
-function sameQueuedMessages(left: RuntimeSnapshot["queuedMessages"], right: RuntimeSnapshot["queuedMessages"]): boolean {
-  if (left === right) return true;
-  if (left.length !== right.length) return false;
-  return left.every((item, index) => {
-    const other = right[index];
-    return Boolean(other)
-      && item.kind === other!.kind && item.index === other!.index
-      && item.text === other!.text && item.imageCount === other!.imageCount;
-  });
-}
-
-function sameContextUsage(left: ContextUsage | undefined, right: ContextUsage | undefined): boolean {
-  if (left === right) return true;
-  if (!left || !right) return false;
-  return left.tokens === right.tokens
-    && left.contextWindow === right.contextWindow
-    && left.percent === right.percent
-    && left.cacheHitRate === right.cacheHitRate
-    && left.breakdown?.system === right.breakdown?.system
-    && left.breakdown?.tools === right.breakdown?.tools
-    && left.breakdown?.messages === right.breakdown?.messages;
-}
-
-function sameSpeedStats(left: SpeedStats | undefined, right: SpeedStats | undefined): boolean {
-  if (left === right) return true;
-  if (!left || !right) return false;
-  return left.turns === right.turns && left.steps === right.steps
-    && left.llmMs === right.llmMs && left.toolMs === right.toolMs
-    && left.ttftMs === right.ttftMs && left.ttftSteps === right.ttftSteps
-    && left.decodeTokens === right.decodeTokens && left.decodeMs === right.decodeMs
-    && left.promptTokens === right.promptTokens && left.outputTokens === right.outputTokens
-    && left.live?.startedAt === right.live?.startedAt
-    && left.live?.firstTokenAt === right.live?.firstTokenAt
-    && left.live?.tokens === right.live?.tokens;
-}
-
-function sameBackgroundProcesses(left: RuntimeSnapshot["backgroundProcesses"], right: RuntimeSnapshot["backgroundProcesses"]): boolean {
-  if (left === right) return true;
-  if (left.length !== right.length) return false;
-  return left.every((item, index) => {
-    const other = right[index];
-    return Boolean(other) && item.id === other!.id && item.pid === other!.pid
-      && item.command === other!.command && item.startedAt === other!.startedAt;
-  });
-}
-
-/** 活跃会话的标量字段差量（不含 messages/executions，那两个走专用补丁）。 */
-function activeFieldsPatch(previous: RuntimeSnapshot, next: RuntimeSnapshot): RuntimeSnapshotFieldsPatch {
-  const fields: RuntimeSnapshotFieldsPatch = { sessionId: next.sessionId };
-  if (previous.workspace !== next.workspace) fields.workspace = next.workspace;
-  if (previous.readOnlyReason !== next.readOnlyReason) fields.readOnlyReason = next.readOnlyReason;
-  if (previous.gitBranch !== next.gitBranch) fields.gitBranch = next.gitBranch;
-  if (previous.agentId !== next.agentId) fields.agentId = next.agentId;
-  if (previous.agentName !== next.agentName) fields.agentName = next.agentName;
-  if (previous.sessionFile !== next.sessionFile) fields.sessionFile = next.sessionFile;
-  if (previous.model?.provider !== next.model?.provider || previous.model?.id !== next.model?.id) fields.model = next.model;
-  if (previous.thinkingLevel !== next.thinkingLevel) fields.thinkingLevel = next.thinkingLevel;
-  if (previous.busy !== next.busy) fields.busy = next.busy;
-  if (previous.status !== next.status) fields.status = next.status;
-  if (previous.turnTiming !== next.turnTiming) fields.turnTiming = next.turnTiming;
-  if (!sameQueuedMessages(previous.queuedMessages, next.queuedMessages)) fields.queuedMessages = next.queuedMessages;
-  if (!sameContextUsage(previous.contextUsage, next.contextUsage)) fields.contextUsage = next.contextUsage;
-  if (!sameSpeedStats(previous.speedStats, next.speedStats)) fields.speedStats = next.speedStats;
-  if (previous.planMode !== next.planMode) fields.planMode = next.planMode;
-  if (previous.computerMode !== next.computerMode) fields.computerMode = next.computerMode;
-  if (previous.designMode !== next.designMode) fields.designMode = next.designMode;
-  if (previous.teamMode !== next.teamMode) fields.teamMode = next.teamMode;
-  if (previous.team !== next.team) fields.team = next.team;
-  // 列表/进程数组变化频率低（refreshSessions / 进程发现），只在引用或内容变化时附带。
-  if (previous.sessions !== next.sessions) fields.sessions = next.sessions;
-  if (previous.recentWorkspaces !== next.recentWorkspaces) fields.recentWorkspaces = next.recentWorkspaces;
-  if (!sameBackgroundProcesses(previous.backgroundProcesses, next.backgroundProcesses)) fields.backgroundProcesses = next.backgroundProcesses;
-  return fields;
-}
-
-function paneFieldsPatch(previous: SessionPaneSnapshot, next: SessionPaneSnapshot): SessionPaneFieldsPatch {
-  const fields: SessionPaneFieldsPatch = { sessionId: next.sessionId };
-  if (previous.sessionFile !== next.sessionFile) fields.sessionFile = next.sessionFile;
-  if (previous.workspace !== next.workspace) fields.workspace = next.workspace;
-  if (previous.agentId !== next.agentId) fields.agentId = next.agentId;
-  if (previous.agentName !== next.agentName) fields.agentName = next.agentName;
-  if (previous.readOnlyReason !== next.readOnlyReason) fields.readOnlyReason = next.readOnlyReason;
-  if (previous.model?.provider !== next.model?.provider || previous.model?.id !== next.model?.id) fields.model = next.model;
-  if (previous.thinkingLevel !== next.thinkingLevel) fields.thinkingLevel = next.thinkingLevel;
-  if (previous.busy !== next.busy) fields.busy = next.busy;
-  if (previous.status !== next.status) fields.status = next.status;
-  if (previous.turnTiming !== next.turnTiming) fields.turnTiming = next.turnTiming;
-  if (!sameQueuedMessages(previous.queuedMessages, next.queuedMessages)) fields.queuedMessages = next.queuedMessages;
-  if (!sameContextUsage(previous.contextUsage, next.contextUsage)) fields.contextUsage = next.contextUsage;
-  if (!sameSpeedStats(previous.speedStats, next.speedStats)) fields.speedStats = next.speedStats;
-  if (previous.planMode !== next.planMode) fields.planMode = next.planMode;
-  if (previous.computerMode !== next.computerMode) fields.computerMode = next.computerMode;
-  if (previous.designMode !== next.designMode) fields.designMode = next.designMode;
-  if (previous.teamMode !== next.teamMode) fields.teamMode = next.teamMode;
-  if (previous.team !== next.team) fields.team = next.team;
-  return fields;
-}
-
-/** 活跃会话：首帧/会话切换发完整 state，此后所有帧只发增量补丁。 */
+/** 活跃会话：首帧/无基线发全量 state，同一会话继续流式发补丁，切回旧会话发定向增量。 */
 function emitActiveSnapshot(): void {
-  const next = snapshot();
-  const previous = lastActiveEmit;
-  if (!previous || previous.sessionId !== next.sessionId) {
-    const executions = executionSnapshots(next.executions, previous?.executions);
-    next.revision = ++activeRevision;
-    lastActiveEmit = makeEmitted(next, executions);
-    post({ type: "state", snapshot: next });
-    return;
-  }
-  const fields = activeFieldsPatch(previous.snapshot, next);
-  const messages = diffChatMessages(previous.messages, next.messages);
-  const { patch: executions, snapshots } = diffToolExecutions(previous.executions, next.executions);
-  // 没有任何变化就不要占用 revision（否则 renderer 会看到补丁序号断档，误触发
-  // 一次全量 state.sync）。
-  if (!messages && !executions && Object.keys(fields).every((key) => key === "sessionId")) return;
-  next.revision = ++activeRevision;
-  fields.revision = next.revision;
-  lastActiveEmit = makeEmitted(next, snapshots);
-  post({ type: "state.patch", snapshot: fields, messages, executions });
+  const frame = activeEmit.plan(snapshot());
+  if (frame) post(frame);
 }
 
 function flushState(): void {
@@ -2708,9 +2568,9 @@ function disposeRecord(record: SessionRuntimeRecord, options: { keepBrowserTab?:
     todos = [];
     memoryStore = undefined;
     memoryTopics = [];
-    // 丢弃该会话的补丁基线：否则 lastActiveEmit 会一直持有整段消息数组
-    // （含 base64 图片），会话关闭后仍无法被 GC。
-    if (lastActiveEmit?.sessionId === record.session.sessionId) lastActiveEmit = undefined;
+    // 丢弃该会话的 active 基线：否则基线会继续持有整段消息数组（含 base64 图片），
+    // 而且切回一个已销毁/重建的会话时绝不能拿旧基线凑合（必须走全量）。
+    activeEmit.drop(record.session.sessionId);
     refreshGitBranch();
   }
   // 会话真正消亡时释放其绑定的浏览器自动化标签页（main 侧只关 pi-browser-*
@@ -6562,12 +6422,26 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     case "state.sync": {
       // 订阅建立前可能错过若干增量帧：以全量重建基线，并让 renderer 用同一份
       // 全量覆盖本地快照（幂等；只在启动/重载时调用一次）。
-      lastActiveEmit = undefined;
+      activeEmit.reset();
       emitActiveSnapshot();
       for (const sessionId of renderedSessions) {
         const record = liveSessions.get(sessionId);
         if (record && record !== activeRuntime) emitPaneSnapshot(record, true);
       }
+      break;
+    }
+    case "state.recover": {
+      // 定向全量恢复：receiver 的基线缺失/不匹配时只为了**这一个** active 会话回到
+      // 可继续差分的状态。绝不广播别的会话、也绝不把旧恢复帧当成当前会话：
+      // 目标已经切走（不再 active）时安静丢弃——接收端会按 requestId/sessionId 过期处理。
+      if (!command.requestId || !command.sessionId) break;
+      const target = liveSessions.get(command.sessionId);
+      if (!target || target !== activeRuntime) break;
+      const next = snapshot();
+      if (next.sessionId !== command.sessionId) break;
+      const frame = activeEmit.plan(next, { forceFull: true });
+      if (!frame || frame.type !== "state") break;
+      post({ type: "state.recovery", requestId: command.requestId, sessionId: command.sessionId, snapshot: frame.snapshot });
       break;
     }
     case "session.watch": {

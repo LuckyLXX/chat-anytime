@@ -26,6 +26,7 @@
 - 中止判定只读 Pi 的 `stopReason === "aborted"`，不匹配 SDK 的英文 abort 文案；被中止的回合按中性样式渲染，不算失败。
 - 侧栏圆点 `runStatus`（活状态，激活即清）与 `completedAt`/`completedOutcome`（持久，顶部「已完成」分区）**正交**；写终态只能走 `setTerminalRunStatus` 一处。
 - 多会话：`liveSessions` 里每条 `SessionRuntimeRecord` 持有自己的 session/busy/status/executions/customTools；切话题是 park 不是销毁，只有同 id 重建、`session.delete`、空闲 LRU 才 dispose。
+- 快照帧三处镜像（utility 发帧 / main 缓存 bootstrap / renderer 应用）：`revision` 是**跨会话全局**发帧序号，`state.patch` 只对**当前** active 会话且必须连号；切回旧会话走 `state.resume.patch`，基线令牌只能是该会话基线的精确 `baseRevision`（**不许**用 `revision === current + 1` 判基线）；基线缺失/令牌不符/补丁越界只发 `state.recover` 换 `state.recovery` 定向全量，**绝不**退回全体 `state.sync`（那会让所有会话基线一起作废）。三进程共用 `src/shared/session-baseline-cache.ts` 的有界 LRU（6 个会话），各自实现一份就会淘汰错位。pane 通道的 `session.state`/`paneRevision` 与 active 基线互不复用。
 - 会话 JSONL 在有首条 assistant 消息前不存在，任何延迟刷新都必须靠 `backfillUnpersistedSessions` 补行，否则刚建的空话题会从侧栏消失。
 - 单实例锁只在 `app.isPackaged` 开启（dev 与安装版要能并行），第二个实例必须 `app.exit(0)` 而不是 `app.quit()`。
 

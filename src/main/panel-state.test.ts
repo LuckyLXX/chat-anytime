@@ -110,3 +110,48 @@ describe("panel state incremental patches", () => {
     expect(cache.snapshot().activeSessionId).toBe("s1");
   });
 });
+
+describe("面板的切回 / 定向恢复帧", () => {
+  it("state.resume.patch 切换 active id 并合并随帧携带的会话列表（不能停在旧 active）", () => {
+    const cache = createPanelStateCache(() => scope);
+    cache.ingest(stateMessage([summary("s1"), summary("s2")], "s1"));
+    cache.ingest({
+      type: "state.resume.patch",
+      sessionId: "s2",
+      baseRevision: 1,
+      snapshot: { sessionId: "s2", revision: 9, sessions: [summary("s2"), summary("s3")] }
+    } as RuntimeMessage);
+    const payload = cache.snapshot();
+    expect(payload.activeSessionId).toBe("s2");
+    expect(payload.sessions.map((item) => item.id)).toEqual(["s2", "s3"]);
+  });
+
+  it("state.resume.patch 未携带 sessions 时保留旧列表（只带变化的字段）", () => {
+    const cache = createPanelStateCache(() => scope);
+    cache.ingest(stateMessage([summary("s1")], "s1"));
+    cache.ingest({
+      type: "state.resume.patch",
+      sessionId: "s2",
+      baseRevision: 1,
+      snapshot: { sessionId: "s2", revision: 9, status: "working" }
+    } as RuntimeMessage);
+    expect(cache.snapshot().activeSessionId).toBe("s2");
+    expect(cache.snapshot().sessions.map((item) => item.id)).toEqual(["s1"]);
+  });
+
+  it("state.recovery 按全量帧处理（active id 与列表都换掉，live 明细不动）", () => {
+    const cache = createPanelStateCache(() => scope);
+    cache.ingest(stateMessage([summary("s1")], "s1"));
+    cache.ingest({ type: "sessions.live", sessions: [live("s1", true)] });
+    cache.ingest({
+      type: "state.recovery",
+      requestId: "req-1",
+      sessionId: "s2",
+      snapshot: { sessionId: "s2", sessions: [summary("s2")] }
+    } as RuntimeMessage);
+    const payload = cache.snapshot();
+    expect(payload.activeSessionId).toBe("s2");
+    expect(payload.sessions.map((item) => item.id)).toEqual(["s2"]);
+    expect(payload.live.map((item) => item.sessionId)).toEqual(["s1"]);
+  });
+});

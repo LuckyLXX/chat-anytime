@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { extname, join, resolve } from "node:path";
 import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, Menu, Notification, protocol, safeStorage, session, shell, utilityProcess, type UtilityProcess } from "electron";
@@ -13,7 +14,7 @@ import { pruneSessionPaths, setArchivedSessionPaths, togglePinnedSessionPath } f
 import { importExternalAttachment, workspaceRelativeAttachment } from "./attachments.js";
 import type { BrowserDownloadPrefs, BrowserPreviewCommand, BrowserPreviewState, DesktopBootstrap, DesktopSettings, GalleryServiceProbe, ImChannelKind, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot, SshCommand, SshCommandResult, SshEventData, SshRevealEvent, TerminalCommand, TerminalEventData, WorkspaceDirectoryListing, WorkspaceEntryResult, WorkspaceFilePreview, WorkspaceFileSearchResult, WorkspaceFileStat, WorkspaceFileWriteResult } from "../shared/protocol.js";
 import { PREVIEW_FILE_SCHEME, isPanelWorkHost, parseWorkspaceFilePreviewUrl } from "../shared/protocol.js";
-import { applyRuntimeStatePatch } from "../shared/snapshot-patch.js";
+import { createMainSnapshotCache } from "./snapshot-baselines.js";
 import { isThemeAssetUrl, parseThemeAssetUrl } from "../shared/theme-assets.js";
 import type { ThemeImportOutcome } from "../shared/theme-assets.js";
 import { serveThemeAsset, migrateInlineThemeAssets, reconcileThemeAssetDirs, themeAssetsDirFor, resolveThemeAgentDir, importThemeCssFile, importThemeDirectory, promoteThemeScope } from "./theme-assets.js";
@@ -98,6 +99,14 @@ let runtimeProcess: UtilityProcess | undefined;
  */
 let imGateway: ImGateway | undefined;
 let latestSnapshot: RuntimeSnapshot | undefined;
+/**
+ * active 快照的按会话基线（bootstrap 的数据源）。
+ *
+ * `state.patch` / `state.resume.patch` 的底座必须是**该会话自己**的上一帧；
+ * `latestSnapshot` 只代表当前 active，不能把 A 的差量套到 B 上。基线缺失/补丁
+ * 失配时这里只发定向恢复（`state.recover`），不拉全局 `state.sync`。
+ */
+const snapshotBaselines = createMainSnapshotCache({ nextRequestId: () => randomUUID() });
 let latestCatalog: Extract<RuntimeMessage, { type: "catalog" }> | undefined;
 let latestResources: ResourceCatalog | undefined;
 /** 渲染端重载后恢复待决提问：utility 的 broker 还在等，面板不能丢。 */
@@ -844,22 +853,12 @@ function startRuntime(): void {
       });
       return;
     }
-    if (message.type === "state") latestSnapshot = message.snapshot;
-    // 增量帧也合并进 main 的缓存：渲染端重载时 bootstrap 拿到的必须是最新状态，
-    // 否则会退回到最近一次全量帧（可能落后数分钟）。
-    else if (message.type === "state.patch" && latestSnapshot) {
-      const revision = message.snapshot.revision;
-      // 重复帧（重连/重放）直接丢弃：增量补丁重复应用会重复 append 消息。
-      if (revision === undefined || latestSnapshot.revision === undefined || revision > latestSnapshot.revision) {
-        const merged = applyRuntimeStatePatch(latestSnapshot, message);
-        if (merged) latestSnapshot = merged;
-        else {
-          // 补丁基线失配（索引越界）：丢弃缓存并让 utility 推一帧全量，避免 bootstrap 永远停在旧状态。
-          latestSnapshot = undefined;
-          runtimeProcess?.postMessage({ type: "state.sync" } satisfies RuntimeCommand);
-        }
-      }
-    }
+    // active 通道（state / state.patch / state.resume.patch / state.recovery）统一交给
+    // 按会话键控的基线缓存：它同时维护「bootstrap 要返回的当前快照」与「该向 utility
+    // 要哪一次定向恢复」。增量帧也要合并进来，否则渲染端重载拿到的会是旧全量帧。
+    const activeIngest = snapshotBaselines.ingest(message);
+    if (activeIngest.latest) latestSnapshot = activeIngest.latest;
+    if (activeIngest.recover) runtimeProcess?.postMessage(activeIngest.recover satisfies RuntimeCommand);
     // 待决提问镜像：渲染端 HMR/刷新/崩溃恢复后靠 bootstrap 把面板重新浮出来。
     // 只镜像、不裁决——真正的作答仍由 utility 的 QuestionBroker 处理。
     if (message.type === "question") pendingQuestions.record(message.request);

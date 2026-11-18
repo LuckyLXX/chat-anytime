@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import type { PermissionRequest, QuestionRequest, RuntimeSnapshot, SessionPaneSnapshot, SessionSearchHit, ToolExecution, Todo, UsageStats } from "../../shared/protocol.js";
-import { currentPermissionRequest, currentQuestionRequest, dropPaneStates, mergeQuestionRequests, mergeRecentWorkspacesPreservingIdentity, mergeSessionsPreservingIdentity, pruneParkedPanels, useDesktopStore } from "./store.js";
+import type { ChatMessage, PermissionRequest, QuestionRequest, RuntimeCommand, RuntimeSnapshot, SessionPaneSnapshot, SessionSearchHit, ToolExecution, Todo, UsageStats } from "../../shared/protocol.js";
+import { currentPermissionRequest, currentQuestionRequest, dropPaneStates, mergeQuestionRequests, mergeRecentWorkspacesPreservingIdentity, mergeSessionsPreservingIdentity, pruneParkedPanels, resetActiveSessionBaselines, useDesktopStore } from "./store.js";
 
 function permission(id: string, sessionId: string): PermissionRequest {
   return {
@@ -884,5 +884,294 @@ describe("IM 通道权威配置推送（im.settings）", () => {
     useDesktopStore.getState().handleRuntimeMessage({ type: "im.settings" });
     expect(useDesktopStore.getState().settings.im).toBeUndefined();
     expect("im" in useDesktopStore.getState().settings).toBe(false);
+  });
+});
+
+// —— 会话切换增量恢复协议（A→B→A 的 state.resume.patch / state.recover / state.recovery）——
+
+function msg(id: string, text = id): ChatMessage {
+  return { id, uuid: id, role: "assistant", timestamp: 1, blocks: [{ type: "text", text }] };
+}
+
+/** 记录渲染端发出的命令（定向恢复请求会走 window.piDesktop.send）。 */
+function installSendSpy(): { sent: RuntimeCommand[]; restore: () => void } {
+  const host = globalThis as { piDesktop?: unknown; window?: unknown };
+  const originalWindow = host.window;
+  const original = host.piDesktop;
+  const sent: RuntimeCommand[] = [];
+  host.window = host;
+  host.piDesktop = {
+    send: async (command: RuntimeCommand) => {
+      sent.push(command);
+    },
+    onRuntimeMessage: () => () => {}
+  };
+  return {
+    sent,
+    restore: () => {
+      host.piDesktop = original;
+      host.window = originalWindow;
+    }
+  };
+}
+
+function seedActiveState(sessionId: string, revision: number, extra: Partial<RuntimeSnapshot> = {}): RuntimeSnapshot {
+  useDesktopStore.getState().handleRuntimeMessage({ type: "state", snapshot: { ...snap(sessionId), revision, ...extra } });
+  return useDesktopStore.getState().snapshot;
+}
+
+describe("active 通道的会话切换增量恢复", () => {
+  beforeEach(() => {
+    resetActiveSessionBaselines();
+    useDesktopStore.setState({ snapshot: { ...snap("placeholder") }, paneStates: {}, parkedPanels: {} });
+    useDesktopStore.getState().handleRuntimeMessage({ type: "state", snapshot: { ...snap("placeholder"), revision: 0 } });
+  });
+
+  it("A→B→A：切回帧套在**目标会话自己**的基线上，B 的历史不会混进来", () => {
+    const spy = installSendSpy();
+    try {
+      seedActiveState("a", 1, { messages: [msg("a1")], status: "A 就绪" });
+      seedActiveState("b", 2, { messages: [msg("b1")], status: "B 就绪" });
+      // 全局 revision 已经跨过 B 的那一帧：5 > baseRevision(1) + 1 完全合法。
+      useDesktopStore.getState().handleRuntimeMessage({
+        type: "state.resume.patch",
+        sessionId: "a",
+        baseRevision: 1,
+        snapshot: { sessionId: "a", revision: 5, status: "A 正在工作" },
+        messages: { append: [msg("a2")] }
+      });
+      const snapshot = useDesktopStore.getState().snapshot;
+      expect(snapshot.sessionId).toBe("a");
+      expect(snapshot.revision).toBe(5);
+      expect(snapshot.status).toBe("A 正在工作");
+      expect(snapshot.messages.map((item) => item.id)).toEqual(["a1", "a2"]);
+      // 焦点切换留档：旧 active（B）的完整快照留在 parkedPanels 里给分屏格子兜底。
+      expect(useDesktopStore.getState().parkedPanels.b?.messages.map((item) => item.id)).toEqual(["b1"]);
+      // 基线命中：不该请求任何恢复。
+      expect(spy.sent).toEqual([]);
+    } finally {
+      spy.restore();
+    }
+  });
+
+  it("令牌不精确相等（基线不符）：拒绝修补，只请求该会话的定向恢复", () => {
+    const spy = installSendSpy();
+    try {
+      seedActiveState("a", 1, { messages: [msg("a1")] });
+      seedActiveState("b", 2, { messages: [msg("b1")] });
+      useDesktopStore.getState().handleRuntimeMessage({
+        type: "state.resume.patch",
+        sessionId: "a",
+        baseRevision: 99,
+        snapshot: { sessionId: "a", revision: 5 },
+        messages: { append: [msg("a2")] }
+      });
+      // 当前画面仍是 B（不被错误差分污染），且只发了一次 state.recover。
+      expect(useDesktopStore.getState().snapshot.sessionId).toBe("b");
+      expect(spy.sent).toEqual([{ type: "state.recover", sessionId: "a", requestId: expect.any(String) }]);
+    } finally {
+      spy.restore();
+    }
+  });
+
+  it("缺基线（重载后未恢复的旧会话）：请求定向恢复，绝不退化成全体 state.sync", () => {
+    const spy = installSendSpy();
+    try {
+      seedActiveState("b", 2, { messages: [msg("b1")] });
+      useDesktopStore.getState().handleRuntimeMessage({
+        type: "state.resume.patch",
+        sessionId: "a",
+        baseRevision: 1,
+        snapshot: { sessionId: "a", revision: 5 }
+      });
+      expect(spy.sent.map((command) => command.type)).toEqual(["state.recover"]);
+      expect(useDesktopStore.getState().snapshot.sessionId).toBe("b");
+    } finally {
+      spy.restore();
+    }
+  });
+
+  it("定向恢复成功后基线重建，下一帧 state.patch 可以继续应用", () => {
+    const spy = installSendSpy();
+    try {
+      seedActiveState("b", 2, { messages: [msg("b1")] });
+      useDesktopStore.getState().handleRuntimeMessage({
+        type: "state.resume.patch",
+        sessionId: "a",
+        baseRevision: 1,
+        snapshot: { sessionId: "a", revision: 5 }
+      });
+      const requestId = (spy.sent[0] as Extract<RuntimeCommand, { type: "state.recover" }>).requestId;
+      useDesktopStore.getState().handleRuntimeMessage({
+        type: "state.recovery",
+        requestId,
+        sessionId: "a",
+        snapshot: { ...snap("a"), revision: 6, messages: [msg("a1")], status: "A 恢复" }
+      });
+      expect(useDesktopStore.getState().snapshot.sessionId).toBe("a");
+      expect(useDesktopStore.getState().snapshot.status).toBe("A 恢复");
+      // 恢复帧之后：同一会话的补丁按 rev+1 继续应用。
+      useDesktopStore.getState().handleRuntimeMessage({
+        type: "state.patch",
+        snapshot: { sessionId: "a", revision: 7, busy: true },
+        messages: { append: [msg("a2")] }
+      });
+      const snapshot = useDesktopStore.getState().snapshot;
+      expect(snapshot.busy).toBe(true);
+      expect(snapshot.messages.map((item) => item.id)).toEqual(["a1", "a2"]);
+    } finally {
+      spy.restore();
+    }
+  });
+
+  it("同一会话的定向恢复按 uuid 复用旧消息对象（整条时间线不因恢复全部重渲染）", () => {
+    const spy = installSendSpy();
+    try {
+      const first = msg("m1");
+      seedActiveState("a", 1, { messages: [first] });
+      // 断档 → 请求恢复（当前会话仍是 a）。
+      useDesktopStore.getState().handleRuntimeMessage({
+        type: "state.patch",
+        snapshot: { sessionId: "a", revision: 9 },
+        messages: { append: [msg("m2")] }
+      });
+      const requestId = (spy.sent[0] as Extract<RuntimeCommand, { type: "state.recover" }>).requestId;
+      useDesktopStore.getState().handleRuntimeMessage({
+        type: "state.recovery",
+        requestId,
+        sessionId: "a",
+        // IPC 结构化克隆后每条消息都是新引用，内容与旧的一致。
+        snapshot: { ...snap("a"), revision: 10, messages: [{ ...first }, msg("m2")] }
+      });
+      expect(useDesktopStore.getState().snapshot.messages[0]).toBe(first);
+    } finally {
+      spy.restore();
+    }
+  });
+
+  it("过期/重复的恢复帧不能覆盖后来激活的会话", () => {
+    const spy = installSendSpy();
+    try {
+      seedActiveState("b", 2, { messages: [msg("b1")] });
+      useDesktopStore.getState().handleRuntimeMessage({
+        type: "state.resume.patch",
+        sessionId: "a",
+        baseRevision: 1,
+        snapshot: { sessionId: "a", revision: 5 }
+      });
+      const requestId = (spy.sent[0] as Extract<RuntimeCommand, { type: "state.recover" }>).requestId;
+      // 用户又切到了 C（全量帧，清掉在途请求）。
+      seedActiveState("c", 8, { messages: [msg("c1")] });
+      // A 的恢复帧这时才到：requestId/目标都过期，必须丢弃。
+      useDesktopStore.getState().handleRuntimeMessage({
+        type: "state.recovery",
+        requestId,
+        sessionId: "a",
+        snapshot: { ...snap("a"), revision: 9, messages: [msg("a1")] }
+      });
+      expect(useDesktopStore.getState().snapshot.sessionId).toBe("c");
+      expect(useDesktopStore.getState().snapshot.messages.map((item) => item.id)).toEqual(["c1"]);
+      // 再重复一次（同一 requestId 已认领过）同样无效。
+      useDesktopStore.getState().handleRuntimeMessage({
+        type: "state.recovery",
+        requestId,
+        sessionId: "a",
+        snapshot: { ...snap("a"), revision: 10 }
+      });
+      expect(useDesktopStore.getState().snapshot.sessionId).toBe("c");
+    } finally {
+      spy.restore();
+    }
+  });
+
+  it("普通 state.patch 的跨会话目标：拒绝套用并要求目标会话的定向恢复", () => {
+    const spy = installSendSpy();
+    try {
+      seedActiveState("b", 2, { messages: [msg("b1")] });
+      useDesktopStore.getState().handleRuntimeMessage({
+        type: "state.patch",
+        snapshot: { sessionId: "a", revision: 3, status: "A 正在工作" },
+        messages: { append: [msg("a1")] }
+      });
+      const snapshot = useDesktopStore.getState().snapshot;
+      expect(snapshot.sessionId).toBe("b");
+      expect(snapshot.messages.map((item) => item.id)).toEqual(["b1"]);
+      expect(spy.sent).toEqual([{ type: "state.recover", sessionId: "a", requestId: expect.any(String) }]);
+    } finally {
+      spy.restore();
+    }
+  });
+
+  it("补丁序号断档（丢帧）改走定向恢复，不再拉全体 state.sync", () => {
+    const spy = installSendSpy();
+    try {
+      seedActiveState("a", 1, { messages: [msg("a1")] });
+      useDesktopStore.getState().handleRuntimeMessage({
+        type: "state.patch",
+        snapshot: { sessionId: "a", revision: 9, status: "跳号了" },
+        messages: { append: [msg("a2")] }
+      });
+      expect(useDesktopStore.getState().snapshot.status).not.toBe("跳号了");
+      expect(useDesktopStore.getState().snapshot.messages.map((item) => item.id)).toEqual(["a1"]);
+      expect(spy.sent.map((command) => command.type)).toEqual(["state.recover"]);
+    } finally {
+      spy.restore();
+    }
+  });
+
+  it("bootstrap 的 active 快照成为基线：重载后当前会话的切回帧仍可增量应用", async () => {
+    const host = globalThis as { piDesktop?: unknown; window?: unknown };
+    const originalWindow = host.window;
+    const original = host.piDesktop;
+    host.window = host;
+    host.piDesktop = {
+      onRuntimeMessage: () => () => {},
+      send: async () => undefined,
+      bootstrap: async () => ({
+        platform: "test",
+        version: "1.18.0",
+        settings: { version: 2, thinkingLevel: "medium", accessMode: "ask", providers: [], agents: [], currentAgentId: "default", appearance: { theme: "system", themePreset: "default", customCss: "", customThemes: [], showThinking: true, showGalleryWall: true } },
+        resources: { skills: [], commands: [], mcpServers: [], todos: [], memory: [], subagents: [], hooks: [], hooksEnabled: true, automation: [], automationRuns: [], gallery: [], diagnostics: [] },
+        runtime: { ...snap("a"), revision: 4, messages: [msg("a1")] }
+      })
+    };
+    try {
+      resetActiveSessionBaselines();
+      await useDesktopStore.getState().initialize();
+      expect(useDesktopStore.getState().snapshot.sessionId).toBe("a");
+      // 另一个会话全量帧之后切回 A：底座就是 bootstrap 那一帧（revision 4）。
+      seedActiveState("b", 5);
+      useDesktopStore.getState().handleRuntimeMessage({
+        type: "state.resume.patch",
+        sessionId: "a",
+        baseRevision: 4,
+        snapshot: { sessionId: "a", revision: 6 },
+        messages: { append: [msg("a2")] }
+      });
+      expect(useDesktopStore.getState().snapshot.sessionId).toBe("a");
+      expect(useDesktopStore.getState().snapshot.messages.map((item) => item.id)).toEqual(["a1", "a2"]);
+    } finally {
+      host.piDesktop = original;
+      host.window = originalWindow;
+      resetActiveSessionBaselines();
+    }
+  });
+});
+
+describe("分屏 pane 通道语义不变", () => {
+  it("session.state.patch 仍按自身 revision 连号应用，且不影响 active 快照", () => {
+    useDesktopStore.setState({
+      snapshot: { ...snap("active"), revision: 10 },
+      paneStates: { pane: { ...snap("pane"), revision: 1, messages: [msg("p1")] } }
+    });
+    useDesktopStore.getState().handleRuntimeMessage({
+      type: "session.state.patch",
+      snapshot: { sessionId: "pane", revision: 2, busy: true },
+      messages: { append: [msg("p2")] }
+    });
+    expect(useDesktopStore.getState().paneStates.pane?.messages.map((item) => item.id)).toEqual(["p1", "p2"]);
+    expect(useDesktopStore.getState().paneStates.pane?.busy).toBe(true);
+    expect(useDesktopStore.getState().snapshot.sessionId).toBe("active");
+    expect(useDesktopStore.getState().snapshot.revision).toBe(10);
   });
 });

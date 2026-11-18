@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { memoryCacheKey } from "./lib/memory-format";
-import { applyRuntimeStatePatch, applySessionStatePatch } from "../../shared/snapshot-patch";
+import { applyResumeStatePatch, applyRuntimeStatePatch, applySessionStatePatch } from "../../shared/snapshot-patch";
+import { MAX_SESSION_BASELINES, createSessionBaselineCache } from "../../shared/session-baseline-cache";
 import type {
   AutomationRunRecord,
   AutomationTask,
@@ -743,12 +744,78 @@ function requestStateSync(): void {
   }
 }
 
+/**
+ * active 通道的**按会话**基线（与 paneStates、parkedPanels 完全分离）。
+ *
+ * 为什么需要它：`state.resume.patch`（切回旧会话）的底座是**目标会话自己**的上一帧
+ * 快照，而不是眼前的 `snapshot`（那时还是别的会话）。拿错底座就是「把 A 的差量算到
+ * B 的头上」——数据看起来正常，内容全错。
+ *
+ * 容量/淘汰规则与 utility、main 共用 `shared/session-baseline-cache.ts`：三处对
+ * 「哪个会话还有基线」的判断必须一致，命中失败一律退化为定向全量恢复。
+ */
+interface ActiveSessionBaseline {
+  sessionId: string;
+  revision?: number;
+  snapshot: RuntimeSnapshot;
+}
+const activeBaselines = createSessionBaselineCache<ActiveSessionBaseline>(MAX_SESSION_BASELINES);
+/**
+ * 在途的定向恢复请求（同一时刻最多一个）：基线缺失/不匹配时发出，`state.recovery`
+ * 必须回带同一 `requestId` 且 `sessionId` 一致才认领——过期响应绝不覆盖后来激活的会话。
+ */
+let pendingRecovery: { requestId: string; sessionId: string } | undefined;
+let recoveryRequestSeq = 0;
+let lastRecoveryRequestAt = 0;
+/** 同一目标的最小重试间隔：持续缺基线时也不该每帧都发一次恢复请求。 */
+const RECOVERY_RETRY_INTERVAL_MS = 1000;
+
+function rememberActiveBaseline(snapshot: RuntimeSnapshot): void {
+  if (!snapshot.sessionId) return;
+  activeBaselines.set({ sessionId: snapshot.sessionId, revision: snapshot.revision, snapshot });
+}
+
+/**
+ * 基线缺失/不匹配/补丁无法应用：只向 utility 要**这一个**会话的定向全量恢复。
+ *
+ * 绝不退化成 `state.sync`：全量重同步会让所有会话的基线一起作废，一次坏帧就退化成
+ * 「每次切会话都重传整段历史」——正是这条协议要修的病。
+ */
+function requestTargetedRecovery(sessionId: string | undefined): void {
+  if (!sessionId) return;
+  const now = Date.now();
+  if (pendingRecovery?.sessionId === sessionId && now - lastRecoveryRequestAt < RECOVERY_RETRY_INTERVAL_MS) return;
+  const requestId = `state-recover-${now.toString(36)}-${++recoveryRequestSeq}`;
+  pendingRecovery = { requestId, sessionId };
+  lastRecoveryRequestAt = now;
+  let sent: Promise<void> | undefined;
+  try {
+    sent = window.piDesktop.send({ type: "state.recover", sessionId, requestId });
+  } catch {
+    sent = undefined;
+  }
+  void sent?.catch(() => {
+    // 发送失败（演示环境/运行时就没起来）：撤回在途标记，让下一帧再试。
+    if (pendingRecovery?.requestId === requestId) pendingRecovery = undefined;
+  });
+  if (!sent && pendingRecovery?.requestId === requestId) pendingRecovery = undefined;
+}
+
+/** 初始化/重载：基线全部作废（bootstrap 只能恢复当前 active 的快照；其余会话切回时各触发一次定向恢复）。 */
+export function resetActiveSessionBaselines(): void {
+  activeBaselines.clear();
+  pendingRecovery = undefined;
+  lastRecoveryRequestAt = 0;
+}
+
 export function handleRuntimeMessage(message: RuntimeMessage): void {
   useDesktopStore.getState().handleRuntimeMessage(message);
 }
 
 /** 分屏格子移除（关闭/布局裁剪）后丢弃对应的 paneStates 与 parkedPanels 缓存；再次 watch 会重新水合。 */
 export function dropPaneStates(sessionIds: string[]): void {
+  for (const id of sessionIds) activeBaselines.delete(id);
+  if (pendingRecovery && sessionIds.includes(pendingRecovery.sessionId)) pendingRecovery = undefined;
   useDesktopStore.setState((state) => {
     let changed = false;
     const next = { ...state.paneStates };
@@ -830,12 +897,13 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   async initialize() {
     const unsubscribe = window.piDesktop.onRuntimeMessage((message) => get().handleRuntimeMessage(message));
     const bootstrap = await window.piDesktop.bootstrap();
+    const restoredSnapshot = bootstrap.runtime ?? get().snapshot;
     set({
       ready: true,
       appVersion: bootstrap.version,
       error: bootstrap.securityWarning,
       settings: bootstrap.settings,
-      snapshot: bootstrap.runtime ?? get().snapshot,
+      snapshot: restoredSnapshot,
       models: bootstrap.catalog?.models ?? [],
       providers: bootstrap.catalog?.providers ?? [],
       resources: bootstrap.resources ?? get().resources,
@@ -860,75 +928,148 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
       imStatus: bootstrap.imStatus ?? get().imStatus,
       customModels: bootstrap.settings.providers.find((provider) => provider.id === "chatanytime-openai-compatible")?.models ?? []
     });
+    // active 基线是内存态：重载后只能从 bootstrap 恢复当前 active 会话那一份，其余
+    // 会话切成真空（它们切回时各触发一次定向全量恢复，这正是协议允许的兑底）。
+    resetActiveSessionBaselines();
+    rememberActiveBaseline(restoredSnapshot);
     return unsubscribe;
   },
   handleRuntimeMessage(message) {
     switch (message.type) {
-      case "state":
-        set((state) => {
-          const incoming = message.snapshot;
-          const previous = state.snapshot;
-          const openingMatches = state.openingSession && (incoming.sessionFile ? normalizeSessionPath(incoming.sessionFile) === normalizeSessionPath(state.openingSession.path) : false);
-          const opening = openingMatches ? undefined : state.openingSession;
-          const { messages: mergedMessages, changed } = mergeMessagesPreservingIdentity(previous.messages, incoming.messages);
-          const mergedExecutions = mergeExecutionsPreservingIdentity(previous.executions, incoming.executions);
-          // sessions/recentWorkspaces 经结构化克隆每帧都是新引用，必须走内容
-          // 比较的身份保留合并，否则“无变化早退”永远不命中、订阅方每帧重渲染。
-          const mergedSessions = mergeSessionsPreservingIdentity(previous.sessions, incoming.sessions);
-          const mergedRecentWorkspaces = mergeRecentWorkspacesPreservingIdentity(previous.recentWorkspaces, incoming.recentWorkspaces);
-          // 会话级布尔标志（计划/电脑/设计/团队模式）与团队快照必须入比较：它们都
-          // 可能整帧只有自己变化（其余字段与上帧恒等，如 model/speedStats 同为
-          // undefined 时），漏比会让本次切换被早退吐掉——画布/计划横幅/团队开关与
-          // 状态条不响应。团队快照必须走内容比较：IPC 后引用必不相等。
-          // gitBranch 同理：切分支只会改变这一个字段，漏比则顶栏徽章永远停在旧分支。
-          if (!changed && previous.busy === incoming.busy && previous.status === incoming.status &&
-              previous.turnTiming === incoming.turnTiming && previous.executions === mergedExecutions &&
-              previous.sessions === mergedSessions && previous.recentWorkspaces === mergedRecentWorkspaces &&
-              previous.model === incoming.model && previous.gitBranch === incoming.gitBranch &&
-              previous.workspace === incoming.workspace && previous.readOnlyReason === incoming.readOnlyReason &&
-              previous.agentId === incoming.agentId && previous.agentName === incoming.agentName &&
-              previous.planMode === incoming.planMode && previous.computerMode === incoming.computerMode && previous.designMode === incoming.designMode &&
-              previous.teamMode === incoming.teamMode && teamSnapshotEqual(previous.team, incoming.team) &&
-              previous.sessionId === incoming.sessionId && previous.sessionFile === incoming.sessionFile &&
-              queuedMessagesEqual(previous.queuedMessages, incoming.queuedMessages) &&
-              previous.thinkingLevel === incoming.thinkingLevel &&
-              previous.revision === incoming.revision) {
-            // Nothing changed at all — keep the exact same snapshot reference
-            // so downstream useMemo/useEffect dependency checks stay no-ops.
-            return state;
-          }
-          // 焦点切换留档：旧激活会话的完整数据就在手上，写入 parkedPanels[旧格]，
-          // 它若是分屏格子则立刻有内容可渲染（水合帧随后写入 paneStates 接管）。
-          // 多槽而非单槽：三分屏焦点在多格间切换时，非“上一任”的格子也有数据可
-          // 兜住，不会误显示“正在载入会话”。
-          const parkedPanels = previous.sessionId && previous.sessionId !== incoming.sessionId
-            ? { ...state.parkedPanels, [previous.sessionId]: previous satisfies SessionPaneSnapshot }
-            : state.parkedPanels;
-          return { snapshot: { ...incoming, messages: mergedMessages, executions: mergedExecutions, sessions: mergedSessions, recentWorkspaces: mergedRecentWorkspaces }, parkedPanels, ...(opening !== state.openingSession ? { openingSession: opening } : {}) };
-        });
+      case "state": {
+        const state = get();
+        const incoming = message.snapshot;
+        const previous = state.snapshot;
+        const openingMatches = state.openingSession && (incoming.sessionFile ? normalizeSessionPath(incoming.sessionFile) === normalizeSessionPath(state.openingSession.path) : false);
+        const opening = openingMatches ? undefined : state.openingSession;
+        const { messages: mergedMessages, changed } = mergeMessagesPreservingIdentity(previous.messages, incoming.messages);
+        const mergedExecutions = mergeExecutionsPreservingIdentity(previous.executions, incoming.executions);
+        // sessions/recentWorkspaces 经结构化克隆每帧都是新引用，必须走内容
+        // 比较的身份保留合并，否则“无变化早退”永远不命中、订阅方每帧重渲染。
+        const mergedSessions = mergeSessionsPreservingIdentity(previous.sessions, incoming.sessions);
+        const mergedRecentWorkspaces = mergeRecentWorkspacesPreservingIdentity(previous.recentWorkspaces, incoming.recentWorkspaces);
+        const next: RuntimeSnapshot = { ...incoming, messages: mergedMessages, executions: mergedExecutions, sessions: mergedSessions, recentWorkspaces: mergedRecentWorkspaces };
+        // 全量帧永远是当前 active 会话的权威：基线直接换成这一份（无论内容是否变化）；
+        // 它也满足任何在途的定向恢复请求（世界已经被重建过了）。
+        rememberActiveBaseline(next);
+        pendingRecovery = undefined;
+        // 会话级布尔标志（计划/电脑/设计/团队模式）与团队快照必须入比较：它们都
+        // 可能整帧只有自己变化（其余字段与上帧恒等，如 model/speedStats 同为
+        // undefined 时），漏比会让本次切换被早退吐掉——画布/计划横幅/团队开关与
+        // 状态条不响应。团队快照必须走内容比较：IPC 后引用必不相等。
+        // gitBranch 同理：切分支只会改变这一个字段，漏比则顶栏徽章永远停在旧分支。
+        if (!changed && previous.busy === incoming.busy && previous.status === incoming.status &&
+            previous.turnTiming === incoming.turnTiming && previous.executions === mergedExecutions &&
+            previous.sessions === mergedSessions && previous.recentWorkspaces === mergedRecentWorkspaces &&
+            previous.model === incoming.model && previous.gitBranch === incoming.gitBranch &&
+            previous.workspace === incoming.workspace && previous.readOnlyReason === incoming.readOnlyReason &&
+            previous.agentId === incoming.agentId && previous.agentName === incoming.agentName &&
+            previous.planMode === incoming.planMode && previous.computerMode === incoming.computerMode && previous.designMode === incoming.designMode &&
+            previous.teamMode === incoming.teamMode && teamSnapshotEqual(previous.team, incoming.team) &&
+            previous.sessionId === incoming.sessionId && previous.sessionFile === incoming.sessionFile &&
+            queuedMessagesEqual(previous.queuedMessages, incoming.queuedMessages) &&
+            previous.thinkingLevel === incoming.thinkingLevel &&
+            previous.revision === incoming.revision) {
+          // Nothing changed at all — keep the exact same snapshot reference
+          // so downstream useMemo/useEffect dependency checks stay no-ops.
+          return;
+        }
+        // 焦点切换留档：旧激活会话的完整数据就在手上，写入 parkedPanels[旧格]，
+        // 它若是分屏格子则立刻有内容可渲染（水合帧随后写入 paneStates 接管）。
+        // 多槽而非单槽：三分屏焦点在多格间切换时，非“上一任”的格子也有数据可
+        // 兜住，不会误显示“正在载入会话”。
+        const parkedPanels = previous.sessionId && previous.sessionId !== incoming.sessionId
+          ? { ...state.parkedPanels, [previous.sessionId]: previous satisfies SessionPaneSnapshot }
+          : state.parkedPanels;
+        set({ snapshot: next, parkedPanels, ...(opening !== state.openingSession ? { openingSession: opening } : {}) });
         break;
+      }
       case "settings":
         set({ settings: message.settings });
         break;
       case "session.opening":
         set({ openingSession: { path: message.path, ...(message.sessionId ? { sessionId: message.sessionId } : {}), at: Date.now() } });
         break;
-      case "state.patch":
-        set((state) => {
-          const revision = message.snapshot.revision;
-          const current = state.snapshot.revision;
-          if (revision !== undefined && current !== undefined) {
-            if (revision <= current) return state;
-            if (revision !== current + 1) {
-              requestStateSync();
-              return state;
-            }
+      case "state.patch": {
+        const state = get();
+        const current = state.snapshot;
+        const frameSessionId = message.snapshot.sessionId;
+        // 普通补丁只接受当前 active 会话：跨会话的差分套到眼前的快照上就是错误内容。
+        // 出现这种帧通常意味着一次切回帧被丢了（丢帧/基线不符），改要目标的定向恢复。
+        if ((frameSessionId ?? undefined) !== (current.sessionId ?? undefined)) {
+          requestTargetedRecovery(frameSessionId ?? current.sessionId);
+          break;
+        }
+        const revision = message.snapshot.revision;
+        if (revision !== undefined && current.revision !== undefined) {
+          if (revision <= current.revision) break;
+          if (revision !== current.revision + 1) {
+            // 断档（丢帧）：只要当前会话的定向恢复，不拉全体 state.sync。
+            requestTargetedRecovery(current.sessionId);
+            break;
           }
-          if ((message.snapshot.sessionId ?? undefined) !== (state.snapshot.sessionId ?? undefined)) return state;
-          const merged = applyRuntimeStatePatch(state.snapshot, message);
-          return merged ? { snapshot: merged } : state;
-        });
+        }
+        const merged = applyRuntimeStatePatch(current, message);
+        if (!merged) {
+          // 消息/执行索引越界（补丁无法应用）：同样只走定向恢复。
+          requestTargetedRecovery(current.sessionId);
+          break;
+        }
+        rememberActiveBaseline(merged);
+        pendingRecovery = undefined;
+        set({ snapshot: merged });
         break;
+      }
+      case "state.resume.patch": {
+        const state = get();
+        const baseline = activeBaselines.get(message.sessionId);
+        // 基线缺失或令牌不精确相等（会话被淘汰/重载过、或中间漏了帧）：
+        // 绝不对错基线修补，直接要这一会话的全量恢复。
+        if (!baseline || baseline.revision === undefined || baseline.revision !== message.baseRevision) {
+          requestTargetedRecovery(message.sessionId);
+          break;
+        }
+        const merged = applyResumeStatePatch(baseline.snapshot, message);
+        if (!merged) {
+          requestTargetedRecovery(message.sessionId);
+          break;
+        }
+        rememberActiveBaseline(merged);
+        pendingRecovery = undefined;
+        const previous = state.snapshot;
+        const parkedPanels = previous.sessionId && previous.sessionId !== merged.sessionId
+          ? { ...state.parkedPanels, [previous.sessionId]: previous satisfies SessionPaneSnapshot }
+          : state.parkedPanels;
+        set({ snapshot: merged, parkedPanels });
+        break;
+      }
+      case "state.recovery": {
+        const pending = pendingRecovery;
+        // 严格认领：请求 id 或目标对不上就是过期响应（用户已经切走/换了请求），
+        // 绝不能把旧会话的全量帧盖到当前画面上。
+        if (!pending || pending.requestId !== message.requestId || pending.sessionId !== message.sessionId) break;
+        pendingRecovery = undefined;
+        const incoming = message.snapshot;
+        if (incoming.sessionId !== message.sessionId) break;
+        const state = get();
+        const previous = state.snapshot;
+        // 同一会话的恢复（最常见：流式中丢帧）按 uuid 复用旧消息对象，否则整条时间线
+        // 会因每帧新引用而全部重渲染；切会话时没有可复用的历史，直接收下全量。
+        const sameSession = (previous.sessionId ?? undefined) === (incoming.sessionId ?? undefined);
+        const { messages: mergedMessages } = sameSession
+          ? mergeMessagesPreservingIdentity(previous.messages, incoming.messages)
+          : { messages: incoming.messages };
+        const mergedExecutions = sameSession
+          ? mergeExecutionsPreservingIdentity(previous.executions, incoming.executions)
+          : incoming.executions;
+        const snapshot: RuntimeSnapshot = { ...incoming, messages: mergedMessages, executions: mergedExecutions };
+        rememberActiveBaseline(snapshot);
+        const parkedPanels = previous.sessionId && previous.sessionId !== snapshot.sessionId
+          ? { ...state.parkedPanels, [previous.sessionId]: previous satisfies SessionPaneSnapshot }
+          : state.parkedPanels;
+        set({ snapshot, parkedPanels });
+        break;
+      }
       case "session.state.patch":
         set((state) => {
           const sessionId = message.snapshot.sessionId;

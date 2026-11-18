@@ -2633,6 +2633,31 @@ export interface RuntimeStatePatch {
   executions?: ToolExecutionsPatch;
 }
 
+/**
+ * 切回旧会话的**定向增量帧**（A→B→A 的第二跳）。
+ *
+ * 为什么不能复用 `state.patch`：普通补丁的底座永远是「当前 active 会话的上一帧」，
+ * 而切回时底座是**目标会话自己**的旧基线；并且 `revision` 是跨会话共享的全局发帧
+ * 序号——A 从旧基线恢复出来的合法新序号会跨过 B 用掉的那几个，`revision` 完全
+ * 可能 > `baseRevision + 1`。所以「基线是否匹配」只能由 `baseRevision` 这一个令牌
+ * 判定：接收方必须有该 `sessionId` 的基线、且 revision 精确等于 `baseRevision`，
+ * 否则必须发 `state.recover` 走定向全量恢复——不猜测、不部分应用。
+ *
+ * 语义边界：这个帧**只**用于切回（`sessionId` 与接收方当前 active 不同）；同一
+ * 会话的高频更新继续走 `state.patch`（那里的 revision 必须严格连号）。
+ */
+export interface RuntimeResumePatch {
+  type: "state.resume.patch";
+  /** 目标会话（切回的那个）：接收方按它挑基线，并据此切换当前 active 会话。 */
+  sessionId: string;
+  /** 目标会话在**接收方**基线上的精确 revision（不是「当前 active 的 revision + 1」）。 */
+  baseRevision: number;
+  /** 变化的标量字段（总带 `sessionId` 与新分配的全局 `revision`）。 */
+  snapshot: RuntimeSnapshotFieldsPatch;
+  messages?: ChatMessagesPatch;
+  executions?: ToolExecutionsPatch;
+}
+
 export interface SessionStatePatch {
   type: "session.state.patch";
   snapshot: SessionPaneFieldsPatch;
@@ -2762,6 +2787,13 @@ export type RuntimeCommand =
   /** 渲染端重载/启动水合后请求一次全量状态（激活会话 + 所有 watched 分屏格）：
    *  补上订阅建立前错过的增量帧，并重置补丁基线。 */
   | { type: "state.sync" }
+  /**
+   * 定向全量恢复（`state.resume.patch` 的基线缺失/不匹配/补丁无法应用时由 main 或
+   * 渲染端请求）：只对**仍 live 且仍是当前 active** 的目标回一帧 `state.recovery`
+   * （带新分配的全局 revision，并重置目标会话的 active 基线）。目标已经切走时
+   * 不回帧——旧恢复帧会被接收方按 requestId/sessionId 丢弃；也绝不广播别的会话。
+   */
+  | { type: "state.recover"; sessionId: string; requestId: string }
   /** 不切换工作区；openSession=false 只改默认助手（automation.run.open 使用）。 */
   | { type: "agent.select"; agentId: string; openSession?: boolean }
   | { type: "agent.save"; agent: AgentProfile }
@@ -2958,6 +2990,13 @@ export type RuntimeMessage =
   | { type: "session.queue-result"; requestId: string; sessionId?: string; ok: false; error: string }
   /** 高频流式帧的增量补丁：只带变化的字段/消息/执行；首次与本会话切换仍走完整 state。 */
   | RuntimeStatePatch
+  /** 切回旧会话（A→B→A 的第二跳）的定向增量帧：底座是目标会话自己的基线，只认 baseRevision。 */
+  | RuntimeResumePatch
+  /**
+   * 响应 `state.recover` 的定向全量帧：带新分配的全局 revision。请求方用它重置目标
+   * 会话的 active 基线；`requestId` 由请求方生成，过期响应（已经切走/换了请求）必须丢弃。
+   */
+  | { type: "state.recovery"; requestId: string; sessionId: string; snapshot: RuntimeSnapshot }
   /** 分屏格子（watched 非激活会话）的会话级快照；与 state 的节流节奏一致（50ms 批量、生命周期立即）。 */
   | { type: "session.state"; snapshot: SessionPaneSnapshot }
   /** 分屏格子的增量补丁（语义同 state.patch）。 */

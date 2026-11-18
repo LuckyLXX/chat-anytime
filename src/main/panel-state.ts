@@ -16,7 +16,8 @@
 import type { PanelStatePayload, RuntimeMessage } from "../shared/protocol.js";
 
 export interface PanelStateCache {
-  /** 喂一条运行时推送；只认 `state` 与 `sessions.live`，其余忽略。 */
+  /** 喂一条运行时推送；只认 active 通道（state / state.patch / 定向增量与恢复帧）
+   *  与 `sessions.live`，其余忽略。 */
   ingest(message: RuntimeMessage): void;
   /** 当前载荷（没有数据时返回空列表，绝不抛错——面板必须能显示「暂无运行中会话」）。 */
   snapshot(): PanelStatePayload;
@@ -51,6 +52,19 @@ export function createPanelStateCache(scope: () => PanelStatePayload["app"]): Pa
       if (message.type === "state.patch") {
         if (message.snapshot.sessions) sessions = message.snapshot.sessions.slice(0, MAX_PANEL_SESSIONS);
         if ("sessionId" in message.snapshot) activeSessionId = message.snapshot.sessionId;
+        return;
+      }
+      // 切回旧会话（A→B→A）的定向增量帧：active id 一定跟着帧走，否则面板会
+      // 一直停在旧 active（列表只在变化时携带）。
+      if (message.type === "state.resume.patch") {
+        activeSessionId = message.sessionId;
+        if (message.snapshot.sessions) sessions = message.snapshot.sessions.slice(0, MAX_PANEL_SESSIONS);
+        return;
+      }
+      // 定向全量恢复帧：与 state 同义（都是当前 active 的全量），active id 照帧更新。
+      if (message.type === "state.recovery") {
+        activeSessionId = message.snapshot.sessionId;
+        sessions = message.snapshot.sessions.slice(0, MAX_PANEL_SESSIONS);
         return;
       }
       if (message.type === "sessions.live") live = message.sessions;
