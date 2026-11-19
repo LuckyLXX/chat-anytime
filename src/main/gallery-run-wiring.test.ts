@@ -124,3 +124,33 @@ describe("后台服务管理器（runner）自身的硬约束", () => {
     expect(runner).toContain("stripAnsi(buffer)");
   });
 });
+
+describe("作品运行的可观测性（不许静默失败、不许无反馈）", () => {
+  it("起服务前先给「正在启动…」横幅（就绪预算最长 30 秒，没反馈就是「点了没反应」）", () => {
+    expect(app).toContain("正在后台启动本地服务…（最多等 ${GALLERY_SERVICE_WAIT_SECONDS} 秒，就绪后自动打开面板）");
+    expect(app).toContain("正在后台启动服务…（最多等 ${GALLERY_SERVICE_WAIT_SECONDS} 秒");
+    // 秒数必须与主进程的就绪预算同源（写死数字过段时间就会和真值分叉）
+    expect(app).toContain("const GALLERY_SERVICE_WAIT_SECONDS = Math.round(GALLERY_SERVICE_WAIT_MS / 1000);");
+  });
+
+  it("失败必提示：先撤「正在启动…」横幅再报错（两条横幅不能同时挂在屏幕上）", () => {
+    expect(app).toMatch(/const galleryRunFailed = useCallback\(\(message: string\): void => \{\n\s+setGalleryToast\(undefined\);\n\s+setMessageActionError\(message\);/u);
+    expect(app).toContain("galleryRunFailed(plan.message ??");
+    // 两条「起服务」失败分支都要走它（只查一处会被另一处的写法掩盖）
+    expect(app).toContain("        if (!started.ok) {\n          galleryRunFailed(started.message);\n          return;\n        }\n        if (await openGalleryPanel");
+    expect(app).toContain("        if (!started.ok) {\n          galleryRunFailed(started.message);\n          return;\n        }\n        if (plan.openPage && app.url)");
+    expect(app).toContain('galleryRunFailed(error instanceof Error ? error.message : "运行作品失败");');
+  });
+
+  it("面板这一轮作废（stale）要明说，不能静默 return", () => {
+    expect(app).toContain("这一轮运行已作废（面板已关闭或又开了一轮），需要重开请再点一次运行。");
+    // 反面：不许再回到「stale 直接 return false」的静默写法
+    expect(app).not.toContain("if (result.stale) return false;");
+  });
+
+  it("服务日志走 GBK 回退解码（中文路径的报错必须可读）", () => {
+    expect(runner).toContain("new GalleryServiceOutputDecoder(legacyEncodings)");
+    // 反面：String(chunk) 是「中文日志全变乱码」的根因
+    expect(runner).not.toContain("listener(String(chunk))");
+  });
+});

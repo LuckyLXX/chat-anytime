@@ -181,6 +181,173 @@ export function killProcessTree(pid: number, platform: NodeJS.Platform = process
 }
 
 /**
+ * 子进程输出该按什么传统编码回退：按系统语言给第一候选，`windows-1252` 兜底。
+ *
+ * 只在 Windows 上有意义：cmd 的内建命令、Windows PowerShell / pwsh 的 cmdlet、部分
+ * Python 与系统工具都按**控制台代码页**（中文机器 = 936 / GBK；日文 932 / Shift_JIS；
+ * 韩文 949 / EUC-KR）写 stdout / stderr，而不是 UTF-8。POSIX 侧输出基本都是 UTF-8，
+ * 不解码成传统编码（否则合法的 UTF-8 字节被瞎解读更糟）。
+ *
+ * 已知边界：这里按**系统语言**猜代码页，不是读真实的 OEM 代码页——系统区域设置被
+ * 手工改成非常见组合（如英文系统跑 936）时仍可能解错，那时日志里的中文会退化成
+ * 替换字符，但不会影响进程本身。
+ */
+export function defaultServiceLegacyEncodings(
+  platform: NodeJS.Platform = process.platform,
+  locale: string = Intl.DateTimeFormat().resolvedOptions().locale
+): readonly string[] {
+  if (platform !== "win32") return [];
+  const language = locale.toLowerCase().split("-")[0] ?? "";
+  if (language === "zh") return ["gbk", "windows-1252"];
+  if (language === "ja") return ["shift_jis", "windows-1252"];
+  if (language === "ko") return ["euc-kr", "windows-1252"];
+  return ["windows-1252"];
+}
+
+/** 双字节（首字节 0x81–0xFE + 尾字节）的传统编码：跨 chunk 时要能认出「首字节在末尾」。 */
+const LEGACY_DOUBLE_BYTE = new Set(["gbk", "gb18030", "big5", "shift_jis", "euc-kr"]);
+
+function concatBytes(left: Uint8Array, right: Uint8Array): Uint8Array {
+  const merged = new Uint8Array(left.length + right.length);
+  merged.set(left, 0);
+  merged.set(right, left.length);
+  return merged;
+}
+
+function decodeStrictUtf8(bytes: Uint8Array): string | undefined {
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return undefined;
+  }
+}
+
+function decodeLenient(bytes: Uint8Array, encoding: string): string | undefined {
+  try {
+    return new TextDecoder(encoding, { fatal: false }).decode(bytes);
+  } catch {
+    return undefined; // 该编码在精简 ICU 里不存在：换下一个候选
+  }
+}
+
+/**
+ * 块里「完整的 UTF-8 前缀」有多少字节；末尾被截断的多字节字符不计入（-1 = 根本不是 UTF-8）。
+ *
+ * 区分这两种失败很重要：`中文` 的字节被 chunk 切成 `e4 b8 | ad e6 96 87` 是**跨块**，
+ * 下一块接上就对了；而 GBK 的 `d6 d0` 永远拼不成合法 UTF-8，只能换编码解。
+ */
+export function utf8CompletePrefixLength(bytes: Uint8Array): number {
+  let index = 0;
+  while (index < bytes.length) {
+    const byte = bytes[index]!;
+    if (byte < 0x80) {
+      index += 1;
+      continue;
+    }
+    const need = byte >= 0xf0 && byte <= 0xf4 ? 4 : byte >= 0xe0 && byte <= 0xef ? 3 : byte >= 0xc2 && byte <= 0xdf ? 2 : 0;
+    if (need === 0) return -1; // 0x80–0xC1、0xF5–0xFF 不可能是 UTF-8 首字节
+    for (let cursor = index + 1; cursor < index + need && cursor < bytes.length; cursor += 1) {
+      if ((bytes[cursor]! & 0xc0) !== 0x80) return -1; // 续字节必须是 10xxxxxx
+    }
+    if (index + need > bytes.length) return index; // 尾部缺字节：等下一块
+    index += need;
+  }
+  return bytes.length;
+}
+
+/** 双字节传统编码的完整前缀长度（首字节在末尾时留给下一块）。 */
+function doubleByteCompletePrefixLength(bytes: Uint8Array): number {
+  let index = 0;
+  while (index < bytes.length) {
+    const byte = bytes[index]!;
+    index += byte < 0x81 ? 1 : 2;
+  }
+  return index > bytes.length ? bytes.length - 1 : bytes.length;
+}
+
+/**
+ * 子进程输出解码器（stdout / stderr 各一份，不跨流拼接）。
+ *
+ * 为什么需要（2026-11-19，用户报「启动命令对中文路径支持有问题」的排查结论）：
+ * 以前这里是 `String(chunk)` —— 按 UTF-8 解一切字节。可 Windows 上很多输出并不是
+ * UTF-8：cmd 内建命令、Windows PowerShell / pwsh 的 cmdlet、部分 Python 与系统工具
+ * 按控制台代码页（中文机器 = GBK）写 stdout / stderr。于是失败信息里最常出现的中文
+ * 路径变成 `����·�� D:\�ճ�������`，看板上只剩乱码——看起来就像「中文路径不支持」。
+ *
+ * 逐块判定（同一个流里混着两种编码也能各解各的）：
+ * 1. 整块能按 UTF-8 严格解开 → 就是 UTF-8（绝大多数情况，含本平台自己的输出）；
+ * 2. 只有**末尾半个多字节字符**不完整（跨 chunk）→ 解出前半段，尾巴留到下一块；
+ * 3. 其余（真的不是 UTF-8）→ 按系统传统编码解（见 defaultServiceLegacyEncodings）。
+ *
+ * 挂起量有界：UTF-8 最多 3 字节，双字节传统编码最多 1 字节；进程退出时 `flush()` 把
+ * 它吐出来（宁可一个替换字符，也不静默丢字节）。
+ */
+export class GalleryServiceOutputDecoder {
+  private pending = new Uint8Array(0);
+  /**
+   * 这股流已经确认「不是 UTF-8」了吗。
+   *
+   * 一旦确认就**粘住**：GBK 字节偶尔会碰巧构成合法 UTF-8（如 `C2 B7`），逐块重判会把
+   * 后面的行解成另一套乱码；而反过来的情况（真 UTF-8 流里夹一段非法字节）只会
+   * 错一块。所以「宁可一直错，也不要一行对一行错」。
+   */
+  private legacy = false;
+
+  constructor(private readonly legacyEncodings: readonly string[] = defaultServiceLegacyEncodings()) {}
+
+  push(chunk: Uint8Array | string): string {
+    const bytes = typeof chunk === "string" ? new TextEncoder().encode(chunk) : chunk;
+    if (bytes.length === 0) return "";
+    const joined = this.pending.length > 0 ? concatBytes(this.pending, bytes) : bytes;
+    this.pending = new Uint8Array(0);
+    if (!this.legacy) {
+      const utf8 = decodeStrictUtf8(joined);
+      if (utf8 !== undefined) return utf8;
+      const complete = utf8CompletePrefixLength(joined);
+      if (complete === 0) {
+        // 块边界正好切在第一个字符里（整块都不完整）：留着等下一块，绝不能当传统编码解。
+        this.pending = joined.slice(0);
+        return "";
+      }
+      if (complete > 0 && complete < joined.length) {
+        const head = decodeStrictUtf8(joined.subarray(0, complete));
+        if (head !== undefined) {
+          this.pending = joined.slice(complete);
+          return head;
+        }
+      }
+      this.legacy = true;
+    }
+    // 不是 UTF-8（或这股流已认定不是）：按系统传统编码解。双字节编码的末尾可能是
+    // 「半个字」，留给下一块。
+    const doubleByte = this.legacyEncodings.some((encoding) => LEGACY_DOUBLE_BYTE.has(encoding));
+    const usable = doubleByte ? joined.subarray(0, doubleByteCompletePrefixLength(joined)) : joined;
+    if (usable.length < joined.length) this.pending = joined.slice(usable.length);
+    for (const encoding of this.legacyEncodings) {
+      const text = decodeLenient(usable, encoding);
+      if (text !== undefined) return text;
+    }
+    return new TextDecoder("utf-8", { fatal: false }).decode(usable);
+  }
+
+  /** 进程退出：把挂起的半截字符吐出来（不静默丢字节）。 */
+  flush(): string {
+    if (this.pending.length === 0) return "";
+    const bytes = this.pending;
+    this.pending = new Uint8Array(0);
+    if (!this.legacy) {
+      const utf8 = decodeStrictUtf8(bytes);
+      if (utf8 !== undefined) return utf8;
+    }
+    for (const encoding of this.legacyEncodings) {
+      const text = decodeLenient(bytes, encoding);
+      if (text !== undefined) return text;
+    }
+    return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+  }
+}
+
+/**
  * 默认启动器：用用户自己的 shell 跑命令（与「自己在终端里跑」同一套解析）。
  *
  * 为什么经过 shell 而不是直接 spawn：Windows 上 `npm` / `npx` 实际是 `.cmd`，不经过
@@ -189,12 +356,22 @@ export function killProcessTree(pid: number, platform: NodeJS.Platform = process
  *
  * `stdio` 第二三项是 pipe：输出要进看板的日志。stdin 给 ignore——后台服务没有终端可
  * 交互，想让进程不阻塞就得显式关掉它（有些工具会等 stdin）。
+ *
+ * 输出一律过 `GalleryServiceOutputDecoder`（2026-11-19）：直接 `String(chunk)` 会把
+ * GBK 的中文日志写成乱码，中文路径的报错就彻底不可读了。
  */
 export function createShellLauncher(
-  options: { shell?: string; platform?: NodeJS.Platform; env?: NodeJS.ProcessEnv } = {}
+  options: {
+    shell?: string;
+    platform?: NodeJS.Platform;
+    env?: NodeJS.ProcessEnv;
+    /** 输出不是 UTF-8 时按什么编码回退（缺省按系统语言推断，单测可注入）。 */
+    legacyEncodings?: readonly string[];
+  } = {}
 ): GalleryServiceLauncher {
   const platform = options.platform ?? process.platform;
   const env = options.env ?? process.env;
+  const legacyEncodings = options.legacyEncodings ?? defaultServiceLegacyEncodings(platform);
   const shell = resolveShellCommand({ shell: options.shell, platform, env });
   return (command, cwd) => {
     const invocation = shellServiceInvocation(shell.file, command);
@@ -206,17 +383,34 @@ export function createShellLauncher(
       detached: platform !== "win32",
       stdio: ["ignore", "pipe", "pipe"]
     });
+    // stdout / stderr 各自一份解码器：两股流互不相干，拼在一起会把半个字符拼错。
+    const stdoutDecoder = new GalleryServiceOutputDecoder(legacyEncodings);
+    const stderrDecoder = new GalleryServiceOutputDecoder(legacyEncodings);
+    let dataListener: ((chunk: string) => void) | undefined;
+    const early: string[] = [];
+    const emit = (text: string): void => {
+      if (!text) return;
+      if (dataListener) dataListener(text);
+      else early.push(text); // 监听器还没挂上（极早期输出）：攒着，挂上即补发
+    };
+    child.stdout?.on("data", (chunk: Buffer) => emit(stdoutDecoder.push(chunk)));
+    child.stderr?.on("data", (chunk: Buffer) => emit(stderrDecoder.push(chunk)));
     return {
       get pid() {
         return child.pid;
       },
       onData(listener) {
-        child.stdout?.on("data", (chunk: Buffer) => listener(String(chunk)));
-        child.stderr?.on("data", (chunk: Buffer) => listener(String(chunk)));
+        dataListener = listener;
+        for (const text of early.splice(0)) listener(text);
       },
       onExit(listener) {
         child.once("error", (error: Error) => listener({ exitCode: null, error: error.message }));
-        child.once("exit", (code) => listener({ exitCode: code }));
+        child.once("exit", (code) => {
+          // 退出前把两个解码器里挂着的半截字符补出来：最后的报错往往就在这一口。
+          emit(stdoutDecoder.flush());
+          emit(stderrDecoder.flush());
+          listener({ exitCode: code });
+        });
       },
       kill() {
         try {

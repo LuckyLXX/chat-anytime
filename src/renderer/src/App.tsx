@@ -80,7 +80,7 @@ import { compactPath, type Artifact } from "./lib/content";
 import { composePickMessage } from "./lib/browser-pick";
 import { composePreviewSelectionMessage, type PreviewSelection } from "./lib/preview-selection";
 import { sendPreviewSelectionToSession } from "./lib/preview-selection-send";
-import { composeGalleryDevMessage, galleryRunPlan, galleryServiceLive, workspaceLabel, type GalleryApp, type GalleryDraft, type GalleryKind, type GalleryPanelOptions, type GalleryServiceRecord } from "../../shared/gallery";
+import { composeGalleryDevMessage, galleryRunPlan, galleryServiceLive, workspaceLabel, GALLERY_SERVICE_WAIT_MS, type GalleryApp, type GalleryDraft, type GalleryKind, type GalleryPanelOptions, type GalleryServiceRecord } from "../../shared/gallery";
 import { insertGalleryDevelopmentText, requestGallerySession } from "./lib/gallery-develop";
 import { GalleryMenu } from "./components/GalleryMenu";
 import { GalleryWall } from "./components/GalleryWall";
@@ -215,6 +215,12 @@ const DESIGN_SPLIT_MAX = 75;
 const GALLERY_DEV_INJECT_TIMEOUT_MS = 10_000;
 /** 新会话的 composer 尚未注册时的重试间隔（一次 snapshot 往返的粒度）。 */
 const GALLERY_DEV_INJECT_RETRY_MS = 60;
+/**
+ * 「正在后台启动服务…」横幅里报的等待预算（秒）。
+ * 与主进程的就绪预算同源（GALLERY_SERVICE_WAIT_MS）：写死一个数字过段时间就会和真值分叉，
+ * 用户看到「最多等 30 秒」而实际等到 60 秒，比不给数字更糟。
+ */
+const GALLERY_SERVICE_WAIT_SECONDS = Math.round(GALLERY_SERVICE_WAIT_MS / 1000);
 
 function clampDesignSplit(value: number): number {
   return Math.min(DESIGN_SPLIT_MAX, Math.max(DESIGN_SPLIT_MIN, Math.round(value * 10) / 10));
@@ -999,7 +1005,14 @@ export function App(): ReactNode {
         ...(runToken !== undefined ? { runToken } : {})
       });
       if (!result.ok) {
-        if (result.stale) return false;
+        if (result.stale) {
+          // 等就绪/建窗期间面板被关掉（或又开了一轮）：这一轮作废是正常时序，但**绝不能静默**——
+          // 用户看到的是「点了运行没反应」（2026-11-19 排查里最像「无法直接运行」的一条静默路径）。
+          setGalleryToast(`「${app.title}」这一轮运行已作废（面板已关闭或又开了一轮），需要重开请再点一次运行。`);
+          return false;
+        }
+        // 撤掉「正在启动…」横幅再报错：两条常驻横幅堆在一起会互相矛盾。
+        setGalleryToast(undefined);
         setMessageActionError(result.message ?? `打不开「${app.title}」的面板窗口`);
         return false;
       }
@@ -1008,6 +1021,7 @@ export function App(): ReactNode {
       return true;
     } catch (error) {
       // IPC 失败时无法判断旧窗口是否仍在；服务所有权由主进程统一收尾。
+      setGalleryToast(undefined);
       setMessageActionError(`打不开「${app.title}」的面板窗口：${error instanceof Error ? error.message : String(error)}`);
       return false;
     }
@@ -1041,6 +1055,17 @@ export function App(): ReactNode {
     }
   }, []);
 
+  /**
+   * 运行失败的统一收尾：先撤掉「正在启动…」横幅，再报错。
+   *
+   * 两个都要管：横幅是常驻的（不会自己消失），不撤掉就会和错误提示同时挂在屏幕上，
+   * 用户看到的是「正在启动」+「启动失败」两句互相矛盾的话。
+   */
+  const galleryRunFailed = useCallback((message: string): void => {
+    setGalleryToast(undefined);
+    setMessageActionError(message);
+  }, []);
+
   const runGalleryApp = useCallback(async (app: GalleryApp): Promise<void> => {
     if (galleryRunsRef.current.has(app.id)) {
       setGalleryToast(`「${app.title}」正在启动或打开，请稍候。`);
@@ -1065,6 +1090,10 @@ export function App(): ReactNode {
         // 面板 + 本地服务（如 Git 管理器）：面板页没有 preload 也跑不了外部命令，
         // 数据只能由本地服务提供。先把服务起在后台、就绪再开窗——窗口打开时数据源
         // 已经就绪（服务已可达时根本走不到这一支）。
+        //
+        // 先给一句「正在启动…」：就绪预算最多 30 秒，不发任何反馈的话，这段时间里
+        // 界面看上去就是「点了没反应」。
+        setGalleryToast(`「${app.title}」正在后台启动本地服务…（最多等 ${GALLERY_SERVICE_WAIT_SECONDS} 秒，就绪后自动打开面板）`);
         const started = await startGalleryService(app, {
           directory: plan.directory,
           command: plan.command,
@@ -1072,7 +1101,7 @@ export function App(): ReactNode {
           ownerPanelId: app.id
         });
         if (!started.ok) {
-          setMessageActionError(started.message);
+          galleryRunFailed(started.message);
           return;
         }
         if (await openGalleryPanel(app, plan.absolutePath, plan.options, started.panelRunToken)) {
@@ -1096,19 +1125,24 @@ export function App(): ReactNode {
       }
       if (plan.action === "start-service") {
         // 运行 = 让主进程在后台起进程：不占标签页，关掉页面也不会停。
+        // 同 start-panel-service：就绪最长 30 秒，先给一句反馈再等。
+        setGalleryToast(plan.openPage
+          ? `「${app.title}」正在后台启动服务…（最多等 ${GALLERY_SERVICE_WAIT_SECONDS} 秒，就绪后自动打开页面）`
+          : `「${app.title}」正在后台启动服务…（最多等 ${GALLERY_SERVICE_WAIT_SECONDS} 秒）`);
         const started = await startGalleryService(app, {
           directory: plan.directory,
           command: plan.command,
           ...(plan.url ? { url: plan.url } : {})
         });
         if (!started.ok) {
-          setMessageActionError(started.message);
+          galleryRunFailed(started.message);
           return;
         }
         if (plan.openPage && app.url) {
           // 打开页面会顺手记一次运行（lastRunAt + 重排）。
           await openGalleryBrowserTab(app, app.url);
           if (started.external) setGalleryToast(`「${app.title}」地址已可达，复用外部服务；平台不会停止它。`);
+          else setGalleryToast(undefined); // 页面已经开出来了，那句「正在启动…」不能留着
           return;
         }
         // 没有页面可开（纯后台服务 / 没登记地址）：区分平台托管与外部服务。
@@ -1119,17 +1153,17 @@ export function App(): ReactNode {
         return;
       }
       if (plan.action === "manual") {
-        setMessageActionError(plan.message ?? (app.url
+        galleryRunFailed(plan.message ?? (app.url
           ? `「${app.title}」的服务没在运行（${app.url} 连不上），作品里也没登记启动命令：点「继续开发」让 AI 补上，或自己起好服务再点运行。`
           : "该作品是服务型，但还没登记启动命令或服务地址；先在作品上点「继续开发」让 AI 补全。"));
         return;
       }
     } catch (error) {
-      setMessageActionError(error instanceof Error ? error.message : "运行作品失败");
+      galleryRunFailed(error instanceof Error ? error.message : "运行作品失败");
     } finally {
       galleryRunsRef.current.delete(app.id);
     }
-  }, [openGalleryBrowserTab, startGalleryService, openGalleryPanel]);
+  }, [openGalleryBrowserTab, startGalleryService, openGalleryPanel, galleryRunFailed]);
 
   /**
    * 「继续开发」：把作品上下文写进 composer。

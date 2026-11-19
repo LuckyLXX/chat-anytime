@@ -1,10 +1,14 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import { createServer } from "node:net";
 import {
+  GalleryServiceOutputDecoder,
   GalleryServiceRunner,
   createShellLauncher,
+  defaultServiceLegacyEncodings,
   galleryServiceLogTail,
   killProcessTree,
+  utf8CompletePrefixLength,
   type GalleryServiceLauncher,
   type GalleryServiceProcessHandle
 } from "./gallery-service-runner.js";
@@ -806,4 +810,84 @@ describe("真实进程：起服务 → 判定就绪 → 结束进程树", () => 
     }
     expect(runner.list()[0]?.status).not.toBe("running");
   }, 40_000);
+});
+
+describe("子进程输出解码（GBK / UTF-8 / 跨 chunk）", () => {
+  // 真字节：中文 Windows 上 cmd 的内建命令与 PowerShell 的 cmdlet 就是按 936（GBK）写的。
+  const GBK_ERROR = new Uint8Array([0xcf, 0xb5, 0xcd, 0xb3, 0xd5, 0xd2, 0xb2, 0xbb, 0xb5, 0xbd, 0xd6, 0xb8, 0xb6, 0xa8, 0xb5, 0xc4, 0xc2, 0xb7, 0xbe, 0xb6, 0xa1, 0xa3]); // 系统找不到指定的路径。
+  const GBK_WITH_PATH = new Uint8Array([0xd6, 0xd0, 0xce, 0xc4, 0xc2, 0xb7, 0xbe, 0xb6, 0x20, 0x44, 0x3a, 0xc8, 0xd5, 0xb3, 0xa3, 0xb9, 0xa4, 0xd7, 0xf7, 0xc7, 0xf8]); // 中文路径 D:日常工作区
+  const UTF8_CJK = new TextEncoder().encode("中文");
+  const REPLACEMENT = String.fromCharCode(0xfffd);
+
+  it("UTF-8 原文照旧（绝大多数输出走这条路，不能被回退逻辑碰坏）", () => {
+    const decoder = new GalleryServiceOutputDecoder(["gbk"]);
+    expect(decoder.push(UTF8_CJK)).toBe("中文");
+    expect(decoder.push("plain ascii")).toBe("plain ascii");
+  });
+
+  it("GBK 字节解成中文（以前 String(chunk) 会得到一串替换字符）", () => {
+    const decoder = new GalleryServiceOutputDecoder(["gbk"]);
+    expect(decoder.push(GBK_ERROR)).toBe("系统找不到指定的路径。");
+    expect(decoder.push(GBK_WITH_PATH)).toBe("中文路径 D:日常工作区");
+  });
+
+  it("跨 chunk 的半个字符既不丢也不产生替换字符（UTF-8 与 GBK 都要接住）", () => {
+    const utf8 = new GalleryServiceOutputDecoder(["gbk"]);
+    // 第一块切在「中」的第三个字节里：完整的「中」先出，半个字留到下一块。
+    expect(utf8.push(UTF8_CJK.subarray(0, 4))).toBe("中");
+    expect(utf8.push(UTF8_CJK.subarray(4))).toBe("文");
+
+    const gbk = new GalleryServiceOutputDecoder(["gbk"]);
+    // 21 字节 = 10 个完整的双字节字 + 下一个字的**首字节**：首字节要留到下一块。
+    const first = gbk.push(GBK_ERROR.subarray(0, 21));
+    const second = gbk.push(GBK_ERROR.subarray(21));
+    expect(first + second).toBe("系统找不到指定的路径。");
+    expect(first + second).not.toContain(REPLACEMENT);
+  });
+
+  it("同一股流里 ASCII 与 GBK 混排也各解各的，且一旦认定 GBK 就粘住", () => {
+    const decoder = new GalleryServiceOutputDecoder(["gbk"]);
+    expect(decoder.push(new TextEncoder().encode("> starting"))).toBe("> starting");
+    expect(decoder.push(GBK_ERROR)).toBe("系统找不到指定的路径。");
+    // 「路径」的 GBK 字节（c2 b7 be b6）碰巧是合法 UTF-8：粘住 GBK 才不会解成另一套乱码
+    expect(decoder.push(new Uint8Array([0xc2, 0xb7, 0xbe, 0xb6]))).toBe("路径");
+  });
+
+  it("非 Windows（没有传统编码候选）时不做瞎猜：仍是替换字符，但绝不抛错", () => {
+    const decoder = new GalleryServiceOutputDecoder([]);
+    expect(decoder.push(GBK_ERROR)).toContain(REPLACEMENT);
+  });
+
+  it("退出时 flush 把挂起的半截字符吐出来（不静默丢）", () => {
+    const decoder = new GalleryServiceOutputDecoder([]);
+    expect(decoder.push(UTF8_CJK.subarray(0, 2))).toBe("");
+    expect(decoder.flush()).toBe(REPLACEMENT);
+    expect(decoder.flush()).toBe("");
+  });
+
+  it("utf8CompletePrefixLength 区分「跨块截断」与「根本不是 UTF-8」", () => {
+    expect(utf8CompletePrefixLength(new TextEncoder().encode("abc"))).toBe(3);
+    expect(utf8CompletePrefixLength(UTF8_CJK)).toBe(6);
+    expect(utf8CompletePrefixLength(UTF8_CJK.subarray(0, 2))).toBe(0);
+    expect(utf8CompletePrefixLength(UTF8_CJK.subarray(0, 4))).toBe(3);
+    expect(utf8CompletePrefixLength(UTF8_CJK.subarray(0, 5))).toBe(3);
+    expect(utf8CompletePrefixLength(GBK_ERROR)).toBe(-1);
+    expect(utf8CompletePrefixLength(new Uint8Array([0xff]))).toBe(-1);
+  });
+
+  it("传统编码候选按系统语言推：中文 → gbk，日文 → shift_jis，POSIX 不猜", () => {
+    expect(defaultServiceLegacyEncodings("win32", "zh-CN")).toEqual(["gbk", "windows-1252"]);
+    expect(defaultServiceLegacyEncodings("win32", "ja-JP")).toEqual(["shift_jis", "windows-1252"]);
+    expect(defaultServiceLegacyEncodings("win32", "en-US")).toEqual(["windows-1252"]);
+    expect(defaultServiceLegacyEncodings("darwin", "zh-CN")).toEqual([]);
+  });
+
+  it("启动器把 stdout / stderr 各自交给解码器（源码级：String(chunk) 是这次的根因）", () => {
+    const source = readFileSync(new URL("./gallery-service-runner.ts", import.meta.url), "utf8");
+    expect(source).toContain("const stdoutDecoder = new GalleryServiceOutputDecoder(legacyEncodings);");
+    expect(source).toContain("const stderrDecoder = new GalleryServiceOutputDecoder(legacyEncodings);");
+    expect(source).toContain("emit(stdoutDecoder.push(chunk))");
+    expect(source).toContain("emit(stderrDecoder.push(chunk))");
+    expect(source).not.toContain("listener(String(chunk))");
+  });
 });
