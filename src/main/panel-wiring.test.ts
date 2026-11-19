@@ -142,7 +142,7 @@ describe("关闭到后台（关闭主窗口 ≠ 退出应用）", () => {
   });
 
   it("sessions.live 不转发给渲染端（那边零消费，只白付一次结构化克隆）", () => {
-    expect(main).toContain('if (message.type !== "sessions.live") mainWindow?.webContents.send("runtime:message", message);');
+    expect(main).toContain('if (message.type !== "sessions.live") mainWindow?.webContents.send("runtime:message", message.type === "permission" ? { ...message, request: previewPermissionRequest(message.request) } : message);');
   });
 });
 

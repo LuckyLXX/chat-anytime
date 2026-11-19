@@ -52,6 +52,7 @@ import type {
   ThinkingLevel,
   ToolExecution,
   TurnTiming,
+  WorkflowRunSummary,
   WorkspaceFileSearchEntry
 } from "../../shared/protocol";
 import { delegationRoleLabels, extensionCalloutTitle, sessionRunStatusLabels, thinkingLevelLabels, toolLabel } from "../../shared/locale";
@@ -80,10 +81,11 @@ import { shareElementAsImage } from "./lib/share-image";
 import { automationTaskIdFromOutput, parseAutomationCreateArgs } from "./lib/automation-call-preview";
 import { formatAutomationSchedule, parseScheduledReminderText } from "../../shared/automation";
 import { selectableCatalogModels } from "./lib/model-list";
-import { currentQuestionRequest, useDesktopStore } from "./store";
+import { currentQuestionRequest, useDesktopStore, workflowRunsForOwner } from "./store";
 import { PanelDock } from "./PanelDock";
 import { TeamStrip } from "./components/TeamStrip";
 import { TeamBoard } from "./components/TeamBoard";
+import { WorkflowRunStrip } from "./components/WorkflowRunStrip";
 
 const accessModeOptions: readonly { value: AccessMode; label: string }[] = [
   { value: "read-only", label: "只读" },
@@ -835,6 +837,13 @@ export interface ConversationPaneProps {
   onOpenContextCenter?(): void;
   /** 查看委派子代理的完整记录（App 层弹只读弹窗）。 */
   onOpenTranscript?(delegation: DelegationProgress): void;
+  /**
+   * 打开工作流中心并直接看这次运行的详情（运行条上的「详情」）。
+   * 带上本格 owner：分屏里每一格只能看到自己的运行，中心页也要落在同一 owner 上。
+   */
+  onOpenWorkflowRun?(runId: string, ownerSessionId: string | undefined): void;
+  /** 运行条待决权限的「定位」：把 owner 会话切到前台，待决权限对话框会浮出来。 */
+  onLocateWorkflowOwner?(run: WorkflowRunSummary): void;
   /** 会话操作失败提示（App 层 toast）。传 undefined 清除。 */
   onActionError(message?: string): void;
   /** 回滚该回复内单个文件的改动（App 层弹确认对话框后发命令）。缺省不显示回滚按钮。 */
@@ -879,6 +888,8 @@ export const ConversationPane = memo(function ConversationPane({
   onOpenMemoryCenter,
   onOpenContextCenter,
   onOpenTranscript,
+  onOpenWorkflowRun,
+  onLocateWorkflowOwner,
   onActionError,
   onRollback,
   renderLanding
@@ -917,6 +928,15 @@ export const ConversationPane = memo(function ConversationPane({
   const showThinking = settings.appearance.showThinking;
   // 最近一条命令级失败（带所属会话）：本格据此收起乐观待回复并给内联提示。
   const commandError = useDesktopStore((state) => state.commandError);
+  // 工作流运行条：只取 owner = 本格的摘要（分屏各看各的）。快照对象身份在无变化时
+  // 由 store 保持，这里的过滤结果也随 useMemo 一起稳定，不额外击穿 memo。
+  const workflowRunsSnapshot = useDesktopStore((state) => state.workflowRuns);
+  const ownerWorkflowRuns = useMemo(
+    () => workflowRunsForOwner(workflowRunsSnapshot?.runs, data.sessionId),
+    [workflowRunsSnapshot, data.sessionId]
+  );
+  /** composer 上方状态条堆栈是否出现（计划 / 团队 / 工作流共用同一个容器）。 */
+  const composerStatusStackVisible = data.planMode || (data.team?.members.length ?? 0) > 0 || ownerWorkflowRuns.length > 0;
 
   const [input, setInput] = useState(() => (sessionId !== undefined ? draftStore?.load(sessionId) ?? "" : ""));
   // 已选斜杠调用（Skill / 自定义命令，可多个混搭）：一次消息可同时挂多个，按选择
@@ -2316,14 +2336,30 @@ export const ConversationPane = memo(function ConversationPane({
           </div>
         );
       })()}
-      <form ref={composerRef} className={`composer${data.queuedMessages.length > 0 ? " has-queue" : ""}${data.planMode ? " has-plan" : ""}${(data.team?.members.length ?? 0) > 0 ? " has-team" : ""}`} data-pane="composer" onSubmit={submit} onDragOver={(event) => event.preventDefault()} onDrop={handleDrop}>
-        {data.planMode && (
-          <div className="composer-plan-banner" data-composer-zone="plan" role="status" title="计划模式：先产出计划，审查批准后才实施。退出请使用访问权限下拉或 /plan">
-            <ClipboardList size={12} />
-            <span className="composer-plan-banner-title">计划模式</span>
+      <form ref={composerRef} className={`composer${data.queuedMessages.length > 0 ? " has-queue" : ""}${composerStatusStackVisible ? " has-status-stack" : ""}`} data-pane="composer" onSubmit={submit} onDragOver={(event) => event.preventDefault()} onDrop={handleDrop}>
+        {composerStatusStackVisible && (
+          // 状态条堆栈：计划 / 团队 / 工作流共用**同一个自适应容器**（一个网格行）。
+          // 为什么不各自占一行：三条任意组合相乘会在 styles.css 里长成
+          // has-plan×has-team×has-workflow×has-queue 的指数级单元格规则，漏一格就是
+          // 重叠。这里只给容器定位一次，新增状态条不再改 CSS。
+          // 队列/输入/工具栏各自占位（见 styles.css 的 .composer.has-status-stack）。
+          <div className="composer-status-stack" data-pane="composer-status-stack" data-composer-zone="status-stack">
+            {data.planMode && (
+              <div className="composer-plan-banner" data-composer-zone="plan" role="status" title="计划模式：先产出计划，审查批准后才实施。退出请使用访问权限下拉或 /plan">
+                <ClipboardList size={12} />
+                <span className="composer-plan-banner-title">计划模式</span>
+              </div>
+            )}
+            {(data.team?.members.length ?? 0) > 0 && <TeamStrip snapshot={data.team} onStopAll={stopTeam} onOpenBoard={() => { setTeamBoardMode("dock"); setTeamBoardOpen(true); }} />}
+            {ownerWorkflowRuns.length > 0 && (
+              <WorkflowRunStrip
+                runs={ownerWorkflowRuns}
+                onDetails={(runId) => onOpenWorkflowRun?.(runId, sessionId)}
+                onLocateOwner={(run) => onLocateWorkflowOwner?.(run)}
+              />
+            )}
           </div>
         )}
-        {(data.team?.members.length ?? 0) > 0 && <TeamStrip snapshot={data.team} onStopAll={stopTeam} onOpenBoard={() => { setTeamBoardMode("dock"); setTeamBoardOpen(true); }} />}
         {data.queuedMessages.length > 0 && (
           <div className="composer-queue" role="list" aria-label="排队输入" data-composer-zone="queue">
             <div className="composer-queue-caption"><Clock size={11} /><span>排队输入 {data.queuedMessages.length} 条 · 本轮回复结束后自动发出</span></div>

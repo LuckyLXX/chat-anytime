@@ -74,6 +74,16 @@ export function permissionAction(mode: AccessMode, toolName: string, risk: Permi
   return "ask";
 }
 
+/** 逐工具风险同时评估 owner 与节点限制；deny > ask > allow。 */
+export function permissionActionWithCap(mode: AccessMode, cap: AccessMode | undefined, toolName: string, risk: PermissionRequest["risk"] | undefined): PermissionAction {
+  const owner = permissionAction(mode, toolName, risk);
+  if (!cap) return owner;
+  const limited = permissionAction(cap, toolName, risk);
+  if (owner === "deny" || limited === "deny") return "deny";
+  if (owner === "ask" || limited === "ask") return "ask";
+  return "allow";
+}
+
 export function permissionNeedsApproval(mode: AccessMode, toolName: string, risk: PermissionRequest["risk"] | undefined): boolean {
   return permissionAction(mode, toolName, risk) === "ask";
 }

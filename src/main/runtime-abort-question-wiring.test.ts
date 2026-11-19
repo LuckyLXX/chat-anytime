@@ -22,7 +22,7 @@ describe("session.abort interaction cleanup contract", () => {
 
   it("中止时取消挂起的权限确认，但不撤掉本会话已授予的 allow-session", () => {
     const block = abortBlock();
-    expect(block).toContain("permissionBroker.cancelPending(record.session.sessionId)");
+    expect(block).toContain("permissionBroker.cancelPendingNonWorkflow(record.session.sessionId)");
     expect(block).not.toContain("permissionBroker.reset(");
   });
 });

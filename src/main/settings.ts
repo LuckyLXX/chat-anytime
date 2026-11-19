@@ -188,15 +188,20 @@ export function normalizeSkillOverrides(value: unknown): Record<string, boolean>
 }
 
 /**
- * 角色级能力工具 overlay（browser / ssh / mcp:<server>）的读回：键必须是
- * 合法前缀且值力 boolean，其余丢弃；空对象不落盘。缺省即启用（true 不存），
- * 只存显式禁用，与 skillOverrides 同构。
+ * 角色级能力工具 overlay（browser / ssh / mcp:<server> / workflow）的读回：
+ * 键必须是合法键且值为 boolean，其余丢弃；空对象不落盘。
+ *
+ * 两套缺省语义不要搅在一起：
+ * - browser / ssh / mcp:<server>：**缺省即启用**（true 不存），只存显式禁用，
+ *   与 skillOverrides 同构；现有角色升级后行为零变化。
+ * - workflow：**缺省即关闭**（工作流工具默认 OFF，见实施方案 §8.3），所以 true 与
+ *   false 都必须原样保存——漏了 true 就等于「打开了又被读回静默关掉」。
  */
 export function normalizeToolOverrides(value: unknown): Record<string, boolean> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   return Object.fromEntries(Object.entries(value as Record<string, unknown>).flatMap(([rawKey, enabled]) => {
     const key = rawKey.trim();
-    const legal = key === "browser" || key === "ssh" || (key.startsWith("mcp:") && key.length > 4);
+    const legal = key === "browser" || key === "ssh" || key === "workflow" || (key.startsWith("mcp:") && key.length > 4);
     return legal && typeof enabled === "boolean" ? [[key, enabled]] : [];
   }));
 }

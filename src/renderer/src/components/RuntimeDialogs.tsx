@@ -18,14 +18,13 @@ interface PermissionDialogProps {
 }
 
 export function PermissionDialog({ request, sessionTitle }: PermissionDialogProps): ReactNode {
-  const principalLabel = permissionPrincipalLabel(request.principal.kind);
+  const workflow = request.principal.workflow;
+  const principalLabel = workflow ? `工作流 · ${workflow.nodeTitle} · 第 ${workflow.attempt} 轮` : permissionPrincipalLabel(request.principal.kind);
   const contextLabel = [principalLabel, sessionTitle, request.summary].filter(Boolean).join(" · ");
 
   async function resolve(decision: PermissionDecision): Promise<void> {
     await window.piDesktop.send({ type: "permission.resolve", id: request.id, decision });
-    useDesktopStore.setState((state) => ({
-      permissions: state.permissions.filter((item) => item.id !== request.id)
-    }));
+    useDesktopStore.getState().handleRuntimeMessage({ type: "permission.dismiss", id: request.id });
   }
 
   return (
@@ -39,7 +38,7 @@ export function PermissionDialog({ request, sessionTitle }: PermissionDialogProp
         <footer>
           <button className="danger-button" type="button" onClick={() => void resolve("deny")}>拒绝</button>
           <button className="secondary-button" type="button" onClick={() => void resolve("allow-once")}>仅允许一次</button>
-          <button className="primary-button" type="button" onClick={() => void resolve("allow-session")}>本次会话允许</button>
+          <button className="primary-button" type="button" onClick={() => void resolve("allow-session")}>{workflow ? "本次工作流允许" : "本次会话允许"}</button>
         </footer>
       </div>
     </div>

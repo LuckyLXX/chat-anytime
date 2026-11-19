@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readSync, statSync, watch } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readSync, realpathSync, rmdirSync, statSync, watch } from "node:fs";
 import { readFile, readdir, realpath, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative as relativePath, resolve, sep } from "node:path";
 import { estimateTokens } from "@earendil-works/pi-coding-agent";
@@ -53,6 +53,7 @@ import type {
   MemoryLibrary,
   MemoryTopicSummary,
   ModelOption,
+  PermissionDecision,
   PromptAttachment,
   ProviderModelSettings,
   ProviderOption,
@@ -80,6 +81,10 @@ import type {
 } from "../shared/protocol.js";
 import { isDelegationProgress } from "../shared/protocol.js";
 import { parseImSessionKey } from "../shared/im.js";
+import type { WorkflowCommand, WorkflowResult, WorkflowSummary } from "../shared/workflow-protocol.js";
+import { summarizeWorkflowRun } from "../shared/workflow-protocol.js";
+import type { WorkflowDefinition, WorkflowDiagnostic, WorkflowModelRef, WorkflowResolvedNodeConfig, WorkflowRun, WorkflowRunValidationContext } from "../shared/workflow.js";
+import { validateWorkflowForRun, WORKFLOW_PERMISSION_TIMEOUT_MS } from "../shared/workflow.js";
 import { THINKING_LEVELS, clampThinkingLevel, supportedThinkingLevels } from "../shared/thinking-levels.js";
 import { toolLabel } from "../shared/locale.js";
 import { PANEL_TODO_LIMIT, isPanelEntryFile, summarizeTodos } from "../shared/panel.js";
@@ -152,6 +157,32 @@ import { buildAutomationTools, type AutomationCreateInput, type AutomationSessio
 import { buildAutomationReminderText } from "./automation-delivery.js";
 import { resolveVisionModel } from "./vision.js";
 import { buildResourceCatalog } from "./resource-catalog.js";
+import { resolveWorkflowNodeConfigs, type WorkflowNodeConfigDeps } from "./workflow-config.js";
+import { createWorkflowChildExecutor, type WorkflowChildNodeConfig, type WorkflowChildPermissionRequest } from "./workflow-child.js";
+import { WorkflowCatalogCache } from "./workflow-catalog-cache.js";
+import { createWorkflowCoordinator, workspaceLockKey, type WorkflowCoordinator } from "./workflow-coordinator.js";
+import { WorkflowRunStore } from "./workflow-run-store.js";
+import { WorkflowRuntime } from "./workflow-runtime.js";
+import { WorkflowStore } from "./workflow-store.js";
+import {
+  ACTIVE_WORKFLOW_STATUSES,
+  createWorkflowCommandProcessor,
+  createWorkflowRunsPublisher,
+  matchWorkflowReference,
+  projectResolvedNodeConfigs,
+  TERMINAL_WORKFLOW_STATUSES,
+  WorkflowCommandFailure,
+  WorkflowRunHistory,
+  workflowFailureResult,
+  type WorkflowCommandDeps,
+  type WorkflowCommandProcessor,
+  type WorkflowOwnerBinding,
+  type WorkflowRunAccepted,
+  type WorkflowRunStatusView,
+  type WorkflowRuntimeHandle,
+  type WorkflowRunsPublisher,
+  type WorkflowToolSurface
+} from "./runtime-workflow-commands.js";
 import { agentWorkspaceSessionDir, backfillUnpersistedSessions, isSessionArchived, isSessionPinned, isUnstartedSession, mergeSessionSummary, overlayLiveRunStatus, pruneVanishedSessions, sameSessionDir, sessionFileMatchesId, setArchivedSessionPaths, sortSessionSummaries, togglePinnedSessionPath, type LiveSessionSeed } from "./session-scope.js";
 import { listSessionScopes, pickRecentSession, resolveSessionOwner, summarizeAllSessions, type SessionScope, type WorkspaceExistsEntry } from "./session-catalog.js";
 import { createWorkspaceResources } from "./workspace-resources.js";
@@ -161,7 +192,7 @@ import { planSessionOpen } from "./session-open-plan.js";
 import { SessionManagerCache } from "./session-manager-cache.js";
 import { SessionOpenCoordinator, sessionOpenPathKey, type SessionOpenIntentTicket } from "./session-open-coordinator.js";
 import { isDesktopConfiguredProvider } from "./model-catalog.js";
-import { createDefaultAgent, defaultTools, ensureDefaultWorkspaceDir, isPositiveInt, mergeBrowserSettings, mergeProviderModels, resolveDefaultWorkspace, resolveStartupWorkspace } from "./settings.js";
+import { BUILTIN_TOOLS, createDefaultAgent, defaultTools, ensureDefaultWorkspaceDir, isPositiveInt, mergeBrowserSettings, mergeProviderModels, resolveDefaultWorkspace, resolveStartupWorkspace } from "./settings.js";
 import { buildMultiInvocationPrompt, composeInvocationBody, parseInvocationPrompt, sameInvocations, type InvocationSegment } from "./invocation-prompt.js";
 import {
   PI_DESKTOP_CONTROL_ENTRY_TYPE,
@@ -196,6 +227,7 @@ import * as runtimeBrowser from "./runtime-browser.js";
 import * as runtimeSsh from "./runtime-ssh.js";
 import * as runtimeComputer from "./runtime-computer.js";
 import * as runtimeDesign from "./runtime-design.js";
+import * as runtimeWorkflow from "./runtime-workflow.js";
 import { applyDesignOps, createDesignDoc, sanitizeDesignName, type DesignDoc } from "../shared/design-schema.js";
 import { exportDesignHtml } from "../shared/design-export.js";
 import { designFilePath, exportDesignFile, listDesigns, readDesign, writeDesign, writeExportFile, DESIGN_FILE_SUFFIX } from "./design-store.js";
@@ -359,8 +391,29 @@ interface SessionRuntimeRecord {
   teamMode: { enabled: boolean };
   /** team_* 工具定义（注册常驻，按 teamMode 决定激活；前缀成本只在开启时产生）。 */
   teamTools: ToolDefinition[];
+  /**
+   * workflow_list / workflow_run / workflow_status 三个工具定义。
+   * **注册常驻、默认不激活**：定义在建会话时进 customTools 且永不摘除（Pi 没有
+   * 移除工具 API），是否进活动集只看角色级开关投影 `workflowEnabled`（默认 OFF）。
+   */
+  workflowTools: ToolDefinition[];
   /** 团队运行时（每个 Lead 会话一个；成员子会话、roster、任务板都在这里）。 */
   teamRuntime?: TeamRuntime;
+  /**
+   * 工作流运行器（每个 owner 会话一份，**持久持有**在 record 上）：
+   * 活跃运行的 record 不允许被 LRU 驱逐、不允许同 id 重建、资源重载与角色保存
+   * 也不销毁它（见 evictParkedSessions / createSession / runResourceOperation /
+   * agent.save 的守卫）。角色级 workflow 开关变化也不重建会话（见
+   * syncWorkflowToolProjection）。运行器只在会话真正被删除（先 stopAndWait 确认）后释放。
+   */
+  workflowRuntime?: WorkflowRuntime;
+  /**
+   * 角色级 workflow 工具开关的**投影**（默认 OFF；缺省/false 都算关闭）。
+   * 它只决定三个定义是否进活动集（定义注册常驻）；创建时从角色配置冻结，之后只在
+   * 空闲回合边界 reconcile（agent.save 的仅开关变化路径 / agent_settled），
+   * 绝不在每回合偷读全局设置。页面运行不受它限制（用户动作 ≠ 模型工具）。
+   */
+  workflowEnabled: boolean;
   /** 按助手划分的长期记忆库（跨会话）；工具闭包读它，提示词快照在创建时冻结。 */
   memoryStore: MemoryStore;
   /** 本会话工作区的项目记忆库（issue #2）：`<workspace>/.pidesktop/memory/`，跟项目走。 */
@@ -840,9 +893,27 @@ function resolveDesignSnapshot(requestId: string, result: DesignSnapshotResult):
   pending.resolve(result);
 }
 
+/**
+ * 工作流节点待决权限 requestId → runId。broker 不暴露待决列表，所以在发帧回调里
+ * 成对登记/摘除：运行摘要的 pendingPermissionIds 与「一键定位」都靠它，且永远不会
+ * 出现已处理却仍挂着的幽灵 id（resolve / 超时 / 精确取消都走 dismiss）。
+ */
+const pendingWorkflowPermissions = new Map<string, string>();
 const permissionBroker = new PermissionBroker(
-  (request) => post({ type: "permission", request }),
-  (id) => post({ type: "permission.dismiss", id })
+  (request) => {
+    // 工作流节点的待决请求进运行摘要（只放 requestId）：运行条/中心页的「待确认」与
+    // 一键定位靠它，用户离开聊天页也不会悄悄永久挂起（broker 侧 10 分钟自动拒绝）。
+    if (request.principal.workflow) {
+      pendingWorkflowPermissions.set(request.id, request.principal.workflow.runId);
+      workflowPlumbing?.publisher.publish();
+    }
+    post({ type: "permission", request });
+  },
+  // resolve / 超时 / 精确取消都经这里收场：登记与摘除严格成对，摘要里不会留幽灵 id。
+  (id) => {
+    if (pendingWorkflowPermissions.delete(id)) workflowPlumbing?.publisher.publish();
+    post({ type: "permission.dismiss", id });
+  }
 );
 const questionBroker = new runtimeQuestionTool.QuestionBroker(
   (request) => post({ type: "question", request }),
@@ -1169,7 +1240,27 @@ async function refreshMcpCatalog(): Promise<void> {
 }
 
 function emitResourceCatalog(): void {
-  post({ type: "resources", resources: buildResourceCatalog({ skills: nativeSkills, commands: nativeCommands, mcpServers, todos, memory: memoryTopics, subagents: subagentCatalog, hooks: hookSummaries(activeRuntime?.workspace ?? workspace), hooksEnabled: settings?.hooks?.enabled !== false, automation: automationTasks, automationRuns, gallery: galleryApps }) });
+  const catalogWorkspace = activeRuntime?.workspace ?? workspace;
+  post({
+    type: "resources",
+    resources: {
+      ...buildResourceCatalog({ skills: nativeSkills, commands: nativeCommands, mcpServers, todos, memory: memoryTopics, subagents: subagentCatalog, hooks: hookSummaries(activeRuntime?.workspace ?? workspace), hooksEnabled: settings?.hooks?.enabled !== false, automation: automationTasks, automationRuns, gallery: galleryApps }),
+      // 工作流目录只带轻量条目（id/名称/用途/节点数/可运行/问题计数）：全文走
+      // workflow.get，避免 32×8000 字 prompt 被每次资源刷新复制一遍。
+      workflows: workflowCatalogItems(catalogWorkspace)
+    }
+  });
+}
+
+/** 资源目录里的工作流轻量目录（工作区不可读/目录损坏时给空，诊断走 workflow.sync）。 */
+function workflowCatalogItems(targetWorkspace: string | undefined): { workspace?: string; items: WorkflowSummary[] } {
+  if (!targetWorkspace) return { items: [] };
+  try {
+    const catalog = ensureWorkflowPlumbing().catalog.list(targetWorkspace, workflowValidationContext(targetWorkspace));
+    return { workspace: catalog.workspace, items: catalog.workflows.map((entry) => ({ ...entry })) };
+  } catch {
+    return { items: [] };
+  }
 }
 
 function emitTodos(): void {
@@ -2734,6 +2825,22 @@ function disposeRecord(record: SessionRuntimeRecord, options: { keepBrowserTab?:
     sessionId: () => record.session.sessionId,
     sessionTitle: () => hookSessionTitle(record.session.sessionId, () => record.session.sessionManager.getSessionName())
   }), "dispose");
+  // 工作流兜底收尾：正常路径（session.delete / 空闲 LRU / 同 id 重建）都在**调用前**
+  // 守卫过——有活跃运行时根本走不到这里。真走到这里时只做「请求停止 + 取消该 run 的
+  // 待决权限」的 best-effort，绝不留一个还在写盘的节点对着已销毁的 owner 继续跑
+  // （disposeRecord 是同步函数，无法等待确认；未确认的收场由运行记录如实停在 stopping）。
+  if (record.workflowRuntime) {
+    try {
+      const run = record.workflowRuntime.snapshot();
+      record.workflowRuntime.stop();
+      if (run) permissionBroker.cancelWorkflow(run.runId);
+    } catch {
+      // best-effort：销毁路径不能被收尾异常打断。
+    }
+    record.workflowRuntime = undefined;
+  }
+  workflowHandles.delete(record.session.sessionId);
+
   // 团队先停：成员子会话不随 Lead 的 dispose 自动结束（Pi 没有父子生命周期绑定），
   // 必须在轮到 Lead 之前 abort + disconnect，否则后台成员会继续跑并继续付费。
   record.teamRuntime?.dispose();
@@ -2799,7 +2906,9 @@ function evictParkedSessions(): void {
     .filter((record) => record !== activeRuntime && !runActive(record) && !renderedSessions.has(record.session.sessionId)
       // 用户停了 Lead 但成员仍在后台跑：这类记录不能被 idle LRU 杀掉（用户决策：
       // 成员留在后台，由成员状态条的「全部停止」收尾）。
-      && !record.teamRuntime?.hasRunningMembers())
+      && !record.teamRuntime?.hasRunningMembers()
+      // 工作流 owner 同理：驱逐会销毁运行器与它的 owner 身份（节点权限/归属都指它）。
+      && !recordHasActiveWorkflow(record))
     .sort((left, right) => right.activatedAt - left.activatedAt);
   let kept = 0;
   let retainedBytes = 0;
@@ -3467,8 +3576,10 @@ function wrapModelRuntimeForVision(runtime: ModelRuntime): ModelRuntime {
  * MCP tools are NOT here: they register through Pi's built-in MCP extension
  * (mcp-bridge), living in the session tool registry instead.
  */
-function buildRecordTools(record: Pick<SessionRuntimeRecord, "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "planTools" | "visionTools" | "browserTools" | "sshTools" | "computerTools" | "automationTools" | "designTools" | "galleryTools" | "jevTools">): ToolDefinition[] {
-  return [...record.subagentTools, ...record.todoTools, ...record.memoryTools, ...record.questionTools, ...record.planTools, ...record.visionTools, ...record.browserTools, ...record.sshTools, ...record.computerTools, ...record.automationTools, ...record.designTools, ...record.galleryTools, ...record.jevTools];
+function buildRecordTools(record: Pick<SessionRuntimeRecord, "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "planTools" | "visionTools" | "browserTools" | "sshTools" | "computerTools" | "automationTools" | "designTools" | "galleryTools" | "jevTools" | "teamTools" | "workflowTools">): ToolDefinition[] {
+  // workflowTools 与 teamTools 一样**注册常驻**（定义固定不变）：是否进活动集只由
+  // toolNamesFor 按各自的开关投影决定，不在这里分叉。
+  return [...record.subagentTools, ...record.todoTools, ...record.memoryTools, ...record.questionTools, ...record.planTools, ...record.visionTools, ...record.browserTools, ...record.sshTools, ...record.computerTools, ...record.automationTools, ...record.designTools, ...record.galleryTools, ...record.jevTools, ...record.teamTools, ...record.workflowTools];
 }
 
 /**
@@ -3489,7 +3600,7 @@ function buildRecordTools(record: Pick<SessionRuntimeRecord, "subagentTools" | "
  * capability toggle (下架), not a per-call gate. Browser/SSH families use the
  * same capability-toggle semantics (master switch AND agent-level overlay).
  */
-function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "session" | "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "planTools" | "visionTools" | "browserTools" | "sshTools" | "computerTools" | "automationTools" | "designTools" | "galleryTools" | "jevTools" | "designMode" | "computerMode" | "teamMode" | "teamTools" | "designGlobalEnabled" | "computerGlobalEnabled" | "jevGlobalEnabled" | "unattended">, includeVision: boolean): string[] {
+function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "session" | "subagentTools" | "todoTools" | "memoryTools" | "questionTools" | "planTools" | "visionTools" | "browserTools" | "sshTools" | "computerTools" | "automationTools" | "designTools" | "galleryTools" | "jevTools" | "designMode" | "computerMode" | "teamMode" | "teamTools" | "workflowTools" | "workflowEnabled" | "designGlobalEnabled" | "computerGlobalEnabled" | "jevGlobalEnabled" | "unattended">, includeVision: boolean): string[] {
   const builtin = Object.entries(record.agent.tools ?? {}).filter(([, enabled]) => enabled).map(([name]) => name);
   // 浏览器/SSH 整族开关：全局总闸 AND 角色级 overlay（agent.toolOverrides），任一关闭
   // 即整族从活动集摘除（schema 不进请求前缀）；execute 内的 enabled 闭包仅作在途回合
@@ -3540,6 +3651,14 @@ function toolNamesFor(record: Pick<SessionRuntimeRecord, "agent" | "session" | "
     // 团队工具只在开了团队模式的会话里激活（9 个 schema 实测 ≈1.1K tokens/请求；
     // 工具定义注册常驻、激活按会话冻结，关掉时零前缀成本）。
     ...(record.teamMode.enabled ? record.teamTools.map((tool) => tool.name) : []),
+    // 工作流工具（workflow_list / workflow_run / workflow_status）：**角色级开关**、
+    // 默认 OFF（存量角色升级后前缀零变化）。它不读全局 settings——只看记录上的开关
+    // 投影（record.workflowEnabled，归一化口径在 runtime-workflow.workflowOverrideEnabled），
+    // 该投影只在空闲回合边界 reconcile（agent.save 仅开关变化 / agent_settled），
+    // 因此本函数仍是纯函数：同一会话状态算出同一活动集。
+    ...(runtimeWorkflow.shouldActivateWorkflowTools({ recordEnabled: record.workflowEnabled })
+      ? record.workflowTools.map((tool) => tool.name)
+      : []),
     // 设计工具仅在设计模式会话里激活（≈1.5K tokens/请求的前缀成本）；总闸
     // settings.design.enabled 关闭时任何会话都不注入。会话内开关不变，因此
     // 前缀缓存整段有效（区别于 browser 的常驻激活策略）。
@@ -3992,6 +4111,10 @@ function handleSessionEvent(record: SessionRuntimeRecord, event: AgentSessionEve
       record.speedStep = undefined;
       record.speedLive = undefined;
       refreshContextBreakdown(record);
+      // 角色级 workflow 开关的回合边界 reconcile（§8.3）：busy 期间保存的角色开关
+      // 只能到这里才应用（不重建会话，只把三个工具名归位到活动集）。空闲且开关
+      // 未变时是一次纯比较，不白做前缀重算。
+      syncWorkflowToolProjection(record);
       // busy/状态变了就是生命周期帧，必须立即刷（几十毫秒的收尾窗口也要如实推送）。
       lifecycle = true;
       break;
@@ -4795,6 +4918,12 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   const rebuildPaneBinding = existing
     ? { rendered: renderedSessions.has(existing.session.sessionId), pending: pendingWatchSessions.has(existing.session.sessionId) }
     : undefined;
+  if (existing && recordHasActiveWorkflow(existing)) {
+    // 同 id 重建（空话题换角色、agent.save 应用配置、资源重载）会销毁运行器与
+    // owner 记录——活跃工作流必须先收场。配置类保存应写成「重新加载后生效」，
+    // 这里守住最后一道：宁可不重建，也不静默杀掉正在跑的 run。
+    throw new Error("该会话有工作流在运行，重建会话会销毁工作流 owner；请先停止工作流或等待运行结束");
+  }
   if (existing) disposeRecord(existing, { keepBrowserTab: true, cacheForReopen: false });
 
   const settingsManager = withCacheWarmingOff(SettingsManager.create(recordWorkspace, getAgentDir()));
@@ -5300,7 +5429,20 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   // 需要 Lead 的 AgentSession 才能构造（记录装配后回填）。
   const teamRef: { runtime?: TeamRuntime } = {};
   const teamTools = buildTeamTools(teamRef);
-  const recordCustomTools: ToolDefinition[] = [shellKill.tools[0]!, shellKill.tools[1]!, ...subagentTools, ...todoTools, ...memoryTools, ...questionTools, ...planTools, ...visionTools, ...browserTools, ...sshTools, ...computerTools, ...automationTools, ...designTools, ...galleryTools, ...jevTools, ...teamTools];
+  // 工作流工具同样用惰性 ref，但回填的是**本会话 record 自己**：surface 的每个
+  // 闭包都绑定它（parked 会话里调 workflow_run 也落在它自己，绝不读 activeRuntime），
+  // 执行端的角色能力复核也读它的开关投影（不读全局 settings）。三个定义**注册常驻**，
+  // 是否进活动集只看 record.workflowEnabled（见 toolNamesFor）。
+  const workflowRef: { record?: SessionRuntimeRecord } = {};
+  const workflowTools = runtimeWorkflow.buildWorkflowTools({
+    surface: () => {
+      const record = workflowRef.record;
+      if (!record) throw new Error("会话尚未就绪，工作流工具暂不可用");
+      return workflowToolSurfaceFor(record);
+    },
+    enabled: () => workflowRef.record?.workflowEnabled === true
+  });
+  const recordCustomTools: ToolDefinition[] = [shellKill.tools[0]!, shellKill.tools[1]!, ...subagentTools, ...todoTools, ...memoryTools, ...questionTools, ...planTools, ...visionTools, ...browserTools, ...sshTools, ...computerTools, ...automationTools, ...designTools, ...galleryTools, ...jevTools, ...teamTools, ...workflowTools];
   // 工具装配的最后一个同步段之后、进入 SDK 之前：过期请求在这里停下。
   if (await abandonCheckpoint()) {
     discardUncommitted();
@@ -5381,6 +5523,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     designMode: recordDesignMode,
     teamMode: recordTeamMode,
     teamTools,
+    workflowTools,
     memoryStore: recordMemoryStore,
     workspaceMemoryStore: recordWorkspaceMemoryStore,
     customTools: recordCustomTools,
@@ -5405,6 +5548,8 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     shellKill,
     steeringImages: [],
     followUpImages: [],
+    // 角色级 workflow 工具开关投影（默认 OFF）：步骤七按它在回合边界 reconcile 注册/活动集。
+    workflowEnabled: workflowToolEnabled(recordAgent),
     unattended: Boolean(options.unattended),
     runStatus: undefined,
     abortRequested: false,
@@ -5414,6 +5559,9 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     activatedAt: Date.now()
   };
   recordBox = record;
+  // 工作流工具的惰性 ref 回填（定义已在 createAgentSession 之前注册）：从这一刻起
+  // 工具闭包认的是**本记录**，与 activeRuntime 无关。
+  workflowRef.record = record;
   sessionHolder.session = result.session;
   recordSessionId = result.session.sessionId;
   // 未提交时按阶段回收：MCP 注销 → 配置监听 → 团队运行时 → 订阅 → 会话本身
@@ -5616,6 +5764,14 @@ async function initialize(command: Extract<RuntimeCommand, { type: "initialize" 
   galleryApps = loadGalleryRepairingIds(galleryFilePath());
   void pruneGalleryThumbs(galleryThumbsPath(), galleryApps);
   emitGallery();
+  // 工作流运行记录启动对账：只把「执行进程确认已退出」的活跃运行转 interrupted，
+  // 再按全局 200 条上限裁剪终态（活跃不裁剪），播种轻量历史并推首帧摘要。
+  // 对账失败绝不影响启动（工作流只是能力之一，配置问题不该卡住应用）。
+  try {
+    prepareWorkflowRunStorage();
+  } catch (error) {
+    void post({ type: "log", level: "warn", message: `工作流运行记录启动对账失败：${errorText(error)}` });
+  }
   // 存量作品补封面：封面上线前登记的作品只有一个类型图标。延后一点再跑，
   // 一是避开启动高峰，二是等 main 侧的离屏截图通道就绪（它走 RPC）。
   setTimeout(() => { void backfillGalleryCovers(); }, 4_000);
@@ -5701,6 +5857,9 @@ async function runResourceOperation(label: string, operation: () => Promise<void
   // Only the active session is rebuilt by resource operations; parked sessions
   // are never touched, so their busy state is irrelevant here.
   if (runActive(record) || resourceOperationBusy) throw new Error("当前会话正在运行，请等待完成后再管理能力");
+  // 资源重载会重建当前会话（customTools 只能靠建会话更新）：有活跃工作流时
+  // 重建 = 销毁 owner，明确拒绝而不是悄悄中断（保存类配置走「重新加载后生效」）。
+  if (recordHasActiveWorkflow(record)) throw new Error("当前会话有工作流在运行，重载资源会重建会话；请先停止工作流或等待运行结束");
   resourceOperationBusy = true;
   // The rebuild disposes the active record midway, so the busy overlay rides on
   // transitionStatus instead of the record (which is replaced before the end).
@@ -5738,10 +5897,11 @@ async function reloadRuntimeResources(): Promise<void> {
 async function refreshActiveSessionForSubagents(): Promise<void> {
   const record = activeRuntime;
   if (!record || !record.extensionApi) return;
-  if (runActive(record)) {
+  if (runActive(record) || recordHasActiveWorkflow(record)) {
     // 与 skill.toggle 同款纪律：不打断进行中的回合；渲染端的 log 通道只转 warn，
-    // 所以这里用 warn 级别（info 会被静默丢掉）。
-    void post({ type: "log", level: "warn", message: "子智能体已保存；当前会话正在运行，新定义将在下次重建会话后出现在可用清单里。" });
+    // 所以这里用 warn 级别（info 会被静默丢掉）。工作流运行中同理——重建会销毁
+    // owner，新定义留到下次重建生效。
+    void post({ type: "log", level: "warn", message: "子智能体已保存；当前会话正在运行或工作流在跑，新定义将在下次重建会话后出现在可用清单里。" });
     return;
   }
   try {
@@ -5760,8 +5920,8 @@ async function refreshActiveSessionForSubagents(): Promise<void> {
 async function refreshActiveSessionForSkills(): Promise<boolean> {
   const record = activeRuntime;
   if (!record || !record.extensionApi) return false;
-  if (runActive(record)) {
-    void post({ type: "log", level: "warn", message: "Skill 商店：当前会话正在运行，新技能将在下次重建会话后对模型可见（清单已即时更新）。" });
+  if (runActive(record) || recordHasActiveWorkflow(record)) {
+    void post({ type: "log", level: "warn", message: "Skill 商店：当前会话正在运行或工作流在跑，新技能将在下次重建会话后对模型可见（清单已即时更新）。" });
     return false;
   }
   try {
@@ -6363,7 +6523,647 @@ function contextRuntimeRows(
   ];
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// 工作流编排 · utility 接线（实施方案 §5–§8，步骤五）
+//
+// 分工（AGENTS.md §1）：会话解析与生命周期决策留在这里；命令回执、目录、
+// 运行摘要发帧、历史缓存在 `runtime-workflow-commands.ts`（显式输入的处理器）。
+//
+// 生命周期硬约束（不可简化）：
+// - 运行器**每 owner record 一份**并持久持有：活跃 owner 不被空闲 LRU 驱逐，
+//   不允许同 id 重建，资源重载与角色保存也不销毁它（配置变化走「重新加载后
+//   生效」，本次 run 继续使用受理时冻结的配置）。
+// - 删除会话是唯一销毁路径，且必须 `stopAndWait` 确认资源收场后才删文件；
+//   未确认就保留会话与运行记录（宁可不删，也不留无主执行）。
+// - 运行必须有**真实 live owner**：页面/工具传入的 ownerSessionId 必须在
+//   liveSessions 里，且工作区 realpath 一致（大小写/别名归一）。owner 绑定
+//   只从 record 取，绝不读 activeRuntime（parked 会话里调用工具也必须落在它自己）。
+// - 节点执行的权限：owner 身份 + workflow scope + 每次工具调用按「owner 当前
+//   访问模式 × 节点 accessModeCap」取更严 + 10 分钟自动拒绝（见
+//   workflowChildPermissionHandler）；浏览器工具每次 execute 复核角色开关与总闸。
+// - 模型 contextWindow/maxTokens 覆盖在受理时冻结（createFrozenModelOverride），
+//   运行中途保存设置不会改变在跑的节点。
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** 每次 owner 的运行器句柄（beginRun 的冻结重置需要稳定引用）；record 上另有 workflowRuntime。 */
+const workflowHandles = new Map<string, WorkflowRuntimeHandle>();
+
+interface WorkflowPlumbing {
+  store: WorkflowStore;
+  catalog: WorkflowCatalogCache;
+  runStore: WorkflowRunStore;
+  coordinator: WorkflowCoordinator;
+  history: WorkflowRunHistory;
+  publisher: WorkflowRunsPublisher;
+  processor: WorkflowCommandProcessor;
+}
+
+let workflowPlumbing: WorkflowPlumbing | undefined;
+let workflowRunStorageReady = false;
+
+/** 本实例当前的活跃运行（含 stopping；终态由历史缓存提供）。 */
+function activeWorkflowRuns(): WorkflowRun[] {
+  const runs: WorkflowRun[] = [];
+  for (const record of liveSessions.values()) {
+    const run = record.workflowRuntime?.snapshot();
+    if (run && ACTIVE_WORKFLOW_STATUSES.has(run.status)) runs.push(run);
+  }
+  return runs;
+}
+
+/** 某 run 当前待决的权限请求 id（只 id，不带参数与摘要）。 */
+function workflowPendingPermissionIds(runId: string): string[] {
+  const ids: string[] = [];
+  for (const [permissionId, target] of pendingWorkflowPermissions) if (target === runId) ids.push(permissionId);
+  return ids;
+}
+
+/** 按 runId 找本实例的运行器（stop / 读实时快照）。 */
+function findWorkflowRuntime(runId: string): WorkflowRuntimeHandle | undefined {
+  for (const [ownerSessionId, handle] of workflowHandles) {
+    if (liveSessions.get(ownerSessionId)?.workflowRuntime === undefined) continue;
+    const run = handle.snapshot();
+    if (run?.runId === runId) return handle;
+  }
+  return undefined;
+}
+
+/**
+ * 工作流基础设施（定义/目录/运行记录/协调器/历史/发帧/命令处理器）的懒加载。
+ * 构造本身不碰磁盘；目录与运行记录读取都在各自方法里，错峰发生。
+ */
+function ensureWorkflowPlumbing(): WorkflowPlumbing {
+  if (workflowPlumbing) return workflowPlumbing;
+  const agentDir = getAgentDir();
+  const store = new WorkflowStore();
+  // 目录缓存 15s：保存/删除会立即 invalidate，手工磁盘变更最迟 15s 后可见；
+  // emitResourceCatalog 在切会话时会被调用，不能每次都把全部定义读一遍。
+  const catalog = new WorkflowCatalogCache(store, Date.now, 15_000);
+  const runStore = new WorkflowRunStore({ agentDir });
+  const coordinator = createWorkflowCoordinator({ agentDir });
+  const history = new WorkflowRunHistory({ selfInstanceId: coordinator.instanceId });
+  const publisher = createWorkflowRunsPublisher({
+    post: (message) => post(message),
+    history,
+    activeRuns: () => activeWorkflowRuns(),
+    pendingPermissionIds: (runId) => workflowPendingPermissionIds(runId)
+  });
+  const processor = createWorkflowCommandProcessor({
+    store,
+    catalog,
+    runs: runStore,
+    instanceId: coordinator.instanceId,
+    post: (message) => post(message),
+    resolveOwner: (ownerSessionId, targetWorkspace) => resolveWorkflowOwner(ownerSessionId, targetWorkspace),
+    runtimeFor: (owner) => workflowHandleForOwner(owner),
+    resolveConfigs: (owner, definition) => resolveWorkflowConfigs(owner, definition),
+    resolveDisplayConfigs: (targetWorkspace, definition) => workflowDisplayConfigs(targetWorkspace, definition),
+    validationContext: (targetWorkspace) => workflowValidationContext(targetWorkspace),
+    pendingPermissionIds: (runId) => workflowPendingPermissionIds(runId),
+    activeRuns: () => activeWorkflowRuns(),
+    findRuntime: (runId) => findWorkflowRuntime(runId),
+    // 目录变更只影响「当前工作区」的 resources 帧；非当前工作区保存时这次推送是
+    // 幂等超集（缓存已 invalidate，切过去会重新读）。
+    publishCatalog: () => emitResourceCatalog(),
+    publishRuns: (options) => { if (options?.immediate) publisher.publishNow(); else publisher.publish(); }
+  });
+  workflowPlumbing = { store, catalog, runStore, coordinator, history, publisher, processor };
+  return workflowPlumbing;
+}
+
+/**
+ * 启动对账 + 有界保留 + 轻量历史播种（进程内只跑一次）。
+ *
+ * 对账**不**把所有 running 改 stopped：只有确认执行 PID 已退出的活跃运行才转
+ * interrupted；活着或判不出来的一律保持原状。终态按全局 200 条上限裁剪，活跃
+ * 运行不裁剪。跑在首帧之前，避免界面把已死实例的运行当成「运行中」。
+ */
+function prepareWorkflowRunStorage(): string[] {
+  const plumbing = ensureWorkflowPlumbing();
+  if (workflowRunStorageReady) return [];
+  workflowRunStorageReady = true;
+  const diagnostics: string[] = [];
+  try {
+    diagnostics.push(...plumbing.runStore.reconcile());
+    diagnostics.push(...plumbing.runStore.prune());
+    const all: WorkflowRun[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = plumbing.runStore.list({ cursor, limit: 200 });
+      all.push(...page.runs);
+      diagnostics.push(...page.diagnostics);
+      cursor = page.nextCursor;
+    } while (cursor);
+    plumbing.history.seed(all);
+  } catch (error) {
+    diagnostics.push(`读取工作流运行记录失败：${errorText(error)}`);
+  }
+  if (diagnostics.length > 0) {
+    void post({ type: "log", level: "warn", message: `工作流运行记录对账：${diagnostics.join("；")}` });
+  }
+  plumbing.publisher.publishNow();
+  return diagnostics;
+}
+
+/** 会话是否有活跃工作流（生命周期守卫的唯一判据）。 */
+function recordHasActiveWorkflow(record: SessionRuntimeRecord | undefined): boolean {
+  return record?.workflowRuntime?.hasActiveRun() === true;
+}
+
+/**
+ * 角色级 workflow 工具开关投影（默认 OFF）：`agent.toolOverrides.workflow === true`
+ * 才算开启；缺省/false 都关闭。归一化实现只在 `runtime-workflow.workflowOverrideEnabled`
+ * 一处（步骤七的注册、活动集、回合边界 reconcile 与「仅开关变化」判定全部读它，
+ * 不在各处重复写 `=== true`）。
+ */
+function workflowToolEnabled(agent: { toolOverrides?: Record<string, boolean> } | undefined): boolean {
+  return runtimeWorkflow.workflowOverrideEnabled(agent);
+}
+
+/**
+ * 角色级 workflow 开关的**回合边界 reconcile**（§8.3）。
+ *
+ * 纪律：只在空闲回合边界调用（`agent.save` 的「仅开关变化」路径与 `agent_settled`
+ * 分支），busy 会话一律留到 settle 后处理——绝不在每回合偷读全局配置。
+ * 开关只决定三个定义是否进**活动集**（定义本身注册常驻、永不摘除），所以这里
+ * **不重建会话**：重建会销毁活跃工作流的 owner，也会让整段前缀缓存作废。
+ *
+ * @returns 是否真的改了投影（调用方据此决定要不要重发快照）。
+ */
+function syncWorkflowToolProjection(record: SessionRuntimeRecord): boolean {
+  // 忙（含 Pi 还在收尾的 isStreaming）不是回合边界：留到 agent_settled。
+  if (runActive(record)) return false;
+  const profile = settings?.agents.find((entry) => entry.id === record.agent.id);
+  if (!profile) return false;
+  const next = workflowToolEnabled(profile);
+  if (record.workflowEnabled === next) return false;
+  record.workflowEnabled = next;
+  // 定义已注册：只需把名字归位到活动集（请求前缀跟着变，同一会话内只在开关切换
+  // 这一次产生前缀重算）。
+  reconcileActiveTools(record);
+  return true;
+}
+
+/** 工作区 realpath 归一键（大小写/别名/分隔符统一；不可读时 undefined）。 */
+function workflowWorkspaceKey(path: string | undefined): string | undefined {
+  if (!path || !path.trim()) return undefined;
+  try {
+    return workspaceLockKey(realpathSync.native(resolve(path)));
+  } catch {
+    return undefined;
+  }
+}
+
+/** 按工作区找一条 live 记录（激活优先）：UI 展示实际模型、校验上下文用。 */
+function workflowRecordForWorkspace(targetWorkspace: string): SessionRuntimeRecord | undefined {
+  const targetKey = workflowWorkspaceKey(targetWorkspace);
+  if (!targetKey) return undefined;
+  const candidates = activeRuntime ? [activeRuntime, ...liveSessions.values()] : [...liveSessions.values()];
+  return candidates.find((record) => workflowWorkspaceKey(record.workspace) === targetKey);
+}
+
+/** owner 绑定（工具接线与页面命令共用；**只从 record 取**，不读 activeRuntime）。 */
+function workflowOwnerBinding(record: SessionRuntimeRecord): WorkflowOwnerBinding {
+  const sessionFile = record.session.sessionManager.getSessionFile();
+  return {
+    ownerSessionId: record.session.sessionId,
+    workspace: record.workspace,
+    ...(sessionFile ? { sessionFile } : {}),
+    agentId: record.agent.id,
+    hasActiveRun: recordHasActiveWorkflow(record)
+  };
+}
+
+/**
+ * owner 解析：必须是真实 live 记录，且工作区与请求路径 realpath 一致。
+ *
+ * 页面运行传 ownerSessionId/workspace；没有匹配工作区的 live owner 时由渲染端
+ * 先走带 requestId 的 session.new 创建并等到成功回执，再发 workflow.run——
+ * 这里绝不脑补一个 session-pending 身份，也不回落到 activeRuntime。
+ */
+function resolveWorkflowOwner(
+  ownerSessionId: string,
+  requestedWorkspace: string
+): { ok: true; owner: WorkflowOwnerBinding } | { ok: false; diagnostic: WorkflowDiagnostic } {
+  const record = liveSessions.get(ownerSessionId);
+  if (!record) {
+    return {
+      ok: false,
+      diagnostic: {
+        code: "owner-missing",
+        message: "owner 会话不在运行中：工作流必须有真实 live owner 会话（页面运行请先在该工作区新建或打开发起工作流的话题）"
+      }
+    };
+  }
+  const target = typeof requestedWorkspace === "string" ? requestedWorkspace.trim() : "";
+  if (!target) return { ok: false, diagnostic: { code: "invalid-workspace", message: "工作流工作区为空" } };
+  const ownerKey = workflowWorkspaceKey(record.workspace);
+  const targetKey = workflowWorkspaceKey(target);
+  if (!ownerKey || !targetKey) {
+    return { ok: false, diagnostic: { code: "invalid-workspace", message: `无法解析工作区真实路径：${record.workspace} / ${target}` } };
+  }
+  if (ownerKey !== targetKey) {
+    return {
+      ok: false,
+      diagnostic: { code: "workspace-mismatch", message: `工作流工作区与会话不一致：owner 在 ${record.workspace}，请求 ${target}` }
+    };
+  }
+  return { ok: true, owner: workflowOwnerBinding(record) };
+}
+
+/** 节点配置解析的公共依赖（模型目录/启用状态/鉴权/覆盖链/浏览器总闸）。 */
+function workflowConfigDeps(): WorkflowNodeConfigDeps {
+  const runtime = modelRuntime;
+  if (!runtime) throw new Error("运行时尚未就绪，无法解析工作流节点模型");
+  return {
+    modelRuntime: runtime,
+    isModelEnabled: (providerId: string, modelId: string) => isModelEnabled(providerId, modelId, settings?.providers),
+    isProviderConfigured: (providerId: string) => providerConfigured(providerId),
+    // 与主会话/子代理同一条覆盖链；这一次调用只在受理前做预检，真正生效的
+    // 冻结副本由 createFrozenModelOverride 提供（见 workflowHandleForOwner）。
+    transformModel: (candidate: Model<Api>) => applyModelOverrides(candidate),
+    // 浏览器总闸实时复核：受理时挂不挂浏览器工具、执行时每次工具再查一遍。
+    isBrowserEnabled: () => settings?.browser?.enabled !== false
+  };
+}
+
+/** 解析全部节点配置（来源/模型/思考等级/工具白名单/静态系统提示）。 */
+function resolveWorkflowConfigs(owner: WorkflowOwnerBinding, definition: WorkflowDefinition): WorkflowChildNodeConfig[] {
+  const record = liveSessions.get(owner.ownerSessionId);
+  if (!record) throw new Error(`owner 会话不在运行中：${owner.ownerSessionId}`);
+  const sessionModel = record.session.model;
+  const fallback = selectedModel ?? settings?.model ?? record.agent.defaultModel;
+  const model: WorkflowModelRef | undefined = sessionModel
+    ? { provider: sessionModel.provider, id: sessionModel.id }
+    : fallback;
+  if (!model) throw new Error("owner 会话没有可用模型，无法解析工作流节点模型");
+  return resolveWorkflowNodeConfigs(
+    {
+      definition,
+      agent: record.agent,
+      model,
+      thinkingLevel: record.session.thinkingLevel,
+      subagents: workspaceResources.load(record.workspace).subagents
+    },
+    workflowConfigDeps()
+  );
+}
+
+/** `workflow.get/save` 附带给 UI 的「实际模型」投影（不含 systemPrompt）；失败返回 undefined。 */
+function workflowDisplayConfigs(targetWorkspace: string, definition: WorkflowDefinition): WorkflowResolvedNodeConfig[] | undefined {
+  if (!modelRuntime) return undefined;
+  const record = workflowRecordForWorkspace(targetWorkspace);
+  const agent = record?.agent ?? currentAgent ?? activeAgent();
+  const sessionModel = record?.session.model;
+  const model: WorkflowModelRef | undefined = sessionModel
+    ? { provider: sessionModel.provider, id: sessionModel.id }
+    : (selectedModel ?? settings?.model ?? agent.defaultModel);
+  if (!model) return undefined;
+  const configs = resolveWorkflowNodeConfigs(
+    {
+      definition,
+      agent,
+      model,
+      thinkingLevel: record?.session.thinkingLevel ?? thinkingLevel,
+      subagents: workspaceResources.load(record?.workspace ?? targetWorkspace).subagents
+    },
+    workflowConfigDeps()
+  );
+  return projectResolvedNodeConfigs(configs);
+}
+
+/** 目录/运行校验上下文：子智能体目录、可用模型、来源工具、owner 当前访问模式。 */
+function workflowValidationContext(targetWorkspace: string): WorkflowRunValidationContext {
+  const record = workflowRecordForWorkspace(targetWorkspace);
+  const agent = record?.agent ?? currentAgent ?? activeAgent();
+  const models: WorkflowModelRef[] = [];
+  try {
+    for (const model of modelRuntime?.getModels() ?? []) models.push({ provider: model.provider, id: model.id });
+  } catch {
+    // 模型目录未就绪：不做「模型存在性」校验，运行前解析仍会逐节点核对。
+  }
+  // 子智能体目录按目标工作区读（没有 live 记录时也一样：可运行标记不能乐观）。
+  const resources = workspaceResources.load(record?.workspace ?? targetWorkspace);
+  return {
+    subagents: resources.subagents,
+    ...(models.length > 0 ? { availableModels: models } : {}),
+    sourceTools: BUILTIN_TOOLS.filter((tool) => agent.tools?.[tool] === true),
+    ownerAccessMode: record ? record.permissionDeps.accessMode() : accessMode
+  };
+}
+
+/**
+ * 一次 run 内的模型覆盖冻结：受理时重置，同一 run 内按 provider/id 复用同一份
+ * Model 对象。用户在运行中途保存设置（改 contextWindow/maxTokens/图片标记）
+ * 不会让正在跑的节点换一套限额——冻结的是**受理那一刻**的覆盖结果。
+ */
+function createFrozenModelOverride(): { transform: (model: Model<Api>) => Model<Api>; reset: () => void } {
+  let cache = new Map<string, Model<Api>>();
+  return {
+    transform: (model) => {
+      const key = `${model.provider}/${model.id}`;
+      const cached = cache.get(key);
+      if (cached) return cached;
+      const applied = applyModelOverrides(model);
+      cache.set(key, applied);
+      return applied;
+    },
+    reset: () => { cache = new Map(); }
+  };
+}
+
+/**
+ * 节点浏览器工具：复用现有 buildBrowserTools，但**每次 execute** 同时复核
+ * ①总闸 settings.browser.enabled ②owner 角色开关（读当前 live 记录，缺省用冻结角色）。
+ * 另两道闸门在受理前已判过：来源定义声明 + 配置解析时的总闸。
+ */
+function buildWorkflowBrowserTools(record: SessionRuntimeRecord): ToolDefinition[] {
+  return runtimeBrowser.buildBrowserTools({
+    request: (op) => requestBrowserAutomation(record.session.sessionId, op),
+    enabled: () => {
+      if (settings?.browser?.enabled === false) return false;
+      const live = liveSessions.get(record.session.sessionId);
+      return (live?.agent ?? record.agent).toolOverrides?.browser !== false;
+    },
+    workspace: () => record.workspace || undefined,
+    resolveUploadFiles: (files) => Promise.resolve(resolveWorkspaceUploadFiles(record.workspace, files)),
+    saveScreenshot: (data, mimeType) => saveBrowserScreenshot(record.workspace, data, mimeType)
+  });
+}
+
+/**
+ * 节点权限门：owner 身份（sessionId/agentId/workspace 全部取 owner record）
+ * + workflow scope + 每次工具调用按「owner 当前访问模式 × 节点 accessModeCap」取严
+ * + 10 分钟自动拒绝。owner 的访问模式实时读取（permissionDeps 的 getter），所以
+ * 节点设 full 也无法绕过 owner 的 read-only。
+ */
+function workflowChildPermissionHandler(record: SessionRuntimeRecord, request: WorkflowChildPermissionRequest): Promise<PermissionDecision> {
+  // 节点 cap 取运行快照里的冻结投影（resolvedNodes），不重读定义/配置。
+  const run = record.workflowRuntime?.snapshot();
+  const frozenNode = run && run.runId === request.node.runId
+    ? run.resolvedNodes.find((entry) => entry.nodeId === request.node.nodeId)
+    : undefined;
+  const cap = frozenNode?.accessModeCap;
+  const deps: runtimePermissions.PermissionGateDeps = {
+    ...record.permissionDeps,
+    ...(cap ? { accessModeCap: () => cap } : {}),
+    workflow: () => request.node,
+    permissionTimeoutMs: () => WORKFLOW_PERMISSION_TIMEOUT_MS
+  };
+  return runtimePermissions.requestPermission(deps, request.toolName, request.args, request.toolCallId, "subagent");
+}
+
+/** 运行变化：终态即时 flush，其余合帧；历史缓存只收轻量摘要。 */
+function onWorkflowRunChange(run: WorkflowRun): void {
+  const plumbing = workflowPlumbing;
+  if (!plumbing) return;
+  plumbing.history.record(run);
+  if (TERMINAL_WORKFLOW_STATUSES.has(run.status)) {
+    for (const [permissionId, runId] of pendingWorkflowPermissions) if (runId === run.runId) pendingWorkflowPermissions.delete(permissionId);
+    plumbing.publisher.publishNow();
+    return;
+  }
+  plumbing.publisher.publish();
+}
+
+/** 取得（必要时创建）owner 的运行器：持久持于 record，销毁只走会话删除路径。 */
+function workflowHandleForOwner(owner: WorkflowOwnerBinding): WorkflowRuntimeHandle {
+  const record = liveSessions.get(owner.ownerSessionId);
+  if (!record) throw new Error(`owner 会话不在运行中：${owner.ownerSessionId}`);
+  const cached = workflowHandles.get(owner.ownerSessionId);
+  if (cached) return cached;
+  if (!modelRuntime) throw new Error("运行时尚未就绪，无法启动工作流");
+  const plumbing = ensureWorkflowPlumbing();
+  const frozen = createFrozenModelOverride();
+  const sessionFile = record.session.sessionManager.getSessionFile();
+  const runtime = new WorkflowRuntime({
+    workspace: record.workspace,
+    agentId: record.agent.id,
+    ownerSessionId: record.session.sessionId,
+    ...(sessionFile ? { ownerSessionFile: sessionFile } : {}),
+    coordinator: plumbing.coordinator,
+    store: plumbing.runStore,
+    executeChild: createWorkflowChildExecutor({
+      workspace: record.workspace,
+      agentDir: getAgentDir(),
+      agent: record.agent,
+      modelRuntime,
+      transformModel: frozen.transform,
+      requestPermission: (request) => workflowChildPermissionHandler(record, request),
+      buildBrowserTools: () => buildWorkflowBrowserTools(record)
+    }),
+    // 停止/结束只取消本 run 的待决请求与会话授权，绝不误伤 owner 自己的待决权限。
+    cancelPermissions: (runId) => permissionBroker.cancelWorkflow(runId),
+    onChange: (run) => onWorkflowRunChange(run)
+  });
+  record.workflowRuntime = runtime;
+  const handle: WorkflowRuntimeHandle = {
+    beginRun: frozen.reset,
+    start: (input) => {
+      try {
+        return runtime.start(input);
+      } catch (error) {
+        // 协调器的抢锁失败只带可读摘要（`acquired.summary`，没有错误类型）：在这里
+        // 归成稳定错误码 conflict，其余（定义/配置/落盘）异常原样上抛。
+        const message = errorText(error);
+        if (message.includes("工作区已有")) throw new WorkflowCommandFailure("conflict", message);
+        throw error;
+      }
+    },
+    stop: (runId) => runtime.stop(runId),
+    snapshot: () => runtime.snapshot(),
+    hasActiveRun: () => runtime.hasActiveRun()
+  };
+  workflowHandles.set(owner.ownerSessionId, handle);
+  return handle;
+}
+
+/**
+ * 工具接线面（步骤七 `runtime-workflow.ts` 的 workflow_list / workflow_run /
+ * workflow_status 调这三个函数）。
+ * 三个函数由 {@link workflowToolSurfaceFor} 打包成 `WorkflowToolSurface` 交给工具构建器。
+ *
+ * `startRecordWorkflow` 与页面运行共用同一条受理路径（同一份冻结配置与预检），
+ * owner 从**闭包里的 record** 取，绝不读 activeRuntime；受理后立即返回 runId，
+ * **不跟随**父工具调用的 signal 终止后台运行（停止走工作流页面/会话删除）。
+ * signal 只在**受理前**生效：已中止则直接失败，不读目录、不抢锁、不建运行器。
+ */
+function workflowCatalogForRecord(record: SessionRuntimeRecord): { workflows: WorkflowSummary[]; diagnostics: string[] } {
+  try {
+    const catalog = ensureWorkflowPlumbing().catalog.list(record.workspace, workflowValidationContext(record.workspace));
+    return { workflows: catalog.workflows.map((entry) => ({ ...entry })), diagnostics: [...catalog.diagnostics] };
+  } catch (error) {
+    return { workflows: [], diagnostics: [errorText(error)] };
+  }
+}
+
+/** 受理前取消的固定文案（工具回执直接透传，不吞成空结果）。 */
+const WORKFLOW_START_CANCELLED = "工作流启动已取消：本轮工具调用已中止，未创建任何运行。";
+
+async function startRecordWorkflow(record: SessionRuntimeRecord, workflowRef: string, input: string, options?: { signal?: AbortSignal }): Promise<WorkflowRunAccepted> {
+  // 受理前取消：什么都不准备（不读目录、不争工作区锁、不建运行器），也就不需要回滚。
+  if (options?.signal?.aborted) throw new Error(WORKFLOW_START_CANCELLED);
+  const plumbing = ensureWorkflowPlumbing();
+  prepareWorkflowRunStorage();
+  const catalog = plumbing.catalog.list(record.workspace, workflowValidationContext(record.workspace));
+  const entries = catalog.workflows.map((entry) => ({ ...entry }));
+  const matched = matchWorkflowReference(entries, workflowRef);
+  if (!matched) {
+    const available = entries.length > 0 ? `（可用：${entries.map((entry) => `${entry.name}［${entry.id}］`).join("、")}）` : "（当前工作区还没有工作流）";
+    throw new Error(`找不到工作流「${workflowRef}」${available}`);
+  }
+  const stored = plumbing.store.get(record.workspace, matched.id);
+  const validation = validateWorkflowForRun(stored.definition, workflowValidationContext(record.workspace));
+  if (!validation.ok) {
+    throw new Error(`工作流「${matched.name}」未通过运行校验：${validation.errors.map((issue) => issue.message).join("；")}`);
+  }
+  const owner = workflowOwnerBinding(record);
+  const configs = resolveWorkflowConfigs(owner, stored.definition);
+  const handle = workflowHandleForOwner(owner);
+  const running = handle.snapshot();
+  if (handle.hasActiveRun()) throw new Error(`该会话已有工作流在运行：${running?.workflowName ?? ""}（${running?.runId ?? ""}）`);
+  // 准备阶段全部是同步的，这个检查只在理论上能命中（signal 在微任务里翻转）；
+  // 命中就到此为止：不冻结模型、不启动运行，已有状态原样保留。
+  if (options?.signal?.aborted) throw new Error(WORKFLOW_START_CANCELLED);
+  handle.beginRun?.();
+  // start 只做预检、锁定与受理；节点执行在运行器的微任务里推进。
+  const run = handle.start({ definition: stored.definition, definitionHash: stored.baseHash, input, configs });
+  plumbing.publisher.publishNow();
+  return { runId: run.runId, status: run.status, workflowName: run.workflowName };
+}
+
+/** `workflow_status` 的数据面：摘要 + gate 判定 + 产物文件引用（不带无界全文）。 */
+function workflowStatusForRecord(record: SessionRuntimeRecord, runId?: string): WorkflowRunStatusView {
+  const plumbing = ensureWorkflowPlumbing();
+  prepareWorkflowRunStorage();
+  const wanted = typeof runId === "string" ? runId.trim() : "";
+  let run: WorkflowRun | undefined;
+  if (wanted) {
+    const live = record.workflowRuntime?.snapshot();
+    run = live && live.runId === wanted ? live : plumbing.runStore.get(wanted);
+  } else {
+    const live = record.workflowRuntime?.snapshot();
+    if (live) run = live;
+    else {
+      const page = plumbing.runStore.list({ workspace: record.workspace, ownerSessionId: record.session.sessionId, limit: 1 });
+      run = page.runs[0];
+    }
+  }
+  if (!run) throw new Error("该会话还没有工作流运行记录");
+  if (run.ownerSessionId !== record.session.sessionId) throw new Error(`运行 ${run.runId} 不属于当前会话，不能从这里读取`);
+  const external = run.runnerInstanceId !== plumbing.coordinator.instanceId;
+  return {
+    summary: summarizeWorkflowRun(run, workflowPendingPermissionIds(run.runId), external),
+    decisions: run.executions.flatMap((execution) => execution.decision
+      ? [{ nodeId: execution.nodeId, nodeTitle: execution.nodeTitle, attempt: execution.attempt, verdict: execution.decision.verdict, reason: execution.decision.reason }]
+      : []),
+    artifacts: run.executions.flatMap((execution) => execution.artifactPath
+      ? [{ executionId: execution.executionId, nodeId: execution.nodeId, nodeTitle: execution.nodeTitle, attempt: execution.attempt, artifactPath: execution.artifactPath }]
+      : []),
+    external
+  };
+}
+
+/**
+ * 工具接线面的实现（步骤七把 `workflowToolSurfaceFor(record)` 交给
+ * `runtime-workflow.ts` 的 buildWorkflowTools）。三个闭包各自绑定这次会话的
+ * record：parked 会话里调用 workflow_run 也落在它自己身上，绝不读 activeRuntime。
+ * `options.signal` 只传进受理前的取消检查（见 startRecordWorkflow）。
+ */
+function workflowToolSurfaceFor(record: SessionRuntimeRecord): WorkflowToolSurface {
+  return {
+    list: () => workflowCatalogForRecord(record),
+    start: (workflowRef, input, options) => startRecordWorkflow(record, workflowRef, input, options),
+    status: (runId) => workflowStatusForRecord(record, runId)
+  };
+}
+
+/** 会话删除前的工作流收场：有活跃运行先 stopAndWait，未确认返回失败原因（保留一切）。 */
+async function releaseWorkflowOwnerForDeletion(deleteTarget: string): Promise<{ ownerSessionId: string | undefined; failures: string[] }> {
+  const live = [...liveSessions.values()].find((record) => {
+    const file = record.session.sessionManager.getSessionFile();
+    return Boolean(file) && resolve(file!).toLowerCase() === deleteTarget.toLowerCase();
+  });
+  const ownerSessionId = live?.session.sessionId
+    ?? currentSessions.find((item) => resolve(item.path).toLowerCase() === deleteTarget.toLowerCase())?.id;
+  const failures: string[] = [];
+  if (live && recordHasActiveWorkflow(live)) {
+    const runtime = live.workflowRuntime!;
+    const runId = runtime.snapshot()?.runId;
+    const confirmed = await runtime.stopAndWait();
+    if (!confirmed) failures.push(`工作流 ${runId ?? ""} 未确认停止（子会话仍在收场），已保留会话与运行记录`);
+    else permissionBroker.cancelWorkflow(runId ?? "");
+  }
+  return { ownerSessionId, failures };
+}
+
+/**
+ * 删除 owner 后清理它的工作流历史（运行记录 + 派生产物 + 节点 JSONL）。
+ * 活跃运行不清理（那是别人的事实源），失败一律保留记录并回报诊断——绝不悄悄
+ * 丢索引造出无法追查的孤儿。
+ */
+async function removeWorkflowHistoryForOwner(ownerSessionId: string | undefined, agentId: string | undefined): Promise<string[]> {
+  if (!ownerSessionId) return [];
+  const plumbing = ensureWorkflowPlumbing();
+  const diagnostics: string[] = [];
+  let removed = false;
+  try {
+    const all: WorkflowRun[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = plumbing.runStore.list({ ownerSessionId, ...(agentId ? { agentId } : {}), cursor, limit: 200 });
+      all.push(...page.runs);
+      diagnostics.push(...page.diagnostics);
+      cursor = page.nextCursor;
+    } while (cursor);
+    for (const run of all) {
+      if (run.ownerSessionId !== ownerSessionId) continue;
+      if (ACTIVE_WORKFLOW_STATUSES.has(run.status)) {
+        diagnostics.push(`${run.runId}：运行仍未结束，保留运行记录`);
+        continue;
+      }
+      try {
+        plumbing.runStore.delete(run.runId);
+        plumbing.history.remove(run.runId);
+        removed = true;
+      } catch (error) {
+        diagnostics.push(`${run.runId}：清理失败（已保留记录）：${errorText(error)}`);
+      }
+    }
+  } catch (error) {
+    diagnostics.push(`读取工作流运行记录失败：${errorText(error)}`);
+  }
+  if (agentId) {
+    // 只在目录确实空了时移除（绝不递归）：其他实例仍活着的运行文件必须留着。
+    try { rmdirSync(join(getAgentDir(), "chatanytime-sessions", agentId, "delegations", "workflows", ownerSessionId)); }
+    catch { /* 非空/不存在都不算错误 */ }
+  }
+  if (removed) plumbing.publisher.publishNow();
+  return diagnostics;
+}
+
+/** 工作流命令的判别（全部走 workflow.result 回执，绝不混进全局 error toast）。 */
+function isWorkflowCommand(command: RuntimeCommand): command is WorkflowCommand {
+  return command.type.startsWith("workflow.");
+}
+
+/**
+ * 工作流命令入口：对账/基础设施按需就绪，然后交给显式输入的处理器。
+ * 处理器自身永不抛（每条命令都回一条带 requestId/op 的 `workflow.result`），
+ * 调用方仍可在外层 catch 里补一条兜底回执（见消息入口）。
+ */
+async function handleWorkflowCommand(command: WorkflowCommand): Promise<void> {
+  prepareWorkflowRunStorage();
+  await ensureWorkflowPlumbing().processor(command);
+}
+
 async function handleCommand(command: RuntimeCommand): Promise<void> {
+  // 工作流命令不落进下面的大 switch：它们的语义（受理/停止/历史/回读）全部由
+  // 处理器按显式依赖决定，会话与生命周期守卫仍在本文件（见工作流段落）。
+  if (isWorkflowCommand(command)) {
+    await handleWorkflowCommand(command);
+    return;
+  }
   switch (command.type) {
     case "initialize":
       await initialize(command);
@@ -6727,9 +7527,16 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       const deleteTarget = resolve(command.path);
       if (!deleteTarget.toLowerCase().endsWith(".jsonl")) throw new Error("只能删除会话文件");
       const ownerAgentId = await ownerAgentIdForSessionPath(deleteTarget);
+      // 工作流 owner：先精确停止并等待资源收场（stopAndWait），未确认就**不删任何东西**。
+      const workflowRelease = await releaseWorkflowOwnerForDeletion(deleteTarget);
+      if (workflowRelease.failures.length > 0) throw new Error(`会话删除已取消：${workflowRelease.failures.join("；")}`);
       const { wasActive, deleted, error } = await deleteSessionByPath(deleteTarget, ownerAgentId);
       if (!deleted) throw new Error(`会话删除失败：${error ?? "未知错误"}`);
+      // 会话删除是唯一清理工作流历史的时机：终态记录/产物/节点 JSONL 一起清，
+      // 失败保留记录并如实回报（不悄悄丢索引）。
+      const workflowFailures = await removeWorkflowHistoryForOwner(workflowRelease.ownerSessionId, ownerAgentId);
       if (error) post({ type: "error", message: `会话已删除，但部分附属数据清理失败：${error}` });
+      if (workflowFailures.length > 0) post({ type: "error", message: `会话已删除，但工作流历史清理未全部完成：${workflowFailures.join("；")}` });
       await finishSessionDeletion(wasActive);
       break;
     }
@@ -6749,11 +7556,21 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
           failures.push(`${deleteTarget}：${errorText(error)}`);
           continue;
         }
+        // 有活跃工作流时先停止并等待收场；未确认就跳过这一条（保留会话与运行记录）。
+        const workflowRelease = await releaseWorkflowOwnerForDeletion(deleteTarget);
+        if (workflowRelease.failures.length > 0) {
+          failures.push(`${deleteTarget}：${workflowRelease.failures.join("；")}`);
+          continue;
+        }
         const { wasActive, deleted, error } = await deleteSessionByPath(deleteTarget, ownerAgentId);
         anyActiveDeleted = anyActiveDeleted || wasActive;
         if (deleted) deletedCount += 1;
         else failures.push(`${deleteTarget}：${error ?? "未知错误"}`);
         if (deleted && error) failures.push(`${deleteTarget}（附属数据）：${error}`);
+        if (deleted) {
+          const workflowFailures = await removeWorkflowHistoryForOwner(workflowRelease.ownerSessionId, ownerAgentId);
+          if (workflowFailures.length > 0) failures.push(`${deleteTarget}（工作流历史）：${workflowFailures.join("；")}`);
+        }
       }
       if (deletedCount === 0) throw new Error(`没有成功删除任何会话${failures.length ? `（失败 ${failures.length}）` : ""}`);
       await finishSessionDeletion(anyActiveDeleted);
@@ -7019,7 +7836,7 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       // exit_plan_mode 已挂起 55 分钟，busy 一直为 true）。
       // 权限侧只取消挂起请求，保留本会话的 allow-session 授权（中止不是撤销授权）。
       questionBroker.reset(record.session.sessionId);
-      permissionBroker.cancelPending(record.session.sessionId);
+      permissionBroker.cancelPendingNonWorkflow(record.session.sessionId);
       // Make the task panel reflect the abort immediately: mark every running
       // tool execution as aborted so its card disappears without waiting for
       // the SDK's tool_execution_end (which may be delayed or never arrive
@@ -7664,25 +8481,51 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
     }
     case "agent.save":
       if (settings) {
-        if (activeRuntime?.busy && activeRuntime.agent.id === command.agent.id) throw new Error("当前会话正在运行，请等待完成后再保存当前 Agent");
+        // 「仅角色级 workflow 开关变化」不重建会话（§8.3）：重建会销毁活跃工作流的
+        // owner、使整段前缀缓存作废，还会打断正在跑的回合。这条路径**不要求会话空闲**
+        // ——空闲记录当场在回合边界 reconcile，busy 记录留到 agent_settled 后处理。
+        const previousProfile = settings.agents.find((item) => item.id === command.agent.id);
+        const workflowSwitchOnly = runtimeWorkflow.isWorkflowSwitchOnlyChange(previousProfile, command.agent);
+        if (!workflowSwitchOnly && activeRuntime?.busy && activeRuntime.agent.id === command.agent.id) throw new Error("当前会话正在运行，请等待完成后再保存当前 Agent");
         const isCurrent = activeRuntime?.agent.id === command.agent.id || (!activeRuntime && settings.currentAgentId === command.agent.id);
         settings.agents = settings.agents.some((item) => item.id === command.agent.id) ? settings.agents.map((item) => item.id === command.agent.id ? command.agent : item) : [...settings.agents, command.agent];
         if (isCurrent) currentAgent = activeAgent();
-        if (isCurrent && workspace) {
-          transitionStatus = `正在应用 ${command.agent.name} 配置`;
+        if (workflowSwitchOnly) {
+          // 开关只影响活动集（三定义注册常驻）：逐条 live 记录在空闲边界归位，
+          // busy 的等 agent_settled；不碰会话本身，也不碰任何工作流运行。
+          for (const record of liveSessions.values()) {
+            if (record.agent.id === command.agent.id) syncWorkflowToolProjection(record);
+          }
           emitState();
-          try {
-            // No reactivate here: applying an agent profile must rebuild the
-            // active session even when its session id is already live. 用 record
-            // 自己的 workspace/agent 重建，避免把焦点格的配置应用到别的格子。
-            await createSession(undefined, { agentOverride: command.agent, workspaceOverride: activeRuntime?.workspace ?? workspace });
-          } catch (error) {
-            status = "Agent 配置应用失败";
+          break;
+        }
+        if (isCurrent && workspace) {
+          if (recordHasActiveWorkflow(activeRuntime)) {
+            // 有活跃工作流时保存不能被当成重建命令：重建会销毁 owner（节点权限/
+            // 归属/运行器都指它）。配置已落盘，明确提示「重新加载后生效」，本次
+            // run 继续使用受理时冻结的配置（§6.3 / §8.3）。
+            void post({
+              type: "log",
+              level: "warn",
+              message: `${command.agent.name} 配置已保存；当前会话有工作流在运行，重新加载会话后生效（本次运行继续使用冻结配置）。`
+            });
             emitState();
-            throw error;
-          } finally {
-            transitionStatus = undefined;
+          } else {
+            transitionStatus = `正在应用 ${command.agent.name} 配置`;
             emitState();
+            try {
+              // No reactivate here: applying an agent profile must rebuild the
+              // active session even when its session id is already live. 用 record
+              // 自己的 workspace/agent 重建，避免把焦点格的配置应用到别的格子。
+              await createSession(undefined, { agentOverride: command.agent, workspaceOverride: activeRuntime?.workspace ?? workspace });
+            } catch (error) {
+              status = "Agent 配置应用失败";
+              emitState();
+              throw error;
+            } finally {
+              transitionStatus = undefined;
+              emitState();
+            }
           }
         } else emitState();
       }
@@ -8347,6 +9190,20 @@ parentPort.on("message", (event: { data: RuntimeCommand }) => {
     sessionNewClaims.cancel(event.data.requestId);
     return;
   }
+  // 工作流停止走同一条旁路：不能排在 workflow.run 预检、session.open 冷开或 settings
+  // 保存后面，否则「停止工作流」要等前一条命令跑完才生效（用户看到的是白等）。
+  // 回执仍由处理器发 workflow.result（ok/失败都带 requestId + op + 诊断）。
+  if (event.data.type === "workflow.stop") {
+    const stopCommand = event.data;
+    void handleCommand(stopCommand).catch((error) => {
+      try {
+        post({ type: "workflow.result", result: workflowFailureResult(stopCommand, error) });
+      } catch {
+        // 通道已关闭：后端状态已落定（运行记录是事实源）。
+      }
+    });
+    return;
+  }
   // 停止会话 / 杀单条 shell 执行同样不能排在 session.open / settings 等串行队列后面，
   // 否则切话题建会话期间点击「停止」会等前一条命令全部跑完才生效（内部全同步操作）。
   if (event.data.type === "session.abort" || event.data.type === "session.killExecution") {
@@ -8374,6 +9231,16 @@ parentPort.on("message", (event: { data: RuntimeCommand }) => {
     .catch((error) => {
       // 被更晚的前台打开取代属于正常流程：不弹「打开失败」，新目标接管 opening 提示。
       if (openTicket?.isSuperseded()) return;
+      // 工作流命令的错误一律回到 workflow.result（渲染端按 requestId 就地显示），
+      // 不只发一条全局 error toast——否则请求方会一直等到自己的超时。
+      if (isWorkflowCommand(event.data)) {
+        try {
+          post({ type: "workflow.result", result: workflowFailureResult(event.data, error) });
+        } catch {
+          // 通道已关闭：不再有回执对象，忽略。
+        }
+        return;
+      }
       if (event.data.type === "session.new" && event.data.requestId) {
         post({ type: "session.new-result", requestId: event.data.requestId, ok: false, error: errorText(error) });
         return;

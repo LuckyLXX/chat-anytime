@@ -42,6 +42,7 @@ import {
   History,
   Brain,
   Layers,
+  Workflow,
   X
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
@@ -62,7 +63,8 @@ import type {
   RuntimeCommand,
   SessionSummary,
   SessionSearchHit,
-  SshHostSummary
+  SshHostSummary,
+  WorkflowRunSummary
 } from "../../shared/protocol";
 import type { ReplyChangedFile } from "./lib/changed-files";
 import { lastCompletedChangedExecutionId, lastReviewExecutionId } from "./lib/execution-select";
@@ -92,6 +94,7 @@ import { AutomationPanel, type AutomationPanelTab } from "./AutomationPanel";
 import { AutomationCenter } from "./AutomationCenter";
 import { MemoryCenter } from "./MemoryCenter";
 import { ContextCenter } from "./ContextCenter";
+import { WorkflowCenter, type WorkflowLeaveGuard } from "./WorkflowCenter";
 import type { AutomationRunsHighlight } from "./AutomationRuns";
 import { CommandPalette } from "./components/CommandPalette";
 import type { PaletteAction } from "./lib/command-palette";
@@ -106,7 +109,7 @@ import { collectRunningSessions, hasRunningSession } from "./lib/running-session
 import { collectRecentCompletedSessions } from "./lib/recent-completions";
 import { resolveThemeAssetUrls, activeThemeScope } from "../../shared/theme-assets";
 import { bubbleOpacityCss, collectThemeLayers, panelOpacityCss, scopeCustomThemeCss, themePresetCss, wallpaperOpacityCss } from "./lib/theme-presets";
-import { panePermissionRequest, paneQuestionRequest, dropPaneStates, pruneParkedPanels, useDesktopStore } from "./store";
+import { panePermissionRequest, paneQuestionRequest, dropPaneStates, pruneParkedPanels, useDesktopStore, workflowRunsForOwner } from "./store";
 import { DesignStudio } from "./design/DesignStudio";
 import { ConversationPane, type PaneComposerApi, type PaneDraftStore } from "./ConversationPane";
 import { SplitLayout } from "./SplitLayout";
@@ -173,6 +176,9 @@ interface PreviewState {
 }
 // powershell 为 opt-in：新建 Agent 默认关闭（与 settings.defaultToolEnabled 对齐）。
 const agentTools: BuiltinToolName[] = ["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"];
+
+/** 工作流页面运行现开 owner 会话的等待上限（带 requestId 的 session.new 到回执）。 */
+const WORKFLOW_OWNER_CREATE_TIMEOUT_MS = 20_000;
 
 type SlashCommandBase = {
   trigger: string;
@@ -434,11 +440,18 @@ function SettingsDialog({ settings, models, providers, resources, workspaceOpen,
       : agent));
   }
 
-  /** 能力工具 overlay 写回：启用即删键（配置只存显式禁用，与迁移层 normalizeToolOverrides 对齐）。 */
+  /**
+   * 能力工具 overlay 写回。两套缺省语义：
+   * - browser / ssh / mcp:<server>：缺省启用 → 启用即删键，只存显式禁用；
+   * - workflow：缺省**关闭** → 启用必须显式写 true（删键等于又关回去），关闭则删键回缺省。
+   */
   function updateAgentToolOverride(key: string, enabled: boolean): void {
     if (!selectedAgent) return;
     const overrides = { ...selectedAgent.toolOverrides };
-    if (enabled) delete overrides[key];
+    if (key === "workflow") {
+      if (enabled) overrides[key] = true;
+      else delete overrides[key];
+    } else if (enabled) delete overrides[key];
     else overrides[key] = false;
     updateAgent({ toolOverrides: Object.keys(overrides).length > 0 ? overrides : undefined });
   }
@@ -549,6 +562,9 @@ export function App(): ReactNode {
   const galleryApps = useDesktopStore((state) => state.galleryApps);
   // 后台服务看板的数据（主进程推送；进程不随页面/主窗口关闭而停）。
   const galleryServices = useDesktopStore((state) => state.galleryServices);
+  // 工作流运行摘要：独立有界快照（epoch/revision 自成一系，不混会话 delta）。
+  // 只在这里订阅一次，按 owner 过滤后传给中心页 / 运行条（见下方 workflowCenterRuns）。
+  const workflowRunsSnapshot = useDesktopStore((state) => state.workflowRuns);
   const [messageActionError, setMessageActionError] = useState<string>();
   const setActionError = useCallback((message?: string): void => {
     setMessageActionError(message);
@@ -644,7 +660,7 @@ export function App(): ReactNode {
   const [softwareRendering] = useState(() => isSoftwareRenderer(readWebglRenderer()));
   const blurEnabled = resolveBlurEnabled(settings.appearance.blur, softwareRendering);
   const [settingsInitialTab, setSettingsInitialTab] = useState<SettingsTab | undefined>(undefined);
-  function openSettingsOn(tab: SettingsTab): void { setSettingsInitialTab(tab); setSettingsOpen(true); }
+  function openSettingsOn(tab: SettingsTab): void { openSettings(tab); }
   function toggleAutomationSessions(): void {
     setShowAutomationSessions((current) => {
       const next = !current;
@@ -662,6 +678,51 @@ export function App(): ReactNode {
   const [automationCenterTaskId, setAutomationCenterTaskId] = useState<string | undefined>(undefined);
   const [memoryCenterOpen, setMemoryCenterOpen] = useState(false);
   const [contextCenterOpen, setContextCenterOpen] = useState(false);
+  // —— 工作流中心：work-area 内的全幅覆盖页（与其它中心/预览/设置互斥）——
+  //
+  // `workflowCenterWorkspace` 是**冻结**的工作区：打开时取当前工作区，只有经过
+  // 组件自己的 dirty 守卫（保存/放弃/取消）才换成新的那个。直接用 activeWorkspace
+  // 的话，「切工作区」会不可逆地把未保存草稿从屏幕上抿走。
+  // `workflowCenterRunId` 等于「从运行条点详情进来」：中心直接落在运行历史页并读取
+  // 那一条的冻结快照；`workflowCenterOwnerId` 是本页的运行 owner（无则开新会话）。
+  const [workflowCenterOpen, setWorkflowCenterOpen] = useState(false);
+  const [workflowCenterWorkspace, setWorkflowCenterWorkspace] = useState<string | undefined>(undefined);
+  const [workflowCenterRunId, setWorkflowCenterRunId] = useState<string | undefined>(undefined);
+  const [workflowCenterOwnerId, setWorkflowCenterOwnerId] = useState<string | undefined>(undefined);
+  // 工作区被切走时给中心发的「切换请求」：requestId 变一次 = 问一次（组件先走
+  // 保存/放弃/取消，落地后回 onWorkspaceSwitch 才会真的换工作区）。
+  const [workflowCenterSwitch, setWorkflowCenterSwitch] = useState<{ workspace: string; requestId: number } | undefined>(undefined);
+  const workflowCenterSwitchSeqRef = useRef(0);
+  // —— 离开工作流中心的唯一入口 ——
+  //
+  // 关页 / 开其它中心 / 开预览 / 开设置 / 侧栏开关 / 命令面板入口都会把中心页从屏幕上
+  // 拿掉。各自 setState 直接关就是绕过组件里的 dirty 守卫（草稿静默丢失），所以这里只
+  // 留一个通道：`requestLeaveWorkflowCenter(要执行的动作)` 先问组件注册的守卫，
+  // 组件不脏就立刻放行，脏就弹「保存 / 放弃 / 取消」，取消则**什么动作都不执行**
+  // （中心页与草稿原样留着）。不用 window.confirm：那里只有「是/否」两选，没有保存。
+  const workflowCenterOpenRef = useRef(false);
+  workflowCenterOpenRef.current = workflowCenterOpen;
+  const workflowCenterLeaveGuardRef = useRef<WorkflowLeaveGuard | undefined>(undefined);
+  const registerWorkflowCenterLeaveGuard = useCallback((guard: WorkflowLeaveGuard | undefined): void => {
+    workflowCenterLeaveGuardRef.current = guard;
+  }, []);
+  const requestLeaveWorkflowCenter = useCallback((action: () => void): void => {
+    if (!workflowCenterOpenRef.current) { action(); return; }
+    const guard = workflowCenterLeaveGuardRef.current;
+    if (!guard) { action(); return; }
+    guard(action);
+  }, []);
+  /**
+   * 打开设置（侧栏按钮 / 顶栏按钮 / Ctrl+, / 命令面板都由它落地）：与离开中心页走同一道
+   * 守卫——中心页上还挂着未保存草稿时，先保存/放弃/取消，别让「顺手开个设置」把上下文
+   * 搅乱后再也回不来。
+   */
+  function openSettings(tab?: SettingsTab): void {
+    requestLeaveWorkflowCenter(() => {
+      setSettingsInitialTab(tab);
+      setSettingsOpen(true);
+    });
+  }
   const [preview, setPreview] = useState<PreviewState>();
   const [previewAddMenuOpen, setPreviewAddMenuOpen] = useState(false);
   // 顶栏「作品」下拉的展开态：它的面板从顶栏向下伸进右侧预览区，而内置浏览器是
@@ -673,58 +734,176 @@ export function App(): ReactNode {
   const previewOpenedRef = useRef(previewOpened);
   previewOpenedRef.current = previewOpened;
   function openAutomationPanel(tab: AutomationPanelTab = "tasks", highlight?: AutomationRunsHighlight): void {
-    setAutomationPanelTab(tab);
-    setAutomationPanelHighlight(highlight);
-    setAutomationPanelOpen(true);
-    setAutomationCenterOpen(false);
-    setMemoryCenterOpen(false);
-    setContextCenterOpen(false);
-    setSettingsOpen(false);
-    setPreviewOpened(false);
-    setPreviewAddMenuOpen(false);
+    requestLeaveWorkflowCenter(() => {
+      setAutomationPanelTab(tab);
+      setAutomationPanelHighlight(highlight);
+      setAutomationPanelOpen(true);
+      setAutomationCenterOpen(false);
+      setMemoryCenterOpen(false);
+      setContextCenterOpen(false);
+      setWorkflowCenterOpen(false);
+      setSettingsOpen(false);
+      setPreviewOpened(false);
+      setPreviewAddMenuOpen(false);
+    });
   }
   function closeAutomationPanel(): void {
     setAutomationPanelOpen(false);
   }
   function openAutomationCenter(taskId?: string): void {
-    setAutomationCenterTaskId(taskId);
-    setAutomationCenterOpen(true);
-    setAutomationPanelOpen(false);
-    setMemoryCenterOpen(false);
-    setContextCenterOpen(false);
-    setSettingsOpen(false);
-    setPreviewOpened(false);
-    setPreviewAddMenuOpen(false);
+    requestLeaveWorkflowCenter(() => {
+      setAutomationCenterTaskId(taskId);
+      setAutomationCenterOpen(true);
+      setAutomationPanelOpen(false);
+      setMemoryCenterOpen(false);
+      setContextCenterOpen(false);
+      setWorkflowCenterOpen(false);
+      setSettingsOpen(false);
+      setPreviewOpened(false);
+      setPreviewAddMenuOpen(false);
+    });
   }
   function closeAutomationCenter(): void {
     setAutomationCenterOpen(false);
   }
-  /** 记忆中心：全幅卡片墙，与自动化中心/预览/设置互斥。 */
+  /** 记忆中心：全幅卡片墙，与自动化中心/工作流中心/预览/设置互斥。 */
   function openMemoryCenter(): void {
-    setMemoryCenterOpen(true);
-    setAutomationPanelOpen(false);
-    setAutomationCenterOpen(false);
-    setContextCenterOpen(false);
-    setSettingsOpen(false);
-    setPreviewOpened(false);
-    setPreviewAddMenuOpen(false);
+    requestLeaveWorkflowCenter(() => {
+      setMemoryCenterOpen(true);
+      setAutomationPanelOpen(false);
+      setAutomationCenterOpen(false);
+      setContextCenterOpen(false);
+      setWorkflowCenterOpen(false);
+      setSettingsOpen(false);
+      setPreviewOpened(false);
+      setPreviewAddMenuOpen(false);
+    });
   }
   function closeMemoryCenter(): void {
     setMemoryCenterOpen(false);
   }
-  /** 上下文中心：只读的会话成分页，与记忆/自动化/预览互斥（都占 work-area 覆盖层）。 */
+  /** 上下文中心：只读的会话成分页，与记忆/工作流/自动化/预览互斥（都占 work-area 覆盖层）。 */
   function openContextCenter(): void {
-    setContextCenterOpen(true);
-    setMemoryCenterOpen(false);
-    setAutomationPanelOpen(false);
-    setAutomationCenterOpen(false);
-    setSettingsOpen(false);
-    setPreviewOpened(false);
-    setPreviewAddMenuOpen(false);
+    requestLeaveWorkflowCenter(() => {
+      setContextCenterOpen(true);
+      setMemoryCenterOpen(false);
+      setAutomationPanelOpen(false);
+      setAutomationCenterOpen(false);
+      setWorkflowCenterOpen(false);
+      setSettingsOpen(false);
+      setPreviewOpened(false);
+      setPreviewAddMenuOpen(false);
+    });
   }
   function closeContextCenter(): void {
     setContextCenterOpen(false);
   }
+  /**
+   * 工作流中心：全幅覆盖页，与记忆/上下文/自动化/预览/设置互斥。
+   * 打开一律关闭右侧预览（内置浏览器是原生 WebContentsView，会盖住 DOM 覆盖层；
+   * 组件内部另有 useOverlayLayer(true) 做双保险）。
+   */
+  function openWorkflowCenter(options: { runId?: string; ownerSessionId?: string; workspace?: string } = {}): void {
+    setWorkflowCenterRunId(options.runId);
+    setWorkflowCenterOwnerId(options.ownerSessionId ?? focusedPaneId ?? activeSessionId);
+    // 工作区：优先用那条运行自己的（分屏里两格可能不是同一个工作区），
+    // 否则用当前工作区。
+    setWorkflowCenterWorkspace(options.workspace ?? activeWorkspace);
+    setWorkflowCenterSwitch(undefined);
+    setWorkflowCenterOpen(true);
+    setAutomationPanelOpen(false);
+    setAutomationCenterOpen(false);
+    setMemoryCenterOpen(false);
+    setContextCenterOpen(false);
+    setSettingsOpen(false);
+    setPreviewOpened(false);
+    setPreviewAddMenuOpen(false);
+  }
+  function closeWorkflowCenter(): void {
+    setWorkflowCenterOpen(false);
+    setWorkflowCenterRunId(undefined);
+    setWorkflowCenterSwitch(undefined);
+  }
+
+  /** 中心页看到的运行摘要：按 owner 过滤；快照/owner 不变时引用不变（组件早退）。 */
+  const workflowCenterRuns = useMemo(
+    () => workflowRunsForOwner(workflowRunsSnapshot?.runs, workflowCenterOwnerId),
+    [workflowRunsSnapshot, workflowCenterOwnerId]
+  );
+
+  // 工作区被切走且中心页开着：给组件发一次切换请求（requestId 递增）。
+  // 这里**不**直接换 `workflowCenterWorkspace`：dirty 草稿必须先在组件里过
+  // 「保存 / 放弃 / 取消」，只有它回 `onWorkspaceSwitch` 才真正落地。
+  useEffect(() => {
+    if (!workflowCenterOpen || !workflowCenterWorkspace || !activeWorkspace) return;
+    if (workspaceKey(workflowCenterWorkspace) === workspaceKey(activeWorkspace)) return;
+    workflowCenterSwitchSeqRef.current += 1;
+    setWorkflowCenterSwitch({ workspace: activeWorkspace, requestId: workflowCenterSwitchSeqRef.current });
+  }, [activeWorkspace, workflowCenterOpen, workflowCenterWorkspace]);
+
+  /**
+   * 页面运行没有 owner 会话时现开一个：走**带 requestId 的 session.new** 并等
+   * `session.new-result` 回执拿真实 live 会话 id，绝不伪造 session-pending 身份
+   * （后端的 workflow.run 会按 live record 核对 owner 与工作区）。工作区固定为
+   * 中心页当前工作区，不随激活会话飘。
+   */
+  async function createWorkflowOwnerSession(): Promise<string> {
+    const workspace = workflowCenterWorkspace ?? activeWorkspace ?? "";
+    if (!workspace) throw new Error("请先打开工作区：工作流的 owner 会话必须属于同一个工作区");
+    const sessionId = await requestGallerySession({
+      workspace,
+      agentId: pickTopicAgentId(settings, activeAgentId),
+      requestId: `workflow-owner-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      signal: new AbortController().signal,
+      timeoutMs: WORKFLOW_OWNER_CREATE_TIMEOUT_MS,
+      send: (command) => window.piDesktop.send(command),
+      subscribe: (listener) => window.piDesktop.onRuntimeMessage(listener)
+    });
+    // 后续运行直接复用这个 owner（组件的 owner 是 prop，不写回就只能每轮重开）。
+    setWorkflowCenterOwnerId(sessionId);
+    return sessionId;
+  }
+
+  /**
+   * 运行条「待确认」定位：把 owner 会话切到前台。
+   * 不另造授权弹窗——待决权限原本就挂在那个会话上，切过去 `PermissionDialog` 自己会浮出来。
+   */
+  function locateWorkflowOwner(run: WorkflowRunSummary): void {
+    const summary = sessionSummaries.find((item) => item.id === run.ownerSessionId);
+    if (!summary) {
+      setMessageActionError("找不到这次运行的 owner 会话（可能已被删除或归档），无法定位待确认的权限");
+      return;
+    }
+    if (splitTree && leafIds(splitTree).includes(run.ownerSessionId)) {
+      focusPane(run.ownerSessionId);
+      return;
+    }
+    void openSession(summary.path, summary.workspace, summary.id, summary.agentId);
+  }
+
+  // 运行条的两个入口（详情 / 定位 owner）以 ref 取值、回调身份恒定：
+  // ConversationPane 是 memo 组件，内联箭头函数会在每次 App 重渲染时把每一格的
+  // memo 击穿（与 getPaneCallbacks 同款做法）。
+  const workflowEntryRef = useRef<{
+    openRun(runId: string, ownerSessionId: string | undefined): void;
+    locateOwner(run: WorkflowRunSummary): void;
+  }>({ openRun: () => undefined, locateOwner: () => undefined });
+  workflowEntryRef.current = {
+    openRun: (runId, ownerSessionId) => {
+      // 运行条只知道 runId：从独立摘要里取那条 run 自己的工作区（分屏里两格可能
+      // 不是同一个工作区，用 activeWorkspace 会把中心页开到错的工作区）。
+      const workspace = useDesktopStore.getState().workflowRuns?.runs.find((run) => run.runId === runId)?.workspace;
+      openWorkflowCenter({ runId, ...(ownerSessionId ? { ownerSessionId } : {}), ...(workspace ? { workspace } : {}) });
+    },
+    locateOwner: (run) => locateWorkflowOwner(run)
+  };
+  const openWorkflowRun = useCallback((runId: string, ownerSessionId: string | undefined): void => {
+    workflowEntryRef.current.openRun(runId, ownerSessionId);
+  }, []);
+  const locateWorkflowOwnerEntry = useCallback((run: WorkflowRunSummary): void => {
+    workflowEntryRef.current.locateOwner(run);
+  }, []);
+
   const [previewEditorStates, setPreviewEditorStates] = useState<Record<string, PreviewEditorState>>({});
   const [sidebarView, setSidebarView] = useState<"topics" | "files">("topics");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -786,6 +965,7 @@ export function App(): ReactNode {
   const automationCenterPresence = useExitPresence(automationCenterOpen, 180);
   const memoryCenterPresence = useExitPresence(memoryCenterOpen, 160);
   const contextCenterPresence = useExitPresence(contextCenterOpen, 160);
+  const workflowCenterPresence = useExitPresence(workflowCenterOpen, 180);
   const permissionPresence = useExitPresenceValue(permission, 130);
   const transcriptPresence = useExitPresenceValue(transcriptTarget, 160);
   const renamePresence = useExitPresenceValue(renameSession, 160);
@@ -2011,15 +2191,20 @@ export function App(): ReactNode {
   // 稳定身份——下游 openArtifactPreview/openFilePreview/openPlanPreview 等
   // memo 化回调全部依赖它，不稳定会级联击穿 ConversationPane 的 memo。
   const openPreviewTarget = useCallback((target: PreviewTarget, id: string = previewTargetKey(target)): void => {
-    setAutomationPanelOpen(false);
-    setAutomationCenterOpen(false);
-    setPreviewOpened(true);
-    setPreview((current) => {
-      if (current?.tabs.some((tab) => tab.id === id)) return { ...current, activeTabId: id };
-      const tab: PreviewTab = { id, target };
-      return current ? { tabs: [...current.tabs, tab], activeTabId: id } : { tabs: [tab], activeTabId: id };
+    // 预览与工作流中心互斥：中心是 work-area 全幅覆盖层，底下的预览只会白占宽度。
+    // 关中心页要先过 dirty 守卫（取消就留在中心页，预览也不开）。
+    requestLeaveWorkflowCenter(() => {
+      setAutomationPanelOpen(false);
+      setAutomationCenterOpen(false);
+      setWorkflowCenterOpen(false);
+      setPreviewOpened(true);
+      setPreview((current) => {
+        if (current?.tabs.some((tab) => tab.id === id)) return { ...current, activeTabId: id };
+        const tab: PreviewTab = { id, target };
+        return current ? { tabs: [...current.tabs, tab], activeTabId: id } : { tabs: [tab], activeTabId: id };
+      });
     });
-  }, []);
+  }, [requestLeaveWorkflowCenter]);
 
   const updatePreviewTarget = useCallback((id: string, target: PreviewTarget): void => {
     setPreview((current) => (current ? { ...current, tabs: current.tabs.map((tab) => (tab.id === id ? { ...tab, target } : tab)) } : current));
@@ -2073,10 +2258,13 @@ export function App(): ReactNode {
 
   /** 切到某个已有的预览标签（不新建、不重建 native 视图；面板收起时一并拉开）。 */
   function revealPreviewTab(id: string): void {
-    setAutomationPanelOpen(false);
-    setAutomationCenterOpen(false);
-    setPreviewOpened(true);
-    setPreview((current) => (current ? { ...current, activeTabId: id } : current));
+    requestLeaveWorkflowCenter(() => {
+      setAutomationPanelOpen(false);
+      setAutomationCenterOpen(false);
+      setWorkflowCenterOpen(false);
+      setPreviewOpened(true);
+      setPreview((current) => (current ? { ...current, activeTabId: id } : current));
+    });
   }
 
   /**
@@ -2225,6 +2413,8 @@ export function App(): ReactNode {
           onOpenMemoryCenter={openMemoryCenter}
           onOpenContextCenter={openContextCenter}
           onOpenTranscript={setTranscriptTarget}
+          onOpenWorkflowRun={openWorkflowRun}
+          onLocateWorkflowOwner={locateWorkflowOwnerEntry}
           onActionError={setActionError}
           onRollback={onRollback}
         />
@@ -2657,9 +2847,10 @@ export function App(): ReactNode {
       <button className={`automation-nav-button${automationPanelOpen || automationCenterOpen ? " active" : ""}`} data-control="automation-open" type="button" title="自动化任务" aria-label="自动化任务" aria-pressed={automationPanelOpen || automationCenterOpen} onClick={() => automationPanelOpen ? closeAutomationPanel() : automationCenterOpen ? closeAutomationCenter() : openAutomationPanel()}><Zap size={15} /><span>自动化</span></button>
       <button className={`automation-nav-button${memoryCenterOpen ? " active" : ""}`} data-control="memory-center-open-nav" type="button" title="记忆中心" aria-label="记忆中心" aria-pressed={memoryCenterOpen} onClick={() => memoryCenterOpen ? closeMemoryCenter() : openMemoryCenter()}><Brain size={15} /><span>记忆</span></button>
       <button className={`automation-nav-button${contextCenterOpen ? " active" : ""}`} data-control="context-center-open-nav" type="button" title="上下文中心（查看系统提示词、工具声明与会话成分）" aria-label="上下文中心" aria-pressed={contextCenterOpen} onClick={() => contextCenterOpen ? closeContextCenter() : openContextCenter()}><Layers size={15} /><span>上下文</span></button>
+      <button className={`automation-nav-button${workflowCenterOpen ? " active" : ""}`} data-control="workflow-center-open" type="button" title="工作流中心（搭多 Agent 流水线、看运行与每轮产物）" aria-label="工作流中心" aria-pressed={workflowCenterOpen} onClick={() => workflowCenterOpen ? requestLeaveWorkflowCenter(closeWorkflowCenter) : openWorkflowCenter()}><Workflow size={15} /><span>工作流</span></button>
       <button className="automation-nav-button" data-control="ssh-open" type="button" title="SSH 远程终端" aria-label="SSH 远程终端" onClick={() => openSshPanel()}><Server size={15} /><span>SSH</span></button>
       <div className="sidebar-footer">
-        <button type="button" data-control="settings" onClick={() => setSettingsOpen(true)}><Settings size={16} />设置</button>
+        <button type="button" data-control="settings" onClick={() => openSettings()}><Settings size={16} />设置</button>
         <span className={`runtime-indicator${runtimeBusy ? " busy" : ""}`}><i />{runtimeStatus}</span>
       </div>
     </>
@@ -2697,13 +2888,14 @@ export function App(): ReactNode {
   shortcutBlockedRef.current = Boolean(permission) || Boolean(question) || galleryWallOpen || Boolean(galleryDraftOpen) || Boolean(galleryDataApp) || previewFullscreen || renamePresence.rendered || deletePresence.rendered || rollbackPresence.rendered || deleteWorkspacePresence.rendered || transcriptPresence.rendered;
   const settingsOpenRef = useRef(false);
   settingsOpenRef.current = settingsOpen;
-  const shortcutActionsRef = useRef({ newSession: (): void => undefined, browser: (): void => undefined });
+  const shortcutActionsRef = useRef({ newSession: (): void => undefined, browser: (): void => undefined, openSettings: (): void => undefined });
   shortcutActionsRef.current = {
     newSession: () => {
       if (!activeWorkspace) { setMessageActionError("先打开一个工作区，再新建话题"); return; }
       void createNewSession();
     },
-    browser: () => openBrowserTab()
+    browser: () => openBrowserTab(),
+    openSettings: () => openSettings()
   };
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent): void {
@@ -2713,7 +2905,7 @@ export function App(): ReactNode {
         event.preventDefault();
         setPaletteOpen(false);
         if (settingsOpenRef.current) { setSettingsOpen(false); setSettingsInitialTab(undefined); }
-        else { setSettingsInitialTab(undefined); setSettingsOpen(true); }
+        else shortcutActionsRef.current.openSettings();
         return;
       }
       if (command === "palette") {
@@ -2755,7 +2947,8 @@ export function App(): ReactNode {
     { id: "view.automation", title: "打开自动化任务", group: "视图", keywords: "automation schedule 定时 任务", hint: enabledAutomationCount > 0 ? `${String(enabledAutomationCount)} 个启用` : "定时任务", icon: Zap, run: () => openAutomationPanel() },
     { id: "view.memory", title: "打开记忆中心", group: "视图", keywords: "memory 记忆 卡片 索引 长期记忆", hint: "卡片墙 + 模型索引", icon: Brain, run: () => openMemoryCenter() },
     { id: "view.context", title: "查看会话上下文", group: "视图", keywords: "context 上下文 提示词 工具 schema token 成分 系统提示词", hint: "系统提示词与工具声明", searchOnly: true, icon: Layers, run: () => openContextCenter() },
-    { id: "settings.open", title: "打开设置", group: "设置", keywords: "settings preference 偏好 配置", shortcut: APP_SHORTCUT_LABELS.settings, icon: Settings, run: () => { setSettingsInitialTab(undefined); setSettingsOpen(true); } }
+    { id: "view.workflow", title: "打开工作流中心", group: "视图", keywords: "workflow 工作流 流水线 编排 多 agent 返工", hint: "搭流程 + 运行详情", icon: Workflow, run: () => openWorkflowCenter() },
+    { id: "settings.open", title: "打开设置", group: "设置", keywords: "settings preference 偏好 配置", shortcut: APP_SHORTCUT_LABELS.settings, icon: Settings, run: () => openSettings() }
   );
 
   if (isGenerating) {
@@ -2882,6 +3075,7 @@ export function App(): ReactNode {
             <button type="button" className="rail-new-session" data-control="new-session" title={`在当前工作区新建话题（${APP_SHORTCUT_LABELS["new-session"]}）`} aria-label="在当前工作区新建话题" disabled={!activeWorkspace} onClick={() => void createNewSession()}><Plus size={18} /></button>
             <button type="button" className={`rail-icon${automationPanelOpen || automationCenterOpen ? " active" : ""}`} data-control="automation-open" title="自动化任务" aria-label="自动化任务" onClick={() => automationPanelOpen ? closeAutomationPanel() : automationCenterOpen ? closeAutomationCenter() : openAutomationPanel()}><Zap size={18} /></button>
             <button type="button" className={`rail-icon${contextCenterOpen ? " active" : ""}`} data-control="context-center-open-nav" title="上下文中心" aria-label="上下文中心" onClick={() => contextCenterOpen ? closeContextCenter() : openContextCenter()}><Layers size={18} /></button>
+            <button type="button" className={`rail-icon${workflowCenterOpen ? " active" : ""}`} data-control="workflow-center-open" title="工作流中心" aria-label="工作流中心" onClick={() => workflowCenterOpen ? requestLeaveWorkflowCenter(closeWorkflowCenter) : openWorkflowCenter()}><Workflow size={18} /></button>
             <button type="button" className="rail-icon" data-control="ssh-open" title="SSH 远程终端" aria-label="SSH 远程终端" onClick={() => openSshPanel()}><Server size={18} /></button>
             <button type="button" className="rail-icon" data-control="rail-topics" title={runningSessions.length > 0 ? `话题列表（${runningSessions.length} 个运行中）` : "话题列表"} aria-label={runningSessions.length > 0 ? `话题列表，${runningSessions.length} 个运行中` : "话题列表"} onClick={() => { setSidebarView("topics"); setSidebarTab("topics"); setSidebarFlyoutOpen(true); }}><MessageCircle size={18} />{runningSessions.length > 0 ? <span className="rail-running-badge">{runningSessions.length}</span> : null}</button>
             <button type="button" className="rail-icon" data-control="rail-search" title="搜索" aria-label="搜索" onClick={() => { setSidebarView("topics"); setSidebarFlyoutOpen(true); window.setTimeout(() => sidebarSearchRef.current?.focus(), 30); }}><Search size={18} /></button>
@@ -2942,7 +3136,7 @@ export function App(): ReactNode {
           <div
             ref={workAreaRef}
             data-pane="work-area"
-            className={`work-area${designMode ? " design-mode" : ` ${workAreaPreviewClasses({ open: previewOpened, tabs: Boolean(preview && preview.tabs.length > 0) })}`}${automationPanelPresence.rendered ? " automation-panel-open" : ""}${automationCenterPresence.rendered ? " automation-center-open" : ""}${memoryCenterPresence.rendered ? " memory-center-open" : ""}${contextCenterPresence.rendered ? " context-center-open" : ""}${designDragging ? " is-design-dragging" : !designMode && previewDragging ? " is-preview-dragging" : ""}`}
+            className={`work-area${designMode ? " design-mode" : ` ${workAreaPreviewClasses({ open: previewOpened, tabs: Boolean(preview && preview.tabs.length > 0) })}`}${automationPanelPresence.rendered ? " automation-panel-open" : ""}${automationCenterPresence.rendered ? " automation-center-open" : ""}${memoryCenterPresence.rendered ? " memory-center-open" : ""}${contextCenterPresence.rendered ? " context-center-open" : ""}${workflowCenterPresence.rendered ? " workflow-center-open" : ""}${designDragging ? " is-design-dragging" : !designMode && previewDragging ? " is-preview-dragging" : ""}`}
             style={designMode
               ? { "--design-split": `${designSplit}%` } as CSSProperties
               : {
@@ -2983,6 +3177,8 @@ export function App(): ReactNode {
                   onOpenMemoryCenter={openMemoryCenter}
                   onOpenContextCenter={openContextCenter}
                   onOpenTranscript={setTranscriptTarget}
+                  onOpenWorkflowRun={openWorkflowRun}
+                  onLocateWorkflowOwner={locateWorkflowOwnerEntry}
                   onActionError={setActionError}
                   onRollback={mainPaneRollback}
                   renderLanding={landingGallery}
@@ -3013,6 +3209,8 @@ export function App(): ReactNode {
               onOpenPlanDetail={openPlanPreview}
               onOpenMemoryTopic={openMemoryTopic}
               onOpenTranscript={setTranscriptTarget}
+              onOpenWorkflowRun={openWorkflowRun}
+              onLocateWorkflowOwner={locateWorkflowOwnerEntry}
               onActionError={setActionError}
               onRollback={mainPaneRollback}
               renderLanding={landingGallery}
@@ -3069,6 +3267,22 @@ export function App(): ReactNode {
           {contextCenterPresence.rendered && (
             <ExitWrap exiting={contextCenterPresence.exiting}>
               <ContextCenter onClose={closeContextCenter} />
+            </ExitWrap>
+          )}
+          {workflowCenterPresence.rendered && (
+            <ExitWrap exiting={workflowCenterPresence.exiting}>
+              <WorkflowCenter
+                workspace={workflowCenterWorkspace ?? activeWorkspace ?? ""}
+                runs={workflowCenterRuns}
+                {...(workflowCenterOwnerId ? { ownerSessionId: workflowCenterOwnerId } : {})}
+                {...(activeAgentId ? { agentId: activeAgentId } : {})}
+                {...(workflowCenterRunId ? { initialRunId: workflowCenterRunId } : {})}
+                {...(workflowCenterSwitch ? { workspaceSwitch: workflowCenterSwitch } : {})}
+                onWorkspaceSwitch={(next) => { setWorkflowCenterWorkspace(next); setWorkflowCenterSwitch(undefined); }}
+                onOwnerRequired={createWorkflowOwnerSession}
+                onClose={closeWorkflowCenter}
+                onRegisterLeaveGuard={registerWorkflowCenterLeaveGuard}
+              />
             </ExitWrap>
           )}
         </div>

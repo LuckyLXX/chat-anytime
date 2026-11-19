@@ -75,6 +75,9 @@ KNOWN_PANES = frozenset({
     "design", "design-toolbar", "design-tools", "design-canvas", "design-layers", "design-inspector",
     "gallery-menu", "gallery-wall", "gallery-services",
     "automation-settings", "automation-dialog", "automation-panel", "automation-center", "memory-center",
+    "workflow-center", "workflow-list", "workflow-main", "workflow-canvas",
+    "workflow-inspector", "workflow-runs", "workflow-run-details", "workflow-run-strip",
+    "composer-status-stack",
     "agent-settings", "general-settings",
     "model-settings",
     "resource-settings",
@@ -136,12 +139,27 @@ KNOWN_CONTROLS = frozenset({
     "hooks-trust",
     "hooks-run-log",
     "hooks-template",
+    # 工作流编排（2026-11-19，方案 §9：工作流中心 / 画布 / 检查器与运行条的控件）。
+    "workflow-center-open", "workflow-center-close", "workflow-view-edit", "workflow-view-runs",
+    "workflow-refresh", "workflow-open", "workflow-create", "workflow-create-blank", "workflow-copy",
+    "workflow-name", "workflow-save", "workflow-delete", "workflow-delete-confirm", "workflow-delete-cancel",
+    "workflow-dirty-save", "workflow-dirty-discard", "workflow-dirty-cancel",
+    "workflow-run", "workflow-run-start", "workflow-run-cancel", "workflow-run-input",
+    "workflow-run-open", "workflow-run-details", "workflow-run-dismiss", "workflow-run-close",
+    "workflow-run-stop", "workflow-run-execution", "workflow-run-content-artifact", "workflow-run-content-transcript",
+    "workflow-runs-refresh", "workflow-runs-more", "workflow-stop", "workflow-pending-locate",
+    "workflow-node-add", "workflow-connect", "workflow-edge-delete", "workflow-node-delete",
+    "workflow-node-kind", "workflow-node-source", "workflow-node-subagent", "workflow-node-thinking",
+    "workflow-node-tools-inherit", "workflow-node-tool", "workflow-node-access", "workflow-node-execution",
+    "workflow-node-artifact-load", "workflow-node-run-details",
+    "workflow-rework-toggle", "workflow-rework-entry", "workflow-rework-gate", "workflow-rework-attempts",
+    "workflow-inspector-workflow-tab",
     "usage-agent-filter",
 })
 KNOWN_ROW_KINDS = frozenset({"workspace", "session", "agent"})
 KNOWN_NODE_KINDS = frozenset({"thinking", "tool-call", "text"})
 KNOWN_NODE_STATES = frozenset({"running", "completed", "error", "aborted"})
-KNOWN_COMPOSER_ZONES = frozenset({"queue", "plan", "attachments", "error", "input", "footer", "stats", "popup"})
+KNOWN_COMPOSER_ZONES = frozenset({"queue", "plan", "status-stack", "workflow", "team", "attachments", "error", "input", "footer", "stats", "popup"})
 KNOWN_LAYER_KINDS = frozenset({"layer", "overlay"})
 KNOWN_UI_STATES = frozenset({
     "data-ui-settings-open", "data-ui-workspace-open", "data-ui-chat-empty",

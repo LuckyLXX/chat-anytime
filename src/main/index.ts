@@ -35,6 +35,7 @@ import { clearPanelData, measurePanelData, type PanelDataDeps } from "./panel-st
 import { installPanelCorsRelaxation } from "./panel-cors.js";
 import { createTrayController, type TrayController } from "./tray.js";
 import { PendingQuestionMirror } from "./pending-questions.js";
+import { PendingPermissionMirror, previewPermissionRequest } from "./pending-permissions.js";
 import type { StaticServerEndpoint } from "./browser-static-server.js";
 import type { PanelAction } from "../shared/panel.js";
 import { clampServiceWait, waitForService } from "./gallery-service.js";
@@ -109,8 +110,10 @@ let latestSnapshot: RuntimeSnapshot | undefined;
 const snapshotBaselines = createMainSnapshotCache({ nextRequestId: () => randomUUID() });
 let latestCatalog: Extract<RuntimeMessage, { type: "catalog" }> | undefined;
 let latestResources: ResourceCatalog | undefined;
+let latestWorkflowRuns: Extract<RuntimeMessage, { type: "workflow.runs" }>["snapshot"] | undefined;
 /** 渲染端重载后恢复待决提问：utility 的 broker 还在等，面板不能丢。 */
 const pendingQuestions = new PendingQuestionMirror();
+const pendingPermissions = new PendingPermissionMirror();
 let settingsCache: DesktopSettings | undefined;
 let credentialsCache: Record<string, string> = {};
 let securityWarning: string | undefined;
@@ -863,6 +866,11 @@ function startRuntime(): void {
     // 只镜像、不裁决——真正的作答仍由 utility 的 QuestionBroker 处理。
     if (message.type === "question") pendingQuestions.record(message.request);
     if (message.type === "question.dismiss") pendingQuestions.dismiss(message.id);
+    if (message.type === "permission") pendingPermissions.record(message.request);
+    if (message.type === "permission.dismiss") pendingPermissions.dismiss(message.id);
+    if (message.type === "workflow.runs") {
+      if (!latestWorkflowRuns || latestWorkflowRuns.epoch !== message.snapshot.epoch || message.snapshot.revision > latestWorkflowRuns.revision) latestWorkflowRuns = message.snapshot;
+    }
     // 面板作品的数据源：无条件喂（不依赖渲染端是否在看，也不依赖主窗口是否存在）。
     panelState.ingest(message);
     if (message.type === "catalog") latestCatalog = message;
@@ -881,11 +889,13 @@ function startRuntime(): void {
     // 面板推送只服务面板窗口（渲染端零消费），不转发——省掉流式期间每 500ms 一次
     // 结构化克隆（载荷含最多 40 条会话摘要 + 各 live 会话的 todo）。
     // main 自己的 ingest 在上一行，不受影响。
-    if (message.type !== "sessions.live") mainWindow?.webContents.send("runtime:message", message);
+    if (message.type !== "sessions.live") mainWindow?.webContents.send("runtime:message", message.type === "permission" ? { ...message, request: previewPermissionRequest(message.request) } : message);
   });
   runtimeProcess.on("exit", (code) => {
     runtimeProcess = undefined;
     pendingQuestions.clear();
+    pendingPermissions.clear();
+    latestWorkflowRuns = undefined;
     mainWindow?.webContents.send("runtime:message", { type: "error", message: `Pi 运行时意外停止（退出代码 ${code}），请重启应用。` } satisfies RuntimeMessage);
   });
   // Forward Pi runtime stdio only in development: in packaged builds the Pi
@@ -1364,7 +1374,7 @@ function registerIpc(): void {
     const settings: DesktopSettings = settingsForRenderer({ ...source, providers: source.providers.map((provider) => ({ ...provider, keyConfigured: Boolean(credentialsCache[provider.id]) })), jevKeyConfigured: Boolean(credentialsCache[JEV_CREDENTIAL_ID]) });
     // 后台服务在主进程里跑，渲染端重载不打断它们 —— 看板必须靠这一帧恢复，否则
     // 「刷新页面 = 服务从看板上消失，而进程还在」。
-    return { platform: process.platform, version: app.getVersion(), securityWarning, settings, runtime: latestSnapshot, catalog: latestCatalog ? { models: latestCatalog.models, providers: latestCatalog.providers } : undefined, resources: latestResources, browserTabs: browserPreviewController?.tabIds() ?? [], questions: pendingQuestions.list(), imStatus: imGatewayStatus(), galleryServices: galleryServices?.list() ?? [] };
+    return { platform: process.platform, version: app.getVersion(), securityWarning, settings, runtime: latestSnapshot, catalog: latestCatalog ? { models: latestCatalog.models, providers: latestCatalog.providers } : undefined, resources: latestResources, browserTabs: browserPreviewController?.tabIds() ?? [], questions: pendingQuestions.list(), permissions: pendingPermissions.list(), workflowRuns: latestWorkflowRuns, imStatus: imGatewayStatus(), galleryServices: galleryServices?.list() ?? [] };
   });
   // 主题导入：对话框与全部文件工作都在主进程（渲染端不再用 webkitdirectory + FileReader
   // 读盘、不再把资产变成 base64 过 IPC）。渲染端只拿 CSS 文本与统计。

@@ -94,7 +94,7 @@ describe("主进程接线", () => {
 
   it("权限消息仍继续转发渲染端（桌面与手机双通道，先到先得）", () => {
     expect(index).toContain("permission / permission.dismiss 仍继续走下面");
-    expect(index).toContain('if (message.type !== "sessions.live") mainWindow?.webContents.send("runtime:message", message);');
+    expect(index).toContain('if (message.type !== "sessions.live") mainWindow?.webContents.send("runtime:message", message.type === "permission" ? { ...message, request: previewPermissionRequest(message.request) } : message);');
   });
 });
 
@@ -309,10 +309,10 @@ describe("主题契约五处镜像", () => {
       expect(themeVariables).toContain(control);
       expect(themeCheck).toContain(`"${control}"`);
     }
-    expect(themeSkill).toContain("主要区域（44）");
-    expect(themeSkill).toContain("关键控件（153）");
-    expect(themeVariables).toContain("`data-pane`（44）");
-    expect(themeVariables).toContain("`data-control`（153）");
+    expect(themeSkill).toContain("主要区域（53）");
+    expect(themeSkill).toContain("关键控件（204）");
+    expect(themeVariables).toContain("`data-pane`（53）");
+    expect(themeVariables).toContain("`data-control`（204）");
     expect(themeCheck).toContain('"im-channel-settings"');
     expect(themeCheck).toContain('"im-channel-enable"');
   });

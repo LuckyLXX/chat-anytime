@@ -1012,36 +1012,24 @@ html[data-ui-blur="off"] *::after {
 .composer.has-queue .composer-queue { grid-row: 1; }
 .composer.has-queue .composer-input-row { grid-row: 2; }
 .composer.has-queue .composer-footer { grid-row: 3; }
-/* 计划模式状态条：占输入框上方首行；与排队列表共存时依次占位。 */
-.composer.has-plan .composer-plan-banner { grid-row: 1; }
-.composer.has-plan .composer-input-row { grid-row: 2; }
-.composer.has-plan .composer-footer { grid-row: 3; }
-.composer.has-plan.has-queue .composer-plan-banner { grid-row: 1; }
-.composer.has-plan.has-queue .composer-queue { grid-row: 2; }
-.composer.has-plan.has-queue .composer-input-row { grid-row: 3; }
-.composer.has-plan.has-queue .composer-footer { grid-row: 4; }
-/* 团队状态条：与计划横幅同处输入框上方首行；与计划/排队共存时依次占位。
-   只显示有成员的会话（团队关闭但成员仍在后台时仍显示，供一键全停）。 */
-.composer.has-team { grid-template-rows: auto minmax(32px, 1fr) auto; }
-.composer.has-team .composer-team-strip { grid-row: 1; }
-.composer.has-team .composer-input-row { grid-row: 2; }
-.composer.has-team .composer-footer { grid-row: 3; }
-.composer.has-team.has-queue { grid-template-rows: auto auto minmax(32px, 1fr) auto; }
-.composer.has-team.has-queue .composer-team-strip { grid-row: 1; }
-.composer.has-team.has-queue .composer-queue { grid-row: 2; }
-.composer.has-team.has-queue .composer-input-row { grid-row: 3; }
-.composer.has-team.has-queue .composer-footer { grid-row: 4; }
-.composer.has-team.has-plan { grid-template-rows: auto auto minmax(32px, 1fr) auto; }
-.composer.has-team.has-plan .composer-team-strip { grid-row: 1; }
-.composer.has-team.has-plan .composer-plan-banner { grid-row: 2; }
-.composer.has-team.has-plan .composer-input-row { grid-row: 3; }
-.composer.has-team.has-plan .composer-footer { grid-row: 4; }
-.composer.has-team.has-plan.has-queue { grid-template-rows: auto auto auto minmax(32px, 1fr) auto; }
-.composer.has-team.has-plan.has-queue .composer-team-strip { grid-row: 1; }
-.composer.has-team.has-plan.has-queue .composer-plan-banner { grid-row: 2; }
-.composer.has-team.has-plan.has-queue .composer-queue { grid-row: 3; }
-.composer.has-team.has-plan.has-queue .composer-input-row { grid-row: 4; }
-.composer.has-team.has-plan.has-queue .composer-footer { grid-row: 5; }
+/* 状态条堆栈（2026-11-19）：计划 / 团队 / 工作流共用输入框上方的**同一个**容器。
+   为什么收成一份：三条状态条各自占一行时，样式里必须写 has-plan×has-team×has-queue
+   的组合矩阵，多一条就翻倍、漏一格就是两条叠在同一行。现在只声明「有没有堆栈」与
+   「有没有排队」两件事，堆栈内部排布交给 `.composer-status-stack` 自己（grid 单列 +
+   gap），以后再加状态条不需要动这里一行。
+   公开钩子：容器带 data-pane="composer-status-stack" 与 data-composer-zone="status-stack"，
+   内部各项保留各自的 data-composer-zone（plan / team / workflow）。 */
+.composer.has-status-stack { grid-template-rows: auto minmax(32px, 1fr) auto; }
+.composer.has-status-stack .composer-status-stack { grid-row: 1; }
+.composer.has-status-stack .composer-input-row { grid-row: 2; }
+.composer.has-status-stack .composer-footer { grid-row: 3; }
+.composer.has-status-stack.has-queue { grid-template-rows: auto auto minmax(32px, 1fr) auto; }
+.composer.has-status-stack.has-queue .composer-status-stack { grid-row: 1; }
+.composer.has-status-stack.has-queue .composer-queue { grid-row: 2; }
+.composer.has-status-stack.has-queue .composer-input-row { grid-row: 3; }
+.composer.has-status-stack.has-queue .composer-footer { grid-row: 4; }
+.composer-status-stack { display: grid; grid-column: 1; align-content: start; justify-items: start; gap: 4px; min-width: 0; max-width: 100%; }
+.composer-status-stack > * { max-width: 100%; }
 .composer-team-strip { display: flex; align-items: center; gap: 8px; justify-self: start; grid-column: 1; min-width: 0; max-width: 100%; padding: 2px 8px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-raised); color: var(--text-muted); font-size: 11px; line-height: 1.6; }
 .composer-team-title { display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; color: var(--text); font-weight: 650; }
 .composer-team-title > svg { flex: 0 0 auto; color: var(--accent-text); }
@@ -1637,6 +1625,17 @@ html[data-ui-blur="off"] *::after {
    - 配色只走语义 token；CJK 连续文本 ≥ 11px，10px 只给徽标/数字。 */
 .work-area.context-center-open .conversation-pane .panel-dock,
 .work-area.context-center-open .conversation-pane .panel-dock-fab { display: none; }
+
+/* ── 工作流中心（2026-11-19）────────────────────────────────────────
+   work-area 内的全幅覆盖页（与记忆中心 / 上下文中心 / 自动化中心同级互斥）。
+   样式主体在 workflow.css（随 WorkflowCenter 一起进入构建）：那里定义
+   data-pane="workflow-center" 的骨架、画布与检查器；这里只钉「它占住 work-area 时
+   会话浮层必须收起」，以及侧栏入口的激活态复用 .automation-nav-button.active。
+   公开钩子：data-pane workflow-center（页）/ workflow-list / workflow-main /
+   workflow-runs / workflow-run-details / workflow-run-strip（运行条）；
+   入口控件 workflow-center-open（侧栏 + 折叠栏）与命令面板动作 view.workflow。 */
+.work-area.workflow-center-open .conversation-pane .panel-dock,
+.work-area.workflow-center-open .conversation-pane .panel-dock-fab { display: none; }
 .context-center { position: absolute; z-index: 37; inset: 0; display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--surface); animation: automation-center-in .18s var(--motion-ease); }
 .ui-presence.is-exiting > .context-center { animation: automation-center-out .18s var(--motion-ease) both; }
 @media (prefers-reduced-motion: reduce) { .context-center, .ui-presence.is-exiting > .context-center { animation: none !important; } }

@@ -52,14 +52,20 @@ export interface PermissionGateDeps {
    * 手机端没人及时点按钮时，工具不能永久挂住整个回合。普通前台会话不设超时。
    */
   permissionTimeoutMs?: () => number | undefined;
+  /** 工作流节点的冻结权限上限及明确归属。 */
+  accessModeCap?: () => AccessMode | undefined;
+  workflow?: () => { runId: string; nodeId: string; attempt: number; nodeTitle: string } | undefined;
+  onWorkflowDenied?: () => void;
 }
 
 export function requestPermission(deps: PermissionGateDeps, toolName: string, args: Record<string, unknown>, toolCallId: string, principalKind: "root-agent" | "subagent" = "root-agent"): Promise<PermissionDecision> {
   const risk = toolRisk(deps.workspace(), toolName, args);
   if (!risk) return Promise.resolve("allow-once");
   const sessionId = deps.session()?.sessionId ?? "session-pending";
+  const workflow = deps.workflow?.();
   return deps.broker.request({
     accessMode: deps.accessMode(),
+    ...(deps.accessModeCap ? { accessModeCap: deps.accessModeCap() } : {}),
     toolName,
     summary: summarizeArgs(toolName, args),
     args,
@@ -69,9 +75,13 @@ export function requestPermission(deps: PermissionGateDeps, toolName: string, ar
       sessionId,
       ...(principalKind === "subagent" ? { parentSessionId: sessionId } : {}),
       agentId: deps.agent()?.id,
-      toolCallId
+      toolCallId,
+      ...(workflow ? { workflow } : {})
     },
     ...(deps.permissionTimeoutMs ? { timeoutMs: deps.permissionTimeoutMs() } : {})
+  }).then((decision) => {
+    if (workflow && decision === "deny") deps.onWorkflowDenied?.();
+    return decision;
   });
 }
 

@@ -66,7 +66,7 @@ beforeEach(() => {
   });
   useDesktopStore.setState({
     skillStore: { ...EMPTY, categories: [{ key: "dev-programming", name: "开发编程", sortOrder: 30 }] },
-    resources: { skills: [], commands: [], mcpServers: [], todos: [], memory: [], subagents: [], hooks: [], hooksEnabled: true, automation: [], automationRuns: [], gallery: [], diagnostics: [] },
+    resources: { workflows: { items: [] }, skills: [], commands: [], mcpServers: [], todos: [], memory: [], subagents: [], hooks: [], hooksEnabled: true, automation: [], automationRuns: [], gallery: [], diagnostics: [] },
     snapshot: { ...useDesktopStore.getState().snapshot, workspace: "D:/ws" }
   });
 });

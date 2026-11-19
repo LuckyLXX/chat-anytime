@@ -4,10 +4,12 @@ import type {
   PermissionDecision,
   PermissionRequest
 } from "../shared/protocol.js";
-import { permissionAction, permissionScope } from "./permissions.js";
+import { permissionActionWithCap, permissionScope } from "./permissions.js";
 
 export interface PermissionBrokerRequest {
   accessMode: AccessMode;
+  /** 节点权限上限；与 owner 模式分别计算动作后取更严格结果。 */
+  accessModeCap?: AccessMode;
   toolName: string;
   summary: string;
   args: Record<string, unknown>;
@@ -32,7 +34,7 @@ interface PendingPermission {
 export class PermissionBroker {
   private sequence = 0;
   private readonly pending = new Map<string, PendingPermission>();
-  private readonly sessionGrants = new Set<string>();
+  private readonly sessionGrants = new Map<string, { sessionId: string; runId?: string }>();
 
   constructor(
     private readonly emit: (request: PermissionRequest) => void,
@@ -40,11 +42,11 @@ export class PermissionBroker {
   ) {}
 
   request(input: PermissionBrokerRequest): Promise<PermissionDecision> {
-    const action = permissionAction(input.accessMode, input.toolName, input.risk);
+    const action = permissionActionWithCap(input.accessMode, input.accessModeCap, input.toolName, input.risk);
     if (action === "allow") return Promise.resolve("allow-once");
     if (action === "deny") return Promise.resolve("deny");
 
-    const grantKey = this.grantKey(input.principal.sessionId, input.toolName, input.risk);
+    const grantKey = this.grantKey(input.principal, input.toolName, input.risk);
     if (this.sessionGrants.has(grantKey)) return Promise.resolve("allow-session");
 
     const id = `permission-${++this.sequence}`;
@@ -81,7 +83,10 @@ export class PermissionBroker {
     this.dismiss(id);
     if (decision === "allow-session") {
       const { principal, toolName, risk } = pending.request;
-      this.sessionGrants.add(this.grantKey(principal.sessionId, toolName, risk));
+      this.sessionGrants.set(this.grantKey(principal, toolName, risk), {
+        sessionId: principal.sessionId,
+        ...(principal.workflow ? { runId: principal.workflow.runId } : {})
+      });
     }
     pending.resolve(decision);
     return true;
@@ -95,9 +100,8 @@ export class PermissionBroker {
       return;
     }
 
-    const prefix = `${sessionId}:`;
-    for (const key of this.sessionGrants) {
-      if (key.startsWith(prefix)) this.sessionGrants.delete(key);
+    for (const [key, grant] of this.sessionGrants) {
+      if (grant.sessionId === sessionId) this.sessionGrants.delete(key);
     }
   }
 
@@ -116,7 +120,28 @@ export class PermissionBroker {
     }
   }
 
-  private grantKey(sessionId: string, toolName: string, risk: PermissionRequest["risk"]): string {
-    return `${sessionId}:${permissionScope(toolName, risk)}`;
+  /** 主会话中止时排除工作流节点；独立工作流不跟随主回合停止。 */
+  cancelPendingNonWorkflow(sessionId: string): void {
+    this.cancelMatching((request) => request.principal.sessionId === sessionId && !request.principal.workflow);
+  }
+
+  /** 停止/结束某工作流时只取消该 run 的权限，并清除该 run 的会话授权。 */
+  cancelWorkflow(runId: string): void {
+    this.cancelMatching((request) => request.principal.workflow?.runId === runId);
+    for (const [key, grant] of this.sessionGrants) if (grant.runId === runId) this.sessionGrants.delete(key);
+  }
+
+  private cancelMatching(matches: (request: PermissionRequest) => boolean): void {
+    for (const [id, pending] of this.pending) {
+      if (!matches(pending.request)) continue;
+      this.pending.delete(id);
+      if (pending.timer) clearTimeout(pending.timer);
+      this.dismiss(id);
+      pending.resolve("deny");
+    }
+  }
+
+  private grantKey(principal: ExecutionPrincipal, toolName: string, risk: PermissionRequest["risk"]): string {
+    return JSON.stringify([principal.sessionId, principal.workflow?.runId ?? null, permissionScope(toolName, risk)]);
   }
 }

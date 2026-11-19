@@ -9,6 +9,9 @@ export type AccessMode = "read-only" | "ask" | "workspace" | "full";
  */
 export type ThinkingLevelMap = Partial<Record<ThinkingLevel, string | null>>;
 
+import type { WorkflowCommand, WorkflowResult, WorkflowRunsSnapshot, WorkflowSummary } from "./workflow-protocol.js";
+export type { WorkflowCommand, WorkflowResult, WorkflowRunsSnapshot, WorkflowSummary, WorkflowRunSummary } from "./workflow-protocol.js";
+export type { WorkflowDefinition, WorkflowRun, WorkflowNode, WorkflowDiagnostic } from "./workflow.js";
 import type { DesignCanvasInfo, DesignNode, DesignOp } from "./design-schema.js";
 import type { MemoryLayer, MemorySnapshot } from "./memory.js";
 export type { MemoryLayer, MemorySnapshot, MemorySnapshotEntry } from "./memory.js";
@@ -208,9 +211,16 @@ export interface AgentProfile {
   skillOverrides?: Record<string, boolean>;
   /**
    * 角色级能力工具开关（与 skillOverrides 同构的 overlay）：合法键为 "browser"、
-   * "ssh"、"mcp:<serverName>"。缺省（无字段/无键）= 启用，false = 该角色禁用；
-   * 存量角色升级后行为零变化。子代理会话不带这些工具族（child session 无
-   * customTools），本字段对委派链路无影响。
+   * "ssh"、"mcp:<serverName>"、"workflow"。
+   *
+   * 两套缺省语义：
+   * - "browser" / "ssh" / "mcp:<serverName>"：缺省（无字段/无键）= 启用，
+   *   false = 该角色禁用；存量角色升级后行为零变化。
+   * - "workflow"：缺省 = **关闭**（工作流工具默认 OFF），只有显式 true 才启用；
+   *   读写两端都必须保留 true/false（`normalizeToolOverrides` 白名单）。页面上的
+   *   工作流运行是用户动作，不受这个开关限制。
+   * 子代理与工作流节点会话不带这些工具族（child session 无 customTools 注入），
+   * 本字段对委派/节点执行链路无影响。
    */
   toolOverrides?: Record<string, boolean>;
   archived?: boolean;
@@ -2224,6 +2234,8 @@ export interface AutomationTask {
 }
 
 export interface ResourceCatalog {
+  /** 当前目录所属工作区及轻量工作流目录，全文按需读取。 */
+  workflows: { workspace?: string; items: WorkflowSummary[] };
   skills: SkillSummary[];
   commands: CommandSummary[];
   mcpServers: McpServerSummary[];
@@ -2672,6 +2684,8 @@ export interface ExecutionPrincipal {
   parentSessionId?: string;
   agentId?: string;
   toolCallId?: string;
+  /** 工作流节点保持 owner 会话身份；授权仅在该次运行内有效。 */
+  workflow?: { runId: string; nodeId: string; attempt: number; nodeTitle: string };
 }
 
 export interface PermissionRequest {
@@ -2715,6 +2729,7 @@ export interface QuestionRequest {
 }
 
 export type RuntimeCommand =
+  | WorkflowCommand
   /** bundledSkillsDir / bundledSubagentsDir：随安装包分发的内置资产目录（
    * <安装目录>/skills 与 <安装目录>/subagents，dev 下为仓库 resources/ 下同名目录），
    * 由主进程解析（utility 进程无 Electron API）；缺省/不存在时该来源不参与扫描。
@@ -2967,6 +2982,8 @@ export type RuntimeCommand =
   | { type: "gallery.run"; id: string };
 
 export type RuntimeMessage =
+  | { type: "workflow.result"; result: WorkflowResult }
+  | { type: "workflow.runs"; snapshot: WorkflowRunsSnapshot }
   | { type: "catalog"; models: ModelOption[]; providers: ProviderOption[] }
   | { type: "custom-models"; providerId: string; models: ProviderModelSettings[] }
   | { type: "custom-model-error"; providerId: string; message: string }
@@ -3133,6 +3150,9 @@ export interface DesktopBootstrap {
   browserTabs?: string[];
   /** 渲染端重载后仍需展示的待决提问（主进程镜像；空/缺省 = 没有挂起的面板）。 */
   questions?: QuestionRequest[];
+  /** 待决权限请求镜像，供 renderer 重载后恢复。 */
+  workflowRuns?: WorkflowRunsSnapshot;
+  permissions?: PermissionRequest[];
   /** IM 通道当前状态（主进程网关快照；缺省 = 没有网关或未初始化）。 */
   imStatus?: ImStatus;
   /**

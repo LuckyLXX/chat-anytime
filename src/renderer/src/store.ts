@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { memoryCacheKey } from "./lib/memory-format";
+import { isTerminalRunStatus } from "./lib/workflow-canvas";
 import { applyResumeStatePatch, applyRuntimeStatePatch, applySessionStatePatch } from "../../shared/snapshot-patch";
 import { MAX_SESSION_BASELINES, createSessionBaselineCache } from "../../shared/session-baseline-cache";
 import type {
@@ -50,7 +51,9 @@ import type {
   TeamMemberSummary,
   TeamMessageSummary,
   TeamTaskSummary,
-  UsageStats
+  UsageStats,
+  WorkflowRunSummary,
+  WorkflowRunsSnapshot
 } from "../../shared/protocol";
 
 /** 团队快照的内容比较：IPC 结构化克隆后引用必不相等，只能逐字段比较。 */
@@ -294,6 +297,126 @@ export function mergeSessionsPreservingIdentity(previous: RuntimeSnapshot["sessi
   return equal ? previous : incoming;
 }
 
+/**
+ * 工作流运行摘要的**内容等价**判定。
+ *
+ * `workflow.runs` 与 `state` 一样经 IPC 结构化克隆，两帧内容相同也会是两个对象；
+ * 这里逐字段比（含每个节点的状态表与待决权限 id 列表），漏比任何一项都会让
+ * 「只有它变化」的帧被早退吞掉——例如只多了待决权限、只推进了节点状态、
+ * 只把 running 变 completed（终态即时 flush 的那一帧最容易被丢）。
+ */
+export function workflowRunSummaryEqual(left: WorkflowRunSummary, right: WorkflowRunSummary): boolean {
+  if (left === right) return true;
+  if (left.runId !== right.runId || left.workflowId !== right.workflowId || left.workflowName !== right.workflowName) return false;
+  if (left.workspace !== right.workspace || left.agentId !== right.agentId || left.ownerSessionId !== right.ownerSessionId) return false;
+  if (left.status !== right.status || left.currentAttempt !== right.currentAttempt || left.maxAttempts !== right.maxAttempts) return false;
+  if (left.currentNodeId !== right.currentNodeId || left.currentNodeTitle !== right.currentNodeTitle) return false;
+  if (left.startedAt !== right.startedAt || left.endedAt !== right.endedAt || left.error !== right.error) return false;
+  if ((left.external ?? false) !== (right.external ?? false)) return false;
+  if (!stringArrayEqual(left.pendingPermissionIds, right.pendingPermissionIds)) return false;
+  const leftNodeIds = Object.keys(left.nodeStates);
+  if (leftNodeIds.length !== Object.keys(right.nodeStates).length) return false;
+  return leftNodeIds.every((nodeId) => left.nodeStates[nodeId] === right.nodeStates[nodeId]);
+}
+
+/** 两帧运行摘要的内容等价（epoch/revision/逐条摘要）；用于「无变化保留对象身份」。 */
+export function workflowRunsSnapshotEqual(left: WorkflowRunsSnapshot | undefined, right: WorkflowRunsSnapshot | undefined): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  if (left.epoch !== right.epoch || left.revision !== right.revision) return false;
+  if (left.runs.length !== right.runs.length) return false;
+  return left.runs.every((run, index) => {
+    const other = right.runs[index];
+    return other !== undefined && workflowRunSummaryEqual(run, other);
+  });
+}
+
+/**
+ * 运行摘要的条数上限（活跃运行全留，终态按开始时间补足）。
+ * 后端本身只保留活跃 run + 最近 50 条终态，这里是渲染端的**有界**兜底：
+ * 快照是整帧替换而不是追加，所以这个上限只防「异常大的帧把一屏列表撑爆」。
+ */
+const MAX_WORKFLOW_RUN_ROWS = 120;
+
+function boundWorkflowRuns(runs: WorkflowRunSummary[]): WorkflowRunSummary[] {
+  if (runs.length <= MAX_WORKFLOW_RUN_ROWS) return runs;
+  const keep = new Set<string>();
+  for (const run of runs) if (!isTerminalRunStatus(run.status)) keep.add(run.runId);
+  const terminal = runs.filter((run) => isTerminalRunStatus(run.status)).slice().sort((left, right) => right.startedAt - left.startedAt);
+  for (const run of terminal) {
+    if (keep.size >= MAX_WORKFLOW_RUN_ROWS) break;
+    keep.add(run.runId);
+  }
+  // 保留进帧时的原始顺序（列表按 startedAt 倒序渲染由组件自己排，这里不动语义）。
+  return runs.filter((run) => keep.has(run.runId));
+}
+
+/**
+ * 已退场的 utility epoch（有更新的实例接替）：晚到的旧帧一律丢弃。
+ * 只保留最近几个，进程生命周期内不会无界增长。
+ */
+const RETIRED_WORKFLOW_EPOCH_LIMIT = 4;
+let retiredWorkflowEpochs: string[] = [];
+
+function retireWorkflowEpoch(epoch: string | undefined): void {
+  if (!epoch || retiredWorkflowEpochs.includes(epoch)) return;
+  retiredWorkflowEpochs = [...retiredWorkflowEpochs, epoch].slice(-RETIRED_WORKFLOW_EPOCH_LIMIT);
+}
+
+/** 重载/重新初始化：epoch 退场名单是内存态，重新开始。 */
+export function resetWorkflowRunsBaseline(): void {
+  retiredWorkflowEpochs = [];
+}
+
+/** 帧来源：live = utility 推送；bootstrap = 主进程缓存的镜像（可能是旧实例的）。 */
+export type WorkflowRunsSource = "live" | "bootstrap";
+
+/**
+ * 工作流运行摘要的合并规则（**独立基线**：绝不碰会话 revision / paneRevision）。
+ *
+ * - 同 epoch：revision 只前进。相等且内容相同 → 保留旧对象（身份稳定，订阅方不重渲）；
+ *   相等但内容不同（理论上不该发生）→ 以新帧为准，绝不吞掉变化。
+ * - 不同 epoch：live 帧意味着 utility 换了实例 → 接受它并让旧 epoch 永久退场；
+ *   bootstrap 帧只是主进程缓存的（可能更旧的）镜像 → 已经在跟别的 epoch 时丢弃，
+ *   否则「重载后先收到运行帧、再收到 bootstrap」会把状态回滚一截。
+ * - 已退场 epoch 的帧无论 revision 都丢弃（旧实例的晚到帧不得回滚）。
+ */
+export function mergeWorkflowRunsSnapshot(
+  previous: WorkflowRunsSnapshot | undefined,
+  incoming: WorkflowRunsSnapshot,
+  source: WorkflowRunsSource = "live"
+): { snapshot: WorkflowRunsSnapshot; changed: boolean } {
+  const next: WorkflowRunsSnapshot = incoming.runs.length <= MAX_WORKFLOW_RUN_ROWS
+    ? incoming
+    : { epoch: incoming.epoch, revision: incoming.revision, runs: boundWorkflowRuns(incoming.runs) };
+  if (!previous) return { snapshot: next, changed: true };
+  if (retiredWorkflowEpochs.includes(next.epoch)) return { snapshot: previous, changed: false };
+  if (next.epoch !== previous.epoch) {
+    if (source === "bootstrap") {
+      retireWorkflowEpoch(next.epoch);
+      return { snapshot: previous, changed: false };
+    }
+    retireWorkflowEpoch(previous.epoch);
+    return { snapshot: next, changed: true };
+  }
+  if (next.revision < previous.revision) return { snapshot: previous, changed: false };
+  if (next.revision === previous.revision && workflowRunsSnapshotEqual(previous, next)) return { snapshot: previous, changed: false };
+  return { snapshot: next, changed: true };
+}
+
+/** 工具：owner 过滤为空时共用的空数组（保持引用稳定，运行条按它早退）。 */
+const EMPTY_WORKFLOW_RUNS: WorkflowRunSummary[] = [];
+
+/**
+ * 某个 owner 会话的运行摘要（运行条/分屏各看各的）。
+ * owner 未定时返回空：绝不把「不知道属于谁」的运行糊到某一格上。
+ */
+export function workflowRunsForOwner(runs: readonly WorkflowRunSummary[] | undefined, ownerSessionId: string | undefined): WorkflowRunSummary[] {
+  if (!runs || !ownerSessionId) return EMPTY_WORKFLOW_RUNS;
+  const filtered = runs.filter((run) => run.ownerSessionId === ownerSessionId);
+  return filtered.length === 0 ? EMPTY_WORKFLOW_RUNS : filtered;
+}
+
 /** recentWorkspaces 的身份保留：与 sessions 同理，字段全为原始值。 */
 export function mergeRecentWorkspacesPreservingIdentity(previous: RuntimeSnapshot["recentWorkspaces"], incoming: RuntimeSnapshot["recentWorkspaces"]): RuntimeSnapshot["recentWorkspaces"] {
   if (previous === incoming) return previous;
@@ -332,6 +455,16 @@ export function mergeQuestionRequests(restored: QuestionRequest[], current: Ques
   const byId = new Map<string, QuestionRequest>();
   for (const request of restored) byId.set(request.id, request);
   for (const request of current) byId.set(request.id, request);
+  return [...byId.values()];
+}
+
+/** 初始化窗口内收到 dismiss 的 id 不允许被稍晚到达的 bootstrap 复活。 */
+let permissionBootstrapPending = false;
+const permissionBootstrapDismissals = new Set<string>();
+export function mergePermissionRequests(restored: PermissionRequest[], current: PermissionRequest[], dismissed: ReadonlySet<string>): PermissionRequest[] {
+  const byId = new Map<string, PermissionRequest>();
+  for (const request of restored) if (!dismissed.has(request.id)) byId.set(request.id, request);
+  for (const request of current) if (!dismissed.has(request.id)) byId.set(request.id, request);
   return [...byId.values()];
 }
 
@@ -649,6 +782,14 @@ interface DesktopState {
   intranetSource: IntranetStoreConnectionState;
   /** IM 通道当前状态（主进程网关快照；bootstrap 与 im.status 推送同源）。 */
   imStatus?: ImStatus;
+  /**
+   * 工作流运行摘要（**独立**的有界快照：active + 最近终态）。
+   *
+   * 为什么不塞进 `snapshot`/`paneStates`：工作流是 owner 会话之外的独立运行实体，
+   * 混进会话增量基线会让 `revision`/`patch` 语义互相污染。这里只存整帧替换的摘要，
+   * 详情/产物一律按需读（`lib/workflow-client`）。
+   */
+  workflowRuns?: WorkflowRunsSnapshot;
   /** IM「测试连接」的最近一次结果（im.test-result 推送）。 */
   imTest?: { requestId: string; ok: boolean; message: string; botName?: string; latencyMs?: number; at: number };
   /**
@@ -705,7 +846,7 @@ const emptySnapshot: RuntimeSnapshot = {
   queuedMessages: []
 };
 const emptySettings: DesktopSettings = { version: 2, thinkingLevel: "medium", accessMode: "ask", providers: [], agents: [], currentAgentId: "default", lastWorkspace: "", defaultWorkspace: "", appearance: { theme: "system", themePreset: "default", customCss: "", customThemes: [], showThinking: true, showGalleryWall: true } };
-const emptyResources: ResourceCatalog = { skills: [], commands: [], mcpServers: [], todos: [], memory: [], subagents: [], hooks: [], hooksEnabled: true, automation: [], automationRuns: [], gallery: [], diagnostics: [] };
+const emptyResources: ResourceCatalog = { workflows: { items: [] }, skills: [], commands: [], mcpServers: [], todos: [], memory: [], subagents: [], hooks: [], hooksEnabled: true, automation: [], automationRuns: [], gallery: [], diagnostics: [] };
 
 /**
  * 高频流式推送的消息数组按 uuid 复用旧对象引用：内容未变的消息保持同一
@@ -901,6 +1042,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   intranetStore: { listLoading: false, listSkills: [], listTotal: 0, topSkills: [], topLoading: false, categories: [], categoriesLoading: false, detailLoading: false, detailVersions: [], detailFiles: [], detailTotalBytes: 0, installs: [] },
   intranetSource: { saving: false },
   imStatus: undefined,
+  workflowRuns: undefined,
   restoredBrowserTabs: [],
   seenDesignRevisions: {},
   usageStatsLoading: false,
@@ -912,9 +1054,19 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   customModelFetchStatus: "idle",
   modelRefreshStatus: "idle",
   async initialize() {
+    permissionBootstrapPending = true;
+    permissionBootstrapDismissals.clear();
+    resetWorkflowRunsBaseline();
     const unsubscribe = window.piDesktop.onRuntimeMessage((message) => get().handleRuntimeMessage(message));
     const bootstrap = await window.piDesktop.bootstrap();
     const restoredSnapshot = bootstrap.runtime ?? get().snapshot;
+    // 工作流运行摘要的水合：bootstrap 只是主进程缓存的镜像。初始化窗口里已经收到
+    // live 帧时走同一套 epoch/revision 规则（同 epoch 比 revision，不同 epoch 说明
+    // utility 已换实例 → 丢弃旧镜像），否则「先收到运行帧、后收到 bootstrap」会把
+    // 状态回滚一截。
+    const restoredWorkflowRuns = bootstrap.workflowRuns
+      ? mergeWorkflowRunsSnapshot(get().workflowRuns, bootstrap.workflowRuns, "bootstrap")
+      : undefined;
     set({
       ready: true,
       appVersion: bootstrap.version,
@@ -927,6 +1079,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
       // 待决提问镜像：渲染端重载（Vite HMR/Ctrl+R/崩溃恢复）会清空 questions，
       // 但 utility 的 QuestionBroker 仍在等答案；不恢复就会面板消失、工具永久挂起。
       questions: mergeQuestionRequests(bootstrap.questions ?? [], get().questions),
+      permissions: mergePermissionRequests(bootstrap.permissions ?? [], get().permissions, permissionBootstrapDismissals),
       todos: bootstrap.resources?.todos ?? get().todos,
       memory: bootstrap.resources?.memory ?? get().memory,
       automation: bootstrap.resources?.automation ?? [],
@@ -943,8 +1096,24 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
       jevKeyConfigured: Boolean(bootstrap.settings.jevKeyConfigured),
       intranetSource: { saving: false, ...(bootstrap.settings.intranetStore ? { config: bootstrap.settings.intranetStore } : {}) },
       imStatus: bootstrap.imStatus ?? get().imStatus,
+      ...(restoredWorkflowRuns?.changed ? { workflowRuns: restoredWorkflowRuns.snapshot } : {}),
       customModels: bootstrap.settings.providers.find((provider) => provider.id === "chatanytime-openai-compatible")?.models ?? []
     });
+    permissionBootstrapPending = false;
+    permissionBootstrapDismissals.clear();
+    // 订阅已建立 + 摘要已水合：向 utility 要一帧工作流摘要（`workflow.sync`）。
+    // 绝不发 `state.sync`——那会让所有会话的基线一起重传，而工作流只需要一条独立的
+    // 轻量补帧（详见方案 §8.2）。
+    try {
+      const workspace = restoredSnapshot.workspace;
+      void window.piDesktop.send({
+        type: "workflow.sync",
+        requestId: `workflow-sync-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+        ...(workspace ? { workspace } : {})
+      }).catch(() => undefined);
+    } catch {
+      // 演示环境/测试替身没有 send 时忽略：bootstrap 水合那一帧已经够用。
+    }
     // active 基线是内存态：重载后只能从 bootstrap 恢复当前 active 会话那一份，其余
     // 会话切成真空（它们切回时各触发一次定向全量恢复，这正是协议允许的兑底）。
     resetActiveSessionBaselines();
@@ -1289,6 +1458,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
           : { permissions: [...state.permissions, message.request] });
         break;
       case "permission.dismiss":
+        if (permissionBootstrapPending) permissionBootstrapDismissals.add(message.id);
         set((state) => ({ permissions: state.permissions.filter((request) => request.id !== message.id) }));
         break;
       case "question":
@@ -1419,6 +1589,13 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
               }
             : state.settings
         }));
+        break;
+      }
+      case "workflow.runs": {
+        // 独立快照（epoch/revision）：过期帧、旧实例帧一律丢弃，内容没变就保留原对象
+        // 身份——运行条/中心页的选择器因此不会因为「重复推送」而重渲。
+        const outcome = mergeWorkflowRunsSnapshot(get().workflowRuns, message.snapshot, "live");
+        if (outcome.changed) set({ workflowRuns: outcome.snapshot });
         break;
       }
       case "im.test-result":

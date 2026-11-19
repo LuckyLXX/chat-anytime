@@ -44,6 +44,7 @@ const agents: AgentProfile[] = [
 ];
 
 const resources: ResourceCatalog = {
+  workflows: { items: [] },
   skills: [
     { id: "skill:computer-use", name: "电脑控制", description: "操作桌面窗口", source: "随应用分发", scope: "bundled", defaultEnabled: true, enabled: true, toggleable: true, disableModelInvocation: false },
     { id: "skill:code-review", name: "code-review", description: "审查代码变更", source: "用户资源", scope: "global", defaultEnabled: true, enabled: true, toggleable: true, disableModelInvocation: false },
@@ -215,6 +216,23 @@ describe("Skill 与工具开关", () => {
     const browserRow = rows.find((row) => row.textContent!.includes("浏览器"))!;
     expect(sshRow.querySelector<HTMLInputElement>("input")!.checked).toBe(false);
     expect(browserRow.querySelector<HTMLInputElement>("input")!.checked).toBe(true);
+  });
+
+  it("工作流开关默认关闭（与浏览器/SSH 的缺省开启相反），带上键域回传", () => {
+    const handlers = render({ selectedAgentId: "heiyuhe" });
+    const rows = [...container.querySelectorAll(".agent-switch-row")];
+    const workflowRow = rows.find((row) => row.textContent!.includes("工作流"))!;
+    expect(workflowRow).toBeDefined();
+    expect(workflowRow.textContent).toContain("默认关闭");
+    // toolOverrides 里没有 workflow 键 = 关闭（不是浏览器/SSH 那套 `!== false`）。
+    expect(workflowRow.querySelector<HTMLInputElement>("input")!.checked).toBe(false);
+    click(workflowRow.querySelector("input")!);
+    expect(handlers.toolOverride).toEqual([["workflow", true]]);
+
+    // 显式 true 的角色显示为已开启。
+    render({ selectedAgentId: "wf", agents: [...agents, { ...agents[0]!, id: "wf", name: "工作流角色", toolOverrides: { workflow: true } }] });
+    const enabledRow = [...container.querySelectorAll(".agent-switch-row")].find((row) => row.textContent!.includes("工作流"))!;
+    expect(enabledRow.querySelector<HTMLInputElement>("input")!.checked).toBe(true);
   });
 
   it("切换开关回传 overlay 键（MCP 用 mcp:<server> 键域）", () => {

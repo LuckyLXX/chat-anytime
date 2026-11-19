@@ -47,7 +47,7 @@ describe("team wiring", () => {
     expect(runtimeSource).toMatch(/record\.teamMode\.enabled \? record\.teamTools\.map/u);
     expect(runtimeSource).toMatch(/"teamMode" \| "teamTools"/u);
     expect(runtimeSource).toMatch(/const teamTools = buildTeamTools\(teamRef\);/u);
-    expect(runtimeSource).toMatch(/\.\.\.teamTools\]/u);
+    expect(runtimeSource).toMatch(/\.\.\.teamTools[,]/u);
   });
 
   it("creates the per-session runtime after the record and reads/writes the session toggle", () => {
@@ -110,7 +110,10 @@ describe("team wiring", () => {
     expect(formationSource).toMatch(/TeamMemberDetail/u);
     expect(storeSource).toMatch(/memberActivityEqual/u);
     expect(localeSource).toMatch(/pidesktop-team-message/u);
-    expect(cssSource).toMatch(/\.composer\.has-team \{/u);
+    // 团队状态条 2026-11-19 起不再占 composer 自己的网格行：它与计划横幅、
+    // 工作流运行条共用一个 `composer-status-stack` 自适应容器（组合数不再翻倍）。
+    expect(cssSource).toMatch(/\.composer-status-stack \{/u);
+    expect(cssSource).not.toMatch(/\.composer\.has-team \{/u);
     expect(cssSource).toMatch(/\.composer-team-strip \{/u);
   });
 });
