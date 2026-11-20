@@ -38,8 +38,6 @@ export const WORKFLOW_NODE_HEIGHT = 88;
 export const WORKFLOW_STAGE_PADDING = 44;
 export const WORKFLOW_COLUMN_STEP = 252;
 export const WORKFLOW_ROW_STEP = 124;
-/** 返工回边在节点下方下探的高度上限。 */
-export const WORKFLOW_REWORK_DROP = 42;
 
 export const WORKFLOW_NODE_KIND_LABELS: Record<WorkflowNodeKind, string> = {
   task: "任务",
@@ -100,20 +98,6 @@ export function nodeRect(node: WorkflowNode): WorkflowRect {
   return { x: node.position.x, y: node.position.y, width: WORKFLOW_NODE_WIDTH, height: WORKFLOW_NODE_HEIGHT };
 }
 
-/** 画布舞台尺寸：覆盖所有节点 + 留白 + 底部返工回边的下探空间。 */
-export function stageSize(nodes: readonly WorkflowNode[]): { width: number; height: number } {
-  let right = 0;
-  let bottom = 0;
-  for (const node of nodes) {
-    right = Math.max(right, node.position.x + WORKFLOW_NODE_WIDTH);
-    bottom = Math.max(bottom, node.position.y + WORKFLOW_NODE_HEIGHT);
-  }
-  return {
-    width: Math.max(720, right + WORKFLOW_STAGE_PADDING),
-    height: Math.max(360, bottom + WORKFLOW_STAGE_PADDING + WORKFLOW_REWORK_DROP + 40)
-  };
-}
-
 function overlaps(a: WorkflowRect, b: WorkflowRect, gap: number): boolean {
   return a.x < b.x + b.width + gap && b.x < a.x + a.width + gap && a.y < b.y + b.height + gap && b.y < a.y + a.height + gap;
 }
@@ -134,40 +118,6 @@ export function nextNodePosition(nodes: readonly WorkflowNode[]): WorkflowNodePo
     candidate = { x: candidate.x, y: candidate.y + WORKFLOW_ROW_STEP };
   }
   return candidate;
-}
-
-export interface WorkflowEdgeGeometry {
-  d: string;
-  midX: number;
-  midY: number;
-}
-
-/** 依赖边的三次贝塞尔：从源节点右中点到目标节点左中点，横向出/入。 */
-export function edgeGeometry(from: WorkflowNode, to: WorkflowNode): WorkflowEdgeGeometry {
-  const x1 = from.position.x + WORKFLOW_NODE_WIDTH;
-  const y1 = from.position.y + WORKFLOW_NODE_HEIGHT / 2;
-  const x2 = to.position.x;
-  const y2 = to.position.y + WORKFLOW_NODE_HEIGHT / 2;
-  const handle = Math.max(40, Math.abs(x2 - x1) / 2);
-  return {
-    d: `M ${x1} ${y1} C ${x1 + handle} ${y1}, ${x2 - handle} ${y2}, ${x2} ${y2}`,
-    midX: (x1 + x2) / 2,
-    midY: (y1 + y2) / 2
-  };
-}
-
-/** 返工回边（gate 底边 → 入口底边，向下绕行）：只表示「这一区间会重跑」，不是普通依赖。 */
-export function reworkGeometry(entry: WorkflowNode, gate: WorkflowNode): WorkflowEdgeGeometry {
-  const fromX = gate.position.x + WORKFLOW_NODE_WIDTH / 2;
-  const fromY = gate.position.y + WORKFLOW_NODE_HEIGHT;
-  const toX = entry.position.x + WORKFLOW_NODE_WIDTH / 2;
-  const toY = entry.position.y + WORKFLOW_NODE_HEIGHT;
-  const drop = WORKFLOW_REWORK_DROP + Math.min(110, Math.abs(fromX - toX) / 6);
-  return {
-    d: `M ${fromX} ${fromY} C ${fromX} ${fromY + drop}, ${toX} ${toY + drop}, ${toX} ${toY}`,
-    midX: (fromX + toX) / 2,
-    midY: Math.max(fromY, toY) + drop * 0.78
-  };
 }
 
 // —— id 分配：定义内稳定、可读（n3 / e7），与运行期 UUID 无关 ——
@@ -390,6 +340,7 @@ export function createStarterWorkflow(now = Date.now(), id = "wf-draft"): Workfl
     name: "实施—验收工作流",
     description: "规划一次，实施/审查/测试按轮返工，验收通过后整理结果。",
     inputHint: "这次要完成的需求、目标文件与验收标准；会作为 {{input}} 注入每个节点。",
+    layout: "auto",
     nodes,
     edges,
     rework: { entryNodeId: "n2", gateNodeId: "n5", maxAttempts: DEFAULT_WORKFLOW_ATTEMPTS },
@@ -440,6 +391,7 @@ export function workflowDraftFingerprint(definition: WorkflowDefinition): string
     description: definition.description ?? "",
     whenToUse: definition.whenToUse ?? "",
     inputHint: definition.inputHint ?? "",
+    layout: definition.layout ?? null,
     nodes,
     edges,
     rework

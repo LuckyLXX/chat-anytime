@@ -1,4 +1,4 @@
-import { AlertTriangle, Check, CircleStop, Copy, FilePlus2, Layers, ListTree, LoaderCircle, Play, Plus, RefreshCw, Save, Search, Trash2, X } from "lucide-react";
+import { AlertTriangle, Check, CircleStop, Copy, FilePlus2, Layers, ListTree, LoaderCircle, PanelBottom, PanelRight, Play, Plus, RefreshCw, Save, Search, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { ChatMessage, WorkflowDiagnostic, WorkflowRunSummary, WorkflowSummary } from "../../shared/protocol";
 import {
@@ -13,6 +13,8 @@ import {
 } from "../../shared/workflow";
 import { formatShortTime, workspaceDisplayName } from "./lib/automation-task-view";
 import { useOverlayLayer } from "./lib/overlay-layers";
+import { useElementSize } from "./lib/use-element-size";
+import { moveWorkflowCanvasNode } from "./lib/workflow-layout";
 import {
   WORKFLOW_RUN_STATUS_LABELS,
   addWorkflowNode,
@@ -23,7 +25,6 @@ import {
   groupWorkflowIssues,
   isTerminalRunStatus,
   isWorkflowDraftDirty,
-  moveWorkflowNode,
   removeWorkflowEdge,
   removeWorkflowNode,
   setWorkflowRework,
@@ -187,6 +188,12 @@ export function WorkflowCenter({ workspace, onClose, runs, ownerSessionId, agent
   const [editorLoading, setEditorLoading] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState<string>();
   const [selectedEdgeId, setSelectedEdgeId] = useState<string>();
+  const centerRef = useRef<HTMLDivElement>(null);
+  const centerSize = useElementSize(centerRef);
+  const compact = centerSize.width > 0 && centerSize.width < 1010;
+  const [inspectorOverride, setInspectorOverride] = useState<boolean>();
+  const inspectorOpen = inspectorOverride ?? !compact;
+  const InspectorIcon = compact ? PanelBottom : PanelRight;
   const [pendingAction, setPendingAction] = useState<PendingAction>();
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string>();
@@ -771,7 +778,7 @@ export function WorkflowCenter({ workspace, onClose, runs, ownerSessionId, agent
   const runInputBytes = runInput === undefined ? 0 : new TextEncoder().encode(runInput).byteLength;
 
   return (
-    <div className="workflow-center" data-pane="workflow-center">
+    <div className="workflow-center" data-pane="workflow-center" data-compact={compact} ref={centerRef}>
       <header className="workflow-center-head">
         <div className="workflow-center-heading">
           <span className="workflow-center-icon"><Layers size={17} /></span>
@@ -780,8 +787,6 @@ export function WorkflowCenter({ workspace, onClose, runs, ownerSessionId, agent
             <p>
               {workspaceDisplayName(workspace) ?? "未选择工作区"}
               {` · ${catalog.length} 个工作流`}
-              {mergedRuns.length > 0 ? ` · ${mergedRuns.length} 条运行记录` : ""}
-              {editor ? ` · ${editor.draft.nodes.length} 节点${dirty ? " · 未保存" : ""}` : ""}
             </p>
           </div>
         </div>
@@ -798,13 +803,18 @@ export function WorkflowCenter({ workspace, onClose, runs, ownerSessionId, agent
       </header>
       <div className="workflow-center-body" data-view={view}>
         <section className="workflow-list" data-pane="workflow-list">
+          <div className="workflow-list-heading">
+            <strong>工作流</strong>
+            <div className="workflow-list-create">
+              <button type="button" className="workflow-list-new" data-control="workflow-create" title="新建（六节点起步模板）" onClick={() => requestAction({ kind: "new" })}><Plus size={15} />新建</button>
+              <button type="button" data-control="workflow-create-blank" title="新建空白工作流" aria-label="新建空白工作流" onClick={() => requestAction({ kind: "blank" })}><FilePlus2 size={15} /></button>
+            </div>
+          </div>
           <div className="workflow-list-toolbar">
             <label className="workflow-list-search">
-              <Search size={12} />
-              <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="筛选名称或用途…" aria-label="筛选工作流" />
+              <Search size={14} />
+              <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索工作流" aria-label="筛选工作流" />
             </label>
-            <button type="button" data-control="workflow-create" title="新建（六节点起步模板）" onClick={() => requestAction({ kind: "new" })}><Plus size={12} />新建</button>
-            <button type="button" data-control="workflow-create-blank" title="新建空白工作流" onClick={() => requestAction({ kind: "blank" })}><FilePlus2 size={12} /></button>
           </div>
           <div className="workflow-list-rows">
             {filteredCatalog.map((item) => (
@@ -827,7 +837,7 @@ export function WorkflowCenter({ workspace, onClose, runs, ownerSessionId, agent
             ))}
             {filteredCatalog.length === 0 && !catalogLoading && (
               <p className="workflow-list-empty">
-                {workspace ? "这个工作区还没有工作流。点「新建」得到六节点起步模板（规划 / 实施 / 审查 / 测试 / 验收 / 整理）。" : "先在左侧选一个工作区。"}
+                {workspace ? query.trim() ? "没有匹配的工作流。" : "这个工作区还没有工作流。新建时可以从六节点模板起步。" : "先在左侧选一个工作区。"}
               </p>
             )}
           </div>
@@ -867,6 +877,7 @@ export function WorkflowCenter({ workspace, onClose, runs, ownerSessionId, agent
                     className="workflow-main-name"
                     value={editor.draft.name}
                     maxLength={64}
+                    data-control="workflow-name"
                     aria-label="工作流名称"
                     onChange={(event) => patchDefinition({ name: event.target.value.slice(0, 64) })}
                   />
@@ -909,7 +920,13 @@ export function WorkflowCenter({ workspace, onClose, runs, ownerSessionId, agent
                 {runNotice && <p className="workflow-notice"><Check size={12} />{runNotice}<button type="button" className="workflow-link" onClick={() => setView("runs")}>查看运行</button></p>}
                 <div className="workflow-main-columns">
                   <WorkflowCanvas
+                    key={`${editor.workspace}:${editor.workflowId ?? editor.draft.createdAt}`}
                     definition={editor.draft}
+                    inspectorControl={(
+                      <button type="button" data-control="workflow-inspector-toggle" aria-expanded={inspectorOpen}
+                        aria-controls="workflow-editor-inspector" title={inspectorOpen ? "收起属性面板" : "展开属性面板"}
+                        onClick={() => setInspectorOverride(!inspectorOpen)}><InspectorIcon size={14} />属性</button>
+                    )}
                     {...(selectedNodeId ? { selectedNodeId } : {})}
                     {...(selectedEdgeId ? { selectedEdgeId } : {})}
                     issues={issues}
@@ -923,7 +940,11 @@ export function WorkflowCenter({ workspace, onClose, runs, ownerSessionId, agent
                     } : {})}
                     onSelectNode={(nodeId) => { setSelectedNodeId(nodeId); if (nodeId) setSelectedEdgeId(undefined); }}
                     onSelectEdge={(edgeId) => { setSelectedEdgeId(edgeId); if (edgeId) setSelectedNodeId(undefined); }}
-                    onMoveNode={(nodeId, position) => setEditor((current) => current ? { ...current, draft: moveWorkflowNode(current.draft, nodeId, position) } : current)}
+                    onMoveNode={(nodeId, position, displayed) => {
+                      setEditor((current) => current ? { ...current, draft: moveWorkflowCanvasNode(current.draft, nodeId, position, displayed) } : current);
+                      setSaveNotice(undefined);
+                    }}
+                    onAutoLayout={() => updateDraft({ ...editor.draft, layout: "auto" })}
                     onAddNode={(kind) => {
                       const { definition, node } = addWorkflowNode(editor.draft, kind ? { kind } : {});
                       updateDraft(definition);
@@ -934,29 +955,31 @@ export function WorkflowCenter({ workspace, onClose, runs, ownerSessionId, agent
                     onDeleteEdge={(edgeId) => setEditor((current) => current ? { ...current, draft: removeWorkflowEdge(current.draft, edgeId) } : current)}
                     onConnect={connectNodes}
                   />
-                  <WorkflowNodeInspector
-                    definition={editor.draft}
-                    {...(selectedNodeId ? { nodeId: selectedNodeId } : {})}
-                    models={models}
-                    providers={providers}
-                    subagents={subagents}
-                    issues={issues}
-                    {...(plannedExecutions !== undefined ? { planExecutions: plannedExecutions } : {})}
-                    {...(nodeExecutions.length > 0 ? { executions: nodeExecutions } : {})}
-                    {...(runDetail?.selectedExecutionId ? { selectedExecutionId: runDetail.selectedExecutionId } : {})}
-                    {...(inspectorArtifact ? { artifact: inspectorArtifact } : {})}
-                    {...(resolvedModel ? { resolvedModel } : {})}
-                    onChangeNode={(patch) => selectedNodeId && patchNode(selectedNodeId, patch)}
-                    onChangeDefinition={patchDefinition}
-                    onChangeRework={patchRework}
-                    onDeleteNode={() => selectedNodeId && deleteNode(selectedNodeId)}
-                    onDeselectNode={() => setSelectedNodeId(undefined)}
-                    onSelectExecution={(executionId) => {
-                      setRunDetail((current) => current ? { ...current, selectedExecutionId: executionId } : current);
-                      if (runDetail?.contents[executionId]?.artifact === undefined) void loadArtifact(executionId);
-                    }}
-                    onOpenRunDetails={() => setView("runs")}
-                  />
+                  <div id="workflow-editor-inspector" className="workflow-inspector-panel" hidden={!inspectorOpen}>
+                    <WorkflowNodeInspector
+                      definition={editor.draft}
+                      {...(selectedNodeId ? { nodeId: selectedNodeId } : {})}
+                      models={models}
+                      providers={providers}
+                      subagents={subagents}
+                      issues={issues}
+                      {...(plannedExecutions !== undefined ? { planExecutions: plannedExecutions } : {})}
+                      {...(nodeExecutions.length > 0 ? { executions: nodeExecutions } : {})}
+                      {...(runDetail?.selectedExecutionId ? { selectedExecutionId: runDetail.selectedExecutionId } : {})}
+                      {...(inspectorArtifact ? { artifact: inspectorArtifact } : {})}
+                      {...(resolvedModel ? { resolvedModel } : {})}
+                      onChangeNode={(patch) => selectedNodeId && patchNode(selectedNodeId, patch)}
+                      onChangeDefinition={patchDefinition}
+                      onChangeRework={patchRework}
+                      onDeleteNode={() => selectedNodeId && deleteNode(selectedNodeId)}
+                      onDeselectNode={() => setSelectedNodeId(undefined)}
+                      onSelectExecution={(executionId) => {
+                        setRunDetail((current) => current ? { ...current, selectedExecutionId: executionId } : current);
+                        if (runDetail?.contents[executionId]?.artifact === undefined) void loadArtifact(executionId);
+                      }}
+                      onOpenRunDetails={() => setView("runs")}
+                    />
+                  </div>
                 </div>
               </>
             )}

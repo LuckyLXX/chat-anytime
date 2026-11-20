@@ -310,9 +310,9 @@ describe("主题契约五处镜像", () => {
       expect(themeCheck).toContain(`"${control}"`);
     }
     expect(themeSkill).toContain("主要区域（53）");
-    expect(themeSkill).toContain("关键控件（204）");
+    expect(themeSkill).toContain("关键控件（210）");
     expect(themeVariables).toContain("`data-pane`（53）");
-    expect(themeVariables).toContain("`data-control`（204）");
+    expect(themeVariables).toContain("`data-control`（210）");
     expect(themeCheck).toContain('"im-channel-settings"');
     expect(themeCheck).toContain('"im-channel-enable"');
   });

@@ -21,6 +21,7 @@ export const WORKFLOW_PERMISSION_TIMEOUT_MS = 10 * 60 * 1000;
 
 export type WorkflowNodeKind = "task" | "review" | "gate" | "output";
 export type WorkflowExecutionKind = "agent" | "subagent";
+export type WorkflowLayoutMode = "auto" | "manual";
 
 export interface WorkflowModelRef {
   provider: string;
@@ -72,6 +73,8 @@ export interface WorkflowDefinition {
   description?: string;
   whenToUse?: string;
   inputHint?: string;
+  /** 编辑器排版偏好。缺省保留旧定义，由画布识别旧编辑器的初始位置。 */
+  layout?: WorkflowLayoutMode;
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
   rework?: WorkflowRework;
@@ -344,6 +347,10 @@ export function normalizeWorkflowDraft(input: unknown, options: WorkflowNormaliz
   const description = optionalText(input.description, "description", 2_000, errors);
   const whenToUse = optionalText(input.whenToUse, "whenToUse", 2_000, errors);
   const inputHint = optionalText(input.inputHint, "inputHint", 2_000, errors);
+  const layout = input.layout === "auto" || input.layout === "manual" ? input.layout : undefined;
+  if (input.layout !== undefined && layout === undefined) {
+    errors.push(diagnostic("invalid-layout", "layout 必须是 auto 或 manual", "layout"));
+  }
   const rawNodes = input.nodes;
   const nodes: WorkflowNode[] = [];
   if (!Array.isArray(rawNodes)) errors.push(diagnostic("invalid-nodes", "nodes 必须是数组", "nodes"));
@@ -415,6 +422,7 @@ export function normalizeWorkflowDraft(input: unknown, options: WorkflowNormaliz
     ...(description !== undefined ? { description } : {}),
     ...(whenToUse !== undefined ? { whenToUse } : {}),
     ...(inputHint !== undefined ? { inputHint } : {}),
+    ...(layout !== undefined ? { layout } : {}),
     nodes,
     edges,
     ...(rework ? { rework } : {}),

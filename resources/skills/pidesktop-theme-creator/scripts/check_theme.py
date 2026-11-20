@@ -149,6 +149,8 @@ KNOWN_CONTROLS = frozenset({
     "workflow-run-stop", "workflow-run-execution", "workflow-run-content-artifact", "workflow-run-content-transcript",
     "workflow-runs-refresh", "workflow-runs-more", "workflow-stop", "workflow-pending-locate",
     "workflow-node-add", "workflow-connect", "workflow-edge-delete", "workflow-node-delete",
+    "workflow-layout-auto", "workflow-view-fit", "workflow-zoom-out", "workflow-zoom-in",
+    "workflow-zoom-reset", "workflow-inspector-toggle",
     "workflow-node-kind", "workflow-node-source", "workflow-node-subagent", "workflow-node-thinking",
     "workflow-node-tools-inherit", "workflow-node-tool", "workflow-node-access", "workflow-node-execution",
     "workflow-node-artifact-load", "workflow-node-run-details",

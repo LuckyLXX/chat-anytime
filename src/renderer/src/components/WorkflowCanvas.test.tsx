@@ -3,6 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createStarterWorkflow, updateWorkflowNode } from "../lib/workflow-canvas";
+import { projectWorkflowCanvas } from "../lib/workflow-layout";
 import { WorkflowCanvas, type WorkflowCanvasProps } from "./WorkflowCanvas";
 
 (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
@@ -28,6 +29,7 @@ function handlers(overrides: Partial<WorkflowCanvasProps> = {}): WorkflowCanvasP
     onSelectNode: vi.fn(),
     onSelectEdge: vi.fn(),
     onMoveNode: vi.fn(),
+    onAutoLayout: vi.fn(),
     onAddNode: vi.fn(),
     onDeleteNode: vi.fn(),
     onDeleteEdge: vi.fn(),
@@ -132,18 +134,36 @@ describe("两击连线", () => {
 });
 
 describe("拖拽与删除", () => {
-  it("拖动超过死区才移动，落点按指针位移换算", () => {
+  it("按屏幕位移预览拖动，抬起时以缩放后的画布坐标保存", () => {
     const props = handlers();
     render(props);
+    const projected = projectWorkflowCanvas(props.definition, { width: 0, height: 0 });
+    const start = projected.nodes.find((item) => item.id === "n2")!.position;
+    const initialTop = Number.parseInt(node("n2").style.top);
+    click(container.querySelector('[data-control="workflow-zoom-in"]')!); // 125%
     pointer(node("n2"), "pointerdown", { clientX: 100, clientY: 100 });
     pointer(node("n2"), "pointermove", { clientX: 101, clientY: 101 });
-    expect(props.onMoveNode).not.toHaveBeenCalled();
+    expect(Number.parseInt(node("n2").style.top)).toBe(initialTop);
     pointer(node("n2"), "pointermove", { clientX: 140, clientY: 160 });
-    // n2 初始在 (296,44)：位移 (+40,+60) 直接换算，不经画布 rect。
-    expect(props.onMoveNode).toHaveBeenCalledWith("n2", { x: 336, y: 104 });
+    expect(Number.parseInt(node("n2").style.top)).toBe(initialTop + 48);
+    expect(props.onMoveNode).not.toHaveBeenCalled();
     pointer(node("n2"), "pointerup", { clientX: 140, clientY: 160 });
-    // 拖拽结束不算点选
+    expect(props.onMoveNode).toHaveBeenCalledWith("n2", { x: start.x + 32, y: start.y + 48 }, projected.nodes);
     expect(props.onSelectNode).not.toHaveBeenCalled();
+  });
+
+  it("适应全图只重置缩放，自动排版才调用定义编辑回调", () => {
+    const props = handlers();
+    render(props);
+    const zoomButton = container.querySelector('[data-control="workflow-zoom-reset"]')!;
+    click(container.querySelector('[data-control="workflow-zoom-in"]')!);
+    expect(zoomButton.textContent).toBe("125%");
+    click(container.querySelector('[data-control="workflow-view-fit"]')!);
+    expect(zoomButton.textContent).toBe("100%");
+    expect(props.onAutoLayout).not.toHaveBeenCalled();
+    expect(props.onMoveNode).not.toHaveBeenCalled();
+    click(container.querySelector('[data-control="workflow-layout-auto"]')!);
+    expect(props.onAutoLayout).toHaveBeenCalledOnce();
   });
 
   it("未拖动的按下-抬起按点选处理", () => {

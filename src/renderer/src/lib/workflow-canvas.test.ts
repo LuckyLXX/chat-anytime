@@ -2,8 +2,6 @@
 import { describe, expect, it } from "vitest";
 import { validateWorkflowForRun } from "../../../shared/workflow";
 import {
-  WORKFLOW_NODE_HEIGHT,
-  WORKFLOW_NODE_WIDTH,
   WORKFLOW_STAGE_PADDING,
   addWorkflowNode,
   attemptText,
@@ -12,7 +10,6 @@ import {
   cloneWorkflowDefinition,
   connectWorkflowNodes,
   createStarterWorkflow,
-  edgeGeometry,
   estimateWorkflowExecutions,
   executionsForNode,
   groupWorkflowIssues,
@@ -27,10 +24,8 @@ import {
   nodeRect,
   removeWorkflowEdge,
   removeWorkflowNode,
-  reworkGeometry,
   reworkRegionNodeIds,
   setWorkflowRework,
-  stageSize,
   updateWorkflowNode,
   workflowDraftFingerprint,
   workflowNodeSourceLabel,
@@ -153,37 +148,6 @@ describe("节点与依赖编辑", () => {
     expect(clampAttempts(Number.NaN)).toBe(3);
     const starter = createStarterWorkflow(1_000);
     expect(setWorkflowRework(starter, { entryNodeId: "n2", gateNodeId: "n5", maxAttempts: 0 }).rework?.maxAttempts).toBe(1);
-  });
-});
-
-describe("几何", () => {
-  it("依赖边从源右中点连到目标左中点，中点用于放置边操作", () => {
-    const starter = createStarterWorkflow(1_000);
-    const from = starter.nodes[0]!;
-    const to = starter.nodes[1]!;
-    const geometry = edgeGeometry(from, to);
-    expect(geometry.d.startsWith(`M ${from.position.x + WORKFLOW_NODE_WIDTH} ${from.position.y + WORKFLOW_NODE_HEIGHT / 2}`)).toBe(true);
-    expect(geometry.d.endsWith(`${to.position.x} ${to.position.y + WORKFLOW_NODE_HEIGHT / 2}`)).toBe(true);
-    expect(geometry.midX).toBeGreaterThan(from.position.x);
-    expect(geometry.midX).toBeLessThan(to.position.x + WORKFLOW_NODE_WIDTH);
-  });
-
-  it("返工回边向下绕行，中点落在两节点下方", () => {
-    const starter = createStarterWorkflow(1_000);
-    const entry = starter.nodes.find((node) => node.id === "n2")!;
-    const gate = starter.nodes.find((node) => node.id === "n5")!;
-    const geometry = reworkGeometry(entry, gate);
-    expect(geometry.midY).toBeGreaterThan(entry.position.y + WORKFLOW_NODE_HEIGHT);
-    expect(geometry.d.startsWith("M ")).toBe(true);
-  });
-
-  it("舞台尺寸覆盖所有节点并留出回边空间", () => {
-    const starter = createStarterWorkflow(1_000);
-    const size = stageSize(starter.nodes);
-    const right = Math.max(...starter.nodes.map((node) => node.position.x + WORKFLOW_NODE_WIDTH));
-    expect(size.width).toBeGreaterThan(right);
-    expect(size.height).toBeGreaterThan(WORKFLOW_NODE_HEIGHT + 40);
-    expect(stageSize([])).toEqual({ width: 720, height: 360 });
   });
 });
 

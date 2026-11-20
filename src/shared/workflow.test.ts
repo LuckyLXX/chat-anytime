@@ -75,6 +75,14 @@ describe("workflow drafts", () => {
     expect(normalizeWorkflowDraft(value).errors.some((error) => error.code === "invalid-access-cap")).toBe(true);
   });
 
+  it("keeps explicit layout in normalization and preserves the missing legacy field", () => {
+    const old = definition([node("n1", "output")], []);
+    expect(normalizeWorkflowDraft(old).definition).not.toHaveProperty("layout");
+    expect(normalizeWorkflowDraft({ ...old, layout: "auto" }).definition?.layout).toBe("auto");
+    expect(normalizeWorkflowDraft({ ...old, layout: "manual" }).definition?.layout).toBe("manual");
+    expect(normalizeWorkflowDraft({ ...old, layout: "fixed" }).errors.map((issue) => issue.code)).toContain("invalid-layout");
+  });
+
   it("keeps semantic order stable when only positions change", () => {
     const before = definition([node("a"), node("b", "output"), node("c")], [["a", "b"], ["a", "c"]]);
     const after = { ...before, nodes: before.nodes.map((item, index) => ({ ...item, position: { x: index * 100, y: index * -50 } })) };

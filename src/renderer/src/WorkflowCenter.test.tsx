@@ -263,6 +263,40 @@ describe("工作流中心：目录与草稿", () => {
     expect(container.textContent).toContain("已保存");
   });
 
+  it("打开旧工作流只投影位置，缩放不触发保存，拖动和重新启用排版才写入草稿", async () => {
+    const { layout: _layout, ...legacy } = createStarterWorkflow(1_000, "wf-00000000-0000-4000-8000-000000000001");
+    const server = createServer({ definitions: [legacy] });
+    render(<WorkflowCenter workspace={WORKSPACE} onClose={vi.fn()} runs={[]} api={server.api} />);
+    await flush();
+    click('[data-control="workflow-open"]');
+    await flush();
+    const node = container.querySelector<HTMLElement>('[data-workflow-node="n2"]')!;
+    expect(node.style.top).not.toBe(`${legacy.nodes[1]?.position.y}px`);
+    const saveButton = container.querySelector<HTMLButtonElement>('[data-control="workflow-save"]')!;
+    click('[data-control="workflow-zoom-in"]');
+    click('[data-control="workflow-view-fit"]');
+    expect(saveButton.disabled).toBe(true);
+    expect(commandTypes(server.sent)).not.toContain("workflow.save");
+    expect(server.definitions.get(legacy.id)?.nodes).toEqual(legacy.nodes);
+
+    act(() => {
+      for (const [type, x] of [["pointerdown", 5], ["pointermove", 45], ["pointerup", 45]] as const) {
+        node.dispatchEvent(new window.PointerEvent(type, { bubbles: true, pointerId: 1, button: 0, clientX: x, clientY: 5 }));
+      }
+    });
+    expect(saveButton.disabled).toBe(false);
+    click('[data-control="workflow-save"]');
+    await flush();
+    const saved = server.definitions.get(legacy.id)!;
+    expect(saved.layout).toBe("manual");
+    expect(saved.nodes[1]!.position.x).toBe(saved.nodes[0]!.position.x + 40);
+    click('[data-control="workflow-layout-auto"]');
+    expect(saveButton.disabled).toBe(false);
+    click('[data-control="workflow-save"]');
+    await flush();
+    expect(server.definitions.get(legacy.id)?.layout).toBe("auto");
+  });
+
   it("保存冲突时如实报冲突，不采纳服务端草稿", async () => {
     const definition = createStarterWorkflow(1_000, "wf-00000000-0000-4000-8000-000000000001");
     const server = createServer({ definitions: [definition], fail: { "workflow.save": { code: "conflict", errors: [{ code: "conflict", message: "工作流已被其他操作修改" }] } } });

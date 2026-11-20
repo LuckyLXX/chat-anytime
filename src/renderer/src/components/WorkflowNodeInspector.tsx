@@ -121,7 +121,7 @@ export function WorkflowNodeInspector(props: WorkflowNodeInspectorProps): ReactN
             )}
 
             <label className="workflow-field">
-              <span>标题（≤{MAX_WORKFLOW_NODE_TITLE_LENGTH} 字）</span>
+              <span>标题</span>
               <input
                 value={node.title}
                 maxLength={MAX_WORKFLOW_NODE_TITLE_LENGTH}
@@ -129,6 +129,7 @@ export function WorkflowNodeInspector(props: WorkflowNodeInspectorProps): ReactN
                 aria-label="节点标题"
                 onChange={(event) => props.onChangeNode({ title: clampText(event.target.value, MAX_WORKFLOW_NODE_TITLE_LENGTH) })}
               />
+              <span className="workflow-node-id">节点 ID <code>{node.id}</code></span>
             </label>
             <div className="workflow-field-row">
               <label className="workflow-field">
