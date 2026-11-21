@@ -361,3 +361,37 @@
 2026-11-17 | v1.5.2 | 无更新（沿用上次发布时间 2026-11-10T12:25:43Z）
 
 2026-11-19 | v1.5.2 | 无更新（沿用上次发布时间 2026-11-10T12:25:43Z）
+
+## 2026-11-21 · v1.6.0（较上次已报告版本 v1.5.2 的增量）
+
+### v1.6.0（2026-11-20T11:35:03Z）
+
+**✨ 新功能**
+
+- 新增 GPT-6.2 Astra 与 GPT-6.2 Sol，可用于 `openai`、`azure`、`openai-codex`；三者默认模型一并换成 GPT-6.2 Sol（`gpt-6.2-sol`，同价）。两者都不接受 reasoning effort `none`/`minimal`（即无 `off` thinking）；上下文 Azure 1.05M，Codex 上 Sol 500K、Astra 272K。
+- Qwen Token Plan 扩充：新增 `qwen4-max-preview`、`deepseek-v4.1-flash`、`deepseek-v4.1-flash-1017`，并支持按套餐分 key：`QWEN_TOKEN_PLAN_TEAM_API_KEY`、`QWEN_TOKEN_PLAN_TEAM_CN_API_KEY`、`QWEN_TOKEN_PLAN_INDIVIDUAL_API_KEY`、`QWEN_TOKEN_PLAN_INDIVIDUAL_CN_API_KEY`（共享的 `QWEN_TOKEN_PLAN_API_KEY`/`QWEN_TOKEN_PLAN_CN_API_KEY` 仍可用）。
+- OpenAI 丢弃 reasoning items 时在 transcript 里提示，如 `OpenAI dropped 2 reasoning items: prefix_mismatch (details in session)`；与 Anthropic 的 thinking 提示一样受 `showCacheMissNotices` 控制、只在丢弃数比上次多时出现，两者都标出原因。
+
+**⚠️ 破坏性变更**
+
+- 扩展组件：`render()` 现返回 `readonly string[]`，且 `Container` 在子项未变时返回同一个缓存数组。原地修改渲染结果的扩展（含 `Container` 子类里的 `super.render()`、内嵌组件的输出）必须先 copy。
+
+**📝 变更与默认值**
+
+- Qwen Token Plan 改用现网关（国际 `token-plan.maas.qwencloudapi.com`、国内 `token-plan.maas.qianwenaiapi.com`），`qwen-token-plan`/`qwen-token-plan-cn` 显示名变为 "Qwen Token Plan Team"/"Qwen Token Plan Team CN"；provider ID 不变，旧 `aliyuncs.com` 主机仍可用。退役的 `deepseek-v3.2`、`deepseek-v4-flash` 已移除（改用 `deepseek-v4-flash-0731` 或 `deepseek-v4.1-flash`）。
+- find 工具的 path 模式改为相对搜索目录（与 grep 的 `glob` 一致）：`src/*.ts` 只命中 `src/a.ts`，跨层须用 `**/src/*.ts`；不含 `/` 的模式仍按文件名匹配任意深度。
+- `undici` 升到 8.12.4（修 6 个安全公告）；llama.cpp 扩展默认连 `http://127.0.0.1:9931`（llama-server 现默认端口）而非 8080。
+- 只要 baseUrl 在 `api.anthropic.com` 上（不再限于 `anthropic` provider）就默认开启 Anthropic message threads；退出时打印的 resume 命令移到 `To resume this session:` 下一行，方便三击选中。
+
+**🐛 修复（要点）**
+
+- 工具链：`read` 不再把「当前模型不支持图片」的提示写进会话（换到视觉模型后会被当旧文本重放），该提示只在 TUI 显示且折叠时也显示；`find` 修 `./src/*.ts` 无结果、以及 `src/**/*.ts` 越过搜索目录向上匹配（项目在 `~/src/app` 时曾返回全项目 .ts）；bash 输出结尾是 >100KB 单行时不再显示空结果；`pi.exec` 对信号结束的命令返回 128+信号值（SIGTERM 143、SIGKILL 137）而非 0；超大 edit diff 不再 `Maximum call stack size exceeded`，也不再每次 resume 复现。
+- 会话与扩展：`/new`、`/resume`、`/fork` 与 RPC `new_session`/`switch_session`/`fork` 替换会话时的问题（扩展加载失败、`enabledModels` 模式无匹配等）此前从不显示，现在交互模式进聊天、print/JSON/RPC 写 stderr 且不重复，SDK 可用新增的 `AgentSessionRuntime.takeUnreportedDiagnostics()` 逐条取；RPC 上述操作不再让扩展 `session_start`/`resources_discover` 跑两遍，客户端能收到 `entry_appended` 等事件，`--mode json` 不再丢 `session_start` 事件；扩展 `pi.events` handler 抛错不再用 `console.error` 糊在 TUI 上；`AgentSession.reload()` 在 `bindExtensions({})` 后重新发 `session_start`（MCP 扩展 reload 后不再停摆）；`tool_search` 载入的 MCP 工具在 resume/`/reload` 时不再被丢弃；`/reload`、`/new` 等装包时 git/npm 输出不再糊 TUI（失败报输出尾部；交互模式下 git/ssh 不能交互提问，需凭据助手或 ssh agent）；`/share` 在 gh 启动失败时不再崩；Esc 打断一批工具调用后未开始的调用补 "Operation aborted" 结果；工具调用或 provider 报错后 `/copy` 能复制上一条回答。
+- 渲染与终端：全屏长会话滚动不再占满一个 CPU 核（不再每次滚轮重绘整篇 transcript）；`/login`、`/logout`、`/model`、`/scoped-models`、`/resume`、`/settings`、`pi config` 搜索时高亮跟随输入，Enter 选最佳匹配、方向键不再把高亮弹回第一项；退出与各类 picker 不再丢 stdout 尾部（最多等 1 秒，修 shell 里冒出鼠标/按键上报）；重绘（如窗口 resize）后 Kitty 图片不再消失、Markdown 内联多行图片下方文字不再压图、Kitty/iTerm2 图片不再盖住其上的 overlay；从外部 `kill -TSTP` 挂起会恢复终端并在 `fg` 后重绘；未作用域的语法高亮不再继承终端前景色导致看不清。
+- 协议与模型：`Connection closed.` 与只有 socket 码的错误（`read ECONNRESET`、`write EPIPE`、`connect ETIMEDOUT`）现在会触发自动重试；schema 含无 `type` 节点（如 `items: {}`、`Type.Unknown()`）的工具改走非 strict，不再被 OpenAI 400；Mistral 大模型工具调用卡几分钟（未设 `compat.supportsStrictMode` 时不再发 strict 工具）；非 strict 的 Anthropic schema 会告知模型禁止额外参数；GitHub Copilot 走 Responses API 的模型不再把省略的可选参数填成空串或瞎编；OpenAI Codex WebSocket 60 分钟上限中途断开现在换新连接重试；`openai-codex` 不再忽视模型 `maxTokens`、GPT-6.2 上系统提示缓存命中几乎为零、改 thinking level 不再失效 prompt 缓存；GitHub Copilot 的 Gemini/Kimi 模型不再忽略 thinking level、usage 的 reasoning tokens 不再恒为 0；Groq Qwen 不再 `400 Unexpected message role`（非 OpenAI 的兼容 provider 改用 `system` role）；llama.cpp 分类器识别其图片输入（`models.classify()` 发到 `/v1/systemone`）；`enabledModels`/`--models` 告警只在启动显示一次，不再在 `/new`、`/resume`、`/fork` 时糊屏；Windows 托管安装下 `pi update` 不再误报 "Could not verify managed Pi"（PATH 上旧系统 Node 抢先）；`/export` HTML 里自定义工具输出的链接不再显示转义码、可点击。
+- 输入与补全：Tab 路径菜单（`look at /tmp/fi`）或斜杠命令参数菜单（`/open /tm`）里按 Enter 现在接受补全，不再直接发送 prompt。
+
+**Release**：https://github.com/earendil-works/pi/releases/tag/v1.6.0 ｜ 共 1 个新版本
+
+---
+2026-11-21 | v1.6.0 | 2026-11-20T11:35:03Z
