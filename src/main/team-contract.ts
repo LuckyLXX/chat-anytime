@@ -23,9 +23,24 @@ export interface TeamMemberView {
   description?: string;
   subagent?: string;
   model?: string;
+  /** 运行来源：`codex` = 外部 Codex App Server（Pi 成员缺省不带）。 */
+  backend?: "codex";
   diagnostics: string[];
   /** 最近一个回合的结算（回合结果 / 短结论 / 任务 / 产物 / 卡点），旧会话缺省。 */
   settlement?: TeamMemberSettlement;
+}
+
+/** 外部运行时（首版只有 Codex）的轻量可用性标识：进 `team_list`，让 Lead 知道能派给谁。 */
+export interface TeamBackendView {
+  backend: "codex";
+  /** 设置里启用、CLI 可执行文件可解析、协议版本已知：三者都满足才 true。 */
+  available: boolean;
+  /** 探测到的 CLI 版本（`codex-cli 0.171.0` 这种可读串）。 */
+  version?: string;
+  /** 不可用时给模型看的可行动原因（「未启用」「找不到 CLI」「只读」…）。 */
+  reason?: string;
+  /** 这个后端当前允许的访问上限；`read-only` 时不要指望它能改文件。 */
+  access: "read-only" | "workspace-write";
 }
 
 export interface TeamWaitNoProgress {
@@ -69,14 +84,14 @@ export interface TeamMemberIdentity {
 }
 
 export interface TeamPermissionHooks {
-  /** 审批卡已发出（Lead 在等时能看到「某成员在等审批」）。 */
-  onPending(request: TeamPermissionNotice): void;
+  /** 审批卡已发出（Lead 在等时能看到「某成员在等审批」）；`requestId` 与 settlement.id 同一个键。 */
+  onPending(request: TeamPermissionNotice, requestId?: string): void;
   /** 请求收场（含模式直通/授权复用）：deny 的来源与取消都要能区分。 */
   onSettled(settlement: PermissionSettlement & { request: TeamPermissionNotice }): void;
 }
 
 export interface TeamService {
-  spawn(membership: TeamMembership, params: { name: string; description: string; prompt: string; subagent?: string; taskId?: string }, signal?: AbortSignal): Promise<TeamMemberView>;
+  spawn(membership: TeamMembership, params: { name: string; description: string; prompt: string; subagent?: string; taskId?: string; backend?: "codex" }, signal?: AbortSignal): Promise<TeamMemberView>;
   send(membership: TeamMembership, target: string, text: string, signal?: AbortSignal, taskId?: string): Promise<{ sent: true }>;
   list(membership: TeamMembership): TeamMemberView[];
   wait(membership: TeamMembership, timeoutMs: number, signal: AbortSignal): Promise<TeamWaitResult>;
@@ -86,6 +101,8 @@ export interface TeamService {
   listTasks(membership: TeamMembership, filter: TeamListTaskFilter): { tasks: TeamTaskView[]; nextCursor?: number };
   getTask(membership: TeamMembership, taskId: string): TeamTaskView;
   updateTask(membership: TeamMembership, mutation: TeamTaskMutation): Promise<TeamTaskView>;
+  /** 可用外部运行时（首版只有 Codex）；未接入时返回空表（零提示词成本）。 */
+  backends(): TeamBackendView[];
   /** 渲染端状态条用的成员摘要（只含 teammate）。 */
   snapshot(): TeamSnapshot;
   hasRunningMembers(): boolean;

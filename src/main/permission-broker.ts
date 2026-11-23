@@ -33,8 +33,8 @@ export interface PermissionBrokerRequest {
    * 超时 → `deny`，与用户自己点「拒绝」同一条路径（幂等：先到先得）。
    */
   timeoutMs?: number;
-  /** 卡片已发出的回调（团队运行时用它让等待中的 Lead 知道有成员在等审批）。 */
-  onPending?: () => void;
+  /** 卡片已发出的回调（团队运行时用它让等待中的 Lead 知道有成员在等审批）；参数是本次请求 id。 */
+  onPending?: (id: string) => void;
   /** 请求收场时恰好回调一次（含 mode 直通与 grant 复用），说明裁决从哪来。 */
   onSettled?: (settlement: PermissionSettlement) => void;
 }
@@ -93,7 +93,9 @@ export class PermissionBroker {
       }
       this.pending.set(id, pending);
       // 登记之后再通知：回调里若立刻取消，pending 已在表里，不会漏掉。
-      input.onPending?.();
+      // id 必须交给调用方：团队把审批登记进 `pendingApprovals`，收场时只能按同一个
+      // id 精确摘除（拿工具调用 id 去登记会留一张永远不清的卡）。
+      input.onPending?.(id);
     });
   }
 

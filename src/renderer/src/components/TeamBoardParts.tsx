@@ -234,6 +234,8 @@ export function MemberRow({ member, selected, now, onSelect }: {
       <span className="team-member-copy">
         <span className="team-member-line">
           <strong>{member.name}</strong>
+          {/* 运行来源：Codex 成员的模型不是 Pi 的 provider/model，靠这个标识区分（缺省 = Pi 子会话）。 */}
+          {member.backend === "codex" && <span className="team-member-backend" title="运行来源：本机 Codex CLI（App Server），转写与结算由运行时回传">Codex</span>}
           <span className={`team-status-badge ${member.status}`}>{statusLabel(member.status)}</span>
           <span className="team-member-time">{member.status === "running" ? formatElapsed(activity?.startedAt, now) : activity ? `${activity.steps} 步` : "—"}</span>
         </span>
@@ -287,8 +289,9 @@ export function TeamMemberDetail({
         <span className={`team-status-dot ${selected.status}`} />
         <strong>{selected.name}</strong>
         <span className={`team-status-badge ${selected.status}`}>{statusLabel(selected.status)}</span>
+        {selected.backend === "codex" && <span className="team-member-backend" title="运行来源：本机 Codex CLI（App Server）">Codex</span>}
         <span className="team-detail-meta">
-          {[selected.model, selected.thinkingLevel ? `思考 ${thinkingLevelLabels[selected.thinkingLevel]}` : ""]
+          {[selected.backend === "codex" ? undefined : selected.model, selected.thinkingLevel ? `思考 ${thinkingLevelLabels[selected.thinkingLevel]}` : ""]
             .filter(Boolean)
             .join(" · ")}
         </span>

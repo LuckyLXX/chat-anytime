@@ -49,23 +49,25 @@ export function createTeamTools(service: TeamService, membership: TeamMembership
     tools.push(defineTool({
       name: "team_spawn",
       label: "创建团队成员",
-      description: "创建一名有名字的常驻团队成员（独立子会话，共享当前工作区），并让它立即开始执行 prompt。只有 Team Lead 能调用。成员默认继承 Lead 的模型、系统提示与内置工具；subagent 可指定一个已定义的子智能体来覆盖模型/提示词/工具/颜色。名字必须小写 kebab-case、全团队唯一且永不复用（创建失败也不复用）。可选用 task_id 把共享任务绑定到这次执行（之后可按任务停止）。返回成员行；创建完成后成员状态为 running。",
+      description: "创建一名有名字的常驻团队成员（独立子会话，共享当前工作区），并让它立即开始执行 prompt。只有 Team Lead 能调用。成员默认继承 Lead 的模型、系统提示与内置工具；subagent 可指定一个已定义的子智能体来覆盖模型/提示词/工具/颜色。backend=\"codex\" 派给外部 Codex CLI（用它本机登录，不支持 subagent）。名字必须小写 kebab-case、全团队唯一且永不复用（创建失败也不复用）。可选用 task_id 把共享任务绑定到这次执行（之后可按任务停止）。返回成员行；创建完成后成员状态为 running。",
       promptSnippet: "team_spawn: 创建有名字的常驻团队成员（仅 Lead）",
       parameters: Type.Object({
         name: Type.String({ description: "唯一的小写 kebab-case 成员名（如 reviewer，最多 64 字符，不能是 lead）" }),
         description: Type.String({ description: "这名成员负责什么（简短，最多 200 字符）" }),
         prompt: Type.String({ description: "成员的完整初始任务；它看不到 Lead 的对话历史，必须自包含" }),
         task_id: Type.Optional(Type.String({ description: "可选：要绑定的共享任务 id（pending+就绪会自动认领；一个成员同一时间只绑一个任务）" })),
-        subagent: Type.Optional(Type.String({ description: "可选：现有自定义子智能体的名称或 id；指定后用它的人设/模型/工具/颜色" }))
+        subagent: Type.Optional(Type.String({ description: "可选：现有自定义子智能体的名称或 id；指定后用它的人设/模型/工具/颜色" })),
+        backend: Type.Optional(Type.Literal("codex", { description: "可选：派给外部 Codex CLI（需先在设置里启用）" }))
       }),
       execute: async (_toolCallId, params, signal) => {
-        const args = params as { name: string; description: string; prompt: string; task_id?: string; subagent?: string };
+        const args = params as { name: string; description: string; prompt: string; task_id?: string; subagent?: string; backend?: "codex" };
         return json(await service.spawn(membership, {
           name: args.name,
           description: args.description,
           prompt: args.prompt,
           ...(args.task_id === undefined ? {} : { taskId: args.task_id }),
-          ...(args.subagent === undefined ? {} : { subagent: args.subagent })
+          ...(args.subagent === undefined ? {} : { subagent: args.subagent }),
+          ...(args.backend === undefined ? {} : { backend: args.backend })
         }, signal));
       }
     }));
@@ -107,11 +109,14 @@ export function createTeamTools(service: TeamService, membership: TeamMembership
   tools.push(defineTool({
     name: "team_list",
     label: "列出团队成员",
-    description: "列出 Lead 与全部成员的可寻址名字、当前状态、模型、诊断与最近一个回合的结算（settlement：结局/短结论/对应任务/产物引用/卡点）。inactive 只表示当前没有回合在跑，不代表任务完成/失败；stopping 表示停止已受理、正在收尾；provisioning 表示创建中，failed 表示创建失败（名字仍被占用）。",
+    description: "列出 Lead 与全部成员的可寻址名字、当前状态、模型、运行来源（backend=codex 为外部 CLI）、诊断与最近一个回合的结算（settlement：结局/短结论/对应任务/产物引用/卡点）。backends 是可用的外部运行时（可用性/版本/访问上限），无则缺省。inactive 只表示当前没有回合在跑，不代表任务完成/失败；stopping 表示停止已受理、正在收尾；provisioning 表示创建中，failed 表示创建失败（名字仍被占用）。",
     promptSnippet: "team_list: 查看团队成员、状态与诊断",
     promptGuidelines: TEAM_POLICY_GUIDELINES,
     parameters: Type.Object({}),
-    execute: () => Promise.resolve(json({ members: service.list(membership) }))
+    execute: () => {
+      const backends = service.backends();
+      return Promise.resolve(json({ members: service.list(membership), ...(backends.length > 0 ? { backends } : {}) }));
+    }
   }));
 
   tools.push(defineTool({

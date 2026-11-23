@@ -10,6 +10,7 @@ import {
 import { normalizeThinkingLevelMap } from "../shared/thinking-levels.js";
 import { normalizeShortcuts } from "../shared/shortcuts.js";
 import { parseImSettings } from "../shared/im.js";
+import { normalizeCodexCliSettings } from "../shared/codex.js";
 import { normalizeArchivedSessionPaths, normalizePinnedSessionPaths } from "./session-scope.js";
 import type {
   AccessMode,
@@ -576,6 +577,9 @@ export function defaultSettings(): DesktopSettings {
     version: 2,
     lastWorkspace: undefined,
     shortcuts: undefined,
+    // Codex CLI 接入缺省未配置（`undefined` = 没有这份配置，不落键）；显式列出这个键，
+    // 好让 settings-store 的「新增顶层字段必须进脏字段夹具」契约测试盯住它。
+    codex: undefined,
     thinkingLevel: "medium",
     accessMode: "ask",
     providers: [],
@@ -667,6 +671,9 @@ export function migrateSettings(raw: unknown): { settings: DesktopSettings; lega
     checkpoint: normalizeCheckpoint(source.checkpoint),
     ssh: normalizeSsh(source.ssh),
     jev: normalizeJev(source.jev),
+    // Codex CLI 接入（`codex.settings.save` 是唯一写入口）：migrateSettings 是唯一读入口，
+    // 漏读 = 下一次任意设置写入把它从磁盘抹掉（同 pinnedSessionPaths / ssh / jev 的纪律）。
+    codex: normalizeCodexCliSettings(source.codex),
     intranetStore: normalizeIntranetStore(source.intranetStore),
     im: normalizeIm(source.im),
     ...(pinnedSessionPaths ? { pinnedSessionPaths } : {}),

@@ -62,8 +62,8 @@ export interface PermissionRequestExtra {
   accessModeCap?: AccessMode;
   /** 覆盖 deps.permissionTimeoutMs 的超时。 */
   timeoutMs?: number;
-  /** 待决卡已发出。 */
-  onPending?: () => void;
+  /** 待决卡已发出（参数是本次权限请求 id，收场时按它精确摘除）。 */
+  onPending?: (id: string) => void;
   /** 收场时恰好回调一次（deny 的来源：用户拒绝 / 模式拦截 / 超时 / 取消 分别可辨）。 */
   onSettled?: (settlement: PermissionSettlement) => void;
 }

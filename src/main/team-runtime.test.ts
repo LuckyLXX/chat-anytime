@@ -161,7 +161,7 @@ interface Harness {
   options: TeamRuntimeOptions;
   permissionCalls: { toolName: string; member: { memberId: string; memberName: string }; hooks: unknown }[];
   /** 运行时注入给权限门的两条回调（用例据此模拟「卡片发出 / 拒绝 / 超时 / 取消」）。 */
-  pendingHandler?: (notice: TeamPermissionNotice) => void;
+  pendingHandler?: (notice: TeamPermissionNotice, requestId?: string) => void;
   settledHandler?: (settlement: PermissionSettlement & { request: TeamPermissionNotice }) => void;
   cancelledMembers: string[];
 }
@@ -765,6 +765,50 @@ describe("team permission feedback", () => {
 
     child.emit({ type: "agent_settled" });
     expect(settlementEntries(h.lead).at(-1)?.blocker).toMatchObject({ kind: "permission-denied", toolName: "bash" });
+  });
+
+  it("clears the pending card by the permission request id even when it differs from the tool call id", async () => {
+    const h = harness();
+    await h.runtime.spawn(leadMembership, { name: "reviewer", description: "x", prompt: "p" });
+    const child = h.created[0]!;
+    child.emit({ type: "agent_start" });
+    await h.runtime.memberPermissionRequest({ memberId: child.sessionId, memberName: "reviewer" }, "bash", { command: "npm test" }, "call-bash");
+    const request = { memberName: "reviewer", toolName: "bash", summary: "执行命令：npm test" };
+    // 权限请求 id 与工具调用 id 不同：登记和摘除必须用同一个键（权限 id）。
+    // 先注册等待者，再发卡（否则通知早于 waiter，只能等到超时）。
+    const waiting = h.runtime.wait(leadMembership, 10_000, new AbortController().signal);
+    h.pendingHandler?.(request, "permission-9");
+    await expect(waiting).resolves.toMatchObject({
+      pendingApprovals: [request]
+    });
+    h.settledHandler?.({ id: "permission-9", decision: "allow-once", cause: "user", request });
+    vi.useFakeTimers();
+    const after = h.runtime.wait(leadMembership, 30_000, new AbortController().signal);
+    await vi.advanceTimersByTimeAsync(30_000);
+    const result = await after;
+    expect(result).toMatchObject({ timedOut: true });
+    expect(result.pendingApprovals).toBeUndefined();
+  });
+
+  it("registers Codex round approvals and removes them on settle", async () => {
+    const h = harness();
+    await h.runtime.spawn(leadMembership, { name: "reviewer", description: "x", prompt: "p" });
+    const child = h.created[0]!;
+    // 轮次确认发生在 turn/start 之前（agent_start 还没来）：登记必须自己把回合开账。
+    const notice = { memberName: "reviewer", toolName: "codex", summary: "本轮写入" };
+    // 先注册等待者：登记会触发 notify，晚注册就只能等超时。
+    const waiting = h.runtime.wait(leadMembership, 10_000, new AbortController().signal);
+    h.runtime.noteCodexApprovalPending(child.sessionId, notice, "permission-42");
+    await expect(waiting).resolves.toMatchObject({
+      pendingApprovals: [notice]
+    });
+    h.runtime.noteCodexApprovalSettled(child.sessionId, "permission-42");
+    vi.useFakeTimers();
+    const after = h.runtime.wait(leadMembership, 30_000, new AbortController().signal);
+    await vi.advanceTimersByTimeAsync(30_000);
+    const result = await after;
+    expect(result).toMatchObject({ timedOut: true });
+    expect(result.pendingApprovals).toBeUndefined();
   });
 
   it("treats an access-mode block and a timeout as separate blockers, and a cancel as aborted (no blocker)", async () => {

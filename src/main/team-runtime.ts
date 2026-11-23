@@ -14,13 +14,14 @@
 
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 import {
   createAgentSession,
   DefaultResourceLoader,
   SessionManager,
   SettingsManager,
   type AgentSession,
+  type AgentSessionEvent,
   type AgentSessionEventListener,
   type ModelRuntime,
   type ToolDefinition
@@ -43,6 +44,7 @@ import {
   appendTeamMember,
   appendTeamSettlement,
   appendTeamTask,
+  backendOfMemberConfig,
   reconcileProvisioningMember,
   restoreTeamState,
   type TeamMemberConfig,
@@ -64,6 +66,7 @@ import {
 import {
   TEAM_NO_ACTIVE_PEER_MESSAGE,
   teamIdentityBlock,
+  type TeamBackendView,
   type TeamListTaskFilter,
   type TeamMembership,
   type TeamMemberIdentity,
@@ -74,6 +77,24 @@ import {
   type TeamStopResult,
   type TeamWaitResult
 } from "./team-contract.js";
+
+/**
+ * 子会话可选的**窄失败事件契约**。
+ *
+ * Pi 的 `agent_settled` 只有一个 `aborted` 布尔：模型报错与正常结束在它眼里是同一件事
+ * （错误只体现在 assistant 消息里）。外部运行时（Codex）的 `turn/completed` 会明确给出
+ * `failed`，把它翻译成 `agent_settled` 会被结算成「已完成」——所以失败要单独一条事件。
+ * Pi 子会话从不发这条事件，旧分支零变化。
+ */
+export interface TeamChildRunFailedEvent {
+  type: "pidesktop_run_failed";
+  error: string;
+  /** true = 停止/中止导致的失败（按「已中止」结算，不算成员的错）。 */
+  aborted?: boolean;
+}
+
+export type TeamChildEvent = AgentSessionEvent | TeamChildRunFailedEvent;
+export type TeamChildListener = (event: TeamChildEvent) => void;
 
 /** 子会话只需要这几个方法；收窄后单测可注入 fake，不必伪造整个 AgentSession。 */
 export interface TeamChildSession {
@@ -87,7 +108,7 @@ export interface TeamChildSession {
   /** 停止时清掉排队指令（Pi 的 abort 不清 steering/followUp）；旧会话没有此方法时跳过。 */
   clearQueue?(): void;
   dispose(): void;
-  subscribe(listener: AgentSessionEventListener): () => void;
+  subscribe(listener: TeamChildListener): () => void;
   /** 只读统计；测试 fake 可以缺省。 */
   getSessionStats?(): { toolCalls: number; tokens: { total: number }; cost: number };
   getContextUsage?(): { percent: number | null } | undefined;
@@ -110,6 +131,39 @@ export interface TeamChildFactoryRequest {
 
 export type TeamChildFactory = (request: TeamChildFactoryRequest) => Promise<TeamChildCreated>;
 
+/**
+ * 外部运行时后端（首版只有 Codex）的可用性投影。
+ *
+ * `available=false` 时 `team_spawn backend:"codex"` 直接拒绝（不占成员名）；
+ * `access` 是**这个后端当前被允许的上限**——读写能力还必须同时满足 C 阶段的逐轮策略。
+ */
+export interface TeamCodexBackendAvailability {
+  available: boolean;
+  version?: string;
+  reason?: string;
+  /** 已解析的可执行文件（预检通过时给出；写进成员编制冻结下来）。 */
+  executable?: string;
+  access: "read-only" | "workspace-write";
+}
+
+/** 为一个 Codex 成员建子会话（首次 thread/start、冷恢复 thread/resume）。 */
+export interface TeamCodexChildRequest {
+  memberId: string;
+  memberName: string;
+  workspace: string;
+  /** 团队目录（成员转写与 thread 绑定都在这下面，随会话删除一并清理）。 */
+  memberDir: string;
+  /** 成员的 SessionManager（Codex 也写兼容的 user/assistant 条目）。 */
+  manager: SessionManager;
+  config: TeamMemberConfig;
+  signal?: AbortSignal;
+}
+
+export interface TeamCodexBackend {
+  availability(): TeamCodexBackendAvailability;
+  createChild(request: TeamCodexChildRequest): Promise<TeamChildCreated>;
+}
+
 export interface TeamRuntimeOptions {
   leadSession: AgentSession;
   workspace: string;
@@ -131,9 +185,16 @@ export interface TeamRuntimeOptions {
   buildBrowserTools?(): ToolDefinition[];
   /** 测试注入；缺省走 createAgentSession。 */
   createChildSession?: TeamChildFactory;
+  /**
+   * 外部运行时（Codex）：缺省未接入 → `team_spawn backend:"codex"` 报明确原因；
+   * `team_list` 的 backends 为空（零提示词成本）。
+   */
+  codex?: TeamCodexBackend;
   now?(): number;
   /** 状态变化（成员/任务/投递）时回调，pi-runtime 据此推快照。 */
   onChange?(): void;
+  /** 设置关闭接入 / 权限收紧主动停掉的 Codex 成员（诊断日志用；缺省静默）。 */
+  onCodexMemberStopped?(memberName: string, reason: string): void;
 }
 
 interface MemberRuntime {
@@ -401,7 +462,7 @@ export class TeamRuntime implements TeamService {
 
   async spawn(
     membership: TeamMembership,
-    params: { name: string; description: string; prompt: string; subagent?: string; taskId?: string },
+    params: { name: string; description: string; prompt: string; subagent?: string; taskId?: string; backend?: "codex" },
     signal?: AbortSignal
   ): Promise<TeamMemberView> {
     this.assertNotDisposed();
@@ -411,12 +472,7 @@ export class TeamRuntime implements TeamService {
     try {
       prepared = await this.mutate(() => this.prepareSpawn(params));
       const reservation = prepared;
-      created = await this.createChild({
-        manager: reservation.manager,
-        config: reservation.member.config,
-        name: reservation.member.name,
-        ...(signal === undefined ? {} : { signal })
-      });
+      created = await this.createChildFor(reservation.member, reservation.manager, signal);
       if (!this.attach(reservation.member.id, created)) {
         created = undefined;
         throw new Error("成员会话未能挂载到团队运行时");
@@ -612,6 +668,29 @@ export class TeamRuntime implements TeamService {
     return this.members.get(memberId)?.record.config.accessModeCap;
   }
 
+  /**
+   * 设置关闭接入 / 权限收紧时停掉**正在跑的 Codex 成员**（Pi 成员不受影响）。
+   *
+   * 为什么要主动停：Codex 的沙箱是**逐轮参数**，已经在跑的那一轮不会因为设置变化
+   * 自己缩小权限；不停它，就等于用一个已作废的授权继续写盘。返回被要求停止的成员数，
+   * 调用方（pi-runtime）据此写日志/回执。
+   */
+  stopCodexMembers(reason: string): number {
+    if (this.disposed) return 0;
+    let stopped = 0;
+    for (const member of this.members.values()) {
+      if (backendOfMemberConfig(member.record.config) !== "codex") continue;
+      if (!member.running && !member.stopping) continue;
+      const result = this.stopMember(member, { target: "member", value: member.record.name });
+      if (result.status === "delivered") {
+        stopped += 1;
+        this.options.onCodexMemberStopped?.(member.record.name, reason);
+      }
+    }
+    if (stopped > 0) this.notify();
+    return stopped;
+  }
+
   stopAll(): void {
     if (this.disposed) return;
     let changed = false;
@@ -684,6 +763,19 @@ export class TeamRuntime implements TeamService {
 
   // ── 渲染端快照 ──────────────────────────────────────────────────────────
 
+  backends(): TeamBackendView[] {
+    const backend = this.options.codex;
+    if (!backend) return [];
+    const availability = backend.availability();
+    return [{
+      backend: "codex",
+      available: availability.available,
+      access: availability.access,
+      ...(availability.version ? { version: availability.version } : {}),
+      ...(availability.reason ? { reason: availability.reason } : {})
+    }];
+  }
+
   snapshot(): TeamSnapshot {
     if (this.snapshotCache) return this.snapshotCache;
     const members: TeamMemberSummary[] = this.state.members.map((record) => {
@@ -703,7 +795,8 @@ export class TeamRuntime implements TeamService {
         ...(error ? { error } : {}),
         sessionId: record.id,
         sessionFile: record.sessionFile,
-        model: `${record.config.model.provider}/${record.config.model.id}`,
+        ...(this.modelLabel(record.config) ? { model: this.modelLabel(record.config) } : {}),
+        ...(backendOfMemberConfig(record.config) === "codex" ? { backend: "codex" as const } : {}),
         thinkingLevel: record.config.thinkingLevel,
         ...(task ? { taskId: task.id, taskSubject: task.subject } : {}),
         ...(activity ? { activity } : {}),
@@ -829,6 +922,8 @@ export class TeamRuntime implements TeamService {
       member.unsubscribe = undefined;
       member.running = false;
       member.stopping = false;
+      // 销毁时先把还在等的卡收掉：迟到的点击不能落到已经没人接的回合上（与 stop 同口径）。
+      this.options.cancelMemberPermissions?.(member.record.id);
       if (!handle) continue;
       // abort 可能卡在模型请求上；5s 后强制断开，别让一次退出拖住整个进程。
       const force = setTimeout(() => {
@@ -853,7 +948,7 @@ export class TeamRuntime implements TeamService {
 
   // ── 内部：创建 / 恢复 ───────────────────────────────────────────────────
 
-  private prepareSpawn(params: { name: string; description: string; prompt: string; subagent?: string }): { member: TeamMemberRecord; manager: SessionManager; prompt: string } {
+  private prepareSpawn(params: { name: string; description: string; prompt: string; subagent?: string; backend?: "codex" }): { member: TeamMemberRecord; manager: SessionManager; prompt: string } {
     this.assertNotDisposed();
     const name = String(params.name ?? "").trim();
     if (!MEMBER_NAME.test(name) || name.length > 64 || name === "lead") {
@@ -871,7 +966,12 @@ export class TeamRuntime implements TeamService {
     if (Buffer.byteLength(prompt, "utf8") > MAX_TEAM_MESSAGE_BYTES) {
       throw new Error(`成员首条 prompt 超过 ${MAX_TEAM_MESSAGE_BYTES} 字节上限`);
     }
-    const config = this.configFor(name, params.subagent);
+    // 后端预检留在「占用成员名」之前：Codex 未启用/CLI 解析不出来时，成员名不该被
+    // 一条 failed 记录永久占掉（用户修好设置后可以直接用同一个名字重试）。
+    const backend = params.backend === "codex" ? "codex" : "pi";
+    const config = backend === "codex"
+      ? this.codexConfigFor(name, params.subagent)
+      : this.configFor(name, params.subagent);
     const id = randomUUID();
     const manager = SessionManager.create(this.options.workspace, this.teamDir, {
       id,
@@ -965,16 +1065,17 @@ export class TeamRuntime implements TeamService {
       throw new Error(`成员「${member.record.name}」的会话未能恢复`);
     }
     member.livePromise = (async () => {
-      if (!existsSync(member.record.sessionFile)) {
+      const isCodex = backendOfMemberConfig(member.record.config) === "codex";
+      const hasFile = existsSync(member.record.sessionFile);
+      if (!hasFile && !isCodex) {
         throw new Error(`成员「${member.record.name}」的会话文件不存在，无法冷恢复`);
       }
-      const manager = SessionManager.open(member.record.sessionFile, this.teamDir);
-      const created = await this.createChild({
-        manager,
-        config: member.record.config,
-        name: member.record.name,
-        ...(signal === undefined ? {} : { signal })
-      });
+      // Codex 成员的转写文件可能还没落（首回合之前）：这时新建一个同 id 的 manager，
+      // 让后续 user/assistant 条目照常写入；已有文件则沿用（原转写保留）。
+      const manager = hasFile
+        ? SessionManager.open(member.record.sessionFile, this.teamDir)
+        : SessionManager.create(this.options.workspace, this.teamDir, { id: member.record.id, parentSession: this.leadSession.sessionId });
+      const created = await this.createChildFor(member.record, manager, signal);
       if (!this.attach(member.record.id, created)) throw new Error("成员会话未能挂载到团队运行时");
     })();
     try {
@@ -1007,6 +1108,16 @@ export class TeamRuntime implements TeamService {
     }
     member.unsubscribe = created.handle.subscribe((event) => {
       const now = Date.now();
+      // 窄失败契约（Codex 的 failed 终态）：按失败结算一次，并带上真实原因。
+      if (event.type === "pidesktop_run_failed") {
+        member.running = false;
+        member.stopping = false;
+        closeRunningSteps(member, event.aborted ? "aborted" : "error", now);
+        this.settleTurn(member, event.aborted ? "aborted" : "failed", event.aborted ? undefined : event.error);
+        this.notify();
+        this.scheduleIdle(member);
+        return;
+      }
       if (event.type === "agent_settled") {
         member.running = false;
         member.stopping = false;
@@ -1052,6 +1163,14 @@ export class TeamRuntime implements TeamService {
         return;
       }
       if (event.type === "tool_execution_end") {
+        if (member.record.config.mode === "codex" && event.toolName === "fileChange" && !event.isError) {
+          const result = event.result as { changedPaths?: unknown } | undefined;
+          if (Array.isArray(result?.changedPaths)) {
+            for (const path of result.changedPaths) {
+              if (typeof path === "string") this.noteArtifactValue(member, isAbsolute(path) ? relative(this.options.workspace, path) : path);
+            }
+          }
+        }
         closeRunningSteps(member, event.isError ? "error" : "done", now, event.toolCallId, event.durationMs);
         member.lastActiveAt = now;
         this.notifyActivity();
@@ -1448,6 +1567,61 @@ export class TeamRuntime implements TeamService {
     };
   }
 
+  /** Codex 成员的编制：不伪造 Pi provider/model，冻结 CLI 与访问上限。 */
+  private codexConfigFor(name: string, subagentKey: string | undefined): TeamMemberConfig {
+    if (subagentKey !== undefined && subagentKey.trim()) {
+      throw new Error("Codex 成员不支持 subagent（那是 Pi 子智能体定义）：请把角色要求写进 prompt 或成员的 description");
+    }
+    const backend = this.options.codex;
+    if (!backend) throw new Error("Codex 后端未接入：请在「设置 → 子智能体 → Codex CLI」启用并选择可执行文件");
+    const availability = backend.availability();
+    if (!availability.available || !availability.executable) {
+      throw new Error(`Codex 后端不可用：${availability.reason ?? "未检测到可用的 Codex CLI"}`);
+    }
+    return {
+      mode: "codex",
+      systemPrompt: "",
+      tools: [],
+      thinkingLevel: this.options.getThinkingLevel(),
+      browserTools: false,
+      codex: {
+        executable: availability.executable,
+        sandbox: availability.access,
+        approvalPolicy: "never",
+        ...(availability.version ? { version: availability.version } : {})
+      }
+    };
+  }
+
+  /** 按成员编制选后端：Codex 走外部运行时，其余（含旧记录）走 Pi 子会话。 */
+  private async createChildFor(member: TeamMemberRecord, manager: SessionManager, signal?: AbortSignal): Promise<TeamChildCreated> {
+    if (backendOfMemberConfig(member.config) !== "codex") {
+      return await this.createChild({
+        manager,
+        config: member.config,
+        name: member.name,
+        ...(signal === undefined ? {} : { signal })
+      });
+    }
+    const backend = this.options.codex;
+    if (!backend) throw new Error(`成员「${member.name}」是 Codex 成员，但 Codex 后端当前未接入（设置里未启用）`);
+    return await backend.createChild({
+      memberId: member.id,
+      memberName: member.name,
+      workspace: this.options.workspace,
+      memberDir: this.teamDir,
+      manager,
+      config: member.config,
+      ...(signal === undefined ? {} : { signal })
+    });
+  }
+
+  /** 成员模型的可读标签（Codex 成员没有 Pi provider/model）。 */
+  private modelLabel(config: TeamMemberConfig): string | undefined {
+    if (backendOfMemberConfig(config) === "codex") return `codex/${config.codex?.model ?? "default"}`;
+    return config.model ? `${config.model.provider}/${config.model.id}` : undefined;
+  }
+
   private async createChild(request: TeamChildFactoryRequest): Promise<TeamChildCreated> {
     if (this.options.createChildSession) return await this.options.createChildSession(request);
     return await this.defaultCreateChild(request);
@@ -1465,9 +1639,10 @@ export class TeamRuntime implements TeamService {
     toolCallId: string
   ): Promise<PermissionDecision> {
     const hooks: TeamPermissionHooks = {
-      onPending: (notice) => {
+      onPending: (notice, requestId) => {
         const runtime = this.members.get(member.memberId);
-        if (runtime) this.notePermissionPending(runtime, notice, toolCallId);
+        // 权限 id 与 settlement.id 同键；旧调用方（测试替身）没给 id 时退回工具调用 id。
+        if (runtime) this.notePermissionPending(runtime, notice, requestId ?? toolCallId);
       },
       onSettled: (settlement) => {
         const runtime = this.members.get(member.memberId);
@@ -1475,6 +1650,29 @@ export class TeamRuntime implements TeamService {
       }
     };
     return this.options.requestPermission(toolName, args, toolCallId, member, hooks);
+  }
+
+  /**
+   * Codex 轮次确认（工作区写入的本轮授权）的登记入口。
+   *
+   * 与 Pi 成员共用同一套口径：确认发生在 `turn/start` **之前**，所以这里先把回合开账，
+   * 否则 `team_wait` 的 `pendingApprovals` 看不到、拒绝后的结算也丢；`requestId` 必须是
+   * 权限请求自己的 id（broker 的 onPending 给出），收场时按同一个键摘除。
+   */
+  noteCodexApprovalPending(memberId: string, notice: TeamPermissionNotice, requestId: string): void {
+    if (this.disposed || !requestId) return;
+    const member = this.members.get(memberId);
+    if (!member) return;
+    this.beginTurn(member);
+    this.notePermissionPending(member, notice, requestId);
+  }
+
+  /** Codex 轮次确认收场：只摘除卡片登记（拒绝/超时的语义由本回合的失败结算表达）。 */
+  noteCodexApprovalSettled(memberId: string, requestId: string): void {
+    if (this.disposed || !requestId) return;
+    const turn = this.members.get(memberId)?.turn;
+    if (!turn || !turn.pending.delete(requestId)) return;
+    this.notify();
   }
 
   private async defaultCreateChild(request: TeamChildFactoryRequest): Promise<TeamChildCreated> {
@@ -1500,6 +1698,8 @@ export class TeamRuntime implements TeamService {
     await resourceLoader.reload();
     const teamTools = createTeamTools(this, { role: "teammate", name: request.name });
     const browserTools = request.config.browserTools && this.options.buildBrowserTools ? this.options.buildBrowserTools() : [];
+    // Pi 子会话必须有模型（Codex 成员走 createChildFor 的另一条分支，不会到这里）。
+    if (!request.config.model) throw new Error("成员缺少 Pi 模型（记录已损坏？）");
     const model = this.resolveModel(request.config.model);
     const { session } = await createAgentSession({
       cwd: this.options.workspace,
@@ -1545,7 +1745,8 @@ export class TeamRuntime implements TeamService {
       status: this.statusOf(record, memberRuntime),
       ...(record.description ? { description: record.description } : {}),
       ...(record.config.subagentName ? { subagent: record.config.subagentName } : {}),
-      model: `${record.config.model.provider}/${record.config.model.id}`,
+      ...(this.modelLabel(record.config) ? { model: this.modelLabel(record.config) } : {}),
+      ...(backendOfMemberConfig(record.config) === "codex" ? { backend: "codex" as const } : {}),
       diagnostics,
       ...(memberRuntime?.settlement ? { settlement: { ...memberRuntime.settlement } } : {})
     };

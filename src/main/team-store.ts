@@ -12,6 +12,9 @@
  * 留在 utility 进程即可。
  */
 
+import { randomUUID } from "node:crypto";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type { AccessMode, ThinkingLevel, TeamMemberSettlement } from "../shared/protocol.js";
 import type { PersistedSessionEntry } from "./session-history.js";
@@ -32,6 +35,8 @@ export const TEAM_IDLE_DISPOSE_MS = 30 * 60_000;
 export const TEAM_SPAWN_START_TIMEOUT_MS = 30_000;
 
 export type TeamMemberPhase = "provisioning" | "active" | "failed";
+/** 成员的运行来源：`inherit`/`subagent` 是 Pi 子会话，`codex` 是外部 Codex App Server。 */
+export type TeamMemberBackend = "pi" | "codex";
 export type TeamTaskStatus = "pending" | "in_progress" | "completed" | "deleted";
 
 /**
@@ -39,13 +44,34 @@ export type TeamTaskStatus = "pending" | "in_progress" | "completed" | "deleted"
  * 变样或无法复活。systemPrompt 是有效人设（不含 base 与团队身份块），上限沿用
  * 子智能体定义的 20000 字符。
  */
+/**
+ * Codex 成员的编制（冻结）。thread id 不在这里：它在回合之间会变（首次创建/冷恢复），
+ * 单独原子落成员目录（见 `writeCodexThreadBinding`），成员编制保持不可变。
+ */
+export interface TeamCodexMemberConfig {
+  /** 创建时冻结的可执行文件（用户换 CLI 后旧成员仍用这条；失效时给出具体原因）。 */
+  executable: string;
+  /** 首版冻结的访问上限；C 阶段逐轮与 Lead 当前模式取严。 */
+  sandbox: "read-only" | "workspace-write";
+  approvalPolicy: "never" | "on-request";
+  /** 用户选的 Codex 模型；缺省 = 用本机 Codex 配置的模型。 */
+  model?: string;
+  /** 探测到的 CLI 版本（展示/诊断用）。 */
+  version?: string;
+}
+
 export interface TeamMemberConfig {
-  mode: "inherit" | "subagent";
+  /**
+   * `inherit` / `subagent` = Pi 子会话（旧记录的读法完全不变）；`codex` = 外部运行时，
+   * 不要求虚构的 Pi provider/model。
+   */
+  mode: "inherit" | "subagent" | "codex";
   subagentId?: string;
   subagentName?: string;
   systemPrompt: string;
   tools: string[];
-  model: { provider: string; id: string };
+  /** Codex 成员没有 Pi 模型（只有 `codex.model` / 本机配置）。 */
+  model?: { provider: string; id: string };
   thinkingLevel: ThinkingLevel;
   browserTools: boolean;
   color?: string;
@@ -54,6 +80,13 @@ export interface TeamMemberConfig {
    * 沿用原会话访问策略（存量成员零变化）；值在创建时冻结，冷恢复沿用同一条。
    */
   accessModeCap?: AccessMode;
+  /** `mode: "codex"` 时的 Codex 编制。 */
+  codex?: TeamCodexMemberConfig;
+}
+
+/** 成员的运行来源（旧记录没有 mode/codex 之外的信息 → 一律按 Pi 读）。 */
+export function backendOfMemberConfig(config: TeamMemberConfig): TeamMemberBackend {
+  return config.mode === "codex" ? "codex" : "pi";
 }
 
 /** 一个 teammate 的持久记录。 */
@@ -113,12 +146,32 @@ function isThinkingLevel(value: unknown): value is ThinkingLevel {
     || value === "high" || value === "xhigh" || value === "max";
 }
 
+function isModelRef(value: unknown): value is { provider: string; id: string } {
+  return isRecord(value) && typeof value.provider === "string" && typeof value.id === "string";
+}
+
+function isTeamCodexMemberConfig(value: unknown): value is TeamCodexMemberConfig {
+  if (!isRecord(value)) return false;
+  if (typeof value.executable !== "string" || !value.executable) return false;
+  if (value.sandbox !== "read-only" && value.sandbox !== "workspace-write") return false;
+  if (value.approvalPolicy !== "never" && value.approvalPolicy !== "on-request") return false;
+  if (value.model !== undefined && typeof value.model !== "string") return false;
+  if (value.version !== undefined && typeof value.version !== "string") return false;
+  return true;
+}
+
 function isTeamMemberConfig(value: unknown): value is TeamMemberConfig {
   if (!isRecord(value)) return false;
-  if (value.mode !== "inherit" && value.mode !== "subagent") return false;
+  if (value.mode !== "inherit" && value.mode !== "subagent" && value.mode !== "codex") return false;
   if (typeof value.systemPrompt !== "string") return false;
   if (stringArray(value.tools) === undefined) return false;
-  if (!isRecord(value.model) || typeof value.model.provider !== "string" || typeof value.model.id !== "string") return false;
+  if (value.mode === "codex") {
+    // Codex 成员不要求 Pi 的 provider/model；model 若出现仍要合法（导出/迁移时容错）。
+    if (!isTeamCodexMemberConfig(value.codex)) return false;
+    if (value.model !== undefined && !isModelRef(value.model)) return false;
+  } else if (!isModelRef(value.model)) {
+    return false;
+  }
   if (!isThinkingLevel(value.thinkingLevel)) return false;
   if (typeof value.browserTools !== "boolean") return false;
   if (value.subagentId !== undefined && typeof value.subagentId !== "string") return false;
@@ -127,6 +180,7 @@ function isTeamMemberConfig(value: unknown): value is TeamMemberConfig {
   if (value.accessModeCap !== undefined
     && value.accessModeCap !== "read-only" && value.accessModeCap !== "ask"
     && value.accessModeCap !== "workspace" && value.accessModeCap !== "full") return false;
+  if (value.mode === "codex" && value.accessModeCap !== undefined) return false;
   return true;
 }
 
@@ -251,4 +305,60 @@ export function reconcileProvisioningMember(
     phase: "failed",
     error: "团队创建未完成（应用在创建过程中退出，子会话缺少首条消息）"
   };
+}
+
+/**
+ * Codex 线程绑定文件（成员目录内，与成员转写并列）。
+ *
+ * 为什么单独落盘而不是写进 Lead 的会话日志：thread id 是**成员级的运行时事实**，
+ * 与成员目录同生共死（删会话/删团队目录时一并清掉）；写进 Lead 日志会让一个本该
+ * 只在 Codex 侧存在的 id 进入团队的全量快照。
+ */
+export interface CodexThreadBinding {
+  memberId: string;
+  memberName: string;
+  /** 绑定创建时的工作区；工作区变了的旧绑定不再复用（否则会把两个项目混进同一线程）。 */
+  workspace: string;
+  threadId: string;
+  /** Codex 线程实际使用的 cwd。 */
+  cwd: string;
+  sandbox: "read-only" | "workspace-write";
+  updatedAt: number;
+}
+
+export function codexThreadBindingPath(memberDir: string, memberId: string): string {
+  return join(memberDir, `${memberId}.codex-thread.json`);
+}
+
+function isCodexThreadBinding(value: unknown): value is CodexThreadBinding {
+  if (!isRecord(value)) return false;
+  return typeof value.memberId === "string"
+    && typeof value.memberName === "string"
+    && typeof value.workspace === "string"
+    && typeof value.threadId === "string"
+    && value.threadId.length > 0
+    && typeof value.cwd === "string"
+    && (value.sandbox === "read-only" || value.sandbox === "workspace-write")
+    && typeof value.updatedAt === "number";
+}
+
+/** 读回线程绑定；文件缺失/损坏/成员或工作区不符时返回 undefined（调用方按新线程处理）。 */
+export function readCodexThreadBinding(path: string, expected: { memberId: string; workspace: string }): CodexThreadBinding | undefined {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+    if (!isCodexThreadBinding(parsed)) return undefined;
+    if (parsed.memberId !== expected.memberId || parsed.workspace !== expected.workspace) return undefined;
+    return parsed;
+  } catch {
+    return undefined;
+  }
+}
+
+/** 原子写线程绑定（同目录 tmp + rename；半截文件永远不会被读到）。 */
+export function writeCodexThreadBinding(path: string, binding: CodexThreadBinding): void {
+  mkdirSync(dirname(path), { recursive: true });
+  const temporary = `${path}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
+  writeFileSync(temporary, `${JSON.stringify(binding, null, 2)}
+`, "utf8");
+  renameSync(temporary, path);
 }

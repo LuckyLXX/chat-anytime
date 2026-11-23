@@ -151,6 +151,9 @@ function memberSummaryEqual(left: TeamMemberSummary | undefined, right: TeamMemb
     && left.status === right.status
     && left.description === right.description
     && left.subagent === right.subagent
+    // 运行来源（codex / 缺省 Pi）也必须参与比较：漏了它，同一成员从 Pi 变成 Codex 时
+    // 快照被判「没变」，看板上的来源标识会停在旧值。
+    && left.backend === right.backend
     && left.color === right.color
     && left.error === right.error
     && left.sessionId === right.sessionId
@@ -644,6 +647,11 @@ interface DesktopState {
   /** 「测试连接」的进行状态与最近一次结果（设置页按钮与提示行用）。 */
   jevTestStatus: "idle" | "loading" | "success" | "error";
   jevTestMessage?: string;
+  /** Codex 连接测试（`codex.connection.test`）：只握手，结果按 requestId 归位。 */
+  codexTestStatus: "idle" | "loading" | "success" | "error";
+  codexTestMessage?: string;
+  /** 进行中/最近一次请求的 id：迟到的旧回执按它丢弃（用户连点两次时不会串台）。 */
+  codexTestRequestId?: string;
   customModels: CustomProviderModel[];
   customModelFetchStatus: "idle" | "loading" | "success" | "error";
   customModelFetchError?: string;
@@ -940,6 +948,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   customProviderKeyConfigured: false,
   jevKeyConfigured: false,
   jevTestStatus: "idle",
+  codexTestStatus: "idle",
   customModels: [],
   customModelFetchStatus: "idle",
   modelRefreshStatus: "idle",
@@ -1315,6 +1324,13 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
       case "jev-test-result":
         set({ jevTestStatus: message.ok ? "success" : "error", jevTestMessage: message.message });
         break;
+      // Codex 连接测试回执：requestId 不匹配说明回执已过期（用户改完设置又点了一次），
+      // 直接丢掉——否则界面上会出现「新配置 + 旧结果」的错配。
+      case "codex-test-result": {
+        if (get().codexTestRequestId !== undefined && get().codexTestRequestId !== message.requestId) break;
+        set({ codexTestStatus: message.ok ? "success" : "error", codexTestMessage: message.message });
+        break;
+      }
       case "models-refreshed":        set({ modelRefreshStatus: "success", modelRefreshError: undefined, modelRefreshProvider: message.providerId });
         break;
       case "models-refresh-error":

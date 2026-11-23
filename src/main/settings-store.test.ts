@@ -131,7 +131,10 @@ describe("diffSettings", () => {
       currentAgentId: (settings) => ({ ...settings, currentAgentId: "agent-2" }),
       lastWorkspace: (settings) => ({ ...settings, lastWorkspace: "D:/Projects/p" }),
       appearance: (settings) => ({ ...settings, appearance: { ...settings.appearance, showThinking: false } }),
-      shortcuts: (settings) => ({ ...settings, shortcuts: { paletteHotkey: "CommandOrControl+Shift+Space" } })
+      shortcuts: (settings) => ({ ...settings, shortcuts: { paletteHotkey: "CommandOrControl+Shift+Space" } }),
+      // Codex CLI 接入：独立写入口（codex.settings.save），但落盘仍是 settings.json 的顶层键——
+      // 脏判定漏了它就会出现「设置页显示已保存、重启后回到未启用」。
+      codex: (settings) => ({ ...settings, codex: { enabled: true, access: "read-only" } })
     };
     // 新增一个顶层设置字段时这里会红（要求同步补 mutation），而不是等用户发现它不落盘。
     expect(Object.keys(base).sort()).toEqual(Object.keys(mutations).sort());

@@ -4550,6 +4550,8 @@ html[data-ui-motion="off"] .automation-center, html[data-ui-motion="off"] .ui-pr
 .team-settlement-summary { overflow: hidden; max-width: 100%; text-overflow: ellipsis; white-space: nowrap; }
 .team-settlement-artifacts { color: var(--text-muted); }
 .team-member-blocker { flex: 0 0 auto; padding: 0 4px; border: 1px solid var(--danger-border); border-radius: 4px; color: var(--danger-text); font-size: var(--tb-fs-micro); }
+/* 运行来源标识（外部运行时，例如 Codex）：中性配色，不与状态徽标抢视线。 */
+.team-member-backend { flex: 0 0 auto; height: 18px; padding: 0 5px; border: 1px solid var(--border); border-radius: 5px; color: var(--text-muted); font-size: var(--tb-fs-micro); line-height: 17px; white-space: nowrap; }
 .team-status-dot.in_progress { background: var(--accent); }
 .team-status-dot.pending { background: var(--text-muted); }
 .team-status-dot.completed { background: var(--success, #65d6a5); }

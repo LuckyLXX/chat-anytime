@@ -1316,6 +1316,23 @@ export function createDemoApi(): DesktopApi {
         case "vision.save":
           demoSettings.vision = { ...command.vision };
           break;
+        // Codex CLI 接入：demo 里只做配置往返（真实进程在 Electron 主进程拉起）。
+        case "codex.settings.save":
+          demoSettings.codex = { ...command.codex };
+          emit({ type: "settings", settings: structuredClone(demoSettings) });
+          break;
+        // 浏览器演示环境没有子进程，也就没有 Codex app-server 可握手。
+        // 如实回「演示环境不做真实探测」而**不假装成功**（与 jev.test 同口径）。
+        case "codex.connection.test":
+          emit({
+            type: "codex-test-result",
+            requestId: command.requestId,
+            ok: false,
+            state: "spawn-failed",
+            access: command.codex?.access ?? demoSettings.codex?.access ?? "read-only",
+            message: "演示环境不会拉起真实的 Codex 进程：请在桌面应用里测试连接。"
+          });
+          break;
         // Jev（TypeSafe）通路：demo 只做配置往返（真实 HTTP 在主进程，demo 里没有）。
         case "jev.save":
           demoSettings.jev = { ...command.jev };

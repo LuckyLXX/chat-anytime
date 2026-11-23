@@ -71,4 +71,17 @@ describe("settingsAfterDialogClose", () => {
     restored.im!.channels[0]!.label = "改坏了";
     expect(live.im?.channels[0]?.label).toBe("内网工单");
   });
+
+  it("弹窗打开期间保存的 Codex 配置不会被回滚掉（主进程独立写入口）", () => {
+    const baseline = settings();
+    const live = settings({ codex: { enabled: true, access: "workspace-write", executable: "C:\\tools\\codex.exe" } });
+    expect(settingsAfterDialogClose(baseline, live).codex).toEqual(live.codex);
+  });
+
+  it("主进程把 Codex 配置清空（live 没有 codex）时，回滚也不会把旧配置复活", () => {
+    const baseline = settings({ codex: { enabled: true, access: "read-only" } });
+    const restored = settingsAfterDialogClose(baseline, settings());
+    expect(restored.codex).toBeUndefined();
+    expect("codex" in restored).toBe(false);
+  });
 });

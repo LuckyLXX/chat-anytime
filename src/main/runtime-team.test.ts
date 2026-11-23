@@ -36,6 +36,7 @@ function fakeService(): TeamService {
     listTasks: vi.fn(() => ({ tasks: [taskView] })),
     getTask: vi.fn(() => taskView),
     updateTask: vi.fn(async () => taskView),
+    backends: vi.fn(() => [{ backend: "codex" as const, available: true, access: "read-only" as const, version: "codex-cli 0.171.0" }]),
     snapshot: vi.fn(() => ({ members: [], running: 0 })),
     hasRunningMembers: vi.fn(() => false),
     stopAll: vi.fn(),
@@ -113,6 +114,21 @@ describe("team tool surface", () => {
     expect(service.interrupt).toHaveBeenLastCalledWith({ role: "lead", name: "lead" }, { taskId: "task-1" });
   });
 
+  it("routes backend=\"codex\" and exposes available external runtimes on team_list", async () => {
+    const service = fakeService();
+    const tools = createTeamTools(service, { role: "lead", name: "lead" });
+    await execute(tools, "team_spawn", { name: "coder", description: "改代码", prompt: "实现 A", backend: "codex" });
+    expect(service.spawn).toHaveBeenLastCalledWith(
+      { role: "lead", name: "lead" },
+      { name: "coder", description: "改代码", prompt: "实现 A", backend: "codex" },
+      undefined
+    );
+    expect(parsed(await execute(tools, "team_list", {}))).toMatchObject({
+      members: [memberView],
+      backends: [{ backend: "codex", available: true, access: "read-only", version: "codex-cli 0.171.0" }]
+    });
+  });
+
   it("maps task tool arguments onto the service mutation shape", async () => {
     const service = fakeService();
     const tools = createTeamTools(service, { role: "lead", name: "lead" });
@@ -150,8 +166,10 @@ describe("team tool surface", () => {
       description: tool.description,
       parameters: tool.parameters
     })));
-    // 实测 1112 tokens（9 个工具 schema，含 name/description/parameters）；预算放到 1400
-    // 留出正常文案调整空间。只在开启团队模式的会话里付；超过说明描述膨胀了，先精简再放宽。
+    // 实测 1331 tokens（9 个工具 schema，含 name/description/parameters；2026-11-23 加入
+    // team_spawn 的 backend:"codex" 与 team_list 的 backends 后从 1112 涨到这里）；预算
+    // 放到 1400 留出正常文案调整空间。只在开启团队模式的会话里付；超过说明描述膨胀了，
+    // 先精简再放宽。
     expect(tokens).toBeLessThan(1400);
   });
 });

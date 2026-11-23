@@ -12,6 +12,8 @@ export type ThinkingLevelMap = Partial<Record<ThinkingLevel, string | null>>;
 import type { DesignCanvasInfo, DesignNode, DesignOp } from "./design-schema.js";
 import type { MemoryLayer, MemorySnapshot } from "./memory.js";
 export type { MemoryLayer, MemorySnapshot, MemorySnapshotEntry } from "./memory.js";
+import type { CodexCliSettings, CodexConnectionState, CodexConnectionTestResult } from "./codex.js";
+export type { CodexCliSettings, CodexConnectionState, CodexConnectionTestResult, CodexAuthStatus } from "./codex.js";
 import type { MemoryHealth } from "./memory-health.js";
 export type { MemoryDuplicateGroup, MemoryHealth, MemoryHealthIssue, MemoryHealthIssueKind } from "./memory-health.js";
 import type { ThemeImportOutcome } from "./theme-assets.js";
@@ -480,6 +482,13 @@ export interface DesktopSettings {
    * 是唯一读入口，`migrateSettings` 必须读回，否则下次任意设置写入会把它抹掉。
    */
   im?: ImSettings;
+  /**
+   * 全局 Codex CLI 接入配置（首版单个）：开关 + 可执行文件路径 + 访问上限。
+   * 由独立的 `codex.settings.save` 维护（刻意**不进** settings.save 的 Pick：日常保存
+   * 其它设置不能把这份配置抹掉）；`normalizeCodexCliSettings`（shared/codex.ts）是唯一读入口，
+   * `migrateSettings` 必须读回，否则下次任意设置写入会把它从磁盘删掉。
+   */
+  codex?: CodexCliSettings;
   computer?: ComputerSettings;
   design?: DesignSettings;
   checkpoint?: CheckpointSettings;
@@ -2522,6 +2531,8 @@ export interface TeamMemberSummary {
   description?: string;
   /** 命中的自定义子智能体定义名（inherit 模式缺省）。 */
   subagent?: string;
+  /** 运行来源：缺省（Pi 子会话）不带这项；`codex` = 外部 Codex App Server 成员（看板据此标注来源）。 */
+  backend?: "codex";
   color?: string;
   /** failed 时的原因（渲染端 title 展示）。 */
   error?: string;
@@ -2775,6 +2786,34 @@ export interface QuestionRequest {
   questions: QuestionItem[];
 }
 
+/**
+ * Codex App Server 受监管子进程（utility ⇄ main）。
+ *
+ * 为什么进程归 main：进程树回收、应用退出/utility 崩溃后的孤儿清理都只有主进程做得到；
+ * utility 只做协议语义（JSONL 解析、握手、回合路由），它拿不到也不需要拿到子进程句柄。
+ *
+ * 传输只走 stdio（不监听端口、不暴露网络）：stdout/stderr 由 main 解码后原样转发，
+ * 任务正文只经 stdin 的 JSONL 帧传递。`handle` 由 utility 生成、绑定到这条进程；
+ * 停止/超时之后的迟到帧按 handle 丢弃，重建 runtime 后旧 handle 一律不可达。
+ */
+export type CodexProcessEvent =
+  /** app-server 的 stdout（JSONL 文本；main 已按 UTF-8 跨块解码）。 */
+  | { kind: "stdout"; text: string }
+  /** app-server 的 stderr（诊断用，只保留尾部）。 */
+  | { kind: "stderr"; text: string }
+  /** 进程结束（含 spawn 失败）；一进程只会收到一次。 */
+  | { kind: "exit"; code: number | null; signal?: string; error?: string };
+
+/** 启动一条 Codex 进程的受限入参（参数由适配器构造，main 会再校验一次）。 */
+export interface CodexProcessStartOptions {
+  /** Codex 本地可执行文件的绝对路径（`codex.exe` / npm `codex.cmd` / POSIX 入口）。 */
+  executable: string;
+  /** 只允许 `app-server`（可带 -c/--enable/--disable 覆盖）或 `--version` 探测。 */
+  args: string[];
+  /** 成员绑定的工作区（绝对路径）。 */
+  cwd: string;
+}
+
 export type RuntimeCommand =
   /** bundledSkillsDir / bundledSubagentsDir：随安装包分发的内置资产目录（
    * <安装目录>/skills 与 <安装目录>/subagents，dev 下为仓库 resources/ 下同名目录），
@@ -2885,6 +2924,16 @@ export type RuntimeCommand =
    * （尚未保存的也必须能测），草稿为空时回落已保存值。
    */
   | { type: "jev.test"; baseUrl?: string; model?: string; apiKey?: string }
+  /**
+   * Codex CLI 接入配置（原子替换整份配置）。走独立命令而不是 settings.save 的一个键：
+   * 这条命令是这份配置的**唯一**写入口，日常保存其它设置（settings.save）碰不到它。
+   */
+  | { type: "codex.settings.save"; codex: CodexCliSettings }
+  /**
+   * 测试 Codex 连接：只握手 + 读登录状态（**不建线程、不跑模型、不改配置**）。
+   * 用表单里的**草稿配置**（尚未保存也能测），`requestId` 用于丢弃迟到/过期回执。
+   */
+  | { type: "codex.connection.test"; requestId: string; codex?: CodexCliSettings }
   | { type: "memory.save"; memory: MemorySettings }
   | { type: "memory.create"; topic: string; description: string; content: string; layer?: MemoryLayer; summary?: string; triggers?: string[]; workspaceScoped?: boolean; sessionId?: string; /** 目标助手（缺省 = 当前会话的助手）。 */ agentId?: string }
   /** 面板更新：正文/描述至少传一个；layer/summary/triggers 可单独改（缺省保留既有值）。 */
@@ -2999,6 +3048,11 @@ export type RuntimeCommand =
   | { type: "ssh-automation.result"; requestId: string; result: SshAutomationResult }
   /** main 进程回传的设计导出缩略图（响应 utility 的 design-snapshot.request）。 */
   | { type: "design-snapshot.result"; requestId: string; result: DesignSnapshotResult }
+  /** main 进程受理 Codex 子进程启动（响应 codex.process.start；失败时带可读原因）。 */
+  | { type: "codex.process.start-result"; requestId: string; ok: true; pid?: number }
+  | { type: "codex.process.start-result"; requestId: string; ok: false; error: string }
+  /** main 进程转发的 Codex 子进程事件（stdout/stderr/exit）；handle 由 utility 分配。 */
+  | { type: "codex.process.event"; handle: string; event: CodexProcessEvent }
   // —— 设计模式（Design Studio）：画布 ↔ utility 会话的文档命令。sessionId 走
   // resolveTargetRecord（缺省激活会话）；designDoc 绑定是会话级，画布跟随激活会话。 ——
   /** 列出工作区设计文档（结果经 design.docs 推送）。 */
@@ -3035,6 +3089,9 @@ export type RuntimeMessage =
   | { type: "models-refresh-error"; providerId: string; message: string }
   /** Jev 「测试连接」结果：ok=true 时带实际回答的模型与延迟，ok=false 时带可行动错误。 */
   | { type: "jev-test-result"; ok: boolean; message: string; model?: string; latencyMs?: number }
+  /** Codex 「测试连接」回执：原样回 `requestId`，渲染端据此丢弃过期结果。 */
+  | ({ type: "codex-test-result"; requestId: string } & CodexConnectionTestResult)
+
   | { type: "state"; snapshot: RuntimeSnapshot }
   /** 主进程设置写入后的权威回推，避免设置弹窗持有旧草稿覆盖 live settings。 */
   | { type: "settings"; settings: DesktopSettings }
@@ -3149,6 +3206,12 @@ export type RuntimeMessage =
   | { type: "design-snapshot.request"; requestId: string; request: DesignSnapshotRequest }
   /** utility 进程请求显示/隐藏电脑控制悬浮提示条（computer_* 操作期间告知用户「AI 正在操作 XX」）。 */
   | { type: "computer-overlay.request"; kind: "show" | "hide"; text?: string }
+  /** utility 进程请求 main 拉起一条受监管的 Codex 子进程（成员级；main 负责进程树回收）。 */
+  | { type: "codex.process.start"; requestId: string; handle: string; options: CodexProcessStartOptions }
+  /** 向 Codex 子进程的 stdin 写一帧（JSONL 文本；单帧上限由 main 再校验）。 */
+  | { type: "codex.process.write"; handle: string; data: string }
+  /** 停止一条 Codex 进程（结束整棵进程树；迟到的 write/事件按 handle 丢弃）。 */
+  | { type: "codex.process.stop"; handle: string; reason?: string }
   /**
    * 失败提示。`sessionId` 只在**命令级失败**（utility 的命令分发 catch，命令本身带着会话）时给出：
    * `runtime:send` 是「发了就不回」的通道（main 侧 handler 返回 void），渲染端 `await send()`

@@ -1,17 +1,36 @@
-import { describe, expect, it, vi } from "vitest";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type { PersistedSessionEntry } from "./session-history.js";
 import {
   TEAM_ENTRY_TYPE,
   appendTeamMember,
   appendTeamTask,
+  backendOfMemberConfig,
+  codexThreadBindingPath,
   emptyTeamState,
+  readCodexThreadBinding,
   readTeamEntryData,
   reconcileProvisioningMember,
   restoreTeamState,
+  writeCodexThreadBinding,
+  type TeamMemberConfig,
   type TeamMemberRecord,
   type TeamTaskRecord
 } from "./team-store.js";
+
+const temporaryDirectories: string[] = [];
+afterEach(() => {
+  for (const directory of temporaryDirectories.splice(0)) {
+    try {
+      rmSync(directory, { recursive: true, force: true });
+    } catch {
+      // ignore
+    }
+  }
+});
 
 function member(overrides: Partial<TeamMemberRecord> = {}): TeamMemberRecord {
   return {
@@ -125,5 +144,54 @@ describe("provisioning reconciliation", () => {
     expect(reconcileProvisioningMember(active, false)).toBe(active);
     const failed = member({ phase: "failed", error: "x" });
     expect(reconcileProvisioningMember(failed, true)).toBe(failed);
+  });
+});
+
+describe("codex member records", () => {
+  const codexConfig: TeamMemberConfig = {
+    mode: "codex",
+    systemPrompt: "",
+    tools: [],
+    thinkingLevel: "medium",
+    browserTools: false,
+    codex: { executable: "C:\tools\codex.exe", sandbox: "read-only", approvalPolicy: "never", version: "codex-cli 0.171.0" }
+  };
+
+  it("accepts a Codex record without inventing a Pi provider/model", () => {
+    const record = member({ config: codexConfig });
+    expect(readTeamEntryData({ kind: "member", member: record })?.kind).toBe("member");
+    expect(backendOfMemberConfig(codexConfig)).toBe("codex");
+    expect(backendOfMemberConfig(member().config)).toBe("pi");
+  });
+
+  it("rejects malformed Codex configs instead of loading a half-record", () => {
+    expect(readTeamEntryData({ kind: "member", member: member({ config: { ...codexConfig, codex: undefined } }) })).toBeUndefined();
+    expect(readTeamEntryData({ kind: "member", member: member({ config: { ...codexConfig, codex: { executable: "", sandbox: "read-only", approvalPolicy: "never" } } }) })).toBeUndefined();
+    expect(readTeamEntryData({ kind: "member", member: member({ config: { ...codexConfig, codex: { executable: "x", sandbox: "workspace-write", approvalPolicy: "sometimes" } as never } }) })).toBeUndefined();
+    // Pi 记录仍然必须有 model（旧记录不受影响）。
+    expect(readTeamEntryData({ kind: "member", member: member({ config: { ...codexConfig, mode: "inherit", codex: undefined } }) })).toBeUndefined();
+  });
+});
+
+describe("codex thread binding", () => {
+  it("round-trips atomically and rejects another member/workspace", () => {
+    const directory = mkdtempSync(join(tmpdir(), "pi-desktop-thread-binding-"));
+    temporaryDirectories.push(directory);
+    const path = codexThreadBindingPath(directory, "member-1");
+    writeCodexThreadBinding(path, {
+      memberId: "member-1",
+      memberName: "reviewer",
+      workspace: "/work",
+      threadId: "thread-1",
+      cwd: "/work",
+      sandbox: "read-only",
+      updatedAt: 1
+    });
+    expect(readCodexThreadBinding(path, { memberId: "member-1", workspace: "/work" })?.threadId).toBe("thread-1");
+    expect(readCodexThreadBinding(path, { memberId: "member-1", workspace: "/other" })).toBeUndefined();
+    expect(readCodexThreadBinding(path, { memberId: "member-2", workspace: "/work" })).toBeUndefined();
+    // 文件是完整 JSON（tmp + rename：不会留下半截）。
+    expect(() => JSON.parse(readFileSync(path, "utf8"))).not.toThrow();
+    expect(readCodexThreadBinding(join(directory, "missing.json"), { memberId: "member-1", workspace: "/work" })).toBeUndefined();
   });
 });

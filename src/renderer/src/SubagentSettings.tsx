@@ -1,6 +1,7 @@
-import { Bot, Pencil, Plus, Trash2, X } from "lucide-react";
+import { Bot, Pencil, Plus, TerminalSquare, Trash2, X } from "lucide-react";
 import { useState, type FormEvent, type ReactNode } from "react";
-import type { BuiltinToolName, ModelOption, ProviderOption, ResourceCatalog, RuntimeCommand, SubagentDefinition, SubagentScope, ThinkingLevel } from "../../shared/protocol";
+import type { BuiltinToolName, CodexCliSettings, ModelOption, ProviderOption, ResourceCatalog, RuntimeCommand, SubagentDefinition, SubagentScope, ThinkingLevel } from "../../shared/protocol";
+import { DEFAULT_CODEX_CLI_SETTINGS } from "../../shared/codex";
 import { toolLabel, thinkingLevelLabels } from "../../shared/locale";
 import { THINKING_LEVELS } from "../../shared/thinking-levels";
 import { selectableCatalogModels } from "./lib/model-list";
@@ -51,6 +52,20 @@ export function SubagentSettings({ resources, workspaceOpen, models, providers }
   const [browserTools, setBrowserTools] = useState(false);
   const [inherited, setInherited] = useState<boolean>(true);
   const [tools, setTools] = useState<Record<BuiltinToolName, boolean>>(() => Object.fromEntries(SUBAGENT_TOOLS.map((tool) => [tool, true])) as Record<BuiltinToolName, boolean>);
+
+  // —— Codex CLI 接入卡（独立命令 codex.settings.save / codex.connection.test）——
+  // 草稿口径：`draft` 一旦被用户改过就以它为准，否则跟随已保存配置（首次挂载时
+  // 设置还在加载的窗口里也不会把用户配置显示成默认值）。
+  const savedCodex = useDesktopStore((state) => state.settings.codex);
+  const codexTestStatus = useDesktopStore((state) => state.codexTestStatus);
+  const codexTestMessage = useDesktopStore((state) => state.codexTestMessage);
+  const [codexDraft, setCodexDraft] = useState<CodexCliSettings>();
+  const [codexNote, setCodexNote] = useState<string>();
+  const codex = codexDraft ?? savedCodex ?? DEFAULT_CODEX_CLI_SETTINGS;
+  const updateCodex = (patch: Partial<CodexCliSettings>): void => {
+    setCodexNote(undefined);
+    setCodexDraft({ ...codex, ...patch });
+  };
 
   // 与顶栏模型选择器/Agent 默认模型下拉同口径：只保留已勾选（enabled !== false）且已配置的模型。
   const configuredModels = selectableCatalogModels(models).filter((model) => model.configured);
@@ -143,6 +158,32 @@ export function SubagentSettings({ resources, workspaceOpen, models, providers }
     setFormOpen(false);
   }
 
+  /** 保存 Codex 配置（原子替换整份配置；刻意与其他设置分开，见 protocol 的注释）。 */
+  async function saveCodex(): Promise<void> {
+    const success = await run({ type: "codex.settings.save", codex });
+    if (success) {
+      // 主进程会把归一化后的权威配置以 settings 事件回推：丢掉本地草稿，卡片跟随
+      // 实际落盘的那一份（否则界面上还显示着被主进程修正前的旧值）。
+      setCodexDraft(undefined);
+      setCodexNote("已保存：下一个回合生效（未保存的改动不会被测试连接写盘）。");
+    }
+  }
+
+  /**
+   * 测试连接：用**当前表单**（含未保存改动）跑一次握手 + 读登录状态。
+   * requestId 由渲染端生成，回执按它对号入座——连点两次时旧结果不会覆盖新结果。
+   */
+  async function testCodex(): Promise<void> {
+    const requestId = `codex-test-${Date.now().toString(36)}`;
+    setCodexNote(undefined);
+    useDesktopStore.setState({ codexTestStatus: "loading", codexTestMessage: undefined, codexTestRequestId: requestId });
+    try {
+      await window.piDesktop.send({ type: "codex.connection.test", requestId, codex });
+    } catch (error) {
+      useDesktopStore.setState({ codexTestStatus: "error", codexTestMessage: error instanceof Error ? error.message : "测试连接失败" });
+    }
+  }
+
   async function deleteSubagent(subagent: SubagentDefinition): Promise<void> {
     await run({ type: "subagent.delete", id: subagent.id, scope: subagent.scope });
   }
@@ -179,6 +220,38 @@ export function SubagentSettings({ resources, workspaceOpen, models, providers }
       </header>
       <div className="resource-page-body">
         {localError && <p className="form-error resource-error">{localError}</p>}
+
+        <section className="resource-card" aria-label="Codex CLI 接入" data-codex-card>
+          <div className="resource-card-head">
+            <span className="resource-card-title"><TerminalSquare size={14} /><strong>Codex CLI</strong></span>
+            <small>把本机 Codex 当作团队的外部运行时：Lead 用 team_spawn 派活，运行来源、进度与结算都进团队看板</small>
+            <span className="resource-card-actions">
+              <small className="resource-card-count">{codex.enabled ? "已启用" : "未启用"}</small>
+              <button className="secondary-button compact-button" type="button" data-codex-test disabled={controlsBusy || codexTestStatus === "loading"} onClick={() => void testCodex()}>{codexTestStatus === "loading" ? "测试中" : "测试连接"}</button>
+              <button className="secondary-button compact-button" type="button" data-codex-save disabled={controlsBusy} onClick={() => void saveCodex()}>保存</button>
+            </span>
+          </div>
+          <div className="resource-card-body">
+            <label className="checkbox-setting" data-codex-enable><input type="checkbox" checked={codex.enabled} onChange={(changeEvent) => updateCodex({ enabled: changeEvent.target.checked })} />启用 Codex 接入（默认关闭；关闭时团队只使用 Pi 成员）</label>
+            <div className="mcp-form-grid">
+              <label className="mcp-form-wide">可执行文件
+                <input value={codex.executable ?? ""} placeholder="留空 = 自动探测 PATH 上的官方安装（Windows 含 npm 的 codex.cmd）" data-codex-executable onChange={(changeEvent) => updateCodex({ executable: changeEvent.target.value })} />
+              </label>
+              <label>访问上限
+                <select value={codex.access} data-codex-access onChange={(changeEvent) => updateCodex({ access: changeEvent.target.value === "workspace-write" ? "workspace-write" : "read-only" })}>
+                  <option value="read-only">只读（默认）</option>
+                  <option value="workspace-write">当前工作区可写</option>
+                </select>
+              </label>
+            </div>
+            <p className="resource-form-help">
+              凭据由你本机的 Codex 安装自己管理：这里只保存开关、可执行文件路径与访问上限，<strong>不存任何 Codex 令牌</strong>。Codex 访问它自己的本机线程记录，PiDesktop 只保留团队转写。
+              「当前工作区可写」只是上限：每一轮还要同时满足 Lead 会话的当前模式（只读恒只读、ask 先拿本轮确认），写入根只有当前工作区并排除临时目录、禁用网络。Windows 上只读与工作区写入都要求 Codex 的 Windows 沙箱就绪（windowsSandbox/readiness = ready）；不 ready 或该版本不支持时两种访问级别都会被拦下并给出具体原因，不会静默降级成只读。「测试连接」只握手、读登录状态与 Windows 沙箱就绪（不建线程、不跑模型、不写配置），可以在保存前先测。
+            </p>
+            {codexTestStatus !== "idle" && <p className={codexTestStatus === "error" ? "form-error jev-test-result" : "form-hint jev-test-result"} data-role="codex-test-result">{codexTestStatus === "loading" ? "正在连接 Codex…" : codexTestMessage}</p>}
+            {codexNote && <p className="form-hint" data-role="codex-save-note">{codexNote}</p>}
+          </div>
+        </section>
 
         <section className="resource-card" aria-label="已定义子智能体">
           <div className="resource-card-head">

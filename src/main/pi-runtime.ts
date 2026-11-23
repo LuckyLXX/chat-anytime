@@ -132,6 +132,8 @@ import * as runtimeJev from "./runtime-jev.js";
 import { assistantText, createSubagentTools, buildSubagentPromptBlock, type SubagentContext } from "./subagent.js";
 import { TeamRuntime } from "./team-runtime.js";
 import { createTeamTools } from "./runtime-team.js";
+import { CodexProcessBridge } from "./codex-process-client.js";
+import { CodexTeamBackend, normalizeCodexCliConfig, probeCodexConnection, type CodexCliConfig } from "./runtime-codex.js";
 import { readTeamMode, writeTeamMode } from "./team-mode-store.js";
 import type { TeamService } from "./team-contract.js";
 import { withCacheWarmingOff } from "./runtime-settings.js";
@@ -756,6 +758,24 @@ function post(message: RuntimeMessage): void {
   parentPort.postMessage(message);
 }
 
+/**
+ * Codex 受监管子进程的 utility 侧句柄表。
+ *
+ * 进程由 main 拉起（见 index.ts 的 CodexProcessSupervisor）：这里只把 RPC 包装成
+ * 「可写/可停/可收事件」的句柄，供 Codex App Server 客户端使用。`codex.process.*`
+ * 消息在消息入口就消费掉（不进串行命令队列、也不转发渲染端）。
+ */
+const codexBridge = new CodexProcessBridge({ post });
+
+/**
+ * 读 settings 里的 Codex 配置（`settings.codex`，由 `codex.settings.save` 维护）。
+ * 归一化与 main 的 migrateSettings 共用 shared/codex.ts 的同一份实现：这里再走一遍
+ * `normalizeCodexCliConfig` 只是兜住「内存镜像被别处写坏」的自愈路径（幂等）。
+ */
+function readCodexCliConfig(): CodexCliConfig | undefined {
+  return normalizeCodexCliConfig(settings?.codex);
+}
+
 // Browser automation RPC: the utility process asks the main process to drive
 // the visible preview tabs (CDP lives there); results come back as
 // browser-automation.result commands handled outside the serial command
@@ -856,6 +876,8 @@ function memberAccessModeCap(record: SessionRuntimeRecord, memberId: string): Ac
  * 回合永久挂在权限卡上；超时按 deny 收场，并把卡点回报给 Lead。
  */
 const TEAM_PERMISSION_TIMEOUT_MS = 10 * 60 * 1000;
+/** Codex 本轮写入确认的逐轮序号（让每张卡只覆盖一轮，见 requestRoundApproval）。 */
+let codexApprovalSeq = 0;
 const permissionBroker = new PermissionBroker(
   (request) => {
     post({ type: "permission", request });
@@ -950,6 +972,7 @@ function buildTeamTools(teamRef: { runtime?: TeamRuntime }): ToolDefinition[] {
     listTasks: (membership, filter) => get().listTasks(membership, filter),
     getTask: (membership, taskId) => get().getTask(membership, taskId),
     updateTask: (membership, mutation) => get().updateTask(membership, mutation),
+    backends: () => get().backends(),
     snapshot: () => get().snapshot(),
     hasRunningMembers: () => get().hasRunningMembers(),
     stopAll: () => get().stopAll(),
@@ -5513,7 +5536,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
         ...(memberAccessModeCap(record, member.memberId) ? { accessModeCap: memberAccessModeCap(record, member.memberId) } : {}),
         // 复用 IM 的 10 分钟审批兜底：无人值守时成员不能把回合永久挂住。
         timeoutMs: TEAM_PERMISSION_TIMEOUT_MS,
-        onPending: () => hooks.onPending({ memberName: member.memberName, toolName, summary: runtimePermissions.summarizeArgs(toolName, args) }),
+        onPending: (requestId) => hooks.onPending({ memberName: member.memberName, toolName, summary: runtimePermissions.summarizeArgs(toolName, args) }, requestId),
         onSettled: (settlement) => hooks.onSettled({
           ...settlement,
           request: { memberName: member.memberName, toolName, summary: runtimePermissions.summarizeArgs(toolName, args) }
@@ -5521,6 +5544,57 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
       }
     ),
     cancelMemberPermissions: (memberId) => permissionBroker.cancelTeamMember(memberId),
+    // Codex 外部运行时：配置来自 settings.codex（`codex.settings.save` 是唯一写入口）；
+    // 进程仍归 main 监管。权限轴（C 阶段）有三条，全部在这里注入，不缓存：
+    // - 逐轮读 Lead 会话当前访问模式（`ask` 时才需要本轮确认，`read-only` 恒只读）；
+    // - `ask` 的工作区写入确认走共享 PermissionBroker（成员卡 + 10 分钟兜底超时）；
+    // - 设置关闭接入或权限收紧时，由下面的 `stopCodexMembers` 终止正在跑的 Codex 回合。
+    codex: new CodexTeamBackend({
+      readConfig: readCodexCliConfig,
+      startProcess: (options) => codexBridge.start(options),
+      leadAccessMode: () => (record.permissionDeps ? record.permissionDeps.accessMode() : accessMode),
+      requestRoundApproval: async (input) => {
+        // 一张卡只覆盖一轮：toolName 带**逐轮**序号，broker 的 allow-session 授权缓存
+        // 因此永远命中不到下一轮（"本轮批准" 不会被悄悄升级成 "本会话永久批准"）。
+        codexApprovalSeq += 1;
+        const toolName = `codex_round_${codexApprovalSeq}`;
+        const notice = { memberName: input.memberName, toolName: "codex", summary: input.summary };
+        // 审批登记按 broker 的真实请求 id（与 settlement.id 同键）：team_wait 能看到
+        // 成员在等授权，收场时也能精确摘除（用回合序号/工具名登记会留一张永不清的卡）。
+        let pendingId: string | undefined;
+        const decision = await permissionBroker.request({
+          // 固定 ask：无论全局模式是什么，这里都**必须**弹卡（mode 直通不允许绕）。
+          accessMode: "ask",
+          toolName,
+          summary: input.summary,
+          args: { memberName: input.memberName, workspace: input.workspace, turn: input.turn },
+          risk: "write",
+          principal: {
+            kind: "subagent",
+            sessionId: record.session.sessionId,
+            parentSessionId: record.session.sessionId,
+            agentId: record.agent.id,
+            team: {
+              leadSessionId: record.session.sessionId,
+              memberId: input.memberId,
+              memberName: input.memberName
+            }
+          },
+          onPending: (id) => {
+            pendingId = id;
+            teamRef.runtime?.noteCodexApprovalPending(input.memberId, notice, id);
+          },
+          onSettled: (settlement) => {
+            const id = settlement.id || pendingId;
+            if (id) teamRef.runtime?.noteCodexApprovalSettled(input.memberId, id);
+          },
+          // 无人值守时不能把回合永久挂在卡上：超时按拒绝收场（与团队审批同口径）。
+          timeoutMs: TEAM_PERMISSION_TIMEOUT_MS
+        });
+        return decision !== "deny";
+      },
+      log: (level, message) => post({ type: "log", level, message: `Codex：${message}` })
+    }),
     buildBrowserTools: () => runtimeBrowser.buildBrowserTools({
       request: (op) => requestBrowserAutomation(record.session.sessionId, op),
       enabled: () => settings?.browser?.enabled !== false,
@@ -5528,6 +5602,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
       resolveUploadFiles: (files) => Promise.resolve(resolveWorkspaceUploadFiles(recordWorkspace, files)),
       saveScreenshot: (data, mimeType) => saveBrowserScreenshot(recordWorkspace, data, mimeType)
     }),
+    onCodexMemberStopped: (memberName, reason) => post({ type: "log", level: "info", message: `Codex 成员「${memberName}」已要求停止：${reason}` }),
     onChange: () => {
       if (record === activeRuntime) emitState();
       else emitPaneStateFor(record);
@@ -7588,6 +7663,52 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       post({ type: "jev-test-result", ok: result.ok, message: result.message, ...(result.model ? { model: result.model } : {}), ...(result.latencyMs !== undefined ? { latencyMs: result.latencyMs } : {}) });
       break;
     }
+    // Codex CLI 接入配置（独立写入口，见 index.ts 的同名分支）：只更新内存镜像。
+    // 团队成员的下一次回合、`team_list` 的可用性投影都按这份配置重算（后端按配置内容
+    // 缓存，内容一变 key 就变，不需要额外的失效调用）。
+    // 正在跑的 Codex 回合不会自己缩权：关闭接入 / 把访问上限从工作区可写收紧到只读时
+    // 必须主动停掉（逐轮重算只能管到下一轮，管不到正在写盘的本轮）。
+    case "codex.settings.save": {
+      const previous = settings?.codex;
+      const next = normalizeCodexCliConfig(command.codex);
+      if (settings) settings.codex = next;
+      const disabled = Boolean(previous?.enabled) && next?.enabled !== true;
+      const tightened = previous?.access === "workspace-write" && next?.access !== "workspace-write";
+      if (disabled || tightened) {
+        const reason = disabled
+          ? "设置里关闭了 Codex 接入，正在运行的 Codex 回合已按新配置停止"
+          : "访问上限从「当前工作区可写」收紧为「只读」，正在运行的 Codex 回合已停止（下一轮按只读重算）";
+        for (const live of liveSessions.values()) live.teamRuntime?.stopCodexMembers(reason);
+      }
+      break;
+    }
+    // Codex「测试连接」：用设置页的**草稿配置**（未保存也能测），只握手 + 读登录状态，
+    // 不建线程、不跑模型、不写任何配置。回执原样带回 requestId，渲染端据此丢弃过期结果。
+    case "codex.connection.test": {
+      const config = normalizeCodexCliConfig(command.codex) ?? readCodexCliConfig();
+      if (!config) {
+        post({ type: "codex-test-result", requestId: command.requestId, ok: false, state: "not-enabled", access: "read-only", message: "还没配置 Codex CLI：先在设置 → 子智能体 → Codex CLI 里启用接入" });
+        break;
+      }
+      const result = await probeCodexConnection({
+        config,
+        startProcess: (options) => codexBridge.start(options),
+        cwd: workspace ?? process.cwd()
+      });
+      post({
+        type: "codex-test-result",
+        requestId: command.requestId,
+        ok: result.ok,
+        state: result.state,
+        message: result.message,
+        access: result.access,
+        ...(result.executable ? { executable: result.executable } : {}),
+        ...(result.version ? { version: result.version } : {}),
+        ...(result.auth ? { auth: result.auth } : {}),
+        ...(result.platformOs ? { platformOs: result.platformOs } : {})
+      });
+      break;
+    }
     case "memory.save": {
       // 快照/治理块按会话冻结，开关自下一个会话生效；工具 execute 实时判断。
       if (settings) settings.memory = command.memory;
@@ -7770,6 +7891,10 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       // jev.save 同款。
       const browserSwitchChanged = (settings.browser?.enabled !== false) !== (command.settings.browser?.enabled !== false);
       const sshSwitchChanged = (settings.ssh?.enabled !== false) !== (command.settings.ssh?.enabled !== false);
+      // 收紧后，正在运行的回合可能仍持有之前的工作区写入权限。
+      const nextAccessMode = command.settings.accessMode;
+      const accessModeTightened = (nextAccessMode === "read-only" && accessMode !== "read-only")
+        || (nextAccessMode === "ask" && (accessMode === "workspace" || accessMode === "full"));
       settings.model = command.settings.model;
       settings.thinkingLevel = command.settings.thinkingLevel;
       settings.accessMode = command.settings.accessMode;
@@ -7790,6 +7915,10 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       settings.shortcuts = command.settings.shortcuts;
       thinkingLevel = command.settings.thinkingLevel;
       accessMode = command.settings.accessMode;
+      if (accessModeTightened) {
+        const reason = "访问模式已收紧，正在停止 Codex 回合。继续时按新权限执行。";
+        for (const record of liveSessions.values()) record.teamRuntime?.stopCodexMembers(reason);
+      }
       selectedModel = command.settings.model;
       if (activeRuntime) {
         activeRuntime.session.setThinkingLevel(thinkingLevel);
@@ -8388,8 +8517,13 @@ let commandQueue = Promise.resolve();
 // unref，进程被 kill 时由操作系统回收，这里的 dispose 只是优雅路径。
 // （Electron 类型只声明了 message 事件，close 需按通用 EventEmitter 挂。）
 (parentPort as unknown as NodeJS.EventEmitter).on("close", () => {
+  // utility 要退出：尽力停掉自己拉起的 Codex 进程（main 在 utility 退出时还会兜底回收）。
+  codexBridge.shutdown();
 });
 parentPort.on("message", (event: { data: RuntimeCommand }) => {
+  // Codex 进程桥的内部消息（启动回执 / stdio 事件）：必须最先消费——它们直接喂给
+  // 正在 await 的握手/回合，排在命令队列后面会把回合拖死。
+  if (codexBridge.handleMessage(event.data)) return;
   // Browser RPC results resolve tool executions directly — queueing them
   // behind serialized commands would stall the run for no reason.
   if (event.data.type === "browser-automation.result") {

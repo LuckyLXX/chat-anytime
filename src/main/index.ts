@@ -7,6 +7,7 @@ import { spawn } from "node-pty";
 import appIconPath from "./assets/icon.ico?asset";
 import { resolveBundledSkillsDir, resolveBundledSubagentsDir, resolveBundledToolsDir } from "./bundled-skills.js";
 import { migrateSettings, mergeBrowserSettings, normalizeIntranetStore, normalizeJev, normalizeVision, withBrowserDownloadPrefs } from "./settings.js";
+import { normalizeCodexCliSettings } from "../shared/codex.js";
 import { manualDownloadPrefs } from "./browser-manual-download.js";
 import { mergeSavedAppearance, settingsForRenderer } from "./appearance-assets.js";
 import { createSettingsPersistence, diffSettings, readSettingsFile, settingsPath as settingsFilePath, type SettingsPersistence } from "./settings-store.js";
@@ -26,6 +27,7 @@ import { ComputerOverlayController } from "./computer-overlay.js";
 import { DesignSnapshotController } from "./design-snapshot.js";
 import { galleryThumbsDirFor, readGalleryThumb, resolveGalleryAgentDir } from "./gallery-store.js";
 import { createShellLauncher, GalleryServiceRunner, killProcessTree } from "./gallery-service-runner.js";
+import { CodexProcessSupervisor } from "./codex-process.js";
 import { normalizeGalleryPanelOptions, type GalleryDataClearResult, type GalleryDataResult, type GalleryServiceRecord, type GalleryServiceStartRequest, type GalleryServiceStartResult } from "../shared/gallery.js";
 import { createPanelStateCache } from "./panel-state.js";
 import { panelBoundsPathFor } from "./panel-bounds.js";
@@ -94,6 +96,14 @@ app.commandLine.appendSwitch("disable-features", [...new Set([...existingDisable
 
 let mainWindow: BrowserWindow | undefined;
 let runtimeProcess: UtilityProcess | undefined;
+/**
+ * Codex App Server 进程表（每个 utility 实例一份，与 utility 同生命周期）。
+ *
+ * 为什么在 main：进程树回收、utility 崩溃与用户退出后的孤儿清理只有主进程做得到；
+ * utility 只发 `codex.process.*` 命令做语义（JSONL 握手/回合），拿不到也不需要句柄。
+ * `startRuntime()` 换实例时旧的先 `shutdown()`（旧句柄在新实例里不可达）。
+ */
+let codexSupervisor: CodexProcessSupervisor | undefined;
 /**
  * IM 通道网关（2026-11-12 飞书长连接 P1）：连接、白名单、会话绑定、审批卡全在主进程。
  * 懒创建（bootstrap / 设置页测试连接也要用），`startImGateway()` 才真正建连。
@@ -504,6 +514,12 @@ function updateSettings(command: RuntimeCommand): void {
     case "jev.test":
       sendToRuntime({ ...command, ...(command.apiKey?.trim() ? {} : { apiKey: credentialsCache[JEV_CREDENTIAL_ID] }) });
       return;
+    // Codex CLI 接入：**独立写入口**（刻意不进 settings.save 的 Pick——日常保存其它设置
+    // 不能把这份配置抹掉）。归一化与 migrateSettings 共用 shared/codex.ts 的同一份实现；
+    // 命令随后原样转发 utility，让它的内存镜像与新回合的读取口径一起更新。
+    case "codex.settings.save":
+      settings.codex = normalizeCodexCliSettings(command.codex);
+      break;
     case "memory.save":
       settings.memory = command.memory;
       break;
@@ -524,7 +540,9 @@ function updateSettings(command: RuntimeCommand): void {
   // 全局快捷键只在开关/值变化时重注册（applyPaletteHotkey 内部幂等早退）。
   if (command.type === "settings.save") applyPaletteHotkey();
   persistSettings().schedule(diffSettings(previous, settings));
-  if (command.type === "settings.save") {
+  // 两份配置都由主进程独占写盘：保存后回推**权威**快照（含归一化结果），否则渲染端
+  // 只能保留自己提交的那份，关闭设置弹窗时回滚基线一覆盖就“保存成功、重进就没了”。
+  if (command.type === "settings.save" || command.type === "codex.settings.save") {
     mainWindow?.webContents.send("runtime:message", { type: "settings", settings: rendererSettings() } satisfies RuntimeMessage);
   }
 }
@@ -788,12 +806,57 @@ function showHookNotification(title: string, body: string, sessionId?: string, v
   notification.show();
 }
 function startRuntime(): void {
+  // 重建运行时：旧的 Codex 进程一律回收（它们归属旧 utility 实例，谁也接不回去）。
+  codexSupervisor?.shutdown();
   runtimeProcess = utilityProcess.fork(runtimeEntry(), [], { serviceName: "Pi 运行时", stdio: "pipe" });
+  codexSupervisor = new CodexProcessSupervisor({
+    onEvent: (handle, event) => {
+      // 只发给当前这条 utility；句柄不匹配的旧帧由 utility 侧按 handle 丢弃。
+      runtimeProcess?.postMessage({ type: "codex.process.event", handle, event } satisfies RuntimeCommand);
+    }
+  });
   runtimeProcess.on("message", (message: RuntimeMessage) => {
     // IM 通道先消费：im.session.ready / im.turn / im.delta 是**内部协议**，不转发
     // 渲染端；permission / permission.dismiss 仍继续走下面（桌面与手机双通道，
     // 先到先得，broker 幂等）。
     if (imGateway?.handleRuntimeMessage(message)) return;
+    // Codex 受监管子进程（内部协议，不转发渲染端）：进程只在 main 拉起/回收，
+    // utility 拿到的是受限的 stdio 事件流。
+    if (message.type === "codex.process.start") {
+      const supervisor = codexSupervisor;
+      if (!supervisor) {
+        runtimeProcess?.postMessage({
+          type: "codex.process.start-result",
+          requestId: message.requestId,
+          ok: false,
+          error: "Codex 进程监管不可用（运行时尚未启动）"
+        } satisfies RuntimeCommand);
+        return;
+      }
+      void supervisor.start(message.handle, message.options).then(
+        (result) => runtimeProcess?.postMessage({
+          type: "codex.process.start-result",
+          requestId: message.requestId,
+          ok: true,
+          ...(result.pid === undefined ? {} : { pid: result.pid })
+        } satisfies RuntimeCommand),
+        (error: unknown) => runtimeProcess?.postMessage({
+          type: "codex.process.start-result",
+          requestId: message.requestId,
+          ok: false,
+          error: error instanceof Error ? error.message : String(error)
+        } satisfies RuntimeCommand)
+      );
+      return;
+    }
+    if (message.type === "codex.process.write") {
+      codexSupervisor?.write(message.handle, message.data);
+      return;
+    }
+    if (message.type === "codex.process.stop") {
+      codexSupervisor?.stop(message.handle, message.reason);
+      return;
+    }
     if (message.type === "runtime-context") {
       // utility 激活成功后的唯一持久化入口：只写上下文，不转发渲染端。
       const source = loadSettings();
@@ -889,6 +952,9 @@ function startRuntime(): void {
   });
   runtimeProcess.on("exit", (code) => {
     runtimeProcess = undefined;
+    // utility 意外退出：它拥有的 Codex 进程树必须一起回收（否则成为孤儿进程）。
+    codexSupervisor?.shutdown();
+    codexSupervisor = undefined;
     pendingQuestions.clear();
     pendingPermissions.clear();
     mainWindow?.webContents.send("runtime:message", { type: "error", message: `Pi 运行时意外停止（退出代码 ${code}），请重启应用。` } satisfies RuntimeMessage);
@@ -1684,6 +1750,8 @@ app.on("before-quit", () => {
     galleryServicesTimer = undefined;
   }
   galleryServices?.disposeAll();
+  codexSupervisor?.shutdown();
+  codexSupervisor = undefined;
   trayController?.dispose();
   terminalManager.disposeAll();
   sshConnectionManager?.disposeAll();
