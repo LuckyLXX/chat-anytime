@@ -34,7 +34,13 @@ describe("team wiring", () => {
     expect(protocolSource).toMatch(/\{ type: "session\.teamMode"; enabled: boolean; sessionId\?: string \}/u);
     expect(protocolSource).toMatch(/\{ type: "team\.stopAll"; sessionId\?: string \}/u);
     expect(protocolSource).toMatch(/\{ type: "team\.send"; target: string; text: string; sessionId\?: string \}/u);
-    expect(protocolSource).toMatch(/\{ type: "team\.interrupt"; name: string; sessionId\?: string \}/u);
+    // 停止按成员名或任务 id（二选一），并带停止受理回执。
+    expect(protocolSource).toMatch(/\{ type: "team\.interrupt"; name\?: string; taskId\?: string; sessionId\?: string \}/u);
+    expect(protocolSource).toMatch(/\{ type: "team\.stop-result"; result: TeamStopResult; sessionId\?: string \}/u);
+    expect(protocolSource).toMatch(/export interface TeamMemberSettlement/u);
+    expect(protocolSource).toMatch(/settlement\?: TeamMemberSettlement/u);
+    expect(protocolSource).toMatch(/stopping\?: number/u);
+    expect(protocolSource).toMatch(/team\?: \{ leadSessionId: string; memberId: string; memberName: string \}/u);
     expect(protocolSource).toMatch(/kind\?: "subagent" \| "team"/u);
     expect(protocolSource).toMatch(/toolCallId\?: string/u);
     expect(protocolSource).toMatch(/export interface TeamMessageSummary/u);
@@ -47,7 +53,7 @@ describe("team wiring", () => {
     expect(runtimeSource).toMatch(/record\.teamMode\.enabled \? record\.teamTools\.map/u);
     expect(runtimeSource).toMatch(/"teamMode" \| "teamTools"/u);
     expect(runtimeSource).toMatch(/const teamTools = buildTeamTools\(teamRef\);/u);
-    expect(runtimeSource).toMatch(/\.\.\.teamTools[,]/u);
+    expect(runtimeSource).toMatch(/\.\.\.teamTools\]/u);
   });
 
   it("creates the per-session runtime after the record and reads/writes the session toggle", () => {

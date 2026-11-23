@@ -52,7 +52,6 @@ import type {
   ThinkingLevel,
   ToolExecution,
   TurnTiming,
-  WorkflowRunSummary,
   WorkspaceFileSearchEntry
 } from "../../shared/protocol";
 import { delegationRoleLabels, extensionCalloutTitle, sessionRunStatusLabels, thinkingLevelLabels, toolLabel } from "../../shared/locale";
@@ -81,11 +80,10 @@ import { shareElementAsImage } from "./lib/share-image";
 import { automationTaskIdFromOutput, parseAutomationCreateArgs } from "./lib/automation-call-preview";
 import { formatAutomationSchedule, parseScheduledReminderText } from "../../shared/automation";
 import { selectableCatalogModels } from "./lib/model-list";
-import { currentQuestionRequest, useDesktopStore, workflowRunsForOwner } from "./store";
+import { currentQuestionRequest, useDesktopStore } from "./store";
 import { PanelDock } from "./PanelDock";
 import { TeamStrip } from "./components/TeamStrip";
 import { TeamBoard } from "./components/TeamBoard";
-import { WorkflowRunStrip } from "./components/WorkflowRunStrip";
 
 const accessModeOptions: readonly { value: AccessMode; label: string }[] = [
   { value: "read-only", label: "只读" },
@@ -837,13 +835,6 @@ export interface ConversationPaneProps {
   onOpenContextCenter?(): void;
   /** 查看委派子代理的完整记录（App 层弹只读弹窗）。 */
   onOpenTranscript?(delegation: DelegationProgress): void;
-  /**
-   * 打开工作流中心并直接看这次运行的详情（运行条上的「详情」）。
-   * 带上本格 owner：分屏里每一格只能看到自己的运行，中心页也要落在同一 owner 上。
-   */
-  onOpenWorkflowRun?(runId: string, ownerSessionId: string | undefined): void;
-  /** 运行条待决权限的「定位」：把 owner 会话切到前台，待决权限对话框会浮出来。 */
-  onLocateWorkflowOwner?(run: WorkflowRunSummary): void;
   /** 会话操作失败提示（App 层 toast）。传 undefined 清除。 */
   onActionError(message?: string): void;
   /** 回滚该回复内单个文件的改动（App 层弹确认对话框后发命令）。缺省不显示回滚按钮。 */
@@ -888,8 +879,6 @@ export const ConversationPane = memo(function ConversationPane({
   onOpenMemoryCenter,
   onOpenContextCenter,
   onOpenTranscript,
-  onOpenWorkflowRun,
-  onLocateWorkflowOwner,
   onActionError,
   onRollback,
   renderLanding
@@ -928,15 +917,8 @@ export const ConversationPane = memo(function ConversationPane({
   const showThinking = settings.appearance.showThinking;
   // 最近一条命令级失败（带所属会话）：本格据此收起乐观待回复并给内联提示。
   const commandError = useDesktopStore((state) => state.commandError);
-  // 工作流运行条：只取 owner = 本格的摘要（分屏各看各的）。快照对象身份在无变化时
-  // 由 store 保持，这里的过滤结果也随 useMemo 一起稳定，不额外击穿 memo。
-  const workflowRunsSnapshot = useDesktopStore((state) => state.workflowRuns);
-  const ownerWorkflowRuns = useMemo(
-    () => workflowRunsForOwner(workflowRunsSnapshot?.runs, data.sessionId),
-    [workflowRunsSnapshot, data.sessionId]
-  );
-  /** composer 上方状态条堆栈是否出现（计划 / 团队 / 工作流共用同一个容器）。 */
-  const composerStatusStackVisible = data.planMode || (data.team?.members.length ?? 0) > 0 || ownerWorkflowRuns.length > 0;
+  /** composer 上方状态条堆栈是否出现（计划 / 团队共用同一个容器）。 */
+  const composerStatusStackVisible = data.planMode || (data.team?.members.length ?? 0) > 0;
 
   const [input, setInput] = useState(() => (sessionId !== undefined ? draftStore?.load(sessionId) ?? "" : ""));
   // 已选斜杠调用（Skill / 自定义命令，可多个混搭）：一次消息可同时挂多个，按选择
@@ -1857,6 +1839,18 @@ export const ConversationPane = memo(function ConversationPane({
 
   const teamBoardVisible = teamBoardOpen && (data.team?.members.length ?? 0) > 0;
 
+  // 停止受理回执：命令通道是单向的，回执走推送（带来源会话）。只有「没活跃执行 /
+  // 任务已完成 / 未绑定」这类明确拒绝才提示；delivered 由状态条自己显示「正在停止」。
+  const teamStopResult = useDesktopStore((state) => state.teamStopResult);
+  const seenStopAtRef = useRef(0);
+  useEffect(() => {
+    if (!teamStopResult || teamStopResult.at === seenStopAtRef.current) return;
+    seenStopAtRef.current = teamStopResult.at;
+    if (teamStopResult.sessionId !== data.sessionId) return;
+    if (teamStopResult.status === "delivered") return;
+    onActionError(teamStopResult.message);
+  }, [teamStopResult, data.sessionId, onActionError]);
+
   useEffect(() => {
     if (!data.team || data.team.members.length === 0) {
       setTeamBoardOpen(false);
@@ -2338,10 +2332,10 @@ export const ConversationPane = memo(function ConversationPane({
       })()}
       <form ref={composerRef} className={`composer${data.queuedMessages.length > 0 ? " has-queue" : ""}${composerStatusStackVisible ? " has-status-stack" : ""}`} data-pane="composer" onSubmit={submit} onDragOver={(event) => event.preventDefault()} onDrop={handleDrop}>
         {composerStatusStackVisible && (
-          // 状态条堆栈：计划 / 团队 / 工作流共用**同一个自适应容器**（一个网格行）。
-          // 为什么不各自占一行：三条任意组合相乘会在 styles.css 里长成
-          // has-plan×has-team×has-workflow×has-queue 的指数级单元格规则，漏一格就是
-          // 重叠。这里只给容器定位一次，新增状态条不再改 CSS。
+          // 状态条堆栈：计划 / 团队共用**同一个自适应容器**（一个网格行）。
+          // 为什么不各自占一行：多条任意组合相乘会在 styles.css 里长成
+          // has-plan×has-team×has-queue 的指数级单元格规则，漏一格就是重叠。
+          // 这里只给容器定位一次，新增状态条不再改 CSS。
           // 队列/输入/工具栏各自占位（见 styles.css 的 .composer.has-status-stack）。
           <div className="composer-status-stack" data-pane="composer-status-stack" data-composer-zone="status-stack">
             {data.planMode && (
@@ -2351,13 +2345,6 @@ export const ConversationPane = memo(function ConversationPane({
               </div>
             )}
             {(data.team?.members.length ?? 0) > 0 && <TeamStrip snapshot={data.team} onStopAll={stopTeam} onOpenBoard={() => { setTeamBoardMode("dock"); setTeamBoardOpen(true); }} />}
-            {ownerWorkflowRuns.length > 0 && (
-              <WorkflowRunStrip
-                runs={ownerWorkflowRuns}
-                onDetails={(runId) => onOpenWorkflowRun?.(runId, sessionId)}
-                onLocateOwner={(run) => onLocateWorkflowOwner?.(run)}
-              />
-            )}
           </div>
         )}
         {data.queuedMessages.length > 0 && (

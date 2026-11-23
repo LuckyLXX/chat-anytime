@@ -5,10 +5,10 @@
 // session/workspace/agent values are always current.
 
 import type { AgentSession, ExtensionAPI, InlineExtension } from "@earendil-works/pi-coding-agent";
-import type { AccessMode, AgentProfile, PermissionDecision } from "../shared/protocol.js";
+import type { AccessMode, AgentProfile, ExecutionPrincipal, PermissionDecision } from "../shared/protocol.js";
 import { toolLabel } from "../shared/locale.js";
 import { toolRisk } from "./permissions.js";
-import type { PermissionBroker } from "./permission-broker.js";
+import type { PermissionBroker, PermissionSettlement } from "./permission-broker.js";
 
 export function summarizeArgs(toolName: string, args: Record<string, unknown>): string {
   if (toolName === "bash" || toolName === "powershell") return String(args.command ?? "执行命令");
@@ -52,20 +52,30 @@ export interface PermissionGateDeps {
    * 手机端没人及时点按钮时，工具不能永久挂住整个回合。普通前台会话不设超时。
    */
   permissionTimeoutMs?: () => number | undefined;
-  /** 工作流节点的冻结权限上限及明确归属。 */
-  accessModeCap?: () => AccessMode | undefined;
-  workflow?: () => { runId: string; nodeId: string; attempt: number; nodeTitle: string } | undefined;
-  onWorkflowDenied?: () => void;
 }
 
-export function requestPermission(deps: PermissionGateDeps, toolName: string, args: Record<string, unknown>, toolCallId: string, principalKind: "root-agent" | "subagent" = "root-agent"): Promise<PermissionDecision> {
+/** 单次请求的附加身份与上限（团队成员用）：不进 deps，因为它们按成员而异。 */
+export interface PermissionRequestExtra {
+  /** 附加到 principal.team：Lead 会话 id + 不可复用的成员 id + 成员名。 */
+  team?: NonNullable<ExecutionPrincipal["team"]>;
+  /** 成员可选权限上限；与 owner 当前模式逐次取严，旧成员（缺省）继承原会话访问策略。 */
+  accessModeCap?: AccessMode;
+  /** 覆盖 deps.permissionTimeoutMs 的超时。 */
+  timeoutMs?: number;
+  /** 待决卡已发出。 */
+  onPending?: () => void;
+  /** 收场时恰好回调一次（deny 的来源：用户拒绝 / 模式拦截 / 超时 / 取消 分别可辨）。 */
+  onSettled?: (settlement: PermissionSettlement) => void;
+}
+
+export function requestPermission(deps: PermissionGateDeps, toolName: string, args: Record<string, unknown>, toolCallId: string, principalKind: "root-agent" | "subagent" = "root-agent", extra?: PermissionRequestExtra): Promise<PermissionDecision> {
   const risk = toolRisk(deps.workspace(), toolName, args);
   if (!risk) return Promise.resolve("allow-once");
   const sessionId = deps.session()?.sessionId ?? "session-pending";
-  const workflow = deps.workflow?.();
+  const timeoutMs = extra?.timeoutMs ?? (deps.permissionTimeoutMs ? deps.permissionTimeoutMs() : undefined);
   return deps.broker.request({
     accessMode: deps.accessMode(),
-    ...(deps.accessModeCap ? { accessModeCap: deps.accessModeCap() } : {}),
+    ...(extra?.accessModeCap ? { accessModeCap: extra.accessModeCap } : {}),
     toolName,
     summary: summarizeArgs(toolName, args),
     args,
@@ -76,12 +86,11 @@ export function requestPermission(deps: PermissionGateDeps, toolName: string, ar
       ...(principalKind === "subagent" ? { parentSessionId: sessionId } : {}),
       agentId: deps.agent()?.id,
       toolCallId,
-      ...(workflow ? { workflow } : {})
+      ...(extra?.team ? { team: extra.team } : {})
     },
-    ...(deps.permissionTimeoutMs ? { timeoutMs: deps.permissionTimeoutMs() } : {})
-  }).then((decision) => {
-    if (workflow && decision === "deny") deps.onWorkflowDenied?.();
-    return decision;
+    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+    ...(extra?.onPending ? { onPending: extra.onPending } : {}),
+    ...(extra?.onSettled ? { onSettled: extra.onSettled } : {})
   });
 }
 

@@ -1,4 +1,4 @@
-import type { AutomationRunRecord, AutomationTask, CommandSummary, GalleryApp, HookSummary, McpServerSummary, MemoryTopicSummary, ResourceCatalog, SkillSummary, SubagentDefinition, Todo, WorkflowSummary } from "../shared/protocol.js";
+import type { AutomationRunRecord, AutomationTask, CommandSummary, GalleryApp, HookSummary, McpServerSummary, MemoryTopicSummary, ResourceCatalog, SkillSummary, SubagentDefinition, Todo } from "../shared/protocol.js";
 
 /**
  * The resource catalog is now a thin aggregate over the self-built capability
@@ -8,12 +8,6 @@ import type { AutomationRunRecord, AutomationTask, CommandSummary, GalleryApp, H
  */
 
 export interface ResourceCatalogInput {
-  /**
-   * 当前目录所属工作区 + 轻量工作流目录。**只带 id/名称/用途/节点数/可运行/问题计数**：
-   * 全文（含各节点 prompt）走 `workflow.get`，否则每次资源刷新都会把整份定义复制一遍
-   * （方案 §8.2）。`workspace` 缺省 = 目录不可用/没有工作区，此时 items 必为空。
-   */
-  workflows?: { workspace?: string; items: WorkflowSummary[] };
   skills?: SkillSummary[];
   commands?: CommandSummary[];
   mcpServers?: McpServerSummary[];
@@ -36,7 +30,6 @@ export interface ResourceCatalogInput {
 }
 
 export const emptyResourceCatalog: ResourceCatalog = {
-  workflows: { items: [] },
   skills: [],
   commands: [],
   mcpServers: [],
@@ -53,12 +46,6 @@ export const emptyResourceCatalog: ResourceCatalog = {
 
 export function buildResourceCatalog(input: ResourceCatalogInput): ResourceCatalog {
   return {
-    // workspace 只在真有时才出现：缺省不能写成 `workspace: undefined`（bootstrap 快照
-    // 经结构化克隆后两种写法看着一样，但契约测试要能区分「没有工作区」与「空串」）。
-    workflows: {
-      ...(input.workflows?.workspace ? { workspace: input.workflows.workspace } : {}),
-      items: input.workflows ? structuredClone(input.workflows.items) : []
-    },
     skills: input.skills ? structuredClone(input.skills) : [],
     commands: input.commands ? structuredClone(input.commands) : [],
     mcpServers: input.mcpServers ? structuredClone(input.mcpServers) : [],

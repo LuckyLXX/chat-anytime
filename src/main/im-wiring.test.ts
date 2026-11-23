@@ -207,15 +207,16 @@ describe("自定义通道（接内网工作软件）", () => {
 });
 
 describe("权限超时", () => {
-  it("broker 支持 timeoutMs：超时走同一条 resolve(deny)，并清理定时器", () => {
+  it("broker 支持 timeoutMs：超时走同一条 settle(deny)，并清理定时器", () => {
     expect(broker).toContain("timeoutMs?: number;");
-    expect(broker).toContain("this.resolve(id, \"deny\");");
+    expect(broker).toContain('this.settle(pending, id, "deny", "timeout");');
     expect(broker).toContain("clearTimeout(pending.timer)");
   });
 
   it("权限门把会话级超时透传给 broker", () => {
     expect(permissions).toContain("permissionTimeoutMs?: () => number | undefined;");
-    expect(permissions).toContain("...(deps.permissionTimeoutMs ? { timeoutMs: deps.permissionTimeoutMs() } : {})");
+    expect(permissions).toContain("const timeoutMs = extra?.timeoutMs ?? (deps.permissionTimeoutMs ? deps.permissionTimeoutMs() : undefined);");
+    expect(permissions).toContain("...(timeoutMs !== undefined ? { timeoutMs } : {})");
     expect(runtime).toContain("() => recordBox?.im?.approvalTimeoutMs");
   });
 });
@@ -309,10 +310,10 @@ describe("主题契约五处镜像", () => {
       expect(themeVariables).toContain(control);
       expect(themeCheck).toContain(`"${control}"`);
     }
-    expect(themeSkill).toContain("主要区域（53）");
-    expect(themeSkill).toContain("关键控件（210）");
-    expect(themeVariables).toContain("`data-pane`（53）");
-    expect(themeVariables).toContain("`data-control`（210）");
+    expect(themeSkill).toContain("主要区域（45）");
+    expect(themeSkill).toContain("关键控件（152）");
+    expect(themeVariables).toContain("`data-pane`（45）");
+    expect(themeVariables).toContain("`data-control`（152）");
     expect(themeCheck).toContain('"im-channel-settings"');
     expect(themeCheck).toContain('"im-channel-enable"');
   });

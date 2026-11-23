@@ -6,6 +6,9 @@
  * send/list/wait/task_*（不能创建成员、不能中断别人）。运行时会再校验一次，
  * 工具可见性只是省 token 的第一道门。
  *
+ * 停止按成员名或任务 id（二选一）：任务绑定在 spawn/send 上以可选 task_id 显式建立，
+ * 让「按任务停止」有明确归属；未绑定/已完成/无活跃执行时如实回报，不误停别人。
+ *
  * 协作纪律写在 `team_list` 的 promptGuidelines 上（Pi 只把**激活工具**的
  * guidelines 追加进系统提示词）：团队模式关闭时零成本；开启时每个成员各一份，
  * 但不改动 Lead 的固定系统提示词，前缀缓存只在开关切换那一次失效。
@@ -29,6 +32,7 @@ const TEAM_POLICY_GUIDELINES = [
   "team_send 发给 running 成员会在其最近步骤边界送达；发给 inactive 成员会唤醒或冷恢复它。成功只代表投递到收件箱，不代表已处理。",
   "先 team_list 再 team_wait；没有其他成员 running/provisioning 时 team_wait 会立即返回 noProgress，不要轮询。",
   "任务板用 revision 做 compare-and-set：先 team_task_get，再用最新 revision 更新；write_scopes 只做重叠告警，不是文件锁。",
+  "分派需要精确追踪的任务时，用 spawn/send 的 task_id 把任务板 id 与这次成员回合绑定；之后 team_interrupt 可按 name 或 task_id 停止（二选一）。",
   "一次性拿结果的独立子任务用 delegate_agent；需要跨轮续存、互发消息或共享任务板时用 team_*。"
 ];
 
@@ -45,20 +49,22 @@ export function createTeamTools(service: TeamService, membership: TeamMembership
     tools.push(defineTool({
       name: "team_spawn",
       label: "创建团队成员",
-      description: "创建一名有名字的常驻团队成员（独立子会话，共享当前工作区），并让它立即开始执行 prompt。只有 Team Lead 能调用。成员默认继承 Lead 的模型、系统提示与内置工具；subagent 可指定一个已定义的子智能体来覆盖模型/提示词/工具/颜色。名字必须小写 kebab-case、全团队唯一且永不复用（创建失败也不复用）。返回成员行；创建完成后成员状态为 running。",
+      description: "创建一名有名字的常驻团队成员（独立子会话，共享当前工作区），并让它立即开始执行 prompt。只有 Team Lead 能调用。成员默认继承 Lead 的模型、系统提示与内置工具；subagent 可指定一个已定义的子智能体来覆盖模型/提示词/工具/颜色。名字必须小写 kebab-case、全团队唯一且永不复用（创建失败也不复用）。可选用 task_id 把共享任务绑定到这次执行（之后可按任务停止）。返回成员行；创建完成后成员状态为 running。",
       promptSnippet: "team_spawn: 创建有名字的常驻团队成员（仅 Lead）",
       parameters: Type.Object({
         name: Type.String({ description: "唯一的小写 kebab-case 成员名（如 reviewer，最多 64 字符，不能是 lead）" }),
         description: Type.String({ description: "这名成员负责什么（简短，最多 200 字符）" }),
         prompt: Type.String({ description: "成员的完整初始任务；它看不到 Lead 的对话历史，必须自包含" }),
+        task_id: Type.Optional(Type.String({ description: "可选：要绑定的共享任务 id（pending+就绪会自动认领；一个成员同一时间只绑一个任务）" })),
         subagent: Type.Optional(Type.String({ description: "可选：现有自定义子智能体的名称或 id；指定后用它的人设/模型/工具/颜色" }))
       }),
       execute: async (_toolCallId, params, signal) => {
-        const args = params as { name: string; description: string; prompt: string; subagent?: string };
+        const args = params as { name: string; description: string; prompt: string; task_id?: string; subagent?: string };
         return json(await service.spawn(membership, {
           name: args.name,
           description: args.description,
           prompt: args.prompt,
+          ...(args.task_id === undefined ? {} : { taskId: args.task_id }),
           ...(args.subagent === undefined ? {} : { subagent: args.subagent })
         }, signal));
       }
@@ -66,14 +72,18 @@ export function createTeamTools(service: TeamService, membership: TeamMembership
 
     tools.push(defineTool({
       name: "team_interrupt",
-      label: "中断团队成员",
-      description: "中断一名成员当前的回合，但保留它排队的消息与任务归属（只有 Team Lead 能调用）。成员不会被删除，之后仍可 team_send 唤醒。",
+      label: "停止团队成员",
+      description: "停止一名成员当前的回合（只有 Team Lead 能调用）：按成员名 name 或按任务绑定 task_id 指定，二选一。受理后成员状态为 stopping，收到回合结束或资源回收后才算「已停止」；排队的指令与该成员的待审批请求会被清掉，任务归属与已完成依赖保留（可用 team_task_update 的 reassign 改派）。成员不会被删除，之后仍可 team_send 唤醒。任务已完成、未绑定或无活跃执行时如实返回状态，不会误停其他工作。",
       parameters: Type.Object({
-        target: Type.String({ description: "成员名（来自 team_spawn / team_list）" })
+        name: Type.Optional(Type.String({ description: "成员名（来自 team_spawn / team_list）；与 task_id 二选一" })),
+        task_id: Type.Optional(Type.String({ description: "共享任务 id（需先用 spawn/send 的 task_id 绑定）；与 name 二选一" }))
       }),
       execute: (_toolCallId, params) => {
-        const args = params as { target: string };
-        return Promise.resolve(json(service.interrupt(membership, args.target)));
+        const args = params as { name?: string; task_id?: string };
+        return Promise.resolve(json(service.interrupt(membership, {
+          ...(args.name === undefined ? {} : { name: args.name }),
+          ...(args.task_id === undefined ? {} : { taskId: args.task_id })
+        })));
       }
     }));
   }
@@ -81,22 +91,23 @@ export function createTeamTools(service: TeamService, membership: TeamMembership
   tools.push(defineTool({
     name: "team_send",
     label: "给团队成员发消息",
-    description: "给另一名成员或 Lead 发一条点对点消息。发给 running 目标会在其最近步骤边界送达；发给 inactive 目标会启动/冷恢复它的下一轮。成功只代表投递到收件箱，不代表模型已处理。不能给自己发消息；单条消息上限 64KB。",
+    description: "给另一名成员或 Lead 发一条点对点消息。发给 running 目标会在其最近步骤边界送达；发给 inactive 目标会启动/冷恢复它的下一轮。成功只代表投递到收件箱，不代表模型已处理。不能给自己发消息；单条消息上限 64KB。给成员时可选用 task_id 绑定这条消息要执行的任务（便于按任务停止）。",
     promptSnippet: "team_send: 给成员或 Lead 发一条点对点消息",
     parameters: Type.Object({
       target: Type.String({ description: "成员名或 lead（来自 team_spawn / team_list）" }),
-      message: Type.String({ description: "自包含的消息正文" })
+      message: Type.String({ description: "自包含的消息正文" }),
+      task_id: Type.Optional(Type.String({ description: "可选：这条消息执行的任务 id（仅 target 是成员时有效）" }))
     }),
     execute: async (_toolCallId, params, signal) => {
-      const args = params as { target: string; message: string };
-      return json(await service.send(membership, args.target, args.message, signal));
+      const args = params as { target: string; message: string; task_id?: string };
+      return json(await service.send(membership, args.target, args.message, signal, args.task_id));
     }
   }));
 
   tools.push(defineTool({
     name: "team_list",
     label: "列出团队成员",
-    description: "列出 Lead 与全部成员的可寻址名字、当前状态、模型与诊断。inactive 只表示当前没有回合在跑，不代表任务完成/失败；provisioning 表示创建中，failed 表示创建失败（名字仍被占用）。",
+    description: "列出 Lead 与全部成员的可寻址名字、当前状态、模型、诊断与最近一个回合的结算（settlement：结局/短结论/对应任务/产物引用/卡点）。inactive 只表示当前没有回合在跑，不代表任务完成/失败；stopping 表示停止已受理、正在收尾；provisioning 表示创建中，failed 表示创建失败（名字仍被占用）。",
     promptSnippet: "team_list: 查看团队成员、状态与诊断",
     promptGuidelines: TEAM_POLICY_GUIDELINES,
     parameters: Type.Object({}),
@@ -106,7 +117,7 @@ export function createTeamTools(service: TeamService, membership: TeamMembership
   tools.push(defineTool({
     name: "team_wait",
     label: "等待团队变化",
-    description: "等待调用之后的下一次团队变化（成员状态、消息接收或任务更新），避免轮询。不会唤醒 inactive 成员；没有其他成员 running/provisioning 时立即返回 noProgress。醒来或超时后重新 team_list / team_task_list。",
+    description: "等待调用之后的下一次团队变化（成员状态、消息接收、任务更新或回合结算），避免轮询。返回 settlements（成员回合的结算：结局/短结论/任务/产物/卡点）、pendingApprovals（谁在等审批）与 userInput（用户发来新指令）。开始等待之前就已发生的结算也会一并返回，不会漏报，也不会重复返回同一旧事件。不会唤醒 inactive 成员；没有其他成员 running/provisioning 时立即返回 noProgress。醒来或超时后重新 team_list / team_task_list。",
     promptSnippet: "team_wait: 等下一次团队变化（不唤醒 inactive 成员）",
     parameters: Type.Object({
       timeout_ms: Type.Optional(Type.Integer({ minimum: 10_000, maximum: 3_600_000, description: "等待毫秒数（10000–3600000，默认 30000）" }))

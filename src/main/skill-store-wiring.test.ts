@@ -181,7 +181,7 @@ describe("渲染端接线", () => {
     }
     // 计数也要跟着走（pane 39→40→41→42→43→44→53、control 104→116→124→129→138→142→146→153→204→210）
     const skillDoc = read("../../resources/skills/pidesktop-theme-creator/SKILL.md");
-    expect(skillDoc).toContain("主要区域（53）");
-    expect(skillDoc).toContain("关键控件（210）");
+    expect(skillDoc).toContain("主要区域（45）");
+    expect(skillDoc).toContain("关键控件（152）");
   });
 });

@@ -75,8 +75,6 @@ KNOWN_PANES = frozenset({
     "design", "design-toolbar", "design-tools", "design-canvas", "design-layers", "design-inspector",
     "gallery-menu", "gallery-wall", "gallery-services",
     "automation-settings", "automation-dialog", "automation-panel", "automation-center", "memory-center",
-    "workflow-center", "workflow-list", "workflow-main", "workflow-canvas",
-    "workflow-inspector", "workflow-runs", "workflow-run-details", "workflow-run-strip",
     "composer-status-stack",
     "agent-settings", "general-settings",
     "model-settings",
@@ -139,29 +137,84 @@ KNOWN_CONTROLS = frozenset({
     "hooks-trust",
     "hooks-run-log",
     "hooks-template",
-    # 工作流编排（2026-11-19，方案 §9：工作流中心 / 画布 / 检查器与运行条的控件）。
-    "workflow-center-open", "workflow-center-close", "workflow-view-edit", "workflow-view-runs",
-    "workflow-refresh", "workflow-open", "workflow-create", "workflow-create-blank", "workflow-copy",
-    "workflow-name", "workflow-save", "workflow-delete", "workflow-delete-confirm", "workflow-delete-cancel",
-    "workflow-dirty-save", "workflow-dirty-discard", "workflow-dirty-cancel",
-    "workflow-run", "workflow-run-start", "workflow-run-cancel", "workflow-run-input",
-    "workflow-run-open", "workflow-run-details", "workflow-run-dismiss", "workflow-run-close",
-    "workflow-run-stop", "workflow-run-execution", "workflow-run-content-artifact", "workflow-run-content-transcript",
-    "workflow-runs-refresh", "workflow-runs-more", "workflow-stop", "workflow-pending-locate",
-    "workflow-node-add", "workflow-connect", "workflow-edge-delete", "workflow-node-delete",
-    "workflow-layout-auto", "workflow-view-fit", "workflow-zoom-out", "workflow-zoom-in",
-    "workflow-zoom-reset", "workflow-inspector-toggle",
-    "workflow-node-kind", "workflow-node-source", "workflow-node-subagent", "workflow-node-thinking",
-    "workflow-node-tools-inherit", "workflow-node-tool", "workflow-node-access", "workflow-node-execution",
-    "workflow-node-artifact-load", "workflow-node-run-details",
-    "workflow-rework-toggle", "workflow-rework-entry", "workflow-rework-gate", "workflow-rework-attempts",
-    "workflow-inspector-workflow-tab",
     "usage-agent-filter",
 })
 KNOWN_ROW_KINDS = frozenset({"workspace", "session", "agent"})
 KNOWN_NODE_KINDS = frozenset({"thinking", "tool-call", "text"})
 KNOWN_NODE_STATES = frozenset({"running", "completed", "error", "aborted"})
-KNOWN_COMPOSER_ZONES = frozenset({"queue", "plan", "status-stack", "workflow", "team", "attachments", "error", "input", "footer", "stats", "popup"})
+KNOWN_COMPOSER_ZONES = frozenset({"queue", "plan", "status-stack", "team", "attachments", "error", "input", "footer", "stats", "popup"})
+
+# 已退役的钩子（功能下线后旧主题 CSS 里可能还在）：不判「未知」错误，而是提示为无效选择器。
+# 2026-11-23 工作流编排下线：8 个区域、58 个控件、1 个输入框分区全部退役；
+# 真正未知的钩子仍然严格报错（见 check_hooks）。
+RETIRED_HOOK_VALUES = {
+    "pane": frozenset({
+        "workflow-center", "workflow-list", "workflow-main", "workflow-canvas",
+        "workflow-inspector", "workflow-runs", "workflow-run-details", "workflow-run-strip",
+    }),
+    "control": frozenset({
+        "workflow-center-open",
+        "workflow-center-close",
+        "workflow-view-edit",
+        "workflow-view-runs",
+        "workflow-refresh",
+        "workflow-open",
+        "workflow-create",
+        "workflow-create-blank",
+        "workflow-copy",
+        "workflow-name",
+        "workflow-save",
+        "workflow-delete",
+        "workflow-delete-confirm",
+        "workflow-delete-cancel",
+        "workflow-dirty-save",
+        "workflow-dirty-discard",
+        "workflow-dirty-cancel",
+        "workflow-run",
+        "workflow-run-start",
+        "workflow-run-cancel",
+        "workflow-run-input",
+        "workflow-run-open",
+        "workflow-run-details",
+        "workflow-run-dismiss",
+        "workflow-run-close",
+        "workflow-run-stop",
+        "workflow-run-execution",
+        "workflow-run-content-artifact",
+        "workflow-run-content-transcript",
+        "workflow-runs-refresh",
+        "workflow-runs-more",
+        "workflow-stop",
+        "workflow-pending-locate",
+        "workflow-node-add",
+        "workflow-connect",
+        "workflow-edge-delete",
+        "workflow-node-delete",
+        "workflow-layout-auto",
+        "workflow-view-fit",
+        "workflow-zoom-out",
+        "workflow-zoom-in",
+        "workflow-zoom-reset",
+        "workflow-inspector-toggle",
+        "workflow-node-kind",
+        "workflow-node-source",
+        "workflow-node-subagent",
+        "workflow-node-thinking",
+        "workflow-node-tools-inherit",
+        "workflow-node-tool",
+        "workflow-node-access",
+        "workflow-node-execution",
+        "workflow-node-artifact-load",
+        "workflow-node-run-details",
+        "workflow-rework-toggle",
+        "workflow-rework-entry",
+        "workflow-rework-gate",
+        "workflow-rework-attempts",
+        "workflow-inspector-workflow-tab",
+    }),
+    "composer-zone": frozenset({"workflow"}),
+}
+
 KNOWN_LAYER_KINDS = frozenset({"layer", "overlay"})
 KNOWN_UI_STATES = frozenset({
     "data-ui-settings-open", "data-ui-workspace-open", "data-ui-chat-empty",
@@ -397,6 +450,8 @@ def check_hooks(css: str, layer_names: set[str]) -> list[str]:
             if not matcher or not value:
                 errors.append(f"[data-{kind}] 钩子必须带取值；合法取值：{', '.join(sorted(known))}")
             elif value not in known:
+                if value in RETIRED_HOOK_VALUES.get(kind, ()):
+                    continue  # 退役钩子只在 check_retired_hooks 里提示，不算未知
                 errors.append(f"未知的 data-{kind} 取值 \"{value}\"；合法取值：{', '.join(sorted(known))}")
         elif kind in BOOLEAN_HOOK_ATTRS:
             if matcher:
@@ -420,6 +475,29 @@ def check_hooks(css: str, layer_names: set[str]) -> list[str]:
             elif value not in layer_names:
                 errors.append(f'data-theme-layer="{value}" 未声明对应的 --pi-layer-<name> / --pi-overlay-<name> 装饰层')
     return errors
+
+
+def check_retired_hooks(css: str) -> list[str]:
+    """已退役钩子的迁移提示（警告，不阻断通过）。
+
+    功能下线后，旧主题里指向「工作流中心」一类已退役区域的选择器永远命中不了
+    任何元素；把它们列出来让作者直接删，而不是判成「未知钩子」逼人改名。
+    """
+    warnings: list[str] = []
+    reported: set[str] = set()
+    for match in HOOK_ATTR_RE.finditer(strip_comments(css)):
+        kind = match.group(1)
+        value = next((group for group in match.groups()[2:] if group is not None), None)
+        if not value or value not in RETIRED_HOOK_VALUES.get(kind, ()):
+            continue
+        key = f"{kind}:{value}"
+        if key in reported:
+            continue
+        reported.add(key)
+        warnings.append(
+            f'[data-{kind}="{value}"] 是已退役的钩子（对应功能已下线），选择器不再命中任何元素，请移除'
+        )
+    return warnings
 
 
 def check_pitfalls(css: str) -> list[str]:
@@ -538,7 +616,7 @@ def check_theme(path: Path, allow_missing_assets: bool) -> tuple[list[str], list
     if re.search(r"color-mix\s*\(", css, re.IGNORECASE):
         errors.append("主题使用了 color-mix()；请输出最终的 rgb()/rgba()/hex 值以保证内嵌 Chromium 兼容")
     errors.extend(check_assets(css, path, allow_missing_assets))
-    return errors, check_pitfalls(css)
+    return errors, check_pitfalls(css) + check_retired_hooks(css)
 
 
 def main(argv: Iterable[str] | None = None) -> int:

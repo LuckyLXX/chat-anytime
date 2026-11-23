@@ -13,7 +13,7 @@ export function TeamStrip({ snapshot, onStopAll, onOpenBoard }: { snapshot?: Tea
     <div className="composer-team-strip" data-composer-zone="team" role="status" aria-label="团队成员状态">
       <span className="composer-team-title">
         <Users size={12} />
-        团队 {snapshot.members.length} 人{snapshot.running > 0 ? ` · ${snapshot.running} 运行中` : ""}
+        团队 {snapshot.members.length} 人{snapshot.running > 0 ? ` · ${snapshot.running} 运行中` : ""}{(snapshot.stopping ?? 0) > 0 ? ` · ${snapshot.stopping} 正在停止` : ""}
       </span>
       <span className="composer-team-members">
         {snapshot.members.map((member) => {
@@ -43,8 +43,10 @@ export function TeamStrip({ snapshot, onStopAll, onOpenBoard }: { snapshot?: Tea
         className="composer-team-stop"
         data-control="team-stop-all"
         type="button"
-        disabled={snapshot.running === 0}
-        title={snapshot.running === 0 ? "没有正在运行的成员" : "停止所有成员的当前回合（保留排队消息与任务归属）"}
+        disabled={snapshot.running === 0 && (snapshot.stopping ?? 0) === 0}
+        title={snapshot.running === 0 && (snapshot.stopping ?? 0) === 0
+          ? "没有正在运行的成员"
+          : "停止所有成员的当前回合（排队指令与待审批会清掉；任务归属与产物保留，可改派）"}
         aria-label="停止所有团队成员"
         onClick={onStopAll}
       >

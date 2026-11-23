@@ -1020,7 +1020,7 @@ html[data-ui-blur="off"] *::after {
    「有没有排队」两件事，堆栈内部排布交给 `.composer-status-stack` 自己（grid 单列 +
    gap），以后再加状态条不需要动这里一行。
    公开钩子：容器带 data-pane="composer-status-stack" 与 data-composer-zone="status-stack"，
-   内部各项保留各自的 data-composer-zone（plan / team / workflow）。 */
+   内部各项保留各自的 data-composer-zone（plan / team）。 */
 .composer.has-status-stack { grid-template-rows: auto minmax(32px, 1fr) auto; }
 .composer.has-status-stack .composer-status-stack { grid-row: 1; }
 .composer.has-status-stack .composer-input-row { grid-row: 2; }
@@ -1628,16 +1628,6 @@ html[data-ui-blur="off"] *::after {
 .work-area.context-center-open .conversation-pane .panel-dock,
 .work-area.context-center-open .conversation-pane .panel-dock-fab { display: none; }
 
-/* ── 工作流中心（2026-11-19）────────────────────────────────────────
-   work-area 内的全幅覆盖页（与记忆中心 / 上下文中心 / 自动化中心同级互斥）。
-   样式主体在 workflow.css（随 WorkflowCenter 一起进入构建）：那里定义
-   data-pane="workflow-center" 的骨架、画布与检查器；这里只钉「它占住 work-area 时
-   会话浮层必须收起」，以及侧栏入口的激活态复用 .automation-nav-button.active。
-   公开钩子：data-pane workflow-center（页）/ workflow-list / workflow-main /
-   workflow-runs / workflow-run-details / workflow-run-strip（运行条）；
-   入口控件 workflow-center-open（侧栏 + 折叠栏）与命令面板动作 view.workflow。 */
-.work-area.workflow-center-open .conversation-pane .panel-dock,
-.work-area.workflow-center-open .conversation-pane .panel-dock-fab { display: none; }
 .context-center { position: absolute; z-index: 37; inset: 0; display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--surface); animation: automation-center-in .18s var(--motion-ease); }
 .ui-presence.is-exiting > .context-center { animation: automation-center-out .18s var(--motion-ease) both; }
 @media (prefers-reduced-motion: reduce) { .context-center, .ui-presence.is-exiting > .context-center { animation: none !important; } }
@@ -4549,6 +4539,17 @@ html[data-ui-motion="off"] .automation-center, html[data-ui-motion="off"] .ui-pr
 .team-status-dot.inactive { background: var(--success, #65d6a5); }
 .team-status-dot.provisioning { background: var(--warning); }
 .team-status-dot.failed { background: var(--danger); }
+/* 正在停止：停止已受理、等待 agent_settled 或资源回收（不谎报「已停止」）。 */
+.team-status-dot.stopping { background: var(--warning); animation: team-pulse 1.8s ease-in-out infinite; }
+.team-status-badge.stopping { color: var(--warning-text, #ffd18b); border-color: #5a492c; background: rgba(90, 73, 44, .3); }
+.team-settlement { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 6px 2px 0; padding: 5px 8px; border: 1px solid var(--border); border-radius: 7px; color: var(--text-muted); font-size: var(--tb-fs-label); line-height: 1.5; }
+.team-settlement.failed { border-color: var(--danger-border); }
+.team-settlement.aborted { border-style: dashed; }
+.team-settlement-outcome { color: var(--text); font-weight: 600; }
+.team-settlement-blocker { padding: 0 5px; border: 1px solid var(--danger-border); border-radius: 5px; color: var(--danger-text); background: var(--danger-soft); }
+.team-settlement-summary { overflow: hidden; max-width: 100%; text-overflow: ellipsis; white-space: nowrap; }
+.team-settlement-artifacts { color: var(--text-muted); }
+.team-member-blocker { flex: 0 0 auto; padding: 0 4px; border: 1px solid var(--danger-border); border-radius: 4px; color: var(--danger-text); font-size: var(--tb-fs-micro); }
 .team-status-dot.in_progress { background: var(--accent); }
 .team-status-dot.pending { background: var(--text-muted); }
 .team-status-dot.completed { background: var(--success, #65d6a5); }

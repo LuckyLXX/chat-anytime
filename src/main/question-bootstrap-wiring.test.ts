@@ -30,14 +30,11 @@ describe("pending questions bootstrap wiring contract", () => {
     expect(mainIndex).toContain("questions: pendingQuestions.list()");
   });
 
-  it("工作流运行快照同时进入 main bootstrap 并由渲染端 epoch/revision 合并", () => {
+  it("工作流编排已下线：bootstrap 不再带运行快照，渲染端初始化也不发补帧（反向验证）", () => {
     const bootstrap = protocol.slice(protocol.indexOf("export interface DesktopBootstrap"), protocol.indexOf("export interface DesktopApi"));
-    expect(bootstrap).toContain("workflowRuns?: WorkflowRunsSnapshot");
-    expect(mainIndex).toContain("let latestWorkflowRuns:");
-    expect(mainIndex).toContain("if (message.type === \"workflow.runs\")");
-    expect(mainIndex).toContain("workflowRuns: latestWorkflowRuns");
-    expect(store).toContain("const restoredWorkflowRuns = bootstrap.workflowRuns");
-    expect(store).toContain('type: "workflow.sync"');
+    expect(bootstrap).not.toContain("workflowRuns");
+    expect(mainIndex).not.toContain("latestWorkflowRuns");
+    expect(store).not.toContain('type: "workflow.sync"');
     const initialization = store.slice(store.indexOf("async initialize()"), store.indexOf("  handleRuntimeMessage(message)"));
     expect(initialization).not.toContain('type: "state.sync"');
   });

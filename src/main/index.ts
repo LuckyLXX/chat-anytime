@@ -110,7 +110,6 @@ let latestSnapshot: RuntimeSnapshot | undefined;
 const snapshotBaselines = createMainSnapshotCache({ nextRequestId: () => randomUUID() });
 let latestCatalog: Extract<RuntimeMessage, { type: "catalog" }> | undefined;
 let latestResources: ResourceCatalog | undefined;
-let latestWorkflowRuns: Extract<RuntimeMessage, { type: "workflow.runs" }>["snapshot"] | undefined;
 /** 渲染端重载后恢复待决提问：utility 的 broker 还在等，面板不能丢。 */
 const pendingQuestions = new PendingQuestionMirror();
 const pendingPermissions = new PendingPermissionMirror();
@@ -868,9 +867,6 @@ function startRuntime(): void {
     if (message.type === "question.dismiss") pendingQuestions.dismiss(message.id);
     if (message.type === "permission") pendingPermissions.record(message.request);
     if (message.type === "permission.dismiss") pendingPermissions.dismiss(message.id);
-    if (message.type === "workflow.runs") {
-      if (!latestWorkflowRuns || latestWorkflowRuns.epoch !== message.snapshot.epoch || message.snapshot.revision > latestWorkflowRuns.revision) latestWorkflowRuns = message.snapshot;
-    }
     // 面板作品的数据源：无条件喂（不依赖渲染端是否在看，也不依赖主窗口是否存在）。
     panelState.ingest(message);
     if (message.type === "catalog") latestCatalog = message;
@@ -895,7 +891,6 @@ function startRuntime(): void {
     runtimeProcess = undefined;
     pendingQuestions.clear();
     pendingPermissions.clear();
-    latestWorkflowRuns = undefined;
     mainWindow?.webContents.send("runtime:message", { type: "error", message: `Pi 运行时意外停止（退出代码 ${code}），请重启应用。` } satisfies RuntimeMessage);
   });
   // Forward Pi runtime stdio only in development: in packaged builds the Pi
@@ -1374,7 +1369,7 @@ function registerIpc(): void {
     const settings: DesktopSettings = settingsForRenderer({ ...source, providers: source.providers.map((provider) => ({ ...provider, keyConfigured: Boolean(credentialsCache[provider.id]) })), jevKeyConfigured: Boolean(credentialsCache[JEV_CREDENTIAL_ID]) });
     // 后台服务在主进程里跑，渲染端重载不打断它们 —— 看板必须靠这一帧恢复，否则
     // 「刷新页面 = 服务从看板上消失，而进程还在」。
-    return { platform: process.platform, version: app.getVersion(), securityWarning, settings, runtime: latestSnapshot, catalog: latestCatalog ? { models: latestCatalog.models, providers: latestCatalog.providers } : undefined, resources: latestResources, browserTabs: browserPreviewController?.tabIds() ?? [], questions: pendingQuestions.list(), permissions: pendingPermissions.list(), workflowRuns: latestWorkflowRuns, imStatus: imGatewayStatus(), galleryServices: galleryServices?.list() ?? [] };
+    return { platform: process.platform, version: app.getVersion(), securityWarning, settings, runtime: latestSnapshot, catalog: latestCatalog ? { models: latestCatalog.models, providers: latestCatalog.providers } : undefined, resources: latestResources, browserTabs: browserPreviewController?.tabIds() ?? [], questions: pendingQuestions.list(), permissions: pendingPermissions.list(), imStatus: imGatewayStatus(), galleryServices: galleryServices?.list() ?? [] };
   });
   // 主题导入：对话框与全部文件工作都在主进程（渲染端不再用 webkitdirectory + FileReader
   // 读盘、不再把资产变成 base64 过 IPC）。渲染端只拿 CSS 文本与统计。

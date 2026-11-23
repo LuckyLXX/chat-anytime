@@ -199,10 +199,10 @@ export function TeamBoard({
       <header className="team-board-header">
         {full && <button className="team-board-back" type="button" onClick={onToggleMode}><ArrowLeft size={13} />返回对话</button>}
         <span className="team-board-title"><Users size={14} />{full ? "团队编队" : "团队"}</span>
-        <span className="team-board-sub">{members.length} 人 · {snapshot.running} 运行中</span>
+        <span className="team-board-sub">{members.length} 人 · {snapshot.running} 运行中{(snapshot.stopping ?? 0) > 0 ? ` · ${snapshot.stopping} 正在停止` : ""}</span>
         <span className="team-board-grow" />
         <span className="team-board-elapsed"><Clock size={11} />{snapshot.running > 0 ? formatElapsed(teamStartedAt, now) : "—"}</span>
-        <button className="team-board-icon danger" type="button" data-control="team-board-stop-all" title="停止所有成员的当前回合（保留队列与任务归属）" aria-label="全部停止" onClick={onStopAll} disabled={snapshot.running === 0}>
+        <button className="team-board-icon danger" type="button" data-control="team-board-stop-all" title="停止所有成员的当前回合（排队指令与待审批会清掉；任务归属与产物保留，可改派）" aria-label="全部停止" onClick={onStopAll} disabled={snapshot.running === 0 && (snapshot.stopping ?? 0) === 0}>
           <CircleStop size={14} />
         </button>
         <button className="team-board-icon" type="button" title={full ? "收起到右侧" : "放大为工作台"} aria-label={full ? "收起到右侧" : "放大为工作台"} onClick={onToggleMode}>

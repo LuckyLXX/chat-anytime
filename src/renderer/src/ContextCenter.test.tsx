@@ -102,7 +102,7 @@ beforeEach(() => {
     contextInspection: { requestId: "r1", sessionId: "session-1", loading: false, data: inspection(), at: inspection().at },
     providers: [{ id: "deepseek", name: "DeepSeek", configured: true } as never],
     resources: {
-      workflows: { items: [] }, skills: [], commands: [], mcpServers: [], todos: [], memory: [], subagents: [], hooks: [], hooksEnabled: true, automation: [], automationRuns: [], gallery: [], diagnostics: []
+      skills: [], commands: [], mcpServers: [], todos: [], memory: [], subagents: [], hooks: [], hooksEnabled: true, automation: [], automationRuns: [], gallery: [], diagnostics: []
     },
     memory: []
   });

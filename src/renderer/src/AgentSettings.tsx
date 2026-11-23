@@ -8,7 +8,6 @@ import {
   Save,
   Search,
   Terminal,
-  Workflow,
   Wrench,
   X
 } from "lucide-react";
@@ -84,14 +83,6 @@ function agentSkillEnabled(agent: AgentProfile, skill: ResourceCatalog["skills"]
 /** 角色级能力工具 overlay：缺省（无键）= 启用，显式 false 才禁用；键域 browser/ssh/mcp:<server>。 */
 function agentToolEnabled(agent: AgentProfile, key: string): boolean {
   return agent.toolOverrides?.[key] !== false;
-}
-
-/**
- * 工作流工具是**另一套缺省语义**：默认关闭，只有显式 true 才算开
- * （浏览器/SSH/MCP 仍是缺省开启）。这两种语义不能共用上面的 `!== false`。
- */
-function agentWorkflowEnabled(agent: AgentProfile): boolean {
-  return agent.toolOverrides?.workflow === true;
 }
 
 interface AgentSettingsProps {
@@ -328,11 +319,6 @@ export function AgentSettings({
                 <span className="agent-switch-icon"><Terminal size={13} /></span>
                 <span className="agent-switch-copy"><strong>SSH 远程终端</strong><small>14 个 ssh_* 工具</small></span>
                 <input type="checkbox" className="agent-switch" checked={agentToolEnabled(selectedAgent, "ssh")} onChange={(event) => onUpdateToolOverride("ssh", event.target.checked)} />
-              </label>
-              <label className="agent-switch-row" title="默认关闭：开启后该角色可在会话里用一句话启动已保存的工作流">
-                <span className="agent-switch-icon"><Workflow size={13} /></span>
-                <span className="agent-switch-copy"><strong>工作流编排</strong><small>3 个 workflow_* 工具 · 默认关闭（可在工作流中心直接运行，不依赖此开关）</small></span>
-                <input type="checkbox" className="agent-switch" checked={agentWorkflowEnabled(selectedAgent)} onChange={(event) => onUpdateToolOverride("workflow", event.target.checked)} />
               </label>
               {resources.mcpServers.map((server) => (
                 <label className="agent-switch-row" key={`mcp:${server.name}`} title={server.disabled ? "该服务器已在 MCP 设置中停用" : undefined}>

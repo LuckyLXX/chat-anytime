@@ -31,7 +31,7 @@ function fakeService(): TeamService {
     send: vi.fn(async () => ({ sent: true as const })),
     list: vi.fn(() => [memberView]),
     wait: vi.fn(async () => ({ timedOut: false })),
-    interrupt: vi.fn(() => ({ previousStatus: "running" as const })),
+    interrupt: vi.fn(() => ({ target: "member" as const, value: "reviewer", status: "delivered" as const, memberName: "reviewer", message: "已受理：正在停止成员「reviewer」" })),
     createTask: vi.fn(async () => taskView),
     listTasks: vi.fn(() => ({ tasks: [taskView] })),
     getTask: vi.fn(() => taskView),
@@ -39,6 +39,7 @@ function fakeService(): TeamService {
     snapshot: vi.fn(() => ({ members: [], running: 0 })),
     hasRunningMembers: vi.fn(() => false),
     stopAll: vi.fn(),
+    wakeForUserInput: vi.fn(),
     dispose: vi.fn()
   };
 }
@@ -93,15 +94,23 @@ describe("team tool surface", () => {
     const tools = createTeamTools(service, { role: "lead", name: "lead" });
     expect(parsed(await execute(tools, "team_spawn", { name: "reviewer", description: "审查", prompt: "看 diff" }))).toMatchObject({ target: "reviewer" });
     expect(service.spawn).toHaveBeenCalledWith({ role: "lead", name: "lead" }, { name: "reviewer", description: "审查", prompt: "看 diff" }, undefined);
+    // 可选 task_id：分派即绑定（按任务停止的前提）。
+    await execute(tools, "team_spawn", { name: "builder", description: "实现", prompt: "写代码", task_id: "task-9" });
+    expect(service.spawn).toHaveBeenLastCalledWith({ role: "lead", name: "lead" }, { name: "builder", description: "实现", prompt: "写代码", taskId: "task-9" }, undefined);
 
     expect(parsed(await execute(tools, "team_send", { target: "reviewer", message: "hi" }))).toEqual({ sent: true });
-    expect(service.send).toHaveBeenCalledWith({ role: "lead", name: "lead" }, "reviewer", "hi", undefined);
+    expect(service.send).toHaveBeenCalledWith({ role: "lead", name: "lead" }, "reviewer", "hi", undefined, undefined);
+    await execute(tools, "team_send", { target: "reviewer", message: "hi", task_id: "task-1" });
+    expect(service.send).toHaveBeenLastCalledWith({ role: "lead", name: "lead" }, "reviewer", "hi", undefined, "task-1");
 
     expect(parsed(await execute(tools, "team_wait", {}))).toEqual({ timedOut: false });
     expect(service.wait).toHaveBeenCalledWith({ role: "lead", name: "lead" }, 30_000, expect.anything());
 
-    expect(parsed(await execute(tools, "team_interrupt", { target: "reviewer" }))).toEqual({ previousStatus: "running" });
-    expect(service.interrupt).toHaveBeenCalledWith({ role: "lead", name: "lead" }, "reviewer");
+    expect(parsed(await execute(tools, "team_interrupt", { name: "reviewer" }))).toMatchObject({ status: "delivered", memberName: "reviewer" });
+    expect(service.interrupt).toHaveBeenCalledWith({ role: "lead", name: "lead" }, { name: "reviewer" });
+    // 按任务停止走同一条工具（二选一），参数映射到 taskId。
+    expect(parsed(await execute(tools, "team_interrupt", { task_id: "task-1" }))).toMatchObject({ status: "delivered" });
+    expect(service.interrupt).toHaveBeenLastCalledWith({ role: "lead", name: "lead" }, { taskId: "task-1" });
   });
 
   it("maps task tool arguments onto the service mutation shape", async () => {

@@ -29,7 +29,38 @@ const snapshot: TeamSnapshot = {
         ]
       }
     },
-    { name: "portrait-data", status: "inactive", description: "数据适配", activity: { steps: 1, recent: [] } }
+    { name: "portrait-data", status: "inactive", description: "数据适配", activity: { steps: 1, recent: [] } },
+    {
+      name: "portrait-review",
+      status: "stopping",
+      description: "审查",
+      settlement: {
+        id: "child-3:2",
+        memberName: "portrait-review",
+        outcome: "completed",
+        summary: "审查完成：见 src/portrait/report.md",
+        taskIds: ["task-1"],
+        artifacts: ["src/portrait/report.md"],
+        reported: false,
+        at: 1_700_000_000_000
+      }
+    },
+    {
+      name: "portrait-bash",
+      status: "running",
+      description: "命令验证",
+      settlement: {
+        id: "child-4:1",
+        memberName: "portrait-bash",
+        outcome: "failed",
+        taskIds: [],
+        artifacts: [],
+        blocker: { kind: "permission-denied", toolName: "bash", summary: "执行命令：npm test" },
+        reported: true,
+        error: "被权限拦截",
+        at: 1_700_000_000_500
+      }
+    }
   ],
   tasks: [
     { id: "task-1", revision: 2, subject: "渲染器骨架", status: "in_progress", ownerName: "portrait-render", blockedBy: [], writeScopes: [], ready: false, writeScopeWarnings: [] },
@@ -37,13 +68,13 @@ const snapshot: TeamSnapshot = {
   ]
 };
 
-function markup(mode: "dock" | "full" = "dock"): string {
+function markup(mode: "dock" | "full" = "dock", selectedName = "portrait-render"): string {
   return renderToStaticMarkup(
     <TeamBoard
       snapshot={snapshot}
       mode={mode}
       width={420}
-      selectedName="portrait-render"
+      selectedName={selectedName}
       onSelect={() => undefined}
       onResize={() => undefined}
       onToggleMode={() => undefined}
@@ -66,6 +97,24 @@ describe("TeamBoard", () => {
     expect(html).toContain('data-control="team-board-send"');
     expect(html).toContain('data-control="team-board-stop-all"');
     expect(html).toContain("停止成员");
+  });
+
+  it("shows the last settlement, its blocker and the stopping state", () => {
+    const completed = markup("dock", "portrait-review");
+    // 结算行：结局 + 短结论 + 产物数都能看见，不靠颜色区分。
+    expect(completed).toContain('class="team-settlement completed"');
+    expect(completed).toContain("上回合已完成");
+    expect(completed).toContain("审查完成：见 src/portrait/report.md");
+    expect(completed).toContain("产物 1");
+    // 正在停止的成员：状态标签写「正在停止」，不谎报已停止。
+    expect(completed).toContain("正在停止");
+
+    const blocked = markup("dock", "portrait-bash");
+    // 卡点直接写进结算行（成员名 + 工具 + 原因），列表行也带徽标。
+    expect(blocked).toContain("权限被拒");
+    expect(blocked).toContain("执行命令：npm test");
+    expect(blocked).toContain("team-member-blocker");
+    expect(blocked).toContain("上回合失败");
   });
 
   it("renders the full formation with summary, graph, task board, comms and return action", () => {

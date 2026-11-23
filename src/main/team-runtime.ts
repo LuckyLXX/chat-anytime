@@ -26,19 +26,22 @@ import {
   type ToolDefinition
 } from "@earendil-works/pi-coding-agent";
 import type { Api, Model } from "@earendil-works/pi-ai";
-import type { AgentProfile, PermissionDecision, SubagentDefinition, TeamLeadSummary, TeamMemberActivityStep, TeamMemberReport, TeamMemberSummary, TeamMessageSummary, TeamSnapshot, TeamTaskSummary, ThinkingLevel } from "../shared/protocol.js";
+import type { AccessMode, AgentProfile, PermissionDecision, SubagentDefinition, TeamLeadSummary, TeamMemberActivityStep, TeamMemberBlocker, TeamMemberReport, TeamMemberSettlement, TeamMemberSummary, TeamMessageSummary, TeamSnapshot, TeamTaskSummary, ThinkingLevel } from "../shared/protocol.js";
+import type { PermissionSettlement } from "./permission-broker.js";
 import { createChildPermissionExtension, resolveSubagentDefinition } from "./subagent.js";
 import { withCacheWarmingOff } from "./runtime-settings.js";
 import { createTeamTools } from "./runtime-team.js";
 import type { PersistedSessionEntry } from "./session-history.js";
 import {
   MAX_TEAM_MEMBERS,
+  TEAM_ENTRY_TYPE,
   MAX_TEAM_MESSAGE_BYTES,
   TEAM_IDLE_DISPOSE_MS,
   TEAM_SPAWN_START_TIMEOUT_MS,
   TEAM_WAIT_MAX_MS,
   TEAM_WAIT_MIN_MS,
   appendTeamMember,
+  appendTeamSettlement,
   appendTeamTask,
   reconcileProvisioningMember,
   restoreTeamState,
@@ -48,7 +51,9 @@ import {
 } from "./team-store.js";
 import {
   createTask,
+  ownerNameOf,
   projectTaskView,
+  taskReady,
   updateTask,
   withTask,
   type TeamTaskCaller,
@@ -61,8 +66,12 @@ import {
   teamIdentityBlock,
   type TeamListTaskFilter,
   type TeamMembership,
+  type TeamMemberIdentity,
   type TeamMemberView,
+  type TeamPermissionHooks,
+  type TeamPermissionNotice,
   type TeamService,
+  type TeamStopResult,
   type TeamWaitResult
 } from "./team-contract.js";
 
@@ -75,6 +84,8 @@ export interface TeamChildSession {
     options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" }
   ): Promise<void>;
   abort(): Promise<void>;
+  /** 停止时清掉排队指令（Pi 的 abort 不清 steering/followUp）；旧会话没有此方法时跳过。 */
+  clearQueue?(): void;
   dispose(): void;
   subscribe(listener: AgentSessionEventListener): () => void;
   /** 只读统计；测试 fake 可以缺省。 */
@@ -109,7 +120,14 @@ export interface TeamRuntimeOptions {
   getSubagentCatalog?(): SubagentDefinition[] | undefined;
   isModelEnabled?(provider: string, id: string): boolean;
   transformModel?(model: Model<Api>): Model<Api>;
-  requestPermission(toolName: string, args: Record<string, unknown>, toolCallId: string): Promise<PermissionDecision>;
+  /**
+   * 成员请求权限：身份（Lead 会话 + 不可复用的成员 id/名字）与回调由运行时注入，
+   * 实现侧（pi-runtime）负责挂到共享权限门上——按成员隔离长期授权、按成员取消、
+   * 以 10 分钟兜底超时自动拒绝。
+   */
+  requestPermission(toolName: string, args: Record<string, unknown>, toolCallId: string, member: TeamMemberIdentity, hooks: TeamPermissionHooks): Promise<PermissionDecision>;
+  /** 停止某成员时取消它的待决权限与长期授权（pi-runtime 接到共享 broker）。 */
+  cancelMemberPermissions?(memberId: string): void;
   buildBrowserTools?(): ToolDefinition[];
   /** 测试注入；缺省走 createAgentSession。 */
   createChildSession?: TeamChildFactory;
@@ -135,6 +153,34 @@ interface MemberRuntime {
   recent: TeamMemberActivityStep[];
   /** 最后一条 assistant 文本（「最新回报」，仅本次运行）。 */
   lastReport?: TeamMemberReport;
+  /** 停止已受理、等待 agent_settled 或资源回收（状态显示「正在停止」，不谎报已停止）。 */
+  stopping: boolean;
+  /** 已结算的回合数（结算 id 的后半段）。 */
+  turnSeq: number;
+  /** 当前回合；agent_start 开、agent_settled 结算。 */
+  turn?: MemberTurn;
+  /** 最近一个回合的结算（进快照与 team_list）。 */
+  settlement?: TeamMemberSettlement;
+  /** 当前显式绑定的执行任务（同一时间只绑一个；见 bindTask）。 */
+  taskBinding?: string;
+  /** 停止看门狗：settled 迟迟不来时兜底收口。 */
+  stopTimer?: ReturnType<typeof setTimeout>;
+}
+
+/** 一个成员回合的记账：结算时一次性收口，平时只累计。 */
+interface MemberTurn {
+  id: string;
+  startedAt: number;
+  /** 本回合 write/edit 写出（或结论里明确提到）的工作区相对路径。 */
+  artifacts: Set<string>;
+  /** 本回合是否已主动 team_send 给 Lead（正文去重依据，回合结果照常提供）。 */
+  reportedToLead: boolean;
+  /** 本回合最后一条 assistant 文本（截断后进结算）。 */
+  lastReport?: string;
+  /** 卡点：权限被拒 / 模式拦截 / 等审批超时。 */
+  blocker?: TeamMemberBlocker;
+  /** 正在等审批的请求（id → 摘要），停止时逐条取消。 */
+  pending: Map<string, TeamPermissionNotice>;
 }
 
 const MEMBER_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u;
@@ -144,6 +190,12 @@ const TEAM_LOG_LIMIT = 80;
 const TEAM_LOG_TEXT_LIMIT = 400;
 /** Lead 统计要遍历整条会话日志，活动期快照约 8 次/秒 ⇒ 最多每秒重算一次。 */
 const LEAD_STATS_TTL_MS = 1_000;
+/** 结算里最多带 8 个产物引用（快照与工具回执都按帧带，不能无限长）。 */
+const SETTLEMENT_ARTIFACT_LIMIT = 8;
+/** 停止受理后的收尾看门狗：abort 卡住或 settled 丢失时强制收口（不谎报永久「正在停止」）。 */
+const TEAM_STOP_SETTLE_TIMEOUT_MS = 30_000;
+/** 待被 Lead 消费的结算环形缓冲上限（超出丢最老；持久化副本仍在 Lead 日志里）。 */
+const SETTLEMENT_QUEUE_LIMIT = 50;
 
 /** 取 assistant 消息里的可读文本（忽略 thinking / tool 块），折叠空白。 */
 function assistantText(message: unknown): string {
@@ -173,6 +225,44 @@ function clipTeamText(text: string): string {
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** 卡点原因的中文短句（结算正文与工具回执共用）。 */
+function blockerCauseLabel(kind: TeamMemberBlocker["kind"]): string {
+  switch (kind) {
+    case "permission-denied": return "用户拒绝";
+    case "permission-mode": return "访问模式拦截";
+    case "permission-timeout": return "等待审批超时";
+    case "permission-pending": return "仍在等待审批";
+  }
+}
+
+/**
+ * 从成员结论里抽出「明确提到的产物引用」：只认带扩展名的路径片段，最多 8 个。
+ * 不做模糊匹配——结算里的产物是要交给下一个成员直接复用的，宁可少给也不错给。
+ */
+function mentionedArtifacts(text: string): string[] {
+  const found = new Set<string>();
+  for (const match of text.matchAll(/(?:^|[\s`("'（\[:：])((?:[\w.@-]+\/)*[\w.@-]+\.[A-Za-z0-9]{1,8})(?=$|[\s`)"'），。；:：、\]])/gu)) {
+    const value = match[1]!;
+    if (value.length > 240) continue;
+    if (/^(?:https?|file):/u.test(value)) continue;
+    found.add(value);
+    if (found.size >= SETTLEMENT_ARTIFACT_LIMIT) break;
+  }
+  return [...found];
+}
+
+/** Lead 收件箱里的结算正文：结论 / 任务 / 产物 / 卡点各一行，模型可直接照做。 */
+function settlementText(settlement: TeamMemberSettlement): string {
+  const lines = [`成员「${settlement.memberName}」回合结束：${settlement.outcome === "completed" ? "已完成" : settlement.outcome === "failed" ? "失败" : "已中止"}`];
+  if (settlement.summary) lines.push(`结论：${settlement.summary}`);
+  if (settlement.error) lines.push(`错误：${settlement.error}`);
+  if (settlement.taskIds.length > 0) lines.push(`任务：${settlement.taskIds.join("、")}`);
+  if (settlement.artifacts.length > 0) lines.push(`产物：${settlement.artifacts.join("、")}`);
+  if (settlement.blocker) lines.push(`卡点：${blockerCauseLabel(settlement.blocker.kind)}（${settlement.blocker.summary}）`);
+  if (settlement.reported) lines.push("（该回合已主动汇报过，此处只补回合结果）");
+  return lines.join("\n");
 }
 
 /** ES2022 lib 没有 Promise.withResolvers，运行时手动建一个。 */
@@ -252,13 +342,19 @@ export class TeamRuntime implements TeamService {
   private readonly teamDir: string;
   private readonly members = new Map<string, MemberRuntime>();
   private state: TeamState;
-  private readonly waiters = new Set<() => void>();
+  private readonly waiters = new Set<(input?: "user") => void>();
+  private readonly userWaiters = new Set<(input?: "user") => void>();
   private queue: Promise<unknown> = Promise.resolve();
   private snapshotCache: TeamSnapshot | undefined;
   private activityTimer?: ReturnType<typeof setTimeout>;
   private disposed = false;
   private messages: TeamMessageSummary[] = [];
   private messageSeq = 0;
+  /** 待 Lead 消费的结算队列（有界；持久副本在 Lead 日志里）。 */
+  private pendingSettlements: Array<{ seq: number; settlement: TeamMemberSettlement }> = [];
+  private settlementSeq = 0;
+  /** 每个调用者已消费到的结算序号（team_wait 不重复返回同一旧事件）。 */
+  private readonly settlementCursor = new Map<string, number>();
   private leadStatsCache?: {
     at: number;
     stats: { toolCalls: number; tokens: { total: number }; cost: number } | undefined;
@@ -281,10 +377,23 @@ export class TeamRuntime implements TeamService {
         // 日志是派生的：写失败不阻断会话打开，内存态仍可用。
       }
     }
+    // 回合号从 Lead 日志里的既有结算恢复：结算 id 是「成员id:回合号」，只从 1 起
+    // 数会跨重启重复（历史结算与新的混成一条）。
+    for (const entry of entries) {
+      if (entry.type !== "custom" || entry.customType !== TEAM_ENTRY_TYPE) continue;
+      const data = entry.data as { kind?: string; settlement?: { id?: string; memberName?: string } } | undefined;
+      if (data?.kind !== "settled" || typeof data.settlement?.id !== "string" || typeof data.settlement.memberName !== "string") continue;
+      const turnSeq = Number(data.settlement.id.slice(data.settlement.id.lastIndexOf(":") + 1));
+      if (!Number.isSafeInteger(turnSeq) || turnSeq <= 0) continue;
+      const record = this.state.members.find((member) => member.name === data.settlement!.memberName);
+      if (!record) continue;
+      const slot = this.members.get(record.id);
+      if (slot) slot.turnSeq = Math.max(slot.turnSeq, turnSeq);
+    }
     // 恢复已有成员的运行时槽位（不重新拉子会话；handle 留空，首次 send 时冷恢复）。
     // 漏掉这一步会让重启后的 active 成员在 activeMember() 里「运行时不存在」。
     for (const member of this.state.members) {
-      if (!this.members.has(member.id)) this.members.set(member.id, { record: member, running: false, steps: 0, recent: [] });
+      if (!this.members.has(member.id)) this.members.set(member.id, this.emptyMemberRuntime(member));
     }
   }
 
@@ -292,7 +401,7 @@ export class TeamRuntime implements TeamService {
 
   async spawn(
     membership: TeamMembership,
-    params: { name: string; description: string; prompt: string; subagent?: string },
+    params: { name: string; description: string; prompt: string; subagent?: string; taskId?: string },
     signal?: AbortSignal
   ): Promise<TeamMemberView> {
     this.assertNotDisposed();
@@ -311,6 +420,11 @@ export class TeamRuntime implements TeamService {
       if (!this.attach(reservation.member.id, created)) {
         created = undefined;
         throw new Error("成员会话未能挂载到团队运行时");
+      }
+      // 显式任务绑定（可选）：在首条 prompt 之前定好，成员一开跑就能被按任务停止。
+      if (params.taskId !== undefined) {
+        const bound = this.members.get(reservation.member.id);
+        if (bound) this.bindTask(bound, params.taskId);
       }
       // 所有权已转交 member.handle；失败路径不要再 dispose 第二次。
       created = undefined;
@@ -353,7 +467,7 @@ export class TeamRuntime implements TeamService {
     ];
   }
 
-  async send(membership: TeamMembership, target: string, text: string, signal?: AbortSignal): Promise<{ sent: true }> {
+  async send(membership: TeamMembership, target: string, text: string, signal?: AbortSignal, taskId?: string): Promise<{ sent: true }> {
     this.assertNotDisposed();
     this.assertMembership(membership);
     const name = String(target ?? "").trim();
@@ -366,6 +480,10 @@ export class TeamRuntime implements TeamService {
     }
     const senderLabel = membership.role === "lead" ? " Lead" : `团队成员「${membership.name}」`;
     if (name === "lead") {
+      // 本回合是否已主动汇报：结算据此去重正文（回合结果照常提供，不会被漏掉）。
+      const senderRecord = this.state.members.find((member) => member.name === membership.name);
+      const senderRuntime = senderRecord ? this.members.get(senderRecord.id) : undefined;
+      if (senderRuntime?.turn) senderRuntime.turn.reportedToLead = true;
       const delivery = this.deliverToLead(`来自${senderLabel}：\n${body}`, membership.name);
       void delivery.catch(() => undefined);
       await this.observeImmediate(delivery);
@@ -374,6 +492,7 @@ export class TeamRuntime implements TeamService {
       return { sent: true };
     }
     const member = this.activeMember(name);
+    if (taskId !== undefined) this.bindTask(member, taskId);
     const handle = await this.ensureLive(member, signal);
     member.running = true;
     member.lastError = undefined;
@@ -405,11 +524,21 @@ export class TeamRuntime implements TeamService {
     const activePeer = this.state.members.some((member) => {
       if (member.name === membership.name) return false;
       const status = this.statusOf(member, this.members.get(member.id));
-      return status === "running" || status === "provisioning";
+      return status === "running" || status === "provisioning" || status === "stopping";
     });
+    // 先结算「在开始等待之前就已经发生」的回合结束：漏掉这一步，成员在 Lead 调用
+    // team_wait 之前就结束时会静默丢失（用户看到的是一次白等）。游标保证不重复返回。
+    const fresh = this.drainSettlements(membership);
+    const approvals = this.pendingApprovals();
     if (!activePeer) {
-      return { timedOut: false, noProgress: { reason: "no-active-peer", message: TEAM_NO_ACTIVE_PEER_MESSAGE } };
+      return {
+        timedOut: false,
+        noProgress: { reason: "no-active-peer", message: TEAM_NO_ACTIVE_PEER_MESSAGE },
+        ...(fresh.length > 0 ? { settlements: fresh } : {}),
+        ...(approvals.length > 0 ? { pendingApprovals: approvals } : {})
+      };
     }
+    let userInput = false;
     const changed = await new Promise<boolean>((resolve, reject) => {
       let settled = false;
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -419,56 +548,85 @@ export class TeamRuntime implements TeamService {
         if (timer) clearTimeout(timer);
         signal.removeEventListener("abort", onAbort);
         this.waiters.delete(waiter);
+        this.userWaiters.delete(waiter);
         action();
       };
-      const waiter = (): void => finish(() => resolve(true));
+      const waiter = (input?: "user"): void => finish(() => {
+        if (input === "user") userInput = true;
+        resolve(true);
+      });
       const onAbort = (): void => finish(() => {
         const reason: unknown = signal.reason;
         reject(reason instanceof Error ? reason : new Error("team_wait 被中止"));
       });
       this.waiters.add(waiter);
+      this.userWaiters.add(waiter);
       timer = setTimeout(() => finish(() => resolve(false)), timeoutMs);
       timer.unref?.();
       signal.addEventListener("abort", onAbort, { once: true });
       if (signal.aborted) onAbort();
     });
-    return { timedOut: !changed };
+    // fresh（开始等待之前就已结束的回合）与 after（等待期间结束的回合）都要返回：
+    // 游标只在 drain 时前进，两段之间不会重叠，也不会重复。
+    const after = [...fresh, ...this.drainSettlements(membership)];
+    const stillPending = this.pendingApprovals();
+    return {
+      timedOut: !changed,
+      ...(after.length > 0 ? { settlements: after } : {}),
+      ...(stillPending.length > 0 ? { pendingApprovals: stillPending } : {}),
+      ...(userInput ? { userInput: true as const } : {})
+    };
   }
 
-  interrupt(membership: TeamMembership, target: string): { previousStatus: "running" | "inactive" } {
+  interrupt(membership: TeamMembership, target: { name?: string; taskId?: string }): TeamStopResult {
     this.assertNotDisposed();
     this.assertLead(membership);
-    const name = String(target ?? "").trim();
-    if (name === "lead") throw new Error("不能中断 Team Lead");
-    const member = this.activeMember(name);
-    if (!member.handle) return { previousStatus: "inactive" };
-    const previousStatus = member.running ? "running" : "inactive";
-    member.running = false;
-    // Pi 的 abort 不清 steering/followUp 队列：成员重新被唤醒时仍会收到排队消息，
-    // 任务归属也不因中断改变（与 dsh 的 keepInbox 语义一致）。
-    void member.handle.abort().catch((error: unknown) => {
-      member.lastError = errorText(error);
-    });
-    this.notify();
-    return { previousStatus };
+    const name = target.name?.trim();
+    const taskId = target.taskId?.trim();
+    if (Boolean(name) === Boolean(taskId)) throw new Error("停止成员需要 name 或 taskId（二选一）");
+    if (name) {
+      if (name === "lead") throw new Error("不能中断 Team Lead");
+      const member = this.activeMember(name);
+      return this.stopMember(member, { target: "member", value: name });
+    }
+    const task = this.state.tasks.find((candidate) => candidate.id === taskId && candidate.status !== "deleted");
+    if (!taskId) throw new Error("task_id 不能为空");
+    if (!task) return { target: "task", value: taskId!, status: "unknown", message: `任务 ${taskId} 不存在（或已删除）` };
+    if (task.status === "completed") {
+      return { target: "task", value: taskId!, status: "completed", taskId: taskId!, message: `任务 ${taskId} 已完成，不能按任务停止；如需停止成员请用 name` };
+    }
+    const bound = this.memberBoundToTask(taskId)
+      ?? [...this.members.values()].find((member) => member.taskBinding === taskId && (member.running || member.stopping));
+    if (!bound) {
+      return { target: "task", value: taskId!, status: "unbound", taskId: taskId!, message: `任务 ${taskId} 没有活跃的成员执行（未绑定或成员已空闲），不需要停止` };
+    }
+    return this.stopMember(bound, { target: "task", value: taskId!, taskId: taskId! });
   }
 
   hasRunningMembers(): boolean {
-    return [...this.members.values()].some((member) => member.running);
+    return [...this.members.values()].some((member) => member.running || member.stopping);
+  }
+
+  /** 成员的权限上限（创建时冻结；缺省 = 不设上限，沿用原会话访问策略）。 */
+  memberAccessModeCap(memberId: string): AccessMode | undefined {
+    return this.members.get(memberId)?.record.config.accessModeCap;
   }
 
   stopAll(): void {
     if (this.disposed) return;
     let changed = false;
     for (const member of this.members.values()) {
-      if (!member.running || !member.handle) continue;
-      member.running = false;
-      changed = true;
-      void member.handle.abort().catch((error: unknown) => {
-        member.lastError = errorText(error);
-      });
+      if (!member.running && !member.stopping) continue;
+      const result = this.stopMember(member, { target: "member", value: member.record.name });
+      if (result.status === "delivered") changed = true;
     }
     if (changed) this.notify();
+  }
+
+  /** 用户发新指令：只叫醒「等团队事件」的等待者，团队自身的事件（活动帧/结算）不走这条。 */
+  wakeForUserInput(): void {
+    if (this.disposed || this.userWaiters.size === 0) return;
+    for (const waiter of [...this.userWaiters]) waiter("user");
   }
 
   // ── 任务板 ──────────────────────────────────────────────────────────────
@@ -549,7 +707,8 @@ export class TeamRuntime implements TeamService {
         thinkingLevel: record.config.thinkingLevel,
         ...(task ? { taskId: task.id, taskSubject: task.subject } : {}),
         ...(activity ? { activity } : {}),
-        ...(member?.lastReport ? { lastReport: { ...member.lastReport } } : {})
+        ...(member?.lastReport ? { lastReport: { ...member.lastReport } } : {}),
+        ...(member?.settlement ? { settlement: { ...member.settlement } } : {})
       };
     });
     const tasks: TeamTaskSummary[] = [];
@@ -572,6 +731,7 @@ export class TeamRuntime implements TeamService {
     this.snapshotCache = {
       members,
       running: members.filter((member) => member.status === "running").length,
+      ...(members.some((member) => member.status === "stopping") ? { stopping: members.filter((member) => member.status === "stopping").length } : {}),
       tasks,
       lead: this.leadSummary(),
       ...(this.messages.length > 0 ? { messages: [...this.messages] } : {})
@@ -659,6 +819,7 @@ export class TeamRuntime implements TeamService {
     }
     for (const waiter of [...this.waiters]) waiter();
     this.waiters.clear();
+    this.userWaiters.clear();
     for (const member of this.members.values()) {
       if (member.idleTimer) clearTimeout(member.idleTimer);
       member.idleTimer = undefined;
@@ -667,6 +828,7 @@ export class TeamRuntime implements TeamService {
       member.unsubscribe?.();
       member.unsubscribe = undefined;
       member.running = false;
+      member.stopping = false;
       if (!handle) continue;
       // abort 可能卡在模型请求上；5s 后强制断开，别让一次退出拖住整个进程。
       const force = setTimeout(() => {
@@ -847,7 +1009,11 @@ export class TeamRuntime implements TeamService {
       const now = Date.now();
       if (event.type === "agent_settled") {
         member.running = false;
+        member.stopping = false;
         closeRunningSteps(member, event.aborted ? "aborted" : "done", now);
+        // 每成员每回合一条结算：写进 Lead 的会话日志（不进 LLM 上下文），并经
+        // team_wait / team_list / Lead 收件箱之一送达模型。
+        this.settleTurn(member, event.aborted ? "aborted" : "completed");
         this.notify();
         this.scheduleIdle(member);
         return;
@@ -856,6 +1022,12 @@ export class TeamRuntime implements TeamService {
         member.running = true;
         member.startedAt = now;
         member.lastActiveAt = now;
+        this.beginTurn(member);
+        // 停止已受理后又起了一个回合（排队消息的 triggerTurn）：不能把 stopping 清掉
+        // ——那等于静默撤销用户的停止；立刻再停一次，等这次 run 的 settled 再收口。
+        if (member.stopping) {
+          this.requestStop(member);
+        }
         this.notifyActivity();
         return;
       }
@@ -870,6 +1042,8 @@ export class TeamRuntime implements TeamService {
         };
         member.recent = [...member.recent, step].slice(-8);
         member.steps += 1;
+        // artifacts 只收「写」：read/grep 的路径不算产物，否则结算里全是噪声。
+        if (event.toolName === "write" || event.toolName === "edit") this.noteArtifact(member, event.args);
         member.currentTool = event.toolName;
         member.currentDetail = detail;
         member.lastActiveAt = now;
@@ -885,7 +1059,13 @@ export class TeamRuntime implements TeamService {
       }
       if (event.type === "message_end") {
         const report = assistantText(event.message);
-        if (report) member.lastReport = { text: clipTeamText(report), at: now };
+        if (report) {
+          member.lastReport = { text: clipTeamText(report), at: now };
+          if (member.turn) {
+            member.turn.lastReport = clipTeamText(report);
+            for (const path of mentionedArtifacts(report)) this.noteArtifactValue(member, path);
+          }
+        }
         this.notifyActivity();
         return;
       }
@@ -899,6 +1079,8 @@ export class TeamRuntime implements TeamService {
     if (!member) return;
     if (member.idleTimer) clearTimeout(member.idleTimer);
     member.idleTimer = undefined;
+    if (member.stopTimer) clearTimeout(member.stopTimer);
+    member.stopTimer = undefined;
     const handle = member.handle;
     member.handle = undefined;
     member.unsubscribe?.();
@@ -935,10 +1117,290 @@ export class TeamRuntime implements TeamService {
   private noteRunEnd(memberId: string, error?: unknown): void {
     const member = this.members.get(memberId);
     if (!member) return;
+    const hadTurn = member.turn !== undefined;
     member.running = false;
     if (error !== undefined) member.lastError = errorText(error);
+    // 失败与正常结算分开：outcome=failed 才带 error，且只在本回合真的跑过时结算
+    // （首条 prompt 被 preflight 拦下这类「还没开跑」的失败由 spawn 自己的 failed 记账）。
+    if (hadTurn) this.settleTurn(member, "failed", error);
     this.notify();
     this.scheduleIdle(member);
+  }
+
+  // ── 内部：回合记账 / 结算 ─────────────────────────────────────────────
+
+  private emptyMemberRuntime(record: TeamMemberRecord): MemberRuntime {
+    return { record, running: false, stopping: false, turnSeq: 0, steps: 0, recent: [] };
+  }
+
+  /** 开新回合：id 用 `成员id:回合号`（重启后从日志重算，不依赖内存）。 */
+  private beginTurn(member: MemberRuntime): void {
+    if (member.turn) return;
+    member.turn = {
+      id: `${member.record.id}:${member.turnSeq + 1}`,
+      startedAt: this.now(),
+      artifacts: new Set(),
+      reportedToLead: false,
+      pending: new Map()
+    };
+  }
+
+  private noteArtifact(member: MemberRuntime, args: unknown): void {
+    if (!args || typeof args !== "object") return;
+    const value = (args as Record<string, unknown>).path ?? (args as Record<string, unknown>).file_path ?? (args as Record<string, unknown>).filePath;
+    if (typeof value === "string") this.noteArtifactValue(member, value);
+  }
+
+  /** 只收工作区相对路径；绝对路径与 `..` 一律丢弃（结算要能直接交给别的成员复用）。 */
+  private noteArtifactValue(member: MemberRuntime, value: string): void {
+    const turn = member.turn;
+    if (!turn || turn.artifacts.size >= SETTLEMENT_ARTIFACT_LIMIT) return;
+    const normalized = value.trim().replaceAll("\\", "/").replace(/^\.\//u, "");
+    if (!normalized || normalized.startsWith("/") || /^[A-Za-z]:/u.test(normalized) || normalized.split("/").includes("..")) return;
+    if (normalized.length > 240) return;
+    turn.artifacts.add(normalized);
+  }
+
+  /** 成员当前在跑的任务 id（显式绑定的优先，其次任务板上 in_progress 的认领）。 */
+  private taskIdsFor(member: MemberRuntime): string[] {
+    const ids = new Set<string>();
+    if (member.taskBinding) ids.add(member.taskBinding);
+    for (const task of this.state.tasks) {
+      if (task.status === "in_progress" && task.ownerId === member.record.id) ids.add(task.id);
+    }
+    return [...ids];
+  }
+
+  /**
+   * 收口一个成员回合并产出结算：
+   * - outcome 区分 completed / failed / aborted（用户/Lead 停止不算失败）；
+   * - 已主动 team_send 给 Lead 的回合不再重复投递正文，但结算照常提供；
+   * - 结算写进 Lead 日志（CustomEntry，不进 LLM 上下文）并进待消费队列（team_wait 取）。
+   */
+  private settleTurn(member: MemberRuntime, outcome: TeamMemberSettlement["outcome"], error?: unknown): void {
+    const turn = member.turn;
+    // 没有回合就不结算：首条 prompt 在 Pi 的 preflight 阶段就失败时 running 可能已被
+    // 置 true，但那是「创建失败」（由 spawn 自己记账），不是一次跑到一半的回合。
+    if (!turn) return;
+    member.turn = undefined;
+    member.turnSeq += 1;
+    member.stopping = false;
+    const settlement: TeamMemberSettlement = {
+      id: `${member.record.id}:${member.turnSeq}`,
+      memberName: member.record.name,
+      outcome,
+      ...(turn?.lastReport ? { summary: turn.lastReport } : {}),
+      taskIds: this.taskIdsFor(member),
+      artifacts: [...(turn?.artifacts ?? [])].slice(0, SETTLEMENT_ARTIFACT_LIMIT),
+      ...(turn?.blocker ? { blocker: { ...turn.blocker } } : {}),
+      reported: turn?.reportedToLead === true,
+      ...(error === undefined ? {} : { error: errorText(error) }),
+      at: this.now()
+    };
+    member.settlement = settlement;
+    member.lastError = error === undefined ? member.lastError : errorText(error);
+    try {
+      appendTeamSettlement(this.leadSession, settlement);
+    } catch {
+      // 日志是派生的：写失败不阻断成员回合收尾，内存态与工具回执仍可用。
+    }
+    this.settlementSeq += 1;
+    this.pendingSettlements = [...this.pendingSettlements, { seq: this.settlementSeq, settlement }].slice(-SETTLEMENT_QUEUE_LIMIT);
+    // 已经主动汇报过的正常结算不再往 Lead 收件箱塞一条重复正文；失败/中止必须通知
+    // （成员自己没法汇报），卡点也在正文里点明，Lead 才知道该改派还是补授权。
+    if (!settlement.reported || outcome !== "completed" || settlement.blocker) {
+      const delivery = this.deliverToLead(settlementText(settlement), member.record.name);
+      void delivery.catch(() => undefined);
+    }
+    this.refreshTaskBinding(member);
+    this.snapshotCache = undefined;
+  }
+
+  /** 取走调用者尚未消费的结算（游标保证同一事件不重复返回）。 */
+  private drainSettlements(membership: TeamMembership): TeamMemberSettlement[] {
+    const cursor = this.settlementCursor.get(membership.name) ?? 0;
+    const fresh = this.pendingSettlements.filter((entry) => entry.seq > cursor);
+    if (fresh.length === 0) return [];
+    this.settlementCursor.set(membership.name, fresh[fresh.length - 1]!.seq);
+    // 只给「自己以外」的成员结算：Lead 不需要自己的结算（它没有成员回合）。
+    return fresh.map((entry) => entry.settlement).filter((settlement) => settlement.memberName !== membership.name);
+  }
+
+  /** 正在等审批的成员请求（team_wait 的事件之一，让 Lead 知道卡在哪一步）。 */
+  private pendingApprovals(): TeamPermissionNotice[] {
+    const notices: TeamPermissionNotice[] = [];
+    for (const member of this.members.values()) {
+      for (const notice of member.turn?.pending.values() ?? []) notices.push({ ...notice });
+    }
+    return notices;
+  }
+
+  /** 权限请求的收场回调：deny 的来源（用户拒绝 / 模式拦截 / 超时）分开记，取消归中止。 */
+  private notePermissionOutcome(member: MemberRuntime, settlement: PermissionSettlement & { request: TeamPermissionNotice }): void {
+    const turn = member.turn;
+    // 按请求 id 精确摘除：同一命令并发两次审批时，收场一条不能把另一条也抹掉。
+    if (turn && settlement.id) turn.pending.delete(settlement.id);
+    if (settlement.decision !== "deny") return;
+    // 取消 = 成员/团队被停止：结局是「中止」，不记成卡点（否则结算会误导 Lead 去补授权）。
+    if (settlement.cause === "cancel") return;
+    const kind = settlement.cause === "timeout"
+      ? "permission-timeout"
+      : settlement.cause === "mode"
+        ? "permission-mode"
+        : "permission-denied";
+    if (turn) turn.blocker = { kind, toolName: settlement.request.toolName, summary: settlement.request.summary };
+    // 权限被拦下不结束成员回合（工具以错误结果回到成员模型），但 Lead 应立即知道，
+    // 才能决定「换个审查员」还是「把命令验证交给有授权的会话」。
+    const delivery = this.deliverToLead(
+      `成员「${member.record.name}」的权限请求被拒（${blockerCauseLabel(kind)}）：${settlement.request.summary}。该成员这一回合会继续，但这一步没有执行；可以换成员/换任务，或把需要授权的那一步交给有权限的会话。`,
+      member.record.name
+    );
+    void delivery.catch(() => undefined);
+    this.notify();
+  }
+
+  /** 收到成员权限卡时的登记（team_wait 的 pendingApprovals 由此而来）。 */
+  private notePermissionPending(member: MemberRuntime, notice: TeamPermissionNotice, requestId: string): void {
+    if (!member.turn) return;
+    member.turn.pending.set(requestId, notice);
+    // 等审批是**可行动事件**（Lead 要决定换人还是补授权），不是活动帧：它要唤醒
+    // 等待中的 Lead，而工具步骤/消息流的刷新不允许唤醒（见 notifyActivity）。
+    this.notify();
+  }
+
+  // ── 内部：任务绑定 / 停止 ─────────────────────────────────────────────
+
+  /**
+   * 把任务板上的任务与这名成员的执行回合显式关联（可选）。
+   * 复用任务板归属与 CAS：pending+就绪 → 以成员身份认领；已由该成员认领 → 直接绑定；
+   * 已完成 / 他人认领 / 依赖未完成都明确报错。同一成员同一时间只绑一个任务。
+   */
+  private bindTask(member: MemberRuntime, taskId: string): void {
+    const id = taskId.trim();
+    if (!id) throw new Error("task_id 不能为空");
+    const task = this.state.tasks.find((candidate) => candidate.id === id && candidate.status !== "deleted");
+    if (!task) throw new Error(`任务不存在：${id}`);
+    if (task.status === "completed") throw new Error(`任务 ${id} 已完成，不能再绑定执行成员`);
+    if (member.taskBinding && member.taskBinding !== id && (member.running || member.stopping)) {
+      throw new Error(`成员「${member.record.name}」正在执行 ${member.taskBinding}；同一时间只能绑定一个任务，先等它结束或停止该成员`);
+    }
+    if (task.status === "in_progress" && task.ownerId !== member.record.id) {
+      const owner = ownerNameOf(this.state, this.leadSession.sessionId, task.ownerId) ?? "其他成员";
+      throw new Error(`任务 ${id} 已由「${owner}」认领；要改派请用 team_task_update 的 reassign`);
+    }
+    if (task.status === "pending") {
+      if (!taskReady(this.state, task)) throw new Error(`任务 ${id} 的依赖尚未全部完成，不能开始执行`);
+      const next = updateTask(this.state, this.leadSession.sessionId, this.taskCaller({ role: "teammate", name: member.record.name }), {
+        taskId: id,
+        expectedRevision: task.revision,
+        action: "claim"
+      });
+      this.state = { ...this.state, tasks: withTask(this.state, next) };
+      appendTeamTask(this.leadSession, next);
+    }
+    member.taskBinding = id;
+    this.snapshotCache = undefined;
+  }
+
+  /**
+   * 共享停止路径（单成员停止、「全部停止」、按任务停止都走它）：
+   * 受理即进入 stopping，清排队指令、取消该成员的待决权限与长期授权；`agent_settled`
+   * 或资源回收后才回到 inactive（结算 outcome=aborted）。重复停止幂等，不误停其他成员。
+   */
+  private stopMember(member: MemberRuntime, target: { target: "member" | "task"; value: string; taskId?: string }): TeamStopResult {
+    const base: Omit<TeamStopResult, "status" | "message"> = {
+      ...target,
+      memberName: member.record.name,
+      ...(member.taskBinding ? { taskId: member.taskBinding } : {})
+    };
+    if (!member.running && !member.stopping) {
+      return { ...base, status: "idle", message: `成员「${member.record.name}」当前没有活跃回合，不需要停止` };
+    }
+    if (member.stopping) {
+      // 已受理过：重发一次停止兜底（abort 可能被迟到的 run 复位），没有进行中的 run
+      // 时直接收口——不能让 stopping 只能靠销毁会话才解除。
+      this.requestStop(member);
+      return { ...base, status: "delivered", message: `已受理：成员「${member.record.name}」正在停止中，收到回合结束或资源回收后才算「已停止」` };
+    }
+    member.stopping = true;
+    this.clearMemberQueue(member);
+    member.turn?.pending.clear();
+    this.options.cancelMemberPermissions?.(member.record.id);
+    this.requestStop(member);
+    this.notify();
+    return { ...base, status: "delivered", message: `已受理：正在停止成员「${member.record.name}」，收到回合结束或资源回收后报告「已停止」` };
+  }
+
+  /**
+   * 发一次停止请求，并保证「停止受理」一定能收口：
+   * - 没有进行中的 run 时 Pi 的 abort 是空操作（不会发 agent_settled）→ 就地收口；
+   * - 有进行中的 run 时等 settled，另挂看门狗兜底（abort 卡住/事件丢失也不悬挂）。
+   * 重复调用是安全的：只会重发一次 abort。
+   */
+  private requestStop(member: MemberRuntime): void {
+    const handle = member.handle;
+    if (!handle) {
+      this.finishStoppedMember(member);
+      return;
+    }
+    const streaming = handle.isStreaming === true;
+    // Pi 的 abort 不清 steering/followUp 队列、也不撤任务归属；队列在 stopMember 里
+    // 显式清掉，任务归属与已完成依赖保留（Lead 可用既有 CAS reassign 改派）。
+    void handle.abort().catch((error: unknown) => {
+      member.lastError = errorText(error);
+      this.finishStoppedMember(member);
+    });
+    if (!streaming) {
+      // 没有进行中的 run：abort 不会产生 settled，直接按「已中止」收口。
+      this.finishStoppedMember(member);
+      return;
+    }
+    if (member.stopTimer) clearTimeout(member.stopTimer);
+    const timer = setTimeout(() => {
+      member.stopTimer = undefined;
+      if (this.disposed || !member.stopping) return;
+      member.lastError = member.lastError ?? "停止未在预期时间内收尾，已强制释放成员子会话";
+      this.finishStoppedMember(member);
+    }, TEAM_STOP_SETTLE_TIMEOUT_MS);
+    timer.unref?.();
+    member.stopTimer = timer;
+  }
+
+  /** 任务当前归属的成员（优先按任务板 ownerId，其次按执行绑定）。 */
+  private memberBoundToTask(taskId: string): MemberRuntime | undefined {
+    const task = this.state.tasks.find((candidate) => candidate.id === taskId);
+    const byOwner = task?.ownerId ? this.members.get(task.ownerId) : undefined;
+    if (byOwner && (byOwner.running || byOwner.stopping) && (byOwner.taskBinding === taskId || task?.ownerId === byOwner.record.id)) return byOwner;
+    return undefined;
+  }
+
+  /** 结算后清掉「已不再属于本成员」的任务绑定（任务被改派/完成后不再按旧绑定停人）。 */
+  private refreshTaskBinding(member: MemberRuntime): void {
+    if (!member.taskBinding) return;
+    const task = this.state.tasks.find((candidate) => candidate.id === member.taskBinding);
+    if (!task || task.status === "completed" || task.status === "deleted" || (task.ownerId !== undefined && task.ownerId !== member.record.id)) {
+      member.taskBinding = undefined;
+    }
+  }
+
+  /** 停止路径的兜底收口：abort 失败/未回 settled 时按「已中止」结算并释放子会话。 */
+  private finishStoppedMember(member: MemberRuntime): void {
+    if (member.stopTimer) clearTimeout(member.stopTimer);
+    member.stopTimer = undefined;
+    if (member.turn) this.settleTurn(member, "aborted");
+    member.running = false;
+    member.stopping = false;
+    this.detach(member.record.id);
+    this.notify();
+  }
+
+  /** 停止时清掉该成员排队的指令（防止取消后又收到旧任务）。 */
+  private clearMemberQueue(member: MemberRuntime): void {
+    try {
+      member.handle?.clearQueue?.();
+    } catch {
+      // 旧会话/测试替身没有 clearQueue：best-effort，abort 仍会结束当前回合。
+    }
   }
 
   // ── 内部：编制 / 子会话工厂 ─────────────────────────────────────────────
@@ -991,8 +1453,38 @@ export class TeamRuntime implements TeamService {
     return await this.defaultCreateChild(request);
   }
 
+  /**
+   * 成员的权限请求（defaultCreateChild 与单测共用）：把成员身份与两条回调接到
+   * `options.requestPermission` 上——待审批登记进回合（team_wait 能看到），收场按
+   * 原因记卡点并回报 Lead。工具层不感知这些细节。
+   */
+  memberPermissionRequest(
+    member: TeamMemberIdentity,
+    toolName: string,
+    args: Record<string, unknown>,
+    toolCallId: string
+  ): Promise<PermissionDecision> {
+    const hooks: TeamPermissionHooks = {
+      onPending: (notice) => {
+        const runtime = this.members.get(member.memberId);
+        if (runtime) this.notePermissionPending(runtime, notice, toolCallId);
+      },
+      onSettled: (settlement) => {
+        const runtime = this.members.get(member.memberId);
+        if (runtime) this.notePermissionOutcome(runtime, settlement);
+      }
+    };
+    return this.options.requestPermission(toolName, args, toolCallId, member, hooks);
+  }
+
   private async defaultCreateChild(request: TeamChildFactoryRequest): Promise<TeamChildCreated> {
     request.signal?.throwIfAborted();
+    // 成员身份（Lead 会话 + 不可复用的成员 id）：权限请求按它隔离授权、按它取消，
+    // 审批卡也能显示是谁在请求。id 取自 SessionManager（= 成员记录 id）。
+    const memberId = request.manager.getSessionId();
+    const member: TeamMemberIdentity = { memberId, memberName: request.name };
+    const requestForMember = (toolName: string, args: Record<string, unknown>, toolCallId: string): Promise<PermissionDecision> =>
+      this.memberPermissionRequest(member, toolName, args, toolCallId);
     const settingsManager = withCacheWarmingOff(SettingsManager.create(this.options.workspace, this.options.agentDir));
     const resourceLoader = new DefaultResourceLoader({
       cwd: this.options.workspace,
@@ -1002,7 +1494,7 @@ export class TeamRuntime implements TeamService {
       noSkills: true,
       noThemes: true,
       noContextFiles: true,
-      extensionFactories: [createChildPermissionExtension(this.options.requestPermission, "用户已在 PiDesktop 中拒绝该团队成员操作")],
+      extensionFactories: [createChildPermissionExtension(requestForMember, "用户已在 PiDesktop 中拒绝该团队成员操作")],
       systemPromptOverride: (base) => [base, request.config.systemPrompt, teamIdentityBlock(request.name)].filter(Boolean).join("\n\n")
     });
     await resourceLoader.reload();
@@ -1054,13 +1546,15 @@ export class TeamRuntime implements TeamService {
       ...(record.description ? { description: record.description } : {}),
       ...(record.config.subagentName ? { subagent: record.config.subagentName } : {}),
       model: `${record.config.model.provider}/${record.config.model.id}`,
-      diagnostics
+      diagnostics,
+      ...(memberRuntime?.settlement ? { settlement: { ...memberRuntime.settlement } } : {})
     };
   }
 
   private statusOf(record: TeamMemberRecord, member: MemberRuntime | undefined): TeamMemberSummary["status"] {
     if (record.phase === "failed") return "failed";
     if (record.phase === "provisioning") return "provisioning";
+    if (member?.stopping) return "stopping";
     return member?.running ? "running" : "inactive";
   }
 
@@ -1131,7 +1625,7 @@ export class TeamRuntime implements TeamService {
       : { ...this.state, members: this.state.members.map((member) => member.id === record.id ? record : member) };
     const runtime = this.members.get(record.id);
     if (runtime) runtime.record = record;
-    else this.members.set(record.id, { record, running: false, steps: 0, recent: [] });
+    else this.members.set(record.id, this.emptyMemberRuntime(record));
   }
 
   private childHasUserMessage(path: string): boolean {

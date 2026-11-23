@@ -9,9 +9,6 @@ export type AccessMode = "read-only" | "ask" | "workspace" | "full";
  */
 export type ThinkingLevelMap = Partial<Record<ThinkingLevel, string | null>>;
 
-import type { WorkflowCommand, WorkflowResult, WorkflowRunsSnapshot, WorkflowSummary } from "./workflow-protocol.js";
-export type { WorkflowCommand, WorkflowResult, WorkflowRunsSnapshot, WorkflowSummary, WorkflowRunSummary } from "./workflow-protocol.js";
-export type { WorkflowDefinition, WorkflowRun, WorkflowNode, WorkflowDiagnostic } from "./workflow.js";
 import type { DesignCanvasInfo, DesignNode, DesignOp } from "./design-schema.js";
 import type { MemoryLayer, MemorySnapshot } from "./memory.js";
 export type { MemoryLayer, MemorySnapshot, MemorySnapshotEntry } from "./memory.js";
@@ -211,16 +208,10 @@ export interface AgentProfile {
   skillOverrides?: Record<string, boolean>;
   /**
    * 角色级能力工具开关（与 skillOverrides 同构的 overlay）：合法键为 "browser"、
-   * "ssh"、"mcp:<serverName>"、"workflow"。
-   *
-   * 两套缺省语义：
-   * - "browser" / "ssh" / "mcp:<serverName>"：缺省（无字段/无键）= 启用，
-   *   false = 该角色禁用；存量角色升级后行为零变化。
-   * - "workflow"：缺省 = **关闭**（工作流工具默认 OFF），只有显式 true 才启用；
-   *   读写两端都必须保留 true/false（`normalizeToolOverrides` 白名单）。页面上的
-   *   工作流运行是用户动作，不受这个开关限制。
-   * 子代理与工作流节点会话不带这些工具族（child session 无 customTools 注入），
-   * 本字段对委派/节点执行链路无影响。
+   * "ssh"、"mcp:<serverName>"。缺省（无字段/无键）= 启用，false = 该角色禁用；
+   * 存量角色升级后行为零变化（读写两端都走 `normalizeToolOverrides` 白名单）。
+   * 子代理与团队成员会话不带这些工具族（child session 无 customTools 注入），
+   * 本字段对委派/团队执行链路无影响。
    */
   toolOverrides?: Record<string, boolean>;
   archived?: boolean;
@@ -2234,8 +2225,6 @@ export interface AutomationTask {
 }
 
 export interface ResourceCatalog {
-  /** 当前目录所属工作区及轻量工作流目录，全文按需读取。 */
-  workflows: { workspace?: string; items: WorkflowSummary[] };
   skills: SkillSummary[];
   commands: CommandSummary[];
   mcpServers: McpServerSummary[];
@@ -2469,6 +2458,42 @@ export interface TeamMemberReport {
   at: number;
 }
 
+/**
+ * 成员回合的卡点：权限请求被拒 / 被访问模式拦截 / 等待审批超时 / 仍在等审批。
+ * 取消（成员或团队被停止）不算卡点，归入结算的 aborted 结局。
+ */
+export interface TeamMemberBlocker {
+  kind: "permission-denied" | "permission-mode" | "permission-timeout" | "permission-pending";
+  toolName: string;
+  summary: string;
+}
+
+/**
+ * 成员一个回合的结算（每成员每回合一条，有界）：基于 `agent_settled` 派生，
+ * 写进 Lead 会话日志（`pidesktop-team` custom entry，kind=settled），并经
+ * `team_wait` 事件 / `team_list` 成员行 / Lead 收件箱消息三条路径之一送达模型。
+ * 成员回合结束与任务验收分别判定：这里只报告「回合怎么结束的」，不替 Lead 验收任务。
+ */
+export interface TeamMemberSettlement {
+  /** `memberId:turnSeq`，Lead 侧去重用。 */
+  id: string;
+  memberName: string;
+  /** completed = 模型自然结束；failed = 回合报错；aborted = 用户/Lead 停止或成员被中断。 */
+  outcome: "completed" | "failed" | "aborted";
+  /** 最后一条 assistant 文本（短结论，截断）；失败时为空。 */
+  summary?: string;
+  /** 成员当前 in_progress 的任务 id（已知任务）。 */
+  taskIds: string[];
+  /** 成员在结论里明确提到、或本回合用 write/edit 写出的工作区相对路径（去重、有界）。 */
+  artifacts: string[];
+  /** 卡点（见 TeamMemberBlocker）。 */
+  blocker?: TeamMemberBlocker;
+  /** 本回合成员是否已主动 team_send 给 Lead（已汇报的正文不再重复投递）。 */
+  reported: boolean;
+  error?: string;
+  at: number;
+}
+
 /** 团队通信记录（内存环形缓冲，重启清空；完整正文仍在会话日志里）。 */
 export interface TeamMessageSummary {
   id: string;
@@ -2492,7 +2517,8 @@ export interface TeamLeadSummary {
 
 export interface TeamMemberSummary {
   name: string;
-  status: "running" | "inactive" | "provisioning" | "failed";
+  /** stopping = 停止已受理、等待 agent_settled 或资源回收；只有收尾后才回到 inactive。 */
+  status: "running" | "inactive" | "provisioning" | "failed" | "stopping";
   description?: string;
   /** 命中的自定义子智能体定义名（inherit 模式缺省）。 */
   subagent?: string;
@@ -2511,12 +2537,29 @@ export interface TeamMemberSummary {
   activity?: TeamMemberActivity;
   /** 最近一次 assistant 文本（卡片「最新回报」用）。 */
   lastReport?: TeamMemberReport;
+  /** 最近一个回合的结算（旧会话缺省）。 */
+  settlement?: TeamMemberSettlement;
+}
+
+/** 停止某成员时的受理状态：只有 delivered 才代表本次请求被真正处理。 */
+export type TeamStopStatus = "delivered" | "idle" | "unbound" | "completed" | "unknown";
+
+/** 按成员名或任务 id 停止的受理回执（渲染端据此提示「正在停止 / 没活跃执行」）。 */
+export interface TeamStopResult {
+  target: "member" | "task";
+  value: string;
+  status: TeamStopStatus;
+  memberName?: string;
+  taskId?: string;
+  message: string;
 }
 
 /** 激活会话的团队快照：成员 + 运行计数 + 任务板 + 编队页数据。没有成员时缺省（渲染端不显示状态条）。 */
 export interface TeamSnapshot {
   members: TeamMemberSummary[];
   running: number;
+  /** 已受理停止、尚在收尾的成员数；停止按钮在 running + stopping 都为 0 时置灰。 */
+  stopping?: number;
   /** 共享任务板的只读视图；旧快照可能没有。 */
   tasks?: TeamTaskSummary[];
   /** Lead 的团队级汇总；旧快照没有。 */
@@ -2684,8 +2727,12 @@ export interface ExecutionPrincipal {
   parentSessionId?: string;
   agentId?: string;
   toolCallId?: string;
-  /** 工作流节点保持 owner 会话身份；授权仅在该次运行内有效。 */
-  workflow?: { runId: string; nodeId: string; attempt: number; nodeTitle: string };
+  /**
+   * 团队成员的权限请求：sessionId 仍是 owner（Lead）会话，审批卡按 owner 会话路由；
+   * memberId 是不可复用的成员子会话 id（名字永不复用，但 id 才是授权隔离键），
+   * 「本次会话允许」的长期授权按成员隔离，取消也可按成员精确取消。
+   */
+  team?: { leadSessionId: string; memberId: string; memberName: string };
 }
 
 export interface PermissionRequest {
@@ -2729,7 +2776,6 @@ export interface QuestionRequest {
 }
 
 export type RuntimeCommand =
-  | WorkflowCommand
   /** bundledSkillsDir / bundledSubagentsDir：随安装包分发的内置资产目录（
    * <安装目录>/skills 与 <安装目录>/subagents，dev 下为仓库 resources/ 下同名目录），
    * 由主进程解析（utility 进程无 Electron API）；缺省/不存在时该来源不参与扫描。
@@ -2779,12 +2825,12 @@ export type RuntimeCommand =
    *  只在 session.new 显式继承）。关掉只撤工具，不停止已创建的成员——成员状态条
    *  仍显示并提供「全部停止」。 */
   | { type: "session.teamMode"; enabled: boolean; sessionId?: string }
-  /** 停止本会话团队里所有正在跑的成员（只停当前回合，保留队列与任务归属）。 */
+  /** 停止本会话团队里所有正在跑的成员（只停当前回合，保留任务归属；排队指令与待审批一并清除）。 */
   | { type: "team.stopAll"; sessionId?: string }
   /** 用户以 Lead 身份给成员发消息（走 TeamRuntime.send，running 时步骤边界送达）。 */
   | { type: "team.send"; target: string; text: string; sessionId?: string }
-  /** 用户以 Lead 身份停止单个成员的当前回合（保留队列与任务归属）。 */
-  | { type: "team.interrupt"; name: string; sessionId?: string }
+  /** 停止一名成员，或停止某条任务绑定的成员（name / taskId 二选一）；受理后成员进入 stopping，收尾后回 inactive。 */
+  | { type: "team.interrupt"; name?: string; taskId?: string; sessionId?: string }
   | { type: "session.abort"; sessionId?: string }
   /** 任务面板按命令停止：只终止一条正在执行的 bash/powershell 调用（杀进程树），
    * 不中止整个会话——工具以错误结果收场供模型继续本轮。executionId 即
@@ -2982,8 +3028,6 @@ export type RuntimeCommand =
   | { type: "gallery.run"; id: string };
 
 export type RuntimeMessage =
-  | { type: "workflow.result"; result: WorkflowResult }
-  | { type: "workflow.runs"; snapshot: WorkflowRunsSnapshot }
   | { type: "catalog"; models: ModelOption[]; providers: ProviderOption[] }
   | { type: "custom-models"; providerId: string; models: ProviderModelSettings[] }
   | { type: "custom-model-error"; providerId: string; message: string }
@@ -3027,6 +3071,8 @@ export type RuntimeMessage =
   | { type: "resources"; resources: ResourceCatalog }
   /** Skill 商店结果（响应 skill-store.* 命令；requestId 与请求原样带回，见 shared/skill-store.ts）。 */
   | { type: "skill-store-result"; result: SkillStoreResult }
+  /** 停止受理回执（按成员或按任务）：delivered = 受理进入 stopping，其余为明确拒绝原因。 */
+  | { type: "team.stop-result"; result: TeamStopResult; sessionId?: string }
   | { type: "todos"; todos: Todo[] }
   /** 全局快捷键呼出命令面板（主进程 push）；渲染端只负责把面板打开。 */
   | { type: "palette.open" }
@@ -3151,7 +3197,6 @@ export interface DesktopBootstrap {
   /** 渲染端重载后仍需展示的待决提问（主进程镜像；空/缺省 = 没有挂起的面板）。 */
   questions?: QuestionRequest[];
   /** 待决权限请求镜像，供 renderer 重载后恢复。 */
-  workflowRuns?: WorkflowRunsSnapshot;
   permissions?: PermissionRequest[];
   /** IM 通道当前状态（主进程网关快照；缺省 = 没有网关或未初始化）。 */
   imStatus?: ImStatus;

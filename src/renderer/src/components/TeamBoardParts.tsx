@@ -15,7 +15,7 @@ import {
   Terminal
 } from "lucide-react";
 import type { ReactNode } from "react";
-import type { ChatMessage, TeamMemberActivity, TeamMemberActivityStep, TeamMemberSummary, TeamTaskSummary } from "../../../shared/protocol";
+import type { ChatMessage, TeamMemberActivity, TeamMemberActivityStep, TeamMemberSettlement, TeamMemberSummary, TeamTaskSummary } from "../../../shared/protocol";
 import { thinkingLevelLabels, toolLabel } from "../../../shared/locale";
 import type { Artifact } from "../lib/content";
 import { TranscriptTimeline } from "./DelegationTranscript";
@@ -57,6 +57,7 @@ export function statusLabel(status: TeamMemberSummary["status"]): string {
     case "inactive": return "空闲";
     case "provisioning": return "创建中";
     case "failed": return "失败";
+    case "stopping": return "正在停止";
   }
 }
 
@@ -64,6 +65,30 @@ export function taskStatusLabel(task: TeamTaskSummary): string {
   if (task.status === "in_progress") return "进行中";
   if (task.status === "completed") return "已完成";
   return task.ready ? "就绪" : "阻塞";
+}
+
+/** 结算里卡点的中文短句（与主进程 blockerCauseLabel 同口径）。 */
+export function blockerLabel(kind: NonNullable<TeamMemberSettlement["blocker"]>["kind"]): string {
+  switch (kind) {
+    case "permission-denied": return "权限被拒";
+    case "permission-mode": return "访问模式拦截";
+    case "permission-timeout": return "等审批超时";
+    case "permission-pending": return "等待审批";
+  }
+}
+
+/** 成员最近一个回合的结算行：结局 + 卡点（看板与详情共用）。 */
+export function SettlementLine({ settlement }: { settlement?: TeamMemberSettlement }): ReactNode {
+  if (!settlement) return null;
+  const outcome = settlement.outcome === "completed" ? "已完成" : settlement.outcome === "failed" ? "失败" : "已中止";
+  return (
+    <p className={`team-settlement ${settlement.outcome}`}>
+      <span className="team-settlement-outcome">上回合{outcome}</span>
+      {settlement.blocker && <span className="team-settlement-blocker">{blockerLabel(settlement.blocker.kind)}：{settlement.blocker.summary}</span>}
+      {settlement.summary && <span className="team-settlement-summary" title={settlement.summary}>{settlement.summary}</span>}
+      {settlement.artifacts.length > 0 && <span className="team-settlement-artifacts">产物 {settlement.artifacts.length}</span>}
+    </p>
+  );
 }
 
 function toolIcon(tool: string | undefined): ReactNode {
@@ -215,6 +240,7 @@ export function MemberRow({ member, selected, now, onSelect }: {
         <span className="team-member-now">
           {activity?.currentTool ? toolIcon(activity.currentTool) : <ChevronRight size={11} />}
           <span title={current}>{current}</span>
+          {member.settlement?.blocker && <span className="team-member-blocker" title={member.settlement.blocker.summary}>{blockerLabel(member.settlement.blocker.kind)}</span>}
         </span>
       </span>
       <ChevronRight className="team-member-chevron" size={12} />
@@ -275,6 +301,7 @@ export function TeamMemberDetail({
         {selected.taskSubject && <span className="team-detail-task"><Layers size={10} />{selected.taskId ? `${selected.taskId} ` : ""}{selected.taskSubject}</span>}
       </div>
       {selected.error && <p className="team-detail-error"><AlertTriangle size={11} />{selected.error}</p>}
+      <SettlementLine settlement={selected.settlement} />
       {full ? (
         <div className="team-transcript-panel">
           {transcript && transcript.length > 0
@@ -290,7 +317,7 @@ export function TeamMemberDetail({
         <button className="team-detail-action" type="button" onClick={onOpenTranscript} disabled={!selected.sessionFile}>
           <ScrollText size={11} />查看完整记录
         </button>
-        <button className="team-detail-action danger" type="button" onClick={onStop} disabled={selected.status !== "running"}>
+        <button className="team-detail-action danger" type="button" onClick={onStop} disabled={selected.status !== "running" && selected.status !== "stopping"}>
           <CircleStop size={11} />停止成员
         </button>
       </div>

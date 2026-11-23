@@ -421,9 +421,6 @@ flowchart LR
 };
 
 const demoResources: ResourceCatalog = {
-  // 工作流目录在 demo 里给空：浏览器的离线 API 没有工作流存储（workflow.* 命令
-  // 只在 Electron 里有人应答），填几条假条目只会让「点了打不开」看起来像 bug。
-  workflows: { items: [] },
   // 技能刻意给到 8 个以上：角色页的 Skill 搜索框在 >8 时才渲染，只放 2–3 个的话
   // demo（渲染端唯一目视验证途径）永远跑不到这条分支，真机上 22 个 Skill 才暴露。
   skills: [

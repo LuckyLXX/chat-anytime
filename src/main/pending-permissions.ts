@@ -11,7 +11,7 @@ export function previewPermissionRequest(request: PermissionRequest): Permission
   const args = bytes.byteLength > MAX_PERMISSION_PREVIEW_BYTES
     ? `${bytes.subarray(0, MAX_PERMISSION_PREVIEW_BYTES).toString("utf8")}\n（参数预览已截断）`
     : JSON.parse(serialized) as unknown;
-  return { ...request, principal: { ...request.principal, ...(request.principal.workflow ? { workflow: { ...request.principal.workflow } } : {}) }, args };
+  return { ...request, args };
 }
 
 /** main 只镜像待决展示，不参与 broker 的真实裁决。 */

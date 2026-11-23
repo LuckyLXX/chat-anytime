@@ -18,8 +18,8 @@ interface PermissionDialogProps {
 }
 
 export function PermissionDialog({ request, sessionTitle }: PermissionDialogProps): ReactNode {
-  const workflow = request.principal.workflow;
-  const principalLabel = workflow ? `工作流 · ${workflow.nodeTitle} · 第 ${workflow.attempt} 轮` : permissionPrincipalLabel(request.principal.kind);
+  const team = request.principal.team;
+  const principalLabel = team ? `团队成员「${team.memberName}」` : permissionPrincipalLabel(request.principal.kind);
   const contextLabel = [principalLabel, sessionTitle, request.summary].filter(Boolean).join(" · ");
 
   async function resolve(decision: PermissionDecision): Promise<void> {
@@ -38,7 +38,7 @@ export function PermissionDialog({ request, sessionTitle }: PermissionDialogProp
         <footer>
           <button className="danger-button" type="button" onClick={() => void resolve("deny")}>拒绝</button>
           <button className="secondary-button" type="button" onClick={() => void resolve("allow-once")}>仅允许一次</button>
-          <button className="primary-button" type="button" onClick={() => void resolve("allow-session")}>{workflow ? "本次工作流允许" : "本次会话允许"}</button>
+          <button className="primary-button" type="button" onClick={() => void resolve("allow-session")}>{team ? "本会话内允许该成员" : "本次会话允许"}</button>
         </footer>
       </div>
     </div>

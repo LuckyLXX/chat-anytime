@@ -10,11 +10,12 @@ import {
   SettingsManager,
   type AgentSession
 } from "@earendil-works/pi-coding-agent";
-import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from "@earendil-works/pi-ai";
 import type { AgentProfile, ThinkingLevel } from "../shared/protocol.js";
+import type { TeamMemberSettlement } from "../shared/protocol.js";
 import type { PersistedSessionEntry } from "./session-history.js";
 import { TEAM_ENTRY_TYPE } from "./team-store.js";
-import { TeamRuntime } from "./team-runtime.js";
+import { TeamRuntime, type TeamRuntimeOptions } from "./team-runtime.js";
 
 /**
  * 真实 AgentSession 上的团队链路冒烟（零网络 faux provider）：
@@ -71,7 +72,7 @@ async function makeLead(): Promise<{ lead: AgentSession; faux: ReturnType<typeof
   return { lead, faux, agentDir, root };
 }
 
-function makeRuntime(lead: AgentSession, root: string, agentDir: string): TeamRuntime {
+function makeRuntime(lead: AgentSession, root: string, agentDir: string, overrides: Partial<TeamRuntimeOptions> = {}): TeamRuntime {
   return new TeamRuntime({
     leadSession: lead,
     workspace: root,
@@ -80,8 +81,16 @@ function makeRuntime(lead: AgentSession, root: string, agentDir: string): TeamRu
     modelRuntime: lead.modelRuntime,
     getThinkingLevel: () => "medium" as ThinkingLevel,
     requestPermission: () => Promise.resolve("allow-once"),
-    onChange: () => undefined
+    onChange: () => undefined,
+    ...overrides
   });
+}
+
+function settlements(lead: AgentSession): TeamMemberSettlement[] {
+  const entries = lead.sessionManager.getBranch() as unknown as PersistedSessionEntry[];
+  return entries
+    .filter((entry) => entry.type === "custom" && entry.customType === TEAM_ENTRY_TYPE && (entry.data as { kind?: string })?.kind === "settled")
+    .map((entry) => (entry.data as { settlement: TeamMemberSettlement }).settlement);
 }
 
 function activeMemberFile(lead: AgentSession): string {
@@ -149,4 +158,69 @@ describe("team MVP over a real AgentSession", () => {
       lead2.dispose();
     }
   }, 20_000);
+
+  /**
+   * 2026-11-23 的 SSH 真实场景（这次决定下线工作流的直接原因）：
+   * 开发成员留下产物并结算 → 审查成员撞上权限拦截 → Lead 拿到「谁 + 为什么」→
+   * 复用产物改派审查 → 前面的开发保持完成。这里用真实 Pi 会话 + faux provider 走一遍，
+   * 权限门用替身按脚本裁决（真实 broker 的行为在 permission-broker.test 里钉住）。
+   */
+  it("hands开发成员, 权限卡点与改派都通过结算与权限反馈回到 Lead", async () => {
+    const { lead, faux, agentDir, root } = await makeLead();
+    const asked: { toolName: string; memberName: string }[] = [];
+    const runtime = makeRuntime(lead, root, agentDir, {
+      // 与 pi-runtime 的真实接线同构：弹卡（onPending）→ 收场（onSettled）；
+      // 只在审查成员请求命令执行时拒绝（真实场景：只读审查员 bash 被拒）。
+      requestPermission: (toolName, _args, _toolCallId, member, hooks) => {
+        asked.push({ toolName, memberName: member.memberName });
+        const request = { memberName: member.memberName, toolName, summary: toolName };
+        const decision = member.memberName === "reviewer" && toolName === "bash" ? "deny" : "allow-once";
+        hooks.onPending(request);
+        hooks.onSettled({ id: "call-bash", decision, cause: decision === "deny" ? "user" : "mode", request });
+        return Promise.resolve(decision);
+      }
+    });
+    try {
+      // ① 开发成员留下产物并结算。
+      faux.setResponses([
+        fauxAssistantMessage([
+          fauxText("开发完成：改完 src/ssh/terminal.ts"),
+          fauxToolCall("write", { path: "src/ssh/terminal.ts", content: "// x" })
+        ], { stopReason: "toolUse" }),
+        fauxAssistantMessage("已完成 SSH 终端修复")
+      ]);
+      await runtime.spawn({ role: "lead", name: "lead" }, { name: "builder", description: "实现修复", prompt: "改 SSH 终端选区" });
+      await waitFor(() => settlements(lead).some((settlement) => settlement.memberName === "builder"));
+
+      const dev = settlements(lead).filter((settlement) => settlement.memberName === "builder").at(-1)!;
+      expect(dev.outcome).toBe("completed");
+      // 结算里的短结论是「本回合最后一条 assistant 文本」（工具轮之后的收尾话术）。
+      expect(dev.summary).toContain("已完成 SSH 终端修复");
+      expect(dev.artifacts).toContain("src/ssh/terminal.ts");
+
+      // ② 审查成员撞上权限拦截：Lead 拿到成员名与原因。
+      faux.setResponses([
+        fauxAssistantMessage([
+          fauxText("跑测试确认"),
+          fauxToolCall("bash", { command: "npm test" })
+        ], { stopReason: "toolUse" }),
+        fauxAssistantMessage("测试被权限拦截，未能验证")
+      ]);
+      await runtime.spawn({ role: "lead", name: "lead" }, { name: "reviewer", description: "只读审查", prompt: "审查 SSH 改动" });
+      await waitFor(() => settlements(lead).some((settlement) => settlement.memberName === "reviewer"));
+      const review = settlements(lead).filter((settlement) => settlement.memberName === "reviewer").at(-1)!;
+      expect(asked.some((entry) => entry.memberName === "reviewer" && entry.toolName === "bash")).toBe(true);
+      expect(review.blocker).toMatchObject({ kind: "permission-denied", toolName: "bash" });
+      // 开发成员的结算不受影响（不同回合、不同成员），任务验收由 Lead 另判。
+      expect(settlements(lead).filter((settlement) => settlement.memberName === "builder")).toHaveLength(1);
+      // Lead 侧能通过 team_list 看到两人的结算（轻量结果通道）。
+      const rows = runtime.list({ role: "lead", name: "lead" });
+      expect(rows.find((row) => row.target === "reviewer")?.settlement?.blocker?.toolName).toBe("bash");
+      expect(rows.find((row) => row.target === "builder")?.settlement?.artifacts).toContain("src/ssh/terminal.ts");
+    } finally {
+      runtime.dispose();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      lead.dispose();
+    }
+  }, 40_000);
 });

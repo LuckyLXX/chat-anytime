@@ -4,9 +4,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession, AgentSessionEvent, AgentSessionEventListener } from "@earendil-works/pi-coding-agent";
-import type { AgentProfile, ThinkingLevel } from "../shared/protocol.js";
+import type { AgentProfile, TeamMemberSettlement, ThinkingLevel } from "../shared/protocol.js";
 import type { PersistedSessionEntry } from "./session-history.js";
 import { TEAM_ENTRY_TYPE, TEAM_IDLE_DISPOSE_MS, type TeamMemberRecord, type TeamTaskRecord } from "./team-store.js";
+import type { PermissionSettlement } from "./permission-broker.js";
+import type { TeamPermissionNotice } from "./team-contract.js";
 import { TeamRuntime, type TeamChildCreated, type TeamChildFactory, type TeamChildSession, type TeamRuntimeOptions } from "./team-runtime.js";
 
 const temporaryDirectories: string[] = [];
@@ -42,6 +44,7 @@ interface FakeLead {
   delivered: { message: unknown; options: unknown }[];
   stats: { toolCalls: number; tokens: { total: number }; cost: number };
   context: { percent: number | null } | undefined;
+  streaming: boolean;
 }
 
 function fakeLead(branch: PersistedSessionEntry[] = [], streaming = false): FakeLead {
@@ -49,9 +52,17 @@ function fakeLead(branch: PersistedSessionEntry[] = [], streaming = false): Fake
   const delivered: { message: unknown; options: unknown }[] = [];
   const stats = { toolCalls: 7, tokens: { total: 12_345 }, cost: 0.42 };
   const context: { percent: number | null } | undefined = { percent: 33 };
+  const lead: FakeLead = {
+    entries,
+    delivered,
+    stats,
+    context,
+    streaming,
+    session: undefined as unknown as AgentSession
+  };
   const session = {
     sessionId: LEAD,
-    isStreaming: streaming,
+    get isStreaming() { return lead.streaming; },
     model: { provider: "p", id: "m" },
     sessionManager: {
       getBranch: () => entries,
@@ -68,7 +79,8 @@ function fakeLead(branch: PersistedSessionEntry[] = [], streaming = false): Fake
     getSessionStats: () => ({ ...stats, tokens: { ...stats.tokens } }),
     getContextUsage: () => (context ? { ...context } : undefined)
   };
-  return { session: session as unknown as AgentSession, entries, delivered, stats, context };
+  lead.session = session as unknown as AgentSession;
+  return lead;
 }
 
 class FakeChild implements TeamChildSession {
@@ -77,6 +89,7 @@ class FakeChild implements TeamChildSession {
   custom: { message: { customType: string; content: { type: string; text: string }[]; details?: unknown }; options?: unknown }[] = [];
   disposed = false;
   aborted = false;
+  queueCleared = false;
   failSend = false;
   private listeners = new Set<AgentSessionEventListener>();
   stats: { toolCalls: number; tokens: { total: number }; cost: number } = { toolCalls: 0, tokens: { total: 0 }, cost: 0 };
@@ -92,7 +105,7 @@ class FakeChild implements TeamChildSession {
   }
 
   sendCustomMessage(
-    message: { customType: string; content: { type: "text"; text: string }[]; display: boolean; details?: unknown },
+    message: { customType: string; content: { type: string; text: string }[]; display: boolean; details?: unknown },
     options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" }
   ): Promise<void> {
     if (this.failSend) return Promise.reject(new Error("模型不可用"));
@@ -104,8 +117,13 @@ class FakeChild implements TeamChildSession {
   abort(): Promise<void> {
     this.aborted = true;
     this.isStreaming = false;
-    this.emit("agent_settled");
+    // 与 Pi 一致：abort 后的收尾事件带 aborted=true（结算据此归类「已中止」）。
+    this.emit({ type: "agent_settled", aborted: true });
     return Promise.resolve();
+  }
+
+  clearQueue(): void {
+    this.queueCleared = true;
   }
 
   dispose(): void {
@@ -141,11 +159,18 @@ interface Harness {
   lead: FakeLead;
   created: FakeChild[];
   options: TeamRuntimeOptions;
+  permissionCalls: { toolName: string; member: { memberId: string; memberName: string }; hooks: unknown }[];
+  /** 运行时注入给权限门的两条回调（用例据此模拟「卡片发出 / 拒绝 / 超时 / 取消」）。 */
+  pendingHandler?: (notice: TeamPermissionNotice) => void;
+  settledHandler?: (settlement: PermissionSettlement & { request: TeamPermissionNotice }) => void;
+  cancelledMembers: string[];
 }
 
 function harness(branch: PersistedSessionEntry[] = [], overrides: Partial<TeamRuntimeOptions> = {}): Harness {
   const lead = fakeLead(branch);
   const created: FakeChild[] = [];
+  const permissionCalls: Harness["permissionCalls"] = [];
+  const cancelledMembers: string[] = [];
   const factory: TeamChildFactory = async (request) => {
     // 让子会话文件真实存在，冷恢复（SessionManager.open）才能工作。
     const file = request.manager.getSessionFile();
@@ -163,6 +188,14 @@ function harness(branch: PersistedSessionEntry[] = [], overrides: Partial<TeamRu
   const workspace = join(root, "workspace");
   const agentDir = join(root, "agent");
   mkdirSync(workspace, { recursive: true });
+  const result: Harness = {
+    runtime: undefined as unknown as TeamRuntime,
+    lead,
+    created,
+    options: undefined as unknown as TeamRuntimeOptions,
+    permissionCalls,
+    cancelledMembers
+  };
   const options: TeamRuntimeOptions = {
     leadSession: lead.session,
     workspace,
@@ -170,12 +203,20 @@ function harness(branch: PersistedSessionEntry[] = [], overrides: Partial<TeamRu
     agent: agentProfile(),
     modelRuntime: {} as never,
     getThinkingLevel: () => "medium" as ThinkingLevel,
-    requestPermission: () => Promise.resolve("allow-once"),
+    requestPermission: (toolName, _args, _toolCallId, member, hooks) => {
+      permissionCalls.push({ toolName, member, hooks });
+      result.pendingHandler = hooks.onPending;
+      result.settledHandler = hooks.onSettled;
+      return Promise.resolve("allow-once");
+    },
+    cancelMemberPermissions: (memberId) => { cancelledMembers.push(memberId); },
     onChange: () => undefined,
     createChildSession: factory,
     ...overrides
   };
-  return { runtime: new TeamRuntime(options), lead, created, options };
+  result.runtime = new TeamRuntime(options);
+  result.options = options;
+  return result;
 }
 
 function memberRecord(overrides: Partial<TeamMemberRecord> = {}): TeamMemberRecord {
@@ -204,6 +245,13 @@ function memberEntry(record: TeamMemberRecord): PersistedSessionEntry {
 
 function taskEntry(task: TeamTaskRecord): PersistedSessionEntry {
   return { id: `e-${task.id}-${task.revision}`, type: "custom", customType: TEAM_ENTRY_TYPE, data: { kind: "task", task } };
+}
+
+/** Lead 日志里的结算条目（durable 通道）。 */
+function settlementEntries(lead: FakeLead): TeamMemberSettlement[] {
+  return lead.entries
+    .filter((entry) => entry.type === "custom" && entry.customType === TEAM_ENTRY_TYPE && (entry.data as { kind?: string }).kind === "settled")
+    .map((entry) => (entry.data as { settlement: TeamMemberSettlement }).settlement);
 }
 
 describe("spawn", () => {
@@ -349,7 +397,7 @@ describe("wait / interrupt / stopAll", () => {
     await h.runtime.spawn(leadMembership, { name: "reviewer", description: "x", prompt: "p" });
     const waiting = h.runtime.wait(leadMembership, 10_000, new AbortController().signal);
     await h.runtime.createTask(leadMembership, { subject: "s", description: "d" });
-    await expect(waiting).resolves.toEqual({ timedOut: false });
+    await expect(waiting).resolves.toMatchObject({ timedOut: false });
   });
 
   it("times out and rejects on abort", async () => {
@@ -381,14 +429,24 @@ describe("wait / interrupt / stopAll", () => {
     await expect(h.runtime.send(leadMembership, "reviewer", "hi")).rejects.toThrow(/模型不可用/u);
   });
 
-  it("interrupts a teammate without clearing queued messages, and stopAll aborts every running member", async () => {
+  it("stops a teammate by name with an accepted receipt, and stopAll stops every running member", async () => {
     const h = harness();
     await h.runtime.spawn(leadMembership, { name: "reviewer", description: "x", prompt: "p" });
     const child = h.created[0]!;
-    expect(h.runtime.interrupt(leadMembership, "reviewer")).toEqual({ previousStatus: "running" });
+    expect(h.runtime.interrupt(leadMembership, { name: "reviewer" })).toMatchObject({
+      target: "member",
+      value: "reviewer",
+      memberName: "reviewer",
+      status: "delivered"
+    });
+    // 受理后进入 stopping，迟到的 agent_settled 才把它落回 inactive。
     expect(child.aborted).toBe(true);
-    expect(() => h.runtime.interrupt({ role: "teammate", name: "reviewer" }, "reviewer")).toThrow(/只有 Team Lead/u);
-    expect(() => h.runtime.interrupt(leadMembership, "lead")).toThrow(/不能中断 Team Lead/u);
+    expect(h.runtime.snapshot().members[0]?.status).toBe("inactive");
+    expect(() => h.runtime.interrupt({ role: "teammate", name: "reviewer" }, { name: "reviewer" })).toThrow(/只有 Team Lead/u);
+    expect(() => h.runtime.interrupt(leadMembership, { name: "lead" })).toThrow(/不能中断 Team Lead/u);
+    // 二选一是硬约束：都不给或都给都拒绝。
+    expect(() => h.runtime.interrupt(leadMembership, {})).toThrow(/二选一/u);
+    expect(() => h.runtime.interrupt(leadMembership, { name: "reviewer", taskId: "task-1" })).toThrow(/二选一/u);
 
     await h.runtime.spawn(leadMembership, { name: "explorer", description: "x", prompt: "p" });
     const second = h.created[1]!;
@@ -534,5 +592,302 @@ describe("formation snapshot data", () => {
     vi.setSystemTime(1_001_001);
     child.emit({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "进展 2" }] } });
     expect(h.runtime.snapshot().lead?.tokens).toBe(99_999);
+  });
+});
+
+describe("settlements delivered to the Lead", () => {
+  it("writes one bounded settlement per member turn and pushes it to the Lead inbox", async () => {
+    const h = harness();
+    await h.runtime.spawn(leadMembership, { name: "reviewer", description: "x", prompt: "p" });
+    const child = h.created[0]!;
+    child.emit({ type: "agent_start" });
+    child.emit({ type: "tool_execution_start", toolCallId: "w1", toolName: "write", args: { path: "src/review/report.md" } });
+    child.emit({ type: "tool_execution_end", toolCallId: "w1", toolName: "write", result: {}, isError: false });
+    child.emit({
+      type: "message_end",
+      message: { role: "assistant", content: [{ type: "text", text: "审查完成：见 src/review/report.md" }] }
+    });
+    child.emit({ type: "agent_settled" });
+
+    const settled = settlementEntries(h.lead);
+    expect(settled).toHaveLength(1);
+    expect(settled[0]).toMatchObject({
+      memberName: "reviewer",
+      outcome: "completed",
+      reported: false,
+      artifacts: ["src/review/report.md"]
+    });
+    expect(settled[0]!.summary).toContain("审查完成");
+    // 快照与 team_list 都带同一条结算（轻量、可直接展示）。
+    expect(h.runtime.snapshot().members[0]?.settlement).toMatchObject({ outcome: "completed" });
+    expect(h.runtime.list(leadMembership).find((row) => row.target === "reviewer")?.settlement).toMatchObject({ outcome: "completed" });
+    // Lead 空闲：结算进收件箱但不自动开回合（triggerTurn:false）。
+    const delivery = h.lead.delivered.at(-1);
+    expect(delivery?.options).toEqual({ triggerTurn: false });
+    expect(JSON.stringify(delivery?.message)).toContain("成员「reviewer」回合结束");
+  });
+
+  it("de-duplicates the body when the member already reported to the Lead, but still provides the result", async () => {
+    const h = harness();
+    await h.runtime.spawn(leadMembership, { name: "reviewer", description: "x", prompt: "p" });
+    const child = h.created[0]!;
+    child.emit({ type: "agent_start" });
+    await h.runtime.send({ role: "teammate", name: "reviewer" }, "lead", "A 做完了");
+    const beforeTurnEnd = h.lead.delivered.length;
+    child.emit({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "A 做完了" }] } });
+    child.emit({ type: "agent_settled" });
+
+    const settled = settlementEntries(h.lead);
+    expect(settled[0]).toMatchObject({ reported: true, outcome: "completed" });
+    // 已汇报 → 不再往 Lead 收件箱塞第二条重复正文。
+    expect(h.lead.delivered).toHaveLength(beforeTurnEnd);
+    // 但结算本身照常可取。
+    expect(h.runtime.list(leadMembership).find((row) => row.target === "reviewer")?.settlement?.summary).toBe("A 做完了");
+  });
+
+  it("separates failed / aborted from completed and never counts a stop as a failure", async () => {
+    const h = harness();
+    await h.runtime.spawn(leadMembership, { name: "reviewer", description: "x", prompt: "p" });
+    const child = h.created[0]!;
+    child.emit({ type: "agent_start" });
+    h.runtime.stopAll();
+    child.emit({ type: "agent_settled", aborted: true });
+    expect(settlementEntries(h.lead).at(-1)).toMatchObject({ outcome: "aborted" });
+
+    await h.runtime.spawn(leadMembership, { name: "builder", description: "y", prompt: "q" });
+    const second = h.created[1]!;
+    second.emit({ type: "agent_start" });
+    second.failSend = true;
+    await expect(h.runtime.send(leadMembership, "builder", "hi")).rejects.toThrow(/模型不可用/u);
+    expect(settlementEntries(h.lead).at(-1)).toMatchObject({ outcome: "failed" });
+    expect(settlementEntries(h.lead).at(-1)!.error).toContain("模型不可用");
+  });
+
+  it("returns settlements produced BEFORE team_wait started, and never repeats the same event", async () => {
+    const h = harness();
+    await h.runtime.spawn(leadMembership, { name: "reviewer", description: "x", prompt: "p" });
+    const child = h.created[0]!;
+    // 成员在 Lead 开始等待之前就结束了（时序陷阱：漏报 → 白等一次）。
+    child.emit({ type: "agent_start" });
+    child.emit({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "先做完了" }] } });
+    child.emit({ type: "agent_settled" });
+
+    const first = await h.runtime.wait(leadMembership, 10_000, new AbortController().signal);
+    expect(first.noProgress?.reason).toBe("no-active-peer");
+    expect(first.settlements).toHaveLength(1);
+    expect(first.settlements?.[0]?.summary).toBe("先做完了");
+
+    // 同一事件不会再返回一次（游标）。
+    const second = await h.runtime.wait(leadMembership, 10_000, new AbortController().signal);
+    expect(second.settlements).toBeUndefined();
+  });
+
+  it("returns settlements produced before the wait even while another peer is still active", async () => {
+    vi.useFakeTimers();
+    const h = harness();
+    await h.runtime.spawn(leadMembership, { name: "reviewer", description: "x", prompt: "p" });
+    await h.runtime.spawn(leadMembership, { name: "builder", description: "y", prompt: "q" });
+    const reviewer = h.created[0]!;
+    // reviewer 在 Lead 开始等待之前就结束了；builder 仍在跑（activePeer 为真）。
+    reviewer.emit({ type: "agent_start" });
+    reviewer.emit({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "先结束的那个" }] } });
+    reviewer.emit({ type: "agent_settled" });
+
+    const waiting = h.runtime.wait(leadMembership, 10_000, new AbortController().signal);
+    await vi.advanceTimersByTimeAsync(1_000);
+    h.created[1]!.emit({ type: "agent_start" });
+    h.created[1]!.emit({ type: "agent_settled" });
+    const result = await waiting;
+    // 两段结算都拿到：等待前结束的 reviewer + 等待期间结束的 builder，且不重复。
+    expect(result.settlements?.map((settlement) => settlement.memberName)).toEqual(["reviewer", "builder"]);
+  });
+
+  it("wakes a waiting Lead with the settlement that ended the wait", async () => {
+    vi.useFakeTimers();
+    const h = harness();
+    await h.runtime.spawn(leadMembership, { name: "reviewer", description: "x", prompt: "p" });
+    const waiting = h.runtime.wait(leadMembership, 30_000, new AbortController().signal);
+    await vi.advanceTimersByTimeAsync(0);
+    h.created[0]!.emit({ type: "agent_start" });
+    h.created[0]!.emit({ type: "agent_settled" });
+    const result = await waiting;
+    expect(result.timedOut).toBe(false);
+    expect(result.settlements?.[0]).toMatchObject({ memberName: "reviewer", outcome: "completed" });
+  });
+
+  it("wakes the waiting Lead on user input but not on team activity frames", async () => {
+    vi.useFakeTimers();
+    const h = harness();
+    await h.runtime.spawn(leadMembership, { name: "reviewer", description: "x", prompt: "p" });
+    const controller = new AbortController();
+    const waiting = h.runtime.wait(leadMembership, 30_000, controller.signal);
+    await vi.advanceTimersByTimeAsync(0);
+    h.created[0]!.emit({ type: "tool_execution_start", toolCallId: "t1", toolName: "read", args: { path: "a.ts" } });
+    await vi.advanceTimersByTimeAsync(200);
+    let settled = false;
+    void waiting.then(() => { settled = true; });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).toBe(false);
+    h.runtime.wakeForUserInput();
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(waiting).resolves.toMatchObject({ userInput: true });
+  });
+});
+
+describe("team permission feedback", () => {
+  it("surfaces a denied permission to the Lead with the member name and the reason", async () => {
+    const h = harness();
+    await h.runtime.spawn(leadMembership, { name: "reviewer", description: "x", prompt: "p" });
+    const child = h.created[0]!;
+    child.emit({ type: "agent_start" });
+    // 走运行时真正暴露给子会话的成员权限桥：身份由运行时注入，回调落在运行时记账里。
+    await h.runtime.memberPermissionRequest({ memberId: child.sessionId, memberName: "reviewer" }, "bash", { command: "npm test" }, "call-bash");
+    expect(h.permissionCalls.at(-1)?.member).toMatchObject({ memberId: child.sessionId, memberName: "reviewer" });
+
+    // Lead 正在等：审批卡发出要**唤醒**等待者并带上 pendingApprovals（可行动事件）。
+    const waiting = h.runtime.wait(leadMembership, 10_000, new AbortController().signal);
+    h.pendingHandler?.({ memberName: "reviewer", toolName: "bash", summary: "执行命令：npm test" });
+    await expect(waiting).resolves.toMatchObject({
+      timedOut: false,
+      pendingApprovals: [{ memberName: "reviewer", toolName: "bash", summary: "执行命令：npm test" }]
+    });
+
+    h.settledHandler?.({
+      id: "call-bash", decision: "deny",
+      cause: "user",
+      request: { memberName: "reviewer", toolName: "bash", summary: "执行命令：npm test" }
+    });
+
+    const delivered = h.lead.delivered.map((item) => JSON.stringify(item.message)).join("\n");
+    expect(delivered).toContain("成员「reviewer」的权限请求被拒");
+    expect(delivered).toContain("用户拒绝");
+    expect(delivered).toContain("npm test");
+
+    child.emit({ type: "agent_settled" });
+    expect(settlementEntries(h.lead).at(-1)?.blocker).toMatchObject({ kind: "permission-denied", toolName: "bash" });
+  });
+
+  it("treats an access-mode block and a timeout as separate blockers, and a cancel as aborted (no blocker)", async () => {
+    const h = harness();
+    await h.runtime.spawn(leadMembership, { name: "reviewer", description: "x", prompt: "p" });
+    const child = h.created[0]!;
+    child.emit({ type: "agent_start" });
+    await h.runtime.memberPermissionRequest({ memberId: child.sessionId, memberName: "reviewer" }, "bash", { command: "npm test" }, "call-bash");
+    const request = { memberName: "reviewer", toolName: "bash", summary: "执行命令：npm test" };
+
+    h.settledHandler?.({ id: "call-bash", decision: "deny", cause: "mode", request });
+    expect(JSON.stringify(h.lead.delivered.at(-1)?.message)).toContain("访问模式拦截");
+
+    h.settledHandler?.({ id: "call-bash", decision: "deny", cause: "timeout", request });
+    expect(JSON.stringify(h.lead.delivered.at(-1)?.message)).toContain("等待审批超时");
+
+    // 取消（成员被停止）归中止：不记新卡点，也不额外投递拒绝正文。
+    // 注意本回合前面已经有过真实卡点（超时），结算要如实带上它——被取消的那次请求
+    // 本身不构成卡点，但「这一回合被拦过」是事实，Lead 据此决定改派或补授权。
+    const before = h.lead.delivered.length;
+    h.settledHandler?.({ id: "call-bash", decision: "deny", cause: "cancel", request });
+    expect(h.lead.delivered).toHaveLength(before);
+    h.runtime.stopAll();
+    expect(settlementEntries(h.lead).at(-1)).toMatchObject({
+      outcome: "aborted",
+      blocker: { kind: "permission-timeout" }
+    });
+
+    await h.runtime.spawn(leadMembership, { name: "clean", description: "无卡点", prompt: "q" });
+    const clean = h.created[1]!;
+    clean.emit({ type: "agent_start" });
+    h.runtime.stopAll();
+    const cleanSettlement = settlementEntries(h.lead).filter((entry) => entry.memberName === "clean").at(-1)!;
+    expect(cleanSettlement).toMatchObject({ outcome: "aborted" });
+    expect(cleanSettlement.blocker).toBeUndefined();
+
+    // 干净回合被取消：结算里没有卡点，只会额外给 Lead 发一条「已中止」的结算正文。
+  });
+});
+
+describe("stop by task and stopping state", () => {
+  it("binds a task to the member turn, claims it, and stops exactly that member", async () => {
+    const h = harness();
+    const task = await h.runtime.createTask(leadMembership, { subject: "审查", description: "审查 SSH 改动" });
+    await h.runtime.spawn(leadMembership, { name: "reviewer", description: "审查", prompt: "看 diff" });
+    const child = h.created[0]!;
+    child.emit({ type: "agent_start" });
+    await h.runtime.send(leadMembership, "reviewer", "开始审查", undefined, task.id);
+    // 绑定即认领（pending+就绪 → in_progress，owner = 该成员）。
+    expect(h.runtime.getTask(leadMembership, task.id)).toMatchObject({ status: "in_progress", ownerName: "reviewer" });
+
+    const result = h.runtime.interrupt(leadMembership, { taskId: task.id });
+    expect(result).toMatchObject({ target: "task", status: "delivered", memberName: "reviewer", taskId: task.id });
+    expect(child.aborted).toBe(true);
+    // 任务记录与归属保留（Lead 可用既有 CAS 改派）。
+    expect(h.runtime.getTask(leadMembership, task.id)).toMatchObject({ status: "in_progress", ownerName: "reviewer" });
+  });
+
+  it("returns explicit statuses for completed tasks, unbound tasks and idle members", async () => {
+    const h = harness();
+    await h.runtime.spawn(leadMembership, { name: "reviewer", description: "x", prompt: "p" });
+    const child = h.created[0]!;
+    child.emit({ type: "agent_start" });
+    child.emit({ type: "agent_settled" });
+    expect(h.runtime.interrupt(leadMembership, { name: "reviewer" })).toMatchObject({ status: "idle" });
+
+    const task = await h.runtime.createTask(leadMembership, { subject: "s", description: "d" });
+    expect(h.runtime.interrupt(leadMembership, { taskId: task.id })).toMatchObject({ status: "unbound" });
+    expect(h.runtime.interrupt(leadMembership, { taskId: "task-999" })).toMatchObject({ status: "unknown" });
+
+    await h.runtime.updateTask(leadMembership, { taskId: task.id, expectedRevision: task.revision, action: "claim" });
+    await h.runtime.updateTask(leadMembership, { taskId: task.id, expectedRevision: task.revision + 1, action: "complete" });
+    expect(h.runtime.interrupt(leadMembership, { taskId: task.id })).toMatchObject({ status: "completed" });
+  });
+
+  it("shows stopping until the settled event arrives, clears the queue and cancels member permissions", async () => {
+    const h = harness();
+    await h.runtime.spawn(leadMembership, { name: "reviewer", description: "x", prompt: "p" });
+    const child = h.created[0]!;
+    child.emit({ type: "agent_start" });
+    // 手动 abort 不自动发 settled：模拟「停止已受理、收尾还没到」的窗口。
+    child.abort = (): Promise<void> => {
+      child.aborted = true;
+      child.isStreaming = false;
+      return Promise.resolve();
+    };
+    const result = h.runtime.interrupt(leadMembership, { name: "reviewer" });
+    expect(result.status).toBe("delivered");
+    expect(h.runtime.snapshot().members[0]?.status).toBe("stopping");
+    expect(h.runtime.snapshot().stopping).toBe(1);
+    expect(child.queueCleared).toBe(true);
+    expect(h.cancelledMembers).toEqual([child.sessionId]);
+    // 重复停止幂等：还是 delivered，且不会误伤别人。
+    expect(h.runtime.interrupt(leadMembership, { name: "reviewer" }).status).toBe("delivered");
+  });
+
+  it("falls back to aborted when abort itself fails (stopping never hangs forever)", async () => {
+    const h = harness();
+    await h.runtime.spawn(leadMembership, { name: "reviewer", description: "x", prompt: "p" });
+    const child = h.created[0]!;
+    child.emit({ type: "agent_start" });
+    // abort 直接抛错：不会再收到 agent_settled，必须就地收口（否则看板一直「正在停止」）。
+    child.abort = (): Promise<void> => Promise.reject(new Error("abort 失败"));
+    expect(h.runtime.interrupt(leadMembership, { name: "reviewer" }).status).toBe("delivered");
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(h.runtime.snapshot().members[0]?.status).toBe("inactive");
+    expect(h.runtime.snapshot().stopping).toBeUndefined();
+    expect(settlementEntries(h.lead).at(-1)).toMatchObject({ outcome: "aborted" });
+    expect(child.disposed).toBe(true);
+  });
+
+  it("falls back to aborted when abort itself fails (stopping never hangs forever)", async () => {
+    const h = harness();
+    await h.runtime.spawn(leadMembership, { name: "reviewer", description: "x", prompt: "p" });
+    const child = h.created[0]!;
+    child.emit({ type: "agent_start" });
+    // abort 直接抛错：不会再收到 agent_settled，必须就地收口（否则看板一直「正在停止」）。
+    child.abort = (): Promise<void> => Promise.reject(new Error("abort 失败"));
+    expect(h.runtime.interrupt(leadMembership, { name: "reviewer" }).status).toBe("delivered");
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(h.runtime.snapshot().members[0]?.status).toBe("inactive");
+    expect(h.runtime.snapshot().stopping).toBeUndefined();
+    expect(settlementEntries(h.lead).at(-1)).toMatchObject({ outcome: "aborted" });
+    expect(child.disposed).toBe(true);
   });
 });

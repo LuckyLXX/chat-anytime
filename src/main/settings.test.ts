@@ -182,19 +182,15 @@ describe("desktop settings migration", () => {
     expect(normalizeAgent({ id: "empty", toolOverrides: {} }).toolOverrides).toBeUndefined();
   });
 
-  it("preserves the workflow tool override in both directions (default OFF)", () => {
-    // 工作流工具缺省**关闭**：true 与 false 都必须原样读回——丢了 true 就是
-    // 「用户在设置里打开了、内部却静默关回去」，而这条错误没有任何提示。
-    expect(normalizeAgent({ id: "wf-on", toolOverrides: { workflow: true } }).toolOverrides).toEqual({ workflow: true });
-    expect(normalizeAgent({ id: "wf-off", toolOverrides: { workflow: false } }).toolOverrides).toEqual({ workflow: false });
-    // agent.save 不过 normalize 直接落盘——重启后靠这里读回。
-    expect(migrateSettings({ agents: [{ id: "wf-on", toolOverrides: { workflow: true } }] }).settings.agents.find((item) => item.id === "wf-on")?.toolOverrides).toEqual({ workflow: true });
-    // 缺省无键 = 关闭（存量角色升级后零变化）。
-    expect(normalizeAgent({ id: "plain" }).toolOverrides).toBeUndefined();
+  it("drops the retired workflow tool override on read-back (the capability was removed on 2026-11-23)", () => {
+    // 工作流编排已下线：存量 settings.json 里可能还有 toolOverrides.workflow。读回时按
+    // 非法键丢弃，下一次无关写盘即把它从磁盘抹掉；其余键不受影响。
+    expect(normalizeAgent({ id: "wf-on", toolOverrides: { workflow: true } }).toolOverrides).toBeUndefined();
+    expect(migrateSettings({ agents: [{ id: "wf-on", toolOverrides: { workflow: true, browser: false } }] }).settings.agents.find((item) => item.id === "wf-on")?.toolOverrides).toEqual({ browser: false });
     // 原有 browser/ssh/mcp 的语义不变：false = 显式禁用，true 也保留（值保真）。
     expect(normalizeAgent({ id: "legacy", toolOverrides: { browser: false, ssh: true, "mcp:exa": false } }).toolOverrides).toEqual({ browser: false, ssh: true, "mcp:exa": false });
-    // 非法值仍然丢弃（不因为白名单扩了一个键就放宽类型检查）。
-    expect(normalizeAgent({ id: "junk", toolOverrides: { workflow: "yes" as unknown as boolean } }).toolOverrides).toBeUndefined();
+    // 非法值仍然丢弃（不因为白名单变化就放宽类型检查）。
+    expect(normalizeAgent({ id: "junk", toolOverrides: { browser: "yes" as unknown as boolean } }).toolOverrides).toBeUndefined();
   });
 
   it("preserves provider and agent defaults while normalizing invalid current ids", () => {

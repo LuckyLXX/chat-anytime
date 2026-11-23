@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import type { ChatMessage, PermissionRequest, QuestionRequest, RuntimeCommand, RuntimeSnapshot, SessionPaneSnapshot, SessionSearchHit, ToolExecution, Todo, UsageStats, WorkflowRunSummary, WorkflowRunsSnapshot } from "../../shared/protocol.js";
-import { currentPermissionRequest, currentQuestionRequest, dropPaneStates, mergeQuestionRequests, mergeRecentWorkspacesPreservingIdentity, mergeSessionsPreservingIdentity, mergeWorkflowRunsSnapshot, pruneParkedPanels, resetActiveSessionBaselines, resetWorkflowRunsBaseline, useDesktopStore, workflowRunsForOwner } from "./store.js";
+import type { ChatMessage, PermissionRequest, QuestionRequest, RuntimeCommand, RuntimeSnapshot, SessionPaneSnapshot, SessionSearchHit, ToolExecution, Todo, UsageStats } from "../../shared/protocol.js";
+import { currentPermissionRequest, currentQuestionRequest, dropPaneStates, mergeQuestionRequests, mergeRecentWorkspacesPreservingIdentity, mergeSessionsPreservingIdentity, pruneParkedPanels, resetActiveSessionBaselines, useDesktopStore } from "./store.js";
 
 function permission(id: string, sessionId: string): PermissionRequest {
   return {
@@ -1251,203 +1251,28 @@ describe("分屏 pane 通道语义不变", () => {
   });
 });
 
-/**
- * 工作流运行摘要的独立基线（方案 §8.2）。
- *
- * 这里钉的都是「静默失真」类风险：状态看着在动，其实是旧帧把新帧盖回去；或者
- * 无变化帧被当成变化、把每帧都变成新对象，导致整列运行条重渲染。
- * 工作流**不复用**会话 revision / paneRevision，也不触碰 snapshot。
- */
-function workflowRun(overrides: Partial<WorkflowRunSummary> = {}): WorkflowRunSummary {
-  return {
-    runId: "run-1",
-    workflowId: "wf-1",
-    workflowName: "实施—验收工作流",
-    workspace: "D:/Ws",
-    agentId: "default",
-    ownerSessionId: "owner-a",
-    status: "running",
-    currentAttempt: 1,
-    maxAttempts: 3,
-    currentNodeId: "n2",
-    currentNodeTitle: "实施",
-    nodeStates: { n1: "completed", n2: "running" },
-    pendingPermissionIds: [],
-    startedAt: 1_000,
-    ...overrides
-  };
-}
-
-function workflowSnapshot(revision: number, runs: WorkflowRunSummary[], epoch = "epoch-a"): WorkflowRunsSnapshot {
-  return { epoch, revision, runs };
-}
-
-describe("工作流运行摘要：过期帧与对象身份", () => {
-  beforeEach(() => {
-    resetWorkflowRunsBaseline();
-    useDesktopStore.setState({ workflowRuns: undefined });
-  });
-
-  it("同一 epoch 的旧 revision 帧被丢弃，不覆盖已应用的新状态", () => {
-    const state = useDesktopStore.getState();
-    state.handleRuntimeMessage({ type: "workflow.runs", snapshot: workflowSnapshot(4, [workflowRun({ status: "completed", endedAt: 2_000 })]) });
-    state.handleRuntimeMessage({ type: "workflow.runs", snapshot: workflowSnapshot(3, [workflowRun({ status: "running" })]) });
-    expect(useDesktopStore.getState().workflowRuns?.revision).toBe(4);
-    expect(useDesktopStore.getState().workflowRuns?.runs[0]?.status).toBe("completed");
-  });
-
-  it("内容完全相同的一帧保留旧对象身份（订阅方不重渲）", () => {
-    const state = useDesktopStore.getState();
-    state.handleRuntimeMessage({ type: "workflow.runs", snapshot: workflowSnapshot(1, [workflowRun()]) });
-    const first = useDesktopStore.getState().workflowRuns;
-    // 结构化克隆后是全新对象，但内容一致：必须继续用旧引用。
-    state.handleRuntimeMessage({ type: "workflow.runs", snapshot: workflowSnapshot(1, [workflowRun()]) });
-    expect(useDesktopStore.getState().workflowRuns).toBe(first);
-  });
-
-  it("只有待决权限 / 节点状态 / 终态变化的帧必须被采纳（不许被早退吞掉）", () => {
-    const state = useDesktopStore.getState();
-    state.handleRuntimeMessage({ type: "workflow.runs", snapshot: workflowSnapshot(1, [workflowRun()]) });
-    const first = useDesktopStore.getState().workflowRuns;
-
-    state.handleRuntimeMessage({ type: "workflow.runs", snapshot: workflowSnapshot(2, [workflowRun({ pendingPermissionIds: ["p-1"] })]) });
-    expect(useDesktopStore.getState().workflowRuns).not.toBe(first);
-    expect(useDesktopStore.getState().workflowRuns?.runs[0]?.pendingPermissionIds).toEqual(["p-1"]);
-
-    state.handleRuntimeMessage({
-      type: "workflow.runs",
-      snapshot: workflowSnapshot(3, [workflowRun({ pendingPermissionIds: ["p-1"], nodeStates: { n1: "completed", n2: "completed", n3: "running" }, currentNodeId: "n3" })])
-    });
-    expect(useDesktopStore.getState().workflowRuns?.runs[0]?.currentNodeId).toBe("n3");
-    expect(Object.keys(useDesktopStore.getState().workflowRuns?.runs[0]?.nodeStates ?? {})).toHaveLength(3);
-  });
-
-  it("新实例（不同 epoch）接替旧实例，旧 epoch 的晚到帧被永久丢弃", () => {
-    const state = useDesktopStore.getState();
-    state.handleRuntimeMessage({ type: "workflow.runs", snapshot: workflowSnapshot(9, [workflowRun({ runId: "run-old" })], "epoch-old") });
-    state.handleRuntimeMessage({ type: "workflow.runs", snapshot: workflowSnapshot(1, [workflowRun({ runId: "run-new" })], "epoch-new") });
-    expect(useDesktopStore.getState().workflowRuns?.epoch).toBe("epoch-new");
-    expect(useDesktopStore.getState().workflowRuns?.runs[0]?.runId).toBe("run-new");
-    // 旧实例的晚到帧（revision 更高也不行）不得回滚。
-    state.handleRuntimeMessage({ type: "workflow.runs", snapshot: workflowSnapshot(10, [workflowRun({ runId: "run-old" })], "epoch-old") });
-    expect(useDesktopStore.getState().workflowRuns?.epoch).toBe("epoch-new");
-    expect(useDesktopStore.getState().workflowRuns?.runs[0]?.runId).toBe("run-new");
-  });
-
-  it("bootstrap 镜像不与已跟随的 epoch 抢：已在跟新实例时丢弃旧镜像", () => {
-    const previous = workflowSnapshot(2, [workflowRun({ runId: "run-new" })], "epoch-new");
-    const outcome = mergeWorkflowRunsSnapshot(previous, workflowSnapshot(7, [workflowRun({ runId: "run-old" })], "epoch-old"), "bootstrap");
-    expect(outcome.changed).toBe(false);
-    expect(outcome.snapshot).toBe(previous);
-  });
-
-  it("bootstrap 同 epoch 且更新时采纳；更旧时保留 live 那一帧", () => {
-    const live = workflowSnapshot(5, [workflowRun({ runId: "run-live" })]);
-    const newer = mergeWorkflowRunsSnapshot(live, workflowSnapshot(6, [workflowRun({ runId: "run-live" }), workflowRun({ runId: "run-second" })]), "bootstrap");
-    expect(newer.changed).toBe(true);
-    expect(newer.snapshot.runs).toHaveLength(2);
-    const older = mergeWorkflowRunsSnapshot(newer.snapshot, workflowSnapshot(4, [workflowRun({ runId: "run-live" })]), "bootstrap");
-    expect(older.changed).toBe(false);
-    expect(older.snapshot).toBe(newer.snapshot);
-  });
-
-  it("运行摘要不触碰会话快照与 revision（不混 session delta）", () => {
-    useDesktopStore.setState({ snapshot: { ...snap("session-a"), revision: 7 } });
-    useDesktopStore.getState().handleRuntimeMessage({ type: "workflow.runs", snapshot: workflowSnapshot(3, [workflowRun()]) });
-    expect(useDesktopStore.getState().snapshot.sessionId).toBe("session-a");
-    expect(useDesktopStore.getState().snapshot.revision).toBe(7);
-  });
-
-  it("超过上限时活跃运行全留、终态按开始时间补足", () => {
-    const active = Array.from({ length: 5 }, (_, index) => workflowRun({ runId: `active-${index}`, status: "running" }));
-    const terminal = Array.from({ length: 200 }, (_, index) => workflowRun({ runId: `done-${index}`, status: "completed", endedAt: 2_000, startedAt: index }));
-    const state = useDesktopStore.getState();
-    state.handleRuntimeMessage({ type: "workflow.runs", snapshot: workflowSnapshot(1, [...active, ...terminal]) });
-    const runs = useDesktopStore.getState().workflowRuns?.runs ?? [];
-    expect(runs.length).toBe(120);
-    expect(runs.filter((run) => run.status === "running")).toHaveLength(5);
-    // 最新的终态保留，最旧的被裁掉。
-    expect(runs.some((run) => run.runId === "done-199")).toBe(true);
-    expect(runs.some((run) => run.runId === "done-0")).toBe(false);
-  });
-});
-
-describe("工作流运行摘要：bootstrap 水合", () => {
-  it("初始化窗口内先到 live 帧、后到更旧的 bootstrap 镜像 → 不回滚", async () => {
+describe("initialize 水合", () => {
+  it("订阅建立并水合完毕后不发 state.sync（基线只按会话定向恢复，绝不全体重传）", async () => {
     const host = globalThis as { piDesktop?: unknown; window?: unknown };
     const originalWindow = host.window;
     const original = host.piDesktop;
     const sent: RuntimeCommand[] = [];
-    let deliver: ((message: { type: "workflow.runs"; snapshot: WorkflowRunsSnapshot }) => void) | undefined;
-    resetWorkflowRunsBaseline();
-    useDesktopStore.setState({ workflowRuns: undefined });
-    host.window = host;
-    host.piDesktop = {
-      onRuntimeMessage: (listener: typeof deliver) => { deliver = listener; return () => {}; },
-      send: async (command: RuntimeCommand) => { sent.push(command); },
-      bootstrap: async () => {
-        // 初始化窗口内 live 帧先到（bootstrap 还在路上）。
-        deliver?.({ type: "workflow.runs", snapshot: workflowSnapshot(3, [workflowRun({ runId: "run-live" })]) });
-        return {
-          platform: "test",
-          version: "1",
-          settings: { version: 2, thinkingLevel: "medium", accessMode: "ask", providers: [], agents: [], currentAgentId: "default", appearance: { theme: "system", themePreset: "default", customCss: "", customThemes: [] } },
-          // 主进程缓存的是更旧的一帧（revision 2）：晚到不得覆盖 live 那一帧。
-          workflowRuns: workflowSnapshot(2, [workflowRun({ runId: "run-bootstrap" })])
-        };
-      }
-    };
-    try {
-      await useDesktopStore.getState().initialize();
-      expect(useDesktopStore.getState().workflowRuns?.revision).toBe(3);
-      expect(useDesktopStore.getState().workflowRuns?.runs[0]?.runId).toBe("run-live");
-      // 订阅建立且水合完毕后要补一帧 workflow.sync；绝不发 state.sync。
-      expect(sent.some((command) => command.type === "workflow.sync")).toBe(true);
-      expect(sent.some((command) => command.type === "state.sync")).toBe(false);
-    } finally {
-      host.piDesktop = original;
-      host.window = originalWindow;
-      resetWorkflowRunsBaseline();
-      useDesktopStore.setState({ workflowRuns: undefined });
-    }
-  });
-
-  it("没有 live 帧时用 bootstrap 水合一帧", async () => {
-    const host = globalThis as { piDesktop?: unknown; window?: unknown };
-    const originalWindow = host.window;
-    const original = host.piDesktop;
-    resetWorkflowRunsBaseline();
-    useDesktopStore.setState({ workflowRuns: undefined });
     host.window = host;
     host.piDesktop = {
       onRuntimeMessage: () => () => {},
-      send: async () => undefined,
+      send: async (command: RuntimeCommand) => { sent.push(command); },
       bootstrap: async () => ({
         platform: "test",
         version: "1",
-        settings: { version: 2, thinkingLevel: "medium", accessMode: "ask", providers: [], agents: [], currentAgentId: "default", appearance: { theme: "system", themePreset: "default", customCss: "", customThemes: [] } },
-        workflowRuns: workflowSnapshot(6, [workflowRun({ runId: "run-restored", status: "completed", endedAt: 2_000 })])
+        settings: { version: 2, thinkingLevel: "medium", accessMode: "ask", providers: [], agents: [], currentAgentId: "default", appearance: { theme: "system", themePreset: "default", customCss: "", customThemes: [] } }
       })
     };
     try {
       await useDesktopStore.getState().initialize();
-      expect(useDesktopStore.getState().workflowRuns?.runs[0]?.runId).toBe("run-restored");
+      expect(sent.some((command) => command.type === "state.sync")).toBe(false);
     } finally {
       host.piDesktop = original;
       host.window = originalWindow;
-      resetWorkflowRunsBaseline();
-      useDesktopStore.setState({ workflowRuns: undefined });
     }
-  });
-});
-
-describe("运行条按 owner 过滤", () => {
-  it("只取该 owner 的运行；owner 未定或没有命中时给稳定的空数组", () => {
-    const runs = [workflowRun({ runId: "run-a", ownerSessionId: "owner-a" }), workflowRun({ runId: "run-b", ownerSessionId: "owner-b" })];
-    expect(workflowRunsForOwner(runs, "owner-a").map((run) => run.runId)).toEqual(["run-a"]);
-    expect(workflowRunsForOwner(runs, "owner-z")).toHaveLength(0);
-    // 空结果必须是同一个引用（运行条据此早退，不重渲）。
-    expect(workflowRunsForOwner(runs, "owner-z")).toBe(workflowRunsForOwner(undefined, "owner-a"));
-    expect(workflowRunsForOwner(runs, undefined)).toHaveLength(0);
   });
 });

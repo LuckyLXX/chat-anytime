@@ -13,7 +13,7 @@
  */
 
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
-import type { ThinkingLevel } from "../shared/protocol.js";
+import type { AccessMode, ThinkingLevel, TeamMemberSettlement } from "../shared/protocol.js";
 import type { PersistedSessionEntry } from "./session-history.js";
 
 /** Lead 日志里团队快照的 customType（CustomEntry 不进 LLM 上下文）。 */
@@ -49,6 +49,11 @@ export interface TeamMemberConfig {
   thinkingLevel: ThinkingLevel;
   browserTools: boolean;
   color?: string;
+  /**
+   * 成员的**可选**权限上限（与 Lead 当前访问模式逐次取严）。缺省 = 不设上限，
+   * 沿用原会话访问策略（存量成员零变化）；值在创建时冻结，冷恢复沿用同一条。
+   */
+  accessModeCap?: AccessMode;
 }
 
 /** 一个 teammate 的持久记录。 */
@@ -86,7 +91,9 @@ export interface TeamState {
 /** 日志里的一条团队快照（全量值，后写覆盖前写）。 */
 export type TeamEntryData =
   | { kind: "member"; member: TeamMemberRecord }
-  | { kind: "task"; task: TeamTaskRecord };
+  | { kind: "task"; task: TeamTaskRecord }
+  /** 成员回合结算：只进会话日志（不进 LLM 上下文），供重启后回看「上一回合怎么结束的」。 */
+  | { kind: "settled"; settlement: TeamMemberSettlement };
 
 export function emptyTeamState(): TeamState {
   return { members: [], tasks: [] };
@@ -117,6 +124,9 @@ function isTeamMemberConfig(value: unknown): value is TeamMemberConfig {
   if (value.subagentId !== undefined && typeof value.subagentId !== "string") return false;
   if (value.subagentName !== undefined && typeof value.subagentName !== "string") return false;
   if (value.color !== undefined && typeof value.color !== "string") return false;
+  if (value.accessModeCap !== undefined
+    && value.accessModeCap !== "read-only" && value.accessModeCap !== "ask"
+    && value.accessModeCap !== "workspace" && value.accessModeCap !== "full") return false;
   return true;
 }
 
@@ -131,6 +141,25 @@ export function isTeamMemberRecord(value: unknown): value is TeamMemberRecord {
     && typeof value.sessionFile === "string"
     && typeof value.createdAt === "number"
     && isTeamMemberConfig(value.config);
+}
+
+/** 校验日志里的一条回合结算。 */
+export function isTeamSettlement(value: unknown): value is TeamMemberSettlement {
+  if (!isRecord(value)) return false;
+  if (typeof value.id !== "string" || typeof value.memberName !== "string") return false;
+  if (value.outcome !== "completed" && value.outcome !== "failed" && value.outcome !== "aborted") return false;
+  if (typeof value.reported !== "boolean" || typeof value.at !== "number") return false;
+  if (value.summary !== undefined && typeof value.summary !== "string") return false;
+  if (value.error !== undefined && typeof value.error !== "string") return false;
+  if (stringArray(value.taskIds) === undefined || stringArray(value.artifacts) === undefined) return false;
+  if (value.blocker !== undefined) {
+    const blocker = value.blocker;
+    if (!isRecord(blocker)) return false;
+    if (blocker.kind !== "permission-denied" && blocker.kind !== "permission-mode"
+      && blocker.kind !== "permission-timeout" && blocker.kind !== "permission-pending") return false;
+    if (typeof blocker.toolName !== "string" || typeof blocker.summary !== "string") return false;
+  }
+  return true;
 }
 
 /** 校验日志里的一条任务快照。 */
@@ -152,6 +181,7 @@ export function readTeamEntryData(value: unknown): TeamEntryData | undefined {
   if (!isRecord(value)) return undefined;
   if (value.kind === "member" && isTeamMemberRecord(value.member)) return { kind: "member", member: value.member };
   if (value.kind === "task" && isTeamTaskRecord(value.task)) return { kind: "task", task: value.task };
+  if (value.kind === "settled" && isTeamSettlement(value.settlement)) return { kind: "settled", settlement: value.settlement };
   return undefined;
 }
 
@@ -178,6 +208,7 @@ export function restoreTeamState(entries: readonly PersistedSessionEntry[]): Tea
       }
       continue;
     }
+    if (data.kind === "settled") continue; // 结算只回看，不重建成员/任务状态
     const index = taskIndex.get(data.task.id);
     if (index === undefined) {
       taskIndex.set(data.task.id, tasks.length);
@@ -197,6 +228,11 @@ export function appendTeamMember(session: AgentSession, member: TeamMemberRecord
 /** 追加一条任务快照。 */
 export function appendTeamTask(session: AgentSession, task: TeamTaskRecord): void {
   session.sessionManager.appendCustomEntry(TEAM_ENTRY_TYPE, { kind: "task", task } satisfies TeamEntryData);
+}
+
+/** 追加一条回合结算（Lead 的既有持久化路径：CustomEntry 不进 LLM 上下文）。 */
+export function appendTeamSettlement(session: AgentSession, settlement: TeamMemberSettlement): void {
+  session.sessionManager.appendCustomEntry(TEAM_ENTRY_TYPE, { kind: "settled", settlement } satisfies TeamEntryData);
 }
 
 /**

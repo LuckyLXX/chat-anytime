@@ -20,9 +20,10 @@ describe("session.abort interaction cleanup contract", () => {
     expect(abortBlock()).toContain("questionBroker.reset(record.session.sessionId)");
   });
 
-  it("中止时取消挂起的权限确认，但不撤掉本会话已授予的 allow-session", () => {
+  it("中止时取消挂起的权限确认（Lead 自身 + 同步子代理，不波及团队成员），但不撤掉本会话已授予的 allow-session", () => {
     const block = abortBlock();
-    expect(block).toContain("permissionBroker.cancelPendingNonWorkflow(record.session.sessionId)");
+    expect(block).toContain("permissionBroker.cancelPendingNonTeam(record.session.sessionId)");
+    expect(block).not.toContain("permissionBroker.cancelPending(");
     expect(block).not.toContain("permissionBroker.reset(");
   });
 });

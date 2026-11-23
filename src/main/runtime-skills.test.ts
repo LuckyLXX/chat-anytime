@@ -39,7 +39,7 @@ describe("skillPathsFor", () => {
 describe("bundled skill assets (repo contract)", () => {
   const repoRoot = resolve(__dirname, "../..");
   const skillsRoot = join(repoRoot, "resources", "skills");
-  const bundledSlugs = ["automation", "chatanytime-config", "computer-use", "gallery-publish", "pidesktop-theme-creator", "web-tasks", "workflow"];
+  const bundledSlugs = ["automation", "chatanytime-config", "computer-use", "gallery-publish", "pidesktop-theme-creator", "web-tasks"];
 
   it("ships the bundled skill dirs with their runtime assets", () => {
     // 这些路径是发行契约：electron-builder 的 extraResources 把 resources/skills
@@ -103,8 +103,6 @@ describe("bundled skill assets (repo contract)", () => {
     expect(bySlug.get("chatanytime-config")?.name).toBe("ChatAnyTime 配置");
     expect(bySlug.get("gallery-publish")?.name).toBe("作品发布");
     expect(bySlug.get("pidesktop-theme-creator")?.name).toBe("pidesktop-theme-creator");
-    expect(bySlug.get("workflow")).toMatchObject({ name: "工作流编排", scope: "bundled" });
-    expect(buildSkillsSystemPromptBlock(toSkillSummaries(skills, new Set()))).toContain("/skill:工作流编排");
   });
 
   it("merges empty bundled/global/project dirs without noise", async () => {
