@@ -199,7 +199,10 @@ export function resolveXtermTheme(tokens: TerminalThemeTokens): ITheme {
  *   比默认的「光标直接消失」更容易找回终端；
  * - `minimumContrastRatio 4.5`：xterm 渲染期把不达标的前景/ANSI 色调到 WCAG AA，
  *   这是「任意自定义主题底色下颜色都看得清」的根本保障；
- * - `scrollback 4000` 与 `fontSize 13` 沿用改动前的取值，不变更既有行为。
+ * - `scrollback 4000` 与 `fontSize 13` 沿用改动前的取值，不变更既有行为；
+ * - `macOptionClickForcesSelection: true`：mac 上远端程序接管鼠标后，只有 xterm 6
+ *   的这个开关打开，Option+拖选 才能强制本地选区（Windows/Linux 是 Shift）。
+ *   界面提示与右键菜单的文案跟着这条设置走（见 lib/terminal-clipboard.ts）。
  */
 export const TERMINAL_OPTIONS: Partial<ITerminalOptions> = {
   cursorBlink: true,
@@ -210,6 +213,7 @@ export const TERMINAL_OPTIONS: Partial<ITerminalOptions> = {
   fontWeightBold: 600,
   letterSpacing: 0,
   lineHeight: 1.3,
+  macOptionClickForcesSelection: true,
   minimumContrastRatio: 4.5,
   scrollback: 4000
 };

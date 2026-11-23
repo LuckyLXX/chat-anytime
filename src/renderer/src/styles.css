@@ -413,6 +413,8 @@ html[data-ui-blur="off"] *::after {
 .context-menu-item:hover { background: var(--surface-button-hover); }
 .context-menu-item.danger { color: var(--danger); }
 .context-menu-item.danger:hover { background: var(--danger-soft); }
+.context-menu-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.context-menu-hint { margin-left: auto; padding-left: 16px; color: var(--text-muted); font-size: 11px; font-family: var(--mono-font, monospace); }
 .session-workspace-group { display: grid; gap: 2px; }
 .session-workspace-heading { position: relative; min-height: 43px; }
 .session-list .session-workspace-toggle { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 43px; padding: 6px 8px; color: var(--text); background: transparent; }
@@ -2515,12 +2517,11 @@ html[data-ui-motion="off"] .general-jev-toggle .chevron { transition: none; }
    选择器 specificity 必须压过 .work-area.with-preview* 里的面板宽度/位移，否则全屏
    面板会被按「右侧一列」定位（320px 宽、贴着右缘）。 */
 .work-area .content-preview-panel.preview-fullscreen { position: fixed; z-index: 46; inset: 0; width: auto; transform: none; animation: none; }
-.terminal-pane { position: relative; height: 100%; background: var(--code-surface); }
-/* SSH 终端：竖向 flex —— [终端][操作条][文件面板(可折叠)]。
+.terminal-pane { position: relative; display: flex; flex-direction: column; height: 100%; background: var(--code-surface); }
+.terminal-pane > .terminal-shell { flex: 1 1 auto; min-height: 0; }
+/* SSH 文件分屏与 XtermView 外壳都是竖排 flex 项。
    注意：**不能**给文件面板用 position:absolute + inset:0，那会盖住开关按钮
    （初版 bug：面板 z-index 8 高于开关 7，打开后再也点不到关闭）。 */
-.ssh-terminal-pane { display: flex; flex-direction: column; }
-.ssh-terminal-pane .terminal-xterm { flex: 1 1 auto; min-height: 0; }
 .ssh-actions-bar { flex: 0 0 auto; display: flex; justify-content: flex-end; padding: 4px 10px; border-top: 1px solid var(--border); background: var(--surface); }
 .ssh-files-toggle { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border: 1px solid var(--border); border-radius: 7px; color: var(--text-muted); background: transparent; font-size: 11.5px; cursor: pointer; }
 .ssh-files-toggle:hover { color: var(--text); border-color: var(--border-strong); background: var(--surface-button-hover); }
@@ -2533,8 +2534,22 @@ html[data-ui-motion="off"] .general-jev-toggle .chevron { transition: none; }
 .ssh-files-splitter:hover::after, .ssh-files-splitter.dragging::after, .ssh-files-splitter:focus-visible::after { opacity: 1; background: var(--accent); }
 .ssh-files-splitter:focus-visible { outline: none; }
 .terminal-xterm { height: 100%; padding: 10px 6px 8px 12px; }
-.terminal-ended { position: absolute; inset: 0; z-index: 5; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 20px; text-align: center; color: var(--code-text); background: color-mix(in srgb, var(--code-surface) 82%, transparent); }
-.terminal-ended span { max-width: 46ch; font-size: 13px; line-height: 1.5; opacity: 0.78; }
+/* —— 终端剪贴板外壳（2026-11-23）：XtermView 的外层容器，负责给右键菜单、多行确认框、
+   鼠标接管提示与错误提示做定位参照。它不是覆盖层：只有提示类元素 absolute。 —— */
+.terminal-shell { position: relative; display: flex; flex-direction: column; width: 100%; height: 100%; min-height: 0; }
+.terminal-shell > .terminal-xterm { flex: 1 1 auto; height: auto; min-height: 0; }
+/* 远端程序接管鼠标时的提示：只读、不吃指针事件（否则又会挡住拖选）。 */
+.terminal-mouse-hint { position: absolute; z-index: 4; top: 8px; left: 12px; right: 12px; padding: 5px 9px; border: 1px solid var(--border); border-radius: 8px; background: color-mix(in srgb, var(--code-surface) 86%, transparent); color: var(--code-text); font-size: 11px; line-height: 1.45; opacity: .85; pointer-events: none; }
+.terminal-clipboard-notice { position: absolute; z-index: 7; left: 50%; bottom: 12px; transform: translateX(-50%); max-width: min(420px, calc(100% - 24px)); padding: 6px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text); font-size: 11.5px; box-shadow: var(--shadow-md); pointer-events: none; }
+/* 多行粘贴确认：终端**下方**的一条卡片，不挡输出（用户要在贴之前看一眼上下文）。 */
+.terminal-paste-confirm { position: absolute; z-index: 7; left: 12px; right: 12px; bottom: 12px; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 12px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--surface); color: var(--text); box-shadow: var(--shadow-md); }
+.terminal-paste-confirm-text { flex: 1 1 220px; min-width: 0; font-size: 12px; line-height: 1.5; }
+.terminal-paste-confirm-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; }
+/* SSH 断线/失败提示：终端下方的状态条（不是遮罩）—— 输出区仍可拖选复制。 */
+.terminal-status-bar { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 12px; border-top: 1px solid var(--border); background: color-mix(in srgb, var(--danger, #dc2626) 8%, var(--surface)); color: var(--text); }
+.terminal-status-text { display: flex; flex: 1 1 auto; flex-direction: column; gap: 3px; min-width: 0; font-size: 12px; line-height: 1.45; }
+.terminal-status-text > span { color: var(--text-muted); word-break: break-word; }
+.terminal-status-hint { font-size: 11px; opacity: .8; }
 /* —— SSH：连接中/指纹确认覆盖层 + 主机管理面板 —— */
 .terminal-overlay { position: absolute; inset: 0; z-index: 6; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--code-text); background: color-mix(in srgb, var(--code-surface) 78%, transparent); font-size: 13px; }
 .terminal-overlay-detail { font-size: 12px; opacity: 0.65; font-family: var(--mono-font, monospace); }

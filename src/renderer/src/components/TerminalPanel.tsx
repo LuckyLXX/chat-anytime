@@ -59,11 +59,13 @@ export function TerminalPanel({ terminalId, workspace, cwd, initialCommand }: { 
   return (
     <div className="terminal-pane" data-pane="terminal">
       {/* key 重建视图：ended 清理 + create 重发（重连按钮） */}
-      <XtermView key={`${terminalId}-${restartNonce}`} onReady={handleReady} onInput={handleInput} onResize={handleResize} focus />
+      <XtermView key={`${terminalId}-${restartNonce}`} onReady={handleReady} onInput={handleInput} onResize={handleResize} focus canPaste={!ended} />
       {ended && (
-        <div className="terminal-ended">
-          {ended.kind === "exit" ? <strong>进程已退出{typeof ended.code === "number" ? `（代码 ${ended.code}）` : ""}</strong> : <strong>终端不可用</strong>}
-          {ended.kind === "error" && <span>{ended.message}</span>}
+        <div className="terminal-status-bar" role="status">
+          <div className="terminal-status-text">
+            {ended.kind === "exit" ? <strong>进程已退出{typeof ended.code === "number" ? `（代码 ${ended.code}）` : ""}</strong> : <strong>终端不可用</strong>}
+            {ended.kind === "error" && <span>{ended.message}</span>}
+          </div>
           <button type="button" className="primary-button" onClick={() => setRestartNonce((nonce) => nonce + 1)}><RotateCw size={14} />重新启动</button>
         </div>
       )}

@@ -3,6 +3,8 @@ import { useOverlayLayer } from "../lib/overlay-layers";
 
 export interface ContextMenuItem {
   label: string;
+  /** 右侧快捷键提示（如 Ctrl+C）：只做展示，不参与点击。 */
+  hint?: string;
   danger?: boolean;
   /** 置灰不可点（如分屏格满时的「分屏到右侧」）。 */
   disabled?: boolean;
@@ -30,7 +32,8 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps): ReactNo
       >
         {items.map((item) => (
           <button key={item.label} type="button" className={`context-menu-item${item.danger ? " danger" : ""}`} role="menuitem" aria-disabled={item.disabled} disabled={item.disabled} onClick={() => { if (item.disabled) return; onClose(); item.onClick(); }}>
-            {item.label}
+            <span className="context-menu-label">{item.label}</span>
+            {item.hint && <span className="context-menu-hint">{item.hint}</span>}
           </button>
         ))}
       </div>

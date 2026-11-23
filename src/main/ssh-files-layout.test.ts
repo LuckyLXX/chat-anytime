@@ -40,10 +40,15 @@ describe("SSH files panel layout contract", () => {
     expect(drawer).toContain("flex:");
   });
 
-  it("终端区域是竖向 flex，终端本体可伸缩（分屏后自动让出高度）", () => {
-    expect(ruleBody(".ssh-terminal-pane")).toContain("flex-direction: column");
-    // 终端本体必须 flex 伸缩且 min-height:0，否则内容撑开导致面板被挤出视口。
-    const xterm = ruleBody(".ssh-terminal-pane .terminal-xterm");
+  it("终端区域是竖向 flex，终端外壳可伸缩（分屏后自动让出高度）", () => {
+    expect(ruleBody(".terminal-pane")).toContain("flex-direction: column");
+    // 2026-11-23 起终端多了一层外壳（`.terminal-shell`，剪贴板菜单/确认框的定位参照）：
+    // 外壳是 flex 项，xterm 本体在外壳内伸缩。两者都必须 min-height:0，否则内容
+    // 撑开导致面板被挤出视口。
+    const shell = ruleBody(".terminal-pane > .terminal-shell");
+    expect(shell).toContain("flex: 1 1 auto");
+    expect(shell).toContain("min-height: 0");
+    const xterm = ruleBody(".terminal-shell > .terminal-xterm");
     expect(xterm).toContain("flex: 1 1 auto");
     expect(xterm).toContain("min-height: 0");
   });

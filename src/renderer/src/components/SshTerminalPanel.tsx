@@ -36,6 +36,10 @@ type ConnectionState =
  * 分栏高度：拖动分隔条（`.ssh-files-splitter`）按**容器高度百分比**改文件面板的
  * flex-basis，比例存 localStorage（下次打开沿用），双击/回车复位 45%。百分比而非
  * 像素：终端面板会随窗口和工作区布局伸缩，像素值在矮窗口里会直接把 xterm 挤成 0。
+ *
+ * 断线提示（2026-11-23）：从全屏遮罩改成终端**下方**的状态条。遮罩会盖住 xterm，
+ * 用户想选中最后那段报错复制下来都不成；现在输出区仍然可选可复制，只把粘贴关闭
+ *（`canPaste={false}`），重连按钮保留在原位置。
  */
 
 const SPLIT_STORAGE_KEY = "pidesktop.sshFilesSplitPct";
@@ -191,7 +195,7 @@ export function SshTerminalPanel({ terminalId, hostId, hostName, workspace }: { 
 
   return (
     <div className="terminal-pane ssh-terminal-pane" data-pane="terminal" ref={(element) => { paneRef.current = element ?? undefined; }}>
-      <XtermView key={`${terminalId}-${restartNonce}`} onReady={handleReady} onInput={handleInput} onResize={handleResize} focus highlightPrompt />
+      <XtermView key={`${terminalId}-${restartNonce}`} onReady={handleReady} onInput={handleInput} onResize={handleResize} focus highlightPrompt canPaste={state.status === "connected"} />
       {/* 操作条：固定在终端下方，抽屉开关就在这里（所以永远不会被抽屉盖住）。 */}
       {state.status === "connected" && (
         <div className="ssh-actions-bar">
@@ -272,10 +276,15 @@ export function SshTerminalPanel({ terminalId, hostId, hostName, workspace }: { 
           </div>
         </div>
       )}
+      {/* 断线/失败提示：**下方状态条**，不是全屏遮罩 —— 全屏遮罩会拦住输出区的鼠标，
+          用户就没法选中最后那段报错去复制。终端本体留在上面，只关闭粘贴（连接已不在）。 */}
       {state.status === "closed" && (
-        <div className="terminal-ended">
-          <strong>{state.error ? "连接失败" : "连接已断开"}</strong>
-          {(state.error ?? state.detail) && <span>{state.error ?? state.detail}</span>}
+        <div className="terminal-status-bar" role="status">
+          <div className="terminal-status-text">
+            <strong>{state.error ? "连接失败" : "连接已断开"}</strong>
+            {(state.error ?? state.detail) && <span>{state.error ?? state.detail}</span>}
+            <span className="terminal-status-hint">上方输出仍可拖选复制，粘贴已禁用；点「重新连接」继续。</span>
+          </div>
           <button type="button" className="primary-button" onClick={() => { setRestartNonce((nonce) => nonce + 1); }}>
             <RotateCw size={14} />重新连接
           </button>
