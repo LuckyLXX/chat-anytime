@@ -1349,6 +1349,26 @@ export function createDemoApi(): DesktopApi {
         case "resources.reload":
           emit({ type: "resources", resources: structuredClone(demoResources) });
           break;
+        // Skill 详情：浏览器演示环境没有文件系统，用一条示例 SKILL.md + 示例附件把
+        // 页面形态演示出来（不伪造“真实路径”，路径字段留空）。
+        case "skill.inspect": {
+          const skill = demoResources.skills.find((item) => item.id === command.id);
+          emit({
+            type: "skill-detail",
+            detail: skill
+              ? {
+                  id: skill.id,
+                  filePath: "",
+                  content: `---\nname: ${skill.name}\ndescription: ${skill.description}\n---\n\n# ${skill.name}\n\n${skill.description}\n\n## 何时使用\n\n当用户提出与此能力相关的请求时使用。\n\n## 步骤\n\n1. 先读相关文件，理清现有做法。\n2. 执行并验证结果。\n3. 把结论写回记录。\n`,
+                  files: [
+                    { path: "references/notes.md", size: 2048 },
+                    { path: "scripts/run.py", size: 5120 }
+                  ]
+                }
+              : { id: command.id, filePath: "", content: "", files: [], error: "演示环境里找不到该 Skill" }
+          });
+          break;
+        }
         // Skill 商店：浏览器演示环境没有文件系统可写，也没有 Node 侧的网络代理。
         // 如实回「演示环境不支持」，**绝不伪造安装成功**（与 themeImport 同口径）。
         case "skill-store.list":

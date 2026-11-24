@@ -142,6 +142,7 @@ import type { SubagentDefinition, SubagentScope, DelegationProgress, SlashInvoca
 import type { SkillStoreResult } from "../shared/skill-store.js";
 import { SKILL_STORE_BASE_URL } from "../shared/skill-store.js";
 import { buildSkillsSystemPromptBlock, setSkillEnabled, type DiscoveredSkill } from "./skill-catalog.js";
+import { inspectSkill } from "./skill-inspect.js";
 import * as skillStoreClient from "./skill-store-client.js";
 import * as intranetSkillStoreClient from "./skill-store-intranet-client.js";
 import { installSkillFromStore, listInstallRecords, storeScopeRoot, uninstall as uninstallStoreSkill } from "./skill-store-install.js";
@@ -8191,6 +8192,18 @@ async function handleCommand(command: RuntimeCommand): Promise<void> {
       await runResourceOperation(command.enabled ? "正在启用 Skill" : "正在停用 Skill", async () => {
         setSkillEnabled(skillPaths().statePath, command.id, command.enabled);
         await reloadRuntimeResources();
+      });
+      break;
+    }
+    case "skill.inspect": {
+      // 设置页选中条目时按需读：只认目录里已有的 id（不接受任意路径），读失败也走
+      // 同一条推送（error 内联），渲染端只需要处理一种形态。
+      const skill = nativeSkills.find((item) => item.id === command.id);
+      post({
+        type: "skill-detail",
+        detail: skill
+          ? inspectSkill(skill)
+          : { id: command.id, filePath: "", content: "", files: [], error: "找不到该 Skill（可能已被删除，点「重载资源」刷新列表）" }
       });
       break;
     }

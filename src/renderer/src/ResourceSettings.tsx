@@ -1,8 +1,9 @@
-import { KeyRound, Pencil, Plus, Puzzle, RefreshCw, Search, Server, Trash2, X, Zap } from "lucide-react";
-import { useState, type FormEvent, type ReactNode } from "react";
+import { File, FileCode2, FileText, Image as ImageIcon, KeyRound, Paperclip, Pencil, Plus, Puzzle, RefreshCw, Search, Server, Trash2, X, Zap } from "lucide-react";
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { resourceScopeLabels } from "../../shared/locale";
 import type { CommandDraft, CommandSummary, McpServerConfigDraft, McpServerStatus, McpServerSummary, ResourceCatalog, RuntimeCommand, SkillSummary } from "../../shared/protocol";
-import { useDesktopStore } from "./store";
+import { MarkdownPreviewContent } from "./components/RichContent";
+import { clearSkillDetails, useDesktopStore } from "./store";
 
 /**
  * 资源设置三页（MCP Server / Skill / 自定义命令）。
@@ -23,6 +24,13 @@ import { useDesktopStore } from "./store";
  * 数据流与旧实现逐字节一致：resources.reload / mcp.server.* / skill.toggle /
  * command.* 的命令名与载荷不变；本组页面仍是「即改即发」（无整页保存底栏）。
  * `ResourceSettings` 作为 `McpSettings` 的兼容别名保留，供既有调用点与测试引用。
+ *
+ * 2026-11-24 Skill 页重排（用户口径：左栏去掉 `/skill:` 前缀、右栏要能看到
+ * SKILL.md 正文与附件清单、整页太挤）：左栏只显示 name，徽标从「已启用」
+ * （全列表同值，纯噪声）换成作用域；右栏改成「标题条（启用开关常驻）+ 概览 +
+ * SKILL.md（预览/源码）+ 附件清单 + 折叠的资源规则」。正文与附件不进
+ * ResourceCatalog（高频推送），选中时经 `skill.inspect` 按需读取、`skill-detail`
+ * 回推，失败同路带回 error。
  */
 
 interface ResourcePageProps {
@@ -80,6 +88,8 @@ interface SplitPageProps {
   onNew?(): void;
   detailTitle: string;
   detailSubtitle: string;
+  /** 标题条右侧的常驻操作（Skill 页的启用开关）：不随正文滚走。 */
+  detailActions?: ReactNode;
   detail: ReactNode;
 }
 
@@ -87,7 +97,7 @@ interface SplitPageProps {
 function SplitPage({
   title, description, count, controlsBusy, localError, onReload,
   query, onQuery, searchPlaceholder, railEmpty, railItems,
-  newLabel, newControl, onNew, detailTitle, detailSubtitle, detail
+  newLabel, newControl, onNew, detailTitle, detailSubtitle, detailActions, detail
 }: SplitPageProps): ReactNode {
   return (
     <div className="resource-page resource-split-page" data-pane="resource-settings">
@@ -117,6 +127,7 @@ function SplitPage({
         <section className="resource-split-detail" aria-label={`${title}详情`}>
           <header className="resource-split-detail-bar">
             <span className="resource-split-detail-title"><strong>{detailTitle}</strong><small>{detailSubtitle}</small></span>
+            {detailActions}
           </header>
           <div className="resource-split-detail-body">
             {localError && <p className="form-error resource-error">{localError}</p>}
@@ -134,12 +145,14 @@ interface SplitRailItemProps {
   subtitle: string;
   active: boolean;
   badge?: ReactNode;
+  /** 停用条目的压暗态（不改变选中态，只在视觉上区分）。 */
+  muted?: boolean;
   onClick(): void;
 }
 
-function SplitRailItem({ icon, title, subtitle, active, badge, onClick }: SplitRailItemProps): ReactNode {
+function SplitRailItem({ icon, title, subtitle, active, badge, muted, onClick }: SplitRailItemProps): ReactNode {
   return (
-    <button type="button" className={active ? "resource-split-rail-item active" : "resource-split-rail-item"} onClick={onClick}>
+    <button type="button" className={["resource-split-rail-item", active && "active", muted && "is-muted"].filter(Boolean).join(" ")} onClick={onClick}>
       <span className="resource-split-rail-icon">{icon}</span>
       <span className="resource-split-rail-copy"><strong>{title}</strong><small>{subtitle}</small></span>
       {badge}
@@ -484,31 +497,110 @@ export function SkillSettings({ resources }: ResourcePageProps): ReactNode {
   const { run, controlsBusy, localError } = useResourceRunner("资源操作失败");
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string>();
+  const [view, setView] = useState<"preview" | "source">("preview");
   const skills = resources.skills;
   const visibleSkills = skills.filter((skill) => `${skill.name} ${skill.description}`.toLowerCase().includes(query.trim().toLowerCase()));
   const selected: SkillSummary | undefined = skills.find((skill) => skill.id === selectedId) ?? skills[0];
+  // 正文与附件清单按需读取（目录推送不带正文）：缓存放在 store，按 id 归位。
+  const detail = useDesktopStore((state) => (selected ? state.skillDetails[selected.id] : undefined));
+
+  useEffect(() => {
+    if (!selected || detail) return;
+    void window.piDesktop.send({ type: "skill.inspect", id: selected.id });
+  }, [selected?.id, detail]);
 
   const railItems = visibleSkills.map((skill) => (
     <SplitRailItem
       key={skill.id}
       icon={<Puzzle size={13} />}
-      title={`/skill:${skill.name}`}
+      title={skill.name}
       subtitle={skill.description || "未填写说明"}
       active={selected?.id === skill.id}
-      badge={<em className={skill.enabled ? "resource-split-rail-badge" : "resource-split-rail-badge off"}>{skill.enabled ? "已启用" : "已停用"}</em>}
+      muted={!skill.enabled}
+      // 全部条目都挂「已启用」纯噪声：徽标改显示作用域，停用项才报「停用」。
+      badge={<em className={skill.enabled ? "resource-split-rail-badge scope" : "resource-split-rail-badge off"}>{skill.enabled ? resourceScopeLabels[skill.scope] : "停用"}</em>}
       onClick={() => setSelectedId(skill.id)}
     />
   ));
 
-  const detail = selected
+  const files = detail?.files ?? [];
+  const filesBytes = files.reduce((sum, file) => sum + file.size, 0);
+  // 附件卡右上角的一行小结：读取失败时不能报「无附带文件」（那是说谎）。
+  const filesSummary = !detail
+    ? "读取中…"
+    : detail.error
+      ? "读取失败"
+      : files.length === 0
+        ? "无附带文件"
+        : `${files.length}${detail.filesTruncated ? "+" : ""} 个文件 · ${formatBytes(filesBytes)}`;
+
+  /** 重读 SKILL.md（文件可能在外部被编辑过；目录本身没变化，不必重载资源）。 */
+  function reloadDetail(): void {
+    if (selected) void window.piDesktop.send({ type: "skill.inspect", id: selected.id });
+  }
+
+  const detailNode = selected
     ? (
-      <div className="resource-split-detail-stack">
-        <div className="resource-item" data-skill-id={selected.id}>
-          <div className="resource-item-icon"><Puzzle size={14} /></div>
-          <div className="resource-item-copy"><strong>/skill:{selected.name}</strong><small>{selected.description}</small><em>{resourceScopeLabels[selected.scope]} · {selected.source}{selected.disableModelInvocation ? " · 仅手动调用" : ""}</em></div>
-          <label className="resource-toggle" title={selected.toggleable ? undefined : "该 Skill 由运行时动态提供，不可关闭"}><input type="checkbox" checked={selected.enabled} disabled={controlsBusy || !selected.toggleable} onChange={(event) => void run({ type: "skill.toggle", id: selected.id, enabled: event.target.checked })} /><span>启用</span></label>
-        </div>
-        <p className="resource-form-help">把 <code>{`<slug>/SKILL.md`}</code> 放到全局目录 <code>pidesktop-skills/</code>、共享目录 <code>~/.agents/skills/</code> 或项目目录 <code>.pidesktop-skills/</code> 即可被发现，启用后会注入系统提示供模型调用。标「内置」的是随应用分发的内置 Skill（安装目录 <code>resources/skills/</code>）；要改内置内容，把它的目录复制到全局目录 <code>pidesktop-skills/</code> 即可覆盖（同名优先级：当前项目 &gt; 全局 &gt; 内置 &gt; 共享）。</p>
+      <div className="skill-detail" data-skill-id={selected.id}>
+        <section className="skill-overview">
+          <p className="skill-overview-text">{selected.description || "未填写说明"}</p>
+          <div className="skill-meta">
+            <span><em>来源</em>{selected.source}</span>
+            <span><em>作用域</em>{resourceScopeLabels[selected.scope]}</span>
+            <span><em>调用</em><code>{`/skill:${selected.name}`}</code></span>
+            {selected.disableModelInvocation && <span><em>模型调用</em>仅手动</span>}
+          </div>
+          {selected.filePath && <code className="skill-path" title={selected.filePath}>{selected.filePath}</code>}
+        </section>
+
+        <section className="resource-card skill-card skill-content-card">
+          <header className="resource-card-head">
+            <span className="resource-card-title"><FileText size={13} /><strong>SKILL.md</strong></span>
+            <small>{detail ? (detail.error ? "读取失败" : `${formatBytes(contentBytes(detail.content))} · ${detail.content.split(/\r?\n/u).length} 行`) : "读取中…"}</small>
+            <div className="resource-card-actions">
+              <div className="skill-view-switch" role="group" aria-label="SKILL.md 显示方式">
+                <button type="button" className={view === "preview" ? "active" : ""} aria-pressed={view === "preview"} onClick={() => setView("preview")}>预览</button>
+                <button type="button" className={view === "source" ? "active" : ""} aria-pressed={view === "source"} onClick={() => setView("source")}>源码</button>
+              </div>
+              <button className="icon-button" type="button" title="重新读取 SKILL.md" aria-label="重新读取 SKILL.md" onClick={reloadDetail}><RefreshCw size={13} /></button>
+            </div>
+          </header>
+          <div className="skill-content-body">
+            {!detail
+              ? <p className="skill-note">正在读取 SKILL.md…</p>
+              : detail.error
+                ? <p className="skill-error">{detail.error}</p>
+                : view === "source"
+                  ? <pre className="resource-split-template skill-source"><code>{detail.content}</code></pre>
+                  : <MarkdownPreviewContent content={stripFrontmatter(detail.content)} windowed={false} artifactPrefix={`skill-${selected.id}`} onOpenArtifact={ignoreArtifact} />}
+            {detail?.contentTruncated && <p className="skill-note">SKILL.md 较大，此处只显示前面一部分；完整内容请直接打开上面的路径。</p>}
+          </div>
+        </section>
+
+        <section className="resource-card skill-card skill-files-card">
+          <header className="resource-card-head">
+            <span className="resource-card-title"><Paperclip size={13} /><strong>附件</strong></span>
+            <small>{filesSummary}</small>
+          </header>
+          {files.length > 0 && (
+            <ul className="skill-file-list">
+              {files.map((file) => (
+                <li key={file.path}>
+                  <span className="skill-file-icon">{skillFileIcon(file.path)}</span>
+                  <code>{file.path}</code>
+                  <em>{formatBytes(file.size)}</em>
+                </li>
+              ))}
+            </ul>
+          )}
+          {detail && files.length === 0 && !detail.error && <div className="skill-content-body"><p className="skill-note">这个 Skill 只包含 SKILL.md，没有附带文件。</p></div>}
+          {detail?.filesTruncated && <div className="skill-content-body"><p className="skill-note">附件较多，此处只列出一部分；完整清单请直接打开上面的路径。</p></div>}
+        </section>
+
+        <details className="skill-rules">
+          <summary>Skill 从哪里来、怎么生效</summary>
+          <p>把 <code>{`<slug>/SKILL.md`}</code> 放到全局目录 <code>pidesktop-skills/</code>、共享目录 <code>~/.agents/skills/</code> 或项目目录 <code>.pidesktop-skills/</code> 即可被发现，启用后会注入系统提示供模型调用。标「内置」的是随应用分发的内置 Skill（安装目录 <code>resources/skills/</code>）；要改内置内容，把它的目录复制到全局目录 <code>pidesktop-skills/</code> 即可覆盖（同名优先级：当前项目 &gt; 全局 &gt; 内置 &gt; 共享）。</p>
+        </details>
         {resources.diagnostics.length > 0 && <div className="resource-diagnostics"><strong>资源诊断</strong>{resources.diagnostics.map((diagnostic) => <p key={diagnostic}>{diagnostic}</p>)}</div>}
       </div>
     )
@@ -521,17 +613,52 @@ export function SkillSettings({ resources }: ResourcePageProps): ReactNode {
       count={skills.length}
       controlsBusy={controlsBusy}
       localError={localError}
-      onReload={() => void run({ type: "resources.reload" })}
+      // SKILL.md 可能刚在外部改过：重载资源前先清详情缓存，选中效应会重新读取。
+      onReload={() => { clearSkillDetails(); void run({ type: "resources.reload" }); }}
       query={query}
       onQuery={setQuery}
       searchPlaceholder="搜索 Skill 名称或说明"
       railEmpty="当前没有发现 Skill"
       railItems={railItems}
-      detailTitle={selected ? `/skill:${selected.name}` : "Skill"}
-      detailSubtitle="选中左侧条目查看来源与作用域；启用开关即时生效"
-      detail={detail}
+      detailTitle={selected?.name ?? "Skill"}
+      detailSubtitle={selected ? "SKILL.md 正文与附件清单按需读取；启用开关即时生效" : "选中左侧条目查看内容与附件"}
+      detailActions={selected && (
+        <label className="resource-switch" title={selected.toggleable ? "启用后注入系统提示，模型可按需调用" : "该 Skill 由运行时动态提供，不可关闭"}>
+          <input type="checkbox" checked={selected.enabled} disabled={controlsBusy || !selected.toggleable} onChange={(event) => void run({ type: "skill.toggle", id: selected.id, enabled: event.target.checked })} />
+          <span>{selected.enabled ? "已启用" : "已停用"}</span>
+        </label>
+      )}
+      detail={detailNode}
     />
   );
+}
+
+/** 设置页没有预览面板：SKILL.md 里的 HTML 围栏会渲染成 artifact 卡，点击不做事（也不该做事）。 */
+function ignoreArtifact(): void {}
+
+/** SKILL.md 的 frontmatter 在渲染预览里是噪音（name/description 已在概览展示）；源码视图保留原文。 */
+function stripFrontmatter(content: string): string {
+  return content.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/u, "");
+}
+
+/** 附件行图标：只按扩展名粗分三类，足够扫读（不解析文件内容）。 */
+function skillFileIcon(path: string): ReactNode {
+  const extension = path.slice(path.lastIndexOf(".") + 1).toLowerCase();
+  if (["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico"].includes(extension)) return <ImageIcon size={13} />;
+  if (["ts", "tsx", "js", "jsx", "mjs", "py", "sh", "ps1", "css", "html", "sql", "json"].includes(extension)) return <FileCode2 size={13} />;
+  if (["md", "markdown", "txt", "yaml", "yml", "toml", "ini", "csv"].includes(extension)) return <FileText size={13} />;
+  return <File size={13} />;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/** 正文字节数（UTF-8）：中文 SKILL.md 的「字符数」与文件大小差三倍，展示必须按字节。 */
+function contentBytes(content: string): number {
+  return new TextEncoder().encode(content).length;
 }
 
 /* ============================================================================

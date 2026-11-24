@@ -2340,6 +2340,60 @@ html[data-ui-motion="off"] .general-jev-toggle .chevron { transition: none; }
 .resource-split-page .resource-split-detail-body .tool-grid label { margin: 0; }
 @media (max-width: 900px) { .resource-split-page .resource-split-layout { grid-template-columns: 200px minmax(0, 1fr); } }
 
+/* ============================================================
+   Skill 详情页（2026-11-24 重排，用户口径：左栏去掉 /skill: 前缀、右栏要能看到
+   SKILL.md 与附件清单、整页别挤）。
+   结构：固定标题条（名称 + 启用开关常驻）→ 概览 → SKILL.md 卡（预览/源码）→
+   附件卡 → 折叠的资源规则；正文随 .resource-split-detail-body 单一滚动。
+   规则全部带 .resource-split-page 前缀（≥(0,2,0)），压过 .settings-dialog
+   label/input/button/p 的 (0,1,1) 全局副作用（38px 输入框、15px 18px 外边距）。
+   ============================================================ */
+.resource-split-page .skill-detail { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.resource-split-page .skill-overview { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.resource-split-page .skill-overview-text { margin: 0; color: var(--text); font-size: 12px; line-height: 1.55; }
+.resource-split-page .skill-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.resource-split-page .skill-meta > span { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; color: var(--text); border: 1px solid var(--border); border-radius: 999px; background: var(--surface-raised); font-size: 10.5px; line-height: 1.5; }
+.resource-split-page .skill-meta em { color: var(--text-muted); font-style: normal; }
+.resource-split-page .skill-path { display: block; margin: 0; padding: 5px 8px; overflow-wrap: anywhere; color: var(--text-muted); border-radius: 6px; background: var(--surface-muted); font-family: ui-monospace, "Cascadia Mono", "Consolas", monospace; font-size: 10.5px; line-height: 1.5; }
+/* 预览/源码切换（同 .session-view-switch 形态，尺寸缩一档贴合卡片头） */
+.resource-split-page .skill-view-switch { display: inline-flex; align-items: center; gap: 2px; padding: 2px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
+.resource-split-page .skill-view-switch button { display: inline-flex; align-items: center; height: 21px; min-height: 21px; margin: 0; padding: 0 8px; border: 0; border-radius: 4px; color: var(--text-muted); background: transparent; font-size: 10.5px; font-weight: 650; cursor: pointer; }
+.resource-split-page .skill-view-switch button:hover { color: var(--text); background: var(--surface-button-hover); }
+.resource-split-page .skill-view-switch button.active { color: var(--accent-text); background: var(--accent-soft); }
+.resource-split-page .skill-content-body { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 11px 12px; }
+.resource-split-page .skill-content-body .rich-content { font-size: 12px; line-height: 1.6; }
+.resource-split-page .skill-content-body .rich-content h1 { font-size: 16px; }
+.resource-split-page .skill-content-body .rich-content h2 { font-size: 14px; }
+.resource-split-page .skill-content-body .rich-content h3 { font-size: 12.5px; }
+.resource-split-page .skill-source { max-height: none; padding: 0; border: 0; background: transparent; font-size: 11px; line-height: 1.6; }
+.resource-split-page .skill-note { margin: 0; color: var(--text-muted); font-size: 10.5px; line-height: 1.55; }
+.resource-split-page .skill-error { margin: 0; color: var(--danger); font-size: 11px; line-height: 1.55; }
+/* 附件清单：整宽行 + 分隔线（不嵌二级滚动，跟着详情区一起滚） */
+.resource-split-page .skill-file-list { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
+.resource-split-page .skill-file-list li { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 6px 12px; border-top: 1px solid var(--border); }
+.resource-split-page .skill-file-list li:first-child { border-top: 0; }
+.resource-split-page .skill-file-icon { display: grid; flex: 0 0 auto; place-items: center; width: 20px; height: 20px; color: var(--accent-text); border-radius: 5px; background: var(--accent-soft); }
+.resource-split-page .skill-file-list code { flex: 1 1 auto; min-width: 0; margin: 0; overflow: hidden; color: var(--text); background: transparent; font-family: ui-monospace, "Cascadia Mono", "Consolas", monospace; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.resource-split-page .skill-file-list em { flex: 0 0 auto; color: var(--text-muted); font-size: 10px; font-style: normal; }
+/* 折叠的资源规则（原来是一大段帮助文字，挤在详情页中段） */
+.resource-split-page .skill-rules { border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.resource-split-page .skill-rules > summary { padding: 9px 12px; color: var(--text-muted); font-size: 11px; font-weight: 600; cursor: pointer; }
+.resource-split-page .skill-rules[open] > summary { border-bottom: 1px solid var(--border); }
+.resource-split-page .skill-rules > p { margin: 0; padding: 10px 12px; color: var(--text-muted); font-size: 10.5px; line-height: 1.55; }
+/* 标题条的常驻启用开关（同 agent-switch / general-switch 形态） */
+.resource-split-page .resource-switch { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 7px; margin: 0; color: var(--text-muted); font-size: 10.5px; font-weight: 650; white-space: nowrap; cursor: pointer; }
+.resource-split-page .resource-switch input { flex: 0 0 auto; width: 32px; height: 18px; margin: 0; padding: 0; appearance: none; border: 0; border-radius: 999px; background: var(--border-strong); cursor: pointer; transition: background .15s ease; }
+.resource-split-page .resource-switch input::after { display: block; width: 14px; height: 14px; margin: 2px; border-radius: 50%; background: #fff; content: ""; transition: transform .15s ease; }
+.resource-split-page .resource-switch input:checked { background: var(--accent); }
+.resource-split-page .resource-switch input:checked::after { transform: translateX(14px); }
+.resource-split-page .resource-switch input:disabled { cursor: default; opacity: .55; }
+.resource-split-page .resource-switch input:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+html[data-ui-motion="off"] .resource-split-page .resource-switch input, html[data-ui-motion="off"] .resource-split-page .resource-switch input::after { transition: none; }
+/* 左栏：作用域徽标（中性色，与停用徽标区分）与停用行的压暗 */
+.resource-split-page .resource-split-rail-badge.scope { color: var(--text-muted); background: var(--surface-muted); }
+.resource-split-page .resource-split-rail-item.is-muted .resource-split-rail-copy { opacity: .62; }
+.resource-split-page .resource-split-rail-item.is-muted .resource-split-rail-icon { opacity: .5; }
+
 .resource-card { flex: 0 0 auto; overflow: hidden; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
 .resource-card-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 9px; padding: 9px 12px; border-bottom: 1px solid var(--border); }
 .resource-card-title { display: inline-flex; align-items: center; gap: 6px; color: var(--accent-text); }

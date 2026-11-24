@@ -1942,6 +1942,35 @@ export interface SkillSummary {
   disableModelInvocation: boolean;
 }
 
+/**
+ * Skill 目录里的一个附件文件（SKILL.md 之外的可见文件）。
+ * 路径统一用 `/` 分隔（相对 skill 目录），渲染端只展示、不据此读盘。
+ */
+export interface SkillFileEntry {
+  path: string;
+  size: number;
+}
+
+/**
+ * Skill 详情：设置页选中某个 Skill 时按需读取（`skill.inspect` → `skill-detail`）。
+ * 不进 ResourceCatalog——目录是高频推送，把 26 份 SKILL.md 每次都带上纯属浪费。
+ */
+export interface SkillDetail {
+  /** 与请求同源的 SkillSummary.id（渲染端据此归位，连点不同条目不会串台）。 */
+  id: string;
+  /** SKILL.md 绝对路径（成功读取时给出）。 */
+  filePath: string;
+  /** SKILL.md 正文；读取失败为空串，超限时截断（contentTruncated=true）。 */
+  content: string;
+  contentTruncated?: boolean;
+  /** SKILL.md 之外的附件（已过滤缓存目录与隐藏文件），按路径排序。 */
+  files: SkillFileEntry[];
+  /** 附件数量超上限时截断（只列前 SKILL_FILES_MAX 个）。 */
+  filesTruncated?: boolean;
+  /** 读取失败原因（文件已删除、无路径等）；成功时不带。 */
+  error?: string;
+}
+
 /** 自定义斜杠命令摘要（命令目录下的 md 模板文件）。 */
 export interface CommandSummary {
   /** 命令名 = md 文件名去扩展；斜杠菜单展示为 /<name>。 */
@@ -2975,6 +3004,8 @@ export type RuntimeCommand =
   | { type: "command.save"; command: CommandDraft; sessionId?: string }
   | { type: "command.delete"; name: string; scope: "project" | "global"; sessionId?: string }
   | { type: "skill.toggle"; id: string; enabled: boolean }
+  /** 按需读取 Skill 详情（SKILL.md 正文 + 附件清单），结果经 skill-detail 推送。 */
+  | { type: "skill.inspect"; id: string }
   // —— Skill 商店（SkillHub Open API）：浏览/搜索/详情/安装/卸载。结果**不走命令返回**
   // （runtime:send 永不 reject），全部以 {type:"skill-store-result", requestId, …} 推送回
   // 渲染端；requestId 由渲染端生成并原样带回，避免列表/详情/安装并发时状态串台。 ——
@@ -3126,6 +3157,8 @@ export type RuntimeMessage =
    */
   | { type: "sessions.live"; sessions: PanelSessionLive[] }
   | { type: "resources"; resources: ResourceCatalog }
+  /** Skill 详情读取回执（响应 skill.inspect；失败也走这条，error 内联）。 */
+  | { type: "skill-detail"; detail: SkillDetail }
   /** Skill 商店结果（响应 skill-store.* 命令；requestId 与请求原样带回，见 shared/skill-store.ts）。 */
   | { type: "skill-store-result"; result: SkillStoreResult }
   /** 停止受理回执（按成员或按任务）：delivered = 受理进入 stopping，其余为明确拒绝原因。 */

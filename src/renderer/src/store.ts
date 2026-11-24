@@ -31,6 +31,7 @@ import type {
   RuntimeSnapshot,
   SessionPaneSnapshot,
   SessionSearchHit,
+  SkillDetail,
   SkillStoreCategory,
   SkillStoreDetail,
   SkillStoreFile,
@@ -597,6 +598,11 @@ interface DesktopState {
   models: ModelOption[];
   providers: ProviderOption[];
   resources: ResourceCatalog;
+  /**
+   * Skill 详情按需缓存：`skill.id` → SKILL.md 正文 + 附件清单（响应 skill.inspect）。
+   * 与 ResourceCatalog 分开：目录是高频推送，正文只在设置页选中时读一次。
+   */
+  skillDetails: Record<string, SkillDetail>;
   todos: Todo[];
   /** 会话全文检索状态（侧栏内联结果区）。 */
   sessionSearch: SessionSearchState;
@@ -907,6 +913,14 @@ export function pruneParkedPanels(keepIds: ReadonlySet<string>): void {
   });
 }
 
+/**
+ * 清空 Skill 详情缓存（设置页「重载资源」前调用）：SKILL.md 可能在外部被改过，
+ * 清掉后由详情页的选中效应重新拉取，同一条目也能看到新内容。
+ */
+export function clearSkillDetails(): void {
+  useDesktopStore.setState({ skillDetails: {} });
+}
+
 export const useDesktopStore = create<DesktopState>((set, get) => ({
   ready: false,
   appVersion: "",
@@ -916,6 +930,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   models: [],
   providers: [],
   resources: emptyResources,
+  skillDetails: {},
   todos: [],
   sessionSearch: { query: "", loading: false, hits: [] },
   paletteSearch: { query: "", loading: false, hits: [] },
@@ -1197,6 +1212,10 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
         break;
       case "resources":
         set({ resources: message.resources });
+        break;
+      case "skill-detail":
+        // 按 id 归位：用户连点不同条目时，晚到的旧回执不会覆盖当前选中项。
+        set((state) => ({ skillDetails: { ...state.skillDetails, [message.detail.id]: message.detail } }));
         break;
       case "automation":
         set({ automation: message.tasks });
