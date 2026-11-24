@@ -2409,6 +2409,8 @@ html[data-ui-motion="off"] .resource-split-page .resource-switch input, html[dat
 .resource-split-page .mcp-tool-list code { flex: 1 1 auto; min-width: 0; margin: 0; overflow: hidden; color: var(--text); background: transparent; font-family: ui-monospace, "Cascadia Mono", "Consolas", monospace; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .resource-split-page .mcp-tool-list em { flex: 0 0 auto; padding: 0 6px; color: var(--text-muted); border-radius: 999px; background: var(--surface-muted); font-size: 9.5px; font-style: normal; font-weight: 650; }
 .resource-split-page .mcp-tool-empty { margin: 0; color: var(--text-muted); font-size: 10.5px; line-height: 1.55; }
+/* 图例：三个标签的语义写在卡片底部（不靠 hover 才能看懂） */
+.resource-split-page .mcp-tool-legend { margin: 0; padding: 7px 12px 9px; border-top: 1px solid var(--border); color: var(--text-muted); font-size: 10.5px; line-height: 1.55; }
 
 .resource-card { flex: 0 0 auto; overflow: hidden; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
 .resource-card-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 9px; padding: 9px 12px; border-bottom: 1px solid var(--border); }

@@ -518,18 +518,29 @@ export function McpSettings({ resources }: ResourcePageProps): ReactNode {
           <small>{summary}</small>
         </header>
         {tools.length > 0 ? (
-          <ul className="mcp-tool-list">
-            {tools.map((tool) => {
-              const tag = tool.exposure === "codemode" ? "脚本" : tool.exposure === "hidden" ? "已关闭" : !tool.active ? "未激活" : undefined;
-              return (
-                <li key={tool.fullName} data-tool-active={tool.active ? "true" : "false"}>
-                  <span className={`mcp-tool-dot${tool.active ? " is-active" : ""}`} aria-hidden="true" />
-                  <code title={tool.fullName}>{tool.name}</code>
-                  {tag && <em>{tag}</em>}
-                </li>
-              );
-            })}
-          </ul>
+          <>
+            <ul className="mcp-tool-list">
+              {tools.map((tool) => {
+                const tag = tool.exposure === "codemode" ? "脚本" : tool.exposure === "hidden" ? "已关闭" : !tool.active ? "未生效" : undefined;
+                const hint = tool.exposure === "codemode"
+                  ? "脚本模式：工具已注册但不声明给模型，由 codemode 脚本检索调用"
+                  : tool.exposure === "hidden"
+                    ? "角色级关闭（hidden）：工具只在注册表里，既不声明给模型，也不能被脚本调用"
+                    : !tool.active
+                      ? "已注册但还没进入活动集：不声明给模型。通常是刚重连的瞬间，点「重载资源」刷新"
+                      : "直连：已声明给模型，每次请求都会带上它的 schema";
+                return (
+                  <li key={tool.fullName} title={`${tool.fullName}
+${hint}`} data-tool-active={tool.active ? "true" : "false"}>
+                    <span className={`mcp-tool-dot${tool.active ? " is-active" : ""}`} aria-hidden="true" />
+                    <code>{tool.name}</code>
+                    {tag && <em title={hint}>{tag}</em>}
+                  </li>
+                );
+              })}
+            </ul>
+            <p className="mcp-tool-legend">绿点 = 已声明给模型（每次请求都带它的 schema）；「脚本」= 走 codemode 调用、不占前缀；「已关闭」= 被角色级开关关掉；「未生效」= 已注册但还没进活动集，点「重载资源」刷新。</p>
+          </>
         ) : (
           <div className="resource-card-body"><p className="mcp-tool-empty">{disabled ? "服务器已停用，不注册工具。" : reported > 0 ? `运行时报告 ${reported} 个工具，但清单还没同步过来：先点右上「重载资源」；仍为空就重启应用（工具名由后台运行时提供）。` : server.status === "connected" ? "服务器已连接，但还没有注册到任何工具——可能需要重新连接或完成授权。" : "连接成功后，这里会列出该服务器注册到会话的工具。"}</p></div>
         )}

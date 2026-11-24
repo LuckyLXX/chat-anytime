@@ -445,7 +445,7 @@ const demoResources: ResourceCatalog = {
         { name: "search", fullName: "mcp__docs__search", active: true },
         { name: "fetch", fullName: "mcp__docs__fetch", active: true },
         { name: "list_pages", fullName: "mcp__docs__list_pages", active: true },
-        { name: "get_page", fullName: "mcp__docs__get_page", active: true },
+        { name: "get_page", fullName: "mcp__docs__get_page", active: false, exposure: "direct" },
         { name: "search_examples", fullName: "mcp__docs__search_examples", active: true },
         { name: "list_spaces", fullName: "mcp__docs__list_spaces", active: true },
         { name: "export_markdown", fullName: "mcp__docs__export_markdown", active: false, exposure: "codemode" },

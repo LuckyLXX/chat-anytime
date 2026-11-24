@@ -254,17 +254,24 @@ describe("MCP 详情页工具清单", () => {
         { name: "fetch", fullName: "mcp__docs__fetch", active: true },
         { name: "search", fullName: "mcp__docs__search", active: true },
         { name: "bulk_export", fullName: "mcp__docs__bulk_export", active: false, exposure: "codemode" },
-        { name: "raw_diff", fullName: "mcp__docs__raw_diff", active: false, exposure: "hidden" }
+        { name: "raw_diff", fullName: "mcp__docs__raw_diff", active: false, exposure: "hidden" },
+        { name: "fresh", fullName: "mcp__docs__fresh", active: false, exposure: "direct" }
       ]
     })]);
 
     const rows = [...container.querySelectorAll("[data-mcp-tools='docs'] .mcp-tool-list li")];
-    expect(rows.map((row) => row.querySelector("code")?.textContent)).toEqual(["fetch", "search", "bulk_export", "raw_diff"]);
-    expect(rows[0]?.querySelector("code")?.getAttribute("title")).toBe("mcp__docs__fetch");
+    expect(rows.map((row) => row.querySelector("code")?.textContent)).toEqual(["fetch", "search", "bulk_export", "raw_diff", "fresh"]);
+    // 全名与状态解释都在 title 里（不占版面也能查）
+    expect(rows[0]?.getAttribute("title")).toContain("mcp__docs__fetch");
+    expect(rows[0]?.getAttribute("title")).toContain("已声明给模型");
     expect(rows[0]?.querySelector(".mcp-tool-dot")?.className).toContain("is-active");
     expect(rows[2]?.querySelector(".mcp-tool-dot")?.className).not.toContain("is-active");
     expect(rows[2]?.querySelector("em")?.textContent).toBe("脚本");
     expect(rows[3]?.querySelector("em")?.textContent).toBe("已关闭");
+    expect(rows[4]?.querySelector("em")?.textContent).toBe("未生效");
+    expect(rows[4]?.querySelector("em")?.getAttribute("title")).toContain("还没进入活动集");
+    // 图例常驻：三个标签的语义不靠 hover 才能读到
+    expect(container.querySelector("[data-mcp-tools='docs'] .mcp-tool-legend")?.textContent).toContain("未生效");
     expect(container.querySelector("[data-mcp-tools='docs'] .resource-card-head small")?.textContent).toContain("2 个已声明");
   });
 
