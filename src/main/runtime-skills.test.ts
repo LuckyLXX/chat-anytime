@@ -39,7 +39,7 @@ describe("skillPathsFor", () => {
 describe("bundled skill assets (repo contract)", () => {
   const repoRoot = resolve(__dirname, "../..");
   const skillsRoot = join(repoRoot, "resources", "skills");
-  const bundledSlugs = ["automation", "chatanytime-config", "computer-use", "gallery-publish", "pidesktop-theme-creator", "web-tasks"];
+  const bundledSlugs = ["automation", "chatanytime-config", "computer-use", "gallery-publish", "memory-organize", "pidesktop-theme-creator", "web-tasks"];
 
   it("ships the bundled skill dirs with their runtime assets", () => {
     // 这些路径是发行契约：electron-builder 的 extraResources 把 resources/skills

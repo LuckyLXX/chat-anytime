@@ -299,6 +299,7 @@ const REQUIRED_SKILLS = [
   'computer-use/uia.py',
   'computer-use/ui_detect.py',
   'computer-use/test/selfcheck.py',
+  'memory-organize/SKILL.md',
   'web-tasks/SKILL.md'
 ]
 const REQUIRED_SUBAGENTS = [

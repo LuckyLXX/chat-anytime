@@ -135,3 +135,5 @@
 | 并行会话下的提交纪律 / CRLF | PiDesktop 混合工作区提交纪律 |
 
 专题文档：主题创作 `docs/theme-guide.md`；桌面控制 `resources/skills/computer-use/SKILL.md` + `test/selfcheck.py`；发布检查 `.github/scripts/verify-package.cjs`；历史与取证 `docs/迭代记录.md`（含沉淀索引）与 `docs/迭代记录/YYYY-MM.md`；方案与设计稿 `docs/plans/`。
+
+内置 Skill 三处同步：`resources/skills/<slug>/`、`runtime-skills.test.ts` 的 `bundledSlugs`、`verify-package.cjs` 的 `REQUIRED_SKILLS`——新增/改名时一起改，漏后两处会让测试与打包校验对新增资产静默失效。
