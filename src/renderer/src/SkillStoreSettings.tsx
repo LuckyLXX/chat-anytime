@@ -32,7 +32,7 @@ export function SkillStoreSettings(): ReactNode {
       <header className="resource-page-head">
         <span className="resource-page-title">
           <strong>Skill 商店</strong>
-          <small>来自 SkillHub（api.skillhub.cn）的公开技能；安装后在「技能与工具」里管理启用</small>
+          <small>来自 SkillHub（api.skillhub.cn）的公开技能；安装后在「Skill」菜单里管理启用</small>
         </span>
         <span className="resource-page-actions">
           <label className="skill-store-scope">

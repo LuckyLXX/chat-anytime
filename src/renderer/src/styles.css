@@ -2270,10 +2270,11 @@ html[data-ui-motion="off"] .general-jev-toggle .chevron { transition: none; }
 .model-settings .model-footer-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; }
 
 /* ============================================================
-   资源页骨架（技能与工具 / 子智能体 / 钩子三页共用，2026-09-23）。
-   三页结构同源：顶部固定条（标题 + 说明 + 动作）+ 可滚动正文，正文里每个
-   主题各一张 .resource-card 分区卡片。旧的 .resource-settings /
-   .resource-section* 三页迁完后删除。
+   资源页骨架（MCP Server / Skill / 自定义命令 / 子智能体 / 钩子）。
+   2026-11-23：前四页改两段式（.resource-split-layout：左栏逐条列表 + 右栏
+   编辑/详情），钩子页与商店页仍用单列 .resource-page-body + 分区卡片。
+   两代结构共用顶部固定条 .resource-page-head 与 .resource-card 卡片体系。
+   旧的 .resource-settings / .resource-section* 三页迁完后删除。
    注意两个历史特异性坑：① .settings-dialog label (0,1,1) 在 .mcp-form-grid
    label (0,1,1) 之后 —— 不显式压过就会给表单每行加「15px 18px」外边距；
    ② .settings-dialog input/select (0,1,1) 会把卡片里的输入框打回 38px 高，
@@ -2286,6 +2287,58 @@ html[data-ui-motion="off"] .general-jev-toggle .chevron { transition: none; }
 .resource-page-title small { color: var(--text-muted); font-size: 10.5px; line-height: 1.4; }
 .resource-page-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; }
 .resource-page-body { display: flex; flex: 1 1 auto; flex-direction: column; gap: 11px; min-height: 0; padding: 13px 16px 18px; overflow-y: auto; }
+
+/* ============================================================
+   两段式资源页（MCP Server / Skill / 自定义命令 / 子智能体，2026-11-23）。
+   与 .im-channel-layout / .agent-settings 同口径：根 .resource-page 负责 height:100%，
+   中段 .resource-split-layout 用 grid 分两栏，滚动各自收进 rail-list / detail-body，
+   页头与详情标题条固定不动。所有规则带 .resource-split-page 前缀（(0,2,x)），
+   压过 .settings-dialog label/input/button 的 (0,1,1) 全局副作用。
+   ============================================================ */
+.resource-split-page .resource-split-layout { display: grid; flex: 1 1 auto; grid-template-columns: 232px minmax(0, 1fr); min-height: 0; }
+.resource-split-page .resource-split-rail { display: flex; flex-direction: column; gap: 7px; min-height: 0; min-width: 0; padding: 11px 10px; border-right: 1px solid var(--border); background: var(--surface-muted); }
+.resource-split-page .resource-split-rail-head { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; padding: 0 4px 2px; color: var(--text-muted); font-size: 10.5px; font-weight: 700; }
+.resource-split-page .resource-split-rail-head > span { display: inline-grid; place-items: center; min-width: 17px; height: 15px; padding: 0 4px; border-radius: 99px; background: var(--surface-raised); color: var(--text-muted); font-size: 10px; }
+.resource-split-page .resource-split-rail-search { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; min-height: 28px; padding: 0 8px; color: var(--text-muted); border: 1px solid var(--border); border-radius: 6px; background: var(--surface-input); }
+.resource-split-page .resource-split-rail-search:focus-within { border-color: var(--accent); }
+.resource-split-page .resource-split-rail-search svg { flex: 0 0 auto; }
+.resource-split-page .resource-split-rail-search input { width: 100%; min-width: 0; height: 24px; padding: 0; margin: 0; border: 0; border-radius: 0; outline: 0; color: var(--text); background: transparent; font: inherit; font-size: 11px; font-weight: 400; }
+.resource-split-page .resource-split-rail-search input::placeholder { color: var(--text-muted); }
+.resource-split-page .resource-split-rail-list { display: flex; flex: 1 1 auto; flex-direction: column; gap: 3px; min-height: 0; overflow-y: auto; }
+.resource-split-page .resource-split-rail-empty { margin: 6px 2px; color: var(--text-muted); font-size: 11px; }
+.resource-split-page .resource-split-rail-item { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; align-items: center; gap: 8px; width: 100%; min-height: 42px; padding: 5px 7px; border: 1px solid transparent; border-radius: 6px; color: var(--text); background: transparent; text-align: left; cursor: pointer; }
+.resource-split-page .resource-split-rail-item:hover { background: var(--surface-raised); }
+.resource-split-page .resource-split-rail-item.active { border-color: var(--accent); background: var(--surface); box-shadow: inset 2px 0 0 var(--accent); }
+.resource-split-page .resource-split-rail-icon { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 6px; color: var(--accent-text); background: var(--accent-soft); }
+.resource-split-page .resource-split-rail-copy { display: grid; gap: 1px; min-width: 0; }
+.resource-split-page .resource-split-rail-copy strong { overflow: hidden; min-width: 0; font-size: 12px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.resource-split-page .resource-split-rail-copy small { overflow: hidden; color: var(--text-muted); font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }
+.resource-split-page .resource-split-rail-badge { flex: 0 0 auto; padding: 1px 5px; border-radius: 999px; color: var(--success); background: var(--success-soft); font-size: 9px; font-style: normal; font-weight: 700; white-space: nowrap; }
+.resource-split-page .resource-split-rail-badge.off { color: var(--text-muted); background: var(--surface-muted); }
+.resource-split-page .resource-split-rail-new { display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; gap: 4px; min-height: 32px; padding: 0 12px; color: var(--text-muted); border: 1px dashed var(--border-strong); border-radius: 6px; background: transparent; font-size: 11px; font-weight: 650; cursor: pointer; }
+.resource-split-page .resource-split-rail-new:hover { color: var(--accent-text); border-color: var(--accent); background: var(--accent-soft); }
+.resource-split-page .resource-split-detail { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.resource-split-page .resource-split-detail-bar { display: flex; flex: 0 0 auto; align-items: center; gap: 9px; padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--surface); }
+.resource-split-page .resource-split-detail-title { display: grid; flex: 1 1 auto; gap: 1px; min-width: 0; }
+.resource-split-page .resource-split-detail-title strong { overflow: hidden; color: var(--text); font-size: 13px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.resource-split-page .resource-split-detail-title small { overflow: hidden; color: var(--text-muted); font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }
+.resource-split-page .resource-split-detail-body { display: flex; flex: 1 1 auto; flex-direction: column; gap: 11px; min-height: 0; padding: 13px 16px 18px; overflow-y: auto; }
+.resource-split-page .resource-split-detail-stack { display: flex; flex-direction: column; gap: 11px; min-width: 0; }
+.resource-split-page .resource-split-template { margin: 0; padding: 10px 12px; overflow-x: auto; border: 1px solid var(--border); border-radius: 6px; color: var(--text-muted); background: var(--surface-muted); font-size: 10.5px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* 右栏卡片内的表单/列表沿用 .resource-page 既有规则：两级前缀同样压过全局 label/input。 */
+.resource-split-page .resource-split-detail-body .mcp-form-grid label { margin: 0; }
+.resource-split-page .resource-split-detail-body .mcp-form-grid input, .resource-split-page .resource-split-detail-body .mcp-form-grid select { height: 32px; padding: 0 9px; font-size: 12px; font-weight: 400; }
+.resource-split-page .resource-split-detail-body .mcp-form-grid textarea { padding: 8px 10px; font-size: 12px; font-weight: 400; line-height: 1.5; }
+.resource-split-page .resource-split-detail-body .resource-toggle { display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto; margin: 0; white-space: nowrap; }
+.resource-split-page .resource-split-detail-body .resource-toggle input { flex: 0 0 auto; width: 15px; height: 15px; padding: 0; }
+.resource-split-page .resource-split-detail-body .resource-item label { margin: 0; color: var(--text-muted); }
+.resource-split-page .resource-split-detail-body .mcp-form-wide { margin: 0; }
+.resource-split-page .resource-split-detail-body fieldset.mcp-form-wide { min-width: 0; margin: 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; }
+.resource-split-page .resource-split-detail-body fieldset legend { padding: 0 4px; color: var(--text-muted); font-size: 10px; font-weight: 700; }
+.resource-split-page .resource-split-detail-body .tool-toggle { display: inline-flex; align-items: center; gap: 5px; margin: 0; color: var(--text); font-size: 11px; font-weight: 500; cursor: pointer; }
+.resource-split-page .resource-split-detail-body .tool-toggle input { flex: 0 0 auto; width: 15px; height: 15px; padding: 0; }
+.resource-split-page .resource-split-detail-body .tool-grid label { margin: 0; }
+@media (max-width: 900px) { .resource-split-page .resource-split-layout { grid-template-columns: 200px minmax(0, 1fr); } }
 
 .resource-card { flex: 0 0 auto; overflow: hidden; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
 .resource-card-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 9px; padding: 9px 12px; border-bottom: 1px solid var(--border); }
