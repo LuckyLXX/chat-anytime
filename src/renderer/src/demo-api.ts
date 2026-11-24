@@ -439,7 +439,19 @@ const demoResources: ResourceCatalog = {
     { name: "review", description: "审查指定文件的改动（$ARGUMENTS 传入路径）", scope: "project", filePath: "./.pidesktop-commands/review.md", template: "审查以下文件的改动并指出风险：$ARGUMENTS" }
   ],
   mcpServers: [
-    { name: "docs", scope: "project", transport: "stdio", command: "npx", args: ["-y", "docs-mcp"], env: { DOCS_TOKEN: "demo-token" }, status: "connected", toolCount: 8, resourceCount: 2, disabled: false },
+    {
+      name: "docs", scope: "project", transport: "stdio", command: "npx", args: ["-y", "docs-mcp"], env: { DOCS_TOKEN: "demo-token" }, status: "connected", toolCount: 8, resourceCount: 2, disabled: false,
+      tools: [
+        { name: "search", fullName: "mcp__docs__search", active: true },
+        { name: "fetch", fullName: "mcp__docs__fetch", active: true },
+        { name: "list_pages", fullName: "mcp__docs__list_pages", active: true },
+        { name: "get_page", fullName: "mcp__docs__get_page", active: true },
+        { name: "search_examples", fullName: "mcp__docs__search_examples", active: true },
+        { name: "list_spaces", fullName: "mcp__docs__list_spaces", active: true },
+        { name: "export_markdown", fullName: "mcp__docs__export_markdown", active: false, exposure: "codemode" },
+        { name: "raw_diff", fullName: "mcp__docs__raw_diff", active: false, exposure: "hidden" }
+      ]
+    },
     { name: "browser", scope: "global", transport: "http", url: "https://mcp.example.com/mcp", auth: "none", headers: { "X-API-Key": "demo-key" }, status: "disabled", toolCount: 0, disabled: true },
     { name: "figma", scope: "global", transport: "http", url: "https://mcp.figma.com/mcp", auth: "oauth", status: "needs-auth", authState: "idle", toolCount: 0, disabled: false }
   ],
@@ -1586,6 +1598,12 @@ export function createDemoApi(): DesktopApi {
               server.status = "connected";
               server.authState = "authorized";
               server.toolCount = 4;
+              server.tools = [
+                { name: "get_file", fullName: "mcp__figma__get_file", active: true },
+                { name: "get_node", fullName: "mcp__figma__get_node", active: true },
+                { name: "list_comments", fullName: "mcp__figma__list_comments", active: true },
+                { name: "export_image", fullName: "mcp__figma__export_image", active: true }
+              ];
               emit({ type: "resources", resources: structuredClone(demoResources) });
             }, 2_500);
           }
@@ -1597,13 +1615,20 @@ export function createDemoApi(): DesktopApi {
             server.status = "needs-auth";
             server.authState = "idle";
             server.toolCount = 0;
+            server.tools = undefined;
           }
           emit({ type: "resources", resources: structuredClone(demoResources) });
           break;
         }
         case "mcp.server.toggle": {
           const server = demoResources.mcpServers.find((item) => item.name === command.name);
-          if (server) { server.disabled = !command.enabled; server.status = command.enabled ? "not-connected" : "disabled"; }
+          if (server) {
+            server.disabled = !command.enabled;
+            server.status = command.enabled ? "not-connected" : "disabled";
+            // 停用 = Pi 注销该服务器（工具从注册表移除）；重新启用要等连接后才有清单。
+            server.tools = command.enabled ? server.tools : undefined;
+            server.toolCount = command.enabled ? server.toolCount : 0;
+          }
           emit({ type: "resources", resources: structuredClone(demoResources) });
           break;
         }

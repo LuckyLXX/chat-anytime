@@ -243,3 +243,38 @@ describe("ResourceSettings 的 MCP 表单载荷", () => {
     expect(command.original).toEqual({ name: "exa", scope: "global" });
   });
 });
+
+describe("MCP 详情页工具清单", () => {
+  it("列出注册表里的工具：短名 + 全名 title + 活动点 + 脚本/关闭标签", async () => {
+    await render([serverSummary({
+      name: "docs",
+      status: "connected",
+      toolCount: 3,
+      tools: [
+        { name: "fetch", fullName: "mcp__docs__fetch", active: true },
+        { name: "search", fullName: "mcp__docs__search", active: true },
+        { name: "bulk_export", fullName: "mcp__docs__bulk_export", active: false, exposure: "codemode" },
+        { name: "raw_diff", fullName: "mcp__docs__raw_diff", active: false, exposure: "hidden" }
+      ]
+    })]);
+
+    const rows = [...container.querySelectorAll("[data-mcp-tools='docs'] .mcp-tool-list li")];
+    expect(rows.map((row) => row.querySelector("code")?.textContent)).toEqual(["fetch", "search", "bulk_export", "raw_diff"]);
+    expect(rows[0]?.querySelector("code")?.getAttribute("title")).toBe("mcp__docs__fetch");
+    expect(rows[0]?.querySelector(".mcp-tool-dot")?.className).toContain("is-active");
+    expect(rows[2]?.querySelector(".mcp-tool-dot")?.className).not.toContain("is-active");
+    expect(rows[2]?.querySelector("em")?.textContent).toBe("脚本");
+    expect(rows[3]?.querySelector("em")?.textContent).toBe("已关闭");
+    expect(container.querySelector("[data-mcp-tools='docs'] .resource-card-head small")?.textContent).toContain("2 个已声明");
+  });
+
+  it("没有工具时如实说明（已连接 / 未连接两种口径）", async () => {
+    await render([serverSummary({ name: "docs", status: "connected", toolCount: 0 })]);
+    expect(container.querySelector("[data-mcp-tools='docs'] .mcp-tool-empty")?.textContent).toContain("还没有注册到任何工具");
+
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await render([serverSummary({ name: "exa", status: "not-connected", toolCount: 0 })]);
+    expect(container.querySelector("[data-mcp-tools='exa'] .mcp-tool-empty")?.textContent).toContain("连接成功后");
+  });
+});

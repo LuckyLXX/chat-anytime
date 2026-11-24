@@ -55,6 +55,19 @@ describe("MCP 状态板解析接线", () => {
     expect(source).toContain('mode: "rpc",');
   });
 
+
+  it("工具清单来自会话工具注册表（活动会话优先，退到任一 live 会话）", () => {
+    const rebuild = functionBody("function rebuildMcpSummariesFromConfig(");
+    expect(rebuild).toContain("tools: mcpToolsFromRegistry(");
+    expect(rebuild).toContain("activeRuntime ?? [...liveSessions.values()][0]");
+    const helper = functionBody("function mcpToolsFromRegistry(");
+    expect(helper).toContain("runtimeMcp.groupMcpToolsByServer(");
+    expect(helper).toContain("record.session.getAllTools()");
+    expect(helper).toContain("record.session.getActiveToolNames()");
+    // 注册表读取失败不能拖垮目录刷新
+    expect(helper).toContain("return new Map();");
+  });
+
   it("销毁路径先 unregisterAll 再 dispose（否则 stdio 子进程泄漏）", () => {
     const body = functionBody("function disposeRecord(");
     const unregisterAt = body.indexOf("record.mcpBridgeControl?.unregisterAll()");

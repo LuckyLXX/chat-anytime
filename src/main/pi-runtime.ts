@@ -48,6 +48,7 @@ import type {
   HookRule,
   HookSummary,
   McpServerSummary,
+  McpToolSummary,
   MemoryOverview,
   MemoryOverviewAgent,
   MemoryLibrary,
@@ -1126,8 +1127,24 @@ function rebuildMcpSummariesFromConfig(): void {
     authPending: mcpAuthPending,
     // 「已授权」以 Pi 凭据文件里的 tokens 为准（只读、容错）：仅凭连接成功不算授权，
     // 否则非 OAuth 服务器（只带 X-API-Key 这类头）也会被显示成「清除凭据」。
-    authorized: runtimeMcp.authorizedMcpServers(runtimeMcp.readMcpAuthFile(getAgentDir()), configured)
+    authorized: runtimeMcp.authorizedMcpServers(runtimeMcp.readMcpAuthFile(getAgentDir()), configured),
+    // 工具清单来自会话注册表（Pi 的 MCP 扩展注册后才有；没连接时为空）。
+    // 取活动会话，没活动会话时退到任一 live 会话——同一配置的前缀名相同，
+    // parked 会话的注册表同样是可用的快照。
+    tools: mcpToolsFromRegistry(activeRuntime ?? [...liveSessions.values()][0])
   });
+}
+
+/** 把某个会话工具注册表里的 MCP 工具按服务器分组（无会话时返回空表）。 */
+function mcpToolsFromRegistry(record: SessionRuntimeRecord | undefined): Map<string, McpToolSummary[]> {
+  if (!record) return new Map();
+  try {
+    return runtimeMcp.groupMcpToolsByServer(record.session.getAllTools(), new Set(record.session.getActiveToolNames()));
+  } catch (error) {
+    // 注册表读取失败不能拖垮目录刷新（面板退化成「没有工具清单」）。
+    post({ type: "log", level: "warn", message: `读取 MCP 工具清单失败：${errorText(error)}` });
+    return new Map();
+  }
 }
 
 /**

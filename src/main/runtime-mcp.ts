@@ -8,7 +8,7 @@
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import type { McpServerSummary, McpServerConfigDraft, McpOAuthAdvanced } from "../shared/protocol.js";
+import type { McpServerSummary, McpServerConfigDraft, McpOAuthAdvanced, McpToolSummary } from "../shared/protocol.js";
 import { readConfiguredMcpServers, readMcpServerEntry, hasAuthorizationHeader, type McpServerConfigEntry, type ConfiguredMcpServer } from "./mcp-config.js";
 
 export function mcpConfigPathsFor(workspace: string | undefined, agentDir: string): { project: string; global: string } {
@@ -337,6 +337,55 @@ export function parseMcpStatusText(text: string): Map<string, ParsedMcpServerSta
 }
 
 // ---------------------------------------------------------------------------------------
+// 工具清单投影
+// ---------------------------------------------------------------------------------------
+
+/** 工具注册表的最小形状（Pi GetAllTools 的子集，只取这里需要的两个字段）。 */
+export interface McpRegistryToolLike {
+  name: string;
+  exposure?: string;
+}
+
+/** `mcp__<净化服务器名>__<工具名>`（Pi 的 createMcpToolName 同一规则）。 */
+const MCP_TOOL_NAME_PATTERN = /^mcp__([A-Za-z0-9_]+)__(.+)$/u;
+const MCP_EXPOSURES = new Set(["direct", "codemode", "deferred", "hidden"]);
+
+/**
+ * 配置里的服务器名 → 工具名前缀里的净化名。Pi 会把非 `[A-Za-z0-9_]` 字符（含 `-`）
+ * 换成 `_`（`createMcpToolName`），所以 `my-server` 的工具前缀是 `mcp__my_server__`。
+ * 两个服务器名净化后重名（`a-b` 与 `a_b`）时工具会归到同一组——Pi 本身也无法区分，
+ * 面板宁可多列也不静默丢掉。
+ */
+export function mcpToolServerKey(serverName: string): string {
+  return serverName.replace(/[^A-Za-z0-9_]/gu, "_");
+}
+
+/**
+ * 从工具注册表里挑出 MCP 工具并按服务器分组。
+ * `active` 来自会话的活动集（`getActiveToolNames()`）：codemode 只注册不声明，
+ * 与「未激活」在面板上的含义不同（看 exposure，不看 active）。
+ */
+export function groupMcpToolsByServer(tools: readonly McpRegistryToolLike[], active: ReadonlySet<string>): Map<string, McpToolSummary[]> {
+  const grouped = new Map<string, McpToolSummary[]>();
+  for (const tool of tools) {
+    const match = MCP_TOOL_NAME_PATTERN.exec(tool.name);
+    if (!match?.[1] || !match[2]) continue;
+    const exposure = tool.exposure && MCP_EXPOSURES.has(tool.exposure) ? (tool.exposure as McpToolSummary["exposure"]) : undefined;
+    const entry: McpToolSummary = {
+      name: match[2],
+      fullName: tool.name,
+      active: active.has(tool.name),
+      ...(exposure ? { exposure } : {})
+    };
+    const list = grouped.get(match[1]);
+    if (list) list.push(entry);
+    else grouped.set(match[1], [entry]);
+  }
+  for (const list of grouped.values()) list.sort((left, right) => left.name.localeCompare(right.name));
+  return grouped;
+}
+
+// ---------------------------------------------------------------------------------------
 // McpServerSummary 投影
 // ---------------------------------------------------------------------------------------
 
@@ -352,11 +401,14 @@ export function buildMcpSummaries(params: {
   authPending: ReadonlySet<string>;
   /** 「真的授权过」的服务器名集合（见 authorizedMcpServers）：只有它才让面板显示「清除凭据」。 */
   authorized: ReadonlySet<string>;
+  /** 键 = `mcpToolServerKey(服务器名)`，值 = 该服务器已注册的工具（来自会话注册表）。 */
+  tools?: ReadonlyMap<string, McpToolSummary[]>;
 }): McpServerSummary[] {
   const { configured, parsed, authPending, authorized } = params;
   return configured.map((server): McpServerSummary => {
     const entry = server.entry;
     const transport = entry.command ? "stdio" : "http";
+    const tools = params.tools?.get(mcpToolServerKey(server.name));
     const base: McpServerSummary = {
       name: server.name,
       scope: server.scope,
@@ -374,6 +426,7 @@ export function buildMcpSummaries(params: {
       ...(entry.exposure === "codemode" ? { exposure: "codemode" as const } : {}),
       status: "not-connected",
       toolCount: 0,
+      ...(tools && tools.length > 0 ? { tools } : {}),
       disabled: Boolean(entry.disabled),
       ...(mcpOauthEligible(server) ? { authState: "idle" as const } : {})
     };

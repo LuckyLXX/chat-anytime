@@ -1999,6 +1999,22 @@ export type McpServerStatus = "connected" | "cached" | "failed" | "needs-auth" |
  */
 export type McpAuthState = "idle" | "pending" | "authorized" | "failed";
 
+/**
+ * MCP 服务器注册到会话里的一个工具（工具清单投影）。
+ * Pi 的命名规则：`mcp__<server>__<tool>`，非法字符换成 `_`、超长时尾巴带哈希，
+ * 所以 `fullName` 才是权威名称（短名只用于展示）。
+ */
+export interface McpToolSummary {
+  /** 服务器内的工具短名（去掉 `mcp__<server>__` 前缀）。 */
+  name: string;
+  /** 注册全名（`mcp__…`）：排障/复制用，可能是带哈希后缀的截断名。 */
+  fullName: string;
+  /** 是否在活动集（direct 声明且未被角色级 overlay 关掉）。 */
+  active: boolean;
+  /** Pi 的暴露档位：codemode = 脚本模式（不声明给模型）、hidden = 角色级关闭。 */
+  exposure?: "direct" | "codemode" | "deferred" | "hidden";
+}
+
 export interface McpServerSummary {
   name: string;
   /** 配置所在文件：项目 `.mcp.json` / 用户全局 `mcp.json`（编辑表单回填与删除定位）。 */
@@ -2018,6 +2034,11 @@ export interface McpServerSummary {
   /** OAuth 凭据状态（仅 HTTP 且非 bearer-env 的 server 会出现）。 */
   authState?: McpAuthState;
   toolCount: number;
+  /**
+   * 已注册的工具清单（来自当前会话的工具注册表；没连接/没注册时不带）。
+   * 只带名字不带描述：资源目录是高频推送，描述文本会让每帧膨胀好几倍。
+   */
+  tools?: McpToolSummary[];
   resourceCount?: number;
   failedAgoSeconds?: number;
   disabled: boolean;

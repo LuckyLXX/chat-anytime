@@ -2394,6 +2394,22 @@ html[data-ui-motion="off"] .resource-split-page .resource-switch input, html[dat
 .resource-split-page .resource-split-rail-item.is-muted .resource-split-rail-copy { opacity: .62; }
 .resource-split-page .resource-split-rail-item.is-muted .resource-split-rail-icon { opacity: .5; }
 
+/* ============================================================
+   MCP 详情页的工具清单（2026-11-24）。名字来自会话工具注册表
+   （`mcp__<server>__<tool>`）：圆点 = 是否在活动集，行尾小标签区分
+   脚本模式（codemode，不声明给模型）/ 角色级关闭（hidden）/ 未激活。
+   与 Skill 附件清单同形式：整宽行 + 分隔线，不嵌二级滚动。
+   ============================================================ */
+.resource-split-page .mcp-tool-card { flex: 0 0 auto; }
+.resource-split-page .mcp-tool-list { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
+.resource-split-page .mcp-tool-list li { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 5px 12px; border-top: 1px solid var(--border); }
+.resource-split-page .mcp-tool-list li:first-child { border-top: 0; }
+.resource-split-page .mcp-tool-dot { flex: 0 0 auto; width: 6px; height: 6px; border-radius: 50%; background: var(--border-strong); }
+.resource-split-page .mcp-tool-dot.is-active { background: var(--success); }
+.resource-split-page .mcp-tool-list code { flex: 1 1 auto; min-width: 0; margin: 0; overflow: hidden; color: var(--text); background: transparent; font-family: ui-monospace, "Cascadia Mono", "Consolas", monospace; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.resource-split-page .mcp-tool-list em { flex: 0 0 auto; padding: 0 6px; color: var(--text-muted); border-radius: 999px; background: var(--surface-muted); font-size: 9.5px; font-style: normal; font-weight: 650; }
+.resource-split-page .mcp-tool-empty { margin: 0; color: var(--text-muted); font-size: 10.5px; line-height: 1.55; }
+
 .resource-card { flex: 0 0 auto; overflow: hidden; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
 .resource-card-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 9px; padding: 9px 12px; border-bottom: 1px solid var(--border); }
 .resource-card-title { display: inline-flex; align-items: center; gap: 6px; color: var(--accent-text); }

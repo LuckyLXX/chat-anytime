@@ -13,6 +13,8 @@ import {
   mcpOauthEligible,
   buildMcpSummaries,
   authorizedMcpServers,
+  mcpToolServerKey,
+  groupMcpToolsByServer,
   mcpCredentialKeysFor,
   planMcpServerSave,
   PI_MCP_CALL_TIMEOUT_SECONDS,
@@ -311,5 +313,50 @@ describe("planMcpServerSave（迁移后保留：编辑/迁移/停用态随行）
     await writeFile(global, JSON.stringify({ mcpServers: { a: { command: "npx", disabled: true } } }), "utf8");
     const plan = planMcpServerSave({ project: join(root, "p.json"), global }, { name: "a", scope: "global", transport: "stdio", command: "node" });
     expect(plan.entry).toEqual({ command: "node", disabled: true });
+  });
+});
+
+describe("MCP 工具清单投影（详情页工具卡）", () => {
+  it("服务器名净化与 Pi 的 createMcpToolName 一致（`-`/`.` 都变 `_`）", () => {
+    expect(mcpToolServerKey("docs")).toBe("docs");
+    expect(mcpToolServerKey("my-server")).toBe("my_server");
+    expect(mcpToolServerKey("a.b:c")).toBe("a_b_c");
+  });
+
+  it("按服务器分组：只挑 mcp__ 工具，短名/fullName/active/exposure 齐备并按名排序", () => {
+    const grouped = groupMcpToolsByServer([
+      { name: "mcp__docs__search", exposure: "direct" },
+      { name: "mcp__docs__fetch" },
+      { name: "mcp__docs__bulk_export", exposure: "codemode" },
+      { name: "mcp__docs__panel", exposure: "weird" },
+      { name: "mcp__my_server__ping" },
+      { name: "mcp__docs__" },
+      { name: "read" }
+    ], new Set(["mcp__docs__search", "mcp__my_server__ping"]));
+
+    expect([...grouped.keys()].sort()).toEqual(["docs", "my_server"]);
+    expect(grouped.get("docs")?.map((tool) => tool.name)).toEqual(["bulk_export", "fetch", "panel", "search"]);
+    expect(grouped.get("docs")?.[0]).toEqual({ name: "bulk_export", fullName: "mcp__docs__bulk_export", active: false, exposure: "codemode" });
+    // 未知 exposure 不投影（面板只认 Pi 的四档）
+    expect(grouped.get("docs")?.find((tool) => tool.name === "panel")?.exposure).toBeUndefined();
+    expect(grouped.get("my_server")).toEqual([{ name: "ping", fullName: "mcp__my_server__ping", active: true }]);
+  });
+
+  it("带哈希后缀的截断名保留 fullName 原样（短名也照实展示，不去猜原名）", () => {
+    const grouped = groupMcpToolsByServer([{ name: "mcp__docs__very_long_tool_name_1a2b3c4d", exposure: "direct" }], new Set());
+    expect(grouped.get("docs")?.[0]).toMatchObject({ name: "very_long_tool_name_1a2b3c4d", fullName: "mcp__docs__very_long_tool_name_1a2b3c4d", active: false });
+  });
+
+  it("buildMcpSummaries 按净化名挂上清单；没有工具的服务器不产生字段", () => {
+    const tools = groupMcpToolsByServer([{ name: "mcp__my_server__ping", exposure: "direct" }], new Set(["mcp__my_server__ping"]));
+    const summaries = buildMcpSummaries({
+      configured: [server("my-server", { command: "npx" }), server("plain", { command: "npx" })],
+      parsed: new Map(),
+      authPending: new Set(),
+      authorized: new Set(),
+      tools
+    });
+    expect(summaries.find((item) => item.name === "my-server")?.tools).toEqual([{ name: "ping", fullName: "mcp__my_server__ping", active: true, exposure: "direct" }]);
+    expect(summaries.find((item) => item.name === "plain")?.tools).toBeUndefined();
   });
 });

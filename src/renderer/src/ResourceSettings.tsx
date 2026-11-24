@@ -1,4 +1,4 @@
-import { File, FileCode2, FileText, Image as ImageIcon, KeyRound, Paperclip, Pencil, Plus, Puzzle, RefreshCw, Search, Server, Trash2, X, Zap } from "lucide-react";
+import { File, FileCode2, FileText, Image as ImageIcon, KeyRound, Paperclip, Pencil, Plus, Puzzle, RefreshCw, Search, Server, Trash2, Wrench, X, Zap } from "lucide-react";
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { resourceScopeLabels } from "../../shared/locale";
 import type { CommandDraft, CommandSummary, McpServerConfigDraft, McpServerStatus, McpServerSummary, ResourceCatalog, RuntimeCommand, SkillSummary } from "../../shared/protocol";
@@ -482,9 +482,53 @@ export function McpSettings({ resources }: ResourcePageProps): ReactNode {
           <button className="icon-button" type="button" title={`编辑 ${server.name}`} aria-label={`编辑 MCP ${server.name}`} disabled={controlsBusy} onClick={() => editMcpServer(server)}><Pencil size={14} /></button>
           <button className="icon-button resource-remove" type="button" title={`删除 ${server.name}`} aria-label={`删除 MCP ${server.name}`} disabled={controlsBusy} onClick={() => void run({ type: "mcp.server.delete", name: server.name, scope: server.scope })}><Trash2 size={14} /></button>
         </div>
+        {mcpToolCard(server)}
         <p className="resource-form-help">把 <code>{"<name>/SKILL.md"}</code> 之类资源接进 Pi 的 MCP 扩展：直连会把工具声明进每次请求前缀，脚本模式改由 codemode 发现调用。改用「编辑」可修改启动命令、请求头、认证与超时；停用与删除都是即时命令。</p>
         {resources.diagnostics.length > 0 && <div className="resource-diagnostics"><strong>资源诊断</strong>{resources.diagnostics.map((diagnostic) => <p key={diagnostic}>{diagnostic}</p>)}</div>}
       </div>
+    );
+  }
+
+  /**
+   * 工具清单卡片：名字来自当前会话的工具注册表（`mcp__<server>__<tool>`）。
+   * 三种态：有工具 → 列表；已连接但没注册到 → 如实说；未连接/停用 → 说明稍后出现。
+   * 标签语义按 exposure 分：codemode = 脚本（不声明给模型）、hidden = 角色级关闭；
+   * direct 却不在活动集才是「未激活」（注册与激活之间的瞬时态）。
+   */
+  function mcpToolCard(server: McpServerSummary): ReactNode {
+    const tools = server.tools ?? [];
+    const activeCount = tools.filter((tool) => tool.active).length;
+    const disabled = server.disabled || server.status === "disabled";
+    const summary = tools.length > 0
+      ? `${tools.length} 个${activeCount === tools.length ? "" : ` · ${activeCount} 个已声明`}`
+      : disabled
+        ? "已停用"
+        : server.status === "connected"
+          ? "没有注册工具"
+          : "连接后显示";
+    return (
+      <section className="resource-card mcp-tool-card" data-mcp-tools={server.name}>
+        <header className="resource-card-head">
+          <span className="resource-card-title"><Wrench size={13} /><strong>工具</strong></span>
+          <small>{summary}</small>
+        </header>
+        {tools.length > 0 ? (
+          <ul className="mcp-tool-list">
+            {tools.map((tool) => {
+              const tag = tool.exposure === "codemode" ? "脚本" : tool.exposure === "hidden" ? "已关闭" : !tool.active ? "未激活" : undefined;
+              return (
+                <li key={tool.fullName} data-tool-active={tool.active ? "true" : "false"}>
+                  <span className={`mcp-tool-dot${tool.active ? " is-active" : ""}`} aria-hidden="true" />
+                  <code title={tool.fullName}>{tool.name}</code>
+                  {tag && <em>{tag}</em>}
+                </li>
+              );
+            })}
+          </ul>
+        ) : (
+          <div className="resource-card-body"><p className="mcp-tool-empty">{disabled ? "服务器已停用，不注册工具。" : server.status === "connected" ? "服务器已连接，但还没有注册到任何工具——可能需要重新连接或完成授权。" : "连接成功后，这里会列出该服务器注册到会话的工具。"}</p></div>
+        )}
+      </section>
     );
   }
 }
