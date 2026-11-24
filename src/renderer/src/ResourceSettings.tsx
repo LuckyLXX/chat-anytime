@@ -499,13 +499,18 @@ export function McpSettings({ resources }: ResourcePageProps): ReactNode {
     const tools = server.tools ?? [];
     const activeCount = tools.filter((tool) => tool.active).length;
     const disabled = server.disabled || server.status === "disabled";
+    // 状态板报出的 toolCount 与注册表清单可能短时间不同步（例如运行中的应用还没加载
+    // 清单投影这一步）：这时不能声称「没有注册工具」，要如实说清单没同步。
+    const reported = server.toolCount;
     const summary = tools.length > 0
       ? `${tools.length} 个${activeCount === tools.length ? "" : ` · ${activeCount} 个已声明`}`
       : disabled
         ? "已停用"
-        : server.status === "connected"
-          ? "没有注册工具"
-          : "连接后显示";
+        : reported > 0
+          ? "清单未同步"
+          : server.status === "connected"
+            ? "没有注册工具"
+            : "连接后显示";
     return (
       <section className="resource-card mcp-tool-card" data-mcp-tools={server.name}>
         <header className="resource-card-head">
@@ -526,7 +531,7 @@ export function McpSettings({ resources }: ResourcePageProps): ReactNode {
             })}
           </ul>
         ) : (
-          <div className="resource-card-body"><p className="mcp-tool-empty">{disabled ? "服务器已停用，不注册工具。" : server.status === "connected" ? "服务器已连接，但还没有注册到任何工具——可能需要重新连接或完成授权。" : "连接成功后，这里会列出该服务器注册到会话的工具。"}</p></div>
+          <div className="resource-card-body"><p className="mcp-tool-empty">{disabled ? "服务器已停用，不注册工具。" : reported > 0 ? `运行时报告 ${reported} 个工具，但清单还没同步过来：先点右上「重载资源」；仍为空就重启应用（工具名由后台运行时提供）。` : server.status === "connected" ? "服务器已连接，但还没有注册到任何工具——可能需要重新连接或完成授权。" : "连接成功后，这里会列出该服务器注册到会话的工具。"}</p></div>
         )}
       </section>
     );

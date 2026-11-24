@@ -268,7 +268,7 @@ describe("MCP 详情页工具清单", () => {
     expect(container.querySelector("[data-mcp-tools='docs'] .resource-card-head small")?.textContent).toContain("2 个已声明");
   });
 
-  it("没有工具时如实说明（已连接 / 未连接两种口径）", async () => {
+  it("没有工具时如实说明（已连接 / 未连接 / 清单未同步三种口径）", async () => {
     await render([serverSummary({ name: "docs", status: "connected", toolCount: 0 })]);
     expect(container.querySelector("[data-mcp-tools='docs'] .mcp-tool-empty")?.textContent).toContain("还没有注册到任何工具");
 
@@ -276,5 +276,13 @@ describe("MCP 详情页工具清单", () => {
     root = createRoot(container);
     await render([serverSummary({ name: "exa", status: "not-connected", toolCount: 0 })]);
     expect(container.querySelector("[data-mcp-tools='exa'] .mcp-tool-empty")?.textContent).toContain("连接成功后");
+
+    // 状态板报出了工具数、清单却没到（运行时没跟上）：不能声称「没有注册工具」
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await render([serverSummary({ name: "dbx", status: "connected", toolCount: 18 })]);
+    const card = container.querySelector("[data-mcp-tools='dbx']");
+    expect(card?.querySelector(".resource-card-head small")?.textContent).toBe("清单未同步");
+    expect(card?.querySelector(".mcp-tool-empty")?.textContent).toContain("运行时报告 18 个工具");
   });
 });

@@ -17,7 +17,7 @@ import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-work
 
 import { buildMcpUiContext, createPiMcpExtensionLayer, createPidesktopMcpBridge, observeToolSetApi, type McpBridgeControl } from "./mcp-bridge.js";
 import { estimateToolTokens } from "./context-breakdown.js";
-import { parseMcpStatusText } from "./runtime-mcp.js";
+import { buildMcpSummaries, groupMcpToolsByServer, parseMcpStatusText } from "./runtime-mcp.js";
 
 /**
  * 「自建 MCP → Pi 内置 MCP」迁移（2026-10-15）的真实会话回归网。
@@ -225,6 +225,31 @@ describe("MCP → Pi 内置扩展：真实会话集成（stdio 伪服务器）",
       expect(probe.toolCalls.find((call) => call.name === "mcp__poc__echo")?.input).toEqual({ value: "from-test" });
       const transcript = probe.session.state.messages.map((message) => JSON.stringify((message as { content?: unknown }).content ?? "")).join("\n");
       expect(transcript).toContain("echo:from-test");
+    } finally {
+      probe.session.dispose();
+    }
+  });
+
+
+  it("工具清单投影：真实注册表按服务器归组，摘要带上工具名与活动态", { timeout: 60000 }, async () => {
+    const probe = await makeProbeSession({
+      mcpJson: { mcpServers: { poc: { command: process.execPath, args: ["./server.mjs"] } } }
+    });
+    try {
+      await waitFor(() => probe.session.getAllTools().some((tool) => tool.name === "mcp__poc__echo"), 20000, "工具注册");
+
+      // 设置页的「工具」卡就是这么来的：注册表 → 分组 → 摘要投影。
+      const grouped = groupMcpToolsByServer(probe.session.getAllTools(), new Set(probe.session.getActiveToolNames()));
+      expect(grouped.get("poc")).toEqual([{ name: "echo", fullName: "mcp__poc__echo", active: true, exposure: "direct" }]);
+
+      const summaries = buildMcpSummaries({
+        configured: [{ name: "poc", scope: "global", entry: { command: process.execPath, args: ["./server.mjs"] } }],
+        parsed: new Map([["poc", { name: "poc", state: "connected", toolCount: 1 }]]),
+        authPending: new Set(),
+        authorized: new Set(),
+        tools: grouped
+      });
+      expect(summaries[0]?.tools?.map((tool) => tool.name)).toEqual(["echo"]);
     } finally {
       probe.session.dispose();
     }
