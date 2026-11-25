@@ -26,7 +26,8 @@ import { dispatchWithQueueReceipt } from "./queue-receipt.js";
 import { SessionNewClaims, sessionNewResolution } from "./session-new-claims.js";
 import { resolveHookSessionTitle } from "./hooks-session-title.js";
 import { alignQueueState, imageAttachmentsFrom, promoteQueueMessage, queuedMessageText, queueSnapshotMessages, removeQueueMessage, replayQueueArgs, type PromoteOutcome } from "./queue-images.js";
-import { normalizeMessages, userMessageText } from "./message-normalize.js";
+import { userMessageText } from "./message-normalize.js";
+import { createSessionDisplay } from "./session-display.js";
 import { runActive } from "./run-state.js";
 import { diffChatMessages, diffToolExecutions } from "../shared/snapshot-patch.js";
 import { createActiveEmitter, executionSnapshots, makeEmitted, paneFieldsPatch, type ActiveEmitter, type EmittedSnapshot } from "./snapshot-emit.js";
@@ -38,7 +39,6 @@ import type {
   BrowserAutomationResult,
   SshAutomationRequest,
   SshAutomationResult,
-  ChatMessage,
   ContextUsage,
   ContextUsageBreakdown,
   DesktopSettings,
@@ -170,7 +170,6 @@ import { BUILTIN_TOOLS, createDefaultAgent, defaultTools, ensureDefaultWorkspace
 import { buildMultiInvocationPrompt, composeInvocationBody, parseInvocationPrompt, sameInvocations, type InvocationSegment } from "./invocation-prompt.js";
 import {
   PI_DESKTOP_CONTROL_ENTRY_TYPE,
-  restoreControlMessages,
   restoreToolExecutions,
   transcriptMessagesFromEntries,
   type PersistedSessionEntry,
@@ -339,7 +338,7 @@ interface SessionRuntimeRecord {
   status: string;
   turnTiming?: TurnTiming;
   executions: Map<string, ToolExecution>;
-  controlMessages: ChatMessage[];
+  displayHistory: ReturnType<typeof createSessionDisplay>;
   todoStore: TodoStore;
   /** Per-session tool-call pacer backing the todo_write anti-batching reminder. */
   todoPace: runtimeTodoTools.TodoPaceTracker;
@@ -2403,12 +2402,7 @@ function paneSnapshotFrom(record: SessionRuntimeRecord): SessionPaneSnapshot {
   // 目录恢复后无需用户在别处触发动作，下一帧快照即可解除只读。
   refreshReadOnlyReason(record);
   const session = record.session;
-  const sessionMessages = normalizeMessages(session.state.messages, session.state.streamingMessage);
-  // 热路径：绝大多数会话没有 pcontrol 消息，避免每帧 copy + O(n log n) 排序。
-  const controlMessages = record.controlMessages ?? [];
-  const messages = controlMessages.length === 0
-    ? sessionMessages
-    : [...sessionMessages, ...controlMessages].sort((left, right) => left.timestamp - right.timestamp);
+  const messages = record.displayHistory.timeline(session.state.streamingMessage);
   return {
     sessionId: session.sessionId,
     sessionFile: session.sessionManager.getSessionFile(),
@@ -4095,9 +4089,8 @@ function handleSessionEvent(record: SessionRuntimeRecord, event: AgentSessionEve
       immediate = false;
       break;
     case "message_end":
-      // Final frame carries the completed message; flush immediately so the
-      // streaming flag clears without a 50ms gap. Accumulate its usage into
-      // the session-wide cache counters.
+      // Accumulate the finalized usage now. The snapshot below follows Pi's
+      // commit of the completed message so it can read the new branch leaf.
       record.cacheUsage = runtimeContextUsage.addMessageToCacheUsage(record.cacheUsage, event.message);
       if (event.message.role === "assistant" && record.speedStep) {
         const usage = runtimeContextUsage.validAssistantUsage(event.message);
@@ -4224,6 +4217,16 @@ function handleSessionEvent(record: SessionRuntimeRecord, event: AgentSessionEve
       break;
   }
   handleImSessionEvent(record, event);
+  if (event.type === "message_end") {
+    // Pi 先同步通知订阅者，再追加该消息。完成帧在同一事件循环内读已提交分支，
+    // 保留流式气泡到定稿的连续性，也避免旧会话的微任务在重建后推帧。
+    queueMicrotask(() => {
+      if (liveSessions.get(record.session.sessionId) !== record) return;
+      if (record === activeRuntime) scheduleEmit(true);
+      else schedulePaneEmit(record, true);
+    });
+    return;
+  }
   if (record !== activeRuntime) {
     // Parked session: lifecycle changes drive the sidebar dot + list freshness;
     // streaming content is dropped unless the session is rendered in a split
@@ -4276,10 +4279,7 @@ function backfillRestoredArtifacts(record: SessionRuntimeRecord): void {
 }
 
 function appendCompactControlMessage(record: SessionRuntimeRecord, kind: "compact-command" | "compact-result", text: string): void {
-  const entryId = record.session.sessionManager.appendCustomEntry(PI_DESKTOP_CONTROL_ENTRY_TYPE, { kind, text });
-  const entry = record.session.sessionManager.getEntry(entryId);
-  if (!entry || entry.type !== "custom") return;
-  record.controlMessages = [...record.controlMessages, ...restoreControlMessages([entry as unknown as PersistedSessionEntry])];
+  record.session.sessionManager.appendCustomEntry(PI_DESKTOP_CONTROL_ENTRY_TYPE, { kind, text });
 }
 
 /** 服务商是否有已配置鉴权（会话模型回退用，口径同 provider.delete 旧实现）。 */
@@ -5402,6 +5402,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     const corrected = applyModelOverrides(result.session.model);
     if (corrected !== result.session.model) result.session.agent.state.model = corrected;
   }
+  const displayHistory = createSessionDisplay(activeSessionManager);
   // 早水合（分屏）：历史已由 createAgentSession 装载，而扩展绑定/工具激活/
   // activate 还要一小会儿。若该会话已被渲染端 watch（或等待 watch），先推一
   // 帧会话级快照让格子显示历史，随后的 activate/emitState 与常规推送接管。
@@ -5425,7 +5426,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
         computerMode: recordComputerMode.enabled,
         designMode: recordDesignMode.enabled,
         teamMode: recordTeamMode.enabled,
-        messages: normalizeMessages(earlySession.state.messages, earlySession.state.streamingMessage),
+        messages: displayHistory.timeline(earlySession.state.streamingMessage),
         executions: []
       }
     });
@@ -5442,7 +5443,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
     status: "",
     turnTiming: undefined,
     executions: new Map(),
-    controlMessages: restoreControlMessages(activeSessionManager.getBranch() as unknown as PersistedSessionEntry[]),
+    displayHistory,
     todoStore: recordTodoStore,
     todoPace: recordTodoPace,
     planState: recordPlanState,
@@ -5634,7 +5635,7 @@ async function createSession(sessionManager?: SessionManager, options: { reactiv
   result.session.setActiveToolsByName(toolNamesFor(record, !hasImageInput(result.session.model)));
   // 工具活动集在此定型；三段明细的首次重算放在 record 进入 liveSessions 之后
   // （applyToolSetChange），与后续的工具事件走同一条路径。
-  record.executions = new Map(restoreToolExecutions(result.session.state.messages as unknown as PersistedSessionMessage[], recordWorkspace).map((execution) => [execution.id, execution]));
+  record.executions = new Map(restoreToolExecutions(record.displayHistory.committedMessages() as readonly PersistedSessionMessage[], recordWorkspace).map((execution) => [execution.id, execution]));
   backfillRestoredArtifacts(record);
   // Background processes launched by earlier sessions keep running across
   // restarts; rediscover them from the session's bash history (throttled).
