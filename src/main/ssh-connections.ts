@@ -13,6 +13,7 @@ import type {
   SshHostSummary,
   SshHostTestResult
 } from "../shared/protocol.js";
+import type { SshTriageFailure } from "../shared/ssh-triage.js";
 import type { SshHostStore, StoredSshHost } from "./ssh-host-store.js";
 import { validateHostDraft } from "./ssh-host-store.js";
 import type { SshKnownHostsStore } from "./ssh-known-hosts.js";
@@ -75,6 +76,40 @@ export interface SshConnectOptionsLike {
 export interface SshExecStreamLike {
   on(event: string, listener: (...args: never[]) => void): unknown;
   close?(): void;
+}
+
+/** 后台只读命令的可调参数（triage 采集：超时、输出上限、用户停止信号）。 */
+export interface SshBackgroundCommandOptions {
+  /** 单条命令的总时长上限（含建连）；缺省 20 秒。 */
+  timeoutMs?: number;
+  /** stdout/stderr **各自**的字符上限（只保留尾部）；缺省 8KB。 */
+  maxOutputChars?: number;
+  /** 用户停止：abort 后立即关通道、放掉客户端。 */
+  signal?: AbortSignal;
+  /**
+   * 逐块回调（stdout 与 stderr 都算）。排查采集用它把输出边收边落盘：崩馈/断电时
+   * 当前项的部分输出不会丢（启动归档只补状态，不补字节）。
+   */
+  onChunk?: (chunk: string, stream: "stdout" | "stderr") => void;
+}
+
+/**
+ * 后台只读命令的结果。
+ *
+ * `ok: false` 一律是**采集层**失败（连不上/凭据/指纹/超时/断线），与「命令跑完了但
+ * 业务不达标」严格区分：后者是 `ok: true` + 非零退出码/输出内容，由 triage 自己判定。
+ */
+export type SshBackgroundCommandResult =
+  | { ok: true; stdout: string; stderr: string; exitCode: number; truncated?: boolean }
+  | { ok: false; failure: SshTriageFailure; message: string; stdout: string; stderr: string; exitCode: null; truncated?: boolean };
+
+/** 后台 exec 通道的最小结构视图（stderr 是独立可读端，必须排水）。 */
+interface BackgroundExecStream extends SshExecStreamLike {
+  stderr?: { on(event: string, listener: (...args: never[]) => void): unknown };
+}
+
+function backgroundFailure(failure: SshTriageFailure, message: string): SshBackgroundCommandResult {
+  return { ok: false, failure, message, stdout: "", stderr: "", exitCode: null };
 }
 
 export interface SshShellStreamLike {
@@ -212,6 +247,12 @@ const EXEC_DEFAULT_TIMEOUT_MS = 60_000;
 const EXEC_MIN_TIMEOUT_MS = 1_000;
 const EXEC_MAX_TIMEOUT_MS = 600_000;
 export const EXEC_OUTPUT_LIMIT_CHARS = 8 * 1024;
+/** 后台只读命令（triage 采集）的默认/可调预算：一条诊断命令不该比一次 exec 等更久。 */
+const BACKGROUND_EXEC_TIMEOUT_MS = 20_000;
+const BACKGROUND_EXEC_MIN_TIMEOUT_MS = 1_000;
+const BACKGROUND_EXEC_MAX_TIMEOUT_MS = 120_000;
+/** 后台命令的输出上限（stdout/stderr 各自按此截尾）；与 triage 的日志保留上限对齐。 */
+const BACKGROUND_EXEC_MAX_CHARS = 16 * 1024;
 export const READ_DEFAULT_CHARS = 4 * 1024;
 export const READ_MAX_CHARS = 16 * 1024;
 
@@ -807,6 +848,154 @@ export class SshConnectionManager {
       keepaliveCountMax: SSH_KEEPALIVE_COUNT_MAX,
       hostVerifier
     };
+  }
+
+  // ——— 后台只读命令（排查采集 triage 用） ———
+
+  /**
+   * 后台只读命令：临时**非 PTY** exec 通道跑一条命令，返回输出、退出码与采集层失败原因。
+   *
+   * 与交互终端的三条硬边界（产品要求，不是实现细节）：
+   * 1. **绝不 reveal、绝不 publish**：后台采集不能在用户眼前弹出终端标签，也不进任何
+   *    已打开终端的流（`probedFingerprints` / `pendingPasswords` 同样不参与）。
+   * 2. **复用同一套身份**：主机库凭据（含本次运行在密码卡里输入的临时密码）、连接参数
+   *    （`connectOptions` 的 readyTimeout / keepalive / 认证方式）与已知指纹库共用一份；
+   *    参数只在这里维护一次，后台与交互两条路径不会漂移。
+   * 3. **指纹 fail closed**：库里没有该主机的指纹就直接拒绝（不探测、不自动信任、不写
+   *    库）。后台任务没有「让用户看一眼确认卡」的时机，沉默地放行未知指纹等于偷偷
+   *    取消 TOFU；记录过但本次不一致同样拒绝（可能是中间人，或服务器重装）。
+   *
+   * 通道必须排水（stdout 与 stderr 都要消费），否则 `'close'` 永远不来——见
+   * execRoundTrip 的注释与 ssh-host-test-e2e.test.ts 的反向验证。
+   */
+  async runBackgroundCommand(hostId: string, command: string, options: SshBackgroundCommandOptions = {}): Promise<SshBackgroundCommandResult> {
+    const stored = this.deps.hostStore.get(hostId);
+    if (!stored) return backgroundFailure("host-missing", "主机不存在或已删除");
+    if (!command.trim()) return backgroundFailure("channel-failed", "采集命令为空");
+    const password = this.availablePassword(hostId);
+    if (password === undefined) return backgroundFailure("credentials-missing", "该主机没有可用密码：先在终端连接一次并输入密码，再回来重查");
+    const known = this.deps.knownHosts.get(stored.host, stored.port);
+    if (known === undefined) {
+      return backgroundFailure("fingerprint-unknown", `该主机指纹尚未信任（${stored.host}:${stored.port} 没有记录）：先在 SSH 面板连接一次并确认指纹，再回来重查`);
+    }
+    if (options.signal?.aborted) return backgroundFailure("stopped", "已停止");
+    const timeoutMs = Math.min(BACKGROUND_EXEC_MAX_TIMEOUT_MS, Math.max(BACKGROUND_EXEC_MIN_TIMEOUT_MS, Math.round(options.timeoutMs ?? BACKGROUND_EXEC_TIMEOUT_MS)));
+    const limit = Math.min(BACKGROUND_EXEC_MAX_CHARS, Math.max(256, Math.round(options.maxOutputChars ?? EXEC_OUTPUT_LIMIT_CHARS)));
+    const client = this.deps.createClient();
+    return await new Promise<SshBackgroundCommandResult>((resolve) => {
+      let settled = false;
+      let stdout = "";
+      let stderr = "";
+      let truncated = false;
+      let fingerprintMismatch = false;
+      let channelOpened = false;
+      const append = (current: string, chunk: string): string => {
+        const next = current + chunk;
+        if (next.length <= limit) return next;
+        truncated = true;
+        return next.slice(next.length - limit);
+      };
+      const finish = (result: SshBackgroundCommandResult): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        options.signal?.removeEventListener?.("abort", onAbort);
+        try {
+          client.end();
+        } catch {
+          // 已销毁的 client 再 end 属幂等路径
+        }
+        resolve(result);
+      };
+      const finishFailure = (failure: SshTriageFailure, message: string): void => {
+        finish({ ok: false, failure, message, stdout, stderr, exitCode: null, ...(truncated ? { truncated: true } : {}) });
+      };
+      const onAbort = (): void => finishFailure("stopped", "已停止采集");
+      const timer = setTimeout(() => finishFailure("timeout", `采集命令超时（${Math.round(timeoutMs / 1000)} 秒内没有完成）`), timeoutMs);
+      options.signal?.addEventListener?.("abort", onAbort, { once: true });
+
+      client.on("error", ((error: Error) => {
+        if (settled) return;
+        const message = error.message || "连接失败";
+        if (fingerprintMismatch) {
+          finishFailure("fingerprint-mismatch", `主机指纹与已记录的不一致（可能是中间人攻击，或服务器重装/换 IP）：${message}`);
+          return;
+        }
+        if (isAuthFailure(message)) {
+          finishFailure("auth-failed", `密码认证被拒绝：${message}`);
+          return;
+        }
+        finishFailure(channelOpened ? "channel-failed" : "connect-failed", message);
+      }) as unknown as (...args: never[]) => void);
+      client.on("close", (() => {
+        // 正常收尾后 client.end() 也会走到这里：settled 已置位，静默。
+        if (settled) return;
+        finishFailure(channelOpened ? "disconnected" : "connect-failed", "连接已断开");
+      }) as unknown as (...args: never[]) => void);
+      client.on("keyboard-interactive", ((_name: string, _instructions: string, _lang: string, prompts: Array<{ echo: boolean }>, done: (answers: string[]) => void) => {
+        done(prompts.map(() => password));
+      }) as unknown as (...args: never[]) => void);
+      client.on("ready", (() => {
+        if (settled) return;
+        if (!client.exec) {
+          finishFailure("channel-failed", "当前 SSH 客户端不支持 exec 通道");
+          return;
+        }
+        client.exec(command, (error, stream) => {
+          if (settled) {
+            stream?.close?.();
+            return;
+          }
+          if (error || !stream) {
+            finishFailure("channel-failed", error?.message || "无法打开 exec 通道（服务器可能禁用了命令执行）");
+            return;
+          }
+          channelOpened = true;
+          const channel = stream as BackgroundExecStream;
+          let exitCode: number | null = null;
+          channel.on("data", ((chunk: Buffer) => {
+            if (settled) return;
+            const text = chunk.toString("utf8");
+            stdout = append(stdout, text);
+            options.onChunk?.(text, "stdout");
+          }) as unknown as (...args: never[]) => void);
+          // stderr 必须同样排水：不消费会挡住 'end'，'close' 永远不来（与 stdout 同理）。
+          channel.stderr?.on("data", ((chunk: Buffer) => {
+            if (settled) return;
+            const text = chunk.toString("utf8");
+            stderr = append(stderr, text);
+            options.onChunk?.(text, "stderr");
+          }) as unknown as (...args: never[]) => void);
+          channel.on("exit", ((code: number | null) => {
+            if (typeof code === "number") exitCode = code;
+          }) as unknown as (...args: never[]) => void);
+          channel.on("close", ((code: number | null) => {
+            if (settled) return;
+            const finalCode = typeof code === "number" ? code : exitCode;
+            if (finalCode === null) {
+              finishFailure("disconnected", "采集命令未返回退出码（连接在执行中断开）");
+              return;
+            }
+            finish({ ok: true, stdout, stderr, exitCode: finalCode, ...(truncated ? { truncated: true } : {}) });
+          }) as unknown as (...args: never[]) => void);
+          channel.on("error", ((channelError: Error) => {
+            finishFailure("channel-failed", channelError.message || "exec 通道出错");
+          }) as unknown as (...args: never[]) => void);
+        });
+      }) as unknown as (...args: never[]) => void);
+
+      client.connect(this.connectOptions(stored, password, (key: Buffer) => {
+        const fingerprint = fingerprintOfHostKey(key);
+        if (known === fingerprint) return true;
+        if (known === undefined) {
+          // 防御性分支：上面已经 fail closed 过未知指纹，这里绝不放行。
+          return false;
+        }
+        fingerprintMismatch = true;
+        return false;
+      }));
+      client.setNoDelay?.(true);
+    });
   }
 
   // ——— 连接测试（面板「测试」按钮） ———

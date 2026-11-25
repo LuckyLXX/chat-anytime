@@ -13,7 +13,7 @@ import { mergeSavedAppearance, settingsForRenderer } from "./appearance-assets.j
 import { createSettingsPersistence, diffSettings, readSettingsFile, settingsPath as settingsFilePath, type SettingsPersistence } from "./settings-store.js";
 import { pruneSessionPaths, setArchivedSessionPaths, togglePinnedSessionPath } from "./session-scope.js";
 import { importExternalAttachment, workspaceRelativeAttachment } from "./attachments.js";
-import type { BrowserDownloadPrefs, BrowserPreviewCommand, BrowserPreviewState, DesktopBootstrap, DesktopSettings, GalleryServiceProbe, ImChannelKind, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot, SshCommand, SshCommandResult, SshEventData, SshRevealEvent, TerminalCommand, TerminalEventData, WorkspaceDirectoryListing, WorkspaceEntryResult, WorkspaceFilePreview, WorkspaceFileSearchResult, WorkspaceFileStat, WorkspaceFileWriteResult } from "../shared/protocol.js";
+import type { BrowserDownloadPrefs, BrowserPreviewCommand, BrowserPreviewState, DesktopBootstrap, DesktopSettings, GalleryServiceProbe, ImChannelKind, PromptAttachment, ResourceCatalog, RuntimeCommand, RuntimeMessage, RuntimeSnapshot, SshCommand, SshCommandResult, SshEventData, SshTriageCommand, SshRevealEvent, TerminalCommand, TerminalEventData, WorkspaceDirectoryListing, WorkspaceEntryResult, WorkspaceFilePreview, WorkspaceFileSearchResult, WorkspaceFileStat, WorkspaceFileWriteResult } from "../shared/protocol.js";
 import { PREVIEW_FILE_SCHEME, isPanelWorkHost, parseWorkspaceFilePreviewUrl } from "../shared/protocol.js";
 import { createMainSnapshotCache } from "./snapshot-baselines.js";
 import { isThemeAssetUrl, parseThemeAssetUrl } from "../shared/theme-assets.js";
@@ -46,6 +46,7 @@ import { Client as Ssh2Client } from "ssh2";
 import { createSshHostStore, type SshHostCrypto } from "./ssh-host-store.js";
 import { createSshKnownHostsStore } from "./ssh-known-hosts.js";
 import { SshConnectionManager, type SshClientLike } from "./ssh-connections.js";
+import { createSshTriageManager, type SshTriageManager } from "./ssh-triage.js";
 import { installSingleInstanceGuard } from "./single-instance.js";
 import { ImGateway } from "./im-gateway.js";
 import { normalizeImChannel } from "../shared/im.js";
@@ -210,14 +211,29 @@ const sshCrypto: SshHostCrypto = {
 };
 // ssh2 Client 的最小结构适配（运行时形状一致，接口层只声明用到的方法）。
 const createSsh2Client = (): SshClientLike => new Ssh2Client() as unknown as SshClientLike;
-let sshConnectionManager: SshConnectionManager | undefined;
-function ensureSshManager(): SshConnectionManager {
+/**
+ * 主机库与指纹库是**单例**：交互终端（SshConnectionManager）与后台排查
+ * （SshTriageManager）必须看同一份凭据与已知指纹——否则后台任务会因为「另一个
+ * 实例里没有密码/没有指纹」而莫名其妙地要用户重输。
+ */
+let sshHostStore: ReturnType<typeof createSshHostStore> | undefined;
+let sshKnownHosts: ReturnType<typeof createSshKnownHostsStore> | undefined;
+function ensureSshHostStore(): ReturnType<typeof createSshHostStore> {
   // 延迟创建：app.getPath("userData") 在模块顶层即可用，但 host store 的
   // 明文降级警告依赖 safeStorage 就绪状态，统一在首次使用时创建。
+  sshHostStore ??= createSshHostStore({ filePath: join(app.getPath("userData"), "pidesktop-ssh-hosts.json"), crypto: sshCrypto });
+  return sshHostStore;
+}
+function ensureSshKnownHosts(): ReturnType<typeof createSshKnownHostsStore> {
+  sshKnownHosts ??= createSshKnownHostsStore(join(app.getPath("userData"), "pidesktop-ssh-known-hosts.json"));
+  return sshKnownHosts;
+}
+let sshConnectionManager: SshConnectionManager | undefined;
+function ensureSshManager(): SshConnectionManager {
   sshConnectionManager ??= new SshConnectionManager({
     createClient: createSsh2Client,
-    hostStore: createSshHostStore({ filePath: join(app.getPath("userData"), "pidesktop-ssh-hosts.json"), crypto: sshCrypto }),
-    knownHosts: createSshKnownHostsStore(join(app.getPath("userData"), "pidesktop-ssh-known-hosts.json")),
+    hostStore: ensureSshHostStore(),
+    knownHosts: ensureSshKnownHosts(),
     // 首连自动信任：实时读内存设置（与 settings.ssh.enabled 同样的 live 语义，
     // 设置页保存后立刻生效，不需要重连/重启）。settingsCache 未就绪时视为关闭。
     autoTrustFingerprint: () => loadSettings().ssh?.autoTrustFingerprint === true,
@@ -233,6 +249,36 @@ function ensureSshManager(): SshConnectionManager {
     }
   });
   return sshConnectionManager;
+}
+
+// —— SSH 后台排障（triage）：批次调度 + 只读检查 + 主机卡片 ——
+let sshTriageManager: SshTriageManager | undefined;
+let sshTriageNotifyTimer: ReturnType<typeof setTimeout> | undefined;
+/**
+ * 排查状态变化的失效信号（节流 250ms）：渲染端可选订阅（preload 未接就靠短轮询，
+ * 两种口径都成立——信号只用来让面板「尽快」刷新，不是唯一事实源）。
+ */
+function pushSshTriageChanged(): void {
+  if (sshTriageNotifyTimer) return;
+  sshTriageNotifyTimer = setTimeout(() => {
+    sshTriageNotifyTimer = undefined;
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    try {
+      mainWindow.webContents.send("ssh:triage-changed");
+    } catch {
+      // 渲染端正在销毁：下一次轮询/面板重开会再拉一次
+    }
+  }, 250);
+}
+function ensureSshTriage(): SshTriageManager {
+  sshTriageManager ??= createSshTriageManager({
+    dir: join(app.getPath("userData"), "pidesktop-ssh-triage"),
+    hostStore: ensureSshHostStore(),
+    // 采集通道复用交互终端那套凭据/连接参数/已知指纹（临时非 PTY exec，绝不 reveal）。
+    exec: (hostId, command, options) => ensureSshManager().runBackgroundCommand(hostId, command, options),
+    onChange: () => pushSshTriageChanged()
+  });
+  return sshTriageManager;
 }
 
 function settingsPath(): string { return settingsFilePath(app.getPath("userData")); }
@@ -1339,6 +1385,29 @@ function isSshCommand(value: unknown): value is SshCommand {
       return typeof command.terminalId === "string" && command.terminalId.trim() !== "" && typeof command.transferId === "string" && command.transferId.trim() !== "" && Array.isArray(command.remotePaths) && command.remotePaths.length > 0 && command.remotePaths.every((item) => typeof item === "string" && item.trim() !== "") && typeof command.workspace === "string" && command.workspace.trim() !== "";
     case "sftp.cancel":
       return typeof command.terminalId === "string" && command.terminalId.trim() !== "" && typeof command.transferId === "string" && command.transferId.trim() !== "";
+    // —— 后台排障（triage）：只校验形状，检查项参数与主机身份由主进程进一步把关。 ——
+    case "triage.start":
+      return Array.isArray(command.hostIds) && command.hostIds.length > 0 && command.hostIds.every((id) => typeof id === "string" && id.trim() !== "")
+        && Array.isArray(command.checks) && command.checks.length > 0
+        && (command.title === undefined || typeof command.title === "string")
+        && (command.sourceBatchId === undefined || typeof command.sourceBatchId === "string");
+    case "triage.list":
+      return true;
+    case "triage.detail":
+      return typeof command.batchId === "string" && command.batchId.trim() !== "" && (command.hostId === undefined || typeof command.hostId === "string");
+    case "triage.stop":
+      return typeof command.batchId === "string" && command.batchId.trim() !== "";
+    case "triage.card.get":
+      return typeof command.hostId === "string" && command.hostId.trim() !== "";
+    case "triage.card.save":
+      return typeof command.hostId === "string" && command.hostId.trim() !== ""
+        && typeof command.endpoint === "string" && command.endpoint.trim() !== ""
+        && typeof command.revision === "number" && Number.isFinite(command.revision)
+        && Array.isArray(command.directories) && Array.isArray(command.summaries);
+    case "triage.card.adopt":
+      return typeof command.hostId === "string" && command.hostId.trim() !== ""
+        && typeof command.fromEndpoint === "string" && command.fromEndpoint.trim() !== ""
+        && typeof command.accept === "boolean";
     case "hosts":
       return true;
     default:
@@ -1704,6 +1773,11 @@ function registerIpc(): void {
   });
   ipcMain.handle("ssh:command", (_event, command: SshCommand): SshCommandResult | Promise<SshCommandResult> => {
     if (!isSshCommand(command)) throw new Error("SSH 命令无效");
+    // 后台排查（triage.*）走独立管理器：它不碰交互终端的连接、标签与流，
+    // 因此必须先于 ensureSshManager() 分派（否则会被当成不支持的同步命令）。
+    if (command.type.startsWith("triage.")) {
+      return ensureSshTriage().handle(command as SshTriageCommand);
+    }
     // SFTP 是流式异步操作（上传/下载要跨秒到分钟），走独立异步入口；
     // 其余命令保持原有的同步语义（终端输入/连接等必须即时返回）。
     const manager = ensureSshManager();
@@ -1755,6 +1829,12 @@ app.on("before-quit", () => {
   trayController?.dispose();
   terminalManager.disposeAll();
   sshConnectionManager?.disposeAll();
+  // 排查记录先收尾：停掉在途采集并 flush 日志（遗留的 running 状态由下次启动归档为中断）。
+  sshTriageManager?.dispose();
+  if (sshTriageNotifyTimer) {
+    clearTimeout(sshTriageNotifyTimer);
+    sshTriageNotifyTimer = undefined;
+  }
   runtimeProcess?.kill();
 });
 app.on("will-quit", () => { globalShortcut.unregisterAll(); });

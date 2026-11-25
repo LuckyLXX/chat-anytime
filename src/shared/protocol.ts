@@ -17,8 +17,47 @@ export type { CodexCliSettings, CodexConnectionState, CodexConnectionTestResult,
 import type { MemoryHealth } from "./memory-health.js";
 export type { MemoryDuplicateGroup, MemoryHealth, MemoryHealthIssue, MemoryHealthIssueKind } from "./memory-health.js";
 import type { ThemeImportOutcome } from "./theme-assets.js";
+import type { SshTriageCommand, SshTriageCommandResult } from "./ssh-triage.js";
 import type { SkillStoreIntranetSettings, SkillStoreQuery, SkillStoreResult, SkillStoreScope, SkillStoreSource } from "./skill-store.js";
 export type { SkillStoreCategory, SkillStoreCommand, SkillStoreDetail, SkillStoreFile, SkillStoreInstallOutcome, SkillStoreInstallSummary, SkillStoreIntranetSettings, SkillStoreQuery, SkillStoreResult, SkillStoreScope, SkillStoreSkill, SkillStoreSort, SkillStoreSource, SkillStoreUninstallOutcome, SkillStoreVersion } from "./skill-store.js";
+export type {
+  SshTriageBatchDetail,
+  SshTriageBatchStatus,
+  SshTriageBatchSummary,
+  SshTriageCommand,
+  SshTriageCommandResult,
+  SshTriageCard,
+  SshTriageCardDirectory,
+  SshTriageCardSummary,
+  SshTriageCardView,
+  SshTriageCheckKind,
+  SshTriageCheckRequest,
+  SshTriageCheckResult,
+  SshTriageCheckStatus,
+  SshTriageFailure,
+  SshTriageHostDetail,
+  SshTriageHostSnapshot,
+  SshTriageHostStatus,
+  SshTriageHostSummaryRow
+} from "./ssh-triage.js";
+export {
+  SSH_TRIAGE_BATCH_STATUS_LABELS,
+  SSH_TRIAGE_CARD_LIMITS,
+  SSH_TRIAGE_CHECK_KINDS,
+  SSH_TRIAGE_CHECK_KIND_LABELS,
+  SSH_TRIAGE_CHECK_STATUS_LABELS,
+  SSH_TRIAGE_FAILURE_LABELS,
+  SSH_TRIAGE_HOST_CONCURRENCY,
+  SSH_TRIAGE_HOST_STATUS_LABELS,
+  SSH_TRIAGE_KEEP_BATCHES,
+  SSH_TRIAGE_LOG_LIMIT_CHARS,
+  SSH_TRIAGE_MAX_HOSTS,
+  SSH_TRIAGE_MAX_TOTAL_BYTES,
+  SSH_TRIAGE_TITLE_LIMIT,
+  describeSshTriageCheck,
+  sshEndpointKey,
+  validateSshTriageCheck
+} from "./ssh-triage.js";
 export type { DesignCanvasInfo, DesignDoc, DesignLayout, DesignNode, DesignNodeDraft, DesignOp, DesignNodeType } from "./design-schema.js";
 export { applyDesignOps, cloneNodeWithNewIds, countNodes, createDesignDoc, findNode, makeNodeId, normalizeDesignDoc, sanitizeDesignName, summarizeNode } from "./design-schema.js";
 
@@ -1676,7 +1715,13 @@ export type SshCommand =
    */
   | { type: "sftp.download"; terminalId: string; transferId: string; remotePaths: string[]; workspace: string }
   /** 取消在途传输（清理半成品）。 */
-  | { type: "sftp.cancel"; terminalId: string; transferId: string };
+  | { type: "sftp.cancel"; terminalId: string; transferId: string }
+  // ——— 后台排障（triage）———
+  // 与交互终端完全隔离：主进程另开**临时非 PTY exec 通道**（复用同一主机库凭据、
+  // 连接参数与已知指纹；缺凭据/未信任指纹一律 fail closed，绝不 reveal 终端标签）。
+  // 状态更新不推事件，由面板可见时短轮询 triage.list / triage.detail 拉取。
+  // 命令与结果形状在 shared/ssh-triage.ts（与检查项、卡片类型同处一个模块）。
+  | SshTriageCommand;
 
 export type SshCommandResult =
   | { kind: "hosts"; hosts: SshHostSummary[]; groups: SshGroupSummary[]; connectedHostIds: string[] }
@@ -1689,6 +1734,8 @@ export type SshCommandResult =
   | { kind: "connect" }
   /** 远端目录列表（sftp.list 的同步返回；传输进度走 transfer 事件）。 */
   | { kind: "sftp-listing"; path: string; /** 远端 home（面包屑「主目录」用）；解析失败时缺省。 */ home?: string; entries: SshRemoteEntry[] }
+  // ——— 后台排障（triage）———
+  | SshTriageCommandResult
   | { kind: "void" };
 
 export type SshEventData =
@@ -3423,4 +3470,5 @@ export interface DesktopApi {
    * 所以这条只服务于「面板已打开、AI 在后台导入了一批主机」的场景。
    */
   onSshHostsChanged(listener: () => void): () => void;
+  onSshTriageChanged(listener: () => void): () => void;
 }

@@ -69,10 +69,10 @@ function writeSplitPct(pct: number): void {
   }
 }
 
-export function SshTerminalPanel({ terminalId, hostId, hostName, workspace }: { terminalId: string; hostId: string; hostName: string; workspace?: string }): ReactNode {
+export function SshTerminalPanel({ terminalId, hostId, hostName, workspace, initialPath }: { terminalId: string; hostId: string; hostName: string; workspace?: string; initialPath?: string }): ReactNode {
   const [state, setState] = useState<ConnectionState>({ status: "connecting" });
   const [restartNonce, setRestartNonce] = useState(0);
-  const [filesOpen, setFilesOpen] = useState(false);
+  const [filesOpen, setFilesOpen] = useState(Boolean(initialPath));
   const [actionError, setActionError] = useState<string | undefined>(undefined);
   const [splitPct, setSplitPct] = useState<number>(() => readSplitPct());
   const [dragging, setDragging] = useState(false);
@@ -235,7 +235,7 @@ export function SshTerminalPanel({ terminalId, hostId, hostName, workspace }: { 
       )}
       {filesOpen && state.status === "connected" && (
         <div className="ssh-files-drawer" style={{ flexBasis: `${splitPct}%` }}>
-          <SshFilesPanel terminalId={terminalId} workspace={workspace} onError={setActionError} />
+          <SshFilesPanel terminalId={terminalId} workspace={workspace} initialPath={initialPath} onError={setActionError} />
         </div>
       )}
       {actionError && (

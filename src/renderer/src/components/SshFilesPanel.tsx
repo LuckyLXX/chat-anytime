@@ -37,7 +37,7 @@ interface TransferState {
   relativePath?: string;
 }
 
-export function SshFilesPanel({ terminalId, workspace, onError }: { terminalId: string; workspace?: string; onError(message: string): void }): ReactNode {
+export function SshFilesPanel({ terminalId, workspace, initialPath, onError }: { terminalId: string; workspace?: string; initialPath?: string; onError(message: string): void }): ReactNode {
   const [path, setPath] = useState<string>("");
   const [home, setHome] = useState<string | undefined>(undefined);
   const [entries, setEntries] = useState<SshRemoteEntry[] | undefined>(undefined);
@@ -48,7 +48,7 @@ export function SshFilesPanel({ terminalId, workspace, onError }: { terminalId: 
   // 传输 id 由渲染端生成（一次操作一个 base id，多文件在主进程拆成 base#N）。
   const transferSeqRef = useRef(0);
   // 当前目录的 ref 镜像：传输事件的订阅回调里必须拿到**最新**路径（见文件头 ⓐ）。
-  const pathRef = useRef("");
+  const pathRef = useRef(initialPath ?? "");
   const listRef = useRef<HTMLDivElement | undefined>(undefined);
   // shift 连选的锚点（列表索引）。
   const anchorRef = useRef<number | undefined>(undefined);
@@ -80,10 +80,10 @@ export function SshFilesPanel({ terminalId, workspace, onError }: { terminalId: 
     void list(pathRef.current || undefined);
   }, [list]);
 
-  // 首次挂载列 home；terminalId 变化（重连）重新列。
+  // 从主机卡片进入时载入指定目录，否则列远端主目录。
   useEffect(() => {
-    void list();
-  }, [list]);
+    void list(initialPath);
+  }, [initialPath, list]);
 
   // 传输进度：只认本 terminalId 的 transfer 事件。
   useEffect(() => {

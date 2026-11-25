@@ -937,6 +937,8 @@ export function createDemoApi(): DesktopApi {
     },
     async ssh(command: SshCommand): Promise<SshCommandResult> {
       if (command.type === "hosts") return { kind: "hosts", hosts: [], groups: [], connectedHostIds: [] };
+      if (command.type === "triage.list") return { kind: "triage-batches", batches: [] };
+      if (command.type.startsWith("triage.")) throw new Error("SSH 后台排查仅在 Electron 桌面窗口中可用");
       if (command.type === "connect") {
         for (const listener of sshDataListeners.get(command.terminalId) ?? []) {
           listener({ type: "error", terminalId: command.terminalId, message: "SSH 连接仅在 Electron 桌面窗口中可用" });
@@ -1742,6 +1744,9 @@ export function createDemoApi(): DesktopApi {
       return () => {
         sshHostsChangedListeners.delete(listener);
       };
+    },
+    onSshTriageChanged(): () => void {
+      return () => {};
     }
   };
 }

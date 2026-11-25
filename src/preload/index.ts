@@ -88,6 +88,11 @@ const api: DesktopApi = {
     const handler = (): void => listener();
     ipcRenderer.on("ssh:hosts-changed", handler);
     return () => ipcRenderer.removeListener("ssh:hosts-changed", handler);
+  },
+  onSshTriageChanged: (listener: () => void) => {
+    const handler = (): void => listener();
+    ipcRenderer.on("ssh:triage-changed", handler);
+    return () => ipcRenderer.removeListener("ssh:triage-changed", handler);
   }
 };
 

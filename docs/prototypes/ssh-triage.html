@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SSH 排查工作台 · PiDesktop</title>
+<style>
+  :root { color-scheme: light; --page:#f6f3f5; --paper:#fff; --line:#e8dfe5; --ink:#302238; --dim:#695c6b; --accent:#a62252; --tint:#fceaf0; --ok:#166543; --ok-bg:#e6f4ec; --warn:#825016; --warn-bg:#fff1d8; --error:#a12440; --error-bg:#fce9ee; font: 14px/1.5 'Segoe UI','Microsoft YaHei UI',system-ui,sans-serif; }
+  *, *::before, *::after { box-sizing:border-box; }
+  body { margin:0; background:var(--page); color:var(--ink); }
+  button, input, textarea, select { font:inherit; color:inherit; }
+  button { border:1px solid var(--line); border-radius:8px; padding:.54rem .76rem; background:var(--paper); cursor:pointer; }
+  button:hover { border-color:#c293a5; }
+  :focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
+  .primary { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:650; }
+  .dim, small { color:var(--dim); }
+  .mono, time, pre { font-family:'Cascadia Mono',Consolas,monospace; }
+  .top { background:var(--paper); border-bottom:1px solid var(--line); }
+  .brand { max-width:1260px; margin:auto; padding:12px 28px; display:flex; align-items:center; gap:12px; font-size:13px; }
+  .brand-mark { display:grid; place-items:center; border-radius:8px; width:30px; height:30px; background:var(--tint); color:var(--accent); font:bold 13px Consolas,monospace; }
+  .prototype { margin-left:auto; color:var(--dim); }
+  main { max-width:1260px; margin:auto; padding:28px; }
+  h1,h2,h3,p { margin:0; }
+  h1 { font-size:clamp(25px,3.2vw,37px); letter-spacing:-.025em; line-height:1.15; }
+  h2 { font-size:17px; }
+  h3 { font-size:14px; }
+  .intro { display:flex; justify-content:space-between; align-items:center; gap:12px; }
+  .intro p { margin-top:7px; }
+  .tabs { display:flex; gap:18px; border-bottom:1px solid var(--line); margin:20px 0 15px; }
+  .tabs button { border:0; border-radius:0; background:transparent; padding:0 3px 9px; color:var(--dim); }
+  .tabs button[aria-current=page] { box-shadow:0 -2px var(--accent) inset; color:var(--accent); font-weight:700; }
+  .layout { display:grid; gap:14px; grid-template-columns:minmax(0,1fr) 300px; align-items:start; }
+  .box { background:var(--paper); border:1px solid var(--line); border-radius:12px; overflow:hidden; }
+  .batch-head { padding:17px 18px 12px; display:flex; justify-content:space-between; gap:9px; flex-wrap:wrap; }
+  .tag { display:inline-flex; align-items:center; border-radius:5px; padding:2px 7px; font-size:12px; font-weight:650; white-space:nowrap; width:max-content; }
+  .ok { color:var(--ok); background:var(--ok-bg); }
+  .warn { color:var(--warn); background:var(--warn-bg); }
+  .error { color:var(--error); background:var(--error-bg); }
+  .quiet { color:var(--dim); background:var(--page); }
+  .batch-picker { border:1px solid var(--line); border-radius:7px; padding:3px 6px; background:var(--paper); max-width:100%; }
+  .hosts { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1.12fr); border-top:1px solid var(--line); }
+  .rows { min-width:0; padding:8px; }
+  .host { width:100%; display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:3px 6px; padding:9px 10px; text-align:left; border-color:transparent; margin:2px 0; overflow-wrap:anywhere; }
+  .host[aria-pressed=true] { background:var(--tint); border-color:#e8c2d1; }
+  .host span:last-child { font-size:12px; grid-column:1/-1; }
+  .detail { padding:15px; min-width:0; border-left:1px solid var(--line); background:#fcfafb; }
+  .detail header, .card header, .section-title { display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap; }
+  .detail summary { display:flex; gap:5px; flex-wrap:wrap; margin:9px 0; }
+  .detail p { margin-top:5px; }
+  .actions { display:flex; gap:7px; flex-wrap:wrap; margin-top:10px; }
+  pre { margin:9px 0 0; min-height:108px; max-height:200px; overflow:auto; background:#2e2531; color:#f8eff7; padding:10px 11px; line-height:1.65; border-radius:8px; font-size:12px; white-space:pre-wrap; overflow-wrap:anywhere; }
+  .card { padding:15px; min-width:0; }
+  .card header p { margin-top:3px; }
+  .section-title { padding-top:13px; margin-top:13px; border-top:1px solid var(--line); }
+  .link { color:var(--accent); background:transparent; border:0; padding:3px 0; }
+  .dir { width:100%; text-align:left; display:block; margin-top:7px; overflow-wrap:anywhere; }
+  .dir code { display:block; color:var(--dim); font-size:12px; }
+  .issue { border-left:2px solid #d7b0c0; padding-left:9px; margin-top:9px; }
+  .issue p { margin-top:2px; overflow-wrap:anywhere; }
+  .modal { width:min(480px,calc(100% - 28px)); border:1px solid var(--line); border-radius:14px; padding:18px; color:var(--ink); }
+  .modal::backdrop { background:#2e253185; }
+  .modal label { display:block; margin-top:9px; }
+  .modal input:not([type=checkbox]), .modal textarea { display:block; width:100%; border:1px solid var(--line); border-radius:7px; padding:7px; margin:3px 0; }
+  .modal textarea { min-height:82px; resize:vertical; }
+  .modal fieldset { border:1px solid var(--line); border-radius:7px; margin:10px 0; }
+  .modal .actions { justify-content:flex-end; }
+  .toast { position:fixed; left:50%; bottom:15px; transform:translateX(-50%); width:max-content; max-width:calc(100% - 24px); padding:8px 12px; border-radius:9px; color:#fff; background:#392539; }
+  .card-only .layout { grid-template-columns:minmax(0,580px); }
+  .card-only .batch { display:none; }
+  [hidden] { display:none!important; }
+  @media (max-width:900px) { .layout { grid-template-columns:1fr; } }
+  @media (max-width:560px) {
+    main { padding:16px 12px; } .brand { padding:9px 12px; } .intro { align-items:flex-start; } .intro p { font-size:12px; } .hosts { grid-template-columns:1fr; } .detail { border-left:0; border-top:1px solid var(--line); } .rows { padding:4px 7px; } .host { padding:5px 7px; }
+  }
+</style>
+</head>
+<body>
+<header class="top"><div class="brand"><span aria-hidden="true" class="brand-mark">&gt;_</span><strong>PiDesktop</strong><span class="dim">/ SSH</span><span class="prototype">演示数据</span></div></header>
+<main id="workbench">
+  <div class="intro"><div><h1>SSH 排查工作台</h1><p class="dim">查看主机、后台任务和历史排查记录</p></div><button class="primary" id="new-task">新建排查</button></div>
+  <nav class="tabs" aria-label="SSH 工作台"><button id="tab-tasks" aria-current="page">任务</button><button id="tab-hosts">主机卡片</button></nav>
+  <div class="layout">
+    <section class="box batch" aria-labelledby="batch-name">
+      <header class="batch-head"><div><h2 id="batch-name">测试 API · 启动异常</h2><p class="dim" id="batch-summary">内网测试组 · 4 台主机 · 现场已保存</p></div><select id="batch-select" class="batch-picker" aria-label="选择排查批次"><option value="original">11-25 14:32 · 启动异常</option></select></header>
+      <div class="hosts">
+        <div class="rows" id="host-list" aria-label="当前任务的主机"></div>
+        <section class="detail" aria-labelledby="host-heading">
+          <header><h3 id="host-heading" class="mono"></h3><span class="tag" id="host-status"></span></header>
+          <div id="checks" class="actions" aria-label="检查项"></div>
+          <p id="evidence" class="dim"></p>
+          <pre id="output" tabindex="0" aria-label="采集输出"></pre>
+          <div class="actions"><button id="open-terminal">打开终端</button><button id="retry">复查该主机</button><button id="save-issue">记入排查摘要</button><button id="copy-output" class="link">复制给 AI</button></div>
+        </section>
+      </div>
+    </section>
+    <aside class="box card" aria-labelledby="card-title">
+      <header><div><h2 id="card-title">主机卡片</h2><p id="card-host" class="mono"></p></div><select id="host-select" class="batch-picker" aria-label="切换主机卡片"></select></header>
+      <div class="section-title"><h3>常用排查目录</h3><button class="link" id="new-dir">添加</button></div>
+      <div id="dirs"></div>
+      <div class="section-title"><h3>历史排查摘要</h3><button class="link" id="new-issue">新增</button></div>
+      <div id="issues"></div>
+    </aside>
+  </div>
+</main>
+<dialog id="task-dialog" class="modal"><form id="task-form"><h2>新建排查</h2><fieldset id="task-hosts"><legend>目标主机</legend></fieldset><fieldset><legend>检查项</legend><label><input type="checkbox" name="check" value="服务" checked> test-api.service 状态</label><label><input type="checkbox" name="check" value="端口" checked> 8080 端口监听</label><label><input type="checkbox" name="check" value="磁盘" checked> 文件系统用量</label><label><input type="checkbox" name="check" value="日志" checked> 最近 15 分钟服务错误</label></fieldset><div class="actions"><button type="button" data-dismiss>取消</button><button class="primary">后台运行</button></div></form></dialog>
+<dialog id="issue-dialog" class="modal"><form id="issue-form"><h2>保存排查摘要</h2><p class="dim" id="issue-host"></p><label>问题标题<input name="title" required maxlength="100"></label><label>现象、原因与处理<textarea name="body" required maxlength="1200" placeholder="可粘贴 AI 起草的摘要，核对后保存"></textarea></label><div class="actions"><button type="button" data-dismiss>取消</button><button class="primary">保存到主机</button></div></form></dialog>
+<dialog id="dir-dialog" class="modal"><form id="dir-form"><h2>添加排查目录</h2><label>名字<input name="title" required maxlength="40"></label><label>远端绝对路径<input name="path" required pattern="/.*" placeholder="/srv/test-api"></label><div class="actions"><button type="button" data-dismiss>取消</button><button class="primary">保存</button></div></form></dialog>
+<dialog id="terminal-dialog" class="modal"><form method="dialog"><h2 id="terminal-title">交互终端</h2><pre id="terminal-output"></pre><div class="actions"><button>返回排查</button></div></form></dialog>
+<div class="toast" id="toast" role="status" hidden></div>
+<script>
+  const byId = (id) => document.getElementById(id);
+  const node = (tag, text, className) => {
+    const item = document.createElement(tag);
+    if (text) item.textContent = text;
+    if (className) item.className = className;
+    return item;
+  };
+  const servers = [
+    { id:'test-api-01', address:'192.0.2.21', status:'检查通过', tone:'ok', desc:'服务正常 · 8080 已监听' },
+    { id:'test-api-02', address:'192.0.2.22', status:'检查通过', tone:'ok', desc:'服务正常 · 8080 已监听' },
+    { id:'test-api-03', address:'192.0.2.23', status:'服务异常', tone:'error', desc:'服务退出 · 8080 未监听' },
+    { id:'test-api-04', address:'192.0.2.24', status:'采集中断', tone:'warn', desc:'已采 3 项 · 日志未采完' },
+  ];
+  const checkNames = ['服务','端口','磁盘','日志'];
+  const examples = new Map(servers.map((host) => [host.id, { dirs:[['应用目录','/srv/test-api'],['日志目录','/var/log/test-api']], issues:[] }]));
+  examples.get('test-api-03').issues.push(['配置更新后服务无法启动','补齐 test-api.env 后重新验证，8080 恢复监听。','11-19']);
+  const batches = new Map([['original', { title:'测试 API · 启动异常', hosts:servers, checks:checkNames }]]);
+  let batchId = 'original';
+  let hostId = 'test-api-03';
+  let selectedCheck = '日志';
+  let toastTimer;
+  const currentHost = () => servers.find((host) => host.id === hostId);
+  function message(text) {
+    byId('toast').textContent = text;
+    byId('toast').hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { byId('toast').hidden = true; }, 3000);
+  }
+  function switchView(showCards) {
+    byId('workbench').classList.toggle('card-only', showCards);
+    byId('tab-tasks').toggleAttribute('aria-current', !showCards);
+    byId('tab-hosts').toggleAttribute('aria-current', showCards);
+    byId(showCards ? 'tab-hosts' : 'tab-tasks').setAttribute('aria-current', 'page');
+  }
+  function logFor(host, check) {
+    if (check === '磁盘') return '/dev/sda1   80G   32G   48G   40%   /';
+    if (check === '端口') return host.tone === 'error' ? '8080 未监听' : 'LISTEN  0  128  127.0.0.1:8080';
+    if (check === '服务') return host.tone === 'error' ? 'test-api.service\nActive: failed (Result: exit-code)\nstatus=1/FAILURE' : 'test-api.service\nActive: active (running)';
+    if (host.tone === 'error') return '14:32:02 systemd  Starting Test API\n14:32:03 app      Failed to load test-api.env\n14:32:03 systemd  Main process exited, status=1';
+    if (host.tone === 'warn') return '14:32:01 app      Started worker\n14:32:04 SSH      连接中断，已保留部分输出';
+    return '该时间段未采集到服务错误。';
+  }
+  function render() {
+    const batch = batches.get(batchId);
+    const host = currentHost();
+    byId('batch-name').textContent = batch.title;
+    byId('batch-summary').textContent = `${batch.hosts.length} 台主机 · 现场已保存`;
+    byId('host-list').replaceChildren(...batch.hosts.map((target) => {
+      const row = node('button', '', 'host');
+      row.setAttribute('aria-pressed', target.id === hostId);
+      row.append(node('strong', target.id, 'mono'), node('span', target.status, 'tag ' + target.tone), node('span', target.desc, 'dim'));
+      row.addEventListener('click', () => { hostId = target.id; render(); });
+      return row;
+    }));
+    byId('host-heading').textContent = host.id;
+    byId('host-status').className = 'tag ' + host.tone;
+    byId('host-status').textContent = host.status;
+    byId('checks').replaceChildren(...batch.checks.map((check) => {
+      const button = node('button', check, check === selectedCheck ? 'tag primary' : 'tag quiet');
+      button.addEventListener('click', () => { selectedCheck = check; render(); });
+      button.setAttribute('aria-pressed', check === selectedCheck);
+      return button;
+    }));
+    byId('evidence').textContent = host.tone === 'warn' && selectedCheck === '日志' ? '上次采集在 14:32:04 中断，可单独复查。' : '采集时间 14:32:03 · ' + selectedCheck;
+    byId('output').textContent = logFor(host, selectedCheck);
+    byId('card-host').textContent = host.id;
+    byId('host-select').value = host.id;
+    const card = examples.get(host.id);
+    byId('dirs').replaceChildren(...card.dirs.map(([title,path]) => {
+      const button = node('button', '', 'dir');
+      button.append(node('strong', title), node('code', path));
+      button.addEventListener('click', () => terminal(path));
+      return button;
+    }));
+    byId('issues').replaceChildren(...card.issues.map(([title,body,date]) => {
+      const row = node('div', '', 'issue');
+      row.append(node('strong', title), node('p', body, 'dim'), node('small', date));
+      return row;
+    }));
+    if (!card.issues.length) byId('issues').append(node('p','暂无排查摘要','dim'));
+  }
+  function terminal(path) {
+    const host = currentHost();
+    byId('terminal-title').textContent = host.id + ' · ' + (path ? '文件面板' : '交互终端');
+    byId('terminal-output').textContent = path ? `SFTP · ${path}\n\nconfig/\nlogs/\nREADME.md` : `已连接 ${host.address}\n\nops@${host.id}:~$`;
+    byId('terminal-dialog').showModal();
+  }
+  function task(onlyCurrent) {
+    const fieldset = byId('task-hosts');
+    fieldset.querySelectorAll('label').forEach((label) => label.remove());
+    servers.forEach((host) => {
+      const label = node('label', '');
+      const input = node('input', '');
+      Object.assign(input, {type:'checkbox',name:'host',value:host.id,checked:!onlyCurrent || host.id === hostId});
+      label.append(input, ' ' + host.id);
+      fieldset.append(label);
+    });
+    byId('task-dialog').showModal();
+  }
+  function issue(withEvidence) {
+    const form = byId('issue-form');
+    form.reset();
+    byId('issue-host').textContent = hostId;
+    if (withEvidence) {
+      form.elements.title.value = currentHost().desc;
+      form.elements.body.value = byId('output').textContent;
+    }
+    byId('issue-dialog').showModal();
+  }
+  byId('tab-tasks').addEventListener('click', () => switchView(false));
+  byId('tab-hosts').addEventListener('click', () => switchView(true));
+  for (const host of servers) byId('host-select').add(new Option(host.id, host.id));
+  byId('host-select').addEventListener('change', (event) => {
+    hostId = event.target.value;
+    if (!batches.get(batchId).hosts.some((row) => row.id === hostId)) {
+      batchId = 'original';
+      byId('batch-select').value = batchId;
+      selectedCheck = '日志';
+    }
+    render();
+  });
+  byId('batch-select').addEventListener('change', (event) => {
+    batchId = event.target.value;
+    const batch = batches.get(batchId);
+    hostId = batch.hosts[0].id;
+    selectedCheck = batch.checks[0];
+    render();
+  });
+  byId('new-task').addEventListener('click', () => task(false));
+  byId('retry').addEventListener('click', () => task(true));
+  byId('open-terminal').addEventListener('click', () => terminal());
+  byId('save-issue').addEventListener('click', () => issue(true));
+  byId('new-issue').addEventListener('click', () => issue(false));
+  byId('new-dir').addEventListener('click', () => byId('dir-dialog').showModal());
+  document.querySelectorAll('[data-dismiss]').forEach((button) => button.addEventListener('click', () => button.closest('dialog').close()));
+  byId('copy-output').addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(hostId + '\n' + byId('output').textContent); message('已复制本项采集输出'); }
+    catch { message('可选中并复制采集输出'); }
+  });
+  byId('task-form').addEventListener('submit', (event) => {
+    event.preventDefault();
+    const fields = new FormData(event.target);
+    const targets = servers.filter((row) => fields.getAll('host').includes(row.id));
+    const checks = fields.getAll('check');
+    if (!targets.length || !checks.length) return message('请选择主机和检查项');
+    batchId = String(batches.size);
+    batches.set(batchId, {title:'测试 API · 复查 '+batchId, hosts:targets, checks});
+    const picker = byId('batch-select');
+    picker.add(new Option('复查 '+batchId+' · '+targets.length+' 台', batchId));
+    picker.value = batchId;
+    hostId = targets[0].id;
+    selectedCheck = checks[0];
+    switchView(false);
+    render();
+    byId('task-dialog').close();
+    message('已生成复查批次的演示结果');
+  });
+  byId('issue-form').addEventListener('submit', (event) => {
+    event.preventDefault();
+    const data = new FormData(event.target);
+    examples.get(hostId).issues.unshift([data.get('title'), data.get('body'), '本次排查']);
+    byId('issue-dialog').close();
+    render();
+    message('已在此预览中保存摘要');
+  });
+  byId('dir-form').addEventListener('submit', (event) => {
+    event.preventDefault();
+    const data = new FormData(event.target);
+    examples.get(hostId).dirs.push([data.get('title'), data.get('path')]);
+    byId('dir-dialog').close();
+    event.target.reset();
+    render();
+    message('已在此预览中保存目录');
+  });
+  render();
+</script>
+</body>
+</html>

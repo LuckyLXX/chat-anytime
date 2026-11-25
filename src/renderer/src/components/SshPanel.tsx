@@ -1,6 +1,9 @@
 import { Activity, ChevronDown, ChevronRight, Folder, LoaderCircle, Pencil, Plus, Server, Trash2, TriangleAlert, X } from "lucide-react";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import type { SshGroupSummary, SshHostSummary } from "../../../shared/protocol";
+import { sshEndpointKey } from "../../../shared/ssh-triage";
+import { SshTriageCard, type SshTriageSummarySeed } from "./SshTriageCard";
+import { SshTriagePanel } from "./SshTriagePanel";
 
 /**
  * SSH 主机管理（预览面板的一种 tab，data-pane="ssh"）：分组化主机清单——
@@ -31,7 +34,10 @@ const EMPTY_HOST_DRAFT: Omit<Extract<HostDraftState, { mode: "editing" }>, "mode
 /** 未分组的 bucket 键（真实分组用其 id）。 */
 const UNGROUPED_KEY = "__ungrouped__";
 
-export function SshPanel({ onConnect }: { onConnect(host: SshHostSummary): void }): ReactNode {
+export function SshPanel({ onConnect }: { onConnect(host: SshHostSummary, initialPath?: string): void }): ReactNode {
+  const [section, setSection] = useState<"hosts" | "tasks" | "card">("hosts");
+  const [cardHostId, setCardHostId] = useState("");
+  const [summarySeed, setSummarySeed] = useState<SshTriageSummarySeed>();
   const [hosts, setHosts] = useState<SshHostSummary[] | undefined>(undefined);
   const [groups, setGroups] = useState<SshGroupSummary[]>([]);
   const [connectedIds, setConnectedIds] = useState<string[]>([]);
@@ -168,6 +174,12 @@ export function SshPanel({ onConnect }: { onConnect(host: SshHostSummary): void 
     });
   };
 
+  const cardHost = hosts?.find((host) => host.id === cardHostId);
+  const openCard = (host: SshHostSummary, seed?: SshTriageSummarySeed): void => {
+    setCardHostId(host.id);
+    setSummarySeed(seed);
+    setSection("card");
+  };
   const insecure = hosts?.some((host) => host.credentialInsecure) ?? false;
   const hostDraftOpen = draft.mode === "editing";
   const groupNameOf = (id: string): string | undefined => groups.find((group) => group.id === id)?.name;
@@ -205,6 +217,7 @@ export function SshPanel({ onConnect }: { onConnect(host: SshHostSummary): void 
           >
             {test?.phase === "testing" ? <LoaderCircle className="spinning" size={14} /> : <Activity size={14} />}
           </button>
+          <button type="button" className="ghost-button ghost-icon" title="排查卡片" aria-label={`查看 ${host.name} 的排查卡片`} onClick={() => openCard(host)}><Folder size={14} /></button>
           <button type="button" className="ghost-button ghost-icon" title="编辑" aria-label={`编辑 ${host.name}`} onClick={() => beginEditHost(host)}><Pencil size={14} /></button>
           <button type="button" className="ghost-button ghost-icon danger" data-control="ssh-host-delete" title="删除" aria-label={`删除 ${host.name}`} onClick={() => void removeHost(host)}><Trash2 size={14} /></button>
         </div>
@@ -236,6 +249,16 @@ export function SshPanel({ onConnect }: { onConnect(host: SshHostSummary): void 
           </button>
         </div>
       </div>
+      <nav className="ssh-triage-actions" aria-label="SSH 工作台">
+        <button type="button" className="ghost-button" aria-pressed={section === "hosts"} onClick={() => setSection("hosts")}>主机</button>
+        <button type="button" className="ghost-button" aria-pressed={section === "tasks"} onClick={() => setSection("tasks")}>任务</button>
+        {cardHost && <button type="button" className="ghost-button" aria-pressed={section === "card"} onClick={() => setSection("card")}>主机卡片</button>}
+      </nav>
+      {section === "tasks" && <SshTriagePanel hosts={hosts ?? []} groups={groups} onConnect={onConnect} onSummary={openCard} />}
+      {section === "card" && (cardHost
+        ? <SshTriageCard key={`${cardHost.id}:${sshEndpointKey(cardHost)}`} host={cardHost} seed={summarySeed} onOpenDirectory={(path) => onConnect(cardHost, path)} />
+        : <p className="ssh-triage-muted">该主机已删除</p>)}
+      <div hidden={section !== "hosts"}>
       {insecure && (
         <div className="ssh-insecure-warning">
           <TriangleAlert size={14} />
@@ -343,6 +366,7 @@ export function SshPanel({ onConnect }: { onConnect(host: SshHostSummary): void 
           })}
         </div>
       )}
+      </div>
     </div>
   );
 }

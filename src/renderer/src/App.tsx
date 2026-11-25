@@ -2153,9 +2153,9 @@ export function App(): ReactNode {
   }
 
   /** 主机面板点「连接」：新开一个远程终端 tab（连接由 SshTerminalPanel 发起）。 */
-  function openSshTerminalHost(host: SshHostSummary): void {
+  function openSshTerminalHost(host: SshHostSummary, initialPath?: string): void {
     const terminalId = `ssh-${crypto.randomUUID()}`;
-    openPreviewTarget({ type: "ssh-terminal", terminalId, hostId: host.id, hostName: host.name }, terminalId);
+    openPreviewTarget({ type: "ssh-terminal", terminalId, hostId: host.id, hostName: host.name, initialPath }, terminalId);
   }
 
   async function openManualFilePreview(): Promise<void> {
