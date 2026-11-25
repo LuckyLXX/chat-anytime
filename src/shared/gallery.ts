@@ -914,7 +914,11 @@ export interface GalleryServiceRecord {
 /** 推送/展示的输出尾部上限（完整环形缓冲在 runner 内，更大）。 */
 export const GALLERY_SERVICE_LOG_TAIL_CHARS = 4_000;
 
-/** 看板只记这么多个**已结束**的服务（活着的永远不淘汰）。 */
+/** 看板只记这么多个**已结束**的服务（活着的永远不淘汰）。
+ *
+ * 「已结束」里每个作品（appId）只会有最近的一条：新记录登记时同作品的旧死记录会被替换
+ * （`releaseDeadForApp`），所以这个上限实际拦的是「用过又停掉的不同作品数」。
+ */
 export const MAX_GALLERY_SERVICE_RECORDS = 24;
 
 /**

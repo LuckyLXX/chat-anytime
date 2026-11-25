@@ -500,7 +500,8 @@ export class GalleryServiceRunner {
    * 三条刻意的顺序（与旧终端的「已可达不重启」同一取向）：
    * 1. 同作品已有**同命令同目录**的活进程 → 直接复用（重复点「运行」不叠进程）；
    * 2. 命令/目录变了 → 先停旧的、等它真的走掉再起新的（否则端口冲突，新进程起不来）；
-   * 3. 登记了 url 且此刻已可达 → 不起进程（那是用户手工起的或上一次留下的，别乱杀）。
+   * 3. 登记了 url 且此刻已可达 → 不起进程（那是用户手工起的或上一次留下的，别乱杀）；
+   * 4. 新记录登记时换掉同作品已结束的旧记录 → 看板上一个作品只有一行（历史不堆叠）。
    *
    * 入口是**串行 + 合流**的（见 queues / inflight）：并发只影响排队，不会叠进程。
    */
@@ -855,6 +856,10 @@ export class GalleryServiceRunner {
     if (input.url) record.url = input.url;
     if (input.ownerPanelId) record.ownerPanelId = input.ownerPanelId;
     const entry: Entry = { record, buffer: "", stopping: false, exitWaiters: [], settled: false, claimSeq: 1 };
+    // 登记新记录前先清掉同作品**已结束**的旧记录：看板上一个作品永远只有一行。
+    // 没有这一步时，每次「停止 → 再运行」都会留下上一轮的「已停止 / 启动失败」行，
+    // 同一作品跑几次就叠几行（用户 2026-11-25 报的就是这个「没有保证唯一」）。
+    this.releaseDeadForApp(input.appId);
     this.entries.set(record.id, entry);
 
     let handle: GalleryServiceProcessHandle;
@@ -1100,7 +1105,24 @@ export class GalleryServiceRunner {
     this.emit();
   }
 
-  /** 已结束的记录只留最近的一批（活着的永不淘汰）。 */
+  /**
+   * 清掉同作品**已结束**的旧记录（新记录登记前调用，见 startLocked）。
+   *
+   * 为什么在登记处而不是 `list()`：记录 id 是看板行的身份（渲染端的展开态、停止/重启的
+   * 入参都按它定位），在源头就不产生重复比在展示层合并更简单——一次运行只对应一条记录。
+   *
+   * 只删死记录：活着的记录由 start / restart 的「先停旧、等它真的退出」处理，绝不在这里
+   * 静默丢掉一个还在跑的进程（那会让看板撒谎，也没人回收它）。
+   */
+  private releaseDeadForApp(appId: string): void {
+    for (const [id, entry] of this.entries) {
+      if (entry.record.appId !== appId) continue;
+      if (galleryServiceLive(entry.record)) continue;
+      this.entries.delete(id);
+    }
+  }
+
+  /** 已结束的记录只留最近的一批（活着的永不淘汰；同作品至多一条，见 releaseDeadForApp）。 */
   private trimDead(): void {
     const dead = [...this.entries.values()]
       .filter((entry) => !galleryServiceLive(entry.record))

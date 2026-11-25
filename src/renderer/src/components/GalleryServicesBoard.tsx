@@ -136,9 +136,9 @@ export function GalleryServicesBoard({ services, onOpenPage, onStop, onRestart }
           {live.length > 0 ? `${live.length} 个在后台` : "没有在跑的"}
           {dead.length > 0 ? ` · ${dead.length} 个已结束` : ""}
         </span>
-        {/* 一句话写清三种所有权事实（2026-11-16）：关页面不停 / 关面板只停平台为它启动的那个 / 外部服务不接管也不受影响。
+        {/* 一句话写清所有权与去重口径（2026-11-16 / 11-25）：关页面不停 / 关面板只停平台为它启动的那个 / 外部服务不接管也不受影响 / 同一作品只留最近一次记录。
             刻意写成单个字符串——JSX 多行文本会在换行处插入空格，读起来会多出莫名其妙的分隔。 */}
-        <small className="gallery-services-hint">{"后台进程：关掉页面不会停；面板作品关窗时，平台会异步停掉它为这个面板启动的服务；地址已可达的外部服务平台不接管、也不受影响；应用退出时全部停止。"}</small>
+        <small className="gallery-services-hint">{"后台进程：关掉页面不会停；面板作品关窗时，平台会异步停掉它为这个面板启动的服务；地址已可达的外部服务平台不接管、也不受影响；应用退出时全部停止；同一作品只保留最近一次运行的记录。"}</small>
       </header>
       <ul className="gallery-services-list">
         {services.map((service) => (

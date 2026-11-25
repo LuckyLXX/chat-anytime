@@ -80,7 +80,7 @@
 
 **Automation** — agent 级原子 JSON + 5 字段 cron（无 vixie dom/dow OR）；一次 fire = 新建后台会话（`workspace` 跟任务、`model` 三级回落，无人值守默认 full）。`runs.jsonl` 四态含 `skipped`：中性结局、不写 `task.lastRun`、不弹 toast。工具名用下划线（OpenAI 兼容端点按 `^[a-zA-Z0-9_-]+$` 校验）。
 
-**Gallery** — 发布是显式动作，绝不扫目录自动登记；列表全局，存 `<agentDir>/pidesktop-gallery`，**不要**塞进 settings.json。服务型作品的服务跑在**主进程后台进程**（不是终端标签）：同 appId + 同命令复用、地址已可达则不自启、停止杀进程树、`before-quit` 全回收、面板作品关窗即停；`runMode` page/background。每个作品都要有封面。细节 → 记忆「PiDesktop 作品墙与服务进程（Gallery）」。
+**Gallery** — 发布是显式动作，绝不扫目录自动登记；列表全局，存 `<agentDir>/pidesktop-gallery`，**不要**塞进 settings.json。服务型作品的服务跑在**主进程后台进程**（不是终端标签）：同 appId + 同命令复用、地址已可达则不自启、停止杀进程树、`before-quit` 全回收、面板作品关窗即停；**看板上一个作品（appId）永远只有一行**（新记录登记时替换同作品已结束的记录，不许堆历史）；`runMode` page/background。每个作品都要有封面。细节 → 记忆「PiDesktop 作品墙与服务进程（Gallery）」。
 
 **Team** — 只有 Lead 能 spawn / interrupt / reassign；任务用全量快照 CAS。活动通知只让快照失效，**不许唤醒 `team_wait`**。
 

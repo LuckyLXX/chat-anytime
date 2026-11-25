@@ -25,10 +25,15 @@ function noop(): void {
   // 契约测试不触发回调
 }
 
-/** 看板的服务 fixture：一个在跑（带 url 与日志）、一个已失败（看日志/移出的形态）。 */
+/**
+ * 看板的服务 fixture：一个在跑（带 url 与日志）、一个已失败（看日志/移出的形态）。
+ *
+ * 两条**分属不同作品**：主进程的看板不变量是「同一作品只留一行」（新一次运行替掉上次已结束
+ * 的记录），所以同 appId 同时出现「运行中 + 已失败」两行在真实数据里不会发生。
+ */
 const services: GalleryServiceRecord[] = [
   { id: "s1", appId: "g2", title: "记账小工具", command: "npm run dev", cwd: "D:/ws/apps/ledger", url: "http://localhost:5173", pid: 12_345, status: "running", ready: true, startedAt: Date.now() - 65_000 },
-  { id: "s2", appId: "g2", title: "记账小工具", command: "npm run dev", cwd: "D:/ws/apps/ledger", status: "failed", ready: false, startedAt: Date.now() - 90_000, endedAt: Date.now() - 80_000, exitCode: 1, note: "进程已退出（退出码 1）", log: "Error: EADDRINUSE" }
+  { id: "s2", appId: "g3", title: "会话状态面板", command: "node bridge.mjs", cwd: "D:/ws/panels/status", status: "failed", ready: false, startedAt: Date.now() - 90_000, endedAt: Date.now() - 80_000, exitCode: 1, note: "进程已退出（退出码 1）", log: "Error: EADDRINUSE" }
 ];
 
 /** GalleryWall 的必需 props 骨架（服务看板三件套每处都要传，集中在这里避免漂移）。 */

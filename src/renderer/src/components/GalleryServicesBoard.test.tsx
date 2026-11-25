@@ -81,6 +81,8 @@ describe("GalleryServicesBoard 渲染", () => {
     expect(markup).toContain("关掉页面不会停");
     expect(markup).toContain("面板作品关窗时，平台会异步停掉它为这个面板启动的服务");
     expect(markup).toContain("外部服务平台不接管");
+    // 同一作品只留一行（2026-11-25）：用户要知道历史记录被新一次运行替掉，不然「我上次的失败记录呢」没法解释
+    expect(markup).toContain("同一作品只保留最近一次运行的记录");
   });
 
   it("行内标出「面板托管」，停止按钮的悬停说明区分托管服务与平台自主服务", () => {

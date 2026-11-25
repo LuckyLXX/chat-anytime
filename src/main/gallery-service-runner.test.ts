@@ -186,8 +186,7 @@ describe("GalleryServiceRunner：复用与重启", () => {
 
   it("命令变了要先停旧进程、等它退出再起新的", async () => {
     const h = harness();
-    const first = await h.runner.start(baseInput);
-    const firstId = first.ok ? first.record?.id : undefined;
+    expect((await h.runner.start(baseInput)).ok).toBe(true);
     const pending = h.runner.start({ ...baseInput, command: "node proxy2.mjs" });
     // 旧的还在跑：停它（killTree + 单进程 kill）
     await Promise.resolve();
@@ -199,7 +198,9 @@ describe("GalleryServiceRunner：复用与重启", () => {
     const result = await pending;
     expect(result.ok).toBe(true);
     expect(h.launched.map((entry) => entry.command)).toEqual(["node proxy.mjs", "node proxy2.mjs"]);
-    expect(h.runner.list().find((record) => record.id === firstId)?.status).toBe("stopped");
+    // 旧记录随着新纪录登记被换掉（同一作品只留一行，见「看板唯一性」）——这里能看出的
+    // 是「旧进程确实被停了」：它先被 killTree，退出事件到时才有地方接着起新进程。
+    expect(h.runner.list().filter((record) => record.appId === "g1")).toMatchObject([{ id: result.ok ? result.record?.id : "", status: "running" }]);
   });
 
   it("地址已可达时不另起进程（用户手工起的服务不碰）", async () => {
@@ -334,6 +335,77 @@ describe("GalleryServiceRunner：退出、停止与清理", () => {
     const log = h.runner.list()[0]?.log ?? "";
     expect(log.length).toBeLessThanOrEqual(40);
     expect(log.endsWith("0123456789")).toBe(true);
+  });
+});
+
+/**
+ * 看板唯一性（2026-11-25，用户报「同一个服务已经关闭了还会重复出现，没有保证唯一」）。
+ *
+ * 病根不在展示层：`entries` 每次 start 都新建一条记录，而上一次运行留下的**已结束**记录
+ * 一直留在里面——同一作品跑几次，看板上就有几行同名记录（一行在跑、其余「已停止」）。
+ * 契约：**一个作品（appId）在看板上永远只有一行**，新记录登记时替换同作品已结束的记录；
+ * 别的作品的记录、以及还活着的记录一律不碰。
+ */
+describe("GalleryServiceRunner：看板唯一性（同一作品只留一行）", () => {
+  it("停止后再运行：上一次已结束的记录被新记录替换，不会叠出第二行", async () => {
+    const h = harness();
+    const first = await h.runner.start(baseInput);
+    expect(h.runner.stop(first.ok ? first.record!.id : "")).toBe(true);
+    h.handles[0]?.exit(null);
+    expect(h.runner.list()).toMatchObject([{ appId: "g1", status: "stopped" }]);
+
+    const again = await h.runner.start(baseInput);
+    expect(again.ok).toBe(true);
+    const rows = h.runner.list().filter((record) => record.appId === "g1");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ id: again.ok ? again.record!.id : "", status: "running" });
+  });
+
+  it("启动失败后再运行：失败记录随新记录一起被替换（看板不堆同一作品的失败历史）", async () => {
+    const h = harness();
+    await h.runner.start(baseInput);
+    h.handles[0]?.exit(1); // 起不来 → 看板留一条「启动失败」
+    expect(h.runner.list()).toMatchObject([{ status: "failed" }]);
+
+    const retry = await h.runner.start(baseInput);
+    expect(retry.ok).toBe(true);
+    const rows = h.runner.list().filter((record) => record.appId === "g1");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.status).toBe("running");
+  });
+
+  it("面板关窗停止后重新打开：仍只有一行（关窗留下的已停止记录被替换）", async () => {
+    const h = harness();
+    const panelInput = { ...baseInput, appId: "panel-a", ownerPanelId: "panel-a" };
+    await h.runner.start(panelInput);
+    const ticket = h.runner.prepareOwnerStop("panel-a");
+    expect(h.runner.stopByOwner("panel-a", ticket)).toBe(1);
+    h.handles[0]?.exit(null);
+    expect(h.runner.list().filter((record) => record.appId === "panel-a")).toHaveLength(1);
+
+    const reopened = await h.runner.start(panelInput);
+    expect(reopened.ok).toBe(true);
+    const rows = h.runner.list().filter((record) => record.appId === "panel-a");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.status).toBe("running");
+  });
+
+  it("只替换同一个 appId：别的作品（包括它已结束的记录）原样保留", async () => {
+    const h = harness();
+    await h.runner.start({ ...baseInput, appId: "a" });
+    await h.runner.start({ ...baseInput, appId: "b" });
+    // 两个都停掉：看板上每个作品各留一条「已停止」
+    h.runner.stop(h.runner.list().find((record) => record.appId === "a")!.id);
+    h.handles[0]?.exit(null);
+    h.runner.stop(h.runner.list().find((record) => record.appId === "b")!.id);
+    h.handles[1]?.exit(null);
+    expect(h.runner.list().map((record) => `${record.appId}:${record.status}`).sort()).toEqual(["a:stopped", "b:stopped"]);
+
+    // 只重跑 b：b 的旧记录被新记录替掉，a 的已结束记录原样留着（清理绝不越过 appId）
+    expect((await h.runner.start({ ...baseInput, appId: "b" })).ok).toBe(true);
+    const rows = h.runner.list();
+    expect(rows.filter((record) => record.appId === "b")).toMatchObject([{ status: "running" }]);
+    expect(rows.filter((record) => record.appId === "a")).toMatchObject([{ status: "stopped" }]);
   });
 });
 
